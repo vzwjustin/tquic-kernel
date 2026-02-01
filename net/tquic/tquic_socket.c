@@ -117,7 +117,6 @@ static const struct proto_ops tquic_proto_ops = {
 	.sendmsg	= tquic_sendmsg_socket,
 	.recvmsg	= tquic_recvmsg_socket,
 	.mmap		= sock_no_mmap,
-	.sendpage	= tquic_sendpage_socket,	/* Zero-copy sendfile support */
 	.splice_read	= tquic_splice_read_socket,	/* Zero-copy splice support */
 };
 

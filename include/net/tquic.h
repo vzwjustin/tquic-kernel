@@ -57,6 +57,10 @@
 #define TQUIC_MIN_PATHS		1
 #define TQUIC_DEFAULT_PATHS	4
 
+/* Scheduler/CC name limits */
+#define TQUIC_SCHED_NAME_MAX	16
+#define TQUIC_CC_NAME_MAX	16
+
 struct tquic_sock;
 struct tquic_connection;
 struct tquic_stream;
@@ -66,6 +70,7 @@ struct tquic_packet;
 struct tquic_coupled_state;
 struct tquic_client;
 struct tquic_persistent_cong_info;
+struct tquic_bond_state;
 
 /**
  * enum tquic_conn_state - Connection state machine states
@@ -455,6 +460,45 @@ struct tquic_connection {
 
 /* Forward declaration for handshake state */
 struct tquic_handshake_state;
+
+/**
+ * struct tquic_bond_state - WAN bonding state per connection
+ * @mode: Bonding mode (active-backup, round-robin, etc.)
+ * @aggr_mode: Aggregation mode
+ * @failover_mode: Failover mode
+ * @reorder_queue: Reorder buffer for out-of-order packets
+ * @reorder_next_seq: Next expected sequence number
+ * @reorder_window: Size of reorder window
+ * @stats: Bonding statistics
+ * @rr_counter: Round-robin counter
+ * @primary_path: Primary path for active-backup mode
+ * @failover_pending: Failover operation in progress
+ * @conn: Reference to parent connection
+ */
+struct tquic_bond_state {
+	u8 mode;
+	u8 aggr_mode;
+	u8 failover_mode;
+
+	struct sk_buff_head reorder_queue;
+	u64 reorder_next_seq;
+	u32 reorder_window;
+	spinlock_t reorder_lock;
+
+	struct tquic_bond_stats stats;
+
+	u32 rr_counter;
+	struct tquic_path *primary_path;
+
+	bool failover_pending;
+	ktime_t failover_start;
+	struct tquic_path *failover_from;
+
+	struct work_struct failover_work;
+	struct delayed_work probe_work;
+
+	struct tquic_connection *conn;
+};
 
 /**
  * struct tquic_sock - TQUIC socket structure
@@ -1039,9 +1083,16 @@ static inline void tquic_cert_verify_exit(void) { }
 
 #endif /* CONFIG_TQUIC_CERT_VERIFY */
 
-/* Scheduler registration */
+/* Scheduler registration and operations */
 int tquic_register_scheduler(struct tquic_sched_ops *ops);
 void tquic_unregister_scheduler(struct tquic_sched_ops *ops);
+struct tquic_sched_ops *tquic_sched_find(const char *name);
+void tquic_sched_set_default(const char *name);
+void *tquic_sched_init_conn(struct tquic_connection *conn,
+			    struct tquic_sched_ops *ops);
+void tquic_sched_release_conn(struct tquic_sched_ops *ops, void *state);
+const char *tquic_sched_get_default(struct net *net);
+struct tquic_sched_ops *tquic_sched_default(void);
 
 /* Congestion control registration */
 int tquic_register_cong(struct tquic_cong_ops *ops);

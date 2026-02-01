@@ -35,7 +35,7 @@
  */
 
 /* Zerocopy entry states */
-enum tquic_zc_state {
+enum tquic_zc_entry_state {
 	TQUIC_ZC_PENDING = 0,	/* Queued for transmission */
 	TQUIC_ZC_IN_FLIGHT,	/* Transmitted, awaiting ACK */
 	TQUIC_ZC_COMPLETED,	/* ACKed, ready for notification */
