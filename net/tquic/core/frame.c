@@ -24,6 +24,7 @@
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/bug.h>
+#include <linux/limits.h>
 #include <net/tquic.h>
 
 /*
@@ -54,6 +55,10 @@
 #define TQUIC_FRAME_CONNECTION_CLOSE	0x1c
 #define TQUIC_FRAME_CONNECTION_CLOSE_APP	0x1d
 #define TQUIC_FRAME_HANDSHAKE_DONE	0x1e
+
+/* DATAGRAM frame types (RFC 9221) */
+#define TQUIC_FRAME_DATAGRAM		0x30  /* No length field */
+#define TQUIC_FRAME_DATAGRAM_LEN	0x31  /* With length field */
 
 /* STREAM frame flags (bits within frame type 0x08-0x0f) */
 #define TQUIC_STREAM_FLAG_FIN		0x01
@@ -185,6 +190,15 @@ struct tquic_frame_connection_close {
 };
 
 /*
+ * DATAGRAM frame (RFC 9221)
+ */
+struct tquic_frame_datagram {
+	u64 length;
+	const u8 *data;
+	bool has_length;  /* true if type 0x31 (explicit length) */
+};
+
+/*
  * Generic frame union
  */
 struct tquic_frame {
@@ -208,6 +222,7 @@ struct tquic_frame {
 		struct tquic_frame_path_challenge path_challenge;
 		struct tquic_frame_path_response path_response;
 		struct tquic_frame_connection_close conn_close;
+		struct tquic_frame_datagram datagram;
 	};
 };
 
@@ -634,8 +649,8 @@ static int tquic_parse_crypto_frame(const u8 *buf, size_t buf_len,
 	p += consumed;
 	remaining -= consumed;
 
-	/* Crypto Data */
-	if (remaining < frame->crypto.length)
+	/* Crypto Data - validate length doesn't exceed size_t and remaining buffer */
+	if (frame->crypto.length > SIZE_MAX || remaining < frame->crypto.length)
 		return -EINVAL;
 
 	frame->crypto.data = p;
@@ -678,13 +693,11 @@ static int tquic_parse_new_token_frame(const u8 *buf, size_t buf_len,
 	p += consumed;
 	remaining -= consumed;
 
-	/* Validate token length */
+	/* Validate token length - check against max, SIZE_MAX, and remaining buffer */
 	if (frame->new_token.token_len == 0 ||
-	    frame->new_token.token_len > TQUIC_MAX_TOKEN_LEN)
-		return -EINVAL;
-
-	/* Token */
-	if (remaining < frame->new_token.token_len)
+	    frame->new_token.token_len > TQUIC_MAX_TOKEN_LEN ||
+	    frame->new_token.token_len > SIZE_MAX ||
+	    remaining < frame->new_token.token_len)
 		return -EINVAL;
 
 	frame->new_token.token = p;
@@ -756,7 +769,8 @@ static int tquic_parse_stream_frame(const u8 *buf, size_t buf_len,
 		p += consumed;
 		remaining -= consumed;
 
-		if (remaining < frame->stream.length)
+		/* Validate length doesn't exceed size_t and remaining buffer */
+		if (frame->stream.length > SIZE_MAX || remaining < frame->stream.length)
 			return -EINVAL;
 
 		frame->stream.data = p;
@@ -1209,8 +1223,9 @@ static int tquic_parse_connection_close_frame(const u8 *buf, size_t buf_len,
 	p += consumed;
 	remaining -= consumed;
 
-	/* Reason Phrase */
-	if (remaining < frame->conn_close.reason_len)
+	/* Reason Phrase - validate length doesn't exceed size_t and remaining buffer */
+	if (frame->conn_close.reason_len > SIZE_MAX ||
+	    remaining < frame->conn_close.reason_len)
 		return -EINVAL;
 
 	if (frame->conn_close.reason_len > 0)
@@ -1242,6 +1257,66 @@ static int tquic_parse_handshake_done_frame(const u8 *buf, size_t buf_len,
 	frame->type = TQUIC_FRAME_HANDSHAKE_DONE;
 	return 1;
 }
+
+/**
+ * tquic_parse_datagram_frame - Parse DATAGRAM frame (RFC 9221)
+ * @buf: Buffer containing the frame
+ * @buf_len: Length of the buffer
+ * @frame: Output frame structure
+ *
+ * DATAGRAM frames (0x30-0x31) carry unreliable application data:
+ * - Type 0x30: No length field, data extends to end of packet
+ * - Type 0x31: Has length field specifying data size
+ *
+ * Note: frame->datagram.data points into the original buffer.
+ * Returns bytes consumed on success, negative error code on failure.
+ */
+int tquic_parse_datagram_frame(const u8 *buf, size_t buf_len,
+			       struct tquic_frame *frame)
+{
+	const u8 *p = buf;
+	size_t remaining = buf_len;
+	size_t consumed;
+	u8 frame_type;
+	int ret;
+
+	if (remaining < 1)
+		return -EINVAL;
+
+	frame_type = buf[0];
+	frame->type = frame_type;
+	frame->datagram.has_length = (frame_type & 0x01) != 0;
+
+	/* Skip frame type */
+	p++;
+	remaining--;
+
+	if (frame->datagram.has_length) {
+		/* Type 0x31: Length field present */
+		ret = tquic_varint_decode(p, remaining, &frame->datagram.length, &consumed);
+		if (ret < 0)
+			return ret;
+		p += consumed;
+		remaining -= consumed;
+
+		/* Validate length doesn't exceed SIZE_MAX and remaining buffer */
+		if (frame->datagram.length > SIZE_MAX ||
+		    remaining < frame->datagram.length)
+			return -EINVAL;
+
+		frame->datagram.data = p;
+		p += frame->datagram.length;
+		remaining -= frame->datagram.length;
+	} else {
+		/* Type 0x30: Data extends to end of packet */
+		frame->datagram.length = remaining;
+		frame->datagram.data = p;
+		remaining = 0;
+	}
+
+	return (int)(buf_len - remaining);
+}
+EXPORT_SYMBOL_GPL(tquic_parse_datagram_frame);
 
 /**
  * tquic_parse_frame - Parse a single QUIC frame from a buffer
@@ -1338,6 +1413,10 @@ int tquic_parse_frame(const u8 *buf, size_t buf_len, struct tquic_frame *frame,
 
 	case TQUIC_FRAME_HANDSHAKE_DONE:
 		return tquic_parse_handshake_done_frame(buf, buf_len, frame);
+
+	case TQUIC_FRAME_DATAGRAM:
+	case TQUIC_FRAME_DATAGRAM_LEN:
+		return tquic_parse_datagram_frame(buf, buf_len, frame);
 
 	default:
 		/* Unknown frame type */
@@ -1658,6 +1737,26 @@ size_t tquic_handshake_done_frame_size(void)
 }
 EXPORT_SYMBOL_GPL(tquic_handshake_done_frame_size);
 
+/**
+ * tquic_datagram_frame_size - Calculate size for DATAGRAM frame (RFC 9221)
+ * @data_len: Length of datagram payload
+ * @with_length: true if length field should be included (type 0x31)
+ *
+ * Returns the size in bytes (including data).
+ */
+size_t tquic_datagram_frame_size(u64 data_len, bool with_length)
+{
+	size_t size = 1;  /* Frame type */
+
+	if (with_length)
+		size += tquic_varint_len(data_len);
+
+	size += data_len;
+
+	return size;
+}
+EXPORT_SYMBOL_GPL(tquic_datagram_frame_size);
+
 /* =========================================================================
  * Frame Construction Functions
  * ========================================================================= */
@@ -1912,7 +2011,8 @@ int tquic_write_crypto_frame(u8 *buf, size_t buf_len, u64 offset,
 	p += ret;
 	remaining -= ret;
 
-	if (remaining < data_len)
+	/* Validate data_len doesn't exceed size_t and remaining buffer */
+	if (data_len > SIZE_MAX || remaining < data_len)
 		return -ENOSPC;
 	memcpy(p, data, data_len);
 	p += data_len;
@@ -1952,7 +2052,8 @@ int tquic_write_new_token_frame(u8 *buf, size_t buf_len,
 	p += ret;
 	remaining -= ret;
 
-	if (remaining < token_len)
+	/* Validate token_len doesn't exceed size_t and remaining buffer */
+	if (token_len > SIZE_MAX || remaining < token_len)
 		return -ENOSPC;
 	memcpy(p, token, token_len);
 	p += token_len;
@@ -2024,8 +2125,8 @@ int tquic_write_stream_frame(u8 *buf, size_t buf_len, u64 stream_id,
 		remaining -= ret;
 	}
 
-	/* Stream data */
-	if (remaining < data_len)
+	/* Stream data - validate data_len doesn't exceed size_t and remaining buffer */
+	if (data_len > SIZE_MAX || remaining < data_len)
 		return -ENOSPC;
 	if (data_len > 0)
 		memcpy(p, data, data_len);
@@ -2425,7 +2526,8 @@ int tquic_write_connection_close_frame(u8 *buf, size_t buf_len, u64 error_code,
 	remaining -= ret;
 
 	if (reason_len > 0) {
-		if (remaining < reason_len)
+		/* Validate reason_len doesn't exceed size_t and remaining buffer */
+		if (reason_len > SIZE_MAX || remaining < reason_len)
 			return -ENOSPC;
 		memcpy(p, reason, reason_len);
 		p += reason_len;
@@ -2452,6 +2554,55 @@ int tquic_write_handshake_done_frame(u8 *buf, size_t buf_len)
 	return 1;
 }
 EXPORT_SYMBOL_GPL(tquic_write_handshake_done_frame);
+
+/**
+ * tquic_write_datagram_frame - Write DATAGRAM frame (RFC 9221)
+ * @buf: Output buffer
+ * @buf_len: Length of buffer
+ * @data: Datagram payload
+ * @data_len: Length of payload
+ * @with_length: true to include length field (type 0x31), false for 0x30
+ *
+ * DATAGRAM frames carry unreliable, unordered application data.
+ * Type 0x30 has no length field (data extends to end of packet).
+ * Type 0x31 includes an explicit length field.
+ *
+ * Returns bytes written on success, negative error code on failure.
+ */
+int tquic_write_datagram_frame(u8 *buf, size_t buf_len, const u8 *data,
+			       u64 data_len, bool with_length)
+{
+	u8 *p = buf;
+	size_t remaining = buf_len;
+	int ret;
+
+	if (remaining < 1)
+		return -ENOSPC;
+
+	/* Frame type: 0x30 without length, 0x31 with length */
+	*p++ = with_length ? TQUIC_FRAME_DATAGRAM_LEN : TQUIC_FRAME_DATAGRAM;
+	remaining--;
+
+	if (with_length) {
+		ret = tquic_varint_encode(data_len, p, remaining);
+		if (ret < 0)
+			return ret;
+		p += ret;
+		remaining -= ret;
+	}
+
+	/* Validate data_len doesn't exceed SIZE_MAX and remaining buffer */
+	if (data_len > SIZE_MAX || remaining < data_len)
+		return -ENOSPC;
+
+	if (data_len > 0)
+		memcpy(p, data, data_len);
+	p += data_len;
+	remaining -= data_len;
+
+	return (int)(buf_len - remaining);
+}
+EXPORT_SYMBOL_GPL(tquic_write_datagram_frame);
 
 /* =========================================================================
  * Utility Functions
@@ -2516,6 +2667,9 @@ const char *tquic_frame_type_name(u8 type)
 		return "CONNECTION_CLOSE_APP";
 	case TQUIC_FRAME_HANDSHAKE_DONE:
 		return "HANDSHAKE_DONE";
+	case TQUIC_FRAME_DATAGRAM:
+	case TQUIC_FRAME_DATAGRAM_LEN:
+		return "DATAGRAM";
 	default:
 		return "UNKNOWN";
 	}
@@ -2611,6 +2765,8 @@ bool tquic_frame_allowed_in_pn_space(u8 type, int pn_space)
 	case TQUIC_FRAME_PATH_RESPONSE:
 	case TQUIC_FRAME_CONNECTION_CLOSE_APP:
 	case TQUIC_FRAME_HANDSHAKE_DONE:
+	case TQUIC_FRAME_DATAGRAM:
+	case TQUIC_FRAME_DATAGRAM_LEN:
 		return pn_space == TQUIC_PN_SPACE_APPLICATION;
 
 	default:

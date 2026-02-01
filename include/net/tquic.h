@@ -561,6 +561,20 @@ struct tquic_sock {
 		bool server_push_enabled;	/* Server push support */
 	} http3_settings;
 	void *h3_conn;			/* h3_connection pointer when active */
+
+	/*
+	 * Certificate verification settings
+	 *
+	 * Controls TLS certificate chain validation behavior.
+	 * Settings must be configured before connect().
+	 */
+	struct {
+		u8 verify_mode;		/* TQUIC_VERIFY_* mode */
+		bool verify_hostname;	/* Check hostname matches cert */
+		bool allow_self_signed;	/* Allow self-signed certs (testing) */
+		char expected_hostname[256]; /* Override hostname for matching */
+		u8 expected_hostname_len;
+	} cert_verify;
 };
 
 static inline struct tquic_sock *tquic_sk(struct sock *sk)
@@ -954,6 +968,75 @@ int tquic_decrypt_packet(struct tquic_crypto_state *crypto,
 			 u8 *payload, size_t payload_len,
 			 u64 pkt_num, u8 *out, size_t *out_len);
 bool tquic_crypto_handshake_complete(struct tquic_crypto_state *crypto);
+
+/*
+ * Certificate Verification (crypto/cert_verify.c)
+ *
+ * Provides X.509 certificate chain validation for TQUIC TLS 1.3.
+ * Uses kernel keyring infrastructure for trust anchor lookup.
+ */
+#ifdef CONFIG_TQUIC_CERT_VERIFY
+struct tquic_cert_verify_ctx;
+struct tquic_handshake;
+
+/* Verification modes */
+#define TQUIC_CERT_VERIFY_NONE		0  /* No verification (INSECURE) */
+#define TQUIC_CERT_VERIFY_OPTIONAL	1  /* Verify if present, allow missing */
+#define TQUIC_CERT_VERIFY_REQUIRED	2  /* Full verification required */
+
+/* Context management */
+struct tquic_cert_verify_ctx *tquic_cert_verify_ctx_alloc(gfp_t gfp);
+void tquic_cert_verify_ctx_free(struct tquic_cert_verify_ctx *ctx);
+
+/* Configuration */
+int tquic_cert_verify_set_hostname(struct tquic_cert_verify_ctx *ctx,
+				   const char *hostname, u32 len);
+int tquic_cert_verify_set_mode(struct tquic_cert_verify_ctx *ctx, int mode);
+int tquic_cert_verify_set_keyring(struct tquic_cert_verify_ctx *ctx,
+				  struct key *keyring);
+
+/* Chain verification */
+int tquic_verify_cert_chain(struct tquic_cert_verify_ctx *ctx,
+			    const u8 *cert_chain, size_t chain_len);
+int tquic_verify_hostname(const struct tquic_x509_cert *cert,
+			  const char *expected, u32 expected_len);
+const char *tquic_cert_verify_get_error(struct tquic_cert_verify_ctx *ctx);
+
+/* Handshake integration */
+int tquic_hs_verify_server_cert(struct tquic_handshake *hs,
+				struct tquic_connection *conn);
+int tquic_hs_verify_client_cert(struct tquic_handshake *hs,
+				struct tquic_connection *conn);
+
+/* Certificate chain access from handshake */
+u8 *tquic_hs_get_peer_cert(struct tquic_handshake *hs, u32 *len);
+u8 *tquic_hs_get_peer_cert_chain(struct tquic_handshake *hs, u32 *len);
+const char *tquic_hs_get_sni(struct tquic_handshake *hs, u32 *len);
+bool tquic_hs_is_psk_mode(struct tquic_handshake *hs);
+
+/* Module init/exit */
+int __init tquic_cert_verify_init(void);
+void __exit tquic_cert_verify_exit(void);
+
+#else /* !CONFIG_TQUIC_CERT_VERIFY */
+
+/* Stubs when certificate verification is not enabled */
+static inline int tquic_hs_verify_server_cert(void *hs, void *conn)
+{
+	/* Always succeed without verification (INSECURE) */
+	pr_warn_once("TQUIC: Certificate verification disabled - connections are vulnerable to MITM\n");
+	return 0;
+}
+
+static inline int tquic_hs_verify_client_cert(void *hs, void *conn)
+{
+	return 0;
+}
+
+static inline int tquic_cert_verify_init(void) { return 0; }
+static inline void tquic_cert_verify_exit(void) { }
+
+#endif /* CONFIG_TQUIC_CERT_VERIFY */
 
 /* Scheduler registration */
 int tquic_register_scheduler(struct tquic_sched_ops *ops);

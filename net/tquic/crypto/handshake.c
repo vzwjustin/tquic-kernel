@@ -2707,5 +2707,57 @@ void tquic_hs_cleanup(struct tquic_handshake *hs)
 }
 EXPORT_SYMBOL_GPL(tquic_hs_cleanup);
 
+/*
+ * Get peer certificate data (for certificate verification)
+ */
+u8 *tquic_hs_get_peer_cert(struct tquic_handshake *hs, u32 *len)
+{
+	if (!hs) {
+		*len = 0;
+		return NULL;
+	}
+
+	*len = hs->peer_cert_len;
+	return hs->peer_cert;
+}
+EXPORT_SYMBOL_GPL(tquic_hs_get_peer_cert);
+
+/*
+ * Get peer certificate chain (full chain from Certificate message)
+ * Returns pointer to stored chain data and sets len to total chain length
+ */
+u8 *tquic_hs_get_peer_cert_chain(struct tquic_handshake *hs, u32 *len)
+{
+	/* For now, return just the end-entity certificate
+	 * Full chain support would require storing all certs from Certificate msg
+	 */
+	return tquic_hs_get_peer_cert(hs, len);
+}
+EXPORT_SYMBOL_GPL(tquic_hs_get_peer_cert_chain);
+
+/*
+ * Get expected hostname (SNI) for certificate verification
+ */
+const char *tquic_hs_get_sni(struct tquic_handshake *hs, u32 *len)
+{
+	if (!hs || !hs->sni) {
+		*len = 0;
+		return NULL;
+	}
+
+	*len = hs->sni_len;
+	return hs->sni;
+}
+EXPORT_SYMBOL_GPL(tquic_hs_get_sni);
+
+/*
+ * Check if handshake is using PSK (skip certificate verification)
+ */
+bool tquic_hs_is_psk_mode(struct tquic_handshake *hs)
+{
+	return hs ? hs->using_psk : false;
+}
+EXPORT_SYMBOL_GPL(tquic_hs_is_psk_mode);
+
 MODULE_DESCRIPTION("TQUIC TLS 1.3 Handshake for QUIC");
 MODULE_LICENSE("GPL");

@@ -68,6 +68,8 @@ struct tquic_loss_state;
 struct tquic_sent_packet;
 struct tquic_ack_range;
 struct tquic_ack_frame;
+struct tquic_ack_frequency_state;
+struct tquic_ack_frequency_frame;
 
 /**
  * struct tquic_ecn_counts - ECN counters
@@ -199,6 +201,13 @@ struct tquic_loss_state {
 	/* Persistent congestion */
 	ktime_t persistent_congestion_start;
 	bool in_persistent_congestion;
+
+	/*
+	 * ACK Frequency extension state (draft-ietf-quic-ack-frequency)
+	 * When non-NULL, contains negotiated ACK frequency parameters
+	 * that override default ACK timing behavior.
+	 */
+	struct tquic_ack_frequency_state *ack_freq;
 
 	spinlock_t lock;
 };
@@ -367,6 +376,45 @@ void tquic_loss_get_rtt_stats(struct tquic_loss_state *loss,
  */
 void tquic_loss_get_in_flight(struct tquic_loss_state *loss,
 			      u64 *bytes, u32 *packets);
+
+/*
+ * ACK Frequency Integration
+ */
+
+/**
+ * tquic_loss_state_set_ack_freq - Associate ACK frequency state with loss state
+ * @loss: Loss detection state
+ * @ack_freq: ACK frequency state (may be NULL to disable)
+ *
+ * Associates an ACK frequency state with the loss state to enable
+ * ACK suppression based on negotiated parameters.
+ */
+void tquic_loss_state_set_ack_freq(struct tquic_loss_state *loss,
+				   struct tquic_ack_frequency_state *ack_freq);
+
+/**
+ * tquic_should_send_ack - Determine if ACK should be sent
+ * @loss: Loss detection state
+ * @pn: Packet number just received
+ * @ack_eliciting: Whether the packet was ack-eliciting
+ *
+ * Checks ACK frequency state (if available) to determine whether
+ * an ACK should be sent. Falls back to default behavior if ACK
+ * frequency is not enabled.
+ *
+ * Returns true if an ACK should be sent immediately.
+ */
+bool tquic_should_send_ack(struct tquic_loss_state *loss,
+			   u64 pn, bool ack_eliciting);
+
+/**
+ * tquic_get_ack_delay - Get current ACK delay for timer
+ * @loss: Loss detection state
+ *
+ * Returns the current ACK delay in microseconds, considering
+ * ACK frequency negotiation if active.
+ */
+u64 tquic_get_ack_delay(struct tquic_loss_state *loss);
 
 /*
  * Module Initialization

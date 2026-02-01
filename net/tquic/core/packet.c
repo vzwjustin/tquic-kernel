@@ -23,6 +23,7 @@
 #include <linux/string.h>
 #include <crypto/utils.h>
 #include <net/tquic.h>
+#include <net/tquic_frame.h>
 #include <asm/unaligned.h>
 
 /* QUIC packet type constants */
@@ -548,6 +549,14 @@ int tquic_parse_long_header(const u8 *data, size_t len,
 		if (ret < 0)
 			return ret;
 		offset += ret;
+
+		/*
+		 * Validate token length to prevent memory exhaustion attacks.
+		 * An attacker could send a varint encoding a huge token length
+		 * to cause excessive memory allocation.
+		 */
+		if (hdr->token_len > TQUIC_MAX_TOKEN_LEN)
+			return -EINVAL;
 
 		if (hdr->token_len > 0) {
 			if (offset + hdr->token_len > len)
@@ -1240,6 +1249,12 @@ int tquic_split_coalesced(const u8 *data, size_t len,
 						  &token_len);
 			if (ret < 0)
 				return ret;
+			/*
+			 * Validate token length to prevent integer overflow
+			 * and memory exhaustion attacks from malicious packets.
+			 */
+			if (token_len > TQUIC_MAX_TOKEN_LEN)
+				return -EINVAL;
 			hdr_len += ret + token_len;
 		}
 

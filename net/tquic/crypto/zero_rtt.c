@@ -47,6 +47,13 @@ static struct tquic_replay_filter global_replay_filter;
 static u8 server_ticket_key[TQUIC_SESSION_TICKET_KEY_LEN];
 static bool server_ticket_key_valid;
 
+/*
+ * Cryptographically random seeds for replay filter bloom hash.
+ * Initialized at module load to prevent hash prediction attacks.
+ */
+static u32 replay_hash_seed1 __read_mostly;
+static u32 replay_hash_seed2 __read_mostly;
+
 /* TLS 1.3 cipher suites */
 #define TLS_AES_128_GCM_SHA256		0x1301
 #define TLS_AES_256_GCM_SHA384		0x1302
@@ -731,15 +738,18 @@ static void replay_filter_rotate(struct tquic_replay_filter *filter)
 
 /*
  * Compute bloom filter hash indices
+ *
+ * Uses cryptographically random seeds initialized at module load
+ * to prevent hash prediction attacks on the replay filter.
  */
 static void replay_filter_hash(const u8 *data, u32 len, u32 *indices)
 {
 	u32 h1, h2;
 	int i;
 
-	/* Use jhash for fast hashing */
-	h1 = jhash(data, len, 0x12345678);
-	h2 = jhash(data, len, 0xdeadbeef);
+	/* Use jhash with random seeds initialized at module load */
+	h1 = jhash(data, len, replay_hash_seed1);
+	h2 = jhash(data, len, replay_hash_seed2);
 
 	for (i = 0; i < TQUIC_REPLAY_BLOOM_HASHES; i++)
 		indices[i] = (h1 + i * h2) % TQUIC_REPLAY_BLOOM_BITS;
@@ -1275,6 +1285,25 @@ int tquic_zero_rtt_encrypt(struct tquic_connection *conn,
 	if (!state->keys.valid)
 		return -ENOKEY;
 
+	/*
+	 * CRITICAL: Ensure packet number is strictly increasing to prevent
+	 * nonce reuse. In AEAD (AES-GCM, ChaCha20-Poly1305), reusing a nonce
+	 * with the same key completely compromises the encryption - allowing
+	 * plaintext recovery and authentication bypass.
+	 *
+	 * RFC 9001 Section 5.3: "The nonce, N, is formed by combining the
+	 * packet protection IV with the packet number."
+	 *
+	 * Since packet numbers must be unique per key, we enforce strict
+	 * monotonicity to guarantee nonce uniqueness.
+	 */
+	if (state->pn_initialized && pkt_num <= state->largest_sent_pn) {
+		WARN_ONCE(1, "TQUIC: 0-RTT packet number reuse detected! "
+			  "pn=%llu largest_sent=%llu - cryptographic compromise prevented\n",
+			  pkt_num, state->largest_sent_pn);
+		return -EINVAL;
+	}
+
 	/* Allocate AEAD */
 	aead = crypto_alloc_aead(tquic_cipher_to_aead_name(state->cipher_suite), 0, 0);
 	if (IS_ERR(aead))
@@ -1314,6 +1343,9 @@ int tquic_zero_rtt_encrypt(struct tquic_connection *conn,
 	if (ret == 0) {
 		*out_len = payload_len + 16;
 		state->early_data_sent += payload_len;
+		/* Update largest sent packet number after successful encryption */
+		state->largest_sent_pn = pkt_num;
+		state->pn_initialized = true;
 	}
 
 	return ret;
@@ -1341,6 +1373,27 @@ int tquic_zero_rtt_decrypt(struct tquic_connection *conn,
 
 	if (payload_len < 16)
 		return -EINVAL;
+
+	/*
+	 * Replay protection: Check that packet number is greater than
+	 * the largest received packet number. While QUIC allows out-of-order
+	 * delivery, packets with very old packet numbers are suspicious.
+	 *
+	 * RFC 9000 Section 13.2.3: "Endpoints MUST discard packets that are
+	 * too old to be decoded or that have packet numbers that have been
+	 * previously received."
+	 *
+	 * Note: A full implementation would use a sliding window to allow
+	 * some reordering while still detecting replays. For 0-RTT early data,
+	 * we use strict ordering as a conservative approach since 0-RTT data
+	 * is particularly sensitive to replay attacks (RFC 9001 Section 9.2).
+	 */
+	if (state->pn_initialized && pkt_num <= state->largest_recv_pn) {
+		pr_debug("TQUIC: 0-RTT potential replay detected - "
+			 "pn=%llu largest_recv=%llu\n",
+			 pkt_num, state->largest_recv_pn);
+		return -EINVAL;
+	}
 
 	/* Allocate AEAD */
 	aead = crypto_alloc_aead(tquic_cipher_to_aead_name(state->cipher_suite), 0, 0);
@@ -1379,6 +1432,16 @@ int tquic_zero_rtt_decrypt(struct tquic_connection *conn,
 		*out_len = payload_len - 16;
 		memcpy(out, payload, *out_len);
 		state->early_data_received += *out_len;
+		/*
+		 * Update largest received packet number after successful
+		 * decryption for replay protection. Only update if this
+		 * packet number is larger (allows for some reordering in
+		 * the case where strict check above is relaxed).
+		 */
+		if (!state->pn_initialized || pkt_num > state->largest_recv_pn) {
+			state->largest_recv_pn = pkt_num;
+			state->pn_initialized = true;
+		}
 	}
 
 	return ret;
@@ -1440,6 +1503,13 @@ int __init tquic_zero_rtt_module_init(void)
 	INIT_LIST_HEAD(&global_ticket_store.lru_list);
 	global_ticket_store.count = 0;
 	global_ticket_store.max_count = 1024;	/* Default max tickets */
+
+	/*
+	 * Initialize replay filter hash seeds with cryptographically
+	 * random values to prevent hash prediction attacks.
+	 */
+	get_random_bytes(&replay_hash_seed1, sizeof(replay_hash_seed1));
+	get_random_bytes(&replay_hash_seed2, sizeof(replay_hash_seed2));
 
 	/* Initialize global replay filter */
 	ret = tquic_replay_filter_init(&global_replay_filter,

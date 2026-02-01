@@ -124,6 +124,59 @@
 /* Maximum PSK identity length */
 #define TQUIC_MAX_PSK_IDENTITY_LEN	64
 
+/*
+ * Certificate Verification Socket Options
+ *
+ * These options control TLS certificate chain validation behavior.
+ * Must be set before connect() for client sockets.
+ */
+
+/* Certificate verification mode */
+#define TQUIC_CERT_VERIFY_MODE		30
+#define SO_TQUIC_CERT_VERIFY_MODE	TQUIC_CERT_VERIFY_MODE
+
+/* Expected hostname for SNI/certificate matching */
+#define TQUIC_EXPECTED_HOSTNAME		31
+#define SO_TQUIC_EXPECTED_HOSTNAME	TQUIC_EXPECTED_HOSTNAME
+
+/* Allow self-signed certificates (DANGEROUS - testing only) */
+#define TQUIC_ALLOW_SELF_SIGNED		32
+#define SO_TQUIC_ALLOW_SELF_SIGNED	TQUIC_ALLOW_SELF_SIGNED
+
+/**
+ * Certificate verification modes for TQUIC_CERT_VERIFY_MODE
+ *
+ * @TQUIC_VERIFY_NONE: No certificate verification (INSECURE)
+ *                     Only use for testing in controlled environments
+ * @TQUIC_VERIFY_OPTIONAL: Verify if certificate present, allow missing
+ *                         Useful for opportunistic encryption
+ * @TQUIC_VERIFY_REQUIRED: Full verification required (default)
+ *                         Recommended for production use
+ */
+#define TQUIC_VERIFY_NONE		0
+#define TQUIC_VERIFY_OPTIONAL		1
+#define TQUIC_VERIFY_REQUIRED		2
+
+/* Maximum expected hostname length */
+#define TQUIC_MAX_HOSTNAME_LEN		255
+
+/**
+ * struct tquic_cert_verify_args - Certificate verification configuration
+ * @verify_mode: Verification mode (TQUIC_VERIFY_*)
+ * @allow_self_signed: Allow self-signed certs (0 = no, 1 = yes)
+ * @verify_hostname: Verify hostname matches cert (0 = no, 1 = yes)
+ * @reserved: Reserved, must be 0
+ *
+ * Used with getsockopt(TQUIC_CERT_VERIFY_MODE) to query current settings.
+ * Individual fields can be set via separate setsockopt calls.
+ */
+struct tquic_cert_verify_args {
+	__u8	verify_mode;
+	__u8	allow_self_signed;
+	__u8	verify_hostname;
+	__u8	reserved;
+};
+
 /* WAN Bonding specific socket options */
 #define TQUIC_BOND_MODE		50  /* Bonding mode */
 #define TQUIC_BOND_ADD_PATH	51  /* Add a path to bond */
@@ -742,5 +795,247 @@ struct tquic_http3_stream_info {
 #define TQUIC_H3_REQUEST_TRAILERS		3
 #define TQUIC_H3_REQUEST_COMPLETE		4
 #define TQUIC_H3_REQUEST_ERROR			5
+
+/*
+ * =============================================================================
+ * io_uring Integration Socket Options
+ * =============================================================================
+ *
+ * These options configure io_uring behavior for TQUIC sockets.
+ * io_uring provides high-performance async I/O with minimal syscall overhead.
+ */
+
+/* io_uring socket options at SOL_TQUIC level */
+#define TQUIC_URING_SQPOLL		200	/* Enable/disable SQPOLL mode */
+#define TQUIC_URING_CQE_BATCH		201	/* Set CQE batching threshold */
+#define TQUIC_URING_BUF_RING		202	/* Configure buffer ring */
+
+/*
+ * SO_TQUIC_URING_SQPOLL - Enable/disable submission queue polling
+ *
+ * Used with setsockopt(SOL_TQUIC, TQUIC_URING_SQPOLL, &val, sizeof(val)).
+ * The value is an int: 1 = enable SQPOLL mode, 0 = disable.
+ *
+ * When SQPOLL is enabled:
+ *   - A kernel thread polls the submission queue for new work
+ *   - Applications can submit I/O without syscalls
+ *   - Provides lowest possible latency for high-frequency I/O
+ *   - Uses more CPU (kernel thread is always running)
+ *
+ * Note: The io_uring instance must be set up with IORING_SETUP_SQPOLL
+ * for this to have any effect.
+ */
+#define SO_TQUIC_URING_SQPOLL		TQUIC_URING_SQPOLL
+
+/*
+ * SO_TQUIC_URING_CQE_BATCH - Set completion queue entry batching threshold
+ *
+ * Used with setsockopt(SOL_TQUIC, TQUIC_URING_CQE_BATCH, &val, sizeof(val)).
+ * The value is an int: batch_size (0-256), where 0 = no batching.
+ *
+ * When batching is enabled:
+ *   - Completions are accumulated until threshold is reached
+ *   - Reduces overhead of per-completion CQ updates
+ *   - May increase latency for individual operations
+ *   - Useful for high-throughput scenarios
+ *
+ * Default is 0 (no batching, immediate completion).
+ */
+#define SO_TQUIC_URING_CQE_BATCH	TQUIC_URING_CQE_BATCH
+
+/*
+ * SO_TQUIC_URING_BUF_RING - Configure registered buffer ring
+ *
+ * Used with setsockopt(SOL_TQUIC, TQUIC_URING_BUF_RING, &args, sizeof(args)).
+ * The args is a struct tquic_uring_buf_ring_args.
+ *
+ * Buffer rings provide pre-registered buffers for zero-copy I/O:
+ *   - Eliminates buffer allocation overhead in the fast path
+ *   - Enables efficient multishot receive operations
+ *   - Buffers are automatically recycled after use
+ *   - Significantly reduces latency variance
+ */
+#define SO_TQUIC_URING_BUF_RING		TQUIC_URING_BUF_RING
+
+/**
+ * struct tquic_uring_buf_ring_args - Buffer ring configuration
+ * @bgid: Buffer group ID (unique identifier for this ring)
+ * @flags: Configuration flags (CREATE, DESTROY)
+ * @buf_size: Size of each buffer in the ring (bytes)
+ * @buf_count: Number of buffers in the ring (power of 2 recommended)
+ * @reserved: Reserved for future use, must be 0
+ *
+ * Used with setsockopt(TQUIC_URING_BUF_RING) to create or destroy
+ * a registered buffer ring for zero-copy receive operations.
+ *
+ * To create a buffer ring:
+ *   args.flags = TQUIC_URING_BUF_RING_CREATE;
+ *   args.bgid = unique_group_id;
+ *   args.buf_size = 4096;  // or larger for jumbo frames
+ *   args.buf_count = 256;
+ *
+ * To destroy a buffer ring:
+ *   args.flags = TQUIC_URING_BUF_RING_DESTROY;
+ *   args.bgid = group_id_to_destroy;
+ */
+struct tquic_uring_buf_ring_args {
+	__u16	bgid;		/* Buffer group ID */
+	__u16	flags;		/* TQUIC_URING_BUF_RING_* flags */
+	__u32	buf_size;	/* Size of each buffer */
+	__u32	buf_count;	/* Number of buffers */
+	__u32	reserved;	/* Must be 0 */
+};
+
+/* Buffer ring flags */
+#define TQUIC_URING_BUF_RING_CREATE	(1 << 0)	/* Create new ring */
+#define TQUIC_URING_BUF_RING_DESTROY	(1 << 1)	/* Destroy existing ring */
+
+/**
+ * struct tquic_uring_stats - io_uring statistics for TQUIC socket
+ * @sends: Total send operations completed
+ * @recvs: Total receive operations completed
+ * @completions: Total completion queue entries generated
+ * @multishot_recvs: Multishot receive operations
+ * @zc_sends: Zero-copy send operations
+ * @retries: Operations that needed retry
+ * @overflow_events: CQE overflow events (dropped completions)
+ *
+ * Used with getsockopt to retrieve io_uring performance statistics.
+ */
+struct tquic_uring_stats {
+	__u64	sends;
+	__u64	recvs;
+	__u64	completions;
+	__u64	multishot_recvs;
+	__u64	zc_sends;
+	__u64	retries;
+	__u64	overflow_events;
+};
+
+/* Get io_uring statistics (read-only) */
+#define TQUIC_URING_STATS		203
+#define SO_TQUIC_URING_STATS		TQUIC_URING_STATS
+
+/* io_uring buffer ring limits */
+#define TQUIC_URING_MAX_BUF_RINGS	16	/* Max buffer rings per connection */
+#define TQUIC_URING_MAX_BUFS_PER_RING	32768	/* Max buffers per ring */
+#define TQUIC_URING_MIN_BUF_SIZE	64	/* Minimum buffer size */
+#define TQUIC_URING_MAX_BUF_SIZE	(1 << 20)  /* Maximum buffer size (1MB) */
+
+/*
+ * =============================================================================
+ * AF_XDP Integration Socket Options
+ * =============================================================================
+ *
+ * These options configure AF_XDP (XDP sockets) for kernel-bypass packet I/O.
+ * AF_XDP provides 10x+ packet rate improvements by bypassing the networking stack.
+ */
+
+/* AF_XDP socket options at SOL_TQUIC level */
+#define TQUIC_XDP_MODE		210	/* Set XDP mode (TQUIC_XDP_*) */
+#define TQUIC_XDP_STATS		211	/* Get XDP statistics (read-only) */
+
+#define SO_TQUIC_XDP_MODE	TQUIC_XDP_MODE
+#define SO_TQUIC_XDP_STATS	TQUIC_XDP_STATS
+
+/*
+ * XDP operating modes
+ *
+ * @TQUIC_XDP_OFF: XDP disabled, use regular UDP socket (default)
+ * @TQUIC_XDP_COPY: XDP copy mode - works with all drivers
+ * @TQUIC_XDP_ZEROCOPY: XDP zero-copy mode - requires driver support
+ */
+#define TQUIC_XDP_OFF		0	/* XDP disabled */
+#define TQUIC_XDP_COPY		1	/* XDP copy mode */
+#define TQUIC_XDP_ZEROCOPY	2	/* XDP zero-copy mode */
+
+/*
+ * XDP configuration flags
+ */
+#define TQUIC_XDP_FLAG_NEED_WAKEUP	(1 << 0)  /* Use need_wakeup mechanism */
+#define TQUIC_XDP_FLAG_SHARED_UMEM	(1 << 1)  /* Share UMEM across paths */
+#define TQUIC_XDP_FLAG_DRV_MODE		(1 << 2)  /* Force driver XDP mode */
+
+/**
+ * struct tquic_xdp_config - AF_XDP configuration
+ * @mode: Operating mode (TQUIC_XDP_OFF, TQUIC_XDP_COPY, TQUIC_XDP_ZEROCOPY)
+ * @queue_id: NIC queue to bind AF_XDP socket to
+ * @frame_size: UMEM frame size in bytes (0 = default 4096)
+ * @num_frames: Number of frames in UMEM (0 = default 4096)
+ * @flags: Configuration flags (TQUIC_XDP_FLAG_*)
+ * @ifname: Network interface name
+ *
+ * Used with setsockopt(SOL_TQUIC, TQUIC_XDP_MODE, &config, sizeof(config))
+ * to enable and configure AF_XDP for the TQUIC socket.
+ *
+ * Example:
+ *   struct tquic_xdp_config config = {
+ *       .mode = TQUIC_XDP_ZEROCOPY,
+ *       .queue_id = 0,
+ *       .frame_size = 4096,
+ *       .num_frames = 4096,
+ *       .flags = TQUIC_XDP_FLAG_NEED_WAKEUP,
+ *   };
+ *   strncpy(config.ifname, "eth0", IFNAMSIZ);
+ *   setsockopt(fd, SOL_TQUIC, TQUIC_XDP_MODE, &config, sizeof(config));
+ *
+ * To disable XDP:
+ *   config.mode = TQUIC_XDP_OFF;
+ *   setsockopt(fd, SOL_TQUIC, TQUIC_XDP_MODE, &config, sizeof(config));
+ */
+struct tquic_xdp_config {
+	__u32	mode;		/* TQUIC_XDP_OFF/COPY/ZEROCOPY */
+	__u32	queue_id;	/* NIC queue to bind */
+	__u32	frame_size;	/* Frame size (0 = default 4096) */
+	__u32	num_frames;	/* Number of frames (0 = default 4096) */
+	__u32	flags;		/* TQUIC_XDP_FLAG_* */
+	char	ifname[16];	/* Interface name (IFNAMSIZ) */
+};
+
+/**
+ * struct tquic_xdp_stats - AF_XDP statistics
+ * @rx_packets: Packets received via XDP
+ * @rx_bytes: Bytes received via XDP
+ * @rx_drops: Receive drops (fill ring empty, etc.)
+ * @tx_packets: Packets transmitted via XDP
+ * @tx_bytes: Bytes transmitted via XDP
+ * @tx_drops: Transmit drops (TX ring full, etc.)
+ * @fill_ring_empty: Times fill ring ran empty
+ * @completion_ring_full: Times completion ring was full
+ * @invalid_descs: Invalid descriptors encountered
+ * @xdp_redirect_ok: Successful XDP redirects
+ * @xdp_redirect_fail: Failed XDP redirects
+ *
+ * Used with getsockopt(SOL_TQUIC, TQUIC_XDP_STATS) to retrieve statistics.
+ */
+struct tquic_xdp_stats {
+	__u64	rx_packets;
+	__u64	rx_bytes;
+	__u64	rx_drops;
+	__u64	tx_packets;
+	__u64	tx_bytes;
+	__u64	tx_drops;
+	__u64	fill_ring_empty;
+	__u64	completion_ring_full;
+	__u64	invalid_descs;
+	__u64	xdp_redirect_ok;
+	__u64	xdp_redirect_fail;
+};
+
+/* AF_XDP defaults */
+#define TQUIC_XDP_DEFAULT_FRAME_SIZE	4096
+#define TQUIC_XDP_DEFAULT_NUM_FRAMES	4096
+#define TQUIC_XDP_DEFAULT_RING_SIZE	2048
+
+/* AF_XDP limits */
+#define TQUIC_XDP_MIN_FRAME_SIZE	2048
+#define TQUIC_XDP_MAX_FRAME_SIZE	16384
+#define TQUIC_XDP_MIN_NUM_FRAMES	256
+#define TQUIC_XDP_MAX_NUM_FRAMES	65536
+
+/* QUIC ports for XDP packet filtering */
+#define TQUIC_XDP_PORT_443		443
+#define TQUIC_XDP_PORT_4433		4433
+#define TQUIC_XDP_PORT_8443		8443
 
 #endif /* _UAPI_LINUX_TQUIC_H */

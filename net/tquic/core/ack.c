@@ -28,6 +28,7 @@
 #include <net/tquic.h>
 
 #include "varint.h"
+#include "ack_frequency.h"
 
 /*
  * RFC 9002 Constants
@@ -250,6 +251,13 @@ struct tquic_loss_state {
 	/* Persistent congestion */
 	ktime_t persistent_congestion_start;
 	bool in_persistent_congestion;
+
+	/*
+	 * ACK Frequency extension state (draft-ietf-quic-ack-frequency)
+	 * When non-NULL, contains negotiated ACK frequency parameters
+	 * that override default ACK timing behavior.
+	 */
+	struct tquic_ack_frequency_state *ack_freq;
 
 	spinlock_t lock;
 };
@@ -1834,6 +1842,131 @@ void tquic_loss_get_in_flight(struct tquic_loss_state *loss,
 	spin_unlock(&loss->lock);
 }
 EXPORT_SYMBOL_GPL(tquic_loss_get_in_flight);
+
+/*
+ * =============================================================================
+ * ACK Frequency Integration (draft-ietf-quic-ack-frequency)
+ * =============================================================================
+ */
+
+/**
+ * tquic_loss_state_set_ack_freq - Associate ACK frequency state with loss state
+ * @loss: Loss detection state
+ * @ack_freq: ACK frequency state (may be NULL to disable)
+ *
+ * Associates an ACK frequency state with the loss state to enable
+ * ACK suppression based on negotiated parameters.
+ */
+void tquic_loss_state_set_ack_freq(struct tquic_loss_state *loss,
+				   struct tquic_ack_frequency_state *ack_freq)
+{
+	if (!loss)
+		return;
+
+	spin_lock(&loss->lock);
+	loss->ack_freq = ack_freq;
+
+	/*
+	 * If ACK frequency is being enabled, update the max_ack_delay
+	 * in RTT state to use the negotiated value.
+	 */
+	if (ack_freq) {
+		u64 new_delay = tquic_ack_freq_get_max_delay(ack_freq);
+
+		if (new_delay > 0)
+			loss->rtt.max_ack_delay = new_delay;
+	}
+
+	spin_unlock(&loss->lock);
+}
+EXPORT_SYMBOL_GPL(tquic_loss_state_set_ack_freq);
+
+/**
+ * tquic_should_send_ack - Determine if ACK should be sent
+ * @loss: Loss detection state
+ * @pn: Packet number just received
+ * @ack_eliciting: Whether the packet was ack-eliciting
+ *
+ * Checks ACK frequency state (if available) to determine whether
+ * an ACK should be sent. Falls back to default behavior if ACK
+ * frequency is not enabled.
+ *
+ * Returns true if an ACK should be sent immediately.
+ */
+bool tquic_should_send_ack(struct tquic_loss_state *loss,
+			   u64 pn, bool ack_eliciting)
+{
+	bool should_ack;
+
+	if (!loss)
+		return true;
+
+	spin_lock(&loss->lock);
+
+	/*
+	 * If ACK frequency extension is active, use its decision logic.
+	 * Otherwise fall back to default QUIC behavior.
+	 */
+	if (loss->ack_freq && tquic_ack_freq_is_enabled(loss->ack_freq)) {
+		should_ack = tquic_ack_freq_should_ack(loss->ack_freq,
+						       pn, ack_eliciting);
+	} else {
+		/*
+		 * Default QUIC behavior (RFC 9000 Section 13.2.1):
+		 * - ACK every second ack-eliciting packet
+		 * - ACK immediately if packet is out of order
+		 * - ACK immediately on any handshake space packet
+		 */
+		if (!ack_eliciting) {
+			/* Non-ack-eliciting packets don't require ACK */
+			should_ack = false;
+		} else {
+			/*
+			 * Simple heuristic: ACK immediately.
+			 * A full implementation would track ack-eliciting
+			 * packet count and ACK every 2nd packet.
+			 */
+			should_ack = true;
+		}
+	}
+
+	spin_unlock(&loss->lock);
+	return should_ack;
+}
+EXPORT_SYMBOL_GPL(tquic_should_send_ack);
+
+/**
+ * tquic_get_ack_delay - Get current ACK delay for timer
+ * @loss: Loss detection state
+ *
+ * Returns the current ACK delay in microseconds, considering
+ * ACK frequency negotiation if active.
+ */
+u64 tquic_get_ack_delay(struct tquic_loss_state *loss)
+{
+	u64 delay;
+
+	if (!loss)
+		return TQUIC_MAX_ACK_DELAY_US;
+
+	spin_lock(&loss->lock);
+
+	/*
+	 * If ACK frequency extension is active, use its negotiated
+	 * max ACK delay. Otherwise use the default or configured value.
+	 */
+	if (loss->ack_freq && tquic_ack_freq_is_enabled(loss->ack_freq)) {
+		delay = tquic_ack_freq_get_max_delay(loss->ack_freq);
+	} else {
+		/* Use the configured ack_delay_us or default max_ack_delay */
+		delay = loss->ack_delay_us > 0 ?
+			loss->ack_delay_us : loss->rtt.max_ack_delay;
+	}
+
+	spin_unlock(&loss->lock);
+	return delay;
+}
+EXPORT_SYMBOL_GPL(tquic_get_ack_delay);
 
 /*
  * =============================================================================

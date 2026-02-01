@@ -163,6 +163,13 @@ static int tquic_init_sock(struct sock *sk)
 	/* Enable pacing by default per CONTEXT.md */
 	tsk->pacing_enabled = true;
 
+	/* Initialize certificate verification with secure defaults */
+	tsk->cert_verify.verify_mode = TQUIC_VERIFY_REQUIRED;
+	tsk->cert_verify.verify_hostname = true;
+	tsk->cert_verify.allow_self_signed = false;
+	tsk->cert_verify.expected_hostname[0] = '\0';
+	tsk->cert_verify.expected_hostname_len = 0;
+
 	/* Create connection structure */
 	tsk->conn = tquic_conn_create(sk, GFP_KERNEL);
 	if (!tsk->conn)
@@ -1084,6 +1091,95 @@ static int tquic_setsockopt(struct socket *sock, int level, int optname,
 		return 0;
 	}
 
+	/*
+	 * Certificate Verification Socket Options
+	 *
+	 * These options control TLS certificate chain validation.
+	 * Must be set before connect() for client sockets.
+	 */
+
+	case TQUIC_CERT_VERIFY_MODE:
+		/*
+		 * SO_TQUIC_CERT_VERIFY_MODE: Set certificate verification mode
+		 *
+		 * Values:
+		 *   TQUIC_VERIFY_NONE     - No verification (INSECURE)
+		 *   TQUIC_VERIFY_OPTIONAL - Verify if present, allow missing
+		 *   TQUIC_VERIFY_REQUIRED - Full verification required (default)
+		 *
+		 * WARNING: Using NONE leaves connections vulnerable to MITM attacks.
+		 * Must be set before connect().
+		 */
+		if (val < TQUIC_VERIFY_NONE || val > TQUIC_VERIFY_REQUIRED)
+			return -EINVAL;
+
+		lock_sock(sk);
+		if (tsk->conn && tsk->conn->state != TQUIC_CONN_IDLE) {
+			release_sock(sk);
+			return -EISCONN;
+		}
+		tsk->cert_verify.verify_mode = val;
+		if (val == TQUIC_VERIFY_NONE)
+			pr_warn("tquic: Certificate verification disabled for socket - INSECURE\n");
+		release_sock(sk);
+		return 0;
+
+	case TQUIC_EXPECTED_HOSTNAME: {
+		/*
+		 * SO_TQUIC_EXPECTED_HOSTNAME: Set expected hostname for verification
+		 *
+		 * Overrides the hostname used for certificate verification.
+		 * By default, the hostname from connect() or server_name is used.
+		 *
+		 * Useful when connecting via IP address but expecting a specific
+		 * certificate, or when using a different name than the SNI.
+		 *
+		 * Must be set before connect().
+		 */
+		char hostname[TQUIC_MAX_HOSTNAME_LEN + 1];
+
+		if (optlen <= 0 || optlen > TQUIC_MAX_HOSTNAME_LEN)
+			return -EINVAL;
+
+		if (copy_from_sockptr(hostname, optval, optlen))
+			return -EFAULT;
+		hostname[optlen] = '\0';
+
+		lock_sock(sk);
+		if (tsk->conn && tsk->conn->state != TQUIC_CONN_IDLE) {
+			release_sock(sk);
+			return -EISCONN;
+		}
+		memcpy(tsk->cert_verify.expected_hostname, hostname, optlen);
+		tsk->cert_verify.expected_hostname_len = optlen;
+		tsk->cert_verify.verify_hostname = true;
+		release_sock(sk);
+
+		pr_debug("tquic: Expected hostname set to '%s'\n", hostname);
+		return 0;
+	}
+
+	case TQUIC_ALLOW_SELF_SIGNED:
+		/*
+		 * SO_TQUIC_ALLOW_SELF_SIGNED: Allow self-signed certificates
+		 *
+		 * WARNING: This is DANGEROUS and should only be used for testing
+		 * in controlled environments. Self-signed certificates provide
+		 * no authentication and are vulnerable to MITM attacks.
+		 *
+		 * Must be set before connect().
+		 */
+		lock_sock(sk);
+		if (tsk->conn && tsk->conn->state != TQUIC_CONN_IDLE) {
+			release_sock(sk);
+			return -EISCONN;
+		}
+		tsk->cert_verify.allow_self_signed = !!val;
+		if (val)
+			pr_warn("tquic: Self-signed certificates allowed for socket - INSECURE\n");
+		release_sock(sk);
+		return 0;
+
 	default:
 		return -ENOPROTOOPT;
 	}
@@ -1462,6 +1558,70 @@ static int tquic_getsockopt(struct socket *sock, int level, int optname,
 
 		return 0;
 	}
+
+	/*
+	 * Certificate Verification Socket Options (getsockopt)
+	 */
+
+	case TQUIC_CERT_VERIFY_MODE:
+		/*
+		 * SO_TQUIC_CERT_VERIFY_MODE: Get certificate verification mode
+		 *
+		 * Returns the current verification mode:
+		 *   TQUIC_VERIFY_NONE     - No verification (INSECURE)
+		 *   TQUIC_VERIFY_OPTIONAL - Verify if present, allow missing
+		 *   TQUIC_VERIFY_REQUIRED - Full verification required
+		 */
+		val = tsk->cert_verify.verify_mode;
+		break;
+
+	case TQUIC_EXPECTED_HOSTNAME: {
+		/*
+		 * SO_TQUIC_EXPECTED_HOSTNAME: Get expected hostname
+		 *
+		 * Returns the configured hostname for certificate verification.
+		 * If not explicitly set, returns the server_name (SNI).
+		 */
+		const char *hostname;
+		int hostname_len;
+
+		lock_sock(sk);
+		if (tsk->cert_verify.expected_hostname_len > 0) {
+			hostname = tsk->cert_verify.expected_hostname;
+			hostname_len = tsk->cert_verify.expected_hostname_len;
+		} else if (tsk->server_name_len > 0) {
+			hostname = tsk->server_name;
+			hostname_len = tsk->server_name_len;
+		} else {
+			release_sock(sk);
+			return -ENOENT;
+		}
+
+		if (len < hostname_len) {
+			release_sock(sk);
+			return -EINVAL;
+		}
+
+		if (copy_to_user(optval, hostname, hostname_len)) {
+			release_sock(sk);
+			return -EFAULT;
+		}
+		release_sock(sk);
+
+		if (put_user(hostname_len, optlen))
+			return -EFAULT;
+
+		return 0;
+	}
+
+	case TQUIC_ALLOW_SELF_SIGNED:
+		/*
+		 * SO_TQUIC_ALLOW_SELF_SIGNED: Get self-signed certificate status
+		 *
+		 * Returns 1 if self-signed certificates are allowed, 0 otherwise.
+		 */
+		val = tsk->cert_verify.allow_self_signed ? 1 : 0;
+		break;
 
 	default:
 		return -ENOPROTOOPT;

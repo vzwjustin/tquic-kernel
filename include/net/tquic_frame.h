@@ -42,6 +42,10 @@
 #define TQUIC_FRAME_CONNECTION_CLOSE_APP	0x1d
 #define TQUIC_FRAME_HANDSHAKE_DONE	0x1e
 
+/* DATAGRAM frame types (RFC 9221) */
+#define TQUIC_FRAME_DATAGRAM		0x30  /* No length field */
+#define TQUIC_FRAME_DATAGRAM_LEN	0x31  /* With length field */
+
 /* STREAM frame flags */
 #define TQUIC_STREAM_FLAG_FIN		0x01
 #define TQUIC_STREAM_FLAG_LEN		0x02
@@ -171,6 +175,15 @@ struct tquic_frame_connection_close {
 };
 
 /*
+ * DATAGRAM frame (RFC 9221)
+ */
+struct tquic_frame_datagram {
+	u64 length;
+	const u8 *data;
+	bool has_length;  /* true if type 0x31 (explicit length) */
+};
+
+/*
  * Generic frame union
  */
 struct tquic_frame {
@@ -194,6 +207,7 @@ struct tquic_frame {
 		struct tquic_frame_path_challenge path_challenge;
 		struct tquic_frame_path_response path_response;
 		struct tquic_frame_connection_close conn_close;
+		struct tquic_frame_datagram datagram;
 	};
 };
 
@@ -238,6 +252,7 @@ size_t tquic_path_response_frame_size(void);
 size_t tquic_connection_close_frame_size(u64 error_code, u64 frame_type,
 					 u64 reason_len, bool app_close);
 size_t tquic_handshake_done_frame_size(void);
+size_t tquic_datagram_frame_size(u64 data_len, bool with_length);
 
 /*
  * Frame Construction
@@ -279,6 +294,14 @@ int tquic_write_connection_close_frame(u8 *buf, size_t buf_len, u64 error_code,
 				       u64 frame_type, const u8 *reason,
 				       u64 reason_len, bool app_close);
 int tquic_write_handshake_done_frame(u8 *buf, size_t buf_len);
+int tquic_write_datagram_frame(u8 *buf, size_t buf_len, const u8 *data,
+			       u64 data_len, bool with_length);
+
+/*
+ * Frame Parsing (DATAGRAM specific)
+ */
+int tquic_parse_datagram_frame(const u8 *buf, size_t buf_len,
+			       struct tquic_frame *frame);
 
 /*
  * Utility Functions
@@ -330,6 +353,28 @@ static inline bool tquic_stream_frame_has_length(u8 type)
 static inline bool tquic_stream_frame_has_offset(u8 type)
 {
 	return type & TQUIC_STREAM_FLAG_OFF;
+}
+
+/**
+ * tquic_is_datagram_frame - Check if frame type is a DATAGRAM frame
+ * @type: Frame type byte
+ *
+ * Returns true if the frame type is DATAGRAM (0x30 or 0x31).
+ */
+static inline bool tquic_is_datagram_frame(u8 type)
+{
+	return (type & 0xfe) == TQUIC_FRAME_DATAGRAM;
+}
+
+/**
+ * tquic_datagram_frame_has_length - Check if DATAGRAM frame has length field
+ * @type: Frame type byte
+ *
+ * Returns true if the length field is present (type 0x31).
+ */
+static inline bool tquic_datagram_frame_has_length(u8 type)
+{
+	return type & 0x01;
 }
 
 #endif /* _NET_TQUIC_FRAME_H */

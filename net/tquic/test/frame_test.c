@@ -41,6 +41,10 @@
 #define TQUIC_FRAME_PATH_STATUS		0x21
 #define TQUIC_FRAME_ACK_MP		0x22
 
+/* DATAGRAM frame types (RFC 9221) */
+#define TQUIC_FRAME_DATAGRAM		0x30  /* No length field */
+#define TQUIC_FRAME_DATAGRAM_LEN	0x31  /* With length field */
+
 /* Stream frame flags */
 #define TQUIC_STREAM_FLAG_OFF		0x04  /* Offset field present */
 #define TQUIC_STREAM_FLAG_LEN		0x02  /* Length field present */
@@ -520,6 +524,60 @@ static void tquic_frame_test_new_token(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, new_token_frame[1], 16);
 }
 
+/* Test: DATAGRAM frame (RFC 9221) */
+static void tquic_frame_test_datagram(struct kunit *test)
+{
+	/*
+	 * DATAGRAM Frame (RFC 9221):
+	 * - Type (0x30 or 0x31)
+	 * - [Length (varint)] - only if Type is 0x31
+	 * - Datagram Data
+	 *
+	 * Type 0x30: Data extends to end of packet (no length field)
+	 * Type 0x31: Explicit length field present
+	 */
+	u8 datagram_no_len[] = {
+		0x30,	/* DATAGRAM frame type (no length) */
+		/* Data extends to end of packet */
+		0x48, 0x65, 0x6c, 0x6c, 0x6f, /* "Hello" */
+	};
+
+	u8 datagram_with_len[] = {
+		0x31,	/* DATAGRAM frame type (with length) */
+		0x05,	/* Length = 5 */
+		0x48, 0x65, 0x6c, 0x6c, 0x6f, /* "Hello" */
+	};
+
+	/* Test type 0x30 (no length field) */
+	KUNIT_EXPECT_EQ(test, datagram_no_len[0], TQUIC_FRAME_DATAGRAM);
+	KUNIT_EXPECT_FALSE(test, (datagram_no_len[0] & 0x01) != 0);
+
+	/* Test type 0x31 (with length field) */
+	KUNIT_EXPECT_EQ(test, datagram_with_len[0], TQUIC_FRAME_DATAGRAM_LEN);
+	KUNIT_EXPECT_TRUE(test, (datagram_with_len[0] & 0x01) != 0);
+	KUNIT_EXPECT_EQ(test, datagram_with_len[1], 5); /* Length */
+
+	/* Verify DATAGRAM type range (0x30-0x31) */
+	KUNIT_EXPECT_EQ(test, (TQUIC_FRAME_DATAGRAM & 0xfe), 0x30);
+	KUNIT_EXPECT_EQ(test, (TQUIC_FRAME_DATAGRAM_LEN & 0xfe), 0x30);
+
+	/* Verify distinction between types */
+	KUNIT_EXPECT_NE(test, TQUIC_FRAME_DATAGRAM, TQUIC_FRAME_DATAGRAM_LEN);
+}
+
+/* Test: DATAGRAM frame type identification */
+static void tquic_frame_test_datagram_type_check(struct kunit *test)
+{
+	/* Helper macro check: (type & 0xfe) == 0x30 identifies DATAGRAM frames */
+	KUNIT_EXPECT_TRUE(test, (0x30 & 0xfe) == 0x30);
+	KUNIT_EXPECT_TRUE(test, (0x31 & 0xfe) == 0x30);
+
+	/* Non-DATAGRAM frames should not match */
+	KUNIT_EXPECT_FALSE(test, (0x2f & 0xfe) == 0x30);
+	KUNIT_EXPECT_FALSE(test, (0x32 & 0xfe) == 0x30);
+	KUNIT_EXPECT_FALSE(test, (0x08 & 0xfe) == 0x30); /* STREAM */
+}
+
 static struct kunit_case tquic_frame_test_cases[] = {
 	KUNIT_CASE(tquic_frame_test_type_identify),
 	KUNIT_CASE(tquic_frame_test_stream_type_range),
@@ -547,6 +605,8 @@ static struct kunit_case tquic_frame_test_cases[] = {
 	KUNIT_CASE(tquic_frame_test_data_blocked),
 	KUNIT_CASE(tquic_frame_test_stream_data_blocked),
 	KUNIT_CASE(tquic_frame_test_new_token),
+	KUNIT_CASE(tquic_frame_test_datagram),
+	KUNIT_CASE(tquic_frame_test_datagram_type_check),
 	{}
 };
 

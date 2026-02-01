@@ -44,6 +44,7 @@ tquic_core-y := \
 	core/frame.o \
 	core/packet.o \
 	core/ack.o \
+	core/ack_frequency.o \
 	core/flow_control.o \
 	core/transport_params.o \
 	core/cid.o
@@ -96,8 +97,14 @@ tquic_crypto-y := \
 	crypto/key_update.o \
 	crypto/zero_rtt.o
 
+# Certificate verification (requires keyring support)
+tquic_crypto-$(CONFIG_TQUIC_CERT_VERIFY) += crypto/cert_verify.o
+
 # IPv6 Support
 tquic-$(CONFIG_TQUIC_IPV6) += tquic_ipv6.o
+
+# NAPI polling support
+tquic-$(CONFIG_TQUIC_NAPI) += napi.o
 
 # Netfilter integration for connection tracking
 obj-$(CONFIG_TQUIC_NETFILTER) += tquic_nf.o
@@ -112,6 +119,13 @@ tquic_bpf-y := bpf.o
 # HTTP/3 Support (RFC 9114)
 obj-$(CONFIG_TQUIC_HTTP3) += http3/
 
+# io_uring support for high-performance async I/O
+tquic-$(CONFIG_TQUIC_IO_URING) += io_uring.o
+
+# AF_XDP high-performance packet I/O
+obj-$(CONFIG_TQUIC_AF_XDP) += tquic_af_xdp.o
+tquic_af_xdp-y := af_xdp.o
+
 # KUnit tests
 obj-$(CONFIG_TQUIC_KUNIT_TEST) += tquic_test.o
 tquic_test-y := \
@@ -121,4 +135,5 @@ tquic_test-y := \
 	test/flow_control_test.o \
 	test/scheduler_test.o \
 	test/transport_params_test.o \
-	test/grease_test.o
+	test/grease_test.o \
+	test/security_test.o

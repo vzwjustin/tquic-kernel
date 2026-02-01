@@ -202,6 +202,9 @@ struct tquic_zero_rtt_keys {
  * @early_data_sent: Bytes of early data sent
  * @early_data_received: Bytes of early data received
  * @cipher_suite: Cipher suite for 0-RTT (must match resumption)
+ * @largest_sent_pn: Largest packet number sent (for nonce reuse prevention)
+ * @largest_recv_pn: Largest packet number received (for replay protection)
+ * @pn_initialized: True once first packet sent/received (for initial state)
  */
 struct tquic_zero_rtt_state_s {
 	enum tquic_zero_rtt_state state;
@@ -211,6 +214,10 @@ struct tquic_zero_rtt_state_s {
 	u64 early_data_sent;
 	u64 early_data_received;
 	u16 cipher_suite;
+	/* Packet number tracking for nonce reuse and replay protection */
+	u64 largest_sent_pn;
+	u64 largest_recv_pn;
+	bool pn_initialized;
 };
 
 /*

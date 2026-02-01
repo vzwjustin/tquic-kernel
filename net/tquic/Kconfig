@@ -254,6 +254,48 @@ config TQUIC_CRYPTO
 
 	  If unsure, say Y.
 
+config TQUIC_CERT_VERIFY
+	bool "TQUIC Certificate Chain Validation"
+	depends on TQUIC_CRYPTO
+	depends on KEYS
+	depends on ASYMMETRIC_KEY_TYPE
+	select ASYMMETRIC_PUBLIC_KEY_SUBTYPE
+	select X509_CERTIFICATE_PARSER
+	default y
+	help
+	  Enable X.509 certificate chain validation for TQUIC TLS 1.3
+	  connections. This is CRITICAL for security as it prevents
+	  man-in-the-middle (MITM) attacks.
+
+	  When enabled, TQUIC will:
+	    - Parse and validate X.509 certificate chains
+	    - Verify certificate signatures using kernel crypto
+	    - Check certificate validity periods
+	    - Verify hostname/SNI matching (RFC 6125)
+	    - Look up trust anchors in the kernel system keyring
+	    - Support Subject Alternative Names (SAN)
+	    - Enforce CA basic constraints
+
+	  Certificate verification modes (configurable per-socket):
+	    - NONE: No verification (INSECURE, testing only)
+	    - OPTIONAL: Verify if cert present, allow missing
+	    - REQUIRED: Full verification required (default)
+
+	  Trusted root certificates are looked up in:
+	    - System trusted keyring (.builtin_trusted_keys)
+	    - Secondary trusted keyring (.secondary_trusted_keys)
+	    - Platform keyring (.platform)
+
+	  Socket options for configuration:
+	    - TQUIC_CERT_VERIFY_MODE: Set verification mode
+	    - TQUIC_EXPECTED_HOSTNAME: Override SNI for hostname check
+
+	  WARNING: Disabling this option or setting verify mode to NONE
+	  leaves connections vulnerable to MITM attacks. Only disable
+	  for testing in controlled environments.
+
+	  If unsure, say Y.
+
 config TQUIC_IPV6
 	bool "TQUIC IPv6 support"
 	depends on TQUIC_CORE
@@ -345,6 +387,33 @@ config TQUIC_DEBUGFS
 	  and internal state for debugging purposes.
 
 	  If unsure, say N.
+
+config TQUIC_NAPI
+	bool "TQUIC NAPI polling support"
+	depends on TQUIC_CORE
+	default y
+	help
+	  Enable NAPI (New API) polling mode for TQUIC. NAPI reduces
+	  interrupt overhead by polling for packets in softirq context,
+	  providing better performance at high packet rates.
+
+	  Features include:
+	    - Per-socket NAPI polling for receive path
+	    - Busy polling support (sk_busy_loop) for ultra-low latency
+	    - SO_BUSY_POLL socket option integration
+	    - Per-CPU NAPI instances for multi-queue NICs
+	    - Adaptive interrupt coalescing
+	    - Statistics via /proc/net/tquic_napi
+
+	  When enabled, TQUIC will use NAPI for packet reception which
+	  can significantly reduce CPU overhead at high packet rates
+	  and improve latency consistency.
+
+	  Busy polling allows applications to poll for data without
+	  sleeping, reducing latency for latency-sensitive workloads
+	  at the cost of increased CPU usage.
+
+	  If unsure, say Y.
 
 config TQUIC_KUNIT_TEST
 	tristate "TQUIC KUnit tests" if !KUNIT_ALL_TESTS
@@ -445,5 +514,90 @@ config TQUIC_HTTP3_QPACK
 	  Disabling this limits HTTP/3 to literal header encoding only.
 
 	  If unsure, say Y.
+
+config TQUIC_IO_URING
+	bool "TQUIC io_uring support"
+	depends on TQUIC_CORE
+	depends on IO_URING
+	default y
+	help
+	  Enable io_uring integration for TQUIC sockets. This provides
+	  high-performance async I/O with minimal syscall overhead.
+
+	  Features include:
+	    - TQUIC-specific send/recv operations with stream awareness
+	    - Multishot receive for continuous packet reception
+	    - Registered buffers for zero-copy I/O
+	    - SQPOLL integration for kernel-side polling
+	    - Completion batching to reduce overhead
+
+	  When enabled, TQUIC sockets can be used with io_uring for
+	  significantly improved performance in high-throughput scenarios.
+	  The SQPOLL mode eliminates syscall overhead by having a kernel
+	  thread poll the submission queue.
+
+	  Socket options:
+	    - TQUIC_URING_SQPOLL: Enable/disable SQPOLL mode
+	    - TQUIC_URING_CQE_BATCH: Set completion batching threshold
+	    - TQUIC_URING_BUF_RING: Configure buffer rings for zero-copy
+
+	  Performance benefits:
+	    - Reduced syscall overhead via batched submission
+	    - Zero-copy I/O with registered buffers
+	    - Multishot receive eliminates per-packet re-arming
+	    - SQPOLL provides sub-microsecond latency
+
+	  If you plan to use io_uring with TQUIC, say Y.
+	  If unsure, say Y.
+
+config TQUIC_AF_XDP
+	tristate "TQUIC AF_XDP high-performance packet I/O"
+	depends on TQUIC_CORE
+	depends on XDP_SOCKETS
+	depends on BPF_SYSCALL
+	default n
+	help
+	  Enable AF_XDP (XDP sockets) integration for TQUIC to achieve
+	  kernel-bypass packet processing with 10x+ packet rate improvements.
+
+	  AF_XDP allows TQUIC to send and receive QUIC packets directly
+	  from userspace memory regions (UMEM), bypassing the normal
+	  kernel networking stack for maximum performance.
+
+	  Features:
+	    - Zero-copy packet reception via XDP redirect
+	    - Zero-copy packet transmission via XSK TX ring
+	    - UMEM management with reference counting
+	    - Copy mode fallback for driver compatibility
+	    - Automatic fallback to regular sockets if XDP not supported
+	    - XDP program for QUIC packet steering (ports 443, 4433, 8443)
+	    - Per-path XSK configuration for multipath bonding
+
+	  Operating modes (configurable via TQUIC_XDP_MODE socket option):
+	    - TQUIC_XDP_OFF: XDP disabled, use regular UDP socket
+	    - TQUIC_XDP_COPY: XDP copy mode (driver compatibility)
+	    - TQUIC_XDP_ZEROCOPY: XDP zero-copy (best performance)
+
+	  Requirements:
+	    - Network interface with XDP support (most modern NICs)
+	    - For zero-copy: NIC driver with AF_XDP zero-copy support
+	    - BPF_SYSCALL for XDP program loading
+
+	  Performance benefits:
+	    - 10-20x higher packet rates compared to regular sockets
+	    - Sub-microsecond latency for packet processing
+	    - Efficient batched I/O via ring buffers
+	    - CPU cache-friendly memory layout
+
+	  Use cases:
+	    - High-frequency trading over QUIC
+	    - High-throughput WAN bonding servers
+	    - Low-latency real-time applications
+	    - Network function virtualization (NFV)
+
+	  To compile this as a module, choose M here: the module will
+	  be called tquic_af_xdp.
+
+	  If unsure, say N.
 
 endif # TQUIC
