@@ -30,6 +30,10 @@ tquic-y := \
 	tquic_retry.o \
 	tquic_token.o \
 	tquic_stateless_reset.o \
+	tquic_forward.o \
+	tquic_preferred_addr.o \
+	tquic_qos.o \
+	tquic_tunnel.o \
 	grease.o \
 	tquic_ack_frequency.o \
 	cong/tquic_cong.o \
@@ -165,4 +169,5 @@ tquic_test-y := \
 	test/scheduler_test.o \
 	test/transport_params_test.o \
 	test/grease_test.o \
-	test/security_test.o
+	test/security_test.o \
+	test/reorder_test.o
