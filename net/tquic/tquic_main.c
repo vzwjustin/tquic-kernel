@@ -665,7 +665,7 @@ DEFINE_PROC_SHOW_ATTRIBUTE(tquic_proc_connections);
 DEFINE_PROC_SHOW_ATTRIBUTE(tquic_proc_paths);
 DEFINE_PROC_SHOW_ATTRIBUTE(tquic_proc_stats);
 
-static int __init tquic_proc_init(void)
+int __init tquic_proc_init(void)
 {
 	tquic_proc_dir = proc_mkdir("tquic", init_net.proc_net);
 	if (!tquic_proc_dir)
@@ -690,7 +690,7 @@ err:
 	return -ENOMEM;
 }
 
-static void __exit tquic_proc_exit(void)
+void __exit tquic_proc_exit(void)
 {
 	remove_proc_subtree("tquic", init_net.proc_net);
 }
