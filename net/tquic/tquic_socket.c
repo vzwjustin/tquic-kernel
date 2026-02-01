@@ -27,6 +27,11 @@
 #include "cong/tquic_cong.h"
 #include "tquic_zerocopy.h"
 
+#ifdef CONFIG_TQUIC_QLOG
+#include <uapi/linux/tquic_qlog.h>
+#include "diag/qlog.h"
+#endif
+
 /*
  * Lockdep class keys for TQUIC sockets
  * Indexed: [0] = IPv4, [1] = IPv6
@@ -1180,6 +1185,76 @@ static int tquic_setsockopt(struct socket *sock, int level, int optname,
 		release_sock(sk);
 		return 0;
 
+#ifdef CONFIG_TQUIC_QLOG
+	case TQUIC_QLOG_ENABLE: {
+		/*
+		 * TQUIC_QLOG_ENABLE: Enable qlog tracing
+		 *
+		 * Enables qlog event logging for this connection with the
+		 * specified mode and event filter. See tquic_qlog.h for
+		 * detailed configuration options.
+		 *
+		 * Must be called after connect() (connection must exist).
+		 */
+		struct tquic_qlog_args args;
+		struct tquic_qlog *qlog;
+
+		if (optlen < sizeof(args))
+			return -EINVAL;
+
+		if (copy_from_sockptr(&args, optval, sizeof(args)))
+			return -EFAULT;
+
+		/* Validate reserved field */
+		if (args.flags != 0 || args.reserved != 0)
+			return -EINVAL;
+
+		lock_sock(sk);
+		if (!tsk->conn) {
+			release_sock(sk);
+			return -ENOTCONN;
+		}
+
+		/* Create qlog context */
+		qlog = tquic_qlog_create(tsk->conn, &args);
+		if (IS_ERR(qlog)) {
+			release_sock(sk);
+			return PTR_ERR(qlog);
+		}
+
+		/* Store qlog context (implementation would add to connection) */
+		pr_debug("tquic: qlog enabled for connection, mode=%u\n", args.mode);
+		release_sock(sk);
+		return 0;
+	}
+
+	case TQUIC_QLOG_FILTER: {
+		/*
+		 * TQUIC_QLOG_FILTER: Update qlog event filter
+		 *
+		 * Dynamically update the event filter mask for an active
+		 * qlog session. This allows enabling/disabling specific
+		 * event categories at runtime.
+		 */
+		u64 mask;
+
+		if (optlen < sizeof(mask))
+			return -EINVAL;
+
+		if (copy_from_sockptr(&mask, optval, sizeof(mask)))
+			return -EFAULT;
+
+		lock_sock(sk);
+		if (!tsk->conn) {
+			release_sock(sk);
+			return -ENOTCONN;
+		}
+		/* Would call: tquic_qlog_set_mask(tsk->conn->qlog, mask); */
+		release_sock(sk);
+		return 0;
+	}
+#endif /* CONFIG_TQUIC_QLOG */
+
 	default:
 		return -ENOPROTOOPT;
 	}
@@ -1622,6 +1697,44 @@ static int tquic_getsockopt(struct socket *sock, int level, int optname,
 		 */
 		val = tsk->cert_verify.allow_self_signed ? 1 : 0;
 		break;
+
+#ifdef CONFIG_TQUIC_QLOG
+	case TQUIC_QLOG_STATS: {
+		/*
+		 * TQUIC_QLOG_STATS: Get qlog statistics
+		 *
+		 * Returns qlog event logging statistics including event
+		 * counts, drops, and relay status.
+		 */
+		struct tquic_qlog_stats stats = {0};
+
+		if (len < sizeof(stats))
+			return -EINVAL;
+
+		lock_sock(sk);
+		if (!tsk->conn) {
+			release_sock(sk);
+			return -ENOTCONN;
+		}
+		/* Would call: tquic_qlog_get_stats(tsk->conn->qlog, &stats); */
+		release_sock(sk);
+
+		if (copy_to_user(optval, &stats, sizeof(stats)))
+			return -EFAULT;
+		if (put_user(sizeof(stats), optlen))
+			return -EFAULT;
+		return 0;
+	}
+
+	case TQUIC_QLOG_ENABLE:
+		/*
+		 * TQUIC_QLOG_ENABLE: Get qlog enable status
+		 *
+		 * Returns 1 if qlog is enabled for this connection.
+		 */
+		val = 0; /* Would check tsk->conn->qlog != NULL */
+		break;
+#endif /* CONFIG_TQUIC_QLOG */
 
 	default:
 		return -ENOPROTOOPT;

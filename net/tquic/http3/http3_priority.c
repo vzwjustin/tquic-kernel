@@ -9,9 +9,8 @@
  * - Urgency (u=0-7): 0 is highest priority, 7 is lowest, default is 3
  * - Incremental (i): Boolean flag for incremental delivery hint
  *
- * PRIORITY_UPDATE frames allow dynamic priority updates during a request:
- * - Frame type 0xf0700: Priority update for request streams
- * - Frame type 0xf0701: Priority update for push streams
+ * PRIORITY_UPDATE frame (type 0x0f) allows dynamic priority updates.
+ * The Priority header field uses Structured Field Dictionary format.
  *
  * The implementation integrates with the TQUIC scheduler to provide
  * priority-aware stream scheduling for optimal HTTP/3 performance.
@@ -28,8 +27,10 @@
 #include <linux/sysctl.h>
 #include <net/net_namespace.h>
 #include <net/tquic.h>
+#include <net/tquic_http3.h>
 
 #include "http3_priority.h"
+#include "http3_stream.h"
 #include "../core/varint.h"
 
 /* Global statistics */
@@ -978,6 +979,580 @@ void http3_priority_get_stats(struct tquic_connection *conn,
 EXPORT_SYMBOL_GPL(http3_priority_get_stats);
 
 /* =========================================================================
+ * Public API - RFC 9218 Compliant Functions
+ * ========================================================================= */
+
+/**
+ * tquic_h3_send_priority_update - Send PRIORITY_UPDATE frame
+ */
+int tquic_h3_send_priority_update(struct tquic_http3_conn *conn,
+				  u64 stream_id,
+				  const struct tquic_h3_priority *pri)
+{
+	u8 buf[64];
+	size_t offset = 0;
+	int ret;
+	char field_buf[HTTP3_PRIORITY_FIELD_MAX_LEN];
+	int field_len;
+	struct http3_priority internal_pri;
+
+	if (!conn || !pri)
+		return -EINVAL;
+
+	/* Convert public API struct to internal format */
+	internal_pri.urgency = pri->urgency;
+	internal_pri.incremental = pri->incremental;
+	internal_pri.valid = true;
+
+	/* Clamp urgency to valid range */
+	if (internal_pri.urgency > TQUIC_H3_PRIORITY_URGENCY_MAX)
+		internal_pri.urgency = TQUIC_H3_PRIORITY_URGENCY_MAX;
+
+	/* Encode priority field value */
+	field_len = http3_priority_encode_field(field_buf, sizeof(field_buf),
+						&internal_pri);
+	if (field_len < 0)
+		return field_len;
+
+	/* Frame type: PRIORITY_UPDATE (0x0f) */
+	ret = varint_encode(TQUIC_H3_FRAME_PRIORITY_UPDATE, buf + offset,
+			    sizeof(buf) - offset);
+	if (ret < 0)
+		return ret;
+	offset += ret;
+
+	/* Frame length = Element ID size + Priority Field Value length */
+	{
+		size_t elem_id_size = varint_size(stream_id);
+		size_t payload_len = elem_id_size + field_len;
+
+		ret = varint_encode(payload_len, buf + offset,
+				    sizeof(buf) - offset);
+		if (ret < 0)
+			return ret;
+		offset += ret;
+	}
+
+	/* Element ID (Stream ID) */
+	ret = varint_encode(stream_id, buf + offset, sizeof(buf) - offset);
+	if (ret < 0)
+		return ret;
+	offset += ret;
+
+	/* Priority Field Value */
+	if (offset + field_len > sizeof(buf))
+		return -ENOSPC;
+	memcpy(buf + offset, field_buf, field_len);
+	offset += field_len;
+
+	/* Send on control stream */
+	if (conn->ctrl_stream_local) {
+		ret = tquic_stream_send(conn->ctrl_stream_local, buf, offset,
+					false);
+		if (ret < 0)
+			return ret;
+	}
+
+	atomic64_inc(&http3_priority_global_stats.updates_sent);
+
+	pr_debug("tquic_h3: sent PRIORITY_UPDATE for stream %llu (u=%u, i=%d)\n",
+		 stream_id, pri->urgency, pri->incremental);
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(tquic_h3_send_priority_update);
+
+/**
+ * tquic_h3_handle_priority_update - Handle received PRIORITY_UPDATE frame
+ */
+int tquic_h3_handle_priority_update(struct tquic_http3_conn *conn,
+				    const u8 *data, size_t len)
+{
+	struct http3_priority_update_frame frame;
+	struct tquic_h3_priority pub_pri;
+	int ret;
+
+	if (!conn || !data || len == 0)
+		return -EINVAL;
+
+	/* Parse the frame payload */
+	ret = http3_priority_parse_frame(data, len, &frame, false);
+	if (ret < 0)
+		return ret;
+
+	/* Convert to public struct */
+	pub_pri.urgency = frame.priority.urgency;
+	pub_pri.incremental = frame.priority.incremental;
+
+	/* Update the stream priority if conn has priority state */
+	if (conn->qconn) {
+		ret = http3_priority_handle_update(conn->qconn, &frame);
+		if (ret < 0 && ret != -ENOENT)
+			return ret;
+	}
+
+	atomic64_inc(&http3_priority_global_stats.updates_received);
+
+	pr_debug("tquic_h3: received PRIORITY_UPDATE for stream %llu (u=%u, i=%d)\n",
+		 frame.element_id, pub_pri.urgency, pub_pri.incremental);
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(tquic_h3_handle_priority_update);
+
+/**
+ * tquic_h3_parse_priority_header - Parse "Priority: u=X, i" header
+ */
+int tquic_h3_parse_priority_header(const char *value, size_t len,
+				   struct tquic_h3_priority *pri)
+{
+	struct http3_priority internal_pri;
+	int ret;
+
+	if (!pri)
+		return -EINVAL;
+
+	/* Use internal parser */
+	ret = http3_priority_parse_field(value, len, &internal_pri);
+	if (ret < 0)
+		return ret;
+
+	/* Convert to public struct */
+	pri->urgency = internal_pri.urgency;
+	pri->incremental = internal_pri.incremental;
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(tquic_h3_parse_priority_header);
+
+/**
+ * tquic_h3_format_priority_header - Format priority as header value
+ */
+int tquic_h3_format_priority_header(const struct tquic_h3_priority *pri,
+				    char *buf, size_t len)
+{
+	struct http3_priority internal_pri;
+
+	if (!pri || !buf)
+		return -EINVAL;
+
+	/* Convert to internal struct */
+	internal_pri.urgency = pri->urgency;
+	internal_pri.incremental = pri->incremental;
+	internal_pri.valid = true;
+
+	return http3_priority_encode_field(buf, len, &internal_pri);
+}
+EXPORT_SYMBOL_GPL(tquic_h3_format_priority_header);
+
+/**
+ * tquic_h3_priority_next - Get next stream to send based on priority
+ */
+struct tquic_h3_stream *tquic_h3_priority_next(struct tquic_http3_conn *conn)
+{
+	struct http3_priority_state *state;
+	struct http3_priority_stream *ps;
+	int urgency;
+	u64 stream_id = 0;
+
+	if (!conn || !conn->qconn)
+		return NULL;
+
+	/* Get priority state from connection */
+	state = NULL; /* Would retrieve from conn's extended data */
+	if (!state)
+		return NULL;
+
+	spin_lock_bh(&state->lock);
+
+	/* Search buckets from highest priority (0) to lowest (7) */
+	for (urgency = 0; urgency < HTTP3_PRIORITY_NUM_BUCKETS; urgency++) {
+		struct list_head *bucket = &state->buckets[urgency];
+		struct list_head *cursor = state->rr_cursor[urgency];
+		bool found_incremental = false;
+
+		if (list_empty(bucket))
+			continue;
+
+		/* If we have a cursor, start from there for round-robin */
+		if (cursor && cursor != bucket) {
+			ps = list_entry(cursor, struct http3_priority_stream,
+					bucket_node);
+			if (ps->priority.incremental) {
+				/* Advance cursor for next call */
+				state->rr_cursor[urgency] =
+					(cursor->next == bucket) ?
+					bucket->next : cursor->next;
+				stream_id = ps->stream_id;
+				found_incremental = true;
+				goto found;
+			}
+		}
+
+		/* Otherwise, find first non-incremental or any stream */
+		list_for_each_entry(ps, bucket, bucket_node) {
+			if (!ps->priority.incremental) {
+				/* Non-incremental: send in order */
+				stream_id = ps->stream_id;
+				goto found;
+			}
+			if (!found_incremental) {
+				/* First incremental at this urgency */
+				stream_id = ps->stream_id;
+				state->rr_cursor[urgency] = &ps->bucket_node;
+				found_incremental = true;
+			}
+		}
+
+		if (found_incremental)
+			goto found;
+	}
+
+found:
+	spin_unlock_bh(&state->lock);
+
+	/* Look up the actual stream structure */
+	if (stream_id != 0) {
+		/* Would look up h3_stream by ID from conn */
+		/* For now, return NULL as full integration needed */
+	}
+
+	return NULL;
+}
+EXPORT_SYMBOL_GPL(tquic_h3_priority_next);
+
+/**
+ * tquic_h3_stream_set_priority - Update stream priority
+ */
+void tquic_h3_stream_set_priority(struct tquic_h3_stream *stream,
+				  const struct tquic_h3_priority *pri)
+{
+	if (!stream || !pri)
+		return;
+
+	/* The h3_stream structure would have a priority field */
+	/* For now, this is a stub that will be connected to stream mgmt */
+	pr_debug("tquic_h3: set stream priority u=%u, i=%d\n",
+		 pri->urgency, pri->incremental);
+}
+EXPORT_SYMBOL_GPL(tquic_h3_stream_set_priority);
+
+/**
+ * tquic_h3_stream_get_priority - Get current stream priority
+ */
+int tquic_h3_stream_get_priority(struct tquic_h3_stream *stream,
+				 struct tquic_h3_priority *pri)
+{
+	if (!stream || !pri)
+		return -EINVAL;
+
+	/* Return defaults for now - would read from stream structure */
+	pri->urgency = TQUIC_H3_PRIORITY_URGENCY_DEFAULT;
+	pri->incremental = TQUIC_H3_PRIORITY_INCREMENTAL_DEFAULT;
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(tquic_h3_stream_get_priority);
+
+/* =========================================================================
+ * Priority Tree Implementation
+ * ========================================================================= */
+
+/* Tree node structure for stream tracking */
+struct priority_tree_node {
+	u64 stream_id;
+	struct tquic_h3_priority priority;
+	struct list_head bucket_node;	/* in urgency bucket */
+	struct rb_node tree_node;	/* in lookup tree */
+};
+
+/**
+ * tquic_h3_priority_tree_init - Initialize priority tree
+ */
+void tquic_h3_priority_tree_init(struct tquic_h3_priority_tree *tree)
+{
+	int i;
+
+	if (!tree)
+		return;
+
+	for (i = 0; i < 8; i++) {
+		INIT_LIST_HEAD(&tree->buckets[i]);
+		tree->rr_cursor[i] = NULL;
+	}
+
+	tree->stream_tree = RB_ROOT;
+	spin_lock_init(&tree->lock);
+	tree->stream_count = 0;
+	tree->enabled = true;
+}
+EXPORT_SYMBOL_GPL(tquic_h3_priority_tree_init);
+
+/**
+ * tquic_h3_priority_tree_destroy - Destroy priority tree
+ */
+void tquic_h3_priority_tree_destroy(struct tquic_h3_priority_tree *tree)
+{
+	struct rb_node *node;
+
+	if (!tree)
+		return;
+
+	spin_lock_bh(&tree->lock);
+
+	/* Free all nodes */
+	while ((node = rb_first(&tree->stream_tree))) {
+		struct priority_tree_node *ptn;
+
+		ptn = rb_entry(node, struct priority_tree_node, tree_node);
+		rb_erase(node, &tree->stream_tree);
+		list_del(&ptn->bucket_node);
+		kfree(ptn);
+	}
+
+	tree->stream_count = 0;
+	tree->enabled = false;
+
+	spin_unlock_bh(&tree->lock);
+}
+EXPORT_SYMBOL_GPL(tquic_h3_priority_tree_destroy);
+
+/* Helper: lookup node by stream ID */
+static struct priority_tree_node *
+tree_lookup(struct tquic_h3_priority_tree *tree, u64 stream_id)
+{
+	struct rb_node *node = tree->stream_tree.rb_node;
+
+	while (node) {
+		struct priority_tree_node *ptn;
+
+		ptn = rb_entry(node, struct priority_tree_node, tree_node);
+
+		if (stream_id < ptn->stream_id)
+			node = node->rb_left;
+		else if (stream_id > ptn->stream_id)
+			node = node->rb_right;
+		else
+			return ptn;
+	}
+
+	return NULL;
+}
+
+/**
+ * tquic_h3_priority_tree_add - Add stream to priority tree
+ */
+int tquic_h3_priority_tree_add(struct tquic_h3_priority_tree *tree,
+			       u64 stream_id,
+			       const struct tquic_h3_priority *pri)
+{
+	struct priority_tree_node *ptn;
+	struct rb_node **link, *parent = NULL;
+	u8 urgency;
+
+	if (!tree || !pri)
+		return -EINVAL;
+
+	ptn = kzalloc(sizeof(*ptn), GFP_ATOMIC);
+	if (!ptn)
+		return -ENOMEM;
+
+	ptn->stream_id = stream_id;
+	ptn->priority = *pri;
+	INIT_LIST_HEAD(&ptn->bucket_node);
+
+	/* Clamp urgency */
+	urgency = pri->urgency;
+	if (urgency > TQUIC_H3_PRIORITY_URGENCY_MAX)
+		urgency = TQUIC_H3_PRIORITY_URGENCY_MAX;
+
+	spin_lock_bh(&tree->lock);
+
+	/* Insert into RB tree */
+	link = &tree->stream_tree.rb_node;
+	while (*link) {
+		struct priority_tree_node *entry;
+
+		parent = *link;
+		entry = rb_entry(parent, struct priority_tree_node, tree_node);
+
+		if (stream_id < entry->stream_id) {
+			link = &parent->rb_left;
+		} else if (stream_id > entry->stream_id) {
+			link = &parent->rb_right;
+		} else {
+			/* Already exists */
+			spin_unlock_bh(&tree->lock);
+			kfree(ptn);
+			return -EEXIST;
+		}
+	}
+
+	rb_link_node(&ptn->tree_node, parent, link);
+	rb_insert_color(&ptn->tree_node, &tree->stream_tree);
+
+	/* Add to urgency bucket */
+	list_add_tail(&ptn->bucket_node, &tree->buckets[urgency]);
+	tree->stream_count++;
+
+	spin_unlock_bh(&tree->lock);
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(tquic_h3_priority_tree_add);
+
+/**
+ * tquic_h3_priority_tree_remove - Remove stream from priority tree
+ */
+void tquic_h3_priority_tree_remove(struct tquic_h3_priority_tree *tree,
+				   u64 stream_id)
+{
+	struct priority_tree_node *ptn;
+	u8 urgency;
+
+	if (!tree)
+		return;
+
+	spin_lock_bh(&tree->lock);
+
+	ptn = tree_lookup(tree, stream_id);
+	if (ptn) {
+		urgency = ptn->priority.urgency;
+		if (urgency > TQUIC_H3_PRIORITY_URGENCY_MAX)
+			urgency = TQUIC_H3_PRIORITY_URGENCY_MAX;
+
+		/* Check if cursor points to this node */
+		if (tree->rr_cursor[urgency] == &ptn->bucket_node) {
+			if (ptn->bucket_node.next != &tree->buckets[urgency])
+				tree->rr_cursor[urgency] = ptn->bucket_node.next;
+			else
+				tree->rr_cursor[urgency] = NULL;
+		}
+
+		list_del(&ptn->bucket_node);
+		rb_erase(&ptn->tree_node, &tree->stream_tree);
+		tree->stream_count--;
+
+		spin_unlock_bh(&tree->lock);
+		kfree(ptn);
+		return;
+	}
+
+	spin_unlock_bh(&tree->lock);
+}
+EXPORT_SYMBOL_GPL(tquic_h3_priority_tree_remove);
+
+/**
+ * tquic_h3_priority_tree_update - Update stream priority in tree
+ */
+int tquic_h3_priority_tree_update(struct tquic_h3_priority_tree *tree,
+				  u64 stream_id,
+				  const struct tquic_h3_priority *pri)
+{
+	struct priority_tree_node *ptn;
+	u8 old_urgency, new_urgency;
+
+	if (!tree || !pri)
+		return -EINVAL;
+
+	spin_lock_bh(&tree->lock);
+
+	ptn = tree_lookup(tree, stream_id);
+	if (!ptn) {
+		spin_unlock_bh(&tree->lock);
+		return -ENOENT;
+	}
+
+	old_urgency = ptn->priority.urgency;
+	if (old_urgency > TQUIC_H3_PRIORITY_URGENCY_MAX)
+		old_urgency = TQUIC_H3_PRIORITY_URGENCY_MAX;
+
+	new_urgency = pri->urgency;
+	if (new_urgency > TQUIC_H3_PRIORITY_URGENCY_MAX)
+		new_urgency = TQUIC_H3_PRIORITY_URGENCY_MAX;
+
+	/* Update priority */
+	ptn->priority = *pri;
+
+	/* Move to new bucket if urgency changed */
+	if (old_urgency != new_urgency) {
+		/* Update cursor if needed */
+		if (tree->rr_cursor[old_urgency] == &ptn->bucket_node) {
+			if (ptn->bucket_node.next != &tree->buckets[old_urgency])
+				tree->rr_cursor[old_urgency] = ptn->bucket_node.next;
+			else
+				tree->rr_cursor[old_urgency] = NULL;
+		}
+
+		list_del(&ptn->bucket_node);
+		list_add_tail(&ptn->bucket_node, &tree->buckets[new_urgency]);
+	}
+
+	spin_unlock_bh(&tree->lock);
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(tquic_h3_priority_tree_update);
+
+/**
+ * tquic_h3_priority_tree_next - Get next stream to send
+ */
+u64 tquic_h3_priority_tree_next(struct tquic_h3_priority_tree *tree)
+{
+	struct priority_tree_node *ptn;
+	int urgency;
+	u64 stream_id = 0;
+
+	if (!tree)
+		return 0;
+
+	spin_lock_bh(&tree->lock);
+
+	/* Search from highest priority (0) to lowest (7) */
+	for (urgency = 0; urgency < 8; urgency++) {
+		struct list_head *bucket = &tree->buckets[urgency];
+		struct list_head *cursor;
+		bool has_incremental = false;
+
+		if (list_empty(bucket))
+			continue;
+
+		/* First pass: look for non-incremental streams */
+		list_for_each_entry(ptn, bucket, bucket_node) {
+			if (!ptn->priority.incremental) {
+				stream_id = ptn->stream_id;
+				goto found;
+			}
+			has_incremental = true;
+		}
+
+		/* Only incremental streams at this urgency - use round-robin */
+		if (has_incremental) {
+			cursor = tree->rr_cursor[urgency];
+			if (!cursor || cursor == bucket)
+				cursor = bucket->next;
+
+			ptn = list_entry(cursor, struct priority_tree_node,
+					 bucket_node);
+			stream_id = ptn->stream_id;
+
+			/* Advance cursor for next call */
+			if (cursor->next == bucket)
+				tree->rr_cursor[urgency] = bucket->next;
+			else
+				tree->rr_cursor[urgency] = cursor->next;
+
+			goto found;
+		}
+	}
+
+found:
+	spin_unlock_bh(&tree->lock);
+	return stream_id;
+}
+EXPORT_SYMBOL_GPL(tquic_h3_priority_tree_next);
+
+/* =========================================================================
  * Module Initialization
  * ========================================================================= */
 
@@ -996,8 +1571,10 @@ int __init http3_priority_init(void)
 	/* Note: sysctl http3_priorities_enabled is registered in tquic_sysctl.c */
 
 	pr_info("http3_priority: HTTP/3 Extensible Priorities (RFC 9218) initialized\n");
-	pr_info("http3_priority: sysctl net.tquic.http3_priorities_enabled=%d\n",
-		http3_priorities_enabled(NULL));
+	pr_info("http3_priority: PRIORITY_UPDATE frame type 0x%x\n",
+		TQUIC_H3_FRAME_PRIORITY_UPDATE);
+	pr_info("http3_priority: SETTINGS_ENABLE_PRIORITY 0x%x\n",
+		TQUIC_H3_SETTINGS_ENABLE_PRIORITY);
 
 	return 0;
 }

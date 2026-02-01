@@ -1038,4 +1038,26 @@ struct tquic_xdp_stats {
 #define TQUIC_XDP_PORT_4433		4433
 #define TQUIC_XDP_PORT_8443		8443
 
+/*
+ * =============================================================================
+ * Qlog Tracing (draft-ietf-quic-qlog-main-schema)
+ * =============================================================================
+ *
+ * Qlog provides structured event logging for QUIC protocol debugging
+ * and analysis. Events are captured in a ring buffer and can be
+ * relayed to userspace via netlink.
+ *
+ * Include <uapi/linux/tquic_qlog.h> for detailed qlog API.
+ */
+
+/* Qlog socket options (see tquic_qlog.h for details) */
+#define TQUIC_QLOG_ENABLE		250
+#define SO_TQUIC_QLOG_ENABLE		TQUIC_QLOG_ENABLE
+
+#define TQUIC_QLOG_STATS		251
+#define SO_TQUIC_QLOG_STATS		TQUIC_QLOG_STATS
+
+#define TQUIC_QLOG_FILTER		252
+#define SO_TQUIC_QLOG_FILTER		TQUIC_QLOG_FILTER
+
 #endif /* _UAPI_LINUX_TQUIC_H */

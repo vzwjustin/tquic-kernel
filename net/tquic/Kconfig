@@ -296,6 +296,47 @@ config TQUIC_CERT_VERIFY
 
 	  If unsure, say Y.
 
+config TQUIC_CRYPTO_HW_OFFLOAD
+	bool "TQUIC Hardware Crypto Offload Detection"
+	depends on TQUIC_CRYPTO
+	depends on X86
+	default y
+	help
+	  Enable hardware crypto offload detection and algorithm selection
+	  for TQUIC packet encryption/decryption. This provides automatic
+	  selection of the most efficient implementation based on detected
+	  CPU capabilities.
+
+	  Detected CPU features:
+	    - AES-NI:      Hardware AES acceleration
+	    - PCLMULQDQ:   Carry-less multiplication for GCM
+	    - AVX2:        Advanced Vector Extensions 2
+	    - AVX-512:     512-bit SIMD for batch processing
+	    - VAES:        Vector AES (AVX-512 accelerated)
+	    - VPCLMULQDQ:  Vector PCLMULQDQ for parallel GCM
+	    - SHA-NI:      Hardware SHA acceleration
+
+	  Implementation selection:
+	    - AES-GCM: Prefers AVX-512+VAES+VPCLMULQDQ, falls back to
+	      AES-NI+PCLMULQDQ, then generic software
+	    - ChaCha20-Poly1305: Prefers AVX-512, then AVX2, then generic
+
+	  Additional features:
+	    - Batch encryption for AVX-512 (up to 16 packets in parallel)
+	    - Per-CPU statistics tracking
+	    - /proc/net/tquic/crypto_caps for capability inspection
+	    - Intel QAT hardware offload support (if CONFIG_CRYPTO_DEV_QAT)
+
+	  Statistics exposed via proc:
+	    - Operations per implementation type
+	    - Total bytes encrypted/decrypted
+	    - Batch operation counts
+
+	  This option adds minimal overhead and is recommended for best
+	  cryptographic performance on x86 systems.
+
+	  If unsure, say Y.
+
 config TQUIC_IPV6
 	bool "TQUIC IPv6 support"
 	depends on TQUIC_CORE
@@ -332,6 +373,38 @@ config TQUIC_DIAG
 	  Support for TQUIC socket diagnostics via the sock_diag
 	  netlink interface. This enables tools like ss to display
 	  TQUIC connection information.
+
+config TQUIC_QLOG
+	tristate "TQUIC Qlog Tracing (draft-ietf-quic-qlog)"
+	depends on TQUIC_CORE
+	default y
+	help
+	  Enable qlog tracing for QUIC connections per the IETF qlog
+	  specification (draft-ietf-quic-qlog-main-schema and
+	  draft-ietf-quic-qlog-quic-events).
+
+	  Qlog provides structured event logging for:
+	    - Connectivity: Connection start/close, state transitions
+	    - Transport: Packet sent/received/dropped, frame processing
+	    - Recovery: CC metrics, congestion state, loss detection
+	    - Security: Key updates and retirements
+
+	  Output modes:
+	    - Ring buffer: Store events in memory for later retrieval
+	    - Netlink: Real-time streaming to userspace applications
+
+	  Events are logged in JSON-SEQ format compatible with qlog
+	  analysis tools like qvis (https://qvis.quictools.info/).
+
+	  Configuration via socket options:
+	    - TQUIC_QLOG_ENABLE: Enable with mode and event mask
+	    - TQUIC_QLOG_FILTER: Update event filter dynamically
+	    - TQUIC_QLOG_STATS: Get logging statistics
+
+	  To compile this as a module, choose M here: the module will
+	  be called tquic_qlog.
+
+	  If unsure, say Y.
 
 config TQUIC_NETFILTER
 	tristate "TQUIC Netfilter integration"
@@ -549,6 +622,39 @@ config TQUIC_IO_URING
 
 	  If you plan to use io_uring with TQUIC, say Y.
 	  If unsure, say Y.
+
+config TQUIC_MASQUE
+	tristate "TQUIC MASQUE support (RFC 9484 CONNECT-IP)"
+	depends on TQUIC_CORE
+	depends on TQUIC_HTTP3
+	default m
+	help
+	  Enable MASQUE (Multiplexed Application Substrate over QUIC Encryption)
+	  support for TQUIC, specifically CONNECT-IP per RFC 9484.
+
+	  CONNECT-IP provides IP proxying over HTTP/3, enabling:
+	    - IP tunnel establishment through QUIC connections
+	    - Address assignment (ADDRESS_ASSIGN/ADDRESS_REQUEST capsules)
+	    - Route advertisement (ROUTE_ADVERTISEMENT capsule)
+	    - IP packet forwarding via HTTP Datagrams (context ID 0)
+	    - Protocol filtering (ICMP, TCP, UDP, or any)
+	    - Minimum MTU enforcement (1280 for IPv6)
+
+	  Capsule Types (RFC 9484 Section 4):
+	    - ADDRESS_ASSIGN (0x01): Server assigns IP addresses to client
+	    - ADDRESS_REQUEST (0x02): Client requests IP address
+	    - ROUTE_ADVERTISEMENT (0x03): Server advertises reachable routes
+
+	  This is useful for:
+	    - VPN-like tunneling over QUIC
+	    - Corporate network access via proxies
+	    - Privacy-preserving IP proxying
+	    - Network access in restricted environments
+
+	  To compile this as a module, choose M here: the module will
+	  be called tquic_masque.
+
+	  If unsure, say M.
 
 config TQUIC_AF_XDP
 	tristate "TQUIC AF_XDP high-performance packet I/O"

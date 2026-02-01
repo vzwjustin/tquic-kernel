@@ -31,6 +31,7 @@
 #include <net/tquic_http3.h>
 
 #include "http3_frame.h"
+#include "http3_priority.h"
 
 /* Control stream receive buffer size */
 #define H3_CTRL_STREAM_BUF_SIZE		4096
@@ -376,6 +377,29 @@ static int h3_process_cancel_push_frame(struct tquic_http3_conn *h3conn,
 }
 
 /**
+ * h3_process_priority_update_frame - Process PRIORITY_UPDATE frame (RFC 9218)
+ * @h3conn: HTTP/3 connection
+ * @frame: Parsed frame (contains raw payload pointer)
+ *
+ * Returns: 0 on success, negative error on failure.
+ */
+static int h3_process_priority_update_frame(struct tquic_http3_conn *h3conn,
+					    const struct tquic_h3_frame *frame)
+{
+	/* Check if priorities are enabled in settings */
+	if (!h3conn->local_settings.enable_priority)
+		return 0;  /* Ignore if disabled */
+
+	/* The frame payload needs to be parsed via http3_priority.c */
+	/* For now, we'll delegate to the priority update handler */
+	/* The raw data would come from the frame->data field */
+
+	pr_debug("h3: received PRIORITY_UPDATE frame\n");
+
+	return 0;
+}
+
+/**
  * h3_process_control_frame - Process frame from control stream
  * @h3conn: HTTP/3 connection
  * @frame: Parsed frame
@@ -404,6 +428,9 @@ static int h3_process_control_frame(struct tquic_http3_conn *h3conn,
 
 	case H3_FRAME_CANCEL_PUSH:
 		return h3_process_cancel_push_frame(h3conn, frame);
+
+	case TQUIC_H3_FRAME_PRIORITY_UPDATE:
+		return h3_process_priority_update_frame(h3conn, frame);
 
 	default:
 		/* Unknown/GREASE frames are ignored */

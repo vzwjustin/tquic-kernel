@@ -26,11 +26,17 @@
 #include <net/tquic_frame.h>
 #include <asm/unaligned.h>
 
-/* QUIC packet type constants */
+/* QUIC v1 packet type constants (RFC 9000) */
 #define QUIC_PACKET_TYPE_INITIAL	0x00
 #define QUIC_PACKET_TYPE_0RTT		0x01
 #define QUIC_PACKET_TYPE_HANDSHAKE	0x02
 #define QUIC_PACKET_TYPE_RETRY		0x03
+
+/* QUIC v2 packet type constants (RFC 9369) */
+#define QUIC_V2_PACKET_TYPE_RETRY	0x00
+#define QUIC_V2_PACKET_TYPE_INITIAL	0x01
+#define QUIC_V2_PACKET_TYPE_0RTT	0x02
+#define QUIC_V2_PACKET_TYPE_HANDSHAKE	0x03
 
 /* Header form bits */
 #define QUIC_HEADER_FORM_LONG		0x80
@@ -88,6 +94,112 @@
 
 /* Slab cache for packet structures */
 static struct kmem_cache *tquic_packet_cache;
+
+/*
+ * QUIC v2 Packet Type Encoding/Decoding (RFC 9369)
+ *
+ * QUIC v2 uses different packet type bit encodings than v1:
+ *   v1: Initial=0b00, 0-RTT=0b01, Handshake=0b10, Retry=0b11
+ *   v2: Initial=0b01, 0-RTT=0b10, Handshake=0b11, Retry=0b00
+ *
+ * This prevents ossification by ensuring middleboxes cannot rely
+ * on specific bit patterns to identify packet types.
+ */
+
+/**
+ * tquic_encode_packet_type - Encode internal packet type to wire format
+ * @version: QUIC version being used
+ * @type: Internal packet type enum
+ *
+ * Returns: Wire format packet type bits (0-3), or 0xff on error
+ *
+ * Converts internal packet type to the 2-bit wire format based on version.
+ */
+static inline u8 tquic_encode_packet_type(u32 version, enum tquic_packet_type type)
+{
+	if (version == QUIC_VERSION_2) {
+		/* QUIC v2 encoding (RFC 9369) */
+		switch (type) {
+		case TQUIC_PKT_INITIAL:
+			return QUIC_V2_PACKET_TYPE_INITIAL;
+		case TQUIC_PKT_0RTT:
+			return QUIC_V2_PACKET_TYPE_0RTT;
+		case TQUIC_PKT_HANDSHAKE:
+			return QUIC_V2_PACKET_TYPE_HANDSHAKE;
+		case TQUIC_PKT_RETRY:
+			return QUIC_V2_PACKET_TYPE_RETRY;
+		default:
+			return 0xff;
+		}
+	}
+
+	/* QUIC v1 encoding (RFC 9000) - type values match wire format */
+	switch (type) {
+	case TQUIC_PKT_INITIAL:
+		return QUIC_PACKET_TYPE_INITIAL;
+	case TQUIC_PKT_0RTT:
+		return QUIC_PACKET_TYPE_0RTT;
+	case TQUIC_PKT_HANDSHAKE:
+		return QUIC_PACKET_TYPE_HANDSHAKE;
+	case TQUIC_PKT_RETRY:
+		return QUIC_PACKET_TYPE_RETRY;
+	default:
+		return 0xff;
+	}
+}
+
+/**
+ * tquic_decode_packet_type - Decode wire format packet type to internal type
+ * @version: QUIC version being used
+ * @wire_type: Wire format packet type bits (0-3)
+ *
+ * Returns: Internal packet type enum, or -EINVAL on error
+ *
+ * Converts 2-bit wire format packet type to internal enum based on version.
+ */
+static inline int tquic_decode_packet_type(u32 version, u8 wire_type)
+{
+	if (version == QUIC_VERSION_2) {
+		/* QUIC v2 decoding (RFC 9369) */
+		switch (wire_type) {
+		case QUIC_V2_PACKET_TYPE_INITIAL:
+			return TQUIC_PKT_INITIAL;
+		case QUIC_V2_PACKET_TYPE_0RTT:
+			return TQUIC_PKT_0RTT;
+		case QUIC_V2_PACKET_TYPE_HANDSHAKE:
+			return TQUIC_PKT_HANDSHAKE;
+		case QUIC_V2_PACKET_TYPE_RETRY:
+			return TQUIC_PKT_RETRY;
+		default:
+			return -EINVAL;
+		}
+	}
+
+	/* QUIC v1 decoding (RFC 9000) */
+	switch (wire_type) {
+	case QUIC_PACKET_TYPE_INITIAL:
+		return TQUIC_PKT_INITIAL;
+	case QUIC_PACKET_TYPE_0RTT:
+		return TQUIC_PKT_0RTT;
+	case QUIC_PACKET_TYPE_HANDSHAKE:
+		return TQUIC_PKT_HANDSHAKE;
+	case QUIC_PACKET_TYPE_RETRY:
+		return TQUIC_PKT_RETRY;
+	default:
+		return -EINVAL;
+	}
+}
+
+/**
+ * tquic_is_version_2 - Check if version is QUIC v2
+ * @version: QUIC version to check
+ *
+ * Returns: true if QUIC v2, false otherwise
+ */
+static inline bool tquic_is_version_2(u32 version)
+{
+	return version == QUIC_VERSION_2;
+}
 
 /*
  * Variable-length integer encoding/decoding
@@ -486,23 +598,16 @@ int tquic_parse_long_header(const u8 *data, size_t len,
 		return offset;
 	}
 
-	/* Map long header type to internal type */
-	switch (pkt_type) {
-	case QUIC_PACKET_TYPE_INITIAL:
-		hdr->type = TQUIC_PKT_INITIAL;
-		break;
-	case QUIC_PACKET_TYPE_0RTT:
-		hdr->type = TQUIC_PKT_0RTT;
-		break;
-	case QUIC_PACKET_TYPE_HANDSHAKE:
-		hdr->type = TQUIC_PKT_HANDSHAKE;
-		break;
-	case QUIC_PACKET_TYPE_RETRY:
-		hdr->type = TQUIC_PKT_RETRY;
-		break;
-	default:
-		return -EINVAL;
-	}
+	/*
+	 * Map long header type to internal type using version-aware decoding.
+	 * QUIC v2 (RFC 9369) uses different packet type bit encodings:
+	 *   v1: Initial=0b00, 0-RTT=0b01, Handshake=0b10, Retry=0b11
+	 *   v2: Initial=0b01, 0-RTT=0b10, Handshake=0b11, Retry=0b00
+	 */
+	ret = tquic_decode_packet_type(hdr->version, pkt_type);
+	if (ret < 0)
+		return ret;
+	hdr->type = ret;
 
 	/* DCID length and DCID */
 	if (offset >= len)
@@ -699,10 +804,13 @@ EXPORT_SYMBOL_GPL(tquic_is_long_header);
  * @len: Packet length
  *
  * Returns: Packet type or negative error
+ *
+ * Note: This function handles version-aware decoding for QUIC v2 (RFC 9369).
  */
 int tquic_get_packet_type(const u8 *data, size_t len)
 {
 	u8 first_byte;
+	u8 wire_type;
 	u32 version;
 
 	if (len < 1)
@@ -724,19 +832,11 @@ int tquic_get_packet_type(const u8 *data, size_t len)
 	if (version == QUIC_VERSION_NEGOTIATION)
 		return TQUIC_PKT_VERSION_NEG;
 
-	switch ((first_byte & QUIC_LONG_HEADER_TYPE_MASK) >>
-		QUIC_LONG_HEADER_TYPE_SHIFT) {
-	case QUIC_PACKET_TYPE_INITIAL:
-		return TQUIC_PKT_INITIAL;
-	case QUIC_PACKET_TYPE_0RTT:
-		return TQUIC_PKT_0RTT;
-	case QUIC_PACKET_TYPE_HANDSHAKE:
-		return TQUIC_PKT_HANDSHAKE;
-	case QUIC_PACKET_TYPE_RETRY:
-		return TQUIC_PKT_RETRY;
-	default:
-		return -EINVAL;
-	}
+	/* Extract wire type and use version-aware decoding */
+	wire_type = (first_byte & QUIC_LONG_HEADER_TYPE_MASK) >>
+		    QUIC_LONG_HEADER_TYPE_SHIFT;
+
+	return tquic_decode_packet_type(version, wire_type);
 }
 EXPORT_SYMBOL_GPL(tquic_get_packet_type);
 
@@ -1028,20 +1128,15 @@ int tquic_build_long_header(enum tquic_packet_type type, u32 version,
 	if (pn_len < 1 || pn_len > 4)
 		return -EINVAL;
 
-	/* Map internal type to wire format */
-	switch (type) {
-	case TQUIC_PKT_INITIAL:
-		pkt_type = QUIC_PACKET_TYPE_INITIAL;
-		break;
-	case TQUIC_PKT_0RTT:
-		pkt_type = QUIC_PACKET_TYPE_0RTT;
-		break;
-	case TQUIC_PKT_HANDSHAKE:
-		pkt_type = QUIC_PACKET_TYPE_HANDSHAKE;
-		break;
-	default:
+	/*
+	 * Map internal type to wire format using version-aware encoding.
+	 * QUIC v2 (RFC 9369) uses different packet type bit encodings:
+	 *   v1: Initial=0b00, 0-RTT=0b01, Handshake=0b10, Retry=0b11
+	 *   v2: Initial=0b01, 0-RTT=0b10, Handshake=0b11, Retry=0b00
+	 */
+	pkt_type = tquic_encode_packet_type(version, type);
+	if (pkt_type == 0xff)
 		return -EINVAL;
-	}
 
 	/* Calculate length field value (pn_len + payload_len) */
 	length = pn_len + payload_len;

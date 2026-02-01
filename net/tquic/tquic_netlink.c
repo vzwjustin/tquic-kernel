@@ -16,13 +16,21 @@
 #include <net/sock.h>
 #include <net/tquic.h>
 
-/* Netlink family */
-static struct genl_family tquic_genl_family;
+#ifdef CONFIG_TQUIC_QLOG
+#include <uapi/linux/tquic_qlog.h>
+#endif
+
+/* Netlink family - exported for qlog module */
+struct genl_family tquic_genl_family;
+EXPORT_SYMBOL_GPL(tquic_genl_family);
 
 /* Multicast groups */
 static const struct genl_multicast_group tquic_mcgrps[] = {
 	[TQUIC_NL_GRP_CONN] = { .name = "conn", },
 	[TQUIC_NL_GRP_PATH] = { .name = "path", },
+#ifdef CONFIG_TQUIC_QLOG
+	[TQUIC_NL_GRP_QLOG] = { .name = "qlog", },
+#endif
 };
 
 /* Attribute policy */

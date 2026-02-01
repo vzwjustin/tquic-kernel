@@ -43,6 +43,9 @@ struct tquic_http3_conn;
 #define H3_FRAME_GOAWAY			0x07
 #define H3_FRAME_MAX_PUSH_ID		0x0d
 
+/* RFC 9218: PRIORITY_UPDATE frame type */
+#define TQUIC_H3_FRAME_PRIORITY_UPDATE	0x0f
+
 /* Reserved frame types for GREASE (RFC 9114 Section 7.2.8) */
 #define H3_FRAME_GREASE_MASK		0x1f
 #define H3_FRAME_GREASE_BASE		0x21
@@ -60,6 +63,9 @@ struct tquic_http3_conn;
 #define H3_SETTINGS_QPACK_MAX_TABLE_CAPACITY	0x01
 #define H3_SETTINGS_MAX_FIELD_SECTION_SIZE	0x06
 #define H3_SETTINGS_QPACK_BLOCKED_STREAMS	0x07
+
+/* RFC 9218: Extensible Priorities setting */
+#define TQUIC_H3_SETTINGS_ENABLE_PRIORITY	0x11
 
 /* Default settings values */
 #define H3_DEFAULT_QPACK_MAX_TABLE_CAPACITY	0
@@ -115,6 +121,43 @@ struct tquic_http3_conn;
 
 /*
  * =============================================================================
+ * HTTP/3 Extensible Priorities (RFC 9218)
+ * =============================================================================
+ */
+
+/* Priority urgency range */
+#define TQUIC_H3_PRIORITY_URGENCY_MIN		0
+#define TQUIC_H3_PRIORITY_URGENCY_MAX		7
+#define TQUIC_H3_PRIORITY_URGENCY_DEFAULT	3
+
+/**
+ * struct tquic_h3_priority - RFC 9218 priority parameters
+ * @urgency: Urgency level (0-7, 0 = highest priority, default 3)
+ * @incremental: Incremental delivery hint (default false)
+ *
+ * These parameters are used in the Priority header field and
+ * PRIORITY_UPDATE frames per RFC 9218.
+ */
+struct tquic_h3_priority {
+	u8 urgency;		/* 0-7, default 3 */
+	bool incremental;	/* default false */
+};
+
+/**
+ * struct tquic_h3_priority_update - PRIORITY_UPDATE frame (type 0x0f)
+ * @element_id: Stream ID being updated
+ * @priority: New priority parameters
+ *
+ * PRIORITY_UPDATE allows a client to update the priority of a request
+ * stream after the initial request has been sent.
+ */
+struct tquic_h3_priority_update {
+	u64 element_id;		/* Stream ID */
+	struct tquic_h3_priority priority;
+};
+
+/*
+ * =============================================================================
  * HTTP/3 Settings Structure
  * =============================================================================
  */
@@ -124,6 +167,7 @@ struct tquic_http3_conn;
  * @qpack_max_table_capacity: Max size of QPACK dynamic table (bytes)
  * @max_field_section_size: Max size of encoded header section (bytes)
  * @qpack_blocked_streams: Max streams that can be blocked by QPACK
+ * @enable_priority: RFC 9218 extensible priorities enabled
  *
  * These settings are exchanged via SETTINGS frames on the control stream.
  * They apply to the connection and affect QPACK encoding/decoding limits.
@@ -132,6 +176,7 @@ struct tquic_h3_settings {
 	u64 qpack_max_table_capacity;
 	u64 max_field_section_size;
 	u64 qpack_blocked_streams;
+	bool enable_priority;		/* RFC 9218 */
 };
 
 /*
@@ -564,6 +609,119 @@ const char *tquic_h3_error_name(u64 error);
 static inline bool tquic_h3_is_grease_id(u64 id)
 {
 	return ((id - 0x21) % 0x1f) == 0;
+}
+
+/*
+ * =============================================================================
+ * HTTP/3 Extensible Priorities API (RFC 9218)
+ * =============================================================================
+ */
+
+/* Forward declaration for stream type */
+struct tquic_h3_stream;
+
+/**
+ * tquic_h3_send_priority_update - Send PRIORITY_UPDATE frame
+ * @conn: HTTP/3 connection
+ * @stream_id: Stream ID to update priority for
+ * @pri: New priority parameters
+ *
+ * Sends a PRIORITY_UPDATE frame (type 0x0f) on the control stream
+ * to update the priority of the specified request stream.
+ *
+ * Returns: 0 on success, negative error code on failure
+ */
+int tquic_h3_send_priority_update(struct tquic_http3_conn *conn,
+				  u64 stream_id,
+				  const struct tquic_h3_priority *pri);
+
+/**
+ * tquic_h3_handle_priority_update - Handle received PRIORITY_UPDATE frame
+ * @conn: HTTP/3 connection
+ * @data: Frame payload (after frame type and length)
+ * @len: Payload length
+ *
+ * Processes a PRIORITY_UPDATE frame received from the peer.
+ *
+ * Returns: 0 on success, negative error code on failure
+ */
+int tquic_h3_handle_priority_update(struct tquic_http3_conn *conn,
+				    const u8 *data, size_t len);
+
+/**
+ * tquic_h3_parse_priority_header - Parse "Priority: u=X, i" header
+ * @value: Header field value string
+ * @len: Value length
+ * @pri: Output priority parameters
+ *
+ * Parses the Priority header field from an HTTP request/response
+ * per RFC 9218 Section 4 (Structured Field Dictionary format).
+ *
+ * Examples:
+ *   "u=2, i"  -> urgency=2, incremental=true
+ *   "u=5"     -> urgency=5, incremental=false
+ *   "i"       -> urgency=3 (default), incremental=true
+ *
+ * Returns: 0 on success, negative error code on invalid format
+ */
+int tquic_h3_parse_priority_header(const char *value, size_t len,
+				   struct tquic_h3_priority *pri);
+
+/**
+ * tquic_h3_format_priority_header - Format priority as header value
+ * @pri: Priority parameters to format
+ * @buf: Output buffer
+ * @len: Buffer size
+ *
+ * Formats priority parameters as a Priority header field value.
+ *
+ * Returns: Number of bytes written on success, negative error on failure
+ */
+int tquic_h3_format_priority_header(const struct tquic_h3_priority *pri,
+				    char *buf, size_t len);
+
+/**
+ * tquic_h3_priority_next - Get next stream to send based on priority
+ * @conn: HTTP/3 connection
+ *
+ * Returns the highest priority stream that has data ready to send.
+ * Scheduling uses urgency-based buckets with round-robin for
+ * incremental streams at the same urgency level.
+ *
+ * Returns: Pointer to next stream, or NULL if none ready
+ */
+struct tquic_h3_stream *tquic_h3_priority_next(struct tquic_http3_conn *conn);
+
+/**
+ * tquic_h3_stream_set_priority - Update stream priority
+ * @stream: HTTP/3 stream
+ * @pri: New priority parameters
+ *
+ * Updates the priority for a stream. This affects scheduling order.
+ */
+void tquic_h3_stream_set_priority(struct tquic_h3_stream *stream,
+				  const struct tquic_h3_priority *pri);
+
+/**
+ * tquic_h3_stream_get_priority - Get current stream priority
+ * @stream: HTTP/3 stream
+ * @pri: Output priority parameters
+ *
+ * Returns: 0 on success, negative error code on failure
+ */
+int tquic_h3_stream_get_priority(struct tquic_h3_stream *stream,
+				 struct tquic_h3_priority *pri);
+
+/**
+ * tquic_h3_priority_init - Initialize priority to defaults
+ * @pri: Priority structure to initialize
+ *
+ * Sets urgency=3 and incremental=false per RFC 9218.
+ */
+static inline void tquic_h3_priority_init(struct tquic_h3_priority *pri)
+{
+	pri->urgency = TQUIC_H3_PRIORITY_URGENCY_DEFAULT;
+	pri->incremental = false;
 }
 
 /*

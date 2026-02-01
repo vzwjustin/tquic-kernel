@@ -17,6 +17,42 @@
 /* Stateless reset token length */
 #define TQUIC_STATELESS_RESET_TOKEN_LEN	16
 
+/*
+ * Version Information Transport Parameter (RFC 9368)
+ *
+ * Transport parameter ID: 0x11
+ * Used for Compatible Version Negotiation to indicate the chosen version
+ * and the list of versions the endpoint supports.
+ */
+#define TQUIC_TP_VERSION_INFORMATION	0x11
+
+/* Maximum number of available versions in version_info */
+#define TQUIC_MAX_AVAILABLE_VERSIONS	16
+
+/**
+ * struct tquic_version_info - Version Information transport parameter (RFC 9368)
+ * @chosen_version: The QUIC version selected for the connection
+ * @available_versions: Array of versions the endpoint supports
+ * @num_versions: Number of entries in available_versions array
+ *
+ * The Chosen Version field contains the version that the endpoint has chosen
+ * for this connection. For a client, this is the version used in the long
+ * header of the first Initial packet. For a server, this is the version
+ * negotiated for the connection.
+ *
+ * The Available Versions field contains all versions the endpoint supports,
+ * ordered by preference (most preferred first). The list MUST include the
+ * Chosen Version.
+ *
+ * Version 0 is reserved for Version Negotiation and MUST NOT appear in
+ * either Chosen Version or Available Versions.
+ */
+struct tquic_version_info {
+	u32 chosen_version;
+	u32 available_versions[TQUIC_MAX_AVAILABLE_VERSIONS];
+	size_t num_versions;
+};
+
 /**
  * struct tquic_preferred_address - Preferred address transport parameter
  * @ipv4_addr: IPv4 address (4 bytes)
@@ -119,6 +155,10 @@ struct tquic_transport_params {
 	/* RFC 9369 Multipath transport parameters */
 	u64 initial_max_paths;		/* Maximum concurrent paths (0x0f01) */
 
+	/* draft-ietf-quic-multipath initial_max_path_id */
+	u64 initial_max_path_id;	/* Maximum Path ID (0x0f02) */
+	bool initial_max_path_id_present;
+
 	/* DATAGRAM frame support (RFC 9221) */
 	u64 max_datagram_frame_size;	/* 0 = disabled, >0 = max size */
 
@@ -128,6 +168,10 @@ struct tquic_transport_params {
 	/* ACK Frequency (draft-ietf-quic-ack-frequency) */
 	u64 min_ack_delay;		/* Minimum ACK delay in microseconds (0x0e) */
 	bool min_ack_delay_present;	/* Whether min_ack_delay was advertised */
+
+	/* Version Information (RFC 9368 - Compatible Version Negotiation) */
+	struct tquic_version_info *version_info;	/* Version information parameter */
+	bool version_info_present;	/* Whether version_info was advertised */
 };
 
 /**
@@ -197,6 +241,7 @@ struct tquic_negotiated_params {
 	/* Multipath (WAN bonding - RFC 9369) */
 	bool multipath_enabled;
 	u64 max_paths;			/* Negotiated maximum concurrent paths */
+	u64 max_path_id;		/* Negotiated maximum Path ID */
 
 	/* DATAGRAM support (RFC 9221) */
 	u64 max_datagram_frame_size;	/* Negotiated max size, 0 = disabled */
@@ -363,5 +408,118 @@ void tquic_tp_debug_print(const struct tquic_transport_params *params,
 #define TQUIC_TP_ERR_CID_MISMATCH	3  /* Connection ID mismatch */
 #define TQUIC_TP_ERR_VERSION_MISMATCH	4  /* Version mismatch */
 #define TQUIC_TP_ERR_DECODE_FAILED	5  /* Decoding failed */
+
+/*
+ * QUIC Transport Error Codes (RFC 9000 Section 20.1)
+ * VERSION_NEGOTIATION_ERROR added by RFC 9368
+ */
+#define TQUIC_ERR_VERSION_NEGOTIATION	0x11  /* Version negotiation error (RFC 9368) */
+
+/*
+ * Version Information API (RFC 9368 - Compatible Version Negotiation)
+ */
+
+/**
+ * tquic_version_info_alloc - Allocate a version_info structure
+ * @gfp: Memory allocation flags
+ *
+ * Return: Pointer to allocated structure, or NULL on failure
+ */
+struct tquic_version_info *tquic_version_info_alloc(gfp_t gfp);
+
+/**
+ * tquic_version_info_free - Free a version_info structure
+ * @info: Structure to free (may be NULL)
+ */
+void tquic_version_info_free(struct tquic_version_info *info);
+
+/**
+ * tquic_encode_version_info - Encode version_information transport parameter
+ * @buf: Output buffer
+ * @len: Buffer length
+ * @chosen: The chosen QUIC version for the connection
+ * @available: Array of available/supported versions
+ * @count: Number of versions in the available array
+ *
+ * Encodes the version_information transport parameter as specified in
+ * RFC 9368 Section 3. The format is:
+ *   - Chosen Version (4 bytes)
+ *   - Available Versions (4 bytes each)
+ *
+ * Return: Number of bytes written on success, negative error code on failure
+ *         -EINVAL if chosen is 0 or any available version is 0
+ *         -ENOSPC if buffer is too small
+ */
+ssize_t tquic_encode_version_info(u8 *buf, size_t len,
+				  u32 chosen, const u32 *available, size_t count);
+
+/**
+ * tquic_decode_version_info - Decode version_information transport parameter
+ * @buf: Input buffer containing the parameter value
+ * @len: Length of the parameter value
+ * @info: Output structure to populate
+ *
+ * Decodes the version_information transport parameter value. The caller
+ * should have already parsed the parameter ID and length fields.
+ *
+ * Return: 0 on success, negative error code on failure
+ *         -EINVAL if the parameter is malformed
+ *         -EPROTO if validation fails (version 0 present)
+ */
+int tquic_decode_version_info(const u8 *buf, size_t len,
+			      struct tquic_version_info *info);
+
+/**
+ * tquic_validate_version_info - Validate version_information parameter
+ * @info: Version information to validate
+ * @connection_version: The version used on the connection
+ * @is_client: True if validating a client's version_info
+ *
+ * Validates the version_information transport parameter according to
+ * RFC 9368 requirements:
+ *   - Chosen Version must not be 0
+ *   - No Available Version can be 0
+ *   - For clients: Chosen Version must match the connection version
+ *   - Chosen Version should appear in Available Versions (warning if not)
+ *
+ * Return: 0 if valid, negative error code if invalid
+ *         -TQUIC_ERR_VERSION_NEGOTIATION on validation failure
+ */
+int tquic_validate_version_info(const struct tquic_version_info *info,
+				u32 connection_version, bool is_client);
+
+/**
+ * tquic_version_info_contains - Check if version is in available versions
+ * @info: Version information structure
+ * @version: Version to search for
+ *
+ * Return: true if version is found in available_versions, false otherwise
+ */
+bool tquic_version_info_contains(const struct tquic_version_info *info,
+				 u32 version);
+
+/**
+ * tquic_tp_set_version_info - Set version_info in transport parameters
+ * @params: Transport parameters structure
+ * @chosen: Chosen version for the connection
+ * @available: Array of available versions
+ * @count: Number of available versions
+ * @gfp: Memory allocation flags
+ *
+ * Convenience function to set up version_information in transport parameters.
+ *
+ * Return: 0 on success, negative error code on failure
+ */
+int tquic_tp_set_version_info(struct tquic_transport_params *params,
+			      u32 chosen, const u32 *available, size_t count,
+			      gfp_t gfp);
+
+/**
+ * tquic_tp_clear_version_info - Clear version_info from transport parameters
+ * @params: Transport parameters structure
+ *
+ * Frees and clears any version_info present in the transport parameters.
+ */
+void tquic_tp_clear_version_info(struct tquic_transport_params *params);
 
 #endif /* _TQUIC_TRANSPORT_PARAMS_H */

@@ -22,8 +22,10 @@
 #include <linux/errno.h>
 #include <linux/string.h>
 #include <asm/unaligned.h>
+#include <net/tquic_http3.h>
 
 #include "http3_frame.h"
+#include "http3_priority.h"
 
 /*
  * =============================================================================
@@ -1042,6 +1044,8 @@ const char *tquic_h3_frame_type_name(u64 type)
 		return "GOAWAY";
 	case H3_FRAME_MAX_PUSH_ID:
 		return "MAX_PUSH_ID";
+	case TQUIC_H3_FRAME_PRIORITY_UPDATE:
+		return "PRIORITY_UPDATE";
 	default:
 		if (tquic_h3_is_grease_id(type))
 			return "GREASE";
@@ -1116,6 +1120,7 @@ bool h3_frame_valid_on_control_stream(u64 type)
 	case H3_FRAME_SETTINGS:
 	case H3_FRAME_GOAWAY:
 	case H3_FRAME_MAX_PUSH_ID:
+	case TQUIC_H3_FRAME_PRIORITY_UPDATE:	/* RFC 9218 */
 		return true;
 	default:
 		/* GREASE frames allowed anywhere */

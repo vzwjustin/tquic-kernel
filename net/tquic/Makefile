@@ -82,6 +82,22 @@ tquic_westwood-y := cong/westwood.o
 obj-$(CONFIG_TQUIC_WAN_BONDING) += tquic_coupled.o
 tquic_coupled-y := cong/coupled.o
 
+# BBRv2 congestion control
+obj-$(CONFIG_TQUIC_CONG_BBRV2) += tquic_bbrv2.o
+tquic_bbrv2-y := cong/bbrv2.o
+
+# Prague congestion control (L4S)
+obj-$(CONFIG_TQUIC_CONG_PRAGUE) += tquic_prague.o
+tquic_prague-y := cong/prague.o
+
+# L4S ECN support
+obj-$(CONFIG_TQUIC_L4S) += tquic_l4s.o
+tquic_l4s-y := cong/l4s.o
+
+# AccECN feedback
+obj-$(CONFIG_TQUIC_ACCECN) += tquic_accecn.o
+tquic_accecn-y := cong/accecn.o
+
 # Multipath extension (RFC 9369)
 obj-$(CONFIG_TQUIC_MULTIPATH) += tquic_multipath.o
 tquic_multipath-y := \
@@ -100,6 +116,9 @@ tquic_crypto-y := \
 # Certificate verification (requires keyring support)
 tquic_crypto-$(CONFIG_TQUIC_CERT_VERIFY) += crypto/cert_verify.o
 
+# Hardware crypto offload detection (AES-NI, AVX2, AVX-512, QAT)
+tquic_crypto-$(CONFIG_TQUIC_CRYPTO_HW_OFFLOAD) += crypto/hw_offload.o
+
 # IPv6 Support
 tquic-$(CONFIG_TQUIC_IPV6) += tquic_ipv6.o
 
@@ -112,12 +131,22 @@ obj-$(CONFIG_TQUIC_NETFILTER) += tquic_nf.o
 # Socket diagnostics for ss command support
 obj-$(CONFIG_TQUIC_DIAG) += tquic_diag.o
 
+# Path metrics export (diag/)
+obj-$(CONFIG_TQUIC_DIAG) += diag/
+
 # BPF struct_ops for pluggable schedulers
 obj-$(CONFIG_TQUIC_BPF) += tquic_bpf.o
 tquic_bpf-y := bpf.o
 
 # HTTP/3 Support (RFC 9114)
 obj-$(CONFIG_TQUIC_HTTP3) += http3/
+
+# MASQUE Support (RFC 9484 CONNECT-IP)
+obj-$(CONFIG_TQUIC_MASQUE) += masque/
+
+# QUIC-LB Load Balancing Support (draft-ietf-quic-load-balancers)
+obj-$(CONFIG_TQUIC_QUIC_LB) += tquic_quic_lb.o
+tquic_quic_lb-y := lb/quic_lb.o
 
 # io_uring support for high-performance async I/O
 tquic-$(CONFIG_TQUIC_IO_URING) += io_uring.o

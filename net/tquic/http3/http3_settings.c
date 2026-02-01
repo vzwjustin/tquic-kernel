@@ -24,8 +24,10 @@
 #include <linux/types.h>
 #include <linux/errno.h>
 #include <linux/string.h>
+#include <net/tquic_http3.h>
 
 #include "http3_frame.h"
+#include "http3_priority.h"
 
 /*
  * =============================================================================
@@ -41,6 +43,7 @@
  *   - QPACK_MAX_TABLE_CAPACITY: 0 (no dynamic table)
  *   - MAX_FIELD_SECTION_SIZE: unlimited (we use 16KB as practical default)
  *   - QPACK_BLOCKED_STREAMS: 0 (no blocked streams)
+ *   - ENABLE_PRIORITY: true (RFC 9218 extensible priorities enabled)
  */
 void tquic_h3_settings_init(struct tquic_h3_settings *settings)
 {
@@ -50,6 +53,7 @@ void tquic_h3_settings_init(struct tquic_h3_settings *settings)
 	settings->qpack_max_table_capacity = H3_DEFAULT_QPACK_MAX_TABLE_CAPACITY;
 	settings->max_field_section_size = H3_DEFAULT_MAX_FIELD_SECTION_SIZE;
 	settings->qpack_blocked_streams = H3_DEFAULT_QPACK_BLOCKED_STREAMS;
+	settings->enable_priority = true;  /* RFC 9218 default */
 }
 EXPORT_SYMBOL_GPL(tquic_h3_settings_init);
 
@@ -165,6 +169,23 @@ int h3_encode_settings(const struct tquic_h3_settings *settings,
 		offset += ret;
 	}
 
+	/*
+	 * Encode SETTINGS_ENABLE_PRIORITY (RFC 9218)
+	 * True by default, encode 1 if enabled, 0 if disabled
+	 */
+	if (settings->enable_priority) {
+		ret = h3_varint_encode(TQUIC_H3_SETTINGS_ENABLE_PRIORITY,
+				       buf + offset, len - offset);
+		if (ret < 0)
+			return ret;
+		offset += ret;
+
+		ret = h3_varint_encode(1, buf + offset, len - offset);
+		if (ret < 0)
+			return ret;
+		offset += ret;
+	}
+
 	return offset;
 }
 
@@ -248,6 +269,14 @@ int h3_decode_settings(const u8 *buf, size_t len,
 			settings->qpack_blocked_streams = value;
 			break;
 
+		case TQUIC_H3_SETTINGS_ENABLE_PRIORITY:
+			/* RFC 9218: SETTINGS_ENABLE_PRIORITY (0x11) */
+			if (seen_mask & (1ULL << 3))
+				return -H3_SETTINGS_ERROR;
+			seen_mask |= (1ULL << 3);
+			settings->enable_priority = (value != 0);
+			break;
+
 		default:
 			/*
 			 * Unknown settings MUST be ignored per RFC 9114.
@@ -283,7 +312,8 @@ bool h3_settings_equal(const struct tquic_h3_settings *a,
 
 	return (a->qpack_max_table_capacity == b->qpack_max_table_capacity) &&
 	       (a->max_field_section_size == b->max_field_section_size) &&
-	       (a->qpack_blocked_streams == b->qpack_blocked_streams);
+	       (a->qpack_blocked_streams == b->qpack_blocked_streams) &&
+	       (a->enable_priority == b->enable_priority);
 }
 
 /**
@@ -300,6 +330,7 @@ void h3_settings_copy(struct tquic_h3_settings *dst,
 	dst->qpack_max_table_capacity = src->qpack_max_table_capacity;
 	dst->max_field_section_size = src->max_field_section_size;
 	dst->qpack_blocked_streams = src->qpack_blocked_streams;
+	dst->enable_priority = src->enable_priority;
 }
 
 /**
@@ -399,6 +430,8 @@ const char *h3_settings_identifier_name(u64 id)
 		return "MAX_FIELD_SECTION_SIZE";
 	case H3_SETTINGS_QPACK_BLOCKED_STREAMS:
 		return "QPACK_BLOCKED_STREAMS";
+	case TQUIC_H3_SETTINGS_ENABLE_PRIORITY:
+		return "ENABLE_PRIORITY";
 	default:
 		if (tquic_h3_is_grease_id(id))
 			return "GREASE";

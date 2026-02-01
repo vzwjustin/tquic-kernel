@@ -36,18 +36,128 @@
 #define TLS_AES_256_GCM_SHA384		0x1302
 #define TLS_CHACHA20_POLY1305_SHA256	0x1303
 
-/* QUIC version salt for initial keys */
-static const u8 tquic_v1_salt[] = {
+/* QUIC v1 initial salt (RFC 9001) */
+static const u8 tquic_v1_initial_salt[20] = {
 	0x38, 0x76, 0x2c, 0xf7, 0xf5, 0x59, 0x34, 0xb3,
 	0x4d, 0x17, 0x9a, 0xe6, 0xa4, 0xc8, 0x0c, 0xad,
 	0xcc, 0xbb, 0x7f, 0x0a
 };
 
-/* HKDF labels */
-#define TQUIC_HKDF_LABEL_KEY		"quic key"
-#define TQUIC_HKDF_LABEL_IV		"quic iv"
-#define TQUIC_HKDF_LABEL_HP		"quic hp"
-#define TQUIC_HKDF_LABEL_KU		"quic ku"
+/* QUIC v2 initial salt (RFC 9369) */
+static const u8 tquic_v2_initial_salt[20] = {
+	0x0d, 0xed, 0xe3, 0xde, 0xf7, 0x00, 0xa6, 0xdb,
+	0x81, 0x93, 0x81, 0xbe, 0x6e, 0x26, 0x9d, 0xcb,
+	0xf9, 0xbd, 0x2e, 0xd9
+};
+
+/* HKDF label types */
+enum tquic_hkdf_label_type {
+	TQUIC_LABEL_KEY = 0,
+	TQUIC_LABEL_IV,
+	TQUIC_LABEL_HP,
+	TQUIC_LABEL_KU,
+};
+
+/* QUIC v1 HKDF labels (RFC 9001) */
+#define TQUIC_V1_LABEL_KEY		"quic key"
+#define TQUIC_V1_LABEL_IV		"quic iv"
+#define TQUIC_V1_LABEL_HP		"quic hp"
+#define TQUIC_V1_LABEL_KU		"quic ku"
+
+/* QUIC v2 HKDF labels (RFC 9369) */
+#define TQUIC_V2_LABEL_KEY		"quicv2 key"
+#define TQUIC_V2_LABEL_IV		"quicv2 iv"
+#define TQUIC_V2_LABEL_HP		"quicv2 hp"
+#define TQUIC_V2_LABEL_KU		"quicv2 ku"
+
+/* Legacy aliases for compatibility */
+#define TQUIC_HKDF_LABEL_KEY		TQUIC_V1_LABEL_KEY
+#define TQUIC_HKDF_LABEL_IV		TQUIC_V1_LABEL_IV
+#define TQUIC_HKDF_LABEL_HP		TQUIC_V1_LABEL_HP
+#define TQUIC_HKDF_LABEL_KU		TQUIC_V1_LABEL_KU
+
+/**
+ * tquic_get_initial_salt - Get the initial salt for a QUIC version
+ * @version: QUIC version number
+ * @salt_len: OUT - length of the salt
+ *
+ * Returns the appropriate initial salt based on QUIC version.
+ * For QUIC v1 (0x00000001), returns the RFC 9001 salt.
+ * For QUIC v2 (0x6b3343cf), returns the RFC 9369 salt.
+ *
+ * Return: Pointer to salt bytes, or NULL for unsupported versions
+ */
+static const u8 *tquic_get_initial_salt(u32 version, size_t *salt_len)
+{
+	switch (version) {
+	case TQUIC_VERSION_1:
+		*salt_len = sizeof(tquic_v1_initial_salt);
+		return tquic_v1_initial_salt;
+	case TQUIC_VERSION_2:
+		*salt_len = sizeof(tquic_v2_initial_salt);
+		return tquic_v2_initial_salt;
+	default:
+		/* Unknown version - return v1 as fallback for draft versions */
+		*salt_len = sizeof(tquic_v1_initial_salt);
+		return tquic_v1_initial_salt;
+	}
+}
+
+/**
+ * tquic_get_hkdf_label - Get the HKDF label for a QUIC version
+ * @version: QUIC version number
+ * @label_type: Type of label (TQUIC_LABEL_KEY, IV, HP, or KU)
+ * @label_len: OUT - length of the label string
+ *
+ * Returns the appropriate HKDF label based on QUIC version and label type.
+ * For QUIC v1, returns labels like "quic key".
+ * For QUIC v2, returns labels like "quicv2 key" per RFC 9369.
+ *
+ * Return: Pointer to label string, or NULL for invalid label_type
+ */
+static const char *tquic_get_hkdf_label(u32 version, int label_type,
+					size_t *label_len)
+{
+	bool is_v2 = (version == TQUIC_VERSION_2);
+
+	switch (label_type) {
+	case TQUIC_LABEL_KEY:
+		if (is_v2) {
+			*label_len = strlen(TQUIC_V2_LABEL_KEY);
+			return TQUIC_V2_LABEL_KEY;
+		}
+		*label_len = strlen(TQUIC_V1_LABEL_KEY);
+		return TQUIC_V1_LABEL_KEY;
+
+	case TQUIC_LABEL_IV:
+		if (is_v2) {
+			*label_len = strlen(TQUIC_V2_LABEL_IV);
+			return TQUIC_V2_LABEL_IV;
+		}
+		*label_len = strlen(TQUIC_V1_LABEL_IV);
+		return TQUIC_V1_LABEL_IV;
+
+	case TQUIC_LABEL_HP:
+		if (is_v2) {
+			*label_len = strlen(TQUIC_V2_LABEL_HP);
+			return TQUIC_V2_LABEL_HP;
+		}
+		*label_len = strlen(TQUIC_V1_LABEL_HP);
+		return TQUIC_V1_LABEL_HP;
+
+	case TQUIC_LABEL_KU:
+		if (is_v2) {
+			*label_len = strlen(TQUIC_V2_LABEL_KU);
+			return TQUIC_V2_LABEL_KU;
+		}
+		*label_len = strlen(TQUIC_V1_LABEL_KU);
+		return TQUIC_V1_LABEL_KU;
+
+	default:
+		*label_len = 0;
+		return NULL;
+	}
+}
 
 /* Encryption level */
 enum tquic_enc_level {
@@ -218,36 +328,62 @@ static int tquic_hkdf_expand_label(struct crypto_shash *hash,
 }
 
 /*
- * Derive keys from secret
+ * Derive keys from secret (version-aware)
+ * @crypto: Crypto state
+ * @keys: Key structure to populate
+ * @version: QUIC version for selecting appropriate HKDF labels
  */
-static int tquic_derive_keys(struct tquic_crypto_state *crypto,
-			     struct tquic_keys *keys)
+static int tquic_derive_keys_versioned(struct tquic_crypto_state *crypto,
+				       struct tquic_keys *keys, u32 version)
 {
+	const char *label;
+	size_t label_len;
 	int ret;
 
+	/* Derive key using version-appropriate label */
+	label = tquic_get_hkdf_label(version, TQUIC_LABEL_KEY, &label_len);
+	if (!label)
+		return -EINVAL;
+
 	ret = tquic_hkdf_expand_label(crypto->hash, keys->secret,
-				      keys->secret_len, TQUIC_HKDF_LABEL_KEY,
-				      strlen(TQUIC_HKDF_LABEL_KEY),
+				      keys->secret_len, label, label_len,
 				      keys->key, keys->key_len);
 	if (ret)
 		return ret;
 
+	/* Derive IV using version-appropriate label */
+	label = tquic_get_hkdf_label(version, TQUIC_LABEL_IV, &label_len);
+	if (!label)
+		return -EINVAL;
+
 	ret = tquic_hkdf_expand_label(crypto->hash, keys->secret,
-				      keys->secret_len, TQUIC_HKDF_LABEL_IV,
-				      strlen(TQUIC_HKDF_LABEL_IV),
+				      keys->secret_len, label, label_len,
 				      keys->iv, keys->iv_len);
 	if (ret)
 		return ret;
 
+	/* Derive HP key using version-appropriate label */
+	label = tquic_get_hkdf_label(version, TQUIC_LABEL_HP, &label_len);
+	if (!label)
+		return -EINVAL;
+
 	ret = tquic_hkdf_expand_label(crypto->hash, keys->secret,
-				      keys->secret_len, TQUIC_HKDF_LABEL_HP,
-				      strlen(TQUIC_HKDF_LABEL_HP),
+				      keys->secret_len, label, label_len,
 				      keys->hp_key, keys->key_len);
 	if (ret)
 		return ret;
 
 	keys->valid = true;
 	return 0;
+}
+
+/*
+ * Derive keys from secret (legacy wrapper using v1 labels)
+ */
+static int tquic_derive_keys(struct tquic_crypto_state *crypto,
+			     struct tquic_keys *keys)
+{
+	return tquic_derive_keys_versioned(crypto, keys, TQUIC_VERSION_1);
 }
 
 /*
