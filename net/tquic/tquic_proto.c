@@ -136,6 +136,8 @@ static int sysctl_tquic_rmem[3] = { 4096, 131072, 6291456 };
  */
 static int tquic_v4_rcv(struct sk_buff *skb);
 static int tquic_v4_err(struct sk_buff *skb, u32 info);
+static struct proto tquic_prot;
+static const struct proto_ops tquic_inet_ops;
 
 #if IS_ENABLED(CONFIG_IPV6)
 static int tquic_v6_rcv(struct sk_buff *skb);
