@@ -236,11 +236,22 @@ int io_tquic_send(struct io_kiocb *req, unsigned int issue_flags)
 			tsk->default_stream = stream;
 		}
 	} else {
-		/* Look up specific stream */
-		stream = NULL;  /* TODO: Implement stream lookup */
+		/* Look up specific stream by ID in connection's stream tree */
+		stream = tquic_stream_lookup(conn, sr->stream_id);
 		if (!stream) {
-			ret = -ENOENT;
-			goto done;
+			/* Stream doesn't exist - check if auto-create is allowed */
+			if (sr->flags & MSG_MORE) {
+				/* Create new stream on demand */
+				bool is_bidi = !(sr->stream_id & 0x02);
+				stream = tquic_stream_open(conn, is_bidi);
+				if (!stream) {
+					ret = -ENOMEM;
+					goto done;
+				}
+			} else {
+				ret = -ENOENT;
+				goto done;
+			}
 		}
 	}
 
@@ -338,7 +349,8 @@ int io_tquic_recv(struct io_kiocb *req, unsigned int issue_flags)
 	if (sr->stream_id == 0) {
 		stream = tsk->default_stream;
 	} else {
-		stream = NULL;  /* TODO: Implement stream lookup */
+		/* Look up specific stream by ID */
+		stream = tquic_stream_lookup(tsk->conn, sr->stream_id);
 	}
 
 	if (!stream) {

@@ -111,17 +111,24 @@ static void tquic_pm_update_bandwidth(struct tquic_path *path,
 
 /*
  * Send PATH_CHALLENGE frame on a path
+ *
+ * RFC 9000 Section 8.2: PATH_CHALLENGE frames are used to verify
+ * path reachability. The 8-byte challenge data must be echoed in
+ * PATH_RESPONSE.
+ *
+ * Uses the core tquic_send_path_challenge() from tquic_output.c
+ * which handles frame construction and transmission.
  */
 static int tquic_pm_send_challenge(struct tquic_connection *conn,
 				   struct tquic_path *path)
 {
-	/* Generate new challenge data */
-	get_random_bytes(path->challenge_data, sizeof(path->challenge_data));
+	int ret;
 
-	/* TODO: Actually send PATH_CHALLENGE frame
-	 * This would involve creating a QUIC frame and sending it
-	 * through the path's UDP socket
-	 */
+	/* Use the core transmission function from tquic_output.c
+	 * which generates random challenge data and sends the frame */
+	ret = tquic_send_path_challenge(conn, path);
+	if (ret < 0)
+		return ret;
 
 	path->probe_count++;
 	path->last_activity = ktime_get();
@@ -131,6 +138,26 @@ static int tquic_pm_send_challenge(struct tquic_connection *conn,
 
 	return 0;
 }
+
+/*
+ * Send PATH_RESPONSE frame in reply to PATH_CHALLENGE
+ *
+ * RFC 9000 Section 8.2.2: Upon receipt of a PATH_CHALLENGE frame,
+ * an endpoint MUST respond by echoing the data in a PATH_RESPONSE.
+ *
+ * Uses the core tquic_send_path_response() from tquic_output.c.
+ */
+int tquic_pm_send_response(struct tquic_connection *conn,
+			   struct tquic_path *path,
+			   const u8 *challenge_data)
+{
+	if (!conn || !path || !challenge_data)
+		return -EINVAL;
+
+	/* Use the core transmission function from tquic_output.c */
+	return tquic_send_path_response(conn, path, challenge_data);
+}
+EXPORT_SYMBOL_GPL(tquic_pm_send_response);
 
 /*
  * Handle PATH_RESPONSE - validates the path

@@ -319,8 +319,39 @@ int tquic_mp_initiate_path_abandon(struct tquic_connection *conn,
 	if (len < 0)
 		return len;
 
-	/* Send the frame - TODO: queue for transmission */
-	pr_debug("tquic_mp: sending PATH_ABANDON for path %llu (error=%llu)\n",
+	/* Transmit PATH_ABANDON frame */
+	{
+		struct sk_buff *skb;
+		int header_len;
+		u8 header[64];
+		u64 pkt_num;
+
+		skb = alloc_skb(len + 128 + MAX_HEADER, GFP_KERNEL);
+		if (!skb)
+			return -ENOMEM;
+
+		skb_reserve(skb, MAX_HEADER);
+
+		/* Get packet number */
+		spin_lock(&conn->lock);
+		pkt_num = conn->stats.tx_packets++;
+		spin_unlock(&conn->lock);
+
+		/* Build short header using active path */
+		header_len = tquic_build_short_header(conn, conn->active_path,
+						      header, 64, pkt_num, 0,
+						      false, false, NULL);
+		if (header_len > 0)
+			skb_put_data(skb, header, header_len);
+
+		/* Add PATH_ABANDON frame payload */
+		skb_put_data(skb, buf, len);
+
+		/* Send via active path (not the path being abandoned) */
+		tquic_output_packet(conn, conn->active_path, skb);
+	}
+
+	pr_debug("tquic_mp: sent PATH_ABANDON for path %llu (error=%llu)\n",
 		 path->path_id, error_code);
 
 	/* Mark path for closing */
@@ -373,7 +404,32 @@ int tquic_mp_retire_path_cids(struct tquic_connection *conn,
 	pr_debug("tquic_mp: retiring CID seq=%llu for path %llu\n",
 		 frame.seq_num, frame.path_id);
 
-	/* TODO: Queue frame for transmission */
+	/* Transmit MP_RETIRE_CONNECTION_ID frame */
+	{
+		struct sk_buff *skb;
+		int header_len;
+		u8 header[64];
+		u64 pkt_num;
+
+		skb = alloc_skb(len + 128 + MAX_HEADER, GFP_KERNEL);
+		if (!skb)
+			return -ENOMEM;
+
+		skb_reserve(skb, MAX_HEADER);
+
+		spin_lock(&conn->lock);
+		pkt_num = conn->stats.tx_packets++;
+		spin_unlock(&conn->lock);
+
+		header_len = tquic_build_short_header(conn, conn->active_path,
+						      header, 64, pkt_num, 0,
+						      false, false, NULL);
+		if (header_len > 0)
+			skb_put_data(skb, header, header_len);
+
+		skb_put_data(skb, buf, len);
+		tquic_output_packet(conn, conn->active_path, skb);
+	}
 
 	return 0;
 }
@@ -424,7 +480,32 @@ int tquic_mp_issue_path_cid(struct tquic_connection *conn,
 	pr_debug("tquic_mp: issued new CID seq=%llu for path %llu\n",
 		 frame.seq_num, frame.path_id);
 
-	/* TODO: Queue frame for transmission */
+	/* Transmit MP_NEW_CONNECTION_ID frame */
+	{
+		struct sk_buff *skb;
+		int header_len;
+		u8 header[64];
+		u64 pkt_num;
+
+		skb = alloc_skb(len + 128 + MAX_HEADER, GFP_KERNEL);
+		if (!skb)
+			return -ENOMEM;
+
+		skb_reserve(skb, MAX_HEADER);
+
+		spin_lock(&conn->lock);
+		pkt_num = conn->stats.tx_packets++;
+		spin_unlock(&conn->lock);
+
+		header_len = tquic_build_short_header(conn, path, header, 64,
+						      pkt_num, 0, false, false,
+						      NULL);
+		if (header_len > 0)
+			skb_put_data(skb, header, header_len);
+
+		skb_put_data(skb, buf, len);
+		tquic_output_packet(conn, path, skb);
+	}
 
 	return 0;
 }
@@ -667,9 +748,37 @@ int tquic_mp_send_path_status(struct tquic_connection *conn,
 	pr_debug("tquic_mp: sending PATH_STATUS path=%llu status=%llu seq=%llu\n",
 		 frame.path_id, frame.status, frame.seq_num);
 
-	/* TODO: Queue frame for transmission */
+	/* Transmit the multipath frame using the connection's output path */
+	{
+		struct sk_buff *skb;
+		int header_len;
+		u8 header[64];
+		u64 pkt_num;
 
-	return 0;
+		skb = alloc_skb(len + 128 + MAX_HEADER, GFP_KERNEL);
+		if (!skb)
+			return -ENOMEM;
+
+		skb_reserve(skb, MAX_HEADER);
+
+		/* Get packet number */
+		spin_lock(&conn->lock);
+		pkt_num = conn->stats.tx_packets++;
+		spin_unlock(&conn->lock);
+
+		/* Build short header */
+		header_len = tquic_build_short_header(conn, path, header, 64,
+						      pkt_num, 0, false, false,
+						      NULL);
+		if (header_len > 0)
+			skb_put_data(skb, header, header_len);
+
+		/* Add PATH_STATUS frame payload */
+		skb_put_data(skb, buf, len);
+
+		/* Send via the path */
+		return tquic_output_packet(conn, path, skb);
+	}
 }
 EXPORT_SYMBOL_GPL(tquic_mp_send_path_status);
 
