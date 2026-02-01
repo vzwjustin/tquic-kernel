@@ -46,9 +46,26 @@
 
 #include <net/tquic.h>
 
-/* Enable tracepoints for observability */
+/* Tracepoints disabled for out-of-tree build - struct field mismatches */
+#if 0
 #define CREATE_TRACE_POINTS
 #include <trace/events/tquic.h>
+#endif
+
+/* Stub out trace macros when disabled */
+#define trace_tquic_conn_create(...)    do { } while (0)
+#define trace_tquic_conn_destroy(...)   do { } while (0)
+#define trace_tquic_handshake_start(...) do { } while (0)
+#define trace_tquic_handshake_complete(...) do { } while (0)
+#define trace_tquic_path_add(...)       do { } while (0)
+#define trace_tquic_path_remove(...)    do { } while (0)
+#define trace_tquic_path_state(...)     do { } while (0)
+#define trace_tquic_migration(...)      do { } while (0)
+#define trace_tquic_tx(...)             do { } while (0)
+#define trace_tquic_rx(...)             do { } while (0)
+#define trace_tquic_cong_event(...)     do { } while (0)
+#define trace_tquic_rtt_update(...)     do { } while (0)
+#define trace_tquic_loss_detected(...)  do { } while (0)
 
 #include "protocol.h"
 
