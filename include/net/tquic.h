@@ -577,7 +577,7 @@ struct tquic_sock {
 	} cert_verify;
 };
 
-static inline struct tquic_sock *tquic_sk(struct sock *sk)
+static inline struct tquic_sock *tquic_sk(const struct sock *sk)
 {
 	return (struct tquic_sock *)sk;
 }
@@ -656,8 +656,9 @@ struct tquic_cong_ops {
 int tquic_connect(struct sock *sk, struct sockaddr *addr, int addr_len);
 int tquic_accept(struct sock *sk, struct sock **newsk, int flags, bool kern);
 int tquic_sendmsg(struct sock *sk, struct msghdr *msg, size_t len);
-int tquic_recvmsg(struct sock *sk, struct msghdr *msg, size_t len, int flags);
-int tquic_close(struct sock *sk, long timeout);
+int tquic_recvmsg(struct sock *sk, struct msghdr *msg, size_t len, int flags,
+		  int *addr_len);
+void tquic_close(struct sock *sk, long timeout);
 __poll_t tquic_poll(struct file *file, struct socket *sock, poll_table *wait);
 
 /* Connection management */
@@ -1359,9 +1360,10 @@ int tquic_cid_rotate_now(struct tquic_cid_manager *mgr);
 void tquic_cid_on_packet_sent(struct tquic_cid_manager *mgr);
 
 /* Per-path CID assignment for multipath */
-int tquic_cid_assign_to_path(struct tquic_cid_manager *mgr,
-			     struct tquic_path *path);
-void tquic_cid_release_from_path(struct tquic_cid_manager *mgr,
+int tquic_cid_assign_to_path(struct tquic_connection *conn,
+			     struct tquic_path *path,
+			     struct tquic_cid *cid);
+void tquic_cid_release_from_path(struct tquic_connection *conn,
 				 struct tquic_path *path);
 const struct tquic_cid *tquic_cid_get_for_path(struct tquic_cid_manager *mgr,
 					       u32 path_id);

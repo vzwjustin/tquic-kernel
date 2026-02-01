@@ -614,7 +614,7 @@ static int tquic_shutdown(struct socket *sock, int how)
 /*
  * Close connection
  */
-int tquic_close(struct sock *sk, long timeout)
+void tquic_close(struct sock *sk, long timeout)
 {
 	struct tquic_sock *tsk = tquic_sk(sk);
 
@@ -633,8 +633,6 @@ int tquic_close(struct sock *sk, long timeout)
 	}
 
 	inet_sk_set_state(sk, TCP_CLOSE);
-
-	return 0;
 }
 EXPORT_SYMBOL_GPL(tquic_close);
 
@@ -1842,10 +1840,11 @@ EXPORT_SYMBOL_GPL(tquic_sendmsg);
 static int tquic_recvmsg_socket(struct socket *sock, struct msghdr *msg,
 				size_t len, int flags)
 {
-	return tquic_recvmsg(sock->sk, msg, len, flags);
+	return tquic_recvmsg(sock->sk, msg, len, flags, NULL);
 }
 
-int tquic_recvmsg(struct sock *sk, struct msghdr *msg, size_t len, int flags)
+int tquic_recvmsg(struct sock *sk, struct msghdr *msg, size_t len, int flags,
+		  int *addr_len)
 {
 	struct tquic_sock *tsk = tquic_sk(sk);
 	struct tquic_connection *conn = tsk->conn;

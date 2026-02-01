@@ -28,6 +28,7 @@
 #include <linux/sysctl.h>
 #include <linux/inetdevice.h>
 
+#include <linux/icmp.h>
 #include <net/net_namespace.h>
 #include <net/netns/generic.h>
 #include <net/sock.h>
@@ -35,7 +36,9 @@
 #include <net/ip.h>
 #include <net/inet_common.h>
 #include <net/inet_connection_sock.h>
+#include <net/inet_hashtables.h>
 #include <net/inet_sock.h>
+#include <net/tcp.h>
 
 #if IS_ENABLED(CONFIG_IPV6)
 #include <net/ipv6.h>
@@ -133,16 +136,16 @@ __weak void tquic_sched_set_default(const char *name)
 {
 }
 
-__weak void *tquic_bond_init(struct tquic_connection *conn)
+__weak struct tquic_bond_state *tquic_bond_init(struct tquic_connection *conn)
 {
 	return NULL;
 }
 
-__weak void tquic_bond_cleanup(void *scheduler)
+__weak void tquic_bond_cleanup(struct tquic_bond_state *bond)
 {
 }
 
-__weak int tquic_bond_set_mode(struct tquic_connection *conn, int mode)
+__weak int tquic_bond_set_mode(struct tquic_connection *conn, u8 mode)
 {
 	return 0;
 }
@@ -801,7 +804,7 @@ DEFINE_PROC_SHOW_ATTRIBUTE(tquic_proc_connections);
 DEFINE_PROC_SHOW_ATTRIBUTE(tquic_proc_paths);
 DEFINE_PROC_SHOW_ATTRIBUTE(tquic_proc_stats);
 
-static int tquic_proc_init(struct net *net)
+static int tquic_net_proc_init(struct net *net)
 {
 	struct tquic_net *tn = tquic_pernet(net);
 
@@ -829,7 +832,7 @@ err:
 	return -ENOMEM;
 }
 
-static void tquic_proc_exit(struct net *net)
+static void tquic_net_proc_exit(struct net *net)
 {
 	struct tquic_net *tn = tquic_pernet(net);
 
@@ -878,7 +881,7 @@ static int __net_init tquic_net_init(struct net *net)
 
 #ifdef CONFIG_PROC_FS
 	/* Initialize proc entries */
-	ret = tquic_proc_init(net);
+	ret = tquic_net_proc_init(net);
 	if (ret)
 		goto err_proc;
 #endif
@@ -901,7 +904,7 @@ static void __net_exit tquic_net_exit(struct net *net)
 	/* TODO: Close all connections in this namespace */
 
 #ifdef CONFIG_PROC_FS
-	tquic_proc_exit(net);
+	tquic_net_proc_exit(net);
 #endif
 	tquic_net_sysctl_unregister(net);
 
