@@ -1,0 +1,371 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/*
+ * TQUIC: BBR Congestion Control
+ *
+ * Copyright (c) 2026 Linux Foundation
+ *
+ * BBR (Bottleneck Bandwidth and RTT) congestion control for TQUIC.
+ * Adapted for multipath WAN bonding scenarios.
+ */
+
+#include <linux/module.h>
+#include <linux/kernel.h>
+#include <linux/slab.h>
+#include <linux/minmax.h>
+#include <net/tquic.h>
+
+/* BBR parameters */
+#define BBR_SCALE		8
+#define BBR_UNIT		(1 << BBR_SCALE)
+
+/* Pacing gain during STARTUP */
+#define BBR_HIGH_GAIN		((2885 * BBR_UNIT) / 1000)  /* 2/ln(2) */
+/* Pacing gain during DRAIN */
+#define BBR_DRAIN_GAIN		((1000 * BBR_UNIT) / 2885)
+/* Pacing gain during PROBE_BW */
+#define BBR_PACING_GAIN		BBR_UNIT
+/* cwnd gain */
+#define BBR_CWND_GAIN		(2 * BBR_UNIT)
+
+/* Probe RTT duration */
+#define BBR_PROBE_RTT_MS	200
+
+/* Min cwnd in packets */
+#define BBR_MIN_CWND_PKTS	4
+
+/* BBR state machine */
+enum bbr_mode {
+	BBR_STARTUP,	/* Ramp up to fill pipe */
+	BBR_DRAIN,	/* Drain excess queue */
+	BBR_PROBE_BW,	/* Discover bandwidth */
+	BBR_PROBE_RTT,	/* Probe min RTT */
+};
+
+/* Per-path BBR state */
+struct tquic_bbr {
+	/* Core BBR state */
+	enum bbr_mode mode;
+	u64 bw;			/* Max bandwidth (bytes/us) */
+	u32 min_rtt_us;		/* Min RTT in microseconds */
+	u32 rtt_cnt;		/* Rounds since RTT measurement */
+
+	/* Pacing state */
+	u64 pacing_rate;	/* Current pacing rate */
+	u32 pacing_gain;	/* Pacing gain (scaled) */
+	u32 cwnd_gain;		/* cwnd gain (scaled) */
+
+	/* cwnd */
+	u64 cwnd;		/* Congestion window */
+	u64 prior_cwnd;		/* cwnd before PROBE_RTT */
+
+	/* Bandwidth filter */
+	struct {
+		u64 bw[10];	/* Bandwidth samples */
+		u32 head;	/* Ring buffer head */
+		u32 count;	/* Sample count */
+	} bw_filter;
+
+	/* RTT filter */
+	u32 min_rtt_stamp;	/* Timestamp of min RTT */
+
+	/* Round counting */
+	u64 delivered;		/* Total delivered bytes */
+	u64 round_start;	/* delivered at round start */
+	bool round_started;
+
+	/* Cycle state for PROBE_BW */
+	u32 cycle_idx;		/* Cycle index */
+	u32 cycle_stamp;	/* Cycle start time */
+
+	/* PROBE_RTT state */
+	bool probe_rtt_done;
+	u32 probe_rtt_stamp;
+};
+
+/* Pacing gain cycle for PROBE_BW */
+static const u32 bbr_pacing_cycle[] = {
+	BBR_UNIT * 5 / 4,	/* 1.25 - probe for more bandwidth */
+	BBR_UNIT * 3 / 4,	/* 0.75 - drain excess */
+	BBR_UNIT,
+	BBR_UNIT,
+	BBR_UNIT,
+	BBR_UNIT,
+	BBR_UNIT,
+	BBR_UNIT,
+};
+#define BBR_CYCLE_LEN	ARRAY_SIZE(bbr_pacing_cycle)
+
+/*
+ * Update bandwidth filter with new sample
+ */
+static void bbr_update_bw(struct tquic_bbr *bbr, u64 bw_sample)
+{
+	struct tquic_bbr *f = bbr;
+	u64 max_bw = 0;
+	int i;
+
+	/* Add to ring buffer */
+	f->bw_filter.bw[f->bw_filter.head] = bw_sample;
+	f->bw_filter.head = (f->bw_filter.head + 1) % 10;
+	if (f->bw_filter.count < 10)
+		f->bw_filter.count++;
+
+	/* Find max */
+	for (i = 0; i < f->bw_filter.count; i++) {
+		if (f->bw_filter.bw[i] > max_bw)
+			max_bw = f->bw_filter.bw[i];
+	}
+
+	bbr->bw = max_bw;
+}
+
+/*
+ * Calculate pacing rate
+ */
+static void bbr_set_pacing_rate(struct tquic_bbr *bbr)
+{
+	u64 rate;
+
+	rate = bbr->bw * bbr->pacing_gain / BBR_UNIT;
+
+	/* Ensure minimum rate */
+	if (rate < 1200)
+		rate = 1200;
+
+	bbr->pacing_rate = rate;
+}
+
+/*
+ * Calculate cwnd
+ */
+static void bbr_set_cwnd(struct tquic_bbr *bbr)
+{
+	u64 target_cwnd;
+
+	if (bbr->bw == 0 || bbr->min_rtt_us == 0) {
+		bbr->cwnd = 10 * 1200;  /* Initial cwnd */
+		return;
+	}
+
+	/* BDP */
+	target_cwnd = bbr->bw * bbr->min_rtt_us / 1000000;
+
+	/* Apply gain */
+	target_cwnd = target_cwnd * bbr->cwnd_gain / BBR_UNIT;
+
+	/* Ensure minimum */
+	target_cwnd = max(target_cwnd, (u64)(BBR_MIN_CWND_PKTS * 1200));
+
+	bbr->cwnd = target_cwnd;
+}
+
+/*
+ * Check if we should enter PROBE_RTT
+ */
+static void bbr_check_probe_rtt(struct tquic_bbr *bbr, u32 now_ms)
+{
+	if (bbr->mode == BBR_PROBE_RTT)
+		return;
+
+	/* Enter PROBE_RTT if min_rtt is stale */
+	if (now_ms - bbr->min_rtt_stamp > 10000) {  /* 10 seconds */
+		bbr->prior_cwnd = bbr->cwnd;
+		bbr->mode = BBR_PROBE_RTT;
+		bbr->probe_rtt_done = false;
+		bbr->probe_rtt_stamp = now_ms;
+		bbr->pacing_gain = BBR_UNIT;
+	}
+}
+
+/*
+ * Handle PROBE_RTT state
+ */
+static void bbr_handle_probe_rtt(struct tquic_bbr *bbr, u32 now_ms)
+{
+	/* Reduce cwnd to min */
+	bbr->cwnd = BBR_MIN_CWND_PKTS * 1200;
+
+	if (!bbr->probe_rtt_done) {
+		if (now_ms - bbr->probe_rtt_stamp >= BBR_PROBE_RTT_MS) {
+			bbr->probe_rtt_done = true;
+			bbr->min_rtt_stamp = now_ms;
+		}
+	} else {
+		/* Exit PROBE_RTT */
+		bbr->cwnd = bbr->prior_cwnd;
+		bbr->mode = BBR_PROBE_BW;
+		bbr->cycle_idx = 0;
+		bbr->pacing_gain = bbr_pacing_cycle[0];
+	}
+}
+
+/*
+ * Initialize BBR state
+ */
+static void *tquic_bbr_init(struct tquic_path *path)
+{
+	struct tquic_bbr *bbr;
+
+	bbr = kzalloc(sizeof(*bbr), GFP_KERNEL);
+	if (!bbr)
+		return NULL;
+
+	bbr->mode = BBR_STARTUP;
+	bbr->pacing_gain = BBR_HIGH_GAIN;
+	bbr->cwnd_gain = BBR_CWND_GAIN;
+	bbr->cwnd = 10 * 1200;
+	bbr->min_rtt_us = UINT_MAX;
+
+	pr_debug("tquic_bbr: initialized for path %u\n", path->path_id);
+
+	return bbr;
+}
+
+static void tquic_bbr_release(void *state)
+{
+	kfree(state);
+}
+
+static void tquic_bbr_on_sent(void *state, u64 bytes, ktime_t sent_time)
+{
+	/* Track sent data for delivery rate */
+}
+
+/*
+ * Process ACK - main BBR logic
+ */
+static void tquic_bbr_on_ack(void *state, u64 bytes_acked, u64 rtt_us)
+{
+	struct tquic_bbr *bbr = state;
+	u32 now_ms = jiffies_to_msecs(jiffies);
+	u64 bw_sample;
+
+	if (!bbr)
+		return;
+
+	/* Update min RTT */
+	if (rtt_us < bbr->min_rtt_us || bbr->min_rtt_us == UINT_MAX) {
+		bbr->min_rtt_us = rtt_us;
+		bbr->min_rtt_stamp = now_ms;
+	}
+
+	/* Calculate bandwidth sample */
+	if (rtt_us > 0) {
+		bw_sample = bytes_acked * 1000000 / rtt_us;
+		bbr_update_bw(bbr, bw_sample);
+	}
+
+	/* Update round counting */
+	bbr->delivered += bytes_acked;
+
+	/* State machine */
+	switch (bbr->mode) {
+	case BBR_STARTUP:
+		/* Check if bandwidth growth has slowed */
+		if (bbr->bw_filter.count >= 3) {
+			u64 thresh = bbr->bw * 5 / 4;
+			if (bw_sample < thresh) {
+				/* Bandwidth not growing, exit startup */
+				bbr->mode = BBR_DRAIN;
+				bbr->pacing_gain = BBR_DRAIN_GAIN;
+			}
+		}
+		break;
+
+	case BBR_DRAIN:
+		/* Drain excess queue */
+		bbr->pacing_gain = BBR_DRAIN_GAIN;
+		/* Transition to PROBE_BW when inflight drops */
+		bbr->mode = BBR_PROBE_BW;
+		bbr->cycle_idx = 0;
+		bbr->cycle_stamp = now_ms;
+		bbr->pacing_gain = bbr_pacing_cycle[0];
+		break;
+
+	case BBR_PROBE_BW:
+		/* Cycle through pacing gains */
+		if (now_ms - bbr->cycle_stamp >= bbr->min_rtt_us / 1000) {
+			bbr->cycle_idx = (bbr->cycle_idx + 1) % BBR_CYCLE_LEN;
+			bbr->pacing_gain = bbr_pacing_cycle[bbr->cycle_idx];
+			bbr->cycle_stamp = now_ms;
+		}
+		bbr_check_probe_rtt(bbr, now_ms);
+		break;
+
+	case BBR_PROBE_RTT:
+		bbr_handle_probe_rtt(bbr, now_ms);
+		break;
+	}
+
+	/* Update pacing rate and cwnd */
+	bbr_set_pacing_rate(bbr);
+	if (bbr->mode != BBR_PROBE_RTT)
+		bbr_set_cwnd(bbr);
+}
+
+static void tquic_bbr_on_loss(void *state, u64 bytes_lost)
+{
+	/* BBR doesn't reduce cwnd on loss, only on measured congestion */
+}
+
+static void tquic_bbr_on_rtt(void *state, u64 rtt_us)
+{
+	struct tquic_bbr *bbr = state;
+
+	if (!bbr)
+		return;
+
+	/* Update min RTT */
+	if (rtt_us < bbr->min_rtt_us) {
+		bbr->min_rtt_us = rtt_us;
+		bbr->min_rtt_stamp = jiffies_to_msecs(jiffies);
+	}
+}
+
+static u64 tquic_bbr_get_cwnd(void *state)
+{
+	struct tquic_bbr *bbr = state;
+	return bbr ? bbr->cwnd : 10 * 1200;
+}
+
+static u64 tquic_bbr_get_pacing_rate(void *state)
+{
+	struct tquic_bbr *bbr = state;
+	return bbr ? bbr->pacing_rate : 0;
+}
+
+static bool tquic_bbr_can_send(void *state, u64 bytes)
+{
+	return true;  /* BBR uses pacing, not cwnd limiting */
+}
+
+static struct tquic_cong_ops tquic_bbr_ops = {
+	.name = "bbr",
+	.owner = THIS_MODULE,
+	.init = tquic_bbr_init,
+	.release = tquic_bbr_release,
+	.on_packet_sent = tquic_bbr_on_sent,
+	.on_ack = tquic_bbr_on_ack,
+	.on_loss = tquic_bbr_on_loss,
+	.on_rtt_update = tquic_bbr_on_rtt,
+	.get_cwnd = tquic_bbr_get_cwnd,
+	.get_pacing_rate = tquic_bbr_get_pacing_rate,
+	.can_send = tquic_bbr_can_send,
+};
+
+static int __init tquic_bbr_module_init(void)
+{
+	return tquic_register_cong(&tquic_bbr_ops);
+}
+
+static void __exit tquic_bbr_module_exit(void)
+{
+	tquic_unregister_cong(&tquic_bbr_ops);
+}
+
+module_init(tquic_bbr_module_init);
+module_exit(tquic_bbr_module_exit);
+
+MODULE_DESCRIPTION("TQUIC BBR Congestion Control");
+MODULE_LICENSE("GPL");
+MODULE_ALIAS("tquic-cong-bbr");

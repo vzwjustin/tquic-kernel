@@ -1,0 +1,11 @@
+tquicd (1.0.0-1) unstable; urgency=medium
+
+  * Initial release
+  * Multi-tenant PSK authentication
+  * Zero-copy TCP tunnel forwarding
+  * Prometheus metrics export
+  * Web dashboard for path monitoring
+  * Detailed connection logging
+  * TPROXY transparent proxy support
+
+ -- Linux Foundation <linux@linuxfoundation.org>  Sat, 01 Feb 2026 00:00:00 +0000

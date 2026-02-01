@@ -1,0 +1,366 @@
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# TQUIC WAN Bonding configuration
+#
+
+menuconfig TQUIC
+	tristate "TQUIC: WAN Bonding over QUIC"
+	depends on INET
+	select CRYPTO
+	select CRYPTO_AES
+	select CRYPTO_GCM
+	select NET_UDP_TUNNEL
+	help
+	  TQUIC (Transport QUIC) provides WAN bonding capabilities using
+	  the QUIC protocol. It enables aggregating multiple WAN connections
+	  (such as LTE, 5G, WiFi, and wired links) into a single logical
+	  connection with seamless failover and bandwidth aggregation.
+
+	  TQUIC implements connection migration, multipath support, and
+	  intelligent path selection to optimize throughput and reliability
+	  across heterogeneous network links.
+
+	  To compile this driver as a module, choose M here: the module
+	  will be called tquic.
+
+	  If unsure, say N.
+
+if TQUIC
+
+config TQUIC_CORE
+	tristate "TQUIC Core Protocol"
+	default y
+	help
+	  This provides the core TQUIC protocol implementation including
+	  connection management, stream multiplexing, and the QUIC state
+	  machine. This is required for all TQUIC functionality.
+
+	  To compile this as a module, choose M here: the module will
+	  be called tquic_core.
+
+	  If unsure, say Y.
+
+config TQUIC_WAN_BONDING
+	tristate "TQUIC WAN Bonding Support"
+	depends on TQUIC_CORE
+	select DST_CACHE
+	default y
+	help
+	  Enable WAN bonding support in TQUIC. This allows aggregating
+	  multiple network paths into a single logical connection with
+	  automatic failover and load balancing capabilities.
+
+	  Features include:
+	    - Multi-path aggregation across heterogeneous links
+	    - Seamless connection migration between paths
+	    - Intelligent path selection based on latency and bandwidth
+	    - Automatic failover with sub-second recovery
+
+	  To compile this as a module, choose M here: the module will
+	  be called tquic_bond.
+
+	  If unsure, say Y.
+
+config TQUIC_PATH_MANAGER
+	tristate "TQUIC Path Manager"
+	depends on TQUIC_WAN_BONDING
+	default y
+	help
+	  The TQUIC Path Manager handles discovery, monitoring, and
+	  selection of network paths for WAN bonding. It provides
+	  APIs for path probing, quality estimation, and dynamic
+	  path management.
+
+	  To compile this as a module, choose M here: the module will
+	  be called tquic_pm.
+
+	  If unsure, say Y.
+
+config TQUIC_SCHEDULER
+	tristate "TQUIC Packet Scheduler"
+	depends on TQUIC_WAN_BONDING
+	default y
+	help
+	  The TQUIC Packet Scheduler determines how packets are
+	  distributed across available paths. It supports multiple
+	  scheduling algorithms selectable at runtime.
+
+	  To compile this as a module, choose M here: the module will
+	  be called tquic_sched.
+
+	  If unsure, say Y.
+
+config TQUIC_CONG
+	bool "TQUIC Congestion Control Framework"
+	depends on TQUIC
+	default y
+	help
+	  Congestion control framework for TQUIC multipath connections.
+	  Provides central CC algorithm registration, per-path CC state
+	  lifecycle management, and callback dispatch for ACK/loss/RTT
+	  events.
+
+	  Supports Cubic, BBR, COPA, Westwood, and coupled (OLIA/BALIA)
+	  congestion control algorithms.
+
+	  This option enables the CC framework core. Individual CC
+	  algorithms can be selected separately.
+
+	  If unsure, say Y.
+
+menuconfig TQUIC_CONG_ADVANCED
+	bool "TQUIC: advanced congestion control"
+	depends on TQUIC_CORE
+	help
+	  Support for selection of various TQUIC congestion control
+	  modules optimized for multipath WAN scenarios.
+
+	  The default congestion control algorithm is CUBIC, which
+	  works well for most scenarios. Advanced users may want to
+	  experiment with other algorithms for specific use cases.
+
+	  If unsure, say N.
+
+if TQUIC_CONG_ADVANCED
+
+config TQUIC_CONG_CUBIC
+	tristate "TQUIC CUBIC"
+	default y
+	help
+	  CUBIC congestion control adapted for TQUIC multipath
+	  environments. CUBIC uses a cubic function for window
+	  growth which provides good performance across a wide
+	  range of network conditions.
+
+	  This is the default congestion control algorithm.
+
+config TQUIC_CONG_BBR
+	tristate "TQUIC BBR (Bottleneck Bandwidth and RTT)"
+	default m
+	help
+	  BBR (Bottleneck Bandwidth and RTT) congestion control
+	  adapted for TQUIC multipath environments. BBR attempts
+	  to achieve high throughput while maintaining low latency
+	  by estimating the available bandwidth and minimum RTT.
+
+	  BBR works well on paths with varying characteristics
+	  and is recommended for heterogeneous WAN bonding scenarios.
+
+config TQUIC_CONG_COPA
+	tristate "TQUIC Copa"
+	default m
+	help
+	  Copa (Competitive Pacing Algorithm) is a delay-based
+	  congestion control algorithm designed to achieve both
+	  high throughput and low queuing delay. It is particularly
+	  well-suited for real-time applications over bonded links.
+
+config TQUIC_CONG_WESTWOOD
+	tristate "TQUIC Westwood+"
+	default m
+	help
+	  Westwood+ congestion control adapted for TQUIC. Westwood+
+	  uses bandwidth estimation to improve performance over
+	  wireless links where packet loss may not indicate congestion.
+
+	  Recommended when bonding includes wireless/mobile paths.
+
+config TQUIC_CONG_COUPLED
+	tristate "TQUIC Coupled Multipath (OLIA/LIA/BALIA)"
+	default y
+	help
+	  Coupled multipath congestion control algorithms designed
+	  specifically for WAN bonding scenarios. These algorithms
+	  ensure fairness and efficiency when aggregating bandwidth
+	  across multiple paths.
+
+	  Includes:
+	    - LIA (Linked Increases Algorithm)
+	    - OLIA (Opportunistic Linked Increases) - RFC 6356
+	    - BALIA (Balanced Linked Adaptation)
+
+	  Features:
+	    - Shared bottleneck detection
+	    - Per-path subflow management
+	    - Fair resource pooling across paths
+	    - Integration with CUBIC/BBR per-path algorithms
+
+	  OLIA is recommended for most multipath scenarios as it
+	  provides good TCP-friendliness while allowing opportunistic
+	  use of uncongested paths.
+
+	  This is CRITICAL for true WAN bonding to ensure fairness
+	  with other flows sharing network bottlenecks.
+
+	  If using TQUIC for multipath WAN bonding, say Y.
+
+endif # TQUIC_CONG_ADVANCED
+
+choice
+	prompt "Default TQUIC congestion control"
+	default DEFAULT_TQUIC_CUBIC
+	help
+	  Select the default congestion control algorithm for TQUIC
+	  connections. This can be overridden at runtime via sysctl
+	  or socket options.
+
+	config DEFAULT_TQUIC_CUBIC
+		bool "CUBIC" if TQUIC_CONG_CUBIC=y || !TQUIC_CONG_ADVANCED
+
+	config DEFAULT_TQUIC_BBR
+		bool "BBR" if TQUIC_CONG_BBR=y
+
+	config DEFAULT_TQUIC_COPA
+		bool "Copa" if TQUIC_CONG_COPA=y
+
+	config DEFAULT_TQUIC_WESTWOOD
+		bool "Westwood+" if TQUIC_CONG_WESTWOOD=y
+
+	config DEFAULT_TQUIC_OLIA
+		bool "OLIA (Coupled Multipath)" if TQUIC_CONG_COUPLED=y
+
+	config DEFAULT_TQUIC_LIA
+		bool "LIA (Coupled Multipath)" if TQUIC_CONG_COUPLED=y
+
+	config DEFAULT_TQUIC_BALIA
+		bool "BALIA (Coupled Multipath)" if TQUIC_CONG_COUPLED=y
+
+endchoice
+
+config DEFAULT_TQUIC_CONG
+	string
+	default "cubic" if DEFAULT_TQUIC_CUBIC
+	default "bbr" if DEFAULT_TQUIC_BBR
+	default "copa" if DEFAULT_TQUIC_COPA
+	default "westwood" if DEFAULT_TQUIC_WESTWOOD
+	default "olia" if DEFAULT_TQUIC_OLIA
+	default "lia" if DEFAULT_TQUIC_LIA
+	default "balia" if DEFAULT_TQUIC_BALIA
+	default "cubic"
+
+config TQUIC_CRYPTO
+	tristate "TQUIC Cryptographic Support"
+	depends on TQUIC_CORE
+	select CRYPTO_LIB_CHACHA20POLY1305
+	select CRYPTO_LIB_AES
+	default y
+	help
+	  Cryptographic support for TQUIC including TLS 1.3 handshake
+	  and packet protection. This is required for secure TQUIC
+	  connections.
+
+	  To compile this as a module, choose M here: the module will
+	  be called tquic_crypto.
+
+	  If unsure, say Y.
+
+config TQUIC_IPV6
+	bool "TQUIC IPv6 support"
+	depends on TQUIC_CORE
+	depends on IPV6=y
+	default y
+	help
+	  Enable IPv6 support for TQUIC connections. This allows
+	  TQUIC to use IPv6 paths for WAN bonding alongside IPv4.
+
+	  Features include:
+	    - Full IPv6 socket operations with inet6_connection_sock
+	    - IPv6 address handling in paths with dual-stack support
+	    - IPv6 UDP tunnel integration
+	    - IPv6 flow label handling for consistent routing
+	    - IPv6 extension headers consideration
+	    - Path MTU Discovery for IPv6 (RFC 8201)
+	    - IPv6-specific setsockopt/getsockopt options
+	    - Happy Eyeballs support (RFC 8305) for preferring IPv6
+	      with fast IPv4 fallback when IPv6 is unavailable
+
+	  Happy Eyeballs (RFC 8305) enables TQUIC to prefer IPv6
+	  connections while quickly falling back to IPv4 if IPv6
+	  connectivity is broken or too slow, improving connection
+	  setup time in dual-stack environments.
+
+	  If unsure, say Y.
+
+config TQUIC_DIAG
+	tristate "TQUIC connection diagnostics"
+	depends on TQUIC_CORE
+	depends on INET_DIAG
+	def_tristate INET_DIAG
+	help
+	  Support for TQUIC socket diagnostics via the sock_diag
+	  netlink interface. This enables tools like ss to display
+	  TQUIC connection information.
+
+config TQUIC_NETFILTER
+	tristate "TQUIC Netfilter integration"
+	depends on TQUIC_CORE
+	depends on NETFILTER
+	default y
+	help
+	  Enable Netfilter integration for TQUIC. This provides:
+	    - QUIC connection tracking for stateful firewalls
+	    - Support for QUIC-aware NAT traversal
+	    - Connection state inspection via /proc/net/tquic_conntrack
+	    - Integration with existing netfilter rules
+
+	  This is important for TQUIC WAN bonding scenarios where
+	  firewalls or NAT devices are present in the network path.
+
+	  To compile this as a module, choose M here: the module will
+	  be called tquic_nf.
+
+	  If unsure, say Y.
+
+config TQUIC_BPF
+	bool "TQUIC BPF struct_ops for pluggable schedulers"
+	depends on TQUIC_SCHEDULER
+	depends on BPF_SYSCALL
+	depends on BPF_JIT
+	default y
+	help
+	  Enable BPF struct_ops support for TQUIC path schedulers.
+	  This allows writing custom path scheduling algorithms in BPF C
+	  and loading them at runtime, similar to TCP's BPF congestion
+	  control support.
+
+	  With this enabled, you can implement custom scheduling policies
+	  that consider factors like:
+	    - Path RTT and bandwidth estimates
+	    - Loss rates and congestion state
+	    - Application-specific priorities
+	    - Custom load balancing algorithms
+
+	  BPF schedulers are safer than kernel modules as they run in
+	  the BPF sandbox with verified safety guarantees.
+
+	  If unsure, say Y.
+
+config TQUIC_DEBUGFS
+	bool "TQUIC debugfs interface"
+	depends on TQUIC_CORE
+	depends on DEBUG_FS
+	help
+	  Export TQUIC debugging information via debugfs. This
+	  includes per-connection statistics, path information,
+	  and internal state for debugging purposes.
+
+	  If unsure, say N.
+
+config TQUIC_KUNIT_TEST
+	tristate "TQUIC KUnit tests" if !KUNIT_ALL_TESTS
+	depends on TQUIC_CORE
+	depends on KUNIT
+	default KUNIT_ALL_TESTS
+	help
+	  KUnit tests for the TQUIC subsystem covering core protocol
+	  functionality, path management, and congestion control.
+
+	  Only useful for kernel developers running KUnit test harness
+	  and not for inclusion into a production build.
+
+	  For more information on KUnit and unit tests in general,
+	  refer to the KUnit documentation in Documentation/dev-tools/kunit/.
+
+	  If unsure, say N.
+
+endif # TQUIC

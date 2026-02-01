@@ -1,0 +1,12 @@
+#!/usr/bin/make -f
+%:
+	dh $@
+
+override_dh_auto_build:
+	cd tquicd && go build -o tquicd .
+
+override_dh_auto_install:
+	install -D -m 755 tquicd/tquicd debian/tquicd/usr/bin/tquicd
+	install -D -m 644 debian/tquicd.service debian/tquicd/lib/systemd/system/tquicd.service
+	install -d debian/tquicd/etc/tquic.d
+	install -D -m 644 tquicd/example.conf debian/tquicd/etc/tquic.d/example.conf

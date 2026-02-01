@@ -1,0 +1,15 @@
+Source: tquicd
+Section: net
+Priority: optional
+Maintainer: Linux Foundation <linux@linuxfoundation.org>
+Build-Depends: debhelper-compat (= 13), golang-1.22-go
+Standards-Version: 4.6.0
+
+Package: tquicd
+Architecture: amd64
+Depends: ${shlibs:Depends}, ${misc:Depends}, iproute2, nftables
+Description: TQUIC VPS Aggregation Daemon
+ Server-side daemon for TQUIC WAN bandwidth aggregation.
+ Accepts multi-path TQUIC connections from home routers,
+ forwards traffic to internet destinations with NAT masquerade,
+ and provides real-time path monitoring via Prometheus.

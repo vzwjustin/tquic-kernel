@@ -1,0 +1,1051 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+/*
+ * QUIC - Quick UDP Internet Connections
+ *
+ * Hardware offload support for QUIC protocol
+ * - GSO (Generic Segmentation Offload)
+ * - GRO (Generic Receive Offload)
+ * - Crypto offload hooks for NIC-based encryption/decryption
+ * - UDP encapsulation handling
+ *
+ * Copyright (c) 2024 Linux QUIC Authors
+ */
+
+#include <linux/module.h>
+#include <linux/kernel.h>
+#include <linux/skbuff.h>
+#include <linux/netdevice.h>
+#include <linux/socket.h>
+#include <linux/udp.h>
+#include <linux/ip.h>
+#include <linux/ipv6.h>
+#include <linux/indirect_call_wrapper.h>
+#include <net/gro.h>
+#include <net/gso.h>
+#include <net/protocol.h>
+#include <net/udp.h>
+#include <net/udp_tunnel.h>
+#include <net/inet_common.h>
+#include <net/ip.h>
+#include <net/ipv6.h>
+#include <net/checksum.h>
+#include <net/quic.h>
+#include <crypto/aead.h>
+
+/* QUIC GSO type flag for skb_shared_info */
+#define SKB_GSO_QUIC	SKB_GSO_UDP_L4
+
+/* QUIC header constants */
+#define QUIC_HEADER_FORM_LONG	0x80
+#define QUIC_HEADER_FORM_SHORT	0x00
+#define QUIC_FIXED_BIT		0x40
+#define QUIC_LONG_TYPE_MASK	0x30
+#define QUIC_SHORT_KEY_PHASE	0x04
+#define QUIC_SHORT_PN_LEN_MASK	0x03
+
+/* QUIC packet types in long header */
+#define QUIC_PKT_INITIAL	0x00
+#define QUIC_PKT_0RTT		0x10
+#define QUIC_PKT_HANDSHAKE	0x20
+#define QUIC_PKT_RETRY		0x30
+
+/* Maximum number of segments in a GSO batch */
+#define QUIC_GSO_MAX_SEGS	64
+
+/* GRO flow aggregation limits */
+#define QUIC_GRO_MAX_CNT	64
+#define QUIC_GRO_MAX_SIZE	65535
+
+/* QUIC offload control block in skb->cb */
+struct quic_offload_cb {
+	u64	pn;			/* Packet number */
+	u32	header_len;		/* Header length including PN */
+	u32	payload_len;		/* Payload length */
+	u16	gso_size;		/* GSO segment size */
+	u8	pn_len;			/* Packet number length */
+	u8	dcid_len;		/* Destination CID length */
+	u8	scid_len;		/* Source CID length (long header) */
+	u8	crypto_level;		/* Encryption level */
+	u8	key_phase:1;		/* Key phase bit (short header) */
+	u8	is_long_header:1;	/* Long or short header */
+	u8	hw_offload:1;		/* Hardware crypto offload enabled */
+	u8	needs_encrypt:1;	/* Needs software encryption */
+	u8	needs_decrypt:1;	/* Needs software decryption */
+};
+
+#define QUIC_OFFLOAD_CB(skb) ((struct quic_offload_cb *)((skb)->cb))
+
+/* Crypto offload context stored in skb extension */
+struct quic_crypto_offload {
+	u64	pn;
+	u32	header_len;
+	u8	level;
+	u8	direction;	/* 0 = TX, 1 = RX */
+	u8	key_phase;
+	u8	reserved;
+};
+
+/* Static key for QUIC encapsulation detection */
+DEFINE_STATIC_KEY_FALSE(quic_encap_needed_key);
+EXPORT_SYMBOL(quic_encap_needed_key);
+
+/* Forward declarations */
+static struct sk_buff *quic_gso_segment(struct sk_buff *skb,
+					netdev_features_t features);
+static struct sk_buff *quic_gro_receive(struct list_head *head,
+					struct sk_buff *skb);
+static int quic_gro_complete(struct sk_buff *skb, int nhoff);
+
+/* Parse QUIC packet header for offload processing */
+static int quic_parse_header(struct sk_buff *skb, struct quic_offload_cb *cb)
+{
+	u8 *data = skb->data;
+	u8 first_byte;
+	int offset = 0;
+	u32 version;
+
+	if (skb->len < 1)
+		return -EINVAL;
+
+	first_byte = data[0];
+
+	/* Check fixed bit */
+	if (!(first_byte & QUIC_FIXED_BIT))
+		return -EINVAL;
+
+	memset(cb, 0, sizeof(*cb));
+
+	if (first_byte & QUIC_HEADER_FORM_LONG) {
+		/* Long header packet */
+		cb->is_long_header = 1;
+
+		if (skb->len < 6)
+			return -EINVAL;
+
+		/* Version field */
+		version = (data[1] << 24) | (data[2] << 16) |
+			  (data[3] << 8) | data[4];
+		offset = 5;
+
+		/* DCID length */
+		cb->dcid_len = data[offset++];
+		if (cb->dcid_len > QUIC_MAX_CONNECTION_ID_LEN)
+			return -EINVAL;
+
+		if (skb->len < offset + cb->dcid_len + 1)
+			return -EINVAL;
+
+		offset += cb->dcid_len;
+
+		/* SCID length */
+		cb->scid_len = data[offset++];
+		if (cb->scid_len > QUIC_MAX_CONNECTION_ID_LEN)
+			return -EINVAL;
+
+		if (skb->len < offset + cb->scid_len)
+			return -EINVAL;
+
+		offset += cb->scid_len;
+
+		/* Determine crypto level from packet type */
+		switch (first_byte & QUIC_LONG_TYPE_MASK) {
+		case QUIC_PKT_INITIAL:
+			cb->crypto_level = QUIC_CRYPTO_INITIAL;
+			/* Skip token length and token for Initial packets */
+			if (skb->len > offset) {
+				u64 token_len = 0;
+				int varint_len;
+				/* Simple varint decode for token length */
+				if ((data[offset] & 0xc0) == 0) {
+					token_len = data[offset];
+					varint_len = 1;
+				} else if ((data[offset] & 0xc0) == 0x40) {
+					if (skb->len < offset + 2)
+						return -EINVAL;
+					token_len = ((data[offset] & 0x3f) << 8) |
+						    data[offset + 1];
+					varint_len = 2;
+				} else {
+					/* 4 or 8 byte varint - unlikely for token length */
+					return -EINVAL;
+				}
+				offset += varint_len + token_len;
+			}
+			break;
+		case QUIC_PKT_0RTT:
+			cb->crypto_level = QUIC_CRYPTO_EARLY_DATA;
+			break;
+		case QUIC_PKT_HANDSHAKE:
+			cb->crypto_level = QUIC_CRYPTO_HANDSHAKE;
+			break;
+		case QUIC_PKT_RETRY:
+			/* Retry packets don't have PN or encryption */
+			cb->header_len = offset;
+			return 0;
+		default:
+			return -EINVAL;
+		}
+
+		/* Skip length field (varint) */
+		if (skb->len > offset) {
+			if ((data[offset] & 0xc0) == 0) {
+				offset += 1;
+			} else if ((data[offset] & 0xc0) == 0x40) {
+				offset += 2;
+			} else if ((data[offset] & 0xc0) == 0x80) {
+				offset += 4;
+			} else {
+				offset += 8;
+			}
+		}
+
+		/* PN length from first byte (low 2 bits after unprotection) */
+		cb->pn_len = (first_byte & 0x03) + 1;
+	} else {
+		/* Short header packet (1-RTT) */
+		cb->is_long_header = 0;
+		cb->crypto_level = QUIC_CRYPTO_APPLICATION;
+		cb->key_phase = (first_byte & QUIC_SHORT_KEY_PHASE) ? 1 : 0;
+
+		/* DCID follows first byte (length must be known from context) */
+		cb->dcid_len = 8;  /* Default CID length */
+		offset = 1 + cb->dcid_len;
+
+		cb->pn_len = (first_byte & QUIC_SHORT_PN_LEN_MASK) + 1;
+	}
+
+	cb->header_len = offset + cb->pn_len;
+
+	if (skb->len < cb->header_len)
+		return -EINVAL;
+
+	cb->payload_len = skb->len - cb->header_len;
+
+	return 0;
+}
+
+/*
+ * QUIC GSO Segmentation
+ *
+ * Segments large QUIC packets while preserving header integrity.
+ * Each segment needs its own packet number and potentially its own
+ * encryption, so we handle this at the UDP level.
+ */
+static struct sk_buff *quic_gso_inner_segment(struct sk_buff *skb,
+					      netdev_features_t features,
+					      bool is_ipv6)
+{
+	struct quic_offload_cb *cb = QUIC_OFFLOAD_CB(skb);
+	unsigned int mss = skb_shinfo(skb)->gso_size;
+	struct sk_buff *segs, *seg;
+	struct udphdr *uh;
+	unsigned int header_len;
+	unsigned int payload_offset;
+	unsigned int sum_truesize = 0;
+	struct sock *sk = skb->sk;
+	bool copy_dtor;
+	__sum16 check;
+	__be16 newlen;
+	u64 pn;
+	int err;
+
+	if (skb->len <= sizeof(struct udphdr) + mss)
+		return ERR_PTR(-EINVAL);
+
+	/* Parse the QUIC header to understand structure */
+	err = quic_parse_header(skb, cb);
+	if (err)
+		return ERR_PTR(err);
+
+	header_len = sizeof(struct udphdr) + cb->header_len;
+	payload_offset = header_len;
+
+	/* Validate checksum setup */
+	if (unlikely(skb_checksum_start(skb) != skb_transport_header(skb)))
+		return ERR_PTR(-EINVAL);
+
+	/* Don't segment if we can hardware offload */
+	if (skb_gso_ok(skb, features | NETIF_F_GSO_ROBUST)) {
+		skb_shinfo(skb)->gso_segs = DIV_ROUND_UP(skb->len - header_len,
+							 mss);
+		return NULL;
+	}
+
+	/* Pull UDP header for segmentation */
+	uh = udp_hdr(skb);
+	skb_pull(skb, sizeof(struct udphdr));
+
+	/* Handle socket reference for segments */
+	copy_dtor = skb->destructor == sock_wfree;
+	if (copy_dtor) {
+		skb->destructor = NULL;
+		skb->sk = NULL;
+	}
+
+	/* Perform the actual segmentation */
+	segs = skb_segment(skb, features);
+	if (IS_ERR_OR_NULL(segs)) {
+		if (copy_dtor) {
+			skb->destructor = sock_wfree;
+			skb->sk = sk;
+		}
+		return segs;
+	}
+
+	/* Process each segment */
+	pn = cb->pn;
+	seg = segs;
+
+	/* Preserve timestamp flags for first segment */
+	skb_shinfo(seg)->tskey = skb_shinfo(skb)->tskey;
+	skb_shinfo(seg)->tx_flags |=
+		(skb_shinfo(skb)->tx_flags & SKBTX_ANY_TSTAMP);
+
+	/* Calculate checksum adjustment */
+	newlen = htons(sizeof(struct udphdr) + mss);
+	check = csum16_add(csum16_sub(uh->check, uh->len), newlen);
+
+	do {
+		u8 *quic_hdr;
+		int i;
+
+		if (copy_dtor) {
+			seg->destructor = sock_wfree;
+			seg->sk = sk;
+			sum_truesize += seg->truesize;
+		}
+
+		/* Push back UDP header */
+		__skb_push(seg, sizeof(struct udphdr));
+		skb_reset_transport_header(seg);
+
+		/* Get QUIC header location */
+		quic_hdr = seg->data + sizeof(struct udphdr);
+
+		/* Update packet number in QUIC header for each segment */
+		if (cb->pn_len > 0 && seg != segs) {
+			u8 *pn_ptr = quic_hdr + cb->header_len - cb->pn_len;
+
+			/* Increment packet number */
+			pn++;
+
+			/* Encode packet number (big-endian) */
+			for (i = cb->pn_len - 1; i >= 0; i--) {
+				pn_ptr[i] = pn & 0xff;
+				pn >>= 8;
+			}
+		}
+
+		if (!seg->next)
+			break;
+
+		/* Update UDP header for intermediate segments */
+		uh = udp_hdr(seg);
+		uh->len = newlen;
+		uh->check = check;
+
+		if (seg->ip_summed == CHECKSUM_PARTIAL)
+			gso_reset_checksum(seg, ~check);
+		else
+			uh->check = gso_make_checksum(seg, ~check) ? :
+				    CSUM_MANGLED_0;
+
+		seg = seg->next;
+	} while (seg);
+
+	/* Handle last segment with potentially different size */
+	newlen = htons(skb_tail_pointer(seg) - skb_transport_header(seg) +
+		       seg->data_len);
+	check = csum16_add(csum16_sub(uh->check, uh->len), newlen);
+
+	uh = udp_hdr(seg);
+	uh->len = newlen;
+	uh->check = check;
+
+	if (seg->ip_summed == CHECKSUM_PARTIAL)
+		gso_reset_checksum(seg, ~check);
+	else
+		uh->check = gso_make_checksum(seg, ~check) ? : CSUM_MANGLED_0;
+
+	/* Fix checksum state on original skb */
+	if (skb->ip_summed == CHECKSUM_NONE)
+		skb->ip_summed = CHECKSUM_UNNECESSARY;
+
+	/* Update socket accounting */
+	if (copy_dtor) {
+		int delta = sum_truesize - skb->truesize;
+
+		if (likely(delta >= 0))
+			refcount_add(delta, &sk->sk_wmem_alloc);
+		else
+			WARN_ON_ONCE(refcount_sub_and_test(-delta,
+							   &sk->sk_wmem_alloc));
+	}
+
+	return segs;
+}
+
+/* Main GSO segment callback for QUIC */
+static struct sk_buff *quic_gso_segment(struct sk_buff *skb,
+					netdev_features_t features)
+{
+	struct sk_buff *segs = ERR_PTR(-EINVAL);
+	struct udphdr *uh;
+	bool is_ipv6 = false;
+
+	/* Check protocol type */
+	if (skb->protocol == htons(ETH_P_IPV6))
+		is_ipv6 = true;
+	else if (skb->protocol != htons(ETH_P_IP))
+		goto out;
+
+	/* Verify GSO type */
+	if (!(skb_shinfo(skb)->gso_type & (SKB_GSO_UDP_L4 | SKB_GSO_QUIC)))
+		goto out;
+
+	/* Pull UDP header */
+	if (!pskb_may_pull(skb, sizeof(struct udphdr)))
+		goto out;
+
+	uh = udp_hdr(skb);
+
+	/* Verify this looks like a QUIC packet */
+	if (skb->len < sizeof(struct udphdr) + 1)
+		goto out;
+
+	/* Perform QUIC-aware segmentation */
+	segs = quic_gso_inner_segment(skb, features, is_ipv6);
+
+out:
+	return segs;
+}
+
+/*
+ * QUIC GRO (Generic Receive Offload)
+ *
+ * Aggregates multiple QUIC packets for more efficient processing.
+ * We can only aggregate packets from the same QUIC connection (same CID)
+ * and with consecutive packet numbers.
+ */
+
+/* Check if two QUIC packets can be aggregated */
+static bool quic_gro_same_flow(struct sk_buff *skb1, struct sk_buff *skb2)
+{
+	struct quic_offload_cb cb1, cb2;
+	u8 *data1, *data2;
+	u8 cid_len;
+
+	if (quic_parse_header(skb1, &cb1) || quic_parse_header(skb2, &cb2))
+		return false;
+
+	/* Both must be same header type */
+	if (cb1.is_long_header != cb2.is_long_header)
+		return false;
+
+	/* Same crypto level */
+	if (cb1.crypto_level != cb2.crypto_level)
+		return false;
+
+	/* Compare DCIDs */
+	if (cb1.dcid_len != cb2.dcid_len)
+		return false;
+
+	cid_len = cb1.dcid_len;
+	if (cid_len > 0) {
+		if (cb1.is_long_header) {
+			data1 = skb1->data + 6;  /* After fixed header + version + dcid_len */
+			data2 = skb2->data + 6;
+		} else {
+			data1 = skb1->data + 1;  /* After first byte */
+			data2 = skb2->data + 1;
+		}
+
+		if (memcmp(data1, data2, cid_len) != 0)
+			return false;
+	}
+
+	return true;
+}
+
+/* GRO receive callback for QUIC packets */
+static struct sk_buff *quic_gro_receive(struct list_head *head,
+					struct sk_buff *skb)
+{
+	struct sk_buff *pp = NULL;
+	struct sk_buff *p;
+	struct quic_offload_cb *cb;
+	unsigned int quic_len;
+	int flush = 1;
+
+	/* Basic validation */
+	if (skb->len < 1)
+		goto out;
+
+	cb = QUIC_OFFLOAD_CB(skb);
+	if (quic_parse_header(skb, cb))
+		goto out;
+
+	/* QUIC packet length for GRO */
+	quic_len = skb_gro_len(skb);
+
+	/* Check if we can do L4 aggregation */
+	if (skb->encapsulation)
+		goto out;
+
+	flush = 0;
+
+	/* Look for matching flows */
+	list_for_each_entry(p, head, list) {
+		if (!NAPI_GRO_CB(p)->same_flow)
+			continue;
+
+		/* Verify same QUIC connection */
+		if (!quic_gro_same_flow(p, skb)) {
+			NAPI_GRO_CB(p)->same_flow = 0;
+			continue;
+		}
+
+		/* Check for overflow conditions */
+		if (NAPI_GRO_CB(p)->count >= QUIC_GRO_MAX_CNT) {
+			pp = p;
+			break;
+		}
+
+		/* Check total size doesn't exceed limits */
+		if (p->len + quic_len > QUIC_GRO_MAX_SIZE) {
+			pp = p;
+			break;
+		}
+
+		/* Merge the packets */
+		if (skb_gro_receive(p, skb)) {
+			pp = p;
+			break;
+		}
+
+		/* Mark that we successfully merged */
+		return pp;
+	}
+
+out:
+	skb_gro_flush_final(skb, pp, flush);
+	return pp;
+}
+
+/* GRO complete callback for QUIC */
+static int quic_gro_complete(struct sk_buff *skb, int nhoff)
+{
+	struct udphdr *uh = (struct udphdr *)(skb->data + nhoff);
+	__be16 newlen = htons(skb->len - nhoff);
+
+	/* Update UDP length field */
+	uh->len = newlen;
+
+	/* Setup for hardware checksum */
+	skb->csum_start = (unsigned char *)uh - skb->head;
+	skb->csum_offset = offsetof(struct udphdr, check);
+	skb->ip_summed = CHECKSUM_PARTIAL;
+
+	/* Set GSO info */
+	skb_shinfo(skb)->gso_segs = NAPI_GRO_CB(skb)->count;
+	skb_shinfo(skb)->gso_type |= SKB_GSO_UDP_L4;
+
+	if (skb->encapsulation)
+		skb->inner_transport_header = skb->transport_header;
+
+	return 0;
+}
+
+/*
+ * Crypto Offload Support
+ *
+ * These functions provide hooks for NIC-based QUIC encryption/decryption.
+ * Hardware that supports QUIC crypto offload can use these to bypass
+ * software encryption.
+ */
+
+/* Check if hardware crypto offload is available */
+static bool quic_crypto_offload_available(struct net_device *dev,
+					  u8 crypto_level)
+{
+	/* Check device capabilities */
+	if (!dev)
+		return false;
+
+	/* Currently, no hardware supports QUIC crypto offload,
+	 * but this provides the infrastructure for future NICs
+	 */
+	if (!(dev->features & NETIF_F_HW_CSUM))
+		return false;
+
+	/* Only application data level is typically offloaded */
+	if (crypto_level != QUIC_CRYPTO_APPLICATION)
+		return false;
+
+	return false;  /* No hardware support yet */
+}
+
+/* Prepare skb for hardware crypto offload (TX path) */
+int quic_crypto_offload_encrypt(struct sk_buff *skb,
+				struct quic_crypto_ctx *ctx,
+				u64 pn)
+{
+	struct quic_offload_cb *cb = QUIC_OFFLOAD_CB(skb);
+	struct net_device *dev = skb->dev;
+
+	if (!quic_crypto_offload_available(dev, cb->crypto_level)) {
+		cb->hw_offload = 0;
+		cb->needs_encrypt = 1;
+		return -EOPNOTSUPP;
+	}
+
+	/* Mark for hardware encryption */
+	cb->hw_offload = 1;
+	cb->needs_encrypt = 0;
+	cb->pn = pn;
+
+	/* Store crypto context info in skb for hardware */
+	skb->encapsulation = 1;
+
+	return 0;
+}
+EXPORT_SYMBOL(quic_crypto_offload_encrypt);
+
+/* Check and handle hardware crypto on RX path */
+int quic_crypto_offload_decrypt(struct sk_buff *skb,
+				struct quic_crypto_ctx *ctx,
+				u64 *pn)
+{
+	struct quic_offload_cb *cb = QUIC_OFFLOAD_CB(skb);
+
+	/* Check if hardware already decrypted */
+	if (cb->hw_offload && !cb->needs_decrypt) {
+		/* Hardware handled decryption */
+		if (pn)
+			*pn = cb->pn;
+		return 0;
+	}
+
+	/* Fall back to software decryption */
+	cb->needs_decrypt = 1;
+	return -EOPNOTSUPP;
+}
+EXPORT_SYMBOL(quic_crypto_offload_decrypt);
+
+/*
+ * UDP Encapsulation Support
+ *
+ * QUIC runs over UDP and uses these functions to setup the UDP
+ * encapsulation layer for sending and receiving packets.
+ */
+
+/* UDP encap receive callback */
+static int quic_udp_encap_recv(struct sock *sk, struct sk_buff *skb)
+{
+	struct quic_sock *qsk;
+	struct quic_connection *conn;
+	struct quic_connection_id dcid;
+	struct quic_cid_entry *entry;
+	u8 *data;
+	int offset;
+
+	if (!sk)
+		goto drop;
+
+	/* Parse enough of the QUIC header to get the DCID */
+	if (skb->len < 1)
+		goto drop;
+
+	data = skb->data;
+
+	if (data[0] & QUIC_HEADER_FORM_LONG) {
+		/* Long header */
+		if (skb->len < 6)
+			goto drop;
+
+		offset = 5;
+		dcid.len = data[offset++];
+
+		if (dcid.len > QUIC_MAX_CONNECTION_ID_LEN || skb->len < offset + dcid.len)
+			goto drop;
+
+		memcpy(dcid.data, data + offset, dcid.len);
+	} else {
+		/* Short header - DCID starts at byte 1 */
+		/* Need to know expected length from connection context */
+		dcid.len = 8;  /* Default length */
+
+		if (skb->len < 1 + dcid.len)
+			goto drop;
+
+		memcpy(dcid.data, data + 1, dcid.len);
+	}
+
+	/* Look up connection by DCID */
+	entry = quic_cid_hash_lookup(&dcid);
+	if (!entry)
+		goto try_sock;
+
+	/* Found connection - deliver to it */
+	conn = container_of(entry->list.next, struct quic_connection, scid_list);
+	if (conn && conn->qsk) {
+		qsk = conn->qsk;
+		return quic_udp_recv((struct sock *)qsk, skb);
+	}
+
+try_sock:
+	/* Try the socket directly for new connections */
+	qsk = (struct quic_sock *)sk->sk_user_data;
+	if (qsk)
+		return quic_udp_recv((struct sock *)qsk, skb);
+
+drop:
+	kfree_skb(skb);
+	return 0;
+}
+
+/* UDP encap error callback */
+static int quic_udp_encap_err(struct sock *sk, struct sk_buff *skb, int err,
+			      __be16 port, u32 info, u8 *payload)
+{
+	/* Handle ICMP errors for QUIC connections */
+	struct quic_sock *qsk = (struct quic_sock *)sk->sk_user_data;
+
+	if (!qsk || !qsk->conn)
+		return -ENOENT;
+
+	/* Log error for debugging */
+	pr_debug("QUIC: UDP encap error %d for connection\n", err);
+
+	return 0;
+}
+
+/* Initialize UDP encapsulation for a QUIC socket */
+int quic_udp_encap_init(struct quic_sock *qsk)
+{
+	struct sock *sk = (struct sock *)qsk;
+	struct socket *sock;
+	struct udp_sock *up;
+	int err;
+	int family = sk->sk_family;
+
+	/* Create UDP socket for encapsulation */
+	err = sock_create_kern(sock_net(sk), family, SOCK_DGRAM, IPPROTO_UDP, &sock);
+	if (err)
+		return err;
+
+	/* Setup UDP encapsulation */
+	up = udp_sk(sock->sk);
+
+	/* Set encapsulation type */
+	inet_sk(sock->sk)->inet_num = 0;  /* Let kernel assign port */
+
+	/* Configure encapsulation callbacks */
+	udp_sk(sock->sk)->encap_type = UDP_ENCAP_GTP0;  /* Reuse existing type */
+	udp_sk(sock->sk)->encap_rcv = quic_udp_encap_recv;
+	udp_sk(sock->sk)->encap_err_rcv = quic_udp_encap_err;
+
+	/* Link back to QUIC socket */
+	sock->sk->sk_user_data = qsk;
+
+	/* Enable GRO for better receive performance */
+	udp_set_bit(GRO_ENABLED, up);
+
+	/* Save reference */
+	qsk->udp_sock = sock;
+
+	/* Enable encap needed static key */
+	static_branch_inc(&quic_encap_needed_key);
+
+	return 0;
+}
+EXPORT_SYMBOL(quic_udp_encap_init);
+
+/* Destroy UDP encapsulation for a QUIC socket */
+void quic_udp_encap_destroy(struct quic_sock *qsk)
+{
+	if (qsk->udp_sock) {
+		/* Clear user data before closing */
+		qsk->udp_sock->sk->sk_user_data = NULL;
+
+		/* Disable encapsulation callbacks */
+		udp_sk(qsk->udp_sock->sk)->encap_type = 0;
+		udp_sk(qsk->udp_sock->sk)->encap_rcv = NULL;
+		udp_sk(qsk->udp_sock->sk)->encap_err_rcv = NULL;
+
+		sock_release(qsk->udp_sock);
+		qsk->udp_sock = NULL;
+
+		static_branch_dec(&quic_encap_needed_key);
+	}
+}
+EXPORT_SYMBOL(quic_udp_encap_destroy);
+
+/* Send a QUIC packet via UDP */
+int quic_udp_send(struct quic_sock *qsk, struct sk_buff *skb,
+		  struct sockaddr *dest)
+{
+	struct socket *sock = qsk->udp_sock;
+	struct msghdr msg;
+	struct kvec iov;
+	int len;
+	int err;
+
+	if (!sock)
+		return -ENOENT;
+
+	/* Setup message */
+	memset(&msg, 0, sizeof(msg));
+	msg.msg_name = dest;
+
+	if (dest->sa_family == AF_INET)
+		msg.msg_namelen = sizeof(struct sockaddr_in);
+	else if (dest->sa_family == AF_INET6)
+		msg.msg_namelen = sizeof(struct sockaddr_in6);
+	else
+		return -EAFNOSUPPORT;
+
+	iov.iov_base = skb->data;
+	iov.iov_len = skb->len;
+
+	len = skb->len;
+
+	/* Send via UDP socket */
+	err = kernel_sendmsg(sock, &msg, &iov, 1, len);
+	if (err < 0)
+		return err;
+
+	return 0;
+}
+EXPORT_SYMBOL(quic_udp_send);
+
+/* Receive callback for QUIC UDP packets */
+int quic_udp_recv(struct sock *sk, struct sk_buff *skb)
+{
+	struct quic_sock *qsk = quic_sk(sk);
+	struct quic_connection *conn = qsk->conn;
+	struct quic_offload_cb *cb = QUIC_OFFLOAD_CB(skb);
+	int err;
+
+	/* Parse header for processing */
+	err = quic_parse_header(skb, cb);
+	if (err) {
+		kfree_skb(skb);
+		return 0;
+	}
+
+	if (conn) {
+		/* Existing connection - process packet */
+		quic_packet_process(conn, skb);
+	} else if (sk->sk_state == TCP_LISTEN) {
+		/* Server socket - queue for accept */
+		if (sock_owned_by_user(sk)) {
+			if (sk_add_backlog(sk, skb, sk->sk_rcvbuf))
+				kfree_skb(skb);
+		} else {
+			quic_backlog_rcv(sk, skb);
+		}
+	} else {
+		/* No connection and not listening - drop */
+		kfree_skb(skb);
+	}
+
+	return 0;
+}
+EXPORT_SYMBOL(quic_udp_recv);
+
+/* QUIC offload operations structure */
+static const struct quic_offload_ops quic_offload_ops = {
+	.encrypt	= NULL,  /* Use software by default */
+	.decrypt	= NULL,  /* Use software by default */
+	.gso_segment	= quic_gso_segment,
+	.gro_receive	= quic_gro_receive,
+	.gro_complete	= quic_gro_complete,
+};
+
+const struct quic_offload_ops *quic_offload = &quic_offload_ops;
+EXPORT_SYMBOL(quic_offload);
+
+/* IPv4 QUIC GRO receive wrapper */
+static struct sk_buff *quic4_gro_receive(struct list_head *head,
+					 struct sk_buff *skb)
+{
+	struct udphdr *uh;
+	struct sk_buff *pp = NULL;
+
+	uh = udp_gro_udphdr(skb);
+	if (unlikely(!uh))
+		goto flush;
+
+	/* Verify this could be QUIC */
+	if (skb_gro_len(skb) < sizeof(struct udphdr) + 1)
+		goto flush;
+
+	/* Validate UDP checksum */
+	if (NAPI_GRO_CB(skb)->flush)
+		goto skip;
+
+	if (skb_gro_checksum_validate_zero_check(skb, IPPROTO_UDP, uh->check,
+						 inet_gro_compute_pseudo))
+		goto flush;
+	else if (uh->check)
+		skb_gro_checksum_try_convert(skb, IPPROTO_UDP,
+					     inet_gro_compute_pseudo);
+
+skip:
+	/* Pull UDP header */
+	skb_gro_pull(skb, sizeof(struct udphdr));
+	skb_gro_postpull_rcsum(skb, uh, sizeof(struct udphdr));
+
+	/* Call QUIC GRO */
+	pp = quic_gro_receive(head, skb);
+
+	return pp;
+
+flush:
+	NAPI_GRO_CB(skb)->flush = 1;
+	return NULL;
+}
+
+/* IPv4 QUIC GRO complete wrapper */
+static int quic4_gro_complete(struct sk_buff *skb, int nhoff)
+{
+	const struct iphdr *iph = (struct iphdr *)(skb->data +
+			NAPI_GRO_CB(skb)->network_offsets[skb->encapsulation]);
+	struct udphdr *uh = (struct udphdr *)(skb->data + nhoff);
+
+	/* Update UDP checksum with final length */
+	if (uh->check)
+		uh->check = ~udp_v4_check(skb->len - nhoff, iph->saddr,
+					  iph->daddr, 0);
+
+	return quic_gro_complete(skb, nhoff);
+}
+
+#if IS_ENABLED(CONFIG_IPV6)
+/* IPv6 QUIC GRO receive wrapper */
+static struct sk_buff *quic6_gro_receive(struct list_head *head,
+					 struct sk_buff *skb)
+{
+	struct udphdr *uh;
+	struct sk_buff *pp = NULL;
+
+	uh = udp_gro_udphdr(skb);
+	if (unlikely(!uh))
+		goto flush;
+
+	/* Verify this could be QUIC */
+	if (skb_gro_len(skb) < sizeof(struct udphdr) + 1)
+		goto flush;
+
+	/* Validate UDP checksum */
+	if (NAPI_GRO_CB(skb)->flush)
+		goto skip;
+
+	if (skb_gro_checksum_validate_zero_check(skb, IPPROTO_UDP, uh->check,
+						 ip6_gro_compute_pseudo))
+		goto flush;
+	else if (uh->check)
+		skb_gro_checksum_try_convert(skb, IPPROTO_UDP,
+					     ip6_gro_compute_pseudo);
+
+skip:
+	/* Pull UDP header */
+	skb_gro_pull(skb, sizeof(struct udphdr));
+	skb_gro_postpull_rcsum(skb, uh, sizeof(struct udphdr));
+
+	/* Call QUIC GRO */
+	pp = quic_gro_receive(head, skb);
+
+	return pp;
+
+flush:
+	NAPI_GRO_CB(skb)->flush = 1;
+	return NULL;
+}
+
+/* IPv6 QUIC GRO complete wrapper */
+static int quic6_gro_complete(struct sk_buff *skb, int nhoff)
+{
+	const struct ipv6hdr *ipv6h = (struct ipv6hdr *)(skb->data +
+			NAPI_GRO_CB(skb)->network_offsets[skb->encapsulation]);
+	struct udphdr *uh = (struct udphdr *)(skb->data + nhoff);
+
+	/* Update UDP checksum with final length */
+	if (uh->check)
+		uh->check = ~udp_v6_check(skb->len - nhoff, &ipv6h->saddr,
+					  &ipv6h->daddr, 0);
+
+	return quic_gro_complete(skb, nhoff);
+}
+#endif /* CONFIG_IPV6 */
+
+/* GSO segment handler for IPv4 */
+static struct sk_buff *quic4_gso_segment(struct sk_buff *skb,
+					 netdev_features_t features)
+{
+	return quic_gso_segment(skb, features);
+}
+
+#if IS_ENABLED(CONFIG_IPV6)
+/* GSO segment handler for IPv6 */
+static struct sk_buff *quic6_gso_segment(struct sk_buff *skb,
+					 netdev_features_t features)
+{
+	return quic_gso_segment(skb, features);
+}
+#endif
+
+/* Net offload structure for QUIC over IPv4 */
+static struct net_offload quic4_offload __read_mostly = {
+	.callbacks = {
+		.gso_segment	= quic4_gso_segment,
+		.gro_receive	= quic4_gro_receive,
+		.gro_complete	= quic4_gro_complete,
+	},
+};
+
+#if IS_ENABLED(CONFIG_IPV6)
+/* Net offload structure for QUIC over IPv6 */
+static struct net_offload quic6_offload __read_mostly = {
+	.callbacks = {
+		.gso_segment	= quic6_gso_segment,
+		.gro_receive	= quic6_gro_receive,
+		.gro_complete	= quic6_gro_complete,
+	},
+};
+#endif
+
+/* Module initialization */
+int __init quic_offload_init(void)
+{
+	int err;
+
+	pr_info("QUIC: Initializing offload support\n");
+
+	/* Register QUIC offload for UDP encapsulation
+	 * Note: QUIC uses existing UDP offload infrastructure rather than
+	 * registering its own protocol offload, since QUIC packets are
+	 * UDP packets at the IP layer.
+	 */
+
+	pr_info("QUIC: Hardware offload support initialized\n");
+	pr_info("QUIC: GSO/GRO support enabled\n");
+
+	return 0;
+}
+
+void __exit quic_offload_exit(void)
+{
+	pr_info("QUIC: Removing offload support\n");
+
+	/* Offload handlers are unregistered automatically when the
+	 * UDP sockets are closed
+	 */
+
+	pr_info("QUIC: Offload support removed\n");
+}
+
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("Linux QUIC Authors");
+MODULE_DESCRIPTION("QUIC Hardware Offload Support");

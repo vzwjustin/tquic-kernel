@@ -1,0 +1,24 @@
+#!/bin/bash
+set -e
+
+case "$1" in
+    purge)
+        # Remove sysctl config
+        rm -f /etc/sysctl.d/90-tquic.conf
+        sysctl --system 2>/dev/null || true
+
+        # Remove nftables tables
+        nft delete table inet tquic 2>/dev/null || true
+        nft delete table ip tquic_tproxy 2>/dev/null || true
+
+        # Remove TPROXY routing rules
+        ip rule del fwmark 1 lookup 100 2>/dev/null || true
+        ip route del local 0.0.0.0/0 dev lo table 100 2>/dev/null || true
+
+        # Remove directories
+        rm -rf /var/log/tquic
+        rm -rf /run/tquicd
+        ;;
+esac
+
+#DEBHELPER#

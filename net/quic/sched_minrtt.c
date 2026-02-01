@@ -1,0 +1,418 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * TQUIC MinRTT Scheduler
+ *
+ * Copyright (c) 2026 Linux Foundation
+ *
+ * Selects the path with minimum smoothed RTT for each packet.
+ * Uses a tolerance band to prevent path flapping when RTTs are similar.
+ *
+ * Per RESEARCH.md: 10% default tolerance band to avoid oscillation
+ * when paths have nearly identical latencies.
+ *
+ * This module also provides a simple round-robin scheduler as a
+ * baseline comparison for testing and simple use cases.
+ */
+
+#define pr_fmt(fmt) "TQUIC: " fmt
+
+#include <linux/module.h>
+#include <linux/kernel.h>
+#include <linux/slab.h>
+#include <linux/ktime.h>
+#include <linux/rculist.h>
+#include "tquic_sched.h"
+
+/*
+ * Default RTT value when no measurements available (100ms in microseconds)
+ */
+#define TQUIC_DEFAULT_RTT_US	100000
+
+/*
+ * Module parameter for RTT tolerance percentage.
+ * When RTTs differ by less than this percentage, the scheduler
+ * stays with the current path to avoid unnecessary switching.
+ */
+static unsigned int minrtt_tolerance_pct = 10;
+module_param_named(tolerance_pct, minrtt_tolerance_pct, uint, 0644);
+MODULE_PARM_DESC(tolerance_pct, "RTT tolerance percentage for path switching (default 10)");
+
+/* =========================================================================
+ * MinRTT Scheduler Implementation
+ * ========================================================================= */
+
+/**
+ * struct minrtt_sched_data - MinRTT scheduler private state
+ * @current_path_id: Currently selected path ID (0xFF = none)
+ * @current_rtt_us: RTT of current path in microseconds
+ * @last_switch: Time of last path switch (for statistics)
+ * @switch_count: Number of path switches (for diagnostics)
+ *
+ * This structure tracks the scheduler's current path selection
+ * state, allowing hysteresis via the tolerance band.
+ */
+struct minrtt_sched_data {
+	u8 current_path_id;	/* Currently selected path */
+	u64 current_rtt_us;	/* RTT of current path */
+	ktime_t last_switch;	/* Time of last path switch */
+	u32 switch_count;	/* Number of path switches */
+};
+
+/**
+ * minrtt_init - Initialize MinRTT scheduler for a connection
+ * @conn: Connection to initialize
+ *
+ * Allocates and initializes the per-connection scheduler state.
+ */
+static void minrtt_init(struct tquic_connection *conn)
+{
+	struct minrtt_sched_data *sd;
+
+	sd = kzalloc(sizeof(*sd), GFP_KERNEL);
+	if (!sd)
+		return;
+
+	sd->current_path_id = 0xFF;	/* Invalid initially */
+	sd->current_rtt_us = U64_MAX;
+	sd->last_switch = ktime_get();
+	sd->switch_count = 0;
+
+	conn->sched_priv = sd;
+}
+
+/**
+ * minrtt_release - Release MinRTT scheduler resources
+ * @conn: Connection to release
+ */
+static void minrtt_release(struct tquic_connection *conn)
+{
+	kfree(conn->sched_priv);
+	conn->sched_priv = NULL;
+}
+
+/**
+ * minrtt_get_path - Select path with minimum RTT
+ * @conn: Connection to select path for
+ * @result: Path selection result (output)
+ * @flags: Scheduling flags
+ *
+ * Selects the path with the lowest smoothed RTT, applying a tolerance
+ * band to prevent oscillation when paths have similar latencies.
+ *
+ * The tolerance band works as follows:
+ *   - If current path is still usable, only switch to a new path if
+ *     new_rtt < current_rtt * (100 - tolerance_pct) / 100
+ *   - This prevents flapping between paths with nearly identical RTTs
+ *
+ * Returns 0 on success, -EINVAL if no state, -ENOENT if no paths.
+ */
+static int minrtt_get_path(struct tquic_connection *conn,
+			   struct tquic_sched_path_result *result,
+			   u32 flags)
+{
+	struct minrtt_sched_data *sd = conn->sched_priv;
+	struct tquic_path *path, *best = NULL, *current = NULL;
+	u64 min_rtt = U64_MAX;
+	u64 tolerance_threshold;
+
+	if (!sd)
+		return -EINVAL;
+
+	rcu_read_lock();
+
+	/* Find current path and best path by RTT */
+	list_for_each_entry_rcu(path, &conn->paths, list) {
+		u64 rtt;
+
+		if (path->state != TQUIC_PATH_ACTIVE)
+			continue;
+
+		/* Track current path for tolerance comparison */
+		if (path->path_id == sd->current_path_id)
+			current = path;
+
+		/* Get smoothed RTT, use default if no measurement yet */
+		rtt = path->cc.smoothed_rtt_us;
+		if (rtt == 0)
+			rtt = TQUIC_DEFAULT_RTT_US;
+
+		if (rtt < min_rtt) {
+			min_rtt = rtt;
+			best = path;
+		}
+	}
+
+	if (!best) {
+		rcu_read_unlock();
+		return -ENOENT;
+	}
+
+	/*
+	 * Tolerance band: Only switch to a new path if its RTT is
+	 * significantly better than current path. This prevents
+	 * oscillation when paths have similar latencies.
+	 *
+	 * Switch if: new_rtt < current_rtt * (100 - tolerance) / 100
+	 *
+	 * Example with 10% tolerance:
+	 *   current_rtt = 50ms, threshold = 45ms
+	 *   Only switch if new path has RTT < 45ms
+	 */
+	if (current && current->state == TQUIC_PATH_ACTIVE) {
+		tolerance_threshold = sd->current_rtt_us *
+				      (100 - minrtt_tolerance_pct) / 100;
+
+		if (min_rtt >= tolerance_threshold) {
+			/* Stay with current path - RTT difference not significant */
+			best = current;
+		}
+	}
+
+	/* Update state if switching paths */
+	if (best->path_id != sd->current_path_id) {
+		pr_debug("minrtt: switching from path %u (rtt=%llu) to path %u (rtt=%llu)\n",
+			 sd->current_path_id, sd->current_rtt_us,
+			 best->path_id, best->cc.smoothed_rtt_us);
+
+		sd->current_path_id = best->path_id;
+		sd->current_rtt_us = best->cc.smoothed_rtt_us;
+		if (sd->current_rtt_us == 0)
+			sd->current_rtt_us = TQUIC_DEFAULT_RTT_US;
+		sd->last_switch = ktime_get();
+		sd->switch_count++;
+	}
+
+	result->primary = best;
+	result->backup = NULL;	/* MinRTT doesn't use backup path */
+	result->flags = 0;
+
+	rcu_read_unlock();
+	return 0;
+}
+
+/**
+ * minrtt_path_added - Handle new path notification
+ * @conn: Connection
+ * @path: Newly added path
+ *
+ * New path might have better RTT - will be evaluated on next get_path().
+ */
+static void minrtt_path_added(struct tquic_connection *conn,
+			      struct tquic_path *path)
+{
+	pr_debug("minrtt: path %u added (ifindex=%d)\n",
+		 path->path_id, path->ifindex);
+}
+
+/**
+ * minrtt_path_removed - Handle path removal notification
+ * @conn: Connection
+ * @path: Path being removed
+ *
+ * If the current path is being removed, invalidate our state so
+ * get_path() will select a new path on the next call.
+ */
+static void minrtt_path_removed(struct tquic_connection *conn,
+				struct tquic_path *path)
+{
+	struct minrtt_sched_data *sd = conn->sched_priv;
+
+	if (sd && sd->current_path_id == path->path_id) {
+		sd->current_path_id = 0xFF;
+		sd->current_rtt_us = U64_MAX;
+		pr_debug("minrtt: current path %u removed, will reselect\n",
+			 path->path_id);
+	}
+}
+
+/**
+ * minrtt_ack_received - Handle ACK feedback
+ * @conn: Connection
+ * @path: Path that received ACK
+ * @acked_bytes: Number of bytes acknowledged
+ *
+ * Update our cached RTT for the current path when ACKs arrive.
+ */
+static void minrtt_ack_received(struct tquic_connection *conn,
+				struct tquic_path *path,
+				u64 acked_bytes)
+{
+	struct minrtt_sched_data *sd = conn->sched_priv;
+
+	if (sd && path->path_id == sd->current_path_id) {
+		/* Update cached RTT from path's smoothed RTT */
+		sd->current_rtt_us = path->cc.smoothed_rtt_us;
+		if (sd->current_rtt_us == 0)
+			sd->current_rtt_us = TQUIC_DEFAULT_RTT_US;
+	}
+}
+
+/**
+ * MinRTT scheduler operations structure
+ */
+static struct tquic_sched_ops tquic_sched_minrtt = {
+	.name		= "minrtt",
+	.owner		= THIS_MODULE,
+	.get_path	= minrtt_get_path,
+	.init		= minrtt_init,
+	.release	= minrtt_release,
+	.path_added	= minrtt_path_added,
+	.path_removed	= minrtt_path_removed,
+	.ack_received	= minrtt_ack_received,
+};
+
+/* =========================================================================
+ * Round-Robin Scheduler Implementation
+ * ========================================================================= */
+
+/**
+ * struct rr_sched_data - Round-robin scheduler private state
+ * @next_index: Index counter for round-robin selection
+ *
+ * Simple state: just track which path to use next.
+ */
+struct rr_sched_data {
+	u32 next_index;		/* Next path index to use */
+};
+
+/**
+ * rr_init - Initialize round-robin scheduler for a connection
+ * @conn: Connection to initialize
+ */
+static void rr_init(struct tquic_connection *conn)
+{
+	struct rr_sched_data *rd;
+
+	rd = kzalloc(sizeof(*rd), GFP_KERNEL);
+	if (rd)
+		conn->sched_priv = rd;
+}
+
+/**
+ * rr_release - Release round-robin scheduler resources
+ * @conn: Connection to release
+ */
+static void rr_release(struct tquic_connection *conn)
+{
+	kfree(conn->sched_priv);
+	conn->sched_priv = NULL;
+}
+
+/**
+ * rr_get_path - Select path using round-robin
+ * @conn: Connection to select path for
+ * @result: Path selection result (output)
+ * @flags: Scheduling flags
+ *
+ * Distributes packets evenly across all active paths using a simple
+ * index-based round-robin. The next_index counter increments with
+ * each call, and we select path at (next_index % active_count).
+ *
+ * Returns 0 on success, -EINVAL if no state, -ENOENT if no active paths.
+ */
+static int rr_get_path(struct tquic_connection *conn,
+		       struct tquic_sched_path_result *result,
+		       u32 flags)
+{
+	struct rr_sched_data *rd = conn->sched_priv;
+	struct tquic_path *path;
+	int active_count = 0;
+	int target_index;
+	int current_index = 0;
+
+	if (!rd)
+		return -EINVAL;
+
+	rcu_read_lock();
+
+	/* Count active paths */
+	list_for_each_entry_rcu(path, &conn->paths, list) {
+		if (path->state == TQUIC_PATH_ACTIVE)
+			active_count++;
+	}
+
+	if (active_count == 0) {
+		rcu_read_unlock();
+		return -ENOENT;
+	}
+
+	/* Round-robin: select path at (next_index % active_count) */
+	target_index = rd->next_index % active_count;
+	rd->next_index++;
+
+	/* Find the target path */
+	list_for_each_entry_rcu(path, &conn->paths, list) {
+		if (path->state != TQUIC_PATH_ACTIVE)
+			continue;
+
+		if (current_index == target_index) {
+			result->primary = path;
+			result->backup = NULL;
+			result->flags = 0;
+			rcu_read_unlock();
+			return 0;
+		}
+		current_index++;
+	}
+
+	rcu_read_unlock();
+	return -ENOENT;
+}
+
+/**
+ * Round-robin scheduler operations structure
+ */
+static struct tquic_sched_ops tquic_sched_rr = {
+	.name		= "rr",
+	.owner		= THIS_MODULE,
+	.get_path	= rr_get_path,
+	.init		= rr_init,
+	.release	= rr_release,
+};
+
+/* =========================================================================
+ * Module Initialization
+ * ========================================================================= */
+
+static int __init tquic_sched_minrtt_init(void)
+{
+	int ret;
+
+	pr_info("Initializing TQUIC MinRTT and Round-Robin schedulers\n");
+
+	/* Register MinRTT scheduler */
+	ret = tquic_register_scheduler(&tquic_sched_minrtt);
+	if (ret) {
+		pr_err("Failed to register minrtt scheduler: %d\n", ret);
+		return ret;
+	}
+
+	/* Register Round-Robin scheduler */
+	ret = tquic_register_scheduler(&tquic_sched_rr);
+	if (ret) {
+		pr_err("Failed to register rr scheduler: %d\n", ret);
+		tquic_unregister_scheduler(&tquic_sched_minrtt);
+		return ret;
+	}
+
+	pr_info("TQUIC MinRTT scheduler (tolerance=%u%%) registered\n",
+		minrtt_tolerance_pct);
+	pr_info("TQUIC Round-Robin scheduler registered\n");
+
+	return 0;
+}
+
+static void __exit tquic_sched_minrtt_exit(void)
+{
+	pr_info("Unloading TQUIC MinRTT and Round-Robin schedulers\n");
+
+	tquic_unregister_scheduler(&tquic_sched_rr);
+	tquic_unregister_scheduler(&tquic_sched_minrtt);
+}
+
+module_init(tquic_sched_minrtt_init);
+module_exit(tquic_sched_minrtt_exit);
+
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("Linux Foundation");
+MODULE_DESCRIPTION("TQUIC MinRTT and Round-Robin Schedulers");
