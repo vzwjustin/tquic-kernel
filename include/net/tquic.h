@@ -18,6 +18,7 @@
 #include <linux/workqueue.h>
 #include <linux/rhashtable.h>
 #include <linux/refcount.h>
+#include <linux/udp.h>
 #include <net/sock.h>
 #include <net/inet_connection_sock.h>
 #include <uapi/linux/tquic.h>

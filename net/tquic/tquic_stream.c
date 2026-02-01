@@ -33,6 +33,30 @@
 #include "http3/http3_stream.h"
 
 /*
+ * Helper to create file descriptor for a socket
+ * Replacement for sock_map_fd which is not exported
+ */
+static int tquic_sock_map_fd(struct socket *sock, int flags)
+{
+	struct file *newfile;
+	int fd = get_unused_fd_flags(flags);
+
+	if (unlikely(fd < 0)) {
+		sock_release(sock);
+		return fd;
+	}
+
+	newfile = sock_alloc_file(sock, flags, "tquic-stream");
+	if (IS_ERR(newfile)) {
+		put_unused_fd(fd);
+		return PTR_ERR(newfile);
+	}
+
+	fd_install(fd, newfile);
+	return fd;
+}
+
+/*
  * Stream socket proto_ops forward declarations
  */
 static int tquic_stream_release(struct socket *sock);
@@ -63,8 +87,6 @@ static const struct proto_ops tquic_stream_ops = {
 	.ioctl		= sock_no_ioctl,
 	.listen		= sock_no_listen,
 	.shutdown	= sock_no_shutdown,
-	.setsockopt	= sock_no_setsockopt,
-	.getsockopt	= sock_no_getsockopt,
 	.sendmsg	= tquic_stream_sendmsg,
 	.recvmsg	= tquic_stream_recvmsg,
 	.mmap		= sock_no_mmap,
@@ -379,12 +401,11 @@ int tquic_stream_socket_create(struct tquic_connection *conn,
 	tquic_stream_add_to_conn(conn, stream);
 
 	/* Get file descriptor for the socket */
-	fd = sock_map_fd(sock, O_CLOEXEC);
+	fd = tquic_sock_map_fd(sock, O_CLOEXEC);
 	if (fd < 0) {
+		/* Note: tquic_sock_map_fd calls sock_release on failure */
 		tquic_stream_remove_from_conn(conn, stream);
-		sock->sk->sk_user_data = NULL;
 		kfree(ss);
-		sock_release(sock);
 		tquic_stream_free(stream);
 		return fd;
 	}
