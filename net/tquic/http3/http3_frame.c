@@ -21,7 +21,7 @@
 #include <linux/types.h>
 #include <linux/errno.h>
 #include <linux/string.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 #include <net/tquic_http3.h>
 
 #include "http3_frame.h"

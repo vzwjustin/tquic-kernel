@@ -24,7 +24,7 @@
 #include <crypto/utils.h>
 #include <net/tquic.h>
 #include <net/tquic_frame.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 /* QUIC v1 packet type constants (RFC 9000) */
 #define QUIC_PACKET_TYPE_INITIAL	0x00

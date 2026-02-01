@@ -33,7 +33,7 @@
 #include <net/ipv6.h>
 #include <net/tquic.h>
 #include <net/tquic_http3.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 #include "connect_udp.h"
 #include "../core/varint.h"

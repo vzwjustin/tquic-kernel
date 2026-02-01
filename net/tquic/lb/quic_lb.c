@@ -14,7 +14,7 @@
 #include <linux/random.h>
 #include <crypto/aes.h>
 #include <crypto/skcipher.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 #include "quic_lb.h"
 
