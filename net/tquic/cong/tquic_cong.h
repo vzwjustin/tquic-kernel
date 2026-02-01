@@ -236,7 +236,159 @@ bool tquic_cong_is_coupling_enabled(struct tquic_connection *conn);
  *
  * Called when ACK frame reports increased ECN CE count.
  * Per CONTEXT.md: "ECN support: available but off by default".
+ *
+ * Per RFC 9002 Section 7.1: "Each increase in the ECN-CE counter
+ * is a signal of congestion. The sender SHOULD reduce the congestion
+ * window using the approach described in..."
  */
 void tquic_cong_on_ecn(struct tquic_path *path, u64 ecn_ce_count);
+
+/*
+ * =============================================================================
+ * ECN (Explicit Congestion Notification) Support
+ * =============================================================================
+ *
+ * Per RFC 9002 Section 7, ECN provides early congestion signals via
+ * IP header marking rather than packet loss. This allows congestion
+ * control to respond before packets are dropped.
+ *
+ * ECN Codepoints (IP header):
+ * - 00 = Not-ECT (ECN not in use)
+ * - 01 = ECT(1)  (ECN Capable Transport)
+ * - 10 = ECT(0)  (ECN Capable Transport)
+ * - 11 = CE      (Congestion Experienced)
+ *
+ * Per CONTEXT.md: "ECN support: available but off by default (enable via sysctl)"
+ */
+
+/* ECN codepoints for IP header DSCP/ECN field */
+#define TQUIC_ECN_NOT_ECT	0x00	/* Not ECN-Capable Transport */
+#define TQUIC_ECN_ECT1		0x01	/* ECN Capable Transport (1) */
+#define TQUIC_ECN_ECT0		0x02	/* ECN Capable Transport (0) */
+#define TQUIC_ECN_CE		0x03	/* Congestion Experienced */
+
+/* Default ECN marking for outgoing packets (ECT(0) per RFC 9000) */
+#define TQUIC_ECN_DEFAULT_MARK	TQUIC_ECN_ECT0
+
+/* ECN beta factor for cwnd reduction (scaled by 1000, default 0.8 = 800) */
+#define TQUIC_ECN_BETA_DEFAULT	800
+#define TQUIC_ECN_BETA_SCALE	1000
+
+/*
+ * Per-path ECN state tracking
+ *
+ * Tracks ECN counts from ACK frames to detect CE count increases.
+ * Per RFC 9002: Only respond to *increases* in CE count, not absolute values.
+ */
+struct tquic_ecn_state {
+	u64 ect0_count;		/* Previous ECT(0) count from ACK */
+	u64 ect1_count;		/* Previous ECT(1) count from ACK */
+	u64 ce_count;		/* Previous CE count from ACK */
+	ktime_t last_ce_time;	/* Time of last CE response (rate limiting) */
+	bool ecn_capable;	/* Path validated as ECN-capable */
+	bool ecn_ce_in_round;	/* CE received in current round (RFC 9002) */
+	u64 round_start;	/* Packet number at round start */
+};
+
+/*
+ * tquic_ecn_init - Initialize ECN state for a path
+ * @ecn: ECN state structure to initialize
+ */
+static inline void tquic_ecn_init(struct tquic_ecn_state *ecn)
+{
+	memset(ecn, 0, sizeof(*ecn));
+	ecn->ecn_capable = false;
+}
+
+/*
+ * tquic_ecn_validate_path - Mark path as ECN-capable after validation
+ * @ecn: ECN state structure
+ *
+ * Called when a path successfully receives ECN feedback in ACKs.
+ */
+static inline void tquic_ecn_validate_path(struct tquic_ecn_state *ecn)
+{
+	ecn->ecn_capable = true;
+}
+
+/*
+ * tquic_ecn_is_capable - Check if path is ECN-capable
+ * @ecn: ECN state structure
+ *
+ * Return: true if path has been validated for ECN
+ */
+static inline bool tquic_ecn_is_capable(const struct tquic_ecn_state *ecn)
+{
+	return ecn->ecn_capable;
+}
+
+/*
+ * tquic_ecn_process_ack - Process ECN counts from ACK frame
+ * @ecn: ECN state structure
+ * @ect0: ECT(0) count from ACK
+ * @ect1: ECT(1) count from ACK
+ * @ce: CE count from ACK
+ *
+ * Returns: Number of new CE marks (increase since last ACK), 0 if none
+ */
+static inline u64 tquic_ecn_process_ack(struct tquic_ecn_state *ecn,
+					u64 ect0, u64 ect1, u64 ce)
+{
+	u64 ce_increase = 0;
+
+	/* Detect increase in CE count */
+	if (ce > ecn->ce_count)
+		ce_increase = ce - ecn->ce_count;
+
+	/* Update stored counts */
+	ecn->ect0_count = ect0;
+	ecn->ect1_count = ect1;
+	ecn->ce_count = ce;
+
+	/* Mark path as ECN-capable if we receive any ECN feedback */
+	if (ect0 > 0 || ect1 > 0 || ce > 0)
+		ecn->ecn_capable = true;
+
+	return ce_increase;
+}
+
+/*
+ * tquic_ecn_start_round - Start a new congestion round
+ * @ecn: ECN state structure
+ * @pkt_num: Current packet number
+ *
+ * Called at the start of a new round to reset CE tracking.
+ * Per RFC 9002: Don't reduce more than once per RTT.
+ */
+static inline void tquic_ecn_start_round(struct tquic_ecn_state *ecn,
+					 u64 pkt_num)
+{
+	ecn->ecn_ce_in_round = false;
+	ecn->round_start = pkt_num;
+}
+
+/*
+ * tquic_ecn_can_respond - Check if we can respond to CE in this round
+ * @ecn: ECN state structure
+ *
+ * Per RFC 9002 Section 7.1: "A sender MUST NOT apply this reduction
+ * more than once in a given round trip."
+ *
+ * Return: true if we can respond to CE, false if already responded this round
+ */
+static inline bool tquic_ecn_can_respond(struct tquic_ecn_state *ecn)
+{
+	return !ecn->ecn_ce_in_round;
+}
+
+/*
+ * tquic_ecn_mark_responded - Mark that we responded to CE in this round
+ * @ecn: ECN state structure
+ */
+static inline void tquic_ecn_mark_responded(struct tquic_ecn_state *ecn)
+{
+	ecn->ecn_ce_in_round = true;
+	ecn->last_ce_time = ktime_get();
+}
 
 #endif /* _TQUIC_CONG_H */

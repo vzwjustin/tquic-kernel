@@ -29,6 +29,7 @@
 
 #include "tquic_mib.h"
 #include "cong/tquic_cong.h"
+#include "crypto/key_update.h"
 
 /* QUIC frame types (must match tquic_output.c) */
 #define TQUIC_FRAME_PADDING		0x00
@@ -91,6 +92,17 @@ static int tquic_process_frames(struct tquic_connection *conn,
 				u8 *payload, size_t len,
 				int enc_level, u64 pkt_num);
 
+/*
+ * Per-path ECN tracking state for detecting CE count increases
+ * Per RFC 9002 Section 7.1: Only respond to *increases* in CE count
+ */
+struct tquic_ecn_tracking {
+	u64 ect0_count;		/* Previous ECT(0) count from peer */
+	u64 ect1_count;		/* Previous ECT(1) count from peer */
+	u64 ce_count;		/* Previous CE count from peer */
+	bool validated;		/* ECN path validation complete */
+};
+
 /* Receive context for packet processing */
 struct tquic_rx_ctx {
 	struct tquic_connection *conn;
@@ -103,6 +115,7 @@ struct tquic_rx_ctx {
 	int enc_level;
 	bool is_long_header;
 	bool ack_eliciting;
+	u8 key_phase_bit;  /* Key phase from short header (RFC 9001 Section 6) */
 };
 
 /* GRO state per socket */
@@ -565,6 +578,9 @@ static int tquic_process_ack_frame(struct tquic_rx_ctx *ctx)
 	 * - ECT(1) Count: packets received with ECT(1) codepoint
 	 * - ECN-CE Count: packets received with ECN-CE codepoint
 	 *
+	 * Per RFC 9002 Section 7.1:
+	 * "Each increase in the ECN-CE counter is a signal of congestion."
+	 *
 	 * Per CONTEXT.md: "ECN support: available but off by default"
 	 */
 	if (has_ecn) {
@@ -589,12 +605,17 @@ static int tquic_process_ack_frame(struct tquic_rx_ctx *ctx)
 			return ret;
 		ctx->offset += ret;
 
-		/* Update MIB counter for ECN frames received */
+		/* Update MIB counters for ECN frames received */
 		if (ctx->conn && ctx->conn->sk) {
-			TQUIC_INC_STATS(sock_net(ctx->conn->sk), TQUIC_MIB_ECNACKSRX);
+			struct net *net = sock_net(ctx->conn->sk);
+
+			TQUIC_INC_STATS(net, TQUIC_MIB_ECNACKSRX);
+			if (ecn_ect0 > 0)
+				TQUIC_ADD_STATS(net, TQUIC_MIB_ECNECT0RX, ecn_ect0);
+			if (ecn_ect1 > 0)
+				TQUIC_ADD_STATS(net, TQUIC_MIB_ECNECT1RX, ecn_ect1);
 			if (ecn_ce > 0)
-				TQUIC_ADD_STATS(sock_net(ctx->conn->sk),
-						TQUIC_MIB_ECNCEMARKSRX, ecn_ce);
+				TQUIC_ADD_STATS(net, TQUIC_MIB_ECNCEMARKSRX, ecn_ce);
 		}
 	}
 
@@ -1080,17 +1101,27 @@ static int tquic_process_handshake_done_frame(struct tquic_rx_ctx *ctx)
 }
 
 /*
- * Process DATAGRAM frame
+ * Process DATAGRAM frame (RFC 9221)
+ *
+ * DATAGRAM frames carry unreliable, unordered application data.
+ * Unlike STREAM frames, there is no retransmission or ordering.
+ *
+ * Frame format:
+ *   Type (0x30 or 0x31): 1 byte
+ *   [Length]: varint (only if Type & 0x01)
+ *   Data: remaining bytes
  */
 static int tquic_process_datagram_frame(struct tquic_rx_ctx *ctx)
 {
 	u8 frame_type = ctx->data[ctx->offset];
 	bool has_length = (frame_type & 0x01) != 0;
 	u64 length;
+	struct sk_buff *dgram_skb;
 	int ret;
 
 	ctx->offset++;  /* Skip frame type */
 
+	/* Parse length field if present (0x31), otherwise use remaining bytes */
 	if (has_length) {
 		ret = tquic_decode_varint(ctx->data + ctx->offset,
 					  ctx->len - ctx->offset, &length);
@@ -1098,17 +1129,84 @@ static int tquic_process_datagram_frame(struct tquic_rx_ctx *ctx)
 			return ret;
 		ctx->offset += ret;
 	} else {
+		/* Type 0x30: datagram extends to end of packet */
 		length = ctx->len - ctx->offset;
 	}
 
 	if (ctx->offset + length > ctx->len)
 		return -EINVAL;
 
-	/* Deliver datagram to application */
-	/* This would queue to a datagram receive buffer */
+	/* Check if datagram support is enabled on this connection */
+	if (!ctx->conn || !ctx->conn->datagram.enabled) {
+		/* RFC 9221: If not negotiated, this is a protocol error */
+		pr_debug("tquic: received DATAGRAM but not negotiated\n");
+		return -EPROTO;
+	}
+
+	/* Validate against negotiated maximum size */
+	if (length > ctx->conn->datagram.max_recv_size) {
+		pr_debug("tquic: DATAGRAM too large: %llu > %llu\n",
+			 length, ctx->conn->datagram.max_recv_size);
+		return -EMSGSIZE;
+	}
+
+	/* Queue datagram for delivery to application */
+	spin_lock(&ctx->conn->datagram.lock);
+
+	/* Check queue limit to prevent memory exhaustion */
+	if (ctx->conn->datagram.recv_queue_len >=
+	    ctx->conn->datagram.recv_queue_max) {
+		/* Drop datagram (unreliable, so this is acceptable) */
+		ctx->conn->datagram.datagrams_dropped++;
+		spin_unlock(&ctx->conn->datagram.lock);
+		/* Update MIB counter for dropped datagram */
+		if (ctx->conn->sk)
+			TQUIC_INC_STATS(sock_net(ctx->conn->sk), TQUIC_MIB_DATAGRAMSDROPPED);
+		pr_debug("tquic: DATAGRAM dropped, queue full\n");
+		/* Continue processing - this is not a fatal error */
+		ctx->offset += length;
+		ctx->ack_eliciting = true;
+		return 0;
+	}
+
+	/* Allocate SKB for datagram */
+	dgram_skb = alloc_skb(length, GFP_ATOMIC);
+	if (!dgram_skb) {
+		ctx->conn->datagram.datagrams_dropped++;
+		spin_unlock(&ctx->conn->datagram.lock);
+		/* Update MIB counter for dropped datagram */
+		if (ctx->conn->sk)
+			TQUIC_INC_STATS(sock_net(ctx->conn->sk), TQUIC_MIB_DATAGRAMSDROPPED);
+		ctx->offset += length;
+		ctx->ack_eliciting = true;
+		return 0;  /* Not fatal, continue */
+	}
+
+	/* Copy datagram payload */
+	skb_put_data(dgram_skb, ctx->data + ctx->offset, length);
+
+	/* Store receive timestamp in SKB cb */
+	ktime_get_ts64((struct timespec64 *)dgram_skb->cb);
+
+	/* Queue to receive buffer */
+	skb_queue_tail(&ctx->conn->datagram.recv_queue, dgram_skb);
+	ctx->conn->datagram.recv_queue_len++;
+	ctx->conn->datagram.datagrams_received++;
+
+	spin_unlock(&ctx->conn->datagram.lock);
+
+	/* Update MIB counter for datagram receive */
+	if (ctx->conn->sk)
+		TQUIC_INC_STATS(sock_net(ctx->conn->sk), TQUIC_MIB_DATAGRAMSRX);
+
+	/* Wake up any waiters */
+	if (ctx->conn->sk)
+		ctx->conn->sk->sk_data_ready(ctx->conn->sk);
 
 	ctx->offset += length;
 	ctx->ack_eliciting = true;
+
+	pr_debug("tquic: received DATAGRAM, len=%llu\n", length);
 
 	return 0;
 }
@@ -1520,6 +1618,18 @@ static int tquic_process_packet(struct tquic_connection *conn,
 
 		pkt_type = -1;  /* Short header / 1-RTT */
 		pkt_num_len = (data[0] & 0x03) + 1;
+
+		/*
+		 * Key phase handling (RFC 9001 Section 6)
+		 *
+		 * The key phase bit in short header packets indicates which
+		 * key generation was used to encrypt the packet. A change
+		 * indicates a key update by the peer.
+		 *
+		 * We handle this after header unprotection reveals the true
+		 * key phase bit, and before decryption to use correct keys.
+		 */
+		ctx.key_phase_bit = key_phase ? 1 : 0;
 	}
 
 	/* Find path if not provided */
@@ -1552,8 +1662,46 @@ static int tquic_process_packet(struct tquic_connection *conn,
 				    pkt_type >= 0 ? pkt_type : 3,
 				    decrypted, &decrypted_len);
 	if (ret < 0) {
-		kfree(decrypted);
-		return ret;
+		/*
+		 * Key Update: Decryption failure for short headers might be
+		 * due to key phase change. Try with old keys if available.
+		 * Per RFC 9001 Section 6.3, packets in flight during key
+		 * update may arrive encrypted with old keys.
+		 */
+		if (pkt_type < 0 && conn->crypto_state) {
+			ret = tquic_try_decrypt_with_old_keys(conn,
+							      data, ctx.offset,
+							      payload, payload_len,
+							      pkt_num,
+							      decrypted, &decrypted_len);
+		}
+		if (ret < 0) {
+			kfree(decrypted);
+			return ret;
+		}
+	}
+
+	/*
+	 * Key Update Detection (RFC 9001 Section 6)
+	 *
+	 * For short header packets (1-RTT), check if the key phase bit
+	 * differs from our current key phase. A change indicates either:
+	 * - Peer has initiated a key update (we need to respond)
+	 * - Our previous key update has been acknowledged
+	 */
+	if (pkt_type < 0 && conn->crypto_state) {
+		struct tquic_key_update_state *ku_state;
+		ku_state = tquic_crypto_get_key_update_state(conn->crypto_state);
+		if (ku_state) {
+			u8 current_phase = tquic_key_update_get_phase(ku_state);
+			if (ctx.key_phase_bit != current_phase) {
+				int ku_ret = tquic_handle_key_phase_change(conn, ctx.key_phase_bit);
+				if (ku_ret < 0)
+					pr_warn("tquic: key phase change handling failed: %d\n", ku_ret);
+			}
+			/* Track packet received for key update timing */
+			tquic_key_update_on_packet_received(ku_state);
+		}
 	}
 
 	/* Process frames */

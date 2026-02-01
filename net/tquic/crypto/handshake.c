@@ -578,6 +578,14 @@ static int tquic_encode_transport_params(struct tquic_transport_params *params,
 		p += vlen;
 	}
 
+	/* grease_quic_bit (RFC 9287) - zero-length parameter */
+	if (params->grease_quic_bit) {
+		tquic_varint_encode(QUIC_TP_GREASE_QUIC_BIT, p, &vlen);
+		p += vlen;
+		tquic_varint_encode(0, p, &vlen);  /* Zero-length value */
+		p += vlen;
+	}
+
 	*out_len = p - buf;
 	return 0;
 }

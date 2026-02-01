@@ -398,6 +398,33 @@ struct tquic_connection {
 	/* Connection token for netlink identification */
 	u32 token;
 
+	/* DATAGRAM frame support (RFC 9221) */
+	struct {
+		bool enabled;			/* True if datagrams negotiated */
+		u64 max_send_size;		/* Max datagram size we can send */
+		u64 max_recv_size;		/* Max datagram size we accept */
+		struct sk_buff_head recv_queue;	/* Received datagram queue */
+		spinlock_t lock;		/* Protects datagram state */
+		u32 recv_queue_len;		/* Current queue length */
+		u32 recv_queue_max;		/* Maximum queue length */
+		u64 datagrams_sent;		/* Statistics: sent count */
+		u64 datagrams_received;		/* Statistics: recv count */
+		u64 datagrams_dropped;		/* Statistics: dropped count */
+	} datagram;
+
+	/*
+	 * GREASE (RFC 9287) state
+	 *
+	 * GREASE (Generate Random Extensions And Sustain Extensibility)
+	 * helps ensure forward compatibility by randomly including
+	 * reserved values that receivers must ignore.
+	 */
+	struct {
+		bool enabled;			/* GREASE enabled for this conn */
+		bool peer_grease_quic_bit;	/* Peer advertised grease_quic_bit */
+		bool local_grease_quic_bit;	/* We advertised grease_quic_bit */
+	} grease;
+
 	spinlock_t lock;
 	refcount_t refcnt;
 	struct sock *sk;
@@ -478,6 +505,15 @@ struct tquic_sock {
 	 */
 	char psk_identity[64];
 	u8 psk_identity_len;
+
+	/*
+	 * DATAGRAM frame support (RFC 9221)
+	 *
+	 * When enabled, sendmsg/recvmsg can transfer unreliable datagrams
+	 * using cmsg with TQUIC_CMSG_DATAGRAM type.
+	 */
+	bool datagram_enabled;		/* SO_TQUIC_DATAGRAM enabled */
+	u32 datagram_queue_max;		/* Max receive queue length */
 };
 
 static inline struct tquic_sock *tquic_sk(struct sock *sk)
@@ -708,6 +744,115 @@ u32 tquic_bond_get_path_weight(struct tquic_connection *conn, u8 path_id);
 struct tquic_pacing_state;
 struct tquic_path *tquic_select_path(struct tquic_connection *conn,
 				     struct sk_buff *skb);
+
+/*
+ * GRO/GSO Offload Support (tquic_offload.c)
+ *
+ * Generic Receive Offload (GRO) aggregates multiple incoming QUIC packets
+ * into larger buffers for efficient processing. This is the receive-side
+ * counterpart to GSO (Generic Segmentation Offload) on transmit.
+ */
+
+/* GRO receive callback for UDP tunnel sockets */
+struct sk_buff *tquic_gro_receive(struct list_head *head, struct sk_buff *skb,
+				  struct udphdr *uh, struct sock *sk);
+struct sk_buff *tquic_gro_receive_udp(struct sock *sk, struct list_head *head,
+				      struct sk_buff *skb);
+
+/* GRO complete callback */
+int tquic_gro_complete(struct sk_buff *skb, int nhoff);
+int tquic_gro_complete_udp(struct sock *sk, struct sk_buff *skb, int nhoff);
+
+/* GRO setup/teardown per socket */
+int tquic_setup_gro(struct sock *sk);
+void tquic_clear_gro(struct sock *sk);
+
+/* GRO statistics */
+void tquic_gro_stats_show(struct seq_file *seq);
+void tquic_gro_get_stats(u64 *coalesced, u64 *flushes, u64 *avg_aggregation);
+
+/* Offload initialization */
+int __init tquic_offload_init(void);
+void __exit tquic_offload_exit(void);
+
+/*
+ * DATAGRAM Frame Support (RFC 9221)
+ *
+ * QUIC DATAGRAM frames provide unreliable, unordered message delivery.
+ * Datagrams are not retransmitted on loss and have no flow control.
+ */
+
+/**
+ * tquic_send_datagram - Send a DATAGRAM frame
+ * @conn: Connection to send on
+ * @data: Datagram payload
+ * @len: Payload length
+ *
+ * Sends an unreliable datagram on the connection. The datagram will be
+ * sent on the next packet, subject to congestion control. Unlike stream
+ * data, datagrams are not retransmitted if lost.
+ *
+ * Returns: 0 on success, -EMSGSIZE if len exceeds max_datagram_frame_size,
+ *          -ENOTCONN if connection not established, -EOPNOTSUPP if
+ *          datagrams not negotiated, other negative errno on error.
+ */
+int tquic_send_datagram(struct tquic_connection *conn,
+			const void *data, size_t len);
+
+/**
+ * tquic_recv_datagram - Receive a DATAGRAM frame
+ * @conn: Connection to receive from
+ * @data: Buffer for datagram payload
+ * @len: Buffer size
+ * @flags: Receive flags (MSG_DONTWAIT, MSG_PEEK, etc.)
+ *
+ * Receives the next available datagram from the receive queue.
+ * Datagrams are delivered in the order they were received but
+ * may arrive out of order relative to when they were sent.
+ *
+ * Returns: Number of bytes received, -EAGAIN if no datagram available
+ *          and MSG_DONTWAIT set, -EOPNOTSUPP if datagrams not negotiated,
+ *          other negative errno on error.
+ */
+int tquic_recv_datagram(struct tquic_connection *conn,
+			void *data, size_t len, int flags);
+
+/**
+ * tquic_datagram_max_size - Get maximum datagram payload size
+ * @conn: Connection
+ *
+ * Returns the maximum size of datagram payloads that can be sent
+ * on this connection, as negotiated via transport parameters.
+ *
+ * Returns: Maximum payload size, or 0 if datagrams not supported.
+ */
+u64 tquic_datagram_max_size(struct tquic_connection *conn);
+
+/**
+ * tquic_datagram_init - Initialize datagram support for connection
+ * @conn: Connection
+ *
+ * Called after transport parameter negotiation to initialize
+ * datagram receive queue and state.
+ */
+void tquic_datagram_init(struct tquic_connection *conn);
+
+/**
+ * tquic_datagram_cleanup - Cleanup datagram state
+ * @conn: Connection
+ *
+ * Called during connection teardown to free datagram resources.
+ */
+void tquic_datagram_cleanup(struct tquic_connection *conn);
+
+/**
+ * tquic_datagram_queue_len - Get number of queued datagrams
+ * @conn: Connection to query
+ *
+ * Returns the number of datagrams currently in the receive queue.
+ */
+u32 tquic_datagram_queue_len(struct tquic_connection *conn);
+
 int tquic_xmit(struct tquic_connection *conn, struct tquic_stream *stream,
 	       const u8 *data, size_t len, bool fin);
 int tquic_send_ack(struct tquic_connection *conn, struct tquic_path *path,
@@ -1240,6 +1385,55 @@ void __exit tquic_timer_exit(void);
 
 /*
  * =============================================================================
+ * Path MTU Discovery (DPLPMTUD) - RFC 8899
+ * =============================================================================
+ */
+
+/* PMTUD state machine states */
+enum tquic_pmtud_state {
+	TQUIC_PMTUD_DISABLED = 0,
+	TQUIC_PMTUD_BASE,
+	TQUIC_PMTUD_SEARCHING,
+	TQUIC_PMTUD_SEARCH_COMPLETE,
+	TQUIC_PMTUD_ERROR,
+};
+
+/* PMTUD constants */
+#define TQUIC_PMTUD_BASE_MTU		1200	/* QUIC minimum MTU */
+#define TQUIC_PMTUD_MAX_MTU_DEFAULT	1500	/* Ethernet MTU */
+#define TQUIC_PMTUD_MAX_MTU_JUMBO	9000	/* Jumbo frames */
+
+/* PMTUD path lifecycle */
+int tquic_pmtud_init_path(struct tquic_path *path);
+void tquic_pmtud_release_path(struct tquic_path *path);
+
+/* PMTUD control */
+int tquic_pmtud_start(struct tquic_path *path);
+void tquic_pmtud_stop(struct tquic_path *path);
+
+/* PMTUD probe events */
+void tquic_pmtud_on_probe_ack(struct tquic_path *path, u64 pkt_num,
+			      u32 probed_size);
+void tquic_pmtud_on_probe_lost(struct tquic_path *path, u64 pkt_num);
+
+/* Black hole detection */
+void tquic_pmtud_on_packet_loss(struct tquic_path *path, u32 pkt_size);
+void tquic_pmtud_on_ack(struct tquic_path *path, u32 pkt_size);
+
+/* MTU accessors */
+u32 tquic_pmtud_get_mtu(struct tquic_path *path);
+int tquic_pmtud_set_max_mtu(struct tquic_path *path, u32 max_mtu);
+
+/* Sysctl accessors */
+int tquic_pmtud_sysctl_enabled(void);
+int tquic_pmtud_sysctl_probe_interval(void);
+
+/* PMTUD subsystem initialization */
+int __init tquic_pmtud_init(void);
+void __exit tquic_pmtud_exit(void);
+
+/*
+ * =============================================================================
  * Coupled Multipath Congestion Control API
  * =============================================================================
  *
@@ -1654,5 +1848,58 @@ int tquic_forward_check_gro_gso(struct net_device *dev);
 /* Forwarding subsystem init/exit */
 int __init tquic_forward_init(void);
 void __exit tquic_forward_exit(void);
+
+/*
+ * =============================================================================
+ * Zero-Copy I/O Support
+ * =============================================================================
+ *
+ * High-performance I/O paths using zero-copy techniques:
+ *   - MSG_ZEROCOPY for sendmsg with completion notification
+ *   - sendfile/sendpage support via page references
+ *   - splice support for zero-copy pipe transfer
+ *   - Direct page placement for receive path
+ *
+ * Reference: TCP zerocopy implementation (net/ipv4/tcp.c)
+ */
+
+/* MSG_ZEROCOPY support for sendmsg */
+int tquic_sendmsg_zerocopy(struct sock *sk, struct msghdr *msg, size_t len,
+			   struct tquic_stream *stream);
+int tquic_check_zerocopy_flag(struct sock *sk, struct msghdr *msg, int flags);
+
+/* sendfile/sendpage support */
+ssize_t tquic_sendpage(struct socket *sock, struct page *page,
+		       int offset, size_t size, int flags);
+
+/* splice support */
+ssize_t tquic_splice_read(struct socket *sock, loff_t *ppos,
+			  struct pipe_inode_info *pipe, size_t len,
+			  unsigned int flags);
+
+/* Receive-side optimization */
+size_t tquic_recvmsg_peek_size(struct sock *sk, struct tquic_stream *stream);
+struct page *tquic_rx_page_pool_alloc(struct tquic_connection *conn);
+struct sk_buff *tquic_rx_build_skb_from_page(struct tquic_connection *conn,
+					     struct page *page,
+					     unsigned int offset,
+					     unsigned int len);
+
+/* Socket option support */
+int tquic_set_zerocopy(struct sock *sk, int val);
+int tquic_get_zerocopy(struct sock *sk);
+
+/* Completion notification */
+void tquic_zc_complete(struct sock *sk, u32 id);
+void tquic_zc_abort(struct sock *sk, u32 id, int err);
+
+/* Zerocopy state management */
+int tquic_zc_state_alloc(struct tquic_connection *conn);
+void tquic_zc_state_free(struct tquic_connection *conn);
+
+/* SKB zerocopy helpers */
+int tquic_skb_zerocopy_setup(struct sk_buff *skb, struct page *page,
+			     unsigned int offset, unsigned int len);
+int tquic_skb_orphan_frags_rx(struct sk_buff *skb, gfp_t gfp);
 
 #endif /* _NET_TQUIC_H */

@@ -115,6 +115,12 @@ struct tquic_transport_params {
 
 	/* Multipath extension for WAN bonding */
 	bool enable_multipath;
+
+	/* DATAGRAM frame support (RFC 9221) */
+	u64 max_datagram_frame_size;	/* 0 = disabled, >0 = max size */
+
+	/* GREASE support (RFC 9287) */
+	bool grease_quic_bit;		/* Willing to receive GREASE'd packets */
 };
 
 /**
@@ -183,6 +189,13 @@ struct tquic_negotiated_params {
 
 	/* Multipath (WAN bonding) */
 	bool multipath_enabled;
+
+	/* DATAGRAM support (RFC 9221) */
+	u64 max_datagram_frame_size;	/* Negotiated max size, 0 = disabled */
+	bool datagram_enabled;		/* True if both peers support datagrams */
+
+	/* GREASE support (RFC 9287) */
+	bool peer_grease_quic_bit;	/* Peer supports GREASE'd fixed bit */
 
 	/* Server preferred address */
 	struct tquic_preferred_address preferred_address;

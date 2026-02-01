@@ -81,11 +81,29 @@ struct netns_tquic {
 	/* ECN support for congestion signaling */
 	bool ecn_enabled;
 
+	/* ECN beta factor for cwnd reduction (scaled by 1000, default 800 = 0.8) */
+	u32 ecn_beta;
+
 	/* Pacing configuration (default: true per CONTEXT.md) */
 	bool pacing_enabled;
 
 	/* Path degradation threshold (consecutive losses in same round) */
 	int path_degrade_threshold;
+
+	/*
+	 * GREASE (RFC 9287) configuration
+	 *
+	 * GREASE (Generate Random Extensions And Sustain Extensibility)
+	 * helps ensure forward compatibility by randomly including
+	 * reserved values that receivers must ignore.
+	 *
+	 * When enabled:
+	 *   - May GREASE the fixed bit in long headers (with peer support)
+	 *   - Includes grease_quic_bit transport parameter
+	 *   - May include reserved transport parameters (31*N + 27)
+	 *   - May include reserved versions in Version Negotiation
+	 */
+	bool grease_enabled;
 };
 
 #endif /* _NET_NETNS_TQUIC_H */

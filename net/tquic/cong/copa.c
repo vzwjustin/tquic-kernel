@@ -54,6 +54,9 @@ struct copa_rtt_sample {
 	ktime_t time;
 };
 
+/* ECN beta factor for Copa (delay-based should be more responsive) */
+#define COPA_ECN_BETA		700	/* 0.7 scaled by 1000 */
+
 /* Per-path Copa state */
 struct tquic_copa {
 	/* Core Copa state */
@@ -86,6 +89,11 @@ struct tquic_copa {
 	/* Statistics */
 	u64 bytes_acked_total;
 	u64 last_cwnd;		/* For change detection */
+
+	/* ECN state per RFC 9002 Section 7 */
+	ktime_t last_ecn_time;	/* Time of last ECN response */
+	bool ecn_in_round;	/* ECN CE received in current round */
+	u64 ecn_ce_total;	/* Total CE marks received */
 };
 
 /*
@@ -392,6 +400,109 @@ static void tquic_copa_on_rtt(void *state, u64 rtt_us)
 	copa_update_standing_rtt(copa, rtt_us, now);
 }
 
+/*
+ * Called on ECN Congestion Experienced (CE) marks
+ *
+ * Copa is delay-based and naturally responds to queue buildup through
+ * RTT measurements. However, ECN provides an explicit congestion signal
+ * that Copa should respect, especially when competing with loss-based
+ * algorithms.
+ *
+ * Per RFC 9002 Section 7:
+ * - Treat ECN-CE as congestion signal
+ * - Reduce sending rate
+ * - Don't reduce more than once per RTT
+ *
+ * Copa's response to ECN:
+ * 1. Immediately reduce cwnd (more aggressive than RTT-based reduction)
+ * 2. Reset velocity to prevent aggressive increases
+ * 3. Set direction to DOWN to encourage continued reduction
+ * 4. Update delta to be more conservative if ECN is persistent
+ */
+static void tquic_copa_on_ecn(void *state, u64 ecn_ce_count)
+{
+	struct tquic_copa *copa = state;
+	ktime_t now;
+	s64 time_since_last;
+
+	if (!copa || ecn_ce_count == 0)
+		return;
+
+	now = ktime_get();
+	copa->ecn_ce_total += ecn_ce_count;
+
+	/*
+	 * Per RFC 9002: Don't respond more than once per RTT.
+	 * Use min_rtt for rate limiting.
+	 */
+	if (copa->ecn_in_round) {
+		pr_debug("tquic_copa: ECN CE ignored (already responded this round)\n");
+		return;
+	}
+
+	/* Time-based rate limiting using min_rtt */
+	if (copa->rtt_min_us > 0) {
+		time_since_last = ktime_us_delta(now, copa->last_ecn_time);
+		if (time_since_last < copa->rtt_min_us) {
+			pr_debug("tquic_copa: ECN CE ignored (within RTT window)\n");
+			return;
+		}
+	}
+
+	/*
+	 * Copa ECN Response:
+	 *
+	 * Copa normally relies on RTT increases to detect congestion.
+	 * ECN provides a more explicit signal that we should reduce.
+	 *
+	 * We apply a multiplicative decrease similar to loss-based
+	 * algorithms, but slightly less aggressive since Copa will
+	 * naturally reduce further if RTT remains high.
+	 */
+
+	/* Exit slow start if active */
+	if (copa->in_slow_start) {
+		copa->in_slow_start = false;
+		copa->ssthresh = copa->cwnd;
+	}
+
+	/* Reduce cwnd by beta_ecn factor (0.7) */
+	copa->cwnd = max(copa->cwnd * COPA_ECN_BETA / COPA_DELTA_SCALE,
+			 (u64)COPA_MIN_CWND);
+
+	/* Update ssthresh */
+	copa->ssthresh = copa->cwnd;
+
+	/*
+	 * Reset velocity to prevent aggressive increase after reduction.
+	 * Set direction to DOWN so Copa continues being conservative.
+	 */
+	copa->velocity = COPA_VELOCITY_MIN;
+	copa->direction = COPA_DIR_DOWN;
+	copa->direction_count = 0;
+
+	/*
+	 * If ECN-CE is persistent, make delta more conservative.
+	 * This targets lower queuing delay.
+	 */
+	if (copa->ecn_ce_total > 5 && copa->delta > COPA_MIN_DELTA) {
+		/* Reduce delta to target even lower queuing delay */
+		copa->delta = max(copa->delta - 50, (u32)COPA_MIN_DELTA);
+	}
+
+	/* Update pacing rate */
+	if (copa->rtt_min_us > 0) {
+		copa->pacing_rate = copa->cwnd * USEC_PER_SEC / copa->rtt_min_us;
+	}
+
+	/* Mark that we responded to ECN in this round */
+	copa->ecn_in_round = true;
+	copa->last_ecn_time = now;
+
+	pr_debug("tquic_copa: ECN CE response, ce_count=%llu total=%llu cwnd=%llu delta=%u\n",
+		 ecn_ce_count, copa->ecn_ce_total, copa->cwnd, copa->delta);
+}
+
 static u64 tquic_copa_get_cwnd(void *state)
 {
 	struct tquic_copa *copa = state;
@@ -424,6 +535,7 @@ static struct tquic_cong_ops tquic_copa_ops = {
 	.on_ack = tquic_copa_on_ack,
 	.on_loss = tquic_copa_on_loss,
 	.on_rtt_update = tquic_copa_on_rtt,
+	.on_ecn = tquic_copa_on_ecn,  /* ECN CE handler per RFC 9002 */
 	.get_cwnd = tquic_copa_get_cwnd,
 	.get_pacing_rate = tquic_copa_get_pacing_rate,
 	.can_send = tquic_copa_can_send,

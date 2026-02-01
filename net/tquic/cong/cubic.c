@@ -23,6 +23,9 @@
 #define TQUIC_CUBIC_INIT_CWND	(10 * 1200)	/* 10 packets */
 #define TQUIC_CUBIC_MIN_CWND	(2 * 1200)	/* 2 packets */
 
+/* ECN beta factor for cwnd reduction (RFC 9002: typically 0.8) */
+#define TQUIC_CUBIC_BETA_ECN		819	/* 0.8 scaled by 1024 */
+
 /* Per-path CUBIC state */
 struct tquic_cubic {
 	u64 cwnd;		/* Current congestion window */
@@ -37,6 +40,12 @@ struct tquic_cubic {
 	u32 last_cwnd;		/* Last cwnd for hystart */
 	u32 tcp_cwnd;		/* Emulated TCP cwnd */
 	bool in_slow_start;	/* In slow start phase */
+
+	/* ECN state per RFC 9002 Section 7 */
+	ktime_t last_ecn_time;	/* Time of last ECN response */
+	u64 ecn_round_start;	/* Packet count at round start for ECN */
+	bool ecn_in_round;	/* ECN CE received in current round */
+	u64 rtt_us;		/* Current RTT estimate for round tracking */
 };
 
 /*
@@ -224,7 +233,106 @@ static void tquic_cubic_on_loss(void *state, u64 bytes_lost)
  */
 static void tquic_cubic_on_rtt(void *state, u64 rtt_us)
 {
-	/* Could be used for delay-based modifications */
+	struct tquic_cubic *cubic = state;
+
+	if (!cubic || rtt_us == 0)
+		return;
+
+	/* Store RTT for ECN round tracking */
+	cubic->rtt_us = rtt_us;
+}
+
+/*
+ * Called on ECN Congestion Experienced (CE) marks
+ *
+ * Per RFC 9002 Section 7.1:
+ * - Treat ECN-CE as congestion signal similar to loss
+ * - Reduce cwnd using multiplicative decrease
+ * - Don't reduce more than once per RTT
+ *
+ * For CUBIC, we use a slightly less aggressive reduction than loss
+ * (beta_ecn = 0.8 vs beta = 0.7 for loss) since ECN indicates
+ * congestion before actual packet loss occurs.
+ */
+static void tquic_cubic_on_ecn(void *state, u64 ecn_ce_count)
+{
+	struct tquic_cubic *cubic = state;
+	ktime_t now;
+	s64 time_since_last;
+
+	if (!cubic || ecn_ce_count == 0)
+		return;
+
+	now = ktime_get();
+
+	/*
+	 * Per RFC 9002 Section 7.1: "A sender MUST NOT apply this
+	 * reduction more than once in a given round trip."
+	 *
+	 * Use time-based rate limiting: don't respond more than once
+	 * per RTT. This is a conservative approximation.
+	 */
+	if (cubic->ecn_in_round) {
+		pr_debug("tquic_cubic: ECN CE ignored (already responded this round)\n");
+		return;
+	}
+
+	/* Also check time-based rate limiting as backup */
+	if (cubic->rtt_us > 0) {
+		time_since_last = ktime_us_delta(now, cubic->last_ecn_time);
+		if (time_since_last < cubic->rtt_us) {
+			pr_debug("tquic_cubic: ECN CE ignored (within RTT window)\n");
+			return;
+		}
+	}
+
+	/*
+	 * ECN congestion response:
+	 * - Save w_max for fast convergence
+	 * - Reduce cwnd by beta_ecn factor (typically 0.8)
+	 * - Enter congestion avoidance (exit slow start)
+	 * - Reset epoch for CUBIC curve calculation
+	 */
+
+	/* Fast convergence: remember previous maximum */
+	if (cubic->cwnd < cubic->w_last_max) {
+		cubic->w_last_max = cubic->cwnd *
+			(TQUIC_CUBIC_BETA_SCALE + TQUIC_CUBIC_BETA_ECN) /
+			(2 * TQUIC_CUBIC_BETA_SCALE);
+	} else {
+		cubic->w_last_max = cubic->cwnd;
+	}
+
+	cubic->w_max = cubic->cwnd;
+
+	/*
+	 * Multiplicative decrease with beta_ecn (0.8)
+	 * Less aggressive than loss (0.7) since ECN is early signal
+	 */
+	cubic->ssthresh = max(cubic->cwnd * TQUIC_CUBIC_BETA_ECN /
+			      TQUIC_CUBIC_BETA_SCALE,
+			      (u64)TQUIC_CUBIC_MIN_CWND);
+	cubic->cwnd = cubic->ssthresh;
+
+	/* Reset CUBIC epoch to start new curve */
+	cubic->epoch_start = 0;
+	cubic->in_slow_start = false;
+
+	/* Mark that we responded to ECN in this round */
+	cubic->ecn_in_round = true;
+	cubic->last_ecn_time = now;
+
+	pr_debug("tquic_cubic: ECN CE response, ce_count=%llu cwnd=%llu ssthresh=%llu\n",
+		 ecn_ce_count, cubic->cwnd, cubic->ssthresh);
+}
+
+/*
+ * Start a new congestion round (called on ACK of new data)
+ * Resets ECN round tracking per RFC 9002.
+ */
+static void tquic_cubic_new_round(struct tquic_cubic *cubic)
+{
+	cubic->ecn_in_round = false;
 }
 
 static u64 tquic_cubic_get_cwnd(void *state)
@@ -265,6 +373,7 @@ static struct tquic_cong_ops tquic_cubic_ops = {
 	.on_ack = tquic_cubic_on_ack,
 	.on_loss = tquic_cubic_on_loss,
 	.on_rtt_update = tquic_cubic_on_rtt,
+	.on_ecn = tquic_cubic_on_ecn,  /* ECN CE handler per RFC 9002 */
 	.get_cwnd = tquic_cubic_get_cwnd,
 	.get_pacing_rate = tquic_cubic_get_pacing_rate,
 	.can_send = tquic_cubic_can_send,

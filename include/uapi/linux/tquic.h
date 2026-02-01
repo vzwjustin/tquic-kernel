@@ -86,6 +86,29 @@
 #define TQUIC_PSK_IDENTITY	22  /* PSK identity for authentication */
 
 /*
+ * SO_TQUIC_ZEROCOPY - Enable/disable zero-copy I/O
+ *
+ * Used with setsockopt(SOL_TQUIC, SO_TQUIC_ZEROCOPY, &val, sizeof(val)).
+ * The value is an int: 1 = enable zero-copy, 0 = disable zero-copy.
+ *
+ * When enabled:
+ *   - sendmsg() with MSG_ZEROCOPY maps user pages directly into skbs
+ *     without copying, completion notification via error queue
+ *   - sendfile() uses page references instead of copying
+ *   - splice() provides zero-copy data transfer to/from pipes
+ *
+ * Zero-copy completion notification:
+ *   - SO_EE_ORIGIN_ZEROCOPY messages on socket error queue
+ *   - ee_data/ee_info contain the notification ID range
+ *   - ee_code & SO_EE_CODE_ZEROCOPY_COPIED indicates copy fallback
+ *
+ * Requirements:
+ *   - For best performance, NIC should support scatter-gather (NETIF_F_SG)
+ *   - Without SG, fallback to copy with completion notification
+ */
+#define SO_TQUIC_ZEROCOPY	TQUIC_ZEROCOPY
+
+/*
  * SO_TQUIC_PSK_IDENTITY - Set PSK identity for connection
  *
  * Used with setsockopt(SOL_TQUIC, SO_TQUIC_PSK_IDENTITY, identity, len).
@@ -524,5 +547,54 @@ struct tquic_stream_args {
 
 /* Stream limit sockopt (read-only) */
 #define TQUIC_STREAMS_AVAILABLE	60	/* Get number of streams that can be opened */
+
+/*
+ * DATAGRAM Frame Support (RFC 9221)
+ *
+ * QUIC DATAGRAM frames provide unreliable, unordered message delivery
+ * over a QUIC connection. Unlike streams, datagrams are not retransmitted
+ * on loss and have no ordering guarantees.
+ *
+ * Use cases:
+ *   - Real-time applications (VoIP, gaming, live video)
+ *   - Unreliable messaging on top of QUIC
+ *   - Tunneling protocols that handle their own reliability
+ */
+
+/* Socket option to enable/query DATAGRAM support */
+#define TQUIC_SO_DATAGRAM		80	/* Enable DATAGRAM frame support */
+#define TQUIC_SO_MAX_DATAGRAM_SIZE	81	/* Get max datagram size (read-only) */
+#define TQUIC_SO_DATAGRAM_QUEUE_LEN	82	/* Get/set datagram queue length */
+
+/**
+ * struct tquic_datagram_info - DATAGRAM frame ancillary data
+ * @dgram_id: Application-provided datagram identifier (for tracking)
+ * @flags: Datagram flags (reserved for future use)
+ *
+ * This structure is passed via cmsg with sendmsg/recvmsg to
+ * distinguish datagram messages from stream data.
+ *
+ * Usage:
+ *   - sendmsg: Use TQUIC_CMSG_DATAGRAM with this struct
+ *   - recvmsg: Receive this struct via cmsg when reading datagrams
+ */
+struct tquic_datagram_info {
+	__u64 dgram_id;		/* Application datagram identifier */
+	__u32 flags;		/* Reserved, must be 0 */
+	__u32 reserved;		/* Reserved for alignment */
+};
+
+/* cmsg type for DATAGRAM frames */
+#define TQUIC_CMSG_DATAGRAM	200	/* Ancillary data indicates DATAGRAM */
+
+/* Datagram flags (for future use) */
+#define TQUIC_DGRAM_FLAG_NONE		0x00
+
+/* Default and limits for datagram queue */
+#define TQUIC_DATAGRAM_QUEUE_DEFAULT	256
+#define TQUIC_DATAGRAM_QUEUE_MAX	4096
+
+/* Maximum datagram frame size (excluding QUIC header overhead) */
+#define TQUIC_MAX_DATAGRAM_SIZE		65527
 
 #endif /* _UAPI_LINUX_TQUIC_H */

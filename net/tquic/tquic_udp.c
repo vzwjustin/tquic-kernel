@@ -31,6 +31,7 @@
 #include <net/dst_cache.h>
 #include <net/checksum.h>
 #include <net/gso.h>
+#include <net/gro.h>
 #if IS_ENABLED(CONFIG_IPV6)
 #include <net/ipv6.h>
 #include <net/ipv6_stubs.h>
@@ -138,6 +139,7 @@ struct tquic_udp_sock {
 		u64 rx_errors;
 		u64 gso_segments;
 		u64 gro_packets;
+		u64 gro_merged;		/* Packets successfully merged via GRO */
 	} stats;
 };
 
@@ -896,31 +898,33 @@ static void tquic_udp_encap_destroy(struct sock *sk)
  * @head: List of held packets
  * @skb: New packet to potentially aggregate
  *
- * Returns: Packet to hold, or NULL
+ * Uses the TQUIC GRO offload module for packet coalescing. QUIC packets
+ * from the same connection (same DCID) can be aggregated using frag_list
+ * to reduce per-packet processing overhead.
+ *
+ * Returns: Packet to flush, or NULL
  */
 static struct sk_buff *tquic_udp_gro_receive(struct sock *sk,
 					     struct list_head *head,
 					     struct sk_buff *skb)
 {
 	struct tquic_udp_sock *us;
+	struct udphdr *uh;
 
 	us = rcu_dereference_sk_user_data(sk);
-	if (!us || !us->gro_enabled)
-		goto out;
+	if (!us || !us->gro_enabled) {
+		NAPI_GRO_CB(skb)->flush = 1;
+		return NULL;
+	}
 
-	/* QUIC packets can't be simply coalesced due to:
-	 * - Encrypted payloads
-	 * - Per-packet sequence numbers
-	 * - Potentially different paths
-	 *
-	 * However, we can still benefit from GRO batching for
-	 * delivering multiple packets at once.
-	 */
+	/* Update socket-level GRO statistics */
 	us->stats.gro_packets++;
 
-out:
-	/* Let UDP layer handle the packet list */
-	return NULL;
+	/* Get UDP header for the TQUIC GRO receive */
+	uh = udp_hdr(skb);
+
+	/* Use TQUIC-specific GRO receive for packet aggregation */
+	return tquic_gro_receive_udp(sk, head, skb);
 }
 
 /**
@@ -929,13 +933,22 @@ out:
  * @skb: Completed packet
  * @nhoff: Network header offset
  *
+ * Finalizes GRO aggregation for TQUIC packets. Sets up GSO information
+ * so the aggregated packet can be properly handled by the stack.
+ *
  * Returns: 0 on success
  */
 static int tquic_udp_gro_complete(struct sock *sk, struct sk_buff *skb,
 				  int nhoff)
 {
-	/* Mark as processed */
-	return 0;
+	struct tquic_udp_sock *us;
+
+	us = rcu_dereference_sk_user_data(sk);
+	if (us)
+		us->stats.gro_merged++;
+
+	/* Use TQUIC-specific GRO complete */
+	return tquic_gro_complete_udp(sk, skb, nhoff);
 }
 
 /*

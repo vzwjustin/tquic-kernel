@@ -1,23 +1,15 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * TQUIC: Connection Migration Stubs
+ * TQUIC: Connection Migration Implementation
  *
  * Copyright (c) 2026 Linux Foundation
  *
- * Provides API surface for connection migration.
- * Full implementation in Phase 4 (Path Manager).
- *
- * Phase 2 scope:
- * - API definitions (UAPI, sockopt handlers)
- * - Status reporting (always returns NONE/no migration)
- * - Stubs return -ENOSYS for actual migration operations
- *
- * Phase 4 will implement:
- * - Automatic NAT rebind migration
+ * Implements RFC 9000 Section 9 Connection Migration for TQUIC WAN bonding.
+ * Supports:
+ * - Automatic migration on path degradation (high RTT, packet loss)
  * - Explicit migration via sockopt
- * - PATH_CHALLENGE/PATH_RESPONSE handling
- * - Path state machine
- * - Multipath support
+ * - Server-side migration handling (NAT rebinding)
+ * - Session TTL for persistent state across router reconnects
  *
  * RFC 9000 Connection Migration Overview:
  * - Connection migration allows a connection to continue even when the
@@ -31,9 +23,26 @@
 #include <linux/slab.h>
 #include <linux/errno.h>
 #include <linux/timer.h>
+#include <linux/workqueue.h>
+#include <linux/random.h>
 #include <linux/netdevice.h>
+#include <net/sock.h>
 #include <net/tquic.h>
 #include "protocol.h"
+#include "cong/tquic_cong.h"
+
+/* Migration constants */
+#define TQUIC_MIGRATION_PTO_MULTIPLIER	3	/* 3x PTO for validation timeout */
+#define TQUIC_MIGRATION_MAX_RETRIES	3	/* Max PATH_CHALLENGE retries */
+#define TQUIC_MIGRATION_DEFAULT_TIMEOUT_MS 1000	/* Default 1s timeout */
+
+/* Path quality degradation thresholds */
+#define TQUIC_PATH_DEGRADED_RTT_MULT	3	/* RTT > 3x min_rtt = degraded */
+#define TQUIC_PATH_DEGRADED_LOSS_PCT	10	/* >10% loss = degraded */
+#define TQUIC_PATH_PROBE_TIMEOUT_MS	100	/* Probe interval when degraded */
+
+/* Anti-amplification limit per RFC 9000 Section 8 */
+#define TQUIC_ANTI_AMPLIFICATION_LIMIT	3	/* Max 3x amplification */
 
 /* Forward declaration for tquic_client */
 struct tquic_client {
@@ -57,50 +66,209 @@ struct tquic_client {
 	struct rcu_head rcu_head;
 };
 
+/**
+ * struct tquic_migration_state - Migration state machine
+ * @status: Current migration status (TQUIC_MIGRATE_*)
+ * @old_path: Previous active path
+ * @new_path: Target path for migration
+ * @old_cid: Previous connection ID
+ * @new_cid: Fresh CID for new path
+ * @challenge_data: 8 bytes of PATH_CHALLENGE data
+ * @challenge_sent: When PATH_CHALLENGE was sent
+ * @retries: Number of validation retries
+ * @probe_rtt: RTT measured from validation
+ * @error_code: Error code if migration failed
+ * @flags: Migration flags (TQUIC_MIGRATE_FLAG_*)
+ * @timer: Validation timeout timer
+ * @work: Deferred migration work
+ * @lock: Protects migration state
+ */
+struct tquic_migration_state {
+	enum tquic_migrate_status status;
+	struct tquic_path *old_path;
+	struct tquic_path *new_path;
+	struct tquic_cid old_cid;
+	struct tquic_cid new_cid;
+	u8 challenge_data[8];
+	ktime_t challenge_sent;
+	u8 retries;
+	u32 probe_rtt;
+	u32 error_code;
+	u32 flags;
+	struct timer_list timer;
+	struct work_struct work;
+	spinlock_t lock;
+};
+
 /*
  * =============================================================================
- * PATH MANAGEMENT STUBS
- *
- * TODO Phase 4: Implement full path management with:
- * - Path list in connection
- * - Path state machine (UNUSED -> PENDING -> ACTIVE/STANDBY/FAILED)
- * - RTT/congestion tracking per path
- * - Path selection/scheduling for multipath
+ * HELPER FUNCTIONS
  * =============================================================================
  */
 
 /**
- * tquic_path_find_by_addr - Find path by address (stub)
+ * sockaddr_equal - Compare two socket addresses
+ */
+static bool sockaddr_equal(const struct sockaddr_storage *a,
+			   const struct sockaddr_storage *b)
+{
+	if (a->ss_family != b->ss_family)
+		return false;
+
+	if (a->ss_family == AF_INET) {
+		const struct sockaddr_in *a4 = (const struct sockaddr_in *)a;
+		const struct sockaddr_in *b4 = (const struct sockaddr_in *)b;
+		return a4->sin_addr.s_addr == b4->sin_addr.s_addr &&
+		       a4->sin_port == b4->sin_port;
+	}
+
+#if IS_ENABLED(CONFIG_IPV6)
+	if (a->ss_family == AF_INET6) {
+		const struct sockaddr_in6 *a6 = (const struct sockaddr_in6 *)a;
+		const struct sockaddr_in6 *b6 = (const struct sockaddr_in6 *)b;
+		return ipv6_addr_equal(&a6->sin6_addr, &b6->sin6_addr) &&
+		       a6->sin6_port == b6->sin6_port;
+	}
+#endif
+
+	return false;
+}
+
+/**
+ * tquic_path_is_degraded - Check if path quality has degraded
+ * @path: Path to check
+ *
+ * Returns true if path shows signs of degradation (high RTT or loss).
+ */
+static bool tquic_path_is_degraded(struct tquic_path *path)
+{
+	struct tquic_path_stats *stats = &path->stats;
+	u64 loss_rate;
+
+	if (path->state != TQUIC_PATH_ACTIVE)
+		return true;
+
+	/* Check RTT degradation */
+	if (stats->rtt_min > 0 && stats->rtt_smoothed > 0) {
+		if (stats->rtt_smoothed > stats->rtt_min * TQUIC_PATH_DEGRADED_RTT_MULT)
+			return true;
+	}
+
+	/* Check packet loss */
+	if (stats->tx_packets > 100) {
+		loss_rate = (stats->lost_packets * 100) / stats->tx_packets;
+		if (loss_rate > TQUIC_PATH_DEGRADED_LOSS_PCT)
+			return true;
+	}
+
+	return false;
+}
+
+/**
+ * tquic_path_compute_score - Compute path quality score
+ * @path: Path to score
+ *
+ * Higher score = better path for migration target selection.
+ */
+static u64 tquic_path_compute_score(struct tquic_path *path)
+{
+	struct tquic_path_stats *stats = &path->stats;
+	u64 score = 1000000;  /* Base score */
+
+	/* Only consider validated or active paths */
+	if (path->state != TQUIC_PATH_ACTIVE &&
+	    path->state != TQUIC_PATH_VALIDATED &&
+	    path->state != TQUIC_PATH_STANDBY)
+		return 0;
+
+	/* Factor in RTT (lower is better) */
+	if (stats->rtt_smoothed > 0)
+		score = score * 1000 / stats->rtt_smoothed;
+
+	/* Factor in bandwidth (higher is better) */
+	if (stats->bandwidth > 0)
+		score = (score * stats->bandwidth) >> 20;
+
+	/* Penalize for loss */
+	if (stats->tx_packets > 0 && stats->lost_packets > 0) {
+		u64 loss_pct = (stats->lost_packets * 100) / stats->tx_packets;
+		score = score * (100 - min(loss_pct, 90ULL)) / 100;
+	}
+
+	/* Apply priority (lower priority value = preferred) */
+	score = score * (256 - path->priority) / 256;
+
+	/* Apply weight */
+	score = score * path->weight;
+
+	return score;
+}
+
+/**
+ * tquic_migration_timeout_us - Calculate migration timeout
+ * @path: Path being validated
+ *
+ * Returns timeout in microseconds (3x PTO per RFC 9000).
+ */
+static u32 tquic_migration_timeout_us(struct tquic_path *path)
+{
+	u32 timeout_us;
+
+	if (path->stats.rtt_smoothed == 0) {
+		timeout_us = TQUIC_MIGRATION_DEFAULT_TIMEOUT_MS * 1000;
+	} else {
+		/* PTO = SRTT + max(4*RTTVAR, 1ms) */
+		u32 pto_us = path->stats.rtt_smoothed +
+			     max(path->stats.rtt_variance * 4, 1000U);
+		timeout_us = pto_us * TQUIC_MIGRATION_PTO_MULTIPLIER;
+	}
+
+	/* Clamp to reasonable bounds */
+	return clamp(timeout_us, 100000U, 10000000U);
+}
+
+/*
+ * =============================================================================
+ * PATH MANAGEMENT
+ * =============================================================================
+ */
+
+/**
+ * tquic_path_find_by_addr - Find path by address
  * @conn: Connection to search
  * @addr: Address to find
  *
- * TODO Phase 4: Implement path lookup by address pair.
- * Should iterate conn->paths and compare local/remote addresses.
+ * Searches conn->paths list for a path matching the given address.
+ * Must be called with paths_lock held or in RCU read section.
  *
  * Returns: Path pointer or NULL if not found
  */
 struct tquic_path *tquic_path_find_by_addr(struct tquic_connection *conn,
 					   const struct sockaddr_storage *addr)
 {
-	/* TODO Phase 4: Search conn->paths list by address
-	 *
-	 * Implementation outline:
-	 * list_for_each_entry(path, &conn->paths, list) {
-	 *     if (sockaddr_equal(&path->local_addr, addr) ||
-	 *         sockaddr_equal(&path->remote_addr, addr))
-	 *         return path;
-	 * }
-	 */
+	struct tquic_path *path;
+
+	if (!conn || !addr)
+		return NULL;
+
+	list_for_each_entry_rcu(path, &conn->paths, list) {
+		if (sockaddr_equal(&path->local_addr, addr) ||
+		    sockaddr_equal(&path->remote_addr, addr))
+			return path;
+	}
+
 	return NULL;
 }
+EXPORT_SYMBOL_GPL(tquic_path_find_by_addr);
 
 /**
- * tquic_path_create - Create new path (stub)
+ * tquic_path_create - Create new path for migration
  * @conn: Connection to add path to
  * @local: Local address for path
  * @remote: Remote address for path
  *
- * TODO Phase 4: Allocate path, add to connection, initialize stats.
+ * Allocates a new path, initializes its state, and adds it to the connection.
+ * Does NOT start path validation - caller must do that.
  *
  * Returns: New path pointer or NULL on failure
  */
@@ -108,142 +276,313 @@ struct tquic_path *tquic_path_create(struct tquic_connection *conn,
 				     const struct sockaddr_storage *local,
 				     const struct sockaddr_storage *remote)
 {
-	/* TODO Phase 4: Full path creation with:
-	 * 1. Allocate struct tquic_path
-	 * 2. Copy local and remote addresses
-	 * 3. Assign unique path_id from conn->next_path_id++
-	 * 4. Set state to TQUIC_PATH_PENDING
-	 * 5. Add to conn->paths list
-	 * 6. Initialize RTT estimates (from conn defaults or peer)
-	 * 7. Initialize congestion control state
-	 * 8. Start path validation timer
-	 */
-	return NULL;
+	struct tquic_path *path;
+	static atomic_t path_id_gen = ATOMIC_INIT(0);
+
+	if (!conn || !local || !remote)
+		return NULL;
+
+	/* Check path limit */
+	if (conn->num_paths >= conn->max_paths)
+		return NULL;
+
+	path = kzalloc(sizeof(*path), GFP_KERNEL);
+	if (!path)
+		return NULL;
+
+	/* Initialize path */
+	path->conn = conn;
+	path->path_id = atomic_inc_return(&path_id_gen);
+	path->state = TQUIC_PATH_PENDING;
+	path->saved_state = TQUIC_PATH_UNUSED;
+
+	/* Copy addresses */
+	memcpy(&path->local_addr, local,
+	       local->ss_family == AF_INET ?
+	       sizeof(struct sockaddr_in) : sizeof(struct sockaddr_in6));
+	memcpy(&path->remote_addr, remote,
+	       remote->ss_family == AF_INET ?
+	       sizeof(struct sockaddr_in) : sizeof(struct sockaddr_in6));
+
+	/* Initialize with conservative estimates */
+	path->stats.rtt_smoothed = TQUIC_DEFAULT_RTT * 1000;  /* 100ms default */
+	path->stats.rtt_variance = path->stats.rtt_smoothed / 2;
+	path->stats.cwnd = 14720;  /* Initial cwnd */
+
+	/* Default weight and priority */
+	path->weight = 1;
+	path->priority = 0;
+	path->mtu = 1200;  /* QUIC minimum */
+
+	/* Initialize validation state */
+	timer_setup(&path->validation.timer, tquic_path_validation_timeout, 0);
+	skb_queue_head_init(&path->response.queue);
+	atomic_set(&path->response.count, 0);
+
+	INIT_LIST_HEAD(&path->list);
+
+	/* Initialize congestion control */
+	if (tquic_cong_init_path(path, NULL) < 0)
+		pr_debug("tquic: CC init failed for path %u (non-fatal)\n",
+			 path->path_id);
+
+	/* Add to connection's path list */
+	spin_lock_bh(&conn->paths_lock);
+	list_add_tail_rcu(&path->list, &conn->paths);
+	conn->num_paths++;
+	spin_unlock_bh(&conn->paths_lock);
+
+	pr_debug("tquic: created path %u for migration\n", path->path_id);
+
+	return path;
 }
+EXPORT_SYMBOL_GPL(tquic_path_create);
 
 /**
- * tquic_path_free - Free path (stub)
+ * tquic_path_free - Free a path
  * @path: Path to free
  *
- * TODO Phase 4: Remove from connection, free resources.
+ * Removes path from connection and frees all resources.
  */
 void tquic_path_free(struct tquic_path *path)
 {
-	/* TODO Phase 4: Full path cleanup with:
-	 * 1. Remove from conn->paths list
-	 * 2. Cancel validation timer
-	 * 3. Release CID assigned to this path
-	 * 4. Free congestion control state
-	 * 5. Free path structure
-	 */
-	if (path)
-		kfree(path);
+	struct tquic_connection *conn;
+
+	if (!path)
+		return;
+
+	conn = path->conn;
+
+	/* Cancel validation timer */
+	del_timer_sync(&path->validation.timer);
+
+	/* Purge response queue */
+	skb_queue_purge(&path->response.queue);
+
+	/* Release congestion control state */
+	tquic_cong_release_path(path);
+
+	/* Release device reference */
+	if (path->dev)
+		dev_put(path->dev);
+
+	/* Remove from connection's path list */
+	if (conn) {
+		spin_lock_bh(&conn->paths_lock);
+		list_del_rcu(&path->list);
+		conn->num_paths--;
+		spin_unlock_bh(&conn->paths_lock);
+
+		/* Wait for RCU readers */
+		synchronize_rcu();
+	}
+
+	kfree(path);
 }
+EXPORT_SYMBOL_GPL(tquic_path_free);
 
 /**
- * tquic_migration_send_path_challenge - Send PATH_CHALLENGE frame (stub)
+ * tquic_migration_send_path_challenge - Send PATH_CHALLENGE frame
  * @conn: Connection
  * @path: Path to send challenge on
  *
- * TODO Phase 4: Build and send PATH_CHALLENGE with random data.
+ * Generates random challenge data and sends PATH_CHALLENGE on the path.
  *
  * Returns: 0 on success, negative errno on failure
  */
 int tquic_migration_send_path_challenge(struct tquic_connection *conn,
 					struct tquic_path *path)
 {
-	/* TODO Phase 4: PATH_CHALLENGE implementation:
-	 * 1. Generate 8 bytes of cryptographically random challenge data
-	 * 2. Store in path->challenge_data for later verification
-	 * 3. Build PATH_CHALLENGE frame (type 0x1a, 8 bytes data)
-	 * 4. Send frame on the specified path
-	 * 5. Set path state to TQUIC_PATH_PENDING
-	 * 6. Start validation timer (per RFC 9000, 3*PTO)
-	 */
-	pr_debug("tquic: PATH_CHALLENGE requested (stub)\n");
-	return -ENOSYS;
+	if (!conn || !path)
+		return -EINVAL;
+
+	/* Generate 8 bytes of cryptographically random challenge data */
+	get_random_bytes(path->validation.challenge_data,
+			 sizeof(path->validation.challenge_data));
+
+	/* Also store in legacy field for compatibility */
+	memcpy(path->challenge_data, path->validation.challenge_data, 8);
+
+	/* Record send time */
+	path->validation.challenge_sent = ktime_get();
+	path->validation.challenge_pending = true;
+
+	/* Send via existing path challenge infrastructure */
+	return tquic_send_path_challenge(conn, path);
 }
+EXPORT_SYMBOL_GPL(tquic_migration_send_path_challenge);
 
 /**
- * tquic_migration_path_event - Notify userspace of path event (stub)
+ * tquic_migration_path_event - Notify userspace of path event
  * @conn: Connection
  * @path: Path that changed
  * @event: Event type (TQUIC_PATH_EVENT_*)
- *
- * TODO Phase 4: Send netlink notification for path events.
  */
 void tquic_migration_path_event(struct tquic_connection *conn,
 				struct tquic_path *path, int event)
 {
-	/* TODO Phase 4: Netlink notification implementation:
-	 * 1. Build TQUIC_CMD_PATH_EVENT message
-	 * 2. Include path_id, state, event type
-	 * 3. Multicast to TQUIC_NL_GRP_PATH group
-	 */
-	pr_debug("tquic: path event %d (stub)\n", event);
+	if (!conn || !path)
+		return;
+
+	/* Send netlink notification */
+	tquic_nl_path_event(conn, path, event);
+
+	pr_debug("tquic: path %u event %d\n", path->path_id, event);
+}
+EXPORT_SYMBOL_GPL(tquic_migration_path_event);
+
+/*
+ * =============================================================================
+ * MIGRATION STATE MACHINE
+ * =============================================================================
+ */
+
+/**
+ * tquic_migration_state_alloc - Allocate migration state
+ * @conn: Connection
+ *
+ * Returns: New migration state or NULL on failure
+ */
+static struct tquic_migration_state *tquic_migration_state_alloc(
+	struct tquic_connection *conn)
+{
+	struct tquic_migration_state *ms;
+
+	ms = kzalloc(sizeof(*ms), GFP_KERNEL);
+	if (!ms)
+		return NULL;
+
+	ms->status = TQUIC_MIGRATE_NONE;
+	spin_lock_init(&ms->lock);
+	timer_setup(&ms->timer, NULL, 0);  /* Timer setup later */
+
+	return ms;
+}
+
+/**
+ * tquic_migration_timeout - Validation timeout handler
+ */
+static void tquic_migration_timeout(struct timer_list *t)
+{
+	struct tquic_migration_state *ms;
+	struct tquic_connection *conn;
+	struct tquic_path *path;
+
+	ms = from_timer(ms, t, timer);
+	if (!ms || !ms->new_path)
+		return;
+
+	conn = ms->new_path->conn;
+	path = ms->new_path;
+
+	spin_lock_bh(&ms->lock);
+
+	if (ms->status != TQUIC_MIGRATE_PROBING) {
+		spin_unlock_bh(&ms->lock);
+		return;
+	}
+
+	ms->retries++;
+
+	if (ms->retries >= TQUIC_MIGRATION_MAX_RETRIES) {
+		/* Migration failed */
+		pr_warn("tquic: migration to path %u failed after %u retries\n",
+			path->path_id, ms->retries);
+
+		ms->status = TQUIC_MIGRATE_FAILED;
+		ms->error_code = EQUIC_NO_VIABLE_PATH;
+		path->state = TQUIC_PATH_FAILED;
+
+		spin_unlock_bh(&ms->lock);
+
+		/* Notify failure */
+		tquic_migration_path_event(conn, path, TQUIC_PATH_EVENT_FAILED);
+		return;
+	}
+
+	spin_unlock_bh(&ms->lock);
+
+	/* Retry PATH_CHALLENGE */
+	pr_debug("tquic: retrying PATH_CHALLENGE on path %u (attempt %u)\n",
+		 path->path_id, ms->retries + 1);
+
+	tquic_migration_send_path_challenge(conn, path);
+
+	/* Reschedule timeout */
+	mod_timer(&ms->timer, jiffies +
+		  usecs_to_jiffies(tquic_migration_timeout_us(path)));
+}
+
+/**
+ * tquic_migration_work_handler - Deferred migration completion
+ */
+static void tquic_migration_work_handler(struct work_struct *work)
+{
+	struct tquic_migration_state *ms;
+	struct tquic_connection *conn;
+	struct tquic_path *old_path, *new_path;
+
+	ms = container_of(work, struct tquic_migration_state, work);
+	if (!ms || !ms->new_path)
+		return;
+
+	conn = ms->new_path->conn;
+
+	spin_lock_bh(&ms->lock);
+
+	if (ms->status != TQUIC_MIGRATE_VALIDATED) {
+		spin_unlock_bh(&ms->lock);
+		return;
+	}
+
+	old_path = ms->old_path;
+	new_path = ms->new_path;
+
+	/* Complete migration unless probe-only */
+	if (!(ms->flags & TQUIC_MIGRATE_FLAG_PROBE_ONLY)) {
+		spin_lock(&conn->lock);
+		conn->active_path = new_path;
+		conn->stats.path_migrations++;
+		spin_unlock(&conn->lock);
+
+		pr_info("tquic: migration complete to path %u (RTT: %u us)\n",
+			new_path->path_id, ms->probe_rtt);
+
+		/* Demote old path to standby */
+		if (old_path && old_path != new_path) {
+			old_path->state = TQUIC_PATH_STANDBY;
+		}
+	}
+
+	ms->status = TQUIC_MIGRATE_NONE;
+	ms->old_path = NULL;
+	ms->new_path = NULL;
+
+	spin_unlock_bh(&ms->lock);
+
+	/* Notify completion */
+	tquic_migration_path_event(conn, new_path, TQUIC_PATH_EVENT_ACTIVE);
 }
 
 /*
  * =============================================================================
- * MIGRATION API
- *
- * These functions provide the sockopt API surface.
- * Full implementation in Phase 4 (Path Manager).
+ * AUTOMATIC MIGRATION
  * =============================================================================
  */
 
 /**
- * tquic_migrate_explicit - Explicit migration via sockopt (stub)
- * @conn: Connection to migrate
- * @new_local: New local address to migrate to
- * @flags: Migration flags (TQUIC_MIGRATE_FLAG_*)
- *
- * Phase 2: Returns -ENOSYS (not implemented).
- * Phase 4: Will implement full migration with PATH_CHALLENGE.
- *
- * Returns: 0 on success, negative errno on failure
- */
-int tquic_migrate_explicit(struct tquic_connection *conn,
-			   struct sockaddr_storage *new_local,
-			   u32 flags)
-{
-	if (!conn)
-		return -EINVAL;
-
-	if (conn->state != TQUIC_CONN_CONNECTED)
-		return -ENOTCONN;
-
-	/*
-	 * TODO Phase 4: Implement migration with:
-	 * 1. Validate new_local address is usable
-	 * 2. Get fresh CID via tquic_cid_get_for_migration()
-	 *    - If no CID available, may need to wait for NEW_CONNECTION_ID
-	 * 3. Create new path via tquic_path_create()
-	 * 4. Assign CID to new path
-	 * 5. Send PATH_CHALLENGE on new path
-	 * 6. Set migration state to TQUIC_MIGRATE_PROBING
-	 * 7. Wait for PATH_RESPONSE (async via callback)
-	 * 8. On success: switch active path, notify userspace
-	 * 9. On timeout: mark migration failed, clean up
-	 *
-	 * TQUIC_MIGRATE_FLAG_PROBE_ONLY: Don't switch, just validate
-	 * TQUIC_MIGRATE_FLAG_FORCE: Migrate even if current path is OK
-	 */
-
-	pr_info("tquic: explicit migration not yet implemented (Phase 4)\n");
-	return -ENOSYS;
-}
-
-/**
- * tquic_migrate_auto - Automatic migration on NAT rebind (stub)
+ * tquic_migrate_auto - Automatic migration on path degradation or NAT rebind
  * @conn: Connection
- * @path: Current path
- * @new_addr: New remote address detected
+ * @path: Current path (may be degraded or have new address)
+ * @new_addr: New remote address detected (NULL for quality-based migration)
  *
- * Phase 2: Does nothing, returns -ENOSYS.
- * Phase 4: Will detect source address change and trigger migration.
+ * Detects when the current path has degraded (high RTT, packet loss) or
+ * when a NAT rebinding has occurred, and initiates migration to a better path.
  *
- * Called from packet input path when peer's source address changes.
+ * Per RFC 9000 Section 9:
+ * - On receiving packet from new address: validate before sending data
+ * - Limit data to unvalidated address (anti-amplification)
+ * - Probe both old and new paths initially
  *
  * Returns: 0 on success, negative errno on failure
  */
@@ -251,88 +590,334 @@ int tquic_migrate_auto(struct tquic_connection *conn,
 		       struct tquic_path *path,
 		       struct sockaddr_storage *new_addr)
 {
-	/*
-	 * TODO Phase 4: Implement automatic migration with:
-	 * 1. Detect source address change in packet input
-	 * 2. Verify this isn't a spoofed packet (anti-amplification)
-	 * 3. If peer initiated migration (we received from new address):
-	 *    - Create new path for new address
-	 *    - Send PATH_CHALLENGE to validate
-	 *    - Don't send significant data until validated
-	 * 4. If we initiated (our address changed):
-	 *    - Similar process but we are the migrating party
-	 *
-	 * Key per RFC 9000:
-	 * - Must limit data sent to unvalidated address (anti-amplification)
-	 * - Should use fresh CID to prevent linkability
-	 * - Should probe both old and new paths initially
-	 */
+	struct tquic_migration_state *ms;
+	struct tquic_path *best_path = NULL;
+	struct tquic_path *iter;
+	u64 best_score = 0;
+	int ret;
 
-	pr_debug("tquic: auto migration not yet implemented (Phase 4)\n");
-	return -ENOSYS;
+	if (!conn)
+		return -EINVAL;
+
+	if (conn->state != TQUIC_CONN_CONNECTED)
+		return -ENOTCONN;
+
+	/* Check if migration is already in progress */
+	ms = (struct tquic_migration_state *)conn->state_machine;
+	if (ms && ms->status == TQUIC_MIGRATE_PROBING)
+		return -EBUSY;
+
+	/*
+	 * Case 1: NAT rebinding - new_addr is provided
+	 * Peer sent from a different source address, need to validate.
+	 */
+	if (new_addr) {
+		pr_debug("tquic: auto-migration triggered by NAT rebind\n");
+
+		/* Update path's remote address */
+		if (path) {
+			spin_lock_bh(&conn->paths_lock);
+			memcpy(&path->remote_addr, new_addr, sizeof(*new_addr));
+			path->last_activity = ktime_get();
+			spin_unlock_bh(&conn->paths_lock);
+
+			/* Validate the new address */
+			ret = tquic_path_start_validation(conn, path);
+			if (ret < 0)
+				pr_debug("tquic: NAT rebind validation failed: %d\n", ret);
+
+			/* Don't send significant data until validated */
+			path->state = TQUIC_PATH_PENDING;
+		}
+
+		conn->stats.path_migrations++;
+		return 0;
+	}
+
+	/*
+	 * Case 2: Quality degradation - find a better path
+	 */
+	if (path && !tquic_path_is_degraded(path)) {
+		/* Current path is fine, no migration needed */
+		return 0;
+	}
+
+	pr_debug("tquic: auto-migration triggered by path degradation\n");
+
+	/* Find best alternative path */
+	rcu_read_lock();
+	list_for_each_entry_rcu(iter, &conn->paths, list) {
+		u64 score;
+
+		/* Skip current degraded path */
+		if (iter == path)
+			continue;
+
+		/* Skip non-usable paths */
+		if (iter->state != TQUIC_PATH_ACTIVE &&
+		    iter->state != TQUIC_PATH_VALIDATED &&
+		    iter->state != TQUIC_PATH_STANDBY)
+			continue;
+
+		score = tquic_path_compute_score(iter);
+		if (score > best_score) {
+			best_score = score;
+			best_path = iter;
+		}
+	}
+	rcu_read_unlock();
+
+	if (!best_path) {
+		pr_debug("tquic: no alternative path for migration\n");
+		return -ENOENT;
+	}
+
+	/* Allocate or get migration state */
+	if (!ms) {
+		ms = tquic_migration_state_alloc(conn);
+		if (!ms)
+			return -ENOMEM;
+		conn->state_machine = ms;
+	}
+
+	/* Set up migration */
+	spin_lock_bh(&ms->lock);
+
+	ms->status = TQUIC_MIGRATE_PROBING;
+	ms->old_path = conn->active_path;
+	ms->new_path = best_path;
+	ms->retries = 0;
+	ms->flags = 0;
+
+	spin_unlock_bh(&ms->lock);
+
+	/* Get fresh CID for new path if available */
+	ret = tquic_cid_get_for_migration(conn, &ms->new_cid);
+	if (ret == 0) {
+		/* Assign new CID to path */
+		memcpy(&best_path->remote_cid, &ms->new_cid,
+		       sizeof(best_path->remote_cid));
+	}
+
+	/* Send PATH_CHALLENGE on new path */
+	ret = tquic_path_start_validation(conn, best_path);
+	if (ret < 0) {
+		spin_lock_bh(&ms->lock);
+		ms->status = TQUIC_MIGRATE_NONE;
+		ms->new_path = NULL;
+		spin_unlock_bh(&ms->lock);
+		return ret;
+	}
+
+	/* Set up timeout timer */
+	ms->timer.function = tquic_migration_timeout;
+	mod_timer(&ms->timer, jiffies +
+		  usecs_to_jiffies(tquic_migration_timeout_us(best_path)));
+
+	pr_info("tquic: auto-migration started to path %u\n", best_path->path_id);
+
+	return 0;
 }
+EXPORT_SYMBOL_GPL(tquic_migrate_auto);
+
+/*
+ * =============================================================================
+ * EXPLICIT MIGRATION
+ * =============================================================================
+ */
+
+/**
+ * tquic_migrate_explicit - Explicit migration via sockopt
+ * @conn: Connection to migrate
+ * @new_local: New local address to migrate to
+ * @flags: Migration flags (TQUIC_MIGRATE_FLAG_*)
+ *
+ * Application-requested migration to a specific local address.
+ * Creates new path if needed, validates it, and switches traffic.
+ *
+ * TQUIC_MIGRATE_FLAG_PROBE_ONLY: Validate path without switching traffic
+ * TQUIC_MIGRATE_FLAG_FORCE: Migrate even if current path is healthy
+ *
+ * Returns: 0 on success (migration started), negative errno on failure
+ */
+int tquic_migrate_explicit(struct tquic_connection *conn,
+			   struct sockaddr_storage *new_local,
+			   u32 flags)
+{
+	struct tquic_migration_state *ms;
+	struct tquic_path *new_path;
+	int ret;
+
+	if (!conn || !new_local)
+		return -EINVAL;
+
+	if (conn->state != TQUIC_CONN_CONNECTED)
+		return -ENOTCONN;
+
+	/* Check if migration is already in progress */
+	ms = (struct tquic_migration_state *)conn->state_machine;
+	if (ms && ms->status == TQUIC_MIGRATE_PROBING)
+		return -EBUSY;
+
+	/* If not forcing, check if current path is OK */
+	if (!(flags & TQUIC_MIGRATE_FLAG_FORCE) &&
+	    conn->active_path &&
+	    !tquic_path_is_degraded(conn->active_path)) {
+		pr_debug("tquic: explicit migration rejected - current path OK\n");
+		return -EALREADY;
+	}
+
+	/* Check if we already have a path with this local address */
+	rcu_read_lock();
+	new_path = tquic_path_find_by_addr(conn, new_local);
+	rcu_read_unlock();
+
+	if (!new_path) {
+		/* Create new path with the specified local address */
+		if (!conn->active_path) {
+			pr_warn("tquic: no active path to get remote address\n");
+			return -EINVAL;
+		}
+
+		new_path = tquic_path_create(conn, new_local,
+					     &conn->active_path->remote_addr);
+		if (!new_path)
+			return -ENOMEM;
+	}
+
+	/* Allocate or get migration state */
+	if (!ms) {
+		ms = tquic_migration_state_alloc(conn);
+		if (!ms) {
+			tquic_path_free(new_path);
+			return -ENOMEM;
+		}
+		conn->state_machine = ms;
+	}
+
+	/* Set up migration work handler */
+	INIT_WORK(&ms->work, tquic_migration_work_handler);
+
+	/* Set up migration state */
+	spin_lock_bh(&ms->lock);
+
+	ms->status = TQUIC_MIGRATE_PROBING;
+	ms->old_path = conn->active_path;
+	ms->new_path = new_path;
+	ms->retries = 0;
+	ms->flags = flags;
+	ms->error_code = 0;
+
+	spin_unlock_bh(&ms->lock);
+
+	/* Get fresh CID for new path */
+	ret = tquic_cid_get_for_migration(conn, &ms->new_cid);
+	if (ret == 0) {
+		memcpy(&new_path->remote_cid, &ms->new_cid,
+		       sizeof(new_path->remote_cid));
+		pr_debug("tquic: assigned fresh CID for migration\n");
+	}
+
+	/* Start path validation */
+	ret = tquic_path_start_validation(conn, new_path);
+	if (ret < 0) {
+		spin_lock_bh(&ms->lock);
+		ms->status = TQUIC_MIGRATE_FAILED;
+		ms->error_code = -ret;
+		spin_unlock_bh(&ms->lock);
+		return ret;
+	}
+
+	/* Set up timeout timer */
+	ms->timer.function = tquic_migration_timeout;
+	mod_timer(&ms->timer, jiffies +
+		  usecs_to_jiffies(tquic_migration_timeout_us(new_path)));
+
+	pr_info("tquic: explicit migration started to path %u (flags=0x%x)\n",
+		new_path->path_id, flags);
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(tquic_migrate_explicit);
 
 /**
  * tquic_migration_get_status - Get current migration status
  * @conn: Connection
  * @info: OUT - Migration status information
  *
- * Phase 2: Always returns TQUIC_MIGRATE_NONE (no migration in progress).
- * Phase 4: Will return actual migration state from conn->migration_state.
- *
  * Returns: 0 on success
  */
 int tquic_migration_get_status(struct tquic_connection *conn,
 			       struct tquic_migrate_info *info)
 {
+	struct tquic_migration_state *ms;
+
 	memset(info, 0, sizeof(*info));
 	info->status = TQUIC_MIGRATE_NONE;
 
 	if (!conn)
 		return 0;
 
-	/*
-	 * TODO Phase 4: Return actual migration state from conn:
-	 * - status: current migration status enum
-	 * - old_path_id: ID of previous/current active path
-	 * - new_path_id: ID of path being migrated to
-	 * - probe_rtt: RTT from PATH_CHALLENGE/RESPONSE if validated
-	 * - error_code: Error code if migration failed
-	 * - old_local: Previous local address
-	 * - new_local: New local address (if migrating)
-	 * - remote: Remote address
-	 *
-	 * Migration state machine:
-	 * TQUIC_MIGRATE_NONE -> TQUIC_MIGRATE_PROBING (challenge sent)
-	 * TQUIC_MIGRATE_PROBING -> TQUIC_MIGRATE_VALIDATED (response received)
-	 * TQUIC_MIGRATE_PROBING -> TQUIC_MIGRATE_FAILED (timeout)
-	 * TQUIC_MIGRATE_VALIDATED -> TQUIC_MIGRATE_NONE (complete)
-	 */
+	ms = (struct tquic_migration_state *)conn->state_machine;
+	if (!ms)
+		return 0;
+
+	spin_lock_bh(&ms->lock);
+
+	info->status = ms->status;
+	info->probe_rtt = ms->probe_rtt;
+	info->error_code = ms->error_code;
+
+	if (ms->old_path) {
+		info->old_path_id = ms->old_path->path_id;
+		memcpy(&info->old_local, &ms->old_path->local_addr,
+		       sizeof(info->old_local));
+	}
+
+	if (ms->new_path) {
+		info->new_path_id = ms->new_path->path_id;
+		memcpy(&info->new_local, &ms->new_path->local_addr,
+		       sizeof(info->new_local));
+		memcpy(&info->remote, &ms->new_path->remote_addr,
+		       sizeof(info->remote));
+	}
+
+	spin_unlock_bh(&ms->lock);
 
 	return 0;
 }
+EXPORT_SYMBOL_GPL(tquic_migration_get_status);
 
 /**
  * tquic_migration_cleanup - Clean up migration state
  * @conn: Connection
- *
- * Called during connection teardown to free any migration-related resources.
  */
 void tquic_migration_cleanup(struct tquic_connection *conn)
 {
-	/* TODO Phase 4: Free migration state if present
-	 *
-	 * 1. Cancel any pending PATH_CHALLENGE timers
-	 * 2. Free pending path structures
-	 * 3. Clear migration state
-	 */
+	struct tquic_migration_state *ms;
+
+	if (!conn)
+		return;
+
+	ms = (struct tquic_migration_state *)conn->state_machine;
+	if (!ms)
+		return;
+
+	/* Cancel timer */
+	del_timer_sync(&ms->timer);
+
+	/* Cancel any pending work */
+	cancel_work_sync(&ms->work);
+
+	/* Clear state */
+	conn->state_machine = NULL;
+	kfree(ms);
 }
+EXPORT_SYMBOL_GPL(tquic_migration_cleanup);
 
 /*
  * =============================================================================
- * PATH_RESPONSE HANDLING (Stubs)
- *
- * These will be called from packet input path in Phase 4.
+ * PATH_CHALLENGE / PATH_RESPONSE HANDLING
  * =============================================================================
  */
 
@@ -342,7 +927,8 @@ void tquic_migration_cleanup(struct tquic_connection *conn)
  * @path: Path frame arrived on
  * @data: 8-byte challenge data
  *
- * TODO Phase 4: Echo back with PATH_RESPONSE.
+ * Per RFC 9000 Section 8.2: Must respond with PATH_RESPONSE echoing
+ * the same 8 bytes on the same path.
  *
  * Returns: 0 on success, negative errno on failure
  */
@@ -350,14 +936,15 @@ int tquic_migration_handle_path_challenge(struct tquic_connection *conn,
 					  struct tquic_path *path,
 					  const u8 *data)
 {
-	/* TODO Phase 4:
-	 * 1. Build PATH_RESPONSE frame with same 8-byte data
-	 * 2. Send on same path the challenge arrived on
-	 * 3. This echoes the challenge back to prove path validity
-	 */
-	pr_debug("tquic: PATH_CHALLENGE received (stub)\n");
-	return -ENOSYS;
+	if (!conn || !path || !data)
+		return -EINVAL;
+
+	pr_debug("tquic: PATH_CHALLENGE received on path %u\n", path->path_id);
+
+	/* Delegate to path validation module which handles rate limiting */
+	return tquic_path_handle_challenge(conn, path, data);
 }
+EXPORT_SYMBOL_GPL(tquic_migration_handle_path_challenge);
 
 /**
  * tquic_migration_handle_path_response - Handle received PATH_RESPONSE
@@ -365,7 +952,8 @@ int tquic_migration_handle_path_challenge(struct tquic_connection *conn,
  * @path: Path frame arrived on
  * @data: 8-byte response data
  *
- * TODO Phase 4: Validate response matches our challenge.
+ * Validates that response matches our pending challenge.
+ * If valid, marks path as validated and completes migration if pending.
  *
  * Returns: 0 on success, negative errno on failure
  */
@@ -373,46 +961,75 @@ int tquic_migration_handle_path_response(struct tquic_connection *conn,
 					 struct tquic_path *path,
 					 const u8 *data)
 {
-	/* TODO Phase 4:
-	 * 1. Check if data matches path->challenge_data
-	 * 2. If match: path is validated
-	 *    - Set path state to TQUIC_PATH_ACTIVE
-	 *    - Calculate RTT from challenge/response
-	 *    - If migrating, switch active path
-	 *    - Notify userspace via netlink
-	 * 3. If no match: protocol error
-	 */
-	pr_debug("tquic: PATH_RESPONSE received (stub)\n");
-	return -ENOSYS;
+	struct tquic_migration_state *ms;
+	ktime_t now = ktime_get();
+	int ret;
+
+	if (!conn || !path || !data)
+		return -EINVAL;
+
+	pr_debug("tquic: PATH_RESPONSE received on path %u\n", path->path_id);
+
+	/* First, let the path validation module handle it */
+	ret = tquic_path_handle_response(conn, path, data);
+	if (ret < 0)
+		return ret;
+
+	/* Check if this completes a pending migration */
+	ms = (struct tquic_migration_state *)conn->state_machine;
+	if (!ms || ms->status != TQUIC_MIGRATE_PROBING)
+		return 0;
+
+	spin_lock_bh(&ms->lock);
+
+	if (ms->new_path != path) {
+		spin_unlock_bh(&ms->lock);
+		return 0;
+	}
+
+	/* Verify challenge data matches */
+	if (memcmp(data, ms->challenge_data, 8) != 0) {
+		spin_unlock_bh(&ms->lock);
+		pr_debug("tquic: PATH_RESPONSE mismatch for migration\n");
+		return -EINVAL;
+	}
+
+	/* Cancel timeout timer */
+	del_timer(&ms->timer);
+
+	/* Calculate RTT */
+	ms->probe_rtt = ktime_us_delta(now, path->validation.challenge_sent);
+
+	/* Mark migration validated */
+	ms->status = TQUIC_MIGRATE_VALIDATED;
+	path->state = TQUIC_PATH_ACTIVE;
+
+	spin_unlock_bh(&ms->lock);
+
+	pr_info("tquic: migration validated for path %u (RTT: %u us)\n",
+		path->path_id, ms->probe_rtt);
+
+	/* Schedule deferred migration completion */
+	schedule_work(&ms->work);
+
+	return 0;
 }
+EXPORT_SYMBOL_GPL(tquic_migration_handle_path_response);
 
 /*
  * =============================================================================
  * SERVER-SIDE MIGRATION HANDLING
  * =============================================================================
- *
- * These functions enable connection migration when a router's source IP
- * changes. This is common in WAN bonding scenarios where routers may have
- * dynamic IP addresses or experience NAT rebinding.
- *
- * Per CONTEXT.md: "Persistent session state across router reconnects with
- * configurable TTL" - implemented via session_ttl and session state timers.
  */
 
 /**
  * tquic_server_handle_migration - Handle server-side connection migration
  * @conn: Connection receiving the migrated packet
- * @path: Path packet arrived on (may have new source address)
+ * @path: Path packet arrived on
  * @new_remote: New remote address detected
  *
- * Called from packet input path when a packet arrives from a known CID
- * but from a different source address. This indicates the router has
- * migrated (e.g., NAT rebinding, IP address change).
- *
- * Server-side migration handling:
- * 1. Validate via CID (already done before this is called)
- * 2. Update path's remote_addr to new source
- * 3. Trigger PATH_CHALLENGE validation for the new address
+ * Per RFC 9000 Section 9.3: Server must validate new client address
+ * before sending significant data (anti-amplification).
  *
  * Returns: 0 on success, negative errno on failure
  */
@@ -434,23 +1051,37 @@ int tquic_server_handle_migration(struct tquic_connection *conn,
 	pr_debug("tquic: handling server-side migration for path %u\n",
 		 path->path_id);
 
-	/*
-	 * Update path's remote address to new source.
-	 * This allows future packets to be sent to the new address.
-	 */
-	spin_lock_bh(&conn->paths_lock);
-	memcpy(&path->remote_addr, new_remote, sizeof(*new_remote));
-	path->last_activity = ktime_get();
-	spin_unlock_bh(&conn->paths_lock);
+	/* Check if this is NAT rebinding (same CID, different address) */
+	if (!sockaddr_equal(&path->remote_addr, new_remote)) {
+		pr_info("tquic: detected NAT rebinding on path %u\n",
+			path->path_id);
 
-	/*
-	 * Trigger PATH_CHALLENGE validation for the new address.
-	 * Per RFC 9000, we must validate before sending significant data.
-	 */
-	ret = tquic_path_start_validation(conn, path);
-	if (ret < 0) {
-		pr_debug("tquic: failed to start path validation: %d\n", ret);
-		/* Continue anyway - validation failure is non-fatal */
+		/*
+		 * Update path's remote address.
+		 * Per RFC 9000 Section 9.3.2: This could be NAT rebinding,
+		 * so we update the address but start validation.
+		 */
+		spin_lock_bh(&conn->paths_lock);
+		memcpy(&path->remote_addr, new_remote, sizeof(*new_remote));
+		path->last_activity = ktime_get();
+
+		/* Save state and set to pending until validated */
+		path->saved_state = path->state;
+		path->state = TQUIC_PATH_PENDING;
+		spin_unlock_bh(&conn->paths_lock);
+
+		/*
+		 * Trigger PATH_CHALLENGE validation.
+		 * Per RFC 9000, must validate before sending significant data.
+		 */
+		ret = tquic_path_start_validation(conn, path);
+		if (ret < 0) {
+			pr_debug("tquic: failed to start path validation: %d\n", ret);
+			/* Restore state on failure */
+			spin_lock_bh(&conn->paths_lock);
+			path->state = path->saved_state;
+			spin_unlock_bh(&conn->paths_lock);
+		}
 	}
 
 	/* Update statistics */
@@ -467,20 +1098,10 @@ EXPORT_SYMBOL_GPL(tquic_server_handle_migration);
  * =============================================================================
  * SESSION STATE TTL FOR ROUTER RECONNECTS
  * =============================================================================
- *
- * When all paths go down, instead of immediately closing the connection,
- * we keep session state for a configurable TTL period (default 120s per
- * CONTEXT.md). This allows routers to reconnect and resume sessions.
  */
 
 /**
  * struct tquic_session_state - Session state preserved during path loss
- * @conn: Connection this state belongs to
- * @timer: TTL expiration timer
- * @start_time: When all paths went down
- * @ttl_ms: Time to live in milliseconds
- * @packet_queue: Queued packets during path loss
- * @queue_timeout: Timeout for queued packets (default 30s)
  */
 struct tquic_session_state {
 	struct tquic_connection *conn;
@@ -491,13 +1112,6 @@ struct tquic_session_state {
 	u32 queue_timeout_ms;
 };
 
-/**
- * tquic_session_ttl_expired - Timer callback for session TTL expiration
- * @t: Timer that fired
- *
- * Called when the session TTL expires without any paths recovering.
- * Closes the connection and cleans up session state.
- */
 static void tquic_session_ttl_expired(struct timer_list *t)
 {
 	struct tquic_session_state *state;
@@ -516,19 +1130,13 @@ static void tquic_session_ttl_expired(struct timer_list *t)
 	/* Clean up queued packets */
 	skb_queue_purge(&state->packet_queue);
 
+	/* Clear state from connection */
+	conn->state_machine = NULL;
+
 	/* Free session state */
 	kfree(state);
 }
 
-/**
- * tquic_server_start_session_ttl - Start session TTL timer on all paths down
- * @conn: Connection with all paths unavailable
- *
- * Called when the last path becomes unavailable. Instead of closing
- * immediately, we keep session state for the TTL period.
- *
- * Returns: 0 on success, negative errno on failure
- */
 int tquic_server_start_session_ttl(struct tquic_connection *conn)
 {
 	struct tquic_session_state *state;
@@ -543,7 +1151,7 @@ int tquic_server_start_session_ttl(struct tquic_connection *conn)
 	if (client)
 		ttl_ms = client->session_ttl;
 	else
-		ttl_ms = 120000;  /* Default 120s per CONTEXT.md */
+		ttl_ms = 120000;  /* Default 120s */
 
 	/* Check if we already have session state */
 	if (conn->state_machine) {
@@ -564,7 +1172,6 @@ int tquic_server_start_session_ttl(struct tquic_connection *conn)
 	timer_setup(&state->timer, tquic_session_ttl_expired, 0);
 	mod_timer(&state->timer, jiffies + msecs_to_jiffies(ttl_ms));
 
-	/* Store session state in connection */
 	conn->state_machine = state;
 
 	pr_info("tquic: session TTL started for connection token=%u (ttl=%ums)\n",
@@ -574,16 +1181,6 @@ int tquic_server_start_session_ttl(struct tquic_connection *conn)
 }
 EXPORT_SYMBOL_GPL(tquic_server_start_session_ttl);
 
-/**
- * tquic_server_session_resume - Resume session when router reconnects
- * @conn: Connection to resume
- * @path: Path that was recovered
- *
- * Called when a path recovers within the TTL window. Cancels the TTL
- * timer and drains any queued packets.
- *
- * Returns: 0 on success, negative errno on failure
- */
 int tquic_server_session_resume(struct tquic_connection *conn,
 				struct tquic_path *path)
 {
@@ -594,10 +1191,8 @@ int tquic_server_session_resume(struct tquic_connection *conn,
 		return -EINVAL;
 
 	state = (struct tquic_session_state *)conn->state_machine;
-	if (!state) {
-		/* No session state - just a normal path recovery */
+	if (!state)
 		return 0;
-	}
 
 	pr_info("tquic: session resumed for connection token=%u\n",
 		conn->token);
@@ -605,16 +1200,9 @@ int tquic_server_session_resume(struct tquic_connection *conn,
 	/* Cancel TTL timer */
 	del_timer_sync(&state->timer);
 
-	/* Drain queued packets to the recovered path */
-	while ((skb = skb_dequeue(&state->packet_queue)) != NULL) {
-		/*
-		 * Re-transmit queued packet on recovered path.
-		 * Note: These packets may need to be re-encrypted if
-		 * they were partially processed. For now, we just
-		 * drop them and let retransmission handle recovery.
-		 */
+	/* Drain queued packets */
+	while ((skb = skb_dequeue(&state->packet_queue)) != NULL)
 		kfree_skb(skb);
-	}
 
 	/* Free session state */
 	conn->state_machine = NULL;
@@ -627,19 +1215,6 @@ int tquic_server_session_resume(struct tquic_connection *conn,
 }
 EXPORT_SYMBOL_GPL(tquic_server_session_resume);
 
-/**
- * tquic_server_queue_packet - Queue packet during path unavailability
- * @conn: Connection with unavailable paths
- * @skb: Packet to queue
- *
- * Called when a packet needs to be sent but no paths are available.
- * Queues the packet for later transmission when a path recovers.
- * Drops if queue is full or timeout is reached.
- *
- * Per CONTEXT.md: "Queue-with-timeout for path-down scenario" (30s)
- *
- * Returns: 0 on success (queued or timeout), -ENOMEM if queue full
- */
 int tquic_server_queue_packet(struct tquic_connection *conn,
 			      struct sk_buff *skb)
 {
@@ -651,12 +1226,11 @@ int tquic_server_queue_packet(struct tquic_connection *conn,
 
 	state = (struct tquic_session_state *)conn->state_machine;
 	if (!state) {
-		/* No session state - drop packet */
 		kfree_skb(skb);
 		return 0;
 	}
 
-	/* Check queue timeout (30s per CONTEXT.md) */
+	/* Check queue timeout (30s) */
 	elapsed_ms = ktime_ms_delta(ktime_get(), state->start_time);
 	if (elapsed_ms >= state->queue_timeout_ms) {
 		pr_debug("tquic: queue timeout reached, dropping packet\n");
@@ -664,28 +1238,21 @@ int tquic_server_queue_packet(struct tquic_connection *conn,
 		return 0;
 	}
 
-	/* Check queue size (limit to prevent memory exhaustion) */
+	/* Check queue size */
 	if (skb_queue_len(&state->packet_queue) >= 1024) {
+		struct sk_buff *old_skb;
 		pr_debug("tquic: queue full, dropping oldest packet\n");
-		skb = skb_dequeue(&state->packet_queue);
-		if (skb)
-			kfree_skb(skb);
+		old_skb = skb_dequeue(&state->packet_queue);
+		if (old_skb)
+			kfree_skb(old_skb);
 	}
 
-	/* Queue the packet */
 	skb_queue_tail(&state->packet_queue, skb);
 
 	return 0;
 }
 EXPORT_SYMBOL_GPL(tquic_server_queue_packet);
 
-/**
- * tquic_server_check_path_recovery - Check if any paths can be recovered
- * @conn: Connection to check
- *
- * Called periodically to check if any UNAVAILABLE paths can be recovered.
- * If a path's interface comes back up, trigger recovery.
- */
 void tquic_server_check_path_recovery(struct tquic_connection *conn)
 {
 	struct tquic_path *path;
@@ -698,13 +1265,14 @@ void tquic_server_check_path_recovery(struct tquic_connection *conn)
 		if (path->state == TQUIC_PATH_UNAVAILABLE) {
 			/* Check if network device is back up */
 			if (path->dev && netif_running(path->dev)) {
-				/* Try to recover path */
+				/* Restore state and trigger validation */
 				path->state = path->saved_state;
 				if (path->state == TQUIC_PATH_UNUSED)
 					path->state = TQUIC_PATH_PENDING;
 
-				/* Trigger validation */
+				spin_unlock_bh(&conn->paths_lock);
 				tquic_path_start_validation(conn, path);
+				spin_lock_bh(&conn->paths_lock);
 
 				pr_debug("tquic: attempting path %u recovery\n",
 					 path->path_id);
@@ -713,3 +1281,7 @@ void tquic_server_check_path_recovery(struct tquic_connection *conn)
 	}
 	spin_unlock_bh(&conn->paths_lock);
 }
+EXPORT_SYMBOL_GPL(tquic_server_check_path_recovery);
+
+MODULE_DESCRIPTION("TQUIC Connection Migration");
+MODULE_LICENSE("GPL");

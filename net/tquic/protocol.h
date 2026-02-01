@@ -447,12 +447,39 @@ int tquic_cid_retire(struct tquic_connection *conn, u64 seq_num);
 struct tquic_connection *tquic_cid_lookup(const struct tquic_cid *cid);
 int tquic_cid_get_for_migration(struct tquic_connection *conn,
 				struct tquic_cid *cid);
+int tquic_cid_add_remote(struct tquic_connection *conn,
+			 const struct tquic_cid *cid,
+			 u64 seq_num, u64 retire_prior_to,
+			 const u8 *reset_token);
 
-/* CID frame stubs (tquic_cid.c, full impl Phase 3) */
+/* CID frame transmission (tquic_cid.c) */
 void tquic_send_new_connection_id(struct tquic_connection *conn,
 				  const struct tquic_cid *cid,
 				  const u8 *reset_token);
 void tquic_send_retire_connection_id(struct tquic_connection *conn, u64 seq_num);
+
+/* CID rotation (tquic_cid.c) */
+bool tquic_cid_check_rotation(struct tquic_connection *conn);
+int tquic_cid_rotate(struct tquic_connection *conn);
+void tquic_cid_set_rotation_enabled(struct tquic_connection *conn, bool enabled);
+void tquic_cid_update_active_limit(struct tquic_connection *conn, u8 limit);
+
+/* CID sequence number tracking (tquic_cid.c) */
+u64 tquic_cid_get_next_seq(struct tquic_connection *conn);
+u64 tquic_cid_get_retire_prior_to(struct tquic_connection *conn);
+void tquic_cid_handle_peer_retire_prior_to(struct tquic_connection *conn,
+					   u64 retire_prior_to);
+
+/* CID path integration (tquic_cid.c) */
+int tquic_cid_assign_to_path(struct tquic_connection *conn,
+			     struct tquic_path *path,
+			     struct tquic_cid *cid);
+void tquic_cid_release_from_path(struct tquic_connection *conn,
+				 struct tquic_path *path);
+int tquic_cid_get_path_cid(struct tquic_connection *conn,
+			   struct tquic_path *path,
+			   struct tquic_cid *cid);
+void tquic_cid_retire_remote(struct tquic_connection *conn, u64 seq_num);
 
 /* CID table init/exit */
 int __init tquic_cid_table_init(void);

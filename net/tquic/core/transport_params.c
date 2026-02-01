@@ -44,6 +44,12 @@
 /* Custom parameter for multipath/WAN bonding (RFC 9369) */
 #define TP_ENABLE_MULTIPATH			0x0f739bbc1b666d05ULL
 
+/* DATAGRAM frame support (RFC 9221) */
+#define TP_MAX_DATAGRAM_FRAME_SIZE		0x20
+
+/* GREASE (RFC 9287) */
+#define TP_GREASE_QUIC_BIT			0x2ab2
+
 /* Stateless reset token length */
 #define STATELESS_RESET_TOKEN_LEN	16
 
@@ -216,6 +222,9 @@ void tquic_tp_init(struct tquic_transport_params *params)
 
 	/* Multipath disabled by default */
 	params->enable_multipath = false;
+
+	/* DATAGRAM disabled by default (RFC 9221) */
+	params->max_datagram_frame_size = 0;
 }
 EXPORT_SYMBOL_GPL(tquic_tp_init);
 
@@ -240,6 +249,9 @@ void tquic_tp_set_defaults_client(struct tquic_transport_params *params)
 
 	/* Enable multipath for WAN bonding by default on client */
 	params->enable_multipath = true;
+
+	/* Enable DATAGRAM support with reasonable default size */
+	params->max_datagram_frame_size = 65535;
 }
 EXPORT_SYMBOL_GPL(tquic_tp_set_defaults_client);
 
@@ -264,6 +276,9 @@ void tquic_tp_set_defaults_server(struct tquic_transport_params *params)
 
 	/* Enable multipath for WAN bonding by default on server */
 	params->enable_multipath = true;
+
+	/* Enable DATAGRAM support with reasonable default size */
+	params->max_datagram_frame_size = 65535;
 }
 EXPORT_SYMBOL_GPL(tquic_tp_set_defaults_server);
 
@@ -671,6 +686,25 @@ ssize_t tquic_tp_encode(const struct tquic_transport_params *params,
 		offset += ret;
 	}
 
+	/* max_datagram_frame_size (RFC 9221) */
+	if (params->max_datagram_frame_size > 0) {
+		ret = encode_varint_param(buf + offset, buflen - offset,
+					  TP_MAX_DATAGRAM_FRAME_SIZE,
+					  params->max_datagram_frame_size);
+		if (ret < 0)
+			return ret;
+		offset += ret;
+	}
+
+	/* grease_quic_bit (RFC 9287) - zero-length parameter */
+	if (params->grease_quic_bit) {
+		ret = encode_zero_length_param(buf + offset, buflen - offset,
+					       TP_GREASE_QUIC_BIT);
+		if (ret < 0)
+			return ret;
+		offset += ret;
+	}
+
 	return offset;
 }
 EXPORT_SYMBOL_GPL(tquic_tp_encode);
@@ -923,6 +957,23 @@ int tquic_tp_decode(const u8 *buf, size_t buflen, bool is_server,
 			params->retry_scid_present = true;
 			break;
 
+		case TP_MAX_DATAGRAM_FRAME_SIZE:
+			/* RFC 9221: max_datagram_frame_size */
+			ret = tquic_varint_decode(buf + offset, param_len, &value);
+			if (ret < 0 || (size_t)ret != param_len)
+				return -EINVAL;
+			params->max_datagram_frame_size = value;
+			break;
+
+		case TP_GREASE_QUIC_BIT:
+			/*
+			 * RFC 9287: grease_quic_bit
+			 * Zero-length parameter indicating willingness to
+			 * receive packets with GREASE'd fixed bit.
+			 */
+			params->grease_quic_bit = true;
+			break;
+
 		default:
 			/* Handle custom multipath parameter */
 			if (param_id == TP_ENABLE_MULTIPATH) {
@@ -1103,6 +1154,29 @@ int tquic_tp_negotiate(const struct tquic_transport_params *local,
 	 */
 	result->multipath_enabled = local->enable_multipath &&
 				    remote->enable_multipath;
+
+	/*
+	 * DATAGRAM support (RFC 9221):
+	 * Enabled only if both peers advertise non-zero max_datagram_frame_size.
+	 * The negotiated size is the minimum of both values.
+	 */
+	if (local->max_datagram_frame_size > 0 &&
+	    remote->max_datagram_frame_size > 0) {
+		result->datagram_enabled = true;
+		result->max_datagram_frame_size = min(local->max_datagram_frame_size,
+						      remote->max_datagram_frame_size);
+	} else {
+		result->datagram_enabled = false;
+		result->max_datagram_frame_size = 0;
+	}
+
+	/*
+	 * GREASE (RFC 9287):
+	 * Store the peer's grease_quic_bit support for use in packet
+	 * construction. We can only GREASE the fixed bit if the peer
+	 * has advertised support.
+	 */
+	result->peer_grease_quic_bit = remote->grease_quic_bit;
 
 	/* Copy preferred address if server provided one */
 	if (remote->preferred_address_present) {
@@ -1350,6 +1424,14 @@ size_t tquic_tp_encoded_size(const struct tquic_transport_params *params,
 	if (params->enable_multipath)
 		size += 10 + 1;  /* 8-byte ID + length + value */
 
+	/* max_datagram_frame_size (RFC 9221) */
+	if (params->max_datagram_frame_size > 0)
+		size += 2 + tquic_varint_len(params->max_datagram_frame_size);
+
+	/* grease_quic_bit (RFC 9287) - 2-byte ID + 1-byte length (0) */
+	if (params->grease_quic_bit)
+		size += 4;  /* 0x2ab2 = 2-byte varint + 1-byte zero length */
+
 	return size;
 }
 EXPORT_SYMBOL_GPL(tquic_tp_encoded_size);
@@ -1389,6 +1471,10 @@ void tquic_tp_debug_print(const struct tquic_transport_params *params,
 		 params->active_connection_id_limit);
 	pr_debug("%s:   enable_multipath: %s\n", prefix,
 		 params->enable_multipath ? "yes" : "no");
+	pr_debug("%s:   max_datagram_frame_size: %llu\n", prefix,
+		 params->max_datagram_frame_size);
+	pr_debug("%s:   grease_quic_bit: %s\n", prefix,
+		 params->grease_quic_bit ? "yes" : "no");
 
 	if (params->initial_scid_present)
 		pr_debug("%s:   initial_source_cid: %*phN\n", prefix,

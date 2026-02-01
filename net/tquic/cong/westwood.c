@@ -42,6 +42,10 @@
 #define WESTWOOD_RTT_MIN_DEFAULT	(50 * USEC_PER_MSEC)	/* 50ms */
 #define WESTWOOD_BW_SAMPLE_INTERVAL	(50 * USEC_PER_MSEC)	/* 50ms */
 
+/* ECN beta factor for Westwood (same as loss, use BDP-based recovery) */
+#define WESTWOOD_ECN_BETA	800	/* 0.8 scaled by 1000 */
+#define WESTWOOD_ECN_SCALE	1000
+
 /* Per-path Westwood+ state */
 struct tquic_westwood {
 	/* Core state */
@@ -76,6 +80,11 @@ struct tquic_westwood {
 	/* Statistics */
 	u64 total_bytes_acked;
 	u64 loss_events;
+
+	/* ECN state per RFC 9002 Section 7 */
+	ktime_t last_ecn_time;	/* Time of last ECN response */
+	bool ecn_in_round;	/* ECN CE received in current round */
+	u64 ecn_events;		/* Total ECN CE events */
 };
 
 /*
@@ -319,6 +328,95 @@ static void tquic_westwood_on_rtt(void *state, u64 rtt_us)
 		ww->rtt_min_us = rtt_us;
 }
 
+/*
+ * Called on ECN Congestion Experienced (CE) marks
+ *
+ * Westwood+ key insight: Use bandwidth estimate for recovery
+ * rather than traditional multiplicative decrease. This works
+ * well for ECN too, as ECN indicates congestion without loss.
+ *
+ * Per RFC 9002 Section 7:
+ * - Treat ECN-CE as congestion signal similar to loss
+ * - Use BDP-based recovery (Westwood's core feature)
+ * - Don't reduce more than once per RTT
+ *
+ * Westwood+ ECN response uses the same bandwidth-based approach
+ * as loss recovery, setting ssthresh to estimated BDP.
+ */
+static void tquic_westwood_on_ecn(void *state, u64 ecn_ce_count)
+{
+	struct tquic_westwood *ww = state;
+	ktime_t now;
+	s64 time_since_last;
+	u64 bdp;
+
+	if (!ww || ecn_ce_count == 0)
+		return;
+
+	now = ktime_get();
+	ww->ecn_events++;
+
+	/*
+	 * Per RFC 9002: Don't respond more than once per RTT.
+	 */
+	if (ww->ecn_in_round) {
+		pr_debug("tquic_westwood: ECN CE ignored (already responded this round)\n");
+		return;
+	}
+
+	/* Time-based rate limiting using min_rtt */
+	if (ww->rtt_min_us > 0) {
+		time_since_last = ktime_us_delta(now, ww->last_ecn_time);
+		if (time_since_last < ww->rtt_min_us) {
+			pr_debug("tquic_westwood: ECN CE ignored (within RTT window)\n");
+			return;
+		}
+	}
+
+	/* Don't reduce if already in recovery */
+	if (ww->in_recovery) {
+		pr_debug("tquic_westwood: ECN CE ignored (in recovery)\n");
+		return;
+	}
+
+	/*
+	 * Westwood+ ECN Recovery:
+	 *
+	 * Use the same bandwidth-based approach as loss recovery.
+	 * This is Westwood's key advantage - it uses the estimated
+	 * BDP to set ssthresh rather than cwnd/2.
+	 *
+	 * For ECN, we can be slightly less aggressive since packets
+	 * weren't actually lost. Use 80% of estimated BDP.
+	 */
+	bdp = westwood_bdp(ww);
+
+	/*
+	 * Set ssthresh to estimated BDP * beta_ecn
+	 * Slightly less aggressive than loss (which uses raw BDP)
+	 */
+	ww->ssthresh = max(bdp * WESTWOOD_ECN_BETA / WESTWOOD_ECN_SCALE,
+			   (u64)WESTWOOD_MIN_CWND);
+
+	/*
+	 * Set cwnd to ssthresh.
+	 * Westwood allows faster recovery than traditional cwnd/2.
+	 */
+	ww->cwnd = ww->ssthresh;
+
+	/* Enter recovery mode */
+	ww->in_recovery = true;
+	ww->recovery_start = ww->cumulative_ack + ww->cwnd;
+	ww->in_slow_start = false;
+
+	/* Mark that we responded to ECN in this round */
+	ww->ecn_in_round = true;
+	ww->last_ecn_time = now;
+
+	pr_debug("tquic_westwood: ECN CE response, ce_count=%llu cwnd=%llu ssthresh=%llu bw_est=%llu bdp=%llu\n",
+		 ecn_ce_count, ww->cwnd, ww->ssthresh, ww->bw_est, bdp);
+}
+
 static u64 tquic_westwood_get_cwnd(void *state)
 {
 	struct tquic_westwood *ww = state;
@@ -359,6 +457,7 @@ static struct tquic_cong_ops tquic_westwood_ops = {
 	.on_ack = tquic_westwood_on_ack,
 	.on_loss = tquic_westwood_on_loss,
 	.on_rtt_update = tquic_westwood_on_rtt,
+	.on_ecn = tquic_westwood_on_ecn,  /* ECN CE handler per RFC 9002 */
 	.get_cwnd = tquic_westwood_get_cwnd,
 	.get_pacing_rate = tquic_westwood_get_pacing_rate,
 	.can_send = tquic_westwood_can_send,

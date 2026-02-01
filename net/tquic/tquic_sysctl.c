@@ -43,6 +43,17 @@ static char tquic_congestion[16] = "cubic";
 /* Debug tunables */
 static int tquic_debug_level;
 
+/* GREASE (RFC 9287) tunable - enabled by default */
+static int tquic_grease_enabled = 1;
+
+/* Key update tunables (RFC 9001 Section 6) */
+static unsigned long tquic_key_update_interval_packets = (1UL << 20);  /* ~1M packets */
+static int tquic_key_update_interval_seconds = 3600;  /* 1 hour */
+
+/* PMTUD tunables (RFC 8899) */
+static int tquic_pmtud_enabled = 1;
+static int tquic_pmtud_probe_interval = 15000;  /* ms - RFC 8899 recommends 15s */
+
 /* Forward declarations for scheduler API */
 struct tquic_sched_ops;
 struct tquic_sched_ops *tquic_sched_find(const char *name);
@@ -288,6 +299,42 @@ static int proc_tquic_ecn_enabled(struct ctl_table *table, int write,
 	return 0;
 }
 
+/*
+ * Per-netns ECN beta sysctl handler
+ *
+ * Handles reading/writing net.tquic.ecn_beta which sets the cwnd reduction
+ * factor when ECN-CE marks are received. Value is scaled by 1000.
+ * Default is 800 (0.8), meaning cwnd is reduced to 80% on ECN signal.
+ *
+ * Per RFC 9002 Section 7.2: ECN reduction is typically less aggressive
+ * than loss-based reduction (0.8 vs 0.7 for CUBIC).
+ */
+static int proc_tquic_ecn_beta(struct ctl_table *table, int write,
+			       void *buffer, size_t *lenp, loff_t *ppos)
+{
+	struct net *net = current->nsproxy->net_ns;
+	int val = net->tquic.ecn_beta ?: 800;  /* Default to 0.8 */
+	struct ctl_table tmp_table;
+	int ret;
+
+	memset(&tmp_table, 0, sizeof(tmp_table));
+	tmp_table.procname = table->procname;
+	tmp_table.data = &val;
+	tmp_table.maxlen = sizeof(val);
+	tmp_table.mode = table->mode;
+	tmp_table.extra1 = table->extra1;
+	tmp_table.extra2 = table->extra2;
+
+	ret = proc_dointvec_minmax(&tmp_table, write, buffer, lenp, ppos);
+	if (ret || !write)
+		return ret;
+
+	net->tquic.ecn_beta = val;
+	pr_debug("tquic: netns ECN beta set to %d/1000 (%d.%d%%)\n",
+		 val, val / 10, val % 10);
+	return 0;
+}
+
 /* Legacy global sysctl handler (for compatibility) */
 static int tquic_sysctl_scheduler(struct ctl_table *table, int write,
 				  void *buffer, size_t *lenp, loff_t *ppos)
@@ -397,6 +444,43 @@ static int proc_tquic_path_degrade_threshold(struct ctl_table *table, int write,
 	return 0;
 }
 
+/*
+ * Per-netns GREASE sysctl handler
+ *
+ * Handles reading/writing net.tquic.grease_enabled which enables/disables
+ * GREASE (RFC 9287) for forward compatibility testing.
+ *
+ * When enabled:
+ *   - May GREASE the fixed bit in long headers (with peer support)
+ *   - Includes grease_quic_bit transport parameter
+ *   - May include reserved transport parameters (31*N + 27)
+ *   - May include reserved versions in Version Negotiation
+ */
+static int proc_tquic_grease_enabled(struct ctl_table *table, int write,
+				     void *buffer, size_t *lenp, loff_t *ppos)
+{
+	struct net *net = current->nsproxy->net_ns;
+	int val = net->tquic.grease_enabled ? 1 : 0;
+	struct ctl_table tmp_table;
+	int ret;
+
+	memset(&tmp_table, 0, sizeof(tmp_table));
+	tmp_table.procname = table->procname;
+	tmp_table.data = &val;
+	tmp_table.maxlen = sizeof(val);
+	tmp_table.mode = table->mode;
+	tmp_table.extra1 = table->extra1;
+	tmp_table.extra2 = table->extra2;
+
+	ret = proc_dointvec_minmax(&tmp_table, write, buffer, lenp, ppos);
+	if (ret || !write)
+		return ret;
+
+	net->tquic.grease_enabled = !!val;
+	pr_debug("tquic: netns GREASE %s\n", val ? "enabled" : "disabled");
+	return 0;
+}
+
 /* Min/max values for integer tunables */
 static int zero;
 static int one = 1;
@@ -410,6 +494,10 @@ static int max_bond_mode = TQUIC_BOND_MODE_ECF;
 static int max_data = 1024;    /* MB */
 static int max_ack_delay = 1000;
 static int max_bbr_rtt_threshold = 10000;  /* ms */
+static int max_ecn_beta = 1000;  /* Maximum 1.0 (full, no reduction) */
+static unsigned long max_key_update_packets = (1UL << 30);  /* ~1B packets max */
+static int max_key_update_seconds = 86400;  /* 24 hours max */
+static int max_pmtud_probe_interval = 60000;  /* 60 seconds max */
 
 /* Sysctl table */
 static struct ctl_table tquic_sysctl_table[] = {
@@ -588,6 +676,15 @@ static struct ctl_table tquic_sysctl_table[] = {
 		.extra2		= &one,
 	},
 	{
+		.procname	= "ecn_beta",
+		.data		= NULL,  /* Uses current->nsproxy->net_ns */
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_tquic_ecn_beta,
+		.extra1		= &one,  /* Minimum 0.1% */
+		.extra2		= &max_ecn_beta,  /* Maximum 100% */
+	},
+	{
 		.procname	= "pacing_enabled",
 		.data		= NULL,  /* Uses current->nsproxy->net_ns */
 		.maxlen		= sizeof(int),
@@ -611,6 +708,51 @@ static struct ctl_table tquic_sysctl_table[] = {
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec,
+	},
+	{
+		.procname	= "key_update_interval_packets",
+		.data		= &tquic_key_update_interval_packets,
+		.maxlen		= sizeof(unsigned long),
+		.mode		= 0644,
+		.proc_handler	= proc_doulongvec_minmax,
+		.extra1		= &zero,
+		.extra2		= &max_key_update_packets,
+	},
+	{
+		.procname	= "key_update_interval_seconds",
+		.data		= &tquic_key_update_interval_seconds,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= &zero,
+		.extra2		= &max_key_update_seconds,
+	},
+	{
+		.procname	= "grease_enabled",
+		.data		= NULL,  /* Uses current->nsproxy->net_ns */
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_tquic_grease_enabled,
+		.extra1		= &zero,
+		.extra2		= &one,
+	},
+	{
+		.procname	= "pmtud_enabled",
+		.data		= &tquic_pmtud_enabled,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= &zero,
+		.extra2		= &one,
+	},
+	{
+		.procname	= "pmtud_probe_interval_ms",
+		.data		= &tquic_pmtud_probe_interval,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= &one,
+		.extra2		= &max_pmtud_probe_interval,
 	},
 	{ }
 };
@@ -717,6 +859,14 @@ bool tquic_net_get_ecn_enabled(struct net *net)
 }
 EXPORT_SYMBOL_GPL(tquic_net_get_ecn_enabled);
 
+u32 tquic_net_get_ecn_beta(struct net *net)
+{
+	if (!net)
+		return 800;  /* Default 0.8 scaled by 1000 */
+	return net->tquic.ecn_beta ?: 800;
+}
+EXPORT_SYMBOL_GPL(tquic_net_get_ecn_beta);
+
 bool tquic_net_get_pacing_enabled(struct net *net)
 {
 	if (!net)
@@ -732,6 +882,39 @@ int tquic_net_get_path_degrade_threshold(struct net *net)
 	return net->tquic.path_degrade_threshold ?: 5;
 }
 EXPORT_SYMBOL_GPL(tquic_net_get_path_degrade_threshold);
+
+/* GREASE (RFC 9287) accessor */
+int tquic_sysctl_get_grease_enabled(void)
+{
+	return tquic_grease_enabled;
+}
+EXPORT_SYMBOL_GPL(tquic_sysctl_get_grease_enabled);
+
+/* Key update (RFC 9001 Section 6) accessors */
+unsigned long tquic_sysctl_get_key_update_interval_packets(void)
+{
+	return tquic_key_update_interval_packets;
+}
+EXPORT_SYMBOL_GPL(tquic_sysctl_get_key_update_interval_packets);
+
+int tquic_sysctl_get_key_update_interval_seconds(void)
+{
+	return tquic_key_update_interval_seconds;
+}
+EXPORT_SYMBOL_GPL(tquic_sysctl_get_key_update_interval_seconds);
+
+/* PMTUD (RFC 8899) accessors */
+int tquic_sysctl_get_pmtud_enabled(void)
+{
+	return tquic_pmtud_enabled;
+}
+EXPORT_SYMBOL_GPL(tquic_sysctl_get_pmtud_enabled);
+
+int tquic_sysctl_get_pmtud_probe_interval(void)
+{
+	return tquic_pmtud_probe_interval;
+}
+EXPORT_SYMBOL_GPL(tquic_sysctl_get_pmtud_probe_interval);
 
 int __init tquic_sysctl_init(void)
 {

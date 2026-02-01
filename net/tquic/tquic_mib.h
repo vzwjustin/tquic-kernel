@@ -63,12 +63,24 @@ enum linux_tquic_mib_field {
 	TQUIC_MIB_STREAMSCLOSED,         /* Streams closed */
 	TQUIC_MIB_STREAMBLOCKED,         /* Stream limit blocked */
 
+	/* DATAGRAM frame counters (RFC 9221) */
+	TQUIC_MIB_DATAGRAMSRX,           /* DATAGRAM frames received */
+	TQUIC_MIB_DATAGRAMSTX,           /* DATAGRAM frames transmitted */
+	TQUIC_MIB_DATAGRAMSDROPPED,      /* DATAGRAM frames dropped (queue full) */
+
 	/* ECN counters - per CONTEXT.md: "ECN support: available but off by default" */
 	TQUIC_MIB_ECNACKSRX,             /* ACK_ECN frames received */
 	TQUIC_MIB_ECNACKSTX,             /* ACK_ECN frames transmitted */
 	TQUIC_MIB_ECNCEMARKSRX,          /* ECN CE marks received (congestion signals) */
 	TQUIC_MIB_ECNECT0RX,             /* ECT(0) marks received */
 	TQUIC_MIB_ECNECT1RX,             /* ECT(1) marks received */
+
+	/* GRO (Generic Receive Offload) counters */
+	TQUIC_MIB_GROPACKETS,            /* Packets processed by GRO */
+	TQUIC_MIB_GROCOALESCED,          /* Packets coalesced via GRO */
+	TQUIC_MIB_GROFLUSHES,            /* GRO flush events */
+	TQUIC_MIB_GSOPACKETS,            /* Packets processed by GSO */
+	TQUIC_MIB_GSOSEGMENTS,           /* Segments created by GSO */
 
 	/*
 	 * Per-EQUIC error counters (EQUIC_BASE=500)

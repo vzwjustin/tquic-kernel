@@ -41,6 +41,10 @@ enum bbr_mode {
 	BBR_PROBE_RTT,	/* Probe min RTT */
 };
 
+/* ECN parameters for BBR */
+#define BBR_ECN_INFLIGHT_REDUCTION	((BBR_UNIT * 3) / 4)  /* 0.75 */
+#define BBR_ECN_PACING_REDUCTION	((BBR_UNIT * 9) / 10) /* 0.9 */
+
 /* Per-path BBR state */
 struct tquic_bbr {
 	/* Core BBR state */
@@ -80,6 +84,14 @@ struct tquic_bbr {
 	/* PROBE_RTT state */
 	bool probe_rtt_done;
 	u32 probe_rtt_stamp;
+
+	/* ECN state per RFC 9002 Section 7 */
+	u64 inflight_hi;	/* High water mark for inflight */
+	u64 inflight_lo;	/* Low water mark for inflight */
+	ktime_t last_ecn_time;	/* Time of last ECN response */
+	bool ecn_in_round;	/* ECN CE received in current round */
+	bool ecn_eligible;	/* Path is ECN-capable */
+	u64 ecn_ce_total;	/* Total CE marks received */
 };
 
 /* Pacing gain cycle for PROBE_BW */
@@ -305,7 +317,134 @@ static void tquic_bbr_on_ack(void *state, u64 bytes_acked, u64 rtt_us)
 
 static void tquic_bbr_on_loss(void *state, u64 bytes_lost)
 {
-	/* BBR doesn't reduce cwnd on loss, only on measured congestion */
+	/*
+	 * BBR v1 doesn't traditionally reduce cwnd on loss.
+	 * However, persistent loss can indicate that inflight_hi
+	 * is too high. BBR v2 addresses this more explicitly.
+	 *
+	 * For BBR v1 compatibility, we track but don't aggressively respond.
+	 */
+}
+
+/*
+ * Called on ECN Congestion Experienced (CE) marks
+ *
+ * BBR treats ECN as a signal to reduce inflight_hi (the ceiling
+ * on bytes in flight). Unlike loss-based algorithms, BBR doesn't
+ * directly reduce cwnd but instead constrains the amount of data
+ * it keeps in flight.
+ *
+ * Per RFC 9002 Section 7 and BBR draft:
+ * - ECN-CE indicates the queue is building at a bottleneck
+ * - BBR should reduce its inflight target
+ * - May enter PROBE_RTT sooner or reduce pacing rate
+ */
+static void tquic_bbr_on_ecn(void *state, u64 ecn_ce_count)
+{
+	struct tquic_bbr *bbr = state;
+	ktime_t now;
+	s64 time_since_last;
+	u64 bdp;
+
+	if (!bbr || ecn_ce_count == 0)
+		return;
+
+	now = ktime_get();
+
+	/*
+	 * Per RFC 9002: Don't respond more than once per RTT.
+	 * Use time-based rate limiting.
+	 */
+	if (bbr->ecn_in_round) {
+		pr_debug("tquic_bbr: ECN CE ignored (already responded this round)\n");
+		return;
+	}
+
+	/* Time-based rate limiting using min_rtt */
+	if (bbr->min_rtt_us > 0 && bbr->min_rtt_us != UINT_MAX) {
+		time_since_last = ktime_us_delta(now, bbr->last_ecn_time);
+		if (time_since_last < bbr->min_rtt_us) {
+			pr_debug("tquic_bbr: ECN CE ignored (within RTT window)\n");
+			return;
+		}
+	}
+
+	bbr->ecn_ce_total += ecn_ce_count;
+	bbr->ecn_eligible = true;
+
+	/*
+	 * BBR ECN Response Strategy:
+	 *
+	 * 1. Reduce inflight_hi - this caps the amount of data BBR
+	 *    will keep in flight, reducing queue occupancy.
+	 *
+	 * 2. Temporarily reduce pacing gain - this slows down the
+	 *    sending rate to drain the queue.
+	 *
+	 * 3. Consider entering PROBE_RTT sooner if ECN is persistent.
+	 */
+
+	/* Calculate current BDP as baseline */
+	if (bbr->bw > 0 && bbr->min_rtt_us > 0 && bbr->min_rtt_us != UINT_MAX) {
+		bdp = bbr->bw * bbr->min_rtt_us / 1000000;
+	} else {
+		bdp = bbr->cwnd;
+	}
+
+	/*
+	 * Set inflight_hi to limit queue buildup.
+	 * Use 75% of current cwnd as the new ceiling, but not less than BDP.
+	 */
+	if (bbr->inflight_hi == 0)
+		bbr->inflight_hi = bbr->cwnd;
+
+	bbr->inflight_hi = max(
+		bbr->inflight_hi * BBR_ECN_INFLIGHT_REDUCTION / BBR_UNIT,
+		bdp);
+
+	/*
+	 * Reduce cwnd to inflight_hi if it's higher.
+	 * This is a soft constraint - BBR will probe back up.
+	 */
+	if (bbr->cwnd > bbr->inflight_hi)
+		bbr->cwnd = bbr->inflight_hi;
+
+	/*
+	 * Temporarily reduce pacing gain in PROBE_BW mode.
+	 * This helps drain the queue faster.
+	 */
+	if (bbr->mode == BBR_PROBE_BW) {
+		/* Move to a draining cycle phase */
+		bbr->pacing_gain = bbr_pacing_cycle[1];  /* 0.75 drain gain */
+		bbr->cycle_stamp = jiffies_to_msecs(jiffies);
+	}
+
+	/*
+	 * If we're seeing persistent ECN-CE, consider entering PROBE_RTT
+	 * to completely drain the queue and measure true min_rtt.
+	 */
+	if (bbr->ecn_ce_total > 10 && bbr->mode != BBR_PROBE_RTT) {
+		u32 now_ms = jiffies_to_msecs(jiffies);
+
+		/* Enter PROBE_RTT if min_rtt is getting stale anyway */
+		if (now_ms - bbr->min_rtt_stamp > 5000) {  /* 5 seconds */
+			bbr->prior_cwnd = bbr->cwnd;
+			bbr->mode = BBR_PROBE_RTT;
+			bbr->probe_rtt_done = false;
+			bbr->probe_rtt_stamp = now_ms;
+			bbr->pacing_gain = BBR_UNIT;
+		}
+	}
+
+	/* Mark that we responded to ECN in this round */
+	bbr->ecn_in_round = true;
+	bbr->last_ecn_time = now;
+
+	/* Update pacing rate after changes */
+	bbr_set_pacing_rate(bbr);
+
+	pr_debug("tquic_bbr: ECN CE response, ce_count=%llu total=%llu cwnd=%llu inflight_hi=%llu\n",
+		 ecn_ce_count, bbr->ecn_ce_total, bbr->cwnd, bbr->inflight_hi);
 }
 
 static void tquic_bbr_on_rtt(void *state, u64 rtt_us)
@@ -348,6 +487,7 @@ static struct tquic_cong_ops tquic_bbr_ops = {
 	.on_ack = tquic_bbr_on_ack,
 	.on_loss = tquic_bbr_on_loss,
 	.on_rtt_update = tquic_bbr_on_rtt,
+	.on_ecn = tquic_bbr_on_ecn,  /* ECN CE handler per RFC 9002 */
 	.get_cwnd = tquic_bbr_get_cwnd,
 	.get_pacing_rate = tquic_bbr_get_pacing_rate,
 	.can_send = tquic_bbr_can_send,

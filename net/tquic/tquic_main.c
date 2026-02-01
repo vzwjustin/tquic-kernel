@@ -755,12 +755,19 @@ static int __init tquic_init(void)
 	if (err)
 		goto err_diag;
 
+	/* Initialize GRO/GSO offload support */
+	err = tquic_offload_init();
+	if (err)
+		goto err_offload;
+
 	pr_info("tquic: TQUIC WAN bonding subsystem initialized\n");
 	pr_info("tquic: Default bond mode: %d, scheduler: %s, congestion: %s\n",
 		tquic_default_bond_mode, tquic_default_scheduler, tquic_default_cong);
 
 	return 0;
 
+err_offload:
+	tquic_diag_exit();
 err_diag:
 	tquic_proc_exit();
 err_proc:
@@ -783,6 +790,7 @@ static void __exit tquic_exit(void)
 {
 	pr_info("tquic: shutting down TQUIC WAN bonding subsystem\n");
 
+	tquic_offload_exit();
 	tquic_diag_exit();
 	tquic_proc_exit();
 	tquic_sysctl_exit();

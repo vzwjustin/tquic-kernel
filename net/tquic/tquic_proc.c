@@ -437,6 +437,10 @@ static const struct seq_operations tquic_conn_seq_ops = {
 static int tquic_stat_seq_show(struct seq_file *seq, void *v)
 {
 	tquic_mib_seq_show(seq);
+
+	/* Include GRO statistics */
+	tquic_gro_stats_show(seq);
+
 	return 0;
 }
 

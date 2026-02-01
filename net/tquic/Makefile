@@ -17,13 +17,17 @@ tquic-y := \
 	tquic_udp.o \
 	tquic_output.o \
 	tquic_input.o \
+	tquic_offload.o \
 	tquic_timer.o \
 	tquic_cid.o \
 	tquic_migration.o \
+	tquic_pmtud.o \
 	tquic_diag.o \
 	tquic_mib.o \
 	tquic_proc.o \
 	tquic_server.o \
+	tquic_zerocopy.o \
+	grease.o \
 	cong/tquic_cong.o
 
 # Core protocol components
@@ -76,7 +80,8 @@ tquic_coupled-y := cong/coupled.o
 obj-$(CONFIG_TQUIC_CRYPTO) += tquic_crypto.o
 tquic_crypto-y := \
 	crypto/tls.o \
-	crypto/header_protection.o
+	crypto/header_protection.o \
+	crypto/key_update.o
 
 # IPv6 Support
 tquic-$(CONFIG_TQUIC_IPV6) += tquic_ipv6.o
@@ -99,4 +104,5 @@ tquic_test-y := \
 	test/frame_test.o \
 	test/flow_control_test.o \
 	test/scheduler_test.o \
-	test/transport_params_test.o
+	test/transport_params_test.o \
+	test/grease_test.o

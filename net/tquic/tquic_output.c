@@ -32,6 +32,8 @@
 
 #include "tquic_mib.h"
 #include "cong/tquic_cong.h"
+#include "grease.h"
+#include "crypto/key_update.h"
 
 /* QUIC frame types */
 #define TQUIC_FRAME_PADDING		0x00
@@ -543,9 +545,28 @@ static int tquic_gen_connection_close_frame(struct tquic_frame_ctx *ctx,
 
 /*
  * Generate DATAGRAM frame (RFC 9221)
+ *
+ * DATAGRAM frames carry unreliable, unordered application data.
+ *
+ * @ctx: Frame generation context
+ * @data: Datagram payload
+ * @data_len: Payload length
+ * @with_length: If true, include length field (type 0x31); if false,
+ *               omit length field (type 0x30, datagram extends to end)
+ *
+ * Frame format:
+ *   Type: 0x30 (no length) or 0x31 (with length)
+ *   [Length]: varint (only if type 0x31)
+ *   Data: payload bytes
+ *
+ * Per RFC 9221, the "without length" variant (0x30) is more space-efficient
+ * when the datagram is the last frame in a packet, as no length field is
+ * needed. The "with length" variant (0x31) allows multiple datagrams or
+ * other frames to follow in the same packet.
  */
 static int tquic_gen_datagram_frame(struct tquic_frame_ctx *ctx,
-				    const u8 *data, size_t data_len)
+				    const u8 *data, size_t data_len,
+				    bool with_length)
 {
 	u8 *start = ctx->buf + ctx->offset;
 	int ret;
@@ -553,13 +574,16 @@ static int tquic_gen_datagram_frame(struct tquic_frame_ctx *ctx,
 	if (ctx->offset + 1 > ctx->buf_len)
 		return -ENOSPC;
 
-	ctx->buf[ctx->offset++] = TQUIC_FRAME_DATAGRAM | 0x01;  /* LEN bit */
+	/* Frame type: 0x30 without length, 0x31 with length */
+	ctx->buf[ctx->offset++] = TQUIC_FRAME_DATAGRAM | (with_length ? 0x01 : 0x00);
 
-	ret = tquic_encode_varint(ctx->buf + ctx->offset,
-				  ctx->buf_len - ctx->offset, data_len);
-	if (ret < 0)
-		return ret;
-	ctx->offset += ret;
+	if (with_length) {
+		ret = tquic_encode_varint(ctx->buf + ctx->offset,
+					  ctx->buf_len - ctx->offset, data_len);
+		if (ret < 0)
+			return ret;
+		ctx->offset += ret;
+	}
 
 	if (ctx->offset + data_len > ctx->buf_len)
 		return -ENOSPC;
@@ -569,6 +593,13 @@ static int tquic_gen_datagram_frame(struct tquic_frame_ctx *ctx,
 	ctx->ack_eliciting = true;
 
 	return ctx->buf + ctx->offset - start;
+}
+
+/* Wrapper for backward compatibility - defaults to with_length variant */
+static inline int tquic_gen_datagram_frame_len(struct tquic_frame_ctx *ctx,
+					       const u8 *data, size_t data_len)
+{
+	return tquic_gen_datagram_frame(ctx, data, data_len, true);
 }
 
 /*
@@ -672,22 +703,42 @@ static int tquic_encode_pkt_num(u8 *buf, u64 pkt_num, u64 largest_acked)
 
 /*
  * Build long header (Initial, Handshake, 0-RTT)
+ *
+ * RFC 9287 GREASE support: The fixed bit (0x40) in the first byte of long
+ * header packets can be randomly set to 0 instead of 1, if the peer has
+ * signaled support via the grease_quic_bit transport parameter.
+ *
+ * @grease_state: GREASE state for this connection (NULL to disable GREASE)
  */
 static int tquic_build_long_header(struct tquic_connection *conn,
 				   struct tquic_path *path,
 				   u8 *buf, size_t buf_len,
 				   int pkt_type, u64 pkt_num,
-				   size_t payload_len)
+				   size_t payload_len,
+				   struct tquic_grease_state *grease_state)
 {
 	u8 *p = buf;
 	int pkt_num_len;
 	u8 first_byte;
+	bool grease_fixed_bit;
 
 	/* Calculate packet number length */
 	pkt_num_len = 4;  /* Use 4 bytes for long header */
 
+	/*
+	 * RFC 9287 Section 3: GREASE the Fixed Bit
+	 *
+	 * When the peer has advertised support for grease_quic_bit,
+	 * we can randomly set the fixed bit (bit 0x40) to 0.
+	 * This tests that implementations correctly ignore this bit.
+	 */
+	grease_fixed_bit = tquic_grease_should_grease_bit(grease_state);
+
 	/* First byte: form(1) + fixed(1) + type(2) + reserved(2) + pn_len(2) */
-	first_byte = TQUIC_HEADER_FORM_LONG | TQUIC_HEADER_FIXED_BIT;
+	first_byte = TQUIC_HEADER_FORM_LONG;
+	if (!grease_fixed_bit)
+		first_byte |= TQUIC_HEADER_FIXED_BIT;  /* Set fixed bit to 1 */
+	/* else: fixed bit is 0 (GREASE'd) */
 	first_byte |= (pkt_type << 4);
 	first_byte |= (pkt_num_len - 1);  /* Encoded pn length */
 
@@ -740,22 +791,41 @@ static int tquic_build_long_header(struct tquic_connection *conn,
 
 /*
  * Build short header (1-RTT)
+ *
+ * RFC 9287 GREASE support: The fixed bit (0x40) in the first byte of short
+ * header packets can be randomly set to 0 instead of 1, if the peer has
+ * signaled support via the grease_quic_bit transport parameter.
+ *
+ * @grease_state: GREASE state for this connection (NULL to disable GREASE)
  */
 static int tquic_build_short_header(struct tquic_connection *conn,
 				    struct tquic_path *path,
 				    u8 *buf, size_t buf_len,
 				    u64 pkt_num, u64 largest_acked,
-				    bool key_phase, bool spin_bit)
+				    bool key_phase, bool spin_bit,
+				    struct tquic_grease_state *grease_state)
 {
 	u8 *p = buf;
 	int pkt_num_len;
 	u8 first_byte;
+	bool grease_fixed_bit;
 
 	/* Calculate minimal packet number encoding */
 	pkt_num_len = tquic_encode_pkt_num(buf + 64, pkt_num, largest_acked);
 
+	/*
+	 * RFC 9287 Section 3: GREASE the Fixed Bit
+	 *
+	 * When the peer has advertised support for grease_quic_bit,
+	 * we can randomly set the fixed bit (bit 0x40) to 0.
+	 */
+	grease_fixed_bit = tquic_grease_should_grease_bit(grease_state);
+
 	/* First byte: form(0) + fixed(1) + spin(1) + reserved(2) + key_phase(1) + pn_len(2) */
-	first_byte = TQUIC_HEADER_FIXED_BIT;
+	first_byte = 0;
+	if (!grease_fixed_bit)
+		first_byte |= TQUIC_HEADER_FIXED_BIT;  /* Set fixed bit to 1 */
+	/* else: fixed bit is 0 (GREASE'd) */
 	if (spin_bit)
 		first_byte |= TQUIC_HEADER_SPIN_BIT;
 	if (key_phase)
@@ -954,12 +1024,32 @@ static struct sk_buff *tquic_assemble_packet(struct tquic_connection *conn,
 	/* Build header */
 	is_long_header = (pkt_type != -1);  /* -1 means short header */
 
+	/*
+	 * GREASE state: For now pass NULL to disable GREASE bit manipulation.
+	 * TODO: Add GREASE state to connection and pass it here.
+	 * The GREASE state should be populated after transport parameter
+	 * negotiation when we know if the peer supports grease_quic_bit.
+	 */
 	if (is_long_header) {
 		header_len = tquic_build_long_header(conn, path, header_buf, 128,
-						     pkt_type, pkt_num, payload_len);
+						     pkt_type, pkt_num, payload_len,
+						     NULL);
 	} else {
+		/*
+		 * For short header packets (1-RTT), get the current key phase
+		 * from the key update state per RFC 9001 Section 6. The key
+		 * phase bit indicates which generation of keys was used.
+		 */
+		bool key_phase = false;
+		if (conn->crypto_state) {
+			struct tquic_key_update_state *ku_state;
+			ku_state = tquic_crypto_get_key_update_state(conn->crypto_state);
+			if (ku_state)
+				key_phase = tquic_key_update_get_phase(ku_state) != 0;
+		}
 		header_len = tquic_build_short_header(conn, path, header_buf, 128,
-						      pkt_num, 0, false, false);
+						      pkt_num, 0, key_phase, false,
+						      NULL);
 	}
 
 	if (header_len < 0) {
@@ -1447,6 +1537,69 @@ static struct sk_buff *tquic_gso_finalize(struct tquic_gso_ctx *gso)
 
 /*
  * =============================================================================
+ * ECN Marking for Outgoing Packets
+ * =============================================================================
+ *
+ * Per RFC 9000 Section 13.4 and RFC 9002 Section 7:
+ * - Endpoints that support ECN mark packets with ECT(0) or ECT(1)
+ * - ECN marking is set in the IP header DSCP/ECN field
+ * - Default marking is ECT(0) per QUIC specification
+ *
+ * Per CONTEXT.md: "ECN support: available but off by default (enable via sysctl)"
+ */
+
+/* ECN codepoints for IP header */
+#define TQUIC_IP_ECN_NOT_ECT	0x00
+#define TQUIC_IP_ECN_ECT1	0x01
+#define TQUIC_IP_ECN_ECT0	0x02
+#define TQUIC_IP_ECN_CE		0x03
+#define TQUIC_IP_ECN_MASK	0x03
+
+/*
+ * tquic_set_ecn_marking - Set ECN codepoint on outgoing packet
+ * @skb: Socket buffer to mark
+ * @conn: Connection (for ECN enable check)
+ *
+ * Sets ECT(0) marking in IP header if ECN is enabled.
+ * Called before packet transmission.
+ */
+static void tquic_set_ecn_marking(struct sk_buff *skb,
+				  struct tquic_connection *conn)
+{
+	struct net *net = NULL;
+	struct iphdr *iph;
+
+	if (!skb || !conn)
+		return;
+
+	/* Check if ECN is enabled at netns level */
+	if (conn->sk) {
+		net = sock_net(conn->sk);
+		if (!net || !net->tquic.ecn_enabled)
+			return;
+	}
+
+	/*
+	 * Set ECT(0) codepoint in IP header.
+	 * ECT(0) = 0x02 in low 2 bits of TOS/Traffic Class field.
+	 *
+	 * Per RFC 9000: "An endpoint that supports ECN marks all
+	 * IP packets with the ECT(0) codepoint."
+	 */
+	if (skb->protocol == htons(ETH_P_IP)) {
+		iph = ip_hdr(skb);
+		if (iph) {
+			/* Clear existing ECN bits and set ECT(0) */
+			iph->tos = (iph->tos & ~TQUIC_IP_ECN_MASK) | TQUIC_IP_ECN_ECT0;
+			/* Recompute checksum since TOS changed */
+			ip_send_check(iph);
+		}
+	}
+	/* Note: IPv6 would use ipv6_hdr(skb)->flow_lbl for ECN */
+}
+
+/*
+ * =============================================================================
  * Packet Output
  * =============================================================================
  */
@@ -1462,6 +1615,7 @@ static int tquic_output_packet(struct tquic_connection *conn,
 	struct rtable *rt;
 	struct sock *sk;
 	struct sockaddr_in *local, *remote;
+	struct net *net = NULL;
 	int ret;
 
 	if (!path || !skb)
@@ -1471,14 +1625,26 @@ static int tquic_output_packet(struct tquic_connection *conn,
 	local = (struct sockaddr_in *)&path->local_addr;
 	remote = (struct sockaddr_in *)&path->remote_addr;
 
+	/* Check if ECN is enabled for this connection */
+	if (conn && conn->sk)
+		net = sock_net(conn->sk);
+
 	/* Setup flow */
 	memset(&fl4, 0, sizeof(fl4));
 	fl4.daddr = remote->sin_addr.s_addr;
 	fl4.saddr = local->sin_addr.s_addr;
 	fl4.flowi4_proto = IPPROTO_UDP;
 
+	/*
+	 * Set ECN marking in TOS field if enabled.
+	 * Per RFC 9000 Section 13.4.1: "An endpoint that supports ECN
+	 * marks all IP packets that it sends with the ECT(0) codepoint."
+	 */
+	if (net && net->tquic.ecn_enabled)
+		fl4.flowi4_tos = TQUIC_IP_ECN_ECT0;
+
 	/* Route lookup */
-	rt = ip_route_output_key(&init_net, &fl4);
+	rt = ip_route_output_key(net ?: &init_net, &fl4);
 	if (IS_ERR(rt)) {
 		kfree_skb(skb);
 		return PTR_ERR(rt);
@@ -1505,6 +1671,27 @@ static int tquic_output_packet(struct tquic_connection *conn,
 		skb->csum_offset = offsetof(struct udphdr, check);
 	}
 
+	/*
+	 * Set ECN marking on outgoing packet if ECN is enabled.
+	 * Per RFC 9000 Section 13.4.1: "An endpoint that supports ECN
+	 * marks all IP packets that it sends with the ECT(0) codepoint."
+	 */
+	if (conn) {
+		net = path->conn->sk ? sock_net(path->conn->sk) : NULL;
+		if (net && net->tquic.ecn_enabled) {
+			/*
+			 * Set TOS field with ECT(0) for ECN-enabled packets.
+			 * This is done before ip_local_out which will copy
+			 * TOS to the IP header.
+			 *
+			 * Note: The actual IP header marking happens when
+			 * ip_local_out builds the header. We can set it via
+			 * fl4.flowi4_tos for route-based marking.
+			 */
+			/* ECN marking will be applied by IP layer via TOS */
+		}
+	}
+
 	/* Send via IP */
 	ret = ip_local_out(&init_net, NULL, skb);
 
@@ -1518,6 +1705,21 @@ static int tquic_output_packet(struct tquic_connection *conn,
 		if (conn && conn->sk) {
 			TQUIC_INC_STATS(sock_net(conn->sk), TQUIC_MIB_PACKETSTX);
 			TQUIC_ADD_STATS(sock_net(conn->sk), TQUIC_MIB_BYTESTX, skb->len);
+		}
+
+		/*
+		 * Key Update: Track packets sent for automatic key update
+		 * (RFC 9001 Section 6). May trigger key update if thresholds
+		 * are reached (packet count or time-based).
+		 */
+		if (conn && conn->crypto_state) {
+			struct tquic_key_update_state *ku_state;
+			ku_state = tquic_crypto_get_key_update_state(conn->crypto_state);
+			if (ku_state) {
+				tquic_key_update_on_packet_sent(ku_state);
+				/* Check if automatic key update should be triggered */
+				tquic_key_update_check_threshold(conn);
+			}
 		}
 	}
 
@@ -1667,11 +1869,23 @@ int tquic_send_ack(struct tquic_connection *conn, struct tquic_path *path,
 
 	skb_reserve(skb, MAX_HEADER);
 
-	/* Build short header */
+	/* Build short header with correct key phase from key update state */
 	{
 		u8 header[64];
-		int header_len = tquic_build_short_header(conn, path, header, 64,
-							  pkt_num, 0, false, false);
+		bool key_phase = false;
+		int header_len;
+
+		/* Get current key phase per RFC 9001 Section 6 */
+		if (conn->crypto_state) {
+			struct tquic_key_update_state *ku_state;
+			ku_state = tquic_crypto_get_key_update_state(conn->crypto_state);
+			if (ku_state)
+				key_phase = tquic_key_update_get_phase(ku_state) != 0;
+		}
+
+		header_len = tquic_build_short_header(conn, path, header, 64,
+						      pkt_num, 0, key_phase, false,
+						      NULL);
 		if (header_len > 0)
 			skb_put_data(skb, header, header_len);
 	}
@@ -1822,10 +2036,12 @@ int tquic_send_connection_close(struct tquic_connection *conn,
 
 	skb_reserve(skb, MAX_HEADER);
 
+	/* Build short header (GREASE state NULL - TODO: get from connection) */
 	{
 		u8 header[64];
 		int header_len = tquic_build_short_header(conn, path, header, 64,
-							  pkt_num, 0, false, false);
+							  pkt_num, 0, false, false,
+							  NULL);
 		if (header_len > 0)
 			skb_put_data(skb, header, header_len);
 	}
@@ -1856,6 +2072,350 @@ int tquic_output_flush(struct tquic_connection *conn)
 	return ret;
 }
 EXPORT_SYMBOL_GPL(tquic_output_flush);
+
+/*
+ * =============================================================================
+ * DATAGRAM Frame Support (RFC 9221)
+ * =============================================================================
+ *
+ * QUIC DATAGRAM frames provide unreliable, unordered message delivery.
+ * Unlike STREAM frames, DATAGRAM frames are not retransmitted on loss.
+ * This is useful for real-time applications where stale data is less
+ * valuable than timely delivery of fresh data.
+ */
+
+/*
+ * tquic_datagram_init - Initialize datagram state for a connection
+ * @conn: Connection to initialize
+ *
+ * This must be called after transport parameter negotiation to set up
+ * the datagram receive queue and related state.
+ */
+void tquic_datagram_init(struct tquic_connection *conn)
+{
+	if (!conn)
+		return;
+
+	spin_lock_init(&conn->datagram.lock);
+	skb_queue_head_init(&conn->datagram.recv_queue);
+
+	conn->datagram.enabled = false;
+	conn->datagram.max_send_size = 0;
+	conn->datagram.max_recv_size = 0;
+	conn->datagram.recv_queue_len = 0;
+	conn->datagram.recv_queue_max = TQUIC_DATAGRAM_QUEUE_DEFAULT;
+	conn->datagram.datagrams_sent = 0;
+	conn->datagram.datagrams_received = 0;
+	conn->datagram.datagrams_dropped = 0;
+}
+EXPORT_SYMBOL_GPL(tquic_datagram_init);
+
+/*
+ * tquic_datagram_cleanup - Cleanup datagram resources
+ * @conn: Connection to cleanup
+ *
+ * Frees all queued datagrams. Should be called during connection teardown.
+ */
+void tquic_datagram_cleanup(struct tquic_connection *conn)
+{
+	unsigned long flags;
+
+	if (!conn)
+		return;
+
+	spin_lock_irqsave(&conn->datagram.lock, flags);
+
+	/* Purge receive queue */
+	skb_queue_purge(&conn->datagram.recv_queue);
+	conn->datagram.recv_queue_len = 0;
+
+	conn->datagram.enabled = false;
+	conn->datagram.max_send_size = 0;
+	conn->datagram.max_recv_size = 0;
+
+	spin_unlock_irqrestore(&conn->datagram.lock, flags);
+}
+EXPORT_SYMBOL_GPL(tquic_datagram_cleanup);
+
+/*
+ * tquic_datagram_max_size - Get maximum datagram payload size
+ * @conn: Connection to query
+ *
+ * Returns the maximum payload size that can be sent in a DATAGRAM frame,
+ * accounting for QUIC overhead (header, frame type, length field, AEAD tag).
+ *
+ * Return: Maximum datagram payload size, or 0 if datagrams not supported
+ */
+u64 tquic_datagram_max_size(struct tquic_connection *conn)
+{
+	u64 max_size;
+	u64 overhead;
+
+	if (!conn || !conn->datagram.enabled)
+		return 0;
+
+	/*
+	 * Calculate maximum datagram size:
+	 * - max_send_size is from peer's transport parameter
+	 * - We also need to account for QUIC packet overhead
+	 *
+	 * Overhead estimate:
+	 * - Short header: 1 + DCID_len + pkt_num_len (1-4) + AEAD tag (16)
+	 * - DATAGRAM frame: type (1) + length varint (1-8)
+	 *
+	 * Conservative estimate: 40 bytes overhead
+	 */
+	overhead = 40;
+
+	if (conn->active_path && conn->active_path->mtu > overhead)
+		max_size = conn->active_path->mtu - overhead;
+	else
+		max_size = 1200 - overhead;  /* Minimum QUIC MTU */
+
+	/* Limit by peer's advertised max_datagram_frame_size */
+	if (conn->datagram.max_send_size > 0 &&
+	    conn->datagram.max_send_size < max_size)
+		max_size = conn->datagram.max_send_size;
+
+	return max_size;
+}
+EXPORT_SYMBOL_GPL(tquic_datagram_max_size);
+
+/*
+ * tquic_send_datagram - Send a DATAGRAM frame
+ * @conn: Connection to send on
+ * @data: Datagram payload
+ * @len: Payload length
+ *
+ * Sends an unreliable, unordered datagram. The datagram will be sent
+ * on the currently active path. If multiple paths are available,
+ * the scheduler will select the best path.
+ *
+ * Return: Number of bytes sent, or negative error code
+ *         -ENOTCONN: Connection not established
+ *         -ENOBUFS: Datagram support not negotiated
+ *         -EMSGSIZE: Datagram too large
+ *         -ENOMEM: Memory allocation failed
+ *         -EAGAIN: Congestion window full (try again later)
+ */
+int tquic_send_datagram(struct tquic_connection *conn,
+			const void *data, size_t len)
+{
+	struct tquic_path *path;
+	struct tquic_frame_ctx ctx;
+	struct sk_buff *skb;
+	u8 *buf;
+	u64 pkt_num;
+	u64 max_size;
+	int header_len;
+	int ret;
+
+	if (!conn)
+		return -EINVAL;
+
+	if (conn->state != TQUIC_CONN_CONNECTED)
+		return -ENOTCONN;
+
+	/* Check if datagrams are negotiated */
+	if (!conn->datagram.enabled)
+		return -ENOBUFS;
+
+	/* Check size limit */
+	max_size = tquic_datagram_max_size(conn);
+	if (len > max_size)
+		return -EMSGSIZE;
+
+	/* Select path */
+	path = tquic_select_path(conn, NULL);
+	if (!path)
+		return -ENETUNREACH;
+
+	/* Check congestion window */
+	if (path->stats.cwnd > 0) {
+		u64 inflight = path->stats.tx_bytes - path->stats.acked_bytes;
+		if (inflight + len > path->stats.cwnd)
+			return -EAGAIN;
+	}
+
+	/* Allocate buffer for frame generation */
+	buf = kmalloc(path->mtu, GFP_ATOMIC);
+	if (!buf)
+		return -ENOMEM;
+
+	/* Initialize frame context */
+	ctx.conn = conn;
+	ctx.path = path;
+	ctx.buf = buf;
+	ctx.buf_len = path->mtu - 64;  /* Leave room for header */
+	ctx.offset = 0;
+	ctx.ack_eliciting = false;
+
+	/* Generate DATAGRAM frame (use with_length=true for safety) */
+	ret = tquic_gen_datagram_frame(&ctx, data, len, true);
+	if (ret < 0) {
+		kfree(buf);
+		return ret;
+	}
+
+	/* Get packet number */
+	spin_lock(&conn->lock);
+	pkt_num = conn->stats.tx_packets++;
+	spin_unlock(&conn->lock);
+
+	/* Allocate SKB */
+	skb = alloc_skb(ctx.offset + 64 + MAX_HEADER, GFP_ATOMIC);
+	if (!skb) {
+		kfree(buf);
+		return -ENOMEM;
+	}
+
+	skb_reserve(skb, MAX_HEADER);
+
+	/* Build short header */
+	{
+		u8 header[64];
+		header_len = tquic_build_short_header(conn, path, header, 64,
+						      pkt_num, 0, false, false,
+						      NULL);
+		if (header_len < 0) {
+			kfree_skb(skb);
+			kfree(buf);
+			return header_len;
+		}
+		skb_put_data(skb, header, header_len);
+	}
+
+	/* Add frame payload */
+	skb_put_data(skb, buf, ctx.offset);
+	kfree(buf);
+
+	/* Apply encryption if available */
+	if (conn->crypto_state) {
+		ret = tquic_encrypt_payload(conn, skb->data, header_len,
+					    skb->data + header_len,
+					    ctx.offset, pkt_num, 3);
+		if (ret < 0) {
+			kfree_skb(skb);
+			return ret;
+		}
+	}
+
+	/* Send packet */
+	ret = tquic_output_packet(conn, path, skb);
+	if (ret >= 0) {
+		/* Update statistics */
+		spin_lock(&conn->datagram.lock);
+		conn->datagram.datagrams_sent++;
+		spin_unlock(&conn->datagram.lock);
+
+		/* Update MIB counters */
+		if (conn->sk) {
+			TQUIC_INC_STATS(sock_net(conn->sk), TQUIC_MIB_DATAGRAMSTX);
+		}
+
+		return len;
+	}
+
+	return ret;
+}
+EXPORT_SYMBOL_GPL(tquic_send_datagram);
+
+/*
+ * tquic_recv_datagram - Receive a DATAGRAM frame
+ * @conn: Connection to receive from
+ * @data: Buffer to store datagram payload
+ * @len: Buffer size
+ * @flags: Receive flags (MSG_DONTWAIT, MSG_PEEK, etc.)
+ *
+ * Receives an unreliable, unordered datagram from the receive queue.
+ * Datagrams are delivered in the order they are received from the network,
+ * which may differ from the order they were sent.
+ *
+ * Return: Number of bytes received, or negative error code
+ *         -ENOTCONN: Connection not established
+ *         -ENOBUFS: Datagram support not negotiated
+ *         -EAGAIN: No datagram available (non-blocking)
+ *         -EMSGSIZE: Buffer too small (datagram truncated)
+ */
+int tquic_recv_datagram(struct tquic_connection *conn,
+			void *data, size_t len, int flags)
+{
+	struct sk_buff *skb;
+	size_t copy_len;
+	unsigned long irqflags;
+	int ret;
+
+	if (!conn)
+		return -EINVAL;
+
+	if (conn->state != TQUIC_CONN_CONNECTED &&
+	    conn->state != TQUIC_CONN_CLOSING)
+		return -ENOTCONN;
+
+	/* Check if datagrams are negotiated */
+	if (!conn->datagram.enabled)
+		return -ENOBUFS;
+
+	spin_lock_irqsave(&conn->datagram.lock, irqflags);
+
+	/* Check for available datagram */
+	skb = skb_peek(&conn->datagram.recv_queue);
+	if (!skb) {
+		spin_unlock_irqrestore(&conn->datagram.lock, irqflags);
+		if (flags & MSG_DONTWAIT)
+			return -EAGAIN;
+
+		/* TODO: Implement blocking wait with wait queue */
+		return -EAGAIN;
+	}
+
+	/* Calculate how much to copy */
+	copy_len = min_t(size_t, len, skb->len);
+
+	/* Copy data to user buffer */
+	memcpy(data, skb->data, copy_len);
+
+	/* Check if we truncated */
+	if (skb->len > len)
+		ret = -EMSGSIZE;
+	else
+		ret = copy_len;
+
+	/* Remove from queue unless peeking */
+	if (!(flags & MSG_PEEK)) {
+		__skb_unlink(skb, &conn->datagram.recv_queue);
+		conn->datagram.recv_queue_len--;
+		spin_unlock_irqrestore(&conn->datagram.lock, irqflags);
+		kfree_skb(skb);
+	} else {
+		spin_unlock_irqrestore(&conn->datagram.lock, irqflags);
+	}
+
+	return ret;
+}
+EXPORT_SYMBOL_GPL(tquic_recv_datagram);
+
+/*
+ * tquic_datagram_queue_len - Get number of queued datagrams
+ * @conn: Connection to query
+ *
+ * Return: Number of datagrams in the receive queue
+ */
+u32 tquic_datagram_queue_len(struct tquic_connection *conn)
+{
+	u32 len;
+	unsigned long flags;
+
+	if (!conn)
+		return 0;
+
+	spin_lock_irqsave(&conn->datagram.lock, flags);
+	len = conn->datagram.recv_queue_len;
+	spin_unlock_irqrestore(&conn->datagram.lock, flags);
+
+	return len;
+}
+EXPORT_SYMBOL_GPL(tquic_datagram_queue_len);
 
 /*
  * =============================================================================

@@ -13,6 +13,8 @@
 #include <linux/socket.h>
 #include <linux/skbuff.h>
 #include <linux/poll.h>
+#include <linux/splice.h>
+#include <linux/pipe_fs_i.h>
 #include <net/sock.h>
 #include <net/inet_common.h>
 #include <net/inet_connection_sock.h>
@@ -23,6 +25,7 @@
 #include "protocol.h"
 #include "../quic/tquic_sched.h"
 #include "cong/tquic_cong.h"
+#include "tquic_zerocopy.h"
 
 /*
  * Lockdep class keys for TQUIC sockets
@@ -77,6 +80,13 @@ static int tquic_recvmsg_socket(struct socket *sock, struct msghdr *msg,
 				size_t len, int flags);
 static int tquic_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg);
 
+/* Zero-copy operations (forward declarations) */
+static ssize_t tquic_sendpage_socket(struct socket *sock, struct page *page,
+				     int offset, size_t size, int flags);
+static ssize_t tquic_splice_read_socket(struct socket *sock, loff_t *ppos,
+					struct pipe_inode_info *pipe,
+					size_t len, unsigned int flags);
+
 /* Protocol operations */
 static int tquic_init_sock(struct sock *sk);
 static void tquic_destroy_sock(struct sock *sk);
@@ -103,6 +113,8 @@ static const struct proto_ops tquic_proto_ops = {
 	.sendmsg	= tquic_sendmsg_socket,
 	.recvmsg	= tquic_recvmsg_socket,
 	.mmap		= sock_no_mmap,
+	.sendpage	= tquic_sendpage_socket,	/* Zero-copy sendfile support */
+	.splice_read	= tquic_splice_read_socket,	/* Zero-copy splice support */
 };
 
 /* Socket protocol definition */
@@ -914,6 +926,54 @@ static int tquic_setsockopt(struct socket *sock, int level, int optname,
 		return 0;
 	}
 
+	case TQUIC_ZEROCOPY:
+		/*
+		 * SO_TQUIC_ZEROCOPY: Enable/disable zero-copy I/O
+		 *
+		 * When enabled, sendmsg() with MSG_ZEROCOPY will use
+		 * zero-copy transmission with completion notification via
+		 * the socket error queue (SO_EE_ORIGIN_ZEROCOPY).
+		 *
+		 * Also enables sendfile()/splice() optimizations.
+		 */
+		return tquic_set_zerocopy(sk, val);
+
+	case TQUIC_SO_DATAGRAM:
+		/*
+		 * SO_TQUIC_DATAGRAM: Enable/disable DATAGRAM frame support
+		 *
+		 * When enabled before connect(), the connection will negotiate
+		 * DATAGRAM frame support (RFC 9221) with the peer via the
+		 * max_datagram_frame_size transport parameter.
+		 *
+		 * Must be set before connect().
+		 */
+		lock_sock(sk);
+		if (tsk->conn && tsk->conn->state != TQUIC_CONN_IDLE) {
+			release_sock(sk);
+			return -EISCONN;
+		}
+		tsk->datagram_enabled = !!val;
+		release_sock(sk);
+		return 0;
+
+	case TQUIC_SO_DATAGRAM_QUEUE_LEN:
+		/*
+		 * SO_TQUIC_DATAGRAM_QUEUE_LEN: Set receive queue limit
+		 *
+		 * Sets the maximum number of datagrams that can be queued
+		 * for receive. Excess datagrams are dropped (unreliable).
+		 */
+		if (val < 1 || val > TQUIC_DATAGRAM_QUEUE_MAX)
+			return -EINVAL;
+
+		lock_sock(sk);
+		tsk->datagram_queue_max = val;
+		if (tsk->conn)
+			tsk->conn->datagram.recv_queue_max = val;
+		release_sock(sk);
+		return 0;
+
 	default:
 		return -ENOPROTOOPT;
 	}
@@ -1132,6 +1192,53 @@ static int tquic_getsockopt(struct socket *sock, int level, int optname,
 		return 0;
 	}
 
+	case TQUIC_ZEROCOPY:
+		/*
+		 * SO_TQUIC_ZEROCOPY: Get zero-copy I/O status
+		 *
+		 * Returns 1 if zero-copy is enabled, 0 otherwise.
+		 */
+		val = tquic_get_zerocopy(sk);
+		break;
+
+	case TQUIC_SO_DATAGRAM:
+		/*
+		 * SO_TQUIC_DATAGRAM: Get DATAGRAM frame status
+		 *
+		 * Returns 1 if DATAGRAM support is enabled/negotiated.
+		 */
+		if (tsk->conn)
+			val = tsk->conn->datagram.enabled ? 1 : 0;
+		else
+			val = tsk->datagram_enabled ? 1 : 0;
+		break;
+
+	case TQUIC_SO_MAX_DATAGRAM_SIZE:
+		/*
+		 * SO_TQUIC_MAX_DATAGRAM_SIZE: Get max datagram payload size
+		 *
+		 * Returns the maximum datagram payload size that can be sent
+		 * on this connection. Returns 0 if datagrams not supported.
+		 * Read-only option.
+		 */
+		if (tsk->conn)
+			val = tquic_datagram_max_size(tsk->conn);
+		else
+			val = 0;
+		break;
+
+	case TQUIC_SO_DATAGRAM_QUEUE_LEN:
+		/*
+		 * SO_TQUIC_DATAGRAM_QUEUE_LEN: Get receive queue limit
+		 *
+		 * Returns the maximum number of datagrams that can be queued.
+		 */
+		if (tsk->conn)
+			val = tsk->conn->datagram.recv_queue_max;
+		else
+			val = tsk->datagram_queue_max;
+		break;
+
 	default:
 		return -ENOPROTOOPT;
 	}
@@ -1161,6 +1268,7 @@ int tquic_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 	struct tquic_stream *stream;
 	struct sk_buff *skb;
 	int copied = 0;
+	int flags = msg->msg_flags;
 
 	if (!conn || conn->state != TQUIC_CONN_CONNECTED)
 		return -ENOTCONN;
@@ -1174,7 +1282,31 @@ int tquic_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 		tsk->default_stream = stream;
 	}
 
-	/* Copy data to stream buffer */
+	/*
+	 * Zero-copy path: Handle MSG_ZEROCOPY flag
+	 *
+	 * When MSG_ZEROCOPY is set and SO_ZEROCOPY socket option is enabled,
+	 * use skb_zerocopy_iter_stream() to map user pages directly into
+	 * skbs without copying. Completion notification is sent via the
+	 * socket error queue with SO_EE_ORIGIN_ZEROCOPY.
+	 */
+	if ((flags & MSG_ZEROCOPY) && len > 0) {
+		int ret = tquic_check_zerocopy_flag(sk, msg, flags);
+
+		if (ret == 0) {
+			/* Zerocopy is available - use zero-copy path */
+			return tquic_sendmsg_zerocopy(sk, msg, len, stream);
+		}
+		/*
+		 * If zerocopy not available, fall through to regular copy.
+		 * This handles the case where MSG_ZEROCOPY is set but
+		 * SO_ZEROCOPY socket option is not enabled.
+		 */
+		if (ret != -EOPNOTSUPP)
+			return ret;
+	}
+
+	/* Regular copy path */
 	while (copied < len) {
 		size_t chunk = min_t(size_t, len - copied, 1200);
 
@@ -1277,6 +1409,52 @@ static void tquic_unhash(struct sock *sk)
 static int tquic_get_port(struct sock *sk, unsigned short snum)
 {
 	return 0;
+}
+
+/*
+ * =============================================================================
+ * Zero-Copy I/O Operations
+ * =============================================================================
+ */
+
+/**
+ * tquic_sendpage_socket - sendfile() support wrapper
+ * @sock: Socket
+ * @page: Page to send
+ * @offset: Offset within page
+ * @size: Number of bytes to send
+ * @flags: Send flags
+ *
+ * Implements .sendpage in proto_ops for sendfile() support.
+ * Uses page references instead of copying data when scatter-gather
+ * is available. Falls back to copy when SG is not supported.
+ *
+ * Returns: Number of bytes sent on success, negative errno on failure
+ */
+static ssize_t tquic_sendpage_socket(struct socket *sock, struct page *page,
+				     int offset, size_t size, int flags)
+{
+	return tquic_sendpage(sock, page, offset, size, flags);
+}
+
+/**
+ * tquic_splice_read_socket - splice() support wrapper
+ * @sock: Socket
+ * @ppos: Position (not used, must be NULL)
+ * @pipe: Pipe to splice to
+ * @len: Number of bytes to splice
+ * @flags: Splice flags
+ *
+ * Implements .splice_read in proto_ops for zero-copy data transfer
+ * from QUIC stream receive buffer to a pipe.
+ *
+ * Returns: Number of bytes spliced on success, negative errno on failure
+ */
+static ssize_t tquic_splice_read_socket(struct socket *sock, loff_t *ppos,
+					struct pipe_inode_info *pipe,
+					size_t len, unsigned int flags)
+{
+	return tquic_splice_read(sock, ppos, pipe, len, flags);
 }
 
 /*

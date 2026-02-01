@@ -948,32 +948,64 @@ EXPORT_SYMBOL_GPL(tquic_cong_is_coupling_enabled);
  * @ecn_ce_count: Number of ECN CE marks reported in ACK
  *
  * ECN CE (Congestion Experienced) marks indicate congestion without loss.
- * The CC algorithm should reduce CWND similar to loss response.
+ * Per RFC 9002 Section 7.1, each increase in the ECN-CE counter is a
+ * signal of congestion that the sender should respond to.
  *
  * Per CONTEXT.md: "Loss on one path reduces only that path's CWND"
  * This applies to ECN as well - ECN on one path affects only that path.
+ *
+ * This function dispatches to the CC algorithm's on_ecn callback if
+ * available, otherwise falls back to on_loss with estimated bytes.
  */
 void tquic_cong_on_ecn(struct tquic_path *path, u64 ecn_ce_count)
 {
 	struct tquic_cong_ops *ca;
+	struct net *net = NULL;
 
 	if (!path || ecn_ce_count == 0)
 		return;
+
+	/* Check if ECN is enabled at netns level */
+	if (path->conn && path->conn->sk) {
+		net = sock_net(path->conn->sk);
+		if (net && !net->tquic.ecn_enabled) {
+			/* ECN disabled for this namespace, ignore CE marks */
+			pr_debug("tquic_cong: ECN CE ignored (ecn_enabled=0)\n");
+			return;
+		}
+	}
 
 	ca = path->cong_ops;
 	if (!ca || !path->cong)
 		return;
 
 	/*
-	 * ECN CE is treated as a congestion signal, similar to loss.
-	 * Call on_loss with an estimated bytes value based on CE count.
+	 * Per RFC 9002 Section 7.1:
+	 * "Each increase in the ECN-CE counter is a signal of congestion.
+	 * The sender SHOULD reduce the congestion window using the approach
+	 * described in Section 7.3 or an equivalent approach."
 	 *
-	 * RFC 9002 Section 7.1: "Each increase in the ECN-CE counter
-	 * SHOULD be treated as a single congestion notification."
+	 * Prefer the dedicated on_ecn callback if available, as it allows
+	 * CC algorithms to implement ECN-specific responses (e.g., different
+	 * reduction factors, different timing constraints).
 	 *
-	 * We estimate 1200 bytes (MTU) per CE mark for CWND reduction.
+	 * Fall back to on_loss if on_ecn is not implemented.
 	 */
-	if (ca->on_loss) {
+	if (ca->on_ecn) {
+		/* Use dedicated ECN handler */
+		ca->on_ecn(path->cong, ecn_ce_count);
+
+		/* Update path stats from CC state */
+		if (ca->get_cwnd)
+			path->stats.cwnd = ca->get_cwnd(path->cong);
+
+		pr_debug("tquic_cong: ECN CE on path %u via on_ecn, ce_count=%llu, new_cwnd=%u\n",
+			 path->path_id, ecn_ce_count, path->stats.cwnd);
+	} else if (ca->on_loss) {
+		/*
+		 * Fallback: Treat ECN CE similar to loss.
+		 * Estimate 1200 bytes (MTU) per CE mark for CWND reduction.
+		 */
 		u64 ecn_bytes = ecn_ce_count * 1200;
 		ca->on_loss(path->cong, ecn_bytes);
 
@@ -981,9 +1013,13 @@ void tquic_cong_on_ecn(struct tquic_path *path, u64 ecn_ce_count)
 		if (ca->get_cwnd)
 			path->stats.cwnd = ca->get_cwnd(path->cong);
 
-		pr_debug("tquic_cong: ECN CE on path %u, ce_count=%llu, new_cwnd=%u\n",
+		pr_debug("tquic_cong: ECN CE on path %u via on_loss fallback, ce_count=%llu, new_cwnd=%u\n",
 			 path->path_id, ecn_ce_count, path->stats.cwnd);
 	}
+
+	/* Update pacing rate after congestion response */
+	if (path->conn && path->conn->sk)
+		tquic_update_pacing(path->conn->sk, path);
 }
 EXPORT_SYMBOL_GPL(tquic_cong_on_ecn);
 
