@@ -805,16 +805,18 @@ int tquic_server_handshake(struct sock *listener_sk,
 		sizeof(child_tsk->requested_scheduler));
 
 	/* Initialize scheduler for child connection */
-	ret = tquic_sched_init_conn(conn,
-				    child_tsk->requested_scheduler[0] ?
-				    child_tsk->requested_scheduler : NULL);
-	if (ret < 0) {
-		pr_warn("tquic: scheduler init failed for child: %d, using default\n", ret);
-		/* Try with default scheduler */
-		ret = tquic_sched_init_conn(conn, NULL);
-		if (ret < 0) {
-			pr_debug("tquic: default scheduler init failed: %d\n", ret);
-			/* Non-fatal - continue without explicit scheduler */
+	{
+		struct tquic_sched_ops *sched_ops = NULL;
+
+		if (child_tsk->requested_scheduler[0])
+			sched_ops = tquic_sched_find(child_tsk->requested_scheduler);
+
+		conn->scheduler = tquic_sched_init_conn(conn, sched_ops);
+		if (!conn->scheduler) {
+			pr_warn("tquic: scheduler init failed for child, using default\n");
+			conn->scheduler = tquic_sched_init_conn(conn, NULL);
+			if (!conn->scheduler)
+				pr_debug("tquic: default scheduler init failed\n");
 		}
 	}
 
