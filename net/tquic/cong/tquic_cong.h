@@ -101,6 +101,55 @@ void tquic_cong_on_ack(struct tquic_path *path, u64 bytes_acked, u64 rtt_us);
 void tquic_cong_on_loss(struct tquic_path *path, u64 bytes_lost);
 
 /*
+ * =============================================================================
+ * Persistent Congestion Detection (RFC 9002 Section 7.6)
+ * =============================================================================
+ *
+ * Persistent congestion is detected when an ack-eliciting packet is lost and
+ * its loss is contiguous with a loss spanning more than the persistent
+ * congestion duration. When persistent congestion is established, the
+ * sender's congestion window MUST be reduced to the minimum congestion
+ * window (kMinimumWindow).
+ */
+
+/* Forward declaration for persistent congestion info */
+struct tquic_persistent_cong_info;
+struct tquic_lost_packet;
+
+/*
+ * tquic_cong_on_persistent_congestion - Dispatch persistent congestion event
+ * @path: Path that experienced persistent congestion
+ * @info: Persistent congestion information (period, min_cwnd)
+ *
+ * Called when persistent congestion is detected per RFC 9002 Section 7.6.
+ * Dispatches to the CC algorithm's on_persistent_congestion callback.
+ * The CC algorithm should reset its state to minimum congestion window.
+ */
+void tquic_cong_on_persistent_congestion(struct tquic_path *path,
+					 struct tquic_persistent_cong_info *info);
+
+/*
+ * tquic_cong_check_persistent_congestion - Check for persistent congestion
+ * @path: Path to check for persistent congestion
+ * @lost_packets: Array of lost packets sorted by send time
+ * @num_lost: Number of packets in the lost_packets array
+ * @smoothed_rtt: Smoothed RTT in microseconds
+ * @rtt_var: RTT variance in microseconds
+ *
+ * Checks if the lost packets span a duration exceeding the persistent
+ * congestion threshold. If so, invokes persistent congestion handling.
+ *
+ * Per RFC 9002: Persistent congestion period =
+ *   (smoothed_rtt + max(4*rtt_var, kGranularity)) * kPersistentCongestionThreshold
+ *
+ * Return: true if persistent congestion was detected and handled, false otherwise
+ */
+bool tquic_cong_check_persistent_congestion(struct tquic_path *path,
+					    struct tquic_lost_packet *lost_packets,
+					    int num_lost,
+					    u64 smoothed_rtt, u64 rtt_var);
+
+/*
  * tquic_cong_on_rtt - Dispatch RTT update to path's CC algorithm
  * @path: Path with RTT update
  * @rtt_us: RTT sample in microseconds

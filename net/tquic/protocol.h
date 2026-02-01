@@ -145,6 +145,8 @@ static inline struct ipv6_pinfo *tquic_inet6_sk(const struct sock *sk)
 #define TQUIC_F_SERVER_MODE		BIT(2)
 #define TQUIC_F_HANDSHAKE_DONE		BIT(3)
 #define TQUIC_F_CLOSING			BIT(4)
+#define TQUIC_F_ZERO_RTT_ENABLED	BIT(7)	/* 0-RTT early data enabled */
+#define TQUIC_F_ZERO_RTT_ACCEPTED	BIT(8)	/* 0-RTT accepted by server */
 
 /*
  * =============================================================================
@@ -338,6 +340,20 @@ int tquic_wait_for_handshake(struct sock *sk, u32 timeout_ms);
 void tquic_handshake_cleanup(struct sock *sk);
 void tquic_handshake_done(void *data, int status, key_serial_t peerid);
 bool tquic_handshake_in_progress(struct sock *sk);
+
+/*
+ * 0-RTT Early Data functions (tquic_handshake.c)
+ *
+ * These functions implement TLS 1.3 0-RTT early data support
+ * per RFC 9001 Sections 4.6-4.7.
+ */
+int tquic_attempt_zero_rtt(struct sock *sk, const char *server_name,
+			   u8 server_name_len);
+void tquic_handle_zero_rtt_response(struct sock *sk, bool accepted);
+int tquic_store_session_ticket(struct sock *sk, const char *server_name,
+			       u8 server_name_len, const u8 *ticket_data,
+			       u32 ticket_len, const u8 *psk, u32 psk_len,
+			       u16 cipher_suite, u32 max_age);
 
 /*
  * =============================================================================

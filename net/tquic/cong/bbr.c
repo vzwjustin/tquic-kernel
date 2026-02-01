@@ -13,6 +13,7 @@
 #include <linux/slab.h>
 #include <linux/minmax.h>
 #include <net/tquic.h>
+#include "persistent_cong.h"
 
 /* BBR parameters */
 #define BBR_SCALE		8
@@ -478,6 +479,59 @@ static bool tquic_bbr_can_send(void *state, u64 bytes)
 	return true;  /* BBR uses pacing, not cwnd limiting */
 }
 
+/*
+ * Called on persistent congestion (RFC 9002 Section 7.6)
+ *
+ * For BBR, persistent congestion requires:
+ * 1. Reset cwnd to minimum
+ * 2. Reset inflight limits
+ * 3. Re-enter STARTUP to rediscover bandwidth
+ *
+ * BBR is model-based, so persistent congestion means our model
+ * is severely wrong. We need to start fresh.
+ */
+static void tquic_bbr_on_persistent_cong(void *state,
+					 struct tquic_persistent_cong_info *info)
+{
+	struct tquic_bbr *bbr = state;
+
+	if (!bbr || !info)
+		return;
+
+	pr_info("tquic_bbr: persistent congestion, resetting cwnd %llu -> %llu\n",
+		bbr->cwnd, info->min_cwnd);
+
+	/* Reset cwnd to minimum per RFC 9002 */
+	bbr->cwnd = info->min_cwnd;
+	bbr->prior_cwnd = info->min_cwnd;
+
+	/* Reset inflight limits */
+	bbr->inflight_hi = 0;
+	bbr->inflight_lo = 0;
+
+	/*
+	 * Re-enter STARTUP mode to rediscover bandwidth.
+	 * Persistent congestion means our bandwidth estimate was wrong.
+	 */
+	bbr->mode = BBR_STARTUP;
+	bbr->pacing_gain = BBR_HIGH_GAIN;
+	bbr->cwnd_gain = BBR_CWND_GAIN;
+
+	/* Reset bandwidth filter - our estimates were clearly wrong */
+	memset(&bbr->bw_filter, 0, sizeof(bbr->bw_filter));
+	bbr->bw = 0;
+
+	/* Keep min_rtt estimate but mark it as potentially stale */
+	bbr->rtt_cnt = 0;
+
+	/* Update pacing rate based on new state */
+	bbr_set_pacing_rate(bbr);
+
+	/* Reset ECN state */
+	bbr->ecn_in_round = false;
+	bbr->ecn_ce_total = 0;
+}
+
 static struct tquic_cong_ops tquic_bbr_ops = {
 	.name = "bbr",
 	.owner = THIS_MODULE,
@@ -488,6 +542,7 @@ static struct tquic_cong_ops tquic_bbr_ops = {
 	.on_loss = tquic_bbr_on_loss,
 	.on_rtt_update = tquic_bbr_on_rtt,
 	.on_ecn = tquic_bbr_on_ecn,  /* ECN CE handler per RFC 9002 */
+	.on_persistent_congestion = tquic_bbr_on_persistent_cong,
 	.get_cwnd = tquic_bbr_get_cwnd,
 	.get_pacing_rate = tquic_bbr_get_pacing_rate,
 	.can_send = tquic_bbr_can_send,

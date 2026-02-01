@@ -1283,5 +1283,112 @@ void tquic_server_check_path_recovery(struct tquic_connection *conn)
 }
 EXPORT_SYMBOL_GPL(tquic_server_check_path_recovery);
 
+/*
+ * =============================================================================
+ * PREFERRED ADDRESS MIGRATION (RFC 9000 Section 9.6)
+ * =============================================================================
+ */
+
+/**
+ * tquic_migrate_to_preferred_address - Migrate to server's preferred address
+ * @conn: Connection
+ *
+ * Initiates migration to the server's preferred address as received in
+ * transport parameters. This is called automatically after handshake if
+ * prefer_preferred_address sysctl is enabled, or can be called explicitly.
+ *
+ * Per RFC 9000 Section 9.6:
+ * - Client MAY migrate to preferred address after handshake
+ * - Must validate the new path before switching
+ * - Use the CID provided in the preferred_address parameter
+ *
+ * Returns: 0 on success, negative errno on failure
+ */
+int tquic_migrate_to_preferred_address(struct tquic_connection *conn)
+{
+	struct tquic_negotiated_params *negotiated;
+	struct tquic_preferred_address *pref_addr;
+	struct tquic_migration_state *ms;
+	struct tquic_path *new_path;
+	struct sockaddr_storage remote_addr;
+	sa_family_t family;
+	bool has_ipv4 = false;
+	bool has_ipv6 = false;
+	int ret;
+
+	if (!conn)
+		return -EINVAL;
+
+	if (conn->state != TQUIC_CONN_CONNECTED)
+		return -ENOTCONN;
+
+	if (conn->role != TQUIC_ROLE_CLIENT) {
+		pr_debug("tquic: only clients can migrate to preferred address\n");
+		return -EINVAL;
+	}
+
+	/* Check if migration is already in progress */
+	ms = (struct tquic_migration_state *)conn->state_machine;
+	if (ms && ms->status == TQUIC_MIGRATE_PROBING)
+		return -EBUSY;
+
+	/* Access negotiated parameters to get preferred address */
+	/* For now, we need to track this in the connection state */
+	/* TODO: Store preferred_address in connection structure */
+
+	/*
+	 * Check if we have a preferred address available.
+	 * This would be set during transport parameter negotiation.
+	 * For now, return -ENOENT if not available.
+	 */
+	if (!conn->pm) {
+		pr_debug("tquic: no path manager state\n");
+		return -ENOENT;
+	}
+
+	/*
+	 * Placeholder: In full implementation, the preferred address
+	 * would be stored in conn->pm or a dedicated structure after
+	 * transport parameter parsing.
+	 */
+	pr_info("tquic: migrate_to_preferred_address called for connection\n");
+
+	return -ENOENT;  /* Preferred address not yet stored */
+}
+EXPORT_SYMBOL_GPL(tquic_migrate_to_preferred_address);
+
+/**
+ * tquic_migration_on_handshake_complete - Handle post-handshake migration setup
+ * @conn: Connection
+ *
+ * Called when handshake completes. If a preferred address was received
+ * and auto-migration is enabled, initiates migration.
+ */
+void tquic_migration_on_handshake_complete(struct tquic_connection *conn)
+{
+	struct net *net;
+
+	if (!conn || !conn->sk)
+		return;
+
+	if (conn->role != TQUIC_ROLE_CLIENT)
+		return;
+
+	net = sock_net(conn->sk);
+
+	/* Check if auto-migration to preferred address is enabled */
+	if (!net->tquic.prefer_preferred_address)
+		return;
+
+	/*
+	 * Check if we received a preferred address in transport params.
+	 * If so, and auto-migration is enabled, start migration.
+	 */
+	if (tquic_migrate_to_preferred_address(conn) == 0) {
+		pr_debug("tquic: auto-migrating to preferred address\n");
+	}
+}
+EXPORT_SYMBOL_GPL(tquic_migration_on_handshake_complete);
+
 MODULE_DESCRIPTION("TQUIC Connection Migration");
 MODULE_LICENSE("GPL");

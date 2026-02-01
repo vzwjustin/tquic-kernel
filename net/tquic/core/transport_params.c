@@ -50,6 +50,9 @@
 /* GREASE (RFC 9287) */
 #define TP_GREASE_QUIC_BIT			0x2ab2
 
+/* ACK Frequency (draft-ietf-quic-ack-frequency) */
+#define TP_MIN_ACK_DELAY			0xff04de1aULL
+
 /* Stateless reset token length */
 #define STATELESS_RESET_TOKEN_LEN	16
 
@@ -225,6 +228,10 @@ void tquic_tp_init(struct tquic_transport_params *params)
 
 	/* DATAGRAM disabled by default (RFC 9221) */
 	params->max_datagram_frame_size = 0;
+
+	/* ACK Frequency - min_ack_delay not present by default */
+	params->min_ack_delay = 0;
+	params->min_ack_delay_present = false;
 }
 EXPORT_SYMBOL_GPL(tquic_tp_init);
 
@@ -252,6 +259,10 @@ void tquic_tp_set_defaults_client(struct tquic_transport_params *params)
 
 	/* Enable DATAGRAM support with reasonable default size */
 	params->max_datagram_frame_size = 65535;
+
+	/* Enable ACK frequency extension with default min_ack_delay of 25ms */
+	params->min_ack_delay = 25000;  /* 25ms in microseconds */
+	params->min_ack_delay_present = true;
 }
 EXPORT_SYMBOL_GPL(tquic_tp_set_defaults_client);
 
@@ -279,6 +290,10 @@ void tquic_tp_set_defaults_server(struct tquic_transport_params *params)
 
 	/* Enable DATAGRAM support with reasonable default size */
 	params->max_datagram_frame_size = 65535;
+
+	/* Enable ACK frequency extension with default min_ack_delay of 25ms */
+	params->min_ack_delay = 25000;  /* 25ms in microseconds */
+	params->min_ack_delay_present = true;
 }
 EXPORT_SYMBOL_GPL(tquic_tp_set_defaults_server);
 
@@ -705,6 +720,16 @@ ssize_t tquic_tp_encode(const struct tquic_transport_params *params,
 		offset += ret;
 	}
 
+	/* min_ack_delay (draft-ietf-quic-ack-frequency) */
+	if (params->min_ack_delay_present) {
+		ret = encode_varint_param(buf + offset, buflen - offset,
+					  TP_MIN_ACK_DELAY,
+					  params->min_ack_delay);
+		if (ret < 0)
+			return ret;
+		offset += ret;
+	}
+
 	return offset;
 }
 EXPORT_SYMBOL_GPL(tquic_tp_encode);
@@ -987,6 +1012,14 @@ int tquic_tp_decode(const u8 *buf, size_t buflen, bool is_server,
 					/* Zero-length means enabled */
 					params->enable_multipath = true;
 				}
+			} else if (param_id == TP_MIN_ACK_DELAY) {
+				/* ACK Frequency (draft-ietf-quic-ack-frequency) */
+				ret = tquic_varint_decode(buf + offset,
+							  param_len, &value);
+				if (ret < 0 || (size_t)ret != param_len)
+					return -EINVAL;
+				params->min_ack_delay = value;
+				params->min_ack_delay_present = true;
 			}
 			/* Unknown parameters are ignored per RFC 9000 */
 			break;
@@ -1191,6 +1224,20 @@ int tquic_tp_negotiate(const struct tquic_transport_params *local,
 		       remote->stateless_reset_token,
 		       STATELESS_RESET_TOKEN_LEN);
 		result->peer_stateless_reset_token_present = true;
+	}
+
+	/*
+	 * ACK Frequency (draft-ietf-quic-ack-frequency):
+	 * Enabled only if both peers advertise min_ack_delay parameter.
+	 * The peer's min_ack_delay is the minimum delay we MUST wait
+	 * before requesting them to send an ACK.
+	 */
+	if (local->min_ack_delay_present && remote->min_ack_delay_present) {
+		result->ack_frequency_enabled = true;
+		result->peer_min_ack_delay = remote->min_ack_delay;
+	} else {
+		result->ack_frequency_enabled = false;
+		result->peer_min_ack_delay = 0;
 	}
 
 	return 0;
@@ -1432,6 +1479,13 @@ size_t tquic_tp_encoded_size(const struct tquic_transport_params *params,
 	if (params->grease_quic_bit)
 		size += 4;  /* 0x2ab2 = 2-byte varint + 1-byte zero length */
 
+	/* min_ack_delay (draft-ietf-quic-ack-frequency) */
+	if (params->min_ack_delay_present) {
+		size += tquic_varint_len(TP_MIN_ACK_DELAY) +
+			tquic_varint_len(tquic_varint_len(params->min_ack_delay)) +
+			tquic_varint_len(params->min_ack_delay);
+	}
+
 	return size;
 }
 EXPORT_SYMBOL_GPL(tquic_tp_encoded_size);
@@ -1475,6 +1529,9 @@ void tquic_tp_debug_print(const struct tquic_transport_params *params,
 		 params->max_datagram_frame_size);
 	pr_debug("%s:   grease_quic_bit: %s\n", prefix,
 		 params->grease_quic_bit ? "yes" : "no");
+	if (params->min_ack_delay_present)
+		pr_debug("%s:   min_ack_delay: %llu us\n", prefix,
+			 params->min_ack_delay);
 
 	if (params->initial_scid_present)
 		pr_debug("%s:   initial_source_cid: %*phN\n", prefix,

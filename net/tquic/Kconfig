@@ -363,4 +363,87 @@ config TQUIC_KUNIT_TEST
 
 	  If unsure, say N.
 
+config TQUIC_MULTIPATH
+	tristate "TQUIC Multipath Extension (RFC 9369)"
+	depends on TQUIC_WAN_BONDING
+	default y
+	help
+	  Enable the QUIC Multipath Extension as specified in RFC 9369.
+	  This provides standardized multipath support with:
+
+	    - PATH_ABANDON frame (0x17): Graceful path closure
+	    - MP_NEW_CONNECTION_ID (0x40): Path-specific CID issuance
+	    - MP_RETIRE_CONNECTION_ID (0x41): Path-specific CID retirement
+	    - MP_ACK (0x42/0x43): Per-path acknowledgments
+	    - PATH_STATUS (0x44): Path availability signaling
+
+	  Transport parameters:
+	    - enable_multipath (0x0f00): Negotiate multipath capability
+	    - initial_max_paths (0x0f01): Maximum concurrent paths
+
+	  This extension allows interoperability with other RFC 9369
+	  compliant QUIC implementations and provides standardized
+	  multipath semantics for WAN bonding.
+
+	  To compile this as a module, choose M here: the module will
+	  be called tquic_multipath.
+
+	  If using TQUIC for multipath WAN bonding, say Y.
+
+config TQUIC_HTTP3
+	tristate "TQUIC HTTP/3 support (RFC 9114)"
+	depends on TQUIC_CORE
+	default m
+	help
+	  Enable HTTP/3 protocol support for TQUIC. HTTP/3 is the
+	  HTTP mapping over QUIC as specified in RFC 9114.
+
+	  This module provides:
+	    - HTTP/3 frame parsing and generation
+	    - SETTINGS negotiation
+	    - Control stream management
+	    - Server push support (PUSH_PROMISE, CANCEL_PUSH)
+	    - Graceful shutdown (GOAWAY)
+
+	  HTTP/3 Frame Types supported:
+	    - DATA (0x00): Payload data
+	    - HEADERS (0x01): QPACK-compressed headers
+	    - CANCEL_PUSH (0x03): Cancel server push
+	    - SETTINGS (0x04): Configuration parameters
+	    - PUSH_PROMISE (0x05): Server push announcement
+	    - GOAWAY (0x07): Graceful shutdown
+	    - MAX_PUSH_ID (0x0d): Push flow control
+
+	  SETTINGS parameters:
+	    - QPACK_MAX_TABLE_CAPACITY (0x01)
+	    - MAX_FIELD_SECTION_SIZE (0x06)
+	    - QPACK_BLOCKED_STREAMS (0x07)
+
+	  Note: Full QPACK (RFC 9204) support requires CONFIG_TQUIC_HTTP3_QPACK.
+
+	  To compile this as a module, choose M here: the module will
+	  be called tquic_http3.
+
+	  If unsure, say M.
+
+config TQUIC_HTTP3_QPACK
+	bool "TQUIC QPACK header compression (RFC 9204)"
+	depends on TQUIC_HTTP3
+	default y
+	help
+	  Enable QPACK header compression for HTTP/3. QPACK provides
+	  efficient encoding of HTTP header fields using static and
+	  dynamic tables.
+
+	  Features:
+	    - Static table with 99 predefined header fields
+	    - Dynamic table for connection-specific entries
+	    - Huffman encoding for string literals
+	    - Encoder/decoder stream management
+
+	  QPACK is required for efficient HTTP/3 header transmission.
+	  Disabling this limits HTTP/3 to literal header encoding only.
+
+	  If unsure, say Y.
+
 endif # TQUIC

@@ -26,6 +26,7 @@
 #include <linux/math64.h>
 #include <linux/random.h>
 #include <net/tquic.h>
+#include "persistent_cong.h"
 
 /* Algorithm selection */
 enum coupled_algo {
@@ -1157,6 +1158,59 @@ static bool coupled_can_send(void *cong_data, u64 bytes)
 }
 
 /*
+ * Called on persistent congestion (RFC 9002 Section 7.6)
+ *
+ * For coupled CC, persistent congestion on one subflow affects
+ * only that subflow's cwnd (per CONTEXT.md: "Loss on one path
+ * reduces only that path's CWND").
+ *
+ * However, we must recalculate the global alpha after resetting
+ * this subflow, which may affect increase rates on other paths.
+ */
+static void coupled_on_persistent_cong(void *cong_data,
+				       struct tquic_persistent_cong_info *info)
+{
+	struct coupled_subflow *sf = cong_data;
+	struct coupled_state *state;
+	struct tquic_connection *conn;
+
+	if (!sf || !sf->path || !info)
+		return;
+
+	conn = container_of(sf->path->list.prev, struct tquic_connection, paths);
+	state = conn->scheduler;
+
+	pr_info("tquic_coupled: persistent congestion on path %u, cwnd %llu -> %llu\n",
+		sf->path_id, sf->cwnd, info->min_cwnd);
+
+	/* Reset this subflow's cwnd to minimum per RFC 9002 */
+	sf->cwnd = info->min_cwnd;
+	sf->ssthresh = info->min_cwnd;
+	sf->in_slow_start = false;
+
+	/* Reset CUBIC state for this subflow */
+	sf->cubic_w_max = info->min_cwnd;
+	sf->cubic_epoch_start = 0;
+
+	/* Reset BBR state for this subflow */
+	sf->bbr_bw = 0;
+
+	/* Clear in-flight tracking */
+	sf->in_flight = 0;
+
+	/* Mark loss in round */
+	sf->loss_in_round = true;
+
+	/* Update path stats */
+	if (sf->path)
+		sf->path->stats.cwnd = (u32)min(sf->cwnd, (u64)UINT_MAX);
+
+	/* Recalculate global alpha after this subflow's reset */
+	if (state)
+		coupled_update_alpha(state);
+}
+
+/*
  * =============================================================================
  * Module Interface
  * =============================================================================
@@ -1172,6 +1226,7 @@ static struct tquic_cong_ops tquic_coupled_ops = {
 	.on_ack = coupled_on_ack,
 	.on_loss = coupled_on_loss,
 	.on_rtt_update = coupled_on_rtt,
+	.on_persistent_congestion = coupled_on_persistent_cong,
 	.get_cwnd = coupled_get_cwnd,
 	.get_pacing_rate = coupled_get_pacing_rate,
 	.can_send = coupled_can_send,
@@ -1187,6 +1242,7 @@ static struct tquic_cong_ops tquic_olia_ops = {
 	.on_ack = coupled_on_ack,
 	.on_loss = coupled_on_loss,
 	.on_rtt_update = coupled_on_rtt,
+	.on_persistent_congestion = coupled_on_persistent_cong,
 	.get_cwnd = coupled_get_cwnd,
 	.get_pacing_rate = coupled_get_pacing_rate,
 	.can_send = coupled_can_send,
@@ -1202,6 +1258,7 @@ static struct tquic_cong_ops tquic_lia_ops = {
 	.on_ack = coupled_on_ack,
 	.on_loss = coupled_on_loss,
 	.on_rtt_update = coupled_on_rtt,
+	.on_persistent_congestion = coupled_on_persistent_cong,
 	.get_cwnd = coupled_get_cwnd,
 	.get_pacing_rate = coupled_get_pacing_rate,
 	.can_send = coupled_can_send,
@@ -1217,6 +1274,7 @@ static struct tquic_cong_ops tquic_balia_ops = {
 	.on_ack = coupled_on_ack,
 	.on_loss = coupled_on_loss,
 	.on_rtt_update = coupled_on_rtt,
+	.on_persistent_congestion = coupled_on_persistent_cong,
 	.get_cwnd = coupled_get_cwnd,
 	.get_pacing_rate = coupled_get_pacing_rate,
 	.can_send = coupled_can_send,

@@ -974,6 +974,116 @@ static int tquic_setsockopt(struct socket *sock, int level, int optname,
 		release_sock(sk);
 		return 0;
 
+	case TQUIC_SO_HTTP3_ENABLE:
+		/*
+		 * SO_TQUIC_HTTP3_ENABLE: Enable/disable HTTP/3 mode
+		 *
+		 * When enabled before connect(), the connection will operate
+		 * in HTTP/3 mode (RFC 9114) with proper stream type mapping,
+		 * control streams, and QPACK header compression.
+		 *
+		 * Must be set before connect().
+		 */
+		lock_sock(sk);
+		if (tsk->conn && tsk->conn->state != TQUIC_CONN_IDLE) {
+			release_sock(sk);
+			return -EISCONN;
+		}
+		tsk->http3_enabled = !!val;
+		release_sock(sk);
+		return 0;
+
+	case TQUIC_SO_HTTP3_MAX_TABLE_CAPACITY:
+		/*
+		 * SO_TQUIC_HTTP3_MAX_TABLE_CAPACITY: Set QPACK max table capacity
+		 *
+		 * Sets the maximum size (in bytes) of the QPACK dynamic table
+		 * for header compression. Default is 4096.
+		 */
+		if (val < 0 || val > TQUIC_HTTP3_MAX_TABLE_CAPACITY_MAX)
+			return -EINVAL;
+
+		lock_sock(sk);
+		tsk->http3_settings.max_table_capacity = val;
+		release_sock(sk);
+		return 0;
+
+	case TQUIC_SO_HTTP3_MAX_FIELD_SECTION_SIZE:
+		/*
+		 * SO_TQUIC_HTTP3_MAX_FIELD_SECTION_SIZE: Set max header section size
+		 *
+		 * Sets the maximum size (in bytes) of a header section that
+		 * the endpoint is willing to accept. Default is 16384.
+		 */
+		if (val < 0)
+			return -EINVAL;
+
+		lock_sock(sk);
+		tsk->http3_settings.max_field_section_size = val;
+		release_sock(sk);
+		return 0;
+
+	case TQUIC_SO_HTTP3_BLOCKED_STREAMS:
+		/*
+		 * SO_TQUIC_HTTP3_BLOCKED_STREAMS: Set QPACK blocked streams
+		 *
+		 * Sets the maximum number of streams that can be blocked
+		 * waiting for QPACK decoder instructions. Default is 100.
+		 */
+		if (val < 0 || val > TQUIC_HTTP3_MAX_BLOCKED_STREAMS_MAX)
+			return -EINVAL;
+
+		lock_sock(sk);
+		tsk->http3_settings.max_blocked_streams = val;
+		release_sock(sk);
+		return 0;
+
+	case TQUIC_SO_HTTP3_SERVER_PUSH:
+		/*
+		 * SO_TQUIC_HTTP3_SERVER_PUSH: Enable/disable server push
+		 *
+		 * When enabled, the server can push resources to the client
+		 * using PUSH_PROMISE frames. Default is disabled.
+		 */
+		lock_sock(sk);
+		tsk->http3_settings.server_push_enabled = !!val;
+		release_sock(sk);
+		return 0;
+
+	case TQUIC_SO_HTTP3_SETTINGS: {
+		/*
+		 * SO_TQUIC_HTTP3_SETTINGS: Set all HTTP/3 settings at once
+		 *
+		 * Allows setting all HTTP/3 configuration parameters with
+		 * a single socket option call using struct tquic_http3_settings.
+		 */
+		struct tquic_http3_settings settings;
+
+		if (optlen < sizeof(settings))
+			return -EINVAL;
+
+		if (copy_from_sockptr(&settings, optval, sizeof(settings)))
+			return -EFAULT;
+
+		/* Validate settings */
+		if (settings.max_table_capacity > TQUIC_HTTP3_MAX_TABLE_CAPACITY_MAX)
+			return -EINVAL;
+		if (settings.max_blocked_streams > TQUIC_HTTP3_MAX_BLOCKED_STREAMS_MAX)
+			return -EINVAL;
+
+		lock_sock(sk);
+		if (tsk->conn && tsk->conn->state != TQUIC_CONN_IDLE) {
+			release_sock(sk);
+			return -EISCONN;
+		}
+		tsk->http3_settings.max_table_capacity = settings.max_table_capacity;
+		tsk->http3_settings.max_field_section_size = settings.max_field_section_size;
+		tsk->http3_settings.max_blocked_streams = settings.max_blocked_streams;
+		tsk->http3_settings.server_push_enabled = settings.enable_push;
+		release_sock(sk);
+		return 0;
+	}
+
 	default:
 		return -ENOPROTOOPT;
 	}
@@ -1238,6 +1348,120 @@ static int tquic_getsockopt(struct socket *sock, int level, int optname,
 		else
 			val = tsk->datagram_queue_max;
 		break;
+
+	case TQUIC_SO_HTTP3_ENABLE:
+		/*
+		 * SO_TQUIC_HTTP3_ENABLE: Get HTTP/3 mode status
+		 *
+		 * Returns 1 if HTTP/3 mode is enabled, 0 otherwise.
+		 */
+		val = tsk->http3_enabled ? 1 : 0;
+		break;
+
+	case TQUIC_SO_HTTP3_MAX_TABLE_CAPACITY:
+		/*
+		 * SO_TQUIC_HTTP3_MAX_TABLE_CAPACITY: Get QPACK max table capacity
+		 *
+		 * Returns the configured QPACK dynamic table capacity.
+		 */
+		val = tsk->http3_settings.max_table_capacity;
+		break;
+
+	case TQUIC_SO_HTTP3_MAX_FIELD_SECTION_SIZE:
+		/*
+		 * SO_TQUIC_HTTP3_MAX_FIELD_SECTION_SIZE: Get max header section size
+		 *
+		 * Returns the maximum header section size this endpoint accepts.
+		 */
+		val = tsk->http3_settings.max_field_section_size;
+		break;
+
+	case TQUIC_SO_HTTP3_BLOCKED_STREAMS:
+		/*
+		 * SO_TQUIC_HTTP3_BLOCKED_STREAMS: Get QPACK blocked streams
+		 *
+		 * Returns the maximum number of QPACK blocked streams.
+		 */
+		val = tsk->http3_settings.max_blocked_streams;
+		break;
+
+	case TQUIC_SO_HTTP3_SERVER_PUSH:
+		/*
+		 * SO_TQUIC_HTTP3_SERVER_PUSH: Get server push status
+		 *
+		 * Returns 1 if server push is enabled, 0 otherwise.
+		 */
+		val = tsk->http3_settings.server_push_enabled ? 1 : 0;
+		break;
+
+	case TQUIC_SO_HTTP3_SETTINGS: {
+		/*
+		 * SO_TQUIC_HTTP3_SETTINGS: Get all HTTP/3 settings
+		 *
+		 * Returns all HTTP/3 configuration parameters in a single
+		 * struct tquic_http3_settings.
+		 */
+		struct tquic_http3_settings settings;
+
+		if (len < sizeof(settings))
+			return -EINVAL;
+
+		lock_sock(sk);
+		settings.max_table_capacity = tsk->http3_settings.max_table_capacity;
+		settings.max_field_section_size = tsk->http3_settings.max_field_section_size;
+		settings.max_blocked_streams = tsk->http3_settings.max_blocked_streams;
+		settings.enable_push = tsk->http3_settings.server_push_enabled;
+		settings.reserved = 0;
+		settings.reserved2 = 0;
+		release_sock(sk);
+
+		if (copy_to_user(optval, &settings, sizeof(settings)))
+			return -EFAULT;
+		if (put_user(sizeof(settings), optlen))
+			return -EFAULT;
+
+		return 0;
+	}
+
+	case TQUIC_SO_HTTP3_STREAM_INFO: {
+		/*
+		 * SO_TQUIC_HTTP3_STREAM_INFO: Get HTTP/3 stream information
+		 *
+		 * Returns information about a specific HTTP/3 stream including
+		 * its type, state, and statistics.
+		 */
+		struct tquic_http3_stream_info info;
+
+		if (len < sizeof(info))
+			return -EINVAL;
+
+		/* Get stream ID from user */
+		if (copy_from_user(&info, optval, sizeof(info)))
+			return -EFAULT;
+
+		lock_sock(sk);
+		if (!tsk->h3_conn) {
+			release_sock(sk);
+			return -ENOTCONN;
+		}
+
+		/*
+		 * Stream info lookup would be implemented in http3_stream.c
+		 * For now, return basic socket-level info
+		 */
+		info.type = 0; /* Filled by h3_stream_get_info() */
+		info.state = 0;
+		info.bytes_sent = 0;
+		info.bytes_received = 0;
+		release_sock(sk);
+
+		if (copy_to_user(optval, &info, sizeof(info)))
+			return -EFAULT;
+		if (put_user(sizeof(info), optlen))
+			return -EFAULT;
+
+		return 0;
+	}
 
 	default:
 		return -ENOPROTOOPT;

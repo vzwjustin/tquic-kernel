@@ -22,6 +22,7 @@
 #include <linux/minmax.h>
 #include <linux/math64.h>
 #include <net/tquic.h>
+#include "persistent_cong.h"
 
 /* Copa parameters */
 #define COPA_DELTA_SCALE	1000	/* Scale for delta parameter */
@@ -526,6 +527,63 @@ static bool tquic_copa_can_send(void *state, u64 bytes)
 	return true;
 }
 
+/*
+ * Called on persistent congestion (RFC 9002 Section 7.6)
+ *
+ * For Copa (delay-based), persistent congestion indicates that
+ * our RTT measurements were severely wrong or the path characteristics
+ * changed dramatically.
+ *
+ * We reset:
+ * 1. cwnd to minimum
+ * 2. RTT measurements (they're clearly stale)
+ * 3. Velocity and direction state
+ * 4. Delta parameter (make more conservative)
+ */
+static void tquic_copa_on_persistent_cong(void *state,
+					  struct tquic_persistent_cong_info *info)
+{
+	struct tquic_copa *copa = state;
+
+	if (!copa || !info)
+		return;
+
+	pr_info("tquic_copa: persistent congestion, resetting cwnd %llu -> %llu\n",
+		copa->cwnd, info->min_cwnd);
+
+	/* Reset cwnd to minimum per RFC 9002 */
+	copa->cwnd = info->min_cwnd;
+	copa->ssthresh = info->min_cwnd;
+
+	/* Exit slow start */
+	copa->in_slow_start = false;
+
+	/* Reset RTT measurements - they're clearly stale */
+	copa->rtt_min_us = 0;
+	copa->rtt_standing_us = 0;
+	copa->rtt_sample_count = 0;
+	copa->rtt_sample_head = 0;
+
+	/* Reset velocity state to be conservative */
+	copa->velocity = COPA_VELOCITY_MIN;
+	copa->direction = COPA_DIR_NONE;
+	copa->direction_count = 0;
+
+	/* Reset pacing rate */
+	copa->pacing_rate = 0;
+
+	/* Reset ECN state */
+	copa->ecn_in_round = false;
+	copa->ecn_ce_total = 0;
+
+	/*
+	 * Make delta more conservative after persistent congestion.
+	 * This targets lower queuing delay.
+	 */
+	if (copa->delta > COPA_MIN_DELTA)
+		copa->delta = max(copa->delta / 2, (u32)COPA_MIN_DELTA);
+}
+
 static struct tquic_cong_ops tquic_copa_ops = {
 	.name = "copa",
 	.owner = THIS_MODULE,
@@ -536,6 +594,7 @@ static struct tquic_cong_ops tquic_copa_ops = {
 	.on_loss = tquic_copa_on_loss,
 	.on_rtt_update = tquic_copa_on_rtt,
 	.on_ecn = tquic_copa_on_ecn,  /* ECN CE handler per RFC 9002 */
+	.on_persistent_congestion = tquic_copa_on_persistent_cong,
 	.get_cwnd = tquic_copa_get_cwnd,
 	.get_pacing_rate = tquic_copa_get_pacing_rate,
 	.can_send = tquic_copa_can_send,

@@ -28,6 +28,7 @@
 #include <linux/minmax.h>
 #include <linux/math64.h>
 #include <net/tquic.h>
+#include "persistent_cong.h"
 
 /* Westwood+ parameters */
 #define WESTWOOD_INIT_CWND	(10 * 1200)	/* 10 packets */
@@ -448,6 +449,50 @@ static bool tquic_westwood_can_send(void *state, u64 bytes)
 	return true;
 }
 
+/*
+ * Called on persistent congestion (RFC 9002 Section 7.6)
+ *
+ * For Westwood+, persistent congestion indicates our bandwidth
+ * estimation was severely wrong. We reset:
+ * 1. cwnd to minimum
+ * 2. Bandwidth estimation filter (start fresh)
+ * 3. Recovery state
+ */
+static void tquic_westwood_on_persistent_cong(void *state,
+					      struct tquic_persistent_cong_info *info)
+{
+	struct tquic_westwood *ww = state;
+
+	if (!ww || !info)
+		return;
+
+	pr_info("tquic_westwood: persistent congestion, resetting cwnd %llu -> %llu\n",
+		ww->cwnd, info->min_cwnd);
+
+	/* Reset cwnd to minimum per RFC 9002 */
+	ww->cwnd = info->min_cwnd;
+	ww->ssthresh = info->min_cwnd;
+
+	/* Exit slow start */
+	ww->in_slow_start = false;
+
+	/* Clear recovery state */
+	ww->in_recovery = false;
+
+	/* Reset bandwidth estimation - our estimates were clearly wrong */
+	ww->bw_est = 0;
+	ww->bw_sample_count = 0;
+	ww->bw_filter_idx = 0;
+	memset(ww->bw_filter, 0, sizeof(ww->bw_filter));
+
+	/* Reset sample interval tracking */
+	ww->bytes_acked = 0;
+	ww->bw_sample_start = ns_to_ktime(0);
+
+	/* Reset ECN state */
+	ww->ecn_in_round = false;
+}
+
 static struct tquic_cong_ops tquic_westwood_ops = {
 	.name = "westwood",
 	.owner = THIS_MODULE,
@@ -458,6 +503,7 @@ static struct tquic_cong_ops tquic_westwood_ops = {
 	.on_loss = tquic_westwood_on_loss,
 	.on_rtt_update = tquic_westwood_on_rtt,
 	.on_ecn = tquic_westwood_on_ecn,  /* ECN CE handler per RFC 9002 */
+	.on_persistent_congestion = tquic_westwood_on_persistent_cong,
 	.get_cwnd = tquic_westwood_get_cwnd,
 	.get_pacing_rate = tquic_westwood_get_pacing_rate,
 	.can_send = tquic_westwood_can_send,

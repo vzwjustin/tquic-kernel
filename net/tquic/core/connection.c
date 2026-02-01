@@ -34,6 +34,7 @@
 #include <net/tquic.h>
 
 #include "varint.h"
+#include "../tquic_stateless_reset.h"
 
 /* QUIC Error Codes (RFC 9000 Section 20) */
 #define TQUIC_NO_ERROR			0x00
@@ -434,9 +435,21 @@ struct tquic_cid_entry *tquic_conn_add_local_cid(struct tquic_connection *conn)
 	if (!entry)
 		return NULL;
 
-	/* Generate stateless reset token */
-	get_random_bytes(entry->stateless_reset_token,
-			 sizeof(entry->stateless_reset_token));
+	/*
+	 * Generate stateless reset token deterministically from CID
+	 * Per RFC 9000 Section 10.3.2, using HMAC with static key
+	 */
+	{
+		const u8 *static_key = tquic_stateless_reset_get_static_key();
+
+		if (static_key) {
+			tquic_stateless_reset_generate_token(&new_cid, static_key,
+							     entry->stateless_reset_token);
+		} else {
+			get_random_bytes(entry->stateless_reset_token,
+					 sizeof(entry->stateless_reset_token));
+		}
+	}
 	entry->has_reset_token = true;
 
 	spin_lock(&conn->lock);
@@ -2066,8 +2079,20 @@ int tquic_conn_server_accept(struct tquic_connection *conn,
 	if (ret < 0)
 		goto err_free;
 
-	/* Generate stateless reset token */
-	get_random_bytes(cs->stateless_reset_token, 16);
+	/*
+	 * Generate stateless reset token deterministically from CID
+	 * Per RFC 9000 Section 10.3.2, using HMAC with static key
+	 */
+	{
+		const u8 *static_key = tquic_stateless_reset_get_static_key();
+
+		if (static_key) {
+			tquic_stateless_reset_generate_token(&conn->scid, static_key,
+							     cs->stateless_reset_token);
+		} else {
+			get_random_bytes(cs->stateless_reset_token, 16);
+		}
+	}
 	cs->has_stateless_reset = true;
 
 	/* Transition to connecting state */

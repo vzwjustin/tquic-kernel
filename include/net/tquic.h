@@ -65,6 +65,7 @@ struct tquic_frame;
 struct tquic_packet;
 struct tquic_coupled_state;
 struct tquic_client;
+struct tquic_persistent_cong_info;
 
 /**
  * enum tquic_conn_state - Connection state machine states
@@ -246,6 +247,10 @@ struct tquic_path {
 		atomic_t count;               /* Current queue depth */
 	} response;
 
+	/* Multipath extension state (RFC 9369) */
+	void *mp_ack_state;		/* Per-path ACK tracking */
+	void *abandon_state;		/* Path abandonment state */
+
 	struct rcu_head rcu_head;	/* RCU callback for kfree_rcu */
 };
 
@@ -425,6 +430,23 @@ struct tquic_connection {
 		bool local_grease_quic_bit;	/* We advertised grease_quic_bit */
 	} grease;
 
+	/*
+	 * Address validation token state (RFC 9000 Section 8.1.3-8.1.4)
+	 *
+	 * Tokens allow servers to skip address validation on future
+	 * connections from validated clients. Clients store tokens
+	 * received via NEW_TOKEN frames for future use.
+	 */
+	void *token_state;	/* struct tquic_token_state * */
+
+	/*
+	 * 0-RTT early data state (RFC 9001 Section 4.6-4.7)
+	 *
+	 * Manages 0-RTT key derivation, early data transmission,
+	 * and server accept/reject handling. NULL when 0-RTT not in use.
+	 */
+	void *zero_rtt_state;	/* struct tquic_zero_rtt_state_s * */
+
 	spinlock_t lock;
 	refcount_t refcnt;
 	struct sock *sk;
@@ -507,6 +529,16 @@ struct tquic_sock {
 	u8 psk_identity_len;
 
 	/*
+	 * Server name for SNI and 0-RTT ticket lookup (set via connect)
+	 *
+	 * For client: Server hostname used for TLS SNI and 0-RTT session
+	 *             ticket lookup. Set during connect() from sockaddr.
+	 * For server: Not used.
+	 */
+	char server_name[256];
+	u8 server_name_len;
+
+	/*
 	 * DATAGRAM frame support (RFC 9221)
 	 *
 	 * When enabled, sendmsg/recvmsg can transfer unreliable datagrams
@@ -514,6 +546,21 @@ struct tquic_sock {
 	 */
 	bool datagram_enabled;		/* SO_TQUIC_DATAGRAM enabled */
 	u32 datagram_queue_max;		/* Max receive queue length */
+
+	/*
+	 * HTTP/3 support (RFC 9114)
+	 *
+	 * When enabled, the QUIC connection operates in HTTP/3 mode with
+	 * proper stream type mapping, control streams, and QPACK support.
+	 */
+	bool http3_enabled;		/* SO_TQUIC_HTTP3_ENABLE enabled */
+	struct {
+		u32 max_table_capacity;		/* QPACK max table capacity */
+		u32 max_field_section_size;	/* Max header section size */
+		u32 max_blocked_streams;	/* QPACK blocked streams */
+		bool server_push_enabled;	/* Server push support */
+	} http3_settings;
+	void *h3_conn;			/* h3_connection pointer when active */
 };
 
 static inline struct tquic_sock *tquic_sk(struct sock *sk)
@@ -573,6 +620,16 @@ struct tquic_cong_ops {
 	void (*on_loss)(void *cong_data, u64 bytes_lost);
 	void (*on_rtt_update)(void *cong_data, u64 rtt_us);
 	void (*on_ecn)(void *cong_data, u64 ecn_ce_count);  /* ECN CE handler */
+
+	/*
+	 * Persistent congestion handler (RFC 9002 Section 7.6)
+	 *
+	 * Called when persistent congestion is detected. The algorithm
+	 * should reset cwnd to minimum (2 * max_datagram_size) and
+	 * reset any algorithm-specific state as needed.
+	 */
+	void (*on_persistent_congestion)(void *cong_data,
+					 struct tquic_persistent_cong_info *info);
 
 	u64 (*get_cwnd)(void *cong_data);
 	u64 (*get_pacing_rate)(void *cong_data);

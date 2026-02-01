@@ -689,6 +689,18 @@ int tquic_conn_add_path_safe(struct tquic_connection *conn,
 	/* Initialize validation state (timer, queue) */
 	tquic_path_init_validation(path);
 
+	/* Initialize multipath ACK state (RFC 9369) */
+#ifdef CONFIG_TQUIC_MULTIPATH
+	{
+		extern struct tquic_mp_path_ack_state *tquic_mp_ack_state_create(
+			struct tquic_path *);
+		path->mp_ack_state = tquic_mp_ack_state_create(path);
+		if (!path->mp_ack_state)
+			pr_warn("tquic: failed to init MP ACK state for path %u\n",
+				path->path_id);
+	}
+#endif
+
 	/* Initialize congestion control for this path */
 	ret = tquic_cong_init_path(path, NULL);  /* NULL = use default CC */
 	if (ret) {
@@ -771,6 +783,18 @@ int tquic_conn_remove_path_safe(struct tquic_connection *conn,
 
 	/* Release PMTUD state */
 	tquic_pmtud_release_path(path);
+
+	/* Release multipath state (RFC 9369) */
+#ifdef CONFIG_TQUIC_MULTIPATH
+	{
+		extern void tquic_mp_ack_state_destroy(void *);
+		extern void tquic_mp_abandon_state_destroy(void *);
+		if (path->mp_ack_state)
+			tquic_mp_ack_state_destroy(path->mp_ack_state);
+		if (path->abandon_state)
+			tquic_mp_abandon_state_destroy(path->abandon_state);
+	}
+#endif
 
 	/* Release device reference */
 	if (path->dev)

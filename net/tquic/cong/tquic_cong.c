@@ -548,6 +548,141 @@ void tquic_cong_on_loss(struct tquic_path *path, u64 bytes_lost)
 EXPORT_SYMBOL_GPL(tquic_cong_on_loss);
 
 /*
+ * =============================================================================
+ * Persistent Congestion Detection (RFC 9002 Section 7.6)
+ * =============================================================================
+ *
+ * When packets spanning the persistent congestion period are all lost,
+ * the sender declares persistent congestion and resets cwnd to minimum.
+ *
+ * This is integrated with loss detection - when declaring losses after
+ * a PTO timeout, check if persistent congestion has occurred.
+ */
+#include "persistent_cong.h"
+
+/*
+ * tquic_cong_on_persistent_congestion - Handle persistent congestion event
+ * @path: Path that experienced persistent congestion
+ * @info: Persistent congestion info (min_cwnd, timestamps, etc.)
+ *
+ * Called when persistent congestion is detected on a path.
+ * Dispatches to the CC algorithm's on_persistent_congestion callback.
+ *
+ * Per RFC 9002 Section 7.6:
+ * "When persistent congestion is established, the sender's congestion
+ * window MUST be reduced to the minimum congestion window."
+ */
+void tquic_cong_on_persistent_congestion(struct tquic_path *path,
+					 struct tquic_persistent_cong_info *info)
+{
+	struct tquic_cong_ops *ca;
+	struct net *net = NULL;
+
+	if (!path || !info)
+		return;
+
+	/* Get network namespace for MIB counter */
+	if (path->conn && path->conn->sk)
+		net = sock_net(path->conn->sk);
+
+	ca = path->cong_ops;
+
+	/* Call CC algorithm's persistent congestion handler */
+	if (ca && ca->on_persistent_congestion && path->cong) {
+		ca->on_persistent_congestion(path->cong, info);
+
+		/* Update path stats from CC state */
+		if (ca->get_cwnd)
+			path->stats.cwnd = ca->get_cwnd(path->cong);
+
+		pr_debug("tquic_cong: persistent congestion on path %u, new cwnd=%u\n",
+			 path->path_id, path->stats.cwnd);
+	} else {
+		/*
+		 * Default behavior if CC doesn't implement callback:
+		 * Reset cwnd to minimum
+		 */
+		path->stats.cwnd = (u32)info->min_cwnd;
+		pr_debug("tquic_cong: persistent congestion on path %u (default), cwnd=%u\n",
+			 path->path_id, path->stats.cwnd);
+	}
+
+	/* Update pacing rate after persistent congestion */
+	if (path->conn && path->conn->sk)
+		tquic_update_pacing(path->conn->sk, path);
+}
+EXPORT_SYMBOL_GPL(tquic_cong_on_persistent_congestion);
+
+/*
+ * tquic_cong_check_persistent_congestion - Check for and handle persistent congestion
+ * @path: Path to check
+ * @lost_packets: Array of lost packet information
+ * @num_lost: Number of lost packets
+ * @smoothed_rtt: Smoothed RTT in microseconds
+ * @rtt_var: RTT variance in microseconds
+ *
+ * Called from loss detection after declaring packet losses.
+ * Checks if the lost packets span the persistent congestion period
+ * and if so, triggers persistent congestion handling.
+ *
+ * Return: true if persistent congestion was detected, false otherwise
+ */
+bool tquic_cong_check_persistent_congestion(struct tquic_path *path,
+					    struct tquic_lost_packet *lost_packets,
+					    int num_lost,
+					    u64 smoothed_rtt, u64 rtt_var)
+{
+	struct tquic_persistent_cong_state pc_state;
+	struct tquic_persistent_cong_info info;
+	struct net *net = NULL;
+	ktime_t earliest = ns_to_ktime(LLONG_MAX);
+	ktime_t latest = ns_to_ktime(0);
+	int i;
+
+	if (!path || !lost_packets || num_lost < 2)
+		return false;
+
+	/* Get network namespace */
+	if (path->conn && path->conn->sk)
+		net = sock_net(path->conn->sk);
+
+	/* Initialize persistent congestion state from current RTT */
+	tquic_persistent_cong_init(&pc_state);
+	tquic_persistent_cong_update_rtt(&pc_state, smoothed_rtt, rtt_var);
+
+	/* Check for persistent congestion */
+	if (!tquic_check_persistent_cong(&pc_state, lost_packets, num_lost, net))
+		return false;
+
+	/*
+	 * Persistent congestion detected - find earliest and latest
+	 * ACK-eliciting packet times for the info structure
+	 */
+	for (i = 0; i < num_lost; i++) {
+		if (!lost_packets[i].ack_eliciting)
+			continue;
+
+		if (ktime_before(lost_packets[i].send_time, earliest))
+			earliest = lost_packets[i].send_time;
+		if (ktime_after(lost_packets[i].send_time, latest))
+			latest = lost_packets[i].send_time;
+	}
+
+	/* Build info structure for CC callback */
+	info.min_cwnd = tquic_min_cwnd(TQUIC_DEFAULT_MAX_DATAGRAM_SIZE);
+	info.max_datagram_size = TQUIC_DEFAULT_MAX_DATAGRAM_SIZE;
+	info.earliest_send_time = earliest;
+	info.latest_send_time = latest;
+	info.duration_us = ktime_us_delta(latest, earliest);
+
+	/* Handle persistent congestion */
+	tquic_cong_on_persistent_congestion(path, &info);
+
+	return true;
+}
+EXPORT_SYMBOL_GPL(tquic_cong_check_persistent_congestion);
+
+/*
  * tquic_cong_on_rtt - Dispatch RTT update to path's CC algorithm
  * @path: Path with RTT update
  * @rtt_us: RTT sample in microseconds

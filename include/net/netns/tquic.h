@@ -104,6 +104,25 @@ struct netns_tquic {
 	 *   - May include reserved versions in Version Negotiation
 	 */
 	bool grease_enabled;
+
+	/*
+	 * Preferred Address (RFC 9000 Section 9.6) configuration
+	 *
+	 * preferred_address_enabled (server):
+	 *   When true, server advertises a preferred address in transport
+	 *   parameters. Server must ensure it can receive on this address.
+	 *   Default: false (0)
+	 *   Value -1 means: use global sysctl default
+	 *
+	 * prefer_preferred_address (client):
+	 *   When true, client automatically migrates to server's preferred
+	 *   address after handshake completion. Per RFC 9000, clients
+	 *   SHOULD migrate when able.
+	 *   Default: true (1)
+	 *   Value -1 means: use global sysctl default
+	 */
+	int preferred_address_enabled;
+	int prefer_preferred_address;
 };
 
 #endif /* _NET_NETNS_TQUIC_H */

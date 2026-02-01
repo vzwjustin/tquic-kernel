@@ -28,6 +28,7 @@
 
 #include "protocol.h"
 #include "tquic_mib.h"
+#include "tquic_retry.h"
 
 /*
  * Maximum PSK identity length (RFC 8446 Section 4.2.11)
@@ -570,6 +571,120 @@ EXPORT_SYMBOL_GPL(tquic_client_get_stats);
  * SERVER ACCEPT PATH
  * =============================================================================
  */
+
+/* Forward declaration of sysctl accessor */
+extern int tquic_sysctl_get_retry_required(void);
+
+/**
+ * tquic_server_check_retry_required - Check if Retry packet should be sent
+ * @sk: Server socket
+ * @skb: Initial packet
+ * @client_addr: Client source address
+ * @version: QUIC version from packet
+ * @dcid: Destination CID from packet
+ * @dcid_len: DCID length
+ * @scid: Source CID from packet
+ * @scid_len: SCID length
+ * @token: Token from Initial packet (NULL if none)
+ * @token_len: Token length
+ *
+ * Called when a new Initial packet arrives without a known connection.
+ * If Retry is enabled via sysctl and no valid token is present, sends
+ * a Retry packet to validate the client address.
+ *
+ * Per RFC 9000 Section 8.1: Retry is used to force clients to demonstrate
+ * they can receive packets at their claimed source address, mitigating
+ * amplification attacks.
+ *
+ * Returns:
+ *   0: Continue with handshake (no Retry needed or valid token present)
+ *   1: Retry packet sent, caller should drop the Initial packet
+ *   negative errno on error
+ */
+int tquic_server_check_retry_required(struct sock *sk,
+				      struct sk_buff *skb,
+				      struct sockaddr_storage *client_addr,
+				      u32 version,
+				      const u8 *dcid, u8 dcid_len,
+				      const u8 *scid, u8 scid_len,
+				      const u8 *token, size_t token_len)
+{
+	struct net *net;
+	int ret;
+
+	if (!sk)
+		return -EINVAL;
+
+	net = sock_net(sk);
+
+	/* Check if Retry is required via sysctl */
+	if (!tquic_retry_is_required(net))
+		return 0;  /* Retry not required, continue with handshake */
+
+	/*
+	 * If the client included a token, validate it.
+	 * A valid token proves the client already completed a Retry exchange
+	 * for this connection attempt.
+	 */
+	if (token && token_len > 0) {
+		u8 odcid[TQUIC_MAX_CID_LEN];
+		u8 odcid_len;
+
+		/*
+		 * Validate the Retry token. This checks:
+		 * - Token decryption succeeds (proves server generated it)
+		 * - Client IP matches encoded IP (proves address ownership)
+		 * - Timestamp is within validity window (prevents replay)
+		 */
+		ret = tquic_retry_token_validate(NULL, /* use global state */
+						 token, token_len,
+						 client_addr,
+						 odcid, &odcid_len);
+		if (ret == 0) {
+			/* Valid token - continue with handshake */
+			pr_debug("tquic: valid Retry token, proceeding with handshake\n");
+			return 0;
+		}
+
+		/*
+		 * Token validation failed. This could be:
+		 * - Token from different server (decryption fails)
+		 * - Client IP changed (address mismatch)
+		 * - Token expired (timestamp too old)
+		 * - Malformed token
+		 *
+		 * Send a new Retry packet to validate the current address.
+		 */
+		pr_debug("tquic: Retry token validation failed: %d\n", ret);
+	}
+
+	/*
+	 * No valid token - send Retry packet.
+	 *
+	 * Per RFC 9000 Section 8.1.2:
+	 * "A server MUST NOT send more than one Retry packet in response
+	 * to a single UDP datagram."
+	 *
+	 * The Retry packet includes:
+	 * - New server-chosen SCID
+	 * - Retry Token encoding: ODCID, client IP, timestamp
+	 * - Retry Integrity Tag (computed with fixed key from RFC 9001)
+	 */
+	ret = tquic_retry_send(sk, client_addr, version,
+			       dcid, dcid_len, scid, scid_len);
+	if (ret) {
+		pr_debug("tquic: failed to send Retry packet: %d\n", ret);
+		return ret;
+	}
+
+	/* Update statistics */
+	TQUIC_INC_STATS(net, TQUIC_MIB_RETRYPACKETSTX);
+
+	pr_debug("tquic: sent Retry packet to client\n");
+
+	return 1;  /* Retry sent, drop the Initial packet */
+}
+EXPORT_SYMBOL_GPL(tquic_server_check_retry_required);
 
 /**
  * tquic_server_accept - Process incoming connection on server socket

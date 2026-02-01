@@ -34,6 +34,7 @@
 #include <linux/skbuff.h>
 #include <net/tquic.h>
 #include "protocol.h"
+#include "tquic_stateless_reset.h"
 
 /* Frame type constants */
 #define TQUIC_FRAME_NEW_CONNECTION_ID		0x18
@@ -275,8 +276,24 @@ int tquic_cid_pool_init(struct tquic_connection *conn)
 	entry->state = CID_STATE_ACTIVE;
 	entry->path = NULL;
 
-	/* Generate stateless reset token */
-	get_random_bytes(entry->reset_token, TQUIC_STATELESS_RESET_TOKEN_LEN);
+	/*
+	 * Generate stateless reset token deterministically using HMAC
+	 * Per RFC 9000 Section 10.3.2, tokens must be generated from
+	 * a static key so they can be regenerated after state loss.
+	 */
+	{
+		const u8 *static_key = tquic_stateless_reset_get_static_key();
+
+		if (static_key) {
+			tquic_stateless_reset_generate_token(&entry->cid,
+							     static_key,
+							     entry->reset_token);
+		} else {
+			/* Fallback if stateless reset not initialized yet */
+			get_random_bytes(entry->reset_token,
+					 TQUIC_STATELESS_RESET_TOKEN_LEN);
+		}
+	}
 
 	/* Add to global hash table for packet demux lookup */
 	if (cid_table_initialized) {
@@ -391,8 +408,24 @@ int tquic_cid_issue(struct tquic_connection *conn, struct tquic_cid *cid)
 	entry->state = CID_STATE_ACTIVE;
 	entry->path = NULL;
 
-	/* Generate stateless reset token */
-	get_random_bytes(entry->reset_token, TQUIC_STATELESS_RESET_TOKEN_LEN);
+	/*
+	 * Generate stateless reset token deterministically using HMAC
+	 * Per RFC 9000 Section 10.3.2, tokens must be generated from
+	 * a static key so they can be regenerated after state loss.
+	 */
+	{
+		const u8 *static_key = tquic_stateless_reset_get_static_key();
+
+		if (static_key) {
+			tquic_stateless_reset_generate_token(&entry->cid,
+							     static_key,
+							     entry->reset_token);
+		} else {
+			/* Fallback if not initialized */
+			get_random_bytes(entry->reset_token,
+					 TQUIC_STATELESS_RESET_TOKEN_LEN);
+		}
+	}
 
 	/* Register in global hash table */
 	if (cid_table_initialized) {

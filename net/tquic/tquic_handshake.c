@@ -28,6 +28,7 @@
 
 #include "protocol.h"
 #include "tquic_mib.h"
+#include "crypto/zero_rtt.h"
 #include "../quic/tquic_sched.h"
 
 /*
@@ -46,6 +47,163 @@ int tquic_server_get_client_psk(const char *identity, size_t identity_len,
  * Rate limit state for PSK rejection logging
  */
 static DEFINE_RATELIMIT_STATE(tquic_psk_reject_log, 5 * HZ, 5);
+
+/*
+ * =============================================================================
+ * 0-RTT Early Data Support (RFC 9001 Section 4.6-4.7)
+ * =============================================================================
+ *
+ * 0-RTT allows clients to send data immediately using keys derived from
+ * a previous session's resumption_master_secret. This is attempted when:
+ * - A valid session ticket exists for the server
+ * - The ticket has not expired
+ * - 0-RTT is enabled via sysctl
+ *
+ * The state machine is:
+ *   Client: NONE -> ATTEMPTING -> ACCEPTED/REJECTED
+ *   Server: NONE -> ACCEPTED/REJECTED (after evaluating)
+ */
+
+/**
+ * tquic_attempt_zero_rtt - Attempt 0-RTT on cached session ticket
+ * @sk: Socket for the connection
+ * @server_name: Server hostname (SNI)
+ * @server_name_len: Length of server name
+ *
+ * Called by client before handshake to check if 0-RTT is possible.
+ * If a valid session ticket exists, derives 0-RTT keys and sets
+ * connection state to ATTEMPTING.
+ *
+ * Returns: 0 if 0-RTT is possible, -ENOENT if no ticket, other negative on error
+ */
+int tquic_attempt_zero_rtt(struct sock *sk, const char *server_name,
+			   u8 server_name_len)
+{
+	struct tquic_sock *tsk = tquic_sk(sk);
+	struct tquic_connection *conn = tsk->conn;
+	int ret;
+
+	if (!conn)
+		return -EINVAL;
+
+	/* Check if 0-RTT is enabled */
+	if (!tquic_sysctl_get_zero_rtt_enabled()) {
+		pr_debug("tquic: 0-RTT disabled via sysctl\n");
+		return -ENOENT;
+	}
+
+	/* Initialize 0-RTT state if not already done */
+	if (!conn->zero_rtt_state) {
+		ret = tquic_zero_rtt_init(conn);
+		if (ret)
+			return ret;
+	}
+
+	/* Attempt 0-RTT with cached ticket */
+	ret = tquic_zero_rtt_attempt(conn, server_name, server_name_len);
+	if (ret == 0) {
+		/* Update MIB counter for 0-RTT attempt */
+		TQUIC_INC_STATS(sock_net(sk), TQUIC_MIB_0RTTATTEMPTED);
+		pr_debug("tquic: 0-RTT attempt started for %.*s\n",
+			 server_name_len, server_name);
+	}
+
+	return ret;
+}
+EXPORT_SYMBOL_GPL(tquic_attempt_zero_rtt);
+
+/**
+ * tquic_handle_zero_rtt_response - Handle server's 0-RTT response
+ * @sk: Socket for the connection
+ * @accepted: True if server accepted 0-RTT
+ *
+ * Called when client receives server's response indicating whether
+ * 0-RTT was accepted (via early_data extension in EncryptedExtensions).
+ *
+ * If rejected:
+ * - Remove the session ticket from cache
+ * - Mark early data for retransmission as 1-RTT
+ */
+void tquic_handle_zero_rtt_response(struct sock *sk, bool accepted)
+{
+	struct tquic_sock *tsk = tquic_sk(sk);
+	struct tquic_connection *conn = tsk->conn;
+	struct tquic_zero_rtt_state_s *state;
+
+	if (!conn || !conn->zero_rtt_state)
+		return;
+
+	state = conn->zero_rtt_state;
+
+	if (accepted) {
+		tquic_zero_rtt_confirmed(conn);
+		TQUIC_INC_STATS(sock_net(sk), TQUIC_MIB_0RTTACCEPTED);
+		pr_debug("tquic: 0-RTT accepted by server\n");
+	} else {
+		/* Remove stale ticket */
+		if (state->ticket) {
+			tquic_zero_rtt_remove_ticket(state->ticket->server_name,
+						     state->ticket->server_name_len);
+		}
+		tquic_zero_rtt_reject(conn);
+		TQUIC_INC_STATS(sock_net(sk), TQUIC_MIB_0RTTREJECTED);
+		pr_debug("tquic: 0-RTT rejected by server\n");
+	}
+}
+EXPORT_SYMBOL_GPL(tquic_handle_zero_rtt_response);
+
+/**
+ * tquic_store_session_ticket - Store session ticket for future 0-RTT
+ * @sk: Socket for the connection
+ * @server_name: Server hostname
+ * @server_name_len: Length of server name
+ * @ticket_data: Encrypted ticket from NEW_SESSION_TICKET
+ * @ticket_len: Length of ticket
+ * @psk: Pre-shared key (resumption_master_secret)
+ * @psk_len: Length of PSK
+ * @cipher_suite: Negotiated cipher suite
+ * @max_age: Ticket lifetime in seconds
+ *
+ * Called after successful handshake when server sends NEW_SESSION_TICKET.
+ *
+ * Returns: 0 on success, negative on error
+ */
+int tquic_store_session_ticket(struct sock *sk, const char *server_name,
+			       u8 server_name_len, const u8 *ticket_data,
+			       u32 ticket_len, const u8 *psk, u32 psk_len,
+			       u16 cipher_suite, u32 max_age)
+{
+	struct tquic_session_ticket_plaintext plaintext;
+	u32 max_age_sysctl;
+
+	if (!server_name || server_name_len == 0)
+		return -EINVAL;
+
+	if (!ticket_data || ticket_len == 0)
+		return -EINVAL;
+
+	if (!psk || psk_len == 0 || psk_len > TQUIC_ZERO_RTT_SECRET_MAX_LEN)
+		return -EINVAL;
+
+	/* Build plaintext ticket content */
+	memset(&plaintext, 0, sizeof(plaintext));
+	memcpy(plaintext.psk, psk, psk_len);
+	plaintext.psk_len = psk_len;
+
+	/* Limit max_age to sysctl setting */
+	max_age_sysctl = tquic_sysctl_get_zero_rtt_max_age();
+	plaintext.max_age = min(max_age, max_age_sysctl);
+	plaintext.creation_time = ktime_get_real_seconds();
+	plaintext.cipher_suite = cipher_suite;
+
+	/* ALPN and transport params would be filled from connection state */
+	plaintext.alpn_len = 0;
+	plaintext.transport_params_len = 0;
+
+	return tquic_zero_rtt_store_ticket(server_name, server_name_len,
+					   ticket_data, ticket_len, &plaintext);
+}
+EXPORT_SYMBOL_GPL(tquic_store_session_ticket);
 
 /**
  * struct tquic_handshake_state - Handshake state tracking
@@ -163,6 +321,9 @@ static int tquic_map_handshake_error(int status)
  * infrastructure. The actual handshake is performed by the tlshd
  * userspace daemon.
  *
+ * If a valid session ticket exists for the server, 0-RTT early data
+ * mode is enabled allowing data to be sent before handshake completes.
+ *
  * The caller should:
  *   1. Call tquic_start_handshake() to initiate
  *   2. Call tquic_wait_for_handshake() to block until complete
@@ -177,6 +338,7 @@ int tquic_start_handshake(struct sock *sk)
 	struct tls_handshake_args args;
 	struct socket *sock;
 	int ret;
+	int zero_rtt_ret;
 
 	if (!sk || !tsk->conn)
 		return -EINVAL;
@@ -190,6 +352,26 @@ int tquic_start_handshake(struct sock *sk)
 	if (tsk->flags & TQUIC_F_HANDSHAKE_DONE) {
 		pr_debug("tquic: handshake already completed\n");
 		return -EISCONN;
+	}
+
+	/*
+	 * Attempt 0-RTT if we have a cached session ticket.
+	 * This is done before the handshake so early data can be sent
+	 * concurrently with the handshake.
+	 *
+	 * Per RFC 9001 Section 4.6:
+	 * "A client MAY use a previously established session to send
+	 * 0-RTT data before the handshake completes."
+	 */
+	if (tsk->server_name[0] != '\0') {
+		zero_rtt_ret = tquic_attempt_zero_rtt(sk, tsk->server_name,
+						      strlen(tsk->server_name));
+		if (zero_rtt_ret == 0) {
+			pr_debug("tquic: 0-RTT enabled for handshake\n");
+			/* 0-RTT is possible - mark connection as able to send early data */
+			tsk->flags |= TQUIC_F_ZERO_RTT_ENABLED;
+		}
+		/* If 0-RTT fails, continue with normal handshake */
 	}
 
 	/* Allocate handshake state */

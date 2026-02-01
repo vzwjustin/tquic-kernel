@@ -13,6 +13,7 @@
 #include <linux/slab.h>
 #include <linux/math64.h>
 #include <net/tquic.h>
+#include "persistent_cong.h"
 
 /* CUBIC parameters */
 #define TQUIC_CUBIC_C		410	/* C = 0.4 scaled by 1024 */
@@ -364,6 +365,50 @@ static bool tquic_cubic_can_send(void *state, u64 bytes)
 	return true;
 }
 
+/*
+ * Called on persistent congestion (RFC 9002 Section 7.6)
+ *
+ * Per RFC 9002:
+ * "When persistent congestion is established, the sender's congestion
+ * window MUST be reduced to the minimum congestion window (kMinimumWindow),
+ * which equals 2 * max_datagram_size."
+ *
+ * For CUBIC, we also reset:
+ * - ssthresh to the new cwnd
+ * - Epoch start (to begin fresh CUBIC curve)
+ * - w_max and w_last_max (fast convergence state)
+ */
+static void tquic_cubic_on_persistent_cong(void *state,
+					   struct tquic_persistent_cong_info *info)
+{
+	struct tquic_cubic *cubic = state;
+
+	if (!cubic || !info)
+		return;
+
+	pr_info("tquic_cubic: persistent congestion, resetting cwnd %llu -> %llu\n",
+		cubic->cwnd, info->min_cwnd);
+
+	/* Reset to minimum cwnd per RFC 9002 */
+	cubic->cwnd = info->min_cwnd;
+	cubic->ssthresh = info->min_cwnd;
+
+	/* Reset CUBIC state to start fresh */
+	cubic->epoch_start = 0;
+	cubic->w_max = cubic->cwnd;
+	cubic->w_last_max = cubic->cwnd;
+	cubic->k = 0;
+	cubic->origin_point = cubic->cwnd;
+	cubic->tcp_cwnd = cubic->cwnd;
+	cubic->ack_cnt = 0;
+
+	/* Exit slow start - persistent congestion means we were too aggressive */
+	cubic->in_slow_start = false;
+
+	/* Reset ECN round tracking */
+	cubic->ecn_in_round = false;
+}
+
 static struct tquic_cong_ops tquic_cubic_ops = {
 	.name = "cubic",
 	.owner = THIS_MODULE,
@@ -374,6 +419,7 @@ static struct tquic_cong_ops tquic_cubic_ops = {
 	.on_loss = tquic_cubic_on_loss,
 	.on_rtt_update = tquic_cubic_on_rtt,
 	.on_ecn = tquic_cubic_on_ecn,  /* ECN CE handler per RFC 9002 */
+	.on_persistent_congestion = tquic_cubic_on_persistent_cong,
 	.get_cwnd = tquic_cubic_get_cwnd,
 	.get_pacing_rate = tquic_cubic_get_pacing_rate,
 	.can_send = tquic_cubic_can_send,

@@ -10,6 +10,12 @@
  * Per CONTEXT.md, TQUIC uses a streams-only I/O model where sendmsg/recvmsg
  * work on stream sockets, not the connection socket. The connection socket
  * is used for control operations (connect, listen, accept, stream creation).
+ *
+ * HTTP/3 Integration (RFC 9114):
+ * When HTTP/3 mode is enabled, streams follow HTTP/3 semantics:
+ *   - Bidirectional streams: Request/response pairs (client-initiated: 0, 4, 8...)
+ *   - Unidirectional streams: Control, Push, QPACK (type byte at start)
+ * Stream type validation and frame sequencing are enforced in HTTP/3 mode.
  */
 
 #include <linux/module.h>
@@ -24,6 +30,7 @@
 #include <uapi/linux/tquic.h>
 
 #include "protocol.h"
+#include "http3/http3_stream.h"
 
 /*
  * Stream socket proto_ops forward declarations
@@ -611,3 +618,261 @@ int tquic_wait_for_stream_credit(struct tquic_connection *conn,
 			conn->state != TQUIC_CONN_CONNECTED);
 }
 EXPORT_SYMBOL_GPL(tquic_wait_for_stream_credit);
+
+/*
+ * =============================================================================
+ * HTTP/3 STREAM INTEGRATION
+ * =============================================================================
+ *
+ * These functions integrate HTTP/3 stream semantics with the QUIC stream layer.
+ * When HTTP/3 mode is enabled on a connection, streams follow RFC 9114 rules:
+ *
+ * Stream ID Encoding (RFC 9000 Section 2.1):
+ *   - Bits 0-1: Type (0=client bidi, 1=server bidi, 2=client uni, 3=server uni)
+ *   - Client-initiated bidi (request streams): 0, 4, 8, 12, ...
+ *   - Server-initiated bidi: 1, 5, 9, 13, ... (not used in HTTP/3)
+ *   - Client-initiated uni: 2, 6, 10, 14, ...
+ *   - Server-initiated uni: 3, 7, 11, 15, ...
+ *
+ * HTTP/3 Stream Types (RFC 9114 Section 6.2):
+ *   Unidirectional streams start with a type byte:
+ *   - 0x00: Control stream (one per endpoint, required)
+ *   - 0x01: Push stream (server to client only)
+ *   - 0x02: QPACK Encoder stream
+ *   - 0x03: QPACK Decoder stream
+ */
+
+/**
+ * tquic_stream_is_http3_request - Check if stream is an HTTP/3 request stream
+ * @stream: Stream to check
+ *
+ * HTTP/3 request streams are client-initiated bidirectional streams
+ * (stream IDs: 0, 4, 8, 12, ...).
+ *
+ * Return: true if this is a request stream
+ */
+bool tquic_stream_is_http3_request(struct tquic_stream *stream)
+{
+	if (!stream)
+		return false;
+
+	/* Request streams are client-initiated bidirectional */
+	return h3_stream_id_is_request(stream->id);
+}
+EXPORT_SYMBOL_GPL(tquic_stream_is_http3_request);
+
+/**
+ * tquic_stream_validate_http3_id - Validate stream ID for HTTP/3 semantics
+ * @conn: Connection
+ * @stream_id: Stream ID to validate
+ * @is_local: True if locally initiated
+ *
+ * Validates that the stream ID follows HTTP/3 rules:
+ *   - Client-initiated bidi streams: 0, 4, 8, 12, ...
+ *   - Server cannot initiate bidi streams in HTTP/3
+ *
+ * Return: 0 on success, -H3_STREAM_CREATION_ERROR on failure
+ */
+int tquic_stream_validate_http3_id(struct tquic_connection *conn,
+				   u64 stream_id, bool is_local)
+{
+	bool is_server = (conn->role == TQUIC_ROLE_SERVER);
+	bool is_bidi = h3_stream_id_is_bidi(stream_id);
+	bool is_client_initiated = h3_stream_id_is_client_initiated(stream_id);
+
+	/* Validate bidirectional stream ownership */
+	if (is_bidi) {
+		if (is_local && is_server) {
+			/*
+			 * Server cannot initiate bidi streams in HTTP/3.
+			 * Server uses push streams (unidirectional) instead.
+			 */
+			pr_err("tquic: server cannot open bidi stream in HTTP/3\n");
+			return -H3_STREAM_CREATION_ERROR;
+		}
+
+		/* Validate client-initiated bidi stream ID sequence */
+		if (is_client_initiated) {
+			if ((stream_id & 0x03) != 0x00) {
+				pr_err("tquic: invalid request stream ID %llu\n",
+				       stream_id);
+				return -H3_STREAM_CREATION_ERROR;
+			}
+		}
+	}
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(tquic_stream_validate_http3_id);
+
+/**
+ * tquic_stream_get_http3_type - Get HTTP/3 type for unidirectional stream
+ * @stream: Unidirectional stream
+ *
+ * For unidirectional streams, the type is determined by the first byte
+ * sent/received on the stream.
+ *
+ * Return: Stream type (0-3), or -1 if not yet known or not unidirectional
+ */
+int tquic_stream_get_http3_type(struct tquic_stream *stream)
+{
+	if (!stream)
+		return -1;
+
+	/* Bidirectional streams don't have a type byte */
+	if (h3_stream_id_is_bidi(stream->id))
+		return -1;
+
+	/*
+	 * The HTTP/3 stream type is stored in the stream's extended state.
+	 * If not yet received, return -1 to indicate pending.
+	 */
+	if (!stream->ext)
+		return -1;
+
+	/* Type is stored in lower bits of priority field (reused for HTTP/3) */
+	return stream->priority;
+}
+EXPORT_SYMBOL_GPL(tquic_stream_get_http3_type);
+
+/**
+ * tquic_stream_set_http3_type - Set HTTP/3 type for unidirectional stream
+ * @stream: Unidirectional stream
+ * @type: Stream type (H3_STREAM_TYPE_CONTROL, etc.)
+ *
+ * Sets the HTTP/3 stream type. Must be called before sending any data
+ * on an outgoing unidirectional stream.
+ *
+ * Return: 0 on success, negative error
+ */
+int tquic_stream_set_http3_type(struct tquic_stream *stream, u8 type)
+{
+	if (!stream)
+		return -EINVAL;
+
+	if (h3_stream_id_is_bidi(stream->id)) {
+		pr_err("tquic: cannot set type on bidirectional stream\n");
+		return -EINVAL;
+	}
+
+	if (type > H3_STREAM_TYPE_QPACK_DECODER &&
+	    !H3_STREAM_TYPE_IS_GREASE(type)) {
+		pr_err("tquic: invalid HTTP/3 stream type %u\n", type);
+		return -EINVAL;
+	}
+
+	stream->priority = type;
+
+	pr_debug("tquic: set HTTP/3 stream type %s on id=%llu\n",
+		 h3_stream_type_name(type), stream->id);
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(tquic_stream_set_http3_type);
+
+/**
+ * tquic_stream_is_http3_critical - Check if stream is HTTP/3 critical
+ * @stream: Stream to check
+ *
+ * Critical streams (Control, QPACK Encoder, QPACK Decoder) must not be
+ * closed before the connection closes. Closing a critical stream results
+ * in H3_CLOSED_CRITICAL_STREAM error.
+ *
+ * Return: true if stream is critical
+ */
+bool tquic_stream_is_http3_critical(struct tquic_stream *stream)
+{
+	int type;
+
+	if (!stream)
+		return false;
+
+	if (h3_stream_id_is_bidi(stream->id))
+		return false;
+
+	type = tquic_stream_get_http3_type(stream);
+	if (type < 0)
+		return false;
+
+	return h3_stream_type_is_critical(type);
+}
+EXPORT_SYMBOL_GPL(tquic_stream_is_http3_critical);
+
+/**
+ * tquic_stream_lookup_by_id - Look up stream by ID in connection
+ * @conn: Connection to search
+ * @stream_id: Stream ID to find
+ *
+ * Searches the connection's stream RB-tree for a stream with the given ID.
+ *
+ * Return: Stream if found, NULL otherwise
+ */
+struct tquic_stream *tquic_stream_lookup_by_id(struct tquic_connection *conn,
+					       u64 stream_id)
+{
+	struct rb_node *node;
+
+	if (!conn)
+		return NULL;
+
+	spin_lock_bh(&conn->lock);
+
+	node = conn->streams.rb_node;
+	while (node) {
+		struct tquic_stream *stream;
+
+		stream = rb_entry(node, struct tquic_stream, node);
+
+		if (stream_id < stream->id)
+			node = node->rb_left;
+		else if (stream_id > stream->id)
+			node = node->rb_right;
+		else {
+			spin_unlock_bh(&conn->lock);
+			return stream;
+		}
+	}
+
+	spin_unlock_bh(&conn->lock);
+	return NULL;
+}
+EXPORT_SYMBOL_GPL(tquic_stream_lookup_by_id);
+
+/**
+ * tquic_stream_count_by_type - Count streams of a given HTTP/3 type
+ * @conn: Connection to search
+ * @type: HTTP/3 stream type to count
+ *
+ * Counts the number of unidirectional streams with the given HTTP/3 type.
+ * Used to enforce "one control stream per endpoint" rule.
+ *
+ * Return: Number of streams matching the type
+ */
+int tquic_stream_count_by_type(struct tquic_connection *conn, u8 type)
+{
+	struct rb_node *node;
+	int count = 0;
+
+	if (!conn)
+		return 0;
+
+	spin_lock_bh(&conn->lock);
+
+	for (node = rb_first(&conn->streams); node; node = rb_next(node)) {
+		struct tquic_stream *stream;
+
+		stream = rb_entry(node, struct tquic_stream, node);
+
+		/* Only count unidirectional streams */
+		if (!h3_stream_id_is_uni(stream->id))
+			continue;
+
+		if (stream->priority == type)
+			count++;
+	}
+
+	spin_unlock_bh(&conn->lock);
+
+	return count;
+}
+EXPORT_SYMBOL_GPL(tquic_stream_count_by_type);

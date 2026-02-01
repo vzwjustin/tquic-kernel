@@ -113,14 +113,21 @@ struct tquic_transport_params {
 	/* Connection ID management */
 	u64 active_connection_id_limit;	/* minimum 2 */
 
-	/* Multipath extension for WAN bonding */
+	/* Multipath extension for WAN bonding (RFC 9369) */
 	bool enable_multipath;
+
+	/* RFC 9369 Multipath transport parameters */
+	u64 initial_max_paths;		/* Maximum concurrent paths (0x0f01) */
 
 	/* DATAGRAM frame support (RFC 9221) */
 	u64 max_datagram_frame_size;	/* 0 = disabled, >0 = max size */
 
 	/* GREASE support (RFC 9287) */
 	bool grease_quic_bit;		/* Willing to receive GREASE'd packets */
+
+	/* ACK Frequency (draft-ietf-quic-ack-frequency) */
+	u64 min_ack_delay;		/* Minimum ACK delay in microseconds (0x0e) */
+	bool min_ack_delay_present;	/* Whether min_ack_delay was advertised */
 };
 
 /**
@@ -187,8 +194,9 @@ struct tquic_negotiated_params {
 	/* Connection ID management */
 	u64 active_cid_limit;
 
-	/* Multipath (WAN bonding) */
+	/* Multipath (WAN bonding - RFC 9369) */
 	bool multipath_enabled;
+	u64 max_paths;			/* Negotiated maximum concurrent paths */
 
 	/* DATAGRAM support (RFC 9221) */
 	u64 max_datagram_frame_size;	/* Negotiated max size, 0 = disabled */
@@ -204,6 +212,10 @@ struct tquic_negotiated_params {
 	/* Stateless reset */
 	u8 peer_stateless_reset_token[TQUIC_STATELESS_RESET_TOKEN_LEN];
 	bool peer_stateless_reset_token_present;
+
+	/* ACK Frequency (draft-ietf-quic-ack-frequency) */
+	bool ack_frequency_enabled;	/* Both peers support ACK frequency */
+	u64 peer_min_ack_delay;		/* Peer's min_ack_delay in microseconds */
 };
 
 /*

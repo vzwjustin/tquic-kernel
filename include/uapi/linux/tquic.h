@@ -597,4 +597,150 @@ struct tquic_datagram_info {
 /* Maximum datagram frame size (excluding QUIC header overhead) */
 #define TQUIC_MAX_DATAGRAM_SIZE		65527
 
+/*
+ * HTTP/3 Support (RFC 9114)
+ *
+ * When HTTP/3 mode is enabled, QUIC streams follow HTTP/3 semantics:
+ *   - Bidirectional streams: Request/response pairs
+ *   - Unidirectional streams: Control, Push, QPACK streams
+ *
+ * Stream type mapping:
+ *   - Client-initiated bidi (0, 4, 8, ...): Request streams
+ *   - Server-initiated uni: Control (0x00), Push (0x01), QPACK (0x02, 0x03)
+ *
+ * Frame types are enforced per stream:
+ *   - Control stream: SETTINGS, GOAWAY, MAX_PUSH_ID only
+ *   - Request stream: HEADERS, DATA, PUSH_PROMISE only
+ */
+
+/* Socket option to enable HTTP/3 mode */
+#define TQUIC_SO_HTTP3_ENABLE			90	/* Enable HTTP/3 semantics */
+#define TQUIC_SO_HTTP3_SETTINGS			91	/* Set HTTP/3 settings */
+#define TQUIC_SO_HTTP3_MAX_TABLE_CAPACITY	92	/* QPACK max table capacity */
+#define TQUIC_SO_HTTP3_MAX_FIELD_SECTION_SIZE	93	/* Max header field section size */
+#define TQUIC_SO_HTTP3_BLOCKED_STREAMS		94	/* QPACK blocked streams */
+#define TQUIC_SO_HTTP3_SERVER_PUSH		95	/* Enable server push */
+#define TQUIC_SO_HTTP3_STREAM_INFO		96	/* Get stream info (read-only) */
+
+/* Aliases for backward compatibility */
+#define TQUIC_SO_HTTP3_QPACK_MAX_CAP	TQUIC_SO_HTTP3_MAX_TABLE_CAPACITY
+#define TQUIC_SO_HTTP3_MAX_FIELD_SIZE	TQUIC_SO_HTTP3_MAX_FIELD_SECTION_SIZE
+#define TQUIC_SO_HTTP3_QPACK_BLOCKED	TQUIC_SO_HTTP3_BLOCKED_STREAMS
+
+/* HTTP/3 default values */
+#define TQUIC_HTTP3_DEFAULT_TABLE_CAPACITY	4096
+#define TQUIC_HTTP3_DEFAULT_FIELD_SECTION_SIZE	16384
+#define TQUIC_HTTP3_DEFAULT_BLOCKED_STREAMS	100
+
+/* HTTP/3 maximum values */
+#define TQUIC_HTTP3_MAX_TABLE_CAPACITY_MAX	65536
+#define TQUIC_HTTP3_MAX_BLOCKED_STREAMS_MAX	1000
+
+/**
+ * struct tquic_http3_settings - HTTP/3 SETTINGS parameters
+ * @max_table_capacity: Maximum QPACK dynamic table capacity (bytes)
+ * @max_field_section_size: Maximum compressed header field section size (bytes)
+ * @max_blocked_streams: Maximum blocked QPACK streams
+ * @enable_push: Enable server push (0 = disabled, 1 = enabled)
+ * @reserved: Reserved for alignment
+ *
+ * Used with setsockopt(TQUIC_SO_HTTP3_SETTINGS) to configure HTTP/3 params.
+ * Must be set before connect() or handshake completion.
+ *
+ * Defaults:
+ *   max_table_capacity: 4096 bytes
+ *   max_field_section_size: 16384 bytes
+ *   max_blocked_streams: 100
+ *   enable_push: 0 (disabled)
+ */
+struct tquic_http3_settings {
+	__u32 max_table_capacity;
+	__u32 max_field_section_size;
+	__u32 max_blocked_streams;
+	__u32 enable_push;
+	__u32 reserved;
+	__u32 reserved2;
+};
+
+/*
+ * HTTP/3 Error Codes (RFC 9114 Section 8.1)
+ *
+ * These error codes are used in CONNECTION_CLOSE frames and
+ * RESET_STREAM/STOP_SENDING frames for HTTP/3 connections.
+ */
+#define TQUIC_H3_NO_ERROR			0x100
+#define TQUIC_H3_GENERAL_PROTOCOL_ERROR		0x101
+#define TQUIC_H3_INTERNAL_ERROR			0x102
+#define TQUIC_H3_STREAM_CREATION_ERROR		0x103
+#define TQUIC_H3_CLOSED_CRITICAL_STREAM		0x104
+#define TQUIC_H3_FRAME_UNEXPECTED		0x105
+#define TQUIC_H3_FRAME_ERROR			0x106
+#define TQUIC_H3_EXCESSIVE_LOAD			0x107
+#define TQUIC_H3_ID_ERROR			0x108
+#define TQUIC_H3_SETTINGS_ERROR			0x109
+#define TQUIC_H3_MISSING_SETTINGS		0x10a
+#define TQUIC_H3_REQUEST_REJECTED		0x10b
+#define TQUIC_H3_REQUEST_CANCELLED		0x10c
+#define TQUIC_H3_REQUEST_INCOMPLETE		0x10d
+#define TQUIC_H3_MESSAGE_ERROR			0x10e
+#define TQUIC_H3_CONNECT_ERROR			0x10f
+#define TQUIC_H3_VERSION_FALLBACK		0x110
+
+/*
+ * HTTP/3 Stream Types (RFC 9114 Section 6.2)
+ *
+ * Unidirectional streams in HTTP/3 start with a stream type byte.
+ * These constants define the standard stream types.
+ */
+#define TQUIC_H3_STREAM_TYPE_CONTROL		0x00
+#define TQUIC_H3_STREAM_TYPE_PUSH		0x01
+#define TQUIC_H3_STREAM_TYPE_QPACK_ENCODER	0x02
+#define TQUIC_H3_STREAM_TYPE_QPACK_DECODER	0x03
+
+/*
+ * HTTP/3 Frame Types (RFC 9114 Section 7.2)
+ */
+#define TQUIC_H3_FRAME_DATA			0x00
+#define TQUIC_H3_FRAME_HEADERS			0x01
+#define TQUIC_H3_FRAME_CANCEL_PUSH		0x03
+#define TQUIC_H3_FRAME_SETTINGS			0x04
+#define TQUIC_H3_FRAME_PUSH_PROMISE		0x05
+#define TQUIC_H3_FRAME_GOAWAY			0x07
+#define TQUIC_H3_FRAME_MAX_PUSH_ID		0x0d
+
+/**
+ * struct tquic_http3_stream_info - HTTP/3 stream information
+ * @stream_id: QUIC stream ID (input: stream to query)
+ * @type: HTTP/3 stream type (H3_STREAM_TYPE_* for unidirectional streams)
+ * @state: Request state machine state (TQUIC_H3_REQUEST_*)
+ * @is_request_stream: True if this is a request stream
+ * @headers_received: True if HEADERS frame has been received
+ * @data_offset: Current data offset
+ * @content_length: Expected content length (-1 if unknown)
+ * @bytes_sent: Bytes sent on this stream
+ * @bytes_received: Bytes received on this stream
+ *
+ * Used with getsockopt(TQUIC_SO_HTTP3_STREAM_INFO) to query HTTP/3 stream state.
+ * Set stream_id before calling getsockopt to query a specific stream.
+ */
+struct tquic_http3_stream_info {
+	__u64 stream_id;
+	__u32 type;
+	__u32 state;
+	__u32 is_request_stream;
+	__u32 headers_received;
+	__u64 data_offset;
+	__s64 content_length;
+	__u64 bytes_sent;
+	__u64 bytes_received;
+};
+
+/* HTTP/3 request states (for tquic_http3_stream_info.request_state) */
+#define TQUIC_H3_REQUEST_IDLE			0
+#define TQUIC_H3_REQUEST_HEADERS_RECEIVED	1
+#define TQUIC_H3_REQUEST_DATA			2
+#define TQUIC_H3_REQUEST_TRAILERS		3
+#define TQUIC_H3_REQUEST_COMPLETE		4
+#define TQUIC_H3_REQUEST_ERROR			5
+
 #endif /* _UAPI_LINUX_TQUIC_H */

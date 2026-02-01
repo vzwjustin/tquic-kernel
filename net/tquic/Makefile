@@ -27,8 +27,13 @@ tquic-y := \
 	tquic_proc.o \
 	tquic_server.o \
 	tquic_zerocopy.o \
+	tquic_retry.o \
+	tquic_token.o \
+	tquic_stateless_reset.o \
 	grease.o \
-	cong/tquic_cong.o
+	tquic_ack_frequency.o \
+	cong/tquic_cong.o \
+	cong/persistent_cong.o
 
 # Core protocol components
 obj-$(CONFIG_TQUIC_CORE) += tquic_core.o
@@ -76,12 +81,20 @@ tquic_westwood-y := cong/westwood.o
 obj-$(CONFIG_TQUIC_WAN_BONDING) += tquic_coupled.o
 tquic_coupled-y := cong/coupled.o
 
+# Multipath extension (RFC 9369)
+obj-$(CONFIG_TQUIC_MULTIPATH) += tquic_multipath.o
+tquic_multipath-y := \
+	multipath/mp_frame.o \
+	multipath/mp_ack.o \
+	multipath/path_abandon.o
+
 # Crypto support
 obj-$(CONFIG_TQUIC_CRYPTO) += tquic_crypto.o
 tquic_crypto-y := \
 	crypto/tls.o \
 	crypto/header_protection.o \
-	crypto/key_update.o
+	crypto/key_update.o \
+	crypto/zero_rtt.o
 
 # IPv6 Support
 tquic-$(CONFIG_TQUIC_IPV6) += tquic_ipv6.o
@@ -95,6 +108,9 @@ obj-$(CONFIG_TQUIC_DIAG) += tquic_diag.o
 # BPF struct_ops for pluggable schedulers
 obj-$(CONFIG_TQUIC_BPF) += tquic_bpf.o
 tquic_bpf-y := bpf.o
+
+# HTTP/3 Support (RFC 9114)
+obj-$(CONFIG_TQUIC_HTTP3) += http3/
 
 # KUnit tests
 obj-$(CONFIG_TQUIC_KUNIT_TEST) += tquic_test.o

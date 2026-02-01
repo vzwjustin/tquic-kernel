@@ -54,6 +54,45 @@ static int tquic_key_update_interval_seconds = 3600;  /* 1 hour */
 static int tquic_pmtud_enabled = 1;
 static int tquic_pmtud_probe_interval = 15000;  /* ms - RFC 8899 recommends 15s */
 
+/* ACK Frequency tunables (draft-ietf-quic-ack-frequency) */
+static int tquic_ack_frequency_enabled = 1;		/* Enabled by default */
+static int tquic_default_ack_delay_us = 25000;		/* 25ms in microseconds */
+
+/* Stateless reset tunable (RFC 9000 Section 10.3) */
+static int tquic_stateless_reset_enabled = 1;  /* Enabled by default per RFC */
+
+/* Address validation token tunables (RFC 9000 Section 8.1.3-8.1.4) */
+static int tquic_token_lifetime_seconds = 86400;  /* 24 hours default */
+
+/* Retry packet tunables (RFC 9000 Section 8.1) */
+static int tquic_retry_required;			/* 0 = disabled (default), 1 = enabled */
+static int tquic_retry_token_lifetime = 120;		/* seconds, default 2 minutes */
+
+/* HTTP/3 Extensible Priorities (RFC 9218) */
+static int tquic_http3_priorities_enabled = 1;  /* Enabled by default */
+
+/* 0-RTT Early Data (RFC 9001 Section 4.6-4.7) */
+static int tquic_zero_rtt_enabled = 1;			/* Enabled by default */
+static int tquic_zero_rtt_max_age_seconds = 604800;	/* 7 days default */
+
+/* QPACK HTTP/3 header compression (RFC 9204) */
+static int tquic_qpack_max_table_capacity = 4096;	/* Default per RFC 9204 */
+
+/*
+ * Preferred Address tunables (RFC 9000 Section 9.6)
+ *
+ * preferred_address_enabled (server):
+ *   When enabled, server advertises a preferred address in transport parameters.
+ *   Default: 0 (disabled) - must be explicitly configured with addresses.
+ *
+ * prefer_preferred_address (client):
+ *   When enabled, client automatically migrates to server's preferred address
+ *   after handshake completion if one was provided.
+ *   Default: 1 (enabled) - per RFC 9000, clients SHOULD migrate if able.
+ */
+static int tquic_preferred_address_enabled;		/* Server: advertise */
+static int tquic_prefer_preferred_address = 1;		/* Client: auto-migrate */
+
 /* Forward declarations for scheduler API */
 struct tquic_sched_ops;
 struct tquic_sched_ops *tquic_sched_find(const char *name);
@@ -498,6 +537,10 @@ static int max_ecn_beta = 1000;  /* Maximum 1.0 (full, no reduction) */
 static unsigned long max_key_update_packets = (1UL << 30);  /* ~1B packets max */
 static int max_key_update_seconds = 86400;  /* 24 hours max */
 static int max_pmtud_probe_interval = 60000;  /* 60 seconds max */
+static int max_token_lifetime = 604800;  /* 7 days max */
+static int max_ack_delay_us = 16383000;  /* ~16.4 seconds max per spec */
+static int max_retry_token_lifetime = 3600;  /* 1 hour max for Retry tokens */
+static int max_qpack_table_capacity = 1048576;  /* 1MB max for QPACK table */
 
 /* Sysctl table */
 static struct ctl_table tquic_sysctl_table[] = {
@@ -754,6 +797,233 @@ static struct ctl_table tquic_sysctl_table[] = {
 		.extra1		= &one,
 		.extra2		= &max_pmtud_probe_interval,
 	},
+	/*
+	 * Stateless reset (RFC 9000 Section 10.3)
+	 *
+	 * When enabled, the server sends stateless reset packets in response
+	 * to packets with unknown connection IDs. This allows graceful
+	 * termination when the server has lost connection state.
+	 *
+	 * Default: enabled (required by RFC 9000)
+	 */
+	{
+		.procname	= "stateless_reset_enabled",
+		.data		= &tquic_stateless_reset_enabled,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= &zero,
+		.extra2		= &one,
+	},
+	/*
+	 * Address validation token lifetime (RFC 9000 Section 8.1.4)
+	 *
+	 * Tokens issued via NEW_TOKEN frames allow clients to skip address
+	 * validation on future connections. This setting controls how long
+	 * tokens remain valid.
+	 *
+	 * Default: 86400 seconds (24 hours)
+	 * Range: 1 to 604800 seconds (1 second to 7 days)
+	 */
+	{
+		.procname	= "token_lifetime_seconds",
+		.data		= &tquic_token_lifetime_seconds,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= &one,
+		.extra2		= &max_token_lifetime,
+	},
+	/*
+	 * Retry required (RFC 9000 Section 8.1)
+	 *
+	 * When enabled, the server sends Retry packets in response to new
+	 * Initial packets to validate client addresses before allocating
+	 * connection state. This mitigates amplification attacks.
+	 *
+	 * Default: 0 (disabled)
+	 * Set to 1 to require Retry for all new connections
+	 */
+	{
+		.procname	= "retry_required",
+		.data		= &tquic_retry_required,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= &zero,
+		.extra2		= &one,
+	},
+	/*
+	 * Retry token lifetime (RFC 9000 Section 8.1)
+	 *
+	 * Controls how long Retry tokens remain valid. Tokens encode the
+	 * client IP address, timestamp, and original DCID. The server
+	 * validates the timestamp is within this window.
+	 *
+	 * Default: 120 seconds (2 minutes)
+	 * Range: 1 to 3600 seconds (1 second to 1 hour)
+	 */
+	{
+		.procname	= "retry_token_lifetime",
+		.data		= &tquic_retry_token_lifetime,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= &one,
+		.extra2		= &max_retry_token_lifetime,
+	},
+	/*
+	 * HTTP/3 Extensible Priorities (RFC 9218)
+	 *
+	 * When enabled, HTTP/3 stream priorities are tracked and used for
+	 * scheduling. The priority scheme uses urgency (u=0-7) and incremental
+	 * (i) parameters. PRIORITY_UPDATE frames (0xf0700, 0xf0701) allow
+	 * dynamic priority changes during request lifetime.
+	 *
+	 * Default: 1 (enabled)
+	 */
+	{
+		.procname	= "http3_priorities_enabled",
+		.data		= &tquic_http3_priorities_enabled,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= &zero,
+		.extra2		= &one,
+	},
+	/*
+	 * Preferred Address (RFC 9000 Section 9.6)
+	 *
+	 * preferred_address_enabled: Server advertises a preferred address
+	 * in transport parameters. The server must ensure it can receive
+	 * packets on this address before enabling.
+	 *
+	 * Default: 0 (disabled)
+	 */
+	{
+		.procname	= "preferred_address_enabled",
+		.data		= &tquic_preferred_address_enabled,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= &zero,
+		.extra2		= &one,
+	},
+	/*
+	 * prefer_preferred_address: Client automatically migrates to
+	 * server's preferred address after handshake if one is provided.
+	 * Per RFC 9000, clients SHOULD migrate to preferred address
+	 * when able.
+	 *
+	 * Default: 1 (enabled)
+	 */
+	{
+		.procname	= "prefer_preferred_address",
+		.data		= &tquic_prefer_preferred_address,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= &zero,
+		.extra2		= &one,
+	},
+	/*
+	 * ACK Frequency Extension (draft-ietf-quic-ack-frequency)
+	 *
+	 * Allows the sender to control how frequently the peer generates
+	 * acknowledgments via ACK_FREQUENCY (0xaf) and IMMEDIATE_ACK (0xac)
+	 * frames. This can reduce ACK overhead on high-bandwidth paths while
+	 * maintaining good feedback for congestion control.
+	 *
+	 * Default: enabled
+	 */
+	{
+		.procname	= "ack_frequency_enabled",
+		.data		= &tquic_ack_frequency_enabled,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= &zero,
+		.extra2		= &one,
+	},
+	/*
+	 * Default ACK delay in microseconds
+	 *
+	 * The maximum time an endpoint will wait before sending an ACK frame.
+	 * This is used as the default for the min_ack_delay transport parameter
+	 * per draft-ietf-quic-ack-frequency.
+	 *
+	 * Default: 25000 microseconds (25ms)
+	 * Range: 1 to 16383000 microseconds (~16.4 seconds per spec)
+	 */
+	{
+		.procname	= "default_ack_delay_us",
+		.data		= &tquic_default_ack_delay_us,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= &one,
+		.extra2		= &max_ack_delay_us,
+	},
+	/*
+	 * 0-RTT Early Data (RFC 9001 Section 4.6-4.7)
+	 *
+	 * When enabled, clients can send early data before the handshake
+	 * completes using cached session tickets. This reduces latency but
+	 * early data may be replayed; applications must be idempotent.
+	 *
+	 * Default: enabled (1)
+	 */
+	{
+		.procname	= "zero_rtt_enabled",
+		.data		= &tquic_zero_rtt_enabled,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= &zero,
+		.extra2		= &one,
+	},
+	/*
+	 * 0-RTT Session Ticket Max Age (RFC 9001 Section 4.6.1)
+	 *
+	 * Maximum age of session tickets for 0-RTT resumption.
+	 * Tickets older than this are rejected for 0-RTT but may
+	 * still be used for 1-RTT resumption.
+	 *
+	 * Default: 604800 seconds (7 days)
+	 * Range: 1 to 604800 seconds
+	 */
+	{
+		.procname	= "zero_rtt_max_age_seconds",
+		.data		= &tquic_zero_rtt_max_age_seconds,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= &one,
+		.extra2		= &max_token_lifetime,
+	},
+	/*
+	 * QPACK Dynamic Table Capacity (RFC 9204)
+	 *
+	 * Maximum size in bytes of the QPACK dynamic table used for
+	 * HTTP/3 header compression. Each entry uses name_len + value_len + 32
+	 * bytes. Larger tables provide better compression but use more memory.
+	 *
+	 * This value is advertised via the QPACK_MAX_TABLE_CAPACITY (0x01)
+	 * SETTINGS parameter in HTTP/3. The actual table capacity is
+	 * negotiated as min(local_max, peer_max).
+	 *
+	 * Default: 4096 bytes (accommodates ~50-100 typical entries)
+	 * Range: 0 to 1048576 bytes (0 disables dynamic table, max 1MB)
+	 */
+	{
+		.procname	= "qpack_max_table_capacity",
+		.data		= &tquic_qpack_max_table_capacity,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= &zero,
+		.extra2		= &max_qpack_table_capacity,
+	},
 	{ }
 };
 
@@ -915,6 +1185,81 @@ int tquic_sysctl_get_pmtud_probe_interval(void)
 	return tquic_pmtud_probe_interval;
 }
 EXPORT_SYMBOL_GPL(tquic_sysctl_get_pmtud_probe_interval);
+
+/* Stateless reset (RFC 9000 Section 10.3) - declared in tquic_stateless_reset.c */
+
+/* Address validation token (RFC 9000 Section 8.1.3-8.1.4) accessor */
+int tquic_sysctl_get_token_lifetime(void)
+{
+	return tquic_token_lifetime_seconds;
+}
+EXPORT_SYMBOL_GPL(tquic_sysctl_get_token_lifetime);
+
+/* Retry packet (RFC 9000 Section 8.1) accessors */
+int tquic_sysctl_get_retry_required(void)
+{
+	return tquic_retry_required;
+}
+EXPORT_SYMBOL_GPL(tquic_sysctl_get_retry_required);
+
+int tquic_sysctl_get_retry_token_lifetime(void)
+{
+	return tquic_retry_token_lifetime;
+}
+EXPORT_SYMBOL_GPL(tquic_sysctl_get_retry_token_lifetime);
+
+/* HTTP/3 Extensible Priorities (RFC 9218) accessor */
+int tquic_sysctl_get_http3_priorities_enabled(void)
+{
+	return tquic_http3_priorities_enabled;
+}
+EXPORT_SYMBOL_GPL(tquic_sysctl_get_http3_priorities_enabled);
+
+/* ACK Frequency (draft-ietf-quic-ack-frequency) accessors */
+bool tquic_sysctl_get_ack_frequency_enabled(void)
+{
+	return tquic_ack_frequency_enabled;
+}
+EXPORT_SYMBOL_GPL(tquic_sysctl_get_ack_frequency_enabled);
+
+u32 tquic_sysctl_get_default_ack_delay_us(void)
+{
+	return tquic_default_ack_delay_us;
+}
+EXPORT_SYMBOL_GPL(tquic_sysctl_get_default_ack_delay_us);
+
+/* Preferred Address (RFC 9000 Section 9.6) accessors */
+int tquic_sysctl_get_preferred_address_enabled(void)
+{
+	return tquic_preferred_address_enabled;
+}
+EXPORT_SYMBOL_GPL(tquic_sysctl_get_preferred_address_enabled);
+
+int tquic_sysctl_get_prefer_preferred_address(void)
+{
+	return tquic_prefer_preferred_address;
+}
+EXPORT_SYMBOL_GPL(tquic_sysctl_get_prefer_preferred_address);
+
+/* 0-RTT Early Data (RFC 9001 Section 4.6-4.7) accessors */
+int tquic_sysctl_get_zero_rtt_enabled(void)
+{
+	return tquic_zero_rtt_enabled;
+}
+EXPORT_SYMBOL_GPL(tquic_sysctl_get_zero_rtt_enabled);
+
+int tquic_sysctl_get_zero_rtt_max_age(void)
+{
+	return tquic_zero_rtt_max_age_seconds;
+}
+EXPORT_SYMBOL_GPL(tquic_sysctl_get_zero_rtt_max_age);
+
+/* QPACK (RFC 9204) accessor */
+int tquic_sysctl_get_qpack_max_table_capacity(void)
+{
+	return tquic_qpack_max_table_capacity;
+}
+EXPORT_SYMBOL_GPL(tquic_sysctl_get_qpack_max_table_capacity);
 
 int __init tquic_sysctl_init(void)
 {

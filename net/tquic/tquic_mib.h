@@ -14,6 +14,7 @@
  * - Connection lifecycle: Track active connections
  * - Path health: Track RTT, loss, migrations (for WAN bonding)
  * - Stream counters: Track stream opens/closes
+ * - 0-RTT counters: Track early data attempts, acceptance, rejection
  * - Per-EQUIC error counters: Track specific QUIC transport errors
  */
 
@@ -57,6 +58,7 @@ enum linux_tquic_mib_field {
 	TQUIC_MIB_PATHVALIDATED,         /* Paths successfully validated */
 	TQUIC_MIB_RTTSAMPLES,            /* RTT measurements taken */
 	TQUIC_MIB_LOSSEVENTS,            /* Loss detection events */
+	TQUIC_MIB_PERSISTENTCONGESTION,  /* Persistent congestion events (RFC 9002) */
 
 	/* Stream counters */
 	TQUIC_MIB_STREAMSOPENED,         /* Streams opened */
@@ -67,6 +69,13 @@ enum linux_tquic_mib_field {
 	TQUIC_MIB_DATAGRAMSRX,           /* DATAGRAM frames received */
 	TQUIC_MIB_DATAGRAMSTX,           /* DATAGRAM frames transmitted */
 	TQUIC_MIB_DATAGRAMSDROPPED,      /* DATAGRAM frames dropped (queue full) */
+
+	/* Address validation token counters (RFC 9000 Section 8.1.3-8.1.4) */
+	TQUIC_MIB_NEWTOKENSRX,           /* NEW_TOKEN frames received */
+	TQUIC_MIB_NEWTOKENSTX,           /* NEW_TOKEN frames transmitted */
+	TQUIC_MIB_TOKENSVALID,           /* Tokens validated successfully */
+	TQUIC_MIB_TOKENSEXPIRED,         /* Tokens rejected (expired) */
+	TQUIC_MIB_TOKENSINVALID,         /* Tokens rejected (invalid) */
 
 	/* ECN counters - per CONTEXT.md: "ECN support: available but off by default" */
 	TQUIC_MIB_ECNACKSRX,             /* ACK_ECN frames received */
@@ -81,6 +90,19 @@ enum linux_tquic_mib_field {
 	TQUIC_MIB_GROFLUSHES,            /* GRO flush events */
 	TQUIC_MIB_GSOPACKETS,            /* Packets processed by GSO */
 	TQUIC_MIB_GSOSEGMENTS,           /* Segments created by GSO */
+
+	/* Retry packet counters (RFC 9000 Section 8.1) */
+	TQUIC_MIB_RETRYPACKETSTX,        /* Retry packets sent (server) */
+	TQUIC_MIB_RETRYPACKETSRX,        /* Retry packets received (client) */
+	TQUIC_MIB_RETRYERRORS,           /* Retry integrity tag verification failures */
+
+	/* 0-RTT Early Data counters (RFC 9001 Section 4.6-4.7) */
+	TQUIC_MIB_0RTTATTEMPTED,         /* 0-RTT attempts by client */
+	TQUIC_MIB_0RTTACCEPTED,          /* 0-RTT accepted by server */
+	TQUIC_MIB_0RTTREJECTED,          /* 0-RTT rejected by server */
+	TQUIC_MIB_0RTTBYTESTX,           /* Bytes sent in 0-RTT packets */
+	TQUIC_MIB_0RTTBYTESRX,           /* Bytes received in 0-RTT packets */
+	TQUIC_MIB_0RTTREPLAYS,           /* 0-RTT replay attempts detected */
 
 	/*
 	 * Per-EQUIC error counters (EQUIC_BASE=500)

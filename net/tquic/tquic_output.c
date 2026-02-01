@@ -34,6 +34,7 @@
 #include "cong/tquic_cong.h"
 #include "grease.h"
 #include "crypto/key_update.h"
+#include "tquic_token.h"
 
 /* QUIC frame types */
 #define TQUIC_FRAME_PADDING		0x00

@@ -30,6 +30,11 @@
 #include "tquic_mib.h"
 #include "cong/tquic_cong.h"
 #include "crypto/key_update.h"
+#include "crypto/zero_rtt.h"
+#include "tquic_stateless_reset.h"
+#include "tquic_token.h"
+#include "tquic_retry.h"
+#include "tquic_ack_frequency.h"
 
 /* QUIC frame types (must match tquic_output.c) */
 #define TQUIC_FRAME_PADDING		0x00
@@ -57,11 +62,16 @@
 #define TQUIC_FRAME_CONNECTION_CLOSE_APP 0x1d
 #define TQUIC_FRAME_HANDSHAKE_DONE	0x1e
 #define TQUIC_FRAME_DATAGRAM		0x30  /* 0x30-0x31 */
-#define TQUIC_FRAME_ACK_FREQUENCY	0xaf
+#define TQUIC_FRAME_IMMEDIATE_ACK	0xac  /* draft-ietf-quic-ack-frequency */
+#define TQUIC_FRAME_ACK_FREQUENCY	0xaf  /* draft-ietf-quic-ack-frequency */
+/* RFC 9369 Multipath frames - 1-byte types */
 #define TQUIC_FRAME_MP_NEW_CONNECTION_ID 0x40
 #define TQUIC_FRAME_MP_RETIRE_CONNECTION_ID 0x41
 #define TQUIC_FRAME_MP_ACK		0x42
-#define TQUIC_FRAME_PATH_ABANDON	0x43
+#define TQUIC_FRAME_MP_ACK_ECN		0x43
+/* RFC 9369 Multipath frames - extended types (varint encoded) */
+#define TQUIC_MP_FRAME_PATH_ABANDON	0x15c0
+#define TQUIC_MP_FRAME_PATH_STATUS	0x15c08
 
 /* Packet header constants */
 #define TQUIC_HEADER_FORM_LONG		0x80
@@ -293,28 +303,21 @@ static int tquic_decrypt_payload(struct tquic_connection *conn,
 
 /*
  * Check if packet is a stateless reset
+ *
+ * Per RFC 9000 Section 10.3.1:
+ * "An endpoint detects a potential stateless reset using the last
+ * 16 bytes of the UDP datagram. An endpoint remembers all stateless
+ * reset tokens associated with the connection IDs and remote addresses
+ * for datagrams it has recently sent."
  */
 static bool tquic_is_stateless_reset(struct tquic_connection *conn,
 				     const u8 *data, size_t len)
 {
-	const u8 *token;
-
-	/* Must be at least minimum length */
-	if (len < TQUIC_STATELESS_RESET_MIN_LEN)
-		return false;
-
-	/* Short header with random bits that looks like valid packet */
-	if (data[0] & TQUIC_HEADER_FORM_LONG)
-		return false;
-
-	/* Extract token from last 16 bytes */
-	token = data + len - TQUIC_STATELESS_RESET_TOKEN_LEN;
-
-	/* Compare with known stateless reset tokens */
-	/* In a real implementation, we'd check against tokens from */
-	/* NEW_CONNECTION_ID frames */
-
-	return false;  /* Not implemented yet */
+	/*
+	 * Use the new detection API which checks against all tokens
+	 * stored from NEW_CONNECTION_ID frames received from the peer.
+	 */
+	return tquic_stateless_reset_detect_conn(conn, data, len);
 }
 
 /*
@@ -1101,6 +1104,68 @@ static int tquic_process_handshake_done_frame(struct tquic_rx_ctx *ctx)
 }
 
 /*
+ * Process NEW_TOKEN frame (RFC 9000 Section 8.1.3-8.1.4)
+ *
+ * NEW_TOKEN frames provide address validation tokens to clients
+ * for use in future connections. This allows skipping the address
+ * validation handshake on subsequent connections from the same client.
+ *
+ * Frame format:
+ *   Type (0x07): 1 byte
+ *   Token Length: varint
+ *   Token: Token Length bytes
+ *
+ * Per RFC 9000: "A client MUST NOT send a NEW_TOKEN frame."
+ * Only servers send NEW_TOKEN frames after handshake completion.
+ */
+static int tquic_process_new_token(struct tquic_rx_ctx *ctx)
+{
+	u64 token_len;
+	int ret;
+
+	ctx->offset++;  /* Skip frame type */
+
+	/* Parse token length */
+	ret = tquic_decode_varint(ctx->data + ctx->offset,
+				  ctx->len - ctx->offset, &token_len);
+	if (ret < 0)
+		return ret;
+	ctx->offset += ret;
+
+	/* Validate token length */
+	if (token_len > TQUIC_TOKEN_MAX_LEN) {
+		pr_debug("tquic: NEW_TOKEN too large: %llu > %u\n",
+			 token_len, TQUIC_TOKEN_MAX_LEN);
+		return -EINVAL;
+	}
+
+	if (ctx->offset + token_len > ctx->len)
+		return -EINVAL;
+
+	/* Process the token - delegate to token module */
+	ret = tquic_process_new_token_frame(ctx->conn,
+					    ctx->data + ctx->offset,
+					    token_len);
+	if (ret < 0) {
+		pr_debug("tquic: NEW_TOKEN processing failed: %d\n", ret);
+		/* Update MIB counter for invalid token */
+		if (ctx->conn && ctx->conn->sk)
+			TQUIC_INC_STATS(sock_net(ctx->conn->sk), TQUIC_MIB_TOKENSINVALID);
+	} else {
+		/* Update MIB counter for token received */
+		if (ctx->conn && ctx->conn->sk)
+			TQUIC_INC_STATS(sock_net(ctx->conn->sk), TQUIC_MIB_NEWTOKENSRX);
+	}
+
+	ctx->offset += token_len;
+	ctx->ack_eliciting = true;
+
+	pr_debug("tquic: received NEW_TOKEN, len=%llu\n", token_len);
+
+	return 0;
+}
+
+/*
  * Process DATAGRAM frame (RFC 9221)
  *
  * DATAGRAM frames carry unreliable, unordered application data.
@@ -1212,6 +1277,322 @@ static int tquic_process_datagram_frame(struct tquic_rx_ctx *ctx)
 }
 
 /*
+ * Process ACK_FREQUENCY frame (draft-ietf-quic-ack-frequency)
+ *
+ * ACK_FREQUENCY Frame {
+ *   Type (i) = 0xaf,
+ *   Sequence Number (i),
+ *   Ack-Eliciting Threshold (i),
+ *   Request Max Ack Delay (i),
+ *   Reorder Threshold (i),
+ * }
+ *
+ * This frame allows the sender to request changes to the peer's ACK behavior.
+ */
+static int tquic_process_ack_frequency_frame(struct tquic_rx_ctx *ctx)
+{
+	struct tquic_ack_frequency_frame frame;
+	int ret;
+	u64 frame_type;
+
+	/* Parse frame type */
+	ret = tquic_decode_varint(ctx->data + ctx->offset,
+				  ctx->len - ctx->offset, &frame_type);
+	if (ret < 0)
+		return ret;
+	ctx->offset += ret;
+
+	/* Parse the frame fields */
+	ret = tquic_parse_ack_frequency_frame(ctx->data + ctx->offset,
+					      ctx->len - ctx->offset,
+					      &frame);
+	if (ret < 0)
+		return ret;
+	ctx->offset += ret;
+
+	/* Handle the frame */
+	ret = tquic_handle_ack_frequency_frame(ctx->conn, &frame);
+	if (ret < 0)
+		return ret;
+
+	ctx->ack_eliciting = true;
+
+	return 0;
+}
+
+/*
+ * Process IMMEDIATE_ACK frame (draft-ietf-quic-ack-frequency)
+ *
+ * IMMEDIATE_ACK Frame {
+ *   Type (i) = 0xac,
+ * }
+ *
+ * This frame requests that the peer send an ACK immediately.
+ */
+static int tquic_process_immediate_ack_frame(struct tquic_rx_ctx *ctx)
+{
+	int ret;
+	u64 frame_type;
+
+	/* Parse and validate frame type */
+	ret = tquic_decode_varint(ctx->data + ctx->offset,
+				  ctx->len - ctx->offset, &frame_type);
+	if (ret < 0)
+		return ret;
+
+	if (frame_type != TQUIC_FRAME_IMMEDIATE_ACK)
+		return -EINVAL;
+
+	ctx->offset += ret;
+
+	/* Handle the frame */
+	ret = tquic_handle_immediate_ack_frame(ctx->conn);
+	if (ret < 0)
+		return ret;
+
+	ctx->ack_eliciting = true;
+
+	pr_debug("tquic: processed IMMEDIATE_ACK frame\n");
+
+	return 0;
+}
+
+/*
+ * =============================================================================
+ * RFC 9369 Multipath Frame Processing
+ * =============================================================================
+ */
+
+#ifdef CONFIG_TQUIC_MULTIPATH
+
+#include "multipath/mp_frame.h"
+#include "multipath/mp_ack.h"
+#include "multipath/path_abandon.h"
+
+/**
+ * tquic_is_mp_extended_frame - Check if this is an extended MP frame
+ * @ctx: Receive context
+ *
+ * Extended multipath frames have multi-byte frame types that start with
+ * specific prefixes. This function peeks at the frame type without consuming it.
+ */
+static bool tquic_is_mp_extended_frame(struct tquic_rx_ctx *ctx)
+{
+	u64 frame_type;
+	int ret;
+
+	ret = tquic_decode_varint(ctx->data + ctx->offset,
+				  ctx->len - ctx->offset, &frame_type);
+	if (ret < 0)
+		return false;
+
+	/* Check for extended multipath frame types */
+	return (frame_type >= 0x15c0 && frame_type <= 0x15cff);
+}
+
+/**
+ * tquic_process_mp_extended_frame - Process extended multipath frames
+ * @ctx: Receive context
+ *
+ * Handles PATH_ABANDON (0x15c0) and PATH_STATUS (0x15c08).
+ */
+static int tquic_process_mp_extended_frame(struct tquic_rx_ctx *ctx)
+{
+	u64 frame_type;
+	int ret;
+
+	ret = tquic_decode_varint(ctx->data + ctx->offset,
+				  ctx->len - ctx->offset, &frame_type);
+	if (ret < 0)
+		return ret;
+
+	if (frame_type == TQUIC_MP_FRAME_PATH_ABANDON) {
+		return tquic_process_path_abandon_frame(ctx);
+	} else if (frame_type == TQUIC_MP_FRAME_PATH_STATUS) {
+		return tquic_process_path_status_frame(ctx);
+	}
+
+	pr_debug("tquic: unknown extended MP frame type 0x%llx\n", frame_type);
+	return -EINVAL;
+}
+
+/**
+ * tquic_process_path_abandon_frame - Process PATH_ABANDON frame
+ * @ctx: Receive context
+ *
+ * RFC 9369: PATH_ABANDON frame indicates peer is abandoning a path.
+ */
+static int tquic_process_path_abandon_frame(struct tquic_rx_ctx *ctx)
+{
+	struct tquic_mp_path_abandon frame;
+	int ret;
+
+	ret = tquic_mp_parse_path_abandon(ctx->data + ctx->offset,
+					  ctx->len - ctx->offset, &frame);
+	if (ret < 0)
+		return ret;
+
+	ctx->offset += ret;
+	ctx->ack_eliciting = true;
+
+	/* Handle the frame */
+	ret = tquic_mp_handle_path_abandon(ctx->conn, &frame);
+	if (ret < 0) {
+		pr_debug("tquic: PATH_ABANDON handling failed: %d\n", ret);
+		return ret;
+	}
+
+	pr_debug("tquic: processed PATH_ABANDON for path %llu\n", frame.path_id);
+	return 0;
+}
+
+/**
+ * tquic_process_mp_new_connection_id_frame - Process MP_NEW_CONNECTION_ID
+ * @ctx: Receive context
+ *
+ * RFC 9369: MP_NEW_CONNECTION_ID issues path-specific CIDs.
+ */
+static int tquic_process_mp_new_connection_id_frame(struct tquic_rx_ctx *ctx)
+{
+	struct tquic_mp_new_connection_id frame;
+	int ret;
+
+	ret = tquic_mp_parse_new_connection_id(ctx->data + ctx->offset,
+					       ctx->len - ctx->offset, &frame);
+	if (ret < 0)
+		return ret;
+
+	ctx->offset += ret;
+	ctx->ack_eliciting = true;
+
+	/* Handle the frame */
+	ret = tquic_mp_handle_new_connection_id(ctx->conn, &frame);
+	if (ret < 0) {
+		pr_debug("tquic: MP_NEW_CONNECTION_ID handling failed: %d\n", ret);
+		return ret;
+	}
+
+	pr_debug("tquic: processed MP_NEW_CONNECTION_ID path=%llu seq=%llu\n",
+		 frame.path_id, frame.seq_num);
+	return 0;
+}
+
+/**
+ * tquic_process_mp_retire_connection_id_frame - Process MP_RETIRE_CONNECTION_ID
+ * @ctx: Receive context
+ *
+ * RFC 9369: MP_RETIRE_CONNECTION_ID retires path-specific CIDs.
+ */
+static int tquic_process_mp_retire_connection_id_frame(struct tquic_rx_ctx *ctx)
+{
+	struct tquic_mp_retire_connection_id frame;
+	int ret;
+
+	ret = tquic_mp_parse_retire_connection_id(ctx->data + ctx->offset,
+						  ctx->len - ctx->offset, &frame);
+	if (ret < 0)
+		return ret;
+
+	ctx->offset += ret;
+	ctx->ack_eliciting = true;
+
+	/* Handle the frame */
+	ret = tquic_mp_handle_retire_connection_id(ctx->conn, &frame);
+	if (ret < 0) {
+		pr_debug("tquic: MP_RETIRE_CONNECTION_ID handling failed: %d\n", ret);
+		return ret;
+	}
+
+	pr_debug("tquic: processed MP_RETIRE_CONNECTION_ID path=%llu seq=%llu\n",
+		 frame.path_id, frame.seq_num);
+	return 0;
+}
+
+/**
+ * tquic_process_mp_ack_frame - Process MP_ACK frame
+ * @ctx: Receive context
+ *
+ * RFC 9369: MP_ACK provides per-path acknowledgments.
+ */
+static int tquic_process_mp_ack_frame(struct tquic_rx_ctx *ctx)
+{
+	struct tquic_mp_ack frame;
+	struct tquic_path *path;
+	struct tquic_mp_path_ack_state *ack_state;
+	u8 ack_delay_exponent = 3;  /* Default */
+	int ret;
+
+	ret = tquic_mp_parse_ack(ctx->data + ctx->offset,
+				 ctx->len - ctx->offset,
+				 &frame, ack_delay_exponent);
+	if (ret < 0)
+		return ret;
+
+	ctx->offset += ret;
+	/* MP_ACK is NOT ack-eliciting (RFC 9000 Section 13.2) */
+
+	/* Find the path for this ACK */
+	spin_lock(&ctx->conn->paths_lock);
+	list_for_each_entry(path, &ctx->conn->paths, list) {
+		if (path->path_id == frame.path_id) {
+			ack_state = path->mp_ack_state;
+			if (ack_state) {
+				spin_unlock(&ctx->conn->paths_lock);
+				ret = tquic_mp_on_ack_received(ack_state,
+					TQUIC_PN_SPACE_APPLICATION,
+					&frame, ctx->conn);
+				if (ret < 0) {
+					pr_debug("tquic: MP_ACK processing failed: %d\n", ret);
+					return ret;
+				}
+				pr_debug("tquic: processed MP_ACK path=%llu largest=%llu\n",
+					 frame.path_id, frame.largest_ack);
+				return 0;
+			}
+			break;
+		}
+	}
+	spin_unlock(&ctx->conn->paths_lock);
+
+	pr_debug("tquic: MP_ACK for unknown/uninitialized path %llu\n",
+		 frame.path_id);
+	return 0;
+}
+
+/**
+ * tquic_process_path_status_frame - Process PATH_STATUS frame
+ * @ctx: Receive context
+ *
+ * RFC 9369: PATH_STATUS reports path availability and priority.
+ */
+static int tquic_process_path_status_frame(struct tquic_rx_ctx *ctx)
+{
+	struct tquic_mp_path_status frame;
+	int ret;
+
+	ret = tquic_mp_parse_path_status(ctx->data + ctx->offset,
+					 ctx->len - ctx->offset, &frame);
+	if (ret < 0)
+		return ret;
+
+	ctx->offset += ret;
+	ctx->ack_eliciting = true;
+
+	/* Handle the frame */
+	ret = tquic_mp_handle_path_status(ctx->conn, &frame);
+	if (ret < 0) {
+		pr_debug("tquic: PATH_STATUS handling failed: %d\n", ret);
+		return ret;
+	}
+
+	pr_debug("tquic: processed PATH_STATUS path=%llu status=%llu\n",
+		 frame.path_id, frame.status);
+	return 0;
+}
+
+#endif /* CONFIG_TQUIC_MULTIPATH */
+
+/*
  * Demultiplex and process all frames in packet
  */
 static int tquic_process_frames(struct tquic_connection *conn,
@@ -1245,6 +1626,8 @@ static int tquic_process_frames(struct tquic_connection *conn,
 			ret = tquic_process_ack_frame(&ctx);
 		} else if (frame_type == TQUIC_FRAME_CRYPTO) {
 			ret = tquic_process_crypto_frame(&ctx);
+		} else if (frame_type == TQUIC_FRAME_NEW_TOKEN) {
+			ret = tquic_process_new_token(&ctx);
 		} else if ((frame_type & 0xf8) == TQUIC_FRAME_STREAM) {
 			ret = tquic_process_stream_frame(&ctx);
 		} else if (frame_type == TQUIC_FRAME_MAX_DATA) {
@@ -1267,6 +1650,24 @@ static int tquic_process_frames(struct tquic_connection *conn,
 			ret = tquic_process_handshake_done_frame(&ctx);
 		} else if ((frame_type & 0xfe) == TQUIC_FRAME_DATAGRAM) {
 			ret = tquic_process_datagram_frame(&ctx);
+		} else if (frame_type == TQUIC_FRAME_ACK_FREQUENCY) {
+			ret = tquic_process_ack_frequency_frame(&ctx);
+		} else if (frame_type == TQUIC_FRAME_IMMEDIATE_ACK) {
+			ret = tquic_process_immediate_ack_frame(&ctx);
+#ifdef CONFIG_TQUIC_MULTIPATH
+		} else if (frame_type == 0x40) {
+			/* MP_NEW_CONNECTION_ID (RFC 9369) */
+			ret = tquic_process_mp_new_connection_id_frame(&ctx);
+		} else if (frame_type == 0x41) {
+			/* MP_RETIRE_CONNECTION_ID (RFC 9369) */
+			ret = tquic_process_mp_retire_connection_id_frame(&ctx);
+		} else if (frame_type == 0x42 || frame_type == 0x43) {
+			/* MP_ACK or MP_ACK_ECN (RFC 9369) */
+			ret = tquic_process_mp_ack_frame(&ctx);
+		} else if (tquic_is_mp_extended_frame(&ctx)) {
+			/* Extended multipath frames (PATH_ABANDON, PATH_STATUS) */
+			ret = tquic_process_mp_extended_frame(&ctx);
+#endif
 		} else {
 			/* Unknown frame type */
 			pr_debug("tquic: unknown frame type 0x%02x\n", frame_type);
@@ -1570,6 +1971,129 @@ static int tquic_process_packet(struct tquic_connection *conn,
 			return 0;
 		}
 
+		/*
+		 * Handle Retry packet (client-side, RFC 9000 Section 17.2.5)
+		 *
+		 * A Retry packet is sent by the server in response to an Initial
+		 * packet to validate the client's address. The client must:
+		 * 1. Verify the Retry Integrity Tag using original DCID
+		 * 2. Extract the Retry Token
+		 * 3. Store the new server-provided SCID
+		 * 4. Retransmit Initial with the Retry Token
+		 *
+		 * Retry packets can only be received on clients during connection
+		 * establishment (TQUIC_CONN_CONNECTING state).
+		 */
+		if (pkt_type == TQUIC_PKT_RETRY) {
+			/* Need connection to process Retry */
+			if (!conn)
+				conn = tquic_lookup_by_dcid(dcid, dcid_len);
+
+			if (conn) {
+				/*
+				 * Only process Retry in connecting state.
+				 * Per RFC 9000: "A client MUST discard a Retry
+				 * packet that contains a DCID field that is
+				 * not equal to the SCID field of its Initial."
+				 */
+				if (conn->state == TQUIC_CONN_CONNECTING) {
+					ret = tquic_retry_process(conn, data, len);
+					if (ret == 0) {
+						/* Update MIB counter */
+						if (conn->sk)
+							TQUIC_INC_STATS(sock_net(conn->sk),
+									TQUIC_MIB_RETRYPACKETSRX);
+						/*
+						 * Retry processed successfully.
+						 * Caller should retransmit Initial with token.
+						 * Return special code to trigger retry.
+						 */
+						return -EAGAIN;
+					}
+				} else {
+					/*
+					 * Per RFC 9000 Section 17.2.5.2:
+					 * "A client MUST discard a Retry packet
+					 * if it has received and successfully
+					 * processed a Retry packet for this
+					 * connection."
+					 */
+					pr_debug("tquic: discarding Retry in state %d\n",
+						 conn->state);
+				}
+			}
+			return 0;  /* Discard Retry packet after processing */
+		}
+
+		/*
+		 * Handle 0-RTT packets (RFC 9001 Section 4.6-4.7)
+		 *
+		 * 0-RTT packets are sent by clients using keys derived from
+		 * a previous session's resumption_master_secret. They contain
+		 * early application data and may arrive before or during the
+		 * TLS handshake.
+		 *
+		 * Server processing:
+		 * 1. Look up connection by DCID
+		 * 2. Check if 0-RTT is enabled and not rejected
+		 * 3. Decrypt using 0-RTT keys
+		 * 4. Process frames (limited: no CRYPTO, ACK, etc.)
+		 *
+		 * Client processing (unlikely - server doesn't send 0-RTT):
+		 * - Discard the packet
+		 */
+		if (pkt_type == TQUIC_PKT_ZERO_RTT) {
+			if (!conn)
+				conn = tquic_lookup_by_dcid(dcid, dcid_len);
+
+			if (!conn) {
+				pr_debug("tquic: 0-RTT packet for unknown connection\n");
+				return -ENOENT;
+			}
+
+			/* Server-side: check if we can accept 0-RTT */
+			if (conn->role == TQUIC_ROLE_SERVER) {
+				enum tquic_zero_rtt_state zrtt_state;
+				zrtt_state = tquic_zero_rtt_get_state(conn);
+
+				if (zrtt_state == TQUIC_0RTT_REJECTED) {
+					/*
+					 * 0-RTT already rejected - discard packet.
+					 * Client will retransmit as 1-RTT.
+					 */
+					pr_debug("tquic: 0-RTT rejected, discarding\n");
+					return 0;
+				}
+
+				/*
+				 * Accept 0-RTT if not yet decided.
+				 * This initializes keys for decryption.
+				 */
+				if (zrtt_state == TQUIC_0RTT_NONE) {
+					ret = tquic_zero_rtt_accept(conn);
+					if (ret < 0) {
+						/* Replay or other error - reject */
+						tquic_zero_rtt_reject(conn);
+						if (ret == -EEXIST && conn->sk)
+							TQUIC_INC_STATS(sock_net(conn->sk),
+									TQUIC_MIB_0RTTREPLAYS);
+						pr_debug("tquic: 0-RTT rejected: %d\n", ret);
+						return 0;
+					}
+					if (conn->sk)
+						TQUIC_INC_STATS(sock_net(conn->sk),
+								TQUIC_MIB_0RTTACCEPTED);
+				}
+			} else {
+				/* Client received 0-RTT packet - shouldn't happen */
+				pr_debug("tquic: client received 0-RTT packet?\n");
+				return -EPROTO;
+			}
+
+			/* Continue to decrypt and process as 0-RTT */
+			/* Fall through to normal packet processing below */
+		}
+
 		/* Lookup connection by DCID if not provided */
 		if (!conn)
 			conn = tquic_lookup_by_dcid(dcid, dcid_len);
@@ -1656,28 +2180,50 @@ static int tquic_process_packet(struct tquic_connection *conn,
 	if (!decrypted)
 		return -ENOMEM;
 
-	ret = tquic_decrypt_payload(conn, data, ctx.offset,
-				    payload, payload_len,
-				    pkt_num,
-				    pkt_type >= 0 ? pkt_type : 3,
-				    decrypted, &decrypted_len);
-	if (ret < 0) {
-		/*
-		 * Key Update: Decryption failure for short headers might be
-		 * due to key phase change. Try with old keys if available.
-		 * Per RFC 9001 Section 6.3, packets in flight during key
-		 * update may arrive encrypted with old keys.
-		 */
-		if (pkt_type < 0 && conn->crypto_state) {
-			ret = tquic_try_decrypt_with_old_keys(conn,
-							      data, ctx.offset,
-							      payload, payload_len,
-							      pkt_num,
-							      decrypted, &decrypted_len);
-		}
+	/*
+	 * Decrypt payload using appropriate keys:
+	 * - 0-RTT packets use 0-RTT keys from session ticket
+	 * - Other packets use normal crypto state keys
+	 */
+	if (pkt_type == TQUIC_PKT_ZERO_RTT) {
+		/* Decrypt using 0-RTT keys */
+		ret = tquic_zero_rtt_decrypt(conn, data, ctx.offset,
+					     payload, payload_len,
+					     pkt_num, decrypted, &decrypted_len);
 		if (ret < 0) {
 			kfree(decrypted);
+			if (ret == -ENOKEY)
+				pr_debug("tquic: 0-RTT decryption failed, no keys\n");
 			return ret;
+		}
+		/* Update 0-RTT stats */
+		if (conn->sk)
+			TQUIC_ADD_STATS(sock_net(conn->sk), TQUIC_MIB_0RTTBYTESRX,
+					decrypted_len);
+	} else {
+		ret = tquic_decrypt_payload(conn, data, ctx.offset,
+					    payload, payload_len,
+					    pkt_num,
+					    pkt_type >= 0 ? pkt_type : 3,
+					    decrypted, &decrypted_len);
+		if (ret < 0) {
+			/*
+			 * Key Update: Decryption failure for short headers might be
+			 * due to key phase change. Try with old keys if available.
+			 * Per RFC 9001 Section 6.3, packets in flight during key
+			 * update may arrive encrypted with old keys.
+			 */
+			if (pkt_type < 0 && conn->crypto_state) {
+				ret = tquic_try_decrypt_with_old_keys(conn,
+								      data, ctx.offset,
+								      payload, payload_len,
+								      pkt_num,
+								      decrypted, &decrypted_len);
+			}
+			if (ret < 0) {
+				kfree(decrypted);
+				return ret;
+			}
 		}
 	}
 
@@ -1731,12 +2277,20 @@ static int tquic_process_packet(struct tquic_connection *conn,
 
 /*
  * UDP receive callback - main entry point for received packets
+ *
+ * This is the primary entry point for all QUIC packets received via UDP.
+ * It handles:
+ * - Stateless reset detection (received from peer)
+ * - Version negotiation processing
+ * - Regular packet processing
+ * - Stateless reset transmission (for unknown CIDs, per RFC 9000 Section 10.3)
  */
 int tquic_udp_recv(struct sock *sk, struct sk_buff *skb)
 {
 	struct tquic_connection *conn = NULL;
 	struct tquic_path *path = NULL;
 	struct sockaddr_storage src_addr;
+	struct sockaddr_storage local_addr;
 	u8 *data;
 	size_t len;
 	int ret;
@@ -1744,18 +2298,33 @@ int tquic_udp_recv(struct sock *sk, struct sk_buff *skb)
 	if (!skb)
 		return -EINVAL;
 
-	/* Extract source address */
+	/* Extract source (remote) address */
 	memset(&src_addr, 0, sizeof(src_addr));
+	memset(&local_addr, 0, sizeof(local_addr));
+
 	if (skb->protocol == htons(ETH_P_IP)) {
-		struct sockaddr_in *sin = (struct sockaddr_in *)&src_addr;
-		sin->sin_family = AF_INET;
-		sin->sin_addr.s_addr = ip_hdr(skb)->saddr;
-		sin->sin_port = udp_hdr(skb)->source;
+		struct sockaddr_in *sin_src = (struct sockaddr_in *)&src_addr;
+		struct sockaddr_in *sin_local = (struct sockaddr_in *)&local_addr;
+
+		sin_src->sin_family = AF_INET;
+		sin_src->sin_addr.s_addr = ip_hdr(skb)->saddr;
+		sin_src->sin_port = udp_hdr(skb)->source;
+
+		/* Local address for stateless reset response */
+		sin_local->sin_family = AF_INET;
+		sin_local->sin_addr.s_addr = ip_hdr(skb)->daddr;
+		sin_local->sin_port = udp_hdr(skb)->dest;
 	} else if (skb->protocol == htons(ETH_P_IPV6)) {
-		struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)&src_addr;
-		sin6->sin6_family = AF_INET6;
-		sin6->sin6_addr = ipv6_hdr(skb)->saddr;
-		sin6->sin6_port = udp_hdr(skb)->source;
+		struct sockaddr_in6 *sin6_src = (struct sockaddr_in6 *)&src_addr;
+		struct sockaddr_in6 *sin6_local = (struct sockaddr_in6 *)&local_addr;
+
+		sin6_src->sin6_family = AF_INET6;
+		sin6_src->sin6_addr = ipv6_hdr(skb)->saddr;
+		sin6_src->sin6_port = udp_hdr(skb)->source;
+
+		sin6_local->sin6_family = AF_INET6;
+		sin6_local->sin6_addr = ipv6_hdr(skb)->daddr;
+		sin6_local->sin6_port = udp_hdr(skb)->dest;
 	}
 
 	/* Get UDP payload */
@@ -1767,7 +2336,7 @@ int tquic_udp_recv(struct sock *sk, struct sk_buff *skb)
 		return -EINVAL;
 	}
 
-	/* Check for stateless reset */
+	/* Check for stateless reset (received from peer) */
 	if (len >= TQUIC_STATELESS_RESET_MIN_LEN &&
 	    !(data[0] & TQUIC_HEADER_FORM_LONG)) {
 		/* Try to find connection for reset check */
@@ -1804,6 +2373,59 @@ int tquic_udp_recv(struct sock *sk, struct sk_buff *skb)
 
 	/* Process the QUIC packet */
 	ret = tquic_process_packet(conn, path, data, len, &src_addr);
+
+	/*
+	 * Per RFC 9000 Section 10.3:
+	 * "An endpoint that receives packets that it cannot process sends
+	 * a stateless reset in response."
+	 *
+	 * If we couldn't find a connection for a short header packet,
+	 * we should send a stateless reset. However, we must NOT send
+	 * a stateless reset in response to:
+	 * - Long header packets (might be Initial packets for new connections)
+	 * - Packets that could themselves be stateless resets
+	 * - Packets too small to trigger without amplification
+	 */
+	if (ret == -ENOENT && !(data[0] & TQUIC_HEADER_FORM_LONG)) {
+		/*
+		 * Short header packet with unknown CID - send stateless reset
+		 *
+		 * We need to extract the DCID from the packet to generate
+		 * the correct token. For short headers, DCID starts at byte 1.
+		 */
+		struct tquic_cid unknown_cid;
+		const u8 *static_key;
+
+		/*
+		 * Don't send reset if this packet could itself be a reset
+		 * (would cause infinite loop)
+		 */
+		if (len >= TQUIC_STATELESS_RESET_MIN_LEN) {
+			/*
+			 * Extract DCID - we don't know the length, but we
+			 * can use up to TQUIC_DEFAULT_CID_LEN bytes
+			 */
+			unknown_cid.len = min_t(size_t,
+						len - 1 - TQUIC_STATELESS_RESET_TOKEN_LEN,
+						TQUIC_DEFAULT_CID_LEN);
+			if (unknown_cid.len > 0) {
+				memcpy(unknown_cid.id, data + 1, unknown_cid.len);
+				unknown_cid.seq_num = 0;
+				unknown_cid.retire_prior_to = 0;
+
+				static_key = tquic_stateless_reset_get_static_key();
+				if (static_key) {
+					tquic_stateless_reset_send(sk,
+								   &local_addr,
+								   &src_addr,
+								   &unknown_cid,
+								   static_key,
+								   len);
+					pr_debug("tquic: sent stateless reset for unknown CID\n");
+				}
+			}
+		}
+	}
 
 	kfree_skb(skb);
 	return ret;
