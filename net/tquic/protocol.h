@@ -77,6 +77,10 @@ struct tquic_mib;
  * This structure is accessed via netns_generic mechanism since we cannot
  * modify struct net or struct netns_mib for out-of-tree modules.
  */
+/* Scheduler/CC name limits for per-netns storage */
+#define TQUIC_NET_SCHED_NAME_MAX	16
+#define TQUIC_NET_CC_NAME_MAX		16
+
 struct tquic_net {
 	/* Sysctl parameters */
 	int enabled;
@@ -89,6 +93,23 @@ struct tquic_net {
 	int initial_rtt;
 	int initial_cwnd;
 	int debug_level;
+
+	/* Scheduler/CC per-netns configuration */
+	struct tquic_sched_ops __rcu *default_scheduler;
+	char sched_name[TQUIC_NET_SCHED_NAME_MAX];
+	struct tquic_cong_ops __rcu *default_cong;
+	char cc_name[TQUIC_NET_CC_NAME_MAX];
+
+	/* BBR auto-selection threshold (ms) */
+	u32 bbr_rtt_threshold_ms;
+
+	/* Feature flags */
+	bool coupled_enabled;
+	bool ecn_enabled;
+	int ecn_beta;
+	bool pacing_enabled;
+	int path_degrade_threshold;
+	bool grease_enabled;
 
 	/* Per-netns MIB statistics (out-of-tree replacement for net->mib) */
 	struct tquic_mib __percpu *mib;

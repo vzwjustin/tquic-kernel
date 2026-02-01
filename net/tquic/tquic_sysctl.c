@@ -13,8 +13,9 @@
 #include <linux/sched.h>
 #include <linux/nsproxy.h>
 #include <net/net_namespace.h>
-#include <net/netns/tquic.h>
 #include <net/tquic.h>
+
+#include "protocol.h"
 
 /* Global tunables */
 static int tquic_enabled = 1;
@@ -112,7 +113,7 @@ const char *tquic_cong_get_default_name(struct net *net);
  * On read: Returns current default scheduler name
  * On write: Validates scheduler exists and sets as default
  */
-static int proc_tquic_scheduler(struct ctl_table *table, int write,
+static int proc_tquic_scheduler(const struct ctl_table *table, int write,
 				void *buffer, size_t *lenp, loff_t *ppos)
 {
 	struct net *net = current->nsproxy->net_ns;
@@ -125,8 +126,8 @@ static int proc_tquic_scheduler(struct ctl_table *table, int write,
 		const char *current_name;
 
 		rcu_read_lock();
-		if (net->tquic.default_scheduler)
-			current_name = net->tquic.default_scheduler->name;
+		if (tquic_pernet(net)->default_scheduler)
+			current_name = tquic_pernet(net)->default_scheduler->name;
 		else
 			current_name = "aggregate";
 		rcu_read_unlock();
@@ -144,7 +145,7 @@ static int proc_tquic_scheduler(struct ctl_table *table, int write,
 	}
 
 	/* Write: get new scheduler name from user */
-	strscpy(name, net->tquic.sched_name, sizeof(name));
+	strscpy(name, tquic_pernet(net)->sched_name, sizeof(name));
 
 	memset(&tmp_table, 0, sizeof(tmp_table));
 	tmp_table.procname = table->procname;
@@ -165,8 +166,8 @@ static int proc_tquic_scheduler(struct ctl_table *table, int write,
 	}
 	rcu_read_unlock();
 
-	/* Set per-netns default scheduler */
-	ret = tquic_sched_set_default(net, name);
+	/* Set default scheduler (global for out-of-tree build) */
+	ret = tquic_sched_set_default(name);
 	if (ret) {
 		pr_warn("tquic: failed to set scheduler '%s': %d\n", name, ret);
 		return ret;
@@ -185,7 +186,7 @@ static int proc_tquic_scheduler(struct ctl_table *table, int write,
  * On read: Returns current default CC algorithm name
  * On write: Validates CC algorithm exists and sets as default
  */
-static int proc_tquic_cc_algorithm(struct ctl_table *table, int write,
+static int proc_tquic_cc_algorithm(const struct ctl_table *table, int write,
 				   void *buffer, size_t *lenp, loff_t *ppos)
 {
 	struct net *net = current->nsproxy->net_ns;
@@ -211,7 +212,7 @@ static int proc_tquic_cc_algorithm(struct ctl_table *table, int write,
 	}
 
 	/* Write: get new CC algorithm name from user */
-	strscpy(name, net->tquic.cc_name, sizeof(name));
+	strscpy(name, tquic_pernet(net)->cc_name, sizeof(name));
 
 	memset(&tmp_table, 0, sizeof(tmp_table));
 	tmp_table.procname = table->procname;
@@ -249,11 +250,11 @@ static int proc_tquic_cc_algorithm(struct ctl_table *table, int write,
  *
  * Set to 0 to disable BBR auto-selection.
  */
-static int proc_tquic_bbr_rtt_threshold(struct ctl_table *table, int write,
+static int proc_tquic_bbr_rtt_threshold(const struct ctl_table *table, int write,
 					void *buffer, size_t *lenp, loff_t *ppos)
 {
 	struct net *net = current->nsproxy->net_ns;
-	int val = net->tquic.bbr_rtt_threshold_ms;
+	int val = tquic_pernet(net)->bbr_rtt_threshold_ms;
 	struct ctl_table tmp_table;
 	int ret;
 
@@ -269,7 +270,7 @@ static int proc_tquic_bbr_rtt_threshold(struct ctl_table *table, int write,
 	if (ret || !write)
 		return ret;
 
-	net->tquic.bbr_rtt_threshold_ms = val;
+	tquic_pernet(net)->bbr_rtt_threshold_ms = val;
 	pr_debug("tquic: netns BBR RTT threshold set to %d ms\n", val);
 	return 0;
 }
@@ -280,11 +281,11 @@ static int proc_tquic_bbr_rtt_threshold(struct ctl_table *table, int write,
  * Handles reading/writing net.tquic.cc_coupled which enables/disables
  * coupled congestion control for multipath TCP-fairness.
  */
-static int proc_tquic_cc_coupled(struct ctl_table *table, int write,
+static int proc_tquic_cc_coupled(const struct ctl_table *table, int write,
 				 void *buffer, size_t *lenp, loff_t *ppos)
 {
 	struct net *net = current->nsproxy->net_ns;
-	int val = net->tquic.coupled_enabled ? 1 : 0;
+	int val = tquic_pernet(net)->coupled_enabled ? 1 : 0;
 	struct ctl_table tmp_table;
 	int ret;
 
@@ -300,7 +301,7 @@ static int proc_tquic_cc_coupled(struct ctl_table *table, int write,
 	if (ret || !write)
 		return ret;
 
-	net->tquic.coupled_enabled = !!val;
+	tquic_pernet(net)->coupled_enabled = !!val;
 	pr_debug("tquic: netns coupled CC %s\n",
 		 val ? "enabled" : "disabled");
 	return 0;
@@ -313,11 +314,11 @@ static int proc_tquic_cc_coupled(struct ctl_table *table, int write,
  * ECN (Explicit Congestion Notification) for congestion signaling.
  * Per CONTEXT.md: "ECN support: available but off by default"
  */
-static int proc_tquic_ecn_enabled(struct ctl_table *table, int write,
+static int proc_tquic_ecn_enabled(const struct ctl_table *table, int write,
 				  void *buffer, size_t *lenp, loff_t *ppos)
 {
 	struct net *net = current->nsproxy->net_ns;
-	int val = net->tquic.ecn_enabled ? 1 : 0;
+	int val = tquic_pernet(net)->ecn_enabled ? 1 : 0;
 	struct ctl_table tmp_table;
 	int ret;
 
@@ -333,7 +334,7 @@ static int proc_tquic_ecn_enabled(struct ctl_table *table, int write,
 	if (ret || !write)
 		return ret;
 
-	net->tquic.ecn_enabled = !!val;
+	tquic_pernet(net)->ecn_enabled = !!val;
 	pr_debug("tquic: netns ECN %s\n", val ? "enabled" : "disabled");
 	return 0;
 }
@@ -348,11 +349,11 @@ static int proc_tquic_ecn_enabled(struct ctl_table *table, int write,
  * Per RFC 9002 Section 7.2: ECN reduction is typically less aggressive
  * than loss-based reduction (0.8 vs 0.7 for CUBIC).
  */
-static int proc_tquic_ecn_beta(struct ctl_table *table, int write,
+static int proc_tquic_ecn_beta(const struct ctl_table *table, int write,
 			       void *buffer, size_t *lenp, loff_t *ppos)
 {
 	struct net *net = current->nsproxy->net_ns;
-	int val = net->tquic.ecn_beta ?: 800;  /* Default to 0.8 */
+	int val = tquic_pernet(net)->ecn_beta ?: 800;  /* Default to 0.8 */
 	struct ctl_table tmp_table;
 	int ret;
 
@@ -368,14 +369,14 @@ static int proc_tquic_ecn_beta(struct ctl_table *table, int write,
 	if (ret || !write)
 		return ret;
 
-	net->tquic.ecn_beta = val;
+	tquic_pernet(net)->ecn_beta = val;
 	pr_debug("tquic: netns ECN beta set to %d/1000 (%d.%d%%)\n",
 		 val, val / 10, val % 10);
 	return 0;
 }
 
 /* Legacy global sysctl handler (for compatibility) */
-static int tquic_sysctl_scheduler(struct ctl_table *table, int write,
+static int tquic_sysctl_scheduler(const struct ctl_table *table, int write,
 				  void *buffer, size_t *lenp, loff_t *ppos)
 {
 	int ret;
@@ -393,8 +394,8 @@ static int tquic_sysctl_scheduler(struct ctl_table *table, int write,
 	}
 	rcu_read_unlock();
 
-	/* Also set for init_net as the per-netns default */
-	ret = tquic_sched_set_default(&init_net, tquic_scheduler);
+	/* Set global default scheduler */
+	ret = tquic_sched_set_default(tquic_scheduler);
 	if (ret)
 		pr_warn("tquic: failed to set default scheduler '%s'\n",
 			tquic_scheduler);
@@ -402,7 +403,7 @@ static int tquic_sysctl_scheduler(struct ctl_table *table, int write,
 	return 0;
 }
 
-static int tquic_sysctl_bond_mode(struct ctl_table *table, int write,
+static int tquic_sysctl_bond_mode(const struct ctl_table *table, int write,
 				  void *buffer, size_t *lenp, loff_t *ppos)
 {
 	int ret;
@@ -425,11 +426,11 @@ static int tquic_sysctl_bond_mode(struct ctl_table *table, int write,
  * Handles reading/writing net.tquic.pacing_enabled which enables/disables
  * pacing for TQUIC connections. Pacing is enabled by default per CONTEXT.md.
  */
-static int proc_tquic_pacing_enabled(struct ctl_table *table, int write,
+static int proc_tquic_pacing_enabled(const struct ctl_table *table, int write,
 				     void *buffer, size_t *lenp, loff_t *ppos)
 {
 	struct net *net = current->nsproxy->net_ns;
-	int val = net->tquic.pacing_enabled ? 1 : 0;
+	int val = tquic_pernet(net)->pacing_enabled ? 1 : 0;
 	struct ctl_table tmp_table;
 	int ret;
 
@@ -445,7 +446,7 @@ static int proc_tquic_pacing_enabled(struct ctl_table *table, int write,
 	if (ret || !write)
 		return ret;
 
-	net->tquic.pacing_enabled = !!val;
+	tquic_pernet(net)->pacing_enabled = !!val;
 	pr_debug("tquic: netns pacing %s\n", val ? "enabled" : "disabled");
 	return 0;
 }
@@ -457,12 +458,12 @@ static int proc_tquic_pacing_enabled(struct ctl_table *table, int write,
  * the number of consecutive losses in same round before path degradation.
  * Default is 5 per RESEARCH.md recommendation.
  */
-static int proc_tquic_path_degrade_threshold(struct ctl_table *table, int write,
+static int proc_tquic_path_degrade_threshold(const struct ctl_table *table, int write,
 					     void *buffer, size_t *lenp,
 					     loff_t *ppos)
 {
 	struct net *net = current->nsproxy->net_ns;
-	int val = net->tquic.path_degrade_threshold;
+	int val = tquic_pernet(net)->path_degrade_threshold;
 	struct ctl_table tmp_table;
 	int ret;
 
@@ -478,7 +479,7 @@ static int proc_tquic_path_degrade_threshold(struct ctl_table *table, int write,
 	if (ret || !write)
 		return ret;
 
-	net->tquic.path_degrade_threshold = val;
+	tquic_pernet(net)->path_degrade_threshold = val;
 	pr_debug("tquic: netns path_degrade_threshold set to %d\n", val);
 	return 0;
 }
@@ -495,11 +496,11 @@ static int proc_tquic_path_degrade_threshold(struct ctl_table *table, int write,
  *   - May include reserved transport parameters (31*N + 27)
  *   - May include reserved versions in Version Negotiation
  */
-static int proc_tquic_grease_enabled(struct ctl_table *table, int write,
+static int proc_tquic_grease_enabled(const struct ctl_table *table, int write,
 				     void *buffer, size_t *lenp, loff_t *ppos)
 {
 	struct net *net = current->nsproxy->net_ns;
-	int val = net->tquic.grease_enabled ? 1 : 0;
+	int val = tquic_pernet(net)->grease_enabled ? 1 : 0;
 	struct ctl_table tmp_table;
 	int ret;
 
@@ -515,7 +516,7 @@ static int proc_tquic_grease_enabled(struct ctl_table *table, int write,
 	if (ret || !write)
 		return ret;
 
-	net->tquic.grease_enabled = !!val;
+	tquic_pernet(net)->grease_enabled = !!val;
 	pr_debug("tquic: netns GREASE %s\n", val ? "enabled" : "disabled");
 	return 0;
 }
@@ -1109,7 +1110,7 @@ u32 tquic_net_get_bbr_rtt_threshold(struct net *net)
 {
 	if (!net)
 		return NETNS_TQUIC_BBR_RTT_THRESHOLD_MS;
-	return net->tquic.bbr_rtt_threshold_ms;
+	return tquic_pernet(net)->bbr_rtt_threshold_ms;
 }
 EXPORT_SYMBOL_GPL(tquic_net_get_bbr_rtt_threshold);
 
@@ -1117,7 +1118,7 @@ bool tquic_net_get_cc_coupled(struct net *net)
 {
 	if (!net)
 		return false;
-	return net->tquic.coupled_enabled;
+	return tquic_pernet(net)->coupled_enabled;
 }
 EXPORT_SYMBOL_GPL(tquic_net_get_cc_coupled);
 
@@ -1125,7 +1126,7 @@ bool tquic_net_get_ecn_enabled(struct net *net)
 {
 	if (!net)
 		return false;
-	return net->tquic.ecn_enabled;
+	return tquic_pernet(net)->ecn_enabled;
 }
 EXPORT_SYMBOL_GPL(tquic_net_get_ecn_enabled);
 
@@ -1133,7 +1134,7 @@ u32 tquic_net_get_ecn_beta(struct net *net)
 {
 	if (!net)
 		return 800;  /* Default 0.8 scaled by 1000 */
-	return net->tquic.ecn_beta ?: 800;
+	return tquic_pernet(net)->ecn_beta ?: 800;
 }
 EXPORT_SYMBOL_GPL(tquic_net_get_ecn_beta);
 
@@ -1141,7 +1142,7 @@ bool tquic_net_get_pacing_enabled(struct net *net)
 {
 	if (!net)
 		return true;  /* Pacing enabled by default per CONTEXT.md */
-	return net->tquic.pacing_enabled;
+	return tquic_pernet(net)->pacing_enabled;
 }
 EXPORT_SYMBOL_GPL(tquic_net_get_pacing_enabled);
 
@@ -1149,7 +1150,7 @@ int tquic_net_get_path_degrade_threshold(struct net *net)
 {
 	if (!net)
 		return 5;  /* Default per RESEARCH.md recommendation */
-	return net->tquic.path_degrade_threshold ?: 5;
+	return tquic_pernet(net)->path_degrade_threshold ?: 5;
 }
 EXPORT_SYMBOL_GPL(tquic_net_get_path_degrade_threshold);
 
