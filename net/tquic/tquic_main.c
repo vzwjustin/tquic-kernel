@@ -99,8 +99,8 @@ struct tquic_connection *tquic_conn_create(struct sock *sk, gfp_t gfp)
 	/* Initialize flow control defaults */
 	conn->max_data_local = TQUIC_DEFAULT_MAX_DATA;
 	conn->max_data_remote = TQUIC_DEFAULT_MAX_DATA;
-	conn->max_streams_bidi = TQUIC_MAX_STREAMS_BIDI;
-	conn->max_streams_uni = TQUIC_MAX_STREAMS_UNI;
+	conn->max_streams_bidi = TQUIC_MAX_STREAM_COUNT_BIDI;
+	conn->max_streams_uni = TQUIC_MAX_STREAM_COUNT_UNI;
 
 	/* Set default idle timeout */
 	conn->idle_timeout = TQUIC_DEFAULT_IDLE_TIMEOUT;
@@ -672,15 +672,15 @@ static int __init tquic_proc_init(void)
 		return -ENOMEM;
 
 	if (!proc_create("connections", 0444, tquic_proc_dir,
-			 &tquic_proc_connections_fops))
+			 &tquic_proc_connections_proc_ops))
 		goto err;
 
 	if (!proc_create("paths", 0444, tquic_proc_dir,
-			 &tquic_proc_paths_fops))
+			 &tquic_proc_paths_proc_ops))
 		goto err;
 
 	if (!proc_create("stats", 0444, tquic_proc_dir,
-			 &tquic_proc_stats_fops))
+			 &tquic_proc_stats_proc_ops))
 		goto err;
 
 	return 0;
@@ -699,7 +699,7 @@ static void __exit tquic_proc_exit(void)
  * Module Initialization
  */
 
-static int __init tquic_init(void)
+int __init tquic_init(void)
 {
 	int err;
 
@@ -786,7 +786,7 @@ err_conn_cache:
 	return err;
 }
 
-static void __exit tquic_exit(void)
+void __exit tquic_exit(void)
 {
 	pr_info("tquic: shutting down TQUIC WAN bonding subsystem\n");
 

@@ -38,9 +38,9 @@
 #define TQUIC_PN_SPACE_APPLICATION	2
 #define TQUIC_PN_SPACE_COUNT	3
 
-/* Stream limits */
-#define TQUIC_MAX_STREAMS_BIDI	(1ULL << 60)
-#define TQUIC_MAX_STREAMS_UNI	(1ULL << 60)
+/* Stream limits (RFC 9000 maximum values) */
+#define TQUIC_MAX_STREAM_COUNT_BIDI	(1ULL << 60)
+#define TQUIC_MAX_STREAM_COUNT_UNI	(1ULL << 60)
 
 /* Flow control defaults */
 #define TQUIC_DEFAULT_MAX_DATA		(1 << 20)   /* 1 MB */
@@ -1080,8 +1080,8 @@ void __exit tquic_mib_exit(struct net *net);
 
 /* Proc interface (net/tquic/tquic_proc.c) */
 struct tquic_error_ring;
-int __init tquic_proc_init(struct net *net);
-void __exit tquic_proc_exit(struct net *net);
+int __init tquic_proc_init(void);
+void __exit tquic_proc_exit(void);
 void tquic_log_error(struct net *net, struct tquic_connection *conn,
 		     u32 error_code, const char *msg);
 const char *tquic_error_name(u32 error_code);
@@ -1303,7 +1303,9 @@ void __exit tquic_packet_exit(void);
 
 /* CID management constants */
 #define TQUIC_RESET_TOKEN_LEN		16
+#ifndef TQUIC_CID_POOL_MIN
 #define TQUIC_CID_POOL_MIN		4
+#endif
 #define TQUIC_CID_POOL_MAX		16
 
 /* Forward declarations for CID management */

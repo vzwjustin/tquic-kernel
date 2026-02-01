@@ -784,7 +784,7 @@ static void test_max_limits_enforcement(struct kunit *test)
 	u8 cid_len;
 
 	/* Stream ID limits */
-	stream_id = TQUIC_MAX_STREAMS_BIDI;
+	stream_id = TQUIC_MAX_STREAM_COUNT_BIDI;
 	max_streams = (1ULL << 60);
 	KUNIT_EXPECT_EQ(test, stream_id, max_streams);
 

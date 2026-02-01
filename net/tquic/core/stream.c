@@ -394,10 +394,10 @@ struct tquic_stream_manager *tquic_stream_manager_create(
 	INIT_LIST_HEAD(&mgr->blocked_list);
 
 	/* Initialize stream limits */
-	mgr->max_bidi_local = TQUIC_MAX_STREAMS_BIDI;
-	mgr->max_bidi_remote = TQUIC_MAX_STREAMS_BIDI;
-	mgr->max_uni_local = TQUIC_MAX_STREAMS_UNI;
-	mgr->max_uni_remote = TQUIC_MAX_STREAMS_UNI;
+	mgr->max_bidi_local = TQUIC_MAX_STREAM_COUNT_BIDI;
+	mgr->max_bidi_remote = TQUIC_MAX_STREAM_COUNT_BIDI;
+	mgr->max_uni_local = TQUIC_MAX_STREAM_COUNT_UNI;
+	mgr->max_uni_remote = TQUIC_MAX_STREAM_COUNT_UNI;
 
 	/* Initialize next stream IDs based on role */
 	if (is_server) {

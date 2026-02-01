@@ -1073,12 +1073,12 @@ int tquic_tp_validate(const struct tquic_transport_params *params,
 	}
 
 	/* initial_max_streams values must be <= 2^60 */
-	if (params->initial_max_streams_bidi > TQUIC_MAX_STREAMS_BIDI) {
+	if (params->initial_max_streams_bidi > TQUIC_MAX_STREAM_COUNT_BIDI) {
 		pr_debug("tquic: initial_max_streams_bidi too large\n");
 		return -EINVAL;
 	}
 
-	if (params->initial_max_streams_uni > TQUIC_MAX_STREAMS_UNI) {
+	if (params->initial_max_streams_uni > TQUIC_MAX_STREAM_COUNT_UNI) {
 		pr_debug("tquic: initial_max_streams_uni too large\n");
 		return -EINVAL;
 	}
