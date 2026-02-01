@@ -85,8 +85,6 @@ static int tquic_recvmsg_socket(struct socket *sock, struct msghdr *msg,
 static int tquic_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg);
 
 /* Zero-copy operations (forward declarations) */
-static ssize_t tquic_sendpage_socket(struct socket *sock, struct page *page,
-				     int offset, size_t size, int flags);
 static ssize_t tquic_splice_read_socket(struct socket *sock, loff_t *ppos,
 					struct pipe_inode_info *pipe,
 					size_t len, unsigned int flags);
@@ -299,15 +297,21 @@ int tquic_connect(struct sock *sk, struct sockaddr *addr, int addr_len)
 	 * Initialize scheduler - use requested or per-netns default.
 	 * Per CONTEXT.md: "Scheduler locked at connection establishment"
 	 */
-	ret = tquic_sched_init_conn(conn,
-				    tsk->requested_scheduler[0] ?
-				    tsk->requested_scheduler : NULL);
-	if (ret < 0) {
-		pr_warn("tquic: scheduler init failed: %d, using default\n", ret);
-		/* Try with default scheduler */
-		ret = tquic_sched_init_conn(conn, NULL);
-		if (ret < 0)
-			goto out_unlock;
+	{
+		struct tquic_sched_ops *sched_ops = NULL;
+
+		if (tsk->requested_scheduler[0])
+			sched_ops = tquic_sched_find(tsk->requested_scheduler);
+
+		conn->scheduler = tquic_sched_init_conn(conn, sched_ops);
+		if (!conn->scheduler) {
+			pr_warn("tquic: scheduler init failed, using default\n");
+			conn->scheduler = tquic_sched_init_conn(conn, NULL);
+			if (!conn->scheduler) {
+				ret = -ENOMEM;
+				goto out_unlock;
+			}
+		}
 	}
 
 	/* Set state before handshake */
@@ -848,7 +852,15 @@ static int tquic_setsockopt(struct socket *sock, int level, int optname,
 			ret = -EISCONN;
 		} else if (tsk->conn) {
 			/* Connection exists but idle, init scheduler now */
-			ret = tquic_sched_init_conn(tsk->conn, name);
+			struct tquic_sched_ops *sched_ops = tquic_sched_find(name);
+
+			if (sched_ops) {
+				tsk->conn->scheduler = tquic_sched_init_conn(tsk->conn, sched_ops);
+				if (!tsk->conn->scheduler)
+					ret = -ENOMEM;
+			} else {
+				ret = -ENOENT;
+			}
 		} else {
 			/* No connection yet, store for later when connection is created */
 			strscpy(tsk->requested_scheduler, name,
@@ -1350,30 +1362,8 @@ static int tquic_getsockopt(struct socket *sock, int level, int optname,
 		int name_len;
 
 		lock_sock(sk);
-		if (tsk->conn && tsk->conn->scheduler) {
-			/*
-			 * Connection exists with scheduler - get name from
-			 * the scheduler's sched_ops via tquic_sched.h API
-			 */
-			struct tquic_sched_ops *sched;
-
-			rcu_read_lock();
-			/* scheduler points to bonding state which contains sched */
-			sched = rcu_dereference((struct tquic_sched_ops *)
-						tsk->conn->scheduler);
-			/*
-			 * In this implementation, conn->scheduler is actually
-			 * a tquic_bond_state pointer. The actual scheduler ops
-			 * would be accessed differently. For now, check if we
-			 * have a requested_scheduler stored.
-			 */
-			if (tsk->requested_scheduler[0]) {
-				name = tsk->requested_scheduler;
-			} else {
-				name = tquic_sched_get_default(sock_net(sk));
-			}
-			rcu_read_unlock();
-		} else if (tsk->requested_scheduler[0]) {
+		if (tsk->requested_scheduler[0]) {
+			/* Return the requested/active scheduler name */
 			name = tsk->requested_scheduler;
 		} else {
 			/* Return per-netns default */
@@ -1910,26 +1900,6 @@ static int tquic_get_port(struct sock *sk, unsigned short snum)
  * Zero-Copy I/O Operations
  * =============================================================================
  */
-
-/**
- * tquic_sendpage_socket - sendfile() support wrapper
- * @sock: Socket
- * @page: Page to send
- * @offset: Offset within page
- * @size: Number of bytes to send
- * @flags: Send flags
- *
- * Implements .sendpage in proto_ops for sendfile() support.
- * Uses page references instead of copying data when scatter-gather
- * is available. Falls back to copy when SG is not supported.
- *
- * Returns: Number of bytes sent on success, negative errno on failure
- */
-static ssize_t tquic_sendpage_socket(struct socket *sock, struct page *page,
-				     int offset, size_t size, int flags)
-{
-	return tquic_sendpage(sock, page, offset, size, flags);
-}
 
 /**
  * tquic_splice_read_socket - splice() support wrapper
