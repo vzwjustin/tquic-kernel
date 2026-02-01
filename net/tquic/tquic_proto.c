@@ -71,48 +71,11 @@
 #define trace_tquic_loss_detected(...)  do { } while (0)
 
 #include "protocol.h"
+#include "tquic_mib.h"
 
-/* Network namespace identifier */
-static unsigned int tquic_net_id __read_mostly;
-
-/*
- * Per-network namespace TQUIC data
- */
-struct tquic_net {
-	/* Sysctl parameters */
-	int enabled;
-	int bond_mode;
-	int max_paths;
-	int reorder_window;
-	int probe_interval;
-	int failover_timeout;
-	int idle_timeout;
-	int initial_rtt;
-	int initial_cwnd;
-	int debug_level;
-
-	/* Proc entries */
-	struct proc_dir_entry *proc_net_tquic;
-
-	/* Sysctl header */
-	struct ctl_table_header *sysctl_header;
-
-	/* Connection tracking for this namespace */
-	struct list_head connections;
-	spinlock_t conn_lock;
-	atomic_t conn_count;
-
-	/* Statistics */
-	atomic64_t total_tx_bytes;
-	atomic64_t total_rx_bytes;
-	atomic64_t total_connections;
-};
-
-/* Access per-netns data */
-static inline struct tquic_net *tquic_pernet(const struct net *net)
-{
-	return net_generic(net, tquic_net_id);
-}
+/* Network namespace identifier (exported for protocol.h inline accessor) */
+unsigned int tquic_net_id __read_mostly;
+EXPORT_SYMBOL_GPL(tquic_net_id);
 
 /*
  * TQUIC memory management (cannot use TCP's unexported symbols)
@@ -885,6 +848,11 @@ static int __net_init tquic_net_init(struct net *net)
 	tn->initial_cwnd = 10;
 	tn->debug_level = 0;
 
+	/* Allocate per-CPU MIB statistics */
+	tn->mib = alloc_percpu(struct tquic_mib);
+	if (!tn->mib)
+		return -ENOMEM;
+
 	/* Initialize connection tracking */
 	INIT_LIST_HEAD(&tn->connections);
 	spin_lock_init(&tn->conn_lock);
@@ -898,7 +866,7 @@ static int __net_init tquic_net_init(struct net *net)
 	/* Register sysctl */
 	ret = tquic_net_sysctl_register(net);
 	if (ret)
-		return ret;
+		goto err_sysctl;
 
 #ifdef CONFIG_PROC_FS
 	/* Initialize proc entries */
@@ -913,8 +881,11 @@ static int __net_init tquic_net_init(struct net *net)
 #ifdef CONFIG_PROC_FS
 err_proc:
 	tquic_net_sysctl_unregister(net);
-	return ret;
 #endif
+err_sysctl:
+	free_percpu(tn->mib);
+	tn->mib = NULL;
+	return ret;
 }
 
 /* Cleanup per-netns TQUIC data */
@@ -928,6 +899,10 @@ static void __net_exit tquic_net_exit(struct net *net)
 	tquic_net_proc_exit(net);
 #endif
 	tquic_net_sysctl_unregister(net);
+
+	/* Free per-CPU MIB statistics */
+	free_percpu(tn->mib);
+	tn->mib = NULL;
 
 	/* Verify all connections are cleaned up */
 	WARN_ON(atomic_read(&tn->conn_count) != 0);

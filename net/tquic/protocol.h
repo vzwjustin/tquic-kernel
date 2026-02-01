@@ -62,11 +62,62 @@
 
 #include <linux/spinlock.h>
 #include <linux/lockdep.h>
+#include <linux/snmp.h>
 #include <net/inet_connection_sock.h>
+#include <net/netns/generic.h>
 #include <net/tquic.h>
 
 /* Forward declarations */
 struct tquic_connection;
+struct tquic_mib;
+
+/*
+ * Per-network namespace TQUIC data (for out-of-tree module builds)
+ *
+ * This structure is accessed via netns_generic mechanism since we cannot
+ * modify struct net or struct netns_mib for out-of-tree modules.
+ */
+struct tquic_net {
+	/* Sysctl parameters */
+	int enabled;
+	int bond_mode;
+	int max_paths;
+	int reorder_window;
+	int probe_interval;
+	int failover_timeout;
+	int idle_timeout;
+	int initial_rtt;
+	int initial_cwnd;
+	int debug_level;
+
+	/* Per-netns MIB statistics (out-of-tree replacement for net->mib) */
+	struct tquic_mib __percpu *mib;
+
+	/* Proc entries */
+	struct proc_dir_entry *proc_net_tquic;
+
+	/* Sysctl header */
+	struct ctl_table_header *sysctl_header;
+
+	/* Connection tracking for this namespace */
+	struct list_head connections;
+	spinlock_t conn_lock;
+	atomic_t conn_count;
+
+	/* Statistics */
+	atomic64_t total_tx_bytes;
+	atomic64_t total_rx_bytes;
+	atomic64_t total_connections;
+};
+
+/* Network namespace ID (defined in tquic_proto.c) */
+extern unsigned int tquic_net_id;
+
+/* Access per-netns data */
+static inline struct tquic_net *tquic_pernet(const struct net *net)
+{
+	return net_generic(net, tquic_net_id);
+}
 struct tquic_path;
 struct tquic_stream;
 struct tquic_path_manager;

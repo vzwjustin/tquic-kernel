@@ -25,6 +25,14 @@
 #include <net/snmp.h>
 #include <uapi/linux/tquic.h>
 
+/*
+ * For out-of-tree module builds, we access MIB via our per-netns
+ * structure instead of net->mib.tquic_statistics.
+ *
+ * Include protocol.h to get tquic_net and tquic_pernet() definitions.
+ */
+#include "protocol.h"
+
 /**
  * enum linux_tquic_mib_field - TQUIC MIB counter indices
  *
@@ -150,11 +158,15 @@ struct tquic_mib {
  * TQUIC_INC_STATS - Increment a TQUIC MIB counter
  * @net: Network namespace
  * @field: Counter to increment (TQUIC_MIB_* enum value)
+ *
+ * For out-of-tree builds, accesses MIB via tquic_pernet(net)->mib
+ * instead of net->mib.tquic_statistics.
  */
 #define TQUIC_INC_STATS(net, field)					\
 	do {								\
-		if (likely((net)->mib.tquic_statistics))		\
-			SNMP_INC_STATS((net)->mib.tquic_statistics, field); \
+		struct tquic_net *__tn = tquic_pernet(net);		\
+		if (likely(__tn && __tn->mib))				\
+			SNMP_INC_STATS(__tn->mib, field);		\
 	} while (0)
 
 /**
@@ -164,8 +176,9 @@ struct tquic_mib {
  */
 #define __TQUIC_INC_STATS(net, field)					\
 	do {								\
-		if (likely((net)->mib.tquic_statistics))		\
-			__SNMP_INC_STATS((net)->mib.tquic_statistics, field); \
+		struct tquic_net *__tn = tquic_pernet(net);		\
+		if (likely(__tn && __tn->mib))				\
+			__SNMP_INC_STATS(__tn->mib, field);		\
 	} while (0)
 
 /**
@@ -175,8 +188,9 @@ struct tquic_mib {
  */
 #define TQUIC_DEC_STATS(net, field)					\
 	do {								\
-		if (likely((net)->mib.tquic_statistics))		\
-			SNMP_DEC_STATS((net)->mib.tquic_statistics, field); \
+		struct tquic_net *__tn = tquic_pernet(net);		\
+		if (likely(__tn && __tn->mib))				\
+			SNMP_DEC_STATS(__tn->mib, field);		\
 	} while (0)
 
 /**
@@ -189,8 +203,9 @@ struct tquic_mib {
  */
 #define TQUIC_ADD_STATS(net, field, val)				\
 	do {								\
-		if (likely((net)->mib.tquic_statistics))		\
-			SNMP_ADD_STATS((net)->mib.tquic_statistics, field, val); \
+		struct tquic_net *__tn = tquic_pernet(net);		\
+		if (likely(__tn && __tn->mib))				\
+			SNMP_ADD_STATS(__tn->mib, field, val);		\
 	} while (0)
 
 /**

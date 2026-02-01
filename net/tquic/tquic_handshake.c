@@ -29,7 +29,6 @@
 #include "protocol.h"
 #include "tquic_mib.h"
 #include "crypto/zero_rtt.h"
-#include "../quic/tquic_sched.h"
 
 /*
  * Forward declarations for server functions
