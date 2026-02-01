@@ -106,13 +106,10 @@ enum tquic_conn_state_internal {
  *
  * Usage:
  *   struct tquic_sock *tsk = tquic_sk(sk);
+ *
+ * Note: tquic_sk is already defined in include/net/tquic.h, so we don't
+ * redefine it here. This comment is kept for documentation.
  */
-#ifndef tquic_sk
-static inline struct tquic_sock *tquic_sk(const struct sock *sk)
-{
-	return (struct tquic_sock *)sk;
-}
-#endif
 
 /*
  * IPv6 TQUIC socket structure

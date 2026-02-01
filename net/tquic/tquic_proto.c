@@ -115,6 +115,23 @@ static inline struct tquic_net *tquic_pernet(const struct net *net)
 }
 
 /*
+ * TQUIC memory management (cannot use TCP's unexported symbols)
+ */
+static DEFINE_PER_CPU(int, tquic_sockets_allocated);
+static struct percpu_counter tquic_sockets_allocated_counter;
+static atomic_long_t tquic_memory_allocated;
+static unsigned long tquic_memory_pressure;
+
+/* TQUIC sysctl memory limits (in pages) */
+static long sysctl_tquic_mem[3] = {
+	768 * 1024,	/* Low threshold */
+	1024 * 1024,	/* Pressure threshold */
+	1536 * 1024	/* Hard limit */
+};
+static int sysctl_tquic_wmem[3] = { 4096, 16384, 4194304 };
+static int sysctl_tquic_rmem[3] = { 4096, 131072, 6291456 };
+
+/*
  * Forward declarations
  */
 static int tquic_v4_rcv(struct sk_buff *skb);
@@ -413,7 +430,6 @@ static int tquic_create_socket(struct net *net, struct socket *sock,
 {
 	struct tquic_net *tn = tquic_pernet(net);
 	struct sock *sk;
-	int ret;
 
 	if (!tn->enabled)
 		return -EPROTONOSUPPORT;
@@ -424,12 +440,14 @@ static int tquic_create_socket(struct net *net, struct socket *sock,
 
 	sock->state = SS_UNCONNECTED;
 
-	/* Let inet_create do the actual work via protosw */
-	ret = inet_create(net, sock, protocol, kern);
-	if (ret < 0)
-		return ret;
+	/* Allocate sock structure */
+	sk = sk_alloc(net, PF_INET, GFP_KERNEL, &tquic_prot, kern);
+	if (!sk)
+		return -ENOBUFS;
 
-	sk = sock->sk;
+	sock_init_data(sock, sk);
+	sk->sk_protocol = protocol;
+	sock->ops = &tquic_inet_ops;
 
 	/* Additional TQUIC-specific socket initialization */
 	atomic64_inc(&tn->total_connections);
@@ -487,12 +505,12 @@ static struct proto tquic_prot = {
 	.hash		= inet_hash,
 	.unhash		= inet_unhash,
 	.get_port	= inet_csk_get_port,
-	.sockets_allocated = &tcp_sockets_allocated,
-	.memory_allocated = &tcp_memory_allocated,
-	.memory_pressure = &tcp_memory_pressure,
-	.sysctl_mem	= sysctl_tcp_mem,
-	.sysctl_wmem	= sysctl_tcp_wmem,
-	.sysctl_rmem	= sysctl_tcp_rmem,
+	.sockets_allocated = &tquic_sockets_allocated_counter,
+	.memory_allocated = &tquic_memory_allocated,
+	.memory_pressure = &tquic_memory_pressure,
+	.sysctl_mem	= sysctl_tquic_mem,
+	.sysctl_wmem	= sysctl_tquic_wmem,
+	.sysctl_rmem	= sysctl_tquic_rmem,
 };
 
 /* inet_protosw for TQUIC over IPv4 - SOCK_STREAM */
@@ -551,15 +569,15 @@ static struct proto tquicv6_prot = {
 	.connect	= tquic_connect,
 	.sendmsg	= tquic_sendmsg,
 	.recvmsg	= tquic_recvmsg,
-	.hash		= inet6_hash,
+	.hash		= inet_hash,
 	.unhash		= inet_unhash,
 	.get_port	= inet_csk_get_port,
-	.sockets_allocated = &tcp_sockets_allocated,
-	.memory_allocated = &tcp_memory_allocated,
-	.memory_pressure = &tcp_memory_pressure,
-	.sysctl_mem	= sysctl_tcp_mem,
-	.sysctl_wmem	= sysctl_tcp_wmem,
-	.sysctl_rmem	= sysctl_tcp_rmem,
+	.sockets_allocated = &tquic_sockets_allocated_counter,
+	.memory_allocated = &tquic_memory_allocated,
+	.memory_pressure = &tquic_memory_pressure,
+	.sysctl_mem	= sysctl_tquic_mem,
+	.sysctl_wmem	= sysctl_tquic_wmem,
+	.sysctl_rmem	= sysctl_tquic_rmem,
 };
 
 /* inet6_protosw for TQUIC over IPv6 - SOCK_STREAM */
