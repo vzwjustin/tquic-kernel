@@ -20,9 +20,8 @@
 #include <uapi/linux/tquic_qlog.h>
 #endif
 
-/* Netlink family - exported for qlog module */
-struct genl_family tquic_genl_family;
-EXPORT_SYMBOL_GPL(tquic_genl_family);
+/* Netlink family forward declaration - exported for qlog module */
+static struct genl_family tquic_genl_family;
 
 /* Multicast groups */
 static const struct genl_multicast_group tquic_mcgrps[] = {
@@ -252,7 +251,7 @@ static int tquic_nl_add_path(struct sk_buff *skb, struct genl_info *info)
 	{
 		struct tquic_path *path = tquic_conn_get_path(conn, ret);
 		if (path)
-			tquic_nl_path_event(conn, path, TQUIC_PATH_EVENT_ADDED);
+			tquic_nl_path_event(conn, path, TQUIC_PATH_EVENT_ADD);
 	}
 
 	return ret;  /* Returns path ID */

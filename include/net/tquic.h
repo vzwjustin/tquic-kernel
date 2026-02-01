@@ -1463,6 +1463,8 @@ void tquic_bond_cleanup(struct tquic_bond_state *bond);
 int tquic_bond_set_mode(struct tquic_connection *conn, u8 mode);
 struct tquic_path *tquic_bond_select_path(struct tquic_connection *conn,
 					  struct sk_buff *skb);
+int tquic_bond_get_stats(struct tquic_connection *conn,
+			 struct tquic_bond_stats *stats);
 
 /*
  * UDP Tunnel Integration for WAN Bonding
