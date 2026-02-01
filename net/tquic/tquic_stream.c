@@ -220,6 +220,95 @@ static void tquic_stream_free(struct tquic_stream *stream)
 	kfree(stream);
 }
 
+/**
+ * tquic_stream_send_fin - Send FIN to gracefully close stream send side
+ * @conn: Parent connection
+ * @stream: Stream to close
+ *
+ * RFC 9000 Section 3.3: Signals that no more data will be sent on this stream.
+ * Sends a STREAM frame with FIN bit set (and no data payload).
+ *
+ * Uses the core tquic_xmit() function from tquic_output.c which handles
+ * frame construction, encryption, and transmission.
+ *
+ * Returns: 0 on success, negative errno on failure
+ */
+int tquic_stream_send_fin(struct tquic_connection *conn,
+			  struct tquic_stream *stream)
+{
+	int ret;
+
+	if (!conn || !stream)
+		return -EINVAL;
+
+	if (stream->fin_sent)
+		return 0;  /* Already sent FIN */
+
+	/*
+	 * Use tquic_xmit with empty data and fin=true to send a STREAM
+	 * frame with only the FIN bit set. This properly handles:
+	 * - Frame generation with correct flags
+	 * - Path selection
+	 * - Encryption and header protection
+	 * - Pacing and congestion control
+	 */
+	ret = tquic_xmit(conn, stream, NULL, 0, true);
+	if (ret < 0)
+		return ret;
+
+	/* tquic_xmit already updates stream->fin_sent and send_offset */
+
+	/* Update stream state based on bidirectional close status */
+	if (stream->fin_received) {
+		stream->state = TQUIC_STREAM_CLOSED;
+	} else {
+		stream->state = TQUIC_STREAM_SEND;  /* Half-closed (local) */
+	}
+
+	pr_debug("tquic: sent FIN on stream %llu at offset %llu\n",
+		 stream->id, stream->send_offset);
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(tquic_stream_send_fin);
+
+/**
+ * tquic_stream_lookup - Find a stream by ID in a connection
+ * @conn: Connection to search
+ * @stream_id: Stream ID to find
+ *
+ * Returns: Stream pointer on success, NULL if not found
+ */
+struct tquic_stream *tquic_stream_lookup(struct tquic_connection *conn,
+					 u64 stream_id)
+{
+	struct rb_node *node;
+	struct tquic_stream *stream;
+
+	if (!conn)
+		return NULL;
+
+	spin_lock_bh(&conn->lock);
+
+	node = conn->streams.rb_node;
+	while (node) {
+		stream = rb_entry(node, struct tquic_stream, node);
+
+		if (stream_id < stream->id)
+			node = node->rb_left;
+		else if (stream_id > stream->id)
+			node = node->rb_right;
+		else {
+			spin_unlock_bh(&conn->lock);
+			return stream;
+		}
+	}
+
+	spin_unlock_bh(&conn->lock);
+	return NULL;
+}
+EXPORT_SYMBOL_GPL(tquic_stream_lookup);
+
 /*
  * =============================================================================
  * STREAM SOCKET OPERATIONS
@@ -333,13 +422,15 @@ static int tquic_stream_release(struct socket *sock)
 	conn = ss->conn;
 
 	if (stream && conn) {
+		/* Send FIN if not already sent and stream is still writable */
+		if (!stream->fin_sent &&
+		    (stream->state == TQUIC_STREAM_OPEN ||
+		     stream->state == TQUIC_STREAM_SEND)) {
+			tquic_stream_send_fin(conn, stream);
+		}
+
 		/* Remove from connection's stream tree */
 		tquic_stream_remove_from_conn(conn, stream);
-
-		/*
-		 * TODO: Send FIN if not already sent (Phase 3).
-		 * For now, just clean up the stream.
-		 */
 
 		tquic_stream_free(stream);
 	}
