@@ -117,7 +117,6 @@ static inline struct tquic_net *tquic_pernet(const struct net *net)
 /*
  * TQUIC memory management (cannot use TCP's unexported symbols)
  */
-static DEFINE_PER_CPU(int, tquic_sockets_allocated);
 static struct percpu_counter tquic_sockets_allocated_counter;
 static atomic_long_t tquic_memory_allocated;
 static unsigned long tquic_memory_pressure;
@@ -262,8 +261,6 @@ static int tquic_v4_rcv(struct sk_buff *skb)
 static int tquic_v4_err(struct sk_buff *skb, u32 info)
 {
 	const struct iphdr *iph = ip_hdr(skb);
-	struct tquic_connection *conn;
-	struct tquic_path *path;
 
 	pr_debug("received ICMP error for TQUIC, info=%u\n", info);
 
@@ -708,6 +705,8 @@ static struct ctl_table tquic_net_sysctl_table[] = {
 	{ }
 };
 
+#define TQUIC_SYSCTL_TABLE_SIZE ARRAY_SIZE(tquic_net_sysctl_table)
+
 static int tquic_net_sysctl_register(struct net *net)
 {
 	struct tquic_net *tn = tquic_pernet(net);
@@ -732,7 +731,8 @@ static int tquic_net_sysctl_register(struct net *net)
 	table[i++].data = &tn->initial_cwnd;
 	table[i++].data = &tn->debug_level;
 
-	tn->sysctl_header = register_net_sysctl(net, "net/tquic", table);
+	tn->sysctl_header = register_net_sysctl_sz(net, "net/tquic", table,
+						    TQUIC_SYSCTL_TABLE_SIZE);
 	if (!tn->sysctl_header) {
 		kfree(table);
 		return -ENOMEM;
@@ -744,12 +744,13 @@ static int tquic_net_sysctl_register(struct net *net)
 static void tquic_net_sysctl_unregister(struct net *net)
 {
 	struct tquic_net *tn = tquic_pernet(net);
-	struct ctl_table *table;
+	const struct ctl_table *table;
 
 	if (tn->sysctl_header) {
 		table = tn->sysctl_header->ctl_table_arg;
 		unregister_net_sysctl_table(tn->sysctl_header);
-		kfree(table);
+		/* We allocated with kmemdup, so cast away const for kfree */
+		kfree((void *)table);
 		tn->sysctl_header = NULL;
 	}
 }
