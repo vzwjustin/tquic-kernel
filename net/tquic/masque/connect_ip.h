@@ -41,6 +41,9 @@
 #define TQUIC_CONNECT_IP_MAX_ADDRESSES		16
 #define TQUIC_CONNECT_IP_MAX_ROUTES		64
 
+/* Maximum datagram buffer size (max QUIC datagram payload) */
+#define TQUIC_MAX_DATAGRAM_SIZE			65535
+
 /*
  * =============================================================================
  * DATA STRUCTURES

@@ -38,6 +38,7 @@
 #include <net/tquic.h>
 
 #include "../protocol.h"
+#include "connect_ip.h"
 
 /*
  * =============================================================================
@@ -1188,7 +1189,7 @@ int tquic_connect_ip_recv(struct tquic_connect_ip_tunnel *tunnel,
 			  struct sk_buff **skb)
 {
 	struct tquic_connection *conn;
-	u8 datagram_buf[65536];
+	u8 *datagram_buf;
 	int ret;
 	u64 context_id;
 	int context_id_len;
@@ -1208,39 +1209,56 @@ int tquic_connect_ip_recv(struct tquic_connect_ip_tunnel *tunnel,
 	if (!conn->datagram.enabled)
 		return -EOPNOTSUPP;
 
+	/* Allocate datagram buffer - max QUIC datagram size */
+	datagram_buf = kmalloc(TQUIC_MAX_DATAGRAM_SIZE, GFP_ATOMIC);
+	if (!datagram_buf)
+		return -ENOMEM;
+
 	/* Receive datagram */
-	ret = tquic_recv_datagram(conn, datagram_buf, sizeof(datagram_buf),
+	ret = tquic_recv_datagram(conn, datagram_buf, TQUIC_MAX_DATAGRAM_SIZE,
 				  MSG_DONTWAIT);
 	if (ret < 0)
-		return ret;
+		goto out_free;
 
-	if (ret == 0)
-		return -EAGAIN;
+	if (ret == 0) {
+		ret = -EAGAIN;
+		goto out_free;
+	}
 
 	/* Decode context ID */
 	context_id_len = connect_ip_varint_decode(datagram_buf, ret, &context_id);
-	if (context_id_len < 0)
-		return context_id_len;
+	if (context_id_len < 0) {
+		ret = context_id_len;
+		goto out_free;
+	}
 
 	/* CONNECT-IP uses context ID 0 */
 	if (context_id != CONNECT_IP_CONTEXT_ID) {
 		pr_debug("tquic: ignoring datagram with context_id=%llu\n",
 			 context_id);
-		return -EAGAIN;
+		ret = -EAGAIN;
+		goto out_free;
 	}
 
 	/* Extract IP packet */
 	ip_pkt_len = ret - context_id_len;
-	if (ip_pkt_len == 0)
-		return -EINVAL;
+	if (ip_pkt_len == 0) {
+		ret = -EINVAL;
+		goto out_free;
+	}
 
 	/* Allocate skb for IP packet */
 	new_skb = alloc_skb(ip_pkt_len + NET_SKB_PAD, GFP_ATOMIC);
-	if (!new_skb)
-		return -ENOMEM;
+	if (!new_skb) {
+		ret = -ENOMEM;
+		goto out_free;
+	}
 
 	skb_reserve(new_skb, NET_SKB_PAD);
 	skb_put_data(new_skb, datagram_buf + context_id_len, ip_pkt_len);
+
+	/* Free datagram buffer - data now in skb */
+	kfree(datagram_buf);
 
 	/* Validate IP header */
 	ret = connect_ip_validate_ip_header(new_skb, &version);
@@ -1261,6 +1279,10 @@ int tquic_connect_ip_recv(struct tquic_connect_ip_tunnel *tunnel,
 		 version, ip_pkt_len);
 
 	return 0;
+
+out_free:
+	kfree(datagram_buf);
+	return ret;
 }
 EXPORT_SYMBOL_GPL(tquic_connect_ip_recv);
 
