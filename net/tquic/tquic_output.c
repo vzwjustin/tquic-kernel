@@ -2156,8 +2156,14 @@ int tquic_output_flush(struct tquic_connection *conn)
 
 				/* Consume data from stream's send buffer */
 				if (chunk_size == skb->len) {
-					/* Consumed entire skb */
+					/* Consumed entire skb - uncharge memory */
 					skb_unlink(skb, &stream->send_buf);
+					if (conn->sk) {
+						sk_mem_uncharge(conn->sk, skb->truesize);
+						atomic_sub(skb->truesize, &conn->sk->sk_wmem_alloc);
+						if (sk_stream_wspace(conn->sk) > 0)
+							conn->sk->sk_write_space(conn->sk);
+					}
 					kfree_skb(skb);
 				} else {
 					/* Partial consumption - adjust skb */

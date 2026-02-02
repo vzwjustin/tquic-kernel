@@ -810,6 +810,23 @@ static int tquic_process_stream_frame(struct tquic_rx_ctx *ctx)
 	/* Store offset in skb->cb for reordering */
 	*(u64 *)data_skb->cb = offset;
 
+	/*
+	 * Charge receive buffer memory against the connection socket.
+	 * If receive buffer is full, drop the skb and apply backpressure.
+	 */
+	if (ctx->conn->sk) {
+		struct sock *sk = ctx->conn->sk;
+		int amt = data_skb->truesize;
+
+		if (atomic_read(&sk->sk_rmem_alloc) + amt > sk->sk_rcvbuf) {
+			kfree_skb(data_skb);
+			/* Don't treat as fatal - peer will retransmit */
+			return 0;
+		}
+		sk_mem_charge(sk, amt);
+		atomic_add(amt, &sk->sk_rmem_alloc);
+	}
+
 	skb_queue_tail(&stream->recv_buf, data_skb);
 	stream->recv_offset = max(stream->recv_offset, offset + length);
 

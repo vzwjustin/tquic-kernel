@@ -364,6 +364,20 @@ ssize_t tquic_forward_splice(struct tquic_tunnel *tunnel, int direction)
 			skb_reserve(skb, 32);  /* Room for QUIC headers */
 			skb_put_data(skb, buf, err);
 
+			/* Charge memory against QUIC connection socket */
+			if (stream->conn && stream->conn->sk) {
+				struct sock *quic_sk = stream->conn->sk;
+
+				if (sk_wmem_schedule(quic_sk, skb->truesize)) {
+					sk_mem_charge(quic_sk, skb->truesize);
+					atomic_add(skb->truesize, &quic_sk->sk_wmem_alloc);
+				} else {
+					kfree_skb(skb);
+					kfree(buf);
+					return total > 0 ? total : -ENOBUFS;
+				}
+			}
+
 			/* Enqueue to QUIC stream send buffer */
 			skb_queue_tail(&stream->send_buf, skb);
 			stream->send_offset += err;
@@ -672,6 +686,14 @@ ssize_t tquic_forward_hairpin(struct tquic_tunnel *tunnel,
 		struct tquic_hairpin_header *hdr;
 		unsigned int payload_offset = 0;
 
+		/* Uncharge memory from source connection socket */
+		if (src_stream->conn && src_stream->conn->sk) {
+			struct sock *src_sk = src_stream->conn->sk;
+
+			sk_mem_uncharge(src_sk, skb->truesize);
+			atomic_sub(skb->truesize, &src_sk->sk_rmem_alloc);
+		}
+
 		/*
 		 * Process hairpin header if present, strip it for forwarding.
 		 * On first hop, add new header with incremented hop count.
@@ -713,10 +735,23 @@ ssize_t tquic_forward_hairpin(struct tquic_tunnel *tunnel,
 		return 0;
 	}
 
-	/* Enqueue to destination stream */
+	/* Enqueue to destination stream with memory accounting */
 	spin_lock_bh(&dst_stream->send_buf.lock);
 	skb_queue_walk_safe(&tx_queue, skb, skb_next) {
 		__skb_unlink(skb, &tx_queue);
+
+		/* Charge memory to destination connection socket */
+		if (dst_stream->conn && dst_stream->conn->sk) {
+			struct sock *dst_sk = dst_stream->conn->sk;
+
+			/*
+			 * We don't check sk_wmem_schedule here because we've
+			 * already dequeued from source - must deliver or drop.
+			 */
+			sk_mem_charge(dst_sk, skb->truesize);
+			atomic_add(skb->truesize, &dst_sk->sk_wmem_alloc);
+		}
+
 		__skb_queue_tail(&dst_stream->send_buf, skb);
 	}
 	spin_unlock_bh(&dst_stream->send_buf.lock);

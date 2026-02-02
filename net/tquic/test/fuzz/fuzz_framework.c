@@ -578,27 +578,238 @@ EXPORT_SYMBOL_GPL(tquic_fuzz_corpus_clear);
  * =============================================================================
  */
 
+/* Fuzz target connection state */
+struct tquic_fuzz_conn {
+	struct tquic_connection *conn;
+	void *crypto_state;
+	bool initialized;
+};
+
+/* Global fuzz connection (reused across iterations) */
+static DEFINE_MUTEX(fuzz_conn_lock);
+static struct tquic_fuzz_conn fuzz_client;
+static struct tquic_fuzz_conn fuzz_server;
+
+/**
+ * tquic_fuzz_init_conn - Initialize a fuzzing connection
+ * @fconn: Fuzz connection to initialize
+ * @is_server: True for server, false for client
+ *
+ * Returns: 0 on success, negative errno on failure
+ */
+static int tquic_fuzz_init_conn(struct tquic_fuzz_conn *fconn, bool is_server)
+{
+	struct tquic_cid cid;
+
+	if (fconn->initialized)
+		return 0;
+
+	/* Generate deterministic CID for reproducibility */
+	cid.len = 8;
+	memset(cid.id, is_server ? 0xAA : 0xBB, cid.len);
+
+	fconn->conn = tquic_conn_alloc(GFP_KERNEL);
+	if (!fconn->conn)
+		return -ENOMEM;
+
+	fconn->conn->scid = cid;
+	fconn->conn->role = is_server ? TQUIC_CONN_SERVER : TQUIC_CONN_CLIENT;
+	fconn->conn->state = TQUIC_CONN_CONNECTED;
+	fconn->conn->version = TQUIC_VERSION_1;
+
+	/* Initialize transport parameters */
+	tquic_tp_init(&fconn->conn->local_params);
+	if (is_server)
+		tquic_tp_set_defaults_server(&fconn->conn->local_params);
+	else
+		tquic_tp_set_defaults_client(&fconn->conn->local_params);
+
+	/* Initialize crypto state */
+	fconn->crypto_state = tquic_crypto_init_versioned(&cid, is_server,
+							  TQUIC_VERSION_1);
+	if (!fconn->crypto_state) {
+		tquic_conn_destroy(fconn->conn);
+		fconn->conn = NULL;
+		return -ENOMEM;
+	}
+
+	fconn->conn->crypto_state = fconn->crypto_state;
+	fconn->initialized = true;
+
+	return 0;
+}
+
+/**
+ * tquic_fuzz_cleanup_conn - Clean up a fuzzing connection
+ * @fconn: Fuzz connection to clean up
+ */
+static void tquic_fuzz_cleanup_conn(struct tquic_fuzz_conn *fconn)
+{
+	if (!fconn->initialized)
+		return;
+
+	if (fconn->crypto_state) {
+		tquic_crypto_cleanup(fconn->crypto_state);
+		fconn->crypto_state = NULL;
+	}
+
+	if (fconn->conn) {
+		fconn->conn->crypto_state = NULL;  /* Already freed above */
+		tquic_conn_destroy(fconn->conn);
+		fconn->conn = NULL;
+	}
+
+	fconn->initialized = false;
+}
+
+/**
+ * tquic_fuzz_run_once - Execute one fuzzing iteration
+ * @state: Fuzzer state
+ * @input: Fuzzed input data
+ * @len: Input length
+ *
+ * Processes the fuzzed input through the QUIC stack. This function:
+ * 1. Parses the input as a QUIC packet
+ * 2. Processes it through the appropriate handler
+ * 3. Records any crashes or interesting behavior
+ *
+ * Returns: 0 on success, negative errno on failure
+ */
 int tquic_fuzz_run_once(struct tquic_fuzz_state *state,
 			const u8 *input, size_t len)
 {
-	/* In real implementation, this would:
-	 * 1. Create a QUIC connection
-	 * 2. Inject the fuzzed input
-	 * 3. Check for crashes/hangs
-	 * 4. Record coverage
-	 */
+	struct tquic_fuzz_conn *target;
+	bool is_long_header;
+	int ret = 0;
 
 	if (!state || !input || len == 0)
 		return -EINVAL;
 
 	atomic64_inc(&state->stats.iterations);
 
-	/* Placeholder: would inject into actual QUIC processing */
-	pr_debug("tquic_fuzz: processing %zu byte input\n", len);
+	/* Need at least 1 byte to determine header type */
+	if (len < 1)
+		return 0;
 
-	return 0;
+	mutex_lock(&fuzz_conn_lock);
+
+	/* Determine target based on packet type */
+	is_long_header = (input[0] & 0x80) != 0;
+
+	/* Initialize connections if needed */
+	if (state->targets & TQUIC_FUZZ_TARGET_SERVER) {
+		ret = tquic_fuzz_init_conn(&fuzz_server, true);
+		if (ret < 0)
+			goto out_unlock;
+	}
+
+	if (state->targets & TQUIC_FUZZ_TARGET_CLIENT) {
+		ret = tquic_fuzz_init_conn(&fuzz_client, false);
+		if (ret < 0)
+			goto out_unlock;
+	}
+
+	/* Select target - long headers typically go to server */
+	if (is_long_header && (state->targets & TQUIC_FUZZ_TARGET_SERVER))
+		target = &fuzz_server;
+	else if (state->targets & TQUIC_FUZZ_TARGET_CLIENT)
+		target = &fuzz_client;
+	else if (state->targets & TQUIC_FUZZ_TARGET_SERVER)
+		target = &fuzz_server;
+	else {
+		ret = -EINVAL;
+		goto out_unlock;
+	}
+
+	if (!target->conn) {
+		ret = -ENOENT;
+		goto out_unlock;
+	}
+
+	pr_debug("tquic_fuzz: processing %zu byte %s packet to %s\n",
+		 len, is_long_header ? "long" : "short",
+		 target == &fuzz_server ? "server" : "client");
+
+	/* Process through different fuzz targets */
+	if (state->targets & TQUIC_FUZZ_TARGET_PACKET) {
+		/* Full packet processing */
+		ret = tquic_conn_process_packet(target->conn, input, len);
+		if (ret < 0 && ret != -EINVAL && ret != -EBADMSG) {
+			/* Unexpected error - potential bug */
+			atomic64_inc(&state->stats.unique_crashes);
+			pr_warn("tquic_fuzz: unexpected error %d processing packet\n", ret);
+		}
+	}
+
+	if (state->targets & TQUIC_FUZZ_TARGET_FRAME) {
+		/* Frame decoding only (skip packet header) */
+		size_t header_len = is_long_header ? 7 : 1;
+		if (len > header_len) {
+			ret = tquic_frame_decode(target->conn, input + header_len,
+						 len - header_len);
+			if (ret < 0 && ret != -EINVAL && ret != -EBADMSG) {
+				atomic64_inc(&state->stats.unique_crashes);
+				pr_warn("tquic_fuzz: unexpected error %d decoding frame\n", ret);
+			}
+		}
+	}
+
+	if (state->targets & TQUIC_FUZZ_TARGET_CRYPTO) {
+		/* Crypto processing (header protection removal, decryption) */
+		u8 *packet_copy;
+
+		packet_copy = kmemdup(input, len, GFP_KERNEL);
+		if (packet_copy) {
+			ret = tquic_crypto_unprotect_header(target->conn->crypto_state,
+							    packet_copy, len, 0,
+							    NULL, NULL);
+			if (ret == 0 && len > 20) {
+				/* Try decryption */
+				u8 decrypted[4096];
+				size_t decrypted_len;
+
+				ret = tquic_decrypt_packet(target->conn->crypto_state,
+							   packet_copy, 20,
+							   packet_copy + 20, len - 20,
+							   0, decrypted, &decrypted_len);
+			}
+			kfree(packet_copy);
+		}
+	}
+
+	if (state->targets & TQUIC_FUZZ_TARGET_TRANSPORT_PARAMS) {
+		/* Transport parameter decoding */
+		struct tquic_transport_params params;
+
+		ret = tquic_tp_decode(input, len, true, &params);
+		if (ret < 0 && ret != -EINVAL && ret != -EOVERFLOW) {
+			atomic64_inc(&state->stats.unique_crashes);
+			pr_warn("tquic_fuzz: unexpected error %d decoding transport params\n", ret);
+		}
+	}
+
+	ret = 0;  /* Don't propagate expected errors */
+
+out_unlock:
+	mutex_unlock(&fuzz_conn_lock);
+	return ret;
 }
 EXPORT_SYMBOL_GPL(tquic_fuzz_run_once);
+
+/**
+ * tquic_fuzz_reset_state - Reset fuzzing state for new run
+ * @state: Fuzzer state to reset
+ *
+ * Cleans up and reinitializes the fuzzing connections.
+ */
+void tquic_fuzz_reset_state(struct tquic_fuzz_state *state)
+{
+	mutex_lock(&fuzz_conn_lock);
+	tquic_fuzz_cleanup_conn(&fuzz_client);
+	tquic_fuzz_cleanup_conn(&fuzz_server);
+	mutex_unlock(&fuzz_conn_lock);
+}
+EXPORT_SYMBOL_GPL(tquic_fuzz_reset_state);
 
 static void fuzz_work_fn(struct work_struct *work)
 {
@@ -772,6 +983,12 @@ void tquic_fuzz_exit(void)
 	/* Stop any running fuzzing */
 	if (tquic_fuzzer)
 		tquic_fuzz_stop(tquic_fuzzer);
+
+	/* Clean up fuzz connections */
+	mutex_lock(&fuzz_conn_lock);
+	tquic_fuzz_cleanup_conn(&fuzz_client);
+	tquic_fuzz_cleanup_conn(&fuzz_server);
+	mutex_unlock(&fuzz_conn_lock);
 
 	/* Remove debugfs */
 	debugfs_remove_recursive(fuzz_debugfs_dir);

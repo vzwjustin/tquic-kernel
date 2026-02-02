@@ -36,6 +36,150 @@
 extern void tquic_update_pacing(struct sock *sk, struct tquic_path *path);
 
 /*
+ * =============================================================================
+ * SOCKET MEMORY ACCOUNTING
+ * =============================================================================
+ *
+ * TQUIC implements proper socket memory accounting to integrate with the
+ * kernel's memory pressure mechanisms (sk_mem_charge/sk_mem_uncharge).
+ * This ensures:
+ *
+ * - Per-socket write buffer limits (sk_sndbuf / sk_wmem_alloc)
+ * - Per-socket read buffer limits (sk_rcvbuf / sk_rmem_alloc)
+ * - System-wide memory pressure tracking (sysctl_tquic_mem)
+ * - Proper interaction with poll/epoll for write availability
+ *
+ * Memory is charged when data is buffered for transmission and uncharged
+ * when data is consumed by the application or freed.
+ */
+
+/**
+ * tquic_stream_wmem_charge - Charge memory for send buffer
+ * @sk: Parent socket (connection socket for accounting)
+ * @skb: SKB being added to send buffer
+ *
+ * Called when adding data to stream send buffer. Charges against the
+ * connection socket's write memory.
+ *
+ * Returns: 0 on success, -ENOBUFS if memory limit exceeded
+ */
+static int tquic_stream_wmem_charge(struct sock *sk, struct sk_buff *skb)
+{
+	int amt = skb->truesize;
+
+	if (!sk)
+		return 0;
+
+	/* Check if we have room in socket's send buffer */
+	if (sk_wmem_schedule(sk, amt)) {
+		sk_mem_charge(sk, amt);
+		atomic_add(amt, &sk->sk_wmem_alloc);
+		return 0;
+	}
+
+	return -ENOBUFS;
+}
+
+/**
+ * tquic_stream_wmem_uncharge - Uncharge memory from send buffer
+ * @sk: Parent socket
+ * @skb: SKB being removed from send buffer
+ *
+ * Called when stream data has been acknowledged and can be freed.
+ */
+static void tquic_stream_wmem_uncharge(struct sock *sk, struct sk_buff *skb)
+{
+	int amt = skb->truesize;
+
+	if (!sk)
+		return;
+
+	sk_mem_uncharge(sk, amt);
+	atomic_sub(amt, &sk->sk_wmem_alloc);
+
+	/* Wake up writers if socket was previously blocked */
+	if (sk_stream_wspace(sk) > 0)
+		sk->sk_write_space(sk);
+}
+
+/**
+ * tquic_stream_rmem_charge - Charge memory for receive buffer
+ * @sk: Parent socket
+ * @skb: SKB being added to receive buffer
+ *
+ * Called when receiving data into stream buffer.
+ *
+ * Returns: 0 on success, -ENOBUFS if memory limit exceeded
+ */
+static int tquic_stream_rmem_charge(struct sock *sk, struct sk_buff *skb)
+{
+	int amt = skb->truesize;
+
+	if (!sk)
+		return 0;
+
+	/* Check receive buffer limits */
+	if (atomic_read(&sk->sk_rmem_alloc) + amt > sk->sk_rcvbuf)
+		return -ENOBUFS;
+
+	sk_mem_charge(sk, amt);
+	atomic_add(amt, &sk->sk_rmem_alloc);
+	return 0;
+}
+
+/**
+ * tquic_stream_rmem_uncharge - Uncharge memory from receive buffer
+ * @sk: Parent socket
+ * @skb: SKB being consumed from receive buffer
+ *
+ * Called when application reads data from stream.
+ */
+static void tquic_stream_rmem_uncharge(struct sock *sk, struct sk_buff *skb)
+{
+	int amt = skb->truesize;
+
+	if (!sk)
+		return;
+
+	sk_mem_uncharge(sk, amt);
+	atomic_sub(amt, &sk->sk_rmem_alloc);
+}
+
+/**
+ * tquic_stream_purge_wmem - Purge send buffer with memory accounting
+ * @sk: Parent socket
+ * @queue: SKB queue to purge
+ *
+ * Purges all SKBs from send buffer and properly uncharges memory.
+ */
+static void tquic_stream_purge_wmem(struct sock *sk, struct sk_buff_head *queue)
+{
+	struct sk_buff *skb;
+
+	while ((skb = skb_dequeue(queue)) != NULL) {
+		tquic_stream_wmem_uncharge(sk, skb);
+		kfree_skb(skb);
+	}
+}
+
+/**
+ * tquic_stream_purge_rmem - Purge receive buffer with memory accounting
+ * @sk: Parent socket
+ * @queue: SKB queue to purge
+ *
+ * Purges all SKBs from receive buffer and properly uncharges memory.
+ */
+static void tquic_stream_purge_rmem(struct sock *sk, struct sk_buff_head *queue)
+{
+	struct sk_buff *skb;
+
+	while ((skb = skb_dequeue(queue)) != NULL) {
+		tquic_stream_rmem_uncharge(sk, skb);
+		kfree_skb(skb);
+	}
+}
+
+/*
  * Helper to create file descriptor for a socket
  * Replacement for sock_map_fd which is not exported
  */
@@ -233,12 +377,27 @@ static void tquic_stream_remove_from_conn(struct tquic_connection *conn,
  */
 static void tquic_stream_free(struct tquic_stream *stream)
 {
+	struct sock *sk;
+
 	if (!stream)
 		return;
 
-	/* Purge any remaining buffers */
-	skb_queue_purge(&stream->send_buf);
-	skb_queue_purge(&stream->recv_buf);
+	/*
+	 * Get the parent socket for memory accounting.
+	 * If the connection or socket is already gone, fall back
+	 * to simple purge without memory accounting.
+	 */
+	sk = (stream->conn) ? stream->conn->sk : NULL;
+
+	/* Purge any remaining buffers with proper memory accounting */
+	if (sk) {
+		tquic_stream_purge_wmem(sk, &stream->send_buf);
+		tquic_stream_purge_rmem(sk, &stream->recv_buf);
+	} else {
+		/* Fallback: no socket available, just purge */
+		skb_queue_purge(&stream->send_buf);
+		skb_queue_purge(&stream->recv_buf);
+	}
 
 	pr_debug("tquic: freed stream id=%llu\n", stream->id);
 
@@ -763,6 +922,12 @@ static int tquic_stream_sendmsg(struct socket *sock, struct msghdr *msg,
 			return copied > 0 ? copied : -EFAULT;
 		}
 
+		/* Charge socket memory for this buffer */
+		if (tquic_stream_wmem_charge(ss->parent_sk, skb)) {
+			kfree_skb(skb);
+			return copied > 0 ? copied : -ENOBUFS;
+		}
+
 		/* Store stream offset in skb->cb for frame generation */
 		*(u64 *)skb->cb = stream->send_offset;
 
@@ -861,6 +1026,8 @@ static int tquic_stream_recvmsg(struct socket *sock, struct msghdr *msg,
 			skb_pull(skb, chunk);
 			skb_queue_head(&stream->recv_buf, skb);
 		} else {
+			/* Full skb consumed - uncharge memory and free */
+			tquic_stream_rmem_uncharge(ss->parent_sk, skb);
 			kfree_skb(skb);
 		}
 	}

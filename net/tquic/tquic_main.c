@@ -156,12 +156,28 @@ void tquic_conn_destroy(struct tquic_connection *conn)
 		kmem_cache_free(tquic_path_cache, path);
 	}
 
-	/* Free all streams */
+	/* Free all streams with proper memory accounting */
 	while ((node = rb_first(&conn->streams))) {
 		struct tquic_stream *stream = rb_entry(node, struct tquic_stream, node);
+		struct sk_buff *skb;
+
 		rb_erase(node, &conn->streams);
-		skb_queue_purge(&stream->send_buf);
-		skb_queue_purge(&stream->recv_buf);
+
+		/* Uncharge memory when purging buffers */
+		while ((skb = skb_dequeue(&stream->send_buf)) != NULL) {
+			if (conn->sk) {
+				sk_mem_uncharge(conn->sk, skb->truesize);
+				atomic_sub(skb->truesize, &conn->sk->sk_wmem_alloc);
+			}
+			kfree_skb(skb);
+		}
+		while ((skb = skb_dequeue(&stream->recv_buf)) != NULL) {
+			if (conn->sk) {
+				sk_mem_uncharge(conn->sk, skb->truesize);
+				atomic_sub(skb->truesize, &conn->sk->sk_rmem_alloc);
+			}
+			kfree_skb(skb);
+		}
 		kmem_cache_free(tquic_stream_cache, stream);
 	}
 
@@ -542,14 +558,28 @@ EXPORT_SYMBOL_GPL(tquic_stream_open);
 void tquic_stream_close(struct tquic_stream *stream)
 {
 	struct tquic_connection *conn = stream->conn;
+	struct sk_buff *skb;
 
 	spin_lock(&conn->lock);
 	rb_erase(&stream->node, &conn->streams);
 	conn->stats.streams_closed++;
 	spin_unlock(&conn->lock);
 
-	skb_queue_purge(&stream->send_buf);
-	skb_queue_purge(&stream->recv_buf);
+	/* Purge with proper memory accounting */
+	while ((skb = skb_dequeue(&stream->send_buf)) != NULL) {
+		if (conn->sk) {
+			sk_mem_uncharge(conn->sk, skb->truesize);
+			atomic_sub(skb->truesize, &conn->sk->sk_wmem_alloc);
+		}
+		kfree_skb(skb);
+	}
+	while ((skb = skb_dequeue(&stream->recv_buf)) != NULL) {
+		if (conn->sk) {
+			sk_mem_uncharge(conn->sk, skb->truesize);
+			atomic_sub(skb->truesize, &conn->sk->sk_rmem_alloc);
+		}
+		kfree_skb(skb);
+	}
 
 	kmem_cache_free(tquic_stream_cache, stream);
 }

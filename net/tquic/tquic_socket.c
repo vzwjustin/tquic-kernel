@@ -1972,6 +1972,15 @@ int tquic_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 			return copied > 0 ? copied : -EFAULT;
 		}
 
+		/* Charge socket memory for this buffer */
+		if (sk_wmem_schedule(sk, skb->truesize)) {
+			sk_mem_charge(sk, skb->truesize);
+			atomic_add(skb->truesize, &sk->sk_wmem_alloc);
+		} else {
+			kfree_skb(skb);
+			return copied > 0 ? copied : -ENOBUFS;
+		}
+
 		skb_queue_tail(&stream->send_buf, skb);
 		copied += chunk;
 
