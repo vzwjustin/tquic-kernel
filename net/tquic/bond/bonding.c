@@ -23,7 +23,7 @@
 struct tquic_path_quality {
 	u64 score;           /* Combined quality score */
 	u32 available_cwnd;  /* Available congestion window */
-	u32 inflight;        /* Packets in flight */
+	s64 inflight;        /* Bytes in flight (signed to detect underflow) */
 	u32 est_delivery;    /* Estimated delivery time (us) */
 	bool can_send;       /* Can accept more data */
 };
@@ -68,18 +68,21 @@ static void tquic_calc_path_quality(struct tquic_path *path,
 	quality->score = score;
 	quality->available_cwnd = stats->cwnd;
 	/*
-	 * Track in-flight packets from path statistics.
+	 * Track in-flight bytes from path statistics.
 	 * This is updated by the congestion control module.
+	 * Use signed arithmetic to detect underflow.
 	 */
-	quality->inflight = stats->tx_bytes - (stats->rx_bytes + stats->lost_packets * 1200);
+	quality->inflight = (s64)stats->tx_bytes -
+			    ((s64)stats->rx_bytes + (s64)stats->lost_packets * 1200);
 	if (quality->inflight < 0)
 		quality->inflight = 0;
 	quality->est_delivery = stats->rtt_smoothed;
-	quality->can_send = (quality->available_cwnd > quality->inflight);
+	quality->can_send = (quality->available_cwnd > (u64)quality->inflight);
 }
 
 /*
  * Select best path based on minimum RTT
+ * Caller must hold conn->lock to protect path list iteration.
  */
 static struct tquic_path *tquic_select_minrtt(struct tquic_bond_state *bond,
 					      struct sk_buff *skb)
@@ -88,6 +91,7 @@ static struct tquic_path *tquic_select_minrtt(struct tquic_bond_state *bond,
 	struct tquic_path *path, *best = NULL;
 	u32 min_rtt = UINT_MAX;
 
+	/* conn->lock must be held by caller */
 	list_for_each_entry(path, &conn->paths, list) {
 		if (path->state != TQUIC_PATH_ACTIVE)
 			continue;
@@ -103,6 +107,7 @@ static struct tquic_path *tquic_select_minrtt(struct tquic_bond_state *bond,
 
 /*
  * Select path using round-robin
+ * Caller must hold conn->lock to protect path list iteration.
  */
 static struct tquic_path *tquic_select_roundrobin(struct tquic_bond_state *bond,
 						  struct sk_buff *skb)
@@ -111,13 +116,22 @@ static struct tquic_path *tquic_select_roundrobin(struct tquic_bond_state *bond,
 	struct tquic_path *path;
 	u32 idx = 0;
 	u32 target;
+	u32 active_count = 0;
 
-	/* Guard against division by zero when no paths exist */
-	if (unlikely(conn->num_paths == 0))
+	/* conn->lock must be held by caller */
+	/* Count active paths first to avoid bias from inactive paths */
+	list_for_each_entry(path, &conn->paths, list) {
+		if (path->state == TQUIC_PATH_ACTIVE)
+			active_count++;
+	}
+
+	/* Guard against division by zero when no active paths exist */
+	if (unlikely(active_count == 0))
 		return conn->active_path;
 
-	target = bond->rr_counter++ % conn->num_paths;
+	target = bond->rr_counter++ % active_count;
 
+	/* Select the target'th active path */
 	list_for_each_entry(path, &conn->paths, list) {
 		if (path->state != TQUIC_PATH_ACTIVE)
 			continue;
@@ -127,12 +141,7 @@ static struct tquic_path *tquic_select_roundrobin(struct tquic_bond_state *bond,
 		idx++;
 	}
 
-	/* Fallback to first active path */
-	list_for_each_entry(path, &conn->paths, list) {
-		if (path->state == TQUIC_PATH_ACTIVE)
-			return path;
-	}
-
+	/* Fallback should not be reached, but handle defensively */
 	return conn->active_path;
 }
 
@@ -396,6 +405,8 @@ static int tquic_send_redundant(struct tquic_bond_state *bond,
 
 /*
  * Main path selection function
+ * Caller must hold conn->lock to protect path list iteration.
+ * Called from tquic_select_path() which acquires the lock.
  */
 struct tquic_path *tquic_bond_select_path(struct tquic_connection *conn,
 					  struct sk_buff *skb)
@@ -403,6 +414,7 @@ struct tquic_path *tquic_bond_select_path(struct tquic_connection *conn,
 	struct tquic_bond_state *bond = conn->scheduler;
 	struct tquic_path *selected;
 
+	/* conn->lock must be held by caller (tquic_select_path) */
 	if (!bond)
 		return conn->active_path;
 
