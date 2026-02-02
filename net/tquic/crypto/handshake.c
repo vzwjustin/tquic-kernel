@@ -1827,6 +1827,300 @@ int tquic_hs_process_certificate(struct tquic_handshake *hs,
 EXPORT_SYMBOL_GPL(tquic_hs_process_certificate);
 
 /*
+ * MGF1 - Mask Generation Function (RFC 8017 Appendix B.2.1)
+ * Used for RSASSA-PSS signature verification.
+ *
+ * @hash_alg: Hash algorithm name (e.g., "sha256")
+ * @seed: Seed value
+ * @seed_len: Length of seed
+ * @mask: Output buffer for generated mask
+ * @mask_len: Desired length of mask
+ *
+ * Returns 0 on success, negative error code on failure.
+ */
+static int tquic_mgf1(const char *hash_alg, const u8 *seed, u32 seed_len,
+		      u8 *mask, u32 mask_len)
+{
+	struct crypto_shash *hash_tfm;
+	u32 hash_len;
+	u32 counter = 0;
+	u8 counter_be[4];
+	u8 hash_out[64];  /* Max hash size (SHA-512) */
+	u32 offset = 0;
+	int err;
+
+	hash_tfm = crypto_alloc_shash(hash_alg, 0, 0);
+	if (IS_ERR(hash_tfm))
+		return PTR_ERR(hash_tfm);
+
+	hash_len = crypto_shash_digestsize(hash_tfm);
+
+	while (offset < mask_len) {
+		SHASH_DESC_ON_STACK(desc, hash_tfm);
+		u32 copy_len;
+
+		desc->tfm = hash_tfm;
+
+		/* Counter in big-endian */
+		counter_be[0] = (counter >> 24) & 0xff;
+		counter_be[1] = (counter >> 16) & 0xff;
+		counter_be[2] = (counter >> 8) & 0xff;
+		counter_be[3] = counter & 0xff;
+
+		/* Hash(seed || counter) */
+		err = crypto_shash_init(desc);
+		if (err)
+			goto out;
+		err = crypto_shash_update(desc, seed, seed_len);
+		if (err)
+			goto out;
+		err = crypto_shash_final(desc, hash_out);
+		shash_desc_zero(desc);
+		if (err)
+			goto out;
+
+		/* Copy to mask buffer */
+		copy_len = min(hash_len, mask_len - offset);
+		memcpy(mask + offset, hash_out, copy_len);
+		offset += copy_len;
+		counter++;
+	}
+	err = 0;
+
+out:
+	crypto_free_shash(hash_tfm);
+	return err;
+}
+
+/*
+ * EMSA-PSS-VERIFY - PSS padding verification (RFC 8017 Section 9.1.2)
+ * Used for RSASSA-PSS signature verification in TLS 1.3.
+ *
+ * @hash_alg: Hash algorithm name
+ * @hash_len: Hash output length in bytes
+ * @msg_hash: Hash of the message to verify
+ * @em: Encoded message (output of RSA public key operation)
+ * @em_len: Length of encoded message (key size in bytes)
+ *
+ * TLS 1.3 uses salt length equal to hash length.
+ *
+ * Returns 0 on success, -EKEYREJECTED if verification fails.
+ */
+static int tquic_emsa_pss_verify(const char *hash_alg, u32 hash_len,
+				 const u8 *msg_hash, const u8 *em, u32 em_len)
+{
+	u8 *db_mask = NULL;
+	u8 *db = NULL;
+	u8 *m_prime = NULL;
+	u8 h_prime[64];  /* Max hash size */
+	struct crypto_shash *hash_tfm = NULL;
+	u32 salt_len = hash_len;  /* TLS 1.3: sLen = hLen */
+	u32 db_len;
+	u32 ps_len;
+	u32 i;
+	int err = -EKEYREJECTED;
+
+	/* Step 3: emLen must be at least hLen + sLen + 2 */
+	if (em_len < hash_len + salt_len + 2) {
+		pr_debug("tquic_pss: EM too short\n");
+		return -EKEYREJECTED;
+	}
+
+	/* Step 4: Check rightmost byte is 0xbc */
+	if (em[em_len - 1] != 0xbc) {
+		pr_debug("tquic_pss: Invalid trailer byte 0x%02x (expected 0xbc)\n",
+			 em[em_len - 1]);
+		return -EKEYREJECTED;
+	}
+
+	db_len = em_len - hash_len - 1;
+
+	/* Allocate working buffers */
+	db_mask = kmalloc(db_len, GFP_KERNEL);
+	db = kmalloc(db_len, GFP_KERNEL);
+	m_prime = kmalloc(8 + hash_len + salt_len, GFP_KERNEL);
+	if (!db_mask || !db || !m_prime) {
+		err = -ENOMEM;
+		goto out;
+	}
+
+	/* Step 5-6: maskedDB is leftmost (emLen - hLen - 1) bytes */
+	/* Step 7: H is the next hLen bytes */
+	/* maskedDB = em[0..db_len-1], H = em[db_len..db_len+hash_len-1] */
+
+	/* Step 8: Generate dbMask = MGF1(H, emLen - hLen - 1) */
+	err = tquic_mgf1(hash_alg, em + db_len, hash_len, db_mask, db_len);
+	if (err) {
+		pr_debug("tquic_pss: MGF1 failed: %d\n", err);
+		goto out;
+	}
+
+	/* Step 9: DB = maskedDB XOR dbMask */
+	for (i = 0; i < db_len; i++)
+		db[i] = em[i] ^ db_mask[i];
+
+	/* Step 10: Set leftmost 8*emLen - emBits bits to zero */
+	/* For RSA keys, emBits = key_bits - 1, so we clear the top bit */
+	db[0] &= 0x7f;
+
+	/* Step 11: Check DB = PS || 0x01 || salt
+	 * PS is (emLen - hLen - sLen - 2) zero bytes
+	 */
+	ps_len = db_len - salt_len - 1;
+	for (i = 0; i < ps_len; i++) {
+		if (db[i] != 0x00) {
+			pr_debug("tquic_pss: Non-zero padding at position %u\n", i);
+			err = -EKEYREJECTED;
+			goto out;
+		}
+	}
+
+	if (db[ps_len] != 0x01) {
+		pr_debug("tquic_pss: Missing 0x01 separator at position %u\n", ps_len);
+		err = -EKEYREJECTED;
+		goto out;
+	}
+
+	/* Step 12: Salt is the rightmost sLen bytes of DB */
+	/* salt = db[db_len - salt_len .. db_len - 1] */
+
+	/* Step 13: M' = (0x)00 00 00 00 00 00 00 00 || mHash || salt */
+	memset(m_prime, 0, 8);
+	memcpy(m_prime + 8, msg_hash, hash_len);
+	memcpy(m_prime + 8 + hash_len, db + db_len - salt_len, salt_len);
+
+	/* Step 14: H' = Hash(M') */
+	hash_tfm = crypto_alloc_shash(hash_alg, 0, 0);
+	if (IS_ERR(hash_tfm)) {
+		err = PTR_ERR(hash_tfm);
+		hash_tfm = NULL;
+		goto out;
+	}
+
+	{
+		SHASH_DESC_ON_STACK(desc, hash_tfm);
+		desc->tfm = hash_tfm;
+		err = crypto_shash_digest(desc, m_prime, 8 + hash_len + salt_len,
+					  h_prime);
+		shash_desc_zero(desc);
+	}
+
+	if (err) {
+		pr_debug("tquic_pss: Failed to compute H'\n");
+		goto out;
+	}
+
+	/* Step 15: Compare H and H' */
+	if (crypto_memneq(em + db_len, h_prime, hash_len)) {
+		pr_debug("tquic_pss: H != H' - signature verification failed\n");
+		err = -EKEYREJECTED;
+		goto out;
+	}
+
+	pr_debug("tquic_pss: EMSA-PSS verification succeeded\n");
+	err = 0;
+
+out:
+	if (hash_tfm)
+		crypto_free_shash(hash_tfm);
+	kfree(m_prime);
+	kfree(db);
+	kfree(db_mask);
+	return err;
+}
+
+/*
+ * Verify RSA-PSS signature (RSASSA-PSS per RFC 8017 Section 8.1.2)
+ *
+ * @pubkey_data: DER-encoded public key
+ * @pubkey_len: Length of public key
+ * @hash_alg: Hash algorithm name
+ * @hash_len: Hash output length
+ * @msg_hash: Hash of message being verified
+ * @signature: Signature to verify
+ * @sig_len: Length of signature
+ *
+ * Returns 0 on success, negative error on failure.
+ */
+static int tquic_verify_rsa_pss(const u8 *pubkey_data, u32 pubkey_len,
+				const char *hash_alg, u32 hash_len,
+				const u8 *msg_hash,
+				const u8 *signature, u32 sig_len)
+{
+	struct crypto_akcipher *tfm = NULL;
+	struct akcipher_request *req = NULL;
+	struct scatterlist sg_in, sg_out;
+	u8 *em = NULL;  /* Encoded message */
+	u32 key_size;
+	int err;
+	DECLARE_CRYPTO_WAIT(wait);
+
+	/* Allocate raw RSA cipher */
+	tfm = crypto_alloc_akcipher("rsa", 0, 0);
+	if (IS_ERR(tfm)) {
+		err = PTR_ERR(tfm);
+		pr_warn("tquic_pss: Failed to allocate RSA: %d\n", err);
+		return err;
+	}
+
+	/* Set public key */
+	err = crypto_akcipher_set_pub_key(tfm, pubkey_data, pubkey_len);
+	if (err) {
+		pr_warn("tquic_pss: Failed to set public key: %d\n", err);
+		goto out_free_tfm;
+	}
+
+	/* Get key size */
+	key_size = crypto_akcipher_maxsize(tfm);
+	if (key_size == 0 || sig_len != key_size) {
+		pr_warn("tquic_pss: Signature length %u != key size %u\n",
+			sig_len, key_size);
+		err = -EINVAL;
+		goto out_free_tfm;
+	}
+
+	/* Allocate buffer for encoded message */
+	em = kmalloc(key_size, GFP_KERNEL);
+	if (!em) {
+		err = -ENOMEM;
+		goto out_free_tfm;
+	}
+
+	/* Allocate request */
+	req = akcipher_request_alloc(tfm, GFP_KERNEL);
+	if (!req) {
+		err = -ENOMEM;
+		goto out_free_em;
+	}
+
+	/* Set up scatter-gather for RSA public key operation (encrypt = verify) */
+	sg_init_one(&sg_in, signature, sig_len);
+	sg_init_one(&sg_out, em, key_size);
+
+	akcipher_request_set_crypt(req, &sg_in, &sg_out, sig_len, key_size);
+	akcipher_request_set_callback(req, CRYPTO_TFM_REQ_MAY_BACKLOG,
+				      crypto_req_done, &wait);
+
+	/* Perform RSA public key operation: em = signature^e mod n */
+	err = crypto_wait_req(crypto_akcipher_encrypt(req), &wait);
+	if (err) {
+		pr_warn("tquic_pss: RSA operation failed: %d\n", err);
+		goto out_free_req;
+	}
+
+	/* Verify PSS padding */
+	err = tquic_emsa_pss_verify(hash_alg, hash_len, msg_hash, em, key_size);
+
+out_free_req:
+	akcipher_request_free(req);
+out_free_em:
+	kfree(em);
+out_free_tfm:
+	crypto_free_akcipher(tfm);
+	return err;
+}
+
+/*
  * Process CertificateVerify message
  */
 int tquic_hs_process_certificate_verify(struct tquic_handshake *hs,
@@ -1934,22 +2228,25 @@ int tquic_hs_process_certificate_verify(struct tquic_handshake *hs,
 		 * Verify signature using kernel crypto API.
 		 * Support RSA-PSS (0x0804, 0x0805, 0x0806) and
 		 * ECDSA (0x0403, 0x0503, 0x0603) algorithms.
+		 *
+		 * RSA-PSS uses proper RSASSA-PSS per RFC 8017 Section 8.1.2.
+		 * ECDSA uses kernel's native ECDSA verification.
 		 */
 		switch (sig_alg) {
 		case 0x0804:  /* rsa_pss_rsae_sha256 */
 			hash_alg = "sha256";
-			akcipher_alg = "pkcs1pad(rsa,sha256)";
 			content_hash_len = 32;
+			akcipher_alg = NULL;  /* Use RSA-PSS path */
 			break;
 		case 0x0805:  /* rsa_pss_rsae_sha384 */
 			hash_alg = "sha384";
-			akcipher_alg = "pkcs1pad(rsa,sha384)";
 			content_hash_len = 48;
+			akcipher_alg = NULL;  /* Use RSA-PSS path */
 			break;
 		case 0x0806:  /* rsa_pss_rsae_sha512 */
 			hash_alg = "sha512";
-			akcipher_alg = "pkcs1pad(rsa,sha512)";
 			content_hash_len = 64;
+			akcipher_alg = NULL;  /* Use RSA-PSS path */
 			break;
 		case 0x0403:  /* ecdsa_secp256r1_sha256 */
 			hash_alg = "sha256";
@@ -1999,59 +2296,81 @@ int tquic_hs_process_certificate_verify(struct tquic_handshake *hs,
 			return err;
 		}
 
-		/* Allocate asymmetric cipher for signature verification */
-		tfm = crypto_alloc_akcipher(akcipher_alg, 0, 0);
-		if (IS_ERR(tfm)) {
-			err = PTR_ERR(tfm);
-			pr_warn("tquic_hs: Failed to allocate akcipher %s: %d\n",
-				akcipher_alg, err);
-			tquic_x509_cert_free(cert);
-			return err;
-		}
+		/*
+		 * Verify signature based on algorithm type.
+		 * RSA-PSS requires special handling with EMSA-PSS verification.
+		 * ECDSA uses the kernel's native signature verification.
+		 */
+		if (akcipher_alg == NULL) {
+			/* RSA-PSS verification (RFC 8017 Section 8.1.2) */
+			err = tquic_verify_rsa_pss(cert->pubkey.key_data,
+						   cert->pubkey.key_len,
+						   hash_alg, content_hash_len,
+						   content_hash,
+						   p, sig_len);
+			if (err) {
+				pr_warn("tquic_hs: RSA-PSS signature verification FAILED: %d\n",
+					err);
+				tquic_x509_cert_free(cert);
+				return err;
+			}
+			pr_debug("tquic_hs: RSA-PSS CertificateVerify verified successfully\n");
+		} else {
+			/* ECDSA verification using kernel crypto API */
+			tfm = crypto_alloc_akcipher(akcipher_alg, 0, 0);
+			if (IS_ERR(tfm)) {
+				err = PTR_ERR(tfm);
+				pr_warn("tquic_hs: Failed to allocate akcipher %s: %d\n",
+					akcipher_alg, err);
+				tquic_x509_cert_free(cert);
+				return err;
+			}
 
-		/* Set public key from peer certificate */
-		err = crypto_akcipher_set_pub_key(tfm, cert->pubkey.key_data,
-						  cert->pubkey.key_len);
-		if (err) {
-			pr_warn("tquic_hs: Failed to set public key: %d\n", err);
-			goto out_free;
-		}
+			/* Set public key from peer certificate */
+			err = crypto_akcipher_set_pub_key(tfm, cert->pubkey.key_data,
+							  cert->pubkey.key_len);
+			if (err) {
+				pr_warn("tquic_hs: Failed to set public key: %d\n", err);
+				goto out_free;
+			}
 
-		/* Allocate request */
-		req = akcipher_request_alloc(tfm, GFP_KERNEL);
-		if (!req) {
-			err = -ENOMEM;
-			pr_warn("tquic_hs: Failed to allocate akcipher request\n");
-			goto out_free;
-		}
+			/* Allocate request */
+			req = akcipher_request_alloc(tfm, GFP_KERNEL);
+			if (!req) {
+				err = -ENOMEM;
+				pr_warn("tquic_hs: Failed to allocate akcipher request\n");
+				goto out_free;
+			}
 
-		/* Set up scatter-gather lists */
-		sg_init_one(&sg_sig, p, sig_len);  /* p points to signature */
-		sg_init_one(&sg_hash, content_hash, content_hash_len);
+			/* Set up scatter-gather lists */
+			sg_init_one(&sg_sig, p, sig_len);  /* p points to signature */
+			sg_init_one(&sg_hash, content_hash, content_hash_len);
 
-		akcipher_request_set_crypt(req, &sg_sig, &sg_hash,
-					   sig_len, content_hash_len);
-		akcipher_request_set_callback(req, CRYPTO_TFM_REQ_MAY_BACKLOG,
-					      crypto_req_done, &wait);
+			akcipher_request_set_crypt(req, &sg_sig, &sg_hash,
+						   sig_len, content_hash_len);
+			akcipher_request_set_callback(req, CRYPTO_TFM_REQ_MAY_BACKLOG,
+						      crypto_req_done, &wait);
 
-		/* Perform signature verification */
-		err = crypto_wait_req(crypto_akcipher_verify(req), &wait);
-		if (err) {
-			pr_warn("tquic_hs: CertificateVerify signature verification FAILED: %d\n",
-				err);
+			/* Perform ECDSA signature verification */
+			err = crypto_wait_req(crypto_akcipher_verify(req), &wait);
+			if (err) {
+				pr_warn("tquic_hs: ECDSA signature verification FAILED: %d\n",
+					err);
+				akcipher_request_free(req);
+				goto out_free;
+			}
+
+			pr_debug("tquic_hs: ECDSA CertificateVerify verified successfully\n");
 			akcipher_request_free(req);
-			goto out_free;
+out_free:
+			crypto_free_akcipher(tfm);
+			if (err) {
+				tquic_x509_cert_free(cert);
+				return err;
+			}
 		}
 
-		pr_debug("tquic_hs: CertificateVerify signature verified successfully\n");
-
-		akcipher_request_free(req);
-out_free:
-		crypto_free_akcipher(tfm);
 		tquic_x509_cert_free(cert);
-
-		if (err)
-			return err;
 	}
 
 	pr_debug("tquic_hs: CertificateVerify sig_alg=0x%04x, sig_len=%u\n",
