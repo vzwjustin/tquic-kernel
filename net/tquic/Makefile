@@ -189,6 +189,10 @@ tquic_fec-y := \
 	fec/reed_solomon.o \
 	fec/fec_scheduler.o
 
+# Security Components - QUIC-Exfil Mitigation (draft-iab-quic-exfil)
+obj-$(CONFIG_TQUIC_SECURITY) += tquic_security.o
+tquic_security-y := security/quic_exfil.o
+
 # KUnit tests
 obj-$(CONFIG_TQUIC_KUNIT_TEST) += tquic_test.o
 tquic_test-y := \
@@ -206,4 +210,5 @@ tquic_test-y := \
 	test/bdp_frame_test.o \
 	test/fec_test.o \
 	test/nat_keepalive_test.o \
-	test/cong_data_test.o
+	test/cong_data_test.o \
+	test/quic_exfil_test.o

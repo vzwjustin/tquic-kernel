@@ -11,4 +11,5 @@ tquic_pm-y := \
 	pm_netlink.o \
 	pm_userspace.o \
 	path_validation.o \
-	nat_keepalive.o
+	nat_keepalive.o \
+	nat_lifecycle.o

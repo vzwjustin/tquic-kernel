@@ -332,6 +332,68 @@ int tquic_nat_keepalive_set_power_mode(struct tquic_path *path, u8 mode);
 
 /*
  * =============================================================================
+ * NAT Lifecycle Integration API
+ * =============================================================================
+ *
+ * These functions integrate the basic keepalive with the advanced NAT
+ * lifecycle management module for enhanced NAT handling.
+ */
+
+/* Include lifecycle header for enum definitions */
+#include "nat_lifecycle.h"
+
+/**
+ * tquic_nat_keepalive_sync_with_lifecycle - Synchronize with lifecycle module
+ * @state: Keepalive state
+ *
+ * Updates keepalive interval based on lifecycle recommendations.
+ * Should be called after NAT type detection or timeout estimation updates.
+ *
+ * Context: Any
+ */
+void tquic_nat_keepalive_sync_with_lifecycle(struct tquic_nat_keepalive_state *state);
+
+/**
+ * tquic_nat_keepalive_get_binding_state - Get current NAT binding state
+ * @state: Keepalive state
+ *
+ * Returns the current binding state from the lifecycle module.
+ * Useful for determining if a keepalive should be sent urgently.
+ *
+ * Context: Any
+ * Return: Binding state (ACTIVE, EXPIRING, EXPIRED, etc.)
+ */
+enum tquic_nat_binding_state tquic_nat_keepalive_get_binding_state(
+	struct tquic_nat_keepalive_state *state);
+
+/**
+ * tquic_nat_keepalive_get_nat_type - Get detected NAT type
+ * @state: Keepalive state
+ *
+ * Returns the NAT type detected by the lifecycle module.
+ * Useful for adjusting application behavior based on NAT restrictiveness.
+ *
+ * Context: Any
+ * Return: NAT type (FULL_CONE, RESTRICTED, SYMMETRIC, etc.)
+ */
+enum tquic_nat_type tquic_nat_keepalive_get_nat_type(
+	struct tquic_nat_keepalive_state *state);
+
+/**
+ * tquic_nat_keepalive_force_binding_refresh - Force immediate binding refresh
+ * @state: Keepalive state
+ *
+ * Triggers an immediate keepalive to refresh the NAT binding.
+ * Use when binding expiry is imminent or before critical operations.
+ *
+ * Context: Softirq or process context
+ * Return: 0 on success, negative error code on failure
+ */
+int tquic_nat_keepalive_force_binding_refresh(
+	struct tquic_nat_keepalive_state *state);
+
+/*
+ * =============================================================================
  * Sysctl Accessors
  * =============================================================================
  */
