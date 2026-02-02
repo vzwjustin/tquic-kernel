@@ -124,6 +124,7 @@ struct tquic_conn_state_machine {
 	enum tquic_hs_substate hs_state;
 	bool is_server;
 	bool handshake_confirmed;
+	bool client_hello_received;	/* Server: ClientHello received */
 
 	/* Version negotiation */
 	u32 original_version;

@@ -34,7 +34,8 @@ MODULE_LICENSE("GPL");
 MODULE_VERSION("1.0.0");
 
 /* Global state */
-static struct rhashtable tquic_conn_table;
+struct rhashtable tquic_conn_table;
+EXPORT_SYMBOL_GPL(tquic_conn_table);
 static DEFINE_SPINLOCK(tquic_lock);
 static struct kmem_cache *tquic_conn_cache;
 static struct kmem_cache *tquic_stream_cache;

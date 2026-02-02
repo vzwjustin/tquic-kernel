@@ -149,38 +149,51 @@ static int tquic_hp_mask_aes(struct tquic_hp_key *hp_key,
  * counter = sample[0..3]
  * nonce = sample[4..15]
  * mask = ChaCha20(hp_key, counter, nonce, {0,0,0,0,0})
+ *
+ * Uses kernel crypto API for portability across kernel versions.
  */
 static int tquic_hp_mask_chacha20(struct tquic_hp_key *hp_key,
 				  const u8 *sample, u8 *mask)
 {
-	struct chacha_state state;
-	u32 key[CHACHA_KEY_WORDS];
-	u8 iv[CHACHA_IV_SIZE];
+	struct crypto_skcipher *tfm;
+	struct skcipher_request *req;
+	struct scatterlist sg;
 	u8 zeros[TQUIC_HP_MASK_LEN] = {0};
+	u8 output[TQUIC_HP_MASK_LEN];
+	DECLARE_CRYPTO_WAIT(wait);
+	int ret;
 
-	/* Load key into 32-bit words */
-	key[0] = get_unaligned_le32(hp_key->key);
-	key[1] = get_unaligned_le32(hp_key->key + 4);
-	key[2] = get_unaligned_le32(hp_key->key + 8);
-	key[3] = get_unaligned_le32(hp_key->key + 12);
-	key[4] = get_unaligned_le32(hp_key->key + 16);
-	key[5] = get_unaligned_le32(hp_key->key + 20);
-	key[6] = get_unaligned_le32(hp_key->key + 24);
-	key[7] = get_unaligned_le32(hp_key->key + 28);
+	tfm = crypto_alloc_skcipher("chacha20", 0, 0);
+	if (IS_ERR(tfm)) {
+		pr_warn("tquic: failed to allocate chacha20: %ld\n", PTR_ERR(tfm));
+		return PTR_ERR(tfm);
+	}
 
-	/*
-	 * Build IV: counter (4 bytes from sample[0..3]) + nonce (12 bytes from sample[4..15])
-	 * ChaCha20 IV format: counter(4) || nonce(12)
-	 */
-	memcpy(iv, sample, CHACHA_IV_SIZE);
+	ret = crypto_skcipher_setkey(tfm, hp_key->key, 32);
+	if (ret) {
+		crypto_free_skcipher(tfm);
+		return ret;
+	}
 
-	chacha_init(&state, key, iv);
-	chacha20_crypt(&state, mask, zeros, TQUIC_HP_MASK_LEN);
+	req = skcipher_request_alloc(tfm, GFP_ATOMIC);
+	if (!req) {
+		crypto_free_skcipher(tfm);
+		return -ENOMEM;
+	}
 
-	chacha_zeroize_state(&state);
-	memzero_explicit(key, sizeof(key));
+	sg_init_one(&sg, zeros, TQUIC_HP_MASK_LEN);
+	skcipher_request_set_callback(req, CRYPTO_TFM_REQ_MAY_BACKLOG,
+				      crypto_req_done, &wait);
+	skcipher_request_set_crypt(req, &sg, &sg, TQUIC_HP_MASK_LEN, (u8 *)sample);
 
-	return 0;
+	ret = crypto_wait_req(crypto_skcipher_encrypt(req), &wait);
+	if (ret == 0)
+		memcpy(mask, zeros, TQUIC_HP_MASK_LEN);
+
+	skcipher_request_free(req);
+	crypto_free_skcipher(tfm);
+
+	return ret;
 }
 
 /**

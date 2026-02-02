@@ -88,6 +88,25 @@ struct tquic_sched_ops *tquic_sched_find(const char *name)
 }
 EXPORT_SYMBOL_GPL(tquic_sched_find);
 
+/**
+ * tquic_sched_get_default - Get the default scheduler name
+ * @net: Network namespace (unused for now, global default)
+ *
+ * Returns the name of the default scheduler.
+ */
+const char *tquic_sched_get_default(struct net *net)
+{
+	const char *name = "ecf";  /* Default scheduler name */
+
+	rcu_read_lock();
+	if (default_scheduler && default_scheduler->name)
+		name = default_scheduler->name;
+	rcu_read_unlock();
+
+	return name;
+}
+EXPORT_SYMBOL_GPL(tquic_sched_get_default);
+
 /*
  * Get default scheduler
  */

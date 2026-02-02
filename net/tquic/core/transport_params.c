@@ -19,6 +19,7 @@
 #include <net/tquic.h>
 
 #include "transport_params.h"
+#include "../tquic_stateless_reset.h"
 
 /*
  * Transport Parameter IDs as defined in RFC 9000 Section 18.2

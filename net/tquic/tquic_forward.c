@@ -70,6 +70,24 @@ __weak u8 tquic_tunnel_get_traffic_class(struct tquic_tunnel *tunnel)
 }
 
 /*
+ * Stub implementations for pipe functions in out-of-tree builds.
+ * alloc_pipe_info() and free_pipe_info() are not exported symbols.
+ * For full splice support, these would need in-tree kernel patches.
+ */
+#ifdef TQUIC_OUT_OF_TREE
+static inline struct pipe_inode_info *alloc_pipe_info(void)
+{
+	/* Cannot use pipe splice in out-of-tree module */
+	return NULL;
+}
+
+static inline void free_pipe_info(struct pipe_inode_info *pipe)
+{
+	/* No-op for out-of-tree */
+}
+#endif
+
+/*
  * =============================================================================
  * HAIRPIN DETECTION STATE
  * =============================================================================

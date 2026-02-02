@@ -222,6 +222,8 @@ static inline struct ipv6_pinfo *tquic_inet6_sk(const struct sock *sk)
 #define TQUIC_F_CLOSING			BIT(4)
 #define TQUIC_F_ZERO_RTT_ENABLED	BIT(7)	/* 0-RTT early data enabled */
 #define TQUIC_F_ZERO_RTT_ACCEPTED	BIT(8)	/* 0-RTT accepted by server */
+#define TQUIC_F_HAS_SESSION_TICKET	BIT(9)	/* Valid session ticket for 0-RTT */
+#define TQUIC_F_SERVER_HANDSHAKE_STARTED BIT(10) /* Server handshake initiated */
 
 /*
  * =============================================================================

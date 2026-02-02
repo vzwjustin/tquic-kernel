@@ -671,25 +671,12 @@ struct tquic_sched_ops {
 	struct list_head list;
 };
 
-/**
- * enum tquic_path_event - Path state change events for schedulers
- * @TQUIC_PATH_EVENT_ADD: New path added to connection
- * @TQUIC_PATH_EVENT_REMOVE: Path being removed from connection
- * @TQUIC_PATH_EVENT_ACTIVE: Path became active (validation passed)
- * @TQUIC_PATH_EVENT_STANDBY: Path moved to standby state
- * @TQUIC_PATH_EVENT_FAILED: Path failed (validation failed or errors)
- * @TQUIC_PATH_EVENT_RTT_UPDATE: Path RTT estimate updated
- * @TQUIC_PATH_EVENT_CWND_UPDATE: Path congestion window changed
+/*
+ * Path events: Base events defined in <uapi/linux/tquic.h>
+ * Additional internal-only events for scheduler callbacks:
  */
-enum tquic_path_event {
-	TQUIC_PATH_EVENT_ADD = 0,
-	TQUIC_PATH_EVENT_REMOVE,
-	TQUIC_PATH_EVENT_ACTIVE,
-	TQUIC_PATH_EVENT_STANDBY,
-	TQUIC_PATH_EVENT_FAILED,
-	TQUIC_PATH_EVENT_RTT_UPDATE,
-	TQUIC_PATH_EVENT_CWND_UPDATE,
-};
+#define TQUIC_PATH_EVENT_RTT_UPDATE	100	/* Path RTT estimate updated */
+#define TQUIC_PATH_EVENT_CWND_UPDATE	101	/* Path congestion window changed */
 
 /* Scheduler parameter IDs for set_param callback */
 #define TQUIC_SCHED_PARAM_MODE		0

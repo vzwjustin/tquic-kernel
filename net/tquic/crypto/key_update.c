@@ -154,6 +154,9 @@ extern void tquic_hp_rotate_keys(struct tquic_hp_ctx *ctx);
 struct tquic_crypto_state;
 extern struct tquic_hp_ctx *tquic_crypto_get_hp_ctx(struct tquic_crypto_state *crypto);
 
+/* Forward declaration - defined at end of this file */
+struct tquic_key_update_state *tquic_crypto_get_key_update_state(void *crypto_state);
+
 /* Sysctl parameters */
 static u64 sysctl_key_update_interval_packets = TQUIC_DEFAULT_KEY_UPDATE_PACKETS;
 static u32 sysctl_key_update_interval_seconds = TQUIC_DEFAULT_KEY_UPDATE_SECONDS;
@@ -333,29 +336,29 @@ static int tquic_ku_derive_keys(struct tquic_key_update_state *state,
 /**
  * tquic_ku_derive_next_generation - Derive complete next key generation
  * @state: Key update state
- * @current: Current key generation
+ * @cur_gen: Current key generation (named to avoid kernel 'current' macro)
  * @next: Next key generation to populate
  *
  * Returns 0 on success, negative error code on failure.
  */
 static int tquic_ku_derive_next_generation(struct tquic_key_update_state *state,
-					   struct tquic_key_generation *current,
+					   struct tquic_key_generation *cur_gen,
 					   struct tquic_key_generation *next)
 {
 	int ret;
 
-	if (!current->valid)
+	if (!cur_gen->valid)
 		return -EINVAL;
 
 	/* Derive next secret */
-	ret = tquic_ku_derive_next_secret(state, current->secret,
-					  current->secret_len, next->secret);
+	ret = tquic_ku_derive_next_secret(state, cur_gen->secret,
+					  cur_gen->secret_len, next->secret);
 	if (ret)
 		return ret;
 
-	next->secret_len = current->secret_len;
-	next->key_len = current->key_len;
-	next->iv_len = current->iv_len;
+	next->secret_len = cur_gen->secret_len;
+	next->key_len = cur_gen->key_len;
+	next->iv_len = cur_gen->iv_len;
 
 	/* Derive keys from next secret */
 	return tquic_ku_derive_keys(state, next);

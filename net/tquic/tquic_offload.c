@@ -271,6 +271,15 @@ static struct sk_buff *tquic_gro_receive_segment(struct list_head *head,
 			return NULL;
 		}
 
+#ifdef TQUIC_OUT_OF_TREE
+		/*
+		 * skb_gro_receive_list is not exported for out-of-tree modules.
+		 * Flush this packet instead of coalescing - GRO aggregation
+		 * is disabled for out-of-tree builds.
+		 */
+		NAPI_GRO_CB(skb)->flush = 1;
+		return pp;
+#else
 		/* Set up for frag_list receive */
 		skb_set_network_header(skb, skb_gro_receive_network_offset(skb));
 		ret = skb_gro_receive_list(p, skb);
@@ -278,6 +287,7 @@ static struct sk_buff *tquic_gro_receive_segment(struct list_head *head,
 			NAPI_GRO_CB(skb)->flush = 1;
 			return NULL;
 		}
+#endif
 
 		/* Update statistics */
 		atomic64_inc(&tquic_gro_stats.coalesced_packets);

@@ -720,5 +720,36 @@ int tquic_bond_get_stats(struct tquic_connection *conn,
 }
 EXPORT_SYMBOL_GPL(tquic_bond_get_stats);
 
+/**
+ * tquic_bond_set_path_weight - Set the scheduling weight for a path
+ * @conn: Connection
+ * @path_id: Path identifier
+ * @weight: New weight (0-100)
+ *
+ * Sets the relative weight of a path for weighted scheduling algorithms.
+ * Higher weight means more traffic is directed to that path.
+ *
+ * Returns 0 on success, negative error on failure.
+ */
+int tquic_bond_set_path_weight(struct tquic_connection *conn, u32 path_id, u32 weight)
+{
+	struct tquic_path *path;
+
+	if (!conn || weight > 100)
+		return -EINVAL;
+
+	list_for_each_entry(path, &conn->paths, list) {
+		if (path->path_id == path_id) {
+			path->weight = weight;
+			pr_debug("tquic_bond: path %u weight set to %u\n",
+				 path_id, weight);
+			return 0;
+		}
+	}
+
+	return -ENOENT;
+}
+EXPORT_SYMBOL_GPL(tquic_bond_set_path_weight);
+
 MODULE_DESCRIPTION("TQUIC WAN Bonding Core");
 MODULE_LICENSE("GPL");

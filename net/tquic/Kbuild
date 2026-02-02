@@ -79,7 +79,8 @@ tquic_bond-y := \
 tquic_pm-y := \
 	pm/pm_types.o \
 	pm/pm_kernel.o \
-	pm/path_manager.o
+	pm/path_manager.o \
+	pm/path_validation.o
 
 # Packet Scheduler
 tquic_sched-y := \
