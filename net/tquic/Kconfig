@@ -564,6 +564,137 @@ config TQUIC_MULTIPATH
 
 	  If using TQUIC for multipath WAN bonding, say Y.
 
+config TQUIC_BDP_FRAME
+	tristate "TQUIC BDP Frame Extension (draft-kuhn-quic-bdpframe-extension-05)"
+	depends on TQUIC_CORE
+	depends on TQUIC_CONG
+	select CRYPTO_HASH
+	select CRYPTO_HMAC
+	select CRYPTO_SHA256
+	default m
+	help
+	  Enable the BDP (Bandwidth-Delay Product) Frame extension for QUIC.
+	  This extension allows endpoints to exchange path characteristics
+	  observed during previous connections, enabling "Careful Resume" of
+	  congestion control state.
+
+	  Features:
+	    - BDP Frame (0x1f): Carries BDP, cwnd, RTT, and lifetime
+	    - HMAC-SHA256 authentication for security
+	    - Careful Resume algorithm for safe CC state restoration
+	    - Endpoint token for server identification
+	    - Gradual cwnd increase with path validation
+
+	  Transport parameter:
+	    - enable_bdp_frame (provisional): Negotiate BDP frame support
+
+	  Careful Resume phases:
+	    - Reconnection: Initial path validation
+	    - Unvalidated: Gradual cwnd increase toward saved value
+	    - Safe Retreat: Fallback if path changed significantly
+	    - Normal: Validation complete, normal CC operation
+
+	  This is useful for:
+	    - Faster connection startup after resumption
+	    - Reduced slow-start overhead on known paths
+	    - Better performance for mobile/roaming scenarios
+
+	  To compile this as a module, choose M here: the module will
+	  be called tquic_bdp_frame.
+
+	  If unsure, say M.
+
+config TQUIC_CONG_DATA
+	tristate "TQUIC Congestion Control Data Exchange (draft-yuan-quic-congestion-data-00)"
+	depends on TQUIC_CORE
+	depends on TQUIC_CONG
+	select CRYPTO_HASH
+	select CRYPTO_HMAC
+	select CRYPTO_SHA256
+	default m
+	help
+	  Enable the Congestion Control Data exchange extension for QUIC.
+	  This extension allows endpoints to exchange congestion control state
+	  information for connection resumption optimization.
+
+	  Features:
+	    - CONGESTION_DATA Frame (provisional): Carries BWE, RTT, loss rate,
+	      cwnd, ssthresh, pacing rate, and delivery rate
+	    - HMAC-SHA256 authentication for security
+	    - Careful Resume algorithm for safe CC state restoration
+	    - Sequence number tracking for ordering/deduplication
+	    - Privacy controls (full, partial, minimal, disabled)
+	    - 0-RTT integration for connection resumption
+
+	  Transport parameter:
+	    - enable_cong_data (0xff0cd002): Negotiate cong data support
+
+	  Careful Resume phases:
+	    - Validating: Verify RTT matches saved data
+	    - Ramping: Gradual cwnd increase toward target
+	    - Complete: Validation successful, normal CC operation
+	    - Retreated: Safe fallback if path changed significantly
+
+	  This is useful for:
+	    - Faster connection startup after resumption
+	    - Reduced slow-start overhead on known paths
+	    - Better performance for mobile/roaming scenarios
+	    - Cross-connection CC state sharing (server-to-client hints)
+
+	  Unlike BDP Frame Extension, this extension:
+	    - Uses different frame format with more metrics
+	    - Supports per-frame privacy controls
+	    - Provides explicit sequence numbers for ordering
+
+	  To compile this as a module, choose M here: the module will
+	  be called tquic_cong_data.
+
+	  If unsure, say M.
+
+config TQUIC_FEC
+	tristate "TQUIC Forward Error Correction (draft-zheng-quic-fec-extension-01)"
+	depends on TQUIC_CORE
+	default m
+	help
+	  Enable Forward Error Correction (FEC) for QUIC. FEC allows
+	  recovery of lost packets without waiting for retransmission,
+	  reducing latency in lossy network conditions.
+
+	  This module implements the QUIC FEC extension as specified in
+	  draft-zheng-quic-fec-extension-01.
+
+	  FEC Schemes supported:
+	    - XOR: Simple single-packet recovery, low overhead
+	    - Reed-Solomon GF(2^8): Multi-packet recovery, moderate overhead
+	    - Reed-Solomon GF(2^16): High recovery capability, higher overhead
+
+	  Frame types:
+	    - FEC_REPAIR (0xfc00): Contains repair symbols
+	    - FEC_SOURCE_INFO (0xfc01): Identifies source packets
+
+	  Transport parameters:
+	    - enable_fec (0xff0f000): Enable FEC support
+	    - fec_scheme (0xff0f001): Preferred FEC scheme
+	    - max_source_symbols (0xff0f002): Max symbols per block
+
+	  Features:
+	    - Adaptive FEC rate based on observed loss
+	    - Configurable source block sizes (2-255 symbols)
+	    - Reed-Solomon with Galois field arithmetic
+	    - Berlekamp-Massey decoding for erasure recovery
+	    - Integration with loss detection and scheduling
+
+	  This is particularly useful for:
+	    - Real-time communication (VoIP, video conferencing)
+	    - Satellite and long-distance links with high latency
+	    - Mobile networks with burst losses
+	    - Gaming and other latency-sensitive applications
+
+	  To compile this as a module, choose M here: the module will
+	  be called tquic_fec.
+
+	  If unsure, say M.
+
 config TQUIC_HTTP3
 	tristate "TQUIC HTTP/3 support (RFC 9114)"
 	depends on TQUIC_CORE

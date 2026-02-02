@@ -172,6 +172,55 @@ struct tquic_transport_params {
 	/* Version Information (RFC 9368 - Compatible Version Negotiation) */
 	struct tquic_version_info *version_info;	/* Version information parameter */
 	bool version_info_present;	/* Whether version_info was advertised */
+
+	/* Receive Timestamps (draft-smith-quic-receive-ts-03) */
+	u64 max_receive_timestamps_per_ack;	/* Max timestamps in ACK (0xff0a002) */
+	bool max_receive_timestamps_per_ack_present;
+	u8 receive_timestamps_exponent;		/* Timestamp delta exponent (0xff0a003) */
+	bool receive_timestamps_exponent_present;
+
+	/* Address Discovery (draft-ietf-quic-address-discovery) */
+	bool enable_address_discovery;	/* Supports OBSERVED_ADDRESS frames (0x9f01) */
+
+	/* Reliable Stream Reset (draft-ietf-quic-reliable-stream-reset-07) */
+	bool reliable_stream_reset;	/* Supports RESET_STREAM_AT frame (0x17cd) */
+
+	/* Extended Key Update (draft-ietf-quic-extended-key-update-01) */
+	u64 extended_key_update;	/* Max outstanding requests (0 = disabled) */
+	bool extended_key_update_present;
+
+	/* Additional Addresses (draft-piraux-quic-additional-addresses) */
+	void *additional_addresses;	/* Pointer to tquic_additional_addresses */
+	bool additional_addresses_present;
+
+	/* BDP Frame Extension (draft-kuhn-quic-bdpframe-extension-05) */
+	bool enable_bdp_frame;		/* Supports BDP Frame extension */
+
+	/* Deadline-Aware Multipath Scheduling (draft-tjohn-quic-multipath-dmtp-01) */
+	bool enable_deadline_aware;	/* Enable deadline-aware scheduling (0x0f10) */
+	bool enable_deadline_aware_present;
+	u32 deadline_granularity;	/* Time granularity in microseconds (0x0f11) */
+	bool deadline_granularity_present;
+	u32 max_deadline_streams;	/* Max streams with deadlines (0x0f12) */
+	bool max_deadline_streams_present;
+	u8 deadline_miss_policy;	/* Policy for missed deadlines (0x0f13) */
+	bool deadline_miss_policy_present;
+
+	/* Forward Error Correction (draft-zheng-quic-fec-extension-01) */
+	bool enable_fec;		/* FEC is supported (0xff0f000) */
+	bool enable_fec_present;	/* Whether FEC was advertised */
+	u8 fec_scheme;			/* Preferred FEC scheme (0xff0f001) */
+	bool fec_scheme_present;
+	u8 max_source_symbols;		/* Max source symbols per block (0xff0f002) */
+	bool max_source_symbols_present;
+
+	/* Congestion Control Data Exchange (draft-yuan-quic-congestion-data-00) */
+	bool enable_cong_data;		/* CC data exchange supported (0xff0cd002) */
+	bool enable_cong_data_present;	/* Whether enable_cong_data was advertised */
+
+	/* One-Way Delay Measurement (draft-huitema-quic-1wd) */
+	u64 enable_one_way_delay;	/* Timestamp resolution in us (0xff02de1a) */
+	bool enable_one_way_delay_present;
 };
 
 /**
@@ -261,6 +310,46 @@ struct tquic_negotiated_params {
 	/* ACK Frequency (draft-ietf-quic-ack-frequency) */
 	bool ack_frequency_enabled;	/* Both peers support ACK frequency */
 	u64 peer_min_ack_delay;		/* Peer's min_ack_delay in microseconds */
+
+	/* Receive Timestamps (draft-smith-quic-receive-ts-03) */
+	bool receive_timestamps_enabled;	/* Both peers support receive timestamps */
+	u64 max_receive_timestamps;		/* Negotiated max timestamps per ACK */
+	u8 receive_timestamps_exponent;		/* Negotiated timestamp exponent */
+
+	/* Address Discovery (draft-ietf-quic-address-discovery) */
+	bool address_discovery_enabled;	/* Both peers support address discovery */
+
+	/* Reliable Stream Reset (draft-ietf-quic-reliable-stream-reset-07) */
+	bool reliable_reset_enabled;	/* Both peers support RESET_STREAM_AT */
+
+	/* Extended Key Update (draft-ietf-quic-extended-key-update-01) */
+	bool extended_key_update_enabled;  /* Both peers support EKU */
+	u64 extended_key_update_max;	   /* Negotiated max outstanding requests */
+
+	/* Additional Addresses (draft-piraux-quic-additional-addresses) */
+	bool additional_addresses_enabled; /* Both peers support additional addresses */
+	void *peer_additional_addresses;   /* Peer's additional addresses list */
+
+	/* BDP Frame Extension (draft-kuhn-quic-bdpframe-extension-05) */
+	bool bdp_frame_enabled;		/* Both peers support BDP Frame extension */
+
+	/* Deadline-Aware Multipath Scheduling (draft-tjohn-quic-multipath-dmtp-01) */
+	bool deadline_aware_enabled;	/* Both peers support deadline scheduling */
+	u32 deadline_granularity;	/* Negotiated time granularity (us) */
+	u32 max_deadline_streams;	/* Negotiated max deadline streams */
+	u8 deadline_miss_policy;	/* Negotiated miss policy */
+
+	/* Forward Error Correction (draft-zheng-quic-fec-extension-01) */
+	bool fec_enabled;		/* Both peers support FEC */
+	u8 fec_scheme;			/* Negotiated FEC scheme */
+	u8 max_source_symbols;		/* Negotiated max source symbols */
+
+	/* Congestion Control Data Exchange (draft-yuan-quic-congestion-data-00) */
+	bool cong_data_enabled;		/* Both peers support CC data exchange */
+
+	/* One-Way Delay Measurement (draft-huitema-quic-1wd) */
+	bool one_way_delay_enabled;	/* Both peers support OWD measurement */
+	u64 one_way_delay_resolution;	/* Negotiated timestamp resolution (us) */
 };
 
 /*

@@ -113,6 +113,8 @@ struct tquic_net {
 	bool grease_enabled;
 	int preferred_address_enabled;	/* -1 = use global, 0/1 = disabled/enabled */
 	int prefer_preferred_address;	/* -1 = use global, 0/1 = disabled/enabled */
+	int additional_addresses_enabled; /* -1 = use global, 0/1 = disabled/enabled */
+	int additional_addresses_max;	/* Max addresses (0 = use global) */
 
 	/* Per-netns MIB statistics (out-of-tree replacement for net->mib) */
 	struct tquic_mib __percpu *mib;

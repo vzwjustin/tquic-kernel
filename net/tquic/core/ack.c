@@ -29,6 +29,9 @@
 
 #include "varint.h"
 #include "ack_frequency.h"
+#include "receive_timestamps.h"
+#include "one_way_delay.h"
+#include "ack.h"
 
 /*
  * RFC 9002 Constants
@@ -754,6 +757,339 @@ out:
 	return ret;
 }
 EXPORT_SYMBOL_GPL(tquic_generate_ack_frame);
+
+/**
+ * tquic_generate_ack_frame_with_timestamps - Generate ACK with receive timestamps
+ * @loss: Loss state
+ * @pn_space: Packet number space
+ * @buf: Output buffer
+ * @buf_len: Buffer length
+ * @include_ecn: Whether to include ECN counts
+ * @ts_state: Receive timestamps state (may be NULL to disable timestamps)
+ *
+ * Generates an ACK frame including receive timestamps if the extension
+ * is negotiated. Uses frame type 0xffa0 (or 0xffa1 with ECN) as specified
+ * in draft-smith-quic-receive-ts-03.
+ *
+ * ACK frame format with timestamps:
+ *   Type (varint): 0xffa0 or 0xffa1 (with ECN)
+ *   Largest Acknowledged (varint)
+ *   ACK Delay (varint)
+ *   ACK Range Count (varint)
+ *   First ACK Range (varint)
+ *   [ACK Range]*: Gap, ACK Range Length
+ *   [ECN Counts]: ECT(0), ECT(1), ECN-CE (if type is 0xffa1)
+ *   [Receive Timestamps]: encoded timestamps section
+ *
+ * Returns number of bytes written or negative error.
+ */
+int tquic_generate_ack_frame_with_timestamps(struct tquic_loss_state *loss,
+					     int pn_space, u8 *buf,
+					     size_t buf_len, bool include_ecn,
+					     struct tquic_receive_ts_state *ts_state)
+{
+	struct tquic_ack_range *range;
+	size_t offset = 0;
+	u64 largest_acked;
+	u64 ack_delay;
+	u64 first_range;
+	u64 prev_smallest;
+	u32 range_count;
+	bool use_timestamps;
+	u64 frame_type;
+	int ret;
+
+	/* Check if timestamps should be included */
+	use_timestamps = ts_state && tquic_receive_ts_is_enabled(ts_state);
+
+	spin_lock(&loss->lock);
+
+	if (list_empty(&loss->ack_ranges[pn_space])) {
+		spin_unlock(&loss->lock);
+		return -ENODATA;
+	}
+
+	/* Get largest acknowledged from first range */
+	range = list_first_entry(&loss->ack_ranges[pn_space],
+				 struct tquic_ack_range, list);
+	largest_acked = range->end;
+	first_range = range->end - range->start;
+
+	/* Calculate ACK delay in microseconds */
+	ack_delay = ktime_us_delta(ktime_get(),
+				   loss->largest_received_time[pn_space]);
+
+	/* Range count (excluding first range) */
+	range_count = loss->num_ack_ranges[pn_space] - 1;
+
+	/* Determine frame type */
+	if (use_timestamps) {
+		if (include_ecn && loss->ecn_validated)
+			frame_type = TQUIC_FRAME_ACK_ECN_RECEIVE_TS;
+		else
+			frame_type = TQUIC_FRAME_ACK_RECEIVE_TS;
+	} else {
+		if (include_ecn && loss->ecn_validated)
+			frame_type = TQUIC_FRAME_ACK_ECN;
+		else
+			frame_type = TQUIC_FRAME_ACK;
+	}
+
+	/* Frame type (as varint for extended types) */
+	ret = tquic_varint_write(buf, buf_len, &offset, frame_type);
+	if (ret < 0)
+		goto out;
+
+	/* Largest Acknowledged */
+	ret = tquic_varint_write(buf, buf_len, &offset, largest_acked);
+	if (ret < 0)
+		goto out;
+
+	/* ACK Delay (using default exponent of 3, so divide by 8) */
+	ret = tquic_varint_write(buf, buf_len, &offset, ack_delay >> 3);
+	if (ret < 0)
+		goto out;
+
+	/* ACK Range Count */
+	ret = tquic_varint_write(buf, buf_len, &offset, range_count);
+	if (ret < 0)
+		goto out;
+
+	/* First ACK Range */
+	ret = tquic_varint_write(buf, buf_len, &offset, first_range);
+	if (ret < 0)
+		goto out;
+
+	/* Additional ACK ranges */
+	prev_smallest = range->start;
+	list_for_each_entry_continue(range, &loss->ack_ranges[pn_space], list) {
+		u64 gap = prev_smallest - range->end - 2;
+		u64 range_len = range->end - range->start;
+
+		/* Gap */
+		ret = tquic_varint_write(buf, buf_len, &offset, gap);
+		if (ret < 0)
+			goto out;
+
+		/* ACK Range Length */
+		ret = tquic_varint_write(buf, buf_len, &offset, range_len);
+		if (ret < 0)
+			goto out;
+
+		prev_smallest = range->start;
+	}
+
+	/* ECN counts if requested and using ECN frame type */
+	if ((frame_type == TQUIC_FRAME_ACK_ECN ||
+	     frame_type == TQUIC_FRAME_ACK_ECN_RECEIVE_TS) &&
+	    loss->ecn_validated) {
+		ret = tquic_varint_write(buf, buf_len, &offset,
+					 loss->ecn_acked.ect0);
+		if (ret < 0)
+			goto out;
+
+		ret = tquic_varint_write(buf, buf_len, &offset,
+					 loss->ecn_acked.ect1);
+		if (ret < 0)
+			goto out;
+
+		ret = tquic_varint_write(buf, buf_len, &offset,
+					 loss->ecn_acked.ce);
+		if (ret < 0)
+			goto out;
+	}
+
+	/* Encode receive timestamps if enabled */
+	if (use_timestamps) {
+		ssize_t ts_len;
+
+		ts_len = tquic_receive_ts_encode(ts_state,
+						 &loss->ack_ranges[pn_space],
+						 loss->num_ack_ranges[pn_space],
+						 largest_acked,
+						 buf + offset,
+						 buf_len - offset);
+		if (ts_len < 0) {
+			/*
+			 * Timestamp encoding failed - this is non-fatal.
+			 * We already wrote the ACK portion, so just log
+			 * and return what we have. In practice, the only
+			 * failures would be buffer overflow or missing data.
+			 */
+			pr_debug("tquic: receive timestamp encoding failed: %zd\n",
+				 ts_len);
+		} else {
+			offset += ts_len;
+		}
+	}
+
+	spin_unlock(&loss->lock);
+	return offset;
+
+out:
+	spin_unlock(&loss->lock);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(tquic_generate_ack_frame_with_timestamps);
+
+/**
+ * tquic_generate_ack_1wd_frame - Generate ACK_1WD frame with one-way delay timestamp
+ * @loss: Loss state
+ * @pn_space: Packet number space
+ * @buf: Output buffer
+ * @buf_len: Buffer length
+ * @include_ecn: Whether to include ECN counts
+ * @owd_state: One-Way Delay state (must not be NULL)
+ * @recv_time: Time when largest acknowledged packet was received
+ *
+ * Generates an ACK_1WD (0x1a02) or ACK_1WD_ECN (0x1a03) frame as specified
+ * in draft-huitema-quic-1wd. The frame includes a receive timestamp that
+ * enables the sender to calculate one-way delays.
+ *
+ * ACK_1WD frame format:
+ *   Type (varint): 0x1a02 or 0x1a03 (with ECN)
+ *   Largest Acknowledged (varint)
+ *   ACK Delay (varint)
+ *   ACK Range Count (varint)
+ *   First ACK Range (varint)
+ *   [ACK Range]*: Gap, ACK Range Length
+ *   [ECN Counts]: ECT(0), ECT(1), ECN-CE (if type is 0x1a03)
+ *   Receive Timestamp (varint): timestamp when largest_acked was received
+ *
+ * Returns number of bytes written or negative error.
+ */
+int tquic_generate_ack_1wd_frame(struct tquic_loss_state *loss, int pn_space,
+				 u8 *buf, size_t buf_len, bool include_ecn,
+				 struct tquic_owd_state *owd_state,
+				 ktime_t recv_time)
+{
+	struct tquic_ack_range *range;
+	size_t offset = 0;
+	u64 largest_acked;
+	u64 ack_delay;
+	u64 first_range;
+	u64 prev_smallest;
+	u32 range_count;
+	u64 frame_type;
+	u64 timestamp;
+	int ret;
+
+	if (!loss || !owd_state)
+		return -EINVAL;
+
+	if (!tquic_owd_is_enabled(owd_state))
+		return -ENOENT;
+
+	spin_lock(&loss->lock);
+
+	if (list_empty(&loss->ack_ranges[pn_space])) {
+		spin_unlock(&loss->lock);
+		return -ENODATA;
+	}
+
+	/* Get largest acknowledged from first range */
+	range = list_first_entry(&loss->ack_ranges[pn_space],
+				 struct tquic_ack_range, list);
+	largest_acked = range->end;
+	first_range = range->end - range->start;
+
+	/* Calculate ACK delay in microseconds */
+	ack_delay = ktime_us_delta(ktime_get(),
+				   loss->largest_received_time[pn_space]);
+
+	/* Range count (excluding first range) */
+	range_count = loss->num_ack_ranges[pn_space] - 1;
+
+	/* Determine frame type based on ECN */
+	if (include_ecn && loss->ecn_validated)
+		frame_type = TQUIC_FRAME_ACK_1WD_ECN;
+	else
+		frame_type = TQUIC_FRAME_ACK_1WD;
+
+	/* Frame type (varint for 0x1a02/0x1a03) */
+	ret = tquic_varint_write(buf, buf_len, &offset, frame_type);
+	if (ret < 0)
+		goto out;
+
+	/* Largest Acknowledged */
+	ret = tquic_varint_write(buf, buf_len, &offset, largest_acked);
+	if (ret < 0)
+		goto out;
+
+	/* ACK Delay (using default exponent of 3, so divide by 8) */
+	ret = tquic_varint_write(buf, buf_len, &offset, ack_delay >> 3);
+	if (ret < 0)
+		goto out;
+
+	/* ACK Range Count */
+	ret = tquic_varint_write(buf, buf_len, &offset, range_count);
+	if (ret < 0)
+		goto out;
+
+	/* First ACK Range */
+	ret = tquic_varint_write(buf, buf_len, &offset, first_range);
+	if (ret < 0)
+		goto out;
+
+	/* Additional ACK ranges */
+	prev_smallest = largest_acked - first_range;
+
+	list_for_each_entry_continue(range, &loss->ack_ranges[pn_space], list) {
+		u64 gap;
+		u64 ack_range_length;
+
+		/* Gap = prev_smallest - current_end - 2 */
+		if (prev_smallest <= range->end + 1) {
+			ret = -EINVAL;
+			goto out;
+		}
+		gap = prev_smallest - range->end - 2;
+
+		/* ACK Range Length */
+		ack_range_length = range->end - range->start;
+
+		ret = tquic_varint_write(buf, buf_len, &offset, gap);
+		if (ret < 0)
+			goto out;
+
+		ret = tquic_varint_write(buf, buf_len, &offset, ack_range_length);
+		if (ret < 0)
+			goto out;
+
+		prev_smallest = range->start;
+	}
+
+	/* ECN Counts (if ACK_1WD_ECN) */
+	if (include_ecn && loss->ecn_validated) {
+		ret = tquic_varint_write(buf, buf_len, &offset,
+					 loss->ecn_acked.ect0);
+		if (ret < 0)
+			goto out;
+
+		ret = tquic_varint_write(buf, buf_len, &offset,
+					 loss->ecn_acked.ect1);
+		if (ret < 0)
+			goto out;
+
+		ret = tquic_varint_write(buf, buf_len, &offset,
+					 loss->ecn_acked.ce);
+		if (ret < 0)
+			goto out;
+	}
+
+	/* Receive Timestamp - the OWD extension field */
+	timestamp = tquic_owd_ktime_to_timestamp(owd_state, recv_time);
+	ret = tquic_varint_write(buf, buf_len, &offset, timestamp);
+	if (ret < 0)
+		goto out;
+
+	ret = offset;
+
+out:
+	spin_unlock(&loss->lock);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(tquic_generate_ack_1wd_frame);
 
 /*
  * =============================================================================
