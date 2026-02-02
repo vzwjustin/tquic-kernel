@@ -77,11 +77,12 @@ MODULE_PARM_DESC(offload_enabled, "Enable SmartNIC QUIC offload");
 /**
  * tquic_skb_get_packet_number - Extract packet number from QUIC header
  * @skb: Socket buffer containing QUIC packet
+ * @dcid_len: Length of Destination Connection ID (from connection state)
  *
  * Parses the QUIC short header to extract the packet number.
  * Returns 0 if extraction fails (caller should use fallback).
  */
-static u64 tquic_skb_get_packet_number(struct sk_buff *skb)
+static u64 tquic_skb_get_packet_number(struct sk_buff *skb, u8 dcid_len)
 {
 	unsigned char *data;
 	u8 first_byte;
@@ -104,9 +105,8 @@ static u64 tquic_skb_get_packet_number(struct sk_buff *skb)
 	/* Short header: PN length encoded in bits 0-1 */
 	pn_len = (first_byte & 0x03) + 1;
 
-	/* Skip DCID (typically at offset 1, length depends on connection) */
-	/* For offload, we assume DCID length is known or use fixed offset */
-	offset = 1 + 8;  /* 1 byte header + 8 byte DCID (common case) */
+	/* Skip DCID using actual connection ID length */
+	offset = 1 + dcid_len;  /* 1 byte header + DCID */
 
 	if (skb->len < offset + pn_len)
 		return 0;
@@ -535,8 +535,8 @@ int tquic_offload_rx(struct tquic_nic_device *dev, struct sk_buff *skb,
 		return 1;
 	}
 
-	/* Extract packet number from QUIC header */
-	pn = tquic_skb_get_packet_number(skb);
+	/* Extract packet number from QUIC header using connection's DCID length */
+	pn = tquic_skb_get_packet_number(skb, conn->dcid_len);
 	if (pn == 0) {
 		/* Fallback if we can't extract PN from header */
 		pn = conn->rx_pn_next;
@@ -632,9 +632,9 @@ int tquic_offload_batch_rx(struct tquic_nic_device *dev,
 	if (!pns)
 		return -ENOMEM;
 
-	/* Extract packet numbers from QUIC headers */
+	/* Extract packet numbers from QUIC headers using connection's DCID length */
 	for (i = 0; i < count; i++) {
-		pns[i] = tquic_skb_get_packet_number(skbs[i]);
+		pns[i] = tquic_skb_get_packet_number(skbs[i], conn->dcid_len);
 		if (pns[i] == 0)
 			pns[i] = conn->rx_pn_next + i;  /* Fallback */
 	}

@@ -1015,10 +1015,11 @@ static int __init tquic_bench_init(void)
 static void __exit tquic_bench_exit(void)
 {
 	/* Wait for any running benchmark to complete */
-	while (bench_running) {
+	if (READ_ONCE(bench_running))
 		pr_info("TQUIC: waiting for benchmark to complete before unload\n");
+
+	while (READ_ONCE(bench_running))
 		msleep(100);
-	}
 
 	remove_proc_entry("tquic_bench", NULL);
 	remove_proc_entry("tquic_bench_results", NULL);
