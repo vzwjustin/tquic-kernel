@@ -329,6 +329,16 @@ int tquic_sendmsg_zerocopy(struct sock *sk, struct msghdr *msg, size_t len,
 			}
 		}
 
+		/* Charge socket memory for this buffer */
+		if (sk_wmem_schedule(sk, new_skb->truesize)) {
+			sk_mem_charge(sk, new_skb->truesize);
+			atomic_add(new_skb->truesize, &sk->sk_wmem_alloc);
+		} else {
+			kfree_skb(new_skb);
+			err = -ENOBUFS;
+			goto out_err;
+		}
+
 		/* Queue the skb to stream send buffer */
 		skb_queue_tail(&stream->send_buf, new_skb);
 		copied += chunk;
@@ -470,6 +480,15 @@ ssize_t tquic_sendpage(struct socket *sock, struct page *page,
 		vaddr = kmap_local_page(page);
 		memcpy(data, vaddr + offset, size);
 		kunmap_local(vaddr);
+	}
+
+	/* Charge socket memory for this buffer */
+	if (sk_wmem_schedule(sk, skb->truesize)) {
+		sk_mem_charge(sk, skb->truesize);
+		atomic_add(skb->truesize, &sk->sk_wmem_alloc);
+	} else {
+		kfree_skb(skb);
+		return -ENOBUFS;
 	}
 
 	/* Queue to stream send buffer */

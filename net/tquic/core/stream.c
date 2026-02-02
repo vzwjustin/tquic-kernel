@@ -1089,6 +1089,9 @@ EXPORT_SYMBOL_GPL(tquic_stream_get_or_create);
 void tquic_stream_destroy(struct tquic_stream_manager *mgr,
 			  struct tquic_stream *stream)
 {
+	struct sock *sk;
+	struct sk_buff *skb;
+
 	if (!stream)
 		return;
 
@@ -1096,9 +1099,24 @@ void tquic_stream_destroy(struct tquic_stream_manager *mgr,
 	tquic_stream_remove(mgr, stream);
 	spin_unlock(&mgr->lock);
 
-	/* Purge buffers */
-	skb_queue_purge(&stream->send_buf);
-	skb_queue_purge(&stream->recv_buf);
+	/* Get socket for memory accounting */
+	sk = (mgr->conn) ? mgr->conn->sk : NULL;
+
+	/* Purge buffers with proper memory accounting */
+	while ((skb = skb_dequeue(&stream->send_buf)) != NULL) {
+		if (sk) {
+			sk_mem_uncharge(sk, skb->truesize);
+			atomic_sub(skb->truesize, &sk->sk_wmem_alloc);
+		}
+		kfree_skb(skb);
+	}
+	while ((skb = skb_dequeue(&stream->recv_buf)) != NULL) {
+		if (sk) {
+			sk_mem_uncharge(sk, skb->truesize);
+			atomic_sub(skb->truesize, &sk->sk_rmem_alloc);
+		}
+		kfree_skb(skb);
+	}
 
 	/* Wake any waiters */
 	wake_up_all(&stream->wait);
@@ -1631,13 +1649,24 @@ int tquic_stream_reset_send(struct tquic_stream_manager *mgr,
 			    struct tquic_stream *stream,
 			    u64 error_code)
 {
+	struct sock *sk;
+	struct sk_buff *skb;
+
 	if (!tquic_stream_can_send(mgr, stream))
 		return -EINVAL;
 
+	sk = (mgr->conn) ? mgr->conn->sk : NULL;
+
 	spin_lock(&mgr->lock);
 
-	/* Clear send buffer */
-	skb_queue_purge(&stream->send_buf);
+	/* Clear send buffer with proper memory accounting */
+	while ((skb = skb_dequeue(&stream->send_buf)) != NULL) {
+		if (sk) {
+			sk_mem_uncharge(sk, skb->truesize);
+			atomic_sub(skb->truesize, &sk->sk_wmem_alloc);
+		}
+		kfree_skb(skb);
+	}
 
 	/* Record error and transition state */
 	stream->state = TQUIC_STREAM_RESET_SENT;
@@ -2191,6 +2220,7 @@ EXPORT_SYMBOL_GPL(tquic_stream_wait_for_data);
 void tquic_stream_memory_pressure(struct tquic_stream_manager *mgr)
 {
 	struct rb_node *node;
+	struct sock *sk = (mgr->conn) ? mgr->conn->sk : NULL;
 
 	spin_lock(&mgr->lock);
 
@@ -2198,13 +2228,28 @@ void tquic_stream_memory_pressure(struct tquic_stream_manager *mgr)
 	for (node = rb_first(&mgr->streams); node; ) {
 		struct tquic_stream *stream;
 		struct rb_node *next = rb_next(node);
+		struct sk_buff *skb;
 
 		stream = rb_entry(node, struct tquic_stream, node);
 
 		if (stream->state == TQUIC_STREAM_CLOSED) {
 			tquic_stream_remove(mgr, stream);
-			skb_queue_purge(&stream->send_buf);
-			skb_queue_purge(&stream->recv_buf);
+
+			/* Purge with memory accounting */
+			while ((skb = skb_dequeue(&stream->send_buf)) != NULL) {
+				if (sk) {
+					sk_mem_uncharge(sk, skb->truesize);
+					atomic_sub(skb->truesize, &sk->sk_wmem_alloc);
+				}
+				kfree_skb(skb);
+			}
+			while ((skb = skb_dequeue(&stream->recv_buf)) != NULL) {
+				if (sk) {
+					sk_mem_uncharge(sk, skb->truesize);
+					atomic_sub(skb->truesize, &sk->sk_rmem_alloc);
+				}
+				kfree_skb(skb);
+			}
 			kfree(stream);
 		}
 
@@ -2258,21 +2303,38 @@ EXPORT_SYMBOL_GPL(tquic_stream_get_buffer_usage);
 void tquic_stream_manager_destroy(struct tquic_stream_manager *mgr)
 {
 	struct rb_node *node;
+	struct sock *sk;
 
 	if (!mgr)
 		return;
+
+	sk = (mgr->conn) ? mgr->conn->sk : NULL;
 
 	/* Destroy all streams */
 	spin_lock(&mgr->lock);
 
 	while ((node = rb_first(&mgr->streams))) {
 		struct tquic_stream *stream;
+		struct sk_buff *skb;
 
 		stream = rb_entry(node, struct tquic_stream, node);
 		rb_erase(node, &mgr->streams);
 
-		skb_queue_purge(&stream->send_buf);
-		skb_queue_purge(&stream->recv_buf);
+		/* Purge buffers with memory accounting */
+		while ((skb = skb_dequeue(&stream->send_buf)) != NULL) {
+			if (sk) {
+				sk_mem_uncharge(sk, skb->truesize);
+				atomic_sub(skb->truesize, &sk->sk_wmem_alloc);
+			}
+			kfree_skb(skb);
+		}
+		while ((skb = skb_dequeue(&stream->recv_buf)) != NULL) {
+			if (sk) {
+				sk_mem_uncharge(sk, skb->truesize);
+				atomic_sub(skb->truesize, &sk->sk_rmem_alloc);
+			}
+			kfree_skb(skb);
+		}
 		wake_up_all(&stream->wait);
 		kfree(stream);
 	}

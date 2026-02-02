@@ -42,14 +42,17 @@
 #define TQUIC_FUZZ_MODE_REPLAY		4	/* Replay corpus */
 
 /* Fuzz targets */
-#define TQUIC_FUZZ_TARGET_PACKET	BIT(0)
-#define TQUIC_FUZZ_TARGET_FRAME		BIT(1)
-#define TQUIC_FUZZ_TARGET_CRYPTO	BIT(2)
-#define TQUIC_FUZZ_TARGET_PARAMS	BIT(3)
-#define TQUIC_FUZZ_TARGET_CID		BIT(4)
-#define TQUIC_FUZZ_TARGET_FLOW		BIT(5)
-#define TQUIC_FUZZ_TARGET_STATE		BIT(6)
-#define TQUIC_FUZZ_TARGET_ALL		0xFFFFFFFF
+#define TQUIC_FUZZ_TARGET_PACKET		BIT(0)
+#define TQUIC_FUZZ_TARGET_FRAME			BIT(1)
+#define TQUIC_FUZZ_TARGET_CRYPTO		BIT(2)
+#define TQUIC_FUZZ_TARGET_PARAMS		BIT(3)
+#define TQUIC_FUZZ_TARGET_TRANSPORT_PARAMS	TQUIC_FUZZ_TARGET_PARAMS
+#define TQUIC_FUZZ_TARGET_CID			BIT(4)
+#define TQUIC_FUZZ_TARGET_FLOW			BIT(5)
+#define TQUIC_FUZZ_TARGET_STATE			BIT(6)
+#define TQUIC_FUZZ_TARGET_SERVER		BIT(7)	/* Target server role */
+#define TQUIC_FUZZ_TARGET_CLIENT		BIT(8)	/* Target client role */
+#define TQUIC_FUZZ_TARGET_ALL			0xFFFFFFFF
 
 /* Mutation strategies */
 #define TQUIC_MUTATE_BIT_FLIP		BIT(0)
@@ -409,6 +412,14 @@ int tquic_fuzz_start(struct tquic_fuzz_state *state, u64 iterations);
  * @state: Fuzzer state
  */
 void tquic_fuzz_stop(struct tquic_fuzz_state *state);
+
+/**
+ * tquic_fuzz_reset_state - Reset fuzzing state for new run
+ * @state: Fuzzer state to reset
+ *
+ * Cleans up and reinitializes the fuzzing connections.
+ */
+void tquic_fuzz_reset_state(struct tquic_fuzz_state *state);
 
 /*
  * =============================================================================

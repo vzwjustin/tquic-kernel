@@ -358,6 +358,31 @@ int tquic_test_corrupt_packet(struct tquic_test_ctx *ctx, bool from_server);
 
 /*
  * =============================================================================
+ * Additional Test Utilities
+ * =============================================================================
+ */
+
+/**
+ * tquic_test_exchange_packets - Exchange pending packets between connections
+ * @ctx: Test context
+ *
+ * Transfers pending outbound packets from one connection to the other.
+ * This simulates network packet delivery for loopback testing.
+ *
+ * Returns: Number of packets exchanged, or negative errno on failure
+ */
+int tquic_test_exchange_packets(struct tquic_test_ctx *ctx);
+
+/**
+ * tquic_test_cleanup_ctx - Clean up test context private data
+ * @ctx: Test context to clean up
+ *
+ * Frees all resources allocated for the test context.
+ */
+void tquic_test_cleanup_ctx(struct tquic_test_ctx *ctx);
+
+/*
+ * =============================================================================
  * Module Init/Exit
  * =============================================================================
  */
