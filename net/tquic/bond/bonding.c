@@ -751,5 +751,67 @@ int tquic_bond_set_path_weight(struct tquic_connection *conn, u32 path_id, u32 w
 }
 EXPORT_SYMBOL_GPL(tquic_bond_set_path_weight);
 
+/**
+ * tquic_bond_interface_down - Handle network interface going down
+ * @conn: QUIC connection
+ * @dev: Network device that went down
+ *
+ * Called by the path manager when a network interface goes down.
+ * Marks all paths using this interface as failed and triggers failover.
+ */
+void tquic_bond_interface_down(struct tquic_connection *conn,
+			       struct net_device *dev)
+{
+	struct tquic_bond_state *bond;
+	struct tquic_path *path;
+	int failed_count = 0;
+
+	if (!conn)
+		return;
+
+	bond = conn->bond_state;
+	if (!bond)
+		return;
+
+	spin_lock_bh(&bond->lock);
+
+	/* Mark all paths using this interface as failed */
+	list_for_each_entry(path, &conn->paths, list) {
+		if (path->dev == dev && path->state == TQUIC_PATH_ACTIVE) {
+			path->state = TQUIC_PATH_FAILED;
+			failed_count++;
+
+			pr_debug("tquic: path %u failed (interface %s down)\n",
+				 path->path_id, dev->name);
+		}
+	}
+
+	/* If primary path failed, trigger failover */
+	if (bond->primary_path && bond->primary_path->dev == dev) {
+		struct tquic_path *new_primary = NULL;
+
+		/* Find first active path as new primary */
+		list_for_each_entry(path, &conn->paths, list) {
+			if (path->state == TQUIC_PATH_ACTIVE && path != bond->primary_path) {
+				new_primary = path;
+				break;
+			}
+		}
+
+		if (new_primary) {
+			bond->primary_path = new_primary;
+			pr_info("tquic: failover to path %u after interface %s down\n",
+				new_primary->path_id, dev->name);
+		} else {
+			bond->primary_path = NULL;
+			pr_warn("tquic: no available paths after interface %s down\n",
+				dev->name);
+		}
+	}
+
+	spin_unlock_bh(&bond->lock);
+}
+EXPORT_SYMBOL_GPL(tquic_bond_interface_down);
+
 MODULE_DESCRIPTION("TQUIC WAN Bonding Core");
 MODULE_LICENSE("GPL");
