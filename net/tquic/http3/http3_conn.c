@@ -485,6 +485,14 @@ struct tquic_http3_conn *tquic_h3_conn_create(struct tquic_connection *qconn,
 	/* Initialize peer settings to defaults */
 	tquic_h3_settings_init(&h3conn->peer_settings);
 
+	/* Initialize priority tree for RFC 9218 extensible priorities */
+	if (h3conn->local_settings.enable_priority) {
+		h3conn->priority_tree = kzalloc(sizeof(*h3conn->priority_tree),
+						gfp);
+		if (h3conn->priority_tree)
+			tquic_h3_priority_tree_init(h3conn->priority_tree);
+	}
+
 	/* Transition to CONNECTING */
 	h3_conn_set_state(h3conn, H3_CONN_CONNECTING);
 
@@ -538,6 +546,12 @@ void tquic_h3_conn_destroy(struct tquic_http3_conn *h3conn)
 		tquic_stream_close(h3conn->qpack_enc_stream);
 	if (h3conn->qpack_dec_stream)
 		tquic_stream_close(h3conn->qpack_dec_stream);
+
+	/* Destroy priority tree */
+	if (h3conn->priority_tree) {
+		tquic_h3_priority_tree_destroy(h3conn->priority_tree);
+		kfree(h3conn->priority_tree);
+	}
 
 	kfree(h3conn);
 }

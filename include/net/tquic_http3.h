@@ -22,6 +22,8 @@
 struct tquic_connection;
 struct tquic_stream;
 struct tquic_http3_conn;
+struct tquic_h3_priority_tree;
+struct tquic_h3_stream;
 
 /*
  * =============================================================================
@@ -373,6 +375,9 @@ struct tquic_http3_conn {
 
 	/* GOAWAY state */
 	u64 goaway_id;
+
+	/* Priority tree for RFC 9218 extensible priorities */
+	struct tquic_h3_priority_tree *priority_tree;
 
 	/* Synchronization */
 	spinlock_t lock;

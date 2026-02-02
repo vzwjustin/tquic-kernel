@@ -149,15 +149,24 @@ struct qpack_header_list {
 	u64 total_size;
 };
 
+/* Callback for when headers are decoded from a previously blocked stream */
+typedef void (*qpack_headers_decoded_cb)(struct tquic_connection *conn,
+					 u64 stream_id,
+					 struct qpack_header_list *headers);
+
 /**
  * struct qpack_blocked_stream - Stream blocked on dynamic table
  * @stream_id: QUIC stream ID
  * @required_insert_count: Required insert count to unblock
+ * @data: Saved header block data for later decoding
+ * @data_len: Length of saved data
  * @list: Linked list node
  */
 struct qpack_blocked_stream {
 	u64 stream_id;
 	u64 required_insert_count;
+	u8 *data;
+	size_t data_len;
 	struct list_head list;
 };
 
@@ -192,7 +201,8 @@ struct qpack_encoder {
  * @dynamic_table: Decoder's dynamic table
  * @max_blocked_streams: Maximum number of blocked streams
  * @blocked_streams: List of blocked streams
- * @num_blocked: Number of currently blocked streams
+ * @blocked_stream_count: Number of currently blocked streams
+ * @on_headers_decoded: Callback when blocked stream is unblocked
  * @lock: Spinlock for decoder state
  */
 struct qpack_decoder {
@@ -201,7 +211,8 @@ struct qpack_decoder {
 	struct qpack_dynamic_table dynamic_table;
 	u32 max_blocked_streams;
 	struct list_head blocked_streams;
-	u32 num_blocked;
+	u32 blocked_stream_count;
+	qpack_headers_decoded_cb on_headers_decoded;
 	spinlock_t lock;
 };
 
@@ -376,6 +387,17 @@ int qpack_decoder_send_stream_cancel(struct qpack_decoder *dec, u64 stream_id);
 
 /* Send Insert Count Increment */
 int qpack_decoder_send_insert_count_inc(struct qpack_decoder *dec, u64 increment);
+
+/* Process blocked streams after dynamic table update */
+int qpack_decoder_process_blocked_streams(struct qpack_decoder *dec);
+
+/* Set callback for when blocked streams are unblocked */
+static inline void qpack_decoder_set_callback(struct qpack_decoder *dec,
+					      qpack_headers_decoded_cb cb)
+{
+	if (dec)
+		dec->on_headers_decoded = cb;
+}
 
 /*
  * =============================================================================

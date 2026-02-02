@@ -45,6 +45,12 @@
 /* Custom parameter for multipath/WAN bonding (RFC 9369) */
 #define TP_ENABLE_MULTIPATH			0x0f739bbc1b666d05ULL
 
+/* Multipath initial_max_path_id (draft-ietf-quic-multipath) */
+#define TP_INITIAL_MAX_PATH_ID			0x0f739bbc1b666d06ULL
+
+/* Version information (RFC 9368) */
+#define TP_VERSION_INFORMATION			0x11
+
 /* DATAGRAM frame support (RFC 9221) */
 #define TP_MAX_DATAGRAM_FRAME_SIZE		0x20
 
@@ -258,6 +264,10 @@ void tquic_tp_set_defaults_client(struct tquic_transport_params *params)
 	/* Enable multipath for WAN bonding by default on client */
 	params->enable_multipath = true;
 
+	/* Set initial_max_path_id for multipath (draft-ietf-quic-multipath) */
+	params->initial_max_path_id = TQUIC_MAX_PATHS - 1;
+	params->initial_max_path_id_present = true;
+
 	/* Enable DATAGRAM support with reasonable default size */
 	params->max_datagram_frame_size = 65535;
 
@@ -288,6 +298,10 @@ void tquic_tp_set_defaults_server(struct tquic_transport_params *params)
 
 	/* Enable multipath for WAN bonding by default on server */
 	params->enable_multipath = true;
+
+	/* Set initial_max_path_id for multipath (draft-ietf-quic-multipath) */
+	params->initial_max_path_id = TQUIC_MAX_PATHS - 1;
+	params->initial_max_path_id_present = true;
 
 	/* Enable DATAGRAM support with reasonable default size */
 	params->max_datagram_frame_size = 65535;
@@ -731,6 +745,47 @@ ssize_t tquic_tp_encode(const struct tquic_transport_params *params,
 		offset += ret;
 	}
 
+	/* initial_max_path_id (draft-ietf-quic-multipath) */
+	if (params->initial_max_path_id_present) {
+		ret = encode_varint_param(buf + offset, buflen - offset,
+					  TP_INITIAL_MAX_PATH_ID,
+					  params->initial_max_path_id);
+		if (ret < 0)
+			return ret;
+		offset += ret;
+	}
+
+	/* version_information (RFC 9368) */
+	if (params->version_info_present && params->version_info) {
+		ssize_t vi_ret;
+		size_t value_len;
+
+		/* Calculate value length: chosen (4) + available (4 * count) */
+		value_len = 4 + (4 * params->version_info->num_versions);
+
+		/* Parameter ID */
+		ret = tp_varint_encode(buf + offset, buflen - offset,
+				       TP_VERSION_INFORMATION);
+		if (ret < 0)
+			return ret;
+		offset += ret;
+
+		/* Length */
+		ret = tp_varint_encode(buf + offset, buflen - offset, value_len);
+		if (ret < 0)
+			return ret;
+		offset += ret;
+
+		/* Value: chosen version + available versions */
+		vi_ret = tquic_encode_version_info(buf + offset, buflen - offset,
+						   params->version_info->chosen_version,
+						   params->version_info->available_versions,
+						   params->version_info->num_versions);
+		if (vi_ret < 0)
+			return vi_ret;
+		offset += vi_ret;
+	}
+
 	return offset;
 }
 EXPORT_SYMBOL_GPL(tquic_tp_encode);
@@ -1000,6 +1055,22 @@ int tquic_tp_decode(const u8 *buf, size_t buflen, bool is_server,
 			params->grease_quic_bit = true;
 			break;
 
+		case TP_VERSION_INFORMATION:
+			/* Version information (RFC 9368) */
+			if (param_len < 4)  /* At least chosen version */
+				return -EINVAL;
+			if (!params->version_info) {
+				params->version_info = tquic_version_info_alloc(GFP_KERNEL);
+				if (!params->version_info)
+					return -ENOMEM;
+			}
+			ret = tquic_decode_version_info(buf + offset, param_len,
+							params->version_info);
+			if (ret < 0)
+				return ret;
+			params->version_info_present = true;
+			break;
+
 		default:
 			/* Handle custom multipath parameter */
 			if (param_id == TP_ENABLE_MULTIPATH) {
@@ -1013,6 +1084,14 @@ int tquic_tp_decode(const u8 *buf, size_t buflen, bool is_server,
 					/* Zero-length means enabled */
 					params->enable_multipath = true;
 				}
+			} else if (param_id == TP_INITIAL_MAX_PATH_ID) {
+				/* Multipath initial_max_path_id */
+				ret = tp_varint_decode(buf + offset,
+							  param_len, &value);
+				if (ret < 0 || (size_t)ret != param_len)
+					return -EINVAL;
+				params->initial_max_path_id = value;
+				params->initial_max_path_id_present = true;
 			} else if (param_id == TP_MIN_ACK_DELAY) {
 				/* ACK Frequency (draft-ietf-quic-ack-frequency) */
 				ret = tp_varint_decode(buf + offset,
@@ -1188,6 +1267,29 @@ int tquic_tp_negotiate(const struct tquic_transport_params *local,
 	 */
 	result->multipath_enabled = local->enable_multipath &&
 				    remote->enable_multipath;
+
+	/*
+	 * Multipath path ID limits (draft-ietf-quic-multipath)
+	 * If both peers advertise initial_max_path_id, use the minimum.
+	 * If only one advertises it, use that value.
+	 * If neither advertises it but multipath is enabled, use a default.
+	 */
+	if (result->multipath_enabled) {
+		if (local->initial_max_path_id_present &&
+		    remote->initial_max_path_id_present) {
+			result->max_path_id = min(local->initial_max_path_id,
+						  remote->initial_max_path_id);
+		} else if (local->initial_max_path_id_present) {
+			result->max_path_id = local->initial_max_path_id;
+		} else if (remote->initial_max_path_id_present) {
+			result->max_path_id = remote->initial_max_path_id;
+		} else {
+			/* Default: allow up to TQUIC_MAX_PATHS paths */
+			result->max_path_id = TQUIC_MAX_PATHS - 1;
+		}
+	} else {
+		result->max_path_id = 0;  /* Single path */
+	}
 
 	/*
 	 * DATAGRAM support (RFC 9221):
@@ -1599,5 +1701,288 @@ void tquic_tp_debug_print(const struct tquic_transport_params *params,
 	if (params->original_dcid_present)
 		pr_debug("%s:   original_dest_cid: %*phN\n", prefix,
 			 params->original_dcid.len, params->original_dcid.id);
+
+	if (params->initial_max_path_id_present)
+		pr_debug("%s:   initial_max_path_id: %llu\n", prefix,
+			 params->initial_max_path_id);
+
+	if (params->version_info_present && params->version_info) {
+		size_t i;
+		pr_debug("%s:   version_info.chosen: 0x%08x\n", prefix,
+			 params->version_info->chosen_version);
+		for (i = 0; i < params->version_info->num_versions; i++)
+			pr_debug("%s:   version_info.available[%zu]: 0x%08x\n",
+				 prefix, i, params->version_info->available_versions[i]);
+	}
 }
 EXPORT_SYMBOL_GPL(tquic_tp_debug_print);
+
+/*
+ * =============================================================================
+ * Version Information API (RFC 9368 - Compatible Version Negotiation)
+ * =============================================================================
+ */
+
+/**
+ * tquic_version_info_alloc - Allocate a version_info structure
+ * @gfp: Memory allocation flags
+ *
+ * Return: Pointer to allocated structure, or NULL on failure
+ */
+struct tquic_version_info *tquic_version_info_alloc(gfp_t gfp)
+{
+	struct tquic_version_info *info;
+
+	info = kzalloc(sizeof(*info), gfp);
+	if (!info)
+		return NULL;
+
+	return info;
+}
+EXPORT_SYMBOL_GPL(tquic_version_info_alloc);
+
+/**
+ * tquic_version_info_free - Free a version_info structure
+ * @info: Structure to free (may be NULL)
+ */
+void tquic_version_info_free(struct tquic_version_info *info)
+{
+	kfree(info);
+}
+EXPORT_SYMBOL_GPL(tquic_version_info_free);
+
+/**
+ * tquic_encode_version_info - Encode version_information transport parameter
+ * @buf: Output buffer
+ * @len: Buffer length
+ * @chosen: The chosen QUIC version for the connection
+ * @available: Array of available/supported versions
+ * @count: Number of versions in the available array
+ *
+ * Return: Number of bytes written on success, negative error code on failure
+ */
+ssize_t tquic_encode_version_info(u8 *buf, size_t len,
+				  u32 chosen, const u32 *available, size_t count)
+{
+	size_t offset = 0;
+	size_t i;
+	size_t needed;
+
+	/* Validate: version 0 is not allowed */
+	if (chosen == 0)
+		return -EINVAL;
+
+	for (i = 0; i < count; i++) {
+		if (available[i] == 0)
+			return -EINVAL;
+	}
+
+	/* Calculate needed space: chosen (4) + available (4 * count) */
+	needed = 4 + (4 * count);
+	if (len < needed)
+		return -ENOSPC;
+
+	/* Encode Chosen Version (4 bytes, big-endian) */
+	buf[offset++] = (chosen >> 24) & 0xff;
+	buf[offset++] = (chosen >> 16) & 0xff;
+	buf[offset++] = (chosen >> 8) & 0xff;
+	buf[offset++] = chosen & 0xff;
+
+	/* Encode Available Versions (4 bytes each, big-endian) */
+	for (i = 0; i < count; i++) {
+		u32 v = available[i];
+		buf[offset++] = (v >> 24) & 0xff;
+		buf[offset++] = (v >> 16) & 0xff;
+		buf[offset++] = (v >> 8) & 0xff;
+		buf[offset++] = v & 0xff;
+	}
+
+	return offset;
+}
+EXPORT_SYMBOL_GPL(tquic_encode_version_info);
+
+/**
+ * tquic_decode_version_info - Decode version_information transport parameter
+ * @buf: Input buffer containing the parameter value
+ * @len: Length of the parameter value
+ * @info: Output structure to populate
+ *
+ * Return: 0 on success, negative error code on failure
+ */
+int tquic_decode_version_info(const u8 *buf, size_t len,
+			      struct tquic_version_info *info)
+{
+	size_t offset = 0;
+	size_t num_available;
+	size_t i;
+
+	if (!buf || !info)
+		return -EINVAL;
+
+	/* Must have at least the Chosen Version (4 bytes) */
+	if (len < 4)
+		return -EINVAL;
+
+	/* Decode Chosen Version */
+	info->chosen_version = ((u32)buf[offset] << 24) |
+			       ((u32)buf[offset + 1] << 16) |
+			       ((u32)buf[offset + 2] << 8) |
+			       buf[offset + 3];
+	offset += 4;
+
+	/* Version 0 is not allowed */
+	if (info->chosen_version == 0)
+		return -EPROTO;
+
+	/* Remaining bytes are Available Versions (must be multiple of 4) */
+	if ((len - offset) % 4 != 0)
+		return -EINVAL;
+
+	num_available = (len - offset) / 4;
+	if (num_available > TQUIC_MAX_AVAILABLE_VERSIONS)
+		num_available = TQUIC_MAX_AVAILABLE_VERSIONS;
+
+	info->num_versions = num_available;
+
+	for (i = 0; i < num_available; i++) {
+		info->available_versions[i] = ((u32)buf[offset] << 24) |
+					      ((u32)buf[offset + 1] << 16) |
+					      ((u32)buf[offset + 2] << 8) |
+					      buf[offset + 3];
+		offset += 4;
+
+		/* Version 0 is not allowed in available versions */
+		if (info->available_versions[i] == 0)
+			return -EPROTO;
+	}
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(tquic_decode_version_info);
+
+/**
+ * tquic_validate_version_info - Validate version_information parameter
+ * @info: Version information to validate
+ * @connection_version: The version used on the connection
+ * @is_client: True if validating a client's version_info
+ *
+ * Return: 0 if valid, negative error code if invalid
+ */
+int tquic_validate_version_info(const struct tquic_version_info *info,
+				u32 connection_version, bool is_client)
+{
+	size_t i;
+	bool chosen_in_available = false;
+
+	if (!info)
+		return -EINVAL;
+
+	/* Chosen Version must not be 0 */
+	if (info->chosen_version == 0)
+		return -TQUIC_ERR_VERSION_NEGOTIATION;
+
+	/* For clients: Chosen Version must match connection version */
+	if (is_client && info->chosen_version != connection_version) {
+		pr_debug("tquic: client version_info chosen (0x%08x) != connection (0x%08x)\n",
+			 info->chosen_version, connection_version);
+		return -TQUIC_ERR_VERSION_NEGOTIATION;
+	}
+
+	/* Validate Available Versions */
+	for (i = 0; i < info->num_versions; i++) {
+		if (info->available_versions[i] == 0)
+			return -TQUIC_ERR_VERSION_NEGOTIATION;
+
+		if (info->available_versions[i] == info->chosen_version)
+			chosen_in_available = true;
+	}
+
+	/* Chosen Version should appear in Available Versions */
+	if (info->num_versions > 0 && !chosen_in_available) {
+		pr_warn("tquic: version_info chosen not in available list\n");
+		/* This is a SHOULD, not a MUST, so just warn */
+	}
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(tquic_validate_version_info);
+
+/**
+ * tquic_version_info_contains - Check if version is in available versions
+ * @info: Version information structure
+ * @version: Version to search for
+ *
+ * Return: true if version is found in available_versions, false otherwise
+ */
+bool tquic_version_info_contains(const struct tquic_version_info *info,
+				 u32 version)
+{
+	size_t i;
+
+	if (!info || version == 0)
+		return false;
+
+	for (i = 0; i < info->num_versions; i++) {
+		if (info->available_versions[i] == version)
+			return true;
+	}
+
+	return false;
+}
+EXPORT_SYMBOL_GPL(tquic_version_info_contains);
+
+/**
+ * tquic_tp_set_version_info - Set version_info in transport parameters
+ * @params: Transport parameters structure
+ * @chosen: Chosen version for the connection
+ * @available: Array of available versions
+ * @count: Number of available versions
+ * @gfp: Memory allocation flags
+ *
+ * Return: 0 on success, negative error code on failure
+ */
+int tquic_tp_set_version_info(struct tquic_transport_params *params,
+			      u32 chosen, const u32 *available, size_t count,
+			      gfp_t gfp)
+{
+	if (!params)
+		return -EINVAL;
+
+	if (count > TQUIC_MAX_AVAILABLE_VERSIONS)
+		return -EINVAL;
+
+	/* Free existing version_info if present */
+	if (params->version_info)
+		tquic_version_info_free(params->version_info);
+
+	params->version_info = tquic_version_info_alloc(gfp);
+	if (!params->version_info)
+		return -ENOMEM;
+
+	params->version_info->chosen_version = chosen;
+	params->version_info->num_versions = count;
+	memcpy(params->version_info->available_versions, available,
+	       count * sizeof(u32));
+
+	params->version_info_present = true;
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(tquic_tp_set_version_info);
+
+/**
+ * tquic_tp_clear_version_info - Clear version_info from transport parameters
+ * @params: Transport parameters structure
+ */
+void tquic_tp_clear_version_info(struct tquic_transport_params *params)
+{
+	if (!params)
+		return;
+
+	if (params->version_info) {
+		tquic_version_info_free(params->version_info);
+		params->version_info = NULL;
+	}
+	params->version_info_present = false;
+}
+EXPORT_SYMBOL_GPL(tquic_tp_clear_version_info);

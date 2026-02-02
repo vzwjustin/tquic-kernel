@@ -282,7 +282,63 @@ int qpack_decode_headers(struct qpack_decoder *dec,
 
 	/* Check if we need to wait for table updates */
 	if (required_insert_count > dec->dynamic_table.insert_count) {
-		/* Would need to block - not implemented yet */
+		struct qpack_blocked_stream *blocked;
+		unsigned long flags;
+
+		/*
+		 * Stream requires entries not yet in the dynamic table.
+		 * Per RFC 9204 Section 2.1.2, we must block this stream
+		 * until the required entries have been inserted.
+		 *
+		 * Check if we're at the blocked stream limit.
+		 */
+		spin_lock_irqsave(&dec->lock, flags);
+
+		if (dec->blocked_stream_count >= dec->max_blocked_streams) {
+			spin_unlock_irqrestore(&dec->lock, flags);
+			/*
+			 * At limit - connection error per RFC 9204 Section 4.2:
+			 * "If the decoder encounters more blocked streams than it
+			 * announced with SETTINGS_QPACK_BLOCKED_STREAMS, this MUST
+			 * be treated as a connection error of type
+			 * QPACK_DECOMPRESSION_FAILED."
+			 */
+			pr_debug("qpack: blocked stream limit reached (%u)\n",
+				 dec->max_blocked_streams);
+			return -ENOBUFS;
+		}
+
+		/* Add stream to blocked list */
+		blocked = kzalloc(sizeof(*blocked), GFP_ATOMIC);
+		if (!blocked) {
+			spin_unlock_irqrestore(&dec->lock, flags);
+			return -ENOMEM;
+		}
+
+		blocked->stream_id = stream_id;
+		blocked->required_insert_count = required_insert_count;
+		blocked->data = kmemdup(data, len, GFP_ATOMIC);
+		if (!blocked->data) {
+			spin_unlock_irqrestore(&dec->lock, flags);
+			kfree(blocked);
+			return -ENOMEM;
+		}
+		blocked->data_len = len;
+
+		list_add_tail(&blocked->list, &dec->blocked_streams);
+		dec->blocked_stream_count++;
+
+		spin_unlock_irqrestore(&dec->lock, flags);
+
+		pr_debug("qpack: stream %llu blocked waiting for insert_count %llu (have %llu)\n",
+			 stream_id, required_insert_count,
+			 dec->dynamic_table.insert_count);
+
+		/*
+		 * Return -EAGAIN to indicate the decode is pending.
+		 * The caller should not treat this as an error but
+		 * rather as "decode in progress, will complete later".
+		 */
 		return -EAGAIN;
 	}
 
@@ -625,11 +681,83 @@ int qpack_decoder_process_encoder_stream(struct qpack_decoder *dec,
 	    dec->dynamic_table.insert_count > inserts_before) {
 		u64 increment = dec->dynamic_table.insert_count - inserts_before;
 		qpack_decoder_send_insert_count_inc(dec, increment);
+
+		/* Try to unblock any streams that were waiting for table updates */
+		qpack_decoder_process_blocked_streams(dec);
 	}
 
 	return 0;
 }
 EXPORT_SYMBOL_GPL(qpack_decoder_process_encoder_stream);
+
+/**
+ * qpack_decoder_process_blocked_streams - Try to decode blocked streams
+ * @dec: Decoder
+ *
+ * Processes any blocked streams that can now be decoded because the
+ * dynamic table has been updated with the required entries.
+ *
+ * Returns: Number of streams unblocked
+ */
+int qpack_decoder_process_blocked_streams(struct qpack_decoder *dec)
+{
+	struct qpack_blocked_stream *blocked, *tmp;
+	LIST_HEAD(ready_list);
+	unsigned long flags;
+	int unblocked = 0;
+
+	if (!dec)
+		return 0;
+
+	spin_lock_irqsave(&dec->lock, flags);
+
+	/* Find streams that can now be decoded */
+	list_for_each_entry_safe(blocked, tmp, &dec->blocked_streams, list) {
+		if (blocked->required_insert_count <= dec->dynamic_table.insert_count) {
+			list_del(&blocked->list);
+			list_add_tail(&blocked->list, &ready_list);
+			dec->blocked_stream_count--;
+		}
+	}
+
+	spin_unlock_irqrestore(&dec->lock, flags);
+
+	/* Process ready streams outside the lock */
+	list_for_each_entry_safe(blocked, tmp, &ready_list, list) {
+		struct qpack_header_list headers;
+		int ret;
+
+		pr_debug("qpack: unblocking stream %llu (insert_count now %llu)\n",
+			 blocked->stream_id, dec->dynamic_table.insert_count);
+
+		ret = qpack_decode_headers(dec, blocked->stream_id,
+					   blocked->data, blocked->data_len,
+					   &headers);
+		if (ret == 0) {
+			/*
+			 * Successfully decoded - deliver headers to HTTP/3 layer.
+			 * This callback should be set up by the HTTP/3 connection.
+			 */
+			if (dec->on_headers_decoded)
+				dec->on_headers_decoded(dec->conn, blocked->stream_id,
+							&headers);
+			qpack_header_list_destroy(&headers);
+			unblocked++;
+		} else if (ret != -EAGAIN) {
+			/* Real error - log and continue */
+			pr_warn("qpack: failed to decode unblocked stream %llu: %d\n",
+				blocked->stream_id, ret);
+		}
+		/* If ret == -EAGAIN, stream is re-blocked (needs more inserts) */
+
+		list_del(&blocked->list);
+		kfree(blocked->data);
+		kfree(blocked);
+	}
+
+	return unblocked;
+}
+EXPORT_SYMBOL_GPL(qpack_decoder_process_blocked_streams);
 
 /*
  * =============================================================================
