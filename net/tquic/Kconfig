@@ -651,6 +651,70 @@ config TQUIC_CONG_DATA
 
 	  If unsure, say M.
 
+config TQUIC_SECURITY
+	tristate "TQUIC Security Components - QUIC-Exfil Mitigation (draft-iab-quic-exfil)"
+	depends on TQUIC_CORE
+	default y
+	help
+	  Enable advanced security components for TQUIC including defense
+	  mechanisms against timing side-channel information leakage attacks
+	  as described in draft-iab-quic-exfil.
+
+	  Components included:
+
+	    - Timing Normalization: Adds controlled random delays to packet
+	      processing to prevent timing-based information leakage. Delays
+	      are configurable per protection level.
+
+	    - Constant-Time Operations: Provides constant-time implementations
+	      of security-critical operations (CID validation, packet number
+	      decoding, memory comparison) to prevent timing side-channel attacks.
+
+	    - Traffic Analysis Protection: Implements padding and traffic shaping
+	      to prevent flow analysis and fingerprinting:
+	        * Random padding up to MTU
+	        * Block-size padding (128, 256, 512, 1024 bytes)
+	        * Decoy traffic generation
+	        * Packet batching
+
+	    - Spin Bit Randomization: Random spin bit values to prevent RTT
+	      inference by network observers:
+	        * Probabilistic randomization
+	        * Spin bit freezing
+	        * Full randomization (paranoid mode)
+
+	    - Packet Timing Jitter: Adds configurable random jitter to outgoing
+	      packets to mask traffic patterns:
+	        * Uniform distribution
+	        * Gaussian distribution
+	        * Exponential distribution
+	        * Adaptive jitter based on traffic
+
+	  Protection levels (configurable via sysctl):
+	    - NONE: Disabled (maximum performance)
+	    - LOW: Minimal protection (low overhead)
+	    - MEDIUM: Balanced protection (default)
+	    - HIGH: Maximum protection (moderate overhead)
+	    - PARANOID: Defense-in-depth (significant overhead)
+
+	  Sysctl parameters under /proc/sys/net/tquic/security/:
+	    - exfil_level: Global protection level (0-4)
+	    - exfil_timing_delay_us: Maximum timing delay (microseconds)
+	    - exfil_padding_strategy: Padding strategy (0-3)
+	    - exfil_pad_probability: Padding probability (0-100%)
+	    - exfil_spin_mode: Spin bit randomization mode (0-3)
+	    - exfil_jitter_min_us: Minimum jitter (microseconds)
+	    - exfil_jitter_max_us: Maximum jitter (microseconds)
+
+	  Reference: draft-iab-quic-exfil-01
+	  https://datatracker.ietf.org/doc/draft-iab-quic-exfil/
+
+	  To compile this as a module, choose M here: the module will
+	  be called tquic_security.
+
+	  If security against traffic analysis is important, say Y.
+	  If unsure, say Y.
+
 config TQUIC_FEC
 	tristate "TQUIC Forward Error Correction (draft-zheng-quic-fec-extension-01)"
 	depends on TQUIC_CORE

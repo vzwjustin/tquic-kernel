@@ -27,6 +27,7 @@
 #include "../protocol.h"
 #include "../core/additional_addresses.h"
 #include "nat_keepalive.h"
+#include "nat_lifecycle.h"
 
 /* Path probe configuration */
 #define TQUIC_PM_PROBE_INTERVAL_MS	1000	/* 1 second */
@@ -830,6 +831,14 @@ int tquic_conn_add_path_safe(struct tquic_connection *conn,
 		/* Continue without NAT keepalive - not fatal */
 	}
 
+	/* Initialize NAT lifecycle management for this path */
+	ret = tquic_nat_lifecycle_init(path, conn);
+	if (ret) {
+		pr_debug("tquic: NAT lifecycle init for path %u: %d (optional)\n",
+			 path->path_id, ret);
+		/* Continue without lifecycle - it's optional */
+	}
+
 	/* Add to connection's path list with RCU */
 	spin_lock_bh(&conn->paths_lock);
 	list_add_tail_rcu(&path->list, &conn->paths);
@@ -896,6 +905,9 @@ int tquic_conn_remove_path_safe(struct tquic_connection *conn,
 
 	/* Release PMTUD state */
 	tquic_pmtud_release_path(path);
+
+	/* Release NAT lifecycle state */
+	tquic_nat_lifecycle_cleanup(path);
 
 	/* Release NAT keepalive state (RFC 9308 Section 3.5) */
 	tquic_nat_keepalive_cleanup(path);

@@ -290,6 +290,21 @@ struct tquic_path {
 	 */
 	void *nat_keepalive_state;	/* struct tquic_nat_keepalive_state * */
 
+	/*
+	 * NAT Lifecycle state - Advanced NAT management
+	 *
+	 * Provides advanced NAT lifecycle management including:
+	 * - NAT binding timeout detection and prediction
+	 * - NAT type detection (Full Cone, Restricted, Symmetric, CGNAT)
+	 * - Adaptive keepalive interval adjustment
+	 * - Cascaded NAT topology detection
+	 * - STUN-like probing for NAT characteristic detection
+	 *
+	 * Allocated by tquic_nat_lifecycle_init(), freed by tquic_nat_lifecycle_cleanup().
+	 * Works in conjunction with nat_keepalive_state for optimal NAT handling.
+	 */
+	void *nat_lifecycle_state;	/* struct tquic_nat_lifecycle_state * */
+
 	struct rcu_head rcu_head;	/* RCU callback for kfree_rcu */
 };
 
