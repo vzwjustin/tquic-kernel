@@ -6,8 +6,9 @@
 # so we unconditionally build all modules.
 #
 # Note: Out-of-tree builds consolidate tightly-coupled modules into
-# tquic.ko to avoid circular symbol dependencies. Congestion control
-# algorithms remain as separate modules.
+# tquic.ko to avoid circular symbol dependencies. Some files exist
+# in both top-level and core/ directories - we use top-level versions
+# where they exist to avoid duplicate symbols.
 #
 
 # For out-of-tree builds, build one main module plus CC algorithms
@@ -22,7 +23,8 @@ obj-m += tquic_l4s.o
 obj-m += tquic_accecn.o
 
 # Main TQUIC module - consolidated for out-of-tree build
-# Includes: main, core, crypto, bond, pm, sched, multipath, coupled
+# Uses top-level files for duplicates (stream, cid, ack_frequency)
+# and core/ files only for unique functionality (connection, ack, frame, packet, flow_control, transport_params)
 tquic-y := \
 	tquic_main.o \
 	tquic_proto.o \
@@ -55,16 +57,11 @@ tquic-y := \
 	tquic_ack_frequency.o \
 	cong/tquic_cong.o \
 	cong/persistent_cong.o \
-	core/varint.o \
-	core/connection.o \
-	core/stream.o \
+	core/ack.o \
 	core/frame.o \
 	core/packet.o \
-	core/ack.o \
-	core/ack_frequency.o \
 	core/flow_control.o \
 	core/transport_params.o \
-	core/cid.o \
 	crypto/tls.o \
 	crypto/header_protection.o \
 	crypto/key_update.o \
@@ -74,12 +71,10 @@ tquic-y := \
 	pm/pm_kernel.o \
 	pm/path_manager.o \
 	pm/path_validation.o \
-	sched/scheduler.o \
 	sched/reorder.o \
 	multipath/mp_frame.o \
 	multipath/mp_ack.o \
-	multipath/path_abandon.o \
-	cong/coupled.o
+	multipath/path_abandon.o
 
 # Congestion Control algorithms (standalone modules)
 tquic_cubic-y := cong/cubic.o
