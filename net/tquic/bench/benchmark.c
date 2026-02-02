@@ -469,7 +469,9 @@ static int bench_latency(struct tquic_bench_config *cfg,
 	/* Compute results */
 	result->latency.conn_established = success;
 	result->latency.conn_failed = failed;
-	result->latency.avg_handshake_us = total_latency / (success * 1000);
+	/* Avoid division by zero if all connections failed */
+	result->latency.avg_handshake_us = success > 0 ?
+		total_latency / (success * 1000) : 0;
 	result->latency.min_handshake_us = min_latency / 1000;
 	result->latency.max_handshake_us = max_latency / 1000;
 
@@ -1012,6 +1014,12 @@ static int __init tquic_bench_init(void)
 
 static void __exit tquic_bench_exit(void)
 {
+	/* Wait for any running benchmark to complete */
+	while (bench_running) {
+		pr_info("TQUIC: waiting for benchmark to complete before unload\n");
+		msleep(100);
+	}
+
 	remove_proc_entry("tquic_bench", NULL);
 	remove_proc_entry("tquic_bench_results", NULL);
 

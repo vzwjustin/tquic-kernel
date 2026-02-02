@@ -185,6 +185,15 @@ static void quic_tcp_data_ready(struct sock *sk)
 		queue_work(quic_tcp_wq, &conn->rx_work);
 }
 
+/* Separate callback for listener sockets to avoid type confusion */
+static void quic_tcp_listener_data_ready(struct sock *sk)
+{
+	struct quic_tcp_listener *listener = sk->sk_user_data;
+
+	if (listener && listener->running)
+		queue_work(quic_tcp_wq, &listener->accept_work);
+}
+
 static void quic_tcp_write_space(struct sock *sk)
 {
 	struct quic_tcp_connection *conn = sk->sk_user_data;
@@ -565,6 +574,10 @@ static void quic_tcp_accept_work(struct work_struct *work)
 
 	while (listener->running) {
 		ret = kernel_accept(listener->tcp_sk, &newsock, O_NONBLOCK);
+		if (ret == -EAGAIN || ret == -EWOULDBLOCK) {
+			/* No pending connections, wait to be woken up */
+			break;
+		}
 		if (ret < 0)
 			break;
 
@@ -658,12 +671,12 @@ struct quic_tcp_listener *quic_tcp_listen(u16 port)
 	spin_lock_init(&listener->conn_lock);
 	INIT_WORK(&listener->accept_work, quic_tcp_accept_work);
 
-	/* Setup data_ready callback for accept */
+	/* Setup data_ready callback for accept - use listener-specific callback */
 	{
 		struct sock *sk = listener->tcp_sk->sk;
 		write_lock_bh(&sk->sk_callback_lock);
 		sk->sk_user_data = listener;
-		sk->sk_data_ready = quic_tcp_data_ready;
+		sk->sk_data_ready = quic_tcp_listener_data_ready;
 		write_unlock_bh(&sk->sk_callback_lock);
 	}
 

@@ -70,6 +70,70 @@ MODULE_PARM_DESC(offload_enabled, "Enable SmartNIC QUIC offload");
 
 /*
  * =============================================================================
+ * Packet Number Extraction
+ * =============================================================================
+ */
+
+/**
+ * tquic_skb_get_packet_number - Extract packet number from QUIC header
+ * @skb: Socket buffer containing QUIC packet
+ *
+ * Parses the QUIC short header to extract the packet number.
+ * Returns 0 if extraction fails (caller should use fallback).
+ */
+static u64 tquic_skb_get_packet_number(struct sk_buff *skb)
+{
+	unsigned char *data;
+	u8 first_byte;
+	int pn_len;
+	u64 pn = 0;
+	int offset;
+
+	if (!skb || skb->len < 2)
+		return 0;
+
+	data = skb->data;
+	first_byte = data[0];
+
+	/* Check if short header (bit 7 = 0 for short header) */
+	if (first_byte & 0x80) {
+		/* Long header - packet number position varies */
+		return 0;  /* Let caller use fallback */
+	}
+
+	/* Short header: PN length encoded in bits 0-1 */
+	pn_len = (first_byte & 0x03) + 1;
+
+	/* Skip DCID (typically at offset 1, length depends on connection) */
+	/* For offload, we assume DCID length is known or use fixed offset */
+	offset = 1 + 8;  /* 1 byte header + 8 byte DCID (common case) */
+
+	if (skb->len < offset + pn_len)
+		return 0;
+
+	/* Extract packet number (big-endian) */
+	switch (pn_len) {
+	case 1:
+		pn = data[offset];
+		break;
+	case 2:
+		pn = (data[offset] << 8) | data[offset + 1];
+		break;
+	case 4:
+		pn = ((u32)data[offset] << 24) |
+		     ((u32)data[offset + 1] << 16) |
+		     ((u32)data[offset + 2] << 8) |
+		     data[offset + 3];
+		break;
+	default:
+		return 0;
+	}
+
+	return pn;
+}
+
+/*
+ * =============================================================================
  * Device Registration
  * =============================================================================
  */
@@ -258,11 +322,14 @@ int tquic_offload_key_install(struct tquic_nic_device *dev,
 		NIC_DBG(2, "installed TX key %d for conn\n", ret);
 	}
 
-	/* Get read key (for RX decryption) */
+	/* Get read key (for RX decryption) - reset key struct first */
 	if (conn->crypto_state && conn->crypto_state->rx_secret) {
+		memset(&key, 0, sizeof(key));
 		memcpy(key.key, conn->crypto_state->rx_secret,
 		       min_t(size_t, conn->crypto_state->key_len, sizeof(key.key)));
 		key.key_len = conn->crypto_state->key_len;
+		key.cipher_suite = conn->crypto_state->cipher_suite;
+		atomic_set(&key.refcount, 1);
 
 		spin_lock(&dev->lock);
 		ret = dev->ops->add_key(dev, &key);
@@ -468,9 +535,12 @@ int tquic_offload_rx(struct tquic_nic_device *dev, struct sk_buff *skb,
 		return 1;
 	}
 
-	/* Extract packet number from packet */
-	/* Note: In real implementation, this would parse the QUIC header */
-	pn = conn->rx_pn_next;
+	/* Extract packet number from QUIC header */
+	pn = tquic_skb_get_packet_number(skb);
+	if (pn == 0) {
+		/* Fallback if we can't extract PN from header */
+		pn = conn->rx_pn_next;
+	}
 
 	spin_lock(&dev->lock);
 	ret = dev->ops->decrypt(dev, skb, conn->hw_rx_key_id, pn);
@@ -562,9 +632,12 @@ int tquic_offload_batch_rx(struct tquic_nic_device *dev,
 	if (!pns)
 		return -ENOMEM;
 
-	/* Extract packet numbers */
-	for (i = 0; i < count; i++)
-		pns[i] = conn->rx_pn_next + i;
+	/* Extract packet numbers from QUIC headers */
+	for (i = 0; i < count; i++) {
+		pns[i] = tquic_skb_get_packet_number(skbs[i]);
+		if (pns[i] == 0)
+			pns[i] = conn->rx_pn_next + i;  /* Fallback */
+	}
 
 	spin_lock(&dev->lock);
 	ret = dev->ops->batch_decrypt(dev, skbs, count,

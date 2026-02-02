@@ -139,8 +139,8 @@ TQUIC is a complete, production-ready kernel module implementing the QUIC protoc
 
 ### Security Features
 - **Anti-Replay Protection**: 0-RTT replay filter with configurable window
-- **QUIC-LEAK Defense** (CVE-2025-54939): Pre-handshake memory exhaustion protection
-- **CID Stuffing Protection** (CVE-2024-22189): RETIRE_CONNECTION_ID flooding mitigation
+- **QUIC-LEAK Defense**: Pre-handshake memory exhaustion protection with per-IP budgets
+- **CID Stuffing Protection**: RETIRE_CONNECTION_ID flooding mitigation with rate limiting
 - **Optimistic ACK Detection**: Detection of ACKs for never-sent packets
 - **PATH_CHALLENGE Flooding**: Rate limiting with crypto-grade RNG
 - **Anti-Amplification**: RFC 9000 amplification limit enforcement
@@ -149,7 +149,7 @@ TQUIC is a complete, production-ready kernel module implementing the QUIC protoc
 - **Reliable Reset**: RESET_STREAM_AT (0x24) for guaranteed delivery
 
 ### Observability & Diagnostics
-- **qlog Support**: QUIC Event Logging (RFC 9293-compatible, v2 format)
+- **qlog Support**: QUIC Event Logging (draft-ietf-quic-qlog-main-schema-12)
 - **Kernel Tracepoints**: Connection state, frame events, errors
 - **Path Metrics**: Per-path RTT, bandwidth, loss rate
 - **sock_diag**: `ss` command visibility for QUIC sockets
@@ -304,7 +304,7 @@ Comprehensive unit tests covering all protocol components:
 - Transport parameter negotiation
 - Flow control enforcement
 - Scheduler algorithms
-- Security mechanisms (42K lines)
+- Security mechanisms
 
 ### Interoperability Testing
 Test framework against major QUIC implementations:
@@ -337,10 +337,10 @@ Test cases: handshake, 0-RTT, migration, multipath, failover
 | RFC 9114 | HTTP/3 |
 | RFC 9204 | QPACK: Field Compression for HTTP/3 |
 | RFC 9218 | Extensible Prioritization Scheme for HTTP |
-| RFC 9220 | Bootstrapping WebSockets with HTTP/3 |
+| RFC 9220 | Extended CONNECT for HTTP/3 (WebTransport) |
 | RFC 9221 | An Unreliable Datagram Extension to QUIC |
 | RFC 9287 | Greasing the QUIC Bit |
-| RFC 9293 | Debugging Logging for QUIC (qlog) |
+| RFC 9293 | qlog: Structured Logging for QUIC (draft-12 based) |
 | RFC 9297 | HTTP Datagrams and the Capsule Protocol |
 | RFC 9298 | Proxying UDP in HTTP |
 | RFC 9368 | Compatible Version Negotiation for QUIC |
@@ -353,7 +353,7 @@ Test cases: handshake, 0-RTT, migration, multipath, failover
 | draft-ietf-quic-multipath-17 | Multipath Extension for QUIC |
 | draft-ietf-quic-load-balancers-21 | QUIC-LB: Generating Routable QUIC Connection IDs |
 | draft-ietf-webtrans-http3-14 | WebTransport over HTTP/3 |
-| draft-ietf-quic-reliable-stream-reset | Reliable QUIC Stream Resets |
+| draft-ietf-quic-reliable-stream-reset-05 | Reliable QUIC Stream Resets |
 | draft-smith-quic-receive-ts-03 | QUIC Extension for Reporting Packet Receive Timestamps |
 
 ## Use Cases

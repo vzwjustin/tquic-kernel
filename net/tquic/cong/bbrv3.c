@@ -559,6 +559,7 @@ static void *bbrv3_init(struct tquic_path *path)
 	bbr->full_bw_count = 0;
 	bbr->full_bw_reached = false;
 	bbr->in_loss_recovery = false;
+	bbr->loss_round_delivered = 0;
 	bbr->ecn_alpha = BBR3_ECN_ALPHA_INIT;
 	bbr->ecn_eligible = true;
 	bbr->probe_rtt_done_time = ktime_get();
@@ -636,7 +637,8 @@ static void bbrv3_on_ack(void *cong_data, u64 bytes_acked, u64 rtt_us)
 
 	case BBR3_DRAIN:
 		bbrv3_check_drain_done(bbr);
-		if (bbr->cwnd <= bbrv3_bdp(bbr))
+		/* Check bytes-in-flight, not cwnd, per BBRv3 spec */
+		if (bbr->path && bbr->path->bytes_in_flight <= bbrv3_bdp(bbr))
 			bbrv3_enter_probe_bw(bbr);
 		break;
 
@@ -709,11 +711,14 @@ static void bbrv3_on_persistent_congestion(void *cong_data,
 static bool bbrv3_can_send(void *cong_data, u64 bytes)
 {
 	struct bbrv3 *bbr = cong_data;
+	u64 inflight;
 
 	if (!bbr)
 		return true;
 
-	return bytes <= bbr->cwnd;
+	/* Check bytes-in-flight + new packet against cwnd */
+	inflight = bbr->path ? bbr->path->bytes_in_flight : 0;
+	return (inflight + bytes) <= bbr->cwnd;
 }
 
 struct tquic_cong_ops bbrv3_cong_ops = {
