@@ -5,26 +5,24 @@
 # When building out-of-tree, CONFIG_TQUIC* variables are not set,
 # so we unconditionally build all modules.
 #
+# Note: Out-of-tree builds consolidate tightly-coupled modules into
+# tquic.ko to avoid circular symbol dependencies. Congestion control
+# algorithms remain as separate modules.
+#
 
-# For out-of-tree builds, unconditionally build as modules
+# For out-of-tree builds, build one main module plus CC algorithms
 obj-m += tquic.o
-obj-m += tquic_core.o
-obj-m += tquic_bond.o
-obj-m += tquic_pm.o
-obj-m += tquic_sched.o
 obj-m += tquic_cubic.o
 obj-m += tquic_bbr.o
 obj-m += tquic_copa.o
 obj-m += tquic_westwood.o
-obj-m += tquic_coupled.o
 obj-m += tquic_bbrv2.o
 obj-m += tquic_prague.o
 obj-m += tquic_l4s.o
 obj-m += tquic_accecn.o
-obj-m += tquic_multipath.o
-obj-m += tquic_crypto.o
 
-# Main TQUIC module
+# Main TQUIC module - consolidated for out-of-tree build
+# Includes: main, core, crypto, bond, pm, sched, multipath, coupled
 tquic-y := \
 	tquic_main.o \
 	tquic_proto.o \
@@ -56,10 +54,7 @@ tquic-y := \
 	grease.o \
 	tquic_ack_frequency.o \
 	cong/tquic_cong.o \
-	cong/persistent_cong.o
-
-# Core protocol components
-tquic_core-y := \
+	cong/persistent_cong.o \
 	core/varint.o \
 	core/connection.o \
 	core/stream.o \
@@ -69,47 +64,32 @@ tquic_core-y := \
 	core/ack_frequency.o \
 	core/flow_control.o \
 	core/transport_params.o \
-	core/cid.o
-
-# WAN Bonding components
-tquic_bond-y := \
-	bond/bonding.o
-
-# Path Manager
-tquic_pm-y := \
+	core/cid.o \
+	crypto/tls.o \
+	crypto/header_protection.o \
+	crypto/key_update.o \
+	crypto/zero_rtt.o \
+	bond/bonding.o \
 	pm/pm_types.o \
 	pm/pm_kernel.o \
 	pm/path_manager.o \
-	pm/path_validation.o
-
-# Packet Scheduler
-tquic_sched-y := \
+	pm/path_validation.o \
 	sched/scheduler.o \
-	sched/reorder.o
+	sched/reorder.o \
+	multipath/mp_frame.o \
+	multipath/mp_ack.o \
+	multipath/path_abandon.o \
+	cong/coupled.o
 
-# Congestion Control algorithms
+# Congestion Control algorithms (standalone modules)
 tquic_cubic-y := cong/cubic.o
 tquic_bbr-y := cong/bbr.o
 tquic_copa-y := cong/copa.o
 tquic_westwood-y := cong/westwood.o
-tquic_coupled-y := cong/coupled.o
 tquic_bbrv2-y := cong/bbrv2.o
 tquic_prague-y := cong/prague.o
 tquic_l4s-y := cong/l4s.o
 tquic_accecn-y := cong/accecn.o
-
-# Multipath extension (RFC 9369)
-tquic_multipath-y := \
-	multipath/mp_frame.o \
-	multipath/mp_ack.o \
-	multipath/path_abandon.o
-
-# Crypto support
-tquic_crypto-y := \
-	crypto/tls.o \
-	crypto/header_protection.o \
-	crypto/key_update.o \
-	crypto/zero_rtt.o
 
 # Extra CFLAGS for out-of-tree build
 # Use the tquic-kernel include directory for TQUIC headers
