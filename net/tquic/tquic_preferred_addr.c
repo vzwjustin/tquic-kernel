@@ -327,6 +327,10 @@ EXPORT_SYMBOL_GPL(tquic_pref_addr_server_encode);
  * tquic_pref_addr_client_init - Initialize client migration state
  * @conn: Connection
  *
+ * Initializes the preferred address migration state for a client connection.
+ * Per RFC 9000 Section 9.6, the client may migrate to the server's preferred
+ * address after handshake completion.
+ *
  * Return: 0 on success, negative errno on failure
  */
 int tquic_pref_addr_client_init(struct tquic_connection *conn)
@@ -335,6 +339,10 @@ int tquic_pref_addr_client_init(struct tquic_connection *conn)
 
 	if (!conn)
 		return -EINVAL;
+
+	/* Check if already initialized */
+	if (conn->preferred_addr)
+		return 0;
 
 	migration = kzalloc(sizeof(*migration), GFP_KERNEL);
 	if (!migration)
@@ -345,10 +353,11 @@ int tquic_pref_addr_client_init(struct tquic_connection *conn)
 	migration->migration_path = NULL;
 
 	/*
-	 * Store in pm state or connection's extended state.
-	 * For now, use the state_machine pointer if available.
+	 * Store in connection's dedicated preferred_addr field.
+	 * This is separate from state_machine to avoid conflicts with
+	 * other migration state types.
 	 */
-	conn->state_machine = migration;
+	conn->preferred_addr = migration;
 
 	pr_debug("tquic_pref_addr: client migration state initialized\n");
 
@@ -359,6 +368,9 @@ EXPORT_SYMBOL_GPL(tquic_pref_addr_client_init);
 /**
  * tquic_pref_addr_client_cleanup - Clean up client migration state
  * @conn: Connection
+ *
+ * Releases all resources allocated for preferred address migration.
+ * Called during connection teardown.
  */
 void tquic_pref_addr_client_cleanup(struct tquic_connection *conn)
 {
@@ -367,7 +379,7 @@ void tquic_pref_addr_client_cleanup(struct tquic_connection *conn)
 	if (!conn)
 		return;
 
-	migration = conn->state_machine;
+	migration = conn->preferred_addr;
 	if (!migration)
 		return;
 
@@ -378,7 +390,7 @@ void tquic_pref_addr_client_cleanup(struct tquic_connection *conn)
 	}
 
 	kfree(migration);
-	conn->state_machine = NULL;
+	conn->preferred_addr = NULL;
 
 	pr_debug("tquic_pref_addr: client migration state cleaned up\n");
 }
@@ -466,6 +478,13 @@ EXPORT_SYMBOL_GPL(tquic_pref_addr_client_decode);
  * @conn: Connection
  * @pref_addr: Decoded preferred address from transport parameters
  *
+ * Called when the client receives transport parameters containing a
+ * preferred_address. Per RFC 9000 Section 9.6, the server advertises
+ * its preferred address which the client can migrate to after handshake.
+ *
+ * This function stores the preferred address information in the connection
+ * structure for later use when initiating migration.
+ *
  * Return: 0 on success, negative errno on failure
  */
 int tquic_pref_addr_client_received(struct tquic_connection *conn,
@@ -478,13 +497,13 @@ int tquic_pref_addr_client_received(struct tquic_connection *conn,
 	if (!conn || !pref_addr)
 		return -EINVAL;
 
-	migration = conn->state_machine;
+	migration = conn->preferred_addr;
 	if (!migration) {
 		/* Initialize if not already done */
 		int ret = tquic_pref_addr_client_init(conn);
 		if (ret)
 			return ret;
-		migration = conn->state_machine;
+		migration = conn->preferred_addr;
 	}
 
 	/* Check if IPv4 is valid (non-zero address and port) */
@@ -546,6 +565,19 @@ EXPORT_SYMBOL_GPL(tquic_pref_addr_client_received);
  * tquic_pref_addr_client_can_migrate - Check if migration is possible
  * @conn: Connection
  *
+ * Checks whether the client can migrate to the server's preferred address.
+ * Factors considered:
+ * - Connection is in CONNECTED state
+ * - Preferred address was received from server
+ * - Haven't already migrated to preferred address
+ * - Auto-migration is enabled via sysctl
+ *
+ * Per RFC 9000 Section 9.6: "A server MAY provide a preferred_address
+ * transport parameter, even when the disable_active_migration transport
+ * parameter is present." Therefore, we do NOT check migration_disabled
+ * here - migration to preferred_address is always allowed if the server
+ * provided one.
+ *
  * Return: true if migration is possible
  */
 bool tquic_pref_addr_client_can_migrate(struct tquic_connection *conn)
@@ -562,11 +594,17 @@ bool tquic_pref_addr_client_can_migrate(struct tquic_connection *conn)
 	if (!tquic_pref_addr_auto_migrate(net))
 		return false;
 
-	/* Must be in connected state */
+	/* Must be in connected state (handshake complete) */
 	if (conn->state != TQUIC_CONN_CONNECTED)
 		return false;
 
-	migration = conn->state_machine;
+	/*
+	 * Note: We intentionally do NOT check conn->migration_disabled here.
+	 * Per RFC 9000 Section 9.6, migration to the server's preferred address
+	 * is permitted even when disable_active_migration is set.
+	 */
+
+	migration = conn->preferred_addr;
 	if (!migration)
 		return false;
 
@@ -600,7 +638,7 @@ int tquic_pref_addr_client_select_address(struct tquic_connection *conn,
 	if (!conn || !family)
 		return -EINVAL;
 
-	migration = conn->state_machine;
+	migration = conn->preferred_addr;
 	if (!migration)
 		return -ENOENT;
 
@@ -731,7 +769,7 @@ int tquic_pref_addr_client_start_migration(struct tquic_connection *conn)
 		return -EINVAL;
 	}
 
-	migration = conn->state_machine;
+	migration = conn->preferred_addr;
 
 	/* Select address family */
 	ret = tquic_pref_addr_client_select_address(conn, &family);
@@ -798,7 +836,7 @@ int tquic_pref_addr_client_on_validated(struct tquic_connection *conn,
 	if (!conn || !path)
 		return -EINVAL;
 
-	migration = conn->state_machine;
+	migration = conn->preferred_addr;
 	if (!migration || migration->state != TQUIC_PREF_ADDR_VALIDATING)
 		return -EINVAL;
 
@@ -844,7 +882,7 @@ void tquic_pref_addr_client_on_failed(struct tquic_connection *conn, int error)
 	if (!conn)
 		return;
 
-	migration = conn->state_machine;
+	migration = conn->preferred_addr;
 	if (!migration)
 		return;
 
@@ -877,7 +915,7 @@ void tquic_pref_addr_client_abort(struct tquic_connection *conn)
 	if (!conn)
 		return;
 
-	migration = conn->state_machine;
+	migration = conn->preferred_addr;
 	if (!migration)
 		return;
 
@@ -913,7 +951,7 @@ enum tquic_pref_addr_state tquic_pref_addr_client_get_state(
 	if (!conn)
 		return TQUIC_PREF_ADDR_NONE;
 
-	migration = conn->state_machine;
+	migration = conn->preferred_addr;
 	if (!migration)
 		return TQUIC_PREF_ADDR_NONE;
 

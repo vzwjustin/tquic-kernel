@@ -21,6 +21,7 @@
 #include <linux/completion.h>
 #include <linux/jiffies.h>
 #include <linux/ratelimit.h>
+#include <linux/unaligned.h>
 #include <net/sock.h>
 #include <net/handshake.h>
 #include <net/tquic.h>
@@ -29,6 +30,7 @@
 #include "protocol.h"
 #include "tquic_mib.h"
 #include "crypto/zero_rtt.h"
+#include "core/varint.h"
 
 /*
  * Forward declarations for server functions
@@ -593,39 +595,275 @@ void tquic_install_crypto_state(struct sock *sk)
 }
 EXPORT_SYMBOL_GPL(tquic_install_crypto_state);
 
+/*
+ * QUIC Long Header packet types (first byte bits 4-5)
+ */
+#define TQUIC_PKT_TYPE_INITIAL		0x00
+#define TQUIC_PKT_TYPE_0RTT		0x01
+#define TQUIC_PKT_TYPE_HANDSHAKE	0x02
+#define TQUIC_PKT_TYPE_RETRY		0x03
+
+/*
+ * First byte masks for QUIC long header
+ */
+#define TQUIC_HEADER_FORM_MASK		0x80	/* Bit 7: 1=long, 0=short */
+#define TQUIC_FIXED_BIT_MASK		0x40	/* Bit 6: must be 1 */
+#define TQUIC_LONG_PKT_TYPE_MASK	0x30	/* Bits 4-5: packet type */
+#define TQUIC_LONG_PKT_TYPE_SHIFT	4
+#define TQUIC_PN_LEN_MASK		0x03	/* Bits 0-1: PN length - 1 */
+
+/*
+ * Minimum Initial packet size per RFC 9000 Section 14.1
+ * Initial packets must be at least 1200 bytes when sent by clients
+ * However, we accept smaller packets for validation purposes
+ */
+#define TQUIC_INITIAL_PKT_MIN_LEN	7	/* 1 + 4 + 1 + 0 + 1 */
+
 /**
  * tquic_conn_server_accept_init - Initialize connection for server accept
  * @conn: New connection for accepted client
  * @initial_pkt: The incoming Initial packet
  *
- * Extracts connection IDs from Initial packet and initializes server-side
- * state. This is a helper for tquic_server_handshake.
+ * Parses the QUIC Initial packet long header per RFC 9000 Section 17.2:
+ *   - First byte: Header form (1) | Fixed bit (1) | Type (2) | Reserved (2) | PN Len (2)
+ *   - Version (4 bytes)
+ *   - DCID Length (1 byte) + DCID (variable, 0-20 bytes)
+ *   - SCID Length (1 byte) + SCID (variable, 0-20 bytes)
+ *   - Token Length (varint) + Token (variable)
+ *   - Length (varint) - remaining packet length including PN and payload
+ *   - Packet Number (1-4 bytes, based on PN Length field)
+ *
+ * For server-side accept:
+ *   - Client's DCID becomes our SCID (what client uses to reach us)
+ *   - Client's SCID becomes our DCID (what we use to reach client)
  *
  * Returns: 0 on success, negative errno on failure.
  */
 static int tquic_conn_server_accept_init(struct tquic_connection *conn,
 					 struct sk_buff *initial_pkt)
 {
-	/*
-	 * TODO: Parse Initial packet header to extract:
-	 * - Destination CID (becomes our SCID)
-	 * - Source CID (becomes peer's CID / our DCID)
-	 * - Version
-	 * - Token (if present)
-	 */
+	const u8 *data;
+	size_t len;
+	size_t offset;
+	u8 first_byte;
+	u8 pkt_type;
+	u32 version;
+	u8 dcid_len;
+	u8 scid_len;
+	u64 token_len;
+	u64 payload_len;
+	int ret;
 
-	if (!initial_pkt || initial_pkt->len < 20)
+	if (!conn || !initial_pkt)
 		return -EINVAL;
 
-	/* For now, generate server-side CIDs */
-	conn->scid.len = TQUIC_DEFAULT_CID_LEN;
-	get_random_bytes(conn->scid.id, conn->scid.len);
+	data = initial_pkt->data;
+	len = initial_pkt->len;
 
-	/* Placeholder: Extract DCID from packet */
-	conn->dcid.len = TQUIC_DEFAULT_CID_LEN;
+	/* Need at least minimum header: first byte + version + dcid_len + scid_len */
+	if (len < TQUIC_INITIAL_PKT_MIN_LEN) {
+		pr_debug("tquic: Initial packet too short: %zu bytes\n", len);
+		return -EINVAL;
+	}
 
-	/* Mark as server-side connection */
+	offset = 0;
+
+	/*
+	 * Parse first byte:
+	 *   Bit 7: Header Form (1 = long header)
+	 *   Bit 6: Fixed Bit (must be 1)
+	 *   Bits 4-5: Long Packet Type (00 = Initial)
+	 *   Bits 2-3: Reserved (ignored for now)
+	 *   Bits 0-1: Packet Number Length - 1
+	 */
+	first_byte = data[offset++];
+
+	/* Verify this is a long header packet */
+	if (!(first_byte & TQUIC_HEADER_FORM_MASK)) {
+		pr_debug("tquic: Not a long header packet\n");
+		return -EINVAL;
+	}
+
+	/* Verify fixed bit is set (RFC 9000 Section 17.2) */
+	if (!(first_byte & TQUIC_FIXED_BIT_MASK)) {
+		pr_debug("tquic: Fixed bit not set in Initial packet\n");
+		return -EINVAL;
+	}
+
+	/* Verify packet type is Initial (00) */
+	pkt_type = (first_byte & TQUIC_LONG_PKT_TYPE_MASK) >> TQUIC_LONG_PKT_TYPE_SHIFT;
+	if (pkt_type != TQUIC_PKT_TYPE_INITIAL) {
+		pr_debug("tquic: Not an Initial packet, type=%u\n", pkt_type);
+		return -EINVAL;
+	}
+
+	/*
+	 * Parse Version (4 bytes, network byte order)
+	 */
+	if (offset + 4 > len) {
+		pr_debug("tquic: Packet too short for version\n");
+		return -EINVAL;
+	}
+
+	version = get_unaligned_be32(data + offset);
+	offset += 4;
+
+	/* Validate version - must be QUIC v1 or v2 */
+	if (version != TQUIC_VERSION_1 && version != TQUIC_VERSION_2) {
+		pr_debug("tquic: Unsupported QUIC version: 0x%08x\n", version);
+		return -EPROTONOSUPPORT;
+	}
+
+	conn->version = version;
+
+	/*
+	 * Parse Destination Connection ID Length (1 byte)
+	 * Per RFC 9000 Section 17.2: 0-20 bytes
+	 */
+	if (offset >= len) {
+		pr_debug("tquic: Packet too short for DCID length\n");
+		return -EINVAL;
+	}
+
+	dcid_len = data[offset++];
+	if (dcid_len > TQUIC_MAX_CID_LEN) {
+		pr_debug("tquic: DCID length exceeds maximum: %u > %u\n",
+			 dcid_len, TQUIC_MAX_CID_LEN);
+		return -EINVAL;
+	}
+
+	/*
+	 * Parse Destination Connection ID
+	 * This is what the client used to address us - becomes our SCID
+	 */
+	if (offset + dcid_len > len) {
+		pr_debug("tquic: Packet too short for DCID\n");
+		return -EINVAL;
+	}
+
+	conn->scid.len = dcid_len;
+	if (dcid_len > 0)
+		memcpy(conn->scid.id, data + offset, dcid_len);
+	offset += dcid_len;
+
+	/*
+	 * Parse Source Connection ID Length (1 byte)
+	 * Per RFC 9000 Section 17.2: 0-20 bytes
+	 */
+	if (offset >= len) {
+		pr_debug("tquic: Packet too short for SCID length\n");
+		return -EINVAL;
+	}
+
+	scid_len = data[offset++];
+	if (scid_len > TQUIC_MAX_CID_LEN) {
+		pr_debug("tquic: SCID length exceeds maximum: %u > %u\n",
+			 scid_len, TQUIC_MAX_CID_LEN);
+		return -EINVAL;
+	}
+
+	/*
+	 * Parse Source Connection ID
+	 * This is the client's CID - becomes our DCID (peer's CID)
+	 */
+	if (offset + scid_len > len) {
+		pr_debug("tquic: Packet too short for SCID\n");
+		return -EINVAL;
+	}
+
+	conn->dcid.len = scid_len;
+	if (scid_len > 0)
+		memcpy(conn->dcid.id, data + offset, scid_len);
+	offset += scid_len;
+
+	/*
+	 * Parse Token Length (variable-length integer)
+	 * Per RFC 9000 Section 17.2.2: Initial packets may contain a token
+	 * for address validation (from Retry or NEW_TOKEN)
+	 */
+	ret = tquic_varint_read(data, len, &offset, &token_len);
+	if (ret < 0) {
+		pr_debug("tquic: Failed to parse token length: %d\n", ret);
+		return -EINVAL;
+	}
+
+	/* Validate token length is reasonable */
+	if (token_len > len - offset) {
+		pr_debug("tquic: Token length exceeds remaining data: %llu > %zu\n",
+			 token_len, len - offset);
+		return -EINVAL;
+	}
+
+	/*
+	 * Skip token data for now
+	 * TODO: If token is present, validate it for address validation
+	 * Per RFC 9000 Section 8.1, tokens are used to prove address ownership
+	 */
+	if (token_len > 0) {
+		pr_debug("tquic: Initial packet has %llu byte token\n", token_len);
+		/* Token validation would go here */
+	}
+	offset += token_len;
+
+	/*
+	 * Parse Length (variable-length integer)
+	 * This is the remaining packet length including packet number and payload
+	 */
+	ret = tquic_varint_read(data, len, &offset, &payload_len);
+	if (ret < 0) {
+		pr_debug("tquic: Failed to parse payload length: %d\n", ret);
+		return -EINVAL;
+	}
+
+	/* Validate payload length is reasonable */
+	if (payload_len > len - offset) {
+		pr_debug("tquic: Payload length exceeds remaining data: %llu > %zu\n",
+			 payload_len, len - offset);
+		return -EINVAL;
+	}
+
+	/*
+	 * At this point we have successfully parsed:
+	 *   - Version (validated as v1 or v2)
+	 *   - DCID -> stored in conn->scid (what client uses to reach us)
+	 *   - SCID -> stored in conn->dcid (what we use to reach client)
+	 *   - Token length (and skipped token data)
+	 *   - Payload length
+	 *
+	 * The packet number and encrypted payload follow, but we don't
+	 * parse those here - they require Initial keys for decryption.
+	 *
+	 * Per RFC 9000 Section 7.2:
+	 * "Upon receiving an Initial packet, a server uses the Destination
+	 * Connection ID from the client as the Source Connection ID of
+	 * packets it sends."
+	 *
+	 * However, we generate a new SCID for the server side. The client's
+	 * original DCID (now in conn->scid) is used to derive Initial keys.
+	 */
+
+	/* Generate a new server-side SCID for our use */
+	if (conn->scid.len == 0) {
+		/* Client sent empty DCID, generate one */
+		conn->scid.len = TQUIC_DEFAULT_CID_LEN;
+		get_random_bytes(conn->scid.id, conn->scid.len);
+	}
+
+	/* Initialize CID sequence numbers */
+	conn->scid.seq_num = 0;
+	conn->scid.retire_prior_to = 0;
+	conn->dcid.seq_num = 0;
+	conn->dcid.retire_prior_to = 0;
+
+	/* Set role to server */
+	conn->role = TQUIC_ROLE_SERVER;
+
+	/* Mark as server-side connection in handshake phase */
 	conn->state = TQUIC_CONN_CONNECTING;
+
+	pr_debug("tquic: Parsed Initial packet: version=0x%08x, "
+		 "dcid_len=%u, scid_len=%u, token_len=%llu\n",
+		 version, dcid_len, scid_len, token_len);
 
 	return 0;
 }

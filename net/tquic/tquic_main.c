@@ -26,6 +26,7 @@
 #include <net/udp_tunnel.h>
 #include <net/tquic.h>
 #include <net/tquic_pm.h>
+#include "protocol.h"
 
 /* Module info */
 MODULE_AUTHOR("Linux Foundation");
@@ -334,6 +335,9 @@ EXPORT_SYMBOL_GPL(tquic_conn_migrate);
  * sysctl configuration and initializes PM state. For kernel PM with
  * auto_discover enabled, triggers initial path discovery.
  *
+ * Also adds the connection to the per-netns connection list for
+ * lookup by token (used by netlink and diagnostics interfaces).
+ *
  * Returns 0 on success, negative error on failure.
  */
 int tquic_pm_conn_init(struct tquic_connection *conn)
@@ -342,6 +346,7 @@ int tquic_pm_conn_init(struct tquic_connection *conn)
 	struct tquic_pm_pernet *pernet;
 	struct tquic_pm_ops *ops;
 	struct tquic_pm_state *pm_state;
+	struct tquic_net *tn;
 	int ret;
 
 	if (!conn || !conn->sk)
@@ -349,6 +354,10 @@ int tquic_pm_conn_init(struct tquic_connection *conn)
 
 	pernet = tquic_pm_get_pernet(net);
 	if (!pernet)
+		return -ENOENT;
+
+	tn = tquic_pernet(net);
+	if (!tn)
 		return -ENOENT;
 
 	/* Get PM ops for current type */
@@ -372,11 +381,27 @@ int tquic_pm_conn_init(struct tquic_connection *conn)
 	/* Generate unique connection token for netlink identification */
 	conn->token = get_random_u32();
 
+	/*
+	 * Initialize pm_node list head and add to per-netns connection list.
+	 * This enables lookup by token via tquic_conn_lookup_by_token().
+	 * Use RCU-safe list operations for concurrent read access.
+	 */
+	INIT_LIST_HEAD(&conn->pm_node);
+	spin_lock_bh(&tn->conn_lock);
+	list_add_tail_rcu(&conn->pm_node, &tn->connections);
+	atomic_inc(&tn->conn_count);
+	spin_unlock_bh(&tn->conn_lock);
+
 	/* Call PM-specific init if available */
 	if (ops->init) {
 		ret = ops->init(net);
 		if (ret < 0) {
 			pr_err("TQUIC: PM init failed: %d\n", ret);
+			/* Remove from connection list on failure */
+			spin_lock_bh(&tn->conn_lock);
+			list_del_rcu(&conn->pm_node);
+			atomic_dec(&tn->conn_count);
+			spin_unlock_bh(&tn->conn_lock);
 			kfree(pm_state);
 			conn->pm = NULL;
 			return ret;
@@ -403,11 +428,14 @@ EXPORT_SYMBOL_GPL(tquic_pm_conn_init);
  * tquic_pm_conn_release - Clean up path manager state for connection
  * @conn: Connection to release PM for
  *
- * Called when connection is being closed. Releases PM-specific state.
+ * Called when connection is being closed. Releases PM-specific state
+ * and removes the connection from the per-netns connection list.
  */
 void tquic_pm_conn_release(struct tquic_connection *conn)
 {
 	struct tquic_pm_state *pm_state;
+	struct net *net;
+	struct tquic_net *tn;
 
 	if (!conn || !conn->pm)
 		return;
@@ -416,8 +444,29 @@ void tquic_pm_conn_release(struct tquic_connection *conn)
 
 	/* Call PM-specific release if available */
 	if (pm_state->ops && pm_state->ops->release && conn->sk) {
-		struct net *net = sock_net(conn->sk);
+		net = sock_net(conn->sk);
 		pm_state->ops->release(net);
+	}
+
+	/*
+	 * Remove from per-netns connection list.
+	 * This must be done before freeing the pm_state to ensure
+	 * concurrent lookups via tquic_conn_lookup_by_token() are safe.
+	 */
+	if (conn->sk) {
+		net = sock_net(conn->sk);
+		tn = tquic_pernet(net);
+		if (tn && !list_empty(&conn->pm_node)) {
+			spin_lock_bh(&tn->conn_lock);
+			list_del_rcu(&conn->pm_node);
+			atomic_dec(&tn->conn_count);
+			spin_unlock_bh(&tn->conn_lock);
+
+			/*
+			 * Ensure RCU grace period before connection can be freed.
+			 * The caller (tquic_conn_destroy) should handle this.
+			 */
+		}
 	}
 
 	/* Free PM-specific private data if any */

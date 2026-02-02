@@ -30,6 +30,7 @@
 #include <net/tquic.h>
 #include "protocol.h"
 #include "cong/tquic_cong.h"
+#include "tquic_preferred_addr.h"
 
 /* Sysctl accessor forward declaration */
 int tquic_sysctl_get_prefer_preferred_address(void);
@@ -613,6 +614,10 @@ int tquic_migrate_auto(struct tquic_connection *conn,
 	/*
 	 * Case 1: NAT rebinding - new_addr is provided
 	 * Peer sent from a different source address, need to validate.
+	 *
+	 * Per RFC 9000 Section 9.3.1: NAT rebinding is always permitted
+	 * as it's a passive change (peer changed address, we respond).
+	 * This is not considered active migration.
 	 */
 	if (new_addr) {
 		pr_debug("tquic: auto-migration triggered by NAT rebind\n");
@@ -638,8 +643,17 @@ int tquic_migrate_auto(struct tquic_connection *conn,
 	}
 
 	/*
-	 * Case 2: Quality degradation - find a better path
+	 * Case 2: Quality degradation - active migration to better path
+	 *
+	 * Check if active migration is disabled (RFC 9000 Section 9.1).
+	 * If disabled, we cannot initiate migration to a new path.
 	 */
+	if (conn->migration_disabled) {
+		pr_debug("tquic: auto-migration rejected - migration disabled\n");
+		return -EPERM;
+	}
+
+	/* Check if current path actually needs migration */
 	if (path && !tquic_path_is_degraded(path)) {
 		/* Current path is fine, no migration needed */
 		return 0;
@@ -756,6 +770,21 @@ int tquic_migrate_explicit(struct tquic_connection *conn,
 
 	if (conn->state != TQUIC_CONN_CONNECTED)
 		return -ENOTCONN;
+
+	/*
+	 * Check if active migration is disabled (RFC 9000 Section 9.1)
+	 *
+	 * Per RFC 9000: "If the disable_active_migration transport parameter
+	 * is received, an endpoint that uses a different local address MUST NOT
+	 * send packets to the peer."
+	 *
+	 * Note: Migration to preferred_address is handled separately by
+	 * tquic_migrate_to_preferred_address() which bypasses this check.
+	 */
+	if (conn->migration_disabled) {
+		pr_debug("tquic: explicit migration rejected - migration disabled\n");
+		return -EPERM;
+	}
 
 	/* Check if migration is already in progress */
 	ms = (struct tquic_migration_state *)conn->state_machine;
@@ -894,6 +923,10 @@ EXPORT_SYMBOL_GPL(tquic_migration_get_status);
 /**
  * tquic_migration_cleanup - Clean up migration state
  * @conn: Connection
+ *
+ * Cleans up all migration-related state including:
+ * - General migration state machine
+ * - Preferred address migration state (RFC 9000 Section 9.6)
  */
 void tquic_migration_cleanup(struct tquic_connection *conn)
 {
@@ -902,19 +935,22 @@ void tquic_migration_cleanup(struct tquic_connection *conn)
 	if (!conn)
 		return;
 
+	/* Clean up general migration state */
 	ms = (struct tquic_migration_state *)conn->state_machine;
-	if (!ms)
-		return;
+	if (ms) {
+		/* Cancel timer */
+		del_timer_sync(&ms->timer);
 
-	/* Cancel timer */
-	del_timer_sync(&ms->timer);
+		/* Cancel any pending work */
+		cancel_work_sync(&ms->work);
 
-	/* Cancel any pending work */
-	cancel_work_sync(&ms->work);
+		/* Clear state */
+		conn->state_machine = NULL;
+		kfree(ms);
+	}
 
-	/* Clear state */
-	conn->state_machine = NULL;
-	kfree(ms);
+	/* Clean up preferred address migration state (RFC 9000 Section 9.6) */
+	tquic_pref_addr_client_cleanup(conn);
 }
 EXPORT_SYMBOL_GPL(tquic_migration_cleanup);
 
@@ -1309,14 +1345,11 @@ EXPORT_SYMBOL_GPL(tquic_server_check_path_recovery);
  */
 int tquic_migrate_to_preferred_address(struct tquic_connection *conn)
 {
-	struct tquic_negotiated_params *negotiated;
-	struct tquic_preferred_address *pref_addr;
+	struct tquic_pref_addr_migration *pref_migration;
 	struct tquic_migration_state *ms;
 	struct tquic_path *new_path;
 	struct sockaddr_storage remote_addr;
 	sa_family_t family;
-	bool has_ipv4 = false;
-	bool has_ipv6 = false;
 	int ret;
 
 	if (!conn)
@@ -1335,28 +1368,103 @@ int tquic_migrate_to_preferred_address(struct tquic_connection *conn)
 	if (ms && ms->status == TQUIC_MIGRATE_PROBING)
 		return -EBUSY;
 
-	/* Access negotiated parameters to get preferred address */
-	/* For now, we need to track this in the connection state */
-	/* TODO: Store preferred_address in connection structure */
+	/*
+	 * Access preferred address migration state.
+	 * This is stored in conn->preferred_addr by tquic_pref_addr_client_received()
+	 * after transport parameter negotiation.
+	 *
+	 * Per RFC 9000 Section 9.6, the preferred_address transport parameter
+	 * contains the server's preferred address(es), connection ID, and
+	 * stateless reset token. The client stores this for migration.
+	 */
+	pref_migration = (struct tquic_pref_addr_migration *)conn->preferred_addr;
 
 	/*
-	 * Check if we have a preferred address available.
-	 * This would be set during transport parameter negotiation.
-	 * For now, return -ENOENT if not available.
+	 * Validate preferred address is available.
+	 * Per RFC 9000 Section 9.6, the preferred_address transport parameter
+	 * is only sent by servers and contains the address client should migrate to.
 	 */
-	if (!conn->pm) {
-		pr_debug("tquic: no path manager state\n");
+	if (!pref_migration) {
+		pr_debug("tquic: no preferred address migration state\n");
+		return -ENOENT;
+	}
+
+	if (pref_migration->state != TQUIC_PREF_ADDR_AVAILABLE) {
+		pr_debug("tquic: preferred address not available (state=%d)\n",
+			 pref_migration->state);
+		return -ENOENT;
+	}
+
+	/* Check if we have at least one valid address */
+	if (!pref_migration->server_addr.ipv4_valid &&
+	    !pref_migration->server_addr.ipv6_valid) {
+		pr_debug("tquic: no valid preferred address configured\n");
 		return -ENOENT;
 	}
 
 	/*
-	 * Placeholder: In full implementation, the preferred address
-	 * would be stored in conn->pm or a dedicated structure after
-	 * transport parameter parsing.
+	 * Select address family for migration.
+	 * Prefer same family as current connection for better success chance.
 	 */
-	pr_info("tquic: migrate_to_preferred_address called for connection\n");
+	ret = tquic_pref_addr_client_select_address(conn, &family);
+	if (ret < 0) {
+		pr_debug("tquic: failed to select preferred address family: %d\n", ret);
+		return ret;
+	}
 
-	return -ENOENT;  /* Preferred address not yet stored */
+	/* Build remote address based on selected family */
+	memset(&remote_addr, 0, sizeof(remote_addr));
+	if (family == AF_INET) {
+		struct sockaddr_in *sin = (struct sockaddr_in *)&remote_addr;
+		memcpy(sin, &pref_migration->server_addr.ipv4_addr, sizeof(*sin));
+		pr_debug("tquic: migrating to preferred IPv4 address %pI4:%u\n",
+			 &sin->sin_addr, ntohs(sin->sin_port));
+	} else {
+		struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)&remote_addr;
+		memcpy(sin6, &pref_migration->server_addr.ipv6_addr, sizeof(*sin6));
+		pr_debug("tquic: migrating to preferred IPv6 address %pI6c:%u\n",
+			 &sin6->sin6_addr, ntohs(sin6->sin6_port));
+	}
+
+	/*
+	 * Create new path for preferred address migration.
+	 * Per RFC 9000 Section 9.6, use the CID provided in the preferred_address
+	 * transport parameter for the new path.
+	 */
+	new_path = tquic_pref_addr_create_path(conn, &remote_addr,
+					       &pref_migration->server_addr.cid,
+					       pref_migration->server_addr.reset_token);
+	if (IS_ERR(new_path)) {
+		pr_err("tquic: failed to create path for preferred address: %ld\n",
+		       PTR_ERR(new_path));
+		return PTR_ERR(new_path);
+	}
+
+	/* Update migration state */
+	pref_migration->migration_path = new_path;
+	pref_migration->state = TQUIC_PREF_ADDR_VALIDATING;
+	pref_migration->validation_started = ktime_get();
+	pref_migration->retry_count = 0;
+	pref_migration->migration_attempts++;
+
+	/*
+	 * Start path validation with PATH_CHALLENGE.
+	 * Per RFC 9000 Section 8.2, must validate path before switching traffic.
+	 */
+	ret = tquic_pref_addr_validate_path(conn, new_path);
+	if (ret < 0) {
+		pr_err("tquic: failed to start preferred address path validation: %d\n", ret);
+		pref_migration->state = TQUIC_PREF_ADDR_FAILED;
+		pref_migration->validation_failures++;
+		tquic_path_free(new_path);
+		pref_migration->migration_path = NULL;
+		return ret;
+	}
+
+	pr_info("tquic: started migration to preferred address (family=%s)\n",
+		family == AF_INET ? "IPv4" : "IPv6");
+
+	return 0;
 }
 EXPORT_SYMBOL_GPL(tquic_migrate_to_preferred_address);
 

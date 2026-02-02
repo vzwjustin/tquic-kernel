@@ -1245,6 +1245,10 @@ int tquic_tp_negotiate(const struct tquic_transport_params *local,
 }
 EXPORT_SYMBOL_GPL(tquic_tp_negotiate);
 
+/* Forward declaration for preferred address handling */
+int tquic_pref_addr_client_received(struct tquic_connection *conn,
+				    const struct tquic_preferred_address *pref_addr);
+
 /**
  * tquic_tp_apply - Apply negotiated parameters to a connection
  * @conn: Connection to apply parameters to
@@ -1258,6 +1262,8 @@ EXPORT_SYMBOL_GPL(tquic_tp_negotiate);
 int tquic_tp_apply(struct tquic_connection *conn,
 		   const struct tquic_negotiated_params *negotiated)
 {
+	int ret;
+
 	spin_lock(&conn->lock);
 
 	/* Apply idle timeout */
@@ -1271,13 +1277,49 @@ int tquic_tp_apply(struct tquic_connection *conn,
 	conn->max_streams_bidi = negotiated->max_streams_bidi_send;
 	conn->max_streams_uni = negotiated->max_streams_uni_send;
 
+	/*
+	 * Apply migration policy (RFC 9000 Section 9.1)
+	 *
+	 * If either endpoint advertised disable_active_migration, then
+	 * active migration is disabled. However, per RFC 9000 Section 9.6,
+	 * migration to a preferred_address is still permitted even when
+	 * disable_active_migration is present.
+	 */
+	conn->migration_disabled = negotiated->migration_disabled;
+
 	spin_unlock(&conn->lock);
 
-	pr_debug("tquic: applied transport params - idle=%u max_data=%llu/%llu multipath=%d\n",
+	/*
+	 * Handle preferred address (RFC 9000 Section 9.6)
+	 *
+	 * If the server provided a preferred_address in transport parameters,
+	 * store it in the connection for potential migration after handshake.
+	 * Only clients process preferred_address from servers.
+	 *
+	 * Per RFC 9000 Section 9.6: "A server MAY provide a preferred_address
+	 * transport parameter, even when the disable_active_migration
+	 * transport parameter is present."
+	 */
+	if (negotiated->preferred_address_present &&
+	    conn->role == TQUIC_ROLE_CLIENT) {
+		ret = tquic_pref_addr_client_received(conn,
+						      &negotiated->preferred_address);
+		if (ret < 0) {
+			pr_debug("tquic: failed to store preferred address: %d\n",
+				 ret);
+			/* Non-fatal: connection continues without preferred addr */
+		} else {
+			pr_info("tquic: stored server's preferred address for migration\n");
+		}
+	}
+
+	pr_debug("tquic: applied transport params - idle=%u max_data=%llu/%llu multipath=%d pref_addr=%d migration_disabled=%d\n",
 		 negotiated->idle_timeout,
 		 negotiated->max_data_send,
 		 negotiated->max_data_recv,
-		 negotiated->multipath_enabled);
+		 negotiated->multipath_enabled,
+		 negotiated->preferred_address_present,
+		 negotiated->migration_disabled);
 
 	return 0;
 }

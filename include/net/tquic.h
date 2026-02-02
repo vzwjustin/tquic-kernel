@@ -371,6 +371,15 @@ struct tquic_connection {
 	u8 num_paths;
 	u8 max_paths;			/* Maximum paths allowed */
 
+	/*
+	 * Migration control (RFC 9000 Section 9)
+	 *
+	 * If either endpoint advertises disable_active_migration transport
+	 * parameter, active migration MUST NOT be performed. However,
+	 * migration to preferred_address is still allowed per RFC 9000 9.6.
+	 */
+	bool migration_disabled;	/* True if active migration is disabled */
+
 	/* Stream management */
 	struct rb_root streams;
 	u64 next_stream_id_bidi;
@@ -426,6 +435,7 @@ struct tquic_connection {
 		u64 datagrams_sent;		/* Statistics: sent count */
 		u64 datagrams_received;		/* Statistics: recv count */
 		u64 datagrams_dropped;		/* Statistics: dropped count */
+		wait_queue_head_t wait;		/* Wait queue for blocking recv */
 	} datagram;
 
 	/*
@@ -457,6 +467,25 @@ struct tquic_connection {
 	 * and server accept/reject handling. NULL when 0-RTT not in use.
 	 */
 	void *zero_rtt_state;	/* struct tquic_zero_rtt_state_s * */
+
+	/*
+	 * Preferred Address state (RFC 9000 Section 9.6)
+	 *
+	 * Server advertises a preferred address in transport parameters.
+	 * Client stores this address and can migrate to it after handshake.
+	 * This enables server-directed migration for load balancing/failover.
+	 *
+	 * The preferred_addr pointer holds client-side migration state
+	 * (struct tquic_pref_addr_migration *) which includes:
+	 * - IPv4 and IPv6 preferred addresses from server
+	 * - Connection ID for preferred address path
+	 * - Stateless reset token for the CID
+	 * - Migration state machine
+	 *
+	 * For server-side, this holds the config being advertised
+	 * (struct tquic_pref_addr_config *).
+	 */
+	void *preferred_addr;	/* struct tquic_pref_addr_migration/config * */
 
 	spinlock_t lock;
 	refcount_t refcnt;
@@ -965,6 +994,37 @@ void tquic_conn_on_packet_received(struct tquic_connection *conn, size_t bytes);
 
 /* Connection lookup */
 struct tquic_connection *tquic_conn_lookup_by_cid(const struct tquic_cid *cid);
+
+/**
+ * tquic_conn_get - Acquire a reference on a connection
+ * @conn: Connection to reference
+ *
+ * Increments the connection's reference count. Use this when storing
+ * a pointer to a connection that needs to remain valid.
+ *
+ * Returns: true if reference was acquired, false if connection is being destroyed
+ */
+static inline bool tquic_conn_get(struct tquic_connection *conn)
+{
+	return refcount_inc_not_zero(&conn->refcnt);
+}
+
+/**
+ * tquic_conn_put - Release a reference on a connection
+ * @conn: Connection to release
+ *
+ * Decrements the connection's reference count. When the count reaches
+ * zero, the connection will be destroyed.
+ *
+ * Note: This function returns whether the final reference was dropped,
+ * but callers should not rely on this for destruction - the destruction
+ * is handled internally.
+ */
+static inline void tquic_conn_put(struct tquic_connection *conn)
+{
+	if (refcount_dec_and_test(&conn->refcnt))
+		tquic_conn_destroy(conn);
+}
 
 /* State machine cleanup */
 void tquic_conn_state_cleanup(struct tquic_connection *conn);
@@ -1602,6 +1662,13 @@ int tquic_bond_get_stats(struct tquic_connection *conn,
 
 /* Forward declaration for UDP socket state */
 struct tquic_udp_sock;
+
+/* Listener registration and lookup */
+int tquic_register_listener(struct sock *sk);
+void tquic_unregister_listener(struct sock *sk);
+struct sock *tquic_lookup_listener(const struct sockaddr_storage *local_addr);
+struct sock *tquic_lookup_listener_net(struct net *net,
+				       const struct sockaddr_storage *local_addr);
 
 /* UDP socket lifecycle */
 void tquic_udp_sock_put(struct tquic_udp_sock *us);

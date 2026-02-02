@@ -24,6 +24,7 @@
 #include <net/tquic_pmtud.h>
 #include <uapi/linux/tquic_pm.h>
 #include "../cong/tquic_cong.h"
+#include "../protocol.h"
 
 /* Path probe configuration */
 #define TQUIC_PM_PROBE_INTERVAL_MS	1000	/* 1 second */
@@ -851,14 +852,65 @@ int tquic_conn_remove_path_safe(struct tquic_connection *conn,
 }
 EXPORT_SYMBOL_GPL(tquic_conn_remove_path_safe);
 
-/*
- * Lookup connection by netlink token
+/**
+ * tquic_conn_lookup_by_token - Find a connection by its unique token
+ * @net: Network namespace to search in
+ * @token: The connection token to search for (assigned during connection setup)
  *
- * Stub for now - full implementation in connection management phase.
+ * This function is used by the netlink interface and diagnostics subsystem
+ * to locate a TQUIC connection by its unique 32-bit token. The token is
+ * generated using get_random_u32() when the connection's path manager is
+ * initialized and serves as a stable identifier for external interfaces.
+ *
+ * The function iterates through the per-netns connection list under RCU
+ * read-side protection. If a matching connection is found, its reference
+ * count is incremented before returning to ensure the connection remains
+ * valid while the caller uses it.
+ *
+ * Context: Can be called from process context or soft-IRQ context.
+ *          Uses RCU read-side locking internally.
+ *
+ * Return: Pointer to the connection with a reference held, or NULL if not found.
+ *         Caller must call tquic_conn_put() when done with the connection.
  */
 struct tquic_connection *tquic_conn_lookup_by_token(struct net *net, u32 token)
 {
-	/* TODO: Implement connection hash table lookup by token */
+	struct tquic_net *tn;
+	struct tquic_connection *conn;
+
+	if (!net)
+		return NULL;
+
+	tn = tquic_pernet(net);
+	if (!tn)
+		return NULL;
+
+	/*
+	 * Use RCU read-side locking to safely iterate the connection list.
+	 * The connection list is protected by RCU for read access and
+	 * tn->conn_lock for writes.
+	 */
+	rcu_read_lock();
+	list_for_each_entry_rcu(conn, &tn->connections, pm_node) {
+		if (conn->token == token) {
+			/*
+			 * Found a match - try to get a reference.
+			 * Use refcount_inc_not_zero() to handle the case where
+			 * the connection is being destroyed concurrently.
+			 */
+			if (refcount_inc_not_zero(&conn->refcnt)) {
+				rcu_read_unlock();
+				return conn;
+			}
+			/*
+			 * Connection is being destroyed, continue searching
+			 * in case of token collision (extremely unlikely but
+			 * theoretically possible with 32-bit random tokens).
+			 */
+		}
+	}
+	rcu_read_unlock();
+
 	return NULL;
 }
 EXPORT_SYMBOL_GPL(tquic_conn_lookup_by_token);

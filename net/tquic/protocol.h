@@ -448,6 +448,8 @@ void tquic_unregister_listener(struct sock *sk);
 
 /* Listener lookup (tquic_udp.c) */
 struct sock *tquic_lookup_listener(const struct sockaddr_storage *local_addr);
+struct sock *tquic_lookup_listener_net(struct net *net,
+				       const struct sockaddr_storage *local_addr);
 
 /* Listener flag for tquic_sock.flags */
 #define TQUIC_F_LISTENER_REGISTERED	BIT(5)

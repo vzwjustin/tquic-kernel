@@ -620,20 +620,112 @@ static int tquic_v6_connect(struct sock *sk, struct sockaddr *addr, int addr_len
 		conn->active_path->mtu = mtu;
 	}
 
-	conn->state = TQUIC_CONN_CONNECTING;
+	/*
+	 * Initialize connection state machine for client mode.
+	 * This generates the initial source and destination CIDs,
+	 * sets up the state machine, and prepares for handshake.
+	 */
+	err = tquic_conn_client_connect(conn, (struct sockaddr *)usin);
+	if (err < 0) {
+		pr_err("tquic: IPv6 client connect init failed: %d\n", err);
+		goto failure;
+	}
+
+	/*
+	 * Initialize scheduler - use requested or per-netns default.
+	 * Per CONTEXT.md: "Scheduler locked at connection establishment"
+	 */
+	{
+		struct tquic_sched_ops *sched_ops = NULL;
+
+		if (tsk->requested_scheduler[0])
+			sched_ops = tquic_sched_find(tsk->requested_scheduler);
+
+		conn->scheduler = tquic_sched_init_conn(conn, sched_ops);
+		if (!conn->scheduler) {
+			pr_warn("tquic: IPv6 scheduler init failed, using default\n");
+			conn->scheduler = tquic_sched_init_conn(conn, NULL);
+			if (!conn->scheduler) {
+				err = -ENOMEM;
+				goto failure;
+			}
+		}
+	}
+
+	/* Set state to connecting - handshake in progress */
 	inet_sk_set_state(sk, TCP_SYN_SENT);
 
-	/* TODO: Initiate QUIC handshake */
+	/*
+	 * Allocate and set up the timer state for the connection.
+	 * This includes the PTO timer for Initial packet retransmission.
+	 */
+	if (!conn->timer_state) {
+		conn->timer_state = tquic_timer_state_alloc(conn);
+		if (!conn->timer_state) {
+			pr_warn("tquic: IPv6 timer state alloc failed\n");
+			/* Continue without timer - basic operation still works */
+		}
+	}
 
-	/* For now, simulate immediate connection */
+	/*
+	 * Initiate TLS 1.3 handshake via net/handshake infrastructure.
+	 * This sends the Initial packet containing ClientHello CRYPTO frame.
+	 * The handshake is asynchronous - we'll block waiting for completion.
+	 *
+	 * Per RFC 9001: The Initial packet contains the TLS ClientHello
+	 * in a CRYPTO frame. The packet is padded to 1200 bytes minimum.
+	 */
+	err = tquic_start_handshake(sk);
+	if (err < 0 && err != -EALREADY) {
+		pr_err("tquic: IPv6 handshake start failed: %d\n", err);
+		goto failure_close;
+	}
+
+	/*
+	 * Block until handshake completes.
+	 * Per CONTEXT.md: connect() blocks until handshake completes or
+	 * a fixed 30-second timeout expires.
+	 *
+	 * The timer system handles Initial packet retransmission during
+	 * handshake via the PTO timer mechanism.
+	 */
+	err = tquic_wait_for_handshake(sk, TQUIC_HANDSHAKE_TIMEOUT_MS);
+	if (err < 0) {
+		pr_err("tquic: IPv6 handshake failed: %d\n", err);
+		goto failure_close;
+	}
+
+	/* Verify handshake actually completed */
+	if (!(tsk->flags & TQUIC_F_HANDSHAKE_DONE)) {
+		err = -EQUIC_HANDSHAKE_FAILED;
+		goto failure_close;
+	}
+
+	/* Handshake succeeded - mark connection as established */
 	conn->state = TQUIC_CONN_CONNECTED;
 	inet_sk_set_state(sk, TCP_ESTABLISHED);
+
+	/* Initialize path manager after connection established */
+	err = tquic_pm_conn_init(conn);
+	if (err < 0) {
+		pr_warn("tquic: IPv6 PM init failed: %d\n", err);
+		/* Continue anyway - PM is optional for basic operation */
+	}
+
+	/* Start idle timer now that connection is established */
+	if (conn->timer_state)
+		tquic_timer_set_idle(conn->timer_state);
 
 	pr_debug("tquic: IPv6 connected to %pI6c:%u\n",
 		 &usin->sin6_addr, ntohs(usin->sin6_port));
 
 	return 0;
 
+failure_close:
+	/* Clean up handshake state on failure */
+	tquic_handshake_cleanup(sk);
+	inet_sk_set_state(sk, TCP_CLOSE);
+	sk->sk_err = -err;
 failure:
 	sk->sk_route_caps = 0;
 	return err;

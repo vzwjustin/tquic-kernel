@@ -1963,22 +1963,228 @@ int tquic_send_connection_close(struct tquic_connection *conn,
 EXPORT_SYMBOL_GPL(tquic_send_connection_close);
 
 /*
- * Flush pending output on all paths
+ * tquic_output_flush - Flush pending stream data on connection
+ * @conn: Connection with pending stream data
+ *
+ * This function implements the transmission trigger for non-NODELAY mode.
+ * It iterates over all streams with pending data and transmits frames
+ * respecting flow control and congestion control limits.
+ *
+ * Flow control is enforced at two levels:
+ * - Stream level: Cannot exceed stream->max_send_data
+ * - Connection level: Cannot exceed conn->max_data_remote
+ *
+ * Congestion control is checked per-path before transmission.
+ *
+ * Returns: Number of packets transmitted, or negative errno on error
  */
 int tquic_output_flush(struct tquic_connection *conn)
 {
 	struct tquic_path *path;
+	struct tquic_pending_frame *frame;
+	struct sk_buff *skb, *send_skb;
+	struct rb_node *node;
+	LIST_HEAD(frames);
+	u64 pkt_num;
+	u64 conn_credit;
+	u64 inflight;
+	int packets_sent = 0;
 	int ret = 0;
+	bool cwnd_limited;
 
-	list_for_each_entry(path, &conn->paths, list) {
-		if (path->state != TQUIC_PATH_ACTIVE)
-			continue;
+	if (!conn)
+		return -EINVAL;
 
-		/* Flush any pending paced packets */
-		/* This is a simplified implementation */
+	if (conn->state != TQUIC_CONN_CONNECTED)
+		return -ENOTCONN;
+
+	/* Select path for transmission */
+	path = tquic_select_path(conn, NULL);
+	if (!path || path->state != TQUIC_PATH_ACTIVE) {
+		pr_debug("tquic: output_flush no active path\n");
+		return 0;
 	}
 
-	return ret;
+	/*
+	 * Check congestion window before attempting transmission.
+	 * If cwnd is exhausted, we'll be woken by ACK processing.
+	 */
+	if (path->stats.cwnd > 0) {
+		inflight = path->stats.tx_bytes - path->stats.acked_bytes;
+		cwnd_limited = (inflight >= path->stats.cwnd);
+	} else {
+		/* No cwnd limit set yet (initial state) - allow sending */
+		cwnd_limited = false;
+	}
+
+	if (cwnd_limited) {
+		pr_debug("tquic: output_flush blocked by cwnd (inflight=%llu, cwnd=%u)\n",
+			 inflight, path->stats.cwnd);
+		return 0;
+	}
+
+	/* Check connection-level flow control credit */
+	spin_lock_bh(&conn->lock);
+	if (conn->data_sent >= conn->max_data_remote) {
+		spin_unlock_bh(&conn->lock);
+		pr_debug("tquic: output_flush blocked by connection flow control\n");
+		return 0;
+	}
+	conn_credit = conn->max_data_remote - conn->data_sent;
+	spin_unlock_bh(&conn->lock);
+
+	/*
+	 * Iterate over streams with pending data.
+	 * We use the connection's stream rb-tree directly.
+	 */
+	spin_lock_bh(&conn->lock);
+	for (node = rb_first(&conn->streams); node && packets_sent < 16; node = rb_next(node)) {
+		struct tquic_stream *stream;
+		u64 stream_credit;
+		size_t chunk_size;
+
+		stream = rb_entry(node, struct tquic_stream, node);
+
+		/* Skip streams with no pending data */
+		if (skb_queue_empty(&stream->send_buf))
+			continue;
+
+		/* Skip blocked streams */
+		if (stream->blocked)
+			continue;
+
+		/* Check stream-level flow control */
+		if (stream->send_offset >= stream->max_send_data) {
+			stream->blocked = true;
+			continue;
+		}
+		stream_credit = stream->max_send_data - stream->send_offset;
+
+		/* Process pending data from this stream's send buffer */
+		while (!skb_queue_empty(&stream->send_buf) &&
+		       conn_credit > 0 && stream_credit > 0 &&
+		       packets_sent < 16) {
+			u64 stream_offset;
+
+			skb = skb_peek(&stream->send_buf);
+			if (!skb)
+				break;
+
+			/* Determine chunk size respecting flow control */
+			chunk_size = skb->len;
+			if (chunk_size > stream_credit)
+				chunk_size = stream_credit;
+			if (chunk_size > conn_credit)
+				chunk_size = conn_credit;
+			if (chunk_size > path->mtu - 100)
+				chunk_size = path->mtu - 100;
+
+			/* Get stream offset from skb cb */
+			stream_offset = *(u64 *)skb->cb;
+
+			/* Allocate and set up pending frame */
+			frame = kzalloc(sizeof(*frame), GFP_ATOMIC);
+			if (!frame) {
+				ret = -ENOMEM;
+				break;
+			}
+
+			frame->type = TQUIC_FRAME_STREAM;
+			frame->stream_id = stream->id;
+			frame->offset = stream_offset;
+			frame->len = chunk_size;
+			frame->fin = stream->fin_sent &&
+				     (chunk_size == skb->len) &&
+				     (skb == skb_peek_tail(&stream->send_buf));
+
+			if (chunk_size > 0) {
+				frame->data = kmalloc(chunk_size, GFP_ATOMIC);
+				if (!frame->data) {
+					kfree(frame);
+					ret = -ENOMEM;
+					break;
+				}
+				memcpy(frame->data, skb->data, chunk_size);
+			}
+
+			INIT_LIST_HEAD(&frame->list);
+			list_add_tail(&frame->list, &frames);
+
+			/* Get next packet number */
+			pkt_num = conn->stats.tx_packets++;
+
+			/* Release lock while sending (may sleep in crypto) */
+			spin_unlock_bh(&conn->lock);
+
+			/* Assemble and send packet */
+			send_skb = tquic_assemble_packet(conn, path, -1, pkt_num, &frames);
+			if (send_skb) {
+				/*
+				 * Send via tquic_output_packet which handles:
+				 * - EDT timestamp for FQ qdisc pacing
+				 * - Internal pacing timer scheduling
+				 * - Packet tracking for retransmission
+				 *
+				 * Pacing is configured via sk->sk_pacing_rate
+				 * and handled by either FQ qdisc or EDT timestamps.
+				 */
+				ret = tquic_output_packet(conn, path, send_skb);
+
+				if (ret >= 0) {
+					packets_sent++;
+					pr_debug("tquic: output_flush sent pkt %llu stream %llu offset %llu len %zu\n",
+						 pkt_num, stream->id, stream_offset, chunk_size);
+				}
+			} else {
+				/* Cleanup frame on assembly failure */
+				struct tquic_pending_frame *f, *tmp;
+				list_for_each_entry_safe(f, tmp, &frames, list) {
+					list_del(&f->list);
+					kfree(f->data);
+					kfree(f);
+				}
+			}
+
+			/* Re-acquire lock and update state */
+			spin_lock_bh(&conn->lock);
+
+			if (ret >= 0 && send_skb) {
+				/* Update flow control accounting */
+				conn->data_sent += chunk_size;
+				conn_credit -= chunk_size;
+				stream_credit -= chunk_size;
+
+				/* Consume data from stream's send buffer */
+				if (chunk_size == skb->len) {
+					/* Consumed entire skb */
+					skb_unlink(skb, &stream->send_buf);
+					kfree_skb(skb);
+				} else {
+					/* Partial consumption - adjust skb */
+					skb_pull(skb, chunk_size);
+					*(u64 *)skb->cb = stream_offset + chunk_size;
+				}
+			}
+
+			/* Clear frame list for next iteration */
+			INIT_LIST_HEAD(&frames);
+
+			if (ret < 0)
+				break;
+		}
+
+		if (ret < 0)
+			break;
+	}
+	spin_unlock_bh(&conn->lock);
+
+	/*
+	 * If we transmitted any packets, the timer/recovery subsystem
+	 * will handle loss detection and retransmission via
+	 * tquic_timer_schedule() called from tquic_output_packet().
+	 */
+
+	return packets_sent > 0 ? packets_sent : ret;
 }
 EXPORT_SYMBOL_GPL(tquic_output_flush);
 
@@ -2007,6 +2213,7 @@ void tquic_datagram_init(struct tquic_connection *conn)
 
 	spin_lock_init(&conn->datagram.lock);
 	skb_queue_head_init(&conn->datagram.recv_queue);
+	init_waitqueue_head(&conn->datagram.wait);
 
 	conn->datagram.enabled = false;
 	conn->datagram.max_send_size = 0;
@@ -2246,6 +2453,76 @@ EXPORT_SYMBOL_GPL(tquic_send_datagram);
  *         -EAGAIN: No datagram available (non-blocking)
  *         -EMSGSIZE: Buffer too small (datagram truncated)
  */
+/*
+ * tquic_datagram_wait_data - Wait for datagram data to arrive
+ * @conn: Connection to wait on
+ * @timeo: Pointer to timeout in jiffies (updated on return)
+ *
+ * Blocks until a datagram is available, the connection closes,
+ * an error occurs, or the timeout expires.
+ *
+ * Return: 0 on success (data available), negative error code otherwise
+ *         -EAGAIN: Timeout expired with no data
+ *         -EINTR: Interrupted by signal (use sock_intr_errno for proper value)
+ *         -ENOTCONN: Connection closed or in error state
+ */
+static int tquic_datagram_wait_data(struct tquic_connection *conn, long *timeo)
+{
+	struct sock *sk = conn->sk;
+	int ret;
+
+	/*
+	 * Wait for one of:
+	 *   - Datagram available in receive queue
+	 *   - Connection error (sk_err set)
+	 *   - Connection closing/closed
+	 *   - Socket shutdown (sk_shutdown & RCV_SHUTDOWN)
+	 *   - Timeout
+	 *   - Signal
+	 *
+	 * The datagram.wait queue is woken by tquic_input.c when a
+	 * DATAGRAM frame is received (via sk->sk_data_ready callback).
+	 */
+	ret = wait_event_interruptible_timeout(
+		conn->datagram.wait,
+		!skb_queue_empty(&conn->datagram.recv_queue) ||
+		    (sk && sk->sk_err) ||
+		    (sk && (sk->sk_shutdown & RCV_SHUTDOWN)) ||
+		    conn->state == TQUIC_CONN_CLOSED ||
+		    conn->state == TQUIC_CONN_DRAINING,
+		*timeo);
+
+	if (ret < 0) {
+		/* Interrupted by signal */
+		return -EINTR;
+	}
+
+	if (ret == 0) {
+		/* Timeout expired */
+		*timeo = 0;
+		return -EAGAIN;
+	}
+
+	/* Update remaining timeout */
+	*timeo = ret;
+
+	/* Check for socket error */
+	if (sk && sk->sk_err)
+		return -sock_error(sk);
+
+	/* Check for shutdown */
+	if (sk && (sk->sk_shutdown & RCV_SHUTDOWN))
+		return -ENOTCONN;
+
+	/* Check for connection close */
+	if (conn->state == TQUIC_CONN_CLOSED ||
+	    conn->state == TQUIC_CONN_DRAINING)
+		return -ENOTCONN;
+
+	/* Data should be available now */
+	return 0;
+}
+
 int tquic_recv_datagram(struct tquic_connection *conn,
 			void *data, size_t len, int flags)
 {
@@ -2253,6 +2530,7 @@ int tquic_recv_datagram(struct tquic_connection *conn,
 	size_t copy_len;
 	unsigned long irqflags;
 	int ret;
+	long timeo;
 
 	if (!conn)
 		return -EINVAL;
@@ -2265,17 +2543,55 @@ int tquic_recv_datagram(struct tquic_connection *conn,
 	if (!conn->datagram.enabled)
 		return -ENOBUFS;
 
+	/*
+	 * Determine timeout for blocking operation.
+	 * Use the socket's SO_RCVTIMEO if available, otherwise block indefinitely.
+	 * A timeout of 0 means non-blocking when MSG_DONTWAIT is not set but
+	 * the socket is in non-blocking mode.
+	 */
+	if (conn->sk)
+		timeo = sock_rcvtimeo(conn->sk, flags & MSG_DONTWAIT);
+	else
+		timeo = (flags & MSG_DONTWAIT) ? 0 : MAX_SCHEDULE_TIMEOUT;
+
+retry:
 	spin_lock_irqsave(&conn->datagram.lock, irqflags);
 
 	/* Check for available datagram */
 	skb = skb_peek(&conn->datagram.recv_queue);
 	if (!skb) {
 		spin_unlock_irqrestore(&conn->datagram.lock, irqflags);
+
+		/* Non-blocking mode: return immediately */
 		if (flags & MSG_DONTWAIT)
 			return -EAGAIN;
 
-		/* TODO: Implement blocking wait with wait queue */
-		return -EAGAIN;
+		/* No timeout set (non-blocking socket): return immediately */
+		if (timeo == 0)
+			return -EAGAIN;
+
+		/* Check for pending signals before blocking */
+		if (signal_pending(current))
+			return sock_intr_errno(timeo);
+
+		/* Block waiting for data */
+		ret = tquic_datagram_wait_data(conn, &timeo);
+		if (ret < 0) {
+			if (ret == -EINTR)
+				return sock_intr_errno(timeo);
+			return ret;
+		}
+
+		/*
+		 * Re-check connection state after waking up.
+		 * Connection may have transitioned while we were sleeping.
+		 */
+		if (conn->state != TQUIC_CONN_CONNECTED &&
+		    conn->state != TQUIC_CONN_CLOSING)
+			return -ENOTCONN;
+
+		/* Retry to get the datagram */
+		goto retry;
 	}
 
 	/* Calculate how much to copy */

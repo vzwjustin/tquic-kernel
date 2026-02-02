@@ -252,24 +252,42 @@ static int tquic_udp_reserve_port(__be16 port)
  */
 
 /**
+ * tquic_listener_hash_port - Compute hash for listener lookup by port only
+ * @port: Port number in network byte order
+ *
+ * Hash by port only to allow finding both specific-address and wildcard
+ * listeners in the same bucket. Address matching is done during iteration.
+ *
+ * This follows the pattern of TCP's inet_lhashfn() which hashes by port,
+ * allowing efficient lookup of listeners bound to different addresses
+ * on the same port.
+ */
+static inline u32 tquic_listener_hash_port(__be16 port)
+{
+	return jhash_1word((__force u32)port, 0) & 0xff;
+}
+
+/**
  * tquic_listener_hash - Compute hash for listener lookup
  * @addr: Local address to hash
  *
- * Simple hash based on port and address for listener table indexing.
+ * Extracts port from address and hashes by port only.
+ * This ensures listeners on the same port but different addresses
+ * (including wildcard) end up in the same hash bucket.
  */
 static inline u32 tquic_listener_hash(const struct sockaddr_storage *addr)
 {
+	__be16 port = 0;
+
 	if (addr->ss_family == AF_INET) {
 		const struct sockaddr_in *sin = (const struct sockaddr_in *)addr;
-		return (ntohs(sin->sin_port) ^
-			ntohl(sin->sin_addr.s_addr)) & 0xff;
+		port = sin->sin_port;
 	} else if (addr->ss_family == AF_INET6) {
 		const struct sockaddr_in6 *sin6 = (const struct sockaddr_in6 *)addr;
-		u32 hash = jhash(&sin6->sin6_addr, sizeof(sin6->sin6_addr),
-				 ntohs(sin6->sin6_port));
-		return hash & 0xff;
+		port = sin6->sin6_port;
 	}
-	return 0;
+
+	return tquic_listener_hash_port(port);
 }
 
 /**
@@ -327,41 +345,374 @@ void tquic_unregister_listener(struct sock *sk)
 }
 EXPORT_SYMBOL_GPL(tquic_unregister_listener);
 
+/*
+ * Helper: Check if an IPv4 address is wildcard (INADDR_ANY)
+ */
+static inline bool tquic_ipv4_is_wildcard(__be32 addr)
+{
+	return addr == htonl(INADDR_ANY);
+}
+
+#if IS_ENABLED(CONFIG_IPV6)
+/*
+ * Helper: Check if an IPv6 address is wildcard (in6addr_any)
+ */
+static inline bool tquic_ipv6_is_wildcard(const struct in6_addr *addr)
+{
+	return ipv6_addr_any(addr);
+}
+
+/*
+ * Helper: Check if IPv6 address is IPv4-mapped (::ffff:x.x.x.x)
+ */
+static inline bool tquic_ipv6_is_v4mapped(const struct in6_addr *addr)
+{
+	return ipv6_addr_v4mapped(addr);
+}
+
+/*
+ * Helper: Extract IPv4 address from IPv4-mapped IPv6 address
+ */
+static inline __be32 tquic_ipv6_get_v4mapped(const struct in6_addr *addr)
+{
+	return addr->s6_addr32[3];
+}
+#endif
+
+/*
+ * tquic_listener_addr_match - Compare addresses for listener matching
+ * @bind_addr: Listener's bound address
+ * @local_addr: Incoming packet's destination address
+ *
+ * Returns match score:
+ *   0 = no match
+ *   1 = wildcard match (listener bound to INADDR_ANY/in6addr_any)
+ *   2 = exact address match
+ *   3 = IPv4-mapped match (IPv6 wildcard listener matching IPv4)
+ *
+ * Higher score = more specific match.
+ */
+static int tquic_listener_addr_match(const struct sockaddr_storage *bind_addr,
+				     const struct sockaddr_storage *local_addr)
+{
+	/* Handle IPv4 addresses */
+	if (bind_addr->ss_family == AF_INET &&
+	    local_addr->ss_family == AF_INET) {
+		const struct sockaddr_in *bind_sin =
+			(const struct sockaddr_in *)bind_addr;
+		const struct sockaddr_in *local_sin =
+			(const struct sockaddr_in *)local_addr;
+
+		/* Port must match */
+		if (bind_sin->sin_port != local_sin->sin_port)
+			return 0;
+
+		/* Exact address match */
+		if (bind_sin->sin_addr.s_addr == local_sin->sin_addr.s_addr)
+			return 2;
+
+		/* Wildcard match (INADDR_ANY) */
+		if (tquic_ipv4_is_wildcard(bind_sin->sin_addr.s_addr))
+			return 1;
+
+		return 0;
+	}
+
+#if IS_ENABLED(CONFIG_IPV6)
+	/* Handle IPv6 addresses */
+	if (bind_addr->ss_family == AF_INET6 &&
+	    local_addr->ss_family == AF_INET6) {
+		const struct sockaddr_in6 *bind_sin6 =
+			(const struct sockaddr_in6 *)bind_addr;
+		const struct sockaddr_in6 *local_sin6 =
+			(const struct sockaddr_in6 *)local_addr;
+
+		/* Port must match */
+		if (bind_sin6->sin6_port != local_sin6->sin6_port)
+			return 0;
+
+		/* Exact address match */
+		if (ipv6_addr_equal(&bind_sin6->sin6_addr,
+				    &local_sin6->sin6_addr))
+			return 2;
+
+		/* Wildcard match (in6addr_any) */
+		if (tquic_ipv6_is_wildcard(&bind_sin6->sin6_addr))
+			return 1;
+
+		return 0;
+	}
+
+	/*
+	 * Handle cross-family matching:
+	 * IPv6 wildcard listener can accept IPv4 connections
+	 * (dual-stack socket behavior)
+	 */
+	if (bind_addr->ss_family == AF_INET6 &&
+	    local_addr->ss_family == AF_INET) {
+		const struct sockaddr_in6 *bind_sin6 =
+			(const struct sockaddr_in6 *)bind_addr;
+		const struct sockaddr_in *local_sin =
+			(const struct sockaddr_in *)local_addr;
+
+		/* Port must match (network byte order) */
+		if (bind_sin6->sin6_port != local_sin->sin_port)
+			return 0;
+
+		/* IPv6 wildcard matches any IPv4 address */
+		if (tquic_ipv6_is_wildcard(&bind_sin6->sin6_addr))
+			return 1;
+
+		/*
+		 * IPv4-mapped IPv6 address match:
+		 * Listener bound to ::ffff:a.b.c.d matches IPv4 a.b.c.d
+		 */
+		if (tquic_ipv6_is_v4mapped(&bind_sin6->sin6_addr)) {
+			__be32 mapped_addr = tquic_ipv6_get_v4mapped(
+				&bind_sin6->sin6_addr);
+
+			/* Exact mapped address match */
+			if (mapped_addr == local_sin->sin_addr.s_addr)
+				return 2;
+
+			/* Wildcard mapped address (::ffff:0.0.0.0) */
+			if (tquic_ipv4_is_wildcard(mapped_addr))
+				return 1;
+		}
+
+		return 0;
+	}
+
+	/*
+	 * Handle IPv4 listener matching IPv4-mapped IPv6 address
+	 * (incoming packet has IPv6 header but IPv4-mapped destination)
+	 */
+	if (bind_addr->ss_family == AF_INET &&
+	    local_addr->ss_family == AF_INET6) {
+		const struct sockaddr_in *bind_sin =
+			(const struct sockaddr_in *)bind_addr;
+		const struct sockaddr_in6 *local_sin6 =
+			(const struct sockaddr_in6 *)local_addr;
+		__be32 v4addr;
+
+		/* Only match if the IPv6 address is IPv4-mapped */
+		if (!tquic_ipv6_is_v4mapped(&local_sin6->sin6_addr))
+			return 0;
+
+		/* Port must match */
+		if (bind_sin->sin_port != local_sin6->sin6_port)
+			return 0;
+
+		/* Extract the IPv4 address from the mapped address */
+		v4addr = tquic_ipv6_get_v4mapped(&local_sin6->sin6_addr);
+
+		/* Exact address match */
+		if (bind_sin->sin_addr.s_addr == v4addr)
+			return 2;
+
+		/* Wildcard match */
+		if (tquic_ipv4_is_wildcard(bind_sin->sin_addr.s_addr))
+			return 1;
+
+		return 0;
+	}
+#endif
+
+	return 0;
+}
+
+/**
+ * tquic_listener_compute_score - Compute match score for a listener
+ * @tsk: TQUIC socket to evaluate
+ * @local_addr: Incoming packet's destination address
+ * @net: Network namespace to match
+ *
+ * Computes a score indicating how well this listener matches the
+ * incoming packet's destination address. Higher scores indicate
+ * more specific matches.
+ *
+ * Score breakdown:
+ *   -1 = No match (wrong port, wrong address family, wrong netns)
+ *    1 = Wildcard address match (INADDR_ANY or in6addr_any)
+ *    2 = Exact address match
+ *    3 = Exact match + bound to specific device
+ *    4 = Exact match + bound device + same CPU (NUMA locality)
+ *
+ * This mirrors TCP's compute_score() in inet_hashtables.c
+ *
+ * Returns: Match score, or -1 if no match
+ */
+static int tquic_listener_compute_score(struct tquic_sock *tsk,
+					const struct sockaddr_storage *local_addr,
+					struct net *net)
+{
+	struct sock *sk = (struct sock *)tsk;
+	int score;
+	int addr_score;
+
+	/* Must be in listening state */
+	if (sk->sk_state != TCP_LISTEN)
+		return -1;
+
+	/* Network namespace must match */
+	if (net && !net_eq(sock_net(sk), net))
+		return -1;
+
+	/* Get address match score (0 = no match, 1 = wildcard, 2 = exact) */
+	addr_score = tquic_listener_addr_match(&tsk->bind_addr, local_addr);
+	if (addr_score == 0)
+		return -1;
+
+	/* Base score from address match */
+	score = addr_score;
+
+	/*
+	 * Bonus for bound device (like TCP):
+	 * Listeners bound to a specific interface are preferred over
+	 * listeners bound to all interfaces.
+	 */
+	if (sk->sk_bound_dev_if) {
+		/*
+		 * Note: For full device matching we would need the incoming
+		 * interface index. For now, just give a small bonus for
+		 * being bound to a specific device.
+		 */
+		score++;
+	}
+
+	/*
+	 * Bonus for CPU locality (like TCP):
+	 * If the listener's preferred incoming CPU matches the current
+	 * CPU, give a small performance bonus.
+	 */
+	if (READ_ONCE(sk->sk_incoming_cpu) == raw_smp_processor_id())
+		score++;
+
+	return score;
+}
+
+/**
+ * tquic_lookup_listener_in_bucket - Search a single hash bucket for listeners
+ * @bucket: Hash bucket to search
+ * @local_addr: Incoming packet's destination address
+ * @net: Network namespace (may be NULL to skip netns check)
+ * @best_sk: Current best match (input/output)
+ * @best_score: Current best score (input/output)
+ *
+ * Iterates through all listeners in the bucket and updates best_sk/best_score
+ * if a better match is found.
+ *
+ * Returns: true if an exact match was found (can stop searching)
+ */
+static bool tquic_lookup_listener_in_bucket(struct hlist_head *bucket,
+					    const struct sockaddr_storage *local_addr,
+					    struct net *net,
+					    struct sock **best_sk,
+					    int *best_score)
+{
+	struct tquic_sock *tsk;
+	int score;
+
+	hlist_for_each_entry_rcu(tsk, bucket, listener_node) {
+		score = tquic_listener_compute_score(tsk, local_addr, net);
+
+		if (score > *best_score) {
+			*best_score = score;
+			*best_sk = (struct sock *)tsk;
+
+			/*
+			 * Exact address match with good score - this is optimal.
+			 * Score of 2 means exact address match, 3+ means exact
+			 * with additional bonuses. No need to continue searching.
+			 */
+			if (score >= 2)
+				return true;
+		}
+	}
+
+	return false;
+}
+
 /**
  * tquic_lookup_listener - Find listener for incoming packet
- * @local_addr: Local address from UDP header
+ * @local_addr: Local address from incoming UDP packet (destination addr+port)
  *
  * Searches the listener hash table for a socket listening on the
- * specified local address.
+ * specified local address. Returns the most specific match:
+ *   - Exact address match preferred over wildcard
+ *   - IPv4-mapped addresses handled for dual-stack support
+ *   - Device-bound listeners preferred over unbound
  *
- * Returns: Listener socket or NULL if not found.
- * Caller must hold RCU read lock.
+ * The lookup algorithm (following TCP's __inet_lookup_listener pattern):
+ *   1. Hash by port to find the bucket
+ *   2. Iterate all listeners in bucket, computing match score for each
+ *   3. Return highest-scoring listener (most specific match)
+ *
+ * For servers with multiple interfaces or IP addresses, this ensures
+ * packets are delivered to the correct listener:
+ *   - Listener on 192.168.1.1:443 gets packets for that IP
+ *   - Listener on 0.0.0.0:443 gets packets for any other IP on port 443
+ *   - If both exist, specific IP listener wins
+ *
+ * Thread safety: Caller must hold RCU read lock.
+ *
+ * Returns: Matching listener socket, or NULL if not found
  */
 struct sock *tquic_lookup_listener(const struct sockaddr_storage *local_addr)
 {
-	struct tquic_sock *tsk;
+	struct sock *best_sk = NULL;
+	int best_score = 0;
 	u32 hash;
+
+	/*
+	 * Hash by port only - this puts all listeners on the same port
+	 * into the same bucket, regardless of their bound address.
+	 * This is crucial for matching both specific-address and wildcard
+	 * listeners efficiently.
+	 */
+	hash = tquic_listener_hash(local_addr);
+
+	/*
+	 * Search the bucket for the best matching listener.
+	 * Unlike TCP which does separate lookups for specific address and
+	 * INADDR_ANY buckets, we use a single bucket keyed by port only
+	 * and score each listener based on address match specificity.
+	 */
+	tquic_lookup_listener_in_bucket(&tquic_listeners[hash], local_addr,
+					NULL, &best_sk, &best_score);
+
+	return best_sk;
+}
+EXPORT_SYMBOL_GPL(tquic_lookup_listener);
+
+/**
+ * tquic_lookup_listener_net - Find listener for incoming packet with netns
+ * @net: Network namespace to search in
+ * @local_addr: Local address from incoming UDP packet
+ *
+ * Like tquic_lookup_listener() but also matches network namespace.
+ * Use this when you have the network namespace from the incoming socket.
+ *
+ * Returns: Matching listener socket, or NULL if not found
+ */
+struct sock *tquic_lookup_listener_net(struct net *net,
+				       const struct sockaddr_storage *local_addr)
+{
+	struct sock *best_sk = NULL;
+	int best_score = 0;
+	u32 hash;
+
+	if (!net)
+		return tquic_lookup_listener(local_addr);
 
 	hash = tquic_listener_hash(local_addr);
 
-	hlist_for_each_entry_rcu(tsk, &tquic_listeners[hash], listener_node) {
-		struct sock *sk = (struct sock *)tsk;
+	tquic_lookup_listener_in_bucket(&tquic_listeners[hash], local_addr,
+					net, &best_sk, &best_score);
 
-		/* Must be in listening state */
-		if (sk->sk_state != TCP_LISTEN)
-			continue;
-
-		/* TODO: Full address matching
-		 * For now, just return first listener in bucket.
-		 * Phase 3 will implement proper address+port matching.
-		 */
-		if (tsk->bind_addr.ss_family == local_addr->ss_family)
-			return sk;
-	}
-
-	return NULL;
+	return best_sk;
 }
-EXPORT_SYMBOL_GPL(tquic_lookup_listener);
+EXPORT_SYMBOL_GPL(tquic_lookup_listener_net);
 
 /*
  * Socket hash table operations

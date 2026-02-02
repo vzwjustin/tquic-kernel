@@ -32,6 +32,9 @@
 #include "protocol.h"
 #include "http3/http3_stream.h"
 
+/* Forward declaration for pacing integration (defined in tquic_output.c) */
+extern void tquic_update_pacing(struct sock *sk, struct tquic_path *path);
+
 /*
  * Helper to create file descriptor for a socket
  * Replacement for sock_map_fd which is not exported
@@ -463,12 +466,224 @@ static int tquic_stream_release(struct socket *sock)
 }
 
 /**
+ * tquic_stream_check_flow_control - Check if stream can send more data
+ * @conn: Connection
+ * @stream: Stream to check
+ * @len: Bytes we want to send
+ *
+ * Checks both stream-level and connection-level flow control limits.
+ * Returns the number of bytes allowed to send (may be less than requested).
+ * Returns 0 if blocked (caller should wait or return -EAGAIN).
+ */
+static size_t tquic_stream_check_flow_control(struct tquic_connection *conn,
+					      struct tquic_stream *stream,
+					      size_t len)
+{
+	size_t allowed = len;
+	u64 stream_limit, conn_limit;
+
+	/* Check stream-level flow control */
+	if (stream->send_offset >= stream->max_send_data) {
+		stream->blocked = true;
+		return 0;
+	}
+
+	stream_limit = stream->max_send_data - stream->send_offset;
+	if (allowed > stream_limit)
+		allowed = stream_limit;
+
+	/* Check connection-level flow control */
+	spin_lock_bh(&conn->lock);
+	if (conn->data_sent >= conn->max_data_remote) {
+		spin_unlock_bh(&conn->lock);
+		return 0;
+	}
+
+	conn_limit = conn->max_data_remote - conn->data_sent;
+	if (allowed > conn_limit)
+		allowed = conn_limit;
+	spin_unlock_bh(&conn->lock);
+
+	return allowed;
+}
+
+/**
+ * tquic_stream_trigger_output - Trigger packet transmission after stream write
+ * @conn: Connection with pending stream data
+ * @stream: Stream that has new data
+ * @sock: Socket (for pacing rate updates)
+ *
+ * This function implements the critical transmission trigger that ensures
+ * data written to streams is actually transmitted. It performs:
+ *
+ * 1. Connection state validation
+ * 2. Path selection for multipath WAN bonding
+ * 3. Congestion window check
+ * 4. Pacing integration (FQ qdisc or internal pacing)
+ * 5. Direct transmission or work scheduling
+ *
+ * The trigger respects the TQUIC_NODELAY socket option for latency-sensitive
+ * applications and integrates with the timer/recovery subsystem for proper
+ * retransmission handling.
+ */
+static void tquic_stream_trigger_output(struct tquic_connection *conn,
+					struct tquic_stream *stream,
+					struct sock *sk)
+{
+	struct tquic_path *path;
+	struct tquic_sock *tsk;
+	struct net *net = NULL;
+	u64 inflight;
+	bool can_send;
+	bool nodelay = false;
+	bool pacing_enabled = true;
+
+	if (!conn || conn->state != TQUIC_CONN_CONNECTED)
+		return;
+
+	/* Get socket options if available */
+	if (sk) {
+		tsk = tquic_sk(sk);
+		nodelay = tsk->nodelay;
+		net = sock_net(sk);
+		if (net) {
+			struct tquic_net *tn = tquic_pernet(net);
+			if (tn)
+				pacing_enabled = tn->pacing_enabled;
+		}
+	}
+
+	/* Select the best path for transmission */
+	path = tquic_select_path(conn, NULL);
+	if (!path || path->state != TQUIC_PATH_ACTIVE) {
+		/*
+		 * No active path available. The timer subsystem will
+		 * handle retransmission when a path becomes available.
+		 */
+		pr_debug("tquic: no active path for stream %llu transmission\n",
+			 stream->id);
+		return;
+	}
+
+	/*
+	 * Check congestion window before attempting transmission.
+	 * If cwnd is exhausted, data will be sent when ACKs arrive
+	 * and the timer/recovery subsystem processes them.
+	 */
+	if (path->stats.cwnd > 0) {
+		inflight = path->stats.tx_bytes - path->stats.acked_bytes;
+		can_send = (inflight < path->stats.cwnd);
+	} else {
+		/* No cwnd limit set yet (initial state) */
+		can_send = true;
+	}
+
+	if (!can_send) {
+		pr_debug("tquic: stream %llu blocked by cwnd (inflight=%llu, cwnd=%u)\n",
+			 stream->id, inflight, path->stats.cwnd);
+		return;
+	}
+
+	/*
+	 * Pacing integration: Update socket pacing rate for FQ qdisc.
+	 * If FQ is attached to the interface, it will handle pacing.
+	 * Otherwise, internal pacing in tquic_output.c will be used.
+	 */
+	if (pacing_enabled && sk)
+		tquic_update_pacing(sk, path);
+
+	/*
+	 * Transmission strategy:
+	 *
+	 * NODELAY mode: Transmit immediately via tquic_xmit() for lowest
+	 * latency. This is appropriate for interactive applications.
+	 *
+	 * Normal mode: Use tquic_output_flush() which may coalesce frames
+	 * from multiple streams and respect pacing. This is more efficient
+	 * for bulk transfers.
+	 *
+	 * The actual transmission path in tquic_output.c will:
+	 * - Generate STREAM frames from the send buffer
+	 * - Apply encryption and header protection
+	 * - Select path via the scheduler
+	 * - Apply pacing if enabled
+	 * - Track packets for loss detection/retransmission
+	 */
+	if (nodelay) {
+		/*
+		 * Direct transmission for low-latency applications.
+		 * Dequeue one chunk from send_buf and transmit it.
+		 */
+		struct sk_buff *skb = skb_peek(&stream->send_buf);
+
+		if (skb) {
+			int ret;
+
+			/*
+			 * Use tquic_xmit to send the data. Note: tquic_xmit
+			 * expects raw data, but we have it in an skb. For
+			 * proper integration, we pass the skb data directly.
+			 *
+			 * FIN handling: Check if this is the last data and
+			 * stream should be closed.
+			 */
+			ret = tquic_xmit(conn, stream, skb->data, skb->len,
+					 stream->fin_sent);
+			if (ret >= 0) {
+				/*
+				 * Data was accepted for transmission.
+				 * The send_buf will be drained by the frame
+				 * generation code in tquic_output.c.
+				 */
+				pr_debug("tquic: stream %llu nodelay xmit %d bytes\n",
+					 stream->id, ret);
+			} else if (ret == -EAGAIN) {
+				/*
+				 * Congestion/pacing blocked. The pacing timer
+				 * or ACK processing will retry later.
+				 */
+				pr_debug("tquic: stream %llu xmit blocked\n",
+					 stream->id);
+			} else {
+				pr_warn("tquic: stream %llu xmit error %d\n",
+					stream->id, ret);
+			}
+		}
+	} else {
+		/*
+		 * Normal mode: Let tquic_output_flush() handle transmission.
+		 * This allows frame coalescing and respects pacing.
+		 */
+		tquic_output_flush(conn);
+	}
+
+	/*
+	 * Schedule retransmission timer if not already running.
+	 * The timer subsystem (tquic_timer.c) handles:
+	 * - Loss detection timer (for unacked packets)
+	 * - PTO timer (probe timeout)
+	 * - Pacing timer (for rate-limited sending)
+	 *
+	 * Timer scheduling is handled internally by tquic_xmit/output_flush.
+	 */
+}
+
+/**
  * tquic_stream_sendmsg - Send data on stream socket
  * @sock: Stream socket
  * @msg: Message to send
  * @len: Length of data
  *
  * Copies data to stream's send buffer and triggers transmission.
+ * Implements flow control, pacing, and proper output scheduling.
+ *
+ * Flow control is enforced at two levels:
+ * - Stream level: Cannot exceed stream->max_send_data
+ * - Connection level: Cannot exceed conn->max_data_remote
+ *
+ * If flow control blocks sending, the function returns -EAGAIN for
+ * non-blocking sockets or waits for MAX_STREAM_DATA/MAX_DATA frames
+ * for blocking sockets.
  *
  * Returns: Number of bytes sent on success, negative errno on failure
  */
@@ -480,6 +695,8 @@ static int tquic_stream_sendmsg(struct socket *sock, struct msghdr *msg,
 	struct tquic_connection *conn;
 	struct sk_buff *skb;
 	size_t copied = 0;
+	size_t allowed;
+	bool nonblock;
 
 	if (!sock->sk)
 		return -ENOTCONN;
@@ -490,6 +707,8 @@ static int tquic_stream_sendmsg(struct socket *sock, struct msghdr *msg,
 
 	stream = ss->stream;
 	conn = ss->conn;
+	nonblock = (msg->msg_flags & MSG_DONTWAIT) ||
+		   (sock->file->f_flags & O_NONBLOCK);
 
 	/* Check stream and connection state */
 	if (stream->state == TQUIC_STREAM_CLOSED ||
@@ -498,6 +717,37 @@ static int tquic_stream_sendmsg(struct socket *sock, struct msghdr *msg,
 
 	if (conn->state != TQUIC_CONN_CONNECTED)
 		return -ENOTCONN;
+
+	/* Check flow control before copying data */
+	allowed = tquic_stream_check_flow_control(conn, stream, len);
+	if (allowed == 0) {
+		if (nonblock)
+			return -EAGAIN;
+
+		/*
+		 * Block waiting for flow control credit.
+		 * MAX_STREAM_DATA or MAX_DATA from peer will wake us.
+		 */
+		if (wait_event_interruptible(stream->wait,
+				tquic_stream_check_flow_control(conn, stream, len) > 0 ||
+				stream->state == TQUIC_STREAM_CLOSED ||
+				conn->state != TQUIC_CONN_CONNECTED))
+			return -EINTR;
+
+		/* Re-check state after waking */
+		if (stream->state == TQUIC_STREAM_CLOSED)
+			return -EPIPE;
+		if (conn->state != TQUIC_CONN_CONNECTED)
+			return -ENOTCONN;
+
+		allowed = tquic_stream_check_flow_control(conn, stream, len);
+		if (allowed == 0)
+			return -EAGAIN;
+	}
+
+	/* Limit to flow control allowed amount */
+	if (len > allowed)
+		len = allowed;
 
 	/* Copy data to stream send buffer in chunks */
 	while (copied < len) {
@@ -513,13 +763,25 @@ static int tquic_stream_sendmsg(struct socket *sock, struct msghdr *msg,
 			return copied > 0 ? copied : -EFAULT;
 		}
 
+		/* Store stream offset in skb->cb for frame generation */
+		*(u64 *)skb->cb = stream->send_offset;
+
 		skb_queue_tail(&stream->send_buf, skb);
 		stream->send_offset += chunk;
 		copied += chunk;
+
+		/* Update connection-level data tracking */
+		spin_lock_bh(&conn->lock);
+		conn->data_sent += chunk;
+		spin_unlock_bh(&conn->lock);
 	}
 
-	/* Trigger transmission (stub in Phase 2, full impl Phase 3) */
-	tquic_output_flush(conn);
+	/*
+	 * Trigger transmission for the newly buffered data.
+	 * This handles path selection, congestion control, pacing,
+	 * and either immediate transmission or work scheduling.
+	 */
+	tquic_stream_trigger_output(conn, stream, ss->parent_sk);
 
 	return copied;
 }

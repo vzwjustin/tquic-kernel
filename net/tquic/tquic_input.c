@@ -1264,7 +1264,12 @@ static int tquic_process_datagram_frame(struct tquic_rx_ctx *ctx)
 	if (ctx->conn->sk)
 		TQUIC_INC_STATS(sock_net(ctx->conn->sk), TQUIC_MIB_DATAGRAMSRX);
 
-	/* Wake up any waiters */
+	/*
+	 * Wake up waiters on both the datagram-specific wait queue
+	 * (for tquic_recv_datagram blocking) and the socket wait queue
+	 * (for poll/epoll/select).
+	 */
+	wake_up_interruptible(&ctx->conn->datagram.wait);
 	if (ctx->conn->sk)
 		ctx->conn->sk->sk_data_ready(ctx->conn->sk);
 

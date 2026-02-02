@@ -96,9 +96,88 @@ struct tquic_mp_cid_retire_entry {
 	struct list_head list;
 };
 
-/* Memory cache */
+/**
+ * struct tquic_mp_remote_cid - Remote CID entry for multipath
+ * @seq_num: Sequence number of this CID
+ * @path_id: Path this CID is associated with
+ * @cid_len: Length of the connection ID
+ * @cid: The connection ID bytes
+ * @reset_token: Stateless reset token (16 bytes)
+ * @retired: Whether this CID has been retired
+ * @list: List linkage
+ *
+ * Tracks remote CIDs received via MP_NEW_CONNECTION_ID frames.
+ * Per RFC 9000 Section 5.1.2, we must track all CIDs and retire
+ * those with sequence numbers below retire_prior_to.
+ */
+struct tquic_mp_remote_cid {
+	u64 seq_num;
+	u64 path_id;
+	u8 cid_len;
+	u8 cid[TQUIC_MAX_CID_LEN];
+	u8 reset_token[TQUIC_MP_RESET_TOKEN_LEN];
+	bool retired;
+	struct list_head list;
+};
+
+/**
+ * struct tquic_mp_local_cid - Local CID entry for multipath
+ * @seq_num: Sequence number of this CID
+ * @path_id: Path this CID is associated with
+ * @cid_len: Length of the connection ID
+ * @cid: The connection ID bytes
+ * @reset_token: Stateless reset token (16 bytes)
+ * @retired: Whether peer has retired this CID
+ * @list: List linkage
+ *
+ * Tracks local CIDs we've issued via MP_NEW_CONNECTION_ID frames.
+ * When peer sends MP_RETIRE_CONNECTION_ID, we mark the CID as retired
+ * and may issue a replacement.
+ */
+struct tquic_mp_local_cid {
+	u64 seq_num;
+	u64 path_id;
+	u8 cid_len;
+	u8 cid[TQUIC_MAX_CID_LEN];
+	u8 reset_token[TQUIC_MP_RESET_TOKEN_LEN];
+	bool retired;
+	struct list_head list;
+};
+
+/**
+ * struct tquic_mp_cid_state - Per-path CID management state for multipath
+ * @remote_cids: List of remote CIDs (received from peer)
+ * @local_cids: List of local CIDs (issued to peer)
+ * @pending_retirements: Queue of RETIRE_CONNECTION_ID frames to send
+ * @remote_cid_count: Number of active remote CIDs
+ * @local_cid_count: Number of active local CIDs
+ * @next_local_seq: Next sequence number for local CIDs
+ * @retire_prior_to: Latest retire_prior_to received from peer
+ * @lock: Spinlock for CID state access
+ *
+ * Manages CID pools for multipath connections. Each path can have
+ * multiple CIDs, and the retire_prior_to mechanism ensures CID
+ * retirement happens atomically across the connection.
+ */
+struct tquic_mp_cid_state {
+	struct list_head remote_cids;
+	struct list_head local_cids;
+	struct list_head pending_retirements;
+	u32 remote_cid_count;
+	u32 local_cid_count;
+	u64 next_local_seq;
+	u64 retire_prior_to;
+	spinlock_t lock;
+};
+
+/* Memory cache for CID entries */
+static struct kmem_cache *mp_remote_cid_cache;
+static struct kmem_cache *mp_local_cid_cache;
+
+/* Memory caches */
 static struct kmem_cache *mp_abandon_state_cache;
 static struct kmem_cache *mp_cid_retire_cache;
+static struct kmem_cache *mp_cid_state_cache;
 
 /* SKB reserve size for QUIC packet headers */
 #define TQUIC_SKB_RESERVE	128
@@ -526,9 +605,236 @@ int tquic_mp_issue_path_cid(struct tquic_connection *conn,
 EXPORT_SYMBOL_GPL(tquic_mp_issue_path_cid);
 
 /**
+ * struct tquic_mp_pending_retire - Pending RETIRE_CONNECTION_ID frame
+ * @path_id: Path the CID belongs to
+ * @seq_num: Sequence number of the CID to retire
+ * @list: List linkage for pending retirements queue
+ *
+ * Tracks CIDs that need RETIRE_CONNECTION_ID frames sent to peer.
+ * Per RFC 9000 Section 5.1.2, when we receive a NEW_CONNECTION_ID
+ * frame with retire_prior_to, we MUST send RETIRE_CONNECTION_ID
+ * for each CID we're retiring.
+ */
+struct tquic_mp_pending_retire {
+	u64 path_id;
+	u64 seq_num;
+	struct list_head list;
+};
+
+/* Memory cache for pending retirement entries */
+static struct kmem_cache *mp_pending_retire_cache;
+
+/**
+ * tquic_mp_cid_state_create - Create CID state for a path
+ * @path: Path to create state for
+ *
+ * Returns allocated CID state or NULL on failure.
+ *
+ * Note: This function is provided for future CID pool expansion where
+ * multiple CIDs may be tracked per path. Currently unused but reserved
+ * for full RFC 9000 multi-CID pool support.
+ */
+static struct tquic_mp_cid_state * __maybe_unused
+tquic_mp_cid_state_create(struct tquic_path *path)
+{
+	struct tquic_mp_cid_state *state;
+
+	if (!mp_cid_state_cache)
+		return NULL;
+
+	state = kmem_cache_zalloc(mp_cid_state_cache, GFP_KERNEL);
+	if (!state)
+		return NULL;
+
+	INIT_LIST_HEAD(&state->remote_cids);
+	INIT_LIST_HEAD(&state->local_cids);
+	INIT_LIST_HEAD(&state->pending_retirements);
+	spin_lock_init(&state->lock);
+	state->retire_prior_to = 0;
+	state->next_local_seq = 0;
+
+	return state;
+}
+
+/**
+ * tquic_mp_cid_state_destroy - Destroy CID state for a path
+ * @state: CID state to destroy
+ *
+ * Note: This function is provided for future CID pool expansion where
+ * multiple CIDs may be tracked per path. Currently unused but reserved
+ * for full RFC 9000 multi-CID pool support.
+ */
+static void __maybe_unused
+tquic_mp_cid_state_destroy(struct tquic_mp_cid_state *state)
+{
+	struct tquic_mp_remote_cid *rcid, *rtmp;
+	struct tquic_mp_local_cid *lcid, *ltmp;
+	struct tquic_mp_pending_retire *pret, *ptmp;
+
+	if (!state)
+		return;
+
+	spin_lock(&state->lock);
+
+	/* Free all remote CIDs */
+	list_for_each_entry_safe(rcid, rtmp, &state->remote_cids, list) {
+		list_del(&rcid->list);
+		if (mp_remote_cid_cache)
+			kmem_cache_free(mp_remote_cid_cache, rcid);
+	}
+
+	/* Free all local CIDs */
+	list_for_each_entry_safe(lcid, ltmp, &state->local_cids, list) {
+		list_del(&lcid->list);
+		if (mp_local_cid_cache)
+			kmem_cache_free(mp_local_cid_cache, lcid);
+	}
+
+	/* Free all pending retirements */
+	list_for_each_entry_safe(pret, ptmp, &state->pending_retirements, list) {
+		list_del(&pret->list);
+		if (mp_pending_retire_cache)
+			kmem_cache_free(mp_pending_retire_cache, pret);
+	}
+
+	spin_unlock(&state->lock);
+
+	if (mp_cid_state_cache)
+		kmem_cache_free(mp_cid_state_cache, state);
+}
+
+/**
+ * tquic_mp_get_or_create_cid_state - Get or create CID state for a path
+ * @path: Path to get/create CID state for
+ *
+ * Returns CID state pointer or NULL on failure.
+ *
+ * Note: This function is provided for future CID pool expansion where
+ * multiple CIDs may be tracked per path. Currently returns NULL as we
+ * use path->local_cid/remote_cid directly for the simplified single-CID
+ * per path model.
+ */
+static struct tquic_mp_cid_state * __maybe_unused
+tquic_mp_get_or_create_cid_state(struct tquic_path *path)
+{
+	/* For now, we use the path's local/remote CID directly
+	 * In a full implementation, each path would have a dedicated
+	 * CID state structure. Here we'll allocate one lazily.
+	 */
+	return NULL;  /* Using path->local_cid/remote_cid directly */
+}
+
+/**
+ * tquic_mp_send_retire_cid_frame - Send RETIRE_CONNECTION_ID frame
+ * @conn: Connection
+ * @path_id: Path the CID belongs to
+ * @seq_num: Sequence number of CID to retire
+ *
+ * Builds and sends an MP_RETIRE_CONNECTION_ID frame to notify the peer
+ * that we will no longer use the specified CID.
+ *
+ * Returns 0 on success or negative error.
+ */
+static int tquic_mp_send_retire_cid_frame(struct tquic_connection *conn,
+					  u64 path_id, u64 seq_num)
+{
+	struct tquic_mp_retire_connection_id frame;
+	u8 buf[32];
+	int len;
+
+	if (!conn || !conn->active_path)
+		return -EINVAL;
+
+	/* Build MP_RETIRE_CONNECTION_ID frame */
+	memset(&frame, 0, sizeof(frame));
+	frame.path_id = path_id;
+	frame.seq_num = seq_num;
+
+	/* Encode frame */
+	len = tquic_mp_write_retire_connection_id(&frame, buf, sizeof(buf));
+	if (len < 0)
+		return len;
+
+	pr_debug("tquic_mp: sending RETIRE_CONNECTION_ID path=%llu seq=%llu\n",
+		 path_id, seq_num);
+
+	/* Send via active path */
+	return tquic_mp_send_control_frame(conn, conn->active_path, buf, len);
+}
+
+/**
+ * tquic_mp_retire_cids_prior_to - Retire all CIDs with seq < retire_prior_to
+ * @conn: Connection
+ * @path: Path whose CIDs to check
+ * @retire_prior_to: Sequence number threshold
+ *
+ * Per RFC 9000 Section 5.1.2, when we receive a NEW_CONNECTION_ID frame
+ * with a retire_prior_to value greater than what we've seen before,
+ * we MUST:
+ * 1. Stop using CIDs with sequence numbers < retire_prior_to
+ * 2. Send RETIRE_CONNECTION_ID frames for each such CID
+ *
+ * Returns number of CIDs retired or negative error.
+ */
+static int tquic_mp_retire_cids_prior_to(struct tquic_connection *conn,
+					 struct tquic_path *path,
+					 u64 retire_prior_to)
+{
+	int retired_count = 0;
+	u64 seq;
+
+	if (!conn || !path)
+		return -EINVAL;
+
+	/* Check if we need to retire the current remote CID */
+	if (path->remote_cid.seq_num < retire_prior_to) {
+		/* The current CID needs to be retired - but we should already
+		 * have a replacement from the NEW_CONNECTION_ID frame.
+		 * Send RETIRE_CONNECTION_ID for the old CID.
+		 */
+		seq = path->remote_cid.seq_num;
+
+		pr_debug("tquic_mp: retiring current remote CID seq=%llu (prior_to=%llu) on path %u\n",
+			 seq, retire_prior_to, path->path_id);
+
+		/* Send RETIRE_CONNECTION_ID frame for the old CID */
+		tquic_mp_send_retire_cid_frame(conn, path->path_id, seq);
+		retired_count++;
+	}
+
+	/*
+	 * In a full implementation with CID pools, we would iterate through
+	 * all remote CIDs associated with this path and retire those with
+	 * seq_num < retire_prior_to. Since we're using the simplified
+	 * single-CID-per-path model, we just handle the current CID above.
+	 *
+	 * For multipath scenarios with multiple CIDs per path, this would
+	 * look like:
+	 *
+	 * spin_lock(&path->cid_state->lock);
+	 * list_for_each_entry_safe(rcid, tmp, &path->cid_state->remote_cids, list) {
+	 *     if (rcid->seq_num < retire_prior_to && !rcid->retired) {
+	 *         rcid->retired = true;
+	 *         // Queue RETIRE_CONNECTION_ID frame
+	 *         tquic_mp_send_retire_cid_frame(conn, path->path_id, rcid->seq_num);
+	 *         retired_count++;
+	 *     }
+	 * }
+	 * spin_unlock(&path->cid_state->lock);
+	 */
+
+	return retired_count;
+}
+
+/**
  * tquic_mp_handle_new_connection_id - Handle MP_NEW_CONNECTION_ID frame
  * @conn: Connection
  * @frame: Parsed MP_NEW_CONNECTION_ID frame
+ *
+ * Per RFC 9000 Section 5.1.1 and RFC 9369 for multipath:
+ * - Store the new CID for future use on the specified path
+ * - The retire_prior_to field indicates CIDs that must be retired
+ * - We MUST send RETIRE_CONNECTION_ID for each CID being retired
  *
  * Returns 0 on success or negative error.
  */
@@ -537,12 +843,27 @@ int tquic_mp_handle_new_connection_id(struct tquic_connection *conn,
 {
 	struct tquic_path *path;
 	bool found = false;
+	u64 old_retire_prior_to;
+	int ret = 0;
 
 	if (!conn || !frame)
 		return -EINVAL;
 
-	pr_debug("tquic_mp: received MP_NEW_CONNECTION_ID path=%llu seq=%llu\n",
-		 frame->path_id, frame->seq_num);
+	/* Validate frame fields per RFC 9000 Section 19.15 */
+	if (frame->retire_prior_to > frame->seq_num) {
+		pr_warn("tquic_mp: invalid NEW_CONNECTION_ID: retire_prior_to (%llu) > seq_num (%llu)\n",
+			frame->retire_prior_to, frame->seq_num);
+		return -EINVAL;
+	}
+
+	if (frame->cid_len < 1 || frame->cid_len > TQUIC_MAX_CID_LEN) {
+		pr_warn("tquic_mp: invalid NEW_CONNECTION_ID: cid_len=%u\n",
+			frame->cid_len);
+		return -EINVAL;
+	}
+
+	pr_debug("tquic_mp: received MP_NEW_CONNECTION_ID path=%llu seq=%llu retire_prior_to=%llu\n",
+		 frame->path_id, frame->seq_num, frame->retire_prior_to);
 
 	/* Find the path */
 	spin_lock(&conn->paths_lock);
@@ -560,20 +881,49 @@ int tquic_mp_handle_new_connection_id(struct tquic_connection *conn,
 		return -ENOENT;
 	}
 
-	/* Update remote CID for this path */
+	/* Save old retire_prior_to to check if we need to retire CIDs */
+	old_retire_prior_to = path->remote_cid.retire_prior_to;
+
+	/* Update remote CID for this path if this is a newer CID */
 	if (frame->seq_num > path->remote_cid.seq_num) {
 		path->remote_cid.seq_num = frame->seq_num;
 		path->remote_cid.len = frame->cid_len;
 		memcpy(path->remote_cid.id, frame->cid, frame->cid_len);
 		path->remote_cid.retire_prior_to = frame->retire_prior_to;
+
+		pr_debug("tquic_mp: updated remote CID for path %llu: seq=%llu len=%u\n",
+			 frame->path_id, frame->seq_num, frame->cid_len);
 	}
 
 	spin_unlock(&conn->paths_lock);
 
-	/* Retire CIDs with sequence < retire_prior_to */
-	/* TODO: Implement CID retirement queue */
+	/*
+	 * RFC 9000 Section 5.1.2: CID Retirement
+	 *
+	 * Upon receipt of an increased retire_prior_to field, the peer MUST
+	 * stop using the corresponding connection IDs and MUST send
+	 * RETIRE_CONNECTION_ID frames to indicate that the CIDs are retired.
+	 *
+	 * Process CID retirement if retire_prior_to has increased.
+	 */
+	if (frame->retire_prior_to > old_retire_prior_to) {
+		int retired;
 
-	return 0;
+		pr_debug("tquic_mp: retire_prior_to increased from %llu to %llu on path %llu\n",
+			 old_retire_prior_to, frame->retire_prior_to, frame->path_id);
+
+		retired = tquic_mp_retire_cids_prior_to(conn, path,
+						       frame->retire_prior_to);
+		if (retired < 0) {
+			pr_warn("tquic_mp: CID retirement failed: %d\n", retired);
+			ret = retired;
+		} else if (retired > 0) {
+			pr_debug("tquic_mp: retired %d CIDs on path %llu\n",
+				 retired, frame->path_id);
+		}
+	}
+
+	return ret;
 }
 EXPORT_SYMBOL_GPL(tquic_mp_handle_new_connection_id);
 
@@ -582,6 +932,12 @@ EXPORT_SYMBOL_GPL(tquic_mp_handle_new_connection_id);
  * @conn: Connection
  * @frame: Parsed MP_RETIRE_CONNECTION_ID frame
  *
+ * Per RFC 9000 Section 5.1.2 and RFC 9369 for multipath:
+ * - When peer sends RETIRE_CONNECTION_ID, they are indicating they will
+ *   no longer use that CID to send packets to us
+ * - We SHOULD remove the CID from our local CID set
+ * - We MAY issue a new CID to replace the retired one
+ *
  * Returns 0 on success or negative error.
  */
 int tquic_mp_handle_retire_connection_id(struct tquic_connection *conn,
@@ -589,6 +945,8 @@ int tquic_mp_handle_retire_connection_id(struct tquic_connection *conn,
 {
 	struct tquic_path *path;
 	bool found = false;
+	bool cid_matched = false;
+	int ret = 0;
 
 	if (!conn || !frame)
 		return -EINVAL;
@@ -604,19 +962,80 @@ int tquic_mp_handle_retire_connection_id(struct tquic_connection *conn,
 			break;
 		}
 	}
-	spin_unlock(&conn->paths_lock);
 
 	if (!found) {
+		spin_unlock(&conn->paths_lock);
 		pr_debug("tquic_mp: MP_RETIRE_CONNECTION_ID for unknown path %llu\n",
 			 frame->path_id);
+		/*
+		 * RFC 9000: If the sequence number refers to a CID that was
+		 * not issued, this is a protocol violation. However, we may
+		 * have already removed the path, so just log and return.
+		 */
 		return -ENOENT;
 	}
 
-	/* Mark CID as retired - peer will no longer use it */
-	/* TODO: Remove from active CID set */
+	/*
+	 * Check if this retirement request refers to our current local CID.
+	 *
+	 * Per RFC 9000 Section 5.1.2, an endpoint should not retire a CID
+	 * that has not been issued to the peer. Check if seq_num matches
+	 * a CID we've issued.
+	 */
+	if (path->local_cid.seq_num == frame->seq_num) {
+		cid_matched = true;
+		pr_debug("tquic_mp: peer retiring our CID seq=%llu on path %u\n",
+			 frame->seq_num, path->path_id);
+	}
 
-	/* Issue a new CID to replace the retired one */
-	return tquic_mp_issue_path_cid(conn, path);
+	spin_unlock(&conn->paths_lock);
+
+	if (!cid_matched) {
+		/*
+		 * The sequence number doesn't match our current CID for this path.
+		 * This could mean:
+		 * 1. The CID was already retired (duplicate frame)
+		 * 2. The CID was never issued (protocol violation)
+		 *
+		 * Per RFC 9000, receiving a RETIRE_CONNECTION_ID for an unknown
+		 * sequence number is not necessarily an error - it might be a
+		 * duplicate or refer to an already-retired CID.
+		 */
+		pr_debug("tquic_mp: RETIRE_CONNECTION_ID seq=%llu doesn't match current CID seq=%llu\n",
+			 frame->seq_num, path->local_cid.seq_num);
+
+		/* Not an error - might be duplicate or already retired */
+		return 0;
+	}
+
+	/*
+	 * The peer has retired our current CID for this path.
+	 * We MUST issue a new CID so the path can continue to function.
+	 *
+	 * Per RFC 9000 Section 5.1.1:
+	 * "An endpoint MAY send connection IDs that temporarily exceed a
+	 * peer's limit if the NEW_CONNECTION_ID frame also requires the
+	 * retirement of any excess, by including a sufficiently large value
+	 * in the Retire Prior To field."
+	 *
+	 * Issue a replacement CID for this path.
+	 */
+	pr_info("tquic_mp: issuing replacement CID for path %llu after peer retirement of seq=%llu\n",
+		frame->path_id, frame->seq_num);
+
+	ret = tquic_mp_issue_path_cid(conn, path);
+	if (ret < 0) {
+		pr_warn("tquic_mp: failed to issue replacement CID for path %llu: %d\n",
+			frame->path_id, ret);
+		return ret;
+	}
+
+	/* Update statistics */
+	spin_lock(&conn->lock);
+	/* Could track CID retirements in connection stats here */
+	spin_unlock(&conn->lock);
+
+	return 0;
 }
 EXPORT_SYMBOL_GPL(tquic_mp_handle_retire_connection_id);
 
@@ -862,9 +1281,41 @@ int __init tquic_mp_abandon_init(void)
 	if (!mp_cid_retire_cache)
 		goto err_cid_retire;
 
-	pr_info("tquic: Multipath path abandonment initialized (RFC 9369)\n");
+	mp_cid_state_cache = kmem_cache_create("tquic_mp_cid_state",
+		sizeof(struct tquic_mp_cid_state), 0,
+		SLAB_HWCACHE_ALIGN, NULL);
+	if (!mp_cid_state_cache)
+		goto err_cid_state;
+
+	mp_remote_cid_cache = kmem_cache_create("tquic_mp_remote_cid",
+		sizeof(struct tquic_mp_remote_cid), 0,
+		SLAB_HWCACHE_ALIGN, NULL);
+	if (!mp_remote_cid_cache)
+		goto err_remote_cid;
+
+	mp_local_cid_cache = kmem_cache_create("tquic_mp_local_cid",
+		sizeof(struct tquic_mp_local_cid), 0,
+		SLAB_HWCACHE_ALIGN, NULL);
+	if (!mp_local_cid_cache)
+		goto err_local_cid;
+
+	mp_pending_retire_cache = kmem_cache_create("tquic_mp_pending_retire",
+		sizeof(struct tquic_mp_pending_retire), 0,
+		SLAB_HWCACHE_ALIGN, NULL);
+	if (!mp_pending_retire_cache)
+		goto err_pending_retire;
+
+	pr_info("tquic: Multipath path abandonment and CID management initialized (RFC 9369)\n");
 	return 0;
 
+err_pending_retire:
+	kmem_cache_destroy(mp_local_cid_cache);
+err_local_cid:
+	kmem_cache_destroy(mp_remote_cid_cache);
+err_remote_cid:
+	kmem_cache_destroy(mp_cid_state_cache);
+err_cid_state:
+	kmem_cache_destroy(mp_cid_retire_cache);
 err_cid_retire:
 	kmem_cache_destroy(mp_abandon_state_cache);
 err_abandon_state:
@@ -876,10 +1327,14 @@ err_abandon_state:
  */
 void __exit tquic_mp_abandon_exit(void)
 {
+	kmem_cache_destroy(mp_pending_retire_cache);
+	kmem_cache_destroy(mp_local_cid_cache);
+	kmem_cache_destroy(mp_remote_cid_cache);
+	kmem_cache_destroy(mp_cid_state_cache);
 	kmem_cache_destroy(mp_cid_retire_cache);
 	kmem_cache_destroy(mp_abandon_state_cache);
 
-	pr_info("tquic: Multipath path abandonment cleaned up\n");
+	pr_info("tquic: Multipath path abandonment and CID management cleaned up\n");
 }
 
 MODULE_DESCRIPTION("TQUIC Path Abandonment for Multipath (RFC 9369)");

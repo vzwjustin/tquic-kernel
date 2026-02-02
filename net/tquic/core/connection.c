@@ -332,6 +332,11 @@ static int tquic_conn_set_state(struct tquic_connection *conn,
 		cs->closing_start = ktime_get();
 		/* Schedule close frame retransmission */
 		schedule_work(&cs->close_work);
+		/*
+		 * Wake up datagram waiters so they can detect
+		 * the connection is closing and return appropriately.
+		 */
+		wake_up_interruptible(&conn->datagram.wait);
 		break;
 
 	case TQUIC_CONN_DRAINING:
@@ -339,6 +344,11 @@ static int tquic_conn_set_state(struct tquic_connection *conn,
 		/* Schedule drain timeout */
 		schedule_delayed_work(&cs->drain_work,
 				      msecs_to_jiffies(cs->drain_timeout_ms));
+		/*
+		 * Wake up datagram waiters - connection is draining,
+		 * no more data will be delivered.
+		 */
+		wake_up_interruptible(&conn->datagram.wait);
 		break;
 
 	case TQUIC_CONN_CLOSED:
@@ -347,7 +357,11 @@ static int tquic_conn_set_state(struct tquic_connection *conn,
 		cancel_work_sync(&cs->migration_work);
 		cancel_delayed_work_sync(&cs->drain_work);
 		cancel_delayed_work_sync(&cs->validation_work);
-		/* Wake up any waiters */
+		/*
+		 * Wake up all waiters - connection is fully closed,
+		 * both socket state change and datagram waiters.
+		 */
+		wake_up_interruptible(&conn->datagram.wait);
 		if (conn->sk && conn->sk->sk_state_change)
 			conn->sk->sk_state_change(conn->sk);
 		break;
