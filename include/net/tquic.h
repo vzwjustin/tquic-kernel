@@ -83,6 +83,8 @@ struct tquic_client;
 struct tquic_persistent_cong_info;
 struct tquic_bond_state;
 struct tquic_grease_state;
+struct tquic_addr_discovery_state;
+struct tquic_negotiated_params;
 
 /**
  * enum tquic_conn_state - Connection state machine states
@@ -279,6 +281,14 @@ struct tquic_path {
 	 * Allocated by tquic_pmtud_init_path(), freed by tquic_pmtud_release_path().
 	 */
 	void *pmtud_state;		/* struct tquic_pmtud_state_info * */
+
+	/*
+	 * NAT Keepalive state - RFC 9308 Section 3.5
+	 *
+	 * Manages per-path NAT binding keepalive using minimal PING frames.
+	 * Allocated by tquic_nat_keepalive_init(), freed by tquic_nat_keepalive_cleanup().
+	 */
+	void *nat_keepalive_state;	/* struct tquic_nat_keepalive_state * */
 
 	struct rcu_head rcu_head;	/* RCU callback for kfree_rcu */
 };
@@ -506,6 +516,22 @@ struct tquic_connection {
 	void *preferred_addr;	/* struct tquic_pref_addr_migration/config * */
 
 	/*
+	 * Additional Addresses state (draft-piraux-quic-additional-addresses)
+	 *
+	 * The additional_addresses transport parameter allows endpoints to
+	 * advertise multiple addresses for connection migration beyond the
+	 * single preferred_address. This enables flexible migration scenarios
+	 * for multipath and mobile connections.
+	 *
+	 * additional_local_addrs: Local addresses to advertise to peer
+	 * additional_remote_addrs: Remote addresses received from peer
+	 *
+	 * Both are struct tquic_additional_addresses *.
+	 */
+	void *additional_local_addrs;	/* Local addresses to advertise */
+	void *additional_remote_addrs;	/* Remote addresses from peer */
+
+	/*
 	 * HTTP/3 Priority state (RFC 9218)
 	 *
 	 * Manages RFC 9218 Extensible Priorities for HTTP/3 streams.
@@ -572,6 +598,71 @@ struct tquic_connection {
 	 */
 	struct tasklet_struct tx_tasklet;
 	bool tasklet_scheduled;
+
+	/*
+	 * Control frame queue (RESET_STREAM, STOP_SENDING, etc.)
+	 *
+	 * Frames queued here are transmitted in the next packet.
+	 * Protected by connection lock.
+	 */
+	struct sk_buff_head control_frames;
+
+	/*
+	 * Transmit work for deferred frame transmission
+	 */
+	struct work_struct tx_work;
+
+	/*
+	 * Reliable Stream Reset (draft-ietf-quic-reliable-stream-reset-07)
+	 *
+	 * True when both endpoints have negotiated support for
+	 * RESET_STREAM_AT frames via the reliable_stream_reset
+	 * transport parameter (0x17cd).
+	 */
+	bool reliable_reset_enabled;
+
+	/*
+	 * Address Discovery state (draft-ietf-quic-address-discovery)
+	 *
+	 * Manages OBSERVED_ADDRESS frame generation and processing,
+	 * NAT rebinding detection, and address change notifications.
+	 * Allocated by tquic_pm_init_address_discovery() after
+	 * transport parameter negotiation confirms mutual support.
+	 */
+	struct tquic_addr_discovery_state *addr_discovery_state;
+
+	/*
+	 * Negotiated transport parameters
+	 *
+	 * Result of transport parameter negotiation between endpoints.
+	 * Contains the effective values for flow control, stream limits,
+	 * and extension support after applying negotiation rules.
+	 */
+	struct tquic_negotiated_params negotiated_params;
+
+	/*
+	 * BDP Frame Extension state (draft-kuhn-quic-bdpframe-extension-05)
+	 *
+	 * Manages BDP (Bandwidth-Delay Product) frame generation, reception,
+	 * validation, and Careful Resume algorithm for safe congestion control
+	 * state restoration across connection resumption.
+	 *
+	 * Allocated by tquic_bdp_init() after transport parameter negotiation
+	 * confirms mutual support. Freed by tquic_bdp_release().
+	 */
+	void *bdp_state;	/* struct tquic_bdp_state * */
+
+	/*
+	 * Congestion Control Data Exchange state (draft-yuan-quic-congestion-data-00)
+	 *
+	 * Manages CONGESTION_DATA frame generation, reception, validation,
+	 * and Careful Resume for congestion control state restoration during
+	 * connection resumption. Supports 0-RTT integration for faster startup.
+	 *
+	 * Allocated by tquic_cong_data_init() after transport parameter negotiation
+	 * confirms mutual support. Freed by tquic_cong_data_release().
+	 */
+	void *cong_data_state;	/* struct tquic_cong_data_state * */
 
 	spinlock_t lock;
 	refcount_t refcnt;

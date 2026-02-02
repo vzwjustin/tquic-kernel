@@ -17,6 +17,8 @@
 #include <net/sock.h>
 #include <net/tquic.h>
 
+#include "../core/one_way_delay.h"
+
 /* Registered schedulers */
 static LIST_HEAD(tquic_sched_list);
 static DEFINE_SPINLOCK(tquic_sched_lock);
@@ -583,6 +585,309 @@ static struct tquic_sched_ops tquic_sched_ecf = {
 };
 
 /*
+ * OWD-Aware Scheduler (One-Way Delay)
+ *
+ * This scheduler leverages one-way delay measurements to make better
+ * path selection decisions, especially for asymmetric links. It considers:
+ * - Forward delay for uploads (data flowing from sender to receiver)
+ * - Reverse delay for downloads (ACKs and responses)
+ * - Asymmetry detection for optimal traffic steering
+ *
+ * The scheduler is particularly useful for scenarios like:
+ * - Satellite links with significant propagation asymmetry
+ * - Cellular networks with different uplink/downlink characteristics
+ * - Mixed wired/wireless paths in WAN bonding
+ */
+struct owd_sched_data {
+	struct tquic_owd_state *owd_state;	/* Per-path OWD states */
+	bool prefer_forward;			/* Optimize for upload traffic */
+	u32 asymmetry_threshold_pct;		/* Threshold for asymmetry detection */
+	u64 last_path_switch_time;		/* To avoid path flapping */
+	u32 min_switch_interval_ms;		/* Minimum time between switches */
+};
+
+static void *owd_init(struct tquic_connection *conn)
+{
+	struct owd_sched_data *data;
+
+	data = kzalloc(sizeof(*data), GFP_KERNEL);
+	if (!data)
+		return NULL;
+
+	/* Default settings */
+	data->prefer_forward = true;  /* Default to upload optimization */
+	data->asymmetry_threshold_pct = 20;  /* 20% difference triggers asymmetry */
+	data->min_switch_interval_ms = 100;  /* Avoid rapid path switching */
+
+	return data;
+}
+
+static void owd_release(void *state)
+{
+	kfree(state);
+}
+
+/**
+ * owd_select - Select path based on one-way delay characteristics
+ * @state: Scheduler state
+ * @conn: Connection
+ * @skb: Packet being scheduled
+ *
+ * Path selection algorithm:
+ * 1. If OWD data is available, use directional delays
+ * 2. For upload-heavy traffic, prefer paths with lower forward delay
+ * 3. For download/ACK traffic, prefer paths with lower reverse delay
+ * 4. Fall back to RTT/2 estimate if no OWD data
+ * 5. Apply hysteresis to avoid path flapping
+ */
+static struct tquic_path *owd_select(void *state, struct tquic_connection *conn,
+				     struct sk_buff *skb)
+{
+	struct owd_sched_data *data = state;
+	struct tquic_path *path, *best = NULL;
+	struct tquic_owd_path_info info;
+	s64 best_delay = S64_MAX;
+	ktime_t now = ktime_get();
+	u64 time_since_switch_ms;
+
+	if (!data)
+		return conn->active_path;
+
+	/* Check if enough time has passed since last path switch */
+	time_since_switch_ms = ktime_ms_delta(now,
+					      ns_to_ktime(data->last_path_switch_time * NSEC_PER_MSEC));
+
+	rcu_read_lock();
+	list_for_each_entry_rcu(path, &conn->paths, list) {
+		s64 effective_delay;
+		int ret;
+
+		if (path->state != TQUIC_PATH_ACTIVE)
+			continue;
+
+		/* Try to get OWD information for this path */
+		if (conn->owd_state) {
+			ret = tquic_owd_get_path_info(conn->owd_state, path, &info);
+			if (ret == 0 && info.confidence > 50) {
+				/* Use directional delay based on traffic type */
+				if (data->prefer_forward)
+					effective_delay = info.forward_delay_us;
+				else
+					effective_delay = info.reverse_delay_us;
+
+				/*
+				 * For asymmetric paths, prefer the direction
+				 * that matches our traffic pattern.
+				 */
+				if (info.is_asymmetric) {
+					/*
+					 * Boost score for paths where asymmetry
+					 * favors our traffic direction.
+					 */
+					if (data->prefer_forward &&
+					    info.asymmetry_ratio < 1000) {
+						/* Forward is faster than reverse */
+						effective_delay = effective_delay * 90 / 100;
+					} else if (!data->prefer_forward &&
+						   info.asymmetry_ratio > 1000) {
+						/* Reverse is faster than forward */
+						effective_delay = effective_delay * 90 / 100;
+					}
+				}
+			} else {
+				/* Fall back to RTT/2 estimate */
+				effective_delay = path->stats.rtt_smoothed / 2;
+			}
+		} else {
+			/* No OWD state - use RTT/2 */
+			effective_delay = path->stats.rtt_smoothed / 2;
+		}
+
+		/*
+		 * Apply hysteresis: if this is the current path, give it
+		 * a 10% advantage to avoid unnecessary switching.
+		 */
+		if (path == conn->active_path &&
+		    time_since_switch_ms < data->min_switch_interval_ms) {
+			effective_delay = effective_delay * 90 / 100;
+		}
+
+		/*
+		 * Factor in congestion window utilization.
+		 * A path with available capacity is preferred even if
+		 * it has slightly higher delay.
+		 */
+		if (path->stats.cwnd > 0) {
+			u64 in_flight = 0;
+
+			if (path->stats.tx_bytes > path->stats.acked_bytes)
+				in_flight = path->stats.tx_bytes - path->stats.acked_bytes;
+
+			/* If path has spare capacity, reduce effective delay */
+			if (in_flight < path->stats.cwnd / 2)
+				effective_delay = effective_delay * 85 / 100;
+		}
+
+		if (effective_delay < best_delay) {
+			best_delay = effective_delay;
+			best = path;
+		}
+	}
+	rcu_read_unlock();
+
+	/* Update last switch time if we're changing paths */
+	if (best && best != conn->active_path)
+		data->last_path_switch_time = ktime_to_ms(now);
+
+	return best ?: conn->active_path;
+}
+
+static void owd_feedback(void *state, struct tquic_path *path,
+			 struct sk_buff *skb, bool success)
+{
+	/*
+	 * OWD feedback is handled through the OWD state updates
+	 * when ACK_1WD frames are processed. The scheduler will
+	 * automatically adapt to new delay measurements.
+	 */
+}
+
+static struct tquic_sched_ops tquic_sched_owd = {
+	.name = "owd",
+	.init = owd_init,
+	.release = owd_release,
+	.select = owd_select,
+	.feedback = owd_feedback,
+};
+
+/*
+ * OWD-ECF Hybrid Scheduler
+ *
+ * Combines ECF (Earliest Completion First) with OWD awareness.
+ * Uses one-way delay measurements when available for more accurate
+ * completion time estimation, especially on asymmetric paths.
+ */
+struct owd_ecf_sched_data {
+	u64 last_update_jiffies;
+	bool owd_available;
+};
+
+static void *owd_ecf_init(struct tquic_connection *conn)
+{
+	struct owd_ecf_sched_data *data;
+
+	data = kzalloc(sizeof(*data), GFP_KERNEL);
+	if (data)
+		data->last_update_jiffies = jiffies;
+
+	return data;
+}
+
+static void owd_ecf_release(void *state)
+{
+	kfree(state);
+}
+
+/**
+ * owd_ecf_select - ECF scheduler enhanced with OWD information
+ *
+ * Enhanced ECF formula when OWD is available:
+ *   Completion_Time = Forward_OWD + (In_Flight + Pkt_Size) / Bandwidth
+ *
+ * This is more accurate than RTT-based ECF because:
+ * - On asymmetric links, forward delay may differ significantly from RTT/2
+ * - Download ACKs (reverse path) don't affect data delivery time
+ */
+static struct tquic_path *owd_ecf_select(void *state,
+					 struct tquic_connection *conn,
+					 struct sk_buff *skb)
+{
+	struct tquic_path *path, *best = NULL;
+	struct tquic_owd_path_info info;
+	u64 min_completion = ULLONG_MAX;
+	u32 pkt_size = skb->len;
+	bool have_owd = false;
+
+	/* Check if OWD data is available */
+	if (conn->owd_state && tquic_owd_has_valid_estimates(conn->owd_state))
+		have_owd = true;
+
+	rcu_read_lock();
+	list_for_each_entry_rcu(path, &conn->paths, list) {
+		u64 completion_time;
+		u64 in_flight_bytes;
+		u64 queue_drain_time;
+		s64 delay_us;
+		u64 bandwidth;
+
+		if (path->state != TQUIC_PATH_ACTIVE)
+			continue;
+
+		/* Calculate in-flight bytes */
+		if (path->stats.tx_bytes > path->stats.acked_bytes)
+			in_flight_bytes = path->stats.tx_bytes - path->stats.acked_bytes;
+		else
+			in_flight_bytes = 0;
+
+		if (in_flight_bytes > path->stats.cwnd)
+			in_flight_bytes = path->stats.cwnd;
+
+		/* Get delay estimate - use OWD if available */
+		if (have_owd && conn->owd_state) {
+			int ret = tquic_owd_get_path_info(conn->owd_state, path, &info);
+			if (ret == 0 && info.confidence > 30) {
+				/* Use forward delay for data delivery time */
+				delay_us = info.forward_delay_us;
+			} else {
+				delay_us = path->stats.rtt_smoothed / 2;
+			}
+		} else {
+			delay_us = path->stats.rtt_smoothed / 2;
+		}
+
+		if (delay_us <= 0)
+			delay_us = 50000;  /* 50ms default */
+
+		/* Get bandwidth estimate */
+		bandwidth = path->stats.bandwidth;
+		if (bandwidth == 0) {
+			if (path->stats.cwnd > 0 && path->stats.rtt_smoothed > 0)
+				bandwidth = (u64)path->stats.cwnd * 1000000ULL /
+					    path->stats.rtt_smoothed;
+			else
+				bandwidth = 125000;  /* 1 Mbps default */
+		}
+
+		/* Calculate completion time */
+		queue_drain_time = ((in_flight_bytes + pkt_size) * 1000000ULL) / bandwidth;
+		completion_time = (u64)delay_us + queue_drain_time;
+
+		/* Apply loss rate penalty */
+		if (path->stats.tx_packets > 100) {
+			u64 loss_rate_pct = (path->stats.lost_packets * 100) /
+					    path->stats.tx_packets;
+			if (loss_rate_pct > 0 && loss_rate_pct < 50)
+				completion_time = completion_time * 100 / (100 - loss_rate_pct);
+		}
+
+		if (completion_time < min_completion) {
+			min_completion = completion_time;
+			best = path;
+		}
+	}
+	rcu_read_unlock();
+
+	return best ?: conn->active_path;
+}
+
+static struct tquic_sched_ops tquic_sched_owd_ecf = {
+	.name = "owd-ecf",
+	.init = owd_ecf_init,
+	.release = owd_ecf_release,
+	.select = owd_ecf_select,
+};
+
+/*
  * Module initialization
  */
 static int __init tquic_sched_module_init(void)
@@ -595,6 +900,10 @@ static int __init tquic_sched_module_init(void)
 	tquic_sched_register(&tquic_sched_redundant);
 	tquic_sched_register(&tquic_sched_ecf);
 
+	/* Register OWD-aware schedulers (draft-huitema-quic-1wd) */
+	tquic_sched_register(&tquic_sched_owd);
+	tquic_sched_register(&tquic_sched_owd_ecf);
+
 	/* Set minrtt as default */
 	tquic_sched_set_default("minrtt");
 
@@ -604,6 +913,11 @@ static int __init tquic_sched_module_init(void)
 
 static void __exit tquic_sched_module_exit(void)
 {
+	/* Unregister OWD-aware schedulers */
+	tquic_sched_unregister(&tquic_sched_owd_ecf);
+	tquic_sched_unregister(&tquic_sched_owd);
+
+	/* Unregister built-in schedulers */
 	tquic_sched_unregister(&tquic_sched_ecf);
 	tquic_sched_unregister(&tquic_sched_redundant);
 	tquic_sched_unregister(&tquic_sched_blest);

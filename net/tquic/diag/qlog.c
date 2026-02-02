@@ -6,7 +6,7 @@
  *
  * Implements qlog event logging for QUIC connections per:
  *   draft-ietf-quic-qlog-main-schema
- *   draft-ietf-quic-qlog-quic-events
+ *   draft-ietf-quic-qlog-quic-events-12
  *
  * Qlog provides structured logging of QUIC protocol events for
  * debugging, performance analysis, and interoperability testing.
@@ -15,7 +15,7 @@
  *   - Ring buffer storage for efficient event capture
  *   - Netlink relay for real-time event streaming
  *   - JSON-SEQ output format for qlog tooling compatibility
- *   - Per-event filtering via bitmask
+ *   - Per-event filtering via bitmask and severity
  *   - Lock-free ring buffer for fast-path logging
  */
 
@@ -43,6 +43,122 @@ extern struct genl_family tquic_genl_family;
  */
 static const struct genl_multicast_group tquic_qlog_mcgrps[] = {
 	[0] = { .name = "qlog", },
+};
+
+/*
+ * =============================================================================
+ * Event Name Tables (draft-12 compliant)
+ * =============================================================================
+ */
+
+/* Event type names for JSON output per draft-12 */
+static const char * const qlog_event_names[] = {
+	/* Connectivity events */
+	[QLOG_CONNECTIVITY_SERVER_LISTENING]	= "connectivity:server_listening",
+	[QLOG_CONNECTIVITY_CONNECTION_STARTED]	= "connectivity:connection_started",
+	[QLOG_CONNECTIVITY_CONNECTION_CLOSED]	= "connectivity:connection_closed",
+	[QLOG_CONNECTIVITY_CONNECTION_ID_UPDATED] = "connectivity:connection_id_updated",
+	[QLOG_CONNECTIVITY_SPIN_BIT_UPDATED]	= "connectivity:spin_bit_updated",
+	[QLOG_CONNECTIVITY_PATH_UPDATED]	= "connectivity:path_updated",
+
+	/* Transport events */
+	[QLOG_TRANSPORT_VERSION_INFORMATION]	= "transport:version_information",
+	[QLOG_TRANSPORT_ALPN_INFORMATION]	= "transport:alpn_information",
+	[QLOG_TRANSPORT_PARAMETERS_SET]		= "transport:parameters_set",
+	[QLOG_TRANSPORT_PARAMETERS_RESTORED]	= "transport:parameters_restored",
+	[QLOG_TRANSPORT_PACKET_SENT]		= "transport:packet_sent",
+	[QLOG_TRANSPORT_PACKET_RECEIVED]	= "transport:packet_received",
+	[QLOG_TRANSPORT_PACKET_DROPPED]		= "transport:packet_dropped",
+	[QLOG_TRANSPORT_PACKET_BUFFERED]	= "transport:packet_buffered",
+	[QLOG_TRANSPORT_PACKETS_ACKED]		= "transport:packets_acked",
+	[QLOG_TRANSPORT_DATAGRAMS_SENT]		= "transport:datagrams_sent",
+	[QLOG_TRANSPORT_DATAGRAMS_RECEIVED]	= "transport:datagrams_received",
+	[QLOG_TRANSPORT_DATAGRAM_DROPPED]	= "transport:datagram_dropped",
+	[QLOG_TRANSPORT_STREAM_STATE_UPDATED]	= "transport:stream_state_updated",
+	[QLOG_TRANSPORT_FRAMES_PROCESSED]	= "transport:frames_processed",
+	[QLOG_TRANSPORT_DATA_MOVED]		= "transport:data_moved",
+
+	/* Recovery events */
+	[QLOG_RECOVERY_PARAMETERS_SET]		= "recovery:parameters_set",
+	[QLOG_RECOVERY_METRICS_UPDATED]		= "recovery:metrics_updated",
+	[QLOG_RECOVERY_CONGESTION_STATE_UPDATED] = "recovery:congestion_state_updated",
+	[QLOG_RECOVERY_LOSS_TIMER_UPDATED]	= "recovery:loss_timer_updated",
+	[QLOG_RECOVERY_PACKET_LOST]		= "recovery:packet_lost",
+	[QLOG_RECOVERY_MARKED_FOR_RETRANSMIT]	= "recovery:marked_for_retransmit",
+	[QLOG_RECOVERY_ECN_STATE_UPDATED]	= "recovery:ecn_state_updated",
+
+	/* Security events */
+	[QLOG_SECURITY_KEY_UPDATED]		= "security:key_updated",
+	[QLOG_SECURITY_KEY_DISCARDED]		= "security:key_discarded",
+};
+
+/* Packet type names (draft-12 Section 6.5) */
+static const char * const qlog_packet_type_names[] = {
+	[QLOG_PKT_INITIAL]		= "initial",
+	[QLOG_PKT_HANDSHAKE]		= "handshake",
+	[QLOG_PKT_0RTT]			= "0RTT",
+	[QLOG_PKT_1RTT]			= "1RTT",
+	[QLOG_PKT_RETRY]		= "retry",
+	[QLOG_PKT_VERSION_NEG]		= "version_negotiation",
+	[QLOG_PKT_STATELESS_RESET]	= "stateless_reset",
+	[QLOG_PKT_UNKNOWN]		= "unknown",
+};
+
+/* Packet drop reason names (draft-12 Section 6.7) */
+static const char * const qlog_drop_reason_names[] = {
+	[QLOG_DROP_UNKNOWN]			= "unknown",
+	[QLOG_DROP_INTERNAL_ERROR]		= "internal_error",
+	[QLOG_DROP_INVALID]			= "invalid",
+	[QLOG_DROP_INVALID_LENGTH]		= "invalid_length",
+	[QLOG_DROP_UNSUPPORTED_VERSION]		= "unsupported_version",
+	[QLOG_DROP_UNEXPECTED_PACKET]		= "unexpected_packet",
+	[QLOG_DROP_UNEXPECTED_SOURCE_CID]	= "unexpected_source_connection_id",
+	[QLOG_DROP_UNEXPECTED_VERSION]		= "unexpected_version",
+	[QLOG_DROP_DUPLICATE]			= "duplicate",
+	[QLOG_DROP_KEY_UNAVAILABLE]		= "key_unavailable",
+	[QLOG_DROP_DECRYPTION_FAILURE]		= "decryption_failure",
+	[QLOG_DROP_HEADER_PARSE_ERROR]		= "header_parse_error",
+	[QLOG_DROP_PAYLOAD_PARSE_ERROR]		= "payload_parse_error",
+	[QLOG_DROP_PROTOCOL_VIOLATION]		= "protocol_violation",
+	[QLOG_DROP_CONGESTION_CONTROL]		= "congestion_control",
+	[QLOG_DROP_CONNECTION_UNKNOWN]		= "connection_unknown",
+	[QLOG_DROP_DOS_PREVENTION]		= "dos_prevention",
+	[QLOG_DROP_NO_LISTENER]			= "no_listener",
+};
+
+/* CC state names (draft-12 Section 7.3) */
+static const char * const qlog_cc_state_names[] = {
+	[QLOG_CC_SLOW_START]		= "slow_start",
+	[QLOG_CC_CONGESTION_AVOIDANCE]	= "congestion_avoidance",
+	[QLOG_CC_APPLICATION_LIMITED]	= "application_limited",
+	[QLOG_CC_RECOVERY]		= "recovery",
+};
+
+/* Timer type names (draft-12 Section 7.4) */
+static const char * const qlog_timer_type_names[] = {
+	[QLOG_TIMER_ACK]	= "ack",
+	[QLOG_TIMER_PTO]	= "pto",
+	[QLOG_TIMER_IDLE]	= "idle",
+	[QLOG_TIMER_HANDSHAKE]	= "handshake",
+};
+
+/* Timer event names */
+static const char * const qlog_timer_event_names[] = {
+	[QLOG_TIMER_SET]	= "set",
+	[QLOG_TIMER_EXPIRED]	= "expired",
+	[QLOG_TIMER_CANCELLED]	= "cancelled",
+};
+
+/* Key type names (draft-12 Section 8.1) */
+static const char * const qlog_key_type_names[] = {
+	[QLOG_KEY_SERVER_INITIAL_SECRET]	= "server_initial_secret",
+	[QLOG_KEY_CLIENT_INITIAL_SECRET]	= "client_initial_secret",
+	[QLOG_KEY_SERVER_HANDSHAKE_SECRET]	= "server_handshake_secret",
+	[QLOG_KEY_CLIENT_HANDSHAKE_SECRET]	= "client_handshake_secret",
+	[QLOG_KEY_SERVER_0RTT_SECRET]		= "server_0rtt_secret",
+	[QLOG_KEY_CLIENT_0RTT_SECRET]		= "client_0rtt_secret",
+	[QLOG_KEY_SERVER_1RTT_SECRET]		= "server_1rtt_secret",
+	[QLOG_KEY_CLIENT_1RTT_SECRET]		= "client_1rtt_secret",
 };
 
 /*
@@ -184,6 +300,10 @@ struct tquic_qlog *tquic_qlog_create(struct tquic_connection *conn,
 	if (qlog->event_mask == 0)
 		qlog->event_mask = QLOG_MASK_ALL;
 
+	qlog->severity_filter = args->severity;
+	if (qlog->severity_filter == 0)
+		qlog->severity_filter = TQUIC_QLOG_SEV_DEBUG; /* Log all */
+
 	qlog->mode = args->mode;
 	qlog->relay_to_userspace = (args->mode == TQUIC_QLOG_MODE_NETLINK);
 
@@ -192,8 +312,8 @@ struct tquic_qlog *tquic_qlog_create(struct tquic_connection *conn,
 
 	memset(&qlog->stats, 0, sizeof(qlog->stats));
 
-	pr_debug("tquic: qlog created, ring_size=%u, mask=0x%llx\n",
-		 ring_size, qlog->event_mask);
+	pr_debug("tquic: qlog created, ring_size=%u, mask=0x%llx, severity=%u\n",
+		 ring_size, qlog->event_mask, qlog->severity_filter);
 
 	return qlog;
 }
@@ -241,6 +361,20 @@ void tquic_qlog_set_mask(struct tquic_qlog *qlog, u64 mask)
 }
 EXPORT_SYMBOL_GPL(tquic_qlog_set_mask);
 
+/**
+ * tquic_qlog_set_severity - Update severity filter
+ * @qlog: Qlog context
+ * @severity: Minimum severity to log
+ */
+void tquic_qlog_set_severity(struct tquic_qlog *qlog, u8 severity)
+{
+	if (!qlog)
+		return;
+
+	WRITE_ONCE(qlog->severity_filter, severity);
+}
+EXPORT_SYMBOL_GPL(tquic_qlog_set_severity);
+
 /*
  * =============================================================================
  * Internal Event Logging Helpers
@@ -261,16 +395,15 @@ static struct tquic_qlog_event_entry *log_event_common(
 	struct tquic_qlog_event_entry *entry;
 	unsigned long flags;
 
-	if (!qlog || qlog->mode == TQUIC_QLOG_MODE_DISABLED)
-		return NULL;
-
-	if (!(qlog->event_mask & QLOG_EVENT_BIT(event_type)))
+	if (!tquic_qlog_enabled(qlog, event_type))
 		return NULL;
 
 	spin_lock_irqsave(&qlog->lock, flags);
 	entry = ring_buffer_alloc_entry(qlog);
 	entry->timestamp_ns = ktime_get_boottime_ns();
 	entry->event_type = event_type;
+	entry->severity = tquic_qlog_event_severity(event_type);
+	entry->category = tquic_qlog_event_category(event_type);
 	qlog->stats.events_logged++;
 	spin_unlock_irqrestore(&qlog->lock, flags);
 
@@ -301,51 +434,87 @@ static void relay_event(struct tquic_qlog *qlog,
 
 /*
  * =============================================================================
- * Packet Events
+ * Transport Events (draft-12 Section 6)
  * =============================================================================
  */
 
+/**
+ * fill_packet_header - Fill packet header structure
+ */
+static void fill_packet_header(struct tquic_qlog_packet_header *hdr,
+			       const struct tquic_qlog_packet_info *info)
+{
+	hdr->packet_number = info->packet_number;
+	hdr->packet_type = info->packet_type;
+	hdr->packet_size = info->packet_size;
+	hdr->payload_length = info->payload_length;
+	hdr->version = info->version;
+	hdr->key_phase = info->key_phase;
+	hdr->spin_bit = info->spin_bit;
+	hdr->scid_length = 0;  /* Could be filled from conn */
+	hdr->dcid_length = 0;
+}
+
 void tquic_qlog_packet_sent(struct tquic_qlog *qlog,
-			    u64 pkt_num, u32 pkt_type, size_t size,
-			    u32 path_id, u16 frames, bool ack_eliciting)
+			    const struct tquic_qlog_packet_info *info)
 {
 	struct tquic_qlog_event_entry *entry;
 
-	entry = log_event_common(qlog, QLOG_PACKET_SENT);
+	entry = log_event_common(qlog, QLOG_TRANSPORT_PACKET_SENT);
 	if (!entry)
 		return;
 
-	entry->path_id = path_id;
+	entry->path_id = info->path_id;
 	entry->data_len = sizeof(entry->data.packet);
-	entry->data.packet.packet_number = pkt_num;
-	entry->data.packet.packet_type = pkt_type;
-	entry->data.packet.packet_size = size;
-	entry->data.packet.path_id = path_id;
-	entry->data.packet.frames_count = frames;
-	entry->data.packet.ack_eliciting = ack_eliciting ? 1 : 0;
-	entry->data.packet.in_flight = 1;
+
+	fill_packet_header(&entry->data.packet.header, info);
+	entry->data.packet.path_id = info->path_id;
+	entry->data.packet.frames_count = info->frames_count;
+	entry->data.packet.is_coalesced = info->is_coalesced ? 1 : 0;
+	entry->data.packet.is_mtu_probe = info->is_mtu_probe ? 1 : 0;
+	entry->data.packet.ecn = info->ecn;
+	entry->data.packet.ack_eliciting = info->ack_eliciting ? 1 : 0;
+	entry->data.packet.in_flight = info->in_flight ? 1 : 0;
 
 	relay_event(qlog, entry);
 }
 EXPORT_SYMBOL_GPL(tquic_qlog_packet_sent);
 
+void tquic_qlog_packet_sent_simple(struct tquic_qlog *qlog,
+				   u64 pkt_num, u32 pkt_type, size_t size,
+				   u32 path_id, u16 frames, bool ack_eliciting)
+{
+	struct tquic_qlog_packet_info info = {
+		.packet_number = pkt_num,
+		.packet_type = pkt_type,
+		.packet_size = size,
+		.path_id = path_id,
+		.frames_count = frames,
+		.ack_eliciting = ack_eliciting,
+		.in_flight = ack_eliciting,
+	};
+
+	tquic_qlog_packet_sent(qlog, &info);
+}
+EXPORT_SYMBOL_GPL(tquic_qlog_packet_sent_simple);
+
 void tquic_qlog_packet_received(struct tquic_qlog *qlog,
-				u64 pkt_num, u32 pkt_type, size_t size,
-				u32 path_id)
+				const struct tquic_qlog_packet_info *info)
 {
 	struct tquic_qlog_event_entry *entry;
 
-	entry = log_event_common(qlog, QLOG_PACKET_RECEIVED);
+	entry = log_event_common(qlog, QLOG_TRANSPORT_PACKET_RECEIVED);
 	if (!entry)
 		return;
 
-	entry->path_id = path_id;
+	entry->path_id = info->path_id;
 	entry->data_len = sizeof(entry->data.packet);
-	entry->data.packet.packet_number = pkt_num;
-	entry->data.packet.packet_type = pkt_type;
-	entry->data.packet.packet_size = size;
-	entry->data.packet.path_id = path_id;
-	entry->data.packet.frames_count = 0;  /* Unknown at receive time */
+
+	fill_packet_header(&entry->data.packet.header, info);
+	entry->data.packet.path_id = info->path_id;
+	entry->data.packet.frames_count = info->frames_count;
+	entry->data.packet.is_coalesced = info->is_coalesced ? 1 : 0;
+	entry->data.packet.ecn = info->ecn;
 	entry->data.packet.ack_eliciting = 0;
 	entry->data.packet.in_flight = 0;
 
@@ -353,93 +522,123 @@ void tquic_qlog_packet_received(struct tquic_qlog *qlog,
 }
 EXPORT_SYMBOL_GPL(tquic_qlog_packet_received);
 
+void tquic_qlog_packet_received_simple(struct tquic_qlog *qlog,
+				       u64 pkt_num, u32 pkt_type, size_t size,
+				       u32 path_id)
+{
+	struct tquic_qlog_packet_info info = {
+		.packet_number = pkt_num,
+		.packet_type = pkt_type,
+		.packet_size = size,
+		.path_id = path_id,
+	};
+
+	tquic_qlog_packet_received(qlog, &info);
+}
+EXPORT_SYMBOL_GPL(tquic_qlog_packet_received_simple);
+
 void tquic_qlog_packet_dropped(struct tquic_qlog *qlog,
 			       u32 pkt_type, size_t size,
-			       const char *reason)
+			       u32 reason, u32 path_id)
 {
 	struct tquic_qlog_event_entry *entry;
 
-	entry = log_event_common(qlog, QLOG_PACKET_DROPPED);
+	entry = log_event_common(qlog, QLOG_TRANSPORT_PACKET_DROPPED);
 	if (!entry)
 		return;
 
-	entry->path_id = 0;
-	entry->data_len = sizeof(entry->data.packet);
-	entry->data.packet.packet_number = 0;  /* Unknown for dropped */
-	entry->data.packet.packet_type = pkt_type;
-	entry->data.packet.packet_size = size;
-	entry->data.packet.path_id = 0;
-	entry->data.packet.frames_count = 0;
-	entry->data.packet.ack_eliciting = 0;
-	entry->data.packet.in_flight = 0;
+	entry->path_id = path_id;
+	entry->data_len = sizeof(entry->data.packet_dropped);
+	entry->data.packet_dropped.header.packet_number = 0;
+	entry->data.packet_dropped.header.packet_type = pkt_type;
+	entry->data.packet_dropped.header.packet_size = size;
+	entry->data.packet_dropped.raw_length = size;
+	entry->data.packet_dropped.drop_reason = reason;
+	entry->data.packet_dropped.path_id = path_id;
 
 	relay_event(qlog, entry);
 }
 EXPORT_SYMBOL_GPL(tquic_qlog_packet_dropped);
 
-void tquic_qlog_packet_lost(struct tquic_qlog *qlog,
-			    u64 pkt_num, u32 pkt_type, size_t size,
-			    u32 path_id)
+void tquic_qlog_packet_buffered(struct tquic_qlog *qlog,
+				u64 pkt_num, u32 pkt_type, size_t size,
+				u32 reason, u32 path_id)
 {
 	struct tquic_qlog_event_entry *entry;
 
-	entry = log_event_common(qlog, QLOG_PACKET_LOST);
+	entry = log_event_common(qlog, QLOG_TRANSPORT_PACKET_BUFFERED);
 	if (!entry)
 		return;
 
 	entry->path_id = path_id;
-	entry->data_len = sizeof(entry->data.packet);
-	entry->data.packet.packet_number = pkt_num;
-	entry->data.packet.packet_type = pkt_type;
-	entry->data.packet.packet_size = size;
-	entry->data.packet.path_id = path_id;
-	entry->data.packet.frames_count = 0;
-	entry->data.packet.ack_eliciting = 1;  /* Lost packets are ack-eliciting */
-	entry->data.packet.in_flight = 1;
+	entry->data_len = sizeof(entry->data.packet_buffered);
+	entry->data.packet_buffered.header.packet_number = pkt_num;
+	entry->data.packet_buffered.header.packet_type = pkt_type;
+	entry->data.packet_buffered.header.packet_size = size;
+	entry->data.packet_buffered.buffer_reason = reason;
+	entry->data.packet_buffered.path_id = path_id;
 
 	relay_event(qlog, entry);
 }
-EXPORT_SYMBOL_GPL(tquic_qlog_packet_lost);
+EXPORT_SYMBOL_GPL(tquic_qlog_packet_buffered);
 
 /*
  * =============================================================================
- * Recovery Events
+ * Recovery Events (draft-12 Section 7)
  * =============================================================================
  */
 
 void tquic_qlog_metrics_updated(struct tquic_qlog *qlog,
-				u64 cwnd, u64 bytes_in_flight,
-				u64 min_rtt, u64 smoothed_rtt,
-				u32 path_id)
+				const struct tquic_qlog_metrics_info *metrics)
 {
 	struct tquic_qlog_event_entry *entry;
 
-	entry = log_event_common(qlog, QLOG_METRICS_UPDATED);
+	entry = log_event_common(qlog, QLOG_RECOVERY_METRICS_UPDATED);
 	if (!entry)
 		return;
 
-	entry->path_id = path_id;
+	entry->path_id = metrics->path_id;
 	entry->data_len = sizeof(entry->data.metrics);
-	entry->data.metrics.cwnd = cwnd;
-	entry->data.metrics.bytes_in_flight = bytes_in_flight;
-	entry->data.metrics.min_rtt = min_rtt;
-	entry->data.metrics.smoothed_rtt = smoothed_rtt;
-	entry->data.metrics.rtt_variance = 0;  /* Not passed in basic API */
-	entry->data.metrics.ssthresh = 0;
-	entry->data.metrics.pacing_rate = 0;
-	entry->data.metrics.path_id = path_id;
+	entry->data.metrics.min_rtt = metrics->min_rtt;
+	entry->data.metrics.smoothed_rtt = metrics->smoothed_rtt;
+	entry->data.metrics.latest_rtt = metrics->latest_rtt;
+	entry->data.metrics.rtt_variance = metrics->rtt_variance;
+	entry->data.metrics.cwnd = metrics->cwnd;
+	entry->data.metrics.bytes_in_flight = metrics->bytes_in_flight;
+	entry->data.metrics.ssthresh = metrics->ssthresh;
+	entry->data.metrics.pacing_rate = metrics->pacing_rate;
+	entry->data.metrics.pto_count = metrics->pto_count;
+	entry->data.metrics.packets_in_flight = metrics->packets_in_flight;
+	entry->data.metrics.path_id = metrics->path_id;
 
 	relay_event(qlog, entry);
 }
 EXPORT_SYMBOL_GPL(tquic_qlog_metrics_updated);
 
-void tquic_qlog_congestion_state(struct tquic_qlog *qlog,
-				 u32 old_state, u32 new_state,
-				 u32 trigger, u32 path_id)
+void tquic_qlog_metrics_updated_simple(struct tquic_qlog *qlog,
+				       u64 cwnd, u64 bytes_in_flight,
+				       u64 min_rtt, u64 smoothed_rtt,
+				       u32 path_id)
+{
+	struct tquic_qlog_metrics_info metrics = {
+		.min_rtt = min_rtt,
+		.smoothed_rtt = smoothed_rtt,
+		.cwnd = cwnd,
+		.bytes_in_flight = bytes_in_flight,
+		.path_id = path_id,
+	};
+
+	tquic_qlog_metrics_updated(qlog, &metrics);
+}
+EXPORT_SYMBOL_GPL(tquic_qlog_metrics_updated_simple);
+
+void tquic_qlog_congestion_state_updated(struct tquic_qlog *qlog,
+					 u32 old_state, u32 new_state,
+					 u32 trigger, u32 path_id)
 {
 	struct tquic_qlog_event_entry *entry;
 
-	entry = log_event_common(qlog, QLOG_CONGESTION_STATE_UPDATED);
+	entry = log_event_common(qlog, QLOG_RECOVERY_CONGESTION_STATE_UPDATED);
 	if (!entry)
 		return;
 
@@ -452,75 +651,55 @@ void tquic_qlog_congestion_state(struct tquic_qlog *qlog,
 
 	relay_event(qlog, entry);
 }
-EXPORT_SYMBOL_GPL(tquic_qlog_congestion_state);
+EXPORT_SYMBOL_GPL(tquic_qlog_congestion_state_updated);
 
 void tquic_qlog_loss_timer_updated(struct tquic_qlog *qlog,
-				   u32 timer_type, u64 delta_us,
-				   u32 path_id)
+				   u32 timer_type, u32 timer_event,
+				   u64 delta_us, u32 pn_space, u32 path_id)
 {
 	struct tquic_qlog_event_entry *entry;
 
-	entry = log_event_common(qlog, QLOG_LOSS_TIMER_UPDATED);
+	entry = log_event_common(qlog, QLOG_RECOVERY_LOSS_TIMER_UPDATED);
 	if (!entry)
 		return;
 
 	entry->path_id = path_id;
 	entry->data_len = sizeof(entry->data.timer);
 	entry->data.timer.timer_type = timer_type;
+	entry->data.timer.timer_event = timer_event;
 	entry->data.timer.delta = delta_us;
+	entry->data.timer.packet_number_space = pn_space;
 	entry->data.timer.path_id = path_id;
 
 	relay_event(qlog, entry);
 }
 EXPORT_SYMBOL_GPL(tquic_qlog_loss_timer_updated);
 
-/*
- * =============================================================================
- * Security Events
- * =============================================================================
- */
-
-void tquic_qlog_key_updated(struct tquic_qlog *qlog,
-			    u32 key_phase, u32 generation, u32 trigger)
+void tquic_qlog_packet_lost(struct tquic_qlog *qlog,
+			    u64 pkt_num, u32 pkt_type, size_t size,
+			    u32 trigger, u32 path_id)
 {
 	struct tquic_qlog_event_entry *entry;
 
-	entry = log_event_common(qlog, QLOG_KEY_UPDATED);
+	entry = log_event_common(qlog, QLOG_RECOVERY_PACKET_LOST);
 	if (!entry)
 		return;
 
-	entry->path_id = 0;
-	entry->data_len = sizeof(entry->data.key);
-	entry->data.key.key_phase = key_phase;
-	entry->data.key.generation = generation;
-	entry->data.key.trigger = trigger;
+	entry->path_id = path_id;
+	entry->data_len = sizeof(entry->data.packet_lost);
+	entry->data.packet_lost.header.packet_number = pkt_num;
+	entry->data.packet_lost.header.packet_type = pkt_type;
+	entry->data.packet_lost.header.packet_size = size;
+	entry->data.packet_lost.path_id = path_id;
+	entry->data.packet_lost.trigger = trigger;
 
 	relay_event(qlog, entry);
 }
-EXPORT_SYMBOL_GPL(tquic_qlog_key_updated);
-
-void tquic_qlog_key_retired(struct tquic_qlog *qlog,
-			    u32 key_phase, u32 generation)
-{
-	struct tquic_qlog_event_entry *entry;
-
-	entry = log_event_common(qlog, QLOG_KEY_RETIRED);
-	if (!entry)
-		return;
-
-	entry->path_id = 0;
-	entry->data_len = sizeof(entry->data.key);
-	entry->data.key.key_phase = key_phase;
-	entry->data.key.generation = generation;
-	entry->data.key.trigger = QLOG_KEY_TRIGGER_LOCAL;
-
-	relay_event(qlog, entry);
-}
-EXPORT_SYMBOL_GPL(tquic_qlog_key_retired);
+EXPORT_SYMBOL_GPL(tquic_qlog_packet_lost);
 
 /*
  * =============================================================================
- * Connection Events
+ * Connectivity Events (draft-12 Section 5)
  * =============================================================================
  */
 
@@ -528,7 +707,7 @@ void tquic_qlog_connection_started(struct tquic_qlog *qlog, u32 version)
 {
 	struct tquic_qlog_event_entry *entry;
 
-	entry = log_event_common(qlog, QLOG_CONNECTION_STARTED);
+	entry = log_event_common(qlog, QLOG_CONNECTIVITY_CONNECTION_STARTED);
 	if (!entry)
 		return;
 
@@ -536,18 +715,20 @@ void tquic_qlog_connection_started(struct tquic_qlog *qlog, u32 version)
 	entry->data_len = sizeof(entry->data.connection);
 	entry->data.connection.old_state = QLOG_CONN_IDLE;
 	entry->data.connection.new_state = QLOG_CONN_CONNECTING;
-	entry->data.connection.error_code = 0;
 	entry->data.connection.version = version;
+	entry->data.connection.error_code = 0;
+	entry->data.connection.reason_phrase_len = 0;
 
 	relay_event(qlog, entry);
 }
 EXPORT_SYMBOL_GPL(tquic_qlog_connection_started);
 
-void tquic_qlog_connection_closed(struct tquic_qlog *qlog, u64 error_code)
+void tquic_qlog_connection_closed(struct tquic_qlog *qlog, u64 error_code,
+				  const char *reason, size_t reason_len)
 {
 	struct tquic_qlog_event_entry *entry;
 
-	entry = log_event_common(qlog, QLOG_CONNECTION_CLOSED);
+	entry = log_event_common(qlog, QLOG_CONNECTIVITY_CONNECTION_CLOSED);
 	if (!entry)
 		return;
 
@@ -555,8 +736,9 @@ void tquic_qlog_connection_closed(struct tquic_qlog *qlog, u64 error_code)
 	entry->data_len = sizeof(entry->data.connection);
 	entry->data.connection.old_state = QLOG_CONN_CONNECTED;
 	entry->data.connection.new_state = QLOG_CONN_CLOSED;
-	entry->data.connection.error_code = error_code;
 	entry->data.connection.version = 0;
+	entry->data.connection.error_code = error_code;
+	entry->data.connection.reason_phrase_len = reason_len;
 
 	relay_event(qlog, entry);
 }
@@ -565,66 +747,142 @@ EXPORT_SYMBOL_GPL(tquic_qlog_connection_closed);
 void tquic_qlog_connection_state_updated(struct tquic_qlog *qlog,
 					 u32 old_state, u32 new_state)
 {
+	/* Map to path_updated for primary path (path_id=0) */
+	tquic_qlog_path_updated(qlog, 0, old_state, new_state, 0);
+}
+EXPORT_SYMBOL_GPL(tquic_qlog_connection_state_updated);
+
+void tquic_qlog_path_updated(struct tquic_qlog *qlog, u32 path_id,
+			     u32 old_state, u32 new_state, u32 mtu)
+{
 	struct tquic_qlog_event_entry *entry;
 
-	entry = log_event_common(qlog, QLOG_CONNECTION_STATE_UPDATED);
+	entry = log_event_common(qlog, QLOG_CONNECTIVITY_PATH_UPDATED);
+	if (!entry)
+		return;
+
+	entry->path_id = path_id;
+	entry->data_len = sizeof(entry->data.path);
+	entry->data.path.old_state = old_state;
+	entry->data.path.new_state = new_state;
+	entry->data.path.path_id = path_id;
+	entry->data.path.mtu = mtu;
+	entry->data.path.local_addr_len = 0;
+	entry->data.path.remote_addr_len = 0;
+
+	relay_event(qlog, entry);
+}
+EXPORT_SYMBOL_GPL(tquic_qlog_path_updated);
+
+/*
+ * =============================================================================
+ * Security Events (draft-12 Section 8)
+ * =============================================================================
+ */
+
+void tquic_qlog_key_updated(struct tquic_qlog *qlog,
+			    u32 key_type, u32 key_phase,
+			    u32 generation, u32 trigger)
+{
+	struct tquic_qlog_event_entry *entry;
+
+	entry = log_event_common(qlog, QLOG_SECURITY_KEY_UPDATED);
 	if (!entry)
 		return;
 
 	entry->path_id = 0;
-	entry->data_len = sizeof(entry->data.connection);
-	entry->data.connection.old_state = old_state;
-	entry->data.connection.new_state = new_state;
-	entry->data.connection.error_code = 0;
-	entry->data.connection.version = 0;
+	entry->data_len = sizeof(entry->data.key);
+	entry->data.key.key_type = key_type;
+	entry->data.key.key_phase = key_phase;
+	entry->data.key.generation = generation;
+	entry->data.key.trigger = trigger;
 
 	relay_event(qlog, entry);
 }
-EXPORT_SYMBOL_GPL(tquic_qlog_connection_state_updated);
+EXPORT_SYMBOL_GPL(tquic_qlog_key_updated);
+
+void tquic_qlog_key_discarded(struct tquic_qlog *qlog,
+			      u32 key_type, u32 key_phase,
+			      u32 generation, u32 trigger)
+{
+	struct tquic_qlog_event_entry *entry;
+
+	entry = log_event_common(qlog, QLOG_SECURITY_KEY_DISCARDED);
+	if (!entry)
+		return;
+
+	entry->path_id = 0;
+	entry->data_len = sizeof(entry->data.key);
+	entry->data.key.key_type = key_type;
+	entry->data.key.key_phase = key_phase;
+	entry->data.key.generation = generation;
+	entry->data.key.trigger = trigger;
+
+	relay_event(qlog, entry);
+}
+EXPORT_SYMBOL_GPL(tquic_qlog_key_discarded);
 
 /*
  * =============================================================================
- * JSON Output
+ * JSON Output (draft-12 compliant JSON-SEQ format)
  * =============================================================================
  *
  * Generates JSON-SEQ formatted events per draft-ietf-quic-qlog-main-schema.
  * Each line starts with ASCII Record Separator (0x1E) for JSON-SEQ.
  */
 
-/* Event type names for JSON output */
-static const char * const qlog_event_names[] = {
-	[QLOG_CONNECTION_STARTED]	= "connectivity:connection_started",
-	[QLOG_CONNECTION_CLOSED]	= "connectivity:connection_closed",
-	[QLOG_CONNECTION_STATE_UPDATED]	= "connectivity:connection_state_updated",
-	[QLOG_PACKET_SENT]		= "transport:packet_sent",
-	[QLOG_PACKET_RECEIVED]		= "transport:packet_received",
-	[QLOG_PACKET_DROPPED]		= "transport:packet_dropped",
-	[QLOG_FRAMES_PROCESSED]		= "transport:frames_processed",
-	[QLOG_METRICS_UPDATED]		= "recovery:metrics_updated",
-	[QLOG_CONGESTION_STATE_UPDATED]	= "recovery:congestion_state_updated",
-	[QLOG_LOSS_TIMER_UPDATED]	= "recovery:loss_timer_updated",
-	[QLOG_PACKET_LOST]		= "recovery:packet_lost",
-	[QLOG_KEY_UPDATED]		= "security:key_updated",
-	[QLOG_KEY_RETIRED]		= "security:key_retired",
-};
+/**
+ * get_event_name - Get event name string
+ * @event_type: Event type
+ *
+ * Return: Event name string or "unknown"
+ */
+static const char *get_event_name(u32 event_type)
+{
+	if (event_type < ARRAY_SIZE(qlog_event_names) &&
+	    qlog_event_names[event_type])
+		return qlog_event_names[event_type];
+	return "unknown:unknown";
+}
 
-/* Packet type names */
-static const char * const qlog_packet_type_names[] = {
-	[QLOG_PKT_INITIAL]	= "initial",
-	[QLOG_PKT_HANDSHAKE]	= "handshake",
-	[QLOG_PKT_0RTT]		= "0rtt",
-	[QLOG_PKT_1RTT]		= "1rtt",
-	[QLOG_PKT_RETRY]	= "retry",
-	[QLOG_PKT_VERSION_NEG]	= "version_negotiation",
-};
+/**
+ * get_packet_type_name - Get packet type string
+ * @pkt_type: Packet type
+ *
+ * Return: Packet type name or "unknown"
+ */
+static const char *get_packet_type_name(u32 pkt_type)
+{
+	if (pkt_type < ARRAY_SIZE(qlog_packet_type_names))
+		return qlog_packet_type_names[pkt_type];
+	return "unknown";
+}
 
-/* CC state names */
-static const char * const qlog_cc_state_names[] = {
-	[QLOG_CC_SLOW_START]		= "slow_start",
-	[QLOG_CC_CONGESTION_AVOIDANCE]	= "congestion_avoidance",
-	[QLOG_CC_APPLICATION_LIMITED]	= "application_limited",
-	[QLOG_CC_RECOVERY]		= "recovery",
-};
+/**
+ * get_drop_reason_name - Get drop reason string
+ * @reason: Drop reason
+ *
+ * Return: Reason string or "unknown"
+ */
+static const char *get_drop_reason_name(u32 reason)
+{
+	if (reason < ARRAY_SIZE(qlog_drop_reason_names))
+		return qlog_drop_reason_names[reason];
+	return "unknown";
+}
+
+/**
+ * get_cc_state_name - Get CC state string
+ * @state: CC state
+ *
+ * Return: State name or "unknown"
+ */
+static const char *get_cc_state_name(u32 state)
+{
+	if (state < ARRAY_SIZE(qlog_cc_state_names))
+		return qlog_cc_state_names[state];
+	return "unknown";
+}
 
 /**
  * tquic_qlog_emit_json - Emit event as JSON line
@@ -643,14 +901,12 @@ int tquic_qlog_emit_json(struct tquic_qlog *qlog,
 	int len = 0;
 	u64 time_ms;
 
-	if (!entry || entry->event_type >= ARRAY_SIZE(qlog_event_names))
+	if (!entry)
 		return -EINVAL;
 
-	event_name = qlog_event_names[entry->event_type];
-	if (!event_name)
-		return -EINVAL;
+	event_name = get_event_name(entry->event_type);
 
-	/* Convert to milliseconds with 3 decimal places */
+	/* Convert timestamp to milliseconds with 3 decimal places */
 	time_ms = entry->timestamp_ns / 1000000;
 
 	/* JSON-SEQ record separator + opening brace */
@@ -662,100 +918,184 @@ int tquic_qlog_emit_json(struct tquic_qlog *qlog,
 	if (len >= buflen)
 		return -ENOSPC;
 
-	/* Event-specific data */
+	/* Event-specific data per draft-12 */
 	switch (entry->event_type) {
-	case QLOG_PACKET_SENT:
-	case QLOG_PACKET_RECEIVED:
-	case QLOG_PACKET_DROPPED:
-	case QLOG_PACKET_LOST: {
+	case QLOG_TRANSPORT_PACKET_SENT:
+	case QLOG_TRANSPORT_PACKET_RECEIVED: {
 		const struct tquic_qlog_packet_event *pkt = &entry->data.packet;
-		const char *pkt_type = "unknown";
-
-		if (pkt->packet_type < ARRAY_SIZE(qlog_packet_type_names))
-			pkt_type = qlog_packet_type_names[pkt->packet_type];
+		const char *pkt_type = get_packet_type_name(pkt->header.packet_type);
 
 		len += snprintf(buf + len, buflen - len,
-				"\"header\":{\"packet_type\":\"%s\",\"packet_number\":%llu},"
-				"\"raw\":{\"length\":%u},\"path_id\":%u",
-				pkt_type, pkt->packet_number,
-				pkt->packet_size, pkt->path_id);
+				"\"header\":{\"packet_type\":\"%s\","
+				"\"packet_number\":%llu},"
+				"\"raw\":{\"length\":%u},"
+				"\"is_coalesced\":%s",
+				pkt_type, pkt->header.packet_number,
+				pkt->header.packet_size,
+				pkt->is_coalesced ? "true" : "false");
+
+		if (entry->event_type == QLOG_TRANSPORT_PACKET_SENT) {
+			len += snprintf(buf + len, buflen - len,
+					",\"frames\":{\"count\":%u},"
+					"\"is_mtu_probe_packet\":%s",
+					pkt->frames_count,
+					pkt->is_mtu_probe ? "true" : "false");
+		}
 		break;
 	}
 
-	case QLOG_METRICS_UPDATED: {
+	case QLOG_TRANSPORT_PACKET_DROPPED: {
+		const struct tquic_qlog_packet_dropped_event *drop =
+			&entry->data.packet_dropped;
+		const char *pkt_type = get_packet_type_name(drop->header.packet_type);
+		const char *reason = get_drop_reason_name(drop->drop_reason);
+
+		len += snprintf(buf + len, buflen - len,
+				"\"header\":{\"packet_type\":\"%s\"},"
+				"\"raw\":{\"length\":%u},"
+				"\"trigger\":\"%s\"",
+				pkt_type, drop->raw_length, reason);
+		break;
+	}
+
+	case QLOG_TRANSPORT_PACKET_BUFFERED: {
+		const struct tquic_qlog_packet_buffered_event *buf_ev =
+			&entry->data.packet_buffered;
+		const char *pkt_type = get_packet_type_name(buf_ev->header.packet_type);
+
+		len += snprintf(buf + len, buflen - len,
+				"\"header\":{\"packet_type\":\"%s\","
+				"\"packet_number\":%llu},"
+				"\"raw\":{\"length\":%u},"
+				"\"trigger\":\"%s\"",
+				pkt_type, buf_ev->header.packet_number,
+				buf_ev->header.packet_size,
+				buf_ev->buffer_reason == QLOG_BUFFER_KEYS_UNAVAILABLE ?
+				"keys_unavailable" : "backpressure");
+		break;
+	}
+
+	case QLOG_RECOVERY_METRICS_UPDATED: {
 		const struct tquic_qlog_metrics_event *m = &entry->data.metrics;
 
 		len += snprintf(buf + len, buflen - len,
-				"\"congestion_window\":%llu,"
-				"\"bytes_in_flight\":%llu,"
 				"\"min_rtt\":%llu,"
 				"\"smoothed_rtt\":%llu,"
-				"\"path_id\":%u",
-				m->cwnd, m->bytes_in_flight,
-				m->min_rtt, m->smoothed_rtt, m->path_id);
+				"\"latest_rtt\":%llu,"
+				"\"rtt_variance\":%llu,"
+				"\"congestion_window\":%llu,"
+				"\"bytes_in_flight\":%llu,"
+				"\"ssthresh\":%llu",
+				m->min_rtt, m->smoothed_rtt, m->latest_rtt,
+				m->rtt_variance, m->cwnd, m->bytes_in_flight,
+				m->ssthresh);
+
+		if (m->pacing_rate > 0) {
+			len += snprintf(buf + len, buflen - len,
+					",\"pacing_rate\":%llu", m->pacing_rate);
+		}
+		if (m->pto_count > 0) {
+			len += snprintf(buf + len, buflen - len,
+					",\"pto_count\":%u", m->pto_count);
+		}
 		break;
 	}
 
-	case QLOG_CONGESTION_STATE_UPDATED: {
+	case QLOG_RECOVERY_CONGESTION_STATE_UPDATED: {
 		const struct tquic_qlog_congestion_event *c = &entry->data.congestion;
-		const char *old_name = "unknown";
-		const char *new_name = "unknown";
-
-		if (c->old_state < ARRAY_SIZE(qlog_cc_state_names))
-			old_name = qlog_cc_state_names[c->old_state];
-		if (c->new_state < ARRAY_SIZE(qlog_cc_state_names))
-			new_name = qlog_cc_state_names[c->new_state];
+		const char *old_name = get_cc_state_name(c->old_state);
+		const char *new_name = get_cc_state_name(c->new_state);
 
 		len += snprintf(buf + len, buflen - len,
-				"\"old\":\"%s\",\"new\":\"%s\",\"path_id\":%u",
-				old_name, new_name, c->path_id);
+				"\"old\":\"%s\",\"new\":\"%s\"",
+				old_name, new_name);
 		break;
 	}
 
-	case QLOG_LOSS_TIMER_UPDATED: {
+	case QLOG_RECOVERY_LOSS_TIMER_UPDATED: {
 		const struct tquic_qlog_loss_timer_event *t = &entry->data.timer;
-		static const char * const timer_names[] = {
-			"ack", "pto", "idle", "handshake"
-		};
-		const char *timer_name = "unknown";
+		const char *timer_type = "unknown";
+		const char *timer_event = "unknown";
 
-		if (t->timer_type < ARRAY_SIZE(timer_names))
-			timer_name = timer_names[t->timer_type];
+		if (t->timer_type < ARRAY_SIZE(qlog_timer_type_names))
+			timer_type = qlog_timer_type_names[t->timer_type];
+		if (t->timer_event < ARRAY_SIZE(qlog_timer_event_names))
+			timer_event = qlog_timer_event_names[t->timer_event];
 
 		len += snprintf(buf + len, buflen - len,
-				"\"timer_type\":\"%s\",\"delta\":%llu,\"path_id\":%u",
-				timer_name, t->delta, t->path_id);
+				"\"timer_type\":\"%s\",\"event_type\":\"%s\"",
+				timer_type, timer_event);
+
+		if (t->timer_event == QLOG_TIMER_SET) {
+			len += snprintf(buf + len, buflen - len,
+					",\"delta\":%llu", t->delta);
+		}
 		break;
 	}
 
-	case QLOG_KEY_UPDATED:
-	case QLOG_KEY_RETIRED: {
+	case QLOG_RECOVERY_PACKET_LOST: {
+		const struct tquic_qlog_packet_lost_event *lost = &entry->data.packet_lost;
+		const char *pkt_type = get_packet_type_name(lost->header.packet_type);
+
+		len += snprintf(buf + len, buflen - len,
+				"\"header\":{\"packet_type\":\"%s\","
+				"\"packet_number\":%llu}",
+				pkt_type, lost->header.packet_number);
+		break;
+	}
+
+	case QLOG_SECURITY_KEY_UPDATED:
+	case QLOG_SECURITY_KEY_DISCARDED: {
 		const struct tquic_qlog_key_event *k = &entry->data.key;
+		const char *key_type = "unknown";
+
+		if (k->key_type < ARRAY_SIZE(qlog_key_type_names))
+			key_type = qlog_key_type_names[k->key_type];
 
 		len += snprintf(buf + len, buflen - len,
-				"\"key_phase\":%u,\"generation\":%u",
-				k->key_phase, k->generation);
+				"\"key_type\":\"%s\",\"generation\":%u",
+				key_type, k->generation);
+
+		if (k->key_phase > 0) {
+			len += snprintf(buf + len, buflen - len,
+					",\"key_phase\":%u", k->key_phase);
+		}
 		break;
 	}
 
-	case QLOG_CONNECTION_STARTED:
-	case QLOG_CONNECTION_CLOSED:
-	case QLOG_CONNECTION_STATE_UPDATED: {
+	case QLOG_CONNECTIVITY_CONNECTION_STARTED:
+	case QLOG_CONNECTIVITY_CONNECTION_CLOSED: {
 		const struct tquic_qlog_connection_event *c = &entry->data.connection;
 
+		if (c->version != 0) {
+			len += snprintf(buf + len, buflen - len,
+					"\"quic_version\":\"0x%08x\"", c->version);
+		}
+		if (c->error_code != 0) {
+			if (c->version != 0)
+				len += snprintf(buf + len, buflen - len, ",");
+			len += snprintf(buf + len, buflen - len,
+					"\"error_code\":%llu", c->error_code);
+		}
+		break;
+	}
+
+	case QLOG_CONNECTIVITY_PATH_UPDATED: {
+		const struct tquic_qlog_path_event *p = &entry->data.path;
+
 		len += snprintf(buf + len, buflen - len,
-				"\"old\":%u,\"new\":%u",
-				c->old_state, c->new_state);
-		if (c->error_code != 0)
+				"\"path_id\":%u,\"old\":%u,\"new\":%u",
+				p->path_id, p->old_state, p->new_state);
+
+		if (p->mtu > 0) {
 			len += snprintf(buf + len, buflen - len,
-					",\"error_code\":%llu", c->error_code);
-		if (c->version != 0)
-			len += snprintf(buf + len, buflen - len,
-					",\"version\":\"0x%08x\"", c->version);
+					",\"mtu\":%u", p->mtu);
+		}
 		break;
 	}
 
 	default:
+		/* No specific data for this event type */
 		break;
 	}
 
@@ -787,7 +1127,7 @@ int tquic_qlog_nl_event(struct tquic_qlog *qlog,
 {
 	struct sk_buff *skb;
 	void *hdr;
-	char json_buf[512];
+	char json_buf[1024];
 	int json_len;
 	int ret = 0;
 
@@ -812,6 +1152,14 @@ int tquic_qlog_nl_event(struct tquic_qlog *qlog,
 	/* Add timestamp */
 	if (nla_put_u64_64bit(skb, TQUIC_QLOG_ATTR_TIMESTAMP,
 			      entry->timestamp_ns, TQUIC_QLOG_ATTR_UNSPEC))
+		goto nla_put_failure;
+
+	/* Add severity */
+	if (nla_put_u32(skb, TQUIC_QLOG_ATTR_SEVERITY, entry->severity))
+		goto nla_put_failure;
+
+	/* Add category */
+	if (nla_put_u32(skb, TQUIC_QLOG_ATTR_CATEGORY, entry->category))
 		goto nla_put_failure;
 
 	/* Add connection ID */
@@ -877,7 +1225,7 @@ ssize_t tquic_qlog_read_events(struct tquic_qlog *qlog,
 	if (!qlog || !qlog->ring)
 		return -EINVAL;
 
-	json_buf = kmalloc(512, GFP_KERNEL);
+	json_buf = kmalloc(1024, GFP_KERNEL);
 	if (!json_buf)
 		return -ENOMEM;
 
@@ -891,7 +1239,7 @@ ssize_t tquic_qlog_read_events(struct tquic_qlog *qlog,
 
 		/* Format as JSON */
 		json_len = tquic_qlog_emit_json(qlog, entry,
-						json_buf, 512);
+						json_buf, 1024);
 		if (json_len <= 0)
 			break;
 
@@ -946,7 +1294,7 @@ EXPORT_SYMBOL_GPL(tquic_qlog_poll);
 
 int __init tquic_qlog_init(void)
 {
-	pr_info("tquic: qlog tracing initialized\n");
+	pr_info("tquic: qlog tracing initialized (draft-ietf-quic-qlog-quic-events-12)\n");
 	return 0;
 }
 
@@ -956,4 +1304,4 @@ void __exit tquic_qlog_exit(void)
 }
 
 MODULE_LICENSE("GPL");
-MODULE_DESCRIPTION("TQUIC Qlog Tracing Support");
+MODULE_DESCRIPTION("TQUIC Qlog Tracing Support (draft-12)");

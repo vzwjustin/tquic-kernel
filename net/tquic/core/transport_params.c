@@ -60,6 +60,56 @@
 /* ACK Frequency (draft-ietf-quic-ack-frequency) */
 #define TP_MIN_ACK_DELAY			0xff04de1aULL
 
+/* Receive Timestamps (draft-smith-quic-receive-ts-03) */
+#define TP_MAX_RECEIVE_TIMESTAMPS_PER_ACK	0xff0a002ULL
+#define TP_RECEIVE_TIMESTAMPS_EXPONENT		0xff0a003ULL
+
+/* Default receive timestamps values */
+#define DEFAULT_MAX_RECEIVE_TIMESTAMPS		255
+#define DEFAULT_RECEIVE_TS_EXPONENT		0
+#define MAX_RECEIVE_TS_EXPONENT			20
+
+/* Address Discovery (draft-ietf-quic-address-discovery) */
+#define TP_ENABLE_ADDRESS_DISCOVERY		0x9f01ULL
+
+/* Reliable Stream Reset (draft-ietf-quic-reliable-stream-reset-07) */
+#define TP_RELIABLE_STREAM_RESET		0x17cdULL
+
+/* Extended Key Update (draft-ietf-quic-extended-key-update-01) */
+#define TP_EXTENDED_KEY_UPDATE			0x3aULL
+
+/* BDP Frame Extension (draft-kuhn-quic-bdpframe-extension-05) */
+#define TP_ENABLE_BDP_FRAME			0xff0bdf01ULL
+
+/* Deadline-Aware Multipath Scheduling (draft-tjohn-quic-multipath-dmtp-01) */
+#define TP_ENABLE_DEADLINE_AWARE		0x0f10ULL
+#define TP_DEADLINE_GRANULARITY			0x0f11ULL
+#define TP_MAX_DEADLINE_STREAMS			0x0f12ULL
+#define TP_DEADLINE_MISS_POLICY			0x0f13ULL
+
+/* Default deadline-aware scheduling values */
+#define DEFAULT_DEADLINE_GRANULARITY		1000	/* 1 ms in microseconds */
+#define DEFAULT_MAX_DEADLINE_STREAMS		256
+#define DEFAULT_DEADLINE_MISS_POLICY		1	/* Best effort */
+
+/* Forward Error Correction (draft-zheng-quic-fec-extension-01) */
+#define TP_ENABLE_FEC				0xff0f000ULL
+#define TP_FEC_SCHEME				0xff0f001ULL
+#define TP_MAX_SOURCE_SYMBOLS			0xff0f002ULL
+
+/* Default FEC values */
+#define DEFAULT_FEC_SCHEME			0	/* XOR */
+#define DEFAULT_MAX_SOURCE_SYMBOLS		32
+
+/* Congestion Control Data Exchange (draft-yuan-quic-congestion-data-00) */
+#define TP_ENABLE_CONG_DATA			0xff0cd002ULL
+
+/* One-Way Delay Measurement (draft-huitema-quic-1wd) */
+#define TP_ENABLE_ONE_WAY_DELAY			0xff02de1aULL
+
+/* Default OWD timestamp resolution in microseconds */
+#define DEFAULT_OWD_RESOLUTION_US		1000	/* 1ms */
+
 /* Stateless reset token length */
 #define STATELESS_RESET_TOKEN_LEN	16
 
@@ -239,6 +289,12 @@ void tquic_tp_init(struct tquic_transport_params *params)
 	/* ACK Frequency - min_ack_delay not present by default */
 	params->min_ack_delay = 0;
 	params->min_ack_delay_present = false;
+
+	/* Receive Timestamps (draft-smith-quic-receive-ts-03) */
+	params->max_receive_timestamps_per_ack = 0;
+	params->max_receive_timestamps_per_ack_present = false;
+	params->receive_timestamps_exponent = DEFAULT_RECEIVE_TS_EXPONENT;
+	params->receive_timestamps_exponent_present = false;
 }
 EXPORT_SYMBOL_GPL(tquic_tp_init);
 
@@ -274,6 +330,12 @@ void tquic_tp_set_defaults_client(struct tquic_transport_params *params)
 	/* Enable ACK frequency extension with default min_ack_delay of 25ms */
 	params->min_ack_delay = 25000;  /* 25ms in microseconds */
 	params->min_ack_delay_present = true;
+
+	/* Enable receive timestamps extension (draft-smith-quic-receive-ts-03) */
+	params->max_receive_timestamps_per_ack = DEFAULT_MAX_RECEIVE_TIMESTAMPS;
+	params->max_receive_timestamps_per_ack_present = true;
+	params->receive_timestamps_exponent = DEFAULT_RECEIVE_TS_EXPONENT;
+	params->receive_timestamps_exponent_present = true;
 }
 EXPORT_SYMBOL_GPL(tquic_tp_set_defaults_client);
 
@@ -309,6 +371,12 @@ void tquic_tp_set_defaults_server(struct tquic_transport_params *params)
 	/* Enable ACK frequency extension with default min_ack_delay of 25ms */
 	params->min_ack_delay = 25000;  /* 25ms in microseconds */
 	params->min_ack_delay_present = true;
+
+	/* Enable receive timestamps extension (draft-smith-quic-receive-ts-03) */
+	params->max_receive_timestamps_per_ack = DEFAULT_MAX_RECEIVE_TIMESTAMPS;
+	params->max_receive_timestamps_per_ack_present = true;
+	params->receive_timestamps_exponent = DEFAULT_RECEIVE_TS_EXPONENT;
+	params->receive_timestamps_exponent_present = true;
 }
 EXPORT_SYMBOL_GPL(tquic_tp_set_defaults_server);
 
@@ -786,6 +854,160 @@ ssize_t tquic_tp_encode(const struct tquic_transport_params *params,
 		offset += vi_ret;
 	}
 
+	/* max_receive_timestamps_per_ack (draft-smith-quic-receive-ts-03) */
+	if (params->max_receive_timestamps_per_ack_present) {
+		ret = encode_varint_param(buf + offset, buflen - offset,
+					  TP_MAX_RECEIVE_TIMESTAMPS_PER_ACK,
+					  params->max_receive_timestamps_per_ack);
+		if (ret < 0)
+			return ret;
+		offset += ret;
+	}
+
+	/* receive_timestamps_exponent (draft-smith-quic-receive-ts-03) */
+	if (params->receive_timestamps_exponent_present) {
+		ret = encode_varint_param(buf + offset, buflen - offset,
+					  TP_RECEIVE_TIMESTAMPS_EXPONENT,
+					  params->receive_timestamps_exponent);
+		if (ret < 0)
+			return ret;
+		offset += ret;
+	}
+
+	/* enable_address_discovery (draft-ietf-quic-address-discovery) */
+	if (params->enable_address_discovery) {
+		ret = encode_zero_length_param(buf + offset, buflen - offset,
+					       TP_ENABLE_ADDRESS_DISCOVERY);
+		if (ret < 0)
+			return ret;
+		offset += ret;
+	}
+
+	/* reliable_stream_reset (draft-ietf-quic-reliable-stream-reset-07) */
+	if (params->reliable_stream_reset) {
+		ret = encode_zero_length_param(buf + offset, buflen - offset,
+					       TP_RELIABLE_STREAM_RESET);
+		if (ret < 0)
+			return ret;
+		offset += ret;
+	}
+
+	/* extended_key_update (draft-ietf-quic-extended-key-update-01) */
+	if (params->extended_key_update_present && params->extended_key_update > 0) {
+		ret = encode_varint_param(buf + offset, buflen - offset,
+					  TP_EXTENDED_KEY_UPDATE,
+					  params->extended_key_update);
+		if (ret < 0)
+			return ret;
+		offset += ret;
+	}
+
+	/* enable_bdp_frame (draft-kuhn-quic-bdpframe-extension-05) */
+	if (params->enable_bdp_frame) {
+		ret = encode_zero_length_param(buf + offset, buflen - offset,
+					       TP_ENABLE_BDP_FRAME);
+		if (ret < 0)
+			return ret;
+		offset += ret;
+	}
+
+	/* Deadline-Aware Multipath Scheduling (draft-tjohn-quic-multipath-dmtp-01) */
+	if (params->enable_deadline_aware_present && params->enable_deadline_aware) {
+		ret = encode_zero_length_param(buf + offset, buflen - offset,
+					       TP_ENABLE_DEADLINE_AWARE);
+		if (ret < 0)
+			return ret;
+		offset += ret;
+	}
+
+	if (params->deadline_granularity_present) {
+		ret = encode_varint_param(buf + offset, buflen - offset,
+					  TP_DEADLINE_GRANULARITY,
+					  params->deadline_granularity);
+		if (ret < 0)
+			return ret;
+		offset += ret;
+	}
+
+	if (params->max_deadline_streams_present) {
+		ret = encode_varint_param(buf + offset, buflen - offset,
+					  TP_MAX_DEADLINE_STREAMS,
+					  params->max_deadline_streams);
+		if (ret < 0)
+			return ret;
+		offset += ret;
+	}
+
+	if (params->deadline_miss_policy_present) {
+		ret = encode_varint_param(buf + offset, buflen - offset,
+					  TP_DEADLINE_MISS_POLICY,
+					  params->deadline_miss_policy);
+		if (ret < 0)
+			return ret;
+		offset += ret;
+	}
+
+	/* Forward Error Correction (draft-zheng-quic-fec-extension-01) */
+	if (params->enable_fec_present && params->enable_fec) {
+		ret = encode_zero_length_param(buf + offset, buflen - offset,
+					       TP_ENABLE_FEC);
+		if (ret < 0)
+			return ret;
+		offset += ret;
+	}
+
+	if (params->fec_scheme_present) {
+		ret = encode_varint_param(buf + offset, buflen - offset,
+					  TP_FEC_SCHEME,
+					  params->fec_scheme);
+		if (ret < 0)
+			return ret;
+		offset += ret;
+	}
+
+	if (params->max_source_symbols_present) {
+		ret = encode_varint_param(buf + offset, buflen - offset,
+					  TP_MAX_SOURCE_SYMBOLS,
+					  params->max_source_symbols);
+		if (ret < 0)
+			return ret;
+		offset += ret;
+	}
+
+	/* enable_cong_data (draft-yuan-quic-congestion-data-00) */
+	if (params->enable_cong_data_present && params->enable_cong_data) {
+		ret = encode_zero_length_param(buf + offset, buflen - offset,
+					       TP_ENABLE_CONG_DATA);
+		if (ret < 0)
+			return ret;
+		offset += ret;
+	}
+
+	/* enable_one_way_delay (draft-huitema-quic-1wd) */
+	if (params->enable_one_way_delay_present &&
+	    params->enable_one_way_delay > 0) {
+		/* Encode parameter ID */
+		ret = tp_varint_encode(buf + offset, buflen - offset,
+				       TP_ENABLE_ONE_WAY_DELAY);
+		if (ret < 0)
+			return ret;
+		offset += ret;
+
+		/* Encode value length */
+		size_t value_len = tp_varint_len(params->enable_one_way_delay);
+		ret = tp_varint_encode(buf + offset, buflen - offset, value_len);
+		if (ret < 0)
+			return ret;
+		offset += ret;
+
+		/* Encode timestamp resolution in microseconds */
+		ret = tp_varint_encode(buf + offset, buflen - offset,
+				       params->enable_one_way_delay);
+		if (ret < 0)
+			return ret;
+		offset += ret;
+	}
+
 	return offset;
 }
 EXPORT_SYMBOL_GPL(tquic_tp_encode);
@@ -1055,6 +1277,28 @@ int tquic_tp_decode(const u8 *buf, size_t buflen, bool is_server,
 			params->grease_quic_bit = true;
 			break;
 
+		case TP_RELIABLE_STREAM_RESET:
+			/*
+			 * draft-ietf-quic-reliable-stream-reset-07:
+			 * Zero-length parameter indicating support for
+			 * RESET_STREAM_AT frames.
+			 */
+			params->reliable_stream_reset = true;
+			break;
+
+		case TP_EXTENDED_KEY_UPDATE:
+			/*
+			 * draft-ietf-quic-extended-key-update-01:
+			 * Maximum outstanding key update requests.
+			 * Value of 0 or absent means EKU is not supported.
+			 */
+			ret = tp_varint_decode(buf + offset, param_len, &value);
+			if (ret < 0 || (size_t)ret != param_len)
+				return -EINVAL;
+			params->extended_key_update = value;
+			params->extended_key_update_present = true;
+			break;
+
 		case TP_VERSION_INFORMATION:
 			/* Version information (RFC 9368) */
 			if (param_len < 4)  /* At least chosen version */
@@ -1100,6 +1344,107 @@ int tquic_tp_decode(const u8 *buf, size_t buflen, bool is_server,
 					return -EINVAL;
 				params->min_ack_delay = value;
 				params->min_ack_delay_present = true;
+			} else if (param_id == TP_MAX_RECEIVE_TIMESTAMPS_PER_ACK) {
+				/* Receive Timestamps (draft-smith-quic-receive-ts-03) */
+				ret = tp_varint_decode(buf + offset,
+							  param_len, &value);
+				if (ret < 0 || (size_t)ret != param_len)
+					return -EINVAL;
+				params->max_receive_timestamps_per_ack = value;
+				params->max_receive_timestamps_per_ack_present = true;
+			} else if (param_id == TP_RECEIVE_TIMESTAMPS_EXPONENT) {
+				/* Receive Timestamps exponent (draft-smith-quic-receive-ts-03) */
+				ret = tp_varint_decode(buf + offset,
+							  param_len, &value);
+				if (ret < 0 || (size_t)ret != param_len)
+					return -EINVAL;
+				if (value > MAX_RECEIVE_TS_EXPONENT)
+					return -EINVAL;
+				params->receive_timestamps_exponent = (u8)value;
+				params->receive_timestamps_exponent_present = true;
+			} else if (param_id == TP_ENABLE_ADDRESS_DISCOVERY) {
+				/* Address Discovery (draft-ietf-quic-address-discovery) */
+				/* Zero-length parameter means enabled */
+				params->enable_address_discovery = true;
+			} else if (param_id == TP_ENABLE_BDP_FRAME) {
+				/* BDP Frame (draft-kuhn-quic-bdpframe-extension-05) */
+				/* Zero-length parameter means enabled */
+				params->enable_bdp_frame = true;
+			} else if (param_id == TP_ENABLE_DEADLINE_AWARE) {
+				/* Deadline-Aware Scheduling (draft-tjohn-quic-multipath-dmtp-01) */
+				/* Zero-length parameter means enabled */
+				params->enable_deadline_aware = true;
+				params->enable_deadline_aware_present = true;
+			} else if (param_id == TP_DEADLINE_GRANULARITY) {
+				/* Deadline granularity in microseconds */
+				ret = tp_varint_decode(buf + offset,
+						       param_len, &value);
+				if (ret < 0 || (size_t)ret != param_len)
+					return -EINVAL;
+				params->deadline_granularity = (u32)value;
+				params->deadline_granularity_present = true;
+			} else if (param_id == TP_MAX_DEADLINE_STREAMS) {
+				/* Maximum deadline-aware streams */
+				ret = tp_varint_decode(buf + offset,
+						       param_len, &value);
+				if (ret < 0 || (size_t)ret != param_len)
+					return -EINVAL;
+				params->max_deadline_streams = (u32)value;
+				params->max_deadline_streams_present = true;
+			} else if (param_id == TP_DEADLINE_MISS_POLICY) {
+				/* Deadline miss policy */
+				ret = tp_varint_decode(buf + offset,
+						       param_len, &value);
+				if (ret < 0 || (size_t)ret != param_len)
+					return -EINVAL;
+				if (value > 3)  /* Max policy value */
+					return -EINVAL;
+				params->deadline_miss_policy = (u8)value;
+				params->deadline_miss_policy_present = true;
+			} else if (param_id == TP_ENABLE_FEC) {
+				/* FEC (draft-zheng-quic-fec-extension-01) */
+				/* Zero-length parameter means enabled */
+				params->enable_fec = true;
+				params->enable_fec_present = true;
+			} else if (param_id == TP_FEC_SCHEME) {
+				/* FEC scheme */
+				ret = tp_varint_decode(buf + offset,
+						       param_len, &value);
+				if (ret < 0 || (size_t)ret != param_len)
+					return -EINVAL;
+				if (value > 2)  /* Max scheme value */
+					return -EINVAL;
+				params->fec_scheme = (u8)value;
+				params->fec_scheme_present = true;
+			} else if (param_id == TP_MAX_SOURCE_SYMBOLS) {
+				/* Max source symbols per block */
+				ret = tp_varint_decode(buf + offset,
+						       param_len, &value);
+				if (ret < 0 || (size_t)ret != param_len)
+					return -EINVAL;
+				if (value < 2 || value > 255)
+					return -EINVAL;
+				params->max_source_symbols = (u8)value;
+				params->max_source_symbols_present = true;
+			} else if (param_id == TP_ENABLE_CONG_DATA) {
+				/* Congestion Data (draft-yuan-quic-congestion-data-00) */
+				/* Zero-length parameter means enabled */
+				params->enable_cong_data = true;
+				params->enable_cong_data_present = true;
+			} else if (param_id == TP_ENABLE_ONE_WAY_DELAY) {
+				/* One-Way Delay (draft-huitema-quic-1wd) */
+				/* Value is timestamp resolution in microseconds */
+				if (param_len > 0) {
+					ret = tp_varint_decode(buf + offset,
+							       param_len, &value);
+					if (ret < 0)
+						return ret;
+					params->enable_one_way_delay = value;
+				} else {
+					/* Zero length means default resolution */
+					params->enable_one_way_delay = DEFAULT_OWD_RESOLUTION_US;
+				}
+				params->enable_one_way_delay_present = true;
 			}
 			/* Unknown parameters are ignored per RFC 9000 */
 			break;
@@ -1341,6 +1686,123 @@ int tquic_tp_negotiate(const struct tquic_transport_params *local,
 	} else {
 		result->ack_frequency_enabled = false;
 		result->peer_min_ack_delay = 0;
+	}
+
+	/*
+	 * Address Discovery (draft-ietf-quic-address-discovery):
+	 * Enabled only if both peers advertise enable_address_discovery.
+	 * When enabled, endpoints can send OBSERVED_ADDRESS frames to
+	 * inform peers of their observed source address.
+	 */
+	result->address_discovery_enabled = local->enable_address_discovery &&
+					    remote->enable_address_discovery;
+
+	/*
+	 * Receive Timestamps (draft-smith-quic-receive-ts-03):
+	 * Enabled only if both peers advertise max_receive_timestamps_per_ack.
+	 * The negotiated maximum is the minimum of both peers' values.
+	 * The exponent is negotiated to use the larger (coarser precision).
+	 */
+	if (local->max_receive_timestamps_per_ack_present &&
+	    remote->max_receive_timestamps_per_ack_present &&
+	    local->max_receive_timestamps_per_ack > 0 &&
+	    remote->max_receive_timestamps_per_ack > 0) {
+		result->receive_timestamps_enabled = true;
+		result->max_receive_timestamps = min(
+			local->max_receive_timestamps_per_ack,
+			remote->max_receive_timestamps_per_ack);
+		/*
+		 * Use the larger exponent (coarser precision) to ensure
+		 * both peers can decode the timestamps correctly.
+		 */
+		result->receive_timestamps_exponent = max(
+			local->receive_timestamps_exponent,
+			remote->receive_timestamps_exponent);
+	} else {
+		result->receive_timestamps_enabled = false;
+		result->max_receive_timestamps = 0;
+		result->receive_timestamps_exponent = 0;
+	}
+
+	/*
+	 * Reliable Stream Reset (draft-ietf-quic-reliable-stream-reset-07):
+	 * Enabled only if both peers advertise reliable_stream_reset.
+	 * When enabled, endpoints can send RESET_STREAM_AT frames with
+	 * partial delivery guarantees.
+	 */
+	result->reliable_reset_enabled = local->reliable_stream_reset &&
+					 remote->reliable_stream_reset;
+
+	/*
+	 * Extended Key Update (draft-ietf-quic-extended-key-update-01):
+	 * Enabled only if both peers advertise extended_key_update > 0.
+	 * The negotiated max is the minimum of both values.
+	 */
+	if (local->extended_key_update_present && local->extended_key_update > 0 &&
+	    remote->extended_key_update_present && remote->extended_key_update > 0) {
+		result->extended_key_update_enabled = true;
+		result->extended_key_update_max = min(local->extended_key_update,
+						      remote->extended_key_update);
+	} else {
+		result->extended_key_update_enabled = false;
+		result->extended_key_update_max = 0;
+	}
+
+	/*
+	 * BDP Frame Extension (draft-kuhn-quic-bdpframe-extension-05):
+	 * Enabled only if both peers advertise enable_bdp_frame.
+	 * When enabled, endpoints can exchange BDP frames for Careful Resume.
+	 */
+	result->bdp_frame_enabled = local->enable_bdp_frame &&
+				    remote->enable_bdp_frame;
+
+	/*
+	 * Forward Error Correction (draft-zheng-quic-fec-extension-01):
+	 * Enabled only if both peers advertise enable_fec.
+	 * Negotiate the common FEC scheme and minimum max_source_symbols.
+	 */
+	if (local->enable_fec_present && local->enable_fec &&
+	    remote->enable_fec_present && remote->enable_fec) {
+		result->fec_enabled = true;
+		/* Use the more conservative scheme (lower value) */
+		result->fec_scheme = min(local->fec_scheme, remote->fec_scheme);
+		/* Use the minimum of max_source_symbols */
+		result->max_source_symbols = min(local->max_source_symbols,
+						 remote->max_source_symbols);
+		if (result->max_source_symbols < 2)
+			result->max_source_symbols = 2;  /* Minimum block size */
+	} else {
+		result->fec_enabled = false;
+		result->fec_scheme = 0;
+		result->max_source_symbols = 0;
+	}
+
+	/*
+	 * Congestion Control Data Exchange (draft-yuan-quic-congestion-data-00):
+	 * Enabled only if both peers advertise enable_cong_data.
+	 * When enabled, endpoints can exchange CONGESTION_DATA frames
+	 * for connection resumption optimization via Careful Resume.
+	 */
+	result->cong_data_enabled = local->enable_cong_data_present &&
+				    local->enable_cong_data &&
+				    remote->enable_cong_data_present &&
+				    remote->enable_cong_data;
+
+	/*
+	 * One-Way Delay Measurement (draft-huitema-quic-1wd)
+	 * Enabled if both peers advertise the parameter.
+	 * Use the coarser (larger) timestamp resolution of the two peers.
+	 */
+	result->one_way_delay_enabled = local->enable_one_way_delay_present &&
+					local->enable_one_way_delay > 0 &&
+					remote->enable_one_way_delay_present &&
+					remote->enable_one_way_delay > 0;
+
+	if (result->one_way_delay_enabled) {
+		/* Use the larger (coarser) resolution */
+		result->one_way_delay_resolution =
+			max(local->enable_one_way_delay,
+			    remote->enable_one_way_delay);
 	}
 
 	return 0;
@@ -1675,6 +2137,66 @@ size_t tquic_tp_encoded_size(const struct tquic_transport_params *params,
 			tp_varint_len(params->min_ack_delay);
 	}
 
+	/* enable_address_discovery (draft-ietf-quic-address-discovery) */
+	if (params->enable_address_discovery) {
+		/* 0x9f01 = 2-byte varint + 1-byte zero length */
+		size += tp_varint_len(TP_ENABLE_ADDRESS_DISCOVERY) + 1;
+	}
+
+	/* reliable_stream_reset (draft-ietf-quic-reliable-stream-reset-07) */
+	if (params->reliable_stream_reset) {
+		/* 0x17cd = 2-byte varint + 1-byte zero length */
+		size += tp_varint_len(TP_RELIABLE_STREAM_RESET) + 1;
+	}
+
+	/* enable_bdp_frame (draft-kuhn-quic-bdpframe-extension-05) */
+	if (params->enable_bdp_frame) {
+		/* Zero-length parameter */
+		size += tp_varint_len(TP_ENABLE_BDP_FRAME) + 1;
+	}
+
+	/* Deadline-Aware Multipath Scheduling (draft-tjohn-quic-multipath-dmtp-01) */
+	if (params->enable_deadline_aware_present && params->enable_deadline_aware) {
+		/* Zero-length parameter */
+		size += tp_varint_len(TP_ENABLE_DEADLINE_AWARE) + 1;
+	}
+
+	if (params->deadline_granularity_present) {
+		size += tp_varint_len(TP_DEADLINE_GRANULARITY) +
+			tp_varint_len(tp_varint_len(params->deadline_granularity)) +
+			tp_varint_len(params->deadline_granularity);
+	}
+
+	if (params->max_deadline_streams_present) {
+		size += tp_varint_len(TP_MAX_DEADLINE_STREAMS) +
+			tp_varint_len(tp_varint_len(params->max_deadline_streams)) +
+			tp_varint_len(params->max_deadline_streams);
+	}
+
+	if (params->deadline_miss_policy_present) {
+		size += tp_varint_len(TP_DEADLINE_MISS_POLICY) +
+			tp_varint_len(tp_varint_len(params->deadline_miss_policy)) +
+			tp_varint_len(params->deadline_miss_policy);
+	}
+
+	/* Forward Error Correction (draft-zheng-quic-fec-extension-01) */
+	if (params->enable_fec_present && params->enable_fec) {
+		/* Zero-length parameter */
+		size += tp_varint_len(TP_ENABLE_FEC) + 1;
+	}
+
+	if (params->fec_scheme_present) {
+		size += tp_varint_len(TP_FEC_SCHEME) +
+			tp_varint_len(tp_varint_len(params->fec_scheme)) +
+			tp_varint_len(params->fec_scheme);
+	}
+
+	if (params->max_source_symbols_present) {
+		size += tp_varint_len(TP_MAX_SOURCE_SYMBOLS) +
+			tp_varint_len(tp_varint_len(params->max_source_symbols)) +
+			tp_varint_len(params->max_source_symbols);
+	}
+
 	return size;
 }
 EXPORT_SYMBOL_GPL(tquic_tp_encoded_size);
@@ -1718,6 +2240,10 @@ void tquic_tp_debug_print(const struct tquic_transport_params *params,
 		 params->max_datagram_frame_size);
 	pr_debug("%s:   grease_quic_bit: %s\n", prefix,
 		 params->grease_quic_bit ? "yes" : "no");
+	pr_debug("%s:   reliable_stream_reset: %s\n", prefix,
+		 params->reliable_stream_reset ? "yes" : "no");
+	pr_debug("%s:   enable_bdp_frame: %s\n", prefix,
+		 params->enable_bdp_frame ? "yes" : "no");
 	if (params->min_ack_delay_present)
 		pr_debug("%s:   min_ack_delay: %llu us\n", prefix,
 			 params->min_ack_delay);

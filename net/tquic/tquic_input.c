@@ -36,6 +36,7 @@
 #include "tquic_retry.h"
 #include "tquic_ack_frequency.h"
 #include "tquic_ratelimit.h"
+#include "rate_limit.h"
 
 /* QUIC frame types (must match tquic_output.c) */
 #define TQUIC_FRAME_PADDING		0x00
@@ -2349,10 +2350,14 @@ int tquic_udp_recv(struct sock *sk, struct sk_buff *skb)
 	 * per-IP rate limits before allocating any connection state.
 	 * This is the first line of defense against amplification attacks.
 	 *
-	 * We check:
-	 * 1. Long header packets that could be Initial packets
-	 * 2. Apply token bucket rate limiting per source IP
-	 * 3. Under attack, require SYN cookie-style validation
+	 * We have two rate limiting subsystems:
+	 * 1. rate_limit.h: Token bucket with global and per-IP limits
+	 * 2. tquic_ratelimit.h: Advanced rate limiting with cookie validation
+	 *
+	 * Check order:
+	 * 1. Global rate limit check (rate_limit.h)
+	 * 2. Per-IP rate limit check (rate_limit.h)
+	 * 3. Advanced checks with cookie support (tquic_ratelimit.h)
 	 */
 	if (len >= 7 && (data[0] & TQUIC_HEADER_FORM_LONG)) {
 		/* Long header - check if this is an Initial packet */
@@ -2365,10 +2370,23 @@ int tquic_udp_recv(struct sock *sk, struct sk_buff *skb)
 			size_t token_len = 0;
 			size_t offset;
 
-			/* Parse enough header to extract token */
+			/* Parse enough header to extract DCID */
 			if (len >= 6) {
 				dcid_len = data[5];
 				offset = 6 + dcid_len;
+
+				/*
+				 * First check: Global and per-IP token bucket limits
+				 * (rate_limit.h - lightweight fast path)
+				 */
+				if (!tquic_rate_limit_check_initial(sock_net(sk),
+								    &src_addr,
+								    data + 6,
+								    dcid_len)) {
+					/* Rate limited - silently drop */
+					kfree_skb(skb);
+					return -EBUSY;
+				}
 
 				if (offset < len) {
 					scid_len = data[offset];
@@ -2387,7 +2405,10 @@ int tquic_udp_recv(struct sock *sk, struct sk_buff *skb)
 					}
 				}
 
-				/* Perform rate limit check with token */
+				/*
+				 * Second check: Advanced rate limiting with cookie
+				 * support (tquic_ratelimit.h - attack mode handling)
+				 */
 				action = tquic_ratelimit_check_initial(
 					sock_net(sk), &src_addr,
 					data + 6, dcid_len,

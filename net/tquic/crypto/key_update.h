@@ -252,4 +252,44 @@ void tquic_key_update_set_intervals(struct tquic_key_update_state *state,
  */
 struct tquic_key_update_state *tquic_crypto_get_key_update_state(void *crypto_state);
 
+/*
+ * =============================================================================
+ * Extended Key Update Integration
+ * =============================================================================
+ */
+
+/**
+ * tquic_key_update_with_psk - Derive keys with additional PSK material
+ * @conn: TQUIC connection
+ * @psk: Pre-shared key material to mix in
+ * @psk_len: Length of PSK material
+ *
+ * Derives new keys by first mixing the PSK with current secrets using
+ * HKDF-Extract, then performing standard key derivation.
+ *
+ * This is used by the Extended Key Update extension to incorporate
+ * external key material (e.g., from post-quantum key exchange).
+ *
+ * Returns 0 on success, negative error code on failure.
+ */
+int tquic_key_update_with_psk(struct tquic_connection *conn,
+			      const u8 *psk, size_t psk_len);
+
+/**
+ * tquic_key_update_get_old_read_keys - Get previous generation read keys
+ * @state: Key update state
+ * @key: Output buffer for AEAD key
+ * @key_len: Output: key length
+ * @iv: Output buffer for IV
+ * @iv_len: Output: IV length
+ *
+ * Retrieves the previous generation read keys for decrypting packets
+ * that were in flight during a key update.
+ *
+ * Returns 0 on success, -ENOKEY if old keys not available.
+ */
+int tquic_key_update_get_old_read_keys(struct tquic_key_update_state *state,
+				       u8 *key, u32 *key_len,
+				       u8 *iv, u32 *iv_len);
+
 #endif /* _TQUIC_KEY_UPDATE_H */

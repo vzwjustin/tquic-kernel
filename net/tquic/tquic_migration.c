@@ -31,6 +31,7 @@
 #include "protocol.h"
 #include "cong/tquic_cong.h"
 #include "tquic_preferred_addr.h"
+#include "core/additional_addresses.h"
 
 /* Sysctl accessor forward declaration */
 int tquic_sysctl_get_prefer_preferred_address(void);
@@ -1500,6 +1501,359 @@ void tquic_migration_on_handshake_complete(struct tquic_connection *conn)
 	}
 }
 EXPORT_SYMBOL_GPL(tquic_migration_on_handshake_complete);
+
+/*
+ * =============================================================================
+ * ADDITIONAL ADDRESSES MIGRATION (draft-piraux-quic-additional-addresses)
+ * =============================================================================
+ */
+
+/**
+ * tquic_migrate_to_additional_address - Migrate to a specific additional address
+ * @conn: Connection
+ * @addr_entry: Additional address entry to migrate to
+ *
+ * Initiates migration to a specific additional address from the peer's
+ * additional_addresses transport parameter.
+ *
+ * Return: 0 on success, negative errno on failure
+ */
+int tquic_migrate_to_additional_address(struct tquic_connection *conn,
+					struct tquic_additional_address *addr_entry)
+{
+	struct tquic_migration_state *ms;
+	struct tquic_path *new_path;
+	struct sockaddr_storage local_addr;
+	int ret;
+
+	if (!conn || !addr_entry)
+		return -EINVAL;
+
+	if (conn->state != TQUIC_CONN_CONNECTED)
+		return -ENOTCONN;
+
+	/*
+	 * Unlike preferred_address, migration to additional addresses
+	 * is subject to the disable_active_migration flag.
+	 */
+	if (conn->migration_disabled) {
+		pr_debug("tquic: additional address migration rejected - migration disabled\n");
+		return -EPERM;
+	}
+
+	/* Check if migration is already in progress */
+	ms = (struct tquic_migration_state *)conn->state_machine;
+	if (ms && ms->status == TQUIC_MIGRATE_PROBING)
+		return -EBUSY;
+
+	/* Validate the address entry */
+	if (!addr_entry->active) {
+		pr_debug("tquic: additional address not active\n");
+		return -EINVAL;
+	}
+
+	if (!tquic_additional_addr_is_valid(&addr_entry->addr)) {
+		pr_debug("tquic: additional address validation failed\n");
+		return -EINVAL;
+	}
+
+	/* Get local address from current path */
+	if (conn->active_path) {
+		memcpy(&local_addr, &conn->active_path->local_addr,
+		       sizeof(local_addr));
+	} else {
+		memset(&local_addr, 0, sizeof(local_addr));
+		local_addr.ss_family = addr_entry->addr.ss_family;
+	}
+
+	/* Create path to the additional address */
+	new_path = tquic_path_create(conn, &local_addr, &addr_entry->addr);
+	if (!new_path) {
+		pr_err("tquic: failed to create path for additional address\n");
+		return -ENOMEM;
+	}
+
+	/* Set the remote CID from the additional address */
+	memcpy(&new_path->remote_cid, &addr_entry->cid,
+	       sizeof(new_path->remote_cid));
+
+	/*
+	 * Register the stateless reset token with CID manager.
+	 * Critical for detecting stateless reset packets on this path.
+	 */
+	if (conn->cid_mgr) {
+		ret = tquic_cid_handle_additional_addr(conn->cid_mgr,
+						       &addr_entry->cid,
+						       addr_entry->stateless_reset_token);
+		if (ret < 0) {
+			pr_warn("tquic: failed to register reset token for additional addr: %d\n",
+				ret);
+			/* Continue despite error - path can still work */
+		}
+	}
+
+	/* Allocate or get migration state */
+	if (!ms) {
+		ms = kzalloc(sizeof(*ms), GFP_KERNEL);
+		if (!ms) {
+			tquic_path_free(new_path);
+			return -ENOMEM;
+		}
+		spin_lock_init(&ms->lock);
+		timer_setup(&ms->timer, NULL, 0);
+		INIT_WORK(&ms->work, tquic_migration_work_handler);
+		conn->state_machine = ms;
+	}
+
+	/* Set up migration state */
+	spin_lock_bh(&ms->lock);
+	ms->status = TQUIC_MIGRATE_PROBING;
+	ms->old_path = conn->active_path;
+	ms->new_path = new_path;
+	ms->retries = 0;
+	ms->flags = 0;
+	ms->error_code = 0;
+	spin_unlock_bh(&ms->lock);
+
+	/* Start path validation */
+	ret = tquic_path_start_validation(conn, new_path);
+	if (ret < 0) {
+		spin_lock_bh(&ms->lock);
+		ms->status = TQUIC_MIGRATE_FAILED;
+		ms->error_code = -ret;
+		ms->new_path = NULL;
+		spin_unlock_bh(&ms->lock);
+		tquic_path_free(new_path);
+		return ret;
+	}
+
+	/* Set up timeout timer */
+	ms->timer.function = tquic_migration_timeout;
+	mod_timer(&ms->timer, jiffies +
+		  usecs_to_jiffies(tquic_migration_timeout_us(new_path)));
+
+	/* Mark address as in use */
+	addr_entry->last_used = ktime_get();
+
+	pr_info("tquic: started migration to additional address (IPv%u)\n",
+		addr_entry->ip_version);
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(tquic_migrate_to_additional_address);
+
+/**
+ * tquic_migrate_select_additional_address - Select and migrate to best additional address
+ * @conn: Connection
+ * @policy: Address selection policy
+ *
+ * Selects the best additional address using the specified policy and
+ * initiates migration to it.
+ *
+ * Return: 0 on success, negative errno on failure
+ */
+int tquic_migrate_select_additional_address(struct tquic_connection *conn,
+					    enum tquic_addr_select_policy policy)
+{
+	struct tquic_additional_addresses *remote_addrs;
+	struct tquic_additional_address *selected;
+	sa_family_t current_family = AF_UNSPEC;
+
+	if (!conn)
+		return -EINVAL;
+
+	remote_addrs = conn->additional_remote_addrs;
+	if (!remote_addrs || remote_addrs->count == 0) {
+		pr_debug("tquic: no additional addresses available\n");
+		return -ENOENT;
+	}
+
+	/* Get current address family */
+	if (conn->active_path)
+		current_family = conn->active_path->remote_addr.ss_family;
+
+	/* Select address */
+	spin_lock_bh(&remote_addrs->lock);
+	selected = tquic_additional_addr_select(remote_addrs, policy,
+						current_family);
+	spin_unlock_bh(&remote_addrs->lock);
+
+	if (!selected) {
+		pr_debug("tquic: no suitable additional address found\n");
+		return -ENOENT;
+	}
+
+	return tquic_migrate_to_additional_address(conn, selected);
+}
+EXPORT_SYMBOL_GPL(tquic_migrate_select_additional_address);
+
+/**
+ * tquic_migrate_additional_addr_on_validated - Handle additional address path validation
+ * @conn: Connection
+ * @path: Validated path
+ *
+ * Called when a path to an additional address is successfully validated.
+ * Updates the address entry and completes the migration.
+ *
+ * Return: 0 on success, negative errno on failure
+ */
+int tquic_migrate_additional_addr_on_validated(struct tquic_connection *conn,
+					       struct tquic_path *path)
+{
+	struct tquic_additional_addresses *remote_addrs;
+	struct tquic_additional_address *addr_entry;
+	u32 rtt_us;
+
+	if (!conn || !path)
+		return -EINVAL;
+
+	remote_addrs = conn->additional_remote_addrs;
+	if (!remote_addrs)
+		return 0;
+
+	/* Find the address entry for this path */
+	spin_lock_bh(&remote_addrs->lock);
+	addr_entry = tquic_additional_addr_find(remote_addrs, &path->remote_addr);
+	if (addr_entry) {
+		/* Mark as validated */
+		tquic_additional_addr_validate(addr_entry);
+
+		/* Update RTT estimate from path validation */
+		rtt_us = path->stats.rtt_smoothed;
+		if (rtt_us > 0)
+			tquic_additional_addr_update_rtt(addr_entry, rtt_us);
+
+		pr_debug("tquic: additional address validated (RTT: %u us)\n",
+			 rtt_us);
+	}
+	spin_unlock_bh(&remote_addrs->lock);
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(tquic_migrate_additional_addr_on_validated);
+
+/**
+ * tquic_migrate_additional_addr_on_failed - Handle additional address validation failure
+ * @conn: Connection
+ * @path: Failed path
+ * @error: Error code
+ *
+ * Called when path validation to an additional address fails.
+ * Marks the address as invalid.
+ */
+void tquic_migrate_additional_addr_on_failed(struct tquic_connection *conn,
+					     struct tquic_path *path,
+					     int error)
+{
+	struct tquic_additional_addresses *remote_addrs;
+	struct tquic_additional_address *addr_entry;
+
+	if (!conn || !path)
+		return;
+
+	remote_addrs = conn->additional_remote_addrs;
+	if (!remote_addrs)
+		return;
+
+	/* Find and invalidate the address entry */
+	spin_lock_bh(&remote_addrs->lock);
+	addr_entry = tquic_additional_addr_find(remote_addrs, &path->remote_addr);
+	if (addr_entry) {
+		tquic_additional_addr_invalidate(addr_entry);
+		pr_warn("tquic: additional address validation failed (error: %d)\n",
+			error);
+	}
+	spin_unlock_bh(&remote_addrs->lock);
+}
+EXPORT_SYMBOL_GPL(tquic_migrate_additional_addr_on_failed);
+
+/**
+ * tquic_migrate_validate_all_additional - Validate all additional addresses
+ * @conn: Connection
+ *
+ * Starts path validation probes to all additional addresses received from
+ * the peer. This allows measuring RTT and reachability before migration
+ * is needed.
+ *
+ * Return: Number of validation probes started, or negative errno on failure
+ */
+int tquic_migrate_validate_all_additional(struct tquic_connection *conn)
+{
+	struct tquic_additional_addresses *remote_addrs;
+	struct tquic_additional_address *entry;
+	struct sockaddr_storage local_addr;
+	struct tquic_path *probe_path;
+	int count = 0;
+	int ret;
+
+	if (!conn)
+		return -EINVAL;
+
+	if (conn->state != TQUIC_CONN_CONNECTED)
+		return -ENOTCONN;
+
+	remote_addrs = conn->additional_remote_addrs;
+	if (!remote_addrs || remote_addrs->count == 0)
+		return 0;
+
+	/* Get local address for probing */
+	if (conn->active_path) {
+		memcpy(&local_addr, &conn->active_path->local_addr,
+		       sizeof(local_addr));
+	} else {
+		return -ENOENT;
+	}
+
+	spin_lock_bh(&remote_addrs->lock);
+	list_for_each_entry(entry, &remote_addrs->addresses, list) {
+		/* Skip already validated or inactive addresses */
+		if (entry->validated || !entry->active)
+			continue;
+
+		spin_unlock_bh(&remote_addrs->lock);
+
+		/* Create probe path */
+		probe_path = tquic_path_create(conn, &local_addr, &entry->addr);
+		if (probe_path) {
+			memcpy(&probe_path->remote_cid, &entry->cid,
+			       sizeof(entry->cid));
+
+			/* Send PATH_CHALLENGE (probe only, don't migrate) */
+			ret = tquic_path_start_validation(conn, probe_path);
+			if (ret == 0) {
+				count++;
+				pr_debug("tquic: probing additional address %d\n",
+					 count);
+			} else {
+				tquic_path_free(probe_path);
+			}
+		}
+
+		spin_lock_bh(&remote_addrs->lock);
+	}
+	spin_unlock_bh(&remote_addrs->lock);
+
+	pr_info("tquic: started validation probes to %d additional addresses\n",
+		count);
+
+	return count;
+}
+EXPORT_SYMBOL_GPL(tquic_migrate_validate_all_additional);
+
+/**
+ * tquic_additional_addr_migration_cleanup - Clean up additional address migration state
+ * @conn: Connection
+ *
+ * Cleans up additional addresses state during connection teardown.
+ */
+void tquic_additional_addr_migration_cleanup(struct tquic_connection *conn)
+{
+	if (!conn)
+		return;
+
+	tquic_additional_addr_conn_cleanup(conn);
+}
+EXPORT_SYMBOL_GPL(tquic_additional_addr_migration_cleanup);
 
 MODULE_DESCRIPTION("TQUIC Connection Migration");
 MODULE_LICENSE("GPL");

@@ -1513,6 +1513,126 @@ int tquic_cid_handle_preferred_addr(struct tquic_cid_manager *mgr,
 EXPORT_SYMBOL_GPL(tquic_cid_handle_preferred_addr);
 
 /**
+ * tquic_cid_handle_additional_addr - Handle CID from additional_addresses parameter
+ * @mgr: CID manager
+ * @cid: Connection ID from additional_addresses parameter
+ * @reset_token: Stateless reset token from parameter
+ *
+ * Called when processing additional_addresses transport parameter entries.
+ * Each additional address has its own CID and reset token.
+ *
+ * Return: 0 on success, negative error on failure
+ */
+int tquic_cid_handle_additional_addr(struct tquic_cid_manager *mgr,
+				     const struct tquic_cid *cid,
+				     const u8 *reset_token)
+{
+	u64 seq_num;
+
+	if (!mgr || !cid)
+		return -EINVAL;
+
+	/*
+	 * Additional addresses CIDs start at sequence 2 (after preferred_address).
+	 * Use next expected sequence number.
+	 */
+	spin_lock(&mgr->lock);
+	seq_num = mgr->next_remote_seq;
+	if (seq_num < 2)
+		seq_num = 2;  /* Reserve 0 for initial, 1 for preferred_address */
+	spin_unlock(&mgr->lock);
+
+	return tquic_cid_handle_new_cid(mgr, seq_num, 0, cid, reset_token);
+}
+EXPORT_SYMBOL_GPL(tquic_cid_handle_additional_addr);
+
+/**
+ * tquic_cid_register_remote - Register a remote CID with specific sequence number
+ * @mgr: CID manager
+ * @cid: Connection ID to register
+ * @seq_num: Sequence number for this CID
+ * @reset_token: Stateless reset token
+ *
+ * Registers a remote CID (received from peer) with the CID manager.
+ * This is used for additional_addresses where we know the sequence number.
+ *
+ * Return: 0 on success, negative error on failure
+ */
+int tquic_cid_register_remote(struct tquic_cid_manager *mgr,
+			      const struct tquic_cid *cid,
+			      u64 seq_num,
+			      const u8 *reset_token)
+{
+	if (!mgr || !cid)
+		return -EINVAL;
+
+	return tquic_cid_handle_new_cid(mgr, seq_num, 0, cid, reset_token);
+}
+EXPORT_SYMBOL_GPL(tquic_cid_register_remote);
+
+/**
+ * tquic_cid_register_local - Register a local CID for additional address
+ * @mgr: CID manager
+ * @cid: Connection ID to register
+ *
+ * Registers a local CID that we will advertise in additional_addresses.
+ * Generates the appropriate reset token and adds to local CID pool.
+ *
+ * Return: 0 on success, negative error on failure
+ */
+int tquic_cid_register_local(struct tquic_cid_manager *mgr,
+			     const struct tquic_cid *cid)
+{
+	struct tquic_cid_entry *entry;
+	u64 seq_num;
+
+	if (!mgr || !cid || cid->len == 0)
+		return -EINVAL;
+
+	if (cid->len > TQUIC_MAX_CID_LEN)
+		return -EINVAL;
+
+	/* Allocate entry */
+	entry = kmem_cache_zalloc(tquic_cid_cache, GFP_KERNEL);
+	if (!entry)
+		return -ENOMEM;
+
+	/* Get next sequence number */
+	spin_lock(&mgr->lock);
+	seq_num = mgr->next_local_seq++;
+	spin_unlock(&mgr->lock);
+
+	/* Initialize entry */
+	memcpy(&entry->cid, cid, sizeof(*cid));
+	entry->seq_num = seq_num;
+	entry->retire_prior_to = 0;
+	entry->conn = mgr->conn;
+	entry->state = TQUIC_CID_STATE_ACTIVE;
+	entry->is_local = true;
+	entry->created = ktime_get();
+	refcount_set(&entry->refcnt, 1);
+
+	/* Generate reset token */
+	tquic_cid_generate_reset_token(cid, entry->reset_token);
+
+	/* Add to local CID list */
+	spin_lock(&mgr->lock);
+	list_add_tail(&entry->list, &mgr->local_cids);
+	mgr->local_cid_count++;
+	spin_unlock(&mgr->lock);
+
+	/* Register in global lookup table */
+	rhashtable_insert_fast(&tquic_cid_table, &entry->node,
+			       tquic_cid_table.p);
+
+	pr_debug("tquic_cid: registered local CID (seq=%llu, len=%u)\n",
+		 seq_num, cid->len);
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(tquic_cid_register_local);
+
+/**
  * tquic_cid_get_active_local - Get the active local CID
  * @mgr: CID manager
  *

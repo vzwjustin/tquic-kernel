@@ -37,6 +37,7 @@ tquic-y := \
 	tquic_ratelimit.o \
 	grease.o \
 	tquic_ack_frequency.o \
+	security_hardening.o \
 	cong/tquic_cong.o \
 	cong/persistent_cong.o
 
@@ -52,7 +53,8 @@ tquic_core-y := \
 	core/ack_frequency.o \
 	core/flow_control.o \
 	core/transport_params.o \
-	core/cid.o
+	core/cid.o \
+	core/address_discovery.o
 
 # WAN Bonding components
 obj-$(CONFIG_TQUIC_WAN_BONDING) += tquic_bond.o
@@ -109,6 +111,16 @@ tquic_l4s-y := cong/l4s.o
 # AccECN feedback
 obj-$(CONFIG_TQUIC_ACCECN) += tquic_accecn.o
 tquic_accecn-y := cong/accecn.o
+
+# BDP Frame Extension (draft-kuhn-quic-bdpframe-extension-05)
+obj-$(CONFIG_TQUIC_BDP_FRAME) += tquic_bdp_frame.o
+tquic_bdp_frame-y := \
+	cong/bdp_frame.o \
+	cong/careful_resume.o
+
+# Congestion Control Data Exchange (draft-yuan-quic-congestion-data-00)
+obj-$(CONFIG_TQUIC_CONG_DATA) += tquic_cong_data.o
+tquic_cong_data-y := cong/cong_data.o
 
 # Multipath extension (RFC 9369)
 obj-$(CONFIG_TQUIC_MULTIPATH) += tquic_multipath.o
@@ -167,6 +179,16 @@ tquic-$(CONFIG_TQUIC_IO_URING) += io_uring.o
 obj-$(CONFIG_TQUIC_AF_XDP) += tquic_af_xdp.o
 tquic_af_xdp-y := af_xdp.o
 
+# Forward Error Correction (draft-zheng-quic-fec-extension-01)
+obj-$(CONFIG_TQUIC_FEC) += tquic_fec.o
+tquic_fec-y := \
+	fec/fec_core.o \
+	fec/fec_encoder.o \
+	fec/fec_decoder.o \
+	fec/xor_fec.o \
+	fec/reed_solomon.o \
+	fec/fec_scheduler.o
+
 # KUnit tests
 obj-$(CONFIG_TQUIC_KUNIT_TEST) += tquic_test.o
 tquic_test-y := \
@@ -178,4 +200,10 @@ tquic_test-y := \
 	test/transport_params_test.o \
 	test/grease_test.o \
 	test/security_test.o \
-	test/reorder_test.o
+	test/security_hardening_test.o \
+	test/reorder_test.o \
+	test/address_discovery_test.o \
+	test/bdp_frame_test.o \
+	test/fec_test.o \
+	test/nat_keepalive_test.o \
+	test/cong_data_test.o

@@ -126,6 +126,21 @@ struct tquic_stream_ext {
 		ktime_t first_byte_received;
 		ktime_t last_activity;
 	} stats;
+
+	/* Deadline-aware scheduling (draft-tjohn-quic-multipath-dmtp-01) */
+	struct {
+		bool enabled;		/* Deadline scheduling enabled for stream */
+		ktime_t deadline;	/* Current stream deadline (absolute) */
+		u64 relative_deadline_us;  /* Relative deadline from app */
+		u8 priority;		/* Deadline priority level (0=critical) */
+		u8 miss_policy;		/* Policy when deadline missed */
+		u64 deadline_offset;	/* Data offset deadline applies to */
+		u64 deadline_length;	/* Data length deadline covers */
+		u32 slack_us;		/* Allowed slack time */
+		u64 deadlines_met;	/* Statistics: deadlines met */
+		u64 deadlines_missed;	/* Statistics: deadlines missed */
+		u64 avg_delivery_us;	/* Average delivery time */
+	} deadline;
 };
 
 /**

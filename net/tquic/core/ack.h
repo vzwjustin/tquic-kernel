@@ -51,6 +51,10 @@
 #define TQUIC_FRAME_ACK			0x02
 #define TQUIC_FRAME_ACK_ECN		0x03
 
+/* ACK frame types with Receive Timestamps (draft-smith-quic-receive-ts-03) */
+#define TQUIC_FRAME_ACK_RECEIVE_TS		0xffa0
+#define TQUIC_FRAME_ACK_ECN_RECEIVE_TS		0xffa1
+
 /*
  * Packet metadata flags
  */
@@ -70,6 +74,7 @@ struct tquic_ack_range;
 struct tquic_ack_frame;
 struct tquic_ack_frequency_state;
 struct tquic_ack_frequency_frame;
+struct tquic_receive_ts_state;
 
 /**
  * struct tquic_ecn_counts - ECN counters
@@ -265,6 +270,26 @@ int tquic_record_received_packet(struct tquic_loss_state *loss,
  */
 int tquic_generate_ack_frame(struct tquic_loss_state *loss, int pn_space,
 			     u8 *buf, size_t buf_len, bool include_ecn);
+
+/**
+ * tquic_generate_ack_frame_with_timestamps - Generate ACK with receive timestamps
+ * @loss: Loss state
+ * @pn_space: Packet number space
+ * @buf: Output buffer
+ * @buf_len: Buffer length
+ * @include_ecn: Whether to include ECN counts
+ * @ts_state: Receive timestamps state (may be NULL to disable timestamps)
+ *
+ * Generates an ACK frame including receive timestamps if the extension
+ * is negotiated. Uses frame type 0xffa0 (or 0xffa1 with ECN) as specified
+ * in draft-smith-quic-receive-ts-03.
+ *
+ * Returns number of bytes written or negative error.
+ */
+int tquic_generate_ack_frame_with_timestamps(struct tquic_loss_state *loss,
+					     int pn_space, u8 *buf,
+					     size_t buf_len, bool include_ecn,
+					     struct tquic_receive_ts_state *ts_state);
 
 /*
  * ACK Frame Processing

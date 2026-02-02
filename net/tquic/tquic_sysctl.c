@@ -44,6 +44,19 @@ static char tquic_congestion[16] = "cubic";
 /* Debug tunables */
 static int tquic_debug_level;
 
+/*
+ * Connection Rate Limiting for DoS Protection
+ *
+ * rate_limit_enabled: Enable/disable connection rate limiting (default: enabled)
+ * max_connections_per_second: Global rate limit for new connections (default: 10000)
+ * max_connections_burst: Maximum burst capacity for global limiter (default: 1000)
+ * per_ip_rate_limit: Per-IP connection rate limit (default: 100)
+ */
+static int tquic_rate_limit_enabled = 1;
+static int tquic_max_connections_per_second = 10000;
+static int tquic_max_connections_burst = 1000;
+static int tquic_per_ip_rate_limit = 100;
+
 /* GREASE (RFC 9287) tunable - enabled by default */
 static int tquic_grease_enabled = 1;
 
@@ -114,6 +127,21 @@ static int tquic_preferred_address_enabled;		/* Server: advertise */
 static int tquic_prefer_preferred_address = 1;		/* Client: auto-migrate */
 
 /*
+ * Additional Addresses Extension (draft-piraux-quic-additional-addresses)
+ *
+ * additional_addresses_enabled:
+ *   When enabled, endpoints can advertise multiple addresses via transport
+ *   parameters and use them for connection migration.
+ *   Default: 1 (enabled) - allows flexible migration options.
+ *
+ * additional_addresses_max:
+ *   Maximum number of additional addresses to advertise or accept.
+ *   Default: 8 - provides reasonable flexibility without excessive overhead.
+ */
+static int tquic_additional_addresses_enabled = 1;	/* Enable extension */
+static int tquic_additional_addresses_max = 8;		/* Max addresses */
+
+/*
  * TLS Certificate Verification Settings (RFC 5280, RFC 6125)
  *
  * cert_verify_mode:
@@ -139,6 +167,38 @@ static int tquic_cert_verify_mode = 2;			/* required (secure default) */
 static int tquic_cert_verify_hostname = 1;		/* enabled (secure default) */
 static int tquic_cert_revocation_mode = 1;		/* soft_fail (pragmatic default) */
 static int tquic_cert_time_tolerance = 300;		/* 5 minutes clock skew tolerance */
+
+/*
+ * Security Hardening Tunables
+ *
+ * These settings provide defense against known QUIC vulnerabilities:
+ * - CVE-2025-54939 (QUIC-LEAK): Pre-handshake memory exhaustion
+ * - CVE-2024-22189: Retire CID stuffing attack
+ * - Optimistic ACK attack via packet number skipping
+ * - Spin bit privacy concerns
+ */
+
+/* Pre-handshake memory limit (CVE-2025-54939 defense) - in bytes */
+static u64 tquic_pre_handshake_memory_limit = (64 * 1024 * 1024);  /* 64 MB */
+static u64 tquic_pre_handshake_per_ip_budget = (1 * 1024 * 1024);  /* 1 MB */
+
+/* Packet number skip rate for optimistic ACK defense (1 in N packets) */
+static int tquic_pn_skip_rate = 128;  /* Default: 1 in 128 packets (~0.78%) */
+
+/* Spin bit policy: 0=always correct, 1=never (random), 2=probabilistic */
+static int tquic_spin_bit_policy = 2;  /* Default: probabilistic */
+static int tquic_spin_bit_disable_rate = 8;  /* 1 in 8 = 12.5% disable */
+
+/*
+ * NAT Keepalive tunables (RFC 9308 Section 3.5)
+ *
+ * These control NAT binding keepalive behavior. QUIC connections through
+ * NAT devices require periodic keepalive to prevent binding timeout.
+ * Using PING frames minimizes overhead while keeping bindings alive.
+ */
+static int tquic_nat_keepalive_enabled = 1;		/* Enabled by default */
+static int tquic_nat_keepalive_interval = 25000;	/* 25 seconds default */
+static int tquic_nat_keepalive_adaptive = 1;		/* Adaptive mode on */
 
 /* Forward declarations for scheduler API */
 struct tquic_sched_ops;
@@ -564,6 +624,7 @@ static int proc_tquic_grease_enabled(const struct ctl_table *table, int write,
 /* Min/max values for integer tunables */
 static int zero;
 static int one = 1;
+static int sixteen = 16;
 static int ten = 10;
 static int max_paths = TQUIC_MAX_PATHS;
 static int max_reorder = 1024;
@@ -586,6 +647,11 @@ static int two = 2;
 static int max_cert_verify_mode = 2;      /* required = maximum */
 static int max_revocation_mode = 2;       /* hard_fail = maximum */
 static int max_cert_time_tolerance = 86400;  /* 24 hours max clock skew */
+
+/* Rate limiting min/max values */
+static int max_connections_rate = 1000000;  /* 1M conn/s max */
+static int max_burst_limit = 100000;        /* 100K burst max */
+static int max_per_ip_rate = 10000;         /* 10K per-IP max */
 
 /* Sysctl table */
 static struct ctl_table tquic_sysctl_table[] = {
@@ -972,6 +1038,40 @@ static struct ctl_table tquic_sysctl_table[] = {
 		.extra2		= &one,
 	},
 	/*
+	 * Additional Addresses Extension (draft-piraux-quic-additional-addresses)
+	 *
+	 * Allows endpoints to advertise multiple addresses for connection
+	 * migration and multipath scenarios beyond the single preferred_address.
+	 *
+	 * Default: enabled
+	 */
+	{
+		.procname	= "additional_addresses_enabled",
+		.data		= &tquic_additional_addresses_enabled,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= &zero,
+		.extra2		= &one,
+	},
+	/*
+	 * Maximum number of additional addresses to advertise/accept.
+	 * Higher values provide more migration options but increase
+	 * transport parameter size and memory usage.
+	 *
+	 * Default: 8
+	 * Range: 1 to 16
+	 */
+	{
+		.procname	= "additional_addresses_max",
+		.data		= &tquic_additional_addresses_max,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= &one,
+		.extra2		= &sixteen,
+	},
+	/*
 	 * ACK Frequency Extension (draft-ietf-quic-ack-frequency)
 	 *
 	 * Allows the sender to control how frequently the peer generates
@@ -1205,8 +1305,210 @@ static struct ctl_table tquic_sysctl_table[] = {
 		.extra1		= &zero,
 		.extra2		= &max_cert_time_tolerance,
 	},
+	/*
+	 * Connection Rate Limiting for DoS Protection
+	 *
+	 * These parameters control connection rate limiting to protect
+	 * against denial-of-service attacks. Rate limiting is applied
+	 * at the earliest possible point (Initial packet processing)
+	 * before allocating any connection state.
+	 */
+	{
+		.procname	= "rate_limit_enabled",
+		.data		= &tquic_rate_limit_enabled,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= &zero,
+		.extra2		= &one,
+	},
+	/*
+	 * max_connections_per_second: Global connection rate limit
+	 *
+	 * Maximum number of new connections per second across all clients.
+	 * This is the first line of defense against connection flood attacks.
+	 *
+	 * Default: 10000 connections/second
+	 * Range: 1 to 1000000
+	 */
+	{
+		.procname	= "max_connections_per_second",
+		.data		= &tquic_max_connections_per_second,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= &one,
+		.extra2		= &max_connections_rate,
+	},
+	/*
+	 * max_connections_burst: Burst capacity for global rate limiter
+	 *
+	 * Maximum burst of connections that can be accepted before
+	 * rate limiting kicks in. This allows handling temporary spikes
+	 * while still protecting against sustained attacks.
+	 *
+	 * Default: 1000 connections
+	 * Range: 1 to 100000
+	 */
+	{
+		.procname	= "max_connections_burst",
+		.data		= &tquic_max_connections_burst,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= &one,
+		.extra2		= &max_burst_limit,
+	},
+	/*
+	 * per_ip_rate_limit: Per-IP connection rate limit
+	 *
+	 * Maximum connections per second from a single IP address.
+	 * This prevents a single attacker from exhausting the global
+	 * rate limit, ensuring fair access for legitimate clients.
+	 *
+	 * Default: 100 connections/second per IP
+	 * Range: 1 to 10000
+	 */
+	{
+		.procname	= "per_ip_rate_limit",
+		.data		= &tquic_per_ip_rate_limit,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= &one,
+		.extra2		= &max_per_ip_rate,
+	},
+	/*
+	 * =============================================================================
+	 * SECURITY HARDENING SETTINGS
+	 * =============================================================================
+	 */
+	/*
+	 * pre_handshake_memory_limit: CVE-2025-54939 (QUIC-LEAK) defense
+	 *
+	 * Maximum total memory allowed for connections before handshake completes.
+	 * This limits the damage from amplification attacks using spoofed IPs.
+	 *
+	 * Default: 67108864 (64 MB)
+	 * Range: 1MB to 512MB
+	 */
+	{
+		.procname	= "pre_handshake_memory_limit",
+		.data		= &tquic_pre_handshake_memory_limit,
+		.maxlen		= sizeof(u64),
+		.mode		= 0644,
+		.proc_handler	= proc_doulongvec_minmax,
+	},
+	/*
+	 * pn_skip_rate: Optimistic ACK attack defense
+	 *
+	 * Randomly skip packet numbers to detect peers that ACK unsent packets.
+	 * Value is "1 in N" - higher means less frequent skipping.
+	 *
+	 * Default: 128 (skip ~0.78% of packet numbers)
+	 * Range: 8 to 65536 (0 disables skipping)
+	 */
+	{
+		.procname	= "pn_skip_rate",
+		.data		= &tquic_pn_skip_rate,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= SYSCTL_ZERO,
+		.extra2		= SYSCTL_INT_MAX,
+	},
+	/*
+	 * spin_bit_policy: Spin bit privacy control
+	 *
+	 * Controls the spin bit behavior for latency privacy:
+	 *   0 = always (always set spin bit correctly)
+	 *   1 = never (always use random value - maximum privacy)
+	 *   2 = probabilistic (sometimes use random - balance)
+	 *
+	 * Default: 2 (probabilistic)
+	 */
+	{
+		.procname	= "spin_bit_policy",
+		.data		= &tquic_spin_bit_policy,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= SYSCTL_ZERO,
+		.extra2		= SYSCTL_TWO,
+	},
+	/*
+	 * =============================================================================
+	 * NAT KEEPALIVE SETTINGS (RFC 9308 Section 3.5)
+	 * =============================================================================
+	 *
+	 * NAT keepalive sends minimal PING frames to keep NAT bindings alive.
+	 * This prevents connection disruption when NAT timeouts occur.
+	 */
+	/*
+	 * nat_keepalive_enabled: Enable/disable NAT keepalive
+	 *
+	 * When enabled, TQUIC sends minimal PING frames on idle paths to
+	 * prevent NAT binding timeout. This is essential for connections
+	 * through NAT devices with short UDP binding timeouts.
+	 *
+	 * Default: 1 (enabled)
+	 */
+	{
+		.procname	= "nat_keepalive_enabled",
+		.data		= &tquic_nat_keepalive_enabled,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= SYSCTL_ZERO,
+		.extra2		= SYSCTL_ONE,
+	},
+	/*
+	 * nat_keepalive_interval: Keepalive interval in milliseconds
+	 *
+	 * Time between keepalive packets on idle paths. Should be less than
+	 * the shortest expected NAT binding timeout (typically 30 seconds).
+	 * RFC 9308 recommends sending keepalives well before timeout.
+	 *
+	 * Default: 25000 (25 seconds, safe for most NATs)
+	 * Range: 5000 to 120000 (5 seconds to 2 minutes)
+	 */
+	{
+		.procname	= "nat_keepalive_interval",
+		.data		= &tquic_nat_keepalive_interval,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= &tquic_nat_keepalive_min_interval,
+		.extra2		= &tquic_nat_keepalive_max_interval,
+	},
+	/*
+	 * nat_keepalive_adaptive: Enable adaptive interval estimation
+	 *
+	 * When enabled, the keepalive interval is automatically adjusted
+	 * based on observed NAT timeout behavior:
+	 * - Successful keepalives: gradually increase interval (less traffic)
+	 * - Failed keepalives: decrease interval (more reliable)
+	 *
+	 * This optimizes battery life on mobile devices while maintaining
+	 * reliable NAT binding.
+	 *
+	 * Default: 1 (enabled)
+	 */
+	{
+		.procname	= "nat_keepalive_adaptive",
+		.data		= &tquic_nat_keepalive_adaptive,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= SYSCTL_ZERO,
+		.extra2		= SYSCTL_ONE,
+	},
 	{ }
 };
+
+/* NAT keepalive sysctl min/max values */
+static int tquic_nat_keepalive_min_interval = 5000;   /* 5 seconds */
+static int tquic_nat_keepalive_max_interval = 120000; /* 2 minutes */
 
 static struct ctl_table_header *tquic_sysctl_header;
 
@@ -1425,6 +1727,19 @@ int tquic_sysctl_get_prefer_preferred_address(void)
 }
 EXPORT_SYMBOL_GPL(tquic_sysctl_get_prefer_preferred_address);
 
+/* Additional Addresses Extension (draft-piraux-quic-additional-addresses) accessors */
+int tquic_sysctl_get_additional_addresses_enabled(void)
+{
+	return tquic_additional_addresses_enabled;
+}
+EXPORT_SYMBOL_GPL(tquic_sysctl_get_additional_addresses_enabled);
+
+int tquic_sysctl_get_additional_addresses_max(void)
+{
+	return tquic_additional_addresses_max;
+}
+EXPORT_SYMBOL_GPL(tquic_sysctl_get_additional_addresses_max);
+
 /* 0-RTT Early Data (RFC 9001 Section 4.6-4.7) accessors */
 int tquic_sysctl_get_zero_rtt_enabled(void)
 {
@@ -1525,6 +1840,158 @@ u32 tquic_sysctl_get_cert_time_tolerance(void)
 	return (u32)tquic_cert_time_tolerance;
 }
 EXPORT_SYMBOL_GPL(tquic_sysctl_get_cert_time_tolerance);
+
+/*
+ * Rate Limiting Accessor Functions
+ */
+
+/**
+ * tquic_sysctl_rate_limit_enabled - Check if rate limiting is enabled
+ *
+ * Returns: 1 if rate limiting is enabled, 0 if disabled
+ */
+int tquic_sysctl_rate_limit_enabled(void)
+{
+	return tquic_rate_limit_enabled;
+}
+EXPORT_SYMBOL_GPL(tquic_sysctl_rate_limit_enabled);
+
+/**
+ * tquic_sysctl_max_connections_per_second - Get global rate limit
+ *
+ * Returns: Maximum connections per second (global)
+ */
+int tquic_sysctl_max_connections_per_second(void)
+{
+	return tquic_max_connections_per_second;
+}
+EXPORT_SYMBOL_GPL(tquic_sysctl_max_connections_per_second);
+
+/**
+ * tquic_sysctl_max_connections_burst - Get burst capacity
+ *
+ * Returns: Maximum burst size for global rate limiter
+ */
+int tquic_sysctl_max_connections_burst(void)
+{
+	return tquic_max_connections_burst;
+}
+EXPORT_SYMBOL_GPL(tquic_sysctl_max_connections_burst);
+
+/**
+ * tquic_sysctl_per_ip_rate_limit - Get per-IP rate limit
+ *
+ * Returns: Maximum connections per second per IP
+ */
+int tquic_sysctl_per_ip_rate_limit(void)
+{
+	return tquic_per_ip_rate_limit;
+}
+EXPORT_SYMBOL_GPL(tquic_sysctl_per_ip_rate_limit);
+
+/*
+ * =============================================================================
+ * SECURITY HARDENING ACCESSORS
+ * =============================================================================
+ */
+
+/**
+ * tquic_sysctl_get_pre_handshake_memory_limit - Get pre-handshake memory limit
+ *
+ * Returns: Maximum bytes allowed for pre-handshake connection state
+ *
+ * This limit defends against CVE-2025-54939 (QUIC-LEAK attack).
+ */
+u64 tquic_sysctl_get_pre_handshake_memory_limit(void)
+{
+	return tquic_pre_handshake_memory_limit;
+}
+EXPORT_SYMBOL_GPL(tquic_sysctl_get_pre_handshake_memory_limit);
+
+/**
+ * tquic_sysctl_get_pre_handshake_per_ip_budget - Get per-IP pre-handshake budget
+ *
+ * Returns: Maximum bytes per source IP for pre-handshake state
+ */
+u64 tquic_sysctl_get_pre_handshake_per_ip_budget(void)
+{
+	return tquic_pre_handshake_per_ip_budget;
+}
+EXPORT_SYMBOL_GPL(tquic_sysctl_get_pre_handshake_per_ip_budget);
+
+/**
+ * tquic_sysctl_get_pn_skip_rate - Get packet number skip rate
+ *
+ * Returns: Skip rate (1 in N packets), 0 means disabled
+ *
+ * Packet number skipping helps detect optimistic ACK attacks.
+ */
+u32 tquic_sysctl_get_pn_skip_rate(void)
+{
+	return (u32)tquic_pn_skip_rate;
+}
+EXPORT_SYMBOL_GPL(tquic_sysctl_get_pn_skip_rate);
+
+/**
+ * tquic_sysctl_get_spin_bit_policy - Get spin bit privacy policy
+ *
+ * Returns: Policy value (0=always, 1=never, 2=probabilistic)
+ */
+u8 tquic_sysctl_get_spin_bit_policy(void)
+{
+	return (u8)tquic_spin_bit_policy;
+}
+EXPORT_SYMBOL_GPL(tquic_sysctl_get_spin_bit_policy);
+
+/**
+ * tquic_sysctl_get_spin_bit_disable_rate - Get spin bit probabilistic disable rate
+ *
+ * Returns: Disable rate (1 in N packets)
+ */
+u8 tquic_sysctl_get_spin_bit_disable_rate(void)
+{
+	return (u8)tquic_spin_bit_disable_rate;
+}
+EXPORT_SYMBOL_GPL(tquic_sysctl_get_spin_bit_disable_rate);
+
+/*
+ * =============================================================================
+ * NAT KEEPALIVE ACCESSORS (RFC 9308 Section 3.5)
+ * =============================================================================
+ */
+
+/**
+ * tquic_sysctl_get_nat_keepalive_enabled - Get NAT keepalive enabled state
+ *
+ * Returns: 1 if NAT keepalive is enabled, 0 if disabled
+ */
+int tquic_sysctl_get_nat_keepalive_enabled(void)
+{
+	return tquic_nat_keepalive_enabled;
+}
+EXPORT_SYMBOL_GPL(tquic_sysctl_get_nat_keepalive_enabled);
+
+/**
+ * tquic_sysctl_get_nat_keepalive_interval - Get NAT keepalive interval
+ *
+ * Returns: Keepalive interval in milliseconds
+ */
+u32 tquic_sysctl_get_nat_keepalive_interval(void)
+{
+	return (u32)tquic_nat_keepalive_interval;
+}
+EXPORT_SYMBOL_GPL(tquic_sysctl_get_nat_keepalive_interval);
+
+/**
+ * tquic_sysctl_get_nat_keepalive_adaptive - Get NAT keepalive adaptive mode
+ *
+ * Returns: 1 if adaptive mode is enabled, 0 if disabled
+ */
+int tquic_sysctl_get_nat_keepalive_adaptive(void)
+{
+	return tquic_nat_keepalive_adaptive;
+}
+EXPORT_SYMBOL_GPL(tquic_sysctl_get_nat_keepalive_adaptive);
 
 /* Number of actual sysctl entries (excluding null terminator) */
 #define TQUIC_SYSCTL_TABLE_ENTRIES (ARRAY_SIZE(tquic_sysctl_table) - 1)

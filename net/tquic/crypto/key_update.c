@@ -23,6 +23,8 @@
 #include <crypto/aead.h>
 #include <net/tquic.h>
 
+#include "extended_key_update.h"
+
 /* Key update HKDF label per RFC 9001 Section 6.1 */
 #define TQUIC_HKDF_LABEL_KU		"quic ku"
 
@@ -934,6 +936,9 @@ EXPORT_SYMBOL_GPL(tquic_key_update_on_packet_received);
  * Checks if automatic key update should be triggered based on
  * configured thresholds. Called periodically or on packet send.
  *
+ * If extended key update is enabled, uses that mechanism instead
+ * of the RFC 9001 key phase bit mechanism.
+ *
  * Returns true if key update was initiated.
  */
 bool tquic_key_update_check_threshold(struct tquic_connection *conn)
@@ -948,6 +953,22 @@ bool tquic_key_update_check_threshold(struct tquic_connection *conn)
 		return false;
 
 	if (tquic_ku_should_update(state)) {
+		/*
+		 * Check if extended key update is enabled and use it
+		 * for coordinated key updates with acknowledgment.
+		 */
+		if (tquic_eku_is_enabled(conn)) {
+			s64 ret = tquic_eku_request(conn, 0);
+			if (ret >= 0)
+				return true;
+			/*
+			 * Fall through to RFC 9001 if EKU request fails.
+			 * This provides graceful degradation.
+			 */
+			pr_debug("tquic: EKU request failed (%lld), using RFC 9001\n",
+				 ret);
+		}
+
 		if (tquic_initiate_key_update(conn) == 0)
 			return true;
 	}
@@ -1113,6 +1134,190 @@ tquic_crypto_get_key_update_state(void *crypto_state)
 	return accessor->key_update;
 }
 EXPORT_SYMBOL_GPL(tquic_crypto_get_key_update_state);
+
+/*
+ * =============================================================================
+ * Extended Key Update Integration
+ * =============================================================================
+ */
+
+/**
+ * tquic_key_update_with_psk - Derive keys with additional PSK material
+ * @conn: TQUIC connection
+ * @psk: Pre-shared key material to mix in
+ * @psk_len: Length of PSK material
+ *
+ * Derives new keys by first mixing the PSK with current secrets using
+ * HKDF-Extract, then performing standard key derivation.
+ *
+ * This is used by the Extended Key Update extension to incorporate
+ * external key material (e.g., from post-quantum key exchange).
+ *
+ * Returns 0 on success, negative error code on failure.
+ */
+int tquic_key_update_with_psk(struct tquic_connection *conn,
+			      const u8 *psk, size_t psk_len)
+{
+	struct tquic_key_update_state *state;
+	u8 mixed_read_secret[TQUIC_SECRET_MAX_LEN];
+	u8 mixed_write_secret[TQUIC_SECRET_MAX_LEN];
+	unsigned long flags;
+	int ret;
+
+	if (!conn || !conn->crypto_state)
+		return -EINVAL;
+
+	if (!psk || psk_len == 0 || psk_len > TQUIC_SECRET_MAX_LEN)
+		return -EINVAL;
+
+	state = tquic_crypto_get_key_update_state(conn->crypto_state);
+	if (!state)
+		return -EINVAL;
+
+	spin_lock_irqsave(&state->lock, flags);
+
+	if (!state->handshake_confirmed) {
+		spin_unlock_irqrestore(&state->lock, flags);
+		return -EAGAIN;
+	}
+
+	if (!state->current_read.valid || !state->current_write.valid) {
+		spin_unlock_irqrestore(&state->lock, flags);
+		return -EINVAL;
+	}
+
+	spin_unlock_irqrestore(&state->lock, flags);
+
+	/*
+	 * Mix PSK with current secrets using HKDF-Extract:
+	 * mixed_secret = HKDF-Extract(current_secret, psk)
+	 *
+	 * This provides additional entropy from the external PSK
+	 * while maintaining forward secrecy properties.
+	 */
+	ret = crypto_shash_setkey(state->hash_tfm,
+				  state->current_read.secret,
+				  state->current_read.secret_len);
+	if (ret)
+		goto cleanup;
+
+	/* For read direction */
+	{
+		SHASH_DESC_ON_STACK(desc, state->hash_tfm);
+		desc->tfm = state->hash_tfm;
+
+		ret = crypto_shash_init(desc);
+		if (ret)
+			goto cleanup;
+
+		ret = crypto_shash_update(desc, psk, psk_len);
+		if (ret)
+			goto cleanup;
+
+		ret = crypto_shash_final(desc, mixed_read_secret);
+		if (ret)
+			goto cleanup;
+	}
+
+	/* For write direction */
+	ret = crypto_shash_setkey(state->hash_tfm,
+				  state->current_write.secret,
+				  state->current_write.secret_len);
+	if (ret)
+		goto cleanup;
+
+	{
+		SHASH_DESC_ON_STACK(desc, state->hash_tfm);
+		desc->tfm = state->hash_tfm;
+
+		ret = crypto_shash_init(desc);
+		if (ret)
+			goto cleanup;
+
+		ret = crypto_shash_update(desc, psk, psk_len);
+		if (ret)
+			goto cleanup;
+
+		ret = crypto_shash_final(desc, mixed_write_secret);
+		if (ret)
+			goto cleanup;
+	}
+
+	/*
+	 * Install the mixed secrets as the base for next key derivation.
+	 * The actual key derivation will happen in tquic_initiate_key_update().
+	 */
+	spin_lock_irqsave(&state->lock, flags);
+
+	memcpy(state->current_read.secret, mixed_read_secret,
+	       state->current_read.secret_len);
+	memcpy(state->current_write.secret, mixed_write_secret,
+	       state->current_write.secret_len);
+
+	/* Invalidate pre-computed next keys so they'll be re-derived */
+	state->next_read.valid = false;
+	state->next_write.valid = false;
+
+	spin_unlock_irqrestore(&state->lock, flags);
+
+	/* Now perform the standard key update */
+	ret = tquic_initiate_key_update(conn);
+
+cleanup:
+	memzero_explicit(mixed_read_secret, sizeof(mixed_read_secret));
+	memzero_explicit(mixed_write_secret, sizeof(mixed_write_secret));
+
+	return ret;
+}
+EXPORT_SYMBOL_GPL(tquic_key_update_with_psk);
+
+/**
+ * tquic_key_update_get_old_read_keys - Get previous generation read keys
+ * @state: Key update state
+ * @key: Output buffer for AEAD key
+ * @key_len: Output: key length
+ * @iv: Output buffer for IV
+ * @iv_len: Output: IV length
+ *
+ * Returns 0 on success, -ENOKEY if old keys not available.
+ */
+int tquic_key_update_get_old_read_keys(struct tquic_key_update_state *state,
+				       u8 *key, u32 *key_len,
+				       u8 *iv, u32 *iv_len)
+{
+	struct tquic_key_generation *old;
+	unsigned long flags;
+
+	if (!state)
+		return -EINVAL;
+
+	spin_lock_irqsave(&state->lock, flags);
+
+	if (!state->old_keys_valid) {
+		spin_unlock_irqrestore(&state->lock, flags);
+		return -ENOKEY;
+	}
+
+	old = &state->old_read;
+	if (!old->valid) {
+		spin_unlock_irqrestore(&state->lock, flags);
+		return -ENOKEY;
+	}
+
+	if (key && key_len) {
+		memcpy(key, old->key, old->key_len);
+		*key_len = old->key_len;
+	}
+
+	if (iv && iv_len) {
+		memcpy(iv, old->iv, old->iv_len);
+		*iv_len = old->iv_len;
+	}
+
+	spin_unlock_irqrestore(&state->lock, flags);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(tquic_key_update_get_old_read_keys);
 
 MODULE_DESCRIPTION("TQUIC TLS 1.3 Key Update Mechanism");
 MODULE_LICENSE("GPL");

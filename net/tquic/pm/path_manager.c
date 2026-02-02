@@ -25,6 +25,8 @@
 #include <uapi/linux/tquic_pm.h>
 #include "../cong/tquic_cong.h"
 #include "../protocol.h"
+#include "../core/additional_addresses.h"
+#include "nat_keepalive.h"
 
 /* Path probe configuration */
 #define TQUIC_PM_PROBE_INTERVAL_MS	1000	/* 1 second */
@@ -443,6 +445,10 @@ void tquic_path_update_stats(struct tquic_path *path, struct sk_buff *skb,
 	}
 
 	path->last_activity = now;
+
+	/* Reset NAT keepalive timer on path activity (RFC 9308) */
+	if (success)
+		tquic_nat_keepalive_on_activity(path);
 }
 EXPORT_SYMBOL_GPL(tquic_path_update_stats);
 
@@ -816,6 +822,14 @@ int tquic_conn_add_path_safe(struct tquic_connection *conn,
 		/* Continue without PMTUD - not fatal */
 	}
 
+	/* Initialize NAT keepalive for this path (RFC 9308 Section 3.5) */
+	ret = tquic_nat_keepalive_init(path, conn);
+	if (ret) {
+		pr_warn("tquic: failed to init NAT keepalive for path %u: %d\n",
+			path->path_id, ret);
+		/* Continue without NAT keepalive - not fatal */
+	}
+
 	/* Add to connection's path list with RCU */
 	spin_lock_bh(&conn->paths_lock);
 	list_add_tail_rcu(&path->list, &conn->paths);
@@ -882,6 +896,9 @@ int tquic_conn_remove_path_safe(struct tquic_connection *conn,
 
 	/* Release PMTUD state */
 	tquic_pmtud_release_path(path);
+
+	/* Release NAT keepalive state (RFC 9308 Section 3.5) */
+	tquic_nat_keepalive_cleanup(path);
 
 	/* Release multipath state (RFC 9369) */
 #ifdef CONFIG_TQUIC_MULTIPATH
@@ -995,6 +1012,584 @@ void tquic_conn_flush_paths(struct tquic_connection *conn)
 	}
 }
 EXPORT_SYMBOL_GPL(tquic_conn_flush_paths);
+
+/*
+ * =============================================================================
+ * NAT Rebinding Detection with Address Discovery Integration
+ * =============================================================================
+ *
+ * These functions integrate with the Address Discovery extension
+ * (draft-ietf-quic-address-discovery) to detect NAT rebinding events
+ * and optionally send OBSERVED_ADDRESS frames to the peer.
+ */
+
+#include "../core/address_discovery.h"
+
+/**
+ * tquic_pm_check_address_change - Check for address changes on packet receipt
+ * @conn: Connection that received the packet
+ * @from_addr: Source address the packet was received from
+ * @path: Path the packet was received on
+ *
+ * Called from the receive path when a packet arrives. Checks if the source
+ * address differs from the expected path address, indicating NAT rebinding.
+ * If address discovery is enabled and the address changed, sends an
+ * OBSERVED_ADDRESS frame to the peer.
+ *
+ * Return: true if address changed (NAT rebinding detected), false otherwise
+ */
+bool tquic_pm_check_address_change(struct tquic_connection *conn,
+				   const struct sockaddr_storage *from_addr,
+				   struct tquic_path *path)
+{
+	struct tquic_addr_discovery_state *ad_state;
+	bool changed = false;
+	bool nat_rebind;
+
+	if (!conn || !from_addr || !path)
+		return false;
+
+	/* Get address discovery state from connection */
+	ad_state = conn->addr_discovery_state;
+	if (!ad_state)
+		return false;
+
+	/* Check for NAT rebinding using address discovery module */
+	nat_rebind = tquic_detect_nat_rebinding(conn, ad_state, from_addr);
+
+	if (nat_rebind) {
+		pr_info("tquic_pm: NAT rebinding detected on path %u\n",
+			path->path_id);
+
+		/* Update the observed address */
+		tquic_update_observed_address(ad_state, from_addr, &changed);
+
+		/* Send OBSERVED_ADDRESS to peer if enabled */
+		if (ad_state->config.enabled && ad_state->config.report_on_change) {
+			int ret = tquic_send_observed_address(conn, ad_state, from_addr);
+			if (ret == -EAGAIN) {
+				pr_debug("tquic_pm: OBSERVED_ADDRESS rate limited\n");
+			} else if (ret < 0) {
+				pr_debug("tquic_pm: failed to send OBSERVED_ADDRESS: %d\n",
+					 ret);
+			}
+		}
+
+		/* Update path's remote address if NAT rebind confirmed */
+		spin_lock_bh(&conn->paths_lock);
+		memcpy(&path->remote_addr, from_addr, sizeof(*from_addr));
+		spin_unlock_bh(&conn->paths_lock);
+	}
+
+	return nat_rebind;
+}
+EXPORT_SYMBOL_GPL(tquic_pm_check_address_change);
+
+/**
+ * tquic_pm_notify_observed_address - Notify peer of their observed address
+ * @conn: Connection
+ * @path: Path to send on
+ *
+ * Sends an OBSERVED_ADDRESS frame to the peer to inform them of the address
+ * we observe for their packets. This is useful for helping peers detect
+ * NAT rebinding or discover their public address.
+ *
+ * Return: 0 on success, negative error code on failure
+ */
+int tquic_pm_notify_observed_address(struct tquic_connection *conn,
+				     struct tquic_path *path)
+{
+	struct tquic_addr_discovery_state *ad_state;
+
+	if (!conn || !path)
+		return -EINVAL;
+
+	ad_state = conn->addr_discovery_state;
+	if (!ad_state || !ad_state->config.enabled)
+		return -ENOENT;
+
+	return tquic_send_observed_address(conn, ad_state, &path->remote_addr);
+}
+EXPORT_SYMBOL_GPL(tquic_pm_notify_observed_address);
+
+/**
+ * tquic_pm_init_address_discovery - Initialize address discovery for connection
+ * @conn: Connection to initialize
+ *
+ * Allocates and initializes the address discovery state for a connection.
+ * Should be called during connection setup after transport parameter negotiation.
+ *
+ * Return: 0 on success, negative error code on failure
+ */
+int tquic_pm_init_address_discovery(struct tquic_connection *conn)
+{
+	struct tquic_addr_discovery_state *state;
+	int ret;
+
+	if (!conn)
+		return -EINVAL;
+
+	/* Already initialized? */
+	if (conn->addr_discovery_state)
+		return 0;
+
+	state = kzalloc(sizeof(*state), GFP_KERNEL);
+	if (!state)
+		return -ENOMEM;
+
+	ret = tquic_addr_discovery_init(state);
+	if (ret < 0) {
+		kfree(state);
+		return ret;
+	}
+
+	/* Enable if negotiated */
+	if (conn->negotiated_params.address_discovery_enabled) {
+		state->config.enabled = true;
+		state->config.report_on_change = true;
+	}
+
+	conn->addr_discovery_state = state;
+
+	pr_debug("tquic_pm: address discovery initialized (enabled=%d)\n",
+		 state->config.enabled);
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(tquic_pm_init_address_discovery);
+
+/**
+ * tquic_pm_cleanup_address_discovery - Clean up address discovery state
+ * @conn: Connection to clean up
+ */
+void tquic_pm_cleanup_address_discovery(struct tquic_connection *conn)
+{
+	struct tquic_addr_discovery_state *state;
+
+	if (!conn)
+		return;
+
+	state = conn->addr_discovery_state;
+	if (!state)
+		return;
+
+	tquic_addr_discovery_cleanup(state);
+	kfree(state);
+	conn->addr_discovery_state = NULL;
+}
+EXPORT_SYMBOL_GPL(tquic_pm_cleanup_address_discovery);
+
+/*
+ * =============================================================================
+ * Additional Addresses Path Manager Integration
+ * (draft-piraux-quic-additional-addresses)
+ * =============================================================================
+ *
+ * These functions integrate the additional_addresses transport parameter
+ * extension with the path manager for seamless path creation and validation.
+ */
+
+/**
+ * tquic_pm_init_additional_addresses - Initialize additional addresses for connection
+ * @conn: Connection to initialize
+ *
+ * Allocates and initializes the additional addresses subsystem for the
+ * connection. Should be called during connection setup.
+ *
+ * Return: 0 on success, negative error code on failure
+ */
+int tquic_pm_init_additional_addresses(struct tquic_connection *conn)
+{
+	struct net *net;
+
+	if (!conn || !conn->sk)
+		return -EINVAL;
+
+	net = sock_net(conn->sk);
+
+	/* Check if additional addresses is enabled via sysctl */
+	if (!tquic_additional_addr_enabled(net)) {
+		pr_debug("tquic_pm: additional addresses disabled\n");
+		return 0;
+	}
+
+	return tquic_additional_addr_conn_init(conn);
+}
+EXPORT_SYMBOL_GPL(tquic_pm_init_additional_addresses);
+
+/**
+ * tquic_pm_cleanup_additional_addresses - Clean up additional addresses state
+ * @conn: Connection to clean up
+ */
+void tquic_pm_cleanup_additional_addresses(struct tquic_connection *conn)
+{
+	if (!conn)
+		return;
+
+	tquic_additional_addr_conn_cleanup(conn);
+}
+EXPORT_SYMBOL_GPL(tquic_pm_cleanup_additional_addresses);
+
+/**
+ * tquic_pm_add_local_additional_address - Add a local address to advertise
+ * @conn: Connection
+ * @addr: Local address to advertise
+ * @cid: Connection ID for this address (or NULL to auto-generate)
+ *
+ * Adds a local address to the list of additional addresses that will be
+ * advertised to the peer in the transport parameters.
+ *
+ * Return: 0 on success, negative error code on failure
+ */
+int tquic_pm_add_local_additional_address(struct tquic_connection *conn,
+					  const struct sockaddr_storage *addr,
+					  const struct tquic_cid *cid)
+{
+	struct tquic_additional_addresses *local_addrs;
+	struct tquic_cid auto_cid;
+	u8 ip_version;
+	int ret;
+
+	if (!conn || !addr)
+		return -EINVAL;
+
+	/* Initialize if needed */
+	if (!conn->additional_local_addrs) {
+		ret = tquic_additional_addr_conn_init(conn);
+		if (ret < 0)
+			return ret;
+	}
+
+	local_addrs = conn->additional_local_addrs;
+	if (!local_addrs)
+		return -EINVAL;
+
+	/* Determine IP version */
+	if (addr->ss_family == AF_INET)
+		ip_version = TQUIC_ADDR_IP_VERSION_4;
+	else if (addr->ss_family == AF_INET6)
+		ip_version = TQUIC_ADDR_IP_VERSION_6;
+	else
+		return -EAFNOSUPPORT;
+
+	/* Auto-generate CID if not provided */
+	if (!cid || cid->len == 0) {
+		auto_cid.len = 8;  /* Default CID length */
+		get_random_bytes(auto_cid.id, auto_cid.len);
+		cid = &auto_cid;
+
+		/* Register the CID with CID manager */
+		if (conn->cid_mgr) {
+			ret = tquic_cid_register_local(conn->cid_mgr, &auto_cid);
+			if (ret < 0) {
+				pr_warn("tquic_pm: failed to register local CID: %d\n",
+					ret);
+				/* Continue despite error */
+			}
+		}
+	}
+
+	ret = tquic_additional_addr_add(local_addrs, ip_version, addr, cid, NULL);
+	if (ret < 0)
+		return ret;
+
+	pr_info("tquic_pm: added local additional address (IPv%u, total=%u)\n",
+		ip_version, local_addrs->count);
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(tquic_pm_add_local_additional_address);
+
+/**
+ * tquic_pm_remove_local_additional_address - Remove a local additional address
+ * @conn: Connection
+ * @addr: Address to remove
+ *
+ * Return: 0 on success, negative error code on failure
+ */
+int tquic_pm_remove_local_additional_address(struct tquic_connection *conn,
+					     const struct sockaddr_storage *addr)
+{
+	struct tquic_additional_addresses *local_addrs;
+
+	if (!conn || !addr)
+		return -EINVAL;
+
+	local_addrs = conn->additional_local_addrs;
+	if (!local_addrs)
+		return -ENOENT;
+
+	return tquic_additional_addr_remove(local_addrs, addr);
+}
+EXPORT_SYMBOL_GPL(tquic_pm_remove_local_additional_address);
+
+/**
+ * tquic_pm_create_path_to_additional - Create path to a remote additional address
+ * @conn: Connection
+ * @addr_entry: Remote additional address entry
+ *
+ * Creates a new path to the specified remote additional address and
+ * optionally starts path validation.
+ *
+ * Return: New path on success, ERR_PTR on failure
+ */
+struct tquic_path *tquic_pm_create_path_to_additional(
+	struct tquic_connection *conn,
+	struct tquic_additional_address *addr_entry)
+{
+	struct tquic_path *path;
+	struct sockaddr_storage local_addr;
+	int ret;
+
+	if (!conn || !addr_entry)
+		return ERR_PTR(-EINVAL);
+
+	/* Validate address */
+	if (!addr_entry->active) {
+		pr_debug("tquic_pm: additional address not active\n");
+		return ERR_PTR(-EINVAL);
+	}
+
+	/* Get local address */
+	if (conn->active_path) {
+		memcpy(&local_addr, &conn->active_path->local_addr,
+		       sizeof(local_addr));
+	} else {
+		/* Use any local address of matching family */
+		memset(&local_addr, 0, sizeof(local_addr));
+		local_addr.ss_family = addr_entry->addr.ss_family;
+	}
+
+	/* Create path */
+	path = tquic_path_create(conn, &local_addr, &addr_entry->addr);
+	if (!path)
+		return ERR_PTR(-ENOMEM);
+
+	/* Set remote CID from the additional address */
+	memcpy(&path->remote_cid, &addr_entry->cid, sizeof(addr_entry->cid));
+
+	/* Register the stateless reset token */
+	if (conn->cid_mgr) {
+		ret = tquic_cid_handle_additional_addr(conn->cid_mgr,
+						       &addr_entry->cid,
+						       addr_entry->stateless_reset_token);
+		if (ret < 0) {
+			pr_warn("tquic_pm: failed to register reset token: %d\n",
+				ret);
+		}
+	}
+
+	pr_debug("tquic_pm: created path %u to additional address\n",
+		 path->path_id);
+
+	return path;
+}
+EXPORT_SYMBOL_GPL(tquic_pm_create_path_to_additional);
+
+/**
+ * tquic_pm_validate_additional_address - Validate a remote additional address
+ * @conn: Connection
+ * @addr_entry: Address entry to validate
+ *
+ * Creates a path to the additional address and starts PATH_CHALLENGE
+ * validation without switching traffic to it.
+ *
+ * Return: 0 on success, negative error code on failure
+ */
+int tquic_pm_validate_additional_address(struct tquic_connection *conn,
+					 struct tquic_additional_address *addr_entry)
+{
+	struct tquic_path *path;
+	int ret;
+
+	if (!conn || !addr_entry)
+		return -EINVAL;
+
+	/* Already validated? */
+	if (addr_entry->validated)
+		return 0;
+
+	/* Create path */
+	path = tquic_pm_create_path_to_additional(conn, addr_entry);
+	if (IS_ERR(path))
+		return PTR_ERR(path);
+
+	/* Start validation */
+	ret = tquic_path_start_validation(conn, path);
+	if (ret < 0) {
+		tquic_path_free(path);
+		return ret;
+	}
+
+	pr_debug("tquic_pm: started validation for additional address\n");
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(tquic_pm_validate_additional_address);
+
+/**
+ * tquic_pm_get_best_additional_address - Get best additional address for migration
+ * @conn: Connection
+ * @policy: Selection policy
+ *
+ * Returns the best additional address according to the specified policy.
+ * Does NOT initiate migration - caller should use the returned entry
+ * with tquic_migrate_to_additional_address() if migration is desired.
+ *
+ * Return: Best address entry, or NULL if none available
+ */
+struct tquic_additional_address *tquic_pm_get_best_additional_address(
+	struct tquic_connection *conn,
+	enum tquic_addr_select_policy policy)
+{
+	struct tquic_additional_addresses *remote_addrs;
+	struct tquic_additional_address *best;
+	sa_family_t current_family = AF_UNSPEC;
+
+	if (!conn)
+		return NULL;
+
+	remote_addrs = conn->additional_remote_addrs;
+	if (!remote_addrs || remote_addrs->count == 0)
+		return NULL;
+
+	if (conn->active_path)
+		current_family = conn->active_path->remote_addr.ss_family;
+
+	spin_lock_bh(&remote_addrs->lock);
+	best = tquic_additional_addr_select(remote_addrs, policy, current_family);
+	spin_unlock_bh(&remote_addrs->lock);
+
+	return best;
+}
+EXPORT_SYMBOL_GPL(tquic_pm_get_best_additional_address);
+
+/**
+ * tquic_pm_on_path_validated_additional - Handle path validation for additional addresses
+ * @conn: Connection
+ * @path: Validated path
+ *
+ * Called from the path validation completion handler when a path to
+ * an additional address is successfully validated.
+ */
+void tquic_pm_on_path_validated_additional(struct tquic_connection *conn,
+					   struct tquic_path *path)
+{
+	struct tquic_additional_addresses *remote_addrs;
+	struct tquic_additional_address *addr_entry;
+
+	if (!conn || !path)
+		return;
+
+	remote_addrs = conn->additional_remote_addrs;
+	if (!remote_addrs)
+		return;
+
+	spin_lock_bh(&remote_addrs->lock);
+	addr_entry = tquic_additional_addr_find(remote_addrs, &path->remote_addr);
+	if (addr_entry) {
+		tquic_additional_addr_validate(addr_entry);
+
+		/* Update RTT estimate */
+		if (path->stats.rtt_smoothed > 0)
+			tquic_additional_addr_update_rtt(addr_entry,
+							 path->stats.rtt_smoothed);
+	}
+	spin_unlock_bh(&remote_addrs->lock);
+}
+EXPORT_SYMBOL_GPL(tquic_pm_on_path_validated_additional);
+
+/**
+ * tquic_pm_on_path_failed_additional - Handle path failure for additional addresses
+ * @conn: Connection
+ * @path: Failed path
+ *
+ * Called when path validation or connectivity to an additional address fails.
+ */
+void tquic_pm_on_path_failed_additional(struct tquic_connection *conn,
+					struct tquic_path *path)
+{
+	struct tquic_additional_addresses *remote_addrs;
+	struct tquic_additional_address *addr_entry;
+
+	if (!conn || !path)
+		return;
+
+	remote_addrs = conn->additional_remote_addrs;
+	if (!remote_addrs)
+		return;
+
+	spin_lock_bh(&remote_addrs->lock);
+	addr_entry = tquic_additional_addr_find(remote_addrs, &path->remote_addr);
+	if (addr_entry)
+		tquic_additional_addr_invalidate(addr_entry);
+	spin_unlock_bh(&remote_addrs->lock);
+}
+EXPORT_SYMBOL_GPL(tquic_pm_on_path_failed_additional);
+
+/**
+ * tquic_pm_coordinate_preferred_and_additional - Coordinate preferred and additional addresses
+ * @conn: Connection
+ *
+ * Coordinates migration decisions between the preferred_address transport
+ * parameter (RFC 9000) and additional_addresses extension. This ensures
+ * that both mechanisms work together properly.
+ *
+ * Priority:
+ * 1. If preferred_address is available and not yet migrated, prefer it
+ * 2. If preferred_address migration failed or completed, consider additional addresses
+ * 3. Use RTT and policy to select among additional addresses
+ *
+ * Return: Selected address type (0=none, 1=preferred, 2=additional)
+ */
+int tquic_pm_coordinate_preferred_and_additional(struct tquic_connection *conn)
+{
+	struct tquic_pref_addr_migration *pref_migration;
+	struct tquic_additional_addresses *remote_addrs;
+	enum tquic_pref_addr_state pref_state;
+
+	if (!conn)
+		return 0;
+
+	/* Check preferred address state */
+	pref_migration = conn->preferred_addr;
+	if (pref_migration) {
+		pref_state = pref_migration->state;
+
+		/* Prefer preferred_address if available and not yet tried */
+		if (pref_state == TQUIC_PREF_ADDR_AVAILABLE)
+			return 1;  /* Use preferred address */
+
+		/* If preferred address is validating, wait for it */
+		if (pref_state == TQUIC_PREF_ADDR_VALIDATING)
+			return 1;
+
+		/* Preferred address already migrated or failed */
+	}
+
+	/* Check additional addresses */
+	remote_addrs = conn->additional_remote_addrs;
+	if (remote_addrs && remote_addrs->count > 0) {
+		struct tquic_additional_address *entry;
+		bool has_validated = false;
+		bool has_active = false;
+
+		spin_lock_bh(&remote_addrs->lock);
+		list_for_each_entry(entry, &remote_addrs->addresses, list) {
+			if (entry->active)
+				has_active = true;
+			if (entry->validated)
+				has_validated = true;
+		}
+		spin_unlock_bh(&remote_addrs->lock);
+
+		if (has_validated || has_active)
+			return 2;  /* Use additional addresses */
+	}
+
+	return 0;  /* No migration option available */
+}
+EXPORT_SYMBOL_GPL(tquic_pm_coordinate_preferred_and_additional);
 
 MODULE_DESCRIPTION("TQUIC Path Manager for WAN Bonding");
 MODULE_LICENSE("GPL");

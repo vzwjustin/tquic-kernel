@@ -35,6 +35,7 @@
 #include <net/tquic.h>
 #include "protocol.h"
 #include "tquic_stateless_reset.h"
+#include "security_hardening.h"
 
 /* Frame type constants */
 #define TQUIC_FRAME_NEW_CONNECTION_ID		0x18
@@ -123,6 +124,9 @@ struct tquic_cid_pool {
 	struct work_struct rotation_work;
 	bool rotation_enabled;
 	struct tquic_connection *conn;
+
+	/* Security hardening (CVE-2024-22189 defense) */
+	struct tquic_cid_security security;
 };
 
 /*
@@ -252,6 +256,9 @@ int tquic_cid_pool_init(struct tquic_connection *conn)
 	INIT_WORK(&pool->rotation_work, tquic_cid_rotation_work);
 	timer_setup(&pool->rotation_timer, tquic_cid_rotation_timer_cb, 0);
 
+	/* Initialize security state (CVE-2024-22189 defense) */
+	tquic_cid_security_init(&pool->security);
+
 	/* Generate initial local CID */
 	entry = kzalloc(sizeof(*entry), GFP_KERNEL);
 	if (!entry) {
@@ -330,6 +337,9 @@ void tquic_cid_pool_destroy(struct tquic_connection *conn)
 	/* Stop rotation timer and cancel pending work */
 	del_timer_sync(&pool->rotation_timer);
 	cancel_work_sync(&pool->rotation_work);
+
+	/* Cleanup security state */
+	tquic_cid_security_destroy(&pool->security);
 
 	spin_lock_bh(&pool->lock);
 
@@ -581,9 +591,27 @@ int tquic_cid_add_remote(struct tquic_connection *conn,
 {
 	struct tquic_cid_pool *pool = conn->cid_pool;
 	struct tquic_cid_entry *entry, *tmp;
+	int ret;
 
 	if (!pool)
 		return -EINVAL;
+
+	/*
+	 * CVE-2024-22189 Defense: Rate limit NEW_CONNECTION_ID processing
+	 *
+	 * An attacker can flood the connection with NEW_CONNECTION_ID frames
+	 * with high retire_prior_to values, causing excessive RETIRE_CONNECTION_ID
+	 * frames to be queued and potentially exhausting memory.
+	 */
+	ret = tquic_cid_security_check_new_cid(&pool->security);
+	if (ret) {
+		if (ret == -EBUSY) {
+			pr_debug("tquic: NEW_CONNECTION_ID rate limited\n");
+			tquic_security_event(TQUIC_SEC_EVENT_NEW_CID_RATE_LIMIT,
+					     NULL, "rate limit exceeded");
+		}
+		return ret;
+	}
 
 	entry = kzalloc(sizeof(*entry), GFP_ATOMIC);
 	if (!entry)
@@ -877,19 +905,43 @@ static int tquic_build_retire_connection_id_frame(u8 *buf, size_t buf_len,
  */
 void tquic_send_retire_connection_id(struct tquic_connection *conn, u64 seq_num)
 {
+	struct tquic_cid_pool *pool;
 	struct tquic_path *path;
 	struct sk_buff *skb;
 	u8 *frame_buf;
 	u8 *pkt_buf;
 	int frame_len;
 	size_t pkt_len;
+	int ret;
 
 	if (!conn)
 		return;
 
+	/*
+	 * CVE-2024-22189 Defense: Limit queued RETIRE_CONNECTION_ID frames
+	 *
+	 * An attacker can send many NEW_CONNECTION_ID frames with high
+	 * retire_prior_to values, forcing us to queue many RETIRE_CONNECTION_ID
+	 * frames. We limit the queue to prevent memory exhaustion.
+	 */
+	pool = conn->cid_pool;
+	if (pool) {
+		ret = tquic_cid_security_queue_retire(&pool->security);
+		if (ret == -EPROTO) {
+			pr_warn("tquic: RETIRE_CONNECTION_ID stuffing attack detected "
+				"(queued >= %d)\n", TQUIC_MAX_QUEUED_RETIRE_CID);
+			tquic_security_event(TQUIC_SEC_EVENT_RETIRE_CID_FLOOD,
+					     NULL, "queue limit exceeded - closing connection");
+			/* TODO: Close connection with PROTOCOL_VIOLATION */
+			return;
+		}
+	}
+
 	path = conn->active_path;
 	if (!path) {
 		pr_debug("tquic: RETIRE_CONNECTION_ID: no active path\n");
+		if (pool)
+			tquic_cid_security_dequeue_retire(&pool->security);
 		return;
 	}
 
