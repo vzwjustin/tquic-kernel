@@ -769,17 +769,18 @@ void tquic_bond_interface_down(struct tquic_connection *conn,
 	if (!conn)
 		return;
 
-	bond = conn->bond_state;
+	bond = conn->scheduler;
 	if (!bond)
 		return;
 
-	spin_lock_bh(&bond->lock);
+	spin_lock(&conn->lock);
 
 	/* Mark all paths using this interface as failed */
 	list_for_each_entry(path, &conn->paths, list) {
 		if (path->dev == dev && path->state == TQUIC_PATH_ACTIVE) {
 			path->state = TQUIC_PATH_FAILED;
 			failed_count++;
+			bond->stats.failed_paths++;
 
 			pr_debug("tquic: path %u failed (interface %s down)\n",
 				 path->path_id, dev->name);
@@ -800,6 +801,8 @@ void tquic_bond_interface_down(struct tquic_connection *conn,
 
 		if (new_primary) {
 			bond->primary_path = new_primary;
+			conn->active_path = new_primary;
+			bond->stats.failovers++;
 			pr_info("tquic: failover to path %u after interface %s down\n",
 				new_primary->path_id, dev->name);
 		} else {
@@ -809,7 +812,7 @@ void tquic_bond_interface_down(struct tquic_connection *conn,
 		}
 	}
 
-	spin_unlock_bh(&bond->lock);
+	spin_unlock(&conn->lock);
 }
 EXPORT_SYMBOL_GPL(tquic_bond_interface_down);
 
