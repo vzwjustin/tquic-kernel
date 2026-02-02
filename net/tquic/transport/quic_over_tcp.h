@@ -299,6 +299,8 @@ struct quic_tcp_config {
  * @list:             Connection list linkage
  * @packet_callback:  Callback when QUIC packet received
  * @callback_data:    User data for callback
+ * @fc_callback:      Flow control state change callback
+ * @fc_callback_data: User data for flow control callback
  */
 struct quic_tcp_connection {
 	struct socket *tcp_sk;
@@ -323,6 +325,10 @@ struct quic_tcp_connection {
 	/* Packet delivery callback */
 	void (*packet_callback)(void *data, const u8 *packet, size_t len);
 	void *callback_data;
+
+	/* Flow control state change callback */
+	void (*fc_callback)(void *data, bool blocked);
+	void *fc_callback_data;
 
 	/* Saved TCP callbacks for restore */
 	void (*saved_data_ready)(struct sock *sk);

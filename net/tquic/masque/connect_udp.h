@@ -166,6 +166,10 @@ struct tquic_connect_udp_stats {
  * Linkage:
  * @list: List node for connection's tunnel list
  * @is_server: True if this is server-side (proxy)
+ *
+ * Receive handler:
+ * @recv_handler: Callback for received datagrams
+ * @recv_handler_ctx: Context for receive handler callback
  */
 struct tquic_connect_udp_tunnel {
 	struct tquic_stream *stream;
@@ -199,6 +203,10 @@ struct tquic_connect_udp_tunnel {
 	/* Linkage */
 	struct list_head list;
 	bool is_server;
+
+	/* Receive handler callback */
+	tquic_connect_udp_datagram_handler recv_handler;
+	void *recv_handler_ctx;
 };
 
 /**

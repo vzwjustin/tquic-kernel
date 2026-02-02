@@ -537,6 +537,12 @@ int tquic_owd_generate_ack_1wd(struct tquic_owd_state *owd,
 	ssize_t ret;
 	u64 frame_type;
 	u64 timestamp;
+	u64 largest_acked;
+	u64 ack_delay;
+	u64 first_range;
+	u64 prev_smallest;
+	u32 range_count;
+	struct tquic_ack_range *range;
 
 	if (!owd || !loss || !buf)
 		return -EINVAL;
@@ -544,21 +550,27 @@ int tquic_owd_generate_ack_1wd(struct tquic_owd_state *owd,
 	if (!(owd->flags & TQUIC_OWD_FLAG_ENABLED))
 		return -ENOENT;
 
-	/* Frame type */
-	frame_type = include_ecn ? TQUIC_FRAME_ACK_1WD_ECN : TQUIC_FRAME_ACK_1WD;
-	ret = owd_varint_encode(buf + offset, buf_len - offset, frame_type);
-	if (ret < 0)
-		return ret;
-	offset += ret;
+	spin_lock(&loss->lock);
+
+	if (list_empty(&loss->ack_ranges[pn_space])) {
+		spin_unlock(&loss->lock);
+		return -ENODATA;
+	}
+
+	/* Get largest acknowledged from first range */
+	range = list_first_entry(&loss->ack_ranges[pn_space],
+				 struct tquic_ack_range, list);
+	largest_acked = range->end;
+	first_range = range->end - range->start;
+
+	/* Calculate ACK delay in microseconds */
+	ack_delay = ktime_us_delta(ktime_get(),
+				   loss->largest_received_time[pn_space]);
+
+	/* Range count (excluding first range) */
+	range_count = loss->num_ack_ranges[pn_space] - 1;
 
 	/*
-	 * Note: The ACK range encoding would be handled by integrating with
-	 * the existing ACK generation code in ack.c. Here we show the
-	 * timestamp addition.
-	 *
-	 * For a complete implementation, this would call into the standard
-	 * ACK frame generation and append the timestamp at the end.
-	 *
 	 * ACK_1WD Frame Format (draft-huitema-quic-1wd):
 	 *   Frame Type (varint): 0x1a02 or 0x1a03
 	 *   Largest Acknowledged (varint)
@@ -570,19 +582,94 @@ int tquic_owd_generate_ack_1wd(struct tquic_owd_state *owd,
 	 *   Receive Timestamp (varint)  <-- Added by OWD extension
 	 */
 
-	/* Placeholder: In real implementation, generate standard ACK fields here */
-	/* For now, just encode the timestamp portion as demonstration */
+	/* Frame type */
+	frame_type = include_ecn ? TQUIC_FRAME_ACK_1WD_ECN : TQUIC_FRAME_ACK_1WD;
+	ret = owd_varint_encode(buf + offset, buf_len - offset, frame_type);
+	if (ret < 0)
+		goto out;
+	offset += ret;
 
-	/* Encode receive timestamp at the end */
+	/* Largest Acknowledged */
+	ret = owd_varint_encode(buf + offset, buf_len - offset, largest_acked);
+	if (ret < 0)
+		goto out;
+	offset += ret;
+
+	/* ACK Delay (using default exponent of 3, so divide by 8) */
+	ret = owd_varint_encode(buf + offset, buf_len - offset, ack_delay >> 3);
+	if (ret < 0)
+		goto out;
+	offset += ret;
+
+	/* ACK Range Count */
+	ret = owd_varint_encode(buf + offset, buf_len - offset, range_count);
+	if (ret < 0)
+		goto out;
+	offset += ret;
+
+	/* First ACK Range */
+	ret = owd_varint_encode(buf + offset, buf_len - offset, first_range);
+	if (ret < 0)
+		goto out;
+	offset += ret;
+
+	/* Additional ACK ranges */
+	prev_smallest = range->start;
+	list_for_each_entry_continue(range, &loss->ack_ranges[pn_space], list) {
+		u64 gap = prev_smallest - range->end - 2;
+		u64 range_len = range->end - range->start;
+
+		/* Gap */
+		ret = owd_varint_encode(buf + offset, buf_len - offset, gap);
+		if (ret < 0)
+			goto out;
+		offset += ret;
+
+		/* ACK Range Length */
+		ret = owd_varint_encode(buf + offset, buf_len - offset, range_len);
+		if (ret < 0)
+			goto out;
+		offset += ret;
+
+		prev_smallest = range->start;
+	}
+
+	/* ECN counts if requested */
+	if (include_ecn && loss->ecn_validated) {
+		ret = owd_varint_encode(buf + offset, buf_len - offset,
+					loss->ecn_acked.ect0);
+		if (ret < 0)
+			goto out;
+		offset += ret;
+
+		ret = owd_varint_encode(buf + offset, buf_len - offset,
+					loss->ecn_acked.ect1);
+		if (ret < 0)
+			goto out;
+		offset += ret;
+
+		ret = owd_varint_encode(buf + offset, buf_len - offset,
+					loss->ecn_acked.ce);
+		if (ret < 0)
+			goto out;
+		offset += ret;
+	}
+
+	/* Encode receive timestamp at the end (OWD extension) */
 	timestamp = tquic_owd_ktime_to_timestamp(owd, recv_time);
 	ret = owd_varint_encode(buf + offset, buf_len - offset, timestamp);
 	if (ret < 0)
-		return ret;
+		goto out;
 	offset += ret;
 
 	owd->last_send_ts = timestamp;
 
+	spin_unlock(&loss->lock);
 	return offset;
+
+out:
+	spin_unlock(&loss->lock);
+	return ret;
 }
 EXPORT_SYMBOL_GPL(tquic_owd_generate_ack_1wd);
 

@@ -1298,6 +1298,101 @@ static int forward_from_target(struct tquic_connect_udp_tunnel *tunnel)
 }
 
 /**
+ * invoke_recv_handler - Invoke the receive handler callback
+ * @tunnel: Tunnel that received the datagram
+ * @context_id: Context ID from the HTTP Datagram
+ * @data: Payload data
+ * @len: Payload length
+ *
+ * Invokes the registered receive handler callback if one is set.
+ * The handler is invoked with the tunnel lock released.
+ *
+ * Returns: Return value from the handler, or 0 if no handler is set.
+ */
+static int invoke_recv_handler(struct tquic_connect_udp_tunnel *tunnel,
+			       u64 context_id, const u8 *data, size_t len)
+{
+	tquic_connect_udp_datagram_handler handler;
+	void *ctx;
+	unsigned long flags;
+
+	spin_lock_irqsave(&tunnel->lock, flags);
+	handler = tunnel->recv_handler;
+	ctx = tunnel->recv_handler_ctx;
+	spin_unlock_irqrestore(&tunnel->lock, flags);
+
+	if (handler)
+		return handler(tunnel, context_id, data, len, ctx);
+
+	return 0;
+}
+
+/**
+ * process_incoming_quic_datagrams - Process datagrams from QUIC layer
+ * @tunnel: Tunnel to process
+ *
+ * Processes incoming QUIC datagrams and either forwards them (proxy mode)
+ * or invokes the receive handler (client mode).
+ *
+ * Returns: Number of datagrams processed, or negative errno on error.
+ */
+static int process_incoming_quic_datagrams(struct tquic_connect_udp_tunnel *tunnel)
+{
+	u8 *datagram_buf;
+	u64 context_id;
+	const u8 *payload;
+	size_t payload_len;
+	int ret;
+	int processed = 0;
+
+	datagram_buf = kmalloc(TQUIC_CONNECT_UDP_MAX_PAYLOAD + 8, GFP_KERNEL);
+	if (!datagram_buf)
+		return -ENOMEM;
+
+	while (1) {
+		/* Receive QUIC DATAGRAM non-blocking */
+		ret = tquic_recv_datagram(tunnel->conn, datagram_buf,
+					  TQUIC_CONNECT_UDP_MAX_PAYLOAD + 8,
+					  MSG_DONTWAIT);
+		if (ret <= 0)
+			break;
+
+		/* Decode HTTP Datagram */
+		ret = tquic_http_datagram_decode(datagram_buf, ret,
+						 &context_id, &payload,
+						 &payload_len);
+		if (ret < 0) {
+			spin_lock_bh(&tunnel->lock);
+			tunnel->stats.rx_errors++;
+			spin_unlock_bh(&tunnel->lock);
+			continue;
+		}
+
+		/* Update statistics */
+		spin_lock_bh(&tunnel->lock);
+		tunnel->stats.rx_datagrams++;
+		tunnel->stats.rx_bytes += payload_len;
+		reset_idle_timer(tunnel);
+		spin_unlock_bh(&tunnel->lock);
+
+		/* Invoke receive handler if registered */
+		if (tunnel->recv_handler) {
+			invoke_recv_handler(tunnel, context_id, payload,
+					    payload_len);
+		} else if (tunnel->is_server &&
+			   context_id == TQUIC_CONNECT_UDP_CONTEXT_ID) {
+			/* Proxy mode: forward to target */
+			forward_to_target(tunnel, payload, payload_len);
+		}
+
+		processed++;
+	}
+
+	kfree(datagram_buf);
+	return processed > 0 ? processed : ret;
+}
+
+/**
  * proxy_forward_work - Work function for asynchronous forwarding
  * @work: Work structure
  */
@@ -1308,6 +1403,9 @@ static void proxy_forward_work(struct work_struct *work)
 
 	if (tunnel->state != CONNECT_UDP_ESTABLISHED)
 		return;
+
+	/* Process any incoming QUIC datagrams */
+	process_incoming_quic_datagrams(tunnel);
 
 	/* Forward any pending datagrams from target */
 	while (forward_from_target(tunnel) > 0)
@@ -1718,19 +1816,27 @@ EXPORT_SYMBOL_GPL(tquic_connect_udp_unregister_context);
  * @tunnel: Tunnel
  * @handler: Handler callback
  * @context: Handler context
+ *
+ * Sets the callback function that will be invoked when datagrams are
+ * received on the tunnel. The handler is called with the tunnel, context ID,
+ * payload data, payload length, and user-provided context.
  */
 void tquic_connect_udp_set_recv_handler(struct tquic_connect_udp_tunnel *tunnel,
 					tquic_connect_udp_datagram_handler handler,
 					void *context)
 {
+	unsigned long flags;
+
 	if (!tunnel)
 		return;
 
-	/*
-	 * In a full implementation, this would set a callback to be
-	 * invoked when datagrams arrive. For now, this is a placeholder.
-	 */
-	pr_debug("connect-udp: receive handler set\n");
+	spin_lock_irqsave(&tunnel->lock, flags);
+	tunnel->recv_handler = handler;
+	tunnel->recv_handler_ctx = context;
+	spin_unlock_irqrestore(&tunnel->lock, flags);
+
+	pr_debug("connect-udp: receive handler %s\n",
+		 handler ? "registered" : "cleared");
 }
 EXPORT_SYMBOL_GPL(tquic_connect_udp_set_recv_handler);
 

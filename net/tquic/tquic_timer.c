@@ -1291,6 +1291,9 @@ EXPORT_SYMBOL_GPL(tquic_timer_can_send_paced);
 /**
  * tquic_path_validation_expired - Path validation timer callback
  * @t: Timer that expired
+ *
+ * Called when path validation times out. Retries the PATH_CHALLENGE
+ * or marks the path as failed after maximum retries.
  */
 static void tquic_path_validation_expired(struct timer_list *t)
 {
@@ -1298,8 +1301,7 @@ static void tquic_path_validation_expired(struct timer_list *t)
 	struct tquic_connection *conn;
 
 	/* Get connection from path */
-	/* Note: In real implementation, would need proper linkage */
-	conn = NULL; /* Would be path->conn or similar */
+	conn = path->conn;
 
 	if (!conn)
 		return;
