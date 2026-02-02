@@ -774,7 +774,12 @@ int __init tquic_token_init(void)
 	}
 
 	/* Set authentication tag length */
-	crypto_aead_setauthsize(tquic_token_aead, TQUIC_TOKEN_TAG_LEN);
+	if (crypto_aead_setauthsize(tquic_token_aead, TQUIC_TOKEN_TAG_LEN)) {
+		pr_err("tquic: failed to set token auth tag size\n");
+		crypto_free_aead(tquic_token_aead);
+		tquic_token_aead = NULL;
+		return -EINVAL;
+	}
 
 	pr_info("tquic: token subsystem initialized\n");
 	return 0;

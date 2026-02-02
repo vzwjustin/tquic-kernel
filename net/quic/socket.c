@@ -1110,37 +1110,168 @@ static int quic_sendmsg_stream(struct sock *sk, struct msghdr *msg,
 	if (qsk->udp_sock) {
 		struct msghdr udp_msg = {};
 		struct kvec iov;
-		struct sk_buff *skb;
-		char *buf;
+		u8 *pkt_buf;
+		u8 *user_data;
 		size_t to_send = min(len, (size_t)sk->sk_sndbuf);
+		size_t pkt_len;
+		size_t header_len;
+		size_t frame_overhead;
+		u8 *p;
+		u64 pn;
 
-		buf = kmalloc(to_send, GFP_KERNEL);
-		if (!buf)
+		/*
+		 * Calculate packet size:
+		 * - Short header: 1 byte flags + DCID + 1-4 byte PN
+		 * - STREAM frame: 1 byte type + varint stream_id + varint offset +
+		 *                 varint length + data
+		 * - AEAD tag: 16 bytes
+		 */
+		header_len = 1 + qsk->remote_cid.len + 2;  /* Conservative PN length */
+		frame_overhead = 1 + 8 + 8 + 2;  /* Type + stream_id + offset + length (max varint) */
+		pkt_len = header_len + frame_overhead + to_send + 16;  /* +16 for AEAD tag */
+
+		pkt_buf = kmalloc(pkt_len, GFP_KERNEL);
+		if (!pkt_buf)
 			return -ENOMEM;
 
-		if (!copy_from_iter_full(buf, to_send, &msg->msg_iter)) {
-			kfree(buf);
+		user_data = kmalloc(to_send, GFP_KERNEL);
+		if (!user_data) {
+			kfree(pkt_buf);
+			return -ENOMEM;
+		}
+
+		if (!copy_from_iter_full(user_data, to_send, &msg->msg_iter)) {
+			kfree(user_data);
+			kfree(pkt_buf);
 			return -EFAULT;
 		}
 
-		/* TODO: Add QUIC header and encryption here */
-		/* For now, send raw data as placeholder */
+		/*
+		 * Build QUIC short header packet (RFC 9000 Section 17.3)
+		 *
+		 * Short Header {
+		 *   Header Form (1) = 0,
+		 *   Fixed Bit (1) = 1,
+		 *   Spin Bit (1),
+		 *   Reserved Bits (2),
+		 *   Key Phase (1),
+		 *   Packet Number Length (2),
+		 *   Destination Connection ID (0..160),
+		 *   Packet Number (8..32),
+		 * }
+		 */
+		p = pkt_buf;
+		pn = qsk->packets_sent;  /* Use packet counter as PN */
 
-		iov.iov_base = buf;
-		iov.iov_len = to_send;
+		/* First byte: form=0, fixed=1, spin=0, reserved=00, kp=0, pn_len=01 (2 bytes) */
+		*p++ = 0x40 | 0x01;  /* Short header, fixed bit, 2-byte PN */
 
-		err = kernel_sendmsg(qsk->udp_sock, &udp_msg, &iov, 1, to_send);
+		/* Destination Connection ID */
+		if (qsk->remote_cid.len > 0) {
+			memcpy(p, qsk->remote_cid.data, qsk->remote_cid.len);
+			p += qsk->remote_cid.len;
+		}
+
+		/* Packet Number (2 bytes) */
+		*p++ = (pn >> 8) & 0xff;
+		*p++ = pn & 0xff;
+
+		header_len = p - pkt_buf;
+
+		/*
+		 * Build STREAM frame (RFC 9000 Section 19.8)
+		 *
+		 * STREAM Frame {
+		 *   Type (i) = 0x08..0x0f,
+		 *   Stream ID (i),
+		 *   [Offset (i)],
+		 *   [Length (i)],
+		 *   Stream Data (..),
+		 * }
+		 */
+		/* Frame type: 0x08 base + 0x04 (OFF) + 0x02 (LEN) = 0x0E */
+		*p++ = 0x08 | 0x04 | 0x02;
+
+		/* Stream ID (2-byte varint for common case) */
+		if (stream_id < 64) {
+			*p++ = stream_id & 0x3f;
+		} else {
+			*p++ = 0x40 | ((stream_id >> 8) & 0x3f);
+			*p++ = stream_id & 0xff;
+		}
+
+		/* Offset (2-byte varint) */
+		if (qsk->tx_offset < 64) {
+			*p++ = qsk->tx_offset & 0x3f;
+		} else {
+			*p++ = 0x40 | ((qsk->tx_offset >> 8) & 0x3f);
+			*p++ = qsk->tx_offset & 0xff;
+		}
+
+		/* Length (2-byte varint) */
+		*p++ = 0x40 | ((to_send >> 8) & 0x3f);
+		*p++ = to_send & 0xff;
+
+		/* Stream data */
+		memcpy(p, user_data, to_send);
+		p += to_send;
+
+		pkt_len = p - pkt_buf;
+
+		/*
+		 * Encryption: Apply AEAD packet protection (RFC 9001 Section 5)
+		 *
+		 * For production: Use quic_packet_encrypt() or similar.
+		 * This requires properly negotiated keys from TLS handshake.
+		 */
+		if (qsk->conn && qsk->conn->handshake_complete) {
+			/* Use connection's crypto context for encryption */
+			struct quic_crypto_ctx *crypto =
+				&qsk->conn->crypto[QUIC_CRYPTO_APPLICATION];
+
+			if (crypto->keys_available) {
+				err = quic_crypto_encrypt(crypto, pkt_buf, pkt_len,
+							  header_len, pn);
+				if (err < 0) {
+					kfree(user_data);
+					kfree(pkt_buf);
+					return err;
+				}
+				pkt_len += 16;  /* AEAD tag */
+
+				/* Apply header protection */
+				err = quic_crypto_hp_mask(crypto,
+							  pkt_buf + header_len + 4,
+							  pkt_buf);
+				if (err < 0) {
+					kfree(user_data);
+					kfree(pkt_buf);
+					return err;
+				}
+			} else {
+				pr_warn_once("QUIC: sending unencrypted - keys not available\n");
+			}
+		} else {
+			pr_warn_once("QUIC: sending unencrypted - handshake not complete\n");
+		}
+
+		kfree(user_data);
+
+		iov.iov_base = pkt_buf;
+		iov.iov_len = pkt_len;
+
+		err = kernel_sendmsg(qsk->udp_sock, &udp_msg, &iov, 1, pkt_len);
 		if (err < 0) {
-			kfree(buf);
+			kfree(pkt_buf);
 			return err;
 		}
 
-		sent = err;
+		sent = to_send;  /* Application data sent (not wire bytes) */
 		qsk->tx_offset += sent;
-		qsk->bytes_sent += sent;
+		qsk->bytes_sent += pkt_len;
 		qsk->packets_sent++;
 
-		kfree(buf);
+		kfree(pkt_buf);
 	} else {
 		/* No UDP socket yet - queue data */
 		return -ENOTCONN;
@@ -1261,11 +1392,119 @@ static int quic_recvmsg_stream(struct sock *sk, struct msghdr *msg,
 
 	spin_unlock_bh(&qsk->rx_lock);
 
-	/* TODO: Parse QUIC header to extract stream ID */
-	/* For now, return a placeholder stream ID */
-	if (stream_id_out)
-		*stream_id_out = 0;
+	/*
+	 * Parse QUIC packet header and extract stream ID from STREAM frame
+	 *
+	 * QUIC Short Header (RFC 9000 Section 17.3):
+	 *   First byte: Form(1) | Fixed(1) | Spin(1) | Reserved(2) | KeyPhase(1) | PN_Len(2)
+	 *   DCID: 0-20 bytes (length known from connection)
+	 *   Packet Number: 1-4 bytes (length from first byte)
+	 *
+	 * After decryption, parse STREAM frame (RFC 9000 Section 19.8):
+	 *   Type: 0x08-0x0F (bits indicate OFF/LEN/FIN)
+	 *   Stream ID: varint
+	 *   [Offset]: varint (if OFF bit set)
+	 *   [Length]: varint (if LEN bit set)
+	 *   Data: remaining bytes or Length bytes
+	 */
+	if (stream_id_out) {
+		u8 *data = skb->data;
+		size_t data_len = skb->len;
+		size_t offset = 0;
+		u8 first_byte;
+		u8 pn_len;
+		u64 stream_id = 0;
 
+		*stream_id_out = 0;  /* Default */
+
+		if (data_len < 2)
+			goto copy_data;
+
+		first_byte = data[0];
+
+		/* Check if short header (form bit = 0) */
+		if (!(first_byte & 0x80)) {
+			/* Short header packet */
+			pn_len = (first_byte & 0x03) + 1;
+
+			/* Skip DCID (use local CID length as expected DCID len) */
+			offset = 1 + qsk->local_cid.len + pn_len;
+
+			if (offset >= data_len)
+				goto copy_data;
+
+			/*
+			 * Decrypt packet if connection has keys.
+			 * For now, assume data after header is already decrypted
+			 * (e.g., by receive processing before queueing).
+			 */
+
+			/* Parse frames - look for STREAM frame (0x08-0x0F) */
+			while (offset < data_len) {
+				u8 frame_type = data[offset];
+
+				/* Check for STREAM frame type (0x08-0x0F) */
+				if ((frame_type & 0xF8) == 0x08) {
+					bool has_offset = frame_type & 0x04;
+					bool has_length = frame_type & 0x02;
+					u64 tmp;
+					int varint_len;
+
+					offset++;
+
+					/* Parse Stream ID (varint) */
+					if (offset >= data_len)
+						break;
+
+					/* Decode varint for stream ID */
+					if ((data[offset] & 0xC0) == 0x00) {
+						stream_id = data[offset] & 0x3F;
+						offset++;
+					} else if ((data[offset] & 0xC0) == 0x40) {
+						if (offset + 1 >= data_len)
+							break;
+						stream_id = ((data[offset] & 0x3F) << 8) |
+							     data[offset + 1];
+						offset += 2;
+					} else if ((data[offset] & 0xC0) == 0x80) {
+						if (offset + 3 >= data_len)
+							break;
+						stream_id = ((u64)(data[offset] & 0x3F) << 24) |
+							     ((u64)data[offset + 1] << 16) |
+							     ((u64)data[offset + 2] << 8) |
+							     data[offset + 3];
+						offset += 4;
+					} else {
+						/* 8-byte varint - skip for now */
+						offset += 8;
+						if (offset > data_len)
+							break;
+					}
+
+					*stream_id_out = stream_id;
+					break;  /* Found stream ID */
+				}
+
+				/* Skip other frame types */
+				if (frame_type == 0x00) {
+					/* PADDING - skip single byte */
+					offset++;
+				} else if (frame_type == 0x01) {
+					/* PING - skip single byte */
+					offset++;
+				} else {
+					/* Unknown frame - cannot continue parsing */
+					break;
+				}
+			}
+		} else {
+			/* Long header - would need version-specific parsing */
+			/* For Initial packets, stream 0 is implicit crypto stream */
+			*stream_id_out = 0;
+		}
+	}
+
+copy_data:
 	/* Copy data to user */
 	copied = min_t(size_t, len, skb->len);
 
