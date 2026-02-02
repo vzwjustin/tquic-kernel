@@ -1101,24 +1101,35 @@ static struct sk_buff *tquic_assemble_packet(struct tquic_connection *conn,
 
 /*
  * Select path using the connection's scheduler
+ * Caller must NOT hold conn->lock; this function acquires it.
  */
 struct tquic_path *tquic_select_path(struct tquic_connection *conn,
 				     struct sk_buff *skb)
 {
-	struct tquic_sched_ops *sched;
-	void *sched_state;
+	struct tquic_path *selected;
+
+	/*
+	 * Acquire connection lock to protect path list iteration.
+	 * The bonding path selection functions iterate conn->paths
+	 * which can change concurrently if paths are added/removed.
+	 */
+	spin_lock(&conn->lock);
 
 	/* Use bonding path selection if scheduler is set */
 	if (conn->scheduler)
-		return tquic_bond_select_path(conn, skb);
+		selected = tquic_bond_select_path(conn, skb);
+	else
+		selected = conn->active_path;
 
-	/* Fallback to active path */
-	return conn->active_path;
+	spin_unlock(&conn->lock);
+
+	return selected;
 }
 EXPORT_SYMBOL_GPL(tquic_select_path);
 
 /*
  * Select path with load balancing
+ * Caller must hold conn->lock to protect path list iteration.
  */
 static struct tquic_path *tquic_select_path_lb(struct tquic_connection *conn,
 					       struct sk_buff *skb, u32 flags)
@@ -1126,6 +1137,8 @@ static struct tquic_path *tquic_select_path_lb(struct tquic_connection *conn,
 	struct tquic_path *path, *best = NULL;
 	u64 min_inflight = ULLONG_MAX;
 	u32 best_score = 0;
+
+	lockdep_assert_held(&conn->lock);
 
 	/* Iterate through active paths */
 	list_for_each_entry(path, &conn->paths, list) {

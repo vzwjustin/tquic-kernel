@@ -18,7 +18,9 @@
 #include <crypto/skcipher.h>
 #include <crypto/ecdh.h>
 #include <crypto/curve25519.h>
+#include <crypto/akcipher.h>
 #include <net/tquic.h>
+#include "cert_verify.h"
 
 /* TLS 1.3 Version */
 #define TLS_VERSION_13			0x0304
@@ -1874,7 +1876,7 @@ int tquic_hs_process_certificate_verify(struct tquic_handshake *hs,
 	 * Verify signature against transcript hash and certificate public key.
 	 * The signature is over:
 	 * - 64 spaces (0x20)
-	 * - "TLS 1.3, server CertificateVerify"
+	 * - "TLS 1.3, server CertificateVerify" (or client variant)
 	 * - 0x00
 	 * - Transcript-Hash(CH..Certificate)
 	 */
@@ -1882,11 +1884,25 @@ int tquic_hs_process_certificate_verify(struct tquic_handshake *hs,
 		u8 content[200];
 		u8 *cp = content;
 		u8 transcript_hash[64];
+		u8 content_hash[64];
 		int hash_len;
-		struct crypto_akcipher *tfm;
-		struct akcipher_request *req;
-		struct scatterlist sg;
+		u32 content_len;
+		u32 content_hash_len;
+		struct tquic_x509_cert *cert = NULL;
+		struct crypto_akcipher *tfm = NULL;
+		struct akcipher_request *req = NULL;
+		struct crypto_shash *hash_tfm = NULL;
+		struct scatterlist sg_sig, sg_hash;
+		const char *hash_alg;
+		const char *akcipher_alg;
 		int err;
+		DECLARE_CRYPTO_WAIT(wait);
+
+		/* Verify we have a peer certificate */
+		if (!hs->peer_cert || hs->peer_cert_len == 0) {
+			pr_warn("tquic_hs: CertificateVerify without peer certificate\n");
+			return -EINVAL;
+		}
 
 		/* Build content to verify */
 		memset(cp, 0x20, 64);  /* 64 spaces */
@@ -1898,9 +1914,20 @@ int tquic_hs_process_certificate_verify(struct tquic_handshake *hs,
 		/* Get transcript hash */
 		hash_len = tquic_hs_get_transcript_hash(hs, transcript_hash,
 							sizeof(transcript_hash));
-		if (hash_len > 0) {
-			memcpy(cp, transcript_hash, hash_len);
-			cp += hash_len;
+		if (hash_len <= 0) {
+			pr_warn("tquic_hs: Failed to get transcript hash\n");
+			return -EINVAL;
+		}
+		memcpy(cp, transcript_hash, hash_len);
+		cp += hash_len;
+		content_len = cp - content;
+
+		/* Parse peer certificate to extract public key */
+		cert = tquic_x509_cert_parse(hs->peer_cert, hs->peer_cert_len,
+					     GFP_KERNEL);
+		if (!cert) {
+			pr_warn("tquic_hs: Failed to parse peer certificate\n");
+			return -EINVAL;
 		}
 
 		/*
@@ -1910,31 +1937,121 @@ int tquic_hs_process_certificate_verify(struct tquic_handshake *hs,
 		 */
 		switch (sig_alg) {
 		case 0x0804:  /* rsa_pss_rsae_sha256 */
+			hash_alg = "sha256";
+			akcipher_alg = "pkcs1pad(rsa,sha256)";
+			content_hash_len = 32;
+			break;
 		case 0x0805:  /* rsa_pss_rsae_sha384 */
+			hash_alg = "sha384";
+			akcipher_alg = "pkcs1pad(rsa,sha384)";
+			content_hash_len = 48;
+			break;
 		case 0x0806:  /* rsa_pss_rsae_sha512 */
-			/* RSA-PSS verification */
-			if (hs->peer_cert && hs->peer_cert_len > 0) {
-				pr_debug("tquic_hs: RSA-PSS signature verification\n");
-				/* Signature verification would be done here */
-				/* For now, accept if we have a certificate */
-			}
+			hash_alg = "sha512";
+			akcipher_alg = "pkcs1pad(rsa,sha512)";
+			content_hash_len = 64;
 			break;
-
 		case 0x0403:  /* ecdsa_secp256r1_sha256 */
-		case 0x0503:  /* ecdsa_secp384r1_sha384 */
-		case 0x0603:  /* ecdsa_secp521r1_sha512 */
-			/* ECDSA verification */
-			if (hs->peer_cert && hs->peer_cert_len > 0) {
-				pr_debug("tquic_hs: ECDSA signature verification\n");
-				/* Signature verification would be done here */
-			}
+			hash_alg = "sha256";
+			akcipher_alg = "ecdsa-nist-p256";
+			content_hash_len = 32;
 			break;
-
+		case 0x0503:  /* ecdsa_secp384r1_sha384 */
+			hash_alg = "sha384";
+			akcipher_alg = "ecdsa-nist-p384";
+			content_hash_len = 48;
+			break;
+		case 0x0603:  /* ecdsa_secp521r1_sha512 */
+			hash_alg = "sha512";
+			akcipher_alg = "ecdsa-nist-p521";
+			content_hash_len = 64;
+			break;
 		default:
 			pr_warn("tquic_hs: unsupported signature algorithm 0x%04x\n",
 				sig_alg);
-			break;
+			tquic_x509_cert_free(cert);
+			return -EINVAL;
 		}
+
+		/* Hash the content */
+		hash_tfm = crypto_alloc_shash(hash_alg, 0, 0);
+		if (IS_ERR(hash_tfm)) {
+			err = PTR_ERR(hash_tfm);
+			pr_warn("tquic_hs: Failed to allocate hash %s: %d\n",
+				hash_alg, err);
+			tquic_x509_cert_free(cert);
+			return err;
+		}
+
+		{
+			SHASH_DESC_ON_STACK(desc, hash_tfm);
+			desc->tfm = hash_tfm;
+
+			err = crypto_shash_digest(desc, content, content_len,
+						  content_hash);
+			shash_desc_zero(desc);
+		}
+		crypto_free_shash(hash_tfm);
+
+		if (err) {
+			pr_warn("tquic_hs: Failed to hash content: %d\n", err);
+			tquic_x509_cert_free(cert);
+			return err;
+		}
+
+		/* Allocate asymmetric cipher for signature verification */
+		tfm = crypto_alloc_akcipher(akcipher_alg, 0, 0);
+		if (IS_ERR(tfm)) {
+			err = PTR_ERR(tfm);
+			pr_warn("tquic_hs: Failed to allocate akcipher %s: %d\n",
+				akcipher_alg, err);
+			tquic_x509_cert_free(cert);
+			return err;
+		}
+
+		/* Set public key from peer certificate */
+		err = crypto_akcipher_set_pub_key(tfm, cert->pubkey.key_data,
+						  cert->pubkey.key_len);
+		if (err) {
+			pr_warn("tquic_hs: Failed to set public key: %d\n", err);
+			goto out_free;
+		}
+
+		/* Allocate request */
+		req = akcipher_request_alloc(tfm, GFP_KERNEL);
+		if (!req) {
+			err = -ENOMEM;
+			pr_warn("tquic_hs: Failed to allocate akcipher request\n");
+			goto out_free;
+		}
+
+		/* Set up scatter-gather lists */
+		sg_init_one(&sg_sig, p, sig_len);  /* p points to signature */
+		sg_init_one(&sg_hash, content_hash, content_hash_len);
+
+		akcipher_request_set_crypt(req, &sg_sig, &sg_hash,
+					   sig_len, content_hash_len);
+		akcipher_request_set_callback(req, CRYPTO_TFM_REQ_MAY_BACKLOG,
+					      crypto_req_done, &wait);
+
+		/* Perform signature verification */
+		err = crypto_wait_req(crypto_akcipher_verify(req), &wait);
+		if (err) {
+			pr_warn("tquic_hs: CertificateVerify signature verification FAILED: %d\n",
+				err);
+			akcipher_request_free(req);
+			goto out_free;
+		}
+
+		pr_debug("tquic_hs: CertificateVerify signature verified successfully\n");
+
+		akcipher_request_free(req);
+out_free:
+		crypto_free_akcipher(tfm);
+		tquic_x509_cert_free(cert);
+
+		if (err)
+			return err;
 	}
 
 	pr_debug("tquic_hs: CertificateVerify sig_alg=0x%04x, sig_len=%u\n",
