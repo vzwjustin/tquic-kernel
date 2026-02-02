@@ -70,20 +70,31 @@ __weak u8 tquic_tunnel_get_traffic_class(struct tquic_tunnel *tunnel)
 }
 
 /*
- * Stub implementations for pipe functions in out-of-tree builds.
- * alloc_pipe_info() and free_pipe_info() are not exported symbols.
- * For full splice support, these would need in-tree kernel patches.
+ * Wrapper functions for pipe allocation in out-of-tree builds.
+ * alloc_pipe_info() and free_pipe_info() are declared in pipe_fs_i.h
+ * but not exported for modules. Use wrapper functions that return NULL
+ * for out-of-tree builds, effectively disabling splice-based forwarding.
  */
 #ifdef TQUIC_OUT_OF_TREE
-static inline struct pipe_inode_info *alloc_pipe_info(void)
+static inline struct pipe_inode_info *tquic_alloc_pipe(void)
 {
-	/* Cannot use pipe splice in out-of-tree module */
+	/* Cannot use pipe splice in out-of-tree module - symbol not exported */
 	return NULL;
 }
 
-static inline void free_pipe_info(struct pipe_inode_info *pipe)
+static inline void tquic_free_pipe(struct pipe_inode_info *pipe)
 {
 	/* No-op for out-of-tree */
+}
+#else
+static inline struct pipe_inode_info *tquic_alloc_pipe(void)
+{
+	return alloc_pipe_info();
+}
+
+static inline void tquic_free_pipe(struct pipe_inode_info *pipe)
+{
+	free_pipe_info(pipe);
 }
 #endif
 
@@ -172,9 +183,9 @@ static struct tquic_splice_state *tquic_splice_state_alloc(void)
 
 	/*
 	 * Allocate pipe for splice buffer
-	 * Note: alloc_pipe_info() is internal, we use create_pipe_files() pattern
+	 * Note: Uses wrapper for out-of-tree compatibility
 	 */
-	state->pipe = alloc_pipe_info();
+	state->pipe = tquic_alloc_pipe();
 	if (!state->pipe) {
 		kfree(state);
 		return NULL;
@@ -193,7 +204,7 @@ static void tquic_splice_state_free(struct tquic_splice_state *state)
 		return;
 
 	if (state->pipe)
-		free_pipe_info(state->pipe);
+		tquic_free_pipe(state->pipe);
 
 	kfree(state);
 }
@@ -223,7 +234,7 @@ ssize_t tquic_forward_splice(struct tquic_tunnel *tunnel, int direction)
 	 * Create temporary pipe for splice buffer
 	 * In production, this would be cached per-tunnel
 	 */
-	pipe = alloc_pipe_info();
+	pipe = tquic_alloc_pipe();
 	if (!pipe)
 		return -ENOMEM;
 
@@ -265,7 +276,7 @@ ssize_t tquic_forward_splice(struct tquic_tunnel *tunnel, int direction)
 
 	total = spliced;
 
-	free_pipe_info(pipe);
+	tquic_free_pipe(pipe);
 
 	return total > 0 ? total : spliced;
 }
