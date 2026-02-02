@@ -1867,11 +1867,14 @@ static int tquic_mgf1(const char *hash_alg, const u8 *seed, u32 seed_len,
 		counter_be[2] = (counter >> 8) & 0xff;
 		counter_be[3] = counter & 0xff;
 
-		/* Hash(seed || counter) */
+		/* Hash(seed || counter) per RFC 8017 B.2.1 */
 		err = crypto_shash_init(desc);
 		if (err)
 			goto out;
 		err = crypto_shash_update(desc, seed, seed_len);
+		if (err)
+			goto out;
+		err = crypto_shash_update(desc, counter_be, 4);
 		if (err)
 			goto out;
 		err = crypto_shash_final(desc, hash_out);
@@ -1959,9 +1962,15 @@ static int tquic_emsa_pss_verify(const char *hash_alg, u32 hash_len,
 	for (i = 0; i < db_len; i++)
 		db[i] = em[i] ^ db_mask[i];
 
-	/* Step 10: Set leftmost 8*emLen - emBits bits to zero */
-	/* For RSA keys, emBits = key_bits - 1, so we clear the top bit */
-	db[0] &= 0x7f;
+	/* Step 10: Check leftmost 8*emLen - emBits bits are zero.
+	 * For RSA keys, emBits = 8*emLen - 1, so we check the top bit.
+	 * This MUST be a check, not a modification - reject invalid signatures.
+	 */
+	if (db[0] & 0x80) {
+		pr_debug("tquic_pss: Invalid DB leading bit (must be 0)\n");
+		err = -EKEYREJECTED;
+		goto out;
+	}
 
 	/* Step 11: Check DB = PS || 0x01 || salt
 	 * PS is (emLen - hLen - sLen - 2) zero bytes
