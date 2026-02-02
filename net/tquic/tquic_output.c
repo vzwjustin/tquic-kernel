@@ -983,7 +983,7 @@ static struct sk_buff *tquic_assemble_packet(struct tquic_connection *conn,
 	/* Allocate buffers */
 	header_buf = kmalloc(128, GFP_ATOMIC);
 	payload_buf = kmalloc(path->mtu, GFP_ATOMIC);
-	if (!header_buf || !payload_buf) {
+	if (unlikely(!header_buf || !payload_buf)) {
 		kfree(header_buf);
 		kfree(payload_buf);
 		return NULL;
@@ -1760,7 +1760,7 @@ int tquic_xmit(struct tquic_connection *conn, struct tquic_stream *stream,
 
 		/* Create pending frame */
 		frame = kzalloc(sizeof(*frame), GFP_ATOMIC);
-		if (!frame) {
+		if (unlikely(!frame)) {
 			ret = -ENOMEM;
 			break;
 		}
@@ -2419,10 +2419,10 @@ int tquic_send_datagram(struct tquic_connection *conn,
 	/* Send packet */
 	ret = tquic_output_packet(conn, path, skb);
 	if (ret >= 0) {
-		/* Update statistics */
-		spin_lock(&conn->datagram.lock);
+		/* Update statistics (use _bh for softirq safety) */
+		spin_lock_bh(&conn->datagram.lock);
 		conn->datagram.datagrams_sent++;
-		spin_unlock(&conn->datagram.lock);
+		spin_unlock_bh(&conn->datagram.lock);
 
 		/* Update MIB counters */
 		if (conn->sk) {

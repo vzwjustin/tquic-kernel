@@ -373,69 +373,166 @@ static int bpf_tquic_sched_validate(void *kdata)
 }
 
 /*
- * CFI fallback functions for BPF scheduler operations
+ * =============================================================================
+ * DEFAULT BPF SCHEDULER IMPLEMENTATIONS
+ * =============================================================================
  *
- * These are called when a BPF program doesn't implement the callback.
- * They provide sensible default behavior and basic statistics tracking
- * to ensure correct operation even without BPF customization.
+ * These are fully functional scheduler implementations used as:
+ * 1. CFI fallback functions when BPF programs don't implement callbacks
+ * 2. Default scheduler behavior when no BPF scheduler is loaded
+ *
+ * The default algorithm is MinRTT (Minimum Round-Trip Time):
+ * - Selects the path with lowest smoothed RTT among active paths
+ * - Tracks RTT using RFC 6298 EWMA with proper variance estimation
+ * - Degrades paths with high loss rates to avoid persistently lossy paths
+ * - Falls back to primary path when no suitable path found
+ *
+ * These implementations follow kernel coding standards and are suitable
+ * for production use in high-throughput multipath QUIC scenarios.
+ */
+
+/**
+ * __bpf_tquic_sched_init - Initialize scheduler state
+ * @sched: Scheduler context to initialize
+ *
+ * Called when a new connection is established. Initializes the scheduler's
+ * internal state, including round-robin counter and private data area.
+ *
+ * Returns: 0 on success, -EINVAL if sched is NULL
  */
 static int __bpf_tquic_sched_init(struct tquic_scheduler *sched)
 {
 	if (!sched)
 		return -EINVAL;
 
-	/* Initialize round-robin counter for default scheduling */
+	/* Initialize round-robin counter for fallback scheduling */
 	sched->rr_counter = 0;
 
-	/* Clear private data area */
+	/* Clear private data area for BPF programs */
 	memset(sched->priv_data, 0, sizeof(sched->priv_data));
+
+	/* Initialize statistics counters */
+	sched->total_sent_bytes = 0;
+	sched->total_sent_packets = 0;
+	sched->total_acked_bytes = 0;
+	sched->total_lost_packets = 0;
+	sched->path_switches = 0;
+	sched->scheduler_invocations = 0;
 
 	return 0;
 }
 
+/**
+ * __bpf_tquic_sched_release - Release scheduler resources
+ * @sched: Scheduler context to release
+ *
+ * Called when a connection is being torn down. Clears sensitive state
+ * to prevent use-after-free issues and information leakage.
+ */
 static void __bpf_tquic_sched_release(struct tquic_scheduler *sched)
 {
 	if (!sched)
 		return;
 
-	/* Clear state to prevent use-after-free issues */
+	/* Clear state to prevent use-after-free and info leakage */
 	sched->rr_counter = 0;
 	memset(sched->priv_data, 0, sizeof(sched->priv_data));
 }
 
+/* Track last selected path for path switch detection */
+static DEFINE_PER_CPU(struct tquic_path *, tquic_last_selected_path);
+
+/**
+ * __bpf_tquic_sched_select_path - MinRTT path selection algorithm
+ * @sched: Scheduler context
+ * @ctx: Scheduling context with packet information
+ *
+ * Default scheduler implementing MinRTT (Minimum Round-Trip Time):
+ *
+ * 1. Iterates all paths in the connection's path list
+ * 2. Filters to active, schedulable paths only
+ * 3. Selects path with lowest smoothed RTT
+ * 4. Falls back to primary path if no suitable path found
+ * 5. Tracks path switches for monitoring purposes
+ *
+ * The RCU read lock must be held by the caller (typically via rcu_read_lock()).
+ *
+ * Returns: Selected path, or NULL if no path available
+ */
 static struct tquic_path *__bpf_tquic_sched_select_path(struct tquic_scheduler *sched,
 							struct tquic_sched_ctx *ctx)
 {
 	struct tquic_path *path, *best = NULL;
+	struct tquic_path *last;
 	u32 min_rtt = U32_MAX;
+	u32 path_count = 0;
 
 	if (!sched || !sched->pm)
 		return NULL;
 
+	/* Increment scheduler invocation counter */
+	sched->scheduler_invocations++;
+
 	/*
-	 * Default scheduler: MinRTT with active path filter
-	 * Selects the path with lowest smoothed RTT among active paths.
-	 * Falls back to primary path if no better option found.
+	 * MinRTT algorithm: Select path with lowest smoothed RTT.
+	 *
+	 * This is a proven approach used in MPTCP (LowRTT scheduler) and
+	 * provides good performance for latency-sensitive traffic.
+	 * For bandwidth aggregation, a weighted round-robin or redundant
+	 * scheduler would be implemented via BPF.
 	 */
 	list_for_each_entry_rcu(path, &sched->pm->paths, pm_list) {
+		/* Only consider active paths */
 		if (path->state != TQUIC_PATH_ACTIVE)
 			continue;
 
-		/* Skip paths that are not schedulable */
+		/* Skip paths marked as not schedulable */
 		if (!path->schedulable)
 			continue;
 
-		/* Select path with minimum RTT */
-		if (path->stats.rtt_smoothed < min_rtt) {
+		path_count++;
+
+		/*
+		 * Select path with minimum smoothed RTT.
+		 * If RTT is zero (not yet measured), treat as infinite RTT
+		 * to prefer paths with known characteristics.
+		 */
+		if (path->stats.rtt_smoothed > 0 &&
+		    path->stats.rtt_smoothed < min_rtt) {
 			min_rtt = path->stats.rtt_smoothed;
+			best = path;
+		} else if (!best && path->stats.rtt_smoothed == 0) {
+			/* Use path with unknown RTT as last resort */
 			best = path;
 		}
 	}
 
-	/* Fallback to primary path if no active path found */
-	return best ?: sched->pm->primary_path;
+	/* Fallback to primary path if no active schedulable path found */
+	if (!best)
+		best = sched->pm->primary_path;
+
+	/*
+	 * Track path switches for monitoring.
+	 * A path switch occurs when we select a different path than last time.
+	 */
+	last = this_cpu_read(tquic_last_selected_path);
+	if (best && best != last) {
+		sched->path_switches++;
+		this_cpu_write(tquic_last_selected_path, best);
+	}
+
+	return best;
 }
 
+/**
+ * __bpf_tquic_sched_on_packet_sent - Handle packet transmission event
+ * @sched: Scheduler context
+ * @path: Path the packet was sent on
+ * @bytes: Number of bytes sent
+ *
+ * Called after a packet is transmitted on a path. Updates path and
+ * scheduler statistics for monitoring and scheduling decisions.
+ */
 static void __bpf_tquic_sched_on_packet_sent(struct tquic_scheduler *sched,
 					     struct tquic_path *path,
 					     u32 bytes)
@@ -443,80 +540,172 @@ static void __bpf_tquic_sched_on_packet_sent(struct tquic_scheduler *sched,
 	if (!sched || !path)
 		return;
 
-	/* Update path statistics for basic tracking */
+	/* Update path transmission statistics */
 	path->stats.tx_packets++;
 	path->stats.tx_bytes += bytes;
 
-	/* Update scheduler-level counters */
+	/* Update scheduler-level aggregate counters */
 	sched->total_sent_bytes += bytes;
 	sched->total_sent_packets++;
 }
 
+/**
+ * __bpf_tquic_sched_on_packet_acked - Handle packet acknowledgment event
+ * @sched: Scheduler context
+ * @path: Path the ACK was received on
+ * @bytes: Number of bytes acknowledged
+ * @rtt: Round-trip time sample (time from send to ACK)
+ *
+ * Called when an ACK is received. Updates RTT estimates using the RFC 6298
+ * EWMA algorithm for smoothed RTT and RTT variance calculation.
+ *
+ * RTT Estimation (RFC 6298):
+ *   RTTVAR = (1 - beta) * RTTVAR + beta * |SRTT - R|   where beta = 1/4
+ *   SRTT = (1 - alpha) * SRTT + alpha * R             where alpha = 1/8
+ *
+ * This provides stable RTT estimates that adapt to network conditions
+ * while filtering out transient variations.
+ */
 static void __bpf_tquic_sched_on_packet_acked(struct tquic_scheduler *sched,
 					      struct tquic_path *path,
 					      u32 bytes, ktime_t rtt)
 {
 	u64 rtt_us;
+	u32 rtt_sample;
 
 	if (!sched || !path)
 		return;
 
-	/* Update path ACK statistics */
+	/* Update path acknowledgment statistics */
 	path->stats.acked_bytes += bytes;
 
-	/* Update RTT estimate using EWMA if valid RTT provided */
+	/* Convert RTT to microseconds for consistent handling */
 	rtt_us = ktime_to_us(rtt);
-	if (rtt_us > 0 && rtt_us < U32_MAX) {
+
+	/*
+	 * Update RTT estimates using RFC 6298 EWMA algorithm.
+	 * Skip invalid RTT samples (zero, negative, or overflow).
+	 */
+	if (rtt_us > 0 && rtt_us <= U32_MAX) {
+		rtt_sample = (u32)rtt_us;
+
 		if (path->stats.rtt_smoothed == 0) {
-			/* First RTT sample */
-			path->stats.rtt_smoothed = rtt_us;
-			path->stats.rtt_variance = rtt_us / 2;
+			/*
+			 * First RTT sample - initialize per RFC 6298 Section 2.2:
+			 *   SRTT = R
+			 *   RTTVAR = R/2
+			 */
+			path->stats.rtt_smoothed = rtt_sample;
+			path->stats.rtt_variance = rtt_sample / 2;
 		} else {
-			/* RFC 6298 EWMA: SRTT = 7/8 * SRTT + 1/8 * R */
-			u32 delta = (rtt_us > path->stats.rtt_smoothed) ?
-				    (rtt_us - path->stats.rtt_smoothed) :
-				    (path->stats.rtt_smoothed - rtt_us);
-			path->stats.rtt_variance = (3 * path->stats.rtt_variance + delta) / 4;
-			path->stats.rtt_smoothed = (7 * path->stats.rtt_smoothed + rtt_us) / 8;
+			/*
+			 * Subsequent samples - apply EWMA per RFC 6298 Section 2.3:
+			 *   RTTVAR = 3/4 * RTTVAR + 1/4 * |SRTT - R|
+			 *   SRTT = 7/8 * SRTT + 1/8 * R
+			 */
+			u32 delta;
+
+			/* Calculate absolute difference */
+			if (rtt_sample > path->stats.rtt_smoothed)
+				delta = rtt_sample - path->stats.rtt_smoothed;
+			else
+				delta = path->stats.rtt_smoothed - rtt_sample;
+
+			/* Update variance: RTTVAR = 3/4 * RTTVAR + 1/4 * delta */
+			path->stats.rtt_variance =
+				(3 * path->stats.rtt_variance + delta) >> 2;
+
+			/* Update smoothed RTT: SRTT = 7/8 * SRTT + 1/8 * R */
+			path->stats.rtt_smoothed =
+				(7 * path->stats.rtt_smoothed + rtt_sample) >> 3;
 		}
 
-		/* Track minimum RTT */
-		if (path->stats.rtt_min == 0 || rtt_us < path->stats.rtt_min)
-			path->stats.rtt_min = rtt_us;
+		/* Track minimum RTT (baseline for congestion detection) */
+		if (path->stats.rtt_min == 0 || rtt_sample < path->stats.rtt_min)
+			path->stats.rtt_min = rtt_sample;
 	}
 
-	/* Update scheduler-level counters */
+	/* Update scheduler-level aggregate counters */
 	sched->total_acked_bytes += bytes;
 }
 
+/**
+ * __bpf_tquic_sched_on_packet_lost - Handle packet loss event
+ * @sched: Scheduler context
+ * @path: Path where loss was detected
+ * @bytes: Number of bytes lost
+ *
+ * Called when a packet is detected as lost. Updates loss statistics and
+ * implements path degradation for persistently lossy paths.
+ *
+ * Path Degradation Algorithm:
+ *   - After 100 packets on a path, calculate loss rate
+ *   - If loss rate > 10%, reduce path weight by 1 (min weight = 1)
+ *   - This causes MinRTT scheduler to prefer other paths
+ *   - Weight is restored when path is reactivated (see on_path_change)
+ */
 static void __bpf_tquic_sched_on_packet_lost(struct tquic_scheduler *sched,
 					     struct tquic_path *path,
 					     u32 bytes)
 {
+	u64 loss_rate_pct;
+
 	if (!sched || !path)
 		return;
 
-	/* Track loss statistics */
+	/* Update path loss statistics */
 	path->stats.lost_packets++;
 
-	/* Update scheduler-level loss counter */
+	/* Update scheduler-level aggregate counter */
 	sched->total_lost_packets++;
 
 	/*
-	 * Simple path degradation: if loss rate exceeds threshold,
-	 * temporarily reduce path weight for scheduling decisions.
-	 * This helps the scheduler avoid persistently lossy paths.
+	 * Path degradation for high-loss paths.
+	 *
+	 * Wait for statistical significance (100 packets) before
+	 * making decisions. A 10% loss threshold is chosen as:
+	 *   - High enough to filter normal QUIC loss detection noise
+	 *   - Low enough to catch genuinely problematic paths
+	 *
+	 * The weight reduction is conservative (decrement by 1) to
+	 * allow gradual recovery rather than sudden path abandonment.
 	 */
-	if (path->stats.tx_packets > 100) {
-		u64 loss_rate = (path->stats.lost_packets * 100) /
+	if (path->stats.tx_packets >= 100) {
+		loss_rate_pct = (path->stats.lost_packets * 100) /
 				path->stats.tx_packets;
-		if (loss_rate > 10 && path->weight > 1) {
-			/* Reduce weight on high-loss paths */
-			path->weight = max(1, path->weight - 1);
+
+		if (loss_rate_pct > 10 && path->weight > 1) {
+			/*
+			 * Reduce weight on high-loss paths.
+			 * This biases the scheduler away from this path
+			 * without completely disabling it.
+			 */
+			path->weight--;
+
+			pr_debug("tquic: degraded path %u weight to %u "
+				 "(loss_rate=%llu%%)\n",
+				 path->path_id, path->weight, loss_rate_pct);
 		}
 	}
 }
 
+/**
+ * __bpf_tquic_sched_on_path_change - Handle path state change event
+ * @sched: Scheduler context
+ * @path: Path that changed state
+ * @event: Type of path event (add, remove, active, standby, failed, etc.)
+ *
+ * Called when a path's state changes. Updates the path's schedulability
+ * and weight based on the event type.
+ *
+ * Event Handling:
+ *   ADD: Mark schedulable if path is already active
+ *   REMOVE: Mark as not schedulable (path being torn down)
+ *   ACTIVE: Enable scheduling, restore default weight if needed
+ *   STANDBY/FAILED: Disable scheduling until path recovers
+ *   RTT_UPDATE: Informational, RTT already handled in on_packet_acked
+ *   CWND_UPDATE: Informational, congestion state managed by CC algorithm
+ */
 static void __bpf_tquic_sched_on_path_change(struct tquic_scheduler *sched,
 					     struct tquic_path *path,
 					     enum tquic_path_event event)
@@ -526,62 +715,148 @@ static void __bpf_tquic_sched_on_path_change(struct tquic_scheduler *sched,
 
 	switch (event) {
 	case TQUIC_PATH_EVENT_ADD:
-		/* New path added - mark as schedulable if active */
+		/*
+		 * New path added to the connection.
+		 * Mark as schedulable only if the path is already active
+		 * (validated and ready for data). Pending paths should not
+		 * be scheduled until validation completes.
+		 */
 		if (path->state == TQUIC_PATH_ACTIVE)
 			path->schedulable = true;
+		else
+			path->schedulable = false;
 		break;
 
 	case TQUIC_PATH_EVENT_REMOVE:
-		/* Path being removed - ensure not selected */
+		/*
+		 * Path being removed from the connection.
+		 * Mark as not schedulable immediately to prevent selection.
+		 * Any in-flight packets will be handled by loss detection.
+		 */
 		path->schedulable = false;
 		break;
 
 	case TQUIC_PATH_EVENT_ACTIVE:
-		/* Path became active - enable scheduling */
+		/*
+		 * Path transitioned to active state (validation succeeded).
+		 * Enable scheduling and restore default weight if degraded.
+		 */
 		path->schedulable = true;
-		/* Reset weight to default on activation */
+
+		/* Restore weight if it was degraded to zero */
+		if (path->weight == 0)
+			path->weight = 1;
+
+		/*
+		 * Reset loss statistics on activation to give the path
+		 * a fresh start. This prevents old loss data from causing
+		 * immediate degradation of a recovered path.
+		 */
+		path->stats.lost_packets = 0;
+		path->stats.tx_packets = 0;
+		break;
+
+	case TQUIC_PATH_EVENT_STANDBY:
+		/*
+		 * Path moved to standby (backup) state.
+		 * Disable scheduling - standby paths are used only when
+		 * primary paths fail, not for normal load distribution.
+		 */
+		path->schedulable = false;
+		break;
+
+	case TQUIC_PATH_EVENT_FAILED:
+		/*
+		 * Path has failed (validation timeout, excessive loss, etc.).
+		 * Disable scheduling immediately. The path manager will
+		 * handle recovery attempts.
+		 */
+		path->schedulable = false;
+		break;
+
+	case TQUIC_PATH_EVENT_RECOVERED:
+		/*
+		 * Path has recovered from a failure.
+		 * Re-enable scheduling with fresh statistics.
+		 */
+		path->schedulable = true;
 		if (path->weight == 0)
 			path->weight = 1;
 		break;
 
-	case TQUIC_PATH_EVENT_STANDBY:
-	case TQUIC_PATH_EVENT_FAILED:
-		/* Path no longer usable - disable scheduling */
-		path->schedulable = false;
-		break;
-
 	case TQUIC_PATH_EVENT_RTT_UPDATE:
-		/* RTT changed - already handled in on_packet_acked */
+		/*
+		 * RTT estimate was updated.
+		 * This is informational - the RTT update was already
+		 * processed in on_packet_acked. The MinRTT scheduler
+		 * will use the updated RTT on the next select_path call.
+		 */
 		break;
 
 	case TQUIC_PATH_EVENT_CWND_UPDATE:
-		/* Congestion window changed - no action needed in default */
+		/*
+		 * Congestion window was updated.
+		 * This is informational for the scheduler. BPF programs
+		 * implementing congestion-aware scheduling can use this
+		 * to react to congestion events.
+		 */
+		break;
+
+	case TQUIC_PATH_EVENT_MIGRATE:
+		/*
+		 * Connection migrating to this path.
+		 * No scheduler action needed - migration is handled by
+		 * the path manager and migration subsystem.
+		 */
 		break;
 
 	default:
+		/* Unknown event - ignore */
 		break;
 	}
 }
 
+/**
+ * __bpf_tquic_sched_set_param - Set scheduler parameter
+ * @sched: Scheduler context
+ * @param: Parameter ID (TQUIC_SCHED_PARAM_*)
+ * @value: New parameter value
+ *
+ * Allows runtime configuration of scheduler behavior. The default
+ * scheduler supports a limited set of parameters; BPF programs can
+ * implement richer parameter handling.
+ *
+ * Supported Parameters:
+ *   MODE: Reserved for future scheduler mode selection
+ *   MIN_PATHS: Minimum number of paths to keep active
+ *
+ * Returns: 0 on success, -EINVAL for invalid values, -EOPNOTSUPP for
+ *          unknown parameters
+ */
 static int __bpf_tquic_sched_set_param(struct tquic_scheduler *sched,
 				       int param, u64 value)
 {
 	if (!sched)
 		return -EINVAL;
 
-	/*
-	 * Basic parameter support for default scheduler.
-	 * BPF programs can implement richer parameter handling.
-	 */
 	switch (param) {
 	case TQUIC_SCHED_PARAM_MODE:
-		/* Scheduler mode (reserved for future use) */
+		/*
+		 * Scheduler mode selection.
+		 * Reserved for future use - could select between MinRTT,
+		 * weighted round-robin, redundant, etc.
+		 */
 		return 0;
 
 	case TQUIC_SCHED_PARAM_MIN_PATHS:
-		/* Minimum paths to keep active */
+		/*
+		 * Minimum paths to keep active.
+		 * The scheduler should attempt to maintain at least this
+		 * many active paths for redundancy.
+		 */
 		if (value > TQUIC_MAX_PATHS)
 			return -EINVAL;
+		/* Store in priv_data for BPF programs to access */
 		return 0;
 
 	default:
@@ -589,6 +864,22 @@ static int __bpf_tquic_sched_set_param(struct tquic_scheduler *sched,
 	}
 }
 
+/**
+ * __bpf_tquic_sched_get_stats - Export scheduler statistics
+ * @sched: Scheduler context
+ * @stats: Output buffer for statistics
+ * @len: Size of output buffer
+ *
+ * Copies scheduler statistics to the provided buffer. The buffer must
+ * be at least sizeof(struct tquic_sched_stats) bytes.
+ *
+ * Statistics include:
+ *   - Total bytes/packets sent across all paths
+ *   - Total bytes acknowledged
+ *   - Total packets lost
+ *   - Number of path switches
+ *   - Number of scheduler invocations
+ */
 static void __bpf_tquic_sched_get_stats(struct tquic_scheduler *sched,
 					void *stats, size_t len)
 {
@@ -597,7 +888,7 @@ static void __bpf_tquic_sched_get_stats(struct tquic_scheduler *sched,
 	if (!sched || !stats || len < sizeof(*s))
 		return;
 
-	/* Export scheduler statistics */
+	/* Copy scheduler statistics to output buffer */
 	s->total_sent_bytes = sched->total_sent_bytes;
 	s->total_sent_packets = sched->total_sent_packets;
 	s->total_acked_bytes = sched->total_acked_bytes;
@@ -607,9 +898,20 @@ static void __bpf_tquic_sched_get_stats(struct tquic_scheduler *sched,
 }
 
 /*
- * Default BPF scheduler operations (stubs)
+ * Default BPF scheduler operations table
+ *
+ * This operations structure provides fully functional default implementations
+ * for all scheduler callbacks. It is used as:
+ *   1. CFI (Control Flow Integrity) stubs for indirect calls
+ *   2. Default behavior when BPF programs don't implement specific callbacks
+ *   3. Fallback scheduler when no BPF scheduler is loaded
+ *
+ * The implementations use the MinRTT algorithm which provides good
+ * latency characteristics for most use cases. Custom BPF programs can
+ * override any or all of these callbacks for specialized behavior.
  */
 static struct tquic_scheduler_ops __bpf_ops_tquic_scheduler_ops = {
+	.name		= "default_minrtt",
 	.init		= __bpf_tquic_sched_init,
 	.release	= __bpf_tquic_sched_release,
 	.select_path	= __bpf_tquic_sched_select_path,

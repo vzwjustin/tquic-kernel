@@ -27,6 +27,7 @@
 #include <net/tquic.h>
 #include <net/tquic_pm.h>
 #include "protocol.h"
+#include "tquic_ratelimit.h"
 
 /* Module info */
 MODULE_AUTHOR("Linux Foundation");
@@ -654,12 +655,19 @@ int __init tquic_init(void)
 	if (err)
 		goto err_offload;
 
+	/* Initialize rate limiting for DDoS protection */
+	err = tquic_ratelimit_module_init();
+	if (err)
+		goto err_ratelimit;
+
 	pr_info("tquic: TQUIC WAN bonding subsystem initialized\n");
 	pr_info("tquic: Default bond mode: %d, scheduler: %s, congestion: %s\n",
 		tquic_default_bond_mode, tquic_default_scheduler, tquic_default_cong);
 
 	return 0;
 
+err_ratelimit:
+	tquic_offload_exit();
 err_offload:
 	tquic_diag_exit();
 err_diag:
@@ -682,6 +690,7 @@ void __exit tquic_exit(void)
 {
 	pr_info("tquic: shutting down TQUIC WAN bonding subsystem\n");
 
+	tquic_ratelimit_module_exit();
 	tquic_offload_exit();
 	tquic_diag_exit();
 	/* Proc interface is cleaned up per-netns via pernet_operations */

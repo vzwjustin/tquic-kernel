@@ -171,6 +171,23 @@ struct qpack_blocked_stream {
 };
 
 /**
+ * struct qpack_stream_state - Per-stream QPACK encoder state
+ * @stream_id: QUIC stream ID
+ * @required_insert_count: Insert count when headers were encoded
+ * @list: Linked list node for encoder's stream tracking
+ *
+ * Tracks the required insert count for each stream that has pending
+ * header blocks. When Section Acknowledgment is received, we look up
+ * this value to update the known_received_count, allowing the encoder
+ * to evict old entries from the dynamic table.
+ */
+struct qpack_stream_state {
+	u64 stream_id;
+	u64 required_insert_count;
+	struct list_head list;
+};
+
+/**
  * struct qpack_encoder - QPACK encoder state
  * @conn: Parent connection
  * @encoder_stream: Encoder stream for sending instructions
@@ -179,6 +196,7 @@ struct qpack_blocked_stream {
  * @blocked_streams: List of blocked streams
  * @num_blocked: Number of currently blocked streams
  * @known_received_count: Known received insert count from decoder
+ * @stream_states: Per-stream insert count tracking for Section Acknowledgment
  * @use_huffman: Whether to use Huffman coding
  * @lock: Spinlock for encoder state
  */
@@ -190,6 +208,7 @@ struct qpack_encoder {
 	struct list_head blocked_streams;
 	u32 num_blocked;
 	u64 known_received_count;
+	struct list_head stream_states;  /* Per-stream insert count tracking */
 	bool use_huffman;
 	spinlock_t lock;
 };

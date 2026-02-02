@@ -1,18 +1,32 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
- * TQUIC: ACK Frequency Extension (draft-ietf-quic-ack-frequency)
+ * TQUIC: ACK Frequency Extension (RFC 9002 Appendix A.7)
  *
  * Copyright (c) 2026 Linux Foundation
  *
- * Implements ACK_FREQUENCY and IMMEDIATE_ACK frames to allow sender
- * control over how frequently the peer generates acknowledgments.
+ * Connection-level wrappers for ACK Frequency extension.
+ *
+ * This header provides the connection-level API for ACK frequency
+ * negotiation and management. The core implementation is in
+ * core/ack_frequency.c with the detailed state machine.
  *
  * Frame Types:
- *   - ACK_FREQUENCY (0xaf): Negotiate delayed ACK behavior
- *   - IMMEDIATE_ACK (0xac): Request immediate ACK from peer
+ *   - ACK_FREQUENCY (0xaf): Request peer adjust ACK behavior
+ *   - IMMEDIATE_ACK (0x1f): Request immediate ACK from peer
  *
  * Transport Parameter:
- *   - min_ack_delay (0x0e): Minimum ACK delay in microseconds
+ *   - min_ack_delay (0xff04de1a): Minimum ACK delay in microseconds
+ *
+ * Features:
+ *   - Full negotiation state machine
+ *   - Dynamic ACK frequency adjustment based on:
+ *     - Congestion control state
+ *     - RTT characteristics
+ *     - Bandwidth estimates
+ *     - Packet reordering
+ *     - Application hints
+ *     - ECN signals
+ *   - Congestion control integration
  */
 
 #ifndef _TQUIC_ACK_FREQUENCY_H
@@ -22,135 +36,103 @@
 #include <linux/spinlock.h>
 #include <net/tquic.h>
 
-/* Frame type values per draft-ietf-quic-ack-frequency */
-#define TQUIC_FRAME_ACK_FREQUENCY	0xaf
-#define TQUIC_FRAME_IMMEDIATE_ACK	0xac
-
-/* Transport parameter ID for min_ack_delay (draft-ietf-quic-ack-frequency) */
-#define TQUIC_TP_MIN_ACK_DELAY		0xff04de1aULL
-
-/* Default values */
-#define TQUIC_DEFAULT_ACK_ELICITING_THRESHOLD	2
-#define TQUIC_DEFAULT_MAX_ACK_DELAY_US		25000	/* 25ms in microseconds */
-#define TQUIC_DEFAULT_REORDER_THRESHOLD		0	/* No reordering tolerance */
-#define TQUIC_MIN_ACK_DELAY_MIN_US		1	/* 1 microsecond minimum */
-#define TQUIC_MIN_ACK_DELAY_MAX_US		16383000 /* ~16.4 seconds */
-
-/* Ignore threshold for reorder_threshold field */
-#define TQUIC_REORDER_THRESHOLD_IGNORE		0xffffffffffffffff
-
-/**
- * struct tquic_ack_frequency_frame - ACK_FREQUENCY frame contents
- * @sequence_number: Monotonically increasing sequence number
- * @ack_eliciting_threshold: ACK-eliciting packets before ACK required
- * @request_max_ack_delay: Requested maximum ACK delay in microseconds
- * @reorder_threshold: Packet reordering threshold before immediate ACK
- *
- * Per draft-ietf-quic-ack-frequency Section 4:
- * The ACK_FREQUENCY frame (type 0xaf) allows an endpoint to request its
- * peer change its ACK behavior. The frame format is:
- *
- * ACK_FREQUENCY Frame {
- *   Type (i) = 0xaf,
- *   Sequence Number (i),
- *   Ack-Eliciting Threshold (i),
- *   Request Max Ack Delay (i),
- *   Reorder Threshold (i),
- * }
- */
-struct tquic_ack_frequency_frame {
-	u64 sequence_number;
-	u64 ack_eliciting_threshold;
-	u64 request_max_ack_delay;
-	u64 reorder_threshold;
-};
-
-/**
- * struct tquic_ack_frequency_state - Per-connection ACK frequency state
- * @enabled: Whether ACK frequency extension is negotiated
- * @min_ack_delay_us: Our min_ack_delay transport parameter (microseconds)
- * @peer_min_ack_delay_us: Peer's min_ack_delay transport parameter
- * @last_sent_seq: Last sequence number sent in ACK_FREQUENCY frame
- * @last_recv_seq: Last sequence number received in ACK_FREQUENCY frame
- * @current_ack_elicit_threshold: Current ack-eliciting threshold from peer
- * @current_max_ack_delay_us: Current max ACK delay from peer (microseconds)
- * @current_reorder_threshold: Current reorder threshold from peer
- * @pending_send: ACK_FREQUENCY frame needs to be sent
- * @pending_immediate_ack: IMMEDIATE_ACK frame needs to be sent
- * @packets_since_ack: Ack-eliciting packets received since last ACK sent
- * @lock: Spinlock protecting this state
- */
-struct tquic_ack_frequency_state {
-	bool enabled;
-	u64 min_ack_delay_us;
-	u64 peer_min_ack_delay_us;
-
-	u64 last_sent_seq;
-	u64 last_recv_seq;
-
-	u64 current_ack_elicit_threshold;
-	u64 current_max_ack_delay_us;
-	u64 current_reorder_threshold;
-
-	bool pending_send;
-	bool pending_immediate_ack;
-
-	u64 packets_since_ack;
-
-	spinlock_t lock;
-};
+/* Include core ACK frequency definitions */
+#include "core/ack_frequency.h"
 
 /*
  * =============================================================================
- * ACK Frequency State Management
+ * Frame Type Constants (re-exported for convenience)
+ * =============================================================================
+ */
+
+/* Note: Frame types are defined in core/ack_frequency.h:
+ *   TQUIC_FRAME_ACK_FREQUENCY  = 0xaf
+ *   TQUIC_FRAME_IMMEDIATE_ACK  = 0x1f
+ *   TQUIC_TP_MIN_ACK_DELAY     = 0xff04de1a
+ */
+
+/*
+ * =============================================================================
+ * Legacy Definitions (for backward compatibility)
+ * =============================================================================
+ */
+
+/* Default values - these map to core definitions */
+#define TQUIC_DEFAULT_ACK_ELICITING_THRESHOLD	TQUIC_ACK_FREQ_DEFAULT_THRESHOLD
+#define TQUIC_DEFAULT_MAX_ACK_DELAY_US		TQUIC_ACK_FREQ_DEFAULT_MAX_DELAY_US
+#define TQUIC_DEFAULT_REORDER_THRESHOLD		TQUIC_ACK_FREQ_DEFAULT_REORDER_THRESHOLD
+
+/* Ignore threshold for reorder_threshold field */
+#define TQUIC_REORDER_THRESHOLD_IGNORE		0xffffffffffffffffULL
+
+/*
+ * =============================================================================
+ * Connection-Level State Management
  * =============================================================================
  */
 
 /**
- * tquic_ack_freq_init - Initialize ACK frequency state for a connection
+ * tquic_ack_freq_conn_init - Initialize ACK frequency state for a connection
  * @conn: Connection to initialize
  *
- * Allocates and initializes the ACK frequency state. Must be called
- * during connection setup before transport parameter negotiation.
+ * Allocates and initializes the ACK frequency state, storing it in
+ * conn->ack_freq_state. Must be called during connection setup before
+ * transport parameter negotiation.
  *
- * Return: 0 on success, -ENOMEM on allocation failure
+ * Return: 0 on success, -ENOMEM on allocation failure, -EINVAL on bad param
  */
-int tquic_ack_freq_init(struct tquic_connection *conn);
+int tquic_ack_freq_conn_init(struct tquic_connection *conn);
 
 /**
- * tquic_ack_freq_cleanup - Clean up ACK frequency state
+ * tquic_ack_freq_conn_cleanup - Clean up ACK frequency state
  * @conn: Connection to clean up
  *
- * Frees ACK frequency state. Called during connection teardown.
+ * Frees ACK frequency state stored in conn->ack_freq_state.
+ * Called during connection teardown.
  */
-void tquic_ack_freq_cleanup(struct tquic_connection *conn);
+void tquic_ack_freq_conn_cleanup(struct tquic_connection *conn);
 
 /**
- * tquic_ack_freq_enable - Enable ACK frequency extension after negotiation
+ * tquic_ack_freq_conn_enable - Enable ACK frequency extension
  * @conn: Connection
- * @peer_min_ack_delay: Peer's min_ack_delay transport parameter
+ * @peer_min_ack_delay: Peer's min_ack_delay transport parameter (microseconds)
  *
- * Called after transport parameter negotiation if both endpoints
+ * Called after transport parameter negotiation when both endpoints
  * advertise the min_ack_delay parameter.
  */
-void tquic_ack_freq_enable(struct tquic_connection *conn, u64 peer_min_ack_delay);
+void tquic_ack_freq_conn_enable(struct tquic_connection *conn,
+				u64 peer_min_ack_delay);
 
 /**
- * tquic_ack_freq_is_enabled - Check if ACK frequency is enabled
+ * tquic_ack_freq_conn_is_enabled - Check if ACK frequency is enabled
  * @conn: Connection to check
  *
- * Return: true if ACK frequency extension is negotiated
+ * Return: true if ACK frequency extension is negotiated and enabled
  */
+bool tquic_ack_freq_conn_is_enabled(struct tquic_connection *conn);
+
+/*
+ * =============================================================================
+ * Legacy API (for backward compatibility)
+ * =============================================================================
+ */
+
+/* These functions are kept for backward compatibility but use the new core */
+
+int tquic_ack_freq_init(struct tquic_connection *conn);
+void tquic_ack_freq_cleanup(struct tquic_connection *conn);
+void tquic_ack_freq_enable(struct tquic_connection *conn, u64 peer_min_ack_delay);
 bool tquic_ack_freq_is_enabled(struct tquic_connection *conn);
 
 /*
  * =============================================================================
- * Frame Generation
+ * Frame Generation (Connection-Level)
  * =============================================================================
  */
 
 /**
  * tquic_gen_ack_frequency_frame - Generate ACK_FREQUENCY frame
+ * @conn: Connection
  * @buf: Output buffer
  * @buf_len: Buffer length
  * @ack_eliciting_threshold: ACK-eliciting packets before ACK required
@@ -176,9 +158,8 @@ int tquic_gen_ack_frequency_frame(struct tquic_connection *conn,
  * @buf_len: Buffer length
  *
  * Generates an IMMEDIATE_ACK frame requesting immediate ACK from peer.
- * The frame has no payload, just the type byte.
  *
- * Return: Number of bytes written (1), or negative error code
+ * Return: Number of bytes written, or negative error code
  */
 int tquic_gen_immediate_ack_frame(u8 *buf, size_t buf_len);
 
@@ -202,33 +183,14 @@ size_t tquic_ack_frequency_frame_size(u64 ack_eliciting_threshold,
  * =============================================================================
  */
 
-/**
- * tquic_parse_ack_frequency_frame - Parse ACK_FREQUENCY frame
- * @buf: Input buffer (starting after frame type byte)
- * @buf_len: Buffer length
- * @frame: Output frame structure
- *
- * Parses an ACK_FREQUENCY frame from the wire format.
- *
- * Return: Bytes consumed on success, negative error code on failure
+/* Note: Frame parsing functions are available from core/ack_frequency.h:
+ *   tquic_parse_ack_frequency_frame()
+ *   tquic_parse_immediate_ack_frame()
  */
-int tquic_parse_ack_frequency_frame(const u8 *buf, size_t buf_len,
-				    struct tquic_ack_frequency_frame *frame);
-
-/**
- * tquic_parse_immediate_ack_frame - Parse IMMEDIATE_ACK frame
- * @buf: Input buffer (starting at frame type byte)
- * @buf_len: Buffer length
- *
- * IMMEDIATE_ACK has no payload, so this just validates the frame type.
- *
- * Return: Bytes consumed (1) on success, negative error code on failure
- */
-int tquic_parse_immediate_ack_frame(const u8 *buf, size_t buf_len);
 
 /*
  * =============================================================================
- * Frame Handling
+ * Frame Handling (Connection-Level)
  * =============================================================================
  */
 
@@ -257,7 +219,7 @@ int tquic_handle_immediate_ack_frame(struct tquic_connection *conn);
 
 /*
  * =============================================================================
- * ACK Decision Logic
+ * ACK Decision Logic (Connection-Level)
  * =============================================================================
  */
 
@@ -295,6 +257,18 @@ void tquic_ack_freq_on_ack_sent(struct tquic_connection *conn);
 bool tquic_ack_freq_should_ack_immediately(struct tquic_connection *conn);
 
 /**
+ * tquic_ack_freq_should_ack - Determine if ACK should be sent
+ * @state: ACK frequency state
+ * @pn: Packet number just received
+ * @ack_eliciting: Whether the packet was ack-eliciting
+ *
+ * Implements the ACK suppression algorithm from draft-ietf-quic-ack-frequency.
+ * Returns true if an ACK should be sent.
+ */
+bool tquic_ack_freq_should_ack(struct tquic_ack_frequency_state *state,
+			       u64 pn, bool ack_eliciting);
+
+/**
  * tquic_ack_freq_get_max_delay - Get current max ACK delay
  * @conn: Connection
  *
@@ -330,7 +304,7 @@ int tquic_ack_freq_decode_tp(const u8 *buf, size_t buf_len, u64 *min_ack_delay_u
 
 /*
  * =============================================================================
- * Sender Control API
+ * Sender Control API (Connection-Level)
  * =============================================================================
  */
 
@@ -370,6 +344,85 @@ int tquic_ack_freq_request_immediate_ack(struct tquic_connection *conn);
  */
 bool tquic_ack_freq_has_pending_frames(struct tquic_connection *conn);
 
+/**
+ * tquic_ack_freq_generate_pending_frames - Generate pending frames
+ * @conn: Connection
+ * @buf: Output buffer
+ * @buf_len: Buffer length
+ *
+ * Generates any pending ACK_FREQUENCY or IMMEDIATE_ACK frames.
+ *
+ * Return: Bytes written, or negative error code
+ */
+int tquic_ack_freq_generate_pending_frames(struct tquic_connection *conn,
+					   u8 *buf, size_t buf_len);
+
+/*
+ * =============================================================================
+ * Congestion Control Integration (Connection-Level)
+ * =============================================================================
+ */
+
+/**
+ * tquic_ack_freq_conn_on_congestion - Notify of congestion event
+ * @conn: Connection
+ * @in_recovery: Whether CC is in recovery state
+ *
+ * Called by congestion control when entering/exiting recovery.
+ */
+void tquic_ack_freq_conn_on_congestion(struct tquic_connection *conn,
+				       bool in_recovery);
+
+/**
+ * tquic_ack_freq_conn_on_rtt_update - Notify of RTT update
+ * @conn: Connection
+ * @rtt_us: Smoothed RTT in microseconds
+ * @rtt_var_us: RTT variance in microseconds
+ *
+ * Adjusts ACK frequency based on path RTT characteristics.
+ */
+void tquic_ack_freq_conn_on_rtt_update(struct tquic_connection *conn,
+				       u64 rtt_us, u64 rtt_var_us);
+
+/**
+ * tquic_ack_freq_conn_on_bandwidth_update - Notify of bandwidth estimate update
+ * @conn: Connection
+ * @bandwidth_bps: Estimated bandwidth in bytes per second
+ *
+ * Adjusts ACK frequency based on path bandwidth.
+ */
+void tquic_ack_freq_conn_on_bandwidth_update(struct tquic_connection *conn,
+					     u64 bandwidth_bps);
+
+/**
+ * tquic_ack_freq_conn_on_reordering - Notify of packet reordering detection
+ * @conn: Connection
+ * @gap: Reorder gap in packets
+ *
+ * Adjusts reorder threshold based on observed reordering.
+ */
+void tquic_ack_freq_conn_on_reordering(struct tquic_connection *conn, u64 gap);
+
+/**
+ * tquic_ack_freq_conn_on_ecn - Notify of ECN congestion signal
+ * @conn: Connection
+ *
+ * Adjusts ACK frequency in response to ECN-CE marks.
+ */
+void tquic_ack_freq_conn_on_ecn(struct tquic_connection *conn);
+
+/**
+ * tquic_ack_freq_conn_set_app_hint - Set application-level hint
+ * @conn: Connection
+ * @latency_sensitive: True if application is latency-sensitive
+ * @throughput_focused: True if application prioritizes throughput
+ *
+ * Allows application to influence ACK frequency decisions.
+ */
+void tquic_ack_freq_conn_set_app_hint(struct tquic_connection *conn,
+				      bool latency_sensitive,
+				      bool throughput_focused);
+
 /*
  * =============================================================================
  * Sysctl Accessors
@@ -379,7 +432,7 @@ bool tquic_ack_freq_has_pending_frames(struct tquic_connection *conn);
 /**
  * tquic_sysctl_get_ack_frequency_enabled - Get sysctl ack_frequency_enabled
  *
- * Return: true if ACK frequency extension is enabled
+ * Return: true if ACK frequency extension is enabled globally
  */
 bool tquic_sysctl_get_ack_frequency_enabled(void);
 
@@ -389,5 +442,27 @@ bool tquic_sysctl_get_ack_frequency_enabled(void);
  * Return: Default ACK delay in microseconds
  */
 u32 tquic_sysctl_get_default_ack_delay_us(void);
+
+/*
+ * =============================================================================
+ * Module Initialization
+ * =============================================================================
+ */
+
+/**
+ * tquic_ack_freq_module_init - Initialize ACK frequency module
+ *
+ * Called during TQUIC module initialization.
+ *
+ * Return: 0 on success, negative error on failure
+ */
+int tquic_ack_freq_module_init(void);
+
+/**
+ * tquic_ack_freq_module_exit - Clean up ACK frequency module
+ *
+ * Called during TQUIC module unload.
+ */
+void tquic_ack_freq_module_exit(void);
 
 #endif /* _TQUIC_ACK_FREQUENCY_H */

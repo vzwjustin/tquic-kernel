@@ -271,6 +271,14 @@ static struct h3_stream *h3_stream_alloc(void)
 	h3s->push_state = H3_PUSH_IDLE;
 	h3s->content_length = -1;
 
+	/*
+	 * RFC 9218: Default priority is urgency=3, incremental=false
+	 * priority_valid=false indicates default values (not explicitly set)
+	 */
+	h3s->priority_urgency = 3;	/* Default per RFC 9218 */
+	h3s->priority_incremental = false;
+	h3s->priority_valid = false;
+
 	return h3s;
 }
 

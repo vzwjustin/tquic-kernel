@@ -29,6 +29,7 @@
 
 #include "protocol.h"
 #include "tquic_mib.h"
+#include "tquic_token.h"
 #include "crypto/zero_rtt.h"
 #include "core/varint.h"
 
@@ -795,13 +796,86 @@ static int tquic_conn_server_accept_init(struct tquic_connection *conn,
 	}
 
 	/*
-	 * Skip token data for now
-	 * TODO: If token is present, validate it for address validation
-	 * Per RFC 9000 Section 8.1, tokens are used to prove address ownership
+	 * Token validation for address validation (RFC 9000 Section 8.1)
+	 *
+	 * Tokens can come from:
+	 * 1. A Retry packet (short-lived, verifies address ownership)
+	 * 2. A NEW_TOKEN frame (long-lived, speeds up future connections)
+	 *
+	 * Token validation proves the client owns the source address,
+	 * allowing the server to skip amplification limiting.
+	 *
+	 * Validation failure is not fatal - we just proceed without
+	 * address validation credit (subject to amplification limits).
 	 */
 	if (token_len > 0) {
+		const u8 *token_data = data + offset;
+		struct sockaddr_storage client_addr;
+		struct tquic_cid original_dcid;
+		int token_ret;
+
 		pr_debug("tquic: Initial packet has %llu byte token\n", token_len);
-		/* Token validation would go here */
+
+		/* Get client address from path or connection */
+		memset(&client_addr, 0, sizeof(client_addr));
+		if (conn->active_path) {
+			memcpy(&client_addr, &conn->active_path->remote_addr,
+			       sizeof(client_addr));
+		}
+
+		/*
+		 * Attempt to validate the token. We try both retry token
+		 * validation (short lifetime) and regular token validation
+		 * (long lifetime).
+		 *
+		 * Note: tquic_token_validate_retry expects retry tokens,
+		 * while tquic_token_validate handles NEW_TOKEN tokens.
+		 * Try retry first since it's more common during connection
+		 * establishment after a Retry.
+		 */
+		memset(&original_dcid, 0, sizeof(original_dcid));
+
+		token_ret = tquic_token_validate_retry(
+			NULL,  /* Use global server key */
+			&client_addr,
+			token_data, (u32)token_len,
+			&original_dcid);
+
+		if (token_ret == 0) {
+			/*
+			 * Valid retry token - address is validated.
+			 * The original_dcid should match what we derive
+			 * Initial keys from.
+			 */
+			pr_debug("tquic: Valid retry token, address validated\n");
+			/* Mark address as validated - skip amplification limit */
+			if (conn->active_path)
+				conn->active_path->state = TQUIC_PATH_VALIDATED;
+		} else {
+			/*
+			 * Try NEW_TOKEN validation (longer lifetime)
+			 */
+			token_ret = tquic_token_validate(
+				NULL,  /* Use global server key */
+				&client_addr,
+				token_data, (u32)token_len,
+				0,  /* Default lifetime */
+				NULL);  /* No DCID for NEW_TOKEN */
+
+			if (token_ret == 0) {
+				pr_debug("tquic: Valid NEW_TOKEN, address validated\n");
+				if (conn->active_path)
+					conn->active_path->state = TQUIC_PATH_VALIDATED;
+			} else {
+				/*
+				 * Token invalid - not fatal. The server will
+				 * apply amplification limits until address
+				 * is validated via PATH_CHALLENGE/RESPONSE.
+				 */
+				pr_debug("tquic: Token validation failed: %d\n",
+					 token_ret);
+			}
+		}
 	}
 	offset += token_len;
 

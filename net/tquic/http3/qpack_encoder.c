@@ -66,6 +66,7 @@ int qpack_encoder_init(struct qpack_encoder *enc,
 		return ret;
 
 	INIT_LIST_HEAD(&enc->blocked_streams);
+	INIT_LIST_HEAD(&enc->stream_states);
 	spin_lock_init(&enc->lock);
 
 	return 0;
@@ -79,16 +80,26 @@ EXPORT_SYMBOL_GPL(qpack_encoder_init);
 void qpack_encoder_destroy(struct qpack_encoder *enc)
 {
 	struct qpack_blocked_stream *blocked, *tmp;
+	struct qpack_stream_state *state, *state_tmp;
 	unsigned long flags;
 
 	if (!enc)
 		return;
 
 	spin_lock_irqsave(&enc->lock, flags);
+
+	/* Free blocked streams */
 	list_for_each_entry_safe(blocked, tmp, &enc->blocked_streams, list) {
 		list_del(&blocked->list);
 		kfree(blocked);
 	}
+
+	/* Free stream state tracking entries */
+	list_for_each_entry_safe(state, state_tmp, &enc->stream_states, list) {
+		list_del(&state->list);
+		kfree(state);
+	}
+
 	spin_unlock_irqrestore(&enc->lock, flags);
 
 	qpack_dynamic_table_destroy(&enc->dynamic_table);
@@ -493,6 +504,32 @@ int qpack_encode_headers(struct qpack_encoder *enc,
 		offset += hdr_len;
 	}
 
+	/*
+	 * Track per-stream insert count for Section Acknowledgment handling.
+	 *
+	 * RFC 9204 Section 2.1.4: When the decoder acknowledges a header block,
+	 * the encoder can update its known received count, allowing safe
+	 * eviction of dynamic table entries.
+	 *
+	 * We only track streams that reference dynamic table entries
+	 * (required_insert_count > 0), since literal-only streams don't
+	 * need tracking.
+	 */
+	if (required_insert_count > 0) {
+		struct qpack_stream_state *state;
+
+		state = kzalloc(sizeof(*state), GFP_ATOMIC);
+		if (state) {
+			state->stream_id = stream_id;
+			state->required_insert_count = required_insert_count;
+
+			spin_lock_irqsave(&enc->lock, flags);
+			list_add_tail(&state->list, &enc->stream_states);
+			spin_unlock_irqrestore(&enc->lock, flags);
+		}
+		/* Allocation failure is non-fatal - just means less accurate tracking */
+	}
+
 	*encoded_len = offset;
 	return 0;
 }
@@ -511,6 +548,49 @@ EXPORT_SYMBOL_GPL(qpack_encode_headers);
  * - Stream Cancellation
  * - Insert Count Increment
  */
+/*
+ * qpack_encoder_find_stream_state - Find stream state by stream ID
+ * @enc: Encoder
+ * @stream_id: Stream ID to find
+ *
+ * Must be called with enc->lock held.
+ * Returns: Stream state or NULL if not found.
+ */
+static struct qpack_stream_state *
+qpack_encoder_find_stream_state(struct qpack_encoder *enc, u64 stream_id)
+{
+	struct qpack_stream_state *state;
+
+	list_for_each_entry(state, &enc->stream_states, list) {
+		if (state->stream_id == stream_id)
+			return state;
+	}
+	return NULL;
+}
+
+/*
+ * qpack_encoder_remove_stream_state - Remove and free stream state
+ * @enc: Encoder
+ * @stream_id: Stream ID to remove
+ *
+ * Must be called with enc->lock held.
+ * Returns: The required_insert_count for the stream, or 0 if not found.
+ */
+static u64 qpack_encoder_remove_stream_state(struct qpack_encoder *enc,
+					     u64 stream_id)
+{
+	struct qpack_stream_state *state;
+	u64 required_insert_count = 0;
+
+	state = qpack_encoder_find_stream_state(enc, stream_id);
+	if (state) {
+		required_insert_count = state->required_insert_count;
+		list_del(&state->list);
+		kfree(state);
+	}
+	return required_insert_count;
+}
+
 int qpack_encoder_process_decoder_stream(struct qpack_encoder *enc,
 					 const u8 *data, size_t len)
 {
@@ -518,6 +598,7 @@ int qpack_encoder_process_decoder_stream(struct qpack_encoder *enc,
 	u64 value;
 	size_t consumed;
 	int ret;
+	unsigned long flags;
 
 	if (!enc || !data || len == 0)
 		return -EINVAL;
@@ -526,36 +607,109 @@ int qpack_encoder_process_decoder_stream(struct qpack_encoder *enc,
 		u8 first_byte = data[offset];
 
 		if (first_byte & 0x80) {
-			/* Section Acknowledgment: 1xxxxxxx */
+			/* Section Acknowledgment: 1xxxxxxx
+			 *
+			 * RFC 9204 Section 4.4.1: After processing a header block,
+			 * the decoder sends a Section Acknowledgment with the stream
+			 * ID to indicate it has processed all header blocks on that
+			 * stream up to the required insert count.
+			 *
+			 * This allows the encoder to update known_received_count,
+			 * which determines which dynamic table entries can be safely
+			 * evicted or referenced.
+			 */
 			ret = qpack_decode_integer(data + offset, len - offset,
 						   7, &value, &consumed);
 			if (ret)
 				return ret;
 			offset += consumed;
 
-			/* Stream ID acknowledged - update known state */
-			/* TODO: Track per-stream insert counts */
+			spin_lock_irqsave(&enc->lock, flags);
+
+			/* Look up the required insert count for this stream */
+			u64 stream_insert_count =
+				qpack_encoder_remove_stream_state(enc, value);
+
+			/*
+			 * Update known_received_count to the maximum of:
+			 * - Current known_received_count
+			 * - This stream's required_insert_count
+			 *
+			 * This ensures the encoder knows the decoder has received
+			 * all table updates up to this point for safe eviction.
+			 */
+			if (stream_insert_count > enc->known_received_count) {
+				enc->known_received_count = stream_insert_count;
+				qpack_dynamic_table_acknowledge(
+					&enc->dynamic_table,
+					enc->known_received_count);
+			}
+
+			spin_unlock_irqrestore(&enc->lock, flags);
+
+			pr_debug("qpack: section ack for stream %llu, "
+				 "known_received_count now %llu\n",
+				 value, enc->known_received_count);
+
 		} else if (first_byte & 0x40) {
-			/* Stream Cancellation: 01xxxxxx */
+			/* Stream Cancellation: 01xxxxxx
+			 *
+			 * RFC 9204 Section 4.4.2: The decoder sends this when
+			 * it will not read from a stream. The encoder should
+			 * remove any tracking state for that stream.
+			 */
 			ret = qpack_decode_integer(data + offset, len - offset,
 						   6, &value, &consumed);
 			if (ret)
 				return ret;
 			offset += consumed;
 
-			/* Stream cancelled - remove from blocked list if present */
+			spin_lock_irqsave(&enc->lock, flags);
+
+			/* Remove stream state (don't update known_received_count) */
+			qpack_encoder_remove_stream_state(enc, value);
+
+			/* Also remove from blocked streams if present */
+			struct qpack_blocked_stream *blocked, *tmp;
+			list_for_each_entry_safe(blocked, tmp,
+						 &enc->blocked_streams, list) {
+				if (blocked->stream_id == value) {
+					list_del(&blocked->list);
+					kfree(blocked->data);
+					kfree(blocked);
+					enc->num_blocked--;
+					break;
+				}
+			}
+
+			spin_unlock_irqrestore(&enc->lock, flags);
+
+			pr_debug("qpack: stream %llu cancelled\n", value);
+
 		} else {
-			/* Insert Count Increment: 00xxxxxx */
+			/* Insert Count Increment: 00xxxxxx
+			 *
+			 * RFC 9204 Section 4.4.3: The decoder sends this to
+			 * indicate it has received and processed table updates.
+			 */
 			ret = qpack_decode_integer(data + offset, len - offset,
 						   6, &value, &consumed);
 			if (ret)
 				return ret;
 			offset += consumed;
+
+			spin_lock_irqsave(&enc->lock, flags);
 
 			/* Update known received count */
 			enc->known_received_count += value;
 			qpack_dynamic_table_acknowledge(&enc->dynamic_table,
 							enc->known_received_count);
+
+			spin_unlock_irqrestore(&enc->lock, flags);
+
+			pr_debug("qpack: insert count increment %llu, "
+				 "known_received_count now %llu\n",
+				 value, enc->known_received_count);
 		}
 	}
 

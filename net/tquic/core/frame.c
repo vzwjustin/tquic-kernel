@@ -25,7 +25,54 @@
 #include <linux/string.h>
 #include <linux/bug.h>
 #include <linux/limits.h>
+#include <linux/overflow.h>
 #include <net/tquic.h>
+
+/*
+ * SECURITY FIX: Defense against size_t underflow in frame parsing.
+ *
+ * When parsing untrusted network input, we must guard against arithmetic
+ * underflow on size_t variables. A malformed frame could cause 'remaining'
+ * to wrap around to a huge value, leading to buffer over-reads or worse.
+ *
+ * This macro validates that we have sufficient bytes BEFORE any subtraction,
+ * providing defense-in-depth even when called functions also validate bounds.
+ */
+
+/**
+ * FRAME_ADVANCE_SAFE - Safely advance parser position with underflow protection
+ * @p: Pointer to current position (updated on success)
+ * @remaining: Bytes remaining in buffer (updated on success)
+ * @n: Number of bytes to advance
+ *
+ * Returns 0 on success, -EPROTO if advancing would underflow.
+ * This provides defense-in-depth against malformed input that could
+ * cause size_t underflow and subsequent buffer over-reads.
+ */
+#define FRAME_ADVANCE_SAFE(p, remaining, n) ({			\
+	int __ret = 0;						\
+	size_t __n = (n);					\
+	if (unlikely(__n > (remaining))) {			\
+		__ret = -EPROTO;				\
+	} else {						\
+		(p) += __n;					\
+		(remaining) -= __n;				\
+	}							\
+	__ret;							\
+})
+
+/**
+ * frame_check_remaining - Validate sufficient bytes remain before operation
+ * @remaining: Current remaining byte count
+ * @needed: Number of bytes needed
+ *
+ * Returns true if sufficient bytes available, false otherwise.
+ * Use this for explicit bounds checks before any buffer access.
+ */
+static inline bool frame_check_remaining(size_t remaining, size_t needed)
+{
+	return remaining >= needed;
+}
 
 /*
  * QUIC Frame Type Values (RFC 9000, Section 12.4)
@@ -378,7 +425,8 @@ static int frame_varint_encode(u64 val, u8 *buf, size_t buf_len)
  * @buf_len: Length of the buffer
  * @frame: Output frame structure
  *
- * Counts consecutive PADDING (0x00) bytes.
+ * SECURITY: Counts consecutive PADDING (0x00) bytes with explicit bounds check.
+ * The loop is bounded by buf_len preventing any buffer over-read.
  * Returns bytes consumed on success, negative error code on failure.
  */
 static int tquic_parse_padding_frame(const u8 *buf, size_t buf_len,
@@ -386,6 +434,10 @@ static int tquic_parse_padding_frame(const u8 *buf, size_t buf_len,
 {
 	size_t count = 0;
 
+	/*
+	 * SECURITY: Loop is bounded by buf_len; count can never exceed buf_len.
+	 * Each iteration checks count < buf_len before accessing buf[count].
+	 */
 	while (count < buf_len && buf[count] == TQUIC_FRAME_PADDING)
 		count++;
 
@@ -400,13 +452,14 @@ static int tquic_parse_padding_frame(const u8 *buf, size_t buf_len,
  * @buf_len: Length of the buffer
  * @frame: Output frame structure
  *
+ * SECURITY: Fixed-size frame (type byte only) with explicit bounds check.
  * PING frames have no payload, just the type byte.
  * Returns bytes consumed on success, negative error code on failure.
  */
 static int tquic_parse_ping_frame(const u8 *buf, size_t buf_len,
 				  struct tquic_frame *frame)
 {
-	if (buf_len < 1)
+	if (!frame_check_remaining(buf_len, 1))
 		return -EINVAL;
 
 	frame->type = TQUIC_FRAME_PING;
@@ -422,7 +475,13 @@ static int tquic_parse_ping_frame(const u8 *buf, size_t buf_len,
  * @ranges_buf: Buffer to store ACK ranges (caller-provided)
  * @max_ranges: Maximum number of ranges the buffer can hold
  *
+ * SECURITY: This function handles untrusted network input. All arithmetic
+ * on size_t variables uses explicit bounds checking to prevent underflow
+ * that could lead to buffer over-reads or remote code execution.
+ *
  * Returns bytes consumed on success, negative error code on failure.
+ * Returns -EINVAL for invalid input, -EPROTO for malformed frames,
+ * -EOVERFLOW if range count exceeds maximum.
  */
 static int tquic_parse_ack_frame(const u8 *buf, size_t buf_len,
 				 struct tquic_frame *frame, bool has_ecn,
@@ -431,42 +490,65 @@ static int tquic_parse_ack_frame(const u8 *buf, size_t buf_len,
 {
 	const u8 *p = buf;
 	size_t remaining = buf_len;
-	size_t consumed;
+	size_t consumed = 0;  /* Initialize to prevent use of garbage on error paths */
 	u64 i;
 	int ret;
 
-	if (remaining < 1)
+	/*
+	 * SECURITY: Validate minimum frame size upfront.
+	 * ACK frame requires at least: type(1) + largest_ack(1) + delay(1) +
+	 * range_count(1) + first_range(1) = 5 bytes minimum.
+	 */
+	if (!frame_check_remaining(remaining, 1))
 		return -EINVAL;
 
-	/* Skip frame type */
-	p++;
-	remaining--;
+	if (!ranges_buf && max_ranges > 0)
+		return -EINVAL;
+
+	/* Skip frame type - already validated above */
+	ret = FRAME_ADVANCE_SAFE(p, remaining, 1);
+	if (ret < 0)
+		return ret;
 
 	frame->type = has_ecn ? TQUIC_FRAME_ACK_ECN : TQUIC_FRAME_ACK;
 	frame->ack.has_ecn = has_ecn;
 	frame->ack.ranges = ranges_buf;
 
+	/*
+	 * SECURITY: Each varint decode is followed by explicit bounds check
+	 * before advancing. Even though frame_varint_decode() checks bounds
+	 * internally, we verify at caller site for defense-in-depth.
+	 */
+
 	/* Largest Acknowledged */
 	ret = frame_varint_decode(p, remaining, &frame->ack.largest_ack, &consumed);
 	if (ret < 0)
 		return ret;
-	p += consumed;
-	remaining -= consumed;
+	ret = FRAME_ADVANCE_SAFE(p, remaining, consumed);
+	if (ret < 0)
+		return ret;
 
 	/* ACK Delay */
 	ret = frame_varint_decode(p, remaining, &frame->ack.ack_delay, &consumed);
 	if (ret < 0)
 		return ret;
-	p += consumed;
-	remaining -= consumed;
+	ret = FRAME_ADVANCE_SAFE(p, remaining, consumed);
+	if (ret < 0)
+		return ret;
 
 	/* ACK Range Count */
 	ret = frame_varint_decode(p, remaining, &frame->ack.ack_range_count, &consumed);
 	if (ret < 0)
 		return ret;
-	p += consumed;
-	remaining -= consumed;
+	ret = FRAME_ADVANCE_SAFE(p, remaining, consumed);
+	if (ret < 0)
+		return ret;
 
+	/*
+	 * SECURITY: Validate range count against caller's buffer size.
+	 * A malicious peer could send huge range count to exhaust resources
+	 * or overflow array bounds.
+	 */
 	if (frame->ack.ack_range_count > max_ranges)
 		return -EOVERFLOW;
 
@@ -474,47 +556,64 @@ static int tquic_parse_ack_frame(const u8 *buf, size_t buf_len,
 	ret = frame_varint_decode(p, remaining, &frame->ack.first_ack_range, &consumed);
 	if (ret < 0)
 		return ret;
-	p += consumed;
-	remaining -= consumed;
+	ret = FRAME_ADVANCE_SAFE(p, remaining, consumed);
+	if (ret < 0)
+		return ret;
 
-	/* Additional ACK Ranges */
+	/*
+	 * Additional ACK Ranges - each contains Gap + ACK Range Length.
+	 * SECURITY: Loop bound is validated above against max_ranges.
+	 */
 	for (i = 0; i < frame->ack.ack_range_count; i++) {
 		/* Gap */
 		ret = frame_varint_decode(p, remaining, &ranges_buf[i].gap, &consumed);
 		if (ret < 0)
 			return ret;
-		p += consumed;
-		remaining -= consumed;
+		ret = FRAME_ADVANCE_SAFE(p, remaining, consumed);
+		if (ret < 0)
+			return ret;
 
 		/* ACK Range Length */
 		ret = frame_varint_decode(p, remaining, &ranges_buf[i].ack_range_len, &consumed);
 		if (ret < 0)
 			return ret;
-		p += consumed;
-		remaining -= consumed;
+		ret = FRAME_ADVANCE_SAFE(p, remaining, consumed);
+		if (ret < 0)
+			return ret;
 	}
 
-	/* ECN Counts (if present) */
+	/* ECN Counts (if present in ACK_ECN frame type 0x03) */
 	if (has_ecn) {
+		/* ECT(0) Count */
 		ret = frame_varint_decode(p, remaining, &frame->ack.ect0_count, &consumed);
 		if (ret < 0)
 			return ret;
-		p += consumed;
-		remaining -= consumed;
+		ret = FRAME_ADVANCE_SAFE(p, remaining, consumed);
+		if (ret < 0)
+			return ret;
 
+		/* ECT(1) Count */
 		ret = frame_varint_decode(p, remaining, &frame->ack.ect1_count, &consumed);
 		if (ret < 0)
 			return ret;
-		p += consumed;
-		remaining -= consumed;
+		ret = FRAME_ADVANCE_SAFE(p, remaining, consumed);
+		if (ret < 0)
+			return ret;
 
+		/* ECN-CE Count */
 		ret = frame_varint_decode(p, remaining, &frame->ack.ecn_ce_count, &consumed);
 		if (ret < 0)
 			return ret;
-		p += consumed;
-		remaining -= consumed;
+		ret = FRAME_ADVANCE_SAFE(p, remaining, consumed);
+		if (ret < 0)
+			return ret;
 	}
 
+	/*
+	 * SECURITY: Final calculation is safe because we only reach here
+	 * after all FRAME_ADVANCE_SAFE calls succeeded, guaranteeing
+	 * remaining <= buf_len.
+	 */
 	return (int)(buf_len - remaining);
 }
 
@@ -524,6 +623,7 @@ static int tquic_parse_ack_frame(const u8 *buf, size_t buf_len,
  * @buf_len: Length of the buffer
  * @frame: Output frame structure
  *
+ * SECURITY: Uses bounds-checked arithmetic to prevent size_t underflow.
  * Returns bytes consumed on success, negative error code on failure.
  */
 static int tquic_parse_reset_stream_frame(const u8 *buf, size_t buf_len,
@@ -531,15 +631,16 @@ static int tquic_parse_reset_stream_frame(const u8 *buf, size_t buf_len,
 {
 	const u8 *p = buf;
 	size_t remaining = buf_len;
-	size_t consumed;
+	size_t consumed = 0;
 	int ret;
 
-	if (remaining < 1)
+	if (!frame_check_remaining(remaining, 1))
 		return -EINVAL;
 
 	/* Skip frame type */
-	p++;
-	remaining--;
+	ret = FRAME_ADVANCE_SAFE(p, remaining, 1);
+	if (ret < 0)
+		return ret;
 
 	frame->type = TQUIC_FRAME_RESET_STREAM;
 
@@ -547,22 +648,25 @@ static int tquic_parse_reset_stream_frame(const u8 *buf, size_t buf_len,
 	ret = frame_varint_decode(p, remaining, &frame->reset_stream.stream_id, &consumed);
 	if (ret < 0)
 		return ret;
-	p += consumed;
-	remaining -= consumed;
+	ret = FRAME_ADVANCE_SAFE(p, remaining, consumed);
+	if (ret < 0)
+		return ret;
 
 	/* Application Protocol Error Code */
 	ret = frame_varint_decode(p, remaining, &frame->reset_stream.app_error_code, &consumed);
 	if (ret < 0)
 		return ret;
-	p += consumed;
-	remaining -= consumed;
+	ret = FRAME_ADVANCE_SAFE(p, remaining, consumed);
+	if (ret < 0)
+		return ret;
 
 	/* Final Size */
 	ret = frame_varint_decode(p, remaining, &frame->reset_stream.final_size, &consumed);
 	if (ret < 0)
 		return ret;
-	p += consumed;
-	remaining -= consumed;
+	ret = FRAME_ADVANCE_SAFE(p, remaining, consumed);
+	if (ret < 0)
+		return ret;
 
 	return (int)(buf_len - remaining);
 }
@@ -573,6 +677,7 @@ static int tquic_parse_reset_stream_frame(const u8 *buf, size_t buf_len,
  * @buf_len: Length of the buffer
  * @frame: Output frame structure
  *
+ * SECURITY: Uses bounds-checked arithmetic to prevent size_t underflow.
  * Returns bytes consumed on success, negative error code on failure.
  */
 static int tquic_parse_stop_sending_frame(const u8 *buf, size_t buf_len,
@@ -580,15 +685,16 @@ static int tquic_parse_stop_sending_frame(const u8 *buf, size_t buf_len,
 {
 	const u8 *p = buf;
 	size_t remaining = buf_len;
-	size_t consumed;
+	size_t consumed = 0;
 	int ret;
 
-	if (remaining < 1)
+	if (!frame_check_remaining(remaining, 1))
 		return -EINVAL;
 
 	/* Skip frame type */
-	p++;
-	remaining--;
+	ret = FRAME_ADVANCE_SAFE(p, remaining, 1);
+	if (ret < 0)
+		return ret;
 
 	frame->type = TQUIC_FRAME_STOP_SENDING;
 
@@ -596,15 +702,17 @@ static int tquic_parse_stop_sending_frame(const u8 *buf, size_t buf_len,
 	ret = frame_varint_decode(p, remaining, &frame->stop_sending.stream_id, &consumed);
 	if (ret < 0)
 		return ret;
-	p += consumed;
-	remaining -= consumed;
+	ret = FRAME_ADVANCE_SAFE(p, remaining, consumed);
+	if (ret < 0)
+		return ret;
 
 	/* Application Protocol Error Code */
 	ret = frame_varint_decode(p, remaining, &frame->stop_sending.app_error_code, &consumed);
 	if (ret < 0)
 		return ret;
-	p += consumed;
-	remaining -= consumed;
+	ret = FRAME_ADVANCE_SAFE(p, remaining, consumed);
+	if (ret < 0)
+		return ret;
 
 	return (int)(buf_len - remaining);
 }
@@ -615,6 +723,10 @@ static int tquic_parse_stop_sending_frame(const u8 *buf, size_t buf_len,
  * @buf_len: Length of the buffer
  * @frame: Output frame structure
  *
+ * SECURITY: Uses bounds-checked arithmetic to prevent size_t underflow.
+ * The crypto.length field is validated against both SIZE_MAX and remaining
+ * buffer before advancing to prevent integer overflow attacks.
+ *
  * Note: frame->crypto.data points into the original buffer.
  * Returns bytes consumed on success, negative error code on failure.
  */
@@ -623,15 +735,16 @@ static int tquic_parse_crypto_frame(const u8 *buf, size_t buf_len,
 {
 	const u8 *p = buf;
 	size_t remaining = buf_len;
-	size_t consumed;
+	size_t consumed = 0;
 	int ret;
 
-	if (remaining < 1)
+	if (!frame_check_remaining(remaining, 1))
 		return -EINVAL;
 
 	/* Skip frame type */
-	p++;
-	remaining--;
+	ret = FRAME_ADVANCE_SAFE(p, remaining, 1);
+	if (ret < 0)
+		return ret;
 
 	frame->type = TQUIC_FRAME_CRYPTO;
 
@@ -639,23 +752,33 @@ static int tquic_parse_crypto_frame(const u8 *buf, size_t buf_len,
 	ret = frame_varint_decode(p, remaining, &frame->crypto.offset, &consumed);
 	if (ret < 0)
 		return ret;
-	p += consumed;
-	remaining -= consumed;
+	ret = FRAME_ADVANCE_SAFE(p, remaining, consumed);
+	if (ret < 0)
+		return ret;
 
 	/* Length */
 	ret = frame_varint_decode(p, remaining, &frame->crypto.length, &consumed);
 	if (ret < 0)
 		return ret;
-	p += consumed;
-	remaining -= consumed;
+	ret = FRAME_ADVANCE_SAFE(p, remaining, consumed);
+	if (ret < 0)
+		return ret;
 
-	/* Crypto Data - validate length doesn't exceed size_t and remaining buffer */
-	if (frame->crypto.length > SIZE_MAX || remaining < frame->crypto.length)
-		return -EINVAL;
+	/*
+	 * SECURITY: Validate crypto data length before advancing.
+	 * A malicious frame could specify a huge length to cause underflow
+	 * or buffer over-read. Check against SIZE_MAX prevents u64->size_t
+	 * truncation issues on 32-bit systems.
+	 */
+	if (frame->crypto.length > SIZE_MAX)
+		return -EPROTO;
+	if (!frame_check_remaining(remaining, (size_t)frame->crypto.length))
+		return -EPROTO;
 
 	frame->crypto.data = p;
-	p += frame->crypto.length;
-	remaining -= frame->crypto.length;
+	ret = FRAME_ADVANCE_SAFE(p, remaining, (size_t)frame->crypto.length);
+	if (ret < 0)
+		return ret;
 
 	return (int)(buf_len - remaining);
 }
@@ -666,6 +789,9 @@ static int tquic_parse_crypto_frame(const u8 *buf, size_t buf_len,
  * @buf_len: Length of the buffer
  * @frame: Output frame structure
  *
+ * SECURITY: Uses bounds-checked arithmetic to prevent size_t underflow.
+ * Token length is validated against maximum and buffer bounds.
+ *
  * Note: frame->new_token.token points into the original buffer.
  * Returns bytes consumed on success, negative error code on failure.
  */
@@ -674,15 +800,16 @@ static int tquic_parse_new_token_frame(const u8 *buf, size_t buf_len,
 {
 	const u8 *p = buf;
 	size_t remaining = buf_len;
-	size_t consumed;
+	size_t consumed = 0;
 	int ret;
 
-	if (remaining < 1)
+	if (!frame_check_remaining(remaining, 1))
 		return -EINVAL;
 
 	/* Skip frame type */
-	p++;
-	remaining--;
+	ret = FRAME_ADVANCE_SAFE(p, remaining, 1);
+	if (ret < 0)
+		return ret;
 
 	frame->type = TQUIC_FRAME_NEW_TOKEN;
 
@@ -690,19 +817,30 @@ static int tquic_parse_new_token_frame(const u8 *buf, size_t buf_len,
 	ret = frame_varint_decode(p, remaining, &frame->new_token.token_len, &consumed);
 	if (ret < 0)
 		return ret;
-	p += consumed;
-	remaining -= consumed;
+	ret = FRAME_ADVANCE_SAFE(p, remaining, consumed);
+	if (ret < 0)
+		return ret;
 
-	/* Validate token length - check against max, SIZE_MAX, and remaining buffer */
-	if (frame->new_token.token_len == 0 ||
-	    frame->new_token.token_len > TQUIC_MAX_TOKEN_LEN ||
-	    frame->new_token.token_len > SIZE_MAX ||
-	    remaining < frame->new_token.token_len)
-		return -EINVAL;
+	/*
+	 * SECURITY: Validate token length before buffer access.
+	 * - Empty tokens are invalid per RFC 9000
+	 * - Check against TQUIC_MAX_TOKEN_LEN for resource limits
+	 * - Check against SIZE_MAX for 32-bit system safety
+	 * - Check against remaining for buffer bounds
+	 */
+	if (frame->new_token.token_len == 0)
+		return -EPROTO;
+	if (frame->new_token.token_len > TQUIC_MAX_TOKEN_LEN)
+		return -EPROTO;
+	if (frame->new_token.token_len > SIZE_MAX)
+		return -EPROTO;
+	if (!frame_check_remaining(remaining, (size_t)frame->new_token.token_len))
+		return -EPROTO;
 
 	frame->new_token.token = p;
-	p += frame->new_token.token_len;
-	remaining -= frame->new_token.token_len;
+	ret = FRAME_ADVANCE_SAFE(p, remaining, (size_t)frame->new_token.token_len);
+	if (ret < 0)
+		return ret;
 
 	return (int)(buf_len - remaining);
 }
@@ -718,6 +856,9 @@ static int tquic_parse_new_token_frame(const u8 *buf, size_t buf_len,
  * - Bit 1 (0x02): LEN - length field present
  * - Bit 2 (0x04): OFF - offset field present
  *
+ * SECURITY: Uses bounds-checked arithmetic to prevent size_t underflow.
+ * The stream data length is carefully validated before buffer access.
+ *
  * Note: frame->stream.data points into the original buffer.
  * Returns bytes consumed on success, negative error code on failure.
  */
@@ -726,11 +867,11 @@ static int tquic_parse_stream_frame(const u8 *buf, size_t buf_len,
 {
 	const u8 *p = buf;
 	size_t remaining = buf_len;
-	size_t consumed;
+	size_t consumed = 0;
 	u8 flags;
 	int ret;
 
-	if (remaining < 1)
+	if (!frame_check_remaining(remaining, 1))
 		return -EINVAL;
 
 	flags = buf[0] & 0x07;
@@ -740,23 +881,26 @@ static int tquic_parse_stream_frame(const u8 *buf, size_t buf_len,
 	frame->stream.has_offset = !!(flags & TQUIC_STREAM_FLAG_OFF);
 
 	/* Skip frame type */
-	p++;
-	remaining--;
+	ret = FRAME_ADVANCE_SAFE(p, remaining, 1);
+	if (ret < 0)
+		return ret;
 
 	/* Stream ID */
 	ret = frame_varint_decode(p, remaining, &frame->stream.stream_id, &consumed);
 	if (ret < 0)
 		return ret;
-	p += consumed;
-	remaining -= consumed;
+	ret = FRAME_ADVANCE_SAFE(p, remaining, consumed);
+	if (ret < 0)
+		return ret;
 
 	/* Offset (if present) */
 	if (frame->stream.has_offset) {
 		ret = frame_varint_decode(p, remaining, &frame->stream.offset, &consumed);
 		if (ret < 0)
 			return ret;
-		p += consumed;
-		remaining -= consumed;
+		ret = FRAME_ADVANCE_SAFE(p, remaining, consumed);
+		if (ret < 0)
+			return ret;
 	} else {
 		frame->stream.offset = 0;
 	}
@@ -766,18 +910,25 @@ static int tquic_parse_stream_frame(const u8 *buf, size_t buf_len,
 		ret = frame_varint_decode(p, remaining, &frame->stream.length, &consumed);
 		if (ret < 0)
 			return ret;
-		p += consumed;
-		remaining -= consumed;
+		ret = FRAME_ADVANCE_SAFE(p, remaining, consumed);
+		if (ret < 0)
+			return ret;
 
-		/* Validate length doesn't exceed size_t and remaining buffer */
-		if (frame->stream.length > SIZE_MAX || remaining < frame->stream.length)
-			return -EINVAL;
+		/*
+		 * SECURITY: Validate stream data length before buffer access.
+		 * Check against SIZE_MAX for 32-bit safety, then against remaining.
+		 */
+		if (frame->stream.length > SIZE_MAX)
+			return -EPROTO;
+		if (!frame_check_remaining(remaining, (size_t)frame->stream.length))
+			return -EPROTO;
 
 		frame->stream.data = p;
-		p += frame->stream.length;
-		remaining -= frame->stream.length;
+		ret = FRAME_ADVANCE_SAFE(p, remaining, (size_t)frame->stream.length);
+		if (ret < 0)
+			return ret;
 	} else {
-		/* Data extends to end of packet */
+		/* Data extends to end of packet - remaining is already bounded */
 		frame->stream.length = remaining;
 		frame->stream.data = p;
 		remaining = 0;
@@ -792,6 +943,7 @@ static int tquic_parse_stream_frame(const u8 *buf, size_t buf_len,
  * @buf_len: Length of the buffer
  * @frame: Output frame structure
  *
+ * SECURITY: Uses bounds-checked arithmetic to prevent size_t underflow.
  * Returns bytes consumed on success, negative error code on failure.
  */
 static int tquic_parse_max_data_frame(const u8 *buf, size_t buf_len,
@@ -799,15 +951,16 @@ static int tquic_parse_max_data_frame(const u8 *buf, size_t buf_len,
 {
 	const u8 *p = buf;
 	size_t remaining = buf_len;
-	size_t consumed;
+	size_t consumed = 0;
 	int ret;
 
-	if (remaining < 1)
+	if (!frame_check_remaining(remaining, 1))
 		return -EINVAL;
 
 	/* Skip frame type */
-	p++;
-	remaining--;
+	ret = FRAME_ADVANCE_SAFE(p, remaining, 1);
+	if (ret < 0)
+		return ret;
 
 	frame->type = TQUIC_FRAME_MAX_DATA;
 
@@ -815,8 +968,9 @@ static int tquic_parse_max_data_frame(const u8 *buf, size_t buf_len,
 	ret = frame_varint_decode(p, remaining, &frame->max_data.max_data, &consumed);
 	if (ret < 0)
 		return ret;
-	p += consumed;
-	remaining -= consumed;
+	ret = FRAME_ADVANCE_SAFE(p, remaining, consumed);
+	if (ret < 0)
+		return ret;
 
 	return (int)(buf_len - remaining);
 }
@@ -827,6 +981,7 @@ static int tquic_parse_max_data_frame(const u8 *buf, size_t buf_len,
  * @buf_len: Length of the buffer
  * @frame: Output frame structure
  *
+ * SECURITY: Uses bounds-checked arithmetic to prevent size_t underflow.
  * Returns bytes consumed on success, negative error code on failure.
  */
 static int tquic_parse_max_stream_data_frame(const u8 *buf, size_t buf_len,
@@ -834,15 +989,16 @@ static int tquic_parse_max_stream_data_frame(const u8 *buf, size_t buf_len,
 {
 	const u8 *p = buf;
 	size_t remaining = buf_len;
-	size_t consumed;
+	size_t consumed = 0;
 	int ret;
 
-	if (remaining < 1)
+	if (!frame_check_remaining(remaining, 1))
 		return -EINVAL;
 
 	/* Skip frame type */
-	p++;
-	remaining--;
+	ret = FRAME_ADVANCE_SAFE(p, remaining, 1);
+	if (ret < 0)
+		return ret;
 
 	frame->type = TQUIC_FRAME_MAX_STREAM_DATA;
 
@@ -850,15 +1006,17 @@ static int tquic_parse_max_stream_data_frame(const u8 *buf, size_t buf_len,
 	ret = frame_varint_decode(p, remaining, &frame->max_stream_data.stream_id, &consumed);
 	if (ret < 0)
 		return ret;
-	p += consumed;
-	remaining -= consumed;
+	ret = FRAME_ADVANCE_SAFE(p, remaining, consumed);
+	if (ret < 0)
+		return ret;
 
 	/* Maximum Stream Data */
 	ret = frame_varint_decode(p, remaining, &frame->max_stream_data.max_stream_data, &consumed);
 	if (ret < 0)
 		return ret;
-	p += consumed;
-	remaining -= consumed;
+	ret = FRAME_ADVANCE_SAFE(p, remaining, consumed);
+	if (ret < 0)
+		return ret;
 
 	return (int)(buf_len - remaining);
 }
@@ -870,6 +1028,7 @@ static int tquic_parse_max_stream_data_frame(const u8 *buf, size_t buf_len,
  * @frame: Output frame structure
  * @bidi: true for bidirectional (0x12), false for unidirectional (0x13)
  *
+ * SECURITY: Uses bounds-checked arithmetic to prevent size_t underflow.
  * Returns bytes consumed on success, negative error code on failure.
  */
 static int tquic_parse_max_streams_frame(const u8 *buf, size_t buf_len,
@@ -877,15 +1036,16 @@ static int tquic_parse_max_streams_frame(const u8 *buf, size_t buf_len,
 {
 	const u8 *p = buf;
 	size_t remaining = buf_len;
-	size_t consumed;
+	size_t consumed = 0;
 	int ret;
 
-	if (remaining < 1)
+	if (!frame_check_remaining(remaining, 1))
 		return -EINVAL;
 
 	/* Skip frame type */
-	p++;
-	remaining--;
+	ret = FRAME_ADVANCE_SAFE(p, remaining, 1);
+	if (ret < 0)
+		return ret;
 
 	frame->type = bidi ? TQUIC_FRAME_MAX_STREAMS_BIDI : TQUIC_FRAME_MAX_STREAMS_UNI;
 	frame->max_streams.bidi = bidi;
@@ -894,12 +1054,13 @@ static int tquic_parse_max_streams_frame(const u8 *buf, size_t buf_len,
 	ret = frame_varint_decode(p, remaining, &frame->max_streams.max_streams, &consumed);
 	if (ret < 0)
 		return ret;
-	p += consumed;
-	remaining -= consumed;
+	ret = FRAME_ADVANCE_SAFE(p, remaining, consumed);
+	if (ret < 0)
+		return ret;
 
-	/* Validate: max streams cannot exceed 2^60 */
+	/* SECURITY: Validate max streams per RFC 9000 (cannot exceed 2^60) */
 	if (frame->max_streams.max_streams > (1ULL << 60))
-		return -EINVAL;
+		return -EPROTO;
 
 	return (int)(buf_len - remaining);
 }
@@ -910,6 +1071,7 @@ static int tquic_parse_max_streams_frame(const u8 *buf, size_t buf_len,
  * @buf_len: Length of the buffer
  * @frame: Output frame structure
  *
+ * SECURITY: Uses bounds-checked arithmetic to prevent size_t underflow.
  * Returns bytes consumed on success, negative error code on failure.
  */
 static int tquic_parse_data_blocked_frame(const u8 *buf, size_t buf_len,
@@ -917,15 +1079,16 @@ static int tquic_parse_data_blocked_frame(const u8 *buf, size_t buf_len,
 {
 	const u8 *p = buf;
 	size_t remaining = buf_len;
-	size_t consumed;
+	size_t consumed = 0;
 	int ret;
 
-	if (remaining < 1)
+	if (!frame_check_remaining(remaining, 1))
 		return -EINVAL;
 
 	/* Skip frame type */
-	p++;
-	remaining--;
+	ret = FRAME_ADVANCE_SAFE(p, remaining, 1);
+	if (ret < 0)
+		return ret;
 
 	frame->type = TQUIC_FRAME_DATA_BLOCKED;
 
@@ -933,8 +1096,9 @@ static int tquic_parse_data_blocked_frame(const u8 *buf, size_t buf_len,
 	ret = frame_varint_decode(p, remaining, &frame->data_blocked.max_data, &consumed);
 	if (ret < 0)
 		return ret;
-	p += consumed;
-	remaining -= consumed;
+	ret = FRAME_ADVANCE_SAFE(p, remaining, consumed);
+	if (ret < 0)
+		return ret;
 
 	return (int)(buf_len - remaining);
 }
@@ -945,6 +1109,7 @@ static int tquic_parse_data_blocked_frame(const u8 *buf, size_t buf_len,
  * @buf_len: Length of the buffer
  * @frame: Output frame structure
  *
+ * SECURITY: Uses bounds-checked arithmetic to prevent size_t underflow.
  * Returns bytes consumed on success, negative error code on failure.
  */
 static int tquic_parse_stream_data_blocked_frame(const u8 *buf, size_t buf_len,
@@ -952,15 +1117,16 @@ static int tquic_parse_stream_data_blocked_frame(const u8 *buf, size_t buf_len,
 {
 	const u8 *p = buf;
 	size_t remaining = buf_len;
-	size_t consumed;
+	size_t consumed = 0;
 	int ret;
 
-	if (remaining < 1)
+	if (!frame_check_remaining(remaining, 1))
 		return -EINVAL;
 
 	/* Skip frame type */
-	p++;
-	remaining--;
+	ret = FRAME_ADVANCE_SAFE(p, remaining, 1);
+	if (ret < 0)
+		return ret;
 
 	frame->type = TQUIC_FRAME_STREAM_DATA_BLOCKED;
 
@@ -968,15 +1134,17 @@ static int tquic_parse_stream_data_blocked_frame(const u8 *buf, size_t buf_len,
 	ret = frame_varint_decode(p, remaining, &frame->stream_data_blocked.stream_id, &consumed);
 	if (ret < 0)
 		return ret;
-	p += consumed;
-	remaining -= consumed;
+	ret = FRAME_ADVANCE_SAFE(p, remaining, consumed);
+	if (ret < 0)
+		return ret;
 
 	/* Maximum Stream Data (the limit at which blocking occurred) */
 	ret = frame_varint_decode(p, remaining, &frame->stream_data_blocked.max_stream_data, &consumed);
 	if (ret < 0)
 		return ret;
-	p += consumed;
-	remaining -= consumed;
+	ret = FRAME_ADVANCE_SAFE(p, remaining, consumed);
+	if (ret < 0)
+		return ret;
 
 	return (int)(buf_len - remaining);
 }
@@ -988,6 +1156,7 @@ static int tquic_parse_stream_data_blocked_frame(const u8 *buf, size_t buf_len,
  * @frame: Output frame structure
  * @bidi: true for bidirectional (0x16), false for unidirectional (0x17)
  *
+ * SECURITY: Uses bounds-checked arithmetic to prevent size_t underflow.
  * Returns bytes consumed on success, negative error code on failure.
  */
 static int tquic_parse_streams_blocked_frame(const u8 *buf, size_t buf_len,
@@ -995,15 +1164,16 @@ static int tquic_parse_streams_blocked_frame(const u8 *buf, size_t buf_len,
 {
 	const u8 *p = buf;
 	size_t remaining = buf_len;
-	size_t consumed;
+	size_t consumed = 0;
 	int ret;
 
-	if (remaining < 1)
+	if (!frame_check_remaining(remaining, 1))
 		return -EINVAL;
 
 	/* Skip frame type */
-	p++;
-	remaining--;
+	ret = FRAME_ADVANCE_SAFE(p, remaining, 1);
+	if (ret < 0)
+		return ret;
 
 	frame->type = bidi ? TQUIC_FRAME_STREAMS_BLOCKED_BIDI :
 			     TQUIC_FRAME_STREAMS_BLOCKED_UNI;
@@ -1013,12 +1183,13 @@ static int tquic_parse_streams_blocked_frame(const u8 *buf, size_t buf_len,
 	ret = frame_varint_decode(p, remaining, &frame->streams_blocked.max_streams, &consumed);
 	if (ret < 0)
 		return ret;
-	p += consumed;
-	remaining -= consumed;
+	ret = FRAME_ADVANCE_SAFE(p, remaining, consumed);
+	if (ret < 0)
+		return ret;
 
-	/* Validate: max streams cannot exceed 2^60 */
+	/* SECURITY: Validate max streams per RFC 9000 (cannot exceed 2^60) */
 	if (frame->streams_blocked.max_streams > (1ULL << 60))
-		return -EINVAL;
+		return -EPROTO;
 
 	return (int)(buf_len - remaining);
 }
@@ -1029,6 +1200,8 @@ static int tquic_parse_streams_blocked_frame(const u8 *buf, size_t buf_len,
  * @buf_len: Length of the buffer
  * @frame: Output frame structure
  *
+ * SECURITY: Uses bounds-checked arithmetic to prevent size_t underflow.
+ * Connection ID length is validated against protocol limits before use.
  * Returns bytes consumed on success, negative error code on failure.
  */
 static int tquic_parse_new_connection_id_frame(const u8 *buf, size_t buf_len,
@@ -1036,15 +1209,16 @@ static int tquic_parse_new_connection_id_frame(const u8 *buf, size_t buf_len,
 {
 	const u8 *p = buf;
 	size_t remaining = buf_len;
-	size_t consumed;
+	size_t consumed = 0;
 	int ret;
 
-	if (remaining < 1)
+	if (!frame_check_remaining(remaining, 1))
 		return -EINVAL;
 
 	/* Skip frame type */
-	p++;
-	remaining--;
+	ret = FRAME_ADVANCE_SAFE(p, remaining, 1);
+	if (ret < 0)
+		return ret;
 
 	frame->type = TQUIC_FRAME_NEW_CONNECTION_ID;
 
@@ -1052,43 +1226,52 @@ static int tquic_parse_new_connection_id_frame(const u8 *buf, size_t buf_len,
 	ret = frame_varint_decode(p, remaining, &frame->new_cid.seq_num, &consumed);
 	if (ret < 0)
 		return ret;
-	p += consumed;
-	remaining -= consumed;
+	ret = FRAME_ADVANCE_SAFE(p, remaining, consumed);
+	if (ret < 0)
+		return ret;
 
 	/* Retire Prior To */
 	ret = frame_varint_decode(p, remaining, &frame->new_cid.retire_prior_to, &consumed);
 	if (ret < 0)
 		return ret;
-	p += consumed;
-	remaining -= consumed;
+	ret = FRAME_ADVANCE_SAFE(p, remaining, consumed);
+	if (ret < 0)
+		return ret;
 
-	/* Retire Prior To must not be greater than Sequence Number */
+	/* SECURITY: Retire Prior To must not be greater than Sequence Number */
 	if (frame->new_cid.retire_prior_to > frame->new_cid.seq_num)
-		return -EINVAL;
+		return -EPROTO;
 
 	/* Connection ID Length (1 byte, not varint) */
-	if (remaining < 1)
-		return -EINVAL;
-	frame->new_cid.cid_len = *p++;
-	remaining--;
+	if (!frame_check_remaining(remaining, 1))
+		return -EPROTO;
+	frame->new_cid.cid_len = *p;
+	ret = FRAME_ADVANCE_SAFE(p, remaining, 1);
+	if (ret < 0)
+		return ret;
 
-	/* Validate CID length (1-20 for NEW_CONNECTION_ID, RFC 9000 says > 0) */
+	/*
+	 * SECURITY: Validate CID length before buffer access.
+	 * RFC 9000 requires 1-20 bytes for NEW_CONNECTION_ID.
+	 */
 	if (frame->new_cid.cid_len < 1 || frame->new_cid.cid_len > TQUIC_MAX_CID_LEN)
-		return -EINVAL;
+		return -EPROTO;
 
-	/* Connection ID */
-	if (remaining < frame->new_cid.cid_len)
-		return -EINVAL;
+	/* Connection ID - validate remaining buffer first */
+	if (!frame_check_remaining(remaining, frame->new_cid.cid_len))
+		return -EPROTO;
 	memcpy(frame->new_cid.cid, p, frame->new_cid.cid_len);
-	p += frame->new_cid.cid_len;
-	remaining -= frame->new_cid.cid_len;
+	ret = FRAME_ADVANCE_SAFE(p, remaining, frame->new_cid.cid_len);
+	if (ret < 0)
+		return ret;
 
 	/* Stateless Reset Token (16 bytes) */
-	if (remaining < TQUIC_STATELESS_RESET_TOKEN_LEN)
-		return -EINVAL;
+	if (!frame_check_remaining(remaining, TQUIC_STATELESS_RESET_TOKEN_LEN))
+		return -EPROTO;
 	memcpy(frame->new_cid.stateless_reset_token, p, TQUIC_STATELESS_RESET_TOKEN_LEN);
-	p += TQUIC_STATELESS_RESET_TOKEN_LEN;
-	remaining -= TQUIC_STATELESS_RESET_TOKEN_LEN;
+	ret = FRAME_ADVANCE_SAFE(p, remaining, TQUIC_STATELESS_RESET_TOKEN_LEN);
+	if (ret < 0)
+		return ret;
 
 	return (int)(buf_len - remaining);
 }
@@ -1099,6 +1282,7 @@ static int tquic_parse_new_connection_id_frame(const u8 *buf, size_t buf_len,
  * @buf_len: Length of the buffer
  * @frame: Output frame structure
  *
+ * SECURITY: Uses bounds-checked arithmetic to prevent size_t underflow.
  * Returns bytes consumed on success, negative error code on failure.
  */
 static int tquic_parse_retire_connection_id_frame(const u8 *buf, size_t buf_len,
@@ -1106,15 +1290,16 @@ static int tquic_parse_retire_connection_id_frame(const u8 *buf, size_t buf_len,
 {
 	const u8 *p = buf;
 	size_t remaining = buf_len;
-	size_t consumed;
+	size_t consumed = 0;
 	int ret;
 
-	if (remaining < 1)
+	if (!frame_check_remaining(remaining, 1))
 		return -EINVAL;
 
 	/* Skip frame type */
-	p++;
-	remaining--;
+	ret = FRAME_ADVANCE_SAFE(p, remaining, 1);
+	if (ret < 0)
+		return ret;
 
 	frame->type = TQUIC_FRAME_RETIRE_CONNECTION_ID;
 
@@ -1122,8 +1307,9 @@ static int tquic_parse_retire_connection_id_frame(const u8 *buf, size_t buf_len,
 	ret = frame_varint_decode(p, remaining, &frame->retire_cid.seq_num, &consumed);
 	if (ret < 0)
 		return ret;
-	p += consumed;
-	remaining -= consumed;
+	ret = FRAME_ADVANCE_SAFE(p, remaining, consumed);
+	if (ret < 0)
+		return ret;
 
 	return (int)(buf_len - remaining);
 }
@@ -1134,12 +1320,14 @@ static int tquic_parse_retire_connection_id_frame(const u8 *buf, size_t buf_len,
  * @buf_len: Length of the buffer
  * @frame: Output frame structure
  *
+ * SECURITY: Fixed-size frame with explicit bounds check.
  * Returns bytes consumed on success, negative error code on failure.
  */
 static int tquic_parse_path_challenge_frame(const u8 *buf, size_t buf_len,
 					    struct tquic_frame *frame)
 {
-	if (buf_len < 9)  /* 1 byte type + 8 bytes data */
+	/* SECURITY: PATH_CHALLENGE is fixed 9 bytes: type(1) + data(8) */
+	if (!frame_check_remaining(buf_len, 9))
 		return -EINVAL;
 
 	frame->type = TQUIC_FRAME_PATH_CHALLENGE;
@@ -1154,12 +1342,14 @@ static int tquic_parse_path_challenge_frame(const u8 *buf, size_t buf_len,
  * @buf_len: Length of the buffer
  * @frame: Output frame structure
  *
+ * SECURITY: Fixed-size frame with explicit bounds check.
  * Returns bytes consumed on success, negative error code on failure.
  */
 static int tquic_parse_path_response_frame(const u8 *buf, size_t buf_len,
 					   struct tquic_frame *frame)
 {
-	if (buf_len < 9)  /* 1 byte type + 8 bytes data */
+	/* SECURITY: PATH_RESPONSE is fixed 9 bytes: type(1) + data(8) */
+	if (!frame_check_remaining(buf_len, 9))
 		return -EINVAL;
 
 	frame->type = TQUIC_FRAME_PATH_RESPONSE;
@@ -1175,6 +1365,9 @@ static int tquic_parse_path_response_frame(const u8 *buf, size_t buf_len,
  * @frame: Output frame structure
  * @app_close: true for application close (0x1d), false for transport (0x1c)
  *
+ * SECURITY: Uses bounds-checked arithmetic to prevent size_t underflow.
+ * Reason phrase length is validated against buffer bounds.
+ *
  * Note: frame->conn_close.reason points into the original buffer.
  * Returns bytes consumed on success, negative error code on failure.
  */
@@ -1184,15 +1377,16 @@ static int tquic_parse_connection_close_frame(const u8 *buf, size_t buf_len,
 {
 	const u8 *p = buf;
 	size_t remaining = buf_len;
-	size_t consumed;
+	size_t consumed = 0;
 	int ret;
 
-	if (remaining < 1)
+	if (!frame_check_remaining(remaining, 1))
 		return -EINVAL;
 
 	/* Skip frame type */
-	p++;
-	remaining--;
+	ret = FRAME_ADVANCE_SAFE(p, remaining, 1);
+	if (ret < 0)
+		return ret;
 
 	frame->type = app_close ? TQUIC_FRAME_CONNECTION_CLOSE_APP :
 				  TQUIC_FRAME_CONNECTION_CLOSE;
@@ -1202,16 +1396,18 @@ static int tquic_parse_connection_close_frame(const u8 *buf, size_t buf_len,
 	ret = frame_varint_decode(p, remaining, &frame->conn_close.error_code, &consumed);
 	if (ret < 0)
 		return ret;
-	p += consumed;
-	remaining -= consumed;
+	ret = FRAME_ADVANCE_SAFE(p, remaining, consumed);
+	if (ret < 0)
+		return ret;
 
 	/* Frame Type (only for transport close, not app close) */
 	if (!app_close) {
 		ret = frame_varint_decode(p, remaining, &frame->conn_close.frame_type, &consumed);
 		if (ret < 0)
 			return ret;
-		p += consumed;
-		remaining -= consumed;
+		ret = FRAME_ADVANCE_SAFE(p, remaining, consumed);
+		if (ret < 0)
+			return ret;
 	} else {
 		frame->conn_close.frame_type = 0;
 	}
@@ -1220,21 +1416,27 @@ static int tquic_parse_connection_close_frame(const u8 *buf, size_t buf_len,
 	ret = frame_varint_decode(p, remaining, &frame->conn_close.reason_len, &consumed);
 	if (ret < 0)
 		return ret;
-	p += consumed;
-	remaining -= consumed;
+	ret = FRAME_ADVANCE_SAFE(p, remaining, consumed);
+	if (ret < 0)
+		return ret;
 
-	/* Reason Phrase - validate length doesn't exceed size_t and remaining buffer */
-	if (frame->conn_close.reason_len > SIZE_MAX ||
-	    remaining < frame->conn_close.reason_len)
-		return -EINVAL;
+	/*
+	 * SECURITY: Validate reason phrase length before buffer access.
+	 * Check against SIZE_MAX for 32-bit safety, then against remaining.
+	 */
+	if (frame->conn_close.reason_len > SIZE_MAX)
+		return -EPROTO;
+	if (!frame_check_remaining(remaining, (size_t)frame->conn_close.reason_len))
+		return -EPROTO;
 
 	if (frame->conn_close.reason_len > 0)
 		frame->conn_close.reason = p;
 	else
 		frame->conn_close.reason = NULL;
 
-	p += frame->conn_close.reason_len;
-	remaining -= frame->conn_close.reason_len;
+	ret = FRAME_ADVANCE_SAFE(p, remaining, (size_t)frame->conn_close.reason_len);
+	if (ret < 0)
+		return ret;
 
 	return (int)(buf_len - remaining);
 }
@@ -1245,13 +1447,14 @@ static int tquic_parse_connection_close_frame(const u8 *buf, size_t buf_len,
  * @buf_len: Length of the buffer
  * @frame: Output frame structure
  *
+ * SECURITY: Fixed-size frame (type byte only) with explicit bounds check.
  * HANDSHAKE_DONE has no payload, just the type byte.
  * Returns bytes consumed on success, negative error code on failure.
  */
 static int tquic_parse_handshake_done_frame(const u8 *buf, size_t buf_len,
 					    struct tquic_frame *frame)
 {
-	if (buf_len < 1)
+	if (!frame_check_remaining(buf_len, 1))
 		return -EINVAL;
 
 	frame->type = TQUIC_FRAME_HANDSHAKE_DONE;
@@ -1268,6 +1471,9 @@ static int tquic_parse_handshake_done_frame(const u8 *buf, size_t buf_len,
  * - Type 0x30: No length field, data extends to end of packet
  * - Type 0x31: Has length field specifying data size
  *
+ * SECURITY: Uses bounds-checked arithmetic to prevent size_t underflow.
+ * Datagram length is validated against buffer bounds before access.
+ *
  * Note: frame->datagram.data points into the original buffer.
  * Returns bytes consumed on success, negative error code on failure.
  */
@@ -1276,11 +1482,11 @@ int tquic_parse_datagram_frame(const u8 *buf, size_t buf_len,
 {
 	const u8 *p = buf;
 	size_t remaining = buf_len;
-	size_t consumed;
+	size_t consumed = 0;
 	u8 frame_type;
 	int ret;
 
-	if (remaining < 1)
+	if (!frame_check_remaining(remaining, 1))
 		return -EINVAL;
 
 	frame_type = buf[0];
@@ -1288,27 +1494,34 @@ int tquic_parse_datagram_frame(const u8 *buf, size_t buf_len,
 	frame->datagram.has_length = (frame_type & 0x01) != 0;
 
 	/* Skip frame type */
-	p++;
-	remaining--;
+	ret = FRAME_ADVANCE_SAFE(p, remaining, 1);
+	if (ret < 0)
+		return ret;
 
 	if (frame->datagram.has_length) {
 		/* Type 0x31: Length field present */
 		ret = frame_varint_decode(p, remaining, &frame->datagram.length, &consumed);
 		if (ret < 0)
 			return ret;
-		p += consumed;
-		remaining -= consumed;
+		ret = FRAME_ADVANCE_SAFE(p, remaining, consumed);
+		if (ret < 0)
+			return ret;
 
-		/* Validate length doesn't exceed SIZE_MAX and remaining buffer */
-		if (frame->datagram.length > SIZE_MAX ||
-		    remaining < frame->datagram.length)
-			return -EINVAL;
+		/*
+		 * SECURITY: Validate datagram length before buffer access.
+		 * Check against SIZE_MAX for 32-bit safety, then against remaining.
+		 */
+		if (frame->datagram.length > SIZE_MAX)
+			return -EPROTO;
+		if (!frame_check_remaining(remaining, (size_t)frame->datagram.length))
+			return -EPROTO;
 
 		frame->datagram.data = p;
-		p += frame->datagram.length;
-		remaining -= frame->datagram.length;
+		ret = FRAME_ADVANCE_SAFE(p, remaining, (size_t)frame->datagram.length);
+		if (ret < 0)
+			return ret;
 	} else {
-		/* Type 0x30: Data extends to end of packet */
+		/* Type 0x30: Data extends to end of packet - remaining is bounded */
 		frame->datagram.length = remaining;
 		frame->datagram.data = p;
 		remaining = 0;
@@ -1326,6 +1539,17 @@ EXPORT_SYMBOL_GPL(tquic_parse_datagram_frame);
  * @ranges_buf: Buffer for ACK ranges (can be NULL if ACK not expected)
  * @max_ranges: Maximum number of ACK ranges
  *
+ * SECURITY: This is the main entry point for parsing untrusted network data.
+ * All frame-specific parsers use bounds-checked arithmetic (FRAME_ADVANCE_SAFE)
+ * to prevent size_t underflow vulnerabilities that could lead to buffer
+ * over-reads or remote code execution.
+ *
+ * Error codes:
+ *   -EINVAL: Invalid parameters (NULL pointers, zero length)
+ *   -EPROTO: Malformed frame (bounds violation, invalid length fields)
+ *   -EOVERFLOW: Resource limits exceeded (e.g., too many ACK ranges)
+ *   -EPROTONOSUPPORT: Unknown frame type
+ *
  * Returns bytes consumed on success, negative error code on failure.
  */
 int tquic_parse_frame(const u8 *buf, size_t buf_len, struct tquic_frame *frame,
@@ -1333,7 +1557,8 @@ int tquic_parse_frame(const u8 *buf, size_t buf_len, struct tquic_frame *frame,
 {
 	u8 type;
 
-	if (!buf || !frame || buf_len < 1)
+	/* SECURITY: Validate inputs before accessing buffer */
+	if (!buf || !frame || !frame_check_remaining(buf_len, 1))
 		return -EINVAL;
 
 	type = buf[0];

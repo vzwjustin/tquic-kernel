@@ -21,6 +21,7 @@
 #include <linux/random.h>
 #include <linux/crc32.h>
 #include <linux/string.h>
+#include <linux/overflow.h>
 #include <crypto/utils.h>
 #include <net/tquic.h>
 #include <net/tquic_frame.h>
@@ -517,6 +518,8 @@ int tquic_parse_long_header(const u8 *data, size_t len,
 
 	/* Token (Initial packets only) */
 	if (hdr->type == TQUIC_PKT_INITIAL) {
+		size_t new_offset;
+
 		ret = tquic_varint_decode(&data[offset], len - offset,
 					  &hdr->token_len);
 		if (ret < 0)
@@ -524,18 +527,38 @@ int tquic_parse_long_header(const u8 *data, size_t len,
 		offset += ret;
 
 		/*
-		 * Validate token length to prevent memory exhaustion attacks.
-		 * An attacker could send a varint encoding a huge token length
-		 * to cause excessive memory allocation.
+		 * SECURITY FIX: Token length validation to prevent buffer overflow.
+		 *
+		 * A malicious packet can encode an arbitrary 62-bit value in the
+		 * token_len varint field. We must validate:
+		 * 1. token_len does not exceed TQUIC_MAX_TOKEN_LEN (protocol limit)
+		 * 2. token_len does not cause integer overflow when added to offset
+		 * 3. offset + token_len does not exceed the buffer length
+		 *
+		 * These checks prevent:
+		 * - Memory exhaustion attacks from huge token_len values
+		 * - Integer overflow attacks where offset + token_len wraps around
+		 * - Buffer over-read attacks accessing memory past the packet
 		 */
 		if (hdr->token_len > TQUIC_MAX_TOKEN_LEN)
-			return -EINVAL;
+			return -EPROTO;
 
 		if (hdr->token_len > 0) {
-			if (offset + hdr->token_len > len)
-				return -EINVAL;
+			/*
+			 * Use check_add_overflow to safely compute offset + token_len.
+			 * This prevents integer wraparound attacks where a carefully
+			 * crafted token_len could cause offset + token_len to wrap
+			 * around to a small value, bypassing the bounds check.
+			 */
+			if (check_add_overflow(offset, (size_t)hdr->token_len,
+					       &new_offset))
+				return -EPROTO;
+
+			if (new_offset > len)
+				return -EPROTO;
+
 			hdr->token = (u8 *)&data[offset];
-			offset += hdr->token_len;
+			offset = new_offset;
 		}
 	}
 
@@ -545,14 +568,29 @@ int tquic_parse_long_header(const u8 *data, size_t len,
 		return ret;
 	offset += ret;
 
-	/* Verify we have enough data for payload */
-	if (offset + hdr->payload_len > len)
-		return -EINVAL;
+	/*
+	 * SECURITY FIX: Verify payload length with safe arithmetic.
+	 *
+	 * The payload_len field is decoded from a varint that can encode
+	 * values up to 2^62-1. A malicious packet could specify a huge
+	 * payload_len to cause offset + payload_len to overflow, bypassing
+	 * the bounds check and causing buffer over-read.
+	 */
+	{
+		size_t end_offset;
+
+		if (check_add_overflow(offset, (size_t)hdr->payload_len,
+				       &end_offset))
+			return -EPROTO;
+
+		if (end_offset > len)
+			return -EPROTO;
+	}
 
 	/* Packet number (1-4 bytes, encoded in first byte's low bits) */
 	hdr->pn_len = (first_byte & 0x03) + 1;
 	if (offset + hdr->pn_len > len)
-		return -EINVAL;
+		return -EPROTO;
 
 	/*
 	 * Note: In practice, the packet number is protected by header
@@ -1203,22 +1241,56 @@ int tquic_split_coalesced(const u8 *data, size_t len,
 			return -EINVAL;
 		hdr_len += 1 + scid_len;
 
+		/*
+		 * Verify bounds after SCID parsing before proceeding to
+		 * type-specific fields (token for Initial, length field, etc.)
+		 */
+		if (offset + hdr_len > len)
+			return -EPROTO;
+
 		/* Check for Initial packet (has token) */
 		if ((data[offset] & QUIC_LONG_HEADER_TYPE_MASK) ==
 		    (QUIC_PACKET_TYPE_INITIAL << QUIC_LONG_HEADER_TYPE_SHIFT)) {
+			size_t token_addition;
+			size_t new_hdr_len;
+
 			/* Token length (varint) */
 			ret = tquic_varint_decode(&data[offset + hdr_len],
 						  len - offset - hdr_len,
 						  &token_len);
 			if (ret < 0)
 				return ret;
+
 			/*
-			 * Validate token length to prevent integer overflow
-			 * and memory exhaustion attacks from malicious packets.
+			 * SECURITY FIX: Token length overflow prevention.
+			 *
+			 * A malicious packet can specify an arbitrary token_len
+			 * value. We must:
+			 * 1. Validate token_len against TQUIC_MAX_TOKEN_LEN
+			 * 2. Use safe arithmetic to prevent integer overflow
+			 * 3. Verify the resulting offset is within bounds
+			 *
+			 * This prevents buffer over-read attacks and integer
+			 * wraparound exploits in coalesced packet splitting.
 			 */
 			if (token_len > TQUIC_MAX_TOKEN_LEN)
-				return -EINVAL;
-			hdr_len += ret + token_len;
+				return -EPROTO;
+
+			/* Safe addition: ret + token_len */
+			if (check_add_overflow((size_t)ret, (size_t)token_len,
+					       &token_addition))
+				return -EPROTO;
+
+			/* Safe addition: hdr_len + (ret + token_len) */
+			if (check_add_overflow(hdr_len, token_addition,
+					       &new_hdr_len))
+				return -EPROTO;
+
+			hdr_len = new_hdr_len;
+
+			/* Verify we're still within buffer bounds */
+			if (hdr_len > len - offset)
+				return -EPROTO;
 		}
 
 		/* Check for Retry packet (no length field) */
@@ -1232,7 +1304,7 @@ int tquic_split_coalesced(const u8 *data, size_t len,
 
 		/* Length field */
 		if (offset + hdr_len >= len)
-			return -EINVAL;
+			return -EPROTO;
 		ret = tquic_varint_decode(&data[offset + hdr_len],
 					  len - offset - hdr_len,
 					  &pkt_len);
@@ -1240,12 +1312,32 @@ int tquic_split_coalesced(const u8 *data, size_t len,
 			return ret;
 		hdr_len += ret;
 
-		/* Total packet length */
-		if (offset + hdr_len + pkt_len > len)
-			return -EINVAL;
+		/*
+		 * SECURITY FIX: Safe total packet length calculation.
+		 *
+		 * Prevent integer overflow in offset + hdr_len + pkt_len.
+		 * A malicious pkt_len value could cause wraparound.
+		 */
+		{
+			size_t total_offset;
+			size_t pkt_total;
 
-		lengths[count] = hdr_len + pkt_len;
-		offset += lengths[count];
+			/* First: hdr_len + pkt_len */
+			if (check_add_overflow(hdr_len, (size_t)pkt_len,
+					       &pkt_total))
+				return -EPROTO;
+
+			/* Then: offset + (hdr_len + pkt_len) */
+			if (check_add_overflow(offset, pkt_total,
+					       &total_offset))
+				return -EPROTO;
+
+			if (total_offset > len)
+				return -EPROTO;
+
+			lengths[count] = pkt_total;
+			offset = total_offset;
+		}
 		count++;
 	}
 

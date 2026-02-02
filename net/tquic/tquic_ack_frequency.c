@@ -1,24 +1,28 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * TQUIC: ACK Frequency Extension (draft-ietf-quic-ack-frequency)
+ * TQUIC: ACK Frequency Extension (RFC 9002 Appendix A.7)
  *
  * Copyright (c) 2026 Linux Foundation
  *
- * Implements ACK_FREQUENCY and IMMEDIATE_ACK frames to allow sender
- * control over how frequently the peer generates acknowledgments.
+ * Connection-level wrappers for ACK Frequency extension.
  *
- * This extension allows a sender to optimize ACK behavior for the
- * connection's characteristics:
- *   - High-bandwidth paths benefit from reduced ACK frequency
- *   - Latency-sensitive applications can request immediate ACKs
- *   - Reorder-tolerant applications can reduce spurious ACKs
+ * This file provides the connection-level API that wraps the core
+ * ACK frequency implementation in core/ack_frequency.c. It manages
+ * the ack_freq_state field in tquic_connection and provides the
+ * interface used by the TQUIC protocol implementation.
  *
  * Frame Types:
- *   - ACK_FREQUENCY (0xaf): Negotiate delayed ACK behavior
- *   - IMMEDIATE_ACK (0xac): Request immediate ACK from peer
+ *   - ACK_FREQUENCY (0xaf): Request peer adjust ACK behavior
+ *   - IMMEDIATE_ACK (0x1f): Request immediate ACK from peer
  *
  * Transport Parameter:
- *   - min_ack_delay (0x0e): Minimum ACK delay in microseconds
+ *   - min_ack_delay (0xff04de1a): Minimum ACK delay in microseconds
+ *
+ * Features:
+ *   - Full integration with tquic_connection structure
+ *   - Automatic state management during connection lifecycle
+ *   - Congestion control integration callbacks
+ *   - Dynamic ACK frequency adjustment
  */
 
 #include <linux/module.h>
@@ -29,6 +33,7 @@
 
 #include "tquic_ack_frequency.h"
 #include "tquic_mib.h"
+#include "core/ack_frequency.h"
 
 /*
  * =============================================================================
@@ -127,94 +132,192 @@ static inline int varint_decode(const u8 *buf, size_t buf_len, u64 *val)
 
 /*
  * =============================================================================
- * ACK Frequency State Management
+ * Helper Functions
  * =============================================================================
  */
 
 /**
- * tquic_ack_freq_init - Initialize ACK frequency state for a connection
+ * conn_get_ack_freq_state - Get ACK frequency state from connection
+ * @conn: Connection
+ *
+ * Returns the ACK frequency state, or NULL if not initialized.
  */
-int tquic_ack_freq_init(struct tquic_connection *conn)
+static inline struct tquic_ack_frequency_state *
+conn_get_ack_freq_state(struct tquic_connection *conn)
+{
+	if (!conn)
+		return NULL;
+	return (struct tquic_ack_frequency_state *)conn->ack_freq_state;
+}
+
+/*
+ * =============================================================================
+ * Connection-Level State Management
+ * =============================================================================
+ */
+
+/**
+ * tquic_ack_freq_conn_init - Initialize ACK frequency state for a connection
+ * @conn: Connection to initialize
+ *
+ * Allocates and initializes the ACK frequency state, storing it in
+ * conn->ack_freq_state.
+ *
+ * Return: 0 on success, negative error on failure
+ */
+int tquic_ack_freq_conn_init(struct tquic_connection *conn)
 {
 	struct tquic_ack_frequency_state *state;
 
 	if (!conn)
 		return -EINVAL;
 
-	state = kzalloc(sizeof(*state), GFP_KERNEL);
+	/* Check if already initialized */
+	if (conn->ack_freq_state)
+		return 0;
+
+	/* Check if ACK frequency is globally enabled */
+	if (!tquic_sysctl_get_ack_frequency_enabled()) {
+		conn->ack_freq_state = NULL;
+		return 0;
+	}
+
+	/* Use core implementation to create state */
+	state = tquic_ack_freq_state_create(conn);
 	if (!state)
 		return -ENOMEM;
 
-	spin_lock_init(&state->lock);
+	/* Set default min_ack_delay from sysctl */
+	state->min_ack_delay_us = tquic_sysctl_get_default_ack_delay_us();
 
-	/* Set defaults per draft-ietf-quic-ack-frequency */
-	state->enabled = false;
-	state->min_ack_delay_us = TQUIC_DEFAULT_MAX_ACK_DELAY_US;
-	state->peer_min_ack_delay_us = TQUIC_DEFAULT_MAX_ACK_DELAY_US;
-	state->last_sent_seq = 0;
-	state->last_recv_seq = 0;
-	state->current_ack_elicit_threshold = TQUIC_DEFAULT_ACK_ELICITING_THRESHOLD;
-	state->current_max_ack_delay_us = TQUIC_DEFAULT_MAX_ACK_DELAY_US;
-	state->current_reorder_threshold = TQUIC_DEFAULT_REORDER_THRESHOLD;
-	state->pending_send = false;
-	state->pending_immediate_ack = false;
-	state->packets_since_ack = 0;
+	/* Store in connection */
+	conn->ack_freq_state = state;
 
-	/* Store state in connection - use crypto_state temporarily
-	 * TODO: Add dedicated ack_freq_state field to tquic_connection */
-	/* For now we'll embed in the connection's private area */
-
-	pr_debug("tquic: ACK frequency state initialized\n");
+	pr_debug("tquic: ACK frequency state initialized for connection\n");
 
 	return 0;
+}
+EXPORT_SYMBOL_GPL(tquic_ack_freq_conn_init);
+
+/**
+ * tquic_ack_freq_conn_cleanup - Clean up ACK frequency state
+ * @conn: Connection to clean up
+ */
+void tquic_ack_freq_conn_cleanup(struct tquic_connection *conn)
+{
+	struct tquic_ack_frequency_state *state;
+
+	if (!conn)
+		return;
+
+	state = conn_get_ack_freq_state(conn);
+	if (!state)
+		return;
+
+	/* Use core implementation to destroy state */
+	tquic_ack_freq_state_destroy(state);
+	conn->ack_freq_state = NULL;
+
+	pr_debug("tquic: ACK frequency state cleaned up for connection\n");
+}
+EXPORT_SYMBOL_GPL(tquic_ack_freq_conn_cleanup);
+
+/**
+ * tquic_ack_freq_conn_enable - Enable ACK frequency extension
+ * @conn: Connection
+ * @peer_min_ack_delay: Peer's min_ack_delay transport parameter (microseconds)
+ */
+void tquic_ack_freq_conn_enable(struct tquic_connection *conn,
+				u64 peer_min_ack_delay)
+{
+	struct tquic_ack_frequency_state *state;
+
+	if (!conn)
+		return;
+
+	state = conn_get_ack_freq_state(conn);
+	if (!state)
+		return;
+
+	/* Use core implementation to enable */
+	tquic_ack_freq_enable(state, peer_min_ack_delay);
+
+	pr_debug("tquic: ACK frequency enabled for connection, "
+		 "peer_min_ack_delay=%llu us\n", peer_min_ack_delay);
+}
+EXPORT_SYMBOL_GPL(tquic_ack_freq_conn_enable);
+
+/**
+ * tquic_ack_freq_conn_is_enabled - Check if ACK frequency is enabled
+ * @conn: Connection to check
+ *
+ * Return: true if ACK frequency extension is negotiated and enabled
+ */
+bool tquic_ack_freq_conn_is_enabled(struct tquic_connection *conn)
+{
+	struct tquic_ack_frequency_state *state;
+
+	if (!conn)
+		return false;
+
+	/* Check global sysctl first */
+	if (!tquic_sysctl_get_ack_frequency_enabled())
+		return false;
+
+	state = conn_get_ack_freq_state(conn);
+	if (!state)
+		return false;
+
+	return tquic_ack_freq_is_enabled(state);
+}
+EXPORT_SYMBOL_GPL(tquic_ack_freq_conn_is_enabled);
+
+/*
+ * =============================================================================
+ * Legacy API (for backward compatibility)
+ * =============================================================================
+ */
+
+/**
+ * tquic_ack_freq_init - Legacy: Initialize ACK frequency state
+ * @conn: Connection to initialize
+ *
+ * This is the legacy API that maps to tquic_ack_freq_conn_init().
+ */
+int tquic_ack_freq_init(struct tquic_connection *conn)
+{
+	return tquic_ack_freq_conn_init(conn);
 }
 EXPORT_SYMBOL_GPL(tquic_ack_freq_init);
 
 /**
- * tquic_ack_freq_cleanup - Clean up ACK frequency state
+ * tquic_ack_freq_cleanup - Legacy: Clean up ACK frequency state
+ * @conn: Connection to clean up
  */
 void tquic_ack_freq_cleanup(struct tquic_connection *conn)
 {
-	/* State cleanup would happen here */
-	pr_debug("tquic: ACK frequency state cleaned up\n");
+	tquic_ack_freq_conn_cleanup(conn);
 }
 EXPORT_SYMBOL_GPL(tquic_ack_freq_cleanup);
 
 /**
- * tquic_ack_freq_enable - Enable ACK frequency extension after negotiation
+ * tquic_ack_freq_enable - Legacy: Enable ACK frequency extension
+ * @conn: Connection
+ * @peer_min_ack_delay: Peer's min_ack_delay transport parameter
  */
 void tquic_ack_freq_enable(struct tquic_connection *conn, u64 peer_min_ack_delay)
 {
-	if (!conn)
-		return;
-
-	/* Validate peer's min_ack_delay */
-	if (peer_min_ack_delay < TQUIC_MIN_ACK_DELAY_MIN_US ||
-	    peer_min_ack_delay > TQUIC_MIN_ACK_DELAY_MAX_US) {
-		pr_warn("tquic: invalid peer min_ack_delay: %llu\n",
-			peer_min_ack_delay);
-		return;
-	}
-
-	pr_debug("tquic: ACK frequency enabled, peer_min_ack_delay=%llu us\n",
-		 peer_min_ack_delay);
+	tquic_ack_freq_conn_enable(conn, peer_min_ack_delay);
 }
 EXPORT_SYMBOL_GPL(tquic_ack_freq_enable);
 
 /**
- * tquic_ack_freq_is_enabled - Check if ACK frequency is enabled
+ * tquic_ack_freq_is_enabled - Legacy: Check if ACK frequency is enabled
+ * @conn: Connection to check
  */
 bool tquic_ack_freq_is_enabled(struct tquic_connection *conn)
 {
-	if (!conn)
-		return false;
-
-	/* Check sysctl first */
-	if (!tquic_sysctl_get_ack_frequency_enabled())
-		return false;
-
-	/* Extension must be negotiated via transport parameters */
-	return true;
+	return tquic_ack_freq_conn_is_enabled(conn);
 }
 EXPORT_SYMBOL_GPL(tquic_ack_freq_is_enabled);
 
@@ -226,6 +329,12 @@ EXPORT_SYMBOL_GPL(tquic_ack_freq_is_enabled);
 
 /**
  * tquic_ack_frequency_frame_size - Calculate ACK_FREQUENCY frame size
+ * @ack_eliciting_threshold: ACK-eliciting threshold value
+ * @request_max_ack_delay: Max ACK delay value
+ * @reorder_threshold: Reorder threshold value
+ * @seq_num: Sequence number value
+ *
+ * Return: Size in bytes needed for the frame
  */
 size_t tquic_ack_frequency_frame_size(u64 ack_eliciting_threshold,
 				      u64 request_max_ack_delay,
@@ -261,14 +370,15 @@ EXPORT_SYMBOL_GPL(tquic_ack_frequency_frame_size);
 
 /**
  * tquic_gen_ack_frequency_frame - Generate ACK_FREQUENCY frame
+ * @conn: Connection
+ * @buf: Output buffer
+ * @buf_len: Buffer length
+ * @ack_eliciting_threshold: ACK-eliciting packets before ACK required
+ * @request_max_ack_delay: Requested max ACK delay (microseconds)
+ * @reorder_threshold: Reorder threshold (packets)
+ * @seq_num: Output sequence number assigned
  *
- * ACK_FREQUENCY Frame {
- *   Type (i) = 0xaf,
- *   Sequence Number (i),
- *   Ack-Eliciting Threshold (i),
- *   Request Max Ack Delay (i),
- *   Reorder Threshold (i),
- * }
+ * Return: Number of bytes written, or negative error code
  */
 int tquic_gen_ack_frequency_frame(struct tquic_connection *conn,
 				  u8 *buf, size_t buf_len,
@@ -277,6 +387,7 @@ int tquic_gen_ack_frequency_frame(struct tquic_connection *conn,
 				  u64 reorder_threshold,
 				  u64 *seq_num)
 {
+	struct tquic_ack_frequency_state *state;
 	u8 *p = buf;
 	int ret;
 	size_t required_size;
@@ -285,11 +396,18 @@ int tquic_gen_ack_frequency_frame(struct tquic_connection *conn,
 	if (!conn || !buf || !seq_num)
 		return -EINVAL;
 
-	/* Get next sequence number (monotonically increasing) */
-	spin_lock(&conn->lock);
-	/* Would use ack_freq state here; for now use a simple counter */
-	next_seq = conn->stats.tx_packets & 0xFFFF; /* Simplified */
-	spin_unlock(&conn->lock);
+	state = conn_get_ack_freq_state(conn);
+	if (!state) {
+		/* Fallback: use connection stats for sequence */
+		spin_lock(&conn->lock);
+		next_seq = conn->stats.tx_packets & 0xFFFF;
+		spin_unlock(&conn->lock);
+	} else {
+		/* Get next sequence number from state */
+		spin_lock(&state->lock);
+		next_seq = ++state->last_sent_seq;
+		spin_unlock(&state->lock);
+	}
 
 	/* Calculate required size */
 	required_size = tquic_ack_frequency_frame_size(ack_eliciting_threshold,
@@ -331,6 +449,13 @@ int tquic_gen_ack_frequency_frame(struct tquic_connection *conn,
 
 	*seq_num = next_seq;
 
+	/* Update statistics */
+	if (state) {
+		spin_lock(&state->lock);
+		state->frames_sent++;
+		spin_unlock(&state->lock);
+	}
+
 	pr_debug("tquic: generated ACK_FREQUENCY frame: seq=%llu threshold=%llu "
 		 "max_delay=%llu reorder=%llu\n",
 		 next_seq, ack_eliciting_threshold,
@@ -342,12 +467,10 @@ EXPORT_SYMBOL_GPL(tquic_gen_ack_frequency_frame);
 
 /**
  * tquic_gen_immediate_ack_frame - Generate IMMEDIATE_ACK frame
+ * @buf: Output buffer
+ * @buf_len: Buffer length
  *
- * IMMEDIATE_ACK Frame {
- *   Type (i) = 0xac,
- * }
- *
- * The frame has no additional fields beyond the type.
+ * Return: Number of bytes written, or negative error code
  */
 int tquic_gen_immediate_ack_frame(u8 *buf, size_t buf_len)
 {
@@ -356,7 +479,7 @@ int tquic_gen_immediate_ack_frame(u8 *buf, size_t buf_len)
 	if (!buf)
 		return -EINVAL;
 
-	/* Frame type (0xac) - requires 2 bytes as varint */
+	/* Frame type (0x1f) */
 	ret = varint_encode(buf, buf_len, TQUIC_FRAME_IMMEDIATE_ACK);
 	if (ret < 0)
 		return ret;
@@ -375,8 +498,11 @@ EXPORT_SYMBOL_GPL(tquic_gen_immediate_ack_frame);
 
 /**
  * tquic_parse_ack_frequency_frame - Parse ACK_FREQUENCY frame
+ * @buf: Input buffer (starting after frame type byte)
+ * @buf_len: Buffer length
+ * @frame: Output frame structure
  *
- * Parses from after the frame type byte.
+ * Return: Bytes consumed on success, negative error on failure
  */
 int tquic_parse_ack_frequency_frame(const u8 *buf, size_t buf_len,
 				    struct tquic_ack_frequency_frame *frame)
@@ -402,6 +528,12 @@ int tquic_parse_ack_frequency_frame(const u8 *buf, size_t buf_len,
 	p += ret;
 	remaining -= ret;
 
+	/* Validate threshold - must be non-zero */
+	if (frame->ack_eliciting_threshold == 0) {
+		pr_warn("tquic: ACK_FREQUENCY with zero threshold is invalid\n");
+		return -EINVAL;
+	}
+
 	/* Request Max Ack Delay */
 	ret = varint_decode(p, remaining, &frame->request_max_ack_delay);
 	if (ret < 0)
@@ -426,6 +558,10 @@ EXPORT_SYMBOL_GPL(tquic_parse_ack_frequency_frame);
 
 /**
  * tquic_parse_immediate_ack_frame - Parse IMMEDIATE_ACK frame
+ * @buf: Input buffer (starting at frame type byte)
+ * @buf_len: Buffer length
+ *
+ * Return: Bytes consumed on success, negative error on failure
  */
 int tquic_parse_immediate_ack_frame(const u8 *buf, size_t buf_len)
 {
@@ -440,8 +576,11 @@ int tquic_parse_immediate_ack_frame(const u8 *buf, size_t buf_len)
 	if (ret < 0)
 		return ret;
 
-	if (frame_type != TQUIC_FRAME_IMMEDIATE_ACK)
+	if (frame_type != TQUIC_FRAME_IMMEDIATE_ACK) {
+		pr_warn("tquic: expected IMMEDIATE_ACK (0x1f), got 0x%llx\n",
+			frame_type);
 		return -EINVAL;
+	}
 
 	pr_debug("tquic: parsed IMMEDIATE_ACK frame\n");
 
@@ -457,14 +596,16 @@ EXPORT_SYMBOL_GPL(tquic_parse_immediate_ack_frame);
 
 /**
  * tquic_handle_ack_frequency_frame - Process received ACK_FREQUENCY frame
+ * @conn: Connection
+ * @frame: Parsed frame
  *
- * Per draft-ietf-quic-ack-frequency Section 4.1:
- * "An endpoint MUST use the values from the ACK_FREQUENCY frame with
- * the largest received Sequence Number field value."
+ * Return: 0 on success, negative error code on failure
  */
 int tquic_handle_ack_frequency_frame(struct tquic_connection *conn,
 				     const struct tquic_ack_frequency_frame *frame)
 {
+	struct tquic_ack_frequency_state *state;
+
 	if (!conn || !frame)
 		return -EINVAL;
 
@@ -474,22 +615,16 @@ int tquic_handle_ack_frequency_frame(struct tquic_connection *conn,
 		return -EINVAL;
 	}
 
-	/*
-	 * Per Section 4.1: Only process if sequence number is larger than
-	 * previously received. This ensures monotonicity.
-	 */
-	spin_lock(&conn->lock);
-
-	/* Would compare against last_recv_seq in ack_freq state */
-	/* For now, just log and apply */
-
-	spin_unlock(&conn->lock);
-
-	pr_debug("tquic: applied ACK_FREQUENCY: threshold=%llu max_delay=%llu "
-		 "reorder=%llu\n",
-		 frame->ack_eliciting_threshold,
-		 frame->request_max_ack_delay,
-		 frame->reorder_threshold);
+	state = conn_get_ack_freq_state(conn);
+	if (state) {
+		/* Use core implementation */
+		int ret = tquic_handle_ack_frequency_frame(state, frame);
+		if (ret < 0)
+			return ret;
+	} else {
+		/* Extension not fully initialized - just log */
+		pr_debug("tquic: received ACK_FREQUENCY but state not initialized\n");
+	}
 
 	/* Update MIB counter */
 	if (conn->sk)
@@ -501,24 +636,24 @@ EXPORT_SYMBOL_GPL(tquic_handle_ack_frequency_frame);
 
 /**
  * tquic_handle_immediate_ack_frame - Process received IMMEDIATE_ACK frame
+ * @conn: Connection
  *
- * Per draft-ietf-quic-ack-frequency Section 5:
- * "When an endpoint receives an IMMEDIATE_ACK frame, it SHOULD send
- * an ACK frame immediately upon receiving an ack-eliciting packet."
+ * Return: 0 on success, negative error code on failure
  */
 int tquic_handle_immediate_ack_frame(struct tquic_connection *conn)
 {
+	struct tquic_ack_frequency_state *state;
+
 	if (!conn)
 		return -EINVAL;
 
-	/*
-	 * Set flag to trigger immediate ACK on next ack-eliciting packet.
-	 * The actual ACK generation happens in the receive path.
-	 */
-	spin_lock(&conn->lock);
-	/* Would set pending_immediate_ack in ack_freq state */
-	spin_unlock(&conn->lock);
+	state = conn_get_ack_freq_state(conn);
+	if (state) {
+		/* Use core implementation */
+		return tquic_handle_immediate_ack_frame(state);
+	}
 
+	/* Extension not fully initialized - just log */
 	pr_debug("tquic: received IMMEDIATE_ACK, will ACK next packet immediately\n");
 
 	return 0;
@@ -533,20 +668,19 @@ EXPORT_SYMBOL_GPL(tquic_handle_immediate_ack_frame);
 
 /**
  * tquic_ack_freq_on_packet_received - Notify ACK frequency of packet receipt
+ * @conn: Connection
+ * @ack_eliciting: Whether the packet was ack-eliciting
+ * @pkt_num: Packet number received
+ * @expected_pkt_num: Expected next packet number (for reorder detection)
  *
- * Returns true if an ACK should be sent based on:
- * 1. IMMEDIATE_ACK was requested
- * 2. Ack-eliciting threshold reached
- * 3. Reorder threshold exceeded
+ * Return: true if an ACK should be sent
  */
 bool tquic_ack_freq_on_packet_received(struct tquic_connection *conn,
 				       bool ack_eliciting,
 				       u64 pkt_num,
 				       u64 expected_pkt_num)
 {
-	bool should_ack = false;
-	u64 threshold;
-	u64 reorder_gap;
+	struct tquic_ack_frequency_state *state;
 
 	if (!conn)
 		return true;  /* Default: ACK everything */
@@ -554,82 +688,79 @@ bool tquic_ack_freq_on_packet_received(struct tquic_connection *conn,
 	if (!ack_eliciting)
 		return false;  /* Non-ack-eliciting packets don't trigger ACKs */
 
-	spin_lock(&conn->lock);
-
-	/* Default thresholds */
-	threshold = TQUIC_DEFAULT_ACK_ELICITING_THRESHOLD;
-
-	/* Check reorder threshold */
-	if (pkt_num < expected_pkt_num) {
-		reorder_gap = expected_pkt_num - pkt_num;
-		/* Reordering detected - may need immediate ACK */
-		if (TQUIC_DEFAULT_REORDER_THRESHOLD > 0 &&
-		    reorder_gap > TQUIC_DEFAULT_REORDER_THRESHOLD) {
-			should_ack = true;
-			pr_debug("tquic: reorder threshold exceeded, sending ACK\n");
-		}
+	state = conn_get_ack_freq_state(conn);
+	if (state) {
+		/* Use core implementation */
+		return tquic_ack_freq_should_ack(state, pkt_num, ack_eliciting);
 	}
 
-	/* Increment packet counter and check threshold */
-	/* Would use ack_freq state packets_since_ack here */
-	/* Simplified: use stats counter */
+	/* Default behavior: ACK every 2 packets */
+	spin_lock(&conn->lock);
 	conn->stats.rx_packets++;
-
-	if ((conn->stats.rx_packets % threshold) == 0)
-		should_ack = true;
-
 	spin_unlock(&conn->lock);
 
-	return should_ack;
+	return (conn->stats.rx_packets % 2) == 0;
 }
 EXPORT_SYMBOL_GPL(tquic_ack_freq_on_packet_received);
 
 /**
  * tquic_ack_freq_on_ack_sent - Notify ACK frequency that ACK was sent
+ * @conn: Connection
  */
 void tquic_ack_freq_on_ack_sent(struct tquic_connection *conn)
 {
+	struct tquic_ack_frequency_state *state;
+
 	if (!conn)
 		return;
 
-	spin_lock(&conn->lock);
-	/* Would reset packets_since_ack in ack_freq state */
-	spin_unlock(&conn->lock);
+	state = conn_get_ack_freq_state(conn);
+	if (state) {
+		/* Use core implementation */
+		tquic_ack_freq_on_ack_sent(state);
+	}
 }
 EXPORT_SYMBOL_GPL(tquic_ack_freq_on_ack_sent);
 
 /**
  * tquic_ack_freq_should_ack_immediately - Check if immediate ACK needed
+ * @conn: Connection
+ *
+ * Return: true if immediate ACK should be sent
  */
 bool tquic_ack_freq_should_ack_immediately(struct tquic_connection *conn)
 {
+	struct tquic_ack_frequency_state *state;
 	bool immediate = false;
 
 	if (!conn)
 		return true;
 
-	spin_lock(&conn->lock);
-	/* Would check pending_immediate_ack in ack_freq state */
-	spin_unlock(&conn->lock);
+	state = conn_get_ack_freq_state(conn);
+	if (state) {
+		spin_lock(&state->lock);
+		immediate = state->immediate_ack_pending;
+		spin_unlock(&state->lock);
+	}
 
 	return immediate;
 }
 EXPORT_SYMBOL_GPL(tquic_ack_freq_should_ack_immediately);
 
 /**
- * tquic_ack_freq_should_ack - Determine if ACK should be sent
+ * tquic_ack_freq_should_ack - Determine if ACK should be sent (state-based)
  * @state: ACK frequency state
  * @pn: Packet number just received
  * @ack_eliciting: Whether the packet was ack-eliciting
  *
- * Implements the ACK suppression algorithm from draft-ietf-quic-ack-frequency.
- * Returns true if an ACK should be sent.
+ * Return: true if an ACK should be sent
  */
 bool tquic_ack_freq_should_ack(struct tquic_ack_frequency_state *state,
 			       u64 pn, bool ack_eliciting)
 {
 	bool should_ack = false;
 	u64 threshold;
+	u64 gap;
 
 	if (!state)
 		return true;  /* Default to ACK everything */
@@ -645,31 +776,50 @@ bool tquic_ack_freq_should_ack(struct tquic_ack_frequency_state *state,
 		state->packets_since_ack++;
 		if (state->packets_since_ack >= 2)
 			should_ack = true;
-		spin_unlock(&state->lock);
-		return should_ack;
+		goto out;
 	}
 
 	/* Check for pending IMMEDIATE_ACK */
-	if (state->pending_immediate_ack) {
-		state->pending_immediate_ack = false;
+	if (state->immediate_ack_pending) {
+		state->immediate_ack_pending = false;
 		should_ack = true;
 		goto out;
+	}
+
+	/* During congestion, ACK more frequently */
+	if (state->in_congestion) {
+		threshold = state->dynamic_params.congestion_threshold;
+	} else {
+		threshold = state->current_threshold;
 	}
 
 	/* Increment packet counter */
 	state->packets_since_ack++;
 
 	/* Check ack-eliciting threshold */
-	threshold = state->current_ack_elicit_threshold;
 	if (state->packets_since_ack >= threshold) {
 		should_ack = true;
 		goto out;
 	}
 
-	/*
-	 * Reorder detection is simplified for this struct version.
-	 * The current_reorder_threshold can be used for future extensions.
-	 */
+	/* Check reorder threshold (if not ignoring order) */
+	if (!state->ignore_order && state->current_reorder_threshold > 0) {
+		if (pn < state->largest_pn_received) {
+			gap = state->largest_pn_received - pn;
+			if (gap >= state->current_reorder_threshold) {
+				pr_debug("tquic: reorder threshold exceeded "
+					 "(gap=%llu >= %llu)\n",
+					 gap, state->current_reorder_threshold);
+				state->reordering_detected = true;
+				should_ack = true;
+				goto out;
+			}
+		}
+	}
+
+	/* Update largest received */
+	if (pn > state->largest_pn_received)
+		state->largest_pn_received = pn;
 
 out:
 	spin_unlock(&state->lock);
@@ -679,20 +829,25 @@ EXPORT_SYMBOL_GPL(tquic_ack_freq_should_ack);
 
 /**
  * tquic_ack_freq_get_max_delay - Get current max ACK delay
+ * @conn: Connection
+ *
+ * Return: Maximum ACK delay in microseconds
  */
 u64 tquic_ack_freq_get_max_delay(struct tquic_connection *conn)
 {
-	u64 delay = TQUIC_DEFAULT_MAX_ACK_DELAY_US;
+	struct tquic_ack_frequency_state *state;
+	u64 delay;
 
 	if (!conn)
-		return delay;
+		return TQUIC_DEFAULT_MAX_ACK_DELAY_US;
 
-	spin_lock(&conn->lock);
-	/* Would return current_max_ack_delay_us from ack_freq state */
-	delay = tquic_sysctl_get_default_ack_delay_us();
-	spin_unlock(&conn->lock);
+	state = conn_get_ack_freq_state(conn);
+	if (state) {
+		/* Use core implementation */
+		return tquic_ack_freq_get_max_delay(state);
+	}
 
-	return delay;
+	return tquic_sysctl_get_default_ack_delay_us();
 }
 EXPORT_SYMBOL_GPL(tquic_ack_freq_get_max_delay);
 
@@ -704,12 +859,11 @@ EXPORT_SYMBOL_GPL(tquic_ack_freq_get_max_delay);
 
 /**
  * tquic_ack_freq_encode_tp - Encode min_ack_delay transport parameter
+ * @min_ack_delay_us: Minimum ACK delay in microseconds
+ * @buf: Output buffer
+ * @buf_len: Buffer length
  *
- * Transport Parameter {
- *   Type (i) = 0x0e,
- *   Length (i),
- *   Value (i) = min_ack_delay in microseconds,
- * }
+ * Return: Bytes written, or negative error code
  */
 int tquic_ack_freq_encode_tp(u64 min_ack_delay_us, u8 *buf, size_t buf_len)
 {
@@ -725,7 +879,7 @@ int tquic_ack_freq_encode_tp(u64 min_ack_delay_us, u8 *buf, size_t buf_len)
 	    min_ack_delay_us > TQUIC_MIN_ACK_DELAY_MAX_US)
 		return -EINVAL;
 
-	/* Parameter ID (0x0e) */
+	/* Parameter ID (0xff04de1a) */
 	ret = varint_encode(p, buf_len - (p - buf), TQUIC_TP_MIN_ACK_DELAY);
 	if (ret < 0)
 		return ret;
@@ -749,6 +903,11 @@ EXPORT_SYMBOL_GPL(tquic_ack_freq_encode_tp);
 
 /**
  * tquic_ack_freq_decode_tp - Decode min_ack_delay transport parameter
+ * @buf: Input buffer (parameter value only)
+ * @buf_len: Value length
+ * @min_ack_delay_us: Output minimum ACK delay
+ *
+ * Return: 0 on success, negative error code on failure
  */
 int tquic_ack_freq_decode_tp(const u8 *buf, size_t buf_len, u64 *min_ack_delay_us)
 {
@@ -781,12 +940,20 @@ EXPORT_SYMBOL_GPL(tquic_ack_freq_decode_tp);
 
 /**
  * tquic_ack_freq_request_update - Request peer update ACK behavior
+ * @conn: Connection
+ * @ack_elicit_threshold: Desired ack-eliciting threshold
+ * @max_ack_delay_us: Desired max ACK delay (microseconds)
+ * @reorder_threshold: Desired reorder threshold
+ *
+ * Return: 0 on success, negative error code on failure
  */
 int tquic_ack_freq_request_update(struct tquic_connection *conn,
 				  u64 ack_elicit_threshold,
 				  u64 max_ack_delay_us,
 				  u64 reorder_threshold)
 {
+	struct tquic_ack_frequency_state *state;
+
 	if (!conn)
 		return -EINVAL;
 
@@ -797,9 +964,13 @@ int tquic_ack_freq_request_update(struct tquic_connection *conn,
 	if (ack_elicit_threshold == 0)
 		return -EINVAL;
 
-	spin_lock(&conn->lock);
-	/* Would set pending_send and store parameters in ack_freq state */
-	spin_unlock(&conn->lock);
+	state = conn_get_ack_freq_state(conn);
+	if (state) {
+		/* Use core implementation */
+		return tquic_ack_freq_request_update(state, ack_elicit_threshold,
+						     max_ack_delay_us,
+						     reorder_threshold);
+	}
 
 	pr_debug("tquic: scheduled ACK_FREQUENCY update: threshold=%llu "
 		 "delay=%llu reorder=%llu\n",
@@ -811,18 +982,25 @@ EXPORT_SYMBOL_GPL(tquic_ack_freq_request_update);
 
 /**
  * tquic_ack_freq_request_immediate_ack - Request immediate ACK from peer
+ * @conn: Connection
+ *
+ * Return: 0 on success, negative error code on failure
  */
 int tquic_ack_freq_request_immediate_ack(struct tquic_connection *conn)
 {
+	struct tquic_ack_frequency_state *state;
+
 	if (!conn)
 		return -EINVAL;
 
 	if (!tquic_ack_freq_is_enabled(conn))
 		return -EOPNOTSUPP;
 
-	spin_lock(&conn->lock);
-	/* Would set pending_immediate_ack in ack_freq state */
-	spin_unlock(&conn->lock);
+	state = conn_get_ack_freq_state(conn);
+	if (state) {
+		/* Use core implementation */
+		return tquic_ack_freq_request_immediate_ack(state);
+	}
 
 	pr_debug("tquic: scheduled IMMEDIATE_ACK request\n");
 
@@ -832,21 +1010,229 @@ EXPORT_SYMBOL_GPL(tquic_ack_freq_request_immediate_ack);
 
 /**
  * tquic_ack_freq_has_pending_frames - Check for pending ACK frequency frames
+ * @conn: Connection
+ *
+ * Return: true if frames need to be sent
  */
 bool tquic_ack_freq_has_pending_frames(struct tquic_connection *conn)
 {
-	bool pending = false;
+	struct tquic_ack_frequency_state *state;
 
 	if (!conn)
 		return false;
 
-	spin_lock(&conn->lock);
-	/* Would check pending_send || pending_immediate_ack in ack_freq state */
-	spin_unlock(&conn->lock);
+	state = conn_get_ack_freq_state(conn);
+	if (state) {
+		/* Use core implementation */
+		return tquic_ack_freq_has_pending(state);
+	}
 
-	return pending;
+	return false;
 }
 EXPORT_SYMBOL_GPL(tquic_ack_freq_has_pending_frames);
+
+/**
+ * tquic_ack_freq_generate_pending_frames - Generate pending frames
+ * @conn: Connection
+ * @buf: Output buffer
+ * @buf_len: Buffer length
+ *
+ * Return: Bytes written, or negative error code
+ */
+int tquic_ack_freq_generate_pending_frames(struct tquic_connection *conn,
+					   u8 *buf, size_t buf_len)
+{
+	struct tquic_ack_frequency_state *state;
+
+	if (!conn || !buf)
+		return -EINVAL;
+
+	state = conn_get_ack_freq_state(conn);
+	if (state) {
+		/* Use core implementation */
+		return tquic_ack_freq_generate_pending(state, buf, buf_len);
+	}
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(tquic_ack_freq_generate_pending_frames);
+
+/*
+ * =============================================================================
+ * Congestion Control Integration
+ * =============================================================================
+ */
+
+/**
+ * tquic_ack_freq_conn_on_congestion - Notify of congestion event
+ * @conn: Connection
+ * @in_recovery: Whether CC is in recovery state
+ */
+void tquic_ack_freq_conn_on_congestion(struct tquic_connection *conn,
+				       bool in_recovery)
+{
+	struct tquic_ack_frequency_state *state;
+
+	if (!conn)
+		return;
+
+	state = conn_get_ack_freq_state(conn);
+	if (state) {
+		/* Use core implementation */
+		tquic_ack_freq_on_congestion_event(state, in_recovery);
+	}
+}
+EXPORT_SYMBOL_GPL(tquic_ack_freq_conn_on_congestion);
+
+/**
+ * tquic_ack_freq_conn_on_rtt_update - Notify of RTT update
+ * @conn: Connection
+ * @rtt_us: Smoothed RTT in microseconds
+ * @rtt_var_us: RTT variance in microseconds
+ */
+void tquic_ack_freq_conn_on_rtt_update(struct tquic_connection *conn,
+				       u64 rtt_us, u64 rtt_var_us)
+{
+	struct tquic_ack_frequency_state *state;
+
+	if (!conn)
+		return;
+
+	state = conn_get_ack_freq_state(conn);
+	if (state) {
+		/* Use core implementation */
+		tquic_ack_freq_on_rtt_update(state, rtt_us, rtt_var_us);
+	}
+}
+EXPORT_SYMBOL_GPL(tquic_ack_freq_conn_on_rtt_update);
+
+/**
+ * tquic_ack_freq_conn_on_bandwidth_update - Notify of bandwidth estimate update
+ * @conn: Connection
+ * @bandwidth_bps: Estimated bandwidth in bytes per second
+ */
+void tquic_ack_freq_conn_on_bandwidth_update(struct tquic_connection *conn,
+					     u64 bandwidth_bps)
+{
+	struct tquic_ack_frequency_state *state;
+
+	if (!conn)
+		return;
+
+	state = conn_get_ack_freq_state(conn);
+	if (state) {
+		/* Use core implementation */
+		tquic_ack_freq_on_bandwidth_update(state, bandwidth_bps);
+	}
+}
+EXPORT_SYMBOL_GPL(tquic_ack_freq_conn_on_bandwidth_update);
+
+/**
+ * tquic_ack_freq_conn_on_reordering - Notify of packet reordering detection
+ * @conn: Connection
+ * @gap: Reorder gap in packets
+ */
+void tquic_ack_freq_conn_on_reordering(struct tquic_connection *conn, u64 gap)
+{
+	struct tquic_ack_frequency_state *state;
+
+	if (!conn)
+		return;
+
+	state = conn_get_ack_freq_state(conn);
+	if (state) {
+		/* Use core implementation */
+		tquic_ack_freq_on_reordering(state, gap);
+	}
+}
+EXPORT_SYMBOL_GPL(tquic_ack_freq_conn_on_reordering);
+
+/**
+ * tquic_ack_freq_conn_on_ecn - Notify of ECN congestion signal
+ * @conn: Connection
+ */
+void tquic_ack_freq_conn_on_ecn(struct tquic_connection *conn)
+{
+	struct tquic_ack_frequency_state *state;
+
+	if (!conn)
+		return;
+
+	state = conn_get_ack_freq_state(conn);
+	if (state) {
+		/* Use core implementation */
+		tquic_ack_freq_on_ecn(state);
+	}
+}
+EXPORT_SYMBOL_GPL(tquic_ack_freq_conn_on_ecn);
+
+/**
+ * tquic_ack_freq_conn_set_app_hint - Set application-level hint
+ * @conn: Connection
+ * @latency_sensitive: True if application is latency-sensitive
+ * @throughput_focused: True if application prioritizes throughput
+ */
+void tquic_ack_freq_conn_set_app_hint(struct tquic_connection *conn,
+				      bool latency_sensitive,
+				      bool throughput_focused)
+{
+	struct tquic_ack_frequency_state *state;
+
+	if (!conn)
+		return;
+
+	state = conn_get_ack_freq_state(conn);
+	if (state) {
+		/* Use core implementation */
+		tquic_ack_freq_set_application_hint(state, latency_sensitive,
+						    throughput_focused);
+	}
+}
+EXPORT_SYMBOL_GPL(tquic_ack_freq_conn_set_app_hint);
+
+/*
+ * =============================================================================
+ * Module Initialization
+ * =============================================================================
+ */
+
+/**
+ * tquic_ack_freq_module_init - Initialize ACK frequency module
+ *
+ * Called during TQUIC module initialization.
+ *
+ * Return: 0 on success, negative error on failure
+ */
+int tquic_ack_freq_module_init(void)
+{
+	int ret;
+
+	/* Initialize core ACK frequency module */
+	ret = tquic_ack_freq_init();
+	if (ret) {
+		pr_err("tquic: failed to initialize ACK frequency core: %d\n",
+		       ret);
+		return ret;
+	}
+
+	pr_info("tquic: ACK frequency extension module initialized\n");
+	return 0;
+}
+EXPORT_SYMBOL_GPL(tquic_ack_freq_module_init);
+
+/**
+ * tquic_ack_freq_module_exit - Clean up ACK frequency module
+ *
+ * Called during TQUIC module unload.
+ */
+void tquic_ack_freq_module_exit(void)
+{
+	/* Clean up core ACK frequency module */
+	tquic_ack_freq_exit();
+
+	pr_info("tquic: ACK frequency extension module cleaned up\n");
+}
+EXPORT_SYMBOL_GPL(tquic_ack_freq_module_exit);
 
 /*
  * =============================================================================
@@ -854,5 +1240,5 @@ EXPORT_SYMBOL_GPL(tquic_ack_freq_has_pending_frames);
  * =============================================================================
  */
 
-MODULE_DESCRIPTION("TQUIC ACK Frequency Extension");
+MODULE_DESCRIPTION("TQUIC ACK Frequency Extension (RFC 9002 Appendix A.7)");
 MODULE_LICENSE("GPL");

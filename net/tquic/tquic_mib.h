@@ -117,6 +117,14 @@ enum linux_tquic_mib_field {
 	TQUIC_MIB_0RTTBYTESRX,           /* Bytes received in 0-RTT packets */
 	TQUIC_MIB_0RTTREPLAYS,           /* 0-RTT replay attempts detected */
 
+	/* Rate limiting counters (DDoS protection) */
+	TQUIC_MIB_RATELIMIT_CHECKED,         /* Connection attempts checked */
+	TQUIC_MIB_RATELIMIT_ACCEPTED,        /* Connections accepted */
+	TQUIC_MIB_RATELIMIT_DROPPED,         /* Connections rate limited */
+	TQUIC_MIB_RATELIMIT_COOKIES,         /* Cookie validations required */
+	TQUIC_MIB_RATELIMIT_BLACKLISTED,     /* Connections from blacklisted IPs */
+	TQUIC_MIB_RATELIMIT_ATTACK_MODE,     /* Times attack mode was triggered */
+
 	/*
 	 * Per-EQUIC error counters (EQUIC_BASE=500)
 	 * Maps to RFC 9000 QUIC Transport Error Codes

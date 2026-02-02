@@ -832,7 +832,7 @@ int tquic_uring_enable_sqpoll(struct tquic_connection *conn)
 	if (!conn)
 		return -EINVAL;
 
-	uctx = conn->state_machine;
+	uctx = conn->uring_ctx;
 	if (!uctx)
 		return -EINVAL;
 
@@ -858,7 +858,7 @@ void tquic_uring_disable_sqpoll(struct tquic_connection *conn)
 	if (!conn)
 		return;
 
-	uctx = conn->state_machine;
+	uctx = conn->uring_ctx;
 	if (!uctx)
 		return;
 
@@ -874,7 +874,7 @@ bool tquic_uring_sqpoll_enabled(struct tquic_connection *conn)
 	if (!conn)
 		return false;
 
-	uctx = conn->state_machine;
+	uctx = conn->uring_ctx;
 	return uctx && uctx->sqpoll_enabled;
 }
 EXPORT_SYMBOL_GPL(tquic_uring_sqpoll_enabled);
@@ -893,7 +893,7 @@ int tquic_uring_set_cqe_batch_size(struct tquic_connection *conn,
 	if (!conn)
 		return -EINVAL;
 
-	uctx = conn->state_machine;
+	uctx = conn->uring_ctx;
 	if (!uctx)
 		return -EINVAL;
 
@@ -915,7 +915,7 @@ void tquic_uring_flush_cqes(struct tquic_connection *conn)
 	if (!conn)
 		return;
 
-	uctx = conn->state_machine;
+	uctx = conn->uring_ctx;
 	if (!uctx)
 		return;
 
@@ -935,7 +935,7 @@ int tquic_uring_handle_overflow(struct tquic_connection *conn)
 	if (!conn)
 		return 0;
 
-	uctx = conn->state_machine;
+	uctx = conn->uring_ctx;
 	if (!uctx)
 		return 0;
 
@@ -978,8 +978,8 @@ int tquic_uring_ctx_alloc(struct tquic_connection *conn)
 	atomic_set(&uctx->pending_cqes, 0);
 	atomic_set(&uctx->cqe_overflow, 0);
 
-	/* Store in connection - using state_machine field as placeholder */
-	/* In production, add dedicated field to tquic_connection */
+	/* Store context in connection's dedicated field */
+	conn->uring_ctx = uctx;
 
 	pr_debug("tquic: allocated io_uring context for connection\n");
 	return 0;
@@ -994,7 +994,7 @@ void tquic_uring_ctx_free(struct tquic_connection *conn)
 	if (!conn)
 		return;
 
-	uctx = conn->state_machine;
+	uctx = conn->uring_ctx;
 	if (!uctx)
 		return;
 
@@ -1007,6 +1007,7 @@ void tquic_uring_ctx_free(struct tquic_connection *conn)
 	}
 
 	kfree(uctx);
+	conn->uring_ctx = NULL;
 	pr_debug("tquic: freed io_uring context\n");
 }
 EXPORT_SYMBOL_GPL(tquic_uring_ctx_free);
@@ -1024,8 +1025,8 @@ struct tquic_uring_ctx *tquic_uring_ctx_get(struct sock *sk)
 	if (!conn)
 		return NULL;
 
-	/* Return the uring context stored in state_machine */
-	return conn->state_machine;
+	/* Return the uring context stored in dedicated field */
+	return conn->uring_ctx;
 }
 EXPORT_SYMBOL_GPL(tquic_uring_ctx_get);
 
@@ -1043,7 +1044,7 @@ int tquic_uring_get_stats(struct tquic_connection *conn,
 	if (!conn || !stats)
 		return -EINVAL;
 
-	uctx = conn->state_machine;
+	uctx = conn->uring_ctx;
 	if (!uctx)
 		return -EINVAL;
 

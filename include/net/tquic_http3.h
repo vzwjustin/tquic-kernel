@@ -368,13 +368,16 @@ struct tquic_http3_conn {
 	struct tquic_stream *qpack_enc_stream;
 	struct tquic_stream *qpack_dec_stream;
 
-	/* Server push state */
-	u64 next_push_id;
-	u64 max_push_id;
-	bool push_enabled;
+	/* Server push state (RFC 9114 Section 4.6) */
+	u64 next_push_id;		/* Next push ID to allocate (server) */
+	u64 max_push_id;		/* Max push ID allowed (from MAX_PUSH_ID) */
+	bool push_enabled;		/* True if push is enabled */
+	void *push_entries;		/* List of h3_push_entry (internal) */
 
 	/* GOAWAY state */
 	u64 goaway_id;
+	bool goaway_sent;		/* True if we sent GOAWAY */
+	bool goaway_received;		/* True if we received GOAWAY */
 
 	/* Priority tree for RFC 9218 extensible priorities */
 	struct tquic_h3_priority_tree *priority_tree;
@@ -465,6 +468,111 @@ int tquic_h3_send_goaway(struct tquic_http3_conn *h3conn, u64 id);
  * Returns: 0 on success, negative error code on failure.
  */
 int tquic_h3_set_max_push_id(struct tquic_http3_conn *h3conn, u64 push_id);
+
+/*
+ * =============================================================================
+ * HTTP/3 Graceful Shutdown API (RFC 9114 Section 5.2)
+ * =============================================================================
+ */
+
+/**
+ * tquic_h3_graceful_shutdown - Initiate graceful HTTP/3 shutdown
+ * @h3conn: HTTP/3 connection
+ *
+ * Initiates graceful shutdown by sending GOAWAY with max ID.
+ * Allows in-flight requests to complete.
+ *
+ * Returns: 0 on success, negative error code on failure.
+ */
+int tquic_h3_graceful_shutdown(struct tquic_http3_conn *h3conn);
+
+/**
+ * tquic_h3_complete_shutdown - Complete graceful shutdown with final GOAWAY
+ * @h3conn: HTTP/3 connection
+ * @final_id: Final ID (last stream/push ID processed)
+ *
+ * Completes graceful shutdown by sending final GOAWAY.
+ *
+ * Returns: 0 on success, negative error code on failure.
+ */
+int tquic_h3_complete_shutdown(struct tquic_http3_conn *h3conn, u64 final_id);
+
+/**
+ * tquic_h3_is_shutting_down - Check if connection is shutting down
+ * @h3conn: HTTP/3 connection
+ *
+ * Returns: true if GOAWAY has been sent or received.
+ */
+bool tquic_h3_is_shutting_down(struct tquic_http3_conn *h3conn);
+
+/**
+ * tquic_h3_can_create_stream - Check if new streams can be created
+ * @h3conn: HTTP/3 connection
+ * @stream_id: Proposed stream ID
+ *
+ * Returns: true if stream can be created considering GOAWAY state.
+ */
+bool tquic_h3_can_create_stream(struct tquic_http3_conn *h3conn, u64 stream_id);
+
+/*
+ * =============================================================================
+ * HTTP/3 Server Push API (RFC 9114 Section 4.6)
+ * =============================================================================
+ */
+
+/**
+ * tquic_h3_send_push_promise - Send PUSH_PROMISE frame (server only)
+ * @h3conn: HTTP/3 connection
+ * @request_stream: Request stream to send PUSH_PROMISE on
+ * @headers: QPACK-encoded request headers for the push
+ * @headers_len: Length of encoded headers
+ * @push_id_out: Output parameter for assigned push ID
+ *
+ * Announces a server push to the client.
+ *
+ * Returns: 0 on success, negative error code on failure.
+ */
+int tquic_h3_send_push_promise(struct tquic_http3_conn *h3conn,
+			       struct tquic_stream *request_stream,
+			       const u8 *headers, size_t headers_len,
+			       u64 *push_id_out);
+
+/**
+ * tquic_h3_create_push_stream - Create push stream for promised push
+ * @h3conn: HTTP/3 connection
+ * @push_id: Push ID from PUSH_PROMISE
+ * @stream_out: Output parameter for created stream
+ *
+ * Creates the unidirectional push stream for delivering pushed content.
+ *
+ * Returns: 0 on success, negative error code on failure.
+ */
+int tquic_h3_create_push_stream(struct tquic_http3_conn *h3conn,
+				u64 push_id,
+				struct tquic_stream **stream_out);
+
+/**
+ * tquic_h3_send_cancel_push - Send CANCEL_PUSH frame
+ * @h3conn: HTTP/3 connection
+ * @push_id: Push ID to cancel
+ *
+ * Server: cancels a push it previously promised.
+ * Client: rejects a push it was promised.
+ *
+ * Returns: 0 on success, negative error code on failure.
+ */
+int tquic_h3_send_cancel_push(struct tquic_http3_conn *h3conn, u64 push_id);
+
+/**
+ * tquic_h3_reject_push - Client rejects a promised push
+ * @h3conn: HTTP/3 connection
+ * @push_id: Push ID to reject
+ *
+ * Convenience function for clients to reject a server push.
+ *
+ * Returns: 0 on success, negative error code on failure.
+ */
+int tquic_h3_reject_push(struct tquic_http3_conn *h3conn, u64 push_id);
 
 /*
  * =============================================================================

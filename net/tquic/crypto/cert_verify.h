@@ -34,46 +34,184 @@ enum tquic_cert_verify_mode {
 /* Maximum single certificate size */
 #define TQUIC_MAX_CERT_SIZE		16384
 
+/* Maximum CRL/OCSP response size */
+#define TQUIC_MAX_CRL_SIZE		(1024 * 1024)	/* 1MB */
+#define TQUIC_MAX_OCSP_RESP_SIZE	(64 * 1024)	/* 64KB */
+
+/* Signature algorithm identifiers (TLS 1.3 / RFC 8446) */
+#define TLS_SIG_RSA_PKCS1_SHA256	0x0401
+#define TLS_SIG_RSA_PKCS1_SHA384	0x0501
+#define TLS_SIG_RSA_PKCS1_SHA512	0x0601
+#define TLS_SIG_ECDSA_SECP256R1_SHA256	0x0403
+#define TLS_SIG_ECDSA_SECP384R1_SHA384	0x0503
+#define TLS_SIG_ECDSA_SECP521R1_SHA512	0x0603
+#define TLS_SIG_RSA_PSS_RSAE_SHA256	0x0804
+#define TLS_SIG_RSA_PSS_RSAE_SHA384	0x0805
+#define TLS_SIG_RSA_PSS_RSAE_SHA512	0x0806
+#define TLS_SIG_ED25519			0x0807
+#define TLS_SIG_ED448			0x0808
+
+/* Public key algorithm types */
+enum tquic_pubkey_algo {
+	TQUIC_PUBKEY_ALGO_RSA = 0,
+	TQUIC_PUBKEY_ALGO_ECDSA_P256,
+	TQUIC_PUBKEY_ALGO_ECDSA_P384,
+	TQUIC_PUBKEY_ALGO_ECDSA_P521,
+	TQUIC_PUBKEY_ALGO_ED25519,
+	TQUIC_PUBKEY_ALGO_ED448,
+	TQUIC_PUBKEY_ALGO_UNKNOWN,
+};
+
+/* Hash algorithm types */
+enum tquic_hash_algo {
+	TQUIC_HASH_SHA256 = 0,
+	TQUIC_HASH_SHA384,
+	TQUIC_HASH_SHA512,
+	TQUIC_HASH_UNKNOWN,
+};
+
+/**
+ * struct tquic_x509_signature - Parsed certificate signature
+ * @algo: Signature algorithm OID
+ * @sig_algo_id: TLS signature algorithm identifier
+ * @signature: Signature bytes
+ * @sig_len: Length of signature
+ * @hash_algo: Hash algorithm used
+ * @pubkey_algo: Public key algorithm used
+ */
+struct tquic_x509_signature {
+	const u8 *algo;
+	u32 algo_len;
+	u16 sig_algo_id;
+	u8 *signature;
+	u32 sig_len;
+	enum tquic_hash_algo hash_algo;
+	enum tquic_pubkey_algo pubkey_algo;
+};
+
+/**
+ * struct tquic_x509_pubkey - Parsed public key
+ * @algo: Algorithm OID
+ * @algo_len: Length of algorithm OID
+ * @key_data: Raw public key data (DER)
+ * @key_len: Length of key data
+ * @pubkey_algo: Public key algorithm type
+ * @key_bits: Key size in bits
+ */
+struct tquic_x509_pubkey {
+	const u8 *algo;
+	u32 algo_len;
+	u8 *key_data;
+	u32 key_len;
+	enum tquic_pubkey_algo pubkey_algo;
+	u32 key_bits;
+};
+
 /**
  * struct tquic_x509_cert - Parsed X.509 certificate
  * @raw: Raw DER-encoded certificate data
  * @raw_len: Length of raw data
+ * @tbs: TBSCertificate data (for signature verification)
+ * @tbs_len: Length of TBSCertificate
  * @subject: Subject DN (Common Name extracted)
  * @subject_len: Length of subject
  * @issuer: Issuer DN
  * @issuer_len: Length of issuer
+ * @issuer_raw: Raw issuer DN for matching
+ * @issuer_raw_len: Length of raw issuer DN
+ * @subject_raw: Raw subject DN for matching
+ * @subject_raw_len: Length of raw subject DN
  * @serial: Serial number
  * @serial_len: Length of serial number
  * @valid_from: Not before timestamp (seconds since epoch)
  * @valid_to: Not after timestamp (seconds since epoch)
  * @is_ca: True if certificate is a CA
+ * @path_len_constraint: Path length constraint (-1 if none)
+ * @key_usage: Key usage bits
+ * @ext_key_usage: Extended key usage flags
  * @san_dns: Subject Alternative Names (DNS)
  * @san_dns_count: Number of DNS SANs
- * @pub_key: Public key data
- * @pub_key_len: Length of public key
+ * @san_ip: Subject Alternative Names (IP addresses)
+ * @san_ip_count: Number of IP SANs
+ * @pubkey: Parsed public key
+ * @signature: Parsed signature
  * @sig_algo: Signature algorithm OID
  * @self_signed: True if self-signed
+ * @akid: Authority Key Identifier
+ * @akid_len: Length of AKID
+ * @skid: Subject Key Identifier
+ * @skid_len: Length of SKID
+ * @crl_dp: CRL Distribution Point URLs
+ * @crl_dp_count: Number of CRL DPs
+ * @ocsp_url: OCSP responder URL
+ * @ocsp_url_len: Length of OCSP URL
  * @next: Next certificate in chain (issuer direction)
  */
 struct tquic_x509_cert {
 	u8 *raw;
 	u32 raw_len;
+	const u8 *tbs;
+	u32 tbs_len;
 	char *subject;
 	u32 subject_len;
 	char *issuer;
 	u32 issuer_len;
+	u8 *issuer_raw;
+	u32 issuer_raw_len;
+	u8 *subject_raw;
+	u32 subject_raw_len;
 	u8 *serial;
 	u32 serial_len;
 	s64 valid_from;
 	s64 valid_to;
 	bool is_ca;
+	int path_len_constraint;
+	u16 key_usage;
+	u32 ext_key_usage;
 	char **san_dns;
 	u32 san_dns_count;
-	u8 *pub_key;
-	u32 pub_key_len;
+	u8 **san_ip;
+	u32 *san_ip_len;
+	u32 san_ip_count;
+	struct tquic_x509_pubkey pubkey;
+	struct tquic_x509_signature signature;
 	u16 sig_algo;
 	bool self_signed;
+	u8 *akid;
+	u32 akid_len;
+	u8 *skid;
+	u32 skid_len;
+	char **crl_dp;
+	u32 crl_dp_count;
+	char *ocsp_url;
+	u32 ocsp_url_len;
 	struct tquic_x509_cert *next;
+};
+
+/* Key usage bits (RFC 5280) */
+#define TQUIC_KU_DIGITAL_SIGNATURE	0x0080
+#define TQUIC_KU_NON_REPUDIATION	0x0040
+#define TQUIC_KU_KEY_ENCIPHERMENT	0x0020
+#define TQUIC_KU_DATA_ENCIPHERMENT	0x0010
+#define TQUIC_KU_KEY_AGREEMENT		0x0008
+#define TQUIC_KU_KEY_CERT_SIGN		0x0004
+#define TQUIC_KU_CRL_SIGN		0x0002
+#define TQUIC_KU_ENCIPHER_ONLY		0x0001
+#define TQUIC_KU_DECIPHER_ONLY		0x8000
+
+/* Extended key usage flags */
+#define TQUIC_EKU_SERVER_AUTH		0x0001
+#define TQUIC_EKU_CLIENT_AUTH		0x0002
+#define TQUIC_EKU_CODE_SIGNING		0x0004
+#define TQUIC_EKU_EMAIL_PROTECTION	0x0008
+#define TQUIC_EKU_TIME_STAMPING		0x0010
+#define TQUIC_EKU_OCSP_SIGNING		0x0020
+
+/* Revocation check modes */
+enum tquic_revocation_mode {
+	TQUIC_REVOKE_NONE = 0,		/* No revocation checking */
+	TQUIC_REVOKE_SOFT_FAIL = 1,	/* Check but ignore failures */
+	TQUIC_REVOKE_HARD_FAIL = 2,	/* Check and fail if cannot verify */
 };
 
 /**
@@ -84,12 +222,17 @@ struct tquic_x509_cert {
  * @verify_mode: Verification mode (none/optional/required)
  * @verify_hostname: Whether to perform hostname verification
  * @allow_self_signed: Allow self-signed certificates (testing only)
- * @check_revocation: Check certificate revocation status
+ * @check_revocation: Revocation check mode
  * @time_tolerance: Allowed clock skew in seconds
+ * @min_key_bits_rsa: Minimum RSA key size (default 2048)
+ * @min_key_bits_ec: Minimum EC key size (default 256)
  * @chain: Parsed certificate chain
  * @chain_len: Number of certificates in chain
  * @error_code: Last error code
  * @error_msg: Human-readable error message
+ * @error_depth: Chain depth where error occurred
+ * @ocsp_stapling: OCSP stapling data from TLS
+ * @ocsp_stapling_len: Length of OCSP stapling data
  */
 struct tquic_cert_verify_ctx {
 	struct key *trusted_keyring;
@@ -98,12 +241,17 @@ struct tquic_cert_verify_ctx {
 	enum tquic_cert_verify_mode verify_mode;
 	bool verify_hostname;
 	bool allow_self_signed;
-	bool check_revocation;
+	enum tquic_revocation_mode check_revocation;
 	u32 time_tolerance;
+	u32 min_key_bits_rsa;
+	u32 min_key_bits_ec;
 	struct tquic_x509_cert *chain;
 	u32 chain_len;
 	int error_code;
 	const char *error_msg;
+	u32 error_depth;
+	u8 *ocsp_stapling;
+	u32 ocsp_stapling_len;
 };
 
 /**
@@ -135,6 +283,10 @@ struct tquic_cert_chain_entry {
 #define TQUIC_CERT_ERR_INTERNAL		-11
 #define TQUIC_CERT_ERR_WEAK_KEY		-12
 #define TQUIC_CERT_ERR_CONSTRAINT	-13
+#define TQUIC_CERT_ERR_KEY_USAGE	-14
+#define TQUIC_CERT_ERR_ISSUER_MISMATCH	-15
+#define TQUIC_CERT_ERR_PATH_LEN		-16
+#define TQUIC_CERT_ERR_REVOCATION_CHECK	-17
 
 /*
  * Core API
@@ -200,6 +352,8 @@ int tquic_cert_verify_set_keyring(struct tquic_cert_verify_ctx *ctx,
  *   - Validity period checking
  *   - Root trust anchor lookup in keyring
  *   - Hostname verification (if enabled)
+ *   - Key usage validation
+ *   - Path length constraint checking
  *
  * Returns: 0 on success, negative error code on failure
  *          Error details available via ctx->error_code and ctx->error_msg
@@ -301,10 +455,80 @@ int tquic_x509_cert_is_valid_time(const struct tquic_x509_cert *cert,
  * @cert: Certificate to verify
  * @issuer: Issuer certificate (or self for root)
  *
+ * Performs actual cryptographic signature verification using
+ * the kernel's public_key_verify_signature() API.
+ *
  * Returns: 0 on success, -EKEYREJECTED on signature mismatch
  */
 int tquic_x509_verify_signature(const struct tquic_x509_cert *cert,
 				const struct tquic_x509_cert *issuer);
+
+/**
+ * tquic_x509_check_key_usage - Verify certificate key usage
+ * @cert: Certificate to check
+ * @depth: Chain depth (0 = end-entity)
+ * @is_server: True if verifying server certificate
+ *
+ * Returns: 0 if key usage is appropriate, -EKEYREJECTED otherwise
+ */
+int tquic_x509_check_key_usage(const struct tquic_x509_cert *cert,
+			       int depth, bool is_server);
+
+/*
+ * Revocation checking
+ */
+
+/**
+ * tquic_check_revocation - Check certificate revocation status
+ * @ctx: Verification context
+ * @cert: Certificate to check
+ *
+ * Checks OCSP stapling first (if provided), then falls back to CRL.
+ *
+ * Returns: 0 if not revoked, -EKEYREVOKED if revoked, other errors on failure
+ */
+int tquic_check_revocation(struct tquic_cert_verify_ctx *ctx,
+			   const struct tquic_x509_cert *cert);
+
+/*
+ * Trusted CA management via procfs
+ */
+
+/**
+ * tquic_add_trusted_ca - Add a trusted CA certificate
+ * @cert_data: DER-encoded certificate data
+ * @cert_len: Length of certificate data
+ * @description: Human-readable description
+ *
+ * Adds a CA certificate to the TQUIC trusted keyring.
+ *
+ * Returns: 0 on success, -errno on failure
+ */
+int tquic_add_trusted_ca(const u8 *cert_data, u32 cert_len,
+			 const char *description);
+
+/**
+ * tquic_remove_trusted_ca - Remove a trusted CA certificate
+ * @description: Description of certificate to remove
+ *
+ * Returns: 0 on success, -ENOENT if not found
+ */
+int tquic_remove_trusted_ca(const char *description);
+
+/**
+ * tquic_clear_trusted_cas - Remove all custom trusted CAs
+ *
+ * Returns: Number of certificates removed
+ */
+int tquic_clear_trusted_cas(void);
+
+/*
+ * Sysctl accessors
+ */
+int tquic_sysctl_get_cert_verify_mode(void);
+bool tquic_sysctl_get_cert_verify_hostname(void);
+int tquic_sysctl_get_cert_revocation_mode(void);
+u32 tquic_sysctl_get_cert_time_tolerance(void);
 
 /*
  * Module initialization

@@ -199,6 +199,9 @@ struct tquic_crypto_state {
 	/* Cipher suite */
 	u16 cipher_suite;
 
+	/* QUIC version for key derivation (RFC 9369) */
+	u32 version;
+
 	/* Keys per encryption level */
 	struct tquic_keys read_keys[TQUIC_ENC_LEVEL_COUNT];
 	struct tquic_keys write_keys[TQUIC_ENC_LEVEL_COUNT];
@@ -422,21 +425,36 @@ static int tquic_setup_hp_keys(struct tquic_crypto_state *crypto,
 }
 
 /*
- * Derive initial keys from connection ID
+ * Derive initial keys from connection ID (version-aware)
+ *
+ * RFC 9369 Section 3.1 specifies different initial salts and HKDF labels
+ * for QUIC v2. This function uses version-aware helpers to select the
+ * correct cryptographic parameters.
+ *
+ * @crypto: Crypto state structure
+ * @dcid: Destination Connection ID (used as input key material)
+ * @is_server: True if this is the server side
+ * @version: QUIC version (TQUIC_VERSION_1 or TQUIC_VERSION_2)
  */
-static int tquic_derive_initial_keys(struct tquic_crypto_state *crypto,
-				     const struct tquic_cid *dcid,
-				     bool is_server)
+static int tquic_derive_initial_keys_versioned(struct tquic_crypto_state *crypto,
+					       const struct tquic_cid *dcid,
+					       bool is_server, u32 version)
 {
 	u8 initial_secret[32];
 	u8 client_secret[32];
 	u8 server_secret[32];
 	struct tquic_keys *read_keys, *write_keys;
+	const u8 *salt;
+	size_t salt_len;
 	int ret;
 
-	/* Derive initial secret */
-	ret = tquic_hkdf_extract(crypto->hash, tquic_v1_initial_salt,
-				 sizeof(tquic_v1_initial_salt),
+	/* Get version-appropriate initial salt (RFC 9369 Section 3.1) */
+	salt = tquic_get_initial_salt(version, &salt_len);
+	if (!salt)
+		return -EINVAL;
+
+	/* Derive initial secret using version-specific salt */
+	ret = tquic_hkdf_extract(crypto->hash, salt, salt_len,
 				 dcid->id, dcid->len,
 				 initial_secret, sizeof(initial_secret));
 	if (ret)
@@ -476,16 +494,32 @@ static int tquic_derive_initial_keys(struct tquic_crypto_state *crypto,
 	write_keys->key_len = 16;
 	write_keys->iv_len = 12;
 
-	/* Derive actual keys */
-	ret = tquic_derive_keys(crypto, read_keys);
+	/* Derive actual keys using version-appropriate labels */
+	ret = tquic_derive_keys_versioned(crypto, read_keys, version);
 	if (ret)
 		return ret;
 
-	ret = tquic_derive_keys(crypto, write_keys);
+	ret = tquic_derive_keys_versioned(crypto, write_keys, version);
 	if (ret)
 		return ret;
+
+	/* Clear sensitive intermediate secrets */
+	memzero_explicit(initial_secret, sizeof(initial_secret));
+	memzero_explicit(client_secret, sizeof(client_secret));
+	memzero_explicit(server_secret, sizeof(server_secret));
 
 	return 0;
+}
+
+/*
+ * Derive initial keys from connection ID (legacy wrapper - uses v1)
+ */
+static int tquic_derive_initial_keys(struct tquic_crypto_state *crypto,
+				     const struct tquic_cid *dcid,
+				     bool is_server)
+{
+	return tquic_derive_initial_keys_versioned(crypto, dcid, is_server,
+						   TQUIC_VERSION_1);
 }
 
 /*
@@ -746,10 +780,20 @@ int tquic_decrypt_packet_multipath(struct tquic_crypto_state *crypto,
 EXPORT_SYMBOL_GPL(tquic_decrypt_packet_multipath);
 
 /*
- * Initialize crypto state
+ * Initialize crypto state (version-aware)
+ *
+ * RFC 9369 defines QUIC v2 with different initial salts and HKDF labels.
+ * This function initializes crypto state using the appropriate version-specific
+ * parameters.
+ *
+ * @dcid: Destination Connection ID for initial key derivation
+ * @is_server: True if this is the server side
+ * @version: QUIC version (TQUIC_VERSION_1 or TQUIC_VERSION_2)
+ *
+ * Returns: Initialized crypto state, or NULL on failure
  */
-struct tquic_crypto_state *tquic_crypto_init(const struct tquic_cid *dcid,
-					     bool is_server)
+struct tquic_crypto_state *tquic_crypto_init_versioned(const struct tquic_cid *dcid,
+						       bool is_server, u32 version)
 {
 	struct tquic_crypto_state *crypto;
 	int ret;
@@ -759,6 +803,7 @@ struct tquic_crypto_state *tquic_crypto_init(const struct tquic_cid *dcid,
 		return NULL;
 
 	crypto->cipher_suite = TLS_AES_128_GCM_SHA256;
+	crypto->version = version;
 
 	/* Allocate crypto transforms */
 	crypto->aead = crypto_alloc_aead("gcm(aes)", 0, 0);
@@ -799,10 +844,11 @@ struct tquic_crypto_state *tquic_crypto_init(const struct tquic_cid *dcid,
 	/* Set AEAD auth tag length */
 	crypto_aead_setauthsize(crypto->aead, 16);
 
-	/* Derive initial keys */
-	ret = tquic_derive_initial_keys(crypto, dcid, is_server);
+	/* Derive initial keys using version-appropriate salt and labels */
+	ret = tquic_derive_initial_keys_versioned(crypto, dcid, is_server, version);
 	if (ret) {
-		pr_err("tquic_crypto: failed to derive initial keys\n");
+		pr_err("tquic_crypto: failed to derive initial keys for v%s\n",
+		       version == TQUIC_VERSION_2 ? "2" : "1");
 		tquic_crypto_cleanup(crypto);
 		return NULL;
 	}
@@ -821,9 +867,23 @@ struct tquic_crypto_state *tquic_crypto_init(const struct tquic_cid *dcid,
 	/* Sync HP context levels */
 	tquic_hp_set_level(crypto->hp_ctx, TQUIC_ENC_INITIAL, TQUIC_ENC_INITIAL);
 
-	pr_debug("tquic_crypto: initialized crypto state with HP\n");
+	pr_debug("tquic_crypto: initialized crypto state for QUIC v%s\n",
+		 version == TQUIC_VERSION_2 ? "2" : "1");
 
 	return crypto;
+}
+EXPORT_SYMBOL_GPL(tquic_crypto_init_versioned);
+
+/*
+ * Initialize crypto state (legacy wrapper - uses v1)
+ *
+ * This is the backward-compatible version that defaults to QUIC v1.
+ * New code should use tquic_crypto_init_versioned() with an explicit version.
+ */
+struct tquic_crypto_state *tquic_crypto_init(const struct tquic_cid *dcid,
+					     bool is_server)
+{
+	return tquic_crypto_init_versioned(dcid, is_server, TQUIC_VERSION_1);
 }
 EXPORT_SYMBOL_GPL(tquic_crypto_init);
 
@@ -921,8 +981,20 @@ void tquic_crypto_set_level(struct tquic_crypto_state *crypto,
 EXPORT_SYMBOL_GPL(tquic_crypto_set_level);
 
 /*
- * Install keys for a new encryption level
- * This is called when TLS provides new secrets (e.g., after ClientHello/ServerHello)
+ * Install keys for a new encryption level (version-aware)
+ *
+ * This is called when TLS provides new secrets (e.g., after ClientHello/ServerHello).
+ * Uses the QUIC version stored in crypto state to derive keys with the appropriate
+ * HKDF labels per RFC 9001 (v1) or RFC 9369 (v2).
+ *
+ * @crypto: Crypto state
+ * @level: Encryption level for the new keys
+ * @read_secret: Secret for decryption (may be NULL)
+ * @read_secret_len: Length of read secret
+ * @write_secret: Secret for encryption (may be NULL)
+ * @write_secret_len: Length of write secret
+ *
+ * Returns: 0 on success, negative error code on failure
  */
 int tquic_crypto_install_keys(struct tquic_crypto_state *crypto,
 			      enum tquic_enc_level level,
@@ -931,10 +1003,14 @@ int tquic_crypto_install_keys(struct tquic_crypto_state *crypto,
 {
 	struct tquic_keys *read_keys = &crypto->read_keys[level];
 	struct tquic_keys *write_keys = &crypto->write_keys[level];
+	u32 version;
 	int ret;
 
 	if (!crypto || level >= TQUIC_ENC_LEVEL_COUNT)
 		return -EINVAL;
+
+	/* Use stored version for key derivation */
+	version = crypto->version ? crypto->version : TQUIC_VERSION_1;
 
 	/* Set up read keys */
 	if (read_secret && read_secret_len > 0) {
@@ -961,7 +1037,8 @@ int tquic_crypto_install_keys(struct tquic_crypto_state *crypto,
 			return -EINVAL;
 		}
 
-		ret = tquic_derive_keys(crypto, read_keys);
+		/* Use version-aware key derivation */
+		ret = tquic_derive_keys_versioned(crypto, read_keys, version);
 		if (ret)
 			return ret;
 	}
@@ -990,7 +1067,8 @@ int tquic_crypto_install_keys(struct tquic_crypto_state *crypto,
 			return -EINVAL;
 		}
 
-		ret = tquic_derive_keys(crypto, write_keys);
+		/* Use version-aware key derivation */
+		ret = tquic_derive_keys_versioned(crypto, write_keys, version);
 		if (ret)
 			return ret;
 	}
@@ -1000,11 +1078,34 @@ int tquic_crypto_install_keys(struct tquic_crypto_state *crypto,
 	if (ret)
 		return ret;
 
-	pr_debug("tquic_crypto: installed keys for level %d\n", level);
+	pr_debug("tquic_crypto: installed keys for level %d (v%s)\n",
+		 level, version == TQUIC_VERSION_2 ? "2" : "1");
 
 	return 0;
 }
 EXPORT_SYMBOL_GPL(tquic_crypto_install_keys);
+
+/*
+ * Get the QUIC version used by this crypto state
+ */
+u32 tquic_crypto_get_version(struct tquic_crypto_state *crypto)
+{
+	return crypto ? crypto->version : TQUIC_VERSION_1;
+}
+EXPORT_SYMBOL_GPL(tquic_crypto_get_version);
+
+/*
+ * Set the QUIC version for key derivation
+ *
+ * This should be called when version negotiation completes to ensure
+ * subsequent key derivations use the correct HKDF labels.
+ */
+void tquic_crypto_set_version(struct tquic_crypto_state *crypto, u32 version)
+{
+	if (crypto)
+		crypto->version = version;
+}
+EXPORT_SYMBOL_GPL(tquic_crypto_set_version);
 
 MODULE_DESCRIPTION("TQUIC TLS 1.3 Crypto Integration");
 MODULE_LICENSE("GPL");

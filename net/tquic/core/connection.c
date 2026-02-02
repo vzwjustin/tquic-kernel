@@ -714,7 +714,10 @@ int tquic_send_stateless_reset(struct tquic_connection *conn)
 EXPORT_SYMBOL_GPL(tquic_send_stateless_reset);
 
 /*
- * Version Negotiation
+ * Version Negotiation (RFC 9000, RFC 9368, RFC 9369)
+ *
+ * Supports Compatible Version Negotiation per RFC 9368.
+ * Version preference is controlled via /proc/sys/net/tquic/preferred_version.
  */
 
 /* Supported QUIC versions (RFC 9000, RFC 9369) */
@@ -723,6 +726,10 @@ static const u32 tquic_supported_versions[] = {
 	TQUIC_VERSION_2,	/* RFC 9369: QUIC v2 (0x6b3343cf) */
 	0			/* Sentinel value - marks end of list */
 };
+
+/* Number of supported versions (excluding sentinel) */
+#define TQUIC_NUM_SUPPORTED_VERSIONS \
+	(ARRAY_SIZE(tquic_supported_versions) - 1)
 
 /**
  * tquic_version_is_supported - Check if a version is supported
@@ -744,20 +751,53 @@ bool tquic_version_is_supported(u32 version)
 EXPORT_SYMBOL_GPL(tquic_version_is_supported);
 
 /**
+ * tquic_get_preferred_versions - Get ordered list of supported versions
+ * @versions: Output array to fill (must have space for TQUIC_NUM_SUPPORTED_VERSIONS)
+ *
+ * Returns versions in preference order based on sysctl setting.
+ * If preferred_version sysctl is 1, QUIC v2 comes first.
+ * Otherwise, QUIC v1 comes first (default, maximum compatibility).
+ *
+ * Return: Number of versions written to array
+ */
+int tquic_get_preferred_versions(u32 *versions)
+{
+	if (tquic_sysctl_prefer_v2()) {
+		/* Prefer v2 per sysctl setting */
+		versions[0] = TQUIC_VERSION_2;
+		versions[1] = TQUIC_VERSION_1;
+	} else {
+		/* Default: prefer v1 for maximum compatibility */
+		versions[0] = TQUIC_VERSION_1;
+		versions[1] = TQUIC_VERSION_2;
+	}
+	return TQUIC_NUM_SUPPORTED_VERSIONS;
+}
+EXPORT_SYMBOL_GPL(tquic_get_preferred_versions);
+
+/**
  * tquic_version_select - Select best common version
  * @offered: Versions offered by peer
  * @num_offered: Number of offered versions
+ *
+ * Selects the best mutually supported version, respecting the
+ * preferred_version sysctl setting.
  *
  * Returns the best mutually supported version, or 0 if none.
  */
 u32 tquic_version_select(const u32 *offered, int num_offered)
 {
+	u32 preferred[TQUIC_NUM_SUPPORTED_VERSIONS];
+	int num_preferred;
 	int i, j;
 
-	/* Prefer our ordering (newer versions first) */
-	for (i = 0; tquic_supported_versions[i] != 0; i++) {
+	/* Get versions in preference order */
+	num_preferred = tquic_get_preferred_versions(preferred);
+
+	/* Find first mutually supported version in preference order */
+	for (i = 0; i < num_preferred; i++) {
 		for (j = 0; j < num_offered; j++) {
-			if (tquic_supported_versions[i] == offered[j])
+			if (preferred[i] == offered[j])
 				return offered[j];
 		}
 	}
@@ -765,6 +805,18 @@ u32 tquic_version_select(const u32 *offered, int num_offered)
 	return 0;
 }
 EXPORT_SYMBOL_GPL(tquic_version_select);
+
+/**
+ * tquic_version_select_for_initial - Select version for Initial packet
+ *
+ * Returns the preferred QUIC version to use when sending the first
+ * Initial packet. This is controlled by the preferred_version sysctl.
+ */
+u32 tquic_version_select_for_initial(void)
+{
+	return tquic_sysctl_get_preferred_version();
+}
+EXPORT_SYMBOL_GPL(tquic_version_select_for_initial);
 
 /**
  * tquic_send_version_negotiation - Send Version Negotiation packet
@@ -2187,10 +2239,13 @@ int tquic_conn_client_restart(struct tquic_connection *conn)
 			conn->crypto_state = NULL;
 		}
 
-		/* Initialize new crypto state with updated DCID */
-		conn->crypto_state = tquic_crypto_init(&conn->dcid, true);
+		/* Initialize new crypto state with updated DCID and version */
+		conn->crypto_state = tquic_crypto_init_versioned(&conn->dcid,
+								 true,
+								 conn->version);
 		if (!conn->crypto_state) {
-			pr_err("tquic: failed to init crypto for restart\n");
+			pr_err("tquic: failed to init crypto for restart (v%s)\n",
+			       conn->version == TQUIC_VERSION_2 ? "2" : "1");
 			return -ENOMEM;
 		}
 
@@ -2360,11 +2415,14 @@ int tquic_conn_server_accept(struct tquic_connection *conn,
 	 * in tquic_handshake.c which manages the full server flow.
 	 */
 
-	/* Initialize crypto state with client's original DCID */
+	/* Initialize crypto state with client's original DCID and version */
 	if (!conn->crypto_state) {
-		conn->crypto_state = tquic_crypto_init(&conn->dcid, false);
+		conn->crypto_state = tquic_crypto_init_versioned(&conn->dcid,
+								 false,
+								 conn->version);
 		if (!conn->crypto_state) {
-			pr_err("tquic: failed to init server crypto state\n");
+			pr_err("tquic: failed to init server crypto state (v%s)\n",
+			       conn->version == TQUIC_VERSION_2 ? "2" : "1");
 			ret = -ENOMEM;
 			goto err_free;
 		}

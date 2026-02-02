@@ -1415,13 +1415,41 @@ int tquic_tp_apply(struct tquic_connection *conn,
 		}
 	}
 
-	pr_debug("tquic: applied transport params - idle=%u max_data=%llu/%llu multipath=%d pref_addr=%d migration_disabled=%d\n",
+	/*
+	 * Apply DATAGRAM frame support (RFC 9221)
+	 *
+	 * If both peers advertised max_datagram_frame_size > 0, then
+	 * datagram frames are enabled. The negotiated size is the
+	 * minimum of both values.
+	 *
+	 * max_send_size: The maximum size WE can send (peer's advertised limit)
+	 * max_recv_size: The maximum size WE will accept (our advertised limit)
+	 *
+	 * Use spin_lock_bh for softirq safety since this may be called from
+	 * handshake completion which can happen in softirq context.
+	 */
+	spin_lock_bh(&conn->datagram.lock);
+	if (negotiated->datagram_enabled) {
+		conn->datagram.enabled = true;
+		conn->datagram.max_send_size = negotiated->max_datagram_frame_size;
+		conn->datagram.max_recv_size = negotiated->max_datagram_frame_size;
+		pr_debug("tquic: DATAGRAM enabled, max_size=%llu\n",
+			 negotiated->max_datagram_frame_size);
+	} else {
+		conn->datagram.enabled = false;
+		conn->datagram.max_send_size = 0;
+		conn->datagram.max_recv_size = 0;
+	}
+	spin_unlock_bh(&conn->datagram.lock);
+
+	pr_debug("tquic: applied transport params - idle=%u max_data=%llu/%llu multipath=%d pref_addr=%d migration_disabled=%d datagram=%d\n",
 		 negotiated->idle_timeout,
 		 negotiated->max_data_send,
 		 negotiated->max_data_recv,
 		 negotiated->multipath_enabled,
 		 negotiated->preferred_address_present,
-		 negotiated->migration_disabled);
+		 negotiated->migration_disabled,
+		 negotiated->datagram_enabled);
 
 	return 0;
 }

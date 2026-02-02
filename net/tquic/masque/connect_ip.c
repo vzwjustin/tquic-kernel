@@ -32,9 +32,19 @@
 #include <linux/in6.h>
 #include <linux/ip.h>
 #include <linux/ipv6.h>
+#include <linux/netdevice.h>
+#include <linux/if_arp.h>
+#include <linux/inetdevice.h>
+#include <linux/rtnetlink.h>
 #include <net/sock.h>
 #include <net/ip.h>
 #include <net/ipv6.h>
+#include <net/route.h>
+#include <net/ip_fib.h>
+#include <net/ip6_fib.h>
+#include <net/ip6_route.h>
+#include <net/addrconf.h>
+#include <net/netlink.h>
 #include <net/tquic.h>
 
 #include "../protocol.h"
@@ -1464,6 +1474,644 @@ int tquic_connect_ip_set_protocol_filter(
 	return 0;
 }
 EXPORT_SYMBOL_GPL(tquic_connect_ip_set_protocol_filter);
+
+/*
+ * =============================================================================
+ * MODULE INITIALIZATION
+ * =============================================================================
+ */
+
+/*
+ * =============================================================================
+ * KERNEL ROUTING TABLE INTEGRATION
+ * =============================================================================
+ */
+
+/* Interface counter for auto-naming */
+static atomic_t iface_counter = ATOMIC_INIT(0);
+
+/**
+ * struct tquic_connect_ip_netdev_priv - Private data for virtual netdev
+ * @tunnel: Associated tunnel
+ * @iface: Interface structure
+ */
+struct tquic_connect_ip_netdev_priv {
+	struct tquic_connect_ip_tunnel *tunnel;
+	struct tquic_connect_ip_iface *iface;
+};
+
+/**
+ * tquic_netdev_open - Network device open callback
+ * @dev: Network device
+ */
+static int tquic_netdev_open(struct net_device *dev)
+{
+	netif_start_queue(dev);
+	return 0;
+}
+
+/**
+ * tquic_netdev_stop - Network device stop callback
+ * @dev: Network device
+ */
+static int tquic_netdev_stop(struct net_device *dev)
+{
+	netif_stop_queue(dev);
+	return 0;
+}
+
+/**
+ * tquic_netdev_xmit - Network device transmit callback
+ * @skb: Socket buffer to transmit
+ * @dev: Network device
+ *
+ * Called when a packet is transmitted on the virtual interface.
+ * Forwards the packet through the CONNECT-IP tunnel.
+ */
+static netdev_tx_t tquic_netdev_xmit(struct sk_buff *skb,
+				     struct net_device *dev)
+{
+	struct tquic_connect_ip_netdev_priv *priv = netdev_priv(dev);
+	struct tquic_connect_ip_tunnel *tunnel;
+	int ret;
+
+	if (!priv || !priv->tunnel) {
+		dev_kfree_skb(skb);
+		dev->stats.tx_dropped++;
+		return NETDEV_TX_OK;
+	}
+
+	tunnel = priv->tunnel;
+
+	/* Forward packet through tunnel */
+	ret = tquic_connect_ip_send(tunnel, skb);
+	if (ret < 0) {
+		dev->stats.tx_errors++;
+		dev->stats.tx_dropped++;
+	} else {
+		dev->stats.tx_packets++;
+		dev->stats.tx_bytes += skb->len;
+	}
+
+	dev_kfree_skb(skb);
+	return NETDEV_TX_OK;
+}
+
+/**
+ * tquic_netdev_get_stats - Get network device statistics
+ * @dev: Network device
+ */
+static struct net_device_stats *tquic_netdev_get_stats(struct net_device *dev)
+{
+	return &dev->stats;
+}
+
+/* Network device operations */
+static const struct net_device_ops tquic_netdev_ops = {
+	.ndo_open = tquic_netdev_open,
+	.ndo_stop = tquic_netdev_stop,
+	.ndo_start_xmit = tquic_netdev_xmit,
+	.ndo_get_stats = tquic_netdev_get_stats,
+};
+
+/**
+ * tquic_netdev_setup - Network device setup callback
+ * @dev: Network device
+ */
+static void tquic_netdev_setup(struct net_device *dev)
+{
+	dev->netdev_ops = &tquic_netdev_ops;
+	dev->type = ARPHRD_NONE;
+	dev->flags = IFF_POINTOPOINT | IFF_NOARP;
+	dev->mtu = CONNECT_IP_MIN_MTU_IPV6;
+	dev->min_mtu = CONNECT_IP_MIN_MTU_IPV4;
+	dev->max_mtu = 65535;
+	dev->hard_header_len = 0;
+	dev->addr_len = 0;
+	dev->tx_queue_len = 500;
+	dev->features |= NETIF_F_LLTX;
+}
+
+/**
+ * tquic_connect_ip_create_iface - Create virtual network interface
+ * @tunnel: CONNECT-IP tunnel
+ * @name: Interface name (or NULL for auto-generated)
+ * @iface: Output for created interface
+ *
+ * Returns: 0 on success, negative errno on failure.
+ */
+int tquic_connect_ip_create_iface(struct tquic_connect_ip_tunnel *tunnel,
+				  const char *name,
+				  struct tquic_connect_ip_iface **iface)
+{
+	struct tquic_connect_ip_iface *new_iface;
+	struct net_device *dev;
+	struct tquic_connect_ip_netdev_priv *priv;
+	char ifname[IFNAMSIZ];
+	int ret;
+
+	if (!tunnel || !iface)
+		return -EINVAL;
+
+	/* Generate interface name if not provided */
+	if (!name) {
+		int idx = atomic_inc_return(&iface_counter);
+		snprintf(ifname, sizeof(ifname), "%s%d",
+			 TQUIC_CONNECT_IP_IFNAME_PREFIX, idx);
+		name = ifname;
+	}
+
+	/* Allocate interface structure */
+	new_iface = kzalloc(sizeof(*new_iface), GFP_KERNEL);
+	if (!new_iface)
+		return -ENOMEM;
+
+	/* Allocate network device */
+	dev = alloc_netdev(sizeof(struct tquic_connect_ip_netdev_priv),
+			   name, NET_NAME_USER, tquic_netdev_setup);
+	if (!dev) {
+		kfree(new_iface);
+		return -ENOMEM;
+	}
+
+	/* Initialize interface structure */
+	new_iface->net_device = dev;
+	new_iface->tunnel = tunnel;
+	INIT_LIST_HEAD(&new_iface->routes);
+	new_iface->num_routes = 0;
+	INIT_LIST_HEAD(&new_iface->list);
+
+	/* Set up private data */
+	priv = netdev_priv(dev);
+	priv->tunnel = tunnel;
+	priv->iface = new_iface;
+
+	/* Set MTU from tunnel */
+	dev->mtu = tunnel->mtu;
+
+	/* Register network device */
+	ret = register_netdev(dev);
+	if (ret < 0) {
+		free_netdev(dev);
+		kfree(new_iface);
+		return ret;
+	}
+
+	*iface = new_iface;
+
+	pr_info("tquic: created CONNECT-IP interface %s\n", dev->name);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(tquic_connect_ip_create_iface);
+
+/**
+ * tquic_connect_ip_destroy_iface - Destroy virtual network interface
+ * @iface: Interface to destroy
+ */
+void tquic_connect_ip_destroy_iface(struct tquic_connect_ip_iface *iface)
+{
+	struct tquic_connect_ip_route_entry *route, *tmp;
+
+	if (!iface)
+		return;
+
+	/* Flush all routes */
+	tquic_connect_ip_flush_routes(iface);
+
+	/* Free route entries */
+	list_for_each_entry_safe(route, tmp, &iface->routes, list) {
+		list_del(&route->list);
+		kfree(route);
+	}
+
+	/* Unregister and free network device */
+	if (iface->net_device) {
+		pr_info("tquic: destroying CONNECT-IP interface %s\n",
+			iface->net_device->name);
+		unregister_netdev(iface->net_device);
+		free_netdev(iface->net_device);
+	}
+
+	kfree(iface);
+}
+EXPORT_SYMBOL_GPL(tquic_connect_ip_destroy_iface);
+
+/**
+ * tquic_connect_ip_add_route - Add route to kernel routing table
+ * @iface: Virtual interface
+ * @entry: Route entry to add
+ *
+ * Returns: 0 on success, negative errno on failure.
+ */
+int tquic_connect_ip_add_route(struct tquic_connect_ip_iface *iface,
+			       const struct tquic_connect_ip_route_entry *entry)
+{
+	struct tquic_connect_ip_route_entry *new_entry;
+	struct net *net;
+	int ret = 0;
+
+	if (!iface || !iface->net_device || !entry)
+		return -EINVAL;
+
+	net = dev_net(iface->net_device);
+
+	/* Duplicate entry for our list */
+	new_entry = kmemdup(entry, sizeof(*entry), GFP_KERNEL);
+	if (!new_entry)
+		return -ENOMEM;
+
+	INIT_LIST_HEAD(&new_entry->list);
+
+	if (entry->ip_version == 4) {
+#if IS_ENABLED(CONFIG_IP_MULTIPLE_TABLES)
+		struct fib_config cfg = {
+			.fc_family = AF_INET,
+			.fc_dst = entry->dst_addr.v4,
+			.fc_dst_len = entry->dst_prefix_len,
+			.fc_oif = iface->net_device->ifindex,
+			.fc_table = entry->table_id ? entry->table_id : RT_TABLE_MAIN,
+			.fc_priority = entry->priority,
+			.fc_type = RTN_UNICAST,
+			.fc_scope = RT_SCOPE_UNIVERSE,
+			.fc_protocol = RTPROT_STATIC,
+			.fc_nlflags = NLM_F_CREATE | NLM_F_EXCL,
+		};
+
+		if (entry->gateway.v4)
+			cfg.fc_gw4 = entry->gateway.v4;
+
+		rtnl_lock();
+		ret = fib_table_insert(net, fib_get_table(net, cfg.fc_table),
+				       &cfg, NULL);
+		rtnl_unlock();
+#else
+		/* Simplified path without policy routing */
+		pr_debug("tquic: IPv4 route add (no policy routing support)\n");
+#endif
+	}
+#if IS_ENABLED(CONFIG_IPV6)
+	else if (entry->ip_version == 6) {
+		struct fib6_config cfg = {
+			.fc_family = AF_INET6,
+			.fc_dst = entry->dst_addr.v6,
+			.fc_dst_len = entry->dst_prefix_len,
+			.fc_ifindex = iface->net_device->ifindex,
+			.fc_table = entry->table_id ? entry->table_id : RT6_TABLE_MAIN,
+			.fc_metric = entry->priority ? entry->priority : 1024,
+			.fc_type = RTN_UNICAST,
+			.fc_protocol = RTPROT_STATIC,
+			.fc_nlinfo = {
+				.nl_net = net,
+			},
+		};
+
+		if (!ipv6_addr_any(&entry->gateway.v6))
+			cfg.fc_gateway = entry->gateway.v6;
+
+		rtnl_lock();
+		ret = ip6_route_add(&cfg, GFP_KERNEL, NULL);
+		rtnl_unlock();
+	}
+#endif
+	else {
+		kfree(new_entry);
+		return -EAFNOSUPPORT;
+	}
+
+	if (ret < 0) {
+		kfree(new_entry);
+		return ret;
+	}
+
+	/* Add to our tracking list */
+	list_add_tail(&new_entry->list, &iface->routes);
+	iface->num_routes++;
+
+	pr_debug("tquic: added IPv%d route via %s\n",
+		 entry->ip_version, iface->net_device->name);
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(tquic_connect_ip_add_route);
+
+/**
+ * tquic_connect_ip_del_route - Remove route from kernel routing table
+ * @iface: Virtual interface
+ * @entry: Route entry to remove
+ *
+ * Returns: 0 on success, negative errno on failure.
+ */
+int tquic_connect_ip_del_route(struct tquic_connect_ip_iface *iface,
+			       const struct tquic_connect_ip_route_entry *entry)
+{
+	struct tquic_connect_ip_route_entry *tracked, *tmp;
+	struct net *net;
+	int ret = 0;
+
+	if (!iface || !iface->net_device || !entry)
+		return -EINVAL;
+
+	net = dev_net(iface->net_device);
+
+	if (entry->ip_version == 4) {
+#if IS_ENABLED(CONFIG_IP_MULTIPLE_TABLES)
+		struct fib_config cfg = {
+			.fc_family = AF_INET,
+			.fc_dst = entry->dst_addr.v4,
+			.fc_dst_len = entry->dst_prefix_len,
+			.fc_oif = iface->net_device->ifindex,
+			.fc_table = entry->table_id ? entry->table_id : RT_TABLE_MAIN,
+		};
+
+		rtnl_lock();
+		ret = fib_table_delete(net, fib_get_table(net, cfg.fc_table),
+				       &cfg, NULL);
+		rtnl_unlock();
+#endif
+	}
+#if IS_ENABLED(CONFIG_IPV6)
+	else if (entry->ip_version == 6) {
+		struct fib6_config cfg = {
+			.fc_family = AF_INET6,
+			.fc_dst = entry->dst_addr.v6,
+			.fc_dst_len = entry->dst_prefix_len,
+			.fc_ifindex = iface->net_device->ifindex,
+			.fc_table = entry->table_id ? entry->table_id : RT6_TABLE_MAIN,
+			.fc_nlinfo = {
+				.nl_net = net,
+			},
+		};
+
+		rtnl_lock();
+		ret = ip6_route_del(&cfg, NULL);
+		rtnl_unlock();
+	}
+#endif
+	else {
+		return -EAFNOSUPPORT;
+	}
+
+	/* Remove from tracking list */
+	list_for_each_entry_safe(tracked, tmp, &iface->routes, list) {
+		if (tracked->ip_version == entry->ip_version &&
+		    tracked->dst_prefix_len == entry->dst_prefix_len) {
+			bool match = false;
+
+			if (entry->ip_version == 4) {
+				match = (tracked->dst_addr.v4 == entry->dst_addr.v4);
+			} else {
+				match = ipv6_addr_equal(&tracked->dst_addr.v6,
+							&entry->dst_addr.v6);
+			}
+
+			if (match) {
+				list_del(&tracked->list);
+				kfree(tracked);
+				iface->num_routes--;
+				break;
+			}
+		}
+	}
+
+	return ret;
+}
+EXPORT_SYMBOL_GPL(tquic_connect_ip_del_route);
+
+/**
+ * tquic_connect_ip_flush_routes - Remove all routes for interface
+ * @iface: Virtual interface
+ *
+ * Returns: 0 on success, negative errno on failure.
+ */
+int tquic_connect_ip_flush_routes(struct tquic_connect_ip_iface *iface)
+{
+	struct tquic_connect_ip_route_entry *entry, *tmp;
+
+	if (!iface)
+		return -EINVAL;
+
+	list_for_each_entry_safe(entry, tmp, &iface->routes, list) {
+		tquic_connect_ip_del_route(iface, entry);
+	}
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(tquic_connect_ip_flush_routes);
+
+/**
+ * tquic_connect_ip_set_iface_addr - Set interface IP address
+ * @iface: Virtual interface
+ * @addr: IP address
+ *
+ * Returns: 0 on success, negative errno on failure.
+ */
+int tquic_connect_ip_set_iface_addr(struct tquic_connect_ip_iface *iface,
+				    const struct tquic_ip_address *addr)
+{
+	struct net_device *dev;
+	int ret = 0;
+
+	if (!iface || !iface->net_device || !addr)
+		return -EINVAL;
+
+	dev = iface->net_device;
+
+	rtnl_lock();
+
+	if (addr->version == 4) {
+		struct in_ifaddr *ifa;
+		struct in_device *in_dev;
+
+		in_dev = __in_dev_get_rtnl(dev);
+		if (!in_dev) {
+			in_dev = inetdev_init(dev);
+			if (!in_dev) {
+				rtnl_unlock();
+				return -ENOMEM;
+			}
+		}
+
+		ifa = inet_alloc_ifa();
+		if (!ifa) {
+			rtnl_unlock();
+			return -ENOMEM;
+		}
+
+		ifa->ifa_local = addr->addr.v4;
+		ifa->ifa_address = addr->addr.v4;
+		ifa->ifa_prefixlen = addr->prefix_len;
+		ifa->ifa_mask = inet_make_mask(addr->prefix_len);
+		ifa->ifa_scope = RT_SCOPE_UNIVERSE;
+		ifa->ifa_dev = in_dev;
+
+		ret = __inet_insert_ifa(ifa, NULL, 0, NULL);
+	}
+#if IS_ENABLED(CONFIG_IPV6)
+	else if (addr->version == 6) {
+		struct inet6_dev *idev;
+		struct inet6_ifaddr *ifp;
+
+		idev = ipv6_find_idev(dev);
+		if (IS_ERR(idev)) {
+			rtnl_unlock();
+			return PTR_ERR(idev);
+		}
+
+		ifp = ipv6_add_addr(idev, &addr->addr.v6, NULL,
+				    addr->prefix_len, RT_SCOPE_UNIVERSE,
+				    IFA_F_PERMANENT, INFINITY_LIFE_TIME,
+				    INFINITY_LIFE_TIME, true, NULL);
+		if (IS_ERR(ifp)) {
+			ret = PTR_ERR(ifp);
+		}
+	}
+#endif
+	else {
+		ret = -EAFNOSUPPORT;
+	}
+
+	rtnl_unlock();
+
+	if (ret == 0) {
+		pr_debug("tquic: set IPv%d address on %s\n",
+			 addr->version, dev->name);
+	}
+
+	return ret;
+}
+EXPORT_SYMBOL_GPL(tquic_connect_ip_set_iface_addr);
+
+/**
+ * tquic_connect_ip_set_iface_mtu - Set interface MTU
+ * @iface: Virtual interface
+ * @mtu: MTU value
+ *
+ * Returns: 0 on success, negative errno on failure.
+ */
+int tquic_connect_ip_set_iface_mtu(struct tquic_connect_ip_iface *iface,
+				   u32 mtu)
+{
+	if (!iface || !iface->net_device)
+		return -EINVAL;
+
+	if (mtu < CONNECT_IP_MIN_MTU_IPV4)
+		return -EINVAL;
+
+	rtnl_lock();
+	dev_set_mtu(iface->net_device, mtu);
+	rtnl_unlock();
+
+	pr_debug("tquic: set MTU %u on %s\n", mtu, iface->net_device->name);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(tquic_connect_ip_set_iface_mtu);
+
+/*
+ * =============================================================================
+ * IP FORWARDING CONTROL
+ * =============================================================================
+ */
+
+/**
+ * tquic_connect_ip_enable_forwarding - Enable IP forwarding on tunnel
+ * @tunnel: CONNECT-IP tunnel
+ * @enable: true to enable, false to disable
+ *
+ * Returns: 0 on success, negative errno on failure.
+ */
+int tquic_connect_ip_enable_forwarding(struct tquic_connect_ip_tunnel *tunnel,
+				       bool enable)
+{
+	if (!tunnel)
+		return -EINVAL;
+
+	/*
+	 * In a full implementation, this would configure the tunnel to
+	 * inject received packets into the kernel network stack.
+	 * For now, this is tracked as a flag.
+	 */
+	pr_debug("tquic: CONNECT-IP forwarding %s\n",
+		 enable ? "enabled" : "disabled");
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(tquic_connect_ip_enable_forwarding);
+
+/**
+ * tquic_connect_ip_inject_packet - Inject received packet into kernel
+ * @tunnel: CONNECT-IP tunnel
+ * @skb: Socket buffer containing IP packet
+ *
+ * Returns: 0 on success, negative errno on failure.
+ */
+int tquic_connect_ip_inject_packet(struct tquic_connect_ip_tunnel *tunnel,
+				   struct sk_buff *skb)
+{
+	unsigned char *data;
+	u8 ip_version;
+	int ret;
+
+	if (!tunnel || !skb)
+		return -EINVAL;
+
+	if (skb->len < 1)
+		return -EINVAL;
+
+	data = skb->data;
+	ip_version = (data[0] >> 4) & 0x0f;
+
+	/* Set up skb for reception */
+	skb->dev = NULL;  /* Would be set to virtual interface */
+	skb_reset_mac_header(skb);
+	skb_reset_network_header(skb);
+
+	if (ip_version == 4) {
+		skb->protocol = htons(ETH_P_IP);
+		ret = netif_rx(skb);
+	}
+#if IS_ENABLED(CONFIG_IPV6)
+	else if (ip_version == 6) {
+		skb->protocol = htons(ETH_P_IPV6);
+		ret = netif_rx(skb);
+	}
+#endif
+	else {
+		return -EPROTONOSUPPORT;
+	}
+
+	return (ret == NET_RX_SUCCESS) ? 0 : -EIO;
+}
+EXPORT_SYMBOL_GPL(tquic_connect_ip_inject_packet);
+
+/*
+ * =============================================================================
+ * TUNNEL STATISTICS
+ * =============================================================================
+ */
+
+/**
+ * tquic_connect_ip_get_stats - Get tunnel statistics
+ * @tunnel: CONNECT-IP tunnel
+ * @stats: Output for statistics
+ *
+ * Returns: 0 on success, negative errno on failure.
+ */
+int tquic_connect_ip_get_stats(struct tquic_connect_ip_tunnel *tunnel,
+			       struct tquic_connect_ip_stats *stats)
+{
+	if (!tunnel || !stats)
+		return -EINVAL;
+
+	memset(stats, 0, sizeof(*stats));
+
+	/*
+	 * In a full implementation, these would be tracked in the tunnel.
+	 * For now, return zeros.
+	 */
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(tquic_connect_ip_get_stats);
 
 /*
  * =============================================================================

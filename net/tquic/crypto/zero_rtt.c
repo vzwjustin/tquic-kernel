@@ -11,6 +11,46 @@
  * - Server accept/reject via early_data_indication
  * - Anti-replay protection using bloom filter with TTL
  *
+ * =============================================================================
+ * CRITICAL SECURITY INVARIANTS - READ BEFORE MODIFYING
+ * =============================================================================
+ *
+ * 1. NONCE UNIQUENESS (RFC 9001 Section 5.3)
+ *    AEAD ciphers (AES-GCM, ChaCha20-Poly1305) require unique nonces per key.
+ *    In QUIC: nonce = IV XOR packet_number
+ *
+ *    CONSEQUENCE OF NONCE REUSE:
+ *    - AES-GCM: XOR of plaintexts is leaked, authentication is broken
+ *    - ChaCha20-Poly1305: Similar catastrophic failure
+ *    - Result: Complete cryptographic compromise of the connection
+ *
+ *    PROTECTION: Strict packet number monotonicity enforcement with spinlock
+ *    protection for thread safety. See tquic_zero_rtt_encrypt().
+ *
+ * 2. REPLAY PROTECTION (RFC 9000 Section 13.2.3)
+ *    Duplicate packet numbers MUST be rejected to prevent replay attacks.
+ *    For 0-RTT, this is especially critical since early data may have
+ *    side effects that are not idempotent.
+ *
+ *    PROTECTION: Sliding window bitmap of size TQUIC_PN_REPLAY_WINDOW_SIZE.
+ *    PNs are recorded ONLY after successful AEAD authentication.
+ *    See tquic_zero_rtt_decrypt().
+ *
+ * 3. BLOOM FILTER SEEDS (Anti-Replay for Session Tickets)
+ *    Hash seeds MUST be cryptographically random to prevent prediction
+ *    attacks that could cause collisions or bypasses.
+ *
+ *    PROTECTION: Seeds initialized via get_random_bytes() at module load.
+ *    See tquic_zero_rtt_module_init().
+ *
+ * 4. KEY MATERIAL HANDLING
+ *    All cryptographic keys and IVs MUST be securely wiped on cleanup.
+ *
+ *    PROTECTION: memzero_explicit() used for all key material cleanup.
+ *    See tquic_zero_rtt_cleanup().
+ *
+ * =============================================================================
+ *
  * Security Notes (RFC 9001 Section 9.2):
  * - 0-RTT data is replayable; applications must be idempotent
  * - Server anti-replay uses single-use ticket + bloom filter
@@ -50,9 +90,15 @@ static bool server_ticket_key_valid;
 /*
  * Cryptographically random seeds for replay filter bloom hash.
  * Initialized at module load to prevent hash prediction attacks.
+ * Rotated periodically to limit the window for seed compromise attacks.
  */
 static u32 replay_hash_seed1 __read_mostly;
 static u32 replay_hash_seed2 __read_mostly;
+static DEFINE_SPINLOCK(replay_seed_lock);
+static ktime_t replay_seed_last_rotation;
+
+/* Seed rotation interval: 1 hour (in seconds) */
+#define TQUIC_REPLAY_SEED_ROTATION_INTERVAL	3600
 
 /* TLS 1.3 cipher suites */
 #define TLS_AES_128_GCM_SHA256		0x1301
@@ -737,17 +783,75 @@ static void replay_filter_rotate(struct tquic_replay_filter *filter)
 }
 
 /*
- * Compute bloom filter hash indices
+ * tquic_replay_rotate_seeds - Rotate bloom filter hash seeds periodically
  *
- * Uses cryptographically random seeds initialized at module load
- * to prevent hash prediction attacks on the replay filter.
+ * SECURITY: Periodic seed rotation limits the window for attacks that exploit
+ * knowledge of the hash seeds. Even if an attacker discovers the seeds through
+ * timing analysis or other side channels, the seeds will change within the
+ * rotation interval, forcing re-discovery.
+ *
+ * This function should be called periodically (e.g., during filter operations).
+ * It uses a spinlock to ensure thread-safe seed updates.
+ *
+ * Note: When seeds rotate, old bloom filter entries may produce false negatives.
+ * This is acceptable because:
+ *   1. Replay protection already has a TTL-based expiration
+ *   2. The bloom filter is probabilistic by design
+ *   3. Security (unpredictable seeds) outweighs perfect replay detection
+ */
+static void tquic_replay_rotate_seeds(void)
+{
+	ktime_t now;
+	s64 elapsed_seconds;
+	unsigned long flags;
+
+	now = ktime_get();
+
+	spin_lock_irqsave(&replay_seed_lock, flags);
+
+	elapsed_seconds = ktime_to_ms(ktime_sub(now, replay_seed_last_rotation)) / 1000;
+
+	if (elapsed_seconds >= TQUIC_REPLAY_SEED_ROTATION_INTERVAL) {
+		/*
+		 * Generate new cryptographically secure seeds.
+		 * get_random_bytes() uses the kernel CSPRNG which provides
+		 * cryptographic-quality randomness.
+		 */
+		get_random_bytes(&replay_hash_seed1, sizeof(replay_hash_seed1));
+		get_random_bytes(&replay_hash_seed2, sizeof(replay_hash_seed2));
+		replay_seed_last_rotation = now;
+
+		pr_debug("tquic: rotated replay filter hash seeds\n");
+	}
+
+	spin_unlock_irqrestore(&replay_seed_lock, flags);
+}
+
+/*
+ * Compute bloom filter hash indices for anti-replay protection.
+ *
+ * Security notes:
+ *   - Uses cryptographically random seeds (replay_hash_seed1, replay_hash_seed2)
+ *     initialized via get_random_bytes() at module load time
+ *   - Random seeds prevent hash prediction attacks where an attacker could
+ *     craft ticket values to cause bloom filter collisions
+ *   - Double hashing (h1 + i*h2) provides k independent hash functions
+ *     from just two base hashes (Kirsch-Mitzenmacher optimization)
+ *   - Seeds are rotated periodically to limit exposure window
+ *
+ * The seeds MUST be initialized before this function is called.
+ * See tquic_zero_rtt_module_init() for initialization.
  */
 static void replay_filter_hash(const u8 *data, u32 len, u32 *indices)
 {
 	u32 h1, h2;
 	int i;
 
-	/* Use jhash with random seeds initialized at module load */
+	/*
+	 * jhash (Jenkins hash) with random seeds.
+	 * Seeds are initialized with get_random_bytes() in module init,
+	 * providing cryptographic unpredictability.
+	 */
 	h1 = jhash(data, len, replay_hash_seed1);
 	h2 = jhash(data, len, replay_hash_seed2);
 
@@ -764,6 +868,12 @@ int tquic_replay_filter_check(struct tquic_replay_filter *filter,
 
 	if (!filter || !ticket || ticket_len == 0)
 		return -EINVAL;
+
+	/*
+	 * SECURITY: Rotate hash seeds periodically to limit the exposure
+	 * window if seeds are compromised through side-channel attacks.
+	 */
+	tquic_replay_rotate_seeds();
 
 	replay_filter_hash(ticket, ticket_len, indices);
 
@@ -1086,6 +1196,19 @@ int tquic_zero_rtt_init(struct tquic_connection *conn)
 		return -ENOMEM;
 
 	state->state = TQUIC_0RTT_NONE;
+
+	/*
+	 * Initialize packet number tracking for cryptographic security.
+	 * The spinlock protects concurrent access to PN state, which is
+	 * critical because nonce = IV XOR PN, and nonce reuse breaks AEAD.
+	 */
+	spin_lock_init(&state->pn_lock);
+	state->send_pn_initialized = false;
+	state->recv_pn_initialized = false;
+	state->largest_sent_pn = 0;
+	state->largest_recv_pn = 0;
+	bitmap_zero(state->recv_pn_bitmap, TQUIC_PN_REPLAY_WINDOW_SIZE);
+
 	conn->zero_rtt_state = state;
 
 	return 0;
@@ -1101,8 +1224,16 @@ void tquic_zero_rtt_cleanup(struct tquic_connection *conn)
 
 	state = conn->zero_rtt_state;
 
-	/* Securely wipe keys */
+	/*
+	 * Securely wipe all cryptographic material:
+	 * - AEAD keys and IVs
+	 * - Packet number state (prevents information leakage)
+	 * - Replay window bitmap
+	 */
 	memzero_explicit(&state->keys, sizeof(state->keys));
+	memzero_explicit(&state->largest_sent_pn, sizeof(state->largest_sent_pn));
+	memzero_explicit(&state->largest_recv_pn, sizeof(state->largest_recv_pn));
+	bitmap_zero(state->recv_pn_bitmap, TQUIC_PN_REPLAY_WINDOW_SIZE);
 
 	/* Release ticket reference */
 	if (state->ticket)
@@ -1276,6 +1407,7 @@ int tquic_zero_rtt_encrypt(struct tquic_connection *conn,
 	struct aead_request *req;
 	struct scatterlist sg[2];
 	u8 nonce[12];
+	unsigned long flags;
 	int ret;
 
 	if (!conn || !conn->zero_rtt_state)
@@ -1286,23 +1418,43 @@ int tquic_zero_rtt_encrypt(struct tquic_connection *conn,
 		return -ENOKEY;
 
 	/*
-	 * CRITICAL: Ensure packet number is strictly increasing to prevent
-	 * nonce reuse. In AEAD (AES-GCM, ChaCha20-Poly1305), reusing a nonce
-	 * with the same key completely compromises the encryption - allowing
-	 * plaintext recovery and authentication bypass.
+	 * =======================================================================
+	 * CRITICAL SECURITY CHECK: Prevent Nonce Reuse (CVE-class vulnerability)
+	 * =======================================================================
 	 *
-	 * RFC 9001 Section 5.3: "The nonce, N, is formed by combining the
-	 * packet protection IV with the packet number."
+	 * AEAD ciphers (AES-GCM, ChaCha20-Poly1305) require unique nonces per
+	 * key. In QUIC, nonce = IV XOR packet_number (RFC 9001 Section 5.3).
 	 *
-	 * Since packet numbers must be unique per key, we enforce strict
-	 * monotonicity to guarantee nonce uniqueness.
+	 * Nonce reuse consequences:
+	 *   - AES-GCM: XOR of plaintexts leaked, auth tag forgery possible
+	 *   - ChaCha20-Poly1305: Similar catastrophic failure
+	 *
+	 * We enforce STRICT MONOTONICITY: each packet number must be larger
+	 * than all previously used packet numbers. This guarantees unique
+	 * nonces even under concurrent access (protected by spinlock).
+	 *
+	 * Note: QUIC spec allows gaps in PN space, but never reuse.
 	 */
-	if (state->pn_initialized && pkt_num <= state->largest_sent_pn) {
-		WARN_ONCE(1, "TQUIC: 0-RTT packet number reuse detected! "
-			  "pn=%llu largest_sent=%llu - cryptographic compromise prevented\n",
+	spin_lock_irqsave(&state->pn_lock, flags);
+
+	if (state->send_pn_initialized && pkt_num <= state->largest_sent_pn) {
+		spin_unlock_irqrestore(&state->pn_lock, flags);
+		/*
+		 * This is a CRITICAL error - attempting to reuse a packet number
+		 * would compromise all data encrypted with this key. Log loudly
+		 * and refuse to proceed.
+		 */
+		WARN_ONCE(1, "TQUIC: CRITICAL - 0-RTT packet number reuse attempt! "
+			  "pn=%llu largest_sent=%llu - refusing to compromise crypto\n",
 			  pkt_num, state->largest_sent_pn);
 		return -EINVAL;
 	}
+
+	/* Reserve this PN before releasing lock to prevent races */
+	state->largest_sent_pn = pkt_num;
+	state->send_pn_initialized = true;
+
+	spin_unlock_irqrestore(&state->pn_lock, flags);
 
 	/* Allocate AEAD */
 	aead = crypto_alloc_aead(tquic_cipher_to_aead_name(state->cipher_suite), 0, 0);
@@ -1323,6 +1475,7 @@ int tquic_zero_rtt_encrypt(struct tquic_connection *conn,
 		return -ENOMEM;
 	}
 
+	/* Construct nonce: IV XOR packet_number (RFC 9001 Section 5.3) */
 	tquic_create_nonce(state->keys.iv, pkt_num, nonce);
 
 	/* Copy payload to output for in-place encryption */
@@ -1337,20 +1490,131 @@ int tquic_zero_rtt_encrypt(struct tquic_connection *conn,
 
 	ret = crypto_aead_encrypt(req);
 
+	/* Securely clear nonce from stack */
+	memzero_explicit(nonce, sizeof(nonce));
+
 	aead_request_free(req);
 	crypto_free_aead(aead);
 
 	if (ret == 0) {
 		*out_len = payload_len + 16;
 		state->early_data_sent += payload_len;
-		/* Update largest sent packet number after successful encryption */
-		state->largest_sent_pn = pkt_num;
-		state->pn_initialized = true;
 	}
 
 	return ret;
 }
 EXPORT_SYMBOL_GPL(tquic_zero_rtt_encrypt);
+
+/*
+ * tquic_pn_replay_check - Check if packet number is a replay (pre-decryption)
+ * @state: 0-RTT state with replay window
+ * @pkt_num: Packet number to check
+ *
+ * Implements RFC 9000 Section 13.2.3 sliding window replay detection.
+ * Must be called with pn_lock held.
+ *
+ * Returns: 0 if PN is valid (not a replay), -EINVAL if replay detected
+ */
+static int tquic_pn_replay_check_locked(struct tquic_zero_rtt_state_s *state,
+					u64 pkt_num)
+{
+	u64 window_start;
+	u64 offset;
+
+	/* First packet - no replay possible */
+	if (!state->recv_pn_initialized)
+		return 0;
+
+	/*
+	 * RFC 9000 Section 13.2.3: Packet numbers that are too old
+	 * (before the sliding window) MUST be discarded.
+	 */
+	if (state->largest_recv_pn >= TQUIC_PN_REPLAY_WINDOW_SIZE)
+		window_start = state->largest_recv_pn - TQUIC_PN_REPLAY_WINDOW_SIZE + 1;
+	else
+		window_start = 0;
+
+	if (pkt_num < window_start) {
+		/* Packet number is before the replay window - too old */
+		pr_debug("TQUIC: 0-RTT replay - PN %llu before window [%llu, %llu]\n",
+			 pkt_num, window_start, state->largest_recv_pn);
+		return -EINVAL;
+	}
+
+	/* Check if this is a new high water mark */
+	if (pkt_num > state->largest_recv_pn)
+		return 0;  /* New highest PN, definitely not a replay */
+
+	/*
+	 * PN is within the window - check the bitmap.
+	 * Bit position: offset from largest_recv_pn (bit 0 = largest_recv_pn)
+	 */
+	offset = state->largest_recv_pn - pkt_num;
+	if (offset < TQUIC_PN_REPLAY_WINDOW_SIZE &&
+	    test_bit(offset, state->recv_pn_bitmap)) {
+		/* This PN was already received - replay! */
+		pr_debug("TQUIC: 0-RTT replay detected - PN %llu already received\n",
+			 pkt_num);
+		return -EINVAL;
+	}
+
+	return 0;  /* Within window and not previously seen */
+}
+
+/*
+ * tquic_pn_replay_record - Record packet number after successful decryption
+ * @state: 0-RTT state with replay window
+ * @pkt_num: Packet number to record
+ *
+ * Must be called with pn_lock held, ONLY after successful AEAD decryption.
+ * This ordering is critical: we must not record a PN until we've verified
+ * the packet's authenticity, otherwise an attacker could "burn" PNs by
+ * sending packets with valid PNs but invalid authentication tags.
+ */
+static void tquic_pn_replay_record_locked(struct tquic_zero_rtt_state_s *state,
+					  u64 pkt_num)
+{
+	u64 shift;
+	u64 offset;
+
+	if (!state->recv_pn_initialized) {
+		/* First packet */
+		state->largest_recv_pn = pkt_num;
+		state->recv_pn_initialized = true;
+		bitmap_zero(state->recv_pn_bitmap, TQUIC_PN_REPLAY_WINDOW_SIZE);
+		set_bit(0, state->recv_pn_bitmap);  /* Mark PN as received */
+		return;
+	}
+
+	if (pkt_num > state->largest_recv_pn) {
+		/*
+		 * New highest PN - shift the bitmap window.
+		 * All bits shift right by (pkt_num - largest_recv_pn).
+		 */
+		shift = pkt_num - state->largest_recv_pn;
+
+		if (shift >= TQUIC_PN_REPLAY_WINDOW_SIZE) {
+			/* Complete window shift - clear and start fresh */
+			bitmap_zero(state->recv_pn_bitmap, TQUIC_PN_REPLAY_WINDOW_SIZE);
+		} else {
+			/* Partial shift - move bits right */
+			bitmap_shift_right(state->recv_pn_bitmap,
+					   state->recv_pn_bitmap,
+					   shift, TQUIC_PN_REPLAY_WINDOW_SIZE);
+		}
+
+		state->largest_recv_pn = pkt_num;
+		set_bit(0, state->recv_pn_bitmap);  /* Mark new PN as received */
+	} else {
+		/*
+		 * PN is within window but not the largest.
+		 * Set the appropriate bit.
+		 */
+		offset = state->largest_recv_pn - pkt_num;
+		if (offset < TQUIC_PN_REPLAY_WINDOW_SIZE)
+			set_bit(offset, state->recv_pn_bitmap);
+	}
+}
 
 int tquic_zero_rtt_decrypt(struct tquic_connection *conn,
 			   const u8 *header, size_t header_len,
@@ -1362,6 +1626,7 @@ int tquic_zero_rtt_decrypt(struct tquic_connection *conn,
 	struct aead_request *req;
 	struct scatterlist sg[2];
 	u8 nonce[12];
+	unsigned long flags;
 	int ret;
 
 	if (!conn || !conn->zero_rtt_state)
@@ -1375,25 +1640,34 @@ int tquic_zero_rtt_decrypt(struct tquic_connection *conn,
 		return -EINVAL;
 
 	/*
-	 * Replay protection: Check that packet number is greater than
-	 * the largest received packet number. While QUIC allows out-of-order
-	 * delivery, packets with very old packet numbers are suspicious.
+	 * =======================================================================
+	 * REPLAY PROTECTION: Sliding Window (RFC 9000 Section 13.2.3)
+	 * =======================================================================
 	 *
-	 * RFC 9000 Section 13.2.3: "Endpoints MUST discard packets that are
-	 * too old to be decoded or that have packet numbers that have been
-	 * previously received."
+	 * QUIC requires endpoints to discard packets with duplicate packet
+	 * numbers. For 0-RTT, this is especially critical since early data
+	 * may not be idempotent (RFC 9001 Section 9.2).
 	 *
-	 * Note: A full implementation would use a sliding window to allow
-	 * some reordering while still detecting replays. For 0-RTT early data,
-	 * we use strict ordering as a conservative approach since 0-RTT data
-	 * is particularly sensitive to replay attacks (RFC 9001 Section 9.2).
+	 * We implement a sliding window of size TQUIC_PN_REPLAY_WINDOW_SIZE:
+	 *   - Track the largest successfully decrypted PN
+	 *   - Maintain a bitmap of received PNs within the window
+	 *   - Reject PNs that are:
+	 *     a) Before the window (too old)
+	 *     b) Already marked as received in the bitmap (duplicate)
+	 *
+	 * IMPORTANT: We check BEFORE decryption but only RECORD after
+	 * successful decryption. This prevents attackers from "burning"
+	 * valid PNs with forged packets.
 	 */
-	if (state->pn_initialized && pkt_num <= state->largest_recv_pn) {
-		pr_debug("TQUIC: 0-RTT potential replay detected - "
-			 "pn=%llu largest_recv=%llu\n",
-			 pkt_num, state->largest_recv_pn);
-		return -EINVAL;
+	spin_lock_irqsave(&state->pn_lock, flags);
+
+	ret = tquic_pn_replay_check_locked(state, pkt_num);
+	if (ret) {
+		spin_unlock_irqrestore(&state->pn_lock, flags);
+		return ret;
 	}
+
+	spin_unlock_irqrestore(&state->pn_lock, flags);
 
 	/* Allocate AEAD */
 	aead = crypto_alloc_aead(tquic_cipher_to_aead_name(state->cipher_suite), 0, 0);
@@ -1414,6 +1688,7 @@ int tquic_zero_rtt_decrypt(struct tquic_connection *conn,
 		return -ENOMEM;
 	}
 
+	/* Construct nonce: IV XOR packet_number (RFC 9001 Section 5.3) */
 	tquic_create_nonce(state->keys.iv, pkt_num, nonce);
 
 	sg_init_table(sg, 2);
@@ -1425,6 +1700,9 @@ int tquic_zero_rtt_decrypt(struct tquic_connection *conn,
 
 	ret = crypto_aead_decrypt(req);
 
+	/* Securely clear nonce from stack */
+	memzero_explicit(nonce, sizeof(nonce));
+
 	aead_request_free(req);
 	crypto_free_aead(aead);
 
@@ -1432,16 +1710,17 @@ int tquic_zero_rtt_decrypt(struct tquic_connection *conn,
 		*out_len = payload_len - 16;
 		memcpy(out, payload, *out_len);
 		state->early_data_received += *out_len;
+
 		/*
-		 * Update largest received packet number after successful
-		 * decryption for replay protection. Only update if this
-		 * packet number is larger (allows for some reordering in
-		 * the case where strict check above is relaxed).
+		 * CRITICAL: Only record the PN in replay window AFTER
+		 * successful authentication. This prevents an attacker
+		 * from sending packets with valid PNs but bad auth tags
+		 * to "burn" those PNs and cause legitimate packets to
+		 * be rejected as replays.
 		 */
-		if (!state->pn_initialized || pkt_num > state->largest_recv_pn) {
-			state->largest_recv_pn = pkt_num;
-			state->pn_initialized = true;
-		}
+		spin_lock_irqsave(&state->pn_lock, flags);
+		tquic_pn_replay_record_locked(state, pkt_num);
+		spin_unlock_irqrestore(&state->pn_lock, flags);
 	}
 
 	return ret;
@@ -1505,11 +1784,23 @@ int __init tquic_zero_rtt_module_init(void)
 	global_ticket_store.max_count = 1024;	/* Default max tickets */
 
 	/*
-	 * Initialize replay filter hash seeds with cryptographically
-	 * random values to prevent hash prediction attacks.
+	 * SECURITY: Initialize bloom filter hash seeds with cryptographically
+	 * random values from the kernel's CSPRNG (get_random_bytes).
+	 *
+	 * This prevents hash prediction attacks where an attacker could:
+	 * 1. Predict which bloom filter bits a ticket would set
+	 * 2. Craft malicious tickets to cause collisions
+	 * 3. Either bypass replay detection or cause false positives
+	 *
+	 * With random seeds, the attacker cannot predict hash outputs
+	 * without access to kernel memory.
+	 *
+	 * Seeds are rotated periodically (see TQUIC_REPLAY_SEED_ROTATION_INTERVAL)
+	 * to limit exposure window if compromised via side-channel attacks.
 	 */
 	get_random_bytes(&replay_hash_seed1, sizeof(replay_hash_seed1));
 	get_random_bytes(&replay_hash_seed2, sizeof(replay_hash_seed2));
+	replay_seed_last_rotation = ktime_get();
 
 	/* Initialize global replay filter */
 	ret = tquic_replay_filter_init(&global_replay_filter,

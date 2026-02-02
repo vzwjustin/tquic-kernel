@@ -15,6 +15,7 @@
 #include <linux/timer.h>
 #include <linux/random.h>
 #include <linux/skbuff.h>
+#include <crypto/utils.h>
 #include <net/sock.h>
 #include <net/tquic.h>
 #include <uapi/linux/tquic_pm.h>
@@ -251,8 +252,36 @@ int tquic_path_handle_challenge(struct tquic_connection *conn,
 	pr_debug("tquic_pm: queued PATH_RESPONSE on path %u (%d in queue)\n",
 		 path->path_id, atomic_read(&path->response.count));
 
-	/* TODO: Trigger immediate transmission of PATH_RESPONSE
-	 * This would typically schedule output or mark connection writable */
+	/*
+	 * SECURITY: Trigger immediate transmission of PATH_RESPONSE.
+	 *
+	 * RFC 9000 Section 8.2.2 requires PATH_RESPONSE to be sent promptly:
+	 * "An endpoint MUST send each PATH_RESPONSE frame on the network path
+	 * where the corresponding PATH_CHALLENGE was received."
+	 *
+	 * Delaying PATH_RESPONSE could:
+	 * 1. Allow amplification attacks by accumulating challenge/response pairs
+	 * 2. Cause path validation timeouts for legitimate peers
+	 * 3. Create timing vulnerabilities in migration scenarios
+	 *
+	 * We trigger immediate output by marking the socket writable and
+	 * scheduling the connection's transmit tasklet.
+	 */
+	if (conn && conn->sk) {
+		/* Mark socket as having urgent data to send */
+		set_bit(TQUIC_PATH_RESPONSE_PENDING, &conn->flags);
+
+		/* Wake up any waiting writers and trigger immediate output */
+		sk_data_ready(conn->sk);
+
+		/* Schedule immediate transmission via tasklet */
+		if (conn->tasklet_scheduled) {
+			tasklet_hi_schedule(&conn->tx_tasklet);
+		}
+
+		pr_debug("tquic_pm: triggered immediate PATH_RESPONSE transmission on path %u\n",
+			 path->path_id);
+	}
 
 	return 0;
 }
@@ -277,8 +306,16 @@ int tquic_path_handle_response(struct tquic_connection *conn,
 		return -EINVAL;
 	}
 
-	/* Match response data against sent challenge */
-	if (memcmp(data, path->validation.challenge_data, 8) != 0) {
+	/*
+	 * SECURITY: Match response data against sent challenge using
+	 * constant-time comparison to prevent timing side-channel attacks.
+	 *
+	 * An attacker who can observe response timing could iteratively
+	 * discover the challenge bytes if we used memcmp(), which returns
+	 * early on mismatch. crypto_memneq() compares all 8 bytes regardless
+	 * of where mismatches occur.
+	 */
+	if (crypto_memneq(data, path->validation.challenge_data, 8) != 0) {
 		pr_warn("tquic_pm: PATH_RESPONSE mismatch on path %u\n",
 			path->path_id);
 		return -EINVAL;

@@ -60,6 +60,16 @@ struct crypto_aead;
 #define TQUIC_REPLAY_BLOOM_HASHES		4		/* 4 hash functions */
 #define TQUIC_REPLAY_TTL_SECONDS		3600		/* 1 hour */
 
+/*
+ * Packet number replay window size (RFC 9000 Section 13.2.3)
+ *
+ * The sliding window tracks which packet numbers have been received to
+ * prevent replay attacks. A 128-bit window allows for reasonable reordering
+ * while detecting duplicates. Packets with PN <= (largest_recv - window_size)
+ * are rejected as too old.
+ */
+#define TQUIC_PN_REPLAY_WINDOW_SIZE		128
+
 /* ALPN maximum length */
 #define TQUIC_ALPN_MAX_LEN			255
 
@@ -204,7 +214,19 @@ struct tquic_zero_rtt_keys {
  * @cipher_suite: Cipher suite for 0-RTT (must match resumption)
  * @largest_sent_pn: Largest packet number sent (for nonce reuse prevention)
  * @largest_recv_pn: Largest packet number received (for replay protection)
- * @pn_initialized: True once first packet sent/received (for initial state)
+ * @send_pn_initialized: True once first packet sent
+ * @recv_pn_initialized: True once first packet received
+ * @pn_lock: Spinlock protecting packet number state for concurrent access
+ * @recv_pn_bitmap: Sliding window bitmap tracking received packet numbers
+ *
+ * Security note: Packet numbers are critical for AEAD nonce construction.
+ * RFC 9001 Section 5.3 requires unique nonces per key. Since nonce = IV XOR PN,
+ * we MUST ensure:
+ *   - Send side: Strictly monotonically increasing PNs (no reuse)
+ *   - Receive side: Reject duplicate PNs (replay protection per RFC 9000 13.2.3)
+ *
+ * Nonce reuse with AES-GCM or ChaCha20-Poly1305 allows plaintext recovery
+ * and authentication bypass - a complete cryptographic compromise.
  */
 struct tquic_zero_rtt_state_s {
 	enum tquic_zero_rtt_state state;
@@ -214,10 +236,32 @@ struct tquic_zero_rtt_state_s {
 	u64 early_data_sent;
 	u64 early_data_received;
 	u16 cipher_suite;
-	/* Packet number tracking for nonce reuse and replay protection */
+
+	/*
+	 * Packet number tracking for cryptographic security.
+	 *
+	 * CRITICAL: These fields protect against nonce reuse attacks.
+	 * All access MUST be protected by pn_lock for thread safety.
+	 */
+	spinlock_t pn_lock;
+
+	/* Send-side: track largest PN to ensure strict monotonicity */
 	u64 largest_sent_pn;
+	bool send_pn_initialized;
+
+	/*
+	 * Receive-side: sliding window replay protection (RFC 9000 Section 13.2.3)
+	 *
+	 * - largest_recv_pn: Highest PN successfully decrypted
+	 * - recv_pn_bitmap: Tracks received PNs in range
+	 *   [largest_recv_pn - TQUIC_PN_REPLAY_WINDOW_SIZE + 1, largest_recv_pn]
+	 *
+	 * Bit i is set if PN (largest_recv_pn - i) has been received.
+	 * Bit 0 corresponds to largest_recv_pn itself.
+	 */
 	u64 largest_recv_pn;
-	bool pn_initialized;
+	bool recv_pn_initialized;
+	DECLARE_BITMAP(recv_pn_bitmap, TQUIC_PN_REPLAY_WINDOW_SIZE);
 };
 
 /*

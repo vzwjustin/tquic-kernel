@@ -34,6 +34,7 @@ tquic-y := \
 	tquic_preferred_addr.o \
 	tquic_qos.o \
 	tquic_tunnel.o \
+	tquic_ratelimit.o \
 	grease.o \
 	tquic_ack_frequency.o \
 	cong/tquic_cong.o \
@@ -63,7 +64,14 @@ obj-$(CONFIG_TQUIC_PATH_MANAGER) += tquic_pm.o
 tquic_pm-y := \
 	pm/pm_types.o \
 	pm/pm_kernel.o \
-	pm/path_manager.o
+	pm/path_manager.o \
+	pm/path_validation.o
+
+# Path Manager Netlink interface (optional)
+tquic_pm-$(CONFIG_TQUIC_PM_NETLINK) += pm/pm_netlink.o
+
+# Path Manager Userspace interface (optional)
+tquic_pm-$(CONFIG_TQUIC_PM_USERSPACE) += pm/pm_userspace.o
 
 # Packet Scheduler
 obj-$(CONFIG_TQUIC_SCHEDULER) += tquic_sched.o

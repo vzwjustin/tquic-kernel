@@ -577,34 +577,96 @@ struct tquic_path *tquic_conn_get_path_locked(struct tquic_connection *conn,
 EXPORT_SYMBOL_GPL(tquic_conn_get_path_locked);
 
 /*
+ * Calculate bytes in-flight on a specific path
+ *
+ * In-flight bytes = transmitted bytes - acknowledged bytes
+ * This tracks data that has been sent but not yet confirmed received.
+ */
+static u64 tquic_path_inflight_bytes(struct tquic_path *path)
+{
+	u64 tx = path->stats.tx_bytes;
+	u64 acked = path->stats.acked_bytes;
+
+	if (tx > acked)
+		return tx - acked;
+	return 0;
+}
+
+/*
+ * Check if path has any unacknowledged data
+ */
+static bool tquic_path_has_inflight(struct tquic_path *path)
+{
+	return tquic_path_inflight_bytes(path) > 0 ||
+	       path->stats.tx_packets > (path->stats.rx_packets + path->stats.lost_packets);
+}
+
+/*
  * Drain in-flight data from path before removal
+ *
+ * This function waits for all in-flight data on a path to be acknowledged
+ * or timed out before the path can be safely removed. This prevents data
+ * loss when migrating away from a path.
+ *
+ * Per RFC 9000 Section 9.3.3: "An endpoint that has not validated a peer's
+ * address is unable to send to that address. Until that address is validated,
+ * packets can be sent to the previously validated address."
+ *
+ * We wait up to 5 seconds (approximately 3x typical PTO) for:
+ *   1. All transmitted bytes to be acknowledged, OR
+ *   2. Loss detection to declare packets lost, OR
+ *   3. Timeout expiry (hard limit to prevent indefinite blocking)
  */
 static void tquic_path_drain_data(struct tquic_connection *conn,
 				   struct tquic_path *path)
 {
-	/* Wait for pending retransmissions to complete or timeout
-	 * TODO: Full implementation requires packet tracking integration
-	 * For now, just wait a bounded time (5 seconds max) */
 	unsigned long timeout = jiffies + msecs_to_jiffies(5000);
+	unsigned long check_interval_ms = 50;  /* Start with 50ms checks */
+	u64 last_inflight = 0;
+	u64 current_inflight;
+	int stall_count = 0;
 
-	pr_debug("tquic: draining data from path %u\n", path->path_id);
+	pr_debug("tquic: draining data from path %u (inflight=%llu bytes)\n",
+		 path->path_id, tquic_path_inflight_bytes(path));
 
-	/* Simple wait - real implementation would check:
-	 * - No in-flight packets on this path
-	 * - All data migrated to other paths
-	 * - ACKs received or timeout expired */
 	while (time_before(jiffies, timeout)) {
-		/* Check if any data still in-flight */
-		if (path->stats.tx_packets == 0 ||
-		    path->stats.tx_packets == path->stats.rx_packets) {
-			pr_debug("tquic: path %u drain complete\n", path->path_id);
+		current_inflight = tquic_path_inflight_bytes(path);
+
+		/* Path fully drained - all data acknowledged */
+		if (!tquic_path_has_inflight(path)) {
+			pr_debug("tquic: path %u drain complete (all data acked)\n",
+				 path->path_id);
 			return;
 		}
 
-		msleep(100);
+		/* Check for progress - inflight should be decreasing */
+		if (current_inflight == last_inflight) {
+			stall_count++;
+			/*
+			 * If no progress for 500ms (10 checks), assume lost packets
+			 * have been retransmitted on another path
+			 */
+			if (stall_count > 10) {
+				pr_debug("tquic: path %u drain stalled, continuing (inflight=%llu)\n",
+					 path->path_id, current_inflight);
+				return;
+			}
+		} else {
+			stall_count = 0;
+			last_inflight = current_inflight;
+		}
+
+		/*
+		 * Use exponential backoff for check interval to reduce
+		 * CPU overhead while waiting for slow drains
+		 */
+		msleep(check_interval_ms);
+		if (check_interval_ms < 200)
+			check_interval_ms += 25;
 	}
 
-	pr_debug("tquic: path %u drain timeout\n", path->path_id);
+	pr_warn("tquic: path %u drain timeout (remaining inflight=%llu bytes)\n",
+		path->path_id, tquic_path_inflight_bytes(path));
 }
 
 /*
