@@ -139,8 +139,8 @@ TQUIC is a complete, production-ready kernel module implementing the QUIC protoc
 
 ### Security Features
 - **Anti-Replay Protection**: 0-RTT replay filter with configurable window
-- **QUIC-LEAK Defense** (CVE-2025-54939): Pre-handshake memory exhaustion protection
-- **CID Stuffing Protection** (CVE-2024-22189): RETIRE_CONNECTION_ID flooding mitigation
+- **QUIC-LEAK Defense**: Pre-handshake memory exhaustion protection with per-IP budgets
+- **CID Stuffing Protection**: RETIRE_CONNECTION_ID flooding mitigation with rate limiting
 - **Optimistic ACK Detection**: Detection of ACKs for never-sent packets
 - **PATH_CHALLENGE Flooding**: Rate limiting with crypto-grade RNG
 - **Anti-Amplification**: RFC 9000 amplification limit enforcement
@@ -304,7 +304,7 @@ Comprehensive unit tests covering all protocol components:
 - Transport parameter negotiation
 - Flow control enforcement
 - Scheduler algorithms
-- Security mechanisms (42K lines)
+- Security mechanisms
 
 ### Interoperability Testing
 Test framework against major QUIC implementations:
@@ -353,7 +353,7 @@ Test cases: handshake, 0-RTT, migration, multipath, failover
 | draft-ietf-quic-multipath-17 | Multipath Extension for QUIC |
 | draft-ietf-quic-load-balancers-21 | QUIC-LB: Generating Routable QUIC Connection IDs |
 | draft-ietf-webtrans-http3-14 | WebTransport over HTTP/3 |
-| draft-ietf-quic-reliable-stream-reset | Reliable QUIC Stream Resets |
+| draft-ietf-quic-reliable-stream-reset-05 | Reliable QUIC Stream Resets |
 | draft-smith-quic-receive-ts-03 | QUIC Extension for Reporting Packet Receive Timestamps |
 
 ## Use Cases
