@@ -1014,12 +1014,17 @@ static int __init tquic_bench_init(void)
 
 static void __exit tquic_bench_exit(void)
 {
+	int retries = 50; /* 5 seconds timeout */
+
 	/* Wait for any running benchmark to complete */
 	if (READ_ONCE(bench_running))
 		pr_info("TQUIC: waiting for benchmark to complete before unload\n");
 
-	while (READ_ONCE(bench_running))
+	while (READ_ONCE(bench_running) && retries-- > 0)
 		msleep(100);
+
+	if (READ_ONCE(bench_running))
+		pr_warn("TQUIC: benchmark failed to complete, forcing unload\n");
 
 	remove_proc_entry("tquic_bench", NULL);
 	remove_proc_entry("tquic_bench_results", NULL);
