@@ -614,8 +614,10 @@ static void __exit tquic_sched_module_exit(void)
 	pr_info("tquic_sched: scheduler framework cleanup complete\n");
 }
 
+#ifndef TQUIC_OUT_OF_TREE
 module_init(tquic_sched_module_init);
 module_exit(tquic_sched_module_exit);
 
 MODULE_DESCRIPTION("TQUIC Multipath Packet Scheduler Framework");
 MODULE_LICENSE("GPL");
+#endif

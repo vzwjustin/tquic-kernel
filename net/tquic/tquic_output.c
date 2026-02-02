@@ -147,20 +147,9 @@ static void tquic_pacing_work(struct work_struct *work);
  * =============================================================================
  * Variable Length Integer Encoding (QUIC RFC 9000)
  * =============================================================================
+ *
+ * tquic_varint_len and other varint functions are defined in core/varint.c
  */
-
-/* tquic_varint_len is declared in <net/tquic.h>, define it here */
-int tquic_varint_len(u64 val)
-{
-	if (val <= 63)
-		return 1;
-	if (val <= 16383)
-		return 2;
-	if (val <= 1073741823)
-		return 4;
-	return 8;
-}
-EXPORT_SYMBOL_GPL(tquic_varint_len);
 
 static inline int tquic_encode_varint(u8 *buf, size_t buf_len, u64 val)
 {

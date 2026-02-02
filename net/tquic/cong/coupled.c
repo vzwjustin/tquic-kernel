@@ -1641,6 +1641,7 @@ static void __exit tquic_coupled_exit(void)
 	pr_info("tquic_coupled: unloaded\n");
 }
 
+#ifndef TQUIC_OUT_OF_TREE
 module_init(tquic_coupled_init);
 module_exit(tquic_coupled_exit);
 
@@ -1651,3 +1652,4 @@ MODULE_ALIAS("tquic-cong-coupled");
 MODULE_ALIAS("tquic-cong-olia");
 MODULE_ALIAS("tquic-cong-lia");
 MODULE_ALIAS("tquic-cong-balia");
+#endif

@@ -6,9 +6,8 @@
 # so we unconditionally build all modules.
 #
 # Note: Out-of-tree builds consolidate tightly-coupled modules into
-# tquic.ko to avoid circular symbol dependencies. Some files exist
-# in both top-level and core/ directories - we use top-level versions
-# where they exist to avoid duplicate symbols.
+# tquic.ko to avoid circular symbol dependencies. Files with
+# module_init/exit are wrapped with #ifndef TQUIC_OUT_OF_TREE.
 #
 
 # For out-of-tree builds, build one main module plus CC algorithms
@@ -23,8 +22,8 @@ obj-m += tquic_l4s.o
 obj-m += tquic_accecn.o
 
 # Main TQUIC module - consolidated for out-of-tree build
-# Uses top-level files for duplicates (stream, cid, ack_frequency)
-# and core/ files only for unique functionality (connection, ack, frame, packet, flow_control, transport_params)
+# Note: core/stream.c, core/cid.c, core/ack_frequency.c have duplicates
+# in top-level files, so we use top-level versions.
 tquic-y := \
 	tquic_main.o \
 	tquic_proto.o \
@@ -57,6 +56,9 @@ tquic-y := \
 	tquic_ack_frequency.o \
 	cong/tquic_cong.o \
 	cong/persistent_cong.o \
+	cong/coupled.o \
+	core/varint.o \
+	core/connection.o \
 	core/ack.o \
 	core/frame.o \
 	core/packet.o \
@@ -71,6 +73,7 @@ tquic-y := \
 	pm/pm_kernel.o \
 	pm/path_manager.o \
 	pm/path_validation.o \
+	sched/scheduler.o \
 	sched/reorder.o \
 	multipath/mp_frame.o \
 	multipath/mp_ack.o \

@@ -2597,9 +2597,11 @@ static void __exit tquic_connection_exit(void)
 	pr_info("tquic: connection state machine cleanup complete\n");
 }
 
+#ifndef TQUIC_OUT_OF_TREE
 module_init(tquic_connection_init);
 module_exit(tquic_connection_exit);
 
 MODULE_DESCRIPTION("TQUIC Connection State Machine");
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Linux Foundation");
+#endif
