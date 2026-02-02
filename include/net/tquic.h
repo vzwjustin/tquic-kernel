@@ -983,8 +983,8 @@ void tquic_path_update_stats(struct tquic_path *path, struct sk_buff *skb, bool 
 int tquic_path_set_weight(struct tquic_path *path, u8 weight);
 
 /* Bonding state machine (Phase 05) */
-int tquic_bond_set_path_weight(struct tquic_connection *conn, u8 path_id, u32 weight);
-u32 tquic_bond_get_path_weight(struct tquic_connection *conn, u8 path_id);
+int tquic_bond_set_path_weight(struct tquic_connection *conn, u32 path_id, u32 weight);
+u32 tquic_bond_get_path_weight(struct tquic_connection *conn, u32 path_id);
 
 /* Packet transmission (tquic_output.c) */
 struct tquic_pacing_state;
