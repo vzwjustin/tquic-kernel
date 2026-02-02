@@ -1259,10 +1259,18 @@ int tquic_sysctl_get_qpack_max_table_capacity(void)
 }
 EXPORT_SYMBOL_GPL(tquic_sysctl_get_qpack_max_table_capacity);
 
+/* Number of actual sysctl entries (excluding null terminator) */
+#define TQUIC_SYSCTL_TABLE_ENTRIES (ARRAY_SIZE(tquic_sysctl_table) - 1)
+
 int __init tquic_sysctl_init(void)
 {
-	tquic_sysctl_header = register_net_sysctl(&init_net, "net/tquic",
-						  tquic_sysctl_table);
+	/*
+	 * Kernel 6.x requires register_net_sysctl_sz() with explicit size
+	 * to avoid validation errors on the null terminator entry.
+	 */
+	tquic_sysctl_header = register_net_sysctl_sz(&init_net, "net/tquic",
+						     tquic_sysctl_table,
+						     TQUIC_SYSCTL_TABLE_ENTRIES);
 	if (!tquic_sysctl_header)
 		return -ENOMEM;
 

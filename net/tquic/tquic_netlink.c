@@ -23,12 +23,21 @@
 /* Netlink family forward declaration - exported for qlog module */
 static struct genl_family tquic_genl_family;
 
-/* Multicast groups */
-static const struct genl_multicast_group tquic_mcgrps[] = {
-	[TQUIC_NL_GRP_CONN] = { .name = "conn", },
-	[TQUIC_NL_GRP_PATH] = { .name = "path", },
+/* Multicast groups - index 0 is reserved (TQUIC_NL_GRP_NONE), so we start at index 0 here */
+enum {
+	TQUIC_MCGRP_CONN,
+	TQUIC_MCGRP_PATH,
 #ifdef CONFIG_TQUIC_QLOG
-	[TQUIC_NL_GRP_QLOG] = { .name = "qlog", },
+	TQUIC_MCGRP_QLOG,
+#endif
+	__TQUIC_MCGRP_MAX,
+};
+
+static const struct genl_multicast_group tquic_mcgrps[] = {
+	[TQUIC_MCGRP_CONN] = { .name = "conn", },
+	[TQUIC_MCGRP_PATH] = { .name = "path", },
+#ifdef CONFIG_TQUIC_QLOG
+	[TQUIC_MCGRP_QLOG] = { .name = "qlog", },
 #endif
 };
 
@@ -425,52 +434,47 @@ static int tquic_nl_migrate(struct sk_buff *skb, struct genl_info *info)
 	return 0;
 }
 
-/* Netlink operations */
+/* Netlink operations - kernel 6.x requires GENL_CMD_CAP_DO/DUMP flags */
 static const struct genl_small_ops tquic_genl_ops[] = {
 	{
 		.cmd = TQUIC_CMD_GET_CONN,
-		.validate = GENL_DONT_VALIDATE_STRICT | GENL_DONT_VALIDATE_DUMP,
 		.doit = tquic_nl_get_conn,
+		.flags = GENL_CMD_CAP_DO,
 	},
 	{
 		.cmd = TQUIC_CMD_GET_PATH,
-		.validate = GENL_DONT_VALIDATE_STRICT | GENL_DONT_VALIDATE_DUMP,
 		.doit = tquic_nl_get_path,
+		.flags = GENL_CMD_CAP_DO,
 	},
 	{
 		.cmd = TQUIC_CMD_ADD_PATH,
-		.validate = GENL_DONT_VALIDATE_STRICT | GENL_DONT_VALIDATE_DUMP,
 		.doit = tquic_nl_add_path,
-		.flags = GENL_ADMIN_PERM,
+		.flags = GENL_ADMIN_PERM | GENL_CMD_CAP_DO,
 	},
 	{
 		.cmd = TQUIC_CMD_DEL_PATH,
-		.validate = GENL_DONT_VALIDATE_STRICT | GENL_DONT_VALIDATE_DUMP,
 		.doit = tquic_nl_del_path,
-		.flags = GENL_ADMIN_PERM,
+		.flags = GENL_ADMIN_PERM | GENL_CMD_CAP_DO,
 	},
 	{
 		.cmd = TQUIC_CMD_SET_PATH,
-		.validate = GENL_DONT_VALIDATE_STRICT | GENL_DONT_VALIDATE_DUMP,
 		.doit = tquic_nl_set_path,
-		.flags = GENL_ADMIN_PERM,
+		.flags = GENL_ADMIN_PERM | GENL_CMD_CAP_DO,
 	},
 	{
 		.cmd = TQUIC_CMD_SET_BOND,
-		.validate = GENL_DONT_VALIDATE_STRICT | GENL_DONT_VALIDATE_DUMP,
 		.doit = tquic_nl_set_bond,
-		.flags = GENL_ADMIN_PERM,
+		.flags = GENL_ADMIN_PERM | GENL_CMD_CAP_DO,
 	},
 	{
 		.cmd = TQUIC_CMD_GET_STATS,
-		.validate = GENL_DONT_VALIDATE_STRICT | GENL_DONT_VALIDATE_DUMP,
 		.doit = tquic_nl_get_stats,
+		.flags = GENL_CMD_CAP_DO,
 	},
 	{
 		.cmd = TQUIC_CMD_MIGRATE,
-		.validate = GENL_DONT_VALIDATE_STRICT | GENL_DONT_VALIDATE_DUMP,
 		.doit = tquic_nl_migrate,
-		.flags = GENL_ADMIN_PERM,
+		.flags = GENL_ADMIN_PERM | GENL_CMD_CAP_DO,
 	},
 };
 
@@ -519,7 +523,7 @@ int tquic_nl_path_event(struct tquic_connection *conn,
 	genlmsg_end(msg, hdr);
 
 	return genlmsg_multicast(&tquic_genl_family, msg, 0,
-				 TQUIC_NL_GRP_PATH, GFP_ATOMIC);
+				 TQUIC_MCGRP_PATH, GFP_ATOMIC);
 }
 EXPORT_SYMBOL_GPL(tquic_nl_path_event);
 
