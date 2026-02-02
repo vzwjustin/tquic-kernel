@@ -485,6 +485,7 @@ static struct genl_family tquic_genl_family __ro_after_init = {
 	.n_small_ops = ARRAY_SIZE(tquic_genl_ops),
 	.mcgrps = tquic_mcgrps,
 	.n_mcgrps = ARRAY_SIZE(tquic_mcgrps),
+	.resv_start_op = __TQUIC_CMD_MAX,  /* Required for kernel 6.x genetlink */
 };
 
 /*
