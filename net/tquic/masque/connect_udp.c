@@ -1368,6 +1368,372 @@ void __exit tquic_connect_udp_exit(void)
 }
 EXPORT_SYMBOL_GPL(tquic_connect_udp_exit);
 
+/*
+ * =============================================================================
+ * Extended CONNECT Validation (RFC 9220)
+ * =============================================================================
+ */
+
+/**
+ * tquic_extended_connect_validate - Validate extended CONNECT request
+ * @req: Extended CONNECT request to validate
+ * @expected_protocol: Expected protocol string
+ *
+ * Returns: 0 if valid, negative errno if invalid.
+ */
+int tquic_extended_connect_validate(const struct tquic_extended_connect_request *req,
+				    const char *expected_protocol)
+{
+	if (!req || !expected_protocol)
+		return -EINVAL;
+
+	/* Method must be CONNECT */
+	if (!req->method || strcmp(req->method, "CONNECT") != 0)
+		return -EINVAL;
+
+	/* Protocol must match expected */
+	if (!req->protocol || strcmp(req->protocol, expected_protocol) != 0)
+		return -EINVAL;
+
+	/* Scheme must be present for extended CONNECT */
+	if (!req->scheme || strlen(req->scheme) == 0)
+		return -EINVAL;
+
+	/* Authority must be present */
+	if (!req->authority || strlen(req->authority) == 0)
+		return -EINVAL;
+
+	/* Path must be present */
+	if (!req->path || strlen(req->path) == 0)
+		return -EINVAL;
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(tquic_extended_connect_validate);
+
+/*
+ * =============================================================================
+ * Proxy-Status Header Implementation (RFC 9209)
+ * =============================================================================
+ */
+
+/**
+ * tquic_proxy_status_format - Format Proxy-Status header value
+ * @status: Proxy status to format
+ * @buf: Output buffer
+ * @len: Buffer length
+ *
+ * Formats according to RFC 8941 Structured Field Values:
+ *   proxy_name; error=error_type; details="..."
+ *
+ * Returns: Length of formatted string, or negative errno on error.
+ */
+int tquic_proxy_status_format(const struct tquic_proxy_status *status,
+			      char *buf, size_t len)
+{
+	int written;
+
+	if (!status || !buf || len == 0)
+		return -EINVAL;
+
+	/* Start with proxy name as a token */
+	if (status->proxy_name[0]) {
+		written = snprintf(buf, len, "%s", status->proxy_name);
+	} else {
+		/* Use generic proxy identifier if no name set */
+		written = snprintf(buf, len, "proxy");
+	}
+
+	if (written < 0 || written >= len)
+		return -ENOSPC;
+
+	/* Add error type parameter if present */
+	if (status->error_type) {
+		int ret = snprintf(buf + written, len - written,
+				   "; error=%s", status->error_type);
+		if (ret < 0 || ret >= len - written)
+			return -ENOSPC;
+		written += ret;
+	}
+
+	/* Add details parameter if present */
+	if (status->details[0]) {
+		int ret = snprintf(buf + written, len - written,
+				   "; details=\"%s\"", status->details);
+		if (ret < 0 || ret >= len - written)
+			return -ENOSPC;
+		written += ret;
+	}
+
+	/* Add next-hop parameter if present */
+	if (status->next_hop[0]) {
+		int ret = snprintf(buf + written, len - written,
+				   "; next-hop=\"%s\"", status->next_hop);
+		if (ret < 0 || ret >= len - written)
+			return -ENOSPC;
+		written += ret;
+	}
+
+	return written;
+}
+EXPORT_SYMBOL_GPL(tquic_proxy_status_format);
+
+/**
+ * tquic_proxy_status_parse - Parse Proxy-Status header value
+ * @value: Header value string
+ * @status: Output for parsed status
+ *
+ * Returns: 0 on success, negative errno on error.
+ */
+int tquic_proxy_status_parse(const char *value,
+			     struct tquic_proxy_status *status)
+{
+	const char *p, *end;
+	char *dst;
+	size_t copy_len;
+
+	if (!value || !status)
+		return -EINVAL;
+
+	memset(status, 0, sizeof(*status));
+
+	p = value;
+
+	/* Skip leading whitespace */
+	while (*p && (*p == ' ' || *p == '\t'))
+		p++;
+
+	if (!*p)
+		return -EINVAL;
+
+	/* Parse proxy name (token) */
+	end = p;
+	while (*end && *end != ';' && *end != ' ' && *end != '\t')
+		end++;
+
+	copy_len = end - p;
+	if (copy_len >= sizeof(status->proxy_name))
+		copy_len = sizeof(status->proxy_name) - 1;
+
+	memcpy(status->proxy_name, p, copy_len);
+	status->proxy_name[copy_len] = '\0';
+
+	p = end;
+
+	/* Parse parameters */
+	while (*p) {
+		/* Skip whitespace and semicolons */
+		while (*p && (*p == ' ' || *p == '\t' || *p == ';'))
+			p++;
+
+		if (!*p)
+			break;
+
+		/* Look for known parameters */
+		if (strncmp(p, "error=", 6) == 0) {
+			p += 6;
+			/* Error type is a token */
+			end = p;
+			while (*end && *end != ';' && *end != ' ' && *end != '\t')
+				end++;
+
+			/* Match against known error types */
+			if (strncmp(p, PROXY_STATUS_DNS_TIMEOUT,
+				    strlen(PROXY_STATUS_DNS_TIMEOUT)) == 0) {
+				status->error_type = PROXY_STATUS_DNS_TIMEOUT;
+			} else if (strncmp(p, PROXY_STATUS_DNS_ERROR,
+					   strlen(PROXY_STATUS_DNS_ERROR)) == 0) {
+				status->error_type = PROXY_STATUS_DNS_ERROR;
+			} else if (strncmp(p, PROXY_STATUS_DESTINATION_NOT_FOUND,
+					   strlen(PROXY_STATUS_DESTINATION_NOT_FOUND)) == 0) {
+				status->error_type = PROXY_STATUS_DESTINATION_NOT_FOUND;
+			} else if (strncmp(p, PROXY_STATUS_DESTINATION_UNAVAILABLE,
+					   strlen(PROXY_STATUS_DESTINATION_UNAVAILABLE)) == 0) {
+				status->error_type = PROXY_STATUS_DESTINATION_UNAVAILABLE;
+			} else if (strncmp(p, PROXY_STATUS_CONNECTION_REFUSED,
+					   strlen(PROXY_STATUS_CONNECTION_REFUSED)) == 0) {
+				status->error_type = PROXY_STATUS_CONNECTION_REFUSED;
+			} else if (strncmp(p, PROXY_STATUS_PROXY_INTERNAL_ERROR,
+					   strlen(PROXY_STATUS_PROXY_INTERNAL_ERROR)) == 0) {
+				status->error_type = PROXY_STATUS_PROXY_INTERNAL_ERROR;
+			}
+			/* Add more as needed */
+
+			p = end;
+		} else if (strncmp(p, "details=\"", 9) == 0) {
+			p += 9;
+			dst = status->details;
+			while (*p && *p != '"' &&
+			       dst < status->details + sizeof(status->details) - 1) {
+				if (*p == '\\' && *(p + 1))
+					p++;
+				*dst++ = *p++;
+			}
+			*dst = '\0';
+			if (*p == '"')
+				p++;
+		} else if (strncmp(p, "next-hop=\"", 10) == 0) {
+			p += 10;
+			dst = status->next_hop;
+			while (*p && *p != '"' &&
+			       dst < status->next_hop + sizeof(status->next_hop) - 1) {
+				if (*p == '\\' && *(p + 1))
+					p++;
+				*dst++ = *p++;
+			}
+			*dst = '\0';
+			if (*p == '"')
+				p++;
+		} else {
+			/* Skip unknown parameter */
+			while (*p && *p != ';')
+				p++;
+		}
+	}
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(tquic_proxy_status_parse);
+
+/**
+ * tquic_connect_udp_set_proxy_status - Set proxy status for error response
+ * @tunnel: Tunnel
+ * @error_type: Error type token
+ * @details: Optional details string
+ *
+ * Returns: 0 on success, negative errno on error.
+ */
+int tquic_connect_udp_set_proxy_status(struct tquic_connect_udp_tunnel *tunnel,
+				       const char *error_type,
+				       const char *details)
+{
+	/*
+	 * In a full implementation, this would store the proxy status
+	 * in the tunnel structure for inclusion in the HTTP response.
+	 * For now, we just log it.
+	 */
+	if (!tunnel || !error_type)
+		return -EINVAL;
+
+	pr_debug("connect-udp: proxy status error=%s details=%s\n",
+		 error_type, details ? details : "(none)");
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(tquic_connect_udp_set_proxy_status);
+
+/*
+ * =============================================================================
+ * Context ID Management (RFC 9298 Section 4)
+ * =============================================================================
+ */
+
+/**
+ * tquic_connect_udp_alloc_context_id - Allocate new context ID
+ * @tunnel: Tunnel to allocate on
+ * @context_id: Output for allocated context ID
+ *
+ * Returns: 0 on success, negative errno on failure.
+ */
+int tquic_connect_udp_alloc_context_id(struct tquic_connect_udp_tunnel *tunnel,
+				       u64 *context_id)
+{
+	u64 id;
+
+	if (!tunnel || !context_id)
+		return -EINVAL;
+
+	spin_lock_bh(&tunnel->lock);
+
+	id = tunnel->next_context_id;
+
+	/* Check for overflow (very unlikely) */
+	if (tunnel->next_context_id > (1ULL << 62) - 2) {
+		spin_unlock_bh(&tunnel->lock);
+		return -ENOSPC;
+	}
+
+	/* Increment by 2 to maintain even/odd allocation */
+	tunnel->next_context_id += 2;
+
+	spin_unlock_bh(&tunnel->lock);
+
+	*context_id = id;
+
+	pr_debug("connect-udp: allocated context ID %llu\n", id);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(tquic_connect_udp_alloc_context_id);
+
+/**
+ * tquic_connect_udp_register_context - Register context handler
+ * @tunnel: Tunnel
+ * @context_id: Context ID to register
+ * @handler: Handler callback
+ * @context: Handler context
+ *
+ * Returns: 0 on success, negative errno on failure.
+ */
+int tquic_connect_udp_register_context(struct tquic_connect_udp_tunnel *tunnel,
+				       u64 context_id,
+				       int (*handler)(struct tquic_connect_udp_tunnel *,
+						      u64, const u8 *, size_t, void *),
+				       void *context)
+{
+	/*
+	 * In a full implementation, this would maintain a table of
+	 * context ID handlers. For now, context 0 is the only
+	 * supported context (UDP payload).
+	 */
+	if (!tunnel || !handler)
+		return -EINVAL;
+
+	if (context_id != TQUIC_CONNECT_UDP_CONTEXT_ID) {
+		/* Only context 0 is currently supported */
+		pr_debug("connect-udp: context %llu registration (unsupported)\n",
+			 context_id);
+	}
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(tquic_connect_udp_register_context);
+
+/**
+ * tquic_connect_udp_unregister_context - Unregister context handler
+ * @tunnel: Tunnel
+ * @context_id: Context ID to unregister
+ */
+void tquic_connect_udp_unregister_context(struct tquic_connect_udp_tunnel *tunnel,
+					  u64 context_id)
+{
+	if (!tunnel)
+		return;
+
+	pr_debug("connect-udp: context %llu unregistered\n", context_id);
+}
+EXPORT_SYMBOL_GPL(tquic_connect_udp_unregister_context);
+
+/**
+ * tquic_connect_udp_set_recv_handler - Set receive handler
+ * @tunnel: Tunnel
+ * @handler: Handler callback
+ * @context: Handler context
+ */
+void tquic_connect_udp_set_recv_handler(struct tquic_connect_udp_tunnel *tunnel,
+					tquic_connect_udp_datagram_handler handler,
+					void *context)
+{
+	if (!tunnel)
+		return;
+
+	/*
+	 * In a full implementation, this would set a callback to be
+	 * invoked when datagrams arrive. For now, this is a placeholder.
+	 */
+	pr_debug("connect-udp: receive handler set\n");
+}
+EXPORT_SYMBOL_GPL(tquic_connect_udp_set_recv_handler);
+
 MODULE_DESCRIPTION("TQUIC MASQUE CONNECT-UDP Protocol (RFC 9298)");
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Linux Foundation");

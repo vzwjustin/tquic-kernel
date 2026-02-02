@@ -28,6 +28,7 @@
 
 #include "protocol.h"
 #include "tquic_mib.h"
+#include "tquic_ratelimit.h"
 
 /* External reference to global connection table from tquic_main.c */
 extern struct rhashtable tquic_conn_table;
@@ -659,6 +660,29 @@ static const struct proc_ops tquic_errors_proc_ops = {
 	.proc_release	= seq_release_private,
 };
 
+/*
+ * =============================================================================
+ * /proc/net/tquic_ratelimit - Rate Limiting Statistics
+ * =============================================================================
+ */
+
+static int tquic_ratelimit_seq_show(struct seq_file *seq, void *v)
+{
+	return tquic_ratelimit_proc_show(seq, v);
+}
+
+static int tquic_ratelimit_seq_open(struct inode *inode, struct file *file)
+{
+	return single_open_net(inode, file, tquic_ratelimit_seq_show);
+}
+
+static const struct proc_ops tquic_ratelimit_proc_ops = {
+	.proc_open	= tquic_ratelimit_seq_open,
+	.proc_read	= seq_read,
+	.proc_lseek	= seq_lseek,
+	.proc_release	= single_release_net,
+};
+
 /**
  * tquic_proc_init - Initialize proc files for a network namespace
  * @net: Network namespace
@@ -667,6 +691,7 @@ static const struct proc_ops tquic_errors_proc_ops = {
  * - /proc/net/tquic: Connection listing
  * - /proc/net/tquic_stat: MIB counters
  * - /proc/net/tquic_errors: Error ring buffer
+ * - /proc/net/tquic_ratelimit: Rate limiting statistics
  *
  * Also allocates the error ring buffer for this namespace.
  *
@@ -703,8 +728,16 @@ int tquic_proc_init(struct net *net)
 	if (!p)
 		goto err_stat;
 
+	/* Create /proc/net/tquic_ratelimit */
+	p = proc_create_data("tquic_ratelimit", 0444, net->proc_net,
+			     &tquic_ratelimit_proc_ops, net);
+	if (!p)
+		goto err_errors;
+
 	return 0;
 
+err_errors:
+	remove_proc_entry("tquic_errors", net->proc_net);
 err_stat:
 	remove_proc_entry("tquic_stat", net->proc_net);
 err_tquic:
@@ -723,6 +756,7 @@ void tquic_proc_exit(struct net *net)
 {
 	struct tquic_net *tn = tquic_pernet(net);
 
+	remove_proc_entry("tquic_ratelimit", net->proc_net);
 	remove_proc_entry("tquic_errors", net->proc_net);
 	remove_proc_entry("tquic_stat", net->proc_net);
 	remove_proc_entry("tquic", net->proc_net);

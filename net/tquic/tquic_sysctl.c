@@ -80,6 +80,25 @@ static int tquic_zero_rtt_max_age_seconds = 604800;	/* 7 days default */
 static int tquic_qpack_max_table_capacity = 4096;	/* Default per RFC 9204 */
 
 /*
+ * QUIC Version Preference (RFC 9369 - Compatible Version Negotiation)
+ *
+ * preferred_version: Controls which QUIC version is preferred for new connections.
+ *   0 = QUIC v1 (RFC 9000/9001) - default, maximum compatibility
+ *   1 = QUIC v2 (RFC 9369) - improved security, ECN-aware congestion control
+ *
+ * When preferred_version is 1 (v2), clients will attempt to use QUIC v2 and
+ * servers will prefer v2 during version negotiation. Falls back to v1 if peer
+ * doesn't support v2.
+ *
+ * RFC 9369 differences from v1:
+ *   - Different initial salt (0x0dede3def700a6db819381be6e269dcbf9bd2ed9)
+ *   - Different HKDF labels ("quicv2 key/iv/hp/ku" instead of "quic key/iv/hp/ku")
+ *   - Different long header packet type encoding
+ *   - Different Retry integrity key/nonce
+ */
+static int tquic_preferred_version;			/* 0 = v1 (default), 1 = v2 */
+
+/*
  * Preferred Address tunables (RFC 9000 Section 9.6)
  *
  * preferred_address_enabled (server):
@@ -93,6 +112,33 @@ static int tquic_qpack_max_table_capacity = 4096;	/* Default per RFC 9204 */
  */
 static int tquic_preferred_address_enabled;		/* Server: advertise */
 static int tquic_prefer_preferred_address = 1;		/* Client: auto-migrate */
+
+/*
+ * TLS Certificate Verification Settings (RFC 5280, RFC 6125)
+ *
+ * cert_verify_mode:
+ *   0 = none (INSECURE - skip all certificate verification)
+ *   1 = optional (verify if certificate present, allow missing)
+ *   2 = required (full verification required - default, secure)
+ *
+ * cert_verify_hostname:
+ *   0 = disabled (skip hostname verification - INSECURE)
+ *   1 = enabled (verify CN/SAN matches - default, per RFC 6125)
+ *
+ * cert_revocation_mode:
+ *   0 = none (skip revocation checking)
+ *   1 = soft_fail (check if available, continue on failure - default)
+ *   2 = hard_fail (require valid revocation response)
+ *
+ * cert_time_tolerance:
+ *   Tolerance in seconds for notBefore/notAfter checking.
+ *   Allows for clock skew between client and server.
+ *   Default: 300 seconds (5 minutes), per common practice.
+ */
+static int tquic_cert_verify_mode = 2;			/* required (secure default) */
+static int tquic_cert_verify_hostname = 1;		/* enabled (secure default) */
+static int tquic_cert_revocation_mode = 1;		/* soft_fail (pragmatic default) */
+static int tquic_cert_time_tolerance = 300;		/* 5 minutes clock skew tolerance */
 
 /* Forward declarations for scheduler API */
 struct tquic_sched_ops;
@@ -536,6 +582,10 @@ static int max_token_lifetime = 604800;  /* 7 days max */
 static int max_ack_delay_us = 16383000;  /* ~16.4 seconds max per spec */
 static int max_retry_token_lifetime = 3600;  /* 1 hour max for Retry tokens */
 static int max_qpack_table_capacity = 1048576;  /* 1MB max for QPACK table */
+static int two = 2;
+static int max_cert_verify_mode = 2;      /* required = maximum */
+static int max_revocation_mode = 2;       /* hard_fail = maximum */
+static int max_cert_time_tolerance = 86400;  /* 24 hours max clock skew */
 
 /* Sysctl table */
 static struct ctl_table tquic_sysctl_table[] = {
@@ -1019,6 +1069,142 @@ static struct ctl_table tquic_sysctl_table[] = {
 		.extra1		= &zero,
 		.extra2		= &max_qpack_table_capacity,
 	},
+	/*
+	 * QUIC Version Preference (RFC 9369 - QUIC Version 2)
+	 *
+	 * Controls which QUIC version is preferred for new connections:
+	 *   0 = QUIC v1 (RFC 9000/9001) - default, maximum compatibility
+	 *   1 = QUIC v2 (RFC 9369) - improved security properties
+	 *
+	 * QUIC v2 uses different cryptographic parameters:
+	 *   - Initial salt: 0x0dede3def700a6db819381be6e269dcbf9bd2ed9
+	 *   - HKDF labels: "quicv2 key", "quicv2 iv", "quicv2 hp", "quicv2 ku"
+	 *   - Different long header packet type bits encoding
+	 *   - Different Retry integrity key/nonce
+	 *
+	 * Compatible Version Negotiation (RFC 9368) allows graceful fallback
+	 * to v1 if the peer doesn't support v2.
+	 *
+	 * Default: 0 (QUIC v1)
+	 */
+	{
+		.procname	= "preferred_version",
+		.data		= &tquic_preferred_version,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= &zero,
+		.extra2		= &one,
+	},
+	/*
+	 * TLS Certificate Verification Mode (RFC 5280)
+	 *
+	 * Controls how strictly certificate verification is enforced:
+	 *   0 = none (INSECURE - skip all verification, use for testing only)
+	 *   1 = optional (verify if present, allow connections without certs)
+	 *   2 = required (full chain verification required - secure default)
+	 *
+	 * In mode 2 (required), all of the following must pass:
+	 *   - Certificate signature verified against issuer's public key
+	 *   - Certificate chain builds to a trusted root
+	 *   - Validity period (notBefore/notAfter) checked
+	 *   - Key usage and extended key usage validated
+	 *   - Hostname verification (if enabled)
+	 *   - Revocation status (per cert_revocation_mode)
+	 *
+	 * WARNING: Setting to 0 or 1 weakens security significantly.
+	 * Only use for testing or in environments with alternative security.
+	 *
+	 * Default: 2 (required) - maximum security
+	 */
+	{
+		.procname	= "cert_verify_mode",
+		.data		= &tquic_cert_verify_mode,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= &zero,
+		.extra2		= &max_cert_verify_mode,
+	},
+	/*
+	 * TLS Certificate Hostname Verification (RFC 6125)
+	 *
+	 * When enabled, the hostname provided in SNI must match either:
+	 *   - A Subject Alternative Name (SAN) dNSName extension entry
+	 *   - The Common Name (CN) in the Subject field (deprecated fallback)
+	 *
+	 * Wildcard matching is supported per RFC 6125 Section 6.4.3:
+	 *   - Wildcard (*) may appear in leftmost label only
+	 *   - *.example.com matches foo.example.com but not bar.foo.example.com
+	 *   - Wildcard does not match the parent domain (*.com invalid)
+	 *
+	 * WARNING: Disabling hostname verification allows MITM attacks.
+	 * Only disable for testing or when IP addresses are used.
+	 *
+	 * Default: 1 (enabled) - secure
+	 */
+	{
+		.procname	= "cert_verify_hostname",
+		.data		= &tquic_cert_verify_hostname,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= &zero,
+		.extra2		= &one,
+	},
+	/*
+	 * TLS Certificate Revocation Checking Mode
+	 *
+	 * Controls how certificate revocation status is verified:
+	 *   0 = none (skip revocation checking)
+	 *   1 = soft_fail (check OCSP stapling if provided, continue otherwise)
+	 *   2 = hard_fail (require valid OCSP response, reject if unavailable)
+	 *
+	 * In the kernel environment, full OCSP/CRL checking is limited because
+	 * the kernel cannot make HTTP/HTTPS requests. Instead, we support:
+	 *   - OCSP stapling: Server provides pre-fetched OCSP response
+	 *   - Must-staple: Honor the TLS feature extension requiring stapling
+	 *
+	 * soft_fail (mode 1) is the pragmatic default - it validates OCSP
+	 * responses when stapled but doesn't fail connections otherwise.
+	 * This matches common browser behavior.
+	 *
+	 * Default: 1 (soft_fail) - pragmatic balance of security/availability
+	 */
+	{
+		.procname	= "cert_revocation_mode",
+		.data		= &tquic_cert_revocation_mode,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= &zero,
+		.extra2		= &max_revocation_mode,
+	},
+	/*
+	 * TLS Certificate Time Tolerance (seconds)
+	 *
+	 * Tolerance for certificate validity period checking (notBefore/notAfter).
+	 * Allows for clock skew between client, server, and CA systems.
+	 *
+	 * The certificate is considered valid if:
+	 *   current_time >= (notBefore - tolerance)  AND
+	 *   current_time <= (notAfter + tolerance)
+	 *
+	 * A tolerance of 300 seconds (5 minutes) handles typical NTP skew.
+	 * In air-gapped or embedded systems, larger values may be needed.
+	 *
+	 * Range: 0 to 86400 seconds (0 to 24 hours)
+	 * Default: 300 seconds (5 minutes)
+	 */
+	{
+		.procname	= "cert_time_tolerance",
+		.data		= &tquic_cert_time_tolerance,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= &zero,
+		.extra2		= &max_cert_time_tolerance,
+	},
 	{ }
 };
 
@@ -1258,6 +1444,87 @@ int tquic_sysctl_get_qpack_max_table_capacity(void)
 	return tquic_qpack_max_table_capacity;
 }
 EXPORT_SYMBOL_GPL(tquic_sysctl_get_qpack_max_table_capacity);
+
+/*
+ * QUIC Version Preference (RFC 9369) accessor
+ *
+ * Returns the preferred QUIC version number based on sysctl setting:
+ *   tquic_preferred_version == 0: Returns TQUIC_VERSION_1 (0x00000001)
+ *   tquic_preferred_version == 1: Returns TQUIC_VERSION_2 (0x6b3343cf)
+ */
+u32 tquic_sysctl_get_preferred_version(void)
+{
+	if (tquic_preferred_version == 1)
+		return TQUIC_VERSION_2;
+	return TQUIC_VERSION_1;
+}
+EXPORT_SYMBOL_GPL(tquic_sysctl_get_preferred_version);
+
+/*
+ * Check if QUIC v2 is preferred (convenience function)
+ */
+bool tquic_sysctl_prefer_v2(void)
+{
+	return tquic_preferred_version == 1;
+}
+EXPORT_SYMBOL_GPL(tquic_sysctl_prefer_v2);
+
+/*
+ * TLS Certificate Verification Settings Accessors (RFC 5280, RFC 6125)
+ *
+ * These functions provide access to certificate verification configuration
+ * from the crypto/cert_verify.c module.
+ */
+
+/**
+ * tquic_sysctl_get_cert_verify_mode - Get certificate verification mode
+ *
+ * Returns:
+ *   0 = none (skip verification - INSECURE)
+ *   1 = optional (verify if present, allow missing)
+ *   2 = required (full verification required)
+ */
+int tquic_sysctl_get_cert_verify_mode(void)
+{
+	return tquic_cert_verify_mode;
+}
+EXPORT_SYMBOL_GPL(tquic_sysctl_get_cert_verify_mode);
+
+/**
+ * tquic_sysctl_get_cert_verify_hostname - Check if hostname verification enabled
+ *
+ * Returns: true if hostname verification is enabled, false otherwise
+ */
+bool tquic_sysctl_get_cert_verify_hostname(void)
+{
+	return tquic_cert_verify_hostname != 0;
+}
+EXPORT_SYMBOL_GPL(tquic_sysctl_get_cert_verify_hostname);
+
+/**
+ * tquic_sysctl_get_cert_revocation_mode - Get revocation checking mode
+ *
+ * Returns:
+ *   0 = none (skip revocation checking)
+ *   1 = soft_fail (check if available, continue on failure)
+ *   2 = hard_fail (require valid revocation response)
+ */
+int tquic_sysctl_get_cert_revocation_mode(void)
+{
+	return tquic_cert_revocation_mode;
+}
+EXPORT_SYMBOL_GPL(tquic_sysctl_get_cert_revocation_mode);
+
+/**
+ * tquic_sysctl_get_cert_time_tolerance - Get time tolerance for validity check
+ *
+ * Returns: Tolerance in seconds for notBefore/notAfter checking
+ */
+u32 tquic_sysctl_get_cert_time_tolerance(void)
+{
+	return (u32)tquic_cert_time_tolerance;
+}
+EXPORT_SYMBOL_GPL(tquic_sysctl_get_cert_time_tolerance);
 
 /* Number of actual sysctl entries (excluding null terminator) */
 #define TQUIC_SYSCTL_TABLE_ENTRIES (ARRAY_SIZE(tquic_sysctl_table) - 1)

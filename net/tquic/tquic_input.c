@@ -35,6 +35,7 @@
 #include "tquic_token.h"
 #include "tquic_retry.h"
 #include "tquic_ack_frequency.h"
+#include "tquic_ratelimit.h"
 
 /* QUIC frame types (must match tquic_output.c) */
 #define TQUIC_FRAME_PADDING		0x00
@@ -198,7 +199,7 @@ static struct tquic_connection *tquic_lookup_by_dcid(const u8 *dcid, u8 dcid_len
 {
 	struct tquic_cid cid;
 
-	if (dcid_len > TQUIC_MAX_CID_LEN)
+	if (unlikely(dcid_len > TQUIC_MAX_CID_LEN))
 		return NULL;
 
 	cid.len = dcid_len;
@@ -2182,7 +2183,7 @@ static int tquic_process_packet(struct tquic_connection *conn,
 	payload_len = len - ctx.offset;
 
 	decrypted = kmalloc(payload_len, GFP_ATOMIC);
-	if (!decrypted)
+	if (unlikely(!decrypted))
 		return -ENOMEM;
 
 	/*
@@ -2339,6 +2340,105 @@ int tquic_udp_recv(struct sock *sk, struct sk_buff *skb)
 	if (len < 1) {
 		kfree_skb(skb);
 		return -EINVAL;
+	}
+
+	/*
+	 * Rate limiting check for DDoS protection
+	 *
+	 * For Initial packets (new connection attempts), check against
+	 * per-IP rate limits before allocating any connection state.
+	 * This is the first line of defense against amplification attacks.
+	 *
+	 * We check:
+	 * 1. Long header packets that could be Initial packets
+	 * 2. Apply token bucket rate limiting per source IP
+	 * 3. Under attack, require SYN cookie-style validation
+	 */
+	if (len >= 7 && (data[0] & TQUIC_HEADER_FORM_LONG)) {
+		/* Long header - check if this is an Initial packet */
+		int pkt_type = (data[0] & 0x30) >> 4;
+
+		if (pkt_type == TQUIC_PKT_INITIAL) {
+			enum tquic_rl_action action;
+			u8 dcid_len, scid_len;
+			const u8 *token = NULL;
+			size_t token_len = 0;
+			size_t offset;
+
+			/* Parse enough header to extract token */
+			if (len >= 6) {
+				dcid_len = data[5];
+				offset = 6 + dcid_len;
+
+				if (offset < len) {
+					scid_len = data[offset];
+					offset += 1 + scid_len;
+
+					/* Parse token length (varint) */
+					if (offset < len) {
+						u64 tlen;
+						int vlen;
+						vlen = tquic_decode_varint(data + offset,
+									   len - offset, &tlen);
+						if (vlen > 0 && offset + vlen + tlen <= len) {
+							token = data + offset + vlen;
+							token_len = tlen;
+						}
+					}
+				}
+
+				/* Perform rate limit check with token */
+				action = tquic_ratelimit_check_initial(
+					sock_net(sk), &src_addr,
+					data + 6, dcid_len,
+					token, token_len);
+
+				switch (action) {
+				case TQUIC_RL_ACCEPT:
+					/* Continue processing */
+					break;
+
+				case TQUIC_RL_RATE_LIMITED:
+					/*
+					 * Rate limited - silently drop
+					 * No response to avoid amplification
+					 */
+					kfree_skb(skb);
+					return -EBUSY;
+
+				case TQUIC_RL_COOKIE_REQUIRED:
+					/*
+					 * Under attack - send Retry with cookie
+					 * This validates the source address
+					 */
+					if (dcid_len > 0 && offset > 6 + dcid_len) {
+						u8 cookie[64];
+						size_t cookie_len = sizeof(cookie);
+						int ret;
+
+						ret = tquic_ratelimit_generate_cookie(
+							sock_net(sk), &src_addr,
+							data + 6, dcid_len,
+							cookie, &cookie_len);
+						if (ret == 0) {
+							/* Send Retry packet with cookie as token */
+							tquic_retry_send(sk, &src_addr,
+									 TQUIC_VERSION_1,
+									 data + 6, dcid_len,
+									 data + 7 + dcid_len,
+									 scid_len);
+						}
+					}
+					kfree_skb(skb);
+					return 0;
+
+				case TQUIC_RL_BLACKLISTED:
+					/* Blacklisted - silently drop */
+					kfree_skb(skb);
+					return -EACCES;
+				}
+			}
+		}
 	}
 
 	/* Check for stateless reset (received from peer) */

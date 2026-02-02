@@ -540,6 +540,230 @@ int tquic_http_datagram_decode(const u8 *buf, size_t buf_len,
 
 /*
  * =============================================================================
+ * Extended CONNECT Protocol (RFC 8441, RFC 9220)
+ * =============================================================================
+ */
+
+/* Extended CONNECT protocol identifier */
+#define TQUIC_CONNECT_UDP_PROTOCOL	"connect-udp"
+
+/**
+ * struct tquic_extended_connect_request - Extended CONNECT request headers
+ * @method: Must be "CONNECT"
+ * @protocol: Extended protocol (e.g., "connect-udp", "connect-ip")
+ * @scheme: URI scheme (e.g., "https")
+ * @authority: Target authority
+ * @path: Request path (URI template)
+ *
+ * Per RFC 9220, extended CONNECT requests include:
+ *   :method = CONNECT
+ *   :protocol = <extension protocol>
+ *   :scheme = <scheme>
+ *   :authority = <authority>
+ *   :path = <path>
+ */
+struct tquic_extended_connect_request {
+	const char *method;
+	const char *protocol;
+	const char *scheme;
+	const char *authority;
+	const char *path;
+};
+
+/**
+ * tquic_extended_connect_validate - Validate extended CONNECT request
+ * @req: Extended CONNECT request to validate
+ * @expected_protocol: Expected protocol string
+ *
+ * Validates that the request is a properly formed extended CONNECT
+ * with the expected protocol.
+ *
+ * Returns: 0 if valid, negative errno if invalid.
+ */
+int tquic_extended_connect_validate(const struct tquic_extended_connect_request *req,
+				    const char *expected_protocol);
+
+/*
+ * =============================================================================
+ * Proxy-Status Header (RFC 9209)
+ * =============================================================================
+ *
+ * The Proxy-Status header field allows proxies to convey information about
+ * their handling of a request/response. For MASQUE proxies, this is used to
+ * communicate errors that occurred during tunnel establishment or operation.
+ */
+
+/* Proxy-Status error types (RFC 9209 Section 2.3) */
+#define PROXY_STATUS_DNS_TIMEOUT		"dns_timeout"
+#define PROXY_STATUS_DNS_ERROR			"dns_error"
+#define PROXY_STATUS_DESTINATION_NOT_FOUND	"destination_not_found"
+#define PROXY_STATUS_DESTINATION_UNAVAILABLE	"destination_unavailable"
+#define PROXY_STATUS_DESTINATION_IP_PROHIBITED	"destination_ip_prohibited"
+#define PROXY_STATUS_DESTINATION_IP_UNROUTABLE	"destination_ip_unroutable"
+#define PROXY_STATUS_CONNECTION_REFUSED		"connection_refused"
+#define PROXY_STATUS_CONNECTION_TERMINATED	"connection_terminated"
+#define PROXY_STATUS_CONNECTION_TIMEOUT		"connection_timeout"
+#define PROXY_STATUS_CONNECTION_READ_TIMEOUT	"connection_read_timeout"
+#define PROXY_STATUS_CONNECTION_WRITE_TIMEOUT	"connection_write_timeout"
+#define PROXY_STATUS_CONNECTION_LIMIT_REACHED	"connection_limit_reached"
+#define PROXY_STATUS_TLS_PROTOCOL_ERROR		"tls_protocol_error"
+#define PROXY_STATUS_TLS_CERTIFICATE_ERROR	"tls_certificate_error"
+#define PROXY_STATUS_TLS_ALERT_RECEIVED		"tls_alert_received"
+#define PROXY_STATUS_HTTP_REQUEST_ERROR		"http_request_error"
+#define PROXY_STATUS_HTTP_REQUEST_DENIED	"http_request_denied"
+#define PROXY_STATUS_HTTP_RESPONSE_INCOMPLETE	"http_response_incomplete"
+#define PROXY_STATUS_HTTP_RESPONSE_HEADER_SECTION_SIZE "http_response_header_section_size"
+#define PROXY_STATUS_HTTP_RESPONSE_HEADER_SIZE	"http_response_header_size"
+#define PROXY_STATUS_HTTP_RESPONSE_BODY_SIZE	"http_response_body_size"
+#define PROXY_STATUS_HTTP_RESPONSE_TRAILER_SECTION_SIZE "http_response_trailer_section_size"
+#define PROXY_STATUS_HTTP_RESPONSE_TRAILER_SIZE	"http_response_trailer_size"
+#define PROXY_STATUS_HTTP_RESPONSE_TRANSFER_CODING "http_response_transfer_coding"
+#define PROXY_STATUS_HTTP_RESPONSE_CONTENT_CODING "http_response_content_coding"
+#define PROXY_STATUS_HTTP_RESPONSE_TIMEOUT	"http_response_timeout"
+#define PROXY_STATUS_HTTP_UPGRADE_FAILED	"http_upgrade_failed"
+#define PROXY_STATUS_HTTP_PROTOCOL_ERROR	"http_protocol_error"
+#define PROXY_STATUS_PROXY_INTERNAL_RESPONSE	"proxy_internal_response"
+#define PROXY_STATUS_PROXY_INTERNAL_ERROR	"proxy_internal_error"
+#define PROXY_STATUS_PROXY_CONFIGURATION_ERROR	"proxy_configuration_error"
+#define PROXY_STATUS_PROXY_LOOP_DETECTED	"proxy_loop_detected"
+
+/* Maximum Proxy-Status header value length */
+#define PROXY_STATUS_MAX_LEN	512
+
+/**
+ * struct tquic_proxy_status - Proxy-Status header value
+ * @proxy_name: Proxy identifier (e.g., hostname)
+ * @error_type: Error type token (from above defines)
+ * @details: Optional human-readable details
+ * @next_hop: Optional next-hop information
+ *
+ * Represents a parsed or to-be-generated Proxy-Status header value.
+ */
+struct tquic_proxy_status {
+	char proxy_name[64];
+	const char *error_type;
+	char details[256];
+	char next_hop[128];
+};
+
+/**
+ * tquic_proxy_status_format - Format Proxy-Status header value
+ * @status: Proxy status to format
+ * @buf: Output buffer
+ * @len: Buffer length
+ *
+ * Formats the Proxy-Status structured header value according to RFC 8941.
+ *
+ * Returns: Length of formatted string, or negative errno on error.
+ */
+int tquic_proxy_status_format(const struct tquic_proxy_status *status,
+			      char *buf, size_t len);
+
+/**
+ * tquic_proxy_status_parse - Parse Proxy-Status header value
+ * @value: Header value string
+ * @status: Output for parsed status
+ *
+ * Returns: 0 on success, negative errno on error.
+ */
+int tquic_proxy_status_parse(const char *value,
+			     struct tquic_proxy_status *status);
+
+/**
+ * tquic_connect_udp_set_proxy_status - Set proxy status for error response
+ * @tunnel: Tunnel
+ * @error_type: Error type token
+ * @details: Optional details string (may be NULL)
+ *
+ * Sets the proxy status to be included in an error response.
+ *
+ * Returns: 0 on success, negative errno on error.
+ */
+int tquic_connect_udp_set_proxy_status(struct tquic_connect_udp_tunnel *tunnel,
+				       const char *error_type,
+				       const char *details);
+
+/*
+ * =============================================================================
+ * Context ID Management (RFC 9298 Section 4)
+ * =============================================================================
+ */
+
+/**
+ * tquic_connect_udp_alloc_context_id - Allocate new context ID
+ * @tunnel: Tunnel to allocate on
+ * @context_id: Output for allocated context ID
+ *
+ * Allocates the next available context ID. Client allocates even IDs,
+ * server allocates odd IDs.
+ *
+ * Returns: 0 on success, negative errno on failure.
+ */
+int tquic_connect_udp_alloc_context_id(struct tquic_connect_udp_tunnel *tunnel,
+				       u64 *context_id);
+
+/**
+ * tquic_connect_udp_register_context - Register context handler
+ * @tunnel: Tunnel
+ * @context_id: Context ID to register
+ * @handler: Handler callback for received datagrams
+ * @context: Handler context
+ *
+ * Registers a handler for datagrams with the specified context ID.
+ * Context ID 0 is pre-registered for UDP payload.
+ *
+ * Returns: 0 on success, negative errno on failure.
+ */
+int tquic_connect_udp_register_context(struct tquic_connect_udp_tunnel *tunnel,
+				       u64 context_id,
+				       int (*handler)(struct tquic_connect_udp_tunnel *,
+						      u64, const u8 *, size_t, void *),
+				       void *context);
+
+/**
+ * tquic_connect_udp_unregister_context - Unregister context handler
+ * @tunnel: Tunnel
+ * @context_id: Context ID to unregister
+ */
+void tquic_connect_udp_unregister_context(struct tquic_connect_udp_tunnel *tunnel,
+					  u64 context_id);
+
+/*
+ * =============================================================================
+ * Datagram Receive Callback
+ * =============================================================================
+ */
+
+/**
+ * tquic_connect_udp_datagram_handler - QUIC datagram receive callback type
+ * @tunnel: Tunnel that received the datagram
+ * @context_id: Context ID
+ * @data: Payload data
+ * @len: Payload length
+ * @context: Handler context
+ *
+ * Returns: 0 on success, negative errno on error.
+ */
+typedef int (*tquic_connect_udp_datagram_handler)(
+	struct tquic_connect_udp_tunnel *tunnel,
+	u64 context_id,
+	const u8 *data, size_t len,
+	void *context);
+
+/**
+ * tquic_connect_udp_set_recv_handler - Set receive handler
+ * @tunnel: Tunnel
+ * @handler: Handler callback
+ * @context: Handler context
+ *
+ * Sets the callback invoked when datagrams are received on the tunnel.
+ */
+void tquic_connect_udp_set_recv_handler(struct tquic_connect_udp_tunnel *tunnel,
+					tquic_connect_udp_datagram_handler handler,
+					void *context);
+
+/*
+ * =============================================================================
  * Module Initialization
  * =============================================================================
  */

@@ -304,8 +304,8 @@ int tquic_pmtud_init_path(struct tquic_path *path)
 	timer_setup(&pmtud->timer, tquic_pmtud_timer_expired, 0);
 	INIT_WORK(&pmtud->work, tquic_pmtud_work_fn);
 
-	/* Store in path (using an extension field or inline) */
-	/* Note: In production, this would be stored in path structure */
+	/* Store PMTUD state in path's dedicated field */
+	path->pmtud_state = pmtud;
 	path->mtu = pmtud->plpmtu;
 
 	pr_debug("tquic_pmtud: initialized path %u, base=%u, max=%u\n",
@@ -326,15 +326,19 @@ void tquic_pmtud_release_path(struct tquic_path *path)
 	if (!path)
 		return;
 
-	/* In production, pmtud would be stored in path structure */
-	/* For now, this is a placeholder */
-	pmtud = NULL;
+	pmtud = path->pmtud_state;
+	if (!pmtud)
+		return;
 
-	if (pmtud) {
-		del_timer_sync(&pmtud->timer);
-		cancel_work_sync(&pmtud->work);
-		kfree(pmtud);
-	}
+	/* Stop timer and cancel pending work */
+	del_timer_sync(&pmtud->timer);
+	cancel_work_sync(&pmtud->work);
+
+	/* Clear path reference and free */
+	path->pmtud_state = NULL;
+	kfree(pmtud);
+
+	pr_debug("tquic_pmtud: released state for path %u\n", path->path_id);
 }
 EXPORT_SYMBOL_GPL(tquic_pmtud_release_path);
 

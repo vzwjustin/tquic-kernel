@@ -203,6 +203,16 @@ struct h3_stream {
 	u64 bytes_received;
 	u64 bytes_sent;
 
+	/*
+	 * RFC 9218 Extensible Priority
+	 *
+	 * Urgency (0-7): 0 is highest priority, 7 is lowest, default is 3
+	 * Incremental: hint for interleaved delivery (default false)
+	 */
+	u8 priority_urgency;
+	bool priority_incremental;
+	bool priority_valid;		/* True if priority explicitly set */
+
 	/* Tree linkage */
 	struct rb_node node;
 	struct list_head list;

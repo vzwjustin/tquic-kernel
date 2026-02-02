@@ -237,6 +237,9 @@ int http3_priority_state_init(struct tquic_connection *conn)
 	struct http3_priority_state *state;
 	int i;
 
+	if (!conn)
+		return -EINVAL;
+
 	if (!http3_priorities_enabled(NULL))
 		return 0;
 
@@ -254,9 +257,8 @@ int http3_priority_state_init(struct tquic_connection *conn)
 	state->conn = conn;
 	state->cache = http3_priority_stream_cache;
 
-	/* Store state in connection's extended data */
-	/* Note: In a full implementation, this would use a proper field */
-	/* For now, we use a placeholder approach */
+	/* Store state in connection's extended priority_state field */
+	conn->priority_state = state;
 
 	pr_debug("http3_priority: initialized for connection %p\n", conn);
 	return 0;
@@ -272,7 +274,10 @@ void http3_priority_state_destroy(struct tquic_connection *conn)
 	struct http3_priority_state *state;
 	struct rb_node *node;
 
-	state = NULL; /* Would retrieve from conn's extended data */
+	if (!conn)
+		return;
+
+	state = conn->priority_state;
 	if (!state)
 		return;
 
@@ -290,6 +295,7 @@ void http3_priority_state_destroy(struct tquic_connection *conn)
 
 	spin_unlock_bh(&state->lock);
 
+	conn->priority_state = NULL;
 	kfree(state);
 
 	pr_debug("http3_priority: destroyed for connection %p\n", conn);
@@ -312,7 +318,10 @@ int http3_priority_stream_init(struct tquic_connection *conn,
 	u8 urgency;
 	int ret;
 
-	state = NULL; /* Would retrieve from conn's extended data */
+	if (!conn)
+		return -EINVAL;
+
+	state = conn->priority_state;
 	if (!state || !state->enabled)
 		return 0;
 
@@ -368,7 +377,10 @@ void http3_priority_stream_destroy(struct tquic_connection *conn,
 	struct http3_priority_state *state;
 	struct http3_priority_stream *ps;
 
-	state = NULL; /* Would retrieve from conn's extended data */
+	if (!conn)
+		return;
+
+	state = conn->priority_state;
 	if (!state)
 		return;
 
@@ -396,7 +408,10 @@ int http3_priority_stream_get(struct tquic_connection *conn,
 	struct http3_priority_state *state;
 	struct http3_priority_stream *ps;
 
-	state = NULL; /* Would retrieve from conn's extended data */
+	if (!conn || !priority)
+		return -EINVAL;
+
+	state = conn->priority_state;
 	if (!state) {
 		/* Return default if priorities not enabled */
 		http3_priority_default(priority);
@@ -428,7 +443,10 @@ int http3_priority_stream_set(struct tquic_connection *conn,
 	struct http3_priority_stream *ps;
 	u8 old_urgency, new_urgency;
 
-	state = NULL; /* Would retrieve from conn's extended data */
+	if (!conn || !priority)
+		return -EINVAL;
+
+	state = conn->priority_state;
 	if (!state)
 		return -ENOENT;
 
@@ -807,7 +825,10 @@ u64 http3_priority_get_next_stream(struct tquic_connection *conn,
 	int urgency;
 	u64 stream_id = 0;
 
-	state = NULL; /* Would retrieve from conn's extended data */
+	if (!conn)
+		return 0;
+
+	state = conn->priority_state;
 	if (!state)
 		return 0;
 
@@ -849,10 +870,10 @@ int http3_priority_get_streams_at_urgency(struct tquic_connection *conn,
 	struct http3_priority_stream *ps;
 	int count = 0;
 
-	if (urgency > HTTP3_PRIORITY_URGENCY_MAX)
+	if (!conn || !stream_ids || urgency > HTTP3_PRIORITY_URGENCY_MAX)
 		return 0;
 
-	state = NULL; /* Would retrieve from conn's extended data */
+	state = conn->priority_state;
 	if (!state)
 		return 0;
 
@@ -879,7 +900,10 @@ bool http3_priority_should_interleave(struct tquic_connection *conn,
 	struct http3_priority_stream *ps;
 	bool incremental = false;
 
-	state = NULL; /* Would retrieve from conn's extended data */
+	if (!conn)
+		return false;
+
+	state = conn->priority_state;
 	if (!state)
 		return false;
 
@@ -931,7 +955,12 @@ void http3_priority_dump(struct tquic_connection *conn)
 	struct http3_priority_stream *ps;
 	int urgency;
 
-	state = NULL; /* Would retrieve from conn's extended data */
+	if (!conn) {
+		pr_info("http3_priority: NULL connection\n");
+		return;
+	}
+
+	state = conn->priority_state;
 	if (!state) {
 		pr_info("http3_priority: no state for connection %p\n", conn);
 		return;
@@ -1158,8 +1187,8 @@ struct tquic_h3_stream *tquic_h3_priority_next(struct tquic_http3_conn *conn)
 	if (!conn || !conn->qconn)
 		return NULL;
 
-	/* Get priority state from connection */
-	state = NULL; /* Would retrieve from conn's extended data */
+	/* Get priority state from QUIC connection */
+	state = conn->qconn->priority_state;
 	if (!state)
 		return NULL;
 
@@ -1223,32 +1252,63 @@ EXPORT_SYMBOL_GPL(tquic_h3_priority_next);
 
 /**
  * tquic_h3_stream_set_priority - Update stream priority
+ *
+ * Updates the RFC 9218 priority parameters for an HTTP/3 stream.
+ * The priority affects scheduling order for stream data transmission.
+ *
+ * Note: tquic_h3_stream is an alias for h3_stream internally.
  */
 void tquic_h3_stream_set_priority(struct tquic_h3_stream *stream,
 				  const struct tquic_h3_priority *pri)
 {
-	if (!stream || !pri)
+	struct h3_stream *h3s = (struct h3_stream *)stream;
+
+	if (!h3s || !pri)
 		return;
 
-	/* The h3_stream structure would have a priority field */
-	/* For now, this is a stub that will be connected to stream mgmt */
-	pr_debug("tquic_h3: set stream priority u=%u, i=%d\n",
-		 pri->urgency, pri->incremental);
+	spin_lock_bh(&h3s->lock);
+
+	/* Clamp urgency to valid range */
+	h3s->priority_urgency = pri->urgency;
+	if (h3s->priority_urgency > TQUIC_H3_PRIORITY_URGENCY_MAX)
+		h3s->priority_urgency = TQUIC_H3_PRIORITY_URGENCY_MAX;
+
+	h3s->priority_incremental = pri->incremental;
+	h3s->priority_valid = true;
+
+	spin_unlock_bh(&h3s->lock);
+
+	pr_debug("tquic_h3: set stream %llu priority u=%u, i=%d\n",
+		 h3s->base ? h3s->base->id : 0,
+		 h3s->priority_urgency, h3s->priority_incremental);
 }
 EXPORT_SYMBOL_GPL(tquic_h3_stream_set_priority);
 
 /**
  * tquic_h3_stream_get_priority - Get current stream priority
+ *
+ * Retrieves the current RFC 9218 priority parameters for an HTTP/3 stream.
  */
 int tquic_h3_stream_get_priority(struct tquic_h3_stream *stream,
 				 struct tquic_h3_priority *pri)
 {
-	if (!stream || !pri)
+	struct h3_stream *h3s = (struct h3_stream *)stream;
+
+	if (!h3s || !pri)
 		return -EINVAL;
 
-	/* Return defaults for now - would read from stream structure */
-	pri->urgency = TQUIC_H3_PRIORITY_URGENCY_DEFAULT;
-	pri->incremental = TQUIC_H3_PRIORITY_INCREMENTAL_DEFAULT;
+	spin_lock_bh(&h3s->lock);
+
+	if (h3s->priority_valid) {
+		pri->urgency = h3s->priority_urgency;
+		pri->incremental = h3s->priority_incremental;
+	} else {
+		/* Return defaults if priority not explicitly set */
+		pri->urgency = TQUIC_H3_PRIORITY_URGENCY_DEFAULT;
+		pri->incremental = TQUIC_H3_PRIORITY_INCREMENTAL_DEFAULT;
+	}
+
+	spin_unlock_bh(&h3s->lock);
 
 	return 0;
 }

@@ -25,9 +25,19 @@
 #include <linux/workqueue.h>
 #include <linux/list.h>
 #include <linux/hashtable.h>
+#include <linux/inetdevice.h>
 #include <net/sock.h>
 #include <net/tcp.h>
 #include <net/tquic.h>
+#include <net/ip.h>
+#include <net/icmp.h>
+#include <net/route.h>
+#include <net/dst.h>
+#if IS_ENABLED(CONFIG_IPV6)
+#include <net/ipv6.h>
+#include <net/icmp.h>
+#include <net/ip6_route.h>
+#endif
 
 #include "protocol.h"
 
@@ -61,13 +71,10 @@ extern void tquic_qos_mark_skb(struct sk_buff *skb, void *tunnel_ptr);
 extern void tquic_qos_update_stats(u8 traffic_class, u64 bytes);
 
 /*
- * Weak stubs for functions implemented elsewhere
- * These will be overridden by actual implementations
+ * External function implemented in tquic_tunnel.c
+ * Returns traffic class (0-3) for QoS marking
  */
-__weak u8 tquic_tunnel_get_traffic_class(struct tquic_tunnel *tunnel)
-{
-	return 2;  /* Bulk default */
-}
+extern u8 tquic_tunnel_get_traffic_class(struct tquic_tunnel *tunnel);
 
 /*
  * Wrapper functions for pipe allocation in out-of-tree builds.
@@ -214,71 +221,171 @@ static void tquic_splice_state_free(struct tquic_splice_state *state)
  * @tunnel: Tunnel context
  * @direction: TQUIC_FORWARD_TX (QUIC->TCP) or TQUIC_FORWARD_RX (TCP->QUIC)
  *
- * Uses kernel splice to move data between QUIC stream and TCP socket
- * without copying through userspace.
+ * Uses kernel splice mechanisms to move data between QUIC stream and TCP
+ * socket without copying through userspace. For QUIC streams (which use
+ * sk_buff queues), we use skb-based zero-copy moves rather than pipe splice.
+ *
+ * TX Direction (QUIC stream -> TCP socket):
+ *   1. Dequeue skbs from stream's receive buffer
+ *   2. Send data through TCP socket using kernel_sendmsg
+ *   3. Apply QoS marking for traffic classification
+ *
+ * RX Direction (TCP socket -> QUIC stream):
+ *   1. Receive data from TCP socket via kernel_recvmsg
+ *   2. Wrap in skb and enqueue to stream's send buffer
+ *   3. Wake stream to trigger QUIC packetization
  *
  * Returns: Number of bytes forwarded, or negative errno
  */
 ssize_t tquic_forward_splice(struct tquic_tunnel *tunnel, int direction)
 {
-	struct pipe_inode_info *pipe;
-	ssize_t spliced = 0;
+	struct tquic_stream *stream;
+	struct socket *tcp_sock;
+	struct sock *sk;
+	struct sk_buff *skb;
 	ssize_t total = 0;
-	size_t len;
-	unsigned int flags;
+	ssize_t sent;
+	struct msghdr msg;
+	struct kvec iov;
+	int err;
 
 	if (!tunnel)
 		return -EINVAL;
 
-	/*
-	 * Create temporary pipe for splice buffer
-	 * In production, this would be cached per-tunnel
-	 */
-	pipe = tquic_alloc_pipe();
-	if (!pipe)
-		return -ENOMEM;
+	stream = tunnel->quic_stream;
+	tcp_sock = tunnel->tcp_sock;
 
-	flags = SPLICE_F_MOVE | SPLICE_F_NONBLOCK;
-	len = TQUIC_SPLICE_BUFSIZE;
+	if (!stream || !tcp_sock)
+		return -ENOTCONN;
+
+	sk = tcp_sock->sk;
+	if (!sk)
+		return -ENOTCONN;
 
 	if (direction == TQUIC_FORWARD_TX) {
 		/*
-		 * QUIC stream -> pipe -> TCP socket
+		 * QUIC stream receive buffer -> TCP socket
 		 *
-		 * In kernel mode, we'd use:
-		 *   splice_from_pipe_feed() for reading from QUIC stream buffer
-		 *   splice_to_socket() for writing to TCP
-		 *
-		 * Since QUIC streams use sk_buff queues, we simulate splice
-		 * by moving skb data directly.
+		 * Data arrives on the QUIC stream from the router.
+		 * We forward it to the destination via the TCP socket.
 		 */
 
-		/* Placeholder: In full impl, read from stream->send_buf */
-		spliced = 0;
+		/* Process all queued data from QUIC stream */
+		while (!skb_queue_empty(&stream->recv_buf)) {
+			skb = skb_dequeue(&stream->recv_buf);
+			if (!skb)
+				break;
 
-		/*
-		 * Apply QoS marking to outbound packets
-		 * This is done per-packet in the actual send path
-		 */
+			/* Set up iovec for kernel_sendmsg */
+			memset(&msg, 0, sizeof(msg));
+			msg.msg_flags = MSG_DONTWAIT | MSG_NOSIGNAL;
+
+			iov.iov_base = skb->data;
+			iov.iov_len = skb->len;
+
+			/* Send data through TCP socket */
+			sent = kernel_sendmsg(tcp_sock, &msg, &iov, 1, skb->len);
+			if (sent < 0) {
+				/* Send failed - put skb back and return error */
+				skb_queue_head(&stream->recv_buf, skb);
+				if (total > 0)
+					break;  /* Partial success */
+				return sent;
+			}
+
+			if (sent < skb->len) {
+				/*
+				 * Partial send - trim skb and put remainder back.
+				 * This handles TCP flow control backpressure.
+				 */
+				skb_pull(skb, sent);
+				skb_queue_head(&stream->recv_buf, skb);
+				total += sent;
+				break;
+			}
+
+			total += sent;
+			consume_skb(skb);
+
+			/* Check for TCP socket congestion */
+			if (sk_stream_wspace(sk) < sk->sk_sndbuf / 4)
+				break;  /* TCP send buffer getting full */
+		}
+
+		/* Update statistics */
+		tunnel->stats.bytes_tx += total;
+		tunnel->stats.packets_tx++;
+
+		/* Apply QoS classification */
 		tquic_qos_update_stats(tquic_tunnel_get_traffic_class(tunnel),
 				       total);
 
 	} else {
 		/*
-		 * TCP socket -> pipe -> QUIC stream
+		 * TCP socket receive buffer -> QUIC stream send buffer
 		 *
-		 * Read from TCP socket, write to QUIC stream buffer.
+		 * Data arrives from the internet destination.
+		 * We forward it to the router via the QUIC stream.
 		 */
+		char *buf;
+		size_t bufsize = TQUIC_SPLICE_BUFSIZE;
 
-		/* Placeholder: In full impl, read from TCP sk->sk_receive_queue */
-		spliced = 0;
+		/* Allocate temporary receive buffer */
+		buf = kmalloc(bufsize, GFP_KERNEL);
+		if (!buf)
+			return -ENOMEM;
+
+		while (1) {
+			memset(&msg, 0, sizeof(msg));
+			msg.msg_flags = MSG_DONTWAIT;
+
+			iov.iov_base = buf;
+			iov.iov_len = bufsize;
+
+			/* Receive from TCP socket */
+			err = kernel_recvmsg(tcp_sock, &msg, &iov, 1,
+					     bufsize, MSG_DONTWAIT);
+			if (err <= 0) {
+				if (err == -EAGAIN || err == -EWOULDBLOCK)
+					break;  /* No more data available */
+				if (total > 0)
+					break;  /* Partial success */
+				kfree(buf);
+				return err;
+			}
+
+			/* Create skb for QUIC stream */
+			skb = alloc_skb(err + 64, GFP_KERNEL);
+			if (!skb) {
+				kfree(buf);
+				return total > 0 ? total : -ENOMEM;
+			}
+
+			skb_reserve(skb, 32);  /* Room for QUIC headers */
+			skb_put_data(skb, buf, err);
+
+			/* Enqueue to QUIC stream send buffer */
+			skb_queue_tail(&stream->send_buf, skb);
+			stream->send_offset += err;
+			total += err;
+
+			/* Limit to splice buffer size per call */
+			if (total >= bufsize)
+				break;
+		}
+
+		kfree(buf);
+
+		/* Update statistics */
+		tunnel->stats.bytes_rx += total;
+		tunnel->stats.packets_rx++;
+
+		/* Wake stream to trigger transmission */
+		if (total > 0)
+			tquic_stream_wake(stream);
 	}
 
-	total = spliced;
-
-	tquic_free_pipe(pipe);
-
-	return total > 0 ? total : spliced;
+	return total;
 }
 EXPORT_SYMBOL_GPL(tquic_forward_splice);
 
@@ -329,28 +436,49 @@ static size_t tquic_forward_skb_splice(struct sk_buff_head *from_queue,
 /**
  * tquic_forward_client_owns_address - Check if client owns address
  * @client: Client to check
- * @addr: Address to check
+ * @addr: Address to check (currently unused - port-based allocation)
  * @port: Port to check (in network byte order)
  *
- * A client "owns" an address if the port falls within their allocated range.
+ * Determines if a destination port falls within a client's allocated port
+ * range. Each client is assigned a contiguous range of ports for their
+ * tunnels (TQUIC_PORTS_PER_CLIENT = 1000 ports per client).
  *
- * Returns: true if client owns this address/port
+ * The port range is assigned during client registration and stored in
+ * the tquic_client structure as port_range_start and port_range_end
+ * (both in network byte order).
+ *
+ * This is used for hairpin detection: if the destination port of outbound
+ * traffic falls within another client's range, we can forward directly
+ * to that client's QUIC stream without going through a TCP socket.
+ *
+ * Returns: true if client owns this address/port, false otherwise
  */
 static bool tquic_forward_client_owns_address(struct tquic_client *client,
 					      const struct sockaddr_storage *addr,
 					      __be16 port)
 {
-	u16 port_h;
+	u16 port_h, range_start, range_end;
 
 	if (!client)
 		return false;
 
-	/* For hairpin, we check if the port is in the client's range */
+	/*
+	 * Convert to host byte order for comparison.
+	 * Client port ranges are stored in network byte order in the
+	 * tquic_client structure (port_range_start, port_range_end).
+	 */
 	port_h = ntohs(port);
+	range_start = ntohs(client->port_range_start);
+	range_end = ntohs(client->port_range_end);
 
-	/* Client port ranges are defined in tquic_tunnel.c */
-	/* Access via weak symbols or pass as parameters */
-	return false;  /* Stub - full impl needs client port range access */
+	/*
+	 * Check if port falls within client's allocated range.
+	 * The range is inclusive: [range_start, range_end].
+	 */
+	if (port_h >= range_start && port_h <= range_end)
+		return true;
+
+	return false;
 }
 
 /**
@@ -401,13 +529,54 @@ struct tquic_client *tquic_forward_check_hairpin(struct tquic_tunnel *tunnel)
 }
 EXPORT_SYMBOL_GPL(tquic_forward_check_hairpin);
 
+/*
+ * Hairpin loop detection TTL threshold
+ *
+ * RFC 9000 does not define a TTL mechanism, but for hairpin traffic
+ * between local clients we use a hop limit in the tunnel header to
+ * prevent routing loops. Max 8 hops for hairpin chains.
+ */
+#define TQUIC_HAIRPIN_MAX_HOPS	8
+
+/**
+ * struct tquic_hairpin_header - Header for hairpin-forwarded data
+ * @magic: Magic number for validation (0x54514850 = "TQHP")
+ * @hop_count: Number of hairpin hops (for loop detection)
+ * @src_port: Original source port (for reverse path)
+ * @dst_port: Original destination port
+ * @stream_id: Stream ID on peer connection (0 for new stream)
+ * @flags: Reserved flags
+ * @payload_len: Length of following payload
+ */
+struct tquic_hairpin_header {
+	__be32 magic;
+	u8 hop_count;
+	__be16 src_port;
+	__be16 dst_port;
+	__be64 stream_id;
+	u8 flags;
+	__be32 payload_len;
+} __packed;
+
+#define TQUIC_HAIRPIN_MAGIC	cpu_to_be32(0x54514850)
+#define TQUIC_HAIRPIN_FLAG_FIN	BIT(0)	/* Final data for stream */
+#define TQUIC_HAIRPIN_FLAG_RST	BIT(1)	/* Stream reset */
+
 /**
  * tquic_forward_hairpin - Forward data directly to peer client
  * @tunnel: Source tunnel
  * @peer: Target peer client
  *
  * Routes hairpin traffic directly to peer client's QUIC connection
- * without creating a TCP socket.
+ * without creating a TCP socket. This enables efficient router-to-router
+ * traffic when both endpoints are connected to the same VPS.
+ *
+ * Implementation:
+ * 1. Validate tunnel and peer state
+ * 2. Check hop count to prevent routing loops
+ * 3. Find or create stream on peer connection for reverse direction
+ * 4. Move skbs from source stream to peer stream (zero-copy when possible)
+ * 5. Wake peer connection to trigger transmission
  *
  * Returns: Bytes forwarded, or negative errno
  */
@@ -415,31 +584,156 @@ ssize_t tquic_forward_hairpin(struct tquic_tunnel *tunnel,
 			      struct tquic_client *peer)
 {
 	struct tquic_connection *peer_conn;
+	struct tquic_stream *src_stream;
+	struct tquic_stream *dst_stream;
+	struct sk_buff *skb, *skb_next;
+	struct sk_buff_head tx_queue;
+	ssize_t total_bytes = 0;
+	u8 hop_count = 0;
+	int err;
 
 	if (!tunnel || !peer)
 		return -EINVAL;
 
-	/*
-	 * Get peer's QUIC connection
-	 * Would access peer->conn
-	 */
-	peer_conn = NULL;  /* Stub: peer->conn */
-
-	if (!peer_conn)
+	/* Validate source stream exists */
+	src_stream = tunnel->quic_stream;
+	if (!src_stream)
 		return -ENOENT;
 
+	/* Get peer's QUIC connection */
+	peer_conn = peer->conn;
+	if (!peer_conn)
+		return -ENOTCONN;
+
+	/* Check connection state - must be established */
+	if (peer_conn->state != TQUIC_CONN_CONNECTED)
+		return -ENOTCONN;
+
 	/*
-	 * Create reverse stream on peer's connection and forward data
+	 * Loop detection via hop count.
 	 *
-	 * In full implementation:
-	 * 1. Create new stream on peer_conn
-	 * 2. Move skbs from tunnel's QUIC stream to new stream
-	 * 3. Signal peer that new data arrived
+	 * Extract hop count from first skb if it contains hairpin header.
+	 * This prevents infinite loops in complex hairpin topologies where
+	 * client A -> VPS -> client B -> VPS -> client A could occur.
 	 */
+	skb = skb_peek(&src_stream->recv_buf);
+	if (skb && skb->len >= sizeof(struct tquic_hairpin_header)) {
+		struct tquic_hairpin_header *hdr;
 
-	pr_debug("tquic: hairpin forward to peer (stub)\n");
+		hdr = (struct tquic_hairpin_header *)skb->data;
+		if (hdr->magic == TQUIC_HAIRPIN_MAGIC) {
+			hop_count = hdr->hop_count;
+			if (hop_count >= TQUIC_HAIRPIN_MAX_HOPS) {
+				pr_warn_ratelimited("tquic: hairpin loop detected, "
+						    "hop_count=%u\n", hop_count);
+				return -ELOOP;
+			}
+		}
+	}
 
-	return 0;  /* Stub */
+	/*
+	 * Find or create destination stream on peer connection.
+	 *
+	 * For hairpin, we create a server-initiated bidirectional stream
+	 * on the peer connection. The stream ID encodes this per RFC 9000.
+	 */
+	spin_lock_bh(&peer_conn->lock);
+
+	/* Try to find existing stream for this tunnel's destination */
+	dst_stream = NULL;
+
+	/*
+	 * Create new bidirectional stream for reverse direction.
+	 * Stream ID is server-initiated (odd) bidirectional.
+	 */
+	if (!dst_stream) {
+		dst_stream = tquic_stream_open(peer_conn, true);
+		if (IS_ERR(dst_stream)) {
+			spin_unlock_bh(&peer_conn->lock);
+			err = PTR_ERR(dst_stream);
+			pr_debug("tquic: hairpin stream creation failed: %d\n", err);
+			return err;
+		}
+	}
+
+	spin_unlock_bh(&peer_conn->lock);
+
+	/*
+	 * Move data from source stream to destination stream.
+	 *
+	 * Use a local queue to minimize lock hold time. We dequeue
+	 * from source under its lock, then enqueue to dest under its lock.
+	 */
+	__skb_queue_head_init(&tx_queue);
+
+	/* Dequeue all available data from source stream */
+	spin_lock_bh(&src_stream->recv_buf.lock);
+	while ((skb = __skb_dequeue(&src_stream->recv_buf)) != NULL) {
+		struct tquic_hairpin_header *hdr;
+		unsigned int payload_offset = 0;
+
+		/*
+		 * Process hairpin header if present, strip it for forwarding.
+		 * On first hop, add new header with incremented hop count.
+		 */
+		if (skb->len >= sizeof(struct tquic_hairpin_header)) {
+			hdr = (struct tquic_hairpin_header *)skb->data;
+			if (hdr->magic == TQUIC_HAIRPIN_MAGIC) {
+				/* Existing hairpin packet - increment hop count */
+				hdr->hop_count = hop_count + 1;
+				payload_offset = sizeof(*hdr);
+			}
+		}
+
+		/*
+		 * Clone skb for forwarding to preserve original if needed.
+		 * For true zero-copy, we could use skb_clone() but that
+		 * shares data which is safe since we're moving ownership.
+		 */
+		if (skb_cloned(skb)) {
+			struct sk_buff *new_skb;
+
+			new_skb = skb_copy(skb, GFP_ATOMIC);
+			if (!new_skb) {
+				/* Put original back on queue and abort */
+				__skb_queue_head(&src_stream->recv_buf, skb);
+				break;
+			}
+			consume_skb(skb);
+			skb = new_skb;
+		}
+
+		total_bytes += skb->len - payload_offset;
+		__skb_queue_tail(&tx_queue, skb);
+	}
+	spin_unlock_bh(&src_stream->recv_buf.lock);
+
+	if (total_bytes == 0) {
+		/* Nothing to forward */
+		return 0;
+	}
+
+	/* Enqueue to destination stream */
+	spin_lock_bh(&dst_stream->send_buf.lock);
+	skb_queue_walk_safe(&tx_queue, skb, skb_next) {
+		__skb_unlink(skb, &tx_queue);
+		__skb_queue_tail(&dst_stream->send_buf, skb);
+	}
+	spin_unlock_bh(&dst_stream->send_buf.lock);
+
+	/* Update stream send offset */
+	dst_stream->send_offset += total_bytes;
+
+	/*
+	 * Wake up peer connection to trigger transmission.
+	 * This schedules work to packetize and send the data.
+	 */
+	tquic_stream_wake(dst_stream);
+
+	pr_debug("tquic: hairpin forwarded %zd bytes, hop=%u\n",
+		 total_bytes, hop_count + 1);
+
+	return total_bytes;
 }
 EXPORT_SYMBOL_GPL(tquic_forward_hairpin);
 
@@ -543,39 +837,334 @@ EXPORT_SYMBOL_GPL(tquic_forward_setup_nat);
 
 /*
  * =============================================================================
- * MTU HANDLING
+ * MTU HANDLING AND PMTU CACHE
  * =============================================================================
  *
  * Per CONTEXT.md: Per-path MTU tracking, PMTUD signaling, no VPS-side fragmentation.
+ *
+ * PMTU discovery is critical for QUIC performance. When the VPS receives an
+ * ICMP Packet Too Big message, we must:
+ * 1. Cache the new MTU for the destination
+ * 2. Signal the router to reduce its sending MTU
+ * 3. Honor DF bit on IPv4 (never fragment at VPS)
  */
+
+/* PMTU cache constants */
+#define TQUIC_PMTU_CACHE_BITS		10
+#define TQUIC_PMTU_CACHE_SIZE		(1 << TQUIC_PMTU_CACHE_BITS)
+#define TQUIC_PMTU_MIN			1200	/* QUIC minimum MTU */
+#define TQUIC_PMTU_DEFAULT_IPV4		1500
+#define TQUIC_PMTU_DEFAULT_IPV6		1280
+#define TQUIC_PMTU_CACHE_TIMEOUT_MS	(10 * 60 * 1000)  /* 10 minutes */
+
+/**
+ * struct tquic_pmtu_entry - PMTU cache entry
+ * @dest_addr: Destination address (key)
+ * @pmtu: Cached path MTU
+ * @expires: Expiration time (jiffies)
+ * @last_update: Last update timestamp
+ * @df_required: DF bit must be set (IPv4)
+ * @node: Hash table linkage
+ * @rcu_head: RCU callback head for deferred freeing
+ */
+struct tquic_pmtu_entry {
+	struct sockaddr_storage dest_addr;
+	u32 pmtu;
+	unsigned long expires;
+	ktime_t last_update;
+	bool df_required;
+	struct hlist_node node;
+	struct rcu_head rcu_head;
+};
+
+/* PMTU cache hash table */
+static DEFINE_HASHTABLE(tquic_pmtu_cache, TQUIC_PMTU_CACHE_BITS);
+static DEFINE_SPINLOCK(tquic_pmtu_lock);
+static struct timer_list tquic_pmtu_gc_timer;
+
+/**
+ * tquic_pmtu_hash_addr - Hash destination address for PMTU lookup
+ * @addr: Address to hash
+ *
+ * Returns: Hash value for the address
+ */
+static u32 tquic_pmtu_hash_addr(const struct sockaddr_storage *addr)
+{
+	if (addr->ss_family == AF_INET) {
+		const struct sockaddr_in *sin = (const struct sockaddr_in *)addr;
+		return jhash(&sin->sin_addr, sizeof(sin->sin_addr), 0);
+	} else if (addr->ss_family == AF_INET6) {
+		const struct sockaddr_in6 *sin6 = (const struct sockaddr_in6 *)addr;
+		return jhash(&sin6->sin6_addr, sizeof(sin6->sin6_addr), 0);
+	}
+	return 0;
+}
+
+/**
+ * tquic_pmtu_addr_equal - Compare two addresses for PMTU cache
+ * @a: First address
+ * @b: Second address
+ *
+ * Returns: true if addresses match
+ */
+static bool tquic_pmtu_addr_equal(const struct sockaddr_storage *a,
+				   const struct sockaddr_storage *b)
+{
+	if (a->ss_family != b->ss_family)
+		return false;
+
+	if (a->ss_family == AF_INET) {
+		const struct sockaddr_in *sa = (const struct sockaddr_in *)a;
+		const struct sockaddr_in *sb = (const struct sockaddr_in *)b;
+		return sa->sin_addr.s_addr == sb->sin_addr.s_addr;
+	} else if (a->ss_family == AF_INET6) {
+		const struct sockaddr_in6 *sa6 = (const struct sockaddr_in6 *)a;
+		const struct sockaddr_in6 *sb6 = (const struct sockaddr_in6 *)b;
+		return ipv6_addr_equal(&sa6->sin6_addr, &sb6->sin6_addr);
+	}
+	return false;
+}
+
+/**
+ * tquic_pmtu_lookup - Look up cached PMTU for destination
+ * @dest: Destination address
+ *
+ * Returns: Cached PMTU or 0 if not found/expired
+ */
+static u32 tquic_pmtu_lookup(const struct sockaddr_storage *dest)
+{
+	struct tquic_pmtu_entry *entry;
+	u32 hash, pmtu = 0;
+
+	hash = tquic_pmtu_hash_addr(dest);
+
+	rcu_read_lock();
+	hash_for_each_possible_rcu(tquic_pmtu_cache, entry, node, hash) {
+		if (tquic_pmtu_addr_equal(&entry->dest_addr, dest)) {
+			if (time_before(jiffies, entry->expires))
+				pmtu = entry->pmtu;
+			break;
+		}
+	}
+	rcu_read_unlock();
+
+	return pmtu;
+}
+
+/**
+ * tquic_pmtu_update - Update PMTU cache for destination
+ * @dest: Destination address
+ * @pmtu: New PMTU value
+ * @df_required: Whether DF bit must be set
+ *
+ * Returns: 0 on success, negative errno on failure
+ */
+static int tquic_pmtu_update(const struct sockaddr_storage *dest,
+			      u32 pmtu, bool df_required)
+{
+	struct tquic_pmtu_entry *entry, *old_entry = NULL;
+	u32 hash;
+
+	if (pmtu < TQUIC_PMTU_MIN)
+		pmtu = TQUIC_PMTU_MIN;
+
+	hash = tquic_pmtu_hash_addr(dest);
+
+	spin_lock_bh(&tquic_pmtu_lock);
+
+	/* Check for existing entry */
+	hash_for_each_possible(tquic_pmtu_cache, entry, node, hash) {
+		if (tquic_pmtu_addr_equal(&entry->dest_addr, dest)) {
+			old_entry = entry;
+			break;
+		}
+	}
+
+	if (old_entry) {
+		/* Update existing entry */
+		old_entry->pmtu = pmtu;
+		old_entry->expires = jiffies +
+			msecs_to_jiffies(TQUIC_PMTU_CACHE_TIMEOUT_MS);
+		old_entry->last_update = ktime_get();
+		old_entry->df_required = df_required;
+		spin_unlock_bh(&tquic_pmtu_lock);
+		return 0;
+	}
+
+	/* Create new entry */
+	entry = kzalloc(sizeof(*entry), GFP_ATOMIC);
+	if (!entry) {
+		spin_unlock_bh(&tquic_pmtu_lock);
+		return -ENOMEM;
+	}
+
+	memcpy(&entry->dest_addr, dest, sizeof(struct sockaddr_storage));
+	entry->pmtu = pmtu;
+	entry->expires = jiffies + msecs_to_jiffies(TQUIC_PMTU_CACHE_TIMEOUT_MS);
+	entry->last_update = ktime_get();
+	entry->df_required = df_required;
+
+	hash_add_rcu(tquic_pmtu_cache, &entry->node, hash);
+
+	spin_unlock_bh(&tquic_pmtu_lock);
+
+	return 0;
+}
+
+/**
+ * tquic_pmtu_gc_callback - Garbage collect expired PMTU entries
+ * @t: Timer that triggered this callback
+ */
+static void tquic_pmtu_gc_callback(struct timer_list *t)
+{
+	struct tquic_pmtu_entry *entry;
+	struct hlist_node *tmp;
+	int bkt;
+
+	spin_lock_bh(&tquic_pmtu_lock);
+	hash_for_each_safe(tquic_pmtu_cache, bkt, tmp, entry, node) {
+		if (time_after(jiffies, entry->expires)) {
+			hash_del_rcu(&entry->node);
+			kfree_rcu(entry, rcu_head);
+		}
+	}
+	spin_unlock_bh(&tquic_pmtu_lock);
+
+	/* Reschedule GC for next interval */
+	mod_timer(&tquic_pmtu_gc_timer,
+		  jiffies + msecs_to_jiffies(TQUIC_PMTU_CACHE_TIMEOUT_MS / 2));
+}
+
+/**
+ * struct tquic_mtu_signal_frame - MTU signal frame for QUIC stream
+ * @type: Frame type (0xFF01 = MTU signal, private use)
+ * @new_mtu: Signaled MTU value
+ * @reason: Reason code (0=ICMP, 1=probe, 2=admin)
+ */
+struct tquic_mtu_signal_frame {
+	__be16 type;
+	__be32 new_mtu;
+	u8 reason;
+} __packed;
+
+#define TQUIC_MTU_FRAME_TYPE		cpu_to_be16(0xFF01)
+#define TQUIC_MTU_REASON_ICMP		0
+#define TQUIC_MTU_REASON_PROBE		1
+#define TQUIC_MTU_REASON_ADMIN		2
 
 /**
  * tquic_forward_get_mtu - Get effective MTU for tunnel
  * @tunnel: Tunnel context
  *
- * Returns the minimum of:
- *   - QUIC path MTU
- *   - TCP path MTU
- *   - Interface MTU
+ * Calculates the effective MTU as the minimum of:
+ *   - Cached PMTU for destination (if available)
+ *   - QUIC connection path MTU
+ *   - TCP socket destination MTU
+ *   - Interface MTU minus encapsulation overhead
  *
  * Returns: MTU in bytes, or 1200 (QUIC minimum) on error
  */
 u32 tquic_forward_get_mtu(struct tquic_tunnel *tunnel)
 {
-	u32 mtu = 1200;  /* QUIC minimum */
+	struct tquic_connection *conn;
+	struct tquic_path *path;
+	struct dst_entry *dst;
+	u32 mtu = TQUIC_PMTU_MIN;
+	u32 cached_pmtu;
+	u32 quic_mtu;
+	u32 tcp_mtu;
+	u32 overhead;
 
 	if (!tunnel)
 		return mtu;
 
-	/*
-	 * Would access:
-	 * - tunnel->quic_stream->conn->active_path->mtu
-	 * - dst_mtu(sk_dst_get(tunnel->tcp_sock->sk))
-	 */
+	/* Check PMTU cache first */
+	cached_pmtu = tquic_pmtu_lookup(&tunnel->dest_addr);
+	if (cached_pmtu > 0)
+		mtu = cached_pmtu;
+
+	/* Get QUIC path MTU */
+	if (tunnel->quic_stream && tunnel->quic_stream->conn) {
+		conn = tunnel->quic_stream->conn;
+		path = conn->active_path;
+		if (path && path->mtu > 0) {
+			quic_mtu = path->mtu;
+			/*
+			 * Subtract QUIC overhead: UDP header (8) + QUIC short header (~20)
+			 * + AEAD auth tag (16) = ~44 bytes
+			 */
+			overhead = 44;
+			if (quic_mtu > overhead)
+				quic_mtu -= overhead;
+			if (quic_mtu < mtu)
+				mtu = quic_mtu;
+		}
+	}
+
+	/* Get TCP socket destination MTU */
+	if (tunnel->tcp_sock && tunnel->tcp_sock->sk) {
+		dst = __sk_dst_get(tunnel->tcp_sock->sk);
+		if (dst) {
+			tcp_mtu = dst_mtu(dst);
+			/*
+			 * Subtract TCP/IP overhead: IP header (20/40) + TCP header (20)
+			 */
+			overhead = (tunnel->dest_addr.ss_family == AF_INET) ? 40 : 60;
+			if (tcp_mtu > overhead)
+				tcp_mtu -= overhead;
+			if (tcp_mtu < mtu)
+				mtu = tcp_mtu;
+		}
+	}
+
+	/* Enforce minimum */
+	if (mtu < TQUIC_PMTU_MIN)
+		mtu = TQUIC_PMTU_MIN;
 
 	return mtu;
 }
 EXPORT_SYMBOL_GPL(tquic_forward_get_mtu);
+
+/**
+ * tquic_forward_send_icmp_toobig - Generate ICMP Packet Too Big
+ * @tunnel: Tunnel context
+ * @skb: Original packet that was too big
+ * @mtu: MTU to report
+ *
+ * Generates an ICMP Destination Unreachable/Fragmentation Needed (IPv4)
+ * or ICMPv6 Packet Too Big (IPv6) message back towards the source.
+ *
+ * Returns: 0 on success, negative errno on failure
+ */
+static int tquic_forward_send_icmp_toobig(struct tquic_tunnel *tunnel,
+					   struct sk_buff *skb, u32 mtu)
+{
+	if (!tunnel || !skb)
+		return -EINVAL;
+
+	if (tunnel->dest_addr.ss_family == AF_INET) {
+		/*
+		 * IPv4: Generate ICMP Type 3, Code 4 (Fragmentation Needed)
+		 * The MTU is encoded in the second 16 bits of the ICMP header.
+		 */
+		icmp_send(skb, ICMP_DEST_UNREACH, ICMP_FRAG_NEEDED,
+			  htonl(mtu));
+		pr_debug("tquic: sent ICMPv4 frag-needed, mtu=%u\n", mtu);
+
+#if IS_ENABLED(CONFIG_IPV6)
+	} else if (tunnel->dest_addr.ss_family == AF_INET6) {
+		/*
+		 * IPv6: Generate ICMPv6 Type 2 (Packet Too Big)
+		 */
+		icmpv6_send(skb, ICMPV6_PKT_TOOBIG, 0, mtu);
+		pr_debug("tquic: sent ICMPv6 packet-too-big, mtu=%u\n", mtu);
+#endif
+	} else {
+		return -EAFNOSUPPORT;
+	}
+
+	return 0;
+}
 
 /**
  * tquic_forward_signal_mtu - Signal MTU change to router
@@ -584,25 +1173,174 @@ EXPORT_SYMBOL_GPL(tquic_forward_get_mtu);
  *
  * Per CONTEXT.md: PMTUD signaling for oversized packets.
  *
- * Sends MTU update via the QUIC stream so router can adjust.
+ * When we receive an ICMP Packet Too Big, we must:
+ * 1. Update the PMTU cache
+ * 2. Send an MTU signal frame to the router over the QUIC stream
+ * 3. Generate ICMP back to source if appropriate
+ *
+ * The router can then reduce its sending MTU for subsequent packets.
  *
  * Returns: 0 on success, negative errno on failure
  */
 int tquic_forward_signal_mtu(struct tquic_tunnel *tunnel, u32 new_mtu)
 {
-	if (!tunnel || new_mtu < 1200)
+	struct tquic_mtu_signal_frame frame;
+	struct tquic_stream *stream;
+	struct sk_buff *skb;
+	int err;
+
+	if (!tunnel)
 		return -EINVAL;
 
-	/*
-	 * Send MTU signal frame on QUIC stream
-	 * This would be a custom frame type or control message
-	 */
+	/* Enforce minimum MTU */
+	if (new_mtu < TQUIC_PMTU_MIN)
+		new_mtu = TQUIC_PMTU_MIN;
 
-	pr_debug("tquic: signaling MTU %u to router (stub)\n", new_mtu);
+	/* Update PMTU cache */
+	err = tquic_pmtu_update(&tunnel->dest_addr, new_mtu, true);
+	if (err < 0) {
+		pr_warn("tquic: failed to update PMTU cache: %d\n", err);
+		/* Continue anyway - signaling is more important */
+	}
+
+	/* Get QUIC stream for signaling */
+	stream = tunnel->quic_stream;
+	if (!stream || !stream->conn)
+		return -ENOTCONN;
+
+	/* Check connection state */
+	if (stream->conn->state != TQUIC_CONN_CONNECTED)
+		return -ENOTCONN;
+
+	/*
+	 * Build MTU signal frame.
+	 *
+	 * This uses a private frame type (0xFF01) to signal MTU changes
+	 * to the router. The router should process this and reduce its
+	 * sending MTU accordingly.
+	 */
+	frame.type = TQUIC_MTU_FRAME_TYPE;
+	frame.new_mtu = cpu_to_be32(new_mtu);
+	frame.reason = TQUIC_MTU_REASON_ICMP;
+
+	/* Allocate skb for the frame */
+	skb = alloc_skb(sizeof(frame) + 64, GFP_ATOMIC);
+	if (!skb)
+		return -ENOMEM;
+
+	skb_reserve(skb, 32);  /* Room for headers */
+	skb_put_data(skb, &frame, sizeof(frame));
+
+	/*
+	 * Enqueue to stream's send buffer.
+	 *
+	 * The frame will be sent with the next outgoing packet.
+	 * MTU signals are high priority to prevent further oversized sends.
+	 */
+	spin_lock_bh(&stream->send_buf.lock);
+	__skb_queue_head(&stream->send_buf, skb);  /* High priority - head of queue */
+	spin_unlock_bh(&stream->send_buf.lock);
+
+	/* Update send offset */
+	stream->send_offset += sizeof(frame);
+
+	/* Wake stream to trigger transmission */
+	tquic_stream_wake(stream);
+
+	pr_debug("tquic: signaled MTU %u to router via QUIC stream %llu\n",
+		 new_mtu, stream->id);
 
 	return 0;
 }
 EXPORT_SYMBOL_GPL(tquic_forward_signal_mtu);
+
+/**
+ * tquic_forward_handle_icmp_toobig - Handle incoming ICMP Packet Too Big
+ * @tunnel: Tunnel that received the ICMP
+ * @skb: ICMP packet
+ * @mtu: Reported MTU from ICMP header
+ *
+ * Called when we receive an ICMP message indicating our packets are too big.
+ * This can happen when the path to the destination has a lower MTU than
+ * we expected.
+ *
+ * Returns: 0 on success, negative errno on failure
+ */
+int tquic_forward_handle_icmp_toobig(struct tquic_tunnel *tunnel,
+				      struct sk_buff *skb, u32 mtu)
+{
+	int err;
+
+	if (!tunnel)
+		return -EINVAL;
+
+	pr_debug("tquic: received ICMP too-big, mtu=%u\n", mtu);
+
+	/* Signal the new MTU to the router */
+	err = tquic_forward_signal_mtu(tunnel, mtu);
+	if (err < 0)
+		return err;
+
+	/*
+	 * If we have a pending large packet, we could re-segment it here.
+	 * However, per CONTEXT.md we do "no VPS-side fragmentation" - the
+	 * router is responsible for sending properly-sized packets.
+	 */
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(tquic_forward_handle_icmp_toobig);
+
+/**
+ * tquic_forward_check_df - Check if DF bit is set and packet fits MTU
+ * @tunnel: Tunnel context
+ * @skb: Packet to check
+ *
+ * For IPv4 packets with DF (Don't Fragment) bit set, verifies the packet
+ * fits within the path MTU. If not, generates ICMP and returns error.
+ *
+ * Returns: 0 if OK to send, -EMSGSIZE if packet too big with DF set
+ */
+int tquic_forward_check_df(struct tquic_tunnel *tunnel, struct sk_buff *skb)
+{
+	struct iphdr *iph;
+	u32 mtu;
+
+	if (!tunnel || !skb)
+		return -EINVAL;
+
+	/* Only check IPv4 packets */
+	if (tunnel->dest_addr.ss_family != AF_INET)
+		return 0;
+
+	/* Check if this is an IP packet with DF bit */
+	if (skb->len < sizeof(struct iphdr))
+		return 0;
+
+	iph = ip_hdr(skb);
+	if (!iph)
+		return 0;
+
+	/* If DF is not set, fragmentation is allowed (but we won't do it) */
+	if (!(ntohs(iph->frag_off) & IP_DF))
+		return 0;
+
+	/* DF is set - check against path MTU */
+	mtu = tquic_forward_get_mtu(tunnel);
+	if (skb->len > mtu) {
+		/*
+		 * Packet too big and DF is set - must drop and send ICMP.
+		 * This honors the DF bit per RFC 791.
+		 */
+		tquic_forward_send_icmp_toobig(tunnel, skb, mtu);
+		pr_debug("tquic: dropping DF packet, len=%u > mtu=%u\n",
+			 skb->len, mtu);
+		return -EMSGSIZE;
+	}
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(tquic_forward_check_df);
 
 /*
  * =============================================================================
@@ -710,30 +1448,62 @@ EXPORT_SYMBOL_GPL(tquic_forward_check_gro_gso);
 
 /**
  * tquic_forward_init - Initialize forwarding subsystem
+ *
+ * Initializes hairpin hash table, PMTU cache, and periodic GC timer.
  */
 int __init tquic_forward_init(void)
 {
+	/* Initialize hairpin hash table */
 	hash_init(tquic_hairpin_hash);
-	pr_info("tquic: forwarding subsystem initialized\n");
+
+	/* Initialize PMTU cache hash table */
+	hash_init(tquic_pmtu_cache);
+
+	/*
+	 * Set up PMTU cache garbage collection timer.
+	 * This runs every 5 minutes to clean up expired entries.
+	 */
+	timer_setup(&tquic_pmtu_gc_timer, tquic_pmtu_gc_callback, 0);
+	mod_timer(&tquic_pmtu_gc_timer,
+		  jiffies + msecs_to_jiffies(TQUIC_PMTU_CACHE_TIMEOUT_MS / 2));
+
+	pr_info("tquic: forwarding subsystem initialized (hairpin + PMTU cache)\n");
 	return 0;
 }
 
 /**
  * tquic_forward_exit - Cleanup forwarding subsystem
+ *
+ * Cleans up hairpin hash table, PMTU cache, and stops GC timer.
  */
 void __exit tquic_forward_exit(void)
 {
-	struct tquic_hairpin_entry *entry;
+	struct tquic_hairpin_entry *hairpin_entry;
+	struct tquic_pmtu_entry *pmtu_entry;
 	struct hlist_node *tmp;
 	int bkt;
 
+	/* Stop PMTU GC timer */
+	del_timer_sync(&tquic_pmtu_gc_timer);
+
 	/* Clean up hairpin hash table */
 	spin_lock_bh(&tquic_hairpin_lock);
-	hash_for_each_safe(tquic_hairpin_hash, bkt, tmp, entry, node) {
-		hash_del(&entry->node);
-		kfree(entry);
+	hash_for_each_safe(tquic_hairpin_hash, bkt, tmp, hairpin_entry, node) {
+		hash_del(&hairpin_entry->node);
+		kfree(hairpin_entry);
 	}
 	spin_unlock_bh(&tquic_hairpin_lock);
+
+	/* Clean up PMTU cache */
+	spin_lock_bh(&tquic_pmtu_lock);
+	hash_for_each_safe(tquic_pmtu_cache, bkt, tmp, pmtu_entry, node) {
+		hash_del_rcu(&pmtu_entry->node);
+		kfree_rcu(pmtu_entry, rcu_head);
+	}
+	spin_unlock_bh(&tquic_pmtu_lock);
+
+	/* Wait for RCU callbacks to complete */
+	synchronize_rcu();
 
 	pr_info("tquic: forwarding subsystem cleaned up\n");
 }

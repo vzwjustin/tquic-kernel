@@ -25,8 +25,18 @@
 
 /* Protocol version numbers */
 #define TQUIC_VERSION_1		0x00000001
-#define TQUIC_VERSION_2		0x6b3343cf  /* QUIC v2 */
+#define TQUIC_VERSION_2		0x6b3343cf  /* QUIC v2 (RFC 9369) */
 #define TQUIC_VERSION_CURRENT	TQUIC_VERSION_1
+
+/* QUIC version helper macros */
+#define TQUIC_IS_VERSION_1(v)	((v) == TQUIC_VERSION_1)
+#define TQUIC_IS_VERSION_2(v)	((v) == TQUIC_VERSION_2)
+#define TQUIC_IS_SUPPORTED_VERSION(v) \
+	(TQUIC_IS_VERSION_1(v) || TQUIC_IS_VERSION_2(v))
+
+/* Version preference sysctl accessors (tquic_sysctl.c) */
+u32 tquic_sysctl_get_preferred_version(void);
+bool tquic_sysctl_prefer_v2(void);
 
 /* Connection ID constraints */
 #define TQUIC_MAX_CID_LEN	20
@@ -262,6 +272,14 @@ struct tquic_path {
 	void *mp_ack_state;		/* Per-path ACK tracking */
 	void *abandon_state;		/* Path abandonment state */
 
+	/*
+	 * PMTUD (Path MTU Discovery) state - RFC 8899 DPLPMTUD
+	 *
+	 * Manages per-path MTU probing using PING+PADDING frames.
+	 * Allocated by tquic_pmtud_init_path(), freed by tquic_pmtud_release_path().
+	 */
+	void *pmtud_state;		/* struct tquic_pmtud_state_info * */
+
 	struct rcu_head rcu_head;	/* RCU callback for kfree_rcu */
 };
 
@@ -487,12 +505,97 @@ struct tquic_connection {
 	 */
 	void *preferred_addr;	/* struct tquic_pref_addr_migration/config * */
 
+	/*
+	 * HTTP/3 Priority state (RFC 9218)
+	 *
+	 * Manages RFC 9218 Extensible Priorities for HTTP/3 streams.
+	 * Contains urgency buckets (0-7) for priority-based scheduling
+	 * and stream-to-priority mapping via RB-tree.
+	 *
+	 * This is allocated by http3_priority_state_init() when HTTP/3
+	 * layer is established on this QUIC connection.
+	 */
+	void *priority_state;	/* struct http3_priority_state * */
+
+	/*
+	 * ACK Frequency state (RFC 9002 Appendix A.7, draft-ietf-quic-ack-frequency)
+	 *
+	 * Manages ACK frequency negotiation and dynamic adjustment including:
+	 *   - min_ack_delay transport parameter (0xff04de1a)
+	 *   - ACK_FREQUENCY frame (0xaf) generation and handling
+	 *   - IMMEDIATE_ACK frame (0x1f) generation and handling
+	 *   - Dynamic ACK frequency adjustment based on:
+	 *     - Congestion control state (recovery, exit recovery)
+	 *     - RTT characteristics (low/high RTT paths)
+	 *     - Bandwidth estimates (high bandwidth paths)
+	 *     - Packet reordering detection
+	 *     - Application hints (latency-sensitive, throughput-focused)
+	 *     - ECN congestion signals
+	 *
+	 * Allocated by tquic_ack_freq_conn_init() during connection setup.
+	 * Freed by tquic_ack_freq_conn_cleanup() during connection teardown.
+	 */
+	void *ack_freq_state;	/* struct tquic_ack_frequency_state * */
+
+	/*
+	 * Zero-copy I/O state (MSG_ZEROCOPY support)
+	 *
+	 * Tracks pending zero-copy sends, manages page pinning,
+	 * and handles completion notifications via SO_EE_CODE_ZEROCOPY_COPIED.
+	 * Allocated by tquic_zc_state_alloc(), freed by tquic_zc_state_free().
+	 */
+	void *zc_state;		/* struct tquic_zc_state * */
+
+	/*
+	 * io_uring integration context
+	 *
+	 * Manages buffer rings for recv, completion queue entries,
+	 * and async I/O operations for high-performance I/O paths.
+	 * Allocated by tquic_uring_ctx_alloc(), freed by tquic_uring_ctx_free().
+	 */
+	void *uring_ctx;	/* struct tquic_uring_ctx * */
+
+	/*
+	 * Connection-level flags (atomic bit operations)
+	 *
+	 * Uses set_bit/clear_bit/test_bit for lock-free flag manipulation.
+	 * See TQUIC_CONN_FLAG_* definitions below.
+	 */
+	unsigned long flags;
+
+	/*
+	 * Transmit tasklet for deferred/batched transmission
+	 *
+	 * Used for immediate transmission of time-sensitive frames
+	 * like PATH_RESPONSE without holding connection locks.
+	 * Scheduled via tasklet_hi_schedule() for high-priority processing.
+	 */
+	struct tasklet_struct tx_tasklet;
+	bool tasklet_scheduled;
+
 	spinlock_t lock;
 	refcount_t refcnt;
 	struct sock *sk;
 	struct rhash_head node;
 	struct list_head pm_node;	/* Path manager connection list linkage */
 };
+
+/*
+ * Connection flag bits for tquic_connection.flags
+ *
+ * Use set_bit(), clear_bit(), test_bit() for atomic access.
+ * These flags enable lock-free signaling between different contexts
+ * (e.g., softirq, process context, tasklet).
+ */
+#define TQUIC_CONN_FLAG_PATH_RESPONSE_PENDING	0  /* PATH_RESPONSE needs sending */
+#define TQUIC_CONN_FLAG_ACK_PENDING		1  /* ACK frame needs sending */
+#define TQUIC_CONN_FLAG_HANDSHAKE_DONE		2  /* Handshake completed */
+#define TQUIC_CONN_FLAG_DRAINING		3  /* Connection draining */
+#define TQUIC_CONN_FLAG_IMMEDIATE_ACK		4  /* Send ACK immediately */
+#define TQUIC_CONN_FLAG_KEY_UPDATE_PENDING	5  /* Key update in progress */
+
+/* Backwards compatibility alias */
+#define TQUIC_PATH_RESPONSE_PENDING	TQUIC_CONN_FLAG_PATH_RESPONSE_PENDING
 
 /* Forward declaration for handshake state */
 struct tquic_handshake_state;
@@ -920,9 +1023,11 @@ bool tquic_verify_stateless_reset(struct tquic_connection *conn,
 				  const u8 *data, size_t len);
 int tquic_send_stateless_reset(struct tquic_connection *conn);
 
-/* Version negotiation */
+/* Version negotiation (RFC 9000, RFC 9368, RFC 9369) */
 bool tquic_version_is_supported(u32 version);
 u32 tquic_version_select(const u32 *offered, int num_offered);
+int tquic_get_preferred_versions(u32 *versions);
+u32 tquic_version_select_for_initial(void);
 int tquic_send_version_negotiation(struct tquic_connection *conn,
 				   const struct tquic_cid *dcid,
 				   const struct tquic_cid *scid);
@@ -1193,9 +1298,28 @@ int tquic_gro_flush(struct tquic_gro_state *gro,
 
 /* Encryption/decryption (crypto/tls.c) */
 struct tquic_crypto_state;
+
+/*
+ * Version-aware crypto initialization (RFC 9369 QUIC v2 support)
+ *
+ * tquic_crypto_init_versioned() initializes crypto state using the appropriate
+ * HKDF labels and initial salt based on the QUIC version:
+ *   - TQUIC_VERSION_1 (0x00000001): RFC 9001 - "quic key/iv/hp"
+ *   - TQUIC_VERSION_2 (0x6b3343cf): RFC 9369 - "quicv2 key/iv/hp"
+ *
+ * tquic_crypto_init() is the legacy wrapper that defaults to QUIC v1.
+ */
+struct tquic_crypto_state *tquic_crypto_init_versioned(const struct tquic_cid *dcid,
+						       bool is_server, u32 version);
 struct tquic_crypto_state *tquic_crypto_init(const struct tquic_cid *dcid,
 					     bool is_server);
 void tquic_crypto_cleanup(struct tquic_crypto_state *crypto);
+
+/* Version management for crypto state */
+u32 tquic_crypto_get_version(struct tquic_crypto_state *crypto);
+void tquic_crypto_set_version(struct tquic_crypto_state *crypto, u32 version);
+
+/* Packet encryption/decryption */
 int tquic_encrypt_packet(struct tquic_crypto_state *crypto,
 			 u8 *header, size_t header_len,
 			 u8 *payload, size_t payload_len,

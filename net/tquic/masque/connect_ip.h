@@ -341,6 +341,226 @@ int tquic_connect_ip_set_protocol_filter(
 
 /*
  * =============================================================================
+ * KERNEL ROUTING TABLE INTEGRATION
+ * =============================================================================
+ *
+ * CONNECT-IP tunnels can be integrated with the kernel routing table to
+ * enable transparent IP forwarding. This section provides the API for
+ * creating virtual network interfaces and installing routes.
+ */
+
+/* Virtual interface name prefix */
+#define TQUIC_CONNECT_IP_IFNAME_PREFIX	"tquic"
+
+/* Maximum virtual interfaces per tunnel */
+#define TQUIC_CONNECT_IP_MAX_IFACES	4
+
+/**
+ * struct tquic_connect_ip_route_entry - Route table entry
+ * @dst_addr: Destination address
+ * @dst_prefix_len: Destination prefix length
+ * @gateway: Gateway address (optional)
+ * @priority: Route priority/metric
+ * @table_id: Routing table ID (RT_TABLE_MAIN if 0)
+ * @list: List linkage
+ */
+struct tquic_connect_ip_route_entry {
+	union {
+		__be32 v4;
+		struct in6_addr v6;
+	} dst_addr;
+	u8 dst_prefix_len;
+	union {
+		__be32 v4;
+		struct in6_addr v6;
+	} gateway;
+	u32 priority;
+	u32 table_id;
+	u8 ip_version;
+	struct list_head list;
+};
+
+/**
+ * struct tquic_connect_ip_iface - Virtual network interface
+ * @net_device: Network device
+ * @tunnel: Associated tunnel
+ * @routes: List of installed routes
+ * @num_routes: Number of installed routes
+ * @stats: Interface statistics
+ * @list: List linkage
+ */
+struct tquic_connect_ip_iface {
+	struct net_device *net_device;
+	struct tquic_connect_ip_tunnel *tunnel;
+	struct list_head routes;
+	u32 num_routes;
+	struct net_device_stats stats;
+	struct list_head list;
+};
+
+/**
+ * tquic_connect_ip_create_iface - Create virtual network interface
+ * @tunnel: CONNECT-IP tunnel
+ * @name: Interface name (or NULL for auto-generated)
+ * @iface: Output for created interface
+ *
+ * Creates a virtual network interface bound to the tunnel. Packets
+ * transmitted on the interface are forwarded through the tunnel.
+ *
+ * Returns: 0 on success, negative errno on failure.
+ */
+int tquic_connect_ip_create_iface(struct tquic_connect_ip_tunnel *tunnel,
+				  const char *name,
+				  struct tquic_connect_ip_iface **iface);
+
+/**
+ * tquic_connect_ip_destroy_iface - Destroy virtual network interface
+ * @iface: Interface to destroy
+ *
+ * Removes the interface and all associated routes.
+ */
+void tquic_connect_ip_destroy_iface(struct tquic_connect_ip_iface *iface);
+
+/**
+ * tquic_connect_ip_add_route - Add route to kernel routing table
+ * @iface: Virtual interface
+ * @entry: Route entry to add
+ *
+ * Installs a route in the kernel routing table pointing to the
+ * virtual interface. The route will forward matching packets
+ * through the CONNECT-IP tunnel.
+ *
+ * Returns: 0 on success, negative errno on failure.
+ */
+int tquic_connect_ip_add_route(struct tquic_connect_ip_iface *iface,
+			       const struct tquic_connect_ip_route_entry *entry);
+
+/**
+ * tquic_connect_ip_del_route - Remove route from kernel routing table
+ * @iface: Virtual interface
+ * @entry: Route entry to remove
+ *
+ * Returns: 0 on success, negative errno on failure.
+ */
+int tquic_connect_ip_del_route(struct tquic_connect_ip_iface *iface,
+			       const struct tquic_connect_ip_route_entry *entry);
+
+/**
+ * tquic_connect_ip_flush_routes - Remove all routes for interface
+ * @iface: Virtual interface
+ *
+ * Returns: 0 on success, negative errno on failure.
+ */
+int tquic_connect_ip_flush_routes(struct tquic_connect_ip_iface *iface);
+
+/**
+ * tquic_connect_ip_set_iface_addr - Set interface IP address
+ * @iface: Virtual interface
+ * @addr: IP address
+ * @prefix_len: Prefix length
+ *
+ * Configures the IP address on the virtual interface.
+ *
+ * Returns: 0 on success, negative errno on failure.
+ */
+int tquic_connect_ip_set_iface_addr(struct tquic_connect_ip_iface *iface,
+				    const struct tquic_ip_address *addr);
+
+/**
+ * tquic_connect_ip_set_iface_mtu - Set interface MTU
+ * @iface: Virtual interface
+ * @mtu: MTU value
+ *
+ * Returns: 0 on success, negative errno on failure.
+ */
+int tquic_connect_ip_set_iface_mtu(struct tquic_connect_ip_iface *iface,
+				   u32 mtu);
+
+/*
+ * =============================================================================
+ * IP FORWARDING CONTROL
+ * =============================================================================
+ */
+
+/**
+ * tquic_connect_ip_enable_forwarding - Enable IP forwarding on tunnel
+ * @tunnel: CONNECT-IP tunnel
+ * @enable: true to enable, false to disable
+ *
+ * When enabled, received IP packets are injected into the kernel
+ * network stack for forwarding. When disabled, packets are only
+ * passed to registered handlers.
+ *
+ * Returns: 0 on success, negative errno on failure.
+ */
+int tquic_connect_ip_enable_forwarding(struct tquic_connect_ip_tunnel *tunnel,
+				       bool enable);
+
+/**
+ * tquic_connect_ip_inject_packet - Inject received packet into kernel
+ * @tunnel: CONNECT-IP tunnel
+ * @skb: Socket buffer containing IP packet
+ *
+ * Injects the received IP packet into the kernel network stack
+ * as if it was received on the virtual interface.
+ *
+ * Returns: 0 on success, negative errno on failure.
+ */
+int tquic_connect_ip_inject_packet(struct tquic_connect_ip_tunnel *tunnel,
+				   struct sk_buff *skb);
+
+/*
+ * =============================================================================
+ * TUNNEL STATISTICS
+ * =============================================================================
+ */
+
+/**
+ * struct tquic_connect_ip_stats - CONNECT-IP tunnel statistics
+ * @tx_packets: Packets transmitted
+ * @rx_packets: Packets received
+ * @tx_bytes: Bytes transmitted
+ * @rx_bytes: Bytes received
+ * @tx_errors: Transmission errors
+ * @rx_errors: Reception errors
+ * @tx_dropped: Packets dropped on transmit
+ * @rx_dropped: Packets dropped on receive
+ * @addr_assign_sent: ADDRESS_ASSIGN capsules sent
+ * @addr_assign_recv: ADDRESS_ASSIGN capsules received
+ * @addr_request_sent: ADDRESS_REQUEST capsules sent
+ * @addr_request_recv: ADDRESS_REQUEST capsules received
+ * @route_adv_sent: ROUTE_ADVERTISEMENT capsules sent
+ * @route_adv_recv: ROUTE_ADVERTISEMENT capsules received
+ */
+struct tquic_connect_ip_stats {
+	u64 tx_packets;
+	u64 rx_packets;
+	u64 tx_bytes;
+	u64 rx_bytes;
+	u64 tx_errors;
+	u64 rx_errors;
+	u64 tx_dropped;
+	u64 rx_dropped;
+	u64 addr_assign_sent;
+	u64 addr_assign_recv;
+	u64 addr_request_sent;
+	u64 addr_request_recv;
+	u64 route_adv_sent;
+	u64 route_adv_recv;
+};
+
+/**
+ * tquic_connect_ip_get_stats - Get tunnel statistics
+ * @tunnel: CONNECT-IP tunnel
+ * @stats: Output for statistics
+ *
+ * Returns: 0 on success, negative errno on failure.
+ */
+int tquic_connect_ip_get_stats(struct tquic_connect_ip_tunnel *tunnel,
+			       struct tquic_connect_ip_stats *stats);
+
+/*
+ * =============================================================================
  * MODULE INITIALIZATION
  * =============================================================================
  */

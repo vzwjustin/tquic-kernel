@@ -76,6 +76,38 @@ config TQUIC_PATH_MANAGER
 
 	  If unsure, say Y.
 
+config TQUIC_PM_NETLINK
+	bool "TQUIC Path Manager Netlink Interface"
+	depends on TQUIC_PATH_MANAGER
+	default y
+	help
+	  Enable netlink interface for TQUIC Path Manager. This allows
+	  userspace tools to configure and monitor path status via
+	  netlink sockets.
+
+	  The netlink interface provides:
+	    - Path creation and removal
+	    - Path priority and weight configuration
+	    - Path status notifications
+	    - Integration with network management daemons
+
+	  If unsure, say Y.
+
+config TQUIC_PM_USERSPACE
+	bool "TQUIC Userspace Path Manager"
+	depends on TQUIC_PATH_MANAGER
+	depends on TQUIC_PM_NETLINK
+	default n
+	help
+	  Enable userspace path manager mode where path decisions
+	  are delegated to a userspace daemon via netlink. This is
+	  useful for advanced path management scenarios.
+
+	  When enabled, the kernel path manager becomes passive and
+	  userspace controls all path operations.
+
+	  If unsure, say N.
+
 config TQUIC_SCHEDULER
 	tristate "TQUIC Packet Scheduler"
 	depends on TQUIC_WAN_BONDING
@@ -586,6 +618,31 @@ config TQUIC_HTTP3_QPACK
 	  QPACK is required for efficient HTTP/3 header transmission.
 	  Disabling this limits HTTP/3 to literal header encoding only.
 
+	  If unsure, say Y.
+
+config TQUIC_WEBTRANSPORT
+	bool "TQUIC WebTransport support (draft-ietf-webtrans-http3)"
+	depends on TQUIC_HTTP3
+	default y
+	help
+	  Enable WebTransport support over HTTP/3. WebTransport provides
+	  bidirectional client-server communication using QUIC streams
+	  and datagrams, initiated via an HTTP/3 CONNECT request.
+
+	  Features:
+	    - WebTransport session establishment via HTTP/3 CONNECT
+	    - Bidirectional streams for reliable data transfer
+	    - Unidirectional streams for server/client push
+	    - Datagrams for unreliable real-time data
+	    - Session capsules (CLOSE_WEBTRANSPORT_SESSION, DRAIN)
+
+	  Use cases:
+	    - Real-time gaming with mixed reliability requirements
+	    - Live streaming with low-latency feedback
+	    - IoT applications requiring bidirectional communication
+	    - WebRTC alternative for browser-to-server communication
+
+	  If using HTTP/3 for WebTransport applications, say Y.
 	  If unsure, say Y.
 
 config TQUIC_IO_URING

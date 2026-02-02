@@ -573,9 +573,21 @@ __poll_t tquic_poll(struct file *file, struct socket *sock, poll_table *wait)
 		if (tsk->accept_queue_len > 0)
 			mask |= EPOLLIN | EPOLLRDNORM;
 	} else if (sk->sk_state == TCP_ESTABLISHED) {
-		/* Check if data available to read */
+		/* Check if stream data available to read */
 		if (tsk->conn && tsk->default_stream) {
 			if (!skb_queue_empty(&tsk->default_stream->recv_buf))
+				mask |= EPOLLIN | EPOLLRDNORM;
+		}
+
+		/*
+		 * Check if datagram data available (RFC 9221)
+		 *
+		 * Datagrams are readable if the datagram receive queue
+		 * has at least one datagram queued. This allows poll/epoll
+		 * to wake on datagram arrival.
+		 */
+		if (tsk->conn && tsk->conn->datagram.enabled) {
+			if (!skb_queue_empty(&tsk->conn->datagram.recv_queue))
 				mask |= EPOLLIN | EPOLLRDNORM;
 		}
 
@@ -983,6 +995,28 @@ static int tquic_setsockopt(struct socket *sock, int level, int optname,
 		 *
 		 * Sets the maximum number of datagrams that can be queued
 		 * for receive. Excess datagrams are dropped (unreliable).
+		 */
+		if (val < 1 || val > TQUIC_DATAGRAM_QUEUE_MAX)
+			return -EINVAL;
+
+		lock_sock(sk);
+		tsk->datagram_queue_max = val;
+		if (tsk->conn)
+			tsk->conn->datagram.recv_queue_max = val;
+		release_sock(sk);
+		return 0;
+
+	case TQUIC_SO_DATAGRAM_RCVBUF:
+		/*
+		 * SO_TQUIC_DATAGRAM_RCVBUF: Set datagram receive buffer size
+		 *
+		 * Sets the maximum number of datagrams that can be queued
+		 * in the receive buffer. This provides SO_RCVBUF-like semantics
+		 * for datagram flow control.
+		 *
+		 * Note: Unlike SO_RCVBUF which is in bytes, this is the
+		 * maximum number of datagrams to queue. Each datagram can be
+		 * up to max_datagram_frame_size bytes.
 		 */
 		if (val < 1 || val > TQUIC_DATAGRAM_QUEUE_MAX)
 			return -EINVAL;
@@ -1506,6 +1540,53 @@ static int tquic_getsockopt(struct socket *sock, int level, int optname,
 			val = tsk->datagram_queue_max;
 		break;
 
+	case TQUIC_SO_DATAGRAM_STATS: {
+		/*
+		 * SO_TQUIC_DATAGRAM_STATS: Get datagram statistics
+		 *
+		 * Returns comprehensive datagram statistics including
+		 * sent/received/dropped counts and queue state.
+		 */
+		struct tquic_datagram_stats stats = {0};
+
+		if (len < sizeof(stats))
+			return -EINVAL;
+
+		lock_sock(sk);
+		if (tsk->conn && tsk->conn->datagram.enabled) {
+			spin_lock_bh(&tsk->conn->datagram.lock);
+			stats.datagrams_sent = tsk->conn->datagram.datagrams_sent;
+			stats.datagrams_received = tsk->conn->datagram.datagrams_received;
+			stats.datagrams_dropped = tsk->conn->datagram.datagrams_dropped;
+			stats.recv_queue_len = tsk->conn->datagram.recv_queue_len;
+			stats.recv_queue_max = tsk->conn->datagram.recv_queue_max;
+			stats.max_send_size = tsk->conn->datagram.max_send_size;
+			stats.max_recv_size = tsk->conn->datagram.max_recv_size;
+			spin_unlock_bh(&tsk->conn->datagram.lock);
+		}
+		release_sock(sk);
+
+		if (copy_to_user(optval, &stats, sizeof(stats)))
+			return -EFAULT;
+		if (put_user(sizeof(stats), optlen))
+			return -EFAULT;
+		return 0;
+	}
+
+	case TQUIC_SO_DATAGRAM_RCVBUF:
+		/*
+		 * SO_TQUIC_DATAGRAM_RCVBUF: Get datagram receive buffer size
+		 *
+		 * Returns the maximum number of datagrams that can be queued
+		 * in the receive buffer. This is an alias for DATAGRAM_QUEUE_LEN
+		 * provided for API consistency with SO_RCVBUF semantics.
+		 */
+		if (tsk->conn)
+			val = tsk->conn->datagram.recv_queue_max;
+		else
+			val = tsk->datagram_queue_max;
+		break;
+
 	case TQUIC_SO_HTTP3_ENABLE:
 		/*
 		 * SO_TQUIC_HTTP3_ENABLE: Get HTTP/3 mode status
@@ -1744,6 +1825,85 @@ static int tquic_sendmsg_socket(struct socket *sock, struct msghdr *msg,
 	return tquic_sendmsg(sock->sk, msg, len);
 }
 
+/*
+ * tquic_check_datagram_cmsg - Check if sendmsg/recvmsg requests datagram I/O
+ * @msg: Message header with control data
+ *
+ * Scans ancillary data for TQUIC_CMSG_DATAGRAM to determine if
+ * the caller wants to send/receive a datagram instead of stream data.
+ *
+ * Return: true if datagram I/O requested, false otherwise
+ */
+static bool tquic_check_datagram_cmsg(struct msghdr *msg)
+{
+	struct cmsghdr *cmsg;
+
+	if (!msg->msg_control || msg->msg_controllen == 0)
+		return false;
+
+	for_each_cmsghdr(cmsg, msg) {
+		if (!CMSG_OK(msg, cmsg))
+			break;
+
+		if (cmsg->cmsg_level == SOL_TQUIC &&
+		    cmsg->cmsg_type == TQUIC_CMSG_DATAGRAM)
+			return true;
+	}
+
+	return false;
+}
+
+/*
+ * tquic_sendmsg_datagram - Send a datagram via sendmsg
+ * @sk: Socket
+ * @msg: Message header
+ * @len: Data length
+ *
+ * Internal helper for datagram transmission. Called when ancillary data
+ * requests a datagram send via TQUIC_CMSG_DATAGRAM.
+ *
+ * Return: Number of bytes sent, or negative error code
+ */
+static int tquic_sendmsg_datagram(struct sock *sk, struct msghdr *msg,
+				  size_t len)
+{
+	struct tquic_sock *tsk = tquic_sk(sk);
+	struct tquic_connection *conn = tsk->conn;
+	void *buf;
+	int ret;
+
+	if (!conn || conn->state != TQUIC_CONN_CONNECTED)
+		return -ENOTCONN;
+
+	/* Verify datagram support is negotiated */
+	if (!conn->datagram.enabled)
+		return -EOPNOTSUPP;
+
+	/* Check size against negotiated limit */
+	if (len > conn->datagram.max_send_size)
+		return -EMSGSIZE;
+
+	/* Allocate buffer for datagram payload */
+	buf = kmalloc(len, GFP_KERNEL);
+	if (!buf)
+		return -ENOMEM;
+
+	/* Copy data from user */
+	if (copy_from_iter(buf, len, &msg->msg_iter) != len) {
+		kfree(buf);
+		return -EFAULT;
+	}
+
+	/* Send the datagram */
+	ret = tquic_send_datagram(conn, buf, len);
+	kfree(buf);
+
+	if (ret < 0)
+		return ret;
+
+	return len;
+}
+
 int tquic_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 {
 	struct tquic_sock *tsk = tquic_sk(sk);
@@ -1755,6 +1915,16 @@ int tquic_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 
 	if (!conn || conn->state != TQUIC_CONN_CONNECTED)
 		return -ENOTCONN;
+
+	/*
+	 * Check if caller wants datagram send (RFC 9221)
+	 *
+	 * If ancillary data contains TQUIC_CMSG_DATAGRAM, this is a
+	 * datagram send request. The entire message is sent as a single
+	 * unreliable datagram.
+	 */
+	if (tquic_check_datagram_cmsg(msg))
+		return tquic_sendmsg_datagram(sk, msg, len);
 
 	/* Use or create default stream */
 	stream = tsk->default_stream;
@@ -1831,6 +2001,128 @@ static int tquic_recvmsg_socket(struct socket *sock, struct msghdr *msg,
 	return tquic_recvmsg(sock->sk, msg, len, flags, NULL);
 }
 
+/*
+ * tquic_recvmsg_datagram - Receive a datagram via recvmsg
+ * @sk: Socket
+ * @msg: Message header
+ * @len: Maximum length to receive
+ * @flags: Receive flags
+ *
+ * Internal helper for datagram reception. Called when ancillary data
+ * requests a datagram read via TQUIC_CMSG_DATAGRAM.
+ *
+ * Return: Number of bytes received, or negative error code
+ */
+static int tquic_recvmsg_datagram(struct sock *sk, struct msghdr *msg,
+				  size_t len, int flags)
+{
+	struct tquic_sock *tsk = tquic_sk(sk);
+	struct tquic_connection *conn = tsk->conn;
+	struct tquic_datagram_info dgram_info;
+	struct sk_buff *skb;
+	unsigned long irqflags;
+	size_t copy_len;
+	long timeo;
+	int ret;
+
+	if (!conn || (conn->state != TQUIC_CONN_CONNECTED &&
+		      conn->state != TQUIC_CONN_CLOSING))
+		return -ENOTCONN;
+
+	/* Verify datagram support is negotiated */
+	if (!conn->datagram.enabled)
+		return -EOPNOTSUPP;
+
+	/* Get receive timeout */
+	timeo = sock_rcvtimeo(sk, flags & MSG_DONTWAIT);
+
+retry:
+	spin_lock_irqsave(&conn->datagram.lock, irqflags);
+
+	skb = skb_peek(&conn->datagram.recv_queue);
+	if (!skb) {
+		spin_unlock_irqrestore(&conn->datagram.lock, irqflags);
+
+		/* Non-blocking: return immediately */
+		if (flags & MSG_DONTWAIT)
+			return -EAGAIN;
+
+		if (timeo == 0)
+			return -EAGAIN;
+
+		/* Check for pending signals */
+		if (signal_pending(current))
+			return sock_intr_errno(timeo);
+
+		/* Wait for datagram arrival */
+		ret = wait_event_interruptible_timeout(
+			conn->datagram.wait,
+			!skb_queue_empty(&conn->datagram.recv_queue) ||
+			    sk->sk_err ||
+			    (sk->sk_shutdown & RCV_SHUTDOWN) ||
+			    conn->state == TQUIC_CONN_CLOSED,
+			timeo);
+
+		if (ret < 0)
+			return sock_intr_errno(timeo);
+
+		if (ret == 0)
+			return -EAGAIN;
+
+		/* Re-check connection state */
+		if (conn->state == TQUIC_CONN_CLOSED)
+			return -ENOTCONN;
+
+		if (sk->sk_err)
+			return -sock_error(sk);
+
+		if (sk->sk_shutdown & RCV_SHUTDOWN)
+			return 0;
+
+		timeo = ret;
+		goto retry;
+	}
+
+	/* Calculate copy length */
+	copy_len = min_t(size_t, len, skb->len);
+
+	/* Copy data to user buffer */
+	if (copy_to_iter(skb->data, copy_len, &msg->msg_iter) != copy_len) {
+		spin_unlock_irqrestore(&conn->datagram.lock, irqflags);
+		return -EFAULT;
+	}
+
+	/* Set MSG_TRUNC if datagram was truncated */
+	if (skb->len > len)
+		msg->msg_flags |= MSG_TRUNC;
+
+	/* Remove from queue unless peeking */
+	if (!(flags & MSG_PEEK)) {
+		__skb_unlink(skb, &conn->datagram.recv_queue);
+		conn->datagram.recv_queue_len--;
+		spin_unlock_irqrestore(&conn->datagram.lock, irqflags);
+		kfree_skb(skb);
+	} else {
+		spin_unlock_irqrestore(&conn->datagram.lock, irqflags);
+	}
+
+	/*
+	 * Return ancillary data indicating this was a datagram
+	 *
+	 * Per UAPI: struct tquic_datagram_info is returned via cmsg
+	 * with type TQUIC_CMSG_DATAGRAM at level SOL_TQUIC.
+	 */
+	if (msg->msg_controllen >= CMSG_SPACE(sizeof(dgram_info))) {
+		memset(&dgram_info, 0, sizeof(dgram_info));
+		dgram_info.dgram_id = 0;  /* Could be enhanced with tracking */
+		dgram_info.flags = 0;
+		put_cmsg(msg, SOL_TQUIC, TQUIC_CMSG_DATAGRAM,
+			 sizeof(dgram_info), &dgram_info);
+	}
+
+	return copy_len;
+}
+
 int tquic_recvmsg(struct sock *sk, struct msghdr *msg, size_t len, int flags,
 		  int *addr_len)
 {
@@ -1842,6 +2134,15 @@ int tquic_recvmsg(struct sock *sk, struct msghdr *msg, size_t len, int flags,
 
 	if (!conn || conn->state != TQUIC_CONN_CONNECTED)
 		return -ENOTCONN;
+
+	/*
+	 * Check if caller wants datagram read (RFC 9221)
+	 *
+	 * If ancillary data contains TQUIC_CMSG_DATAGRAM, this is a
+	 * datagram read request. Otherwise, read from the default stream.
+	 */
+	if (tquic_check_datagram_cmsg(msg))
+		return tquic_recvmsg_datagram(sk, msg, len, flags);
 
 	stream = tsk->default_stream;
 	if (!stream)

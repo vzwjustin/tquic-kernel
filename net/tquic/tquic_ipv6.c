@@ -47,7 +47,10 @@
 
 #include "protocol.h"
 
-/* TODO: Remove inline tquic6_sock definition below, use protocol.h instead */
+/*
+ * Note: struct tquic6_sock is defined in include/net/tquic.h
+ * Use tquic6_inet6_sk() from that header to access ipv6_pinfo.
+ */
 
 /* Forward declarations */
 static int tquic_v6_connect(struct sock *sk, struct sockaddr *addr, int addr_len);
@@ -58,15 +61,11 @@ static int tquic_v6_err(struct sk_buff *skb, struct inet6_skb_parm *opt,
 			u8 type, u8 code, int offset, __be32 info);
 static int tquic_v6_rcv(struct sk_buff *skb);
 
-/* IPv6 extension for TQUIC socket */
-struct tquic6_sock {
-	struct tquic_sock	tquic;
-	struct ipv6_pinfo	inet6;
-};
-
-/* Helper to get ipv6_pinfo from tquic socket */
-#define tquic_inet6_sk(sk) (&container_of(tquic_sk(sk), \
-					  struct tquic6_sock, tquic)->inet6)
+/*
+ * Helper to get ipv6_pinfo from tquic socket - alias for consistency
+ * with existing code. Uses tquic6_inet6_sk() from include/net/tquic.h.
+ */
+#define tquic_inet6_sk(sk) tquic6_inet6_sk(sk)
 
 /*
  * Happy Eyeballs state for preferring IPv6 with IPv4 fallback

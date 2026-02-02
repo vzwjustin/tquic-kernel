@@ -258,6 +258,22 @@ struct tquic_stream_manager {
 	u64 max_data_remote;
 	u64 data_sent;
 	u64 data_received;
+
+	/*
+	 * SECURITY: Stream creation rate limiting
+	 *
+	 * Prevents stream ID exhaustion attacks where a peer rapidly creates
+	 * streams to exhaust the connection's stream limits or memory.
+	 *
+	 * RFC 9000 Section 4.6: Flow control applies to streams but does not
+	 * prevent rapid stream creation. We add rate limiting to mitigate DoS.
+	 */
+	ktime_t rate_limit_window_start;
+	u32 streams_in_window;
+	u32 max_streams_per_window;		/* Default: 100 streams per second */
+	u32 rate_limit_window_ms;		/* Default: 1000ms */
+	u32 consecutive_limit_hits;		/* Track repeated limit hits */
+	bool rate_limit_exceeded;		/* Connection flagged for abuse */
 };
 
 /* Stream ID classification helpers */
@@ -415,6 +431,21 @@ struct tquic_stream_manager *tquic_stream_manager_create(
 	/* Connection-level flow control */
 	mgr->max_data_local = TQUIC_DEFAULT_MAX_DATA;
 	mgr->max_data_remote = TQUIC_DEFAULT_MAX_DATA;
+
+	/*
+	 * SECURITY: Initialize stream creation rate limiting
+	 *
+	 * Defaults are set here but can be overridden via sysctl or per-connection
+	 * configuration. These defaults allow 100 streams per second which is
+	 * sufficient for most legitimate use cases while protecting against
+	 * stream exhaustion attacks.
+	 */
+	mgr->rate_limit_window_start = ktime_get();
+	mgr->streams_in_window = 0;
+	mgr->max_streams_per_window = 100;	/* 100 streams per second */
+	mgr->rate_limit_window_ms = 1000;	/* 1 second window */
+	mgr->consecutive_limit_hits = 0;
+	mgr->rate_limit_exceeded = false;
 
 	/* Create SLAB caches */
 	mgr->stream_cache = kmem_cache_create("tquic_stream_ext",
@@ -749,12 +780,97 @@ static int tquic_stream_alloc_id(struct tquic_stream_manager *mgr,
 	return 0;
 }
 
+/*
+ * SECURITY: Stream creation rate limiting constants
+ */
+#define TQUIC_STREAM_RATE_LIMIT_DEFAULT		100	/* streams per window */
+#define TQUIC_STREAM_RATE_WINDOW_MS_DEFAULT	1000	/* 1 second window */
+#define TQUIC_STREAM_RATE_ABUSE_THRESHOLD	10	/* consecutive limit hits */
+
+/**
+ * tquic_stream_check_rate_limit - Check stream creation rate limit
+ * @mgr: Stream manager
+ * @new_streams: Number of new streams being requested
+ *
+ * SECURITY: Prevents stream ID exhaustion attacks by rate limiting how
+ * quickly a peer can create new streams. This protects against:
+ *
+ * 1. Memory exhaustion - Each stream requires kernel memory allocation
+ * 2. CPU exhaustion - Processing rapid stream creation frames
+ * 3. Stream ID space exhaustion - Depleting the 62-bit stream ID space
+ *
+ * RFC 9000 allows up to 2^60 streams per direction, but rapid creation
+ * should be rate limited to prevent abuse.
+ *
+ * Return: 0 if allowed, -EBUSY if rate limit exceeded, -ECONNABORTED if abuse
+ */
+static int tquic_stream_check_rate_limit(struct tquic_stream_manager *mgr,
+					 u64 new_streams)
+{
+	ktime_t now = ktime_get();
+	s64 elapsed_ms;
+
+	/* Initialize defaults if not set */
+	if (mgr->max_streams_per_window == 0)
+		mgr->max_streams_per_window = TQUIC_STREAM_RATE_LIMIT_DEFAULT;
+	if (mgr->rate_limit_window_ms == 0)
+		mgr->rate_limit_window_ms = TQUIC_STREAM_RATE_WINDOW_MS_DEFAULT;
+
+	/* Check for abuse flag - connection should be terminated */
+	if (mgr->rate_limit_exceeded) {
+		pr_warn("tquic_stream: connection flagged for stream abuse\n");
+		return -ECONNABORTED;
+	}
+
+	/* Calculate time since window start */
+	elapsed_ms = ktime_ms_delta(now, mgr->rate_limit_window_start);
+
+	/* Reset window if expired */
+	if (elapsed_ms >= mgr->rate_limit_window_ms) {
+		mgr->rate_limit_window_start = now;
+		mgr->streams_in_window = 0;
+	}
+
+	/* Check if new streams would exceed rate limit */
+	if (mgr->streams_in_window + new_streams > mgr->max_streams_per_window) {
+		mgr->consecutive_limit_hits++;
+
+		pr_debug("tquic_stream: rate limit hit (%u streams in %lld ms, consecutive=%u)\n",
+			 mgr->streams_in_window, elapsed_ms,
+			 mgr->consecutive_limit_hits);
+
+		/*
+		 * If we've hit the limit multiple times consecutively,
+		 * flag this connection as potentially abusive.
+		 */
+		if (mgr->consecutive_limit_hits >= TQUIC_STREAM_RATE_ABUSE_THRESHOLD) {
+			pr_warn("tquic_stream: connection flagged for stream exhaustion attack\n");
+			mgr->rate_limit_exceeded = true;
+			return -ECONNABORTED;
+		}
+
+		return -EBUSY;
+	}
+
+	/* Reset consecutive hit counter on successful check */
+	if (mgr->consecutive_limit_hits > 0 &&
+	    mgr->streams_in_window + new_streams <= mgr->max_streams_per_window / 2) {
+		mgr->consecutive_limit_hits = 0;
+	}
+
+	/* Account for the new streams */
+	mgr->streams_in_window += new_streams;
+
+	return 0;
+}
+
 /**
  * tquic_stream_accept_id - Accept a remotely-initiated stream ID
  * @mgr: Stream manager
  * @stream_id: The stream ID
  *
- * Return: 0 on success, -EINVAL if invalid, -ENOSPC if limit exceeded
+ * Return: 0 on success, -EINVAL if invalid, -ENOSPC if limit exceeded,
+ *         -EBUSY if rate limited, -ECONNABORTED if abuse detected
  */
 static int tquic_stream_accept_id(struct tquic_stream_manager *mgr,
 				  u64 stream_id)
@@ -763,6 +879,8 @@ static int tquic_stream_accept_id(struct tquic_stream_manager *mgr,
 	u64 *next_id;
 	u32 *counter;
 	u64 max_streams;
+	u64 new_streams;
+	int ret;
 
 	/* Verify this is a remote-initiated stream */
 	if (tquic_stream_is_local(mgr, stream_id))
@@ -783,10 +901,25 @@ static int tquic_stream_accept_id(struct tquic_stream_manager *mgr,
 		return -EINVAL;  /* Already exists or below range */
 
 	/* Calculate how many streams this would create */
-	u64 new_streams = (stream_id - *next_id) / 4 + 1;
+	new_streams = (stream_id - *next_id) / 4 + 1;
 
-	if (*counter + new_streams > max_streams)
+	/*
+	 * SECURITY: Check MAX_STREAMS limit
+	 * This enforces the peer's advertised stream limit.
+	 */
+	if (*counter + new_streams > max_streams) {
+		pr_debug("tquic_stream: MAX_STREAMS exceeded (have=%u, want=%llu, max=%llu)\n",
+			 *counter, new_streams, max_streams);
 		return -ENOSPC;
+	}
+
+	/*
+	 * SECURITY: Check rate limit to prevent stream exhaustion attacks.
+	 * This is an additional protection layer beyond MAX_STREAMS.
+	 */
+	ret = tquic_stream_check_rate_limit(mgr, new_streams);
+	if (ret)
+		return ret;
 
 	/* Accept this ID and all IDs below it */
 	*next_id = stream_id + 4;

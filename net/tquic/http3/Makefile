@@ -22,3 +22,6 @@ tquic_http3-$(CONFIG_TQUIC_HTTP3_QPACK) += \
 	qpack_dynamic.o \
 	qpack_encoder.o \
 	qpack_decoder.o
+
+# WebTransport support (draft-ietf-webtrans-http3)
+tquic_http3-$(CONFIG_TQUIC_WEBTRANSPORT) += webtransport.o

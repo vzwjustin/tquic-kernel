@@ -1130,6 +1130,138 @@ int tquic_cid_rotate_now(struct tquic_cid_manager *mgr)
 EXPORT_SYMBOL_GPL(tquic_cid_rotate_now);
 
 /**
+ * tquic_cid_rotate_on_migration - Rotate CIDs on connection migration
+ * @mgr: CID manager
+ * @old_path: Path being migrated from (may be NULL)
+ * @new_path: Path being migrated to
+ *
+ * SECURITY: Ensures CID unlinkability during connection migration.
+ *
+ * Per RFC 9000 Section 9.5: "An endpoint MUST NOT reuse a connection ID
+ * when sending from more than one local address or to more than one
+ * destination address."
+ *
+ * This function ensures that:
+ * 1. The new path gets a fresh CID that cannot be correlated with old paths
+ * 2. The old path's CID is retired to prevent linkability
+ * 3. Cryptographically random new CIDs prevent correlation attacks
+ *
+ * Without this protection, an attacker observing traffic on multiple network
+ * paths could link them to the same QUIC connection by correlating CIDs.
+ *
+ * Return: 0 on success, negative error on failure
+ */
+int tquic_cid_rotate_on_migration(struct tquic_cid_manager *mgr,
+				  struct tquic_path *old_path,
+				  struct tquic_path *new_path)
+{
+	struct tquic_cid_entry *new_local_cid = NULL;
+	struct tquic_cid_entry *old_local_cid = NULL;
+	struct tquic_cid_entry *entry;
+	int ret = 0;
+
+	if (!mgr || !new_path)
+		return -EINVAL;
+
+	pr_debug("tquic_cid: rotating CIDs for migration (old_path=%p, new_path=%u)\n",
+		 old_path, new_path->path_id);
+
+	spin_lock(&mgr->lock);
+
+	/*
+	 * Step 1: Get the old path's CID (if any) for retirement
+	 */
+	if (old_path && old_path->path_id < TQUIC_MAX_PATHS) {
+		old_local_cid = mgr->path_local_cids[old_path->path_id];
+	}
+
+	/*
+	 * Step 2: Find or create a fresh CID for the new path
+	 *
+	 * We specifically avoid reusing CIDs to prevent linkability.
+	 * The new CID must be cryptographically independent of old CIDs.
+	 */
+	list_for_each_entry(entry, &mgr->local_cids, list) {
+		if (entry->state == TQUIC_CID_STATE_ACTIVE &&
+		    !entry->path &&
+		    entry != old_local_cid) {
+			new_local_cid = entry;
+			break;
+		}
+	}
+
+	spin_unlock(&mgr->lock);
+
+	/*
+	 * Step 3: If no unused CID available, create a new one
+	 * This ensures cryptographic independence via get_random_bytes()
+	 */
+	if (!new_local_cid) {
+		tquic_cid_pool_replenish(mgr);
+
+		spin_lock(&mgr->lock);
+		list_for_each_entry(entry, &mgr->local_cids, list) {
+			if (entry->state == TQUIC_CID_STATE_ACTIVE &&
+			    !entry->path &&
+			    entry != old_local_cid) {
+				new_local_cid = entry;
+				break;
+			}
+		}
+
+		if (!new_local_cid) {
+			spin_unlock(&mgr->lock);
+			pr_warn("tquic_cid: no CID available for migration\n");
+			return -ENOSPC;
+		}
+		spin_unlock(&mgr->lock);
+	}
+
+	spin_lock(&mgr->lock);
+
+	/*
+	 * Step 4: Assign new CID to the new path
+	 */
+	if (new_path->path_id < TQUIC_MAX_PATHS) {
+		new_local_cid->path = new_path;
+		mgr->path_local_cids[new_path->path_id] = new_local_cid;
+		tquic_cid_entry_get(new_local_cid);
+	}
+
+	/*
+	 * Step 5: Mark old CID for retirement (linkability prevention)
+	 *
+	 * By retiring the old CID, we ensure it won't be used again,
+	 * preventing any correlation between pre-migration and
+	 * post-migration traffic.
+	 */
+	if (old_local_cid && old_local_cid != new_local_cid) {
+		old_local_cid->state = TQUIC_CID_STATE_PENDING_RETIRE;
+		old_local_cid->path = NULL;
+
+		if (old_path && old_path->path_id < TQUIC_MAX_PATHS) {
+			mgr->path_local_cids[old_path->path_id] = NULL;
+		}
+
+		/* Update retire_prior_to to include this CID */
+		if (old_local_cid->seq_num >= mgr->retire_prior_to_send) {
+			mgr->retire_prior_to_send = old_local_cid->seq_num + 1;
+		}
+
+		pr_debug("tquic_cid: retired old CID seq=%llu for unlinkability\n",
+			 old_local_cid->seq_num);
+	}
+
+	spin_unlock(&mgr->lock);
+
+	pr_debug("tquic_cid: migration CID rotation complete (new seq=%llu)\n",
+		 new_local_cid->seq_num);
+
+	return ret;
+}
+EXPORT_SYMBOL_GPL(tquic_cid_rotate_on_migration);
+
+/**
  * tquic_cid_on_packet_sent - Update CID state on packet transmission
  * @mgr: CID manager
  *

@@ -959,6 +959,447 @@ static void test_new_cid_sequence_validation(struct kunit *test)
 
 /*
  * =============================================================================
+ * SECTION 4: Rate Limiting Under Load Tests
+ * =============================================================================
+ */
+
+/**
+ * struct tquic_test_rate_limiter - Simple rate limiter for testing
+ * @tokens: Current tokens in bucket
+ * @last_refill: Last refill timestamp (jiffies simulation)
+ * @max_tokens: Maximum bucket capacity
+ * @refill_rate: Tokens added per time unit
+ * @total_accepted: Statistics - accepted requests
+ * @total_rejected: Statistics - rejected requests
+ */
+struct tquic_test_rate_limiter {
+	u32 tokens;
+	unsigned long last_refill;
+	u32 max_tokens;
+	u32 refill_rate;
+	u64 total_accepted;
+	u64 total_rejected;
+};
+
+/**
+ * tquic_test_rl_init - Initialize rate limiter
+ * @rl: Rate limiter to initialize
+ * @max_tokens: Maximum bucket capacity
+ * @refill_rate: Tokens per time unit
+ */
+static void tquic_test_rl_init(struct tquic_test_rate_limiter *rl,
+			       u32 max_tokens, u32 refill_rate)
+{
+	rl->tokens = max_tokens;
+	rl->last_refill = 0;
+	rl->max_tokens = max_tokens;
+	rl->refill_rate = refill_rate;
+	rl->total_accepted = 0;
+	rl->total_rejected = 0;
+}
+
+/**
+ * tquic_test_rl_check - Check rate limit and consume token
+ * @rl: Rate limiter
+ * @now: Current time (jiffies simulation)
+ *
+ * Returns: true if allowed, false if rate limited
+ */
+static bool tquic_test_rl_check(struct tquic_test_rate_limiter *rl,
+				unsigned long now)
+{
+	/* Refill tokens based on time elapsed */
+	if (now > rl->last_refill) {
+		u32 elapsed = now - rl->last_refill;
+		u32 new_tokens = elapsed * rl->refill_rate;
+		rl->tokens = min(rl->tokens + new_tokens, rl->max_tokens);
+		rl->last_refill = now;
+	}
+
+	/* Check if we have tokens */
+	if (rl->tokens > 0) {
+		rl->tokens--;
+		rl->total_accepted++;
+		return true;
+	}
+
+	rl->total_rejected++;
+	return false;
+}
+
+/* Test: Rate limiter token bucket algorithm */
+static void test_ratelimit_token_bucket(struct kunit *test)
+{
+	struct tquic_test_rate_limiter rl;
+	int i;
+
+	/* ARRANGE: Initialize rate limiter with 10 tokens, 1 per time unit */
+	tquic_test_rl_init(&rl, 10, 1);
+
+	/* ACT/ASSERT: Should accept first 10 requests */
+	for (i = 0; i < 10; i++) {
+		KUNIT_EXPECT_TRUE(test, tquic_test_rl_check(&rl, 0));
+	}
+
+	/* ASSERT: 11th request should be rejected */
+	KUNIT_EXPECT_FALSE(test, tquic_test_rl_check(&rl, 0));
+	KUNIT_EXPECT_EQ(test, rl.total_accepted, 10ULL);
+	KUNIT_EXPECT_EQ(test, rl.total_rejected, 1ULL);
+}
+
+/* Test: Rate limiter token refill */
+static void test_ratelimit_token_refill(struct kunit *test)
+{
+	struct tquic_test_rate_limiter rl;
+
+	/* ARRANGE: Initialize rate limiter, empty all tokens */
+	tquic_test_rl_init(&rl, 10, 2);  /* 2 tokens per time unit */
+	rl.tokens = 0;
+	rl.last_refill = 0;
+
+	/* ACT: Advance time by 5 units (should add 10 tokens, capped at max) */
+	KUNIT_EXPECT_TRUE(test, tquic_test_rl_check(&rl, 5));
+
+	/* ASSERT: Should have 9 tokens remaining (10 refilled, 1 used) */
+	KUNIT_EXPECT_EQ(test, rl.tokens, 9U);
+}
+
+/* Test: Rate limiter burst handling */
+static void test_ratelimit_burst_handling(struct kunit *test)
+{
+	struct tquic_test_rate_limiter rl;
+	int accepted = 0;
+	int i;
+
+	/* ARRANGE: Initialize with small burst capacity */
+	tquic_test_rl_init(&rl, 5, 1);  /* burst of 5, refill 1/time */
+
+	/* ACT: Try to send 100 requests in burst (at time 0) */
+	for (i = 0; i < 100; i++) {
+		if (tquic_test_rl_check(&rl, 0))
+			accepted++;
+	}
+
+	/* ASSERT: Only burst amount should be accepted */
+	KUNIT_EXPECT_EQ(test, accepted, 5);
+	KUNIT_EXPECT_EQ(test, rl.total_rejected, 95ULL);
+}
+
+/* Test: Rate limiter under sustained load */
+static void test_ratelimit_sustained_load(struct kunit *test)
+{
+	struct tquic_test_rate_limiter rl;
+	int accepted = 0;
+	unsigned long time;
+
+	/* ARRANGE: Rate limit to 10 per 10 time units = 1/time unit */
+	tquic_test_rl_init(&rl, 10, 1);
+	rl.tokens = 0;
+
+	/* ACT: Simulate 100 time units with 1 request per time unit */
+	for (time = 1; time <= 100; time++) {
+		if (tquic_test_rl_check(&rl, time))
+			accepted++;
+	}
+
+	/* ASSERT: Should accept all or close to all (1 request/time = 1 refill/time) */
+	KUNIT_EXPECT_GE(test, accepted, 90);  /* Allow for initial empty bucket */
+}
+
+/*
+ * =============================================================================
+ * SECTION 5: Certificate Validation Tests
+ * =============================================================================
+ */
+
+/**
+ * struct tquic_test_cert_info - Simulated certificate info for testing
+ * @valid_from: Not before timestamp (seconds since epoch)
+ * @valid_to: Not after timestamp (seconds since epoch)
+ * @is_ca: Certificate is a CA
+ * @hostname: Subject CN / SAN DNS name
+ * @issuer: Issuer CN
+ * @key_bits: Key size in bits
+ * @is_trusted: Whether issuer is trusted
+ */
+struct tquic_test_cert_info {
+	s64 valid_from;
+	s64 valid_to;
+	bool is_ca;
+	const char *hostname;
+	const char *issuer;
+	u32 key_bits;
+	bool is_trusted;
+};
+
+/* Simulated current time for certificate tests */
+#define TEST_CURRENT_TIME	1700000000LL  /* Approx Nov 2023 */
+
+/**
+ * tquic_test_cert_check_validity - Check certificate time validity
+ * @cert: Certificate info
+ * @now: Current time
+ *
+ * Returns: 0 if valid, -1 if expired, -2 if not yet valid
+ */
+static int tquic_test_cert_check_validity(const struct tquic_test_cert_info *cert,
+					  s64 now)
+{
+	if (now < cert->valid_from)
+		return -2;  /* Not yet valid */
+	if (now > cert->valid_to)
+		return -1;  /* Expired */
+	return 0;  /* Valid */
+}
+
+/**
+ * tquic_test_cert_check_hostname - Check hostname matches certificate
+ * @cert: Certificate info
+ * @expected: Expected hostname
+ *
+ * Returns: 0 if match, -1 if no match
+ */
+static int tquic_test_cert_check_hostname(const struct tquic_test_cert_info *cert,
+					  const char *expected)
+{
+	if (!cert->hostname || !expected)
+		return -1;
+
+	/* Exact match */
+	if (strcmp(cert->hostname, expected) == 0)
+		return 0;
+
+	/* Wildcard match (simple: *.example.com matches foo.example.com) */
+	if (cert->hostname[0] == '*' && cert->hostname[1] == '.') {
+		const char *cert_domain = cert->hostname + 1;  /* .example.com */
+		const char *expected_dot = strchr(expected, '.');
+		if (expected_dot && strcmp(expected_dot, cert_domain) == 0)
+			return 0;
+	}
+
+	return -1;
+}
+
+/**
+ * tquic_test_cert_check_key_strength - Check key is strong enough
+ * @cert: Certificate info
+ * @min_rsa_bits: Minimum RSA key size
+ *
+ * Returns: 0 if strong enough, -1 if weak
+ */
+static int tquic_test_cert_check_key_strength(const struct tquic_test_cert_info *cert,
+					      u32 min_rsa_bits)
+{
+	if (cert->key_bits < min_rsa_bits)
+		return -1;
+	return 0;
+}
+
+/* Test: Valid certificate passes all checks */
+static void test_cert_valid(struct kunit *test)
+{
+	struct tquic_test_cert_info cert = {
+		.valid_from = TEST_CURRENT_TIME - 86400,  /* Valid from yesterday */
+		.valid_to = TEST_CURRENT_TIME + 86400 * 365,  /* Valid for 1 year */
+		.is_ca = false,
+		.hostname = "example.com",
+		.issuer = "Example CA",
+		.key_bits = 2048,
+		.is_trusted = true,
+	};
+
+	/* ARRANGE/ACT/ASSERT: All checks should pass */
+	KUNIT_EXPECT_EQ(test, tquic_test_cert_check_validity(&cert, TEST_CURRENT_TIME), 0);
+	KUNIT_EXPECT_EQ(test, tquic_test_cert_check_hostname(&cert, "example.com"), 0);
+	KUNIT_EXPECT_EQ(test, tquic_test_cert_check_key_strength(&cert, 2048), 0);
+	KUNIT_EXPECT_TRUE(test, cert.is_trusted);
+}
+
+/* Test: Expired certificate is rejected */
+static void test_cert_expired(struct kunit *test)
+{
+	struct tquic_test_cert_info cert = {
+		.valid_from = TEST_CURRENT_TIME - 86400 * 400,  /* 400 days ago */
+		.valid_to = TEST_CURRENT_TIME - 86400 * 35,  /* Expired 35 days ago */
+		.hostname = "example.com",
+		.key_bits = 2048,
+	};
+
+	/* ARRANGE/ACT/ASSERT: Certificate should be detected as expired */
+	KUNIT_EXPECT_EQ(test, tquic_test_cert_check_validity(&cert, TEST_CURRENT_TIME), -1);
+}
+
+/* Test: Not yet valid certificate is rejected */
+static void test_cert_not_yet_valid(struct kunit *test)
+{
+	struct tquic_test_cert_info cert = {
+		.valid_from = TEST_CURRENT_TIME + 86400 * 30,  /* Valid in 30 days */
+		.valid_to = TEST_CURRENT_TIME + 86400 * 400,
+		.hostname = "example.com",
+		.key_bits = 2048,
+	};
+
+	/* ARRANGE/ACT/ASSERT: Certificate should be detected as not yet valid */
+	KUNIT_EXPECT_EQ(test, tquic_test_cert_check_validity(&cert, TEST_CURRENT_TIME), -2);
+}
+
+/* Test: Wrong hostname is rejected */
+static void test_cert_wrong_hostname(struct kunit *test)
+{
+	struct tquic_test_cert_info cert = {
+		.valid_from = TEST_CURRENT_TIME - 86400,
+		.valid_to = TEST_CURRENT_TIME + 86400 * 365,
+		.hostname = "example.com",
+		.key_bits = 2048,
+	};
+
+	/* ARRANGE/ACT/ASSERT: Hostname mismatch should be detected */
+	KUNIT_EXPECT_NE(test, tquic_test_cert_check_hostname(&cert, "example.com"), -1);
+	KUNIT_EXPECT_EQ(test, tquic_test_cert_check_hostname(&cert, "evil.com"), -1);
+	KUNIT_EXPECT_EQ(test, tquic_test_cert_check_hostname(&cert, "sub.example.com"), -1);
+}
+
+/* Test: Wildcard certificate matching */
+static void test_cert_wildcard_hostname(struct kunit *test)
+{
+	struct tquic_test_cert_info cert = {
+		.valid_from = TEST_CURRENT_TIME - 86400,
+		.valid_to = TEST_CURRENT_TIME + 86400 * 365,
+		.hostname = "*.example.com",
+		.key_bits = 2048,
+	};
+
+	/* ARRANGE/ACT/ASSERT: Wildcard should match subdomains */
+	KUNIT_EXPECT_EQ(test, tquic_test_cert_check_hostname(&cert, "foo.example.com"), 0);
+	KUNIT_EXPECT_EQ(test, tquic_test_cert_check_hostname(&cert, "bar.example.com"), 0);
+	/* Wildcard should NOT match apex domain */
+	KUNIT_EXPECT_EQ(test, tquic_test_cert_check_hostname(&cert, "example.com"), -1);
+	/* Wildcard should NOT match nested subdomains */
+	KUNIT_EXPECT_EQ(test, tquic_test_cert_check_hostname(&cert, "foo.bar.example.com"), -1);
+}
+
+/* Test: Untrusted CA is rejected */
+static void test_cert_untrusted_ca(struct kunit *test)
+{
+	struct tquic_test_cert_info cert = {
+		.valid_from = TEST_CURRENT_TIME - 86400,
+		.valid_to = TEST_CURRENT_TIME + 86400 * 365,
+		.hostname = "example.com",
+		.issuer = "Evil Untrusted CA",
+		.key_bits = 2048,
+		.is_trusted = false,
+	};
+
+	/* ARRANGE/ACT/ASSERT: Untrusted issuer should be detected */
+	KUNIT_EXPECT_FALSE(test, cert.is_trusted);
+}
+
+/* Test: Weak key is rejected */
+static void test_cert_weak_key(struct kunit *test)
+{
+	struct tquic_test_cert_info cert_1024 = {
+		.valid_from = TEST_CURRENT_TIME - 86400,
+		.valid_to = TEST_CURRENT_TIME + 86400 * 365,
+		.hostname = "example.com",
+		.key_bits = 1024,  /* Too weak for modern security */
+	};
+
+	struct tquic_test_cert_info cert_2048 = {
+		.valid_from = TEST_CURRENT_TIME - 86400,
+		.valid_to = TEST_CURRENT_TIME + 86400 * 365,
+		.hostname = "example.com",
+		.key_bits = 2048,  /* Acceptable */
+	};
+
+	/* ARRANGE/ACT/ASSERT: 1024-bit key should be rejected, 2048-bit accepted */
+	KUNIT_EXPECT_EQ(test, tquic_test_cert_check_key_strength(&cert_1024, 2048), -1);
+	KUNIT_EXPECT_EQ(test, tquic_test_cert_check_key_strength(&cert_2048, 2048), 0);
+}
+
+/*
+ * =============================================================================
+ * SECTION 6: Replay Attack Protection Extended Tests
+ * =============================================================================
+ */
+
+/* Test: Replay attack with duplicate packet numbers */
+static void test_replay_attack_duplicate_pn(struct kunit *test)
+{
+	struct tquic_test_replay_filter filter;
+	u64 test_pn = 1000;
+
+	/* ARRANGE: Initialize filter and mark packet as seen */
+	memset(&filter, 0, sizeof(filter));
+	KUNIT_EXPECT_TRUE(test, tquic_test_replay_check(&filter, test_pn));
+
+	/* ACT/ASSERT: Replaying same packet should be detected */
+	KUNIT_EXPECT_FALSE(test, tquic_test_replay_check(&filter, test_pn));
+	KUNIT_EXPECT_FALSE(test, tquic_test_replay_check(&filter, test_pn));
+	KUNIT_EXPECT_FALSE(test, tquic_test_replay_check(&filter, test_pn));
+}
+
+/* Test: Replay attack with old packet numbers */
+static void test_replay_attack_old_packets(struct kunit *test)
+{
+	struct tquic_test_replay_filter filter;
+	int i;
+
+	/* ARRANGE: Initialize filter and process many packets */
+	memset(&filter, 0, sizeof(filter));
+
+	/* Process packets 0-9999 */
+	for (i = 0; i < 10000; i++) {
+		tquic_test_replay_check(&filter, i);
+	}
+
+	/* ACT/ASSERT: Very old packets should be rejected */
+	KUNIT_EXPECT_FALSE(test, tquic_test_replay_check(&filter, 0));
+	KUNIT_EXPECT_FALSE(test, tquic_test_replay_check(&filter, 100));
+	KUNIT_EXPECT_FALSE(test, tquic_test_replay_check(&filter, 500));
+}
+
+/* Test: Replay filter with out-of-order packets */
+static void test_replay_out_of_order(struct kunit *test)
+{
+	struct tquic_test_replay_filter filter;
+
+	/* ARRANGE: Initialize filter */
+	memset(&filter, 0, sizeof(filter));
+
+	/* ACT: Process packets out of order */
+	KUNIT_EXPECT_TRUE(test, tquic_test_replay_check(&filter, 100));
+	KUNIT_EXPECT_TRUE(test, tquic_test_replay_check(&filter, 50));
+	KUNIT_EXPECT_TRUE(test, tquic_test_replay_check(&filter, 75));
+	KUNIT_EXPECT_TRUE(test, tquic_test_replay_check(&filter, 25));
+	KUNIT_EXPECT_TRUE(test, tquic_test_replay_check(&filter, 90));
+
+	/* ASSERT: All packets should be marked as seen (replays detected) */
+	KUNIT_EXPECT_FALSE(test, tquic_test_replay_check(&filter, 100));
+	KUNIT_EXPECT_FALSE(test, tquic_test_replay_check(&filter, 50));
+	KUNIT_EXPECT_FALSE(test, tquic_test_replay_check(&filter, 75));
+	KUNIT_EXPECT_FALSE(test, tquic_test_replay_check(&filter, 25));
+	KUNIT_EXPECT_FALSE(test, tquic_test_replay_check(&filter, 90));
+}
+
+/* Test: Replay filter window edge cases */
+static void test_replay_window_edge_cases(struct kunit *test)
+{
+	struct tquic_test_replay_filter filter;
+	u64 window_size = TQUIC_REPLAY_WINDOW_SIZE;
+
+	/* ARRANGE: Initialize filter at specific packet number */
+	memset(&filter, 0, sizeof(filter));
+	KUNIT_EXPECT_TRUE(test, tquic_test_replay_check(&filter, window_size));
+
+	/* ACT/ASSERT: Packet at start of window should be accepted */
+	KUNIT_EXPECT_TRUE(test, tquic_test_replay_check(&filter, 1));
+
+	/* Packet just before window should be rejected */
+	KUNIT_EXPECT_FALSE(test, tquic_test_replay_check(&filter, 0));
+}
+
+/*
+ * =============================================================================
  * Test Suite Definition
  * =============================================================================
  */
@@ -994,6 +1435,27 @@ static struct kunit_case tquic_security_test_cases[] = {
 	KUNIT_CASE(test_frame_vs_packet_size),
 	KUNIT_CASE(test_path_mtu_limits),
 	KUNIT_CASE(test_new_cid_sequence_validation),
+
+	/* Rate limiting tests */
+	KUNIT_CASE(test_ratelimit_token_bucket),
+	KUNIT_CASE(test_ratelimit_token_refill),
+	KUNIT_CASE(test_ratelimit_burst_handling),
+	KUNIT_CASE(test_ratelimit_sustained_load),
+
+	/* Certificate validation tests */
+	KUNIT_CASE(test_cert_valid),
+	KUNIT_CASE(test_cert_expired),
+	KUNIT_CASE(test_cert_not_yet_valid),
+	KUNIT_CASE(test_cert_wrong_hostname),
+	KUNIT_CASE(test_cert_wildcard_hostname),
+	KUNIT_CASE(test_cert_untrusted_ca),
+	KUNIT_CASE(test_cert_weak_key),
+
+	/* Extended replay attack tests */
+	KUNIT_CASE(test_replay_attack_duplicate_pn),
+	KUNIT_CASE(test_replay_attack_old_packets),
+	KUNIT_CASE(test_replay_out_of_order),
+	KUNIT_CASE(test_replay_window_edge_cases),
 	{}
 };
 

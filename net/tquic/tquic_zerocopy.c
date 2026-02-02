@@ -95,8 +95,10 @@ int tquic_zc_state_alloc(struct tquic_connection *conn)
 	zc->outstanding = 0;
 	zc->enabled = false;
 
-	/* Store in connection - using state_machine as placeholder
-	 * In production, add dedicated field to tquic_connection */
+	/* Store state in connection's dedicated field */
+	conn->zc_state = zc;
+
+	pr_debug("tquic: zero-copy state allocated\n");
 	return 0;
 }
 EXPORT_SYMBOL_GPL(tquic_zc_state_alloc);
@@ -107,7 +109,36 @@ EXPORT_SYMBOL_GPL(tquic_zc_state_alloc);
  */
 void tquic_zc_state_free(struct tquic_connection *conn)
 {
-	/* Cleanup would happen here */
+	struct tquic_zc_state *zc;
+	struct tquic_zc_entry *entry, *tmp;
+
+	if (!conn)
+		return;
+
+	zc = conn->zc_state;
+	if (!zc)
+		return;
+
+	spin_lock_bh(&zc->lock);
+
+	/* Free all pending entries */
+	list_for_each_entry_safe(entry, tmp, &zc->pending, list) {
+		list_del(&entry->list);
+		tquic_zc_entry_free(entry);
+	}
+
+	/* Free all completed entries */
+	list_for_each_entry_safe(entry, tmp, &zc->completed, list) {
+		list_del(&entry->list);
+		tquic_zc_entry_free(entry);
+	}
+
+	spin_unlock_bh(&zc->lock);
+
+	kfree(zc);
+	conn->zc_state = NULL;
+
+	pr_debug("tquic: zero-copy state freed\n");
 }
 EXPORT_SYMBOL_GPL(tquic_zc_state_free);
 

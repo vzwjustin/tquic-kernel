@@ -618,6 +618,8 @@ struct tquic_stream_args {
 #define TQUIC_SO_DATAGRAM		80	/* Enable DATAGRAM frame support */
 #define TQUIC_SO_MAX_DATAGRAM_SIZE	81	/* Get max datagram size (read-only) */
 #define TQUIC_SO_DATAGRAM_QUEUE_LEN	82	/* Get/set datagram queue length */
+#define TQUIC_SO_DATAGRAM_STATS		83	/* Get datagram statistics (read-only) */
+#define TQUIC_SO_DATAGRAM_RCVBUF	84	/* Get/set datagram receive buffer size */
 
 /**
  * struct tquic_datagram_info - DATAGRAM frame ancillary data
@@ -649,6 +651,28 @@ struct tquic_datagram_info {
 
 /* Maximum datagram frame size (excluding QUIC header overhead) */
 #define TQUIC_MAX_DATAGRAM_SIZE		65527
+
+/**
+ * struct tquic_datagram_stats - DATAGRAM frame statistics
+ * @datagrams_sent: Total datagrams sent successfully
+ * @datagrams_received: Total datagrams received and delivered to application
+ * @datagrams_dropped: Datagrams dropped due to queue full or allocation failure
+ * @recv_queue_len: Current number of datagrams in receive queue
+ * @recv_queue_max: Maximum receive queue depth
+ * @max_send_size: Maximum datagram size we can send (peer's limit)
+ * @max_recv_size: Maximum datagram size we accept (our limit)
+ *
+ * Used with getsockopt(TQUIC_SO_DATAGRAM_STATS) to query datagram statistics.
+ */
+struct tquic_datagram_stats {
+	__u64 datagrams_sent;		/* Datagrams sent */
+	__u64 datagrams_received;	/* Datagrams received */
+	__u64 datagrams_dropped;	/* Datagrams dropped (queue full/alloc fail) */
+	__u32 recv_queue_len;		/* Current queue depth */
+	__u32 recv_queue_max;		/* Maximum queue depth */
+	__u64 max_send_size;		/* Max size we can send */
+	__u64 max_recv_size;		/* Max size we accept */
+};
 
 /*
  * HTTP/3 Support (RFC 9114)
