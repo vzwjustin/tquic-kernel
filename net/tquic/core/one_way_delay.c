@@ -550,6 +550,10 @@ int tquic_owd_generate_ack_1wd(struct tquic_owd_state *owd,
 	if (!(owd->flags & TQUIC_OWD_FLAG_ENABLED))
 		return -ENOENT;
 
+	/* Get current time before acquiring lock to avoid ktime_get() overhead
+	 * while holding spinlock, which can cause lock contention on some archs */
+	timestamp = ktime_to_us(ktime_get());
+
 	spin_lock(&loss->lock);
 
 	if (list_empty(&loss->ack_ranges[pn_space])) {
@@ -564,8 +568,7 @@ int tquic_owd_generate_ack_1wd(struct tquic_owd_state *owd,
 	first_range = range->end - range->start;
 
 	/* Calculate ACK delay in microseconds */
-	ack_delay = ktime_us_delta(ktime_get(),
-				   loss->largest_received_time[pn_space]);
+	ack_delay = timestamp - ktime_to_us(loss->largest_received_time[pn_space]);
 
 	/* Range count (excluding first range) */
 	range_count = loss->num_ack_ranges[pn_space] - 1;

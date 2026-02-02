@@ -518,8 +518,9 @@ static void traffic_shaper_decoy_work(struct work_struct *work)
 	/* Random size between 64 and MTU bytes */
 	decoy_size = 64 + (rand_val % (shaper->mtu - 64 + 1));
 
-	/* Allocate sk_buff for decoy packet */
-	skb = alloc_skb(decoy_size + NET_SKB_PAD + NET_IP_ALIGN, GFP_ATOMIC);
+	/* Allocate sk_buff for decoy packet - use GFP_KERNEL since workqueue
+	 * runs in process context that can sleep */
+	skb = alloc_skb(decoy_size + NET_SKB_PAD + NET_IP_ALIGN, GFP_KERNEL);
 	if (!skb)
 		goto reschedule;
 
