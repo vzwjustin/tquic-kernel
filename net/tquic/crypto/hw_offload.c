@@ -365,7 +365,12 @@ struct tquic_crypto_ctx *tquic_crypto_ctx_alloc(u16 cipher_suite, gfp_t gfp)
 	}
 
 	/* Set authentication tag length */
-	crypto_aead_setauthsize(ctx->aead, 16);
+	if (crypto_aead_setauthsize(ctx->aead, 16)) {
+		pr_err("tquic_hw_offload: failed to set auth tag size\n");
+		crypto_free_aead(ctx->aead);
+		kfree(ctx);
+		return NULL;
+	}
 
 	pr_debug("tquic_hw_offload: allocated ctx with impl=%s cipher=0x%04x\n",
 		 tquic_crypto_impl_name(ctx->impl), cipher_suite);
@@ -827,7 +832,13 @@ int tquic_qat_init(struct tquic_qat_ctx *ctx)
 	ctx->tfm = tfm;
 	ctx->qat_available = true;
 
-	crypto_aead_setauthsize(tfm, 16);
+	if (crypto_aead_setauthsize(tfm, 16)) {
+		pr_err("tquic_qat: failed to set auth tag size\n");
+		crypto_free_aead(tfm);
+		ctx->tfm = NULL;
+		ctx->qat_available = false;
+		return -EINVAL;
+	}
 
 	pr_info("tquic_qat: QAT offload initialized\n");
 

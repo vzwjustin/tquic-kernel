@@ -952,7 +952,11 @@ int tquic_session_ticket_encode(const struct tquic_session_ticket_plaintext *pla
 		return ret;
 	}
 
-	crypto_aead_setauthsize(aead, TQUIC_SESSION_TICKET_TAG_LEN);
+	if (crypto_aead_setauthsize(aead, TQUIC_SESSION_TICKET_TAG_LEN)) {
+		pr_err("tquic_zero_rtt: failed to set auth tag size\n");
+		crypto_free_aead(aead);
+		return -EINVAL;
+	}
 
 	/* Allocate request and payload buffer */
 	req = aead_request_alloc(aead, GFP_KERNEL);
@@ -1079,7 +1083,11 @@ int tquic_session_ticket_decode(const u8 *ticket, u32 ticket_len,
 		return ret;
 	}
 
-	crypto_aead_setauthsize(aead, TQUIC_SESSION_TICKET_TAG_LEN);
+	if (crypto_aead_setauthsize(aead, TQUIC_SESSION_TICKET_TAG_LEN)) {
+		pr_err("tquic_zero_rtt: failed to set auth tag size\n");
+		crypto_free_aead(aead);
+		return -EINVAL;
+	}
 
 	/* Allocate request and payload buffer */
 	req = aead_request_alloc(aead, GFP_KERNEL);
@@ -1467,7 +1475,11 @@ int tquic_zero_rtt_encrypt(struct tquic_connection *conn,
 		return ret;
 	}
 
-	crypto_aead_setauthsize(aead, 16);
+	if (crypto_aead_setauthsize(aead, 16)) {
+		pr_err("tquic_zero_rtt: failed to set auth tag size for encryption\n");
+		crypto_free_aead(aead);
+		return -EINVAL;
+	}
 
 	req = aead_request_alloc(aead, GFP_ATOMIC);
 	if (!req) {
@@ -1680,7 +1692,11 @@ int tquic_zero_rtt_decrypt(struct tquic_connection *conn,
 		return ret;
 	}
 
-	crypto_aead_setauthsize(aead, 16);
+	if (crypto_aead_setauthsize(aead, 16)) {
+		pr_err("tquic_zero_rtt: failed to set auth tag size for decryption\n");
+		crypto_free_aead(aead);
+		return -EINVAL;
+	}
 
 	req = aead_request_alloc(aead, GFP_ATOMIC);
 	if (!req) {

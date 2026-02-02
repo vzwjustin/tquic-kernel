@@ -842,7 +842,12 @@ struct tquic_crypto_state *tquic_crypto_init_versioned(const struct tquic_cid *d
 	}
 
 	/* Set AEAD auth tag length */
-	crypto_aead_setauthsize(crypto->aead, 16);
+	ret = crypto_aead_setauthsize(crypto->aead, 16);
+	if (ret) {
+		pr_err("tquic_crypto: failed to set auth tag size: %d\n", ret);
+		tquic_crypto_cleanup(crypto);
+		return NULL;
+	}
 
 	/* Derive initial keys using version-appropriate salt and labels */
 	ret = tquic_derive_initial_keys_versioned(crypto, dcid, is_server, version);
