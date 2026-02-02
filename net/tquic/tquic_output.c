@@ -1893,95 +1893,9 @@ int tquic_send_ack(struct tquic_connection *conn, struct tquic_path *path,
 EXPORT_SYMBOL_GPL(tquic_send_ack);
 
 /*
- * Send PATH_CHALLENGE
+ * tquic_send_path_challenge and tquic_send_path_response are defined
+ * in core/connection.c
  */
-int tquic_send_path_challenge(struct tquic_connection *conn,
-			      struct tquic_path *path)
-{
-	struct tquic_frame_ctx ctx;
-	struct sk_buff *skb;
-	LIST_HEAD(frames);
-	struct tquic_pending_frame *frame;
-	u64 pkt_num;
-
-	/* Generate random challenge data */
-	get_random_bytes(path->challenge_data, 8);
-
-	/* Create frame */
-	frame = kzalloc(sizeof(*frame), GFP_ATOMIC);
-	if (!frame)
-		return -ENOMEM;
-
-	frame->type = TQUIC_FRAME_PATH_CHALLENGE;
-	frame->data = kmalloc(8, GFP_ATOMIC);
-	if (!frame->data) {
-		kfree(frame);
-		return -ENOMEM;
-	}
-	memcpy(frame->data, path->challenge_data, 8);
-	frame->len = 8;
-
-	INIT_LIST_HEAD(&frame->list);
-	list_add_tail(&frame->list, &frames);
-
-	spin_lock(&conn->lock);
-	pkt_num = conn->stats.tx_packets++;
-	spin_unlock(&conn->lock);
-
-	/* Assemble and send */
-	skb = tquic_assemble_packet(conn, path, -1, pkt_num, &frames);
-	if (!skb)
-		return -ENOMEM;
-
-	/* Update MIB counter for path migration attempt */
-	if (conn->sk)
-		TQUIC_INC_STATS(sock_net(conn->sk), TQUIC_MIB_PATHMIGRATIONS);
-
-	return tquic_output_packet(conn, path, skb);
-}
-EXPORT_SYMBOL_GPL(tquic_send_path_challenge);
-
-/*
- * Send PATH_RESPONSE
- */
-int tquic_send_path_response(struct tquic_connection *conn,
-			     struct tquic_path *path,
-			     const u8 challenge_data[8])
-{
-	struct tquic_pending_frame *frame;
-	struct sk_buff *skb;
-	LIST_HEAD(frames);
-	u64 pkt_num;
-
-	/* Create frame */
-	frame = kzalloc(sizeof(*frame), GFP_ATOMIC);
-	if (!frame)
-		return -ENOMEM;
-
-	frame->type = TQUIC_FRAME_PATH_RESPONSE;
-	frame->data = kmalloc(8, GFP_ATOMIC);
-	if (!frame->data) {
-		kfree(frame);
-		return -ENOMEM;
-	}
-	memcpy(frame->data, challenge_data, 8);
-	frame->len = 8;
-
-	INIT_LIST_HEAD(&frame->list);
-	list_add_tail(&frame->list, &frames);
-
-	spin_lock(&conn->lock);
-	pkt_num = conn->stats.tx_packets++;
-	spin_unlock(&conn->lock);
-
-	/* Assemble and send */
-	skb = tquic_assemble_packet(conn, path, -1, pkt_num, &frames);
-	if (!skb)
-		return -ENOMEM;
-
-	return tquic_output_packet(conn, path, skb);
-}
-EXPORT_SYMBOL_GPL(tquic_send_path_response);
 
 /*
  * Send CONNECTION_CLOSE
