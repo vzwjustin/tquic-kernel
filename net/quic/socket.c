@@ -207,6 +207,49 @@ static inline struct ipv6_pinfo *quic_inet6_sk(const struct sock *sk)
 #endif
 
 /*
+ * QUIC Variable-Length Integer Encoding (RFC 9000 Section 16)
+ *
+ * Encodes an integer using QUIC's variable-length encoding scheme:
+ *   - 1 byte:  values 0-63 (6-bit, prefix 00)
+ *   - 2 bytes: values 64-16383 (14-bit, prefix 01)
+ *   - 4 bytes: values 16384-1073741823 (30-bit, prefix 10)
+ *   - 8 bytes: values 1073741824-4611686018427387903 (62-bit, prefix 11)
+ *
+ * Returns the number of bytes written.
+ */
+static inline int quic_encode_varint(u8 *p, u64 value)
+{
+	if (value < 64) {
+		/* 1-byte encoding: 00xxxxxx */
+		*p = (u8)value;
+		return 1;
+	} else if (value < 16384) {
+		/* 2-byte encoding: 01xxxxxx xxxxxxxx */
+		*p++ = 0x40 | (u8)(value >> 8);
+		*p = (u8)(value & 0xff);
+		return 2;
+	} else if (value < 1073741824) {
+		/* 4-byte encoding: 10xxxxxx xxxxxxxx xxxxxxxx xxxxxxxx */
+		*p++ = 0x80 | (u8)(value >> 24);
+		*p++ = (u8)(value >> 16);
+		*p++ = (u8)(value >> 8);
+		*p = (u8)(value & 0xff);
+		return 4;
+	} else {
+		/* 8-byte encoding: 11xxxxxx xxxxxxxx ... (8 bytes total) */
+		*p++ = 0xc0 | (u8)(value >> 56);
+		*p++ = (u8)(value >> 48);
+		*p++ = (u8)(value >> 40);
+		*p++ = (u8)(value >> 32);
+		*p++ = (u8)(value >> 24);
+		*p++ = (u8)(value >> 16);
+		*p++ = (u8)(value >> 8);
+		*p = (u8)(value & 0xff);
+		return 8;
+	}
+}
+
+/*
  * Stream table operations
  */
 static int quic_stream_table_init(struct quic_stream_table *table, unsigned int size)
@@ -1192,25 +1235,14 @@ static int quic_sendmsg_stream(struct sock *sk, struct msghdr *msg,
 		/* Frame type: 0x08 base + 0x04 (OFF) + 0x02 (LEN) = 0x0E */
 		*p++ = 0x08 | 0x04 | 0x02;
 
-		/* Stream ID (2-byte varint for common case) */
-		if (stream_id < 64) {
-			*p++ = stream_id & 0x3f;
-		} else {
-			*p++ = 0x40 | ((stream_id >> 8) & 0x3f);
-			*p++ = stream_id & 0xff;
-		}
+		/* Stream ID (varint - RFC 9000 Section 16) */
+		p += quic_encode_varint(p, stream_id);
 
-		/* Offset (2-byte varint) */
-		if (qsk->tx_offset < 64) {
-			*p++ = qsk->tx_offset & 0x3f;
-		} else {
-			*p++ = 0x40 | ((qsk->tx_offset >> 8) & 0x3f);
-			*p++ = qsk->tx_offset & 0xff;
-		}
+		/* Offset (varint - RFC 9000 Section 16) */
+		p += quic_encode_varint(p, qsk->tx_offset);
 
-		/* Length (2-byte varint) */
-		*p++ = 0x40 | ((to_send >> 8) & 0x3f);
-		*p++ = to_send & 0xff;
+		/* Length (varint - RFC 9000 Section 16) */
+		p += quic_encode_varint(p, to_send);
 
 		/* Stream data */
 		memcpy(p, user_data, to_send);
@@ -1447,8 +1479,9 @@ static int quic_recvmsg_stream(struct sock *sk, struct msghdr *msg,
 				if ((frame_type & 0xF8) == 0x08) {
 					bool has_offset = frame_type & 0x04;
 					bool has_length = frame_type & 0x02;
-					u64 tmp;
-					int varint_len;
+
+					(void)has_offset;  /* TODO: use for offset parsing */
+					(void)has_length;  /* TODO: use for length parsing */
 
 					offset++;
 
