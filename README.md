@@ -189,6 +189,19 @@ Sysctl tunables available at `/proc/sys/net/tquic/`:
 - **High-Performance Proxies**: Kernel-level QUIC termination
 - **SD-WAN**: Software-defined WAN with QUIC transport
 
+## Author
+
+**Justin Adams** ([@vzwjustin](https://github.com/vzwjustin))
+
+Designed and built from the ground up as a true kernel-level QUIC implementation for real-world WAN bonding. This is not a port or wrapper—it's a native Linux kernel module engineered for production deployment.
+
+## Acknowledgments
+
+- **Claude AI** (Anthropic) - Code implementation assistance
+- **IETF QUIC Working Group** - RFC 9000, 9001, 9002 specifications
+- **Linux Kernel Community** - MPTCP reference implementation and kernel networking APIs
+- **Google** - BBRv2 congestion control algorithm
+
 ## License
 
 GPL-2.0 (Linux kernel)
