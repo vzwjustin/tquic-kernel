@@ -617,6 +617,81 @@ bool tquic_ack_freq_should_ack_immediately(struct tquic_connection *conn)
 EXPORT_SYMBOL_GPL(tquic_ack_freq_should_ack_immediately);
 
 /**
+ * tquic_ack_freq_should_ack - Determine if ACK should be sent
+ * @state: ACK frequency state
+ * @pn: Packet number just received
+ * @ack_eliciting: Whether the packet was ack-eliciting
+ *
+ * Implements the ACK suppression algorithm from draft-ietf-quic-ack-frequency.
+ * Returns true if an ACK should be sent.
+ */
+bool tquic_ack_freq_should_ack(struct tquic_ack_frequency_state *state,
+			       u64 pn, bool ack_eliciting)
+{
+	bool should_ack = false;
+	u64 threshold;
+	u64 gap;
+
+	if (!state)
+		return true;  /* Default to ACK everything */
+
+	if (!ack_eliciting)
+		return false;  /* Non-ack-eliciting packets don't trigger ACKs */
+
+	spin_lock(&state->lock);
+
+	/* Extension not enabled - use default behavior */
+	if (!state->enabled) {
+		/* Default: ACK every 2 packets */
+		state->packets_since_ack++;
+		if (state->packets_since_ack >= 2)
+			should_ack = true;
+		spin_unlock(&state->lock);
+		return should_ack;
+	}
+
+	/* Check for pending IMMEDIATE_ACK */
+	if (state->immediate_ack_pending) {
+		state->immediate_ack_pending = false;
+		should_ack = true;
+		goto out;
+	}
+
+	/* Increment packet counter */
+	state->packets_since_ack++;
+
+	/* Check ack-eliciting threshold */
+	threshold = state->ack_eliciting_threshold;
+	if (state->packets_since_ack >= threshold) {
+		should_ack = true;
+		goto out;
+	}
+
+	/* Check reorder threshold (if not ignoring order) */
+	if (!state->ignore_order && state->reorder_threshold > 0) {
+		if (pn < state->largest_pn_received) {
+			gap = state->largest_pn_received - pn;
+			if (gap >= state->reorder_threshold) {
+				pr_debug("tquic: reorder threshold exceeded "
+					 "(gap=%llu >= %llu)\n",
+					 gap, state->reorder_threshold);
+				should_ack = true;
+				goto out;
+			}
+		}
+	}
+
+	/* Update largest received */
+	if (pn > state->largest_pn_received)
+		state->largest_pn_received = pn;
+
+out:
+	spin_unlock(&state->lock);
+	return should_ack;
+}
+EXPORT_SYMBOL_GPL(tquic_ack_freq_should_ack);
+
+/**
  * tquic_ack_freq_get_max_delay - Get current max ACK delay
  */
 u64 tquic_ack_freq_get_max_delay(struct tquic_connection *conn)
