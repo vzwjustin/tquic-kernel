@@ -27,8 +27,10 @@
 #include <net/route.h>
 #include <net/ip.h>
 #include <net/dst.h>
+#include <net/ipv6_stubs.h>
 #include <net/tquic.h>
-#include <net/netns/tquic.h>
+#include <net/tquic_pmtud.h>
+#include "protocol.h"
 #include "cong/tquic_cong.h"
 
 /*
@@ -72,21 +74,9 @@
  * =============================================================================
  */
 
-/**
- * enum tquic_pmtud_state - PMTUD state machine states
- * @TQUIC_PMTUD_DISABLED: PMTUD not active
- * @TQUIC_PMTUD_BASE: Using BASE_PLPMTU (1200 bytes for QUIC)
- * @TQUIC_PMTUD_SEARCHING: Actively probing for larger MTU
- * @TQUIC_PMTUD_SEARCH_COMPLETE: Found working MTU, probing complete
- * @TQUIC_PMTUD_ERROR: Probe failed, backing off
+/*
+ * Note: enum tquic_pmtud_state is defined in <net/tquic.h>
  */
-enum tquic_pmtud_state {
-	TQUIC_PMTUD_DISABLED = 0,
-	TQUIC_PMTUD_BASE,
-	TQUIC_PMTUD_SEARCHING,
-	TQUIC_PMTUD_SEARCH_COMPLETE,
-	TQUIC_PMTUD_ERROR,
-};
 
 /**
  * struct tquic_pmtud_state_info - Per-path PMTUD state
@@ -235,7 +225,8 @@ static u32 tquic_pmtud_get_interface_mtu(struct tquic_path *path)
 			fl6.flowi6_proto = IPPROTO_UDP;
 
 			rcu_read_lock();
-			dst6 = ip6_route_output(sock_net(sk), sk, &fl6);
+			dst6 = ipv6_stub->ipv6_dst_lookup_flow(sock_net(sk), sk,
+							       &fl6, NULL);
 			if (!IS_ERR(dst6)) {
 				mtu = min(mtu, dst_mtu(dst6) - overhead);
 				dst_release(dst6);

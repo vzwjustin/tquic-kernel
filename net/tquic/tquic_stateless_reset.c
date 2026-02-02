@@ -44,15 +44,18 @@
 #include <linux/in.h>
 #include <linux/in6.h>
 #include <crypto/hash.h>
+#include <crypto/utils.h>
 #include <net/sock.h>
 #include <net/udp.h>
 #include <net/ip.h>
 #include <net/ipv6.h>
+#include <net/ip6_route.h>
 #include <net/route.h>
 #include <net/tquic.h>
 
 #include "tquic_stateless_reset.h"
 #include "tquic_mib.h"
+#include "tquic_cid.h"
 #include "protocol.h"
 
 /*

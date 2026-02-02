@@ -25,7 +25,7 @@
 #include <linux/jhash.h>
 #include <net/tquic.h>
 #include <net/net_namespace.h>
-#include <net/netns/tquic.h>
+#include "../protocol.h"
 #include "tquic_cong.h"
 
 /* Forward declaration for pacing update (defined in tquic_output.c) */
@@ -82,8 +82,11 @@ static int tquic_get_path_degrade_threshold(struct tquic_path *path)
 	if (path && path->conn && path->conn->sk)
 		net = sock_net(path->conn->sk);
 
-	if (net && net->tquic.path_degrade_threshold > 0)
-		return net->tquic.path_degrade_threshold;
+	if (net) {
+		struct tquic_net *tn = tquic_pernet(net);
+		if (tn && tn->path_degrade_threshold > 0)
+			return tn->path_degrade_threshold;
+	}
 
 	return TQUIC_PATH_DEGRADE_LOSS_THRESHOLD_DEFAULT;
 }
@@ -820,15 +823,21 @@ int tquic_cong_set_default(struct net *net, const char *name)
 		}
 	}
 
-	/* Store name in netns buffer */
-	strscpy(net->tquic.cc_name, name, NETNS_TQUIC_CC_NAME_MAX);
+	{
+		struct tquic_net *tn = tquic_pernet(net);
+		if (!tn)
+			return -EINVAL;
 
-	/* Swap default CC algorithm (RCU protected) */
-	spin_lock(&tquic_cong_list_lock);
-	old_ca = rcu_dereference_protected(net->tquic.default_cong,
-					   lockdep_is_held(&tquic_cong_list_lock));
-	rcu_assign_pointer(net->tquic.default_cong, ca);
-	spin_unlock(&tquic_cong_list_lock);
+		/* Store name in netns buffer */
+		strscpy(tn->cc_name, name, TQUIC_NET_CC_NAME_MAX);
+
+		/* Swap default CC algorithm (RCU protected) */
+		spin_lock(&tquic_cong_list_lock);
+		old_ca = rcu_dereference_protected(tn->default_cong,
+						   lockdep_is_held(&tquic_cong_list_lock));
+		rcu_assign_pointer(tn->default_cong, ca);
+		spin_unlock(&tquic_cong_list_lock);
+	}
 
 	/* Release old CC algorithm's module reference */
 	if (old_ca && old_ca->owner)
@@ -847,10 +856,16 @@ EXPORT_SYMBOL_GPL(tquic_cong_set_default);
  */
 struct tquic_cong_ops *tquic_cong_get_default(struct net *net)
 {
+	struct tquic_net *tn;
+
 	if (!net)
 		return NULL;
 
-	return rcu_dereference(net->tquic.default_cong);
+	tn = tquic_pernet(net);
+	if (!tn)
+		return NULL;
+
+	return rcu_dereference(tn->default_cong);
 }
 EXPORT_SYMBOL_GPL(tquic_cong_get_default);
 
@@ -863,17 +878,22 @@ EXPORT_SYMBOL_GPL(tquic_cong_get_default);
 const char *tquic_cong_get_default_name(struct net *net)
 {
 	struct tquic_cong_ops *ca;
+	struct tquic_net *tn;
 	const char *name;
 
 	if (!net)
 		return TQUIC_DEFAULT_CC_NAME;
 
+	tn = tquic_pernet(net);
+	if (!tn)
+		return TQUIC_DEFAULT_CC_NAME;
+
 	rcu_read_lock();
-	ca = rcu_dereference(net->tquic.default_cong);
+	ca = rcu_dereference(tn->default_cong);
 	if (ca)
 		name = ca->name;
-	else if (net->tquic.cc_name[0])
-		name = net->tquic.cc_name;
+	else if (tn->cc_name[0])
+		name = tn->cc_name;
 	else
 		name = TQUIC_DEFAULT_CC_NAME;
 	rcu_read_unlock();
@@ -891,13 +911,18 @@ EXPORT_SYMBOL_GPL(tquic_cong_get_default_name);
  */
 bool tquic_cong_is_bbr_preferred(struct net *net, u64 rtt_us)
 {
+	struct tquic_net *tn;
 	u32 threshold_us;
 
 	if (!net)
 		return false;
 
+	tn = tquic_pernet(net);
+	if (!tn)
+		return false;
+
 	/* Convert threshold from ms to us */
-	threshold_us = net->tquic.bbr_rtt_threshold_ms * 1000;
+	threshold_us = tn->bbr_rtt_threshold_ms * 1000;
 
 	/* BBR is preferred for high-RTT paths */
 	return rtt_us >= threshold_us;
@@ -913,10 +938,15 @@ EXPORT_SYMBOL_GPL(tquic_cong_is_bbr_preferred);
  */
 const char *tquic_cong_select_for_rtt(struct net *net, u64 rtt_us)
 {
+	struct tquic_net *tn;
+
 	/* If BBR is preferred for high RTT and threshold is set */
-	if (net && net->tquic.bbr_rtt_threshold_ms > 0 &&
-	    tquic_cong_is_bbr_preferred(net, rtt_us)) {
-		return "bbr";
+	if (net) {
+		tn = tquic_pernet(net);
+		if (tn && tn->bbr_rtt_threshold_ms > 0 &&
+		    tquic_cong_is_bbr_preferred(net, rtt_us)) {
+			return "bbr";
+		}
 	}
 
 	/* Otherwise use the per-netns default */
@@ -1102,8 +1132,11 @@ void tquic_cong_on_ecn(struct tquic_path *path, u64 ecn_ce_count)
 
 	/* Check if ECN is enabled at netns level */
 	if (path->conn && path->conn->sk) {
+		struct tquic_net *tn;
+
 		net = sock_net(path->conn->sk);
-		if (net && !net->tquic.ecn_enabled) {
+		tn = net ? tquic_pernet(net) : NULL;
+		if (tn && !tn->ecn_enabled) {
 			/* ECN disabled for this namespace, ignore CE marks */
 			pr_debug("tquic_cong: ECN CE ignored (ecn_enabled=0)\n");
 			return;

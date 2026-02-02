@@ -19,7 +19,7 @@
 
 #include <linux/types.h>
 #include <linux/ktime.h>
-#include "../cong.h"
+#include "tquic_cong.h"
 
 /* BBRv2 constants */
 #define BBR_SCALE		8	/* Bandwidth scaling shift */
@@ -86,11 +86,11 @@ struct bbr_params {
 };
 
 /**
- * struct minmax_sample - Sample for windowed min/max tracking
+ * struct bbr_minmax_sample - Sample for windowed min/max tracking
  * @time: Timestamp of sample
  * @value: Sample value
  */
-struct minmax_sample {
+struct bbr_minmax_sample {
 	u64 time;
 	u64 value;
 };
@@ -101,7 +101,7 @@ struct minmax_sample {
  * @window_len: Window length in time units
  */
 struct bbr_minmax {
-	struct minmax_sample samples[3];
+	struct bbr_minmax_sample samples[3];
 	u64 window_len;
 };
 
@@ -139,7 +139,7 @@ struct bbr_minmax {
  * @params: Tunable parameters
  */
 struct bbrv2 {
-	struct tquic_cong base;
+	struct tquic_path *path;	/* Associated path */
 	enum bbr_mode mode;
 	enum bbr2_probe_bw_phase probe_bw_phase;
 	struct bbr_minmax bw_filter;
@@ -155,6 +155,7 @@ struct bbrv2 {
 	u32 prior_cwnd;
 	u64 round_count;
 	u64 next_round_delivered;
+	u64 bytes_delivered;		/* Total bytes delivered */
 	u32 cycle_idx;
 	u64 cycle_start;
 	u64 probe_rtt_start;
@@ -172,7 +173,7 @@ struct bbrv2 {
 };
 
 /* BBRv2 congestion control operations */
-extern const struct tquic_cong_ops bbrv2_cong_ops;
+extern struct tquic_cong_ops bbrv2_cong_ops;
 
 /* Module init/exit */
 int __init tquic_bbrv2_init(void);

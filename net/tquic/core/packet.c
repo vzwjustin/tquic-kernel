@@ -26,6 +26,8 @@
 #include <net/tquic_frame.h>
 #include <linux/unaligned.h>
 
+#include "varint.h"
+
 /* QUIC v1 packet type constants (RFC 9000) */
 #define QUIC_PACKET_TYPE_INITIAL	0x00
 #define QUIC_PACKET_TYPE_0RTT		0x01
@@ -211,140 +213,6 @@ static inline bool tquic_is_version_2(u32 version)
  *   10 = 4 bytes (30 bits of value)
  *   11 = 8 bytes (62 bits of value)
  */
-
-/**
- * tquic_varint_decode - Decode a variable-length integer
- * @data: Pointer to data buffer
- * @len: Available length in buffer
- * @value: Output value
- *
- * Returns: Number of bytes consumed, or negative error
- */
-int tquic_varint_decode(const u8 *data, size_t len, u64 *value)
-{
-	u8 prefix;
-	int bytes;
-
-	if (len < 1)
-		return -EINVAL;
-
-	prefix = data[0] & QUIC_VARINT_PREFIX_MASK;
-
-	switch (prefix) {
-	case QUIC_VARINT_1BYTE_PREFIX:
-		bytes = 1;
-		break;
-	case QUIC_VARINT_2BYTE_PREFIX:
-		bytes = 2;
-		break;
-	case QUIC_VARINT_4BYTE_PREFIX:
-		bytes = 4;
-		break;
-	case QUIC_VARINT_8BYTE_PREFIX:
-		bytes = 8;
-		break;
-	default:
-		return -EINVAL;
-	}
-
-	if (len < bytes)
-		return -EINVAL;
-
-	switch (bytes) {
-	case 1:
-		*value = data[0] & 0x3f;
-		break;
-	case 2:
-		*value = ((u64)(data[0] & 0x3f) << 8) | data[1];
-		break;
-	case 4:
-		*value = ((u64)(data[0] & 0x3f) << 24) |
-			 ((u64)data[1] << 16) |
-			 ((u64)data[2] << 8) |
-			 data[3];
-		break;
-	case 8:
-		*value = ((u64)(data[0] & 0x3f) << 56) |
-			 ((u64)data[1] << 48) |
-			 ((u64)data[2] << 40) |
-			 ((u64)data[3] << 32) |
-			 ((u64)data[4] << 24) |
-			 ((u64)data[5] << 16) |
-			 ((u64)data[6] << 8) |
-			 data[7];
-		break;
-	}
-
-	return bytes;
-}
-EXPORT_SYMBOL_GPL(tquic_varint_decode);
-
-/**
- * tquic_varint_encode - Encode a variable-length integer
- * @value: Value to encode
- * @data: Output buffer
- * @len: Available buffer length
- *
- * Returns: Number of bytes written, or negative error
- */
-int tquic_varint_encode(u64 value, u8 *data, size_t len)
-{
-	if (value <= QUIC_VARINT_1BYTE_MAX) {
-		if (len < 1)
-			return -ENOSPC;
-		data[0] = (u8)value;
-		return 1;
-	} else if (value <= QUIC_VARINT_2BYTE_MAX) {
-		if (len < 2)
-			return -ENOSPC;
-		data[0] = QUIC_VARINT_2BYTE_PREFIX | ((value >> 8) & 0x3f);
-		data[1] = value & 0xff;
-		return 2;
-	} else if (value <= QUIC_VARINT_4BYTE_MAX) {
-		if (len < 4)
-			return -ENOSPC;
-		data[0] = QUIC_VARINT_4BYTE_PREFIX | ((value >> 24) & 0x3f);
-		data[1] = (value >> 16) & 0xff;
-		data[2] = (value >> 8) & 0xff;
-		data[3] = value & 0xff;
-		return 4;
-	} else if (value <= QUIC_VARINT_8BYTE_MAX) {
-		if (len < 8)
-			return -ENOSPC;
-		data[0] = QUIC_VARINT_8BYTE_PREFIX | ((value >> 56) & 0x3f);
-		data[1] = (value >> 48) & 0xff;
-		data[2] = (value >> 40) & 0xff;
-		data[3] = (value >> 32) & 0xff;
-		data[4] = (value >> 24) & 0xff;
-		data[5] = (value >> 16) & 0xff;
-		data[6] = (value >> 8) & 0xff;
-		data[7] = value & 0xff;
-		return 8;
-	}
-
-	return -EOVERFLOW;
-}
-EXPORT_SYMBOL_GPL(tquic_varint_encode);
-
-/**
- * tquic_varint_len - Get encoding length for a value
- * @value: Value to encode
- *
- * Returns: Number of bytes needed to encode value
- */
-int tquic_varint_len(u64 value)
-{
-	if (value <= QUIC_VARINT_1BYTE_MAX)
-		return 1;
-	else if (value <= QUIC_VARINT_2BYTE_MAX)
-		return 2;
-	else if (value <= QUIC_VARINT_4BYTE_MAX)
-		return 4;
-	else if (value <= QUIC_VARINT_8BYTE_MAX)
-		return 8;
-	return -EOVERFLOW;
-}
-EXPORT_SYMBOL_GPL(tquic_varint_len);
 
 /*
  * Packet Number Encoding/Decoding

@@ -26,6 +26,7 @@
 #include <net/tquic.h>
 #include <uapi/linux/tquic.h>
 
+#include "protocol.h"
 #include "tquic_mib.h"
 
 /* External reference to global connection table from tquic_main.c */
@@ -175,10 +176,14 @@ void tquic_log_error(struct net *net, struct tquic_connection *conn,
 {
 	struct tquic_error_ring *ring;
 	struct tquic_error_entry *entry;
+	struct tquic_net *tn;
 	int idx;
 
 	/* Get error ring for this namespace */
-	ring = net->tquic.error_ring;
+	tn = tquic_pernet(net);
+	if (!tn)
+		return;
+	ring = tn->error_ring;
 	if (!ring)
 		return;
 
@@ -436,7 +441,9 @@ static const struct seq_operations tquic_conn_seq_ops = {
 
 static int tquic_stat_seq_show(struct seq_file *seq, void *v)
 {
-	tquic_mib_seq_show(seq);
+	struct net *net = seq->private;
+
+	tquic_mib_seq_show_net(seq, net);
 
 	/* Include GRO statistics */
 	tquic_gro_stats_show(seq);
@@ -464,8 +471,12 @@ static void *tquic_errors_seq_start(struct seq_file *seq, loff_t *pos)
 {
 	struct tquic_errors_iter *iter = seq->private;
 	struct tquic_error_ring *ring;
+	struct tquic_net *tn;
 
-	ring = iter->net->tquic.error_ring;
+	tn = tquic_pernet(iter->net);
+	if (!tn)
+		return NULL;
+	ring = tn->error_ring;
 	if (!ring)
 		return NULL;
 
@@ -524,7 +535,12 @@ static int tquic_errors_seq_show(struct seq_file *seq, void *v)
 		return 0;
 	}
 
-	ring = iter->net->tquic.error_ring;
+	{
+		struct tquic_net *tn = tquic_pernet(iter->net);
+		if (!tn)
+			return 0;
+		ring = tn->error_ring;
+	}
 	if (!ring)
 		return 0;
 
@@ -583,27 +599,39 @@ static const struct seq_operations tquic_errors_seq_ops = {
 
 static int tquic_conn_seq_open(struct inode *inode, struct file *file)
 {
-	return seq_open_net(inode, file, &tquic_conn_seq_ops,
-			    sizeof(struct tquic_conn_iter));
+	struct seq_file *seq;
+	struct tquic_conn_iter *iter;
+	int ret;
+
+	ret = seq_open_private(file, &tquic_conn_seq_ops,
+			       sizeof(struct tquic_conn_iter));
+	if (ret < 0)
+		return ret;
+
+	seq = file->private_data;
+	iter = seq->private;
+	iter->net = pde_data(inode);
+
+	return 0;
 }
 
 static const struct proc_ops tquic_conn_proc_ops = {
 	.proc_open	= tquic_conn_seq_open,
 	.proc_read	= seq_read,
 	.proc_lseek	= seq_lseek,
-	.proc_release	= seq_release_net,
+	.proc_release	= seq_release_private,
 };
 
 static int tquic_stat_seq_open(struct inode *inode, struct file *file)
 {
-	return single_open_net(inode, file, tquic_stat_seq_show);
+	return single_open(file, tquic_stat_seq_show, pde_data(inode));
 }
 
 static const struct proc_ops tquic_stat_proc_ops = {
 	.proc_open	= tquic_stat_seq_open,
 	.proc_read	= seq_read,
 	.proc_lseek	= seq_lseek,
-	.proc_release	= single_release_net,
+	.proc_release	= single_release,
 };
 
 static int tquic_errors_seq_open(struct inode *inode, struct file *file)
@@ -612,14 +640,14 @@ static int tquic_errors_seq_open(struct inode *inode, struct file *file)
 	struct tquic_errors_iter *iter;
 	int ret;
 
-	ret = seq_open_net(inode, file, &tquic_errors_seq_ops,
-			   sizeof(struct tquic_errors_iter));
+	ret = seq_open_private(file, &tquic_errors_seq_ops,
+			       sizeof(struct tquic_errors_iter));
 	if (ret < 0)
 		return ret;
 
 	seq = file->private_data;
 	iter = seq->private;
-	iter->net = seq_file_net(seq);
+	iter->net = pde_data(inode);
 
 	return 0;
 }
@@ -628,7 +656,7 @@ static const struct proc_ops tquic_errors_proc_ops = {
 	.proc_open	= tquic_errors_seq_open,
 	.proc_read	= seq_read,
 	.proc_lseek	= seq_lseek,
-	.proc_release	= seq_release_net,
+	.proc_release	= seq_release_private,
 };
 
 /**
@@ -644,30 +672,34 @@ static const struct proc_ops tquic_errors_proc_ops = {
  *
  * Returns: 0 on success, negative errno on failure
  */
-int __init tquic_proc_init(struct net *net)
+int tquic_proc_init(struct net *net)
 {
 	struct proc_dir_entry *p;
+	struct tquic_net *tn = tquic_pernet(net);
+
+	if (!tn)
+		return -EINVAL;
 
 	/* Allocate error ring for this namespace */
-	net->tquic.error_ring = tquic_error_ring_alloc();
-	if (!net->tquic.error_ring)
+	tn->error_ring = tquic_error_ring_alloc();
+	if (!tn->error_ring)
 		return -ENOMEM;
 
-	/* Create /proc/net/tquic */
-	p = proc_create_net("tquic", 0444, net->proc_net,
-			    &tquic_conn_proc_ops, sizeof(struct tquic_conn_iter));
+	/* Create /proc/net/tquic using proc_create_data for out-of-tree compatibility */
+	p = proc_create_data("tquic", 0444, net->proc_net,
+			     &tquic_conn_proc_ops, net);
 	if (!p)
 		goto err_ring;
 
 	/* Create /proc/net/tquic_stat */
-	p = proc_create_net_single("tquic_stat", 0444, net->proc_net,
-				   tquic_stat_seq_show, NULL);
+	p = proc_create_data("tquic_stat", 0444, net->proc_net,
+			     &tquic_stat_proc_ops, net);
 	if (!p)
 		goto err_tquic;
 
 	/* Create /proc/net/tquic_errors */
-	p = proc_create_net("tquic_errors", 0444, net->proc_net,
-			    &tquic_errors_proc_ops, sizeof(struct tquic_errors_iter));
+	p = proc_create_data("tquic_errors", 0444, net->proc_net,
+			     &tquic_errors_proc_ops, net);
 	if (!p)
 		goto err_stat;
 
@@ -678,8 +710,8 @@ err_stat:
 err_tquic:
 	remove_proc_entry("tquic", net->proc_net);
 err_ring:
-	tquic_error_ring_free(net->tquic.error_ring);
-	net->tquic.error_ring = NULL;
+	tquic_error_ring_free(tn->error_ring);
+	tn->error_ring = NULL;
 	return -ENOMEM;
 }
 
@@ -687,14 +719,18 @@ err_ring:
  * tquic_proc_exit - Remove proc files for a network namespace
  * @net: Network namespace
  */
-void __exit tquic_proc_exit(struct net *net)
+void tquic_proc_exit(struct net *net)
 {
+	struct tquic_net *tn = tquic_pernet(net);
+
 	remove_proc_entry("tquic_errors", net->proc_net);
 	remove_proc_entry("tquic_stat", net->proc_net);
 	remove_proc_entry("tquic", net->proc_net);
 
-	tquic_error_ring_free(net->tquic.error_ring);
-	net->tquic.error_ring = NULL;
+	if (tn) {
+		tquic_error_ring_free(tn->error_ring);
+		tn->error_ring = NULL;
+	}
 }
 
 MODULE_DESCRIPTION("TQUIC Proc Interface");

@@ -16,7 +16,7 @@
 #define _TQUIC_PRAGUE_H
 
 #include <linux/types.h>
-#include "../cong.h"
+#include "tquic_cong.h"
 
 /* Prague constants */
 #define PRAGUE_ALPHA_SHIFT		10	/* Alpha scaling (1024) */
@@ -27,6 +27,7 @@
 #define PRAGUE_BETA_ECN			358	/* 0.7 * 512 */
 #define PRAGUE_BETA_LOSS		409	/* 0.8 * 512 */
 #define PRAGUE_RTT_VIRT_SHIFT		3	/* Virtual RTT multiplier */
+#define PRAGUE_DEFAULT_MSS		1200	/* Default MSS for calculations */
 
 /* Prague RTT independence */
 #define PRAGUE_RTT_SCALING_MIN_US	1000	/* 1ms min RTT for scaling */
@@ -60,7 +61,7 @@ struct prague_params {
 
 /**
  * struct prague - Prague congestion control state
- * @base: Base congestion control structure
+ * @path: Associated path
  * @state: Current Prague state
  * @alpha: EWMA of ECN marking fraction (scaled << ALPHA_SHIFT)
  * @cwnd: Congestion window in bytes
@@ -78,7 +79,7 @@ struct prague_params {
  * @params: Tunable parameters
  */
 struct prague {
-	struct tquic_cong base;
+	struct tquic_path *path;
 	enum prague_state state;
 	u32 alpha;
 	u32 cwnd;
@@ -97,7 +98,7 @@ struct prague {
 };
 
 /* Prague congestion control operations */
-extern const struct tquic_cong_ops prague_cong_ops;
+extern struct tquic_cong_ops prague_cong_ops;
 
 /* Module init/exit */
 int __init tquic_prague_init(void);

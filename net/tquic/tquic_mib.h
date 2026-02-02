@@ -60,6 +60,11 @@ enum linux_tquic_mib_field {
 	TQUIC_MIB_CONNCLOSED,            /* Connections closed gracefully */
 	TQUIC_MIB_CONNRESET,             /* Connection resets */
 
+	/* Stateless reset counters (RFC 9000 Section 10.3) */
+	TQUIC_MIB_STATELESSRESETSTX,     /* Stateless reset packets sent */
+	TQUIC_MIB_STATELESSRESETSRX,     /* Stateless reset packets received */
+	TQUIC_MIB_STATELESSRESETSERR,    /* Stateless reset errors */
+
 	/* Path health (for WAN bonding) */
 	TQUIC_MIB_PATHMIGRATIONS,        /* Path migrations */
 	TQUIC_MIB_PATHFAILURES,          /* Path failures */
@@ -235,5 +240,24 @@ static inline enum linux_tquic_mib_field tquic_equic_to_mib(u32 error_code)
 
 	return TQUIC_MIB_NUM;  /* Invalid/unknown error code */
 }
+
+/*
+ * MIB function declarations
+ */
+
+/* Allocate MIB counters for network namespace */
+bool tquic_mib_alloc(struct net *net);
+
+/* Free MIB counters for network namespace */
+void tquic_mib_free(struct net *net);
+
+/* Output MIB counters to seq_file (explicit net for out-of-tree compatibility) */
+void tquic_mib_seq_show_net(struct seq_file *seq, struct net *net);
+
+/* Output MIB counters to seq_file (wrapper for in-tree compatibility) */
+void tquic_mib_seq_show(struct seq_file *seq);
+
+/* GRO statistics output */
+void tquic_gro_stats_show(struct seq_file *seq);
 
 #endif /* _NET_TQUIC_MIB_H */

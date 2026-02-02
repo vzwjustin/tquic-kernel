@@ -181,17 +181,22 @@ static void tquic_zc_entry_put(struct tquic_zc_entry *entry)
  * Called from skb destructor when zerocopy pages can be released.
  * Sends notification to userspace via error queue.
  */
-static void tquic_zerocopy_callback(struct sk_buff *skb,
+/**
+ * tquic_zerocopy_complete - Zerocopy completion callback
+ * @skb: Socket buffer being completed
+ * @uarg: Zerocopy buffer info
+ * @success: True if zero-copy was successful
+ *
+ * Called when zerocopy transmission completes. Uses the standard
+ * msg_zerocopy_ubuf_ops for completion notification.
+ */
+static void tquic_zerocopy_complete(struct sk_buff *skb,
 				    struct ubuf_info *uarg,
 				    bool success)
 {
-	struct sock *sk = skb->sk;
-
-	if (!sk)
-		return;
-
-	/* Standard zerocopy completion notification */
-	sock_zerocopy_callback(skb, uarg, success);
+	/* Use the standard zerocopy ops for completion */
+	if (uarg && uarg->ops && uarg->ops->complete)
+		uarg->ops->complete(skb, uarg, success);
 }
 
 /**
@@ -233,8 +238,7 @@ int tquic_sendmsg_zerocopy(struct sock *sk, struct msghdr *msg, size_t len,
 	} else {
 		/* Allocate new zerocopy tracking structure */
 		skb = skb_peek_tail(&stream->send_buf);
-		uarg = msg_zerocopy_realloc(sk, len, skb ? skb_zcopy(skb) : NULL,
-					    false);
+		uarg = msg_zerocopy_realloc(sk, len, skb ? skb_zcopy(skb) : NULL);
 		if (!uarg) {
 			err = -ENOBUFS;
 			goto out_err;
@@ -262,7 +266,7 @@ int tquic_sendmsg_zerocopy(struct sock *sk, struct msghdr *msg, size_t len,
 			 * into skb frags without copying data.
 			 */
 			err = skb_zerocopy_iter_stream(sk, new_skb, msg, chunk,
-						       uarg, NULL);
+						       uarg);
 			if (err < 0) {
 				kfree_skb(new_skb);
 				if (err == -EMSGSIZE || err == -EEXIST) {
@@ -273,7 +277,7 @@ int tquic_sendmsg_zerocopy(struct sock *sk, struct msghdr *msg, size_t len,
 			}
 
 			/* Mark skb for zerocopy notification */
-			skb_shinfo(new_skb)->tx_flags |= SKBTX_ZEROCOPY_FRAG;
+			skb_shinfo(new_skb)->flags |= SKBFL_ZEROCOPY_FRAG;
 		} else {
 			/*
 			 * Fallback to copy path if SG not supported.
@@ -413,7 +417,7 @@ ssize_t tquic_sendpage(struct socket *sock, struct page *page,
 		skb->truesize += size;
 
 		/* Mark for zerocopy completion */
-		skb_shinfo(skb)->tx_flags |= SKBTX_ZEROCOPY_FRAG;
+		skb_shinfo(skb)->flags |= SKBFL_ZEROCOPY_FRAG;
 	} else {
 		/*
 		 * Copy path: map page and copy data.
@@ -1003,7 +1007,7 @@ int tquic_skb_zerocopy_setup(struct sk_buff *skb, struct page *page,
 	skb->truesize += PAGE_SIZE;
 
 	/* Set zerocopy flag for completion callback */
-	skb_shinfo(skb)->tx_flags |= SKBTX_ZEROCOPY_FRAG;
+	skb_shinfo(skb)->flags |= SKBFL_ZEROCOPY_FRAG;
 
 	return 0;
 }

@@ -34,18 +34,39 @@ module_param(prague_classic_fallback, bool, 0644);
 MODULE_PARM_DESC(prague_classic_fallback, "Fall back to classic ECN if needed (default: true)");
 
 /**
- * prague_init - Initialize Prague congestion control
- * @cong: Base congestion control structure
+ * prague_get_mss - Get MSS from path or use default
+ * @p: Prague state
  *
- * Return: 0 on success, negative error code on failure
+ * Return: Maximum segment size
  */
-static int prague_init(struct tquic_cong *cong)
+static u32 prague_get_mss(struct prague *p)
 {
-	struct prague *p = container_of(cong, struct prague, base);
+	if (p->path && p->path->mtu > 0)
+		return p->path->mtu;
+	return PRAGUE_DEFAULT_MSS;
+}
+
+/**
+ * prague_init - Initialize Prague congestion control
+ * @path: Path to initialize CC for
+ *
+ * Return: Pointer to allocated prague state, or NULL on failure
+ */
+static void *prague_init(struct tquic_path *path)
+{
+	struct prague *p;
+	u32 initial_cwnd;
+
+	p = kzalloc(sizeof(*p), GFP_KERNEL);
+	if (!p)
+		return NULL;
+
+	p->path = path;
+	initial_cwnd = 10 * prague_get_mss(p);
 
 	p->state = PRAGUE_OPEN;
 	p->alpha = prague_alpha_init;
-	p->cwnd = cong->initial_window;
+	p->cwnd = initial_cwnd;
 	p->ssthresh = UINT_MAX;
 	p->bytes_acked = 0;
 	p->ecn_bytes = 0;
@@ -64,29 +85,44 @@ static int prague_init(struct tquic_cong *cong)
 	p->params.rtt_scaling = prague_rtt_scaling;
 	p->params.classic_ecn_fallback = prague_classic_fallback;
 
-	return 0;
+	return p;
 }
 
 /**
  * prague_release - Release Prague state
- * @cong: Base congestion control structure
+ * @cong_data: Prague state to release
  */
-static void prague_release(struct tquic_cong *cong)
+static void prague_release(void *cong_data)
 {
-	/* No dynamic allocations to free */
+	kfree(cong_data);
 }
 
 /**
  * prague_get_cwnd - Get current congestion window
- * @cong: Base congestion control structure
+ * @cong_data: Prague state
  *
  * Return: Current cwnd in bytes
  */
-static u32 prague_get_cwnd(struct tquic_cong *cong)
+static u64 prague_get_cwnd(void *cong_data)
 {
-	struct prague *p = container_of(cong, struct prague, base);
+	struct prague *p = cong_data;
+
+	if (!p)
+		return 10 * PRAGUE_DEFAULT_MSS;
 
 	return p->cwnd;
+}
+
+/**
+ * prague_get_pacing_rate - Get pacing rate
+ * @cong_data: Prague state
+ *
+ * Return: Pacing rate in bytes/sec (0 if no pacing)
+ */
+static u64 prague_get_pacing_rate(void *cong_data)
+{
+	/* Prague doesn't implement explicit pacing */
+	return 0;
 }
 
 /**
@@ -158,6 +194,7 @@ static void prague_ecn_reduce(struct prague *p)
 {
 	u32 reduction;
 	u32 alpha_scaled;
+	u32 mss = prague_get_mss(p);
 
 	/* Scale alpha by RTT if enabled */
 	alpha_scaled = prague_rtt_scale(p, p->alpha);
@@ -167,7 +204,7 @@ static void prague_ecn_reduce(struct prague *p)
 	reduction = max(reduction, 1U);
 
 	p->prior_cwnd = p->cwnd;
-	p->cwnd = max(p->cwnd - reduction, PRAGUE_MIN_CWND * p->base.max_datagram_size);
+	p->cwnd = max(p->cwnd - reduction, PRAGUE_MIN_CWND * mss);
 	p->state = PRAGUE_ECN_REDUCED;
 
 	/* Exit slow start on first ECN mark */
@@ -179,18 +216,23 @@ static void prague_ecn_reduce(struct prague *p)
 
 /**
  * prague_on_ack - Process acknowledgment
- * @cong: Base congestion control structure
- * @acked: Bytes acknowledged
+ * @cong_data: Prague state
+ * @bytes_acked: Bytes acknowledged
  * @rtt_us: RTT sample in microseconds
  *
  * Updates cwnd based on acked bytes. In slow start, doubles cwnd.
  * In congestion avoidance, increases by MSS per RTT.
  */
-static void prague_on_ack(struct tquic_cong *cong, u64 acked, u64 rtt_us)
+static void prague_on_ack(void *cong_data, u64 bytes_acked, u64 rtt_us)
 {
-	struct prague *p = container_of(cong, struct prague, base);
+	struct prague *p = cong_data;
 	u32 increase;
-	u32 mss = p->base.max_datagram_size;
+	u32 mss;
+
+	if (!p)
+		return;
+
+	mss = prague_get_mss(p);
 
 	/* Update RTT estimates */
 	if (rtt_us > 0) {
@@ -204,7 +246,7 @@ static void prague_on_ack(struct tquic_cong *cong, u64 acked, u64 rtt_us)
 		p->rtt_cnt++;
 	}
 
-	p->bytes_acked += acked;
+	p->bytes_acked += bytes_acked;
 
 	/* Don't increase cwnd if in recovery */
 	if (p->state == PRAGUE_RECOVERY)
@@ -212,11 +254,11 @@ static void prague_on_ack(struct tquic_cong *cong, u64 acked, u64 rtt_us)
 
 	if (p->in_slow_start && p->cwnd < p->ssthresh) {
 		/* Slow start: increase by acked bytes */
-		p->cwnd += acked;
+		p->cwnd += bytes_acked;
 	} else {
 		/* Congestion avoidance: increase by MSS per RTT */
 		p->in_slow_start = false;
-		increase = (acked * mss) / p->cwnd;
+		increase = (bytes_acked * mss) / p->cwnd;
 		increase = prague_rtt_scale(p, increase);
 		p->cwnd += increase;
 	}
@@ -228,30 +270,32 @@ static void prague_on_ack(struct tquic_cong *cong, u64 acked, u64 rtt_us)
 
 /**
  * prague_on_ecn - Process ECN congestion signal
- * @cong: Base congestion control structure
- * @ce_count: Number of CE-marked packets
- * @acked_bytes: Total bytes acknowledged
+ * @cong_data: Prague state
+ * @ecn_ce_count: Number of CE-marked packets
  *
  * Implements Prague's scalable ECN response.
  */
-static void prague_on_ecn(struct tquic_cong *cong, u64 ce_count, u64 acked_bytes)
+static void prague_on_ecn(void *cong_data, u64 ecn_ce_count)
 {
-	struct prague *p = container_of(cong, struct prague, base);
+	struct prague *p = cong_data;
 	u64 ce_bytes;
+	u32 mss;
 
-	if (ce_count == 0)
+	if (!p || ecn_ce_count == 0)
 		return;
 
+	mss = prague_get_mss(p);
+
 	/* Estimate CE bytes (assume uniform distribution) */
-	ce_bytes = (ce_count * p->base.max_datagram_size);
+	ce_bytes = ecn_ce_count * mss;
 
 	/* Update alpha estimate */
-	prague_update_alpha(p, acked_bytes + ce_bytes, ce_bytes);
+	prague_update_alpha(p, p->acked_bytes_ecn + ce_bytes, ce_bytes);
 
 	/* Accumulate CE state for proportional response */
-	p->ce_state += ce_count;
+	p->ce_state += ecn_ce_count;
 	p->ecn_bytes += ce_bytes;
-	p->acked_bytes_ecn += acked_bytes;
+	p->acked_bytes_ecn += ce_bytes;
 
 	/* Reduce once per RTT (when enough data acknowledged) */
 	if (p->acked_bytes_ecn >= p->cwnd) {
@@ -264,15 +308,20 @@ static void prague_on_ecn(struct tquic_cong *cong, u64 ce_count, u64 acked_bytes
 
 /**
  * prague_on_loss - Process packet loss event
- * @cong: Base congestion control structure
- * @lost_bytes: Bytes lost
+ * @cong_data: Prague state
+ * @bytes_lost: Bytes lost
  *
  * Loss indicates severe congestion - apply multiplicative decrease.
  */
-static void prague_on_loss(struct tquic_cong *cong, u64 lost_bytes)
+static void prague_on_loss(void *cong_data, u64 bytes_lost)
 {
-	struct prague *p = container_of(cong, struct prague, base);
-	u32 mss = p->base.max_datagram_size;
+	struct prague *p = cong_data;
+	u32 mss;
+
+	if (!p)
+		return;
+
+	mss = prague_get_mss(p);
 
 	/* Avoid multiple reductions per loss event */
 	if (p->state == PRAGUE_RECOVERY)
@@ -291,67 +340,69 @@ static void prague_on_loss(struct tquic_cong *cong, u64 lost_bytes)
 }
 
 /**
- * prague_on_recovery_exit - Exit loss recovery
- * @cong: Base congestion control structure
- *
- * Called when recovery is complete.
+ * prague_on_persistent_congestion - Handle persistent congestion
+ * @cong_data: Prague state
+ * @info: Persistent congestion info
  */
-static void prague_on_recovery_exit(struct tquic_cong *cong)
+static void prague_on_persistent_congestion(void *cong_data,
+					    struct tquic_persistent_cong_info *info)
 {
-	struct prague *p = container_of(cong, struct prague, base);
+	struct prague *p = cong_data;
+	u32 mss;
 
+	if (!p)
+		return;
+
+	mss = prague_get_mss(p);
+
+	/* Reset to minimum cwnd per RFC 9002 Section 7.6 */
+	p->cwnd = 2 * mss;
+	p->ssthresh = p->cwnd;
 	p->state = PRAGUE_OPEN;
+	p->in_slow_start = true;
+	p->alpha = prague_alpha_init;
 }
 
 /**
- * prague_in_slow_start - Check if in slow start
- * @cong: Base congestion control structure
+ * prague_can_send - Check if we can send more data
+ * @cong_data: Prague state
+ * @bytes: Bytes to send
  *
- * Return: true if in slow start
+ * Return: true if can send
  */
-static bool prague_in_slow_start(struct tquic_cong *cong)
+static bool prague_can_send(void *cong_data, u64 bytes)
 {
-	struct prague *p = container_of(cong, struct prague, base);
+	struct prague *p = cong_data;
 
-	return p->in_slow_start;
+	if (!p)
+		return true;
+
+	return bytes <= p->cwnd;
 }
 
-/**
- * prague_in_recovery - Check if in recovery
- * @cong: Base congestion control structure
- *
- * Return: true if in loss recovery
- */
-static bool prague_in_recovery(struct tquic_cong *cong)
-{
-	struct prague *p = container_of(cong, struct prague, base);
-
-	return p->state == PRAGUE_RECOVERY;
-}
-
-const struct tquic_cong_ops prague_cong_ops = {
+struct tquic_cong_ops prague_cong_ops = {
 	.name = "prague",
+	.owner = THIS_MODULE,
 	.init = prague_init,
 	.release = prague_release,
-	.get_cwnd = prague_get_cwnd,
 	.on_ack = prague_on_ack,
 	.on_ecn = prague_on_ecn,
 	.on_loss = prague_on_loss,
-	.on_recovery_exit = prague_on_recovery_exit,
-	.in_slow_start = prague_in_slow_start,
-	.in_recovery = prague_in_recovery,
+	.on_persistent_congestion = prague_on_persistent_congestion,
+	.get_cwnd = prague_get_cwnd,
+	.get_pacing_rate = prague_get_pacing_rate,
+	.can_send = prague_can_send,
 };
-EXPORT_SYMBOL_GPL(prague_cong_ops);
 
 int __init tquic_prague_init(void)
 {
 	pr_info("tquic: Prague congestion control initialized\n");
-	return tquic_cong_register(&prague_cong_ops);
+	return tquic_register_cong(&prague_cong_ops);
 }
 
 void __exit tquic_prague_exit(void)
 {
-	tquic_cong_unregister(&prague_cong_ops);
+	tquic_unregister_cong(&prague_cong_ops);
 }
 
 MODULE_LICENSE("GPL");

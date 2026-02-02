@@ -97,6 +97,7 @@ static int tquic_prefer_preferred_address = 1;		/* Client: auto-migrate */
 /* Forward declarations for scheduler API */
 struct tquic_sched_ops;
 struct tquic_sched_ops *tquic_sched_find(const char *name);
+int tquic_sched_set_default(const char *name);
 
 /* Forward declarations for CC API */
 struct tquic_cong_ops;
@@ -117,7 +118,7 @@ static int proc_tquic_scheduler(const struct ctl_table *table, int write,
 				void *buffer, size_t *lenp, loff_t *ppos)
 {
 	struct net *net = current->nsproxy->net_ns;
-	char name[NETNS_TQUIC_SCHED_NAME_MAX];
+	char name[TQUIC_NET_SCHED_NAME_MAX];
 	struct ctl_table tmp_table;
 	int ret;
 
@@ -166,12 +167,8 @@ static int proc_tquic_scheduler(const struct ctl_table *table, int write,
 	}
 	rcu_read_unlock();
 
-	/* Set default scheduler (global for out-of-tree build) */
-	ret = tquic_sched_set_default(name);
-	if (ret) {
-		pr_warn("tquic: failed to set scheduler '%s': %d\n", name, ret);
-		return ret;
-	}
+	/* Set default scheduler (global for out-of-tree build, void return) */
+	tquic_sched_set_default(name);
 
 	pr_debug("tquic: netns scheduler set to '%s'\n", name);
 	return 0;
@@ -190,7 +187,7 @@ static int proc_tquic_cc_algorithm(const struct ctl_table *table, int write,
 				   void *buffer, size_t *lenp, loff_t *ppos)
 {
 	struct net *net = current->nsproxy->net_ns;
-	char name[NETNS_TQUIC_CC_NAME_MAX];
+	char name[TQUIC_NET_CC_NAME_MAX];
 	struct ctl_table tmp_table;
 	int ret;
 
@@ -394,11 +391,8 @@ static int tquic_sysctl_scheduler(const struct ctl_table *table, int write,
 	}
 	rcu_read_unlock();
 
-	/* Set global default scheduler */
-	ret = tquic_sched_set_default(tquic_scheduler);
-	if (ret)
-		pr_warn("tquic: failed to set default scheduler '%s'\n",
-			tquic_scheduler);
+	/* Set global default scheduler (void return in current API) */
+	tquic_sched_set_default(tquic_scheduler);
 
 	return 0;
 }
@@ -688,7 +682,7 @@ static struct ctl_table tquic_sysctl_table[] = {
 	{
 		.procname	= "cc_algorithm",
 		.data		= NULL,  /* Uses current->nsproxy->net_ns */
-		.maxlen		= NETNS_TQUIC_CC_NAME_MAX,
+		.maxlen		= TQUIC_NET_CC_NAME_MAX,
 		.mode		= 0644,
 		.proc_handler	= proc_tquic_cc_algorithm,
 	},
@@ -1106,10 +1100,13 @@ const char *tquic_net_get_cc_algorithm(struct net *net)
 }
 EXPORT_SYMBOL_GPL(tquic_net_get_cc_algorithm);
 
+/* Default BBR RTT threshold in ms (100ms is standard default) */
+#define TQUIC_DEFAULT_BBR_RTT_THRESHOLD_MS	100
+
 u32 tquic_net_get_bbr_rtt_threshold(struct net *net)
 {
 	if (!net)
-		return NETNS_TQUIC_BBR_RTT_THRESHOLD_MS;
+		return TQUIC_DEFAULT_BBR_RTT_THRESHOLD_MS;
 	return tquic_pernet(net)->bbr_rtt_threshold_ms;
 }
 EXPORT_SYMBOL_GPL(tquic_net_get_bbr_rtt_threshold);

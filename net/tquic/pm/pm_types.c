@@ -251,7 +251,8 @@ static int __net_init tquic_pm_net_init(struct net *net)
 		table[3].data = &pernet->validation_retries;
 		table[4].data = &pernet->event_rate_limit;
 
-		hdr = register_net_sysctl(net, "net/tquic/pm", table);
+		hdr = register_net_sysctl_sz(net, "net/tquic/pm", table,
+					     ARRAY_SIZE(tquic_pm_sysctl_table));
 		if (!hdr) {
 			kfree(table);
 			return -ENOMEM;

@@ -1004,8 +1004,7 @@ static int tquic_udp_xmit_skb4(struct tquic_udp_sock *us, struct sk_buff *skb)
 			    us->local_port,
 			    us->remote_port,
 			    false,		/* xnet */
-			    !us->csum_offload,	/* nocheck */
-			    0);			/* ipcb_flags */
+			    !us->csum_offload);	/* nocheck */
 
 	us->stats.tx_packets++;
 	us->stats.tx_bytes += skb->len;
@@ -1062,8 +1061,7 @@ static int tquic_udp_xmit_skb6(struct tquic_udp_sock *us, struct sk_buff *skb)
 			     0,			/* label */
 			     us->local_port,
 			     us->remote_port,
-			     !us->csum_offload,	/* nocheck */
-			     0);		/* ip6cb_flags */
+			     !us->csum_offload);	/* nocheck */
 
 	us->stats.tx_packets++;
 	us->stats.tx_bytes += skb->len;

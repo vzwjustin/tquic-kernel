@@ -113,8 +113,9 @@ __weak struct tquic_sched_ops *tquic_sched_find(const char *name)
 	return NULL;
 }
 
-__weak void tquic_sched_set_default(const char *name)
+__weak int tquic_sched_set_default(const char *name)
 {
+	return -ENOENT;
 }
 
 __weak struct tquic_bond_state *tquic_bond_init(struct tquic_connection *conn)
@@ -720,111 +721,11 @@ static void tquic_net_sysctl_unregister(struct net *net)
 
 /*
  * Per-Network Namespace Proc Entries
+ *
+ * Proc interface is implemented in tquic_proc.c.
+ * tquic_proc_init/exit create /proc/net/tquic, /proc/net/tquic_stat,
+ * and /proc/net/tquic_errors for each network namespace.
  */
-
-/* /proc/net/tquic/connections */
-static int tquic_proc_connections_show(struct seq_file *s, void *v)
-{
-	struct net *net = seq_file_net(s);
-	struct tquic_net *tn = tquic_pernet(net);
-
-	seq_puts(s, "# TQUIC Connections (per-netns)\n");
-	seq_puts(s, "# SCID State Paths Streams TxBytes RxBytes\n");
-
-	spin_lock(&tn->conn_lock);
-	/* TODO: Iterate through per-netns connection list */
-	spin_unlock(&tn->conn_lock);
-
-	seq_printf(s, "# Total connections: %d\n", atomic_read(&tn->conn_count));
-
-	return 0;
-}
-
-/* /proc/net/tquic/paths */
-static int tquic_proc_paths_show(struct seq_file *s, void *v)
-{
-	struct net *net = seq_file_net(s);
-	struct tquic_net *tn = tquic_pernet(net);
-
-	seq_puts(s, "# TQUIC Paths (WAN Bonding)\n");
-	seq_puts(s, "# ConnID PathID State Prio Weight RTT(us) BW(Bps)\n");
-
-	spin_lock(&tn->conn_lock);
-	/* TODO: Iterate through paths */
-	spin_unlock(&tn->conn_lock);
-
-	return 0;
-}
-
-/* /proc/net/tquic/stats */
-static int tquic_proc_stats_show(struct seq_file *s, void *v)
-{
-	struct net *net = seq_file_net(s);
-	struct tquic_net *tn = tquic_pernet(net);
-
-	seq_puts(s, "TQUIC Statistics (per-netns)\n");
-	seq_puts(s, "============================\n");
-	seq_printf(s, "Enabled:            %d\n", tn->enabled);
-	seq_printf(s, "Active connections: %d\n", atomic_read(&tn->conn_count));
-	seq_printf(s, "Total connections:  %llu\n",
-		   atomic64_read(&tn->total_connections));
-	seq_printf(s, "Bytes transmitted:  %llu\n",
-		   atomic64_read(&tn->total_tx_bytes));
-	seq_printf(s, "Bytes received:     %llu\n",
-		   atomic64_read(&tn->total_rx_bytes));
-	seq_printf(s, "Default bond mode:  %d\n", tn->bond_mode);
-	seq_printf(s, "Max paths:          %d\n", tn->max_paths);
-	seq_printf(s, "Reorder window:     %d\n", tn->reorder_window);
-	seq_printf(s, "Probe interval:     %d ms\n", tn->probe_interval);
-	seq_printf(s, "Failover timeout:   %d ms\n", tn->failover_timeout);
-	seq_printf(s, "Idle timeout:       %d ms\n", tn->idle_timeout);
-	seq_printf(s, "Initial RTT:        %d ms\n", tn->initial_rtt);
-	seq_printf(s, "Initial cwnd:       %d\n", tn->initial_cwnd);
-
-	return 0;
-}
-
-DEFINE_PROC_SHOW_ATTRIBUTE(tquic_proc_connections);
-DEFINE_PROC_SHOW_ATTRIBUTE(tquic_proc_paths);
-DEFINE_PROC_SHOW_ATTRIBUTE(tquic_proc_stats);
-
-static int tquic_net_proc_init(struct net *net)
-{
-	struct tquic_net *tn = tquic_pernet(net);
-
-	tn->proc_net_tquic = proc_net_mkdir(net, "tquic", net->proc_net);
-	if (!tn->proc_net_tquic)
-		return -ENOMEM;
-
-	if (!proc_create_net_single("connections", 0444, tn->proc_net_tquic,
-				    tquic_proc_connections_show, NULL))
-		goto err;
-
-	if (!proc_create_net_single("paths", 0444, tn->proc_net_tquic,
-				    tquic_proc_paths_show, NULL))
-		goto err;
-
-	if (!proc_create_net_single("stats", 0444, tn->proc_net_tquic,
-				    tquic_proc_stats_show, NULL))
-		goto err;
-
-	return 0;
-
-err:
-	remove_proc_subtree("tquic", net->proc_net);
-	tn->proc_net_tquic = NULL;
-	return -ENOMEM;
-}
-
-static void tquic_net_proc_exit(struct net *net)
-{
-	struct tquic_net *tn = tquic_pernet(net);
-
-	if (tn->proc_net_tquic) {
-		remove_proc_subtree("tquic", net->proc_net);
-		tn->proc_net_tquic = NULL;
-	}
-}
 
 /*
  * Per-Network Namespace Init/Exit
@@ -870,7 +771,7 @@ static int __net_init tquic_net_init(struct net *net)
 
 #ifdef CONFIG_PROC_FS
 	/* Initialize proc entries */
-	ret = tquic_net_proc_init(net);
+	ret = tquic_proc_init(net);
 	if (ret)
 		goto err_proc;
 #endif
@@ -896,7 +797,7 @@ static void __net_exit tquic_net_exit(struct net *net)
 	/* TODO: Close all connections in this namespace */
 
 #ifdef CONFIG_PROC_FS
-	tquic_net_proc_exit(net);
+	tquic_proc_exit(net);
 #endif
 	tquic_net_sysctl_unregister(net);
 

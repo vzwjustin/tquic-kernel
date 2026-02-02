@@ -27,8 +27,10 @@
 #include <net/route.h>
 #include <net/inet_common.h>
 #include <crypto/aead.h>
+#include <crypto/skcipher.h>
 #include <net/tquic.h>
-#include <net/netns/tquic.h>
+
+#include "protocol.h"
 
 #include "tquic_mib.h"
 #include "cong/tquic_cong.h"
@@ -136,9 +138,9 @@ struct tquic_gso_ctx {
 };
 
 /* Forward declarations */
-static int tquic_output_packet(struct tquic_connection *conn,
-			       struct tquic_path *path,
-			       struct sk_buff *skb);
+int tquic_output_packet(struct tquic_connection *conn,
+			struct tquic_path *path,
+			struct sk_buff *skb);
 static void tquic_pacing_work(struct work_struct *work);
 
 /*
@@ -147,7 +149,8 @@ static void tquic_pacing_work(struct work_struct *work);
  * =============================================================================
  */
 
-static inline int tquic_varint_len(u64 val)
+/* tquic_varint_len is declared in <net/tquic.h>, define it here */
+int tquic_varint_len(u64 val)
 {
 	if (val <= 63)
 		return 1;
@@ -157,6 +160,7 @@ static inline int tquic_varint_len(u64 val)
 		return 4;
 	return 8;
 }
+EXPORT_SYMBOL_GPL(tquic_varint_len);
 
 static inline int tquic_encode_varint(u8 *buf, size_t buf_len, u64 val)
 {
@@ -711,12 +715,12 @@ static int tquic_encode_pkt_num(u8 *buf, u64 pkt_num, u64 largest_acked)
  *
  * @grease_state: GREASE state for this connection (NULL to disable GREASE)
  */
-static int tquic_build_long_header(struct tquic_connection *conn,
-				   struct tquic_path *path,
-				   u8 *buf, size_t buf_len,
-				   int pkt_type, u64 pkt_num,
-				   size_t payload_len,
-				   struct tquic_grease_state *grease_state)
+static int tquic_build_long_header_internal(struct tquic_connection *conn,
+					    struct tquic_path *path,
+					    u8 *buf, size_t buf_len,
+					    int pkt_type, u64 pkt_num,
+					    size_t payload_len,
+					    struct tquic_grease_state *grease_state)
 {
 	u8 *p = buf;
 	int pkt_num_len;
@@ -799,7 +803,7 @@ static int tquic_build_long_header(struct tquic_connection *conn,
  *
  * @grease_state: GREASE state for this connection (NULL to disable GREASE)
  */
-static int tquic_build_short_header(struct tquic_connection *conn,
+static int tquic_build_short_header_internal(struct tquic_connection *conn,
 				    struct tquic_path *path,
 				    u8 *buf, size_t buf_len,
 				    u64 pkt_num, u64 largest_acked,
@@ -1026,15 +1030,15 @@ static struct sk_buff *tquic_assemble_packet(struct tquic_connection *conn,
 	is_long_header = (pkt_type != -1);  /* -1 means short header */
 
 	/*
-	 * GREASE state: For now pass NULL to disable GREASE bit manipulation.
-	 * TODO: Add GREASE state to connection and pass it here.
-	 * The GREASE state should be populated after transport parameter
-	 * negotiation when we know if the peer supports grease_quic_bit.
+	 * GREASE state: Pass the connection's GREASE state for RFC 9287
+	 * compliant GREASE bit manipulation. The grease_state is initialized
+	 * during connection setup based on per-netns sysctl settings, and
+	 * updated with peer capabilities after transport parameter exchange.
 	 */
 	if (is_long_header) {
-		header_len = tquic_build_long_header(conn, path, header_buf, 128,
+		header_len = tquic_build_long_header_internal(conn, path, header_buf, 128,
 						     pkt_type, pkt_num, payload_len,
-						     NULL);
+						     conn->grease_state);
 	} else {
 		/*
 		 * For short header packets (1-RTT), get the current key phase
@@ -1048,9 +1052,9 @@ static struct sk_buff *tquic_assemble_packet(struct tquic_connection *conn,
 			if (ku_state)
 				key_phase = tquic_key_update_get_phase(ku_state) != 0;
 		}
-		header_len = tquic_build_short_header(conn, path, header_buf, 128,
+		header_len = tquic_build_short_header_internal(conn, path, header_buf, 128,
 						      pkt_num, 0, key_phase, false,
-						      NULL);
+						      conn->grease_state);
 	}
 
 	if (header_len < 0) {
@@ -1244,7 +1248,7 @@ void tquic_update_pacing(struct sock *sk, struct tquic_path *path)
 	net = sock_net(sk);
 
 	/* Check if pacing is enabled at netns level */
-	if (!net->tquic.pacing_enabled)
+	if (!tquic_pernet(net)->pacing_enabled)
 		return;
 
 	/* Check if pacing is enabled per-socket (if field exists) */
@@ -1576,7 +1580,7 @@ static void tquic_set_ecn_marking(struct sk_buff *skb,
 	/* Check if ECN is enabled at netns level */
 	if (conn->sk) {
 		net = sock_net(conn->sk);
-		if (!net || !net->tquic.ecn_enabled)
+		if (!net || !tquic_pernet(net)->ecn_enabled)
 			return;
 	}
 
@@ -1608,9 +1612,9 @@ static void tquic_set_ecn_marking(struct sk_buff *skb,
 /*
  * Send packet on specified path
  */
-static int tquic_output_packet(struct tquic_connection *conn,
-			       struct tquic_path *path,
-			       struct sk_buff *skb)
+int tquic_output_packet(struct tquic_connection *conn,
+			struct tquic_path *path,
+			struct sk_buff *skb)
 {
 	struct flowi4 fl4;
 	struct rtable *rt;
@@ -1641,7 +1645,7 @@ static int tquic_output_packet(struct tquic_connection *conn,
 	 * Per RFC 9000 Section 13.4.1: "An endpoint that supports ECN
 	 * marks all IP packets that it sends with the ECT(0) codepoint."
 	 */
-	if (net && net->tquic.ecn_enabled)
+	if (net && tquic_pernet(net)->ecn_enabled)
 		fl4.flowi4_tos = TQUIC_IP_ECN_ECT0;
 
 	/* Route lookup */
@@ -1679,7 +1683,7 @@ static int tquic_output_packet(struct tquic_connection *conn,
 	 */
 	if (conn) {
 		net = path->conn->sk ? sock_net(path->conn->sk) : NULL;
-		if (net && net->tquic.ecn_enabled) {
+		if (net && tquic_pernet(net)->ecn_enabled) {
 			/*
 			 * Set TOS field with ECT(0) for ECN-enabled packets.
 			 * This is done before ip_local_out which will copy
@@ -1726,6 +1730,7 @@ static int tquic_output_packet(struct tquic_connection *conn,
 
 	return ret;
 }
+EXPORT_SYMBOL_GPL(tquic_output_packet);
 
 /*
  * Main output function - transmit data on connection
@@ -1884,7 +1889,7 @@ int tquic_send_ack(struct tquic_connection *conn, struct tquic_path *path,
 				key_phase = tquic_key_update_get_phase(ku_state) != 0;
 		}
 
-		header_len = tquic_build_short_header(conn, path, header, 64,
+		header_len = tquic_build_short_header_internal(conn, path, header, 64,
 						      pkt_num, 0, key_phase, false,
 						      NULL);
 		if (header_len > 0)
@@ -2037,12 +2042,12 @@ int tquic_send_connection_close(struct tquic_connection *conn,
 
 	skb_reserve(skb, MAX_HEADER);
 
-	/* Build short header (GREASE state NULL - TODO: get from connection) */
+	/* Build short header with connection's GREASE state */
 	{
 		u8 header[64];
-		int header_len = tquic_build_short_header(conn, path, header, 64,
+		int header_len = tquic_build_short_header_internal(conn, path, header, 64,
 							  pkt_num, 0, false, false,
-							  NULL);
+							  conn->grease_state);
 		if (header_len > 0)
 			skb_put_data(skb, header, header_len);
 	}
@@ -2275,7 +2280,7 @@ int tquic_send_datagram(struct tquic_connection *conn,
 	/* Build short header */
 	{
 		u8 header[64];
-		header_len = tquic_build_short_header(conn, path, header, 64,
+		header_len = tquic_build_short_header_internal(conn, path, header, 64,
 						      pkt_num, 0, false, false,
 						      NULL);
 		if (header_len < 0) {

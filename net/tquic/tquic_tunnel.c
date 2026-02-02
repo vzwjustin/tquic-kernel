@@ -54,19 +54,13 @@ enum tquic_tunnel_state {
 	TQUIC_TUNNEL_CLOSED,
 };
 
-/**
- * enum tquic_traffic_class - QoS traffic classes
- * @TQUIC_TC_REALTIME: VoIP/video - lowest latency, highest priority
- * @TQUIC_TC_INTERACTIVE: Gaming - low latency, tolerates small jitter
- * @TQUIC_TC_BULK: Downloads - best-effort, fills available bandwidth
- * @TQUIC_TC_BACKGROUND: Lowest priority, uses idle capacity only
+/*
+ * Traffic classification for QoS - uses defines from net/tquic.h:
+ * - TQUIC_TC_REALTIME: VoIP/video - lowest latency, highest priority
+ * - TQUIC_TC_INTERACTIVE: Gaming - low latency, tolerates small jitter
+ * - TQUIC_TC_BULK: Downloads - best-effort, fills available bandwidth
+ * - TQUIC_TC_BACKGROUND: Lowest priority, uses idle capacity only
  */
-enum tquic_traffic_class {
-	TQUIC_TC_REALTIME = 0,
-	TQUIC_TC_INTERACTIVE = 1,
-	TQUIC_TC_BULK = 2,
-	TQUIC_TC_BACKGROUND = 3,
-};
 
 /**
  * struct tquic_tunnel_stats - Per-tunnel statistics

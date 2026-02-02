@@ -19,8 +19,10 @@
 #include <linux/rtnetlink.h>
 #include <net/sock.h>
 #include <net/route.h>
+#include <net/addrconf.h>
 #include <net/tquic.h>
 #include <net/tquic_pmtud.h>
+#include <uapi/linux/tquic_pm.h>
 #include "../cong/tquic_cong.h"
 
 /* Path probe configuration */
@@ -58,6 +60,11 @@ struct tquic_path_probe {
 	bool pending;
 	u8 attempts;
 };
+
+/* Forward declarations */
+int tquic_pm_discover_addresses(struct tquic_connection *conn,
+				struct sockaddr_storage *addrs,
+				int max_addrs);
 
 /*
  * Calculate smoothed RTT using RFC 6298 algorithm
@@ -654,8 +661,10 @@ static struct tquic_path *tquic_path_alloc(struct tquic_connection *conn,
 			if (found_dev)
 				break;
 		}
-		if (found_dev)
-			path->dev = dev_hold(found_dev);
+		if (found_dev) {
+			path->dev = found_dev;
+			dev_hold(path->dev);
+		}
 		rcu_read_unlock();
 	}
 

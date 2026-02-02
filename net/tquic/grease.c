@@ -17,8 +17,8 @@
 #include <linux/slab.h>
 #include <linux/random.h>
 #include <net/tquic.h>
-#include <net/netns/tquic.h>
 
+#include "protocol.h"
 #include "grease.h"
 #include "core/transport_params.h"
 
@@ -298,10 +298,16 @@ EXPORT_SYMBOL_GPL(tquic_grease_add_versions);
  */
 bool tquic_net_get_grease_enabled(struct net *net)
 {
+	struct tquic_net *tn;
+
 	if (!net)
 		return true;  /* Default enabled */
 
-	return net->tquic.grease_enabled;
+	tn = tquic_pernet(net);
+	if (!tn)
+		return true;  /* Default enabled */
+
+	return tn->grease_enabled;
 }
 EXPORT_SYMBOL_GPL(tquic_net_get_grease_enabled);
 

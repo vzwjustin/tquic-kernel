@@ -531,169 +531,16 @@ EXPORT_SYMBOL_GPL(tquic_unregister_scheduler);
 
 /*
  * Congestion Control Registration
+ * NOTE: tquic_register_cong and tquic_unregister_cong are defined in
+ * cong/tquic_cong.c to avoid duplicate symbol definitions.
  */
-
-int tquic_register_cong(struct tquic_cong_ops *ops)
-{
-	write_lock(&tquic_cong_lock);
-	list_add_tail(&ops->list, &tquic_cong_list);
-	write_unlock(&tquic_cong_lock);
-
-	pr_info("tquic: registered congestion control '%s'\n", ops->name);
-	return 0;
-}
-EXPORT_SYMBOL_GPL(tquic_register_cong);
-
-void tquic_unregister_cong(struct tquic_cong_ops *ops)
-{
-	write_lock(&tquic_cong_lock);
-	list_del(&ops->list);
-	write_unlock(&tquic_cong_lock);
-
-	pr_info("tquic: unregistered congestion control '%s'\n", ops->name);
-}
-EXPORT_SYMBOL_GPL(tquic_unregister_cong);
 
 /*
  * Proc Filesystem Interface
+ *
+ * The proc interface is implemented in tquic_proc.c and initialized
+ * per-netns via pernet_operations in tquic_proto.c.
  */
-
-static int tquic_proc_connections_show(struct seq_file *s, void *v)
-{
-	struct rhashtable_iter iter;
-	struct tquic_connection *conn;
-
-	seq_puts(s, "# TQUIC Connections\n");
-	seq_puts(s, "# SCID State Paths Streams TxBytes RxBytes\n");
-
-	rhashtable_walk_enter(&tquic_conn_table, &iter);
-	rhashtable_walk_start(&iter);
-
-	while ((conn = rhashtable_walk_next(&iter)) != NULL) {
-		if (IS_ERR(conn))
-			continue;
-
-		seq_printf(s, "%*phN %d %u %llu %llu %llu\n",
-			   conn->scid.len, conn->scid.id,
-			   conn->state,
-			   conn->num_paths,
-			   conn->stats.streams_opened - conn->stats.streams_closed,
-			   conn->stats.tx_bytes,
-			   conn->stats.rx_bytes);
-	}
-
-	rhashtable_walk_stop(&iter);
-	rhashtable_walk_exit(&iter);
-
-	return 0;
-}
-
-static int tquic_proc_paths_show(struct seq_file *s, void *v)
-{
-	struct rhashtable_iter iter;
-	struct tquic_connection *conn;
-	struct tquic_path *path;
-
-	seq_puts(s, "# TQUIC Paths (WAN Bonding)\n");
-	seq_puts(s, "# ConnID PathID State Prio Weight RTT(us) BW(Bps) TxPkts RxPkts Lost\n");
-
-	rhashtable_walk_enter(&tquic_conn_table, &iter);
-	rhashtable_walk_start(&iter);
-
-	while ((conn = rhashtable_walk_next(&iter)) != NULL) {
-		if (IS_ERR(conn))
-			continue;
-
-		list_for_each_entry(path, &conn->paths, list) {
-			seq_printf(s, "%*phN %u %d %u %u %u %llu %llu %llu %llu\n",
-				   conn->scid.len, conn->scid.id,
-				   path->path_id,
-				   path->state,
-				   path->priority,
-				   path->weight,
-				   path->stats.rtt_smoothed,
-				   path->stats.bandwidth,
-				   path->stats.tx_packets,
-				   path->stats.rx_packets,
-				   path->stats.lost_packets);
-		}
-	}
-
-	rhashtable_walk_stop(&iter);
-	rhashtable_walk_exit(&iter);
-
-	return 0;
-}
-
-static int tquic_proc_stats_show(struct seq_file *s, void *v)
-{
-	struct rhashtable_iter iter;
-	struct tquic_connection *conn;
-	u64 total_tx = 0, total_rx = 0;
-	u64 total_paths = 0, total_conns = 0;
-
-	rhashtable_walk_enter(&tquic_conn_table, &iter);
-	rhashtable_walk_start(&iter);
-
-	while ((conn = rhashtable_walk_next(&iter)) != NULL) {
-		if (IS_ERR(conn))
-			continue;
-
-		total_conns++;
-		total_paths += conn->num_paths;
-		total_tx += conn->stats.tx_bytes;
-		total_rx += conn->stats.rx_bytes;
-	}
-
-	rhashtable_walk_stop(&iter);
-	rhashtable_walk_exit(&iter);
-
-	seq_puts(s, "TQUIC Global Statistics\n");
-	seq_puts(s, "========================\n");
-	seq_printf(s, "Active connections: %llu\n", total_conns);
-	seq_printf(s, "Total paths:        %llu\n", total_paths);
-	seq_printf(s, "Bytes transmitted:  %llu\n", total_tx);
-	seq_printf(s, "Bytes received:     %llu\n", total_rx);
-	seq_printf(s, "Default scheduler:  %s\n", tquic_default_scheduler);
-	seq_printf(s, "Default congestion: %s\n", tquic_default_cong);
-	seq_printf(s, "Default bond mode:  %d\n", tquic_default_bond_mode);
-
-	return 0;
-}
-
-DEFINE_PROC_SHOW_ATTRIBUTE(tquic_proc_connections);
-DEFINE_PROC_SHOW_ATTRIBUTE(tquic_proc_paths);
-DEFINE_PROC_SHOW_ATTRIBUTE(tquic_proc_stats);
-
-int __init tquic_proc_init(void)
-{
-	tquic_proc_dir = proc_mkdir("tquic", init_net.proc_net);
-	if (!tquic_proc_dir)
-		return -ENOMEM;
-
-	if (!proc_create("connections", 0444, tquic_proc_dir,
-			 &tquic_proc_connections_proc_ops))
-		goto err;
-
-	if (!proc_create("paths", 0444, tquic_proc_dir,
-			 &tquic_proc_paths_proc_ops))
-		goto err;
-
-	if (!proc_create("stats", 0444, tquic_proc_dir,
-			 &tquic_proc_stats_proc_ops))
-		goto err;
-
-	return 0;
-
-err:
-	remove_proc_subtree("tquic", init_net.proc_net);
-	return -ENOMEM;
-}
-
-void __exit tquic_proc_exit(void)
-{
-	remove_proc_subtree("tquic", init_net.proc_net);
-}
 
 /*
  * Module Initialization
@@ -745,10 +592,7 @@ int __init tquic_init(void)
 	if (err)
 		goto err_sysctl;
 
-	/* Initialize proc interface */
-	err = tquic_proc_init();
-	if (err)
-		goto err_proc;
+	/* Proc interface is initialized per-netns via pernet_operations */
 
 	/* Initialize inet_diag handler for ss tool */
 	err = tquic_diag_init();
@@ -769,8 +613,6 @@ int __init tquic_init(void)
 err_offload:
 	tquic_diag_exit();
 err_diag:
-	tquic_proc_exit();
-err_proc:
 	tquic_sysctl_exit();
 err_sysctl:
 	tquic_netlink_exit();
@@ -792,7 +634,7 @@ void __exit tquic_exit(void)
 
 	tquic_offload_exit();
 	tquic_diag_exit();
-	tquic_proc_exit();
+	/* Proc interface is cleaned up per-netns via pernet_operations */
 	tquic_sysctl_exit();
 	tquic_netlink_exit();
 	rhashtable_destroy(&tquic_conn_table);

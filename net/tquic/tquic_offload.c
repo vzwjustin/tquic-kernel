@@ -32,6 +32,7 @@
 #include <net/gro.h>
 #include <net/gso.h>
 #include <net/ip6_checksum.h>
+#include <net/udp_tunnel.h>
 #include <net/tquic.h>
 
 #include "tquic_mib.h"
@@ -688,7 +689,7 @@ int tquic_setup_gro(struct sock *sk)
 	up->gro_complete = tquic_gro_complete_udp;
 
 	/* Enable GRO for this socket */
-	udp_tunnel_encap_enable(sk->sk_socket);
+	udp_tunnel_encap_enable(sk);
 
 	pr_debug("tquic: GRO enabled for socket %p\n", sk);
 

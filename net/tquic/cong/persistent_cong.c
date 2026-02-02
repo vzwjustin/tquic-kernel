@@ -30,7 +30,7 @@
 #include <linux/sort.h>
 #include <net/tquic.h>
 #include <net/net_namespace.h>
-#include <net/netns/tquic.h>
+#include "../protocol.h"
 #include "persistent_cong.h"
 #include "../tquic_mib.h"
 
@@ -343,7 +343,7 @@ EXPORT_SYMBOL_GPL(tquic_on_persistent_congestion);
  *
  * Handles reading/writing net.tquic.persistent_cong_threshold
  */
-static int proc_tquic_persistent_cong_threshold(struct ctl_table *table,
+static int proc_tquic_persistent_cong_threshold(const struct ctl_table *table,
 						int write, void *buffer,
 						size_t *lenp, loff_t *ppos)
 {
@@ -397,7 +397,7 @@ static struct ctl_table tquic_persistent_cong_sysctl[] = {
 
 static struct ctl_table_header *persistent_cong_sysctl_header;
 
-int __init tquic_persistent_cong_init(void)
+int __init tquic_persistent_cong_module_init(void)
 {
 	pr_info("tquic_persistent_cong: initializing (threshold=%u)\n",
 		tquic_persistent_cong_threshold);
@@ -412,7 +412,7 @@ int __init tquic_persistent_cong_init(void)
 	return 0;
 }
 
-void __exit tquic_persistent_cong_exit(void)
+void __exit tquic_persistent_cong_module_exit(void)
 {
 	if (persistent_cong_sysctl_header)
 		unregister_net_sysctl_table(persistent_cong_sysctl_header);

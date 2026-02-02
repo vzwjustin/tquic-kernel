@@ -311,7 +311,7 @@ static void tquic_update_rtt(struct tquic_recovery_state *recovery,
 
 	/* RFC 9002 EWMA update */
 	recovery->rtt_variance = (3 * recovery->rtt_variance +
-				  abs64((s64)recovery->smoothed_rtt - (s64)rtt_sample)) / 4;
+				  abs((s64)recovery->smoothed_rtt - (s64)rtt_sample)) / 4;
 	recovery->smoothed_rtt = (7 * recovery->smoothed_rtt + rtt_sample) / 8;
 }
 

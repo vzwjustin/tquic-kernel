@@ -34,12 +34,11 @@
 #include <linux/net.h>
 #include <net/sock.h>
 #include <net/tquic.h>
-#include <net/netns/tquic.h>
 
+#include "protocol.h"
 #include "tquic_preferred_addr.h"
 #include "tquic_stateless_reset.h"
 #include "core/transport_params.h"
-#include "protocol.h"
 
 /*
  * =============================================================================
@@ -939,8 +938,13 @@ EXPORT_SYMBOL_GPL(tquic_pref_addr_client_get_state);
  */
 bool tquic_pref_addr_enabled(struct net *net)
 {
-	if (net && net->tquic.preferred_address_enabled >= 0)
-		return net->tquic.preferred_address_enabled;
+	struct tquic_net *tn;
+
+	if (net) {
+		tn = tquic_pernet(net);
+		if (tn && tn->preferred_address_enabled >= 0)
+			return tn->preferred_address_enabled;
+	}
 	return tquic_sysctl_get_preferred_address_enabled();
 }
 EXPORT_SYMBOL_GPL(tquic_pref_addr_enabled);
@@ -956,8 +960,13 @@ EXPORT_SYMBOL_GPL(tquic_pref_addr_enabled);
  */
 bool tquic_pref_addr_auto_migrate(struct net *net)
 {
-	if (net && net->tquic.prefer_preferred_address >= 0)
-		return net->tquic.prefer_preferred_address;
+	struct tquic_net *tn;
+
+	if (net) {
+		tn = tquic_pernet(net);
+		if (tn && tn->prefer_preferred_address >= 0)
+			return tn->prefer_preferred_address;
+	}
 	return tquic_sysctl_get_prefer_preferred_address();
 }
 EXPORT_SYMBOL_GPL(tquic_pref_addr_auto_migrate);

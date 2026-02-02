@@ -52,11 +52,8 @@ static bool tquic_pm_kernel_has_default_route(struct net_device *dev)
 	err = fib_lookup(net, &fl4, &res, 0);
 	if (err == 0) {
 		/* Found a route - check if it uses this device */
-		if (FIB_RES_DEV(res) == dev) {
-			fib_res_put(&res);
+		if (FIB_RES_DEV(res) == dev)
 			return true;
-		}
-		fib_res_put(&res);
 	}
 
 	return false;
@@ -300,7 +297,7 @@ static int tquic_pm_kernel_netdev_event(struct notifier_block *nb,
 			struct tquic_connection *conn, *tmp;
 
 			spin_lock_bh(&kdata->conn_lock);
-			list_for_each_entry_safe(conn, tmp, &kdata->conn_list, node) {
+			list_for_each_entry_safe(conn, tmp, &kdata->conn_list, pm_node) {
 				/* Skip if connection not established yet */
 				if (conn->state != TQUIC_CONN_CONNECTED)
 					continue;
@@ -313,7 +310,7 @@ static int tquic_pm_kernel_netdev_event(struct notifier_block *nb,
 			/* Then: discover new paths through this interface */
 			if (tquic_pm_kernel_should_add_path(dev, pernet)) {
 				spin_lock_bh(&kdata->conn_lock);
-				list_for_each_entry_safe(conn, tmp, &kdata->conn_list, node) {
+				list_for_each_entry_safe(conn, tmp, &kdata->conn_list, pm_node) {
 					if (conn->state != TQUIC_CONN_CONNECTED)
 						continue;
 
@@ -330,7 +327,7 @@ static int tquic_pm_kernel_netdev_event(struct notifier_block *nb,
 			struct tquic_connection *conn, *tmp;
 
 			spin_lock_bh(&kdata->conn_lock);
-			list_for_each_entry_safe(conn, tmp, &kdata->conn_list, node) {
+			list_for_each_entry_safe(conn, tmp, &kdata->conn_list, pm_node) {
 				tquic_pm_kernel_mark_unavailable(conn, dev);
 			}
 			spin_unlock_bh(&kdata->conn_lock);
@@ -344,7 +341,7 @@ static int tquic_pm_kernel_netdev_event(struct notifier_block *nb,
 			struct tquic_connection *conn, *tmp;
 
 			spin_lock_bh(&kdata->conn_lock);
-			list_for_each_entry_safe(conn, tmp, &kdata->conn_list, node) {
+			list_for_each_entry_safe(conn, tmp, &kdata->conn_list, pm_node) {
 				if (conn->state != TQUIC_CONN_CONNECTED)
 					continue;
 
@@ -356,7 +353,7 @@ static int tquic_pm_kernel_netdev_event(struct notifier_block *nb,
 			struct tquic_connection *conn, *tmp;
 
 			spin_lock_bh(&kdata->conn_lock);
-			list_for_each_entry_safe(conn, tmp, &kdata->conn_list, node) {
+			list_for_each_entry_safe(conn, tmp, &kdata->conn_list, pm_node) {
 				tquic_pm_kernel_mark_unavailable(conn, dev);
 			}
 			spin_unlock_bh(&kdata->conn_lock);

@@ -131,7 +131,7 @@ static void westwood_update_bw(struct tquic_westwood *ww, u64 bytes_acked,
 	s64 delta_us;
 	u64 bw_sample;
 
-	if (ktime_equal(ww->bw_sample_start, ns_to_ktime(0))) {
+	if (ww->bw_sample_start == 0) {
 		/* First ACK - initialize */
 		ww->bw_sample_start = now;
 		ww->bytes_acked = bytes_acked;

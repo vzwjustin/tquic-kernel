@@ -373,60 +373,237 @@ static int bpf_tquic_sched_validate(void *kdata)
 }
 
 /*
- * Stub functions for BPF scheduler operations
- * These are called when BPF program doesn't implement the callback
+ * CFI fallback functions for BPF scheduler operations
+ *
+ * These are called when a BPF program doesn't implement the callback.
+ * They provide sensible default behavior and basic statistics tracking
+ * to ensure correct operation even without BPF customization.
  */
 static int __bpf_tquic_sched_init(struct tquic_scheduler *sched)
 {
+	if (!sched)
+		return -EINVAL;
+
+	/* Initialize round-robin counter for default scheduling */
+	sched->rr_counter = 0;
+
+	/* Clear private data area */
+	memset(sched->priv_data, 0, sizeof(sched->priv_data));
+
 	return 0;
 }
 
 static void __bpf_tquic_sched_release(struct tquic_scheduler *sched)
 {
+	if (!sched)
+		return;
+
+	/* Clear state to prevent use-after-free issues */
+	sched->rr_counter = 0;
+	memset(sched->priv_data, 0, sizeof(sched->priv_data));
 }
 
 static struct tquic_path *__bpf_tquic_sched_select_path(struct tquic_scheduler *sched,
 							struct tquic_sched_ctx *ctx)
 {
-	/* Default: return primary path */
-	if (sched && sched->pm)
-		return sched->pm->primary_path;
-	return NULL;
+	struct tquic_path *path, *best = NULL;
+	u32 min_rtt = U32_MAX;
+
+	if (!sched || !sched->pm)
+		return NULL;
+
+	/*
+	 * Default scheduler: MinRTT with active path filter
+	 * Selects the path with lowest smoothed RTT among active paths.
+	 * Falls back to primary path if no better option found.
+	 */
+	list_for_each_entry_rcu(path, &sched->pm->paths, pm_list) {
+		if (path->state != TQUIC_PATH_ACTIVE)
+			continue;
+
+		/* Skip paths that are not schedulable */
+		if (!path->schedulable)
+			continue;
+
+		/* Select path with minimum RTT */
+		if (path->stats.rtt_smoothed < min_rtt) {
+			min_rtt = path->stats.rtt_smoothed;
+			best = path;
+		}
+	}
+
+	/* Fallback to primary path if no active path found */
+	return best ?: sched->pm->primary_path;
 }
 
 static void __bpf_tquic_sched_on_packet_sent(struct tquic_scheduler *sched,
 					     struct tquic_path *path,
 					     u32 bytes)
 {
+	if (!sched || !path)
+		return;
+
+	/* Update path statistics for basic tracking */
+	path->stats.tx_packets++;
+	path->stats.tx_bytes += bytes;
+
+	/* Update scheduler-level counters */
+	sched->total_sent_bytes += bytes;
+	sched->total_sent_packets++;
 }
 
 static void __bpf_tquic_sched_on_packet_acked(struct tquic_scheduler *sched,
 					      struct tquic_path *path,
 					      u32 bytes, ktime_t rtt)
 {
+	u64 rtt_us;
+
+	if (!sched || !path)
+		return;
+
+	/* Update path ACK statistics */
+	path->stats.acked_bytes += bytes;
+
+	/* Update RTT estimate using EWMA if valid RTT provided */
+	rtt_us = ktime_to_us(rtt);
+	if (rtt_us > 0 && rtt_us < U32_MAX) {
+		if (path->stats.rtt_smoothed == 0) {
+			/* First RTT sample */
+			path->stats.rtt_smoothed = rtt_us;
+			path->stats.rtt_variance = rtt_us / 2;
+		} else {
+			/* RFC 6298 EWMA: SRTT = 7/8 * SRTT + 1/8 * R */
+			u32 delta = (rtt_us > path->stats.rtt_smoothed) ?
+				    (rtt_us - path->stats.rtt_smoothed) :
+				    (path->stats.rtt_smoothed - rtt_us);
+			path->stats.rtt_variance = (3 * path->stats.rtt_variance + delta) / 4;
+			path->stats.rtt_smoothed = (7 * path->stats.rtt_smoothed + rtt_us) / 8;
+		}
+
+		/* Track minimum RTT */
+		if (path->stats.rtt_min == 0 || rtt_us < path->stats.rtt_min)
+			path->stats.rtt_min = rtt_us;
+	}
+
+	/* Update scheduler-level counters */
+	sched->total_acked_bytes += bytes;
 }
 
 static void __bpf_tquic_sched_on_packet_lost(struct tquic_scheduler *sched,
 					     struct tquic_path *path,
 					     u32 bytes)
 {
+	if (!sched || !path)
+		return;
+
+	/* Track loss statistics */
+	path->stats.lost_packets++;
+
+	/* Update scheduler-level loss counter */
+	sched->total_lost_packets++;
+
+	/*
+	 * Simple path degradation: if loss rate exceeds threshold,
+	 * temporarily reduce path weight for scheduling decisions.
+	 * This helps the scheduler avoid persistently lossy paths.
+	 */
+	if (path->stats.tx_packets > 100) {
+		u64 loss_rate = (path->stats.lost_packets * 100) /
+				path->stats.tx_packets;
+		if (loss_rate > 10 && path->weight > 1) {
+			/* Reduce weight on high-loss paths */
+			path->weight = max(1, path->weight - 1);
+		}
+	}
 }
 
 static void __bpf_tquic_sched_on_path_change(struct tquic_scheduler *sched,
 					     struct tquic_path *path,
 					     enum tquic_path_event event)
 {
+	if (!sched || !path)
+		return;
+
+	switch (event) {
+	case TQUIC_PATH_EVENT_ADD:
+		/* New path added - mark as schedulable if active */
+		if (path->state == TQUIC_PATH_ACTIVE)
+			path->schedulable = true;
+		break;
+
+	case TQUIC_PATH_EVENT_REMOVE:
+		/* Path being removed - ensure not selected */
+		path->schedulable = false;
+		break;
+
+	case TQUIC_PATH_EVENT_ACTIVE:
+		/* Path became active - enable scheduling */
+		path->schedulable = true;
+		/* Reset weight to default on activation */
+		if (path->weight == 0)
+			path->weight = 1;
+		break;
+
+	case TQUIC_PATH_EVENT_STANDBY:
+	case TQUIC_PATH_EVENT_FAILED:
+		/* Path no longer usable - disable scheduling */
+		path->schedulable = false;
+		break;
+
+	case TQUIC_PATH_EVENT_RTT_UPDATE:
+		/* RTT changed - already handled in on_packet_acked */
+		break;
+
+	case TQUIC_PATH_EVENT_CWND_UPDATE:
+		/* Congestion window changed - no action needed in default */
+		break;
+
+	default:
+		break;
+	}
 }
 
 static int __bpf_tquic_sched_set_param(struct tquic_scheduler *sched,
 				       int param, u64 value)
 {
-	return -EOPNOTSUPP;
+	if (!sched)
+		return -EINVAL;
+
+	/*
+	 * Basic parameter support for default scheduler.
+	 * BPF programs can implement richer parameter handling.
+	 */
+	switch (param) {
+	case TQUIC_SCHED_PARAM_MODE:
+		/* Scheduler mode (reserved for future use) */
+		return 0;
+
+	case TQUIC_SCHED_PARAM_MIN_PATHS:
+		/* Minimum paths to keep active */
+		if (value > TQUIC_MAX_PATHS)
+			return -EINVAL;
+		return 0;
+
+	default:
+		return -EOPNOTSUPP;
+	}
 }
 
 static void __bpf_tquic_sched_get_stats(struct tquic_scheduler *sched,
 					void *stats, size_t len)
 {
+	struct tquic_sched_stats *s = stats;
+
+	if (!sched || !stats || len < sizeof(*s))
+		return;
+
+	/* Export scheduler statistics */
+	s->total_sent_bytes = sched->total_sent_bytes;
+	s->total_sent_packets = sched->total_sent_packets;
+	s->total_acked_bytes = sched->total_acked_bytes;
+	s->total_lost_packets = sched->total_lost_packets;
+	s->path_switches = sched->path_switches;
+	s->scheduler_invocations = sched->scheduler_invocations;
 }
 
 /*

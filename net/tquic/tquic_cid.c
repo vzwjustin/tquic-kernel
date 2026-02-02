@@ -173,18 +173,9 @@ static const struct rhashtable_params cid_rht_params = {
  * =============================================================================
  * Variable Length Integer Encoding (QUIC RFC 9000 Section 16)
  * =============================================================================
+ *
+ * Note: tquic_varint_len() is exported from tquic_output.c
  */
-
-static inline int tquic_varint_len(u64 val)
-{
-	if (val <= 63)
-		return 1;
-	if (val <= 16383)
-		return 2;
-	if (val <= 1073741823)
-		return 4;
-	return 8;
-}
 
 static int tquic_encode_varint(u8 *buf, size_t buf_len, u64 val)
 {

@@ -31,6 +31,9 @@
 #include "protocol.h"
 #include "cong/tquic_cong.h"
 
+/* Sysctl accessor forward declaration */
+int tquic_sysctl_get_prefer_preferred_address(void);
+
 /* Migration constants */
 #define TQUIC_MIGRATION_PTO_MULTIPLIER	3	/* 3x PTO for validation timeout */
 #define TQUIC_MIGRATION_MAX_RETRIES	3	/* Max PATH_CHALLENGE retries */
@@ -1377,7 +1380,7 @@ void tquic_migration_on_handshake_complete(struct tquic_connection *conn)
 	net = sock_net(conn->sk);
 
 	/* Check if auto-migration to preferred address is enabled */
-	if (!net->tquic.prefer_preferred_address)
+	if (!tquic_sysctl_get_prefer_preferred_address())
 		return;
 
 	/*

@@ -22,6 +22,9 @@
 
 #include "bbrv2.h"
 
+/* Default MTU for calculations */
+#define BBR_DEFAULT_MSS		1200
+
 /* Pacing gain cycle for ProbeBW (8 phases) */
 static const u32 bbr_pacing_gain_cycle[] = {
 	BBR_UNIT * 5 / 4,	/* 1.25x probe up */
@@ -65,7 +68,7 @@ static void bbr_minmax_reset(struct bbr_minmax *filter, u64 window_len)
  */
 static u64 bbr_minmax_running_max(struct bbr_minmax *filter, u64 now, u64 value)
 {
-	struct minmax_sample *s = filter->samples;
+	struct bbr_minmax_sample *s = filter->samples;
 	u64 dt = now - s[0].time;
 
 	/* New maximum or window expired */
@@ -109,7 +112,7 @@ static u64 bbr_minmax_running_max(struct bbr_minmax *filter, u64 now, u64 value)
  */
 static u64 bbr_minmax_running_min(struct bbr_minmax *filter, u64 now, u64 value)
 {
-	struct minmax_sample *s = filter->samples;
+	struct bbr_minmax_sample *s = filter->samples;
 	u64 dt = now - s[0].time;
 
 	/* New minimum or window expired */
@@ -143,6 +146,19 @@ static u64 bbr_minmax_running_min(struct bbr_minmax *filter, u64 now, u64 value)
 }
 
 /**
+ * bbr_get_mss - Get MSS from path or use default
+ * @bbr: BBRv2 state
+ *
+ * Return: Maximum segment size
+ */
+static u32 bbr_get_mss(struct bbrv2 *bbr)
+{
+	if (bbr->path && bbr->path->mtu > 0)
+		return bbr->path->mtu;
+	return BBR_DEFAULT_MSS;
+}
+
+/**
  * bbr_bdp - Calculate bandwidth-delay product
  * @bbr: BBRv2 state
  *
@@ -164,11 +180,12 @@ static u64 bbr_bdp(struct bbrv2 *bbr)
 static u32 bbr_inflight(struct bbrv2 *bbr, u32 gain)
 {
 	u64 inflight;
+	u32 mss = bbr_get_mss(bbr);
 
 	inflight = bbr_bdp(bbr);
 	inflight = (inflight * gain) >> BBR_SCALE;
 
-	return max((u32)inflight, (u32)(BBR_MIN_CWND * bbr->base.max_datagram_size));
+	return max((u32)inflight, (u32)(BBR_MIN_CWND * mss));
 }
 
 /**
@@ -218,29 +235,13 @@ static void bbr_check_full_bw_reached(struct bbrv2 *bbr)
 }
 
 /**
- * bbr_set_pacing_rate - Set the pacing rate
- * @bbr: BBRv2 state
- */
-static void bbr_set_pacing_rate(struct bbrv2 *bbr)
-{
-	u64 rate;
-
-	rate = (bbr->bw * bbr->pacing_gain) >> BBR_SCALE;
-
-	/* Apply headroom for BBRv2 */
-	rate = (rate * (BBR_UNIT - bbr_headroom)) >> BBR_SCALE;
-
-	bbr->base.pacing_rate = rate;
-}
-
-/**
  * bbr_set_cwnd - Set the congestion window
  * @bbr: BBRv2 state
  */
 static void bbr_set_cwnd(struct bbrv2 *bbr)
 {
 	u32 target;
-	u32 mss = bbr->base.max_datagram_size;
+	u32 mss = bbr_get_mss(bbr);
 
 	target = bbr_inflight(bbr, bbr->cwnd_gain);
 
@@ -313,15 +314,15 @@ static void bbr_enter_probe_rtt(struct bbrv2 *bbr)
  * @bbr: BBRv2 state
  * @acked: Bytes acked
  * @rtt_us: RTT sample
- * @delivered: Total delivered bytes
  */
-static void bbr_update_model(struct bbrv2 *bbr, u64 acked, u64 rtt_us, u64 delivered)
+static void bbr_update_model(struct bbrv2 *bbr, u64 acked, u64 rtt_us)
 {
 	u64 now = ktime_get_ns();
 	u64 bw_sample;
 
 	/* Update round */
-	bbr_update_round(bbr, delivered);
+	bbr->bytes_delivered += acked;
+	bbr_update_round(bbr, bbr->bytes_delivered);
 
 	/* Update bandwidth estimate */
 	if (rtt_us > 0 && acked > 0) {
@@ -376,27 +377,38 @@ static void bbr_check_probe_rtt(struct bbrv2 *bbr)
 
 /**
  * bbrv2_init - Initialize BBRv2 state
- * @cong: Base congestion control structure
+ * @path: Path to initialize CC for
  *
- * Return: 0 on success
+ * Return: Pointer to allocated bbrv2 state, or NULL on failure
  */
-static int bbrv2_init(struct tquic_cong *cong)
+static void *bbrv2_init(struct tquic_path *path)
 {
-	struct bbrv2 *bbr = container_of(cong, struct bbrv2, base);
+	struct bbrv2 *bbr;
+	u32 initial_cwnd;
+
+	bbr = kzalloc(sizeof(*bbr), GFP_KERNEL);
+	if (!bbr)
+		return NULL;
+
+	bbr->path = path;
 
 	/* Initialize filters with 10 RTT window (assume 100ms initially) */
 	bbr_minmax_reset(&bbr->bw_filter, NSEC_PER_SEC);
 	bbr_minmax_reset(&bbr->rtt_filter, 10 * NSEC_PER_SEC);
 
+	/* Get initial cwnd from path stats or use default */
+	initial_cwnd = 10 * bbr_get_mss(bbr);
+
 	bbr->bw = 0;
 	bbr->rtt_us = 0;
 	bbr->min_rtt_us = UINT_MAX;
-	bbr->cwnd = cong->initial_window;
+	bbr->cwnd = initial_cwnd;
 	bbr->inflight_lo = UINT_MAX;
 	bbr->inflight_hi = 0;
 	bbr->prior_cwnd = 0;
 	bbr->round_count = 0;
 	bbr->next_round_delivered = 0;
+	bbr->bytes_delivered = 0;
 	bbr->full_bw = 0;
 	bbr->full_bw_count = 0;
 	bbr->full_bw_reached = false;
@@ -416,44 +428,74 @@ static int bbrv2_init(struct tquic_cong *cong)
 	/* Start in Startup mode */
 	bbr_enter_startup(bbr);
 
-	return 0;
+	return bbr;
 }
 
 /**
  * bbrv2_release - Release BBRv2 state
- * @cong: Base congestion control structure
+ * @cong_data: BBRv2 state to release
  */
-static void bbrv2_release(struct tquic_cong *cong)
+static void bbrv2_release(void *cong_data)
 {
-	/* No dynamic allocations */
+	kfree(cong_data);
 }
 
 /**
  * bbrv2_get_cwnd - Get congestion window
- * @cong: Base congestion control structure
+ * @cong_data: BBRv2 state
  *
  * Return: Cwnd in bytes
  */
-static u32 bbrv2_get_cwnd(struct tquic_cong *cong)
+static u64 bbrv2_get_cwnd(void *cong_data)
 {
-	struct bbrv2 *bbr = container_of(cong, struct bbrv2, base);
+	struct bbrv2 *bbr = cong_data;
+
+	if (!bbr)
+		return 10 * BBR_DEFAULT_MSS;
 
 	return bbr->cwnd;
 }
 
 /**
+ * bbrv2_get_pacing_rate - Get pacing rate
+ * @cong_data: BBRv2 state
+ *
+ * Return: Pacing rate in bytes/sec
+ */
+static u64 bbrv2_get_pacing_rate(void *cong_data)
+{
+	struct bbrv2 *bbr = cong_data;
+	u64 rate;
+
+	if (!bbr || bbr->bw == 0)
+		return 0;
+
+	rate = (bbr->bw * bbr->pacing_gain) >> BBR_SCALE;
+
+	/* Apply headroom for BBRv2 */
+	rate = (rate * (BBR_UNIT - bbr_headroom)) >> BBR_SCALE;
+
+	return rate;
+}
+
+/**
  * bbrv2_on_ack - Process acknowledgment
- * @cong: Base congestion control structure
- * @acked: Bytes acknowledged
+ * @cong_data: BBRv2 state
+ * @bytes_acked: Bytes acknowledged
  * @rtt_us: RTT sample
  */
-static void bbrv2_on_ack(struct tquic_cong *cong, u64 acked, u64 rtt_us)
+static void bbrv2_on_ack(void *cong_data, u64 bytes_acked, u64 rtt_us)
 {
-	struct bbrv2 *bbr = container_of(cong, struct bbrv2, base);
-	u32 mss = bbr->base.max_datagram_size;
+	struct bbrv2 *bbr = cong_data;
+	u32 mss;
+
+	if (!bbr)
+		return;
+
+	mss = bbr_get_mss(bbr);
 
 	/* Update model */
-	bbr_update_model(bbr, acked, rtt_us, cong->bytes_delivered);
+	bbr_update_model(bbr, bytes_acked, rtt_us);
 
 	/* Mode-specific processing */
 	switch (bbr->mode) {
@@ -465,7 +507,8 @@ static void bbrv2_on_ack(struct tquic_cong *cong, u64 acked, u64 rtt_us)
 
 	case BBR_DRAIN:
 		/* Exit Drain when inflight drops to BDP */
-		if (cong->bytes_in_flight <= bbr_bdp(bbr))
+		/* Estimate inflight from cwnd (simplified) */
+		if (bbr->cwnd <= bbr_bdp(bbr))
 			bbr_enter_probe_bw(bbr);
 		break;
 
@@ -495,51 +538,23 @@ static void bbrv2_on_ack(struct tquic_cong *cong, u64 acked, u64 rtt_us)
 	} else {
 		bbr_set_cwnd(bbr);
 	}
-
-	bbr_set_pacing_rate(bbr);
-}
-
-/**
- * bbrv2_on_ecn - Process ECN feedback
- * @cong: Base congestion control structure
- * @ce_count: CE marked packets
- * @acked_bytes: Bytes acknowledged
- */
-static void bbrv2_on_ecn(struct tquic_cong *cong, u64 ce_count, u64 acked_bytes)
-{
-	struct bbrv2 *bbr = container_of(cong, struct bbrv2, base);
-	u32 ecn_fraction;
-
-	if (!bbr->ecn_eligible || ce_count == 0)
-		return;
-
-	bbr->ecn_in_round += ce_count;
-
-	/* Calculate ECN fraction */
-	if (acked_bytes > 0) {
-		ecn_fraction = (ce_count * bbr->base.max_datagram_size * BBR_UNIT) /
-			       acked_bytes;
-
-		/* If ECN fraction exceeds threshold, reduce inflight bounds */
-		if (ecn_fraction > bbr->params.ecn_factor) {
-			bbr->inflight_hi = max((bbr->inflight_hi * bbr->params.beta) >> BBR_SCALE,
-					       (u32)(BBR_MIN_CWND * bbr->base.max_datagram_size));
-			bbr_set_cwnd(bbr);
-		}
-	}
 }
 
 /**
  * bbrv2_on_loss - Process loss event
- * @cong: Base congestion control structure
- * @lost_bytes: Bytes lost
+ * @cong_data: BBRv2 state
+ * @bytes_lost: Bytes lost
  */
-static void bbrv2_on_loss(struct tquic_cong *cong, u64 lost_bytes)
+static void bbrv2_on_loss(void *cong_data, u64 bytes_lost)
 {
-	struct bbrv2 *bbr = container_of(cong, struct bbrv2, base);
-	u32 mss = bbr->base.max_datagram_size;
+	struct bbrv2 *bbr = cong_data;
+	u32 mss;
 
-	bbr->loss_in_round += lost_bytes / mss;
+	if (!bbr)
+		return;
+
+	mss = bbr_get_mss(bbr);
+	bbr->loss_in_round += bytes_lost / mss;
 
 	if (bbr->in_loss_recovery)
 		return;
@@ -562,68 +577,99 @@ static void bbrv2_on_loss(struct tquic_cong *cong, u64 lost_bytes)
 }
 
 /**
- * bbrv2_on_recovery_exit - Exit loss recovery
- * @cong: Base congestion control structure
+ * bbrv2_on_ecn - Process ECN feedback
+ * @cong_data: BBRv2 state
+ * @ecn_ce_count: CE marked packets
  */
-static void bbrv2_on_recovery_exit(struct tquic_cong *cong)
+static void bbrv2_on_ecn(void *cong_data, u64 ecn_ce_count)
 {
-	struct bbrv2 *bbr = container_of(cong, struct bbrv2, base);
+	struct bbrv2 *bbr = cong_data;
+	u32 mss;
 
+	if (!bbr || !bbr->ecn_eligible || ecn_ce_count == 0)
+		return;
+
+	mss = bbr_get_mss(bbr);
+	bbr->ecn_in_round += ecn_ce_count;
+
+	/* If ECN exceeds threshold, reduce inflight bounds */
+	if (bbr->ecn_in_round > bbr->params.ecn_factor) {
+		bbr->inflight_hi = max((bbr->inflight_hi * bbr->params.beta) >> BBR_SCALE,
+				       (u32)(BBR_MIN_CWND * mss));
+		bbr_set_cwnd(bbr);
+	}
+}
+
+/**
+ * bbrv2_on_persistent_congestion - Handle persistent congestion
+ * @cong_data: BBRv2 state
+ * @info: Persistent congestion info
+ */
+static void bbrv2_on_persistent_congestion(void *cong_data,
+					   struct tquic_persistent_cong_info *info)
+{
+	struct bbrv2 *bbr = cong_data;
+	u32 mss;
+
+	if (!bbr)
+		return;
+
+	mss = bbr_get_mss(bbr);
+
+	/* Reset to minimum cwnd per RFC 9002 Section 7.6 */
+	bbr->cwnd = 2 * mss;
+	bbr->inflight_lo = bbr->cwnd;
+	bbr->inflight_hi = 0;
 	bbr->in_loss_recovery = false;
 
-	/* Restore cwnd but respect inflight bounds */
-	bbr_set_cwnd(bbr);
+	/* Reset to startup */
+	bbr->full_bw_reached = false;
+	bbr->full_bw = 0;
+	bbr->full_bw_count = 0;
+	bbr_enter_startup(bbr);
 }
 
 /**
- * bbrv2_in_slow_start - Check if in slow start
- * @cong: Base congestion control structure
+ * bbrv2_can_send - Check if we can send more data
+ * @cong_data: BBRv2 state
+ * @bytes: Bytes to send
  *
- * Return: true if in Startup mode
+ * Return: true if can send
  */
-static bool bbrv2_in_slow_start(struct tquic_cong *cong)
+static bool bbrv2_can_send(void *cong_data, u64 bytes)
 {
-	struct bbrv2 *bbr = container_of(cong, struct bbrv2, base);
+	struct bbrv2 *bbr = cong_data;
 
-	return bbr->mode == BBR_STARTUP;
+	if (!bbr)
+		return true;
+
+	/* Simplified: assume we can send if cwnd allows */
+	return bytes <= bbr->cwnd;
 }
 
-/**
- * bbrv2_in_recovery - Check if in recovery
- * @cong: Base congestion control structure
- *
- * Return: true if in loss recovery
- */
-static bool bbrv2_in_recovery(struct tquic_cong *cong)
-{
-	struct bbrv2 *bbr = container_of(cong, struct bbrv2, base);
-
-	return bbr->in_loss_recovery;
-}
-
-const struct tquic_cong_ops bbrv2_cong_ops = {
+struct tquic_cong_ops bbrv2_cong_ops = {
 	.name = "bbrv2",
+	.owner = THIS_MODULE,
 	.init = bbrv2_init,
 	.release = bbrv2_release,
-	.get_cwnd = bbrv2_get_cwnd,
 	.on_ack = bbrv2_on_ack,
-	.on_ecn = bbrv2_on_ecn,
 	.on_loss = bbrv2_on_loss,
-	.on_recovery_exit = bbrv2_on_recovery_exit,
-	.in_slow_start = bbrv2_in_slow_start,
-	.in_recovery = bbrv2_in_recovery,
+	.on_ecn = bbrv2_on_ecn,
+	.on_persistent_congestion = bbrv2_on_persistent_congestion,
+	.get_cwnd = bbrv2_get_cwnd,
+	.get_pacing_rate = bbrv2_get_pacing_rate,
+	.can_send = bbrv2_can_send,
 };
-EXPORT_SYMBOL_GPL(bbrv2_cong_ops);
 
 int __init tquic_bbrv2_init(void)
 {
 	pr_info("tquic: BBRv2 congestion control initialized\n");
-	return tquic_cong_register(&bbrv2_cong_ops);
+	return tquic_register_cong(&bbrv2_cong_ops);
 }
 
 void __exit tquic_bbrv2_exit(void)
 {
-	tquic_cong_unregister(&bbrv2_cong_ops);
+	tquic_unregister_cong(&bbrv2_cong_ops);
 }
 
 MODULE_LICENSE("GPL");

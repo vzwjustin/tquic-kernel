@@ -33,12 +33,19 @@
  * Encodes the value into the buffer using the minimum number of bytes.
  * Values are encoded in network byte order with length prefix in MSBs.
  *
- * Returns the number of bytes written, or 0 if the value is too large.
+ * Returns the number of bytes written, or negative error on failure.
  */
-int tquic_varint_encode(u64 value, u8 *buf)
+int tquic_varint_encode(u64 value, u8 *buf, size_t len)
 {
+	int needed;
+
 	if (!buf)
-		return 0;
+		return -EINVAL;
+
+	/* Calculate required length */
+	needed = tquic_varint_size(value);
+	if (needed <= 0 || (size_t)needed > len)
+		return -ENOBUFS;
 
 	if (value <= TQUIC_VARINT_1BYTE_MAX) {
 		/* 1 byte: prefix 00, 6-bit value */
@@ -68,9 +75,23 @@ int tquic_varint_encode(u64 value, u8 *buf)
 	}
 
 	/* Value exceeds maximum encodable value */
-	return 0;
+	return -EOVERFLOW;
 }
 EXPORT_SYMBOL_GPL(tquic_varint_encode);
+
+/**
+ * tquic_varint_len - Calculate the encoded size for a value
+ * @value: The value to be encoded
+ *
+ * Returns the number of bytes needed to encode the value, or 0 if the
+ * value exceeds the maximum encodable value. This is an exported wrapper
+ * around the inline tquic_varint_size().
+ */
+int tquic_varint_len(u64 value)
+{
+	return tquic_varint_size(value);
+}
+EXPORT_SYMBOL_GPL(tquic_varint_len);
 
 /**
  * tquic_varint_decode - Decode a QUIC variable-length integer
@@ -198,7 +219,7 @@ int tquic_varint_write(u8 *buf, size_t buf_len, size_t *offset, u64 value)
 		return -ENOSPC;
 
 	/* Encode the value */
-	if (tquic_varint_encode(value, buf + *offset) != encoded_size)
+	if (tquic_varint_encode(value, buf + *offset, remaining) != encoded_size)
 		return -EINVAL;
 
 	*offset += encoded_size;

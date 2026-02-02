@@ -88,7 +88,7 @@ static inline int tquic_varint_decode_len(u8 first_byte)
  * Encodes the value into the buffer using the minimum number of bytes.
  * Returns the number of bytes written, or 0 if the value is too large.
  */
-int tquic_varint_encode(u64 value, u8 *buf);
+int tquic_varint_encode(u64 value, u8 *buf, size_t len);
 
 /**
  * tquic_varint_decode - Decode a QUIC variable-length integer

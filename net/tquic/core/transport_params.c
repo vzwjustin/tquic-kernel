@@ -89,7 +89,7 @@
  *
  * Return: Number of bytes needed to encode the value, or 0 if value is too large
  */
-static size_t tquic_varint_len(u64 value)
+static size_t tp_varint_len(u64 value)
 {
 	if (value <= 63)
 		return 1;
@@ -110,9 +110,9 @@ static size_t tquic_varint_len(u64 value)
  *
  * Return: Number of bytes written, or negative error
  */
-static ssize_t tquic_varint_encode(u8 *buf, size_t buflen, u64 value)
+static ssize_t tp_varint_encode(u8 *buf, size_t buflen, u64 value)
 {
-	size_t len = tquic_varint_len(value);
+	size_t len = tp_varint_len(value);
 
 	if (len == 0)
 		return -EOVERFLOW;
@@ -156,7 +156,7 @@ static ssize_t tquic_varint_encode(u8 *buf, size_t buflen, u64 value)
  *
  * Return: Number of bytes consumed, or negative error
  */
-static ssize_t tquic_varint_decode(const u8 *buf, size_t buflen, u64 *value)
+static ssize_t tp_varint_decode(const u8 *buf, size_t buflen, u64 *value)
 {
 	u8 prefix;
 	size_t len;
@@ -313,13 +313,13 @@ static ssize_t encode_connection_id(u8 *buf, size_t buflen, u64 param_id,
 	size_t offset = 0;
 
 	/* Parameter ID */
-	ret = tquic_varint_encode(buf + offset, buflen - offset, param_id);
+	ret = tp_varint_encode(buf + offset, buflen - offset, param_id);
 	if (ret < 0)
 		return ret;
 	offset += ret;
 
 	/* Length */
-	ret = tquic_varint_encode(buf + offset, buflen - offset, cid->len);
+	ret = tp_varint_encode(buf + offset, buflen - offset, cid->len);
 	if (ret < 0)
 		return ret;
 	offset += ret;
@@ -347,22 +347,22 @@ static ssize_t encode_varint_param(u8 *buf, size_t buflen, u64 param_id,
 {
 	ssize_t ret;
 	size_t offset = 0;
-	size_t value_len = tquic_varint_len(value);
+	size_t value_len = tp_varint_len(value);
 
 	/* Parameter ID */
-	ret = tquic_varint_encode(buf + offset, buflen - offset, param_id);
+	ret = tp_varint_encode(buf + offset, buflen - offset, param_id);
 	if (ret < 0)
 		return ret;
 	offset += ret;
 
 	/* Length */
-	ret = tquic_varint_encode(buf + offset, buflen - offset, value_len);
+	ret = tp_varint_encode(buf + offset, buflen - offset, value_len);
 	if (ret < 0)
 		return ret;
 	offset += ret;
 
 	/* Value */
-	ret = tquic_varint_encode(buf + offset, buflen - offset, value);
+	ret = tp_varint_encode(buf + offset, buflen - offset, value);
 	if (ret < 0)
 		return ret;
 	offset += ret;
@@ -384,13 +384,13 @@ static ssize_t encode_zero_length_param(u8 *buf, size_t buflen, u64 param_id)
 	size_t offset = 0;
 
 	/* Parameter ID */
-	ret = tquic_varint_encode(buf + offset, buflen - offset, param_id);
+	ret = tp_varint_encode(buf + offset, buflen - offset, param_id);
 	if (ret < 0)
 		return ret;
 	offset += ret;
 
 	/* Length (0) */
-	ret = tquic_varint_encode(buf + offset, buflen - offset, 0);
+	ret = tp_varint_encode(buf + offset, buflen - offset, 0);
 	if (ret < 0)
 		return ret;
 	offset += ret;
@@ -413,14 +413,14 @@ static ssize_t encode_stateless_reset_token(u8 *buf, size_t buflen,
 	size_t offset = 0;
 
 	/* Parameter ID */
-	ret = tquic_varint_encode(buf + offset, buflen - offset,
+	ret = tp_varint_encode(buf + offset, buflen - offset,
 				  TP_STATELESS_RESET_TOKEN);
 	if (ret < 0)
 		return ret;
 	offset += ret;
 
 	/* Length (always 16) */
-	ret = tquic_varint_encode(buf + offset, buflen - offset,
+	ret = tp_varint_encode(buf + offset, buflen - offset,
 				  STATELESS_RESET_TOKEN_LEN);
 	if (ret < 0)
 		return ret;
@@ -459,14 +459,14 @@ static ssize_t encode_preferred_address(u8 *buf, size_t buflen,
 		    STATELESS_RESET_TOKEN_LEN;
 
 	/* Parameter ID */
-	ret = tquic_varint_encode(buf + offset, buflen - offset,
+	ret = tp_varint_encode(buf + offset, buflen - offset,
 				  TP_PREFERRED_ADDRESS);
 	if (ret < 0)
 		return ret;
 	offset += ret;
 
 	/* Length */
-	ret = tquic_varint_encode(buf + offset, buflen - offset, value_len);
+	ret = tp_varint_encode(buf + offset, buflen - offset, value_len);
 	if (ret < 0)
 		return ret;
 	offset += ret;
@@ -834,13 +834,13 @@ int tquic_tp_decode(const u8 *buf, size_t buflen, bool is_server,
 
 	while (offset < buflen) {
 		/* Decode parameter ID */
-		ret = tquic_varint_decode(buf + offset, buflen - offset, &param_id);
+		ret = tp_varint_decode(buf + offset, buflen - offset, &param_id);
 		if (ret < 0)
 			return ret;
 		offset += ret;
 
 		/* Decode parameter length */
-		ret = tquic_varint_decode(buf + offset, buflen - offset, &param_len);
+		ret = tp_varint_decode(buf + offset, buflen - offset, &param_len);
 		if (ret < 0)
 			return ret;
 		offset += ret;
@@ -862,7 +862,7 @@ int tquic_tp_decode(const u8 *buf, size_t buflen, bool is_server,
 			break;
 
 		case TP_MAX_IDLE_TIMEOUT:
-			ret = tquic_varint_decode(buf + offset, param_len, &value);
+			ret = tp_varint_decode(buf + offset, param_len, &value);
 			if (ret < 0 || (size_t)ret != param_len)
 				return -EINVAL;
 			params->max_idle_timeout = value;
@@ -879,63 +879,63 @@ int tquic_tp_decode(const u8 *buf, size_t buflen, bool is_server,
 			break;
 
 		case TP_MAX_UDP_PAYLOAD_SIZE:
-			ret = tquic_varint_decode(buf + offset, param_len, &value);
+			ret = tp_varint_decode(buf + offset, param_len, &value);
 			if (ret < 0 || (size_t)ret != param_len)
 				return -EINVAL;
 			params->max_udp_payload_size = value;
 			break;
 
 		case TP_INITIAL_MAX_DATA:
-			ret = tquic_varint_decode(buf + offset, param_len, &value);
+			ret = tp_varint_decode(buf + offset, param_len, &value);
 			if (ret < 0 || (size_t)ret != param_len)
 				return -EINVAL;
 			params->initial_max_data = value;
 			break;
 
 		case TP_INITIAL_MAX_STREAM_DATA_BIDI_LOCAL:
-			ret = tquic_varint_decode(buf + offset, param_len, &value);
+			ret = tp_varint_decode(buf + offset, param_len, &value);
 			if (ret < 0 || (size_t)ret != param_len)
 				return -EINVAL;
 			params->initial_max_stream_data_bidi_local = value;
 			break;
 
 		case TP_INITIAL_MAX_STREAM_DATA_BIDI_REMOTE:
-			ret = tquic_varint_decode(buf + offset, param_len, &value);
+			ret = tp_varint_decode(buf + offset, param_len, &value);
 			if (ret < 0 || (size_t)ret != param_len)
 				return -EINVAL;
 			params->initial_max_stream_data_bidi_remote = value;
 			break;
 
 		case TP_INITIAL_MAX_STREAM_DATA_UNI:
-			ret = tquic_varint_decode(buf + offset, param_len, &value);
+			ret = tp_varint_decode(buf + offset, param_len, &value);
 			if (ret < 0 || (size_t)ret != param_len)
 				return -EINVAL;
 			params->initial_max_stream_data_uni = value;
 			break;
 
 		case TP_INITIAL_MAX_STREAMS_BIDI:
-			ret = tquic_varint_decode(buf + offset, param_len, &value);
+			ret = tp_varint_decode(buf + offset, param_len, &value);
 			if (ret < 0 || (size_t)ret != param_len)
 				return -EINVAL;
 			params->initial_max_streams_bidi = value;
 			break;
 
 		case TP_INITIAL_MAX_STREAMS_UNI:
-			ret = tquic_varint_decode(buf + offset, param_len, &value);
+			ret = tp_varint_decode(buf + offset, param_len, &value);
 			if (ret < 0 || (size_t)ret != param_len)
 				return -EINVAL;
 			params->initial_max_streams_uni = value;
 			break;
 
 		case TP_ACK_DELAY_EXPONENT:
-			ret = tquic_varint_decode(buf + offset, param_len, &value);
+			ret = tp_varint_decode(buf + offset, param_len, &value);
 			if (ret < 0 || (size_t)ret != param_len)
 				return -EINVAL;
 			params->ack_delay_exponent = value;
 			break;
 
 		case TP_MAX_ACK_DELAY:
-			ret = tquic_varint_decode(buf + offset, param_len, &value);
+			ret = tp_varint_decode(buf + offset, param_len, &value);
 			if (ret < 0 || (size_t)ret != param_len)
 				return -EINVAL;
 			params->max_ack_delay = value;
@@ -958,7 +958,7 @@ int tquic_tp_decode(const u8 *buf, size_t buflen, bool is_server,
 			break;
 
 		case TP_ACTIVE_CONNECTION_ID_LIMIT:
-			ret = tquic_varint_decode(buf + offset, param_len, &value);
+			ret = tp_varint_decode(buf + offset, param_len, &value);
 			if (ret < 0 || (size_t)ret != param_len)
 				return -EINVAL;
 			params->active_connection_id_limit = value;
@@ -984,7 +984,7 @@ int tquic_tp_decode(const u8 *buf, size_t buflen, bool is_server,
 
 		case TP_MAX_DATAGRAM_FRAME_SIZE:
 			/* RFC 9221: max_datagram_frame_size */
-			ret = tquic_varint_decode(buf + offset, param_len, &value);
+			ret = tp_varint_decode(buf + offset, param_len, &value);
 			if (ret < 0 || (size_t)ret != param_len)
 				return -EINVAL;
 			params->max_datagram_frame_size = value;
@@ -1003,7 +1003,7 @@ int tquic_tp_decode(const u8 *buf, size_t buflen, bool is_server,
 			/* Handle custom multipath parameter */
 			if (param_id == TP_ENABLE_MULTIPATH) {
 				if (param_len > 0) {
-					ret = tquic_varint_decode(buf + offset,
+					ret = tp_varint_decode(buf + offset,
 								  param_len, &value);
 					if (ret < 0)
 						return ret;
@@ -1014,7 +1014,7 @@ int tquic_tp_decode(const u8 *buf, size_t buflen, bool is_server,
 				}
 			} else if (param_id == TP_MIN_ACK_DELAY) {
 				/* ACK Frequency (draft-ietf-quic-ack-frequency) */
-				ret = tquic_varint_decode(buf + offset,
+				ret = tp_varint_decode(buf + offset,
 							  param_len, &value);
 				if (ret < 0 || (size_t)ret != param_len)
 					return -EINVAL;
@@ -1307,12 +1307,28 @@ void tquic_tp_generate_stateless_reset_token(struct tquic_connection *conn,
 					     const struct tquic_cid *cid,
 					     u8 *token)
 {
+	const u8 *static_key;
+
 	/*
-	 * In a real implementation, this would use HKDF or similar
-	 * with a server secret. For now, generate random bytes.
-	 * TODO: Implement proper stateless reset token generation
+	 * Generate stateless reset token using HMAC-SHA256 per RFC 9000
+	 * Section 10.3.2: "An endpoint could generate a stateless reset
+	 * token by using HMAC with a static key over the connection ID."
+	 *
+	 * We delegate to the proper implementation in tquic_stateless_reset.c
+	 * which uses HMAC-SHA256 and the connection's static key.
 	 */
-	get_random_bytes(token, STATELESS_RESET_TOKEN_LEN);
+	static_key = tquic_stateless_reset_get_static_key();
+	if (static_key && cid) {
+		tquic_stateless_reset_generate_token(cid, static_key, token);
+	} else {
+		/*
+		 * Fallback: If no static key available (early in connection
+		 * lifecycle), generate random bytes. This is less secure
+		 * as tokens won't be deterministic, but is acceptable for
+		 * initial CIDs which are replaced after handshake.
+		 */
+		get_random_bytes(token, STATELESS_RESET_TOKEN_LEN);
+	}
 }
 EXPORT_SYMBOL_GPL(tquic_tp_generate_stateless_reset_token);
 
@@ -1393,12 +1409,12 @@ size_t tquic_tp_encoded_size(const struct tquic_transport_params *params,
 
 	/* original_destination_connection_id */
 	if (is_server && params->original_dcid_present)
-		size += 2 + tquic_varint_len(params->original_dcid.len) +
+		size += 2 + tp_varint_len(params->original_dcid.len) +
 			params->original_dcid.len;
 
 	/* max_idle_timeout */
 	if (params->max_idle_timeout > 0)
-		size += 2 + tquic_varint_len(params->max_idle_timeout);
+		size += 2 + tp_varint_len(params->max_idle_timeout);
 
 	/* stateless_reset_token */
 	if (is_server && params->stateless_reset_token_present)
@@ -1406,39 +1422,39 @@ size_t tquic_tp_encoded_size(const struct tquic_transport_params *params,
 
 	/* max_udp_payload_size */
 	if (params->max_udp_payload_size != DEFAULT_MAX_UDP_PAYLOAD_SIZE)
-		size += 2 + tquic_varint_len(params->max_udp_payload_size);
+		size += 2 + tp_varint_len(params->max_udp_payload_size);
 
 	/* initial_max_data */
 	if (params->initial_max_data > 0)
-		size += 2 + tquic_varint_len(params->initial_max_data);
+		size += 2 + tp_varint_len(params->initial_max_data);
 
 	/* initial_max_stream_data_bidi_local */
 	if (params->initial_max_stream_data_bidi_local > 0)
-		size += 2 + tquic_varint_len(params->initial_max_stream_data_bidi_local);
+		size += 2 + tp_varint_len(params->initial_max_stream_data_bidi_local);
 
 	/* initial_max_stream_data_bidi_remote */
 	if (params->initial_max_stream_data_bidi_remote > 0)
-		size += 2 + tquic_varint_len(params->initial_max_stream_data_bidi_remote);
+		size += 2 + tp_varint_len(params->initial_max_stream_data_bidi_remote);
 
 	/* initial_max_stream_data_uni */
 	if (params->initial_max_stream_data_uni > 0)
-		size += 2 + tquic_varint_len(params->initial_max_stream_data_uni);
+		size += 2 + tp_varint_len(params->initial_max_stream_data_uni);
 
 	/* initial_max_streams_bidi */
 	if (params->initial_max_streams_bidi > 0)
-		size += 2 + tquic_varint_len(params->initial_max_streams_bidi);
+		size += 2 + tp_varint_len(params->initial_max_streams_bidi);
 
 	/* initial_max_streams_uni */
 	if (params->initial_max_streams_uni > 0)
-		size += 2 + tquic_varint_len(params->initial_max_streams_uni);
+		size += 2 + tp_varint_len(params->initial_max_streams_uni);
 
 	/* ack_delay_exponent */
 	if (params->ack_delay_exponent != DEFAULT_ACK_DELAY_EXPONENT)
-		size += 2 + tquic_varint_len(params->ack_delay_exponent);
+		size += 2 + tp_varint_len(params->ack_delay_exponent);
 
 	/* max_ack_delay */
 	if (params->max_ack_delay != DEFAULT_MAX_ACK_DELAY)
-		size += 2 + tquic_varint_len(params->max_ack_delay);
+		size += 2 + tp_varint_len(params->max_ack_delay);
 
 	/* disable_active_migration */
 	if (params->disable_active_migration)
@@ -1455,16 +1471,16 @@ size_t tquic_tp_encoded_size(const struct tquic_transport_params *params,
 
 	/* active_connection_id_limit */
 	if (params->active_connection_id_limit != DEFAULT_ACTIVE_CONNECTION_ID_LIMIT)
-		size += 2 + tquic_varint_len(params->active_connection_id_limit);
+		size += 2 + tp_varint_len(params->active_connection_id_limit);
 
 	/* initial_source_connection_id */
 	if (params->initial_scid_present)
-		size += 2 + tquic_varint_len(params->initial_scid.len) +
+		size += 2 + tp_varint_len(params->initial_scid.len) +
 			params->initial_scid.len;
 
 	/* retry_source_connection_id */
 	if (is_server && params->retry_scid_present)
-		size += 2 + tquic_varint_len(params->retry_scid.len) +
+		size += 2 + tp_varint_len(params->retry_scid.len) +
 			params->retry_scid.len;
 
 	/* enable_multipath */
@@ -1473,7 +1489,7 @@ size_t tquic_tp_encoded_size(const struct tquic_transport_params *params,
 
 	/* max_datagram_frame_size (RFC 9221) */
 	if (params->max_datagram_frame_size > 0)
-		size += 2 + tquic_varint_len(params->max_datagram_frame_size);
+		size += 2 + tp_varint_len(params->max_datagram_frame_size);
 
 	/* grease_quic_bit (RFC 9287) - 2-byte ID + 1-byte length (0) */
 	if (params->grease_quic_bit)
@@ -1481,9 +1497,9 @@ size_t tquic_tp_encoded_size(const struct tquic_transport_params *params,
 
 	/* min_ack_delay (draft-ietf-quic-ack-frequency) */
 	if (params->min_ack_delay_present) {
-		size += tquic_varint_len(TP_MIN_ACK_DELAY) +
-			tquic_varint_len(tquic_varint_len(params->min_ack_delay)) +
-			tquic_varint_len(params->min_ack_delay);
+		size += tp_varint_len(TP_MIN_ACK_DELAY) +
+			tp_varint_len(tp_varint_len(params->min_ack_delay)) +
+			tp_varint_len(params->min_ack_delay);
 	}
 
 	return size;

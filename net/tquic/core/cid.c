@@ -29,6 +29,7 @@
 #include <linux/refcount.h>
 #include <crypto/hash.h>
 #include <crypto/hmac.h>
+#include <crypto/utils.h>
 #include <net/tquic.h>
 
 /* CID pool configuration */
@@ -1156,7 +1157,7 @@ void tquic_cid_on_packet_sent(struct tquic_cid_manager *mgr)
 EXPORT_SYMBOL_GPL(tquic_cid_on_packet_sent);
 
 /**
- * tquic_cid_assign_to_path - Assign CIDs to a path for multipath
+ * tquic_cidmgr_assign_to_path - Assign CIDs to a path for multipath
  * @mgr: CID manager
  * @path: Path to assign CIDs to
  *
@@ -1164,7 +1165,7 @@ EXPORT_SYMBOL_GPL(tquic_cid_on_packet_sent);
  *
  * Return: 0 on success, negative error on failure
  */
-int tquic_cid_assign_to_path(struct tquic_cid_manager *mgr,
+int tquic_cidmgr_assign_to_path(struct tquic_cid_manager *mgr,
 			     struct tquic_path *path)
 {
 	struct tquic_cid_entry *local_entry = NULL;
@@ -1233,14 +1234,14 @@ int tquic_cid_assign_to_path(struct tquic_cid_manager *mgr,
 
 	return 0;
 }
-EXPORT_SYMBOL_GPL(tquic_cid_assign_to_path);
+EXPORT_SYMBOL_GPL(tquic_cidmgr_assign_to_path);
 
 /**
- * tquic_cid_release_from_path - Release CIDs from a path
+ * tquic_cidmgr_release_from_path - Release CIDs from a path
  * @mgr: CID manager
  * @path: Path to release CIDs from
  */
-void tquic_cid_release_from_path(struct tquic_cid_manager *mgr,
+void tquic_cidmgr_release_from_path(struct tquic_cid_manager *mgr,
 				 struct tquic_path *path)
 {
 	struct tquic_cid_entry *entry;
@@ -1266,7 +1267,7 @@ void tquic_cid_release_from_path(struct tquic_cid_manager *mgr,
 
 	pr_debug("tquic_cid: released CIDs from path %u\n", path->path_id);
 }
-EXPORT_SYMBOL_GPL(tquic_cid_release_from_path);
+EXPORT_SYMBOL_GPL(tquic_cidmgr_release_from_path);
 
 /**
  * tquic_cid_get_for_path - Get the local CID for a specific path

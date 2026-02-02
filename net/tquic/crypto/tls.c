@@ -207,9 +207,10 @@ struct tquic_crypto_state {
 	enum tquic_enc_level read_level;
 	enum tquic_enc_level write_level;
 
-	/* Key update state */
+	/* Key update state (RFC 9001 Section 6) */
 	u32 key_phase;
 	bool key_update_pending;
+	struct tquic_key_update_state *key_update;	/* Full key update state */
 
 	/* Crypto handles */
 	struct crypto_aead *aead;
@@ -434,8 +435,8 @@ static int tquic_derive_initial_keys(struct tquic_crypto_state *crypto,
 	int ret;
 
 	/* Derive initial secret */
-	ret = tquic_hkdf_extract(crypto->hash, tquic_v1_salt,
-				 sizeof(tquic_v1_salt),
+	ret = tquic_hkdf_extract(crypto->hash, tquic_v1_initial_salt,
+				 sizeof(tquic_v1_initial_salt),
 				 dcid->id, dcid->len,
 				 initial_secret, sizeof(initial_secret));
 	if (ret)

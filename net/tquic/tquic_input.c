@@ -310,7 +310,7 @@ static int tquic_decrypt_payload(struct tquic_connection *conn,
  * reset tokens associated with the connection IDs and remote addresses
  * for datagrams it has recently sent."
  */
-static bool tquic_is_stateless_reset(struct tquic_connection *conn,
+static bool tquic_is_stateless_reset_internal(struct tquic_connection *conn,
 				     const u8 *data, size_t len)
 {
 	/*
@@ -415,7 +415,7 @@ static int tquic_process_version_negotiation(struct tquic_connection *conn,
 /*
  * Send version negotiation response (server side)
  */
-static int tquic_send_version_negotiation(struct sock *sk,
+static int tquic_send_version_negotiation_internal(struct sock *sk,
 					  const struct sockaddr *addr,
 					  const u8 *dcid, u8 dcid_len,
 					  const u8 *scid, u8 scid_len)
@@ -1696,7 +1696,7 @@ static int tquic_process_frames(struct tquic_connection *conn,
 /*
  * Parse long header
  */
-static int tquic_parse_long_header(struct tquic_rx_ctx *ctx,
+static int tquic_parse_long_header_internal(struct tquic_rx_ctx *ctx,
 				   u8 *dcid, u8 *dcid_len,
 				   u8 *scid, u8 *scid_len,
 				   u32 *version, int *pkt_type)
@@ -1745,7 +1745,7 @@ static int tquic_parse_long_header(struct tquic_rx_ctx *ctx,
 /*
  * Parse short header
  */
-static int tquic_parse_short_header(struct tquic_rx_ctx *ctx,
+static int tquic_parse_short_header_internal(struct tquic_rx_ctx *ctx,
 				    u8 dcid_len,  /* Expected DCID length */
 				    u8 *dcid,
 				    bool *key_phase,
@@ -1820,7 +1820,7 @@ struct tquic_gro_state *tquic_gro_init(void)
 
 	skb_queue_head_init(&gro->hold_queue);
 	spin_lock_init(&gro->lock);
-	hrtimer_init(&gro->gro_flush_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+	hrtimer_init(&gro->flush_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
 
 	return gro;
 }
@@ -1866,7 +1866,7 @@ static bool tquic_gro_can_coalesce(struct sk_buff *skb1, struct sk_buff *skb2)
 /*
  * Attempt to merge packets for GRO
  */
-static struct sk_buff *tquic_gro_receive(struct tquic_gro_state *gro,
+static struct sk_buff *tquic_gro_receive_internal(struct tquic_gro_state *gro,
 					 struct sk_buff *skb)
 {
 	struct sk_buff *held;
@@ -1958,7 +1958,7 @@ static int tquic_process_packet(struct tquic_connection *conn,
 	/* Check header form */
 	if (data[0] & TQUIC_HEADER_FORM_LONG) {
 		/* Long header */
-		ret = tquic_parse_long_header(&ctx, dcid, &dcid_len,
+		ret = tquic_parse_long_header_internal(&ctx, dcid, &dcid_len,
 					      scid, &scid_len,
 					      &version, &pkt_type);
 		if (ret < 0)
@@ -2135,7 +2135,7 @@ static int tquic_process_packet(struct tquic_connection *conn,
 		if (!conn)
 			return -ENOENT;
 
-		ret = tquic_parse_short_header(&ctx, conn->scid.len,
+		ret = tquic_parse_short_header_internal(&ctx, conn->scid.len,
 					       dcid, &key_phase, &spin_bit);
 		if (ret < 0)
 			return ret;
@@ -2345,7 +2345,7 @@ int tquic_udp_recv(struct sock *sk, struct sk_buff *skb)
 			conn = tquic_lookup_by_dcid(data + 1, dcid_len);
 		}
 
-		if (conn && tquic_is_stateless_reset(conn, data, len)) {
+		if (conn && tquic_is_stateless_reset_internal(conn, data, len)) {
 			tquic_handle_stateless_reset(conn);
 			kfree_skb(skb);
 			return 0;
@@ -2455,7 +2455,7 @@ int tquic_setup_udp_encap(struct sock *sk)
 	udp_sk(sk)->encap_rcv = tquic_encap_recv;
 
 	/* Enable GRO */
-	udp_tunnel_encap_enable(sk->sk_socket);
+	udp_tunnel_encap_enable(sk);
 
 	return 0;
 }

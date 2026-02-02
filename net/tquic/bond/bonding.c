@@ -19,39 +19,6 @@
 #include <net/sock.h>
 #include <net/tquic.h>
 
-/* Bonding state per connection */
-struct tquic_bond_state {
-	/* Configuration */
-	u8 mode;
-	u8 aggr_mode;
-	u8 failover_mode;
-
-	/* Reorder buffer */
-	struct sk_buff_head reorder_queue;
-	u64 reorder_next_seq;
-	u32 reorder_window;
-	spinlock_t reorder_lock;
-
-	/* Statistics */
-	struct tquic_bond_stats stats;
-
-	/* Path selection state */
-	u32 rr_counter;  /* Round-robin counter */
-	struct tquic_path *primary_path;
-
-	/* Failover state */
-	bool failover_pending;
-	ktime_t failover_start;
-	struct tquic_path *failover_from;
-
-	/* Work queue for async operations */
-	struct work_struct failover_work;
-	struct delayed_work probe_work;
-
-	/* Reference to connection */
-	struct tquic_connection *conn;
-};
-
 /* Path quality metrics for scheduling decisions */
 struct tquic_path_quality {
 	u64 score;           /* Combined quality score */
@@ -287,13 +254,108 @@ static struct tquic_path *tquic_select_blest(struct tquic_bond_state *bond,
 }
 
 /*
- * ECF (Earliest Completion First) scheduler
+ * ECF (Earliest Completion First) Scheduler
+ *
+ * True bandwidth aggregation scheduler that selects the path with the
+ * earliest predicted packet completion time.
+ *
+ * Formula: Completion_Time = RTT + (In_Flight_Bytes + Packet_Size) / Bandwidth
+ *
+ * This formula considers:
+ *   - RTT: Full round-trip propagation delay
+ *   - In_Flight: Bytes already sent but not acknowledged (queuing)
+ *   - Packet_Size: The current packet to be transmitted
+ *   - Bandwidth: Estimated path throughput capacity
+ *
+ * Example: For 1Gbps Fiber (5ms RTT) + 100Mbps LTE (50ms RTT):
+ *   - Fiber with 50KB in-flight: 5ms + (50KB + 1.5KB) / 125MB/s = 5.4ms
+ *   - LTE with 5KB in-flight:   50ms + (5KB + 1.5KB) / 12.5MB/s = 50.5ms
+ *   → Fiber is selected (faster completion despite more in-flight data)
  */
 static struct tquic_path *tquic_select_ecf(struct tquic_bond_state *bond,
 					   struct sk_buff *skb)
 {
-	/* ECF is similar to BLEST but uses actual completion predictions */
-	return tquic_select_blest(bond, skb);
+	struct tquic_connection *conn = bond->conn;
+	struct tquic_path *path, *best = NULL;
+	u64 min_completion = ULLONG_MAX;
+	u32 pkt_size = skb->len;
+
+	list_for_each_entry(path, &conn->paths, list) {
+		u64 completion_time;
+		u64 in_flight_bytes;
+		u64 queue_drain_time;
+		u64 rtt_us;
+		u64 bandwidth;
+
+		if (path->state != TQUIC_PATH_ACTIVE)
+			continue;
+
+		/*
+		 * Calculate in-flight bytes.
+		 * In-flight = transmitted bytes - acknowledged bytes
+		 * This is data "on the wire" waiting for ACK.
+		 */
+		if (path->stats.tx_bytes > path->stats.acked_bytes)
+			in_flight_bytes = path->stats.tx_bytes - path->stats.acked_bytes;
+		else
+			in_flight_bytes = 0;
+
+		/*
+		 * Clamp in-flight to congestion window.
+		 * We shouldn't have more in-flight than cwnd allows;
+		 * if tracking shows this, packets were likely lost.
+		 */
+		if (in_flight_bytes > path->stats.cwnd)
+			in_flight_bytes = path->stats.cwnd;
+
+		/* Get RTT in microseconds (full RTT for completion estimate) */
+		rtt_us = path->stats.rtt_smoothed;
+		if (rtt_us == 0)
+			rtt_us = 100000;  /* 100ms default */
+
+		/* Get bandwidth in bytes/second */
+		bandwidth = path->stats.bandwidth;
+		if (bandwidth == 0) {
+			/*
+			 * No bandwidth estimate available yet.
+			 * Derive from congestion window and RTT:
+			 * BW ≈ cwnd / RTT (basic BDP relationship)
+			 */
+			if (path->stats.cwnd > 0 && rtt_us > 0)
+				bandwidth = (u64)path->stats.cwnd * 1000000ULL / rtt_us;
+			else
+				bandwidth = 125000;  /* 1 Mbps fallback */
+		}
+
+		/*
+		 * ECF completion time formula:
+		 * Completion_Time = RTT + (In_Flight + Pkt_Size) / Bandwidth
+		 *
+		 * Units: RTT is microseconds, bandwidth is bytes/sec
+		 * (bytes / bytes_per_sec) = seconds → *1000000 for microseconds
+		 */
+		queue_drain_time = ((in_flight_bytes + pkt_size) * 1000000ULL) / bandwidth;
+		completion_time = rtt_us + queue_drain_time;
+
+		/*
+		 * Penalize lossy paths.
+		 * A path with loss requires retransmissions, effectively
+		 * multiplying completion time by 1/(1-loss_rate).
+		 */
+		if (path->stats.tx_packets > 100 && path->stats.lost_packets > 0) {
+			u64 loss_pct = (path->stats.lost_packets * 100) /
+				       path->stats.tx_packets;
+			if (loss_pct > 0 && loss_pct < 50)
+				completion_time = (completion_time * 100) / (100 - loss_pct);
+		}
+
+		if (completion_time < min_completion) {
+			min_completion = completion_time;
+			best = path;
+		}
+	}
+
+	return best ?: conn->active_path;
 }
 
 /*

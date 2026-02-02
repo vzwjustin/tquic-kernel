@@ -110,20 +110,6 @@ struct tquic_ack_frequency_state {
 	spinlock_t lock;
 };
 
-/**
- * struct tquic_ack_frequency_frame - Parsed ACK_FREQUENCY frame
- * @sequence_number: Monotonically increasing sequence number
- * @ack_eliciting_threshold: ACK-eliciting packets before ACK required
- * @request_max_ack_delay: Requested maximum ACK delay (microseconds)
- * @reorder_threshold: Packet reordering threshold
- */
-struct tquic_ack_frequency_frame {
-	u64 sequence_number;
-	u64 ack_eliciting_threshold;
-	u64 request_max_ack_delay;
-	u64 reorder_threshold;
-};
-
 /* Memory cache for ACK frequency state */
 static struct kmem_cache *tquic_ack_freq_cache;
 
@@ -721,7 +707,7 @@ int tquic_ack_freq_request_update(struct tquic_ack_frequency_state *state,
 		return -EINVAL;
 
 	if (!state->enabled)
-		return -ENOTSUP;
+		return -EOPNOTSUPP;
 
 	/* Validate parameters */
 	if (threshold == 0 || threshold > TQUIC_ACK_FREQ_MAX_THRESHOLD)
@@ -767,7 +753,7 @@ int tquic_ack_freq_request_immediate_ack(struct tquic_ack_frequency_state *state
 		return -EINVAL;
 
 	if (!state->enabled)
-		return -ENOTSUP;
+		return -EOPNOTSUPP;
 
 	/* IMMEDIATE_ACK doesn't need pending flag - generate inline */
 	pr_debug("tquic: IMMEDIATE_ACK requested\n");

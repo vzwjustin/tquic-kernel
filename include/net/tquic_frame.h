@@ -213,10 +213,15 @@ struct tquic_frame {
 
 /*
  * Variable-Length Integer API
+ *
+ * These functions are defined in core/varint.c and handle offset-based
+ * reading and writing of QUIC variable-length integers.
  */
-size_t tquic_varint_encode_len(u64 val);
-int tquic_varint_read(const u8 *buf, size_t buf_len, u64 *val, size_t *consumed);
-int tquic_varint_write(u64 val, u8 *buf, size_t buf_len);
+int tquic_varint_read(const u8 *buf, size_t buf_len, size_t *offset, u64 *value);
+int tquic_varint_write(u8 *buf, size_t buf_len, size_t *offset, u64 value);
+int tquic_varint_encode(u64 value, u8 *buf, size_t len);
+int tquic_varint_decode(const u8 *buf, size_t len, u64 *value);
+int tquic_varint_len(u64 value);
 
 /*
  * Frame Parsing

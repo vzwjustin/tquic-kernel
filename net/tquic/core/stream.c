@@ -1830,6 +1830,7 @@ ssize_t tquic_stream_splice_read(struct tquic_stream_manager *mgr,
 				 size_t len, unsigned int flags)
 {
 	size_t spliced = 0;
+	unsigned int head, tail, mask;
 
 	if (!tquic_stream_can_recv(mgr, stream))
 		return -EINVAL;
@@ -1839,20 +1840,24 @@ ssize_t tquic_stream_splice_read(struct tquic_stream_manager *mgr,
 	while (spliced < len && !skb_queue_empty(&stream->recv_buf)) {
 		struct sk_buff *skb;
 		struct page *page;
+		struct pipe_buffer buf;
 		size_t chunk;
-		int ret;
+		ssize_t ret;
 
 		skb = skb_peek(&stream->recv_buf);
 		if (!skb)
 			break;
 
-		/* Check pipe space */
-		if (!pipe_buf_can_merge(pipe))
+		/* Check if pipe has space (kernel 6.12+ API) */
+		head = pipe->head;
+		tail = pipe->tail;
+		mask = pipe->ring_size - 1;
+		if (pipe_full(head, tail, pipe->max_usage))
 			break;
 
 		chunk = min_t(size_t, len - spliced, skb->len);
 
-		/* For linear data, we need to copy to a page */
+		/* Allocate page and copy data from skb */
 		page = alloc_page(GFP_ATOMIC);
 		if (!page) {
 			if (spliced == 0) {
@@ -1864,8 +1869,16 @@ ssize_t tquic_stream_splice_read(struct tquic_stream_manager *mgr,
 
 		memcpy(page_address(page), skb->data, chunk);
 
-		/* Add to pipe */
-		ret = add_to_pipe(pipe, page, chunk, 0);
+		/* Set up pipe_buffer for kernel 6.12+ add_to_pipe() */
+		buf.page = page;
+		buf.offset = 0;
+		buf.len = chunk;
+		buf.ops = &nosteal_pipe_buf_ops;
+		buf.flags = 0;
+		buf.private = 0;
+
+		/* Add buffer to pipe */
+		ret = add_to_pipe(pipe, &buf);
 		if (ret < 0) {
 			put_page(page);
 			if (spliced == 0) {

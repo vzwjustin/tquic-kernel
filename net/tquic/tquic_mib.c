@@ -17,6 +17,7 @@
 #include <net/snmp.h>
 #include <net/tquic.h>
 
+#include "protocol.h"
 #include "tquic_mib.h"
 
 /*
@@ -109,29 +110,17 @@ static const struct snmp_mib tquic_snmp_list[] = {
  * tquic_mib_alloc - Allocate per-CPU MIB counters for a network namespace
  * @net: Network namespace to allocate counters for
  *
- * Allocates per-CPU MIB counter storage. Uses cmpxchg to avoid double
- * allocation if called concurrently.
- *
- * This is called lazily when the first TQUIC socket is created in the
- * namespace, avoiding memory overhead in namespaces not using TQUIC.
+ * Note: For out-of-tree builds, MIB is allocated in tquic_pernet via tquic_proto.c.
+ * This function is kept for compatibility but allocation happens at pernet init.
  *
  * Returns: true on success (or already allocated), false on allocation failure
  */
 bool tquic_mib_alloc(struct net *net)
 {
-	struct tquic_mib __percpu *mib;
+	struct tquic_net *tn = tquic_pernet(net);
 
-	mib = alloc_percpu(struct tquic_mib);
-	if (!mib)
-		return false;
-
-	/* Use cmpxchg to safely set the pointer exactly once */
-	if (cmpxchg(&net->mib.tquic_statistics, NULL, mib)) {
-		/* Another thread beat us to it, free our allocation */
-		free_percpu(mib);
-	}
-
-	return true;
+	/* MIB already allocated in pernet init */
+	return tn && tn->mib != NULL;
 }
 EXPORT_SYMBOL_GPL(tquic_mib_alloc);
 
@@ -139,24 +128,19 @@ EXPORT_SYMBOL_GPL(tquic_mib_alloc);
  * tquic_mib_free - Free per-CPU MIB counters for a network namespace
  * @net: Network namespace to free counters for
  *
- * Called during namespace cleanup. Safe to call even if counters
- * were never allocated.
+ * Note: For out-of-tree builds, MIB is freed in tquic_pernet via tquic_proto.c.
+ * This function is kept for compatibility.
  */
 void tquic_mib_free(struct net *net)
 {
-	struct tquic_mib __percpu *mib;
-
-	mib = net->mib.tquic_statistics;
-	if (mib) {
-		net->mib.tquic_statistics = NULL;
-		free_percpu(mib);
-	}
+	/* MIB freed in pernet exit */
 }
 EXPORT_SYMBOL_GPL(tquic_mib_free);
 
 /**
- * tquic_mib_seq_show - Output MIB counters in TquicExt format
+ * tquic_mib_seq_show_net - Output MIB counters in TquicExt format
  * @seq: Sequence file to write to
+ * @net: Network namespace (explicit parameter for out-of-tree compatibility)
  *
  * Outputs counters in the same format as /proc/net/netstat TcpExt.
  * First line contains counter names, second line contains values.
@@ -165,12 +149,17 @@ EXPORT_SYMBOL_GPL(tquic_mib_free);
  *   TquicExt: HandshakesComplete HandshakesFailed ...
  *   TquicExt: 1234 56 ...
  */
-void tquic_mib_seq_show(struct seq_file *seq)
+void tquic_mib_seq_show_net(struct seq_file *seq, struct net *net)
 {
 	unsigned long sum[ARRAY_SIZE(tquic_snmp_list) - 1];
 	const int cnt = ARRAY_SIZE(tquic_snmp_list) - 1;  /* Exclude sentinel */
-	struct net *net = seq_file_net(seq);
-	int i;
+	struct tquic_net *tn;
+	int i, cpu;
+
+	if (!net)
+		return;
+
+	tn = tquic_pernet(net);
 
 	/* Output header line with counter names */
 	seq_puts(seq, "\nTquicExt:");
@@ -182,14 +171,32 @@ void tquic_mib_seq_show(struct seq_file *seq)
 
 	/* Aggregate per-CPU counters */
 	memset(sum, 0, sizeof(sum));
-	if (net->mib.tquic_statistics)
-		snmp_get_cpu_field_batch(sum, tquic_snmp_list,
-					 net->mib.tquic_statistics);
+	if (tn && tn->mib) {
+		for_each_possible_cpu(cpu) {
+			struct tquic_mib *mib = per_cpu_ptr(tn->mib, cpu);
+			for (i = 0; i < cnt; i++)
+				sum[i] += mib->mibs[tquic_snmp_list[i].entry];
+		}
+	}
 
 	for (i = 0; i < cnt; i++)
 		seq_printf(seq, " %lu", sum[i]);
 
 	seq_putc(seq, '\n');
+}
+EXPORT_SYMBOL_GPL(tquic_mib_seq_show_net);
+
+/**
+ * tquic_mib_seq_show - Output MIB counters (wrapper for in-tree compatibility)
+ * @seq: Sequence file to write to
+ *
+ * This wrapper exists for in-tree build compatibility where seq_file_net
+ * can be used directly.
+ */
+void tquic_mib_seq_show(struct seq_file *seq)
+{
+	/* For out-of-tree, caller should use tquic_mib_seq_show_net directly */
+	tquic_mib_seq_show_net(seq, NULL);
 }
 EXPORT_SYMBOL_GPL(tquic_mib_seq_show);
 

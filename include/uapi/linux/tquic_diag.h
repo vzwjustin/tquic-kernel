@@ -61,23 +61,9 @@ enum {
  * This structure provides the primary connection information
  * displayed by the ss tool. It is returned via TQUIC_DIAG_ATTR_INFO.
  *
- * @state: Connection state (enum tquic_conn_state)
- * @num_paths: Number of active paths (for WAN bonding)
- * @num_streams: Number of open streams
- * @rtt_us: Connection RTT in microseconds (from active path)
- * @tx_bytes: Total bytes transmitted across all paths
- * @rx_bytes: Total bytes received across all paths
- * @retransmits: Total retransmission count
+ * Note: struct tquic_info is defined in <uapi/linux/tquic.h>
+ * This comment remains for documentation purposes.
  */
-struct tquic_info {
-	__u8	state;
-	__u8	num_paths;
-	__u16	num_streams;
-	__u32	rtt_us;
-	__u64	tx_bytes;
-	__u64	rx_bytes;
-	__u64	retransmits;
-};
 
 /*
  * Path state values for TQUIC_DIAG_PATH_STATE

@@ -103,6 +103,12 @@ static struct kmem_cache *mp_cid_retire_cache;
 /* SKB reserve size for QUIC packet headers */
 #define TQUIC_SKB_RESERVE	128
 
+/* Forward declarations */
+int tquic_mp_retire_path_cids(struct tquic_connection *conn,
+			      struct tquic_path *path);
+int tquic_mp_select_new_active_path(struct tquic_connection *conn,
+				    struct tquic_path *excluded_path);
+
 /*
  * =============================================================================
  * Helper Functions
@@ -131,6 +137,7 @@ static int tquic_mp_send_control_frame(struct tquic_connection *conn,
 	int header_len;
 	u8 header[64];
 	u64 pkt_num;
+	int pn_len;
 	int ret;
 
 	if (!conn || !path || !frame_buf || frame_len <= 0)
@@ -147,9 +154,22 @@ static int tquic_mp_send_control_frame(struct tquic_connection *conn,
 	pkt_num = conn->stats.tx_packets++;
 	spin_unlock(&conn->lock);
 
-	/* Build short header */
-	header_len = tquic_build_short_header(conn, path, header, sizeof(header),
-					      pkt_num, 0, false, false, NULL);
+	/* Calculate packet number length (1-4 bytes based on value) */
+	if (pkt_num < 0x100)
+		pn_len = 1;
+	else if (pkt_num < 0x10000)
+		pn_len = 2;
+	else if (pkt_num < 0x1000000)
+		pn_len = 3;
+	else
+		pn_len = 4;
+
+	/* Build short header using connection's destination CID (peer's CID) */
+	header_len = tquic_build_short_header(conn->dcid.id, conn->dcid.len,
+					      pkt_num, pn_len,
+					      0, 0,  /* key_phase, spin_bit */
+					      frame_buf, frame_len,
+					      header, sizeof(header));
 	if (header_len < 0) {
 		kfree_skb(skb);
 		return header_len;

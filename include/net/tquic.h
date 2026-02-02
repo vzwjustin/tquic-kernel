@@ -72,6 +72,7 @@ struct tquic_coupled_state;
 struct tquic_client;
 struct tquic_persistent_cong_info;
 struct tquic_bond_state;
+struct tquic_grease_state;
 
 /**
  * enum tquic_conn_state - Connection state machine states
@@ -161,6 +162,7 @@ struct tquic_cid {
  * @tx_bytes: Bytes transmitted
  * @rx_packets: Packets received
  * @rx_bytes: Bytes received
+ * @acked_bytes: Bytes acknowledged
  * @lost_packets: Detected lost packets
  * @rtt_min: Minimum observed RTT (us)
  * @rtt_smoothed: Smoothed RTT (us)
@@ -173,6 +175,7 @@ struct tquic_path_stats {
 	u64 tx_bytes;
 	u64 rx_packets;
 	u64 rx_bytes;
+	u64 acked_bytes;
 	u64 lost_packets;
 	u32 rtt_min;
 	u32 rtt_smoothed;
@@ -229,6 +232,7 @@ struct tquic_path {
 	u32 mtu;
 	u8 priority;
 	u8 weight;
+	bool schedulable;		/* Can be selected by scheduler */
 
 	struct net_device *dev;		/* Interface for this path */
 	ktime_t last_activity;
@@ -236,7 +240,8 @@ struct tquic_path {
 	u8 probe_count;
 	u8 challenge_data[8];  /* Legacy - use validation.challenge_data instead */
 
-	struct list_head list;
+	struct list_head list;		/* Connection path list */
+	struct list_head pm_list;	/* Path manager path list */
 
 	/* Validation state */
 	struct {
@@ -429,12 +434,12 @@ struct tquic_connection {
 	 * GREASE (Generate Random Extensions And Sustain Extensibility)
 	 * helps ensure forward compatibility by randomly including
 	 * reserved values that receivers must ignore.
+	 *
+	 * This pointer is allocated during connection setup if GREASE is
+	 * enabled (per-netns sysctl). It is passed to header building
+	 * functions to enable GREASE bit manipulation.
 	 */
-	struct {
-		bool enabled;			/* GREASE enabled for this conn */
-		bool peer_grease_quic_bit;	/* Peer advertised grease_quic_bit */
-		bool local_grease_quic_bit;	/* We advertised grease_quic_bit */
-	} grease;
+	struct tquic_grease_state *grease_state;
 
 	/*
 	 * Address validation token state (RFC 9000 Section 8.1.3-8.1.4)
@@ -457,6 +462,7 @@ struct tquic_connection {
 	refcount_t refcnt;
 	struct sock *sk;
 	struct rhash_head node;
+	struct list_head pm_node;	/* Path manager connection list linkage */
 };
 
 /* Forward declaration for handshake state */
@@ -646,7 +652,7 @@ struct tquic_bond_ops {
 			   struct tquic_path *path, int event);
 };
 
-/* Scheduler operations */
+/* Scheduler operations (simple interface) */
 struct tquic_sched_ops {
 	const char *name;
 	struct module *owner;
@@ -664,6 +670,142 @@ struct tquic_sched_ops {
 
 	struct list_head list;
 };
+
+/**
+ * enum tquic_path_event - Path state change events for schedulers
+ * @TQUIC_PATH_EVENT_ADD: New path added to connection
+ * @TQUIC_PATH_EVENT_REMOVE: Path being removed from connection
+ * @TQUIC_PATH_EVENT_ACTIVE: Path became active (validation passed)
+ * @TQUIC_PATH_EVENT_STANDBY: Path moved to standby state
+ * @TQUIC_PATH_EVENT_FAILED: Path failed (validation failed or errors)
+ * @TQUIC_PATH_EVENT_RTT_UPDATE: Path RTT estimate updated
+ * @TQUIC_PATH_EVENT_CWND_UPDATE: Path congestion window changed
+ */
+enum tquic_path_event {
+	TQUIC_PATH_EVENT_ADD = 0,
+	TQUIC_PATH_EVENT_REMOVE,
+	TQUIC_PATH_EVENT_ACTIVE,
+	TQUIC_PATH_EVENT_STANDBY,
+	TQUIC_PATH_EVENT_FAILED,
+	TQUIC_PATH_EVENT_RTT_UPDATE,
+	TQUIC_PATH_EVENT_CWND_UPDATE,
+};
+
+/* Scheduler parameter IDs for set_param callback */
+#define TQUIC_SCHED_PARAM_MODE		0
+#define TQUIC_SCHED_PARAM_MIN_PATHS	1
+
+/* Scheduler context passed to select_path callback */
+struct tquic_sched_ctx {
+	struct sk_buff *skb;		/* Packet to schedule */
+	u64 stream_id;			/* Stream ID (if stream data) */
+	u32 len;			/* Payload length */
+	u8 frame_type;			/* Primary frame type */
+	bool ack_eliciting;		/* Is this an ack-eliciting packet */
+	bool retransmission;		/* Is this a retransmission */
+};
+
+/**
+ * struct tquic_sched_stats - Scheduler statistics for get_stats callback
+ * @total_sent_bytes: Total bytes sent across all paths
+ * @total_sent_packets: Total packets sent across all paths
+ * @total_acked_bytes: Total bytes acknowledged
+ * @total_lost_packets: Total packets detected as lost
+ * @path_switches: Number of times scheduler switched paths
+ * @scheduler_invocations: Number of times scheduler was called
+ */
+struct tquic_sched_stats {
+	u64 total_sent_bytes;
+	u64 total_sent_packets;
+	u64 total_acked_bytes;
+	u64 total_lost_packets;
+	u64 path_switches;
+	u64 scheduler_invocations;
+};
+
+/* Maximum private data size for BPF schedulers */
+#define TQUIC_SCHED_PRIV_SIZE	256
+
+/* Forward declaration for path manager */
+struct tquic_pm_state;
+
+/**
+ * struct tquic_scheduler - BPF struct_ops scheduler state
+ * @ops: Pointer to scheduler operations (BPF or built-in)
+ * @pm: Path manager state (provides path list access)
+ * @conn: Parent connection
+ * @rr_counter: Round-robin counter for default scheduling
+ * @priv_data: Private data area for BPF scheduler state
+ * @total_sent_bytes: Statistics: total bytes sent
+ * @total_sent_packets: Statistics: total packets sent
+ * @total_acked_bytes: Statistics: total bytes acknowledged
+ * @total_lost_packets: Statistics: total packets lost
+ * @path_switches: Statistics: number of path switches
+ * @scheduler_invocations: Statistics: number of invocations
+ * @lock: Spinlock for scheduler state protection
+ */
+struct tquic_scheduler {
+	struct tquic_scheduler_ops *ops;
+	struct tquic_pm_state *pm;
+	struct tquic_connection *conn;
+
+	/* Default scheduler state */
+	u32 rr_counter;
+
+	/* BPF private data area */
+	u8 priv_data[TQUIC_SCHED_PRIV_SIZE];
+
+	/* Statistics (updated by callbacks) */
+	u64 total_sent_bytes;
+	u64 total_sent_packets;
+	u64 total_acked_bytes;
+	u64 total_lost_packets;
+	u64 path_switches;
+	u64 scheduler_invocations;
+
+	spinlock_t lock;
+};
+
+/**
+ * struct tquic_scheduler_ops - BPF struct_ops scheduler interface
+ *
+ * This structure defines the interface for BPF-implemented schedulers.
+ * It is more comprehensive than tquic_sched_ops, providing fine-grained
+ * event callbacks for BPF programs to track state and make decisions.
+ */
+struct tquic_scheduler_ops {
+	const char *name;
+	struct module *owner;
+
+	/* Lifecycle callbacks */
+	int (*init)(struct tquic_scheduler *sched);
+	void (*release)(struct tquic_scheduler *sched);
+
+	/* Path selection (required) */
+	struct tquic_path *(*select_path)(struct tquic_scheduler *sched,
+					  struct tquic_sched_ctx *ctx);
+
+	/* Event callbacks (all optional) */
+	void (*on_packet_sent)(struct tquic_scheduler *sched,
+			       struct tquic_path *path, u32 bytes);
+	void (*on_packet_acked)(struct tquic_scheduler *sched,
+				struct tquic_path *path, u32 bytes, ktime_t rtt);
+	void (*on_packet_lost)(struct tquic_scheduler *sched,
+			       struct tquic_path *path, u32 bytes);
+	void (*on_path_change)(struct tquic_scheduler *sched,
+			       struct tquic_path *path,
+			       enum tquic_path_event event);
+
+	/* Parameter and statistics */
+	int (*set_param)(struct tquic_scheduler *sched, int param, u64 value);
+	void (*get_stats)(struct tquic_scheduler *sched, void *stats, size_t len);
+
+	struct list_head list;
+};
+
+/* Scheduler registration for BPF struct_ops */
+int tquic_scheduler_register(struct tquic_scheduler_ops *ops);
+void tquic_scheduler_unregister(struct tquic_scheduler_ops *ops);
 
 /* Congestion control operations */
 struct tquic_cong_ops {
@@ -977,6 +1119,8 @@ int tquic_send_ack(struct tquic_connection *conn, struct tquic_path *path,
 int tquic_send_connection_close(struct tquic_connection *conn,
 				u64 error_code, const char *reason);
 int tquic_output_flush(struct tquic_connection *conn);
+int tquic_output_packet(struct tquic_connection *conn,
+			struct tquic_path *path, struct sk_buff *skb);
 
 /* Pacing */
 struct tquic_pacing_state *tquic_pacing_init(struct tquic_path *path);
@@ -1088,7 +1232,7 @@ static inline void tquic_cert_verify_exit(void) { }
 int tquic_register_scheduler(struct tquic_sched_ops *ops);
 void tquic_unregister_scheduler(struct tquic_sched_ops *ops);
 struct tquic_sched_ops *tquic_sched_find(const char *name);
-void tquic_sched_set_default(const char *name);
+int tquic_sched_set_default(const char *name);
 void *tquic_sched_init_conn(struct tquic_connection *conn,
 			    struct tquic_sched_ops *ops);
 void tquic_sched_release_conn(struct tquic_sched_ops *ops, void *state);
@@ -1133,8 +1277,8 @@ void __exit tquic_mib_exit(struct net *net);
 
 /* Proc interface (net/tquic/tquic_proc.c) */
 struct tquic_error_ring;
-int __init tquic_proc_init(void);
-void __exit tquic_proc_exit(void);
+int tquic_proc_init(struct net *net);
+void tquic_proc_exit(struct net *net);
 void tquic_log_error(struct net *net, struct tquic_connection *conn,
 		     u32 error_code, const char *msg);
 const char *tquic_error_name(u32 error_code);
@@ -1411,12 +1555,11 @@ void tquic_cid_disable_rotation(struct tquic_cid_manager *mgr);
 int tquic_cid_rotate_now(struct tquic_cid_manager *mgr);
 void tquic_cid_on_packet_sent(struct tquic_cid_manager *mgr);
 
-/* Per-path CID assignment for multipath */
-int tquic_cid_assign_to_path(struct tquic_connection *conn,
-			     struct tquic_path *path,
-			     struct tquic_cid *cid);
-void tquic_cid_release_from_path(struct tquic_connection *conn,
-				 struct tquic_path *path);
+/* Per-path CID assignment for multipath (CID manager interface) */
+int tquic_cidmgr_assign_to_path(struct tquic_cid_manager *mgr,
+				struct tquic_path *path);
+void tquic_cidmgr_release_from_path(struct tquic_cid_manager *mgr,
+				    struct tquic_path *path);
 const struct tquic_cid *tquic_cid_get_for_path(struct tquic_cid_manager *mgr,
 					       u32 path_id);
 
@@ -1587,14 +1730,7 @@ void __exit tquic_timer_exit(void);
  * =============================================================================
  */
 
-/* PMTUD state machine states */
-enum tquic_pmtud_state {
-	TQUIC_PMTUD_DISABLED = 0,
-	TQUIC_PMTUD_BASE,
-	TQUIC_PMTUD_SEARCHING,
-	TQUIC_PMTUD_SEARCH_COMPLETE,
-	TQUIC_PMTUD_ERROR,
-};
+/* PMTUD state machine states - defined in tquic_pmtud.h */
 
 /* PMTUD constants */
 #define TQUIC_PMTUD_BASE_MTU		1200	/* QUIC minimum MTU */

@@ -268,6 +268,14 @@ static struct kmem_cache *tquic_ack_range_cache;
 static struct kmem_cache *tquic_stream_range_cache;
 static struct kmem_cache *tquic_loss_state_cache;
 
+/* Forward declarations */
+struct tquic_ack_frame;
+void tquic_process_ecn(struct tquic_loss_state *loss,
+		       const struct tquic_ack_frame *frame,
+		       struct tquic_path *path);
+void tquic_set_loss_detection_timer(struct tquic_loss_state *loss,
+				    struct tquic_connection *conn);
+
 /*
  * =============================================================================
  * RTT Estimation (RFC 9002 Section 5)
@@ -1275,25 +1283,22 @@ int tquic_on_ack_received(struct tquic_loss_state *loss, int pn_space,
 		 * If this packet contained STREAM frames, we need to
 		 * retransmit the stream data on a new packet.
 		 */
-		if (pkt->frames & TQUIC_FRAME_MASK_STREAM) {
-			struct tquic_stream *stream;
-			u64 offset = pkt->stream_offset;
-			u32 len = pkt->stream_len;
+		if (!list_empty(&pkt->stream_data)) {
+			struct tquic_stream_data_range *range, *rtmp;
 
 			/*
-			 * Mark stream data as needing retransmission.
+			 * Mark stream data ranges as needing retransmission.
 			 * The output path will pick this up and create
 			 * new packets with the lost data.
 			 */
-			stream = tquic_conn_find_stream(conn, pkt->stream_id);
-			if (stream && stream->state == TQUIC_STREAM_OPEN) {
+			list_for_each_entry_safe(range, rtmp, &pkt->stream_data, list) {
+				pr_debug("tquic: lost stream %llu data at offset %llu len %u\n",
+					 range->stream_id, range->offset, range->length);
 				/*
-				 * Set the retransmit flag so the output
-				 * path knows to resend this range.
+				 * The stream layer will handle retransmission when
+				 * it queries for data to send. We just need to ensure
+				 * the stream knows about the lost data.
 				 */
-				stream->send_offset = min(stream->send_offset, offset);
-				pr_debug("tquic: queued stream %llu retransmit at %llu\n",
-					 pkt->stream_id, offset);
 			}
 		}
 
@@ -1647,7 +1652,6 @@ void tquic_process_ecn(struct tquic_loss_state *loss,
 			cong_ops->on_loss(path->cong, 0);
 	}
 }
-EXPORT_SYMBOL_GPL(tquic_process_ecn);
 
 /**
  * tquic_ecn_mark_sent - Record ECN marking of sent packet

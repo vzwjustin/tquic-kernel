@@ -416,46 +416,151 @@ static struct tquic_sched_ops tquic_sched_redundant = {
 
 /*
  * ECF (Earliest Completion First) Scheduler
+ *
+ * The ECF scheduler achieves true bandwidth aggregation by selecting the
+ * path that will deliver the packet earliest. This is CRITICAL for WAN
+ * bonding to achieve aggregated throughput (e.g., 1.5Gbps from 1Gbps + 500Mbps).
+ *
+ * Formula: Completion_Time = RTT + (In_Flight_Bytes + Packet_Size) / Bandwidth
+ *
+ * Where:
+ *   - RTT: Full round-trip time for the path (microseconds)
+ *   - In_Flight_Bytes: Bytes sent but not yet acknowledged
+ *   - Packet_Size: Size of the packet to be sent
+ *   - Bandwidth: Estimated path bandwidth (bytes/second)
+ *
+ * The formula accounts for:
+ *   1. Propagation delay (RTT) - time for the packet to reach destination
+ *   2. Queuing delay (In_Flight / Bandwidth) - time to drain existing queue
+ *   3. Transmission delay (Packet_Size / Bandwidth) - time to transmit packet
  */
+struct ecf_sched_data {
+	/* Per-path in-flight tracking for more accurate estimates */
+	u64 last_update_jiffies;
+};
+
+static void *ecf_init(struct tquic_connection *conn)
+{
+	struct ecf_sched_data *data;
+
+	data = kzalloc(sizeof(*data), GFP_KERNEL);
+	if (data)
+		data->last_update_jiffies = jiffies;
+
+	return data;
+}
+
+static void ecf_release(void *state)
+{
+	kfree(state);
+}
+
 static struct tquic_path *ecf_select(void *state, struct tquic_connection *conn,
 				     struct sk_buff *skb)
 {
 	struct tquic_path *path, *best = NULL;
 	u64 min_completion = ULLONG_MAX;
+	u32 pkt_size = skb->len;
 
-	list_for_each_entry(path, &conn->paths, list) {
+	rcu_read_lock();
+	list_for_each_entry_rcu(path, &conn->paths, list) {
 		u64 completion_time;
-		u64 transmission_time;
-		u64 propagation_delay;
+		u64 in_flight_bytes;
+		u64 queue_drain_time;
+		u64 rtt_us;
+		u64 bandwidth;
 
 		if (path->state != TQUIC_PATH_ACTIVE)
 			continue;
 
-		/* Estimate transmission time */
-		if (path->stats.bandwidth > 0)
-			transmission_time = (skb->len * 1000000ULL) /
-					    path->stats.bandwidth;
+		/*
+		 * Calculate in-flight bytes.
+		 * In-flight = transmitted bytes - acknowledged bytes
+		 * This represents data that is "on the wire" or in network queues.
+		 */
+		if (path->stats.tx_bytes > path->stats.acked_bytes)
+			in_flight_bytes = path->stats.tx_bytes - path->stats.acked_bytes;
 		else
-			transmission_time = 10000;  /* 10ms default */
+			in_flight_bytes = 0;
 
-		/* Propagation delay = RTT/2 */
-		propagation_delay = path->stats.rtt_smoothed / 2;
+		/*
+		 * Clamp in-flight to congestion window.
+		 * If our tracking shows more in-flight than cwnd allows,
+		 * some packets were likely lost - use cwnd as upper bound.
+		 */
+		if (in_flight_bytes > path->stats.cwnd)
+			in_flight_bytes = path->stats.cwnd;
 
-		/* Total completion time estimate */
-		completion_time = transmission_time + propagation_delay;
+		/* Get RTT in microseconds (full RTT, not half) */
+		rtt_us = path->stats.rtt_smoothed;
+		if (rtt_us == 0)
+			rtt_us = 100000;  /* 100ms default if no RTT samples */
+
+		/* Get bandwidth in bytes/second */
+		bandwidth = path->stats.bandwidth;
+		if (bandwidth == 0) {
+			/*
+			 * No bandwidth estimate yet.
+			 * Use a conservative estimate based on cwnd and RTT:
+			 * BW ≈ cwnd / RTT
+			 */
+			if (path->stats.cwnd > 0 && rtt_us > 0)
+				bandwidth = (u64)path->stats.cwnd * 1000000ULL / rtt_us;
+			else
+				bandwidth = 125000;  /* 1 Mbps default */
+		}
+
+		/*
+		 * Calculate completion time using ECF formula:
+		 * Completion_Time = RTT + (In_Flight + Pkt_Size) / Bandwidth
+		 *
+		 * Convert to common unit (microseconds):
+		 * - RTT is already in microseconds
+		 * - (bytes / (bytes/sec)) = seconds, multiply by 1M for microseconds
+		 */
+		queue_drain_time = ((in_flight_bytes + pkt_size) * 1000000ULL) / bandwidth;
+		completion_time = rtt_us + queue_drain_time;
+
+		/*
+		 * Apply a small penalty for paths with high loss rates.
+		 * Completion time estimate should account for potential
+		 * retransmissions: effective_time ≈ time / (1 - loss_rate)
+		 */
+		if (path->stats.tx_packets > 100) {
+			u64 loss_rate_pct = (path->stats.lost_packets * 100) /
+					    path->stats.tx_packets;
+			if (loss_rate_pct > 0 && loss_rate_pct < 50) {
+				/* Scale up completion time by 1/(1-loss_rate) */
+				completion_time = completion_time * 100 / (100 - loss_rate_pct);
+			}
+		}
 
 		if (completion_time < min_completion) {
 			min_completion = completion_time;
 			best = path;
 		}
 	}
+	rcu_read_unlock();
 
 	return best ?: conn->active_path;
 }
 
+static void ecf_feedback(void *state, struct tquic_path *path,
+			 struct sk_buff *skb, bool success)
+{
+	/*
+	 * ECF feedback is handled implicitly through the path statistics
+	 * updates (tx_bytes, acked_bytes, lost_packets, bandwidth, rtt).
+	 * The congestion control module updates these on ACK/loss events.
+	 */
+}
+
 static struct tquic_sched_ops tquic_sched_ecf = {
 	.name = "ecf",
+	.init = ecf_init,
+	.release = ecf_release,
 	.select = ecf_select,
+	.feedback = ecf_feedback,
 };
 
 /*

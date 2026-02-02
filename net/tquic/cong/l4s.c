@@ -14,8 +14,14 @@
 #include <linux/slab.h>
 #include <net/ip.h>
 #include <net/ipv6.h>
+#include <net/inet_ecn.h>
 
 #include "l4s.h"
+
+/* ECN mask - 2 bits for ECN codepoint in TOS/DSCP field */
+#ifndef INET_ECN_MASK
+#define INET_ECN_MASK	0x03
+#endif
 
 /* Alpha EWMA smoothing factor (1/16 = 6.25%) */
 #define TQUIC_L4S_ALPHA_SHIFT		4

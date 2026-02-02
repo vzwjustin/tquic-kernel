@@ -730,7 +730,7 @@ int tquic_ack_freq_request_update(struct tquic_connection *conn,
 		return -EINVAL;
 
 	if (!tquic_ack_freq_is_enabled(conn))
-		return -ENOTSUP;
+		return -EOPNOTSUPP;
 
 	/* Validate parameters */
 	if (ack_elicit_threshold == 0)
@@ -757,7 +757,7 @@ int tquic_ack_freq_request_immediate_ack(struct tquic_connection *conn)
 		return -EINVAL;
 
 	if (!tquic_ack_freq_is_enabled(conn))
-		return -ENOTSUP;
+		return -EOPNOTSUPP;
 
 	spin_lock(&conn->lock);
 	/* Would set pending_immediate_ack in ack_freq state */

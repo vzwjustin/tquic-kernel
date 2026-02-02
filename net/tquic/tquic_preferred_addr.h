@@ -19,6 +19,7 @@
 #include <linux/types.h>
 #include <linux/socket.h>
 #include <net/tquic.h>
+#include "core/transport_params.h"
 
 /*
  * Transport parameter ID for preferred_address (RFC 9000 Section 18.2)

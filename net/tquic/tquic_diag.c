@@ -286,17 +286,17 @@ static void tquic_diag_get_info(struct sock *sk, struct inet_diag_msg *r,
 		return;
 
 	info->state = conn->state;
-	info->num_paths = conn->num_paths;
-	info->num_streams = tquic_count_streams(conn);
+	info->paths_active = conn->num_paths;
+	info->streams_active = tquic_count_streams(conn);
 
 	/* RTT from active path if available */
 	if (conn->active_path)
-		info->rtt_us = conn->active_path->stats.rtt_smoothed;
+		info->rtt = conn->active_path->stats.rtt_smoothed;
 
 	/* Aggregate statistics */
-	info->tx_bytes = conn->stats.tx_bytes;
-	info->rx_bytes = conn->stats.rx_bytes;
-	info->retransmits = conn->stats.retransmissions;
+	info->bytes_sent = conn->stats.tx_bytes;
+	info->bytes_received = conn->stats.rx_bytes;
+	info->packets_lost = conn->stats.retransmissions;
 }
 
 /*

@@ -758,20 +758,10 @@ EXPORT_SYMBOL_GPL(tquic_token_clear);
 
 /*
  * =============================================================================
- * Sysctl Integration
- * =============================================================================
- */
-
-int tquic_sysctl_get_token_lifetime(void)
-{
-	return tquic_token_lifetime_seconds;
-}
-EXPORT_SYMBOL_GPL(tquic_sysctl_get_token_lifetime);
-
-/*
- * =============================================================================
  * Module Initialization
  * =============================================================================
+ *
+ * Note: tquic_sysctl_get_token_lifetime() is defined in tquic_sysctl.c
  */
 
 int __init tquic_token_init(void)

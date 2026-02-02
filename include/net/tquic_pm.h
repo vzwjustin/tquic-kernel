@@ -16,6 +16,7 @@
 #include <linux/list.h>
 #include <net/net_namespace.h>
 #include <net/netns/generic.h>
+#include <uapi/linux/tquic_pm.h>
 
 struct net;
 struct tquic_connection;
@@ -99,11 +100,26 @@ struct tquic_pm_pernet {
 /*
  * Per-Connection PM State
  *
- * Tracks PM-specific state for each connection.
+ * Tracks PM-specific state for each connection, including the list
+ * of paths managed by this connection and the primary/backup path
+ * selections used by schedulers.
  */
 struct tquic_pm_state {
 	struct tquic_pm_ops *ops;	/* Current PM ops */
 	void *priv;			/* PM-specific private data */
+
+	/* Path management */
+	struct list_head paths;		/* List of paths (via tquic_path.pm_list) */
+	struct tquic_path *primary_path;	/* Primary/preferred path */
+	struct tquic_path *backup_path;		/* Backup path for failover */
+	spinlock_t paths_lock;		/* Protects path list modifications */
+
+	/* Path counts */
+	u8 num_paths;			/* Total number of paths */
+	u8 num_active;			/* Number of active paths */
+
+	/* Connection reference */
+	struct tquic_connection *conn;
 };
 
 /* PM type registration */

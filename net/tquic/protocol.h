@@ -70,6 +70,7 @@
 /* Forward declarations */
 struct tquic_connection;
 struct tquic_mib;
+struct tquic_error_ring;
 
 /*
  * Per-network namespace TQUIC data (for out-of-tree module builds)
@@ -110,12 +111,17 @@ struct tquic_net {
 	bool pacing_enabled;
 	int path_degrade_threshold;
 	bool grease_enabled;
+	int preferred_address_enabled;	/* -1 = use global, 0/1 = disabled/enabled */
+	int prefer_preferred_address;	/* -1 = use global, 0/1 = disabled/enabled */
 
 	/* Per-netns MIB statistics (out-of-tree replacement for net->mib) */
 	struct tquic_mib __percpu *mib;
 
 	/* Proc entries */
 	struct proc_dir_entry *proc_net_tquic;
+
+	/* Error ring buffer for /proc/net/tquic_errors */
+	struct tquic_error_ring *error_ring;
 
 	/* Sysctl header */
 	struct ctl_table_header *sysctl_header;
@@ -555,12 +561,11 @@ u64 tquic_cid_get_retire_prior_to(struct tquic_connection *conn);
 void tquic_cid_handle_peer_retire_prior_to(struct tquic_connection *conn,
 					   u64 retire_prior_to);
 
-/* CID path integration (tquic_cid.c) */
-int tquic_cid_assign_to_path(struct tquic_connection *conn,
-			     struct tquic_path *path,
-			     struct tquic_cid *cid);
-void tquic_cid_release_from_path(struct tquic_connection *conn,
-				 struct tquic_path *path);
+/* CID path integration (core/cid.c - CID manager interface) */
+int tquic_cidmgr_assign_to_path(struct tquic_cid_manager *mgr,
+				struct tquic_path *path);
+void tquic_cidmgr_release_from_path(struct tquic_cid_manager *mgr,
+				    struct tquic_path *path);
 int tquic_cid_get_path_cid(struct tquic_connection *conn,
 			   struct tquic_path *path,
 			   struct tquic_cid *cid);
