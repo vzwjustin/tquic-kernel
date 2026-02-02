@@ -125,6 +125,13 @@ enum linux_tquic_mib_field {
 	TQUIC_MIB_RATELIMIT_BLACKLISTED,     /* Connections from blacklisted IPs */
 	TQUIC_MIB_RATELIMIT_ATTACK_MODE,     /* Times attack mode was triggered */
 
+	/* Security event counters */
+	TQUIC_MIB_SEC_PRE_HS_LIMIT,          /* Pre-handshake memory limit exceeded */
+	TQUIC_MIB_SEC_RETIRE_CID_FLOOD,      /* RETIRE_CONNECTION_ID stuffing detected */
+	TQUIC_MIB_SEC_NEW_CID_RATE_LIMIT,    /* NEW_CONNECTION_ID rate limit exceeded */
+	TQUIC_MIB_SEC_OPTIMISTIC_ACK,        /* Optimistic ACK attack detected */
+	TQUIC_MIB_SEC_INVALID_ACK,           /* ACK for unsent packet detected */
+
 	/*
 	 * Per-EQUIC error counters (EQUIC_BASE=500)
 	 * Maps to RFC 9000 QUIC Transport Error Codes

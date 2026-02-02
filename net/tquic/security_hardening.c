@@ -25,6 +25,7 @@
 
 #include "security_hardening.h"
 #include "protocol.h"
+#include "tquic_mib.h"
 
 /*
  * =============================================================================
@@ -801,7 +802,26 @@ void tquic_security_event(enum tquic_security_event event,
 	pr_notice("tquic: SECURITY [%s] from %s: %s\n",
 		  event_name, addr_str, details ? details : "");
 
-	/* TODO: Update MIB counters for each event type */
+	/* Update MIB counters for each event type */
+	switch (event) {
+	case TQUIC_SEC_EVENT_PRE_HS_LIMIT:
+		TQUIC_INC_STATS(&init_net, TQUIC_MIB_SEC_PRE_HS_LIMIT);
+		break;
+	case TQUIC_SEC_EVENT_RETIRE_CID_FLOOD:
+		TQUIC_INC_STATS(&init_net, TQUIC_MIB_SEC_RETIRE_CID_FLOOD);
+		break;
+	case TQUIC_SEC_EVENT_NEW_CID_RATE_LIMIT:
+		TQUIC_INC_STATS(&init_net, TQUIC_MIB_SEC_NEW_CID_RATE_LIMIT);
+		break;
+	case TQUIC_SEC_EVENT_OPTIMISTIC_ACK:
+		TQUIC_INC_STATS(&init_net, TQUIC_MIB_SEC_OPTIMISTIC_ACK);
+		break;
+	case TQUIC_SEC_EVENT_INVALID_ACK:
+		TQUIC_INC_STATS(&init_net, TQUIC_MIB_SEC_INVALID_ACK);
+		break;
+	default:
+		break;
+	}
 }
 
 /*
