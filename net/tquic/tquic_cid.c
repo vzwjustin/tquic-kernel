@@ -49,6 +49,13 @@
 /* Maximum varint encoding sizes */
 #define TQUIC_VARINT_MAX_LEN		8
 
+/* QUIC Error Code for protocol violation (RFC 9000 Section 20) */
+#define TQUIC_PROTOCOL_VIOLATION	0x0a
+
+/* Forward declaration for connection close */
+int tquic_conn_close_with_error(struct tquic_connection *conn,
+				u64 error_code, const char *reason);
+
 /* Forward declarations */
 static void tquic_cid_rotation_work(struct work_struct *work);
 static void tquic_cid_rotation_timer_cb(struct timer_list *t);
@@ -932,7 +939,9 @@ void tquic_send_retire_connection_id(struct tquic_connection *conn, u64 seq_num)
 				"(queued >= %d)\n", TQUIC_MAX_QUEUED_RETIRE_CID);
 			tquic_security_event(TQUIC_SEC_EVENT_RETIRE_CID_FLOOD,
 					     NULL, "queue limit exceeded - closing connection");
-			/* TODO: Close connection with PROTOCOL_VIOLATION */
+			/* Close connection with PROTOCOL_VIOLATION per RFC 9000 */
+			tquic_conn_close_with_error(conn, TQUIC_PROTOCOL_VIOLATION,
+						    "RETIRE_CID stuffing attack");
 			return;
 		}
 	}
