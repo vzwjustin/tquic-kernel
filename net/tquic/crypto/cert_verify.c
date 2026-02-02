@@ -1550,9 +1550,23 @@ int tquic_x509_verify_signature(const struct tquic_x509_cert *cert,
 		tfm = crypto_alloc_akcipher("ecdsa", 0, 0);
 		break;
 	case TQUIC_PUBKEY_ALGO_ED25519:
-		/* Ed25519 not yet widely supported in kernel crypto */
-		pr_debug("tquic_cert: Ed25519 signature verification\n");
-		return 0;  /* Accept for now, implement when kernel supports */
+		/*
+		 * Ed25519 (RFC 8032) uses the "ed25519" algorithm in the
+		 * kernel crypto API. For signature verification, we use
+		 * the akcipher interface similar to ECDSA.
+		 */
+		tfm = crypto_alloc_akcipher("ed25519", 0, 0);
+		if (IS_ERR(tfm)) {
+			/*
+			 * Ed25519 may not be available in all kernel configs.
+			 * This is a security-critical path - do NOT accept
+			 * unverified signatures.
+			 */
+			pr_warn("tquic_cert: Ed25519 not available in kernel, "
+				"certificate signature cannot be verified\n");
+			return -EOPNOTSUPP;
+		}
+		break;
 	default:
 		pr_debug("tquic_cert: Unsupported signature algorithm\n");
 		return -EINVAL;

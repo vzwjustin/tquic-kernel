@@ -482,8 +482,12 @@ int tquic_deadline_sched_init(struct tquic_connection *conn,
 	state->integration.ecf_fallback = true;
 	state->integration.blest_aware = true;
 
-	/* Store state in connection (using scheduler state pointer) */
-	/* Note: In real implementation, add deadline_sched field to connection */
+	/*
+	 * Store state in connection's scheduler field.
+	 * This uses the generic scheduler pointer since the deadline
+	 * scheduler is the primary scheduler for deadline-aware connections.
+	 */
+	conn->scheduler = state;
 
 	pr_info("tquic: Deadline scheduler initialized for connection "
 		"(granularity=%u us, max_streams=%u)\n",
@@ -1229,19 +1233,31 @@ EXPORT_SYMBOL_GPL(tquic_deadline_write_miss_frame);
 
 /**
  * tquic_deadline_get_state - Get scheduler state from connection
+ * @conn: QUIC connection
+ *
+ * Retrieves the deadline scheduler state from the connection's
+ * scheduler field. Returns NULL if the connection doesn't have
+ * deadline scheduling enabled.
  */
 struct tquic_deadline_sched_state *tquic_deadline_get_state(
 	struct tquic_connection *conn)
 {
-	/* In a full implementation, this would retrieve the deadline
-	 * scheduler state from the connection structure. For now,
-	 * we return NULL as it's not yet integrated.
-	 */
-	if (!conn)
+	struct tquic_deadline_sched_state *state;
+
+	if (!conn || !conn->scheduler)
 		return NULL;
 
-	/* Would be: return conn->deadline_sched_state; */
-	return NULL;
+	/*
+	 * Retrieve state from connection's scheduler field.
+	 * The state is stored there by tquic_deadline_sched_init().
+	 */
+	state = (struct tquic_deadline_sched_state *)conn->scheduler;
+
+	/* Verify this is actually a deadline scheduler state by checking conn backref */
+	if (state->conn != conn)
+		return NULL;
+
+	return state;
 }
 EXPORT_SYMBOL_GPL(tquic_deadline_get_state);
 

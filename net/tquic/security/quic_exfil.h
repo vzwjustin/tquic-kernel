@@ -217,6 +217,7 @@ enum tquic_padding_strategy {
  * @batch_timer: Timer for batch flushing
  * @batch_lock: Protects batch_queue
  * @decoy_work: Workqueue for decoy traffic
+ * @decoy_send_fn: Function to call for decoy packet transmission
  * @mtu: Current path MTU
  * @stats_padded_packets: Statistics counter
  * @stats_padding_bytes: Statistics counter
@@ -242,6 +243,7 @@ struct tquic_traffic_shaper {
 
 	/* Decoy traffic generation */
 	struct delayed_work decoy_work;
+	void (*decoy_send_fn)(struct sk_buff *);
 
 	/* Path MTU for padding calculations */
 	u32 mtu;

@@ -208,6 +208,7 @@ void quic_tcp_update_recv_window(struct quic_tcp_connection *conn)
 	struct quic_tcp_flow_control *fc = &conn->flow_ctrl;
 	size_t buf_used;
 	bool was_blocked;
+	bool now_blocked;
 
 	if (!conn)
 		return;
@@ -232,12 +233,17 @@ void quic_tcp_update_recv_window(struct quic_tcp_connection *conn)
 		fc->recv_blocked = false;
 	}
 
+	now_blocked = fc->recv_blocked;
 	fc->last_window_update = ktime_get();
 
 	spin_unlock(&fc->lock);
 
+	/* Notify on state transition */
+	if (was_blocked != now_blocked)
+		quic_tcp_notify_flow_control(conn, now_blocked);
+
 	/* Signal if we transitioned from blocked to unblocked */
-	if (was_blocked && !fc->recv_blocked) {
+	if (was_blocked && !now_blocked) {
 		/* Resume receiving */
 		queue_work(quic_tcp_wq, &conn->rx_work);
 	}
@@ -274,8 +280,41 @@ void quic_tcp_set_flow_control_callback(struct quic_tcp_connection *conn,
 					void (*callback)(void *data, bool blocked),
 					void *data)
 {
-	/* Flow control callbacks are handled via the existing work queue mechanism */
-	/* This is a placeholder for future extension */
+	unsigned long flags;
+
+	if (!conn)
+		return;
+
+	spin_lock_irqsave(&conn->lock, flags);
+	conn->fc_callback = callback;
+	conn->fc_callback_data = data;
+	spin_unlock_irqrestore(&conn->lock, flags);
+}
+
+/**
+ * quic_tcp_notify_flow_control - Notify flow control state change
+ * @conn: Connection
+ * @blocked: True if flow is blocked, false if unblocked
+ *
+ * Internal helper to invoke the flow control callback when state changes.
+ */
+static void quic_tcp_notify_flow_control(struct quic_tcp_connection *conn,
+					 bool blocked)
+{
+	void (*callback)(void *data, bool blocked);
+	void *data;
+	unsigned long flags;
+
+	if (!conn)
+		return;
+
+	spin_lock_irqsave(&conn->lock, flags);
+	callback = conn->fc_callback;
+	data = conn->fc_callback_data;
+	spin_unlock_irqrestore(&conn->lock, flags);
+
+	if (callback)
+		callback(data, blocked);
 }
 EXPORT_SYMBOL_GPL(quic_tcp_set_flow_control_callback);
 
@@ -655,10 +694,17 @@ static void quic_tcp_write_space(struct sock *sk)
 	struct quic_tcp_connection *conn = sk->sk_user_data;
 
 	if (conn) {
+		bool was_blocked;
+
 		/* Update flow control state */
 		spin_lock(&conn->flow_ctrl.lock);
+		was_blocked = conn->flow_ctrl.send_blocked;
 		conn->flow_ctrl.send_blocked = false;
 		spin_unlock(&conn->flow_ctrl.lock);
+
+		/* Notify if we transitioned from blocked to unblocked */
+		if (was_blocked)
+			quic_tcp_notify_flow_control(conn, false);
 
 		queue_work(quic_tcp_wq, &conn->tx_work);
 	}
@@ -927,6 +973,7 @@ int quic_tcp_flush(struct quic_tcp_connection *conn)
 {
 	struct quic_tcp_tx_buffer *tx = &conn->tx_buf;
 	int ret = 0;
+	bool notify_blocked = false;
 
 	if (!conn || conn->state != QUIC_TCP_STATE_CONNECTED)
 		return -ENOTCONN;
@@ -940,7 +987,10 @@ int quic_tcp_flush(struct quic_tcp_connection *conn)
 			/* Send failed, check if blocked */
 			if (ret == -EAGAIN || ret == -EWOULDBLOCK) {
 				spin_lock(&conn->flow_ctrl.lock);
-				conn->flow_ctrl.send_blocked = true;
+				if (!conn->flow_ctrl.send_blocked) {
+					conn->flow_ctrl.send_blocked = true;
+					notify_blocked = true;
+				}
 				spin_unlock(&conn->flow_ctrl.lock);
 			}
 		} else {
@@ -953,6 +1003,10 @@ int quic_tcp_flush(struct quic_tcp_connection *conn)
 	}
 
 	spin_unlock(&tx->lock);
+
+	/* Notify outside of locks to avoid potential deadlocks */
+	if (notify_blocked)
+		quic_tcp_notify_flow_control(conn, true);
 
 	return ret;
 }

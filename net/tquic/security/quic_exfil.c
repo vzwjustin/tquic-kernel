@@ -502,18 +502,55 @@ static void traffic_shaper_decoy_work(struct work_struct *work)
 {
 	struct tquic_traffic_shaper *shaper =
 		container_of(work, struct tquic_traffic_shaper, decoy_work.work);
+	struct sk_buff *skb;
+	u32 decoy_size;
+	u32 rand_val;
 
-	if (!shaper->enable_decoy)
+	if (!shaper->enable_decoy || !shaper->decoy_send_fn)
 		return;
 
-	/* Generate decoy packet (placeholder - actual implementation
-	 * would create a valid QUIC PADDING frame packet) */
+	/*
+	 * Generate a decoy QUIC PADDING frame packet.
+	 * PADDING frames consist entirely of 0x00 bytes (frame type = 0x00).
+	 * We randomize the size to avoid creating a recognizable pattern.
+	 */
+	get_random_bytes(&rand_val, sizeof(rand_val));
+	/* Random size between 64 and MTU bytes */
+	decoy_size = 64 + (rand_val % (shaper->mtu - 64 + 1));
+
+	/* Allocate sk_buff for decoy packet */
+	skb = alloc_skb(decoy_size + NET_SKB_PAD + NET_IP_ALIGN, GFP_ATOMIC);
+	if (!skb)
+		goto reschedule;
+
+	skb_reserve(skb, NET_SKB_PAD + NET_IP_ALIGN);
+
+	/* Fill with PADDING frame (0x00 bytes) */
+	memset(skb_put(skb, decoy_size), 0x00, decoy_size);
+
+	/* Mark as decoy packet in cb for debugging/tracing */
+	skb->cb[0] = 'D';  /* Decoy marker */
+	skb->cb[1] = 'E';
+	skb->cb[2] = 'C';
+	skb->cb[3] = 'O';
+	skb->cb[4] = 'Y';
+
+	/* Send via registered callback */
+	shaper->decoy_send_fn(skb);
+
 	atomic64_inc(&shaper->stats_decoy_packets);
 
-	/* Reschedule */
-	if (shaper->enable_decoy && exfil_wq)
+reschedule:
+	/* Reschedule with jittered interval to avoid timing patterns */
+	if (shaper->enable_decoy && exfil_wq) {
+		u32 jitter;
+
+		get_random_bytes(&jitter, sizeof(jitter));
+		/* Add 0-25% jitter to the interval */
+		jitter = (shaper->decoy_interval_ms * (jitter % 25)) / 100;
 		queue_delayed_work(exfil_wq, &shaper->decoy_work,
-				   msecs_to_jiffies(shaper->decoy_interval_ms));
+				   msecs_to_jiffies(shaper->decoy_interval_ms + jitter));
+	}
 }
 
 /**
@@ -767,12 +804,18 @@ int tquic_traffic_shaper_batch_send(struct tquic_traffic_shaper *shaper,
  * tquic_traffic_shaper_start_decoy - Start decoy traffic generation
  * @shaper: Shaper
  * @send_fn: Function to call for transmission
+ *
+ * Starts periodic generation of decoy PADDING frame packets to mask
+ * traffic patterns and prevent timing analysis attacks.
  */
 void tquic_traffic_shaper_start_decoy(struct tquic_traffic_shaper *shaper,
 				      void (*send_fn)(struct sk_buff *))
 {
-	if (!shaper || !shaper->enable_decoy)
+	if (!shaper || !shaper->enable_decoy || !send_fn)
 		return;
+
+	/* Store the send function for use by the work handler */
+	shaper->decoy_send_fn = send_fn;
 
 	if (exfil_wq)
 		queue_delayed_work(exfil_wq, &shaper->decoy_work,
