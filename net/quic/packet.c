@@ -432,17 +432,23 @@ struct sk_buff *quic_packet_build(struct quic_connection *conn,
 		struct quic_sent_packet *sent;
 
 		sent = kzalloc(sizeof(*sent), GFP_ATOMIC);
-		if (sent) {
-			sent->pn = pn;
-			sent->sent_time = ktime_get();
-			sent->size = skb->len;
-			sent->ack_eliciting = payload_len > 0;
-			sent->in_flight = 1;
-			sent->pn_space = conn->crypto_level;
-			INIT_LIST_HEAD(&sent->list);
-
-			quic_loss_detection_on_packet_sent(conn, sent);
+		if (!sent) {
+			/*
+			 * Cannot track packet for loss detection.
+			 * Fail the send to maintain reliable delivery guarantees.
+			 */
+			kfree_skb(skb);
+			return NULL;
 		}
+		sent->pn = pn;
+		sent->sent_time = ktime_get();
+		sent->size = skb->len;
+		sent->ack_eliciting = payload_len > 0;
+		sent->in_flight = 1;
+		sent->pn_space = conn->crypto_level;
+		INIT_LIST_HEAD(&sent->list);
+
+		quic_loss_detection_on_packet_sent(conn, sent);
 	}
 
 	/* Update statistics */

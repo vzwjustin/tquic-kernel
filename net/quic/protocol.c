@@ -499,13 +499,15 @@ int quic_getsockopt(struct sock *sk, int level, int optname,
 			break;
 		}
 		if (qsk->conn) {
+			if (copy_to_user(optval, &qsk->conn->remote_params,
+					 sizeof(struct quic_transport_params))) {
+				err = -EFAULT;
+				break;
+			}
 			if (put_user(sizeof(struct quic_transport_params), optlen)) {
 				err = -EFAULT;
 				break;
 			}
-			if (copy_to_user(optval, &qsk->conn->remote_params,
-					 sizeof(struct quic_transport_params)))
-				err = -EFAULT;
 		} else {
 			err = -ENOTCONN;
 		}

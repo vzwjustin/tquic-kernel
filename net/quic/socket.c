@@ -1281,10 +1281,22 @@ static int quic_sendmsg_stream(struct sock *sk, struct msghdr *msg,
 					return err;
 				}
 			} else {
-				pr_warn_once("QUIC: sending unencrypted - keys not available\n");
+				/*
+				 * Keys not available - cannot send application data
+				 * unencrypted. Return error to caller.
+				 */
+				kfree(user_data);
+				kfree(pkt_buf);
+				return -EAGAIN;
 			}
 		} else {
-			pr_warn_once("QUIC: sending unencrypted - handshake not complete\n");
+			/*
+			 * Handshake not complete - cannot send application data
+			 * yet. Caller should wait for connection establishment.
+			 */
+			kfree(user_data);
+			kfree(pkt_buf);
+			return -ENOTCONN;
 		}
 
 		kfree(user_data);
@@ -1479,9 +1491,7 @@ static int quic_recvmsg_stream(struct sock *sk, struct msghdr *msg,
 				if ((frame_type & 0xF8) == 0x08) {
 					bool has_offset = frame_type & 0x04;
 					bool has_length = frame_type & 0x02;
-
-					(void)has_offset;  /* TODO: use for offset parsing */
-					(void)has_length;  /* TODO: use for length parsing */
+					u8 varint_len;
 
 					offset++;
 
@@ -1508,10 +1518,32 @@ static int quic_recvmsg_stream(struct sock *sk, struct msghdr *msg,
 							     data[offset + 3];
 						offset += 4;
 					} else {
-						/* 8-byte varint - skip for now */
-						offset += 8;
-						if (offset > data_len)
+						/* 8-byte varint */
+						if (offset + 7 >= data_len)
 							break;
+						offset += 8;
+					}
+
+					/*
+					 * Skip Offset field if present (RFC 9000 Section 19.8)
+					 * The OFF bit indicates presence of Offset field.
+					 */
+					if (has_offset && offset < data_len) {
+						varint_len = 1 << ((data[offset] & 0xC0) >> 6);
+						if (offset + varint_len > data_len)
+							break;
+						offset += varint_len;
+					}
+
+					/*
+					 * Skip Length field if present (RFC 9000 Section 19.8)
+					 * The LEN bit indicates presence of Length field.
+					 */
+					if (has_length && offset < data_len) {
+						varint_len = 1 << ((data[offset] & 0xC0) >> 6);
+						if (offset + varint_len > data_len)
+							break;
+						offset += varint_len;
 					}
 
 					*stream_id_out = stream_id;

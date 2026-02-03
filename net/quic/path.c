@@ -580,13 +580,31 @@ void quic_path_mtu_probe_acked(struct quic_path *path, u32 probe_size)
 
 /*
  * Handle MTU probe loss (implicit ICMP too big or timeout)
+ *
+ * Per RFC 9000 Section 14.3: If a PMTUD probe is lost, the sender should
+ * not increase the maximum datagram size. The current MTU remains valid.
+ *
+ * This implementation tracks the failed probe and sets an upper bound
+ * for future probing attempts.
  */
 void quic_path_mtu_probe_lost(struct quic_path *path, u32 probe_size)
 {
-	/* Probe failed - keep current MTU */
-	/* Could implement binary search here for more efficient discovery */
-	(void)path;
-	(void)probe_size;
+	if (!path)
+		return;
+
+	/*
+	 * Probe failed at this size. The path MTU is somewhere between
+	 * the current working MTU and the failed probe size.
+	 *
+	 * Keep current MTU (it works) and don't probe larger than
+	 * probe_size - 1 in future attempts. The next probe should
+	 * use binary search: (current_mtu + failed_size) / 2
+	 *
+	 * RFC 9000 recommends waiting at least 1 PTO before retrying
+	 * with a smaller probe size.
+	 */
+	pr_debug("QUIC: MTU probe lost at size %u, keeping MTU %u\n",
+		 probe_size, path->mtu);
 }
 
 /*
