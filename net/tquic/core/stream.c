@@ -1106,7 +1106,7 @@ void tquic_stream_destroy(struct tquic_stream_manager *mgr,
 	while ((skb = skb_dequeue(&stream->send_buf)) != NULL) {
 		if (sk) {
 			sk_mem_uncharge(sk, skb->truesize);
-			atomic_sub(skb->truesize, &sk->sk_wmem_alloc);
+			/* sk_wmem_alloc handled by skb destructor */
 		}
 		kfree_skb(skb);
 	}
@@ -1663,7 +1663,7 @@ int tquic_stream_reset_send(struct tquic_stream_manager *mgr,
 	while ((skb = skb_dequeue(&stream->send_buf)) != NULL) {
 		if (sk) {
 			sk_mem_uncharge(sk, skb->truesize);
-			atomic_sub(skb->truesize, &sk->sk_wmem_alloc);
+			/* sk_wmem_alloc handled by skb destructor */
 		}
 		kfree_skb(skb);
 	}
@@ -2239,7 +2239,7 @@ void tquic_stream_memory_pressure(struct tquic_stream_manager *mgr)
 			while ((skb = skb_dequeue(&stream->send_buf)) != NULL) {
 				if (sk) {
 					sk_mem_uncharge(sk, skb->truesize);
-					atomic_sub(skb->truesize, &sk->sk_wmem_alloc);
+					/* sk_wmem_alloc handled by skb destructor */
 				}
 				kfree_skb(skb);
 			}
@@ -2324,7 +2324,7 @@ void tquic_stream_manager_destroy(struct tquic_stream_manager *mgr)
 		while ((skb = skb_dequeue(&stream->send_buf)) != NULL) {
 			if (sk) {
 				sk_mem_uncharge(sk, skb->truesize);
-				atomic_sub(skb->truesize, &sk->sk_wmem_alloc);
+				/* sk_wmem_alloc handled by skb destructor */
 			}
 			kfree_skb(skb);
 		}

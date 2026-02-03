@@ -2173,7 +2173,7 @@ int tquic_output_flush(struct tquic_connection *conn)
 					skb_unlink(skb, &stream->send_buf);
 					if (conn->sk) {
 						sk_mem_uncharge(conn->sk, skb->truesize);
-						atomic_sub(skb->truesize, &conn->sk->sk_wmem_alloc);
+						/* sk_wmem_alloc handled by skb destructor */
 						if (sk_stream_wspace(conn->sk) > 0)
 							conn->sk->sk_write_space(conn->sk);
 					}
