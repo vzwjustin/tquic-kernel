@@ -1584,8 +1584,8 @@ void tquic_stream_reset(struct tquic_stream *stream, u64 error_code);
 
 /* Path management for WAN bonding */
 struct tquic_path *tquic_path_create(struct tquic_connection *conn,
-				     struct sockaddr *local,
-				     struct sockaddr *remote);
+				     const struct sockaddr_storage *local,
+				     const struct sockaddr_storage *remote);
 int tquic_path_probe(struct tquic_connection *conn, struct tquic_path *path);
 void tquic_path_validate(struct tquic_connection *conn, struct tquic_path *path);
 int tquic_path_validate_start(struct tquic_path *path);

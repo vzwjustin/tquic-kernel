@@ -127,16 +127,18 @@ static bool tquic_path_addr_equal(const struct sockaddr_storage *a,
 }
 
 /*
- * Create a new path with given local and remote addresses
+ * Create a new path with given local and remote addresses (internal version)
  *
  * This function allocates and initializes a new path structure including
  * RTT measurements, congestion control, and MTU discovery state.
  *
  * Per RFC 9000 Section 9: Connection Migration
+ *
+ * Note: The exported tquic_path_create is in tquic_migration.c
  */
-struct tquic_path *tquic_path_create(struct tquic_connection *conn,
-				   struct sockaddr *local,
-				   struct sockaddr *remote)
+static struct tquic_path *tquic_path_create_internal(struct tquic_connection *conn,
+						     struct sockaddr *local,
+						     struct sockaddr *remote)
 {
 	struct tquic_path *path;
 	u32 initial_rtt_ms;
@@ -863,7 +865,7 @@ bool tquic_path_needs_probe(struct tquic_path *path)
 
 EXPORT_SYMBOL_GPL(tquic_path_init);
 EXPORT_SYMBOL_GPL(tquic_path_exit);
-EXPORT_SYMBOL_GPL(tquic_path_create);
+/* tquic_path_create exported from tquic_migration.c */
 EXPORT_SYMBOL_GPL(tquic_path_destroy);
 EXPORT_SYMBOL_GPL(tquic_path_challenge);
 EXPORT_SYMBOL_GPL(tquic_path_validate_start);
