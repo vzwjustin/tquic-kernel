@@ -67,7 +67,10 @@ tquic_pm-y := \
 	pm/pm_types.o \
 	pm/pm_kernel.o \
 	pm/path_manager.o \
-	pm/path_validation.o
+	pm/path_validation.o \
+	pm/nat_keepalive.o \
+	pm/nat_lifecycle.o \
+	pm/pm_module.o
 
 # Path Manager Netlink interface (optional)
 tquic_pm-$(CONFIG_TQUIC_PM_NETLINK) += pm/pm_netlink.o
@@ -127,7 +130,9 @@ obj-$(CONFIG_TQUIC_MULTIPATH) += tquic_multipath.o
 tquic_multipath-y := \
 	multipath/mp_frame.o \
 	multipath/mp_ack.o \
-	multipath/path_abandon.o
+	multipath/mp_deadline.o \
+	multipath/path_abandon.o \
+	multipath/multipath_module.o
 
 # Crypto support
 obj-$(CONFIG_TQUIC_CRYPTO) += tquic_crypto.o
@@ -135,7 +140,8 @@ tquic_crypto-y := \
 	crypto/tls.o \
 	crypto/header_protection.o \
 	crypto/key_update.o \
-	crypto/zero_rtt.o
+	crypto/zero_rtt.o \
+	crypto/crypto_module.o
 
 # Certificate verification (requires keyring support)
 tquic_crypto-$(CONFIG_TQUIC_CERT_VERIFY) += crypto/cert_verify.o

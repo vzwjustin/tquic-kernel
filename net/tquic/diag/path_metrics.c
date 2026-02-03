@@ -1275,6 +1275,19 @@ void __exit tquic_path_metrics_exit(struct net *net)
 	pr_info("tquic: path metrics subsystem exited\n");
 }
 
+static int __init tquic_path_metrics_module_init(void)
+{
+	return tquic_path_metrics_init(&init_net);
+}
+
+static void __exit tquic_path_metrics_module_exit(void)
+{
+	tquic_path_metrics_exit(&init_net);
+}
+
+module_init(tquic_path_metrics_module_init);
+module_exit(tquic_path_metrics_module_exit);
+
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("TQUIC Path-Specific Metrics Export");
 MODULE_AUTHOR("Linux Foundation");

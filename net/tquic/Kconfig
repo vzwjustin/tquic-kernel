@@ -9,7 +9,10 @@ menuconfig TQUIC
 	select CRYPTO
 	select CRYPTO_AES
 	select CRYPTO_GCM
+	select KEYS
+	select ASYMMETRIC_KEY_TYPE
 	select NET_UDP_TUNNEL
+	select TQUIC_CERT_VERIFY
 	select TQUIC_WAN_BONDING
 	select TQUIC_SCHEDULER
 	help

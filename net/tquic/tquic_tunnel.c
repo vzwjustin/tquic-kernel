@@ -802,7 +802,8 @@ int tquic_tunnel_handle_icmp_error(struct tquic_tunnel *tunnel,
 	if (type == 3 && code == 4) {
 		/* IPv4 Fragmentation Needed - info contains MTU */
 		pr_debug("tquic: PMTUD signal MTU=%u\n", info);
-		/* Would call tquic_forward_signal_mtu(tunnel, info) */
+		if (tquic_forward_signal_mtu(tunnel, info))
+			pr_debug("tquic: PMTUD signal failed for MTU=%u\n", info);
 	}
 
 	return 0;

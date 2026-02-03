@@ -989,6 +989,9 @@ void __exit tquic_af_xdp_exit(void)
 	pr_info("TQUIC AF_XDP support exiting\n");
 }
 
+module_init(tquic_af_xdp_init);
+module_exit(tquic_af_xdp_exit);
+
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("TQUIC AF_XDP Integration");
 MODULE_AUTHOR("Linux Foundation");

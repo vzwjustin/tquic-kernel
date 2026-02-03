@@ -468,5 +468,8 @@ void __exit tquic_lb_exit(void)
 	pr_info("tquic: QUIC-LB load balancing support cleaned up\n");
 }
 
+module_init(tquic_lb_init);
+module_exit(tquic_lb_exit);
+
 MODULE_DESCRIPTION("TQUIC QUIC-LB Load Balancing Support");
 MODULE_LICENSE("GPL");

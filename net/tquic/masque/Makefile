@@ -13,4 +13,10 @@
 
 obj-$(CONFIG_TQUIC_MASQUE) += tquic_masque.o
 
-tquic_masque-y := capsule.o http_datagram.o connect_udp.o connect_ip.o
+tquic_masque-y := \
+	capsule.o \
+	http_datagram.o \
+	connect_udp.o \
+	connect_ip.o \
+	quic_proxy.o \
+	masque_module.o

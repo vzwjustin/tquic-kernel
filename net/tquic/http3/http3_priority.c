@@ -1820,9 +1820,6 @@ void __exit http3_priority_exit(void)
 	pr_info("http3_priority: HTTP/3 Extensible Priorities unloaded\n");
 }
 
-module_init(http3_priority_init);
-module_exit(http3_priority_exit);
-
 MODULE_DESCRIPTION("TQUIC HTTP/3 Extensible Priorities (RFC 9218)");
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Linux Foundation");

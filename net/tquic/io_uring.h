@@ -571,28 +571,6 @@ int __init tquic_io_uring_init(void);
  */
 void __exit tquic_io_uring_exit(void);
 
-#else /* !CONFIG_TQUIC_IO_URING */
-
-/* Stubs when io_uring support is not enabled */
-
-static inline int tquic_uring_ctx_alloc(struct tquic_connection *conn)
-{
-	return 0;
-}
-
-static inline void tquic_uring_ctx_free(struct tquic_connection *conn)
-{
-}
-
-static inline int tquic_io_uring_init(void)
-{
-	return 0;
-}
-
-static inline void tquic_io_uring_exit(void)
-{
-}
-
 #endif /* CONFIG_TQUIC_IO_URING */
 
 #endif /* _NET_TQUIC_IO_URING_H */

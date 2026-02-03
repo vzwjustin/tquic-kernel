@@ -284,3 +284,10 @@ void __exit tquic_fec_module_exit(void)
 	pr_info("tquic fec: Forward Error Correction subsystem cleaned up\n");
 }
 EXPORT_SYMBOL_GPL(tquic_fec_module_exit);
+
+module_init(tquic_fec_module_init);
+module_exit(tquic_fec_module_exit);
+
+MODULE_DESCRIPTION("TQUIC Forward Error Correction (FEC) Subsystem");
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("Linux Foundation");

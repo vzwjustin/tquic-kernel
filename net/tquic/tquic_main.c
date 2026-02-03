@@ -758,10 +758,12 @@ int __init tquic_init(void)
 		goto err_napi;
 #endif
 
+#if IS_ENABLED(CONFIG_TQUIC_IO_URING)
 	/* Initialize io_uring subsystem */
 	err = tquic_io_uring_init();
 	if (err)
 		goto err_io_uring;
+#endif
 
 	/* Initialize netlink interface */
 	err = tquic_netlink_init();
@@ -812,8 +814,10 @@ err_proto:
 err_sysctl:
 	tquic_netlink_exit();
 err_netlink:
+#if IS_ENABLED(CONFIG_TQUIC_IO_URING)
 	tquic_io_uring_exit();
 err_io_uring:
+#endif
 #if IS_ENABLED(CONFIG_TQUIC_NAPI)
 	tquic_napi_subsys_exit();
 err_napi:
@@ -872,7 +876,9 @@ void __exit tquic_exit(void)
 	/* Proc interface is cleaned up per-netns via pernet_operations */
 	tquic_sysctl_exit();
 	tquic_netlink_exit();
+#if IS_ENABLED(CONFIG_TQUIC_IO_URING)
 	tquic_io_uring_exit();
+#endif
 #if IS_ENABLED(CONFIG_TQUIC_NAPI)
 	tquic_napi_subsys_exit();
 #endif

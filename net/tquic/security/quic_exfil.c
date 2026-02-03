@@ -1678,6 +1678,13 @@ void __exit tquic_exfil_exit(void)
 	pr_info("tquic_exfil: QUIC-Exfil mitigation shutdown\n");
 }
 
+module_init(tquic_exfil_init);
+module_exit(tquic_exfil_exit);
+
+MODULE_DESCRIPTION("TQUIC QUIC-Exfil Mitigation (draft-iab-quic-exfil)");
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("Linux Foundation");
+
 /*
  * =============================================================================
  * Symbol Exports

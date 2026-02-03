@@ -902,7 +902,7 @@ static void __bpf_tquic_sched_get_stats(struct tquic_scheduler *sched,
  *
  * This operations structure provides fully functional default implementations
  * for all scheduler callbacks. It is used as:
- *   1. CFI (Control Flow Integrity) stubs for indirect calls
+ *   1. CFI-safe defaults for indirect calls
  *   2. Default behavior when BPF programs don't implement specific callbacks
  *   3. Fallback scheduler when no BPF scheduler is loaded
  *
@@ -959,7 +959,11 @@ static int __init bpf_tquic_sched_kfunc_init(void)
 	pr_info("TQUIC: BPF scheduler struct_ops registered\n");
 	return 0;
 }
+#ifdef MODULE
+module_init(bpf_tquic_sched_kfunc_init);
+#else
 late_initcall(bpf_tquic_sched_kfunc_init);
+#endif
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Linux Foundation");

@@ -791,5 +791,8 @@ void __exit tquic_nf_exit(void)
 EXPORT_SYMBOL_GPL(tquic_nf_init);
 EXPORT_SYMBOL_GPL(tquic_nf_exit);
 
+module_init(tquic_nf_init);
+module_exit(tquic_nf_exit);
+
 MODULE_DESCRIPTION("TQUIC Netfilter Integration");
 MODULE_LICENSE("GPL");
