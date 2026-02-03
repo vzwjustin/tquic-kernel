@@ -211,6 +211,12 @@ tquic_fec-y := \
 obj-$(CONFIG_TQUIC_SECURITY) += tquic_security.o
 tquic_security-y := security/quic_exfil.o
 
+# QUIC over TCP transport (fallback for UDP-blocked networks)
+obj-$(CONFIG_TQUIC_OVER_TCP) += transport/
+
+# SmartNIC offload support
+obj-$(CONFIG_TQUIC_OFFLOAD) += offload/
+
 # KUnit tests
 obj-$(CONFIG_TQUIC_KUNIT_TEST) += tquic_test.o
 tquic_test-y := \
@@ -230,3 +236,12 @@ tquic_test-y := \
 	test/nat_keepalive_test.o \
 	test/cong_data_test.o \
 	test/quic_exfil_test.o
+
+# Interoperability testing framework
+obj-$(CONFIG_TQUIC_INTEROP_TEST) += test/interop/
+
+# Fuzzing test framework
+obj-$(CONFIG_TQUIC_FUZZ) += test/fuzz/
+
+# Benchmark suite (development only)
+obj-$(CONFIG_TQUIC_BENCH) += bench/

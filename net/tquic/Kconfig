@@ -1159,6 +1159,38 @@ config TQUIC_OVER_TCP
 
 	  If unsure, say N.
 
+config TQUIC_OFFLOAD
+	tristate "TQUIC SmartNIC offload support"
+	depends on TQUIC_CORE
+	default n
+	help
+	  Enable SmartNIC hardware offload support for TQUIC. This allows
+	  QUIC packet processing to be offloaded to capable network
+	  interface cards for improved performance.
+
+	  Features:
+	    - Crypto offload (AES-GCM encryption/decryption)
+	    - Packet reassembly offload
+	    - Connection tracking offload
+
+	  Requires a SmartNIC with QUIC offload capabilities.
+
+	  If unsure, say N.
+
+config TQUIC_BENCH
+	tristate "TQUIC benchmark suite"
+	depends on TQUIC_CORE
+	depends on TQUIC_KUNIT_TEST
+	default n
+	help
+	  Enable the TQUIC benchmark suite for performance testing.
+	  This provides tools for measuring throughput, latency, and
+	  connection establishment rates.
+
+	  Only useful for kernel developers benchmarking TQUIC performance.
+
+	  If unsure, say N.
+
 config TQUIC_INTEROP_TEST
 	tristate "TQUIC interoperability testing framework"
 	depends on TQUIC_CORE
