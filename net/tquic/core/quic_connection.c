@@ -849,7 +849,7 @@ static int tquic_conn_migrate_to_preferred_address(struct tquic_connection *conn
 	 * Initiate path validation per RFC 9000 Section 8.2.
 	 * The connection will migrate to this path after validation succeeds.
 	 */
-	ret = tquic_path_validate(new_path);
+	ret = tquic_path_validate_start(new_path);
 	if (ret < 0) {
 		pr_err("TQUIC: Failed to start path validation: %d\n", ret);
 		tquic_path_destroy(new_path);

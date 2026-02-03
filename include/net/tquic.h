@@ -60,6 +60,16 @@ bool tquic_sysctl_prefer_v2(void);
 #define TQUIC_PN_SPACE_APPLICATION	2
 #define TQUIC_PN_SPACE_COUNT	3
 
+/* Timer types (mirrors QUIC_TIMER_* from include/net/quic.h) */
+#define TQUIC_TIMER_LOSS	0
+#define TQUIC_TIMER_ACK		1
+#define TQUIC_TIMER_IDLE	2
+#define TQUIC_TIMER_HANDSHAKE	3
+#define TQUIC_TIMER_PATH_PROBE	4
+#define TQUIC_TIMER_PACING	5
+#define TQUIC_TIMER_KEY_DISCARD	6
+#define TQUIC_TIMER_MAX		7
+
 /* Stream limits (RFC 9000 maximum values) */
 #define TQUIC_MAX_STREAM_COUNT_BIDI	(1ULL << 60)
 #define TQUIC_MAX_STREAM_COUNT_UNI	(1ULL << 60)
@@ -359,6 +369,7 @@ struct tquic_path {
 	void *abandon_state;		/* Path abandonment state */
 	u64 status_seq_num;		/* Path status sequence number */
 	bool is_backup;			/* Path is in standby/backup mode */
+	bool is_preferred_addr;		/* Path to server's preferred address */
 
 	/*
 	 * PMTUD (Path MTU Discovery) state - RFC 8899 DPLPMTUD
@@ -722,6 +733,12 @@ struct tquic_connection {
 	u64 next_stream_id_uni;
 	u64 max_streams_bidi;
 	u64 max_streams_uni;
+	u64 max_stream_id_bidi;		/* Maximum stream ID for bidi streams */
+	u64 max_stream_id_uni;		/* Maximum stream ID for uni streams */
+
+	/* Connection ID management */
+	struct list_head dcid_list;	/* List of destination CIDs */
+	struct list_head scid_list;	/* List of source CIDs */
 
 	/* Flow control */
 	u64 max_data_local;
@@ -1566,8 +1583,13 @@ int tquic_stream_recv(struct tquic_stream *stream, void *data, size_t len);
 void tquic_stream_reset(struct tquic_stream *stream, u64 error_code);
 
 /* Path management for WAN bonding */
+struct tquic_path *tquic_path_create(struct tquic_connection *conn,
+				     struct sockaddr *local,
+				     struct sockaddr *remote);
 int tquic_path_probe(struct tquic_connection *conn, struct tquic_path *path);
 void tquic_path_validate(struct tquic_connection *conn, struct tquic_path *path);
+int tquic_path_validate_start(struct tquic_path *path);
+void tquic_path_destroy(struct tquic_path *path);
 void tquic_path_update_stats(struct tquic_path *path, struct sk_buff *skb, bool success);
 int tquic_path_set_weight(struct tquic_path *path, u8 weight);
 
@@ -2305,6 +2327,10 @@ struct tquic_pn_space {
 /* Timer state lifecycle */
 struct tquic_timer_state *tquic_timer_state_alloc(struct tquic_connection *conn);
 void tquic_timer_state_free(struct tquic_timer_state *ts);
+
+/* Generic timer set function (from quic_timer.c) */
+void tquic_timer_set(struct tquic_connection *conn, u8 timer_type, ktime_t when);
+void tquic_timer_cancel(struct tquic_connection *conn, u8 timer_type);
 
 /* Idle timeout management */
 void tquic_timer_set_idle(struct tquic_timer_state *ts);
