@@ -673,14 +673,14 @@ static int tquic_ratelimit_seq_show(struct seq_file *seq, void *v)
 
 static int tquic_ratelimit_seq_open(struct inode *inode, struct file *file)
 {
-	return single_open_net(inode, file, tquic_ratelimit_seq_show);
+	return single_open(file, tquic_ratelimit_seq_show, pde_data(inode));
 }
 
 static const struct proc_ops tquic_ratelimit_proc_ops = {
 	.proc_open	= tquic_ratelimit_seq_open,
 	.proc_read	= seq_read,
 	.proc_lseek	= seq_lseek,
-	.proc_release	= single_release_net,
+	.proc_release	= single_release,
 };
 
 /**
