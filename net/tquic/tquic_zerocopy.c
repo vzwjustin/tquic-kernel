@@ -64,6 +64,9 @@ struct tquic_zc_state {
 	bool			enabled;	/* Zerocopy enabled */
 };
 
+/* Forward declaration */
+static void tquic_zc_entry_free(struct tquic_zc_entry *entry);
+
 /*
  * =============================================================================
  * Zerocopy State Management
