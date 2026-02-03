@@ -1170,9 +1170,6 @@ struct tquic_sock {
 	struct tquic_connection *conn;
 	struct socket *udp_sock;	/* UDP encapsulation socket */
 
-	/* Connection configuration */
-	struct tquic_config config;
-
 	struct sockaddr_storage bind_addr;
 	struct sockaddr_storage connect_addr;
 
@@ -1274,12 +1271,8 @@ struct tquic_sock {
 		u8 expected_hostname_len;
 	} cert_verify;
 
-	/* Configuration */
-	struct {
-		u32 handshake_timeout_ms;	/* Handshake timeout */
-		u32 idle_timeout_ms;		/* Idle timeout */
-		u32 max_paths;			/* Maximum paths */
-	} config;
+	/* Connection configuration (using full tquic_config struct) */
+	struct tquic_config config;
 
 	/* Event wait queue */
 	wait_queue_head_t event_wait;
