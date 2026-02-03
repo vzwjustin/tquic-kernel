@@ -443,16 +443,10 @@ int tquic_ratelimit_proc_show(struct seq_file *seq, void *v);
 
 /*
  * =============================================================================
- * MIB Counters
+ * MIB Counters - Note: MIB fields are defined in tquic_mib.h as enum members:
+ * TQUIC_MIB_RATELIMIT_CHECKED, TQUIC_MIB_RATELIMIT_ACCEPTED, etc.
  * =============================================================================
  */
-
-/* Rate limit MIB fields (add to tquic_mib.h) */
-#define TQUIC_MIB_RATELIMIT_CHECKED	0
-#define TQUIC_MIB_RATELIMIT_ACCEPTED	1
-#define TQUIC_MIB_RATELIMIT_DROPPED	2
-#define TQUIC_MIB_RATELIMIT_COOKIES	3
-#define TQUIC_MIB_RATELIMIT_BLACKLISTED	4
 
 /*
  * =============================================================================
