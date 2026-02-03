@@ -39,6 +39,8 @@
 #include <net/tquic.h>
 
 #include "qlog.h"
+
+#include "qlog.h"
 #include "../protocol.h"
 
 /*
@@ -782,6 +784,12 @@ EXPORT_SYMBOL_GPL(qlog_v2_emit_frame);
 
 static int __init qlog_v2_init(void)
 {
+	int ret;
+
+	ret = tquic_qlog_init();
+	if (ret)
+		return ret;
+
 	pr_info("tquic: qlog v2 module loaded (draft-14 compliant)\n");
 	return 0;
 }
@@ -789,6 +797,7 @@ static int __init qlog_v2_init(void)
 static void __exit qlog_v2_exit(void)
 {
 	pr_info("tquic: qlog v2 module unloaded\n");
+	tquic_qlog_exit();
 }
 
 module_init(qlog_v2_init);

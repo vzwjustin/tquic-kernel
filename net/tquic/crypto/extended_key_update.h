@@ -38,10 +38,10 @@ struct crypto_shash;
 /**
  * Extended Key Update Frame Types
  *
- * KEY_UPDATE_REQUEST (0xTBD1): Initiates an extended key update with a
+ * KEY_UPDATE_REQUEST (0x40): Initiates an extended key update with a
  * request ID that must be acknowledged by the peer.
  *
- * KEY_UPDATE_RESPONSE (0xTBD2): Acknowledges a KEY_UPDATE_REQUEST and
+ * KEY_UPDATE_RESPONSE (0x41): Acknowledges a KEY_UPDATE_REQUEST and
  * confirms the key update was processed.
  */
 #define TQUIC_FRAME_KEY_UPDATE_REQUEST		0x40  /* Provisional assignment */

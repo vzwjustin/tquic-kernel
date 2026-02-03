@@ -1490,24 +1490,6 @@ bool tquic_hs_is_psk_mode(struct tquic_handshake *hs);
 int __init tquic_cert_verify_init(void);
 void __exit tquic_cert_verify_exit(void);
 
-#else /* !CONFIG_TQUIC_CERT_VERIFY */
-
-/* Stubs when certificate verification is not enabled */
-static inline int tquic_hs_verify_server_cert(void *hs, void *conn)
-{
-	/* Always succeed without verification (INSECURE) */
-	pr_warn_once("TQUIC: Certificate verification disabled - connections are vulnerable to MITM\n");
-	return 0;
-}
-
-static inline int tquic_hs_verify_client_cert(void *hs, void *conn)
-{
-	return 0;
-}
-
-static inline int tquic_cert_verify_init(void) { return 0; }
-static inline void tquic_cert_verify_exit(void) { }
-
 #endif /* CONFIG_TQUIC_CERT_VERIFY */
 
 /* Scheduler registration and operations */

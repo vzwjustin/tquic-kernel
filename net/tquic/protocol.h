@@ -521,6 +521,14 @@ int tquic_server_accept(struct sock *sk, struct sk_buff *skb,
 int __init tquic_server_init(void);
 void __exit tquic_server_exit(void);
 
+/* Security hardening init/exit (security_hardening.c) */
+int __init tquic_security_hardening_init(void);
+void __exit tquic_security_hardening_exit(void);
+
+/* Persistent congestion sysctl init/exit (cong/persistent_cong.c) */
+int __init tquic_persistent_cong_module_init(void);
+void __exit tquic_persistent_cong_module_exit(void);
+
 /*
  * =============================================================================
  * CONNECTION ID POOL MANAGEMENT

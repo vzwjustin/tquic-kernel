@@ -1291,11 +1291,11 @@ EXPORT_SYMBOL_GPL(h3_connection_send_max_push_id);
  */
 
 /**
- * tquic_http3_init - Initialize HTTP/3 subsystem
+ * tquic_http3_streams_init - Initialize HTTP/3 stream subsystem
  *
  * Return: 0 on success, negative error
  */
-int __init tquic_http3_init(void)
+int __init tquic_http3_streams_init(void)
 {
 	/* Create SLAB caches */
 	h3_connection_cache = kmem_cache_create("h3_connection",
@@ -1320,7 +1320,7 @@ int __init tquic_http3_init(void)
 /**
  * tquic_http3_exit - Cleanup HTTP/3 subsystem
  */
-void __exit tquic_http3_exit(void)
+void __exit tquic_http3_streams_exit(void)
 {
 	if (h3_stream_cache)
 		kmem_cache_destroy(h3_stream_cache);

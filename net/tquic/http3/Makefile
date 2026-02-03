@@ -13,7 +13,8 @@ tquic_http3-y := \
 	http3_conn.o \
 	http3_stream.o \
 	http3_request.o \
-	http3_priority.o
+	http3_priority.o \
+	http3_module.o
 
 # QPACK header compression support (RFC 9204)
 tquic_http3-$(CONFIG_TQUIC_HTTP3_QPACK) += \

@@ -8,4 +8,6 @@ obj-$(CONFIG_TQUIC_MULTIPATH) += tquic_multipath.o
 tquic_multipath-y := \
 	mp_frame.o \
 	mp_ack.o \
-	path_abandon.o
+	mp_deadline.o \
+	path_abandon.o \
+	multipath_module.o

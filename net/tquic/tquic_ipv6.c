@@ -1503,7 +1503,7 @@ static struct pernet_operations tquic6_net_ops = {
  * Module initialization
  */
 
-int __init tquic6_init(void)
+static int __init __maybe_unused tquic6_init(void)
 {
 	int ret;
 
@@ -1544,7 +1544,7 @@ err_protosw:
 	return ret;
 }
 
-void __exit tquic6_exit(void)
+static void __exit __maybe_unused tquic6_exit(void)
 {
 	pr_info("tquic: shutting down IPv6 support\n");
 
@@ -1555,9 +1555,10 @@ void __exit tquic6_exit(void)
 	pr_info("tquic: IPv6 support unloaded\n");
 }
 
-/* Can be compiled as module or built-in */
-module_init(tquic6_init);
-module_exit(tquic6_exit);
+/*
+ * IPv6 protocol registration is handled by tquic_proto_init().
+ * Keep this file for IPv6 helpers without double registration.
+ */
 
 MODULE_AUTHOR("Linux Foundation");
 MODULE_DESCRIPTION("TQUIC IPv6 Support for WAN Bonding");

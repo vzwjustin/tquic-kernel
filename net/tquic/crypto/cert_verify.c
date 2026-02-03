@@ -1496,8 +1496,7 @@ out:
 /*
  * Verify certificate signature using kernel crypto API
  *
- * This is the core signature verification function that addresses
- * the TODO at cert_verify.c:845. It performs standalone cryptographic
+ * This is the core signature verification function. It performs standalone cryptographic
  * signature verification for intermediate certificates not in the keyring.
  */
 int tquic_x509_verify_signature(const struct tquic_x509_cert *cert,

@@ -1665,23 +1665,20 @@ EXPORT_SYMBOL_GPL(tquic_h3_write_frame);
  */
 
 /**
- * tquic_http3_init - Initialize HTTP/3 subsystem
+ * tquic_http3_conn_init - Initialize HTTP/3 connection layer
  */
-int __init tquic_http3_init(void)
+int __init tquic_http3_conn_init(void)
 {
 	pr_info("TQUIC HTTP/3: Initializing (RFC 9114)\n");
 	return 0;
 }
-EXPORT_SYMBOL_GPL(tquic_http3_init);
-
 /**
- * tquic_http3_exit - Cleanup HTTP/3 subsystem
+ * tquic_http3_conn_exit - Cleanup HTTP/3 connection layer
  */
-void __exit tquic_http3_exit(void)
+void __exit tquic_http3_conn_exit(void)
 {
 	pr_info("TQUIC HTTP/3: Exiting\n");
 }
-EXPORT_SYMBOL_GPL(tquic_http3_exit);
 
 MODULE_DESCRIPTION("TQUIC HTTP/3 Connection Management");
 MODULE_LICENSE("GPL");

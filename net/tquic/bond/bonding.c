@@ -828,5 +828,19 @@ void tquic_bond_interface_down(struct tquic_connection *conn,
 }
 EXPORT_SYMBOL_GPL(tquic_bond_interface_down);
 
+static int __init tquic_bond_module_init(void)
+{
+	pr_info("tquic_bond: module loaded\n");
+	return 0;
+}
+
+static void __exit tquic_bond_module_exit(void)
+{
+	pr_info("tquic_bond: module unloaded\n");
+}
+
+module_init(tquic_bond_module_init);
+module_exit(tquic_bond_module_exit);
+
 MODULE_DESCRIPTION("TQUIC WAN Bonding Core");
 MODULE_LICENSE("GPL");
