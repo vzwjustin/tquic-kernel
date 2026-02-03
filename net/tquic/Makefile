@@ -19,7 +19,7 @@ ccflags-y += -I$(src)/include -I$(src)/../quic -I$(src)/../..
 
 obj-$(CONFIG_TQUIC) += tquic.o
 
-# Main TQUIC module - consolidated from net/quic and net/tquic
+# Main TQUIC module - ALL components in single block to avoid make evaluation issues
 tquic-y := \
 	tquic_main.o \
 	tquic_proto.o \
@@ -54,22 +54,12 @@ tquic-y := \
 	tquic_ack_frequency.o \
 	security_hardening.o \
 	cong/tquic_cong.o \
-	cong/persistent_cong.o
-
-# Include remaining files from net/quic consolidation
-# Note: ack_frequency.o, early_data.o, key_update.o, priority.o are in core/
-tquic-y += \
+	cong/persistent_cong.o \
 	quic_socket.o \
 	quic_timer.o \
 	quic_stream.o \
 	quic_sysctl.o \
-	quic_offload.o
-
-# Tracing support
-tquic-$(CONFIG_TRACEPOINTS) += diag/trace.o
-
-# Core protocol components - always included in main module for out-of-tree builds
-tquic-y += \
+	quic_offload.o \
 	core/varint.o \
 	core/connection.o \
 	core/stream.o \
@@ -101,40 +91,24 @@ tquic-y += \
 	core/mp_frame.o \
 	core/packet_coalesce_fix.o \
 	core/early_data.o \
-	core/priority.o
-
-# Optional separate core module (if CONFIG_TQUIC_CORE=m)
-obj-$(CONFIG_TQUIC_CORE) += tquic_core.o
-tquic_core-y := $(tquic-y)
-
-# WAN Bonding components - always included for out-of-tree builds
-tquic-y += \
+	core/priority.o \
 	bond/bonding.o \
 	bond/tquic_bonding.o \
 	bond/tquic_failover.o \
 	bond/tquic_path.o \
 	bond/tquic_reorder.o \
-	bond/cong_coupled.o
-
-# Path Manager - always included for out-of-tree builds
-tquic-y += \
+	bond/cong_coupled.o \
 	pm/pm_types.o \
 	pm/pm_kernel.o \
 	pm/path_manager.o \
 	pm/path_validation.o \
 	pm/nat_keepalive.o \
 	pm/nat_lifecycle.o \
-	pm/pm_module.o
-
-# Packet Scheduler - always included for out-of-tree builds
-tquic-y += \
+	pm/pm_module.o \
 	sched/scheduler.o \
 	sched/reorder.o \
 	sched/deadline_scheduler.o \
-	sched/deadline_aware.o
-
-# Multipath extension - always included for out-of-tree builds
-tquic-y += \
+	sched/deadline_aware.o \
 	multipath/mp_frame.o \
 	multipath/mp_ack.o \
 	multipath/mp_deadline.o \
@@ -145,10 +119,7 @@ tquic-y += \
 	multipath/sched_aggregate.o \
 	multipath/sched_weighted.o \
 	multipath/sched_blest.o \
-	multipath/sched_ecf.o
-
-# Crypto support - always included for out-of-tree builds
-tquic-y += \
+	multipath/sched_ecf.o \
 	crypto/tls.o \
 	crypto/header_protection.o \
 	crypto/key_update.o \
@@ -157,6 +128,18 @@ tquic-y += \
 	crypto/handshake.o \
 	crypto/crypto_module.o \
 	crypto/hw_offload.o
+
+# Tracing support
+tquic-$(CONFIG_TRACEPOINTS) += diag/trace.o
+
+# IPv6 Support
+tquic-$(CONFIG_TQUIC_IPV6) += tquic_ipv6.o
+
+# NAPI polling support
+tquic-$(CONFIG_TQUIC_NAPI) += napi.o
+
+# io_uring support for high-performance async I/O
+tquic-$(CONFIG_TQUIC_IO_URING) += io_uring.o
 
 # Optional separate modules (if corresponding CONFIG is =m)
 obj-$(CONFIG_TQUIC_WAN_BONDING) += tquic_bond.o
@@ -218,7 +201,7 @@ tquic_bdp_frame-y := \
 obj-$(CONFIG_TQUIC_CONG_DATA) += tquic_cong_data.o
 tquic_cong_data-y := cong/cong_data.o
 
-# Multipath extension (RFC 9369) - includes schedulers
+# Multipath extension (RFC 9369) - separate module
 obj-$(CONFIG_TQUIC_MULTIPATH) += tquic_multipath.o
 tquic_multipath-y := \
 	multipath/mp_frame.o \
@@ -233,7 +216,7 @@ tquic_multipath-y := \
 	multipath/sched_blest.o \
 	multipath/sched_ecf.o
 
-# Crypto support
+# Crypto support - separate module
 obj-$(CONFIG_TQUIC_CRYPTO) += tquic_crypto.o
 tquic_crypto-y := \
 	crypto/tls.o \
@@ -249,12 +232,6 @@ tquic_crypto-$(CONFIG_TQUIC_CERT_VERIFY) += crypto/cert_verify.o
 
 # Hardware crypto offload detection (AES-NI, AVX2, AVX-512, QAT)
 tquic_crypto-$(CONFIG_TQUIC_CRYPTO_HW_OFFLOAD) += crypto/hw_offload.o
-
-# IPv6 Support
-tquic-$(CONFIG_TQUIC_IPV6) += tquic_ipv6.o
-
-# NAPI polling support
-tquic-$(CONFIG_TQUIC_NAPI) += napi.o
 
 # Netfilter integration for connection tracking
 obj-$(CONFIG_TQUIC_NETFILTER) += tquic_nf.o
@@ -278,9 +255,6 @@ obj-$(CONFIG_TQUIC_MASQUE) += masque/
 # QUIC-LB Load Balancing Support (draft-ietf-quic-load-balancers)
 obj-$(CONFIG_TQUIC_QUIC_LB) += tquic_quic_lb.o
 tquic_quic_lb-y := lb/quic_lb.o
-
-# io_uring support for high-performance async I/O
-tquic-$(CONFIG_TQUIC_IO_URING) += io_uring.o
 
 # AF_XDP high-performance packet I/O
 obj-$(CONFIG_TQUIC_AF_XDP) += tquic_af_xdp.o
