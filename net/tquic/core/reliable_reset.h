@@ -19,6 +19,9 @@
 #include <linux/errno.h>
 #include <net/tquic.h>
 
+/* Forward declarations */
+struct tquic_transport_params;
+
 /*
  * Frame Type Constants (draft-ietf-quic-reliable-stream-reset-07)
  *
