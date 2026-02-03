@@ -515,7 +515,9 @@ struct tquic_flow_control {
  * struct tquic_config - Connection configuration
  */
 struct tquic_config {
+	u32 version;			/* QUIC version to use */
 	u32 max_idle_timeout_ms;
+	u32 handshake_timeout_ms;	/* Handshake timeout */
 	u64 initial_max_data;
 	u64 initial_max_stream_data_bidi_local;
 	u64 initial_max_stream_data_bidi_remote;
@@ -795,6 +797,7 @@ struct tquic_connection {
 	/* Crypto */
 	void *crypto_state;
 	void *crypto[TQUIC_CRYPTO_MAX];	/* Per-level crypto state */
+	u8 crypto_level;		/* Current crypto level (TQUIC_CRYPTO_*) */
 
 	/* Handshake state */
 	bool handshake_complete;
@@ -1167,6 +1170,9 @@ struct tquic_sock {
 	struct tquic_connection *conn;
 	struct socket *udp_sock;	/* UDP encapsulation socket */
 
+	/* Connection configuration */
+	struct tquic_config config;
+
 	struct sockaddr_storage bind_addr;
 	struct sockaddr_storage connect_addr;
 
@@ -1509,6 +1515,14 @@ struct tquic_path *tquic_conn_get_path_locked(struct tquic_connection *conn,
 /* Path manager connection lifecycle */
 int tquic_pm_conn_init(struct tquic_connection *conn);
 void tquic_pm_conn_release(struct tquic_connection *conn);
+
+/* Loss detection initialization */
+int tquic_loss_detection_init(struct tquic_connection *conn);
+void tquic_loss_detection_cleanup(struct tquic_connection *conn);
+
+/* Scheduler initialization */
+int tquic_sched_init(struct tquic_connection *conn);
+void tquic_sched_cleanup(struct tquic_connection *conn);
 
 /* Path validation (PATH_CHALLENGE/RESPONSE) - net/tquic/pm/path_validation.c */
 int tquic_path_start_validation(struct tquic_connection *conn,

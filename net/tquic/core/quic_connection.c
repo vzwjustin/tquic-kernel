@@ -15,7 +15,7 @@
 #include "../diag/trace.h"
 
 /*
- * ttquic_trace_conn_id - Extract connection ID as u64 for tracing
+ * tquic_trace_conn_id - Extract connection ID as u64 for tracing
  * @cid: Connection ID (tquic_cid structure)
  *
  * Returns: First 8 bytes of CID as u64 for trace events.
@@ -23,7 +23,7 @@
  * This is the tquic version of tquic_trace_conn_id() for use with
  * struct tquic_cid which has id[] instead of data[].
  */
-static inline u64 ttquic_trace_conn_id(const struct tquic_cid *cid)
+static inline u64 tquic_trace_conn_id(const struct tquic_cid *cid)
 {
 	u64 id = 0;
 	int i;
