@@ -23,6 +23,17 @@
 #include <net/inet_connection_sock.h>
 #include <uapi/linux/tquic.h>
 
+/*
+ * IPPROTO_TQUIC - Transport QUIC with multipath
+ *
+ * For out-of-tree builds, the system's linux/in.h doesn't include
+ * IPPROTO_TQUIC. Define it here if not already defined.
+ * Protocol number 263 chosen to be in the unassigned range.
+ */
+#ifndef IPPROTO_TQUIC
+#define IPPROTO_TQUIC	263
+#endif
+
 /* Protocol version numbers */
 #define TQUIC_VERSION_1		0x00000001
 #define TQUIC_VERSION_2		0x6b3343cf  /* QUIC v2 (RFC 9369) */
