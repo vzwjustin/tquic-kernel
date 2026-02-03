@@ -195,27 +195,27 @@ size_t tquic_ack_frequency_frame_size(u64 ack_eliciting_threshold,
  */
 
 /**
- * tquic_handle_ack_frequency_frame - Process received ACK_FREQUENCY frame
+ * tquic_conn_handle_ack_frequency_frame - Process received ACK_FREQUENCY frame
  * @conn: Connection
  * @frame: Parsed frame
  *
- * Updates the connection's ACK behavior according to the peer's request.
+ * Connection-level wrapper. Updates the connection's ACK behavior.
  * Only processes frames with sequence numbers greater than previously seen.
  *
  * Return: 0 on success, negative error code on failure
  */
-int tquic_handle_ack_frequency_frame(struct tquic_connection *conn,
-				     const struct tquic_ack_frequency_frame *frame);
+int tquic_conn_handle_ack_frequency_frame(struct tquic_connection *conn,
+					  const struct tquic_ack_frequency_frame *frame);
 
 /**
- * tquic_handle_immediate_ack_frame - Process received IMMEDIATE_ACK frame
+ * tquic_conn_handle_immediate_ack_frame - Process received IMMEDIATE_ACK frame
  * @conn: Connection
  *
- * Triggers immediate ACK generation when IMMEDIATE_ACK is received.
+ * Connection-level wrapper. Triggers immediate ACK generation.
  *
  * Return: 0 on success, negative error code on failure
  */
-int tquic_handle_immediate_ack_frame(struct tquic_connection *conn);
+int tquic_conn_handle_immediate_ack_frame(struct tquic_connection *conn);
 
 /*
  * =============================================================================
@@ -241,12 +241,12 @@ bool tquic_ack_freq_on_packet_received(struct tquic_connection *conn,
 				       u64 expected_pkt_num);
 
 /**
- * tquic_ack_freq_on_ack_sent - Notify ACK frequency that ACK was sent
+ * tquic_ack_freq_conn_on_ack_sent - Notify ACK frequency that ACK was sent
  * @conn: Connection
  *
- * Called after an ACK frame is sent to reset the packet counter.
+ * Connection-level wrapper. Called after an ACK frame is sent.
  */
-void tquic_ack_freq_on_ack_sent(struct tquic_connection *conn);
+void tquic_ack_freq_conn_on_ack_sent(struct tquic_connection *conn);
 
 /**
  * tquic_ack_freq_should_ack_immediately - Check if immediate ACK needed
@@ -269,12 +269,12 @@ bool tquic_ack_freq_should_ack(struct tquic_ack_frequency_state *state,
 			       u64 pn, bool ack_eliciting);
 
 /**
- * tquic_ack_freq_get_max_delay - Get current max ACK delay
+ * tquic_ack_freq_conn_get_max_delay - Get current max ACK delay
  * @conn: Connection
  *
- * Return: Maximum ACK delay in microseconds
+ * Connection-level wrapper. Returns maximum ACK delay in microseconds.
  */
-u64 tquic_ack_freq_get_max_delay(struct tquic_connection *conn);
+u64 tquic_ack_freq_conn_get_max_delay(struct tquic_connection *conn);
 
 /*
  * =============================================================================
@@ -309,32 +309,30 @@ int tquic_ack_freq_decode_tp(const u8 *buf, size_t buf_len, u64 *min_ack_delay_u
  */
 
 /**
- * tquic_ack_freq_request_update - Request peer update ACK behavior
+ * tquic_ack_freq_conn_request_update - Request peer update ACK behavior
  * @conn: Connection
  * @ack_elicit_threshold: Desired ack-eliciting threshold
  * @max_ack_delay_us: Desired max ACK delay (microseconds)
  * @reorder_threshold: Desired reorder threshold
  *
- * Schedules an ACK_FREQUENCY frame to be sent to the peer requesting
- * it change its ACK behavior.
+ * Connection-level wrapper. Schedules an ACK_FREQUENCY frame.
  *
  * Return: 0 on success, negative error code on failure
  */
-int tquic_ack_freq_request_update(struct tquic_connection *conn,
-				  u64 ack_elicit_threshold,
-				  u64 max_ack_delay_us,
-				  u64 reorder_threshold);
+int tquic_ack_freq_conn_request_update(struct tquic_connection *conn,
+				       u64 ack_elicit_threshold,
+				       u64 max_ack_delay_us,
+				       u64 reorder_threshold);
 
 /**
- * tquic_ack_freq_request_immediate_ack - Request immediate ACK from peer
+ * tquic_ack_freq_conn_request_immediate_ack - Request immediate ACK from peer
  * @conn: Connection
  *
- * Schedules an IMMEDIATE_ACK frame to be sent requesting the peer
- * acknowledge all received packets immediately.
+ * Connection-level wrapper. Schedules an IMMEDIATE_ACK frame.
  *
  * Return: 0 on success, negative error code on failure
  */
-int tquic_ack_freq_request_immediate_ack(struct tquic_connection *conn);
+int tquic_ack_freq_conn_request_immediate_ack(struct tquic_connection *conn);
 
 /**
  * tquic_ack_freq_has_pending_frames - Check for pending ACK frequency frames

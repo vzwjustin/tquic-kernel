@@ -64,8 +64,7 @@
 #define TQUIC_FRAME_CONNECTION_CLOSE_APP 0x1d
 #define TQUIC_FRAME_HANDSHAKE_DONE	0x1e
 #define TQUIC_FRAME_DATAGRAM		0x30  /* 0x30-0x31 */
-#define TQUIC_FRAME_IMMEDIATE_ACK	0xac  /* draft-ietf-quic-ack-frequency */
-#define TQUIC_FRAME_ACK_FREQUENCY	0xaf  /* draft-ietf-quic-ack-frequency */
+/* ACK frequency frame types defined in core/ack_frequency.h */
 /* RFC 9369 Multipath frames - 1-byte types */
 #define TQUIC_FRAME_MP_NEW_CONNECTION_ID 0x40
 #define TQUIC_FRAME_MP_RETIRE_CONNECTION_ID 0x41
