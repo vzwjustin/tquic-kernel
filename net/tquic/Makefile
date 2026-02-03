@@ -14,7 +14,8 @@
 #
 
 # Include paths for headers
-ccflags-y += -I$(src)/include -I$(src)/../quic
+# $(src)/../.. points to the project root where include/uapi/linux/in.h defines IPPROTO_TQUIC
+ccflags-y += -I$(src)/include -I$(src)/../quic -I$(src)/../..
 
 obj-$(CONFIG_TQUIC) += tquic.o
 
