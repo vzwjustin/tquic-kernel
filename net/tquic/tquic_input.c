@@ -1335,7 +1335,7 @@ static int tquic_process_ack_frequency_frame(struct tquic_rx_ctx *ctx)
 	ctx->offset += ret;
 
 	/* Handle the frame */
-	ret = tquic_handle_ack_frequency_frame(ctx->conn, &frame);
+	ret = tquic_conn_handle_ack_frequency_frame(ctx->conn, &frame);
 	if (ret < 0)
 		return ret;
 
@@ -1370,7 +1370,7 @@ static int tquic_process_immediate_ack_frame(struct tquic_rx_ctx *ctx)
 	ctx->offset += ret;
 
 	/* Handle the frame */
-	ret = tquic_handle_immediate_ack_frame(ctx->conn);
+	ret = tquic_conn_handle_immediate_ack_frame(ctx->conn);
 	if (ret < 0)
 		return ret;
 
