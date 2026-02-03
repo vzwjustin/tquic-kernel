@@ -93,56 +93,10 @@ MODULE_PARM_DESC(bond_mode, "Default WAN bonding mode");
 
 /*
  * Connection Management
+ *
+ * Note: tquic_conn_create is defined in net/tquic/core/quic_connection.c
+ * with signature: tquic_conn_create(struct tquic_sock *tsk, bool is_server)
  */
-
-struct tquic_connection *tquic_conn_create(struct sock *sk, gfp_t gfp)
-{
-	struct tquic_connection *conn;
-
-	conn = kmem_cache_zalloc(tquic_conn_cache, gfp);
-	if (!conn)
-		return NULL;
-
-	conn->state = TQUIC_CONN_IDLE;
-	conn->version = TQUIC_VERSION_CURRENT;
-	conn->sk = sk;
-
-	INIT_LIST_HEAD(&conn->paths);
-	conn->streams = RB_ROOT;
-
-	spin_lock_init(&conn->lock);
-	refcount_set(&conn->refcnt, 1);
-
-	/* Initialize flow control defaults */
-	conn->max_data_local = TQUIC_DEFAULT_MAX_DATA;
-	conn->max_data_remote = TQUIC_DEFAULT_MAX_DATA;
-	conn->max_streams_bidi = TQUIC_MAX_STREAM_COUNT_BIDI;
-	conn->max_streams_uni = TQUIC_MAX_STREAM_COUNT_UNI;
-
-	/* Set default idle timeout */
-	conn->idle_timeout = TQUIC_DEFAULT_IDLE_TIMEOUT;
-
-	/* Initialize timer state (manages idle, ack, loss, and PTO timers) */
-	conn->timer_state = tquic_timer_state_alloc(conn);
-	if (!conn->timer_state) {
-		kmem_cache_free(tquic_conn_cache, conn);
-		return NULL;
-	}
-
-	/* Generate local connection ID */
-	get_random_bytes(conn->scid.id, TQUIC_DEFAULT_CID_LEN);
-	conn->scid.len = TQUIC_DEFAULT_CID_LEN;
-	conn->scid.seq_num = 0;
-
-	/* Initialize state machine pointer (allocated on demand) */
-	conn->state_machine = NULL;
-
-	/* Add to global table */
-	rhashtable_insert_fast(&tquic_conn_table, &conn->node, tquic_conn_params);
-
-	return conn;
-}
-EXPORT_SYMBOL_GPL(tquic_conn_create);
 
 void tquic_conn_destroy(struct tquic_connection *conn)
 {

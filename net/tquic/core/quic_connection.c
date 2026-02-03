@@ -460,6 +460,7 @@ err_free_conn:
 	kfree(conn);
 	return NULL;
 }
+EXPORT_SYMBOL_GPL(tquic_conn_create);
 
 void tquic_conn_destroy(struct tquic_connection *conn)
 {
