@@ -58,11 +58,6 @@ tquic-y := \
 	security_hardening.o \
 	cong/tquic_cong.o \
 	cong/persistent_cong.o \
-	quic_socket.o \
-	quic_timer.o \
-	quic_stream.o \
-	quic_sysctl.o \
-	quic_offload.o \
 	core/varint.o \
 	core/connection.o \
 	core/stream.o \
