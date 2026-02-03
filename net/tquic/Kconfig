@@ -1132,8 +1132,76 @@ config TQUIC_AF_XDP
 	    - Low-latency real-time applications
 	    - Network function virtualization (NFV)
 
-	  To compile this as a module, choose M here: the module will
+	To compile this as a module, choose M here: the module will
 	  be called tquic_af_xdp.
+
+	  If unsure, say N.
+
+config TQUIC_OVER_TCP
+	tristate "TQUIC over TCP transport"
+	depends on TQUIC_CORE
+	default n
+	help
+	  Enable QUIC-over-TCP transport for TQUIC. This allows QUIC
+	  connections to run over TCP as a fallback when UDP is blocked
+	  or unreliable.
+
+	  This is useful for:
+	    - Networks that block UDP traffic
+	    - Debugging QUIC without UDP firewall issues
+	    - Environments requiring TCP-only transport
+
+	  Note: This adds latency compared to native UDP transport due
+	  to TCP's head-of-line blocking. Use only when UDP is unavailable.
+
+	  To compile this as a module, choose M here: the module will
+	  be called tquic_tcp.
+
+	  If unsure, say N.
+
+config TQUIC_INTEROP_TEST
+	tristate "TQUIC interoperability testing framework"
+	depends on TQUIC_CORE
+	depends on TQUIC_KUNIT_TEST
+	default n
+	help
+	  Enable the TQUIC interoperability testing framework. This
+	  provides infrastructure for running QUIC interop tests
+	  against other implementations per the quic-interop-runner
+	  test suite.
+
+	  Test categories include:
+	    - RFC 9000 compliance tests
+	    - Connection establishment/migration
+	    - Stream operations and flow control
+	    - Multipath functionality
+
+	  Only useful for kernel developers testing QUIC interoperability.
+
+	  To compile this as a module, choose M here: the module will
+	  be called tquic_interop.
+
+	  If unsure, say N.
+
+config TQUIC_FUZZ
+	tristate "TQUIC fuzzing test framework"
+	depends on TQUIC_CORE
+	depends on TQUIC_KUNIT_TEST
+	default n
+	help
+	  Enable the TQUIC fuzzing framework for security testing.
+	  This provides infrastructure for fuzz testing QUIC packet
+	  parsing and protocol state machines.
+
+	  Features:
+	    - Packet mutation fuzzing
+	    - Protocol state fuzzing
+	    - Coverage-guided fuzzing support
+
+	  Only useful for kernel developers performing security testing.
+
+	  To compile this as a module, choose M here: the module will
+	  be called tquic_fuzz.
 
 	  If unsure, say N.
 

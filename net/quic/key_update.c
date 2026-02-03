@@ -19,6 +19,7 @@
 #include <crypto/aead.h>
 #include <crypto/hash.h>
 #include <net/quic.h>
+#include "key_update.h"
 
 /*
  * Key discard timeout per RFC 9001 Section 6.1:
