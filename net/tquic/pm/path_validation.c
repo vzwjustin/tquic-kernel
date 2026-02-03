@@ -272,7 +272,7 @@ int tquic_path_handle_challenge(struct tquic_connection *conn,
 		set_bit(TQUIC_PATH_RESPONSE_PENDING, &conn->flags);
 
 		/* Wake up any waiting writers and trigger immediate output */
-		sk_data_ready(conn->sk);
+		conn->sk->sk_data_ready(conn->sk);
 
 		/* Schedule immediate transmission via tasklet */
 		if (conn->tasklet_scheduled) {
