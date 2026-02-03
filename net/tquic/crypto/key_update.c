@@ -23,16 +23,11 @@
 #include <crypto/aead.h>
 #include <net/tquic.h>
 
+#include "key_update.h"
 #include "extended_key_update.h"
 
 /* Key update HKDF label per RFC 9001 Section 6.1 */
 #define TQUIC_HKDF_LABEL_KU		"quic ku"
-
-/* Key update constants */
-#define TQUIC_SECRET_MAX_LEN		48	/* SHA-384 max */
-#define TQUIC_KEY_MAX_LEN		32	/* AES-256 max */
-#define TQUIC_IV_MAX_LEN		12
-#define TQUIC_HP_KEY_MAX_LEN		32
 
 /* AEAD confidentiality limits per RFC 9001 Section 6.6 */
 #define TQUIC_AES_GCM_CONFIDENTIALITY_LIMIT	(1ULL << 23)	/* 2^23 packets */
@@ -50,97 +45,10 @@
 #define TLS_AES_256_GCM_SHA384		0x1302
 #define TLS_CHACHA20_POLY1305_SHA256	0x1303
 
-/**
- * struct tquic_key_generation - Keys for one generation (key phase)
- * @secret: Application traffic secret
- * @key: AEAD key derived from secret
- * @iv: Initialization vector derived from secret
- * @hp_key: Header protection key derived from secret
- * @secret_len: Length of the secret
- * @key_len: Length of the AEAD key
- * @iv_len: Length of the IV
- * @valid: Whether this key generation is valid for use
+/*
+ * Note: struct tquic_key_generation and struct tquic_key_update_state
+ * are defined in key_update.h to allow sharing with extended_key_update.c
  */
-struct tquic_key_generation {
-	u8 secret[TQUIC_SECRET_MAX_LEN];
-	u8 key[TQUIC_KEY_MAX_LEN];
-	u8 iv[TQUIC_IV_MAX_LEN];
-	u8 hp_key[TQUIC_HP_KEY_MAX_LEN];
-	u32 secret_len;
-	u32 key_len;
-	u32 iv_len;
-	bool valid;
-};
-
-/**
- * struct tquic_key_update_state - Key update state per connection
- * @current_phase: Current key phase (0 or 1)
- * @current_read: Current generation keys for reading
- * @current_write: Current generation keys for writing
- * @next_read: Next generation keys for reading (pre-computed)
- * @next_write: Next generation keys for writing (pre-computed)
- * @old_read: Previous generation keys (for packets in flight)
- * @packets_sent: Packets sent with current write keys
- * @packets_received: Packets received with current read keys
- * @last_key_update: Timestamp of last key update
- * @update_pending: Key update initiated, waiting for peer ACK
- * @peer_update_received: Peer initiated key update
- * @cipher_suite: Negotiated cipher suite
- * @hash_tfm: Hash transform for HKDF
- * @aead_tfm: AEAD transform for encryption/decryption
- * @handshake_confirmed: Handshake has completed
- * @key_update_interval_packets: Packets before initiating update
- * @key_update_interval_seconds: Seconds before initiating update
- * @lock: Spinlock protecting key state
- * @update_work: Deferred work for key derivation
- * @conn: Back-pointer to connection
- */
-struct tquic_key_update_state {
-	/* Key phase (RFC 9001 Section 6) */
-	u8 current_phase;
-
-	/* Key generations (double-buffered) */
-	struct tquic_key_generation current_read;
-	struct tquic_key_generation current_write;
-	struct tquic_key_generation next_read;
-	struct tquic_key_generation next_write;
-	struct tquic_key_generation old_read;
-
-	/* Statistics for confidentiality limit tracking */
-	u64 packets_sent;
-	u64 packets_received;
-	u64 total_key_updates;
-	u64 peer_initiated_updates;
-
-	/* Timing */
-	ktime_t last_key_update;
-	ktime_t old_key_discard_time;
-
-	/* State flags */
-	bool update_pending;
-	bool peer_update_received;
-	bool handshake_confirmed;
-	bool old_keys_valid;
-
-	/* Cipher configuration */
-	u16 cipher_suite;
-	u64 confidentiality_limit;
-
-	/* Crypto transforms */
-	struct crypto_shash *hash_tfm;
-	struct crypto_aead *aead_tfm;
-
-	/* Configuration (from sysctl or per-connection) */
-	u64 key_update_interval_packets;
-	u32 key_update_interval_seconds;
-
-	/* Synchronization */
-	spinlock_t lock;
-	struct work_struct update_work;
-
-	/* Back-pointer */
-	struct tquic_connection *conn;
-};
 
 /* Forward declarations for HP context functions */
 struct tquic_hp_ctx;
