@@ -231,6 +231,112 @@ config TQUIC_CONG_COUPLED
 
 	  If using TQUIC for multipath WAN bonding, say Y.
 
+config TQUIC_CONG_BBRV2
+	tristate "TQUIC BBRv2 Congestion Control"
+	default m
+	help
+	  BBRv2 congestion control adapted for TQUIC multipath
+	  environments. BBRv2 improves upon BBR with better fairness
+	  and coexistence with loss-based congestion control algorithms.
+
+	  Key improvements over BBRv1:
+	    - Better fairness with CUBIC/Reno flows
+	    - Improved reaction to ECN marking
+	    - Reduced bufferbloat
+	    - More accurate bandwidth estimation
+
+	  Recommended for paths where BBRv1's fairness issues are
+	  a concern.
+
+	  To compile this as a module, choose M here: the module will
+	  be called tquic_bbrv2.
+
+	  If unsure, say M.
+
+config TQUIC_CONG_PRAGUE
+	tristate "TQUIC Prague Congestion Control (L4S)"
+	depends on TQUIC_L4S
+	default m
+	help
+	  Prague congestion control for Low Latency Low Loss Scalable
+	  Throughput (L4S) networks. Prague is designed to achieve
+	  ultra-low latency while maintaining high throughput.
+
+	  Features:
+	    - Scalable congestion signals (AccECN)
+	    - Immediate response to ECN CE marks
+	    - Designed for L4S-enabled networks
+	    - Compatible with classic traffic via DualQ Coupled AQM
+
+	  Prague is the recommended CC for L4S deployments and
+	  provides sub-millisecond latency when network supports it.
+
+	  To compile this as a module, choose M here: the module will
+	  be called tquic_prague.
+
+	  If unsure, say M.
+
+config TQUIC_L4S
+	tristate "TQUIC L4S (Low Latency Low Loss Scalable Throughput)"
+	depends on TQUIC_CORE
+	depends on TQUIC_CONG
+	default m
+	help
+	  Enable L4S (Low Latency Low Loss Scalable Throughput) support
+	  for TQUIC. L4S enables ultra-low queuing latency (<1ms) while
+	  achieving high throughput.
+
+	  L4S requires:
+	    - ECN-capable network path
+	    - L4S-enabled Active Queue Management (DualQ, PI2, etc.)
+	    - Scalable congestion control (Prague, etc.)
+
+	  Features:
+	    - ECT(1) marking for L4S traffic identification
+	    - Accurate ECN feedback via AccECN extension
+	    - Immediate congestion response for ultra-low latency
+	    - Coexistence with classic traffic
+
+	  Use cases:
+	    - Real-time gaming
+	    - Video conferencing
+	    - VoIP
+	    - AR/VR applications
+
+	  To compile this as a module, choose M here: the module will
+	  be called tquic_l4s.
+
+	  If unsure, say M.
+
+config TQUIC_ACCECN
+	tristate "TQUIC Accurate ECN Feedback (AccECN)"
+	depends on TQUIC_CORE
+	depends on TQUIC_CONG
+	default m
+	help
+	  Enable Accurate ECN (AccECN) feedback for TQUIC. AccECN provides
+	  accurate per-packet ECN feedback, enabling scalable congestion
+	  control algorithms like Prague.
+
+	  Standard ECN only reports whether CE marks were seen.
+	  AccECN reports:
+	    - Exact count of CE marks received
+	    - Per-packet ECN codepoint information
+	    - Byte-accurate ECN counters
+
+	  AccECN is required for:
+	    - L4S deployments
+	    - Prague congestion control
+	    - Accurate congestion measurement
+
+	  Transport parameter:
+	    - accurate_ecn (0xff04de1b): Negotiate AccECN support
+
+	  To compile this as a module, choose M here: the module will
+	  be called tquic_accecn.
+
+	  If unsure, say M.
+
 endif # TQUIC_CONG_ADVANCED
 
 choice
@@ -247,11 +353,17 @@ choice
 	config DEFAULT_TQUIC_BBR
 		bool "BBR" if TQUIC_CONG_BBR=y
 
+	config DEFAULT_TQUIC_BBRV2
+		bool "BBRv2" if TQUIC_CONG_BBRV2=y
+
 	config DEFAULT_TQUIC_COPA
 		bool "Copa" if TQUIC_CONG_COPA=y
 
 	config DEFAULT_TQUIC_WESTWOOD
 		bool "Westwood+" if TQUIC_CONG_WESTWOOD=y
+
+	config DEFAULT_TQUIC_PRAGUE
+		bool "Prague (L4S)" if TQUIC_CONG_PRAGUE=y
 
 	config DEFAULT_TQUIC_OLIA
 		bool "OLIA (Coupled Multipath)" if TQUIC_CONG_COUPLED=y
@@ -268,8 +380,10 @@ config DEFAULT_TQUIC_CONG
 	string
 	default "cubic" if DEFAULT_TQUIC_CUBIC
 	default "bbr" if DEFAULT_TQUIC_BBR
+	default "bbrv2" if DEFAULT_TQUIC_BBRV2
 	default "copa" if DEFAULT_TQUIC_COPA
 	default "westwood" if DEFAULT_TQUIC_WESTWOOD
+	default "prague" if DEFAULT_TQUIC_PRAGUE
 	default "olia" if DEFAULT_TQUIC_OLIA
 	default "lia" if DEFAULT_TQUIC_LIA
 	default "balia" if DEFAULT_TQUIC_BALIA
@@ -910,6 +1024,43 @@ config TQUIC_MASQUE
 
 	  To compile this as a module, choose M here: the module will
 	  be called tquic_masque.
+
+	  If unsure, say M.
+
+config TQUIC_QUIC_LB
+	tristate "TQUIC QUIC-LB Load Balancer Support (draft-ietf-quic-load-balancers)"
+	depends on TQUIC_CORE
+	default m
+	help
+	  Enable QUIC-LB (Load Balancers) support for TQUIC as specified in
+	  draft-ietf-quic-load-balancers. QUIC-LB enables efficient load
+	  balancing of QUIC connections without terminating the encryption.
+
+	  Features:
+	    - Server ID encoding in Connection IDs
+	    - Config rotation for rolling deployments
+	    - Retry Service for address validation offload
+	    - Plaintext and encrypted CID modes
+
+	  CID encoding modes:
+	    - Plaintext: Server ID visible in CID (simplest)
+	    - Obfuscated: Server ID XORed with key
+	    - Stream Cipher: AES-CTR encrypted Server ID
+	    - Block Cipher: AES-ECB encrypted Server ID
+
+	  Server configuration:
+	    - Server ID length and value
+	    - Encryption keys and algorithms
+	    - Config ID for version management
+
+	  This is useful for:
+	    - Large-scale QUIC deployments with multiple servers
+	    - Hardware/software load balancers (F5, HAProxy, etc.)
+	    - CDN edge node routing
+	    - Anycast deployments
+
+	  To compile this as a module, choose M here: the module will
+	  be called tquic_quic_lb.
 
 	  If unsure, say M.
 
