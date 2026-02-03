@@ -91,7 +91,6 @@ struct tquic_crypto_stats {
 
 /* Forward declaration */
 struct tquic_crypto_ctx;
-struct tquic_packet;
 
 /*
  * CPU Feature Detection
@@ -231,15 +230,18 @@ int tquic_hw_decrypt_packet(struct tquic_crypto_ctx *ctx,
  */
 
 /**
- * struct tquic_packet - Packet for batch operations
+ * struct tquic_hw_packet - Packet for batch crypto operations
  * @data:     Packet data (input/output)
  * @len:      Data length (updated after operation)
  * @pkt_num:  Packet number for nonce
  * @aad:      Additional authenticated data
  * @aad_len:  AAD length
  * @result:   Operation result (0 = success)
+ *
+ * Note: This is distinct from struct tquic_packet in net/tquic.h which
+ * represents parsed QUIC packets. This struct is for batch crypto operations.
  */
-struct tquic_packet {
+struct tquic_hw_packet {
 	u8 *data;
 	size_t len;
 	u64 pkt_num;
@@ -261,7 +263,7 @@ struct tquic_packet {
  * Return: Number of successfully encrypted packets
  */
 int tquic_crypto_batch_encrypt(struct tquic_crypto_ctx *ctx,
-			       struct tquic_packet *pkts, int count);
+			       struct tquic_hw_packet *pkts, int count);
 
 /**
  * tquic_crypto_batch_decrypt - Decrypt multiple packets in parallel
@@ -274,7 +276,7 @@ int tquic_crypto_batch_encrypt(struct tquic_crypto_ctx *ctx,
  * Return: Number of successfully decrypted packets
  */
 int tquic_crypto_batch_decrypt(struct tquic_crypto_ctx *ctx,
-			       struct tquic_packet *pkts, int count);
+			       struct tquic_hw_packet *pkts, int count);
 
 /*
  * Intel QAT Offload (Optional)

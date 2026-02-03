@@ -620,6 +620,14 @@ struct tquic_connection {
 	void *zc_state;		/* struct tquic_zc_state * */
 
 	/*
+	 * Extended Key Update state (RFC 9369 Key Update extension)
+	 *
+	 * Manages extended key update negotiations and tracking for
+	 * enhanced cryptographic agility.
+	 */
+	void *eku_state;	/* struct tquic_eku_state * */
+
+	/*
 	 * io_uring integration context
 	 *
 	 * Manages buffer rings for recv, completion queue entries,

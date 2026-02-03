@@ -337,7 +337,7 @@ static int tquic_hs_transcript_hash(struct tquic_handshake *hs,
 /*
  * Variable-length integer encoding (QUIC style)
  */
-static int tquic_varint_encode(u64 val, u8 *buf, u32 *len)
+static int hs_varint_encode(u64 val, u8 *buf, u32 *len)
 {
 	if (val < 0x40) {
 		buf[0] = val;
@@ -366,7 +366,7 @@ static int tquic_varint_encode(u64 val, u8 *buf, u32 *len)
 	return 0;
 }
 
-static int tquic_varint_decode(const u8 *buf, u32 buf_len, u64 *val, u32 *len)
+static int hs_varint_decode(const u8 *buf, u32 buf_len, u64 *val, u32 *len)
 {
 	u8 prefix;
 
@@ -426,112 +426,112 @@ static int tquic_encode_transport_params(struct tquic_transport_params *params,
 
 	/* max_idle_timeout */
 	if (params->max_idle_timeout > 0) {
-		tquic_varint_encode(QUIC_TP_MAX_IDLE_TIMEOUT, p, &vlen);
+		hs_varint_encode(QUIC_TP_MAX_IDLE_TIMEOUT, p, &vlen);
 		p += vlen;
-		tquic_varint_encode(8, p, &vlen);
+		hs_varint_encode(8, p, &vlen);
 		p += vlen;
-		tquic_varint_encode(params->max_idle_timeout, p, &vlen);
+		hs_varint_encode(params->max_idle_timeout, p, &vlen);
 		p += vlen;
 	}
 
 	/* max_udp_payload_size */
 	if (params->max_udp_payload_size > 0) {
-		tquic_varint_encode(QUIC_TP_MAX_UDP_PAYLOAD_SIZE, p, &vlen);
+		hs_varint_encode(QUIC_TP_MAX_UDP_PAYLOAD_SIZE, p, &vlen);
 		p += vlen;
-		tquic_varint_encode(8, p, &vlen);
+		hs_varint_encode(8, p, &vlen);
 		p += vlen;
-		tquic_varint_encode(params->max_udp_payload_size, p, &vlen);
+		hs_varint_encode(params->max_udp_payload_size, p, &vlen);
 		p += vlen;
 	}
 
 	/* initial_max_data */
-	tquic_varint_encode(QUIC_TP_INITIAL_MAX_DATA, p, &vlen);
+	hs_varint_encode(QUIC_TP_INITIAL_MAX_DATA, p, &vlen);
 	p += vlen;
-	tquic_varint_encode(8, p, &vlen);
+	hs_varint_encode(8, p, &vlen);
 	p += vlen;
-	tquic_varint_encode(params->initial_max_data, p, &vlen);
+	hs_varint_encode(params->initial_max_data, p, &vlen);
 	p += vlen;
 
 	/* initial_max_stream_data_bidi_local */
-	tquic_varint_encode(QUIC_TP_INITIAL_MAX_STREAM_DATA_BIDI_LOCAL, p, &vlen);
+	hs_varint_encode(QUIC_TP_INITIAL_MAX_STREAM_DATA_BIDI_LOCAL, p, &vlen);
 	p += vlen;
-	tquic_varint_encode(8, p, &vlen);
+	hs_varint_encode(8, p, &vlen);
 	p += vlen;
-	tquic_varint_encode(params->initial_max_stream_data_bidi_local, p, &vlen);
+	hs_varint_encode(params->initial_max_stream_data_bidi_local, p, &vlen);
 	p += vlen;
 
 	/* initial_max_stream_data_bidi_remote */
-	tquic_varint_encode(QUIC_TP_INITIAL_MAX_STREAM_DATA_BIDI_REMOTE, p, &vlen);
+	hs_varint_encode(QUIC_TP_INITIAL_MAX_STREAM_DATA_BIDI_REMOTE, p, &vlen);
 	p += vlen;
-	tquic_varint_encode(8, p, &vlen);
+	hs_varint_encode(8, p, &vlen);
 	p += vlen;
-	tquic_varint_encode(params->initial_max_stream_data_bidi_remote, p, &vlen);
+	hs_varint_encode(params->initial_max_stream_data_bidi_remote, p, &vlen);
 	p += vlen;
 
 	/* initial_max_stream_data_uni */
-	tquic_varint_encode(QUIC_TP_INITIAL_MAX_STREAM_DATA_UNI, p, &vlen);
+	hs_varint_encode(QUIC_TP_INITIAL_MAX_STREAM_DATA_UNI, p, &vlen);
 	p += vlen;
-	tquic_varint_encode(8, p, &vlen);
+	hs_varint_encode(8, p, &vlen);
 	p += vlen;
-	tquic_varint_encode(params->initial_max_stream_data_uni, p, &vlen);
+	hs_varint_encode(params->initial_max_stream_data_uni, p, &vlen);
 	p += vlen;
 
 	/* initial_max_streams_bidi */
-	tquic_varint_encode(QUIC_TP_INITIAL_MAX_STREAMS_BIDI, p, &vlen);
+	hs_varint_encode(QUIC_TP_INITIAL_MAX_STREAMS_BIDI, p, &vlen);
 	p += vlen;
-	tquic_varint_encode(8, p, &vlen);
+	hs_varint_encode(8, p, &vlen);
 	p += vlen;
-	tquic_varint_encode(params->initial_max_streams_bidi, p, &vlen);
+	hs_varint_encode(params->initial_max_streams_bidi, p, &vlen);
 	p += vlen;
 
 	/* initial_max_streams_uni */
-	tquic_varint_encode(QUIC_TP_INITIAL_MAX_STREAMS_UNI, p, &vlen);
+	hs_varint_encode(QUIC_TP_INITIAL_MAX_STREAMS_UNI, p, &vlen);
 	p += vlen;
-	tquic_varint_encode(8, p, &vlen);
+	hs_varint_encode(8, p, &vlen);
 	p += vlen;
-	tquic_varint_encode(params->initial_max_streams_uni, p, &vlen);
+	hs_varint_encode(params->initial_max_streams_uni, p, &vlen);
 	p += vlen;
 
 	/* ack_delay_exponent */
 	if (params->ack_delay_exponent != 3) {
-		tquic_varint_encode(QUIC_TP_ACK_DELAY_EXPONENT, p, &vlen);
+		hs_varint_encode(QUIC_TP_ACK_DELAY_EXPONENT, p, &vlen);
 		p += vlen;
-		tquic_varint_encode(1, p, &vlen);
+		hs_varint_encode(1, p, &vlen);
 		p += vlen;
 		*p++ = params->ack_delay_exponent;
 	}
 
 	/* max_ack_delay */
 	if (params->max_ack_delay != 25) {
-		tquic_varint_encode(QUIC_TP_MAX_ACK_DELAY, p, &vlen);
+		hs_varint_encode(QUIC_TP_MAX_ACK_DELAY, p, &vlen);
 		p += vlen;
-		tquic_varint_encode(8, p, &vlen);
+		hs_varint_encode(8, p, &vlen);
 		p += vlen;
-		tquic_varint_encode(params->max_ack_delay, p, &vlen);
+		hs_varint_encode(params->max_ack_delay, p, &vlen);
 		p += vlen;
 	}
 
 	/* disable_active_migration */
 	if (params->disable_active_migration) {
-		tquic_varint_encode(QUIC_TP_DISABLE_ACTIVE_MIGRATION, p, &vlen);
+		hs_varint_encode(QUIC_TP_DISABLE_ACTIVE_MIGRATION, p, &vlen);
 		p += vlen;
-		tquic_varint_encode(0, p, &vlen);
+		hs_varint_encode(0, p, &vlen);
 		p += vlen;
 	}
 
 	/* active_connection_id_limit */
-	tquic_varint_encode(QUIC_TP_ACTIVE_CONN_ID_LIMIT, p, &vlen);
+	hs_varint_encode(QUIC_TP_ACTIVE_CONN_ID_LIMIT, p, &vlen);
 	p += vlen;
-	tquic_varint_encode(8, p, &vlen);
+	hs_varint_encode(8, p, &vlen);
 	p += vlen;
-	tquic_varint_encode(params->active_conn_id_limit, p, &vlen);
+	hs_varint_encode(params->active_conn_id_limit, p, &vlen);
 	p += vlen;
 
 	/* initial_source_connection_id */
 	if (params->initial_scid_len > 0) {
-		tquic_varint_encode(QUIC_TP_INITIAL_SCID, p, &vlen);
+		hs_varint_encode(QUIC_TP_INITIAL_SCID, p, &vlen);
 		p += vlen;
-		tquic_varint_encode(params->initial_scid_len, p, &vlen);
+		hs_varint_encode(params->initial_scid_len, p, &vlen);
 		p += vlen;
 		memcpy(p, params->initial_scid, params->initial_scid_len);
 		p += params->initial_scid_len;
@@ -541,9 +541,9 @@ static int tquic_encode_transport_params(struct tquic_transport_params *params,
 	if (is_server) {
 		/* original_destination_connection_id */
 		if (params->original_dcid_len > 0) {
-			tquic_varint_encode(QUIC_TP_ORIGINAL_DCID, p, &vlen);
+			hs_varint_encode(QUIC_TP_ORIGINAL_DCID, p, &vlen);
 			p += vlen;
-			tquic_varint_encode(params->original_dcid_len, p, &vlen);
+			hs_varint_encode(params->original_dcid_len, p, &vlen);
 			p += vlen;
 			memcpy(p, params->original_dcid, params->original_dcid_len);
 			p += params->original_dcid_len;
@@ -551,9 +551,9 @@ static int tquic_encode_transport_params(struct tquic_transport_params *params,
 
 		/* stateless_reset_token */
 		if (params->has_stateless_reset_token) {
-			tquic_varint_encode(QUIC_TP_STATELESS_RESET_TOKEN, p, &vlen);
+			hs_varint_encode(QUIC_TP_STATELESS_RESET_TOKEN, p, &vlen);
 			p += vlen;
-			tquic_varint_encode(16, p, &vlen);
+			hs_varint_encode(16, p, &vlen);
 			p += vlen;
 			memcpy(p, params->stateless_reset_token, 16);
 			p += 16;
@@ -561,9 +561,9 @@ static int tquic_encode_transport_params(struct tquic_transport_params *params,
 
 		/* retry_source_connection_id */
 		if (params->has_retry_scid) {
-			tquic_varint_encode(QUIC_TP_RETRY_SCID, p, &vlen);
+			hs_varint_encode(QUIC_TP_RETRY_SCID, p, &vlen);
 			p += vlen;
-			tquic_varint_encode(params->retry_scid_len, p, &vlen);
+			hs_varint_encode(params->retry_scid_len, p, &vlen);
 			p += vlen;
 			memcpy(p, params->retry_scid, params->retry_scid_len);
 			p += params->retry_scid_len;
@@ -572,19 +572,19 @@ static int tquic_encode_transport_params(struct tquic_transport_params *params,
 
 	/* max_datagram_frame_size (for DATAGRAM extension) */
 	if (params->max_datagram_frame_size > 0) {
-		tquic_varint_encode(QUIC_TP_MAX_DATAGRAM_FRAME_SIZE, p, &vlen);
+		hs_varint_encode(QUIC_TP_MAX_DATAGRAM_FRAME_SIZE, p, &vlen);
 		p += vlen;
-		tquic_varint_encode(8, p, &vlen);
+		hs_varint_encode(8, p, &vlen);
 		p += vlen;
-		tquic_varint_encode(params->max_datagram_frame_size, p, &vlen);
+		hs_varint_encode(params->max_datagram_frame_size, p, &vlen);
 		p += vlen;
 	}
 
 	/* grease_quic_bit (RFC 9287) - zero-length parameter */
 	if (params->grease_quic_bit) {
-		tquic_varint_encode(QUIC_TP_GREASE_QUIC_BIT, p, &vlen);
+		hs_varint_encode(QUIC_TP_GREASE_QUIC_BIT, p, &vlen);
 		p += vlen;
-		tquic_varint_encode(0, p, &vlen);  /* Zero-length value */
+		hs_varint_encode(0, p, &vlen);  /* Zero-length value */
 		p += vlen;
 	}
 
@@ -614,12 +614,12 @@ static int tquic_decode_transport_params(const u8 *buf, u32 buf_len,
 	params->active_conn_id_limit = 2;
 
 	while (p < end) {
-		ret = tquic_varint_decode(p, end - p, &param_id, &vlen);
+		ret = hs_varint_decode(p, end - p, &param_id, &vlen);
 		if (ret < 0)
 			return ret;
 		p += vlen;
 
-		ret = tquic_varint_decode(p, end - p, &param_len, &vlen);
+		ret = hs_varint_decode(p, end - p, &param_len, &vlen);
 		if (ret < 0)
 			return ret;
 		p += vlen;
@@ -636,7 +636,7 @@ static int tquic_decode_transport_params(const u8 *buf, u32 buf_len,
 			break;
 
 		case QUIC_TP_MAX_IDLE_TIMEOUT:
-			ret = tquic_varint_decode(p, param_len, &val, &vlen);
+			ret = hs_varint_decode(p, param_len, &val, &vlen);
 			if (ret < 0)
 				return ret;
 			params->max_idle_timeout = val;
@@ -650,7 +650,7 @@ static int tquic_decode_transport_params(const u8 *buf, u32 buf_len,
 			break;
 
 		case QUIC_TP_MAX_UDP_PAYLOAD_SIZE:
-			ret = tquic_varint_decode(p, param_len, &val, &vlen);
+			ret = hs_varint_decode(p, param_len, &val, &vlen);
 			if (ret < 0)
 				return ret;
 			if (val < 1200)
@@ -659,42 +659,42 @@ static int tquic_decode_transport_params(const u8 *buf, u32 buf_len,
 			break;
 
 		case QUIC_TP_INITIAL_MAX_DATA:
-			ret = tquic_varint_decode(p, param_len, &val, &vlen);
+			ret = hs_varint_decode(p, param_len, &val, &vlen);
 			if (ret < 0)
 				return ret;
 			params->initial_max_data = val;
 			break;
 
 		case QUIC_TP_INITIAL_MAX_STREAM_DATA_BIDI_LOCAL:
-			ret = tquic_varint_decode(p, param_len, &val, &vlen);
+			ret = hs_varint_decode(p, param_len, &val, &vlen);
 			if (ret < 0)
 				return ret;
 			params->initial_max_stream_data_bidi_local = val;
 			break;
 
 		case QUIC_TP_INITIAL_MAX_STREAM_DATA_BIDI_REMOTE:
-			ret = tquic_varint_decode(p, param_len, &val, &vlen);
+			ret = hs_varint_decode(p, param_len, &val, &vlen);
 			if (ret < 0)
 				return ret;
 			params->initial_max_stream_data_bidi_remote = val;
 			break;
 
 		case QUIC_TP_INITIAL_MAX_STREAM_DATA_UNI:
-			ret = tquic_varint_decode(p, param_len, &val, &vlen);
+			ret = hs_varint_decode(p, param_len, &val, &vlen);
 			if (ret < 0)
 				return ret;
 			params->initial_max_stream_data_uni = val;
 			break;
 
 		case QUIC_TP_INITIAL_MAX_STREAMS_BIDI:
-			ret = tquic_varint_decode(p, param_len, &val, &vlen);
+			ret = hs_varint_decode(p, param_len, &val, &vlen);
 			if (ret < 0)
 				return ret;
 			params->initial_max_streams_bidi = val;
 			break;
 
 		case QUIC_TP_INITIAL_MAX_STREAMS_UNI:
-			ret = tquic_varint_decode(p, param_len, &val, &vlen);
+			ret = hs_varint_decode(p, param_len, &val, &vlen);
 			if (ret < 0)
 				return ret;
 			params->initial_max_streams_uni = val;
@@ -709,7 +709,7 @@ static int tquic_decode_transport_params(const u8 *buf, u32 buf_len,
 			break;
 
 		case QUIC_TP_MAX_ACK_DELAY:
-			ret = tquic_varint_decode(p, param_len, &val, &vlen);
+			ret = hs_varint_decode(p, param_len, &val, &vlen);
 			if (ret < 0)
 				return ret;
 			if (val >= 16384)
@@ -722,7 +722,7 @@ static int tquic_decode_transport_params(const u8 *buf, u32 buf_len,
 			break;
 
 		case QUIC_TP_ACTIVE_CONN_ID_LIMIT:
-			ret = tquic_varint_decode(p, param_len, &val, &vlen);
+			ret = hs_varint_decode(p, param_len, &val, &vlen);
 			if (ret < 0)
 				return ret;
 			if (val < 2)
@@ -746,7 +746,7 @@ static int tquic_decode_transport_params(const u8 *buf, u32 buf_len,
 			break;
 
 		case QUIC_TP_MAX_DATAGRAM_FRAME_SIZE:
-			ret = tquic_varint_decode(p, param_len, &val, &vlen);
+			ret = hs_varint_decode(p, param_len, &val, &vlen);
 			if (ret < 0)
 				return ret;
 			params->max_datagram_frame_size = val;
@@ -2215,11 +2215,15 @@ int tquic_hs_process_certificate_verify(struct tquic_handshake *hs,
 		*cp++ = 0x00;
 
 		/* Get transcript hash */
-		hash_len = tquic_hs_get_transcript_hash(hs, transcript_hash,
-							sizeof(transcript_hash));
-		if (hash_len <= 0) {
-			pr_warn("tquic_hs: Failed to get transcript hash\n");
-			return -EINVAL;
+		{
+			u32 hash_len_out;
+			int ret = tquic_hs_transcript_hash(hs, transcript_hash,
+							   &hash_len_out);
+			if (ret < 0) {
+				pr_warn("tquic_hs: Failed to get transcript hash\n");
+				return -EINVAL;
+			}
+			hash_len = hash_len_out;
 		}
 		memcpy(cp, transcript_hash, hash_len);
 		cp += hash_len;
