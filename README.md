@@ -149,7 +149,7 @@ TQUIC is a complete, production-ready kernel module implementing the QUIC protoc
 - **Reliable Reset**: RESET_STREAM_AT (0x24) for guaranteed delivery
 
 ### Observability & Diagnostics
-- **qlog Support**: QUIC Event Logging (draft-ietf-quic-qlog-main-schema-12)
+- **qlog Support**: QUIC Event Logging (RFC 9293)
 - **Kernel Tracepoints**: Connection state, frame events, errors
 - **Path Metrics**: Per-path RTT, bandwidth, loss rate
 - **sock_diag**: `ss` command visibility for QUIC sockets
@@ -248,37 +248,37 @@ Sysctl tunables available at `/proc/sys/net/tquic/`:
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│                         User Space                                   │
+│                         User Space                                  │
 │  ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌──────────────┐           │
 │  │ quicly  │  │  ngtcp2 │  │  msquic │  │ WebTransport │           │
 │  └────┬────┘  └────┬────┘  └────┬────┘  └──────┬───────┘           │
 └───────┼────────────┼────────────┼──────────────┼────────────────────┘
         │            │            │              │
 ┌───────▼────────────▼────────────▼──────────────▼────────────────────┐
-│                      TQUIC Socket Layer                              │
+│                      TQUIC Socket Layer                             │
 │  ┌────────────────────────────────────────────────────────────────┐ │
-│  │                    HTTP/3 + QPACK Layer                         │ │
+│  │                    HTTP/3 + QPACK Layer                        │ │
 │  │  ┌──────────┐ ┌────────┐ ┌─────────────┐ ┌──────────────────┐  │ │
 │  │  │  HTTP/3  │ │  QPACK │ │ WebTransport│ │      MASQUE      │  │ │
 │  │  │  Frames  │ │ Codec  │ │   Sessions  │ │ CONNECT-UDP/IP   │  │ │
 │  │  └──────────┘ └────────┘ └─────────────┘ └──────────────────┘  │ │
 │  └────────────────────────────────────────────────────────────────┘ │
 │  ┌────────────────────────────────────────────────────────────────┐ │
-│  │                   Connection Manager                            │ │
+│  │                   Connection Manager                           │ │
 │  │  ┌────────┐ ┌────────┐ ┌────────┐ ┌────────────┐ ┌──────────┐ │ │
 │  │  │ Crypto │ │ Streams│ │  ACK   │ │ Flow Ctrl  │ │ Datagram │ │ │
 │  │  │  TLS   │ │  Mux   │ │Handler │ │            │ │          │ │ │
 │  │  └────────┘ └────────┘ └────────┘ └────────────┘ └──────────┘ │ │
 │  └────────────────────────────────────────────────────────────────┘ │
 │  ┌────────────────────────────────────────────────────────────────┐ │
-│  │                Path Manager (MPQUIC)                            │ │
+│  │                Path Manager (MPQUIC)                           │ │
 │  │  ┌─────────┐ ┌─────────┐ ┌──────────┐ ┌───────────┐ ┌───────┐ │ │
 │  │  │Scheduler│ │  Cong   │ │   Path   │ │ Migration │ │  FEC  │ │ │
 │  │  │ (6 alg) │ │ Control │ │ Validate │ │           │ │       │ │ │
 │  │  └─────────┘ └─────────┘ └──────────┘ └───────────┘ └───────┘ │ │
 │  └────────────────────────────────────────────────────────────────┘ │
 │  ┌────────────────────────────────────────────────────────────────┐ │
-│  │                    Performance Layer                            │ │
+│  │                    Performance Layer                           │ │
 │  │  ┌────────┐ ┌────────┐ ┌──────────┐ ┌───────────┐ ┌─────────┐ │ │
 │  │  │GRO/GSO │ │Zero-Cp │ │  AF_XDP  │ │  io_uring │ │SmartNIC │ │ │
 │  │  └────────┘ └────────┘ └──────────┘ └───────────┘ └─────────┘ │ │
@@ -286,12 +286,12 @@ Sysctl tunables available at `/proc/sys/net/tquic/`:
 └─────────────────────────────────────────────────────────────────────┘
                               │
 ┌─────────────────────────────▼───────────────────────────────────────┐
-│                         UDP Layer                                    │
-│                    (Netfilter hooks here)                            │
+│                         UDP Layer                                   │
+│                    (Netfilter hooks here)                           │
 └─────────────────────────────────────────────────────────────────────┘
                               │
 ┌─────────────────────────────▼───────────────────────────────────────┐
-│                       IP Layer (v4/v6)                               │
+│                       IP Layer (v4/v6)                              │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -350,11 +350,11 @@ Test cases: handshake, 0-RTT, migration, multipath, failover
 ### Drafts Implemented
 | Draft | Description |
 |-------|-------------|
-| draft-ietf-quic-multipath-17 | Multipath Extension for QUIC |
-| draft-ietf-quic-load-balancers-21 | QUIC-LB: Generating Routable QUIC Connection IDs |
-| draft-ietf-webtrans-http3-14 | WebTransport over HTTP/3 |
-| draft-ietf-quic-reliable-stream-reset-05 | Reliable QUIC Stream Resets |
-| draft-smith-quic-receive-ts-03 | QUIC Extension for Reporting Packet Receive Timestamps |
+| draft-ietf-quic-multipath-18 | Multipath Extension for QUIC |
+| draft-ietf-quic-load-balancers-22 | QUIC-LB: Generating Routable QUIC Connection IDs |
+| draft-ietf-webtrans-http3-15 | WebTransport over HTTP/3 |
+| draft-ietf-quic-reliable-stream-reset-06 | Reliable QUIC Stream Resets |
+| draft-smith-quic-receive-ts-04 | QUIC Extension for Reporting Packet Receive Timestamps |
 
 ## Use Cases
 
