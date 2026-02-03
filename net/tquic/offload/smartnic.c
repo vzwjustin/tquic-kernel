@@ -74,13 +74,20 @@ MODULE_PARM_DESC(offload_enabled, "Enable SmartNIC QUIC offload");
  * =============================================================================
  */
 
+/*
+ * Error value for packet number extraction.
+ * QUIC packet numbers are 62-bit, so U64_MAX is never valid.
+ */
+#define TQUIC_PN_INVALID	U64_MAX
+
 /**
  * tquic_skb_get_packet_number - Extract packet number from QUIC header
  * @skb: Socket buffer containing QUIC packet
  * @dcid_len: Length of Destination Connection ID (from connection state)
  *
  * Parses the QUIC short header to extract the packet number.
- * Returns 0 if extraction fails (caller should use fallback).
+ * Returns TQUIC_PN_INVALID if extraction fails (caller should use fallback).
+ * Note: 0 is a valid packet number in QUIC, so we use U64_MAX as error.
  */
 static u64 tquic_skb_get_packet_number(struct sk_buff *skb, u8 dcid_len)
 {
@@ -91,7 +98,7 @@ static u64 tquic_skb_get_packet_number(struct sk_buff *skb, u8 dcid_len)
 	int offset;
 
 	if (!skb || skb->len < 2)
-		return 0;
+		return TQUIC_PN_INVALID;
 
 	data = skb->data;
 	first_byte = data[0];
@@ -99,7 +106,7 @@ static u64 tquic_skb_get_packet_number(struct sk_buff *skb, u8 dcid_len)
 	/* Check if short header (bit 7 = 0 for short header) */
 	if (first_byte & 0x80) {
 		/* Long header - packet number position varies */
-		return 0;  /* Let caller use fallback */
+		return TQUIC_PN_INVALID;
 	}
 
 	/* Short header: PN length encoded in bits 0-1 */
@@ -109,7 +116,7 @@ static u64 tquic_skb_get_packet_number(struct sk_buff *skb, u8 dcid_len)
 	offset = 1 + dcid_len;  /* 1 byte header + DCID */
 
 	if (skb->len < offset + pn_len)
-		return 0;
+		return TQUIC_PN_INVALID;
 
 	/* Extract packet number (big-endian) */
 	switch (pn_len) {
@@ -119,6 +126,11 @@ static u64 tquic_skb_get_packet_number(struct sk_buff *skb, u8 dcid_len)
 	case 2:
 		pn = (data[offset] << 8) | data[offset + 1];
 		break;
+	case 3:
+		pn = ((u32)data[offset] << 16) |
+		     ((u32)data[offset + 1] << 8) |
+		     data[offset + 2];
+		break;
 	case 4:
 		pn = ((u32)data[offset] << 24) |
 		     ((u32)data[offset + 1] << 16) |
@@ -126,7 +138,7 @@ static u64 tquic_skb_get_packet_number(struct sk_buff *skb, u8 dcid_len)
 		     data[offset + 3];
 		break;
 	default:
-		return 0;
+		return TQUIC_PN_INVALID;
 	}
 
 	return pn;
@@ -241,10 +253,13 @@ void tquic_nic_unregister(struct tquic_nic_device *dev)
 	spin_unlock(&tquic_nic_lock);
 
 	/* Cleanup device */
-	if (dev->ops->cleanup)
+	if (dev->ops && dev->ops->cleanup)
 		dev->ops->cleanup(dev);
 
-	NIC_INFO("unregistered device %s\n", dev->netdev->name);
+	if (dev->netdev)
+		NIC_INFO("unregistered device %s\n", dev->netdev->name);
+	else
+		NIC_INFO("unregistered device (netdev NULL)\n");
 
 	kfree(dev);
 }
@@ -537,7 +552,7 @@ int tquic_offload_rx(struct tquic_nic_device *dev, struct sk_buff *skb,
 
 	/* Extract packet number from QUIC header using connection's DCID length */
 	pn = tquic_skb_get_packet_number(skb, conn->dcid_len);
-	if (pn == 0) {
+	if (pn == TQUIC_PN_INVALID) {
 		/* Fallback if we can't extract PN from header */
 		pn = conn->rx_pn_next;
 	}
@@ -635,7 +650,7 @@ int tquic_offload_batch_rx(struct tquic_nic_device *dev,
 	/* Extract packet numbers from QUIC headers using connection's DCID length */
 	for (i = 0; i < count; i++) {
 		pns[i] = tquic_skb_get_packet_number(skbs[i], conn->dcid_len);
-		if (pns[i] == 0)
+		if (pns[i] == TQUIC_PN_INVALID)
 			pns[i] = conn->rx_pn_next + i;  /* Fallback */
 	}
 

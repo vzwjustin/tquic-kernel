@@ -41,6 +41,7 @@ struct tquic_connection;
 #define TQUIC_FAILOVER_TIMEOUT_MULT	3	/* 3x SRTT */
 #define TQUIC_FAILOVER_MIN_TIMEOUT_MS	100	/* Minimum 100ms */
 #define TQUIC_FAILOVER_MAX_TIMEOUT_MS	15000	/* Maximum 15 seconds */
+#define TQUIC_FAILOVER_DEFAULT_SRTT_US	100000	/* Default 100ms SRTT */
 
 /*
  * Retransmit queue limits

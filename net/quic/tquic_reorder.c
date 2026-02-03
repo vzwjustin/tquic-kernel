@@ -486,9 +486,10 @@ void tquic_reorder_update_rtt(struct tquic_reorder_buffer *rb,
 	else
 		rb->rtt_spread = 0;
 
-	/* Adaptive gap timeout: 2 * rtt_spread + 100ms margin */
+	/* Adaptive gap timeout: 2 * rtt_spread + margin */
 	if (rb->rtt_spread > 0) {
-		new_timeout = (rb->rtt_spread / 1000) * 2 + 100;
+		new_timeout = (rb->rtt_spread / 1000) * 2 +
+			      TQUIC_REORDER_GAP_TIMEOUT_MARGIN_MS;
 		new_timeout = clamp(new_timeout,
 				    (u32)TQUIC_REORDER_MIN_TIMEOUT_MS,
 				    (u32)TQUIC_REORDER_MAX_TIMEOUT_MS);

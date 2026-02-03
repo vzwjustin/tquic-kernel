@@ -18,6 +18,7 @@
 #define QUIC_TIMER_MAX_BACKOFF		6	/* Maximum PTO backoff */
 #define QUIC_TIMER_IDLE_TIMEOUT_MS	30000	/* Default idle timeout */
 #define QUIC_TIMER_ACK_DELAY_MS		25	/* Max ACK delay */
+#define QUIC_DEFAULT_PTO_US		333000	/* Default PTO: 333ms per RFC 9002 */
 
 /* Timer state tracking */
 struct quic_timer_state {
@@ -388,7 +389,7 @@ static ktime_t quic_timer_calculate_loss_deadline(struct quic_connection *conn)
 	if (path)
 		pto = quic_path_pto(path);
 	else
-		pto = 333000;  /* Default PTO in microseconds */
+		pto = QUIC_DEFAULT_PTO_US;
 
 	/* Apply backoff */
 	pto = pto << min(conn->pto_count, (u32)QUIC_TIMER_MAX_BACKOFF);
@@ -475,7 +476,7 @@ static ktime_t quic_timer_calculate_idle_deadline(struct quic_connection *conn)
 	if (conn->active_path)
 		pto = quic_path_pto(conn->active_path);
 	else
-		pto = 333000;  /* Default PTO */
+		pto = QUIC_DEFAULT_PTO_US;
 
 	pto = (pto + 999) / 1000;  /* Convert to milliseconds */
 	idle_timeout = max(idle_timeout, 3 * pto);

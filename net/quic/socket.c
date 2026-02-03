@@ -65,6 +65,13 @@
 struct quic_connection;
 struct quic_stream;
 
+/* External function declarations */
+extern int quic_conn_close(struct quic_connection *conn, u64 error_code,
+			   const char *reason, u32 reason_len, bool app_error);
+
+/* QUIC error codes for CONNECTION_CLOSE (RFC 9000 Section 20) */
+#define QUIC_ERROR_NO_ERROR		0x00
+
 /* Stream entry for stream table */
 struct quic_stream_entry {
 	struct hlist_node	node;
@@ -1925,10 +1932,24 @@ static int quic_get_port(struct sock *sk, unsigned short snum)
 
 static void quic_shutdown(struct sock *sk, int how)
 {
+	struct quic_sock *qsk = quic_sk(sk);
+
 	pr_debug("Shutdown QUIC socket %p, how=%d\n", sk, how);
 
-	if (how & SEND_SHUTDOWN)
+	/*
+	 * Per QUIC semantics, shutdown should trigger CONNECTION_CLOSE.
+	 * SEND_SHUTDOWN: We stop sending and initiate connection close.
+	 * RCV_SHUTDOWN: We stop processing received data.
+	 */
+	if (how & SEND_SHUTDOWN) {
 		sk->sk_shutdown |= SEND_SHUTDOWN;
+
+		/* Initiate QUIC connection close if we have a connection */
+		if (qsk->conn) {
+			quic_conn_close(qsk->conn, QUIC_ERROR_NO_ERROR,
+					"socket shutdown", 15, false);
+		}
+	}
 
 	if (how & RCV_SHUTDOWN)
 		sk->sk_shutdown |= RCV_SHUTDOWN;

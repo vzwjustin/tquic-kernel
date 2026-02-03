@@ -180,7 +180,7 @@ struct tquic_failover_ctx *tquic_failover_init(struct tquic_bonding_ctx *bonding
 		struct tquic_path_timeout *pt = &fc->path_timeouts[i];
 
 		pt->last_ack_time = tquic_get_time_us();
-		pt->srtt_us = 100000; /* Default 100ms */
+		pt->srtt_us = TQUIC_FAILOVER_DEFAULT_SRTT_US;
 		pt->timeout_ms = TQUIC_FAILOVER_MIN_TIMEOUT_MS;
 		pt->timeout_armed = false;
 		INIT_DELAYED_WORK(&pt->timeout_work, tquic_failover_timeout_work);

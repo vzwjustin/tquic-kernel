@@ -30,6 +30,7 @@
 
 #include "tquic_bonding.h"
 #include "tquic_failover.h"
+#include "tquic_reorder.h"
 
 /*
  * State name strings for debugging/logging
@@ -202,11 +203,12 @@ void tquic_bonding_update_rtt_spread(struct tquic_bonding_ctx *bc,
 	rtt_spread_us = max_rtt_us - min_rtt_us;
 
 	/*
-	 * Gap timeout formula: 2 * rtt_spread + 100ms margin
+	 * Gap timeout formula: 2 * rtt_spread + margin
 	 * This handles the worst case where slow path packet arrives
 	 * after fast path has already delivered many packets.
 	 */
-	new_timeout_ms = (rtt_spread_us / 1000) * 2 + 100;
+	new_timeout_ms = (rtt_spread_us / 1000) * 2 +
+			 TQUIC_REORDER_GAP_TIMEOUT_MARGIN_MS;
 
 	/* Update reorder buffer */
 	tquic_reorder_update_rtt(bc->reorder, min_rtt_us, true);

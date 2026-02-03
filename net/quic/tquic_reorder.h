@@ -27,10 +27,11 @@
 #define TQUIC_REORDER_DEFAULT_BUFFER	(256 * 1024)	/* 256KB default */
 #define TQUIC_REORDER_MAX_BUFFER	(4 * 1024 * 1024) /* 4MB max */
 
-/* Default gap timeout: 2 * max_rtt_spread + 100ms margin */
+/* Default gap timeout: 2 * max_rtt_spread + margin */
 #define TQUIC_REORDER_DEFAULT_TIMEOUT_MS	1300	/* For 600ms spread */
 #define TQUIC_REORDER_MIN_TIMEOUT_MS		50
 #define TQUIC_REORDER_MAX_TIMEOUT_MS		5000
+#define TQUIC_REORDER_GAP_TIMEOUT_MARGIN_MS	100	/* Safety margin */
 
 /*
  * SKB control block for reorder buffer sequence tracking

@@ -98,6 +98,28 @@ static const char *tquic_wan_type_names[] = {
 #define TQUIC_PATH_MTU_MIN		1200	/* QUIC minimum MTU */
 
 /*
+ * Path quality scoring constants
+ * Total score is 0-1000, higher is better
+ */
+#define TQUIC_PATH_SCORE_MAX		1000	/* Maximum path score */
+#define TQUIC_PATH_SCORE_RTT_MAX	400	/* Max points for RTT */
+#define TQUIC_PATH_SCORE_LOSS_MAX	400	/* Max points for loss rate */
+#define TQUIC_PATH_SCORE_BW_MAX		200	/* Max points for bandwidth */
+
+/* RTT thresholds for scoring (microseconds) */
+#define TQUIC_PATH_RTT_IDEAL		20000	/* 20ms - full points */
+#define TQUIC_PATH_RTT_POOR		500000	/* 500ms - zero points */
+
+/* Bandwidth thresholds for scoring (bytes/sec) */
+#define TQUIC_PATH_BW_EXCELLENT		100000000	/* 100 MB/s */
+#define TQUIC_PATH_BW_GOOD		10000000	/* 10 MB/s */
+#define TQUIC_PATH_BW_FAIR		1000000		/* 1 MB/s */
+#define TQUIC_PATH_BW_POOR		100000		/* 100 KB/s */
+
+/* Loss rate threshold (permille - parts per thousand) */
+#define TQUIC_PATH_LOSS_THRESHOLD	100	/* 10% loss = zero points */
+
+/*
  * Congestion control state per path
  */
 struct tquic_path_cc {
@@ -594,37 +616,39 @@ EXPORT_SYMBOL_GPL(tquic_path_update_loss_rate);
 u32 tquic_path_get_score(struct tquic_path *path)
 {
 	struct tquic_path_metrics *m = &path->metrics;
-	u32 score = 1000;
+	u32 score = TQUIC_PATH_SCORE_MAX;
 	u32 rtt_score, loss_score, bw_score;
+	u32 rtt_range = TQUIC_PATH_RTT_POOR - TQUIC_PATH_RTT_IDEAL;
 
-	/* RTT component (max 400 points) */
-	/* Ideal RTT < 20ms gets full points, degrades linearly to 500ms */
-	if (m->srtt < 20000)
-		rtt_score = 400;
-	else if (m->srtt > 500000)
+	/* RTT component (max TQUIC_PATH_SCORE_RTT_MAX points) */
+	if (m->srtt < TQUIC_PATH_RTT_IDEAL)
+		rtt_score = TQUIC_PATH_SCORE_RTT_MAX;
+	else if (m->srtt > TQUIC_PATH_RTT_POOR)
 		rtt_score = 0;
 	else
-		rtt_score = 400 - (m->srtt - 20000) * 400 / 480000;
+		rtt_score = TQUIC_PATH_SCORE_RTT_MAX -
+			    (m->srtt - TQUIC_PATH_RTT_IDEAL) *
+			    TQUIC_PATH_SCORE_RTT_MAX / rtt_range;
 
-	/* Loss rate component (max 400 points) */
-	/* 0% loss gets full points, >10% loss gets 0 */
+	/* Loss rate component (max TQUIC_PATH_SCORE_LOSS_MAX points) */
 	if (m->loss_rate == 0)
-		loss_score = 400;
-	else if (m->loss_rate >= 100)
+		loss_score = TQUIC_PATH_SCORE_LOSS_MAX;
+	else if (m->loss_rate >= TQUIC_PATH_LOSS_THRESHOLD)
 		loss_score = 0;
 	else
-		loss_score = 400 - m->loss_rate * 4;
+		loss_score = TQUIC_PATH_SCORE_LOSS_MAX -
+			     m->loss_rate * TQUIC_PATH_SCORE_LOSS_MAX /
+			     TQUIC_PATH_LOSS_THRESHOLD;
 
-	/* Bandwidth component (max 200 points) */
-	/* Scale based on estimated bandwidth */
-	if (m->bandwidth >= 100000000)  /* 100 MB/s */
-		bw_score = 200;
-	else if (m->bandwidth >= 10000000)  /* 10 MB/s */
-		bw_score = 150;
-	else if (m->bandwidth >= 1000000)  /* 1 MB/s */
-		bw_score = 100;
-	else if (m->bandwidth >= 100000)  /* 100 KB/s */
-		bw_score = 50;
+	/* Bandwidth component (max TQUIC_PATH_SCORE_BW_MAX points) */
+	if (m->bandwidth >= TQUIC_PATH_BW_EXCELLENT)
+		bw_score = TQUIC_PATH_SCORE_BW_MAX;
+	else if (m->bandwidth >= TQUIC_PATH_BW_GOOD)
+		bw_score = TQUIC_PATH_SCORE_BW_MAX * 3 / 4;
+	else if (m->bandwidth >= TQUIC_PATH_BW_FAIR)
+		bw_score = TQUIC_PATH_SCORE_BW_MAX / 2;
+	else if (m->bandwidth >= TQUIC_PATH_BW_POOR)
+		bw_score = TQUIC_PATH_SCORE_BW_MAX / 4;
 	else
 		bw_score = 0;
 
