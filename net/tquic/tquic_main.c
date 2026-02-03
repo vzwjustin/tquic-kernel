@@ -32,6 +32,7 @@
 #include "napi.h"
 #include "tquic_ack_frequency.h"
 #include "tquic_preferred_addr.h"
+#include "rate_limit.h"
 #include "tquic_ratelimit.h"
 #include "tquic_retry.h"
 #include "tquic_stateless_reset.h"
@@ -793,6 +794,11 @@ int __init tquic_init(void)
 		goto err_offload;
 
 	/* Initialize rate limiting for DDoS protection */
+	err = tquic_rate_limit_module_init();
+	if (err)
+		goto err_rate_limit;
+
+	/* Initialize advanced rate limiting with cookies */
 	err = tquic_ratelimit_module_init();
 	if (err)
 		goto err_ratelimit;
@@ -804,6 +810,8 @@ int __init tquic_init(void)
 	return 0;
 
 err_ratelimit:
+	tquic_rate_limit_module_exit();
+err_rate_limit:
 	tquic_offload_exit();
 err_offload:
 	tquic_diag_exit();
@@ -870,6 +878,7 @@ void __exit tquic_exit(void)
 	pr_info("tquic: shutting down TQUIC WAN bonding subsystem\n");
 
 	tquic_ratelimit_module_exit();
+	tquic_rate_limit_module_exit();
 	tquic_offload_exit();
 	tquic_diag_exit();
 	tquic_proto_exit();

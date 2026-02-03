@@ -35,6 +35,7 @@ tquic-y := \
 	tquic_qos.o \
 	tquic_tunnel.o \
 	tquic_ratelimit.o \
+	rate_limit.o \
 	grease.o \
 	tquic_ack_frequency.o \
 	security_hardening.o \
