@@ -47,11 +47,14 @@
  * Version 0 is reserved for Version Negotiation and MUST NOT appear in
  * either Chosen Version or Available Versions.
  */
+#ifndef TQUIC_VERSION_INFO_DEFINED
+#define TQUIC_VERSION_INFO_DEFINED
 struct tquic_version_info {
 	u32 chosen_version;
 	u32 available_versions[TQUIC_MAX_AVAILABLE_VERSIONS];
 	size_t num_versions;
 };
+#endif /* TQUIC_VERSION_INFO_DEFINED */
 
 /**
  * struct tquic_preferred_address - Preferred address transport parameter
