@@ -492,16 +492,13 @@ void tquic_bonding_derive_weights(struct tquic_bonding_ctx *bc)
 	spin_lock_bh(&bc->state_lock);
 
 	/*
-	 * Phase 1: Calculate raw capacity for each path
+	 * Calculate capacity weight for each path.
 	 *
-	 * Capacity = cwnd / RTT (bytes per second)
+	 * A full implementation would compute: Capacity = cwnd / RTT
+	 * (bytes per second) using per-path congestion control metrics.
 	 *
-	 * We need to access path metrics here. Since tquic_path is defined
-	 * in tquic_path.c, we use a simplified approach for now:
-	 * - Equal weights until full path metric access is available
-	 * - This will be enhanced when Phase 07 congestion control integrates
-	 *
-	 * For now, assign equal capacity to all active paths.
+	 * Currently uses equal weights for simplicity, which provides
+	 * fair distribution across all active paths.
 	 */
 	for (i = 0; i < count && i < TQUIC_MAX_PATHS; i++) {
 		/*

@@ -9,7 +9,7 @@
  * Features:
  * - Capacity-proportional path selection (cwnd/RTT)
  * - 5% minimum weight floor to prevent path starvation
- * - Integration with Phase 5 bonding capacity weights
+ * - Integration with bonding capacity weights from tquic_bonding
  * - Primary + backup path for failover
  *
  * Copyright (c) 2026 Linux Foundation

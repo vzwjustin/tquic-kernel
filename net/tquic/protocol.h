@@ -586,8 +586,8 @@ void __exit tquic_cid_table_exit(void);
  * CONNECTION MIGRATION
  * =============================================================================
  *
- * Migration API surface for Phase 2.
- * Full implementation in Phase 4 (Path Manager).
+ * Connection migration API per RFC 9000 Section 9.
+ * Implementation in tquic_migration.c.
  */
 
 /* Migration flag for tquic_sock.flags */
@@ -604,8 +604,7 @@ int tquic_migration_get_status(struct tquic_connection *conn,
 			       struct tquic_migrate_info *info);
 void tquic_migration_cleanup(struct tquic_connection *conn);
 
-/* Path management function stubs (tquic_migration.c)
- * Full implementation in Phase 4 (Path Manager) */
+/* Path management functions (tquic_migration.c) */
 struct tquic_path *tquic_path_find_by_addr(struct tquic_connection *conn,
 					   const struct sockaddr_storage *addr);
 struct tquic_path *tquic_path_create(struct tquic_connection *conn,
