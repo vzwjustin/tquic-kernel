@@ -331,7 +331,7 @@ static int tquic_tunnel_create_tcp_socket(struct tquic_tunnel *tunnel,
 			if (capable(CAP_NET_ADMIN)) {
 				pr_err("tquic: IP_TRANSPARENT failed despite CAP_NET_ADMIN: %d\n", err);
 				sock_release(sock);
-				return ERR_PTR(err);
+				return err;
 			}
 			pr_info("tquic: IP_TRANSPARENT requires CAP_NET_ADMIN, using normal mode\n");
 			tunnel->is_tproxy = false;
