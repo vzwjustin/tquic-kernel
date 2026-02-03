@@ -198,6 +198,8 @@ static int tquic_spin_bit_disable_rate = 8;  /* 1 in 8 = 12.5% disable */
  */
 static int tquic_nat_keepalive_enabled = 1;		/* Enabled by default */
 static int tquic_nat_keepalive_interval = 25000;	/* 25 seconds default */
+static int tquic_nat_keepalive_min_interval = 5000;	/* 5 seconds minimum */
+static int tquic_nat_keepalive_max_interval = 120000;	/* 2 minutes maximum */
 static int tquic_nat_keepalive_adaptive = 1;		/* Adaptive mode on */
 
 /* Forward declarations for scheduler API */
@@ -1505,10 +1507,6 @@ static struct ctl_table tquic_sysctl_table[] = {
 	},
 	{ }
 };
-
-/* NAT keepalive sysctl min/max values */
-static int tquic_nat_keepalive_min_interval = 5000;   /* 5 seconds */
-static int tquic_nat_keepalive_max_interval = 120000; /* 2 minutes */
 
 static struct ctl_table_header *tquic_sysctl_header;
 
