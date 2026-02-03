@@ -955,7 +955,7 @@ static int tquic_lowlat_select_path(struct tquic_connection *conn,
 	}
 
 	/* If still no path, try backup */
-	if (!selected && ld->backup_path_id != 0xFF) {
+	if (!selected && ld->backup_path_id != TQUIC_INVALID_PATH_ID) {
 		backup = tquic_find_path(conn, ld->backup_path_id);
 		if (backup && tquic_path_can_send(backup))
 			selected = backup;
@@ -1041,9 +1041,9 @@ static void tquic_lowlat_path_added(struct tquic_connection *conn,
 		return;
 
 	/* If no primary yet, use this path */
-	if (ld->primary_path_id == 0xFF)
+	if (ld->primary_path_id == TQUIC_INVALID_PATH_ID)
 		ld->primary_path_id = path->path_id;
-	else if (ld->backup_path_id == 0xFF)
+	else if (ld->backup_path_id == TQUIC_INVALID_PATH_ID)
 		ld->backup_path_id = path->path_id;
 }
 
@@ -1057,10 +1057,10 @@ static void tquic_lowlat_path_removed(struct tquic_connection *conn,
 
 	if (ld->primary_path_id == path->path_id) {
 		ld->primary_path_id = ld->backup_path_id;
-		ld->backup_path_id = 0xFF;
+		ld->backup_path_id = TQUIC_INVALID_PATH_ID;
 		ld->primary_failed = false;
 	} else if (ld->backup_path_id == path->path_id) {
-		ld->backup_path_id = 0xFF;
+		ld->backup_path_id = TQUIC_INVALID_PATH_ID;
 	}
 }
 

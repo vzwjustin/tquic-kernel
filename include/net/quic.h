@@ -51,6 +51,35 @@ struct quic_path;
 #define QUIC_TIMER_PATH_PROBE	4
 #define QUIC_TIMER_MAX		5
 
+/*
+ * QUIC Variable-Length Integer encoding (RFC 9000 Section 16)
+ * The two most significant bits encode the length:
+ * 00 = 1 byte  (6-bit value, 0-63)
+ * 01 = 2 bytes (14-bit value, 0-16383)
+ * 10 = 4 bytes (30-bit value, 0-1073741823)
+ * 11 = 8 bytes (62-bit value, 0-4611686018427387903)
+ */
+#define QUIC_VARINT_1BYTE_PREFIX	0x00
+#define QUIC_VARINT_2BYTE_PREFIX	0x40
+#define QUIC_VARINT_4BYTE_PREFIX	0x80
+#define QUIC_VARINT_8BYTE_PREFIX	0xc0
+#define QUIC_VARINT_PREFIX_MASK		0xc0
+
+/* QUIC Variable-Length Integer maximum values */
+#define QUIC_VARINT_1BYTE_MAX		63ULL
+#define QUIC_VARINT_2BYTE_MAX		16383ULL
+#define QUIC_VARINT_4BYTE_MAX		1073741823ULL
+#define QUIC_VARINT_8BYTE_MAX		4611686018427387903ULL
+
+/* QUIC packet header constants */
+#define QUIC_HEADER_FORM_BIT		0x80	/* Long header if set */
+#define QUIC_FIXED_BIT			0x40	/* Must be 1 */
+
+/* QUIC stream frame flags (RFC 9000 Section 19.8) */
+#define QUIC_STREAM_FRAME_FIN_BIT	0x01
+#define QUIC_STREAM_FRAME_LEN_BIT	0x02
+#define QUIC_STREAM_FRAME_OFF_BIT	0x04
+
 /* ACK range structure */
 struct quic_ack_range {
 	u64	gap;

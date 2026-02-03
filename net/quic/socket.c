@@ -226,25 +226,21 @@ static inline struct ipv6_pinfo *quic_inet6_sk(const struct sock *sk)
  */
 static inline int quic_encode_varint(u8 *p, u64 value)
 {
-	if (value < 64) {
-		/* 1-byte encoding: 00xxxxxx */
+	if (value <= QUIC_VARINT_1BYTE_MAX) {
 		*p = (u8)value;
 		return 1;
-	} else if (value < 16384) {
-		/* 2-byte encoding: 01xxxxxx xxxxxxxx */
-		*p++ = 0x40 | (u8)(value >> 8);
+	} else if (value <= QUIC_VARINT_2BYTE_MAX) {
+		*p++ = QUIC_VARINT_2BYTE_PREFIX | (u8)(value >> 8);
 		*p = (u8)(value & 0xff);
 		return 2;
-	} else if (value < 1073741824) {
-		/* 4-byte encoding: 10xxxxxx xxxxxxxx xxxxxxxx xxxxxxxx */
-		*p++ = 0x80 | (u8)(value >> 24);
+	} else if (value <= QUIC_VARINT_4BYTE_MAX) {
+		*p++ = QUIC_VARINT_4BYTE_PREFIX | (u8)(value >> 24);
 		*p++ = (u8)(value >> 16);
 		*p++ = (u8)(value >> 8);
 		*p = (u8)(value & 0xff);
 		return 4;
 	} else {
-		/* 8-byte encoding: 11xxxxxx xxxxxxxx ... (8 bytes total) */
-		*p++ = 0xc0 | (u8)(value >> 56);
+		*p++ = QUIC_VARINT_8BYTE_PREFIX | (u8)(value >> 56);
 		*p++ = (u8)(value >> 48);
 		*p++ = (u8)(value >> 40);
 		*p++ = (u8)(value >> 32);

@@ -297,9 +297,9 @@ struct sk_buff *quic_packet_build(struct quic_connection *conn,
 			}
 		}
 
-		/* Length field placeholder (2 bytes for now) */
+		/* Length field - 2-byte varint placeholder, updated after payload */
 		p = skb_put(skb, 2);
-		p[0] = 0x40;  /* Will be updated later */
+		p[0] = QUIC_VARINT_2BYTE_PREFIX;
 		p[1] = 0x00;
 
 		pn_offset = skb->len;
@@ -800,17 +800,19 @@ int quic_frame_process_one(struct quic_connection *conn, const u8 *data,
 	case QUIC_FRAME_PATH_CHALLENGE:
 		if (len < offset + 8)
 			return -EINVAL;
-		/* Echo back as PATH_RESPONSE */
+		/* Echo back as PATH_RESPONSE per RFC 9000 Section 8.2.2 */
 		{
 			struct sk_buff *resp = alloc_skb(16, GFP_ATOMIC);
 			u8 *p;
 
-			if (resp) {
-				p = skb_put(resp, 9);
-				p[0] = QUIC_FRAME_PATH_RESPONSE;
-				memcpy(p + 1, data + offset, 8);
-				skb_queue_tail(&conn->pending_frames, resp);
+			if (!resp) {
+				net_warn_ratelimited("QUIC: failed to allocate PATH_RESPONSE\n");
+				return -ENOMEM;
 			}
+			p = skb_put(resp, 9);
+			p[0] = QUIC_FRAME_PATH_RESPONSE;
+			memcpy(p + 1, data + offset, 8);
+			skb_queue_tail(&conn->pending_frames, resp);
 		}
 		return offset + 8;
 
@@ -869,11 +871,13 @@ static int quic_frame_process_crypto(struct quic_connection *conn,
 	/* Pass crypto data to TLS layer (via userspace or kernel TLS) */
 	{
 		struct sk_buff *crypto_skb = alloc_skb(crypto_len + 16, GFP_ATOMIC);
-		if (crypto_skb) {
-			u8 *p = skb_put(crypto_skb, crypto_len);
-			memcpy(p, data + offset, crypto_len);
-			skb_queue_tail(&conn->crypto_buffer[level], crypto_skb);
+
+		if (!crypto_skb) {
+			net_warn_ratelimited("QUIC: failed to allocate crypto buffer\n");
+			return -ENOMEM;
 		}
+		memcpy(skb_put(crypto_skb, crypto_len), data + offset, crypto_len);
+		skb_queue_tail(&conn->crypto_buffer[level], crypto_skb);
 	}
 
 	offset += crypto_len;
@@ -1102,9 +1106,14 @@ static int quic_frame_process_connection_close(struct quic_connection *conn,
 	conn->close_received = 1;
 
 	if (reason_len > 0) {
-		kfree(conn->reason_phrase);
-		conn->reason_phrase = kmemdup(data + offset, reason_len, GFP_ATOMIC);
-		conn->reason_len = reason_len;
+		char *phrase = kmemdup(data + offset, reason_len, GFP_ATOMIC);
+
+		if (phrase) {
+			kfree(conn->reason_phrase);
+			conn->reason_phrase = phrase;
+			conn->reason_len = reason_len;
+		}
+		/* On allocation failure, keep existing reason or none */
 	}
 
 	offset += reason_len;

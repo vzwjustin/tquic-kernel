@@ -218,7 +218,7 @@ static void minrtt_path_removed(struct tquic_connection *conn,
 	struct minrtt_sched_data *sd = conn->sched_priv;
 
 	if (sd && sd->current_path_id == path->path_id) {
-		sd->current_path_id = 0xFF;
+		sd->current_path_id = TQUIC_INVALID_PATH_ID;
 		sd->current_rtt_us = U64_MAX;
 		pr_debug("minrtt: current path %u removed, will reselect\n",
 			 path->path_id);

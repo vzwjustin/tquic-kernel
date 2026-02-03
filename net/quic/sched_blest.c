@@ -416,7 +416,7 @@ static void blest_path_removed(struct tquic_connection *conn,
 
 	/* If current path was removed, invalidate selection */
 	if (sd->current_path_id == path->path_id)
-		sd->current_path_id = 0xFF;
+		sd->current_path_id = TQUIC_INVALID_PATH_ID;
 }
 
 /**

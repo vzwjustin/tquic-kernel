@@ -47,7 +47,7 @@ static inline struct quic_recv_chunk *quic_recv_chunk_alloc(u32 len, gfp_t gfp)
 static inline void quic_recv_chunk_free(struct quic_recv_chunk *chunk)
 {
 	if (chunk->len <= QUIC_CHUNK_SMALL_MAX)
-		quic_recv_chunk_free(chunk);
+		kmem_cache_free(quic_recv_chunk_cache, chunk);
 	else
 		kfree(chunk);
 }
@@ -633,32 +633,32 @@ int quic_stream_handle_stop_sending(struct quic_stream *stream, u64 error_code)
 	return quic_stream_reset(stream, error_code);
 }
 
-/* Variable-length integer encoding helpers */
+/* Variable-length integer encoding helpers (RFC 9000 Section 16) */
 int quic_varint_len(u64 val)
 {
-	if (val <= 63)
+	if (val <= QUIC_VARINT_1BYTE_MAX)
 		return 1;
-	if (val <= 16383)
+	if (val <= QUIC_VARINT_2BYTE_MAX)
 		return 2;
-	if (val <= 1073741823)
+	if (val <= QUIC_VARINT_4BYTE_MAX)
 		return 4;
 	return 8;
 }
 
 void quic_varint_encode(u64 val, u8 *buf)
 {
-	if (val <= 63) {
+	if (val <= QUIC_VARINT_1BYTE_MAX) {
 		buf[0] = val;
-	} else if (val <= 16383) {
-		buf[0] = 0x40 | (val >> 8);
+	} else if (val <= QUIC_VARINT_2BYTE_MAX) {
+		buf[0] = QUIC_VARINT_2BYTE_PREFIX | (val >> 8);
 		buf[1] = val & 0xff;
-	} else if (val <= 1073741823) {
-		buf[0] = 0x80 | (val >> 24);
+	} else if (val <= QUIC_VARINT_4BYTE_MAX) {
+		buf[0] = QUIC_VARINT_4BYTE_PREFIX | (val >> 24);
 		buf[1] = (val >> 16) & 0xff;
 		buf[2] = (val >> 8) & 0xff;
 		buf[3] = val & 0xff;
 	} else {
-		buf[0] = 0xc0 | (val >> 56);
+		buf[0] = QUIC_VARINT_8BYTE_PREFIX | (val >> 56);
 		buf[1] = (val >> 48) & 0xff;
 		buf[2] = (val >> 40) & 0xff;
 		buf[3] = (val >> 32) & 0xff;

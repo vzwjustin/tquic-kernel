@@ -539,8 +539,14 @@ int quic_conn_close(struct quic_connection *conn, u64 error_code,
 	conn->app_error = app_error ? 1 : 0;
 
 	if (reason && reason_len > 0) {
-		conn->reason_phrase = kmemdup(reason, reason_len, GFP_KERNEL);
-		conn->reason_len = reason_len;
+		char *phrase = kmemdup(reason, reason_len, GFP_KERNEL);
+
+		if (phrase) {
+			kfree(conn->reason_phrase);
+			conn->reason_phrase = phrase;
+			conn->reason_len = reason_len;
+		}
+		/* On allocation failure, proceed without reason phrase */
 	}
 
 	conn->state = QUIC_STATE_CLOSING;

@@ -1077,24 +1077,24 @@ int quic_varint_decode(const u8 *data, int len, u64 *value)
 }
 EXPORT_SYMBOL(quic_varint_decode);
 
-/* Variable-length integer encoder */
+/* Variable-length integer encoder (RFC 9000 Section 16) */
 int quic_varint_encode(u64 value, u8 *data)
 {
-	if (value < 64) {
+	if (value <= QUIC_VARINT_1BYTE_MAX) {
 		data[0] = value;
 		return 1;
-	} else if (value < 16384) {
-		data[0] = 0x40 | (value >> 8);
+	} else if (value <= QUIC_VARINT_2BYTE_MAX) {
+		data[0] = QUIC_VARINT_2BYTE_PREFIX | (value >> 8);
 		data[1] = value & 0xff;
 		return 2;
-	} else if (value < 1073741824) {
-		data[0] = 0x80 | (value >> 24);
+	} else if (value <= QUIC_VARINT_4BYTE_MAX) {
+		data[0] = QUIC_VARINT_4BYTE_PREFIX | (value >> 24);
 		data[1] = (value >> 16) & 0xff;
 		data[2] = (value >> 8) & 0xff;
 		data[3] = value & 0xff;
 		return 4;
 	} else {
-		data[0] = 0xc0 | (value >> 56);
+		data[0] = QUIC_VARINT_8BYTE_PREFIX | (value >> 56);
 		data[1] = (value >> 48) & 0xff;
 		data[2] = (value >> 40) & 0xff;
 		data[3] = (value >> 32) & 0xff;
@@ -1107,14 +1107,14 @@ int quic_varint_encode(u64 value, u8 *data)
 }
 EXPORT_SYMBOL(quic_varint_encode);
 
-/* Get varint encoded length */
+/* Get varint encoded length (RFC 9000 Section 16) */
 int quic_varint_len(u64 value)
 {
-	if (value < 64)
+	if (value <= QUIC_VARINT_1BYTE_MAX)
 		return 1;
-	else if (value < 16384)
+	else if (value <= QUIC_VARINT_2BYTE_MAX)
 		return 2;
-	else if (value < 1073741824)
+	else if (value <= QUIC_VARINT_4BYTE_MAX)
 		return 4;
 	else
 		return 8;
