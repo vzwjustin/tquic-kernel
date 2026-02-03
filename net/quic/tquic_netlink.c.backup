@@ -40,9 +40,6 @@
 /* Multicast group offsets */
 #define TQUIC_MCGRP_EVENTS_OFFSET	0
 
-/* Maximum paths per connection (DoS prevention) */
-#define TQUIC_MAX_PATHS_PER_CONN	256
-
 /*
  * Command definitions
  */
@@ -395,10 +392,6 @@ static struct tquic_path_info *tquic_path_create(struct tquic_conn_info *conn)
 {
 	struct tquic_path_info *path;
 
-	/* Prevent DoS via unbounded path creation */
-	if (conn->path_count >= TQUIC_MAX_PATHS_PER_CONN)
-		return NULL;
-
 	path = kzalloc(sizeof(*path), GFP_KERNEL);
 	if (!path)
 		return NULL;
@@ -585,28 +578,6 @@ static int tquic_nl_parse_addr(struct nlattr **attrs,
  */
 
 /**
- * tquic_path_remove_and_free - Remove path from connection and drop references
- * @conn: Connection containing the path
- * @path: Path to remove and free
- *
- * Removes the path from the connection's path list under lock and drops both
- * the list reference and the caller's reference to the path.
- * This is the proper cleanup for error paths after tquic_path_create().
- */
-static void tquic_path_remove_and_free(struct tquic_conn_info *conn,
-					struct tquic_path_info *path)
-{
-	spin_lock_bh(&conn->lock);
-	list_del_rcu(&path->list);
-	conn->path_count--;
-	spin_unlock_bh(&conn->lock);
-
-	/* Drop the caller's reference and the list reference */
-	tquic_path_put(path);
-	tquic_path_put(path);
-}
-
-/**
  * tquic_nl_cmd_path_add - Handle TQUIC_CMD_PATH_ADD
  * @skb: Request socket buffer
  * @info: Generic netlink info
@@ -638,7 +609,7 @@ static int tquic_nl_cmd_path_add(struct sk_buff *skb, struct genl_info *info)
 			return -ENOMEM;
 	}
 
-	/* Create new path - adds to conn->paths list */
+	/* Create new path */
 	path = tquic_path_create(conn);
 	if (!path) {
 		tquic_conn_put(conn);
@@ -648,7 +619,7 @@ static int tquic_nl_cmd_path_add(struct sk_buff *skb, struct genl_info *info)
 	/* Parse address information */
 	ret = tquic_nl_parse_addr(info->attrs, path, info->extack);
 	if (ret) {
-		tquic_path_remove_and_free(conn, path);
+		tquic_path_put(path);
 		tquic_conn_put(conn);
 		return ret;
 	}
@@ -669,7 +640,7 @@ static int tquic_nl_cmd_path_add(struct sk_buff *skb, struct genl_info *info)
 	/* Build reply */
 	reply = genlmsg_new(NLMSG_DEFAULT_SIZE, GFP_KERNEL);
 	if (!reply) {
-		tquic_path_remove_and_free(conn, path);
+		tquic_path_put(path);
 		tquic_conn_put(conn);
 		return -ENOMEM;
 	}
@@ -678,7 +649,7 @@ static int tquic_nl_cmd_path_add(struct sk_buff *skb, struct genl_info *info)
 				TQUIC_CMD_PATH_ADD);
 	if (!hdr) {
 		nlmsg_free(reply);
-		tquic_path_remove_and_free(conn, path);
+		tquic_path_put(path);
 		tquic_conn_put(conn);
 		return -EMSGSIZE;
 	}
@@ -688,7 +659,7 @@ static int tquic_nl_cmd_path_add(struct sk_buff *skb, struct genl_info *info)
 	    nla_put_u32(reply, TQUIC_ATTR_PATH_ID, path->path_id)) {
 		genlmsg_cancel(reply, hdr);
 		nlmsg_free(reply);
-		tquic_path_remove_and_free(conn, path);
+		tquic_path_put(path);
 		tquic_conn_put(conn);
 		return -EMSGSIZE;
 	}
@@ -1513,12 +1484,10 @@ static const struct genl_ops tquic_genl_ops[] = {
 	{
 		.cmd	= TQUIC_CMD_PATH_GET,
 		.doit	= tquic_nl_cmd_path_get,
-		.flags	= GENL_ADMIN_PERM,
 	},
 	{
 		.cmd	= TQUIC_CMD_PATH_LIST,
 		.dumpit	= tquic_nl_cmd_path_dump,
-		.flags	= GENL_ADMIN_PERM,
 	},
 	{
 		.cmd	= TQUIC_CMD_SCHED_SET,
@@ -1528,17 +1497,14 @@ static const struct genl_ops tquic_genl_ops[] = {
 	{
 		.cmd	= TQUIC_CMD_SCHED_GET,
 		.doit	= tquic_nl_cmd_sched_get,
-		.flags	= GENL_ADMIN_PERM,
 	},
 	{
 		.cmd	= TQUIC_CMD_STATS_GET,
 		.doit	= tquic_nl_cmd_stats_get,
-		.flags	= GENL_ADMIN_PERM,
 	},
 	{
 		.cmd	= TQUIC_CMD_CONN_GET,
 		.doit	= tquic_nl_cmd_conn_get,
-		.flags	= GENL_ADMIN_PERM,
 	},
 };
 

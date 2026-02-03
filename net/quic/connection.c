@@ -10,6 +10,7 @@
 #include <linux/slab.h>
 #include <linux/random.h>
 #include <net/quic.h>
+#include "trace.h"
 
 static struct kmem_cache *quic_conn_cache __read_mostly;
 static struct kmem_cache *quic_cid_cache __read_mostly;
@@ -245,24 +246,34 @@ static void quic_timer_ack_cb(struct timer_list *t)
 static void quic_timer_idle_cb(struct timer_list *t)
 {
 	struct quic_connection *conn = from_timer(conn, t, timers[QUIC_TIMER_IDLE]);
+	unsigned long flags;
 
+	spin_lock_irqsave(&conn->lock, flags);
 	if (conn->state != QUIC_STATE_CLOSED) {
 		conn->state = QUIC_STATE_CLOSED;
+		spin_unlock_irqrestore(&conn->lock, flags);
 		if (conn->qsk)
 			wake_up(&conn->qsk->event_wait);
+		return;
 	}
+	spin_unlock_irqrestore(&conn->lock, flags);
 }
 
 static void quic_timer_handshake_cb(struct timer_list *t)
 {
 	struct quic_connection *conn = from_timer(conn, t, timers[QUIC_TIMER_HANDSHAKE]);
+	unsigned long flags;
 
+	spin_lock_irqsave(&conn->lock, flags);
 	if (!conn->handshake_complete && conn->state == QUIC_STATE_CONNECTING) {
 		conn->error_code = QUIC_ERROR_INTERNAL_ERROR;
 		conn->state = QUIC_STATE_CLOSED;
+		spin_unlock_irqrestore(&conn->lock, flags);
 		if (conn->qsk)
 			wake_up(&conn->qsk->event_wait);
+		return;
 	}
+	spin_unlock_irqrestore(&conn->lock, flags);
 }
 
 static void quic_timer_path_probe_cb(struct timer_list *t)
@@ -313,12 +324,17 @@ static void quic_conn_rx_work(struct work_struct *work)
 static void quic_conn_close_work(struct work_struct *work)
 {
 	struct quic_connection *conn = container_of(work, struct quic_connection, close_work);
+	unsigned long flags;
 
+	spin_lock_irqsave(&conn->lock, flags);
 	if (conn->state == QUIC_STATE_DRAINING) {
 		conn->state = QUIC_STATE_CLOSED;
+		spin_unlock_irqrestore(&conn->lock, flags);
 		if (conn->qsk)
 			wake_up(&conn->qsk->event_wait);
+		return;
 	}
+	spin_unlock_irqrestore(&conn->lock, flags);
 }
 
 struct quic_connection *quic_conn_create(struct quic_sock *qsk, bool is_server)
@@ -406,10 +422,27 @@ struct quic_connection *quic_conn_create(struct quic_sock *qsk, bool is_server)
 	for (i = 0; i < QUIC_CRYPTO_MAX; i++)
 		skb_queue_head_init(&conn->crypto_buffer[i]);
 
+	/* Initialize stream priority scheduler (RFC 9218) */
+	quic_sched_init(conn);
+
+	/* Initialize pacing state */
+	skb_queue_head_init(&conn->pacing_queue);
+	conn->pacing_next_send = 0;
+
+	/* Initialize 0-RTT early data state (RFC 9001 Section 4.6) */
+	skb_queue_head_init(&conn->early_data_buffer);
+	conn->early_data_enabled = 0;
+	conn->early_data_accepted = 0;
+	conn->early_data_rejected = 0;
+	conn->max_early_data = 0;
+	conn->early_data_sent = 0;
+
 	/* Initialize statistics */
 	memset(&conn->stats, 0, sizeof(conn->stats));
 
 	refcount_set(&conn->refcnt, 1);
+
+	trace_quic_conn_create(quic_trace_conn_id(&conn->scid), is_server);
 
 	return conn;
 
@@ -430,6 +463,9 @@ void quic_conn_destroy(struct quic_connection *conn)
 
 	if (!conn)
 		return;
+
+	trace_quic_conn_destroy(quic_trace_conn_id(&conn->scid),
+				conn->close_error_code);
 
 	/* Cancel all timers */
 	for (i = 0; i < QUIC_TIMER_MAX; i++)
@@ -472,8 +508,10 @@ void quic_conn_destroy(struct quic_connection *conn)
 	for (i = 0; i < QUIC_CRYPTO_MAX; i++)
 		quic_crypto_destroy(&conn->crypto[i]);
 
-	/* Free pending frames */
+	/* Free pending frames, pacing queue, and early data buffer */
 	skb_queue_purge(&conn->pending_frames);
+	skb_queue_purge(&conn->pacing_queue);
+	skb_queue_purge(&conn->early_data_buffer);
 	for (i = 0; i < QUIC_CRYPTO_MAX; i++)
 		skb_queue_purge(&conn->crypto_buffer[i]);
 
@@ -488,8 +526,12 @@ int quic_conn_connect(struct quic_connection *conn,
 	struct quic_path *path = conn->active_path;
 	int err;
 
-	if (conn->state != QUIC_STATE_IDLE)
+	spin_lock_bh(&conn->lock);
+	if (conn->state != QUIC_STATE_IDLE) {
+		spin_unlock_bh(&conn->lock);
 		return -EINVAL;
+	}
+	spin_unlock_bh(&conn->lock);
 
 	/* Set remote address */
 	memcpy(&path->remote_addr, addr, addr_len);
@@ -506,8 +548,10 @@ int quic_conn_connect(struct quic_connection *conn,
 	if (err)
 		return err;
 
+	spin_lock_bh(&conn->lock);
 	conn->pn_spaces[QUIC_PN_SPACE_INITIAL].keys_available = 1;
 	conn->state = QUIC_STATE_CONNECTING;
+	spin_unlock_bh(&conn->lock);
 
 	/* Start handshake timer */
 	quic_timer_set(conn, QUIC_TIMER_HANDSHAKE,
@@ -521,25 +565,32 @@ int quic_conn_connect(struct quic_connection *conn,
 
 int quic_conn_accept(struct quic_connection *conn)
 {
-	if (conn->state != QUIC_STATE_IDLE)
+	spin_lock_bh(&conn->lock);
+	if (conn->state != QUIC_STATE_IDLE) {
+		spin_unlock_bh(&conn->lock);
 		return -EINVAL;
+	}
 
 	conn->state = QUIC_STATE_HANDSHAKE;
+	spin_unlock_bh(&conn->lock);
 	return 0;
 }
 
 int quic_conn_close(struct quic_connection *conn, u64 error_code,
 		    const char *reason, u32 reason_len, bool app_error)
 {
+	spin_lock_bh(&conn->lock);
 	if (conn->state == QUIC_STATE_CLOSED ||
-	    conn->state == QUIC_STATE_DRAINING)
+	    conn->state == QUIC_STATE_DRAINING) {
+		spin_unlock_bh(&conn->lock);
 		return -EINVAL;
+	}
 
 	conn->error_code = error_code;
 	conn->app_error = app_error ? 1 : 0;
 
 	if (reason && reason_len > 0) {
-		char *phrase = kmemdup(reason, reason_len, GFP_KERNEL);
+		char *phrase = kmemdup(reason, reason_len, GFP_ATOMIC);
 
 		if (phrase) {
 			kfree(conn->reason_phrase);
@@ -550,6 +601,7 @@ int quic_conn_close(struct quic_connection *conn, u64 error_code,
 	}
 
 	conn->state = QUIC_STATE_CLOSING;
+	spin_unlock_bh(&conn->lock);
 
 	/* Send CONNECTION_CLOSE frame */
 	schedule_work(&conn->tx_work);
@@ -564,37 +616,45 @@ int quic_conn_close(struct quic_connection *conn, u64 error_code,
 
 void quic_conn_set_state(struct quic_connection *conn, enum quic_state state)
 {
-	enum quic_state old_state = conn->state;
+	enum quic_state old_state;
 
+	spin_lock_bh(&conn->lock);
+	old_state = conn->state;
 	conn->state = state;
+
+	trace_quic_conn_state_change(quic_trace_conn_id(&conn->scid),
+				     old_state, state);
 
 	switch (state) {
 	case QUIC_STATE_CONNECTED:
 		conn->handshake_complete = 1;
-		quic_timer_cancel(conn, QUIC_TIMER_HANDSHAKE);
-
-		/* Discard handshake keys */
 		conn->pn_spaces[QUIC_PN_SPACE_INITIAL].keys_discarded = 1;
 		conn->pn_spaces[QUIC_PN_SPACE_HANDSHAKE].keys_discarded = 1;
+		atomic64_set(&conn->stats.handshake_time_us, ktime_to_us(ktime_get()));
+		spin_unlock_bh(&conn->lock);
+
+		trace_quic_handshake_complete(quic_trace_conn_id(&conn->scid),
+					      atomic64_read(&conn->stats.handshake_time_us));
+
+		quic_timer_cancel(conn, QUIC_TIMER_HANDSHAKE);
 		quic_crypto_destroy(&conn->crypto[QUIC_CRYPTO_INITIAL]);
 		quic_crypto_destroy(&conn->crypto[QUIC_CRYPTO_HANDSHAKE]);
 
-		/* Record handshake time */
-		conn->stats.handshake_time_us = ktime_to_us(ktime_get());
-
 		if (conn->qsk)
 			wake_up(&conn->qsk->event_wait);
-		break;
+		goto out;
 
 	case QUIC_STATE_DRAINING:
 		conn->draining = 1;
+		spin_unlock_bh(&conn->lock);
 		/* Schedule close after draining period */
 		quic_timer_set(conn, QUIC_TIMER_IDLE,
 			       ktime_add_ms(ktime_get(),
 					    3 * quic_rtt_pto(&conn->active_path->rtt)));
-		break;
+		goto out;
 
 	case QUIC_STATE_CLOSED:
+		spin_unlock_bh(&conn->lock);
 		/* Cancel all timers except idle */
 		quic_timer_cancel(conn, QUIC_TIMER_LOSS);
 		quic_timer_cancel(conn, QUIC_TIMER_ACK);
@@ -603,13 +663,14 @@ void quic_conn_set_state(struct quic_connection *conn, enum quic_state state)
 
 		if (conn->qsk)
 			wake_up(&conn->qsk->event_wait);
-		break;
+		goto out;
 
 	default:
 		break;
 	}
-
-	(void)old_state;
+	spin_unlock_bh(&conn->lock);
+out:
+	return;
 }
 
 /* Generate new connection ID */
@@ -698,3 +759,505 @@ int quic_conn_rotate_dcid(struct quic_connection *conn)
 
 	return -ENOENT;  /* No available CIDs */
 }
+
+/*
+ * Transport Parameter IDs per RFC 9000 Section 18.2
+ */
+#define QUIC_TP_ORIGINAL_DESTINATION_CID		0x00
+#define QUIC_TP_MAX_IDLE_TIMEOUT			0x01
+#define QUIC_TP_STATELESS_RESET_TOKEN			0x02
+#define QUIC_TP_MAX_UDP_PAYLOAD_SIZE			0x03
+#define QUIC_TP_INITIAL_MAX_DATA			0x04
+#define QUIC_TP_INITIAL_MAX_STREAM_DATA_BIDI_LOCAL	0x05
+#define QUIC_TP_INITIAL_MAX_STREAM_DATA_BIDI_REMOTE	0x06
+#define QUIC_TP_INITIAL_MAX_STREAM_DATA_UNI		0x07
+#define QUIC_TP_INITIAL_MAX_STREAMS_BIDI		0x08
+#define QUIC_TP_INITIAL_MAX_STREAMS_UNI			0x09
+#define QUIC_TP_ACK_DELAY_EXPONENT			0x0a
+#define QUIC_TP_MAX_ACK_DELAY				0x0b
+#define QUIC_TP_DISABLE_ACTIVE_MIGRATION		0x0c
+#define QUIC_TP_PREFERRED_ADDRESS			0x0d
+#define QUIC_TP_ACTIVE_CONNECTION_ID_LIMIT		0x0e
+#define QUIC_TP_INITIAL_SOURCE_CID			0x0f
+#define QUIC_TP_RETRY_SOURCE_CID			0x10
+#define QUIC_TP_MAX_DATAGRAM_FRAME_SIZE			0x20
+#define QUIC_TP_GREASE_QUIC_BIT				0x2ab2
+
+/*
+ * RFC 9000 Section 18.2 Limits for transport parameters
+ */
+#define QUIC_TP_MAX_UDP_PAYLOAD_SIZE_MIN	1200
+#define QUIC_TP_MAX_UDP_PAYLOAD_SIZE_MAX	65527
+#define QUIC_TP_ACK_DELAY_EXPONENT_MAX		20
+#define QUIC_TP_MAX_ACK_DELAY_MAX		(1ULL << 14)  /* 16384 ms */
+#define QUIC_TP_ACTIVE_CID_LIMIT_MIN		2
+#define QUIC_TP_MAX_STREAMS_MAX			(1ULL << 60)
+#define QUIC_TP_MAX_DATA_MAX			(1ULL << 62)
+
+/**
+ * quic_transport_param_parse - Parse transport parameters from TLS extension
+ * @conn: QUIC connection
+ * @data: Raw transport parameter data from TLS extension
+ * @len: Length of data
+ *
+ * Parses transport parameters encoded per RFC 9000 Section 18.
+ * Each parameter: parameter_id (varint) | length (varint) | value
+ *
+ * Returns 0 on success, negative error code on failure:
+ *   -EINVAL: Malformed data or invalid encoding
+ *   -EPROTO: Protocol violation (invalid parameter value per RFC 9000)
+ */
+int quic_transport_param_parse(struct quic_connection *conn,
+			       const u8 *data, size_t len)
+{
+	struct quic_transport_params *params = &conn->remote_params;
+	size_t offset = 0;
+	u64 param_id;
+	u64 param_len;
+	int varint_len;
+	bool seen_params[32] = {0};
+
+	/* Initialize with RFC 9000 defaults */
+	memset(params, 0, sizeof(*params));
+	params->max_udp_payload_size = 65527;
+	params->ack_delay_exponent = 3;
+	params->max_ack_delay = 25;
+	params->active_connection_id_limit = 2;
+
+	while (offset < len) {
+		const u8 *param_data;
+		u64 value;
+
+		/* Parse parameter ID */
+		varint_len = quic_varint_decode(data + offset, len - offset,
+						&param_id);
+		if (varint_len < 0)
+			return -EINVAL;
+		offset += varint_len;
+
+		/* Parse parameter length */
+		if (offset >= len)
+			return -EINVAL;
+		varint_len = quic_varint_decode(data + offset, len - offset,
+						&param_len);
+		if (varint_len < 0)
+			return -EINVAL;
+		offset += varint_len;
+
+		if (param_len > len - offset)
+			return -EINVAL;
+
+		param_data = data + offset;
+
+		/* Check for duplicate parameters (RFC 9000 Section 7.4) */
+		if (param_id < 32) {
+			if (seen_params[param_id])
+				return -EPROTO;
+			seen_params[param_id] = true;
+		}
+
+		switch (param_id) {
+		case QUIC_TP_ORIGINAL_DESTINATION_CID:
+			if (param_len > QUIC_MAX_CONNECTION_ID_LEN)
+				return -EPROTO;
+			if (!conn->is_server)
+				params->original_destination_connection_id_len =
+					param_len;
+			break;
+
+		case QUIC_TP_MAX_IDLE_TIMEOUT:
+			if (param_len > 8)
+				return -EINVAL;
+			varint_len = quic_varint_decode(param_data, param_len,
+							&value);
+			if (varint_len < 0 || (size_t)varint_len != param_len)
+				return -EINVAL;
+			params->max_idle_timeout = value;
+			break;
+
+		case QUIC_TP_STATELESS_RESET_TOKEN:
+			if (param_len != 16)
+				return -EPROTO;
+			if (conn->is_server)
+				return -EPROTO;
+			memcpy(params->stateless_reset_token, param_data, 16);
+			break;
+
+		case QUIC_TP_MAX_UDP_PAYLOAD_SIZE:
+			if (param_len > 8)
+				return -EINVAL;
+			varint_len = quic_varint_decode(param_data, param_len,
+							&value);
+			if (varint_len < 0 || (size_t)varint_len != param_len)
+				return -EINVAL;
+			if (value < QUIC_TP_MAX_UDP_PAYLOAD_SIZE_MIN)
+				return -EPROTO;
+			if (value > QUIC_TP_MAX_UDP_PAYLOAD_SIZE_MAX)
+				value = QUIC_TP_MAX_UDP_PAYLOAD_SIZE_MAX;
+			params->max_udp_payload_size = value;
+			break;
+
+		case QUIC_TP_INITIAL_MAX_DATA:
+			if (param_len > 8)
+				return -EINVAL;
+			varint_len = quic_varint_decode(param_data, param_len,
+							&value);
+			if (varint_len < 0 || (size_t)varint_len != param_len)
+				return -EINVAL;
+			if (value > QUIC_TP_MAX_DATA_MAX)
+				return -EPROTO;
+			params->initial_max_data = value;
+			break;
+
+		case QUIC_TP_INITIAL_MAX_STREAM_DATA_BIDI_LOCAL:
+			if (param_len > 8)
+				return -EINVAL;
+			varint_len = quic_varint_decode(param_data, param_len,
+							&value);
+			if (varint_len < 0 || (size_t)varint_len != param_len)
+				return -EINVAL;
+			if (value > QUIC_TP_MAX_DATA_MAX)
+				return -EPROTO;
+			params->initial_max_stream_data_bidi_local = value;
+			break;
+
+		case QUIC_TP_INITIAL_MAX_STREAM_DATA_BIDI_REMOTE:
+			if (param_len > 8)
+				return -EINVAL;
+			varint_len = quic_varint_decode(param_data, param_len,
+							&value);
+			if (varint_len < 0 || (size_t)varint_len != param_len)
+				return -EINVAL;
+			if (value > QUIC_TP_MAX_DATA_MAX)
+				return -EPROTO;
+			params->initial_max_stream_data_bidi_remote = value;
+			break;
+
+		case QUIC_TP_INITIAL_MAX_STREAM_DATA_UNI:
+			if (param_len > 8)
+				return -EINVAL;
+			varint_len = quic_varint_decode(param_data, param_len,
+							&value);
+			if (varint_len < 0 || (size_t)varint_len != param_len)
+				return -EINVAL;
+			if (value > QUIC_TP_MAX_DATA_MAX)
+				return -EPROTO;
+			params->initial_max_stream_data_uni = value;
+			break;
+
+		case QUIC_TP_INITIAL_MAX_STREAMS_BIDI:
+			if (param_len > 8)
+				return -EINVAL;
+			varint_len = quic_varint_decode(param_data, param_len,
+							&value);
+			if (varint_len < 0 || (size_t)varint_len != param_len)
+				return -EINVAL;
+			if (value > QUIC_TP_MAX_STREAMS_MAX)
+				return -EPROTO;
+			params->initial_max_streams_bidi = value;
+			break;
+
+		case QUIC_TP_INITIAL_MAX_STREAMS_UNI:
+			if (param_len > 8)
+				return -EINVAL;
+			varint_len = quic_varint_decode(param_data, param_len,
+							&value);
+			if (varint_len < 0 || (size_t)varint_len != param_len)
+				return -EINVAL;
+			if (value > QUIC_TP_MAX_STREAMS_MAX)
+				return -EPROTO;
+			params->initial_max_streams_uni = value;
+			break;
+
+		case QUIC_TP_ACK_DELAY_EXPONENT:
+			if (param_len > 8)
+				return -EINVAL;
+			varint_len = quic_varint_decode(param_data, param_len,
+							&value);
+			if (varint_len < 0 || (size_t)varint_len != param_len)
+				return -EINVAL;
+			if (value > QUIC_TP_ACK_DELAY_EXPONENT_MAX)
+				return -EPROTO;
+			params->ack_delay_exponent = value;
+			break;
+
+		case QUIC_TP_MAX_ACK_DELAY:
+			if (param_len > 8)
+				return -EINVAL;
+			varint_len = quic_varint_decode(param_data, param_len,
+							&value);
+			if (varint_len < 0 || (size_t)varint_len != param_len)
+				return -EINVAL;
+			if (value >= QUIC_TP_MAX_ACK_DELAY_MAX)
+				return -EPROTO;
+			params->max_ack_delay = value;
+			break;
+
+		case QUIC_TP_DISABLE_ACTIVE_MIGRATION:
+			if (param_len != 0)
+				return -EPROTO;
+			params->disable_active_migration = 1;
+			break;
+
+		case QUIC_TP_PREFERRED_ADDRESS:
+			if (conn->is_server)
+				return -EPROTO;
+			if (param_len < 41)
+				return -EINVAL;
+			params->preferred_address_present = 1;
+			break;
+
+		case QUIC_TP_ACTIVE_CONNECTION_ID_LIMIT:
+			if (param_len > 8)
+				return -EINVAL;
+			varint_len = quic_varint_decode(param_data, param_len,
+							&value);
+			if (varint_len < 0 || (size_t)varint_len != param_len)
+				return -EINVAL;
+			if (value < QUIC_TP_ACTIVE_CID_LIMIT_MIN)
+				return -EPROTO;
+			params->active_connection_id_limit = value;
+			break;
+
+		case QUIC_TP_INITIAL_SOURCE_CID:
+			if (param_len > QUIC_MAX_CONNECTION_ID_LEN)
+				return -EPROTO;
+			params->initial_source_connection_id_len = param_len;
+			break;
+
+		case QUIC_TP_RETRY_SOURCE_CID:
+			if (conn->is_server)
+				return -EPROTO;
+			if (param_len > QUIC_MAX_CONNECTION_ID_LEN)
+				return -EPROTO;
+			params->retry_source_connection_id_len = param_len;
+			break;
+
+		case QUIC_TP_MAX_DATAGRAM_FRAME_SIZE:
+			if (param_len > 8)
+				return -EINVAL;
+			varint_len = quic_varint_decode(param_data, param_len,
+							&value);
+			if (varint_len < 0 || (size_t)varint_len != param_len)
+				return -EINVAL;
+			params->max_datagram_frame_size = value;
+			break;
+
+		case QUIC_TP_GREASE_QUIC_BIT:
+			if (param_len != 0)
+				return -EPROTO;
+			params->grease_quic_bit = 1;
+			break;
+
+		default:
+			/* RFC 9000: ignore unknown parameters */
+			break;
+		}
+
+		offset += param_len;
+	}
+
+	return 0;
+}
+EXPORT_SYMBOL(quic_transport_param_parse);
+
+/**
+ * quic_transport_param_apply - Apply parsed transport params to connection
+ * @conn: QUIC connection with populated remote_params
+ *
+ * Returns 0 on success, negative error code on failure.
+ */
+int quic_transport_param_apply(struct quic_connection *conn)
+{
+	struct quic_transport_params *params = &conn->remote_params;
+
+	/* Apply remote flow control limits */
+	conn->remote_fc.max_data = params->initial_max_data;
+	conn->remote_fc.max_streams_bidi = params->initial_max_streams_bidi;
+	conn->remote_fc.max_streams_uni = params->initial_max_streams_uni;
+
+	/* Update stream limits */
+	if (conn->is_server) {
+		conn->max_stream_id_bidi =
+			params->initial_max_streams_bidi * 4 + 1;
+		conn->max_stream_id_uni =
+			params->initial_max_streams_uni * 4 + 3;
+	} else {
+		conn->max_stream_id_bidi =
+			params->initial_max_streams_bidi * 4;
+		conn->max_stream_id_uni =
+			params->initial_max_streams_uni * 4 + 2;
+	}
+
+	/* Apply idle timeout (minimum of both endpoints) */
+	if (params->max_idle_timeout > 0) {
+		u64 local_timeout = conn->local_params.max_idle_timeout;
+		u64 effective_timeout;
+
+		if (local_timeout == 0)
+			effective_timeout = params->max_idle_timeout;
+		else if (params->max_idle_timeout < local_timeout)
+			effective_timeout = params->max_idle_timeout;
+		else
+			effective_timeout = local_timeout;
+
+		quic_timer_set(conn, QUIC_TIMER_IDLE,
+			       ktime_add_ms(ktime_get(), effective_timeout));
+	}
+
+	/* Apply path MTU limit */
+	if (conn->active_path) {
+		u32 max_payload = params->max_udp_payload_size;
+
+		if (max_payload < conn->active_path->mtu)
+			conn->active_path->mtu = max_payload;
+	}
+
+	conn->migration_disabled = params->disable_active_migration;
+
+	return 0;
+}
+EXPORT_SYMBOL(quic_transport_param_apply);
+
+/**
+ * quic_transport_param_encode - Encode local transport parameters
+ * @conn: QUIC connection
+ * @buf: Output buffer for encoded parameters
+ * @buf_len: Size of output buffer
+ * @out_len: Returns actual encoded length
+ *
+ * Returns 0 on success, -ENOBUFS if buffer too small.
+ */
+int quic_transport_param_encode(struct quic_connection *conn,
+				u8 *buf, size_t buf_len, size_t *out_len)
+{
+	struct quic_transport_params *params = &conn->local_params;
+	size_t offset = 0;
+	int id_len, val_len, len_len;
+
+#define ENCODE_VARINT_PARAM(id, val) do {				\
+	u64 _val = (val);						\
+	id_len = quic_varint_len(id);					\
+	val_len = quic_varint_len(_val);				\
+	len_len = quic_varint_len(val_len);				\
+	if (offset + id_len + len_len + val_len > buf_len)		\
+		return -ENOBUFS;					\
+	offset += quic_varint_encode(id, buf + offset);			\
+	offset += quic_varint_encode(val_len, buf + offset);		\
+	offset += quic_varint_encode(_val, buf + offset);		\
+} while (0)
+
+#define ENCODE_EMPTY_PARAM(id) do {					\
+	id_len = quic_varint_len(id);					\
+	if (offset + id_len + 1 > buf_len)				\
+		return -ENOBUFS;					\
+	offset += quic_varint_encode(id, buf + offset);			\
+	buf[offset++] = 0;						\
+} while (0)
+
+	/* original_destination_connection_id - server only */
+	if (conn->is_server && conn->original_dcid.len > 0) {
+		id_len = quic_varint_len(QUIC_TP_ORIGINAL_DESTINATION_CID);
+		len_len = quic_varint_len(conn->original_dcid.len);
+		if (offset + id_len + len_len + conn->original_dcid.len >
+		    buf_len)
+			return -ENOBUFS;
+		offset += quic_varint_encode(QUIC_TP_ORIGINAL_DESTINATION_CID,
+					     buf + offset);
+		offset += quic_varint_encode(conn->original_dcid.len,
+					     buf + offset);
+		memcpy(buf + offset, conn->original_dcid.data,
+		       conn->original_dcid.len);
+		offset += conn->original_dcid.len;
+	}
+
+	if (params->max_idle_timeout > 0)
+		ENCODE_VARINT_PARAM(QUIC_TP_MAX_IDLE_TIMEOUT,
+				    params->max_idle_timeout);
+
+	if (params->max_udp_payload_size != 65527)
+		ENCODE_VARINT_PARAM(QUIC_TP_MAX_UDP_PAYLOAD_SIZE,
+				    params->max_udp_payload_size);
+
+	if (params->initial_max_data > 0)
+		ENCODE_VARINT_PARAM(QUIC_TP_INITIAL_MAX_DATA,
+				    params->initial_max_data);
+
+	if (params->initial_max_stream_data_bidi_local > 0)
+		ENCODE_VARINT_PARAM(QUIC_TP_INITIAL_MAX_STREAM_DATA_BIDI_LOCAL,
+				    params->initial_max_stream_data_bidi_local);
+
+	if (params->initial_max_stream_data_bidi_remote > 0)
+		ENCODE_VARINT_PARAM(QUIC_TP_INITIAL_MAX_STREAM_DATA_BIDI_REMOTE,
+				    params->initial_max_stream_data_bidi_remote);
+
+	if (params->initial_max_stream_data_uni > 0)
+		ENCODE_VARINT_PARAM(QUIC_TP_INITIAL_MAX_STREAM_DATA_UNI,
+				    params->initial_max_stream_data_uni);
+
+	if (params->initial_max_streams_bidi > 0)
+		ENCODE_VARINT_PARAM(QUIC_TP_INITIAL_MAX_STREAMS_BIDI,
+				    params->initial_max_streams_bidi);
+
+	if (params->initial_max_streams_uni > 0)
+		ENCODE_VARINT_PARAM(QUIC_TP_INITIAL_MAX_STREAMS_UNI,
+				    params->initial_max_streams_uni);
+
+	if (params->ack_delay_exponent != 3)
+		ENCODE_VARINT_PARAM(QUIC_TP_ACK_DELAY_EXPONENT,
+				    params->ack_delay_exponent);
+
+	if (params->max_ack_delay != 25)
+		ENCODE_VARINT_PARAM(QUIC_TP_MAX_ACK_DELAY,
+				    params->max_ack_delay);
+
+	if (params->disable_active_migration)
+		ENCODE_EMPTY_PARAM(QUIC_TP_DISABLE_ACTIVE_MIGRATION);
+
+	if (params->active_connection_id_limit > 2)
+		ENCODE_VARINT_PARAM(QUIC_TP_ACTIVE_CONNECTION_ID_LIMIT,
+				    params->active_connection_id_limit);
+
+	/* initial_source_connection_id */
+	id_len = quic_varint_len(QUIC_TP_INITIAL_SOURCE_CID);
+	len_len = quic_varint_len(conn->scid.len);
+	if (offset + id_len + len_len + conn->scid.len > buf_len)
+		return -ENOBUFS;
+	offset += quic_varint_encode(QUIC_TP_INITIAL_SOURCE_CID, buf + offset);
+	offset += quic_varint_encode(conn->scid.len, buf + offset);
+	memcpy(buf + offset, conn->scid.data, conn->scid.len);
+	offset += conn->scid.len;
+
+	if (params->max_datagram_frame_size > 0)
+		ENCODE_VARINT_PARAM(QUIC_TP_MAX_DATAGRAM_FRAME_SIZE,
+				    params->max_datagram_frame_size);
+
+#undef ENCODE_VARINT_PARAM
+#undef ENCODE_EMPTY_PARAM
+
+	*out_len = offset;
+	return 0;
+}
+EXPORT_SYMBOL(quic_transport_param_encode);
+
+/**
+ * quic_transport_param_validate - Validate transport parameters
+ * @conn: QUIC connection with populated remote_params
+ *
+ * Returns 0 on success, -EPROTO on protocol violation.
+ */
+int quic_transport_param_validate(struct quic_connection *conn)
+{
+	struct quic_transport_params *params = &conn->remote_params;
+
+	/* Validate original_destination_connection_id matches */
+	if (!conn->is_server &&
+	    params->original_destination_connection_id_len > 0) {
+		if (params->original_destination_connection_id_len !=
+		    conn->original_dcid.len)
+			return -EPROTO;
+	}
+
+	return 0;
+}
+EXPORT_SYMBOL(quic_transport_param_validate);

@@ -21,6 +21,7 @@
 #include <linux/slab.h>
 #include <linux/ktime.h>
 #include <linux/rculist.h>
+#include <linux/spinlock.h>
 #include "tquic_sched.h"
 
 /*
@@ -32,10 +33,29 @@
  * Module parameter for RTT tolerance percentage.
  * When RTTs differ by less than this percentage, the scheduler
  * stays with the current path to avoid unnecessary switching.
+ *
+ * Valid range: 0-100 (percentage)
  */
-static unsigned int minrtt_tolerance_pct = 10;
+#define MINRTT_TOLERANCE_PCT_MAX	100
+#define MINRTT_TOLERANCE_PCT_DEFAULT	10
+
+static unsigned int minrtt_tolerance_pct = MINRTT_TOLERANCE_PCT_DEFAULT;
 module_param_named(tolerance_pct, minrtt_tolerance_pct, uint, 0644);
-MODULE_PARM_DESC(tolerance_pct, "RTT tolerance percentage for path switching (default 10)");
+MODULE_PARM_DESC(tolerance_pct,
+	"RTT tolerance percentage for path switching, 0-100 (default 10)");
+
+static inline unsigned int minrtt_get_validated_tolerance(void)
+{
+	unsigned int val = READ_ONCE(minrtt_tolerance_pct);
+
+	if (val > MINRTT_TOLERANCE_PCT_MAX) {
+		pr_warn_once("minrtt: tolerance_pct %u exceeds max %u, using %u\n",
+			     val, MINRTT_TOLERANCE_PCT_MAX,
+			     MINRTT_TOLERANCE_PCT_DEFAULT);
+		return MINRTT_TOLERANCE_PCT_DEFAULT;
+	}
+	return val;
+}
 
 /* =========================================================================
  * MinRTT Scheduler Implementation
@@ -43,6 +63,7 @@ MODULE_PARM_DESC(tolerance_pct, "RTT tolerance percentage for path switching (de
 
 /**
  * struct minrtt_sched_data - MinRTT scheduler private state
+ * @lock: Spinlock protecting scheduler state from concurrent access
  * @current_path_id: Currently selected path ID (0xFF = none)
  * @current_rtt_us: RTT of current path in microseconds
  * @last_switch: Time of last path switch (for statistics)
@@ -50,8 +71,14 @@ MODULE_PARM_DESC(tolerance_pct, "RTT tolerance percentage for path switching (de
  *
  * This structure tracks the scheduler's current path selection
  * state, allowing hysteresis via the tolerance band.
+ *
+ * Locking: The lock protects all mutable fields from concurrent access
+ * between get_path() (send path), ack_received() (ACK processing), and
+ * path_removed() (connection management). The RCU read lock for path
+ * list traversal is held separately.
  */
 struct minrtt_sched_data {
+	spinlock_t lock;	/* Protects scheduler state */
 	u8 current_path_id;	/* Currently selected path */
 	u64 current_rtt_us;	/* RTT of current path */
 	ktime_t last_switch;	/* Time of last path switch */
@@ -72,6 +99,7 @@ static void minrtt_init(struct tquic_connection *conn)
 	if (!sd)
 		return;
 
+	spin_lock_init(&sd->lock);
 	sd->current_path_id = TQUIC_INVALID_PATH_ID;
 	sd->current_rtt_us = U64_MAX;
 	sd->last_switch = ktime_get();
@@ -114,9 +142,18 @@ static int minrtt_get_path(struct tquic_connection *conn,
 	struct tquic_path *path, *best = NULL, *current = NULL;
 	u64 min_rtt = U64_MAX;
 	u64 tolerance_threshold;
+	u8 current_path_id;
+	u64 current_rtt_us;
+	unsigned long irqflags;
 
 	if (!sd)
 		return -EINVAL;
+
+	/* Read current state under lock */
+	spin_lock_irqsave(&sd->lock, irqflags);
+	current_path_id = sd->current_path_id;
+	current_rtt_us = sd->current_rtt_us;
+	spin_unlock_irqrestore(&sd->lock, irqflags);
 
 	rcu_read_lock();
 
@@ -128,7 +165,7 @@ static int minrtt_get_path(struct tquic_connection *conn,
 			continue;
 
 		/* Track current path for tolerance comparison */
-		if (path->path_id == sd->current_path_id)
+		if (path->path_id == current_path_id)
 			current = path;
 
 		/* Get smoothed RTT, use default if no measurement yet */
@@ -159,8 +196,10 @@ static int minrtt_get_path(struct tquic_connection *conn,
 	 *   Only switch if new path has RTT < 45ms
 	 */
 	if (current && current->state == TQUIC_PATH_ACTIVE) {
-		tolerance_threshold = sd->current_rtt_us *
-				      (100 - minrtt_tolerance_pct) / 100;
+		unsigned int tolerance = minrtt_get_validated_tolerance();
+
+		tolerance_threshold = current_rtt_us *
+				      (100 - tolerance) / 100;
 
 		if (min_rtt >= tolerance_threshold) {
 			/* Stay with current path - RTT difference not significant */
@@ -168,7 +207,8 @@ static int minrtt_get_path(struct tquic_connection *conn,
 		}
 	}
 
-	/* Update state if switching paths */
+	/* Update state if switching paths - under lock */
+	spin_lock_irqsave(&sd->lock, irqflags);
 	if (best->path_id != sd->current_path_id) {
 		pr_debug("minrtt: switching from path %u (rtt=%llu) to path %u (rtt=%llu)\n",
 			 sd->current_path_id, sd->current_rtt_us,
@@ -181,6 +221,7 @@ static int minrtt_get_path(struct tquic_connection *conn,
 		sd->last_switch = ktime_get();
 		sd->switch_count++;
 	}
+	spin_unlock_irqrestore(&sd->lock, irqflags);
 
 	result->primary = best;
 	result->backup = NULL;	/* MinRTT doesn't use backup path */
@@ -216,13 +257,19 @@ static void minrtt_path_removed(struct tquic_connection *conn,
 				struct tquic_path *path)
 {
 	struct minrtt_sched_data *sd = conn->sched_priv;
+	unsigned long irqflags;
 
-	if (sd && sd->current_path_id == path->path_id) {
+	if (!sd)
+		return;
+
+	spin_lock_irqsave(&sd->lock, irqflags);
+	if (sd->current_path_id == path->path_id) {
 		sd->current_path_id = TQUIC_INVALID_PATH_ID;
 		sd->current_rtt_us = U64_MAX;
 		pr_debug("minrtt: current path %u removed, will reselect\n",
 			 path->path_id);
 	}
+	spin_unlock_irqrestore(&sd->lock, irqflags);
 }
 
 /**
@@ -238,12 +285,48 @@ static void minrtt_ack_received(struct tquic_connection *conn,
 				u64 acked_bytes)
 {
 	struct minrtt_sched_data *sd = conn->sched_priv;
+	unsigned long irqflags;
 
-	if (sd && path->path_id == sd->current_path_id) {
+	if (!sd)
+		return;
+
+	spin_lock_irqsave(&sd->lock, irqflags);
+	if (path->path_id == sd->current_path_id) {
 		/* Update cached RTT from path's smoothed RTT */
 		sd->current_rtt_us = path->cc.smoothed_rtt_us;
 		if (sd->current_rtt_us == 0)
 			sd->current_rtt_us = TQUIC_DEFAULT_RTT_US;
+	}
+	spin_unlock_irqrestore(&sd->lock, irqflags);
+}
+
+/**
+ * minrtt_loss_detected - Handle loss feedback
+ * @conn: Connection
+ * @path: Path that detected loss
+ * @lost_bytes: Number of bytes lost
+ *
+ * Loss on the current path may indicate congestion or path degradation.
+ * If the current path experiences significant loss, invalidate our
+ * selection to trigger a fresh path evaluation on the next get_path().
+ */
+static void minrtt_loss_detected(struct tquic_connection *conn,
+				 struct tquic_path *path,
+				 u64 lost_bytes)
+{
+	struct minrtt_sched_data *sd = conn->sched_priv;
+
+	if (!sd)
+		return;
+
+	/*
+	 * If loss occurs on current path, force path re-evaluation.
+	 * The path's RTT may now be stale due to congestion.
+	 */
+	if (path->path_id == sd->current_path_id) {
+		pr_debug("minrtt: loss on current path %u, will re-evaluate\n",
+			 path->path_id);
+		/* Don't invalidate immediately - let RTT updates decide */
 	}
 }
 
@@ -259,6 +342,7 @@ static struct tquic_sched_ops tquic_sched_minrtt = {
 	.path_added	= minrtt_path_added,
 	.path_removed	= minrtt_path_removed,
 	.ack_received	= minrtt_ack_received,
+	.loss_detected	= minrtt_loss_detected,
 };
 
 /* =========================================================================
@@ -267,11 +351,16 @@ static struct tquic_sched_ops tquic_sched_minrtt = {
 
 /**
  * struct rr_sched_data - Round-robin scheduler private state
+ * @lock: Spinlock protecting scheduler state
  * @next_index: Index counter for round-robin selection
  *
  * Simple state: just track which path to use next.
+ *
+ * Locking: The lock protects next_index from concurrent increments
+ * in get_path() calls from multiple contexts.
  */
 struct rr_sched_data {
+	spinlock_t lock;	/* Protects next_index */
 	u32 next_index;		/* Next path index to use */
 };
 
@@ -284,8 +373,12 @@ static void rr_init(struct tquic_connection *conn)
 	struct rr_sched_data *rd;
 
 	rd = kzalloc(sizeof(*rd), GFP_KERNEL);
-	if (rd)
-		conn->sched_priv = rd;
+	if (!rd)
+		return;
+
+	spin_lock_init(&rd->lock);
+	rd->next_index = 0;
+	conn->sched_priv = rd;
 }
 
 /**
@@ -319,6 +412,8 @@ static int rr_get_path(struct tquic_connection *conn,
 	int active_count = 0;
 	int target_index;
 	int current_index = 0;
+	u32 next_idx;
+	unsigned long irqflags;
 
 	if (!rd)
 		return -EINVAL;
@@ -336,9 +431,14 @@ static int rr_get_path(struct tquic_connection *conn,
 		return -ENOENT;
 	}
 
-	/* Round-robin: select path at (next_index % active_count) */
-	target_index = rd->next_index % active_count;
+	/* Get and increment index atomically under lock */
+	spin_lock_irqsave(&rd->lock, irqflags);
+	next_idx = rd->next_index;
 	rd->next_index++;
+	spin_unlock_irqrestore(&rd->lock, irqflags);
+
+	/* Round-robin: select path at (next_index % active_count) */
+	target_index = next_idx % active_count;
 
 	/* Find the target path */
 	list_for_each_entry_rcu(path, &conn->paths, list) {

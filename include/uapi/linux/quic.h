@@ -34,6 +34,9 @@
 #define QUIC_SOCKOPT_CRYPTO_KEY			13
 #define QUIC_SOCKOPT_CONGESTION			14
 #define QUIC_SOCKOPT_CONFIG			15
+#define QUIC_SOCKOPT_SNI			16	/* Server Name Indication hostname */
+#define QUIC_SOCKOPT_ALPN_SELECTED		17	/* Get negotiated ALPN (read-only) */
+#define QUIC_SOCKOPT_STREAM_PRIORITY		18	/* Set/get stream priority */
 
 /* QUIC socket option levels */
 #define QUIC_SO_STREAM		1
@@ -323,11 +326,31 @@ struct quic_crypto_info {
 #define QUIC_MIN_CONNECTION_ID_LEN	0
 #define QUIC_STATELESS_RESET_TOKEN_LEN	16
 #define QUIC_MAX_ALPN_LEN		255
+#define QUIC_MAX_SNI_LEN		255	/* Maximum server name length (RFC 6066) */
 #define QUIC_MAX_TOKEN_LEN		512
 #define QUIC_MAX_PACKET_SIZE		1500
 #define QUIC_MIN_PACKET_SIZE		1200
 #define QUIC_MAX_STREAMS		(1ULL << 60)
 #define QUIC_MAX_DATA			(1ULL << 62)
+#define QUIC_MAX_SESSION_TICKET_LEN	4096	/* Maximum session ticket size */
+
+/*
+ * QUIC Session Ticket (RFC 9001 Section 4.6.1)
+ *
+ * Stores the TLS 1.3 session ticket data for 0-RTT resumption.
+ * The ticket is received via NEW_SESSION_TICKET and contains
+ * the PSK identity and associated parameters for resumption.
+ */
+struct quic_session_ticket {
+	__u8	ticket[QUIC_MAX_SESSION_TICKET_LEN];	/* Ticket data */
+	__u32	ticket_len;				/* Length of ticket */
+	__u8	resumption_secret[64];			/* Resumption secret for 0-RTT */
+	__u32	resumption_secret_len;			/* Length of resumption secret */
+	__u16	cipher_type;				/* Cipher suite for 0-RTT */
+	__u32	max_early_data;				/* Max early data allowed */
+	__u64	lifetime;				/* Ticket lifetime in ms */
+	__u64	issued_time;				/* When ticket was issued */
+}
 
 /* QUIC ioctl commands */
 #define QUIC_IOC_MAGIC		'Q'

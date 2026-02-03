@@ -12,6 +12,7 @@
 #include <linux/timer.h>
 #include <linux/jiffies.h>
 #include <net/quic.h>
+#include "trace.h"
 
 /* Timer constants per RFC 9002 */
 #define QUIC_TIMER_GRANULARITY_MS	1	/* Timer granularity in ms */
@@ -20,12 +21,40 @@
 #define QUIC_TIMER_ACK_DELAY_MS		25	/* Max ACK delay */
 #define QUIC_DEFAULT_PTO_US		333000	/* Default PTO: 333ms per RFC 9002 */
 
-/* Timer state tracking */
+/*
+ * Timer lifecycle flags (stored in conn->timer_flags)
+ *
+ * These flags track timer lifecycle to prevent:
+ * - Re-arming timers after destroy has started
+ * - Use-after-free in callbacks
+ */
+#define QUIC_TIMER_FLAG_DESTROYING	BIT(0)	/* Destruction in progress */
+
+/* Timer state tracking (unused, kept for future use) */
 struct quic_timer_state {
 	ktime_t		deadline;
 	bool		armed;
 	u32		backoff_count;
 };
+
+/*
+ * Check if timer operations should proceed
+ *
+ * Returns true if the connection is valid for timer operations.
+ * Must be called with conn->lock held.
+ */
+static inline bool quic_timer_conn_valid_locked(struct quic_connection *conn)
+{
+	/* Check destroying flag - set during quic_timer_cancel_all() */
+	if (conn->timer_flags & QUIC_TIMER_FLAG_DESTROYING)
+		return false;
+
+	/* Check connection state */
+	if (conn->state == QUIC_STATE_CLOSED)
+		return false;
+
+	return true;
+}
 
 /*
  * Convert ktime to jiffies for timer_list
@@ -61,8 +90,8 @@ static void quic_timer_loss_handler(struct timer_list *t)
 
 	spin_lock_irqsave(&conn->lock, flags);
 
-	/* Check connection state */
-	if (conn->state == QUIC_STATE_CLOSED ||
+	/* Check if connection is valid for timer work */
+	if (!quic_timer_conn_valid_locked(conn) ||
 	    conn->state == QUIC_STATE_DRAINING) {
 		spin_unlock_irqrestore(&conn->lock, flags);
 		return;
@@ -76,7 +105,7 @@ static void quic_timer_loss_handler(struct timer_list *t)
 	/* Invoke loss detection timeout handler */
 	quic_loss_detection_on_timeout(conn);
 
-	/* Update timers */
+	/* Update timers (will check destroying flag internally) */
 	quic_timer_update(conn);
 }
 
@@ -97,8 +126,8 @@ static void quic_timer_ack_handler(struct timer_list *t)
 
 	spin_lock_irqsave(&conn->lock, flags);
 
-	/* Check connection state */
-	if (conn->state == QUIC_STATE_CLOSED ||
+	/* Check if connection is valid for timer work */
+	if (!quic_timer_conn_valid_locked(conn) ||
 	    conn->state == QUIC_STATE_DRAINING) {
 		spin_unlock_irqrestore(&conn->lock, flags);
 		return;
@@ -116,7 +145,8 @@ static void quic_timer_ack_handler(struct timer_list *t)
 			if (skb) {
 				int len = quic_ack_create(conn, i, skb);
 				if (len > 0) {
-					skb_queue_tail(&conn->pending_frames, skb);
+					/* Best effort - ACKs can be regenerated */
+					quic_conn_queue_frame(conn, skb);
 				} else {
 					kfree_skb(skb);
 				}
@@ -240,10 +270,92 @@ static void quic_timer_path_probe_handler(struct timer_list *t)
 }
 
 /*
+ * Pacing timer callback
+ *
+ * QUIC implements pacing to spread packet transmission over time and avoid
+ * bursts that could cause congestion. When packets are queued due to pacing
+ * constraints, this timer fires at the next allowed send time to transmit
+ * the queued packets.
+ *
+ * Per RFC 9002 Section 7.7: "A sender SHOULD pace sending of all in-flight
+ * packets based on input from the congestion controller."
+ */
+static void quic_timer_pacing_handler(struct timer_list *t)
+{
+	struct quic_connection *conn = from_timer(conn, t, timers[QUIC_TIMER_PACING]);
+	struct quic_cc_state *cc;
+	struct sk_buff *skb;
+	unsigned long flags;
+	ktime_t now;
+	int sent = 0;
+
+	if (!conn || !conn->active_path)
+		return;
+
+	spin_lock_irqsave(&conn->lock, flags);
+
+	/* Check connection state */
+	if (conn->state == QUIC_STATE_CLOSED ||
+	    conn->state == QUIC_STATE_DRAINING) {
+		spin_unlock_irqrestore(&conn->lock, flags);
+		return;
+	}
+
+	/* Clear timer deadline */
+	conn->timer_deadlines[QUIC_TIMER_PACING] = 0;
+
+	spin_unlock_irqrestore(&conn->lock, flags);
+
+	cc = &conn->active_path->cc;
+	now = ktime_get();
+
+	/* Send packets from the pacing queue while allowed */
+	while ((skb = skb_dequeue(&conn->pacing_queue)) != NULL) {
+		u64 delay_ns;
+		int err;
+
+		/* Check if we can send now or need to reschedule */
+		if (ktime_after(conn->pacing_next_send, now)) {
+			/* Re-queue and reschedule timer */
+			skb_queue_head(&conn->pacing_queue, skb);
+			quic_timer_set(conn, QUIC_TIMER_PACING,
+				       conn->pacing_next_send);
+			break;
+		}
+
+		/* Send the packet */
+		err = quic_output(conn, skb);
+		if (err) {
+			kfree_skb(skb);
+			continue;
+		}
+
+		/* Update pacing state for next packet */
+		delay_ns = quic_cc_pacing_delay(cc, skb->len);
+		conn->pacing_next_send = ktime_add_ns(now, delay_ns);
+		cc->last_sent_time = ktime_to_ns(now);
+		sent++;
+
+		/* Limit batch size to avoid holding softirq too long */
+		if (sent >= 16)
+			break;
+	}
+
+	/* If there are more packets queued, schedule next send */
+	if (!skb_queue_empty(&conn->pacing_queue)) {
+		ktime_t next = conn->pacing_next_send;
+
+		if (ktime_before(next, now))
+			next = ktime_add_ns(now, 1000); /* 1us minimum */
+		quic_timer_set(conn, QUIC_TIMER_PACING, next);
+	}
+}
+
+/*
  * Initialize all timers for a connection
  *
  * This function sets up the timer infrastructure for loss detection,
- * ACK generation, idle timeout, handshake, and path probing.
+ * ACK generation, idle timeout, handshake, path probing, and pacing.
  */
 void quic_timer_init(struct quic_connection *conn)
 {
@@ -251,6 +363,9 @@ void quic_timer_init(struct quic_connection *conn)
 
 	if (!conn)
 		return;
+
+	/* Initialize timer flags - no timers destroying */
+	conn->timer_flags = 0;
 
 	/* Initialize all timer deadlines to 0 (unset) */
 	for (i = 0; i < QUIC_TIMER_MAX; i++)
@@ -262,6 +377,7 @@ void quic_timer_init(struct quic_connection *conn)
 	timer_setup(&conn->timers[QUIC_TIMER_IDLE], quic_timer_idle_handler, 0);
 	timer_setup(&conn->timers[QUIC_TIMER_HANDSHAKE], quic_timer_handshake_handler, 0);
 	timer_setup(&conn->timers[QUIC_TIMER_PATH_PROBE], quic_timer_path_probe_handler, 0);
+	timer_setup(&conn->timers[QUIC_TIMER_PACING], quic_timer_pacing_handler, 0);
 }
 
 /*
@@ -278,6 +394,13 @@ void quic_timer_set(struct quic_connection *conn, u8 timer_type, ktime_t when)
 	if (!conn || timer_type >= QUIC_TIMER_MAX)
 		return;
 
+	/*
+	 * Quick check if destruction is in progress (without lock).
+	 * This is an optimization - we'll double-check under the lock.
+	 */
+	if (READ_ONCE(conn->timer_flags) & QUIC_TIMER_FLAG_DESTROYING)
+		return;
+
 	/* Validate deadline is in the future */
 	if (ktime_before(when, ktime_get())) {
 		/* Fire immediately - set to minimal future time */
@@ -285,6 +408,15 @@ void quic_timer_set(struct quic_connection *conn, u8 timer_type, ktime_t when)
 	}
 
 	spin_lock_irqsave(&conn->lock, flags);
+
+	/*
+	 * Double-check destroying flag under lock. This handles the race
+	 * where destroy started between our quick check and acquiring the lock.
+	 */
+	if (conn->timer_flags & QUIC_TIMER_FLAG_DESTROYING) {
+		spin_unlock_irqrestore(&conn->lock, flags);
+		return;
+	}
 
 	/* Record the deadline */
 	conn->timer_deadlines[timer_type] = when;
@@ -296,13 +428,26 @@ void quic_timer_set(struct quic_connection *conn, u8 timer_type, ktime_t when)
 
 	/* Modify the timer (handles both armed and unarmed states) */
 	mod_timer(&conn->timers[timer_type], expires);
+
+	trace_quic_timer_set(quic_trace_conn_id(&conn->scid), timer_type,
+			     ktime_to_us(ktime_sub(when, ktime_get())));
 }
 
 /*
- * Cancel a timer
+ * Cancel a timer (non-blocking version)
  *
- * This function safely cancels a pending timer without waiting
- * for any running callback to complete (use with caution).
+ * This function cancels a pending timer but does NOT wait for a currently
+ * running callback to complete. Use this only when:
+ * - You're certain no callback can be running (e.g., during init)
+ * - You're in interrupt context and cannot sleep
+ * - The callback checks conn->timer_flags before doing any work
+ *
+ * WARNING: If a callback is running, this returns immediately and the
+ * callback continues executing. The callback will check the destroying
+ * flag and exit early, but there's a brief race window.
+ *
+ * For destruction paths, use quic_timer_cancel_all() which uses
+ * del_timer_sync() and properly waits for callbacks.
  */
 void quic_timer_cancel(struct quic_connection *conn, u8 timer_type)
 {
@@ -318,23 +463,91 @@ void quic_timer_cancel(struct quic_connection *conn, u8 timer_type)
 
 	spin_unlock_irqrestore(&conn->lock, flags);
 
-	/* Delete the timer - use del_timer not del_timer_sync to avoid deadlock */
+	/*
+	 * Delete the timer without waiting for callback.
+	 * Note: If the callback is currently running, del_timer returns 0
+	 * and the callback continues. This is intentional for non-blocking use.
+	 */
 	del_timer(&conn->timers[timer_type]);
+}
+
+/*
+ * Cancel a timer synchronously (blocking version)
+ *
+ * This function cancels a pending timer AND waits for any currently
+ * running callback to complete. This is the safe version to use when
+ * you need to ensure no callback will access data after this returns.
+ *
+ * WARNING: Cannot be called from interrupt context or while holding
+ * locks that the timer callback might need (e.g., conn->lock).
+ */
+void quic_timer_cancel_sync(struct quic_connection *conn, u8 timer_type)
+{
+	unsigned long flags;
+
+	if (!conn || timer_type >= QUIC_TIMER_MAX)
+		return;
+
+	spin_lock_irqsave(&conn->lock, flags);
+
+	/* Clear the deadline */
+	conn->timer_deadlines[timer_type] = 0;
+
+	spin_unlock_irqrestore(&conn->lock, flags);
+
+	/*
+	 * del_timer_sync() waits for any running callback to complete.
+	 * Safe because we released conn->lock above, so callbacks can
+	 * finish acquiring it if needed.
+	 */
+	del_timer_sync(&conn->timers[timer_type]);
 }
 
 /*
  * Cancel all timers synchronously
  *
  * This function should be called when destroying a connection
- * to ensure no timer callbacks are running.
+ * to ensure no timer callbacks are running or will run.
+ *
+ * The sequence is:
+ * 1. Set DESTROYING flag (prevents new timer arms)
+ * 2. Memory barrier (ensures flag is visible)
+ * 3. Cancel each timer with del_timer_sync() (waits for callbacks)
+ *
+ * After this function returns, it is safe to free the connection.
  */
 void quic_timer_cancel_all(struct quic_connection *conn)
 {
+	unsigned long flags;
 	int i;
 
 	if (!conn)
 		return;
 
+	/*
+	 * Set the destroying flag to prevent new timers from being armed.
+	 * This must be done under the lock for the double-check in
+	 * quic_timer_set() to work correctly.
+	 */
+	spin_lock_irqsave(&conn->lock, flags);
+	conn->timer_flags |= QUIC_TIMER_FLAG_DESTROYING;
+	spin_unlock_irqrestore(&conn->lock, flags);
+
+	/*
+	 * Memory barrier to ensure the flag is visible to other CPUs
+	 * before we start canceling timers.
+	 */
+	smp_mb();
+
+	/*
+	 * Cancel all timers synchronously. del_timer_sync() will:
+	 * - If timer is pending: cancel it and return 1
+	 * - If callback is running: wait for it to complete and return 0
+	 * - If timer is not pending: return 0
+	 *
+	 * Callbacks will check the DESTROYING flag and exit early,
+	 * so they won't do any harmful work even if we race.
+	 */
 	for (i = 0; i < QUIC_TIMER_MAX; i++) {
 		conn->timer_deadlines[i] = 0;
 		del_timer_sync(&conn->timers[i]);
@@ -650,6 +863,9 @@ void quic_timer_on_pto_timeout(struct quic_connection *conn)
 	/* Increment PTO count for backoff */
 	if (conn->pto_count < QUIC_TIMER_MAX_BACKOFF)
 		conn->pto_count++;
+
+	trace_quic_pto_timeout(quic_trace_conn_id(&conn->scid),
+			       conn->pto_count, QUIC_PN_SPACE_APPLICATION);
 
 	/* Update timers with backed off PTO */
 	quic_timer_update(conn);

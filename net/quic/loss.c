@@ -11,6 +11,7 @@
 #include <linux/jiffies.h>
 #include <linux/timer.h>
 #include <net/quic.h>
+#include "trace.h"
 
 /*
  * RFC 9002 Constants
@@ -460,6 +461,9 @@ void quic_loss_detection_on_ack_received(struct quic_connection *conn,
 			continue;
 
 		/* This packet is newly acknowledged */
+		trace_quic_packet_acked(quic_trace_conn_id(&conn->scid),
+					pkt->pn, pn_space_idx);
+
 		if (pkt->ack_eliciting) {
 			includes_ack_eliciting = true;
 			pn_space->ack_eliciting_in_flight--;
@@ -507,16 +511,35 @@ void quic_loss_detection_on_ack_received(struct quic_connection *conn,
 
 		quic_rtt_update(&path->rtt, latest_rtt, ack_delay_us);
 
+		trace_quic_rtt_update(quic_trace_conn_id(&conn->scid),
+				      path->rtt.latest_rtt, path->rtt.min_rtt,
+				      path->rtt.smoothed_rtt, path->rtt.rttvar);
+
 		/* Update statistics */
-		conn->stats.min_rtt_us = path->rtt.min_rtt;
-		conn->stats.smoothed_rtt_us = path->rtt.smoothed_rtt;
-		conn->stats.rtt_variance_us = path->rtt.rttvar;
-		conn->stats.latest_rtt_us = path->rtt.latest_rtt;
+		atomic64_set(&conn->stats.min_rtt_us, path->rtt.min_rtt);
+		atomic64_set(&conn->stats.smoothed_rtt_us, path->rtt.smoothed_rtt);
+		atomic64_set(&conn->stats.rtt_variance_us, path->rtt.rttvar);
+		atomic64_set(&conn->stats.latest_rtt_us, path->rtt.latest_rtt);
 	}
 
 	/* Update congestion control */
 	if (path && acked_bytes > 0)
 		quic_cc_on_ack(&path->cc, acked_bytes, &path->rtt);
+
+	/*
+	 * Process ECN feedback (RFC 9000 Section 13.4)
+	 *
+	 * If the ACK frame contains ECN counts (ACK_ECN frame type 0x03),
+	 * validate them and trigger congestion events for any new CE marks.
+	 */
+	if (path && (ack->ecn_ect0 || ack->ecn_ect1 || ack->ecn_ce)) {
+		int ce_count = quic_ecn_validate_ack(path, ack);
+
+		if (ce_count > 0) {
+			/* New CE marks received - trigger congestion response */
+			quic_ecn_process_ce(conn, path, ce_count);
+		}
+	}
 
 	/* Reset PTO count since we got a valid ACK */
 	if (includes_ack_eliciting)
@@ -601,6 +624,9 @@ void quic_loss_detection_detect_lost(struct quic_connection *conn, u8 pn_space_i
 		if (pkt->pn + conn->packet_threshold <= pn_space->largest_acked_pn ||
 		    ktime_before(pkt->sent_time, pkt_time_threshold)) {
 			/* Mark as lost */
+			trace_quic_packet_lost(quic_trace_conn_id(&conn->scid),
+					       pkt->pn, pn_space_idx);
+
 			if (pkt->ack_eliciting)
 				pn_space->ack_eliciting_in_flight--;
 
@@ -630,7 +656,7 @@ void quic_loss_detection_detect_lost(struct quic_connection *conn, u8 pn_space_i
 		/* Update congestion control */
 		if (lost_bytes > 0) {
 			quic_cc_on_loss(&path->cc, lost_bytes);
-			conn->stats.packets_lost++;
+			atomic64_inc(&conn->stats.packets_lost);
 		}
 
 		/* Move lost packets to lost_packets list for retransmission */
@@ -851,8 +877,11 @@ static void quic_loss_send_probe(struct quic_connection *conn, u8 pn_space_idx)
 			skb = skb_clone(pkt->skb, GFP_ATOMIC);
 			if (skb) {
 				spin_unlock_irqrestore(&pn_space->lock, flags);
-				skb_queue_tail(&conn->pending_frames, skb);
-				conn->stats.packets_retransmitted++;
+				if (quic_conn_queue_frame(conn, skb)) {
+					/* Queue full, skip retransmit this cycle */
+					return;
+				}
+				atomic64_inc(&conn->stats.packets_retransmitted);
 				return;
 			}
 		}
@@ -867,7 +896,8 @@ static void quic_loss_send_probe(struct quic_connection *conn, u8 pn_space_idx)
 	if (skb) {
 		u8 *p = skb_put(skb, 1);
 		*p = QUIC_FRAME_PING;
-		skb_queue_tail(&conn->pending_frames, skb);
+		/* Best effort - if queue full, skip PING */
+		quic_conn_queue_frame(conn, skb);
 	}
 
 	/* Schedule TX work to send probe */
@@ -1058,7 +1088,7 @@ void quic_loss_mark_packet_lost(struct quic_connection *conn,
 
 	spin_unlock_irqrestore(&pn_space->lock, flags);
 
-	conn->stats.packets_lost++;
+	atomic64_inc(&conn->stats.packets_lost);
 }
 
 /**
@@ -1150,8 +1180,11 @@ void quic_loss_retransmit_unacked(struct quic_connection *conn)
 				if (skb) {
 					pkt->retransmitted = 1;
 					spin_unlock_irqrestore(&pn_space->lock, flags);
-					skb_queue_tail(&conn->pending_frames, skb);
-					conn->stats.packets_retransmitted++;
+					if (quic_conn_queue_frame(conn, skb)) {
+						/* Queue full, stop retransmissions */
+						return;
+					}
+					atomic64_inc(&conn->stats.packets_retransmitted);
 					spin_lock_irqsave(&pn_space->lock, flags);
 				}
 			}

@@ -270,9 +270,11 @@ struct tquic_path {
 		atomic_t count;               /* Current queue depth */
 	} response;
 
-	/* Multipath extension state (RFC 9369) */
+	/* Multipath extension state (draft-ietf-quic-multipath) */
 	void *mp_ack_state;		/* Per-path ACK tracking */
 	void *abandon_state;		/* Path abandonment state */
+	u64 status_seq_num;		/* Path status sequence number */
+	bool is_backup;			/* Path is in standby/backup mode */
 
 	/*
 	 * PMTUD (Path MTU Discovery) state - RFC 8899 DPLPMTUD

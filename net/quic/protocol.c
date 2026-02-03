@@ -21,6 +21,7 @@
 #include <net/protocol.h>
 #include <net/udp.h>
 #include <net/quic.h>
+#include "early_data.h"
 
 static struct kmem_cache *quic_sock_cachep __read_mostly;
 static struct kmem_cache *quic_conn_cachep __read_mostly;
@@ -53,13 +54,122 @@ MODULE_PARM_DESC(quic_default_max_stream_data, "Default initial max stream data 
 module_param(quic_default_max_streams, uint, 0644);
 MODULE_PARM_DESC(quic_default_max_streams, "Default initial max streams");
 module_param(quic_default_initial_rtt_ms, uint, 0644);
-MODULE_PARM_DESC(quic_default_initial_rtt_ms, "Default initial RTT estimate in milliseconds");
+MODULE_PARM_DESC(quic_default_initial_rtt_ms,
+	"Default initial RTT in ms, 1-60000 (default 333)");
+
+/*
+ * Module parameter validation bounds
+ */
+#define QUIC_IDLE_TIMEOUT_MIN_MS	1
+#define QUIC_IDLE_TIMEOUT_MAX_MS	600000
+#define QUIC_IDLE_TIMEOUT_DEFAULT_MS	30000
+
+#define QUIC_HS_TIMEOUT_MIN_MS		1
+#define QUIC_HS_TIMEOUT_MAX_MS		120000
+#define QUIC_HS_TIMEOUT_DEFAULT_MS	10000
+
+#define QUIC_MAX_DATA_MIN		1024
+#define QUIC_MAX_DATA_MAX		16777216
+#define QUIC_MAX_DATA_DEFAULT		1048576
+
+#define QUIC_MAX_STREAM_DATA_MIN	1024
+#define QUIC_MAX_STREAM_DATA_MAX	16777216
+#define QUIC_MAX_STREAM_DATA_DEFAULT	65536
+
+#define QUIC_MAX_STREAMS_MIN		1
+#define QUIC_MAX_STREAMS_MAX		65535
+#define QUIC_MAX_STREAMS_DEFAULT	100
+
+#define QUIC_INITIAL_RTT_MIN_MS		1
+#define QUIC_INITIAL_RTT_MAX_MS		60000
+#define QUIC_INITIAL_RTT_DEFAULT_MS	333
+
+static inline unsigned int quic_get_validated_idle_timeout(void)
+{
+	unsigned int val = READ_ONCE(quic_default_idle_timeout_ms);
+
+	if (val < QUIC_IDLE_TIMEOUT_MIN_MS || val > QUIC_IDLE_TIMEOUT_MAX_MS) {
+		pr_warn_once("QUIC: idle_timeout_ms %u out of range, using %u\n",
+			     val, QUIC_IDLE_TIMEOUT_DEFAULT_MS);
+		return QUIC_IDLE_TIMEOUT_DEFAULT_MS;
+	}
+	return val;
+}
+
+static inline unsigned int quic_get_validated_handshake_timeout(void)
+{
+	unsigned int val = READ_ONCE(quic_default_handshake_timeout_ms);
+
+	if (val < QUIC_HS_TIMEOUT_MIN_MS || val > QUIC_HS_TIMEOUT_MAX_MS) {
+		pr_warn_once("QUIC: handshake_timeout_ms %u out of range, using %u\n",
+			     val, QUIC_HS_TIMEOUT_DEFAULT_MS);
+		return QUIC_HS_TIMEOUT_DEFAULT_MS;
+	}
+	return val;
+}
+
+static inline unsigned int quic_get_validated_max_data(void)
+{
+	unsigned int val = READ_ONCE(quic_default_max_data);
+
+	if (val < QUIC_MAX_DATA_MIN || val > QUIC_MAX_DATA_MAX) {
+		pr_warn_once("QUIC: max_data %u out of range, using %u\n",
+			     val, QUIC_MAX_DATA_DEFAULT);
+		return QUIC_MAX_DATA_DEFAULT;
+	}
+	return val;
+}
+
+static inline unsigned int quic_get_validated_max_stream_data(void)
+{
+	unsigned int val = READ_ONCE(quic_default_max_stream_data);
+
+	if (val < QUIC_MAX_STREAM_DATA_MIN || val > QUIC_MAX_STREAM_DATA_MAX) {
+		pr_warn_once("QUIC: max_stream_data %u out of range, using %u\n",
+			     val, QUIC_MAX_STREAM_DATA_DEFAULT);
+		return QUIC_MAX_STREAM_DATA_DEFAULT;
+	}
+	return val;
+}
+
+static inline unsigned int quic_get_validated_max_streams(void)
+{
+	unsigned int val = READ_ONCE(quic_default_max_streams);
+
+	if (val < QUIC_MAX_STREAMS_MIN || val > QUIC_MAX_STREAMS_MAX) {
+		pr_warn_once("QUIC: max_streams %u out of range, using %u\n",
+			     val, QUIC_MAX_STREAMS_DEFAULT);
+		return QUIC_MAX_STREAMS_DEFAULT;
+	}
+	return val;
+}
+
+static inline unsigned int quic_get_validated_initial_rtt(void)
+{
+	unsigned int val = READ_ONCE(quic_default_initial_rtt_ms);
+
+	if (val < QUIC_INITIAL_RTT_MIN_MS || val > QUIC_INITIAL_RTT_MAX_MS) {
+		pr_warn_once("QUIC: initial_rtt_ms %u out of range, using %u\n",
+			     val, QUIC_INITIAL_RTT_DEFAULT_MS);
+		return QUIC_INITIAL_RTT_DEFAULT_MS;
+	}
+	return val;
+}
 
 static atomic_long_t quic_memory_allocated;
 static struct percpu_counter quic_sockets_allocated;
 static struct percpu_counter quic_orphan_count;
 
 static int quic_memory_pressure;
+
+/*
+ * Guard against double initialization on module reload or multiple init calls.
+ * These flags track which subsystems have been successfully initialized to
+ * ensure proper cleanup and prevent resource leaks (e.g., calling proto_register
+ * twice causes kernel warnings, double percpu_counter_init leaks memory).
+ */
+static bool quic_proto_registered __read_mostly;
+static bool quic_percpu_initialized __read_mostly;
 
 /* QUIC protocol identifier */
 static struct proto quic_prot = {
@@ -311,6 +421,7 @@ int quic_init_sock(struct sock *sk)
 	qsk->alpn_len = 0;
 	qsk->session_ticket = NULL;
 	qsk->session_ticket_len = 0;
+	qsk->session_ticket_data = NULL;
 	qsk->token = NULL;
 	qsk->token_len = 0;
 
@@ -342,6 +453,7 @@ void quic_destroy_sock(struct sock *sk)
 
 	kfree(qsk->alpn);
 	kfree(qsk->session_ticket);
+	kfree(qsk->session_ticket_data);
 	kfree(qsk->token);
 
 	skb_queue_purge(&qsk->event_queue);
@@ -482,6 +594,38 @@ int quic_setsockopt(struct sock *sk, int level, int optname,
 		} else {
 			err = -ENOTCONN;
 		}
+		break;
+
+	case QUIC_SOCKOPT_SESSION_TICKET:
+		/*
+		 * Set session ticket for 0-RTT resumption (RFC 9001 Section 4.6)
+		 */
+		if (optlen > sizeof(struct quic_session_ticket)) {
+			err = -EINVAL;
+			break;
+		}
+		{
+			struct quic_session_ticket ticket;
+
+			if (copy_from_sockptr(&ticket, optval, optlen)) {
+				err = -EFAULT;
+				break;
+			}
+			err = quic_session_ticket_store(qsk, &ticket);
+		}
+		break;
+
+	case QUIC_SOCKOPT_EARLY_DATA:
+		/* Enable/disable 0-RTT early data */
+		if (optlen != sizeof(int)) {
+			err = -EINVAL;
+			break;
+		}
+		if (copy_from_sockptr(&val, optval, sizeof(val))) {
+			err = -EFAULT;
+			break;
+		}
+		qsk->zero_rtt_enabled = !!val;
 		break;
 
 	default:
@@ -1060,6 +1204,12 @@ static int __init quic_proto_register(void)
 {
 	int err;
 
+	/* Guard against double registration */
+	if (quic_proto_registered) {
+		pr_warn("QUIC: protocol already registered, skipping\n");
+		return 0;
+	}
+
 	err = proto_register(&quic_prot, 1);
 	if (err)
 		return err;
@@ -1081,16 +1231,21 @@ static int __init quic_proto_register(void)
 		return err;
 	}
 
+	quic_proto_registered = true;
 	return 0;
 }
 
 static void quic_proto_unregister(void)
 {
+	if (!quic_proto_registered)
+		return;
+
 	sock_unregister(PF_QUIC);
 #if IS_ENABLED(CONFIG_IPV6)
 	proto_unregister(&quicv6_prot);
 #endif
 	proto_unregister(&quic_prot);
+	quic_proto_registered = false;
 }
 
 static int __init quic_init(void)
@@ -1121,13 +1276,20 @@ static int __init quic_init(void)
 		goto out_conn_cache;
 	}
 
-	err = percpu_counter_init(&quic_sockets_allocated, 0, GFP_KERNEL);
-	if (err)
-		goto out_stream_cache;
+	/* Guard against double percpu_counter initialization */
+	if (quic_percpu_initialized) {
+		pr_warn("QUIC: percpu counters already initialized\n");
+	} else {
+		err = percpu_counter_init(&quic_sockets_allocated, 0, GFP_KERNEL);
+		if (err)
+			goto out_stream_cache;
 
-	err = percpu_counter_init(&quic_orphan_count, 0, GFP_KERNEL);
-	if (err)
-		goto out_sockets_counter;
+		err = percpu_counter_init(&quic_orphan_count, 0, GFP_KERNEL);
+		if (err)
+			goto out_sockets_counter;
+
+		quic_percpu_initialized = true;
+	}
 
 	err = quic_cid_hash_init();
 	if (err)
@@ -1149,9 +1311,12 @@ out_proto:
 out_cid_hash:
 	quic_cid_hash_cleanup();
 out_orphan_counter:
+	if (!quic_percpu_initialized)
+		goto out_stream_cache;
 	percpu_counter_destroy(&quic_orphan_count);
 out_sockets_counter:
 	percpu_counter_destroy(&quic_sockets_allocated);
+	quic_percpu_initialized = false;
 out_stream_cache:
 	kmem_cache_destroy(quic_stream_cachep);
 out_conn_cache:
@@ -1167,8 +1332,11 @@ static void __exit quic_exit(void)
 	quic_proto_unregister();
 	quic_cid_hash_cleanup();
 
-	percpu_counter_destroy(&quic_orphan_count);
-	percpu_counter_destroy(&quic_sockets_allocated);
+	if (quic_percpu_initialized) {
+		percpu_counter_destroy(&quic_orphan_count);
+		percpu_counter_destroy(&quic_sockets_allocated);
+		quic_percpu_initialized = false;
+	}
 
 	kmem_cache_destroy(quic_stream_cachep);
 	kmem_cache_destroy(quic_conn_cachep);

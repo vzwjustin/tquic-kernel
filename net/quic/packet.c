@@ -10,6 +10,8 @@
 #include <linux/slab.h>
 #include <linux/skbuff.h>
 #include <net/quic.h>
+#include "trace.h"
+#include "mp_frame.h"
 
 /* QUIC packet header forms */
 #define QUIC_HEADER_FORM_LONG	0x80
@@ -452,8 +454,12 @@ struct sk_buff *quic_packet_build(struct quic_connection *conn,
 	}
 
 	/* Update statistics */
-	conn->stats.packets_sent++;
-	conn->stats.bytes_sent += skb->len;
+	atomic64_inc(&conn->stats.packets_sent);
+	atomic64_add(skb->len, &conn->stats.bytes_sent);
+
+	trace_quic_packet_send(quic_trace_conn_id(&conn->scid),
+			       sent ? sent->pn : 0, skb->len,
+			       sent ? sent->pn_space : QUIC_PN_SPACE_APPLICATION);
 
 	return skb;
 }
@@ -541,8 +547,8 @@ void quic_packet_process(struct quic_connection *conn, struct sk_buff *skb)
 	quic_frame_process_all(conn, skb, level);
 
 	/* Update statistics */
-	conn->stats.packets_received++;
-	conn->stats.bytes_received += skb->len;
+	atomic64_inc(&conn->stats.packets_received);
+	atomic64_add(skb->len, &conn->stats.bytes_received);
 
 	kfree_skb(skb);
 }
@@ -839,7 +845,36 @@ int quic_frame_process_one(struct quic_connection *conn, const u8 *data,
 		}
 		return 1;
 
+	case QUIC_FRAME_IMMEDIATE_ACK:
+		/*
+		 * IMMEDIATE_ACK frame (draft-ietf-quic-ack-frequency)
+		 * Request immediate acknowledgment from receiver.
+		 */
+		return quic_immediate_ack_process(conn) == 0 ? 1 : -EINVAL;
+
+	case QUIC_FRAME_DATAGRAM:
+	case QUIC_FRAME_DATAGRAM_LEN:
+		return quic_frame_process_datagram(conn, data, len);
+
 	default:
+		/*
+		 * Check for ACK_FREQUENCY frame (type 0xaf).
+		 * This is a 2-byte varint frame type, so we need to check
+		 * if we have a multi-byte frame type starting with 0x40.
+		 */
+		if (frame_type == 0x40 && len >= 2 && data[1] == 0xaf) {
+			/*
+			 * ACK_FREQUENCY frame (draft-ietf-quic-ack-frequency)
+			 * Skip the 2-byte frame type and process the frame.
+			 */
+			int consumed = quic_ack_frequency_process(conn,
+								  data + 2,
+								  len - 2);
+			if (consumed < 0)
+				return consumed;
+			return consumed + 2;  /* Include frame type bytes */
+		}
+
 		/* Unknown frame type */
 		return -EPROTO;
 	}
@@ -865,7 +900,8 @@ static int quic_frame_process_crypto(struct quic_connection *conn,
 		return varint_len;
 	offset += varint_len;
 
-	if (offset + crypto_len > len)
+	/* Bounds check using subtraction to avoid integer overflow */
+	if (crypto_len > len - offset)
 		return -EINVAL;
 
 	/* Pass crypto data to TLS layer (via userspace or kernel TLS) */
@@ -922,7 +958,8 @@ static int quic_frame_process_stream(struct quic_connection *conn,
 		stream_len = len - offset;
 	}
 
-	if (offset + stream_len > len)
+	/* Bounds check using subtraction to avoid integer overflow */
+	if (stream_len > len - offset)
 		return -EINVAL;
 
 	/* Find or create stream */
@@ -931,6 +968,25 @@ static int quic_frame_process_stream(struct quic_connection *conn,
 		stream = quic_stream_create(conn, stream_id);
 		if (!stream)
 			return -ENOMEM;
+	}
+
+	/*
+	 * RFC 9000 Section 4.1: Flow Control Validation
+	 *
+	 * A receiver MUST close the connection with a FLOW_CONTROL_ERROR
+	 * error if the sender violates the advertised connection or stream
+	 * data limits. Check both stream-level and connection-level limits
+	 * before accepting the data.
+	 */
+	if (quic_flow_check_recv_limits(stream, stream_offset, stream_len)) {
+		refcount_dec(&stream->refcnt);
+		/*
+		 * Flow control violation detected. Close the connection
+		 * with FLOW_CONTROL_ERROR (0x03) per RFC 9000.
+		 */
+		quic_conn_close(conn, QUIC_ERROR_FLOW_CONTROL_ERROR,
+				"flow control limit exceeded", 29, false);
+		return -EDQUOT;
 	}
 
 	/* Deliver data to stream */
@@ -1048,15 +1104,15 @@ static int quic_frame_process_new_cid(struct quic_connection *conn,
 	if (cid_len > QUIC_MAX_CONNECTION_ID_LEN)
 		return -EINVAL;
 
-	/* Connection ID */
-	if (offset + cid_len > len)
+	/* Connection ID - use subtraction to avoid integer overflow */
+	if (cid_len > len - offset)
 		return -EINVAL;
 	cid.len = cid_len;
 	memcpy(cid.data, data + offset, cid_len);
 	offset += cid_len;
 
-	/* Stateless Reset Token */
-	if (offset + 16 > len)
+	/* Stateless Reset Token - use subtraction to avoid overflow */
+	if (len < 16 || offset > len - 16)
 		return -EINVAL;
 	memcpy(reset_token, data + offset, 16);
 	offset += 16;
@@ -1096,7 +1152,8 @@ static int quic_frame_process_connection_close(struct quic_connection *conn,
 		return varint_len;
 	offset += varint_len;
 
-	if (offset + reason_len > len)
+	/* Bounds check using subtraction to avoid integer overflow */
+	if (reason_len > len - offset)
 		return -EINVAL;
 
 	/* Store close info */

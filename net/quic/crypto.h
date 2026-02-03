@@ -381,6 +381,112 @@ int quic_verify_retry_tag(u32 version,
 			  const u8 *tag);
 
 /*
+ * TLS 1.3 Extension Types (RFC 8446, RFC 7301, RFC 6066)
+ */
+#define TLS_EXT_SERVER_NAME		0	/* RFC 6066 - SNI */
+#define TLS_EXT_ALPN			16	/* RFC 7301 - Application-Layer Protocol Negotiation */
+#define TLS_EXT_SUPPORTED_VERSIONS	43	/* RFC 8446 - Supported Versions */
+#define TLS_EXT_KEY_SHARE		51	/* RFC 8446 - Key Share */
+#define TLS_EXT_QUIC_TRANSPORT_PARAMS	0x39	/* RFC 9001 - QUIC Transport Parameters */
+
+/*
+ * TLS Extension Building
+ */
+
+/**
+ * quic_tls_build_sni_extension - Build SNI extension for ClientHello
+ * @hostname: Server hostname (null-terminated)
+ * @buf: Output buffer
+ * @buf_len: Buffer size
+ *
+ * Builds the server_name extension (RFC 6066) for TLS ClientHello.
+ *
+ * Return: Number of bytes written on success, negative error code on failure
+ */
+int quic_tls_build_sni_extension(const char *hostname, u8 *buf, size_t buf_len);
+
+/**
+ * quic_tls_build_alpn_extension - Build ALPN extension
+ * @alpn_list: ALPN protocol list (length-prefixed format per RFC 7301)
+ * @alpn_len: Length of ALPN list
+ * @buf: Output buffer
+ * @buf_len: Buffer size
+ *
+ * Builds the application_layer_protocol_negotiation extension (RFC 7301).
+ * Input format: each protocol is prefixed by its length byte.
+ * Example: "\x02h3\x08http/1.1" for ["h3", "http/1.1"]
+ *
+ * Return: Number of bytes written on success, negative error code on failure
+ */
+int quic_tls_build_alpn_extension(const u8 *alpn_list, size_t alpn_len,
+				  u8 *buf, size_t buf_len);
+
+/**
+ * quic_tls_parse_sni_extension - Parse SNI extension from ClientHello
+ * @data: Extension data (after type and length)
+ * @data_len: Length of extension data
+ * @hostname: Output buffer for hostname
+ * @hostname_len: In: buffer size, Out: actual hostname length
+ *
+ * Parses the server_name extension from a ClientHello.
+ *
+ * Return: 0 on success, -EINVAL on parse error, -ENOSPC if buffer too small
+ */
+int quic_tls_parse_sni_extension(const u8 *data, size_t data_len,
+				 char *hostname, size_t *hostname_len);
+
+/**
+ * quic_tls_parse_alpn_extension - Parse ALPN extension
+ * @data: Extension data (after type and length)
+ * @data_len: Length of extension data
+ * @alpn_list: Output buffer for ALPN list
+ * @alpn_len: In: buffer size, Out: actual list length
+ *
+ * Parses the ALPN extension. Output format is the same as input to
+ * quic_tls_build_alpn_extension (length-prefixed protocol list).
+ *
+ * Return: 0 on success, -EINVAL on parse error, -ENOSPC if buffer too small
+ */
+int quic_tls_parse_alpn_extension(const u8 *data, size_t data_len,
+				  u8 *alpn_list, size_t *alpn_len);
+
+/**
+ * quic_tls_select_alpn - Server ALPN selection
+ * @client_alpn: Client's ALPN list (length-prefixed format)
+ * @client_alpn_len: Length of client list
+ * @server_alpn: Server's supported ALPN list (length-prefixed format)
+ * @server_alpn_len: Length of server list
+ * @selected: Output buffer for selected protocol
+ * @selected_len: In: buffer size, Out: selected protocol length
+ *
+ * Selects the first protocol from client's list that server supports.
+ * Per RFC 7301, server preference should be used when both lists have
+ * common protocols.
+ *
+ * Return: 0 on success (protocol selected),
+ *         -ENOENT if no common protocol,
+ *         negative error code on failure
+ */
+int quic_tls_select_alpn(const u8 *client_alpn, size_t client_alpn_len,
+			 const u8 *server_alpn, size_t server_alpn_len,
+			 u8 *selected, size_t *selected_len);
+
+/**
+ * quic_tls_validate_alpn - Validate server's ALPN selection
+ * @offered_alpn: Client's offered ALPN list (length-prefixed format)
+ * @offered_len: Length of offered list
+ * @selected: Server's selected protocol (length-prefixed, single entry)
+ * @selected_len: Length of selected protocol
+ *
+ * Verifies that server's selected ALPN was in client's offered list.
+ * Per RFC 7301 Section 3.2, server MUST NOT select a protocol not offered.
+ *
+ * Return: 0 if valid, -EPROTO if not in offered list
+ */
+int quic_tls_validate_alpn(const u8 *offered_alpn, size_t offered_len,
+			   const u8 *selected, size_t selected_len);
+
+/*
  * Utility Functions
  */
 

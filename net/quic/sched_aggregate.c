@@ -22,6 +22,7 @@
 #include <linux/list.h>
 #include <linux/rcupdate.h>
 #include <linux/ktime.h>
+#include <linux/spinlock.h>
 
 #include "tquic_sched.h"
 #include "tquic_bonding.h"
@@ -41,9 +42,14 @@
  * Maintains cached capacity calculations for each path to avoid
  * recalculating on every packet. Updates periodically based on
  * cwnd and RTT changes.
+ *
+ * Locking: The lock protects capacity data from concurrent access between
+ * get_path() (send path) and path_added()/path_removed()/loss_detected()
+ * (connection management and feedback paths).
  */
 struct aggregate_sched_data {
-	u32 path_capacities[TQUIC_MAX_PATHS];   /* Cached cwnd/RTT */
+	spinlock_t lock;			 /* Protects scheduler state */
+	u32 path_capacities[TQUIC_MAX_PATHS];    /* Cached cwnd/RTT */
 	u32 total_capacity;                      /* Sum for proportional selection */
 	ktime_t last_capacity_update;            /* Avoid recalc every packet */
 };
@@ -88,9 +94,11 @@ static u32 calc_path_capacity(struct tquic_path *path)
  *
  * The minimum floor ensures slower paths (e.g., cellular backup) still
  * receive some traffic, keeping them "warm" for failover.
+ *
+ * Must be called with rcu_read_lock() AND sd->lock held.
  */
-static void update_capacities(struct tquic_connection *conn,
-			      struct aggregate_sched_data *sd)
+static void update_capacities_locked(struct tquic_connection *conn,
+				     struct aggregate_sched_data *sd)
 {
 	struct tquic_path *path;
 	u32 total = 0;
@@ -154,18 +162,21 @@ static int aggregate_get_path(struct tquic_connection *conn,
 	u32 max_capacity = 0;
 	u32 second_capacity = 0;
 	int idx = 0;
+	unsigned long irqflags;
 
 	if (!sd)
 		return -EINVAL;
 
 	rcu_read_lock();
+	spin_lock_irqsave(&sd->lock, irqflags);
 
 	/* Update capacities periodically (not every packet) */
 	if (ktime_ms_delta(ktime_get(), sd->last_capacity_update) >
 	    TQUIC_CAPACITY_UPDATE_MS)
-		update_capacities(conn, sd);
+		update_capacities_locked(conn, sd);
 
 	if (sd->total_capacity == 0) {
+		spin_unlock_irqrestore(&sd->lock, irqflags);
 		rcu_read_unlock();
 		return -ENOENT;
 	}
@@ -214,6 +225,8 @@ static int aggregate_get_path(struct tquic_connection *conn,
 		idx++;
 	}
 
+	spin_unlock_irqrestore(&sd->lock, irqflags);
+
 	if (!best) {
 		rcu_read_unlock();
 		return -ENOENT;
@@ -235,10 +248,12 @@ static void aggregate_init(struct tquic_connection *conn)
 	struct aggregate_sched_data *sd;
 
 	sd = kzalloc(sizeof(*sd), GFP_KERNEL);
-	if (sd) {
-		sd->last_capacity_update = ktime_get();
-		conn->sched_priv = sd;
-	}
+	if (!sd)
+		return;
+
+	spin_lock_init(&sd->lock);
+	sd->last_capacity_update = ktime_get();
+	conn->sched_priv = sd;
 }
 
 /*
@@ -257,9 +272,14 @@ static void aggregate_path_added(struct tquic_connection *conn,
 				 struct tquic_path *path)
 {
 	struct aggregate_sched_data *sd = conn->sched_priv;
+	unsigned long irqflags;
 
-	if (sd)
-		sd->last_capacity_update = 0;  /* Force recalc */
+	if (!sd)
+		return;
+
+	spin_lock_irqsave(&sd->lock, irqflags);
+	sd->last_capacity_update = 0;  /* Force recalc */
+	spin_unlock_irqrestore(&sd->lock, irqflags);
 }
 
 /*
@@ -269,9 +289,14 @@ static void aggregate_path_removed(struct tquic_connection *conn,
 				   struct tquic_path *path)
 {
 	struct aggregate_sched_data *sd = conn->sched_priv;
+	unsigned long irqflags;
 
-	if (sd)
-		sd->last_capacity_update = 0;  /* Force recalc */
+	if (!sd)
+		return;
+
+	spin_lock_irqsave(&sd->lock, irqflags);
+	sd->last_capacity_update = 0;  /* Force recalc */
+	spin_unlock_irqrestore(&sd->lock, irqflags);
 }
 
 /*
@@ -288,6 +313,29 @@ static void aggregate_ack_received(struct tquic_connection *conn,
 }
 
 /*
+ * Loss detected notification
+ *
+ * Trigger capacity recalculation on loss events since cwnd changes.
+ * The aggregate scheduler relies on cwnd/RTT ratios for capacity,
+ * so loss-induced cwnd reductions should trigger recalculation.
+ */
+static void aggregate_loss_detected(struct tquic_connection *conn,
+				    struct tquic_path *path,
+				    u64 lost_bytes)
+{
+	struct aggregate_sched_data *sd = conn->sched_priv;
+	unsigned long irqflags;
+
+	if (!sd)
+		return;
+
+	/* Force capacity recalculation on loss (cwnd will have changed) */
+	spin_lock_irqsave(&sd->lock, irqflags);
+	sd->last_capacity_update = 0;
+	spin_unlock_irqrestore(&sd->lock, irqflags);
+}
+
+/*
  * Aggregate scheduler operations structure
  *
  * Exported as the default scheduler for TQUIC WAN bonding.
@@ -301,6 +349,7 @@ struct tquic_sched_ops tquic_sched_aggregate = {
 	.path_added     = aggregate_path_added,
 	.path_removed   = aggregate_path_removed,
 	.ack_received   = aggregate_ack_received,
+	.loss_detected  = aggregate_loss_detected,
 };
 EXPORT_SYMBOL_GPL(tquic_sched_aggregate);
 

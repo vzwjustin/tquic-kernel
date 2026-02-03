@@ -40,9 +40,6 @@
 /* Multicast group offsets */
 #define TQUIC_MCGRP_EVENTS_OFFSET	0
 
-/* Maximum paths per connection (DoS prevention) */
-#define TQUIC_MAX_PATHS_PER_CONN	256
-
 /*
  * Command definitions
  */
@@ -395,10 +392,6 @@ static struct tquic_path_info *tquic_path_create(struct tquic_conn_info *conn)
 {
 	struct tquic_path_info *path;
 
-	/* Prevent DoS via unbounded path creation */
-	if (conn->path_count >= TQUIC_MAX_PATHS_PER_CONN)
-		return NULL;
-
 	path = kzalloc(sizeof(*path), GFP_KERNEL);
 	if (!path)
 		return NULL;
@@ -701,14 +694,6 @@ static int tquic_nl_cmd_path_add(struct sk_buff *skb, struct genl_info *info)
 	return genlmsg_reply(reply, info);
 }
 
-/**
- * tquic_nl_cmd_path_remove - Handle TQUIC_CMD_PATH_REMOVE
- * @skb: Request socket buffer
- * @info: Generic netlink info
- *
- * Remove a path from a TQUIC connection.
- *
- * Returns: 0 on success, negative error code on failure
  */
 static int tquic_nl_cmd_path_remove(struct sk_buff *skb, struct genl_info *info)
 {
@@ -1513,12 +1498,10 @@ static const struct genl_ops tquic_genl_ops[] = {
 	{
 		.cmd	= TQUIC_CMD_PATH_GET,
 		.doit	= tquic_nl_cmd_path_get,
-		.flags	= GENL_ADMIN_PERM,
 	},
 	{
 		.cmd	= TQUIC_CMD_PATH_LIST,
 		.dumpit	= tquic_nl_cmd_path_dump,
-		.flags	= GENL_ADMIN_PERM,
 	},
 	{
 		.cmd	= TQUIC_CMD_SCHED_SET,
@@ -1528,17 +1511,14 @@ static const struct genl_ops tquic_genl_ops[] = {
 	{
 		.cmd	= TQUIC_CMD_SCHED_GET,
 		.doit	= tquic_nl_cmd_sched_get,
-		.flags	= GENL_ADMIN_PERM,
 	},
 	{
 		.cmd	= TQUIC_CMD_STATS_GET,
 		.doit	= tquic_nl_cmd_stats_get,
-		.flags	= GENL_ADMIN_PERM,
 	},
 	{
 		.cmd	= TQUIC_CMD_CONN_GET,
 		.doit	= tquic_nl_cmd_conn_get,
-		.flags	= GENL_ADMIN_PERM,
 	},
 };
 

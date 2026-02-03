@@ -266,8 +266,9 @@ void quic_flow_control_update_max_data(struct quic_connection *conn)
 	/* Create and queue MAX_DATA frame */
 	skb = quic_flow_create_max_data_frame(conn, new_max_data);
 	if (skb) {
-		skb_queue_tail(&conn->pending_frames, skb);
-		schedule_work(&conn->tx_work);
+		/* Best effort - flow control frames can be regenerated */
+		if (!quic_conn_queue_frame(conn, skb))
+			schedule_work(&conn->tx_work);
 	}
 }
 EXPORT_SYMBOL(quic_flow_control_update_max_data);
@@ -409,12 +410,57 @@ void quic_stream_flow_control_on_data_sent(struct quic_stream *stream,
 EXPORT_SYMBOL(quic_stream_flow_control_on_data_sent);
 
 /**
+ * quic_stream_flow_control_check_recv_limit - Check if receiving would exceed limits
+ * @stream: QUIC stream
+ * @offset: Offset of received data
+ * @len: Length of received data
+ *
+ * RFC 9000 Section 4.1: A receiver MUST close the connection with a
+ * FLOW_CONTROL_ERROR error if the sender violates the advertised
+ * stream data limit.
+ *
+ * Returns: 0 if data can be accepted, -EDQUOT if limit exceeded
+ */
+int quic_stream_flow_control_check_recv_limit(struct quic_stream *stream,
+					      u64 offset, u64 len)
+{
+	u64 new_highest;
+
+	if (len == 0)
+		return 0;
+
+	/*
+	 * RFC 9000 Section 4.1: The highest offset of data received on a
+	 * stream MUST NOT exceed the MAX_STREAM_DATA limit for that stream.
+	 *
+	 * Check if receiving this data would exceed the stream-level
+	 * flow control limit we advertised to the peer.
+	 */
+	new_highest = offset + len;
+	if (new_highest > stream->max_stream_data_local) {
+		/*
+		 * RFC 9000 Section 4.1: A receiver advertises a maximum
+		 * stream data limit. If the sender exceeds this limit,
+		 * the receiver MUST close the connection with a
+		 * FLOW_CONTROL_ERROR.
+		 */
+		return -EDQUOT;
+	}
+
+	return 0;
+}
+EXPORT_SYMBOL(quic_stream_flow_control_check_recv_limit);
+
+/**
  * quic_stream_flow_control_on_data_recvd - Update stream after receiving
  * @stream: QUIC stream
  * @offset: Offset of received data
  * @len: Length of received data
  *
  * Called when data is received on a stream. May trigger MAX_STREAM_DATA.
+ *
+ * Note: The caller MUST call quic_stream_flow_control_check_recv_limit() first
+ * to ensure the data does not exceed flow control limits.
  */
 void quic_stream_flow_control_on_data_recvd(struct quic_stream *stream,
 					    u64 offset, u64 len)
@@ -427,10 +473,15 @@ void quic_stream_flow_control_on_data_recvd(struct quic_stream *stream,
 
 	spin_lock(&recv->lock);
 
-	/* Track highest offset seen */
-	new_highest = offset + len;
-	if (new_highest > recv->highest_offset)
-		recv->highest_offset = new_highest;
+	/*
+	 * Track highest offset seen.
+	 * Check for overflow before computing new_highest.
+	 */
+	if (len <= U64_MAX - offset) {
+		new_highest = offset + len;
+		if (new_highest > recv->highest_offset)
+			recv->highest_offset = new_highest;
+	}
 
 	/*
 	 * Check if we should send MAX_STREAM_DATA. We update when
@@ -495,8 +546,9 @@ void quic_stream_flow_control_update_max_stream_data(struct quic_stream *stream)
 	skb = quic_flow_create_max_stream_data_frame(stream->id,
 						     new_max_stream_data);
 	if (skb) {
-		skb_queue_tail(&conn->pending_frames, skb);
-		schedule_work(&conn->tx_work);
+		/* Best effort - flow control frames can be regenerated */
+		if (!quic_conn_queue_frame(conn, skb))
+			schedule_work(&conn->tx_work);
 	}
 }
 
@@ -549,8 +601,9 @@ void quic_stream_flow_control_send_blocked(struct quic_stream *stream)
 
 	skb = quic_flow_create_stream_data_blocked_frame(stream->id, limit);
 	if (skb) {
-		skb_queue_tail(&conn->pending_frames, skb);
-		schedule_work(&conn->tx_work);
+		/* Best effort - BLOCKED frames are advisory */
+		if (!quic_conn_queue_frame(conn, skb))
+			schedule_work(&conn->tx_work);
 	}
 }
 
@@ -732,8 +785,9 @@ void quic_streams_update_max_streams(struct quic_connection *conn,
 		skb = quic_flow_create_max_streams_frame(new_max_streams,
 							 unidirectional);
 		if (skb) {
-			skb_queue_tail(&conn->pending_frames, skb);
-			schedule_work(&conn->tx_work);
+			/* Best effort - flow control frames can be regenerated */
+			if (!quic_conn_queue_frame(conn, skb))
+				schedule_work(&conn->tx_work);
 		}
 	}
 }
@@ -788,8 +842,9 @@ void quic_streams_send_blocked(struct quic_connection *conn, bool unidirectional
 
 	skb = quic_flow_create_streams_blocked_frame(limit, unidirectional);
 	if (skb) {
-		skb_queue_tail(&conn->pending_frames, skb);
-		schedule_work(&conn->tx_work);
+		/* Best effort - BLOCKED frames are advisory */
+		if (!quic_conn_queue_frame(conn, skb))
+			schedule_work(&conn->tx_work);
 	}
 }
 
@@ -816,8 +871,9 @@ void quic_flow_control_send_data_blocked(struct quic_connection *conn)
 
 	skb = quic_flow_create_data_blocked_frame(limit);
 	if (skb) {
-		skb_queue_tail(&conn->pending_frames, skb);
-		schedule_work(&conn->tx_work);
+		/* Best effort - BLOCKED frames are advisory */
+		if (!quic_conn_queue_frame(conn, skb))
+			schedule_work(&conn->tx_work);
 	}
 }
 
@@ -924,7 +980,7 @@ static struct sk_buff *quic_flow_create_max_data_frame(struct quic_connection *c
 	p = skb_put(skb, quic_varint_len(max_data));
 	quic_varint_encode(max_data, p);
 
-	conn->stats.frames_sent++;
+	atomic64_inc(&conn->stats.frames_sent);
 
 	return skb;
 }
@@ -1181,12 +1237,57 @@ void quic_flow_on_stream_data_sent(struct quic_stream *stream, u64 bytes)
 }
 
 /**
+ * quic_flow_check_recv_limits - Check all receive flow control limits
+ * @stream: QUIC stream
+ * @offset: Offset of received data
+ * @len: Length of received data
+ *
+ * RFC 9000 Section 4.1: A receiver MUST close the connection with a
+ * FLOW_CONTROL_ERROR error if the sender violates the advertised
+ * connection or stream data limits.
+ *
+ * Performs combined check of both connection-level and stream-level
+ * flow control to determine if received data can be accepted.
+ *
+ * Returns: 0 if data can be accepted, -EDQUOT if limits exceeded
+ */
+int quic_flow_check_recv_limits(struct quic_stream *stream, u64 offset, u64 len)
+{
+	struct quic_connection *conn = stream->conn;
+	int err;
+
+	/*
+	 * Check stream-level flow control first (RFC 9000 Section 4.1).
+	 * The highest offset of data received on a stream MUST NOT exceed
+	 * the MAX_STREAM_DATA limit for that stream.
+	 */
+	err = quic_stream_flow_control_check_recv_limit(stream, offset, len);
+	if (err)
+		return err;
+
+	/*
+	 * Check connection-level flow control (RFC 9000 Section 4.1).
+	 * The sum of data received on all streams MUST NOT exceed
+	 * the MAX_DATA limit for the connection.
+	 */
+	err = quic_flow_control_check_recv_limit(conn, len);
+	if (err)
+		return err;
+
+	return 0;
+}
+EXPORT_SYMBOL(quic_flow_check_recv_limits);
+
+/**
  * quic_flow_on_stream_data_recvd - Update all flow control after receiving
  * @stream: QUIC stream
  * @offset: Offset of received data
  * @len: Length of received data
  *
  * Updates both connection-level and stream-level flow control state.
+ *
+ * Note: The caller MUST call quic_flow_check_recv_limits() first to
+ * ensure the data does not exceed flow control limits.
  */
 void quic_flow_on_stream_data_recvd(struct quic_stream *stream,
 				    u64 offset, u64 len)

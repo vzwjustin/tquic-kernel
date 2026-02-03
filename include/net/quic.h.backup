@@ -313,8 +313,8 @@ struct quic_path {
 
 	u32			mtu;
 	u32			amplification_limit;
-	atomic64_t		bytes_sent;
-	atomic64_t		bytes_recv;
+	u64			bytes_sent;
+	u64			bytes_recv;
 	u8			validated:1;
 	u8			active:1;
 	u8			challenge_pending:1;
@@ -396,40 +396,6 @@ struct quic_cid_entry {
 	u64			sequence_number;
 	u64			retire_prior_to;
 	u8			used:1;
-};
-
-/* QUIC connection statistics - atomic counters for thread safety */
-struct quic_stats {
-	/* Packet counters */
-	atomic64_t	packets_sent;
-	atomic64_t	packets_received;
-	atomic64_t	packets_lost;
-	atomic64_t	packets_retransmitted;
-	atomic64_t	bytes_sent;
-	atomic64_t	bytes_received;
-
-	/* Stream counters */
-	atomic64_t	streams_opened;
-	atomic64_t	streams_closed;
-
-	/* Frame counters */
-	atomic64_t	frames_sent;
-
-	/* Multipath scheduler statistics */
-	atomic64_t	total_packets;
-	atomic64_t	total_bytes;
-	atomic64_t	sched_decisions;
-	atomic64_t	path_switches;
-	atomic64_t	reinjections;
-
-	/* RTT measurements (in microseconds) */
-	atomic64_t	min_rtt_us;
-	atomic64_t	smoothed_rtt_us;
-	atomic64_t	latest_rtt_us;
-	atomic64_t	rtt_variance_us;
-
-	/* Handshake timing */
-	atomic64_t	handshake_time_us;
 };
 
 /* QUIC connection */

@@ -254,6 +254,11 @@ static inline bool tquic_path_can_send(const struct tquic_path *path)
 	return path->cc.bytes_in_flight < path->cc.cwnd;
 }
 
+/*
+ * Find a path by ID in a connection's path list.
+ *
+ * Must be called with rcu_read_lock() held.
+ */
 static struct tquic_path *tquic_find_path(struct tquic_connection *conn, u8 path_id)
 {
 	struct tquic_path *path;
@@ -265,6 +270,11 @@ static struct tquic_path *tquic_find_path(struct tquic_connection *conn, u8 path
 	return NULL;
 }
 
+/*
+ * Count the number of active (usable) paths in a connection.
+ *
+ * Must be called with rcu_read_lock() held.
+ */
 static int tquic_count_active_paths(struct tquic_connection *conn)
 {
 	struct tquic_path *path;
@@ -347,13 +357,17 @@ static void tquic_update_bandwidth(struct tquic_path *path, u64 bytes, u64 inter
  * ========================================================================= */
 
 /*
- * Find scheduler by name (must hold RCU read lock)
+ * Find scheduler by name
+ *
+ * Must be called with RCU read lock held OR tquic_sched_list_lock held.
+ * The lockdep condition allows either synchronization method.
  */
 struct tquic_scheduler_ops *tquic_sched_find(const char *name)
 {
 	struct tquic_scheduler_ops *sched;
 
-	list_for_each_entry_rcu(sched, &tquic_sched_list, list) {
+	list_for_each_entry_rcu(sched, &tquic_sched_list, list,
+				lockdep_is_held(&tquic_sched_list_lock)) {
 		if (!strcmp(sched->name, name))
 			return sched;
 	}
@@ -889,7 +903,9 @@ static void tquic_lowlat_release(struct tquic_connection *conn)
 }
 
 /*
- * Find the path with lowest RTT
+ * Find the path with lowest RTT.
+ *
+ * Must be called with rcu_read_lock() held.
  */
 static struct tquic_path *tquic_lowlat_find_best(struct tquic_connection *conn,
 						 struct tquic_path *exclude)
@@ -1842,7 +1858,8 @@ struct tquic_path *tquic_path_add(struct tquic_connection *conn, u8 path_id,
 		return NULL;
 
 	path->path_id = path_id;
-	path->state = TQUIC_PATH_PROBING;
+	/* Use WRITE_ONCE for consistency with lockless readers */
+	WRITE_ONCE(path->state, TQUIC_PATH_PROBING);
 	path->weight = TQUIC_DEFAULT_WEIGHT;
 	path->priority = 0;
 	path->ifindex = ifindex;
@@ -1926,7 +1943,8 @@ void tquic_path_validate(struct tquic_connection *conn, u8 path_id)
 	if (path && !path->validated) {
 		path->validated = true;
 		path->validation_time = tquic_get_time_us();
-		path->state = TQUIC_PATH_ACTIVE;
+		/* Use WRITE_ONCE for lockless readers in schedulers */
+		WRITE_ONCE(path->state, TQUIC_PATH_ACTIVE);
 		conn->active_paths++;
 	}
 
@@ -1951,8 +1969,9 @@ void tquic_path_set_state(struct tquic_connection *conn, u8 path_id,
 		return;
 	}
 
-	old_state = path->state;
-	path->state = state;
+	old_state = READ_ONCE(path->state);
+	/* Use WRITE_ONCE for lockless readers in schedulers */
+	WRITE_ONCE(path->state, state);
 
 	/* Update active count */
 	if (old_state == TQUIC_PATH_ACTIVE && state != TQUIC_PATH_ACTIVE)
@@ -2559,15 +2578,22 @@ static void __net_exit tquic_sched_net_exit(struct net *net)
 {
 	struct tquic_scheduler_ops *sched;
 
-	/* Release per-netns default scheduler reference */
+	/*
+	 * Release per-netns default scheduler reference.
+	 *
+	 * We need to clear the pointer first under RCU, then drop
+	 * the module reference. This is safe because:
+	 * 1. New lookups will see NULL after RCU_INIT_POINTER
+	 * 2. The module reference keeps the scheduler valid until
+	 *    we call module_put()
+	 */
 	rcu_read_lock();
 	sched = rcu_dereference(net->tquic.default_scheduler);
+	RCU_INIT_POINTER(net->tquic.default_scheduler, NULL);
 	rcu_read_unlock();
 
 	if (sched)
 		module_put(sched->owner);
-
-	RCU_INIT_POINTER(net->tquic.default_scheduler, NULL);
 
 	/* Remove per-netns proc entries */
 	remove_proc_subtree("tquic", net->proc_net);
@@ -2579,6 +2605,157 @@ static struct pernet_operations tquic_sched_net_ops = {
 	.init = tquic_sched_net_init,
 	.exit = tquic_sched_net_exit,
 };
+
+/* =========================================================================
+ * New Scheduler Registration API (tquic_sched_ops from tquic_sched.h)
+ * ========================================================================= */
+
+/*
+ * Global list for new-style schedulers (tquic_sched_ops)
+ * This is separate from the legacy tquic_scheduler_ops list.
+ */
+static DEFINE_SPINLOCK(tquic_new_sched_list_lock);
+static LIST_HEAD(tquic_new_sched_list);
+
+/**
+ * tquic_register_scheduler - Register a new-style scheduler
+ * @sched: Scheduler operations structure (tquic_sched_ops)
+ *
+ * Registers a scheduler that implements the new tquic_sched_ops interface
+ * defined in tquic_sched.h. This is the preferred registration API for
+ * new scheduler implementations.
+ *
+ * Returns 0 on success, -EINVAL if invalid, -EEXIST if name exists.
+ */
+int tquic_register_scheduler(struct tquic_sched_ops *sched)
+{
+	struct tquic_sched_ops *existing;
+
+	if (!sched || !sched->name[0]) {
+		pr_err("Invalid scheduler: missing name\n");
+		return -EINVAL;
+	}
+
+	if (!sched->get_path) {
+		pr_err("Scheduler '%s': missing required get_path callback\n",
+		       sched->name);
+		return -EINVAL;
+	}
+
+	spin_lock(&tquic_new_sched_list_lock);
+
+	/* Check for duplicate */
+	list_for_each_entry(existing, &tquic_new_sched_list, list) {
+		if (!strcmp(existing->name, sched->name)) {
+			spin_unlock(&tquic_new_sched_list_lock);
+			pr_err("Scheduler '%s' already registered\n",
+			       sched->name);
+			return -EEXIST;
+		}
+	}
+
+	list_add_tail_rcu(&sched->list, &tquic_new_sched_list);
+
+	spin_unlock(&tquic_new_sched_list_lock);
+
+	pr_info("Registered new-style scheduler: %s\n", sched->name);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(tquic_register_scheduler);
+
+/**
+ * tquic_unregister_scheduler - Unregister a new-style scheduler
+ * @sched: Scheduler to unregister
+ *
+ * Removes a scheduler from the registry. Active connections using
+ * this scheduler will continue to work until connection teardown.
+ */
+void tquic_unregister_scheduler(struct tquic_sched_ops *sched)
+{
+	if (!sched)
+		return;
+
+	spin_lock(&tquic_new_sched_list_lock);
+	list_del_rcu(&sched->list);
+	spin_unlock(&tquic_new_sched_list_lock);
+
+	synchronize_rcu();
+
+	pr_info("Unregistered new-style scheduler: %s\n", sched->name);
+}
+EXPORT_SYMBOL_GPL(tquic_unregister_scheduler);
+
+/**
+ * tquic_new_sched_find - Find a new-style scheduler by name
+ * @name: Scheduler name to search for
+ *
+ * Look up a scheduler by name. Caller must hold RCU read lock.
+ *
+ * Returns pointer to scheduler ops, or NULL if not found.
+ */
+struct tquic_sched_ops *tquic_new_sched_find(const char *name)
+{
+	struct tquic_sched_ops *sched;
+
+	list_for_each_entry_rcu(sched, &tquic_new_sched_list, list) {
+		if (!strcmp(sched->name, name))
+			return sched;
+	}
+	return NULL;
+}
+EXPORT_SYMBOL_GPL(tquic_new_sched_find);
+
+/**
+ * tquic_new_sched_notify_ack - Notify new-style schedulers of ACK
+ * @conn: Connection that received the ACK
+ * @path: Path that received the ACK
+ * @acked_bytes: Number of bytes acknowledged
+ *
+ * Called from the ACK processing path to notify schedulers that
+ * implement the ack_received callback.
+ */
+void tquic_new_sched_notify_ack(struct tquic_connection *conn,
+				struct tquic_path *path,
+				u64 acked_bytes)
+{
+	struct tquic_sched_ops *sched;
+
+	if (!conn || !path)
+		return;
+
+	rcu_read_lock();
+	sched = conn->scheduler;
+	if (sched && sched->ack_received)
+		sched->ack_received(conn, path, acked_bytes);
+	rcu_read_unlock();
+}
+EXPORT_SYMBOL_GPL(tquic_new_sched_notify_ack);
+
+/**
+ * tquic_new_sched_notify_loss - Notify new-style schedulers of loss
+ * @conn: Connection that detected loss
+ * @path: Path that detected loss
+ * @lost_bytes: Number of bytes lost
+ *
+ * Called from the loss detection path to notify schedulers that
+ * implement the loss_detected callback.
+ */
+void tquic_new_sched_notify_loss(struct tquic_connection *conn,
+				 struct tquic_path *path,
+				 u64 lost_bytes)
+{
+	struct tquic_sched_ops *sched;
+
+	if (!conn || !path)
+		return;
+
+	rcu_read_lock();
+	sched = conn->scheduler;
+	if (sched && sched->loss_detected)
+		sched->loss_detected(conn, path, lost_bytes);
+	rcu_read_unlock();
+}
+EXPORT_SYMBOL_GPL(tquic_new_sched_notify_loss);
 
 /* =========================================================================
  * Module Initialization

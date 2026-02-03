@@ -207,6 +207,34 @@ static void weighted_path_removed(struct tquic_connection *conn,
 }
 
 /*
+ * ACK received notification
+ *
+ * The weighted scheduler uses static user-configured weights, so ACK
+ * feedback does not affect scheduling decisions. This callback is
+ * provided for completeness but performs no action.
+ */
+static void weighted_ack_received(struct tquic_connection *conn,
+				  struct tquic_path *path,
+				  u64 acked_bytes)
+{
+	/* Weighted scheduler uses static weights - no feedback needed */
+}
+
+/*
+ * Loss detected notification
+ *
+ * The weighted scheduler uses static user-configured weights, so loss
+ * feedback does not affect scheduling decisions. This callback is
+ * provided for completeness but performs no action.
+ */
+static void weighted_loss_detected(struct tquic_connection *conn,
+				   struct tquic_path *path,
+				   u64 lost_bytes)
+{
+	/* Weighted scheduler uses static weights - no feedback needed */
+}
+
+/*
  * Weighted scheduler operations structure
  */
 static struct tquic_sched_ops tquic_sched_weighted = {
@@ -217,6 +245,8 @@ static struct tquic_sched_ops tquic_sched_weighted = {
 	.release        = weighted_release,
 	.path_added     = weighted_path_added,
 	.path_removed   = weighted_path_removed,
+	.ack_received   = weighted_ack_received,
+	.loss_detected  = weighted_loss_detected,
 };
 
 static int __init tquic_sched_weighted_init(void)

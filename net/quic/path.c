@@ -12,6 +12,7 @@
 #include <linux/in.h>
 #include <linux/in6.h>
 #include <net/quic.h>
+#include "trace.h"
 
 /* Path management constants per RFC 9000 */
 #define QUIC_PATH_CHALLENGE_SIZE	8
@@ -191,8 +192,8 @@ struct quic_path *quic_path_create(struct quic_connection *conn,
 	path->amplification_limit = 0;
 
 	/* Initialize path statistics */
-	path->bytes_sent = 0;
-	path->bytes_recv = 0;
+	atomic64_set(&path->bytes_sent, 0);
+	atomic64_set(&path->bytes_recv, 0);
 
 	/* Path starts unvalidated and inactive */
 	path->validated = 0;
@@ -214,6 +215,30 @@ struct quic_path *quic_path_create(struct quic_connection *conn,
 
 	/* Initialize congestion control */
 	quic_path_cc_init(&path->cc, path->mtu);
+
+	/*
+	 * Initialize per-path packet number space (draft-ietf-quic-multipath)
+	 * This is used for 1-RTT packets when multipath is enabled.
+	 */
+	quic_path_pn_space_init(&path->pn_space);
+
+	/*
+	 * Initialize ECN state (RFC 9000 Section 13.4)
+	 *
+	 * ECN validation is per-path because different network paths
+	 * may have different ECN handling characteristics.
+	 */
+	quic_ecn_init(path);
+
+	/* Assign path ID (increments with each path created on connection) */
+	if (conn) {
+		path->path_id = conn->num_paths;
+	} else {
+		path->path_id = 0;
+	}
+
+	/* Multipath disabled by default; enabled via transport parameter */
+	path->multipath_enabled = 0;
 
 	/* Add to connection's path list if connection provided */
 	if (conn) {
@@ -239,6 +264,9 @@ void quic_path_destroy(struct quic_path *path)
 	/* Remove from list if linked */
 	if (!list_empty(&path->list))
 		list_del(&path->list);
+
+	/* Destroy per-path packet number space */
+	quic_path_pn_space_destroy(&path->pn_space);
 
 	/* Securely clear challenge data */
 	memzero_explicit(path->challenge_data, sizeof(path->challenge_data));
@@ -294,7 +322,8 @@ int quic_path_challenge(struct quic_path *path)
 	path->validation_start = ktime_get();
 
 	/* Queue the frame for transmission */
-	skb_queue_tail(&conn->pending_frames, skb);
+	if (quic_conn_queue_frame(conn, skb))
+		return -ENOBUFS;
 
 	/* Schedule transmission */
 	schedule_work(&conn->tx_work);
@@ -367,6 +396,8 @@ void quic_path_on_validated(struct quic_path *path)
 	if (!conn)
 		return;
 
+	trace_quic_path_validated(quic_trace_conn_id(&conn->scid), conn->num_paths);
+
 	/* Cancel path probe timer */
 	quic_timer_cancel(conn, QUIC_TIMER_PATH_PROBE);
 
@@ -438,6 +469,9 @@ int quic_path_migrate(struct quic_connection *conn, struct quic_path *path)
 	/* Perform migration */
 	path->active = 1;
 	conn->active_path = path;
+
+	trace_quic_path_migrate(quic_trace_conn_id(&conn->scid),
+				old_path ? 0 : 0, conn->num_paths);
 
 	if (old_path)
 		old_path->active = 0;
@@ -556,7 +590,8 @@ int quic_path_mtu_probe(struct quic_path *path)
 	}
 
 	/* Queue the probe packet */
-	skb_queue_tail(&conn->pending_frames, skb);
+	if (quic_conn_queue_frame(conn, skb))
+		return -ENOBUFS;
 	schedule_work(&conn->tx_work);
 
 	return 0;
@@ -687,7 +722,7 @@ void quic_path_on_data_sent(struct quic_path *path, u32 bytes)
 	if (!path)
 		return;
 
-	path->bytes_sent += bytes;
+	atomic64_add(bytes, &path->bytes_sent);
 }
 
 /*
@@ -702,11 +737,11 @@ void quic_path_on_data_received(struct quic_path *path, u32 bytes)
 	if (!path)
 		return;
 
-	path->bytes_recv += bytes;
+	atomic64_add(bytes, &path->bytes_recv);
 
 	/* Update amplification limit (3x received data) */
 	if (!path->validated)
-		path->amplification_limit = path->bytes_recv * 3;
+		path->amplification_limit = atomic64_read(&path->bytes_recv) * 3;
 }
 
 /*
@@ -722,7 +757,7 @@ bool quic_path_can_send(struct quic_path *path, u32 bytes)
 		return true;
 
 	/* Check amplification limit */
-	return (path->bytes_sent + bytes) <= path->amplification_limit;
+	return (atomic64_read(&path->bytes_sent) + bytes) <= path->amplification_limit;
 }
 
 /*

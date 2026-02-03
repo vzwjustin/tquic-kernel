@@ -28,6 +28,12 @@
 #define QUIC_MIN_CWND			(2 * QUIC_MAX_PACKET_SIZE)
 #define QUIC_LOSS_REDUCTION_FACTOR	2	/* Reno: cwnd / 2 */
 
+/*
+ * PRR (Proportional Rate Reduction) per RFC 6937
+ * Smoothly reduces cwnd during loss recovery instead of halving immediately
+ */
+#define PRR_SSTHRESH_REDUCTION		2	/* ssthresh = cwnd/2 for PRR */
+
 /* Default initial RTT (333ms per RFC 9002) */
 #define QUIC_INITIAL_RTT_MS		333
 #define QUIC_INITIAL_RTT_US		(QUIC_INITIAL_RTT_MS * 1000)
@@ -141,6 +147,11 @@ void quic_cc_init(struct quic_cc_state *cc, enum quic_cc_algo algo)
 	cc->last_sent_time = 0;
 	cc->congestion_recovery_start = 0;
 
+	/* PRR state initialization */
+	cc->prr_delivered = 0;
+	cc->prr_out = 0;
+	cc->recov_start_pipe = 0;
+
 	/* Algorithm-specific initialization */
 	switch (algo) {
 	case QUIC_CC_RENO:
@@ -159,6 +170,8 @@ void quic_cc_init(struct quic_cc_state *cc, enum quic_cc_algo algo)
 		cc->bbr_bw = 0;
 		cc->bbr_min_rtt = U64_MAX;
 		cc->bbr_cycle_index = 0;
+		cc->bbr_full_bw = 0;
+		cc->bbr_full_bw_count = 0;
 		/* Initial pacing rate based on initial cwnd and RTT */
 		cc->pacing_rate = div64_u64(cc->cwnd * USEC_PER_SEC,
 					    QUIC_INITIAL_RTT_US);
@@ -181,6 +194,10 @@ void quic_cc_on_packet_sent(struct quic_cc_state *cc, u32 bytes)
 {
 	cc->bytes_in_flight += bytes;
 	cc->last_sent_time = ktime_get_ns();
+
+	/* PRR: Track bytes sent during recovery */
+	if (cc->in_recovery)
+		cc->prr_out += bytes;
 
 	/* Track if we're application limited */
 	if (cc->bytes_in_flight < cc->cwnd)
@@ -338,25 +355,26 @@ static void bbr_update_min_rtt(struct quic_cc_state *cc, struct quic_rtt *rtt)
 
 /*
  * BBR state machine transition
+ *
+ * Note: full_bw and full_bw_count are stored per-connection in cc->bbr_full_bw
+ * and cc->bbr_full_bw_count to avoid data races between concurrent connections.
  */
 static void bbr_check_state_transition(struct quic_cc_state *cc,
 				       struct quic_rtt *rtt)
 {
-	static u32 full_bw_count;
-	static u64 full_bw;
-
 	switch (cc->bbr_mode) {
 	case BBR_MODE_STARTUP:
 		/* Check if we've filled the pipe */
 		if (cc->bbr_bw > 0) {
-			if (cc->bbr_bw >= (full_bw * BBR_FULL_BW_THRESH) >> BBR_SCALE) {
-				full_bw = cc->bbr_bw;
-				full_bw_count = 0;
+			u64 thresh = (cc->bbr_full_bw * BBR_FULL_BW_THRESH) >> BBR_SCALE;
+			if (cc->bbr_bw >= thresh) {
+				cc->bbr_full_bw = cc->bbr_bw;
+				cc->bbr_full_bw_count = 0;
 			} else {
-				full_bw_count++;
-				if (full_bw_count >= BBR_FULL_BW_CNT) {
+				cc->bbr_full_bw_count++;
+				if (cc->bbr_full_bw_count >= BBR_FULL_BW_CNT) {
 					cc->bbr_mode = BBR_MODE_DRAIN;
-					full_bw_count = 0;
+					cc->bbr_full_bw_count = 0;
 				}
 			}
 		}
@@ -544,9 +562,21 @@ static void bbr2_on_ack(struct quic_cc_state *cc, u64 acked_bytes,
 void quic_cc_on_ack(struct quic_cc_state *cc, u64 acked_bytes,
 		    struct quic_rtt *rtt)
 {
+	/*
+	 * PRR: Track bytes delivered during recovery (RFC 6937)
+	 * Must be done before updating bytes_in_flight
+	 */
+	if (cc->in_recovery)
+		cc->prr_delivered += acked_bytes;
+
 	/* Exit recovery if we've acknowledged all data from recovery start */
-	if (cc->in_recovery && cc->bytes_in_flight == 0)
+	if (cc->in_recovery && cc->bytes_in_flight == 0) {
 		cc->in_recovery = 0;
+		/* Reset PRR state on recovery exit */
+		cc->prr_delivered = 0;
+		cc->prr_out = 0;
+		cc->recov_start_pipe = 0;
+	}
 
 	/* Update bytes in flight */
 	if (acked_bytes <= cc->bytes_in_flight)
@@ -588,6 +618,7 @@ EXPORT_SYMBOL_GPL(quic_cc_on_ack);
 /*
  * Handle packet loss
  * RFC 9002: On loss, reduce congestion window
+ * RFC 6937: Use PRR for smooth cwnd reduction during recovery
  */
 void quic_cc_on_loss(struct quic_cc_state *cc, u64 lost_bytes)
 {
@@ -603,22 +634,35 @@ void quic_cc_on_loss(struct quic_cc_state *cc, u64 lost_bytes)
 	cc->in_recovery = 1;
 	cc->congestion_recovery_start = now;
 
+	/*
+	 * PRR initialization (RFC 6937)
+	 * Record pipe (bytes in flight) at start of recovery
+	 * Reset PRR counters for new recovery episode
+	 */
+	cc->recov_start_pipe = cc->bytes_in_flight;
+	cc->prr_delivered = 0;
+	cc->prr_out = 0;
+
 	switch (cc->algo) {
 	case QUIC_CC_RENO:
-		/* RFC 9002: cwnd = cwnd / 2 */
+		/*
+		 * RFC 9002: ssthresh = cwnd / 2
+		 * With PRR, we don't immediately set cwnd = ssthresh.
+		 * Instead, cwnd remains high and PRR limits sending.
+		 */
 		cc->ssthresh = max(cc->cwnd / QUIC_LOSS_REDUCTION_FACTOR,
 				   (u64)QUIC_MIN_CWND);
-		cc->cwnd = cc->ssthresh;
+		/* PRR: Keep cwnd high during recovery, limit by PRR calc */
 		cc->in_slow_start = 0;
 		break;
 
 	case QUIC_CC_CUBIC:
-		/* CUBIC uses beta = 0.7 */
+		/* CUBIC uses beta = 0.7 for ssthresh */
 		cc->ssthresh = (cc->cwnd * CUBIC_BETA) / CUBIC_BETA_SCALE;
 		cc->ssthresh = max(cc->ssthresh, (u64)QUIC_MIN_CWND);
-		cc->cwnd = cc->ssthresh;
+		/* PRR: Keep cwnd, limit sending by PRR calculation */
 		cc->in_slow_start = 0;
-		/* Reset CUBIC state */
+		/* Reset CUBIC state for when recovery ends */
 		cc->cubic_origin_point = cc->ssthresh;
 		cc->cubic_epoch_start = 0;
 		cc->cubic_k = 0;
@@ -737,6 +781,83 @@ u64 quic_cc_pacing_delay(struct quic_cc_state *cc, u32 bytes)
 EXPORT_SYMBOL_GPL(quic_cc_pacing_delay);
 
 /*
+ * PRR: Calculate how many bytes can be sent during recovery
+ * Implements RFC 6937 Proportional Rate Reduction
+ *
+ * Returns the number of bytes allowed to send. The caller should
+ * use this to limit transmission during loss recovery.
+ *
+ * Algorithm (RFC 6937 Section 4):
+ *   snd_cnt = CEIL(prr_delivered * ssthresh / recov_start_pipe) - prr_out
+ *
+ * This ensures sending is proportional to ACKs received, converging
+ * smoothly to ssthresh by the end of recovery.
+ */
+u64 quic_cc_prr_get_snd_cnt(struct quic_cc_state *cc)
+{
+	u64 snd_cnt;
+	u64 pipe;		/* Current bytes in flight */
+	u64 prr_target;		/* Target based on proportional reduction */
+
+	/* PRR only applies during recovery for Reno/CUBIC */
+	if (!cc->in_recovery)
+		return U64_MAX;	/* No limit outside recovery */
+
+	/* BBR/BBRv2 don't use PRR */
+	if (cc->algo == QUIC_CC_BBR || cc->algo == QUIC_CC_BBR2)
+		return U64_MAX;
+
+	pipe = cc->bytes_in_flight;
+
+	/*
+	 * Guard against division by zero.
+	 * If recov_start_pipe is 0, we're in a degenerate state.
+	 */
+	if (cc->recov_start_pipe == 0)
+		return QUIC_MAX_PACKET_SIZE;
+
+	/*
+	 * RFC 6937 PRR-SSRB (Slow Start Reduction Bound):
+	 * prr_target = CEIL(prr_delivered * ssthresh / recov_start_pipe)
+	 * snd_cnt = prr_target - prr_out
+	 *
+	 * Use DIV_ROUND_UP equivalent for ceiling division
+	 */
+	prr_target = div64_u64(cc->prr_delivered * cc->ssthresh +
+			       cc->recov_start_pipe - 1,
+			       cc->recov_start_pipe);
+
+	if (prr_target > cc->prr_out)
+		snd_cnt = prr_target - cc->prr_out;
+	else
+		snd_cnt = 0;
+
+	/*
+	 * RFC 6937 Section 4.2: PRR-SSRB modification
+	 * If pipe < ssthresh, we can send more aggressively to reach ssthresh.
+	 * limit = max(prr_target - prr_out, 1) to ensure at least 1 MSS.
+	 */
+	if (pipe < cc->ssthresh) {
+		u64 deficit = cc->ssthresh - pipe;
+		/*
+		 * Allow at least 1 MSS when below ssthresh to ensure recovery
+		 * can make forward progress.
+		 */
+		snd_cnt = max_t(u64, snd_cnt, min(deficit, (u64)QUIC_MAX_PACKET_SIZE));
+	}
+
+	/*
+	 * Ensure at least 1 MSS can be sent per ACK to avoid stalls.
+	 * This is the "Reduction Bound" part of PRR-SSRB.
+	 */
+	if (snd_cnt == 0 && cc->prr_delivered > 0)
+		snd_cnt = QUIC_MAX_PACKET_SIZE;
+
+	return snd_cnt;
+}
+EXPORT_SYMBOL_GPL(quic_cc_prr_get_snd_cnt);
+
+/*
  * Check if congestion control allows sending
  * Returns true if the given number of bytes can be sent
  */
@@ -745,6 +866,16 @@ bool quic_cc_can_send(struct quic_cc_state *cc, u32 bytes)
 	/* Always allow at least one packet (for probes, PTO, etc.) */
 	if (bytes <= QUIC_MAX_PACKET_SIZE && cc->bytes_in_flight == 0)
 		return true;
+
+	/*
+	 * PRR: During recovery, use PRR to limit sending
+	 * This provides smooth cwnd reduction per RFC 6937
+	 */
+	if (cc->in_recovery && (cc->algo == QUIC_CC_RENO ||
+				cc->algo == QUIC_CC_CUBIC)) {
+		u64 snd_cnt = quic_cc_prr_get_snd_cnt(cc);
+		return bytes <= snd_cnt;
+	}
 
 	/* Check against congestion window */
 	if (cc->bytes_in_flight + bytes <= cc->cwnd)
@@ -779,6 +910,11 @@ void quic_cc_on_persistent_congestion(struct quic_cc_state *cc)
 	cc->in_recovery = 0;
 	cc->bytes_in_flight = 0;
 
+	/* Reset PRR state */
+	cc->prr_delivered = 0;
+	cc->prr_out = 0;
+	cc->recov_start_pipe = 0;
+
 	/* Reset algorithm-specific state */
 	switch (cc->algo) {
 	case QUIC_CC_CUBIC:
@@ -791,6 +927,8 @@ void quic_cc_on_persistent_congestion(struct quic_cc_state *cc)
 	case QUIC_CC_BBR2:
 		cc->bbr_mode = BBR_MODE_STARTUP;
 		cc->bbr_cycle_index = 0;
+		cc->bbr_full_bw = 0;
+		cc->bbr_full_bw_count = 0;
 		/* Keep bandwidth and RTT estimates */
 		break;
 
@@ -875,6 +1013,21 @@ void quic_cc_exit_recovery(struct quic_cc_state *cc)
 		return;
 
 	cc->in_recovery = 0;
+
+	/* Reset PRR state */
+	cc->prr_delivered = 0;
+	cc->prr_out = 0;
+	cc->recov_start_pipe = 0;
+
+	/*
+	 * Set cwnd to ssthresh on recovery exit.
+	 * PRR has gradually reduced the effective sending rate,
+	 * now make cwnd match the target.
+	 */
+	if (cc->algo == QUIC_CC_RENO || cc->algo == QUIC_CC_CUBIC) {
+		cc->cwnd = cc->ssthresh;
+		cc->congestion_window = cc->cwnd;
+	}
 
 	/* For CUBIC, reset epoch to allow proper growth */
 	if (cc->algo == QUIC_CC_CUBIC) {

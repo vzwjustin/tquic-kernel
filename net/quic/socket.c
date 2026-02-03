@@ -42,6 +42,9 @@
 #define QUIC_SOCKOPT_ALPN		7
 #define QUIC_SOCKOPT_KEY		8
 #define QUIC_SOCKOPT_HANDSHAKE_COMPLETE	9
+#define QUIC_SOCKOPT_SNI		10	/* Server Name Indication */
+#define QUIC_SOCKOPT_ALPN_SELECTED	11	/* Negotiated ALPN (read-only) */
+#define QUIC_SOCKOPT_STREAM_PRIORITY	12
 
 /* QUIC socket flags */
 #define QUIC_F_HANDSHAKE_COMPLETE	BIT(0)
@@ -93,6 +96,9 @@ struct quic_connection_id {
 	u8			data[QUIC_MAX_CID_LEN];
 };
 
+/* Maximum SNI length (RFC 6066) */
+#define QUIC_MAX_SNI_LEN		255
+
 /* QUIC socket options structure */
 struct quic_sock_options {
 	u64			max_streams_bidi;
@@ -104,6 +110,18 @@ struct quic_sock_options {
 	u32			idle_timeout;	/* in milliseconds */
 	char			alpn[QUIC_MAX_ALPN_LEN];
 	u8			alpn_len;
+	/*
+	 * Negotiated ALPN - set after successful handshake.
+	 * Contains the single selected protocol (length-prefixed format).
+	 */
+	char			alpn_selected[QUIC_MAX_ALPN_LEN];
+	u8			alpn_selected_len;
+	/*
+	 * SNI - Server Name Indication (RFC 6066, RFC 9001)
+	 * Null-terminated hostname for TLS server_name extension.
+	 */
+	char			server_name[QUIC_MAX_SNI_LEN + 1];
+	u8			server_name_len;
 };
 
 /* Accept queue entry */
@@ -296,6 +314,11 @@ static unsigned int quic_stream_hash(u64 stream_id, unsigned int size)
 	return (unsigned int)(stream_id % size);
 }
 
+/*
+ * Look up a stream by ID in the stream table.
+ *
+ * Must be called with rcu_read_lock() held.
+ */
 static struct quic_stream_entry *quic_stream_lookup(struct quic_stream_table *table,
 						    u64 stream_id)
 {
@@ -459,6 +482,9 @@ static void quic_sk_init_options(struct quic_sock *qsk)
 	qsk->options.max_stream_data_uni = QUIC_DEFAULT_MAX_DATA;
 	qsk->options.idle_timeout = QUIC_DEFAULT_IDLE_TIMEOUT;
 	qsk->options.alpn_len = 0;
+	qsk->options.alpn_selected_len = 0;
+	qsk->options.server_name[0] = '\0';
+	qsk->options.server_name_len = 0;
 }
 
 static int quic_sk_init(struct sock *sk)
@@ -944,6 +970,160 @@ static int quic_getsockopt_alpn(struct quic_sock *qsk, char __user *optval,
 	return 0;
 }
 
+/*
+ * SNI - Server Name Indication (RFC 6066, RFC 9001)
+ *
+ * Set the server hostname for TLS ClientHello server_name extension.
+ * Client: set before connect() to specify target hostname.
+ * Server: read after accept() to get client's requested hostname.
+ *
+ * The hostname must be a valid DNS name (not IP address) per RFC 6066.
+ * Maximum length is 255 bytes.
+ */
+static int quic_setsockopt_sni(struct quic_sock *qsk, sockptr_t optval,
+			       unsigned int optlen)
+{
+	if (optlen > QUIC_MAX_SNI_LEN)
+		return -EINVAL;
+
+	if (optlen == 0) {
+		/* Clear SNI */
+		qsk->options.server_name[0] = '\0';
+		qsk->options.server_name_len = 0;
+		return 0;
+	}
+
+	if (copy_from_sockptr(qsk->options.server_name, optval, optlen))
+		return -EFAULT;
+
+	/* Ensure null-termination */
+	qsk->options.server_name[optlen] = '\0';
+	qsk->options.server_name_len = optlen;
+	return 0;
+}
+
+static int quic_getsockopt_sni(struct quic_sock *qsk, char __user *optval,
+			       int __user *optlen)
+{
+	int len;
+
+	if (get_user(len, optlen))
+		return -EFAULT;
+
+	len = min_t(int, len, qsk->options.server_name_len);
+
+	if (put_user(len, optlen))
+		return -EFAULT;
+
+	if (len > 0 && copy_to_user(optval, qsk->options.server_name, len))
+		return -EFAULT;
+
+	return 0;
+}
+
+/*
+ * ALPN Selected - Negotiated Application Protocol (RFC 7301)
+ *
+ * Get the negotiated ALPN after successful handshake.
+ * This is a read-only option; setting returns -EOPNOTSUPP.
+ * Returns empty (len=0) if handshake not complete or no ALPN negotiated.
+ */
+static int quic_getsockopt_alpn_selected(struct quic_sock *qsk,
+					 char __user *optval,
+					 int __user *optlen)
+{
+	int len;
+
+	if (get_user(len, optlen))
+		return -EFAULT;
+
+	len = min_t(int, len, qsk->options.alpn_selected_len);
+
+	if (put_user(len, optlen))
+		return -EFAULT;
+
+	if (len > 0 && copy_to_user(optval, qsk->options.alpn_selected, len))
+		return -EFAULT;
+
+	return 0;
+}
+
+/*
+ * quic_set_alpn_selected - Set the negotiated ALPN after handshake
+ * @qsk: QUIC socket
+ * @alpn: selected ALPN protocol (length-prefixed format)
+ * @len: length of ALPN data
+ *
+ * Called internally by TLS handshake processing when server selects ALPN.
+ * Returns 0 on success, -EINVAL if len exceeds maximum.
+ */
+int quic_set_alpn_selected(struct quic_sock *qsk, const char *alpn, u8 len)
+{
+	if (len > QUIC_MAX_ALPN_LEN)
+		return -EINVAL;
+
+	memcpy(qsk->options.alpn_selected, alpn, len);
+	qsk->options.alpn_selected_len = len;
+	return 0;
+}
+EXPORT_SYMBOL_GPL(quic_set_alpn_selected);
+
+/*
+ * quic_set_server_name - Set the SNI hostname from ClientHello
+ * @qsk: QUIC socket
+ * @name: server name string (null-terminated)
+ * @len: length of server name (not including null terminator)
+ *
+ * Called internally by TLS handshake processing on server when
+ * parsing ClientHello server_name extension.
+ * Returns 0 on success, -EINVAL if len exceeds maximum.
+ */
+int quic_set_server_name(struct quic_sock *qsk, const char *name, u8 len)
+{
+	if (len > QUIC_MAX_SNI_LEN)
+		return -EINVAL;
+
+	memcpy(qsk->options.server_name, name, len);
+	qsk->options.server_name[len] = '\0';
+	qsk->options.server_name_len = len;
+	return 0;
+}
+EXPORT_SYMBOL_GPL(quic_set_server_name);
+
+/*
+ * quic_get_server_name - Get the SNI hostname configured on socket
+ * @qsk: QUIC socket
+ *
+ * Returns pointer to server name string, or NULL if not set.
+ */
+const char *quic_get_server_name(const struct quic_sock *qsk)
+{
+	if (qsk->options.server_name_len == 0)
+		return NULL;
+	return qsk->options.server_name;
+}
+EXPORT_SYMBOL_GPL(quic_get_server_name);
+
+/*
+ * quic_get_alpn - Get the offered ALPN list configured on socket
+ * @qsk: QUIC socket
+ * @len: output parameter for ALPN length
+ *
+ * Returns pointer to ALPN data (length-prefixed format), or NULL if not set.
+ */
+const char *quic_get_alpn(const struct quic_sock *qsk, u8 *len)
+{
+	if (qsk->options.alpn_len == 0) {
+		if (len)
+			*len = 0;
+		return NULL;
+	}
+	if (len)
+		*len = qsk->options.alpn_len;
+	return qsk->options.alpn;
+}
+EXPORT_SYMBOL_GPL(quic_get_alpn);
+
 static int quic_setsockopt_key(struct quic_sock *qsk, sockptr_t optval,
 			       unsigned int optlen)
 {
@@ -1010,6 +1190,103 @@ static int quic_setsockopt_handshake_complete(struct quic_sock *qsk,
 	return 0;
 }
 
+/*
+ * Set stream priority (RFC 9218)
+ *
+ * Allows applications to specify urgency (0-7) and incremental flag
+ * for stream scheduling. Lower urgency values indicate higher priority.
+ */
+static int quic_setsockopt_stream_priority(struct quic_sock *qsk,
+					   sockptr_t optval,
+					   unsigned int optlen)
+{
+	struct quic_stream_priority prio;
+	struct quic_connection *conn = qsk->conn;
+	struct quic_stream *stream;
+	int err;
+
+	if (optlen < sizeof(prio))
+		return -EINVAL;
+
+	if (copy_from_sockptr(&prio, optval, sizeof(prio)))
+		return -EFAULT;
+
+	/* Validate urgency range */
+	if (prio.urgency > QUIC_PRIORITY_URGENCY_MAX)
+		return -EINVAL;
+
+	if (!conn)
+		return -ENOTCONN;
+
+	/* Find the stream */
+	stream = quic_stream_lookup(conn, prio.stream_id);
+	if (!stream)
+		return -ENOENT;
+
+	/* Set the priority */
+	err = quic_stream_set_priority(stream, prio.urgency,
+				       prio.incremental != 0);
+
+	/* Release lookup reference */
+	refcount_dec(&stream->refcnt);
+
+	return err;
+}
+
+/*
+ * Get stream priority (RFC 9218)
+ */
+static int quic_getsockopt_stream_priority(struct quic_sock *qsk,
+					   char __user *optval,
+					   int __user *optlen)
+{
+	struct quic_stream_priority prio;
+	struct quic_connection *conn = qsk->conn;
+	struct quic_stream *stream;
+	int len;
+	u8 urgency;
+	bool incremental;
+
+	if (get_user(len, optlen))
+		return -EFAULT;
+
+	if (len < sizeof(prio.stream_id))
+		return -EINVAL;
+
+	/* Get stream_id from user to know which stream to query */
+	if (copy_from_user(&prio.stream_id, optval, sizeof(prio.stream_id)))
+		return -EFAULT;
+
+	if (!conn)
+		return -ENOTCONN;
+
+	/* Find the stream */
+	stream = quic_stream_lookup(conn, prio.stream_id);
+	if (!stream)
+		return -ENOENT;
+
+	/* Get the priority */
+	quic_stream_get_priority(stream, &urgency, &incremental);
+
+	/* Release lookup reference */
+	refcount_dec(&stream->refcnt);
+
+	/* Fill in response */
+	memset(&prio, 0, sizeof(prio));
+	prio.stream_id = stream->id;
+	prio.urgency = urgency;
+	prio.incremental = incremental ? 1 : 0;
+
+	len = min_t(int, len, sizeof(prio));
+	if (put_user(len, optlen))
+		return -EFAULT;
+
+	if (copy_to_user(optval, &prio, len))
+		return -EFAULT;
+
+	return 0;
+}
+
 int quic_setsockopt(struct sock *sk, int level, int optname,
 		    sockptr_t optval, unsigned int optlen)
 {
@@ -1062,6 +1339,19 @@ int quic_setsockopt(struct sock *sk, int level, int optname,
 		err = quic_setsockopt_handshake_complete(qsk, optval, optlen);
 		break;
 
+	case QUIC_SOCKOPT_STREAM_PRIORITY:
+		err = quic_setsockopt_stream_priority(qsk, optval, optlen);
+		break;
+
+	case QUIC_SOCKOPT_SNI:
+		err = quic_setsockopt_sni(qsk, optval, optlen);
+		break;
+
+	case QUIC_SOCKOPT_ALPN_SELECTED:
+		/* Read-only option */
+		err = -EOPNOTSUPP;
+		break;
+
 	default:
 		err = -ENOPROTOOPT;
 		break;
@@ -1107,6 +1397,18 @@ int quic_getsockopt(struct sock *sk, int level, int optname,
 		err = quic_getsockopt_alpn(qsk, optval, optlen);
 		break;
 
+	case QUIC_SOCKOPT_STREAM_PRIORITY:
+		err = quic_getsockopt_stream_priority(qsk, optval, optlen);
+		break;
+
+	case QUIC_SOCKOPT_SNI:
+		err = quic_getsockopt_sni(qsk, optval, optlen);
+		break;
+
+	case QUIC_SOCKOPT_ALPN_SELECTED:
+		err = quic_getsockopt_alpn_selected(qsk, optval, optlen);
+		break;
+
 	default:
 		err = -ENOPROTOOPT;
 		break;
@@ -1136,15 +1438,19 @@ static int quic_sendmsg_stream(struct sock *sk, struct msghdr *msg,
 	}
 	rcu_read_unlock();
 
-	/* Check flow control */
-	if (qsk->tx_offset + len > qsk->tx_max_data) {
+	/*
+	 * Check flow control.
+	 * Use subtraction form to avoid integer overflow when tx_offset + len
+	 * would exceed U64_MAX with large values.
+	 */
+	if (len > qsk->tx_max_data - qsk->tx_offset) {
 		/* Flow control blocking */
 		if (msg->msg_flags & MSG_DONTWAIT)
 			return -EAGAIN;
 
 		/* Wait for flow control credit */
 		err = wait_event_interruptible(sk->sk_wq->wait,
-			qsk->tx_offset + len <= qsk->tx_max_data ||
+			len <= qsk->tx_max_data - qsk->tx_offset ||
 			sk->sk_err);
 		if (err)
 			return err;
@@ -1352,10 +1658,16 @@ int quic_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 
 	/* If no stream specified, use default (stream 0 for bidi) */
 	if (!info) {
+		bool stream_exists;
+
 		stream_id = 0;
 
-		/* Ensure stream 0 exists */
-		if (!quic_stream_lookup(&qsk->streams, 0)) {
+		/* Ensure stream 0 exists - need RCU lock for lookup */
+		rcu_read_lock();
+		stream_exists = (quic_stream_lookup(&qsk->streams, 0) != NULL);
+		rcu_read_unlock();
+
+		if (!stream_exists) {
 			err = quic_stream_insert(&qsk->streams, 0, NULL);
 			if (err)
 				return err;
@@ -2165,12 +2477,156 @@ EXPORT_SYMBOL_GPL(quicv6_prot);
 #endif
 
 /*
+ * Socket-level proto_ops wrappers
+ *
+ * These wrappers properly call QUIC-specific handlers instead of delegating
+ * to generic inet_* functions which have TCP-specific assumptions.
+ */
+
+/*
+ * quic_release_sock - Release a QUIC socket
+ *
+ * This is the proto_ops release handler that properly cleans up QUIC state.
+ * Unlike inet_release which is designed for TCP/UDP, we need QUIC-specific
+ * cleanup for connection state, streams, and the underlying UDP socket.
+ */
+static int quic_release_sock(struct socket *sock)
+{
+	struct sock *sk = sock->sk;
+
+	if (!sk)
+		return 0;
+
+	/* Let the proto close handler do QUIC-specific cleanup */
+	if (sk->sk_prot->close) {
+		long timeout = 0;
+
+		if (sock_flag(sk, SOCK_LINGER) &&
+		    !(current->flags & PF_EXITING))
+			timeout = sk->sk_lingertime;
+
+		sk->sk_prot->close(sk, timeout);
+	}
+
+	sock->sk = NULL;
+	return 0;
+}
+
+/*
+ * quic_sock_shutdown - Shutdown a QUIC socket
+ *
+ * QUIC shutdown semantics differ from TCP:
+ * - SEND_SHUTDOWN triggers CONNECTION_CLOSE frame
+ * - RCV_SHUTDOWN stops processing incoming data
+ * - Both are needed for full bidirectional close
+ *
+ * Unlike inet_shutdown which has TCP state machine dependencies,
+ * we directly invoke QUIC-specific shutdown logic.
+ */
+static int quic_sock_shutdown(struct socket *sock, int how)
+{
+	struct sock *sk = sock->sk;
+	int err = 0;
+
+	/* Validate shutdown flags */
+	how++;  /* maps 0->1, 1->2, 2->3 per POSIX shutdown() semantics */
+	if ((how & ~SHUTDOWN_MASK) || !how)
+		return -EINVAL;
+
+	lock_sock(sk);
+
+	/* Update socket state for connection management */
+	if (sock->state == SS_CONNECTING)
+		sock->state = SS_DISCONNECTING;
+
+	/* Check for already closed socket */
+	if (sk->sk_state == TCP_CLOSE) {
+		err = -ENOTCONN;
+		/* Still update shutdown flags to wake up waiters */
+	}
+
+	/* Set shutdown flags */
+	WRITE_ONCE(sk->sk_shutdown, sk->sk_shutdown | how);
+
+	/* Call QUIC-specific shutdown handler */
+	if (sk->sk_prot->shutdown)
+		sk->sk_prot->shutdown(sk, how);
+
+	/* Wake up any processes waiting in poll */
+	sk->sk_state_change(sk);
+
+	release_sock(sk);
+	return err;
+}
+
+/*
+ * quic_sock_sendmsg - Send message on QUIC socket
+ *
+ * This wrapper directly calls the QUIC sendmsg handler instead of going
+ * through inet_sendmsg. This ensures:
+ * - No TCP/UDP-specific INDIRECT_CALL optimizations that slow QUIC
+ * - Proper handling of QUIC stream semantics
+ * - Correct ancillary message processing for stream IDs
+ */
+static int quic_sock_sendmsg(struct socket *sock, struct msghdr *msg,
+			     size_t size)
+{
+	struct sock *sk = sock->sk;
+
+	/* Basic socket state validation */
+	if (unlikely(inet_send_prepare(sk)))
+		return -EAGAIN;
+
+	return quic_sendmsg(sk, msg, size);
+}
+
+/*
+ * quic_sock_recvmsg - Receive message from QUIC socket
+ *
+ * This wrapper directly calls the QUIC recvmsg handler. This ensures:
+ * - Proper QUIC stream reassembly
+ * - Correct handling of stream FIN
+ * - Stream ID information in ancillary data
+ */
+static int quic_sock_recvmsg(struct socket *sock, struct msghdr *msg,
+			     size_t size, int flags)
+{
+	struct sock *sk = sock->sk;
+	int addr_len = 0;
+	int err;
+
+	/* Record flow for RPS if not error queue */
+	if (likely(!(flags & MSG_ERRQUEUE)))
+		sock_rps_record_flow(sk);
+
+	err = quic_recvmsg(sk, msg, size, flags, &addr_len);
+	if (err >= 0)
+		msg->msg_namelen = addr_len;
+
+	return err;
+}
+
+/*
  * Proto operations for socket interface
+ *
+ * Note: We use QUIC-specific handlers for operations that have different
+ * semantics from TCP/UDP:
+ * - release: quic_release_sock (proper QUIC state cleanup)
+ * - shutdown: quic_sock_shutdown (triggers CONNECTION_CLOSE)
+ * - sendmsg: quic_sock_sendmsg (QUIC stream semantics)
+ * - recvmsg: quic_sock_recvmsg (QUIC stream reassembly)
+ *
+ * Operations that correctly delegate are:
+ * - setsockopt/getsockopt: sock_common_* correctly calls sk->sk_prot handlers
+ * - getname: inet_getname works for QUIC (same address semantics)
+ * - ioctl: inet_ioctl handles standard socket ioctls
+ * - socketpair: sock_no_socketpair (QUIC doesn't support socketpair)
+ * - mmap: sock_no_mmap (QUIC doesn't support mmap)
  */
 static const struct proto_ops quic_stream_ops = {
 	.family		= PF_INET,
 	.owner		= THIS_MODULE,
-	.release	= inet_release,
+	.release	= quic_release_sock,
 	.bind		= quic_bind,
 	.connect	= quic_connect,
 	.socketpair	= sock_no_socketpair,
@@ -2179,11 +2635,11 @@ static const struct proto_ops quic_stream_ops = {
 	.poll		= quic_poll,
 	.ioctl		= inet_ioctl,
 	.listen		= quic_listen,
-	.shutdown	= inet_shutdown,
+	.shutdown	= quic_sock_shutdown,
 	.setsockopt	= sock_common_setsockopt,
 	.getsockopt	= sock_common_getsockopt,
-	.sendmsg	= inet_sendmsg,
-	.recvmsg	= inet_recvmsg,
+	.sendmsg	= quic_sock_sendmsg,
+	.recvmsg	= quic_sock_recvmsg,
 	.mmap		= sock_no_mmap,
 };
 
@@ -2191,7 +2647,7 @@ static const struct proto_ops quic_stream_ops = {
 static const struct proto_ops quic6_stream_ops = {
 	.family		= PF_INET6,
 	.owner		= THIS_MODULE,
-	.release	= inet6_release,
+	.release	= quic_release_sock,
 	.bind		= quic_bind,
 	.connect	= quic_connect,
 	.socketpair	= sock_no_socketpair,
@@ -2200,11 +2656,11 @@ static const struct proto_ops quic6_stream_ops = {
 	.poll		= quic_poll,
 	.ioctl		= inet6_ioctl,
 	.listen		= quic_listen,
-	.shutdown	= inet_shutdown,
+	.shutdown	= quic_sock_shutdown,
 	.setsockopt	= sock_common_setsockopt,
 	.getsockopt	= sock_common_getsockopt,
-	.sendmsg	= inet_sendmsg,
-	.recvmsg	= inet_recvmsg,
+	.sendmsg	= quic_sock_sendmsg,
+	.recvmsg	= quic_sock_recvmsg,
 	.mmap		= sock_no_mmap,
 };
 #endif

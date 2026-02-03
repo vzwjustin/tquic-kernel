@@ -367,4 +367,52 @@ const char *tquic_sched_get_default(struct net *net);
 /* Built-in scheduler: aggregate (default for WAN bonding) */
 extern struct tquic_sched_ops tquic_sched_aggregate;
 
+/*
+ * =============================================================================
+ * Scheduler Notification API
+ * =============================================================================
+ *
+ * These functions are called by the core QUIC code to notify schedulers
+ * of ACK and loss events. Schedulers can use this information to adapt
+ * their path selection decisions.
+ */
+
+/**
+ * tquic_new_sched_notify_ack - Notify scheduler of ACK received
+ * @conn: Connection that received the ACK
+ * @path: Path that received the ACK
+ * @acked_bytes: Number of bytes acknowledged
+ *
+ * Called from ACK processing to notify schedulers of delivery confirmation.
+ * Schedulers implementing ack_received can use this for feedback-driven
+ * path selection (e.g., RTT updates, capacity estimation).
+ */
+void tquic_new_sched_notify_ack(struct tquic_connection *conn,
+				struct tquic_path *path,
+				u64 acked_bytes);
+
+/**
+ * tquic_new_sched_notify_loss - Notify scheduler of loss detected
+ * @conn: Connection that detected loss
+ * @path: Path that detected loss
+ * @lost_bytes: Number of bytes lost
+ *
+ * Called from loss detection to notify schedulers of packet loss.
+ * Schedulers implementing loss_detected can use this to avoid
+ * sending on paths with high loss rates.
+ */
+void tquic_new_sched_notify_loss(struct tquic_connection *conn,
+				 struct tquic_path *path,
+				 u64 lost_bytes);
+
+/**
+ * tquic_new_sched_find - Find a new-style scheduler by name
+ * @name: Scheduler name to search for
+ *
+ * Look up a scheduler by name. Caller must hold RCU read lock.
+ *
+ * Returns pointer to scheduler ops, or NULL if not found.
+ */
+struct tquic_sched_ops *tquic_new_sched_find(const char *name);
+
 #endif /* _NET_QUIC_TQUIC_SCHED_H */

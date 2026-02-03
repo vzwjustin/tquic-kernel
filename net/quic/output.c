@@ -36,10 +36,37 @@
 #define QUIC_OUTPUT_SKB_HEADROOM	128
 #define QUIC_OUTPUT_MAX_COALESCE	3
 
-/* Default TTL/hop limit - configurable via module parameter */
-static unsigned int quic_default_ttl __read_mostly = 64;
+/*
+ * Default TTL/hop limit - configurable via module parameter
+ *
+ * Valid range: 1-255 (IP TTL field is 8 bits, 0 means drop immediately)
+ */
+#define QUIC_TTL_MIN		1
+#define QUIC_TTL_MAX		255
+#define QUIC_TTL_DEFAULT	64
+
+static unsigned int quic_default_ttl __read_mostly = QUIC_TTL_DEFAULT;
 module_param(quic_default_ttl, uint, 0644);
-MODULE_PARM_DESC(quic_default_ttl, "Default TTL/hop limit for QUIC packets (1-255)");
+MODULE_PARM_DESC(quic_default_ttl,
+	"Default TTL/hop limit for QUIC packets, 1-255 (default 64)");
+
+/*
+ * quic_get_validated_ttl - Get validated TTL value
+ *
+ * Returns TTL clamped to valid range [1, 255].
+ * Uses default if value is out of range.
+ */
+static inline u8 quic_get_validated_ttl(void)
+{
+	unsigned int val = READ_ONCE(quic_default_ttl);
+
+	if (val < QUIC_TTL_MIN || val > QUIC_TTL_MAX) {
+		pr_warn_once("QUIC: ttl %u out of range [%u-%u], using default %u\n",
+			     val, QUIC_TTL_MIN, QUIC_TTL_MAX, QUIC_TTL_DEFAULT);
+		return QUIC_TTL_DEFAULT;
+	}
+	return (u8)val;
+}
 
 /* Pacing configuration */
 #define QUIC_PACING_SHIFT		10
@@ -241,11 +268,12 @@ static int quic_build_ipv4_header(struct sk_buff *skb,
 
 	iph->version = 4;
 	iph->ihl = 5;
-	iph->tos = 0;
+	/* Set ECN bits from path's ECN marking (RFC 9000 Section 13.4) */
+	iph->tos = quic_ecn_get_marking(path);
 	iph->tot_len = htons(skb->len);
 	iph->id = 0;
 	iph->frag_off = htons(IP_DF);
-	iph->ttl = quic_default_ttl;
+	iph->ttl = quic_get_validated_ttl();
 	iph->protocol = IPPROTO_UDP;
 	iph->check = 0;
 	iph->saddr = fl4.saddr;
@@ -297,10 +325,11 @@ static int quic_build_ipv6_header(struct sk_buff *skb,
 	ip6h = skb_push(skb, sizeof(struct ipv6hdr));
 	skb_reset_network_header(skb);
 
-	ip6_flow_hdr(ip6h, 0, 0);
+	/* Set traffic class with ECN bits (RFC 9000 Section 13.4) */
+	ip6_flow_hdr(ip6h, quic_ecn_get_marking(path), 0);
 	ip6h->payload_len = htons(skb->len - sizeof(struct ipv6hdr));
 	ip6h->nexthdr = IPPROTO_UDP;
-	ip6h->hop_limit = quic_default_ttl;
+	ip6h->hop_limit = quic_get_validated_ttl();
 	ip6h->saddr = saddr->sin6_addr;
 	ip6h->daddr = daddr->sin6_addr;
 
@@ -378,6 +407,34 @@ static int quic_sendmsg_locked(struct quic_sock *qsk, struct sk_buff *skb,
 	return err;
 }
 
+/*
+ * Set ECN marking on UDP socket before sending
+ *
+ * Per RFC 9000 Section 13.4, we need to set ECN bits in the IP header.
+ * For the sendmsg path, we do this by setting the IP_TOS socket option.
+ */
+static void quic_output_set_ecn(struct socket *sock, struct quic_path *path)
+{
+	u8 ecn_marking;
+	int tos;
+
+	if (!sock || !path)
+		return;
+
+	ecn_marking = quic_ecn_get_marking(path);
+
+	/* Get current TOS value and update ECN bits */
+	if (path->local_addr.ss_family == AF_INET) {
+		tos = ecn_marking;  /* ECN bits are in low 2 bits */
+		kernel_setsockopt(sock, SOL_IP, IP_TOS,
+				  (char *)&tos, sizeof(tos));
+	} else if (path->local_addr.ss_family == AF_INET6) {
+		tos = ecn_marking;
+		kernel_setsockopt(sock, SOL_IPV6, IPV6_TCLASS,
+				  (char *)&tos, sizeof(tos));
+	}
+}
+
 /* Main output function - send single packet */
 int quic_output(struct quic_connection *conn, struct sk_buff *skb)
 {
@@ -386,11 +443,20 @@ int quic_output(struct quic_connection *conn, struct sk_buff *skb)
 	struct quic_output_cb *cb;
 	int payload_len;
 	int err;
+	u8 ecn_marking;
 
 	if (!path || !qsk || !qsk->udp_sock)
 		return -ENOENT;
 
 	payload_len = skb->len;
+
+	/*
+	 * Set ECN marking on outgoing packet (RFC 9000 Section 13.4)
+	 *
+	 * Get the ECN marking before sending and track it for validation.
+	 */
+	ecn_marking = quic_ecn_get_marking(path);
+	quic_output_set_ecn(qsk->udp_sock, path);
 
 	/* Build headers */
 	quic_build_udp_header(skb, conn, payload_len);
@@ -400,6 +466,9 @@ int quic_output(struct quic_connection *conn, struct sk_buff *skb)
 				  (struct sockaddr *)&path->remote_addr);
 
 	if (err >= 0) {
+		/* Track ECN-marked packet sent for validation */
+		quic_ecn_on_packet_sent(path, ecn_marking);
+
 		/* Update output callback */
 		cb = QUIC_OUTPUT_CB(skb);
 		cb->send_time = ktime_get();
@@ -407,7 +476,7 @@ int quic_output(struct quic_connection *conn, struct sk_buff *skb)
 		cb->in_flight = 1;
 
 		/* Update path statistics */
-		path->bytes_sent += payload_len;
+		atomic64_add(payload_len, &path->bytes_sent);
 
 		/* Update congestion control */
 		quic_cc_on_packet_sent(&path->cc, payload_len);
@@ -469,36 +538,86 @@ static ktime_t quic_pacing_delay(struct quic_connection *conn, u32 bytes)
 /* Check if we should send now or wait for pacing */
 static bool quic_pacing_allow(struct quic_connection *conn)
 {
-	struct quic_cc_state *cc = &conn->active_path->cc;
 	ktime_t now = ktime_get();
-	s64 diff;
 
-	if (!cc->last_sent_time)
+	/*
+	 * Allow send if:
+	 * 1. No pacing time set yet (first packet)
+	 * 2. Current time is at or past the next allowed send time
+	 * 3. Within the margin for timing jitter
+	 */
+	if (conn->pacing_next_send == 0)
 		return true;
 
-	diff = ktime_to_ns(ktime_sub(now, ns_to_ktime(cc->last_sent_time)));
-
-	/* Allow small margin for timing jitter */
-	return diff >= -QUIC_PACING_MARGIN_US * 1000;
+	/* Allow small margin (1ms) for timing jitter */
+	return !ktime_after(conn->pacing_next_send,
+			    ktime_add_us(now, QUIC_PACING_MARGIN_US));
 }
 
-/* Paced output - respects pacing constraints */
+/*
+ * Queue packet to pacing queue and schedule timer
+ *
+ * When pacing doesn't allow immediate send, packets are queued and
+ * a timer is set to transmit them at the appropriate time.
+ */
+static int quic_pacing_queue_packet(struct quic_connection *conn,
+				    struct sk_buff *skb)
+{
+	ktime_t next_send;
+
+	/* Limit pacing queue to prevent memory exhaustion */
+	if (skb_queue_len(&conn->pacing_queue) >= QUIC_MAX_PENDING_FRAMES) {
+		kfree_skb(skb);
+		return -ENOBUFS;
+	}
+
+	/* Add to pacing queue */
+	skb_queue_tail(&conn->pacing_queue, skb);
+
+	/* Schedule pacing timer if not already scheduled */
+	next_send = conn->pacing_next_send;
+	if (next_send == 0)
+		next_send = ktime_add_us(ktime_get(), 1);
+
+	quic_timer_set(conn, QUIC_TIMER_PACING, next_send);
+
+	return 0;
+}
+
+/*
+ * Paced output - respects pacing constraints
+ *
+ * Per RFC 9002 Section 7.7: "A sender SHOULD pace sending of all in-flight
+ * packets based on input from the congestion controller."
+ *
+ * This function checks if pacing allows sending now. If not, the packet
+ * is queued and a timer is scheduled to send it later at the appropriate
+ * pacing interval.
+ */
 int quic_output_paced(struct quic_connection *conn, struct sk_buff *skb)
 {
 	struct quic_cc_state *cc = &conn->active_path->cc;
+	u64 delay_ns;
+	ktime_t now;
 	int err;
 
 	/* Check pacing */
 	if (!quic_pacing_allow(conn)) {
-		/* Queue for later transmission */
-		skb_queue_tail(&conn->pending_frames, skb);
-		return 0;
+		/* Queue for later transmission with timer */
+		return quic_pacing_queue_packet(conn, skb);
 	}
 
+	/* Send now */
 	err = quic_output(conn, skb);
 	if (!err) {
-		/* Update pacing state */
-		cc->last_sent_time = ktime_to_ns(ktime_get());
+		now = ktime_get();
+
+		/* Calculate next allowed send time based on packet size */
+		delay_ns = quic_cc_pacing_delay(cc, skb->len);
+		conn->pacing_next_send = ktime_add_ns(now, delay_ns);
+
+		/* Update congestion control pacing state */
+		cc->last_sent_time = ktime_to_ns(now);
 	}
 
 	return err;
@@ -807,11 +926,15 @@ int quic_do_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 		data = skb_put(skb, chunk_size);
 		if (!copy_from_iter_full(data, chunk_size, &msg->msg_iter)) {
 			kfree_skb(skb);
-			return -EFAULT;
+			err = -EFAULT;
+			goto out_put_stream;
 		}
 
 		/* Queue for transmission */
-		skb_queue_tail(&conn->pending_frames, skb);
+		if (quic_conn_queue_frame(conn, skb)) {
+			err = -ENOBUFS;
+			goto out_put_stream;
+		}
 
 		/* Update offsets */
 		stream->send.offset += chunk_size;
@@ -829,9 +952,12 @@ int quic_do_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 	if (flags & QUIC_STREAM_FLAG_FIN)
 		stream->fin_sent = 1;
 
+	err = sent;
+
+out_put_stream:
 	refcount_dec(&stream->refcnt);
 
-	return sent;
+	return err;
 }
 EXPORT_SYMBOL(quic_do_sendmsg);
 
@@ -959,8 +1085,12 @@ int quic_stream_recv_data(struct quic_stream *stream, u64 offset,
 	rb_link_node(&chunk->node, parent, link);
 	rb_insert_color(&chunk->node, &recv->data_tree);
 
-	/* Update highest offset */
-	if (offset + len > recv->highest_offset)
+	/*
+	 * Update highest offset.
+	 * Use overflow check before addition to prevent wraparound with
+	 * untrusted network input.
+	 */
+	if (len <= U64_MAX - offset && offset + len > recv->highest_offset)
 		recv->highest_offset = offset + len;
 
 	/* Count pending bytes */
@@ -969,7 +1099,9 @@ int quic_stream_recv_data(struct quic_stream *stream, u64 offset,
 	/* Handle FIN */
 	if (fin) {
 		recv->fin_received = 1;
-		recv->final_size = offset + len;
+		/* Overflow already checked above when updating highest_offset */
+		if (len <= U64_MAX - offset)
+			recv->final_size = offset + len;
 		stream->fin_received = 1;
 	}
 
@@ -1012,15 +1144,15 @@ int quic_frame_process_new_cid(struct quic_connection *conn,
 	if (cid_len > QUIC_MAX_CONNECTION_ID_LEN)
 		return -EINVAL;
 
-	/* Connection ID */
-	if (offset + cid_len > len)
+	/* Connection ID - use subtraction form to avoid integer overflow */
+	if (cid_len > len - offset)
 		return -EINVAL;
 	cid.len = cid_len;
 	memcpy(cid.data, data + offset, cid_len);
 	offset += cid_len;
 
-	/* Stateless Reset Token */
-	if (offset + 16 > len)
+	/* Stateless Reset Token - use subtraction form to avoid overflow */
+	if (len < 16 || offset > len - 16)
 		return -EINVAL;
 	memcpy(reset_token, data + offset, 16);
 	offset += 16;

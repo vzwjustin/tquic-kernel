@@ -106,6 +106,10 @@ struct tquic_capacity_weights {
 #define TQUIC_BOND_F_FAILOVER_DISABLED	BIT(0)	/* Failover init failed */
 #define TQUIC_BOND_F_REORDER_DISABLED	BIT(1)	/* Reorder buffer alloc failed */
 #define TQUIC_BOND_F_REORDER_RETRY	BIT(2)	/* Retry reorder alloc scheduled */
+#define TQUIC_BOND_F_COUPLED_CC		BIT(3)	/* Coupled CC enabled */
+
+/* Forward declaration for coupled congestion control */
+struct coupled_cc_ctx;
 
 /*
  * Bonding context structure
@@ -136,6 +140,9 @@ struct tquic_bonding_ctx {
 
 	/* Failover context for seamless retransmission */
 	struct tquic_failover_ctx *failover;	/* Allocated with bonding */
+
+	/* Coupled congestion control context (RFC 6356) */
+	struct coupled_cc_ctx *coupled_cc;	/* LIA/OLIA for multipath fairness */
 
 	/* Work for async weight updates */
 	struct work_struct weight_work;
@@ -325,6 +332,34 @@ void tquic_bonding_on_path_added(void *ctx, struct tquic_path *path);
  */
 void tquic_bonding_on_path_removed(void *ctx, struct tquic_path *path);
 
+/**
+ * tquic_bonding_on_ack_received - Callback when ACK is received on a path
+ * @bc: Bonding context
+ * @path: The path that received the ACK
+ * @acked_bytes: Number of bytes acknowledged
+ *
+ * Called from congestion control when ACK is processed.
+ * Forwards the notification to the multipath scheduler for
+ * feedback-driven path selection algorithms.
+ */
+void tquic_bonding_on_ack_received(struct tquic_bonding_ctx *bc,
+				   struct tquic_path *path,
+				   u64 acked_bytes);
+
+/**
+ * tquic_bonding_on_loss_detected - Callback when loss is detected on a path
+ * @bc: Bonding context
+ * @path: The path that detected loss
+ * @lost_bytes: Number of bytes lost
+ *
+ * Called from congestion control when loss is detected.
+ * Forwards the notification to the multipath scheduler for
+ * feedback-driven path selection algorithms.
+ */
+void tquic_bonding_on_loss_detected(struct tquic_bonding_ctx *bc,
+				    struct tquic_path *path,
+				    u64 lost_bytes);
+
 /*
  * ============================================================================
  * Reorder Buffer Integration
@@ -420,5 +455,37 @@ tquic_bonding_get_failover(struct tquic_bonding_ctx *bc)
  * The scheduler should check this before selecting new data to send.
  */
 bool tquic_bonding_has_pending_retx(struct tquic_bonding_ctx *bc);
+
+/*
+ * ============================================================================
+ * Coupled Congestion Control Integration (RFC 6356)
+ * ============================================================================
+ */
+
+/**
+ * tquic_bonding_get_coupled_cc - Get coupled CC context
+ * @bc: Bonding context
+ *
+ * Returns coupled CC context if bonding is active, NULL otherwise.
+ * Used by congestion control code to apply LIA/OLIA algorithms.
+ */
+static inline struct coupled_cc_ctx *
+tquic_bonding_get_coupled_cc(struct tquic_bonding_ctx *bc)
+{
+	if (!bc)
+		return NULL;
+	return bc->coupled_cc;
+}
+
+/**
+ * tquic_bonding_coupled_cc_enabled - Check if coupled CC is enabled
+ * @bc: Bonding context
+ *
+ * Returns true if coupled congestion control is active.
+ */
+static inline bool tquic_bonding_coupled_cc_enabled(struct tquic_bonding_ctx *bc)
+{
+	return bc && (bc->flags & TQUIC_BOND_F_COUPLED_CC);
+}
 
 #endif /* _NET_TQUIC_BONDING_H */

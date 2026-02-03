@@ -133,7 +133,8 @@ struct quic_stream *quic_stream_create(struct quic_connection *conn, u64 id)
 
 	stream->id = id;
 	stream->conn = conn;
-	stream->state = QUIC_STREAM_STATE_IDLE;
+	/* Stream not yet visible, use WRITE_ONCE for consistency */
+	WRITE_ONCE(stream->state, QUIC_STREAM_STATE_IDLE);
 
 	quic_stream_recv_buf_init(&stream->recv);
 	quic_stream_send_buf_init(&stream->send);
@@ -192,10 +193,10 @@ struct quic_stream *quic_stream_create(struct quic_connection *conn, u64 id)
 	else
 		conn->streams_count_uni++;
 
+	/* Set state while holding lock for visibility */
+	WRITE_ONCE(stream->state, QUIC_STREAM_STATE_OPEN);
+	atomic64_inc(&conn->stats.streams_opened);
 	spin_unlock(&conn->streams_lock);
-
-	stream->state = QUIC_STREAM_STATE_OPEN;
-	conn->stats.streams_opened++;
 
 	return stream;
 }
@@ -216,7 +217,7 @@ void quic_stream_destroy(struct quic_stream *stream)
 		if (!RB_EMPTY_NODE(&stream->node))
 			rb_erase(&stream->node, &stream->conn->streams);
 		spin_unlock(&stream->conn->streams_lock);
-		stream->conn->stats.streams_closed++;
+		atomic64_inc(&stream->conn->stats.streams_closed);
 	}
 
 	kmem_cache_free(quic_stream_cache, stream);
@@ -420,7 +421,11 @@ static int quic_stream_recv_data_insert(struct quic_stream_recv_buf *recv,
 	rb_link_node(&chunk->node, parent, link);
 	rb_insert_color(&chunk->node, &recv->data_tree);
 
-	if (offset + len > recv->highest_offset)
+	/*
+	 * Update highest offset using subtraction form to prevent integer
+	 * overflow when offset + len would exceed U64_MAX.
+	 */
+	if (len <= U64_MAX - offset && offset + len > recv->highest_offset)
 		recv->highest_offset = offset + len;
 
 	recv->pending += chunk->len;
@@ -439,13 +444,20 @@ int quic_stream_recv_data(struct quic_stream *stream, u64 offset,
 	if (stream->state == QUIC_STREAM_STATE_RESET_RECVD)
 		return -ECONNRESET;
 
-	/* Check for final size violation */
+	/*
+	 * Check for final size violation.
+	 * Use subtraction form to avoid integer overflow when offset + len
+	 * would exceed U64_MAX with untrusted network input.
+	 */
 	if (recv->fin_received) {
-		if (offset + len > recv->final_size)
+		if (len > recv->final_size - offset)
 			return -EPROTO;
 	}
 
 	if (fin) {
+		/* Validate that offset + len doesn't overflow before storing */
+		if (len > U64_MAX - offset)
+			return -EOVERFLOW;
 		recv->final_size = offset + len;
 		recv->fin_received = 1;
 		stream->fin_received = 1;
@@ -531,12 +543,16 @@ int quic_stream_reset(struct quic_stream *stream, u64 error_code)
 	struct sk_buff *skb;
 	u8 *p;
 
-	if (stream->reset_sent)
+	spin_lock_bh(&conn->streams_lock);
+	if (stream->reset_sent) {
+		spin_unlock_bh(&conn->streams_lock);
 		return 0;
+	}
 
 	stream->error_code = error_code;
 	stream->reset_sent = 1;
-	stream->state = QUIC_STREAM_STATE_RESET_SENT;
+	WRITE_ONCE(stream->state, QUIC_STREAM_STATE_RESET_SENT);
+	spin_unlock_bh(&conn->streams_lock);
 
 	/* Build RESET_STREAM frame */
 	skb = alloc_skb(32, GFP_KERNEL);
@@ -555,7 +571,8 @@ int quic_stream_reset(struct quic_stream *stream, u64 error_code)
 	p = skb_put(skb, quic_varint_len(stream->send.offset));
 	quic_varint_encode(stream->send.offset, p);
 
-	skb_queue_tail(&conn->pending_frames, skb);
+	if (quic_conn_queue_frame(conn, skb))
+		return -ENOBUFS;
 	schedule_work(&conn->tx_work);
 
 	wake_up(&stream->wait);
@@ -588,7 +605,8 @@ int quic_stream_stop_sending(struct quic_stream *stream, u64 error_code)
 	p = skb_put(skb, quic_varint_len(error_code));
 	quic_varint_encode(error_code, p);
 
-	skb_queue_tail(&conn->pending_frames, skb);
+	if (quic_conn_queue_frame(conn, skb))
+		return -ENOBUFS;
 	schedule_work(&conn->tx_work);
 
 	return 0;
@@ -598,20 +616,27 @@ int quic_stream_stop_sending(struct quic_stream *stream, u64 error_code)
 int quic_stream_handle_reset(struct quic_stream *stream, u64 error_code,
 			     u64 final_size)
 {
+	struct quic_connection *conn = stream->conn;
 	struct quic_stream_recv_buf *recv = &stream->recv;
 
-	if (stream->reset_received)
+	spin_lock_bh(&conn->streams_lock);
+	if (stream->reset_received) {
+		spin_unlock_bh(&conn->streams_lock);
 		return 0;
+	}
 
 	/* Check final size consistency */
-	if (recv->fin_received && final_size != recv->final_size)
+	if (recv->fin_received && final_size != recv->final_size) {
+		spin_unlock_bh(&conn->streams_lock);
 		return -EPROTO;
+	}
 
 	stream->error_code = error_code;
 	stream->reset_received = 1;
-	stream->state = QUIC_STREAM_STATE_RESET_RECVD;
+	WRITE_ONCE(stream->state, QUIC_STREAM_STATE_RESET_RECVD);
 	recv->reset_received = 1;
 	recv->final_size = final_size;
+	spin_unlock_bh(&conn->streams_lock);
 
 	/* Discard any buffered data */
 	quic_stream_recv_buf_destroy(recv);

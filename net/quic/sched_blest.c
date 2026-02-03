@@ -24,6 +24,7 @@
 #include <linux/slab.h>
 #include <linux/ktime.h>
 #include <linux/rculist.h>
+#include <linux/spinlock.h>
 
 #include "tquic_sched.h"
 
@@ -56,6 +57,7 @@ struct blest_path_state {
 
 /**
  * struct blest_sched_data - BLEST scheduler private state
+ * @lock: Spinlock protecting scheduler state
  * @paths: Per-path state array
  * @segment_size: Default segment size for estimation
  * @current_path_id: Currently selected path (for hysteresis)
@@ -63,8 +65,13 @@ struct blest_path_state {
  *
  * The blocking threshold prevents oscillation when blocking times
  * are very small (sub-millisecond).
+ *
+ * Locking: The lock protects paths[] array and current_path_id from
+ * concurrent access between get_path(), ack_received(), loss_detected(),
+ * path_added(), and path_removed().
  */
 struct blest_sched_data {
+	spinlock_t lock;		/* Protects scheduler state */
 	struct blest_path_state paths[TQUIC_MAX_PATHS];
 	u32 segment_size;		/* Default segment size for estimation */
 	u8 current_path_id;		/* Currently selected path */
@@ -74,10 +81,35 @@ struct blest_sched_data {
 /*
  * Module parameter for blocking threshold (microseconds).
  * Only wait for fast path if blocking would exceed this threshold.
+ *
+ * Valid range: 0 - 10000000 (0 to 10 seconds in microseconds)
+ * - 0 means never wait (always use available capacity)
+ * - Higher values mean more tolerance for head-of-line blocking
  */
-static unsigned int blest_blocking_threshold_us = 1000;  /* 1ms default */
+#define BLEST_THRESHOLD_MAX_US		10000000	/* 10 seconds */
+#define BLEST_THRESHOLD_DEFAULT_US	1000		/* 1 ms */
+
+static unsigned int blest_blocking_threshold_us = BLEST_THRESHOLD_DEFAULT_US;
 module_param_named(blocking_threshold, blest_blocking_threshold_us, uint, 0644);
-MODULE_PARM_DESC(blocking_threshold, "Minimum blocking time (us) to wait for fast path (default 1000)");
+MODULE_PARM_DESC(blocking_threshold,
+	"Minimum blocking time (us) to wait for fast path, 0-10000000 (default 1000)");
+
+/*
+ * blest_get_validated_threshold - Get validated blocking threshold
+ *
+ * Returns threshold clamped to valid range [0, 10000000].
+ */
+static inline u64 blest_get_validated_threshold(void)
+{
+	unsigned int val = READ_ONCE(blest_blocking_threshold_us);
+
+	if (val > BLEST_THRESHOLD_MAX_US) {
+		pr_warn_once("blest: blocking_threshold %u exceeds max %u, "
+			     "using max\n", val, BLEST_THRESHOLD_MAX_US);
+		return BLEST_THRESHOLD_MAX_US;
+	}
+	return val;
+}
 
 /**
  * blest_find_path_state - Find or create path state for a path
@@ -218,11 +250,13 @@ static int blest_get_path(struct tquic_connection *conn,
 	u32 min_rtt = U32_MAX;
 	u32 max_cwnd_avail = 0;
 	int active_count = 0;
+	unsigned long irqflags;
 
 	if (!sd)
 		return -EINVAL;
 
 	rcu_read_lock();
+	spin_lock_irqsave(&sd->lock, irqflags);
 
 	/*
 	 * First pass: Find the fastest path (lowest RTT) and count actives.
@@ -247,6 +281,7 @@ static int blest_get_path(struct tquic_connection *conn,
 	}
 
 	if (active_count == 0 || !fast_path) {
+		spin_unlock_irqrestore(&sd->lock, irqflags);
 		rcu_read_unlock();
 		return -ENOENT;
 	}
@@ -256,6 +291,7 @@ static int blest_get_path(struct tquic_connection *conn,
 		result->primary = fast_path;
 		result->backup = NULL;
 		result->flags = 0;
+		spin_unlock_irqrestore(&sd->lock, irqflags);
 		rcu_read_unlock();
 		return 0;
 	}
@@ -292,7 +328,7 @@ static int blest_get_path(struct tquic_connection *conn,
 		blocking = blest_blocking_estimate(sd, ps, fast_state,
 						   sd->segment_size);
 
-		if (blocking > (s64)blest_blocking_threshold_us) {
+		if (blocking > (s64)blest_get_validated_threshold()) {
 			pr_debug("blest: path %u would block for %lld us, skipping\n",
 				 path->path_id, blocking);
 			continue;
@@ -324,6 +360,7 @@ static int blest_get_path(struct tquic_connection *conn,
 	/* Update current path tracking */
 	sd->current_path_id = best->path_id;
 
+	spin_unlock_irqrestore(&sd->lock, irqflags);
 	rcu_read_unlock();
 	return 0;
 }
@@ -340,9 +377,10 @@ static void blest_init(struct tquic_connection *conn)
 	if (!sd)
 		return;
 
+	spin_lock_init(&sd->lock);
 	sd->segment_size = BLEST_DEFAULT_SEGMENT_SIZE;
 	sd->current_path_id = TQUIC_INVALID_PATH_ID;
-	sd->blocking_threshold_us = blest_blocking_threshold_us;
+	sd->blocking_threshold_us = blest_get_validated_threshold();
 
 	conn->sched_priv = sd;
 }
@@ -369,10 +407,12 @@ static void blest_path_added(struct tquic_connection *conn,
 {
 	struct blest_sched_data *sd = conn->sched_priv;
 	struct blest_path_state *ps;
+	unsigned long irqflags;
 
 	if (!sd)
 		return;
 
+	spin_lock_irqsave(&sd->lock, irqflags);
 	ps = blest_alloc_path_state(sd, path->path_id);
 	if (ps) {
 		ps->rtt_us = path->cc.smoothed_rtt_us;
@@ -390,6 +430,7 @@ static void blest_path_added(struct tquic_connection *conn,
 		pr_debug("blest: path %u added (rtt=%u us, rate=%llu bytes/s)\n",
 			 path->path_id, ps->rtt_us, ps->send_rate);
 	}
+	spin_unlock_irqrestore(&sd->lock, irqflags);
 }
 
 /**
@@ -526,8 +567,8 @@ static int __init tquic_sched_blest_init(void)
 		return ret;
 	}
 
-	pr_info("TQUIC BLEST scheduler registered (blocking_threshold=%u us)\n",
-		blest_blocking_threshold_us);
+	pr_info("TQUIC BLEST scheduler registered (blocking_threshold=%llu us)\n",
+		blest_get_validated_threshold());
 
 	return 0;
 }

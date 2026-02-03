@@ -24,6 +24,7 @@
 #include <linux/slab.h>
 #include <linux/ktime.h>
 #include <linux/rculist.h>
+#include <linux/spinlock.h>
 
 #include "tquic_sched.h"
 
@@ -58,12 +59,18 @@ struct ecf_path_state {
 
 /**
  * struct ecf_sched_data - ECF scheduler private state
+ * @lock: Spinlock protecting scheduler state
  * @paths: Per-path state array
  * @segment_size: Default segment size for estimation
  * @current_path_id: Currently selected path (for statistics)
  * @path_switches: Number of path switches (for diagnostics)
+ *
+ * Locking: The lock protects paths[], current_path_id, and path_switches
+ * from concurrent access between get_path(), ack_received(), loss_detected(),
+ * path_added(), and path_removed().
  */
 struct ecf_sched_data {
+	spinlock_t lock;		/* Protects scheduler state */
 	struct ecf_path_state paths[TQUIC_MAX_PATHS];
 	u32 segment_size;		/* Default segment size for estimation */
 	u8 current_path_id;		/* Currently selected path */
@@ -297,6 +304,7 @@ static void ecf_init(struct tquic_connection *conn)
 	if (!sd)
 		return;
 
+	spin_lock_init(&sd->lock);
 	sd->segment_size = ECF_DEFAULT_SEGMENT_SIZE;
 	sd->current_path_id = TQUIC_INVALID_PATH_ID;
 	sd->path_switches = 0;

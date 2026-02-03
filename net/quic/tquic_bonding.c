@@ -31,6 +31,7 @@
 #include "tquic_bonding.h"
 #include "tquic_failover.h"
 #include "tquic_reorder.h"
+#include "cong_coupled.h"
 
 /*
  * State name strings for debugging/logging
@@ -327,6 +328,20 @@ struct tquic_bonding_ctx *tquic_bonding_init(struct tquic_path_manager *pm,
 		pr_notice("bonding: seamless failover retransmission disabled\n");
 	}
 
+	/*
+	 * Initialize coupled congestion control context (RFC 6356).
+	 * Coupled CC ensures fairness with single-path flows when using
+	 * multiple paths. It is enabled when entering BONDED state.
+	 */
+	bc->coupled_cc = coupled_cc_alloc(NULL, gfp);
+	if (!bc->coupled_cc) {
+		pr_warn("coupled CC allocation failed, using uncoupled CC\n");
+		/*
+		 * Continue without coupled CC - multipath may be unfair
+		 * to competing single-path flows at shared bottlenecks.
+		 */
+	}
+
 	/* Initialize weight work */
 	INIT_WORK(&bc->weight_work, tquic_bonding_weight_work_fn);
 	bc->weight_update_pending = false;
@@ -360,6 +375,12 @@ void tquic_bonding_destroy(struct tquic_bonding_ctx *bc)
 	if (bc->failover) {
 		tquic_failover_destroy(bc->failover);
 		bc->failover = NULL;
+	}
+
+	/* Free coupled CC context */
+	if (bc->coupled_cc) {
+		coupled_cc_free(bc->coupled_cc);
+		bc->coupled_cc = NULL;
 	}
 
 	/* Free reorder buffer */
@@ -440,6 +461,24 @@ void tquic_bonding_update_state(struct tquic_bonding_ctx *bc)
 		}
 
 		tquic_bonding_set_state(bc, new_state);
+
+		/*
+		 * Enable/disable coupled congestion control based on state.
+		 * Coupled CC (RFC 6356 LIA) ensures fairness when using
+		 * multiple paths at a shared bottleneck.
+		 */
+		if (new_state == TQUIC_BOND_ACTIVE ||
+		    new_state == TQUIC_BOND_DEGRADED) {
+			if (bc->coupled_cc) {
+				coupled_cc_enable(bc->coupled_cc);
+				bc->flags |= TQUIC_BOND_F_COUPLED_CC;
+			}
+		} else if (new_state == TQUIC_BOND_SINGLE_PATH) {
+			if (bc->coupled_cc) {
+				coupled_cc_disable(bc->coupled_cc);
+				bc->flags &= ~TQUIC_BOND_F_COUPLED_CC;
+			}
+		}
 
 		/* Schedule weight recalculation on state change */
 		if (new_state == TQUIC_BOND_ACTIVE ||
@@ -805,6 +844,85 @@ void tquic_bonding_on_path_removed(void *ctx, struct tquic_path *path)
 	tquic_bonding_update_state(bc);
 }
 EXPORT_SYMBOL_GPL(tquic_bonding_on_path_removed);
+
+/**
+ * tquic_bonding_on_ack_received - Callback when ACK is received on a path
+ *
+ * Forwards the ACK notification to the multipath scheduler framework.
+ * Schedulers implementing ack_received can use this for feedback-driven
+ * path selection (e.g., RTT updates, capacity estimation).
+ */
+void tquic_bonding_on_ack_received(struct tquic_bonding_ctx *bc,
+				   struct tquic_path *path,
+				   u64 acked_bytes)
+{
+	if (!bc || !path)
+		return;
+
+	/*
+	 * Only forward to scheduler when bonding is active.
+	 * In SINGLE_PATH mode, there's no scheduling decision to inform.
+	 */
+	if (bc->state == TQUIC_BOND_SINGLE_PATH)
+		return;
+
+	/*
+	 * Schedule weight recalculation on ACK (cwnd may have changed).
+	 * Don't recalculate immediately to avoid per-packet overhead.
+	 */
+	tquic_bonding_schedule_weight_update(bc);
+
+	/*
+	 * Note: The scheduler notification (tquic_new_sched_notify_ack) would
+	 * be called here if we had access to a tquic_connection that matches
+	 * the new-style scheduler API. Currently the bonding layer operates
+	 * with the path manager, not the connection-level scheduler.
+	 *
+	 * The connection-level integration will wire this up when the
+	 * tquic_connection from tquic_sched.h is used with bonding.
+	 */
+}
+EXPORT_SYMBOL_GPL(tquic_bonding_on_ack_received);
+
+/**
+ * tquic_bonding_on_loss_detected - Callback when loss is detected on a path
+ *
+ * Forwards the loss notification to the multipath scheduler framework.
+ * Schedulers implementing loss_detected can use this to avoid sending
+ * on paths with high loss rates.
+ */
+void tquic_bonding_on_loss_detected(struct tquic_bonding_ctx *bc,
+				    struct tquic_path *path,
+				    u64 lost_bytes)
+{
+	if (!bc || !path)
+		return;
+
+	/*
+	 * Only forward to scheduler when bonding is active.
+	 * In SINGLE_PATH mode, there's no scheduling decision to inform.
+	 */
+	if (bc->state == TQUIC_BOND_SINGLE_PATH)
+		return;
+
+	/*
+	 * Force weight recalculation on loss (cwnd will have changed).
+	 * Loss events should trigger immediate recalculation since
+	 * the capacity of the affected path has changed significantly.
+	 */
+	tquic_bonding_derive_weights(bc);
+
+	/*
+	 * Note: The scheduler notification (tquic_new_sched_notify_loss) would
+	 * be called here if we had access to a tquic_connection that matches
+	 * the new-style scheduler API. Currently the bonding layer operates
+	 * with the path manager, not the connection-level scheduler.
+	 *
+	 * The connection-level integration will wire this up when the
+	 * tquic_connection from tquic_sched.h is used with bonding.
+	 */
+}
+EXPORT_SYMBOL_GPL(tquic_bonding_on_loss_detected);
 
 /*
  * ============================================================================

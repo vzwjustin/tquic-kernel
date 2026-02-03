@@ -15,6 +15,7 @@
 #include <linux/bitmap.h>
 #include <linux/ktime.h>
 #include <net/quic.h>
+#include "ack_frequency.h"
 
 /*
  * Maximum number of ACK ranges to track per packet number space.
@@ -481,6 +482,9 @@ void quic_ack_on_ecn_received(struct quic_connection *conn, u8 pn_space,
  *
  * Returns true if an ACK frame should be included in the next packet
  * for this packet number space.
+ *
+ * This function supports the ACK_FREQUENCY extension (draft-ietf-quic-ack-frequency)
+ * when enabled, using peer-specified thresholds and delays.
  */
 bool quic_ack_should_send(struct quic_connection *conn, u8 pn_space)
 {
@@ -488,7 +492,8 @@ bool quic_ack_should_send(struct quic_connection *conn, u8 pn_space)
 	struct quic_ack_info *ack_info;
 	ktime_t now;
 	s64 elapsed_us;
-	u64 max_delay_ms;
+	u64 max_delay_us;
+	u64 ack_threshold;
 
 	if (!conn || pn_space >= QUIC_PN_SPACE_MAX)
 		return false;
@@ -508,12 +513,23 @@ bool quic_ack_should_send(struct quic_connection *conn, u8 pn_space)
 		return false;
 
 	/*
+	 * Check for IMMEDIATE_ACK flag (draft-ietf-quic-ack-frequency)
+	 */
+	if (conn->immediate_ack_pending) {
+		conn->immediate_ack_pending = 0;
+		return true;
+	}
+
+	/*
 	 * RFC 9000 Section 13.2.1: Sending ACK Frames
 	 *
 	 * Send ACK in these cases:
 	 * 1. Received at least ack_eliciting_threshold ack-eliciting packets
 	 * 2. max_ack_delay has elapsed since receiving an ack-eliciting packet
 	 * 3. During handshake (Initial/Handshake spaces), send immediately
+	 *
+	 * When ACK_FREQUENCY extension is in use, the threshold and delay
+	 * values are taken from the peer's ACK_FREQUENCY frame parameters.
 	 */
 
 	/* Immediate ACK during handshake */
@@ -523,20 +539,48 @@ bool quic_ack_should_send(struct quic_connection *conn, u8 pn_space)
 			return true;
 	}
 
+	/*
+	 * Get ACK threshold from ACK_FREQUENCY or use default.
+	 * Per draft-ietf-quic-ack-frequency, threshold of 1 means
+	 * ACK after receiving 2 ack-eliciting packets (count > threshold).
+	 */
+	ack_threshold = conn->ack_freq_threshold;
+	if (ack_threshold == 0)
+		ack_threshold = QUIC_ACK_FREQ_DEFAULT_THRESHOLD;
+
 	/* Check threshold */
-	if (space->ack_eliciting_in_flight >= QUIC_ACK_ELICITING_THRESHOLD)
+	if (space->ack_eliciting_in_flight > ack_threshold)
 		return true;
+
+	/*
+	 * Check reordering threshold (draft-ietf-quic-ack-frequency)
+	 * If packets arrive out-of-order beyond the threshold, ACK immediately.
+	 */
+	if (conn->ack_freq_reorder_threshold > 0) {
+		/*
+		 * This would require tracking the last ACKed packet number.
+		 * For now, we rely on the threshold and delay checks.
+		 */
+	}
 
 	/* Check max_ack_delay timeout */
 	if (space->ack_eliciting_in_flight > 0) {
 		now = ktime_get();
 		elapsed_us = ktime_us_delta(now, space->last_ack_time);
 
-		max_delay_ms = conn->local_params.max_ack_delay;
-		if (max_delay_ms == 0)
-			max_delay_ms = 25; /* Default */
+		/*
+		 * Use ACK_FREQUENCY max_ack_delay if set, otherwise use
+		 * transport parameter (converted from ms to us).
+		 */
+		max_delay_us = conn->ack_freq_max_delay_us;
+		if (max_delay_us == 0) {
+			u64 max_delay_ms = conn->local_params.max_ack_delay;
+			if (max_delay_ms == 0)
+				max_delay_ms = 25; /* Default 25ms per RFC 9000 */
+			max_delay_us = max_delay_ms * 1000;
+		}
 
-		if (elapsed_us >= (s64)(max_delay_ms * 1000))
+		if (elapsed_us >= (s64)max_delay_us)
 			return true;
 	}
 

@@ -441,6 +441,11 @@ static void tquic_cc_on_ack(struct tquic_path *path, u32 bytes_acked)
 	}
 
 	spin_unlock_bh(&path->cc_lock);
+
+	/* Notify bonding layer of ACK for scheduler feedback */
+	if (path->pm && path->pm->bonding)
+		tquic_bonding_on_ack_received(path->pm->bonding, path,
+					      bytes_acked);
 }
 
 static void tquic_cc_on_loss(struct tquic_path *path, u32 bytes_lost)
@@ -461,6 +466,11 @@ static void tquic_cc_on_loss(struct tquic_path *path, u32 bytes_lost)
 	}
 
 	spin_unlock_bh(&path->cc_lock);
+
+	/* Notify bonding layer of loss for scheduler feedback */
+	if (path->pm && path->pm->bonding)
+		tquic_bonding_on_loss_detected(path->pm->bonding, path,
+					       bytes_lost);
 }
 
 static u32 tquic_cc_available_cwnd(struct tquic_path *path)
@@ -1976,8 +1986,16 @@ int tquic_handle_migration(struct tquic_path_manager *pm,
 
 	if (!found) {
 		/* NAT rebinding - update primary path's remote address */
+		rcu_read_lock();
 		path = rcu_dereference(pm->primary_path);
 		if (path) {
+			/*
+			 * Take reference before unlocking RCU to ensure
+			 * path survives beyond the RCU read section.
+			 */
+			tquic_path_get(path);
+			rcu_read_unlock();
+
 			spin_lock_bh(&path->state_lock);
 			path->remote_addr = remote_info;
 			path->nat_rebinding = true;
@@ -1985,8 +2003,10 @@ int tquic_handle_migration(struct tquic_path_manager *pm,
 
 			/* Revalidate path with new address */
 			tquic_path_validate(path);
+			tquic_path_put(path);
 			return 0;
 		}
+		rcu_read_unlock();
 	}
 
 	return found ? -EINPROGRESS : -ENOENT;

@@ -28,6 +28,684 @@ static const u8 quic_v2_initial_salt[20] = {
 	0xf9, 0xbd, 0x2e, 0xd9
 };
 
+/*
+ * TLS 1.3 Handshake Message Types (RFC 8446 Section 4)
+ * Used for TLS state machine validation per RFC 9001.
+ */
+#define TLS_HS_CLIENT_HELLO		1
+#define TLS_HS_SERVER_HELLO		2
+#define TLS_HS_NEW_SESSION_TICKET	4
+#define TLS_HS_END_OF_EARLY_DATA	5
+#define TLS_HS_ENCRYPTED_EXTENSIONS	8
+#define TLS_HS_CERTIFICATE		11
+#define TLS_HS_CERTIFICATE_REQUEST	13
+#define TLS_HS_CERTIFICATE_VERIFY	15
+#define TLS_HS_FINISHED			20
+#define TLS_HS_KEY_UPDATE		24
+#define TLS_HS_MESSAGE_HASH		254
+
+/*
+ * TLS 1.3 Alert Types (RFC 8446 Section 6.2)
+ */
+#define TLS_ALERT_CLOSE_NOTIFY			0
+#define TLS_ALERT_UNEXPECTED_MESSAGE		10
+#define TLS_ALERT_BAD_RECORD_MAC		20
+#define TLS_ALERT_RECORD_OVERFLOW		22
+#define TLS_ALERT_HANDSHAKE_FAILURE		40
+#define TLS_ALERT_BAD_CERTIFICATE		42
+#define TLS_ALERT_UNSUPPORTED_CERTIFICATE	43
+#define TLS_ALERT_CERTIFICATE_REVOKED		44
+#define TLS_ALERT_CERTIFICATE_EXPIRED		45
+#define TLS_ALERT_CERTIFICATE_UNKNOWN		46
+#define TLS_ALERT_ILLEGAL_PARAMETER		47
+#define TLS_ALERT_UNKNOWN_CA			48
+#define TLS_ALERT_ACCESS_DENIED			49
+#define TLS_ALERT_DECODE_ERROR			50
+#define TLS_ALERT_DECRYPT_ERROR			51
+#define TLS_ALERT_PROTOCOL_VERSION		70
+#define TLS_ALERT_INSUFFICIENT_SECURITY		71
+#define TLS_ALERT_INTERNAL_ERROR		80
+#define TLS_ALERT_INAPPROPRIATE_FALLBACK	86
+#define TLS_ALERT_USER_CANCELED			90
+#define TLS_ALERT_MISSING_EXTENSION		109
+#define TLS_ALERT_UNSUPPORTED_EXTENSION		110
+#define TLS_ALERT_UNRECOGNIZED_NAME		112
+#define TLS_ALERT_BAD_CERTIFICATE_STATUS	113
+#define TLS_ALERT_UNKNOWN_PSK_IDENTITY		115
+#define TLS_ALERT_CERTIFICATE_REQUIRED		116
+#define TLS_ALERT_NO_APPLICATION_PROTOCOL	120
+
+/*
+ * QUIC-TLS State Machine (RFC 9001 Section 4)
+ *
+ * Client states:
+ *   START -> [send ClientHello] -> WAIT_SH
+ *   WAIT_SH -> [recv ServerHello] -> WAIT_EE
+ *   WAIT_EE -> [recv EncryptedExtensions] -> WAIT_CERT_CR
+ *   WAIT_CERT_CR -> [recv CertificateRequest] -> WAIT_CERT
+ *              or -> [recv Certificate] -> WAIT_CV
+ *   WAIT_CERT -> [recv Certificate] -> WAIT_CV
+ *   WAIT_CV -> [recv CertificateVerify] -> WAIT_FINISHED
+ *   WAIT_FINISHED -> [recv Finished, send Finished] -> CONNECTED
+ *
+ * Server states:
+ *   START -> [recv ClientHello] -> RECVD_CH
+ *   RECVD_CH -> [send ServerHello, EncryptedExtensions, ...] -> WAIT_FINISHED
+ *   WAIT_FINISHED -> [recv Finished] -> CONNECTED
+ *
+ * For PSK-only (0-RTT):
+ *   WAIT_EE -> [recv EncryptedExtensions] -> WAIT_FINISHED (no cert)
+ */
+enum quic_tls_state {
+	QUIC_TLS_STATE_INITIAL = 0,	/* Initial secrets only, no TLS msgs */
+	QUIC_TLS_STATE_START,		/* Ready to begin handshake */
+	QUIC_TLS_STATE_WAIT_SH,		/* Client: waiting for ServerHello */
+	QUIC_TLS_STATE_WAIT_EE,		/* Client: waiting for EncryptedExtensions */
+	QUIC_TLS_STATE_WAIT_CERT_CR,	/* Client: waiting for Cert or CertReq */
+	QUIC_TLS_STATE_WAIT_CERT,	/* Client: waiting for Certificate */
+	QUIC_TLS_STATE_WAIT_CV,		/* Client: waiting for CertificateVerify */
+	QUIC_TLS_STATE_WAIT_FINISHED,	/* Waiting for peer Finished */
+	QUIC_TLS_STATE_CONNECTED,	/* 1-RTT established */
+	QUIC_TLS_STATE_ERROR,		/* TLS alert received */
+};
+
+/* TLS state names for debugging */
+static const char * const quic_tls_state_names[] = {
+	[QUIC_TLS_STATE_INITIAL]	= "INITIAL",
+	[QUIC_TLS_STATE_START]		= "START",
+	[QUIC_TLS_STATE_WAIT_SH]	= "WAIT_SH",
+	[QUIC_TLS_STATE_WAIT_EE]	= "WAIT_EE",
+	[QUIC_TLS_STATE_WAIT_CERT_CR]	= "WAIT_CERT_CR",
+	[QUIC_TLS_STATE_WAIT_CERT]	= "WAIT_CERT",
+	[QUIC_TLS_STATE_WAIT_CV]	= "WAIT_CV",
+	[QUIC_TLS_STATE_WAIT_FINISHED]	= "WAIT_FINISHED",
+	[QUIC_TLS_STATE_CONNECTED]	= "CONNECTED",
+	[QUIC_TLS_STATE_ERROR]		= "ERROR",
+};
+
+/*
+ * TLS handshake context for state machine validation
+ */
+struct quic_tls_ctx {
+	enum quic_tls_state	state;
+	u8			is_server:1;
+	u8			cert_request_sent:1;
+	u8			using_psk:1;
+	u8			early_data_accepted:1;
+	u8			handshake_complete:1;
+	u8			alert_received:1;
+	u8			alert_sent:1;
+	u8			alert_code;
+	u64			crypto_offset[QUIC_CRYPTO_MAX];
+};
+
+/* Static TLS context - in production, embed in quic_connection */
+static DEFINE_PER_CPU(struct quic_tls_ctx, quic_tls_contexts);
+
+/*
+ * quic_tls_ctx_get - Get TLS context for connection
+ * @conn: QUIC connection
+ *
+ * Returns the TLS context for state machine validation.
+ * NOTE: In production, this should be embedded in quic_connection struct.
+ */
+static struct quic_tls_ctx *quic_tls_ctx_get(struct quic_connection *conn)
+{
+	return this_cpu_ptr(&quic_tls_contexts);
+}
+
+/*
+ * quic_tls_state_name - Get human-readable state name
+ * @state: TLS state value
+ *
+ * Returns string name for the TLS state, useful for debugging.
+ */
+static inline const char *quic_tls_state_name(enum quic_tls_state state)
+{
+	if (state < ARRAY_SIZE(quic_tls_state_names))
+		return quic_tls_state_names[state];
+	return "UNKNOWN";
+}
+
+/*
+ * quic_tls_validate_level - Validate encryption level for message type
+ * @msg_type: TLS handshake message type
+ * @level: QUIC encryption level
+ *
+ * Validates that the TLS message is sent at the correct QUIC encryption
+ * level per RFC 9001 Section 4.1.
+ *
+ * Returns 0 if valid, -EPROTO otherwise.
+ */
+static int quic_tls_validate_level(u8 msg_type, u8 level)
+{
+	/*
+	 * RFC 9001 Section 4.1.4:
+	 * - ClientHello, ServerHello: Initial level
+	 * - EncryptedExtensions through Finished: Handshake level
+	 * - NewSessionTicket: Application (1-RTT) level
+	 * - EndOfEarlyData: Handshake level (client only)
+	 */
+	switch (msg_type) {
+	case TLS_HS_CLIENT_HELLO:
+	case TLS_HS_SERVER_HELLO:
+		if (level != QUIC_CRYPTO_INITIAL)
+			return -EPROTO;
+		break;
+
+	case TLS_HS_ENCRYPTED_EXTENSIONS:
+	case TLS_HS_CERTIFICATE_REQUEST:
+	case TLS_HS_CERTIFICATE:
+	case TLS_HS_CERTIFICATE_VERIFY:
+	case TLS_HS_FINISHED:
+	case TLS_HS_END_OF_EARLY_DATA:
+		if (level != QUIC_CRYPTO_HANDSHAKE)
+			return -EPROTO;
+		break;
+
+	case TLS_HS_NEW_SESSION_TICKET:
+		if (level != QUIC_CRYPTO_APPLICATION)
+			return -EPROTO;
+		break;
+
+	default:
+		/* Unknown message types are rejected */
+		return -EPROTO;
+	}
+
+	return 0;
+}
+
+/*
+ * quic_tls_validate_transition - Validate TLS state machine transition
+ * @ctx: TLS context
+ * @msg_type: TLS handshake message type received
+ * @level: QUIC encryption level
+ *
+ * Validates that the received TLS handshake message is allowed in the
+ * current state per RFC 9001 Section 4. Invalid transitions indicate
+ * either a protocol violation or an attack attempt.
+ *
+ * Returns 0 if transition is valid, negative error code otherwise.
+ */
+static int quic_tls_validate_transition(struct quic_tls_ctx *ctx,
+					u8 msg_type, u8 level)
+{
+	enum quic_tls_state old_state = ctx->state;
+	enum quic_tls_state new_state = QUIC_TLS_STATE_ERROR;
+	int err = 0;
+
+	/*
+	 * RFC 9001 Section 4.1.3: Once 1-RTT keys are available,
+	 * endpoints MUST NOT send or accept handshake messages
+	 * (except NewSessionTicket which uses 1-RTT).
+	 */
+	if (ctx->state == QUIC_TLS_STATE_CONNECTED) {
+		if (msg_type == TLS_HS_NEW_SESSION_TICKET) {
+			/* NewSessionTicket is allowed after handshake */
+			if (level != QUIC_CRYPTO_APPLICATION) {
+				pr_warn("QUIC-TLS: NewSessionTicket at wrong level %u\n",
+					level);
+				return -EPROTO;
+			}
+			return 0;
+		}
+		pr_warn("QUIC-TLS: handshake message %u after 1-RTT established\n",
+			msg_type);
+		return -EPROTO;
+	}
+
+	/* Error state is terminal */
+	if (ctx->state == QUIC_TLS_STATE_ERROR) {
+		pr_debug("QUIC-TLS: in error state, rejecting message %u\n",
+			 msg_type);
+		return -EPROTO;
+	}
+
+	/*
+	 * Validate message type against current state.
+	 * State transitions depend on whether we're client or server.
+	 */
+	if (ctx->is_server) {
+		/* Server-side state machine */
+		switch (ctx->state) {
+		case QUIC_TLS_STATE_INITIAL:
+		case QUIC_TLS_STATE_START:
+			/* Server expects ClientHello at Initial level */
+			if (msg_type == TLS_HS_CLIENT_HELLO) {
+				if (level != QUIC_CRYPTO_INITIAL) {
+					pr_warn("QUIC-TLS: ClientHello at wrong level %u\n",
+						level);
+					err = -EPROTO;
+					break;
+				}
+				new_state = QUIC_TLS_STATE_WAIT_FINISHED;
+			} else {
+				pr_warn("QUIC-TLS: server expected ClientHello, got %u\n",
+					msg_type);
+				err = -EPROTO;
+			}
+			break;
+
+		case QUIC_TLS_STATE_WAIT_FINISHED:
+			/* Server expects Finished at Handshake level */
+			if (msg_type == TLS_HS_FINISHED) {
+				if (level != QUIC_CRYPTO_HANDSHAKE) {
+					pr_warn("QUIC-TLS: Finished at wrong level %u\n",
+						level);
+					err = -EPROTO;
+					break;
+				}
+				new_state = QUIC_TLS_STATE_CONNECTED;
+				ctx->handshake_complete = 1;
+			} else if (msg_type == TLS_HS_CERTIFICATE) {
+				/* Client certificate if requested */
+				if (level != QUIC_CRYPTO_HANDSHAKE) {
+					err = -EPROTO;
+					break;
+				}
+				new_state = QUIC_TLS_STATE_WAIT_CV;
+			} else if (msg_type == TLS_HS_END_OF_EARLY_DATA) {
+				/* End of 0-RTT data */
+				if (level != QUIC_CRYPTO_HANDSHAKE) {
+					err = -EPROTO;
+					break;
+				}
+				/* Stay in WAIT_FINISHED */
+				return 0;
+			} else {
+				pr_warn("QUIC-TLS: server expected Finished, got %u\n",
+					msg_type);
+				err = -EPROTO;
+			}
+			break;
+
+		case QUIC_TLS_STATE_WAIT_CV:
+			/* Server expects CertificateVerify after client cert */
+			if (msg_type == TLS_HS_CERTIFICATE_VERIFY) {
+				if (level != QUIC_CRYPTO_HANDSHAKE) {
+					err = -EPROTO;
+					break;
+				}
+				new_state = QUIC_TLS_STATE_WAIT_FINISHED;
+			} else {
+				pr_warn("QUIC-TLS: expected CertificateVerify, got %u\n",
+					msg_type);
+				err = -EPROTO;
+			}
+			break;
+
+		default:
+			pr_warn("QUIC-TLS: server in unexpected state %u\n",
+				ctx->state);
+			err = -EPROTO;
+			break;
+		}
+	} else {
+		/* Client-side state machine */
+		switch (ctx->state) {
+		case QUIC_TLS_STATE_INITIAL:
+		case QUIC_TLS_STATE_START:
+			/* Client shouldn't receive messages in START state */
+			pr_warn("QUIC-TLS: client received message %u in START\n",
+				msg_type);
+			err = -EPROTO;
+			break;
+
+		case QUIC_TLS_STATE_WAIT_SH:
+			/* Client expects ServerHello at Initial level */
+			if (msg_type == TLS_HS_SERVER_HELLO) {
+				if (level != QUIC_CRYPTO_INITIAL) {
+					pr_warn("QUIC-TLS: ServerHello at wrong level %u\n",
+						level);
+					err = -EPROTO;
+					break;
+				}
+				new_state = QUIC_TLS_STATE_WAIT_EE;
+			} else {
+				pr_warn("QUIC-TLS: expected ServerHello, got %u\n",
+					msg_type);
+				err = -EPROTO;
+			}
+			break;
+
+		case QUIC_TLS_STATE_WAIT_EE:
+			/* Client expects EncryptedExtensions at Handshake level */
+			if (msg_type == TLS_HS_ENCRYPTED_EXTENSIONS) {
+				if (level != QUIC_CRYPTO_HANDSHAKE) {
+					pr_warn("QUIC-TLS: EE at wrong level %u\n",
+						level);
+					err = -EPROTO;
+					break;
+				}
+				/* Next state depends on PSK mode */
+				if (ctx->using_psk)
+					new_state = QUIC_TLS_STATE_WAIT_FINISHED;
+				else
+					new_state = QUIC_TLS_STATE_WAIT_CERT_CR;
+			} else {
+				pr_warn("QUIC-TLS: expected EncryptedExtensions, got %u\n",
+					msg_type);
+				err = -EPROTO;
+			}
+			break;
+
+		case QUIC_TLS_STATE_WAIT_CERT_CR:
+			/* Client expects Certificate or CertificateRequest */
+			if (msg_type == TLS_HS_CERTIFICATE_REQUEST) {
+				if (level != QUIC_CRYPTO_HANDSHAKE) {
+					err = -EPROTO;
+					break;
+				}
+				ctx->cert_request_sent = 1;
+				new_state = QUIC_TLS_STATE_WAIT_CERT;
+			} else if (msg_type == TLS_HS_CERTIFICATE) {
+				if (level != QUIC_CRYPTO_HANDSHAKE) {
+					err = -EPROTO;
+					break;
+				}
+				new_state = QUIC_TLS_STATE_WAIT_CV;
+			} else {
+				pr_warn("QUIC-TLS: expected Cert or CertReq, got %u\n",
+					msg_type);
+				err = -EPROTO;
+			}
+			break;
+
+		case QUIC_TLS_STATE_WAIT_CERT:
+			/* Client expects Certificate after CertificateRequest */
+			if (msg_type == TLS_HS_CERTIFICATE) {
+				if (level != QUIC_CRYPTO_HANDSHAKE) {
+					err = -EPROTO;
+					break;
+				}
+				new_state = QUIC_TLS_STATE_WAIT_CV;
+			} else {
+				pr_warn("QUIC-TLS: expected Certificate, got %u\n",
+					msg_type);
+				err = -EPROTO;
+			}
+			break;
+
+		case QUIC_TLS_STATE_WAIT_CV:
+			/* Client expects CertificateVerify */
+			if (msg_type == TLS_HS_CERTIFICATE_VERIFY) {
+				if (level != QUIC_CRYPTO_HANDSHAKE) {
+					err = -EPROTO;
+					break;
+				}
+				new_state = QUIC_TLS_STATE_WAIT_FINISHED;
+			} else {
+				pr_warn("QUIC-TLS: expected CertificateVerify, got %u\n",
+					msg_type);
+				err = -EPROTO;
+			}
+			break;
+
+		case QUIC_TLS_STATE_WAIT_FINISHED:
+			/* Client expects Finished */
+			if (msg_type == TLS_HS_FINISHED) {
+				if (level != QUIC_CRYPTO_HANDSHAKE) {
+					pr_warn("QUIC-TLS: Finished at wrong level %u\n",
+						level);
+					err = -EPROTO;
+					break;
+				}
+				new_state = QUIC_TLS_STATE_CONNECTED;
+				ctx->handshake_complete = 1;
+			} else {
+				pr_warn("QUIC-TLS: expected Finished, got %u\n",
+					msg_type);
+				err = -EPROTO;
+			}
+			break;
+
+		default:
+			pr_warn("QUIC-TLS: client in unexpected state %u\n",
+				ctx->state);
+			err = -EPROTO;
+			break;
+		}
+	}
+
+	if (err) {
+		ctx->state = QUIC_TLS_STATE_ERROR;
+		return err;
+	}
+
+	/* Log state transition for debugging */
+	if (new_state != ctx->state) {
+		pr_debug("QUIC-TLS: state %s -> %s (msg=%u, level=%u)\n",
+			 quic_tls_state_name(old_state),
+			 quic_tls_state_name(new_state),
+			 msg_type, level);
+		ctx->state = new_state;
+	}
+
+	return 0;
+}
+
+/*
+ * quic_tls_handle_alert - Handle TLS alert message
+ * @ctx: TLS context
+ * @alert_level: Alert level (1=warning, 2=fatal)
+ * @alert_desc: Alert description code
+ *
+ * Processes TLS alert messages per RFC 8446 Section 6.
+ * All alerts in QUIC-TLS are treated as connection errors per RFC 9001.
+ *
+ * Returns corresponding QUIC error code.
+ */
+static u64 quic_tls_handle_alert(struct quic_tls_ctx *ctx,
+				 u8 alert_level, u8 alert_desc)
+{
+	ctx->alert_received = 1;
+	ctx->alert_code = alert_desc;
+	ctx->state = QUIC_TLS_STATE_ERROR;
+
+	pr_warn("QUIC-TLS: received alert level=%u desc=%u\n",
+		alert_level, alert_desc);
+
+	/*
+	 * Map TLS alerts to QUIC crypto errors.
+	 * Per RFC 9001 Section 4.8: QUIC_ERROR_CRYPTO_BASE (0x100) + alert
+	 */
+	return QUIC_ERROR_CRYPTO_BASE + alert_desc;
+}
+
+/*
+ * quic_tls_init - Initialize TLS state machine for connection
+ * @conn: QUIC connection
+ * @is_server: True if server, false if client
+ *
+ * Initializes the TLS state machine for a new connection.
+ */
+void quic_tls_init(struct quic_connection *conn, bool is_server)
+{
+	struct quic_tls_ctx *ctx = quic_tls_ctx_get(conn);
+
+	memset(ctx, 0, sizeof(*ctx));
+	ctx->state = QUIC_TLS_STATE_INITIAL;
+	ctx->is_server = is_server ? 1 : 0;
+}
+EXPORT_SYMBOL_GPL(quic_tls_init);
+
+/*
+ * quic_tls_start_handshake - Begin TLS handshake
+ * @conn: QUIC connection
+ *
+ * Transitions from INITIAL to START state, preparing for handshake.
+ * For clients, also transitions to WAIT_SH after sending ClientHello.
+ */
+void quic_tls_start_handshake(struct quic_connection *conn)
+{
+	struct quic_tls_ctx *ctx = quic_tls_ctx_get(conn);
+
+	if (ctx->state != QUIC_TLS_STATE_INITIAL) {
+		pr_warn("QUIC-TLS: start_handshake called in state %s\n",
+			quic_tls_state_name(ctx->state));
+		return;
+	}
+
+	ctx->state = QUIC_TLS_STATE_START;
+
+	/* Client transitions to WAIT_SH after sending ClientHello */
+	if (!ctx->is_server) {
+		pr_debug("QUIC-TLS: client starting handshake, waiting for ServerHello\n");
+		ctx->state = QUIC_TLS_STATE_WAIT_SH;
+	} else {
+		pr_debug("QUIC-TLS: server starting handshake, waiting for ClientHello\n");
+	}
+}
+EXPORT_SYMBOL_GPL(quic_tls_start_handshake);
+
+/*
+ * quic_tls_process_handshake_message - Validate and process TLS message
+ * @conn: QUIC connection
+ * @data: TLS handshake message data
+ * @len: Length of message data
+ * @level: QUIC encryption level
+ *
+ * Validates the TLS handshake message against the state machine and
+ * updates state accordingly. This is the main entry point for TLS
+ * message validation per RFC 9001.
+ *
+ * Returns 0 on success, negative error code on protocol violation.
+ */
+int quic_tls_process_handshake_message(struct quic_connection *conn,
+				       const u8 *data, u32 len, u8 level)
+{
+	struct quic_tls_ctx *ctx = quic_tls_ctx_get(conn);
+	u8 msg_type;
+	u32 msg_len;
+	int err;
+
+	if (len < 4) {
+		pr_warn("QUIC-TLS: message too short (%u bytes)\n", len);
+		return -EINVAL;
+	}
+
+	/* TLS handshake message format:
+	 * msg_type (1 byte) + length (3 bytes) + data
+	 */
+	msg_type = data[0];
+	msg_len = ((u32)data[1] << 16) | ((u32)data[2] << 8) | data[3];
+
+	if (msg_len > len - 4) {
+		pr_warn("QUIC-TLS: message length %u exceeds data %u\n",
+			msg_len, len - 4);
+		return -EINVAL;
+	}
+
+	/* First validate the encryption level for this message type */
+	err = quic_tls_validate_level(msg_type, level);
+	if (err) {
+		pr_warn("QUIC-TLS: message type %u at wrong level %u\n",
+			msg_type, level);
+		ctx->state = QUIC_TLS_STATE_ERROR;
+		return err;
+	}
+
+	/* Validate state machine transition */
+	err = quic_tls_validate_transition(ctx, msg_type, level);
+	if (err) {
+		/* State machine already set to ERROR */
+		return err;
+	}
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(quic_tls_process_handshake_message);
+
+/*
+ * quic_tls_is_handshake_complete - Check if handshake is complete
+ * @conn: QUIC connection
+ *
+ * Returns true if TLS handshake has completed successfully.
+ */
+bool quic_tls_is_handshake_complete(struct quic_connection *conn)
+{
+	struct quic_tls_ctx *ctx = quic_tls_ctx_get(conn);
+
+	return ctx->handshake_complete;
+}
+EXPORT_SYMBOL_GPL(quic_tls_is_handshake_complete);
+
+/*
+ * quic_tls_get_state - Get current TLS state
+ * @conn: QUIC connection
+ *
+ * Returns current TLS handshake state as integer.
+ */
+int quic_tls_get_state(struct quic_connection *conn)
+{
+	struct quic_tls_ctx *ctx = quic_tls_ctx_get(conn);
+
+	return ctx->state;
+}
+EXPORT_SYMBOL_GPL(quic_tls_get_state);
+
+/*
+ * quic_tls_set_psk_mode - Enable PSK-only mode
+ * @conn: QUIC connection
+ * @using_psk: True if using PSK without certificates
+ *
+ * Sets PSK mode which affects state machine (skips cert states).
+ */
+void quic_tls_set_psk_mode(struct quic_connection *conn, bool using_psk)
+{
+	struct quic_tls_ctx *ctx = quic_tls_ctx_get(conn);
+
+	ctx->using_psk = using_psk ? 1 : 0;
+}
+EXPORT_SYMBOL_GPL(quic_tls_set_psk_mode);
+
+/*
+ * quic_tls_process_alert - Process a TLS alert
+ * @conn: QUIC connection
+ * @alert_level: Alert level (1=warning, 2=fatal)
+ * @alert_desc: Alert description code
+ *
+ * Handles incoming TLS alerts per RFC 9001 Section 4.8.
+ * Returns the corresponding QUIC transport error code.
+ */
+u64 quic_tls_process_alert(struct quic_connection *conn,
+			   u8 alert_level, u8 alert_desc)
+{
+	struct quic_tls_ctx *ctx = quic_tls_ctx_get(conn);
+
+	return quic_tls_handle_alert(ctx, alert_level, alert_desc);
+}
+EXPORT_SYMBOL_GPL(quic_tls_process_alert);
+
+/*
+ * quic_tls_in_error_state - Check if TLS is in error state
+ * @conn: QUIC connection
+ *
+ * Returns true if TLS state machine is in error state.
+ */
+bool quic_tls_in_error_state(struct quic_connection *conn)
+{
+	struct quic_tls_ctx *ctx = quic_tls_ctx_get(conn);
+
+	return ctx->state == QUIC_TLS_STATE_ERROR;
+}
+EXPORT_SYMBOL_GPL(quic_tls_in_error_state);
+
+/*
+ * quic_tls_get_alert_code - Get the alert code if in error state
+ * @conn: QUIC connection
+ *
+ * Returns the TLS alert code that caused the error, or 0 if no alert.
+ */
+u8 quic_tls_get_alert_code(struct quic_connection *conn)
+{
+	struct quic_tls_ctx *ctx = quic_tls_ctx_get(conn);
+
+	return ctx->alert_code;
+}
+EXPORT_SYMBOL_GPL(quic_tls_get_alert_code);
+
 /* HKDF labels for QUIC */
 static const char quic_client_in_label[] = "client in";
 static const char quic_server_in_label[] = "server in";
@@ -692,3 +1370,325 @@ int quic_crypto_unprotect_header(struct quic_crypto_ctx *ctx, struct sk_buff *sk
 
 	return 0;
 }
+
+/*
+ * TLS Extension Building and Parsing (RFC 6066, RFC 7301)
+ */
+
+/**
+ * quic_tls_build_sni_extension - Build SNI extension for ClientHello
+ * @hostname: Server hostname (null-terminated)
+ * @buf: Output buffer
+ * @buf_len: Buffer size
+ *
+ * Builds the server_name extension (RFC 6066 Section 3) for TLS ClientHello.
+ * Format:
+ *   Extension Type (2 bytes): 0x0000 (server_name)
+ *   Extension Length (2 bytes)
+ *   Server Name List Length (2 bytes)
+ *   Server Name Type (1 byte): 0x00 (host_name)
+ *   Host Name Length (2 bytes)
+ *   Host Name (variable)
+ *
+ * Return: Number of bytes written on success, negative error code on failure
+ */
+int quic_tls_build_sni_extension(const char *hostname, u8 *buf, size_t buf_len)
+{
+	size_t hostname_len;
+	size_t ext_data_len;
+	size_t total_len;
+	u8 *p = buf;
+
+	if (!hostname || !buf)
+		return -EINVAL;
+
+	hostname_len = strlen(hostname);
+	if (hostname_len == 0 || hostname_len > 255)
+		return -EINVAL;
+
+	/* Calculate lengths */
+	/* Extension data: name_list_len(2) + name_type(1) + name_len(2) + name */
+	ext_data_len = 2 + 1 + 2 + hostname_len;
+	/* Total: ext_type(2) + ext_len(2) + ext_data */
+	total_len = 4 + ext_data_len;
+
+	if (buf_len < total_len)
+		return -ENOSPC;
+
+	/* Extension Type: server_name (0x0000) */
+	*p++ = 0x00;
+	*p++ = 0x00;
+
+	/* Extension Length */
+	*p++ = (ext_data_len >> 8) & 0xff;
+	*p++ = ext_data_len & 0xff;
+
+	/* Server Name List Length */
+	*p++ = ((1 + 2 + hostname_len) >> 8) & 0xff;
+	*p++ = (1 + 2 + hostname_len) & 0xff;
+
+	/* Server Name Type: host_name (0x00) */
+	*p++ = 0x00;
+
+	/* Host Name Length */
+	*p++ = (hostname_len >> 8) & 0xff;
+	*p++ = hostname_len & 0xff;
+
+	/* Host Name */
+	memcpy(p, hostname, hostname_len);
+
+	return total_len;
+}
+EXPORT_SYMBOL_GPL(quic_tls_build_sni_extension);
+
+/**
+ * quic_tls_build_alpn_extension - Build ALPN extension
+ * @alpn_list: ALPN protocol list (length-prefixed format per RFC 7301)
+ * @alpn_len: Length of ALPN list
+ * @buf: Output buffer
+ * @buf_len: Buffer size
+ *
+ * Builds the application_layer_protocol_negotiation extension (RFC 7301).
+ * Format:
+ *   Extension Type (2 bytes): 0x0010 (application_layer_protocol_negotiation)
+ *   Extension Length (2 bytes)
+ *   Protocol Name List Length (2 bytes)
+ *   Protocol Name List (variable): sequence of length-prefixed strings
+ *
+ * Return: Number of bytes written on success, negative error code on failure
+ */
+int quic_tls_build_alpn_extension(const u8 *alpn_list, size_t alpn_len,
+				  u8 *buf, size_t buf_len)
+{
+	size_t ext_data_len;
+	size_t total_len;
+	u8 *p = buf;
+
+	if (!alpn_list || alpn_len == 0 || !buf)
+		return -EINVAL;
+
+	/* Extension data: proto_list_len(2) + proto_list */
+	ext_data_len = 2 + alpn_len;
+	/* Total: ext_type(2) + ext_len(2) + ext_data */
+	total_len = 4 + ext_data_len;
+
+	if (buf_len < total_len)
+		return -ENOSPC;
+
+	/* Extension Type: application_layer_protocol_negotiation (0x0010) */
+	*p++ = 0x00;
+	*p++ = 0x10;
+
+	/* Extension Length */
+	*p++ = (ext_data_len >> 8) & 0xff;
+	*p++ = ext_data_len & 0xff;
+
+	/* Protocol Name List Length */
+	*p++ = (alpn_len >> 8) & 0xff;
+	*p++ = alpn_len & 0xff;
+
+	/* Protocol Name List (already in length-prefixed format) */
+	memcpy(p, alpn_list, alpn_len);
+
+	return total_len;
+}
+EXPORT_SYMBOL_GPL(quic_tls_build_alpn_extension);
+
+/**
+ * quic_tls_parse_sni_extension - Parse SNI extension from ClientHello
+ * @data: Extension data (after type and length)
+ * @data_len: Length of extension data
+ * @hostname: Output buffer for hostname
+ * @hostname_len: In: buffer size, Out: actual hostname length
+ *
+ * Return: 0 on success, -EINVAL on parse error, -ENOSPC if buffer too small
+ */
+int quic_tls_parse_sni_extension(const u8 *data, size_t data_len,
+				 char *hostname, size_t *hostname_len)
+{
+	size_t name_list_len;
+	size_t name_len;
+	u8 name_type;
+	size_t offset = 0;
+
+	if (!data || !hostname || !hostname_len || data_len < 5)
+		return -EINVAL;
+
+	/* Server Name List Length */
+	name_list_len = (data[offset] << 8) | data[offset + 1];
+	offset += 2;
+
+	if (offset + name_list_len > data_len)
+		return -EINVAL;
+
+	/* Parse first (and typically only) server name entry */
+	if (offset + 3 > data_len)
+		return -EINVAL;
+
+	name_type = data[offset++];
+	if (name_type != 0x00) {
+		/* Only host_name type is supported */
+		return -EINVAL;
+	}
+
+	name_len = (data[offset] << 8) | data[offset + 1];
+	offset += 2;
+
+	if (offset + name_len > data_len)
+		return -EINVAL;
+
+	if (name_len > *hostname_len)
+		return -ENOSPC;
+
+	memcpy(hostname, data + offset, name_len);
+	*hostname_len = name_len;
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(quic_tls_parse_sni_extension);
+
+/**
+ * quic_tls_parse_alpn_extension - Parse ALPN extension
+ * @data: Extension data (after type and length)
+ * @data_len: Length of extension data
+ * @alpn_list: Output buffer for ALPN list
+ * @alpn_len: In: buffer size, Out: actual list length
+ *
+ * Return: 0 on success, -EINVAL on parse error, -ENOSPC if buffer too small
+ */
+int quic_tls_parse_alpn_extension(const u8 *data, size_t data_len,
+				  u8 *alpn_list, size_t *alpn_len)
+{
+	size_t list_len;
+
+	if (!data || !alpn_list || !alpn_len || data_len < 2)
+		return -EINVAL;
+
+	/* Protocol Name List Length */
+	list_len = (data[0] << 8) | data[1];
+
+	if (2 + list_len > data_len)
+		return -EINVAL;
+
+	if (list_len > *alpn_len)
+		return -ENOSPC;
+
+	memcpy(alpn_list, data + 2, list_len);
+	*alpn_len = list_len;
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(quic_tls_parse_alpn_extension);
+
+/**
+ * quic_tls_select_alpn - Server ALPN selection
+ * @client_alpn: Client's ALPN list (length-prefixed format)
+ * @client_alpn_len: Length of client list
+ * @server_alpn: Server's supported ALPN list (length-prefixed format)
+ * @server_alpn_len: Length of server list
+ * @selected: Output buffer for selected protocol
+ * @selected_len: In: buffer size, Out: selected protocol length
+ *
+ * Selects the first protocol from server's list that client supports.
+ * Per RFC 7301, server preference should be used.
+ *
+ * Return: 0 on success (protocol selected),
+ *         -ENOENT if no common protocol,
+ *         negative error code on failure
+ */
+int quic_tls_select_alpn(const u8 *client_alpn, size_t client_alpn_len,
+			 const u8 *server_alpn, size_t server_alpn_len,
+			 u8 *selected, size_t *selected_len)
+{
+	size_t s_offset, c_offset;
+	u8 s_proto_len, c_proto_len;
+
+	if (!client_alpn || !server_alpn || !selected || !selected_len)
+		return -EINVAL;
+
+	/* Iterate server protocols (server preference) */
+	for (s_offset = 0; s_offset < server_alpn_len; ) {
+		s_proto_len = server_alpn[s_offset];
+		if (s_offset + 1 + s_proto_len > server_alpn_len)
+			return -EINVAL;
+
+		/* Check if this server protocol is in client's list */
+		for (c_offset = 0; c_offset < client_alpn_len; ) {
+			c_proto_len = client_alpn[c_offset];
+			if (c_offset + 1 + c_proto_len > client_alpn_len)
+				return -EINVAL;
+
+			/* Compare protocols */
+			if (s_proto_len == c_proto_len &&
+			    memcmp(server_alpn + s_offset + 1,
+				   client_alpn + c_offset + 1,
+				   s_proto_len) == 0) {
+				/* Found match - return in length-prefixed format */
+				if (1 + s_proto_len > *selected_len)
+					return -ENOSPC;
+
+				selected[0] = s_proto_len;
+				memcpy(selected + 1,
+				       server_alpn + s_offset + 1,
+				       s_proto_len);
+				*selected_len = 1 + s_proto_len;
+				return 0;
+			}
+
+			c_offset += 1 + c_proto_len;
+		}
+
+		s_offset += 1 + s_proto_len;
+	}
+
+	/* No common protocol found */
+	return -ENOENT;
+}
+EXPORT_SYMBOL_GPL(quic_tls_select_alpn);
+
+/**
+ * quic_tls_validate_alpn - Validate server's ALPN selection
+ * @offered_alpn: Client's offered ALPN list (length-prefixed format)
+ * @offered_len: Length of offered list
+ * @selected: Server's selected protocol (length-prefixed, single entry)
+ * @selected_len: Length of selected protocol (including length byte)
+ *
+ * Verifies that server's selected ALPN was in client's offered list.
+ *
+ * Return: 0 if valid, -EPROTO if not in offered list
+ */
+int quic_tls_validate_alpn(const u8 *offered_alpn, size_t offered_len,
+			   const u8 *selected, size_t selected_len)
+{
+	size_t offset;
+	u8 sel_proto_len, proto_len;
+
+	if (!offered_alpn || !selected || selected_len < 2)
+		return -EINVAL;
+
+	/* Get selected protocol length */
+	sel_proto_len = selected[0];
+	if (1 + sel_proto_len != selected_len)
+		return -EINVAL;
+
+	/* Search for selected protocol in offered list */
+	for (offset = 0; offset < offered_len; ) {
+		proto_len = offered_alpn[offset];
+		if (offset + 1 + proto_len > offered_len)
+			return -EINVAL;
+
+		if (proto_len == sel_proto_len &&
+		    memcmp(offered_alpn + offset + 1,
+			   selected + 1,
+			   proto_len) == 0) {
+			return 0;  /* Found - valid selection */
+		}
+
+		offset += 1 + proto_len;
+	}
+
+	/* Server selected a protocol not offered by client */
+	pr_warn("QUIC-TLS: server selected ALPN not in client's list\n");
+	return -EPROTO;
+}
+EXPORT_SYMBOL_GPL(quic_tls_validate_alpn);
