@@ -96,6 +96,7 @@ struct tquic_bond_state;
 struct tquic_grease_state;
 struct tquic_addr_discovery_state;
 struct tquic_negotiated_params;
+struct tquic_cid_manager;
 
 /**
  * enum tquic_conn_state - Connection state machine states
@@ -1142,6 +1143,14 @@ int tquic_conn_add_remote_cid(struct tquic_connection *conn,
 			      const u8 *reset_token);
 int tquic_conn_retire_cid(struct tquic_connection *conn, u64 seq, bool is_local);
 struct tquic_cid *tquic_conn_get_active_cid(struct tquic_connection *conn);
+
+/* CID manager operations for additional_addresses */
+int tquic_cid_register_remote(struct tquic_cid_manager *mgr,
+			      const struct tquic_cid *cid,
+			      u64 seq_num,
+			      const u8 *reset_token);
+int tquic_cid_register_local(struct tquic_cid_manager *mgr,
+			     const struct tquic_cid *cid);
 
 /* Stateless reset */
 void tquic_generate_stateless_reset_token(const struct tquic_cid *cid,
