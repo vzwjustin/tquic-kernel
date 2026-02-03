@@ -1124,7 +1124,7 @@ int tquic_owd_get_path_info(struct tquic_owd_state *owd,
 		return -EINVAL;
 
 	memset(info, 0, sizeof(*info));
-	info->path_id = path->id;
+	info->path_id = path->path_id;
 
 	if (!tquic_owd_has_valid_estimates(owd)) {
 		/* No OWD data - use RTT/2 as estimate */
