@@ -931,10 +931,4 @@ static void __exit coupled_cc_exit_module(void)
 	pr_info("TQUIC coupled congestion control unloaded\n");
 }
 
-module_init(coupled_cc_init_module);
-module_exit(coupled_cc_exit_module);
-
-MODULE_LICENSE("GPL");
-MODULE_AUTHOR("Linux Foundation");
-MODULE_DESCRIPTION("Coupled Congestion Control for Multipath QUIC");
-MODULE_VERSION("1.0");
+/* Note: module_init/exit handled by main protocol.c */

@@ -253,6 +253,29 @@ config TQUIC_CONG_BBRV2
 
 	  If unsure, say M.
 
+config TQUIC_CONG_BBRV3
+	tristate "TQUIC BBRv3 Congestion Control"
+	default m
+	help
+	  BBRv3 congestion control for TQUIC. This is the latest
+	  iteration of BBR with improved ECN handling, better fairness,
+	  and enhanced stability over BBRv2.
+
+	  Key improvements over BBRv2:
+	    - More responsive to ECN signals (L4S compatible)
+	    - Improved Startup exit for better competing flow fairness
+	    - Refined bandwidth probing with variable duration
+	    - Better handling of aggregation and ACK delays
+	    - Enhanced RTT probing with less queue drain
+
+	  Recommended for modern networks with ECN support and
+	  where L4S compatibility is desired.
+
+	  To compile this as a module, choose M here: the module will
+	  be called tquic_bbrv3.
+
+	  If unsure, say M.
+
 config TQUIC_CONG_PRAGUE
 	tristate "TQUIC Prague Congestion Control (L4S)"
 	depends on TQUIC_L4S

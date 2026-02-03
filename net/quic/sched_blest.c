@@ -579,9 +579,4 @@ static void __exit tquic_sched_blest_exit(void)
 	tquic_unregister_scheduler(&tquic_sched_blest);
 }
 
-module_init(tquic_sched_blest_init);
-module_exit(tquic_sched_blest_exit);
-
-MODULE_LICENSE("GPL");
-MODULE_AUTHOR("Linux Foundation");
-MODULE_DESCRIPTION("TQUIC BLEST Scheduler (Blocking Estimation-based)");
+/* Note: module_init/exit handled by main protocol.c */

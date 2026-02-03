@@ -1086,8 +1086,7 @@ static void __exit tquic_bonding_exit_module(void)
 	pr_info("TQUIC bonding state machine unloaded\n");
 }
 
-module_init(tquic_bonding_init_module);
-module_exit(tquic_bonding_exit_module);
+/* Note: module_init/exit handled by main protocol.c */
 
 /*
  * ============================================================================

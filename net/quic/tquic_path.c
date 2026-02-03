@@ -2245,10 +2245,4 @@ static void __exit tquic_path_exit_module(void)
 	pr_info("TQUIC path manager unloaded\n");
 }
 
-module_init(tquic_path_init_module);
-module_exit(tquic_path_exit_module);
-
-MODULE_LICENSE("GPL");
-MODULE_AUTHOR("Linux Foundation");
-MODULE_DESCRIPTION("TQUIC Multi-Path Management for WAN Bonding");
-MODULE_VERSION("1.0");
+/* Note: module_init/exit handled by main protocol.c */

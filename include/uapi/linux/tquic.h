@@ -10,9 +10,12 @@
 
 #include <linux/types.h>
 #include <linux/socket.h>
+#include <linux/in.h>
 
-/* Protocol number for TQUIC */
-#define IPPROTO_TQUIC	253  /* Experimental */
+/*
+ * Protocol number for TQUIC is defined in <linux/in.h> as IPPROTO_TQUIC = 263.
+ * This follows MPTCP (262) in the protocol number space.
+ */
 
 /* Socket options at SOL_TQUIC level */
 #define SOL_TQUIC	288

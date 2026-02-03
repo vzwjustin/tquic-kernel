@@ -482,9 +482,4 @@ static void __exit tquic_sched_ecf_exit(void)
 	tquic_unregister_scheduler(&tquic_sched_ecf);
 }
 
-module_init(tquic_sched_ecf_init);
-module_exit(tquic_sched_ecf_exit);
-
-MODULE_LICENSE("GPL");
-MODULE_AUTHOR("Linux Foundation");
-MODULE_DESCRIPTION("TQUIC ECF Scheduler (Earliest Completion First)");
+/* Note: module_init/exit handled by main protocol.c */

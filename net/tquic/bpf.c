@@ -959,8 +959,16 @@ static int __init bpf_tquic_sched_kfunc_init(void)
 	pr_info("TQUIC: BPF scheduler struct_ops registered\n");
 	return 0;
 }
+
+static void __exit bpf_tquic_sched_kfunc_exit(void)
+{
+	/* BPF struct_ops cleanup is handled by the kernel */
+	pr_info("TQUIC: BPF scheduler struct_ops unloaded\n");
+}
+
 #ifdef MODULE
 module_init(bpf_tquic_sched_kfunc_init);
+module_exit(bpf_tquic_sched_kfunc_exit);
 #else
 late_initcall(bpf_tquic_sched_kfunc_init);
 #endif
