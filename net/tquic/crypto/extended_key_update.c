@@ -1049,6 +1049,8 @@ EXPORT_SYMBOL_GPL(tquic_eku_decode_response);
  */
 bool tquic_eku_use_rfc9001_fallback(struct tquic_connection *conn)
 {
+	struct tquic_extended_key_update_state *state;
+
 	if (!conn)
 		return true;
 
@@ -1056,7 +1058,8 @@ bool tquic_eku_use_rfc9001_fallback(struct tquic_connection *conn)
 	if (!conn->eku_state)
 		return true;
 
-	return !(conn->eku_state->flags & TQUIC_EKU_FLAG_ENABLED);
+	state = conn->eku_state;
+	return !(state->flags & TQUIC_EKU_FLAG_ENABLED);
 }
 EXPORT_SYMBOL_GPL(tquic_eku_use_rfc9001_fallback);
 
