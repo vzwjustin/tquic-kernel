@@ -2828,10 +2828,4 @@ static void __exit tquic_scheduler_exit(void)
 	pr_info("TQUIC scheduler framework unloaded\n");
 }
 
-module_init(tquic_scheduler_init);
-module_exit(tquic_scheduler_exit);
-
-MODULE_LICENSE("GPL");
-MODULE_AUTHOR("Linux Foundation");
-MODULE_DESCRIPTION("TQUIC Packet Scheduler for WAN Bonding");
-MODULE_VERSION("1.0");
+/* Note: module_init/exit handled by main protocol.c */

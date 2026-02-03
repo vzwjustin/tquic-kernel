@@ -55,7 +55,11 @@ tquic_core-y := \
 	core/flow_control.o \
 	core/transport_params.o \
 	core/cid.o \
-	core/address_discovery.o
+	core/address_discovery.o \
+	core/receive_timestamps.o \
+	core/reliable_reset.o \
+	core/one_way_delay.o \
+	core/additional_addresses.o
 
 # WAN Bonding components
 obj-$(CONFIG_TQUIC_WAN_BONDING) += tquic_bond.o
@@ -83,7 +87,9 @@ tquic_pm-$(CONFIG_TQUIC_PM_USERSPACE) += pm/pm_userspace.o
 obj-$(CONFIG_TQUIC_SCHEDULER) += tquic_sched.o
 tquic_sched-y := \
 	sched/scheduler.o \
-	sched/reorder.o
+	sched/reorder.o \
+	sched/deadline_scheduler.o \
+	sched/deadline_aware.o
 
 # Congestion Control
 obj-$(CONFIG_TQUIC_CONG_CUBIC) += tquic_cubic.o
@@ -103,6 +109,10 @@ tquic_coupled-y := cong/coupled.o
 # BBRv2 congestion control
 obj-$(CONFIG_TQUIC_CONG_BBRV2) += tquic_bbrv2.o
 tquic_bbrv2-y := cong/bbrv2.o
+
+# BBRv3 congestion control
+obj-$(CONFIG_TQUIC_CONG_BBRV3) += tquic_bbrv3.o
+tquic_bbrv3-y := cong/bbrv3.o
 
 # Prague congestion control (L4S)
 obj-$(CONFIG_TQUIC_CONG_PRAGUE) += tquic_prague.o
@@ -141,6 +151,7 @@ tquic_crypto-y := \
 	crypto/tls.o \
 	crypto/header_protection.o \
 	crypto/key_update.o \
+	crypto/extended_key_update.o \
 	crypto/zero_rtt.o \
 	crypto/crypto_module.o
 

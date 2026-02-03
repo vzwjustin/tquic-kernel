@@ -22,6 +22,7 @@
 #include <net/udp.h>
 #include <net/quic.h>
 #include "early_data.h"
+#include "quic_init.h"
 
 static struct kmem_cache *quic_sock_cachep __read_mostly;
 static struct kmem_cache *quic_conn_cachep __read_mostly;
@@ -1303,9 +1304,68 @@ static int __init quic_init(void)
 	if (err)
 		goto out_proto;
 
+	/* Initialize TQUIC bonding subsystem */
+	err = tquic_bonding_init_module();
+	if (err)
+		goto out_offload;
+
+	/* Initialize TQUIC path manager */
+	err = tquic_path_init_module();
+	if (err)
+		goto out_bonding;
+
+	/* Initialize TQUIC scheduler framework */
+	err = tquic_scheduler_init();
+	if (err)
+		goto out_path;
+
+	/* Initialize individual schedulers */
+	err = tquic_sched_minrtt_init();
+	if (err)
+		goto out_sched;
+
+	err = tquic_sched_aggregate_init();
+	if (err)
+		goto out_minrtt;
+
+	err = tquic_sched_weighted_init();
+	if (err)
+		goto out_aggregate;
+
+	err = tquic_sched_blest_init();
+	if (err)
+		goto out_weighted;
+
+	err = tquic_sched_ecf_init();
+	if (err)
+		goto out_blest;
+
+	/* Initialize coupled congestion control */
+	err = coupled_cc_init_module();
+	if (err)
+		goto out_ecf;
+
 	pr_info("QUIC: kernel implementation initialized\n");
 	return 0;
 
+out_ecf:
+	tquic_sched_ecf_exit();
+out_blest:
+	tquic_sched_blest_exit();
+out_weighted:
+	tquic_sched_weighted_exit();
+out_aggregate:
+	tquic_sched_aggregate_exit();
+out_minrtt:
+	tquic_sched_minrtt_exit();
+out_sched:
+	tquic_scheduler_exit();
+out_path:
+	tquic_path_exit_module();
+out_bonding:
+	tquic_bonding_exit_module();
+out_offload:
+	quic_offload_exit();
 out_proto:
 	quic_proto_unregister();
 out_cid_hash:
@@ -1328,6 +1388,17 @@ out_sock_cache:
 
 static void __exit quic_exit(void)
 {
+	/* Cleanup TQUIC subsystems in reverse order */
+	coupled_cc_exit_module();
+	tquic_sched_ecf_exit();
+	tquic_sched_blest_exit();
+	tquic_sched_weighted_exit();
+	tquic_sched_aggregate_exit();
+	tquic_sched_minrtt_exit();
+	tquic_scheduler_exit();
+	tquic_path_exit_module();
+	tquic_bonding_exit_module();
+
 	quic_offload_exit();
 	quic_proto_unregister();
 	quic_cid_hash_cleanup();

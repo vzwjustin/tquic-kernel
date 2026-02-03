@@ -19,4 +19,5 @@ tquic_masque-y := \
 	connect_udp.o \
 	connect_ip.o \
 	quic_proxy.o \
+	quic_proxy_capsules.o \
 	masque_module.o
