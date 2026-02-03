@@ -9,10 +9,10 @@
 
 #include <linux/slab.h>
 #include <linux/uio.h>
-#include <net/quic.h>
+#include <net/tquic.h>
 
-static struct kmem_cache *quic_stream_cache __read_mostly;
-static struct kmem_cache *quic_recv_chunk_cache __read_mostly;
+static struct kmem_cache *tquic_stream_cache __read_mostly;
+static struct kmem_cache *tquic_recv_chunk_cache __read_mostly;
 
 /*
  * Chunk size thresholds for allocation strategy:
@@ -23,9 +23,9 @@ static struct kmem_cache *quic_recv_chunk_cache __read_mostly;
 #define QUIC_CHUNK_SMALL_MAX	1024
 #define QUIC_CHUNK_SIZE_MAX	65536
 
-static inline struct quic_recv_chunk *quic_recv_chunk_alloc(u32 len, gfp_t gfp)
+static inline struct tquic_recv_chunk *tquic_recv_chunk_alloc(u32 len, gfp_t gfp)
 {
-	struct quic_recv_chunk *chunk;
+	struct tquic_recv_chunk *chunk;
 	size_t alloc_size;
 
 	if (len > QUIC_CHUNK_SIZE_MAX)
@@ -35,7 +35,7 @@ static inline struct quic_recv_chunk *quic_recv_chunk_alloc(u32 len, gfp_t gfp)
 
 	if (len <= QUIC_CHUNK_SMALL_MAX) {
 		/* Use cache for small chunks (common case) */
-		chunk = kmem_cache_alloc(quic_recv_chunk_cache, gfp);
+		chunk = kmem_cache_alloc(tquic_recv_chunk_cache, gfp);
 	} else {
 		/* Use kmalloc for large chunks */
 		chunk = kmalloc(alloc_size, gfp);
@@ -44,19 +44,19 @@ static inline struct quic_recv_chunk *quic_recv_chunk_alloc(u32 len, gfp_t gfp)
 	return chunk;
 }
 
-static inline void quic_recv_chunk_free(struct quic_recv_chunk *chunk)
+static inline void tquic_recv_chunk_free(struct tquic_recv_chunk *chunk)
 {
 	if (chunk->len <= QUIC_CHUNK_SMALL_MAX)
-		kmem_cache_free(quic_recv_chunk_cache, chunk);
+		kmem_cache_free(tquic_recv_chunk_cache, chunk);
 	else
 		kfree(chunk);
 }
 
-static struct quic_stream *quic_stream_alloc(void)
+static struct tquic_stream *tquic_stream_alloc(void)
 {
-	struct quic_stream *stream;
+	struct tquic_stream *stream;
 
-	stream = kmem_cache_zalloc(quic_stream_cache, GFP_KERNEL);
+	stream = kmem_cache_zalloc(tquic_stream_cache, GFP_KERNEL);
 	if (!stream)
 		return NULL;
 
@@ -68,7 +68,7 @@ static struct quic_stream *quic_stream_alloc(void)
 	return stream;
 }
 
-static void quic_stream_recv_buf_init(struct quic_stream_recv_buf *recv)
+static void tquic_stream_recv_buf_init(struct tquic_stream_recv_buf *recv)
 {
 	recv->data_tree = RB_ROOT;
 	spin_lock_init(&recv->lock);
@@ -80,7 +80,7 @@ static void quic_stream_recv_buf_init(struct quic_stream_recv_buf *recv)
 	recv->reset_received = 0;
 }
 
-static void quic_stream_send_buf_init(struct quic_stream_send_buf *send)
+static void tquic_stream_send_buf_init(struct tquic_stream_send_buf *send)
 {
 	INIT_LIST_HEAD(&send->pending);
 	spin_lock_init(&send->lock);
@@ -92,23 +92,23 @@ static void quic_stream_send_buf_init(struct quic_stream_send_buf *send)
 	send->reset_sent = 0;
 }
 
-static void quic_stream_recv_buf_destroy(struct quic_stream_recv_buf *recv)
+static void tquic_stream_recv_buf_destroy(struct tquic_stream_recv_buf *recv)
 {
 	struct rb_node *node;
-	struct quic_recv_chunk *chunk;
+	struct tquic_recv_chunk *chunk;
 
 	spin_lock(&recv->lock);
 	node = rb_first(&recv->data_tree);
 	while (node) {
-		chunk = rb_entry(node, struct quic_recv_chunk, node);
+		chunk = rb_entry(node, struct tquic_recv_chunk, node);
 		node = rb_next(node);
 		rb_erase(&chunk->node, &recv->data_tree);
-		quic_recv_chunk_free(chunk);
+		tquic_recv_chunk_free(chunk);
 	}
 	spin_unlock(&recv->lock);
 }
 
-static void quic_stream_send_buf_destroy(struct quic_stream_send_buf *send)
+static void tquic_stream_send_buf_destroy(struct tquic_stream_send_buf *send)
 {
 	struct sk_buff *skb, *tmp;
 
@@ -120,14 +120,14 @@ static void quic_stream_send_buf_destroy(struct quic_stream_send_buf *send)
 	spin_unlock(&send->lock);
 }
 
-struct quic_stream *quic_stream_create(struct quic_connection *conn, u64 id)
+struct tquic_stream *tquic_stream_create(struct tquic_connection *conn, u64 id)
 {
-	struct quic_stream *stream;
+	struct tquic_stream *stream;
 	struct rb_node **link, *parent = NULL;
-	struct quic_stream *entry;
+	struct tquic_stream *entry;
 	bool is_local;
 
-	stream = quic_stream_alloc();
+	stream = tquic_stream_alloc();
 	if (!stream)
 		return NULL;
 
@@ -136,12 +136,12 @@ struct quic_stream *quic_stream_create(struct quic_connection *conn, u64 id)
 	/* Stream not yet visible, use WRITE_ONCE for consistency */
 	WRITE_ONCE(stream->state, QUIC_STREAM_STATE_IDLE);
 
-	quic_stream_recv_buf_init(&stream->recv);
-	quic_stream_send_buf_init(&stream->send);
+	tquic_stream_recv_buf_init(&stream->recv);
+	tquic_stream_send_buf_init(&stream->send);
 
 	/* Set initial flow control limits */
-	is_local = quic_stream_is_local(conn, id);
-	if (quic_stream_is_bidi(id)) {
+	is_local = tquic_stream_is_local(conn, id);
+	if (tquic_stream_is_bidi(id)) {
 		if (is_local) {
 			stream->send.max_stream_data =
 				conn->remote_params.initial_max_stream_data_bidi_remote;
@@ -171,7 +171,7 @@ struct quic_stream *quic_stream_create(struct quic_connection *conn, u64 id)
 	link = &conn->streams.rb_node;
 	while (*link) {
 		parent = *link;
-		entry = rb_entry(parent, struct quic_stream, node);
+		entry = rb_entry(parent, struct tquic_stream, node);
 
 		if (id < entry->id)
 			link = &parent->rb_left;
@@ -180,7 +180,7 @@ struct quic_stream *quic_stream_create(struct quic_connection *conn, u64 id)
 		else {
 			/* Stream already exists */
 			spin_unlock(&conn->streams_lock);
-			quic_stream_destroy(stream);
+			tquic_stream_destroy(stream);
 			return NULL;
 		}
 	}
@@ -188,7 +188,7 @@ struct quic_stream *quic_stream_create(struct quic_connection *conn, u64 id)
 	rb_insert_color(&stream->node, &conn->streams);
 
 	/* Update stream counts */
-	if (quic_stream_is_bidi(id))
+	if (tquic_stream_is_bidi(id))
 		conn->streams_count_bidi++;
 	else
 		conn->streams_count_uni++;
@@ -201,7 +201,7 @@ struct quic_stream *quic_stream_create(struct quic_connection *conn, u64 id)
 	return stream;
 }
 
-void quic_stream_destroy(struct quic_stream *stream)
+void tquic_stream_destroy(struct tquic_stream *stream)
 {
 	if (!stream)
 		return;
@@ -209,8 +209,8 @@ void quic_stream_destroy(struct quic_stream *stream)
 	if (!refcount_dec_and_test(&stream->refcnt))
 		return;
 
-	quic_stream_recv_buf_destroy(&stream->recv);
-	quic_stream_send_buf_destroy(&stream->send);
+	tquic_stream_recv_buf_destroy(&stream->recv);
+	tquic_stream_send_buf_destroy(&stream->send);
 
 	if (stream->conn) {
 		spin_lock(&stream->conn->streams_lock);
@@ -220,18 +220,18 @@ void quic_stream_destroy(struct quic_stream *stream)
 		atomic64_inc(&stream->conn->stats.streams_closed);
 	}
 
-	kmem_cache_free(quic_stream_cache, stream);
+	kmem_cache_free(tquic_stream_cache, stream);
 }
 
-struct quic_stream *quic_stream_lookup(struct quic_connection *conn, u64 id)
+struct tquic_stream *tquic_stream_lookup(struct tquic_connection *conn, u64 id)
 {
 	struct rb_node *node;
-	struct quic_stream *stream;
+	struct tquic_stream *stream;
 
 	spin_lock(&conn->streams_lock);
 	node = conn->streams.rb_node;
 	while (node) {
-		stream = rb_entry(node, struct quic_stream, node);
+		stream = rb_entry(node, struct tquic_stream, node);
 
 		if (id < stream->id)
 			node = node->rb_left;
@@ -248,7 +248,7 @@ struct quic_stream *quic_stream_lookup(struct quic_connection *conn, u64 id)
 	return NULL;
 }
 
-u64 quic_stream_next_id(struct quic_connection *conn, bool unidirectional)
+u64 tquic_stream_next_id(struct tquic_connection *conn, bool unidirectional)
 {
 	u64 id;
 
@@ -265,22 +265,22 @@ u64 quic_stream_next_id(struct quic_connection *conn, bool unidirectional)
 	return id;
 }
 
-bool quic_stream_is_local(struct quic_connection *conn, u64 stream_id)
+bool tquic_stream_is_local(struct tquic_connection *conn, u64 stream_id)
 {
 	bool initiator_is_client = (stream_id & 0x01) == 0;
 	return conn->is_server != initiator_is_client;
 }
 
-bool quic_stream_is_bidi(u64 stream_id)
+bool tquic_stream_is_bidi(u64 stream_id)
 {
 	return (stream_id & 0x02) == 0;
 }
 
-static int quic_stream_send_data(struct quic_stream *stream,
+static int tquic_stream_send_data(struct tquic_stream *stream,
 				 const u8 *data, size_t len, bool fin)
 {
-	struct quic_connection *conn = stream->conn;
-	struct quic_stream_send_buf *send = &stream->send;
+	struct tquic_connection *conn = stream->conn;
+	struct tquic_stream_send_buf *send = &stream->send;
 	size_t max_chunk = QUIC_MAX_PACKET_SIZE - 100;  /* Leave room for headers */
 	size_t offset = 0;
 
@@ -291,7 +291,7 @@ static int quic_stream_send_data(struct quic_stream *stream,
 		u8 *p;
 
 		/* Check flow control */
-		if (!quic_stream_flow_control_can_send(stream, chunk_len)) {
+		if (!tquic_stream_flow_control_can_send(stream, chunk_len)) {
 			/* Block until we have credits */
 			if (offset == 0)
 				return -EAGAIN;
@@ -313,17 +313,17 @@ static int quic_stream_send_data(struct quic_stream *stream,
 		*p = frame_type;
 
 		/* Stream ID (variable length encoding) */
-		p = skb_put(skb, quic_varint_len(stream->id));
-		quic_varint_encode(stream->id, p);
+		p = skb_put(skb, tquic_varint_len(stream->id));
+		tquic_varint_encode(stream->id, p);
 
 		/* Offset (variable length encoding) */
-		p = skb_put(skb, quic_varint_len(send->offset + offset));
-		quic_varint_encode(send->offset + offset, p);
+		p = skb_put(skb, tquic_varint_len(send->offset + offset));
+		tquic_varint_encode(send->offset + offset, p);
 
 		/* Length if LEN bit set */
 		if (frame_type & 0x02) {
-			p = skb_put(skb, quic_varint_len(chunk_len));
-			quic_varint_encode(chunk_len, p);
+			p = skb_put(skb, tquic_varint_len(chunk_len));
+			tquic_varint_encode(chunk_len, p);
 		}
 
 		/* Data */
@@ -336,8 +336,8 @@ static int quic_stream_send_data(struct quic_stream *stream,
 		send->pending_bytes += chunk_len;
 		spin_unlock(&send->lock);
 
-		quic_stream_flow_control_on_data_sent(stream, chunk_len);
-		quic_flow_control_on_data_sent(conn, chunk_len);
+		tquic_stream_flow_control_on_data_sent(stream, chunk_len);
+		tquic_flow_control_on_data_sent(conn, chunk_len);
 
 		offset += chunk_len;
 	}
@@ -353,7 +353,7 @@ static int quic_stream_send_data(struct quic_stream *stream,
 	return offset;
 }
 
-int quic_stream_send(struct quic_stream *stream, struct msghdr *msg, size_t len)
+int tquic_stream_send(struct tquic_stream *stream, struct msghdr *msg, size_t len)
 {
 	u8 *buf;
 	size_t copied;
@@ -363,8 +363,8 @@ int quic_stream_send(struct quic_stream *stream, struct msghdr *msg, size_t len)
 	    stream->state == QUIC_STREAM_STATE_RESET_SENT)
 		return -EPIPE;
 
-	if (!quic_stream_is_local(stream->conn, stream->id) &&
-	    !quic_stream_is_bidi(stream->id))
+	if (!tquic_stream_is_local(stream->conn, stream->id) &&
+	    !tquic_stream_is_bidi(stream->id))
 		return -EINVAL;  /* Can't send on remote-initiated uni stream */
 
 	buf = kmalloc(len, GFP_KERNEL);
@@ -377,20 +377,20 @@ int quic_stream_send(struct quic_stream *stream, struct msghdr *msg, size_t len)
 		return -EFAULT;
 	}
 
-	err = quic_stream_send_data(stream, buf, len, false);
+	err = tquic_stream_send_data(stream, buf, len, false);
 
 	kfree(buf);
 	return err;
 }
 
-static int quic_stream_recv_data_insert(struct quic_stream_recv_buf *recv,
+static int tquic_stream_recv_data_insert(struct tquic_stream_recv_buf *recv,
 					u64 offset, const u8 *data, u32 len)
 {
-	struct quic_recv_chunk *chunk, *existing;
+	struct tquic_recv_chunk *chunk, *existing;
 	struct rb_node **link, *parent = NULL;
 
 	/* Allocate variable-size chunk to hold the full data */
-	chunk = quic_recv_chunk_alloc(len, GFP_ATOMIC);
+	chunk = tquic_recv_chunk_alloc(len, GFP_ATOMIC);
 	if (!chunk)
 		return -ENOMEM;
 
@@ -404,7 +404,7 @@ static int quic_stream_recv_data_insert(struct quic_stream_recv_buf *recv,
 	link = &recv->data_tree.rb_node;
 	while (*link) {
 		parent = *link;
-		existing = rb_entry(parent, struct quic_recv_chunk, node);
+		existing = rb_entry(parent, struct tquic_recv_chunk, node);
 
 		if (offset < existing->offset) {
 			link = &parent->rb_left;
@@ -413,7 +413,7 @@ static int quic_stream_recv_data_insert(struct quic_stream_recv_buf *recv,
 		} else {
 			/* Duplicate data at same offset - skip */
 			spin_unlock(&recv->lock);
-			quic_recv_chunk_free(chunk);
+			tquic_recv_chunk_free(chunk);
 			return 0;
 		}
 	}
@@ -435,10 +435,10 @@ static int quic_stream_recv_data_insert(struct quic_stream_recv_buf *recv,
 	return 0;
 }
 
-int quic_stream_recv_data(struct quic_stream *stream, u64 offset,
+int tquic_stream_recv_data(struct tquic_stream *stream, u64 offset,
 			  const u8 *data, u32 len, bool fin)
 {
-	struct quic_stream_recv_buf *recv = &stream->recv;
+	struct tquic_stream_recv_buf *recv = &stream->recv;
 	int err;
 
 	if (stream->state == QUIC_STREAM_STATE_RESET_RECVD)
@@ -463,11 +463,11 @@ int quic_stream_recv_data(struct quic_stream *stream, u64 offset,
 		stream->fin_received = 1;
 	}
 
-	err = quic_stream_recv_data_insert(recv, offset, data, len);
+	err = tquic_stream_recv_data_insert(recv, offset, data, len);
 	if (err)
 		return err;
 
-	quic_flow_control_on_data_recvd(stream->conn, len);
+	tquic_flow_control_on_data_recvd(stream->conn, len);
 
 	/* Wake up any waiting readers */
 	wake_up(&stream->wait);
@@ -475,10 +475,10 @@ int quic_stream_recv_data(struct quic_stream *stream, u64 offset,
 	return 0;
 }
 
-int quic_stream_recv(struct quic_stream *stream, struct msghdr *msg, size_t len)
+int tquic_stream_recv(struct tquic_stream *stream, struct msghdr *msg, size_t len)
 {
-	struct quic_stream_recv_buf *recv = &stream->recv;
-	struct quic_recv_chunk *chunk;
+	struct tquic_stream_recv_buf *recv = &stream->recv;
+	struct tquic_recv_chunk *chunk;
 	struct rb_node *node;
 	size_t copied = 0;
 	size_t to_copy;
@@ -491,7 +491,7 @@ int quic_stream_recv(struct quic_stream *stream, struct msghdr *msg, size_t len)
 	/* Read contiguous data starting from current offset */
 	node = rb_first(&recv->data_tree);
 	while (node && copied < len) {
-		chunk = rb_entry(node, struct quic_recv_chunk, node);
+		chunk = rb_entry(node, struct tquic_recv_chunk, node);
 
 		/* Check if this chunk is contiguous with what we've read */
 		if (chunk->offset > recv->offset)
@@ -502,7 +502,7 @@ int quic_stream_recv(struct quic_stream *stream, struct msghdr *msg, size_t len)
 			/* Already read this chunk, remove it */
 			node = rb_next(node);
 			rb_erase(&chunk->node, &recv->data_tree);
-			quic_recv_chunk_free(chunk);
+			tquic_recv_chunk_free(chunk);
 			continue;
 		}
 
@@ -526,7 +526,7 @@ int quic_stream_recv(struct quic_stream *stream, struct msghdr *msg, size_t len)
 		if (skip + to_copy >= chunk->len) {
 			node = rb_next(node);
 			rb_erase(&chunk->node, &recv->data_tree);
-			quic_recv_chunk_free(chunk);
+			tquic_recv_chunk_free(chunk);
 		} else {
 			node = rb_next(node);
 		}
@@ -537,9 +537,9 @@ int quic_stream_recv(struct quic_stream *stream, struct msghdr *msg, size_t len)
 	return copied > 0 ? copied : -EAGAIN;
 }
 
-int quic_stream_reset(struct quic_stream *stream, u64 error_code)
+int tquic_stream_reset(struct tquic_stream *stream, u64 error_code)
 {
-	struct quic_connection *conn = stream->conn;
+	struct tquic_connection *conn = stream->conn;
 	struct sk_buff *skb;
 	u8 *p;
 
@@ -562,16 +562,16 @@ int quic_stream_reset(struct quic_stream *stream, u64 error_code)
 	p = skb_put(skb, 1);
 	*p = QUIC_FRAME_RESET_STREAM;
 
-	p = skb_put(skb, quic_varint_len(stream->id));
-	quic_varint_encode(stream->id, p);
+	p = skb_put(skb, tquic_varint_len(stream->id));
+	tquic_varint_encode(stream->id, p);
 
-	p = skb_put(skb, quic_varint_len(error_code));
-	quic_varint_encode(error_code, p);
+	p = skb_put(skb, tquic_varint_len(error_code));
+	tquic_varint_encode(error_code, p);
 
-	p = skb_put(skb, quic_varint_len(stream->send.offset));
-	quic_varint_encode(stream->send.offset, p);
+	p = skb_put(skb, tquic_varint_len(stream->send.offset));
+	tquic_varint_encode(stream->send.offset, p);
 
-	if (quic_conn_queue_frame(conn, skb))
+	if (tquic_conn_queue_frame(conn, skb))
 		return -ENOBUFS;
 	schedule_work(&conn->tx_work);
 
@@ -580,9 +580,9 @@ int quic_stream_reset(struct quic_stream *stream, u64 error_code)
 	return 0;
 }
 
-int quic_stream_stop_sending(struct quic_stream *stream, u64 error_code)
+int tquic_stream_stop_sending(struct tquic_stream *stream, u64 error_code)
 {
-	struct quic_connection *conn = stream->conn;
+	struct tquic_connection *conn = stream->conn;
 	struct sk_buff *skb;
 	u8 *p;
 
@@ -599,13 +599,13 @@ int quic_stream_stop_sending(struct quic_stream *stream, u64 error_code)
 	p = skb_put(skb, 1);
 	*p = QUIC_FRAME_STOP_SENDING;
 
-	p = skb_put(skb, quic_varint_len(stream->id));
-	quic_varint_encode(stream->id, p);
+	p = skb_put(skb, tquic_varint_len(stream->id));
+	tquic_varint_encode(stream->id, p);
 
-	p = skb_put(skb, quic_varint_len(error_code));
-	quic_varint_encode(error_code, p);
+	p = skb_put(skb, tquic_varint_len(error_code));
+	tquic_varint_encode(error_code, p);
 
-	if (quic_conn_queue_frame(conn, skb))
+	if (tquic_conn_queue_frame(conn, skb))
 		return -ENOBUFS;
 	schedule_work(&conn->tx_work);
 
@@ -613,11 +613,11 @@ int quic_stream_stop_sending(struct quic_stream *stream, u64 error_code)
 }
 
 /* Process RESET_STREAM frame */
-int quic_stream_handle_reset(struct quic_stream *stream, u64 error_code,
+int tquic_stream_handle_reset(struct tquic_stream *stream, u64 error_code,
 			     u64 final_size)
 {
-	struct quic_connection *conn = stream->conn;
-	struct quic_stream_recv_buf *recv = &stream->recv;
+	struct tquic_connection *conn = stream->conn;
+	struct tquic_stream_recv_buf *recv = &stream->recv;
 
 	spin_lock_bh(&conn->streams_lock);
 	if (stream->reset_received) {
@@ -639,7 +639,7 @@ int quic_stream_handle_reset(struct quic_stream *stream, u64 error_code,
 	spin_unlock_bh(&conn->streams_lock);
 
 	/* Discard any buffered data */
-	quic_stream_recv_buf_destroy(recv);
+	tquic_stream_recv_buf_destroy(recv);
 
 	wake_up(&stream->wait);
 
@@ -647,7 +647,7 @@ int quic_stream_handle_reset(struct quic_stream *stream, u64 error_code,
 }
 
 /* Process STOP_SENDING frame */
-int quic_stream_handle_stop_sending(struct quic_stream *stream, u64 error_code)
+int tquic_stream_handle_stop_sending(struct tquic_stream *stream, u64 error_code)
 {
 	if (stream->stop_sending_received)
 		return 0;
@@ -655,11 +655,11 @@ int quic_stream_handle_stop_sending(struct quic_stream *stream, u64 error_code)
 	stream->stop_sending_received = 1;
 
 	/* Respond with RESET_STREAM */
-	return quic_stream_reset(stream, error_code);
+	return tquic_stream_reset(stream, error_code);
 }
 
 /* Variable-length integer encoding helpers (RFC 9000 Section 16) */
-int quic_varint_len(u64 val)
+int tquic_varint_len(u64 val)
 {
 	if (val <= QUIC_VARINT_1BYTE_MAX)
 		return 1;
@@ -670,7 +670,7 @@ int quic_varint_len(u64 val)
 	return 8;
 }
 
-void quic_varint_encode(u64 val, u8 *buf)
+void tquic_varint_encode(u64 val, u8 *buf)
 {
 	if (val <= QUIC_VARINT_1BYTE_MAX) {
 		buf[0] = val;
@@ -694,7 +694,7 @@ void quic_varint_encode(u64 val, u8 *buf)
 	}
 }
 
-int quic_varint_decode(const u8 *buf, size_t len, u64 *val)
+int tquic_varint_decode(const u8 *buf, size_t len, u64 *val)
 {
 	u8 prefix;
 	int varint_len;
@@ -736,27 +736,27 @@ int quic_varint_decode(const u8 *buf, size_t len, u64 *val)
 	return varint_len;
 }
 
-int __init quic_stream_init(void)
+int __init tquic_stream_init(void)
 {
-	quic_stream_cache = kmem_cache_create("quic_stream",
-					      sizeof(struct quic_stream), 0,
+	tquic_stream_cache = kmem_cache_create("tquic_stream",
+					      sizeof(struct tquic_stream), 0,
 					      SLAB_HWCACHE_ALIGN, NULL);
-	if (!quic_stream_cache)
+	if (!tquic_stream_cache)
 		return -ENOMEM;
 
-	quic_recv_chunk_cache = kmem_cache_create("quic_recv_chunk",
-						  sizeof(struct quic_recv_chunk) + 1024, 0,
+	tquic_recv_chunk_cache = kmem_cache_create("tquic_recv_chunk",
+						  sizeof(struct tquic_recv_chunk) + 1024, 0,
 						  SLAB_HWCACHE_ALIGN, NULL);
-	if (!quic_recv_chunk_cache) {
-		kmem_cache_destroy(quic_stream_cache);
+	if (!tquic_recv_chunk_cache) {
+		kmem_cache_destroy(tquic_stream_cache);
 		return -ENOMEM;
 	}
 
 	return 0;
 }
 
-void quic_stream_exit(void)
+void tquic_stream_exit(void)
 {
-	kmem_cache_destroy(quic_recv_chunk_cache);
-	kmem_cache_destroy(quic_stream_cache);
+	kmem_cache_destroy(tquic_recv_chunk_cache);
+	kmem_cache_destroy(tquic_stream_cache);
 }

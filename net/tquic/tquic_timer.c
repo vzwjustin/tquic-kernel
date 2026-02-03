@@ -95,6 +95,8 @@ struct tquic_sent_packet {
  * @pending_ack_count: Number of pending ACKs
  * @lock: Per-space lock
  */
+#ifndef TQUIC_PN_SPACE_DEFINED
+#define TQUIC_PN_SPACE_DEFINED
 struct tquic_pn_space {
 	u64 largest_acked;
 	u64 largest_sent;
@@ -111,6 +113,7 @@ struct tquic_pn_space {
 
 	spinlock_t lock;
 };
+#endif /* TQUIC_PN_SPACE_DEFINED */
 
 /**
  * struct tquic_recovery_state - Connection recovery state

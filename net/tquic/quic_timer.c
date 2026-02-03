@@ -11,7 +11,7 @@
 #include <linux/slab.h>
 #include <linux/timer.h>
 #include <linux/jiffies.h>
-#include <net/quic.h>
+#include <net/tquic.h>
 #include "trace.h"
 #include "key_update.h"
 
@@ -32,7 +32,7 @@
 #define QUIC_TIMER_FLAG_DESTROYING	BIT(0)	/* Destruction in progress */
 
 /* Timer state tracking (unused, kept for future use) */
-struct quic_timer_state {
+struct tquic_timer_state {
 	ktime_t		deadline;
 	bool		armed;
 	u32		backoff_count;
@@ -44,9 +44,9 @@ struct quic_timer_state {
  * Returns true if the connection is valid for timer operations.
  * Must be called with conn->lock held.
  */
-static inline bool quic_timer_conn_valid_locked(struct quic_connection *conn)
+static inline bool tquic_timer_conn_valid_locked(struct tquic_connection *conn)
 {
-	/* Check destroying flag - set during quic_timer_cancel_all() */
+	/* Check destroying flag - set during tquic_timer_cancel_all() */
 	if (conn->timer_flags & QUIC_TIMER_FLAG_DESTROYING)
 		return false;
 
@@ -60,7 +60,7 @@ static inline bool quic_timer_conn_valid_locked(struct quic_connection *conn)
 /*
  * Convert ktime to jiffies for timer_list
  */
-static unsigned long quic_ktime_to_jiffies(ktime_t when)
+static unsigned long tquic_ktime_to_jiffies(ktime_t when)
 {
 	s64 delta_ns = ktime_to_ns(ktime_sub(when, ktime_get()));
 	unsigned long delta_jiffies;
@@ -81,9 +81,9 @@ static unsigned long quic_ktime_to_jiffies(ktime_t when)
  * Per RFC 9002 Section 6.2: When the loss detection timer expires,
  * the timer's mode determines the action to be performed.
  */
-static void quic_timer_loss_handler(struct timer_list *t)
+static void tquic_timer_loss_handler(struct timer_list *t)
 {
-	struct quic_connection *conn = from_timer(conn, t, timers[QUIC_TIMER_LOSS]);
+	struct tquic_connection *conn = from_timer(conn, t, timers[TQUIC_TIMER_LOSS]);
 	unsigned long flags;
 
 	if (!conn)
@@ -92,22 +92,22 @@ static void quic_timer_loss_handler(struct timer_list *t)
 	spin_lock_irqsave(&conn->lock, flags);
 
 	/* Check if connection is valid for timer work */
-	if (!quic_timer_conn_valid_locked(conn) ||
+	if (!tquic_timer_conn_valid_locked(conn) ||
 	    conn->state == QUIC_STATE_DRAINING) {
 		spin_unlock_irqrestore(&conn->lock, flags);
 		return;
 	}
 
 	/* Clear timer deadline */
-	conn->timer_deadlines[QUIC_TIMER_LOSS] = 0;
+	conn->timer_deadlines[TQUIC_TIMER_LOSS] = 0;
 
 	spin_unlock_irqrestore(&conn->lock, flags);
 
 	/* Invoke loss detection timeout handler */
-	quic_loss_detection_on_timeout(conn);
+	tquic_loss_detection_on_timeout(conn);
 
 	/* Update timers (will check destroying flag internally) */
-	quic_timer_update(conn);
+	tquic_timer_update(conn);
 }
 
 /*
@@ -116,9 +116,9 @@ static void quic_timer_loss_handler(struct timer_list *t)
  * Per RFC 9000: An endpoint MUST acknowledge all ack-eliciting
  * Initial and Handshake packets immediately
  */
-static void quic_timer_ack_handler(struct timer_list *t)
+static void tquic_timer_ack_handler(struct timer_list *t)
 {
-	struct quic_connection *conn = from_timer(conn, t, timers[QUIC_TIMER_ACK]);
+	struct tquic_connection *conn = from_timer(conn, t, timers[TQUIC_TIMER_ACK]);
 	unsigned long flags;
 	int i;
 
@@ -128,27 +128,27 @@ static void quic_timer_ack_handler(struct timer_list *t)
 	spin_lock_irqsave(&conn->lock, flags);
 
 	/* Check if connection is valid for timer work */
-	if (!quic_timer_conn_valid_locked(conn) ||
+	if (!tquic_timer_conn_valid_locked(conn) ||
 	    conn->state == QUIC_STATE_DRAINING) {
 		spin_unlock_irqrestore(&conn->lock, flags);
 		return;
 	}
 
 	/* Clear timer deadline */
-	conn->timer_deadlines[QUIC_TIMER_ACK] = 0;
+	conn->timer_deadlines[TQUIC_TIMER_ACK] = 0;
 
 	spin_unlock_irqrestore(&conn->lock, flags);
 
 	/* Generate ACK frames for each packet number space */
 	for (i = 0; i < QUIC_PN_SPACE_MAX; i++) {
-		if (quic_ack_should_send(conn, i)) {
+		if (tquic_ack_should_send(conn, i)) {
 			struct sk_buff *skb = alloc_skb(256, GFP_ATOMIC);
 			if (!skb) {
 				pr_warn("QUIC: failed to allocate ACK frame for pn_space %d\n", i);
 				continue;
 			}
 
-			int len = quic_ack_create(conn, i, skb);
+			int len = tquic_ack_create(conn, i, skb);
 			if (len <= 0) {
 				pr_warn("QUIC: failed to create ACK frame for pn_space %d (len=%d)\n",
 					i, len);
@@ -169,7 +169,7 @@ static void quic_timer_ack_handler(struct timer_list *t)
 			 * If queueing fails, log it but still schedule transmission work
 			 * to retry. ACKs are too important to silently discard.
 			 */
-			if (quic_conn_queue_frame(conn, skb)) {
+			if (tquic_conn_queue_frame(conn, skb)) {
 				pr_warn("QUIC: failed to queue ACK frame for pn_space %d (queue full), will retry\n",
 					i);
 				kfree_skb(skb);
@@ -189,9 +189,9 @@ static void quic_timer_ack_handler(struct timer_list *t)
  * either endpoint in its transport parameters, the connection is
  * silently closed and its state is discarded when it remains idle
  */
-static void quic_timer_idle_handler(struct timer_list *t)
+static void tquic_timer_idle_handler(struct timer_list *t)
 {
-	struct quic_connection *conn = from_timer(conn, t, timers[QUIC_TIMER_IDLE]);
+	struct tquic_connection *conn = from_timer(conn, t, timers[TQUIC_TIMER_IDLE]);
 	unsigned long flags;
 
 	if (!conn)
@@ -206,7 +206,7 @@ static void quic_timer_idle_handler(struct timer_list *t)
 	}
 
 	/* Clear timer deadline */
-	conn->timer_deadlines[QUIC_TIMER_IDLE] = 0;
+	conn->timer_deadlines[TQUIC_TIMER_IDLE] = 0;
 
 	/* Connection has been idle too long - close it */
 	conn->state = QUIC_STATE_CLOSED;
@@ -225,9 +225,9 @@ static void quic_timer_idle_handler(struct timer_list *t)
  * Per RFC 9000 Section 7: The QUIC handshake is considered complete
  * when the TLS handshake is complete
  */
-static void quic_timer_handshake_handler(struct timer_list *t)
+static void tquic_timer_handshake_handler(struct timer_list *t)
 {
-	struct quic_connection *conn = from_timer(conn, t, timers[QUIC_TIMER_HANDSHAKE]);
+	struct tquic_connection *conn = from_timer(conn, t, timers[TQUIC_TIMER_HANDSHAKE]);
 	unsigned long flags;
 
 	if (!conn)
@@ -243,7 +243,7 @@ static void quic_timer_handshake_handler(struct timer_list *t)
 	}
 
 	/* Clear timer deadline */
-	conn->timer_deadlines[QUIC_TIMER_HANDSHAKE] = 0;
+	conn->timer_deadlines[TQUIC_TIMER_HANDSHAKE] = 0;
 
 	/* Handshake timeout - close connection */
 	conn->state = QUIC_STATE_CLOSED;
@@ -262,10 +262,10 @@ static void quic_timer_handshake_handler(struct timer_list *t)
  * Per RFC 9000 Section 8.2.4: An endpoint SHOULD NOT probe a new path
  * with packets that are larger than the current maximum datagram size
  */
-static void quic_timer_path_probe_handler(struct timer_list *t)
+static void tquic_timer_path_probe_handler(struct timer_list *t)
 {
-	struct quic_connection *conn = from_timer(conn, t, timers[QUIC_TIMER_PATH_PROBE]);
-	struct quic_path *path;
+	struct tquic_connection *conn = from_timer(conn, t, timers[TQUIC_TIMER_PATH_PROBE]);
+	struct tquic_path *path;
 	unsigned long flags;
 
 	if (!conn)
@@ -281,14 +281,14 @@ static void quic_timer_path_probe_handler(struct timer_list *t)
 	}
 
 	/* Clear timer deadline */
-	conn->timer_deadlines[QUIC_TIMER_PATH_PROBE] = 0;
+	conn->timer_deadlines[TQUIC_TIMER_PATH_PROBE] = 0;
 
 	spin_unlock_irqrestore(&conn->lock, flags);
 
 	/* Check all paths that need probing */
 	list_for_each_entry(path, &conn->paths, list) {
-		if (quic_path_needs_probe(path)) {
-			quic_path_on_probe_timeout(path);
+		if (tquic_path_needs_probe(path)) {
+			tquic_path_on_probe_timeout(path);
 		}
 	}
 }
@@ -304,10 +304,10 @@ static void quic_timer_path_probe_handler(struct timer_list *t)
  * Per RFC 9002 Section 7.7: "A sender SHOULD pace sending of all in-flight
  * packets based on input from the congestion controller."
  */
-static void quic_timer_pacing_handler(struct timer_list *t)
+static void tquic_timer_pacing_handler(struct timer_list *t)
 {
-	struct quic_connection *conn = from_timer(conn, t, timers[QUIC_TIMER_PACING]);
-	struct quic_cc_state *cc;
+	struct tquic_connection *conn = from_timer(conn, t, timers[TQUIC_TIMER_PACING]);
+	struct tquic_cc_state *cc;
 	struct sk_buff *skb;
 	unsigned long flags;
 	ktime_t now;
@@ -326,7 +326,7 @@ static void quic_timer_pacing_handler(struct timer_list *t)
 	}
 
 	/* Clear timer deadline */
-	conn->timer_deadlines[QUIC_TIMER_PACING] = 0;
+	conn->timer_deadlines[TQUIC_TIMER_PACING] = 0;
 
 	spin_unlock_irqrestore(&conn->lock, flags);
 
@@ -342,20 +342,20 @@ static void quic_timer_pacing_handler(struct timer_list *t)
 		if (ktime_after(conn->pacing_next_send, now)) {
 			/* Re-queue and reschedule timer */
 			skb_queue_head(&conn->pacing_queue, skb);
-			quic_timer_set(conn, QUIC_TIMER_PACING,
+			tquic_timer_set(conn, TQUIC_TIMER_PACING,
 				       conn->pacing_next_send);
 			break;
 		}
 
 		/* Send the packet */
-		err = quic_output(conn, skb);
+		err = tquic_output(conn, skb);
 		if (err) {
 			kfree_skb(skb);
 			continue;
 		}
 
 		/* Update pacing state for next packet */
-		delay_ns = quic_cc_pacing_delay(cc, skb->len);
+		delay_ns = tquic_cc_pacing_delay(cc, skb->len);
 		conn->pacing_next_send = ktime_add_ns(now, delay_ns);
 		cc->last_sent_time = ktime_to_ns(now);
 		sent++;
@@ -371,7 +371,7 @@ static void quic_timer_pacing_handler(struct timer_list *t)
 
 		if (ktime_before(next, now))
 			next = ktime_add_ns(now, 1000); /* 1us minimum */
-		quic_timer_set(conn, QUIC_TIMER_PACING, next);
+		tquic_timer_set(conn, TQUIC_TIMER_PACING, next);
 	}
 }
 
@@ -382,10 +382,10 @@ static void quic_timer_pacing_handler(struct timer_list *t)
  * packets. This timer fires ~3x PTO after the update to discard the old
  * keys when they're no longer needed.
  */
-static void quic_timer_key_discard_handler(struct timer_list *t)
+static void tquic_timer_key_discard_handler(struct timer_list *t)
 {
-	struct quic_connection *conn = from_timer(conn, t,
-						  timers[QUIC_TIMER_KEY_DISCARD]);
+	struct tquic_connection *conn = from_timer(conn, t,
+						  timers[TQUIC_TIMER_KEY_DISCARD]);
 	unsigned long flags;
 
 	if (!conn)
@@ -394,18 +394,18 @@ static void quic_timer_key_discard_handler(struct timer_list *t)
 	spin_lock_irqsave(&conn->lock, flags);
 
 	/* Check if connection is valid for timer work */
-	if (!quic_timer_conn_valid_locked(conn)) {
+	if (!tquic_timer_conn_valid_locked(conn)) {
 		spin_unlock_irqrestore(&conn->lock, flags);
 		return;
 	}
 
 	/* Clear timer deadline */
-	conn->timer_deadlines[QUIC_TIMER_KEY_DISCARD] = 0;
+	conn->timer_deadlines[TQUIC_TIMER_KEY_DISCARD] = 0;
 
 	pr_debug("QUIC: key discard timer fired, discarding old keys\n");
 
 	/* Discard old RX keys */
-	quic_crypto_discard_old_keys(conn);
+	tquic_crypto_discard_old_keys(conn);
 
 	spin_unlock_irqrestore(&conn->lock, flags);
 }
@@ -417,7 +417,7 @@ static void quic_timer_key_discard_handler(struct timer_list *t)
  * ACK generation, idle timeout, handshake, path probing, pacing,
  * and key discard.
  */
-void quic_timer_init(struct quic_connection *conn)
+void tquic_timer_init(struct tquic_connection *conn)
 {
 	int i;
 
@@ -432,13 +432,13 @@ void quic_timer_init(struct quic_connection *conn)
 		conn->timer_deadlines[i] = 0;
 
 	/* Set up timer callbacks */
-	timer_setup(&conn->timers[QUIC_TIMER_LOSS], quic_timer_loss_handler, 0);
-	timer_setup(&conn->timers[QUIC_TIMER_ACK], quic_timer_ack_handler, 0);
-	timer_setup(&conn->timers[QUIC_TIMER_IDLE], quic_timer_idle_handler, 0);
-	timer_setup(&conn->timers[QUIC_TIMER_HANDSHAKE], quic_timer_handshake_handler, 0);
-	timer_setup(&conn->timers[QUIC_TIMER_PATH_PROBE], quic_timer_path_probe_handler, 0);
-	timer_setup(&conn->timers[QUIC_TIMER_PACING], quic_timer_pacing_handler, 0);
-	timer_setup(&conn->timers[QUIC_TIMER_KEY_DISCARD], quic_timer_key_discard_handler, 0);
+	timer_setup(&conn->timers[TQUIC_TIMER_LOSS], tquic_timer_loss_handler, 0);
+	timer_setup(&conn->timers[TQUIC_TIMER_ACK], tquic_timer_ack_handler, 0);
+	timer_setup(&conn->timers[TQUIC_TIMER_IDLE], tquic_timer_idle_handler, 0);
+	timer_setup(&conn->timers[TQUIC_TIMER_HANDSHAKE], tquic_timer_handshake_handler, 0);
+	timer_setup(&conn->timers[TQUIC_TIMER_PATH_PROBE], tquic_timer_path_probe_handler, 0);
+	timer_setup(&conn->timers[TQUIC_TIMER_PACING], tquic_timer_pacing_handler, 0);
+	timer_setup(&conn->timers[TQUIC_TIMER_KEY_DISCARD], tquic_timer_key_discard_handler, 0);
 }
 
 /*
@@ -447,7 +447,7 @@ void quic_timer_init(struct quic_connection *conn)
  * Per RFC 9002 Section 6.2: The loss detection timer is a single timer
  * and takes the earliest of three computed timeouts.
  */
-void quic_timer_set(struct quic_connection *conn, u8 timer_type, ktime_t when)
+void tquic_timer_set(struct tquic_connection *conn, u8 timer_type, ktime_t when)
 {
 	unsigned long flags;
 	unsigned long expires;
@@ -483,14 +483,14 @@ void quic_timer_set(struct quic_connection *conn, u8 timer_type, ktime_t when)
 	conn->timer_deadlines[timer_type] = when;
 
 	/* Convert to jiffies and arm the timer */
-	expires = quic_ktime_to_jiffies(when);
+	expires = tquic_ktime_to_jiffies(when);
 
 	spin_unlock_irqrestore(&conn->lock, flags);
 
 	/* Modify the timer (handles both armed and unarmed states) */
 	mod_timer(&conn->timers[timer_type], expires);
 
-	trace_quic_timer_set(quic_trace_conn_id(&conn->scid), timer_type,
+	trace_tquic_timer_set(tquic_trace_conn_id(&conn->scid), timer_type,
 			     ktime_to_us(ktime_sub(when, ktime_get())));
 }
 
@@ -507,10 +507,10 @@ void quic_timer_set(struct quic_connection *conn, u8 timer_type, ktime_t when)
  * callback continues executing. The callback will check the destroying
  * flag and exit early, but there's a brief race window.
  *
- * For destruction paths, use quic_timer_cancel_all() which uses
+ * For destruction paths, use tquic_timer_cancel_all() which uses
  * del_timer_sync() and properly waits for callbacks.
  */
-void quic_timer_cancel(struct quic_connection *conn, u8 timer_type)
+void tquic_timer_cancel(struct tquic_connection *conn, u8 timer_type)
 {
 	unsigned long flags;
 
@@ -542,7 +542,7 @@ void quic_timer_cancel(struct quic_connection *conn, u8 timer_type)
  * WARNING: Cannot be called from interrupt context or while holding
  * locks that the timer callback might need (e.g., conn->lock).
  */
-void quic_timer_cancel_sync(struct quic_connection *conn, u8 timer_type)
+void tquic_timer_cancel_sync(struct tquic_connection *conn, u8 timer_type)
 {
 	unsigned long flags;
 
@@ -577,7 +577,7 @@ void quic_timer_cancel_sync(struct quic_connection *conn, u8 timer_type)
  *
  * After this function returns, it is safe to free the connection.
  */
-void quic_timer_cancel_all(struct quic_connection *conn)
+void tquic_timer_cancel_all(struct tquic_connection *conn)
 {
 	unsigned long flags;
 	int i;
@@ -588,7 +588,7 @@ void quic_timer_cancel_all(struct quic_connection *conn)
 	/*
 	 * Set the destroying flag to prevent new timers from being armed.
 	 * This must be done under the lock for the double-check in
-	 * quic_timer_set() to work correctly.
+	 * tquic_timer_set() to work correctly.
 	 */
 	spin_lock_irqsave(&conn->lock, flags);
 	conn->timer_flags |= QUIC_TIMER_FLAG_DESTROYING;
@@ -621,10 +621,10 @@ void quic_timer_cancel_all(struct quic_connection *conn)
  * Per RFC 9002 Section 6.2: The loss detection timer is set based on
  * the timer's mode, which is set by the latest event.
  */
-static ktime_t quic_timer_calculate_loss_deadline(struct quic_connection *conn)
+static ktime_t tquic_timer_calculate_loss_deadline(struct tquic_connection *conn)
 {
-	struct quic_path *path = conn->active_path;
-	struct quic_pn_space *pn_space;
+	struct tquic_path *path = conn->active_path;
+	struct tquic_pn_space *pn_space;
 	ktime_t earliest_loss_time = 0;
 	ktime_t pto_deadline = 0;
 	u32 pto;
@@ -661,7 +661,7 @@ static ktime_t quic_timer_calculate_loss_deadline(struct quic_connection *conn)
 
 	/* Calculate PTO */
 	if (path)
-		pto = quic_path_pto(path);
+		pto = tquic_path_pto(path);
 	else
 		pto = QUIC_DEFAULT_PTO_US;
 
@@ -690,9 +690,9 @@ static ktime_t quic_timer_calculate_loss_deadline(struct quic_connection *conn)
  * Per RFC 9000 Section 13.2.1: An endpoint MUST send an ACK frame
  * within its advertised max_ack_delay after receiving an ack-eliciting packet
  */
-static ktime_t quic_timer_calculate_ack_deadline(struct quic_connection *conn)
+static ktime_t tquic_timer_calculate_ack_deadline(struct tquic_connection *conn)
 {
-	struct quic_pn_space *pn_space;
+	struct tquic_pn_space *pn_space;
 	ktime_t earliest = 0;
 	int i;
 
@@ -700,7 +700,7 @@ static ktime_t quic_timer_calculate_ack_deadline(struct quic_connection *conn)
 		pn_space = &conn->pn_spaces[i];
 
 		/* Check if there are unacked packets that need ACKing */
-		if (pn_space->last_ack_time != 0 && quic_ack_should_send(conn, i)) {
+		if (pn_space->last_ack_time != 0 && tquic_ack_should_send(conn, i)) {
 			ktime_t deadline;
 			u32 delay_ms;
 
@@ -726,7 +726,7 @@ static ktime_t quic_timer_calculate_ack_deadline(struct quic_connection *conn)
  * Per RFC 9000 Section 10.1: Each endpoint advertises a max_idle_timeout,
  * but the effective timeout is the minimum of the two
  */
-static ktime_t quic_timer_calculate_idle_deadline(struct quic_connection *conn)
+static ktime_t tquic_timer_calculate_idle_deadline(struct tquic_connection *conn)
 {
 	u64 local_timeout = conn->local_params.max_idle_timeout;
 	u64 remote_timeout = conn->remote_params.max_idle_timeout;
@@ -748,7 +748,7 @@ static ktime_t quic_timer_calculate_idle_deadline(struct quic_connection *conn)
 	 * the current PTO to accommodate packet loss
 	 */
 	if (conn->active_path)
-		pto = quic_path_pto(conn->active_path);
+		pto = tquic_path_pto(conn->active_path);
 	else
 		pto = QUIC_DEFAULT_PTO_US;
 
@@ -764,7 +764,7 @@ static ktime_t quic_timer_calculate_idle_deadline(struct quic_connection *conn)
  * This function is called after events that may change timer deadlines,
  * such as packet transmission, ACK reception, or state changes.
  */
-void quic_timer_update(struct quic_connection *conn)
+void tquic_timer_update(struct tquic_connection *conn)
 {
 	ktime_t loss_deadline;
 	ktime_t ack_deadline;
@@ -779,25 +779,25 @@ void quic_timer_update(struct quic_connection *conn)
 		return;
 
 	/* Calculate loss detection timer */
-	loss_deadline = quic_timer_calculate_loss_deadline(conn);
+	loss_deadline = tquic_timer_calculate_loss_deadline(conn);
 	if (loss_deadline != 0) {
-		quic_timer_set(conn, QUIC_TIMER_LOSS, loss_deadline);
+		tquic_timer_set(conn, TQUIC_TIMER_LOSS, loss_deadline);
 	} else {
-		quic_timer_cancel(conn, QUIC_TIMER_LOSS);
+		tquic_timer_cancel(conn, TQUIC_TIMER_LOSS);
 	}
 
 	/* Calculate ACK timer */
-	ack_deadline = quic_timer_calculate_ack_deadline(conn);
+	ack_deadline = tquic_timer_calculate_ack_deadline(conn);
 	if (ack_deadline != 0) {
-		quic_timer_set(conn, QUIC_TIMER_ACK, ack_deadline);
+		tquic_timer_set(conn, TQUIC_TIMER_ACK, ack_deadline);
 	} else {
-		quic_timer_cancel(conn, QUIC_TIMER_ACK);
+		tquic_timer_cancel(conn, TQUIC_TIMER_ACK);
 	}
 
 	/* Calculate idle timer */
-	idle_deadline = quic_timer_calculate_idle_deadline(conn);
+	idle_deadline = tquic_timer_calculate_idle_deadline(conn);
 	if (idle_deadline != 0) {
-		quic_timer_set(conn, QUIC_TIMER_IDLE, idle_deadline);
+		tquic_timer_set(conn, TQUIC_TIMER_IDLE, idle_deadline);
 	}
 
 	/* Handshake timer is set separately when connection is initiated */
@@ -811,16 +811,16 @@ void quic_timer_update(struct quic_connection *conn)
  * Per RFC 9000 Section 10.1: When a packet is received, the endpoint
  * that receives the packet restarts its idle timer
  */
-void quic_timer_reset_idle(struct quic_connection *conn)
+void tquic_timer_reset_idle(struct tquic_connection *conn)
 {
 	ktime_t idle_deadline;
 
 	if (!conn)
 		return;
 
-	idle_deadline = quic_timer_calculate_idle_deadline(conn);
+	idle_deadline = tquic_timer_calculate_idle_deadline(conn);
 	if (idle_deadline != 0)
-		quic_timer_set(conn, QUIC_TIMER_IDLE, idle_deadline);
+		tquic_timer_set(conn, TQUIC_TIMER_IDLE, idle_deadline);
 }
 
 /*
@@ -828,7 +828,7 @@ void quic_timer_reset_idle(struct quic_connection *conn)
  *
  * Returns the time in microseconds, or 0 if no timer is set
  */
-u64 quic_timer_next_timeout_us(struct quic_connection *conn)
+u64 tquic_timer_next_timeout_us(struct tquic_connection *conn)
 {
 	ktime_t now = ktime_get();
 	ktime_t earliest = 0;
@@ -859,7 +859,7 @@ u64 quic_timer_next_timeout_us(struct quic_connection *conn)
 /*
  * Check if any timer is pending
  */
-bool quic_timer_pending(struct quic_connection *conn, u8 timer_type)
+bool tquic_timer_pending(struct tquic_connection *conn, u8 timer_type)
 {
 	if (!conn || timer_type >= QUIC_TIMER_MAX)
 		return false;
@@ -873,7 +873,7 @@ bool quic_timer_pending(struct quic_connection *conn, u8 timer_type)
  * Per RFC 9002 Section 6.2.1: A sender SHOULD restart its PTO timer
  * every time an ack-eliciting packet is sent
  */
-void quic_timer_on_packet_sent(struct quic_connection *conn, bool ack_eliciting)
+void tquic_timer_on_packet_sent(struct tquic_connection *conn, bool ack_eliciting)
 {
 	if (!conn)
 		return;
@@ -883,10 +883,10 @@ void quic_timer_on_packet_sent(struct quic_connection *conn, bool ack_eliciting)
 	}
 
 	/* Reset idle timer on any activity */
-	quic_timer_reset_idle(conn);
+	tquic_timer_reset_idle(conn);
 
 	/* Update loss detection timer */
-	quic_timer_update(conn);
+	tquic_timer_update(conn);
 }
 
 /*
@@ -895,7 +895,7 @@ void quic_timer_on_packet_sent(struct quic_connection *conn, bool ack_eliciting)
  * Per RFC 9002 Section 6.2.1: The PTO backoff factor is reset when
  * an ACK is received
  */
-void quic_timer_on_ack_received(struct quic_connection *conn)
+void tquic_timer_on_ack_received(struct tquic_connection *conn)
 {
 	if (!conn)
 		return;
@@ -904,10 +904,10 @@ void quic_timer_on_ack_received(struct quic_connection *conn)
 	conn->pto_count = 0;
 
 	/* Reset idle timer */
-	quic_timer_reset_idle(conn);
+	tquic_timer_reset_idle(conn);
 
 	/* Recalculate timers */
-	quic_timer_update(conn);
+	tquic_timer_update(conn);
 }
 
 /*
@@ -916,7 +916,7 @@ void quic_timer_on_ack_received(struct quic_connection *conn)
  * Per RFC 9002 Section 6.2.4: When the PTO timer expires, a sender
  * MUST send one or more packets containing ack-eliciting frames
  */
-void quic_timer_on_pto_timeout(struct quic_connection *conn)
+void tquic_timer_on_pto_timeout(struct tquic_connection *conn)
 {
 	if (!conn)
 		return;
@@ -925,17 +925,17 @@ void quic_timer_on_pto_timeout(struct quic_connection *conn)
 	if (conn->pto_count < QUIC_TIMER_MAX_BACKOFF)
 		conn->pto_count++;
 
-	trace_quic_pto_timeout(quic_trace_conn_id(&conn->scid),
+	trace_tquic_pto_timeout(tquic_trace_conn_id(&conn->scid),
 			       conn->pto_count, QUIC_PN_SPACE_APPLICATION);
 
 	/* Update timers with backed off PTO */
-	quic_timer_update(conn);
+	tquic_timer_update(conn);
 }
 
 /*
  * Start handshake timer
  */
-void quic_timer_start_handshake(struct quic_connection *conn, u64 timeout_ms)
+void tquic_timer_start_handshake(struct tquic_connection *conn, u64 timeout_ms)
 {
 	ktime_t deadline;
 
@@ -946,24 +946,24 @@ void quic_timer_start_handshake(struct quic_connection *conn, u64 timeout_ms)
 		timeout_ms = 10000;  /* Default 10 second handshake timeout */
 
 	deadline = ktime_add_ms(ktime_get(), timeout_ms);
-	quic_timer_set(conn, QUIC_TIMER_HANDSHAKE, deadline);
+	tquic_timer_set(conn, TQUIC_TIMER_HANDSHAKE, deadline);
 }
 
 /*
  * Stop handshake timer (called when handshake completes)
  */
-void quic_timer_stop_handshake(struct quic_connection *conn)
+void tquic_timer_stop_handshake(struct tquic_connection *conn)
 {
 	if (!conn)
 		return;
 
-	quic_timer_cancel(conn, QUIC_TIMER_HANDSHAKE);
+	tquic_timer_cancel(conn, TQUIC_TIMER_HANDSHAKE);
 }
 
 /*
  * Arm path validation timer
  */
-void quic_timer_start_path_validation(struct quic_connection *conn, u64 timeout_ms)
+void tquic_timer_start_path_validation(struct tquic_connection *conn, u64 timeout_ms)
 {
 	ktime_t deadline;
 
@@ -974,13 +974,13 @@ void quic_timer_start_path_validation(struct quic_connection *conn, u64 timeout_
 		timeout_ms = 1000;  /* Default 1 second probe timeout */
 
 	deadline = ktime_add_ms(ktime_get(), timeout_ms);
-	quic_timer_set(conn, QUIC_TIMER_PATH_PROBE, deadline);
+	tquic_timer_set(conn, TQUIC_TIMER_PATH_PROBE, deadline);
 }
 
 /*
  * Debug: Get timer state for diagnostics
  */
-void quic_timer_get_state(struct quic_connection *conn, u8 timer_type,
+void tquic_timer_get_state(struct tquic_connection *conn, u8 timer_type,
 			  ktime_t *deadline, bool *armed)
 {
 	if (!conn || timer_type >= QUIC_TIMER_MAX) {

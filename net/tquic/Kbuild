@@ -74,6 +74,21 @@ tquic-y := \
 	core/one_way_delay.o \
 	core/additional_addresses.o \
 	core/mp_frame.o \
+	core/quic_protocol.o \
+	core/quic_connection.o \
+	core/quic_crypto.o \
+	core/quic_packet.o \
+	core/quic_output.o \
+	core/quic_cong.o \
+	core/quic_ecn.o \
+	core/quic_flow.o \
+	core/quic_loss.o \
+	core/quic_path.o \
+	core/quic_ack.o \
+	core/quic_ack_frequency.o \
+	core/quic_key_update.o \
+	core/packet_coalesce_fix.o \
+	core/early_data.o \
 	core/priority.o \
 	bond/bonding.o \
 	bond/tquic_bonding.o \

@@ -28,8 +28,11 @@ struct tquic_failover_ctx;    /* Defined in tquic_failover.h, implemented in 05-
 
 /*
  * Maximum number of paths per bonded connection
+ * Note: May be overridden by include/net/tquic.h if included first
  */
+#ifndef TQUIC_MAX_PATHS
 #define TQUIC_MAX_PATHS			8
+#endif
 
 /*
  * Capacity weight constants

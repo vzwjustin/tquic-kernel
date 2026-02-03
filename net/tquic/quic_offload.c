@@ -29,7 +29,7 @@
 #include <net/ip.h>
 #include <net/ipv6.h>
 #include <net/checksum.h>
-#include <net/quic.h>
+#include <net/tquic.h>
 #include <crypto/aead.h>
 
 /* QUIC GSO type flag for skb_shared_info */
@@ -54,10 +54,10 @@
 
 /* GRO flow aggregation limits */
 #define QUIC_GRO_MAX_CNT	64
-#define QUIC_GRO_MAX_SIZE	65535
+#define TQUIC_GRO_MAX_SIZE	65535
 
 /* QUIC offload control block in skb->cb */
-struct quic_offload_cb {
+struct tquic_offload_cb {
 	u64	pn;			/* Packet number */
 	u32	header_len;		/* Header length including PN */
 	u32	payload_len;		/* Payload length */
@@ -73,10 +73,10 @@ struct quic_offload_cb {
 	u8	needs_decrypt:1;	/* Needs software decryption */
 };
 
-#define QUIC_OFFLOAD_CB(skb) ((struct quic_offload_cb *)((skb)->cb))
+#define TQUIC_OFFLOAD_CB(skb) ((struct tquic_offload_cb *)((skb)->cb))
 
 /* Crypto offload context stored in skb extension */
-struct quic_crypto_offload {
+struct tquic_crypto_offload {
 	u64	pn;
 	u32	header_len;
 	u8	level;
@@ -86,18 +86,18 @@ struct quic_crypto_offload {
 };
 
 /* Static key for QUIC encapsulation detection */
-DEFINE_STATIC_KEY_FALSE(quic_encap_needed_key);
-EXPORT_SYMBOL(quic_encap_needed_key);
+DEFINE_STATIC_KEY_FALSE(tquic_encap_needed_key);
+EXPORT_SYMBOL(tquic_encap_needed_key);
 
 /* Forward declarations */
-static struct sk_buff *quic_gso_segment(struct sk_buff *skb,
+static struct sk_buff *tquic_gso_segment(struct sk_buff *skb,
 					netdev_features_t features);
-static struct sk_buff *quic_gro_receive(struct list_head *head,
+static struct sk_buff *tquic_gro_receive(struct list_head *head,
 					struct sk_buff *skb);
-static int quic_gro_complete(struct sk_buff *skb, int nhoff);
+static int tquic_gro_complete(struct sk_buff *skb, int nhoff);
 
 /* Parse QUIC packet header for offload processing */
-static int quic_parse_header(struct sk_buff *skb, struct quic_offload_cb *cb)
+static int tquic_parse_header(struct sk_buff *skb, struct tquic_offload_cb *cb)
 {
 	u8 *data = skb->data;
 	u8 first_byte;
@@ -231,11 +231,11 @@ static int quic_parse_header(struct sk_buff *skb, struct quic_offload_cb *cb)
  * Each segment needs its own packet number and potentially its own
  * encryption, so we handle this at the UDP level.
  */
-static struct sk_buff *quic_gso_inner_segment(struct sk_buff *skb,
+static struct sk_buff *tquic_gso_inner_segment(struct sk_buff *skb,
 					      netdev_features_t features,
 					      bool is_ipv6)
 {
-	struct quic_offload_cb *cb = QUIC_OFFLOAD_CB(skb);
+	struct tquic_offload_cb *cb = TQUIC_OFFLOAD_CB(skb);
 	unsigned int mss = skb_shinfo(skb)->gso_size;
 	struct sk_buff *segs, *seg;
 	struct udphdr *uh;
@@ -253,7 +253,7 @@ static struct sk_buff *quic_gso_inner_segment(struct sk_buff *skb,
 		return ERR_PTR(-EINVAL);
 
 	/* Parse the QUIC header to understand structure */
-	err = quic_parse_header(skb, cb);
+	err = tquic_parse_header(skb, cb);
 	if (err)
 		return ERR_PTR(err);
 
@@ -306,7 +306,7 @@ static struct sk_buff *quic_gso_inner_segment(struct sk_buff *skb,
 	check = csum16_add(csum16_sub(uh->check, uh->len), newlen);
 
 	do {
-		u8 *quic_hdr;
+		u8 *tquic_hdr;
 		int i;
 
 		if (copy_dtor) {
@@ -320,11 +320,11 @@ static struct sk_buff *quic_gso_inner_segment(struct sk_buff *skb,
 		skb_reset_transport_header(seg);
 
 		/* Get QUIC header location */
-		quic_hdr = seg->data + sizeof(struct udphdr);
+		tquic_hdr = seg->data + sizeof(struct udphdr);
 
 		/* Update packet number in QUIC header for each segment */
 		if (cb->pn_len > 0 && seg != segs) {
-			u8 *pn_ptr = quic_hdr + cb->header_len - cb->pn_len;
+			u8 *pn_ptr = tquic_hdr + cb->header_len - cb->pn_len;
 
 			/* Increment packet number */
 			pn++;
@@ -386,7 +386,7 @@ static struct sk_buff *quic_gso_inner_segment(struct sk_buff *skb,
 }
 
 /* Main GSO segment callback for QUIC */
-static struct sk_buff *quic_gso_segment(struct sk_buff *skb,
+static struct sk_buff *tquic_gso_segment(struct sk_buff *skb,
 					netdev_features_t features)
 {
 	struct sk_buff *segs = ERR_PTR(-EINVAL);
@@ -414,7 +414,7 @@ static struct sk_buff *quic_gso_segment(struct sk_buff *skb,
 		goto out;
 
 	/* Perform QUIC-aware segmentation */
-	segs = quic_gso_inner_segment(skb, features, is_ipv6);
+	segs = tquic_gso_inner_segment(skb, features, is_ipv6);
 
 out:
 	return segs;
@@ -429,13 +429,13 @@ out:
  */
 
 /* Check if two QUIC packets can be aggregated */
-static bool quic_gro_same_flow(struct sk_buff *skb1, struct sk_buff *skb2)
+static bool tquic_gro_same_flow(struct sk_buff *skb1, struct sk_buff *skb2)
 {
-	struct quic_offload_cb cb1, cb2;
+	struct tquic_offload_cb cb1, cb2;
 	u8 *data1, *data2;
 	u8 cid_len;
 
-	if (quic_parse_header(skb1, &cb1) || quic_parse_header(skb2, &cb2))
+	if (tquic_parse_header(skb1, &cb1) || tquic_parse_header(skb2, &cb2))
 		return false;
 
 	/* Both must be same header type */
@@ -468,25 +468,25 @@ static bool quic_gro_same_flow(struct sk_buff *skb1, struct sk_buff *skb2)
 }
 
 /* GRO receive callback for QUIC packets */
-static struct sk_buff *quic_gro_receive(struct list_head *head,
+static struct sk_buff *tquic_gro_receive(struct list_head *head,
 					struct sk_buff *skb)
 {
 	struct sk_buff *pp = NULL;
 	struct sk_buff *p;
-	struct quic_offload_cb *cb;
-	unsigned int quic_len;
+	struct tquic_offload_cb *cb;
+	unsigned int tquic_len;
 	int flush = 1;
 
 	/* Basic validation */
 	if (skb->len < 1)
 		goto out;
 
-	cb = QUIC_OFFLOAD_CB(skb);
-	if (quic_parse_header(skb, cb))
+	cb = TQUIC_OFFLOAD_CB(skb);
+	if (tquic_parse_header(skb, cb))
 		goto out;
 
 	/* QUIC packet length for GRO */
-	quic_len = skb_gro_len(skb);
+	tquic_len = skb_gro_len(skb);
 
 	/* Check if we can do L4 aggregation */
 	if (skb->encapsulation)
@@ -500,7 +500,7 @@ static struct sk_buff *quic_gro_receive(struct list_head *head,
 			continue;
 
 		/* Verify same QUIC connection */
-		if (!quic_gro_same_flow(p, skb)) {
+		if (!tquic_gro_same_flow(p, skb)) {
 			NAPI_GRO_CB(p)->same_flow = 0;
 			continue;
 		}
@@ -512,7 +512,7 @@ static struct sk_buff *quic_gro_receive(struct list_head *head,
 		}
 
 		/* Check total size doesn't exceed limits */
-		if (p->len + quic_len > QUIC_GRO_MAX_SIZE) {
+		if (p->len + tquic_len > TQUIC_GRO_MAX_SIZE) {
 			pp = p;
 			break;
 		}
@@ -533,7 +533,7 @@ out:
 }
 
 /* GRO complete callback for QUIC */
-static int quic_gro_complete(struct sk_buff *skb, int nhoff)
+static int tquic_gro_complete(struct sk_buff *skb, int nhoff)
 {
 	struct udphdr *uh = (struct udphdr *)(skb->data + nhoff);
 	__be16 newlen = htons(skb->len - nhoff);
@@ -565,7 +565,7 @@ static int quic_gro_complete(struct sk_buff *skb, int nhoff)
  */
 
 /*
- * quic_crypto_offload_available - Check if hardware crypto offload is available
+ * tquic_crypto_offload_available - Check if hardware crypto offload is available
  * @dev: Network device to check
  * @crypto_level: QUIC crypto level (Initial, Handshake, or Application)
  *
@@ -581,7 +581,7 @@ static int quic_gro_complete(struct sk_buff *skb, int nhoff)
  *
  * Returns: true if hardware offload is available, false otherwise
  */
-static bool quic_crypto_offload_available(struct net_device *dev,
+static bool tquic_crypto_offload_available(struct net_device *dev,
 					  u8 crypto_level)
 {
 	/* Check device capabilities */
@@ -605,14 +605,14 @@ static bool quic_crypto_offload_available(struct net_device *dev,
 }
 
 /* Prepare skb for hardware crypto offload (TX path) */
-int quic_crypto_offload_encrypt(struct sk_buff *skb,
-				struct quic_crypto_ctx *ctx,
+int tquic_crypto_offload_encrypt(struct sk_buff *skb,
+				struct tquic_crypto_ctx *ctx,
 				u64 pn)
 {
-	struct quic_offload_cb *cb = QUIC_OFFLOAD_CB(skb);
+	struct tquic_offload_cb *cb = TQUIC_OFFLOAD_CB(skb);
 	struct net_device *dev = skb->dev;
 
-	if (!quic_crypto_offload_available(dev, cb->crypto_level)) {
+	if (!tquic_crypto_offload_available(dev, cb->crypto_level)) {
 		cb->hw_offload = 0;
 		cb->needs_encrypt = 1;
 		return -EOPNOTSUPP;
@@ -628,14 +628,14 @@ int quic_crypto_offload_encrypt(struct sk_buff *skb,
 
 	return 0;
 }
-EXPORT_SYMBOL(quic_crypto_offload_encrypt);
+EXPORT_SYMBOL(tquic_crypto_offload_encrypt);
 
 /* Check and handle hardware crypto on RX path */
-int quic_crypto_offload_decrypt(struct sk_buff *skb,
-				struct quic_crypto_ctx *ctx,
+int tquic_crypto_offload_decrypt(struct sk_buff *skb,
+				struct tquic_crypto_ctx *ctx,
 				u64 *pn)
 {
-	struct quic_offload_cb *cb = QUIC_OFFLOAD_CB(skb);
+	struct tquic_offload_cb *cb = TQUIC_OFFLOAD_CB(skb);
 
 	/* Check if hardware already decrypted */
 	if (cb->hw_offload && !cb->needs_decrypt) {
@@ -649,7 +649,7 @@ int quic_crypto_offload_decrypt(struct sk_buff *skb,
 	cb->needs_decrypt = 1;
 	return -EOPNOTSUPP;
 }
-EXPORT_SYMBOL(quic_crypto_offload_decrypt);
+EXPORT_SYMBOL(tquic_crypto_offload_decrypt);
 
 /*
  * UDP Encapsulation Support
@@ -659,12 +659,12 @@ EXPORT_SYMBOL(quic_crypto_offload_decrypt);
  */
 
 /* UDP encap receive callback */
-static int quic_udp_encap_recv(struct sock *sk, struct sk_buff *skb)
+static int tquic_udp_encap_recv(struct sock *sk, struct sk_buff *skb)
 {
-	struct quic_sock *qsk;
-	struct quic_connection *conn;
-	struct quic_connection_id dcid;
-	struct quic_cid_entry *entry;
+	struct tquic_sock *qsk;
+	struct tquic_connection *conn;
+	struct tquic_connection_id dcid;
+	struct tquic_cid_entry *entry;
 	u8 *data;
 	int offset;
 
@@ -701,22 +701,22 @@ static int quic_udp_encap_recv(struct sock *sk, struct sk_buff *skb)
 	}
 
 	/* Look up connection by DCID */
-	entry = quic_cid_hash_lookup(&dcid);
+	entry = tquic_cid_hash_lookup(&dcid);
 	if (!entry)
 		goto try_sock;
 
 	/* Found connection - deliver to it */
-	conn = container_of(entry->list.next, struct quic_connection, scid_list);
+	conn = container_of(entry->list.next, struct tquic_connection, scid_list);
 	if (conn && conn->qsk) {
 		qsk = conn->qsk;
-		return quic_udp_recv((struct sock *)qsk, skb);
+		return tquic_udp_recv((struct sock *)qsk, skb);
 	}
 
 try_sock:
 	/* Try the socket directly for new connections */
-	qsk = (struct quic_sock *)sk->sk_user_data;
+	qsk = (struct tquic_sock *)sk->sk_user_data;
 	if (qsk)
-		return quic_udp_recv((struct sock *)qsk, skb);
+		return tquic_udp_recv((struct sock *)qsk, skb);
 
 drop:
 	kfree_skb(skb);
@@ -724,11 +724,11 @@ drop:
 }
 
 /* UDP encap error callback */
-static int quic_udp_encap_err(struct sock *sk, struct sk_buff *skb, int err,
+static int tquic_udp_encap_err(struct sock *sk, struct sk_buff *skb, int err,
 			      __be16 port, u32 info, u8 *payload)
 {
 	/* Handle ICMP errors for QUIC connections */
-	struct quic_sock *qsk = (struct quic_sock *)sk->sk_user_data;
+	struct tquic_sock *qsk = (struct tquic_sock *)sk->sk_user_data;
 
 	if (!qsk || !qsk->conn)
 		return -ENOENT;
@@ -740,7 +740,7 @@ static int quic_udp_encap_err(struct sock *sk, struct sk_buff *skb, int err,
 }
 
 /* Initialize UDP encapsulation for a QUIC socket */
-int quic_udp_encap_init(struct quic_sock *qsk)
+int tquic_udp_encap_init(struct tquic_sock *qsk)
 {
 	struct sock *sk = (struct sock *)qsk;
 	struct socket *sock;
@@ -761,8 +761,8 @@ int quic_udp_encap_init(struct quic_sock *qsk)
 
 	/* Configure encapsulation callbacks */
 	udp_sk(sock->sk)->encap_type = UDP_ENCAP_GTP0;  /* Reuse existing type */
-	udp_sk(sock->sk)->encap_rcv = quic_udp_encap_recv;
-	udp_sk(sock->sk)->encap_err_rcv = quic_udp_encap_err;
+	udp_sk(sock->sk)->encap_rcv = tquic_udp_encap_recv;
+	udp_sk(sock->sk)->encap_err_rcv = tquic_udp_encap_err;
 
 	/* Link back to QUIC socket */
 	sock->sk->sk_user_data = qsk;
@@ -774,14 +774,14 @@ int quic_udp_encap_init(struct quic_sock *qsk)
 	qsk->udp_sock = sock;
 
 	/* Enable encap needed static key */
-	static_branch_inc(&quic_encap_needed_key);
+	static_branch_inc(&tquic_encap_needed_key);
 
 	return 0;
 }
-EXPORT_SYMBOL(quic_udp_encap_init);
+EXPORT_SYMBOL(tquic_udp_encap_init);
 
 /* Destroy UDP encapsulation for a QUIC socket */
-void quic_udp_encap_destroy(struct quic_sock *qsk)
+void tquic_udp_encap_destroy(struct tquic_sock *qsk)
 {
 	if (qsk->udp_sock) {
 		/* Clear user data before closing */
@@ -795,13 +795,13 @@ void quic_udp_encap_destroy(struct quic_sock *qsk)
 		sock_release(qsk->udp_sock);
 		qsk->udp_sock = NULL;
 
-		static_branch_dec(&quic_encap_needed_key);
+		static_branch_dec(&tquic_encap_needed_key);
 	}
 }
-EXPORT_SYMBOL(quic_udp_encap_destroy);
+EXPORT_SYMBOL(tquic_udp_encap_destroy);
 
 /* Send a QUIC packet via UDP */
-int quic_udp_send(struct quic_sock *qsk, struct sk_buff *skb,
+int tquic_udp_send(struct tquic_sock *qsk, struct sk_buff *skb,
 		  struct sockaddr *dest)
 {
 	struct socket *sock = qsk->udp_sock;
@@ -836,18 +836,18 @@ int quic_udp_send(struct quic_sock *qsk, struct sk_buff *skb,
 
 	return 0;
 }
-EXPORT_SYMBOL(quic_udp_send);
+EXPORT_SYMBOL(tquic_udp_send);
 
 /* Receive callback for QUIC UDP packets */
-int quic_udp_recv(struct sock *sk, struct sk_buff *skb)
+int tquic_udp_recv(struct sock *sk, struct sk_buff *skb)
 {
-	struct quic_sock *qsk = quic_sk(sk);
-	struct quic_connection *conn = qsk->conn;
-	struct quic_offload_cb *cb = QUIC_OFFLOAD_CB(skb);
+	struct tquic_sock *qsk = tquic_sk(sk);
+	struct tquic_connection *conn = qsk->conn;
+	struct tquic_offload_cb *cb = TQUIC_OFFLOAD_CB(skb);
 	int err;
 
 	/* Parse header for processing */
-	err = quic_parse_header(skb, cb);
+	err = tquic_parse_header(skb, cb);
 	if (err) {
 		kfree_skb(skb);
 		return 0;
@@ -855,14 +855,14 @@ int quic_udp_recv(struct sock *sk, struct sk_buff *skb)
 
 	if (conn) {
 		/* Existing connection - process packet */
-		quic_packet_process(conn, skb);
+		tquic_packet_process(conn, skb);
 	} else if (sk->sk_state == TCP_LISTEN) {
 		/* Server socket - queue for accept */
 		if (sock_owned_by_user(sk)) {
 			if (sk_add_backlog(sk, skb, sk->sk_rcvbuf))
 				kfree_skb(skb);
 		} else {
-			quic_backlog_rcv(sk, skb);
+			tquic_backlog_rcv(sk, skb);
 		}
 	} else {
 		/* No connection and not listening - drop */
@@ -871,19 +871,19 @@ int quic_udp_recv(struct sock *sk, struct sk_buff *skb)
 
 	return 0;
 }
-EXPORT_SYMBOL(quic_udp_recv);
+EXPORT_SYMBOL(tquic_udp_recv);
 
 /* QUIC offload operations structure */
-static const struct quic_offload_ops quic_offload_ops = {
+static const struct tquic_offload_ops tquic_offload_ops = {
 	.encrypt	= NULL,  /* Use software by default */
 	.decrypt	= NULL,  /* Use software by default */
-	.gso_segment	= quic_gso_segment,
-	.gro_receive	= quic_gro_receive,
-	.gro_complete	= quic_gro_complete,
+	.gso_segment	= tquic_gso_segment,
+	.gro_receive	= tquic_gro_receive,
+	.gro_complete	= tquic_gro_complete,
 };
 
-const struct quic_offload_ops *quic_offload = &quic_offload_ops;
-EXPORT_SYMBOL(quic_offload);
+const struct tquic_offload_ops *tquic_offload = &tquic_offload_ops;
+EXPORT_SYMBOL(tquic_offload);
 
 /* IPv4 QUIC GRO receive wrapper */
 static struct sk_buff *quic4_gro_receive(struct list_head *head,
@@ -917,7 +917,7 @@ skip:
 	skb_gro_postpull_rcsum(skb, uh, sizeof(struct udphdr));
 
 	/* Call QUIC GRO */
-	pp = quic_gro_receive(head, skb);
+	pp = tquic_gro_receive(head, skb);
 
 	return pp;
 
@@ -938,7 +938,7 @@ static int quic4_gro_complete(struct sk_buff *skb, int nhoff)
 		uh->check = ~udp_v4_check(skb->len - nhoff, iph->saddr,
 					  iph->daddr, 0);
 
-	return quic_gro_complete(skb, nhoff);
+	return tquic_gro_complete(skb, nhoff);
 }
 
 #if IS_ENABLED(CONFIG_IPV6)
@@ -974,7 +974,7 @@ skip:
 	skb_gro_postpull_rcsum(skb, uh, sizeof(struct udphdr));
 
 	/* Call QUIC GRO */
-	pp = quic_gro_receive(head, skb);
+	pp = tquic_gro_receive(head, skb);
 
 	return pp;
 
@@ -995,7 +995,7 @@ static int quic6_gro_complete(struct sk_buff *skb, int nhoff)
 		uh->check = ~udp_v6_check(skb->len - nhoff, &ipv6h->saddr,
 					  &ipv6h->daddr, 0);
 
-	return quic_gro_complete(skb, nhoff);
+	return tquic_gro_complete(skb, nhoff);
 }
 #endif /* CONFIG_IPV6 */
 
@@ -1003,7 +1003,7 @@ static int quic6_gro_complete(struct sk_buff *skb, int nhoff)
 static struct sk_buff *quic4_gso_segment(struct sk_buff *skb,
 					 netdev_features_t features)
 {
-	return quic_gso_segment(skb, features);
+	return tquic_gso_segment(skb, features);
 }
 
 #if IS_ENABLED(CONFIG_IPV6)
@@ -1011,7 +1011,7 @@ static struct sk_buff *quic4_gso_segment(struct sk_buff *skb,
 static struct sk_buff *quic6_gso_segment(struct sk_buff *skb,
 					 netdev_features_t features)
 {
-	return quic_gso_segment(skb, features);
+	return tquic_gso_segment(skb, features);
 }
 #endif
 
@@ -1036,7 +1036,7 @@ static struct net_offload quic6_offload __read_mostly = {
 #endif
 
 /* Module initialization */
-int __init quic_offload_init(void)
+int __init tquic_offload_init(void)
 {
 	int err;
 
@@ -1054,7 +1054,7 @@ int __init quic_offload_init(void)
 	return 0;
 }
 
-void __exit quic_offload_exit(void)
+void __exit tquic_offload_exit(void)
 {
 	pr_info("QUIC: Removing offload support\n");
 

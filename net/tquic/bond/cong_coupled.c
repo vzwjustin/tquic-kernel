@@ -30,7 +30,7 @@
 #include <linux/math64.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
-#include <net/quic.h>
+#include <net/tquic.h>
 
 #include "../multipath/tquic_sched.h"
 #include "tquic_bonding.h"
@@ -61,7 +61,7 @@
 /*
  * Per-path coupled congestion control state
  *
- * This supplements the base quic_cc_state with multipath-specific data
+ * This supplements the base tquic_cc_state with multipath-specific data
  * needed for coupled window increase calculations.
  */
 struct coupled_path_state {
@@ -669,8 +669,8 @@ EXPORT_SYMBOL_GPL(coupled_cc_is_enabled);
  *
  * This wraps the base CC on_ack to apply coupled increase.
  */
-void coupled_cc_on_ack(struct coupled_cc_ctx *ctx, struct quic_cc_state *cc,
-		       u8 path_id, u64 acked_bytes, struct quic_rtt *rtt)
+void coupled_cc_on_ack(struct coupled_cc_ctx *ctx, struct tquic_cc_state *cc,
+		       u8 path_id, u64 acked_bytes, struct tquic_rtt *rtt)
 {
 	u64 coupled_delta;
 	u64 uncoupled_delta;
@@ -717,7 +717,7 @@ EXPORT_SYMBOL_GPL(coupled_cc_on_ack);
  * Loss handling is NOT coupled - each path responds independently.
  * This updates the coupled state to reflect the loss.
  */
-void coupled_cc_on_loss(struct coupled_cc_ctx *ctx, struct quic_cc_state *cc,
+void coupled_cc_on_loss(struct coupled_cc_ctx *ctx, struct tquic_cc_state *cc,
 			u8 path_id)
 {
 	if (!ctx || !ctx->enabled || !cc)

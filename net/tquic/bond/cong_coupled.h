@@ -11,7 +11,7 @@
 #define _NET_QUIC_CONG_COUPLED_H
 
 #include <linux/types.h>
-#include <net/quic.h>
+#include <net/tquic.h>
 
 /* Forward declarations */
 struct coupled_cc_ctx;
@@ -156,8 +156,8 @@ void coupled_cc_update_path(struct coupled_cc_ctx *ctx, u8 path_id,
  *
  * Wraps base CC on_ack to apply coupled increase during congestion avoidance.
  */
-void coupled_cc_on_ack(struct coupled_cc_ctx *ctx, struct quic_cc_state *cc,
-		       u8 path_id, u64 acked_bytes, struct quic_rtt *rtt);
+void coupled_cc_on_ack(struct coupled_cc_ctx *ctx, struct tquic_cc_state *cc,
+		       u8 path_id, u64 acked_bytes, struct tquic_rtt *rtt);
 
 /**
  * coupled_cc_on_loss - Process loss with coupled congestion control
@@ -165,7 +165,7 @@ void coupled_cc_on_ack(struct coupled_cc_ctx *ctx, struct quic_cc_state *cc,
  * @cc: Base congestion control state
  * @path_id: Path that detected loss
  */
-void coupled_cc_on_loss(struct coupled_cc_ctx *ctx, struct quic_cc_state *cc,
+void coupled_cc_on_loss(struct coupled_cc_ctx *ctx, struct tquic_cc_state *cc,
 			u8 path_id);
 
 /*

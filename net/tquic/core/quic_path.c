@@ -1,108 +1,87 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 /*
- * QUIC - Quick UDP Internet Connections
+ * TQUIC - True QUIC with WAN Bonding
  *
  * Path management implementation per RFC 9000 Section 9
  *
- * Copyright (c) 2024 Linux QUIC Authors
+ * Copyright (c) 2026 Linux Foundation
  */
 
 #include <linux/slab.h>
 #include <linux/random.h>
 #include <linux/in.h>
 #include <linux/in6.h>
-#include <net/quic.h>
+#include <net/tquic.h>
+#include <net/tquic_frame.h>
 #include "../diag/trace.h"
 
 /* Path management constants per RFC 9000 */
-#define QUIC_PATH_CHALLENGE_SIZE	8
-#define QUIC_PATH_MAX_PROBES		3
-#define QUIC_PATH_PROBE_TIMEOUT_MS	1000
-#define QUIC_PATH_VALIDATION_TIMEOUT_MS	30000
-#define QUIC_PATH_MTU_MIN		1200
-#define QUIC_PATH_MTU_MAX		65535
-#define QUIC_PATH_MTU_INITIAL		1280
-#define QUIC_PATH_MTU_PROBE_SIZE	16
+#define TQUIC_PATH_CHALLENGE_SIZE	8
+#define TQUIC_PATH_MAX_PROBES		3
+#define TQUIC_PATH_PROBE_TIMEOUT_MS	1000
+#define TQUIC_PATH_VALIDATION_TIMEOUT_MS	30000
+#define TQUIC_PATH_MTU_MIN		1200
+#define TQUIC_PATH_MTU_MAX		65535
+#define TQUIC_PATH_MTU_INITIAL		1280
+#define TQUIC_PATH_MTU_PROBE_SIZE	16
 
 /* MTU discovery probe sizes per RFC 8899 */
-static const u32 quic_mtu_probes[] = {
+static const u32 tquic_mtu_probes[] = {
 	1280, 1400, 1450, 1480, 1492, 1500, 2048, 4096, 8192, 9000
 };
 
-static struct kmem_cache *quic_path_cache __read_mostly;
+static struct kmem_cache *tquic_path_cache __read_mostly;
 
 /*
  * Initialize path management subsystem
  */
-int __init quic_path_init(void)
+int __init tquic_path_init(void)
 {
-	quic_path_cache = kmem_cache_create("quic_path",
-					    sizeof(struct quic_path), 0,
+	tquic_path_cache = kmem_cache_create("tquic_path",
+					    sizeof(struct tquic_path), 0,
 					    SLAB_HWCACHE_ALIGN, NULL);
-	if (!quic_path_cache)
+	if (!tquic_path_cache)
 		return -ENOMEM;
 
 	return 0;
 }
 
-void quic_path_exit(void)
+void tquic_path_exit(void)
 {
-	kmem_cache_destroy(quic_path_cache);
+	kmem_cache_destroy(tquic_path_cache);
 }
 
 /*
  * Initialize RTT measurements for a new path
  * Per RFC 9002 Section 6
  */
-static void quic_path_rtt_init(struct quic_rtt *rtt, u32 initial_rtt_ms)
+static void tquic_path_rtt_init(struct tquic_path *path, u32 initial_rtt_ms)
 {
-	rtt->latest_rtt = initial_rtt_ms * 1000;  /* Convert to microseconds */
-	rtt->min_rtt = U32_MAX;
-	rtt->smoothed_rtt = initial_rtt_ms * 1000;
-	rtt->rttvar = initial_rtt_ms * 500;  /* Initial variance is half of RTT */
-	rtt->first_rtt_sample = 0;
-	rtt->has_sample = 0;
+	/* Initialize the scheduler-accessible CC info */
+	path->cc.smoothed_rtt_us = initial_rtt_ms * 1000;  /* Convert to microseconds */
+	path->cc.min_rtt_us = U64_MAX;
+	path->cc.rtt_var_us = initial_rtt_ms * 500;  /* Initial variance is half of RTT */
 }
 
 /*
  * Initialize congestion control state for a new path
  * Per RFC 9002 Section 7
  */
-static void quic_path_cc_init(struct quic_cc_state *cc, u32 mtu)
+static void tquic_path_cc_init(struct tquic_path *path, u32 mtu)
 {
 	/* Initial window is 10 packets or 14720 bytes, whichever is smaller */
 	u64 initial_window = min_t(u64, 10 * mtu, 14720);
 
-	cc->cwnd = initial_window;
-	cc->ssthresh = U64_MAX;
-	cc->bytes_in_flight = 0;
-	cc->congestion_window = initial_window;
-	cc->pacing_rate = 0;
-	cc->last_sent_time = 0;
-	cc->congestion_recovery_start = 0;
-	cc->pto_count = 0;
-	cc->loss_burst_count = 0;
-	cc->in_slow_start = 1;
-	cc->in_recovery = 0;
-	cc->app_limited = 0;
-	cc->algo = QUIC_CC_RENO;  /* Default to Reno */
+	path->cc.cwnd = initial_window;
+	path->cc.bytes_in_flight = 0;
 
-	/* Initialize BBR-specific fields */
-	cc->bbr_bw = 0;
-	cc->bbr_min_rtt = U64_MAX;
-	cc->bbr_cycle_index = 0;
-	cc->bbr_mode = 0;
-
-	/* Initialize CUBIC-specific fields */
-	cc->cubic_k = 0;
-	cc->cubic_origin_point = 0;
-	cc->cubic_epoch_start = 0;
+	/* Full CC state is managed via the cong pointer and cong_ops */
 }
 
 /*
  * Copy address to path structure with proper validation
  */
-static int quic_path_copy_addr(struct sockaddr_storage *dest,
+static int tquic_path_copy_addr(struct sockaddr_storage *dest,
 			       const struct sockaddr *src)
 {
 	if (!src)
@@ -123,7 +102,7 @@ static int quic_path_copy_addr(struct sockaddr_storage *dest,
 /*
  * Compare two socket addresses for equality
  */
-static bool quic_path_addr_equal(const struct sockaddr_storage *a,
+static bool tquic_path_addr_equal(const struct sockaddr_storage *a,
 				 const struct sockaddr_storage *b)
 {
 	if (a->ss_family != b->ss_family)
@@ -155,81 +134,73 @@ static bool quic_path_addr_equal(const struct sockaddr_storage *a,
  *
  * Per RFC 9000 Section 9: Connection Migration
  */
-struct quic_path *quic_path_create(struct quic_connection *conn,
+struct tquic_path *tquic_path_create(struct tquic_connection *conn,
 				   struct sockaddr *local,
 				   struct sockaddr *remote)
 {
-	struct quic_path *path;
+	struct tquic_path *path;
 	u32 initial_rtt_ms;
 	int err;
 
-	path = kmem_cache_zalloc(quic_path_cache, GFP_KERNEL);
+	path = kmem_cache_zalloc(tquic_path_cache, GFP_KERNEL);
 	if (!path)
 		return NULL;
 
 	INIT_LIST_HEAD(&path->list);
+	INIT_LIST_HEAD(&path->pm_list);
+
+	/* Set back-pointer to connection */
+	path->conn = conn;
 
 	/* Copy addresses if provided */
 	if (local) {
-		err = quic_path_copy_addr(&path->local_addr, local);
+		err = tquic_path_copy_addr(&path->local_addr, local);
 		if (err)
 			goto err_free;
 	}
 
 	if (remote) {
-		err = quic_path_copy_addr(&path->remote_addr, remote);
+		err = tquic_path_copy_addr(&path->remote_addr, remote);
 		if (err)
 			goto err_free;
 	}
 
 	/* Initialize MTU to safe minimum (IPv6 minimum) */
-	path->mtu = QUIC_PATH_MTU_INITIAL;
-
-	/* Initialize anti-amplification limit
-	 * Per RFC 9000 Section 8.1: servers must not send more than 3x
-	 * the data received until the path is validated
-	 */
-	path->amplification_limit = 0;
+	path->mtu = TQUIC_PATH_MTU_INITIAL;
 
 	/* Initialize path statistics */
-	atomic64_set(&path->bytes_sent, 0);
-	atomic64_set(&path->bytes_recv, 0);
+	memset(&path->stats, 0, sizeof(path->stats));
 
-	/* Path starts unvalidated and inactive */
-	path->validated = 0;
-	path->active = 0;
-	path->challenge_pending = 0;
-	path->is_preferred_addr = 0;
+	/* Path starts unvalidated and unused */
+	path->state = TQUIC_PATH_UNUSED;
+	path->saved_state = TQUIC_PATH_UNUSED;
+	path->validation.challenge_pending = false;
+	path->is_backup = false;
+	path->schedulable = false;
 
 	/* Initialize challenge data (will be set when path validation starts) */
-	memset(path->challenge_data, 0, sizeof(path->challenge_data));
-	path->validation_start = 0;
+	memset(path->validation.challenge_data, 0,
+	       sizeof(path->validation.challenge_data));
+	path->validation.challenge_sent = 0;
+	path->validation.retries = 0;
 
-	/* Get initial RTT from connection config if available */
-	if (conn && conn->qsk)
-		initial_rtt_ms = conn->qsk->config.initial_rtt_ms;
-	else
-		initial_rtt_ms = 333;  /* RFC 9002 default: 333ms */
+	/* Initialize response queue */
+	skb_queue_head_init(&path->response.queue);
+	atomic_set(&path->response.count, 0);
+
+	/* Get initial RTT from connection or use default */
+	if (conn && conn->sk) {
+		struct net *net = sock_net(conn->sk);
+		initial_rtt_ms = tquic_net_get_initial_rtt(net);
+	} else {
+		initial_rtt_ms = TQUIC_DEFAULT_RTT;  /* default: 100ms */
+	}
 
 	/* Initialize RTT measurements */
-	quic_path_rtt_init(&path->rtt, initial_rtt_ms);
+	tquic_path_rtt_init(path, initial_rtt_ms);
 
 	/* Initialize congestion control */
-	quic_path_cc_init(&path->cc, path->mtu);
-
-	/*
-	 * Initialize per-path packet number space (draft-ietf-quic-multipath)
-	 * This is used for 1-RTT packets when multipath is enabled.
-	 */
-	quic_path_pn_space_init(&path->pn_space);
-
-	/*
-	 * Initialize ECN state (RFC 9000 Section 13.4)
-	 *
-	 * ECN validation is per-path because different network paths
-	 * may have different ECN handling characteristics.
-	 */
-	quic_ecn_init(path);
+	tquic_path_cc_init(path, path->mtu);
 
 	/* Assign path ID (increments with each path created on connection) */
 	if (conn) {
@@ -238,26 +209,29 @@ struct quic_path *quic_path_create(struct quic_connection *conn,
 		path->path_id = 0;
 	}
 
-	/* Multipath disabled by default; enabled via transport parameter */
-	path->multipath_enabled = 0;
+	/* Initialize priority and weight */
+	path->priority = 0;
+	path->weight = 100;  /* Default weight */
 
 	/* Add to connection's path list if connection provided */
 	if (conn) {
+		spin_lock(&conn->paths_lock);
 		list_add_tail(&path->list, &conn->paths);
 		conn->num_paths++;
+		spin_unlock(&conn->paths_lock);
 	}
 
 	return path;
 
 err_free:
-	kmem_cache_free(quic_path_cache, path);
+	kmem_cache_free(tquic_path_cache, path);
 	return NULL;
 }
 
 /*
  * Destroy a path and release its resources
  */
-void quic_path_destroy(struct quic_path *path)
+void tquic_path_destroy(struct tquic_path *path)
 {
 	if (!path)
 		return;
@@ -266,13 +240,28 @@ void quic_path_destroy(struct quic_path *path)
 	if (!list_empty(&path->list))
 		list_del(&path->list);
 
-	/* Destroy per-path packet number space */
-	quic_path_pn_space_destroy(&path->pn_space);
+	if (!list_empty(&path->pm_list))
+		list_del(&path->pm_list);
+
+	/* Release PMTUD state if allocated */
+	if (path->pmtud_state)
+		tquic_pmtud_release_path(path);
+
+	/* Release NAT keepalive state if allocated */
+	/* Note: tquic_nat_keepalive_cleanup() should be called here */
 
 	/* Securely clear challenge data */
-	memzero_explicit(path->challenge_data, sizeof(path->challenge_data));
+	memzero_explicit(path->validation.challenge_data,
+			 sizeof(path->validation.challenge_data));
 
-	kmem_cache_free(quic_path_cache, path);
+	/* Flush response queue */
+	skb_queue_purge(&path->response.queue);
+
+	/* Release congestion control state */
+	if (path->cong && path->cong_ops && path->cong_ops->release)
+		path->cong_ops->release(path->cong);
+
+	kmem_cache_free(tquic_path_cache, path);
 }
 
 /*
@@ -281,9 +270,9 @@ void quic_path_destroy(struct quic_path *path)
  * Per RFC 9000 Section 8.2: The PATH_CHALLENGE frame contains 8 bytes
  * of cryptographically random data
  */
-static void quic_path_generate_challenge(u8 *data)
+static void tquic_path_generate_challenge(u8 *data)
 {
-	get_random_bytes(data, QUIC_PATH_CHALLENGE_SIZE);
+	get_random_bytes(data, TQUIC_PATH_CHALLENGE_SIZE);
 }
 
 /*
@@ -292,22 +281,21 @@ static void quic_path_generate_challenge(u8 *data)
  * Per RFC 9000 Section 8.2: Path validation is performed using
  * PATH_CHALLENGE and PATH_RESPONSE frames
  */
-int quic_path_challenge(struct quic_path *path)
+int tquic_path_challenge(struct tquic_path *path)
 {
-	struct quic_connection *conn;
+	struct tquic_connection *conn;
 	struct sk_buff *skb;
 	u8 *p;
 
 	if (!path)
 		return -EINVAL;
 
-	/* Find the connection owning this path */
-	conn = container_of(path->list.prev, struct quic_connection, paths);
+	conn = path->conn;
 	if (!conn)
 		return -EINVAL;
 
 	/* Generate new challenge data */
-	quic_path_generate_challenge(path->challenge_data);
+	tquic_path_generate_challenge(path->validation.challenge_data);
 
 	/* Build PATH_CHALLENGE frame */
 	skb = alloc_skb(16, GFP_ATOMIC);
@@ -315,23 +303,23 @@ int quic_path_challenge(struct quic_path *path)
 		return -ENOMEM;
 
 	p = skb_put(skb, 9);
-	p[0] = QUIC_FRAME_PATH_CHALLENGE;
-	memcpy(p + 1, path->challenge_data, QUIC_PATH_CHALLENGE_SIZE);
+	p[0] = TQUIC_FRAME_PATH_CHALLENGE;
+	memcpy(p + 1, path->validation.challenge_data, TQUIC_PATH_CHALLENGE_SIZE);
 
 	/* Mark challenge as pending */
-	path->challenge_pending = 1;
-	path->validation_start = ktime_get();
+	path->validation.challenge_pending = true;
+	path->validation.challenge_sent = ktime_get();
 
 	/* Queue the frame for transmission */
-	if (quic_conn_queue_frame(conn, skb))
-		return -ENOBUFS;
+	spin_lock(&conn->lock);
+	skb_queue_tail(&conn->control_frames, skb);
+	spin_unlock(&conn->lock);
 
 	/* Schedule transmission */
 	schedule_work(&conn->tx_work);
 
-	/* Set timer for path probe timeout */
-	quic_timer_set(conn, QUIC_TIMER_PATH_PROBE,
-		       ktime_add_ms(ktime_get(), QUIC_PATH_PROBE_TIMEOUT_MS));
+	/* Start path validation timer */
+	tquic_timer_start_path_validation(conn, path);
 
 	return 0;
 }
@@ -342,31 +330,38 @@ int quic_path_challenge(struct quic_path *path)
  * Per RFC 9000 Section 8.2.1: Path validation is always initiated by
  * an endpoint that wishes to use a new path
  */
-int quic_path_validate(struct quic_path *path)
+int tquic_path_validate_start(struct tquic_path *path)
 {
+	ktime_t elapsed;
+
 	if (!path)
 		return -EINVAL;
 
 	/* If already validated, nothing to do */
-	if (path->validated)
+	if (path->state == TQUIC_PATH_VALIDATED ||
+	    path->state == TQUIC_PATH_ACTIVE)
 		return 0;
 
-	/* If validation already in progress, continue with existing challenge */
-	if (path->challenge_pending) {
-		ktime_t elapsed = ktime_sub(ktime_get(), path->validation_start);
+	/* If validation already in progress, check for timeout */
+	if (path->validation.challenge_pending) {
+		elapsed = ktime_sub(ktime_get(), path->validation.challenge_sent);
 
 		/* Check for validation timeout */
-		if (ktime_to_ms(elapsed) > QUIC_PATH_VALIDATION_TIMEOUT_MS) {
+		if (ktime_to_ms(elapsed) > TQUIC_PATH_VALIDATION_TIMEOUT_MS) {
 			/* Validation timed out - path is unusable */
-			path->challenge_pending = 0;
+			path->validation.challenge_pending = false;
+			path->state = TQUIC_PATH_FAILED;
 			return -ETIMEDOUT;
 		}
 
 		return 0;
 	}
 
+	/* Update state to pending */
+	path->state = TQUIC_PATH_PENDING;
+
 	/* Send initial PATH_CHALLENGE */
-	return quic_path_challenge(path);
+	return tquic_path_challenge(path);
 }
 
 /*
@@ -375,70 +370,39 @@ int quic_path_validate(struct quic_path *path)
  * Per RFC 9000 Section 8.2.2: A PATH_RESPONSE frame MUST contain the
  * same data as the corresponding PATH_CHALLENGE frame
  */
-void quic_path_on_validated(struct quic_path *path)
+void tquic_path_on_validated(struct tquic_path *path)
 {
-	struct quic_connection *conn;
+	struct tquic_connection *conn;
+	ktime_t validation_time;
 
 	if (!path)
 		return;
 
+	conn = path->conn;
+
+	/* Calculate validation time */
+	validation_time = ktime_sub(ktime_get(), path->validation.challenge_sent);
+
 	/* Mark path as validated */
-	path->validated = 1;
-	path->challenge_pending = 0;
+	path->state = TQUIC_PATH_VALIDATED;
+	path->validation.challenge_pending = false;
+	path->schedulable = true;
 
-	/* Remove anti-amplification limit */
-	path->amplification_limit = QUIC_PATH_MTU_MAX;
-
-	/* Find the connection owning this path */
-	if (list_empty(&path->list))
-		return;
-
-	conn = container_of(path->list.prev, struct quic_connection, paths);
 	if (!conn)
 		return;
 
-	trace_quic_path_validated(quic_trace_conn_id(&conn->scid), conn->num_paths);
+	/* Trace path validation */
+	tquic_trace_path_validated(conn, path->path_id, ktime_to_us(validation_time));
 
-	/* Cancel path probe timer */
-	quic_timer_cancel(conn, QUIC_TIMER_PATH_PROBE);
+	/* Cancel path validation timer */
+	tquic_timer_path_validated(conn, path);
 
-	/* Notify userspace of path validation */
-	if (conn->qsk && conn->qsk->events_enabled) {
-		struct sk_buff *event_skb;
-		struct quic_event_info *info;
-
-		event_skb = alloc_skb(sizeof(*info) + 16, GFP_ATOMIC);
-		if (event_skb) {
-			info = (struct quic_event_info *)skb_put(event_skb, sizeof(*info));
-			memset(info, 0, sizeof(*info));
-			info->type = QUIC_EVENT_PATH_VALIDATED;
-			skb_queue_tail(&conn->qsk->event_queue, event_skb);
-			wake_up(&conn->qsk->event_wait);
-		} else {
-			pr_warn_ratelimited(
-				"failed to allocate event buffer for path validation notification\n");
-			atomic64_inc(&conn->stats.clone_failures);
-		}
-	}
-
-	/*
-	 * RFC 9000 Section 9.6: Use of Preferred Address
-	 *
-	 * If this path was created for a preferred address, automatically
-	 * migrate the connection to this path now that it's validated.
-	 */
-	if (path->is_preferred_addr && !path->active) {
-		int ret = quic_path_migrate(conn, path);
-		if (ret < 0) {
-			pr_warn("QUIC: Failed to migrate to preferred address: %d\n",
-				ret);
-		} else {
-			pr_info("QUIC: Successfully migrated to preferred address\n");
-		}
-	}
+	/* Notify path manager via netlink */
+	tquic_nl_path_event(conn, path, TQUIC_PATH_EVENT_ACTIVE);
 
 	/* Start MTU discovery on the validated path */
-	quic_path_mtu_discovery_start(path);
+	tquic_pmtud_init_path(path);
+	tquic_pmtud_start(path);
 }
 
 /*
@@ -447,17 +411,17 @@ void quic_path_on_validated(struct quic_path *path)
  * Per RFC 9000 Section 8.2.2: An endpoint MUST use unpredictable data
  * in every PATH_CHALLENGE frame
  */
-bool quic_path_verify_response(struct quic_path *path, const u8 *data)
+bool tquic_path_verify_response(struct tquic_path *path, const u8 *data)
 {
 	if (!path || !data)
 		return false;
 
-	if (!path->challenge_pending)
+	if (!path->validation.challenge_pending)
 		return false;
 
 	/* Constant-time comparison to prevent timing attacks */
-	return crypto_memneq(path->challenge_data, data,
-			     QUIC_PATH_CHALLENGE_SIZE) == 0;
+	return crypto_memneq(path->validation.challenge_data, data,
+			     TQUIC_PATH_CHALLENGE_SIZE) == 0;
 }
 
 /*
@@ -467,9 +431,9 @@ bool quic_path_verify_response(struct quic_path *path, const u8 *data)
  * new local address by sending packets containing non-probing frames
  * from that address
  */
-int quic_path_migrate(struct quic_connection *conn, struct quic_path *path)
+int tquic_path_migrate(struct tquic_connection *conn, struct tquic_path *path)
 {
-	struct quic_path *old_path;
+	struct tquic_path *old_path;
 
 	if (!conn || !path)
 		return -EINVAL;
@@ -479,7 +443,8 @@ int quic_path_migrate(struct quic_connection *conn, struct quic_path *path)
 		return -EPERM;
 
 	/* Path must be validated before migration */
-	if (!path->validated)
+	if (path->state != TQUIC_PATH_VALIDATED &&
+	    path->state != TQUIC_PATH_ACTIVE)
 		return -EINVAL;
 
 	/* Get current active path */
@@ -488,51 +453,39 @@ int quic_path_migrate(struct quic_connection *conn, struct quic_path *path)
 		return 0;  /* Already on this path */
 
 	/* Perform migration */
-	path->active = 1;
+	path->state = TQUIC_PATH_ACTIVE;
 	conn->active_path = path;
 
-	trace_quic_path_migrate(quic_trace_conn_id(&conn->scid),
-				old_path ? 0 : 0, conn->num_paths);
-
-	if (old_path)
-		old_path->active = 0;
+	if (old_path) {
+		old_path->state = TQUIC_PATH_STANDBY;
+	}
 
 	/* Per RFC 9000 Section 9.4: Reset congestion controller
 	 * The congestion window and RTT estimator are reset when
 	 * migrating to a completely new path
 	 */
-	if (old_path && !quic_path_addr_equal(&old_path->remote_addr,
+	if (old_path && !tquic_path_addr_equal(&old_path->remote_addr,
 					      &path->remote_addr)) {
 		/* New network path - reset congestion control */
-		quic_path_cc_init(&path->cc, path->mtu);
+		tquic_path_cc_init(path, path->mtu);
 
 		/* Keep minimum RTT from old path as a hint */
-		if (old_path->rtt.has_sample && old_path->rtt.min_rtt != U32_MAX) {
-			path->rtt.min_rtt = old_path->rtt.min_rtt;
+		if (old_path->cc.min_rtt_us != U64_MAX) {
+			path->cc.min_rtt_us = old_path->cc.min_rtt_us;
 		}
 	}
 
 	/* Use a new connection ID for migration per RFC 9000 Section 9.5 */
-	quic_conn_rotate_dcid(conn);
-
-	/* Notify userspace of connection migration */
-	if (conn->qsk && conn->qsk->events_enabled) {
-		struct sk_buff *event_skb;
-		struct quic_event_info *info;
-
-		event_skb = alloc_skb(sizeof(*info) + 16, GFP_ATOMIC);
-		if (event_skb) {
-			info = (struct quic_event_info *)skb_put(event_skb, sizeof(*info));
-			memset(info, 0, sizeof(*info));
-			info->type = QUIC_EVENT_CONNECTION_MIGRATION;
-			skb_queue_tail(&conn->qsk->event_queue, event_skb);
-			wake_up(&conn->qsk->event_wait);
-		} else {
-			pr_warn_ratelimited(
-				"failed to allocate event buffer for connection migration notification\n");
-			atomic64_inc(&conn->stats.clone_failures);
-		}
+	if (conn->cid_pool) {
+		struct tquic_cid_manager *mgr = conn->cid_pool;
+		tquic_cid_rotate_now(mgr);
 	}
+
+	/* Notify via netlink of connection migration */
+	tquic_nl_path_event(conn, path, TQUIC_PATH_EVENT_MIGRATE);
+
+	/* Update statistics */
+	conn->stats.path_migrations++;
 
 	return 0;
 }
@@ -542,13 +495,13 @@ int quic_path_migrate(struct quic_connection *conn, struct quic_path *path)
  */
 
 /* Find the next MTU probe size */
-static u32 quic_path_next_mtu_probe(u32 current_mtu)
+static u32 tquic_path_next_mtu_probe(u32 current_mtu)
 {
 	int i;
 
-	for (i = 0; i < ARRAY_SIZE(quic_mtu_probes); i++) {
-		if (quic_mtu_probes[i] > current_mtu)
-			return quic_mtu_probes[i];
+	for (i = 0; i < ARRAY_SIZE(tquic_mtu_probes); i++) {
+		if (tquic_mtu_probes[i] > current_mtu)
+			return tquic_mtu_probes[i];
 	}
 
 	return current_mtu;
@@ -557,16 +510,20 @@ static u32 quic_path_next_mtu_probe(u32 current_mtu)
 /*
  * Start MTU discovery on a validated path
  */
-void quic_path_mtu_discovery_start(struct quic_path *path)
+void tquic_path_mtu_discovery_start(struct tquic_path *path)
 {
-	if (!path || !path->validated)
+	if (!path)
+		return;
+
+	if (path->state != TQUIC_PATH_VALIDATED &&
+	    path->state != TQUIC_PATH_ACTIVE)
 		return;
 
 	/* Start with conservative MTU */
-	path->mtu = QUIC_PATH_MTU_INITIAL;
+	path->mtu = TQUIC_PATH_MTU_INITIAL;
 
-	/* Schedule MTU probe - will be handled by timer */
-	quic_path_mtu_probe(path);
+	/* Schedule MTU probe - will be handled by PMTUD subsystem */
+	tquic_pmtud_start(path);
 }
 
 /*
@@ -574,25 +531,23 @@ void quic_path_mtu_discovery_start(struct quic_path *path)
  *
  * Per RFC 8899: DPLPMTUD uses probe packets to search for a larger MTU
  */
-int quic_path_mtu_probe(struct quic_path *path)
+int tquic_path_mtu_probe(struct tquic_path *path)
 {
-	struct quic_connection *conn;
+	struct tquic_connection *conn;
 	struct sk_buff *skb;
 	u32 probe_size;
 	u8 *p;
+	int padding;
 
 	if (!path)
 		return -EINVAL;
 
-	if (list_empty(&path->list))
-		return -EINVAL;
-
-	conn = container_of(path->list.prev, struct quic_connection, paths);
+	conn = path->conn;
 	if (!conn)
 		return -EINVAL;
 
 	/* Determine probe size */
-	probe_size = quic_path_next_mtu_probe(path->mtu);
+	probe_size = tquic_path_next_mtu_probe(path->mtu);
 	if (probe_size <= path->mtu)
 		return 0;  /* Already at maximum MTU */
 
@@ -603,20 +558,20 @@ int quic_path_mtu_probe(struct quic_path *path)
 
 	/* PING frame */
 	p = skb_put(skb, 1);
-	*p = QUIC_FRAME_PING;
+	*p = TQUIC_FRAME_PING;
 
 	/* PADDING to reach probe size (accounting for headers and AEAD tag) */
-	{
-		int padding = probe_size - skb->len - 100;  /* Rough header estimate */
-		if (padding > 0) {
-			p = skb_put(skb, padding);
-			memset(p, 0, padding);  /* PADDING frames */
-		}
+	padding = probe_size - skb->len - 100;  /* Rough header estimate */
+	if (padding > 0) {
+		p = skb_put(skb, padding);
+		memset(p, 0, padding);  /* PADDING frames */
 	}
 
 	/* Queue the probe packet */
-	if (quic_conn_queue_frame(conn, skb))
-		return -ENOBUFS;
+	spin_lock(&conn->lock);
+	skb_queue_tail(&conn->control_frames, skb);
+	spin_unlock(&conn->lock);
+
 	schedule_work(&conn->tx_work);
 
 	return 0;
@@ -625,7 +580,7 @@ int quic_path_mtu_probe(struct quic_path *path)
 /*
  * Handle MTU probe acknowledgment
  */
-void quic_path_mtu_probe_acked(struct quic_path *path, u32 probe_size)
+void tquic_path_mtu_probe_acked(struct tquic_path *path, u32 probe_size)
 {
 	if (!path)
 		return;
@@ -635,7 +590,7 @@ void quic_path_mtu_probe_acked(struct quic_path *path, u32 probe_size)
 		path->mtu = probe_size;
 
 	/* Update congestion window for new MTU */
-	quic_cc_init(&path->cc, path->cc.algo);
+	tquic_path_cc_init(path, path->mtu);
 }
 
 /*
@@ -647,7 +602,7 @@ void quic_path_mtu_probe_acked(struct quic_path *path, u32 probe_size)
  * This implementation tracks the failed probe and sets an upper bound
  * for future probing attempts.
  */
-void quic_path_mtu_probe_lost(struct quic_path *path, u32 probe_size)
+void tquic_path_mtu_probe_lost(struct tquic_path *path, u32 probe_size)
 {
 	if (!path)
 		return;
@@ -663,7 +618,7 @@ void quic_path_mtu_probe_lost(struct quic_path *path, u32 probe_size)
 	 * RFC 9000 recommends waiting at least 1 PTO before retrying
 	 * with a smaller probe size.
 	 */
-	pr_debug("QUIC: MTU probe lost at size %u, keeping MTU %u\n",
+	pr_debug("TQUIC: MTU probe lost at size %u, keeping MTU %u\n",
 		 probe_size, path->mtu);
 }
 
@@ -673,46 +628,45 @@ void quic_path_mtu_probe_lost(struct quic_path *path, u32 probe_size)
  * Per RFC 9002 Section 5: RTT is measured by the sender by observing
  * the time between sending an ack-eliciting packet and receiving an ACK
  */
-void quic_path_rtt_update(struct quic_path *path, u32 latest_rtt_us,
+void tquic_path_rtt_update(struct tquic_path *path, u32 latest_rtt_us,
 			  u32 ack_delay_us)
 {
-	struct quic_rtt *rtt;
+	u64 adjusted_rtt;
+	u64 rttvar_sample;
 
 	if (!path)
 		return;
 
-	rtt = &path->rtt;
-
-	/* Update latest RTT */
-	rtt->latest_rtt = latest_rtt_us;
-
 	/* Update minimum RTT (no ack delay adjustment) */
-	if (latest_rtt_us < rtt->min_rtt)
-		rtt->min_rtt = latest_rtt_us;
+	if (latest_rtt_us < path->cc.min_rtt_us)
+		path->cc.min_rtt_us = latest_rtt_us;
 
 	/* First RTT sample */
-	if (!rtt->has_sample) {
-		rtt->has_sample = 1;
-		rtt->first_rtt_sample = ktime_get();
-		rtt->smoothed_rtt = latest_rtt_us;
-		rtt->rttvar = latest_rtt_us / 2;
+	if (path->cc.smoothed_rtt_us == 0 || path->cc.min_rtt_us == U64_MAX) {
+		path->cc.smoothed_rtt_us = latest_rtt_us;
+		path->cc.rtt_var_us = latest_rtt_us / 2;
+		path->cc.min_rtt_us = latest_rtt_us;
 		return;
 	}
 
 	/* Adjust for ACK delay per RFC 9002 Section 5.3 */
-	u32 adjusted_rtt = latest_rtt_us;
-	if (adjusted_rtt >= rtt->min_rtt + ack_delay_us)
+	adjusted_rtt = latest_rtt_us;
+	if (adjusted_rtt >= path->cc.min_rtt_us + ack_delay_us)
 		adjusted_rtt -= ack_delay_us;
 
 	/* Update RTTVAR and smoothed RTT per RFC 9002 Section 5.3 */
-	u32 rttvar_sample;
-	if (adjusted_rtt > rtt->smoothed_rtt)
-		rttvar_sample = adjusted_rtt - rtt->smoothed_rtt;
+	if (adjusted_rtt > path->cc.smoothed_rtt_us)
+		rttvar_sample = adjusted_rtt - path->cc.smoothed_rtt_us;
 	else
-		rttvar_sample = rtt->smoothed_rtt - adjusted_rtt;
+		rttvar_sample = path->cc.smoothed_rtt_us - adjusted_rtt;
 
-	rtt->rttvar = (3 * rtt->rttvar + rttvar_sample) / 4;
-	rtt->smoothed_rtt = (7 * rtt->smoothed_rtt + adjusted_rtt) / 8;
+	path->cc.rtt_var_us = (3 * path->cc.rtt_var_us + rttvar_sample) / 4;
+	path->cc.smoothed_rtt_us = (7 * path->cc.smoothed_rtt_us + adjusted_rtt) / 8;
+
+	/* Update stats */
+	path->stats.rtt_smoothed = (u32)path->cc.smoothed_rtt_us;
+	path->stats.rtt_variance = (u32)path->cc.rtt_var_us;
+	path->stats.rtt_min = (u32)path->cc.min_rtt_us;
 }
 
 /*
@@ -720,18 +674,16 @@ void quic_path_rtt_update(struct quic_path *path, u32 latest_rtt_us,
  *
  * Per RFC 9002 Section 6.2
  */
-u32 quic_path_pto(struct quic_path *path)
+u32 tquic_path_pto(struct tquic_path *path)
 {
-	struct quic_rtt *rtt;
 	u32 pto;
 
 	if (!path)
 		return 1000000;  /* Default 1 second */
 
-	rtt = &path->rtt;
-
 	/* PTO = smoothed_rtt + max(4 * rttvar, kGranularity) + max_ack_delay */
-	pto = rtt->smoothed_rtt + max_t(u32, 4 * rtt->rttvar, 1000);
+	pto = (u32)path->cc.smoothed_rtt_us +
+	      max_t(u32, 4 * (u32)path->cc.rtt_var_us, 1000);
 
 	/* Add maximum ACK delay (default 25ms = 25000us) */
 	pto += 25000;
@@ -740,14 +692,16 @@ u32 quic_path_pto(struct quic_path *path)
 }
 
 /*
- * Record data sent on a path (for anti-amplification)
+ * Record data sent on a path (for anti-amplification and statistics)
  */
-void quic_path_on_data_sent(struct quic_path *path, u32 bytes)
+void tquic_path_on_data_sent(struct tquic_path *path, u32 bytes)
 {
 	if (!path)
 		return;
 
-	atomic64_add(bytes, &path->bytes_sent);
+	path->stats.tx_bytes += bytes;
+	path->stats.tx_packets++;
+	path->last_activity = ktime_get();
 }
 
 /*
@@ -757,53 +711,56 @@ void quic_path_on_data_sent(struct quic_path *path, u32 bytes)
  * servers MUST NOT send more than three times as many bytes as the
  * number of bytes they have received
  */
-void quic_path_on_data_received(struct quic_path *path, u32 bytes)
+void tquic_path_on_data_received(struct tquic_path *path, u32 bytes)
 {
 	if (!path)
 		return;
 
-	atomic64_add(bytes, &path->bytes_recv);
-
-	/* Update amplification limit (3x received data) */
-	if (!path->validated)
-		path->amplification_limit = atomic64_read(&path->bytes_recv) * 3;
+	path->stats.rx_bytes += bytes;
+	path->stats.rx_packets++;
+	path->last_activity = ktime_get();
 }
 
 /*
  * Check if sending is allowed under anti-amplification limits
  */
-bool quic_path_can_send(struct quic_path *path, u32 bytes)
+bool tquic_path_can_send(struct tquic_path *path, u32 bytes)
 {
 	if (!path)
 		return false;
 
 	/* Validated paths have no limit */
-	if (path->validated)
+	if (path->state == TQUIC_PATH_VALIDATED ||
+	    path->state == TQUIC_PATH_ACTIVE)
 		return true;
 
-	/* Check amplification limit */
-	return (atomic64_read(&path->bytes_sent) + bytes) <= path->amplification_limit;
+	/* Check amplification limit (3x received data) */
+	return (path->stats.tx_bytes + bytes) <= (path->stats.rx_bytes * 3);
 }
 
 /*
  * Find a path by remote address
  */
-struct quic_path *quic_path_find(struct quic_connection *conn,
+struct tquic_path *tquic_path_find(struct tquic_connection *conn,
 				 struct sockaddr *remote)
 {
-	struct quic_path *path;
+	struct tquic_path *path;
 	struct sockaddr_storage remote_storage;
 
 	if (!conn || !remote)
 		return NULL;
 
-	if (quic_path_copy_addr(&remote_storage, remote))
+	if (tquic_path_copy_addr(&remote_storage, remote))
 		return NULL;
 
+	spin_lock(&conn->paths_lock);
 	list_for_each_entry(path, &conn->paths, list) {
-		if (quic_path_addr_equal(&path->remote_addr, &remote_storage))
+		if (tquic_path_addr_equal(&path->remote_addr, &remote_storage)) {
+			spin_unlock(&conn->paths_lock);
 			return path;
+		}
 	}
+	spin_unlock(&conn->paths_lock);
 
 	return NULL;
 }
@@ -811,18 +768,50 @@ struct quic_path *quic_path_find(struct quic_connection *conn,
 /*
  * Get path statistics
  */
-int quic_path_get_info(struct quic_path *path, struct quic_path_info *info)
+int tquic_path_get_info(struct tquic_path *path, struct tquic_path_info *info)
 {
 	if (!path || !info)
 		return -EINVAL;
 
 	memset(info, 0, sizeof(*info));
 
+	info->path_id = path->path_id;
 	memcpy(&info->local_addr, &path->local_addr, sizeof(info->local_addr));
 	memcpy(&info->remote_addr, &path->remote_addr, sizeof(info->remote_addr));
 	info->mtu = path->mtu;
-	info->rtt = path->rtt.smoothed_rtt / 1000;  /* Convert to ms */
-	info->validated = path->validated;
+	info->rtt = (u32)(path->cc.smoothed_rtt_us / 1000);  /* Convert to ms */
+	info->rtt_var = (u32)(path->cc.rtt_var_us / 1000);
+	info->cwnd = path->cc.cwnd;
+	info->bandwidth = path->stats.bandwidth;
+	info->bytes_sent = path->stats.tx_bytes;
+	info->bytes_received = path->stats.rx_bytes;
+	info->packets_lost = path->stats.lost_packets;
+	info->priority = path->priority;
+	info->weight = path->weight;
+
+	/* Map internal state to userspace state */
+	switch (path->state) {
+	case TQUIC_PATH_UNUSED:
+		info->state = TQUIC_PATH_STATE_UNUSED;
+		break;
+	case TQUIC_PATH_PENDING:
+		info->state = TQUIC_PATH_STATE_PENDING;
+		break;
+	case TQUIC_PATH_VALIDATED:
+	case TQUIC_PATH_ACTIVE:
+		info->state = TQUIC_PATH_STATE_ACTIVE;
+		break;
+	case TQUIC_PATH_STANDBY:
+	case TQUIC_PATH_UNAVAILABLE:
+		info->state = TQUIC_PATH_STATE_STANDBY;
+		break;
+	case TQUIC_PATH_FAILED:
+	case TQUIC_PATH_CLOSED:
+		info->state = TQUIC_PATH_STATE_FAILED;
+		break;
+	default:
+		info->state = TQUIC_PATH_STATE_UNUSED;
+	}
 
 	return 0;
 }
@@ -830,33 +819,67 @@ int quic_path_get_info(struct quic_path *path, struct quic_path_info *info)
 /*
  * Handle path challenge timeout
  */
-void quic_path_on_probe_timeout(struct quic_path *path)
+void tquic_path_on_probe_timeout(struct tquic_path *path)
 {
 	ktime_t elapsed;
 
-	if (!path || !path->challenge_pending)
+	if (!path || !path->validation.challenge_pending)
 		return;
 
-	elapsed = ktime_sub(ktime_get(), path->validation_start);
+	elapsed = ktime_sub(ktime_get(), path->validation.challenge_sent);
 
 	/* Check for overall validation timeout */
-	if (ktime_to_ms(elapsed) > QUIC_PATH_VALIDATION_TIMEOUT_MS) {
+	if (ktime_to_ms(elapsed) > TQUIC_PATH_VALIDATION_TIMEOUT_MS) {
 		/* Validation failed */
-		path->challenge_pending = 0;
+		path->validation.challenge_pending = false;
+		path->state = TQUIC_PATH_FAILED;
+		return;
+	}
+
+	/* Increment retry count */
+	path->validation.retries++;
+	if (path->validation.retries >= TQUIC_PATH_MAX_PROBES) {
+		/* Too many retries - validation failed */
+		path->validation.challenge_pending = false;
+		path->state = TQUIC_PATH_FAILED;
 		return;
 	}
 
 	/* Retransmit challenge */
-	quic_path_challenge(path);
+	tquic_path_challenge(path);
 }
 
 /*
  * Check if a path needs probing
  */
-bool quic_path_needs_probe(struct quic_path *path)
+bool tquic_path_needs_probe(struct tquic_path *path)
 {
 	if (!path)
 		return false;
 
-	return path->challenge_pending && !path->validated;
+	return path->validation.challenge_pending &&
+	       path->state == TQUIC_PATH_PENDING;
 }
+
+EXPORT_SYMBOL_GPL(tquic_path_init);
+EXPORT_SYMBOL_GPL(tquic_path_exit);
+EXPORT_SYMBOL_GPL(tquic_path_create);
+EXPORT_SYMBOL_GPL(tquic_path_destroy);
+EXPORT_SYMBOL_GPL(tquic_path_challenge);
+EXPORT_SYMBOL_GPL(tquic_path_validate_start);
+EXPORT_SYMBOL_GPL(tquic_path_on_validated);
+EXPORT_SYMBOL_GPL(tquic_path_verify_response);
+EXPORT_SYMBOL_GPL(tquic_path_migrate);
+EXPORT_SYMBOL_GPL(tquic_path_mtu_discovery_start);
+EXPORT_SYMBOL_GPL(tquic_path_mtu_probe);
+EXPORT_SYMBOL_GPL(tquic_path_mtu_probe_acked);
+EXPORT_SYMBOL_GPL(tquic_path_mtu_probe_lost);
+EXPORT_SYMBOL_GPL(tquic_path_rtt_update);
+EXPORT_SYMBOL_GPL(tquic_path_pto);
+EXPORT_SYMBOL_GPL(tquic_path_on_data_sent);
+EXPORT_SYMBOL_GPL(tquic_path_on_data_received);
+EXPORT_SYMBOL_GPL(tquic_path_can_send);
+EXPORT_SYMBOL_GPL(tquic_path_find);
+EXPORT_SYMBOL_GPL(tquic_path_get_info);
+EXPORT_SYMBOL_GPL(tquic_path_on_probe_timeout);
+EXPORT_SYMBOL_GPL(tquic_path_needs_probe);

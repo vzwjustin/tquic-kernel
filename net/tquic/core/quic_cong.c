@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 /*
- * QUIC Congestion Control
+ * TQUIC Congestion Control
  *
- * Implementation of congestion control algorithms for QUIC
+ * Implementation of congestion control algorithms for TQUIC
  * Based on RFC 9002 - QUIC Loss Detection and Congestion Control
  *
  * Implements:
@@ -20,13 +20,90 @@
 #include <linux/math64.h>
 #include <linux/random.h>
 #include <linux/minmax.h>
-#include <net/quic.h>
+#include <net/tquic.h>
+
+/*
+ * Maximum packet size constant
+ * Per RFC 9000, the minimum Initial packet size is 1200 bytes.
+ * We use 1500 for Ethernet MTU compatibility.
+ */
+#define TQUIC_MAX_PACKET_SIZE		1500
+
+/*
+ * TQUIC congestion control algorithms
+ */
+enum tquic_cc_algo {
+	TQUIC_CC_RENO	= 0,
+	TQUIC_CC_CUBIC	= 1,
+	TQUIC_CC_BBR	= 2,
+	TQUIC_CC_BBR2	= 3,
+};
+
+/*
+ * TQUIC RTT measurement structure
+ */
+struct tquic_rtt {
+	u32		latest_rtt;
+	u32		min_rtt;
+	u32		smoothed_rtt;
+	u32		rttvar;
+	ktime_t		first_rtt_sample;
+	u8		has_sample:1;
+};
+
+/*
+ * TQUIC congestion control state
+ */
+struct tquic_cc_state {
+	u64		cwnd;
+	u64		ssthresh;
+	u64		bytes_in_flight;
+	u64		congestion_window;
+	u64		pacing_rate;
+	u64		last_sent_time;
+	ktime_t		congestion_recovery_start;
+	u32		pto_count;
+	u32		loss_burst_count;
+	u8		in_slow_start:1;
+	u8		in_recovery:1;
+	u8		app_limited:1;
+	enum tquic_cc_algo algo;
+	/*
+	 * PRR (Proportional Rate Reduction) state per RFC 6937
+	 * Smoothly reduces cwnd during loss recovery instead of halving
+	 * immediately. Tracks bytes delivered and sent during recovery
+	 * to proportionally allow new transmissions.
+	 */
+	u64		prr_delivered;		/* Bytes delivered since loss */
+	u64		prr_out;		/* Bytes sent since loss */
+	u64		recov_start_pipe;	/* Bytes in flight at recovery start */
+	/* BBR specific */
+	u64		bbr_bw;
+	u64		bbr_min_rtt;
+	u64		bbr_full_bw;		/* Full bandwidth estimate for startup exit */
+	u32		bbr_cycle_index;
+	u32		bbr_full_bw_count;	/* Count of rounds without BW increase */
+	u8		bbr_mode;
+	/* CUBIC specific */
+	u64		cubic_k;
+	u64		cubic_origin_point;
+	ktime_t		cubic_epoch_start;
+};
+
+/*
+ * TQUIC statistics for congestion control
+ */
+struct tquic_stats {
+	u64		cwnd;
+	u64		bytes_in_flight;
+	u8		congestion_state;
+};
 
 /* RFC 9002 constants */
-#define QUIC_INITIAL_CWND_PACKETS	10
-#define QUIC_INITIAL_CWND_MIN		(2 * QUIC_MAX_PACKET_SIZE)
-#define QUIC_MIN_CWND			(2 * QUIC_MAX_PACKET_SIZE)
-#define QUIC_LOSS_REDUCTION_FACTOR	2	/* Reno: cwnd / 2 */
+#define TQUIC_INITIAL_CWND_PACKETS	10
+#define TQUIC_INITIAL_CWND_MIN		(2 * TQUIC_MAX_PACKET_SIZE)
+#define TQUIC_MIN_CWND			(2 * TQUIC_MAX_PACKET_SIZE)
+#define TQUIC_LOSS_REDUCTION_FACTOR	2	/* Reno: cwnd / 2 */
 
 /*
  * PRR (Proportional Rate Reduction) per RFC 6937
@@ -35,12 +112,12 @@
 #define PRR_SSTHRESH_REDUCTION		2	/* ssthresh = cwnd/2 for PRR */
 
 /* Default initial RTT (333ms per RFC 9002) */
-#define QUIC_INITIAL_RTT_MS		333
-#define QUIC_INITIAL_RTT_US		(QUIC_INITIAL_RTT_MS * 1000)
+#define TQUIC_INITIAL_RTT_MS		333
+#define TQUIC_INITIAL_RTT_US		(TQUIC_INITIAL_RTT_MS * 1000)
 
 /* Pacing constants */
-#define QUIC_PACING_MULTIPLIER_NUM	5
-#define QUIC_PACING_MULTIPLIER_DEN	4	/* 1.25x pacing */
+#define TQUIC_PACING_MULTIPLIER_NUM	5
+#define TQUIC_PACING_MULTIPLIER_DEN	4	/* 1.25x pacing */
 
 /* CUBIC constants */
 #define CUBIC_BETA_SCALE		1024
@@ -54,7 +131,7 @@
 #define BBR_HIGH_GAIN			((BBR_UNIT * 2885) / 1000 + 1)	/* 2/ln(2) */
 #define BBR_DRAIN_GAIN			((BBR_UNIT * 1000) / 2885)
 #define BBR_CWND_GAIN			(BBR_UNIT * 2)
-#define BBR_PROBE_RTT_CWND		(4 * QUIC_MAX_PACKET_SIZE)
+#define BBR_PROBE_RTT_CWND		(4 * TQUIC_MAX_PACKET_SIZE)
 #define BBR_MIN_RTT_WIN_SEC		10
 #define BBR_PROBE_RTT_DURATION_MS	200
 #define BBR_CYCLE_LEN			8
@@ -127,15 +204,15 @@ static u32 cubic_root(u64 a)
  * Initialize congestion control state
  * Called when a new connection or path is created
  */
-void quic_cc_init(struct quic_cc_state *cc, enum quic_cc_algo algo)
+void tquic_cc_init(struct tquic_cc_state *cc, enum tquic_cc_algo algo)
 {
 	memset(cc, 0, sizeof(*cc));
 
 	cc->algo = algo;
 
 	/* RFC 9002: Initial window is min(10 * max_datagram_size, max(14720, 2 * max_datagram_size)) */
-	cc->cwnd = min_t(u64, QUIC_INITIAL_CWND_PACKETS * QUIC_MAX_PACKET_SIZE,
-			 max_t(u64, 14720, QUIC_INITIAL_CWND_MIN));
+	cc->cwnd = min_t(u64, TQUIC_INITIAL_CWND_PACKETS * TQUIC_MAX_PACKET_SIZE,
+			 max_t(u64, 14720, TQUIC_INITIAL_CWND_MIN));
 	cc->congestion_window = cc->cwnd;
 	cc->ssthresh = U64_MAX;		/* No initial slow start threshold */
 	cc->bytes_in_flight = 0;
@@ -154,18 +231,18 @@ void quic_cc_init(struct quic_cc_state *cc, enum quic_cc_algo algo)
 
 	/* Algorithm-specific initialization */
 	switch (algo) {
-	case QUIC_CC_RENO:
+	case TQUIC_CC_RENO:
 		/* Reno uses default values */
 		break;
 
-	case QUIC_CC_CUBIC:
+	case TQUIC_CC_CUBIC:
 		cc->cubic_k = 0;
 		cc->cubic_origin_point = 0;
 		cc->cubic_epoch_start = 0;
 		break;
 
-	case QUIC_CC_BBR:
-	case QUIC_CC_BBR2:
+	case TQUIC_CC_BBR:
+	case TQUIC_CC_BBR2:
 		cc->bbr_mode = BBR_MODE_STARTUP;
 		cc->bbr_bw = 0;
 		cc->bbr_min_rtt = U64_MAX;
@@ -174,23 +251,23 @@ void quic_cc_init(struct quic_cc_state *cc, enum quic_cc_algo algo)
 		cc->bbr_full_bw_count = 0;
 		/* Initial pacing rate based on initial cwnd and RTT */
 		cc->pacing_rate = div64_u64(cc->cwnd * USEC_PER_SEC,
-					    QUIC_INITIAL_RTT_US);
+					    TQUIC_INITIAL_RTT_US);
 		break;
 	}
 
 	/* Default pacing rate for non-BBR algorithms */
-	if (algo != QUIC_CC_BBR && algo != QUIC_CC_BBR2) {
+	if (algo != TQUIC_CC_BBR && algo != TQUIC_CC_BBR2) {
 		cc->pacing_rate = div64_u64(cc->cwnd * USEC_PER_SEC,
-					    QUIC_INITIAL_RTT_US);
+					    TQUIC_INITIAL_RTT_US);
 	}
 }
-EXPORT_SYMBOL_GPL(quic_cc_init);
+EXPORT_SYMBOL_GPL(tquic_cc_init);
 
 /*
  * Handle packet sent event
  * Updates bytes in flight tracking
  */
-void quic_cc_on_packet_sent(struct quic_cc_state *cc, u32 bytes)
+void tquic_cc_on_packet_sent(struct tquic_cc_state *cc, u32 bytes)
 {
 	cc->bytes_in_flight += bytes;
 	cc->last_sent_time = ktime_get_ns();
@@ -205,14 +282,14 @@ void quic_cc_on_packet_sent(struct quic_cc_state *cc, u32 bytes)
 	else
 		cc->app_limited = 0;
 }
-EXPORT_SYMBOL_GPL(quic_cc_on_packet_sent);
+EXPORT_SYMBOL_GPL(tquic_cc_on_packet_sent);
 
 /*
  * Reno congestion avoidance: additive increase
  * Increases cwnd by 1 MSS per RTT during congestion avoidance
  */
-static void reno_on_ack(struct quic_cc_state *cc, u64 acked_bytes,
-			struct quic_rtt *rtt)
+static void reno_on_ack(struct tquic_cc_state *cc, u64 acked_bytes,
+			struct tquic_rtt *rtt)
 {
 	if (cc->in_slow_start) {
 		/* Slow start: exponential growth */
@@ -224,7 +301,7 @@ static void reno_on_ack(struct quic_cc_state *cc, u64 acked_bytes,
 	} else {
 		/* Congestion avoidance: linear growth */
 		/* Increase by (acked_bytes * MSS) / cwnd per ACK */
-		cc->cwnd += div64_u64((u64)acked_bytes * QUIC_MAX_PACKET_SIZE,
+		cc->cwnd += div64_u64((u64)acked_bytes * TQUIC_MAX_PACKET_SIZE,
 				      cc->cwnd);
 	}
 
@@ -235,8 +312,8 @@ static void reno_on_ack(struct quic_cc_state *cc, u64 acked_bytes,
  * CUBIC congestion control on ACK
  * Implements the CUBIC window growth function
  */
-static void cubic_on_ack(struct quic_cc_state *cc, u64 acked_bytes,
-			 struct quic_rtt *rtt)
+static void cubic_on_ack(struct tquic_cc_state *cc, u64 acked_bytes,
+			 struct tquic_rtt *rtt)
 {
 	u64 target_cwnd;
 	u64 tcp_cwnd;
@@ -269,7 +346,7 @@ static void cubic_on_ack(struct quic_cc_state *cc, u64 acked_bytes,
 			u64 diff = cc->cubic_origin_point - cc->cwnd;
 			/* Scale by 10 for fixed point, convert bytes to packets */
 			diff = div64_u64(diff * CUBIC_C_SCALE,
-					 (u64)QUIC_MAX_PACKET_SIZE * CUBIC_C);
+					 (u64)TQUIC_MAX_PACKET_SIZE * CUBIC_C);
 			cc->cubic_k = cubic_root(diff);
 		} else {
 			cc->cubic_k = 0;
@@ -289,7 +366,7 @@ static void cubic_on_ack(struct quic_cc_state *cc, u64 acked_bytes,
 
 	/* Calculate delta = C * offs^3 (in packets, then convert to bytes) */
 	delta = offs * offs * offs;
-	delta = div64_u64(delta * CUBIC_C * QUIC_MAX_PACKET_SIZE,
+	delta = div64_u64(delta * CUBIC_C * TQUIC_MAX_PACKET_SIZE,
 			  (u64)CUBIC_C_SCALE << 30);
 
 	if (t < cc->cubic_k)
@@ -305,7 +382,7 @@ static void cubic_on_ack(struct quic_cc_state *cc, u64 acked_bytes,
 		u64 rtt_count = rtt_ms > 0 ? div64_u64(elapsed_ms, rtt_ms) : 1;
 
 		tcp_cwnd = cc->cubic_origin_point +
-			   rtt_count * QUIC_MAX_PACKET_SIZE *
+			   rtt_count * TQUIC_MAX_PACKET_SIZE *
 			   (CUBIC_BETA_SCALE + CUBIC_BETA) /
 			   (CUBIC_BETA_SCALE * 2);
 
@@ -316,7 +393,7 @@ static void cubic_on_ack(struct quic_cc_state *cc, u64 acked_bytes,
 	if (target_cwnd > cc->cwnd + acked_bytes)
 		target_cwnd = cc->cwnd + acked_bytes;
 
-	cc->cwnd = max(target_cwnd, (u64)QUIC_MIN_CWND);
+	cc->cwnd = max(target_cwnd, (u64)TQUIC_MIN_CWND);
 	cc->congestion_window = cc->cwnd;
 }
 
@@ -324,8 +401,8 @@ static void cubic_on_ack(struct quic_cc_state *cc, u64 acked_bytes,
  * Update BBR bandwidth estimate
  * Maintains a windowed maximum of delivery rate samples
  */
-static void bbr_update_bw(struct quic_cc_state *cc, u64 acked_bytes,
-			  struct quic_rtt *rtt)
+static void bbr_update_bw(struct tquic_cc_state *cc, u64 acked_bytes,
+			  struct tquic_rtt *rtt)
 {
 	u64 bw;
 
@@ -344,7 +421,7 @@ static void bbr_update_bw(struct quic_cc_state *cc, u64 acked_bytes,
  * Update BBR minimum RTT
  * Maintains the minimum RTT over a 10-second window
  */
-static void bbr_update_min_rtt(struct quic_cc_state *cc, struct quic_rtt *rtt)
+static void bbr_update_min_rtt(struct tquic_cc_state *cc, struct tquic_rtt *rtt)
 {
 	if (!rtt->has_sample)
 		return;
@@ -359,8 +436,8 @@ static void bbr_update_min_rtt(struct quic_cc_state *cc, struct quic_rtt *rtt)
  * Note: full_bw and full_bw_count are stored per-connection in cc->bbr_full_bw
  * and cc->bbr_full_bw_count to avoid data races between concurrent connections.
  */
-static void bbr_check_state_transition(struct quic_cc_state *cc,
-				       struct quic_rtt *rtt)
+static void bbr_check_state_transition(struct tquic_cc_state *cc,
+				       struct tquic_rtt *rtt)
 {
 	switch (cc->bbr_mode) {
 	case BBR_MODE_STARTUP:
@@ -405,8 +482,8 @@ static void bbr_check_state_transition(struct quic_cc_state *cc,
 /*
  * BBR congestion control on ACK
  */
-static void bbr_on_ack(struct quic_cc_state *cc, u64 acked_bytes,
-		       struct quic_rtt *rtt)
+static void bbr_on_ack(struct tquic_cc_state *cc, u64 acked_bytes,
+		       struct tquic_rtt *rtt)
 {
 	u64 bdp;
 	u64 cwnd_gain;
@@ -462,7 +539,7 @@ static void bbr_on_ack(struct quic_cc_state *cc, u64 acked_bytes,
 
 	/* Calculate cwnd and pacing rate */
 	cc->cwnd = (bdp * cwnd_gain) >> BBR_SCALE;
-	cc->cwnd = max(cc->cwnd, (u64)QUIC_MIN_CWND);
+	cc->cwnd = max(cc->cwnd, (u64)TQUIC_MIN_CWND);
 
 	if (cc->bbr_mode == BBR_MODE_PROBE_RTT)
 		cc->cwnd = min(cc->cwnd, (u64)BBR_PROBE_RTT_CWND);
@@ -477,8 +554,8 @@ static void bbr_on_ack(struct quic_cc_state *cc, u64 acked_bytes,
  * BBRv2 congestion control on ACK
  * Adds loss-based cwnd reduction compared to BBR
  */
-static void bbr2_on_ack(struct quic_cc_state *cc, u64 acked_bytes,
-			struct quic_rtt *rtt)
+static void bbr2_on_ack(struct tquic_cc_state *cc, u64 acked_bytes,
+			struct tquic_rtt *rtt)
 {
 	u64 bdp;
 	u64 cwnd_gain;
@@ -542,11 +619,11 @@ static void bbr2_on_ack(struct quic_cc_state *cc, u64 acked_bytes,
 	if (cc->in_recovery && cc->cwnd > inflight_lo)
 		cc->cwnd = inflight_lo;
 
-	cc->cwnd = max(cc->cwnd, (u64)QUIC_MIN_CWND);
+	cc->cwnd = max(cc->cwnd, (u64)TQUIC_MIN_CWND);
 
 	if (cc->bbr_mode == BBR_MODE_PROBE_RTT) {
 		u64 probe_cwnd = (bdp * BBR2_PROBE_RTT_CWND_GAIN) >> BBR_SCALE;
-		cc->cwnd = max(probe_cwnd, (u64)QUIC_MIN_CWND);
+		cc->cwnd = max(probe_cwnd, (u64)TQUIC_MIN_CWND);
 	}
 
 	cc->congestion_window = cc->cwnd;
@@ -559,8 +636,8 @@ static void bbr2_on_ack(struct quic_cc_state *cc, u64 acked_bytes,
  * Handle acknowledgment of data
  * This is the main entry point for congestion control when packets are ACKed
  */
-void quic_cc_on_ack(struct quic_cc_state *cc, u64 acked_bytes,
-		    struct quic_rtt *rtt)
+void tquic_cc_on_ack(struct tquic_cc_state *cc, u64 acked_bytes,
+		    struct tquic_rtt *rtt)
 {
 	/*
 	 * PRR: Track bytes delivered during recovery (RFC 6937)
@@ -586,41 +663,41 @@ void quic_cc_on_ack(struct quic_cc_state *cc, u64 acked_bytes,
 
 	/* Algorithm-specific handling */
 	switch (cc->algo) {
-	case QUIC_CC_RENO:
+	case TQUIC_CC_RENO:
 		reno_on_ack(cc, acked_bytes, rtt);
 		break;
 
-	case QUIC_CC_CUBIC:
+	case TQUIC_CC_CUBIC:
 		cubic_on_ack(cc, acked_bytes, rtt);
 		break;
 
-	case QUIC_CC_BBR:
+	case TQUIC_CC_BBR:
 		bbr_on_ack(cc, acked_bytes, rtt);
 		break;
 
-	case QUIC_CC_BBR2:
+	case TQUIC_CC_BBR2:
 		bbr2_on_ack(cc, acked_bytes, rtt);
 		break;
 	}
 
 	/* Update pacing rate for Reno and CUBIC */
-	if (cc->algo == QUIC_CC_RENO || cc->algo == QUIC_CC_CUBIC) {
+	if (cc->algo == TQUIC_CC_RENO || cc->algo == TQUIC_CC_CUBIC) {
 		if (rtt->smoothed_rtt > 0) {
 			cc->pacing_rate = div64_u64(cc->cwnd * USEC_PER_SEC *
-						    QUIC_PACING_MULTIPLIER_NUM,
+						    TQUIC_PACING_MULTIPLIER_NUM,
 						    rtt->smoothed_rtt *
-						    QUIC_PACING_MULTIPLIER_DEN);
+						    TQUIC_PACING_MULTIPLIER_DEN);
 		}
 	}
 }
-EXPORT_SYMBOL_GPL(quic_cc_on_ack);
+EXPORT_SYMBOL_GPL(tquic_cc_on_ack);
 
 /*
  * Handle packet loss
  * RFC 9002: On loss, reduce congestion window
  * RFC 6937: Use PRR for smooth cwnd reduction during recovery
  */
-void quic_cc_on_loss(struct quic_cc_state *cc, u64 lost_bytes)
+void tquic_cc_on_loss(struct tquic_cc_state *cc, u64 lost_bytes)
 {
 	ktime_t now = ktime_get();
 
@@ -644,22 +721,22 @@ void quic_cc_on_loss(struct quic_cc_state *cc, u64 lost_bytes)
 	cc->prr_out = 0;
 
 	switch (cc->algo) {
-	case QUIC_CC_RENO:
+	case TQUIC_CC_RENO:
 		/*
 		 * RFC 9002: ssthresh = cwnd / 2
 		 * With PRR, we don't immediately set cwnd = ssthresh.
 		 * Instead, cwnd remains high and PRR limits sending.
 		 */
-		cc->ssthresh = max(cc->cwnd / QUIC_LOSS_REDUCTION_FACTOR,
-				   (u64)QUIC_MIN_CWND);
+		cc->ssthresh = max(cc->cwnd / TQUIC_LOSS_REDUCTION_FACTOR,
+				   (u64)TQUIC_MIN_CWND);
 		/* PRR: Keep cwnd high during recovery, limit by PRR calc */
 		cc->in_slow_start = 0;
 		break;
 
-	case QUIC_CC_CUBIC:
+	case TQUIC_CC_CUBIC:
 		/* CUBIC uses beta = 0.7 for ssthresh */
 		cc->ssthresh = (cc->cwnd * CUBIC_BETA) / CUBIC_BETA_SCALE;
-		cc->ssthresh = max(cc->ssthresh, (u64)QUIC_MIN_CWND);
+		cc->ssthresh = max(cc->ssthresh, (u64)TQUIC_MIN_CWND);
 		/* PRR: Keep cwnd, limit sending by PRR calculation */
 		cc->in_slow_start = 0;
 		/* Reset CUBIC state for when recovery ends */
@@ -668,12 +745,12 @@ void quic_cc_on_loss(struct quic_cc_state *cc, u64 lost_bytes)
 		cc->cubic_k = 0;
 		break;
 
-	case QUIC_CC_BBR:
+	case TQUIC_CC_BBR:
 		/* BBR doesn't reduce cwnd on loss during normal operation */
 		/* Only track the loss for bandwidth estimation */
 		break;
 
-	case QUIC_CC_BBR2:
+	case TQUIC_CC_BBR2:
 		/* BBRv2 responds to loss more aggressively */
 		if (cc->bbr_mode != BBR_MODE_PROBE_RTT) {
 			u64 bdp = 0;
@@ -682,7 +759,7 @@ void quic_cc_on_loss(struct quic_cc_state *cc, u64 lost_bytes)
 						USEC_PER_SEC);
 			/* Reduce cwnd to inflight_lo */
 			cc->cwnd = (bdp * BBR2_INFLIGHT_LO_SCALE) >> BBR_SCALE;
-			cc->cwnd = max(cc->cwnd, (u64)QUIC_MIN_CWND);
+			cc->cwnd = max(cc->cwnd, (u64)TQUIC_MIN_CWND);
 		}
 		break;
 	}
@@ -690,20 +767,20 @@ void quic_cc_on_loss(struct quic_cc_state *cc, u64 lost_bytes)
 	cc->congestion_window = cc->cwnd;
 
 	/* Update pacing rate */
-	if (cc->algo == QUIC_CC_RENO || cc->algo == QUIC_CC_CUBIC) {
+	if (cc->algo == TQUIC_CC_RENO || cc->algo == TQUIC_CC_CUBIC) {
 		cc->pacing_rate = div64_u64(cc->cwnd * USEC_PER_SEC *
-					    QUIC_PACING_MULTIPLIER_NUM,
-					    QUIC_INITIAL_RTT_US *
-					    QUIC_PACING_MULTIPLIER_DEN);
+					    TQUIC_PACING_MULTIPLIER_NUM,
+					    TQUIC_INITIAL_RTT_US *
+					    TQUIC_PACING_MULTIPLIER_DEN);
 	}
 }
-EXPORT_SYMBOL_GPL(quic_cc_on_loss);
+EXPORT_SYMBOL_GPL(tquic_cc_on_loss);
 
 /*
  * Handle congestion event (ECN CE marking)
  * Similar to loss handling per RFC 9002
  */
-void quic_cc_on_congestion_event(struct quic_cc_state *cc)
+void tquic_cc_on_congestion_event(struct tquic_cc_state *cc)
 {
 	ktime_t now = ktime_get();
 
@@ -716,16 +793,16 @@ void quic_cc_on_congestion_event(struct quic_cc_state *cc)
 	cc->congestion_recovery_start = now;
 
 	switch (cc->algo) {
-	case QUIC_CC_RENO:
-		cc->ssthresh = max(cc->cwnd / QUIC_LOSS_REDUCTION_FACTOR,
-				   (u64)QUIC_MIN_CWND);
+	case TQUIC_CC_RENO:
+		cc->ssthresh = max(cc->cwnd / TQUIC_LOSS_REDUCTION_FACTOR,
+				   (u64)TQUIC_MIN_CWND);
 		cc->cwnd = cc->ssthresh;
 		cc->in_slow_start = 0;
 		break;
 
-	case QUIC_CC_CUBIC:
+	case TQUIC_CC_CUBIC:
 		cc->ssthresh = (cc->cwnd * CUBIC_BETA) / CUBIC_BETA_SCALE;
-		cc->ssthresh = max(cc->ssthresh, (u64)QUIC_MIN_CWND);
+		cc->ssthresh = max(cc->ssthresh, (u64)TQUIC_MIN_CWND);
 		cc->cwnd = cc->ssthresh;
 		cc->in_slow_start = 0;
 		cc->cubic_origin_point = cc->ssthresh;
@@ -733,19 +810,19 @@ void quic_cc_on_congestion_event(struct quic_cc_state *cc)
 		cc->cubic_k = 0;
 		break;
 
-	case QUIC_CC_BBR:
+	case TQUIC_CC_BBR:
 		/* BBR treats ECN similarly to loss for the drain mechanism */
 		if (cc->bbr_mode == BBR_MODE_STARTUP)
 			cc->bbr_mode = BBR_MODE_DRAIN;
 		break;
 
-	case QUIC_CC_BBR2:
+	case TQUIC_CC_BBR2:
 		/* BBRv2 uses ECN to reduce inflight */
 		if (cc->bbr_bw > 0 && cc->bbr_min_rtt < U64_MAX) {
 			u64 bdp = div64_u64(cc->bbr_bw * cc->bbr_min_rtt,
 					    USEC_PER_SEC);
 			cc->cwnd = (bdp * BBR2_INFLIGHT_LO_SCALE) >> BBR_SCALE;
-			cc->cwnd = max(cc->cwnd, (u64)QUIC_MIN_CWND);
+			cc->cwnd = max(cc->cwnd, (u64)TQUIC_MIN_CWND);
 		}
 		if (cc->bbr_mode == BBR_MODE_STARTUP)
 			cc->bbr_mode = BBR_MODE_DRAIN;
@@ -754,13 +831,13 @@ void quic_cc_on_congestion_event(struct quic_cc_state *cc)
 
 	cc->congestion_window = cc->cwnd;
 }
-EXPORT_SYMBOL_GPL(quic_cc_on_congestion_event);
+EXPORT_SYMBOL_GPL(tquic_cc_on_congestion_event);
 
 /*
  * Calculate pacing delay for sending the next packet
  * Returns delay in nanoseconds
  */
-u64 quic_cc_pacing_delay(struct quic_cc_state *cc, u32 bytes)
+u64 tquic_cc_pacing_delay(struct tquic_cc_state *cc, u32 bytes)
 {
 	u64 delay_ns;
 
@@ -771,14 +848,14 @@ u64 quic_cc_pacing_delay(struct quic_cc_state *cc, u32 bytes)
 	delay_ns = div64_u64((u64)bytes * NSEC_PER_SEC, cc->pacing_rate);
 
 	/* During slow start, pace more aggressively */
-	if (cc->in_slow_start && (cc->algo == QUIC_CC_RENO ||
-				  cc->algo == QUIC_CC_CUBIC)) {
+	if (cc->in_slow_start && (cc->algo == TQUIC_CC_RENO ||
+				  cc->algo == TQUIC_CC_CUBIC)) {
 		delay_ns = delay_ns / 2;
 	}
 
 	return delay_ns;
 }
-EXPORT_SYMBOL_GPL(quic_cc_pacing_delay);
+EXPORT_SYMBOL_GPL(tquic_cc_pacing_delay);
 
 /*
  * PRR: Calculate how many bytes can be sent during recovery
@@ -793,7 +870,7 @@ EXPORT_SYMBOL_GPL(quic_cc_pacing_delay);
  * This ensures sending is proportional to ACKs received, converging
  * smoothly to ssthresh by the end of recovery.
  */
-u64 quic_cc_prr_get_snd_cnt(struct quic_cc_state *cc)
+u64 tquic_cc_prr_get_snd_cnt(struct tquic_cc_state *cc)
 {
 	u64 snd_cnt;
 	u64 pipe;		/* Current bytes in flight */
@@ -804,7 +881,7 @@ u64 quic_cc_prr_get_snd_cnt(struct quic_cc_state *cc)
 		return U64_MAX;	/* No limit outside recovery */
 
 	/* BBR/BBRv2 don't use PRR */
-	if (cc->algo == QUIC_CC_BBR || cc->algo == QUIC_CC_BBR2)
+	if (cc->algo == TQUIC_CC_BBR || cc->algo == TQUIC_CC_BBR2)
 		return U64_MAX;
 
 	pipe = cc->bytes_in_flight;
@@ -814,7 +891,7 @@ u64 quic_cc_prr_get_snd_cnt(struct quic_cc_state *cc)
 	 * If recov_start_pipe is 0, we're in a degenerate state.
 	 */
 	if (cc->recov_start_pipe == 0)
-		return QUIC_MAX_PACKET_SIZE;
+		return TQUIC_MAX_PACKET_SIZE;
 
 	/*
 	 * RFC 6937 PRR-SSRB (Slow Start Reduction Bound):
@@ -843,7 +920,7 @@ u64 quic_cc_prr_get_snd_cnt(struct quic_cc_state *cc)
 		 * Allow at least 1 MSS when below ssthresh to ensure recovery
 		 * can make forward progress.
 		 */
-		snd_cnt = max_t(u64, snd_cnt, min(deficit, (u64)QUIC_MAX_PACKET_SIZE));
+		snd_cnt = max_t(u64, snd_cnt, min(deficit, (u64)TQUIC_MAX_PACKET_SIZE));
 	}
 
 	/*
@@ -851,29 +928,29 @@ u64 quic_cc_prr_get_snd_cnt(struct quic_cc_state *cc)
 	 * This is the "Reduction Bound" part of PRR-SSRB.
 	 */
 	if (snd_cnt == 0 && cc->prr_delivered > 0)
-		snd_cnt = QUIC_MAX_PACKET_SIZE;
+		snd_cnt = TQUIC_MAX_PACKET_SIZE;
 
 	return snd_cnt;
 }
-EXPORT_SYMBOL_GPL(quic_cc_prr_get_snd_cnt);
+EXPORT_SYMBOL_GPL(tquic_cc_prr_get_snd_cnt);
 
 /*
  * Check if congestion control allows sending
  * Returns true if the given number of bytes can be sent
  */
-bool quic_cc_can_send(struct quic_cc_state *cc, u32 bytes)
+bool tquic_cc_can_send(struct tquic_cc_state *cc, u32 bytes)
 {
 	/* Always allow at least one packet (for probes, PTO, etc.) */
-	if (bytes <= QUIC_MAX_PACKET_SIZE && cc->bytes_in_flight == 0)
+	if (bytes <= TQUIC_MAX_PACKET_SIZE && cc->bytes_in_flight == 0)
 		return true;
 
 	/*
 	 * PRR: During recovery, use PRR to limit sending
 	 * This provides smooth cwnd reduction per RFC 6937
 	 */
-	if (cc->in_recovery && (cc->algo == QUIC_CC_RENO ||
-				cc->algo == QUIC_CC_CUBIC)) {
-		u64 snd_cnt = quic_cc_prr_get_snd_cnt(cc);
+	if (cc->in_recovery && (cc->algo == TQUIC_CC_RENO ||
+				cc->algo == TQUIC_CC_CUBIC)) {
+		u64 snd_cnt = tquic_cc_prr_get_snd_cnt(cc);
 		return bytes <= snd_cnt;
 	}
 
@@ -882,7 +959,7 @@ bool quic_cc_can_send(struct quic_cc_state *cc, u32 bytes)
 		return true;
 
 	/* BBR modes may have different rules */
-	if (cc->algo == QUIC_CC_BBR || cc->algo == QUIC_CC_BBR2) {
+	if (cc->algo == TQUIC_CC_BBR || cc->algo == TQUIC_CC_BBR2) {
 		/* In PROBE_BW with high gain, allow slight overshoot */
 		if (cc->bbr_mode == BBR_MODE_PROBE_BW &&
 		    cc->bbr_cycle_index == 0) {
@@ -894,16 +971,16 @@ bool quic_cc_can_send(struct quic_cc_state *cc, u32 bytes)
 
 	return false;
 }
-EXPORT_SYMBOL_GPL(quic_cc_can_send);
+EXPORT_SYMBOL_GPL(tquic_cc_can_send);
 
 /*
  * Reset congestion state after persistent congestion
  * Per RFC 9002 Section 7.6.2
  */
-void quic_cc_on_persistent_congestion(struct quic_cc_state *cc)
+void tquic_cc_on_persistent_congestion(struct tquic_cc_state *cc)
 {
 	/* Reset to minimum window */
-	cc->cwnd = QUIC_MIN_CWND;
+	cc->cwnd = TQUIC_MIN_CWND;
 	cc->congestion_window = cc->cwnd;
 	cc->ssthresh = cc->cwnd;
 	cc->in_slow_start = 1;
@@ -917,14 +994,14 @@ void quic_cc_on_persistent_congestion(struct quic_cc_state *cc)
 
 	/* Reset algorithm-specific state */
 	switch (cc->algo) {
-	case QUIC_CC_CUBIC:
+	case TQUIC_CC_CUBIC:
 		cc->cubic_epoch_start = 0;
 		cc->cubic_origin_point = 0;
 		cc->cubic_k = 0;
 		break;
 
-	case QUIC_CC_BBR:
-	case QUIC_CC_BBR2:
+	case TQUIC_CC_BBR:
+	case TQUIC_CC_BBR2:
 		cc->bbr_mode = BBR_MODE_STARTUP;
 		cc->bbr_cycle_index = 0;
 		cc->bbr_full_bw = 0;
@@ -938,15 +1015,15 @@ void quic_cc_on_persistent_congestion(struct quic_cc_state *cc)
 
 	/* Reset pacing to initial rate */
 	cc->pacing_rate = div64_u64(cc->cwnd * USEC_PER_SEC,
-				    QUIC_INITIAL_RTT_US);
+				    TQUIC_INITIAL_RTT_US);
 }
-EXPORT_SYMBOL_GPL(quic_cc_on_persistent_congestion);
+EXPORT_SYMBOL_GPL(tquic_cc_on_persistent_congestion);
 
 /*
  * Handle PTO (probe timeout) expiration
  * Per RFC 9002 Section 6.2
  */
-void quic_cc_on_pto(struct quic_cc_state *cc)
+void tquic_cc_on_pto(struct tquic_cc_state *cc)
 {
 	cc->pto_count++;
 
@@ -956,12 +1033,12 @@ void quic_cc_on_pto(struct quic_cc_state *cc)
 	 * The probe packets are sent even if it exceeds cwnd
 	 */
 }
-EXPORT_SYMBOL_GPL(quic_cc_on_pto);
+EXPORT_SYMBOL_GPL(tquic_cc_on_pto);
 
 /*
  * Get current congestion control statistics
  */
-void quic_cc_get_info(struct quic_cc_state *cc, struct quic_stats *stats)
+void tquic_cc_get_info(struct tquic_cc_state *cc, struct tquic_stats *stats)
 {
 	stats->cwnd = cc->cwnd;
 	stats->bytes_in_flight = cc->bytes_in_flight;
@@ -974,40 +1051,40 @@ void quic_cc_get_info(struct quic_cc_state *cc, struct quic_stats *stats)
 	else
 		stats->congestion_state = 1;	/* Congestion avoidance */
 }
-EXPORT_SYMBOL_GPL(quic_cc_get_info);
+EXPORT_SYMBOL_GPL(tquic_cc_get_info);
 
 /*
  * Set application limited state
  * Called when application isn't providing data fast enough
  */
-void quic_cc_set_app_limited(struct quic_cc_state *cc, bool limited)
+void tquic_cc_set_app_limited(struct tquic_cc_state *cc, bool limited)
 {
 	cc->app_limited = limited ? 1 : 0;
 }
-EXPORT_SYMBOL_GPL(quic_cc_set_app_limited);
+EXPORT_SYMBOL_GPL(tquic_cc_set_app_limited);
 
 /*
  * Check if connection is in slow start
  */
-bool quic_cc_in_slow_start(struct quic_cc_state *cc)
+bool tquic_cc_in_slow_start(struct tquic_cc_state *cc)
 {
 	return cc->in_slow_start;
 }
-EXPORT_SYMBOL_GPL(quic_cc_in_slow_start);
+EXPORT_SYMBOL_GPL(tquic_cc_in_slow_start);
 
 /*
  * Check if connection is in recovery
  */
-bool quic_cc_in_recovery(struct quic_cc_state *cc)
+bool tquic_cc_in_recovery(struct tquic_cc_state *cc)
 {
 	return cc->in_recovery;
 }
-EXPORT_SYMBOL_GPL(quic_cc_in_recovery);
+EXPORT_SYMBOL_GPL(tquic_cc_in_recovery);
 
 /*
  * Exit recovery state manually (e.g., after undo)
  */
-void quic_cc_exit_recovery(struct quic_cc_state *cc)
+void tquic_cc_exit_recovery(struct tquic_cc_state *cc)
 {
 	if (!cc->in_recovery)
 		return;
@@ -1024,75 +1101,75 @@ void quic_cc_exit_recovery(struct quic_cc_state *cc)
 	 * PRR has gradually reduced the effective sending rate,
 	 * now make cwnd match the target.
 	 */
-	if (cc->algo == QUIC_CC_RENO || cc->algo == QUIC_CC_CUBIC) {
+	if (cc->algo == TQUIC_CC_RENO || cc->algo == TQUIC_CC_CUBIC) {
 		cc->cwnd = cc->ssthresh;
 		cc->congestion_window = cc->cwnd;
 	}
 
 	/* For CUBIC, reset epoch to allow proper growth */
-	if (cc->algo == QUIC_CC_CUBIC) {
+	if (cc->algo == TQUIC_CC_CUBIC) {
 		cc->cubic_epoch_start = 0;
 	}
 }
-EXPORT_SYMBOL_GPL(quic_cc_exit_recovery);
+EXPORT_SYMBOL_GPL(tquic_cc_exit_recovery);
 
 /*
  * Get the current congestion window in bytes
  */
-u64 quic_cc_get_cwnd(struct quic_cc_state *cc)
+u64 tquic_cc_get_cwnd(struct tquic_cc_state *cc)
 {
 	return cc->cwnd;
 }
-EXPORT_SYMBOL_GPL(quic_cc_get_cwnd);
+EXPORT_SYMBOL_GPL(tquic_cc_get_cwnd);
 
 /*
  * Get the current pacing rate in bytes per second
  */
-u64 quic_cc_get_pacing_rate(struct quic_cc_state *cc)
+u64 tquic_cc_get_pacing_rate(struct tquic_cc_state *cc)
 {
 	return cc->pacing_rate;
 }
-EXPORT_SYMBOL_GPL(quic_cc_get_pacing_rate);
+EXPORT_SYMBOL_GPL(tquic_cc_get_pacing_rate);
 
 /*
  * Get the slow start threshold
  */
-u64 quic_cc_get_ssthresh(struct quic_cc_state *cc)
+u64 tquic_cc_get_ssthresh(struct tquic_cc_state *cc)
 {
 	return cc->ssthresh;
 }
-EXPORT_SYMBOL_GPL(quic_cc_get_ssthresh);
+EXPORT_SYMBOL_GPL(tquic_cc_get_ssthresh);
 
 /*
  * Get the current bytes in flight
  */
-u64 quic_cc_get_bytes_in_flight(struct quic_cc_state *cc)
+u64 tquic_cc_get_bytes_in_flight(struct tquic_cc_state *cc)
 {
 	return cc->bytes_in_flight;
 }
-EXPORT_SYMBOL_GPL(quic_cc_get_bytes_in_flight);
+EXPORT_SYMBOL_GPL(tquic_cc_get_bytes_in_flight);
 
 /*
  * Manually set the congestion window (for testing or special cases)
  */
-void quic_cc_set_cwnd(struct quic_cc_state *cc, u64 cwnd)
+void tquic_cc_set_cwnd(struct tquic_cc_state *cc, u64 cwnd)
 {
-	cc->cwnd = max(cwnd, (u64)QUIC_MIN_CWND);
+	cc->cwnd = max(cwnd, (u64)TQUIC_MIN_CWND);
 	cc->congestion_window = cc->cwnd;
 }
-EXPORT_SYMBOL_GPL(quic_cc_set_cwnd);
+EXPORT_SYMBOL_GPL(tquic_cc_set_cwnd);
 
 /*
  * Change the congestion control algorithm
  */
-void quic_cc_set_algo(struct quic_cc_state *cc, enum quic_cc_algo algo)
+void tquic_cc_set_algo(struct tquic_cc_state *cc, enum tquic_cc_algo algo)
 {
 	u64 saved_cwnd = cc->cwnd;
 	u64 saved_ssthresh = cc->ssthresh;
 	u64 saved_bytes_in_flight = cc->bytes_in_flight;
 
 	/* Re-initialize with new algorithm */
-	quic_cc_init(cc, algo);
+	tquic_cc_init(cc, algo);
 
 	/* Restore window state */
 	cc->cwnd = saved_cwnd;
@@ -1100,28 +1177,28 @@ void quic_cc_set_algo(struct quic_cc_state *cc, enum quic_cc_algo algo)
 	cc->bytes_in_flight = saved_bytes_in_flight;
 	cc->congestion_window = cc->cwnd;
 }
-EXPORT_SYMBOL_GPL(quic_cc_set_algo);
+EXPORT_SYMBOL_GPL(tquic_cc_set_algo);
 
 /*
  * Debug function to get algorithm name
  */
-const char *quic_cc_algo_name(enum quic_cc_algo algo)
+const char *tquic_cc_algo_name(enum tquic_cc_algo algo)
 {
 	switch (algo) {
-	case QUIC_CC_RENO:
+	case TQUIC_CC_RENO:
 		return "reno";
-	case QUIC_CC_CUBIC:
+	case TQUIC_CC_CUBIC:
 		return "cubic";
-	case QUIC_CC_BBR:
+	case TQUIC_CC_BBR:
 		return "bbr";
-	case QUIC_CC_BBR2:
+	case TQUIC_CC_BBR2:
 		return "bbr2";
 	default:
 		return "unknown";
 	}
 }
-EXPORT_SYMBOL_GPL(quic_cc_algo_name);
+EXPORT_SYMBOL_GPL(tquic_cc_algo_name);
 
 MODULE_AUTHOR("Linux QUIC Authors");
-MODULE_DESCRIPTION("QUIC Congestion Control Implementation");
+MODULE_DESCRIPTION("TQUIC Congestion Control Implementation");
 MODULE_LICENSE("GPL");

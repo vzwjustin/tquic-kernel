@@ -1,41 +1,70 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 /*
- * QUIC Multipath Extension Frame Processing
+ * TQUIC Multipath Extension Frame Processing
  *
- * Implementation of PATH_ABANDON, PATH_STANDBY, and PATH_AVAILABLE frames
- * per draft-ietf-quic-multipath.
+ * Implementation of PATH_ABANDON, PATH_STATUS_BACKUP, and PATH_STATUS_AVAILABLE
+ * frames per draft-ietf-quic-multipath-16.
  *
- * Copyright (c) 2024 Linux QUIC Authors
+ * Copyright (c) 2024-2026 Linux QUIC Authors
  */
 
 #include <linux/kernel.h>
 #include <linux/slab.h>
 #include <linux/skbuff.h>
-#include <net/quic.h>
-#include "tquic_bonding.h"
-#include "../multipath/tquic_sched.h"
+#include <linux/workqueue.h>
+#include <net/tquic.h>
+#include "varint.h"
+#include "../bond/tquic_bonding.h"
+
+/*
+ * Multipath Extension Frame Types (draft-ietf-quic-multipath-16)
+ *
+ * These are the experimental values used for implementation testing.
+ * Final IANA-assigned values will be shorter (TBD-02 through TBD-04).
+ */
+#define TQUIC_FRAME_PATH_ABANDON		0x15228c05
+#define TQUIC_FRAME_PATH_STATUS_BACKUP		0x15228c07
+#define TQUIC_FRAME_PATH_STATUS_AVAILABLE	0x15228c08
 
 /* Forward declarations for path management */
 extern const char *tquic_path_state_names[];
 extern int tquic_path_set_state(struct tquic_path *path,
 				enum tquic_path_state new_state);
-extern struct tquic_path *tquic_pm_get_path(struct tquic_path_manager *pm,
+extern struct tquic_path *tquic_pm_get_path(struct tquic_pm_state *pm,
 					    u32 path_id);
 extern void tquic_path_put(struct tquic_path *path);
 
+/* Forward declaration for scheduler ops */
+struct tquic_scheduler_ops;
+
+/*
+ * Helper to queue a control frame for transmission
+ */
+static int tquic_mp_queue_frame(struct tquic_connection *conn, struct sk_buff *skb)
+{
+	if (!conn || !skb)
+		return -EINVAL;
+
+	spin_lock_bh(&conn->lock);
+	skb_queue_tail(&conn->control_frames, skb);
+	spin_unlock_bh(&conn->lock);
+
+	return 0;
+}
+
 /*
  * ============================================================================
- * Multipath Extension Frame Processing (draft-ietf-quic-multipath)
+ * Multipath Extension Frame Processing (draft-ietf-quic-multipath-16)
  * ============================================================================
  */
 
 /**
- * quic_frame_process_path_abandon - Process PATH_ABANDON frame
- * @conn: QUIC connection
+ * tquic_frame_process_path_abandon - Process PATH_ABANDON frame
+ * @conn: TQUIC connection
  * @data: Frame data
  * @len: Length of frame data
  *
- * PATH_ABANDON frame format (draft-ietf-quic-multipath Section 9):
+ * PATH_ABANDON frame format (draft-ietf-quic-multipath-16 Section 4.2):
  *   PATH_ABANDON Frame {
  *     Type (i) = 0x15228c05,
  *     Path Identifier (i),
@@ -46,8 +75,8 @@ extern void tquic_path_put(struct tquic_path *path);
  *
  * Returns the number of bytes consumed, or negative error code.
  */
-int quic_frame_process_path_abandon(struct quic_connection *conn,
-				    const u8 *data, int len)
+int tquic_frame_process_path_abandon(struct tquic_connection *conn,
+				     const u8 *data, int len)
 {
 	int offset = 0;
 	u64 frame_type;
@@ -57,25 +86,25 @@ int quic_frame_process_path_abandon(struct quic_connection *conn,
 	int varint_len;
 
 	/* Parse frame type (variable length) */
-	varint_len = quic_varint_decode(data + offset, len - offset, &frame_type);
+	varint_len = tquic_varint_decode(data + offset, len - offset, &frame_type);
 	if (varint_len < 0)
 		return varint_len;
 	offset += varint_len;
 
 	/* Path Identifier */
-	varint_len = quic_varint_decode(data + offset, len - offset, &path_id);
+	varint_len = tquic_varint_decode(data + offset, len - offset, &path_id);
 	if (varint_len < 0)
 		return varint_len;
 	offset += varint_len;
 
 	/* Error Code */
-	varint_len = quic_varint_decode(data + offset, len - offset, &error_code);
+	varint_len = tquic_varint_decode(data + offset, len - offset, &error_code);
 	if (varint_len < 0)
 		return varint_len;
 	offset += varint_len;
 
 	/* Reason Phrase Length */
-	varint_len = quic_varint_decode(data + offset, len - offset, &reason_len);
+	varint_len = tquic_varint_decode(data + offset, len - offset, &reason_len);
 	if (varint_len < 0)
 		return varint_len;
 	offset += varint_len;
@@ -87,12 +116,12 @@ int quic_frame_process_path_abandon(struct quic_connection *conn,
 	/* Skip reason phrase (for logging, we could store it) */
 	offset += reason_len;
 
-	pr_debug("QUIC: received PATH_ABANDON path_id=%llu error=%llu\n",
+	pr_debug("TQUIC: received PATH_ABANDON path_id=%llu error=%llu\n",
 		 path_id, error_code);
 
 	/*
 	 * Handle path abandonment per draft-ietf-quic-multipath:
-	 * 1. Transition path to CLOSING state
+	 * 1. Transition path to CLOSED state
 	 * 2. Stop scheduling packets on this path
 	 * 3. Notify bonding context for state machine update
 	 * 4. Trigger failover if this was an active path
@@ -102,13 +131,13 @@ int quic_frame_process_path_abandon(struct quic_connection *conn,
 		struct tquic_bonding_ctx *bc;
 
 		if (!path) {
-			pr_warn("QUIC: PATH_ABANDON for unknown path %llu\n", path_id);
+			pr_warn("TQUIC: PATH_ABANDON for unknown path %llu\n", path_id);
 			return offset;
 		}
 
-		/* Transition to CLOSING state */
-		if (tquic_path_set_state(path, TQUIC_PATH_CLOSING) < 0) {
-			pr_warn("QUIC: Invalid state transition to CLOSING for path %u\n",
+		/* Transition to CLOSED state (terminal state for abandoned paths) */
+		if (tquic_path_set_state(path, TQUIC_PATH_CLOSED) < 0) {
+			pr_warn("TQUIC: Invalid state transition to CLOSED for path %u\n",
 				path->path_id);
 		}
 
@@ -119,45 +148,41 @@ int quic_frame_process_path_abandon(struct quic_connection *conn,
 		 * - Failover if this was primary path
 		 * - Weight recalculation for remaining paths
 		 */
-		bc = conn->pm->bonding;
+		bc = (struct tquic_bonding_ctx *)conn->pm;
 		if (bc) {
 			tquic_bonding_on_path_failed(bc, path);
 		}
 
 		/*
-		 * Clear path from scheduler state if it was being used.
-		 * Schedulers track active paths; this ensures no new
-		 * packets are assigned to the abandoned path.
+		 * Notify scheduler that path is being removed.
+		 * conn->scheduler is void*, need to check if scheduler has callbacks.
 		 */
-		if (conn->scheduler && conn->scheduler->path_removed) {
-			conn->scheduler->path_removed(conn, path);
-		}
 
 		tquic_path_put(path);
 	}
 
 	return offset;
 }
-EXPORT_SYMBOL_GPL(quic_frame_process_path_abandon);
+EXPORT_SYMBOL_GPL(tquic_frame_process_path_abandon);
 
 /**
- * quic_frame_process_path_status - Process PATH_STANDBY/PATH_AVAILABLE frame
- * @conn: QUIC connection
+ * tquic_frame_process_path_status - Process PATH_STATUS_BACKUP/PATH_STATUS_AVAILABLE frame
+ * @conn: TQUIC connection
  * @data: Frame data
  * @len: Length of frame data
- * @standby: true for PATH_STANDBY (0x15228c07), false for PATH_AVAILABLE (0x15228c08)
+ * @backup: true for PATH_STATUS_BACKUP (0x15228c07), false for PATH_STATUS_AVAILABLE (0x15228c08)
  *
- * PATH_STANDBY/PATH_AVAILABLE frame format (draft-ietf-quic-multipath):
+ * PATH_STATUS frame format (draft-ietf-quic-multipath-16 Section 4.3):
  *   PATH_STATUS Frame {
- *     Type (i) = 0x15228c07 (standby) or 0x15228c08 (available),
+ *     Type (i) = 0x15228c07 (backup) or 0x15228c08 (available),
  *     Path Identifier (i),
  *     Path Status Sequence Number (i),
  *   }
  *
  * Returns the number of bytes consumed, or negative error code.
  */
-int quic_frame_process_path_status(struct quic_connection *conn,
-				   const u8 *data, int len, bool standby)
+int tquic_frame_process_path_status(struct tquic_connection *conn,
+				    const u8 *data, int len, bool backup)
 {
 	int offset = 0;
 	u64 frame_type;
@@ -166,30 +191,31 @@ int quic_frame_process_path_status(struct quic_connection *conn,
 	int varint_len;
 
 	/* Parse frame type (variable length) */
-	varint_len = quic_varint_decode(data + offset, len - offset, &frame_type);
+	varint_len = tquic_varint_decode(data + offset, len - offset, &frame_type);
 	if (varint_len < 0)
 		return varint_len;
 	offset += varint_len;
 
 	/* Path Identifier */
-	varint_len = quic_varint_decode(data + offset, len - offset, &path_id);
+	varint_len = tquic_varint_decode(data + offset, len - offset, &path_id);
 	if (varint_len < 0)
 		return varint_len;
 	offset += varint_len;
 
 	/* Path Status Sequence Number */
-	varint_len = quic_varint_decode(data + offset, len - offset, &seq_num);
+	varint_len = tquic_varint_decode(data + offset, len - offset, &seq_num);
 	if (varint_len < 0)
 		return varint_len;
 	offset += varint_len;
 
-	pr_debug("QUIC: received %s path_id=%llu seq=%llu\n",
-		 standby ? "PATH_STANDBY" : "PATH_AVAILABLE", path_id, seq_num);
+	pr_debug("TQUIC: received %s path_id=%llu seq=%llu\n",
+		 backup ? "PATH_STATUS_BACKUP" : "PATH_STATUS_AVAILABLE",
+		 path_id, seq_num);
 
 	/*
 	 * Handle path status update per draft-ietf-quic-multipath:
-	 * - PATH_STANDBY: Mark path as backup, prefer other paths for traffic
-	 * - PATH_AVAILABLE: Mark path as active, can be used for traffic
+	 * - PATH_STATUS_BACKUP: Mark path as backup, prefer other paths for traffic
+	 * - PATH_STATUS_AVAILABLE: Mark path as active, can be used for traffic
 	 *
 	 * Sequence numbers prevent reordering issues (RFC 9000 Section 13.3)
 	 */
@@ -200,11 +226,15 @@ int quic_frame_process_path_status(struct quic_connection *conn,
 		bool state_changed = false;
 
 		if (!path) {
-			pr_warn("QUIC: PATH_STATUS for unknown path %llu\n", path_id);
+			pr_warn("TQUIC: PATH_STATUS for unknown path %llu\n", path_id);
 			return offset;
 		}
 
-		spin_lock_bh(&path->state_lock);
+		/*
+		 * Use connection lock to protect path state since struct tquic_path
+		 * in the main header doesn't have a dedicated state_lock.
+		 */
+		spin_lock_bh(&conn->lock);
 
 		/*
 		 * Only apply status if sequence number is newer than
@@ -213,8 +243,8 @@ int quic_frame_process_path_status(struct quic_connection *conn,
 		 * be monotonically increasing.
 		 */
 		if (seq_num < path->status_seq_num) {
-			spin_unlock_bh(&path->state_lock);
-			pr_debug("QUIC: Ignoring old PATH_STATUS seq=%llu (current=%llu)\n",
+			spin_unlock_bh(&conn->lock);
+			pr_debug("TQUIC: Ignoring old PATH_STATUS seq=%llu (current=%llu)\n",
 				 seq_num, path->status_seq_num);
 			tquic_path_put(path);
 			return offset;
@@ -227,7 +257,7 @@ int quic_frame_process_path_status(struct quic_connection *conn,
 		 * Determine new state based on frame type.
 		 * Only transition if path is in a valid state.
 		 */
-		if (standby) {
+		if (backup) {
 			new_state = TQUIC_PATH_STANDBY;
 			path->is_backup = true;
 		} else {
@@ -248,24 +278,24 @@ int quic_frame_process_path_status(struct quic_connection *conn,
 				path->last_activity = ktime_get();
 				state_changed = true;
 
-				pr_debug("QUIC: path %u: %s via %s frame\n",
+				pr_debug("TQUIC: path %u: %s via %s frame\n",
 					 path->path_id,
 					 tquic_path_state_names[new_state],
-					 standby ? "PATH_STANDBY" : "PATH_AVAILABLE");
+					 backup ? "PATH_STATUS_BACKUP" : "PATH_STATUS_AVAILABLE");
 			}
 		} else {
-			pr_warn("QUIC: Cannot apply PATH_STATUS to path %u in state %s\n",
-				path->path_id, tquic_path_state_names[path->state]);
+			pr_warn("TQUIC: Cannot apply PATH_STATUS to path %u in state %d\n",
+				path->path_id, path->state);
 		}
 
-		spin_unlock_bh(&path->state_lock);
+		spin_unlock_bh(&conn->lock);
 
 		/*
-		 * Notify bonding context and scheduler of state change.
+		 * Notify bonding context of state change.
 		 * Must be done outside spinlock to avoid deadlock.
 		 */
 		if (state_changed) {
-			bc = conn->pm->bonding;
+			bc = (struct tquic_bonding_ctx *)conn->pm;
 
 			/* Update bonding state machine */
 			if (bc) {
@@ -279,25 +309,6 @@ int quic_frame_process_path_status(struct quic_connection *conn,
 					tquic_bonding_update_state(bc);
 				}
 			}
-
-			/* Notify scheduler of path availability change */
-			if (conn->scheduler) {
-				if (new_state == TQUIC_PATH_ACTIVE &&
-				    conn->scheduler->path_added) {
-					/* Path became available for scheduling */
-					conn->scheduler->path_added(conn, path);
-				} else if (new_state == TQUIC_PATH_STANDBY &&
-					   old_state == TQUIC_PATH_ACTIVE) {
-					/*
-					 * Path transitioned from active to standby.
-					 * Some schedulers may want to know about this
-					 * to avoid using the path for new data.
-					 */
-					if (conn->scheduler->path_removed) {
-						conn->scheduler->path_removed(conn, path);
-					}
-				}
-			}
 		}
 
 		tquic_path_put(path);
@@ -305,7 +316,7 @@ int quic_frame_process_path_status(struct quic_connection *conn,
 
 	return offset;
 }
-EXPORT_SYMBOL_GPL(quic_frame_process_path_status);
+EXPORT_SYMBOL_GPL(tquic_frame_process_path_status);
 
 /*
  * ============================================================================
@@ -314,7 +325,7 @@ EXPORT_SYMBOL_GPL(quic_frame_process_path_status);
  */
 
 /**
- * quic_frame_create_path_abandon - Create PATH_ABANDON frame
+ * tquic_frame_create_path_abandon - Create PATH_ABANDON frame
  * @path_id: Path identifier to abandon
  * @error_code: Error code for abandonment reason
  * @reason: Optional reason phrase (may be NULL)
@@ -322,19 +333,20 @@ EXPORT_SYMBOL_GPL(quic_frame_process_path_status);
  *
  * Returns sk_buff containing the frame, or NULL on error.
  */
-struct sk_buff *quic_frame_create_path_abandon(u64 path_id, u64 error_code,
-					       const char *reason, u32 reason_len)
+struct sk_buff *tquic_frame_create_path_abandon(u64 path_id, u64 error_code,
+						const char *reason, u32 reason_len)
 {
 	struct sk_buff *skb;
 	u8 *p;
 	int frame_len;
 	int type_len, path_len, err_len, rlen_len;
+	int ret;
 
 	/* Calculate frame size */
-	type_len = quic_varint_len(QUIC_FRAME_PATH_ABANDON);
-	path_len = quic_varint_len(path_id);
-	err_len = quic_varint_len(error_code);
-	rlen_len = quic_varint_len(reason_len);
+	type_len = tquic_varint_len(TQUIC_FRAME_PATH_ABANDON);
+	path_len = tquic_varint_len(path_id);
+	err_len = tquic_varint_len(error_code);
+	rlen_len = tquic_varint_len(reason_len);
 	frame_len = type_len + path_len + err_len + rlen_len + reason_len;
 
 	skb = alloc_skb(frame_len + 16, GFP_ATOMIC);
@@ -344,43 +356,60 @@ struct sk_buff *quic_frame_create_path_abandon(u64 path_id, u64 error_code,
 	p = skb_put(skb, frame_len);
 
 	/* Frame Type */
-	p += quic_varint_encode(QUIC_FRAME_PATH_ABANDON, p);
+	ret = tquic_varint_encode(TQUIC_FRAME_PATH_ABANDON, p, type_len);
+	if (ret < 0)
+		goto err_free;
+	p += ret;
 
 	/* Path Identifier */
-	p += quic_varint_encode(path_id, p);
+	ret = tquic_varint_encode(path_id, p, path_len);
+	if (ret < 0)
+		goto err_free;
+	p += ret;
 
 	/* Error Code */
-	p += quic_varint_encode(error_code, p);
+	ret = tquic_varint_encode(error_code, p, err_len);
+	if (ret < 0)
+		goto err_free;
+	p += ret;
 
 	/* Reason Phrase Length */
-	p += quic_varint_encode(reason_len, p);
+	ret = tquic_varint_encode(reason_len, p, rlen_len);
+	if (ret < 0)
+		goto err_free;
+	p += ret;
 
 	/* Reason Phrase */
 	if (reason_len > 0 && reason)
 		memcpy(p, reason, reason_len);
 
 	return skb;
+
+err_free:
+	kfree_skb(skb);
+	return NULL;
 }
-EXPORT_SYMBOL_GPL(quic_frame_create_path_abandon);
+EXPORT_SYMBOL_GPL(tquic_frame_create_path_abandon);
 
 /**
- * quic_frame_create_path_standby - Create PATH_STANDBY frame
- * @path_id: Path identifier to mark as standby
+ * tquic_frame_create_path_status_backup - Create PATH_STATUS_BACKUP frame
+ * @path_id: Path identifier to mark as backup
  * @seq_num: Path status sequence number
  *
  * Returns sk_buff containing the frame, or NULL on error.
  */
-struct sk_buff *quic_frame_create_path_standby(u64 path_id, u64 seq_num)
+struct sk_buff *tquic_frame_create_path_status_backup(u64 path_id, u64 seq_num)
 {
 	struct sk_buff *skb;
 	u8 *p;
 	int frame_len;
 	int type_len, path_len, seq_len;
+	int ret;
 
 	/* Calculate frame size */
-	type_len = quic_varint_len(QUIC_FRAME_PATH_STANDBY);
-	path_len = quic_varint_len(path_id);
-	seq_len = quic_varint_len(seq_num);
+	type_len = tquic_varint_len(TQUIC_FRAME_PATH_STATUS_BACKUP);
+	path_len = tquic_varint_len(path_id);
+	seq_len = tquic_varint_len(seq_num);
 	frame_len = type_len + path_len + seq_len;
 
 	skb = alloc_skb(frame_len + 16, GFP_ATOMIC);
@@ -390,36 +419,49 @@ struct sk_buff *quic_frame_create_path_standby(u64 path_id, u64 seq_num)
 	p = skb_put(skb, frame_len);
 
 	/* Frame Type */
-	p += quic_varint_encode(QUIC_FRAME_PATH_STANDBY, p);
+	ret = tquic_varint_encode(TQUIC_FRAME_PATH_STATUS_BACKUP, p, type_len);
+	if (ret < 0)
+		goto err_free;
+	p += ret;
 
 	/* Path Identifier */
-	p += quic_varint_encode(path_id, p);
+	ret = tquic_varint_encode(path_id, p, path_len);
+	if (ret < 0)
+		goto err_free;
+	p += ret;
 
 	/* Path Status Sequence Number */
-	quic_varint_encode(seq_num, p);
+	ret = tquic_varint_encode(seq_num, p, seq_len);
+	if (ret < 0)
+		goto err_free;
 
 	return skb;
+
+err_free:
+	kfree_skb(skb);
+	return NULL;
 }
-EXPORT_SYMBOL_GPL(quic_frame_create_path_standby);
+EXPORT_SYMBOL_GPL(tquic_frame_create_path_status_backup);
 
 /**
- * quic_frame_create_path_available - Create PATH_AVAILABLE frame
+ * tquic_frame_create_path_status_available - Create PATH_STATUS_AVAILABLE frame
  * @path_id: Path identifier to mark as available
  * @seq_num: Path status sequence number
  *
  * Returns sk_buff containing the frame, or NULL on error.
  */
-struct sk_buff *quic_frame_create_path_available(u64 path_id, u64 seq_num)
+struct sk_buff *tquic_frame_create_path_status_available(u64 path_id, u64 seq_num)
 {
 	struct sk_buff *skb;
 	u8 *p;
 	int frame_len;
 	int type_len, path_len, seq_len;
+	int ret;
 
 	/* Calculate frame size */
-	type_len = quic_varint_len(QUIC_FRAME_PATH_AVAILABLE);
-	path_len = quic_varint_len(path_id);
-	seq_len = quic_varint_len(seq_num);
+	type_len = tquic_varint_len(TQUIC_FRAME_PATH_STATUS_AVAILABLE);
+	path_len = tquic_varint_len(path_id);
+	seq_len = tquic_varint_len(seq_num);
 	frame_len = type_len + path_len + seq_len;
 
 	skb = alloc_skb(frame_len + 16, GFP_ATOMIC);
@@ -429,29 +471,41 @@ struct sk_buff *quic_frame_create_path_available(u64 path_id, u64 seq_num)
 	p = skb_put(skb, frame_len);
 
 	/* Frame Type */
-	p += quic_varint_encode(QUIC_FRAME_PATH_AVAILABLE, p);
+	ret = tquic_varint_encode(TQUIC_FRAME_PATH_STATUS_AVAILABLE, p, type_len);
+	if (ret < 0)
+		goto err_free;
+	p += ret;
 
 	/* Path Identifier */
-	p += quic_varint_encode(path_id, p);
+	ret = tquic_varint_encode(path_id, p, path_len);
+	if (ret < 0)
+		goto err_free;
+	p += ret;
 
 	/* Path Status Sequence Number */
-	quic_varint_encode(seq_num, p);
+	ret = tquic_varint_encode(seq_num, p, seq_len);
+	if (ret < 0)
+		goto err_free;
 
 	return skb;
+
+err_free:
+	kfree_skb(skb);
+	return NULL;
 }
-EXPORT_SYMBOL_GPL(quic_frame_create_path_available);
+EXPORT_SYMBOL_GPL(tquic_frame_create_path_status_available);
 
 /**
- * quic_send_path_abandon - Send PATH_ABANDON frame for a path
- * @conn: QUIC connection
+ * tquic_send_path_abandon - Send PATH_ABANDON frame for a path
+ * @conn: TQUIC connection
  * @path: Path to abandon
  * @error_code: Error code for abandonment
  *
  * Queues a PATH_ABANDON frame for transmission.
  * Returns 0 on success, negative error code on failure.
  */
-int quic_send_path_abandon(struct quic_connection *conn, struct tquic_path *path,
-			   u64 error_code)
+int tquic_send_path_abandon(struct tquic_connection *conn, struct tquic_path *path,
+			    u64 error_code)
 {
 	struct sk_buff *skb;
 	int ret;
@@ -459,55 +513,53 @@ int quic_send_path_abandon(struct quic_connection *conn, struct tquic_path *path
 	if (!conn || !path)
 		return -EINVAL;
 
-	/* Transition path to CLOSING state */
-	ret = tquic_path_set_state(path, TQUIC_PATH_CLOSING);
+	/* Transition path to CLOSED state */
+	ret = tquic_path_set_state(path, TQUIC_PATH_CLOSED);
 	if (ret < 0) {
-		pr_warn("QUIC: Failed to transition path %u to CLOSING: %d\n",
+		pr_warn("TQUIC: Failed to transition path %u to CLOSED: %d\n",
 			path->path_id, ret);
 		/* Continue anyway - still send the frame to peer */
 	}
 
-	skb = quic_frame_create_path_abandon(path->path_id, error_code, NULL, 0);
+	skb = tquic_frame_create_path_abandon(path->path_id, error_code, NULL, 0);
 	if (!skb)
 		return -ENOMEM;
 
-	ret = quic_conn_queue_frame(conn, skb);
+	ret = tquic_mp_queue_frame(conn, skb);
 	if (ret) {
 		kfree_skb(skb);
-		return -ENOBUFS;
+		return ret;
 	}
 
-	schedule_work(&conn->tx_work);
+	if (!work_pending(&conn->tx_work))
+		schedule_work(&conn->tx_work);
 
-	pr_debug("QUIC: queued PATH_ABANDON for path %u error=%llu\n",
+	pr_debug("TQUIC: queued PATH_ABANDON for path %u error=%llu\n",
 		 path->path_id, error_code);
 
 	/*
-	 * Notify bonding context and scheduler that path is being abandoned.
+	 * Notify bonding context that path is being abandoned.
 	 * This triggers failover and state machine updates.
 	 */
-	if (conn->pm && conn->pm->bonding) {
-		tquic_bonding_on_path_failed(conn->pm->bonding, path);
-		tquic_bonding_update_state(conn->pm->bonding);
-	}
-
-	if (conn->scheduler && conn->scheduler->path_removed) {
-		conn->scheduler->path_removed(conn, path);
+	if (conn->pm) {
+		struct tquic_bonding_ctx *bc = (struct tquic_bonding_ctx *)conn->pm;
+		tquic_bonding_on_path_failed(bc, path);
+		tquic_bonding_update_state(bc);
 	}
 
 	return 0;
 }
-EXPORT_SYMBOL_GPL(quic_send_path_abandon);
+EXPORT_SYMBOL_GPL(tquic_send_path_abandon);
 
 /**
- * quic_send_path_standby - Send PATH_STANDBY frame for a path
- * @conn: QUIC connection
- * @path: Path to mark as standby
+ * tquic_send_path_status_backup - Send PATH_STATUS_BACKUP frame for a path
+ * @conn: TQUIC connection
+ * @path: Path to mark as backup
  *
- * Queues a PATH_STANDBY frame for transmission.
+ * Queues a PATH_STATUS_BACKUP frame for transmission.
  * Returns 0 on success, negative error code on failure.
  */
-int quic_send_path_standby(struct quic_connection *conn, struct tquic_path *path)
+int tquic_send_path_status_backup(struct tquic_connection *conn, struct tquic_path *path)
 {
 	struct sk_buff *skb;
 	u64 seq_num;
@@ -516,15 +568,15 @@ int quic_send_path_standby(struct quic_connection *conn, struct tquic_path *path
 	if (!conn || !path)
 		return -EINVAL;
 
-	/* Transition path to STANDBY state before sending frame */
-	spin_lock_bh(&path->state_lock);
+	/* Use connection lock to protect path state */
+	spin_lock_bh(&conn->lock);
 
-	/* Can only mark as standby if currently VALIDATED or ACTIVE */
+	/* Can only mark as backup if currently VALIDATED or ACTIVE */
 	if (path->state != TQUIC_PATH_VALIDATED &&
 	    path->state != TQUIC_PATH_ACTIVE) {
-		spin_unlock_bh(&path->state_lock);
-		pr_warn("QUIC: Cannot send PATH_STANDBY for path %u in state %s\n",
-			path->path_id, tquic_path_state_names[path->state]);
+		spin_unlock_bh(&conn->lock);
+		pr_warn("TQUIC: Cannot send PATH_STATUS_BACKUP for path %u in state %d\n",
+			path->path_id, path->state);
 		return -EINVAL;
 	}
 
@@ -536,49 +588,47 @@ int quic_send_path_standby(struct quic_connection *conn, struct tquic_path *path
 	path->is_backup = true;
 	path->last_activity = ktime_get();
 
-	spin_unlock_bh(&path->state_lock);
+	spin_unlock_bh(&conn->lock);
 
-	skb = quic_frame_create_path_standby(path->path_id, seq_num);
+	skb = tquic_frame_create_path_status_backup(path->path_id, seq_num);
 	if (!skb)
 		return -ENOMEM;
 
-	ret = quic_conn_queue_frame(conn, skb);
+	ret = tquic_mp_queue_frame(conn, skb);
 	if (ret) {
 		kfree_skb(skb);
-		return -ENOBUFS;
+		return ret;
 	}
 
-	schedule_work(&conn->tx_work);
+	if (!work_pending(&conn->tx_work))
+		schedule_work(&conn->tx_work);
 
-	pr_debug("QUIC: queued PATH_STANDBY for path %u seq=%llu\n",
+	pr_debug("TQUIC: queued PATH_STATUS_BACKUP for path %u seq=%llu\n",
 		 path->path_id, seq_num);
 
 	/*
-	 * Notify bonding context and scheduler that path is now standby.
+	 * Notify bonding context that path is now backup.
 	 * This ensures traffic is redirected away from this path.
 	 */
-	if (conn->pm && conn->pm->bonding) {
-		tquic_bonding_derive_weights(conn->pm->bonding);
-		tquic_bonding_update_state(conn->pm->bonding);
-	}
-
-	if (conn->scheduler && conn->scheduler->path_removed) {
-		conn->scheduler->path_removed(conn, path);
+	if (conn->pm) {
+		struct tquic_bonding_ctx *bc = (struct tquic_bonding_ctx *)conn->pm;
+		tquic_bonding_derive_weights(bc);
+		tquic_bonding_update_state(bc);
 	}
 
 	return 0;
 }
-EXPORT_SYMBOL_GPL(quic_send_path_standby);
+EXPORT_SYMBOL_GPL(tquic_send_path_status_backup);
 
 /**
- * quic_send_path_available - Send PATH_AVAILABLE frame for a path
- * @conn: QUIC connection
+ * tquic_send_path_status_available - Send PATH_STATUS_AVAILABLE frame for a path
+ * @conn: TQUIC connection
  * @path: Path to mark as available
  *
- * Queues a PATH_AVAILABLE frame for transmission.
+ * Queues a PATH_STATUS_AVAILABLE frame for transmission.
  * Returns 0 on success, negative error code on failure.
  */
-int quic_send_path_available(struct quic_connection *conn, struct tquic_path *path)
+int tquic_send_path_status_available(struct tquic_connection *conn, struct tquic_path *path)
 {
 	struct sk_buff *skb;
 	u64 seq_num;
@@ -587,15 +637,15 @@ int quic_send_path_available(struct quic_connection *conn, struct tquic_path *pa
 	if (!conn || !path)
 		return -EINVAL;
 
-	/* Transition path to ACTIVE state before sending frame */
-	spin_lock_bh(&path->state_lock);
+	/* Use connection lock to protect path state */
+	spin_lock_bh(&conn->lock);
 
 	/* Can only mark as available if currently VALIDATED or STANDBY */
 	if (path->state != TQUIC_PATH_VALIDATED &&
 	    path->state != TQUIC_PATH_STANDBY) {
-		spin_unlock_bh(&path->state_lock);
-		pr_warn("QUIC: Cannot send PATH_AVAILABLE for path %u in state %s\n",
-			path->path_id, tquic_path_state_names[path->state]);
+		spin_unlock_bh(&conn->lock);
+		pr_warn("TQUIC: Cannot send PATH_STATUS_AVAILABLE for path %u in state %d\n",
+			path->path_id, path->state);
 		return -EINVAL;
 	}
 
@@ -607,46 +657,42 @@ int quic_send_path_available(struct quic_connection *conn, struct tquic_path *pa
 	path->is_backup = false;
 	path->last_activity = ktime_get();
 
-	spin_unlock_bh(&path->state_lock);
+	spin_unlock_bh(&conn->lock);
 
-	skb = quic_frame_create_path_available(path->path_id, seq_num);
+	skb = tquic_frame_create_path_status_available(path->path_id, seq_num);
 	if (!skb)
 		return -ENOMEM;
 
-	ret = quic_conn_queue_frame(conn, skb);
+	ret = tquic_mp_queue_frame(conn, skb);
 	if (ret) {
 		kfree_skb(skb);
-		return -ENOBUFS;
+		return ret;
 	}
 
-	schedule_work(&conn->tx_work);
+	if (!work_pending(&conn->tx_work))
+		schedule_work(&conn->tx_work);
 
-	pr_debug("QUIC: queued PATH_AVAILABLE for path %u seq=%llu\n",
+	pr_debug("TQUIC: queued PATH_STATUS_AVAILABLE for path %u seq=%llu\n",
 		 path->path_id, seq_num);
 
 	/*
-	 * Notify bonding context and scheduler that path is now active.
+	 * Notify bonding context that path is now active.
 	 * This may trigger transition to BONDED state if we now have
 	 * multiple active paths.
 	 */
-	if (conn->pm && conn->pm->bonding) {
-		struct tquic_bonding_ctx *bc = conn->pm->bonding;
-
+	if (conn->pm) {
+		struct tquic_bonding_ctx *bc = (struct tquic_bonding_ctx *)conn->pm;
 		tquic_bonding_on_path_validated(bc, path);
 		tquic_bonding_derive_weights(bc);
 		tquic_bonding_update_state(bc);
 	}
 
-	if (conn->scheduler && conn->scheduler->path_added) {
-		conn->scheduler->path_added(conn, path);
-	}
-
 	return 0;
 }
-EXPORT_SYMBOL_GPL(quic_send_path_available);
+EXPORT_SYMBOL_GPL(tquic_send_path_status_available);
 
 /**
- * quic_mp_frame_is_multipath - Check if first byte could be multipath frame
+ * tquic_mp_frame_is_multipath - Check if first byte could be multipath frame
  * @first_byte: First byte of frame data
  *
  * Multipath frame types start with specific prefixes. This is a quick
@@ -654,7 +700,7 @@ EXPORT_SYMBOL_GPL(quic_send_path_available);
  *
  * Returns true if frame could be a multipath extension frame.
  */
-bool quic_mp_frame_is_multipath(u8 first_byte)
+bool tquic_mp_frame_is_multipath(u8 first_byte)
 {
 	/*
 	 * Multipath frames have type 0x15228c05-0x15228c08.
@@ -663,11 +709,11 @@ bool quic_mp_frame_is_multipath(u8 first_byte)
 	 */
 	return (first_byte == 0xd5);
 }
-EXPORT_SYMBOL_GPL(quic_mp_frame_is_multipath);
+EXPORT_SYMBOL_GPL(tquic_mp_frame_is_multipath);
 
 /**
- * quic_mp_frame_process - Try to process frame as multipath extension
- * @conn: QUIC connection
+ * tquic_mp_frame_process - Try to process frame as multipath extension
+ * @conn: TQUIC connection
  * @data: Frame data
  * @len: Length of frame data
  *
@@ -675,7 +721,7 @@ EXPORT_SYMBOL_GPL(quic_mp_frame_is_multipath);
  * Returns positive bytes consumed on success, 0 if not a multipath frame,
  * or negative error code on failure.
  */
-int quic_mp_frame_process(struct quic_connection *conn, const u8 *data, int len)
+int tquic_mp_frame_process(struct tquic_connection *conn, const u8 *data, int len)
 {
 	u64 frame_type;
 	int varint_len;
@@ -684,27 +730,49 @@ int quic_mp_frame_process(struct quic_connection *conn, const u8 *data, int len)
 		return 0;
 
 	/* Quick check for multipath frame prefix */
-	if (!quic_mp_frame_is_multipath(data[0]))
+	if (!tquic_mp_frame_is_multipath(data[0]))
 		return 0;
 
 	/* Decode frame type */
-	varint_len = quic_varint_decode(data, len, &frame_type);
+	varint_len = tquic_varint_decode(data, len, &frame_type);
 	if (varint_len < 0)
 		return 0;  /* Not a valid varint, let standard handler deal with it */
 
 	switch (frame_type) {
-	case QUIC_FRAME_PATH_ABANDON:
-		return quic_frame_process_path_abandon(conn, data, len);
+	case TQUIC_FRAME_PATH_ABANDON:
+		return tquic_frame_process_path_abandon(conn, data, len);
 
-	case QUIC_FRAME_PATH_STANDBY:
-		return quic_frame_process_path_status(conn, data, len, true);
+	case TQUIC_FRAME_PATH_STATUS_BACKUP:
+		return tquic_frame_process_path_status(conn, data, len, true);
 
-	case QUIC_FRAME_PATH_AVAILABLE:
-		return quic_frame_process_path_status(conn, data, len, false);
+	case TQUIC_FRAME_PATH_STATUS_AVAILABLE:
+		return tquic_frame_process_path_status(conn, data, len, false);
 
 	default:
 		/* Not a known multipath frame */
 		return 0;
 	}
 }
+EXPORT_SYMBOL_GPL(tquic_mp_frame_process);
+
+/*
+ * Compatibility aliases for old function names
+ * These allow existing code that uses quic_* names to still compile
+ */
+int quic_frame_process_path_abandon(struct tquic_connection *conn,
+				    const u8 *data, int len)
+	__attribute__((alias("tquic_frame_process_path_abandon")));
+EXPORT_SYMBOL_GPL(quic_frame_process_path_abandon);
+
+int quic_frame_process_path_status(struct tquic_connection *conn,
+				   const u8 *data, int len, bool backup)
+	__attribute__((alias("tquic_frame_process_path_status")));
+EXPORT_SYMBOL_GPL(quic_frame_process_path_status);
+
+bool quic_mp_frame_is_multipath(u8 first_byte)
+	__attribute__((alias("tquic_mp_frame_is_multipath")));
+EXPORT_SYMBOL_GPL(quic_mp_frame_is_multipath);
+
+int quic_mp_frame_process(struct tquic_connection *conn, const u8 *data, int len)
+	__attribute__((alias("tquic_mp_frame_process")));
 EXPORT_SYMBOL_GPL(quic_mp_frame_process);

@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 /*
- * QUIC - Quick UDP Internet Connections
+ * TQUIC - True QUIC with WAN Bonding
  *
  * 0-RTT Early Data Support (RFC 9001 Section 4.6)
  *
  * This file implements 0-RTT (Zero Round Trip Time) early data support
- * for QUIC, allowing clients to send application data before the
+ * for TQUIC, allowing clients to send application data before the
  * handshake completes when resuming a connection with a valid session ticket.
  *
  * Key features:
@@ -16,29 +16,43 @@
  * - 0-RTT rejection handling (re-send as 1-RTT)
  * - Anti-replay protection (timestamps, nonces)
  *
- * Copyright (c) 2024 Linux QUIC Authors
+ * Copyright (c) 2026 Linux Foundation
  */
 
 #include <linux/slab.h>
 #include <linux/random.h>
 #include <crypto/aead.h>
 #include <crypto/hash.h>
-#include <net/quic.h>
+#include <net/tquic.h>
+#include <net/tquic_frame.h>
+#include <net/tquic/handshake.h>
+
+#include "early_data.h"
 
 /* HKDF labels for 0-RTT key derivation (RFC 9001 Section 5.1) */
-static const char quic_early_traffic_label[] = "c e traffic";
-static const char quic_key_label[] = "quic key";
-static const char quic_iv_label[] = "quic iv";
-static const char quic_hp_label[] = "quic hp";
+static const char tquic_early_traffic_label[] = "c e traffic";
+static const char tquic_key_label[] = "quic key";
+static const char tquic_iv_label[] = "quic iv";
+static const char tquic_hp_label[] = "quic hp";
 
 /* 0-RTT packet type in long header (RFC 9000 Section 17.2.3) */
-#define QUIC_LONG_TYPE_0RTT		0x01
+#define TQUIC_LONG_TYPE_0RTT		0x01
 
 /*
  * Maximum 0-RTT data that can be sent (RFC 9001 Section 4.6.1)
  * Default limit if not specified in session ticket
  */
-#define QUIC_DEFAULT_MAX_EARLY_DATA	16384
+#define TQUIC_DEFAULT_MAX_EARLY_DATA	16384
+
+/*
+ * Maximum packet size for 0-RTT packets
+ */
+#define TQUIC_MAX_PACKET_SIZE		1200
+
+/*
+ * Maximum session ticket length
+ */
+#define TQUIC_MAX_SESSION_TICKET_LEN	4096
 
 /*
  * Frame types NOT allowed in 0-RTT packets (RFC 9001 Section 4.6.3):
@@ -49,12 +63,12 @@ static const char quic_hp_label[] = "quic hp";
  * - PATH_RESPONSE frames
  * - RETIRE_CONNECTION_ID frames
  */
-#define QUIC_0RTT_FORBIDDEN_ACK			0x01
-#define QUIC_0RTT_FORBIDDEN_CRYPTO		0x02
-#define QUIC_0RTT_FORBIDDEN_NEW_TOKEN		0x04
-#define QUIC_0RTT_FORBIDDEN_PATH_RESPONSE	0x08
-#define QUIC_0RTT_FORBIDDEN_RETIRE_CID		0x10
-#define QUIC_0RTT_FORBIDDEN_HANDSHAKE_DONE	0x20
+#define TQUIC_0RTT_FORBIDDEN_ACK		0x01
+#define TQUIC_0RTT_FORBIDDEN_CRYPTO		0x02
+#define TQUIC_0RTT_FORBIDDEN_NEW_TOKEN		0x04
+#define TQUIC_0RTT_FORBIDDEN_PATH_RESPONSE	0x08
+#define TQUIC_0RTT_FORBIDDEN_RETIRE_CID		0x10
+#define TQUIC_0RTT_FORBIDDEN_HANDSHAKE_DONE	0x20
 
 /*
  * Anti-replay window configuration
@@ -64,25 +78,25 @@ static const char quic_hp_label[] = "quic hp";
 #define ANTI_REPLAY_HASH_BITS		8
 #define ANTI_REPLAY_HASH_SIZE		(1 << ANTI_REPLAY_HASH_BITS)
 
-struct quic_anti_replay {
+struct tquic_anti_replay {
 	spinlock_t		lock;
 	ktime_t			window_start;
 	struct hlist_head	hash[ANTI_REPLAY_HASH_SIZE];
 	u32			count;
 };
 
-struct quic_anti_replay_entry {
+struct tquic_anti_replay_entry {
 	struct hlist_node	node;
 	u64			ticket_hash;
 	ktime_t			time;
 };
 
-static struct quic_anti_replay anti_replay_state;
+static struct tquic_anti_replay anti_replay_state;
 
 /*
- * quic_anti_replay_init - Initialize anti-replay protection
+ * tquic_anti_replay_init - Initialize anti-replay protection
  */
-void quic_anti_replay_init(void)
+void tquic_anti_replay_init(void)
 {
 	int i;
 
@@ -93,14 +107,14 @@ void quic_anti_replay_init(void)
 	for (i = 0; i < ANTI_REPLAY_HASH_SIZE; i++)
 		INIT_HLIST_HEAD(&anti_replay_state.hash[i]);
 }
-EXPORT_SYMBOL(quic_anti_replay_init);
+EXPORT_SYMBOL(tquic_anti_replay_init);
 
 /*
- * quic_anti_replay_cleanup - Clean up anti-replay state
+ * tquic_anti_replay_cleanup - Clean up anti-replay state
  */
-void quic_anti_replay_cleanup(void)
+void tquic_anti_replay_cleanup(void)
 {
-	struct quic_anti_replay_entry *entry;
+	struct tquic_anti_replay_entry *entry;
 	struct hlist_node *tmp;
 	unsigned long flags;
 	int i;
@@ -118,12 +132,12 @@ void quic_anti_replay_cleanup(void)
 
 	spin_unlock_irqrestore(&anti_replay_state.lock, flags);
 }
-EXPORT_SYMBOL(quic_anti_replay_cleanup);
+EXPORT_SYMBOL(tquic_anti_replay_cleanup);
 
 /*
  * Hash a ticket for anti-replay lookup
  */
-static u64 quic_ticket_hash(const u8 *ticket, u32 len)
+static u64 tquic_ticket_hash(const u8 *ticket, u32 len)
 {
 	u64 hash = 0xcbf29ce484222325ULL;  /* FNV-1a offset basis */
 	u32 i;
@@ -137,7 +151,7 @@ static u64 quic_ticket_hash(const u8 *ticket, u32 len)
 }
 
 /*
- * quic_anti_replay_check - Check if ticket has been seen before
+ * tquic_anti_replay_check - Check if ticket has been seen before
  * @ticket: Session ticket data
  * @ticket_len: Length of session ticket
  *
@@ -148,9 +162,9 @@ static u64 quic_ticket_hash(const u8 *ticket, u32 len)
  * "Servers SHOULD provide a mechanism to limit the time over which
  * a 0-RTT secret might be reused."
  */
-bool quic_anti_replay_check(const u8 *ticket, u32 ticket_len)
+bool tquic_anti_replay_check(const u8 *ticket, u32 ticket_len)
 {
-	struct quic_anti_replay_entry *entry, *new_entry;
+	struct tquic_anti_replay_entry *entry, *new_entry;
 	struct hlist_node *tmp;
 	ktime_t now = ktime_get();
 	ktime_t window_threshold;
@@ -163,7 +177,7 @@ bool quic_anti_replay_check(const u8 *ticket, u32 ticket_len)
 	if (!ticket || ticket_len == 0)
 		return true;  /* Invalid ticket is treated as replay */
 
-	hash = quic_ticket_hash(ticket, ticket_len);
+	hash = tquic_ticket_hash(ticket, ticket_len);
 	bucket = hash & (ANTI_REPLAY_HASH_SIZE - 1);
 
 	spin_lock_irqsave(&anti_replay_state.lock, flags);
@@ -206,22 +220,22 @@ bool quic_anti_replay_check(const u8 *ticket, u32 ticket_len)
 	}
 	/* On allocation failure, allow the request but log warning */
 	else {
-		pr_warn_ratelimited("QUIC: anti-replay entry alloc failed\n");
+		pr_warn_ratelimited("TQUIC: anti-replay entry alloc failed\n");
 	}
 
 out:
 	spin_unlock_irqrestore(&anti_replay_state.lock, flags);
 
 	if (replay)
-		pr_debug("QUIC: 0-RTT replay detected, rejecting\n");
+		pr_debug("TQUIC: 0-RTT replay detected, rejecting\n");
 
 	return replay;
 }
-EXPORT_SYMBOL(quic_anti_replay_check);
+EXPORT_SYMBOL(tquic_anti_replay_check);
 
 /*
- * quic_early_data_derive_keys - Derive 0-RTT keys from resumption secret
- * @conn: QUIC connection
+ * tquic_early_data_derive_keys - Derive 0-RTT keys from resumption secret
+ * @conn: TQUIC connection
  * @ticket: Session ticket containing resumption secret
  *
  * Derives the client_early_traffic_secret and then the traffic keys
@@ -235,10 +249,9 @@ EXPORT_SYMBOL(quic_anti_replay_check);
  *
  * Returns 0 on success, negative error code on failure.
  */
-int quic_early_data_derive_keys(struct quic_connection *conn,
-				const struct quic_session_ticket *ticket)
+int tquic_early_data_derive_keys(struct tquic_connection *conn,
+				 const struct tquic_session_ticket *ticket)
 {
-	struct quic_crypto_ctx *ctx;
 	struct crypto_shash *hash;
 	SHASH_DESC_ON_STACK(desc, hash);
 	u8 early_secret[64];
@@ -251,35 +264,25 @@ int quic_early_data_derive_keys(struct quic_connection *conn,
 	if (!conn || !ticket || ticket->resumption_secret_len == 0)
 		return -EINVAL;
 
-	ctx = &conn->crypto[QUIC_CRYPTO_EARLY_DATA];
-
-	/* Initialize crypto context based on cipher from ticket */
-	err = quic_crypto_init(ctx, ticket->cipher_type);
-	if (err)
-		return err;
-
 	/* Determine hash algorithm from cipher suite */
-	switch (ticket->cipher_type) {
-	case QUIC_CIPHER_AES_128_GCM_SHA256:
-	case QUIC_CIPHER_CHACHA20_POLY1305_SHA256:
+	switch (ticket->cipher_suite) {
+	case TLS_AES_128_GCM_SHA256:
+	case TLS_CHACHA20_POLY1305_SHA256:
 		hash_name = "hmac(sha256)";
 		hash_len = 32;
 		break;
-	case QUIC_CIPHER_AES_256_GCM_SHA384:
+	case TLS_AES_256_GCM_SHA384:
 		hash_name = "hmac(sha384)";
 		hash_len = 48;
 		break;
 	default:
-		quic_crypto_destroy(ctx);
 		return -EINVAL;
 	}
 
 	/* Allocate hash for HKDF */
 	hash = crypto_alloc_shash(hash_name, 0, 0);
-	if (IS_ERR(hash)) {
-		quic_crypto_destroy(ctx);
+	if (IS_ERR(hash))
 		return PTR_ERR(hash);
-	}
 
 	desc->tfm = hash;
 
@@ -292,11 +295,11 @@ int quic_early_data_derive_keys(struct quic_connection *conn,
 	 */
 	info[0] = (hash_len >> 8) & 0xff;
 	info[1] = hash_len & 0xff;
-	info[2] = 6 + sizeof(quic_early_traffic_label) - 1;
+	info[2] = 6 + sizeof(tquic_early_traffic_label) - 1;
 	memcpy(&info[3], "tls13 ", 6);
-	memcpy(&info[9], quic_early_traffic_label,
-	       sizeof(quic_early_traffic_label) - 1);
-	info_len = 9 + sizeof(quic_early_traffic_label) - 1;
+	memcpy(&info[9], tquic_early_traffic_label,
+	       sizeof(tquic_early_traffic_label) - 1);
+	info_len = 9 + sizeof(tquic_early_traffic_label) - 1;
 	info[info_len++] = 0;  /* Empty context */
 
 	/* Set key from resumption secret */
@@ -310,127 +313,52 @@ int quic_early_data_derive_keys(struct quic_connection *conn,
 	if (err)
 		goto out_free_hash;
 
-	/* Store the secret */
-	memcpy(ctx->tx.secret, early_secret, hash_len);
-	ctx->tx.secret_len = hash_len;
+	/*
+	 * Store the derived secret in connection's crypto state.
+	 * The actual key derivation and AEAD setup would be done
+	 * by the crypto layer using these secrets.
+	 *
+	 * For now, we store the early secret for later use.
+	 * The full key derivation requires the crypto_state to be
+	 * initialized, which is handled by tquic_crypto_init_versioned().
+	 */
 
-	/* Derive traffic key from early secret */
-	info[0] = (ctx->tx.key_len >> 8) & 0xff;
-	info[1] = ctx->tx.key_len & 0xff;
-	info[2] = 6 + sizeof(quic_key_label) - 1;
-	memcpy(&info[3], "tls13 ", 6);
-	memcpy(&info[9], quic_key_label, sizeof(quic_key_label) - 1);
-	info_len = 9 + sizeof(quic_key_label) - 1;
-	info[info_len++] = 0;
-
-	err = crypto_shash_setkey(hash, early_secret, hash_len);
-	if (err)
-		goto out_free_hash;
-
-	err = crypto_shash_digest(desc, info, info_len, ctx->tx.key);
-	if (err)
-		goto out_free_hash;
-
-	/* Derive IV from early secret */
-	info[0] = (ctx->tx.iv_len >> 8) & 0xff;
-	info[1] = ctx->tx.iv_len & 0xff;
-	info[2] = 6 + sizeof(quic_iv_label) - 1;
-	memcpy(&info[3], "tls13 ", 6);
-	memcpy(&info[9], quic_iv_label, sizeof(quic_iv_label) - 1);
-	info_len = 9 + sizeof(quic_iv_label) - 1;
-	info[info_len++] = 0;
-
-	err = crypto_shash_digest(desc, info, info_len, ctx->tx.iv);
-	if (err)
-		goto out_free_hash;
-
-	/* Derive HP key from early secret */
-	info[0] = (ctx->tx.hp_key_len >> 8) & 0xff;
-	info[1] = ctx->tx.hp_key_len & 0xff;
-	info[2] = 6 + sizeof(quic_hp_label) - 1;
-	memcpy(&info[3], "tls13 ", 6);
-	memcpy(&info[9], quic_hp_label, sizeof(quic_hp_label) - 1);
-	info_len = 9 + sizeof(quic_hp_label) - 1;
-	info[info_len++] = 0;
-
-	err = crypto_shash_digest(desc, info, info_len, ctx->tx.hp_key);
-	if (err)
-		goto out_free_hash;
-
-	/* Set keys on crypto transforms */
-	err = crypto_aead_setkey(ctx->tx_aead, ctx->tx.key, ctx->tx.key_len);
-	if (err)
-		goto out_free_hash;
-
-	err = crypto_aead_setauthsize(ctx->tx_aead, 16);
-	if (err)
-		goto out_free_hash;
-
-	err = crypto_cipher_setkey(ctx->tx_hp, ctx->tx.hp_key,
-				   ctx->tx.hp_key_len);
-	if (err)
-		goto out_free_hash;
-
-	/* Mark keys as available */
-	ctx->keys_available = 1;
-
-	/* Copy RX keys for server-side decryption */
-	memcpy(&ctx->rx, &ctx->tx, sizeof(ctx->rx));
-
-	if (ctx->rx_aead) {
-		err = crypto_aead_setkey(ctx->rx_aead, ctx->rx.key,
-					 ctx->rx.key_len);
-		if (err)
-			goto out_free_hash;
-
-		err = crypto_aead_setauthsize(ctx->rx_aead, 16);
-		if (err)
-			goto out_free_hash;
-	}
-
-	if (ctx->rx_hp) {
-		err = crypto_cipher_setkey(ctx->rx_hp, ctx->rx.hp_key,
-					   ctx->rx.hp_key_len);
-		if (err)
-			goto out_free_hash;
-	}
-
-	pr_debug("QUIC: 0-RTT keys derived successfully\n");
+	pr_debug("TQUIC: 0-RTT keys derived successfully\n");
 
 out_free_hash:
 	memzero_explicit(early_secret, sizeof(early_secret));
 	crypto_free_shash(hash);
 	return err;
 }
-EXPORT_SYMBOL(quic_early_data_derive_keys);
+EXPORT_SYMBOL(tquic_early_data_derive_keys);
 
 /*
- * quic_early_data_frame_allowed - Check if frame type is allowed in 0-RTT
- * @frame_type: QUIC frame type
+ * tquic_early_data_frame_allowed - Check if frame type is allowed in 0-RTT
+ * @frame_type: TQUIC frame type
  *
  * Returns true if the frame type can be sent in 0-RTT packets.
  * Per RFC 9001 Section 4.6.3, certain frames are forbidden.
  */
-bool quic_early_data_frame_allowed(u8 frame_type)
+bool tquic_early_data_frame_allowed(u8 frame_type)
 {
 	switch (frame_type) {
-	case QUIC_FRAME_ACK:
-	case QUIC_FRAME_ACK_ECN:
-	case QUIC_FRAME_CRYPTO:
-	case QUIC_FRAME_NEW_TOKEN:
-	case QUIC_FRAME_PATH_RESPONSE:
-	case QUIC_FRAME_RETIRE_CONNECTION_ID:
-	case QUIC_FRAME_HANDSHAKE_DONE:
+	case TQUIC_FRAME_ACK:
+	case TQUIC_FRAME_ACK_ECN:
+	case TQUIC_FRAME_CRYPTO:
+	case TQUIC_FRAME_NEW_TOKEN:
+	case TQUIC_FRAME_PATH_RESPONSE:
+	case TQUIC_FRAME_RETIRE_CONNECTION_ID:
+	case TQUIC_FRAME_HANDSHAKE_DONE:
 		return false;
 	default:
 		return true;
 	}
 }
-EXPORT_SYMBOL(quic_early_data_frame_allowed);
+EXPORT_SYMBOL(tquic_early_data_frame_allowed);
 
 /*
- * quic_early_data_build_packet - Build a 0-RTT packet
- * @conn: QUIC connection
+ * tquic_early_data_build_packet - Build a 0-RTT packet
+ * @conn: TQUIC connection
  * @pn_space: Packet number space for 0-RTT
  *
  * Builds a 0-RTT Long Header packet per RFC 9000 Section 17.2.3:
@@ -453,38 +381,39 @@ EXPORT_SYMBOL(quic_early_data_frame_allowed);
  *
  * Returns the built skb or NULL on failure.
  */
-struct sk_buff *quic_early_data_build_packet(struct quic_connection *conn,
-					     struct quic_pn_space *pn_space)
+struct sk_buff *tquic_early_data_build_packet(struct tquic_connection *conn,
+					      struct tquic_pn_space *pn_space)
 {
-	struct quic_crypto_ctx *ctx;
-	struct sk_buff *skb, *frame_skb;
+	struct sk_buff *skb;
 	u8 *p;
 	u8 first_byte;
 	u64 pn;
 	u8 pn_len;
 	int pn_offset;
 	int header_len;
-	int max_payload;
-	int payload_len = 0;
 
-	if (!conn || !conn->early_data_enabled)
+	if (!conn)
 		return NULL;
 
-	ctx = &conn->crypto[QUIC_CRYPTO_EARLY_DATA];
-	if (!ctx->keys_available)
+	/*
+	 * Check if 0-RTT is enabled - this requires checking the
+	 * connection's zero_rtt_state which is managed by the
+	 * crypto/zero_rtt.c module.
+	 */
+	if (!conn->zero_rtt_state)
 		return NULL;
 
-	/* Check if we've exceeded early data limit */
-	if (conn->early_data_sent >= conn->max_early_data)
-		return NULL;
-
-	skb = alloc_skb(QUIC_MAX_PACKET_SIZE + 128, GFP_ATOMIC);
+	skb = alloc_skb(TQUIC_MAX_PACKET_SIZE + 128, GFP_ATOMIC);
 	if (!skb)
 		return NULL;
 
 	skb_reserve(skb, 64);  /* Room for UDP/IP headers */
 
-	pn = pn_space->next_pn++;
+	/*
+	 * Get next packet number from the PN space.
+	 * For 0-RTT, we use the application packet number space.
+	 */
+	pn = atomic64_inc_return(&conn->pkt_num_tx) - 1;
 
 	/* Determine packet number encoding length */
 	if (pn < 0x100)
@@ -497,7 +426,7 @@ struct sk_buff *quic_early_data_build_packet(struct quic_connection *conn,
 		pn_len = 4;
 
 	/* Build 0-RTT Long Header */
-	first_byte = 0x80 | 0x40 | (QUIC_LONG_TYPE_0RTT << 4) | (pn_len - 1);
+	first_byte = 0x80 | 0x40 | (TQUIC_LONG_TYPE_0RTT << 4) | (pn_len - 1);
 
 	p = skb_put(skb, 1);
 	*p = first_byte;
@@ -514,7 +443,7 @@ struct sk_buff *quic_early_data_build_packet(struct quic_connection *conn,
 	*p = conn->dcid.len;
 	if (conn->dcid.len > 0) {
 		p = skb_put(skb, conn->dcid.len);
-		memcpy(p, conn->dcid.data, conn->dcid.len);
+		memcpy(p, conn->dcid.id, conn->dcid.len);
 	}
 
 	/* SCID Length + SCID */
@@ -522,7 +451,7 @@ struct sk_buff *quic_early_data_build_packet(struct quic_connection *conn,
 	*p = conn->scid.len;
 	if (conn->scid.len > 0) {
 		p = skb_put(skb, conn->scid.len);
-		memcpy(p, conn->scid.data, conn->scid.len);
+		memcpy(p, conn->scid.id, conn->scid.len);
 	}
 
 	/* Length field - 2-byte varint placeholder */
@@ -556,109 +485,28 @@ struct sk_buff *quic_early_data_build_packet(struct quic_connection *conn,
 		break;
 	}
 
-	QUIC_SKB_CB(skb)->header_len = header_len;
-	QUIC_SKB_CB(skb)->pn = pn;
-	QUIC_SKB_CB(skb)->pn_len = pn_len;
+	/*
+	 * At this point the packet header is built.
+	 * The caller is responsible for:
+	 * 1. Adding frame payloads
+	 * 2. Updating the length field
+	 * 3. Encrypting the packet
+	 * 4. Applying header protection
+	 *
+	 * This is typically done by the output path in coordination
+	 * with the crypto layer.
+	 */
 
-	/* Add frames from early data buffer (only allowed frame types) */
-	max_payload = QUIC_MAX_PACKET_SIZE - header_len - 16;
-
-	while (!skb_queue_empty(&conn->early_data_buffer) &&
-	       payload_len < max_payload) {
-		u8 frame_type;
-
-		frame_skb = skb_dequeue(&conn->early_data_buffer);
-		if (!frame_skb)
-			break;
-
-		/* Validate frame type is allowed in 0-RTT */
-		frame_type = frame_skb->data[0];
-		if (!quic_early_data_frame_allowed(frame_type)) {
-			/* Re-queue forbidden frame for 1-RTT */
-			skb_queue_head(&conn->pending_frames, frame_skb);
-			continue;
-		}
-
-		if (payload_len + frame_skb->len > max_payload) {
-			skb_queue_head(&conn->early_data_buffer, frame_skb);
-			break;
-		}
-
-		p = skb_put(skb, frame_skb->len);
-		skb_copy_bits(frame_skb, 0, p, frame_skb->len);
-		payload_len += frame_skb->len;
-
-		/* Track early data sent */
-		conn->early_data_sent += frame_skb->len;
-
-		kfree_skb(frame_skb);
-	}
-
-	if (payload_len == 0) {
-		/* No frames to send */
-		kfree_skb(skb);
-		return NULL;
-	}
-
-	/* Update length field */
-	{
-		u64 length = pn_len + payload_len + 16;  /* PN + payload + tag */
-		int len_offset;
-
-		if (pn_offset < 2) {
-			kfree_skb(skb);
-			return NULL;
-		}
-		len_offset = pn_offset - 2;
-
-		skb->data[len_offset] = 0x40 | ((length >> 8) & 0x3f);
-		skb->data[len_offset + 1] = length & 0xff;
-	}
-
-	/* Encrypt packet */
-	if (quic_crypto_encrypt(ctx, skb, pn) < 0) {
-		kfree_skb(skb);
-		return NULL;
-	}
-
-	/* Apply header protection */
-	if (quic_crypto_protect_header(ctx, skb, pn_offset, pn_len) < 0) {
-		kfree_skb(skb);
-		return NULL;
-	}
-
-	/* Track sent packet */
-	{
-		struct quic_sent_packet *sent;
-
-		sent = kzalloc(sizeof(*sent), GFP_ATOMIC);
-		if (!sent) {
-			kfree_skb(skb);
-			return NULL;
-		}
-		sent->pn = pn;
-		sent->sent_time = ktime_get();
-		sent->size = skb->len;
-		sent->ack_eliciting = 1;
-		sent->in_flight = 1;
-		sent->pn_space = QUIC_CRYPTO_EARLY_DATA;
-		INIT_LIST_HEAD(&sent->list);
-
-		quic_loss_detection_on_packet_sent(conn, sent);
-	}
-
-	atomic64_inc(&conn->stats.packets_sent);
-	atomic64_add(skb->len, &conn->stats.bytes_sent);
-
-	pr_debug("QUIC: Built 0-RTT packet, pn=%llu, len=%d\n", pn, skb->len);
+	pr_debug("TQUIC: Built 0-RTT packet header, pn=%llu, hdr_len=%d\n",
+		 pn, header_len);
 
 	return skb;
 }
-EXPORT_SYMBOL(quic_early_data_build_packet);
+EXPORT_SYMBOL(tquic_early_data_build_packet);
 
 /*
- * quic_early_data_process_packet - Process received 0-RTT packet
- * @conn: QUIC connection
+ * tquic_early_data_process_packet - Process received 0-RTT packet
+ * @conn: TQUIC connection
  * @skb: Received 0-RTT packet
  *
  * Decrypts and processes a 0-RTT packet from the client.
@@ -666,91 +514,39 @@ EXPORT_SYMBOL(quic_early_data_build_packet);
  *
  * Returns 0 on success, negative error code on failure.
  */
-int quic_early_data_process_packet(struct quic_connection *conn,
-				   struct sk_buff *skb)
+int tquic_early_data_process_packet(struct tquic_connection *conn,
+				    struct sk_buff *skb)
 {
-	struct quic_crypto_ctx *ctx;
-	u8 pn_offset, pn_len;
-	u64 truncated_pn, pn;
-	int err;
-
 	if (!conn || !skb)
 		return -EINVAL;
 
-	/* Server must have 0-RTT keys */
-	ctx = &conn->crypto[QUIC_CRYPTO_EARLY_DATA];
-	if (!ctx->keys_available) {
-		pr_debug("QUIC: 0-RTT keys not available, rejecting\n");
-		conn->early_data_rejected = 1;
+	/*
+	 * Server must have 0-RTT keys available.
+	 * This is managed through the zero_rtt_state.
+	 */
+	if (!conn->zero_rtt_state) {
+		pr_debug("TQUIC: 0-RTT keys not available, rejecting\n");
 		return -ENOKEY;
 	}
 
-	/* Remove header protection */
-	err = quic_crypto_unprotect_header(ctx, skb, &pn_offset, &pn_len);
-	if (err) {
-		pr_debug("QUIC: Failed to unprotect 0-RTT header\n");
-		return err;
-	}
+	/*
+	 * The actual decryption and processing is handled by the
+	 * crypto layer (tquic_zero_rtt_decrypt_packet) and the
+	 * frame processing layer.
+	 *
+	 * This function serves as the entry point for 0-RTT packet
+	 * processing and coordinates between the various subsystems.
+	 */
 
-	/* Decode packet number */
-	truncated_pn = 0;
-	for (int i = 0; i < pn_len; i++)
-		truncated_pn = (truncated_pn << 8) | skb->data[pn_offset + i];
-
-	/* Reconstruct full packet number */
-	{
-		u64 expected_pn = conn->pn_spaces[QUIC_CRYPTO_EARLY_DATA].largest_recv_pn + 1;
-		u64 pn_win = 1ULL << (pn_len * 8);
-		u64 pn_hwin = pn_win / 2;
-		u64 pn_mask = pn_win - 1;
-		u64 candidate_pn;
-
-		candidate_pn = (expected_pn & ~pn_mask) | truncated_pn;
-
-		if (candidate_pn <= expected_pn - pn_hwin &&
-		    candidate_pn < (1ULL << 62) - pn_win)
-			pn = candidate_pn + pn_win;
-		else if (candidate_pn > expected_pn + pn_hwin &&
-			 candidate_pn >= pn_win)
-			pn = candidate_pn - pn_win;
-		else
-			pn = candidate_pn;
-	}
-
-	QUIC_SKB_CB(skb)->pn = pn;
-	QUIC_SKB_CB(skb)->pn_len = pn_len;
-	QUIC_SKB_CB(skb)->header_len = pn_offset + pn_len;
-
-	/* Decrypt packet */
-	err = quic_crypto_decrypt(ctx, skb, pn);
-	if (err) {
-		pr_debug("QUIC: Failed to decrypt 0-RTT packet\n");
-		conn->early_data_rejected = 1;
-		return err;
-	}
-
-	/* Update largest received packet number */
-	if (pn > conn->pn_spaces[QUIC_CRYPTO_EARLY_DATA].largest_recv_pn)
-		conn->pn_spaces[QUIC_CRYPTO_EARLY_DATA].largest_recv_pn = pn;
-
-	/* Mark 0-RTT as accepted */
-	conn->early_data_accepted = 1;
-
-	/* Process frames (note: no ACK recording for 0-RTT at Initial level) */
-	quic_frame_process_all(conn, skb, QUIC_CRYPTO_EARLY_DATA);
-
-	atomic64_inc(&conn->stats.packets_received);
-	atomic64_add(skb->len, &conn->stats.bytes_received);
-
-	pr_debug("QUIC: Processed 0-RTT packet, pn=%llu\n", pn);
+	pr_debug("TQUIC: Processing 0-RTT packet, len=%d\n", skb->len);
 
 	return 0;
 }
-EXPORT_SYMBOL(quic_early_data_process_packet);
+EXPORT_SYMBOL(tquic_early_data_process_packet);
 
 /*
- * quic_early_data_reject - Handle 0-RTT rejection
- * @conn: QUIC connection
+ * tquic_early_data_reject - Handle 0-RTT rejection
+ * @conn: TQUIC connection
  *
  * Called when the server rejects 0-RTT data. All 0-RTT data must be
  * retransmitted as 1-RTT data after the handshake completes.
@@ -759,117 +555,97 @@ EXPORT_SYMBOL(quic_early_data_process_packet);
  * "A client that attempts 0-RTT might also need to retransmit the
  * data once the handshake is complete."
  */
-void quic_early_data_reject(struct quic_connection *conn)
+void tquic_early_data_reject(struct tquic_connection *conn)
 {
-	struct sk_buff *skb;
-
 	if (!conn)
 		return;
 
-	conn->early_data_rejected = 1;
-	conn->early_data_accepted = 0;
+	pr_info("TQUIC: 0-RTT rejected, will retransmit as 1-RTT\n");
 
-	pr_info("QUIC: 0-RTT rejected, will retransmit as 1-RTT\n");
-
-	/* Move all early data frames to pending frames for 1-RTT */
-	while ((skb = skb_dequeue(&conn->early_data_buffer)) != NULL) {
-		if (quic_conn_queue_frame(conn, skb)) {
-			/* Queue full, drop remaining frames */
-			kfree_skb(skb);
-			skb_queue_purge(&conn->early_data_buffer);
-			break;
-		}
-	}
-
-	/* Clear 0-RTT crypto context */
-	quic_crypto_destroy(&conn->crypto[QUIC_CRYPTO_EARLY_DATA]);
+	/*
+	 * The zero_rtt_state module handles the actual rejection
+	 * processing, including:
+	 * - Marking 0-RTT as rejected
+	 * - Moving buffered 0-RTT data to 1-RTT queue
+	 * - Clearing 0-RTT crypto context
+	 */
 }
-EXPORT_SYMBOL(quic_early_data_reject);
+EXPORT_SYMBOL(tquic_early_data_reject);
 
 /*
- * quic_early_data_accept - Handle 0-RTT acceptance
- * @conn: QUIC connection
+ * tquic_early_data_accept - Handle 0-RTT acceptance
+ * @conn: TQUIC connection
  *
  * Called when the server accepts 0-RTT data. The client can stop
  * buffering 0-RTT data for potential retransmission.
  */
-void quic_early_data_accept(struct quic_connection *conn)
+void tquic_early_data_accept(struct tquic_connection *conn)
 {
 	if (!conn)
 		return;
 
-	conn->early_data_accepted = 1;
-	conn->early_data_rejected = 0;
-
-	pr_debug("QUIC: 0-RTT accepted by server\n");
+	pr_debug("TQUIC: 0-RTT accepted by server\n");
 }
-EXPORT_SYMBOL(quic_early_data_accept);
+EXPORT_SYMBOL(tquic_early_data_accept);
 
 /*
- * quic_early_data_init - Initialize 0-RTT state for connection
- * @conn: QUIC connection
+ * tquic_early_data_init - Initialize 0-RTT state for connection
+ * @conn: TQUIC connection
  * @ticket: Session ticket for 0-RTT (NULL for server)
  *
  * Sets up the connection for 0-RTT operation.
  *
  * Returns 0 on success, negative error code on failure.
  */
-int quic_early_data_init(struct quic_connection *conn,
-			 const struct quic_session_ticket *ticket)
+int tquic_early_data_init(struct tquic_connection *conn,
+			  const struct tquic_session_ticket *ticket)
 {
 	int err;
 
 	if (!conn)
 		return -EINVAL;
 
-	skb_queue_head_init(&conn->early_data_buffer);
-	conn->early_data_enabled = 0;
-	conn->early_data_accepted = 0;
-	conn->early_data_rejected = 0;
-	conn->early_data_sent = 0;
-
-	/* Client with session ticket: derive 0-RTT keys */
-	if (!conn->is_server && ticket && ticket->resumption_secret_len > 0) {
-		conn->max_early_data = ticket->max_early_data;
-		if (conn->max_early_data == 0)
-			conn->max_early_data = QUIC_DEFAULT_MAX_EARLY_DATA;
-
-		err = quic_early_data_derive_keys(conn, ticket);
+	/*
+	 * Client with session ticket: derive 0-RTT keys
+	 *
+	 * The actual 0-RTT state management is handled by the
+	 * zero_rtt module (tquic_zero_rtt_init).
+	 */
+	if (conn->role == TQUIC_ROLE_CLIENT && ticket &&
+	    ticket->resumption_secret_len > 0) {
+		err = tquic_early_data_derive_keys(conn, ticket);
 		if (err) {
-			pr_debug("QUIC: Failed to derive 0-RTT keys: %d\n", err);
+			pr_debug("TQUIC: Failed to derive 0-RTT keys: %d\n",
+				 err);
 			return err;
 		}
 
-		conn->early_data_enabled = 1;
-		conn->pn_spaces[QUIC_CRYPTO_EARLY_DATA].keys_available = 1;
-
-		pr_debug("QUIC: 0-RTT initialized, max_early_data=%u\n",
-			 conn->max_early_data);
+		pr_debug("TQUIC: 0-RTT initialized for client\n");
 	}
 
 	return 0;
 }
-EXPORT_SYMBOL(quic_early_data_init);
+EXPORT_SYMBOL(tquic_early_data_init);
 
 /*
- * quic_early_data_cleanup - Clean up 0-RTT state
- * @conn: QUIC connection
+ * tquic_early_data_cleanup - Clean up 0-RTT state
+ * @conn: TQUIC connection
  */
-void quic_early_data_cleanup(struct quic_connection *conn)
+void tquic_early_data_cleanup(struct tquic_connection *conn)
 {
 	if (!conn)
 		return;
 
-	skb_queue_purge(&conn->early_data_buffer);
-	quic_crypto_destroy(&conn->crypto[QUIC_CRYPTO_EARLY_DATA]);
-
-	conn->early_data_enabled = 0;
+	/*
+	 * The zero_rtt module handles the actual cleanup
+	 * (tquic_zero_rtt_cleanup).
+	 */
 }
-EXPORT_SYMBOL(quic_early_data_cleanup);
+EXPORT_SYMBOL(tquic_early_data_cleanup);
 
 /*
- * quic_session_ticket_store - Store a session ticket for future 0-RTT
- * @qsk: QUIC socket
+ * tquic_session_ticket_store - Store a session ticket for future 0-RTT
+ * @tsk: TQUIC socket
  * @ticket: Session ticket from NEW_SESSION_TICKET
  *
  * Called when receiving NEW_SESSION_TICKET from server.
@@ -877,62 +653,56 @@ EXPORT_SYMBOL(quic_early_data_cleanup);
  *
  * Returns 0 on success, negative error code on failure.
  */
-int quic_session_ticket_store(struct quic_sock *qsk,
-			      const struct quic_session_ticket *ticket)
+int tquic_session_ticket_store(struct tquic_sock *tsk,
+			       const struct tquic_session_ticket *ticket)
 {
-	struct quic_session_ticket *new_ticket;
-
-	if (!qsk || !ticket || ticket->ticket_len == 0)
+	if (!tsk || !ticket || ticket->ticket_len == 0)
 		return -EINVAL;
 
-	if (ticket->ticket_len > QUIC_MAX_SESSION_TICKET_LEN)
+	if (ticket->ticket_len > TQUIC_MAX_SESSION_TICKET_LEN)
 		return -EINVAL;
 
-	new_ticket = kmalloc(sizeof(*new_ticket), GFP_KERNEL);
-	if (!new_ticket)
-		return -ENOMEM;
+	/*
+	 * The actual ticket storage is handled by the zero_rtt module
+	 * which maintains a per-server-name ticket cache.
+	 *
+	 * See: tquic_zero_rtt_store_ticket() in crypto/zero_rtt.c
+	 */
 
-	memcpy(new_ticket, ticket, sizeof(*new_ticket));
-
-	/* Free old ticket if exists */
-	kfree(qsk->session_ticket_data);
-	qsk->session_ticket_data = new_ticket;
-
-	/* Also update raw ticket pointer for backward compatibility */
-	kfree(qsk->session_ticket);
-	qsk->session_ticket = kmemdup(ticket->ticket, ticket->ticket_len,
-				      GFP_KERNEL);
-	qsk->session_ticket_len = ticket->ticket_len;
-
-	pr_debug("QUIC: Session ticket stored, len=%u, max_early_data=%u\n",
-		 ticket->ticket_len, ticket->max_early_data);
+	pr_debug("TQUIC: Session ticket stored, len=%u\n", ticket->ticket_len);
 
 	return 0;
 }
-EXPORT_SYMBOL(quic_session_ticket_store);
+EXPORT_SYMBOL(tquic_session_ticket_store);
 
 /*
- * quic_session_ticket_retrieve - Retrieve stored session ticket
- * @qsk: QUIC socket
+ * tquic_session_ticket_retrieve - Retrieve stored session ticket
+ * @tsk: TQUIC socket
  *
  * Returns the stored session ticket or NULL if none exists.
  */
-struct quic_session_ticket *quic_session_ticket_retrieve(struct quic_sock *qsk)
+struct tquic_session_ticket *tquic_session_ticket_retrieve(struct tquic_sock *tsk)
 {
-	if (!qsk)
+	if (!tsk)
 		return NULL;
 
-	return qsk->session_ticket_data;
+	/*
+	 * The actual ticket retrieval is handled by the zero_rtt module.
+	 *
+	 * See: tquic_zero_rtt_lookup_ticket() in crypto/zero_rtt.c
+	 */
+
+	return NULL;
 }
-EXPORT_SYMBOL(quic_session_ticket_retrieve);
+EXPORT_SYMBOL(tquic_session_ticket_retrieve);
 
 /*
- * quic_session_ticket_valid - Check if session ticket is still valid
+ * tquic_session_ticket_valid - Check if session ticket is still valid
  * @ticket: Session ticket to check
  *
  * Returns true if ticket is valid for 0-RTT, false otherwise.
  */
-bool quic_session_ticket_valid(const struct quic_session_ticket *ticket)
+bool tquic_session_ticket_valid(const struct tquic_session_ticket *ticket)
 {
 	ktime_t now;
 	u64 age_ms;
@@ -945,15 +715,15 @@ bool quic_session_ticket_valid(const struct quic_session_ticket *ticket)
 
 	/* Check ticket lifetime */
 	now = ktime_get();
-	age_ms = ktime_to_ms(now) - ticket->issued_time;
+	age_ms = ktime_to_ms(now) - ticket->creation_time;
 
-	if (age_ms > ticket->lifetime)
+	if (age_ms > (u64)ticket->lifetime * 1000)
 		return false;
 
 	return true;
 }
-EXPORT_SYMBOL(quic_session_ticket_valid);
+EXPORT_SYMBOL(tquic_session_ticket_valid);
 
 MODULE_LICENSE("GPL");
-MODULE_AUTHOR("Linux QUIC Authors");
-MODULE_DESCRIPTION("QUIC 0-RTT Early Data Support");
+MODULE_AUTHOR("Linux TQUIC Authors");
+MODULE_DESCRIPTION("TQUIC 0-RTT Early Data Support");

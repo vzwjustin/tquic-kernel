@@ -69,16 +69,9 @@ extern int tquic_pm_get_active_paths(struct tquic_path_manager *pm,
  *   - path->state
  */
 
-/* These match the definitions in tquic_path.c */
-enum {
-	TQUIC_PATH_CREATED = 0,
-	TQUIC_PATH_VALIDATING,
-	TQUIC_PATH_VALIDATED,
-	TQUIC_PATH_ACTIVE,
-	TQUIC_PATH_STANDBY,
-	TQUIC_PATH_FAILED,
-	TQUIC_PATH_CLOSING,
-};
+/*
+ * enum tquic_path_state is defined in include/net/tquic.h
+ */
 
 /*
  * Global workqueue for reorder buffer timeout work
@@ -876,7 +869,7 @@ void tquic_bonding_on_ack_received(struct tquic_connection *conn,
 
 	/* Notify scheduler of ACK for feedback-driven path selection */
 	if (conn)
-		tquic_new_sched_notify_ack(conn, path, acked_bytes);
+		tquic_mp_sched_notify_ack(conn, path, acked_bytes);
 }
 EXPORT_SYMBOL_GPL(tquic_bonding_on_ack_received);
 
@@ -911,7 +904,7 @@ void tquic_bonding_on_loss_detected(struct tquic_connection *conn,
 
 	/* Notify scheduler of loss for feedback-driven path selection */
 	if (conn)
-		tquic_new_sched_notify_loss(conn, path, lost_bytes);
+		tquic_mp_sched_notify_loss(conn, path, lost_bytes);
 }
 EXPORT_SYMBOL_GPL(tquic_bonding_on_loss_detected);
 
@@ -984,7 +977,7 @@ EXPORT_SYMBOL_GPL(tquic_bonding_get_info);
  * Returns: 0 on success, negative errno on failure
  */
 int tquic_bond_set_path_weight(struct tquic_connection *conn,
-			       u8 path_id, u32 weight)
+			       u32 path_id, u32 weight)
 {
 	struct tquic_path_manager *pm;
 	struct tquic_bonding_ctx *bc;
@@ -1019,7 +1012,7 @@ EXPORT_SYMBOL_GPL(tquic_bond_set_path_weight);
  *
  * Returns: Weight value (0-1000), or 0 if invalid
  */
-u32 tquic_bond_get_path_weight(struct tquic_connection *conn, u8 path_id)
+u32 tquic_bond_get_path_weight(struct tquic_connection *conn, u32 path_id)
 {
 	struct tquic_path_manager *pm;
 	struct tquic_bonding_ctx *bc;

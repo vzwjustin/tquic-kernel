@@ -324,12 +324,15 @@ void tquic_cong_on_ecn(struct tquic_path *path, u64 ecn_ce_count);
 #define TQUIC_ECN_BETA_SCALE	1000
 
 /*
- * Per-path ECN state tracking
+ * Per-path ECN state tracking for congestion control
  *
  * Tracks ECN counts from ACK frames to detect CE count increases.
  * Per RFC 9002: Only respond to *increases* in CE count, not absolute values.
+ *
+ * Note: This is the congestion control layer's view of ECN state.
+ * The main tquic_ecn_state is defined in tquic.h for path-level tracking.
  */
-struct tquic_ecn_state {
+struct tquic_cc_ecn_state {
 	u64 ect0_count;		/* Previous ECT(0) count from ACK */
 	u64 ect1_count;		/* Previous ECT(1) count from ACK */
 	u64 ce_count;		/* Previous CE count from ACK */
@@ -340,39 +343,39 @@ struct tquic_ecn_state {
 };
 
 /*
- * tquic_ecn_init - Initialize ECN state for a path
+ * tquic_cc_ecn_init - Initialize ECN state for congestion control
  * @ecn: ECN state structure to initialize
  */
-static inline void tquic_ecn_init(struct tquic_ecn_state *ecn)
+static inline void tquic_cc_ecn_init(struct tquic_cc_ecn_state *ecn)
 {
 	memset(ecn, 0, sizeof(*ecn));
 	ecn->ecn_capable = false;
 }
 
 /*
- * tquic_ecn_validate_path - Mark path as ECN-capable after validation
+ * tquic_cc_ecn_validate_path - Mark path as ECN-capable after validation
  * @ecn: ECN state structure
  *
  * Called when a path successfully receives ECN feedback in ACKs.
  */
-static inline void tquic_ecn_validate_path(struct tquic_ecn_state *ecn)
+static inline void tquic_cc_ecn_validate_path(struct tquic_cc_ecn_state *ecn)
 {
 	ecn->ecn_capable = true;
 }
 
 /*
- * tquic_ecn_is_capable - Check if path is ECN-capable
+ * tquic_cc_ecn_is_capable - Check if path is ECN-capable
  * @ecn: ECN state structure
  *
  * Return: true if path has been validated for ECN
  */
-static inline bool tquic_ecn_is_capable(const struct tquic_ecn_state *ecn)
+static inline bool tquic_cc_ecn_is_capable(const struct tquic_cc_ecn_state *ecn)
 {
 	return ecn->ecn_capable;
 }
 
 /*
- * tquic_ecn_process_ack - Process ECN counts from ACK frame
+ * tquic_cc_ecn_process_ack - Process ECN counts from ACK frame
  * @ecn: ECN state structure
  * @ect0: ECT(0) count from ACK
  * @ect1: ECT(1) count from ACK
@@ -380,8 +383,8 @@ static inline bool tquic_ecn_is_capable(const struct tquic_ecn_state *ecn)
  *
  * Returns: Number of new CE marks (increase since last ACK), 0 if none
  */
-static inline u64 tquic_ecn_process_ack(struct tquic_ecn_state *ecn,
-					u64 ect0, u64 ect1, u64 ce)
+static inline u64 tquic_cc_ecn_process_ack(struct tquic_cc_ecn_state *ecn,
+					   u64 ect0, u64 ect1, u64 ce)
 {
 	u64 ce_increase = 0;
 
@@ -402,22 +405,22 @@ static inline u64 tquic_ecn_process_ack(struct tquic_ecn_state *ecn,
 }
 
 /*
- * tquic_ecn_start_round - Start a new congestion round
+ * tquic_cc_ecn_start_round - Start a new congestion round
  * @ecn: ECN state structure
  * @pkt_num: Current packet number
  *
  * Called at the start of a new round to reset CE tracking.
  * Per RFC 9002: Don't reduce more than once per RTT.
  */
-static inline void tquic_ecn_start_round(struct tquic_ecn_state *ecn,
-					 u64 pkt_num)
+static inline void tquic_cc_ecn_start_round(struct tquic_cc_ecn_state *ecn,
+					    u64 pkt_num)
 {
 	ecn->ecn_ce_in_round = false;
 	ecn->round_start = pkt_num;
 }
 
 /*
- * tquic_ecn_can_respond - Check if we can respond to CE in this round
+ * tquic_cc_ecn_can_respond - Check if we can respond to CE in this round
  * @ecn: ECN state structure
  *
  * Per RFC 9002 Section 7.1: "A sender MUST NOT apply this reduction
@@ -425,16 +428,16 @@ static inline void tquic_ecn_start_round(struct tquic_ecn_state *ecn,
  *
  * Return: true if we can respond to CE, false if already responded this round
  */
-static inline bool tquic_ecn_can_respond(struct tquic_ecn_state *ecn)
+static inline bool tquic_cc_ecn_can_respond(struct tquic_cc_ecn_state *ecn)
 {
 	return !ecn->ecn_ce_in_round;
 }
 
 /*
- * tquic_ecn_mark_responded - Mark that we responded to CE in this round
+ * tquic_cc_ecn_mark_responded - Mark that we responded to CE in this round
  * @ecn: ECN state structure
  */
-static inline void tquic_ecn_mark_responded(struct tquic_ecn_state *ecn)
+static inline void tquic_cc_ecn_mark_responded(struct tquic_cc_ecn_state *ecn)
 {
 	ecn->ecn_ce_in_round = true;
 	ecn->last_ce_time = ktime_get();

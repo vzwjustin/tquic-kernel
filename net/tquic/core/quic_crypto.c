@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 /*
- * QUIC - Quick UDP Internet Connections
+ * TQUIC - True QUIC with WAN Bonding
  *
  * Cryptographic operations for TLS 1.3 integration
  *
  * Copyright (c) 2024 Linux QUIC Authors
+ * Copyright (c) 2026 Linux Foundation
  */
 
 #include <linux/slab.h>
@@ -12,18 +13,18 @@
 #include <crypto/hash.h>
 #include <crypto/skcipher.h>
 #include <crypto/gcm.h>
-#include <net/quic.h>
-#include "quic_crypto.h"
+#include <net/tquic.h>
+#include "tquic_crypto.h"
 
-/* QUIC v1 initial salt (RFC 9001 Section 5.2) */
-static const u8 quic_v1_initial_salt[20] = {
+/* TQUIC v1 initial salt (RFC 9001 Section 5.2) */
+static const u8 tquic_v1_initial_salt[20] = {
 	0x38, 0x76, 0x2c, 0xf7, 0xf5, 0x59, 0x34, 0xb3,
 	0x4d, 0x17, 0x9a, 0xe6, 0xa4, 0xc8, 0x0c, 0xad,
 	0xcc, 0xbb, 0x7f, 0x0a
 };
 
-/* QUIC v2 initial salt (RFC 9369) */
-static const u8 quic_v2_initial_salt[20] = {
+/* TQUIC v2 initial salt (RFC 9369) */
+static const u8 tquic_v2_initial_salt[20] = {
 	0x0d, 0xed, 0xe3, 0xde, 0xf7, 0x00, 0xa6, 0xdb,
 	0x81, 0x93, 0x81, 0xbe, 0x6e, 0x26, 0x9d, 0xcb,
 	0xf9, 0xbd, 0x2e, 0xd9
@@ -77,7 +78,7 @@ static const u8 quic_v2_initial_salt[20] = {
 #define TLS_ALERT_NO_APPLICATION_PROTOCOL	120
 
 /*
- * QUIC-TLS State Machine (RFC 9001 Section 4)
+ * TQUIC-TLS State Machine (RFC 9001 Section 4)
  *
  * Client states:
  *   START -> [send ClientHello] -> WAIT_SH
@@ -98,55 +99,82 @@ static const u8 quic_v2_initial_salt[20] = {
  *   WAIT_EE -> [recv EncryptedExtensions] -> WAIT_FINISHED (no cert)
  */
 /* TLS state names for debugging */
-static const char * const quic_tls_state_names[] = {
-	[QUIC_TLS_STATE_INITIAL]	= "INITIAL",
-	[QUIC_TLS_STATE_START]		= "START",
-	[QUIC_TLS_STATE_WAIT_SH]	= "WAIT_SH",
-	[QUIC_TLS_STATE_WAIT_EE]	= "WAIT_EE",
-	[QUIC_TLS_STATE_WAIT_CERT_CR]	= "WAIT_CERT_CR",
-	[QUIC_TLS_STATE_WAIT_CERT]	= "WAIT_CERT",
-	[QUIC_TLS_STATE_WAIT_CV]	= "WAIT_CV",
-	[QUIC_TLS_STATE_WAIT_FINISHED]	= "WAIT_FINISHED",
-	[QUIC_TLS_STATE_CONNECTED]	= "CONNECTED",
-	[QUIC_TLS_STATE_ERROR]		= "ERROR",
+static const char * const tquic_tls_state_names[] = {
+	[TQUIC_TLS_STATE_INITIAL]	= "INITIAL",
+	[TQUIC_TLS_STATE_START]		= "START",
+	[TQUIC_TLS_STATE_WAIT_SH]	= "WAIT_SH",
+	[TQUIC_TLS_STATE_WAIT_EE]	= "WAIT_EE",
+	[TQUIC_TLS_STATE_WAIT_CERT_CR]	= "WAIT_CERT_CR",
+	[TQUIC_TLS_STATE_WAIT_CERT]	= "WAIT_CERT",
+	[TQUIC_TLS_STATE_WAIT_CV]	= "WAIT_CV",
+	[TQUIC_TLS_STATE_WAIT_FINISHED]	= "WAIT_FINISHED",
+	[TQUIC_TLS_STATE_CONNECTED]	= "CONNECTED",
+	[TQUIC_TLS_STATE_ERROR]		= "ERROR",
 };
 
 /*
- * quic_tls_ctx_get - Get TLS context for connection
- * @conn: QUIC connection
+ * Per-connection TLS context storage
  *
- * Returns the TLS context for state machine validation.
- * TLS context is now embedded in the quic_connection struct.
+ * Since tquic_connection uses opaque void* pointers for crypto state,
+ * we define a wrapper structure that contains both the TLS state machine
+ * context and the crypto contexts for each encryption level.
  */
-static struct quic_tls_ctx *quic_tls_ctx_get(struct quic_connection *conn)
+struct tquic_crypto_wrapper {
+	struct tquic_tls_ctx tls;
+	struct tquic_crypto_ctx crypto[TQUIC_CRYPTO_MAX];
+};
+
+/*
+ * tquic_crypto_wrapper_get - Get crypto wrapper for connection
+ * @conn: TQUIC connection
+ *
+ * Returns the crypto wrapper containing TLS and crypto contexts.
+ * The wrapper is stored in conn->crypto_state.
+ */
+static struct tquic_crypto_wrapper *tquic_crypto_wrapper_get(struct tquic_connection *conn)
 {
-	return &conn->tls;
+	return (struct tquic_crypto_wrapper *)conn->crypto_state;
 }
 
 /*
- * quic_tls_state_name - Get human-readable state name
+ * tquic_tls_ctx_get - Get TLS context for connection
+ * @conn: TQUIC connection
+ *
+ * Returns the TLS context for state machine validation.
+ * TLS context is stored in the crypto wrapper.
+ */
+static struct tquic_tls_ctx *tquic_tls_ctx_get(struct tquic_connection *conn)
+{
+	struct tquic_crypto_wrapper *wrapper = tquic_crypto_wrapper_get(conn);
+	if (!wrapper)
+		return NULL;
+	return &wrapper->tls;
+}
+
+/*
+ * tquic_tls_state_name - Get human-readable state name
  * @state: TLS state value
  *
  * Returns string name for the TLS state, useful for debugging.
  */
-static inline const char *quic_tls_state_name(enum quic_tls_state state)
+static inline const char *tquic_tls_state_name(enum tquic_tls_state state)
 {
-	if (state < ARRAY_SIZE(quic_tls_state_names))
-		return quic_tls_state_names[state];
+	if (state < ARRAY_SIZE(tquic_tls_state_names))
+		return tquic_tls_state_names[state];
 	return "UNKNOWN";
 }
 
 /*
- * quic_tls_validate_level - Validate encryption level for message type
+ * tquic_tls_validate_level - Validate encryption level for message type
  * @msg_type: TLS handshake message type
- * @level: QUIC encryption level
+ * @level: TQUIC encryption level
  *
- * Validates that the TLS message is sent at the correct QUIC encryption
+ * Validates that the TLS message is sent at the correct TQUIC encryption
  * level per RFC 9001 Section 4.1.
  *
  * Returns 0 if valid, -EPROTO otherwise.
  */
-static int quic_tls_validate_level(u8 msg_type, u8 level)
+static int tquic_tls_validate_level(u8 msg_type, u8 level)
 {
 	/*
 	 * RFC 9001 Section 4.1.4:
@@ -158,7 +186,7 @@ static int quic_tls_validate_level(u8 msg_type, u8 level)
 	switch (msg_type) {
 	case TLS_HS_CLIENT_HELLO:
 	case TLS_HS_SERVER_HELLO:
-		if (level != QUIC_CRYPTO_INITIAL)
+		if (level != TQUIC_CRYPTO_INITIAL)
 			return -EPROTO;
 		break;
 
@@ -168,12 +196,12 @@ static int quic_tls_validate_level(u8 msg_type, u8 level)
 	case TLS_HS_CERTIFICATE_VERIFY:
 	case TLS_HS_FINISHED:
 	case TLS_HS_END_OF_EARLY_DATA:
-		if (level != QUIC_CRYPTO_HANDSHAKE)
+		if (level != TQUIC_CRYPTO_HANDSHAKE)
 			return -EPROTO;
 		break;
 
 	case TLS_HS_NEW_SESSION_TICKET:
-		if (level != QUIC_CRYPTO_APPLICATION)
+		if (level != TQUIC_CRYPTO_APPLICATION)
 			return -EPROTO;
 		break;
 
@@ -186,10 +214,10 @@ static int quic_tls_validate_level(u8 msg_type, u8 level)
 }
 
 /*
- * quic_tls_validate_transition - Validate TLS state machine transition
+ * tquic_tls_validate_transition - Validate TLS state machine transition
  * @ctx: TLS context
  * @msg_type: TLS handshake message type received
- * @level: QUIC encryption level
+ * @level: TQUIC encryption level
  *
  * Validates that the received TLS handshake message is allowed in the
  * current state per RFC 9001 Section 4. Invalid transitions indicate
@@ -197,11 +225,11 @@ static int quic_tls_validate_level(u8 msg_type, u8 level)
  *
  * Returns 0 if transition is valid, negative error code otherwise.
  */
-static int quic_tls_validate_transition(struct quic_tls_ctx *ctx,
+static int tquic_tls_validate_transition(struct tquic_tls_ctx *ctx,
 					u8 msg_type, u8 level)
 {
-	enum quic_tls_state old_state = ctx->state;
-	enum quic_tls_state new_state = QUIC_TLS_STATE_ERROR;
+	enum tquic_tls_state old_state = ctx->state;
+	enum tquic_tls_state new_state = TQUIC_TLS_STATE_ERROR;
 	int err = 0;
 
 	/*
@@ -209,24 +237,24 @@ static int quic_tls_validate_transition(struct quic_tls_ctx *ctx,
 	 * endpoints MUST NOT send or accept handshake messages
 	 * (except NewSessionTicket which uses 1-RTT).
 	 */
-	if (ctx->state == QUIC_TLS_STATE_CONNECTED) {
+	if (ctx->state == TQUIC_TLS_STATE_CONNECTED) {
 		if (msg_type == TLS_HS_NEW_SESSION_TICKET) {
 			/* NewSessionTicket is allowed after handshake */
-			if (level != QUIC_CRYPTO_APPLICATION) {
-				pr_warn("QUIC-TLS: NewSessionTicket at wrong level %u\n",
+			if (level != TQUIC_CRYPTO_APPLICATION) {
+				pr_warn("TQUIC-TLS: NewSessionTicket at wrong level %u\n",
 					level);
 				return -EPROTO;
 			}
 			return 0;
 		}
-		pr_warn("QUIC-TLS: handshake message %u after 1-RTT established\n",
+		pr_warn("TQUIC-TLS: handshake message %u after 1-RTT established\n",
 			msg_type);
 		return -EPROTO;
 	}
 
 	/* Error state is terminal */
-	if (ctx->state == QUIC_TLS_STATE_ERROR) {
-		pr_debug("QUIC-TLS: in error state, rejecting message %u\n",
+	if (ctx->state == TQUIC_TLS_STATE_ERROR) {
+		pr_debug("TQUIC-TLS: in error state, rejecting message %u\n",
 			 msg_type);
 		return -EPROTO;
 	}
@@ -238,74 +266,74 @@ static int quic_tls_validate_transition(struct quic_tls_ctx *ctx,
 	if (ctx->is_server) {
 		/* Server-side state machine */
 		switch (ctx->state) {
-		case QUIC_TLS_STATE_INITIAL:
-		case QUIC_TLS_STATE_START:
+		case TQUIC_TLS_STATE_INITIAL:
+		case TQUIC_TLS_STATE_START:
 			/* Server expects ClientHello at Initial level */
 			if (msg_type == TLS_HS_CLIENT_HELLO) {
-				if (level != QUIC_CRYPTO_INITIAL) {
-					pr_warn("QUIC-TLS: ClientHello at wrong level %u\n",
+				if (level != TQUIC_CRYPTO_INITIAL) {
+					pr_warn("TQUIC-TLS: ClientHello at wrong level %u\n",
 						level);
 					err = -EPROTO;
 					break;
 				}
-				new_state = QUIC_TLS_STATE_WAIT_FINISHED;
+				new_state = TQUIC_TLS_STATE_WAIT_FINISHED;
 			} else {
-				pr_warn("QUIC-TLS: server expected ClientHello, got %u\n",
+				pr_warn("TQUIC-TLS: server expected ClientHello, got %u\n",
 					msg_type);
 				err = -EPROTO;
 			}
 			break;
 
-		case QUIC_TLS_STATE_WAIT_FINISHED:
+		case TQUIC_TLS_STATE_WAIT_FINISHED:
 			/* Server expects Finished at Handshake level */
 			if (msg_type == TLS_HS_FINISHED) {
-				if (level != QUIC_CRYPTO_HANDSHAKE) {
-					pr_warn("QUIC-TLS: Finished at wrong level %u\n",
+				if (level != TQUIC_CRYPTO_HANDSHAKE) {
+					pr_warn("TQUIC-TLS: Finished at wrong level %u\n",
 						level);
 					err = -EPROTO;
 					break;
 				}
-				new_state = QUIC_TLS_STATE_CONNECTED;
+				new_state = TQUIC_TLS_STATE_CONNECTED;
 				ctx->handshake_complete = 1;
 			} else if (msg_type == TLS_HS_CERTIFICATE) {
 				/* Client certificate if requested */
-				if (level != QUIC_CRYPTO_HANDSHAKE) {
+				if (level != TQUIC_CRYPTO_HANDSHAKE) {
 					err = -EPROTO;
 					break;
 				}
-				new_state = QUIC_TLS_STATE_WAIT_CV;
+				new_state = TQUIC_TLS_STATE_WAIT_CV;
 			} else if (msg_type == TLS_HS_END_OF_EARLY_DATA) {
 				/* End of 0-RTT data */
-				if (level != QUIC_CRYPTO_HANDSHAKE) {
+				if (level != TQUIC_CRYPTO_HANDSHAKE) {
 					err = -EPROTO;
 					break;
 				}
 				/* Stay in WAIT_FINISHED */
 				return 0;
 			} else {
-				pr_warn("QUIC-TLS: server expected Finished, got %u\n",
+				pr_warn("TQUIC-TLS: server expected Finished, got %u\n",
 					msg_type);
 				err = -EPROTO;
 			}
 			break;
 
-		case QUIC_TLS_STATE_WAIT_CV:
+		case TQUIC_TLS_STATE_WAIT_CV:
 			/* Server expects CertificateVerify after client cert */
 			if (msg_type == TLS_HS_CERTIFICATE_VERIFY) {
-				if (level != QUIC_CRYPTO_HANDSHAKE) {
+				if (level != TQUIC_CRYPTO_HANDSHAKE) {
 					err = -EPROTO;
 					break;
 				}
-				new_state = QUIC_TLS_STATE_WAIT_FINISHED;
+				new_state = TQUIC_TLS_STATE_WAIT_FINISHED;
 			} else {
-				pr_warn("QUIC-TLS: expected CertificateVerify, got %u\n",
+				pr_warn("TQUIC-TLS: expected CertificateVerify, got %u\n",
 					msg_type);
 				err = -EPROTO;
 			}
 			break;
 
 		default:
-			pr_warn("QUIC-TLS: server in unexpected state %u\n",
+			pr_warn("TQUIC-TLS: server in unexpected state %u\n",
 				ctx->state);
 			err = -EPROTO;
 			break;
@@ -313,124 +341,124 @@ static int quic_tls_validate_transition(struct quic_tls_ctx *ctx,
 	} else {
 		/* Client-side state machine */
 		switch (ctx->state) {
-		case QUIC_TLS_STATE_INITIAL:
-		case QUIC_TLS_STATE_START:
+		case TQUIC_TLS_STATE_INITIAL:
+		case TQUIC_TLS_STATE_START:
 			/* Client shouldn't receive messages in START state */
-			pr_warn("QUIC-TLS: client received message %u in START\n",
+			pr_warn("TQUIC-TLS: client received message %u in START\n",
 				msg_type);
 			err = -EPROTO;
 			break;
 
-		case QUIC_TLS_STATE_WAIT_SH:
+		case TQUIC_TLS_STATE_WAIT_SH:
 			/* Client expects ServerHello at Initial level */
 			if (msg_type == TLS_HS_SERVER_HELLO) {
-				if (level != QUIC_CRYPTO_INITIAL) {
-					pr_warn("QUIC-TLS: ServerHello at wrong level %u\n",
+				if (level != TQUIC_CRYPTO_INITIAL) {
+					pr_warn("TQUIC-TLS: ServerHello at wrong level %u\n",
 						level);
 					err = -EPROTO;
 					break;
 				}
-				new_state = QUIC_TLS_STATE_WAIT_EE;
+				new_state = TQUIC_TLS_STATE_WAIT_EE;
 			} else {
-				pr_warn("QUIC-TLS: expected ServerHello, got %u\n",
+				pr_warn("TQUIC-TLS: expected ServerHello, got %u\n",
 					msg_type);
 				err = -EPROTO;
 			}
 			break;
 
-		case QUIC_TLS_STATE_WAIT_EE:
+		case TQUIC_TLS_STATE_WAIT_EE:
 			/* Client expects EncryptedExtensions at Handshake level */
 			if (msg_type == TLS_HS_ENCRYPTED_EXTENSIONS) {
-				if (level != QUIC_CRYPTO_HANDSHAKE) {
-					pr_warn("QUIC-TLS: EE at wrong level %u\n",
+				if (level != TQUIC_CRYPTO_HANDSHAKE) {
+					pr_warn("TQUIC-TLS: EE at wrong level %u\n",
 						level);
 					err = -EPROTO;
 					break;
 				}
 				/* Next state depends on PSK mode */
 				if (ctx->using_psk)
-					new_state = QUIC_TLS_STATE_WAIT_FINISHED;
+					new_state = TQUIC_TLS_STATE_WAIT_FINISHED;
 				else
-					new_state = QUIC_TLS_STATE_WAIT_CERT_CR;
+					new_state = TQUIC_TLS_STATE_WAIT_CERT_CR;
 			} else {
-				pr_warn("QUIC-TLS: expected EncryptedExtensions, got %u\n",
+				pr_warn("TQUIC-TLS: expected EncryptedExtensions, got %u\n",
 					msg_type);
 				err = -EPROTO;
 			}
 			break;
 
-		case QUIC_TLS_STATE_WAIT_CERT_CR:
+		case TQUIC_TLS_STATE_WAIT_CERT_CR:
 			/* Client expects Certificate or CertificateRequest */
 			if (msg_type == TLS_HS_CERTIFICATE_REQUEST) {
-				if (level != QUIC_CRYPTO_HANDSHAKE) {
+				if (level != TQUIC_CRYPTO_HANDSHAKE) {
 					err = -EPROTO;
 					break;
 				}
 				ctx->cert_request_sent = 1;
-				new_state = QUIC_TLS_STATE_WAIT_CERT;
+				new_state = TQUIC_TLS_STATE_WAIT_CERT;
 			} else if (msg_type == TLS_HS_CERTIFICATE) {
-				if (level != QUIC_CRYPTO_HANDSHAKE) {
+				if (level != TQUIC_CRYPTO_HANDSHAKE) {
 					err = -EPROTO;
 					break;
 				}
-				new_state = QUIC_TLS_STATE_WAIT_CV;
+				new_state = TQUIC_TLS_STATE_WAIT_CV;
 			} else {
-				pr_warn("QUIC-TLS: expected Cert or CertReq, got %u\n",
+				pr_warn("TQUIC-TLS: expected Cert or CertReq, got %u\n",
 					msg_type);
 				err = -EPROTO;
 			}
 			break;
 
-		case QUIC_TLS_STATE_WAIT_CERT:
+		case TQUIC_TLS_STATE_WAIT_CERT:
 			/* Client expects Certificate after CertificateRequest */
 			if (msg_type == TLS_HS_CERTIFICATE) {
-				if (level != QUIC_CRYPTO_HANDSHAKE) {
+				if (level != TQUIC_CRYPTO_HANDSHAKE) {
 					err = -EPROTO;
 					break;
 				}
-				new_state = QUIC_TLS_STATE_WAIT_CV;
+				new_state = TQUIC_TLS_STATE_WAIT_CV;
 			} else {
-				pr_warn("QUIC-TLS: expected Certificate, got %u\n",
+				pr_warn("TQUIC-TLS: expected Certificate, got %u\n",
 					msg_type);
 				err = -EPROTO;
 			}
 			break;
 
-		case QUIC_TLS_STATE_WAIT_CV:
+		case TQUIC_TLS_STATE_WAIT_CV:
 			/* Client expects CertificateVerify */
 			if (msg_type == TLS_HS_CERTIFICATE_VERIFY) {
-				if (level != QUIC_CRYPTO_HANDSHAKE) {
+				if (level != TQUIC_CRYPTO_HANDSHAKE) {
 					err = -EPROTO;
 					break;
 				}
-				new_state = QUIC_TLS_STATE_WAIT_FINISHED;
+				new_state = TQUIC_TLS_STATE_WAIT_FINISHED;
 			} else {
-				pr_warn("QUIC-TLS: expected CertificateVerify, got %u\n",
+				pr_warn("TQUIC-TLS: expected CertificateVerify, got %u\n",
 					msg_type);
 				err = -EPROTO;
 			}
 			break;
 
-		case QUIC_TLS_STATE_WAIT_FINISHED:
+		case TQUIC_TLS_STATE_WAIT_FINISHED:
 			/* Client expects Finished */
 			if (msg_type == TLS_HS_FINISHED) {
-				if (level != QUIC_CRYPTO_HANDSHAKE) {
-					pr_warn("QUIC-TLS: Finished at wrong level %u\n",
+				if (level != TQUIC_CRYPTO_HANDSHAKE) {
+					pr_warn("TQUIC-TLS: Finished at wrong level %u\n",
 						level);
 					err = -EPROTO;
 					break;
 				}
-				new_state = QUIC_TLS_STATE_CONNECTED;
+				new_state = TQUIC_TLS_STATE_CONNECTED;
 				ctx->handshake_complete = 1;
 			} else {
-				pr_warn("QUIC-TLS: expected Finished, got %u\n",
+				pr_warn("TQUIC-TLS: expected Finished, got %u\n",
 					msg_type);
 				err = -EPROTO;
 			}
 			break;
 
 		default:
-			pr_warn("QUIC-TLS: client in unexpected state %u\n",
+			pr_warn("TQUIC-TLS: client in unexpected state %u\n",
 				ctx->state);
 			err = -EPROTO;
 			break;
@@ -438,15 +466,15 @@ static int quic_tls_validate_transition(struct quic_tls_ctx *ctx,
 	}
 
 	if (err) {
-		ctx->state = QUIC_TLS_STATE_ERROR;
+		ctx->state = TQUIC_TLS_STATE_ERROR;
 		return err;
 	}
 
 	/* Log state transition for debugging */
 	if (new_state != ctx->state) {
-		pr_debug("QUIC-TLS: state %s -> %s (msg=%u, level=%u)\n",
-			 quic_tls_state_name(old_state),
-			 quic_tls_state_name(new_state),
+		pr_debug("TQUIC-TLS: state %s -> %s (msg=%u, level=%u)\n",
+			 tquic_tls_state_name(old_state),
+			 tquic_tls_state_name(new_state),
 			 msg_type, level);
 		ctx->state = new_state;
 	}
@@ -455,85 +483,85 @@ static int quic_tls_validate_transition(struct quic_tls_ctx *ctx,
 }
 
 /*
- * quic_tls_handle_alert - Handle TLS alert message
+ * tquic_tls_handle_alert - Handle TLS alert message
  * @ctx: TLS context
  * @alert_level: Alert level (1=warning, 2=fatal)
  * @alert_desc: Alert description code
  *
  * Processes TLS alert messages per RFC 8446 Section 6.
- * All alerts in QUIC-TLS are treated as connection errors per RFC 9001.
+ * All alerts in TQUIC-TLS are treated as connection errors per RFC 9001.
  *
- * Returns corresponding QUIC error code.
+ * Returns corresponding TQUIC error code.
  */
-static u64 quic_tls_handle_alert(struct quic_tls_ctx *ctx,
+static u64 tquic_tls_handle_alert(struct tquic_tls_ctx *ctx,
 				 u8 alert_level, u8 alert_desc)
 {
 	ctx->alert_received = 1;
 	ctx->alert_code = alert_desc;
-	ctx->state = QUIC_TLS_STATE_ERROR;
+	ctx->state = TQUIC_TLS_STATE_ERROR;
 
-	pr_warn("QUIC-TLS: received alert level=%u desc=%u\n",
+	pr_warn("TQUIC-TLS: received alert level=%u desc=%u\n",
 		alert_level, alert_desc);
 
 	/*
-	 * Map TLS alerts to QUIC crypto errors.
-	 * Per RFC 9001 Section 4.8: QUIC_ERROR_CRYPTO_BASE (0x100) + alert
+	 * Map TLS alerts to TQUIC crypto errors.
+	 * Per RFC 9001 Section 4.8: TQUIC_ERROR_CRYPTO_BASE (0x100) + alert
 	 */
-	return QUIC_ERROR_CRYPTO_BASE + alert_desc;
+	return TQUIC_ERROR_CRYPTO_BASE + alert_desc;
 }
 
 /*
- * quic_tls_init - Initialize TLS state machine for connection
- * @conn: QUIC connection
+ * tquic_tls_init - Initialize TLS state machine for connection
+ * @conn: TQUIC connection
  * @is_server: True if server, false if client
  *
  * Initializes the TLS state machine for a new connection.
  */
-void quic_tls_init(struct quic_connection *conn, bool is_server)
+void tquic_tls_init(struct tquic_connection *conn, bool is_server)
 {
-	struct quic_tls_ctx *ctx = quic_tls_ctx_get(conn);
+	struct tquic_tls_ctx *ctx = tquic_tls_ctx_get(conn);
 
 	memset(ctx, 0, sizeof(*ctx));
-	ctx->state = QUIC_TLS_STATE_INITIAL;
+	ctx->state = TQUIC_TLS_STATE_INITIAL;
 	ctx->is_server = is_server ? 1 : 0;
 }
-EXPORT_SYMBOL_GPL(quic_tls_init);
+EXPORT_SYMBOL_GPL(tquic_tls_init);
 
 /*
- * quic_tls_start_handshake - Begin TLS handshake
- * @conn: QUIC connection
+ * tquic_tls_start_handshake - Begin TLS handshake
+ * @conn: TQUIC connection
  *
  * Transitions from INITIAL to START state, preparing for handshake.
  * For clients, also transitions to WAIT_SH after sending ClientHello.
  */
-void quic_tls_start_handshake(struct quic_connection *conn)
+void tquic_tls_start_handshake(struct tquic_connection *conn)
 {
-	struct quic_tls_ctx *ctx = quic_tls_ctx_get(conn);
+	struct tquic_tls_ctx *ctx = tquic_tls_ctx_get(conn);
 
-	if (ctx->state != QUIC_TLS_STATE_INITIAL) {
-		pr_warn("QUIC-TLS: start_handshake called in state %s\n",
-			quic_tls_state_name(ctx->state));
+	if (ctx->state != TQUIC_TLS_STATE_INITIAL) {
+		pr_warn("TQUIC-TLS: start_handshake called in state %s\n",
+			tquic_tls_state_name(ctx->state));
 		return;
 	}
 
-	ctx->state = QUIC_TLS_STATE_START;
+	ctx->state = TQUIC_TLS_STATE_START;
 
 	/* Client transitions to WAIT_SH after sending ClientHello */
 	if (!ctx->is_server) {
-		pr_debug("QUIC-TLS: client starting handshake, waiting for ServerHello\n");
-		ctx->state = QUIC_TLS_STATE_WAIT_SH;
+		pr_debug("TQUIC-TLS: client starting handshake, waiting for ServerHello\n");
+		ctx->state = TQUIC_TLS_STATE_WAIT_SH;
 	} else {
-		pr_debug("QUIC-TLS: server starting handshake, waiting for ClientHello\n");
+		pr_debug("TQUIC-TLS: server starting handshake, waiting for ClientHello\n");
 	}
 }
-EXPORT_SYMBOL_GPL(quic_tls_start_handshake);
+EXPORT_SYMBOL_GPL(tquic_tls_start_handshake);
 
 /*
- * quic_tls_process_handshake_message - Validate and process TLS message
- * @conn: QUIC connection
+ * tquic_tls_process_handshake_message - Validate and process TLS message
+ * @conn: TQUIC connection
  * @data: TLS handshake message data
  * @len: Length of message data
- * @level: QUIC encryption level
+ * @level: TQUIC encryption level
  *
  * Validates the TLS handshake message against the state machine and
  * updates state accordingly. This is the main entry point for TLS
@@ -541,16 +569,16 @@ EXPORT_SYMBOL_GPL(quic_tls_start_handshake);
  *
  * Returns 0 on success, negative error code on protocol violation.
  */
-int quic_tls_process_handshake_message(struct quic_connection *conn,
+int tquic_tls_process_handshake_message(struct tquic_connection *conn,
 				       const u8 *data, u32 len, u8 level)
 {
-	struct quic_tls_ctx *ctx = quic_tls_ctx_get(conn);
+	struct tquic_tls_ctx *ctx = tquic_tls_ctx_get(conn);
 	u8 msg_type;
 	u32 msg_len;
 	int err;
 
 	if (len < 4) {
-		pr_warn("QUIC-TLS: message too short (%u bytes)\n", len);
+		pr_warn("TQUIC-TLS: message too short (%u bytes)\n", len);
 		return -EINVAL;
 	}
 
@@ -561,22 +589,22 @@ int quic_tls_process_handshake_message(struct quic_connection *conn,
 	msg_len = ((u32)data[1] << 16) | ((u32)data[2] << 8) | data[3];
 
 	if (msg_len > len - 4) {
-		pr_warn("QUIC-TLS: message length %u exceeds data %u\n",
+		pr_warn("TQUIC-TLS: message length %u exceeds data %u\n",
 			msg_len, len - 4);
 		return -EINVAL;
 	}
 
 	/* First validate the encryption level for this message type */
-	err = quic_tls_validate_level(msg_type, level);
+	err = tquic_tls_validate_level(msg_type, level);
 	if (err) {
-		pr_warn("QUIC-TLS: message type %u at wrong level %u\n",
+		pr_warn("TQUIC-TLS: message type %u at wrong level %u\n",
 			msg_type, level);
-		ctx->state = QUIC_TLS_STATE_ERROR;
+		ctx->state = TQUIC_TLS_STATE_ERROR;
 		return err;
 	}
 
 	/* Validate state machine transition */
-	err = quic_tls_validate_transition(ctx, msg_type, level);
+	err = tquic_tls_validate_transition(ctx, msg_type, level);
 	if (err) {
 		/* State machine already set to ERROR */
 		return err;
@@ -584,104 +612,104 @@ int quic_tls_process_handshake_message(struct quic_connection *conn,
 
 	return 0;
 }
-EXPORT_SYMBOL_GPL(quic_tls_process_handshake_message);
+EXPORT_SYMBOL_GPL(tquic_tls_process_handshake_message);
 
 /*
- * quic_tls_is_handshake_complete - Check if handshake is complete
- * @conn: QUIC connection
+ * tquic_tls_is_handshake_complete - Check if handshake is complete
+ * @conn: TQUIC connection
  *
  * Returns true if TLS handshake has completed successfully.
  */
-bool quic_tls_is_handshake_complete(struct quic_connection *conn)
+bool tquic_tls_is_handshake_complete(struct tquic_connection *conn)
 {
-	struct quic_tls_ctx *ctx = quic_tls_ctx_get(conn);
+	struct tquic_tls_ctx *ctx = tquic_tls_ctx_get(conn);
 
 	return ctx->handshake_complete;
 }
-EXPORT_SYMBOL_GPL(quic_tls_is_handshake_complete);
+EXPORT_SYMBOL_GPL(tquic_tls_is_handshake_complete);
 
 /*
- * quic_tls_get_state - Get current TLS state
- * @conn: QUIC connection
+ * tquic_tls_get_state - Get current TLS state
+ * @conn: TQUIC connection
  *
  * Returns current TLS handshake state as integer.
  */
-int quic_tls_get_state(struct quic_connection *conn)
+int tquic_tls_get_state(struct tquic_connection *conn)
 {
-	struct quic_tls_ctx *ctx = quic_tls_ctx_get(conn);
+	struct tquic_tls_ctx *ctx = tquic_tls_ctx_get(conn);
 
 	return ctx->state;
 }
-EXPORT_SYMBOL_GPL(quic_tls_get_state);
+EXPORT_SYMBOL_GPL(tquic_tls_get_state);
 
 /*
- * quic_tls_set_psk_mode - Enable PSK-only mode
- * @conn: QUIC connection
+ * tquic_tls_set_psk_mode - Enable PSK-only mode
+ * @conn: TQUIC connection
  * @using_psk: True if using PSK without certificates
  *
  * Sets PSK mode which affects state machine (skips cert states).
  */
-void quic_tls_set_psk_mode(struct quic_connection *conn, bool using_psk)
+void tquic_tls_set_psk_mode(struct tquic_connection *conn, bool using_psk)
 {
-	struct quic_tls_ctx *ctx = quic_tls_ctx_get(conn);
+	struct tquic_tls_ctx *ctx = tquic_tls_ctx_get(conn);
 
 	ctx->using_psk = using_psk ? 1 : 0;
 }
-EXPORT_SYMBOL_GPL(quic_tls_set_psk_mode);
+EXPORT_SYMBOL_GPL(tquic_tls_set_psk_mode);
 
 /*
- * quic_tls_process_alert - Process a TLS alert
- * @conn: QUIC connection
+ * tquic_tls_process_alert - Process a TLS alert
+ * @conn: TQUIC connection
  * @alert_level: Alert level (1=warning, 2=fatal)
  * @alert_desc: Alert description code
  *
  * Handles incoming TLS alerts per RFC 9001 Section 4.8.
- * Returns the corresponding QUIC transport error code.
+ * Returns the corresponding TQUIC transport error code.
  */
-u64 quic_tls_process_alert(struct quic_connection *conn,
+u64 tquic_tls_process_alert(struct tquic_connection *conn,
 			   u8 alert_level, u8 alert_desc)
 {
-	struct quic_tls_ctx *ctx = quic_tls_ctx_get(conn);
+	struct tquic_tls_ctx *ctx = tquic_tls_ctx_get(conn);
 
-	return quic_tls_handle_alert(ctx, alert_level, alert_desc);
+	return tquic_tls_handle_alert(ctx, alert_level, alert_desc);
 }
-EXPORT_SYMBOL_GPL(quic_tls_process_alert);
+EXPORT_SYMBOL_GPL(tquic_tls_process_alert);
 
 /*
- * quic_tls_in_error_state - Check if TLS is in error state
- * @conn: QUIC connection
+ * tquic_tls_in_error_state - Check if TLS is in error state
+ * @conn: TQUIC connection
  *
  * Returns true if TLS state machine is in error state.
  */
-bool quic_tls_in_error_state(struct quic_connection *conn)
+bool tquic_tls_in_error_state(struct tquic_connection *conn)
 {
-	struct quic_tls_ctx *ctx = quic_tls_ctx_get(conn);
+	struct tquic_tls_ctx *ctx = tquic_tls_ctx_get(conn);
 
-	return ctx->state == QUIC_TLS_STATE_ERROR;
+	return ctx->state == TQUIC_TLS_STATE_ERROR;
 }
-EXPORT_SYMBOL_GPL(quic_tls_in_error_state);
+EXPORT_SYMBOL_GPL(tquic_tls_in_error_state);
 
 /*
- * quic_tls_get_alert_code - Get the alert code if in error state
- * @conn: QUIC connection
+ * tquic_tls_get_alert_code - Get the alert code if in error state
+ * @conn: TQUIC connection
  *
  * Returns the TLS alert code that caused the error, or 0 if no alert.
  */
-u8 quic_tls_get_alert_code(struct quic_connection *conn)
+u8 tquic_tls_get_alert_code(struct tquic_connection *conn)
 {
-	struct quic_tls_ctx *ctx = quic_tls_ctx_get(conn);
+	struct tquic_tls_ctx *ctx = tquic_tls_ctx_get(conn);
 
 	return ctx->alert_code;
 }
-EXPORT_SYMBOL_GPL(quic_tls_get_alert_code);
+EXPORT_SYMBOL_GPL(tquic_tls_get_alert_code);
 
-/* HKDF labels for QUIC */
-static const char quic_client_in_label[] = "client in";
-static const char quic_server_in_label[] = "server in";
-static const char quic_key_label[] = "quic key";
-static const char quic_iv_label[] = "quic iv";
-static const char quic_hp_label[] = "quic hp";
-static const char quic_ku_label[] = "quic ku";
+/* HKDF labels for TQUIC */
+static const char tquic_client_in_label[] = "client in";
+static const char tquic_server_in_label[] = "server in";
+static const char tquic_key_label[] = "quic key";
+static const char tquic_iv_label[] = "quic iv";
+static const char tquic_hp_label[] = "quic hp";
+static const char tquic_ku_label[] = "quic ku";
 
 struct hkdf_ctx {
 	struct crypto_shash *hash;
@@ -768,7 +796,7 @@ static int hkdf_expand_label(struct hkdf_ctx *ctx, const u8 *prk,
 	return 0;
 }
 
-int quic_crypto_init(struct quic_crypto_ctx *ctx, u16 cipher_type)
+int tquic_crypto_init(struct tquic_crypto_ctx *ctx, u16 cipher_type)
 {
 	const char *aead_name;
 	const char *cipher_name;
@@ -776,19 +804,19 @@ int quic_crypto_init(struct quic_crypto_ctx *ctx, u16 cipher_type)
 	int key_len;
 
 	switch (cipher_type) {
-	case QUIC_CIPHER_AES_128_GCM_SHA256:
+	case TQUIC_CIPHER_AES_128_GCM_SHA256:
 		aead_name = "gcm(aes)";
 		cipher_name = "ecb(aes)";
 		hash_name = "hmac(sha256)";
 		key_len = 16;
 		break;
-	case QUIC_CIPHER_AES_256_GCM_SHA384:
+	case TQUIC_CIPHER_AES_256_GCM_SHA384:
 		aead_name = "gcm(aes)";
 		cipher_name = "ecb(aes)";
 		hash_name = "hmac(sha384)";
 		key_len = 32;
 		break;
-	case QUIC_CIPHER_CHACHA20_POLY1305_SHA256:
+	case TQUIC_CIPHER_CHACHA20_POLY1305_SHA256:
 		aead_name = "rfc7539(chacha20,poly1305)";
 		cipher_name = "chacha20";
 		hash_name = "hmac(sha256)";
@@ -870,7 +898,7 @@ int quic_crypto_init(struct quic_crypto_ctx *ctx, u16 cipher_type)
 	return 0;
 }
 
-void quic_crypto_destroy(struct quic_crypto_ctx *ctx)
+void tquic_crypto_destroy(struct tquic_crypto_ctx *ctx)
 {
 	if (ctx->hash)
 		crypto_free_shash(ctx->hash);
@@ -886,10 +914,16 @@ void quic_crypto_destroy(struct quic_crypto_ctx *ctx)
 	memset(ctx, 0, sizeof(*ctx));
 }
 
-int quic_crypto_derive_initial_secrets(struct quic_connection *conn,
-				       struct quic_connection_id *cid)
+int tquic_crypto_derive_initial_secrets(struct tquic_connection *conn,
+				       struct tquic_cid *cid)
 {
-	struct quic_crypto_ctx *ctx = &conn->crypto[QUIC_CRYPTO_INITIAL];
+	struct tquic_crypto_wrapper *wrapper = tquic_crypto_wrapper_get(conn);
+	struct tquic_crypto_ctx *ctx;
+
+	if (!wrapper)
+		return -EINVAL;
+
+	ctx = &wrapper->crypto[TQUIC_CRYPTO_INITIAL];
 	struct hkdf_ctx hkdf;
 	const u8 *salt;
 	u8 initial_secret[32];
@@ -898,7 +932,7 @@ int quic_crypto_derive_initial_secrets(struct quic_connection *conn,
 	int err;
 
 	/* Initialize with AES-128-GCM-SHA256 for initial packets */
-	err = quic_crypto_init(ctx, QUIC_CIPHER_AES_128_GCM_SHA256);
+	err = tquic_crypto_init(ctx, TQUIC_CIPHER_AES_128_GCM_SHA256);
 	if (err)
 		return err;
 
@@ -906,40 +940,40 @@ int quic_crypto_derive_initial_secrets(struct quic_connection *conn,
 	hkdf.hash_len = 32;  /* SHA-256 */
 
 	/* Select salt based on version */
-	if (conn->version == QUIC_VERSION_2)
-		salt = quic_v2_initial_salt;
+	if (conn->version == TQUIC_VERSION_2)
+		salt = tquic_v2_initial_salt;
 	else
-		salt = quic_v1_initial_salt;
+		salt = tquic_v1_initial_salt;
 
 	/* Extract initial secret */
-	err = hkdf_extract(&hkdf, salt, 20, cid->data, cid->len, initial_secret);
+	err = hkdf_extract(&hkdf, salt, 20, cid->id, cid->len, initial_secret);
 	if (err)
 		goto out;
 
 	/* Derive client and server secrets */
-	err = hkdf_expand_label(&hkdf, initial_secret, quic_client_in_label,
-				strlen(quic_client_in_label), NULL, 0,
+	err = hkdf_expand_label(&hkdf, initial_secret, tquic_client_in_label,
+				strlen(tquic_client_in_label), NULL, 0,
 				client_secret, 32);
 	if (err)
 		goto out;
 
-	err = hkdf_expand_label(&hkdf, initial_secret, quic_server_in_label,
-				strlen(quic_server_in_label), NULL, 0,
+	err = hkdf_expand_label(&hkdf, initial_secret, tquic_server_in_label,
+				strlen(tquic_server_in_label), NULL, 0,
 				server_secret, 32);
 	if (err)
 		goto out;
 
 	/* Derive keys and IVs */
-	if (conn->is_server) {
+	if (conn->role == TQUIC_ROLE_SERVER) {
 		/* Server: RX uses client secret, TX uses server secret */
-		err = quic_crypto_derive_secrets(ctx, client_secret, 32);
+		err = tquic_crypto_derive_secrets(ctx, client_secret, 32);
 		if (err)
 			goto out;
 		memcpy(ctx->rx.secret, client_secret, 32);
 		memcpy(ctx->tx.secret, server_secret, 32);
 	} else {
 		/* Client: TX uses client secret, RX uses server secret */
-		err = quic_crypto_derive_secrets(ctx, client_secret, 32);
+		err = tquic_crypto_derive_secrets(ctx, client_secret, 32);
 		if (err)
 			goto out;
 		memcpy(ctx->tx.secret, client_secret, 32);
@@ -947,39 +981,39 @@ int quic_crypto_derive_initial_secrets(struct quic_connection *conn,
 	}
 
 	/* Derive TX keys */
-	err = hkdf_expand_label(&hkdf, ctx->tx.secret, quic_key_label,
-				strlen(quic_key_label), NULL, 0,
+	err = hkdf_expand_label(&hkdf, ctx->tx.secret, tquic_key_label,
+				strlen(tquic_key_label), NULL, 0,
 				ctx->tx.key, ctx->tx.key_len);
 	if (err)
 		goto out;
 
-	err = hkdf_expand_label(&hkdf, ctx->tx.secret, quic_iv_label,
-				strlen(quic_iv_label), NULL, 0,
+	err = hkdf_expand_label(&hkdf, ctx->tx.secret, tquic_iv_label,
+				strlen(tquic_iv_label), NULL, 0,
 				ctx->tx.iv, ctx->tx.iv_len);
 	if (err)
 		goto out;
 
-	err = hkdf_expand_label(&hkdf, ctx->tx.secret, quic_hp_label,
-				strlen(quic_hp_label), NULL, 0,
+	err = hkdf_expand_label(&hkdf, ctx->tx.secret, tquic_hp_label,
+				strlen(tquic_hp_label), NULL, 0,
 				ctx->tx.hp_key, ctx->tx.hp_key_len);
 	if (err)
 		goto out;
 
 	/* Derive RX keys */
-	err = hkdf_expand_label(&hkdf, ctx->rx.secret, quic_key_label,
-				strlen(quic_key_label), NULL, 0,
+	err = hkdf_expand_label(&hkdf, ctx->rx.secret, tquic_key_label,
+				strlen(tquic_key_label), NULL, 0,
 				ctx->rx.key, ctx->rx.key_len);
 	if (err)
 		goto out;
 
-	err = hkdf_expand_label(&hkdf, ctx->rx.secret, quic_iv_label,
-				strlen(quic_iv_label), NULL, 0,
+	err = hkdf_expand_label(&hkdf, ctx->rx.secret, tquic_iv_label,
+				strlen(tquic_iv_label), NULL, 0,
 				ctx->rx.iv, ctx->rx.iv_len);
 	if (err)
 		goto out;
 
-	err = hkdf_expand_label(&hkdf, ctx->rx.secret, quic_hp_label,
-				strlen(quic_hp_label), NULL, 0,
+	err = hkdf_expand_label(&hkdf, ctx->rx.secret, tquic_hp_label,
+				strlen(tquic_hp_label), NULL, 0,
 				ctx->rx.hp_key, ctx->rx.hp_key_len);
 	if (err)
 		goto out;
@@ -1020,7 +1054,7 @@ out:
 	return err;
 }
 
-int quic_crypto_derive_secrets(struct quic_crypto_ctx *ctx,
+int tquic_crypto_derive_secrets(struct tquic_crypto_ctx *ctx,
 			       const u8 *secret, u32 secret_len)
 {
 	struct hkdf_ctx hkdf;
@@ -1033,22 +1067,22 @@ int quic_crypto_derive_secrets(struct quic_crypto_ctx *ctx,
 	hkdf.hash_len = secret_len;
 
 	/* Derive key */
-	err = hkdf_expand_label(&hkdf, secret, quic_key_label,
-				strlen(quic_key_label), NULL, 0,
+	err = hkdf_expand_label(&hkdf, secret, tquic_key_label,
+				strlen(tquic_key_label), NULL, 0,
 				ctx->tx.key, ctx->tx.key_len);
 	if (err)
 		return err;
 
 	/* Derive IV */
-	err = hkdf_expand_label(&hkdf, secret, quic_iv_label,
-				strlen(quic_iv_label), NULL, 0,
+	err = hkdf_expand_label(&hkdf, secret, tquic_iv_label,
+				strlen(tquic_iv_label), NULL, 0,
 				ctx->tx.iv, ctx->tx.iv_len);
 	if (err)
 		return err;
 
 	/* Derive HP key */
-	err = hkdf_expand_label(&hkdf, secret, quic_hp_label,
-				strlen(quic_hp_label), NULL, 0,
+	err = hkdf_expand_label(&hkdf, secret, tquic_hp_label,
+				strlen(tquic_hp_label), NULL, 0,
 				ctx->tx.hp_key, ctx->tx.hp_key_len);
 	if (err)
 		return err;
@@ -1056,7 +1090,7 @@ int quic_crypto_derive_secrets(struct quic_crypto_ctx *ctx,
 	return 0;
 }
 
-static void quic_crypto_compute_nonce(const u8 *iv, u64 pn, u8 *nonce)
+static void tquic_crypto_compute_nonce(const u8 *iv, u64 pn, u8 *nonce)
 {
 	int i;
 
@@ -1067,7 +1101,7 @@ static void quic_crypto_compute_nonce(const u8 *iv, u64 pn, u8 *nonce)
 		nonce[11 - i] ^= (pn >> (i * 8)) & 0xff;
 }
 
-int quic_crypto_encrypt(struct quic_crypto_ctx *ctx, struct sk_buff *skb,
+int tquic_crypto_encrypt(struct tquic_crypto_ctx *ctx, struct sk_buff *skb,
 			u64 pn)
 {
 	struct aead_request *req;
@@ -1081,11 +1115,11 @@ int quic_crypto_encrypt(struct quic_crypto_ctx *ctx, struct sk_buff *skb,
 	if (!ctx->tx_aead || !ctx->keys_available)
 		return -EINVAL;
 
-	header_len = QUIC_SKB_CB(skb)->header_len;
+	header_len = TQUIC_SKB_CB(skb)->header_len;
 	payload = skb->data + header_len;
 	payload_len = skb->len - header_len;
 
-	quic_crypto_compute_nonce(ctx->tx.iv, pn, nonce);
+	tquic_crypto_compute_nonce(ctx->tx.iv, pn, nonce);
 
 	req = aead_request_alloc(ctx->tx_aead, GFP_ATOMIC);
 	if (!req)
@@ -1117,7 +1151,7 @@ int quic_crypto_encrypt(struct quic_crypto_ctx *ctx, struct sk_buff *skb,
 	return err;
 }
 
-int quic_crypto_decrypt(struct quic_crypto_ctx *ctx, struct sk_buff *skb,
+int tquic_crypto_decrypt(struct tquic_crypto_ctx *ctx, struct sk_buff *skb,
 			u64 pn)
 {
 	struct aead_request *req;
@@ -1131,14 +1165,14 @@ int quic_crypto_decrypt(struct quic_crypto_ctx *ctx, struct sk_buff *skb,
 	if (!ctx->rx_aead || !ctx->keys_available)
 		return -EINVAL;
 
-	header_len = QUIC_SKB_CB(skb)->header_len;
+	header_len = TQUIC_SKB_CB(skb)->header_len;
 	payload = skb->data + header_len;
 	payload_len = skb->len - header_len;
 
 	if (payload_len < 16)
 		return -EINVAL;  /* Too short for auth tag */
 
-	quic_crypto_compute_nonce(ctx->rx.iv, pn, nonce);
+	tquic_crypto_compute_nonce(ctx->rx.iv, pn, nonce);
 
 	req = aead_request_alloc(ctx->rx_aead, GFP_ATOMIC);
 	if (!req)
@@ -1161,7 +1195,7 @@ int quic_crypto_decrypt(struct quic_crypto_ctx *ctx, struct sk_buff *skb,
 	return err;
 }
 
-int quic_crypto_hp_mask(struct quic_crypto_ctx *ctx, const u8 *sample,
+int tquic_crypto_hp_mask(struct tquic_crypto_ctx *ctx, const u8 *sample,
 			u8 *mask)
 {
 	int err;
@@ -1170,8 +1204,8 @@ int quic_crypto_hp_mask(struct quic_crypto_ctx *ctx, const u8 *sample,
 		return -EINVAL;
 
 	/* For AES, we encrypt a block of zeros with the sample as part of the input */
-	if (ctx->cipher_type == QUIC_CIPHER_AES_128_GCM_SHA256 ||
-	    ctx->cipher_type == QUIC_CIPHER_AES_256_GCM_SHA384) {
+	if (ctx->cipher_type == TQUIC_CIPHER_AES_128_GCM_SHA256 ||
+	    ctx->cipher_type == TQUIC_CIPHER_AES_256_GCM_SHA384) {
 		crypto_cipher_encrypt_one(ctx->rx_hp, mask, sample);
 	} else {
 		/* ChaCha20: counter=sample[0..3], nonce=sample[4..15] */
@@ -1183,9 +1217,15 @@ int quic_crypto_hp_mask(struct quic_crypto_ctx *ctx, const u8 *sample,
 	return err;
 }
 
-int quic_crypto_update_keys(struct quic_connection *conn)
+int tquic_crypto_update_keys(struct tquic_connection *conn)
 {
-	struct quic_crypto_ctx *ctx = &conn->crypto[QUIC_CRYPTO_APPLICATION];
+	struct tquic_crypto_wrapper *wrapper = tquic_crypto_wrapper_get(conn);
+	struct tquic_crypto_ctx *ctx;
+
+	if (!wrapper)
+		return -EINVAL;
+
+	ctx = &wrapper->crypto[TQUIC_CRYPTO_APPLICATION];
 	struct hkdf_ctx hkdf;
 	u8 new_secret[64];
 	int err;
@@ -1197,8 +1237,8 @@ int quic_crypto_update_keys(struct quic_connection *conn)
 	hkdf.hash_len = ctx->tx.secret_len;
 
 	/* Derive new secret from current secret */
-	err = hkdf_expand_label(&hkdf, ctx->tx.secret, quic_ku_label,
-				strlen(quic_ku_label), NULL, 0,
+	err = hkdf_expand_label(&hkdf, ctx->tx.secret, tquic_ku_label,
+				strlen(tquic_ku_label), NULL, 0,
 				new_secret, ctx->tx.secret_len);
 	if (err)
 		return err;
@@ -1206,14 +1246,14 @@ int quic_crypto_update_keys(struct quic_connection *conn)
 	/* Derive new keys from new secret */
 	memcpy(ctx->tx.secret, new_secret, ctx->tx.secret_len);
 
-	err = hkdf_expand_label(&hkdf, ctx->tx.secret, quic_key_label,
-				strlen(quic_key_label), NULL, 0,
+	err = hkdf_expand_label(&hkdf, ctx->tx.secret, tquic_key_label,
+				strlen(tquic_key_label), NULL, 0,
 				ctx->tx.key, ctx->tx.key_len);
 	if (err)
 		goto out;
 
-	err = hkdf_expand_label(&hkdf, ctx->tx.secret, quic_iv_label,
-				strlen(quic_iv_label), NULL, 0,
+	err = hkdf_expand_label(&hkdf, ctx->tx.secret, tquic_iv_label,
+				strlen(tquic_iv_label), NULL, 0,
 				ctx->tx.iv, ctx->tx.iv_len);
 	if (err)
 		goto out;
@@ -1225,7 +1265,6 @@ int quic_crypto_update_keys(struct quic_connection *conn)
 
 	/* Toggle key phase */
 	ctx->key_phase = !ctx->key_phase;
-	conn->key_phase = ctx->key_phase;
 
 out:
 	memzero_explicit(new_secret, sizeof(new_secret));
@@ -1233,7 +1272,7 @@ out:
 }
 
 /* Helper to apply header protection */
-int quic_crypto_protect_header(struct quic_crypto_ctx *ctx, struct sk_buff *skb,
+int tquic_crypto_protect_header(struct tquic_crypto_ctx *ctx, struct sk_buff *skb,
 			       u8 pn_offset, u8 pn_len)
 {
 	u8 mask[16];
@@ -1248,8 +1287,8 @@ int quic_crypto_protect_header(struct quic_crypto_ctx *ctx, struct sk_buff *skb,
 	sample = skb->data + pn_offset + 4;
 
 	/* Generate mask using TX HP key */
-	if (ctx->cipher_type == QUIC_CIPHER_AES_128_GCM_SHA256 ||
-	    ctx->cipher_type == QUIC_CIPHER_AES_256_GCM_SHA384) {
+	if (ctx->cipher_type == TQUIC_CIPHER_AES_128_GCM_SHA256 ||
+	    ctx->cipher_type == TQUIC_CIPHER_AES_256_GCM_SHA384) {
 		crypto_cipher_encrypt_one(ctx->tx_hp, mask, sample);
 	} else {
 		memset(mask, 0, 16);
@@ -1275,7 +1314,7 @@ int quic_crypto_protect_header(struct quic_crypto_ctx *ctx, struct sk_buff *skb,
 }
 
 /* Helper to remove header protection */
-int quic_crypto_unprotect_header(struct quic_crypto_ctx *ctx, struct sk_buff *skb,
+int tquic_crypto_unprotect_header(struct tquic_crypto_ctx *ctx, struct sk_buff *skb,
 				 u8 *pn_offset, u8 *pn_len)
 {
 	u8 mask[16];
@@ -1316,8 +1355,8 @@ int quic_crypto_unprotect_header(struct quic_crypto_ctx *ctx, struct sk_buff *sk
 	sample = skb->data + sample_offset;
 
 	/* Generate mask using RX HP key */
-	if (ctx->cipher_type == QUIC_CIPHER_AES_128_GCM_SHA256 ||
-	    ctx->cipher_type == QUIC_CIPHER_AES_256_GCM_SHA384) {
+	if (ctx->cipher_type == TQUIC_CIPHER_AES_128_GCM_SHA256 ||
+	    ctx->cipher_type == TQUIC_CIPHER_AES_256_GCM_SHA384) {
 		crypto_cipher_encrypt_one(ctx->rx_hp, mask, sample);
 	} else {
 		memset(mask, 0, 16);
@@ -1345,7 +1384,7 @@ int quic_crypto_unprotect_header(struct quic_crypto_ctx *ctx, struct sk_buff *sk
  */
 
 /**
- * quic_tls_build_sni_extension - Build SNI extension for ClientHello
+ * tquic_tls_build_sni_extension - Build SNI extension for ClientHello
  * @hostname: Server hostname (null-terminated)
  * @buf: Output buffer
  * @buf_len: Buffer size
@@ -1361,7 +1400,7 @@ int quic_crypto_unprotect_header(struct quic_crypto_ctx *ctx, struct sk_buff *sk
  *
  * Return: Number of bytes written on success, negative error code on failure
  */
-int quic_tls_build_sni_extension(const char *hostname, u8 *buf, size_t buf_len)
+int tquic_tls_build_sni_extension(const char *hostname, u8 *buf, size_t buf_len)
 {
 	size_t hostname_len;
 	size_t ext_data_len;
@@ -1408,10 +1447,10 @@ int quic_tls_build_sni_extension(const char *hostname, u8 *buf, size_t buf_len)
 
 	return total_len;
 }
-EXPORT_SYMBOL_GPL(quic_tls_build_sni_extension);
+EXPORT_SYMBOL_GPL(tquic_tls_build_sni_extension);
 
 /**
- * quic_tls_build_alpn_extension - Build ALPN extension
+ * tquic_tls_build_alpn_extension - Build ALPN extension
  * @alpn_list: ALPN protocol list (length-prefixed format per RFC 7301)
  * @alpn_len: Length of ALPN list
  * @buf: Output buffer
@@ -1426,7 +1465,7 @@ EXPORT_SYMBOL_GPL(quic_tls_build_sni_extension);
  *
  * Return: Number of bytes written on success, negative error code on failure
  */
-int quic_tls_build_alpn_extension(const u8 *alpn_list, size_t alpn_len,
+int tquic_tls_build_alpn_extension(const u8 *alpn_list, size_t alpn_len,
 				  u8 *buf, size_t buf_len)
 {
 	size_t ext_data_len;
@@ -1461,10 +1500,10 @@ int quic_tls_build_alpn_extension(const u8 *alpn_list, size_t alpn_len,
 
 	return total_len;
 }
-EXPORT_SYMBOL_GPL(quic_tls_build_alpn_extension);
+EXPORT_SYMBOL_GPL(tquic_tls_build_alpn_extension);
 
 /**
- * quic_tls_parse_sni_extension - Parse SNI extension from ClientHello
+ * tquic_tls_parse_sni_extension - Parse SNI extension from ClientHello
  * @data: Extension data (after type and length)
  * @data_len: Length of extension data
  * @hostname: Output buffer for hostname
@@ -1472,7 +1511,7 @@ EXPORT_SYMBOL_GPL(quic_tls_build_alpn_extension);
  *
  * Return: 0 on success, -EINVAL on parse error, -ENOSPC if buffer too small
  */
-int quic_tls_parse_sni_extension(const u8 *data, size_t data_len,
+int tquic_tls_parse_sni_extension(const u8 *data, size_t data_len,
 				 char *hostname, size_t *hostname_len)
 {
 	size_t name_list_len;
@@ -1519,10 +1558,10 @@ int quic_tls_parse_sni_extension(const u8 *data, size_t data_len,
 
 	return 0;
 }
-EXPORT_SYMBOL_GPL(quic_tls_parse_sni_extension);
+EXPORT_SYMBOL_GPL(tquic_tls_parse_sni_extension);
 
 /**
- * quic_tls_parse_alpn_extension - Parse ALPN extension
+ * tquic_tls_parse_alpn_extension - Parse ALPN extension
  * @data: Extension data (after type and length)
  * @data_len: Length of extension data
  * @alpn_list: Output buffer for ALPN list
@@ -1530,7 +1569,7 @@ EXPORT_SYMBOL_GPL(quic_tls_parse_sni_extension);
  *
  * Return: 0 on success, -EINVAL on parse error, -ENOSPC if buffer too small
  */
-int quic_tls_parse_alpn_extension(const u8 *data, size_t data_len,
+int tquic_tls_parse_alpn_extension(const u8 *data, size_t data_len,
 				  u8 *alpn_list, size_t *alpn_len)
 {
 	size_t list_len;
@@ -1552,10 +1591,10 @@ int quic_tls_parse_alpn_extension(const u8 *data, size_t data_len,
 
 	return 0;
 }
-EXPORT_SYMBOL_GPL(quic_tls_parse_alpn_extension);
+EXPORT_SYMBOL_GPL(tquic_tls_parse_alpn_extension);
 
 /**
- * quic_tls_select_alpn - Server ALPN selection
+ * tquic_tls_select_alpn - Server ALPN selection
  * @client_alpn: Client's ALPN list (length-prefixed format)
  * @client_alpn_len: Length of client list
  * @server_alpn: Server's supported ALPN list (length-prefixed format)
@@ -1570,7 +1609,7 @@ EXPORT_SYMBOL_GPL(quic_tls_parse_alpn_extension);
  *         -ENOENT if no common protocol,
  *         negative error code on failure
  */
-int quic_tls_select_alpn(const u8 *client_alpn, size_t client_alpn_len,
+int tquic_tls_select_alpn(const u8 *client_alpn, size_t client_alpn_len,
 			 const u8 *server_alpn, size_t server_alpn_len,
 			 u8 *selected, size_t *selected_len)
 {
@@ -1618,10 +1657,10 @@ int quic_tls_select_alpn(const u8 *client_alpn, size_t client_alpn_len,
 	/* No common protocol found */
 	return -ENOENT;
 }
-EXPORT_SYMBOL_GPL(quic_tls_select_alpn);
+EXPORT_SYMBOL_GPL(tquic_tls_select_alpn);
 
 /**
- * quic_tls_validate_alpn - Validate server's ALPN selection
+ * tquic_tls_validate_alpn - Validate server's ALPN selection
  * @offered_alpn: Client's offered ALPN list (length-prefixed format)
  * @offered_len: Length of offered list
  * @selected: Server's selected protocol (length-prefixed, single entry)
@@ -1631,7 +1670,7 @@ EXPORT_SYMBOL_GPL(quic_tls_select_alpn);
  *
  * Return: 0 if valid, -EPROTO if not in offered list
  */
-int quic_tls_validate_alpn(const u8 *offered_alpn, size_t offered_len,
+int tquic_tls_validate_alpn(const u8 *offered_alpn, size_t offered_len,
 			   const u8 *selected, size_t selected_len)
 {
 	size_t offset;
@@ -1662,7 +1701,7 @@ int quic_tls_validate_alpn(const u8 *offered_alpn, size_t offered_len,
 	}
 
 	/* Server selected a protocol not offered by client */
-	pr_warn("QUIC-TLS: server selected ALPN not in client's list\n");
+	pr_warn("TQUIC-TLS: server selected ALPN not in client's list\n");
 	return -EPROTO;
 }
-EXPORT_SYMBOL_GPL(quic_tls_validate_alpn);
+EXPORT_SYMBOL_GPL(tquic_tls_validate_alpn);

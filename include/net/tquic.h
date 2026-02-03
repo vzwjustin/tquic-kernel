@@ -79,6 +79,14 @@ bool tquic_sysctl_prefer_v2(void);
 #define TQUIC_MIN_PATHS		1
 #define TQUIC_DEFAULT_PATHS	4
 
+/* Maximum number of available versions in version_info */
+#define TQUIC_MAX_AVAILABLE_VERSIONS	16
+
+/* Stateless reset token length (also defined later but needed for struct) */
+#ifndef TQUIC_STATELESS_RESET_TOKEN_LEN
+#define TQUIC_STATELESS_RESET_TOKEN_LEN	16
+#endif
+
 /* Scheduler/CC name limits */
 #define TQUIC_SCHED_NAME_MAX	16
 #define TQUIC_CC_NAME_MAX	16
@@ -180,6 +188,51 @@ struct tquic_cid {
 	struct rhash_head node;
 };
 
+/*
+ * ECN codepoint values from IP header (RFC 3168)
+ * These are the 2-bit values in the IP TOS/Traffic Class field
+ */
+#define TQUIC_ECN_NOT_ECT	0x00	/* Not ECN-Capable Transport */
+#define TQUIC_ECN_ECT_1		0x01	/* ECN Capable Transport(1) */
+#define TQUIC_ECN_ECT_0		0x02	/* ECN Capable Transport(0) */
+#define TQUIC_ECN_CE		0x03	/* Congestion Experienced */
+
+/**
+ * struct tquic_ecn_state - Per-path ECN state (RFC 9000 Section 13.4)
+ * @ect0_sent: Packets sent with ECT(0) marking
+ * @ect1_sent: Packets sent with ECT(1) marking
+ * @ect0_acked: ECT(0) count from peer's ACK_ECN frames
+ * @ect1_acked: ECT(1) count from peer's ACK_ECN frames
+ * @ce_acked: CE count from peer's ACK_ECN frames
+ * @ecn_capable: Path validated for ECN
+ * @ecn_validated: Validation complete
+ * @ecn_failed: Validation failed
+ * @ecn_testing: In validation mode
+ * @ecn_marking: Current ECN marking for outgoing packets
+ *
+ * ECN is validated independently per path because network paths may
+ * have different ECN handling characteristics.
+ */
+struct tquic_ecn_state {
+	/* Counters for packets sent with ECN marking */
+	u64 ect0_sent;
+	u64 ect1_sent;
+
+	/* Counters from peer's ACK_ECN frames */
+	u64 ect0_acked;
+	u64 ect1_acked;
+	u64 ce_acked;
+
+	/* ECN state flags */
+	u8 ecn_capable:1;	/* Path validated for ECN */
+	u8 ecn_validated:1;	/* Validation complete */
+	u8 ecn_failed:1;	/* Validation failed */
+	u8 ecn_testing:1;	/* In validation mode */
+
+	/* Current ECN marking to use for outgoing packets */
+	u8 ecn_marking;
+};
+
 /**
  * struct tquic_path_stats - Per-path statistics
  * @tx_packets: Packets transmitted
@@ -250,6 +303,15 @@ struct tquic_path {
 	struct tquic_cid remote_cid;
 
 	struct tquic_path_stats stats;
+
+	/*
+	 * ECN state for this path (RFC 9000 Section 13.4)
+	 *
+	 * ECN is validated independently per path because network
+	 * paths may have different ECN handling characteristics.
+	 */
+	struct tquic_ecn_state ecn;
+
 	void *cong;  /* Congestion control state */
 	struct tquic_cong_ops *cong_ops;  /* Current CC algorithm ops */
 
@@ -392,6 +454,199 @@ struct tquic_conn_stats {
 };
 
 /**
+ * struct tquic_flow_control - Connection flow control state
+ */
+struct tquic_flow_control {
+	u64 max_data;
+	u64 max_data_next;
+	u64 data_sent;
+	u64 data_received;
+	u64 max_streams_bidi;
+	u64 max_streams_uni;
+	u64 streams_opened_bidi;
+	u64 streams_opened_uni;
+	u8 blocked;
+	u64 blocked_at;
+};
+
+/**
+ * struct tquic_config - Connection configuration
+ */
+struct tquic_config {
+	u32 max_idle_timeout_ms;
+	u64 initial_max_data;
+	u64 initial_max_stream_data_bidi_local;
+	u64 initial_max_stream_data_bidi_remote;
+	u64 initial_max_stream_data_uni;
+	u64 initial_max_streams_bidi;
+	u64 initial_max_streams_uni;
+	u8 ack_delay_exponent;
+	u32 max_ack_delay_ms;
+	bool disable_active_migration;
+	u64 max_connection_ids;
+	u64 max_datagram_size;
+};
+
+/**
+ * struct tquic_preferred_address - Preferred address for migration (RFC 9000 9.6)
+ */
+#ifndef TQUIC_PREFERRED_ADDRESS_DEFINED
+#define TQUIC_PREFERRED_ADDRESS_DEFINED
+struct tquic_preferred_address {
+	u8 ipv4_addr[4];
+	u16 ipv4_port;
+	u8 ipv6_addr[16];
+	u16 ipv6_port;
+	struct tquic_cid cid;
+	u8 stateless_reset_token[16];
+};
+#endif /* TQUIC_PREFERRED_ADDRESS_DEFINED */
+
+/**
+ * struct tquic_version_info - Version Information transport parameter (RFC 9368)
+ * @chosen_version: The QUIC version selected for the connection
+ * @available_versions: Array of versions the endpoint supports
+ * @num_versions: Number of entries in available_versions array
+ */
+#ifndef TQUIC_VERSION_INFO_DEFINED
+#define TQUIC_VERSION_INFO_DEFINED
+struct tquic_version_info {
+	u32 chosen_version;
+	u32 available_versions[TQUIC_MAX_AVAILABLE_VERSIONS];
+	size_t num_versions;
+};
+#endif /* TQUIC_VERSION_INFO_DEFINED */
+
+/**
+ * struct tquic_transport_params - Transport parameters (RFC 9000 Section 18)
+ *
+ * Full transport parameters structure for QUIC with all RFC extensions.
+ * This includes all standard RFC 9000 parameters plus multipath (RFC 9369),
+ * datagram (RFC 9221), version negotiation (RFC 9368), and draft extensions.
+ */
+#ifndef TQUIC_TRANSPORT_PARAMS_DEFINED
+#define TQUIC_TRANSPORT_PARAMS_DEFINED
+struct tquic_transport_params {
+	/* Connection IDs */
+	struct tquic_cid original_dcid;
+	bool original_dcid_present;
+
+	struct tquic_cid initial_scid;
+	bool initial_scid_present;
+
+	struct tquic_cid retry_scid;
+	bool retry_scid_present;
+
+	/* Timing parameters */
+	u64 max_idle_timeout;		/* milliseconds, 0 = disabled */
+	u8 ack_delay_exponent;		/* default 3, max 20 */
+	u32 max_ack_delay;		/* milliseconds, default 25, max 2^14 */
+
+	/* Stateless reset token (server only) */
+	u8 stateless_reset_token[TQUIC_STATELESS_RESET_TOKEN_LEN];
+	bool stateless_reset_token_present;
+
+	/* Size limits */
+	u64 max_udp_payload_size;	/* minimum 1200, default 65527 */
+
+	/* Connection-level flow control */
+	u64 initial_max_data;
+
+	/* Stream-level flow control */
+	u64 initial_max_stream_data_bidi_local;
+	u64 initial_max_stream_data_bidi_remote;
+	u64 initial_max_stream_data_uni;
+
+	/* Stream limits */
+	u64 initial_max_streams_bidi;	/* max 2^60 */
+	u64 initial_max_streams_uni;	/* max 2^60 */
+
+	/* Migration */
+	bool disable_active_migration;
+
+	/* Preferred address (server only) */
+	struct tquic_preferred_address preferred_address;
+	bool preferred_address_present;
+
+	/* Connection ID management */
+	u64 active_connection_id_limit;	/* minimum 2 */
+
+	/* Multipath extension for WAN bonding (RFC 9369) */
+	bool enable_multipath;
+
+	/* RFC 9369 Multipath transport parameters */
+	u64 initial_max_paths;		/* Maximum concurrent paths (0x0f01) */
+
+	/* draft-ietf-quic-multipath initial_max_path_id */
+	u64 initial_max_path_id;	/* Maximum Path ID (0x0f02) */
+	bool initial_max_path_id_present;
+
+	/* DATAGRAM frame support (RFC 9221) */
+	u64 max_datagram_frame_size;	/* 0 = disabled, >0 = max size */
+
+	/* GREASE support (RFC 9287) */
+	bool grease_quic_bit;		/* Willing to receive GREASE'd packets */
+
+	/* ACK Frequency (draft-ietf-quic-ack-frequency) */
+	u64 min_ack_delay;		/* Minimum ACK delay in microseconds (0x0e) */
+	bool min_ack_delay_present;	/* Whether min_ack_delay was advertised */
+
+	/* Version Information (RFC 9368 - Compatible Version Negotiation) */
+	struct tquic_version_info *version_info;	/* Version information parameter */
+	bool version_info_present;	/* Whether version_info was advertised */
+
+	/* Receive Timestamps (draft-smith-quic-receive-ts-03) */
+	u64 max_receive_timestamps_per_ack;	/* Max timestamps in ACK (0xff0a002) */
+	bool max_receive_timestamps_per_ack_present;
+	u8 receive_timestamps_exponent;		/* Timestamp delta exponent (0xff0a003) */
+	bool receive_timestamps_exponent_present;
+
+	/* Address Discovery (draft-ietf-quic-address-discovery) */
+	bool enable_address_discovery;	/* Supports OBSERVED_ADDRESS frames (0x9f01) */
+
+	/* Reliable Stream Reset (draft-ietf-quic-reliable-stream-reset-07) */
+	bool reliable_stream_reset;	/* Supports RESET_STREAM_AT frame (0x17cd) */
+
+	/* Extended Key Update (draft-ietf-quic-extended-key-update-01) */
+	u64 extended_key_update;	/* Max outstanding requests (0 = disabled) */
+	bool extended_key_update_present;
+
+	/* Additional Addresses (draft-piraux-quic-additional-addresses) */
+	void *additional_addresses;	/* Pointer to tquic_additional_addresses */
+	bool additional_addresses_present;
+
+	/* BDP Frame Extension (draft-kuhn-quic-bdpframe-extension-05) */
+	bool enable_bdp_frame;		/* Supports BDP Frame extension */
+
+	/* Deadline-Aware Multipath Scheduling (draft-tjohn-quic-multipath-dmtp-01) */
+	bool enable_deadline_aware;	/* Enable deadline-aware scheduling (0x0f10) */
+	bool enable_deadline_aware_present;
+	u32 deadline_granularity;	/* Time granularity in microseconds (0x0f11) */
+	bool deadline_granularity_present;
+	u32 max_deadline_streams;	/* Max streams with deadlines (0x0f12) */
+	bool max_deadline_streams_present;
+	u8 deadline_miss_policy;	/* Policy for missed deadlines (0x0f13) */
+	bool deadline_miss_policy_present;
+
+	/* Forward Error Correction (draft-zheng-quic-fec-extension-01) */
+	bool enable_fec;		/* FEC is supported (0xff0f000) */
+	bool enable_fec_present;	/* Whether FEC was advertised */
+	u8 fec_scheme;			/* Preferred FEC scheme (0xff0f001) */
+	bool fec_scheme_present;
+	u8 max_source_symbols;		/* Max source symbols per block (0xff0f002) */
+	bool max_source_symbols_present;
+
+	/* Congestion Control Data Exchange (draft-yuan-quic-congestion-data-00) */
+	bool enable_cong_data;		/* CC data exchange supported (0xff0cd002) */
+	bool enable_cong_data_present;	/* Whether enable_cong_data was advertised */
+
+	/* One-Way Delay Measurement (draft-huitema-quic-1wd) */
+	u64 enable_one_way_delay;	/* Timestamp resolution in us (0xff02de1a) */
+	bool enable_one_way_delay_present;
+};
+#endif /* TQUIC_TRANSPORT_PARAMS_DEFINED */
+
+/**
  * struct tquic_connection - A TQUIC connection
  * @state: Current connection state
  * @version: Negotiated QUIC version
@@ -428,8 +683,22 @@ struct tquic_connection {
 	enum tquic_conn_role role;
 	u32 version;
 
+	/* True if this is a server-side connection */
+	bool is_server;
+
 	struct tquic_cid scid;
 	struct tquic_cid dcid;
+
+	/* Original Destination Connection ID (for transport param validation) */
+	struct tquic_cid original_dcid;
+
+	/* Transport parameters (RFC 9000 Section 18) */
+	struct tquic_transport_params local_params;
+	struct tquic_transport_params remote_params;
+
+	/* Flow control state */
+	struct tquic_flow_control local_fc;
+	struct tquic_flow_control remote_fc;
 
 	/* Multi-path support for WAN bonding */
 	struct list_head paths;
@@ -1302,6 +1571,26 @@ void tquic_path_validate(struct tquic_connection *conn, struct tquic_path *path)
 void tquic_path_update_stats(struct tquic_path *path, struct sk_buff *skb, bool success);
 int tquic_path_set_weight(struct tquic_path *path, u8 weight);
 
+/*
+ * ECN (Explicit Congestion Notification) Support - RFC 9000 Section 13.4
+ *
+ * ECN allows routers to signal congestion without dropping packets by
+ * marking the ECN field in the IP header. QUIC validates ECN capability
+ * per-path and uses feedback from ACK_ECN frames.
+ */
+struct tquic_ack_frame;  /* Forward declaration */
+
+void tquic_ecn_init(struct tquic_path *path);
+u8 tquic_ecn_get_marking(struct tquic_path *path);
+void tquic_ecn_on_packet_sent(struct tquic_path *path, u8 ecn_marking);
+int tquic_ecn_validate_ack(struct tquic_path *path, struct tquic_ack_frame *ack);
+void tquic_ecn_process_ce(struct tquic_connection *conn,
+			  struct tquic_path *path, u64 ce_count);
+int tquic_ecn_mark_packet(struct sk_buff *skb, u8 ecn_marking);
+u8 tquic_ecn_read_marking(struct sk_buff *skb);
+void tquic_ecn_disable(struct tquic_path *path);
+bool tquic_ecn_is_capable(struct tquic_path *path);
+
 /* Bonding state machine (Phase 05) */
 int tquic_bond_set_path_weight(struct tquic_connection *conn, u32 path_id, u32 weight);
 u32 tquic_bond_get_path_weight(struct tquic_connection *conn, u32 path_id);
@@ -1975,7 +2264,43 @@ void __exit tquic_udp_exit(void);
 struct tquic_timer_state;
 struct tquic_recovery_state;
 struct tquic_sent_packet;
-struct tquic_pn_space;
+
+/**
+ * struct tquic_pn_space - Packet number space state
+ *
+ * QUIC has 3 packet number spaces: Initial, Handshake, Application.
+ * Each space has independent packet numbering and ACK tracking.
+ */
+#ifndef TQUIC_PN_SPACE_DEFINED
+#define TQUIC_PN_SPACE_DEFINED
+struct tquic_pn_space {
+	u64 largest_acked;		/* Largest ACKed packet number */
+	u64 largest_sent;		/* Largest sent packet number */
+	u64 next_pn;			/* Next packet number to use */
+	u64 largest_recv_pn;		/* Largest received packet number */
+	ktime_t loss_time;		/* Time-based loss detection */
+	ktime_t last_ack_time;		/* Last ACK sent time */
+	u32 ack_eliciting_in_flight;	/* ACK-eliciting packets in flight */
+
+	struct rb_root sent_packets;	/* RB-tree of sent packets */
+	struct list_head sent_list;	/* Time-ordered list of sent packets */
+	struct list_head lost_packets;	/* Packets detected as lost */
+
+	u64 *pending_acks;		/* Packet numbers to ACK */
+	u32 pending_ack_count;		/* Number of pending ACKs */
+	u32 pending_ack_capacity;	/* Capacity of pending_acks array */
+
+	struct {
+		u64 largest_pn;
+		u64 ranges[64];		/* ACK ranges */
+		u32 num_ranges;
+	} recv_ack_info;		/* Received packet tracking for ACKs */
+	u8 keys_available:1;		/* Crypto keys available */
+	u8 keys_discarded:1;		/* Keys have been discarded */
+
+	spinlock_t lock;		/* Per-space lock */
+};
+#endif /* TQUIC_PN_SPACE_DEFINED */
 
 /* Timer state lifecycle */
 struct tquic_timer_state *tquic_timer_state_alloc(struct tquic_connection *conn);

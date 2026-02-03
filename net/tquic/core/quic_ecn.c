@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 /*
- * QUIC ECN (Explicit Congestion Notification) Implementation
+ * TQUIC ECN (Explicit Congestion Notification) Implementation
  *
  * Per RFC 9000 Section 13.4 - ECN allows routers to signal congestion
  * without dropping packets by marking the ECN field in the IP header.
@@ -11,7 +11,7 @@
  * 3. Receiver reports ECN counts in ACK_ECN frames (frame type 0x03)
  * 4. Sender uses feedback to reduce sending rate
  *
- * Copyright (c) 2024 Linux QUIC Authors
+ * Copyright (c) 2024-2026 Linux QUIC Authors
  */
 
 #include <linux/kernel.h>
@@ -19,7 +19,12 @@
 #include <linux/skbuff.h>
 #include <linux/ip.h>
 #include <linux/ipv6.h>
-#include <net/quic.h>
+#include <linux/if_ether.h>
+#include <net/tquic.h>
+#include <net/inet_ecn.h>
+
+/* Forward declaration for ack.h types */
+#include "ack.h"
 
 /*
  * ECN codepoint values from IP header (RFC 3168)
@@ -34,14 +39,14 @@
 #define ECN_MASK	0x03
 
 /*
- * quic_ecn_init - Initialize ECN state for a path
+ * tquic_ecn_init - Initialize ECN state for a path
  * @path: The path to initialize
  *
  * Sets up ECN testing mode. QUIC endpoints should test ECN capability
  * by initially marking packets with ECT(0) and checking if the counts
  * are correctly reflected in ACK_ECN frames.
  */
-void quic_ecn_init(struct quic_path *path)
+void tquic_ecn_init(struct tquic_path *path)
 {
 	if (!path)
 		return;
@@ -53,52 +58,52 @@ void quic_ecn_init(struct quic_path *path)
 	 * Start in testing mode, marking packets with ECT(0)
 	 */
 	path->ecn.ecn_testing = 1;
-	path->ecn.ecn_marking = QUIC_ECN_ECT_0;
+	path->ecn.ecn_marking = TQUIC_ECN_ECT_0;
 }
-EXPORT_SYMBOL(quic_ecn_init);
+EXPORT_SYMBOL(tquic_ecn_init);
 
 /*
- * quic_ecn_get_marking - Get ECN marking for outgoing packets
+ * tquic_ecn_get_marking - Get ECN marking for outgoing packets
  * @path: The path being used
  *
  * Returns the ECN codepoint to use for marking outgoing packets,
- * or QUIC_ECN_NOT_ECT if ECN is disabled or failed validation.
+ * or TQUIC_ECN_NOT_ECT if ECN is disabled or failed validation.
  */
-u8 quic_ecn_get_marking(struct quic_path *path)
+u8 tquic_ecn_get_marking(struct tquic_path *path)
 {
 	if (!path)
-		return QUIC_ECN_NOT_ECT;
+		return TQUIC_ECN_NOT_ECT;
 
 	/* Don't mark if ECN failed validation */
 	if (path->ecn.ecn_failed)
-		return QUIC_ECN_NOT_ECT;
+		return TQUIC_ECN_NOT_ECT;
 
 	/* Use configured marking if ECN is capable or testing */
 	if (path->ecn.ecn_capable || path->ecn.ecn_testing)
 		return path->ecn.ecn_marking;
 
-	return QUIC_ECN_NOT_ECT;
+	return TQUIC_ECN_NOT_ECT;
 }
-EXPORT_SYMBOL(quic_ecn_get_marking);
+EXPORT_SYMBOL(tquic_ecn_get_marking);
 
 /*
- * quic_ecn_on_packet_sent - Track ECN-marked packet sent
+ * tquic_ecn_on_packet_sent - Track ECN-marked packet sent
  * @path: The path packet was sent on
  * @ecn_marking: The ECN marking used (ECT(0), ECT(1), or Not-ECT)
  *
  * Updates the count of ECN-marked packets sent on this path.
  * Called from output.c after marking a packet.
  */
-void quic_ecn_on_packet_sent(struct quic_path *path, u8 ecn_marking)
+void tquic_ecn_on_packet_sent(struct tquic_path *path, u8 ecn_marking)
 {
 	if (!path)
 		return;
 
 	switch (ecn_marking) {
-	case QUIC_ECN_ECT_0:
+	case TQUIC_ECN_ECT_0:
 		path->ecn.ect0_sent++;
 		break;
-	case QUIC_ECN_ECT_1:
+	case TQUIC_ECN_ECT_1:
 		path->ecn.ect1_sent++;
 		break;
 	default:
@@ -106,10 +111,10 @@ void quic_ecn_on_packet_sent(struct quic_path *path, u8 ecn_marking)
 		break;
 	}
 }
-EXPORT_SYMBOL(quic_ecn_on_packet_sent);
+EXPORT_SYMBOL(tquic_ecn_on_packet_sent);
 
 /*
- * quic_ecn_validate_ack - Validate ECN counts from ACK_ECN frame
+ * tquic_ecn_validate_ack - Validate ECN counts from ACK_ECN frame
  * @path: The path to validate
  * @ack: ACK information containing ECN counts
  *
@@ -121,7 +126,7 @@ EXPORT_SYMBOL(quic_ecn_on_packet_sent);
  *
  * Returns 0 if valid, -EINVAL if validation fails.
  */
-int quic_ecn_validate_ack(struct quic_path *path, struct quic_ack_info *ack)
+int tquic_ecn_validate_ack(struct tquic_path *path, struct tquic_ack_frame *ack)
 {
 	u64 total_ect_sent;
 	u64 total_ect_acked;
@@ -138,10 +143,10 @@ int quic_ecn_validate_ack(struct quic_path *path, struct quic_ack_info *ack)
 	 * Per RFC 9000 Section 13.4.2.1:
 	 * ECN counts MUST NOT decrease
 	 */
-	if (ack->ecn_ect0 < path->ecn.ect0_acked ||
-	    ack->ecn_ect1 < path->ecn.ect1_acked ||
-	    ack->ecn_ce < path->ecn.ce_acked) {
-		pr_debug("QUIC: ECN validation failed: counts decreased\n");
+	if (ack->ecn.ect0 < path->ecn.ect0_acked ||
+	    ack->ecn.ect1 < path->ecn.ect1_acked ||
+	    ack->ecn.ce < path->ecn.ce_acked) {
+		pr_debug("TQUIC: ECN validation failed: counts decreased\n");
 		path->ecn.ecn_failed = 1;
 		path->ecn.ecn_testing = 0;
 		path->ecn.ecn_capable = 0;
@@ -155,14 +160,14 @@ int quic_ecn_validate_ack(struct quic_path *path, struct quic_ack_info *ack)
 	 * originally sent with an ECT codepoint.
 	 */
 	total_ect_sent = path->ecn.ect0_sent + path->ecn.ect1_sent;
-	total_ect_acked = ack->ecn_ect0 + ack->ecn_ect1 + ack->ecn_ce;
+	total_ect_acked = ack->ecn.ect0 + ack->ecn.ect1 + ack->ecn.ce;
 
 	/*
 	 * Allow some tolerance for reordering - the acked count should
 	 * not exceed what we sent.
 	 */
 	if (total_ect_acked > total_ect_sent) {
-		pr_debug("QUIC: ECN validation failed: more acked than sent\n");
+		pr_debug("TQUIC: ECN validation failed: more acked than sent\n");
 		path->ecn.ecn_failed = 1;
 		path->ecn.ecn_testing = 0;
 		path->ecn.ecn_capable = 0;
@@ -170,12 +175,12 @@ int quic_ecn_validate_ack(struct quic_path *path, struct quic_ack_info *ack)
 	}
 
 	/* Calculate new CE packets reported */
-	new_ce_count = ack->ecn_ce - path->ecn.ce_acked;
+	new_ce_count = ack->ecn.ce - path->ecn.ce_acked;
 
 	/* Update stored counts */
-	path->ecn.ect0_acked = ack->ecn_ect0;
-	path->ecn.ect1_acked = ack->ecn_ect1;
-	path->ecn.ce_acked = ack->ecn_ce;
+	path->ecn.ect0_acked = ack->ecn.ect0;
+	path->ecn.ect1_acked = ack->ecn.ect1;
+	path->ecn.ce_acked = ack->ecn.ce;
 
 	/*
 	 * If we're in testing mode and received valid ECN feedback,
@@ -185,24 +190,24 @@ int quic_ecn_validate_ack(struct quic_path *path, struct quic_ack_info *ack)
 		path->ecn.ecn_validated = 1;
 		path->ecn.ecn_capable = 1;
 		path->ecn.ecn_testing = 0;
-		pr_debug("QUIC: ECN validation successful for path\n");
+		pr_debug("TQUIC: ECN validation successful for path\n");
 	}
 
 	return new_ce_count > 0 ? new_ce_count : 0;
 }
-EXPORT_SYMBOL(quic_ecn_validate_ack);
+EXPORT_SYMBOL(tquic_ecn_validate_ack);
 
 /*
- * quic_ecn_process_ce - Process ECN-CE events from ACK
- * @conn: The QUIC connection
+ * tquic_ecn_process_ce - Process ECN-CE events from ACK
+ * @conn: The TQUIC connection
  * @path: The path that received CE feedback
  * @ce_count: Number of new CE markings reported
  *
  * Called when ACK_ECN frame indicates new CE markings.
  * Triggers congestion control response.
  */
-void quic_ecn_process_ce(struct quic_connection *conn,
-			 struct quic_path *path, u64 ce_count)
+void tquic_ecn_process_ce(struct tquic_connection *conn,
+			  struct tquic_path *path, u64 ce_count)
 {
 	if (!conn || !path || ce_count == 0)
 		return;
@@ -212,23 +217,28 @@ void quic_ecn_process_ce(struct quic_connection *conn,
 	 * An increase in ECN-CE count indicates congestion.
 	 * The sender MUST reduce its congestion window.
 	 */
-	pr_debug("QUIC: ECN-CE received, count=%llu, triggering congestion\n",
+	pr_debug("TQUIC: ECN-CE received, count=%llu, triggering congestion\n",
 		 ce_count);
 
-	/* Trigger congestion control response */
-	quic_cc_on_congestion_event(&path->cc);
+	/*
+	 * Trigger congestion control response via the tquic cong framework.
+	 * tquic_cong_on_ecn() dispatches to the path's CC algorithm
+	 * which will reduce the congestion window appropriately.
+	 */
+	if (path->cong_ops && path->cong_ops->on_ecn)
+		path->cong_ops->on_ecn(path->cong, ce_count);
 }
-EXPORT_SYMBOL(quic_ecn_process_ce);
+EXPORT_SYMBOL(tquic_ecn_process_ce);
 
 /*
- * quic_ecn_mark_packet - Set ECN bits in IP header
+ * tquic_ecn_mark_packet - Set ECN bits in IP header
  * @skb: The packet buffer
  * @ecn_marking: ECN codepoint to set (ECT(0), ECT(1), or Not-ECT)
  *
  * Sets the ECN field in the IP/IPv6 header.
  * Returns 0 on success, negative error on failure.
  */
-int quic_ecn_mark_packet(struct sk_buff *skb, u8 ecn_marking)
+int tquic_ecn_mark_packet(struct sk_buff *skb, u8 ecn_marking)
 {
 	struct iphdr *iph;
 	struct ipv6hdr *ip6h;
@@ -238,7 +248,7 @@ int quic_ecn_mark_packet(struct sk_buff *skb, u8 ecn_marking)
 		return -EINVAL;
 
 	/* Only mark with ECT codepoints, not CE */
-	if (ecn_marking != QUIC_ECN_ECT_0 && ecn_marking != QUIC_ECN_ECT_1)
+	if (ecn_marking != TQUIC_ECN_ECT_0 && ecn_marking != TQUIC_ECN_ECT_1)
 		return 0;
 
 	if (skb->protocol == htons(ETH_P_IP)) {
@@ -275,48 +285,48 @@ int quic_ecn_mark_packet(struct sk_buff *skb, u8 ecn_marking)
 
 	return 0;
 }
-EXPORT_SYMBOL(quic_ecn_mark_packet);
+EXPORT_SYMBOL(tquic_ecn_mark_packet);
 
 /*
- * quic_ecn_read_marking - Read ECN field from received packet
+ * tquic_ecn_read_marking - Read ECN field from received packet
  * @skb: The received packet buffer
  *
  * Extracts the ECN codepoint from the IP header.
  * Returns ECN codepoint (0-3) or 0 on error.
  */
-u8 quic_ecn_read_marking(struct sk_buff *skb)
+u8 tquic_ecn_read_marking(struct sk_buff *skb)
 {
 	struct iphdr *iph;
 	struct ipv6hdr *ip6h;
 
 	if (!skb)
-		return QUIC_ECN_NOT_ECT;
+		return TQUIC_ECN_NOT_ECT;
 
 	if (skb->protocol == htons(ETH_P_IP)) {
 		if (skb->len < sizeof(struct iphdr))
-			return QUIC_ECN_NOT_ECT;
+			return TQUIC_ECN_NOT_ECT;
 
 		iph = ip_hdr(skb);
 		return iph->tos & ECN_MASK;
 	} else if (skb->protocol == htons(ETH_P_IPV6)) {
 		if (skb->len < sizeof(struct ipv6hdr))
-			return QUIC_ECN_NOT_ECT;
+			return TQUIC_ECN_NOT_ECT;
 
 		ip6h = ipv6_hdr(skb);
 		return ipv6_get_dsfield(ip6h) & ECN_MASK;
 	}
 
-	return QUIC_ECN_NOT_ECT;
+	return TQUIC_ECN_NOT_ECT;
 }
-EXPORT_SYMBOL(quic_ecn_read_marking);
+EXPORT_SYMBOL(tquic_ecn_read_marking);
 
 /*
- * quic_ecn_disable - Disable ECN for a path
+ * tquic_ecn_disable - Disable ECN for a path
  * @path: The path to disable ECN on
  *
  * Called when ECN validation fails or when explicitly disabled.
  */
-void quic_ecn_disable(struct quic_path *path)
+void tquic_ecn_disable(struct tquic_path *path)
 {
 	if (!path)
 		return;
@@ -324,27 +334,27 @@ void quic_ecn_disable(struct quic_path *path)
 	path->ecn.ecn_failed = 1;
 	path->ecn.ecn_capable = 0;
 	path->ecn.ecn_testing = 0;
-	path->ecn.ecn_marking = QUIC_ECN_NOT_ECT;
+	path->ecn.ecn_marking = TQUIC_ECN_NOT_ECT;
 
-	pr_debug("QUIC: ECN disabled for path\n");
+	pr_debug("TQUIC: ECN disabled for path\n");
 }
-EXPORT_SYMBOL(quic_ecn_disable);
+EXPORT_SYMBOL(tquic_ecn_disable);
 
 /*
- * quic_ecn_is_capable - Check if path is ECN capable
+ * tquic_ecn_is_capable - Check if path is ECN capable
  * @path: The path to check
  *
  * Returns true if the path has successfully validated ECN.
  */
-bool quic_ecn_is_capable(struct quic_path *path)
+bool tquic_ecn_is_capable(struct tquic_path *path)
 {
 	if (!path)
 		return false;
 
 	return path->ecn.ecn_capable && !path->ecn.ecn_failed;
 }
-EXPORT_SYMBOL(quic_ecn_is_capable);
+EXPORT_SYMBOL(tquic_ecn_is_capable);
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Linux QUIC Authors");
-MODULE_DESCRIPTION("QUIC ECN (Explicit Congestion Notification) Implementation");
+MODULE_DESCRIPTION("TQUIC ECN (Explicit Congestion Notification) Implementation");

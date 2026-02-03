@@ -1,29 +1,31 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
- * QUIC ACK_FREQUENCY Extension Header
+ * TQUIC ACK_FREQUENCY Extension Header
  *
  * Implementation of draft-ietf-quic-ack-frequency
  *
- * Copyright (c) 2024 Linux QUIC Authors
+ * Copyright (c) 2024-2026 Linux TQUIC Authors
  */
 
-#ifndef _QUIC_ACK_FREQUENCY_H
-#define _QUIC_ACK_FREQUENCY_H
+#ifndef _TQUIC_ACK_FREQUENCY_H
+#define _TQUIC_ACK_FREQUENCY_H
 
 #include <linux/types.h>
 #include <linux/skbuff.h>
-
-/* Forward declaration */
-struct quic_connection;
+#include <net/tquic.h>
 
 /*
  * ACK_FREQUENCY frame type: 0xaf (draft-ietf-quic-ack-frequency)
  * IMMEDIATE_ACK frame type: 0x1f
  *
- * These are also defined in uapi/linux/quic.h
+ * These are also defined in uapi/linux/tquic.h
  */
-#define QUIC_FRAME_ACK_FREQUENCY	0xaf
-#define QUIC_FRAME_IMMEDIATE_ACK	0x1f
+#define TQUIC_FRAME_ACK_FREQUENCY	0xaf
+#define TQUIC_FRAME_IMMEDIATE_ACK	0x1f
+
+/* Legacy aliases */
+#define QUIC_FRAME_ACK_FREQUENCY	TQUIC_FRAME_ACK_FREQUENCY
+#define QUIC_FRAME_IMMEDIATE_ACK	TQUIC_FRAME_IMMEDIATE_ACK
 
 /*
  * Default values per draft-ietf-quic-ack-frequency:
@@ -38,16 +40,21 @@ struct quic_connection;
  * - max_ack_delay: 25ms (25000 microseconds)
  *   Default from RFC 9000
  */
-#define QUIC_ACK_FREQ_DEFAULT_THRESHOLD		1
-#define QUIC_ACK_FREQ_DEFAULT_REORDER_THRESHOLD	1
-#define QUIC_ACK_FREQ_DEFAULT_MAX_DELAY_US	25000
+#define TQUIC_ACK_FREQ_DEFAULT_THRESHOLD	1
+#define TQUIC_ACK_FREQ_DEFAULT_REORDER_THRESHOLD 1
+#define TQUIC_ACK_FREQ_DEFAULT_MAX_DELAY_US	25000
+
+/* Legacy aliases */
+#define QUIC_ACK_FREQ_DEFAULT_THRESHOLD		TQUIC_ACK_FREQ_DEFAULT_THRESHOLD
+#define QUIC_ACK_FREQ_DEFAULT_REORDER_THRESHOLD	TQUIC_ACK_FREQ_DEFAULT_REORDER_THRESHOLD
+#define QUIC_ACK_FREQ_DEFAULT_MAX_DELAY_US	TQUIC_ACK_FREQ_DEFAULT_MAX_DELAY_US
 
 /*
  * ACK_FREQUENCY state for a connection
  *
  * Tracks parameters received from peer and sent to peer.
  */
-struct quic_ack_frequency_state {
+struct tquic_ack_frequency_state {
 	/* Parameters received from peer (controlling our ACK behavior) */
 	u64	rx_sequence;		/* Highest sequence number received */
 	u64	rx_ack_eliciting_threshold; /* Packets before ACK required */
@@ -66,49 +73,65 @@ struct quic_ack_frequency_state {
 	u8	update_pending:1;	/* Need to send ACK_FREQUENCY */
 };
 
+/* Legacy alias */
+#define quic_ack_frequency_state	tquic_ack_frequency_state
+
 /* Initialize ACK_FREQUENCY state for a connection */
-void quic_ack_frequency_init(struct quic_connection *conn);
+void tquic_ack_frequency_init(struct tquic_connection *conn);
 
 /* Free ACK_FREQUENCY state for a connection */
-void quic_ack_frequency_destroy(struct quic_connection *conn);
+void tquic_ack_frequency_destroy(struct tquic_connection *conn);
 
 /* Create an ACK_FREQUENCY frame */
-int quic_ack_frequency_create(struct quic_connection *conn,
-			      struct sk_buff *skb,
-			      u64 threshold,
-			      u64 max_ack_delay_us,
-			      u64 reorder_threshold);
+int tquic_ack_frequency_create(struct tquic_connection *conn,
+			       struct sk_buff *skb,
+			       u64 threshold,
+			       u64 max_ack_delay_us,
+			       u64 reorder_threshold);
 
 /* Parse an ACK_FREQUENCY frame */
-int quic_ack_frequency_parse(struct quic_connection *conn,
-			     const u8 *data, int len,
-			     u64 *sequence, u64 *threshold,
-			     u64 *max_ack_delay_us, u64 *reorder_threshold);
+int tquic_ack_frequency_parse(struct tquic_connection *conn,
+			      const u8 *data, int len,
+			      u64 *sequence, u64 *threshold,
+			      u64 *max_ack_delay_us, u64 *reorder_threshold);
 
 /* Process a received ACK_FREQUENCY frame */
-int quic_ack_frequency_process(struct quic_connection *conn,
-			       const u8 *data, int len);
+int tquic_ack_frequency_process(struct tquic_connection *conn,
+				const u8 *data, int len);
 
 /* Create an IMMEDIATE_ACK frame */
-int quic_immediate_ack_create(struct quic_connection *conn, struct sk_buff *skb);
+int tquic_immediate_ack_create(struct tquic_connection *conn, struct sk_buff *skb);
 
 /* Process a received IMMEDIATE_ACK frame */
-int quic_immediate_ack_process(struct quic_connection *conn);
+int tquic_immediate_ack_process(struct tquic_connection *conn);
 
 /* Check if ACK should be sent based on ACK_FREQUENCY parameters */
-bool quic_ack_frequency_should_send(struct quic_connection *conn,
-				    u8 pn_space,
-				    u32 ack_eliciting_count,
-				    u64 largest_recv_pn,
-				    u64 last_ack_largest);
+bool tquic_ack_frequency_should_send(struct tquic_connection *conn,
+				     u8 pn_space,
+				     u32 ack_eliciting_count,
+				     u64 largest_recv_pn,
+				     u64 last_ack_largest);
 
 /* Request peer to use specific ACK frequency settings */
-int quic_ack_frequency_set(struct quic_connection *conn,
-			   u64 threshold, u32 max_delay_ms,
-			   u64 reorder_threshold);
+int tquic_ack_frequency_set(struct tquic_connection *conn,
+			    u64 threshold, u32 max_delay_ms,
+			    u64 reorder_threshold);
 
 /* Module init/exit */
-int __init quic_ack_frequency_module_init(void);
-void quic_ack_frequency_module_exit(void);
+int __init tquic_ack_frequency_module_init(void);
+void tquic_ack_frequency_module_exit(void);
 
-#endif /* _QUIC_ACK_FREQUENCY_H */
+/* Legacy aliases */
+#define quic_ack_frequency_init		tquic_ack_frequency_init
+#define quic_ack_frequency_destroy	tquic_ack_frequency_destroy
+#define quic_ack_frequency_create	tquic_ack_frequency_create
+#define quic_ack_frequency_parse	tquic_ack_frequency_parse
+#define quic_ack_frequency_process	tquic_ack_frequency_process
+#define quic_immediate_ack_create	tquic_immediate_ack_create
+#define quic_immediate_ack_process	tquic_immediate_ack_process
+#define quic_ack_frequency_should_send	tquic_ack_frequency_should_send
+#define quic_ack_frequency_set		tquic_ack_frequency_set
+#define quic_ack_frequency_module_init	tquic_ack_frequency_module_init
+#define quic_ack_frequency_module_exit	tquic_ack_frequency_module_exit
+
+#endif /* _TQUIC_ACK_FREQUENCY_H */

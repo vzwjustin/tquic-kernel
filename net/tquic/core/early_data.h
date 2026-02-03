@@ -1,73 +1,79 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
- * QUIC - Quick UDP Internet Connections
+ * TQUIC - True QUIC with WAN Bonding
  *
  * 0-RTT Early Data Support Header (RFC 9001 Section 4.6)
  *
- * Copyright (c) 2024 Linux QUIC Authors
+ * Copyright (c) 2026 Linux Foundation
  */
 
-#ifndef _NET_QUIC_EARLY_DATA_H
-#define _NET_QUIC_EARLY_DATA_H
+#ifndef _NET_TQUIC_EARLY_DATA_H
+#define _NET_TQUIC_EARLY_DATA_H
 
 #include <linux/types.h>
 #include <linux/skbuff.h>
-#include <net/quic.h>
+#include <net/tquic.h>
+
+/* Forward declarations */
+struct tquic_connection;
+struct tquic_sock;
+struct tquic_session_ticket;
+struct tquic_pn_space;
 
 /*
  * 0-RTT Anti-Replay Protection (RFC 9001 Section 8)
  */
-void quic_anti_replay_init(void);
-void quic_anti_replay_cleanup(void);
-bool quic_anti_replay_check(const u8 *ticket, u32 ticket_len);
+void tquic_anti_replay_init(void);
+void tquic_anti_replay_cleanup(void);
+bool tquic_anti_replay_check(const u8 *ticket, u32 ticket_len);
 
 /*
  * 0-RTT Key Derivation (RFC 9001 Section 5.1)
  */
-int quic_early_data_derive_keys(struct quic_connection *conn,
-				const struct quic_session_ticket *ticket);
+int tquic_early_data_derive_keys(struct tquic_connection *conn,
+				 const struct tquic_session_ticket *ticket);
 
 /*
  * 0-RTT Frame Validation (RFC 9001 Section 4.6.3)
  */
-bool quic_early_data_frame_allowed(u8 frame_type);
+bool tquic_early_data_frame_allowed(u8 frame_type);
 
 /*
  * 0-RTT Packet Building and Processing
  */
-struct sk_buff *quic_early_data_build_packet(struct quic_connection *conn,
-					     struct quic_pn_space *pn_space);
-int quic_early_data_process_packet(struct quic_connection *conn,
-				   struct sk_buff *skb);
+struct sk_buff *tquic_early_data_build_packet(struct tquic_connection *conn,
+					      struct tquic_pn_space *pn_space);
+int tquic_early_data_process_packet(struct tquic_connection *conn,
+				    struct sk_buff *skb);
 
 /*
  * 0-RTT Acceptance/Rejection
  */
-void quic_early_data_reject(struct quic_connection *conn);
-void quic_early_data_accept(struct quic_connection *conn);
+void tquic_early_data_reject(struct tquic_connection *conn);
+void tquic_early_data_accept(struct tquic_connection *conn);
 
 /*
  * 0-RTT Connection State
  */
-int quic_early_data_init(struct quic_connection *conn,
-			 const struct quic_session_ticket *ticket);
-void quic_early_data_cleanup(struct quic_connection *conn);
+int tquic_early_data_init(struct tquic_connection *conn,
+			  const struct tquic_session_ticket *ticket);
+void tquic_early_data_cleanup(struct tquic_connection *conn);
 
 /*
  * Session Ticket Management (RFC 9001 Section 4.6.1)
  */
-int quic_session_ticket_store(struct quic_sock *qsk,
-			      const struct quic_session_ticket *ticket);
-struct quic_session_ticket *quic_session_ticket_retrieve(struct quic_sock *qsk);
-bool quic_session_ticket_valid(const struct quic_session_ticket *ticket);
+int tquic_session_ticket_store(struct tquic_sock *tsk,
+			       const struct tquic_session_ticket *ticket);
+struct tquic_session_ticket *tquic_session_ticket_retrieve(struct tquic_sock *tsk);
+bool tquic_session_ticket_valid(const struct tquic_session_ticket *ticket);
 
 /*
  * Helper macro to check if 0-RTT is enabled and valid
  */
-#define quic_can_send_early_data(conn) \
+#define tquic_can_send_early_data(conn) \
 	((conn)->early_data_enabled && \
 	 !(conn)->early_data_rejected && \
 	 (conn)->early_data_sent < (conn)->max_early_data && \
-	 (conn)->crypto[QUIC_CRYPTO_EARLY_DATA].keys_available)
+	 (conn)->crypto[TQUIC_PN_SPACE_APPLICATION].keys_available)
 
-#endif /* _NET_QUIC_EARLY_DATA_H */
+#endif /* _NET_TQUIC_EARLY_DATA_H */

@@ -65,6 +65,8 @@ struct tquic_version_info {
  * This structure represents the preferred_address transport parameter
  * as defined in RFC 9000 Section 18.2.
  */
+#ifndef TQUIC_PREFERRED_ADDRESS_DEFINED
+#define TQUIC_PREFERRED_ADDRESS_DEFINED
 struct tquic_preferred_address {
 	u8 ipv4_addr[4];
 	u16 ipv4_port;
@@ -73,6 +75,7 @@ struct tquic_preferred_address {
 	struct tquic_cid cid;
 	u8 stateless_reset_token[TQUIC_STATELESS_RESET_TOKEN_LEN];
 };
+#endif /* TQUIC_PREFERRED_ADDRESS_DEFINED */
 
 /**
  * struct tquic_transport_params - QUIC transport parameters
@@ -104,6 +107,8 @@ struct tquic_preferred_address {
  * RFC 9000 Section 18.2, plus the enable_multipath extension for
  * WAN bonding support (RFC 9369).
  */
+#ifndef TQUIC_TRANSPORT_PARAMS_DEFINED
+#define TQUIC_TRANSPORT_PARAMS_DEFINED
 struct tquic_transport_params {
 	/* Connection IDs */
 	struct tquic_cid original_dcid;
@@ -222,6 +227,7 @@ struct tquic_transport_params {
 	u64 enable_one_way_delay;	/* Timestamp resolution in us (0xff02de1a) */
 	bool enable_one_way_delay_present;
 };
+#endif /* TQUIC_TRANSPORT_PARAMS_DEFINED */
 
 /**
  * struct tquic_negotiated_params - Result of transport parameter negotiation

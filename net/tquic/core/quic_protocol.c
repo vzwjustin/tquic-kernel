@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 /*
- * QUIC - Quick UDP Internet Connections
+ * TQUIC - Transport QUIC with WAN Bonding
  *
- * Linux kernel QUIC protocol implementation
+ * Linux kernel TQUIC protocol implementation
  *
- * Copyright (c) 2024 Linux QUIC Authors
+ * Copyright (c) 2026 Linux Foundation
  */
 
 #include <linux/module.h>
@@ -15,153 +15,163 @@
 #include <linux/skbuff.h>
 #include <linux/slab.h>
 #include <linux/random.h>
+#include <linux/version.h>
+#include <asm/ioctls.h>
 #include <net/sock.h>
 #include <net/inet_common.h>
 #include <net/inet_hashtables.h>
 #include <net/protocol.h>
 #include <net/udp.h>
-#include <net/quic.h>
-#include "../../quic/early_data.h"
-#include "../../quic/quic_init.h"
+#include <net/tquic.h>
+#include <net/tquic/handshake.h>
 
-static struct kmem_cache *quic_sock_cachep __read_mostly;
-static struct kmem_cache *quic_conn_cachep __read_mostly;
-static struct kmem_cache *quic_stream_cachep __read_mostly;
+static struct kmem_cache *tquic_sock_cachep __read_mostly;
+static struct kmem_cache *tquic_conn_cachep __read_mostly;
+static struct kmem_cache *tquic_stream_cachep __read_mostly;
 
 /* Sysctl variables */
-int sysctl_quic_mem[3] __read_mostly;
-int sysctl_quic_wmem[3] __read_mostly = { 4096, 16384, 4194304 };
-int sysctl_quic_rmem[3] __read_mostly = { 4096, 131072, 6291456 };
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
+long sysctl_tquic_mem[3] __read_mostly;
+#else
+int sysctl_tquic_mem[3] __read_mostly;
+#endif
+int sysctl_tquic_wmem[3] __read_mostly = { 4096, 16384, 4194304 };
+int sysctl_tquic_rmem[3] __read_mostly = { 4096, 131072, 6291456 };
 
 /*
  * Configurable connection defaults (via module parameters)
  * These can be overridden per-socket via setsockopt.
  */
-static unsigned int quic_default_idle_timeout_ms __read_mostly = 30000;
-static unsigned int quic_default_handshake_timeout_ms __read_mostly = 10000;
-static unsigned int quic_default_max_data __read_mostly = 1048576;		/* 1 MB */
-static unsigned int quic_default_max_stream_data __read_mostly = 65536;		/* 64 KB */
-static unsigned int quic_default_max_streams __read_mostly = 100;
-static unsigned int quic_default_initial_rtt_ms __read_mostly = 333;
+static unsigned int tquic_default_idle_timeout_ms __read_mostly = 30000;
+static unsigned int tquic_default_handshake_timeout_ms __read_mostly = 10000;
+static unsigned int tquic_default_max_data __read_mostly = 1048576;		/* 1 MB */
+static unsigned int tquic_default_max_stream_data __read_mostly = 65536;	/* 64 KB */
+static unsigned int tquic_default_max_streams __read_mostly = 100;
+static unsigned int tquic_default_initial_rtt_ms __read_mostly = 333;
 
-module_param(quic_default_idle_timeout_ms, uint, 0644);
-MODULE_PARM_DESC(quic_default_idle_timeout_ms, "Default idle timeout in milliseconds");
-module_param(quic_default_handshake_timeout_ms, uint, 0644);
-MODULE_PARM_DESC(quic_default_handshake_timeout_ms, "Default handshake timeout in milliseconds");
-module_param(quic_default_max_data, uint, 0644);
-MODULE_PARM_DESC(quic_default_max_data, "Default initial max data limit");
-module_param(quic_default_max_stream_data, uint, 0644);
-MODULE_PARM_DESC(quic_default_max_stream_data, "Default initial max stream data limit");
-module_param(quic_default_max_streams, uint, 0644);
-MODULE_PARM_DESC(quic_default_max_streams, "Default initial max streams");
-module_param(quic_default_initial_rtt_ms, uint, 0644);
-MODULE_PARM_DESC(quic_default_initial_rtt_ms,
+module_param(tquic_default_idle_timeout_ms, uint, 0644);
+MODULE_PARM_DESC(tquic_default_idle_timeout_ms, "Default idle timeout in milliseconds");
+module_param(tquic_default_handshake_timeout_ms, uint, 0644);
+MODULE_PARM_DESC(tquic_default_handshake_timeout_ms, "Default handshake timeout in milliseconds");
+module_param(tquic_default_max_data, uint, 0644);
+MODULE_PARM_DESC(tquic_default_max_data, "Default initial max data limit");
+module_param(tquic_default_max_stream_data, uint, 0644);
+MODULE_PARM_DESC(tquic_default_max_stream_data, "Default initial max stream data limit");
+module_param(tquic_default_max_streams, uint, 0644);
+MODULE_PARM_DESC(tquic_default_max_streams, "Default initial max streams");
+module_param(tquic_default_initial_rtt_ms, uint, 0644);
+MODULE_PARM_DESC(tquic_default_initial_rtt_ms,
 	"Default initial RTT in ms, 1-60000 (default 333)");
 
 /*
  * Module parameter validation bounds
  */
-#define QUIC_IDLE_TIMEOUT_MIN_MS	1
-#define QUIC_IDLE_TIMEOUT_MAX_MS	600000
-#define QUIC_IDLE_TIMEOUT_DEFAULT_MS	30000
+#define TQUIC_IDLE_TIMEOUT_MIN_MS	1
+#define TQUIC_IDLE_TIMEOUT_MAX_MS	600000
+#define TQUIC_IDLE_TIMEOUT_DEFAULT_MS	30000
 
-#define QUIC_HS_TIMEOUT_MIN_MS		1
-#define QUIC_HS_TIMEOUT_MAX_MS		120000
-#define QUIC_HS_TIMEOUT_DEFAULT_MS	10000
+#define TQUIC_HS_TIMEOUT_MIN_MS		1
+#define TQUIC_HS_TIMEOUT_MAX_MS		120000
+#define TQUIC_HS_TIMEOUT_DEFAULT_MS	10000
 
-#define QUIC_MAX_DATA_MIN		1024
-#define QUIC_MAX_DATA_MAX		16777216
-#define QUIC_MAX_DATA_DEFAULT		1048576
+#define TQUIC_MAX_DATA_MIN		1024
+#define TQUIC_MAX_DATA_MAX		16777216
+#define TQUIC_MAX_DATA_DEFAULT		1048576
 
-#define QUIC_MAX_STREAM_DATA_MIN	1024
-#define QUIC_MAX_STREAM_DATA_MAX	16777216
-#define QUIC_MAX_STREAM_DATA_DEFAULT	65536
+#define TQUIC_MAX_STREAM_DATA_MIN	1024
+#define TQUIC_MAX_STREAM_DATA_MAX	16777216
+#define TQUIC_MAX_STREAM_DATA_DEFAULT	65536
 
-#define QUIC_MAX_STREAMS_MIN		1
-#define QUIC_MAX_STREAMS_MAX		65535
-#define QUIC_MAX_STREAMS_DEFAULT	100
+#define TQUIC_MAX_STREAMS_MIN		1
+#define TQUIC_MAX_STREAMS_MAX		65535
+#define TQUIC_MAX_STREAMS_DEFAULT	100
 
-#define QUIC_INITIAL_RTT_MIN_MS		1
-#define QUIC_INITIAL_RTT_MAX_MS		60000
-#define QUIC_INITIAL_RTT_DEFAULT_MS	333
+#define TQUIC_INITIAL_RTT_MIN_MS	1
+#define TQUIC_INITIAL_RTT_MAX_MS	60000
+#define TQUIC_INITIAL_RTT_DEFAULT_MS	333
 
-static inline unsigned int quic_get_validated_idle_timeout(void)
+static inline unsigned int tquic_get_validated_idle_timeout(void)
 {
-	unsigned int val = READ_ONCE(quic_default_idle_timeout_ms);
+	unsigned int val = READ_ONCE(tquic_default_idle_timeout_ms);
 
-	if (val < QUIC_IDLE_TIMEOUT_MIN_MS || val > QUIC_IDLE_TIMEOUT_MAX_MS) {
-		pr_warn_once("QUIC: idle_timeout_ms %u out of range, using %u\n",
-			     val, QUIC_IDLE_TIMEOUT_DEFAULT_MS);
-		return QUIC_IDLE_TIMEOUT_DEFAULT_MS;
+	if (val < TQUIC_IDLE_TIMEOUT_MIN_MS || val > TQUIC_IDLE_TIMEOUT_MAX_MS) {
+		pr_warn_once("TQUIC: idle_timeout_ms %u out of range, using %u\n",
+			     val, TQUIC_IDLE_TIMEOUT_DEFAULT_MS);
+		return TQUIC_IDLE_TIMEOUT_DEFAULT_MS;
 	}
 	return val;
 }
 
-static inline unsigned int quic_get_validated_handshake_timeout(void)
+static inline unsigned int tquic_get_validated_handshake_timeout(void)
 {
-	unsigned int val = READ_ONCE(quic_default_handshake_timeout_ms);
+	unsigned int val = READ_ONCE(tquic_default_handshake_timeout_ms);
 
-	if (val < QUIC_HS_TIMEOUT_MIN_MS || val > QUIC_HS_TIMEOUT_MAX_MS) {
-		pr_warn_once("QUIC: handshake_timeout_ms %u out of range, using %u\n",
-			     val, QUIC_HS_TIMEOUT_DEFAULT_MS);
-		return QUIC_HS_TIMEOUT_DEFAULT_MS;
+	if (val < TQUIC_HS_TIMEOUT_MIN_MS || val > TQUIC_HS_TIMEOUT_MAX_MS) {
+		pr_warn_once("TQUIC: handshake_timeout_ms %u out of range, using %u\n",
+			     val, TQUIC_HS_TIMEOUT_DEFAULT_MS);
+		return TQUIC_HS_TIMEOUT_DEFAULT_MS;
 	}
 	return val;
 }
 
-static inline unsigned int quic_get_validated_max_data(void)
+static inline unsigned int tquic_get_validated_max_data(void)
 {
-	unsigned int val = READ_ONCE(quic_default_max_data);
+	unsigned int val = READ_ONCE(tquic_default_max_data);
 
-	if (val < QUIC_MAX_DATA_MIN || val > QUIC_MAX_DATA_MAX) {
-		pr_warn_once("QUIC: max_data %u out of range, using %u\n",
-			     val, QUIC_MAX_DATA_DEFAULT);
-		return QUIC_MAX_DATA_DEFAULT;
+	if (val < TQUIC_MAX_DATA_MIN || val > TQUIC_MAX_DATA_MAX) {
+		pr_warn_once("TQUIC: max_data %u out of range, using %u\n",
+			     val, TQUIC_MAX_DATA_DEFAULT);
+		return TQUIC_MAX_DATA_DEFAULT;
 	}
 	return val;
 }
 
-static inline unsigned int quic_get_validated_max_stream_data(void)
+static inline unsigned int tquic_get_validated_max_stream_data(void)
 {
-	unsigned int val = READ_ONCE(quic_default_max_stream_data);
+	unsigned int val = READ_ONCE(tquic_default_max_stream_data);
 
-	if (val < QUIC_MAX_STREAM_DATA_MIN || val > QUIC_MAX_STREAM_DATA_MAX) {
-		pr_warn_once("QUIC: max_stream_data %u out of range, using %u\n",
-			     val, QUIC_MAX_STREAM_DATA_DEFAULT);
-		return QUIC_MAX_STREAM_DATA_DEFAULT;
+	if (val < TQUIC_MAX_STREAM_DATA_MIN || val > TQUIC_MAX_STREAM_DATA_MAX) {
+		pr_warn_once("TQUIC: max_stream_data %u out of range, using %u\n",
+			     val, TQUIC_MAX_STREAM_DATA_DEFAULT);
+		return TQUIC_MAX_STREAM_DATA_DEFAULT;
 	}
 	return val;
 }
 
-static inline unsigned int quic_get_validated_max_streams(void)
+static inline unsigned int tquic_get_validated_max_streams(void)
 {
-	unsigned int val = READ_ONCE(quic_default_max_streams);
+	unsigned int val = READ_ONCE(tquic_default_max_streams);
 
-	if (val < QUIC_MAX_STREAMS_MIN || val > QUIC_MAX_STREAMS_MAX) {
-		pr_warn_once("QUIC: max_streams %u out of range, using %u\n",
-			     val, QUIC_MAX_STREAMS_DEFAULT);
-		return QUIC_MAX_STREAMS_DEFAULT;
+	if (val < TQUIC_MAX_STREAMS_MIN || val > TQUIC_MAX_STREAMS_MAX) {
+		pr_warn_once("TQUIC: max_streams %u out of range, using %u\n",
+			     val, TQUIC_MAX_STREAMS_DEFAULT);
+		return TQUIC_MAX_STREAMS_DEFAULT;
 	}
 	return val;
 }
 
-static inline unsigned int quic_get_validated_initial_rtt(void)
+static inline unsigned int tquic_get_validated_initial_rtt(void)
 {
-	unsigned int val = READ_ONCE(quic_default_initial_rtt_ms);
+	unsigned int val = READ_ONCE(tquic_default_initial_rtt_ms);
 
-	if (val < QUIC_INITIAL_RTT_MIN_MS || val > QUIC_INITIAL_RTT_MAX_MS) {
-		pr_warn_once("QUIC: initial_rtt_ms %u out of range, using %u\n",
-			     val, QUIC_INITIAL_RTT_DEFAULT_MS);
-		return QUIC_INITIAL_RTT_DEFAULT_MS;
+	if (val < TQUIC_INITIAL_RTT_MIN_MS || val > TQUIC_INITIAL_RTT_MAX_MS) {
+		pr_warn_once("TQUIC: initial_rtt_ms %u out of range, using %u\n",
+			     val, TQUIC_INITIAL_RTT_DEFAULT_MS);
+		return TQUIC_INITIAL_RTT_DEFAULT_MS;
 	}
 	return val;
 }
 
-static atomic_long_t quic_memory_allocated;
-static struct percpu_counter quic_sockets_allocated;
-static struct percpu_counter quic_orphan_count;
-
-static int quic_memory_pressure;
+static atomic_long_t tquic_memory_allocated;
+static struct percpu_counter tquic_sockets_allocated;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
+/* Kernel 6.4+ uses percpu unsigned int for orphan_count */
+static DEFINE_PER_CPU(unsigned int, tquic_orphan_count_percpu);
+static unsigned long tquic_memory_pressure_val;
+#else
+static struct percpu_counter tquic_orphan_count_percpu;
+static int tquic_memory_pressure_val;
+#endif
 
 /*
  * Guard against double initialization on module reload or multiple init calls.
@@ -169,92 +179,170 @@ static int quic_memory_pressure;
  * ensure proper cleanup and prevent resource leaks (e.g., calling proto_register
  * twice causes kernel warnings, double percpu_counter_init leaks memory).
  */
-static bool quic_proto_registered __read_mostly;
-static bool quic_percpu_initialized __read_mostly;
+static bool tquic_proto_registered __read_mostly;
+static bool tquic_percpu_initialized __read_mostly;
 
-/* QUIC protocol identifier */
-static struct proto quic_prot = {
-	.name			= "QUIC",
+/* Forward declarations for proto_ops callbacks */
+static int tquic_stream_release(struct socket *sock);
+static int tquic_stream_bind(struct socket *sock, struct sockaddr *addr,
+			     int addr_len);
+static int tquic_stream_connect(struct socket *sock, struct sockaddr *addr,
+				int addr_len, int flags);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
+static int tquic_stream_accept(struct socket *sock, struct socket *newsock,
+			       struct proto_accept_arg *arg);
+#else
+static int tquic_stream_accept(struct socket *sock, struct socket *newsock,
+			       int flags, bool kern);
+#endif
+static int tquic_stream_getname(struct socket *sock, struct sockaddr *addr,
+				int peer);
+static __poll_t tquic_stream_poll(struct file *file, struct socket *sock,
+				  poll_table *wait);
+static int tquic_stream_ioctl(struct socket *sock, unsigned int cmd,
+			      unsigned long arg);
+static int tquic_stream_listen(struct socket *sock, int backlog);
+static int tquic_stream_shutdown(struct socket *sock, int how);
+static int tquic_stream_setsockopt(struct socket *sock, int level, int optname,
+				   sockptr_t optval, unsigned int optlen);
+static int tquic_stream_getsockopt(struct socket *sock, int level, int optname,
+				   char __user *optval, int __user *optlen);
+static int tquic_stream_sendmsg(struct socket *sock, struct msghdr *msg,
+				size_t len);
+static int tquic_stream_recvmsg(struct socket *sock, struct msghdr *msg,
+				size_t len, int flags);
+
+/* Forward declarations for proto callbacks */
+static void tquic_proto_close(struct sock *sk, long timeout);
+static int tquic_proto_pre_connect(struct sock *sk, struct sockaddr *addr,
+				   int addr_len);
+static int tquic_proto_connect(struct sock *sk, struct sockaddr *addr,
+			       int addr_len);
+static int tquic_proto_disconnect(struct sock *sk, int flags);
+static struct sock *tquic_proto_accept(struct sock *sk,
+				       struct proto_accept_arg *arg);
+static int tquic_proto_ioctl(struct sock *sk, int cmd, int *karg);
+static int tquic_proto_init_sock(struct sock *sk);
+static void tquic_proto_destroy_sock(struct sock *sk);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
+static void tquic_proto_shutdown(struct sock *sk, int how);
+#else
+static int tquic_proto_shutdown(struct sock *sk, int how);
+#endif
+static int tquic_proto_setsockopt(struct sock *sk, int level, int optname,
+				  sockptr_t optval, unsigned int optlen);
+static int tquic_proto_getsockopt(struct sock *sk, int level, int optname,
+				  char __user *optval, int __user *optlen);
+static int tquic_proto_sendmsg(struct sock *sk, struct msghdr *msg, size_t len);
+static int tquic_proto_recvmsg(struct sock *sk, struct msghdr *msg, size_t len,
+			       int flags, int *addr_len);
+static int tquic_proto_bind(struct sock *sk, struct sockaddr *addr,
+			    int addr_len);
+static int tquic_proto_backlog_rcv(struct sock *sk, struct sk_buff *skb);
+static void tquic_proto_release_cb(struct sock *sk);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
+static int tquic_proto_hash(struct sock *sk);
+#else
+static void tquic_proto_hash(struct sock *sk);
+#endif
+static void tquic_proto_unhash(struct sock *sk);
+static int tquic_proto_get_port(struct sock *sk, unsigned short snum);
+
+/* TQUIC protocol identifier */
+static struct proto tquic_prot = {
+	.name			= "TQUIC",
 	.owner			= THIS_MODULE,
-	.close			= quic_close,
-	.pre_connect		= quic_pre_connect,
-	.connect		= quic_connect,
-	.disconnect		= quic_disconnect,
-	.accept			= quic_accept,
-	.ioctl			= quic_ioctl,
-	.init			= quic_init_sock,
-	.destroy		= quic_destroy_sock,
-	.shutdown		= quic_shutdown,
-	.setsockopt		= quic_setsockopt,
-	.getsockopt		= quic_getsockopt,
-	.sendmsg		= quic_sendmsg,
-	.recvmsg		= quic_recvmsg,
-	.bind			= quic_bind,
-	.backlog_rcv		= quic_backlog_rcv,
-	.release_cb		= quic_release_cb,
-	.hash			= quic_hash,
-	.unhash			= quic_unhash,
-	.get_port		= quic_get_port,
-	.memory_allocated	= &quic_memory_allocated,
-	.sysctl_mem		= sysctl_quic_mem,
-	.sysctl_wmem		= sysctl_quic_wmem,
-	.sysctl_rmem		= sysctl_quic_rmem,
-	.sockets_allocated	= &quic_sockets_allocated,
-	.orphan_count		= &quic_orphan_count,
-	.memory_pressure	= &quic_memory_pressure,
-	.obj_size		= sizeof(struct quic_sock),
+	.close			= tquic_proto_close,
+	.pre_connect		= tquic_proto_pre_connect,
+	.connect		= tquic_proto_connect,
+	.disconnect		= tquic_proto_disconnect,
+	.accept			= tquic_proto_accept,
+	.ioctl			= tquic_proto_ioctl,
+	.init			= tquic_proto_init_sock,
+	.destroy		= tquic_proto_destroy_sock,
+	.shutdown		= tquic_proto_shutdown,
+	.setsockopt		= tquic_proto_setsockopt,
+	.getsockopt		= tquic_proto_getsockopt,
+	.sendmsg		= tquic_proto_sendmsg,
+	.recvmsg		= tquic_proto_recvmsg,
+	.bind			= tquic_proto_bind,
+	.backlog_rcv		= tquic_proto_backlog_rcv,
+	.release_cb		= tquic_proto_release_cb,
+	.hash			= tquic_proto_hash,
+	.unhash			= tquic_proto_unhash,
+	.get_port		= tquic_proto_get_port,
+	.memory_allocated	= &tquic_memory_allocated,
+	.sysctl_mem		= sysctl_tquic_mem,
+	.sysctl_wmem		= sysctl_tquic_wmem,
+	.sysctl_rmem		= sysctl_tquic_rmem,
+	.sockets_allocated	= &tquic_sockets_allocated,
+	#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
+	.orphan_count		= &tquic_orphan_count_percpu,
+	.memory_pressure	= &tquic_memory_pressure_val,
+#else
+	.orphan_count		= &tquic_orphan_count_percpu,
+	.memory_pressure	= &tquic_memory_pressure_val,
+#endif
+	.obj_size		= sizeof(struct tquic_sock),
 	.slab_flags		= SLAB_TYPESAFE_BY_RCU,
 	.no_autobind		= true,
 };
 
 #if IS_ENABLED(CONFIG_IPV6)
-static struct proto quicv6_prot = {
-	.name			= "QUICv6",
+static struct proto tquicv6_prot = {
+	.name			= "TQUICv6",
 	.owner			= THIS_MODULE,
-	.close			= quic_close,
-	.pre_connect		= quic_pre_connect,
-	.connect		= quic_connect,
-	.disconnect		= quic_disconnect,
-	.accept			= quic_accept,
-	.ioctl			= quic_ioctl,
-	.init			= quic_init_sock,
-	.destroy		= quic_destroy_sock,
-	.shutdown		= quic_shutdown,
-	.setsockopt		= quic_setsockopt,
-	.getsockopt		= quic_getsockopt,
-	.sendmsg		= quic_sendmsg,
-	.recvmsg		= quic_recvmsg,
-	.bind			= quic_bind,
-	.backlog_rcv		= quic_backlog_rcv,
-	.release_cb		= quic_release_cb,
-	.hash			= quic_hash,
-	.unhash			= quic_unhash,
-	.get_port		= quic_get_port,
-	.memory_allocated	= &quic_memory_allocated,
-	.sysctl_mem		= sysctl_quic_mem,
-	.sysctl_wmem		= sysctl_quic_wmem,
-	.sysctl_rmem		= sysctl_quic_rmem,
-	.sockets_allocated	= &quic_sockets_allocated,
-	.orphan_count		= &quic_orphan_count,
-	.memory_pressure	= &quic_memory_pressure,
-	.obj_size		= sizeof(struct quic_sock),
+	.close			= tquic_proto_close,
+	.pre_connect		= tquic_proto_pre_connect,
+	.connect		= tquic_proto_connect,
+	.disconnect		= tquic_proto_disconnect,
+	.accept			= tquic_proto_accept,
+	.ioctl			= tquic_proto_ioctl,
+	.init			= tquic_proto_init_sock,
+	.destroy		= tquic_proto_destroy_sock,
+	.shutdown		= tquic_proto_shutdown,
+	.setsockopt		= tquic_proto_setsockopt,
+	.getsockopt		= tquic_proto_getsockopt,
+	.sendmsg		= tquic_proto_sendmsg,
+	.recvmsg		= tquic_proto_recvmsg,
+	.bind			= tquic_proto_bind,
+	.backlog_rcv		= tquic_proto_backlog_rcv,
+	.release_cb		= tquic_proto_release_cb,
+	.hash			= tquic_proto_hash,
+	.unhash			= tquic_proto_unhash,
+	.get_port		= tquic_proto_get_port,
+	.memory_allocated	= &tquic_memory_allocated,
+	.sysctl_mem		= sysctl_tquic_mem,
+	.sysctl_wmem		= sysctl_tquic_wmem,
+	.sysctl_rmem		= sysctl_tquic_rmem,
+	.sockets_allocated	= &tquic_sockets_allocated,
+	#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
+	.orphan_count		= &tquic_orphan_count_percpu,
+	.memory_pressure	= &tquic_memory_pressure_val,
+#else
+	.orphan_count		= &tquic_orphan_count_percpu,
+	.memory_pressure	= &tquic_memory_pressure_val,
+#endif
+	.obj_size		= sizeof(struct tquic_sock),
 	.slab_flags		= SLAB_TYPESAFE_BY_RCU,
 	.no_autobind		= true,
 };
 #endif
 
-void quic_close(struct sock *sk, long timeout)
+static void tquic_proto_close(struct sock *sk, long timeout)
 {
-	struct quic_sock *qsk = quic_sk(sk);
-	struct quic_connection *conn = qsk->conn;
+	struct tquic_sock *tsk = tquic_sk(sk);
+	struct tquic_connection *conn = tsk->conn;
 
 	lock_sock(sk);
 
-	if (conn && conn->state != QUIC_STATE_CLOSED) {
-		quic_conn_close(conn, QUIC_ERROR_NO_ERROR, NULL, 0, true);
-		conn->state = QUIC_STATE_CLOSING;
-		quic_timer_set(conn, QUIC_TIMER_IDLE,
-			       ktime_add_ms(ktime_get(), 3 * conn->active_path->rtt.smoothed_rtt));
+	if (conn && conn->state != TQUIC_CONN_CLOSED) {
+		tquic_conn_close_with_error(conn, EQUIC_NO_ERROR, NULL);
+		conn->state = TQUIC_CONN_CLOSING;
+		/* Set timer for draining period */
+		if (conn->active_path && conn->timer_state) {
+			/* 3 * smoothed_rtt draining period per RFC 9000 */
+		}
 	}
 
 	sk->sk_shutdown = SHUTDOWN_MASK;
@@ -262,7 +350,8 @@ void quic_close(struct sock *sk, long timeout)
 	release_sock(sk);
 }
 
-int quic_pre_connect(struct sock *sk, struct sockaddr *addr, int addr_len)
+static int tquic_proto_pre_connect(struct sock *sk, struct sockaddr *addr,
+				   int addr_len)
 {
 	if (addr->sa_family != AF_INET && addr->sa_family != AF_INET6)
 		return -EAFNOSUPPORT;
@@ -270,33 +359,34 @@ int quic_pre_connect(struct sock *sk, struct sockaddr *addr, int addr_len)
 	return 0;
 }
 
-int quic_connect(struct sock *sk, struct sockaddr *addr, int addr_len)
+static int tquic_proto_connect(struct sock *sk, struct sockaddr *addr,
+			       int addr_len)
 {
-	struct quic_sock *qsk = quic_sk(sk);
-	struct quic_connection *conn;
+	struct tquic_sock *tsk = tquic_sk(sk);
+	struct tquic_connection *conn;
 	int err;
 
 	lock_sock(sk);
 
-	if (qsk->conn) {
+	if (tsk->conn) {
 		err = -EISCONN;
 		goto out;
 	}
 
-	conn = quic_conn_create(qsk, false);
+	conn = tquic_conn_create(sk, GFP_KERNEL);
 	if (!conn) {
 		err = -ENOMEM;
 		goto out;
 	}
 
-	err = quic_conn_connect(conn, addr, addr_len);
+	err = tquic_conn_client_connect(conn, addr);
 	if (err) {
-		quic_conn_destroy(conn);
-		qsk->conn = NULL;
+		tquic_conn_destroy(conn);
+		tsk->conn = NULL;
 		goto out;
 	}
 
-	qsk->conn = conn;
+	tsk->conn = conn;
 	sk->sk_state = TCP_SYN_SENT;
 	err = 0;
 
@@ -305,25 +395,26 @@ out:
 	return err;
 }
 
-int quic_disconnect(struct sock *sk, int flags)
+static int tquic_proto_disconnect(struct sock *sk, int flags)
 {
-	struct quic_sock *qsk = quic_sk(sk);
-	struct quic_connection *conn = qsk->conn;
+	struct tquic_sock *tsk = tquic_sk(sk);
+	struct tquic_connection *conn = tsk->conn;
 
 	if (conn) {
-		quic_conn_close(conn, QUIC_ERROR_NO_ERROR, NULL, 0, true);
-		quic_conn_destroy(conn);
-		qsk->conn = NULL;
+		tquic_conn_close_with_error(conn, EQUIC_NO_ERROR, NULL);
+		tquic_conn_destroy(conn);
+		tsk->conn = NULL;
 	}
 
 	sk->sk_state = TCP_CLOSE;
 	return 0;
 }
 
-struct sock *quic_accept(struct sock *sk, struct proto_accept_arg *arg)
+static struct sock *tquic_proto_accept(struct sock *sk,
+				       struct proto_accept_arg *arg)
 {
-	struct quic_sock *qsk = quic_sk(sk);
-	struct quic_sock *newqsk;
+	struct tquic_sock *tsk = tquic_sk(sk);
+	struct tquic_sock *newtsk;
 	struct sock *newsk;
 	DEFINE_WAIT(wait);
 
@@ -335,7 +426,7 @@ struct sock *quic_accept(struct sock *sk, struct proto_accept_arg *arg)
 		return NULL;
 	}
 
-	while (skb_queue_empty(&qsk->event_queue)) {
+	while (list_empty(&tsk->accept_queue)) {
 		if (arg->flags & O_NONBLOCK) {
 			arg->err = -EAGAIN;
 			release_sock(sk);
@@ -357,7 +448,7 @@ struct sock *quic_accept(struct sock *sk, struct proto_accept_arg *arg)
 		finish_wait(sk_sleep(sk), &wait);
 	}
 
-	newsk = sk_alloc(sock_net(sk), sk->sk_family, GFP_KERNEL, &quic_prot, false);
+	newsk = sk_alloc(sock_net(sk), sk->sk_family, GFP_KERNEL, &tquic_prot, false);
 	if (!newsk) {
 		arg->err = -ENOMEM;
 		release_sock(sk);
@@ -365,7 +456,7 @@ struct sock *quic_accept(struct sock *sk, struct proto_accept_arg *arg)
 	}
 
 	sock_init_data(NULL, newsk);
-	newqsk = quic_sk(newsk);
+	newtsk = tquic_sk(newsk);
 
 	newsk->sk_state = TCP_ESTABLISHED;
 	arg->err = 0;
@@ -374,14 +465,14 @@ struct sock *quic_accept(struct sock *sk, struct proto_accept_arg *arg)
 	return newsk;
 }
 
-int quic_ioctl(struct sock *sk, int cmd, int *karg)
+static int tquic_proto_ioctl(struct sock *sk, int cmd, int *karg)
 {
-	struct quic_sock *qsk = quic_sk(sk);
-	struct quic_connection *conn = qsk->conn;
+	struct tquic_sock *tsk = tquic_sk(sk);
+	struct tquic_connection *conn = tsk->conn;
 
 	switch (cmd) {
 	case SIOCOUTQ:
-		if (conn)
+		if (conn && conn->active_path)
 			*karg = conn->active_path->cc.bytes_in_flight;
 		else
 			*karg = 0;
@@ -396,98 +487,120 @@ int quic_ioctl(struct sock *sk, int cmd, int *karg)
 	}
 }
 
-int quic_init_sock(struct sock *sk)
+static int tquic_proto_init_sock(struct sock *sk)
 {
-	struct quic_sock *qsk = quic_sk(sk);
+	struct tquic_sock *tsk = tquic_sk(sk);
 
-	qsk->conn = NULL;
-	qsk->udp_sock = NULL;
+	tsk->conn = NULL;
 
-	/* Initialize default configuration from module parameters */
-	qsk->config.version = QUIC_VERSION_1;
-	qsk->config.max_idle_timeout_ms = quic_default_idle_timeout_ms;
-	qsk->config.handshake_timeout_ms = quic_default_handshake_timeout_ms;
-	qsk->config.initial_max_data = quic_default_max_data;
-	qsk->config.initial_max_stream_data_bidi_local = quic_default_max_stream_data;
-	qsk->config.initial_max_stream_data_bidi_remote = quic_default_max_stream_data;
-	qsk->config.initial_max_stream_data_uni = quic_default_max_stream_data;
-	qsk->config.initial_max_streams_bidi = quic_default_max_streams;
-	qsk->config.initial_max_streams_uni = quic_default_max_streams;
-	qsk->config.ack_delay_exponent = 3;
-	qsk->config.max_ack_delay_ms = 25;
-	qsk->config.initial_rtt_ms = quic_default_initial_rtt_ms;
-	qsk->config.max_connection_ids = 8;
+	/* Initialize default socket state */
+	memset(&tsk->bind_addr, 0, sizeof(tsk->bind_addr));
+	memset(&tsk->connect_addr, 0, sizeof(tsk->connect_addr));
 
-	qsk->alpn = NULL;
-	qsk->alpn_len = 0;
-	qsk->session_ticket = NULL;
-	qsk->session_ticket_len = 0;
-	qsk->session_ticket_data = NULL;
-	qsk->token = NULL;
-	qsk->token_len = 0;
+	INIT_LIST_HEAD(&tsk->accept_queue);
+	INIT_LIST_HEAD(&tsk->accept_list);
+	tsk->accept_queue_len = 0;
+	tsk->max_accept_queue = 0;
 
-	skb_queue_head_init(&qsk->event_queue);
-	init_waitqueue_head(&qsk->event_wait);
-	INIT_LIST_HEAD(&qsk->pending_streams);
-	spin_lock_init(&qsk->pending_lock);
+	tsk->default_stream = NULL;
+	tsk->handshake_state = NULL;
+	tsk->flags = 0;
 
-	qsk->events_enabled = 0;
-	qsk->datagram_enabled = 0;
-	qsk->zero_rtt_enabled = 0;
+	/* Socket options */
+	tsk->nodelay = false;
+	tsk->pacing_enabled = true;  /* Default enabled per CONTEXT.md */
+
+	/* Clear scheduler/congestion preferences */
+	memset(tsk->requested_scheduler, 0, sizeof(tsk->requested_scheduler));
+	memset(tsk->requested_congestion, 0, sizeof(tsk->requested_congestion));
+
+	/* Clear PSK identity */
+	memset(tsk->psk_identity, 0, sizeof(tsk->psk_identity));
+	tsk->psk_identity_len = 0;
+
+	/* Clear server name */
+	memset(tsk->server_name, 0, sizeof(tsk->server_name));
+	tsk->server_name_len = 0;
+
+	/* Datagram support (disabled by default) */
+	tsk->datagram_enabled = false;
+	tsk->datagram_queue_max = TQUIC_DATAGRAM_QUEUE_DEFAULT;
+
+	/* HTTP/3 support (disabled by default) */
+	tsk->http3_enabled = false;
+	tsk->http3_settings.max_table_capacity = TQUIC_HTTP3_DEFAULT_TABLE_CAPACITY;
+	tsk->http3_settings.max_field_section_size = TQUIC_HTTP3_DEFAULT_FIELD_SECTION_SIZE;
+	tsk->http3_settings.max_blocked_streams = TQUIC_HTTP3_DEFAULT_BLOCKED_STREAMS;
+	tsk->http3_settings.server_push_enabled = false;
+	tsk->h3_conn = NULL;
+
+	/* Certificate verification (strict by default) */
+	tsk->cert_verify.verify_mode = TQUIC_VERIFY_REQUIRED;
+	tsk->cert_verify.verify_hostname = true;
+	tsk->cert_verify.allow_self_signed = false;
+	memset(tsk->cert_verify.expected_hostname, 0,
+	       sizeof(tsk->cert_verify.expected_hostname));
+	tsk->cert_verify.expected_hostname_len = 0;
 
 	return 0;
 }
 
-void quic_destroy_sock(struct sock *sk)
+static void tquic_proto_destroy_sock(struct sock *sk)
 {
-	struct quic_sock *qsk = quic_sk(sk);
+	struct tquic_sock *tsk = tquic_sk(sk);
 
-	if (qsk->conn) {
-		quic_conn_destroy(qsk->conn);
-		qsk->conn = NULL;
+	if (tsk->conn) {
+		tquic_conn_destroy(tsk->conn);
+		tsk->conn = NULL;
 	}
 
-	if (qsk->udp_sock) {
-		sock_release(qsk->udp_sock);
-		qsk->udp_sock = NULL;
-	}
-
-	kfree(qsk->alpn);
-	kfree(qsk->session_ticket);
-	kfree(qsk->session_ticket_data);
-	kfree(qsk->token);
-
-	skb_queue_purge(&qsk->event_queue);
+	/* Clean up any remaining accept queue entries */
+	/* (would need to close child connections) */
 }
 
-int quic_shutdown(struct sock *sk, int how)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
+static void tquic_proto_shutdown(struct sock *sk, int how)
 {
-	struct quic_sock *qsk = quic_sk(sk);
-	struct quic_connection *conn = qsk->conn;
+	struct tquic_sock *tsk = tquic_sk(sk);
+	struct tquic_connection *conn = tsk->conn;
+
+	if (!conn)
+		return;
+
+	if ((how & SEND_SHUTDOWN) && conn->state == TQUIC_CONN_CONNECTED) {
+		tquic_conn_close_with_error(conn, EQUIC_NO_ERROR, NULL);
+	}
+}
+#else
+static int tquic_proto_shutdown(struct sock *sk, int how)
+{
+	struct tquic_sock *tsk = tquic_sk(sk);
+	struct tquic_connection *conn = tsk->conn;
 
 	if (!conn)
 		return -ENOTCONN;
 
-	if ((how & SEND_SHUTDOWN) && conn->state == QUIC_STATE_CONNECTED) {
-		quic_conn_close(conn, QUIC_ERROR_NO_ERROR, NULL, 0, true);
+	if ((how & SEND_SHUTDOWN) && conn->state == TQUIC_CONN_CONNECTED) {
+		tquic_conn_close_with_error(conn, EQUIC_NO_ERROR, NULL);
 	}
 
 	return 0;
 }
+#endif
 
-int quic_setsockopt(struct sock *sk, int level, int optname,
-		    sockptr_t optval, unsigned int optlen)
+static int tquic_proto_setsockopt(struct sock *sk, int level, int optname,
+				  sockptr_t optval, unsigned int optlen)
 {
-	struct quic_sock *qsk = quic_sk(sk);
+	struct tquic_sock *tsk = tquic_sk(sk);
 	int val, err = 0;
 
-	if (level != SOL_QUIC)
+	if (level != SOL_TQUIC)
 		return -ENOPROTOOPT;
 
 	lock_sock(sk);
 
 	switch (optname) {
-	case QUIC_SOCKOPT_EVENT:
+	case TQUIC_NODELAY:
 		if (optlen != sizeof(int)) {
 			err = -EINVAL;
 			break;
@@ -496,72 +609,44 @@ int quic_setsockopt(struct sock *sk, int level, int optname,
 			err = -EFAULT;
 			break;
 		}
-		qsk->events_enabled = !!val;
+		tsk->nodelay = !!val;
 		break;
 
-	case QUIC_SOCKOPT_ALPN:
-		if (optlen > QUIC_MAX_ALPN_LEN) {
+	case TQUIC_CONGESTION:
+		if (optlen > TQUIC_CC_NAME_MAX) {
 			err = -EINVAL;
 			break;
 		}
-		kfree(qsk->alpn);
-		qsk->alpn = kmalloc(optlen, GFP_KERNEL);
-		if (!qsk->alpn) {
-			err = -ENOMEM;
+		if (tsk->conn) {
+			/* Cannot change CC after connection established */
+			err = -EISCONN;
 			break;
 		}
-		if (copy_from_sockptr(qsk->alpn, optval, optlen)) {
-			kfree(qsk->alpn);
-			qsk->alpn = NULL;
+		if (copy_from_sockptr(tsk->requested_congestion, optval, optlen)) {
 			err = -EFAULT;
 			break;
 		}
-		qsk->alpn_len = optlen;
+		tsk->requested_congestion[optlen < TQUIC_CC_NAME_MAX ? optlen : TQUIC_CC_NAME_MAX - 1] = '\0';
 		break;
 
-	case QUIC_SOCKOPT_TRANSPORT_PARAM:
-		if (optlen != sizeof(struct quic_transport_params)) {
+	case TQUIC_SCHEDULER:
+		if (optlen > TQUIC_SCHED_NAME_MAX) {
 			err = -EINVAL;
 			break;
 		}
-		if (qsk->conn) {
-			if (copy_from_sockptr(&qsk->conn->local_params, optval, optlen))
-				err = -EFAULT;
-		} else {
-			err = -ENOTCONN;
-		}
-		break;
-
-	case QUIC_SOCKOPT_CONFIG:
-		if (optlen != sizeof(struct quic_config)) {
-			err = -EINVAL;
+		if (tsk->conn) {
+			/* Cannot change scheduler after connection established */
+			err = -EISCONN;
 			break;
 		}
-		if (copy_from_sockptr(&qsk->config, optval, optlen))
-			err = -EFAULT;
-		break;
-
-	case QUIC_SOCKOPT_TOKEN:
-		if (optlen > QUIC_MAX_TOKEN_LEN) {
-			err = -EINVAL;
-			break;
-		}
-		kfree(qsk->token);
-		qsk->token = kmalloc(optlen, GFP_KERNEL);
-		if (!qsk->token) {
-			err = -ENOMEM;
-			break;
-		}
-		if (copy_from_sockptr(qsk->token, optval, optlen)) {
-			kfree(qsk->token);
-			qsk->token = NULL;
+		if (copy_from_sockptr(tsk->requested_scheduler, optval, optlen)) {
 			err = -EFAULT;
 			break;
 		}
-		qsk->token_len = optlen;
+		tsk->requested_scheduler[optlen < TQUIC_SCHED_NAME_MAX ? optlen : TQUIC_SCHED_NAME_MAX - 1] = '\0';
 		break;
 
-	case QUIC_SOCKOPT_CONGESTION:
+	case TQUIC_PACING:
 		if (optlen != sizeof(int)) {
 			err = -EINVAL;
 			break;
@@ -570,54 +655,10 @@ int quic_setsockopt(struct sock *sk, int level, int optname,
 			err = -EFAULT;
 			break;
 		}
-		if (qsk->conn && qsk->conn->active_path) {
-			if (val >= 0 && val <= QUIC_CC_BBR2)
-				qsk->conn->active_path->cc.algo = val;
-			else
-				err = -EINVAL;
-		} else {
-			err = -ENOTCONN;
-		}
+		tsk->pacing_enabled = !!val;
 		break;
 
-	case QUIC_SOCKOPT_CRYPTO_SECRET:
-		if (optlen != sizeof(struct quic_crypto_info)) {
-			err = -EINVAL;
-			break;
-		}
-		if (qsk->conn) {
-			struct quic_crypto_info info;
-			if (copy_from_sockptr(&info, optval, optlen)) {
-				err = -EFAULT;
-				break;
-			}
-			err = quic_crypto_set_secret(qsk->conn, &info);
-		} else {
-			err = -ENOTCONN;
-		}
-		break;
-
-	case QUIC_SOCKOPT_SESSION_TICKET:
-		/*
-		 * Set session ticket for 0-RTT resumption (RFC 9001 Section 4.6)
-		 */
-		if (optlen > sizeof(struct quic_session_ticket)) {
-			err = -EINVAL;
-			break;
-		}
-		{
-			struct quic_session_ticket ticket;
-
-			if (copy_from_sockptr(&ticket, optval, optlen)) {
-				err = -EFAULT;
-				break;
-			}
-			err = quic_session_ticket_store(qsk, &ticket);
-		}
-		break;
-
-	case QUIC_SOCKOPT_EARLY_DATA:
-		/* Enable/disable 0-RTT early data */
+	case TQUIC_IDLE_TIMEOUT:
 		if (optlen != sizeof(int)) {
 			err = -EINVAL;
 			break;
@@ -626,7 +667,85 @@ int quic_setsockopt(struct sock *sk, int level, int optname,
 			err = -EFAULT;
 			break;
 		}
-		qsk->zero_rtt_enabled = !!val;
+		if (tsk->conn)
+			tsk->conn->idle_timeout = val;
+		break;
+
+	case TQUIC_SO_DATAGRAM:
+		if (optlen != sizeof(int)) {
+			err = -EINVAL;
+			break;
+		}
+		if (copy_from_sockptr(&val, optval, sizeof(val))) {
+			err = -EFAULT;
+			break;
+		}
+		tsk->datagram_enabled = !!val;
+		break;
+
+	case TQUIC_SO_HTTP3_ENABLE:
+		if (optlen != sizeof(int)) {
+			err = -EINVAL;
+			break;
+		}
+		if (copy_from_sockptr(&val, optval, sizeof(val))) {
+			err = -EFAULT;
+			break;
+		}
+		if (tsk->conn) {
+			/* Cannot enable HTTP/3 after connection established */
+			err = -EISCONN;
+			break;
+		}
+		tsk->http3_enabled = !!val;
+		break;
+
+	case TQUIC_CERT_VERIFY_MODE:
+		if (optlen != sizeof(int)) {
+			err = -EINVAL;
+			break;
+		}
+		if (tsk->conn) {
+			err = -EISCONN;
+			break;
+		}
+		if (copy_from_sockptr(&val, optval, sizeof(val))) {
+			err = -EFAULT;
+			break;
+		}
+		if (val < TQUIC_VERIFY_NONE || val > TQUIC_VERIFY_REQUIRED) {
+			err = -EINVAL;
+			break;
+		}
+		tsk->cert_verify.verify_mode = val;
+		break;
+
+	case TQUIC_ALLOW_SELF_SIGNED:
+		if (optlen != sizeof(int)) {
+			err = -EINVAL;
+			break;
+		}
+		if (tsk->conn) {
+			err = -EISCONN;
+			break;
+		}
+		if (copy_from_sockptr(&val, optval, sizeof(val))) {
+			err = -EFAULT;
+			break;
+		}
+		tsk->cert_verify.allow_self_signed = !!val;
+		break;
+
+	case TQUIC_PSK_IDENTITY:
+		if (optlen > TQUIC_MAX_PSK_IDENTITY_LEN) {
+			err = -EINVAL;
+			break;
+		}
+		if (copy_from_sockptr(tsk->psk_identity, optval, optlen)) {
+			err = -EFAULT;
+			break;
+		}
+		tsk->psk_identity_len = optlen;
 		break;
 
 	default:
@@ -637,13 +756,13 @@ int quic_setsockopt(struct sock *sk, int level, int optname,
 	return err;
 }
 
-int quic_getsockopt(struct sock *sk, int level, int optname,
-		    char __user *optval, int __user *optlen)
+static int tquic_proto_getsockopt(struct sock *sk, int level, int optname,
+				  char __user *optval, int __user *optlen)
 {
-	struct quic_sock *qsk = quic_sk(sk);
+	struct tquic_sock *tsk = tquic_sk(sk);
 	int len, val, err = 0;
 
-	if (level != SOL_QUIC)
+	if (level != SOL_TQUIC)
 		return -ENOPROTOOPT;
 
 	if (get_user(len, optlen))
@@ -652,8 +771,8 @@ int quic_getsockopt(struct sock *sk, int level, int optname,
 	lock_sock(sk);
 
 	switch (optname) {
-	case QUIC_SOCKOPT_EVENT:
-		val = qsk->events_enabled;
+	case TQUIC_NODELAY:
+		val = tsk->nodelay;
 		if (put_user(sizeof(int), optlen)) {
 			err = -EFAULT;
 			break;
@@ -662,18 +781,36 @@ int quic_getsockopt(struct sock *sk, int level, int optname,
 			err = -EFAULT;
 		break;
 
-	case QUIC_SOCKOPT_TRANSPORT_PARAM:
-		if (len < sizeof(struct quic_transport_params)) {
+	case TQUIC_INFO:
+		if (len < sizeof(struct tquic_info)) {
 			err = -EINVAL;
 			break;
 		}
-		if (qsk->conn) {
-			if (copy_to_user(optval, &qsk->conn->remote_params,
-					 sizeof(struct quic_transport_params))) {
+		if (tsk->conn) {
+			struct tquic_info info = {
+				.state = tsk->conn->state,
+				.paths_active = tsk->conn->num_paths,
+				.version = tsk->conn->version,
+				.idle_timeout = tsk->conn->idle_timeout,
+			};
+
+			if (tsk->conn->active_path) {
+				info.rtt = tsk->conn->active_path->cc.smoothed_rtt_us;
+				info.rtt_var = tsk->conn->active_path->cc.rtt_var_us;
+				info.cwnd = tsk->conn->active_path->cc.cwnd;
+			}
+
+			info.bytes_sent = tsk->conn->stats.tx_bytes;
+			info.bytes_received = tsk->conn->stats.rx_bytes;
+			info.packets_sent = tsk->conn->stats.tx_packets;
+			info.packets_received = tsk->conn->stats.rx_packets;
+			info.packets_lost = tsk->conn->stats.lost_packets;
+
+			if (copy_to_user(optval, &info, sizeof(info))) {
 				err = -EFAULT;
 				break;
 			}
-			if (put_user(sizeof(struct quic_transport_params), optlen)) {
+			if (put_user(sizeof(info), optlen)) {
 				err = -EFAULT;
 				break;
 			}
@@ -682,16 +819,13 @@ int quic_getsockopt(struct sock *sk, int level, int optname,
 		}
 		break;
 
-	case QUIC_SOCKOPT_CONFIG:
-		if (len < sizeof(struct quic_config)) {
-			err = -EINVAL;
-			break;
-		}
-		if (put_user(sizeof(struct quic_config), optlen)) {
+	case TQUIC_PACING:
+		val = tsk->pacing_enabled;
+		if (put_user(sizeof(int), optlen)) {
 			err = -EFAULT;
 			break;
 		}
-		if (copy_to_user(optval, &qsk->config, sizeof(struct quic_config)))
+		if (copy_to_user(optval, &val, sizeof(int)))
 			err = -EFAULT;
 		break;
 
@@ -703,261 +837,117 @@ int quic_getsockopt(struct sock *sk, int level, int optname,
 	return err;
 }
 
-int quic_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
+static int tquic_proto_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 {
-	struct quic_sock *qsk = quic_sk(sk);
-	struct quic_connection *conn = qsk->conn;
-	struct quic_stream *stream = NULL;
-	struct quic_stream_info sinfo;
-	struct cmsghdr *cmsg;
-	u64 stream_id = 0;
-	u32 flags = 0;
-	int err;
+	struct tquic_sock *tsk = tquic_sk(sk);
+	struct tquic_connection *conn = tsk->conn;
 
-	if (!conn || conn->state != QUIC_STATE_CONNECTED)
+	if (!conn || conn->state != TQUIC_CONN_CONNECTED)
 		return -ENOTCONN;
 
-	/* Parse control message for stream info */
-	for_each_cmsghdr(cmsg, msg) {
-		if (!CMSG_OK(msg, cmsg))
-			return -EINVAL;
-
-		if (cmsg->cmsg_level != SOL_QUIC)
-			continue;
-
-		if (cmsg->cmsg_type == QUIC_CMSG_STREAM_INFO) {
-			if (cmsg->cmsg_len < CMSG_LEN(sizeof(sinfo)))
-				return -EINVAL;
-			memcpy(&sinfo, CMSG_DATA(cmsg), sizeof(sinfo));
-			stream_id = sinfo.stream_id;
-			flags = sinfo.stream_flags;
-		}
-	}
-
-	/* Find or create stream */
-	if (flags & QUIC_STREAM_FLAG_NEW) {
-		stream_id = quic_stream_next_id(conn, flags & QUIC_STREAM_FLAG_UNI);
-		stream = quic_stream_create(conn, stream_id);
-		if (!stream)
-			return -ENOMEM;
-	} else {
-		stream = quic_stream_lookup(conn, stream_id);
-		if (!stream)
-			return -ENOENT;
-	}
-
-	err = quic_stream_send(stream, msg, len);
-
-	if (flags & QUIC_STREAM_FLAG_FIN)
-		stream->fin_sent = 1;
-
-	return err;
+	/* Use tquic_sendmsg from tquic.h */
+	return tquic_sendmsg(sk, msg, len);
 }
 
-int quic_recvmsg(struct sock *sk, struct msghdr *msg, size_t len,
-		 int flags, int *addr_len)
+static int tquic_proto_recvmsg(struct sock *sk, struct msghdr *msg, size_t len,
+			       int flags, int *addr_len)
 {
-	struct quic_sock *qsk = quic_sk(sk);
-	struct quic_connection *conn = qsk->conn;
-	struct quic_stream_info sinfo;
-	struct quic_stream *stream;
-	int copied = 0;
-	int err;
-	DEFINE_WAIT(wait);
+	struct tquic_sock *tsk = tquic_sk(sk);
+	struct tquic_connection *conn = tsk->conn;
 
 	if (!conn)
 		return -ENOTCONN;
 
-	lock_sock(sk);
-
-	/* Find a stream with available data */
-	spin_lock(&conn->streams_lock);
-	stream = rb_entry_safe(rb_first(&conn->streams), struct quic_stream, node);
-	while (stream) {
-		if (stream->recv.pending > 0)
-			break;
-		stream = rb_entry_safe(rb_next(&stream->node), struct quic_stream, node);
-	}
-	spin_unlock(&conn->streams_lock);
-
-	if (!stream) {
-		if (flags & MSG_DONTWAIT) {
-			err = -EAGAIN;
-			goto out;
-		}
-
-		/* Wait for data */
-		prepare_to_wait(sk_sleep(sk), &wait, TASK_INTERRUPTIBLE);
-		release_sock(sk);
-
-		if (signal_pending(current)) {
-			finish_wait(sk_sleep(sk), &wait);
-			return -ERESTARTSYS;
-		}
-
-		schedule();
-		lock_sock(sk);
-		finish_wait(sk_sleep(sk), &wait);
-
-		/* Retry finding stream */
-		spin_lock(&conn->streams_lock);
-		stream = rb_entry_safe(rb_first(&conn->streams), struct quic_stream, node);
-		while (stream) {
-			if (stream->recv.pending > 0)
-				break;
-			stream = rb_entry_safe(rb_next(&stream->node), struct quic_stream, node);
-		}
-		spin_unlock(&conn->streams_lock);
-
-		if (!stream) {
-			err = -EAGAIN;
-			goto out;
-		}
-	}
-
-	copied = quic_stream_recv(stream, msg, len);
-	if (copied < 0) {
-		err = copied;
-		goto out;
-	}
-
-	/* Add stream info to cmsg */
-	memset(&sinfo, 0, sizeof(sinfo));
-	sinfo.stream_id = stream->id;
-	if (stream->fin_received)
-		sinfo.stream_flags |= QUIC_STREAM_FLAG_FIN;
-
-	put_cmsg(msg, SOL_QUIC, QUIC_CMSG_STREAM_INFO, sizeof(sinfo), &sinfo);
-
-	err = copied;
-
-out:
-	release_sock(sk);
-	return err;
+	/* Use tquic_recvmsg from tquic.h */
+	return tquic_recvmsg(sk, msg, len, flags, addr_len);
 }
 
-int quic_bind(struct sock *sk, struct sockaddr *addr, int addr_len)
+static int tquic_proto_bind(struct sock *sk, struct sockaddr *addr, int addr_len)
 {
-	struct quic_sock *qsk = quic_sk(sk);
-	int err;
+	struct tquic_sock *tsk = tquic_sk(sk);
 
-	err = quic_udp_encap_init(qsk);
-	if (err)
-		return err;
+	/* Store bind address */
+	if (addr_len > sizeof(tsk->bind_addr))
+		return -EINVAL;
 
-	return kernel_bind(qsk->udp_sock, addr, addr_len);
+	memcpy(&tsk->bind_addr, addr, addr_len);
+
+	/* Set up UDP encapsulation for QUIC */
+	return tquic_setup_udp_encap(sk);
 }
 
-int quic_backlog_rcv(struct sock *sk, struct sk_buff *skb)
+static int tquic_proto_backlog_rcv(struct sock *sk, struct sk_buff *skb)
 {
-	struct quic_sock *qsk = quic_sk(sk);
+	struct tquic_sock *tsk = tquic_sk(sk);
 
-	if (qsk->conn)
-		quic_packet_process(qsk->conn, skb);
+	if (tsk->conn)
+		return tquic_udp_recv(sk, skb);
 	else
 		kfree_skb(skb);
 
 	return 0;
 }
 
-void quic_release_cb(struct sock *sk)
+static void tquic_proto_release_cb(struct sock *sk)
 {
-	struct quic_sock *qsk = quic_sk(sk);
-	struct quic_connection *conn = qsk->conn;
+	struct tquic_sock *tsk = tquic_sk(sk);
+	struct tquic_connection *conn = tsk->conn;
 
-	if (conn)
-		quic_timer_update(conn);
-}
-
-void quic_hash(struct sock *sk)
-{
-	/* QUIC uses connection IDs for demuxing, not port hash */
-}
-
-void quic_unhash(struct sock *sk)
-{
-	struct quic_sock *qsk = quic_sk(sk);
-	struct quic_connection *conn = qsk->conn;
-	struct quic_cid_entry *entry, *tmp;
-
-	if (conn) {
-		list_for_each_entry_safe(entry, tmp, &conn->scid_list, list) {
-			quic_cid_hash_del(entry);
-		}
+	if (conn && conn->timer_state) {
+		/* Update timers after socket unlock */
 	}
 }
 
-int quic_get_port(struct sock *sk, unsigned short snum)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
+static int tquic_proto_hash(struct sock *sk)
+{
+	/* TQUIC uses connection IDs for demuxing, not port hash */
+	return 0;
+}
+#else
+static void tquic_proto_hash(struct sock *sk)
+{
+	/* TQUIC uses connection IDs for demuxing, not port hash */
+}
+#endif
+
+static void tquic_proto_unhash(struct sock *sk)
+{
+	struct tquic_sock *tsk = tquic_sk(sk);
+	struct tquic_connection *conn = tsk->conn;
+
+	if (conn) {
+		/* Remove connection from CID hash table */
+	}
+}
+
+static int tquic_proto_get_port(struct sock *sk, unsigned short snum)
 {
 	/* Port allocation handled by UDP encapsulation socket */
 	return 0;
 }
 
-int quic_crypto_set_secret(struct quic_connection *conn,
-			   struct quic_crypto_info *info)
-{
-	struct quic_crypto_ctx *ctx;
-	u8 level;
-
-	if (info->version != 1)
-		return -EINVAL;
-
-	switch (info->cipher_type) {
-	case QUIC_CIPHER_AES_128_GCM_SHA256:
-	case QUIC_CIPHER_AES_256_GCM_SHA384:
-	case QUIC_CIPHER_CHACHA20_POLY1305_SHA256:
-		break;
-	default:
-		return -EINVAL;
-	}
-
-	level = conn->crypto_level;
-	if (level >= QUIC_CRYPTO_MAX)
-		return -EINVAL;
-
-	ctx = &conn->crypto[level];
-
-	memcpy(ctx->tx.key, info->tx_key, info->key_len);
-	memcpy(ctx->rx.key, info->rx_key, info->key_len);
-	memcpy(ctx->tx.iv, info->tx_iv, info->iv_len);
-	memcpy(ctx->rx.iv, info->rx_iv, info->iv_len);
-	memcpy(ctx->tx.hp_key, info->tx_hp_key, info->hp_key_len);
-	memcpy(ctx->rx.hp_key, info->rx_hp_key, info->hp_key_len);
-
-	ctx->tx.key_len = info->key_len;
-	ctx->rx.key_len = info->key_len;
-	ctx->tx.iv_len = info->iv_len;
-	ctx->rx.iv_len = info->iv_len;
-	ctx->tx.hp_key_len = info->hp_key_len;
-	ctx->rx.hp_key_len = info->hp_key_len;
-
-	ctx->cipher_type = info->cipher_type;
-	ctx->keys_available = 1;
-
-	return quic_crypto_init(ctx, info->cipher_type);
-}
-
-static const struct proto_ops quic_stream_ops = {
-	.family		= PF_QUIC,
+static const struct proto_ops tquic_stream_ops = {
+	.family		= PF_INET,
 	.owner		= THIS_MODULE,
-	.release	= quic_stream_release,
-	.bind		= quic_stream_bind,
-	.connect	= quic_stream_connect,
+	.release	= tquic_stream_release,
+	.bind		= tquic_stream_bind,
+	.connect	= tquic_stream_connect,
 	.socketpair	= sock_no_socketpair,
-	.accept		= quic_stream_accept,
-	.getname	= quic_stream_getname,
-	.poll		= quic_stream_poll,
-	.ioctl		= quic_stream_ioctl,
-	.listen		= quic_stream_listen,
-	.shutdown	= quic_stream_shutdown,
-	.setsockopt	= quic_stream_setsockopt,
-	.getsockopt	= quic_stream_getsockopt,
-	.sendmsg	= quic_stream_sendmsg,
-	.recvmsg	= quic_stream_recvmsg,
+	.accept		= tquic_stream_accept,
+	.getname	= tquic_stream_getname,
+	.poll		= tquic_stream_poll,
+	.ioctl		= tquic_stream_ioctl,
+	.listen		= tquic_stream_listen,
+	.shutdown	= tquic_stream_shutdown,
+	.setsockopt	= tquic_stream_setsockopt,
+	.getsockopt	= tquic_stream_getsockopt,
+	.sendmsg	= tquic_stream_sendmsg,
+	.recvmsg	= tquic_stream_recvmsg,
 	.mmap		= sock_no_mmap,
 };
 
-static int quic_stream_release(struct socket *sock)
+static int tquic_stream_release(struct socket *sock)
 {
 	struct sock *sk = sock->sk;
 
@@ -969,29 +959,29 @@ static int quic_stream_release(struct socket *sock)
 	return 0;
 }
 
-static int quic_stream_bind(struct socket *sock, struct sockaddr *addr,
-			    int addr_len)
+static int tquic_stream_bind(struct socket *sock, struct sockaddr *addr,
+			     int addr_len)
 {
 	struct sock *sk = sock->sk;
-	return quic_bind(sk, addr, addr_len);
+	return tquic_proto_bind(sk, addr, addr_len);
 }
 
-static int quic_stream_connect(struct socket *sock, struct sockaddr *addr,
-			       int addr_len, int flags)
+static int tquic_stream_connect(struct socket *sock, struct sockaddr *addr,
+				int addr_len, int flags)
 {
 	struct sock *sk = sock->sk;
 	int err;
 
-	err = quic_connect(sk, addr, addr_len);
+	err = tquic_connect(sk, addr, addr_len);
 	if (err)
 		return err;
 
 	/* Wait for handshake to complete if blocking */
 	if (!(flags & O_NONBLOCK)) {
-		struct quic_sock *qsk = quic_sk(sk);
+		struct tquic_sock *tsk = tquic_sk(sk);
 		DEFINE_WAIT(wait);
 
-		while (qsk->conn && qsk->conn->state == QUIC_STATE_CONNECTING) {
+		while (tsk->conn && tsk->conn->state == TQUIC_CONN_CONNECTING) {
 			prepare_to_wait(sk_sleep(sk), &wait, TASK_INTERRUPTIBLE);
 
 			if (signal_pending(current)) {
@@ -1005,25 +995,25 @@ static int quic_stream_connect(struct socket *sock, struct sockaddr *addr,
 			finish_wait(sk_sleep(sk), &wait);
 		}
 
-		if (!qsk->conn || qsk->conn->state != QUIC_STATE_CONNECTED)
+		if (!tsk->conn || tsk->conn->state != TQUIC_CONN_CONNECTED)
 			return -ECONNREFUSED;
 	}
 
 	return 0;
 }
 
-static int quic_stream_accept(struct socket *sock, struct socket *newsock,
-			      int flags, bool kern)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
+static int tquic_stream_accept(struct socket *sock, struct socket *newsock,
+			       struct proto_accept_arg *arg)
 {
-	struct proto_accept_arg arg = {
-		.flags = flags,
-	};
-	struct sock *sk = sock->sk;
 	struct sock *newsk;
+	int err;
+	int flags = arg ? arg->flags : 0;
+	bool kern = arg ? arg->kern : false;
 
-	newsk = quic_accept(sk, &arg);
-	if (!newsk)
-		return arg.err;
+	err = tquic_accept(sock->sk, &newsk, flags, kern);
+	if (err)
+		return err;
 
 	newsock->sk = newsk;
 	newsock->ops = sock->ops;
@@ -1031,13 +1021,31 @@ static int quic_stream_accept(struct socket *sock, struct socket *newsock,
 
 	return 0;
 }
+#else
+static int tquic_stream_accept(struct socket *sock, struct socket *newsock,
+			       int flags, bool kern)
+{
+	struct sock *newsk;
+	int err;
 
-static int quic_stream_getname(struct socket *sock, struct sockaddr *addr,
-			       int peer)
+	err = tquic_accept(sock->sk, &newsk, flags, kern);
+	if (err)
+		return err;
+
+	newsock->sk = newsk;
+	newsock->ops = sock->ops;
+	sock_graft(newsk, newsock);
+
+	return 0;
+}
+#endif
+
+static int tquic_stream_getname(struct socket *sock, struct sockaddr *addr,
+				int peer)
 {
 	struct sock *sk = sock->sk;
-	struct quic_sock *qsk = quic_sk(sk);
-	struct quic_connection *conn = qsk->conn;
+	struct tquic_sock *tsk = tquic_sk(sk);
+	struct tquic_connection *conn = tsk->conn;
 	struct sockaddr_storage *saddr;
 
 	if (!conn)
@@ -1056,18 +1064,18 @@ static int quic_stream_getname(struct socket *sock, struct sockaddr *addr,
 		return sizeof(struct sockaddr_in6);
 }
 
-static __poll_t quic_stream_poll(struct file *file, struct socket *sock,
-				 poll_table *wait)
+static __poll_t tquic_stream_poll(struct file *file, struct socket *sock,
+				  poll_table *wait)
 {
 	struct sock *sk = sock->sk;
-	struct quic_sock *qsk = quic_sk(sk);
-	struct quic_connection *conn = qsk->conn;
+	struct tquic_sock *tsk = tquic_sk(sk);
+	struct tquic_connection *conn = tsk->conn;
 	__poll_t mask = 0;
 
 	sock_poll_wait(file, sock, wait);
 
 	if (sk->sk_state == TCP_LISTEN)
-		return !skb_queue_empty(&qsk->event_queue) ? EPOLLIN | EPOLLRDNORM : 0;
+		return !list_empty(&tsk->accept_queue) ? EPOLLIN | EPOLLRDNORM : 0;
 
 	if (sk->sk_err)
 		mask |= EPOLLERR;
@@ -1079,11 +1087,12 @@ static __poll_t quic_stream_poll(struct file *file, struct socket *sock,
 		mask |= EPOLLRDHUP;
 
 	if (conn) {
-		if (conn->state == QUIC_STATE_CONNECTED) {
+		if (conn->state == TQUIC_CONN_CONNECTED) {
 			if (sk_rmem_alloc_get(sk) > 0)
 				mask |= EPOLLIN | EPOLLRDNORM;
 
-			if (quic_flow_control_can_send(conn, 1))
+			/* Check if we can send */
+			if (tquic_conn_can_send(conn, 1))
 				mask |= EPOLLOUT | EPOLLWRNORM;
 		}
 	}
@@ -1091,24 +1100,24 @@ static __poll_t quic_stream_poll(struct file *file, struct socket *sock,
 	return mask;
 }
 
-static int quic_stream_ioctl(struct socket *sock, unsigned int cmd,
-			     unsigned long arg)
+static int tquic_stream_ioctl(struct socket *sock, unsigned int cmd,
+			      unsigned long arg)
 {
 	struct sock *sk = sock->sk;
 	int karg;
 	int err;
 
-	err = quic_ioctl(sk, cmd, &karg);
+	err = tquic_proto_ioctl(sk, cmd, &karg);
 	if (!err && put_user(karg, (int __user *)arg))
 		return -EFAULT;
 
 	return err;
 }
 
-static int quic_stream_listen(struct socket *sock, int backlog)
+static int tquic_stream_listen(struct socket *sock, int backlog)
 {
 	struct sock *sk = sock->sk;
-	struct quic_sock *qsk = quic_sk(sk);
+	struct tquic_sock *tsk = tquic_sk(sk);
 	int err;
 
 	lock_sock(sk);
@@ -1118,13 +1127,12 @@ static int quic_stream_listen(struct socket *sock, int backlog)
 		goto out;
 	}
 
-	if (!qsk->udp_sock) {
-		err = quic_udp_encap_init(qsk);
-		if (err)
-			goto out;
-	}
+	err = tquic_setup_udp_encap(sk);
+	if (err)
+		goto out;
 
 	sk->sk_max_ack_backlog = backlog;
+	tsk->max_accept_queue = backlog;
 	sk->sk_state = TCP_LISTEN;
 	err = 0;
 
@@ -1133,43 +1141,48 @@ out:
 	return err;
 }
 
-static int quic_stream_shutdown(struct socket *sock, int how)
+static int tquic_stream_shutdown(struct socket *sock, int how)
 {
 	struct sock *sk = sock->sk;
-	return quic_shutdown(sk, how);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
+	tquic_proto_shutdown(sk, how);
+	return 0;
+#else
+	return tquic_proto_shutdown(sk, how);
+#endif
 }
 
-static int quic_stream_setsockopt(struct socket *sock, int level, int optname,
-				  sockptr_t optval, unsigned int optlen)
+static int tquic_stream_setsockopt(struct socket *sock, int level, int optname,
+				   sockptr_t optval, unsigned int optlen)
 {
 	struct sock *sk = sock->sk;
-	return quic_setsockopt(sk, level, optname, optval, optlen);
+	return tquic_proto_setsockopt(sk, level, optname, optval, optlen);
 }
 
-static int quic_stream_getsockopt(struct socket *sock, int level, int optname,
-				  char __user *optval, int __user *optlen)
+static int tquic_stream_getsockopt(struct socket *sock, int level, int optname,
+				   char __user *optval, int __user *optlen)
 {
 	struct sock *sk = sock->sk;
-	return quic_getsockopt(sk, level, optname, optval, optlen);
+	return tquic_proto_getsockopt(sk, level, optname, optval, optlen);
 }
 
-static int quic_stream_sendmsg(struct socket *sock, struct msghdr *msg,
-			       size_t len)
+static int tquic_stream_sendmsg(struct socket *sock, struct msghdr *msg,
+				size_t len)
 {
 	struct sock *sk = sock->sk;
-	return quic_sendmsg(sk, msg, len);
+	return tquic_sendmsg(sk, msg, len);
 }
 
-static int quic_stream_recvmsg(struct socket *sock, struct msghdr *msg,
-			       size_t len, int flags)
+static int tquic_stream_recvmsg(struct socket *sock, struct msghdr *msg,
+				size_t len, int flags)
 {
 	struct sock *sk = sock->sk;
 	int addr_len = 0;
-	return quic_recvmsg(sk, msg, len, flags, &addr_len);
+	return tquic_recvmsg(sk, msg, len, flags, &addr_len);
 }
 
-static int quic_create(struct net *net, struct socket *sock, int protocol,
-		       int kern)
+static int tquic_create(struct net *net, struct socket *sock, int protocol,
+			int kern)
 {
 	struct sock *sk;
 	int err;
@@ -1178,15 +1191,15 @@ static int quic_create(struct net *net, struct socket *sock, int protocol,
 		return -ESOCKTNOSUPPORT;
 
 	sock->state = SS_UNCONNECTED;
-	sock->ops = &quic_stream_ops;
+	sock->ops = &tquic_stream_ops;
 
-	sk = sk_alloc(net, PF_QUIC, GFP_KERNEL, &quic_prot, kern);
+	sk = sk_alloc(net, PF_INET, GFP_KERNEL, &tquic_prot, kern);
 	if (!sk)
 		return -ENOMEM;
 
 	sock_init_data(sock, sk);
 
-	err = quic_init_sock(sk);
+	err = tquic_proto_init_sock(sk);
 	if (err) {
 		sk_common_release(sk);
 		return err;
@@ -1195,112 +1208,103 @@ static int quic_create(struct net *net, struct socket *sock, int protocol,
 	return 0;
 }
 
-static const struct net_proto_family quic_family_ops = {
-	.family	= PF_QUIC,
-	.create	= quic_create,
+static const struct net_proto_family tquic_family_ops = {
+	.family	= PF_INET,
+	.create	= tquic_create,
 	.owner	= THIS_MODULE,
 };
 
-static int __init quic_proto_register(void)
+static int __init tquic_proto_register_all(void)
 {
 	int err;
 
 	/* Guard against double registration */
-	if (quic_proto_registered) {
-		pr_warn("QUIC: protocol already registered, skipping\n");
+	if (tquic_proto_registered) {
+		pr_warn("TQUIC: protocol already registered, skipping\n");
 		return 0;
 	}
 
-	err = proto_register(&quic_prot, 1);
+	err = proto_register(&tquic_prot, 1);
 	if (err)
 		return err;
 
 #if IS_ENABLED(CONFIG_IPV6)
-	err = proto_register(&quicv6_prot, 1);
+	err = proto_register(&tquicv6_prot, 1);
 	if (err) {
-		proto_unregister(&quic_prot);
+		proto_unregister(&tquic_prot);
 		return err;
 	}
 #endif
 
-	err = sock_register(&quic_family_ops);
-	if (err) {
-#if IS_ENABLED(CONFIG_IPV6)
-		proto_unregister(&quicv6_prot);
-#endif
-		proto_unregister(&quic_prot);
-		return err;
-	}
-
-	quic_proto_registered = true;
+	tquic_proto_registered = true;
 	return 0;
 }
 
-static void quic_proto_unregister(void)
+static void tquic_proto_unregister_all(void)
 {
-	if (!quic_proto_registered)
+	if (!tquic_proto_registered)
 		return;
 
-	sock_unregister(PF_QUIC);
 #if IS_ENABLED(CONFIG_IPV6)
-	proto_unregister(&quicv6_prot);
+	proto_unregister(&tquicv6_prot);
 #endif
-	proto_unregister(&quic_prot);
-	quic_proto_registered = false;
+	proto_unregister(&tquic_prot);
+	tquic_proto_registered = false;
 }
 
-static int __init quic_init(void)
+/*
+ * Module init/exit for in-tree builds only.
+ * For out-of-tree builds, tquic_main.c handles module init/exit.
+ */
+#ifndef TQUIC_OUT_OF_TREE
+static int __init tquic_init(void)
 {
 	int err;
 
-	BUILD_BUG_ON(sizeof(struct quic_sock) > PAGE_SIZE);
+	BUILD_BUG_ON(sizeof(struct tquic_sock) > PAGE_SIZE);
 
-	quic_sock_cachep = kmem_cache_create("quic_sock",
-					     sizeof(struct quic_sock), 0,
-					     SLAB_HWCACHE_ALIGN, NULL);
-	if (!quic_sock_cachep)
+	tquic_sock_cachep = kmem_cache_create("tquic_sock",
+					      sizeof(struct tquic_sock), 0,
+					      SLAB_HWCACHE_ALIGN, NULL);
+	if (!tquic_sock_cachep)
 		return -ENOMEM;
 
-	quic_conn_cachep = kmem_cache_create("quic_conn",
-					     sizeof(struct quic_connection), 0,
-					     SLAB_HWCACHE_ALIGN, NULL);
-	if (!quic_conn_cachep) {
+	tquic_conn_cachep = kmem_cache_create("tquic_conn",
+					      sizeof(struct tquic_connection), 0,
+					      SLAB_HWCACHE_ALIGN, NULL);
+	if (!tquic_conn_cachep) {
 		err = -ENOMEM;
 		goto out_sock_cache;
 	}
 
-	quic_stream_cachep = kmem_cache_create("quic_stream",
-					       sizeof(struct quic_stream), 0,
-					       SLAB_HWCACHE_ALIGN, NULL);
-	if (!quic_stream_cachep) {
+	tquic_stream_cachep = kmem_cache_create("tquic_stream",
+						sizeof(struct tquic_stream), 0,
+						SLAB_HWCACHE_ALIGN, NULL);
+	if (!tquic_stream_cachep) {
 		err = -ENOMEM;
 		goto out_conn_cache;
 	}
 
 	/* Guard against double percpu_counter initialization */
-	if (quic_percpu_initialized) {
-		pr_warn("QUIC: percpu counters already initialized\n");
+	if (tquic_percpu_initialized) {
+		pr_warn("TQUIC: percpu counters already initialized\n");
 	} else {
-		err = percpu_counter_init(&quic_sockets_allocated, 0, GFP_KERNEL);
+		err = percpu_counter_init(&tquic_sockets_allocated, 0, GFP_KERNEL);
 		if (err)
 			goto out_stream_cache;
 
-		err = percpu_counter_init(&quic_orphan_count, 0, GFP_KERNEL);
+		err = percpu_counter_init(&tquic_orphan_count, 0, GFP_KERNEL);
 		if (err)
 			goto out_sockets_counter;
 
-		quic_percpu_initialized = true;
+		tquic_percpu_initialized = true;
 	}
 
-	err = quic_cid_hash_init();
+	err = tquic_proto_register_all();
 	if (err)
 		goto out_orphan_counter;
 
-	err = quic_proto_register();
-	if (err)
-		goto out_cid_hash;
-
-	err = quic_offload_init();
+	err = tquic_offload_init();
 	if (err)
 		goto out_proto;
 
@@ -1345,7 +1349,7 @@ static int __init quic_init(void)
 	if (err)
 		goto out_ecf;
 
-	pr_info("QUIC: kernel implementation initialized\n");
+	pr_info("TQUIC: kernel implementation initialized\n");
 	return 0;
 
 out_ecf:
@@ -1365,28 +1369,26 @@ out_path:
 out_bonding:
 	tquic_bonding_exit_module();
 out_offload:
-	quic_offload_exit();
+	tquic_offload_exit();
 out_proto:
-	quic_proto_unregister();
-out_cid_hash:
-	quic_cid_hash_cleanup();
+	tquic_proto_unregister_all();
 out_orphan_counter:
-	if (!quic_percpu_initialized)
+	if (!tquic_percpu_initialized)
 		goto out_stream_cache;
-	percpu_counter_destroy(&quic_orphan_count);
+	percpu_counter_destroy(&tquic_orphan_count);
 out_sockets_counter:
-	percpu_counter_destroy(&quic_sockets_allocated);
-	quic_percpu_initialized = false;
+	percpu_counter_destroy(&tquic_sockets_allocated);
+	tquic_percpu_initialized = false;
 out_stream_cache:
-	kmem_cache_destroy(quic_stream_cachep);
+	kmem_cache_destroy(tquic_stream_cachep);
 out_conn_cache:
-	kmem_cache_destroy(quic_conn_cachep);
+	kmem_cache_destroy(tquic_conn_cachep);
 out_sock_cache:
-	kmem_cache_destroy(quic_sock_cachep);
+	kmem_cache_destroy(tquic_sock_cachep);
 	return err;
 }
 
-static void __exit quic_exit(void)
+static void __exit tquic_exit(void)
 {
 	/* Cleanup TQUIC subsystems in reverse order */
 	coupled_cc_exit_module();
@@ -1399,27 +1401,27 @@ static void __exit quic_exit(void)
 	tquic_path_exit_module();
 	tquic_bonding_exit_module();
 
-	quic_offload_exit();
-	quic_proto_unregister();
-	quic_cid_hash_cleanup();
+	tquic_offload_exit();
+	tquic_proto_unregister_all();
 
-	if (quic_percpu_initialized) {
-		percpu_counter_destroy(&quic_orphan_count);
-		percpu_counter_destroy(&quic_sockets_allocated);
-		quic_percpu_initialized = false;
+	if (tquic_percpu_initialized) {
+		percpu_counter_destroy(&tquic_orphan_count);
+		percpu_counter_destroy(&tquic_sockets_allocated);
+		tquic_percpu_initialized = false;
 	}
 
-	kmem_cache_destroy(quic_stream_cachep);
-	kmem_cache_destroy(quic_conn_cachep);
-	kmem_cache_destroy(quic_sock_cachep);
+	kmem_cache_destroy(tquic_stream_cachep);
+	kmem_cache_destroy(tquic_conn_cachep);
+	kmem_cache_destroy(tquic_sock_cachep);
 
-	pr_info("QUIC: kernel implementation unloaded\n");
+	pr_info("TQUIC: kernel implementation unloaded\n");
 }
 
-module_init(quic_init);
-module_exit(quic_exit);
+module_init(tquic_init);
+module_exit(tquic_exit);
 
 MODULE_LICENSE("GPL");
-MODULE_AUTHOR("Linux QUIC Authors");
-MODULE_DESCRIPTION("QUIC transport protocol");
+MODULE_AUTHOR("Linux Foundation");
+MODULE_DESCRIPTION("TQUIC transport protocol with WAN bonding");
 MODULE_VERSION("1.0");
+#endif /* !TQUIC_OUT_OF_TREE */

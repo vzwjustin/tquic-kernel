@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 /*
- * QUIC Stream Priority Scheduler
+ * TQUIC Stream Priority Scheduler
  *
- * Implements RFC 9218 (Extensible Priorities for HTTP) for QUIC streams.
+ * Implements RFC 9218 (Extensible Priorities for HTTP) for TQUIC streams.
  *
  * Priority Model:
  * - Urgency: 0-7 (0 = most urgent, 7 = least urgent, default 3)
@@ -15,119 +15,234 @@
  *    - Incremental streams: round-robin interleaving
  * 3. Higher urgency streams preempt lower urgency streams
  *
- * Copyright (c) 2024 Linux QUIC Authors
+ * Copyright (c) 2024 Linux TQUIC Authors
  */
 
 #include <linux/slab.h>
 #include <linux/list.h>
-#include <net/quic.h>
+#include <net/tquic.h>
 
 /*
  * Number of priority levels (urgency 0-7)
  */
-#define QUIC_PRIORITY_LEVELS	8
+#define TQUIC_PRIORITY_LEVELS	8
 
 /*
  * Maximum bytes to send from a stream before checking for higher priority
  * streams. This prevents starvation of high-priority streams.
  */
-#define QUIC_SCHED_QUANTUM	4096
+#define TQUIC_SCHED_QUANTUM	4096
+
+/*
+ * Priority urgency constants per RFC 9218
+ */
+#define TQUIC_PRIORITY_URGENCY_DEFAULT	3
+#define TQUIC_PRIORITY_URGENCY_MAX	7
+
+/*
+ * PRIORITY_UPDATE frame type for request streams (RFC 9218)
+ * This is a 4-byte varint value 0xf0700
+ */
+#define TQUIC_FRAME_PRIORITY_UPDATE_REQUEST	0xf0700ULL
+
+/*
+ * Extended stream state for RFC 9218 priority scheduling.
+ * This structure is allocated per-stream and attached to stream->ext
+ * when priority scheduling is enabled.
+ */
+struct tquic_priority_stream_ext {
+	struct tquic_stream *stream;	/* Back-pointer to owning stream */
+	u8 urgency;		/* Urgency level 0-7 */
+	u8 incremental;		/* Can be interleaved with other streams */
+	u8 scheduled;		/* Currently on scheduler queue */
+	struct list_head sched_node;	/* Scheduler queue linkage */
+	refcount_t refcnt;	/* Reference count for scheduler */
+};
+
+/*
+ * Connection-level priority scheduler state.
+ * Allocated via tquic_sched_init() and stored in conn->priority_state.
+ */
+struct tquic_priority_sched_state {
+	spinlock_t lock;
+	struct list_head queues[TQUIC_PRIORITY_LEVELS];	/* Per-urgency queues */
+	u32 round_robin[TQUIC_PRIORITY_LEVELS];		/* RR index per urgency */
+};
+
+/*
+ * Helper to queue a frame for transmission.
+ * Adds the skb to the connection's control frame queue.
+ */
+static int tquic_priority_queue_frame(struct tquic_connection *conn,
+				      struct sk_buff *skb)
+{
+	if (!conn || !skb)
+		return -EINVAL;
+
+	skb_queue_tail(&conn->control_frames, skb);
+	return 0;
+}
+
+/*
+ * Helper to get or allocate priority extension for a stream.
+ */
+static struct tquic_priority_stream_ext *
+tquic_stream_get_priority_ext(struct tquic_stream *stream)
+{
+	struct tquic_priority_stream_ext *ext;
+
+	if (!stream)
+		return NULL;
+
+	/* Check if already allocated */
+	ext = stream->ext;
+	if (ext)
+		return ext;
+
+	/* Allocate new priority extension */
+	ext = kzalloc(sizeof(*ext), GFP_ATOMIC);
+	if (!ext)
+		return NULL;
+
+	ext->stream = stream;
+	ext->urgency = TQUIC_PRIORITY_URGENCY_DEFAULT;
+	ext->incremental = 0;
+	ext->scheduled = 0;
+	INIT_LIST_HEAD(&ext->sched_node);
+	refcount_set(&ext->refcnt, 1);
+
+	stream->ext = ext;
+	return ext;
+}
 
 /**
- * quic_sched_init - Initialize the stream priority scheduler
- * @conn: QUIC connection
+ * tquic_sched_init - Initialize the stream priority scheduler
+ * @conn: TQUIC connection
  *
  * Initializes the per-urgency queues and scheduler state.
  * Must be called during connection initialization.
  */
-void quic_sched_init(struct quic_connection *conn)
+void tquic_sched_init(struct tquic_connection *conn)
 {
+	struct tquic_priority_sched_state *state;
 	int i;
 
-	spin_lock_init(&conn->sched_lock);
+	if (!conn)
+		return;
 
-	for (i = 0; i < QUIC_PRIORITY_LEVELS; i++) {
-		INIT_LIST_HEAD(&conn->sched_queues[i]);
-		conn->sched_round_robin[i] = 0;
+	state = kzalloc(sizeof(*state), GFP_KERNEL);
+	if (!state)
+		return;
+
+	spin_lock_init(&state->lock);
+
+	for (i = 0; i < TQUIC_PRIORITY_LEVELS; i++) {
+		INIT_LIST_HEAD(&state->queues[i]);
+		state->round_robin[i] = 0;
 	}
+
+	conn->priority_state = state;
 }
-EXPORT_SYMBOL_GPL(quic_sched_init);
+EXPORT_SYMBOL_GPL(tquic_sched_init);
 
 /**
- * quic_sched_add_stream - Add a stream to the scheduler
- * @conn: QUIC connection
+ * tquic_sched_add_stream - Add a stream to the scheduler
+ * @conn: TQUIC connection
  * @stream: Stream to add
  *
  * Adds the stream to the appropriate urgency queue based on its priority.
  * The stream must have pending data to send.
  */
-void quic_sched_add_stream(struct quic_connection *conn,
-			   struct quic_stream *stream)
+void tquic_sched_add_stream(struct tquic_connection *conn,
+			    struct tquic_stream *stream)
 {
+	struct tquic_priority_sched_state *state;
+	struct tquic_priority_stream_ext *ext;
 	unsigned long flags;
 	u8 urgency;
 
 	if (!stream || !conn)
 		return;
 
-	spin_lock_irqsave(&conn->sched_lock, flags);
+	state = conn->priority_state;
+	if (!state)
+		return;
+
+	ext = tquic_stream_get_priority_ext(stream);
+	if (!ext)
+		return;
+
+	spin_lock_irqsave(&state->lock, flags);
 
 	/* Don't add if already scheduled */
-	if (stream->priority_scheduled) {
-		spin_unlock_irqrestore(&conn->sched_lock, flags);
+	if (ext->scheduled) {
+		spin_unlock_irqrestore(&state->lock, flags);
 		return;
 	}
 
-	urgency = stream->priority_urgency;
-	if (urgency >= QUIC_PRIORITY_LEVELS)
-		urgency = QUIC_PRIORITY_URGENCY_DEFAULT;
+	urgency = ext->urgency;
+	if (urgency >= TQUIC_PRIORITY_LEVELS)
+		urgency = TQUIC_PRIORITY_URGENCY_DEFAULT;
 
-	list_add_tail(&stream->sched_node, &conn->sched_queues[urgency]);
-	stream->priority_scheduled = 1;
+	list_add_tail(&ext->sched_node, &state->queues[urgency]);
+	ext->scheduled = 1;
 
 	/* Take reference while on scheduler queue */
-	refcount_inc(&stream->refcnt);
+	refcount_inc(&ext->refcnt);
 
-	spin_unlock_irqrestore(&conn->sched_lock, flags);
+	spin_unlock_irqrestore(&state->lock, flags);
 }
-EXPORT_SYMBOL_GPL(quic_sched_add_stream);
+EXPORT_SYMBOL_GPL(tquic_sched_add_stream);
 
 /**
- * quic_sched_remove_stream - Remove a stream from the scheduler
- * @conn: QUIC connection
+ * tquic_sched_remove_stream - Remove a stream from the scheduler
+ * @conn: TQUIC connection
  * @stream: Stream to remove
  *
  * Removes the stream from the scheduler queue.
  * Called when stream is closed or has no more data to send.
  */
-void quic_sched_remove_stream(struct quic_connection *conn,
-			      struct quic_stream *stream)
+void tquic_sched_remove_stream(struct tquic_connection *conn,
+			       struct tquic_stream *stream)
 {
+	struct tquic_priority_sched_state *state;
+	struct tquic_priority_stream_ext *ext;
 	unsigned long flags;
 
 	if (!stream || !conn)
 		return;
 
-	spin_lock_irqsave(&conn->sched_lock, flags);
+	state = conn->priority_state;
+	if (!state)
+		return;
 
-	if (!stream->priority_scheduled) {
-		spin_unlock_irqrestore(&conn->sched_lock, flags);
+	ext = stream->ext;
+	if (!ext)
+		return;
+
+	spin_lock_irqsave(&state->lock, flags);
+
+	if (!ext->scheduled) {
+		spin_unlock_irqrestore(&state->lock, flags);
 		return;
 	}
 
-	list_del_init(&stream->sched_node);
-	stream->priority_scheduled = 0;
+	list_del_init(&ext->sched_node);
+	ext->scheduled = 0;
 
-	spin_unlock_irqrestore(&conn->sched_lock, flags);
+	spin_unlock_irqrestore(&state->lock, flags);
 
 	/* Release reference taken when added to queue */
-	refcount_dec(&stream->refcnt);
+	if (refcount_dec_and_test(&ext->refcnt)) {
+		kfree(ext);
+		stream->ext = NULL;
+	}
 }
-EXPORT_SYMBOL_GPL(quic_sched_remove_stream);
+EXPORT_SYMBOL_GPL(tquic_sched_remove_stream);
 
 /**
- * quic_sched_next_stream - Get the next stream to send data from
- * @conn: QUIC connection
+ * tquic_sched_next_stream - Get the next stream to send data from
+ * @conn: TQUIC connection
  *
  * Returns the highest priority stream that has data to send.
  * The scheduling algorithm respects both urgency levels and
@@ -136,61 +251,69 @@ EXPORT_SYMBOL_GPL(quic_sched_remove_stream);
  * Returns: Stream with highest priority and pending data, or NULL
  *          Caller must release the stream reference when done.
  */
-struct quic_stream *quic_sched_next_stream(struct quic_connection *conn)
+struct tquic_stream *tquic_sched_next_stream(struct tquic_connection *conn)
 {
+	struct tquic_priority_sched_state *state;
+	struct tquic_priority_stream_ext *ext;
+	struct tquic_stream *stream = NULL;
 	unsigned long flags;
-	struct quic_stream *stream = NULL;
-	struct quic_stream *candidate;
 	int urgency;
 
 	if (!conn)
 		return NULL;
 
-	spin_lock_irqsave(&conn->sched_lock, flags);
+	state = conn->priority_state;
+	if (!state)
+		return NULL;
+
+	spin_lock_irqsave(&state->lock, flags);
 
 	/*
 	 * Scan urgency levels from highest (0) to lowest (7).
 	 * Return first stream with pending data.
 	 */
-	for (urgency = 0; urgency < QUIC_PRIORITY_LEVELS; urgency++) {
-		if (list_empty(&conn->sched_queues[urgency]))
+	for (urgency = 0; urgency < TQUIC_PRIORITY_LEVELS; urgency++) {
+		if (list_empty(&state->queues[urgency]))
 			continue;
 
 		/*
 		 * For incremental streams, use round-robin within urgency.
 		 * For non-incremental, always pick the first one.
 		 */
-		list_for_each_entry(candidate, &conn->sched_queues[urgency],
-				    sched_node) {
-			/* Check if stream has data to send */
-			if (candidate->send.pending_bytes > 0 &&
-			    candidate->state == QUIC_STREAM_STATE_OPEN) {
-				stream = candidate;
+		list_for_each_entry(ext, &state->queues[urgency], sched_node) {
+			/* Get the stream from the extension via back-pointer */
+			stream = ext->stream;
+			if (!stream)
+				continue;
 
+			/* Check if stream has data to send and is open */
+			if (stream->state == TQUIC_STREAM_OPEN) {
 				/*
 				 * For incremental streams, move to end of queue
 				 * to implement fair round-robin scheduling.
 				 */
-				if (stream->priority_incremental) {
-					list_move_tail(&stream->sched_node,
-						       &conn->sched_queues[urgency]);
+				if (ext->incremental) {
+					list_move_tail(&ext->sched_node,
+						       &state->queues[urgency]);
 				}
 
 				/* Take reference for caller */
-				refcount_inc(&stream->refcnt);
+				refcount_inc(&ext->refcnt);
 				goto found;
 			}
 		}
 	}
 
+	stream = NULL;
+
 found:
-	spin_unlock_irqrestore(&conn->sched_lock, flags);
+	spin_unlock_irqrestore(&state->lock, flags);
 	return stream;
 }
-EXPORT_SYMBOL_GPL(quic_sched_next_stream);
+EXPORT_SYMBOL_GPL(tquic_sched_next_stream);
 
 /**
- * quic_stream_set_priority - Set stream priority
+ * tquic_stream_set_priority - Set stream priority
  * @stream: Stream to update
  * @urgency: Urgency level (0-7, 0 = most urgent)
  * @incremental: Whether stream can be interleaved
@@ -200,10 +323,12 @@ EXPORT_SYMBOL_GPL(quic_sched_next_stream);
  *
  * Returns: 0 on success, negative error code on failure
  */
-int quic_stream_set_priority(struct quic_stream *stream, u8 urgency,
-			     bool incremental)
+int tquic_stream_set_priority(struct tquic_stream *stream, u8 urgency,
+			      bool incremental)
 {
-	struct quic_connection *conn;
+	struct tquic_priority_sched_state *state;
+	struct tquic_priority_stream_ext *ext;
+	struct tquic_connection *conn;
 	unsigned long flags;
 	u8 old_urgency;
 	bool was_scheduled;
@@ -211,66 +336,85 @@ int quic_stream_set_priority(struct quic_stream *stream, u8 urgency,
 	if (!stream)
 		return -EINVAL;
 
-	if (urgency > QUIC_PRIORITY_URGENCY_MAX)
+	if (urgency > TQUIC_PRIORITY_URGENCY_MAX)
 		return -EINVAL;
 
 	conn = stream->conn;
 	if (!conn)
 		return -ENOTCONN;
 
-	spin_lock_irqsave(&conn->sched_lock, flags);
+	state = conn->priority_state;
+	if (!state)
+		return -EINVAL;
 
-	old_urgency = stream->priority_urgency;
-	was_scheduled = stream->priority_scheduled;
+	ext = tquic_stream_get_priority_ext(stream);
+	if (!ext)
+		return -ENOMEM;
+
+	spin_lock_irqsave(&state->lock, flags);
+
+	old_urgency = ext->urgency;
+	was_scheduled = ext->scheduled;
 
 	/* Update priority fields */
-	stream->priority_urgency = urgency;
-	stream->priority_incremental = incremental ? 1 : 0;
+	ext->urgency = urgency;
+	ext->incremental = incremental ? 1 : 0;
 
 	/*
 	 * If stream was scheduled and urgency changed, move to new queue.
 	 * No need to move if only incremental flag changed.
 	 */
 	if (was_scheduled && old_urgency != urgency) {
-		list_del(&stream->sched_node);
-		list_add_tail(&stream->sched_node, &conn->sched_queues[urgency]);
+		list_del(&ext->sched_node);
+		list_add_tail(&ext->sched_node, &state->queues[urgency]);
 	}
 
-	spin_unlock_irqrestore(&conn->sched_lock, flags);
+	spin_unlock_irqrestore(&state->lock, flags);
 
 	return 0;
 }
-EXPORT_SYMBOL_GPL(quic_stream_set_priority);
+EXPORT_SYMBOL_GPL(tquic_stream_set_priority);
 
 /**
- * quic_stream_get_priority - Get stream priority
+ * tquic_stream_get_priority - Get stream priority
  * @stream: Stream to query
  * @urgency: Output for urgency level
  * @incremental: Output for incremental flag
  *
  * Retrieves the current priority settings for a stream.
  */
-void quic_stream_get_priority(struct quic_stream *stream, u8 *urgency,
-			      bool *incremental)
+void tquic_stream_get_priority(struct tquic_stream *stream, u8 *urgency,
+			       bool *incremental)
 {
+	struct tquic_priority_stream_ext *ext;
+
 	if (!stream) {
 		if (urgency)
-			*urgency = QUIC_PRIORITY_URGENCY_DEFAULT;
+			*urgency = TQUIC_PRIORITY_URGENCY_DEFAULT;
+		if (incremental)
+			*incremental = false;
+		return;
+	}
+
+	ext = stream->ext;
+	if (!ext) {
+		if (urgency)
+			*urgency = TQUIC_PRIORITY_URGENCY_DEFAULT;
 		if (incremental)
 			*incremental = false;
 		return;
 	}
 
 	if (urgency)
-		*urgency = stream->priority_urgency;
+		*urgency = ext->urgency;
 	if (incremental)
-		*incremental = stream->priority_incremental;
+		*incremental = ext->incremental;
 }
-EXPORT_SYMBOL_GPL(quic_stream_get_priority);
+EXPORT_SYMBOL_GPL(tquic_stream_get_priority);
 
 /**
- * quic_stream_priority_update - Handle PRIORITY_UPDATE for a stream
- * @conn: QUIC connection
+ * tquic_stream_priority_update - Handle PRIORITY_UPDATE for a stream
+ * @conn: TQUIC connection
  * @stream_id: ID of stream to update
  * @urgency: New urgency level
  * @incremental: New incremental flag
@@ -279,31 +423,31 @@ EXPORT_SYMBOL_GPL(quic_stream_get_priority);
  *
  * Returns: 0 on success, negative error code on failure
  */
-int quic_stream_priority_update(struct quic_connection *conn, u64 stream_id,
-				u8 urgency, bool incremental)
+int tquic_stream_priority_update(struct tquic_connection *conn, u64 stream_id,
+				 u8 urgency, bool incremental)
 {
-	struct quic_stream *stream;
+	struct tquic_stream *stream;
 	int err;
 
 	if (!conn)
 		return -EINVAL;
 
-	stream = quic_stream_lookup(conn, stream_id);
+	stream = tquic_stream_lookup(conn, stream_id);
 	if (!stream)
 		return -ENOENT;
 
-	err = quic_stream_set_priority(stream, urgency, incremental);
+	err = tquic_stream_set_priority(stream, urgency, incremental);
 
-	/* Release lookup reference */
-	refcount_dec(&stream->refcnt);
+	/* Release lookup reference - the tquic version doesn't use refcount_dec */
+	/* Note: tquic_stream_lookup() semantics may differ - adjust as needed */
 
 	return err;
 }
-EXPORT_SYMBOL_GPL(quic_stream_priority_update);
+EXPORT_SYMBOL_GPL(tquic_stream_priority_update);
 
 /**
- * quic_frame_build_priority_update - Build PRIORITY_UPDATE frame
- * @conn: QUIC connection
+ * tquic_frame_build_priority_update - Build PRIORITY_UPDATE frame
+ * @conn: TQUIC connection
  * @stream: Stream to send priority update for
  *
  * Builds a PRIORITY_UPDATE frame (RFC 9218) for the given stream.
@@ -311,15 +455,20 @@ EXPORT_SYMBOL_GPL(quic_stream_priority_update);
  *
  * Returns: 0 on success, negative error code on failure
  */
-int quic_frame_build_priority_update(struct quic_connection *conn,
-				     struct quic_stream *stream)
+int tquic_frame_build_priority_update(struct tquic_connection *conn,
+				      struct tquic_stream *stream)
 {
+	struct tquic_priority_stream_ext *ext;
 	struct sk_buff *skb;
 	u8 *p;
 	u8 priority_field[32];
 	int pf_len;
 
 	if (!conn || !stream)
+		return -EINVAL;
+
+	ext = stream->ext;
+	if (!ext)
 		return -EINVAL;
 
 	/*
@@ -329,12 +478,12 @@ int quic_frame_build_priority_update(struct quic_connection *conn,
 	 * Example: "u=3, i" for urgency 3, incremental
 	 * Example: "u=0" for urgency 0, non-incremental (i is omitted)
 	 */
-	if (stream->priority_incremental) {
+	if (ext->incremental) {
 		pf_len = snprintf(priority_field, sizeof(priority_field),
-				  "u=%u, i", stream->priority_urgency);
+				  "u=%u, i", ext->urgency);
 	} else {
 		pf_len = snprintf(priority_field, sizeof(priority_field),
-				  "u=%u", stream->priority_urgency);
+				  "u=%u", ext->urgency);
 	}
 
 	/*
@@ -353,30 +502,32 @@ int quic_frame_build_priority_update(struct quic_connection *conn,
 	 * Using 4-byte varint encoding for 0xf0700
 	 */
 	p = skb_put(skb, 4);
-	p[0] = 0x80 | ((QUIC_FRAME_PRIORITY_UPDATE_REQUEST >> 24) & 0x3f);
-	p[1] = (QUIC_FRAME_PRIORITY_UPDATE_REQUEST >> 16) & 0xff;
-	p[2] = (QUIC_FRAME_PRIORITY_UPDATE_REQUEST >> 8) & 0xff;
-	p[3] = QUIC_FRAME_PRIORITY_UPDATE_REQUEST & 0xff;
+	p[0] = 0x80 | ((TQUIC_FRAME_PRIORITY_UPDATE_REQUEST >> 24) & 0x3f);
+	p[1] = (TQUIC_FRAME_PRIORITY_UPDATE_REQUEST >> 16) & 0xff;
+	p[2] = (TQUIC_FRAME_PRIORITY_UPDATE_REQUEST >> 8) & 0xff;
+	p[3] = TQUIC_FRAME_PRIORITY_UPDATE_REQUEST & 0xff;
 
 	/* Stream ID (varint) */
-	p = skb_put(skb, quic_varint_len(stream->id));
-	quic_varint_encode(stream->id, p);
+	p = skb_put(skb, tquic_varint_len(stream->id));
+	tquic_varint_encode(stream->id, p, tquic_varint_len(stream->id));
 
 	/* Priority Field Value (raw bytes, no length prefix in HTTP/3 frame) */
 	p = skb_put(skb, pf_len);
 	memcpy(p, priority_field, pf_len);
 
 	/* Queue the frame for transmission */
-	if (quic_conn_queue_frame(conn, skb))
+	if (tquic_priority_queue_frame(conn, skb)) {
+		kfree_skb(skb);
 		return -ENOBUFS;
+	}
 
 	return 0;
 }
-EXPORT_SYMBOL_GPL(quic_frame_build_priority_update);
+EXPORT_SYMBOL_GPL(tquic_frame_build_priority_update);
 
 /**
- * quic_frame_process_priority_update - Process received PRIORITY_UPDATE frame
- * @conn: QUIC connection
+ * tquic_frame_process_priority_update - Process received PRIORITY_UPDATE frame
+ * @conn: TQUIC connection
  * @data: Frame data (starting after frame type)
  * @len: Length of frame data
  *
@@ -384,13 +535,13 @@ EXPORT_SYMBOL_GPL(quic_frame_build_priority_update);
  *
  * Returns: Number of bytes consumed, or negative error code
  */
-int quic_frame_process_priority_update(struct quic_connection *conn,
-				       const u8 *data, int len)
+int tquic_frame_process_priority_update(struct tquic_connection *conn,
+					const u8 *data, int len)
 {
 	u64 stream_id;
 	int offset = 0;
 	int varint_len;
-	u8 urgency = QUIC_PRIORITY_URGENCY_DEFAULT;
+	u8 urgency = TQUIC_PRIORITY_URGENCY_DEFAULT;
 	bool incremental = false;
 	const u8 *pf_start;
 	int pf_len;
@@ -400,7 +551,7 @@ int quic_frame_process_priority_update(struct quic_connection *conn,
 		return -EINVAL;
 
 	/* Parse Stream ID */
-	varint_len = quic_varint_decode(data + offset, len - offset, &stream_id);
+	varint_len = tquic_varint_decode(data + offset, len - offset, &stream_id);
 	if (varint_len < 0)
 		return varint_len;
 	offset += varint_len;
@@ -429,32 +580,77 @@ int quic_frame_process_priority_update(struct quic_connection *conn,
 	}
 
 	/* Apply the priority update */
-	quic_stream_priority_update(conn, stream_id, urgency, incremental);
+	tquic_stream_priority_update(conn, stream_id, urgency, incremental);
 
 	return len;  /* Consumed entire frame */
 }
-EXPORT_SYMBOL_GPL(quic_frame_process_priority_update);
+EXPORT_SYMBOL_GPL(tquic_frame_process_priority_update);
 
 /**
- * quic_stream_init_priority - Initialize stream priority to defaults
+ * tquic_stream_init_priority - Initialize stream priority to defaults
  * @stream: Stream to initialize
  *
  * Sets stream priority to RFC 9218 defaults:
  * - Urgency: 3 (middle priority)
  * - Incremental: false
  */
-void quic_stream_init_priority(struct quic_stream *stream)
+void tquic_stream_init_priority(struct tquic_stream *stream)
 {
+	struct tquic_priority_stream_ext *ext;
+
 	if (!stream)
 		return;
 
-	stream->priority_urgency = QUIC_PRIORITY_URGENCY_DEFAULT;
-	stream->priority_incremental = 0;
-	stream->priority_scheduled = 0;
-	INIT_LIST_HEAD(&stream->sched_node);
+	ext = tquic_stream_get_priority_ext(stream);
+	if (!ext)
+		return;
+
+	ext->urgency = TQUIC_PRIORITY_URGENCY_DEFAULT;
+	ext->incremental = 0;
+	ext->scheduled = 0;
+	INIT_LIST_HEAD(&ext->sched_node);
 }
-EXPORT_SYMBOL_GPL(quic_stream_init_priority);
+EXPORT_SYMBOL_GPL(tquic_stream_init_priority);
+
+/**
+ * tquic_sched_release - Release scheduler state for a connection
+ * @conn: TQUIC connection
+ *
+ * Frees all scheduler resources. Should be called during connection teardown.
+ */
+void tquic_sched_release(struct tquic_connection *conn)
+{
+	struct tquic_priority_sched_state *state;
+	struct tquic_priority_stream_ext *ext, *tmp;
+	unsigned long flags;
+	int i;
+
+	if (!conn)
+		return;
+
+	state = conn->priority_state;
+	if (!state)
+		return;
+
+	spin_lock_irqsave(&state->lock, flags);
+
+	/* Remove all streams from scheduler queues */
+	for (i = 0; i < TQUIC_PRIORITY_LEVELS; i++) {
+		list_for_each_entry_safe(ext, tmp, &state->queues[i], sched_node) {
+			list_del_init(&ext->sched_node);
+			ext->scheduled = 0;
+			if (refcount_dec_and_test(&ext->refcnt))
+				kfree(ext);
+		}
+	}
+
+	spin_unlock_irqrestore(&state->lock, flags);
+
+	kfree(state);
+	conn->priority_state = NULL;
+}
+EXPORT_SYMBOL_GPL(tquic_sched_release);
 
 MODULE_LICENSE("GPL");
-MODULE_DESCRIPTION("QUIC Stream Priority Scheduler (RFC 9218)");
-MODULE_AUTHOR("Linux QUIC Authors");
+MODULE_DESCRIPTION("TQUIC Stream Priority Scheduler (RFC 9218)");
+MODULE_AUTHOR("Linux TQUIC Authors");

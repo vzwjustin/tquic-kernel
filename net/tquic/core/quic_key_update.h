@@ -1,8 +1,8 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
- * QUIC Key Update Mechanism Header (RFC 9001 Section 6)
+ * TQUIC Key Update Mechanism Header (RFC 9001 Section 6)
  *
- * Declarations for QUIC key update functionality including:
+ * Declarations for TQUIC key update functionality including:
  * - Key phase tracking and detection
  * - Key derivation for update
  * - Old key retention for reordered packets
@@ -11,18 +11,18 @@
  * Copyright (c) 2024 Linux QUIC Authors
  */
 
-#ifndef _NET_QUIC_KEY_UPDATE_H
-#define _NET_QUIC_KEY_UPDATE_H
+#ifndef _NET_TQUIC_KEY_UPDATE_H
+#define _NET_TQUIC_KEY_UPDATE_H
 
 #include <linux/types.h>
 
-struct quic_connection;
-struct quic_crypto_ctx;
+struct tquic_connection;
+struct tquic_crypto_ctx;
 struct sk_buff;
 
 /*
- * Key update support fields are defined in struct quic_crypto_ctx
- * (include/net/quic.h):
+ * Key update support fields are defined in struct tquic_crypto_ctx
+ * (include/net/tquic.h):
  *
  * - rx_aead_prev:       Previous RX AEAD for reordered packets
  * - rx_prev:            Previous RX keys
@@ -37,8 +37,8 @@ struct sk_buff;
  */
 
 /**
- * quic_crypto_initiate_key_update - Initiate a key update
- * @conn: QUIC connection
+ * tquic_crypto_initiate_key_update - Initiate a key update
+ * @conn: TQUIC connection
  *
  * Called to start a key update. Updates TX keys and toggles key phase.
  * Per RFC 9001 Section 6.2, cannot initiate another update until the
@@ -46,11 +46,11 @@ struct sk_buff;
  *
  * Return: 0 on success, -EAGAIN if update pending, negative on error
  */
-int quic_crypto_initiate_key_update(struct quic_connection *conn);
+int tquic_crypto_initiate_key_update(struct tquic_connection *conn);
 
 /**
- * quic_crypto_on_key_phase_change - Handle received key phase change
- * @conn: QUIC connection
+ * tquic_crypto_on_key_phase_change - Handle received key phase change
+ * @conn: TQUIC connection
  * @rx_key_phase: Key phase bit from received packet
  *
  * Called when a packet is received with a different key phase than expected.
@@ -58,19 +58,19 @@ int quic_crypto_initiate_key_update(struct quic_connection *conn);
  *
  * Return: 0 on success, negative error code on failure
  */
-int quic_crypto_on_key_phase_change(struct quic_connection *conn, u8 rx_key_phase);
+int tquic_crypto_on_key_phase_change(struct tquic_connection *conn, u8 rx_key_phase);
 
 /**
- * quic_crypto_discard_old_keys - Discard old keys after timeout
- * @conn: QUIC connection
+ * tquic_crypto_discard_old_keys - Discard old keys after timeout
+ * @conn: TQUIC connection
  *
  * Called by key discard timer to free previous generation keys.
  * Per RFC 9001 Section 6.1, keys should be retained for ~3x PTO.
  */
-void quic_crypto_discard_old_keys(struct quic_connection *conn);
+void tquic_crypto_discard_old_keys(struct tquic_connection *conn);
 
 /**
- * quic_crypto_decrypt_with_phase - Decrypt considering key phase
+ * tquic_crypto_decrypt_with_phase - Decrypt considering key phase
  * @ctx: Crypto context
  * @skb: Socket buffer with encrypted packet
  * @pn: Packet number for nonce
@@ -81,29 +81,29 @@ void quic_crypto_discard_old_keys(struct quic_connection *conn);
  *
  * Return: 0 on success, -EKEYREJECTED if key update needed, negative on error
  */
-int quic_crypto_decrypt_with_phase(struct quic_crypto_ctx *ctx,
-				   struct sk_buff *skb, u64 pn, u8 key_phase);
+int tquic_crypto_decrypt_with_phase(struct tquic_crypto_ctx *ctx,
+				    struct sk_buff *skb, u64 pn, u8 key_phase);
 
 /**
- * quic_crypto_get_key_phase - Get current TX key phase
+ * tquic_crypto_get_key_phase - Get current TX key phase
  * @ctx: Crypto context
  *
  * Return: Current key phase bit (0 or 1)
  */
-u8 quic_crypto_get_key_phase(struct quic_crypto_ctx *ctx);
+u8 tquic_crypto_get_key_phase(struct tquic_crypto_ctx *ctx);
 
 /*
  * Constants
  */
 
 /* Key phase bit in short header first byte (RFC 9000 Section 17.3.1) */
-#define QUIC_SHORT_KEY_PHASE_BIT	0x04
+#define TQUIC_SHORT_KEY_PHASE_BIT	0x04
 
 /* Key discard timeout (default 3x PTO, ~1 second minimum) */
-#define QUIC_KEY_DISCARD_TIMEOUT_MS	1000
+#define TQUIC_KEY_DISCARD_TIMEOUT_MS	1000
 
 /*
- * QUIC_SKB_CB - Access QUIC per-packet metadata in skb->cb
+ * TQUIC_SKB_CB - Access TQUIC per-packet metadata in skb->cb
  *
  * Structure stored in skb->cb for packet processing:
  *   u64 pn;           - Full packet number
@@ -113,7 +113,7 @@ u8 quic_crypto_get_key_phase(struct quic_crypto_ctx *ctx);
  *   u8  dcid_len;     - DCID length
  *   u8  scid_len;     - SCID length (long header only)
  */
-struct quic_skb_cb {
+struct tquic_skb_cb {
 	u64	pn;
 	u32	header_len;
 	u8	pn_len;
@@ -122,6 +122,6 @@ struct quic_skb_cb {
 	u8	scid_len;
 };
 
-#define QUIC_SKB_CB(skb) ((struct quic_skb_cb *)((skb)->cb))
+#define TQUIC_SKB_CB(skb) ((struct tquic_skb_cb *)((skb)->cb))
 
-#endif /* _NET_QUIC_KEY_UPDATE_H */
+#endif /* _NET_TQUIC_KEY_UPDATE_H */

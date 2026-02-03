@@ -2,9 +2,10 @@
 /*
  * TQUIC Cryptographic Operations Header
  *
- * Declarations for QUIC packet protection as specified in RFC 9001.
+ * Declarations for TQUIC packet protection as specified in RFC 9001.
  *
- * Copyright (c) 2024-2026 Linux TQUIC Implementation Authors
+ * Copyright (c) 2024 Linux QUIC Implementation Authors
+ * Copyright (c) 2026 Linux Foundation
  */
 
 #ifndef _NET_TQUIC_CRYPTO_H
@@ -12,8 +13,10 @@
 
 #include <linux/types.h>
 #include <linux/socket.h>
+#include <linux/skbuff.h>
+#include <linux/slab.h>
 #include <crypto/hash.h>
-#include <net/tquic.h>
+#include <crypto/aead.h>
 
 /*
  * TLS 1.3 Cipher Suite Identifiers
@@ -21,11 +24,6 @@
 #define TQUIC_CIPHER_AES_128_GCM_SHA256		0x1301
 #define TQUIC_CIPHER_AES_256_GCM_SHA384		0x1302
 #define TQUIC_CIPHER_CHACHA20_POLY1305_SHA256	0x1303
-
-/* Legacy aliases */
-#define QUIC_CIPHER_AES_128_GCM_SHA256		TQUIC_CIPHER_AES_128_GCM_SHA256
-#define QUIC_CIPHER_AES_256_GCM_SHA384		TQUIC_CIPHER_AES_256_GCM_SHA384
-#define QUIC_CIPHER_CHACHA20_POLY1305_SHA256	TQUIC_CIPHER_CHACHA20_POLY1305_SHA256
 
 /*
  * Cryptographic Size Constants
@@ -35,12 +33,6 @@
 #define TQUIC_SAMPLE_SIZE	16
 #define TQUIC_HP_MASK_SIZE	5
 
-/* Legacy aliases */
-#define QUIC_TAG_SIZE		TQUIC_TAG_SIZE
-#define QUIC_IV_SIZE		TQUIC_IV_SIZE
-#define QUIC_SAMPLE_SIZE	TQUIC_SAMPLE_SIZE
-#define QUIC_HP_MASK_SIZE	TQUIC_HP_MASK_SIZE
-
 /*
  * Maximum key sizes
  */
@@ -48,10 +40,142 @@
 #define TQUIC_MAX_IV_SIZE	12
 #define TQUIC_MAX_HASH_SIZE	48
 
-/* Legacy aliases */
-#define QUIC_MAX_KEY_SIZE	TQUIC_MAX_KEY_SIZE
-#define QUIC_MAX_IV_SIZE	TQUIC_MAX_IV_SIZE
-#define QUIC_MAX_HASH_SIZE	TQUIC_MAX_HASH_SIZE
+/*
+ * Encryption levels
+ */
+#define TQUIC_CRYPTO_INITIAL		0
+#define TQUIC_CRYPTO_HANDSHAKE		1
+#define TQUIC_CRYPTO_APPLICATION	2
+#define TQUIC_CRYPTO_EARLY_DATA		3
+#define TQUIC_CRYPTO_MAX		4
+
+/*
+ * TQUIC error codes
+ */
+#define TQUIC_ERROR_CRYPTO_BASE		0x100
+
+/*
+ * TLS state machine states
+ */
+enum tquic_tls_state {
+	TQUIC_TLS_STATE_INITIAL = 0,	/* Initial secrets only, no TLS msgs */
+	TQUIC_TLS_STATE_START,		/* Ready to begin handshake */
+	TQUIC_TLS_STATE_WAIT_SH,	/* Client: waiting for ServerHello */
+	TQUIC_TLS_STATE_WAIT_EE,	/* Client: waiting for EncryptedExtensions */
+	TQUIC_TLS_STATE_WAIT_CERT_CR,	/* Client: waiting for Cert or CertReq */
+	TQUIC_TLS_STATE_WAIT_CERT,	/* Client: waiting for Certificate */
+	TQUIC_TLS_STATE_WAIT_CV,	/* Client: waiting for CertificateVerify */
+	TQUIC_TLS_STATE_WAIT_FINISHED,	/* Waiting for peer Finished */
+	TQUIC_TLS_STATE_CONNECTED,	/* 1-RTT established */
+	TQUIC_TLS_STATE_ERROR,		/* TLS alert received */
+};
+
+/*
+ * TLS handshake context for state machine validation
+ */
+struct tquic_tls_ctx {
+	enum tquic_tls_state	state;
+	u8			is_server:1;
+	u8			cert_request_sent:1;
+	u8			using_psk:1;
+	u8			early_data_accepted:1;
+	u8			handshake_complete:1;
+	u8			alert_received:1;
+	u8			alert_sent:1;
+	u8			alert_code;
+	u64			crypto_offset[TQUIC_CRYPTO_MAX];
+};
+
+/* TQUIC crypto secret */
+struct tquic_crypto_secret {
+	u8	secret[64];
+	u8	key[32];
+	u8	iv[12];
+	u8	hp_key[32];
+	u32	secret_len;
+	u32	key_len;
+	u32	iv_len;
+	u32	hp_key_len;
+};
+
+/* TQUIC crypto context */
+struct tquic_crypto_ctx {
+	struct crypto_aead	*tx_aead;
+	struct crypto_aead	*rx_aead;
+	struct crypto_cipher	*tx_hp;
+	struct crypto_cipher	*rx_hp;
+	struct crypto_shash	*hash;
+	struct tquic_crypto_secret tx;
+	struct tquic_crypto_secret rx;
+	u16			cipher_type;
+	u8			key_phase:1;
+	u8			keys_available:1;
+
+	/*
+	 * Key Update Support (RFC 9001 Section 6)
+	 */
+	struct crypto_aead	*rx_aead_prev;
+	struct tquic_crypto_secret rx_prev;
+	u8			rx_prev_valid:1;
+	u8			rx_key_phase:1;
+	u8			key_update_pending:1;
+	u64			key_update_pn;
+};
+
+/* TQUIC packet control block for skb->cb */
+struct tquic_skb_cb {
+	u64	pn;
+	u32	header_len;
+	u8	pn_len;
+	u8	key_phase;
+	u8	dcid_len;
+	u8	scid_len;
+	u8	packet_type;
+	u8	crypto_level;
+};
+
+#define TQUIC_SKB_CB(skb) ((struct tquic_skb_cb *)((skb)->cb))
+
+/* Forward declarations */
+struct tquic_connection;
+struct tquic_cid;
+
+/*
+ * Crypto wrapper structure
+ *
+ * This structure wraps the TLS state machine context and crypto contexts
+ * for all encryption levels. It is stored in tquic_connection->crypto_state
+ * as an opaque pointer.
+ */
+struct tquic_crypto_wrapper {
+	struct tquic_tls_ctx tls;
+	struct tquic_crypto_ctx crypto[TQUIC_CRYPTO_MAX];
+};
+
+/**
+ * tquic_crypto_wrapper_alloc - Allocate crypto wrapper for connection
+ * @gfp: GFP flags for allocation
+ *
+ * Allocates and initializes a crypto wrapper structure.
+ * The caller must store the returned pointer in conn->crypto_state.
+ *
+ * Return: Pointer to wrapper on success, NULL on failure
+ */
+static inline struct tquic_crypto_wrapper *tquic_crypto_wrapper_alloc(gfp_t gfp)
+{
+	return kzalloc(sizeof(struct tquic_crypto_wrapper), gfp);
+}
+
+/**
+ * tquic_crypto_wrapper_free - Free crypto wrapper
+ * @wrapper: Wrapper to free
+ *
+ * Frees the crypto wrapper and all associated resources.
+ */
+static inline void tquic_crypto_wrapper_free(struct tquic_crypto_wrapper *wrapper)
+{
+	kfree(wrapper);
+}
 
 /*
  * Crypto context management
@@ -79,15 +203,8 @@ int tquic_crypto_init(struct tquic_crypto_ctx *ctx, u16 cipher_type);
  */
 void tquic_crypto_destroy(struct tquic_crypto_ctx *ctx);
 
-/* Legacy aliases */
-#define quic_crypto_init	tquic_crypto_init
-#define quic_crypto_destroy	tquic_crypto_destroy
-
 /*
  * Key Derivation Functions (RFC 9001)
- *
- * Note: HKDF functions are internal to crypto.c and not exposed in the API.
- * Use the higher-level quic_crypto_derive_*_secrets() functions instead.
  */
 
 /**
@@ -102,7 +219,7 @@ void tquic_crypto_destroy(struct tquic_crypto_ctx *ctx);
  * Return: 0 on success, negative error code on failure
  */
 int tquic_crypto_derive_initial_secrets(struct tquic_connection *conn,
-					struct tquic_cid *cid);
+				       struct tquic_cid *cid);
 
 /**
  * tquic_crypto_derive_secrets - Derive traffic secrets and keys
@@ -116,11 +233,7 @@ int tquic_crypto_derive_initial_secrets(struct tquic_connection *conn,
  * Return: 0 on success, negative error code on failure
  */
 int tquic_crypto_derive_secrets(struct tquic_crypto_ctx *ctx,
-				const u8 *secret, u32 secret_len);
-
-/* Legacy aliases */
-#define quic_crypto_derive_initial_secrets	tquic_crypto_derive_initial_secrets
-#define quic_crypto_derive_secrets		tquic_crypto_derive_secrets
+			       const u8 *secret, u32 secret_len);
 
 /*
  * Header Protection (RFC 9001 Section 5.4)
@@ -138,7 +251,7 @@ int tquic_crypto_derive_secrets(struct tquic_crypto_ctx *ctx,
  * Return: 0 on success, negative error code on failure
  */
 int tquic_crypto_hp_mask(struct tquic_crypto_ctx *ctx, const u8 *sample,
-			 u8 *mask);
+			u8 *mask);
 
 /**
  * tquic_crypto_protect_header - Apply header protection
@@ -148,12 +261,12 @@ int tquic_crypto_hp_mask(struct tquic_crypto_ctx *ctx, const u8 *sample,
  * @pn_len: Length of packet number field (1-4 bytes)
  *
  * Applies header protection to the first byte and packet number field
- * of a QUIC packet.
+ * of a TQUIC packet.
  *
  * Return: 0 on success, negative error code on failure
  */
 int tquic_crypto_protect_header(struct tquic_crypto_ctx *ctx, struct sk_buff *skb,
-				u8 pn_offset, u8 pn_len);
+			       u8 pn_offset, u8 pn_len);
 
 /**
  * tquic_crypto_unprotect_header - Remove header protection
@@ -163,17 +276,12 @@ int tquic_crypto_protect_header(struct tquic_crypto_ctx *ctx, struct sk_buff *sk
  * @pn_len: Output - detected packet number length
  *
  * Removes header protection from the first byte and packet number
- * field of a QUIC packet.
+ * field of a TQUIC packet.
  *
  * Return: 0 on success, negative error code on failure
  */
 int tquic_crypto_unprotect_header(struct tquic_crypto_ctx *ctx, struct sk_buff *skb,
-				  u8 *pn_offset, u8 *pn_len);
-
-/* Legacy aliases */
-#define quic_crypto_hp_mask		tquic_crypto_hp_mask
-#define quic_crypto_protect_header	tquic_crypto_protect_header
-#define quic_crypto_unprotect_header	tquic_crypto_unprotect_header
+				 u8 *pn_offset, u8 *pn_len);
 
 /*
  * Packet Protection (AEAD - RFC 9001 Section 5.3)
@@ -192,7 +300,7 @@ int tquic_crypto_unprotect_header(struct tquic_crypto_ctx *ctx, struct sk_buff *
  * Return: 0 on success, negative error code on failure
  */
 int tquic_crypto_encrypt(struct tquic_crypto_ctx *ctx, struct sk_buff *skb,
-			 u64 pn);
+			u64 pn);
 
 /**
  * tquic_crypto_decrypt - Decrypt TQUIC packet payload
@@ -208,117 +316,105 @@ int tquic_crypto_encrypt(struct tquic_crypto_ctx *ctx, struct sk_buff *skb,
  *         other negative error code on failure
  */
 int tquic_crypto_decrypt(struct tquic_crypto_ctx *ctx, struct sk_buff *skb,
-			 u64 pn);
-
-/* Legacy aliases */
-#define quic_crypto_encrypt	tquic_crypto_encrypt
-#define quic_crypto_decrypt	tquic_crypto_decrypt
+			u64 pn);
 
 /*
  * Key Update (RFC 9001 Section 6)
  */
 
 /**
- * tquic_crypto_update_keys - Perform key update (deprecated, use initiate instead)
+ * tquic_crypto_update_keys - Perform key update
  * @conn: TQUIC connection
  *
  * Derives new traffic keys from the current secret and toggles
- * the key phase bit. This is an internal function; prefer using
- * tquic_crypto_initiate_key_update() for initiating updates.
+ * the key phase bit.
  *
  * Return: 0 on success, negative error code on failure
  */
 int tquic_crypto_update_keys(struct tquic_connection *conn);
 
-/**
- * tquic_crypto_initiate_key_update - Initiate a key update
- * @conn: TQUIC connection
- *
- * Initiates a key update on the connection. Updates TX keys, toggles
- * the key phase bit, and marks the update as pending until acknowledged
- * by the peer per RFC 9001 Section 6.2.
- *
- * Return: 0 on success, -EAGAIN if update already pending, negative error otherwise
- */
-int tquic_crypto_initiate_key_update(struct tquic_connection *conn);
-
-/**
- * tquic_crypto_on_key_phase_change - Handle key phase change in received packet
- * @conn: TQUIC connection
- * @rx_key_phase: Key phase bit from received packet
- *
- * Handles receipt of a packet with a different key phase, either confirming
- * a locally-initiated update or responding to a peer-initiated update.
- *
- * Return: 0 on success, negative error code on failure
- */
-int tquic_crypto_on_key_phase_change(struct tquic_connection *conn, u8 rx_key_phase);
-
-/**
- * tquic_crypto_decrypt_with_phase - Decrypt considering key phase
- * @ctx: Crypto context
- * @skb: Socket buffer containing packet
- * @pn: Packet number
- * @key_phase: Key phase bit from packet header
- *
- * Attempts decryption with current or previous keys based on key phase.
- * Returns -EKEYREJECTED if a key update is needed.
- *
- * Return: 0 on success, -EKEYREJECTED if key update needed, negative error otherwise
- */
-int tquic_crypto_decrypt_with_phase(struct tquic_crypto_ctx *ctx,
-				    struct sk_buff *skb, u64 pn, u8 key_phase);
-
-/**
- * tquic_crypto_discard_old_keys - Discard previous generation keys
- * @conn: TQUIC connection
- *
- * Called by timer to discard old keys after a key update.
- */
-void tquic_crypto_discard_old_keys(struct tquic_connection *conn);
-
-/**
- * tquic_crypto_get_key_phase - Get current TX key phase
- * @ctx: Crypto context
- *
- * Return: Current key phase bit (0 or 1)
- */
-u8 tquic_crypto_get_key_phase(struct tquic_crypto_ctx *ctx);
-
-/* Legacy aliases */
-#define quic_crypto_update_keys		tquic_crypto_update_keys
-#define quic_crypto_initiate_key_update	tquic_crypto_initiate_key_update
-#define quic_crypto_on_key_phase_change	tquic_crypto_on_key_phase_change
-#define quic_crypto_decrypt_with_phase	tquic_crypto_decrypt_with_phase
-#define quic_crypto_discard_old_keys	tquic_crypto_discard_old_keys
-#define quic_crypto_get_key_phase	tquic_crypto_get_key_phase
-
-/*
- * Retry Token Handling (RFC 9001 Section 5.8)
- *
- * Note: Retry token and retry tag functions are not yet implemented.
- * These are placeholders for future implementation of retry packet
- * support. The basic QUIC handshake works without retry packets.
- */
-
 /*
  * TLS 1.3 Extension Types (RFC 8446, RFC 7301, RFC 6066)
  */
-#define TQUIC_TLS_EXT_SERVER_NAME		0	/* RFC 6066 - SNI */
-#define TQUIC_TLS_EXT_ALPN			16	/* RFC 7301 - ALPN */
-#define TQUIC_TLS_EXT_SUPPORTED_VERSIONS	43	/* RFC 8446 */
-#define TQUIC_TLS_EXT_KEY_SHARE			51	/* RFC 8446 */
-#define TQUIC_TLS_EXT_QUIC_TRANSPORT_PARAMS	0x39	/* RFC 9001 */
-
-/* Legacy aliases */
-#define TLS_EXT_SERVER_NAME		TQUIC_TLS_EXT_SERVER_NAME
-#define TLS_EXT_ALPN			TQUIC_TLS_EXT_ALPN
-#define TLS_EXT_SUPPORTED_VERSIONS	TQUIC_TLS_EXT_SUPPORTED_VERSIONS
-#define TLS_EXT_KEY_SHARE		TQUIC_TLS_EXT_KEY_SHARE
-#define TLS_EXT_QUIC_TRANSPORT_PARAMS	TQUIC_TLS_EXT_QUIC_TRANSPORT_PARAMS
+#define TLS_EXT_SERVER_NAME		0	/* RFC 6066 - SNI */
+#define TLS_EXT_ALPN			16	/* RFC 7301 - Application-Layer Protocol Negotiation */
+#define TLS_EXT_SUPPORTED_VERSIONS	43	/* RFC 8446 - Supported Versions */
+#define TLS_EXT_KEY_SHARE		51	/* RFC 8446 - Key Share */
+#define TLS_EXT_TQUIC_TRANSPORT_PARAMS	0x39	/* RFC 9001 - QUIC Transport Parameters */
 
 /*
- * TLS Extension Building
+ * TLS State Machine Functions
+ */
+
+/**
+ * tquic_tls_init - Initialize TLS state machine for connection
+ * @conn: TQUIC connection
+ * @is_server: True if server, false if client
+ */
+void tquic_tls_init(struct tquic_connection *conn, bool is_server);
+
+/**
+ * tquic_tls_start_handshake - Begin TLS handshake
+ * @conn: TQUIC connection
+ */
+void tquic_tls_start_handshake(struct tquic_connection *conn);
+
+/**
+ * tquic_tls_process_handshake_message - Validate and process TLS message
+ * @conn: TQUIC connection
+ * @data: TLS handshake message data
+ * @len: Length of message data
+ * @level: TQUIC encryption level
+ *
+ * Returns 0 on success, negative error code on protocol violation.
+ */
+int tquic_tls_process_handshake_message(struct tquic_connection *conn,
+				       const u8 *data, u32 len, u8 level);
+
+/**
+ * tquic_tls_is_handshake_complete - Check if handshake is complete
+ * @conn: TQUIC connection
+ */
+bool tquic_tls_is_handshake_complete(struct tquic_connection *conn);
+
+/**
+ * tquic_tls_get_state - Get current TLS state
+ * @conn: TQUIC connection
+ */
+int tquic_tls_get_state(struct tquic_connection *conn);
+
+/**
+ * tquic_tls_set_psk_mode - Enable PSK-only mode
+ * @conn: TQUIC connection
+ * @using_psk: True if using PSK without certificates
+ */
+void tquic_tls_set_psk_mode(struct tquic_connection *conn, bool using_psk);
+
+/**
+ * tquic_tls_process_alert - Process a TLS alert
+ * @conn: TQUIC connection
+ * @alert_level: Alert level (1=warning, 2=fatal)
+ * @alert_desc: Alert description code
+ *
+ * Returns the corresponding TQUIC transport error code.
+ */
+u64 tquic_tls_process_alert(struct tquic_connection *conn,
+			   u8 alert_level, u8 alert_desc);
+
+/**
+ * tquic_tls_in_error_state - Check if TLS is in error state
+ * @conn: TQUIC connection
+ */
+bool tquic_tls_in_error_state(struct tquic_connection *conn);
+
+/**
+ * tquic_tls_get_alert_code - Get the alert code if in error state
+ * @conn: TQUIC connection
+ */
+u8 tquic_tls_get_alert_code(struct tquic_connection *conn);
+
+/*
+ * TLS Extension Building and Parsing
  */
 
 /**
@@ -326,8 +422,6 @@ u8 tquic_crypto_get_key_phase(struct tquic_crypto_ctx *ctx);
  * @hostname: Server hostname (null-terminated)
  * @buf: Output buffer
  * @buf_len: Buffer size
- *
- * Builds the server_name extension (RFC 6066) for TLS ClientHello.
  *
  * Return: Number of bytes written on success, negative error code on failure
  */
@@ -340,14 +434,10 @@ int tquic_tls_build_sni_extension(const char *hostname, u8 *buf, size_t buf_len)
  * @buf: Output buffer
  * @buf_len: Buffer size
  *
- * Builds the application_layer_protocol_negotiation extension (RFC 7301).
- * Input format: each protocol is prefixed by its length byte.
- * Example: "\x02h3\x08http/1.1" for ["h3", "http/1.1"]
- *
  * Return: Number of bytes written on success, negative error code on failure
  */
 int tquic_tls_build_alpn_extension(const u8 *alpn_list, size_t alpn_len,
-				   u8 *buf, size_t buf_len);
+				  u8 *buf, size_t buf_len);
 
 /**
  * tquic_tls_parse_sni_extension - Parse SNI extension from ClientHello
@@ -356,12 +446,10 @@ int tquic_tls_build_alpn_extension(const u8 *alpn_list, size_t alpn_len,
  * @hostname: Output buffer for hostname
  * @hostname_len: In: buffer size, Out: actual hostname length
  *
- * Parses the server_name extension from a ClientHello.
- *
  * Return: 0 on success, -EINVAL on parse error, -ENOSPC if buffer too small
  */
 int tquic_tls_parse_sni_extension(const u8 *data, size_t data_len,
-				  char *hostname, size_t *hostname_len);
+				 char *hostname, size_t *hostname_len);
 
 /**
  * tquic_tls_parse_alpn_extension - Parse ALPN extension
@@ -370,13 +458,10 @@ int tquic_tls_parse_sni_extension(const u8 *data, size_t data_len,
  * @alpn_list: Output buffer for ALPN list
  * @alpn_len: In: buffer size, Out: actual list length
  *
- * Parses the ALPN extension. Output format is the same as input to
- * tquic_tls_build_alpn_extension (length-prefixed protocol list).
- *
  * Return: 0 on success, -EINVAL on parse error, -ENOSPC if buffer too small
  */
 int tquic_tls_parse_alpn_extension(const u8 *data, size_t data_len,
-				   u8 *alpn_list, size_t *alpn_len);
+				  u8 *alpn_list, size_t *alpn_len);
 
 /**
  * tquic_tls_select_alpn - Server ALPN selection
@@ -387,17 +472,11 @@ int tquic_tls_parse_alpn_extension(const u8 *data, size_t data_len,
  * @selected: Output buffer for selected protocol
  * @selected_len: In: buffer size, Out: selected protocol length
  *
- * Selects the first protocol from client's list that server supports.
- * Per RFC 7301, server preference should be used when both lists have
- * common protocols.
- *
- * Return: 0 on success (protocol selected),
- *         -ENOENT if no common protocol,
- *         negative error code on failure
+ * Return: 0 on success, -ENOENT if no common protocol, negative error on failure
  */
 int tquic_tls_select_alpn(const u8 *client_alpn, size_t client_alpn_len,
-			  const u8 *server_alpn, size_t server_alpn_len,
-			  u8 *selected, size_t *selected_len);
+			 const u8 *server_alpn, size_t server_alpn_len,
+			 u8 *selected, size_t *selected_len);
 
 /**
  * tquic_tls_validate_alpn - Validate server's ALPN selection
@@ -406,35 +485,9 @@ int tquic_tls_select_alpn(const u8 *client_alpn, size_t client_alpn_len,
  * @selected: Server's selected protocol (length-prefixed, single entry)
  * @selected_len: Length of selected protocol
  *
- * Verifies that server's selected ALPN was in client's offered list.
- * Per RFC 7301 Section 3.2, server MUST NOT select a protocol not offered.
- *
  * Return: 0 if valid, -EPROTO if not in offered list
  */
 int tquic_tls_validate_alpn(const u8 *offered_alpn, size_t offered_len,
-			    const u8 *selected, size_t selected_len);
-
-/* Legacy aliases for TLS functions */
-#define quic_tls_build_sni_extension	tquic_tls_build_sni_extension
-#define quic_tls_build_alpn_extension	tquic_tls_build_alpn_extension
-#define quic_tls_parse_sni_extension	tquic_tls_parse_sni_extension
-#define quic_tls_parse_alpn_extension	tquic_tls_parse_alpn_extension
-#define quic_tls_select_alpn		tquic_tls_select_alpn
-#define quic_tls_validate_alpn		tquic_tls_validate_alpn
-
-/*
- * Utility Functions
- *
- * Note: The following utility functions are not yet implemented but may be
- * added in the future for testing and diagnostics:
- * - tquic_crypto_get_params() - Get cipher parameters
- * - tquic_crypto_set_keys() - Directly set keys (for testing)
- * - tquic_crypto_get_keys() - Export keys (for diagnostics)
- * - tquic_crypto_is_cipher_supported() - Check cipher support
- * - tquic_crypto_get_supported_ciphers() - List supported ciphers
- *
- * The crypto context directly exposes key lengths and cipher type for
- * internal use within the TQUIC module.
- */
+			   const u8 *selected, size_t selected_len);
 
 #endif /* _NET_TQUIC_CRYPTO_H */

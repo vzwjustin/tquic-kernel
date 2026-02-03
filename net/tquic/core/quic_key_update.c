@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 /*
- * QUIC Key Update Mechanism (RFC 9001 Section 6)
+ * TQUIC Key Update Mechanism (RFC 9001 Section 6)
  *
  * This module implements the QUIC key update mechanism which allows
  * encryption keys to be updated during a connection without interruption.
@@ -18,7 +18,7 @@
 #include <linux/errno.h>
 #include <crypto/aead.h>
 #include <crypto/hash.h>
-#include <net/quic.h>
+#include <net/tquic.h>
 #include "key_update.h"
 
 /*
@@ -26,12 +26,12 @@
  * "Keys SHOULD be retained for three times the current Probe Timeout (PTO)"
  * Default to 3 * 333ms = ~1 second as a safe minimum.
  */
-#define QUIC_KEY_DISCARD_TIMEOUT_MS	1000
+#define TQUIC_KEY_DISCARD_TIMEOUT_MS	1000
 
 /* HKDF labels */
-static const char quic_ku_label[] = "quic ku";
-static const char quic_key_label[] = "quic key";
-static const char quic_iv_label[] = "quic iv";
+static const char tquic_ku_label[] = "quic ku";
+static const char tquic_key_label[] = "quic key";
+static const char tquic_iv_label[] = "quic iv";
 
 /* Forward declarations */
 struct hkdf_ctx {
@@ -45,8 +45,8 @@ extern int hkdf_expand_label(struct hkdf_ctx *ctx, const u8 *prk,
 			     u8 *out, size_t out_len);
 
 /*
- * quic_key_update_tx - Update transmit keys for key update
- * @conn: QUIC connection
+ * tquic_key_update_tx - Update transmit keys for key update
+ * @conn: TQUIC connection
  *
  * Derives new TX secret and keys using HKDF-Expand-Label with "quic ku" label.
  * Per RFC 9001 Section 6.1:
@@ -54,9 +54,9 @@ extern int hkdf_expand_label(struct hkdf_ctx *ctx, const u8 *prk,
  *
  * Returns 0 on success, negative error code on failure.
  */
-static int quic_key_update_tx(struct quic_connection *conn)
+static int tquic_key_update_tx(struct tquic_connection *conn)
 {
-	struct quic_crypto_ctx *ctx = &conn->crypto[QUIC_CRYPTO_APPLICATION];
+	struct tquic_crypto_ctx *ctx = &conn->crypto[TQUIC_CRYPTO_APPLICATION];
 	struct hkdf_ctx hkdf;
 	u8 new_secret[64];
 	int err;
@@ -68,8 +68,8 @@ static int quic_key_update_tx(struct quic_connection *conn)
 	hkdf.hash_len = ctx->tx.secret_len;
 
 	/* Derive new secret from current TX secret */
-	err = hkdf_expand_label(&hkdf, ctx->tx.secret, quic_ku_label,
-				strlen(quic_ku_label), NULL, 0,
+	err = hkdf_expand_label(&hkdf, ctx->tx.secret, tquic_ku_label,
+				strlen(tquic_ku_label), NULL, 0,
 				new_secret, ctx->tx.secret_len);
 	if (err)
 		return err;
@@ -78,15 +78,15 @@ static int quic_key_update_tx(struct quic_connection *conn)
 	memcpy(ctx->tx.secret, new_secret, ctx->tx.secret_len);
 
 	/* Derive new TX key */
-	err = hkdf_expand_label(&hkdf, ctx->tx.secret, quic_key_label,
-				strlen(quic_key_label), NULL, 0,
+	err = hkdf_expand_label(&hkdf, ctx->tx.secret, tquic_key_label,
+				strlen(tquic_key_label), NULL, 0,
 				ctx->tx.key, ctx->tx.key_len);
 	if (err)
 		goto out;
 
 	/* Derive new TX IV */
-	err = hkdf_expand_label(&hkdf, ctx->tx.secret, quic_iv_label,
-				strlen(quic_iv_label), NULL, 0,
+	err = hkdf_expand_label(&hkdf, ctx->tx.secret, tquic_iv_label,
+				strlen(tquic_iv_label), NULL, 0,
 				ctx->tx.iv, ctx->tx.iv_len);
 	if (err)
 		goto out;
@@ -100,8 +100,8 @@ out:
 }
 
 /*
- * quic_key_update_rx - Update receive keys for key update
- * @conn: QUIC connection
+ * tquic_key_update_rx - Update receive keys for key update
+ * @conn: TQUIC connection
  *
  * Saves current RX keys as previous (for reordered packets), then derives
  * new RX secret and keys. Per RFC 9001 Section 6.1, old keys must be
@@ -109,9 +109,9 @@ out:
  *
  * Returns 0 on success, negative error code on failure.
  */
-static int quic_key_update_rx(struct quic_connection *conn)
+static int tquic_key_update_rx(struct tquic_connection *conn)
 {
-	struct quic_crypto_ctx *ctx = &conn->crypto[QUIC_CRYPTO_APPLICATION];
+	struct tquic_crypto_ctx *ctx = &conn->crypto[TQUIC_CRYPTO_APPLICATION];
 	struct hkdf_ctx hkdf;
 	u8 new_secret[64];
 	const char *aead_name;
@@ -125,11 +125,11 @@ static int quic_key_update_rx(struct quic_connection *conn)
 
 	/* Determine AEAD algorithm name */
 	switch (ctx->cipher_type) {
-	case QUIC_CIPHER_AES_128_GCM_SHA256:
-	case QUIC_CIPHER_AES_256_GCM_SHA384:
+	case TQUIC_CIPHER_AES_128_GCM_SHA256:
+	case TQUIC_CIPHER_AES_256_GCM_SHA384:
 		aead_name = "gcm(aes)";
 		break;
-	case QUIC_CIPHER_CHACHA20_POLY1305_SHA256:
+	case TQUIC_CIPHER_CHACHA20_POLY1305_SHA256:
 		aead_name = "rfc7539(chacha20,poly1305)";
 		break;
 	default:
@@ -149,7 +149,7 @@ static int quic_key_update_rx(struct quic_connection *conn)
 		ctx->rx_aead_prev = NULL;
 		ctx->rx_prev_valid = 0;
 		/* Continue without previous key support - not fatal */
-		pr_debug("QUIC: could not allocate previous RX AEAD\n");
+		pr_debug("TQUIC: could not allocate previous RX AEAD\n");
 	} else {
 		/* Copy current RX secret to previous */
 		memcpy(&ctx->rx_prev, &ctx->rx, sizeof(ctx->rx_prev));
@@ -174,8 +174,8 @@ static int quic_key_update_rx(struct quic_connection *conn)
 	}
 
 	/* Derive new RX secret from current RX secret */
-	err = hkdf_expand_label(&hkdf, ctx->rx.secret, quic_ku_label,
-				strlen(quic_ku_label), NULL, 0,
+	err = hkdf_expand_label(&hkdf, ctx->rx.secret, tquic_ku_label,
+				strlen(tquic_ku_label), NULL, 0,
 				new_secret, ctx->rx.secret_len);
 	if (err)
 		return err;
@@ -184,15 +184,15 @@ static int quic_key_update_rx(struct quic_connection *conn)
 	memcpy(ctx->rx.secret, new_secret, ctx->rx.secret_len);
 
 	/* Derive new RX key */
-	err = hkdf_expand_label(&hkdf, ctx->rx.secret, quic_key_label,
-				strlen(quic_key_label), NULL, 0,
+	err = hkdf_expand_label(&hkdf, ctx->rx.secret, tquic_key_label,
+				strlen(tquic_key_label), NULL, 0,
 				ctx->rx.key, ctx->rx.key_len);
 	if (err)
 		goto out;
 
 	/* Derive new RX IV */
-	err = hkdf_expand_label(&hkdf, ctx->rx.secret, quic_iv_label,
-				strlen(quic_iv_label), NULL, 0,
+	err = hkdf_expand_label(&hkdf, ctx->rx.secret, tquic_iv_label,
+				strlen(tquic_iv_label), NULL, 0,
 				ctx->rx.iv, ctx->rx.iv_len);
 	if (err)
 		goto out;
@@ -206,8 +206,8 @@ out:
 }
 
 /*
- * quic_crypto_initiate_key_update - Initiate a key update (RFC 9001 Section 6.1)
- * @conn: QUIC connection
+ * tquic_crypto_initiate_key_update - Initiate a key update (RFC 9001 Section 6.1)
+ * @conn: TQUIC connection
  *
  * Called when the local endpoint wants to update keys. This:
  * 1. Updates TX keys and toggles TX key phase
@@ -221,10 +221,10 @@ out:
  * Returns 0 on success, -EAGAIN if key update already pending, other
  * negative error code on failure.
  */
-int quic_crypto_initiate_key_update(struct quic_connection *conn)
+int tquic_crypto_initiate_key_update(struct tquic_connection *conn)
 {
-	struct quic_crypto_ctx *ctx = &conn->crypto[QUIC_CRYPTO_APPLICATION];
-	struct quic_pn_space *pn_space = &conn->pn_spaces[QUIC_PN_SPACE_APPLICATION];
+	struct tquic_crypto_ctx *ctx = &conn->crypto[TQUIC_CRYPTO_APPLICATION];
+	struct tquic_pn_space *pn_space = &conn->pn_spaces[TQUIC_PN_SPACE_APPLICATION];
 	int err;
 
 	if (!ctx->keys_available)
@@ -235,7 +235,7 @@ int quic_crypto_initiate_key_update(struct quic_connection *conn)
 		return -EAGAIN;
 
 	/* Update TX keys */
-	err = quic_key_update_tx(conn);
+	err = tquic_key_update_tx(conn);
 	if (err)
 		return err;
 
@@ -247,16 +247,16 @@ int quic_crypto_initiate_key_update(struct quic_connection *conn)
 	ctx->key_update_pending = 1;
 	ctx->key_update_pn = pn_space->next_pn;
 
-	pr_debug("QUIC: initiated key update, new phase=%u, first_pn=%llu\n",
+	pr_debug("TQUIC: initiated key update, new phase=%u, first_pn=%llu\n",
 		 ctx->key_phase, ctx->key_update_pn);
 
 	return 0;
 }
-EXPORT_SYMBOL_GPL(quic_crypto_initiate_key_update);
+EXPORT_SYMBOL_GPL(tquic_crypto_initiate_key_update);
 
 /*
- * quic_crypto_on_key_phase_change - Handle received packet with different key phase
- * @conn: QUIC connection
+ * tquic_crypto_on_key_phase_change - Handle received packet with different key phase
+ * @conn: TQUIC connection
  * @rx_key_phase: Key phase bit from received packet
  *
  * Called when a packet is received with a key phase different from expected.
@@ -266,9 +266,9 @@ EXPORT_SYMBOL_GPL(quic_crypto_initiate_key_update);
  *
  * Returns 0 on success, negative error code on failure.
  */
-int quic_crypto_on_key_phase_change(struct quic_connection *conn, u8 rx_key_phase)
+int tquic_crypto_on_key_phase_change(struct tquic_connection *conn, u8 rx_key_phase)
 {
-	struct quic_crypto_ctx *ctx = &conn->crypto[QUIC_CRYPTO_APPLICATION];
+	struct tquic_crypto_ctx *ctx = &conn->crypto[TQUIC_CRYPTO_APPLICATION];
 	ktime_t discard_time;
 	int err;
 
@@ -286,7 +286,7 @@ int quic_crypto_on_key_phase_change(struct quic_connection *conn, u8 rx_key_phas
 	 * yet confirmed by peer), this is a consecutive update error.
 	 */
 	if (ctx->key_update_pending && rx_key_phase != ctx->key_phase) {
-		pr_err("QUIC: consecutive key update detected (pending=%u, rx=%u, current=%u)\n",
+		pr_err("TQUIC: consecutive key update detected (pending=%u, rx=%u, current=%u)\n",
 		       ctx->key_update_pending, rx_key_phase, ctx->key_phase);
 		/*
 		 * Return KEY_UPDATE_ERROR. Caller should close connection
@@ -311,9 +311,9 @@ int quic_crypto_on_key_phase_change(struct quic_connection *conn, u8 rx_key_phas
 		 * If RX update fails here, the connection cannot proceed as
 		 * we cannot decrypt future packets from the peer.
 		 */
-		err = quic_key_update_rx(conn);
+		err = tquic_key_update_rx(conn);
 		if (err) {
-			pr_err("QUIC: RX key update failed in confirmation phase (err=%d)\n",
+			pr_err("TQUIC: RX key update failed in confirmation phase (err=%d)\n",
 			       err);
 			/*
 			 * This is a critical failure. TX keys are already updated
@@ -328,10 +328,10 @@ int quic_crypto_on_key_phase_change(struct quic_connection *conn, u8 rx_key_phas
 		ctx->key_update_pending = 0;
 
 		/* Start timer to discard old RX keys (RFC 9001 Section 6.1) */
-		discard_time = ktime_add_ms(ktime_get(), QUIC_KEY_DISCARD_TIMEOUT_MS);
-		quic_timer_set(conn, QUIC_TIMER_KEY_DISCARD, discard_time);
+		discard_time = ktime_add_ms(ktime_get(), TQUIC_KEY_DISCARD_TIMEOUT_MS);
+		tquic_timer_set(conn, TQUIC_TIMER_KEY_DISCARD, discard_time);
 
-		pr_debug("QUIC: key update confirmed by peer, phase=%u\n",
+		pr_debug("TQUIC: key update confirmed by peer, phase=%u\n",
 			 rx_key_phase);
 		return 0;
 	}
@@ -346,7 +346,7 @@ int quic_crypto_on_key_phase_change(struct quic_connection *conn, u8 rx_key_phas
 	 * we must rollback to maintain key phase synchronization.
 	 */
 	if (rx_key_phase != ctx->rx_key_phase) {
-		struct quic_crypto_secret saved_rx;
+		struct tquic_crypto_secret saved_rx;
 		struct crypto_aead *saved_rx_aead_prev;
 		u8 saved_rx_key_phase;
 		u8 saved_rx_prev_valid;
@@ -361,9 +361,9 @@ int quic_crypto_on_key_phase_change(struct quic_connection *conn, u8 rx_key_phas
 		 * Update RX keys first.
 		 * This saves current keys as "previous" and derives new keys.
 		 */
-		err = quic_key_update_rx(conn);
+		err = tquic_key_update_rx(conn);
 		if (err) {
-			pr_warn("QUIC: RX key update failed, err=%d\n", err);
+			pr_warn("TQUIC: RX key update failed, err=%d\n", err);
 			return err;
 		}
 
@@ -374,14 +374,14 @@ int quic_crypto_on_key_phase_change(struct quic_connection *conn, u8 rx_key_phas
 		 * Now update TX keys to match.
 		 * If this fails, we MUST rollback RX keys to avoid asymmetry.
 		 */
-		err = quic_key_update_tx(conn);
+		err = tquic_key_update_tx(conn);
 		if (err) {
 			/*
 			 * TX update failed - CRITICAL: rollback RX update.
 			 * Per RFC 9001 Section 6.2, asymmetric key state causes
 			 * decryption failures and connection breakage.
 			 */
-			pr_warn("QUIC: TX key update failed after RX update, rolling back (err=%d)\n",
+			pr_warn("TQUIC: TX key update failed after RX update, rolling back (err=%d)\n",
 				err);
 
 			/* Rollback: restore saved RX state */
@@ -408,7 +408,7 @@ int quic_crypto_on_key_phase_change(struct quic_connection *conn, u8 rx_key_phas
 				 * inconsistent state. Per RFC 9001, this is a
 				 * fatal error requiring connection termination.
 				 */
-				pr_err("QUIC: RX key rollback failed, connection unusable (err=%d)\n",
+				pr_err("TQUIC: RX key rollback failed, connection unusable (err=%d)\n",
 				       err);
 				/* Return KEY_UPDATE_ERROR code */
 				return -EKEYREJECTED;
@@ -426,10 +426,10 @@ int quic_crypto_on_key_phase_change(struct quic_connection *conn, u8 rx_key_phas
 		conn->key_phase = ctx->key_phase;
 
 		/* Start timer to discard old RX keys (RFC 9001 Section 6.1) */
-		discard_time = ktime_add_ms(ktime_get(), QUIC_KEY_DISCARD_TIMEOUT_MS);
-		quic_timer_set(conn, QUIC_TIMER_KEY_DISCARD, discard_time);
+		discard_time = ktime_add_ms(ktime_get(), TQUIC_KEY_DISCARD_TIMEOUT_MS);
+		tquic_timer_set(conn, TQUIC_TIMER_KEY_DISCARD, discard_time);
 
-		pr_debug("QUIC: responded to peer key update, new phase=%u\n",
+		pr_debug("TQUIC: responded to peer key update, new phase=%u\n",
 			 rx_key_phase);
 		return 0;
 	}
@@ -437,19 +437,19 @@ int quic_crypto_on_key_phase_change(struct quic_connection *conn, u8 rx_key_phas
 	/* Key phase matches expected - no action needed */
 	return 0;
 }
-EXPORT_SYMBOL_GPL(quic_crypto_on_key_phase_change);
+EXPORT_SYMBOL_GPL(tquic_crypto_on_key_phase_change);
 
 /*
- * quic_crypto_discard_old_keys - Discard previous generation keys
- * @conn: QUIC connection
+ * tquic_crypto_discard_old_keys - Discard previous generation keys
+ * @conn: TQUIC connection
  *
  * Called by key discard timer to free old keys. Per RFC 9001 Section 6.1,
  * keys SHOULD be discarded when it's unlikely that any packet protected
  * with the old keys will be received.
  */
-void quic_crypto_discard_old_keys(struct quic_connection *conn)
+void tquic_crypto_discard_old_keys(struct tquic_connection *conn)
 {
-	struct quic_crypto_ctx *ctx = &conn->crypto[QUIC_CRYPTO_APPLICATION];
+	struct tquic_crypto_ctx *ctx = &conn->crypto[TQUIC_CRYPTO_APPLICATION];
 
 	if (ctx->rx_aead_prev) {
 		crypto_free_aead(ctx->rx_aead_prev);
@@ -459,14 +459,14 @@ void quic_crypto_discard_old_keys(struct quic_connection *conn)
 	ctx->rx_prev_valid = 0;
 	memzero_explicit(&ctx->rx_prev, sizeof(ctx->rx_prev));
 
-	pr_debug("QUIC: discarded old keys\n");
+	pr_debug("TQUIC: discarded old keys\n");
 }
-EXPORT_SYMBOL_GPL(quic_crypto_discard_old_keys);
+EXPORT_SYMBOL_GPL(tquic_crypto_discard_old_keys);
 
 /*
  * Compute nonce for AEAD encryption/decryption
  */
-static void quic_compute_nonce(const u8 *iv, u64 pn, u8 *nonce)
+static void tquic_compute_nonce(const u8 *iv, u64 pn, u8 *nonce)
 {
 	int i;
 
@@ -478,7 +478,7 @@ static void quic_compute_nonce(const u8 *iv, u64 pn, u8 *nonce)
 }
 
 /*
- * quic_crypto_decrypt_with_phase - Decrypt packet considering key phase
+ * tquic_crypto_decrypt_with_phase - Decrypt packet considering key phase
  * @ctx: Crypto context
  * @skb: Socket buffer containing encrypted packet
  * @pn: Packet number for nonce construction
@@ -491,8 +491,8 @@ static void quic_compute_nonce(const u8 *iv, u64 pn, u8 *nonce)
  * Returns 0 on success, -EKEYREJECTED if key update needed,
  * other negative error code on failure.
  */
-int quic_crypto_decrypt_with_phase(struct quic_crypto_ctx *ctx,
-				   struct sk_buff *skb, u64 pn, u8 key_phase)
+int tquic_crypto_decrypt_with_phase(struct tquic_crypto_ctx *ctx,
+				    struct sk_buff *skb, u64 pn, u8 key_phase)
 {
 	struct aead_request *req;
 	struct scatterlist sg[2];
@@ -505,7 +505,7 @@ int quic_crypto_decrypt_with_phase(struct quic_crypto_ctx *ctx,
 	if (!ctx->rx_aead || !ctx->keys_available)
 		return -EINVAL;
 
-	header_len = QUIC_SKB_CB(skb)->header_len;
+	header_len = TQUIC_SKB_CB(skb)->header_len;
 	payload = skb->data + header_len;
 	payload_len = skb->len - header_len;
 
@@ -517,7 +517,7 @@ int quic_crypto_decrypt_with_phase(struct quic_crypto_ctx *ctx,
 	 */
 	if (key_phase == ctx->rx_key_phase) {
 		/* Normal case: use current RX keys */
-		quic_compute_nonce(ctx->rx.iv, pn, nonce);
+		tquic_compute_nonce(ctx->rx.iv, pn, nonce);
 
 		req = aead_request_alloc(ctx->rx_aead, GFP_ATOMIC);
 		if (!req)
@@ -543,7 +543,7 @@ int quic_crypto_decrypt_with_phase(struct quic_crypto_ctx *ctx,
 	 * Key phase differs - try previous keys first for reordered packets
 	 */
 	if (ctx->rx_prev_valid && ctx->rx_aead_prev) {
-		quic_compute_nonce(ctx->rx_prev.iv, pn, nonce);
+		tquic_compute_nonce(ctx->rx_prev.iv, pn, nonce);
 
 		req = aead_request_alloc(ctx->rx_aead_prev, GFP_ATOMIC);
 		if (!req)
@@ -571,20 +571,20 @@ int quic_crypto_decrypt_with_phase(struct quic_crypto_ctx *ctx,
 	 */
 	return -EKEYREJECTED;
 }
-EXPORT_SYMBOL_GPL(quic_crypto_decrypt_with_phase);
+EXPORT_SYMBOL_GPL(tquic_crypto_decrypt_with_phase);
 
 /*
- * quic_crypto_get_key_phase - Get current TX key phase
+ * tquic_crypto_get_key_phase - Get current TX key phase
  * @ctx: Crypto context
  *
  * Returns current key phase bit (0 or 1) for packet construction.
  */
-u8 quic_crypto_get_key_phase(struct quic_crypto_ctx *ctx)
+u8 tquic_crypto_get_key_phase(struct tquic_crypto_ctx *ctx)
 {
 	return ctx->key_phase;
 }
-EXPORT_SYMBOL_GPL(quic_crypto_get_key_phase);
+EXPORT_SYMBOL_GPL(tquic_crypto_get_key_phase);
 
 MODULE_LICENSE("GPL");
-MODULE_DESCRIPTION("QUIC Key Update Mechanism");
+MODULE_DESCRIPTION("TQUIC Key Update Mechanism");
 MODULE_AUTHOR("Linux QUIC Authors");
