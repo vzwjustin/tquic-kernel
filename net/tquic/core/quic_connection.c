@@ -470,7 +470,7 @@ void tquic_conn_destroy(struct tquic_connection *conn)
 		stream = rb_entry(node, struct tquic_stream, node);
 		node = rb_next(node);
 		rb_erase(&stream->node, &conn->streams);
-		tquic_stream_destroy(stream);
+		tquic_stream_destroy(NULL, stream);
 	}
 	spin_unlock(&conn->streams_lock);
 

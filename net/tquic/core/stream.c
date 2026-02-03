@@ -1083,7 +1083,7 @@ EXPORT_SYMBOL_GPL(tquic_stream_get_or_create);
 
 /**
  * tquic_stream_destroy - Destroy a stream
- * @mgr: Stream manager
+ * @mgr: Stream manager (may be NULL for direct cleanup)
  * @stream: Stream to destroy
  */
 void tquic_stream_destroy(struct tquic_stream_manager *mgr,
@@ -1095,12 +1095,14 @@ void tquic_stream_destroy(struct tquic_stream_manager *mgr,
 	if (!stream)
 		return;
 
-	spin_lock(&mgr->lock);
-	tquic_stream_remove(mgr, stream);
-	spin_unlock(&mgr->lock);
+	if (mgr) {
+		spin_lock(&mgr->lock);
+		tquic_stream_remove(mgr, stream);
+		spin_unlock(&mgr->lock);
+	}
 
 	/* Get socket for memory accounting */
-	sk = (mgr->conn) ? mgr->conn->sk : NULL;
+	sk = stream->conn ? stream->conn->sk : (mgr && mgr->conn ? mgr->conn->sk : NULL);
 
 	/* Purge buffers with proper memory accounting */
 	while ((skb = skb_dequeue(&stream->send_buf)) != NULL) {

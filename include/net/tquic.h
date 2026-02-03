@@ -1652,9 +1652,10 @@ static inline void tquic_conn_put(struct tquic_connection *conn)
 void tquic_conn_state_cleanup(struct tquic_connection *conn);
 
 /* Stream management */
+struct tquic_stream_manager;	/* Forward declaration */
 struct tquic_stream *tquic_stream_open(struct tquic_connection *conn, bool bidi);
 void tquic_stream_close(struct tquic_stream *stream);
-void tquic_stream_destroy(struct tquic_stream *stream);
+void tquic_stream_destroy(struct tquic_stream_manager *mgr, struct tquic_stream *stream);
 int tquic_stream_send(struct tquic_stream *stream, const void *data, size_t len, bool fin);
 int tquic_stream_recv(struct tquic_stream *stream, void *data, size_t len);
 void tquic_stream_reset(struct tquic_stream *stream, u64 error_code);
