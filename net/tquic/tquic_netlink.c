@@ -350,7 +350,7 @@ static void tquic_conn_put(struct tquic_conn_info *conn)
 	}
 }
 
-static struct tquic_conn_info *tquic_conn_create(struct net *net, u64 conn_id)
+static struct tquic_conn_info *tquic_conn_info_create(struct net *net, u64 conn_id)
 {
 	struct tquic_net *tnet = tquic_get_net(net);
 	struct tquic_conn_info *conn;
@@ -636,7 +636,7 @@ static int tquic_nl_cmd_path_add(struct sk_buff *skb, struct genl_info *info)
 	/* Look up or create the connection */
 	conn = tquic_conn_lookup(net, conn_id);
 	if (!conn) {
-		conn = tquic_conn_create(net, conn_id);
+		conn = tquic_conn_info_create(net, conn_id);
 		if (!conn)
 			return -ENOMEM;
 	}

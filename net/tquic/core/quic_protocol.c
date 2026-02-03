@@ -373,7 +373,7 @@ static int tquic_proto_connect(struct sock *sk, struct sockaddr *addr,
 		goto out;
 	}
 
-	conn = tquic_conn_create(sk, GFP_KERNEL);
+	conn = tquic_conn_create(tsk, false);
 	if (!conn) {
 		err = -ENOMEM;
 		goto out;

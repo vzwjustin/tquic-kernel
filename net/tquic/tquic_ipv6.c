@@ -1266,7 +1266,7 @@ static int tquic_v6_init_sock(struct sock *sk)
 	tsk->max_accept_queue = 128;
 
 	/* Create connection structure */
-	tsk->conn = tquic_conn_create(sk, GFP_KERNEL);
+	tsk->conn = tquic_conn_create(tsk, false);
 	if (!tsk->conn)
 		return -ENOMEM;
 

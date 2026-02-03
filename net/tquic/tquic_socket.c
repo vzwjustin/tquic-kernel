@@ -172,7 +172,7 @@ static int tquic_init_sock(struct sock *sk)
 	tsk->cert_verify.expected_hostname_len = 0;
 
 	/* Create connection structure */
-	tsk->conn = tquic_conn_create(sk, GFP_KERNEL);
+	tsk->conn = tquic_conn_create(tsk, false);
 	if (!tsk->conn)
 		return -ENOMEM;
 

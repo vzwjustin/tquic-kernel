@@ -1089,8 +1089,8 @@ int tquic_server_handshake(struct sock *listener_sk,
 	child_tsk->accept_queue_len = 0;
 	child_tsk->max_accept_queue = 0;
 
-	/* Create connection for child */
-	conn = tquic_conn_create(child_sk, GFP_ATOMIC);
+	/* Create connection for child (server-side) */
+	conn = tquic_conn_create(child_tsk, true);
 	if (!conn) {
 		pr_debug("tquic: failed to create connection for child\n");
 		sk_free(child_sk);
