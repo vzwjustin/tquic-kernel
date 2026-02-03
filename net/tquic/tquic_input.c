@@ -814,18 +814,19 @@ static int tquic_process_stream_frame(struct tquic_rx_ctx *ctx)
 	/*
 	 * Charge receive buffer memory against the connection socket.
 	 * If receive buffer is full, drop the skb and apply backpressure.
+	 * Use sk_rmem_alloc_get() and skb_set_owner_r() for compatibility
+	 * with kernels where sk_rmem_alloc changed from atomic_t to refcount_t.
 	 */
 	if (ctx->conn->sk) {
 		struct sock *sk = ctx->conn->sk;
 		int amt = data_skb->truesize;
 
-		if (atomic_read(&sk->sk_rmem_alloc) + amt > sk->sk_rcvbuf) {
+		if (sk_rmem_alloc_get(sk) + amt > sk->sk_rcvbuf) {
 			kfree_skb(data_skb);
 			/* Don't treat as fatal - peer will retransmit */
 			return 0;
 		}
-		sk_mem_charge(sk, amt);
-		atomic_add(amt, &sk->sk_rmem_alloc);
+		skb_set_owner_r(data_skb, sk);
 	}
 
 	skb_queue_tail(&stream->recv_buf, data_skb);

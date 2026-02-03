@@ -369,8 +369,7 @@ ssize_t tquic_forward_splice(struct tquic_tunnel *tunnel, int direction)
 				struct sock *quic_sk = stream->conn->sk;
 
 				if (sk_wmem_schedule(quic_sk, skb->truesize)) {
-					sk_mem_charge(quic_sk, skb->truesize);
-					atomic_add(skb->truesize, &quic_sk->sk_wmem_alloc);
+					skb_set_owner_w(skb, quic_sk);
 				} else {
 					kfree_skb(skb);
 					kfree(buf);
@@ -745,11 +744,10 @@ ssize_t tquic_forward_hairpin(struct tquic_tunnel *tunnel,
 			struct sock *dst_sk = dst_stream->conn->sk;
 
 			/*
-			 * We don't check sk_wmem_schedule here because we've
-			 * already dequeued from source - must deliver or drop.
+			 * Use skb_set_owner_w which handles both memory
+			 * accounting and refcount properly for all kernel versions.
 			 */
-			sk_mem_charge(dst_sk, skb->truesize);
-			atomic_add(skb->truesize, &dst_sk->sk_wmem_alloc);
+			skb_set_owner_w(skb, dst_sk);
 		}
 
 		__skb_queue_tail(&dst_stream->send_buf, skb);

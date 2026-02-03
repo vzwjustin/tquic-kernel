@@ -28,10 +28,10 @@
  *
  * For out-of-tree builds, the system's linux/in.h doesn't include
  * IPPROTO_TQUIC. Define it here if not already defined.
- * Protocol number 263 chosen to be in the unassigned range.
+ * Protocol number 253 is in the unassigned range and fits in u8.
  */
 #ifndef IPPROTO_TQUIC
-#define IPPROTO_TQUIC	263
+#define IPPROTO_TQUIC	253
 #endif
 
 /* Protocol version numbers */

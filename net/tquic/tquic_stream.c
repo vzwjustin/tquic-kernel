@@ -73,7 +73,13 @@ static int tquic_stream_wmem_charge(struct sock *sk, struct sk_buff *skb)
 	/* Check if we have room in socket's send buffer */
 	if (sk_wmem_schedule(sk, amt)) {
 		sk_mem_charge(sk, amt);
-		atomic_add(amt, &sk->sk_wmem_alloc);
+		/*
+		 * Use skb_set_owner_w() instead of atomic_add() on sk_wmem_alloc.
+		 * Modern kernels (6.x) changed sk_wmem_alloc from atomic_t to
+		 * refcount_t. skb_set_owner_w() properly handles the accounting
+		 * and sets up the skb destructor to decrement on free.
+		 */
+		skb_set_owner_w(skb, sk);
 		return 0;
 	}
 
@@ -95,7 +101,13 @@ static void tquic_stream_wmem_uncharge(struct sock *sk, struct sk_buff *skb)
 		return;
 
 	sk_mem_uncharge(sk, amt);
-	atomic_sub(amt, &sk->sk_wmem_alloc);
+	/*
+	 * Note: sk_wmem_alloc decrement is handled by the skb destructor
+	 * set by skb_set_owner_w() in tquic_stream_wmem_charge().
+	 * Modern kernels (6.x) use refcount_t for sk_wmem_alloc, so we
+	 * cannot use atomic_sub() directly. The kfree_skb() call after
+	 * this function will invoke the destructor.
+	 */
 
 	/* Wake up writers if socket was previously blocked */
 	if (sk_stream_wspace(sk) > 0)
@@ -118,12 +130,21 @@ static int tquic_stream_rmem_charge(struct sock *sk, struct sk_buff *skb)
 	if (!sk)
 		return 0;
 
-	/* Check receive buffer limits */
-	if (atomic_read(&sk->sk_rmem_alloc) + amt > sk->sk_rcvbuf)
+	/*
+	 * Check receive buffer limits.
+	 * Use refcount_read() for modern kernels (6.x) where sk_rmem_alloc
+	 * is refcount_t instead of atomic_t.
+	 */
+	if (refcount_read(&sk->sk_rmem_alloc) + amt > sk->sk_rcvbuf)
 		return -ENOBUFS;
 
 	sk_mem_charge(sk, amt);
-	atomic_add(amt, &sk->sk_rmem_alloc);
+	/*
+	 * Use skb_set_owner_r() instead of atomic_add() on sk_rmem_alloc.
+	 * This properly handles refcount_t and sets up the skb destructor
+	 * to decrement on free.
+	 */
+	skb_set_owner_r(skb, sk);
 	return 0;
 }
 
@@ -142,7 +163,13 @@ static void tquic_stream_rmem_uncharge(struct sock *sk, struct sk_buff *skb)
 		return;
 
 	sk_mem_uncharge(sk, amt);
-	atomic_sub(amt, &sk->sk_rmem_alloc);
+	/*
+	 * Note: sk_rmem_alloc decrement is handled by the skb destructor
+	 * set by skb_set_owner_r() in tquic_stream_rmem_charge().
+	 * Modern kernels (6.x) use refcount_t for sk_rmem_alloc, so we
+	 * cannot use atomic_sub() directly. The kfree_skb() call after
+	 * this function will invoke the destructor.
+	 */
 }
 
 /**

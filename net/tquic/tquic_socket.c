@@ -1981,8 +1981,7 @@ int tquic_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 
 		/* Charge socket memory for this buffer */
 		if (sk_wmem_schedule(sk, skb->truesize)) {
-			sk_mem_charge(sk, skb->truesize);
-			atomic_add(skb->truesize, &sk->sk_wmem_alloc);
+			skb_set_owner_w(skb, sk);
 		} else {
 			kfree_skb(skb);
 			return copied > 0 ? copied : -ENOBUFS;

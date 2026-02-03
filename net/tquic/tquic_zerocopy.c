@@ -331,8 +331,7 @@ int tquic_sendmsg_zerocopy(struct sock *sk, struct msghdr *msg, size_t len,
 
 		/* Charge socket memory for this buffer */
 		if (sk_wmem_schedule(sk, new_skb->truesize)) {
-			sk_mem_charge(sk, new_skb->truesize);
-			atomic_add(new_skb->truesize, &sk->sk_wmem_alloc);
+			skb_set_owner_w(new_skb, sk);
 		} else {
 			kfree_skb(new_skb);
 			err = -ENOBUFS;
@@ -484,8 +483,7 @@ ssize_t tquic_sendpage(struct socket *sock, struct page *page,
 
 	/* Charge socket memory for this buffer */
 	if (sk_wmem_schedule(sk, skb->truesize)) {
-		sk_mem_charge(sk, skb->truesize);
-		atomic_add(skb->truesize, &sk->sk_wmem_alloc);
+		skb_set_owner_w(skb, sk);
 	} else {
 		kfree_skb(skb);
 		return -ENOBUFS;
