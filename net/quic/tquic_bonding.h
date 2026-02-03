@@ -101,6 +101,13 @@ struct tquic_capacity_weights {
 };
 
 /*
+ * Bonding context flags for tracking degraded capabilities
+ */
+#define TQUIC_BOND_F_FAILOVER_DISABLED	BIT(0)	/* Failover init failed */
+#define TQUIC_BOND_F_REORDER_DISABLED	BIT(1)	/* Reorder buffer alloc failed */
+#define TQUIC_BOND_F_REORDER_RETRY	BIT(2)	/* Retry reorder alloc scheduled */
+
+/*
  * Bonding context structure
  *
  * Per-connection bonding state machine context.
@@ -112,6 +119,7 @@ struct tquic_capacity_weights {
 struct tquic_bonding_ctx {
 	enum tquic_bonding_state state;
 	spinlock_t state_lock;
+	u32 flags;			/* TQUIC_BOND_F_* capability flags */
 
 	/* Path tracking */
 	int active_path_count;		/* Paths in ACTIVE/VALIDATED state */

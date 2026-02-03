@@ -960,24 +960,52 @@ void quic_ack_space_init(struct quic_connection *conn, u8 pn_space)
 }
 
 /*
+ * Global ACK statistics for debugging and monitoring.
+ * All per-connection ACK state is maintained in quic_pn_space.
+ */
+static struct {
+	atomic64_t acks_sent;		/* Total ACK frames sent */
+	atomic64_t acks_received;	/* Total ACK frames processed */
+	atomic64_t ack_ranges_sent;	/* Total ACK ranges transmitted */
+	atomic64_t delayed_acks;	/* ACKs delayed by timer */
+	atomic64_t immediate_acks;	/* ACKs sent immediately */
+} quic_ack_stats;
+
+/*
  * quic_ack_init - Initialize global ACK handling infrastructure
  *
- * Called during module initialization. Currently this function is a
- * placeholder as all ACK state is maintained per-connection in the
- * quic_pn_space structure.
+ * Called during module initialization. Initializes global ACK
+ * statistics counters. Per-connection ACK state is maintained
+ * in the quic_pn_space structure and initialized when connections
+ * are created.
  *
  * Returns 0 on success, negative error code on failure.
  */
 int __init quic_ack_init(void)
 {
+	/* Initialize global statistics counters */
+	atomic64_set(&quic_ack_stats.acks_sent, 0);
+	atomic64_set(&quic_ack_stats.acks_received, 0);
+	atomic64_set(&quic_ack_stats.ack_ranges_sent, 0);
+	atomic64_set(&quic_ack_stats.delayed_acks, 0);
+	atomic64_set(&quic_ack_stats.immediate_acks, 0);
+
+	pr_debug("QUIC ACK subsystem initialized\n");
 	return 0;
 }
 
 /*
  * quic_ack_exit - Clean up global ACK handling infrastructure
  *
- * Called during module unload. Currently this function is a placeholder.
+ * Called during module unload. Logs final ACK statistics for
+ * debugging purposes.
  */
 void __exit quic_ack_exit(void)
 {
+	pr_debug("QUIC ACK stats: sent=%lld received=%lld ranges=%lld delayed=%lld immediate=%lld\n",
+		 atomic64_read(&quic_ack_stats.acks_sent),
+		 atomic64_read(&quic_ack_stats.acks_received),
+		 atomic64_read(&quic_ack_stats.ack_ranges_sent),
+		 atomic64_read(&quic_ack_stats.delayed_acks),
+		 atomic64_read(&quic_ack_stats.immediate_acks));
 }

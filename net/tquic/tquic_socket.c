@@ -348,8 +348,15 @@ int tquic_connect(struct sock *sk, struct sockaddr *addr, int addr_len)
 	/* Initialize path manager after connection established */
 	ret = tquic_pm_conn_init(conn);
 	if (ret < 0) {
-		pr_warn("tquic: PM init failed: %d\n", ret);
-		/* Continue anyway - PM is optional for basic operation */
+		pr_warn("tquic: PM init failed (%d), multipath disabled\n", ret);
+		tsk->flags |= TQUIC_F_PM_DISABLED;
+		tsk->flags &= ~TQUIC_F_MULTIPATH_ENABLED;
+		/*
+		 * Continue with single-path operation. Multipath and migration
+		 * features will be unavailable for this connection.
+		 */
+		pr_notice("tquic: connection using single-path mode\n");
+		ret = 0;  /* Not fatal */
 	}
 
 	release_sock(sk);

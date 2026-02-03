@@ -72,7 +72,7 @@ static void minrtt_init(struct tquic_connection *conn)
 	if (!sd)
 		return;
 
-	sd->current_path_id = 0xFF;	/* Invalid initially */
+	sd->current_path_id = TQUIC_INVALID_PATH_ID;
 	sd->current_rtt_us = U64_MAX;
 	sd->last_switch = ktime_get();
 	sd->switch_count = 0;

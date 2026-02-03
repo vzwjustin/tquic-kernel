@@ -341,7 +341,7 @@ static void blest_init(struct tquic_connection *conn)
 		return;
 
 	sd->segment_size = BLEST_DEFAULT_SEGMENT_SIZE;
-	sd->current_path_id = 0xFF;  /* Invalid initially */
+	sd->current_path_id = TQUIC_INVALID_PATH_ID;
 	sd->blocking_threshold_us = blest_blocking_threshold_us;
 
 	conn->sched_priv = sd;

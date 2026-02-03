@@ -36,6 +36,9 @@
 /* Sysctl accessor forward declaration */
 int tquic_sysctl_get_prefer_preferred_address(void);
 
+/* Timer callback forward declaration */
+static void tquic_migration_timeout(struct timer_list *t);
+
 /* Migration constants */
 #define TQUIC_MIGRATION_PTO_MULTIPLIER	3	/* 3x PTO for validation timeout */
 #define TQUIC_MIGRATION_MAX_RETRIES	3	/* Max PATH_CHALLENGE retries */
@@ -459,7 +462,7 @@ static struct tquic_migration_state *tquic_migration_state_alloc(
 
 	ms->status = TQUIC_MIGRATE_NONE;
 	spin_lock_init(&ms->lock);
-	timer_setup(&ms->timer, NULL, 0);  /* Timer setup later */
+	timer_setup(&ms->timer, tquic_migration_timeout, 0);
 
 	return ms;
 }

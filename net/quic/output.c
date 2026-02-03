@@ -36,6 +36,11 @@
 #define QUIC_OUTPUT_SKB_HEADROOM	128
 #define QUIC_OUTPUT_MAX_COALESCE	3
 
+/* Default TTL/hop limit - configurable via module parameter */
+static unsigned int quic_default_ttl __read_mostly = 64;
+module_param(quic_default_ttl, uint, 0644);
+MODULE_PARM_DESC(quic_default_ttl, "Default TTL/hop limit for QUIC packets (1-255)");
+
 /* Pacing configuration */
 #define QUIC_PACING_SHIFT		10
 #define QUIC_PACING_MARGIN_US		1000
@@ -240,7 +245,7 @@ static int quic_build_ipv4_header(struct sk_buff *skb,
 	iph->tot_len = htons(skb->len);
 	iph->id = 0;
 	iph->frag_off = htons(IP_DF);
-	iph->ttl = 64;
+	iph->ttl = quic_default_ttl;
 	iph->protocol = IPPROTO_UDP;
 	iph->check = 0;
 	iph->saddr = fl4.saddr;
@@ -295,7 +300,7 @@ static int quic_build_ipv6_header(struct sk_buff *skb,
 	ip6_flow_hdr(ip6h, 0, 0);
 	ip6h->payload_len = htons(skb->len - sizeof(struct ipv6hdr));
 	ip6h->nexthdr = IPPROTO_UDP;
-	ip6h->hop_limit = 64;
+	ip6h->hop_limit = quic_default_ttl;
 	ip6h->saddr = saddr->sin6_addr;
 	ip6h->daddr = daddr->sin6_addr;
 

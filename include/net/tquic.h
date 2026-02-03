@@ -436,6 +436,9 @@ struct tquic_connection {
 	u64 data_sent;
 	u64 data_received;
 
+	/* Extended flow control state (tquic_fc_state from flow_control.c) */
+	struct tquic_fc_state *fc;
+
 	struct tquic_conn_stats stats;
 
 	/* Timers - managed via timer_state for unified timer/recovery handling */

@@ -1349,12 +1349,13 @@ int tquic_quic_proxy_header_compress(
 
 	/*
 	 * Compressed format:
-	 *   1 byte: compression flags (0x80 = compressed)
+	 *   1 byte: compression flags (0x80 = compressed short, 0xC0 = compressed long)
 	 *   1 byte: compression index
 	 *   remaining: packet without DCID
 	 *
-	 * For short headers, this removes the DCID.
-	 * For long headers, this is more complex (not fully implemented).
+	 * For short headers, this removes the DCID entirely.
+	 * For long headers, we replace the variable-length DCID with the index,
+	 * keeping the fixed-size header structure for proper parsing.
 	 */
 
 	if (!is_long_header) {
@@ -1379,16 +1380,59 @@ int tquic_quic_proxy_header_compress(
 		return 0;
 	}
 
-	/* Long header - copy as-is for now */
-	if (output_len < packet_len)
-		return -ENOSPC;
+	/*
+	 * Long header compression:
+	 * Original: [first_byte(1)] [version(4)] [dcid_len(1)] [dcid(N)] [scid_len(1)] [scid(M)] [payload]
+	 * Compressed: [0xC0|flags(1)] [version(4)] [idx(1)] [scid_len(1)] [scid(M)] [payload]
+	 *
+	 * This saves (dcid_len + 1 - 1) = dcid_len bytes per packet.
+	 */
+	{
+		size_t scid_offset = 6 + dcid_len;
+		u8 scid_len;
+		size_t payload_offset;
+		size_t payload_len;
+		size_t out_len;
 
-	memcpy(output, packet, packet_len);
-	*compressed_len = packet_len;
+		/* Validate we can read SCID length */
+		if (packet_len < scid_offset + 1)
+			return -EINVAL;
 
-	ctx->tx_uncompressed++;
+		scid_len = packet[scid_offset];
 
-	return 0;
+		/* Validate we can read the full SCID and have payload */
+		payload_offset = scid_offset + 1 + scid_len;
+		if (packet_len < payload_offset)
+			return -EINVAL;
+
+		payload_len = packet_len - payload_offset;
+
+		/* Calculate compressed output size:
+		 * 1 (flags) + 4 (version) + 1 (idx) + 1 (scid_len) + scid_len + payload
+		 */
+		out_len = 1 + 4 + 1 + 1 + scid_len + payload_len;
+
+		if (output_len < out_len)
+			return -ENOSPC;
+
+		/* Build compressed long header */
+		output[0] = 0xC0 | (first_byte & 0x3F);  /* Compressed long header flag */
+		memcpy(&output[1], &packet[1], 4);       /* Copy version */
+		output[5] = (u8)idx;                     /* Compression index replaces DCID */
+		output[6] = scid_len;                    /* SCID length */
+		if (scid_len > 0)
+			memcpy(&output[7], &packet[scid_offset + 1], scid_len);
+		memcpy(&output[7 + scid_len], &packet[payload_offset], payload_len);
+
+		*compressed_len = out_len;
+
+		if (compress_index)
+			*compress_index = (u8)idx;
+
+		ctx->tx_compressed++;
+
+		return 0;
+	}
 }
 EXPORT_SYMBOL_GPL(tquic_quic_proxy_header_compress);
 
@@ -1446,6 +1490,64 @@ int tquic_quic_proxy_header_decompress(
 
 	entry = &ctx->entries[compress_index];
 	dcid_len = entry->dcid_len;
+
+	/* Check for long header compression (0xC0 flag) */
+	if ((first_byte & 0xC0) == 0xC0) {
+		/*
+		 * Decompress long header:
+		 * Input: [0xC0|flags(1)] [version(4)] [idx(1)] [scid_len(1)] [scid(M)] [payload]
+		 * Output: [first_byte(1)] [version(4)] [dcid_len(1)] [dcid(N)] [scid_len(1)] [scid(M)] [payload]
+		 */
+		u8 scid_len;
+		size_t payload_offset;
+		size_t payload_len;
+
+		if (compressed_len < 7) {
+			spin_unlock_bh(&ctx->lock);
+			return -EINVAL;
+		}
+
+		scid_len = compressed[6];
+		payload_offset = 7 + scid_len;
+
+		if (compressed_len < payload_offset) {
+			spin_unlock_bh(&ctx->lock);
+			return -EINVAL;
+		}
+
+		payload_len = compressed_len - payload_offset;
+
+		/* Calculate decompressed size:
+		 * 1 (first_byte) + 4 (version) + 1 (dcid_len) + dcid_len + 1 (scid_len) + scid_len + payload
+		 */
+		total_len = 1 + 4 + 1 + dcid_len + 1 + scid_len + payload_len;
+
+		if (output_len < total_len) {
+			spin_unlock_bh(&ctx->lock);
+			return -ENOSPC;
+		}
+
+		/* Reconstruct long header */
+		output[0] = (first_byte & 0x3F) | 0x80;  /* Restore long header flag */
+		memcpy(&output[1], &compressed[1], 4);   /* Copy version */
+		output[5] = dcid_len;                    /* DCID length */
+		memcpy(&output[6], entry->dcid, dcid_len);  /* DCID */
+		output[6 + dcid_len] = scid_len;         /* SCID length */
+		if (scid_len > 0)
+			memcpy(&output[7 + dcid_len], &compressed[7], scid_len);
+		memcpy(&output[7 + dcid_len + scid_len], &compressed[payload_offset], payload_len);
+
+		*packet_len = total_len;
+
+		entry->used++;
+		ctx->rx_compressed++;
+
+		spin_unlock_bh(&ctx->lock);
+
+		return 0;
+	}
+
+	/* Short header decompression (0x80 flag) */
 
 	/* Calculate output size */
 	total_len = 1 + dcid_len + (compressed_len - 2);

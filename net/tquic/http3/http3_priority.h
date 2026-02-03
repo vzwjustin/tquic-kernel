@@ -124,14 +124,34 @@ struct http3_priority_stream {
 };
 
 /**
+ * struct http3_priority_push - Priority state for a push stream
+ * @push_id: The Push ID this priority applies to
+ * @priority: Current priority parameters
+ * @bucket_node: Linkage in urgency bucket
+ * @tree_node: RB-tree node for push ID lookup
+ * @update_count: Number of priority updates received
+ */
+struct http3_priority_push {
+	u64 push_id;
+	struct http3_priority priority;
+	struct list_head bucket_node;
+	struct rb_node tree_node;
+	u32 update_count;
+};
+
+/**
  * struct http3_priority_state - Priority state for a connection
  * @buckets: Urgency-based scheduling buckets (0-7)
  * @streams: RB-tree of all stream priorities for lookup
  * @stream_count: Total number of streams with priority state
+ * @push_buckets: Push stream urgency buckets (0-7)
+ * @push_streams: RB-tree of push stream priorities
+ * @push_count: Total push streams with priority state
  * @lock: Spinlock protecting priority state
  * @enabled: HTTP/3 priorities enabled for this connection
  * @conn: Back-pointer to TQUIC connection
  * @cache: SLAB cache for priority stream allocation
+ * @push_cache: SLAB cache for push priority allocation
  * @rr_cursor: Round-robin cursor for incremental stream scheduling
  *
  * The bucket array provides O(1) access to streams at each urgency level,
@@ -141,10 +161,15 @@ struct http3_priority_state {
 	struct list_head buckets[HTTP3_PRIORITY_NUM_BUCKETS];
 	struct rb_root streams;
 	u32 stream_count;
+	/* Push stream priorities */
+	struct list_head push_buckets[HTTP3_PRIORITY_NUM_BUCKETS];
+	struct rb_root push_streams;
+	u32 push_count;
 	spinlock_t lock;
 	bool enabled;
 	struct tquic_connection *conn;
 	struct kmem_cache *cache;
+	struct kmem_cache *push_cache;
 	/* Round-robin state for incremental streams per bucket */
 	struct list_head *rr_cursor[HTTP3_PRIORITY_NUM_BUCKETS];
 };

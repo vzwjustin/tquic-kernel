@@ -429,10 +429,21 @@ static int tquic_tunnel_create_tcp_socket(struct tquic_tunnel *tunnel,
 		err = sock->ops->setsockopt(sock, SOL_IP, IP_TRANSPARENT,
 					    KERNEL_SOCKPTR(&val), sizeof(val));
 		if (err < 0) {
-			pr_warn("tquic: IP_TRANSPARENT failed: %d\n", err);
-			/* Continue anyway - may not need root/CAP_NET_ADMIN */
+			/*
+			 * IP_TRANSPARENT requires CAP_NET_ADMIN. If it fails,
+			 * we must NOT set is_tproxy=true as that would cause
+			 * packet processing to use TPROXY logic incorrectly.
+			 */
+			if (capable(CAP_NET_ADMIN)) {
+				pr_err("tquic: IP_TRANSPARENT failed despite CAP_NET_ADMIN: %d\n", err);
+				sock_release(sock);
+				return ERR_PTR(err);
+			}
+			pr_info("tquic: IP_TRANSPARENT requires CAP_NET_ADMIN, using normal mode\n");
+			tunnel->is_tproxy = false;
+		} else {
+			tunnel->is_tproxy = true;
 		}
-		tunnel->is_tproxy = true;
 	}
 
 	/* Set up bind address with allocated port */

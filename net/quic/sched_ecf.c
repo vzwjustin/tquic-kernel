@@ -298,7 +298,7 @@ static void ecf_init(struct tquic_connection *conn)
 		return;
 
 	sd->segment_size = ECF_DEFAULT_SEGMENT_SIZE;
-	sd->current_path_id = 0xFF;  /* Invalid initially */
+	sd->current_path_id = TQUIC_INVALID_PATH_ID;
 	sd->path_switches = 0;
 
 	conn->sched_priv = sd;

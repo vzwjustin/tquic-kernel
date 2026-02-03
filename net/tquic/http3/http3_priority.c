@@ -486,6 +486,166 @@ int http3_priority_stream_set(struct tquic_connection *conn,
 EXPORT_SYMBOL_GPL(http3_priority_stream_set);
 
 /* =========================================================================
+ * Push Stream Priority Operations (RFC 9218 Section 7.2)
+ * ========================================================================= */
+
+static struct http3_priority_push *
+priority_push_lookup(struct http3_priority_state *state, u64 push_id)
+{
+	struct rb_node *node = state->push_streams.rb_node;
+
+	while (node) {
+		struct http3_priority_push *pp;
+
+		pp = rb_entry(node, struct http3_priority_push, tree_node);
+		if (push_id < pp->push_id)
+			node = node->rb_left;
+		else if (push_id > pp->push_id)
+			node = node->rb_right;
+		else
+			return pp;
+	}
+
+	return NULL;
+}
+
+static int priority_push_insert(struct http3_priority_state *state,
+				struct http3_priority_push *pp)
+{
+	struct rb_node **link = &state->push_streams.rb_node;
+	struct rb_node *parent = NULL;
+
+	while (*link) {
+		struct http3_priority_push *entry;
+
+		parent = *link;
+		entry = rb_entry(parent, struct http3_priority_push, tree_node);
+
+		if (pp->push_id < entry->push_id)
+			link = &parent->rb_left;
+		else if (pp->push_id > entry->push_id)
+			link = &parent->rb_right;
+		else
+			return -EEXIST;
+	}
+
+	rb_link_node(&pp->tree_node, parent, link);
+	rb_insert_color(&pp->tree_node, &state->push_streams);
+	state->push_count++;
+
+	return 0;
+}
+
+/**
+ * http3_priority_push_init - Initialize priority for a push stream
+ */
+int http3_priority_push_init(struct tquic_connection *conn,
+			     u64 push_id,
+			     const struct http3_priority *initial)
+{
+	struct http3_priority_state *state;
+	struct http3_priority_push *pp;
+	u8 urgency;
+	int ret;
+
+	if (!conn)
+		return -EINVAL;
+
+	state = conn->priority_state;
+	if (!state || !state->enabled)
+		return 0;
+
+	pp = kzalloc(sizeof(*pp), GFP_ATOMIC);
+	if (!pp)
+		return -ENOMEM;
+
+	pp->push_id = push_id;
+	INIT_LIST_HEAD(&pp->bucket_node);
+
+	/* Set initial priority */
+	if (initial && initial->valid) {
+		pp->priority = *initial;
+	} else {
+		http3_priority_default(&pp->priority);
+	}
+
+	/* Clamp urgency to valid range */
+	if (pp->priority.urgency > HTTP3_PRIORITY_URGENCY_MAX)
+		pp->priority.urgency = HTTP3_PRIORITY_URGENCY_MAX;
+
+	urgency = pp->priority.urgency;
+
+	spin_lock_bh(&state->lock);
+
+	ret = priority_push_insert(state, pp);
+	if (ret) {
+		spin_unlock_bh(&state->lock);
+		kfree(pp);
+		return ret;
+	}
+
+	/* Add to appropriate urgency bucket */
+	list_add_tail(&pp->bucket_node, &state->push_buckets[urgency]);
+
+	spin_unlock_bh(&state->lock);
+
+	pr_debug("http3_priority: push %llu initialized with u=%u, i=%d\n",
+		 push_id, urgency, pp->priority.incremental);
+
+	return 0;
+}
+
+/**
+ * http3_priority_push_set - Set priority for a push stream
+ */
+int http3_priority_push_set(struct tquic_connection *conn,
+			    u64 push_id,
+			    const struct http3_priority *priority)
+{
+	struct http3_priority_state *state;
+	struct http3_priority_push *pp;
+	u8 old_urgency, new_urgency;
+
+	if (!conn || !priority)
+		return -EINVAL;
+
+	state = conn->priority_state;
+	if (!state)
+		return -ENOENT;
+
+	new_urgency = priority->urgency;
+	if (new_urgency > HTTP3_PRIORITY_URGENCY_MAX)
+		new_urgency = HTTP3_PRIORITY_URGENCY_MAX;
+
+	spin_lock_bh(&state->lock);
+
+	pp = priority_push_lookup(state, push_id);
+	if (!pp) {
+		spin_unlock_bh(&state->lock);
+		return -ENOENT;
+	}
+
+	old_urgency = pp->priority.urgency;
+	pp->priority.urgency = new_urgency;
+	pp->priority.incremental = priority->incremental;
+	pp->priority.valid = true;
+	pp->update_count++;
+
+	/* Move to new bucket if urgency changed */
+	if (old_urgency != new_urgency) {
+		list_del(&pp->bucket_node);
+		list_add_tail(&pp->bucket_node, &state->push_buckets[new_urgency]);
+	}
+
+	spin_unlock_bh(&state->lock);
+
+	pr_debug("http3_priority: push %llu updated to u=%u, i=%d\n",
+		 push_id, new_urgency, priority->incremental);
+
+	return 0;
+}
+
+/* =========================================================================
  * Priority Field Value Parsing (RFC 9218 Section 4)
  *
  * The Priority field value is a Structured Field Dictionary (RFC 8941).
@@ -768,10 +928,23 @@ int http3_priority_handle_update(struct tquic_connection *conn,
 	if (!frame)
 		return -EINVAL;
 
-	/* Push stream priorities not yet supported */
+	/* Handle push stream priorities */
 	if (frame->is_push) {
-		pr_debug("http3_priority: ignoring push stream priority update\n");
-		return 0;
+		ret = http3_priority_push_set(conn, frame->element_id,
+					      &frame->priority);
+		if (ret == -ENOENT) {
+			/* Push doesn't exist yet - create priority entry */
+			ret = http3_priority_push_init(conn, frame->element_id,
+						       &frame->priority);
+		}
+
+		if (ret == 0) {
+			atomic64_inc(&http3_priority_global_stats.updates_received);
+			pr_debug("http3_priority: push %llu updated to u=%u, i=%d\n",
+				 frame->element_id, frame->priority.urgency,
+				 frame->priority.incremental);
+		}
+		return ret;
 	}
 
 	/* Update stream priority */

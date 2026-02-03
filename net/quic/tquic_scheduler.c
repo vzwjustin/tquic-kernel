@@ -874,8 +874,8 @@ static int tquic_lowlat_init(struct tquic_connection *conn)
 	if (!ld)
 		return -ENOMEM;
 
-	ld->primary_path_id = 0xFF;  /* Invalid initially */
-	ld->backup_path_id = 0xFF;
+	ld->primary_path_id = TQUIC_INVALID_PATH_ID;
+	ld->backup_path_id = TQUIC_INVALID_PATH_ID;
 	ld->primary_failed = false;
 
 	conn->sched_priv = ld;

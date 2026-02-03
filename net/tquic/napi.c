@@ -56,6 +56,9 @@ struct tquic_napi_global_stats {
 
 static struct tquic_napi_global_stats tquic_napi_global_stats;
 
+/* Proc file availability flag - set when /proc/net/tquic_napi unavailable */
+static bool tquic_napi_proc_disabled;
+
 /*
  * =============================================================================
  * Forward Declarations
@@ -1016,8 +1019,15 @@ int __init tquic_napi_subsys_init(void)
 	pde = proc_create("tquic_napi", 0444, init_net.proc_net,
 			  &tquic_napi_proc_ops);
 	if (!pde) {
-		pr_warn("tquic_napi: failed to create proc entry\n");
-		/* Non-fatal - continue without proc file */
+		pr_warn("tquic_napi: failed to create /proc/net/tquic_napi\n");
+		tquic_napi_proc_disabled = true;
+		/*
+		 * Non-fatal - continue without proc file. NAPI statistics
+		 * will not be available via /proc but polling still works.
+		 */
+		pr_notice("tquic_napi: statistics unavailable via /proc\n");
+	} else {
+		tquic_napi_proc_disabled = false;
 	}
 
 	pr_info("TQUIC NAPI subsystem initialized\n");
@@ -1030,8 +1040,9 @@ int __init tquic_napi_subsys_init(void)
  */
 void __exit tquic_napi_subsys_exit(void)
 {
-	/* Remove proc file */
-	remove_proc_entry("tquic_napi", init_net.proc_net);
+	/* Remove proc file only if it was created */
+	if (!tquic_napi_proc_disabled)
+		remove_proc_entry("tquic_napi", init_net.proc_net);
 
 	/* Unregister and free virtual device */
 	if (tquic_napi_dev) {

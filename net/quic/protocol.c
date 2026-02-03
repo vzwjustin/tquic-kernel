@@ -31,6 +31,30 @@ int sysctl_quic_mem[3] __read_mostly;
 int sysctl_quic_wmem[3] __read_mostly = { 4096, 16384, 4194304 };
 int sysctl_quic_rmem[3] __read_mostly = { 4096, 131072, 6291456 };
 
+/*
+ * Configurable connection defaults (via module parameters)
+ * These can be overridden per-socket via setsockopt.
+ */
+static unsigned int quic_default_idle_timeout_ms __read_mostly = 30000;
+static unsigned int quic_default_handshake_timeout_ms __read_mostly = 10000;
+static unsigned int quic_default_max_data __read_mostly = 1048576;		/* 1 MB */
+static unsigned int quic_default_max_stream_data __read_mostly = 65536;		/* 64 KB */
+static unsigned int quic_default_max_streams __read_mostly = 100;
+static unsigned int quic_default_initial_rtt_ms __read_mostly = 333;
+
+module_param(quic_default_idle_timeout_ms, uint, 0644);
+MODULE_PARM_DESC(quic_default_idle_timeout_ms, "Default idle timeout in milliseconds");
+module_param(quic_default_handshake_timeout_ms, uint, 0644);
+MODULE_PARM_DESC(quic_default_handshake_timeout_ms, "Default handshake timeout in milliseconds");
+module_param(quic_default_max_data, uint, 0644);
+MODULE_PARM_DESC(quic_default_max_data, "Default initial max data limit");
+module_param(quic_default_max_stream_data, uint, 0644);
+MODULE_PARM_DESC(quic_default_max_stream_data, "Default initial max stream data limit");
+module_param(quic_default_max_streams, uint, 0644);
+MODULE_PARM_DESC(quic_default_max_streams, "Default initial max streams");
+module_param(quic_default_initial_rtt_ms, uint, 0644);
+MODULE_PARM_DESC(quic_default_initial_rtt_ms, "Default initial RTT estimate in milliseconds");
+
 static atomic_long_t quic_memory_allocated;
 static struct percpu_counter quic_sockets_allocated;
 static struct percpu_counter quic_orphan_count;
@@ -268,19 +292,19 @@ int quic_init_sock(struct sock *sk)
 	qsk->conn = NULL;
 	qsk->udp_sock = NULL;
 
-	/* Initialize default configuration */
+	/* Initialize default configuration from module parameters */
 	qsk->config.version = QUIC_VERSION_1;
-	qsk->config.max_idle_timeout_ms = 30000;
-	qsk->config.handshake_timeout_ms = 10000;
-	qsk->config.initial_max_data = 1048576;
-	qsk->config.initial_max_stream_data_bidi_local = 65536;
-	qsk->config.initial_max_stream_data_bidi_remote = 65536;
-	qsk->config.initial_max_stream_data_uni = 65536;
-	qsk->config.initial_max_streams_bidi = 100;
-	qsk->config.initial_max_streams_uni = 100;
+	qsk->config.max_idle_timeout_ms = quic_default_idle_timeout_ms;
+	qsk->config.handshake_timeout_ms = quic_default_handshake_timeout_ms;
+	qsk->config.initial_max_data = quic_default_max_data;
+	qsk->config.initial_max_stream_data_bidi_local = quic_default_max_stream_data;
+	qsk->config.initial_max_stream_data_bidi_remote = quic_default_max_stream_data;
+	qsk->config.initial_max_stream_data_uni = quic_default_max_stream_data;
+	qsk->config.initial_max_streams_bidi = quic_default_max_streams;
+	qsk->config.initial_max_streams_uni = quic_default_max_streams;
 	qsk->config.ack_delay_exponent = 3;
 	qsk->config.max_ack_delay_ms = 25;
-	qsk->config.initial_rtt_ms = 333;
+	qsk->config.initial_rtt_ms = quic_default_initial_rtt_ms;
 	qsk->config.max_connection_ids = 8;
 
 	qsk->alpn = NULL;

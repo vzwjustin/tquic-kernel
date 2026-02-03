@@ -39,6 +39,12 @@ struct net;
 #define TQUIC_MAX_PATHS		8
 
 /*
+ * Invalid path ID sentinel value
+ * Used to indicate no path is selected or path ID is uninitialized
+ */
+#define TQUIC_INVALID_PATH_ID	0xFF
+
+/*
  * Path states
  */
 enum tquic_path_state {

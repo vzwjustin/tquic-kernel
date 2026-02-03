@@ -113,8 +113,9 @@ int tquic_fc_init(struct tquic_connection *conn, struct tquic_fc_config *config)
 	/* Zero out statistics */
 	memset(&fc->stats, 0, sizeof(fc->stats));
 
-	/* Store in connection structure - assume there's a flow_control field */
-	/* For now, we'll use a temporary approach */
+	/* Store in connection structure */
+	conn->fc = fc;
+
 	pr_debug("tquic_fc: initialized flow control state for connection\n");
 
 	return 0;
@@ -129,7 +130,14 @@ EXPORT_SYMBOL_GPL(tquic_fc_init);
  */
 void tquic_fc_cleanup(struct tquic_connection *conn)
 {
-	/* Flow control state would be freed here */
+	if (!conn)
+		return;
+
+	if (conn->fc) {
+		kfree(conn->fc);
+		conn->fc = NULL;
+	}
+
 	pr_debug("tquic_fc: cleaned up flow control state\n");
 }
 EXPORT_SYMBOL_GPL(tquic_fc_cleanup);

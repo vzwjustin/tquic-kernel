@@ -316,8 +316,13 @@ struct tquic_bonding_ctx *tquic_bonding_init(struct tquic_path_manager *pm,
 	/* Initialize failover context */
 	bc->failover = tquic_failover_init(bc, tquic_bond_wq, gfp);
 	if (!bc->failover) {
-		pr_warn("failover context allocation failed, degraded operation\n");
-		/* Continue without failover - degraded operation */
+		pr_warn("failover context allocation failed, bonding degraded\n");
+		bc->flags |= TQUIC_BOND_F_FAILOVER_DISABLED;
+		/*
+		 * Continue without failover - path failures will not be
+		 * seamlessly handled. Log what functionality is disabled.
+		 */
+		pr_notice("bonding: seamless failover retransmission disabled\n");
 	}
 
 	/* Initialize weight work */
@@ -415,10 +420,12 @@ void tquic_bonding_update_state(struct tquic_bonding_ctx *bc)
 			ret = tquic_bonding_alloc_reorder(bc);
 			if (ret && new_state == TQUIC_BOND_ACTIVE) {
 				/*
-				 * Can't allocate buffer, stay in current state.
-				 * Log warning but don't fail - degraded operation.
+				 * Can't allocate buffer. Mark state and allow
+				 * degraded operation without packet reordering.
 				 */
-				pr_warn("reorder buffer alloc failed, degraded bonding\n");
+				pr_warn("reorder buffer alloc failed (%d), bonding without reorder\n", ret);
+				bc->flags |= TQUIC_BOND_F_REORDER_DISABLED;
+				pr_notice("bonding: packet reordering disabled, may see out-of-order delivery\n");
 			}
 		}
 

@@ -14,6 +14,44 @@
 static struct kmem_cache *quic_stream_cache __read_mostly;
 static struct kmem_cache *quic_recv_chunk_cache __read_mostly;
 
+/*
+ * Chunk size thresholds for allocation strategy:
+ * - Small chunks (<=1024): use dedicated kmem_cache for efficiency
+ * - Large chunks (>1024): use kmalloc for variable-size support
+ * - Maximum chunk size based on QUIC max packet size
+ */
+#define QUIC_CHUNK_SMALL_MAX	1024
+#define QUIC_CHUNK_SIZE_MAX	65536
+
+static inline struct quic_recv_chunk *quic_recv_chunk_alloc(u32 len, gfp_t gfp)
+{
+	struct quic_recv_chunk *chunk;
+	size_t alloc_size;
+
+	if (len > QUIC_CHUNK_SIZE_MAX)
+		return NULL;
+
+	alloc_size = sizeof(*chunk) + len;
+
+	if (len <= QUIC_CHUNK_SMALL_MAX) {
+		/* Use cache for small chunks (common case) */
+		chunk = kmem_cache_alloc(quic_recv_chunk_cache, gfp);
+	} else {
+		/* Use kmalloc for large chunks */
+		chunk = kmalloc(alloc_size, gfp);
+	}
+
+	return chunk;
+}
+
+static inline void quic_recv_chunk_free(struct quic_recv_chunk *chunk)
+{
+	if (chunk->len <= QUIC_CHUNK_SMALL_MAX)
+		quic_recv_chunk_free(chunk);
+	else
+		kfree(chunk);
+}
+
 static struct quic_stream *quic_stream_alloc(void)
 {
 	struct quic_stream *stream;
@@ -65,7 +103,7 @@ static void quic_stream_recv_buf_destroy(struct quic_stream_recv_buf *recv)
 		chunk = rb_entry(node, struct quic_recv_chunk, node);
 		node = rb_next(node);
 		rb_erase(&chunk->node, &recv->data_tree);
-		kmem_cache_free(quic_recv_chunk_cache, chunk);
+		quic_recv_chunk_free(chunk);
 	}
 	spin_unlock(&recv->lock);
 }
@@ -350,15 +388,14 @@ static int quic_stream_recv_data_insert(struct quic_stream_recv_buf *recv,
 	struct quic_recv_chunk *chunk, *existing;
 	struct rb_node **link, *parent = NULL;
 
-	/* Allocate chunk */
-	chunk = kmem_cache_alloc(quic_recv_chunk_cache, GFP_ATOMIC);
+	/* Allocate variable-size chunk to hold the full data */
+	chunk = quic_recv_chunk_alloc(len, GFP_ATOMIC);
 	if (!chunk)
 		return -ENOMEM;
 
-	/* Note: For real implementation, need variable-size allocation */
 	chunk->offset = offset;
-	chunk->len = min_t(u32, len, 1024);
-	memcpy(chunk->data, data, chunk->len);
+	chunk->len = len;
+	memcpy(chunk->data, data, len);
 
 	spin_lock(&recv->lock);
 
@@ -375,7 +412,7 @@ static int quic_stream_recv_data_insert(struct quic_stream_recv_buf *recv,
 		} else {
 			/* Duplicate data at same offset - skip */
 			spin_unlock(&recv->lock);
-			kmem_cache_free(quic_recv_chunk_cache, chunk);
+			quic_recv_chunk_free(chunk);
 			return 0;
 		}
 	}
@@ -453,7 +490,7 @@ int quic_stream_recv(struct quic_stream *stream, struct msghdr *msg, size_t len)
 			/* Already read this chunk, remove it */
 			node = rb_next(node);
 			rb_erase(&chunk->node, &recv->data_tree);
-			kmem_cache_free(quic_recv_chunk_cache, chunk);
+			quic_recv_chunk_free(chunk);
 			continue;
 		}
 
@@ -477,7 +514,7 @@ int quic_stream_recv(struct quic_stream *stream, struct msghdr *msg, size_t len)
 		if (skip + to_copy >= chunk->len) {
 			node = rb_next(node);
 			rb_erase(&chunk->node, &recv->data_tree);
-			kmem_cache_free(quic_recv_chunk_cache, chunk);
+			quic_recv_chunk_free(chunk);
 		} else {
 			node = rb_next(node);
 		}
