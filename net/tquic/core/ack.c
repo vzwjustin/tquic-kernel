@@ -139,131 +139,12 @@ struct tquic_ack_range {
 	struct list_head list;
 };
 
-/**
- * struct tquic_ecn_counts - ECN counters
- * @ect0: ECT(0) counter
- * @ect1: ECT(1) counter
- * @ce: ECN-CE counter
+/*
+ * The following structs are defined in ack.h:
+ *   - struct tquic_ecn_counts
+ *   - struct tquic_rtt_state
+ *   - struct tquic_loss_state
  */
-struct tquic_ecn_counts {
-	u64 ect0;
-	u64 ect1;
-	u64 ce;
-};
-
-/**
- * struct tquic_rtt_state - RTT measurement state
- * @latest_rtt: Most recent RTT sample
- * @smoothed_rtt: Exponentially weighted moving average
- * @rtt_var: RTT variance (mean deviation)
- * @min_rtt: Minimum RTT observed
- * @max_ack_delay: Maximum ACK delay from peer
- * @first_rtt_sample: Time of first RTT sample
- * @samples: Number of RTT samples collected
- */
-struct tquic_rtt_state {
-	u64 latest_rtt;
-	u64 smoothed_rtt;
-	u64 rtt_var;
-	u64 min_rtt;
-	u64 max_ack_delay;
-	ktime_t first_rtt_sample;
-	u32 samples;
-};
-
-/**
- * struct tquic_loss_state - Per-path loss detection state
- * @path: Associated path
- * @rtt: RTT measurement state
- *
- * @loss_time: Time at which next packet is considered lost (per space)
- * @time_of_last_ack_eliciting_packet: Time of last ACK-eliciting send (per space)
- *
- * @largest_acked_packet: Largest acked packet number (per space)
- * @loss_detection_timer: Loss detection timer
- *
- * @pto_count: Consecutive PTO count for exponential backoff
- * @congestion_recovery_start_time: Start of current recovery period
- * @bytes_in_flight: Bytes currently in flight
- * @packets_in_flight: Packets currently in flight
- *
- * @ecn_sent: ECN counts for sent packets
- * @ecn_acked: ECN counts from ACK frames
- * @ecn_validated: Whether ECN is validated for this path
- *
- * @sent_packets: RB-tree of sent packets (per space)
- * @sent_packets_list: Time-ordered list of sent packets (per space)
- * @num_sent_packets: Count of tracked sent packets (per space)
- *
- * @received_packets: Bitmap/ranges of received packets for ACK generation
- * @ack_ranges: List of ACK ranges for outgoing ACK frames
- * @num_ack_ranges: Number of ACK ranges
- * @largest_received: Largest received packet number (per space)
- * @largest_received_time: Time largest packet was received
- * @ack_delay: Delay before sending ACK
- * @ack_eliciting_in_flight: ACK-eliciting packets in flight (per space)
- *
- * @persistent_congestion_start: Start time for persistent congestion detection
- * @in_persistent_congestion: Currently in persistent congestion
- *
- * @lock: Spinlock for synchronization
- */
-struct tquic_loss_state {
-	struct tquic_path *path;
-
-	/* RTT estimation */
-	struct tquic_rtt_state rtt;
-
-	/* Loss detection state per packet number space */
-	ktime_t loss_time[TQUIC_PN_SPACE_COUNT];
-	ktime_t time_of_last_ack_eliciting_packet[TQUIC_PN_SPACE_COUNT];
-
-	/* Largest acknowledged packet per space */
-	u64 largest_acked_packet[TQUIC_PN_SPACE_COUNT];
-
-	/* Timer */
-	struct timer_list loss_detection_timer;
-
-	/* PTO state */
-	u32 pto_count;
-	ktime_t congestion_recovery_start_time;
-
-	/* In-flight tracking */
-	u64 bytes_in_flight;
-	u32 packets_in_flight;
-
-	/* ECN state */
-	struct tquic_ecn_counts ecn_sent;
-	struct tquic_ecn_counts ecn_acked;
-	bool ecn_validated;
-	bool ecn_capable;
-
-	/* Sent packet tracking per packet number space */
-	struct rb_root sent_packets[TQUIC_PN_SPACE_COUNT];
-	struct list_head sent_packets_list[TQUIC_PN_SPACE_COUNT];
-	u32 num_sent_packets[TQUIC_PN_SPACE_COUNT];
-
-	/* Received packet tracking for ACK generation */
-	struct list_head ack_ranges[TQUIC_PN_SPACE_COUNT];
-	u32 num_ack_ranges[TQUIC_PN_SPACE_COUNT];
-	u64 largest_received[TQUIC_PN_SPACE_COUNT];
-	ktime_t largest_received_time[TQUIC_PN_SPACE_COUNT];
-	u32 ack_delay_us;
-	u32 ack_eliciting_in_flight[TQUIC_PN_SPACE_COUNT];
-
-	/* Persistent congestion */
-	ktime_t persistent_congestion_start;
-	bool in_persistent_congestion;
-
-	/*
-	 * ACK Frequency extension state (draft-ietf-quic-ack-frequency)
-	 * When non-NULL, contains negotiated ACK frequency parameters
-	 * that override default ACK timing behavior.
-	 */
-	struct tquic_ack_frequency_state *ack_freq;
-
-	spinlock_t lock;
-};
 
 /* Memory cache for sent packets */
 static struct kmem_cache *tquic_sent_packet_cache;
@@ -1097,28 +978,7 @@ EXPORT_SYMBOL_GPL(tquic_generate_ack_1wd_frame);
  * =============================================================================
  */
 
-/**
- * struct tquic_ack_frame - Parsed ACK frame
- * @largest_acked: Largest acknowledged packet number
- * @ack_delay: ACK delay in microseconds
- * @first_range: Size of first ACK range
- * @ranges: Array of additional ACK ranges (gap, length pairs)
- * @range_count: Number of additional ranges
- * @ecn: ECN counts (if present)
- * @has_ecn: Whether ECN counts are present
- */
-struct tquic_ack_frame {
-	u64 largest_acked;
-	u64 ack_delay;
-	u64 first_range;
-	struct {
-		u64 gap;
-		u64 length;
-	} ranges[TQUIC_MAX_ACK_RANGES];
-	u32 range_count;
-	struct tquic_ecn_counts ecn;
-	bool has_ecn;
-};
+/* struct tquic_ack_frame is defined in ack.h */
 
 /**
  * tquic_parse_ack_frame - Parse an ACK frame from wire format
