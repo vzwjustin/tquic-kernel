@@ -760,6 +760,7 @@ struct tquic_connection {
 
 	/* Stream management */
 	struct rb_root streams;
+	spinlock_t streams_lock;	/* Protects stream tree */
 	u64 next_stream_id_bidi;
 	u64 next_stream_id_uni;
 	u64 max_streams_bidi;
@@ -789,6 +790,7 @@ struct tquic_connection {
 	/* Timers - managed via timer_state for unified timer/recovery handling */
 	u32 idle_timeout;
 	struct tquic_timer_state *timer_state;
+	struct timer_list timers[TQUIC_TIMER_MAX];	/* Per-type timers */
 
 	/* Crypto */
 	void *crypto_state;
@@ -1002,9 +1004,19 @@ struct tquic_connection {
 	struct sk_buff_head control_frames;
 
 	/*
-	 * Transmit work for deferred frame transmission
+	 * Frame queues for various purposes
+	 */
+	struct sk_buff_head pending_frames;	/* Frames pending transmission */
+	struct sk_buff_head pacing_queue;	/* Pacing-delayed frames */
+	struct sk_buff_head early_data_buffer;	/* 0-RTT early data buffer */
+	struct sk_buff_head crypto_buffer[TQUIC_PN_SPACE_COUNT];	/* Per-space crypto buffers */
+
+	/*
+	 * Work structs for deferred processing
 	 */
 	struct work_struct tx_work;
+	struct work_struct rx_work;		/* Receive processing */
+	struct work_struct close_work;		/* Connection close processing */
 
 	/*
 	 * Reliable Stream Reset (draft-ietf-quic-reliable-stream-reset-07)
@@ -1143,6 +1155,7 @@ struct tquic_bond_state {
 struct tquic_sock {
 	struct inet_connection_sock inet;
 	struct tquic_connection *conn;
+	struct socket *udp_sock;	/* UDP encapsulation socket */
 
 	struct sockaddr_storage bind_addr;
 	struct sockaddr_storage connect_addr;
@@ -1641,6 +1654,7 @@ void tquic_conn_state_cleanup(struct tquic_connection *conn);
 /* Stream management */
 struct tquic_stream *tquic_stream_open(struct tquic_connection *conn, bool bidi);
 void tquic_stream_close(struct tquic_stream *stream);
+void tquic_stream_destroy(struct tquic_stream *stream);
 int tquic_stream_send(struct tquic_stream *stream, const void *data, size_t len, bool fin);
 int tquic_stream_recv(struct tquic_stream *stream, void *data, size_t len);
 void tquic_stream_reset(struct tquic_stream *stream, u64 error_code);
@@ -1814,6 +1828,7 @@ struct tquic_gro_state;
 int tquic_udp_recv(struct sock *sk, struct sk_buff *skb);
 int tquic_setup_udp_encap(struct sock *sk);
 void tquic_clear_udp_encap(struct sock *sk);
+int tquic_udp_encap_init(struct tquic_sock *tsk);	/* Initialize UDP encap for sock */
 int tquic_process_coalesced(struct tquic_connection *conn,
 			    struct tquic_path *path,
 			    u8 *data, size_t total_len,
@@ -1843,6 +1858,9 @@ struct tquic_crypto_state *tquic_crypto_init_versioned(const struct tquic_cid *d
 struct tquic_crypto_state *tquic_crypto_init(const struct tquic_cid *dcid,
 					     bool is_server);
 void tquic_crypto_cleanup(struct tquic_crypto_state *crypto);
+void tquic_crypto_destroy(void *crypto);		/* Destroy per-level crypto */
+int tquic_crypto_derive_initial_secrets(struct tquic_connection *conn,
+					const struct tquic_cid *dcid);
 
 /* Version management for crypto state */
 u32 tquic_crypto_get_version(struct tquic_crypto_state *crypto);
