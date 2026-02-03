@@ -563,14 +563,16 @@ EXPORT_SYMBOL_GPL(tquic_parse_immediate_ack_frame);
  */
 
 /**
- * tquic_handle_ack_frequency_frame - Process received ACK_FREQUENCY frame
+ * tquic_conn_handle_ack_frequency_frame - Process received ACK_FREQUENCY frame
  * @conn: Connection
  * @frame: Parsed frame
  *
+ * Connection-level wrapper that delegates to core state-level function.
+ *
  * Return: 0 on success, negative error code on failure
  */
-int tquic_handle_ack_frequency_frame(struct tquic_connection *conn,
-				     const struct tquic_ack_frequency_frame *frame)
+int tquic_conn_handle_ack_frequency_frame(struct tquic_connection *conn,
+					  const struct tquic_ack_frequency_frame *frame)
 {
 	struct tquic_ack_frequency_state *state;
 
@@ -585,7 +587,7 @@ int tquic_handle_ack_frequency_frame(struct tquic_connection *conn,
 
 	state = conn_get_ack_freq_state(conn);
 	if (state) {
-		/* Use core implementation */
+		/* Use core state-level implementation */
 		int ret = tquic_handle_ack_frequency_frame(state, frame);
 		if (ret < 0)
 			return ret;
@@ -600,15 +602,17 @@ int tquic_handle_ack_frequency_frame(struct tquic_connection *conn,
 
 	return 0;
 }
-EXPORT_SYMBOL_GPL(tquic_handle_ack_frequency_frame);
+EXPORT_SYMBOL_GPL(tquic_conn_handle_ack_frequency_frame);
 
 /**
- * tquic_handle_immediate_ack_frame - Process received IMMEDIATE_ACK frame
+ * tquic_conn_handle_immediate_ack_frame - Process received IMMEDIATE_ACK frame
  * @conn: Connection
+ *
+ * Connection-level wrapper that delegates to core state-level function.
  *
  * Return: 0 on success, negative error code on failure
  */
-int tquic_handle_immediate_ack_frame(struct tquic_connection *conn)
+int tquic_conn_handle_immediate_ack_frame(struct tquic_connection *conn)
 {
 	struct tquic_ack_frequency_state *state;
 
@@ -617,7 +621,7 @@ int tquic_handle_immediate_ack_frame(struct tquic_connection *conn)
 
 	state = conn_get_ack_freq_state(conn);
 	if (state) {
-		/* Use core implementation */
+		/* Use core state-level implementation */
 		return tquic_handle_immediate_ack_frame(state);
 	}
 
@@ -626,7 +630,7 @@ int tquic_handle_immediate_ack_frame(struct tquic_connection *conn)
 
 	return 0;
 }
-EXPORT_SYMBOL_GPL(tquic_handle_immediate_ack_frame);
+EXPORT_SYMBOL_GPL(tquic_conn_handle_immediate_ack_frame);
 
 /*
  * =============================================================================
@@ -672,10 +676,12 @@ bool tquic_ack_freq_on_packet_received(struct tquic_connection *conn,
 EXPORT_SYMBOL_GPL(tquic_ack_freq_on_packet_received);
 
 /**
- * tquic_ack_freq_on_ack_sent - Notify ACK frequency that ACK was sent
+ * tquic_ack_freq_conn_on_ack_sent - Notify ACK frequency that ACK was sent
  * @conn: Connection
+ *
+ * Connection-level wrapper that delegates to core state-level function.
  */
-void tquic_ack_freq_on_ack_sent(struct tquic_connection *conn)
+void tquic_ack_freq_conn_on_ack_sent(struct tquic_connection *conn)
 {
 	struct tquic_ack_frequency_state *state;
 
@@ -684,11 +690,11 @@ void tquic_ack_freq_on_ack_sent(struct tquic_connection *conn)
 
 	state = conn_get_ack_freq_state(conn);
 	if (state) {
-		/* Use core implementation */
+		/* Use core state-level implementation */
 		tquic_ack_freq_on_ack_sent(state);
 	}
 }
-EXPORT_SYMBOL_GPL(tquic_ack_freq_on_ack_sent);
+EXPORT_SYMBOL_GPL(tquic_ack_freq_conn_on_ack_sent);
 
 /**
  * tquic_ack_freq_should_ack_immediately - Check if immediate ACK needed
@@ -796,28 +802,29 @@ out:
 EXPORT_SYMBOL_GPL(tquic_ack_freq_should_ack);
 
 /**
- * tquic_ack_freq_get_max_delay - Get current max ACK delay
+ * tquic_ack_freq_conn_get_max_delay - Get current max ACK delay
  * @conn: Connection
+ *
+ * Connection-level wrapper that delegates to core state-level function.
  *
  * Return: Maximum ACK delay in microseconds
  */
-u64 tquic_ack_freq_get_max_delay(struct tquic_connection *conn)
+u64 tquic_ack_freq_conn_get_max_delay(struct tquic_connection *conn)
 {
 	struct tquic_ack_frequency_state *state;
-	u64 delay;
 
 	if (!conn)
 		return TQUIC_DEFAULT_MAX_ACK_DELAY_US;
 
 	state = conn_get_ack_freq_state(conn);
 	if (state) {
-		/* Use core implementation */
+		/* Use core state-level implementation */
 		return tquic_ack_freq_get_max_delay(state);
 	}
 
 	return tquic_sysctl_get_default_ack_delay_us();
 }
-EXPORT_SYMBOL_GPL(tquic_ack_freq_get_max_delay);
+EXPORT_SYMBOL_GPL(tquic_ack_freq_conn_get_max_delay);
 
 /*
  * =============================================================================
@@ -907,25 +914,27 @@ EXPORT_SYMBOL_GPL(tquic_ack_freq_decode_tp);
  */
 
 /**
- * tquic_ack_freq_request_update - Request peer update ACK behavior
+ * tquic_ack_freq_conn_request_update - Request peer update ACK behavior
  * @conn: Connection
  * @ack_elicit_threshold: Desired ack-eliciting threshold
  * @max_ack_delay_us: Desired max ACK delay (microseconds)
  * @reorder_threshold: Desired reorder threshold
  *
+ * Connection-level wrapper that delegates to core state-level function.
+ *
  * Return: 0 on success, negative error code on failure
  */
-int tquic_ack_freq_request_update(struct tquic_connection *conn,
-				  u64 ack_elicit_threshold,
-				  u64 max_ack_delay_us,
-				  u64 reorder_threshold)
+int tquic_ack_freq_conn_request_update(struct tquic_connection *conn,
+				       u64 ack_elicit_threshold,
+				       u64 max_ack_delay_us,
+				       u64 reorder_threshold)
 {
 	struct tquic_ack_frequency_state *state;
 
 	if (!conn)
 		return -EINVAL;
 
-	if (!tquic_ack_freq_is_enabled(conn))
+	if (!tquic_ack_freq_conn_is_enabled(conn))
 		return -EOPNOTSUPP;
 
 	/* Validate parameters */
@@ -934,7 +943,7 @@ int tquic_ack_freq_request_update(struct tquic_connection *conn,
 
 	state = conn_get_ack_freq_state(conn);
 	if (state) {
-		/* Use core implementation */
+		/* Use core state-level implementation */
 		return tquic_ack_freq_request_update(state, ack_elicit_threshold,
 						     max_ack_delay_us,
 						     reorder_threshold);
@@ -946,15 +955,17 @@ int tquic_ack_freq_request_update(struct tquic_connection *conn,
 
 	return 0;
 }
-EXPORT_SYMBOL_GPL(tquic_ack_freq_request_update);
+EXPORT_SYMBOL_GPL(tquic_ack_freq_conn_request_update);
 
 /**
- * tquic_ack_freq_request_immediate_ack - Request immediate ACK from peer
+ * tquic_ack_freq_conn_request_immediate_ack - Request immediate ACK from peer
  * @conn: Connection
+ *
+ * Connection-level wrapper.
  *
  * Return: 0 on success, negative error code on failure
  */
-int tquic_ack_freq_request_immediate_ack(struct tquic_connection *conn)
+int tquic_ack_freq_conn_request_immediate_ack(struct tquic_connection *conn)
 {
 	struct tquic_ack_frequency_state *state;
 
@@ -975,7 +986,7 @@ int tquic_ack_freq_request_immediate_ack(struct tquic_connection *conn)
 
 	return 0;
 }
-EXPORT_SYMBOL_GPL(tquic_ack_freq_request_immediate_ack);
+EXPORT_SYMBOL_GPL(tquic_ack_freq_conn_request_immediate_ack);
 
 /**
  * tquic_ack_freq_has_pending_frames - Check for pending ACK frequency frames
