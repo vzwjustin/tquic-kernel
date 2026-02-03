@@ -31,6 +31,7 @@
 #include "tquic_bonding.h"
 #include "tquic_failover.h"
 #include "tquic_reorder.h"
+#include "tquic_sched.h"
 #include "cong_coupled.h"
 
 /*
@@ -852,7 +853,8 @@ EXPORT_SYMBOL_GPL(tquic_bonding_on_path_removed);
  * Schedulers implementing ack_received can use this for feedback-driven
  * path selection (e.g., RTT updates, capacity estimation).
  */
-void tquic_bonding_on_ack_received(struct tquic_bonding_ctx *bc,
+void tquic_bonding_on_ack_received(struct tquic_connection *conn,
+				   struct tquic_bonding_ctx *bc,
 				   struct tquic_path *path,
 				   u64 acked_bytes)
 {
@@ -872,15 +874,9 @@ void tquic_bonding_on_ack_received(struct tquic_bonding_ctx *bc,
 	 */
 	tquic_bonding_schedule_weight_update(bc);
 
-	/*
-	 * Note: The scheduler notification (tquic_new_sched_notify_ack) would
-	 * be called here if we had access to a tquic_connection that matches
-	 * the new-style scheduler API. Currently the bonding layer operates
-	 * with the path manager, not the connection-level scheduler.
-	 *
-	 * The connection-level integration will wire this up when the
-	 * tquic_connection from tquic_sched.h is used with bonding.
-	 */
+	/* Notify scheduler of ACK for feedback-driven path selection */
+	if (conn)
+		tquic_new_sched_notify_ack(conn, path, acked_bytes);
 }
 EXPORT_SYMBOL_GPL(tquic_bonding_on_ack_received);
 
@@ -891,7 +887,8 @@ EXPORT_SYMBOL_GPL(tquic_bonding_on_ack_received);
  * Schedulers implementing loss_detected can use this to avoid sending
  * on paths with high loss rates.
  */
-void tquic_bonding_on_loss_detected(struct tquic_bonding_ctx *bc,
+void tquic_bonding_on_loss_detected(struct tquic_connection *conn,
+				    struct tquic_bonding_ctx *bc,
 				    struct tquic_path *path,
 				    u64 lost_bytes)
 {
@@ -912,15 +909,9 @@ void tquic_bonding_on_loss_detected(struct tquic_bonding_ctx *bc,
 	 */
 	tquic_bonding_derive_weights(bc);
 
-	/*
-	 * Note: The scheduler notification (tquic_new_sched_notify_loss) would
-	 * be called here if we had access to a tquic_connection that matches
-	 * the new-style scheduler API. Currently the bonding layer operates
-	 * with the path manager, not the connection-level scheduler.
-	 *
-	 * The connection-level integration will wire this up when the
-	 * tquic_connection from tquic_sched.h is used with bonding.
-	 */
+	/* Notify scheduler of loss for feedback-driven path selection */
+	if (conn)
+		tquic_new_sched_notify_loss(conn, path, lost_bytes);
 }
 EXPORT_SYMBOL_GPL(tquic_bonding_on_loss_detected);
 

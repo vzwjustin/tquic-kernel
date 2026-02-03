@@ -28,6 +28,8 @@
 #include <linux/in.h>
 #include <linux/in6.h>
 
+#include "tquic_sched.h"
+
 /*
  * TQUIC Netlink Family Definitions
  */
@@ -1014,18 +1016,15 @@ static int tquic_nl_cmd_sched_set(struct sk_buff *skb, struct genl_info *info)
 		return -ENOENT;
 	}
 
-	/* Validate scheduler name - in real implementation would look up
-	 * registered schedulers
-	 */
-	if (strcmp(sched_name, "default") != 0 &&
-	    strcmp(sched_name, "roundrobin") != 0 &&
-	    strcmp(sched_name, "redundant") != 0 &&
-	    strcmp(sched_name, "lowrtt") != 0 &&
-	    strcmp(sched_name, "weighted") != 0) {
+	/* Validate scheduler name using registered scheduler registry */
+	rcu_read_lock();
+	if (!tquic_new_sched_find(sched_name)) {
+		rcu_read_unlock();
 		tquic_conn_put(conn);
 		NL_SET_ERR_MSG(info->extack, "Unknown scheduler");
 		return -EINVAL;
 	}
+	rcu_read_unlock();
 
 	spin_lock_bh(&conn->lock);
 	strscpy(conn->scheduler, sched_name, sizeof(conn->scheduler));

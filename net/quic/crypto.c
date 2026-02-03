@@ -97,19 +97,6 @@ static const u8 quic_v2_initial_salt[20] = {
  * For PSK-only (0-RTT):
  *   WAIT_EE -> [recv EncryptedExtensions] -> WAIT_FINISHED (no cert)
  */
-enum quic_tls_state {
-	QUIC_TLS_STATE_INITIAL = 0,	/* Initial secrets only, no TLS msgs */
-	QUIC_TLS_STATE_START,		/* Ready to begin handshake */
-	QUIC_TLS_STATE_WAIT_SH,		/* Client: waiting for ServerHello */
-	QUIC_TLS_STATE_WAIT_EE,		/* Client: waiting for EncryptedExtensions */
-	QUIC_TLS_STATE_WAIT_CERT_CR,	/* Client: waiting for Cert or CertReq */
-	QUIC_TLS_STATE_WAIT_CERT,	/* Client: waiting for Certificate */
-	QUIC_TLS_STATE_WAIT_CV,		/* Client: waiting for CertificateVerify */
-	QUIC_TLS_STATE_WAIT_FINISHED,	/* Waiting for peer Finished */
-	QUIC_TLS_STATE_CONNECTED,	/* 1-RTT established */
-	QUIC_TLS_STATE_ERROR,		/* TLS alert received */
-};
-
 /* TLS state names for debugging */
 static const char * const quic_tls_state_names[] = {
 	[QUIC_TLS_STATE_INITIAL]	= "INITIAL",
@@ -125,34 +112,15 @@ static const char * const quic_tls_state_names[] = {
 };
 
 /*
- * TLS handshake context for state machine validation
- */
-struct quic_tls_ctx {
-	enum quic_tls_state	state;
-	u8			is_server:1;
-	u8			cert_request_sent:1;
-	u8			using_psk:1;
-	u8			early_data_accepted:1;
-	u8			handshake_complete:1;
-	u8			alert_received:1;
-	u8			alert_sent:1;
-	u8			alert_code;
-	u64			crypto_offset[QUIC_CRYPTO_MAX];
-};
-
-/* Static TLS context - in production, embed in quic_connection */
-static DEFINE_PER_CPU(struct quic_tls_ctx, quic_tls_contexts);
-
-/*
  * quic_tls_ctx_get - Get TLS context for connection
  * @conn: QUIC connection
  *
  * Returns the TLS context for state machine validation.
- * NOTE: In production, this should be embedded in quic_connection struct.
+ * TLS context is now embedded in the quic_connection struct.
  */
 static struct quic_tls_ctx *quic_tls_ctx_get(struct quic_connection *conn)
 {
-	return this_cpu_ptr(&quic_tls_contexts);
+	return &conn->tls;
 }
 
 /*
@@ -1515,7 +1483,9 @@ int quic_tls_parse_sni_extension(const u8 *data, size_t data_len,
 	if (!data || !hostname || !hostname_len || data_len < 5)
 		return -EINVAL;
 
-	/* Server Name List Length */
+	/* Server Name List Length - validate bounds before 16-bit read */
+	if (offset + 2 > data_len)
+		return -EINVAL;
 	name_list_len = (data[offset] << 8) | data[offset + 1];
 	offset += 2;
 
@@ -1532,6 +1502,9 @@ int quic_tls_parse_sni_extension(const u8 *data, size_t data_len,
 		return -EINVAL;
 	}
 
+	/* Name Length - validate bounds before 16-bit read */
+	if (offset + 2 > data_len)
+		return -EINVAL;
 	name_len = (data[offset] << 8) | data[offset + 1];
 	offset += 2;
 

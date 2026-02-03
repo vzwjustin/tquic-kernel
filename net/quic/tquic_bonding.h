@@ -22,6 +22,7 @@
 /* Forward declarations */
 struct tquic_path;
 struct tquic_path_manager;
+struct tquic_connection;      /* Defined in tquic_sched.h for scheduler API */
 struct tquic_reorder_buffer;  /* Defined in tquic_bonding.c, implemented in 05-02 */
 struct tquic_failover_ctx;    /* Defined in tquic_failover.h, implemented in 05-03 */
 
@@ -334,6 +335,7 @@ void tquic_bonding_on_path_removed(void *ctx, struct tquic_path *path);
 
 /**
  * tquic_bonding_on_ack_received - Callback when ACK is received on a path
+ * @conn: Connection receiving the ACK (for scheduler notification, may be NULL)
  * @bc: Bonding context
  * @path: The path that received the ACK
  * @acked_bytes: Number of bytes acknowledged
@@ -342,12 +344,14 @@ void tquic_bonding_on_path_removed(void *ctx, struct tquic_path *path);
  * Forwards the notification to the multipath scheduler for
  * feedback-driven path selection algorithms.
  */
-void tquic_bonding_on_ack_received(struct tquic_bonding_ctx *bc,
+void tquic_bonding_on_ack_received(struct tquic_connection *conn,
+				   struct tquic_bonding_ctx *bc,
 				   struct tquic_path *path,
 				   u64 acked_bytes);
 
 /**
  * tquic_bonding_on_loss_detected - Callback when loss is detected on a path
+ * @conn: Connection detecting loss (for scheduler notification, may be NULL)
  * @bc: Bonding context
  * @path: The path that detected loss
  * @lost_bytes: Number of bytes lost
@@ -356,7 +360,8 @@ void tquic_bonding_on_ack_received(struct tquic_bonding_ctx *bc,
  * Forwards the notification to the multipath scheduler for
  * feedback-driven path selection algorithms.
  */
-void tquic_bonding_on_loss_detected(struct tquic_bonding_ctx *bc,
+void tquic_bonding_on_loss_detected(struct tquic_connection *conn,
+				    struct tquic_bonding_ctx *bc,
 				    struct tquic_path *path,
 				    u64 lost_bytes);
 

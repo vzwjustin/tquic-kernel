@@ -447,6 +447,58 @@ struct quic_stats {
 	atomic64_t	handshake_time_us;
 };
 
+/*
+ * QUIC-TLS State Machine (RFC 9001 Section 4)
+ *
+ * Client states:
+ *   START -> [send ClientHello] -> WAIT_SH
+ *   WAIT_SH -> [recv ServerHello] -> WAIT_EE
+ *   WAIT_EE -> [recv EncryptedExtensions] -> WAIT_CERT_CR
+ *   WAIT_CERT_CR -> [recv CertificateRequest] -> WAIT_CERT
+ *              or -> [recv Certificate] -> WAIT_CV
+ *   WAIT_CERT -> [recv Certificate] -> WAIT_CV
+ *   WAIT_CV -> [recv CertificateVerify] -> WAIT_FINISHED
+ *   WAIT_FINISHED -> [recv Finished, send Finished] -> CONNECTED
+ *
+ * Server states:
+ *   START -> [recv ClientHello] -> RECVD_CH
+ *   RECVD_CH -> [send ServerHello, EncryptedExtensions, ...] -> WAIT_FINISHED
+ *   WAIT_FINISHED -> [recv Finished] -> CONNECTED
+ *
+ * For PSK-only (0-RTT):
+ *   WAIT_EE -> [recv EncryptedExtensions] -> WAIT_FINISHED (no cert)
+ */
+enum quic_tls_state {
+	QUIC_TLS_STATE_INITIAL = 0,	/* Initial secrets only, no TLS msgs */
+	QUIC_TLS_STATE_START,		/* Ready to begin handshake */
+	QUIC_TLS_STATE_WAIT_SH,		/* Client: waiting for ServerHello */
+	QUIC_TLS_STATE_WAIT_EE,		/* Client: waiting for EncryptedExtensions */
+	QUIC_TLS_STATE_WAIT_CERT_CR,	/* Client: waiting for Cert or CertReq */
+	QUIC_TLS_STATE_WAIT_CERT,	/* Client: waiting for Certificate */
+	QUIC_TLS_STATE_WAIT_CV,		/* Client: waiting for CertificateVerify */
+	QUIC_TLS_STATE_WAIT_FINISHED,	/* Waiting for peer Finished */
+	QUIC_TLS_STATE_CONNECTED,	/* 1-RTT established */
+	QUIC_TLS_STATE_ERROR,		/* TLS alert received */
+};
+
+/*
+ * TLS handshake context for state machine validation
+ *
+ * Embedded in quic_connection to track TLS state per connection.
+ */
+struct quic_tls_ctx {
+	enum quic_tls_state	state;
+	u8			is_server:1;
+	u8			cert_request_sent:1;
+	u8			using_psk:1;
+	u8			early_data_accepted:1;
+	u8			handshake_complete:1;
+	u8			alert_received:1;
+	u8			alert_sent:1;
+	u8			alert_code;
+	u64			crypto_offset[QUIC_CRYPTO_MAX];
+};
+
 /* QUIC connection */
 struct quic_connection {
 	struct quic_sock		*qsk;
@@ -470,6 +522,9 @@ struct quic_connection {
 	/* Crypto contexts for each encryption level */
 	struct quic_crypto_ctx		crypto[QUIC_CRYPTO_MAX];
 	u8				crypto_level;
+
+	/* TLS state machine context (RFC 9001) - embedded for per-connection state */
+	struct quic_tls_ctx		tls;
 
 	/* Streams */
 	struct rb_root			streams;

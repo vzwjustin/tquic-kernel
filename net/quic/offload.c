@@ -564,7 +564,23 @@ static int quic_gro_complete(struct sk_buff *skb, int nhoff)
  * software encryption.
  */
 
-/* Check if hardware crypto offload is available */
+/*
+ * quic_crypto_offload_available - Check if hardware crypto offload is available
+ * @dev: Network device to check
+ * @crypto_level: QUIC crypto level (Initial, Handshake, or Application)
+ *
+ * Checks whether the specified network device supports QUIC hardware crypto
+ * offload for the given encryption level. Currently no NICs support QUIC-
+ * specific crypto offload, so this always returns false after basic validation.
+ *
+ * Future implementation should:
+ * 1. Define a NETIF_F_QUIC_CRYPTO capability flag in netdev_features.h
+ * 2. Check: if (!(dev->features & NETIF_F_QUIC_CRYPTO)) return false;
+ * 3. Return true when hardware is verified to support QUIC crypto offload
+ * 4. Consider vendor-specific capability checks for early-adopter NICs
+ *
+ * Returns: true if hardware offload is available, false otherwise
+ */
 static bool quic_crypto_offload_available(struct net_device *dev,
 					  u8 crypto_level)
 {
@@ -572,9 +588,7 @@ static bool quic_crypto_offload_available(struct net_device *dev,
 	if (!dev)
 		return false;
 
-	/* Currently, no hardware supports QUIC crypto offload,
-	 * but this provides the infrastructure for future NICs
-	 */
+	/* Basic hardware checksum capability is a prerequisite */
 	if (!(dev->features & NETIF_F_HW_CSUM))
 		return false;
 
@@ -582,7 +596,12 @@ static bool quic_crypto_offload_available(struct net_device *dev,
 	if (crypto_level != QUIC_CRYPTO_APPLICATION)
 		return false;
 
-	return false;  /* No hardware support yet */
+	/*
+	 * TODO: Enable hardware crypto offload when NICs support it.
+	 * Currently no hardware supports QUIC-specific crypto offload.
+	 * When available, check for NETIF_F_QUIC_CRYPTO feature flag.
+	 */
+	return false;
 }
 
 /* Prepare skb for hardware crypto offload (TX path) */
