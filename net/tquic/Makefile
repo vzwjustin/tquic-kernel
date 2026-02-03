@@ -57,11 +57,8 @@ tquic-y := \
 	cong/persistent_cong.o
 
 # Include remaining files from net/quic consolidation
+# Note: ack_frequency.o, early_data.o, key_update.o, priority.o are in core/
 tquic-y += \
-	ack_frequency.o \
-	early_data.o \
-	key_update.o \
-	priority.o \
 	quic_socket.o \
 	quic_timer.o \
 	quic_stream.o \
@@ -135,6 +132,31 @@ tquic-y += \
 	sched/reorder.o \
 	sched/deadline_scheduler.o \
 	sched/deadline_aware.o
+
+# Multipath extension - always included for out-of-tree builds
+tquic-y += \
+	multipath/mp_frame.o \
+	multipath/mp_ack.o \
+	multipath/mp_deadline.o \
+	multipath/path_abandon.o \
+	multipath/multipath_module.o \
+	multipath/tquic_scheduler.o \
+	multipath/sched_minrtt.o \
+	multipath/sched_aggregate.o \
+	multipath/sched_weighted.o \
+	multipath/sched_blest.o \
+	multipath/sched_ecf.o
+
+# Crypto support - always included for out-of-tree builds
+tquic-y += \
+	crypto/tls.o \
+	crypto/header_protection.o \
+	crypto/key_update.o \
+	crypto/extended_key_update.o \
+	crypto/zero_rtt.o \
+	crypto/handshake.o \
+	crypto/crypto_module.o \
+	crypto/hw_offload.o
 
 # Optional separate modules (if corresponding CONFIG is =m)
 obj-$(CONFIG_TQUIC_WAN_BONDING) += tquic_bond.o
