@@ -8,7 +8,7 @@ TQUIC is a complete, production-ready kernel module implementing the QUIC protoc
 
 **262,564 lines of C code** (34,573 in net/quic + 214,059 in net/tquic + 11,115 headers) implementing the full QUIC/HTTP3 stack with advanced multipath, security, and performance features.
 
-## 🔒 Security Audit Completed (January 2025)
+## 🔒 Security Audit Completed (January 2026)
 
 TQUIC has undergone a comprehensive security audit addressing **68 distinct issues** across the entire codebase:
 
