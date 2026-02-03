@@ -1486,7 +1486,7 @@ void tquic_close(struct sock *sk, long timeout);
 __poll_t tquic_poll(struct file *file, struct socket *sock, poll_table *wait);
 
 /* Connection management */
-struct tquic_connection *tquic_conn_create(struct sock *sk, gfp_t gfp);
+struct tquic_connection *tquic_conn_create(struct tquic_sock *tsk, bool is_server);
 void tquic_conn_destroy(struct tquic_connection *conn);
 int tquic_conn_add_path(struct tquic_connection *conn,
 			struct sockaddr *local, struct sockaddr *remote);
@@ -2211,6 +2211,12 @@ struct sk_buff *tquic_packet_to_skb(struct tquic_packet *pkt, gfp_t gfp);
 /* Packet subsystem initialization */
 int __init tquic_packet_init(void);
 void __exit tquic_packet_exit(void);
+
+/* Packet building and processing */
+struct sk_buff *tquic_packet_build(struct tquic_connection *conn, int pn_space);
+int tquic_packet_process(struct tquic_connection *conn, struct sk_buff *skb);
+int tquic_udp_send(struct tquic_sock *tsk, struct sk_buff *skb,
+		   struct tquic_path *path);
 
 /*
  * Connection ID Management
