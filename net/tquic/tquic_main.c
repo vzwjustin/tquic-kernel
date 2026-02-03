@@ -27,7 +27,15 @@
 #include <net/tquic.h>
 #include <net/tquic_pm.h>
 #include "protocol.h"
+#include "grease.h"
+#include "io_uring.h"
+#include "napi.h"
+#include "tquic_ack_frequency.h"
+#include "tquic_preferred_addr.h"
 #include "tquic_ratelimit.h"
+#include "tquic_retry.h"
+#include "tquic_stateless_reset.h"
+#include "tquic_token.h"
 
 /* Module info */
 MODULE_AUTHOR("Linux Foundation");
@@ -663,6 +671,98 @@ int __init tquic_init(void)
 	if (err)
 		goto err_hashtable;
 
+	/* Initialize global CID table */
+	err = tquic_cid_table_init();
+	if (err)
+		goto err_cid_table;
+
+	/* Initialize timer subsystem */
+	err = tquic_timer_init();
+	if (err)
+		goto err_timer;
+
+	/* Initialize UDP tunnel subsystem */
+	err = tquic_udp_init();
+	if (err)
+		goto err_udp;
+
+	/* Initialize address validation token subsystem */
+	err = tquic_token_init();
+	if (err)
+		goto err_token;
+
+	/* Initialize stateless reset subsystem */
+	err = tquic_stateless_reset_init();
+	if (err)
+		goto err_stateless_reset;
+
+	/* Initialize Retry subsystem */
+	err = tquic_retry_init();
+	if (err)
+		goto err_retry;
+
+	/* Initialize preferred address support */
+	err = tquic_pref_addr_init();
+	if (err)
+		goto err_pref_addr;
+
+	/* Initialize GREASE support */
+	err = tquic_grease_init();
+	if (err)
+		goto err_grease;
+
+	/* Initialize PMTUD subsystem */
+	err = tquic_pmtud_init();
+	if (err)
+		goto err_pmtud;
+
+	/* Initialize QoS subsystem */
+	err = tquic_qos_init();
+	if (err)
+		goto err_qos;
+
+	/* Initialize tunnel subsystem */
+	err = tquic_tunnel_init();
+	if (err)
+		goto err_tunnel;
+
+	/* Initialize forwarding subsystem */
+	err = tquic_forward_init();
+	if (err)
+		goto err_forward;
+
+	/* Initialize security hardening */
+	err = tquic_security_hardening_init();
+	if (err)
+		goto err_security;
+
+	/* Initialize ACK frequency extension */
+	err = tquic_ack_freq_module_init();
+	if (err)
+		goto err_ack_freq;
+
+	/* Initialize persistent congestion tracking */
+	err = tquic_persistent_cong_module_init();
+	if (err)
+		goto err_persistent_cong;
+
+	/* Initialize server subsystem */
+	err = tquic_server_init();
+	if (err)
+		goto err_server;
+
+#if IS_ENABLED(CONFIG_TQUIC_NAPI)
+	/* Initialize NAPI subsystem */
+	err = tquic_napi_subsys_init();
+	if (err)
+		goto err_napi;
+#endif
+
+	/* Initialize io_uring subsystem */
+	err = tquic_io_uring_init();
+	if (err)
+		goto err_io_uring;
+
 	/* Initialize netlink interface */
 	err = tquic_netlink_init();
 	if (err)
@@ -672,6 +772,11 @@ int __init tquic_init(void)
 	err = tquic_sysctl_init();
 	if (err)
 		goto err_sysctl;
+
+	/* Register protocol handlers */
+	err = tquic_proto_init();
+	if (err)
+		goto err_proto;
 
 	/* Proc interface is initialized per-netns via pernet_operations */
 
@@ -701,10 +806,50 @@ err_ratelimit:
 err_offload:
 	tquic_diag_exit();
 err_diag:
+	tquic_proto_exit();
+err_proto:
 	tquic_sysctl_exit();
 err_sysctl:
 	tquic_netlink_exit();
 err_netlink:
+	tquic_io_uring_exit();
+err_io_uring:
+#if IS_ENABLED(CONFIG_TQUIC_NAPI)
+	tquic_napi_subsys_exit();
+err_napi:
+#endif
+	tquic_server_exit();
+err_server:
+	tquic_persistent_cong_module_exit();
+err_persistent_cong:
+	tquic_ack_freq_module_exit();
+err_ack_freq:
+	tquic_security_hardening_exit();
+err_security:
+	tquic_forward_exit();
+err_forward:
+	tquic_tunnel_exit();
+err_tunnel:
+	tquic_qos_exit();
+err_qos:
+	tquic_pmtud_exit();
+err_pmtud:
+	tquic_grease_exit();
+err_grease:
+	tquic_pref_addr_exit();
+err_pref_addr:
+	tquic_retry_exit();
+err_retry:
+	tquic_stateless_reset_exit();
+err_stateless_reset:
+	tquic_token_exit();
+err_token:
+	tquic_udp_exit();
+err_udp:
+	tquic_timer_exit();
+err_timer:
+	tquic_cid_table_exit();
+err_cid_table:
 	rhashtable_destroy(&tquic_conn_table);
 err_hashtable:
 	kmem_cache_destroy(tquic_path_cache);
@@ -723,9 +868,30 @@ void __exit tquic_exit(void)
 	tquic_ratelimit_module_exit();
 	tquic_offload_exit();
 	tquic_diag_exit();
+	tquic_proto_exit();
 	/* Proc interface is cleaned up per-netns via pernet_operations */
 	tquic_sysctl_exit();
 	tquic_netlink_exit();
+	tquic_io_uring_exit();
+#if IS_ENABLED(CONFIG_TQUIC_NAPI)
+	tquic_napi_subsys_exit();
+#endif
+	tquic_server_exit();
+	tquic_persistent_cong_module_exit();
+	tquic_ack_freq_module_exit();
+	tquic_security_hardening_exit();
+	tquic_forward_exit();
+	tquic_tunnel_exit();
+	tquic_qos_exit();
+	tquic_pmtud_exit();
+	tquic_grease_exit();
+	tquic_pref_addr_exit();
+	tquic_retry_exit();
+	tquic_stateless_reset_exit();
+	tquic_token_exit();
+	tquic_udp_exit();
+	tquic_timer_exit();
+	tquic_cid_table_exit();
 	rhashtable_destroy(&tquic_conn_table);
 	kmem_cache_destroy(tquic_path_cache);
 	kmem_cache_destroy(tquic_stream_cache);

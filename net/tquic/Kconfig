@@ -10,6 +10,8 @@ menuconfig TQUIC
 	select CRYPTO_AES
 	select CRYPTO_GCM
 	select NET_UDP_TUNNEL
+	select TQUIC_WAN_BONDING
+	select TQUIC_SCHEDULER
 	help
 	  TQUIC (Transport QUIC) provides WAN bonding capabilities using
 	  the QUIC protocol. It enables aggregating multiple WAN connections

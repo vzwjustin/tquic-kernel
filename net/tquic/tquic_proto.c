@@ -49,27 +49,6 @@
 
 #include <net/tquic.h>
 
-/* Tracepoints disabled for out-of-tree build - struct field mismatches */
-#if 0
-#define CREATE_TRACE_POINTS
-#include <trace/events/tquic.h>
-#endif
-
-/* Stub out trace macros when disabled */
-#define trace_tquic_conn_create(...)    do { } while (0)
-#define trace_tquic_conn_destroy(...)   do { } while (0)
-#define trace_tquic_handshake_start(...) do { } while (0)
-#define trace_tquic_handshake_complete(...) do { } while (0)
-#define trace_tquic_path_add(...)       do { } while (0)
-#define trace_tquic_path_remove(...)    do { } while (0)
-#define trace_tquic_path_state(...)     do { } while (0)
-#define trace_tquic_migration(...)      do { } while (0)
-#define trace_tquic_tx(...)             do { } while (0)
-#define trace_tquic_rx(...)             do { } while (0)
-#define trace_tquic_cong_event(...)     do { } while (0)
-#define trace_tquic_rtt_update(...)     do { } while (0)
-#define trace_tquic_loss_detected(...)  do { } while (0)
-
 #include "protocol.h"
 #include "tquic_mib.h"
 
@@ -106,38 +85,6 @@ static int tquic_v6_rcv(struct sk_buff *skb);
 static int tquic_v6_err(struct sk_buff *skb, struct inet6_skb_parm *opt,
 			u8 type, u8 code, int offset, __be32 info);
 #endif
-
-/* Scheduler/congestion helper stubs if not defined elsewhere */
-__weak struct tquic_sched_ops *tquic_sched_find(const char *name)
-{
-	return NULL;
-}
-
-__weak int tquic_sched_set_default(const char *name)
-{
-	return -ENOENT;
-}
-
-__weak struct tquic_bond_state *tquic_bond_init(struct tquic_connection *conn)
-{
-	return NULL;
-}
-
-__weak void tquic_bond_cleanup(struct tquic_bond_state *bond)
-{
-}
-
-__weak int tquic_bond_set_mode(struct tquic_connection *conn, u8 mode)
-{
-	return 0;
-}
-
-__weak int tquic_bond_get_stats(struct tquic_connection *conn,
-				struct tquic_bond_stats *stats)
-{
-	memset(stats, 0, sizeof(*stats));
-	return 0;
-}
 
 /*
  * IPv4 Protocol Handler
@@ -676,6 +623,13 @@ static int tquic_net_sysctl_register(struct net *net)
 	struct tquic_net *tn = tquic_pernet(net);
 	struct ctl_table *table;
 	int i;
+
+	/*
+	 * Avoid duplicate sysctl registration in init_net since the global
+	 * sysctl table is already registered via tquic_sysctl.c.
+	 */
+	if (net_eq(net, &init_net))
+		return 0;
 
 	table = kmemdup(tquic_net_sysctl_table, sizeof(tquic_net_sysctl_table),
 			GFP_KERNEL);
