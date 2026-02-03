@@ -28,6 +28,7 @@
 #include "../core/additional_addresses.h"
 #include "nat_keepalive.h"
 #include "nat_lifecycle.h"
+#include "../tquic_preferred_addr.h"
 
 /* Path probe configuration */
 #define TQUIC_PM_PROBE_INTERVAL_MS	1000	/* 1 second */
@@ -1156,7 +1157,7 @@ int tquic_pm_init_address_discovery(struct tquic_connection *conn)
 	}
 
 	/* Enable if negotiated */
-	if (conn->negotiated_params.address_discovery_enabled) {
+	if (conn->negotiated_params && conn->negotiated_params->address_discovery_enabled) {
 		state->config.enabled = true;
 		state->config.report_on_change = true;
 	}
@@ -1290,15 +1291,10 @@ int tquic_pm_add_local_additional_address(struct tquic_connection *conn,
 		get_random_bytes(auto_cid.id, auto_cid.len);
 		cid = &auto_cid;
 
-		/* Register the CID with CID manager */
-		if (conn->cid_mgr) {
-			ret = tquic_cid_register_local(conn->cid_mgr, &auto_cid);
-			if (ret < 0) {
-				pr_warn("tquic_pm: failed to register local CID: %d\n",
-					ret);
-				/* Continue despite error */
-			}
-		}
+		/*
+		 * TODO: Register the CID with CID manager.
+		 * Currently disabled - tquic_connection uses cid_pool instead of cid_mgr.
+		 */
 	}
 
 	ret = tquic_additional_addr_add(local_addrs, ip_version, addr, cid, NULL);
@@ -1380,16 +1376,10 @@ struct tquic_path *tquic_pm_create_path_to_additional(
 	/* Set remote CID from the additional address */
 	memcpy(&path->remote_cid, &addr_entry->cid, sizeof(addr_entry->cid));
 
-	/* Register the stateless reset token */
-	if (conn->cid_mgr) {
-		ret = tquic_cid_handle_additional_addr(conn->cid_mgr,
-						       &addr_entry->cid,
-						       addr_entry->stateless_reset_token);
-		if (ret < 0) {
-			pr_warn("tquic_pm: failed to register reset token: %d\n",
-				ret);
-		}
-	}
+	/*
+	 * TODO: Register the stateless reset token with CID manager.
+	 * Currently disabled - tquic_connection uses cid_pool instead of cid_mgr.
+	 */
 
 	pr_debug("tquic_pm: created path %u to additional address\n",
 		 path->path_id);
