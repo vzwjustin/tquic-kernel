@@ -141,31 +141,8 @@ struct tquic_client {
 };
 
 /*
- * =============================================================================
- * Function Declarations
- * =============================================================================
+ * Note: Function declarations are in include/net/tquic.h
+ * This header only defines the structures needed by multiple .c files
  */
-
-/* Tunnel management */
-struct tquic_tunnel *tquic_tunnel_create(struct tquic_client *client,
-					 struct tquic_stream *stream,
-					 const struct sockaddr_storage *dest,
-					 u8 traffic_class);
-void tquic_tunnel_destroy(struct tquic_tunnel *tunnel);
-int tquic_tunnel_connect(struct tquic_tunnel *tunnel);
-
-/* Client management */
-struct tquic_client *tquic_client_create(const char *psk_identity,
-					 size_t identity_len,
-					 struct tquic_connection *conn);
-void tquic_client_destroy(struct tquic_client *client);
-
-/* Port allocation */
-__be16 tquic_port_alloc(struct tquic_client *client);
-void tquic_port_free(struct tquic_client *client, __be16 port);
-
-/* PMTU helpers */
-int tquic_pmtu_lookup(const struct sockaddr_storage *addr);
-int tquic_pmtu_update(const struct sockaddr_storage *addr, int mtu, bool lock);
 
 #endif /* _TQUIC_TUNNEL_H */

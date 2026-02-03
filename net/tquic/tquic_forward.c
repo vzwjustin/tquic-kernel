@@ -960,12 +960,12 @@ static bool tquic_pmtu_addr_equal(const struct sockaddr_storage *a,
 }
 
 /**
- * tquic_pmtu_lookup - Look up cached PMTU for destination
+ * tquic_fwd_pmtu_lookup - Look up cached PMTU for destination
  * @dest: Destination address
  *
  * Returns: Cached PMTU or 0 if not found/expired
  */
-static u32 tquic_pmtu_lookup(const struct sockaddr_storage *dest)
+static u32 tquic_fwd_pmtu_lookup(const struct sockaddr_storage *dest)
 {
 	struct tquic_pmtu_entry *entry;
 	u32 hash, pmtu = 0;
@@ -986,14 +986,14 @@ static u32 tquic_pmtu_lookup(const struct sockaddr_storage *dest)
 }
 
 /**
- * tquic_pmtu_update - Update PMTU cache for destination
+ * tquic_fwd_pmtu_update - Update PMTU cache for destination
  * @dest: Destination address
  * @pmtu: New PMTU value
  * @df_required: Whether DF bit must be set
  *
  * Returns: 0 on success, negative errno on failure
  */
-static int tquic_pmtu_update(const struct sockaddr_storage *dest,
+static int tquic_fwd_pmtu_update(const struct sockaddr_storage *dest,
 			      u32 pmtu, bool df_required)
 {
 	struct tquic_pmtu_entry *entry, *old_entry = NULL;
@@ -1113,7 +1113,7 @@ u32 tquic_forward_get_mtu(struct tquic_tunnel *tunnel)
 		return mtu;
 
 	/* Check PMTU cache first */
-	cached_pmtu = tquic_pmtu_lookup(&tunnel->dest_addr);
+	cached_pmtu = tquic_fwd_pmtu_lookup(&tunnel->dest_addr);
 	if (cached_pmtu > 0)
 		mtu = cached_pmtu;
 
@@ -1231,7 +1231,7 @@ int tquic_forward_signal_mtu(struct tquic_tunnel *tunnel, u32 new_mtu)
 		new_mtu = TQUIC_PMTU_MIN;
 
 	/* Update PMTU cache */
-	err = tquic_pmtu_update(&tunnel->dest_addr, new_mtu, true);
+	err = tquic_fwd_pmtu_update(&tunnel->dest_addr, new_mtu, true);
 	if (err < 0) {
 		pr_warn("tquic: failed to update PMTU cache: %d\n", err);
 		/* Continue anyway - signaling is more important */
