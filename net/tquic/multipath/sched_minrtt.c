@@ -139,7 +139,7 @@ static int minrtt_get_path(struct tquic_connection *conn,
 			   u32 flags)
 {
 	struct minrtt_sched_data *sd = conn->sched_priv;
-	struct tquic_path *path, *best = NULL, *current = NULL;
+	struct tquic_path *path, *best = NULL, *curr_path = NULL;
 	u64 min_rtt = U64_MAX;
 	u64 tolerance_threshold;
 	u8 current_path_id;
@@ -166,7 +166,7 @@ static int minrtt_get_path(struct tquic_connection *conn,
 
 		/* Track current path for tolerance comparison */
 		if (path->path_id == current_path_id)
-			current = path;
+			curr_path = path;
 
 		/* Get smoothed RTT, use default if no measurement yet */
 		rtt = path->cc.smoothed_rtt_us;
@@ -195,7 +195,7 @@ static int minrtt_get_path(struct tquic_connection *conn,
 	 *   current_rtt = 50ms, threshold = 45ms
 	 *   Only switch if new path has RTT < 45ms
 	 */
-	if (current && current->state == TQUIC_PATH_ACTIVE) {
+	if (curr_path && curr_path->state == TQUIC_PATH_ACTIVE) {
 		unsigned int tolerance = minrtt_get_validated_tolerance();
 
 		tolerance_threshold = current_rtt_us *
@@ -203,7 +203,7 @@ static int minrtt_get_path(struct tquic_connection *conn,
 
 		if (min_rtt >= tolerance_threshold) {
 			/* Stay with current path - RTT difference not significant */
-			best = current;
+			best = curr_path;
 		}
 	}
 

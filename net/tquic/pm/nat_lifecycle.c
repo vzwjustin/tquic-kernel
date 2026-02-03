@@ -1038,11 +1038,11 @@ void tquic_nat_lifecycle_schedule_refresh(struct tquic_nat_lifecycle_state *stat
 
 	if (since_refresh_ms >= interval_ms) {
 		/* Already past refresh time - schedule soon with jitter */
-		delay_ms = prandom_u32_max(100) + 10;
+		delay_ms = get_random_u32_below(100) + 10;
 	} else {
 		delay_ms = interval_ms - since_refresh_ms;
 		/* Add some jitter */
-		delay_ms += prandom_u32_max(delay_ms / 20 + 1);
+		delay_ms += get_random_u32_below(delay_ms / 20 + 1);
 	}
 
 	state->next_refresh_time = ktime_add_ms(now, delay_ms);

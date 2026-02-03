@@ -21,135 +21,35 @@
 #include <linux/cache.h>
 #include <net/net_namespace.h>
 
+/*
+ * Include main tquic.h for core type definitions to avoid redefinition.
+ * This header extends net/tquic.h with scheduler-specific APIs.
+ */
+#include <net/tquic.h>
+
 /* Forward declarations */
 struct net;
 
 /*
  * =============================================================================
- * Path and Connection Structures
+ * Scheduler-Specific Constants
  * =============================================================================
- *
- * These structures define the path and connection state that schedulers
- * need to access for making scheduling decisions.
  */
 
 /*
- * Maximum number of paths supported per connection
- */
-#define TQUIC_MAX_PATHS		8
-
-/*
- * Invalid path ID sentinel value
+ * Invalid path ID sentinel value for scheduler use
  * Used to indicate no path is selected or path ID is uninitialized
  */
+#ifndef TQUIC_INVALID_PATH_ID
 #define TQUIC_INVALID_PATH_ID	0xFF
-
-/*
- * Path states
- */
-enum tquic_path_state {
-	TQUIC_PATH_ACTIVE = 0,		/* Path is active and usable */
-	TQUIC_PATH_STANDBY,		/* Path is standby (backup only) */
-	TQUIC_PATH_FAILED,		/* Path has failed */
-	TQUIC_PATH_PROBING,		/* Path is being probed */
-};
-
-/*
- * Per-path statistics
- */
-struct tquic_path_stats {
-	atomic64_t	packets_sent;
-	atomic64_t	bytes_sent;
-	atomic64_t	packets_acked;
-	atomic64_t	packets_lost;
-	atomic64_t	packets_retrans;
-	u64		last_send_time;
-	u64		last_ack_time;
-	u64		rtt_smoothed;	/* Smoothed RTT in microseconds */
-};
-
-/*
- * Per-path congestion control state
- */
-struct tquic_path_cc {
-	u32		cwnd;		/* Congestion window (bytes) */
-	u32		ssthresh;	/* Slow start threshold */
-	u32		bytes_in_flight;
-	u32		mss;		/* Maximum segment size */
-	u64		last_rtt_us;	/* Last RTT measurement */
-	u64		min_rtt_us;	/* Minimum RTT seen */
-	u64		smoothed_rtt_us;/* Smoothed RTT (EWMA) */
-	u64		rtt_var_us;	/* RTT variance */
-	u32		loss_rate;	/* Loss rate (scaled by 1000) */
-	u32		delivered;	/* Bytes delivered */
-	u32		lost;		/* Bytes lost */
-	u64		bandwidth;	/* Estimated bandwidth (bytes/sec) */
-	bool		in_recovery;
-	u64		recovery_start;
-};
-
-/*
- * Path information for scheduling decisions
- */
-struct tquic_path {
-	u8			path_id;
-	enum tquic_path_state	state;
-	u32			weight;		/* Configured weight */
-	u32			priority;	/* Priority (lower = higher) */
-
-	struct tquic_path_stats	stats;
-	struct tquic_path_cc	cc;
-
-	/* Scheduler-specific data */
-	void			*sched_data;
-
-	/* Path validation */
-	bool			validated;
-	u64			validation_time;
-
-	/* Network interface binding */
-	int			ifindex;
-
-	struct list_head	list;
-	struct rcu_head		rcu;
-};
-
-/*
- * Connection-level scheduler state
- */
-struct tquic_connection {
-	spinlock_t			lock;
-	struct list_head		paths;
-	int				num_paths;
-	int				active_paths;
-
-	/* Current scheduler */
-	struct tquic_sched_ops		*scheduler;
-	void				*sched_priv;
-
-	/* Global statistics */
-	struct {
-		atomic64_t	total_packets;
-		atomic64_t	total_bytes;
-		atomic64_t	sched_decisions;
-		atomic64_t	path_switches;
-		atomic64_t	reinjections;
-	} stats;
-
-	/* Coupled congestion control */
-	bool			coupled_cc;
-	u64			aggregate_cwnd;
-
-	/* Connection identifier for hashing */
-	u64			conn_id;
-
-	struct rcu_head		rcu;
-};
+#endif
 
 /*
  * Scheduler name maximum length (matches TCP congestion control pattern)
  */
+#ifndef TQUIC_SCHED_NAME_MAX
 #define TQUIC_SCHED_NAME_MAX	16
+#endif
 
 /*
  * Scheduler flags for path selection

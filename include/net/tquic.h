@@ -449,6 +449,10 @@ struct tquic_connection {
 	u64 data_sent;
 	u64 data_received;
 
+	/* Packet number tracking for application packet space */
+	atomic64_t pkt_num_tx;		/* Next TX packet number */
+	atomic64_t pkt_num_rx;		/* Highest RX packet number seen */
+
 	/* Extended flow control state (tquic_fc_state from flow_control.c) */
 	struct tquic_fc_state *fc;
 

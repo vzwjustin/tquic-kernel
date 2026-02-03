@@ -1060,12 +1060,12 @@ int tquic_additional_addr_on_tp_received(struct tquic_connection *conn,
 	 * Register CIDs and reset tokens with the CID manager.
 	 * This is critical for proper stateless reset detection.
 	 */
-	if (conn->cid_mgr) {
+	if (conn->cid_pool) {
 		u64 seq_num = remote_addrs->seq_num_base;
 
 		spin_lock_bh(&remote_addrs->lock);
 		list_for_each_entry(entry, &remote_addrs->addresses, list) {
-			ret = tquic_cid_register_remote(conn->cid_mgr,
+			ret = tquic_cid_register_remote(conn->cid_pool,
 							&entry->cid,
 							seq_num++,
 							entry->stateless_reset_token);

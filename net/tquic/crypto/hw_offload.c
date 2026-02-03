@@ -119,15 +119,18 @@ struct tquic_crypto_ctx {
 };
 
 /**
- * struct tquic_packet - Packet structure for batch operations
+ * struct tquic_hw_packet - Packet structure for batch crypto operations
  * @data:          Packet data pointer
  * @len:           Packet length
  * @pkt_num:       Packet number for nonce construction
  * @aad:           Additional authenticated data
  * @aad_len:       AAD length
  * @result:        Encryption/decryption result
+ *
+ * Note: Named tquic_hw_packet to avoid conflict with struct tquic_packet
+ * defined in net/tquic.h for general packet handling.
  */
-struct tquic_packet {
+struct tquic_hw_packet {
 	u8 *data;
 	size_t len;
 	u64 pkt_num;
@@ -636,7 +639,7 @@ EXPORT_SYMBOL_GPL(tquic_hw_decrypt_packet);
  * Return: Number of successfully encrypted packets
  */
 int tquic_crypto_batch_encrypt(struct tquic_crypto_ctx *ctx,
-			       struct tquic_packet *pkts, int count)
+			       struct tquic_hw_packet *pkts, int count)
 {
 	int i, success = 0;
 	size_t ct_len;
@@ -675,7 +678,7 @@ int tquic_crypto_batch_encrypt(struct tquic_crypto_ctx *ctx,
 
 	/* Process packets (crypto API handles AVX-512 internally) */
 	for (i = 0; i < count; i++) {
-		struct tquic_packet *pkt = &pkts[i];
+		struct tquic_hw_packet *pkt = &pkts[i];
 
 		/*
 		 * Allocate temporary buffer for ciphertext.
@@ -721,7 +724,7 @@ EXPORT_SYMBOL_GPL(tquic_crypto_batch_encrypt);
  * Return: Number of successfully decrypted packets
  */
 int tquic_crypto_batch_decrypt(struct tquic_crypto_ctx *ctx,
-			       struct tquic_packet *pkts, int count)
+			       struct tquic_hw_packet *pkts, int count)
 {
 	int i, success = 0;
 	size_t pt_len;
@@ -740,7 +743,7 @@ int tquic_crypto_batch_decrypt(struct tquic_crypto_ctx *ctx,
 #endif
 
 	for (i = 0; i < count; i++) {
-		struct tquic_packet *pkt = &pkts[i];
+		struct tquic_hw_packet *pkt = &pkts[i];
 		u8 *pt_buf;
 		size_t pt_buf_len;
 

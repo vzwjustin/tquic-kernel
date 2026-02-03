@@ -38,6 +38,7 @@
 #include <linux/jiffies.h>
 #include <linux/random.h>
 #include <linux/netdevice.h>
+#include <linux/if_arp.h>		/* ARPHRD_ETHER */
 #include <net/sock.h>
 #include <net/tquic.h>
 
@@ -575,13 +576,13 @@ void tquic_nat_keepalive_schedule(struct tquic_nat_keepalive_state *state)
 
 	if (since_activity_ms >= interval_ms) {
 		/* Already past the interval, send soon but with small jitter */
-		delay_ms = prandom_u32_max(100) + 10;  /* 10-110ms jitter */
+		delay_ms = get_random_u32_below(100) + 10;  /* 10-110ms jitter */
 	} else {
 		/* Schedule for remaining time */
 		delay_ms = interval_ms - since_activity_ms;
 
 		/* Add some jitter to prevent synchronization */
-		delay_ms += prandom_u32_max(delay_ms / 10 + 1);
+		delay_ms += get_random_u32_below(delay_ms / 10 + 1);
 	}
 
 	interval_jiffies = msecs_to_jiffies(delay_ms);
