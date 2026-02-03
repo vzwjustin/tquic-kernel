@@ -1045,7 +1045,7 @@ EXPORT_SYMBOL_GPL(tquic_bond_get_path_weight);
  * ============================================================================
  */
 
-static int __init tquic_bonding_init_module(void)
+int __init tquic_bonding_init_module(void)
 {
 	tquic_bond_wq = alloc_workqueue("tquic_bond",
 					WQ_MEM_RECLAIM | WQ_HIGHPRI, 0);
@@ -1066,7 +1066,7 @@ static int __init tquic_bonding_init_module(void)
 	return 0;
 }
 
-static void __exit tquic_bonding_exit_module(void)
+void __exit tquic_bonding_exit_module(void)
 {
 	if (tquic_reorder_wq)
 		destroy_workqueue(tquic_reorder_wq);

@@ -199,6 +199,7 @@ struct quic_path *quic_path_create(struct quic_connection *conn,
 	path->validated = 0;
 	path->active = 0;
 	path->challenge_pending = 0;
+	path->is_preferred_addr = 0;
 
 	/* Initialize challenge data (will be set when path validation starts) */
 	memset(path->challenge_data, 0, sizeof(path->challenge_data));
@@ -413,6 +414,26 @@ void quic_path_on_validated(struct quic_path *path)
 			info->type = QUIC_EVENT_PATH_VALIDATED;
 			skb_queue_tail(&conn->qsk->event_queue, event_skb);
 			wake_up(&conn->qsk->event_wait);
+		} else {
+			pr_warn_ratelimited(
+				"failed to allocate event buffer for path validation notification\n");
+			atomic64_inc(&conn->stats.clone_failures);
+		}
+	}
+
+	/*
+	 * RFC 9000 Section 9.6: Use of Preferred Address
+	 *
+	 * If this path was created for a preferred address, automatically
+	 * migrate the connection to this path now that it's validated.
+	 */
+	if (path->is_preferred_addr && !path->active) {
+		int ret = quic_path_migrate(conn, path);
+		if (ret < 0) {
+			pr_warn("QUIC: Failed to migrate to preferred address: %d\n",
+				ret);
+		} else {
+			pr_info("QUIC: Successfully migrated to preferred address\n");
 		}
 	}
 
@@ -506,6 +527,10 @@ int quic_path_migrate(struct quic_connection *conn, struct quic_path *path)
 			info->type = QUIC_EVENT_CONNECTION_MIGRATION;
 			skb_queue_tail(&conn->qsk->event_queue, event_skb);
 			wake_up(&conn->qsk->event_wait);
+		} else {
+			pr_warn_ratelimited(
+				"failed to allocate event buffer for connection migration notification\n");
+			atomic64_inc(&conn->stats.clone_failures);
 		}
 	}
 

@@ -237,6 +237,9 @@ struct tquic_path {
 	u8			ecn_capable:1;	/* ECN supported */
 	u8			mtu_probing:1;	/* MTU discovery active */
 
+	/* Multipath extension state (draft-ietf-quic-multipath) */
+	u64			status_seq_num;	/* PATH_STATUS sequence number */
+
 	/* MTU */
 	u16			mtu;
 	u16			mtu_probe_target;
@@ -875,6 +878,7 @@ struct tquic_path *tquic_path_alloc(gfp_t gfp)
 
 	path->state = TQUIC_PATH_CREATED;
 	path->mtu = TQUIC_PATH_MTU_MIN;
+	path->status_seq_num = 0;
 	path->signal_strength = -128;  /* Unknown */
 	path->created = ktime_get();
 
@@ -2232,7 +2236,7 @@ static void tquic_pm_failover_work_fn(struct work_struct *work)
  * ============================================================================
  */
 
-static int __init tquic_path_init_module(void)
+int __init tquic_path_init_module(void)
 {
 	int ret;
 
@@ -2253,7 +2257,7 @@ static int __init tquic_path_init_module(void)
 	return 0;
 }
 
-static void __exit tquic_path_exit_module(void)
+void __exit tquic_path_exit_module(void)
 {
 	unregister_netdevice_notifier(&tquic_netdev_notifier);
 	destroy_workqueue(tquic_pm_wq);

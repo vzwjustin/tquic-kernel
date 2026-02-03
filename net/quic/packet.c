@@ -130,6 +130,19 @@ static int quic_packet_parse_long(struct sk_buff *skb, u8 first_byte)
 		offset += varint_len;
 	}
 
+	/*
+	 * Validate payload length per RFC 9000 Section 12.2.
+	 * The payload_len field indicates the length of the rest of the packet
+	 * (packet number + encrypted payload + AEAD tag). It must not extend
+	 * beyond the received packet data.
+	 *
+	 * Note: payload_len < remaining is allowed per RFC 9000 Section 12.2
+	 * which permits coalesced packets. The peer may have combined multiple
+	 * QUIC packets into a single UDP datagram.
+	 */
+	if (payload_len > skb->len - offset)
+		return -EINVAL;
+
 	/* Packet Number (1-4 bytes, encoded in pn_len after header unprotection) */
 	cb->header_len = offset;
 
@@ -153,6 +166,131 @@ static int quic_packet_parse_short(struct sk_buff *skb, u8 first_byte,
 	offset += expected_dcid_len;
 	cb->header_len = offset;
 
+	return 0;
+}
+
+/*
+ * quic_packet_get_length - Get the total length of a QUIC packet in a buffer
+ * @data: Pointer to the start of the QUIC packet
+ * @len: Total length of available data
+ * @packet_len: Output parameter for the packet length
+ *
+ * Per RFC 9000 Section 12.2, multiple QUIC packets can be coalesced into a
+ * single UDP datagram. This function determines the length of the first
+ * packet so subsequent packets can be separated and processed.
+ *
+ * For long header packets, the length is determined by the Length field.
+ * For short header packets, the entire remaining buffer is the packet.
+ *
+ * Returns 0 on success, negative error code on failure.
+ */
+static int quic_packet_get_length(const u8 *data, int len, int *packet_len)
+{
+	int offset = 1;
+	u8 first_byte;
+	u8 dcid_len, scid_len;
+	u8 packet_type;
+	u64 token_len = 0;
+	u64 payload_len;
+	int varint_len;
+
+	if (len < 1)
+		return -EINVAL;
+
+	first_byte = data[0];
+
+	/* Validate fixed bit per RFC 9000 Section 17.2 */
+	if (!(first_byte & QUIC_FIXED_BIT))
+		return -EINVAL;
+
+	/* Short header packet consumes the entire remaining buffer */
+	if (!(first_byte & QUIC_HEADER_FORM_LONG)) {
+		*packet_len = len;
+		return 0;
+	}
+
+	/* Long header packet - parse to find Length field */
+	if (len < 7)
+		return -EINVAL;
+
+	/* Skip version (4 bytes) */
+	offset = 5;
+
+	/* Destination Connection ID Length (1 byte) */
+	dcid_len = data[offset++];
+	if (dcid_len > QUIC_MAX_CONNECTION_ID_LEN)
+		return -EINVAL;
+
+	if (len < offset + dcid_len + 1)
+		return -EINVAL;
+	offset += dcid_len;
+
+	/* Source Connection ID Length (1 byte) */
+	scid_len = data[offset++];
+	if (scid_len > QUIC_MAX_CONNECTION_ID_LEN)
+		return -EINVAL;
+
+	if (len < offset + scid_len)
+		return -EINVAL;
+	offset += scid_len;
+
+	/* Packet type specific handling */
+	packet_type = (first_byte & 0x30) >> 4;
+
+	switch (packet_type) {
+	case QUIC_LONG_TYPE_INITIAL:
+		/* Token Length (variable) */
+		if (len < offset + 1)
+			return -EINVAL;
+
+		varint_len = quic_varint_decode(data + offset, len - offset,
+						&token_len);
+		if (varint_len < 0)
+			return varint_len;
+		offset += varint_len;
+
+		/* Validate and skip token */
+		if (token_len > len - offset)
+			return -EINVAL;
+		offset += token_len;
+		break;
+
+	case QUIC_LONG_TYPE_0RTT:
+	case QUIC_LONG_TYPE_HANDSHAKE:
+		/* No token field */
+		break;
+
+	case QUIC_LONG_TYPE_RETRY:
+		/*
+		 * Retry packets don't have a Length field and cannot be
+		 * coalesced with other packets per RFC 9000.
+		 */
+		*packet_len = len;
+		return 0;
+
+	default:
+		return -EINVAL;
+	}
+
+	/* Payload Length (variable) */
+	if (len < offset + 1)
+		return -EINVAL;
+
+	varint_len = quic_varint_decode(data + offset, len - offset,
+					&payload_len);
+	if (varint_len < 0)
+		return varint_len;
+	offset += varint_len;
+
+	/*
+	 * Validate payload length per RFC 9000 Section 12.2.
+	 * The packet length is the header (up to and including Length field)
+	 * plus the payload length value.
+	 */
+	if (payload_len > len - offset)
+		return -EINVAL;
+
+	*packet_len = offset + payload_len;
 	return 0;
 }
 
@@ -464,6 +602,21 @@ struct sk_buff *quic_packet_build(struct quic_connection *conn,
 	return skb;
 }
 
+/*
+ * quic_packet_process - Process a UDP datagram that may contain coalesced
+ *                       QUIC packets per RFC 9000 Section 12.2
+ * @conn: QUIC connection
+ * @skb: Socket buffer containing the UDP datagram payload
+ *
+ * Per RFC 9000 Section 12.2, multiple QUIC packets at different encryption
+ * levels can be coalesced into a single UDP datagram. This function:
+ * 1. Determines the length of the first packet using quic_packet_get_length()
+ * 2. Processes the first packet
+ * 3. If there's remaining data, recursively processes the next packet
+ *
+ * This is particularly important during the handshake when Initial and
+ * Handshake packets are often coalesced together.
+ */
 void quic_packet_process(struct quic_connection *conn, struct sk_buff *skb)
 {
 	struct quic_crypto_ctx *ctx;
@@ -472,6 +625,8 @@ void quic_packet_process(struct quic_connection *conn, struct sk_buff *skb)
 	u64 truncated_pn, pn;
 	u8 level;
 	int err;
+	int packet_len;
+	struct sk_buff *next_skb;
 
 	if (skb->len < 1) {
 		kfree_skb(skb);
@@ -479,6 +634,54 @@ void quic_packet_process(struct quic_connection *conn, struct sk_buff *skb)
 	}
 
 	first_byte = skb->data[0];
+
+	/*
+	 * RFC 9000 Section 12.2: Coalesced Packets
+	 * Determine the length of this packet. For long header packets,
+	 * this allows us to separate coalesced packets. For short header
+	 * packets, the entire remaining datagram is this packet.
+	 */
+	err = quic_packet_get_length(skb->data, skb->len, &packet_len);
+	if (err) {
+		kfree_skb(skb);
+		return;
+	}
+
+	/*
+	 * Validate packet_len is within bounds.
+	 * This should not happen given quic_packet_get_length validation,
+	 * but defense in depth is important for network code.
+	 */
+	if (packet_len < 1 || packet_len > skb->len) {
+		kfree_skb(skb);
+		return;
+	}
+
+	/*
+	 * If there's data remaining after this packet, we have coalesced
+	 * packets. Create a new skb for the remaining data and queue it
+	 * for processing after we finish with this packet.
+	 */
+	next_skb = NULL;
+	if (packet_len < skb->len) {
+		int remaining = skb->len - packet_len;
+
+		/*
+		 * Validate remaining data has at least a header byte
+		 * to prevent processing empty/corrupt trailing data.
+		 */
+		if (remaining >= 1) {
+			next_skb = alloc_skb(remaining + 64, GFP_ATOMIC);
+			if (next_skb) {
+				skb_reserve(next_skb, 64);
+				skb_put_data(next_skb, skb->data + packet_len,
+					     remaining);
+			}
+			/* If allocation fails, we just lose the coalesced packet(s) */
+		}
+		/* Trim this skb to just the first packet */
+		skb_trim(skb, packet_len);
+	}
 
 	/* Determine encryption level */
 	if (first_byte & QUIC_HEADER_FORM_LONG) {
@@ -497,10 +700,10 @@ void quic_packet_process(struct quic_connection *conn, struct sk_buff *skb)
 		case QUIC_LONG_TYPE_RETRY:
 			/* Handle retry packet specially */
 			quic_packet_process_retry(conn, skb);
-			return;
+			goto process_next;
 		default:
 			kfree_skb(skb);
-			return;
+			goto process_next;
 		}
 	} else {
 		level = QUIC_CRYPTO_APPLICATION;
@@ -510,14 +713,14 @@ void quic_packet_process(struct quic_connection *conn, struct sk_buff *skb)
 	if (!ctx->keys_available) {
 		/* Buffer packet for later processing */
 		skb_queue_tail(&conn->pending_frames, skb);
-		return;
+		goto process_next;
 	}
 
 	/* Remove header protection */
 	err = quic_crypto_unprotect_header(ctx, skb, &pn_offset, &pn_len);
 	if (err) {
 		kfree_skb(skb);
-		return;
+		goto process_next;
 	}
 
 	/* Decode packet number */
@@ -533,7 +736,7 @@ void quic_packet_process(struct quic_connection *conn, struct sk_buff *skb)
 	err = quic_crypto_decrypt(ctx, skb, pn);
 	if (err) {
 		kfree_skb(skb);
-		return;
+		goto process_next;
 	}
 
 	/* Update largest received packet number */
@@ -551,6 +754,11 @@ void quic_packet_process(struct quic_connection *conn, struct sk_buff *skb)
 	atomic64_add(skb->len, &conn->stats.bytes_received);
 
 	kfree_skb(skb);
+
+process_next:
+	/* Process any remaining coalesced packets */
+	if (next_skb)
+		quic_packet_process(conn, next_skb);
 }
 
 static void quic_packet_process_retry(struct quic_connection *conn,
@@ -854,7 +1062,44 @@ int quic_frame_process_one(struct quic_connection *conn, const u8 *data,
 
 	case QUIC_FRAME_DATAGRAM:
 	case QUIC_FRAME_DATAGRAM_LEN:
-		return quic_frame_process_datagram(conn, data, len);
+		/*
+		 * DATAGRAM frames (RFC 9221) - unreliable, unordered data.
+		 * TODO: Full datagram support implementation pending.
+		 * For now, we skip the frame to prevent protocol errors.
+		 */
+		{
+			u8 frame_type = data[0];
+			bool has_length = (frame_type & 0x01) != 0;
+			u64 datagram_len;
+			int varint_len;
+			int offset = 1;
+
+			if (has_length) {
+				/* Type 0x31: datagram length is explicit */
+				varint_len = quic_varint_decode(data + offset,
+								len - offset,
+								&datagram_len);
+				if (varint_len < 0)
+					return varint_len;
+				offset += varint_len;
+
+				if (offset + datagram_len > len)
+					return -EINVAL;
+
+				offset += datagram_len;
+			} else {
+				/* Type 0x30: datagram extends to end of packet */
+				offset = len;
+			}
+
+			/*
+			 * TODO: Queue datagram for application delivery
+			 * when datagram support is enabled. For now, we
+			 * silently drop the datagram data (unreliable delivery
+			 * makes this acceptable per RFC 9221).
+			 */
+			return offset;
+		}
 
 	default:
 		/*
@@ -1005,6 +1250,7 @@ static int quic_frame_process_ack(struct quic_connection *conn,
 	u64 ack_range_count;
 	int varint_len;
 	int i;
+	int estimated_min_bytes;
 
 	memset(&ack, 0, sizeof(ack));
 
@@ -1020,11 +1266,34 @@ static int quic_frame_process_ack(struct quic_connection *conn,
 		return varint_len;
 	offset += varint_len;
 
-	/* ACK Range Count */
+	/* ACK Range Count - SECURITY: Validate before processing
+	 *
+	 * An untrusted ack_range_count from the network can cause:
+	 * 1. DoS attacks by requesting extreme number of ranges
+	 * 2. Buffer overruns if validation is skipped
+	 * 3. Excessive memory usage or CPU time
+	 *
+	 * RFC 9000 doesn't specify a maximum, but we limit to QUIC_ACK_MAX_RANGES
+	 * which represents a reasonable upper bound for out-of-order packet tracking.
+	 */
 	varint_len = quic_varint_decode(data + offset, len - offset, &ack_range_count);
 	if (varint_len < 0)
 		return varint_len;
 	offset += varint_len;
+
+	/*
+	 * SECURITY: Validate ack_range_count doesn't exceed array bounds.
+	 * Each range requires 2 varints (gap + ack_range), and varints can be
+	 * 1-8 bytes each. Maximum varint is 8 bytes, so worst case is 16 bytes
+	 * per range. Check that buffer has sufficient data.
+	 */
+	if (ack_range_count > 255)
+		return -EINVAL;
+
+	/* Estimate minimum buffer needed: 1st range (1 varint) + count*2 varints */
+	estimated_min_bytes = (1 + ack_range_count * 2);
+	if (len - offset < estimated_min_bytes)
+		return -EINVAL;
 
 	/* First ACK Range */
 	varint_len = quic_varint_decode(data + offset, len - offset, &ack.ranges[0].ack_range);
@@ -1035,7 +1304,7 @@ static int quic_frame_process_ack(struct quic_connection *conn,
 	ack.ack_range_count = 1;
 
 	/* Additional ACK Ranges */
-	for (i = 0; i < ack_range_count && i < 255; i++) {
+	for (i = 0; i < ack_range_count; i++) {
 		varint_len = quic_varint_decode(data + offset, len - offset,
 						&ack.ranges[i + 1].gap);
 		if (varint_len < 0)

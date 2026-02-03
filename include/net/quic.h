@@ -52,7 +52,8 @@ struct quic_ack_frequency_state;
 #define QUIC_TIMER_HANDSHAKE	3
 #define QUIC_TIMER_PATH_PROBE	4
 #define QUIC_TIMER_PACING	5	/* Timer for paced packet transmission */
-#define QUIC_TIMER_MAX		6
+#define QUIC_TIMER_KEY_DISCARD	6	/* Timer for discarding old keys after update */
+#define QUIC_TIMER_MAX		7
 
 /*
  * QUIC Variable-Length Integer encoding (RFC 9000 Section 16)
@@ -334,6 +335,7 @@ struct quic_path {
 	u8			active:1;
 	u8			challenge_pending:1;
 	u8			multipath_enabled:1;	/* Use per-path PN space */
+	u8			is_preferred_addr:1;	/* RFC 9000 Section 9.6 */
 	u8			challenge_data[8];
 	ktime_t			validation_start;
 };
@@ -429,6 +431,9 @@ struct quic_stats {
 
 	/* Frame counters */
 	atomic64_t	frames_sent;
+
+	/* Error counters */
+	atomic64_t	clone_failures;		/* skb_clone failures in retransmit path */
 
 	/* Multipath scheduler statistics */
 	atomic64_t	total_packets;

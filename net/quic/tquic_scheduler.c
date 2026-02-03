@@ -2761,7 +2761,7 @@ EXPORT_SYMBOL_GPL(tquic_new_sched_notify_loss);
  * Module Initialization
  * ========================================================================= */
 
-static int __init tquic_scheduler_init(void)
+int __init tquic_scheduler_init(void)
 {
 	int ret;
 
@@ -2811,7 +2811,7 @@ err_pernet:
 	return ret;
 }
 
-static void __exit tquic_scheduler_exit(void)
+void __exit tquic_scheduler_exit(void)
 {
 	pr_info("Unloading TQUIC packet scheduler framework\n");
 

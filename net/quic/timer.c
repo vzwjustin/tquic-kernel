@@ -13,6 +13,7 @@
 #include <linux/jiffies.h>
 #include <net/quic.h>
 #include "trace.h"
+#include "key_update.h"
 
 /* Timer constants per RFC 9002 */
 #define QUIC_TIMER_GRANULARITY_MS	1	/* Timer granularity in ms */
@@ -142,19 +143,42 @@ static void quic_timer_ack_handler(struct timer_list *t)
 	for (i = 0; i < QUIC_PN_SPACE_MAX; i++) {
 		if (quic_ack_should_send(conn, i)) {
 			struct sk_buff *skb = alloc_skb(256, GFP_ATOMIC);
-			if (skb) {
-				int len = quic_ack_create(conn, i, skb);
-				if (len > 0) {
-					/* Best effort - ACKs can be regenerated */
-					quic_conn_queue_frame(conn, skb);
-				} else {
-					kfree_skb(skb);
-				}
+			if (!skb) {
+				pr_warn("QUIC: failed to allocate ACK frame for pn_space %d\n", i);
+				continue;
+			}
+
+			int len = quic_ack_create(conn, i, skb);
+			if (len <= 0) {
+				pr_warn("QUIC: failed to create ACK frame for pn_space %d (len=%d)\n",
+					i, len);
+				kfree_skb(skb);
+				continue;
+			}
+
+			/*
+			 * Queue ACK frame for transmission.
+			 * CRITICAL: ACKs MUST be sent to inform the peer of received packets.
+			 * Failing to send ACKs causes the peer to retransmit packets
+			 * indefinitely, wasting bandwidth and increasing latency.
+			 *
+			 * While the comment said "ACKs can be regenerated", that's only
+			 * true if the peer retransmits. If we simply drop ACKs, the peer
+			 * never learns what we've received, causing congestion collapse.
+			 *
+			 * If queueing fails, log it but still schedule transmission work
+			 * to retry. ACKs are too important to silently discard.
+			 */
+			if (quic_conn_queue_frame(conn, skb)) {
+				pr_warn("QUIC: failed to queue ACK frame for pn_space %d (queue full), will retry\n",
+					i);
+				kfree_skb(skb);
+				continue;
 			}
 		}
 	}
 
-	/* Schedule transmission */
+	/* Schedule transmission of queued ACK frames */
 	schedule_work(&conn->tx_work);
 }
 
@@ -352,10 +376,46 @@ static void quic_timer_pacing_handler(struct timer_list *t)
 }
 
 /*
+ * Key discard timer callback (RFC 9001 Section 6.1)
+ *
+ * After a key update, old keys are retained briefly to handle reordered
+ * packets. This timer fires ~3x PTO after the update to discard the old
+ * keys when they're no longer needed.
+ */
+static void quic_timer_key_discard_handler(struct timer_list *t)
+{
+	struct quic_connection *conn = from_timer(conn, t,
+						  timers[QUIC_TIMER_KEY_DISCARD]);
+	unsigned long flags;
+
+	if (!conn)
+		return;
+
+	spin_lock_irqsave(&conn->lock, flags);
+
+	/* Check if connection is valid for timer work */
+	if (!quic_timer_conn_valid_locked(conn)) {
+		spin_unlock_irqrestore(&conn->lock, flags);
+		return;
+	}
+
+	/* Clear timer deadline */
+	conn->timer_deadlines[QUIC_TIMER_KEY_DISCARD] = 0;
+
+	pr_debug("QUIC: key discard timer fired, discarding old keys\n");
+
+	/* Discard old RX keys */
+	quic_crypto_discard_old_keys(conn);
+
+	spin_unlock_irqrestore(&conn->lock, flags);
+}
+
+/*
  * Initialize all timers for a connection
  *
  * This function sets up the timer infrastructure for loss detection,
- * ACK generation, idle timeout, handshake, path probing, and pacing.
+ * ACK generation, idle timeout, handshake, path probing, pacing,
+ * and key discard.
  */
 void quic_timer_init(struct quic_connection *conn)
 {
@@ -378,6 +438,7 @@ void quic_timer_init(struct quic_connection *conn)
 	timer_setup(&conn->timers[QUIC_TIMER_HANDSHAKE], quic_timer_handshake_handler, 0);
 	timer_setup(&conn->timers[QUIC_TIMER_PATH_PROBE], quic_timer_path_probe_handler, 0);
 	timer_setup(&conn->timers[QUIC_TIMER_PACING], quic_timer_pacing_handler, 0);
+	timer_setup(&conn->timers[QUIC_TIMER_KEY_DISCARD], quic_timer_key_discard_handler, 0);
 }
 
 /*

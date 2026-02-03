@@ -459,7 +459,7 @@ static struct tquic_sched_ops tquic_sched_ecf = {
  * Module Initialization
  * ========================================================================= */
 
-static int __init tquic_sched_ecf_init(void)
+int __init tquic_sched_ecf_init(void)
 {
 	int ret;
 
@@ -476,7 +476,7 @@ static int __init tquic_sched_ecf_init(void)
 	return 0;
 }
 
-static void __exit tquic_sched_ecf_exit(void)
+void __exit tquic_sched_ecf_exit(void)
 {
 	pr_info("Unloading TQUIC ECF scheduler\n");
 	tquic_unregister_scheduler(&tquic_sched_ecf);

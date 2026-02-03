@@ -108,7 +108,7 @@ int quic_ack_frequency_set(struct quic_connection *conn,
 			   u64 reorder_threshold);
 
 /* Module init/exit */
-int __init quic_ack_frequency_init(void);
-void quic_ack_frequency_exit(void);
+int __init quic_ack_frequency_module_init(void);
+void quic_ack_frequency_module_exit(void);
 
 #endif /* _QUIC_ACK_FREQUENCY_H */

@@ -263,7 +263,19 @@ int quic_ack_frequency_parse(struct quic_connection *conn,
 	int offset = 0;
 	int varint_len;
 
-	if (!data || len < 4)  /* Minimum: 4 single-byte varints */
+	/*
+	 * SECURITY: Validate buffer size before processing.
+	 * This function parses 4 variable-length integers (varints) from untrusted
+	 * network data. Varints can be 1, 2, 4, or 8 bytes each per RFC 9000.
+	 *
+	 * Minimum valid frame:
+	 *   - 4 varints, each 1 byte minimum = 4 bytes total
+	 *   - This is a DoS check; actual buffer needs checking after each decode
+	 *
+	 * We don't assume single-byte varints; each quic_varint_decode() call
+	 * validates buffer bounds and returns the bytes consumed.
+	 */
+	if (!data || len < 4)
 		return -EINVAL;
 
 	/* Sequence Number */
@@ -557,13 +569,13 @@ int quic_ack_frequency_set(struct quic_connection *conn,
  * Module initialization/cleanup - these functions are called from
  * the main QUIC module init/exit.
  */
-int __init quic_ack_frequency_init(void)
+int __init quic_ack_frequency_module_init(void)
 {
 	pr_debug("QUIC ACK_FREQUENCY extension initialized\n");
 	return 0;
 }
 
-void quic_ack_frequency_exit(void)
+void quic_ack_frequency_module_exit(void)
 {
 	pr_debug("QUIC ACK_FREQUENCY extension cleanup\n");
 }

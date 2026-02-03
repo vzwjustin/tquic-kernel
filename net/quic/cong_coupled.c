@@ -920,13 +920,13 @@ EXPORT_SYMBOL_GPL(olia_cc_increase);
  * ============================================================================
  */
 
-static int __init coupled_cc_init_module(void)
+int __init coupled_cc_init_module(void)
 {
 	pr_info("TQUIC coupled congestion control initialized\n");
 	return 0;
 }
 
-static void __exit coupled_cc_exit_module(void)
+void __exit coupled_cc_exit_module(void)
 {
 	pr_info("TQUIC coupled congestion control unloaded\n");
 }

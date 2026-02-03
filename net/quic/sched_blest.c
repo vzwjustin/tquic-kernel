@@ -555,7 +555,7 @@ static struct tquic_sched_ops tquic_sched_blest = {
  * Module Initialization
  * ========================================================================= */
 
-static int __init tquic_sched_blest_init(void)
+int __init tquic_sched_blest_init(void)
 {
 	int ret;
 
@@ -573,7 +573,7 @@ static int __init tquic_sched_blest_init(void)
 	return 0;
 }
 
-static void __exit tquic_sched_blest_exit(void)
+void __exit tquic_sched_blest_exit(void)
 {
 	pr_info("Unloading TQUIC BLEST scheduler\n");
 	tquic_unregister_scheduler(&tquic_sched_blest);

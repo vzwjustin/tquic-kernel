@@ -265,11 +265,34 @@ void quic_flow_control_update_max_data(struct quic_connection *conn)
 
 	/* Create and queue MAX_DATA frame */
 	skb = quic_flow_create_max_data_frame(conn, new_max_data);
-	if (skb) {
-		/* Best effort - flow control frames can be regenerated */
-		if (!quic_conn_queue_frame(conn, skb))
-			schedule_work(&conn->tx_work);
+	if (!skb) {
+		pr_err("QUIC: failed to allocate MAX_DATA frame\n");
+		return;
 	}
+
+	/*
+	 * Queue MAX_DATA frame for transmission.
+	 * CRITICAL: Failure to send MAX_DATA allows the peer to send more data
+	 * than we are willing to accept, which will eventually cause a
+	 * FLOW_CONTROL_ERROR. This is NOT an optional "best effort" operation.
+	 *
+	 * If queueing fails due to memory pressure, we MUST log it and
+	 * retry periodically via DATA_BLOCKED handling.
+	 */
+	if (quic_conn_queue_frame(conn, skb)) {
+		pr_warn("QUIC: failed to queue MAX_DATA frame (queue full), will retry\n");
+		kfree_skb(skb);
+		/*
+		 * Note: The peer is now operating with stale flow control limits.
+		 * A DATA_BLOCKED frame from the peer will trigger a retry of
+		 * MAX_DATA update. If peer never sends DATA_BLOCKED, the idle
+		 * timeout will eventually close the connection.
+		 */
+		return;
+	}
+
+	/* Schedule transmission of the queued frame */
+	schedule_work(&conn->tx_work);
 }
 EXPORT_SYMBOL(quic_flow_control_update_max_data);
 
@@ -545,11 +568,31 @@ void quic_stream_flow_control_update_max_stream_data(struct quic_stream *stream)
 	/* Create and queue MAX_STREAM_DATA frame */
 	skb = quic_flow_create_max_stream_data_frame(stream->id,
 						     new_max_stream_data);
-	if (skb) {
-		/* Best effort - flow control frames can be regenerated */
-		if (!quic_conn_queue_frame(conn, skb))
-			schedule_work(&conn->tx_work);
+	if (!skb) {
+		pr_err("QUIC: failed to allocate MAX_STREAM_DATA frame for stream %llu\n",
+		       stream->id);
+		return;
 	}
+
+	/*
+	 * Queue MAX_STREAM_DATA frame for transmission.
+	 * CRITICAL: Failure to send MAX_STREAM_DATA has the same implications as
+	 * MAX_DATA failure. The peer will be operating with stale flow control
+	 * limits, which will eventually cause a FLOW_CONTROL_ERROR when the
+	 * peer violates the advertised limit.
+	 *
+	 * If queueing fails, log it and rely on STREAM_DATA_BLOCKED from peer
+	 * to trigger a retry, or idle timeout to close connection.
+	 */
+	if (quic_conn_queue_frame(conn, skb)) {
+		pr_warn("QUIC: failed to queue MAX_STREAM_DATA for stream %llu (queue full), will retry\n",
+			stream->id);
+		kfree_skb(skb);
+		return;
+	}
+
+	/* Schedule transmission of the queued frame */
+	schedule_work(&conn->tx_work);
 }
 
 /**
@@ -600,11 +643,33 @@ void quic_stream_flow_control_send_blocked(struct quic_stream *stream)
 	spin_unlock(&send->lock);
 
 	skb = quic_flow_create_stream_data_blocked_frame(stream->id, limit);
-	if (skb) {
-		/* Best effort - BLOCKED frames are advisory */
-		if (!quic_conn_queue_frame(conn, skb))
-			schedule_work(&conn->tx_work);
+	if (!skb) {
+		pr_err("QUIC: failed to allocate STREAM_DATA_BLOCKED frame for stream %llu\n",
+		       stream->id);
+		return;
 	}
+
+	/*
+	 * Queue STREAM_DATA_BLOCKED frame for transmission.
+	 * RFC 9000 Section 4.1: "A sender SHOULD send a STREAM_DATA_BLOCKED
+	 * frame when it wishes to send data but is unable to do so due to
+	 * stream-level flow control."
+	 *
+	 * While this is labeled "advisory" in RFC 9000, it is IMPORTANT for
+	 * congestion visibility and flow control negotiation. Silently dropping
+	 * BLOCKED frames means the receiver never learns that we're blocked.
+	 *
+	 * Log failures so operators can diagnose flow control issues.
+	 */
+	if (quic_conn_queue_frame(conn, skb)) {
+		pr_warn("QUIC: failed to queue STREAM_DATA_BLOCKED for stream %llu (queue full)\n",
+			stream->id);
+		kfree_skb(skb);
+		return;
+	}
+
+	/* Schedule transmission of the queued frame */
+	schedule_work(&conn->tx_work);
 }
 
 /**
@@ -784,11 +849,29 @@ void quic_streams_update_max_streams(struct quic_connection *conn,
 	if (new_max_streams > current_max) {
 		skb = quic_flow_create_max_streams_frame(new_max_streams,
 							 unidirectional);
-		if (skb) {
-			/* Best effort - flow control frames can be regenerated */
-			if (!quic_conn_queue_frame(conn, skb))
-				schedule_work(&conn->tx_work);
+		if (!skb) {
+			pr_err("QUIC: failed to allocate MAX_STREAMS frame\n");
+			return;
 		}
+
+		/*
+		 * Queue MAX_STREAMS frame for transmission.
+		 * CRITICAL: Failure to send MAX_STREAMS prevents the peer from
+		 * opening new streams, limiting connection capacity. While the RFC
+		 * says this is "advisory", it is essential for proper connection
+		 * operation when the peer is blocked on stream limits.
+		 *
+		 * If queueing fails, log it. The peer's STREAMS_BLOCKED frame
+		 * will eventually prompt a retry, or idle timeout closes connection.
+		 */
+		if (quic_conn_queue_frame(conn, skb)) {
+			pr_warn("QUIC: failed to queue MAX_STREAMS frame (queue full), will retry\n");
+			kfree_skb(skb);
+			return;
+		}
+
+		/* Schedule transmission of the queued frame */
+		schedule_work(&conn->tx_work);
 	}
 }
 
@@ -841,11 +924,30 @@ void quic_streams_send_blocked(struct quic_connection *conn, bool unidirectional
 	spin_unlock_bh(&conn->lock);
 
 	skb = quic_flow_create_streams_blocked_frame(limit, unidirectional);
-	if (skb) {
-		/* Best effort - BLOCKED frames are advisory */
-		if (!quic_conn_queue_frame(conn, skb))
-			schedule_work(&conn->tx_work);
+	if (!skb) {
+		pr_err("QUIC: failed to allocate STREAMS_BLOCKED frame\n");
+		return;
 	}
+
+	/*
+	 * Queue STREAMS_BLOCKED frame for transmission.
+	 * RFC 9000 Section 4.6: "A sender SHOULD send a STREAMS_BLOCKED frame
+	 * when it wishes to open a stream but is unable to do so due to the
+	 * stream limit set by its peer."
+	 *
+	 * Like STREAM_DATA_BLOCKED, while labeled "advisory", this is important
+	 * for the receiver to understand we're blocked on stream limits.
+	 *
+	 * Log failures for visibility into flow control issues.
+	 */
+	if (quic_conn_queue_frame(conn, skb)) {
+		pr_warn("QUIC: failed to queue STREAMS_BLOCKED frame (queue full)\n");
+		kfree_skb(skb);
+		return;
+	}
+
+	/* Schedule transmission of the queued frame */
+	schedule_work(&conn->tx_work);
 }
 
 /*
@@ -870,11 +972,32 @@ void quic_flow_control_send_data_blocked(struct quic_connection *conn)
 	spin_unlock_bh(&conn->lock);
 
 	skb = quic_flow_create_data_blocked_frame(limit);
-	if (skb) {
-		/* Best effort - BLOCKED frames are advisory */
-		if (!quic_conn_queue_frame(conn, skb))
-			schedule_work(&conn->tx_work);
+	if (!skb) {
+		pr_err("QUIC: failed to allocate DATA_BLOCKED frame\n");
+		return;
 	}
+
+	/*
+	 * Queue DATA_BLOCKED frame for transmission.
+	 * RFC 9000 Section 4.1: "A sender SHOULD send a DATA_BLOCKED frame
+	 * when it wishes to send data but is unable to do so due to
+	 * connection-level flow control."
+	 *
+	 * While RFC 9000 Section 4.1 also states "A DATA_BLOCKED frame does not
+	 * require any action by the receiver", it is IMPORTANT for the receiver
+	 * to know that we need more flow control credit. Silently dropping this
+	 * frame masks real flow control problems.
+	 *
+	 * Log failures to help diagnose connection-level flow control issues.
+	 */
+	if (quic_conn_queue_frame(conn, skb)) {
+		pr_warn("QUIC: failed to queue DATA_BLOCKED frame (queue full)\n");
+		kfree_skb(skb);
+		return;
+	}
+
+	/* Schedule transmission of the queued frame */
+	schedule_work(&conn->tx_work);
 }
 
 /**

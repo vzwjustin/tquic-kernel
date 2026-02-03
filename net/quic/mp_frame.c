@@ -12,6 +12,16 @@
 #include <linux/slab.h>
 #include <linux/skbuff.h>
 #include <net/quic.h>
+#include "tquic_bonding.h"
+#include "tquic_sched.h"
+
+/* Forward declarations for path management */
+extern const char *tquic_path_state_names[];
+extern int tquic_path_set_state(struct tquic_path *path,
+				enum tquic_path_state new_state);
+extern struct tquic_path *tquic_pm_get_path(struct tquic_path_manager *pm,
+					    u32 path_id);
+extern void tquic_path_put(struct tquic_path *path);
 
 /*
  * ============================================================================
@@ -81,18 +91,49 @@ int quic_frame_process_path_abandon(struct quic_connection *conn,
 		 path_id, error_code);
 
 	/*
-	 * Handle path abandonment:
-	 * - Stop sending data on this path
-	 * - Transition path to abandoned/closed state
-	 * - Notify path manager
+	 * Handle path abandonment per draft-ietf-quic-multipath:
+	 * 1. Transition path to CLOSING state
+	 * 2. Stop scheduling packets on this path
+	 * 3. Notify bonding context for state machine update
+	 * 4. Trigger failover if this was an active path
 	 */
 	if (conn->pm) {
 		struct tquic_path *path = tquic_pm_get_path(conn->pm, (u32)path_id);
+		struct tquic_bonding_ctx *bc;
 
-		if (path) {
-			tquic_path_set_state(path, TQUIC_PATH_CLOSING);
-			tquic_path_put(path);
+		if (!path) {
+			pr_warn("QUIC: PATH_ABANDON for unknown path %llu\n", path_id);
+			return offset;
 		}
+
+		/* Transition to CLOSING state */
+		if (tquic_path_set_state(path, TQUIC_PATH_CLOSING) < 0) {
+			pr_warn("QUIC: Invalid state transition to CLOSING for path %u\n",
+				path->path_id);
+		}
+
+		/*
+		 * Notify bonding context that path is being abandoned.
+		 * This triggers:
+		 * - Bonding state machine update (may transition to DEGRADED)
+		 * - Failover if this was primary path
+		 * - Weight recalculation for remaining paths
+		 */
+		bc = conn->pm->bonding;
+		if (bc) {
+			tquic_bonding_on_path_failed(bc, path);
+		}
+
+		/*
+		 * Clear path from scheduler state if it was being used.
+		 * Schedulers track active paths; this ensures no new
+		 * packets are assigned to the abandoned path.
+		 */
+		if (conn->scheduler && conn->scheduler->path_removed) {
+			conn->scheduler->path_removed(conn, path);
+		}
+
+		tquic_path_put(path);
 	}
 
 	return offset;
@@ -146,39 +187,120 @@ int quic_frame_process_path_status(struct quic_connection *conn,
 		 standby ? "PATH_STANDBY" : "PATH_AVAILABLE", path_id, seq_num);
 
 	/*
-	 * Handle path status update:
+	 * Handle path status update per draft-ietf-quic-multipath:
 	 * - PATH_STANDBY: Mark path as backup, prefer other paths for traffic
 	 * - PATH_AVAILABLE: Mark path as active, can be used for traffic
+	 *
+	 * Sequence numbers prevent reordering issues (RFC 9000 Section 13.3)
 	 */
 	if (conn->pm) {
 		struct tquic_path *path = tquic_pm_get_path(conn->pm, (u32)path_id);
+		struct tquic_bonding_ctx *bc;
+		enum tquic_path_state old_state, new_state;
+		bool state_changed = false;
 
-		if (path) {
-			enum tquic_path_state new_state;
+		if (!path) {
+			pr_warn("QUIC: PATH_STATUS for unknown path %llu\n", path_id);
+			return offset;
+		}
 
-			/*
-			 * Only apply status if sequence number is newer than
-			 * what we've seen before (prevents reordering issues).
-			 */
-			if (seq_num >= path->status_seq_num) {
-				path->status_seq_num = seq_num;
+		spin_lock_bh(&path->state_lock);
 
-				if (standby) {
-					new_state = TQUIC_PATH_STANDBY;
-					path->is_backup = true;
-				} else {
-					new_state = TQUIC_PATH_ACTIVE;
-					path->is_backup = false;
-				}
+		/*
+		 * Only apply status if sequence number is newer than
+		 * what we've seen before (prevents reordering issues).
+		 * Per draft-ietf-quic-multipath, sequence numbers MUST
+		 * be monotonically increasing.
+		 */
+		if (seq_num < path->status_seq_num) {
+			spin_unlock_bh(&path->state_lock);
+			pr_debug("QUIC: Ignoring old PATH_STATUS seq=%llu (current=%llu)\n",
+				 seq_num, path->status_seq_num);
+			tquic_path_put(path);
+			return offset;
+		}
 
-				if (path->state == TQUIC_PATH_VALIDATED ||
-				    path->state == TQUIC_PATH_ACTIVE ||
-				    path->state == TQUIC_PATH_STANDBY) {
-					tquic_path_set_state(path, new_state);
+		path->status_seq_num = seq_num;
+		old_state = path->state;
+
+		/*
+		 * Determine new state based on frame type.
+		 * Only transition if path is in a valid state.
+		 */
+		if (standby) {
+			new_state = TQUIC_PATH_STANDBY;
+			path->is_backup = true;
+		} else {
+			new_state = TQUIC_PATH_ACTIVE;
+			path->is_backup = false;
+		}
+
+		/*
+		 * Valid transitions for PATH_STATUS frames:
+		 * - VALIDATED -> ACTIVE/STANDBY
+		 * - ACTIVE <-> STANDBY
+		 */
+		if (path->state == TQUIC_PATH_VALIDATED ||
+		    path->state == TQUIC_PATH_ACTIVE ||
+		    path->state == TQUIC_PATH_STANDBY) {
+			if (old_state != new_state) {
+				path->state = new_state;
+				path->last_activity = ktime_get();
+				state_changed = true;
+
+				pr_debug("QUIC: path %u: %s via %s frame\n",
+					 path->path_id,
+					 tquic_path_state_names[new_state],
+					 standby ? "PATH_STANDBY" : "PATH_AVAILABLE");
+			}
+		} else {
+			pr_warn("QUIC: Cannot apply PATH_STATUS to path %u in state %s\n",
+				path->path_id, tquic_path_state_names[path->state]);
+		}
+
+		spin_unlock_bh(&path->state_lock);
+
+		/*
+		 * Notify bonding context and scheduler of state change.
+		 * Must be done outside spinlock to avoid deadlock.
+		 */
+		if (state_changed) {
+			bc = conn->pm->bonding;
+
+			/* Update bonding state machine */
+			if (bc) {
+				if (new_state == TQUIC_PATH_ACTIVE) {
+					/* Path became active - may trigger BONDED state */
+					tquic_bonding_on_path_validated(bc, path);
+					tquic_bonding_update_state(bc);
+				} else if (new_state == TQUIC_PATH_STANDBY) {
+					/* Path demoted to standby - recalculate weights */
+					tquic_bonding_derive_weights(bc);
+					tquic_bonding_update_state(bc);
 				}
 			}
-			tquic_path_put(path);
+
+			/* Notify scheduler of path availability change */
+			if (conn->scheduler) {
+				if (new_state == TQUIC_PATH_ACTIVE &&
+				    conn->scheduler->path_added) {
+					/* Path became available for scheduling */
+					conn->scheduler->path_added(conn, path);
+				} else if (new_state == TQUIC_PATH_STANDBY &&
+					   old_state == TQUIC_PATH_ACTIVE) {
+					/*
+					 * Path transitioned from active to standby.
+					 * Some schedulers may want to know about this
+					 * to avoid using the path for new data.
+					 */
+					if (conn->scheduler->path_removed) {
+						conn->scheduler->path_removed(conn, path);
+					}
+				}
+			}
 		}
+
+		tquic_path_put(path);
 	}
 
 	return offset;
@@ -332,20 +454,46 @@ int quic_send_path_abandon(struct quic_connection *conn, struct tquic_path *path
 			   u64 error_code)
 {
 	struct sk_buff *skb;
+	int ret;
 
 	if (!conn || !path)
 		return -EINVAL;
+
+	/* Transition path to CLOSING state */
+	ret = tquic_path_set_state(path, TQUIC_PATH_CLOSING);
+	if (ret < 0) {
+		pr_warn("QUIC: Failed to transition path %u to CLOSING: %d\n",
+			path->path_id, ret);
+		/* Continue anyway - still send the frame to peer */
+	}
 
 	skb = quic_frame_create_path_abandon(path->path_id, error_code, NULL, 0);
 	if (!skb)
 		return -ENOMEM;
 
-	if (quic_conn_queue_frame(conn, skb))
+	ret = quic_conn_queue_frame(conn, skb);
+	if (ret) {
+		kfree_skb(skb);
 		return -ENOBUFS;
+	}
+
 	schedule_work(&conn->tx_work);
 
 	pr_debug("QUIC: queued PATH_ABANDON for path %u error=%llu\n",
 		 path->path_id, error_code);
+
+	/*
+	 * Notify bonding context and scheduler that path is being abandoned.
+	 * This triggers failover and state machine updates.
+	 */
+	if (conn->pm && conn->pm->bonding) {
+		tquic_bonding_on_path_failed(conn->pm->bonding, path);
+		tquic_bonding_update_state(conn->pm->bonding);
+	}
+
+	if (conn->scheduler && conn->scheduler->path_removed) {
+		conn->scheduler->path_removed(conn, path);
+	}
 
 	return 0;
 }
@@ -363,23 +511,60 @@ int quic_send_path_standby(struct quic_connection *conn, struct tquic_path *path
 {
 	struct sk_buff *skb;
 	u64 seq_num;
+	int ret;
 
 	if (!conn || !path)
 		return -EINVAL;
 
+	/* Transition path to STANDBY state before sending frame */
+	spin_lock_bh(&path->state_lock);
+
+	/* Can only mark as standby if currently VALIDATED or ACTIVE */
+	if (path->state != TQUIC_PATH_VALIDATED &&
+	    path->state != TQUIC_PATH_ACTIVE) {
+		spin_unlock_bh(&path->state_lock);
+		pr_warn("QUIC: Cannot send PATH_STANDBY for path %u in state %s\n",
+			path->path_id, tquic_path_state_names[path->state]);
+		return -EINVAL;
+	}
+
 	/* Increment sequence number for this status update */
 	seq_num = ++path->status_seq_num;
+
+	/* Update local state */
+	path->state = TQUIC_PATH_STANDBY;
+	path->is_backup = true;
+	path->last_activity = ktime_get();
+
+	spin_unlock_bh(&path->state_lock);
 
 	skb = quic_frame_create_path_standby(path->path_id, seq_num);
 	if (!skb)
 		return -ENOMEM;
 
-	if (quic_conn_queue_frame(conn, skb))
+	ret = quic_conn_queue_frame(conn, skb);
+	if (ret) {
+		kfree_skb(skb);
 		return -ENOBUFS;
+	}
+
 	schedule_work(&conn->tx_work);
 
 	pr_debug("QUIC: queued PATH_STANDBY for path %u seq=%llu\n",
 		 path->path_id, seq_num);
+
+	/*
+	 * Notify bonding context and scheduler that path is now standby.
+	 * This ensures traffic is redirected away from this path.
+	 */
+	if (conn->pm && conn->pm->bonding) {
+		tquic_bonding_derive_weights(conn->pm->bonding);
+		tquic_bonding_update_state(conn->pm->bonding);
+	}
+
+	if (conn->scheduler && conn->scheduler->path_removed) {
+		conn->scheduler->path_removed(conn, path);
+	}
 
 	return 0;
 }
@@ -397,23 +582,64 @@ int quic_send_path_available(struct quic_connection *conn, struct tquic_path *pa
 {
 	struct sk_buff *skb;
 	u64 seq_num;
+	int ret;
 
 	if (!conn || !path)
 		return -EINVAL;
 
+	/* Transition path to ACTIVE state before sending frame */
+	spin_lock_bh(&path->state_lock);
+
+	/* Can only mark as available if currently VALIDATED or STANDBY */
+	if (path->state != TQUIC_PATH_VALIDATED &&
+	    path->state != TQUIC_PATH_STANDBY) {
+		spin_unlock_bh(&path->state_lock);
+		pr_warn("QUIC: Cannot send PATH_AVAILABLE for path %u in state %s\n",
+			path->path_id, tquic_path_state_names[path->state]);
+		return -EINVAL;
+	}
+
 	/* Increment sequence number for this status update */
 	seq_num = ++path->status_seq_num;
+
+	/* Update local state */
+	path->state = TQUIC_PATH_ACTIVE;
+	path->is_backup = false;
+	path->last_activity = ktime_get();
+
+	spin_unlock_bh(&path->state_lock);
 
 	skb = quic_frame_create_path_available(path->path_id, seq_num);
 	if (!skb)
 		return -ENOMEM;
 
-	if (quic_conn_queue_frame(conn, skb))
+	ret = quic_conn_queue_frame(conn, skb);
+	if (ret) {
+		kfree_skb(skb);
 		return -ENOBUFS;
+	}
+
 	schedule_work(&conn->tx_work);
 
 	pr_debug("QUIC: queued PATH_AVAILABLE for path %u seq=%llu\n",
 		 path->path_id, seq_num);
+
+	/*
+	 * Notify bonding context and scheduler that path is now active.
+	 * This may trigger transition to BONDED state if we now have
+	 * multiple active paths.
+	 */
+	if (conn->pm && conn->pm->bonding) {
+		struct tquic_bonding_ctx *bc = conn->pm->bonding;
+
+		tquic_bonding_on_path_validated(bc, path);
+		tquic_bonding_derive_weights(bc);
+		tquic_bonding_update_state(bc);
+	}
+
+	if (conn->scheduler && conn->scheduler->path_added) {
+		conn->scheduler->path_added(conn, path);
+	}
 
 	return 0;
 }

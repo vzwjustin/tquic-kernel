@@ -353,7 +353,7 @@ struct tquic_sched_ops tquic_sched_aggregate = {
 };
 EXPORT_SYMBOL_GPL(tquic_sched_aggregate);
 
-static int __init tquic_sched_aggregate_init(void)
+int __init tquic_sched_aggregate_init(void)
 {
 	int ret;
 
@@ -363,7 +363,7 @@ static int __init tquic_sched_aggregate_init(void)
 	return ret;
 }
 
-static void __exit tquic_sched_aggregate_exit(void)
+void __exit tquic_sched_aggregate_exit(void)
 {
 	tquic_unregister_scheduler(&tquic_sched_aggregate);
 }

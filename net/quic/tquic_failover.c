@@ -235,8 +235,16 @@ void tquic_failover_destroy(struct tquic_failover_ctx *fc)
 	rhashtable_walk_start(&iter);
 
 	while ((sp = rhashtable_walk_next(&iter)) != NULL) {
-		if (IS_ERR(sp))
+		if (IS_ERR(sp)) {
+			long err = PTR_ERR(sp);
+			if (err != -EAGAIN) {
+				pr_err_ratelimited(
+					"rhashtable walk error: %ld during destroy\n",
+					err);
+				fc->stats.rhashtable_errors++;
+			}
 			continue;
+		}
 
 		rhashtable_remove_fast(&fc->sent_packets, &sp->hash_node,
 				       tquic_sent_packet_params);
@@ -302,8 +310,14 @@ int tquic_failover_track_sent(struct tquic_failover_ctx *fc,
 		spin_unlock_bh(&fc->sent_packets_lock);
 		kfree_skb(sp->skb);
 		kfree(sp);
-		if (ret == -EEXIST)
+		if (ret == -EEXIST) {
 			pr_debug("packet %llu already tracked\n", packet_number);
+		} else {
+			pr_err_ratelimited(
+				"failed to track packet %llu: error %d\n",
+				packet_number, ret);
+			fc->stats.hash_insert_errors++;
+		}
 		return ret;
 	}
 
@@ -419,8 +433,16 @@ int tquic_failover_on_path_failed(struct tquic_failover_ctx *fc, u8 path_id)
 	rhashtable_walk_start(&iter);
 
 	while ((sp = rhashtable_walk_next(&iter)) != NULL) {
-		if (IS_ERR(sp))
+		if (IS_ERR(sp)) {
+			long err = PTR_ERR(sp);
+			if (err != -EAGAIN) {
+				pr_warn_ratelimited(
+					"rhashtable walk error: %ld during path %u failover\n",
+					err, path_id);
+				fc->stats.rhashtable_errors++;
+			}
 			continue;
+		}
 
 		if (sp->path_id == path_id && !sp->in_retx_queue) {
 			/*

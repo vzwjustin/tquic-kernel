@@ -249,12 +249,12 @@ static struct tquic_sched_ops tquic_sched_weighted = {
 	.loss_detected  = weighted_loss_detected,
 };
 
-static int __init tquic_sched_weighted_init(void)
+int __init tquic_sched_weighted_init(void)
 {
 	return tquic_register_scheduler(&tquic_sched_weighted);
 }
 
-static void __exit tquic_sched_weighted_exit(void)
+void __exit tquic_sched_weighted_exit(void)
 {
 	tquic_unregister_scheduler(&tquic_sched_weighted);
 }

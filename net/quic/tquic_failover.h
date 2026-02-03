@@ -178,6 +178,8 @@ struct tquic_failover_ctx {
 		u64		packets_retransmitted;	/* Packets retransmitted */
 		u64		path_failures;		/* Path failure events */
 		u64		failover_time_ns;	/* Total failover time */
+		u64		rhashtable_errors;	/* rhashtable walk errors */
+		u64		hash_insert_errors;	/* Hash table insertion errors */
 	} stats;
 
 	/* Back pointer */

@@ -474,7 +474,7 @@ static struct tquic_sched_ops tquic_sched_rr = {
  * Module Initialization
  * ========================================================================= */
 
-static int __init tquic_sched_minrtt_init(void)
+int __init tquic_sched_minrtt_init(void)
 {
 	int ret;
 
@@ -502,7 +502,7 @@ static int __init tquic_sched_minrtt_init(void)
 	return 0;
 }
 
-static void __exit tquic_sched_minrtt_exit(void)
+void __exit tquic_sched_minrtt_exit(void)
 {
 	pr_info("Unloading TQUIC MinRTT and Round-Robin schedulers\n");
 

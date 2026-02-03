@@ -173,6 +173,23 @@ struct quic_connection_id {
 	__u8	data[20];
 };
 
+/*
+ * QUIC preferred address per RFC 9000 Section 18.2
+ *
+ * This structure represents the server's preferred address that a client
+ * may migrate to after connection establishment. The server includes both
+ * IPv4 and IPv6 addresses; a client may use either or both.
+ */
+struct quic_preferred_address {
+	__u8	ipv4_addr[4];
+	__be16	ipv4_port;
+	__u8	ipv6_addr[16];
+	__be16	ipv6_port;
+	__u8	connection_id_len;
+	__u8	connection_id[20];		/* Max CID length per RFC 9000 */
+	__u8	stateless_reset_token[16];
+};
+
 /* QUIC transport parameters (RFC 9000 Section 18.2) */
 struct quic_transport_params {
 	__u64	original_destination_connection_id_len;
@@ -189,6 +206,7 @@ struct quic_transport_params {
 	__u64	max_ack_delay;
 	__u8	disable_active_migration;
 	__u64	preferred_address_present;
+	struct quic_preferred_address preferred_address;
 	__u64	active_connection_id_limit;
 	__u64	initial_source_connection_id_len;
 	__u64	retry_source_connection_id_len;

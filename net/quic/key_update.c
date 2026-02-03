@@ -276,19 +276,58 @@ int quic_crypto_on_key_phase_change(struct quic_connection *conn, u8 rx_key_phas
 		return -EINVAL;
 
 	/*
+	 * RFC 9001 Section 6.2: Detect consecutive key updates
+	 *
+	 * "An endpoint that receives a second update before it has sent an
+	 * acknowledgment for the packet that initiated the key update MUST
+	 * treat this as a connection error of type KEY_UPDATE_ERROR."
+	 *
+	 * If peer initiates a key update while we have one pending (and not
+	 * yet confirmed by peer), this is a consecutive update error.
+	 */
+	if (ctx->key_update_pending && rx_key_phase != ctx->key_phase) {
+		pr_err("QUIC: consecutive key update detected (pending=%u, rx=%u, current=%u)\n",
+		       ctx->key_update_pending, rx_key_phase, ctx->key_phase);
+		/*
+		 * Return KEY_UPDATE_ERROR. Caller should close connection
+		 * with error code 0x0E (KEY_UPDATE_ERROR per RFC 9001).
+		 */
+		return -EKEYREJECTED;
+	}
+
+	/*
 	 * Case 1: We initiated the key update and peer has responded with
 	 * a packet using the new key phase. Our pending state is confirmed.
+	 *
+	 * Per RFC 9001 Section 6.2: An endpoint that initiates a key update
+	 * sends with the new keys before receiving with them. When we receive
+	 * a packet with the new key phase, it confirms the peer has accepted
+	 * our update. We now update our RX keys to complete the transition.
 	 */
 	if (ctx->key_update_pending && rx_key_phase == ctx->key_phase) {
-		/* Update RX keys to match the new phase */
+		/*
+		 * Update RX keys to match the new phase.
+		 * TX keys were already updated when we initiated the update.
+		 * If RX update fails here, the connection cannot proceed as
+		 * we cannot decrypt future packets from the peer.
+		 */
 		err = quic_key_update_rx(conn);
-		if (err)
+		if (err) {
+			pr_err("QUIC: RX key update failed in confirmation phase (err=%d)\n",
+			       err);
+			/*
+			 * This is a critical failure. TX keys are already updated
+			 * but RX keys failed. Per RFC 9001, this makes the
+			 * connection unusable - we can send but not receive.
+			 * Return error to trigger connection closure.
+			 */
 			return err;
+		}
 
 		ctx->rx_key_phase = rx_key_phase;
 		ctx->key_update_pending = 0;
 
-		/* Start timer to discard old RX keys */
+		/* Start timer to discard old RX keys (RFC 9001 Section 6.1) */
 		discard_time = ktime_add_ms(ktime_get(), QUIC_KEY_DISCARD_TIMEOUT_MS);
 		quic_timer_set(conn, QUIC_TIMER_KEY_DISCARD, discard_time);
 
@@ -301,27 +340,92 @@ int quic_crypto_on_key_phase_change(struct quic_connection *conn, u8 rx_key_phas
 	 * Case 2: Peer initiated a key update. We need to:
 	 * 1. Update our RX keys to decrypt the new packet
 	 * 2. Update our TX keys to respond with the new phase
+	 *
+	 * CRITICAL: Per RFC 9001 Section 6.2, both keys must be updated
+	 * atomically to avoid asymmetric key state. If either update fails,
+	 * we must rollback to maintain key phase synchronization.
 	 */
 	if (rx_key_phase != ctx->rx_key_phase) {
-		/* Update RX keys first */
+		struct quic_crypto_secret saved_rx;
+		struct crypto_aead *saved_rx_aead_prev;
+		u8 saved_rx_key_phase;
+		u8 saved_rx_prev_valid;
+
+		/* Save current RX state for potential rollback */
+		memcpy(&saved_rx, &ctx->rx, sizeof(saved_rx));
+		saved_rx_aead_prev = ctx->rx_aead_prev;
+		saved_rx_key_phase = ctx->rx_key_phase;
+		saved_rx_prev_valid = ctx->rx_prev_valid;
+
+		/*
+		 * Update RX keys first.
+		 * This saves current keys as "previous" and derives new keys.
+		 */
 		err = quic_key_update_rx(conn);
-		if (err)
-			return err;
-
-		ctx->rx_key_phase = rx_key_phase;
-
-		/* Now update TX keys to match */
-		err = quic_key_update_tx(conn);
 		if (err) {
-			/* RX update succeeded but TX failed - problematic state */
-			pr_warn("QUIC: TX key update failed after RX update\n");
+			pr_warn("QUIC: RX key update failed, err=%d\n", err);
 			return err;
 		}
 
+		/* Update RX key phase to match peer */
+		ctx->rx_key_phase = rx_key_phase;
+
+		/*
+		 * Now update TX keys to match.
+		 * If this fails, we MUST rollback RX keys to avoid asymmetry.
+		 */
+		err = quic_key_update_tx(conn);
+		if (err) {
+			/*
+			 * TX update failed - CRITICAL: rollback RX update.
+			 * Per RFC 9001 Section 6.2, asymmetric key state causes
+			 * decryption failures and connection breakage.
+			 */
+			pr_warn("QUIC: TX key update failed after RX update, rolling back (err=%d)\n",
+				err);
+
+			/* Rollback: restore saved RX state */
+			memcpy(&ctx->rx, &saved_rx, sizeof(ctx->rx));
+			ctx->rx_key_phase = saved_rx_key_phase;
+			ctx->rx_prev_valid = saved_rx_prev_valid;
+
+			/* Free the newly allocated previous AEAD that we don't need */
+			if (ctx->rx_aead_prev && ctx->rx_aead_prev != saved_rx_aead_prev)
+				crypto_free_aead(ctx->rx_aead_prev);
+
+			/* Restore saved previous AEAD */
+			ctx->rx_aead_prev = saved_rx_aead_prev;
+
+			/*
+			 * Re-install the old RX key on the current AEAD.
+			 * This ensures decryption continues with pre-update keys.
+			 */
+			err = crypto_aead_setkey(ctx->rx_aead, ctx->rx.key,
+						 ctx->rx.key_len);
+			if (err) {
+				/*
+				 * Rollback failed - connection is now in
+				 * inconsistent state. Per RFC 9001, this is a
+				 * fatal error requiring connection termination.
+				 */
+				pr_err("QUIC: RX key rollback failed, connection unusable (err=%d)\n",
+				       err);
+				/* Return KEY_UPDATE_ERROR code */
+				return -EKEYREJECTED;
+			}
+
+			/*
+			 * Return original TX update error to caller.
+			 * The connection remains usable with old keys.
+			 */
+			return err;
+		}
+
+		/* Both updates succeeded - commit the new key phase */
 		ctx->key_phase = rx_key_phase;
 		conn->key_phase = ctx->key_phase;
 
-		/* Start timer to discard old RX keys */
+		/* Start timer to discard old RX keys (RFC 9001 Section 6.1) */
 		discard_time = ktime_add_ms(ktime_get(), QUIC_KEY_DISCARD_TIMEOUT_MS);
 		quic_timer_set(conn, QUIC_TIMER_KEY_DISCARD, discard_time);
 

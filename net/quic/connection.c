@@ -761,6 +761,128 @@ int quic_conn_rotate_dcid(struct quic_connection *conn)
 }
 
 /*
+ * quic_conn_migrate_to_preferred_address - Initiate migration to server's
+ *                                          preferred address
+ * @conn: QUIC connection
+ *
+ * RFC 9000 Section 9.6: Use of Preferred Address
+ *
+ * This function initiates path validation to the server's preferred address.
+ * The client MAY choose to use either IPv4 or IPv6, or both. The client
+ * initiates path validation to the preferred address and migrates the
+ * connection if validation succeeds.
+ *
+ * Returns 0 on success (path validation initiated), negative error code
+ * on failure. Failure to validate the preferred address does not cause
+ * connection failure per RFC 9000.
+ */
+static int quic_conn_migrate_to_preferred_address(struct quic_connection *conn)
+{
+	struct quic_preferred_address *pa;
+	struct quic_path *new_path = NULL;
+	struct sockaddr_storage remote_addr;
+	struct sockaddr_in *sin;
+	struct sockaddr_in6 *sin6;
+	struct quic_connection_id new_cid;
+	int ret;
+
+	pa = &conn->remote_params.preferred_address;
+
+	/*
+	 * Validate that we have a usable preferred address.
+	 * Per RFC 9000, at least one address family should be provided.
+	 */
+
+	/* Try IPv6 first if available (and if IPv6 is not all zeros) */
+	memset(&remote_addr, 0, sizeof(remote_addr));
+	sin6 = (struct sockaddr_in6 *)&remote_addr;
+
+	if (pa->ipv6_port != 0 &&
+	    memcmp(pa->ipv6_addr, "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0", 16) != 0) {
+		/* Use IPv6 preferred address */
+		sin6->sin6_family = AF_INET6;
+		sin6->sin6_port = pa->ipv6_port;
+		memcpy(&sin6->sin6_addr, pa->ipv6_addr, 16);
+
+		pr_debug("QUIC: Attempting migration to IPv6 preferred address\n");
+	} else if (pa->ipv4_port != 0 &&
+		   memcmp(pa->ipv4_addr, "\0\0\0\0", 4) != 0) {
+		/* Use IPv4 preferred address */
+		sin = (struct sockaddr_in *)&remote_addr;
+		sin->sin_family = AF_INET;
+		sin->sin_port = pa->ipv4_port;
+		memcpy(&sin->sin_addr, pa->ipv4_addr, 4);
+
+		pr_debug("QUIC: Attempting migration to IPv4 preferred address\n");
+	} else {
+		/* No valid address provided */
+		pr_debug("QUIC: No valid preferred address provided\n");
+		return -EINVAL;
+	}
+
+	/*
+	 * Create new path to preferred address.
+	 * The path uses the local address from the active path.
+	 */
+	if (!conn->active_path)
+		return -EINVAL;
+
+	new_path = quic_path_create(conn,
+				     (struct sockaddr *)&conn->active_path->local_addr,
+				     (struct sockaddr *)&remote_addr);
+	if (!new_path) {
+		pr_err("QUIC: Failed to create path to preferred address\n");
+		return -ENOMEM;
+	}
+
+	/* Mark this path as being for preferred address migration */
+	new_path->is_preferred_addr = 1;
+
+	/*
+	 * Add the new connection ID from preferred address.
+	 * Per RFC 9000: "The sequence number of the connection ID supplied in
+	 * the preferred_address transport parameter is 1."
+	 */
+	if (pa->connection_id_len > 0) {
+		new_cid.len = pa->connection_id_len;
+		memcpy(new_cid.data, pa->connection_id, pa->connection_id_len);
+
+		ret = quic_conn_add_peer_cid(conn, &new_cid, 1, 0,
+					      pa->stateless_reset_token);
+		if (ret < 0) {
+			pr_err("QUIC: Failed to add preferred address CID: %d\n",
+			       ret);
+			quic_path_destroy(new_path);
+			return ret;
+		}
+
+		/* Switch to the new connection ID for this path */
+		memcpy(&conn->dcid, &new_cid, sizeof(conn->dcid));
+	}
+
+	/*
+	 * Initiate path validation per RFC 9000 Section 8.2.
+	 * The connection will migrate to this path after validation succeeds.
+	 */
+	ret = quic_path_validate(new_path);
+	if (ret < 0) {
+		pr_err("QUIC: Failed to start path validation: %d\n", ret);
+		quic_path_destroy(new_path);
+		return ret;
+	}
+
+	pr_debug("QUIC: Path validation to preferred address initiated\n");
+
+	/*
+	 * Note: The actual migration (calling quic_path_migrate) happens
+	 * when the PATH_RESPONSE is received and the path is validated.
+	 * See quic_path_on_validated() for migration completion.
+	 */
+
+	return 0;
+}
+
+/*
  * Transport Parameter IDs per RFC 9000 Section 18.2
  */
 #define QUIC_TP_ORIGINAL_DESTINATION_CID		0x00
@@ -1000,11 +1122,57 @@ int quic_transport_param_parse(struct quic_connection *conn,
 			break;
 
 		case QUIC_TP_PREFERRED_ADDRESS:
+			/*
+			 * RFC 9000 Section 18.2: PREFERRED_ADDRESS transport parameter
+			 * is only sent by servers. Format (41+ bytes):
+			 *   - IPv4 Address (4 bytes)
+			 *   - IPv4 Port (2 bytes, network byte order)
+			 *   - IPv6 Address (16 bytes)
+			 *   - IPv6 Port (2 bytes, network byte order)
+			 *   - Connection ID Length (1 byte varint)
+			 *   - Connection ID (0-20 bytes)
+			 *   - Stateless Reset Token (16 bytes)
+			 */
 			if (conn->is_server)
 				return -EPROTO;
 			if (param_len < 41)
 				return -EINVAL;
-			params->preferred_address_present = 1;
+
+			/* Parse preferred address data */
+			{
+				struct quic_preferred_address *pa = &params->preferred_address;
+				const u8 *p = param_data;
+				u8 cid_len;
+
+				/* IPv4 address and port */
+				memcpy(pa->ipv4_addr, p, 4);
+				p += 4;
+				memcpy(&pa->ipv4_port, p, 2);
+				p += 2;
+
+				/* IPv6 address and port */
+				memcpy(pa->ipv6_addr, p, 16);
+				p += 16;
+				memcpy(&pa->ipv6_port, p, 2);
+				p += 2;
+
+				/* Connection ID length and data */
+				cid_len = *p++;
+				if (cid_len > 20)
+					return -EPROTO;
+				if (param_len < 41 + cid_len)
+					return -EINVAL;
+
+				pa->connection_id_len = cid_len;
+				if (cid_len > 0)
+					memcpy(pa->connection_id, p, cid_len);
+				p += cid_len;
+
+				/* Stateless reset token */
+				memcpy(pa->stateless_reset_token, p, 16);
+
+				params->preferred_address_present = 1;
+			}
 			break;
 
 		case QUIC_TP_ACTIVE_CONNECTION_ID_LIMIT:
@@ -1114,6 +1282,27 @@ int quic_transport_param_apply(struct quic_connection *conn)
 	}
 
 	conn->migration_disabled = params->disable_active_migration;
+
+	/*
+	 * RFC 9000 Section 9.6: Use of Preferred Address
+	 *
+	 * If the server has sent a preferred_address transport parameter, a
+	 * client that chooses to use the preferred address initiates path
+	 * validation (Section 8.2) of the preferred address.
+	 *
+	 * Only clients process preferred addresses; servers MUST NOT send
+	 * a preferred_address to other servers.
+	 */
+	if (!conn->is_server && params->preferred_address_present) {
+		int ret = quic_conn_migrate_to_preferred_address(conn);
+		if (ret < 0) {
+			pr_debug("QUIC: Failed to initiate preferred address migration: %d\n",
+				 ret);
+			/* Per RFC 9000: Failure to validate does not cause
+			 * connection failure; just continue on current path.
+			 */
+		}
+	}
 
 	return 0;
 }

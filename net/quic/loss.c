@@ -883,6 +883,14 @@ static void quic_loss_send_probe(struct quic_connection *conn, u8 pn_space_idx)
 				}
 				atomic64_inc(&conn->stats.packets_retransmitted);
 				return;
+			} else {
+				/* skb_clone failed - log and track the error */
+				pr_warn_ratelimited(
+					"skb_clone failed for probe retransmit, pkt_num=%llu\n",
+					pkt->pn);
+				atomic64_inc(&conn->stats.clone_failures);
+				spin_unlock_irqrestore(&pn_space->lock, flags);
+				return;
 			}
 		}
 	}
@@ -1186,6 +1194,13 @@ void quic_loss_retransmit_unacked(struct quic_connection *conn)
 					}
 					atomic64_inc(&conn->stats.packets_retransmitted);
 					spin_lock_irqsave(&pn_space->lock, flags);
+				} else {
+					/* skb_clone failed - log error and continue */
+					pr_warn_ratelimited(
+						"skb_clone failed for unacked retransmit, pkt_num=%llu\n",
+						pkt->pn);
+					atomic64_inc(&conn->stats.clone_failures);
+					/* Continue to next packet to maximize recovery */
 				}
 			}
 		}
