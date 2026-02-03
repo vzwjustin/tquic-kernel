@@ -132,10 +132,10 @@ static int tquic_stream_rmem_charge(struct sock *sk, struct sk_buff *skb)
 
 	/*
 	 * Check receive buffer limits.
-	 * Use refcount_read() for modern kernels (6.x) where sk_rmem_alloc
-	 * is refcount_t instead of atomic_t.
+	 * Note: sk_rmem_alloc is still atomic_t (only sk_wmem_alloc changed
+	 * to refcount_t in modern kernels).
 	 */
-	if (refcount_read(&sk->sk_rmem_alloc) + amt > sk->sk_rcvbuf)
+	if (atomic_read(&sk->sk_rmem_alloc) + amt > sk->sk_rcvbuf)
 		return -ENOBUFS;
 
 	sk_mem_charge(sk, amt);
