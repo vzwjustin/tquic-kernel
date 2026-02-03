@@ -25,10 +25,21 @@
 #include <net/genetlink.h>
 #include <net/netlink.h>
 #include <net/net_namespace.h>
+#include <net/netns/generic.h>
 #include <linux/in.h>
 #include <linux/in6.h>
 
 #include "multipath/tquic_sched.h"
+
+/* Event types for netlink notifications */
+enum tquic_event_type {
+	TQUIC_EVENT_CONN_CREATED = 1,
+	TQUIC_EVENT_CONN_CLOSED,
+	TQUIC_EVENT_PATH_UP,
+	TQUIC_EVENT_PATH_DOWN,
+	TQUIC_EVENT_PATH_CHANGED,
+	TQUIC_EVENT_MIGRATION,
+};
 
 /*
  * TQUIC Netlink Family Definitions
@@ -132,18 +143,18 @@ enum {
 #define TQUIC_ATTR_MAX (__TQUIC_ATTR_MAX - 1)
 
 /*
- * Path state definitions
+ * Netlink path state definitions (different from scheduler path state)
  */
-enum tquic_path_state {
-	TQUIC_PATH_STATE_UNKNOWN = 0,
-	TQUIC_PATH_STATE_VALIDATING,	/* Path validation in progress */
-	TQUIC_PATH_STATE_VALIDATED,	/* Path validated and usable */
-	TQUIC_PATH_STATE_ACTIVE,	/* Path is actively used */
-	TQUIC_PATH_STATE_STANDBY,	/* Path is standby/backup */
-	TQUIC_PATH_STATE_DEGRADED,	/* Path has degraded performance */
-	TQUIC_PATH_STATE_FAILED,	/* Path has failed */
+enum tquic_nl_path_state {
+	TQUIC_NL_PATH_STATE_UNKNOWN = 0,
+	TQUIC_NL_PATH_STATE_VALIDATING,	/* Path validation in progress */
+	TQUIC_NL_PATH_STATE_VALIDATED,	/* Path validated and usable */
+	TQUIC_NL_PATH_STATE_ACTIVE,	/* Path is actively used */
+	TQUIC_NL_PATH_STATE_STANDBY,	/* Path is standby/backup */
+	TQUIC_NL_PATH_STATE_DEGRADED,	/* Path has degraded performance */
+	TQUIC_NL_PATH_STATE_FAILED,	/* Path has failed */
 
-	__TQUIC_PATH_STATE_MAX,
+	__TQUIC_NL_PATH_STATE_MAX,
 };
 
 /*
