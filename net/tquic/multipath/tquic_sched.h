@@ -126,6 +126,13 @@ void tquic_mp_sched_notify_loss(struct tquic_connection *conn,
 				u64 lost_bytes);
 
 /*
+ * Legacy scheduler lookup - for compatibility with code using old interface
+ * Note: Returns struct tquic_sched_ops from net/tquic.h, not tquic_mp_sched_ops
+ */
+struct tquic_sched_ops;  /* Forward declare - defined in net/tquic.h */
+struct tquic_sched_ops *tquic_new_sched_find(const char *name);
+
+/*
  * Legacy compatibility macros - map old names to new mp_ prefixed names
  * for files that haven't been updated yet.
  */
