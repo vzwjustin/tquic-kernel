@@ -403,8 +403,7 @@ static int tquic_process_version_negotiation(struct tquic_connection *conn,
 	}
 
 	if (!found) {
-		pr_warn("tquic: conn %pI4->%pI4: no compatible version found (local supports v1/v2)\n",
-			&conn->local_addr, &conn->remote_addr);
+		pr_warn("tquic: conn: no compatible version found (local supports v1/v2)\n");
 		conn->state = TQUIC_CONN_CLOSED;
 		return -EPROTONOSUPPORT;
 	}
@@ -2269,8 +2268,7 @@ static int tquic_process_packet(struct tquic_connection *conn,
 			if (ctx.key_phase_bit != current_phase) {
 				int ku_ret = tquic_handle_key_phase_change(conn, ctx.key_phase_bit);
 				if (ku_ret < 0)
-					pr_warn("tquic: conn %pI4->%pI4: key phase change %u->%u failed: %d\n",
-						&conn->local_addr, &conn->remote_addr,
+					pr_warn("tquic: key phase change %u->%u failed: %d\n",
 						current_phase, ctx.key_phase_bit, ku_ret);
 			}
 			/* Track packet received for key update timing */
