@@ -83,20 +83,61 @@ struct quic_ack_frequency_state {
  * quic_ack_frequency_init - Initialize ACK_FREQUENCY state for a connection
  * @conn: The QUIC connection
  *
- * Initializes the ACK_FREQUENCY state with default values per the spec.
+ * Allocates and initializes the ACK_FREQUENCY state with default values
+ * per draft-ietf-quic-ack-frequency. The default values match RFC 9000
+ * behavior (ACK every other packet, 25ms max delay).
  */
 void quic_ack_frequency_init(struct quic_connection *conn)
 {
 	struct quic_ack_frequency_state *state;
 
-	/*
-	 * Allocate ACK_FREQUENCY state in the connection's extension data.
-	 * For now, we'll store it directly in the connection structure
-	 * once we add it to the header file.
-	 */
+	if (!conn)
+		return;
 
-	/* Initialize with defaults per draft-ietf-quic-ack-frequency */
-	/* These defaults match RFC 9000 behavior */
+	state = kzalloc(sizeof(*state), GFP_KERNEL);
+	if (!state) {
+		pr_warn("QUIC: failed to allocate ACK_FREQUENCY state\n");
+		return;
+	}
+
+	/*
+	 * Initialize with defaults per draft-ietf-quic-ack-frequency.
+	 * These defaults match RFC 9000 behavior:
+	 * - ACK every 2 ack-eliciting packets (threshold = 2)
+	 * - Max ACK delay of 25ms
+	 * - Reordering threshold of 1 (immediate ACK on reorder)
+	 */
+	state->rx_sequence = 0;
+	state->rx_ack_eliciting_threshold = QUIC_ACK_FREQ_DEFAULT_THRESHOLD;
+	state->rx_max_ack_delay_us = QUIC_ACK_FREQ_DEFAULT_MAX_DELAY_US;
+	state->rx_reordering_threshold = QUIC_ACK_FREQ_DEFAULT_REORDER_THRESHOLD;
+
+	state->tx_sequence = 0;
+	state->tx_ack_eliciting_threshold = QUIC_ACK_FREQ_DEFAULT_THRESHOLD;
+	state->tx_max_ack_delay_us = QUIC_ACK_FREQ_DEFAULT_MAX_DELAY_US;
+	state->tx_reordering_threshold = QUIC_ACK_FREQ_DEFAULT_REORDER_THRESHOLD;
+
+	state->enabled = 0;		/* Disabled until negotiated */
+	state->immediate_ack_pending = 0;
+	state->update_pending = 0;
+
+	conn->ack_freq = state;
+}
+
+/*
+ * quic_ack_frequency_destroy - Free ACK_FREQUENCY state for a connection
+ * @conn: The QUIC connection
+ *
+ * Frees the ACK_FREQUENCY state allocated by quic_ack_frequency_init().
+ * Should be called during connection teardown.
+ */
+void quic_ack_frequency_destroy(struct quic_connection *conn)
+{
+	if (!conn || !conn->ack_freq)
+		return;
+
+	kfree(conn->ack_freq);
+	conn->ack_freq = NULL;
 }
 
 /*

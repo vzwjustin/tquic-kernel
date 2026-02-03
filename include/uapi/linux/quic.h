@@ -350,7 +350,7 @@ struct quic_session_ticket {
 	__u32	max_early_data;				/* Max early data allowed */
 	__u64	lifetime;				/* Ticket lifetime in ms */
 	__u64	issued_time;				/* When ticket was issued */
-}
+};
 
 /* QUIC ioctl commands */
 #define QUIC_IOC_MAGIC		'Q'

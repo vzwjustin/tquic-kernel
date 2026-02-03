@@ -37,6 +37,7 @@ struct quic_crypto_ctx;
 struct quic_pn_space;
 struct quic_path;
 struct quic_path_pn_space;
+struct quic_ack_frequency_state;
 
 /* QUIC packet number space indices */
 #define QUIC_PN_SPACE_INITIAL		0
@@ -521,6 +522,9 @@ struct quic_connection {
 	ktime_t				time_of_last_ack_eliciting;
 	u64				time_threshold;
 	u64				packet_threshold;
+
+	/* ACK_FREQUENCY extension state (draft-ietf-quic-ack-frequency) */
+	struct quic_ack_frequency_state	*ack_freq;
 
 	/* Pending frames */
 	struct sk_buff_head		pending_frames;
