@@ -196,6 +196,20 @@ struct quic_crypto_ctx {
 	u16			cipher_type;
 	u8			key_phase:1;
 	u8			keys_available:1;
+
+	/*
+	 * Key Update Support (RFC 9001 Section 6)
+	 *
+	 * QUIC supports updating encryption keys during a connection.
+	 * When a key update occurs, we retain previous RX keys briefly
+	 * to decrypt any reordered packets sent with the old keys.
+	 */
+	struct crypto_aead	*rx_aead_prev;	/* Previous RX AEAD for reordered pkts */
+	struct quic_crypto_secret rx_prev;	/* Previous RX keys */
+	u8			rx_prev_valid:1;	/* Previous keys available */
+	u8			rx_key_phase:1;		/* Expected RX key phase */
+	u8			key_update_pending:1;	/* Awaiting ACK for key update */
+	u64			key_update_pn;		/* First PN with new keys */
 };
 
 /* QUIC congestion control state */
