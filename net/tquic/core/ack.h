@@ -112,7 +112,10 @@ struct tquic_ecn_counts {
  * @max_ack_delay: Maximum ACK delay from peer
  * @first_rtt_sample: Time of first RTT sample
  * @samples: Number of RTT samples collected
+ *
+ * Note: Primary definition is in include/net/tquic.h
  */
+#ifndef TQUIC_RTT_STATE_DEFINED
 struct tquic_rtt_state {
 	u64 latest_rtt;
 	u64 smoothed_rtt;
@@ -122,6 +125,7 @@ struct tquic_rtt_state {
 	ktime_t first_rtt_sample;
 	u32 samples;
 };
+#endif
 
 /**
  * struct tquic_ack_frame - Parsed ACK frame

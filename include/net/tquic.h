@@ -124,6 +124,7 @@ struct tquic_packet;
  * @first_rtt_sample: Time of first RTT sample
  * @samples: Number of RTT samples taken
  */
+#define TQUIC_RTT_STATE_DEFINED
 struct tquic_rtt_state {
 	u64 latest_rtt;
 	u64 smoothed_rtt;
