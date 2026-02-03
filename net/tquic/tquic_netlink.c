@@ -31,16 +31,6 @@
 
 #include "multipath/tquic_sched.h"
 
-/* Event types for netlink notifications */
-enum tquic_event_type {
-	TQUIC_EVENT_CONN_CREATED = 1,
-	TQUIC_EVENT_CONN_CLOSED,
-	TQUIC_EVENT_PATH_UP,
-	TQUIC_EVENT_PATH_DOWN,
-	TQUIC_EVENT_PATH_CHANGED,
-	TQUIC_EVENT_MIGRATION,
-};
-
 /*
  * TQUIC Netlink Family Definitions
  */
@@ -78,7 +68,7 @@ enum {
 /*
  * Event definitions (sent via multicast)
  */
-enum {
+enum tquic_event_type {
 	TQUIC_EVENT_UNSPEC,
 	TQUIC_EVENT_PATH_UP,		/* Path became available */
 	TQUIC_EVENT_PATH_DOWN,		/* Path failed */
@@ -417,7 +407,7 @@ static struct tquic_path_info *tquic_path_create(struct tquic_conn_info *conn)
 		return NULL;
 
 	refcount_set(&path->refcnt, 1);
-	path->state = TQUIC_PATH_STATE_UNKNOWN;
+	path->state = TQUIC_NL_PATH_STATE_UNKNOWN;
 	path->weight = 1;
 
 	spin_lock_bh(&conn->lock);
@@ -676,7 +666,7 @@ static int tquic_nl_cmd_path_add(struct sk_buff *skb, struct genl_info *info)
 		path->priority = nla_get_u8(info->attrs[TQUIC_ATTR_PATH_PRIORITY]);
 	if (info->attrs[TQUIC_ATTR_PATH_FLAGS])
 		path->flags = nla_get_u32(info->attrs[TQUIC_ATTR_PATH_FLAGS]);
-	WRITE_ONCE(path->state, TQUIC_PATH_STATE_VALIDATING);
+	WRITE_ONCE(path->state, TQUIC_NL_PATH_STATE_VALIDATING);
 	spin_unlock_bh(&conn->lock);
 
 	/* Build reply */
@@ -815,7 +805,7 @@ static int tquic_nl_cmd_path_set(struct sk_buff *skb, struct genl_info *info)
 	if (info->attrs[TQUIC_ATTR_PATH_STATE]) {
 		u8 state = nla_get_u8(info->attrs[TQUIC_ATTR_PATH_STATE]);
 
-		if (state >= __TQUIC_PATH_STATE_MAX) {
+		if (state >= __TQUIC_NL_PATH_STATE_MAX) {
 			tquic_path_put(path);
 			tquic_conn_put(conn);
 			NL_SET_ERR_MSG(info->extack, "Invalid path state");
