@@ -70,6 +70,12 @@ bool tquic_sysctl_prefer_v2(void);
 #define TQUIC_TIMER_KEY_DISCARD	6
 #define TQUIC_TIMER_MAX		7
 
+/* Crypto level indices */
+#define TQUIC_CRYPTO_INITIAL	0
+#define TQUIC_CRYPTO_HANDSHAKE	1
+#define TQUIC_CRYPTO_APPLICATION	2
+#define TQUIC_CRYPTO_MAX	3
+
 /* Stream limits (RFC 9000 maximum values) */
 #define TQUIC_MAX_STREAM_COUNT_BIDI	(1ULL << 60)
 #define TQUIC_MAX_STREAM_COUNT_UNI	(1ULL << 60)
@@ -106,6 +112,7 @@ struct tquic_connection;
 struct tquic_stream;
 struct tquic_path;
 struct tquic_frame;
+struct tquic_rtt_state;
 struct tquic_packet;
 struct tquic_coupled_state;
 struct tquic_client;
@@ -325,6 +332,9 @@ struct tquic_path {
 	void *cong;  /* Congestion control state */
 	struct tquic_cong_ops *cong_ops;  /* Current CC algorithm ops */
 
+	/* RTT measurement state (for loss detection) */
+	struct tquic_rtt_state *rtt;
+
 	/* Scheduler-accessible congestion control info (mirrors cong state) */
 	struct {
 		u64 smoothed_rtt_us;	/* Smoothed RTT in microseconds */
@@ -462,6 +472,7 @@ struct tquic_conn_stats {
 	u64 streams_opened;
 	u64 streams_closed;
 	ktime_t established_time;
+	atomic64_t handshake_time_us;	/* Handshake completion time */
 };
 
 /**
@@ -761,6 +772,25 @@ struct tquic_connection {
 
 	/* Crypto */
 	void *crypto_state;
+	void *crypto[TQUIC_CRYPTO_MAX];	/* Per-level crypto state */
+
+	/* Handshake state */
+	bool handshake_complete;
+	bool draining;			/* Connection is draining */
+
+	/* Packet number spaces */
+	struct tquic_pn_space *pn_spaces;	/* Array of PN spaces */
+
+	/* Connection error state */
+	char *reason;			/* Error reason string */
+	u32 reason_len;			/* Length of reason string */
+
+	/* CID management */
+	u64 next_scid_seq;		/* Next SCID sequence number */
+	u64 retire_dcid_prior_to;	/* Retire DCIDs prior to this seq */
+
+	/* Socket reference */
+	struct tquic_sock *tsk;		/* Associated TQUIC socket */
 
 	/* Scheduler */
 	void *scheduler;		/* Scheduler operations pointer */

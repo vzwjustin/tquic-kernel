@@ -609,7 +609,7 @@ void tquic_conn_set_state(struct tquic_connection *conn, enum tquic_conn_state s
 	old_state = conn->state;
 	conn->state = state;
 
-	trace_tquic_conn_state_change(tquic_trace_conn_id(&conn->scid),
+	trace_quic_conn_state_change(tquic_trace_conn_id(&conn->scid),
 				      old_state, state);
 
 	switch (state) {
@@ -620,7 +620,7 @@ void tquic_conn_set_state(struct tquic_connection *conn, enum tquic_conn_state s
 		atomic64_set(&conn->stats.handshake_time_us, ktime_to_us(ktime_get()));
 		spin_unlock_bh(&conn->lock);
 
-		trace_tquic_handshake_complete(tquic_trace_conn_id(&conn->scid),
+		trace_quic_handshake_complete(tquic_trace_conn_id(&conn->scid),
 					       atomic64_read(&conn->stats.handshake_time_us));
 
 		tquic_timer_cancel(conn, TQUIC_TIMER_HANDSHAKE);
@@ -680,11 +680,15 @@ int tquic_conn_new_cid(struct tquic_connection *conn,
 }
 
 /* Retire a connection ID */
-int tquic_conn_retire_cid(struct tquic_connection *conn, u64 seq)
+int tquic_conn_retire_cid(struct tquic_connection *conn, u64 seq, bool is_local)
 {
 	struct tquic_cid_entry *entry, *tmp;
+	struct list_head *list;
 
-	list_for_each_entry_safe(entry, tmp, &conn->scid_list, list) {
+	/* Select list based on whether it's a local or remote CID */
+	list = is_local ? &conn->scid_list : &conn->dcid_list;
+
+	list_for_each_entry_safe(entry, tmp, list, list) {
 		if (entry->seq_num == seq) {
 			tquic_cid_entry_destroy(entry);
 			return 0;
