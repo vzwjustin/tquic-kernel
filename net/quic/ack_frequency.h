@@ -69,6 +69,9 @@ struct quic_ack_frequency_state {
 /* Initialize ACK_FREQUENCY state for a connection */
 void quic_ack_frequency_init(struct quic_connection *conn);
 
+/* Free ACK_FREQUENCY state for a connection */
+void quic_ack_frequency_destroy(struct quic_connection *conn);
+
 /* Create an ACK_FREQUENCY frame */
 int quic_ack_frequency_create(struct quic_connection *conn,
 			      struct sk_buff *skb,

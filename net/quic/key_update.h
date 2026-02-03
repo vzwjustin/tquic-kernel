@@ -21,15 +21,15 @@ struct quic_crypto_ctx;
 struct sk_buff;
 
 /*
- * Extended crypto context fields for key update support.
- * These fields should be added to struct quic_crypto_ctx in include/net/quic.h:
+ * Key update support fields are defined in struct quic_crypto_ctx
+ * (include/net/quic.h):
  *
- * struct crypto_aead	*rx_aead_prev;     // Previous RX AEAD for reordered pkts
- * struct quic_crypto_secret rx_prev;      // Previous RX keys
- * u8	rx_prev_valid:1;                   // Previous keys available
- * u8	rx_key_phase:1;                    // Expected RX key phase
- * u8	key_update_pending:1;              // Awaiting ACK for key update
- * u64	key_update_pn;                     // First PN with new keys
+ * - rx_aead_prev:       Previous RX AEAD for reordered packets
+ * - rx_prev:            Previous RX keys
+ * - rx_prev_valid:      Previous keys available
+ * - rx_key_phase:       Expected RX key phase
+ * - key_update_pending: Awaiting ACK for key update
+ * - key_update_pn:      First PN with new keys
  */
 
 /*

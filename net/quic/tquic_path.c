@@ -444,7 +444,7 @@ static void tquic_cc_on_ack(struct tquic_path *path, u32 bytes_acked)
 
 	/* Notify bonding layer of ACK for scheduler feedback */
 	if (path->pm && path->pm->bonding)
-		tquic_bonding_on_ack_received(path->pm->bonding, path,
+		tquic_bonding_on_ack_received(NULL, path->pm->bonding, path,
 					      bytes_acked);
 }
 
@@ -469,7 +469,7 @@ static void tquic_cc_on_loss(struct tquic_path *path, u32 bytes_lost)
 
 	/* Notify bonding layer of loss for scheduler feedback */
 	if (path->pm && path->pm->bonding)
-		tquic_bonding_on_loss_detected(path->pm->bonding, path,
+		tquic_bonding_on_loss_detected(NULL, path->pm->bonding, path,
 					       bytes_lost);
 }
 
@@ -1697,7 +1697,9 @@ void tquic_pm_discover_paths(struct tquic_path_manager *pm)
 {
 	struct net_device *dev;
 	struct in_device *in_dev;
+	struct inet6_dev *in6_dev;
 	const struct in_ifaddr *ifa;
+	struct inet6_ifaddr *ifa6;
 	int count = 0;
 
 	if (!pm || !pm->discovery_enabled)
@@ -1729,7 +1731,24 @@ void tquic_pm_discover_paths(struct tquic_path_manager *pm)
 			}
 		}
 
-		/* IPv6 addresses would be discovered similarly */
+		/* Get IPv6 addresses */
+		in6_dev = __in6_dev_get(dev);
+		if (in6_dev) {
+			list_for_each_entry_rcu(ifa6, &in6_dev->addr_list,
+						if_list) {
+				/* Skip link-local addresses for WAN paths */
+				if (ipv6_addr_type(&ifa6->addr) &
+				    IPV6_ADDR_LINKLOCAL)
+					continue;
+
+				pr_debug("discovered interface %s addr %pI6c\n",
+					 dev->name, &ifa6->addr);
+
+				count++;
+				/* Note: actual path addition would need
+				 * remote address from connection context */
+			}
+		}
 	}
 
 	rcu_read_unlock();
