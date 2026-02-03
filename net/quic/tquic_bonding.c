@@ -494,21 +494,22 @@ void tquic_bonding_derive_weights(struct tquic_bonding_ctx *bc)
 	/*
 	 * Calculate capacity weight for each path.
 	 *
-	 * A full implementation would compute: Capacity = cwnd / RTT
-	 * (bytes per second) using per-path congestion control metrics.
-	 *
-	 * Currently uses equal weights for simplicity, which provides
-	 * fair distribution across all active paths.
+	 * Capacity is computed as: cwnd / RTT (bytes per second)
+	 * This provides throughput-proportional scheduling across paths.
 	 */
 	for (i = 0; i < count && i < TQUIC_MAX_PATHS; i++) {
+		u64 cwnd = paths[i]->cc.cwnd;
+		u64 rtt = paths[i]->cc.smoothed_rtt_us;
+
 		/*
-		 * Placeholder: assume equal capacity per path
-		 * Real implementation would be:
-		 *   u64 cwnd = paths[i]->cc.cwnd;
-		 *   u64 rtt = paths[i]->metrics.srtt;
-		 *   capacity[i] = rtt > 0 ? div64_u64(cwnd * USEC_PER_SEC, rtt) : 0;
+		 * Calculate path capacity in bytes per second.
+		 * If RTT is zero (no measurements yet), use default weight.
 		 */
-		capacity[i] = TQUIC_DEFAULT_PATH_WEIGHT;
+		if (rtt > 0 && cwnd > 0)
+			capacity[i] = div64_u64(cwnd * USEC_PER_SEC, rtt);
+		else
+			capacity[i] = TQUIC_DEFAULT_PATH_WEIGHT;
+
 		total_capacity += capacity[i];
 	}
 

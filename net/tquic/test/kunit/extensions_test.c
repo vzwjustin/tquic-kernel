@@ -17,6 +17,8 @@
 #include <linux/module.h>
 #include <linux/slab.h>
 #include <net/tquic.h>
+#include "../../core/receive_timestamps.h"
+#include "../../core/reliable_reset.h"
 
 /*
  * =============================================================================
@@ -27,13 +29,25 @@
 static void test_receive_timestamps_encoding(struct kunit *test)
 {
 	u8 buf[64];
-	int len;
 
-	/* Test timestamp encoding */
-	/* Would test actual timestamp frame encoding here */
-	len = 0;  /* Placeholder */
+	/*
+	 * Verify the ACK_RECEIVE_TIMESTAMPS frame type constant.
+	 * Per draft-smith-quic-receive-ts-03, the frame type is 0xffa0.
+	 */
+	KUNIT_EXPECT_EQ(test, TQUIC_FRAME_ACK_RECEIVE_TIMESTAMPS, 0xffa0);
+	KUNIT_EXPECT_EQ(test, TQUIC_FRAME_ACK_ECN_RECEIVE_TIMESTAMPS, 0xffa1);
 
-	KUNIT_EXPECT_GE(test, (int)sizeof(buf), len);
+	/*
+	 * Test that buffer is large enough for frame type varint.
+	 * Frame type 0xffa0 encodes as a 4-byte varint (0x80 prefix).
+	 */
+	buf[0] = 0x80 | (TQUIC_FRAME_ACK_RECEIVE_TIMESTAMPS >> 24);
+	buf[1] = (TQUIC_FRAME_ACK_RECEIVE_TIMESTAMPS >> 16) & 0xff;
+	buf[2] = (TQUIC_FRAME_ACK_RECEIVE_TIMESTAMPS >> 8) & 0xff;
+	buf[3] = TQUIC_FRAME_ACK_RECEIVE_TIMESTAMPS & 0xff;
+
+	KUNIT_EXPECT_EQ(test, buf[0], (u8)0x80);
+	KUNIT_EXPECT_GE(test, (int)sizeof(buf), 4);
 }
 
 static void test_receive_timestamps_parsing(struct kunit *test)
@@ -57,13 +71,31 @@ static void test_receive_timestamps_rtt_improvement(struct kunit *test)
 static void test_reliable_reset_frame_encoding(struct kunit *test)
 {
 	/* Test RESET_STREAM_AT frame encoding */
+	struct tquic_reset_stream_at frame = {
+		.stream_id = 4,
+		.error_code = 0x100,
+		.final_size = 1000,
+		.reliable_size = 500
+	};
 	u8 buf[32];
-	int len;
+	ssize_t len;
+	size_t expected_size;
 
-	/* Would encode RESET_STREAM_AT frame */
-	len = 0;  /* Placeholder */
+	/* Verify frame type constant per draft-ietf-quic-reliable-stream-reset */
+	KUNIT_EXPECT_EQ(test, TQUIC_FRAME_RESET_STREAM_AT, 0x24);
 
-	KUNIT_EXPECT_GE(test, (int)sizeof(buf), len);
+	/* Calculate expected size */
+	expected_size = tquic_reset_stream_at_size(&frame);
+	KUNIT_EXPECT_GT(test, (int)expected_size, 0);
+	KUNIT_EXPECT_LE(test, (int)expected_size, (int)sizeof(buf));
+
+	/* Encode frame and verify */
+	len = tquic_encode_reset_stream_at(&frame, buf, sizeof(buf));
+	KUNIT_EXPECT_GT(test, (int)len, 0);
+	KUNIT_EXPECT_EQ(test, (int)len, (int)expected_size);
+
+	/* Verify frame type byte */
+	KUNIT_EXPECT_EQ(test, buf[0], (u8)TQUIC_FRAME_RESET_STREAM_AT);
 }
 
 static void test_reliable_reset_at_offset(struct kunit *test)

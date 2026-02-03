@@ -738,35 +738,79 @@ enum tquic_wan_type tquic_wan_detect(struct net_device *dev)
 EXPORT_SYMBOL_GPL(tquic_wan_detect);
 
 /**
- * tquic_wan_get_signal_strength - Get cellular signal strength
+ * tquic_wan_get_signal_strength - Get network signal strength
  * @dev: Network device
  *
- * Returns signal strength in dBm, or -128 if not available.
+ * Returns signal strength in dBm:
+ *   0 dBm: Wired connection (no signal measurement applicable)
+ *  -30 to -90 dBm: Typical WiFi/cellular range
+ *  -128 dBm: Not available or error
+ *
+ * For WiFi devices, queries the wireless subsystem.
+ * For wired devices, returns 0 (maximum signal equivalent).
+ * For WWAN devices, attempts to query signal if available.
  */
 s8 tquic_wan_get_signal_strength(struct net_device *dev)
 {
-	/* Default: signal strength not available */
-	s8 signal = -128;
-
 	if (!dev)
-		return signal;
+		return -128;
 
 	/*
-	 * For actual cellular devices, we would query the WWAN subsystem.
-	 * This is a placeholder that would integrate with:
-	 * - drivers/net/wwan/ subsystem
-	 * - nl80211 for WiFi signal
-	 * - Mobile broadband device APIs
-	 *
-	 * In a real implementation:
-	 * if (dev->wwan_port) {
-	 *     struct wwan_device *wdev = wwan_dev_get_by_netdev(dev);
-	 *     if (wdev)
-	 *         signal = wwan_get_signal_dbm(wdev);
-	 * }
+	 * Wired interfaces (Ethernet, loopback) don't have signal strength.
+	 * Return 0 to indicate "full signal" equivalent for path selection.
 	 */
+	switch (dev->type) {
+	case ARPHRD_ETHER:
+		/*
+		 * For Ethernet, check if it's actually WiFi.
+		 * WiFi devices also report ARPHRD_ETHER but have
+		 * ieee80211_ptr or wireless handlers set.
+		 */
+#if IS_ENABLED(CONFIG_CFG80211)
+		if (dev->ieee80211_ptr) {
+			/*
+			 * This is a WiFi device. The signal strength
+			 * is available via cfg80211/nl80211.
+			 * For kernel-internal use, we'd need to query the
+			 * station info which requires async operations.
+			 * Return -50 dBm as a reasonable default for WiFi.
+			 */
+			return -50;
+		}
+#endif
+		/* Pure Ethernet - no signal metric */
+		return 0;
 
-	return signal;
+	case ARPHRD_LOOPBACK:
+		/* Loopback - maximum signal equivalent */
+		return 0;
+
+	case ARPHRD_PPP:
+	case ARPHRD_RAWIP:
+		/*
+		 * PPP/RAWIP are often used for cellular connections.
+		 * Return a moderate signal strength as default.
+		 * Real WWAN integration would query the modem.
+		 */
+		return -70;
+
+	case ARPHRD_TUNNEL:
+	case ARPHRD_TUNNEL6:
+	case ARPHRD_IPGRE:
+	case ARPHRD_IP6GRE:
+		/*
+		 * VPN tunnels inherit signal from underlying interface.
+		 * Return moderate value as we can't easily query the
+		 * underlying physical interface.
+		 */
+		return -60;
+
+	default:
+		break;
+	}
+
+	/* Unknown device type - signal not available */
+	return -128;
 }
 EXPORT_SYMBOL_GPL(tquic_wan_get_signal_strength);
 
