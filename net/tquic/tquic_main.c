@@ -39,6 +39,10 @@
 #include "tquic_stateless_reset.h"
 #include "tquic_token.h"
 
+/* Forward declarations for ACK frequency module (in tquic_ack_frequency.c) */
+extern int tquic_ack_freq_module_init(void);
+extern void tquic_ack_freq_module_exit(void);
+
 /* Module info */
 MODULE_AUTHOR("Linux Foundation");
 MODULE_DESCRIPTION("TQUIC: WAN Bonding over QUIC");
@@ -177,14 +181,14 @@ void tquic_conn_destroy(struct tquic_connection *conn)
 		while ((skb = skb_dequeue(&stream->send_buf)) != NULL) {
 			if (conn->sk) {
 				sk_mem_uncharge(conn->sk, skb->truesize);
-				atomic_sub(skb->truesize, &conn->sk->sk_wmem_alloc);
+				/* sk_wmem_alloc handled by skb destructor */
 			}
 			kfree_skb(skb);
 		}
 		while ((skb = skb_dequeue(&stream->recv_buf)) != NULL) {
 			if (conn->sk) {
 				sk_mem_uncharge(conn->sk, skb->truesize);
-				atomic_sub(skb->truesize, &conn->sk->sk_rmem_alloc);
+				/* sk_rmem_alloc handled by skb destructor */
 			}
 			kfree_skb(skb);
 		}
@@ -579,14 +583,14 @@ void tquic_stream_close(struct tquic_stream *stream)
 	while ((skb = skb_dequeue(&stream->send_buf)) != NULL) {
 		if (conn->sk) {
 			sk_mem_uncharge(conn->sk, skb->truesize);
-			atomic_sub(skb->truesize, &conn->sk->sk_wmem_alloc);
+			/* sk_wmem_alloc handled by skb destructor */
 		}
 		kfree_skb(skb);
 	}
 	while ((skb = skb_dequeue(&stream->recv_buf)) != NULL) {
 		if (conn->sk) {
 			sk_mem_uncharge(conn->sk, skb->truesize);
-			atomic_sub(skb->truesize, &conn->sk->sk_rmem_alloc);
+			/* sk_rmem_alloc handled by skb destructor */
 		}
 		kfree_skb(skb);
 	}

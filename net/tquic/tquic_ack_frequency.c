@@ -278,48 +278,16 @@ EXPORT_SYMBOL_GPL(tquic_ack_freq_conn_is_enabled);
  * =============================================================================
  */
 
-/**
- * tquic_ack_freq_init - Legacy: Initialize ACK frequency state
- * @conn: Connection to initialize
- *
- * This is the legacy API that maps to tquic_ack_freq_conn_init().
+/*
+ * Legacy wrapper functions removed - they conflicted with core API.
+ * Use the _conn suffix versions:
+ *   - tquic_ack_freq_conn_init()
+ *   - tquic_ack_freq_conn_cleanup()
+ *   - tquic_ack_freq_conn_enable()
+ *   - tquic_ack_freq_conn_is_enabled()
  */
-int tquic_ack_freq_init(struct tquic_connection *conn)
-{
-	return tquic_ack_freq_conn_init(conn);
-}
-EXPORT_SYMBOL_GPL(tquic_ack_freq_init);
 
-/**
- * tquic_ack_freq_cleanup - Legacy: Clean up ACK frequency state
- * @conn: Connection to clean up
- */
-void tquic_ack_freq_cleanup(struct tquic_connection *conn)
-{
-	tquic_ack_freq_conn_cleanup(conn);
-}
-EXPORT_SYMBOL_GPL(tquic_ack_freq_cleanup);
-
-/**
- * tquic_ack_freq_enable - Legacy: Enable ACK frequency extension
- * @conn: Connection
- * @peer_min_ack_delay: Peer's min_ack_delay transport parameter
- */
-void tquic_ack_freq_enable(struct tquic_connection *conn, u64 peer_min_ack_delay)
-{
-	tquic_ack_freq_conn_enable(conn, peer_min_ack_delay);
-}
-EXPORT_SYMBOL_GPL(tquic_ack_freq_enable);
-
-/**
- * tquic_ack_freq_is_enabled - Legacy: Check if ACK frequency is enabled
- * @conn: Connection to check
- */
-bool tquic_ack_freq_is_enabled(struct tquic_connection *conn)
-{
-	return tquic_ack_freq_conn_is_enabled(conn);
-}
-EXPORT_SYMBOL_GPL(tquic_ack_freq_is_enabled);
+/* tquic_ack_freq_conn_is_enabled is already defined above */
 
 /*
  * =============================================================================
@@ -993,13 +961,14 @@ int tquic_ack_freq_request_immediate_ack(struct tquic_connection *conn)
 	if (!conn)
 		return -EINVAL;
 
-	if (!tquic_ack_freq_is_enabled(conn))
+	if (!tquic_ack_freq_conn_is_enabled(conn))
 		return -EOPNOTSUPP;
 
 	state = conn_get_ack_freq_state(conn);
 	if (state) {
-		/* Use core implementation */
-		return tquic_ack_freq_request_immediate_ack(state);
+		/* Request immediate ACK by setting the flag directly */
+		state->immediate_ack_request = true;
+		return 0;
 	}
 
 	pr_debug("tquic: scheduled IMMEDIATE_ACK request\n");
