@@ -22,8 +22,7 @@ obj-m += tquic_l4s.o
 obj-m += tquic_accecn.o
 
 # Main TQUIC module - consolidated for out-of-tree build
-# Note: core/stream.c, core/cid.c, core/ack_frequency.c have duplicates
-# in top-level files, so we use top-level versions.
+# This must match the Makefile tquic-y list for consistency
 tquic-y := \
 	tquic_main.o \
 	tquic_proto.o \
@@ -52,32 +51,86 @@ tquic-y := \
 	tquic_preferred_addr.o \
 	tquic_qos.o \
 	tquic_tunnel.o \
+	tquic_ratelimit.o \
+	rate_limit.o \
 	grease.o \
 	tquic_ack_frequency.o \
+	security_hardening.o \
 	cong/tquic_cong.o \
 	cong/persistent_cong.o \
-	cong/coupled.o \
+	quic_socket.o \
+	quic_timer.o \
+	quic_stream.o \
+	quic_sysctl.o \
+	quic_offload.o \
 	core/varint.o \
 	core/connection.o \
-	core/ack.o \
+	core/stream.o \
 	core/frame.o \
 	core/packet.o \
+	core/ack.o \
+	core/ack_frequency.o \
 	core/flow_control.o \
 	core/transport_params.o \
-	crypto/tls.o \
-	crypto/header_protection.o \
-	crypto/key_update.o \
-	crypto/zero_rtt.o \
+	core/cid.o \
+	core/address_discovery.o \
+	core/receive_timestamps.o \
+	core/reliable_reset.o \
+	core/one_way_delay.o \
+	core/additional_addresses.o \
+	core/quic_protocol.o \
+	core/quic_connection.o \
+	core/quic_crypto.o \
+	core/quic_packet.o \
+	core/quic_output.o \
+	core/quic_cong.o \
+	core/quic_ecn.o \
+	core/quic_flow.o \
+	core/quic_loss.o \
+	core/quic_path.o \
+	core/quic_ack.o \
+	core/quic_ack_frequency.o \
+	core/quic_key_update.o \
+	core/mp_frame.o \
+	core/packet_coalesce_fix.o \
+	core/early_data.o \
+	core/priority.o \
 	bond/bonding.o \
+	bond/tquic_bonding.o \
+	bond/tquic_failover.o \
+	bond/tquic_path.o \
+	bond/tquic_reorder.o \
+	bond/cong_coupled.o \
 	pm/pm_types.o \
 	pm/pm_kernel.o \
 	pm/path_manager.o \
 	pm/path_validation.o \
+	pm/nat_keepalive.o \
+	pm/nat_lifecycle.o \
+	pm/pm_module.o \
 	sched/scheduler.o \
 	sched/reorder.o \
+	sched/deadline_scheduler.o \
+	sched/deadline_aware.o \
 	multipath/mp_frame.o \
 	multipath/mp_ack.o \
-	multipath/path_abandon.o
+	multipath/mp_deadline.o \
+	multipath/path_abandon.o \
+	multipath/multipath_module.o \
+	multipath/tquic_scheduler.o \
+	multipath/sched_minrtt.o \
+	multipath/sched_aggregate.o \
+	multipath/sched_weighted.o \
+	multipath/sched_blest.o \
+	multipath/sched_ecf.o \
+	crypto/tls.o \
+	crypto/header_protection.o \
+	crypto/key_update.o \
+	crypto/extended_key_update.o \
+	crypto/zero_rtt.o \
+	crypto/handshake.o \
+	crypto/crypto_module.o \
+	crypto/hw_offload.o
 
 # Congestion Control algorithms (standalone modules)
 tquic_cubic-y := cong/cubic.o
