@@ -30,7 +30,8 @@
 #include "grease.h"
 #include "io_uring.h"
 #include "napi.h"
-#include "tquic_ack_frequency.h"
+/* Use core ack_frequency.h instead of wrapper to avoid conflicting declarations */
+#include "core/ack_frequency.h"
 #include "tquic_preferred_addr.h"
 #include "rate_limit.h"
 #include "tquic_ratelimit.h"

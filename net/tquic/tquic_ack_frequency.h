@@ -117,12 +117,12 @@ bool tquic_ack_freq_conn_is_enabled(struct tquic_connection *conn);
  * =============================================================================
  */
 
-/* These functions are kept for backward compatibility but use the new core */
+/* Connection-level wrappers - use _conn suffix to avoid conflicts with core API */
 
-int tquic_ack_freq_init(struct tquic_connection *conn);
-void tquic_ack_freq_cleanup(struct tquic_connection *conn);
-void tquic_ack_freq_enable(struct tquic_connection *conn, u64 peer_min_ack_delay);
-bool tquic_ack_freq_is_enabled(struct tquic_connection *conn);
+int tquic_ack_freq_conn_init(struct tquic_connection *conn);
+void tquic_ack_freq_conn_cleanup(struct tquic_connection *conn);
+void tquic_ack_freq_conn_enable(struct tquic_connection *conn, u64 peer_min_ack_delay);
+bool tquic_ack_freq_conn_is_enabled(struct tquic_connection *conn);
 
 /*
  * =============================================================================
