@@ -22,7 +22,6 @@
 
 #include <linux/netdevice.h>
 #include <linux/skbuff.h>
-#include <linux/napi.h>
 #include <linux/percpu.h>
 #include <net/busy_poll.h>
 

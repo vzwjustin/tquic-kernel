@@ -657,8 +657,9 @@ struct tquic_connection {
 	 * Result of transport parameter negotiation between endpoints.
 	 * Contains the effective values for flow control, stream limits,
 	 * and extension support after applying negotiation rules.
+	 * Allocated separately to avoid header dependency on transport_params.h
 	 */
-	struct tquic_negotiated_params negotiated_params;
+	struct tquic_negotiated_params *negotiated_params;
 
 	/*
 	 * BDP Frame Extension state (draft-kuhn-quic-bdpframe-extension-05)
