@@ -32,6 +32,8 @@ TQUIC has undergone a comprehensive security audit addressing **68 distinct issu
 
 ### Protocol Completeness
 All stub implementations and placeholders have been replaced with production code:
+- ✅ Module wiring complete: crypto, multipath, MASQUE, HTTP/3, path manager,
+  qlog/tracepoints, QUIC-LB, FEC, AF_XDP, and netfilter initialize on load
 - ✅ ECN marking and feedback (RFC 9000 §13.4)
 - ✅ 0-RTT early data support with anti-replay
 - ✅ Key update mechanism (RFC 9001 §5.6)
@@ -209,7 +211,7 @@ See [CLAUDE.md](CLAUDE.md) for development workflow and coding standards.
 - **Path Creation Limits**: Maximum 256 paths per connection (TQUIC_MAX_PATHS_PER_CONN)
 - **Queue Bounds**: Limited pending_frames and receive queue sizes
 - **Anti-Amplification**: RFC 9000 amplification limit enforcement (3x ratio)
-- **Connection Rate Limiting**: Per-IP and global limits
+- **Connection Rate Limiting**: Token-bucket fast path + cookie validation (per-IP + global)
 - **PATH_CHALLENGE Flooding**: Rate limiting with crypto-grade RNG
 
 #### Protocol Security
@@ -237,6 +239,7 @@ See [CLAUDE.md](CLAUDE.md) for development workflow and coding standards.
 - **sock_diag Support**: `ss` command visibility
 - **Sysctl Interface**: `/proc/sys/net/tquic/`
 - **Netlink Interface**: Userspace control plane
+- **Subsystem Init/Exit**: Auto-initialized when enabled via Kconfig
 - **Per-Namespace Isolation**: Full netns support
 
 ## Building

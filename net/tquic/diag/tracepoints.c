@@ -38,7 +38,9 @@
 #include <linux/kernel.h>
 #include <linux/slab.h>
 #include <net/tquic.h>
+#include <net/net_namespace.h>
 
+#include "path_metrics.h"
 /*
  * =============================================================================
  * Tracepoint Implementations
@@ -585,6 +587,12 @@ struct tquic_bpf_iter_path {
 
 static int __init tquic_tracepoints_init(void)
 {
+	int ret;
+
+	ret = tquic_path_metrics_init(&init_net);
+	if (ret)
+		return ret;
+
 	pr_info("tquic: tracepoints module loaded\n");
 	return 0;
 }
@@ -592,6 +600,7 @@ static int __init tquic_tracepoints_init(void)
 static void __exit tquic_tracepoints_exit(void)
 {
 	pr_info("tquic: tracepoints module unloaded\n");
+	tquic_path_metrics_exit(&init_net);
 }
 
 module_init(tquic_tracepoints_init);
