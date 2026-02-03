@@ -71,9 +71,8 @@ tquic-y += \
 # Tracing support
 tquic-$(CONFIG_TRACEPOINTS) += diag/trace.o
 
-# Core protocol components - consolidated from net/quic
-obj-$(CONFIG_TQUIC_CORE) += tquic_core.o
-tquic_core-y := \
+# Core protocol components - always included in main module for out-of-tree builds
+tquic-y += \
 	core/varint.o \
 	core/connection.o \
 	core/stream.o \
@@ -107,9 +106,12 @@ tquic_core-y := \
 	core/early_data.o \
 	core/priority.o
 
-# WAN Bonding components - consolidated from net/quic
-obj-$(CONFIG_TQUIC_WAN_BONDING) += tquic_bond.o
-tquic_bond-y := \
+# Optional separate core module (if CONFIG_TQUIC_CORE=m)
+obj-$(CONFIG_TQUIC_CORE) += tquic_core.o
+tquic_core-y := $(tquic-y)
+
+# WAN Bonding components - always included for out-of-tree builds
+tquic-y += \
 	bond/bonding.o \
 	bond/tquic_bonding.o \
 	bond/tquic_failover.o \
@@ -117,9 +119,8 @@ tquic_bond-y := \
 	bond/tquic_reorder.o \
 	bond/cong_coupled.o
 
-# Path Manager
-obj-$(CONFIG_TQUIC_PATH_MANAGER) += tquic_pm.o
-tquic_pm-y := \
+# Path Manager - always included for out-of-tree builds
+tquic-y += \
 	pm/pm_types.o \
 	pm/pm_kernel.o \
 	pm/path_manager.o \
@@ -128,19 +129,27 @@ tquic_pm-y := \
 	pm/nat_lifecycle.o \
 	pm/pm_module.o
 
-# Path Manager Netlink interface (optional)
-tquic_pm-$(CONFIG_TQUIC_PM_NETLINK) += pm/pm_netlink.o
-
-# Path Manager Userspace interface (optional)
-tquic_pm-$(CONFIG_TQUIC_PM_USERSPACE) += pm/pm_userspace.o
-
-# Packet Scheduler
-obj-$(CONFIG_TQUIC_SCHEDULER) += tquic_sched.o
-tquic_sched-y := \
+# Packet Scheduler - always included for out-of-tree builds
+tquic-y += \
 	sched/scheduler.o \
 	sched/reorder.o \
 	sched/deadline_scheduler.o \
 	sched/deadline_aware.o
+
+# Optional separate modules (if corresponding CONFIG is =m)
+obj-$(CONFIG_TQUIC_WAN_BONDING) += tquic_bond.o
+tquic_bond-y := bond/bonding.o bond/tquic_bonding.o bond/tquic_failover.o \
+	bond/tquic_path.o bond/tquic_reorder.o bond/cong_coupled.o
+
+obj-$(CONFIG_TQUIC_PATH_MANAGER) += tquic_pm.o
+tquic_pm-y := pm/pm_types.o pm/pm_kernel.o pm/path_manager.o \
+	pm/path_validation.o pm/nat_keepalive.o pm/nat_lifecycle.o pm/pm_module.o
+tquic_pm-$(CONFIG_TQUIC_PM_NETLINK) += pm/pm_netlink.o
+tquic_pm-$(CONFIG_TQUIC_PM_USERSPACE) += pm/pm_userspace.o
+
+obj-$(CONFIG_TQUIC_SCHEDULER) += tquic_sched.o
+tquic_sched-y := sched/scheduler.o sched/reorder.o \
+	sched/deadline_scheduler.o sched/deadline_aware.o
 
 # Congestion Control
 obj-$(CONFIG_TQUIC_CONG_CUBIC) += tquic_cubic.o
