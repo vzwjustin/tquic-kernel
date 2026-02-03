@@ -1743,16 +1743,16 @@ EXPORT_SYMBOL_GPL(tquic_path_update_metrics);
  * @tx_bytes: Bytes transmitted
  * @rx_bytes: Bytes received
  */
-void tquic_path_update_stats(struct tquic_path_info *path,
-			     u64 tx_packets, u64 rx_packets,
-			     u64 tx_bytes, u64 rx_bytes)
+void tquic_path_info_update_stats(struct tquic_path_info *path,
+				  u64 tx_packets, u64 rx_packets,
+				  u64 tx_bytes, u64 rx_bytes)
 {
 	WRITE_ONCE(path->tx_packets, tx_packets);
 	WRITE_ONCE(path->rx_packets, rx_packets);
 	WRITE_ONCE(path->tx_bytes, tx_bytes);
 	WRITE_ONCE(path->rx_bytes, rx_bytes);
 }
-EXPORT_SYMBOL_GPL(tquic_path_update_stats);
+EXPORT_SYMBOL_GPL(tquic_path_info_update_stats);
 
 /* Module metadata */
 MODULE_LICENSE("GPL");
