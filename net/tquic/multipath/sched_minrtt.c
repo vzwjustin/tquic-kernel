@@ -136,7 +136,7 @@ static void minrtt_release(struct tquic_connection *conn)
  * Returns 0 on success, -EINVAL if no state, -ENOENT if no paths.
  */
 static int minrtt_get_path(struct tquic_connection *conn,
-			   struct tquic_sched_path_result *result,
+			   struct tquic_mp_sched_path_result *result,
 			   u32 flags)
 {
 	struct minrtt_sched_data *sd = conn->sched_priv;
@@ -334,7 +334,7 @@ static void minrtt_loss_detected(struct tquic_connection *conn,
 /**
  * MinRTT scheduler operations structure
  */
-static struct tquic_sched_ops tquic_sched_minrtt = {
+static struct tquic_mp_sched_ops tquic_sched_minrtt = {
 	.name		= "minrtt",
 	.owner		= THIS_MODULE,
 	.get_path	= minrtt_get_path,
@@ -405,7 +405,7 @@ static void rr_release(struct tquic_connection *conn)
  * Returns 0 on success, -EINVAL if no state, -ENOENT if no active paths.
  */
 static int rr_get_path(struct tquic_connection *conn,
-		       struct tquic_sched_path_result *result,
+		       struct tquic_mp_sched_path_result *result,
 		       u32 flags)
 {
 	struct rr_sched_data *rd = conn->sched_priv;
@@ -463,7 +463,7 @@ static int rr_get_path(struct tquic_connection *conn,
 /**
  * Round-robin scheduler operations structure
  */
-static struct tquic_sched_ops tquic_sched_rr = {
+static struct tquic_mp_sched_ops tquic_sched_rr = {
 	.name		= "rr",
 	.owner		= THIS_MODULE,
 	.get_path	= rr_get_path,
@@ -482,17 +482,17 @@ int __init tquic_sched_minrtt_init(void)
 	pr_info("Initializing TQUIC MinRTT and Round-Robin schedulers\n");
 
 	/* Register MinRTT scheduler */
-	ret = tquic_register_scheduler(&tquic_sched_minrtt);
+	ret = tquic_mp_register_scheduler(&tquic_sched_minrtt);
 	if (ret) {
 		pr_err("Failed to register minrtt scheduler: %d\n", ret);
 		return ret;
 	}
 
 	/* Register Round-Robin scheduler */
-	ret = tquic_register_scheduler(&tquic_sched_rr);
+	ret = tquic_mp_register_scheduler(&tquic_sched_rr);
 	if (ret) {
 		pr_err("Failed to register rr scheduler: %d\n", ret);
-		tquic_unregister_scheduler(&tquic_sched_minrtt);
+		tquic_mp_unregister_scheduler(&tquic_sched_minrtt);
 		return ret;
 	}
 
@@ -507,8 +507,8 @@ void __exit tquic_sched_minrtt_exit(void)
 {
 	pr_info("Unloading TQUIC MinRTT and Round-Robin schedulers\n");
 
-	tquic_unregister_scheduler(&tquic_sched_rr);
-	tquic_unregister_scheduler(&tquic_sched_minrtt);
+	tquic_mp_unregister_scheduler(&tquic_sched_rr);
+	tquic_mp_unregister_scheduler(&tquic_sched_minrtt);
 }
 
 /* Note: module_init/exit handled by main protocol.c */

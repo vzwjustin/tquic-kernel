@@ -253,10 +253,20 @@ struct tquic_path {
 	void *cong;  /* Congestion control state */
 	struct tquic_cong_ops *cong_ops;  /* Current CC algorithm ops */
 
+	/* Scheduler-accessible congestion control info (mirrors cong state) */
+	struct {
+		u64 smoothed_rtt_us;	/* Smoothed RTT in microseconds */
+		u64 rtt_var_us;		/* RTT variance */
+		u64 min_rtt_us;		/* Minimum RTT observed */
+		u32 cwnd;		/* Congestion window (bytes) */
+		u32 bytes_in_flight;	/* Bytes currently in flight */
+	} cc;
+
 	u32 mtu;
 	u8 priority;
 	u8 weight;
 	bool schedulable;		/* Can be selected by scheduler */
+	int ifindex;			/* Network interface index */
 
 	struct net_device *dev;		/* Interface for this path */
 	ktime_t last_activity;
@@ -467,7 +477,8 @@ struct tquic_connection {
 	void *crypto_state;
 
 	/* Scheduler */
-	void *scheduler;
+	void *scheduler;		/* Scheduler operations pointer */
+	void *sched_priv;		/* Scheduler per-connection private data */
 
 	/* Connection state machine (extended state) */
 	void *state_machine;
