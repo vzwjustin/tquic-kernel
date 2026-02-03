@@ -782,8 +782,11 @@ struct tquic_connection {
 	struct tquic_pn_space *pn_spaces;	/* Array of PN spaces */
 
 	/* Connection error state */
-	char *reason;			/* Error reason string */
-	u32 reason_len;			/* Length of reason string */
+	u64 error_code;			/* QUIC error code for close */
+	bool app_error;			/* True if application error */
+	char *reason;			/* Error reason string (deprecated) */
+	u32 reason_len;			/* Length of reason string (deprecated) */
+	char *reason_phrase;		/* Error reason phrase */
 
 	/* CID management */
 	u64 next_scid_seq;		/* Next SCID sequence number */
@@ -1221,6 +1224,16 @@ struct tquic_sock {
 		char expected_hostname[256]; /* Override hostname for matching */
 		u8 expected_hostname_len;
 	} cert_verify;
+
+	/* Configuration */
+	struct {
+		u32 handshake_timeout_ms;	/* Handshake timeout */
+		u32 idle_timeout_ms;		/* Idle timeout */
+		u32 max_paths;			/* Maximum paths */
+	} config;
+
+	/* Event wait queue */
+	wait_queue_head_t event_wait;
 };
 
 static inline struct tquic_sock *tquic_sk(const struct sock *sk)
@@ -2353,6 +2366,12 @@ struct tquic_pn_space {
 	spinlock_t lock;		/* Per-space lock */
 };
 #endif /* TQUIC_PN_SPACE_DEFINED */
+
+/* RTT measurement and loss detection */
+u32 tquic_rtt_pto(struct tquic_rtt_state *rtt);
+
+/* Crypto state management */
+void tquic_crypto_destroy(void *crypto);
 
 /* Timer state lifecycle */
 struct tquic_timer_state *tquic_timer_state_alloc(struct tquic_connection *conn);

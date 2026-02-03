@@ -818,8 +818,8 @@ static int tquic_conn_migrate_to_preferred_address(struct tquic_connection *conn
 		return -EINVAL;
 
 	new_path = tquic_path_create(conn,
-				     (struct sockaddr *)&conn->active_path->local_addr,
-				     (struct sockaddr *)&remote_addr);
+				     &conn->active_path->local_addr,
+				     &remote_addr);
 	if (!new_path) {
 		pr_err("TQUIC: Failed to create path to preferred address\n");
 		return -ENOMEM;
