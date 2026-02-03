@@ -26,6 +26,15 @@
 #include "transport_params.h"
 
 /*
+ * Forward declarations for internal functions defined at end of file
+ */
+static struct tquic_stream *tquic_stream_lookup_internal(struct tquic_connection *conn,
+							 u64 stream_id);
+static int tquic_queue_control_frame(struct tquic_connection *conn,
+				     u8 *buf, size_t len);
+static void tquic_schedule_transmit(struct tquic_connection *conn);
+
+/*
  * =============================================================================
  * VARINT HELPERS (local to this file)
  * =============================================================================
@@ -844,8 +853,8 @@ EXPORT_SYMBOL_GPL(tquic_set_reliable_reset_support);
  * This is an internal helper that assumes the caller holds conn->lock.
  * Returns the stream or NULL if not found.
  */
-struct tquic_stream *tquic_stream_lookup_internal(struct tquic_connection *conn,
-						  u64 stream_id)
+static struct tquic_stream *tquic_stream_lookup_internal(struct tquic_connection *conn,
+							 u64 stream_id)
 {
 	struct rb_node *node;
 	struct tquic_stream *stream;
@@ -879,8 +888,8 @@ struct tquic_stream *tquic_stream_lookup_internal(struct tquic_connection *conn,
  *
  * Returns: 0 on success, negative error code on failure
  */
-int tquic_queue_control_frame(struct tquic_connection *conn,
-			      u8 *buf, size_t len)
+static int tquic_queue_control_frame(struct tquic_connection *conn,
+				     u8 *buf, size_t len)
 {
 	struct sk_buff *skb;
 
@@ -924,7 +933,7 @@ int tquic_queue_control_frame(struct tquic_connection *conn,
  *
  * Triggers the connection's transmit path to send pending frames.
  */
-void tquic_schedule_transmit(struct tquic_connection *conn)
+static void tquic_schedule_transmit(struct tquic_connection *conn)
 {
 	if (!conn)
 		return;

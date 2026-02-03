@@ -127,19 +127,9 @@ struct tquic_stream_data_range {
 	struct list_head list;
 };
 
-/**
- * struct tquic_ack_range - A range of acknowledged packet numbers
- * @start: First packet number in range (inclusive)
- * @end: Last packet number in range (inclusive)
- * @list: List linkage
- */
-struct tquic_ack_range {
-	u64 start;
-	u64 end;
-	struct list_head list;
-};
-
 /*
+ * struct tquic_ack_range is defined in ack.h
+ *
  * The following structs are defined in ack.h:
  *   - struct tquic_ecn_counts
  *   - struct tquic_rtt_state
