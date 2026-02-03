@@ -429,7 +429,7 @@ struct tquic_connection *tquic_conn_create(struct tquic_sock *tsk, bool is_serve
 
 	refcount_set(&conn->refcnt, 1);
 
-	trace_tquic_conn_create(tquic_trace_conn_id(&conn->scid), is_server);
+	trace_quic_conn_create(quic_trace_conn_id(&conn->scid), is_server);
 
 	return conn;
 
@@ -451,8 +451,8 @@ void tquic_conn_destroy(struct tquic_connection *conn)
 	if (!conn)
 		return;
 
-	trace_tquic_conn_destroy(tquic_trace_conn_id(&conn->scid),
-				 conn->close_error_code);
+	trace_quic_conn_destroy(quic_trace_conn_id(&conn->scid),
+				 conn->error_code);
 
 	/* Cancel all timers */
 	for (i = 0; i < TQUIC_TIMER_MAX; i++)
@@ -609,7 +609,7 @@ void tquic_conn_set_state(struct tquic_connection *conn, enum tquic_conn_state s
 	old_state = conn->state;
 	conn->state = state;
 
-	trace_quic_conn_state_change(tquic_trace_conn_id(&conn->scid),
+	trace_quic_conn_state_change(quic_trace_conn_id(&conn->scid),
 				      old_state, state);
 
 	switch (state) {
@@ -620,7 +620,7 @@ void tquic_conn_set_state(struct tquic_connection *conn, enum tquic_conn_state s
 		atomic64_set(&conn->stats.handshake_time_us, ktime_to_us(ktime_get()));
 		spin_unlock_bh(&conn->lock);
 
-		trace_quic_handshake_complete(tquic_trace_conn_id(&conn->scid),
+		trace_quic_handshake_complete(quic_trace_conn_id(&conn->scid),
 					       atomic64_read(&conn->stats.handshake_time_us));
 
 		tquic_timer_cancel(conn, TQUIC_TIMER_HANDSHAKE);

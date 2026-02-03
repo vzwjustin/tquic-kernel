@@ -884,6 +884,16 @@ struct tquic_connection {
 	 */
 	void *zero_rtt_state;	/* struct tquic_zero_rtt_state_s * */
 
+	/* 0-RTT early data tracking fields */
+	bool early_data_enabled;	/* 0-RTT is enabled for this connection */
+	bool early_data_accepted;	/* Server accepted early data */
+	bool early_data_rejected;	/* Server rejected early data */
+	u64 max_early_data;		/* Max early data size */
+	u64 early_data_sent;		/* Early data bytes sent */
+
+	/* Pacing state */
+	ktime_t pacing_next_send;	/* Next allowed send time */
+
 	/*
 	 * Preferred Address state (RFC 9000 Section 9.6)
 	 *
