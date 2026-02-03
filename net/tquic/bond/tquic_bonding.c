@@ -31,7 +31,7 @@
 #include "tquic_bonding.h"
 #include "tquic_failover.h"
 #include "tquic_reorder.h"
-#include "tquic_sched.h"
+#include "../multipath/tquic_sched.h"
 #include "cong_coupled.h"
 
 /*

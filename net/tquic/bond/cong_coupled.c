@@ -32,7 +32,7 @@
 #include <linux/spinlock.h>
 #include <net/quic.h>
 
-#include "tquic_sched.h"
+#include "../multipath/tquic_sched.h"
 #include "tquic_bonding.h"
 
 /*

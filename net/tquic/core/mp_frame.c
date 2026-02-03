@@ -13,7 +13,7 @@
 #include <linux/skbuff.h>
 #include <net/quic.h>
 #include "tquic_bonding.h"
-#include "tquic_sched.h"
+#include "../multipath/tquic_sched.h"
 
 /* Forward declarations for path management */
 extern const char *tquic_path_state_names[];

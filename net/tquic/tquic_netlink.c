@@ -28,7 +28,7 @@
 #include <linux/in.h>
 #include <linux/in6.h>
 
-#include "tquic_sched.h"
+#include "multipath/tquic_sched.h"
 
 /*
  * TQUIC Netlink Family Definitions
