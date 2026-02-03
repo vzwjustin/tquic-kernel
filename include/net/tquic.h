@@ -112,8 +112,27 @@ struct tquic_connection;
 struct tquic_stream;
 struct tquic_path;
 struct tquic_frame;
-struct tquic_rtt_state;
 struct tquic_packet;
+
+/**
+ * struct tquic_rtt_state - RTT measurement state (RFC 9002 Section 5)
+ * @latest_rtt: Most recent RTT sample
+ * @smoothed_rtt: Smoothed RTT (SRTT)
+ * @rtt_var: RTT variance
+ * @min_rtt: Minimum RTT observed
+ * @max_ack_delay: Maximum ACK delay from peer
+ * @first_rtt_sample: Time of first RTT sample
+ * @samples: Number of RTT samples taken
+ */
+struct tquic_rtt_state {
+	u64 latest_rtt;
+	u64 smoothed_rtt;
+	u64 rtt_var;
+	u64 min_rtt;
+	u64 max_ack_delay;
+	ktime_t first_rtt_sample;
+	u32 samples;
+};
 struct tquic_coupled_state;
 struct tquic_client;
 struct tquic_persistent_cong_info;
@@ -332,8 +351,8 @@ struct tquic_path {
 	void *cong;  /* Congestion control state */
 	struct tquic_cong_ops *cong_ops;  /* Current CC algorithm ops */
 
-	/* RTT measurement state (for loss detection) */
-	struct tquic_rtt_state *rtt;
+	/* RTT measurement state (for loss detection) - embedded struct */
+	struct tquic_rtt_state rtt;
 
 	/* Scheduler-accessible congestion control info (mirrors cong state) */
 	struct {
