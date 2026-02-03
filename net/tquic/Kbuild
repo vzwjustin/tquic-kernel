@@ -74,8 +74,6 @@ tquic-y := \
 	core/one_way_delay.o \
 	core/additional_addresses.o \
 	core/mp_frame.o \
-	core/packet_coalesce_fix.o \
-	core/early_data.o \
 	core/priority.o \
 	bond/bonding.o \
 	bond/tquic_bonding.o \
