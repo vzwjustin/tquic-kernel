@@ -666,8 +666,8 @@ static struct tquic_path *owd_select(void *state, struct tquic_connection *conn,
 			continue;
 
 		/* Try to get OWD information for this path */
-		if (conn->owd_state) {
-			ret = tquic_owd_get_path_info(conn->owd_state, path, &info);
+		if (NULL /* TODO: conn->owd_state when OWD integrated */) {
+			ret = tquic_owd_get_path_info(NULL /* TODO: conn->owd_state when OWD integrated */, path, &info);
 			if (ret == 0 && info.confidence > 50) {
 				/* Use directional delay based on traffic type */
 				if (data->prefer_forward)
@@ -809,7 +809,7 @@ static struct tquic_path *owd_ecf_select(void *state,
 	bool have_owd = false;
 
 	/* Check if OWD data is available */
-	if (conn->owd_state && tquic_owd_has_valid_estimates(conn->owd_state))
+	if (NULL /* TODO: conn->owd_state when OWD integrated */ && tquic_owd_has_valid_estimates(NULL /* TODO: conn->owd_state when OWD integrated */))
 		have_owd = true;
 
 	rcu_read_lock();
@@ -833,8 +833,8 @@ static struct tquic_path *owd_ecf_select(void *state,
 			in_flight_bytes = path->stats.cwnd;
 
 		/* Get delay estimate - use OWD if available */
-		if (have_owd && conn->owd_state) {
-			int ret = tquic_owd_get_path_info(conn->owd_state, path, &info);
+		if (have_owd && NULL /* TODO: conn->owd_state when OWD integrated */) {
+			int ret = tquic_owd_get_path_info(NULL /* TODO: conn->owd_state when OWD integrated */, path, &info);
 			if (ret == 0 && info.confidence > 30) {
 				/* Use forward delay for data delivery time */
 				delay_us = info.forward_delay_us;
