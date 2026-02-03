@@ -43,7 +43,7 @@ enum tquic_hs_state {
 };
 
 /* QUIC transport parameters */
-struct tquic_transport_params {
+struct tquic_hs_transport_params {
 	u64 original_dcid_len;
 	u8 original_dcid[20];
 	u64 max_idle_timeout;
@@ -81,7 +81,7 @@ struct tquic_session_ticket {
 	u32 resumption_secret_len;
 	u16 cipher_suite;
 	u64 creation_time;
-	struct tquic_transport_params params;
+	struct tquic_hs_transport_params params;
 };
 
 /* Opaque handshake context */
@@ -131,9 +131,9 @@ int tquic_hs_set_alpn(struct tquic_handshake *hs,
 		      const char **protos, u32 count);
 int tquic_hs_set_sni(struct tquic_handshake *hs, const char *hostname);
 int tquic_hs_set_transport_params(struct tquic_handshake *hs,
-				  struct tquic_transport_params *params);
+				  struct tquic_hs_transport_params *params);
 int tquic_hs_get_transport_params(struct tquic_handshake *hs,
-				  struct tquic_transport_params *params);
+				  struct tquic_hs_transport_params *params);
 
 /* Status queries */
 bool tquic_hs_is_complete(struct tquic_handshake *hs);

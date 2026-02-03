@@ -174,7 +174,7 @@ enum tls_alert {
 };
 
 /* QUIC transport parameters structure */
-struct tquic_transport_params {
+struct tquic_hs_transport_params {
 	u64 original_dcid_len;
 	u8 original_dcid[TQUIC_MAX_CID_LEN];
 	u64 max_idle_timeout;
@@ -221,7 +221,7 @@ struct tquic_session_ticket {
 	u32 resumption_secret_len;
 	u16 cipher_suite;
 	u64 creation_time;
-	struct tquic_transport_params params;
+	struct tquic_hs_transport_params params;
 };
 
 /* Key share entry */
@@ -292,8 +292,8 @@ struct tquic_handshake {
 	u32 sni_len;
 
 	/* Transport parameters */
-	struct tquic_transport_params local_params;
-	struct tquic_transport_params peer_params;
+	struct tquic_hs_transport_params local_params;
+	struct tquic_hs_transport_params peer_params;
 	bool params_received;
 
 	/* PSK/Resumption */
@@ -416,7 +416,7 @@ static int hs_varint_decode(const u8 *buf, u32 buf_len, u64 *val, u32 *len)
 /*
  * QUIC Transport Parameters encoding
  */
-static int tquic_encode_transport_params(struct tquic_transport_params *params,
+static int tquic_encode_transport_params(struct tquic_hs_transport_params *params,
 					 u8 *buf, u32 buf_len, u32 *out_len,
 					 bool is_server)
 {
@@ -596,7 +596,7 @@ static int tquic_encode_transport_params(struct tquic_transport_params *params,
  * QUIC Transport Parameters decoding
  */
 static int tquic_decode_transport_params(const u8 *buf, u32 buf_len,
-					 struct tquic_transport_params *params,
+					 struct tquic_hs_transport_params *params,
 					 bool is_server)
 {
 	const u8 *p = buf;
@@ -3036,7 +3036,7 @@ EXPORT_SYMBOL_GPL(tquic_hs_set_sni);
  * Set local transport parameters
  */
 int tquic_hs_set_transport_params(struct tquic_handshake *hs,
-				  struct tquic_transport_params *params)
+				  struct tquic_hs_transport_params *params)
 {
 	memcpy(&hs->local_params, params, sizeof(*params));
 	return 0;
@@ -3047,7 +3047,7 @@ EXPORT_SYMBOL_GPL(tquic_hs_set_transport_params);
  * Get peer transport parameters
  */
 int tquic_hs_get_transport_params(struct tquic_handshake *hs,
-				  struct tquic_transport_params *params)
+				  struct tquic_hs_transport_params *params)
 {
 	if (!hs->params_received)
 		return -EAGAIN;
