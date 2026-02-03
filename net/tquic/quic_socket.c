@@ -16,6 +16,7 @@
 #include <linux/file.h>
 #include <linux/sched/signal.h>
 #include <linux/random.h>
+#include <asm/ioctls.h>
 #include <net/sock.h>
 #include <net/inet_common.h>
 #include <net/inet_sock.h>
@@ -2595,9 +2596,10 @@ static int quic_sock_recvmsg(struct socket *sock, struct msghdr *msg,
 	int addr_len = 0;
 	int err;
 
-	/* Record flow for RPS if not error queue */
-	if (likely(!(flags & MSG_ERRQUEUE)))
-		sock_rps_record_flow(sk);
+	/*
+	 * Note: RPS flow recording is handled by the kernel's UDP layer
+	 * which underlies our QUIC implementation.
+	 */
 
 	err = quic_recvmsg(sk, msg, size, flags, &addr_len);
 	if (err >= 0)
