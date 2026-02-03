@@ -21,8 +21,8 @@
 #include <net/protocol.h>
 #include <net/udp.h>
 #include <net/quic.h>
-#include "early_data.h"
-#include "quic_init.h"
+#include "../../quic/early_data.h"
+#include "../../quic/quic_init.h"
 
 static struct kmem_cache *quic_sock_cachep __read_mostly;
 static struct kmem_cache *quic_conn_cachep __read_mostly;

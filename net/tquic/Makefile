@@ -1,11 +1,24 @@
 # SPDX-License-Identifier: GPL-2.0-only
 #
 # Makefile for the TQUIC WAN Bonding subsystem
+# Consolidated from net/quic and net/tquic
 #
+# This Makefile builds a single tquic.ko module that includes:
+# - Core QUIC protocol implementation (from net/quic)
+# - TQUIC WAN bonding and multipath extensions
+# - Packet schedulers (aggregate, blest, ecf, minrtt, weighted)
+# - Congestion control algorithms
+# - Path management and failover
+# - Crypto/TLS support
+# - Advanced features (HTTP/3, MASQUE, FEC, etc.)
+#
+
+# Include paths for headers
+ccflags-y += -I$(src)/include -I$(src)/../quic
 
 obj-$(CONFIG_TQUIC) += tquic.o
 
-# Main TQUIC module
+# Main TQUIC module - consolidated from net/quic and net/tquic
 tquic-y := \
 	tquic_main.o \
 	tquic_proto.o \
@@ -42,7 +55,22 @@ tquic-y := \
 	cong/tquic_cong.o \
 	cong/persistent_cong.o
 
-# Core protocol components
+# Include remaining files from net/quic consolidation
+tquic-y += \
+	ack_frequency.o \
+	early_data.o \
+	key_update.o \
+	priority.o \
+	quic_socket.o \
+	quic_timer.o \
+	quic_stream.o \
+	quic_sysctl.o \
+	quic_offload.o
+
+# Tracing support
+tquic-$(CONFIG_TRACEPOINTS) += diag/trace.o
+
+# Core protocol components - consolidated from net/quic
 obj-$(CONFIG_TQUIC_CORE) += tquic_core.o
 tquic_core-y := \
 	core/varint.o \
@@ -59,12 +87,34 @@ tquic_core-y := \
 	core/receive_timestamps.o \
 	core/reliable_reset.o \
 	core/one_way_delay.o \
-	core/additional_addresses.o
+	core/additional_addresses.o \
+	core/quic_protocol.o \
+	core/quic_connection.o \
+	core/quic_crypto.o \
+	core/quic_packet.o \
+	core/quic_output.o \
+	core/quic_cong.o \
+	core/quic_ecn.o \
+	core/quic_flow.o \
+	core/quic_loss.o \
+	core/quic_path.o \
+	core/quic_ack.o \
+	core/quic_ack_frequency.o \
+	core/quic_key_update.o \
+	core/mp_frame.o \
+	core/packet_coalesce_fix.o \
+	core/early_data.o \
+	core/priority.o
 
-# WAN Bonding components
+# WAN Bonding components - consolidated from net/quic
 obj-$(CONFIG_TQUIC_WAN_BONDING) += tquic_bond.o
 tquic_bond-y := \
-	bond/bonding.o
+	bond/bonding.o \
+	bond/tquic_bonding.o \
+	bond/tquic_failover.o \
+	bond/tquic_path.o \
+	bond/tquic_reorder.o \
+	bond/cong_coupled.o
 
 # Path Manager
 obj-$(CONFIG_TQUIC_PATH_MANAGER) += tquic_pm.o
@@ -136,14 +186,20 @@ tquic_bdp_frame-y := \
 obj-$(CONFIG_TQUIC_CONG_DATA) += tquic_cong_data.o
 tquic_cong_data-y := cong/cong_data.o
 
-# Multipath extension (RFC 9369)
+# Multipath extension (RFC 9369) - includes schedulers
 obj-$(CONFIG_TQUIC_MULTIPATH) += tquic_multipath.o
 tquic_multipath-y := \
 	multipath/mp_frame.o \
 	multipath/mp_ack.o \
 	multipath/mp_deadline.o \
 	multipath/path_abandon.o \
-	multipath/multipath_module.o
+	multipath/multipath_module.o \
+	multipath/tquic_scheduler.o \
+	multipath/sched_minrtt.o \
+	multipath/sched_aggregate.o \
+	multipath/sched_weighted.o \
+	multipath/sched_blest.o \
+	multipath/sched_ecf.o
 
 # Crypto support
 obj-$(CONFIG_TQUIC_CRYPTO) += tquic_crypto.o
@@ -153,6 +209,7 @@ tquic_crypto-y := \
 	crypto/key_update.o \
 	crypto/extended_key_update.o \
 	crypto/zero_rtt.o \
+	crypto/handshake.o \
 	crypto/crypto_module.o
 
 # Certificate verification (requires keyring support)

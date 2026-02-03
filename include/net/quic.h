@@ -415,8 +415,8 @@ struct quic_cid_entry {
 	u8			used:1;
 };
 
-/* QUIC connection statistics - atomic counters for thread safety */
-struct quic_stats {
+/* QUIC connection statistics - atomic counters for thread safety (kernel-internal) */
+struct quic_conn_stats {
 	/* Packet counters */
 	atomic64_t	packets_sent;
 	atomic64_t	packets_received;
@@ -612,7 +612,7 @@ struct quic_connection {
 	u8				migration_disabled:1;
 
 	/* Statistics */
-	struct quic_stats		stats;
+	struct quic_conn_stats		stats;
 
 	/* Reference counting */
 	refcount_t			refcnt;

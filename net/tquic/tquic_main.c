@@ -633,6 +633,78 @@ EXPORT_SYMBOL_GPL(tquic_unregister_scheduler);
  */
 
 /*
+ * External subsystem initialization function declarations
+ */
+
+/* Crypto subsystem */
+extern int __init tquic_cert_verify_init(void);
+extern void __exit tquic_cert_verify_exit(void);
+extern int __init tquic_zero_rtt_module_init(void);
+extern void __exit tquic_zero_rtt_module_exit(void);
+extern int __init tquic_hw_offload_init(void);
+extern void __exit tquic_hw_offload_exit(void);
+
+/* Scheduler framework and schedulers */
+extern int __init tquic_scheduler_init(void);
+extern void __exit tquic_scheduler_exit(void);
+extern int __init tquic_sched_minrtt_init(void);
+extern void __exit tquic_sched_minrtt_exit(void);
+extern int __init tquic_sched_aggregate_init(void);
+extern void __exit tquic_sched_aggregate_exit(void);
+extern int __init tquic_sched_weighted_init(void);
+extern void __exit tquic_sched_weighted_exit(void);
+extern int __init tquic_sched_blest_init(void);
+extern void __exit tquic_sched_blest_exit(void);
+extern int __init tquic_sched_ecf_init(void);
+extern void __exit tquic_sched_ecf_exit(void);
+
+/* Multipath extensions */
+extern int __init tquic_mp_ack_init(void);
+extern void __exit tquic_mp_ack_exit(void);
+extern int __init tquic_mp_frame_init(void);
+extern void __exit tquic_mp_frame_exit(void);
+extern int __init tquic_mp_abandon_init(void);
+extern void __exit tquic_mp_abandon_exit(void);
+extern int __init tquic_mp_deadline_init(void);
+extern void __exit tquic_mp_deadline_exit(void);
+
+/* Bonding subsystem */
+extern int __init tquic_bonding_init_module(void);
+extern void __exit tquic_bonding_exit_module(void);
+extern int __init tquic_path_init_module(void);
+extern void __exit tquic_path_exit_module(void);
+extern int __init coupled_cc_init_module(void);
+extern void __exit coupled_cc_exit_module(void);
+
+/* Path managers */
+extern int __init tquic_pm_types_init(void);
+extern void __exit tquic_pm_types_exit(void);
+extern int __init tquic_pm_nl_init(void);
+extern void __exit tquic_pm_nl_exit(void);
+extern int __init tquic_pm_userspace_init(void);
+extern void __exit tquic_pm_userspace_exit(void);
+extern int __init tquic_pm_kernel_module_init(void);
+extern void __exit tquic_pm_kernel_module_exit(void);
+extern int __init tquic_nat_keepalive_module_init(void);
+extern void __exit tquic_nat_keepalive_module_exit(void);
+extern int __init tquic_nat_lifecycle_module_init(void);
+extern void __exit tquic_nat_lifecycle_module_exit(void);
+
+/* Congestion control algorithms */
+extern int __init tquic_cong_data_module_init(void);
+extern void __exit tquic_cong_data_module_exit(void);
+extern int __init tquic_bbrv2_init(void);
+extern void __exit tquic_bbrv2_exit(void);
+extern int __init tquic_bbrv3_init(void);
+extern void __exit tquic_bbrv3_exit(void);
+extern int __init tquic_prague_init(void);
+extern void __exit tquic_prague_exit(void);
+
+/* Netlink - tquic_netlink.c uses tquic_nl_init/exit */
+extern int __init tquic_nl_init(void);
+extern void __exit tquic_nl_exit(void);
+
+/*
  * Module Initialization
  */
 
@@ -747,6 +819,118 @@ int __init tquic_init(void)
 	if (err)
 		goto err_persistent_cong;
 
+	/* Initialize crypto subsystem */
+	err = tquic_cert_verify_init();
+	if (err)
+		goto err_cert_verify;
+
+	err = tquic_zero_rtt_module_init();
+	if (err)
+		goto err_zero_rtt;
+
+	err = tquic_hw_offload_init();
+	if (err)
+		goto err_hw_offload;
+
+	/* Initialize congestion control data tracking */
+	err = tquic_cong_data_module_init();
+	if (err)
+		goto err_cong_data;
+
+	/* Initialize congestion control algorithms */
+	err = tquic_bbrv2_init();
+	if (err)
+		goto err_bbrv2;
+
+	err = tquic_bbrv3_init();
+	if (err)
+		goto err_bbrv3;
+
+	err = tquic_prague_init();
+	if (err)
+		goto err_prague;
+
+	/* Initialize multipath extensions */
+	err = tquic_mp_ack_init();
+	if (err)
+		goto err_mp_ack;
+
+	err = tquic_mp_frame_init();
+	if (err)
+		goto err_mp_frame;
+
+	err = tquic_mp_abandon_init();
+	if (err)
+		goto err_mp_abandon;
+
+	err = tquic_mp_deadline_init();
+	if (err)
+		goto err_mp_deadline;
+
+	/* Initialize scheduler framework (must be before individual schedulers) */
+	err = tquic_scheduler_init();
+	if (err)
+		goto err_scheduler;
+
+	/* Initialize individual schedulers */
+	err = tquic_sched_minrtt_init();
+	if (err)
+		goto err_sched_minrtt;
+
+	err = tquic_sched_aggregate_init();
+	if (err)
+		goto err_sched_aggregate;
+
+	err = tquic_sched_weighted_init();
+	if (err)
+		goto err_sched_weighted;
+
+	err = tquic_sched_blest_init();
+	if (err)
+		goto err_sched_blest;
+
+	err = tquic_sched_ecf_init();
+	if (err)
+		goto err_sched_ecf;
+
+	/* Initialize bonding subsystem */
+	err = tquic_bonding_init_module();
+	if (err)
+		goto err_bonding;
+
+	err = tquic_path_init_module();
+	if (err)
+		goto err_path_mgmt;
+
+	err = coupled_cc_init_module();
+	if (err)
+		goto err_coupled_cc;
+
+	/* Initialize path managers */
+	err = tquic_pm_types_init();
+	if (err)
+		goto err_pm_types;
+
+	err = tquic_pm_nl_init();
+	if (err)
+		goto err_pm_nl;
+
+	err = tquic_pm_userspace_init();
+	if (err)
+		goto err_pm_userspace;
+
+	err = tquic_pm_kernel_module_init();
+	if (err)
+		goto err_pm_kernel;
+
+	err = tquic_nat_keepalive_module_init();
+	if (err)
+		goto err_nat_keepalive;
+
+	err = tquic_nat_lifecycle_module_init();
+	if (err)
+		goto err_nat_lifecycle;
+
 	/* Initialize server subsystem */
 	err = tquic_server_init();
 	if (err)
@@ -766,8 +950,8 @@ int __init tquic_init(void)
 		goto err_io_uring;
 #endif
 
-	/* Initialize netlink interface */
-	err = tquic_netlink_init();
+	/* Initialize netlink interface (uses tquic_nl_init) */
+	err = tquic_nl_init();
 	if (err)
 		goto err_netlink;
 
@@ -820,7 +1004,7 @@ err_diag:
 err_proto:
 	tquic_sysctl_exit();
 err_sysctl:
-	tquic_netlink_exit();
+	tquic_nl_exit();
 err_netlink:
 #if IS_ENABLED(CONFIG_TQUIC_IO_URING)
 	tquic_io_uring_exit();
@@ -832,6 +1016,58 @@ err_napi:
 #endif
 	tquic_server_exit();
 err_server:
+	tquic_nat_lifecycle_module_exit();
+err_nat_lifecycle:
+	tquic_nat_keepalive_module_exit();
+err_nat_keepalive:
+	tquic_pm_kernel_module_exit();
+err_pm_kernel:
+	tquic_pm_userspace_exit();
+err_pm_userspace:
+	tquic_pm_nl_exit();
+err_pm_nl:
+	tquic_pm_types_exit();
+err_pm_types:
+	coupled_cc_exit_module();
+err_coupled_cc:
+	tquic_path_exit_module();
+err_path_mgmt:
+	tquic_bonding_exit_module();
+err_bonding:
+	tquic_sched_ecf_exit();
+err_sched_ecf:
+	tquic_sched_blest_exit();
+err_sched_blest:
+	tquic_sched_weighted_exit();
+err_sched_weighted:
+	tquic_sched_aggregate_exit();
+err_sched_aggregate:
+	tquic_sched_minrtt_exit();
+err_sched_minrtt:
+	tquic_scheduler_exit();
+err_scheduler:
+	tquic_mp_deadline_exit();
+err_mp_deadline:
+	tquic_mp_abandon_exit();
+err_mp_abandon:
+	tquic_mp_frame_exit();
+err_mp_frame:
+	tquic_mp_ack_exit();
+err_mp_ack:
+	tquic_prague_exit();
+err_prague:
+	tquic_bbrv3_exit();
+err_bbrv3:
+	tquic_bbrv2_exit();
+err_bbrv2:
+	tquic_cong_data_module_exit();
+err_cong_data:
+	tquic_hw_offload_exit();
+err_hw_offload:
+	tquic_zero_rtt_module_exit();
+err_zero_rtt:
+	tquic_cert_verify_exit();
+err_cert_verify:
 	tquic_persistent_cong_module_exit();
 err_persistent_cong:
 	tquic_ack_freq_module_exit();
@@ -877,6 +1113,7 @@ void __exit tquic_exit(void)
 {
 	pr_info("tquic: shutting down TQUIC WAN bonding subsystem\n");
 
+	/* Cleanup in reverse order of initialization */
 	tquic_ratelimit_module_exit();
 	tquic_rate_limit_module_exit();
 	tquic_offload_exit();
@@ -884,7 +1121,7 @@ void __exit tquic_exit(void)
 	tquic_proto_exit();
 	/* Proc interface is cleaned up per-netns via pernet_operations */
 	tquic_sysctl_exit();
-	tquic_netlink_exit();
+	tquic_nl_exit();
 #if IS_ENABLED(CONFIG_TQUIC_IO_URING)
 	tquic_io_uring_exit();
 #endif
@@ -892,6 +1129,46 @@ void __exit tquic_exit(void)
 	tquic_napi_subsys_exit();
 #endif
 	tquic_server_exit();
+
+	/* Cleanup path managers */
+	tquic_nat_lifecycle_module_exit();
+	tquic_nat_keepalive_module_exit();
+	tquic_pm_kernel_module_exit();
+	tquic_pm_userspace_exit();
+	tquic_pm_nl_exit();
+	tquic_pm_types_exit();
+
+	/* Cleanup bonding subsystem */
+	coupled_cc_exit_module();
+	tquic_path_exit_module();
+	tquic_bonding_exit_module();
+
+	/* Cleanup schedulers (reverse order) */
+	tquic_sched_ecf_exit();
+	tquic_sched_blest_exit();
+	tquic_sched_weighted_exit();
+	tquic_sched_aggregate_exit();
+	tquic_sched_minrtt_exit();
+	tquic_scheduler_exit();
+
+	/* Cleanup multipath extensions */
+	tquic_mp_deadline_exit();
+	tquic_mp_abandon_exit();
+	tquic_mp_frame_exit();
+	tquic_mp_ack_exit();
+
+	/* Cleanup congestion control */
+	tquic_prague_exit();
+	tquic_bbrv3_exit();
+	tquic_bbrv2_exit();
+	tquic_cong_data_module_exit();
+
+	/* Cleanup crypto subsystem */
+	tquic_hw_offload_exit();
+	tquic_zero_rtt_module_exit();
+	tquic_cert_verify_exit();
+
+	/* Cleanup core subsystems */
 	tquic_persistent_cong_module_exit();
 	tquic_ack_freq_module_exit();
 	tquic_security_hardening_exit();
@@ -907,6 +1184,8 @@ void __exit tquic_exit(void)
 	tquic_udp_exit();
 	tquic_timer_exit();
 	tquic_cid_table_exit();
+
+	/* Cleanup global data structures */
 	rhashtable_destroy(&tquic_conn_table);
 	kmem_cache_destroy(tquic_path_cache);
 	kmem_cache_destroy(tquic_stream_cache);

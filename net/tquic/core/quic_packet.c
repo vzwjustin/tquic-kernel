@@ -10,7 +10,7 @@
 #include <linux/slab.h>
 #include <linux/skbuff.h>
 #include <net/quic.h>
-#include "trace.h"
+#include "../diag/trace.h"
 #include "mp_frame.h"
 
 /* QUIC packet header forms */

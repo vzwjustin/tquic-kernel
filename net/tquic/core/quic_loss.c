@@ -11,7 +11,7 @@
 #include <linux/jiffies.h>
 #include <linux/timer.h>
 #include <net/quic.h>
-#include "trace.h"
+#include "../diag/trace.h"
 
 /*
  * RFC 9002 Constants

@@ -10,7 +10,7 @@
 #include <linux/slab.h>
 #include <linux/random.h>
 #include <net/quic.h>
-#include "trace.h"
+#include "../diag/trace.h"
 
 static struct kmem_cache *quic_conn_cache __read_mostly;
 static struct kmem_cache *quic_cid_cache __read_mostly;

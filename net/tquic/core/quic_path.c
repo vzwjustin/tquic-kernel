@@ -12,7 +12,7 @@
 #include <linux/in.h>
 #include <linux/in6.h>
 #include <net/quic.h>
-#include "trace.h"
+#include "../diag/trace.h"
 
 /* Path management constants per RFC 9000 */
 #define QUIC_PATH_CHALLENGE_SIZE	8

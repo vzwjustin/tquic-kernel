@@ -13,7 +13,7 @@
 #include <crypto/skcipher.h>
 #include <crypto/gcm.h>
 #include <net/quic.h>
-#include "crypto.h"
+#include "quic_crypto.h"
 
 /* QUIC v1 initial salt (RFC 9001 Section 5.2) */
 static const u8 quic_v1_initial_salt[20] = {
