@@ -53,4 +53,5 @@ static inline u64 quic_trace_conn_id(const struct quic_connection_id *cid)
 	return id;
 }
 
+
 #endif /* _QUIC_TRACE_H */
