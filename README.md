@@ -6,11 +6,11 @@
 
 TQUIC is a complete, production-ready kernel module implementing the QUIC protocol (RFC 9000, 9001, 9002) with multipath support for WAN bonding. Unlike userspace QUIC implementations, TQUIC operates directly in the Linux kernel for maximum performance and integration with the networking stack.
 
-**262,564 lines of C code** (34,573 in net/quic + 214,059 in net/tquic + 11,115 headers) implementing the full QUIC/HTTP3 stack with advanced multipath, security, and performance features.
+**260,766 lines of C code** (38,410 in net/quic + 214,594 in net/tquic + 7,762 headers) implementing the full QUIC/HTTP3 stack with advanced multipath, security, and performance features.
 
 ## 🔒 Security Audit Completed (February 2026)
 
-TQUIC has undergone a comprehensive security audit addressing **68 distinct issues** across the entire codebase:
+TQUIC has undergone a comprehensive security audit with all critical and high-priority issues resolved across the entire codebase:
 
 ### Critical Security Fixes
 - ✅ **Netlink Permission Bypass** - Added CAP_NET_ADMIN checks to all query operations
@@ -402,34 +402,43 @@ Sysctl tunables available at `/proc/sys/net/tquic/`:
 
 ## Testing Infrastructure
 
-### KUnit Tests (33+ test suites)
-Comprehensive unit tests covering all protocol components:
-- Frame encoding/decoding
-- Packet parsing/generation
-- Transport parameter negotiation
-- Flow control enforcement
-- Scheduler algorithms
-- Security mechanisms
+### KUnit Tests (78 test suites across 35 test files)
+Comprehensive unit tests in `net/tquic/test/` covering:
+- Frame encoding/decoding (frame_test, datagram_test)
+- Packet parsing/generation (packet_test, varint_test)
+- Transport parameter negotiation (transport_params_test)
+- Flow control enforcement (flow_control_test)
+- Scheduler algorithms (scheduler_test, deadline_aware_test)
+- Security mechanisms (security_test, security_hardening_test, crypto_test)
+- HTTP/3 and QPACK (http3_test with 8 suites)
+- WebTransport (webtransport_test)
+- MASQUE (masque_test, quic_proxy_test)
+- Multipath (path_manager_test, address_discovery_test)
+- Extensions (ack_frequency_test, extended_key_update_test, reliable_reset_test)
 
 ### Interoperability Testing
-Test framework against major QUIC implementations:
-- **quiche** (Cloudflare)
-- **msquic** (Microsoft)
-- **ngtcp2** (nghttp2)
-- **picoquic** (multipath pioneer)
+Test framework in `net/tquic/test/interop/` for validation against major QUIC implementations:
+- **quiche** (Cloudflare) - RFC 9000 compliance
+- **msquic** (Microsoft) - Windows compatibility
+- **ngtcp2** (nghttp2) - HTTP/3 interop
+- **picoquic** (multipath pioneer) - Multipath QUIC
 
-Test cases: handshake, 0-RTT, migration, multipath, failover
+Test client/server tools: `tquic_test_client.c`, `tquic_test_server.c`
+Test suites: RFC 9000 compliance tests in `rfc9000_tests.c`
 
 ### Network Simulation
 - Namespace-based isolated topology
 - `tc netem` support: latency, bandwidth, loss, jitter, reordering
 
-### Benchmarking Suite
-- **throughput_bench**: Target >9 Gbps @ 10G NIC
-- **latency_bench**: Target p99 < 2x p50
-- **connections_bench**: 0-RTT rate measurement
-- **failover_bench**: Target <100ms recovery
-- **scheduler_bench**: Algorithm comparison
+### Performance Goals
+Design targets for production deployment:
+- **Throughput**: >9 Gbps on 10G NIC with GRO/GSO offload
+- **Latency**: p99 < 2x p50 RTT under steady-state load
+- **Connection establishment**: Fast 0-RTT resumption
+- **Failover**: <100ms path migration on failure detection
+- **Scheduler efficiency**: Minimal per-packet overhead
+
+(Benchmarking framework available via `net/tquic/test/` performance tests)
 
 ## Protocol Compliance
 
@@ -464,7 +473,7 @@ Test cases: handshake, 0-RTT, migration, multipath, failover
 ## Use Cases
 
 - **WAN Bonding**: Aggregate LTE, 5G, and wired connections for increased bandwidth and reliability
-- **Failover**: Seamless connection migration when primary path fails (<100ms)
+- **Failover**: Seamless connection migration when primary path fails (target <100ms)
 - **Mobile Networks**: Maintain connections across network transitions
 - **High-Performance Proxies**: Kernel-level QUIC/HTTP3 termination
 - **SD-WAN**: Software-defined WAN with QUIC transport
@@ -490,10 +499,10 @@ Test cases: handshake, 0-RTT, migration, multipath, failover
 | Load Balancing Support | ✅ Complete | Server ID encoding, retry service |
 | Forward Error Correction | ✅ Complete | Reed-Solomon, XOR-based FEC |
 | AF_XDP / io_uring | ✅ Complete | Zero-copy, SQPOLL, buffer rings |
-| **Security Audit** | ✅ **Complete** | **68/68 issues fixed, 0 known vulnerabilities** |
-| KUnit Test Suite | ✅ Complete | 33+ test suites, full coverage |
-| Interop Testing | ✅ Complete | quiche, msquic, ngtcp2, picoquic |
-| Benchmarking Suite | ✅ Complete | Throughput, latency, failover, scheduler |
+| **Security Audit** | ✅ **Complete** | **All critical issues fixed, 0 known vulnerabilities** |
+| KUnit Test Suite | ✅ Complete | 78 test suites across 35 files |
+| Interop Testing | ✅ Framework Ready | Test harness in `net/tquic/test/interop/` |
+| Performance Testing | ✅ Framework Ready | KUnit performance tests available |
 
 **Production Status:** Ready for deployment. All security vulnerabilities addressed, all protocol features implemented, comprehensive testing complete.
 
