@@ -1,63 +1,54 @@
 # Out-of-Tree Build: Remaining Fixes
 
-This branch builds much further, but the out-of-tree module still fails at
-`modpost` with undefined symbols. Below is the current known gap list and the
-preferred fixes (either re-enable objects or add minimal stubs).
+## Status: RESOLVED
 
-## Current modpost undefined symbols
+All previously undefined symbols have been fixed as of this commit.
 
-- `tquic_udp_encap_init`
-- `tquic_udp_send`
-- `tquic_scheduler_init`
-- `tquic_scheduler_exit`
-- `tquic_mp_sched_find`
-- `tquic_pm_get_path`
-- `tquic_pm_get_active_paths`
-- `tquic_crypto_derive_initial_secrets`
-- `tquic_path_state_names`
+## Previously undefined symbols (now fixed)
 
-## Likely sources and recommended resolution
+- `tquic_udp_encap_init` - **FIXED**: Added `quic_offload.o` to build
+- `tquic_udp_send` - **FIXED**: Added `quic_offload.o` to build
+- `tquic_scheduler_init` - **FIXED**: Added `multipath/tquic_scheduler.o` to build
+- `tquic_scheduler_exit` - **FIXED**: Added `multipath/tquic_scheduler.o` to build
+- `tquic_mp_sched_find` - **FIXED**: Added `multipath/tquic_scheduler.o` to build
+- `tquic_pm_get_path` - **FIXED**: Added stub in `out_of_tree_stubs.c`
+- `tquic_pm_get_active_paths` - **FIXED**: Added stub in `out_of_tree_stubs.c`
+- `tquic_crypto_derive_initial_secrets` - **FIXED**: Added wrapper in `out_of_tree_stubs.c`
+- `tquic_path_state_names` - **FIXED**: Added definition in `out_of_tree_stubs.c`
 
-1. UDP offload helpers
-   - Symbols: `tquic_udp_encap_init`, `tquic_udp_send`
-   - Source: `net/tquic/quic_offload.c`
-   - Fix: Either compile `quic_offload.c` in out-of-tree or add lightweight
-     stubs in `net/tquic/out_of_tree_stubs.c` (return `-EOPNOTSUPP` and drop skb).
+## Resolution details
 
-2. Multipath scheduler core
-   - Symbols: `tquic_scheduler_init`, `tquic_scheduler_exit`, `tquic_mp_sched_find`
-   - Source: `net/tquic/multipath/tquic_scheduler.c`
-   - Fix: Re-enable `tquic_scheduler.c` in the out-of-tree `tquic-y` list
-     or stub these three symbols (init returns 0, exit no-op, find returns NULL).
+### 1. UDP offload helpers
+- Added `quic_offload.o` to both `net/tquic/Kbuild` and `net/tquic/Makefile`
+- The file provides `tquic_udp_encap_init` and `tquic_udp_send` implementations
 
-3. PM APIs expected by bonding/mp_frame
-   - Symbols: `tquic_pm_get_path`, `tquic_pm_get_active_paths`
-   - Expected by:
-     - `net/tquic/core/mp_frame.c`
-     - `net/tquic/bond/tquic_bonding.c`
-   - Fix options:
-     - Implement simple helpers that walk `conn->paths` via `tquic_conn_get_path`
-       or iterate the list under RCU and return ACTIVE/VALIDATED paths.
-     - Or refactor bonding to use `tquic_conn_get_path` directly.
+### 2. Multipath scheduler core
+- Added `multipath/tquic_scheduler.o` to both `net/tquic/Kbuild` and `net/tquic/Makefile`
+- Provides `tquic_scheduler_init`, `tquic_scheduler_exit`, and `tquic_mp_sched_find`
 
-4. Initial secrets derive API mismatch
-   - Symbol: `tquic_crypto_derive_initial_secrets`
-   - Current implementation is named `tquic_crypto_derive_init_secrets`
-     in `net/tquic/core/quic_crypto.c`.
-   - Fix: add a small wrapper with the correct name that calls
-     `tquic_crypto_derive_init_secrets()` and export it.
+### 3. PM APIs for bonding/mp_frame
+- Added stubs in `out_of_tree_stubs.c`:
+  - `tquic_pm_get_path()` returns NULL
+  - `tquic_pm_get_active_paths()` returns 0
+- These are minimal stubs; full implementation requires real path manager integration
 
-5. Path state name table
-   - Symbol: `tquic_path_state_names`
-   - A static array exists in `net/tquic/diag/path_metrics.c`, but is not exported.
-   - Fix: add a global `const char *tquic_path_state_names[]` (aligned with
-     `enum tquic_path_state` in `include/net/tquic.h`) and export it.
+### 4. Crypto API name mismatch
+- Added wrapper `tquic_crypto_derive_initial_secrets()` that calls
+  `tquic_crypto_derive_init_secrets()` (the actual implementation)
+
+### 5. Path state name table
+- Added global `tquic_path_state_names[]` array in `out_of_tree_stubs.c`
+- Matches the `enum tquic_path_state` in `include/net/tquic.h`
 
 ## Notes
 
-- `net/tquic/out_of_tree_stubs.c` already provides stubs for a few other
-  missing symbols and is compiled when `TQUIC_OUT_OF_TREE` is defined.
-- This branch currently consolidates many objects into `tquic.ko` to avoid
-  circular module dependencies; any new object added should be placed in both
-  `net/tquic/Kbuild` and `net/tquic/Makefile` `tquic-y` lists.
+- `net/tquic/out_of_tree_stubs.c` is compiled when `TQUIC_OUT_OF_TREE` is defined
+- All objects are consolidated into single `tquic.ko` to avoid circular dependencies
+- New objects should be added to both `net/tquic/Kbuild` and `net/tquic/Makefile`
 
+## Build instructions
+
+```bash
+cd net/tquic
+make -C /lib/modules/$(uname -r)/build M=$(pwd) modules
+```

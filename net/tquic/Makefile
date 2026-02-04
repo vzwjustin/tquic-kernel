@@ -36,6 +36,7 @@ tquic-y := \
 	tquic_output.o \
 	tquic_input.o \
 	tquic_offload.o \
+	quic_offload.o \
 	tquic_timer.o \
 	tquic_cid.o \
 	tquic_migration.o \
@@ -120,6 +121,7 @@ tquic-y := \
 	multipath/sched_blest.o \
 	multipath/sched_weighted.o \
 	multipath/sched_aggregate.o \
+	multipath/tquic_scheduler.o \
 	crypto/cert_verify.o \
 	crypto/tls.o \
 	crypto/header_protection.o \
