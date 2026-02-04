@@ -33,7 +33,7 @@ struct tquic_pm_userspace_state {
  * Allocates minimal state and notifies userspace that a new connection
  * is ready for path management.
  */
-static int tquic_pm_userspace_init(struct net *net)
+static int tquic_pm_userspace_init_net(struct net *net)
 {
 	/* Per-netns initialization - nothing needed for userspace PM */
 	pr_debug("TQUIC PM: Userspace PM initialized for netns\n");
@@ -169,9 +169,9 @@ static void tquic_pm_userspace_path_event(struct tquic_connection *conn,
 /*
  * Userspace PM operations structure
  */
-static struct tquic_pm_ops userspace_pm_ops = {
+struct tquic_pm_ops userspace_pm_ops = {
 	.name		= "userspace",
-	.init		= tquic_pm_userspace_init,
+	.init		= tquic_pm_userspace_init_net,
 	.release	= tquic_pm_userspace_release,
 	.add_path	= tquic_pm_userspace_add_path,
 	.del_path	= tquic_pm_userspace_del_path,

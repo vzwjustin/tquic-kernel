@@ -34,6 +34,7 @@
 
 #include "../multipath/tquic_sched.h"
 #include "tquic_bonding.h"
+#include "cong_coupled.h"
 
 /*
  * Coupled congestion control constants
@@ -42,6 +43,11 @@
 /* LIA alpha scaling factor (for fixed-point arithmetic) */
 #define COUPLED_ALPHA_SCALE		1024
 #define COUPLED_ALPHA_MAX		(COUPLED_ALPHA_SCALE * 4)
+
+/* Maximum packet size for QUIC */
+#ifndef QUIC_MAX_PACKET_SIZE
+#define QUIC_MAX_PACKET_SIZE		1500
+#endif
 
 /* Minimum cwnd to prevent starvation (RFC 6356 recommendation) */
 #define COUPLED_MIN_CWND		(2 * QUIC_MAX_PACKET_SIZE)
@@ -662,31 +668,44 @@ EXPORT_SYMBOL_GPL(coupled_cc_is_enabled);
 /**
  * coupled_cc_on_ack - Process ACK with coupled congestion control
  * @ctx: Coupled CC context
- * @cc: Base congestion control state
+ * @cc: Base congestion control state (may be NULL for internal tracking)
  * @path_id: Path that received ACK
  * @acked_bytes: Bytes acknowledged
- * @rtt: RTT measurements
+ * @rtt: RTT measurements (may be NULL if no new RTT sample)
  *
  * This wraps the base CC on_ack to apply coupled increase.
+ * If cc is NULL, updates only the internal coupled CC tracking.
  */
 void coupled_cc_on_ack(struct coupled_cc_ctx *ctx, struct tquic_cc_state *cc,
 		       u8 path_id, u64 acked_bytes, struct tquic_rtt *rtt)
 {
 	u64 coupled_delta;
-	u64 uncoupled_delta;
+	struct coupled_path_state *path_state;
 
-	if (!ctx || !ctx->enabled || !cc)
+	if (!ctx || !ctx->enabled)
 		return;
 
-	/* Update RTT in coupled state */
+	/* Update RTT in coupled state if we have a sample */
 	if (rtt && rtt->has_sample)
 		coupled_cc_update_rtt(ctx, path_id, rtt->smoothed_rtt);
+
+	/* If no base CC state, just update internal tracking */
+	if (!cc) {
+		spin_lock_bh(&ctx->lock);
+		path_state = coupled_find_path(ctx, path_id);
+		if (path_state) {
+			coupled_cc_update_path(ctx, path_id, path_state->cwnd,
+					       rtt ? rtt->smoothed_rtt : 0);
+		}
+		spin_unlock_bh(&ctx->lock);
+		return;
+	}
 
 	/* Only couple during congestion avoidance (not slow start) */
 	if (cc->in_slow_start) {
 		/* Slow start: uncoupled exponential growth */
 		coupled_cc_update_path(ctx, path_id, cc->cwnd,
-					  rtt ? rtt->smoothed_rtt : 0);
+				       rtt ? rtt->smoothed_rtt : 0);
 		return;
 	}
 
@@ -704,14 +723,14 @@ void coupled_cc_on_ack(struct coupled_cc_ctx *ctx, struct tquic_cc_state *cc,
 
 	/* Update path state */
 	coupled_cc_update_path(ctx, path_id, cc->cwnd + coupled_delta,
-				  rtt ? rtt->smoothed_rtt : 0);
+			       rtt ? rtt->smoothed_rtt : 0);
 }
 EXPORT_SYMBOL_GPL(coupled_cc_on_ack);
 
 /**
  * coupled_cc_on_loss - Process loss with coupled congestion control
  * @ctx: Coupled CC context
- * @cc: Base congestion control state
+ * @cc: Base congestion control state (may be NULL for internal tracking)
  * @path_id: Path that detected loss
  *
  * Loss handling is NOT coupled - each path responds independently.
@@ -720,7 +739,7 @@ EXPORT_SYMBOL_GPL(coupled_cc_on_ack);
 void coupled_cc_on_loss(struct coupled_cc_ctx *ctx, struct tquic_cc_state *cc,
 			u8 path_id)
 {
-	if (!ctx || !ctx->enabled || !cc)
+	if (!ctx || !ctx->enabled)
 		return;
 
 	/* Update coupled state with new cwnd after loss */
@@ -733,20 +752,6 @@ EXPORT_SYMBOL_GPL(coupled_cc_on_loss);
  * Statistics and Debugging
  * ============================================================================
  */
-
-/**
- * struct coupled_cc_stats - Coupled CC statistics for reporting
- */
-struct coupled_cc_stats {
-	bool		enabled;
-	int		num_paths;
-	u64		total_cwnd;
-	u64		alpha;
-	u64		min_rtt_us;
-	u64		max_rtt_us;
-	u64		coupled_increases;
-	u64		alpha_updates;
-};
 
 /**
  * coupled_cc_get_stats - Get current coupled CC statistics

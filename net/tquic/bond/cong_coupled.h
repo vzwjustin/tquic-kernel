@@ -16,9 +16,35 @@
 /* Forward declarations */
 struct coupled_cc_ctx;
 struct tquic_connection;
+struct tquic_path;
 
 /* Alpha scaling factor for fixed-point arithmetic */
 #define COUPLED_ALPHA_SCALE	1024
+
+/*
+ * Congestion control state structure for coupled CC integration.
+ * This mirrors the basic CC state used by the congestion control algorithms.
+ */
+struct tquic_cc_state {
+	u64 cwnd;		/* Congestion window in bytes */
+	u64 ssthresh;		/* Slow-start threshold */
+	u64 bytes_in_flight;	/* Bytes currently in flight */
+	bool in_slow_start;	/* True if in slow-start phase */
+	bool in_recovery;	/* True if in recovery phase */
+	ktime_t recovery_start;	/* Start of recovery period */
+};
+
+/*
+ * RTT measurement structure for coupled CC integration.
+ * Compatible with tquic_rtt_state from include/net/tquic.h
+ */
+struct tquic_rtt {
+	u64 smoothed_rtt;	/* Smoothed RTT in microseconds */
+	u64 rtt_var;		/* RTT variance */
+	u64 min_rtt;		/* Minimum RTT observed */
+	u64 latest_rtt;		/* Most recent RTT sample */
+	bool has_sample;	/* True if RTT sample is valid */
+};
 
 /*
  * ============================================================================
@@ -149,12 +175,14 @@ void coupled_cc_update_path(struct coupled_cc_ctx *ctx, u8 path_id,
 /**
  * coupled_cc_on_ack - Process ACK with coupled congestion control
  * @ctx: Coupled CC context
- * @cc: Base congestion control state
+ * @cc: Base congestion control state (may be NULL for internal tracking)
  * @path_id: Path that received ACK
  * @acked_bytes: Bytes acknowledged
- * @rtt: RTT measurements
+ * @rtt: RTT measurements (may be NULL if no new RTT sample)
  *
  * Wraps base CC on_ack to apply coupled increase during congestion avoidance.
+ * If cc is NULL, updates only the internal coupled CC tracking.
+ * If rtt is NULL, no RTT update is performed.
  */
 void coupled_cc_on_ack(struct coupled_cc_ctx *ctx, struct tquic_cc_state *cc,
 		       u8 path_id, u64 acked_bytes, struct tquic_rtt *rtt);
@@ -162,8 +190,10 @@ void coupled_cc_on_ack(struct coupled_cc_ctx *ctx, struct tquic_cc_state *cc,
 /**
  * coupled_cc_on_loss - Process loss with coupled congestion control
  * @ctx: Coupled CC context
- * @cc: Base congestion control state
+ * @cc: Base congestion control state (may be NULL for internal tracking)
  * @path_id: Path that detected loss
+ *
+ * If cc is NULL, updates only the internal coupled CC tracking.
  */
 void coupled_cc_on_loss(struct coupled_cc_ctx *ctx, struct tquic_cc_state *cc,
 			u8 path_id);

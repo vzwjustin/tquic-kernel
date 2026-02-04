@@ -10,6 +10,7 @@
 #include <linux/slab.h>
 #include <linux/uio.h>
 #include <net/tquic.h>
+#include "core/stream.h"
 
 static struct kmem_cache *tquic_stream_cache __read_mostly;
 static struct kmem_cache *tquic_recv_chunk_cache __read_mostly;
@@ -313,17 +314,17 @@ static int tquic_stream_send_data(struct tquic_stream *stream,
 		*p = frame_type;
 
 		/* Stream ID (variable length encoding) */
-		p = skb_put(skb, tquic_varint_len(stream->id));
-		tquic_varint_encode(stream->id, p);
+		p = skb_put(skb, quic_stream_varint_len(stream->id));
+		quic_stream_varint_encode(stream->id, p);
 
 		/* Offset (variable length encoding) */
-		p = skb_put(skb, tquic_varint_len(send->offset + offset));
-		tquic_varint_encode(send->offset + offset, p);
+		p = skb_put(skb, quic_stream_varint_len(send->offset + offset));
+		quic_stream_varint_encode(send->offset + offset, p);
 
 		/* Length if LEN bit set */
 		if (frame_type & 0x02) {
-			p = skb_put(skb, tquic_varint_len(chunk_len));
-			tquic_varint_encode(chunk_len, p);
+			p = skb_put(skb, quic_stream_varint_len(chunk_len));
+			quic_stream_varint_encode(chunk_len, p);
 		}
 
 		/* Data */
@@ -562,14 +563,14 @@ int tquic_stream_reset(struct tquic_stream *stream, u64 error_code)
 	p = skb_put(skb, 1);
 	*p = QUIC_FRAME_RESET_STREAM;
 
-	p = skb_put(skb, tquic_varint_len(stream->id));
-	tquic_varint_encode(stream->id, p);
+	p = skb_put(skb, quic_stream_varint_len(stream->id));
+	quic_stream_varint_encode(stream->id, p);
 
-	p = skb_put(skb, tquic_varint_len(error_code));
-	tquic_varint_encode(error_code, p);
+	p = skb_put(skb, quic_stream_varint_len(error_code));
+	quic_stream_varint_encode(error_code, p);
 
-	p = skb_put(skb, tquic_varint_len(stream->send.offset));
-	tquic_varint_encode(stream->send.offset, p);
+	p = skb_put(skb, quic_stream_varint_len(stream->send.offset));
+	quic_stream_varint_encode(stream->send.offset, p);
 
 	if (tquic_conn_queue_frame(conn, skb))
 		return -ENOBUFS;
@@ -599,11 +600,11 @@ int tquic_stream_stop_sending(struct tquic_stream *stream, u64 error_code)
 	p = skb_put(skb, 1);
 	*p = QUIC_FRAME_STOP_SENDING;
 
-	p = skb_put(skb, tquic_varint_len(stream->id));
-	tquic_varint_encode(stream->id, p);
+	p = skb_put(skb, quic_stream_varint_len(stream->id));
+	quic_stream_varint_encode(stream->id, p);
 
-	p = skb_put(skb, tquic_varint_len(error_code));
-	tquic_varint_encode(error_code, p);
+	p = skb_put(skb, quic_stream_varint_len(error_code));
+	quic_stream_varint_encode(error_code, p);
 
 	if (tquic_conn_queue_frame(conn, skb))
 		return -ENOBUFS;
@@ -658,32 +659,36 @@ int tquic_stream_handle_stop_sending(struct tquic_stream *stream, u64 error_code
 	return tquic_stream_reset(stream, error_code);
 }
 
-/* Variable-length integer encoding helpers (RFC 9000 Section 16) */
-int tquic_varint_len(u64 val)
+/* Variable-length integer encoding helpers (RFC 9000 Section 16)
+ * These are local static versions used only within this file.
+ * The canonical versions are in core/varint.c with EXPORT_SYMBOL_GPL.
+ */
+static int quic_stream_varint_len(u64 val)
 {
-	if (val <= QUIC_VARINT_1BYTE_MAX)
+	if (val <= TQUIC_VARINT_1BYTE_MAX)
 		return 1;
-	if (val <= QUIC_VARINT_2BYTE_MAX)
+	else if (val <= TQUIC_VARINT_2BYTE_MAX)
 		return 2;
-	if (val <= QUIC_VARINT_4BYTE_MAX)
+	else if (val <= TQUIC_VARINT_4BYTE_MAX)
 		return 4;
-	return 8;
+	else
+		return 8;
 }
 
-void tquic_varint_encode(u64 val, u8 *buf)
+static void quic_stream_varint_encode(u64 val, u8 *buf)
 {
-	if (val <= QUIC_VARINT_1BYTE_MAX) {
+	if (val <= TQUIC_VARINT_1BYTE_MAX) {
 		buf[0] = val;
-	} else if (val <= QUIC_VARINT_2BYTE_MAX) {
-		buf[0] = QUIC_VARINT_2BYTE_PREFIX | (val >> 8);
+	} else if (val <= TQUIC_VARINT_2BYTE_MAX) {
+		buf[0] = TQUIC_VARINT_2BYTE_PREFIX | (val >> 8);
 		buf[1] = val & 0xff;
-	} else if (val <= QUIC_VARINT_4BYTE_MAX) {
-		buf[0] = QUIC_VARINT_4BYTE_PREFIX | (val >> 24);
+	} else if (val <= TQUIC_VARINT_4BYTE_MAX) {
+		buf[0] = TQUIC_VARINT_4BYTE_PREFIX | (val >> 24);
 		buf[1] = (val >> 16) & 0xff;
 		buf[2] = (val >> 8) & 0xff;
 		buf[3] = val & 0xff;
 	} else {
-		buf[0] = QUIC_VARINT_8BYTE_PREFIX | (val >> 56);
+		buf[0] = TQUIC_VARINT_8BYTE_PREFIX | (val >> 56);
 		buf[1] = (val >> 48) & 0xff;
 		buf[2] = (val >> 40) & 0xff;
 		buf[3] = (val >> 32) & 0xff;
@@ -694,7 +699,7 @@ void tquic_varint_encode(u64 val, u8 *buf)
 	}
 }
 
-int tquic_varint_decode(const u8 *buf, size_t len, u64 *val)
+static int quic_stream_varint_decode(const u8 *buf, size_t len, u64 *val)
 {
 	u8 prefix;
 	int varint_len;

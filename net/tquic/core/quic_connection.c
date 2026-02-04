@@ -10,9 +10,52 @@
 #include <linux/slab.h>
 #include <linux/random.h>
 #include <net/tquic.h>
+
+/* Include QUIC constants if not already available */
+#ifndef QUIC_MAX_PACKET_SIZE
+#include <uapi/linux/quic.h>
+#endif
+
+/* Fallback definitions if header not available */
+#ifndef QUIC_MAX_PACKET_SIZE
+#define QUIC_MAX_PACKET_SIZE		1500
+#endif
+#ifndef QUIC_ERROR_INTERNAL_ERROR
+#define QUIC_ERROR_INTERNAL_ERROR	0x01
+#endif
 #include "transport_params.h"
 #include "../tquic_cid.h"
 #include "../diag/trace.h"
+
+/* Forward declarations for functions defined in other compilation units */
+void tquic_loss_detection_on_timeout(struct tquic_connection *conn);
+void tquic_timer_update(struct tquic_connection *conn);
+bool tquic_ack_should_send(struct tquic_connection *conn, u8 pn_space);
+int tquic_ack_create(struct tquic_connection *conn, u8 pn_space,
+		     struct sk_buff *skb);
+void tquic_crypto_discard_old_keys(struct tquic_connection *conn);
+
+/*
+ * struct tquic_sent_packet - Tracks a sent packet for loss detection
+ *
+ * This structure is used internally for tracking packets in the
+ * loss detection and ACK processing code. Must match definition in quic_loss.c.
+ */
+struct tquic_sent_packet {
+	struct list_head list;
+	struct rb_node node;
+	u64 pn;
+	ktime_t sent_time;
+	u32 sent_bytes;
+	u32 size;		/* Alias for sent_bytes for API compatibility */
+	u8 pn_space;
+	u32 path_id;
+	bool ack_eliciting;
+	bool in_flight;
+	bool retransmitted;	/* Packet has been retransmitted */
+	u32 frames;
+	struct sk_buff *skb;
+};
 
 /*
  * tquic_trace_conn_id - Extract connection ID as u64 for tracing
@@ -185,7 +228,7 @@ static void tquic_conn_init_local_params(struct tquic_connection *conn,
 	struct tquic_transport_params *params = &conn->local_params;
 
 	params->max_idle_timeout = config->max_idle_timeout_ms;
-	params->max_udp_payload_size = TQUIC_MAX_PACKET_SIZE;
+	params->max_udp_payload_size = QUIC_MAX_PACKET_SIZE;
 	params->initial_max_data = config->initial_max_data;
 	params->initial_max_stream_data_bidi_local =
 		config->initial_max_stream_data_bidi_local;
@@ -273,7 +316,7 @@ static void tquic_timer_handshake_cb(struct timer_list *t)
 
 	spin_lock_irqsave(&conn->lock, flags);
 	if (!conn->handshake_complete && conn->state == TQUIC_CONN_CONNECTING) {
-		conn->error_code = TQUIC_ERROR_INTERNAL_ERROR;
+		conn->error_code = QUIC_ERROR_INTERNAL_ERROR;
 		conn->state = TQUIC_CONN_CLOSED;
 		spin_unlock_irqrestore(&conn->lock, flags);
 		if (conn->tsk)
@@ -296,6 +339,16 @@ static void tquic_timer_path_probe_cb(struct timer_list *t)
 	}
 }
 
+static void tquic_timer_key_discard_cb(struct timer_list *t)
+{
+	struct tquic_connection *conn = from_timer(conn, t, timers[TQUIC_TIMER_KEY_DISCARD]);
+
+	if (!conn)
+		return;
+
+	tquic_crypto_discard_old_keys(conn);
+}
+
 static void tquic_conn_tx_work(struct work_struct *work)
 {
 	struct tquic_connection *conn = container_of(work, struct tquic_connection, tx_work);
@@ -308,10 +361,10 @@ static void tquic_conn_tx_work(struct work_struct *work)
 		if (!pn_space->keys_available || pn_space->keys_discarded)
 			continue;
 
-		skb = tquic_packet_build(conn, pn_space);
+		skb = tquic_packet_build(conn, i);
 		if (skb) {
 			int err = tquic_udp_send(conn->tsk, skb,
-						 (struct sockaddr *)&conn->active_path->remote_addr);
+						 conn->active_path);
 			if (err < 0)
 				kfree_skb(skb);
 		}
@@ -372,18 +425,21 @@ struct tquic_connection *tquic_conn_create(struct tquic_sock *tsk, bool is_serve
 	if (!scid_entry)
 		goto err_free_conn;
 
+	scid_entry->conn = conn;  /* Associate CID with connection for lookup */
 	list_add(&scid_entry->list, &conn->scid_list);
 	tquic_cid_hash_add(scid_entry);
 	conn->next_scid_seq = 1;
 
-	/* Initialize packet number spaces */
+	/* Allocate and initialize packet number spaces */
+	conn->pn_spaces = kcalloc(TQUIC_PN_SPACE_COUNT, sizeof(*conn->pn_spaces),
+				  GFP_KERNEL);
+	if (!conn->pn_spaces)
+		goto err_free_scid;  /* scid was just added, need to remove it */
+
 	for (i = 0; i < TQUIC_PN_SPACE_COUNT; i++)
 		tquic_pn_space_init(&conn->pn_spaces[i]);
 
-	/* Initialize crypto contexts */
-	for (i = 0; i < TQUIC_CRYPTO_MAX; i++) {
-		memset(&conn->crypto[i], 0, sizeof(conn->crypto[i]));
-	}
+	/* Initialize crypto level (crypto[] pointers already zeroed by kzalloc) */
 	conn->crypto_level = TQUIC_CRYPTO_INITIAL;
 
 	/* Initialize streams */
@@ -406,7 +462,7 @@ struct tquic_connection *tquic_conn_create(struct tquic_sock *tsk, bool is_serve
 	INIT_LIST_HEAD(&conn->paths);
 	path = tquic_path_create(conn, NULL, NULL);
 	if (!path)
-		goto err_free_cid;
+		goto err_free_pn_spaces;  /* pn_spaces was just allocated */
 	conn->active_path = path;
 	conn->num_paths = 1;
 
@@ -416,6 +472,7 @@ struct tquic_connection *tquic_conn_create(struct tquic_sock *tsk, bool is_serve
 	timer_setup(&conn->timers[TQUIC_TIMER_IDLE], tquic_timer_idle_cb, 0);
 	timer_setup(&conn->timers[TQUIC_TIMER_HANDSHAKE], tquic_timer_handshake_cb, 0);
 	timer_setup(&conn->timers[TQUIC_TIMER_PATH_PROBE], tquic_timer_path_probe_cb, 0);
+	timer_setup(&conn->timers[TQUIC_TIMER_KEY_DISCARD], tquic_timer_key_discard_cb, 0);
 
 	/* Initialize work queues */
 	INIT_WORK(&conn->tx_work, tquic_conn_tx_work);
@@ -423,11 +480,12 @@ struct tquic_connection *tquic_conn_create(struct tquic_sock *tsk, bool is_serve
 	INIT_WORK(&conn->close_work, tquic_conn_close_work);
 
 	/* Initialize loss detection */
-	tquic_loss_detection_init(conn);
+	if (tquic_loss_detection_init(conn) < 0)
+		goto err_free_path;
 
 	/* Initialize pending frame queues */
 	skb_queue_head_init(&conn->pending_frames);
-	for (i = 0; i < TQUIC_CRYPTO_MAX; i++)
+	for (i = 0; i < TQUIC_PN_SPACE_COUNT; i++)
 		skb_queue_head_init(&conn->crypto_buffer[i]);
 
 	/* Initialize stream priority scheduler (RFC 9218) */
@@ -454,7 +512,11 @@ struct tquic_connection *tquic_conn_create(struct tquic_sock *tsk, bool is_serve
 
 	return conn;
 
-err_free_cid:
+err_free_path:
+	tquic_path_destroy(path);
+err_free_pn_spaces:
+	kfree(conn->pn_spaces);
+err_free_scid:
 	tquic_cid_entry_destroy(scid_entry);
 err_free_conn:
 	kfree(conn);
@@ -462,11 +524,12 @@ err_free_conn:
 }
 EXPORT_SYMBOL_GPL(tquic_conn_create);
 
+#ifndef TQUIC_OUT_OF_TREE
 void tquic_conn_destroy(struct tquic_connection *conn)
 {
 	struct tquic_cid_entry *entry, *tmp_entry;
 	struct tquic_path *path, *tmp_path;
-	struct tquic_stream *stream, *tmp_stream;
+	struct tquic_stream *stream;
 	struct rb_node *node;
 	int i;
 
@@ -510,23 +573,27 @@ void tquic_conn_destroy(struct tquic_connection *conn)
 	}
 
 	/* Destroy packet number spaces */
-	for (i = 0; i < TQUIC_PN_SPACE_COUNT; i++)
-		tquic_pn_space_destroy(&conn->pn_spaces[i]);
+	if (conn->pn_spaces) {
+		for (i = 0; i < TQUIC_PN_SPACE_COUNT; i++)
+			tquic_pn_space_destroy(&conn->pn_spaces[i]);
+		kfree(conn->pn_spaces);
+	}
 
 	/* Destroy crypto contexts */
 	for (i = 0; i < TQUIC_CRYPTO_MAX; i++)
-		tquic_crypto_destroy(&conn->crypto[i]);
+		tquic_crypto_destroy(conn->crypto[i]);
 
 	/* Free pending frames, pacing queue, and early data buffer */
 	skb_queue_purge(&conn->pending_frames);
 	skb_queue_purge(&conn->pacing_queue);
 	skb_queue_purge(&conn->early_data_buffer);
-	for (i = 0; i < TQUIC_CRYPTO_MAX; i++)
+	for (i = 0; i < TQUIC_PN_SPACE_COUNT; i++)
 		skb_queue_purge(&conn->crypto_buffer[i]);
 
 	kfree(conn->reason_phrase);
 	kfree(conn);
 }
+#endif /* TQUIC_OUT_OF_TREE */
 
 int tquic_conn_connect(struct tquic_connection *conn,
 		       struct sockaddr *addr, int addr_len)
@@ -646,8 +713,8 @@ void tquic_conn_set_state(struct tquic_connection *conn, enum tquic_conn_state s
 					       atomic64_read(&conn->stats.handshake_time_us));
 
 		tquic_timer_cancel(conn, TQUIC_TIMER_HANDSHAKE);
-		tquic_crypto_destroy(&conn->crypto[TQUIC_CRYPTO_INITIAL]);
-		tquic_crypto_destroy(&conn->crypto[TQUIC_CRYPTO_HANDSHAKE]);
+		tquic_crypto_destroy(conn->crypto[TQUIC_CRYPTO_INITIAL]);
+		tquic_crypto_destroy(conn->crypto[TQUIC_CRYPTO_HANDSHAKE]);
 
 		if (conn->tsk)
 			wake_up(&conn->tsk->event_wait);
@@ -695,6 +762,7 @@ int tquic_conn_new_cid(struct tquic_connection *conn,
 	if (!entry)
 		return -ENOMEM;
 
+	entry->conn = conn;  /* Associate CID with connection for lookup */
 	list_add_tail(&entry->list, &conn->scid_list);
 	tquic_cid_hash_add(entry);
 
@@ -702,6 +770,7 @@ int tquic_conn_new_cid(struct tquic_connection *conn,
 }
 
 /* Retire a connection ID */
+#ifndef TQUIC_OUT_OF_TREE
 int tquic_conn_retire_cid(struct tquic_connection *conn, u64 seq, bool is_local)
 {
 	struct tquic_cid_entry *entry, *tmp;
@@ -719,6 +788,7 @@ int tquic_conn_retire_cid(struct tquic_connection *conn, u64 seq, bool is_local)
 
 	return -ENOENT;
 }
+#endif /* TQUIC_OUT_OF_TREE */
 
 /* Process NEW_CONNECTION_ID from peer */
 int tquic_conn_add_peer_cid(struct tquic_connection *conn,
@@ -743,6 +813,7 @@ int tquic_conn_add_peer_cid(struct tquic_connection *conn,
 	if (!entry)
 		return -ENOMEM;
 
+	entry->conn = conn;  /* Associate CID with connection */
 	if (reset_token)
 		memcpy(entry->reset_token, reset_token, TQUIC_STATELESS_RESET_TOKEN_LEN);
 

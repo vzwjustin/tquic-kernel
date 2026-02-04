@@ -25,6 +25,7 @@
 #include <linux/ktime.h>
 #include <linux/rculist.h>
 #include <linux/spinlock.h>
+#include <net/tquic.h>
 
 #include "tquic_sched.h"
 
@@ -539,7 +540,7 @@ static void blest_loss_detected(struct tquic_connection *conn,
 /**
  * BLEST scheduler operations structure
  */
-static struct tquic_sched_ops tquic_sched_blest = {
+static struct tquic_mp_sched_ops tquic_mp_sched_blest = {
 	.name		= "blest",
 	.owner		= THIS_MODULE,
 	.get_path	= blest_get_path,
@@ -561,7 +562,7 @@ int __init tquic_sched_blest_init(void)
 
 	pr_info("Initializing TQUIC BLEST scheduler\n");
 
-	ret = tquic_register_scheduler(&tquic_sched_blest);
+	ret = tquic_mp_register_scheduler(&tquic_mp_sched_blest);
 	if (ret) {
 		pr_err("Failed to register blest scheduler: %d\n", ret);
 		return ret;
@@ -576,7 +577,7 @@ int __init tquic_sched_blest_init(void)
 void __exit tquic_sched_blest_exit(void)
 {
 	pr_info("Unloading TQUIC BLEST scheduler\n");
-	tquic_unregister_scheduler(&tquic_sched_blest);
+	tquic_mp_unregister_scheduler(&tquic_mp_sched_blest);
 }
 
 /* Note: module_init/exit handled by main protocol.c */

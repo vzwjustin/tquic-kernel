@@ -930,6 +930,7 @@ EXPORT_SYMBOL_GPL(tquic_crypto_handshake_complete);
 /*
  * Apply header protection to an outgoing packet
  */
+#ifndef TQUIC_OUT_OF_TREE
 int tquic_crypto_protect_header(struct tquic_crypto_state *crypto,
 				u8 *packet, size_t packet_len,
 				size_t pn_offset)
@@ -956,6 +957,7 @@ int tquic_crypto_unprotect_header(struct tquic_crypto_state *crypto,
 				  pn_offset, pn_len, key_phase);
 }
 EXPORT_SYMBOL_GPL(tquic_crypto_unprotect_header);
+#endif /* TQUIC_OUT_OF_TREE */
 
 /*
  * Get the header protection context (for direct access if needed)

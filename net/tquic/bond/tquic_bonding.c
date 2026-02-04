@@ -27,6 +27,7 @@
 #include <linux/ktime.h>
 #include <linux/math64.h>
 #include <net/tquic.h>
+#include <net/tquic_pm.h>
 
 #include "tquic_bonding.h"
 #include "tquic_failover.h"
@@ -38,10 +39,10 @@
  * State name strings for debugging/logging
  */
 const char *tquic_bonding_state_names[] = {
-	[TQUIC_BOND_SINGLE_PATH]	= "SINGLE_PATH",
-	[TQUIC_BOND_PENDING]		= "PENDING",
-	[TQUIC_BOND_ACTIVE]		= "ACTIVE",
-	[TQUIC_BOND_DEGRADED]		= "DEGRADED",
+	[TQUIC_BOND_SINGLE_PATH] = "SINGLE_PATH",
+	[TQUIC_BOND_PENDING] = "PENDING",
+	[TQUIC_BOND_ACTIVE] = "ACTIVE",
+	[TQUIC_BOND_DEGRADED] = "DEGRADED",
 };
 EXPORT_SYMBOL_GPL(tquic_bonding_state_names);
 
@@ -94,9 +95,8 @@ static struct workqueue_struct *tquic_bond_wq;
  * Count paths by state from path manager
  * Must be called with bc->state_lock held or from callback context
  */
-static void tquic_bonding_count_paths(struct tquic_bonding_ctx *bc,
-				      int *active, int *pending,
-				      int *failed, int *degraded)
+static void tquic_bonding_count_paths(struct tquic_bonding_ctx *bc, int *active,
+				      int *pending, int *failed, int *degraded)
 {
 	struct tquic_path *paths[TQUIC_MAX_PATHS];
 	int count, i;
@@ -113,7 +113,7 @@ static void tquic_bonding_count_paths(struct tquic_bonding_ctx *bc,
 		struct tquic_path *path = paths[i];
 		/* Access path state - this is safe under RCU */
 		/* We use a simplified state check here */
-		a++;  /* Count all returned paths as active for now */
+		a++; /* Count all returned paths as active for now */
 		/* Path reference released by caller convention */
 	}
 
@@ -137,7 +137,7 @@ static int tquic_bonding_alloc_reorder(struct tquic_bonding_ctx *bc)
 	int ret;
 
 	if (bc->reorder)
-		return 0;  /* Already allocated */
+		return 0; /* Already allocated */
 
 	reorder = tquic_reorder_alloc(GFP_ATOMIC);
 	if (!reorder)
@@ -241,9 +241,8 @@ static void tquic_bonding_set_state(struct tquic_bonding_ctx *bc,
 
 	pr_info("state transition: %s -> %s (active=%d pending=%d failed=%d)\n",
 		tquic_bonding_state_names[old_state],
-		tquic_bonding_state_names[new_state],
-		bc->active_path_count, bc->pending_path_count,
-		bc->failed_path_count);
+		tquic_bonding_state_names[new_state], bc->active_path_count,
+		bc->pending_path_count, bc->failed_path_count);
 }
 
 /*
@@ -251,8 +250,8 @@ static void tquic_bonding_set_state(struct tquic_bonding_ctx *bc,
  */
 static void tquic_bonding_weight_work_fn(struct work_struct *work)
 {
-	struct tquic_bonding_ctx *bc = container_of(work,
-			struct tquic_bonding_ctx, weight_work);
+	struct tquic_bonding_ctx *bc =
+		container_of(work, struct tquic_bonding_ctx, weight_work);
 
 	tquic_bonding_derive_weights(bc);
 	bc->weight_update_pending = false;
@@ -319,7 +318,8 @@ struct tquic_bonding_ctx *tquic_bonding_init(struct tquic_path_manager *pm,
 		 * Continue without failover - path failures will not be
 		 * seamlessly handled. Log what functionality is disabled.
 		 */
-		pr_notice("bonding: seamless failover retransmission disabled\n");
+		pr_notice(
+			"bonding: seamless failover retransmission disabled\n");
 	}
 
 	/*
@@ -380,8 +380,9 @@ void tquic_bonding_destroy(struct tquic_bonding_ctx *bc)
 	/* Free reorder buffer */
 	tquic_bonding_free_reorder(bc);
 
-	pr_debug("bonding context destroyed (state_changes=%llu time_bonded=%lluns)\n",
-		 bc->stats.state_changes, bc->stats.time_in_bonded_ns);
+	pr_debug(
+		"bonding context destroyed (state_changes=%llu time_bonded=%lluns)\n",
+		bc->stats.state_changes, bc->stats.time_in_bonded_ns);
 
 	kfree(bc);
 }
@@ -440,9 +441,11 @@ void tquic_bonding_update_state(struct tquic_bonding_ctx *bc)
 				 * Can't allocate buffer. Mark state and allow
 				 * degraded operation without packet reordering.
 				 */
-				pr_warn("reorder buffer alloc failed (%d), bonding without reorder\n", ret);
+				pr_warn("reorder buffer alloc failed (%d), bonding without reorder\n",
+					ret);
 				bc->flags |= TQUIC_BOND_F_REORDER_DISABLED;
-				pr_notice("bonding: packet reordering disabled, may see out-of-order delivery\n");
+				pr_notice(
+					"bonding: packet reordering disabled, may see out-of-order delivery\n");
 			}
 		}
 
@@ -566,7 +569,7 @@ void tquic_bonding_derive_weights(struct tquic_bonding_ctx *bc)
 	 * Weight = (capacity / total_capacity) * WEIGHT_SCALE
 	 */
 	for (i = 0; i < count && i < TQUIC_MAX_PATHS; i++) {
-		u8 path_id = i;  /* Simplified: index = path_id */
+		u8 path_id = i; /* Simplified: index = path_id */
 		u32 weight;
 
 		/* Skip user-overridden weights */
@@ -609,8 +612,8 @@ EXPORT_SYMBOL_GPL(tquic_bonding_derive_weights);
 /**
  * tquic_bonding_set_path_weight - Set user-defined weight for a path
  */
-int tquic_bonding_set_path_weight(struct tquic_bonding_ctx *bc,
-				  u8 path_id, u32 weight)
+int tquic_bonding_set_path_weight(struct tquic_bonding_ctx *bc, u8 path_id,
+				  u32 weight)
 {
 	if (!bc)
 		return -EINVAL;
@@ -795,8 +798,8 @@ void tquic_bonding_on_path_added(void *ctx, struct tquic_path *path)
 
 	spin_unlock_bh(&bc->state_lock);
 
-	pr_debug("path added: active=%d pending=%d\n",
-		 bc->active_path_count, bc->pending_path_count);
+	pr_debug("path added: active=%d pending=%d\n", bc->active_path_count,
+		 bc->pending_path_count);
 
 	/* Update state machine (may transition to PENDING) */
 	tquic_bonding_update_state(bc);
@@ -848,8 +851,7 @@ EXPORT_SYMBOL_GPL(tquic_bonding_on_path_removed);
  */
 void tquic_bonding_on_ack_received(struct tquic_connection *conn,
 				   struct tquic_bonding_ctx *bc,
-				   struct tquic_path *path,
-				   u64 acked_bytes)
+				   struct tquic_path *path, u64 acked_bytes)
 {
 	if (!bc || !path)
 		return;
@@ -882,8 +884,7 @@ EXPORT_SYMBOL_GPL(tquic_bonding_on_ack_received);
  */
 void tquic_bonding_on_loss_detected(struct tquic_connection *conn,
 				    struct tquic_bonding_ctx *bc,
-				    struct tquic_path *path,
-				    u64 lost_bytes)
+				    struct tquic_path *path, u64 lost_bytes)
 {
 	if (!bc || !path)
 		return;
@@ -946,7 +947,8 @@ void tquic_bonding_get_info(struct tquic_bonding_ctx *bc,
 	/* Calculate current time in bonded if still bonded */
 	if (bc->state == TQUIC_BOND_ACTIVE) {
 		ktime_t now = ktime_get();
-		info->time_in_bonded_ns = bc->stats.time_in_bonded_ns +
+		info->time_in_bonded_ns =
+			bc->stats.time_in_bonded_ns +
 			ktime_to_ns(ktime_sub(now, bc->stats.bonded_start));
 	} else {
 		info->time_in_bonded_ns = bc->stats.time_in_bonded_ns;
@@ -965,6 +967,10 @@ EXPORT_SYMBOL_GPL(tquic_bonding_get_info);
  * ============================================================================
  */
 
+/*
+ * For out-of-tree builds, tquic_bond_set_path_weight is provided by bond/bonding.c
+ */
+#ifndef TQUIC_OUT_OF_TREE
 /**
  * tquic_bond_set_path_weight - Set path weight via connection
  * @conn: TQUIC connection
@@ -972,38 +978,33 @@ EXPORT_SYMBOL_GPL(tquic_bonding_get_info);
  * @weight: Weight value (50-1000, or 0 to clear override)
  *
  * Wrapper for socket code to set bonding path weight.
- * Accesses bonding context through path manager.
+ * Accesses bonding context through path manager state.
  *
  * Returns: 0 on success, negative errno on failure
  */
-int tquic_bond_set_path_weight(struct tquic_connection *conn,
-			       u32 path_id, u32 weight)
+int tquic_bond_set_path_weight(struct tquic_connection *conn, u32 path_id,
+			       u32 weight)
 {
-	struct tquic_path_manager *pm;
 	struct tquic_bonding_ctx *bc;
 
 	if (!conn)
 		return -EINVAL;
 
 	/*
-	 * Access bonding context via path manager.
-	 * The pm pointer is stored in tquic_pm_state->priv for now.
-	 * In future, this could be a direct field in tquic_connection.
-	 *
-	 * For now, we need to get the path_manager from net/quic/tquic_path.c.
-	 * The bonding context is stored in pm->bonding.
+	 * Access bonding context via path manager state.
+	 * The PM maintains the bonding context when bonding is enabled.
 	 */
-	pm = (struct tquic_path_manager *)conn->scheduler;
-	if (!pm)
+	if (!conn->pm)
 		return -ENOENT;
 
-	bc = pm->bonding;
+	bc = conn->pm->bonding_ctx;
 	if (!bc)
 		return -ENOENT;
 
 	return tquic_bonding_set_path_weight(bc, path_id, weight);
 }
 EXPORT_SYMBOL_GPL(tquic_bond_set_path_weight);
+#endif /* !TQUIC_OUT_OF_TREE */
 
 /**
  * tquic_bond_get_path_weight - Get path weight via connection
@@ -1014,17 +1015,15 @@ EXPORT_SYMBOL_GPL(tquic_bond_set_path_weight);
  */
 u32 tquic_bond_get_path_weight(struct tquic_connection *conn, u32 path_id)
 {
-	struct tquic_path_manager *pm;
 	struct tquic_bonding_ctx *bc;
 
 	if (!conn)
 		return 0;
 
-	pm = (struct tquic_path_manager *)conn->scheduler;
-	if (!pm)
+	if (!conn->pm)
 		return 0;
 
-	bc = pm->bonding;
+	bc = conn->pm->bonding_ctx;
 	if (!bc)
 		return 0;
 
@@ -1040,8 +1039,8 @@ EXPORT_SYMBOL_GPL(tquic_bond_get_path_weight);
 
 int __init tquic_bonding_init_module(void)
 {
-	tquic_bond_wq = alloc_workqueue("tquic_bond",
-					WQ_MEM_RECLAIM | WQ_HIGHPRI, 0);
+	tquic_bond_wq =
+		alloc_workqueue("tquic_bond", WQ_MEM_RECLAIM | WQ_HIGHPRI, 0);
 	if (!tquic_bond_wq) {
 		pr_err("failed to create bond workqueue\n");
 		return -ENOMEM;

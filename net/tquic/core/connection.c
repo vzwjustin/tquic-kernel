@@ -41,8 +41,8 @@
 int tquic_write_path_challenge_frame(u8 *buf, size_t buf_len, const u8 *data);
 int tquic_write_path_response_frame(u8 *buf, size_t buf_len, const u8 *data);
 int tquic_write_connection_close_frame(u8 *buf, size_t buf_len, u64 error_code,
-				       u64 frame_type, const char *reason,
-				       u32 reason_len, bool is_application);
+				       u64 frame_type, const u8 *reason,
+				       u64 reason_len, bool app_close);
 
 /* QUIC Error Codes (RFC 9000 Section 20) */
 #define TQUIC_NO_ERROR			0x00

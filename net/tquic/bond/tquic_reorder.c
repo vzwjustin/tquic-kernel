@@ -21,14 +21,7 @@
 #include <linux/workqueue.h>
 #include "tquic_reorder.h"
 
-/*
- * Convert SKB rb_node to SKB pointer
- * The rb_node is embedded at the start of skb->cb
- */
-static inline struct sk_buff *rb_to_skb(struct rb_node *node)
-{
-	return container_of(node, struct sk_buff, rbnode);
-}
+/* rb_to_skb is defined in linux/skbuff.h */
 
 /*
  * Compare sequence numbers for RB-tree ordering
@@ -180,7 +173,7 @@ int tquic_reorder_insert(struct tquic_reorder_buffer *rb, struct sk_buff *skb,
 {
 	struct tquic_reorder_cb *cb;
 	struct rb_node **p, *parent = NULL;
-	int ret = 0;
+	/* int ret = 0; unused */
 
 	if (!rb || !skb)
 		return -EINVAL;
@@ -220,7 +213,8 @@ int tquic_reorder_insert(struct tquic_reorder_buffer *rb, struct sk_buff *skb,
 
 	/* Fast path: append to tail (common case for nearly-in-order) */
 	if (rb->last_skb) {
-		struct tquic_reorder_cb *last_cb = TQUIC_REORDER_CB(rb->last_skb);
+		struct tquic_reorder_cb *last_cb =
+			TQUIC_REORDER_CB(rb->last_skb);
 
 		if (seq_compare(seq, last_cb->seq) > 0) {
 			/* Append after last_skb */
@@ -261,7 +255,8 @@ int tquic_reorder_insert(struct tquic_reorder_buffer *rb, struct sk_buff *skb,
 	rb_insert_color(&skb->rbnode, &rb->queue);
 
 	/* Update last_skb if this is the new tail */
-	if (!rb->last_skb || seq_compare(seq, TQUIC_REORDER_CB(rb->last_skb)->seq) > 0)
+	if (!rb->last_skb ||
+	    seq_compare(seq, TQUIC_REORDER_CB(rb->last_skb)->seq) > 0)
 		rb->last_skb = skb;
 
 inserted:
@@ -277,7 +272,8 @@ inserted:
 		rb->stats.buffer_peak_bytes = rb->buffer_bytes;
 
 	/* Update oldest arrival for timeout */
-	if (rb->packet_count == 1 || ktime_before(cb->arrival, rb->oldest_arrival))
+	if (rb->packet_count == 1 ||
+	    ktime_before(cb->arrival, rb->oldest_arrival))
 		rb->oldest_arrival = cb->arrival;
 
 	/* Schedule gap timeout if not already scheduled */
@@ -363,8 +359,8 @@ int tquic_reorder_drain(struct tquic_reorder_buffer *rb,
 	spin_unlock_bh(&rb->buffer_lock);
 
 	if (delivered > 0)
-		pr_debug("drained %d packets, next_expected=%llu\n",
-			 delivered, rb->next_expected);
+		pr_debug("drained %d packets, next_expected=%llu\n", delivered,
+			 rb->next_expected);
 
 	return delivered;
 }
@@ -380,7 +376,8 @@ EXPORT_SYMBOL_GPL(tquic_reorder_drain);
  * that have been waiting too long, skipping the gap.
  */
 void tquic_reorder_flush_timeout(struct tquic_reorder_buffer *rb,
-				 void (*deliver)(void *ctx, struct sk_buff *skb),
+				 void (*deliver)(void *ctx,
+						 struct sk_buff *skb),
 				 void *ctx)
 {
 	struct rb_node *node;
@@ -410,7 +407,8 @@ void tquic_reorder_flush_timeout(struct tquic_reorder_buffer *rb,
 		return;
 	}
 
-	pr_info("gap timeout: expected seq=%llu, jumping to buffered\n", gap_start);
+	pr_info("gap timeout: expected seq=%llu, jumping to buffered\n",
+		gap_start);
 
 	/* Jump next_expected to first buffered packet */
 	node = rb_first(&rb->queue);
@@ -425,7 +423,8 @@ void tquic_reorder_flush_timeout(struct tquic_reorder_buffer *rb,
 	/* Drain whatever is now deliverable */
 	delivered = tquic_reorder_drain(rb, deliver, ctx);
 
-	pr_info("gap timeout delivered %d packets after skipping gap\n", delivered);
+	pr_info("gap timeout delivered %d packets after skipping gap\n",
+		delivered);
 }
 EXPORT_SYMBOL_GPL(tquic_reorder_flush_timeout);
 
@@ -440,13 +439,13 @@ EXPORT_SYMBOL_GPL(tquic_reorder_flush_timeout);
  * @rb: Reorder buffer
  * @timeout_ms: New timeout in milliseconds
  */
-void tquic_reorder_update_timeout(struct tquic_reorder_buffer *rb, u32 timeout_ms)
+void tquic_reorder_update_timeout(struct tquic_reorder_buffer *rb,
+				  u32 timeout_ms)
 {
 	if (!rb)
 		return;
 
-	timeout_ms = clamp(timeout_ms,
-			   (u32)TQUIC_REORDER_MIN_TIMEOUT_MS,
+	timeout_ms = clamp(timeout_ms, (u32)TQUIC_REORDER_MIN_TIMEOUT_MS,
 			   (u32)TQUIC_REORDER_MAX_TIMEOUT_MS);
 
 	spin_lock_bh(&rb->buffer_lock);
@@ -465,8 +464,8 @@ EXPORT_SYMBOL_GPL(tquic_reorder_update_timeout);
  *
  * Tracks min/max RTT across paths to calculate RTT spread.
  */
-void tquic_reorder_update_rtt(struct tquic_reorder_buffer *rb,
-			      u32 path_rtt_us, bool is_min)
+void tquic_reorder_update_rtt(struct tquic_reorder_buffer *rb, u32 path_rtt_us,
+			      bool is_min)
 {
 	u32 new_timeout;
 
@@ -532,8 +531,7 @@ void tquic_reorder_adapt_size(struct tquic_reorder_buffer *rb,
 	new_size = (spread_ms * (aggregate_bandwidth / 1000)) * 2;
 
 	/* Clamp to limits */
-	new_size = clamp(new_size,
-			 (size_t)TQUIC_REORDER_MIN_BUFFER,
+	new_size = clamp(new_size, (size_t)TQUIC_REORDER_MIN_BUFFER,
 			 (size_t)TQUIC_REORDER_MAX_BUFFER);
 
 	rb->max_buffer_bytes = new_size;

@@ -311,7 +311,7 @@ int tquic_http_datagram_encode(u64 context_id,
 		return -ENOBUFS;
 
 	/* Encode context ID */
-	tquic_varint_encode(context_id, buf);
+	tquic_varint_encode(context_id, buf, varint_len);
 
 	/* Copy payload */
 	if (payload_len > 0)

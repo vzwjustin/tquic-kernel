@@ -22,9 +22,10 @@
 #include <linux/slab.h>
 #include <linux/list.h>
 #include <linux/rcupdate.h>
+#include <net/tquic.h>
 
 #include "tquic_sched.h"
-#include "tquic_bonding.h"
+#include "../bond/tquic_bonding.h"
 
 /*
  * Deficit Round-Robin constants
@@ -237,7 +238,7 @@ static void weighted_loss_detected(struct tquic_connection *conn,
 /*
  * Weighted scheduler operations structure
  */
-static struct tquic_sched_ops tquic_sched_weighted = {
+static struct tquic_mp_sched_ops tquic_mp_sched_weighted = {
 	.name           = "weighted",
 	.owner          = THIS_MODULE,
 	.get_path       = weighted_get_path,
@@ -251,12 +252,12 @@ static struct tquic_sched_ops tquic_sched_weighted = {
 
 int __init tquic_sched_weighted_init(void)
 {
-	return tquic_register_scheduler(&tquic_sched_weighted);
+	return tquic_mp_register_scheduler(&tquic_mp_sched_weighted);
 }
 
 void __exit tquic_sched_weighted_exit(void)
 {
-	tquic_unregister_scheduler(&tquic_sched_weighted);
+	tquic_mp_unregister_scheduler(&tquic_mp_sched_weighted);
 }
 
 /* Note: module_init/exit handled by main protocol.c */

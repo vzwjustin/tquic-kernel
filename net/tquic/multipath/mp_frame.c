@@ -1067,5 +1067,7 @@ void __exit tquic_mp_frame_exit(void)
 	pr_info("tquic: Multipath frame support cleaned up\n");
 }
 
+#ifndef TQUIC_OUT_OF_TREE
 MODULE_DESCRIPTION("TQUIC Multipath Frame Support (RFC 9369)");
 MODULE_LICENSE("GPL");
+#endif

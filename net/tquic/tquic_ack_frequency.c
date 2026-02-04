@@ -295,6 +295,10 @@ EXPORT_SYMBOL_GPL(tquic_ack_freq_conn_is_enabled);
  * =============================================================================
  */
 
+/*
+ * For out-of-tree builds, frame size/parse functions provided by core/ack_frequency.c
+ */
+#ifndef TQUIC_OUT_OF_TREE
 /**
  * tquic_ack_frequency_frame_size - Calculate ACK_FREQUENCY frame size
  * @ack_eliciting_threshold: ACK-eliciting threshold value
@@ -329,6 +333,7 @@ size_t tquic_ack_frequency_frame_size(u64 ack_eliciting_threshold,
 	return size;
 }
 EXPORT_SYMBOL_GPL(tquic_ack_frequency_frame_size);
+#endif /* !TQUIC_OUT_OF_TREE */
 
 /*
  * =============================================================================
@@ -464,6 +469,7 @@ EXPORT_SYMBOL_GPL(tquic_gen_immediate_ack_frame);
  * =============================================================================
  */
 
+#ifndef TQUIC_OUT_OF_TREE
 /**
  * tquic_parse_ack_frequency_frame - Parse ACK_FREQUENCY frame
  * @buf: Input buffer (starting after frame type byte)
@@ -555,6 +561,7 @@ int tquic_parse_immediate_ack_frame(const u8 *buf, size_t buf_len)
 	return ret;
 }
 EXPORT_SYMBOL_GPL(tquic_parse_immediate_ack_frame);
+#endif /* !TQUIC_OUT_OF_TREE */
 
 /*
  * =============================================================================
@@ -721,6 +728,7 @@ bool tquic_ack_freq_should_ack_immediately(struct tquic_connection *conn)
 }
 EXPORT_SYMBOL_GPL(tquic_ack_freq_should_ack_immediately);
 
+#ifndef TQUIC_OUT_OF_TREE
 /**
  * tquic_ack_freq_should_ack - Determine if ACK should be sent (state-based)
  * @state: ACK frequency state
@@ -800,6 +808,7 @@ out:
 	return should_ack;
 }
 EXPORT_SYMBOL_GPL(tquic_ack_freq_should_ack);
+#endif /* !TQUIC_OUT_OF_TREE */
 
 /**
  * tquic_ack_freq_conn_get_max_delay - Get current max ACK delay
@@ -832,6 +841,7 @@ EXPORT_SYMBOL_GPL(tquic_ack_freq_conn_get_max_delay);
  * =============================================================================
  */
 
+#ifndef TQUIC_OUT_OF_TREE
 /**
  * tquic_ack_freq_encode_tp - Encode min_ack_delay transport parameter
  * @min_ack_delay_us: Minimum ACK delay in microseconds
@@ -906,6 +916,7 @@ int tquic_ack_freq_decode_tp(const u8 *buf, size_t buf_len, u64 *min_ack_delay_u
 	return 0;
 }
 EXPORT_SYMBOL_GPL(tquic_ack_freq_decode_tp);
+#endif /* !TQUIC_OUT_OF_TREE */
 
 /*
  * =============================================================================

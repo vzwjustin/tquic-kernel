@@ -28,52 +28,55 @@
 #include <net/netns/generic.h>
 #include <linux/in.h>
 #include <linux/in6.h>
+#include <net/tquic.h>
+#include <uapi/linux/tquic.h>
+#include <uapi/linux/tquic_pm.h>
 
 #include "multipath/tquic_sched.h"
 
 /*
  * TQUIC Netlink Family Definitions
  */
-#define TQUIC_GENL_NAME		"tquic"
-#define TQUIC_GENL_VERSION	1
+#define TQUIC_NL_GENL_NAME "tquic"
+#define TQUIC_NL_GENL_VERSION 1
 
 /* Multicast group names */
-#define TQUIC_MCGRP_EVENTS	"events"
+#define TQUIC_MCGRP_EVENTS "events"
 
 /* Multicast group offsets */
-#define TQUIC_MCGRP_EVENTS_OFFSET	0
+#define TQUIC_MCGRP_EVENTS_OFFSET 0
 
 /* Maximum paths per connection (DoS prevention) */
-#define TQUIC_MAX_PATHS_PER_CONN	256
+#define TQUIC_MAX_PATHS_PER_CONN 256
 
 /*
  * Command definitions
  */
 enum {
-	TQUIC_CMD_UNSPEC,
-	TQUIC_CMD_PATH_ADD,	/* Add a path manually */
-	TQUIC_CMD_PATH_REMOVE,	/* Remove a path */
-	TQUIC_CMD_PATH_SET,	/* Modify path settings */
-	TQUIC_CMD_PATH_GET,	/* Get path information */
-	TQUIC_CMD_PATH_LIST,	/* List all paths (dump) */
-	TQUIC_CMD_SCHED_SET,	/* Set scheduler */
-	TQUIC_CMD_SCHED_GET,	/* Get current scheduler */
-	TQUIC_CMD_STATS_GET,	/* Get statistics */
-	TQUIC_CMD_CONN_GET,	/* Get connection info */
+	TQUIC_NL_CMD_UNSPEC,
+	TQUIC_NL_CMD_PATH_ADD, /* Add a path manually */
+	TQUIC_NL_CMD_PATH_REMOVE, /* Remove a path */
+	TQUIC_NL_CMD_PATH_SET, /* Modify path settings */
+	TQUIC_NL_CMD_PATH_GET, /* Get path information */
+	TQUIC_NL_CMD_PATH_LIST, /* List all paths (dump) */
+	TQUIC_NL_CMD_SCHED_SET, /* Set scheduler */
+	TQUIC_NL_CMD_SCHED_GET, /* Get current scheduler */
+	TQUIC_NL_CMD_STATS_GET, /* Get statistics */
+	TQUIC_NL_CMD_CONN_GET, /* Get connection info */
 
-	__TQUIC_CMD_MAX,
+	__TQUIC_NL_CMD_MAX,
 };
-#define TQUIC_CMD_MAX (__TQUIC_CMD_MAX - 1)
+#define TQUIC_NL_CMD_MAX (__TQUIC_NL_CMD_MAX - 1)
 
 /*
  * Event definitions (sent via multicast)
  */
 enum tquic_event_type {
 	TQUIC_EVENT_UNSPEC,
-	TQUIC_EVENT_PATH_UP,		/* Path became available */
-	TQUIC_EVENT_PATH_DOWN,		/* Path failed */
-	TQUIC_EVENT_PATH_CHANGE,	/* Path metrics changed */
-	TQUIC_EVENT_MIGRATION,		/* Connection migrated */
+	TQUIC_EVENT_PATH_UP, /* Path became available */
+	TQUIC_EVENT_PATH_DOWN, /* Path failed */
+	TQUIC_EVENT_PATH_CHANGE, /* Path metrics changed */
+	TQUIC_EVENT_MIGRATION, /* Connection migrated */
 
 	__TQUIC_EVENT_MAX,
 };
@@ -83,66 +86,66 @@ enum tquic_event_type {
  * Attribute definitions
  */
 enum {
-	TQUIC_ATTR_UNSPEC,
-	TQUIC_ATTR_PATH_ID,		/* u32: Path identifier */
-	TQUIC_ATTR_PATH_LOCAL_ADDR,	/* binary: Local sockaddr_storage */
-	TQUIC_ATTR_PATH_REMOTE_ADDR,	/* binary: Remote sockaddr_storage */
-	TQUIC_ATTR_PATH_IFINDEX,	/* s32: Interface index */
-	TQUIC_ATTR_PATH_STATE,		/* u8: Path state */
-	TQUIC_ATTR_PATH_RTT,		/* u32: Round-trip time in us */
-	TQUIC_ATTR_PATH_BANDWIDTH,	/* u64: Estimated bandwidth in bps */
-	TQUIC_ATTR_PATH_LOSS_RATE,	/* u32: Loss rate in 0.01% units */
-	TQUIC_ATTR_PATH_WEIGHT,		/* u32: Path weight for scheduling */
-	TQUIC_ATTR_PATH_PRIORITY,	/* u8: Path priority */
-	TQUIC_ATTR_PATH_FLAGS,		/* u32: Path flags */
-	TQUIC_ATTR_SCHED_NAME,		/* string: Scheduler name */
-	TQUIC_ATTR_CONN_ID,		/* u64: Connection ID */
-	TQUIC_ATTR_PATH_LIST,		/* nested: List of paths */
-	TQUIC_ATTR_PATH_ENTRY,		/* nested: Single path entry */
-	TQUIC_ATTR_STATS,		/* nested: Statistics */
-	TQUIC_ATTR_LOCAL_ADDR4,		/* in_addr: IPv4 local address */
-	TQUIC_ATTR_LOCAL_ADDR6,		/* in6_addr: IPv6 local address */
-	TQUIC_ATTR_REMOTE_ADDR4,	/* in_addr: IPv4 remote address */
-	TQUIC_ATTR_REMOTE_ADDR6,	/* in6_addr: IPv6 remote address */
-	TQUIC_ATTR_LOCAL_PORT,		/* u16: Local port */
-	TQUIC_ATTR_REMOTE_PORT,		/* u16: Remote port */
-	TQUIC_ATTR_FAMILY,		/* u16: Address family */
+	TQUIC_NL_ATTR_UNSPEC,
+	TQUIC_NL_ATTR_PATH_ID, /* u32: Path identifier */
+	TQUIC_NL_ATTR_PATH_LOCAL_ADDR, /* binary: Local sockaddr_storage */
+	TQUIC_NL_ATTR_PATH_REMOTE_ADDR, /* binary: Remote sockaddr_storage */
+	TQUIC_NL_ATTR_PATH_IFINDEX, /* s32: Interface index */
+	TQUIC_NL_ATTR_PATH_STATE, /* u8: Path state */
+	TQUIC_NL_ATTR_PATH_RTT, /* u32: Round-trip time in us */
+	TQUIC_NL_ATTR_PATH_BANDWIDTH, /* u64: Estimated bandwidth in bps */
+	TQUIC_NL_ATTR_PATH_LOSS_RATE, /* u32: Loss rate in 0.01% units */
+	TQUIC_NL_ATTR_PATH_WEIGHT, /* u32: Path weight for scheduling */
+	TQUIC_NL_ATTR_PATH_PRIORITY, /* u8: Path priority */
+	TQUIC_NL_ATTR_PATH_FLAGS, /* u32: Path flags */
+	TQUIC_NL_ATTR_SCHED_NAME, /* string: Scheduler name */
+	TQUIC_NL_ATTR_CONN_ID, /* u64: Connection ID */
+	TQUIC_NL_ATTR_PATH_LIST, /* nested: List of paths */
+	TQUIC_NL_ATTR_PATH_ENTRY, /* nested: Single path entry */
+	TQUIC_NL_ATTR_STATS, /* nested: Statistics */
+	TQUIC_NL_ATTR_LOCAL_ADDR4, /* in_addr: IPv4 local address */
+	TQUIC_NL_ATTR_LOCAL_ADDR6, /* in6_addr: IPv6 local address */
+	TQUIC_NL_ATTR_REMOTE_ADDR4, /* in_addr: IPv4 remote address */
+	TQUIC_NL_ATTR_REMOTE_ADDR6, /* in6_addr: IPv6 remote address */
+	TQUIC_NL_ATTR_LOCAL_PORT, /* u16: Local port */
+	TQUIC_NL_ATTR_REMOTE_PORT, /* u16: Remote port */
+	TQUIC_NL_ATTR_FAMILY, /* u16: Address family */
 
 	/* Statistics attributes */
-	TQUIC_ATTR_STATS_TX_PACKETS,	/* u64: Transmitted packets */
-	TQUIC_ATTR_STATS_RX_PACKETS,	/* u64: Received packets */
-	TQUIC_ATTR_STATS_TX_BYTES,	/* u64: Transmitted bytes */
-	TQUIC_ATTR_STATS_RX_BYTES,	/* u64: Received bytes */
-	TQUIC_ATTR_STATS_RETRANS,	/* u64: Retransmissions */
-	TQUIC_ATTR_STATS_SPURIOUS,	/* u64: Spurious retransmissions */
-	TQUIC_ATTR_STATS_CWND,		/* u32: Congestion window */
-	TQUIC_ATTR_STATS_SRTT,		/* u32: Smoothed RTT */
-	TQUIC_ATTR_STATS_RTTVAR,	/* u32: RTT variance */
+	TQUIC_NL_ATTR_STATS_TX_PACKETS, /* u64: Transmitted packets */
+	TQUIC_NL_ATTR_STATS_RX_PACKETS, /* u64: Received packets */
+	TQUIC_NL_ATTR_STATS_TX_BYTES, /* u64: Transmitted bytes */
+	TQUIC_NL_ATTR_STATS_RX_BYTES, /* u64: Received bytes */
+	TQUIC_NL_ATTR_STATS_RETRANS, /* u64: Retransmissions */
+	TQUIC_NL_ATTR_STATS_SPURIOUS, /* u64: Spurious retransmissions */
+	TQUIC_NL_ATTR_STATS_CWND, /* u32: Congestion window */
+	TQUIC_NL_ATTR_STATS_SRTT, /* u32: Smoothed RTT */
+	TQUIC_NL_ATTR_STATS_RTTVAR, /* u32: RTT variance */
 
 	/* Event-specific attributes */
-	TQUIC_ATTR_EVENT_TYPE,		/* u8: Event type */
-	TQUIC_ATTR_EVENT_REASON,	/* u32: Event reason code */
-	TQUIC_ATTR_OLD_PATH_ID,		/* u32: Old path ID (for migration) */
-	TQUIC_ATTR_NEW_PATH_ID,		/* u32: New path ID (for migration) */
+	TQUIC_NL_ATTR_EVENT_TYPE, /* u8: Event type */
+	TQUIC_NL_ATTR_EVENT_REASON, /* u32: Event reason code */
+	TQUIC_NL_ATTR_OLD_PATH_ID, /* u32: Old path ID (for migration) */
+	TQUIC_NL_ATTR_NEW_PATH_ID, /* u32: New path ID (for migration) */
 
 	/* Padding attribute for 64-bit alignment */
-	TQUIC_ATTR_PAD,
+	TQUIC_NL_ATTR_PAD,
 
-	__TQUIC_ATTR_MAX,
+	__TQUIC_NL_ATTR_MAX,
 };
-#define TQUIC_ATTR_MAX (__TQUIC_ATTR_MAX - 1)
+#define TQUIC_NL_ATTR_MAX (__TQUIC_NL_ATTR_MAX - 1)
 
 /*
  * Netlink path state definitions (different from scheduler path state)
  */
 enum tquic_nl_path_state {
 	TQUIC_NL_PATH_STATE_UNKNOWN = 0,
-	TQUIC_NL_PATH_STATE_VALIDATING,	/* Path validation in progress */
-	TQUIC_NL_PATH_STATE_VALIDATED,	/* Path validated and usable */
-	TQUIC_NL_PATH_STATE_ACTIVE,	/* Path is actively used */
-	TQUIC_NL_PATH_STATE_STANDBY,	/* Path is standby/backup */
-	TQUIC_NL_PATH_STATE_DEGRADED,	/* Path has degraded performance */
-	TQUIC_NL_PATH_STATE_FAILED,	/* Path has failed */
+	TQUIC_NL_PATH_STATE_VALIDATING, /* Path validation in progress */
+	TQUIC_NL_PATH_STATE_VALIDATED, /* Path validated and usable */
+	TQUIC_NL_PATH_STATE_ACTIVE, /* Path is actively used */
+	TQUIC_NL_PATH_STATE_STANDBY, /* Path is standby/backup */
+	TQUIC_NL_PATH_STATE_DEGRADED, /* Path has degraded performance */
+	TQUIC_NL_PATH_STATE_FAILED, /* Path has failed */
 
 	__TQUIC_NL_PATH_STATE_MAX,
 };
@@ -150,79 +153,79 @@ enum tquic_nl_path_state {
 /*
  * Path flags
  */
-#define TQUIC_PATH_FLAG_BACKUP		BIT(0)	/* Backup path */
-#define TQUIC_PATH_FLAG_SUBFLOW		BIT(1)	/* Has active subflow */
-#define TQUIC_PATH_FLAG_USABLE		BIT(2)	/* Path is usable */
-#define TQUIC_PATH_FLAG_PREFERRED	BIT(3)	/* Preferred path */
+#define TQUIC_NL_PATH_FLAG_BACKUP BIT(0) /* Backup path */
+#define TQUIC_NL_PATH_FLAG_SUBFLOW BIT(1) /* Has active subflow */
+#define TQUIC_NL_PATH_FLAG_USABLE BIT(2) /* Path is usable */
+#define TQUIC_NL_PATH_FLAG_PREFERRED BIT(3) /* Preferred path */
 
 /*
  * Internal data structures
  */
 
 /* Path information structure */
-struct tquic_path_info {
-	struct list_head	list;
-	struct rcu_head		rcu;
-	refcount_t		refcnt;
+struct tquic_nl_path_info {
+	struct list_head list;
+	struct rcu_head rcu;
+	refcount_t refcnt;
 
-	u32			path_id;
-	u8			state;
-	u8			priority;
-	u16			family;
-	s32			ifindex;
-	u32			flags;
-	u32			weight;
+	u32 path_id;
+	u8 state;
+	u8 priority;
+	u16 family;
+	s32 ifindex;
+	u32 flags;
+	u32 weight;
 
 	/* Addresses */
 	union {
-		struct in_addr	local_addr4;
-		struct in6_addr	local_addr6;
+		struct in_addr local_addr4;
+		struct in6_addr local_addr6;
 	};
 	union {
-		struct in_addr	remote_addr4;
-		struct in6_addr	remote_addr6;
+		struct in_addr remote_addr4;
+		struct in6_addr remote_addr6;
 	};
-	__be16			local_port;
-	__be16			remote_port;
+	__be16 local_port;
+	__be16 remote_port;
 
 	/* Metrics */
-	u32			rtt;		/* RTT in microseconds */
-	u64			bandwidth;	/* Bandwidth in bps */
-	u32			loss_rate;	/* Loss rate in 0.01% */
+	u32 rtt; /* RTT in microseconds */
+	u64 bandwidth; /* Bandwidth in bps */
+	u32 loss_rate; /* Loss rate in 0.01% */
 
 	/* Statistics */
-	u64			tx_packets;
-	u64			rx_packets;
-	u64			tx_bytes;
-	u64			rx_bytes;
-	u64			retransmissions;
-	u64			spurious_retrans;
-	u32			cwnd;
-	u32			srtt;
-	u32			rttvar;
+	u64 tx_packets;
+	u64 rx_packets;
+	u64 tx_bytes;
+	u64 rx_bytes;
+	u64 retransmissions;
+	u64 spurious_retrans;
+	u32 cwnd;
+	u32 srtt;
+	u32 rttvar;
 };
 
 /* Connection information structure */
-struct tquic_conn_info {
-	struct list_head	list;
-	struct hlist_node	hash_node;
-	struct rcu_head		rcu;
-	refcount_t		refcnt;
-	spinlock_t		lock;
+struct tquic_nl_conn_info {
+	struct list_head list;
+	struct hlist_node hash_node;
+	struct rcu_head rcu;
+	refcount_t refcnt;
+	spinlock_t lock;
 
-	u64			conn_id;
-	struct net		*net;
-	char			scheduler[32];
+	u64 conn_id;
+	struct net *net;
+	char scheduler[32];
 
-	struct list_head	paths;
-	u32			path_count;
-	u32			next_path_id;
+	struct list_head paths;
+	u32 path_count;
+	u32 next_path_id;
 };
 
 /* Per-network namespace data */
 struct tquic_net {
-	struct list_head	connections;
-	spinlock_t		conn_lock;
+	struct list_head connections;
+	spinlock_t conn_lock;
 	DECLARE_HASHTABLE(conn_hash, 8);
 };
 
@@ -236,7 +239,7 @@ static struct tquic_net *tquic_get_net(struct net *net)
 /*
  * Forward declarations
  */
-static struct genl_family tquic_genl_family;
+struct genl_family tquic_genl_family;
 
 /*
  * Multicast groups
@@ -251,82 +254,84 @@ static const struct genl_multicast_group tquic_mcgrps[] = {
 /*
  * Attribute policy for validation
  */
-static const struct nla_policy tquic_nl_policy[TQUIC_ATTR_MAX + 1] = {
-	[TQUIC_ATTR_UNSPEC]		= { .type = NLA_UNSPEC },
-	[TQUIC_ATTR_PATH_ID]		= { .type = NLA_U32 },
-	[TQUIC_ATTR_PATH_LOCAL_ADDR]	= { .type = NLA_BINARY,
-					    .len = sizeof(struct sockaddr_storage) },
-	[TQUIC_ATTR_PATH_REMOTE_ADDR]	= { .type = NLA_BINARY,
-					    .len = sizeof(struct sockaddr_storage) },
-	[TQUIC_ATTR_PATH_IFINDEX]	= { .type = NLA_S32 },
-	[TQUIC_ATTR_PATH_STATE]		= { .type = NLA_U8 },
-	[TQUIC_ATTR_PATH_RTT]		= { .type = NLA_U32 },
-	[TQUIC_ATTR_PATH_BANDWIDTH]	= { .type = NLA_U64 },
-	[TQUIC_ATTR_PATH_LOSS_RATE]	= { .type = NLA_U32 },
-	[TQUIC_ATTR_PATH_WEIGHT]	= { .type = NLA_U32 },
-	[TQUIC_ATTR_PATH_PRIORITY]	= { .type = NLA_U8 },
-	[TQUIC_ATTR_PATH_FLAGS]		= { .type = NLA_U32 },
-	[TQUIC_ATTR_SCHED_NAME]		= { .type = NLA_NUL_STRING, .len = 31 },
-	[TQUIC_ATTR_CONN_ID]		= { .type = NLA_U64 },
-	[TQUIC_ATTR_PATH_LIST]		= { .type = NLA_NESTED },
-	[TQUIC_ATTR_PATH_ENTRY]		= { .type = NLA_NESTED },
-	[TQUIC_ATTR_STATS]		= { .type = NLA_NESTED },
-	[TQUIC_ATTR_LOCAL_ADDR4]	= { .type = NLA_U32 },
-	[TQUIC_ATTR_LOCAL_ADDR6]	= { .type = NLA_BINARY,
-					    .len = sizeof(struct in6_addr) },
-	[TQUIC_ATTR_REMOTE_ADDR4]	= { .type = NLA_U32 },
-	[TQUIC_ATTR_REMOTE_ADDR6]	= { .type = NLA_BINARY,
-					    .len = sizeof(struct in6_addr) },
-	[TQUIC_ATTR_LOCAL_PORT]		= { .type = NLA_U16 },
-	[TQUIC_ATTR_REMOTE_PORT]	= { .type = NLA_U16 },
-	[TQUIC_ATTR_FAMILY]		= { .type = NLA_U16 },
-	[TQUIC_ATTR_STATS_TX_PACKETS]	= { .type = NLA_U64 },
-	[TQUIC_ATTR_STATS_RX_PACKETS]	= { .type = NLA_U64 },
-	[TQUIC_ATTR_STATS_TX_BYTES]	= { .type = NLA_U64 },
-	[TQUIC_ATTR_STATS_RX_BYTES]	= { .type = NLA_U64 },
-	[TQUIC_ATTR_STATS_RETRANS]	= { .type = NLA_U64 },
-	[TQUIC_ATTR_STATS_SPURIOUS]	= { .type = NLA_U64 },
-	[TQUIC_ATTR_STATS_CWND]		= { .type = NLA_U32 },
-	[TQUIC_ATTR_STATS_SRTT]		= { .type = NLA_U32 },
-	[TQUIC_ATTR_STATS_RTTVAR]	= { .type = NLA_U32 },
-	[TQUIC_ATTR_EVENT_TYPE]		= { .type = NLA_U8 },
-	[TQUIC_ATTR_EVENT_REASON]	= { .type = NLA_U32 },
-	[TQUIC_ATTR_OLD_PATH_ID]	= { .type = NLA_U32 },
-	[TQUIC_ATTR_NEW_PATH_ID]	= { .type = NLA_U32 },
-	[TQUIC_ATTR_PAD]		= { .type = NLA_FLAG },
+static const struct nla_policy tquic_nl_policy[TQUIC_NL_ATTR_MAX + 1] = {
+	[TQUIC_NL_ATTR_UNSPEC] = { .type = NLA_UNSPEC },
+	[TQUIC_NL_ATTR_PATH_ID] = { .type = NLA_U32 },
+	[TQUIC_NL_ATTR_PATH_LOCAL_ADDR] = { .type = NLA_BINARY,
+					 .len = sizeof(
+						 struct sockaddr_storage) },
+	[TQUIC_NL_ATTR_PATH_REMOTE_ADDR] = { .type = NLA_BINARY,
+					  .len = sizeof(
+						  struct sockaddr_storage) },
+	[TQUIC_NL_ATTR_PATH_IFINDEX] = { .type = NLA_S32 },
+	[TQUIC_NL_ATTR_PATH_STATE] = { .type = NLA_U8 },
+	[TQUIC_NL_ATTR_PATH_RTT] = { .type = NLA_U32 },
+	[TQUIC_NL_ATTR_PATH_BANDWIDTH] = { .type = NLA_U64 },
+	[TQUIC_NL_ATTR_PATH_LOSS_RATE] = { .type = NLA_U32 },
+	[TQUIC_NL_ATTR_PATH_WEIGHT] = { .type = NLA_U32 },
+	[TQUIC_NL_ATTR_PATH_PRIORITY] = { .type = NLA_U8 },
+	[TQUIC_NL_ATTR_PATH_FLAGS] = { .type = NLA_U32 },
+	[TQUIC_NL_ATTR_SCHED_NAME] = { .type = NLA_NUL_STRING, .len = 31 },
+	[TQUIC_NL_ATTR_CONN_ID] = { .type = NLA_U64 },
+	[TQUIC_NL_ATTR_PATH_LIST] = { .type = NLA_NESTED },
+	[TQUIC_NL_ATTR_PATH_ENTRY] = { .type = NLA_NESTED },
+	[TQUIC_NL_ATTR_STATS] = { .type = NLA_NESTED },
+	[TQUIC_NL_ATTR_LOCAL_ADDR4] = { .type = NLA_U32 },
+	[TQUIC_NL_ATTR_LOCAL_ADDR6] = { .type = NLA_BINARY,
+				     .len = sizeof(struct in6_addr) },
+	[TQUIC_NL_ATTR_REMOTE_ADDR4] = { .type = NLA_U32 },
+	[TQUIC_NL_ATTR_REMOTE_ADDR6] = { .type = NLA_BINARY,
+				      .len = sizeof(struct in6_addr) },
+	[TQUIC_NL_ATTR_LOCAL_PORT] = { .type = NLA_U16 },
+	[TQUIC_NL_ATTR_REMOTE_PORT] = { .type = NLA_U16 },
+	[TQUIC_NL_ATTR_FAMILY] = { .type = NLA_U16 },
+	[TQUIC_NL_ATTR_STATS_TX_PACKETS] = { .type = NLA_U64 },
+	[TQUIC_NL_ATTR_STATS_RX_PACKETS] = { .type = NLA_U64 },
+	[TQUIC_NL_ATTR_STATS_TX_BYTES] = { .type = NLA_U64 },
+	[TQUIC_NL_ATTR_STATS_RX_BYTES] = { .type = NLA_U64 },
+	[TQUIC_NL_ATTR_STATS_RETRANS] = { .type = NLA_U64 },
+	[TQUIC_NL_ATTR_STATS_SPURIOUS] = { .type = NLA_U64 },
+	[TQUIC_NL_ATTR_STATS_CWND] = { .type = NLA_U32 },
+	[TQUIC_NL_ATTR_STATS_SRTT] = { .type = NLA_U32 },
+	[TQUIC_NL_ATTR_STATS_RTTVAR] = { .type = NLA_U32 },
+	[TQUIC_NL_ATTR_EVENT_TYPE] = { .type = NLA_U8 },
+	[TQUIC_NL_ATTR_EVENT_REASON] = { .type = NLA_U32 },
+	[TQUIC_NL_ATTR_OLD_PATH_ID] = { .type = NLA_U32 },
+	[TQUIC_NL_ATTR_NEW_PATH_ID] = { .type = NLA_U32 },
+	[TQUIC_NL_ATTR_PAD] = { .type = NLA_FLAG },
 };
 
 /*
  * Nested policy for path entry
  */
-static const struct nla_policy tquic_path_entry_policy[TQUIC_ATTR_MAX + 1] = {
-	[TQUIC_ATTR_PATH_ID]		= { .type = NLA_U32 },
-	[TQUIC_ATTR_PATH_STATE]		= { .type = NLA_U8 },
-	[TQUIC_ATTR_PATH_IFINDEX]	= { .type = NLA_S32 },
-	[TQUIC_ATTR_PATH_RTT]		= { .type = NLA_U32 },
-	[TQUIC_ATTR_PATH_BANDWIDTH]	= { .type = NLA_U64 },
-	[TQUIC_ATTR_PATH_LOSS_RATE]	= { .type = NLA_U32 },
-	[TQUIC_ATTR_PATH_WEIGHT]	= { .type = NLA_U32 },
-	[TQUIC_ATTR_PATH_PRIORITY]	= { .type = NLA_U8 },
-	[TQUIC_ATTR_PATH_FLAGS]		= { .type = NLA_U32 },
-	[TQUIC_ATTR_FAMILY]		= { .type = NLA_U16 },
-	[TQUIC_ATTR_LOCAL_ADDR4]	= { .type = NLA_U32 },
-	[TQUIC_ATTR_LOCAL_ADDR6]	= { .type = NLA_BINARY,
-					    .len = sizeof(struct in6_addr) },
-	[TQUIC_ATTR_REMOTE_ADDR4]	= { .type = NLA_U32 },
-	[TQUIC_ATTR_REMOTE_ADDR6]	= { .type = NLA_BINARY,
-					    .len = sizeof(struct in6_addr) },
-	[TQUIC_ATTR_LOCAL_PORT]		= { .type = NLA_U16 },
-	[TQUIC_ATTR_REMOTE_PORT]	= { .type = NLA_U16 },
+static const struct nla_policy tquic_path_entry_policy[TQUIC_NL_ATTR_MAX + 1] = {
+	[TQUIC_NL_ATTR_PATH_ID] = { .type = NLA_U32 },
+	[TQUIC_NL_ATTR_PATH_STATE] = { .type = NLA_U8 },
+	[TQUIC_NL_ATTR_PATH_IFINDEX] = { .type = NLA_S32 },
+	[TQUIC_NL_ATTR_PATH_RTT] = { .type = NLA_U32 },
+	[TQUIC_NL_ATTR_PATH_BANDWIDTH] = { .type = NLA_U64 },
+	[TQUIC_NL_ATTR_PATH_LOSS_RATE] = { .type = NLA_U32 },
+	[TQUIC_NL_ATTR_PATH_WEIGHT] = { .type = NLA_U32 },
+	[TQUIC_NL_ATTR_PATH_PRIORITY] = { .type = NLA_U8 },
+	[TQUIC_NL_ATTR_PATH_FLAGS] = { .type = NLA_U32 },
+	[TQUIC_NL_ATTR_FAMILY] = { .type = NLA_U16 },
+	[TQUIC_NL_ATTR_LOCAL_ADDR4] = { .type = NLA_U32 },
+	[TQUIC_NL_ATTR_LOCAL_ADDR6] = { .type = NLA_BINARY,
+				     .len = sizeof(struct in6_addr) },
+	[TQUIC_NL_ATTR_REMOTE_ADDR4] = { .type = NLA_U32 },
+	[TQUIC_NL_ATTR_REMOTE_ADDR6] = { .type = NLA_BINARY,
+				      .len = sizeof(struct in6_addr) },
+	[TQUIC_NL_ATTR_LOCAL_PORT] = { .type = NLA_U16 },
+	[TQUIC_NL_ATTR_REMOTE_PORT] = { .type = NLA_U16 },
 };
 
 /*
  * Helper functions for connection/path management
  */
-static struct tquic_conn_info *tquic_conn_lookup(struct net *net, u64 conn_id)
+static struct tquic_nl_conn_info *tquic_conn_lookup(struct net *net, u64 conn_id)
 {
 	struct tquic_net *tnet = tquic_get_net(net);
-	struct tquic_conn_info *conn;
+	struct tquic_nl_conn_info *conn;
 
 	hash_for_each_possible_rcu(tnet->conn_hash, conn, hash_node, conn_id) {
 		if (conn->conn_id == conn_id) {
@@ -337,10 +342,10 @@ static struct tquic_conn_info *tquic_conn_lookup(struct net *net, u64 conn_id)
 	return NULL;
 }
 
-static void tquic_conn_put(struct tquic_conn_info *conn)
+static void tquic_nl_conn_put(struct tquic_nl_conn_info *conn)
 {
 	if (refcount_dec_and_test(&conn->refcnt)) {
-		struct tquic_path_info *path, *tmp;
+		struct tquic_nl_path_info *path, *tmp;
 
 		list_for_each_entry_safe(path, tmp, &conn->paths, list) {
 			list_del_rcu(&path->list);
@@ -350,10 +355,11 @@ static void tquic_conn_put(struct tquic_conn_info *conn)
 	}
 }
 
-static struct tquic_conn_info *tquic_conn_info_create(struct net *net, u64 conn_id)
+static struct tquic_nl_conn_info *tquic_conn_info_create(struct net *net,
+						      u64 conn_id)
 {
 	struct tquic_net *tnet = tquic_get_net(net);
-	struct tquic_conn_info *conn;
+	struct tquic_nl_conn_info *conn;
 
 	conn = kzalloc(sizeof(*conn), GFP_KERNEL);
 	if (!conn)
@@ -374,10 +380,10 @@ static struct tquic_conn_info *tquic_conn_info_create(struct net *net, u64 conn_
 	return conn;
 }
 
-static struct tquic_path_info *tquic_path_lookup(struct tquic_conn_info *conn,
+static struct tquic_nl_path_info *tquic_nl_path_lookup(struct tquic_nl_conn_info *conn,
 						 u32 path_id)
 {
-	struct tquic_path_info *path;
+	struct tquic_nl_path_info *path;
 
 	list_for_each_entry_rcu(path, &conn->paths, list) {
 		if (path->path_id == path_id) {
@@ -388,15 +394,15 @@ static struct tquic_path_info *tquic_path_lookup(struct tquic_conn_info *conn,
 	return NULL;
 }
 
-static void tquic_path_put(struct tquic_path_info *path)
+static void tquic_nl_path_put(struct tquic_nl_path_info *path)
 {
 	if (refcount_dec_and_test(&path->refcnt))
 		kfree_rcu(path, rcu);
 }
 
-static struct tquic_path_info *tquic_path_create(struct tquic_conn_info *conn)
+static struct tquic_nl_path_info *tquic_nl_path_create(struct tquic_nl_conn_info *conn)
 {
-	struct tquic_path_info *path;
+	struct tquic_nl_path_info *path;
 
 	/* Prevent DoS via unbounded path creation */
 	if (conn->path_count >= TQUIC_MAX_PATHS_PER_CONN)
@@ -431,53 +437,53 @@ static struct tquic_path_info *tquic_path_create(struct tquic_conn_info *conn)
  * Returns: 0 on success, negative error code on failure
  */
 static int tquic_nl_fill_path(struct sk_buff *skb,
-			      const struct tquic_path_info *path)
+			      const struct tquic_nl_path_info *path)
 {
 	struct nlattr *nest;
 
-	nest = nla_nest_start(skb, TQUIC_ATTR_PATH_ENTRY);
+	nest = nla_nest_start(skb, TQUIC_NL_ATTR_PATH_ENTRY);
 	if (!nest)
 		return -EMSGSIZE;
 
-	if (nla_put_u32(skb, TQUIC_ATTR_PATH_ID, path->path_id))
+	if (nla_put_u32(skb, TQUIC_NL_ATTR_PATH_ID, path->path_id))
 		goto nla_put_failure;
-	if (nla_put_u8(skb, TQUIC_ATTR_PATH_STATE, path->state))
+	if (nla_put_u8(skb, TQUIC_NL_ATTR_PATH_STATE, path->state))
 		goto nla_put_failure;
-	if (nla_put_s32(skb, TQUIC_ATTR_PATH_IFINDEX, path->ifindex))
+	if (nla_put_s32(skb, TQUIC_NL_ATTR_PATH_IFINDEX, path->ifindex))
 		goto nla_put_failure;
-	if (nla_put_u32(skb, TQUIC_ATTR_PATH_RTT, path->rtt))
+	if (nla_put_u32(skb, TQUIC_NL_ATTR_PATH_RTT, path->rtt))
 		goto nla_put_failure;
-	if (nla_put_u64_64bit(skb, TQUIC_ATTR_PATH_BANDWIDTH, path->bandwidth,
-			      TQUIC_ATTR_PAD))
+	if (nla_put_u64_64bit(skb, TQUIC_NL_ATTR_PATH_BANDWIDTH, path->bandwidth,
+			      TQUIC_NL_ATTR_PAD))
 		goto nla_put_failure;
-	if (nla_put_u32(skb, TQUIC_ATTR_PATH_LOSS_RATE, path->loss_rate))
+	if (nla_put_u32(skb, TQUIC_NL_ATTR_PATH_LOSS_RATE, path->loss_rate))
 		goto nla_put_failure;
-	if (nla_put_u32(skb, TQUIC_ATTR_PATH_WEIGHT, path->weight))
+	if (nla_put_u32(skb, TQUIC_NL_ATTR_PATH_WEIGHT, path->weight))
 		goto nla_put_failure;
-	if (nla_put_u8(skb, TQUIC_ATTR_PATH_PRIORITY, path->priority))
+	if (nla_put_u8(skb, TQUIC_NL_ATTR_PATH_PRIORITY, path->priority))
 		goto nla_put_failure;
-	if (nla_put_u32(skb, TQUIC_ATTR_PATH_FLAGS, path->flags))
+	if (nla_put_u32(skb, TQUIC_NL_ATTR_PATH_FLAGS, path->flags))
 		goto nla_put_failure;
-	if (nla_put_u16(skb, TQUIC_ATTR_FAMILY, path->family))
+	if (nla_put_u16(skb, TQUIC_NL_ATTR_FAMILY, path->family))
 		goto nla_put_failure;
-	if (nla_put_be16(skb, TQUIC_ATTR_LOCAL_PORT, path->local_port))
+	if (nla_put_be16(skb, TQUIC_NL_ATTR_LOCAL_PORT, path->local_port))
 		goto nla_put_failure;
-	if (nla_put_be16(skb, TQUIC_ATTR_REMOTE_PORT, path->remote_port))
+	if (nla_put_be16(skb, TQUIC_NL_ATTR_REMOTE_PORT, path->remote_port))
 		goto nla_put_failure;
 
 	/* Address based on family */
 	if (path->family == AF_INET) {
-		if (nla_put_in_addr(skb, TQUIC_ATTR_LOCAL_ADDR4,
+		if (nla_put_in_addr(skb, TQUIC_NL_ATTR_LOCAL_ADDR4,
 				    path->local_addr4.s_addr))
 			goto nla_put_failure;
-		if (nla_put_in_addr(skb, TQUIC_ATTR_REMOTE_ADDR4,
+		if (nla_put_in_addr(skb, TQUIC_NL_ATTR_REMOTE_ADDR4,
 				    path->remote_addr4.s_addr))
 			goto nla_put_failure;
 	} else if (path->family == AF_INET6) {
-		if (nla_put_in6_addr(skb, TQUIC_ATTR_LOCAL_ADDR6,
+		if (nla_put_in6_addr(skb, TQUIC_NL_ATTR_LOCAL_ADDR6,
 				     &path->local_addr6))
 			goto nla_put_failure;
-		if (nla_put_in6_addr(skb, TQUIC_ATTR_REMOTE_ADDR6,
+		if (nla_put_in6_addr(skb, TQUIC_NL_ATTR_REMOTE_ADDR6,
 				     &path->remote_addr6))
 			goto nla_put_failure;
 	}
@@ -498,37 +504,37 @@ nla_put_failure:
  * Returns: 0 on success, negative error code on failure
  */
 static int tquic_nl_fill_stats(struct sk_buff *skb,
-			       const struct tquic_path_info *path)
+			       const struct tquic_nl_path_info *path)
 {
 	struct nlattr *nest;
 
-	nest = nla_nest_start(skb, TQUIC_ATTR_STATS);
+	nest = nla_nest_start(skb, TQUIC_NL_ATTR_STATS);
 	if (!nest)
 		return -EMSGSIZE;
 
-	if (nla_put_u64_64bit(skb, TQUIC_ATTR_STATS_TX_PACKETS,
-			      path->tx_packets, TQUIC_ATTR_PAD))
+	if (nla_put_u64_64bit(skb, TQUIC_NL_ATTR_STATS_TX_PACKETS,
+			      path->tx_packets, TQUIC_NL_ATTR_PAD))
 		goto nla_put_failure;
-	if (nla_put_u64_64bit(skb, TQUIC_ATTR_STATS_RX_PACKETS,
-			      path->rx_packets, TQUIC_ATTR_PAD))
+	if (nla_put_u64_64bit(skb, TQUIC_NL_ATTR_STATS_RX_PACKETS,
+			      path->rx_packets, TQUIC_NL_ATTR_PAD))
 		goto nla_put_failure;
-	if (nla_put_u64_64bit(skb, TQUIC_ATTR_STATS_TX_BYTES,
-			      path->tx_bytes, TQUIC_ATTR_PAD))
+	if (nla_put_u64_64bit(skb, TQUIC_NL_ATTR_STATS_TX_BYTES, path->tx_bytes,
+			      TQUIC_NL_ATTR_PAD))
 		goto nla_put_failure;
-	if (nla_put_u64_64bit(skb, TQUIC_ATTR_STATS_RX_BYTES,
-			      path->rx_bytes, TQUIC_ATTR_PAD))
+	if (nla_put_u64_64bit(skb, TQUIC_NL_ATTR_STATS_RX_BYTES, path->rx_bytes,
+			      TQUIC_NL_ATTR_PAD))
 		goto nla_put_failure;
-	if (nla_put_u64_64bit(skb, TQUIC_ATTR_STATS_RETRANS,
-			      path->retransmissions, TQUIC_ATTR_PAD))
+	if (nla_put_u64_64bit(skb, TQUIC_NL_ATTR_STATS_RETRANS,
+			      path->retransmissions, TQUIC_NL_ATTR_PAD))
 		goto nla_put_failure;
-	if (nla_put_u64_64bit(skb, TQUIC_ATTR_STATS_SPURIOUS,
-			      path->spurious_retrans, TQUIC_ATTR_PAD))
+	if (nla_put_u64_64bit(skb, TQUIC_NL_ATTR_STATS_SPURIOUS,
+			      path->spurious_retrans, TQUIC_NL_ATTR_PAD))
 		goto nla_put_failure;
-	if (nla_put_u32(skb, TQUIC_ATTR_STATS_CWND, path->cwnd))
+	if (nla_put_u32(skb, TQUIC_NL_ATTR_STATS_CWND, path->cwnd))
 		goto nla_put_failure;
-	if (nla_put_u32(skb, TQUIC_ATTR_STATS_SRTT, path->srtt))
+	if (nla_put_u32(skb, TQUIC_NL_ATTR_STATS_SRTT, path->srtt))
 		goto nla_put_failure;
-	if (nla_put_u32(skb, TQUIC_ATTR_STATS_RTTVAR, path->rttvar))
+	if (nla_put_u32(skb, TQUIC_NL_ATTR_STATS_RTTVAR, path->rttvar))
 		goto nla_put_failure;
 
 	nla_nest_end(skb, nest);
@@ -543,42 +549,44 @@ nla_put_failure:
  * Parse address from netlink attributes
  */
 static int tquic_nl_parse_addr(struct nlattr **attrs,
-			       struct tquic_path_info *path,
+			       struct tquic_nl_path_info *path,
 			       struct netlink_ext_ack *extack)
 {
 	u16 family;
 
-	if (!attrs[TQUIC_ATTR_FAMILY]) {
+	if (!attrs[TQUIC_NL_ATTR_FAMILY]) {
 		NL_SET_ERR_MSG(extack, "Address family is required");
 		return -EINVAL;
 	}
 
-	family = nla_get_u16(attrs[TQUIC_ATTR_FAMILY]);
+	family = nla_get_u16(attrs[TQUIC_NL_ATTR_FAMILY]);
 	path->family = family;
 
 	if (family == AF_INET) {
-		if (attrs[TQUIC_ATTR_LOCAL_ADDR4])
+		if (attrs[TQUIC_NL_ATTR_LOCAL_ADDR4])
 			path->local_addr4.s_addr =
-				nla_get_in_addr(attrs[TQUIC_ATTR_LOCAL_ADDR4]);
-		if (attrs[TQUIC_ATTR_REMOTE_ADDR4])
+				nla_get_in_addr(attrs[TQUIC_NL_ATTR_LOCAL_ADDR4]);
+		if (attrs[TQUIC_NL_ATTR_REMOTE_ADDR4])
 			path->remote_addr4.s_addr =
-				nla_get_in_addr(attrs[TQUIC_ATTR_REMOTE_ADDR4]);
+				nla_get_in_addr(attrs[TQUIC_NL_ATTR_REMOTE_ADDR4]);
 	} else if (family == AF_INET6) {
-		if (attrs[TQUIC_ATTR_LOCAL_ADDR6])
+		if (attrs[TQUIC_NL_ATTR_LOCAL_ADDR6])
 			path->local_addr6 =
-				nla_get_in6_addr(attrs[TQUIC_ATTR_LOCAL_ADDR6]);
-		if (attrs[TQUIC_ATTR_REMOTE_ADDR6])
-			path->remote_addr6 =
-				nla_get_in6_addr(attrs[TQUIC_ATTR_REMOTE_ADDR6]);
+				nla_get_in6_addr(attrs[TQUIC_NL_ATTR_LOCAL_ADDR6]);
+		if (attrs[TQUIC_NL_ATTR_REMOTE_ADDR6])
+			path->remote_addr6 = nla_get_in6_addr(
+				attrs[TQUIC_NL_ATTR_REMOTE_ADDR6]);
 	} else {
 		NL_SET_ERR_MSG(extack, "Unsupported address family");
 		return -EAFNOSUPPORT;
 	}
 
-	if (attrs[TQUIC_ATTR_LOCAL_PORT])
-		path->local_port = htons(nla_get_u16(attrs[TQUIC_ATTR_LOCAL_PORT]));
-	if (attrs[TQUIC_ATTR_REMOTE_PORT])
-		path->remote_port = htons(nla_get_u16(attrs[TQUIC_ATTR_REMOTE_PORT]));
+	if (attrs[TQUIC_NL_ATTR_LOCAL_PORT])
+		path->local_port =
+			htons(nla_get_u16(attrs[TQUIC_NL_ATTR_LOCAL_PORT]));
+	if (attrs[TQUIC_NL_ATTR_REMOTE_PORT])
+		path->remote_port =
+			htons(nla_get_u16(attrs[TQUIC_NL_ATTR_REMOTE_PORT]));
 
 	return 0;
 }
@@ -594,10 +602,10 @@ static int tquic_nl_parse_addr(struct nlattr **attrs,
  *
  * Removes the path from the connection's path list under lock and drops both
  * the list reference and the caller's reference to the path.
- * This is the proper cleanup for error paths after tquic_path_create().
+ * This is the proper cleanup for error paths after tquic_nl_path_create().
  */
-static void tquic_path_remove_and_free(struct tquic_conn_info *conn,
-					struct tquic_path_info *path)
+static void tquic_path_remove_and_free(struct tquic_nl_conn_info *conn,
+				       struct tquic_nl_path_info *path)
 {
 	spin_lock_bh(&conn->lock);
 	list_del_rcu(&path->list);
@@ -605,12 +613,12 @@ static void tquic_path_remove_and_free(struct tquic_conn_info *conn,
 	spin_unlock_bh(&conn->lock);
 
 	/* Drop the caller's reference and the list reference */
-	tquic_path_put(path);
-	tquic_path_put(path);
+	tquic_nl_path_put(path);
+	tquic_nl_path_put(path);
 }
 
 /**
- * tquic_nl_cmd_path_add - Handle TQUIC_CMD_PATH_ADD
+ * tquic_nl_cmd_path_add - Handle TQUIC_NL_CMD_PATH_ADD
  * @skb: Request socket buffer
  * @info: Generic netlink info
  *
@@ -621,17 +629,17 @@ static void tquic_path_remove_and_free(struct tquic_conn_info *conn,
 static int tquic_nl_cmd_path_add(struct sk_buff *skb, struct genl_info *info)
 {
 	struct net *net = genl_info_net(info);
-	struct tquic_conn_info *conn;
-	struct tquic_path_info *path;
+	struct tquic_nl_conn_info *conn;
+	struct tquic_nl_path_info *path;
 	struct sk_buff *reply;
 	void *hdr;
 	u64 conn_id;
 	int ret;
 
-	if (GENL_REQ_ATTR_CHECK(info, TQUIC_ATTR_CONN_ID))
+	if (GENL_REQ_ATTR_CHECK(info, TQUIC_NL_ATTR_CONN_ID))
 		return -EINVAL;
 
-	conn_id = nla_get_u64(info->attrs[TQUIC_ATTR_CONN_ID]);
+	conn_id = nla_get_u64(info->attrs[TQUIC_NL_ATTR_CONN_ID]);
 
 	/* Look up or create the connection */
 	conn = tquic_conn_lookup(net, conn_id);
@@ -642,9 +650,9 @@ static int tquic_nl_cmd_path_add(struct sk_buff *skb, struct genl_info *info)
 	}
 
 	/* Create new path - adds to conn->paths list */
-	path = tquic_path_create(conn);
+	path = tquic_nl_path_create(conn);
 	if (!path) {
-		tquic_conn_put(conn);
+		tquic_nl_conn_put(conn);
 		return -ENOMEM;
 	}
 
@@ -652,20 +660,22 @@ static int tquic_nl_cmd_path_add(struct sk_buff *skb, struct genl_info *info)
 	ret = tquic_nl_parse_addr(info->attrs, path, info->extack);
 	if (ret) {
 		tquic_path_remove_and_free(conn, path);
-		tquic_conn_put(conn);
+		tquic_nl_conn_put(conn);
 		return ret;
 	}
 
 	/* Set optional attributes under lock - path is visible via RCU list */
 	spin_lock_bh(&conn->lock);
-	if (info->attrs[TQUIC_ATTR_PATH_IFINDEX])
-		path->ifindex = nla_get_s32(info->attrs[TQUIC_ATTR_PATH_IFINDEX]);
-	if (info->attrs[TQUIC_ATTR_PATH_WEIGHT])
-		path->weight = nla_get_u32(info->attrs[TQUIC_ATTR_PATH_WEIGHT]);
-	if (info->attrs[TQUIC_ATTR_PATH_PRIORITY])
-		path->priority = nla_get_u8(info->attrs[TQUIC_ATTR_PATH_PRIORITY]);
-	if (info->attrs[TQUIC_ATTR_PATH_FLAGS])
-		path->flags = nla_get_u32(info->attrs[TQUIC_ATTR_PATH_FLAGS]);
+	if (info->attrs[TQUIC_NL_ATTR_PATH_IFINDEX])
+		path->ifindex =
+			nla_get_s32(info->attrs[TQUIC_NL_ATTR_PATH_IFINDEX]);
+	if (info->attrs[TQUIC_NL_ATTR_PATH_WEIGHT])
+		path->weight = nla_get_u32(info->attrs[TQUIC_NL_ATTR_PATH_WEIGHT]);
+	if (info->attrs[TQUIC_NL_ATTR_PATH_PRIORITY])
+		path->priority =
+			nla_get_u8(info->attrs[TQUIC_NL_ATTR_PATH_PRIORITY]);
+	if (info->attrs[TQUIC_NL_ATTR_PATH_FLAGS])
+		path->flags = nla_get_u32(info->attrs[TQUIC_NL_ATTR_PATH_FLAGS]);
 	WRITE_ONCE(path->state, TQUIC_NL_PATH_STATE_VALIDATING);
 	spin_unlock_bh(&conn->lock);
 
@@ -673,39 +683,39 @@ static int tquic_nl_cmd_path_add(struct sk_buff *skb, struct genl_info *info)
 	reply = genlmsg_new(NLMSG_DEFAULT_SIZE, GFP_KERNEL);
 	if (!reply) {
 		tquic_path_remove_and_free(conn, path);
-		tquic_conn_put(conn);
+		tquic_nl_conn_put(conn);
 		return -ENOMEM;
 	}
 
 	hdr = genlmsg_put_reply(reply, info, &tquic_genl_family, 0,
-				TQUIC_CMD_PATH_ADD);
+				TQUIC_NL_CMD_PATH_ADD);
 	if (!hdr) {
 		nlmsg_free(reply);
 		tquic_path_remove_and_free(conn, path);
-		tquic_conn_put(conn);
+		tquic_nl_conn_put(conn);
 		return -EMSGSIZE;
 	}
 
-	if (nla_put_u64_64bit(reply, TQUIC_ATTR_CONN_ID, conn_id,
-			      TQUIC_ATTR_PAD) ||
-	    nla_put_u32(reply, TQUIC_ATTR_PATH_ID, path->path_id)) {
+	if (nla_put_u64_64bit(reply, TQUIC_NL_ATTR_CONN_ID, conn_id,
+			      TQUIC_NL_ATTR_PAD) ||
+	    nla_put_u32(reply, TQUIC_NL_ATTR_PATH_ID, path->path_id)) {
 		genlmsg_cancel(reply, hdr);
 		nlmsg_free(reply);
 		tquic_path_remove_and_free(conn, path);
-		tquic_conn_put(conn);
+		tquic_nl_conn_put(conn);
 		return -EMSGSIZE;
 	}
 
 	genlmsg_end(reply, hdr);
 
-	tquic_path_put(path);
-	tquic_conn_put(conn);
+	tquic_nl_path_put(path);
+	tquic_nl_conn_put(conn);
 
 	return genlmsg_reply(reply, info);
 }
 
 /**
- * tquic_nl_cmd_path_remove - Handle TQUIC_CMD_PATH_REMOVE
+ * tquic_nl_cmd_path_remove - Handle TQUIC_NL_CMD_PATH_REMOVE
  * @skb: Request socket buffer
  * @info: Generic netlink info
  *
@@ -716,17 +726,17 @@ static int tquic_nl_cmd_path_add(struct sk_buff *skb, struct genl_info *info)
 static int tquic_nl_cmd_path_remove(struct sk_buff *skb, struct genl_info *info)
 {
 	struct net *net = genl_info_net(info);
-	struct tquic_conn_info *conn;
-	struct tquic_path_info *path;
+	struct tquic_nl_conn_info *conn;
+	struct tquic_nl_path_info *path;
 	u64 conn_id;
 	u32 path_id;
 
-	if (GENL_REQ_ATTR_CHECK(info, TQUIC_ATTR_CONN_ID) ||
-	    GENL_REQ_ATTR_CHECK(info, TQUIC_ATTR_PATH_ID))
+	if (GENL_REQ_ATTR_CHECK(info, TQUIC_NL_ATTR_CONN_ID) ||
+	    GENL_REQ_ATTR_CHECK(info, TQUIC_NL_ATTR_PATH_ID))
 		return -EINVAL;
 
-	conn_id = nla_get_u64(info->attrs[TQUIC_ATTR_CONN_ID]);
-	path_id = nla_get_u32(info->attrs[TQUIC_ATTR_PATH_ID]);
+	conn_id = nla_get_u64(info->attrs[TQUIC_NL_ATTR_CONN_ID]);
+	path_id = nla_get_u32(info->attrs[TQUIC_NL_ATTR_PATH_ID]);
 
 	conn = tquic_conn_lookup(net, conn_id);
 	if (!conn) {
@@ -734,9 +744,9 @@ static int tquic_nl_cmd_path_remove(struct sk_buff *skb, struct genl_info *info)
 		return -ENOENT;
 	}
 
-	path = tquic_path_lookup(conn, path_id);
+	path = tquic_nl_path_lookup(conn, path_id);
 	if (!path) {
-		tquic_conn_put(conn);
+		tquic_nl_conn_put(conn);
 		NL_SET_ERR_MSG(info->extack, "Path not found");
 		return -ENOENT;
 	}
@@ -748,15 +758,15 @@ static int tquic_nl_cmd_path_remove(struct sk_buff *skb, struct genl_info *info)
 	spin_unlock_bh(&conn->lock);
 
 	/* Drop the lookup reference and the list reference */
-	tquic_path_put(path);
-	tquic_path_put(path);
-	tquic_conn_put(conn);
+	tquic_nl_path_put(path);
+	tquic_nl_path_put(path);
+	tquic_nl_conn_put(conn);
 
 	return 0;
 }
 
 /**
- * tquic_nl_cmd_path_set - Handle TQUIC_CMD_PATH_SET
+ * tquic_nl_cmd_path_set - Handle TQUIC_NL_CMD_PATH_SET
  * @skb: Request socket buffer
  * @info: Generic netlink info
  *
@@ -767,17 +777,17 @@ static int tquic_nl_cmd_path_remove(struct sk_buff *skb, struct genl_info *info)
 static int tquic_nl_cmd_path_set(struct sk_buff *skb, struct genl_info *info)
 {
 	struct net *net = genl_info_net(info);
-	struct tquic_conn_info *conn;
-	struct tquic_path_info *path;
+	struct tquic_nl_conn_info *conn;
+	struct tquic_nl_path_info *path;
 	u64 conn_id;
 	u32 path_id;
 
-	if (GENL_REQ_ATTR_CHECK(info, TQUIC_ATTR_CONN_ID) ||
-	    GENL_REQ_ATTR_CHECK(info, TQUIC_ATTR_PATH_ID))
+	if (GENL_REQ_ATTR_CHECK(info, TQUIC_NL_ATTR_CONN_ID) ||
+	    GENL_REQ_ATTR_CHECK(info, TQUIC_NL_ATTR_PATH_ID))
 		return -EINVAL;
 
-	conn_id = nla_get_u64(info->attrs[TQUIC_ATTR_CONN_ID]);
-	path_id = nla_get_u32(info->attrs[TQUIC_ATTR_PATH_ID]);
+	conn_id = nla_get_u64(info->attrs[TQUIC_NL_ATTR_CONN_ID]);
+	path_id = nla_get_u32(info->attrs[TQUIC_NL_ATTR_PATH_ID]);
 
 	conn = tquic_conn_lookup(net, conn_id);
 	if (!conn) {
@@ -785,43 +795,43 @@ static int tquic_nl_cmd_path_set(struct sk_buff *skb, struct genl_info *info)
 		return -ENOENT;
 	}
 
-	path = tquic_path_lookup(conn, path_id);
+	path = tquic_nl_path_lookup(conn, path_id);
 	if (!path) {
-		tquic_conn_put(conn);
+		tquic_nl_conn_put(conn);
 		NL_SET_ERR_MSG(info->extack, "Path not found");
 		return -ENOENT;
 	}
 
 	/* Update path settings - protected by RCU, but we do atomic updates */
-	if (info->attrs[TQUIC_ATTR_PATH_WEIGHT])
+	if (info->attrs[TQUIC_NL_ATTR_PATH_WEIGHT])
 		WRITE_ONCE(path->weight,
-			   nla_get_u32(info->attrs[TQUIC_ATTR_PATH_WEIGHT]));
-	if (info->attrs[TQUIC_ATTR_PATH_PRIORITY])
+			   nla_get_u32(info->attrs[TQUIC_NL_ATTR_PATH_WEIGHT]));
+	if (info->attrs[TQUIC_NL_ATTR_PATH_PRIORITY])
 		WRITE_ONCE(path->priority,
-			   nla_get_u8(info->attrs[TQUIC_ATTR_PATH_PRIORITY]));
-	if (info->attrs[TQUIC_ATTR_PATH_FLAGS])
+			   nla_get_u8(info->attrs[TQUIC_NL_ATTR_PATH_PRIORITY]));
+	if (info->attrs[TQUIC_NL_ATTR_PATH_FLAGS])
 		WRITE_ONCE(path->flags,
-			   nla_get_u32(info->attrs[TQUIC_ATTR_PATH_FLAGS]));
-	if (info->attrs[TQUIC_ATTR_PATH_STATE]) {
-		u8 state = nla_get_u8(info->attrs[TQUIC_ATTR_PATH_STATE]);
+			   nla_get_u32(info->attrs[TQUIC_NL_ATTR_PATH_FLAGS]));
+	if (info->attrs[TQUIC_NL_ATTR_PATH_STATE]) {
+		u8 state = nla_get_u8(info->attrs[TQUIC_NL_ATTR_PATH_STATE]);
 
 		if (state >= __TQUIC_NL_PATH_STATE_MAX) {
-			tquic_path_put(path);
-			tquic_conn_put(conn);
+			tquic_nl_path_put(path);
+			tquic_nl_conn_put(conn);
 			NL_SET_ERR_MSG(info->extack, "Invalid path state");
 			return -EINVAL;
 		}
 		WRITE_ONCE(path->state, state);
 	}
 
-	tquic_path_put(path);
-	tquic_conn_put(conn);
+	tquic_nl_path_put(path);
+	tquic_nl_conn_put(conn);
 
 	return 0;
 }
 
 /**
- * tquic_nl_cmd_path_get - Handle TQUIC_CMD_PATH_GET
+ * tquic_nl_cmd_path_get - Handle TQUIC_NL_CMD_PATH_GET
  * @skb: Request socket buffer
  * @info: Generic netlink info
  *
@@ -832,20 +842,20 @@ static int tquic_nl_cmd_path_set(struct sk_buff *skb, struct genl_info *info)
 static int tquic_nl_cmd_path_get(struct sk_buff *skb, struct genl_info *info)
 {
 	struct net *net = genl_info_net(info);
-	struct tquic_conn_info *conn;
-	struct tquic_path_info *path;
+	struct tquic_nl_conn_info *conn;
+	struct tquic_nl_path_info *path;
 	struct sk_buff *reply;
 	void *hdr;
 	u64 conn_id;
 	u32 path_id;
 	int ret;
 
-	if (GENL_REQ_ATTR_CHECK(info, TQUIC_ATTR_CONN_ID) ||
-	    GENL_REQ_ATTR_CHECK(info, TQUIC_ATTR_PATH_ID))
+	if (GENL_REQ_ATTR_CHECK(info, TQUIC_NL_ATTR_CONN_ID) ||
+	    GENL_REQ_ATTR_CHECK(info, TQUIC_NL_ATTR_PATH_ID))
 		return -EINVAL;
 
-	conn_id = nla_get_u64(info->attrs[TQUIC_ATTR_CONN_ID]);
-	path_id = nla_get_u32(info->attrs[TQUIC_ATTR_PATH_ID]);
+	conn_id = nla_get_u64(info->attrs[TQUIC_NL_ATTR_CONN_ID]);
+	path_id = nla_get_u32(info->attrs[TQUIC_NL_ATTR_PATH_ID]);
 
 	conn = tquic_conn_lookup(net, conn_id);
 	if (!conn) {
@@ -853,29 +863,29 @@ static int tquic_nl_cmd_path_get(struct sk_buff *skb, struct genl_info *info)
 		return -ENOENT;
 	}
 
-	path = tquic_path_lookup(conn, path_id);
+	path = tquic_nl_path_lookup(conn, path_id);
 	if (!path) {
-		tquic_conn_put(conn);
+		tquic_nl_conn_put(conn);
 		NL_SET_ERR_MSG(info->extack, "Path not found");
 		return -ENOENT;
 	}
 
 	reply = genlmsg_new(NLMSG_DEFAULT_SIZE, GFP_KERNEL);
 	if (!reply) {
-		tquic_path_put(path);
-		tquic_conn_put(conn);
+		tquic_nl_path_put(path);
+		tquic_nl_conn_put(conn);
 		return -ENOMEM;
 	}
 
 	hdr = genlmsg_put_reply(reply, info, &tquic_genl_family, 0,
-				TQUIC_CMD_PATH_GET);
+				TQUIC_NL_CMD_PATH_GET);
 	if (!hdr) {
 		ret = -EMSGSIZE;
 		goto err_free;
 	}
 
-	if (nla_put_u64_64bit(reply, TQUIC_ATTR_CONN_ID, conn_id,
-			      TQUIC_ATTR_PAD)) {
+	if (nla_put_u64_64bit(reply, TQUIC_NL_ATTR_CONN_ID, conn_id,
+			      TQUIC_NL_ATTR_PAD)) {
 		ret = -EMSGSIZE;
 		goto err_cancel;
 	}
@@ -890,8 +900,8 @@ static int tquic_nl_cmd_path_get(struct sk_buff *skb, struct genl_info *info)
 
 	genlmsg_end(reply, hdr);
 
-	tquic_path_put(path);
-	tquic_conn_put(conn);
+	tquic_nl_path_put(path);
+	tquic_nl_conn_put(conn);
 
 	return genlmsg_reply(reply, info);
 
@@ -899,8 +909,8 @@ err_cancel:
 	genlmsg_cancel(reply, hdr);
 err_free:
 	nlmsg_free(reply);
-	tquic_path_put(path);
-	tquic_conn_put(conn);
+	tquic_nl_path_put(path);
+	tquic_nl_conn_put(conn);
 	return ret;
 }
 
@@ -914,7 +924,7 @@ struct tquic_dump_ctx {
 };
 
 /**
- * tquic_nl_cmd_path_dump - Handle TQUIC_CMD_PATH_LIST (dump)
+ * tquic_nl_cmd_path_dump - Handle TQUIC_NL_CMD_PATH_LIST (dump)
  * @skb: Response socket buffer
  * @cb: Netlink callback
  *
@@ -928,17 +938,17 @@ static int tquic_nl_cmd_path_dump(struct sk_buff *skb,
 	const struct genl_info *info = genl_info_dump(cb);
 	struct net *net = sock_net(skb->sk);
 	struct tquic_dump_ctx *ctx = (struct tquic_dump_ctx *)cb->ctx;
-	struct tquic_conn_info *conn;
-	struct tquic_path_info *path;
+	struct tquic_nl_conn_info *conn;
+	struct tquic_nl_path_info *path;
 	void *hdr;
 	int idx = 0;
 
-	if (!info->attrs[TQUIC_ATTR_CONN_ID]) {
+	if (!info->attrs[TQUIC_NL_ATTR_CONN_ID]) {
 		NL_SET_ERR_MSG(info->extack, "Connection ID required");
 		return -EINVAL;
 	}
 
-	ctx->conn_id = nla_get_u64(info->attrs[TQUIC_ATTR_CONN_ID]);
+	ctx->conn_id = nla_get_u64(info->attrs[TQUIC_NL_ATTR_CONN_ID]);
 
 	conn = tquic_conn_lookup(net, ctx->conn_id);
 	if (!conn) {
@@ -955,25 +965,25 @@ static int tquic_nl_cmd_path_dump(struct sk_buff *skb,
 
 		hdr = genlmsg_put(skb, NETLINK_CB(cb->skb).portid,
 				  cb->nlh->nlmsg_seq, &tquic_genl_family,
-				  NLM_F_MULTI, TQUIC_CMD_PATH_LIST);
+				  NLM_F_MULTI, TQUIC_NL_CMD_PATH_LIST);
 		if (!hdr) {
 			rcu_read_unlock();
-			tquic_conn_put(conn);
+			tquic_nl_conn_put(conn);
 			return skb->len;
 		}
 
-		if (nla_put_u64_64bit(skb, TQUIC_ATTR_CONN_ID, ctx->conn_id,
-				      TQUIC_ATTR_PAD)) {
+		if (nla_put_u64_64bit(skb, TQUIC_NL_ATTR_CONN_ID, ctx->conn_id,
+				      TQUIC_NL_ATTR_PAD)) {
 			genlmsg_cancel(skb, hdr);
 			rcu_read_unlock();
-			tquic_conn_put(conn);
+			tquic_nl_conn_put(conn);
 			return skb->len;
 		}
 
 		if (tquic_nl_fill_path(skb, path)) {
 			genlmsg_cancel(skb, hdr);
 			rcu_read_unlock();
-			tquic_conn_put(conn);
+			tquic_nl_conn_put(conn);
 			return skb->len;
 		}
 
@@ -983,13 +993,13 @@ static int tquic_nl_cmd_path_dump(struct sk_buff *skb,
 	rcu_read_unlock();
 
 	ctx->idx = idx;
-	tquic_conn_put(conn);
+	tquic_nl_conn_put(conn);
 
 	return skb->len;
 }
 
 /**
- * tquic_nl_cmd_sched_set - Handle TQUIC_CMD_SCHED_SET
+ * tquic_nl_cmd_sched_set - Handle TQUIC_NL_CMD_SCHED_SET
  * @skb: Request socket buffer
  * @info: Generic netlink info
  *
@@ -1000,16 +1010,16 @@ static int tquic_nl_cmd_path_dump(struct sk_buff *skb,
 static int tquic_nl_cmd_sched_set(struct sk_buff *skb, struct genl_info *info)
 {
 	struct net *net = genl_info_net(info);
-	struct tquic_conn_info *conn;
+	struct tquic_nl_conn_info *conn;
 	const char *sched_name;
 	u64 conn_id;
 
-	if (GENL_REQ_ATTR_CHECK(info, TQUIC_ATTR_CONN_ID) ||
-	    GENL_REQ_ATTR_CHECK(info, TQUIC_ATTR_SCHED_NAME))
+	if (GENL_REQ_ATTR_CHECK(info, TQUIC_NL_ATTR_CONN_ID) ||
+	    GENL_REQ_ATTR_CHECK(info, TQUIC_NL_ATTR_SCHED_NAME))
 		return -EINVAL;
 
-	conn_id = nla_get_u64(info->attrs[TQUIC_ATTR_CONN_ID]);
-	sched_name = nla_data(info->attrs[TQUIC_ATTR_SCHED_NAME]);
+	conn_id = nla_get_u64(info->attrs[TQUIC_NL_ATTR_CONN_ID]);
+	sched_name = nla_data(info->attrs[TQUIC_NL_ATTR_SCHED_NAME]);
 
 	conn = tquic_conn_lookup(net, conn_id);
 	if (!conn) {
@@ -1019,9 +1029,9 @@ static int tquic_nl_cmd_sched_set(struct sk_buff *skb, struct genl_info *info)
 
 	/* Validate scheduler name using registered scheduler registry */
 	rcu_read_lock();
-	if (!tquic_new_sched_find(sched_name)) {
+	if (!tquic_mp_sched_find(sched_name)) {
 		rcu_read_unlock();
-		tquic_conn_put(conn);
+		tquic_nl_conn_put(conn);
 		NL_SET_ERR_MSG(info->extack, "Unknown scheduler");
 		return -EINVAL;
 	}
@@ -1031,12 +1041,12 @@ static int tquic_nl_cmd_sched_set(struct sk_buff *skb, struct genl_info *info)
 	strscpy(conn->scheduler, sched_name, sizeof(conn->scheduler));
 	spin_unlock_bh(&conn->lock);
 
-	tquic_conn_put(conn);
+	tquic_nl_conn_put(conn);
 	return 0;
 }
 
 /**
- * tquic_nl_cmd_sched_get - Handle TQUIC_CMD_SCHED_GET
+ * tquic_nl_cmd_sched_get - Handle TQUIC_NL_CMD_SCHED_GET
  * @skb: Request socket buffer
  * @info: Generic netlink info
  *
@@ -1047,16 +1057,16 @@ static int tquic_nl_cmd_sched_set(struct sk_buff *skb, struct genl_info *info)
 static int tquic_nl_cmd_sched_get(struct sk_buff *skb, struct genl_info *info)
 {
 	struct net *net = genl_info_net(info);
-	struct tquic_conn_info *conn;
+	struct tquic_nl_conn_info *conn;
 	struct sk_buff *reply;
 	void *hdr;
 	u64 conn_id;
 	int ret;
 
-	if (GENL_REQ_ATTR_CHECK(info, TQUIC_ATTR_CONN_ID))
+	if (GENL_REQ_ATTR_CHECK(info, TQUIC_NL_ATTR_CONN_ID))
 		return -EINVAL;
 
-	conn_id = nla_get_u64(info->attrs[TQUIC_ATTR_CONN_ID]);
+	conn_id = nla_get_u64(info->attrs[TQUIC_NL_ATTR_CONN_ID]);
 
 	conn = tquic_conn_lookup(net, conn_id);
 	if (!conn) {
@@ -1066,19 +1076,19 @@ static int tquic_nl_cmd_sched_get(struct sk_buff *skb, struct genl_info *info)
 
 	reply = genlmsg_new(NLMSG_DEFAULT_SIZE, GFP_KERNEL);
 	if (!reply) {
-		tquic_conn_put(conn);
+		tquic_nl_conn_put(conn);
 		return -ENOMEM;
 	}
 
 	hdr = genlmsg_put_reply(reply, info, &tquic_genl_family, 0,
-				TQUIC_CMD_SCHED_GET);
+				TQUIC_NL_CMD_SCHED_GET);
 	if (!hdr) {
 		ret = -EMSGSIZE;
 		goto err_free;
 	}
 
 	spin_lock_bh(&conn->lock);
-	ret = nla_put_string(reply, TQUIC_ATTR_SCHED_NAME, conn->scheduler);
+	ret = nla_put_string(reply, TQUIC_NL_ATTR_SCHED_NAME, conn->scheduler);
 	spin_unlock_bh(&conn->lock);
 
 	if (ret) {
@@ -1086,14 +1096,14 @@ static int tquic_nl_cmd_sched_get(struct sk_buff *skb, struct genl_info *info)
 		goto err_cancel;
 	}
 
-	if (nla_put_u64_64bit(reply, TQUIC_ATTR_CONN_ID, conn_id,
-			      TQUIC_ATTR_PAD)) {
+	if (nla_put_u64_64bit(reply, TQUIC_NL_ATTR_CONN_ID, conn_id,
+			      TQUIC_NL_ATTR_PAD)) {
 		ret = -EMSGSIZE;
 		goto err_cancel;
 	}
 
 	genlmsg_end(reply, hdr);
-	tquic_conn_put(conn);
+	tquic_nl_conn_put(conn);
 
 	return genlmsg_reply(reply, info);
 
@@ -1101,12 +1111,12 @@ err_cancel:
 	genlmsg_cancel(reply, hdr);
 err_free:
 	nlmsg_free(reply);
-	tquic_conn_put(conn);
+	tquic_nl_conn_put(conn);
 	return ret;
 }
 
 /**
- * tquic_nl_cmd_stats_get - Handle TQUIC_CMD_STATS_GET
+ * tquic_nl_cmd_stats_get - Handle TQUIC_NL_CMD_STATS_GET
  * @skb: Request socket buffer
  * @info: Generic netlink info
  *
@@ -1117,8 +1127,8 @@ err_free:
 static int tquic_nl_cmd_stats_get(struct sk_buff *skb, struct genl_info *info)
 {
 	struct net *net = genl_info_net(info);
-	struct tquic_conn_info *conn;
-	struct tquic_path_info *path;
+	struct tquic_nl_conn_info *conn;
+	struct tquic_nl_path_info *path;
 	struct sk_buff *reply;
 	struct nlattr *stats_nest;
 	void *hdr;
@@ -1128,10 +1138,10 @@ static int tquic_nl_cmd_stats_get(struct sk_buff *skb, struct genl_info *info)
 	u64 total_retrans = 0, total_spurious = 0;
 	int ret;
 
-	if (GENL_REQ_ATTR_CHECK(info, TQUIC_ATTR_CONN_ID))
+	if (GENL_REQ_ATTR_CHECK(info, TQUIC_NL_ATTR_CONN_ID))
 		return -EINVAL;
 
-	conn_id = nla_get_u64(info->attrs[TQUIC_ATTR_CONN_ID]);
+	conn_id = nla_get_u64(info->attrs[TQUIC_NL_ATTR_CONN_ID]);
 
 	conn = tquic_conn_lookup(net, conn_id);
 	if (!conn) {
@@ -1153,41 +1163,41 @@ static int tquic_nl_cmd_stats_get(struct sk_buff *skb, struct genl_info *info)
 
 	reply = genlmsg_new(NLMSG_DEFAULT_SIZE, GFP_KERNEL);
 	if (!reply) {
-		tquic_conn_put(conn);
+		tquic_nl_conn_put(conn);
 		return -ENOMEM;
 	}
 
 	hdr = genlmsg_put_reply(reply, info, &tquic_genl_family, 0,
-				TQUIC_CMD_STATS_GET);
+				TQUIC_NL_CMD_STATS_GET);
 	if (!hdr) {
 		ret = -EMSGSIZE;
 		goto err_free;
 	}
 
-	if (nla_put_u64_64bit(reply, TQUIC_ATTR_CONN_ID, conn_id,
-			      TQUIC_ATTR_PAD)) {
+	if (nla_put_u64_64bit(reply, TQUIC_NL_ATTR_CONN_ID, conn_id,
+			      TQUIC_NL_ATTR_PAD)) {
 		ret = -EMSGSIZE;
 		goto err_cancel;
 	}
 
-	stats_nest = nla_nest_start(reply, TQUIC_ATTR_STATS);
+	stats_nest = nla_nest_start(reply, TQUIC_NL_ATTR_STATS);
 	if (!stats_nest) {
 		ret = -EMSGSIZE;
 		goto err_cancel;
 	}
 
-	if (nla_put_u64_64bit(reply, TQUIC_ATTR_STATS_TX_PACKETS,
-			      total_tx_packets, TQUIC_ATTR_PAD) ||
-	    nla_put_u64_64bit(reply, TQUIC_ATTR_STATS_RX_PACKETS,
-			      total_rx_packets, TQUIC_ATTR_PAD) ||
-	    nla_put_u64_64bit(reply, TQUIC_ATTR_STATS_TX_BYTES,
-			      total_tx_bytes, TQUIC_ATTR_PAD) ||
-	    nla_put_u64_64bit(reply, TQUIC_ATTR_STATS_RX_BYTES,
-			      total_rx_bytes, TQUIC_ATTR_PAD) ||
-	    nla_put_u64_64bit(reply, TQUIC_ATTR_STATS_RETRANS,
-			      total_retrans, TQUIC_ATTR_PAD) ||
-	    nla_put_u64_64bit(reply, TQUIC_ATTR_STATS_SPURIOUS,
-			      total_spurious, TQUIC_ATTR_PAD)) {
+	if (nla_put_u64_64bit(reply, TQUIC_NL_ATTR_STATS_TX_PACKETS,
+			      total_tx_packets, TQUIC_NL_ATTR_PAD) ||
+	    nla_put_u64_64bit(reply, TQUIC_NL_ATTR_STATS_RX_PACKETS,
+			      total_rx_packets, TQUIC_NL_ATTR_PAD) ||
+	    nla_put_u64_64bit(reply, TQUIC_NL_ATTR_STATS_TX_BYTES, total_tx_bytes,
+			      TQUIC_NL_ATTR_PAD) ||
+	    nla_put_u64_64bit(reply, TQUIC_NL_ATTR_STATS_RX_BYTES, total_rx_bytes,
+			      TQUIC_NL_ATTR_PAD) ||
+	    nla_put_u64_64bit(reply, TQUIC_NL_ATTR_STATS_RETRANS, total_retrans,
+			      TQUIC_NL_ATTR_PAD) ||
+	    nla_put_u64_64bit(reply, TQUIC_NL_ATTR_STATS_SPURIOUS, total_spurious,
+			      TQUIC_NL_ATTR_PAD)) {
 		nla_nest_cancel(reply, stats_nest);
 		ret = -EMSGSIZE;
 		goto err_cancel;
@@ -1196,19 +1206,19 @@ static int tquic_nl_cmd_stats_get(struct sk_buff *skb, struct genl_info *info)
 	nla_nest_end(reply, stats_nest);
 	genlmsg_end(reply, hdr);
 
-	tquic_conn_put(conn);
+	tquic_nl_conn_put(conn);
 	return genlmsg_reply(reply, info);
 
 err_cancel:
 	genlmsg_cancel(reply, hdr);
 err_free:
 	nlmsg_free(reply);
-	tquic_conn_put(conn);
+	tquic_nl_conn_put(conn);
 	return ret;
 }
 
 /**
- * tquic_nl_cmd_conn_get - Handle TQUIC_CMD_CONN_GET
+ * tquic_nl_cmd_conn_get - Handle TQUIC_NL_CMD_CONN_GET
  * @skb: Request socket buffer
  * @info: Generic netlink info
  *
@@ -1219,18 +1229,18 @@ err_free:
 static int tquic_nl_cmd_conn_get(struct sk_buff *skb, struct genl_info *info)
 {
 	struct net *net = genl_info_net(info);
-	struct tquic_conn_info *conn;
-	struct tquic_path_info *path;
+	struct tquic_nl_conn_info *conn;
+	struct tquic_nl_path_info *path;
 	struct sk_buff *reply;
 	struct nlattr *paths_nest;
 	void *hdr;
 	u64 conn_id;
 	int ret;
 
-	if (GENL_REQ_ATTR_CHECK(info, TQUIC_ATTR_CONN_ID))
+	if (GENL_REQ_ATTR_CHECK(info, TQUIC_NL_ATTR_CONN_ID))
 		return -EINVAL;
 
-	conn_id = nla_get_u64(info->attrs[TQUIC_ATTR_CONN_ID]);
+	conn_id = nla_get_u64(info->attrs[TQUIC_NL_ATTR_CONN_ID]);
 
 	conn = tquic_conn_lookup(net, conn_id);
 	if (!conn) {
@@ -1240,32 +1250,32 @@ static int tquic_nl_cmd_conn_get(struct sk_buff *skb, struct genl_info *info)
 
 	reply = genlmsg_new(NLMSG_DEFAULT_SIZE, GFP_KERNEL);
 	if (!reply) {
-		tquic_conn_put(conn);
+		tquic_nl_conn_put(conn);
 		return -ENOMEM;
 	}
 
 	hdr = genlmsg_put_reply(reply, info, &tquic_genl_family, 0,
-				TQUIC_CMD_CONN_GET);
+				TQUIC_NL_CMD_CONN_GET);
 	if (!hdr) {
 		ret = -EMSGSIZE;
 		goto err_free;
 	}
 
-	if (nla_put_u64_64bit(reply, TQUIC_ATTR_CONN_ID, conn_id,
-			      TQUIC_ATTR_PAD)) {
+	if (nla_put_u64_64bit(reply, TQUIC_NL_ATTR_CONN_ID, conn_id,
+			      TQUIC_NL_ATTR_PAD)) {
 		ret = -EMSGSIZE;
 		goto err_cancel;
 	}
 
 	spin_lock_bh(&conn->lock);
-	ret = nla_put_string(reply, TQUIC_ATTR_SCHED_NAME, conn->scheduler);
+	ret = nla_put_string(reply, TQUIC_NL_ATTR_SCHED_NAME, conn->scheduler);
 	spin_unlock_bh(&conn->lock);
 	if (ret) {
 		ret = -EMSGSIZE;
 		goto err_cancel;
 	}
 
-	paths_nest = nla_nest_start(reply, TQUIC_ATTR_PATH_LIST);
+	paths_nest = nla_nest_start(reply, TQUIC_NL_ATTR_PATH_LIST);
 	if (!paths_nest) {
 		ret = -EMSGSIZE;
 		goto err_cancel;
@@ -1285,14 +1295,14 @@ static int tquic_nl_cmd_conn_get(struct sk_buff *skb, struct genl_info *info)
 	nla_nest_end(reply, paths_nest);
 	genlmsg_end(reply, hdr);
 
-	tquic_conn_put(conn);
+	tquic_nl_conn_put(conn);
 	return genlmsg_reply(reply, info);
 
 err_cancel:
 	genlmsg_cancel(reply, hdr);
 err_free:
 	nlmsg_free(reply);
-	tquic_conn_put(conn);
+	tquic_nl_conn_put(conn);
 	return ret;
 }
 
@@ -1335,13 +1345,13 @@ int tquic_nl_send_event(struct net *net, enum tquic_event_type event,
 		return -EMSGSIZE;
 	}
 
-	if (nla_put_u8(skb, TQUIC_ATTR_EVENT_TYPE, event))
+	if (nla_put_u8(skb, TQUIC_NL_ATTR_EVENT_TYPE, event))
 		goto nla_put_failure;
-	if (nla_put_u64_64bit(skb, TQUIC_ATTR_CONN_ID, conn_id, TQUIC_ATTR_PAD))
+	if (nla_put_u64_64bit(skb, TQUIC_NL_ATTR_CONN_ID, conn_id, TQUIC_NL_ATTR_PAD))
 		goto nla_put_failure;
-	if (path_id && nla_put_u32(skb, TQUIC_ATTR_PATH_ID, path_id))
+	if (path_id && nla_put_u32(skb, TQUIC_NL_ATTR_PATH_ID, path_id))
 		goto nla_put_failure;
-	if (reason && nla_put_u32(skb, TQUIC_ATTR_EVENT_REASON, reason))
+	if (reason && nla_put_u32(skb, TQUIC_NL_ATTR_EVENT_REASON, reason))
 		goto nla_put_failure;
 
 	genlmsg_end(skb, nlh);
@@ -1361,7 +1371,7 @@ nla_put_failure:
 EXPORT_SYMBOL_GPL(tquic_nl_send_event);
 
 /**
- * tquic_nl_path_event - Send a path state change event
+ * tquic_nl_path_event_internal - Send a path state change event (internal API)
  * @net: Network namespace
  * @event: Event type
  * @conn_id: Connection ID
@@ -1369,11 +1379,16 @@ EXPORT_SYMBOL_GPL(tquic_nl_send_event);
  * @reason: Reason for the event
  * @gfp: Memory allocation flags
  *
+ * This is the internal netlink API. External code should use
+ * tquic_nl_path_event(conn, path, event) instead.
+ *
  * Returns: 0 on success, negative error code on failure
  */
-int tquic_nl_path_event(struct net *net, enum tquic_event_type event,
-			u64 conn_id, const struct tquic_path_info *path,
-			u32 reason, gfp_t gfp)
+static int tquic_nl_path_event_internal(struct net *net,
+					enum tquic_event_type event,
+					u64 conn_id,
+					const struct tquic_nl_path_info *path,
+					u32 reason, gfp_t gfp)
 {
 	struct sk_buff *skb;
 	struct nlmsghdr *nlh;
@@ -1393,11 +1408,11 @@ int tquic_nl_path_event(struct net *net, enum tquic_event_type event,
 		return -EMSGSIZE;
 	}
 
-	if (nla_put_u8(skb, TQUIC_ATTR_EVENT_TYPE, event))
+	if (nla_put_u8(skb, TQUIC_NL_ATTR_EVENT_TYPE, event))
 		goto nla_put_failure;
-	if (nla_put_u64_64bit(skb, TQUIC_ATTR_CONN_ID, conn_id, TQUIC_ATTR_PAD))
+	if (nla_put_u64_64bit(skb, TQUIC_NL_ATTR_CONN_ID, conn_id, TQUIC_NL_ATTR_PAD))
 		goto nla_put_failure;
-	if (reason && nla_put_u32(skb, TQUIC_ATTR_EVENT_REASON, reason))
+	if (reason && nla_put_u32(skb, TQUIC_NL_ATTR_EVENT_REASON, reason))
 		goto nla_put_failure;
 
 	ret = tquic_nl_fill_path(skb, path);
@@ -1417,7 +1432,6 @@ nla_put_failure:
 	nlmsg_free(skb);
 	return -EMSGSIZE;
 }
-EXPORT_SYMBOL_GPL(tquic_nl_path_event);
 
 /**
  * tquic_nl_migration_event - Send a connection migration event
@@ -1430,9 +1444,8 @@ EXPORT_SYMBOL_GPL(tquic_nl_path_event);
  *
  * Returns: 0 on success, negative error code on failure
  */
-int tquic_nl_migration_event(struct net *net, u64 conn_id,
-			     u32 old_path_id, u32 new_path_id,
-			     u32 reason, gfp_t gfp)
+int tquic_nl_migration_event(struct net *net, u64 conn_id, u32 old_path_id,
+			     u32 new_path_id, u32 reason, gfp_t gfp)
 {
 	struct sk_buff *skb;
 	struct nlmsghdr *nlh;
@@ -1446,21 +1459,22 @@ int tquic_nl_migration_event(struct net *net, u64 conn_id,
 	if (!skb)
 		return -ENOMEM;
 
-	nlh = genlmsg_put(skb, 0, 0, &tquic_genl_family, 0, TQUIC_EVENT_MIGRATION);
+	nlh = genlmsg_put(skb, 0, 0, &tquic_genl_family, 0,
+			  TQUIC_EVENT_MIGRATION);
 	if (!nlh) {
 		nlmsg_free(skb);
 		return -EMSGSIZE;
 	}
 
-	if (nla_put_u8(skb, TQUIC_ATTR_EVENT_TYPE, TQUIC_EVENT_MIGRATION))
+	if (nla_put_u8(skb, TQUIC_NL_ATTR_EVENT_TYPE, TQUIC_EVENT_MIGRATION))
 		goto nla_put_failure;
-	if (nla_put_u64_64bit(skb, TQUIC_ATTR_CONN_ID, conn_id, TQUIC_ATTR_PAD))
+	if (nla_put_u64_64bit(skb, TQUIC_NL_ATTR_CONN_ID, conn_id, TQUIC_NL_ATTR_PAD))
 		goto nla_put_failure;
-	if (nla_put_u32(skb, TQUIC_ATTR_OLD_PATH_ID, old_path_id))
+	if (nla_put_u32(skb, TQUIC_NL_ATTR_OLD_PATH_ID, old_path_id))
 		goto nla_put_failure;
-	if (nla_put_u32(skb, TQUIC_ATTR_NEW_PATH_ID, new_path_id))
+	if (nla_put_u32(skb, TQUIC_NL_ATTR_NEW_PATH_ID, new_path_id))
 		goto nla_put_failure;
-	if (reason && nla_put_u32(skb, TQUIC_ATTR_EVENT_REASON, reason))
+	if (reason && nla_put_u32(skb, TQUIC_NL_ATTR_EVENT_REASON, reason))
 		goto nla_put_failure;
 
 	genlmsg_end(skb, nlh);
@@ -1496,68 +1510,69 @@ EXPORT_SYMBOL_GPL(tquic_nl_has_listeners);
  */
 static const struct genl_ops tquic_genl_ops[] = {
 	{
-		.cmd	= TQUIC_CMD_PATH_ADD,
-		.doit	= tquic_nl_cmd_path_add,
-		.flags	= GENL_ADMIN_PERM,
+		.cmd = TQUIC_NL_CMD_PATH_ADD,
+		.doit = tquic_nl_cmd_path_add,
+		.flags = GENL_ADMIN_PERM,
 	},
 	{
-		.cmd	= TQUIC_CMD_PATH_REMOVE,
-		.doit	= tquic_nl_cmd_path_remove,
-		.flags	= GENL_ADMIN_PERM,
+		.cmd = TQUIC_NL_CMD_PATH_REMOVE,
+		.doit = tquic_nl_cmd_path_remove,
+		.flags = GENL_ADMIN_PERM,
 	},
 	{
-		.cmd	= TQUIC_CMD_PATH_SET,
-		.doit	= tquic_nl_cmd_path_set,
-		.flags	= GENL_ADMIN_PERM,
+		.cmd = TQUIC_NL_CMD_PATH_SET,
+		.doit = tquic_nl_cmd_path_set,
+		.flags = GENL_ADMIN_PERM,
 	},
 	{
-		.cmd	= TQUIC_CMD_PATH_GET,
-		.doit	= tquic_nl_cmd_path_get,
-		.flags	= GENL_ADMIN_PERM,
+		.cmd = TQUIC_NL_CMD_PATH_GET,
+		.doit = tquic_nl_cmd_path_get,
+		.flags = GENL_ADMIN_PERM,
 	},
 	{
-		.cmd	= TQUIC_CMD_PATH_LIST,
-		.dumpit	= tquic_nl_cmd_path_dump,
-		.flags	= GENL_ADMIN_PERM,
+		.cmd = TQUIC_NL_CMD_PATH_LIST,
+		.dumpit = tquic_nl_cmd_path_dump,
+		.flags = GENL_ADMIN_PERM,
 	},
 	{
-		.cmd	= TQUIC_CMD_SCHED_SET,
-		.doit	= tquic_nl_cmd_sched_set,
-		.flags	= GENL_ADMIN_PERM,
+		.cmd = TQUIC_NL_CMD_SCHED_SET,
+		.doit = tquic_nl_cmd_sched_set,
+		.flags = GENL_ADMIN_PERM,
 	},
 	{
-		.cmd	= TQUIC_CMD_SCHED_GET,
-		.doit	= tquic_nl_cmd_sched_get,
-		.flags	= GENL_ADMIN_PERM,
+		.cmd = TQUIC_NL_CMD_SCHED_GET,
+		.doit = tquic_nl_cmd_sched_get,
+		.flags = GENL_ADMIN_PERM,
 	},
 	{
-		.cmd	= TQUIC_CMD_STATS_GET,
-		.doit	= tquic_nl_cmd_stats_get,
-		.flags	= GENL_ADMIN_PERM,
+		.cmd = TQUIC_NL_CMD_STATS_GET,
+		.doit = tquic_nl_cmd_stats_get,
+		.flags = GENL_ADMIN_PERM,
 	},
 	{
-		.cmd	= TQUIC_CMD_CONN_GET,
-		.doit	= tquic_nl_cmd_conn_get,
-		.flags	= GENL_ADMIN_PERM,
+		.cmd = TQUIC_NL_CMD_CONN_GET,
+		.doit = tquic_nl_cmd_conn_get,
+		.flags = GENL_ADMIN_PERM,
 	},
 };
 
 /*
  * Generic netlink family definition
  */
-static struct genl_family tquic_genl_family __ro_after_init = {
-	.name		= TQUIC_GENL_NAME,
-	.version	= TQUIC_GENL_VERSION,
-	.maxattr	= TQUIC_ATTR_MAX,
-	.policy		= tquic_nl_policy,
-	.netnsok	= true,
-	.module		= THIS_MODULE,
-	.ops		= tquic_genl_ops,
-	.n_ops		= ARRAY_SIZE(tquic_genl_ops),
-	.resv_start_op	= __TQUIC_CMD_MAX,
-	.mcgrps		= tquic_mcgrps,
-	.n_mcgrps	= ARRAY_SIZE(tquic_mcgrps),
+struct genl_family tquic_genl_family __ro_after_init = {
+	.name = TQUIC_NL_GENL_NAME,
+	.version = TQUIC_NL_GENL_VERSION,
+	.maxattr = TQUIC_NL_ATTR_MAX,
+	.policy = tquic_nl_policy,
+	.netnsok = true,
+	.module = THIS_MODULE,
+	.ops = tquic_genl_ops,
+	.n_ops = ARRAY_SIZE(tquic_genl_ops),
+	.resv_start_op = __TQUIC_NL_CMD_MAX,
+	.mcgrps = tquic_mcgrps,
+	.n_mcgrps = ARRAY_SIZE(tquic_mcgrps),
 };
+EXPORT_SYMBOL_GPL(tquic_genl_family);
 
 /*
  * Per-network namespace initialization
@@ -1576,13 +1591,13 @@ static int __net_init tquic_net_init(struct net *net)
 static void __net_exit tquic_net_exit(struct net *net)
 {
 	struct tquic_net *tnet = tquic_get_net(net);
-	struct tquic_conn_info *conn, *tmp;
+	struct tquic_nl_conn_info *conn, *tmp;
 
 	spin_lock_bh(&tnet->conn_lock);
 	list_for_each_entry_safe(conn, tmp, &tnet->connections, list) {
 		hash_del_rcu(&conn->hash_node);
 		list_del_rcu(&conn->list);
-		tquic_conn_put(conn);
+		tquic_nl_conn_put(conn);
 	}
 	spin_unlock_bh(&tnet->conn_lock);
 
@@ -1591,10 +1606,10 @@ static void __net_exit tquic_net_exit(struct net *net)
 }
 
 static struct pernet_operations tquic_net_ops = {
-	.init	= tquic_net_init,
-	.exit	= tquic_net_exit,
-	.id	= &tquic_net_id,
-	.size	= sizeof(struct tquic_net),
+	.init = tquic_net_init,
+	.exit = tquic_net_exit,
+	.id = &tquic_net_id,
+	.size = sizeof(struct tquic_net),
 };
 
 /*
@@ -1626,7 +1641,7 @@ int __init tquic_nl_init(void)
 	}
 
 	pr_info("TQUIC netlink interface registered (family: %s, version: %d)\n",
-		TQUIC_GENL_NAME, TQUIC_GENL_VERSION);
+		TQUIC_NL_GENL_NAME, TQUIC_NL_GENL_VERSION);
 
 	return 0;
 }
@@ -1657,10 +1672,10 @@ void __exit tquic_nl_exit(void)
  * Called by path manager when a path becomes validated and usable.
  */
 void tquic_nl_notify_path_up(struct net *net, u64 conn_id,
-			     const struct tquic_path_info *path)
+			     const struct tquic_nl_path_info *path)
 {
-	tquic_nl_path_event(net, TQUIC_EVENT_PATH_UP, conn_id, path, 0,
-			    GFP_ATOMIC);
+	tquic_nl_path_event_internal(net, TQUIC_EVENT_PATH_UP, conn_id, path, 0,
+				     GFP_ATOMIC);
 }
 EXPORT_SYMBOL_GPL(tquic_nl_notify_path_up);
 
@@ -1674,10 +1689,10 @@ EXPORT_SYMBOL_GPL(tquic_nl_notify_path_up);
  * Called by path manager when a path fails.
  */
 void tquic_nl_notify_path_down(struct net *net, u64 conn_id,
-			       const struct tquic_path_info *path, u32 reason)
+			       const struct tquic_nl_path_info *path, u32 reason)
 {
-	tquic_nl_path_event(net, TQUIC_EVENT_PATH_DOWN, conn_id, path, reason,
-			    GFP_ATOMIC);
+	tquic_nl_path_event_internal(net, TQUIC_EVENT_PATH_DOWN, conn_id, path,
+				     reason, GFP_ATOMIC);
 }
 EXPORT_SYMBOL_GPL(tquic_nl_notify_path_down);
 
@@ -1690,10 +1705,10 @@ EXPORT_SYMBOL_GPL(tquic_nl_notify_path_down);
  * Called when significant path metric changes occur (RTT, loss rate, etc.)
  */
 void tquic_nl_notify_path_change(struct net *net, u64 conn_id,
-				 const struct tquic_path_info *path)
+				 const struct tquic_nl_path_info *path)
 {
-	tquic_nl_path_event(net, TQUIC_EVENT_PATH_CHANGE, conn_id, path, 0,
-			    GFP_ATOMIC);
+	tquic_nl_path_event_internal(net, TQUIC_EVENT_PATH_CHANGE, conn_id,
+				     path, 0, GFP_ATOMIC);
 }
 EXPORT_SYMBOL_GPL(tquic_nl_notify_path_change);
 
@@ -1707,11 +1722,11 @@ EXPORT_SYMBOL_GPL(tquic_nl_notify_path_change);
  *
  * Called by scheduler when the primary path changes.
  */
-void tquic_nl_notify_migration(struct net *net, u64 conn_id,
-			       u32 old_path_id, u32 new_path_id, u32 reason)
+void tquic_nl_notify_migration(struct net *net, u64 conn_id, u32 old_path_id,
+			       u32 new_path_id, u32 reason)
 {
-	tquic_nl_migration_event(net, conn_id, old_path_id, new_path_id,
-				 reason, GFP_ATOMIC);
+	tquic_nl_migration_event(net, conn_id, old_path_id, new_path_id, reason,
+				 GFP_ATOMIC);
 }
 EXPORT_SYMBOL_GPL(tquic_nl_notify_migration);
 
@@ -1726,8 +1741,8 @@ EXPORT_SYMBOL_GPL(tquic_nl_notify_migration);
  * @bandwidth: New bandwidth estimate in bps
  * @loss_rate: New loss rate in 0.01% units
  */
-void tquic_path_update_metrics(struct tquic_path_info *path,
-			       u32 rtt, u64 bandwidth, u32 loss_rate)
+void tquic_path_update_metrics(struct tquic_nl_path_info *path, u32 rtt,
+			       u64 bandwidth, u32 loss_rate)
 {
 	WRITE_ONCE(path->rtt, rtt);
 	WRITE_ONCE(path->bandwidth, bandwidth);
@@ -1743,9 +1758,8 @@ EXPORT_SYMBOL_GPL(tquic_path_update_metrics);
  * @tx_bytes: Bytes transmitted
  * @rx_bytes: Bytes received
  */
-void tquic_path_info_update_stats(struct tquic_path_info *path,
-				  u64 tx_packets, u64 rx_packets,
-				  u64 tx_bytes, u64 rx_bytes)
+void tquic_path_info_update_stats(struct tquic_nl_path_info *path, u64 tx_packets,
+				  u64 rx_packets, u64 tx_bytes, u64 rx_bytes)
 {
 	WRITE_ONCE(path->tx_packets, tx_packets);
 	WRITE_ONCE(path->rx_packets, rx_packets);
@@ -1753,6 +1767,158 @@ void tquic_path_info_update_stats(struct tquic_path_info *path,
 	WRITE_ONCE(path->rx_bytes, rx_bytes);
 }
 EXPORT_SYMBOL_GPL(tquic_path_info_update_stats);
+
+/*
+ * =============================================================================
+ * Simple Wrapper Functions for Connection/Path-based Notifications
+ * =============================================================================
+ *
+ * These functions provide the simple API declared in include/net/tquic.h
+ * that takes (conn, path, event) and converts to the internal netlink API.
+ */
+
+/**
+ * tquic_path_to_path_info - Convert tquic_path to tquic_path_info for netlink
+ * @path: Source path structure
+ * @info: Destination path info structure (caller allocated)
+ */
+static void tquic_path_to_path_info(const struct tquic_path *path,
+				    struct tquic_nl_path_info *info)
+{
+	memset(info, 0, sizeof(*info));
+
+	info->path_id = path->path_id;
+	info->state = path->state;
+	info->family = path->local_addr.ss_family;
+
+	/* Copy addresses based on family */
+	if (path->local_addr.ss_family == AF_INET) {
+		const struct sockaddr_in *sin;
+
+		sin = (const struct sockaddr_in *)&path->local_addr;
+		info->local_addr4 = sin->sin_addr;
+		info->local_port = sin->sin_port;
+
+		sin = (const struct sockaddr_in *)&path->remote_addr;
+		info->remote_addr4 = sin->sin_addr;
+		info->remote_port = sin->sin_port;
+	}
+#if IS_ENABLED(CONFIG_IPV6)
+	else if (path->local_addr.ss_family == AF_INET6) {
+		const struct sockaddr_in6 *sin6;
+
+		sin6 = (const struct sockaddr_in6 *)&path->local_addr;
+		info->local_addr6 = sin6->sin6_addr;
+		info->local_port = sin6->sin6_port;
+
+		sin6 = (const struct sockaddr_in6 *)&path->remote_addr;
+		info->remote_addr6 = sin6->sin6_addr;
+		info->remote_port = sin6->sin6_port;
+	}
+#endif
+
+	/* Copy statistics */
+	info->rtt = path->stats.rtt_smoothed;
+	info->bandwidth = path->stats.bandwidth;
+	info->loss_rate = path->cc.loss_rate;
+	info->tx_packets = path->stats.tx_packets;
+	info->rx_packets = path->stats.rx_packets;
+	info->tx_bytes = path->stats.tx_bytes;
+	info->rx_bytes = path->stats.rx_bytes;
+	info->cwnd = path->cc.cwnd;
+}
+
+/**
+ * tquic_path_event_to_nl_event - Convert path event to netlink event type
+ * @event: Path event from enum tquic_path_event or TQUIC_PM_EVENT_*
+ *
+ * This function handles both tquic_path_event values (from uapi/linux/tquic.h)
+ * and TQUIC_PM_EVENT_* values (from uapi/linux/tquic_pm.h).
+ *
+ * Return: Netlink event type
+ */
+static enum tquic_event_type tquic_path_event_to_nl_event(int event)
+{
+	/*
+	 * Handle tquic_path_event values (uapi/linux/tquic.h).
+	 * Note: TQUIC_PM_EVENT_* values (from uapi/linux/tquic_pm.h) have
+	 * overlapping numeric values with tquic_path_event and are handled
+	 * separately via tquic_pm_nl_send_event(), not this function.
+	 */
+	switch (event) {
+	case TQUIC_PATH_EVENT_ADD:
+		return TQUIC_EVENT_PATH_UP;
+	case TQUIC_PATH_EVENT_REMOVE:
+	case TQUIC_PATH_EVENT_FAILED:
+		return TQUIC_EVENT_PATH_DOWN;
+	case TQUIC_PATH_EVENT_ACTIVE:
+	case TQUIC_PATH_EVENT_STANDBY:
+	case TQUIC_PATH_EVENT_RECOVERED:
+	case TQUIC_PATH_EVENT_RTT_UPDATE:
+	case TQUIC_PATH_EVENT_CWND_UPDATE:
+		return TQUIC_EVENT_PATH_CHANGE;
+	case TQUIC_PATH_EVENT_MIGRATE:
+		return TQUIC_EVENT_MIGRATION;
+	default:
+		return TQUIC_EVENT_PATH_CHANGE;
+	}
+}
+
+/**
+ * tquic_nl_path_event - Simple wrapper for path event notification
+ * @conn: Connection
+ * @path: Path that changed
+ * @event: Event type (from enum tquic_path_event in uapi/linux/tquic.h)
+ *
+ * This is the simple API declared in include/net/tquic.h that converts
+ * from tquic_path to the internal tquic_path_info format and sends
+ * the netlink notification.
+ *
+ * Return: 0 on success, negative error code on failure
+ */
+int tquic_nl_path_event(struct tquic_connection *conn, struct tquic_path *path,
+			enum tquic_path_event event)
+{
+	struct tquic_nl_path_info path_info;
+	struct net *net;
+	enum tquic_event_type nl_event;
+	u64 conn_id;
+	u32 reason = 0;
+
+	if (!conn || !path)
+		return -EINVAL;
+
+	/* Get network namespace from connection's socket */
+	if (conn->sk)
+		net = sock_net(conn->sk);
+	else
+		return -EINVAL;
+
+	/* Convert path to path_info */
+	tquic_path_to_path_info(path, &path_info);
+
+	/* Convert event type */
+	nl_event = tquic_path_event_to_nl_event(event);
+
+	/* Get connection ID */
+	if (conn->dcid.len > 0) {
+		/* Use first 8 bytes of DCID as connection identifier */
+		conn_id = 0;
+		memcpy(&conn_id, conn->dcid.id,
+		       min_t(size_t, conn->dcid.len, sizeof(conn_id)));
+	} else {
+		conn_id = 0;
+	}
+
+	/* Set reason for failure events */
+	if (event == TQUIC_PATH_EVENT_FAILED)
+		reason = 1; /* Generic failure */
+
+	/* Call internal netlink function */
+	return tquic_nl_path_event_internal(net, nl_event, conn_id, &path_info,
+					    reason, GFP_ATOMIC);
+}
+EXPORT_SYMBOL_GPL(tquic_nl_path_event);
 
 /* Module metadata */
 MODULE_LICENSE("GPL");

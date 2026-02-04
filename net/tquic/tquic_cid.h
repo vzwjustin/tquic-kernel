@@ -18,6 +18,7 @@
 #include <linux/workqueue.h>
 #include <linux/list.h>
 #include <net/tquic.h>
+#include "security_hardening.h"
 
 #ifndef TQUIC_STATELESS_RESET_TOKEN_LEN
 #define TQUIC_STATELESS_RESET_TOKEN_LEN	16
@@ -25,12 +26,12 @@
 
 /**
  * enum tquic_cid_state - Connection ID lifecycle state
- * @CID_STATE_PENDING: Issued but not yet acknowledged
+ * @CID_STATE_UNUSED: Not in use
  * @CID_STATE_ACTIVE: Active and usable
  * @CID_STATE_RETIRED: Retired, pending cleanup
  */
 enum tquic_cid_state {
-	CID_STATE_PENDING,
+	CID_STATE_UNUSED = 0,
 	CID_STATE_ACTIVE,
 	CID_STATE_RETIRED,
 };
@@ -97,6 +98,9 @@ struct tquic_cid_pool {
 	struct work_struct rotation_work;
 	bool rotation_enabled;
 	struct tquic_connection *conn;
+
+	/* Security hardening (CVE-2024-22189 defense) */
+	struct tquic_cid_security security;
 };
 
 #endif /* _NET_TQUIC_CID_INTERNAL_H */

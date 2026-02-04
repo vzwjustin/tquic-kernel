@@ -237,7 +237,7 @@ int io_tquic_send(struct io_kiocb *req, unsigned int issue_flags)
 		}
 	} else {
 		/* Look up specific stream by ID in connection's stream tree */
-		stream = tquic_stream_lookup(conn, sr->stream_id);
+		stream = tquic_conn_stream_lookup(conn, sr->stream_id);
 		if (!stream) {
 			/* Stream doesn't exist - check if auto-create is allowed */
 			if (sr->flags & MSG_MORE) {
@@ -350,7 +350,7 @@ int io_tquic_recv(struct io_kiocb *req, unsigned int issue_flags)
 		stream = tsk->default_stream;
 	} else {
 		/* Look up specific stream by ID */
-		stream = tquic_stream_lookup(tsk->conn, sr->stream_id);
+		stream = tquic_conn_stream_lookup(tsk->conn, sr->stream_id);
 	}
 
 	if (!stream) {

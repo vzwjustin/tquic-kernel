@@ -12,6 +12,7 @@
 #include <linux/kernel.h>
 #include <linux/slab.h>
 #include <linux/random.h>
+#include <linux/scatterlist.h>
 #include <crypto/aes.h>
 #include <crypto/skcipher.h>
 #include <linux/unaligned.h>
@@ -65,16 +66,16 @@ struct tquic_lb_config *tquic_lb_config_create(u8 config_rotation,
 		memcpy(cfg->encryption_key, encryption_key,
 		       TQUIC_LB_AES_BLOCK_SIZE);
 
-		/* Allocate AES cipher */
-		cfg->aes_tfm = crypto_alloc_cipher("aes", 0, 0);
+		/* Allocate AES-ECB skcipher (kernel 6.12+ API) */
+		cfg->aes_tfm = crypto_alloc_sync_skcipher("ecb(aes)", 0, 0);
 		if (IS_ERR(cfg->aes_tfm)) {
 			kmem_cache_free(lb_config_cache, cfg);
 			return NULL;
 		}
 
-		if (crypto_cipher_setkey(cfg->aes_tfm, encryption_key,
-					 TQUIC_LB_AES_BLOCK_SIZE)) {
-			crypto_free_cipher(cfg->aes_tfm);
+		if (crypto_sync_skcipher_setkey(cfg->aes_tfm, encryption_key,
+						TQUIC_LB_AES_BLOCK_SIZE)) {
+			crypto_free_sync_skcipher(cfg->aes_tfm);
 			kmem_cache_free(lb_config_cache, cfg);
 			return NULL;
 		}
@@ -109,7 +110,7 @@ void tquic_lb_config_destroy(struct tquic_lb_config *cfg)
 		return;
 
 	if (cfg->aes_tfm)
-		crypto_free_cipher(cfg->aes_tfm);
+		crypto_free_sync_skcipher(cfg->aes_tfm);
 
 	kmem_cache_free(lb_config_cache, cfg);
 }
@@ -158,16 +159,30 @@ EXPORT_SYMBOL_GPL(tquic_lb_generate_nonce);
  * @ciphertext: 16-byte output
  *
  * Used when server_id + nonce = 16 bytes exactly.
+ * Uses sync_skcipher request pattern for kernel 6.12+ compatibility.
  * Returns 0 on success.
  */
 int tquic_lb_encrypt_single_pass(struct tquic_lb_config *cfg,
 				 const u8 *plaintext, u8 *ciphertext)
 {
+	SYNC_SKCIPHER_REQUEST_ON_STACK(req, cfg->aes_tfm);
+	struct scatterlist sg_in, sg_out;
+	int ret;
+
 	if (!cfg || !cfg->aes_tfm)
 		return -EINVAL;
 
-	crypto_cipher_encrypt_one(cfg->aes_tfm, ciphertext, plaintext);
-	return 0;
+	sg_init_one(&sg_in, plaintext, AES_BLOCK_SIZE);
+	sg_init_one(&sg_out, ciphertext, AES_BLOCK_SIZE);
+
+	skcipher_request_set_sync_tfm(req, cfg->aes_tfm);
+	skcipher_request_set_callback(req, 0, NULL, NULL);
+	skcipher_request_set_crypt(req, &sg_in, &sg_out, AES_BLOCK_SIZE, NULL);
+
+	ret = crypto_skcipher_encrypt(req);
+
+	skcipher_request_zero(req);
+	return ret;
 }
 EXPORT_SYMBOL_GPL(tquic_lb_encrypt_single_pass);
 
@@ -177,18 +192,56 @@ EXPORT_SYMBOL_GPL(tquic_lb_encrypt_single_pass);
  * @ciphertext: 16-byte input
  * @plaintext: 16-byte output
  *
+ * Uses sync_skcipher request pattern for kernel 6.12+ compatibility.
  * Returns 0 on success.
  */
 int tquic_lb_decrypt_single_pass(struct tquic_lb_config *cfg,
 				 const u8 *ciphertext, u8 *plaintext)
 {
+	SYNC_SKCIPHER_REQUEST_ON_STACK(req, cfg->aes_tfm);
+	struct scatterlist sg_in, sg_out;
+	int ret;
+
 	if (!cfg || !cfg->aes_tfm)
 		return -EINVAL;
 
-	crypto_cipher_decrypt_one(cfg->aes_tfm, plaintext, ciphertext);
-	return 0;
+	sg_init_one(&sg_in, ciphertext, AES_BLOCK_SIZE);
+	sg_init_one(&sg_out, plaintext, AES_BLOCK_SIZE);
+
+	skcipher_request_set_sync_tfm(req, cfg->aes_tfm);
+	skcipher_request_set_callback(req, 0, NULL, NULL);
+	skcipher_request_set_crypt(req, &sg_in, &sg_out, AES_BLOCK_SIZE, NULL);
+
+	ret = crypto_skcipher_decrypt(req);
+
+	skcipher_request_zero(req);
+	return ret;
 }
 EXPORT_SYMBOL_GPL(tquic_lb_decrypt_single_pass);
+
+/*
+ * Helper function to perform single AES-ECB block encryption
+ * using the sync_skcipher API for kernel 6.12+ compatibility.
+ */
+static int tquic_lb_aes_encrypt_block(struct crypto_sync_skcipher *tfm,
+				      const u8 *in, u8 *out)
+{
+	SYNC_SKCIPHER_REQUEST_ON_STACK(req, tfm);
+	struct scatterlist sg_in, sg_out;
+	int ret;
+
+	sg_init_one(&sg_in, in, AES_BLOCK_SIZE);
+	sg_init_one(&sg_out, out, AES_BLOCK_SIZE);
+
+	skcipher_request_set_sync_tfm(req, tfm);
+	skcipher_request_set_callback(req, 0, NULL, NULL);
+	skcipher_request_set_crypt(req, &sg_in, &sg_out, AES_BLOCK_SIZE, NULL);
+
+	ret = crypto_skcipher_encrypt(req);
+
+	skcipher_request_zero(req);
+	return ret;
+}
 
 /**
  * tquic_lb_encrypt_four_pass - Four-pass Feistel network encryption
@@ -199,6 +252,7 @@ EXPORT_SYMBOL_GPL(tquic_lb_decrypt_single_pass);
  *
  * Used when server_id + nonce != 16 bytes.
  * Implements a 4-round Feistel network with AES-ECB as the round function.
+ * Uses sync_skcipher API for kernel 6.12+ compatibility.
  * Returns 0 on success.
  */
 int tquic_lb_encrypt_four_pass(struct tquic_lb_config *cfg,
@@ -207,7 +261,7 @@ int tquic_lb_encrypt_four_pass(struct tquic_lb_config *cfg,
 {
 	u8 left[16], right[16], tmp[16], round_out[16];
 	size_t half_len;
-	int i, round;
+	int i, round, ret;
 
 	if (!cfg || !cfg->aes_tfm || len > 32)
 		return -EINVAL;
@@ -228,7 +282,9 @@ int tquic_lb_encrypt_four_pass(struct tquic_lb_config *cfg,
 		tmp[15] = round;  /* Include round number */
 
 		/* Apply AES-ECB round function */
-		crypto_cipher_encrypt_one(cfg->aes_tfm, round_out, tmp);
+		ret = tquic_lb_aes_encrypt_block(cfg->aes_tfm, tmp, round_out);
+		if (ret)
+			return ret;
 
 		/* XOR with left half */
 		for (i = 0; i < half_len; i++)
@@ -258,6 +314,7 @@ EXPORT_SYMBOL_GPL(tquic_lb_encrypt_four_pass);
  * @plaintext: Output buffer
  *
  * Reverses the 4-round Feistel encryption.
+ * Uses sync_skcipher API for kernel 6.12+ compatibility.
  * Returns 0 on success.
  */
 int tquic_lb_decrypt_four_pass(struct tquic_lb_config *cfg,
@@ -266,7 +323,7 @@ int tquic_lb_decrypt_four_pass(struct tquic_lb_config *cfg,
 {
 	u8 left[16], right[16], tmp[16], round_out[16];
 	size_t half_len;
-	int i, round;
+	int i, round, ret;
 
 	if (!cfg || !cfg->aes_tfm || len > 32)
 		return -EINVAL;
@@ -294,7 +351,9 @@ int tquic_lb_decrypt_four_pass(struct tquic_lb_config *cfg,
 		tmp[15] = round;
 
 		/* Apply AES-ECB round function */
-		crypto_cipher_encrypt_one(cfg->aes_tfm, round_out, tmp);
+		ret = tquic_lb_aes_encrypt_block(cfg->aes_tfm, tmp, round_out);
+		if (ret)
+			return ret;
 
 		/* XOR with left half */
 		for (i = 0; i < half_len; i++)

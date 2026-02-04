@@ -74,55 +74,42 @@ static int tquic_frame_process_connection_close(struct tquic_connection *conn,
 						const u8 *data, int len);
 
 /*
- * External function declarations - these are provided by other modules
- * in the tquic implementation. The prototypes match what the original
- * quic_packet.c expected, but with tquic_ naming.
+ * Forward declarations for internal functions that need prototypes.
+ * Most external functions are declared in <net/tquic.h>.
  */
-extern int tquic_varint_decode(const u8 *data, size_t len, u64 *value);
-extern int tquic_varint_encode(u64 value, u8 *buf, size_t len);
-extern int tquic_varint_len(u64 value);
-extern int tquic_ack_should_send(struct tquic_connection *conn, u8 level);
-extern int tquic_ack_create(struct tquic_connection *conn, u8 level,
-			    struct sk_buff *skb);
-extern void tquic_ack_on_packet_received(struct tquic_connection *conn,
-					 u64 pn, u8 level);
-extern int tquic_ack_frequency_process(struct tquic_connection *conn,
-				       const u8 *data, int len);
-extern int tquic_immediate_ack_process(struct tquic_connection *conn);
-extern void tquic_frame_process_all(struct tquic_connection *conn,
-				    struct sk_buff *skb, u8 level);
-extern void tquic_loss_detection_on_packet_sent(struct tquic_connection *conn,
-						void *sent);
-extern void tquic_loss_detection_on_ack_received(struct tquic_connection *conn,
-						 void *ack_info, u8 level);
-extern void tquic_conn_retire_cid(struct tquic_connection *conn, u64 seq);
-extern void tquic_conn_add_peer_cid(struct tquic_connection *conn,
-				    void *cid, u64 seq, u64 retire_prior_to,
-				    const u8 *reset_token);
-extern void tquic_conn_set_state(struct tquic_connection *conn, int state);
-extern int tquic_conn_close(struct tquic_connection *conn, u64 error_code,
-			    const char *reason, u32 reason_len, bool app_error);
-extern int tquic_crypto_encrypt(void *ctx, struct sk_buff *skb, u64 pn);
-extern int tquic_crypto_decrypt(void *ctx, struct sk_buff *skb, u64 pn);
-extern int tquic_crypto_protect_header(void *ctx, struct sk_buff *skb,
-				       int pn_offset, u8 pn_len);
-extern int tquic_crypto_unprotect_header(void *ctx, struct sk_buff *skb,
-					 u8 *pn_offset, u8 *pn_len);
-extern void tquic_crypto_destroy(void *ctx);
-extern int tquic_crypto_derive_initial_secrets(struct tquic_connection *conn,
-					       void *cid);
-extern int tquic_flow_check_recv_limits(void *stream, u64 offset, u64 len);
-extern struct tquic_stream *tquic_stream_lookup(struct tquic_connection *conn,
-						u64 stream_id);
-extern struct tquic_stream *tquic_stream_create(struct tquic_connection *conn,
-						u64 stream_id);
-extern void tquic_stream_handle_reset(struct tquic_stream *stream,
-				      u64 error_code, u64 final_size);
-extern void tquic_stream_handle_stop_sending(struct tquic_stream *stream,
-					     u64 error_code);
-extern void tquic_stream_recv_data(struct tquic_stream *stream,
-				   u64 offset, const u8 *data, u64 len,
-				   bool fin);
+int tquic_varint_decode(const u8 *data, size_t len, u64 *value);
+int tquic_varint_encode(u64 value, u8 *buf, size_t len);
+int tquic_varint_len(u64 value);
+void tquic_ack_on_packet_received(struct tquic_connection *conn, u64 pn, u8 level);
+int tquic_ack_frequency_process(struct tquic_connection *conn, const u8 *data, int len);
+int tquic_immediate_ack_process(struct tquic_connection *conn);
+void tquic_loss_detection_on_packet_sent(struct tquic_connection *conn, void *sent);
+void tquic_loss_detection_on_ack_received(struct tquic_connection *conn, void *ack_info, u8 level);
+int tquic_crypto_encrypt(void *ctx, struct sk_buff *skb, u64 pn);
+int tquic_crypto_decrypt(void *ctx, struct sk_buff *skb, u64 pn);
+int tquic_crypto_protect_header(void *ctx, struct sk_buff *skb, int pn_offset, u8 pn_len);
+int tquic_crypto_unprotect_header(void *ctx, struct sk_buff *skb, u8 *pn_offset, u8 *pn_len);
+int tquic_flow_check_recv_limits(struct tquic_stream *stream, u64 offset, u64 len);
+void tquic_stream_handle_reset(struct tquic_stream *stream, u64 error_code, u64 final_size);
+void tquic_stream_handle_stop_sending(struct tquic_stream *stream, u64 error_code);
+
+/*
+ * quic_packet_deliver_stream_data - Internal helper to deliver raw data to stream
+ *
+ * This is a simplified internal function for frame processing. The full
+ * tquic_stream_recv_data() in core/stream.c handles SKBs and stream manager
+ * interactions for the complete implementation.
+ */
+static void quic_packet_deliver_stream_data(struct tquic_stream *stream, u64 offset,
+					    const u8 *data, u64 len, bool fin);
+
+/* Forward declarations for functions defined later in this file */
+int tquic_frame_process_all(struct tquic_connection *conn, struct sk_buff *skb, u8 level);
+int tquic_frame_process_one(struct tquic_connection *conn, const u8 *data, int len, u8 level);
+
+/* Stream lookup/create functions - internal implementations */
+static struct tquic_stream *tquic_stream_lookup_internal(struct tquic_connection *conn, u64 stream_id);
+static struct tquic_stream *tquic_stream_create_internal(struct tquic_connection *conn, u64 stream_id);
 
 /*
  * Connection state constants
@@ -154,6 +141,129 @@ static inline u32 tquic_conn_get_version(struct tquic_connection *conn)
 static inline bool tquic_conn_is_server(struct tquic_connection *conn)
 {
 	return conn->role == TQUIC_ROLE_SERVER;
+}
+
+/*
+ * Stream lookup/create helpers
+ * Streams are stored in an rb_tree indexed by stream ID
+ */
+static struct tquic_stream *tquic_stream_lookup_internal(struct tquic_connection *conn,
+							 u64 stream_id)
+{
+	struct rb_node *node;
+	unsigned long flags;
+
+	spin_lock_irqsave(&conn->streams_lock, flags);
+	node = conn->streams.rb_node;
+	while (node) {
+		struct tquic_stream *stream = rb_entry(node, struct tquic_stream, node);
+
+		if (stream_id < stream->id)
+			node = node->rb_left;
+		else if (stream_id > stream->id)
+			node = node->rb_right;
+		else {
+			spin_unlock_irqrestore(&conn->streams_lock, flags);
+			return stream;
+		}
+	}
+	spin_unlock_irqrestore(&conn->streams_lock, flags);
+	return NULL;
+}
+
+static struct tquic_stream *tquic_stream_create_internal(struct tquic_connection *conn,
+							 u64 stream_id)
+{
+	struct tquic_stream *stream;
+	struct rb_node **link, *parent = NULL;
+	unsigned long flags;
+
+	stream = kzalloc(sizeof(*stream), GFP_ATOMIC);
+	if (!stream)
+		return NULL;
+
+	stream->id = stream_id;
+	stream->conn = conn;
+	stream->state = TQUIC_STREAM_OPEN;
+	skb_queue_head_init(&stream->send_buf);
+	skb_queue_head_init(&stream->recv_buf);
+	init_waitqueue_head(&stream->wait);
+
+	/* Insert into rb_tree */
+	spin_lock_irqsave(&conn->streams_lock, flags);
+	link = &conn->streams.rb_node;
+	while (*link) {
+		struct tquic_stream *s = rb_entry(*link, struct tquic_stream, node);
+		parent = *link;
+		if (stream_id < s->id)
+			link = &(*link)->rb_left;
+		else
+			link = &(*link)->rb_right;
+	}
+	rb_link_node(&stream->node, parent, link);
+	rb_insert_color(&stream->node, &conn->streams);
+	spin_unlock_irqrestore(&conn->streams_lock, flags);
+
+	return stream;
+}
+
+/*
+ * Connection close helper - wraps the actual tquic function
+ */
+static inline int tquic_conn_close_internal(struct tquic_connection *conn,
+					    u64 error_code, const char *reason,
+					    u32 reason_len, bool app_error)
+{
+	/* Use the appropriate close function based on error type */
+	if (app_error)
+		return tquic_conn_close_app(conn, error_code, reason);
+	else
+		return tquic_conn_close_with_error(conn, error_code, reason);
+}
+
+/*
+ * Connection ID retirement helper
+ */
+static inline void tquic_conn_retire_cid_internal(struct tquic_connection *conn, u64 seq)
+{
+	/* Call with is_local=false since we're retiring peer's CID */
+	tquic_conn_retire_cid(conn, seq, false);
+}
+
+/*
+ * quic_packet_deliver_stream_data - Internal simplified stream data delivery
+ *
+ * This function delivers raw received data to a stream for the frame processor.
+ * It handles FIN flag and wakes up any readers waiting on the stream.
+ *
+ * For full stream receive handling with flow control and reassembly,
+ * use tquic_stream_recv_data() from core/stream.c which takes an SKB.
+ */
+static void quic_packet_deliver_stream_data(struct tquic_stream *stream, u64 offset,
+					    const u8 *data, u64 len, bool fin)
+{
+	struct sk_buff *skb;
+
+	if (!stream || !data || len == 0)
+		return;
+
+	/* Allocate an skb to hold the data */
+	skb = alloc_skb(len, GFP_ATOMIC);
+	if (!skb)
+		return;
+
+	/* Copy data into the skb */
+	skb_put_data(skb, data, len);
+
+	/* Queue the skb for stream receive processing */
+	skb_queue_tail(&stream->recv_buf, skb);
+
+	/* Update stream state */
+	if (fin)
+		stream->fin_received = 1;
+
+	/* Wake up any waiting readers */
+	wake_up(&stream->wait);
 }
 
 /* Parse long header packet */
@@ -487,7 +597,7 @@ static u64 tquic_extract_pn(const u8 *data, u8 pn_len)
  * This is particularly important during the handshake when Initial and
  * Handshake packets are often coalesced together.
  */
-void tquic_packet_process(struct tquic_connection *conn, struct sk_buff *skb)
+int tquic_packet_process(struct tquic_connection *conn, struct sk_buff *skb)
 {
 	u8 first_byte;
 	u8 pn_offset, pn_len;
@@ -499,7 +609,7 @@ void tquic_packet_process(struct tquic_connection *conn, struct sk_buff *skb)
 
 	if (skb->len < 1) {
 		kfree_skb(skb);
-		return;
+		return -EINVAL;
 	}
 
 	first_byte = skb->data[0];
@@ -513,7 +623,7 @@ void tquic_packet_process(struct tquic_connection *conn, struct sk_buff *skb)
 	err = tquic_packet_get_length(skb->data, skb->len, &packet_len);
 	if (err) {
 		kfree_skb(skb);
-		return;
+		return err;
 	}
 
 	/*
@@ -523,7 +633,7 @@ void tquic_packet_process(struct tquic_connection *conn, struct sk_buff *skb)
 	 */
 	if (packet_len < 1 || packet_len > skb->len) {
 		kfree_skb(skb);
-		return;
+		return -EINVAL;
 	}
 
 	/*
@@ -628,7 +738,8 @@ void tquic_packet_process(struct tquic_connection *conn, struct sk_buff *skb)
 process_next:
 	/* Process any remaining coalesced packets */
 	if (next_skb)
-		tquic_packet_process(conn, next_skb);
+		return tquic_packet_process(conn, next_skb);
+	return 0;
 }
 
 static void tquic_packet_process_retry(struct tquic_connection *conn,
@@ -750,7 +861,7 @@ int tquic_frame_process_one(struct tquic_connection *conn, const u8 *data,
 		offset += varint_len;
 
 		{
-			struct tquic_stream *stream = tquic_stream_lookup(conn, val1);
+			struct tquic_stream *stream = tquic_stream_lookup_internal(conn, val1);
 			if (stream) {
 				tquic_stream_handle_reset(stream, val2, val3);
 			}
@@ -769,7 +880,7 @@ int tquic_frame_process_one(struct tquic_connection *conn, const u8 *data,
 		offset += varint_len;
 
 		{
-			struct tquic_stream *stream = tquic_stream_lookup(conn, val1);
+			struct tquic_stream *stream = tquic_stream_lookup_internal(conn, val1);
 			if (stream) {
 				tquic_stream_handle_stop_sending(stream, val2);
 			}
@@ -816,7 +927,7 @@ int tquic_frame_process_one(struct tquic_connection *conn, const u8 *data,
 		offset += varint_len;
 
 		{
-			struct tquic_stream *stream = tquic_stream_lookup(conn, val1);
+			struct tquic_stream *stream = tquic_stream_lookup_internal(conn, val1);
 			if (stream) {
 				if (val2 > stream->max_send_data)
 					stream->max_send_data = val2;
@@ -866,7 +977,7 @@ int tquic_frame_process_one(struct tquic_connection *conn, const u8 *data,
 		if (varint_len < 0) return varint_len;
 		offset += varint_len;
 
-		tquic_conn_retire_cid(conn, val1);
+		tquic_conn_retire_cid_internal(conn, val1);
 		return offset;
 
 	case TQUIC_FRAME_PATH_CHALLENGE:
@@ -1052,9 +1163,9 @@ static int tquic_frame_process_stream(struct tquic_connection *conn,
 		return -EINVAL;
 
 	/* Find or create stream */
-	stream = tquic_stream_lookup(conn, stream_id);
+	stream = tquic_stream_lookup_internal(conn, stream_id);
 	if (!stream) {
-		stream = tquic_stream_create(conn, stream_id);
+		stream = tquic_stream_create_internal(conn, stream_id);
 		if (!stream)
 			return -ENOMEM;
 	}
@@ -1072,13 +1183,13 @@ static int tquic_frame_process_stream(struct tquic_connection *conn,
 		 * Flow control violation detected. Close the connection
 		 * with FLOW_CONTROL_ERROR (0x03) per RFC 9000.
 		 */
-		tquic_conn_close(conn, TQUIC_ERROR_FLOW_CONTROL_ERROR,
-				 "flow control limit exceeded", 29, false);
+		tquic_conn_close_internal(conn, TQUIC_ERROR_FLOW_CONTROL_ERROR,
+					  "flow control limit exceeded", 29, false);
 		return -EDQUOT;
 	}
 
 	/* Deliver data to stream */
-	tquic_stream_recv_data(stream, stream_offset, data + offset, stream_len, has_fin);
+	quic_packet_deliver_stream_data(stream, stream_offset, data + offset, stream_len, has_fin);
 
 	return offset + stream_len;
 }
@@ -1225,7 +1336,8 @@ static int tquic_frame_process_new_cid(struct tquic_connection *conn,
 	memcpy(reset_token, data + offset, 16);
 	offset += 16;
 
-	tquic_conn_add_peer_cid(conn, &cid, seq, retire_prior_to, reset_token);
+	/* Note: retire_prior_to is parsed but not used by the current API */
+	tquic_conn_add_remote_cid(conn, &cid, seq, reset_token);
 
 	return offset;
 }

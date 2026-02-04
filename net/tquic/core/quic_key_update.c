@@ -16,10 +16,102 @@
 
 #include <linux/slab.h>
 #include <linux/errno.h>
+#include <linux/string.h>
 #include <crypto/aead.h>
 #include <crypto/hash.h>
 #include <net/tquic.h>
-#include "key_update.h"
+#include <net/tquic_frame.h>
+
+/* Key update header - internal definitions for crypto state */
+
+/*
+ * TQUIC Cipher types (mirrors TLS 1.3 cipher suites)
+ */
+enum tquic_cipher_type {
+	TQUIC_CIPHER_AES_128_GCM_SHA256 = 0x1301,
+	TQUIC_CIPHER_AES_256_GCM_SHA384 = 0x1302,
+	TQUIC_CIPHER_CHACHA20_POLY1305_SHA256 = 0x1303,
+};
+
+/*
+ * Maximum key/IV/secret sizes
+ */
+#define TQUIC_MAX_KEY_LEN	32
+#define TQUIC_MAX_IV_LEN	12
+#define TQUIC_MAX_SECRET_LEN	64
+
+/**
+ * struct tquic_crypto_secret - Cryptographic secrets for a direction
+ * @secret: Current secret (for key derivation)
+ * @secret_len: Length of secret
+ * @key: Derived encryption key
+ * @key_len: Length of key
+ * @iv: Derived IV
+ * @iv_len: Length of IV
+ */
+struct tquic_crypto_secret {
+	u8 secret[TQUIC_MAX_SECRET_LEN];
+	u8 secret_len;
+	u8 key[TQUIC_MAX_KEY_LEN];
+	u8 key_len;
+	u8 iv[TQUIC_MAX_IV_LEN];
+	u8 iv_len;
+};
+
+/**
+ * struct tquic_crypto_ctx - Per-level crypto context
+ * @tx: Transmit direction secrets and keys
+ * @rx: Receive direction secrets and keys
+ * @rx_prev: Previous receive keys (for handling reordered packets)
+ * @tx_aead: Transmit AEAD transform
+ * @rx_aead: Receive AEAD transform
+ * @rx_aead_prev: Previous receive AEAD (for reordered packets)
+ * @hash: Hash algorithm for key derivation
+ * @cipher_type: Cipher suite in use
+ * @key_phase: Current TX key phase (0 or 1)
+ * @rx_key_phase: Expected RX key phase
+ * @rx_prev_valid: Whether previous RX keys are valid
+ * @keys_available: Keys have been installed
+ * @key_update_pending: Key update initiated, awaiting confirmation
+ * @key_update_pn: First packet number with new keys
+ */
+struct tquic_crypto_ctx {
+	struct tquic_crypto_secret tx;
+	struct tquic_crypto_secret rx;
+	struct tquic_crypto_secret rx_prev;
+
+	struct crypto_aead *tx_aead;
+	struct crypto_aead *rx_aead;
+	struct crypto_aead *rx_aead_prev;
+
+	struct crypto_shash *hash;
+	enum tquic_cipher_type cipher_type;
+
+	u8 key_phase:1;
+	u8 rx_key_phase:1;
+	u8 rx_prev_valid:1;
+	u8 keys_available:1;
+	u8 key_update_pending:1;
+	u64 key_update_pn;
+};
+
+/*
+ * Timer function declaration (from tquic_timer.c)
+ */
+void tquic_timer_set(struct tquic_connection *conn, u8 timer_type, ktime_t when);
+
+/*
+ * TQUIC_SKB_CB - Get control block from skb
+ */
+struct tquic_skb_cb {
+	u32 header_len;
+	u32 payload_len;
+	u64 pn;
+	u8 pn_space;
+	u8 key_phase;
+};
+
+#define TQUIC_SKB_CB(skb) ((struct tquic_skb_cb *)&((skb)->cb[0]))
 
 /*
  * Key discard timeout per RFC 9001 Section 6.1:
@@ -56,12 +148,13 @@ extern int hkdf_expand_label(struct hkdf_ctx *ctx, const u8 *prk,
  */
 static int tquic_key_update_tx(struct tquic_connection *conn)
 {
-	struct tquic_crypto_ctx *ctx = &conn->crypto[TQUIC_CRYPTO_APPLICATION];
+	struct tquic_crypto_ctx *ctx = 
+		(struct tquic_crypto_ctx *)conn->crypto[TQUIC_CRYPTO_APPLICATION];
 	struct hkdf_ctx hkdf;
 	u8 new_secret[64];
 	int err;
 
-	if (!ctx->hash || !ctx->keys_available)
+	if (!ctx || !ctx->hash || !ctx->keys_available)
 		return -EINVAL;
 
 	hkdf.hash = ctx->hash;
@@ -111,13 +204,14 @@ out:
  */
 static int tquic_key_update_rx(struct tquic_connection *conn)
 {
-	struct tquic_crypto_ctx *ctx = &conn->crypto[TQUIC_CRYPTO_APPLICATION];
+	struct tquic_crypto_ctx *ctx = 
+		(struct tquic_crypto_ctx *)conn->crypto[TQUIC_CRYPTO_APPLICATION];
 	struct hkdf_ctx hkdf;
 	u8 new_secret[64];
 	const char *aead_name;
 	int err;
 
-	if (!ctx->hash || !ctx->keys_available)
+	if (!ctx || !ctx->hash || !ctx->keys_available)
 		return -EINVAL;
 
 	hkdf.hash = ctx->hash;
@@ -223,11 +317,12 @@ out:
  */
 int tquic_crypto_initiate_key_update(struct tquic_connection *conn)
 {
-	struct tquic_crypto_ctx *ctx = &conn->crypto[TQUIC_CRYPTO_APPLICATION];
+	struct tquic_crypto_ctx *ctx = 
+		(struct tquic_crypto_ctx *)conn->crypto[TQUIC_CRYPTO_APPLICATION];
 	struct tquic_pn_space *pn_space = &conn->pn_spaces[TQUIC_PN_SPACE_APPLICATION];
 	int err;
 
-	if (!ctx->keys_available)
+	if (!ctx || !ctx->keys_available)
 		return -EINVAL;
 
 	/* Check if we're already in a key update (RFC 9001 Section 6.2) */
@@ -241,7 +336,6 @@ int tquic_crypto_initiate_key_update(struct tquic_connection *conn)
 
 	/* Toggle TX key phase */
 	ctx->key_phase = !ctx->key_phase;
-	conn->key_phase = ctx->key_phase;
 
 	/* Mark key update as pending and record first PN with new keys */
 	ctx->key_update_pending = 1;
@@ -268,11 +362,12 @@ EXPORT_SYMBOL_GPL(tquic_crypto_initiate_key_update);
  */
 int tquic_crypto_on_key_phase_change(struct tquic_connection *conn, u8 rx_key_phase)
 {
-	struct tquic_crypto_ctx *ctx = &conn->crypto[TQUIC_CRYPTO_APPLICATION];
+	struct tquic_crypto_ctx *ctx = 
+		(struct tquic_crypto_ctx *)conn->crypto[TQUIC_CRYPTO_APPLICATION];
 	ktime_t discard_time;
 	int err;
 
-	if (!ctx->keys_available)
+	if (!ctx || !ctx->keys_available)
 		return -EINVAL;
 
 	/*
@@ -367,7 +462,7 @@ int tquic_crypto_on_key_phase_change(struct tquic_connection *conn, u8 rx_key_ph
 			return err;
 		}
 
-		/* Update RX key phase to match peer */
+		/* Update RX key phase to match received packet */
 		ctx->rx_key_phase = rx_key_phase;
 
 		/*
@@ -423,7 +518,6 @@ int tquic_crypto_on_key_phase_change(struct tquic_connection *conn, u8 rx_key_ph
 
 		/* Both updates succeeded - commit the new key phase */
 		ctx->key_phase = rx_key_phase;
-		conn->key_phase = ctx->key_phase;
 
 		/* Start timer to discard old RX keys (RFC 9001 Section 6.1) */
 		discard_time = ktime_add_ms(ktime_get(), TQUIC_KEY_DISCARD_TIMEOUT_MS);
@@ -449,7 +543,11 @@ EXPORT_SYMBOL_GPL(tquic_crypto_on_key_phase_change);
  */
 void tquic_crypto_discard_old_keys(struct tquic_connection *conn)
 {
-	struct tquic_crypto_ctx *ctx = &conn->crypto[TQUIC_CRYPTO_APPLICATION];
+	struct tquic_crypto_ctx *ctx = 
+		(struct tquic_crypto_ctx *)conn->crypto[TQUIC_CRYPTO_APPLICATION];
+
+	if (!ctx)
+		return;
 
 	if (ctx->rx_aead_prev) {
 		crypto_free_aead(ctx->rx_aead_prev);

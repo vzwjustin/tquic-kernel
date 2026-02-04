@@ -29,7 +29,15 @@ static struct tquic_sched_ops *default_scheduler;
 /*
  * Scheduler registration
  */
-int tquic_sched_register(struct tquic_sched_ops *ops)
+#ifndef TQUIC_OUT_OF_TREE
+/**
+ * tquic_register_scheduler - Register a scheduler with the framework
+ * @ops: Scheduler operations structure
+ *
+ * This is the standard API declared in net/tquic.h for registering
+ * schedulers. Returns 0 on success.
+ */
+int tquic_register_scheduler(struct tquic_sched_ops *ops)
 {
 	if (!ops || !ops->name || !ops->select)
 		return -EINVAL;
@@ -46,9 +54,20 @@ int tquic_sched_register(struct tquic_sched_ops *ops)
 	pr_info("tquic_sched: registered scheduler '%s'\n", ops->name);
 	return 0;
 }
+EXPORT_SYMBOL_GPL(tquic_register_scheduler);
+
+/* Alias for backwards compatibility within sched/ subsystem */
+int tquic_sched_register(struct tquic_sched_ops *ops)
+{
+	return tquic_register_scheduler(ops);
+}
 EXPORT_SYMBOL_GPL(tquic_sched_register);
 
-void tquic_sched_unregister(struct tquic_sched_ops *ops)
+/**
+ * tquic_unregister_scheduler - Unregister a scheduler from the framework
+ * @ops: Scheduler operations structure
+ */
+void tquic_unregister_scheduler(struct tquic_sched_ops *ops)
 {
 	spin_lock(&tquic_sched_lock);
 
@@ -65,7 +84,15 @@ void tquic_sched_unregister(struct tquic_sched_ops *ops)
 
 	pr_info("tquic_sched: unregistered scheduler '%s'\n", ops->name);
 }
+EXPORT_SYMBOL_GPL(tquic_unregister_scheduler);
+
+/* Alias for backwards compatibility within sched/ subsystem */
+void tquic_sched_unregister(struct tquic_sched_ops *ops)
+{
+	tquic_unregister_scheduler(ops);
+}
 EXPORT_SYMBOL_GPL(tquic_sched_unregister);
+#endif /* !TQUIC_OUT_OF_TREE */
 
 /*
  * Find scheduler by name
@@ -645,7 +672,7 @@ static struct tquic_path *owd_select(void *state, struct tquic_connection *conn,
 {
 	struct owd_sched_data *data = state;
 	struct tquic_path *path, *best = NULL;
-	struct tquic_owd_path_info info;
+	struct tquic_owd_path_info info __maybe_unused;
 	s64 best_delay = S64_MAX;
 	ktime_t now = ktime_get();
 	u64 time_since_switch_ms;
@@ -660,7 +687,7 @@ static struct tquic_path *owd_select(void *state, struct tquic_connection *conn,
 	rcu_read_lock();
 	list_for_each_entry_rcu(path, &conn->paths, list) {
 		s64 effective_delay;
-		int ret;
+		int ret __maybe_unused;
 
 		if (path->state != TQUIC_PATH_ACTIVE)
 			continue;
@@ -798,15 +825,15 @@ static void owd_ecf_release(void *state)
  * - On asymmetric links, forward delay may differ significantly from RTT/2
  * - Download ACKs (reverse path) don't affect data delivery time
  */
-static struct tquic_path *owd_ecf_select(void *state,
+static struct tquic_path *owd_ecf_select(void *state __maybe_unused,
 					 struct tquic_connection *conn,
 					 struct sk_buff *skb)
 {
 	struct tquic_path *path, *best = NULL;
-	struct tquic_owd_path_info info;
+	struct tquic_owd_path_info info __maybe_unused;
 	u64 min_completion = ULLONG_MAX;
 	u32 pkt_size = skb->len;
-	bool have_owd = false;
+	bool have_owd __maybe_unused = false;
 
 	/* Check if OWD data is available */
 	if (NULL /* TODO: conn->owd_state when OWD integrated */ && tquic_owd_has_valid_estimates(NULL /* TODO: conn->owd_state when OWD integrated */))
@@ -890,6 +917,7 @@ static struct tquic_sched_ops tquic_sched_owd_ecf = {
 /*
  * Module initialization
  */
+#ifndef TQUIC_OUT_OF_TREE
 static int __init tquic_sched_module_init(void)
 {
 	/* Register built-in schedulers */
@@ -928,7 +956,6 @@ static void __exit tquic_sched_module_exit(void)
 	pr_info("tquic_sched: scheduler framework cleanup complete\n");
 }
 
-#ifndef TQUIC_OUT_OF_TREE
 module_init(tquic_sched_module_init);
 module_exit(tquic_sched_module_exit);
 

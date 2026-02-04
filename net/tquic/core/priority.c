@@ -20,30 +20,67 @@
 
 #include <linux/slab.h>
 #include <linux/list.h>
+#include <linux/rbtree.h>
 #include <net/tquic.h>
 
 /*
  * Number of priority levels (urgency 0-7)
  */
-#define TQUIC_PRIORITY_LEVELS	8
+#define TQUIC_PRIORITY_LEVELS 8
+
+/*
+ * tquic_stream_lookup - Look up a stream by ID within a connection
+ * @conn: TQUIC connection
+ * @stream_id: Stream ID to find
+ *
+ * Searches the connection's stream rb_tree for the given stream ID.
+ * Returns the stream pointer if found, NULL otherwise.
+ * Caller must hold appropriate locks.
+ */
+static struct tquic_stream *tquic_stream_lookup(struct tquic_connection *conn,
+						u64 stream_id)
+{
+	struct rb_node *node;
+	struct tquic_stream *stream;
+
+	if (!conn)
+		return NULL;
+
+	spin_lock_bh(&conn->lock);
+	node = conn->streams.rb_node;
+	while (node) {
+		stream = rb_entry(node, struct tquic_stream, node);
+		if (stream_id < stream->id) {
+			node = node->rb_left;
+		} else if (stream_id > stream->id) {
+			node = node->rb_right;
+		} else {
+			spin_unlock_bh(&conn->lock);
+			return stream;
+		}
+	}
+	spin_unlock_bh(&conn->lock);
+
+	return NULL;
+}
 
 /*
  * Maximum bytes to send from a stream before checking for higher priority
  * streams. This prevents starvation of high-priority streams.
  */
-#define TQUIC_SCHED_QUANTUM	4096
+#define TQUIC_SCHED_QUANTUM 4096
 
 /*
  * Priority urgency constants per RFC 9218
  */
-#define TQUIC_PRIORITY_URGENCY_DEFAULT	3
-#define TQUIC_PRIORITY_URGENCY_MAX	7
+#define TQUIC_PRIORITY_URGENCY_DEFAULT 3
+#define TQUIC_PRIORITY_URGENCY_MAX 7
 
 /*
  * PRIORITY_UPDATE frame type for request streams (RFC 9218)
  * This is a 4-byte varint value 0xf0700
  */
-#define TQUIC_FRAME_PRIORITY_UPDATE_REQUEST	0xf0700ULL
+#define TQUIC_FRAME_PRIORITY_UPDATE_REQUEST 0xf0700ULL
 
 /*
  * Extended stream state for RFC 9218 priority scheduling.
@@ -51,12 +88,12 @@
  * when priority scheduling is enabled.
  */
 struct tquic_priority_stream_ext {
-	struct tquic_stream *stream;	/* Back-pointer to owning stream */
-	u8 urgency;		/* Urgency level 0-7 */
-	u8 incremental;		/* Can be interleaved with other streams */
-	u8 scheduled;		/* Currently on scheduler queue */
-	struct list_head sched_node;	/* Scheduler queue linkage */
-	refcount_t refcnt;	/* Reference count for scheduler */
+	struct tquic_stream *stream; /* Back-pointer to owning stream */
+	u8 urgency; /* Urgency level 0-7 */
+	u8 incremental; /* Can be interleaved with other streams */
+	u8 scheduled; /* Currently on scheduler queue */
+	struct list_head sched_node; /* Scheduler queue linkage */
+	refcount_t refcnt; /* Reference count for scheduler */
 };
 
 /*
@@ -65,8 +102,8 @@ struct tquic_priority_stream_ext {
  */
 struct tquic_priority_sched_state {
 	spinlock_t lock;
-	struct list_head queues[TQUIC_PRIORITY_LEVELS];	/* Per-urgency queues */
-	u32 round_robin[TQUIC_PRIORITY_LEVELS];		/* RR index per urgency */
+	struct list_head queues[TQUIC_PRIORITY_LEVELS]; /* Per-urgency queues */
+	u32 round_robin[TQUIC_PRIORITY_LEVELS]; /* RR index per urgency */
 };
 
 /*
@@ -121,18 +158,20 @@ tquic_stream_get_priority_ext(struct tquic_stream *stream)
  *
  * Initializes the per-urgency queues and scheduler state.
  * Must be called during connection initialization.
+ *
+ * Returns: 0 on success, negative error code on failure
  */
-void tquic_sched_init(struct tquic_connection *conn)
+int tquic_sched_init(struct tquic_connection *conn)
 {
 	struct tquic_priority_sched_state *state;
 	int i;
 
 	if (!conn)
-		return;
+		return -EINVAL;
 
 	state = kzalloc(sizeof(*state), GFP_KERNEL);
 	if (!state)
-		return;
+		return -ENOMEM;
 
 	spin_lock_init(&state->lock);
 
@@ -142,6 +181,7 @@ void tquic_sched_init(struct tquic_connection *conn)
 	}
 
 	conn->priority_state = state;
+	return 0;
 }
 EXPORT_SYMBOL_GPL(tquic_sched_init);
 
@@ -318,13 +358,13 @@ EXPORT_SYMBOL_GPL(tquic_sched_next_stream);
  * @urgency: Urgency level (0-7, 0 = most urgent)
  * @incremental: Whether stream can be interleaved
  *
- * Updates the stream's priority. If the stream is already scheduled,
- * it will be moved to the appropriate queue.
+ * Updates the stream's priority using RFC 9218 Extensible Priorities.
+ * If the stream is already scheduled, it will be moved to the appropriate queue.
  *
  * Returns: 0 on success, negative error code on failure
  */
-int tquic_stream_set_priority(struct tquic_stream *stream, u8 urgency,
-			      bool incremental)
+int tquic_stream_set_extensible_priority(struct tquic_stream *stream,
+					 u8 urgency, bool incremental)
 {
 	struct tquic_priority_sched_state *state;
 	struct tquic_priority_stream_ext *ext;
@@ -373,7 +413,7 @@ int tquic_stream_set_priority(struct tquic_stream *stream, u8 urgency,
 
 	return 0;
 }
-EXPORT_SYMBOL_GPL(tquic_stream_set_priority);
+EXPORT_SYMBOL_GPL(tquic_stream_set_extensible_priority);
 
 /**
  * tquic_stream_get_priority - Get stream priority
@@ -436,10 +476,8 @@ int tquic_stream_priority_update(struct tquic_connection *conn, u64 stream_id,
 	if (!stream)
 		return -ENOENT;
 
-	err = tquic_stream_set_priority(stream, urgency, incremental);
-
-	/* Release lookup reference - the tquic version doesn't use refcount_dec */
-	/* Note: tquic_stream_lookup() semantics may differ - adjust as needed */
+	err = tquic_stream_set_extensible_priority(stream, urgency,
+						   incremental);
 
 	return err;
 }
@@ -551,7 +589,8 @@ int tquic_frame_process_priority_update(struct tquic_connection *conn,
 		return -EINVAL;
 
 	/* Parse Stream ID */
-	varint_len = tquic_varint_decode(data + offset, len - offset, &stream_id);
+	varint_len =
+		tquic_varint_decode(data + offset, len - offset, &stream_id);
 	if (varint_len < 0)
 		return varint_len;
 	offset += varint_len;
@@ -582,7 +621,7 @@ int tquic_frame_process_priority_update(struct tquic_connection *conn,
 	/* Apply the priority update */
 	tquic_stream_priority_update(conn, stream_id, urgency, incremental);
 
-	return len;  /* Consumed entire frame */
+	return len; /* Consumed entire frame */
 }
 EXPORT_SYMBOL_GPL(tquic_frame_process_priority_update);
 
@@ -636,7 +675,8 @@ void tquic_sched_release(struct tquic_connection *conn)
 
 	/* Remove all streams from scheduler queues */
 	for (i = 0; i < TQUIC_PRIORITY_LEVELS; i++) {
-		list_for_each_entry_safe(ext, tmp, &state->queues[i], sched_node) {
+		list_for_each_entry_safe(ext, tmp, &state->queues[i],
+					 sched_node) {
 			list_del_init(&ext->sched_node);
 			ext->scheduled = 0;
 			if (refcount_dec_and_test(&ext->refcnt))

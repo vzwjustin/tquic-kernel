@@ -369,11 +369,9 @@ int tquic_on_packet_sent(struct tquic_loss_state *loss, int pn_space,
 
 /**
  * tquic_set_loss_detection_timer - Set or update the loss detection timer
- * @loss: Loss state
  * @conn: Connection
  */
-void tquic_set_loss_detection_timer(struct tquic_loss_state *loss,
-				    struct tquic_connection *conn);
+void tquic_set_loss_detection_timer(struct tquic_connection *conn);
 
 /*
  * ECN Processing

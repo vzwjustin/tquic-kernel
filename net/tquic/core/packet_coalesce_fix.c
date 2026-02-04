@@ -22,6 +22,78 @@
 #include <net/tquic.h>
 #include "varint.h"
 
+/* TQUIC packet header forms */
+#define TQUIC_HEADER_FORM_LONG 0x80
+#define TQUIC_FIXED_BIT 0x40
+
+/* Long header packet types */
+#define TQUIC_LONG_TYPE_INITIAL 0x00
+#define TQUIC_LONG_TYPE_0RTT 0x01
+#define TQUIC_LONG_TYPE_HANDSHAKE 0x02
+#define TQUIC_LONG_TYPE_RETRY 0x03
+
+/* Crypto levels */
+#define TQUIC_CRYPTO_INITIAL 0
+#define TQUIC_CRYPTO_HANDSHAKE 1
+#define TQUIC_CRYPTO_APPLICATION 2
+#define TQUIC_CRYPTO_EARLY_DATA 3
+
+/* TQUIC packet control block for skb->cb */
+struct tquic_skb_cb {
+	u64 pn;
+	u32 header_len;
+	u8 pn_len;
+	u8 packet_type;
+	u8 dcid_len;
+	u8 scid_len;
+};
+
+#define TQUIC_SKB_CB(skb) ((struct tquic_skb_cb *)((skb)->cb))
+
+/* Forward declarations for functions defined elsewhere */
+static void tquic_packet_process_retry(struct tquic_connection *conn,
+				       struct sk_buff *skb);
+int tquic_crypto_unprotect_header(void *ctx, struct sk_buff *skb, u8 *pn_offset,
+				  u8 *pn_len);
+int tquic_crypto_decrypt(void *ctx, struct sk_buff *skb, u64 pn);
+void tquic_ack_on_packet_received(struct tquic_connection *conn, u64 pn,
+				  u8 level);
+int tquic_frame_process_all(struct tquic_connection *conn, struct sk_buff *skb,
+			    u8 level);
+
+/* Extract truncated packet number */
+static u64 tquic_extract_pn(const u8 *data, u8 pn_len)
+{
+	u64 pn = 0;
+	int i;
+
+	for (i = 0; i < pn_len; i++)
+		pn = (pn << 8) | data[i];
+
+	return pn;
+}
+
+/* Decode packet number from truncated form */
+static u64 tquic_decode_pn(u64 largest_pn, u64 truncated_pn, u8 pn_len)
+{
+	u64 expected_pn = largest_pn + 1;
+	u64 pn_win = 1ULL << (pn_len * 8);
+	u64 pn_hwin = pn_win / 2;
+	u64 pn_mask = pn_win - 1;
+	u64 candidate_pn;
+
+	candidate_pn = (expected_pn & ~pn_mask) | truncated_pn;
+
+	if (candidate_pn <= expected_pn - pn_hwin &&
+	    candidate_pn < (1ULL << 62) - pn_win)
+		return candidate_pn + pn_win;
+
+	if (candidate_pn > expected_pn + pn_hwin && candidate_pn >= pn_win)
+		return candidate_pn - pn_win;
+
+	return candidate_pn;
+}
+
 /*
  * tquic_packet_get_length - Get the total length of a TQUIC packet in a buffer
  * @data: Pointer to the start of the TQUIC packet
@@ -129,8 +201,8 @@ static int tquic_packet_get_length(const u8 *data, int len, int *packet_len)
 	if (len < offset + 1)
 		return -EINVAL;
 
-	varint_len = tquic_varint_decode(data + offset, len - offset,
-					 &payload_len);
+	varint_len =
+		tquic_varint_decode(data + offset, len - offset, &payload_len);
 	if (varint_len < 0)
 		return varint_len;
 	offset += varint_len;
@@ -164,7 +236,6 @@ static int tquic_packet_get_length(const u8 *data, int len, int *packet_len)
 void tquic_packet_process_coalesced(struct tquic_connection *conn,
 				    struct sk_buff *skb)
 {
-	struct tquic_crypto_ctx *ctx;
 	u8 first_byte;
 	u8 pn_offset, pn_len;
 	u64 truncated_pn, pn;
@@ -219,7 +290,8 @@ void tquic_packet_process_coalesced(struct tquic_connection *conn,
 			next_skb = alloc_skb(remaining + 64, GFP_ATOMIC);
 			if (next_skb) {
 				skb_reserve(next_skb, 64);
-				skb_put_data(next_skb, skb->data + packet_len, remaining);
+				skb_put_data(next_skb, skb->data + packet_len,
+					     remaining);
 			}
 			/* If allocation fails, we just lose the coalesced packet(s) */
 		}
@@ -253,15 +325,9 @@ void tquic_packet_process_coalesced(struct tquic_connection *conn,
 		level = TQUIC_CRYPTO_APPLICATION;
 	}
 
-	ctx = &conn->crypto[level];
-	if (!ctx->keys_available) {
-		/* Buffer packet for later processing */
-		skb_queue_tail(&conn->pending_frames, skb);
-		goto process_next;
-	}
-
-	/* Remove header protection */
-	err = tquic_crypto_unprotect_header(ctx, skb, &pn_offset, &pn_len);
+	/* Remove header protection using connection's crypto state */
+	err = tquic_crypto_unprotect_header(conn->crypto_state, skb, &pn_offset,
+					    &pn_len);
 	if (err) {
 		kfree_skb(skb);
 		goto process_next;
@@ -269,23 +335,23 @@ void tquic_packet_process_coalesced(struct tquic_connection *conn,
 
 	/* Decode packet number */
 	truncated_pn = tquic_extract_pn(skb->data + pn_offset, pn_len);
-	pn = tquic_decode_pn(conn->pn_spaces[level].largest_recv_pn,
-			     truncated_pn, pn_len);
+	pn = tquic_decode_pn(atomic64_read(&conn->pkt_num_rx), truncated_pn,
+			     pn_len);
 
 	TQUIC_SKB_CB(skb)->pn = pn;
 	TQUIC_SKB_CB(skb)->pn_len = pn_len;
 	TQUIC_SKB_CB(skb)->header_len = pn_offset + pn_len;
 
 	/* Decrypt packet */
-	err = tquic_crypto_decrypt(ctx, skb, pn);
+	err = tquic_crypto_decrypt(conn->crypto_state, skb, pn);
 	if (err) {
 		kfree_skb(skb);
 		goto process_next;
 	}
 
 	/* Update largest received packet number */
-	if (pn > conn->pn_spaces[level].largest_recv_pn)
-		conn->pn_spaces[level].largest_recv_pn = pn;
+	if (pn > atomic64_read(&conn->pkt_num_rx))
+		atomic64_set(&conn->pkt_num_rx, pn);
 
 	/* Record ACK for this packet */
 	tquic_ack_on_packet_received(conn, pn, level);
@@ -294,8 +360,8 @@ void tquic_packet_process_coalesced(struct tquic_connection *conn,
 	tquic_frame_process_all(conn, skb, level);
 
 	/* Update statistics */
-	atomic64_inc(&conn->stats.packets_received);
-	atomic64_add(skb->len, &conn->stats.bytes_received);
+	conn->stats.rx_packets++;
+	conn->stats.rx_bytes += skb->len;
 
 	kfree_skb(skb);
 
@@ -303,6 +369,21 @@ process_next:
 	/* Process any remaining coalesced packets */
 	if (next_skb)
 		tquic_packet_process_coalesced(conn, next_skb);
+}
+
+/* Retry packet processing stub */
+static void tquic_packet_process_retry(struct tquic_connection *conn,
+				       struct sk_buff *skb)
+{
+	/* Retry packets are only valid during connection setup */
+	if (conn->state != TQUIC_CONN_CONNECTING) {
+		kfree_skb(skb);
+		return;
+	}
+
+	/* TODO: Validate retry token and integrity tag */
+	/* TODO: Re-derive initial secrets with new DCID */
+	kfree_skb(skb);
 }
 
 /* Legacy alias */

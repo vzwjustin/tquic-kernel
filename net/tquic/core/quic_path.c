@@ -11,24 +11,29 @@
 #include <linux/random.h>
 #include <linux/in.h>
 #include <linux/in6.h>
+#include <crypto/algapi.h>
 #include <net/tquic.h>
 #include <net/tquic_frame.h>
-#include "../diag/trace.h"
+#include "../diag/tracepoints.h"
+#include "../protocol.h"
+
+/* Forward declarations for trace functions (defined in diag/tracepoints.c) */
+void tquic_trace_path_validated(struct tquic_connection *conn, u32 path_id,
+				u64 validation_time_us);
 
 /* Path management constants per RFC 9000 */
-#define TQUIC_PATH_CHALLENGE_SIZE	8
-#define TQUIC_PATH_MAX_PROBES		3
-#define TQUIC_PATH_PROBE_TIMEOUT_MS	1000
-#define TQUIC_PATH_VALIDATION_TIMEOUT_MS	30000
-#define TQUIC_PATH_MTU_MIN		1200
-#define TQUIC_PATH_MTU_MAX		65535
-#define TQUIC_PATH_MTU_INITIAL		1280
-#define TQUIC_PATH_MTU_PROBE_SIZE	16
+#define TQUIC_PATH_CHALLENGE_SIZE 8
+#define TQUIC_PATH_MAX_PROBES 3
+#define TQUIC_PATH_PROBE_TIMEOUT_MS 1000
+#define TQUIC_PATH_VALIDATION_TIMEOUT_MS 30000
+#define TQUIC_PATH_MTU_MIN 1200
+#define TQUIC_PATH_MTU_MAX 65535
+#define TQUIC_PATH_MTU_INITIAL 1280
+#define TQUIC_PATH_MTU_PROBE_SIZE 16
 
 /* MTU discovery probe sizes per RFC 8899 */
-static const u32 tquic_mtu_probes[] = {
-	1280, 1400, 1450, 1480, 1492, 1500, 2048, 4096, 8192, 9000
-};
+static const u32 tquic_mtu_probes[] = { 1280, 1400, 1450, 1480, 1492,
+					1500, 2048, 4096, 8192, 9000 };
 
 static struct kmem_cache *tquic_path_cache __read_mostly;
 
@@ -38,8 +43,8 @@ static struct kmem_cache *tquic_path_cache __read_mostly;
 int __init tquic_path_init(void)
 {
 	tquic_path_cache = kmem_cache_create("tquic_path",
-					    sizeof(struct tquic_path), 0,
-					    SLAB_HWCACHE_ALIGN, NULL);
+					     sizeof(struct tquic_path), 0,
+					     SLAB_HWCACHE_ALIGN, NULL);
 	if (!tquic_path_cache)
 		return -ENOMEM;
 
@@ -58,9 +63,11 @@ void tquic_path_exit(void)
 static void tquic_path_rtt_init(struct tquic_path *path, u32 initial_rtt_ms)
 {
 	/* Initialize the scheduler-accessible CC info */
-	path->cc.smoothed_rtt_us = initial_rtt_ms * 1000;  /* Convert to microseconds */
+	path->cc.smoothed_rtt_us =
+		initial_rtt_ms * 1000; /* Convert to microseconds */
 	path->cc.min_rtt_us = U64_MAX;
-	path->cc.rtt_var_us = initial_rtt_ms * 500;  /* Initial variance is half of RTT */
+	path->cc.rtt_var_us =
+		initial_rtt_ms * 500; /* Initial variance is half of RTT */
 }
 
 /*
@@ -82,7 +89,7 @@ static void tquic_path_cc_init(struct tquic_path *path, u32 mtu)
  * Copy address to path structure with proper validation
  */
 static int tquic_path_copy_addr(struct sockaddr_storage *dest,
-			       const struct sockaddr *src)
+				const struct sockaddr *src)
 {
 	if (!src)
 		return 0;
@@ -103,7 +110,7 @@ static int tquic_path_copy_addr(struct sockaddr_storage *dest,
  * Compare two socket addresses for equality
  */
 static bool tquic_path_addr_equal(const struct sockaddr_storage *a,
-				 const struct sockaddr_storage *b)
+				  const struct sockaddr_storage *b)
 {
 	if (a->ss_family != b->ss_family)
 		return false;
@@ -136,9 +143,9 @@ static bool tquic_path_addr_equal(const struct sockaddr_storage *a,
  *
  * Note: The exported tquic_path_create is in tquic_migration.c
  */
-static struct tquic_path *tquic_path_create_internal(struct tquic_connection *conn,
-						     struct sockaddr *local,
-						     struct sockaddr *remote)
+static struct tquic_path *
+tquic_path_create_internal(struct tquic_connection *conn,
+			   struct sockaddr *local, struct sockaddr *remote)
 {
 	struct tquic_path *path;
 	u32 initial_rtt_ms;
@@ -195,7 +202,7 @@ static struct tquic_path *tquic_path_create_internal(struct tquic_connection *co
 		struct net *net = sock_net(conn->sk);
 		initial_rtt_ms = tquic_net_get_initial_rtt(net);
 	} else {
-		initial_rtt_ms = TQUIC_DEFAULT_RTT;  /* default: 100ms */
+		initial_rtt_ms = TQUIC_DEFAULT_RTT; /* default: 100ms */
 	}
 
 	/* Initialize RTT measurements */
@@ -213,7 +220,7 @@ static struct tquic_path *tquic_path_create_internal(struct tquic_connection *co
 
 	/* Initialize priority and weight */
 	path->priority = 0;
-	path->weight = 100;  /* Default weight */
+	path->weight = 100; /* Default weight */
 
 	/* Add to connection's path list if connection provided */
 	if (conn) {
@@ -306,7 +313,8 @@ int tquic_path_challenge(struct tquic_path *path)
 
 	p = skb_put(skb, 9);
 	p[0] = TQUIC_FRAME_PATH_CHALLENGE;
-	memcpy(p + 1, path->validation.challenge_data, TQUIC_PATH_CHALLENGE_SIZE);
+	memcpy(p + 1, path->validation.challenge_data,
+	       TQUIC_PATH_CHALLENGE_SIZE);
 
 	/* Mark challenge as pending */
 	path->validation.challenge_pending = true;
@@ -346,7 +354,8 @@ int tquic_path_validate_start(struct tquic_path *path)
 
 	/* If validation already in progress, check for timeout */
 	if (path->validation.challenge_pending) {
-		elapsed = ktime_sub(ktime_get(), path->validation.challenge_sent);
+		elapsed =
+			ktime_sub(ktime_get(), path->validation.challenge_sent);
 
 		/* Check for validation timeout */
 		if (ktime_to_ms(elapsed) > TQUIC_PATH_VALIDATION_TIMEOUT_MS) {
@@ -383,7 +392,8 @@ void tquic_path_on_validated(struct tquic_path *path)
 	conn = path->conn;
 
 	/* Calculate validation time */
-	validation_time = ktime_sub(ktime_get(), path->validation.challenge_sent);
+	validation_time =
+		ktime_sub(ktime_get(), path->validation.challenge_sent);
 
 	/* Mark path as validated */
 	path->state = TQUIC_PATH_VALIDATED;
@@ -394,7 +404,8 @@ void tquic_path_on_validated(struct tquic_path *path)
 		return;
 
 	/* Trace path validation */
-	tquic_trace_path_validated(conn, path->path_id, ktime_to_us(validation_time));
+	tquic_trace_path_validated(conn, path->path_id,
+				   ktime_to_us(validation_time));
 
 	/* Cancel path validation timer */
 	tquic_timer_path_validated(conn, path);
@@ -452,7 +463,7 @@ int tquic_path_migrate(struct tquic_connection *conn, struct tquic_path *path)
 	/* Get current active path */
 	old_path = conn->active_path;
 	if (old_path == path)
-		return 0;  /* Already on this path */
+		return 0; /* Already on this path */
 
 	/* Perform migration */
 	path->state = TQUIC_PATH_ACTIVE;
@@ -467,7 +478,7 @@ int tquic_path_migrate(struct tquic_connection *conn, struct tquic_path *path)
 	 * migrating to a completely new path
 	 */
 	if (old_path && !tquic_path_addr_equal(&old_path->remote_addr,
-					      &path->remote_addr)) {
+					       &path->remote_addr)) {
 		/* New network path - reset congestion control */
 		tquic_path_cc_init(path, path->mtu);
 
@@ -479,8 +490,7 @@ int tquic_path_migrate(struct tquic_connection *conn, struct tquic_path *path)
 
 	/* Use a new connection ID for migration per RFC 9000 Section 9.5 */
 	if (conn->cid_pool) {
-		struct tquic_cid_manager *mgr = conn->cid_pool;
-		tquic_cid_rotate_now(mgr);
+		tquic_cid_rotate(conn);
 	}
 
 	/* Notify via netlink of connection migration */
@@ -551,7 +561,7 @@ int tquic_path_mtu_probe(struct tquic_path *path)
 	/* Determine probe size */
 	probe_size = tquic_path_next_mtu_probe(path->mtu);
 	if (probe_size <= path->mtu)
-		return 0;  /* Already at maximum MTU */
+		return 0; /* Already at maximum MTU */
 
 	/* Build a PING frame padded to probe size */
 	skb = alloc_skb(probe_size + 64, GFP_ATOMIC);
@@ -563,10 +573,10 @@ int tquic_path_mtu_probe(struct tquic_path *path)
 	*p = TQUIC_FRAME_PING;
 
 	/* PADDING to reach probe size (accounting for headers and AEAD tag) */
-	padding = probe_size - skb->len - 100;  /* Rough header estimate */
+	padding = probe_size - skb->len - 100; /* Rough header estimate */
 	if (padding > 0) {
 		p = skb_put(skb, padding);
-		memset(p, 0, padding);  /* PADDING frames */
+		memset(p, 0, padding); /* PADDING frames */
 	}
 
 	/* Queue the probe packet */
@@ -631,7 +641,7 @@ void tquic_path_mtu_probe_lost(struct tquic_path *path, u32 probe_size)
  * the time between sending an ack-eliciting packet and receiving an ACK
  */
 void tquic_path_rtt_update(struct tquic_path *path, u32 latest_rtt_us,
-			  u32 ack_delay_us)
+			   u32 ack_delay_us)
 {
 	u64 adjusted_rtt;
 	u64 rttvar_sample;
@@ -663,7 +673,8 @@ void tquic_path_rtt_update(struct tquic_path *path, u32 latest_rtt_us,
 		rttvar_sample = path->cc.smoothed_rtt_us - adjusted_rtt;
 
 	path->cc.rtt_var_us = (3 * path->cc.rtt_var_us + rttvar_sample) / 4;
-	path->cc.smoothed_rtt_us = (7 * path->cc.smoothed_rtt_us + adjusted_rtt) / 8;
+	path->cc.smoothed_rtt_us =
+		(7 * path->cc.smoothed_rtt_us + adjusted_rtt) / 8;
 
 	/* Update stats */
 	path->stats.rtt_smoothed = (u32)path->cc.smoothed_rtt_us;
@@ -681,7 +692,7 @@ u32 tquic_path_pto(struct tquic_path *path)
 	u32 pto;
 
 	if (!path)
-		return 1000000;  /* Default 1 second */
+		return 1000000; /* Default 1 second */
 
 	/* PTO = smoothed_rtt + max(4 * rttvar, kGranularity) + max_ack_delay */
 	pto = (u32)path->cc.smoothed_rtt_us +
@@ -744,7 +755,7 @@ bool tquic_path_can_send(struct tquic_path *path, u32 bytes)
  * Find a path by remote address
  */
 struct tquic_path *tquic_path_find(struct tquic_connection *conn,
-				 struct sockaddr *remote)
+				   struct sockaddr *remote)
 {
 	struct tquic_path *path;
 	struct sockaddr_storage remote_storage;
@@ -757,7 +768,8 @@ struct tquic_path *tquic_path_find(struct tquic_connection *conn,
 
 	spin_lock(&conn->paths_lock);
 	list_for_each_entry(path, &conn->paths, list) {
-		if (tquic_path_addr_equal(&path->remote_addr, &remote_storage)) {
+		if (tquic_path_addr_equal(&path->remote_addr,
+					  &remote_storage)) {
 			spin_unlock(&conn->paths_lock);
 			return path;
 		}
@@ -779,9 +791,10 @@ int tquic_path_get_info(struct tquic_path *path, struct tquic_path_info *info)
 
 	info->path_id = path->path_id;
 	memcpy(&info->local_addr, &path->local_addr, sizeof(info->local_addr));
-	memcpy(&info->remote_addr, &path->remote_addr, sizeof(info->remote_addr));
+	memcpy(&info->remote_addr, &path->remote_addr,
+	       sizeof(info->remote_addr));
 	info->mtu = path->mtu;
-	info->rtt = (u32)(path->cc.smoothed_rtt_us / 1000);  /* Convert to ms */
+	info->rtt = (u32)(path->cc.smoothed_rtt_us / 1000); /* Convert to ms */
 	info->rtt_var = (u32)(path->cc.rtt_var_us / 1000);
 	info->cwnd = path->cc.cwnd;
 	info->bandwidth = path->stats.bandwidth;
@@ -885,3 +898,31 @@ EXPORT_SYMBOL_GPL(tquic_path_find);
 EXPORT_SYMBOL_GPL(tquic_path_get_info);
 EXPORT_SYMBOL_GPL(tquic_path_on_probe_timeout);
 EXPORT_SYMBOL_GPL(tquic_path_needs_probe);
+
+/*
+ * Set path state
+ */
+void tquic_path_set_state(struct tquic_connection *conn, u8 path_id,
+			  enum tquic_path_state state)
+{
+	struct tquic_path *path = NULL;
+	struct tquic_path *p;
+
+	spin_lock(&conn->lock);
+	spin_lock(&conn->paths_lock);
+	list_for_each_entry(p, &conn->paths, list) {
+		if (p->path_id == path_id) {
+			path = p;
+			break;
+		}
+	}
+	spin_unlock(&conn->paths_lock);
+
+	if (path) {
+		WRITE_ONCE(path->state, state);
+		if (state == TQUIC_PATH_ACTIVE && !conn->active_path)
+			conn->active_path = path;
+	}
+	spin_unlock(&conn->lock);
+}
+EXPORT_SYMBOL_GPL(tquic_path_set_state);

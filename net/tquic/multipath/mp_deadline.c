@@ -21,8 +21,12 @@
 #include <linux/slab.h>
 #include <linux/list.h>
 #include <linux/rculist.h>
+#include <linux/rcupdate.h>
 #include <linux/math64.h>
 #include <linux/jhash.h>
+#include <linux/ktime.h>
+#include <linux/workqueue.h>
+#include <linux/limits.h>
 #include <net/tquic.h>
 
 #include "mp_frame.h"
@@ -858,5 +862,7 @@ void __exit tquic_mp_deadline_exit(void)
 	pr_info("tquic: Multipath deadline coordination cleaned up\n");
 }
 
+#ifndef TQUIC_OUT_OF_TREE
 MODULE_DESCRIPTION("TQUIC Multipath Deadline Coordination");
 MODULE_LICENSE("GPL");
+#endif

@@ -22,6 +22,7 @@
 
 #include <uapi/linux/quic.h>
 
+#ifndef TQUIC_OUT_OF_TREE
 /*
  * Define the path where trace headers are located.
  * This is needed for TRACE_INCLUDE_PATH to resolve correctly.
@@ -36,6 +37,13 @@
 #define TRACE_INCLUDE_FILE quic
 
 #include <trace/events/quic.h>
+#else
+/* Stub tracepoints for out-of-tree builds without kernel trace events. */
+#define trace_quic_conn_create(...)			do { } while (0)
+#define trace_quic_conn_destroy(...)			do { } while (0)
+#define trace_quic_conn_state_change(...)		do { } while (0)
+#define trace_quic_handshake_complete(...)		do { } while (0)
+#endif /* TQUIC_OUT_OF_TREE */
 
 /*
  * Helper function to extract connection ID as u64 for tracing.

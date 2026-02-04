@@ -144,8 +144,10 @@ static void tquic_pm_kernel_mark_unavailable(struct tquic_connection *conn,
 			/* Stop validation timer */
 			del_timer(&path->validation.timer);
 
-			/* Emit event */
-			tquic_nl_path_event(conn, path, TQUIC_PM_EVENT_DEGRADED);
+			/* Emit event via PM netlink */
+			if (conn->sk)
+				tquic_pm_nl_send_event(sock_net(conn->sk), conn,
+						       path, TQUIC_PM_EVENT_DEGRADED);
 
 			pr_debug("tquic: path %u marked unavailable (interface %s down)\n",
 				 path->path_id, dev->name);

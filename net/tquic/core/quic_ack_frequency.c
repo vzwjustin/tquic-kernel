@@ -18,6 +18,8 @@
 #include <linux/ktime.h>
 #include <net/tquic.h>
 
+#include "quic_ack_frequency.h"
+
 /*
  * ACK_FREQUENCY frame type (draft-ietf-quic-ack-frequency)
  * Frame type 0xaf
@@ -44,38 +46,11 @@
  */
 
 /*
- * ACK_FREQUENCY state structure
- *
- * This tracks both the parameters we've received from peer
+ * Note: struct tquic_ack_frequency_state is defined in quic_ack_frequency.h
+ * The struct tracks both the parameters we've received from peer
  * (controlling how we send ACKs) and the parameters we've sent to peer
  * (controlling how they send ACKs to us).
  */
-struct tquic_ack_frequency_state {
-	/* Parameters received from peer (controlling our ACK behavior) */
-	u64	rx_sequence;		/* Highest sequence number received */
-	u64	rx_ack_eliciting_threshold; /* Packets before ACK required */
-	u64	rx_max_ack_delay_us;	/* Max delay in microseconds */
-	u64	rx_reordering_threshold; /* Reordering threshold */
-
-	/* Parameters we've sent to peer (controlling their ACK behavior) */
-	u64	tx_sequence;		/* Next sequence number to send */
-	u64	tx_ack_eliciting_threshold; /* Requested threshold */
-	u64	tx_max_ack_delay_us;	/* Requested max delay */
-	u64	tx_reordering_threshold; /* Requested reordering threshold */
-
-	/* State tracking */
-	u8	enabled:1;		/* Extension negotiated */
-	u8	immediate_ack_pending:1; /* IMMEDIATE_ACK received */
-	u8	update_pending:1;	/* Need to send ACK_FREQUENCY */
-};
-
-/* Default values per draft-ietf-quic-ack-frequency */
-#define TQUIC_ACK_FREQ_DEFAULT_THRESHOLD	1
-#define TQUIC_ACK_FREQ_DEFAULT_REORDER_THRESHOLD	1
-#define TQUIC_ACK_FREQ_DEFAULT_MAX_DELAY_US	25000
-
-/* Frame type constants */
-#define TQUIC_FRAME_IMMEDIATE_ACK	0x1fULL
 
 /*
  * tquic_ack_frequency_init - Initialize ACK_FREQUENCY state for a connection

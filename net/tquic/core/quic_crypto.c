@@ -113,18 +113,6 @@ static const char * const tquic_tls_state_names[] = {
 };
 
 /*
- * Per-connection TLS context storage
- *
- * Since tquic_connection uses opaque void* pointers for crypto state,
- * we define a wrapper structure that contains both the TLS state machine
- * context and the crypto contexts for each encryption level.
- */
-struct tquic_crypto_wrapper {
-	struct tquic_tls_ctx tls;
-	struct tquic_crypto_ctx crypto[TQUIC_CRYPTO_MAX];
-};
-
-/*
  * tquic_crypto_wrapper_get - Get crypto wrapper for connection
  * @conn: TQUIC connection
  *
@@ -134,6 +122,38 @@ struct tquic_crypto_wrapper {
 static struct tquic_crypto_wrapper *tquic_crypto_wrapper_get(struct tquic_connection *conn)
 {
 	return (struct tquic_crypto_wrapper *)conn->crypto_state;
+}
+
+/*
+ * tquic_hp_encrypt_block - Single-block ECB encryption for header protection
+ * @tfm: Sync skcipher transform
+ * @dst: Output buffer (at least 16 bytes)
+ * @src: Input buffer (16 bytes)
+ *
+ * Performs a single AES-ECB block encryption for QUIC header protection.
+ * Returns 0 on success, negative error code on failure.
+ */
+static int tquic_hp_encrypt_block(struct crypto_sync_skcipher *tfm,
+				  u8 *dst, const u8 *src)
+{
+	SYNC_SKCIPHER_REQUEST_ON_STACK(req, tfm);
+	struct scatterlist sg_src, sg_dst;
+	u8 src_buf[16], dst_buf[16];
+	int err;
+
+	memcpy(src_buf, src, 16);
+	sg_init_one(&sg_src, src_buf, 16);
+	sg_init_one(&sg_dst, dst_buf, 16);
+
+	skcipher_request_set_sync_tfm(req, tfm);
+	skcipher_request_set_crypt(req, &sg_src, &sg_dst, 16, NULL);
+
+	err = crypto_skcipher_encrypt(req);
+	if (!err)
+		memcpy(dst, dst_buf, 16);
+
+	skcipher_request_zero(req);
+	return err;
 }
 
 /*
@@ -730,7 +750,7 @@ static int hkdf_extract(struct hkdf_ctx *ctx, const u8 *salt, size_t salt_len,
 	return crypto_shash_digest(desc, ikm, ikm_len, prk);
 }
 
-static int hkdf_expand_label(struct hkdf_ctx *ctx, const u8 *prk,
+int hkdf_expand_label(struct hkdf_ctx *ctx, const u8 *prk,
 			     const char *label, size_t label_len,
 			     const u8 *context, size_t context_len,
 			     u8 *out, size_t out_len)
@@ -796,7 +816,7 @@ static int hkdf_expand_label(struct hkdf_ctx *ctx, const u8 *prk,
 	return 0;
 }
 
-int tquic_crypto_init(struct tquic_crypto_ctx *ctx, u16 cipher_type)
+int tquic_crypto_ctx_init(struct tquic_crypto_ctx *ctx, u16 cipher_type)
 {
 	const char *aead_name;
 	const char *cipher_name;
@@ -847,7 +867,7 @@ int tquic_crypto_init(struct tquic_crypto_ctx *ctx, u16 cipher_type)
 	}
 
 	/* Allocate TX header protection cipher */
-	ctx->tx_hp = crypto_alloc_cipher(cipher_name, 0, 0);
+	ctx->tx_hp = crypto_alloc_sync_skcipher(cipher_name, 0, 0);
 	if (IS_ERR(ctx->tx_hp)) {
 		int err = PTR_ERR(ctx->tx_hp);
 		crypto_free_aead(ctx->rx_aead);
@@ -859,10 +879,10 @@ int tquic_crypto_init(struct tquic_crypto_ctx *ctx, u16 cipher_type)
 	}
 
 	/* Allocate RX header protection cipher */
-	ctx->rx_hp = crypto_alloc_cipher(cipher_name, 0, 0);
+	ctx->rx_hp = crypto_alloc_sync_skcipher(cipher_name, 0, 0);
 	if (IS_ERR(ctx->rx_hp)) {
 		int err = PTR_ERR(ctx->rx_hp);
-		crypto_free_cipher(ctx->tx_hp);
+		crypto_free_sync_skcipher(ctx->tx_hp);
 		crypto_free_aead(ctx->rx_aead);
 		crypto_free_aead(ctx->tx_aead);
 		ctx->tx_aead = NULL;
@@ -876,8 +896,8 @@ int tquic_crypto_init(struct tquic_crypto_ctx *ctx, u16 cipher_type)
 	ctx->hash = crypto_alloc_shash(hash_name, 0, 0);
 	if (IS_ERR(ctx->hash)) {
 		int err = PTR_ERR(ctx->hash);
-		crypto_free_cipher(ctx->rx_hp);
-		crypto_free_cipher(ctx->tx_hp);
+		crypto_free_sync_skcipher(ctx->rx_hp);
+		crypto_free_sync_skcipher(ctx->tx_hp);
 		crypto_free_aead(ctx->rx_aead);
 		crypto_free_aead(ctx->tx_aead);
 		ctx->tx_aead = NULL;
@@ -898,14 +918,14 @@ int tquic_crypto_init(struct tquic_crypto_ctx *ctx, u16 cipher_type)
 	return 0;
 }
 
-void tquic_crypto_destroy(struct tquic_crypto_ctx *ctx)
+void tquic_crypto_ctx_destroy(struct tquic_crypto_ctx *ctx)
 {
 	if (ctx->hash)
 		crypto_free_shash(ctx->hash);
 	if (ctx->rx_hp)
-		crypto_free_cipher(ctx->rx_hp);
+		crypto_free_sync_skcipher(ctx->rx_hp);
 	if (ctx->tx_hp)
-		crypto_free_cipher(ctx->tx_hp);
+		crypto_free_sync_skcipher(ctx->tx_hp);
 	if (ctx->rx_aead)
 		crypto_free_aead(ctx->rx_aead);
 	if (ctx->tx_aead)
@@ -914,8 +934,8 @@ void tquic_crypto_destroy(struct tquic_crypto_ctx *ctx)
 	memset(ctx, 0, sizeof(*ctx));
 }
 
-int tquic_crypto_derive_initial_secrets(struct tquic_connection *conn,
-				       struct tquic_cid *cid)
+int tquic_crypto_derive_init_secrets(struct tquic_connection *conn,
+				     struct tquic_cid *cid)
 {
 	struct tquic_crypto_wrapper *wrapper = tquic_crypto_wrapper_get(conn);
 	struct tquic_crypto_ctx *ctx;
@@ -932,7 +952,7 @@ int tquic_crypto_derive_initial_secrets(struct tquic_connection *conn,
 	int err;
 
 	/* Initialize with AES-128-GCM-SHA256 for initial packets */
-	err = tquic_crypto_init(ctx, TQUIC_CIPHER_AES_128_GCM_SHA256);
+	err = tquic_crypto_ctx_init(ctx, TQUIC_CIPHER_AES_128_GCM_SHA256);
 	if (err)
 		return err;
 
@@ -1027,11 +1047,11 @@ int tquic_crypto_derive_initial_secrets(struct tquic_connection *conn,
 	if (err)
 		goto out;
 
-	err = crypto_cipher_setkey(ctx->tx_hp, ctx->tx.hp_key, ctx->tx.hp_key_len);
+	err = crypto_sync_skcipher_setkey(ctx->tx_hp, ctx->tx.hp_key, ctx->tx.hp_key_len);
 	if (err)
 		goto out;
 
-	err = crypto_cipher_setkey(ctx->rx_hp, ctx->rx.hp_key, ctx->rx.hp_key_len);
+	err = crypto_sync_skcipher_setkey(ctx->rx_hp, ctx->rx.hp_key, ctx->rx.hp_key_len);
 	if (err)
 		goto out;
 
@@ -1206,12 +1226,12 @@ int tquic_crypto_hp_mask(struct tquic_crypto_ctx *ctx, const u8 *sample,
 	/* For AES, we encrypt a block of zeros with the sample as part of the input */
 	if (ctx->cipher_type == TQUIC_CIPHER_AES_128_GCM_SHA256 ||
 	    ctx->cipher_type == TQUIC_CIPHER_AES_256_GCM_SHA384) {
-		crypto_cipher_encrypt_one(ctx->rx_hp, mask, sample);
+		err = tquic_hp_encrypt_block(ctx->rx_hp, mask, sample);
 	} else {
 		/* ChaCha20: counter=sample[0..3], nonce=sample[4..15] */
 		/* Encrypt zeros to get mask - simplified */
 		memset(mask, 0, 5);
-		crypto_cipher_encrypt_one(ctx->rx_hp, mask, sample);
+		err = tquic_hp_encrypt_block(ctx->rx_hp, mask, sample);
 	}
 
 	return err;
@@ -1279,6 +1299,7 @@ int tquic_crypto_protect_header(struct tquic_crypto_ctx *ctx, struct sk_buff *sk
 	u8 *sample;
 	u8 *header;
 	int i;
+	int err;
 
 	if (skb->len < pn_offset + 4 + 16)
 		return -EINVAL;
@@ -1289,11 +1310,14 @@ int tquic_crypto_protect_header(struct tquic_crypto_ctx *ctx, struct sk_buff *sk
 	/* Generate mask using TX HP key */
 	if (ctx->cipher_type == TQUIC_CIPHER_AES_128_GCM_SHA256 ||
 	    ctx->cipher_type == TQUIC_CIPHER_AES_256_GCM_SHA384) {
-		crypto_cipher_encrypt_one(ctx->tx_hp, mask, sample);
+		err = tquic_hp_encrypt_block(ctx->tx_hp, mask, sample);
 	} else {
 		memset(mask, 0, 16);
-		crypto_cipher_encrypt_one(ctx->tx_hp, mask, sample);
+		err = tquic_hp_encrypt_block(ctx->tx_hp, mask, sample);
 	}
+
+	if (err)
+		return err;
 
 	header = skb->data;
 
@@ -1322,6 +1346,7 @@ int tquic_crypto_unprotect_header(struct tquic_crypto_ctx *ctx, struct sk_buff *
 	u8 *header;
 	int sample_offset;
 	int i;
+	int err;
 
 	header = skb->data;
 
@@ -1357,11 +1382,14 @@ int tquic_crypto_unprotect_header(struct tquic_crypto_ctx *ctx, struct sk_buff *
 	/* Generate mask using RX HP key */
 	if (ctx->cipher_type == TQUIC_CIPHER_AES_128_GCM_SHA256 ||
 	    ctx->cipher_type == TQUIC_CIPHER_AES_256_GCM_SHA384) {
-		crypto_cipher_encrypt_one(ctx->rx_hp, mask, sample);
+		err = tquic_hp_encrypt_block(ctx->rx_hp, mask, sample);
 	} else {
 		memset(mask, 0, 16);
-		crypto_cipher_encrypt_one(ctx->rx_hp, mask, sample);
+		err = tquic_hp_encrypt_block(ctx->rx_hp, mask, sample);
 	}
+
+	if (err)
+		return err;
 
 	/* Remove mask from first byte */
 	if (header[0] & 0x80) {

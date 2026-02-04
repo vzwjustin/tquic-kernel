@@ -39,8 +39,6 @@
 #include <net/tquic.h>
 
 #include "qlog.h"
-
-#include "qlog.h"
 #include "../protocol.h"
 
 /*

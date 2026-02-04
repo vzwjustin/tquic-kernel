@@ -24,6 +24,7 @@
  * - Coordinates with path management for multipath
  */
 
+#include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/slab.h>
 #include <linux/random.h>
@@ -1526,3 +1527,6 @@ void __exit tquic_cid_table_exit(void)
 		pr_info("tquic: CID hash table destroyed\n");
 	}
 }
+
+MODULE_DESCRIPTION("TQUIC Connection ID Management");
+MODULE_LICENSE("GPL");

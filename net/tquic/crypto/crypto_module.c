@@ -59,8 +59,10 @@ static void __exit tquic_crypto_module_exit(void)
 	pr_info("tquic_crypto: crypto subsystem exited\n");
 }
 
+#ifndef TQUIC_OUT_OF_TREE
 module_init(tquic_crypto_module_init);
 module_exit(tquic_crypto_module_exit);
+#endif /* TQUIC_OUT_OF_TREE */
 
 MODULE_DESCRIPTION("TQUIC Crypto Subsystem");
 MODULE_LICENSE("GPL");

@@ -2186,6 +2186,7 @@ int tquic_add_trusted_ca(const u8 *cert_data, u32 cert_len,
 			 const char *description)
 {
 #ifdef CONFIG_SYSTEM_DATA_VERIFICATION
+	struct key *keyring;
 	key_ref_t key_ref;
 	int ret;
 
@@ -2196,18 +2197,18 @@ int tquic_add_trusted_ca(const u8 *cert_data, u32 cert_len,
 
 	/* Create keyring if it doesn't exist */
 	if (!tquic_trusted_keyring) {
-		key_ref = keyring_alloc(".tquic_trusted",
+		keyring = keyring_alloc(".tquic_trusted",
 					GLOBAL_ROOT_UID, GLOBAL_ROOT_GID,
 					current_cred(),
 					KEY_POS_ALL | KEY_USR_VIEW | KEY_USR_READ |
 					KEY_USR_SEARCH,
 					KEY_ALLOC_NOT_IN_QUOTA,
 					NULL, NULL);
-		if (IS_ERR(key_ref)) {
+		if (IS_ERR(keyring)) {
 			mutex_unlock(&keyring_mutex);
-			return PTR_ERR(key_ref);
+			return PTR_ERR(keyring);
 		}
-		tquic_trusted_keyring = key_ref_to_ptr(key_ref);
+		tquic_trusted_keyring = keyring;
 	}
 
 	/* Add certificate to keyring */
@@ -2236,6 +2237,7 @@ EXPORT_SYMBOL_GPL(tquic_add_trusted_ca);
 int tquic_remove_trusted_ca(const char *description)
 {
 #ifdef CONFIG_SYSTEM_DATA_VERIFICATION
+	key_ref_t key_ref;
 	struct key *key;
 
 	if (!description)
@@ -2248,15 +2250,16 @@ int tquic_remove_trusted_ca(const char *description)
 		return -ENOENT;
 	}
 
-	key = keyring_search(make_key_ref(tquic_trusted_keyring, true),
-			     &key_type_asymmetric, description, true);
-	if (IS_ERR(key)) {
+	key_ref = keyring_search(make_key_ref(tquic_trusted_keyring, true),
+				 &key_type_asymmetric, description, true);
+	if (IS_ERR(key_ref)) {
 		mutex_unlock(&keyring_mutex);
-		return PTR_ERR(key);
+		return PTR_ERR(key_ref);
 	}
 
+	key = key_ref_to_ptr(key_ref);
 	key_unlink(tquic_trusted_keyring, key);
-	key_put(key);
+	key_ref_put(key_ref);
 
 	mutex_unlock(&keyring_mutex);
 
@@ -2295,6 +2298,7 @@ EXPORT_SYMBOL_GPL(tquic_clear_trusted_cas);
  * Sysctl accessor functions
  */
 
+#ifndef TQUIC_OUT_OF_TREE
 int tquic_sysctl_get_cert_verify_mode(void)
 {
 	return tquic_cert_verify_mode;
@@ -2318,6 +2322,7 @@ u32 tquic_sysctl_get_cert_time_tolerance(void)
 	return tquic_cert_time_tolerance;
 }
 EXPORT_SYMBOL_GPL(tquic_sysctl_get_cert_time_tolerance);
+#endif /* TQUIC_OUT_OF_TREE */
 
 /*
  * Procfs interface for trusted CA management

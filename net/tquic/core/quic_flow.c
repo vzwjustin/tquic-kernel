@@ -45,45 +45,18 @@
 #define TQUIC_MAX_STREAMS			((1ULL << 60) - 1)
 
 /*
- * Internal flow control structures for this legacy implementation.
- * Note: The newer tquic flow control uses struct tquic_fc_state from flow_control.h
+ * Flow control uses struct tquic_flow_control from <net/tquic.h>
+ * and transport params use struct tquic_transport_params from <net/tquic.h>
  */
-struct tquic_flow_control {
-	u64 max_data;
-	u64 max_data_next;
-	u64 data_sent;
-	u64 data_received;
-	u64 max_streams_bidi;
-	u64 max_streams_uni;
-	u64 streams_opened_bidi;
-	u64 streams_opened_uni;
-	u8 blocked;
-	u64 blocked_at;
-};
-
-struct tquic_stream_send_buf {
-	spinlock_t lock;
-	u64 offset;
-	u64 max_stream_data;
-};
-
-struct tquic_stream_recv_buf {
-	spinlock_t lock;
-	u64 offset;
-	u64 highest_offset;
-	u64 final_size;
-};
 
 /*
- * Local transport parameters structure for legacy compatibility
+ * Forward declarations for internal (static) functions
+ *
+ * These functions are internal to this file and should not be exported.
+ * They handle low-level frame creation and internal flow control operations.
  */
-struct tquic_transport_params {
-	u64 initial_max_data;
-	u64 initial_max_streams_bidi;
-	u64 initial_max_streams_uni;
-};
 
-/* Forward declarations for internal functions */
+/* Frame creation functions (internal) */
 static struct sk_buff *tquic_flow_create_max_data_frame(struct tquic_connection *conn,
 						       u64 max_data);
 static struct sk_buff *tquic_flow_create_max_stream_data_frame(u64 stream_id,
@@ -95,6 +68,17 @@ static struct sk_buff *tquic_flow_create_stream_data_blocked_frame(u64 stream_id
 								  u64 limit);
 static struct sk_buff *tquic_flow_create_streams_blocked_frame(u64 limit,
 							      bool unidirectional);
+
+/* Internal flow control update functions */
+static void tquic_flow_control_update_max_data_internal(struct tquic_connection *conn);
+static void tquic_stream_flow_control_send_blocked(struct tquic_stream *stream);
+static void tquic_stream_flow_control_update_max_stream_data(struct tquic_stream *stream);
+static void tquic_streams_check_update(struct tquic_connection *conn, bool unidirectional);
+static void tquic_streams_update_max_streams(struct tquic_connection *conn, bool unidirectional);
+
+/* Internal helper for connection-level flow control receive limit check */
+static int tquic_flow_control_check_recv_limit_internal(struct tquic_connection *conn,
+							u64 len);
 
 /* Debug logging macro */
 #define tquic_dbg(fmt, ...) pr_debug("TQUIC: " fmt, ##__VA_ARGS__)
@@ -263,18 +247,19 @@ void tquic_flow_control_on_data_recvd(struct tquic_connection *conn, u64 bytes)
 	spin_unlock_bh(&conn->lock);
 
 	if (should_update)
-		tquic_flow_control_update_max_data(conn);
+		tquic_flow_control_update_max_data_internal(conn);
 }
 EXPORT_SYMBOL_GPL(tquic_flow_control_on_data_recvd);
 
 /**
- * tquic_flow_control_update_max_data - Send MAX_DATA frame to peer
+ * tquic_flow_control_update_max_data_internal - Send MAX_DATA frame to peer
  * @conn: QUIC connection
  *
- * Sends a MAX_DATA frame to increase the connection-level flow control
- * limit advertised to the peer.
+ * Internal function that sends a MAX_DATA frame to increase the connection-level
+ * flow control limit advertised to the peer. This is called from
+ * tquic_flow_control_on_data_recvd() and tquic_flow_control_data_blocked_received().
  */
-void tquic_flow_control_update_max_data(struct tquic_connection *conn)
+static void tquic_flow_control_update_max_data_internal(struct tquic_connection *conn)
 {
 	struct sk_buff *skb;
 	u64 new_max_data;
@@ -337,6 +322,21 @@ void tquic_flow_control_update_max_data(struct tquic_connection *conn)
 
 	/* Schedule transmission of the queued frame */
 	schedule_work(&conn->tx_work);
+}
+
+/**
+ * tquic_flow_control_update_max_data - Public interface for MAX_DATA updates
+ * @conn: QUIC connection
+ *
+ * Public API to trigger a MAX_DATA frame transmission. Called by external
+ * modules that need to request flow control updates.
+ */
+void tquic_flow_control_update_max_data(struct tquic_connection *conn)
+{
+	if (!conn)
+		return;
+
+	tquic_flow_control_update_max_data_internal(conn);
 }
 EXPORT_SYMBOL_GPL(tquic_flow_control_update_max_data);
 
@@ -553,7 +553,7 @@ void tquic_stream_flow_control_on_data_recvd(struct tquic_stream *stream,
  *
  * Sends a MAX_STREAM_DATA frame to increase the stream's flow control limit.
  */
-void tquic_stream_flow_control_update_max_stream_data(struct tquic_stream *stream)
+static void tquic_stream_flow_control_update_max_stream_data(struct tquic_stream *stream)
 {
 	struct tquic_connection *conn = stream->conn;
 	struct sk_buff *skb;
@@ -643,7 +643,7 @@ void tquic_stream_flow_control_max_stream_data_received(struct tquic_stream *str
  * Sends a STREAM_DATA_BLOCKED frame to indicate we want to send more data
  * but are blocked by stream-level flow control.
  */
-void tquic_stream_flow_control_send_blocked(struct tquic_stream *stream)
+static void tquic_stream_flow_control_send_blocked(struct tquic_stream *stream)
 {
 	struct tquic_connection *conn = stream->conn;
 	struct sk_buff *skb;
@@ -782,7 +782,7 @@ void tquic_streams_on_peer_stream_opened(struct tquic_connection *conn,
  * Checks if we should send a MAX_STREAMS frame to allow the peer
  * to open more streams.
  */
-void tquic_streams_check_update(struct tquic_connection *conn, bool unidirectional)
+static void tquic_streams_check_update(struct tquic_connection *conn, bool unidirectional)
 {
 	u64 max_streams;
 	u64 threshold;
@@ -814,7 +814,7 @@ void tquic_streams_check_update(struct tquic_connection *conn, bool unidirection
  *
  * Sends a MAX_STREAMS frame to allow the peer to open more streams.
  */
-void tquic_streams_update_max_streams(struct tquic_connection *conn,
+static void tquic_streams_update_max_streams(struct tquic_connection *conn,
 				     bool unidirectional)
 {
 	struct sk_buff *skb;
@@ -1009,7 +1009,7 @@ void tquic_flow_control_data_blocked_received(struct tquic_connection *conn,
 	tquic_dbg("DATA_BLOCKED received at limit %llu\n", limit);
 
 	/* Optionally trigger MAX_DATA update */
-	tquic_flow_control_update_max_data(conn);
+	tquic_flow_control_update_max_data_internal(conn);
 }
 
 /**
@@ -1350,14 +1350,17 @@ void tquic_flow_on_stream_data_sent(struct tquic_stream *stream, u64 bytes)
 }
 
 /**
- * tquic_flow_control_check_recv_limit - Check connection receive limit
+ * tquic_flow_control_check_recv_limit_internal - Check connection receive limit
  * @conn: QUIC connection
  * @len: Length of data to receive
  *
+ * Internal function to check if receiving data would exceed the connection-level
+ * flow control limit we advertised to the peer.
+ *
  * Returns: 0 if data can be accepted, -EDQUOT if limit exceeded
  */
-static int tquic_flow_control_check_recv_limit(struct tquic_connection *conn,
-					       u64 len)
+static int tquic_flow_control_check_recv_limit_internal(struct tquic_connection *conn,
+							u64 len)
 {
 	int ret = 0;
 
@@ -1406,7 +1409,7 @@ int tquic_flow_check_recv_limits(struct tquic_stream *stream, u64 offset, u64 le
 	 * The sum of data received on all streams MUST NOT exceed
 	 * the MAX_DATA limit for the connection.
 	 */
-	err = tquic_flow_control_check_recv_limit(conn, len);
+	err = tquic_flow_control_check_recv_limit_internal(conn, len);
 	if (err)
 		return err;
 

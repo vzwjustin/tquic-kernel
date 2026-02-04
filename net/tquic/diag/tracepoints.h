@@ -744,7 +744,7 @@ TRACE_EVENT(tquic_scheduler_decision,
 
 /* This must be outside the header guard */
 #undef TRACE_INCLUDE_PATH
-#define TRACE_INCLUDE_PATH .
+#define TRACE_INCLUDE_PATH net/tquic/diag
 #undef TRACE_INCLUDE_FILE
 #define TRACE_INCLUDE_FILE tracepoints
 

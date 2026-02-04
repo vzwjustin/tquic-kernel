@@ -563,7 +563,7 @@ int tquic_deadline_set_stream_deadline(struct tquic_connection *conn,
 
 	state = tquic_deadline_get_state(conn);
 	if (!state || !state->enabled)
-		return -ENOTSUP;
+		return -EOPNOTSUPP;
 
 	/* Validate deadline */
 	if (deadline_us < TQUIC_MIN_DEADLINE_US ||
@@ -788,13 +788,15 @@ void tquic_deadline_on_loss(struct tquic_deadline_sched_state *state,
 
 		if (offset >= deadline->data_offset &&
 		    offset < deadline->data_offset + deadline->data_length) {
+			s64 remaining;
+
 			/* Mark for retransmission */
 			deadline->flags |= TQUIC_DEADLINE_FLAG_RETRANSMIT;
 			deadline->flags |= TQUIC_DEADLINE_FLAG_PENDING;
 
 			/* Recheck feasibility with remaining time */
-			s64 remaining = ktime_us_delta(deadline->deadline,
-						       ktime_get());
+			remaining = ktime_us_delta(deadline->deadline,
+						   ktime_get());
 			if (remaining > 0) {
 				deadline->feasible =
 					tquic_deadline_check_feasibility(
@@ -833,8 +835,10 @@ void tquic_deadline_on_path_change(struct tquic_deadline_sched_state *state,
 		list_for_each_entry(deadline, &state->streams_with_deadlines,
 				    stream_node) {
 			if (deadline->flags & TQUIC_DEADLINE_FLAG_PENDING) {
-				s64 remaining = ktime_us_delta(deadline->deadline,
-							       ktime_get());
+				s64 remaining;
+
+				remaining = ktime_us_delta(deadline->deadline,
+							   ktime_get());
 				if (remaining > 0) {
 					deadline->feasible =
 						tquic_deadline_check_feasibility(

@@ -272,19 +272,28 @@ struct tquic_ecn_state {
 
 /**
  * struct tquic_path_stats - Per-path statistics
- * @tx_packets: Packets transmitted
- * @tx_bytes: Bytes transmitted
+ * @tx_packets: Packets transmitted (legacy, use packets_sent)
+ * @tx_bytes: Bytes transmitted (legacy, use bytes_sent)
  * @rx_packets: Packets received
  * @rx_bytes: Bytes received
  * @acked_bytes: Bytes acknowledged
- * @lost_packets: Detected lost packets
+ * @lost_packets: Detected lost packets (legacy, use packets_lost)
  * @rtt_min: Minimum observed RTT (us)
  * @rtt_smoothed: Smoothed RTT (us)
  * @rtt_variance: RTT variance (us)
  * @bandwidth: Estimated bandwidth (bytes/s)
  * @cwnd: Current congestion window
+ * @packets_sent: Atomic counter of packets sent on this path
+ * @bytes_sent: Atomic counter of bytes sent on this path
+ * @packets_acked: Atomic counter of packets acknowledged
+ * @packets_lost: Atomic counter of packets lost
+ * @packets_retrans: Atomic counter of packets retransmitted
+ *
+ * This struct tracks per-path statistics for the multipath scheduler.
+ * Fields accessed from multiple contexts use atomic64_t for lock-free access.
  */
 struct tquic_path_stats {
+	/* Legacy counters (non-atomic) */
 	u64 tx_packets;
 	u64 tx_bytes;
 	u64 rx_packets;
@@ -296,6 +305,17 @@ struct tquic_path_stats {
 	u32 rtt_variance;
 	u64 bandwidth;
 	u32 cwnd;
+
+	/*
+	 * Atomic counters for scheduler and loss detection.
+	 * These are updated from softirq context (packet TX/RX)
+	 * and read from process context (stats queries).
+	 */
+	atomic64_t packets_sent;	/* Packets sent on this path */
+	atomic64_t bytes_sent;		/* Bytes sent on this path */
+	atomic64_t packets_acked;	/* Packets acknowledged */
+	atomic64_t packets_lost;	/* Packets declared lost (atomic) */
+	atomic64_t packets_retrans;	/* Packets retransmitted */
 };
 
 /* Maximum pending PATH_RESPONSE frames per path to prevent memory exhaustion */
@@ -355,16 +375,56 @@ struct tquic_path {
 	/* RTT measurement state (for loss detection) - embedded struct */
 	struct tquic_rtt_state rtt;
 
-	/* Scheduler-accessible congestion control info (mirrors cong state) */
+	/*
+	 * Scheduler-accessible congestion control info (RFC 9002)
+	 *
+	 * This embedded struct provides congestion control state that
+	 * schedulers and loss detection need to access. It mirrors key
+	 * values from the per-path congestion controller (path->cong).
+	 *
+	 * RTT variables follow RFC 9002 Section 5 naming:
+	 * - smoothed_rtt: Exponentially weighted moving average of RTT
+	 * - rtt_var: Mean deviation of RTT samples
+	 * - min_rtt: Minimum RTT observed over a period
+	 * - latest_rtt: Most recent RTT sample
+	 *
+	 * Congestion variables follow RFC 9002 Section 7:
+	 * - cwnd: Congestion window in bytes
+	 * - bytes_in_flight: Sum of bytes in unacknowledged packets
+	 * - ssthresh: Slow start threshold
+	 * - in_slow_start: Whether in slow start phase
+	 * - in_recovery: Whether in recovery phase
+	 */
 	struct {
+		/* RTT measurement (RFC 9002 Section 5) */
 		u64 smoothed_rtt_us;	/* Smoothed RTT in microseconds */
-		u64 rtt_var_us;		/* RTT variance */
+		u64 rtt_var_us;		/* RTT variance in microseconds */
 		u64 min_rtt_us;		/* Minimum RTT observed */
+		u64 last_rtt_us;	/* Previous RTT sample */
+
+		/* Congestion window (RFC 9002 Section 7) */
 		u32 cwnd;		/* Congestion window (bytes) */
 		u32 bytes_in_flight;	/* Bytes currently in flight */
+		u32 ssthresh;		/* Slow start threshold */
+		u32 mss;		/* Maximum segment size (1200 default) */
+
+		/* Loss tracking */
+		u64 delivered;		/* Total bytes delivered */
+		u64 lost;		/* Total bytes lost */
+		u32 loss_rate;		/* Loss rate (0-1000 = 0-100%) */
+		u64 bandwidth;		/* Estimated bandwidth (bytes/sec) */
+
+		/* Recovery state */
+		bool in_slow_start;	/* In slow start phase */
+		bool in_recovery;	/* In loss recovery */
+		u64 recovery_start;	/* Packet number at recovery start */
+
+		/* PTO state (RFC 9002 Section 6.2) */
+		u32 pto_count;		/* PTO backoff counter */
 	} cc;
 
 	u32 mtu;
+	u32 flags;			/* Path flags (TQUIC_PATH_FLAG_*) */
 	u8 priority;
 	u8 weight;
 	bool schedulable;		/* Can be selected by scheduler */
@@ -480,8 +540,16 @@ struct tquic_stream {
 
 /**
  * struct tquic_conn_stats - Connection-level statistics
+ *
+ * This struct tracks connection-wide statistics for monitoring and
+ * diagnostics. Fields used from multiple contexts (softirq, process)
+ * are atomic64_t for lock-free access.
+ *
+ * RFC 9002 loss detection statistics are tracked here for connection-wide
+ * aggregation. Per-path RTT and loss stats are in struct tquic_path_stats.
  */
 struct tquic_conn_stats {
+	/* Basic packet/byte counters */
 	u64 tx_packets;
 	u64 tx_bytes;
 	u64 rx_packets;
@@ -493,6 +561,50 @@ struct tquic_conn_stats {
 	u64 streams_closed;
 	ktime_t established_time;
 	atomic64_t handshake_time_us;	/* Handshake completion time */
+
+	/*
+	 * Atomic counters for lock-free access from multiple contexts.
+	 * These are used by loss detection (quic_loss.c) and scheduler
+	 * (tquic_scheduler.c) code paths.
+	 */
+
+	/* RFC 9002 Loss Detection statistics */
+	atomic64_t packets_lost;	/* Total packets declared lost */
+	atomic64_t packets_retransmitted; /* Packets retransmitted */
+	atomic64_t clone_failures;	/* SKB clone failures during retx */
+
+	/* RTT statistics (aggregated from active path) */
+	atomic64_t min_rtt_us;		/* Minimum RTT observed (microseconds) */
+	atomic64_t smoothed_rtt_us;	/* Smoothed RTT (microseconds) */
+	atomic64_t rtt_variance_us;	/* RTT variance (microseconds) */
+	atomic64_t latest_rtt_us;	/* Most recent RTT sample */
+
+	/* Scheduler statistics */
+	atomic64_t total_packets;	/* Total packets scheduled */
+	atomic64_t total_bytes;		/* Total bytes scheduled */
+	atomic64_t sched_decisions;	/* Number of scheduler invocations */
+	atomic64_t path_switches;	/* Times scheduler switched paths */
+	atomic64_t reinjections;	/* Packets reinjected on alternate path */
+
+	/*
+	 * QUIC-over-TCP statistics (transport/quic_over_tcp.c)
+	 * These are only used when QUIC runs over TCP for firewall traversal.
+	 */
+	atomic64_t packets_rx;		/* TCP: packets received */
+	atomic64_t packets_tx;		/* TCP: packets transmitted */
+	atomic64_t bytes_rx;		/* TCP: bytes received */
+	atomic64_t bytes_tx;		/* TCP: bytes transmitted */
+	atomic64_t coalesce_count;	/* TCP: packets coalesced */
+	atomic64_t tcp_segments_rx;	/* TCP: segments received */
+	atomic64_t tcp_segments_tx;	/* TCP: segments transmitted */
+	atomic64_t framing_errors;	/* TCP: framing errors */
+	atomic64_t flow_control_pauses;	/* TCP: flow control pauses */
+	atomic64_t keepalives_sent;	/* TCP: keepalives sent */
+	atomic64_t keepalives_recv;	/* TCP: keepalives received */
+
+	/* Additional counters for packet processing */
+	atomic64_t packets_received;	/* Input packets processed */
+	atomic64_t bytes_received;	/* Input bytes processed */
 };
 
 /**
@@ -802,6 +914,54 @@ struct tquic_connection {
 	/* Handshake state */
 	bool handshake_complete;
 	bool draining;			/* Connection is draining */
+
+	/*
+	 * RFC 9002 Loss Detection and Congestion Control State
+	 *
+	 * These connection-level variables implement the loss detection
+	 * algorithm from RFC 9002 Appendix A.3-A.4.
+	 *
+	 * Loss detection uses a single timer (loss_detection_timer) whose
+	 * expiration triggers either time-based loss detection or PTO.
+	 *
+	 * The packet_threshold and time_threshold control when packets
+	 * are declared lost based on gaps in acknowledgments.
+	 */
+
+	/* RFC 9002 Section 6.2: Probe Timeout (PTO) */
+	u32 pto_count;			/* PTO exponential backoff counter */
+
+	/* RFC 9002 Appendix A.3: Loss Detection Timer */
+	ktime_t loss_detection_timer;	/* Timer deadline (0 = not set) */
+	ktime_t time_of_last_ack_eliciting; /* When last ack-eliciting pkt sent */
+
+	/*
+	 * RFC 9002 Section 6.1.1: Packet Threshold
+	 *
+	 * kPacketThreshold: Maximum reordering in packets before declaring
+	 * packet loss. The RECOMMENDED value is 3.
+	 */
+	u32 packet_threshold;
+
+	/*
+	 * RFC 9002 Section 6.1.2: Time Threshold
+	 *
+	 * kTimeThreshold: Maximum reordering in time before declaring loss.
+	 * The RECOMMENDED time threshold is 9/8 of max(smoothed_rtt, latest_rtt).
+	 * We store the numerator here (9); the denominator is implicitly 8.
+	 */
+	u32 time_threshold;
+
+	/*
+	 * Handshake confirmed state (RFC 9002 Appendix A.3)
+	 *
+	 * For servers: Set when HANDSHAKE_DONE is sent.
+	 * For clients: Set when HANDSHAKE_DONE is received.
+	 *
+	 * When handshake_confirmed is false, anti-deadlock mechanisms
+	 * ensure the connection can make progress even without RTT samples.
+	 */
+	bool handshake_confirmed;
 
 	/* Packet number spaces */
 	struct tquic_pn_space *pn_spaces;	/* Array of PN spaces */
@@ -1321,6 +1481,66 @@ struct tquic_sched_ops {
 	struct list_head list;
 };
 
+/**
+ * struct tquic_sched_path_result - Path selection result for multipath schedulers
+ * @primary: Primary path for packet transmission
+ * @backup: Backup path for failover (optional, may be NULL)
+ * @flags: Flags affecting transmission (TQUIC_SCHED_F_*)
+ */
+struct tquic_sched_path_result {
+	struct tquic_path *primary;
+	struct tquic_path *backup;
+	u32 flags;
+};
+
+/* Scheduler result flags */
+#define TQUIC_SCHED_F_REDUNDANT		BIT(0)	/* Send on multiple paths */
+
+/**
+ * struct tquic_mp_sched_ops - Multipath scheduler operations
+ *
+ * Extended scheduler interface for multipath QUIC with path event callbacks.
+ * This is the preferred interface for advanced multipath schedulers that need
+ * feedback from ACK/loss events to make path selection decisions.
+ */
+struct tquic_mp_sched_ops {
+	char name[TQUIC_SCHED_NAME_MAX];
+	struct module *owner;
+	struct list_head list;
+
+	/* Required: select path for next packet */
+	int (*get_path)(struct tquic_connection *conn,
+			struct tquic_sched_path_result *result,
+			u32 flags);
+
+	/* Optional lifecycle hooks */
+	void (*init)(struct tquic_connection *conn);
+	void (*release)(struct tquic_connection *conn);
+
+	/* Optional path events */
+	void (*path_added)(struct tquic_connection *conn,
+			   struct tquic_path *path);
+	void (*path_removed)(struct tquic_connection *conn,
+			     struct tquic_path *path);
+
+	/* Optional feedback hooks */
+	void (*ack_received)(struct tquic_connection *conn,
+			     struct tquic_path *path, u64 acked_bytes);
+	void (*loss_detected)(struct tquic_connection *conn,
+			      struct tquic_path *path, u64 lost_bytes);
+} ____cacheline_aligned_in_smp;
+
+/* Multipath scheduler registration API */
+int tquic_mp_register_scheduler(struct tquic_mp_sched_ops *sched);
+void tquic_mp_unregister_scheduler(struct tquic_mp_sched_ops *sched);
+struct tquic_mp_sched_ops *tquic_mp_sched_find(const char *name);
+
+/* Multipath scheduler notification API */
+void tquic_mp_sched_notify_ack(struct tquic_connection *conn,
+			       struct tquic_path *path, u64 acked_bytes);
+void tquic_mp_sched_notify_loss(struct tquic_connection *conn,
+				struct tquic_path *path, u64 lost_bytes);
+
 /*
  * Path events: Base events defined in <uapi/linux/tquic.h>
  * Additional internal-only events for scheduler callbacks:
@@ -1684,6 +1904,7 @@ struct tquic_path *tquic_path_create(struct tquic_connection *conn,
 int tquic_path_probe(struct tquic_connection *conn, struct tquic_path *path);
 void tquic_path_validate(struct tquic_connection *conn, struct tquic_path *path);
 int tquic_path_validate_start(struct tquic_path *path);
+int tquic_path_challenge(struct tquic_path *path);
 void tquic_path_destroy(struct tquic_path *path);
 void tquic_path_update_stats(struct tquic_path *path, struct sk_buff *skb, bool success);
 int tquic_path_set_weight(struct tquic_path *path, u8 weight);
@@ -2215,6 +2436,9 @@ void __exit tquic_packet_exit(void);
 /* Packet building and processing */
 struct sk_buff *tquic_packet_build(struct tquic_connection *conn, int pn_space);
 int tquic_packet_process(struct tquic_connection *conn, struct sk_buff *skb);
+int tquic_packet_parse(struct sk_buff *skb, struct tquic_packet *pkt);
+int tquic_frame_process_all(struct tquic_connection *conn, struct sk_buff *skb, u8 level);
+int tquic_frame_process_one(struct tquic_connection *conn, const u8 *data, int len, u8 level);
 int tquic_udp_send(struct tquic_sock *tsk, struct sk_buff *skb,
 		   struct tquic_path *path);
 

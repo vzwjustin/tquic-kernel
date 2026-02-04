@@ -23,9 +23,10 @@
 #include <linux/rcupdate.h>
 #include <linux/ktime.h>
 #include <linux/spinlock.h>
+#include <net/tquic.h>
 
 #include "tquic_sched.h"
-#include "tquic_bonding.h"
+#include "../bond/tquic_bonding.h"
 
 /*
  * Capacity calculation constants
@@ -65,8 +66,8 @@ struct aggregate_sched_data {
  */
 static u32 calc_path_capacity(struct tquic_path *path)
 {
-	u64 cwnd = path->stats.cwnd;
-	u32 rtt_us = path->stats.rtt_smoothed;
+	u64 cwnd = path->cc.cwnd;
+	u32 rtt_us = path->cc.smoothed_rtt_us;
 	u64 capacity;
 
 	/* Use default values if metrics not yet available */
@@ -197,12 +198,10 @@ static int aggregate_get_path(struct tquic_connection *conn,
 		capacity = sd->path_capacities[idx];
 
 		/* Check if path has cwnd available (not congestion limited) */
-		if (path->stats.cwnd > 0) {
-			u64 tx = atomic64_read(&path->stats.tx_bytes);
-			u64 rx = atomic64_read(&path->stats.rx_bytes);
-			u32 in_flight = (tx > rx) ? (u32)(tx - rx) : 0;
+		if (path->cc.cwnd > 0) {
+			u32 in_flight = path->cc.bytes_in_flight;
 
-			if (in_flight < path->stats.cwnd)
+			if (in_flight < path->cc.cwnd)
 				available = capacity;
 			else
 				available = 0;  /* Congestion limited */
@@ -340,7 +339,7 @@ static void aggregate_loss_detected(struct tquic_connection *conn,
  *
  * Exported as the default scheduler for TQUIC WAN bonding.
  */
-struct tquic_sched_ops tquic_sched_aggregate = {
+struct tquic_mp_sched_ops tquic_mp_sched_aggregate = {
 	.name           = "aggregate",
 	.owner          = THIS_MODULE,
 	.get_path       = aggregate_get_path,
@@ -351,13 +350,13 @@ struct tquic_sched_ops tquic_sched_aggregate = {
 	.ack_received   = aggregate_ack_received,
 	.loss_detected  = aggregate_loss_detected,
 };
-EXPORT_SYMBOL_GPL(tquic_sched_aggregate);
+EXPORT_SYMBOL_GPL(tquic_mp_sched_aggregate);
 
 int __init tquic_sched_aggregate_init(void)
 {
 	int ret;
 
-	ret = tquic_register_scheduler(&tquic_sched_aggregate);
+	ret = tquic_mp_register_scheduler(&tquic_mp_sched_aggregate);
 	if (ret == 0)
 		pr_info("TQUIC: aggregate scheduler registered (default)\n");
 	return ret;
@@ -365,7 +364,7 @@ int __init tquic_sched_aggregate_init(void)
 
 void __exit tquic_sched_aggregate_exit(void)
 {
-	tquic_unregister_scheduler(&tquic_sched_aggregate);
+	tquic_mp_unregister_scheduler(&tquic_mp_sched_aggregate);
 }
 
 /* Note: module_init/exit handled by main protocol.c */

@@ -10,6 +10,12 @@
 # module_init/exit are wrapped with #ifndef TQUIC_OUT_OF_TREE.
 #
 
+# Include paths for headers
+ccflags-y += -I$(src)/include -I$(src)/../quic -I$(src)/../.. -I$(src)/diag -DTQUIC_OUT_OF_TREE
+# Suppress warnings treated as errors during development (remove for production)
+ccflags-y += -Wno-error=unused-function -Wno-error=unused-variable
+ccflags-y += -Wno-error=missing-prototypes
+
 # For out-of-tree builds, build one main module plus CC algorithms
 obj-m += tquic.o
 obj-m += tquic_cubic.o
@@ -25,6 +31,7 @@ obj-m += tquic_accecn.o
 # This must match the Makefile tquic-y list for consistency
 tquic-y := \
 	tquic_main.o \
+	out_of_tree_stubs.o \
 	tquic_proto.o \
 	tquic_socket.o \
 	tquic_stream.o \
@@ -57,23 +64,25 @@ tquic-y := \
 	tquic_ack_frequency.o \
 	security_hardening.o \
 	cong/tquic_cong.o \
+	cong/cong_data.o \
 	cong/persistent_cong.o \
+	cong/coupled.o \
+	cong/bbrv2.o \
+	cong/bbrv3.o \
+	cong/prague.o \
 	core/varint.o \
 	core/connection.o \
 	core/stream.o \
 	core/frame.o \
 	core/packet.o \
-	core/ack.o \
 	core/ack_frequency.o \
 	core/flow_control.o \
 	core/transport_params.o \
-	core/cid.o \
 	core/address_discovery.o \
 	core/receive_timestamps.o \
 	core/reliable_reset.o \
 	core/one_way_delay.o \
 	core/additional_addresses.o \
-	core/mp_frame.o \
 	core/quic_protocol.o \
 	core/quic_connection.o \
 	core/quic_crypto.o \
@@ -87,24 +96,25 @@ tquic-y := \
 	core/quic_ack.o \
 	core/quic_ack_frequency.o \
 	core/quic_key_update.o \
+	core/mp_frame.o \
 	core/packet_coalesce_fix.o \
 	core/early_data.o \
 	core/priority.o \
 	bond/bonding.o \
 	bond/tquic_bonding.o \
 	bond/tquic_failover.o \
-	bond/tquic_path.o \
 	bond/tquic_reorder.o \
 	bond/cong_coupled.o \
 	pm/pm_types.o \
 	pm/pm_kernel.o \
+	pm/pm_netlink.o \
 	pm/path_manager.o \
 	pm/path_validation.o \
 	pm/nat_keepalive.o \
 	pm/nat_lifecycle.o \
+	pm/pm_userspace.o \
 	pm/pm_module.o \
 	sched/scheduler.o \
-	sched/reorder.o \
 	sched/deadline_scheduler.o \
 	sched/deadline_aware.o \
 	multipath/mp_frame.o \
@@ -112,12 +122,12 @@ tquic-y := \
 	multipath/mp_deadline.o \
 	multipath/path_abandon.o \
 	multipath/multipath_module.o \
-	multipath/tquic_scheduler.o \
 	multipath/sched_minrtt.o \
-	multipath/sched_aggregate.o \
-	multipath/sched_weighted.o \
-	multipath/sched_blest.o \
 	multipath/sched_ecf.o \
+	multipath/sched_blest.o \
+	multipath/sched_weighted.o \
+	multipath/sched_aggregate.o \
+	crypto/cert_verify.o \
 	crypto/tls.o \
 	crypto/header_protection.o \
 	crypto/key_update.o \

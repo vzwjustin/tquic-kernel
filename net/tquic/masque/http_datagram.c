@@ -285,6 +285,7 @@ struct http_datagram_flow *http_datagram_flow_create(
 
 	flow->stream_id = stream_id;
 	flow->quarter_stream_id = http_datagram_stream_to_flow_id(stream_id);
+	flow->mgr = mgr;
 	flow->contexts = RB_ROOT;
 	flow->num_contexts = 0;
 
@@ -718,18 +719,27 @@ int http_datagram_send(struct http_datagram_flow *flow,
 	int encoded_len;
 	int ret;
 
-	if (!flow)
+	if (!flow || !flow->mgr)
 		return -EINVAL;
 
 	if (len > 0 && !payload)
 		return -EINVAL;
 
-	/* Get connection - we need flow to be associated with a manager */
-	/* For now, we'll need to pass connection through another means */
-	/* This is a simplification - in practice flow would have conn reference */
+	/* Get connection from flow's manager */
+	conn = flow->mgr->conn;
+	if (!conn)
+		return -ENOTCONN;
+
+	/* Check if datagrams are enabled */
+	if (!conn->datagram.enabled)
+		return -EOPNOTSUPP;
 
 	/* Calculate maximum buffer size needed */
 	buf_len = 16 + len;  /* 8 bytes for each varint + payload */
+
+	/* Check against maximum datagram size */
+	if (buf_len > conn->datagram.max_send_size)
+		return -EMSGSIZE;
 
 	buf = kmalloc(buf_len, GFP_KERNEL);
 	if (!buf)
@@ -743,21 +753,24 @@ int http_datagram_send(struct http_datagram_flow *flow,
 		return encoded_len;
 	}
 
-	/*
-	 * Send via QUIC DATAGRAM frame.
-	 * Note: This requires the flow to have a reference to the connection.
-	 * In the full implementation, we'd need to thread this through properly.
-	 */
-	/* ret = tquic_send_datagram(conn, buf, encoded_len); */
+	/* Send via QUIC DATAGRAM frame */
+	ret = tquic_send_datagram(conn, buf, encoded_len);
 
-	/* Update stats */
-	spin_lock_bh(&flow->lock);
-	flow->stats.tx_datagrams++;
-	flow->stats.tx_bytes += len;
-	spin_unlock_bh(&flow->lock);
+	if (ret >= 0) {
+		/* Update stats on success */
+		spin_lock_bh(&flow->lock);
+		flow->stats.tx_datagrams++;
+		flow->stats.tx_bytes += len;
+		spin_unlock_bh(&flow->lock);
+	} else {
+		/* Update error stats */
+		spin_lock_bh(&flow->lock);
+		flow->stats.tx_errors++;
+		spin_unlock_bh(&flow->lock);
+	}
 
 	kfree(buf);
-	return len;
+	return ret >= 0 ? len : ret;
 }
 EXPORT_SYMBOL_GPL(http_datagram_send);
 

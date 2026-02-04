@@ -93,13 +93,15 @@ dmesg | grep -i quic
 
 ## Important Notes
 
-1. **Don't modify upstream code**: Files outside `net/quic/` and `include/net/quic/` are from upstream Linux kernel. Avoid changes unless absolutely necessary.
+1. **STUBS ARE NEVER ALLOWED**: No stub functions, placeholder code, or TODO comments. All code must be fully implemented and functional. If unsure how to implement something, MUST research online (RFCs, kernel docs, existing implementations) before writing code. Never assume - always verify.
 
-2. **Memory safety is critical**: All allocations must be checked, all error paths must free resources, all locks must be released.
+2. **Don't modify upstream code**: Files outside `net/quic/` and `include/net/quic/` are from upstream Linux kernel. Avoid changes unless absolutely necessary.
 
-3. **Network data is untrusted**: Every field from packets must be validated before use.
+3. **Memory safety is critical**: All allocations must be checked, all error paths must free resources, all locks must be released.
 
-4. **Reference counting**: Use proper refcounting for shared objects (connections, streams).
+4. **Network data is untrusted**: Every field from packets must be validated before use.
+
+5. **Reference counting**: Use proper refcounting for shared objects (connections, streams).
 
 ## Agents Available
 
