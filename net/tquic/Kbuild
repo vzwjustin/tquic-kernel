@@ -31,7 +31,6 @@ obj-m += tquic_accecn.o
 # This must match the Makefile tquic-y list for consistency
 tquic-y := \
 	tquic_main.o \
-	out_of_tree_stubs.o \
 	tquic_proto.o \
 	tquic_socket.o \
 	tquic_stream.o \
@@ -121,6 +120,7 @@ tquic-y := \
 	multipath/mp_ack.o \
 	multipath/mp_deadline.o \
 	multipath/path_abandon.o \
+	multipath/mp_sched_registry.o \
 	multipath/multipath_module.o \
 	multipath/sched_minrtt.o \
 	multipath/sched_ecf.o \

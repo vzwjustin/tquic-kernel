@@ -1582,5 +1582,45 @@ int tquic_pm_coordinate_preferred_and_additional(struct tquic_connection *conn)
 }
 EXPORT_SYMBOL_GPL(tquic_pm_coordinate_preferred_and_additional);
 
+struct tquic_path *tquic_pm_get_path(struct tquic_pm_state *pm, u32 path_id)
+{
+	if (!pm || !pm->conn)
+		return NULL;
+
+	return tquic_conn_get_path(pm->conn, path_id);
+}
+EXPORT_SYMBOL_GPL(tquic_pm_get_path);
+
+int tquic_pm_get_active_paths(struct tquic_path_manager *pm,
+			      struct tquic_path **paths, int max_paths)
+{
+	struct tquic_pm_state *state = (struct tquic_pm_state *)pm;
+	struct tquic_connection *conn;
+	struct tquic_path *path;
+	int count = 0;
+
+	if (!state || !paths || max_paths <= 0)
+		return 0;
+
+	conn = state->conn;
+	if (!conn)
+		return 0;
+
+	spin_lock_bh(&conn->paths_lock);
+	list_for_each_entry(path, &conn->paths, list) {
+		if (path->state == TQUIC_PATH_ACTIVE ||
+		    path->state == TQUIC_PATH_VALIDATED ||
+		    path->state == TQUIC_PATH_STANDBY) {
+			paths[count++] = path;
+			if (count >= max_paths)
+				break;
+		}
+	}
+	spin_unlock_bh(&conn->paths_lock);
+
+	return count;
+}
+EXPORT_SYMBOL_GPL(tquic_pm_get_active_paths);
+
 MODULE_DESCRIPTION("TQUIC Path Manager for WAN Bonding");
 MODULE_LICENSE("GPL");

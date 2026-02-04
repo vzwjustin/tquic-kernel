@@ -1720,6 +1720,76 @@ int tquic_udp_xmit_on_path(struct tquic_connection *conn,
 }
 EXPORT_SYMBOL_GPL(tquic_udp_xmit_on_path);
 
+int tquic_udp_encap_init(struct tquic_sock *tsk)
+{
+	struct tquic_connection *conn;
+	struct tquic_path *path;
+	int err;
+
+	if (!tsk)
+		return -EINVAL;
+
+	conn = tsk->conn;
+	if (!conn || !conn->active_path)
+		return -EINVAL;
+
+	path = conn->active_path;
+
+	/* Seed local address from bound socket if path hasn't been set yet. */
+	if (path->local_addr.ss_family == 0 &&
+	    tsk->bind_addr.ss_family != 0)
+		path->local_addr = tsk->bind_addr;
+
+	/* Seed remote address from connect info if not yet set. */
+	if (path->remote_addr.ss_family == 0 &&
+	    tsk->connect_addr.ss_family != 0)
+		path->remote_addr = tsk->connect_addr;
+
+	/* Create per-path UDP socket if missing. */
+	if (!path->cong) {
+		err = tquic_udp_create_path_socket(conn, path);
+		if (err)
+			return err;
+	}
+
+	/*
+	 * Expose the underlying socket for legacy paths that expect
+	 * tsk->udp_sock to be populated.
+	 */
+	if (!tsk->udp_sock && path->cong)
+		tsk->udp_sock = ((struct tquic_udp_sock *)path->cong)->sock;
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(tquic_udp_encap_init);
+
+int tquic_udp_send(struct tquic_sock *tsk, struct sk_buff *skb,
+		   struct tquic_path *path)
+{
+	struct tquic_connection *conn;
+
+	if (!tsk || !skb) {
+		kfree_skb(skb);
+		return -EINVAL;
+	}
+
+	conn = tsk->conn;
+	if (!conn) {
+		kfree_skb(skb);
+		return -EINVAL;
+	}
+
+	if (!path)
+		path = conn->active_path;
+	if (!path) {
+		kfree_skb(skb);
+		return -EINVAL;
+	}
+
+	return tquic_udp_xmit_on_path(conn, path, skb);
+}
+EXPORT_SYMBOL_GPL(tquic_udp_send);
+
 /*
  * Integration with inet_connection_sock
  */

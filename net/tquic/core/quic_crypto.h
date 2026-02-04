@@ -77,7 +77,7 @@ int tquic_crypto_init(struct tquic_crypto_ctx *ctx, u16 cipher_type);
  * zeroizing sensitive key material. The context structure itself is
  * not freed (it's typically embedded in the connection structure).
  */
-void tquic_crypto_destroy(struct tquic_crypto_ctx *ctx);
+void tquic_crypto_destroy(void *crypto);
 
 /* Legacy aliases */
 #define quic_crypto_init	tquic_crypto_init

@@ -934,6 +934,15 @@ void tquic_crypto_ctx_destroy(struct tquic_crypto_ctx *ctx)
 	memset(ctx, 0, sizeof(*ctx));
 }
 
+void tquic_crypto_destroy(void *crypto)
+{
+	if (!crypto)
+		return;
+
+	tquic_crypto_ctx_destroy((struct tquic_crypto_ctx *)crypto);
+}
+EXPORT_SYMBOL_GPL(tquic_crypto_destroy);
+
 int tquic_crypto_derive_init_secrets(struct tquic_connection *conn,
 				     struct tquic_cid *cid)
 {
