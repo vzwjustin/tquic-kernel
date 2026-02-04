@@ -29,6 +29,11 @@
 
 #include "early_data.h"
 
+/*
+ * Note: struct tquic_pn_space is defined in include/net/tquic.h
+ * and provides packet number space management.
+ */
+
 /* HKDF labels for 0-RTT key derivation (RFC 9001 Section 5.1) */
 static const char tquic_early_traffic_label[] = "c e traffic";
 static const char tquic_key_label[] = "quic key";
@@ -36,23 +41,23 @@ static const char tquic_iv_label[] = "quic iv";
 static const char tquic_hp_label[] = "quic hp";
 
 /* 0-RTT packet type in long header (RFC 9000 Section 17.2.3) */
-#define TQUIC_LONG_TYPE_0RTT		0x01
+#define TQUIC_LONG_TYPE_0RTT 0x01
 
 /*
  * Maximum 0-RTT data that can be sent (RFC 9001 Section 4.6.1)
  * Default limit if not specified in session ticket
  */
-#define TQUIC_DEFAULT_MAX_EARLY_DATA	16384
+#define TQUIC_DEFAULT_MAX_EARLY_DATA 16384
 
 /*
  * Maximum packet size for 0-RTT packets
  */
-#define TQUIC_MAX_PACKET_SIZE		1200
+#define TQUIC_MAX_PACKET_SIZE 1200
 
 /*
  * Maximum session ticket length
  */
-#define TQUIC_MAX_SESSION_TICKET_LEN	4096
+#define TQUIC_MAX_SESSION_TICKET_LEN 4096
 
 /*
  * Frame types NOT allowed in 0-RTT packets (RFC 9001 Section 4.6.3):
@@ -63,32 +68,32 @@ static const char tquic_hp_label[] = "quic hp";
  * - PATH_RESPONSE frames
  * - RETIRE_CONNECTION_ID frames
  */
-#define TQUIC_0RTT_FORBIDDEN_ACK		0x01
-#define TQUIC_0RTT_FORBIDDEN_CRYPTO		0x02
-#define TQUIC_0RTT_FORBIDDEN_NEW_TOKEN		0x04
-#define TQUIC_0RTT_FORBIDDEN_PATH_RESPONSE	0x08
-#define TQUIC_0RTT_FORBIDDEN_RETIRE_CID		0x10
-#define TQUIC_0RTT_FORBIDDEN_HANDSHAKE_DONE	0x20
+#define TQUIC_0RTT_FORBIDDEN_ACK 0x01
+#define TQUIC_0RTT_FORBIDDEN_CRYPTO 0x02
+#define TQUIC_0RTT_FORBIDDEN_NEW_TOKEN 0x04
+#define TQUIC_0RTT_FORBIDDEN_PATH_RESPONSE 0x08
+#define TQUIC_0RTT_FORBIDDEN_RETIRE_CID 0x10
+#define TQUIC_0RTT_FORBIDDEN_HANDSHAKE_DONE 0x20
 
 /*
  * Anti-replay window configuration
  * Per RFC 9001 Section 8, servers MUST implement anti-replay protection
  */
-#define ANTI_REPLAY_WINDOW_MS		10000	/* 10 second window */
-#define ANTI_REPLAY_HASH_BITS		8
-#define ANTI_REPLAY_HASH_SIZE		(1 << ANTI_REPLAY_HASH_BITS)
+#define ANTI_REPLAY_WINDOW_MS 10000 /* 10 second window */
+#define ANTI_REPLAY_HASH_BITS 8
+#define ANTI_REPLAY_HASH_SIZE (1 << ANTI_REPLAY_HASH_BITS)
 
 struct tquic_anti_replay {
-	spinlock_t		lock;
-	ktime_t			window_start;
-	struct hlist_head	hash[ANTI_REPLAY_HASH_SIZE];
-	u32			count;
+	spinlock_t lock;
+	ktime_t window_start;
+	struct hlist_head hash[ANTI_REPLAY_HASH_SIZE];
+	u32 count;
 };
 
 struct tquic_anti_replay_entry {
-	struct hlist_node	node;
-	u64			ticket_hash;
-	ktime_t			time;
+	struct hlist_node node;
+	u64 ticket_hash;
+	ktime_t time;
 };
 
 static struct tquic_anti_replay anti_replay_state;
@@ -139,12 +144,12 @@ EXPORT_SYMBOL(tquic_anti_replay_cleanup);
  */
 static u64 tquic_ticket_hash(const u8 *ticket, u32 len)
 {
-	u64 hash = 0xcbf29ce484222325ULL;  /* FNV-1a offset basis */
+	u64 hash = 0xcbf29ce484222325ULL; /* FNV-1a offset basis */
 	u32 i;
 
 	for (i = 0; i < len; i++) {
 		hash ^= ticket[i];
-		hash *= 0x100000001b3ULL;  /* FNV-1a prime */
+		hash *= 0x100000001b3ULL; /* FNV-1a prime */
 	}
 
 	return hash;
@@ -175,7 +180,7 @@ bool tquic_anti_replay_check(const u8 *ticket, u32 ticket_len)
 	int i;
 
 	if (!ticket || ticket_len == 0)
-		return true;  /* Invalid ticket is treated as replay */
+		return true; /* Invalid ticket is treated as replay */
 
 	hash = tquic_ticket_hash(ticket, ticket_len);
 	bucket = hash & (ANTI_REPLAY_HASH_SIZE - 1);
@@ -188,10 +193,10 @@ bool tquic_anti_replay_check(const u8 *ticket, u32 ticket_len)
 	if (ktime_before(anti_replay_state.window_start, window_threshold)) {
 		/* Slide the window forward, remove old entries */
 		for (i = 0; i < ANTI_REPLAY_HASH_SIZE; i++) {
-			hlist_for_each_entry_safe(entry, tmp,
-						  &anti_replay_state.hash[i],
-						  node) {
-				if (ktime_before(entry->time, window_threshold)) {
+			hlist_for_each_entry_safe(
+				entry, tmp, &anti_replay_state.hash[i], node) {
+				if (ktime_before(entry->time,
+						 window_threshold)) {
 					hlist_del(&entry->node);
 					kfree(entry);
 					anti_replay_state.count--;
@@ -300,7 +305,7 @@ int tquic_early_data_derive_keys(struct tquic_connection *conn,
 	memcpy(&info[9], tquic_early_traffic_label,
 	       sizeof(tquic_early_traffic_label) - 1);
 	info_len = 9 + sizeof(tquic_early_traffic_label) - 1;
-	info[info_len++] = 0;  /* Empty context */
+	info[info_len++] = 0; /* Empty context */
 
 	/* Set key from resumption secret */
 	err = crypto_shash_setkey(hash, ticket->resumption_secret,
@@ -407,7 +412,7 @@ struct sk_buff *tquic_early_data_build_packet(struct tquic_connection *conn,
 	if (!skb)
 		return NULL;
 
-	skb_reserve(skb, 64);  /* Room for UDP/IP headers */
+	skb_reserve(skb, 64); /* Room for UDP/IP headers */
 
 	/*
 	 * Get next packet number from the PN space.
@@ -438,25 +443,31 @@ struct sk_buff *tquic_early_data_build_packet(struct tquic_connection *conn,
 	p[2] = (conn->version >> 8) & 0xff;
 	p[3] = conn->version & 0xff;
 
-	/* DCID Length + DCID */
-	p = skb_put(skb, 1);
-	*p = conn->dcid.len;
-	if (conn->dcid.len > 0) {
-		p = skb_put(skb, conn->dcid.len);
-		memcpy(p, conn->dcid.id, conn->dcid.len);
+	/* DCID Length + DCID - use local_cid.len for casting */
+	{
+		u8 dcid_len_val = conn->dcid.len;
+		p = skb_put(skb, 1);
+		*p = dcid_len_val;
+		if (dcid_len_val > 0) {
+			p = skb_put(skb, dcid_len_val);
+			memcpy(p, conn->dcid.id, dcid_len_val);
+		}
 	}
 
-	/* SCID Length + SCID */
-	p = skb_put(skb, 1);
-	*p = conn->scid.len;
-	if (conn->scid.len > 0) {
-		p = skb_put(skb, conn->scid.len);
-		memcpy(p, conn->scid.id, conn->scid.len);
+	/* SCID Length + SCID - use local variable for casting */
+	{
+		u8 scid_len_val = conn->scid.len;
+		p = skb_put(skb, 1);
+		*p = scid_len_val;
+		if (scid_len_val > 0) {
+			p = skb_put(skb, scid_len_val);
+			memcpy(p, conn->scid.id, scid_len_val);
+		}
 	}
 
 	/* Length field - 2-byte varint placeholder */
 	p = skb_put(skb, 2);
-	p[0] = 0x40;  /* 2-byte varint prefix */
+	p[0] = 0x40; /* 2-byte varint prefix */
 	p[1] = 0x00;
 
 	pn_offset = skb->len;
@@ -497,8 +508,8 @@ struct sk_buff *tquic_early_data_build_packet(struct tquic_connection *conn,
 	 * with the crypto layer.
 	 */
 
-	pr_debug("TQUIC: Built 0-RTT packet header, pn=%llu, hdr_len=%d\n",
-		 pn, header_len);
+	pr_debug("TQUIC: Built 0-RTT packet header, pn=%llu, hdr_len=%d\n", pn,
+		 header_len);
 
 	return skb;
 }
@@ -681,7 +692,8 @@ EXPORT_SYMBOL(tquic_session_ticket_store);
  *
  * Returns the stored session ticket or NULL if none exists.
  */
-struct tquic_session_ticket *tquic_session_ticket_retrieve(struct tquic_sock *tsk)
+struct tquic_session_ticket *
+tquic_session_ticket_retrieve(struct tquic_sock *tsk)
 {
 	if (!tsk)
 		return NULL;

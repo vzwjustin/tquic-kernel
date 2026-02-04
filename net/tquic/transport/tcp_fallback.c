@@ -476,7 +476,7 @@ int tquic_fallback_trigger(struct tquic_fallback_ctx *ctx,
 	fn = tquic_fallback_pernet(net);
 
 	if (!fn->enabled)
-		return -ENOTSUP;
+		return -EOPNOTSUPP;
 
 	spin_lock(&ctx->lock);
 
@@ -701,7 +701,7 @@ int tquic_fallback_send(struct tquic_fallback_ctx *ctx,
 	spin_unlock(&ctx->lock);
 
 	/* UDP path - would use normal QUIC send path */
-	return -ENOTSUP;
+	return -EOPNOTSUPP;
 }
 EXPORT_SYMBOL_GPL(tquic_fallback_send);
 

@@ -906,7 +906,7 @@ void tquic_pref_addr_client_on_failed(struct tquic_connection *conn, int error)
 	/* Notify via netlink */
 	if (conn->active_path)
 		tquic_nl_path_event(conn, conn->active_path,
-				    TQUIC_PATH_EVENT_MIGRATE_FAILED);
+				    TQUIC_PATH_EVENT_FAILED);
 }
 EXPORT_SYMBOL_GPL(tquic_pref_addr_client_on_failed);
 

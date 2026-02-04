@@ -682,8 +682,8 @@ void tquic_pmtud_on_packet_loss(struct tquic_path *path, u32 pkt_size)
 	if (pkt_size <= TQUIC_BASE_PLPMTU)
 		return;
 
-	/* In production, pmtud would be retrieved from path structure */
-	pmtud = NULL;
+	/* Get PMTUD state from path structure */
+	pmtud = path->pmtud_state;
 
 	if (!pmtud)
 		return;
@@ -733,8 +733,8 @@ void tquic_pmtud_on_ack(struct tquic_path *path, u32 pkt_size)
 	if (pkt_size <= TQUIC_BASE_PLPMTU)
 		return;
 
-	/* In production, pmtud would be retrieved from path structure */
-	pmtud = NULL;
+	/* Get PMTUD state from path structure */
+	pmtud = path->pmtud_state;
 
 	if (!pmtud)
 		return;

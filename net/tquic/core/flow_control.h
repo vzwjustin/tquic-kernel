@@ -504,4 +504,69 @@ void tquic_fc_reset(struct tquic_fc_state *fc);
 /* Get flow control statistics */
 void tquic_fc_get_stats(struct tquic_fc_state *fc, void *stats, size_t len);
 
+/*
+ * Simplified Flow Control API (quic_flow.c)
+ *
+ * These functions provide a simpler flow control interface that operates
+ * directly on tquic_connection and tquic_stream structures. They are
+ * exported for use by other TQUIC modules.
+ */
+
+/* Connection-level flow control */
+void tquic_flow_control_init(struct tquic_connection *conn);
+bool tquic_flow_control_can_send(struct tquic_connection *conn, u64 bytes);
+void tquic_flow_control_on_data_sent(struct tquic_connection *conn, u64 bytes);
+void tquic_flow_control_on_data_recvd(struct tquic_connection *conn, u64 bytes);
+void tquic_flow_control_update_max_data(struct tquic_connection *conn);
+void tquic_flow_control_max_data_received(struct tquic_connection *conn, u64 max_data);
+u64 tquic_flow_control_get_available(struct tquic_connection *conn);
+void tquic_flow_control_send_data_blocked(struct tquic_connection *conn);
+void tquic_flow_control_data_blocked_received(struct tquic_connection *conn, u64 limit);
+
+/* Stream-level flow control */
+void tquic_stream_flow_control_init(struct tquic_stream *stream,
+				    u64 max_stream_data_local,
+				    u64 max_stream_data_remote);
+bool tquic_stream_flow_control_can_send(struct tquic_stream *stream, u64 bytes);
+void tquic_stream_flow_control_on_data_sent(struct tquic_stream *stream, u64 bytes);
+int tquic_stream_flow_control_check_recv_limit(struct tquic_stream *stream,
+					       u64 offset, u64 len);
+void tquic_stream_flow_control_on_data_recvd(struct tquic_stream *stream,
+					     u64 offset, u64 len);
+void tquic_stream_flow_control_max_stream_data_received(struct tquic_stream *stream,
+							u64 max_stream_data);
+u64 tquic_stream_flow_control_get_available(struct tquic_stream *stream);
+
+/* Stream count management */
+bool tquic_streams_can_open(struct tquic_connection *conn, bool unidirectional);
+void tquic_streams_on_stream_opened(struct tquic_connection *conn, bool unidirectional);
+void tquic_streams_on_peer_stream_opened(struct tquic_connection *conn, bool unidirectional);
+void tquic_streams_max_streams_received(struct tquic_connection *conn,
+					u64 max_streams, bool unidirectional);
+void tquic_streams_send_blocked(struct tquic_connection *conn, bool unidirectional);
+
+/* Blocked frame handling */
+void tquic_stream_data_blocked_received(struct tquic_connection *conn,
+					u64 stream_id, u64 limit);
+void tquic_streams_blocked_received(struct tquic_connection *conn,
+				    u64 limit, bool unidirectional);
+
+/* Combined flow control checks */
+bool tquic_flow_can_send_stream_data(struct tquic_stream *stream, u64 bytes);
+void tquic_flow_on_stream_data_sent(struct tquic_stream *stream, u64 bytes);
+int tquic_flow_check_recv_limits(struct tquic_stream *stream, u64 offset, u64 len);
+void tquic_flow_on_stream_data_recvd(struct tquic_stream *stream, u64 offset, u64 len);
+
+/* Statistics */
+void tquic_flow_get_stats(struct tquic_connection *conn,
+			  u64 *local_max_data, u64 *local_data_recvd,
+			  u64 *remote_max_data, u64 *remote_data_sent);
+void tquic_stream_flow_get_stats(struct tquic_stream *stream,
+				 u64 *send_offset, u64 *send_max,
+				 u64 *recv_offset, u64 *recv_max);
+
+/* Module init/exit */
+int __init tquic_flow_init(void);
+void tquic_flow_exit(void);
+
 #endif /* _TQUIC_FLOW_CONTROL_H */

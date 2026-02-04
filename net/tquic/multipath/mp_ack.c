@@ -22,6 +22,7 @@
 #include <linux/timer.h>
 #include <linux/ktime.h>
 #include <linux/math64.h>
+#include <linux/limits.h>
 #include <net/tquic.h>
 
 #include "mp_frame.h"
@@ -1135,5 +1136,7 @@ void __exit tquic_mp_ack_exit(void)
 	pr_info("tquic: Multipath ACK processing cleaned up\n");
 }
 
+#ifndef TQUIC_OUT_OF_TREE
 MODULE_DESCRIPTION("TQUIC Multipath ACK Processing (RFC 9369)");
 MODULE_LICENSE("GPL");
+#endif

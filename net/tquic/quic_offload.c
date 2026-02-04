@@ -801,10 +801,11 @@ void tquic_udp_encap_destroy(struct tquic_sock *qsk)
 EXPORT_SYMBOL(tquic_udp_encap_destroy);
 
 /* Send a QUIC packet via UDP */
-int tquic_udp_send(struct tquic_sock *qsk, struct sk_buff *skb,
-		  struct sockaddr *dest)
+int tquic_udp_send(struct tquic_sock *tsk, struct sk_buff *skb,
+		   struct tquic_path *path)
 {
-	struct socket *sock = qsk->udp_sock;
+	struct socket *sock = tsk->udp_sock;
+	struct sockaddr *dest;
 	struct msghdr msg;
 	struct kvec iov;
 	int len;
@@ -812,6 +813,12 @@ int tquic_udp_send(struct tquic_sock *qsk, struct sk_buff *skb,
 
 	if (!sock)
 		return -ENOENT;
+
+	if (!path)
+		return -EINVAL;
+
+	/* Extract destination address from path */
+	dest = (struct sockaddr *)&path->remote_addr;
 
 	/* Setup message */
 	memset(&msg, 0, sizeof(msg));

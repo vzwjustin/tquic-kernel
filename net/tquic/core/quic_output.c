@@ -107,6 +107,15 @@ static DEFINE_PER_CPU(struct tquic_output_state, tquic_output_state);
 extern int sysctl_tquic_wmem[3];
 extern int sysctl_tquic_rmem[3];
 
+/*
+ * External function declarations for packet building.
+ * These are provided by other modules in the tquic implementation.
+ */
+extern bool tquic_ack_should_send(struct tquic_connection *conn, u8 pn_space);
+extern int tquic_crypto_encrypt(void *ctx, struct sk_buff *skb, u64 pn);
+extern int tquic_crypto_protect_header(void *ctx, struct sk_buff *skb,
+				       u8 pn_offset, u8 pn_len);
+
 /* Timer types for pacing */
 #define TQUIC_TIMER_PACING	5
 
@@ -175,13 +184,26 @@ struct tquic_stream_recv_buf {
  * UDP Socket Management
  */
 
-/* Create and configure UDP socket for TQUIC */
+/*
+ * tquic_create_udp_socket - Create and configure UDP socket for TQUIC
+ * @tsk: TQUIC socket
+ * @family: Address family (AF_INET or AF_INET6)
+ *
+ * Creates a kernel UDP socket for QUIC packet encapsulation. For kernel 6.12+,
+ * we access socket fields directly instead of using kernel_setsockopt() which
+ * has been removed.
+ *
+ * Returns 0 on success, negative error code on failure.
+ */
 static int tquic_create_udp_socket(struct tquic_sock *tsk, int family)
 {
 	struct socket *sock;
 	struct sock *sk;
+	struct udp_sock *up;
 	int err;
-	int val;
+
+	if (!tsk)
+		return -EINVAL;
 
 	err = sock_create_kern(sock_net((struct sock *)tsk), family,
 			       SOCK_DGRAM, IPPROTO_UDP, &sock);
@@ -189,45 +211,120 @@ static int tquic_create_udp_socket(struct tquic_sock *tsk, int family)
 		return err;
 
 	sk = sock->sk;
+	up = (struct udp_sock *)sk;
 
-	/* Disable UDP checksums for IPv4 if hardware can do it */
-	if (family == AF_INET) {
-		val = 1;
-		sock_set_flag(sk, SOCK_NO_CHECK_TX);
-	}
+	/*
+	 * Disable UDP checksums for IPv4 if hardware can do it.
+	 * For kernel 6.12+, we set the socket field directly instead
+	 * of using kernel_setsockopt(SO_NO_CHECK).
+	 */
+	if (family == AF_INET)
+		sk->sk_no_check_tx = 1;
 
 	/* Enable non-blocking mode */
 	sock->file = NULL;
 	sk->sk_allocation = GFP_ATOMIC;
 
-	/* Set socket buffer sizes */
+	/*
+	 * Set socket buffer sizes directly on the socket.
+	 * kernel_setsockopt() is removed in kernel 6.12+.
+	 */
 	sk->sk_sndbuf = sysctl_tquic_wmem[1];
 	sk->sk_rcvbuf = sysctl_tquic_rmem[1];
 
-	/* Mark as TQUIC encapsulation socket */
-	udp_sk(sk)->encap_type = 1;  /* Generic encap */
+	/*
+	 * Mark as TQUIC encapsulation socket.
+	 * encap_type = 1 indicates generic encapsulation.
+	 */
+	up->encap_type = 1;
 
-	/* Link to TQUIC socket */
+	/* Link to TQUIC socket for callback dispatch */
 	sk->sk_user_data = tsk;
 
-	/* Enable GRO */
-	udp_set_bit(GRO_ENABLED, udp_sk(sk));
+	/*
+	 * Enable GRO (Generic Receive Offload) on the UDP socket.
+	 * For kernel 6.12+, we use set_bit() on udp_flags directly
+	 * instead of kernel_setsockopt(UDP_GRO).
+	 */
+	set_bit(UDP_FLAGS_GRO_ENABLED, &up->udp_flags);
+
+	/* Store the socket in the TQUIC socket structure */
+	tsk->udp_sock = sock;
 
 	return 0;
 }
 
-/* Bind UDP socket to local address */
+/*
+ * tquic_bind_udp_socket - Bind UDP socket to local address
+ * @tsk: TQUIC socket
+ * @addr: Local address to bind to
+ * @addr_len: Length of address structure
+ *
+ * Binds the UDP encapsulation socket to a local address. This allows the
+ * QUIC connection to use a specific local port and/or address.
+ *
+ * Returns 0 on success, negative error code on failure.
+ */
 static int tquic_bind_udp_socket(struct tquic_sock *tsk,
 				 struct sockaddr *addr, int addr_len)
 {
-	return -ENOENT;  /* Placeholder - needs UDP sock reference */
+	struct socket *sock;
+	int err;
+
+	if (!tsk)
+		return -EINVAL;
+
+	sock = tsk->udp_sock;
+	if (!sock)
+		return -ENOENT;
+
+	/* Use kernel_bind to bind the UDP socket */
+	err = kernel_bind(sock, addr, addr_len);
+	if (err)
+		return err;
+
+	/* Store the bound address */
+	memcpy(&tsk->bind_addr, addr, min_t(int, addr_len,
+					    sizeof(tsk->bind_addr)));
+
+	return 0;
 }
 
-/* Connect UDP socket to remote address */
+/*
+ * tquic_connect_udp_socket - Connect UDP socket to remote address
+ * @tsk: TQUIC socket
+ * @addr: Remote address to connect to
+ * @addr_len: Length of address structure
+ *
+ * Connects the UDP encapsulation socket to a remote address. This sets the
+ * default destination for outgoing packets, enabling sendmsg without
+ * specifying the destination each time.
+ *
+ * Returns 0 on success, negative error code on failure.
+ */
 static int tquic_connect_udp_socket(struct tquic_sock *tsk,
 				    struct sockaddr *addr, int addr_len)
 {
-	return -ENOENT;  /* Placeholder - needs UDP sock reference */
+	struct socket *sock;
+	int err;
+
+	if (!tsk)
+		return -EINVAL;
+
+	sock = tsk->udp_sock;
+	if (!sock)
+		return -ENOENT;
+
+	/* Use kernel_connect to connect the UDP socket */
+	err = kernel_connect(sock, addr, addr_len, O_NONBLOCK);
+	if (err && err != -EINPROGRESS)
+		return err;
+
+	/* Store the connected address */
+	memcpy(&tsk->connect_addr, addr, min_t(int, addr_len,
+					       sizeof(tsk->connect_addr)));
+
+	return 0;
 }
 
 /*
@@ -268,18 +365,20 @@ void tquic_free_tx_skb(struct sk_buff *skb)
 }
 EXPORT_SYMBOL(tquic_free_tx_skb);
 
+#ifndef TQUIC_OUT_OF_TREE
 /* Get ECN marking for path - use path's cc state */
-static u8 tquic_ecn_get_marking(struct tquic_path *path)
+u8 tquic_ecn_get_marking(struct tquic_path *path)
 {
 	/* Default to ECT(0) if ECN is enabled, otherwise Not-ECT */
 	return 0x02;  /* ECT(0) */
 }
 
 /* Track ECN-marked packet sent */
-static void tquic_ecn_on_packet_sent(struct tquic_path *path, u8 ecn_marking)
+void tquic_ecn_on_packet_sent(struct tquic_path *path, u8 ecn_marking)
 {
 	/* Track ECN counts - implementation specific */
 }
+#endif /* TQUIC_OUT_OF_TREE */
 
 /* Build UDP header for TQUIC packet */
 static void tquic_build_udp_header(struct sk_buff *skb,
@@ -451,40 +550,116 @@ static int tquic_xmit_skb(struct sk_buff *skb, struct tquic_connection *conn)
 	return err;
 }
 
-/* Send TQUIC packet using kernel_sendmsg interface */
+/*
+ * tquic_sendmsg_locked - Send TQUIC packet using kernel_sendmsg interface
+ * @tsk: TQUIC socket
+ * @skb: Socket buffer containing the QUIC packet to send
+ * @dest: Destination address (may be NULL if socket is connected)
+ *
+ * Sends a QUIC packet through the UDP encapsulation socket using the
+ * kernel_sendmsg() interface. This is the sendmsg path for packet transmission.
+ *
+ * The caller must hold appropriate locks. The skb is consumed regardless of
+ * success or failure (i.e., the caller should not free it).
+ *
+ * Returns number of bytes sent on success, negative error code on failure.
+ */
 static int tquic_sendmsg_locked(struct tquic_sock *tsk, struct sk_buff *skb,
 				struct sockaddr *dest)
 {
-	/* Placeholder - needs proper UDP socket reference from tsk */
-	return -ENOENT;
+	struct socket *sock;
+	struct msghdr msg;
+	struct kvec iov;
+	int addr_len;
+	int ret;
+
+	if (!tsk || !skb)
+		return -EINVAL;
+
+	sock = tsk->udp_sock;
+	if (!sock) {
+		kfree_skb(skb);
+		return -ENOENT;
+	}
+
+	/* Initialize message header */
+	memset(&msg, 0, sizeof(msg));
+
+	/* Set destination address if provided */
+	if (dest) {
+		msg.msg_name = dest;
+		if (dest->sa_family == AF_INET)
+			addr_len = sizeof(struct sockaddr_in);
+		else if (dest->sa_family == AF_INET6)
+			addr_len = sizeof(struct sockaddr_in6);
+		else {
+			kfree_skb(skb);
+			return -EAFNOSUPPORT;
+		}
+		msg.msg_namelen = addr_len;
+	}
+
+	/* Set up the I/O vector to point to skb data */
+	iov.iov_base = skb->data;
+	iov.iov_len = skb->len;
+
+	/* Send the packet */
+	ret = kernel_sendmsg(sock, &msg, &iov, 1, skb->len);
+
+	/* Always consume the skb */
+	kfree_skb(skb);
+
+	return ret;
 }
 
 /*
- * Set ECN marking on UDP socket before sending
+ * tquic_output_set_ecn - Set ECN marking on UDP socket before sending
+ * @sock: UDP socket to configure
+ * @path: TQUIC path containing address family information
  *
  * Per RFC 9000 Section 13.4, we need to set ECN bits in the IP header.
- * For the sendmsg path, we do this by setting the IP_TOS socket option.
+ * For the sendmsg path, we do this by setting the TOS/traffic class
+ * directly on the socket. This avoids kernel_setsockopt() which is
+ * removed in kernel 6.12+.
+ *
+ * For IPv4, we set inet_sk(sk)->tos which controls the IP_TOS field.
+ * For IPv6, we set inet6_sk(sk)->tclass which controls the traffic class.
+ *
+ * The ECN bits are the low 2 bits of the TOS/traffic class field:
+ *   00 = Not-ECT (ECN not supported)
+ *   01 = ECT(1)
+ *   10 = ECT(0) - preferred for QUIC
+ *   11 = CE (Congestion Experienced)
  */
 static void tquic_output_set_ecn(struct socket *sock, struct tquic_path *path)
 {
 	u8 ecn_marking;
-	int tos;
 
-	if (!sock || !path)
+	if (!sock || !sock->sk || !path)
 		return;
 
 	ecn_marking = tquic_ecn_get_marking(path);
 
-	/* Get current TOS value and update ECN bits */
+	/*
+	 * Set ECN bits on the socket directly. For kernel 6.12+, we access
+	 * socket fields directly instead of using kernel_setsockopt().
+	 */
 	if (path->local_addr.ss_family == AF_INET) {
-		tos = ecn_marking;  /* ECN bits are in low 2 bits */
-		kernel_setsockopt(sock, SOL_IP, IP_TOS,
-				  (char *)&tos, sizeof(tos));
-	} else if (path->local_addr.ss_family == AF_INET6) {
-		tos = ecn_marking;
-		kernel_setsockopt(sock, SOL_IPV6, IPV6_TCLASS,
-				  (char *)&tos, sizeof(tos));
+		/*
+		 * For IPv4, set the TOS field on inet socket.
+		 * ECN bits are in the low 2 bits of the TOS byte.
+		 */
+		inet_sk(sock->sk)->tos = ecn_marking;
 	}
+#if IS_ENABLED(CONFIG_IPV6)
+	else if (path->local_addr.ss_family == AF_INET6) {
+		/*
+		 * For IPv6, set the traffic class on inet6 socket.
+		 * The traffic class includes DSCP (6 bits) + ECN (2 bits).
+		 */
+		inet6_sk(sock->sk)->tclass = ecn_marking;
+	}
+#endif
 }
 
 /* Congestion control on packet sent - use path's cc state */
@@ -765,7 +940,7 @@ EXPORT_SYMBOL(tquic_output_gso);
  */
 
 /* Coalesce multiple TQUIC packets */
-struct sk_buff *tquic_coalesce_packets(struct sk_buff_head *packets)
+struct sk_buff *tquic_coalesce_skbs(struct sk_buff_head *packets)
 {
 	struct sk_buff *coalesced, *skb;
 	u32 total_len = 0;
@@ -799,7 +974,7 @@ struct sk_buff *tquic_coalesce_packets(struct sk_buff_head *packets)
 
 	return coalesced;
 }
-EXPORT_SYMBOL(tquic_coalesce_packets);
+EXPORT_SYMBOL(tquic_coalesce_skbs);
 
 /* Send coalesced packet */
 int tquic_output_coalesced(struct tquic_connection *conn,
@@ -808,7 +983,7 @@ int tquic_output_coalesced(struct tquic_connection *conn,
 	struct sk_buff *skb;
 	int err;
 
-	skb = tquic_coalesce_packets(packets);
+	skb = tquic_coalesce_skbs(packets);
 	if (!skb)
 		return -ENOMEM;
 
@@ -999,6 +1174,459 @@ out_put_stream:
 EXPORT_SYMBOL(tquic_do_sendmsg);
 
 /*
+ * TQUIC SKB Control Block
+ *
+ * This structure is used by tquic_packet_build to communicate packet metadata
+ * to the crypto layer. The layout matches tquic_skb_cb defined in quic_packet.c
+ * and quic_key_update.h.
+ */
+struct tquic_build_skb_cb {
+	u64	pn;		/* Packet number */
+	u32	header_len;	/* Header length (for AEAD AAD) */
+	u8	pn_len;		/* Packet number length (1-4) */
+	u8	packet_type;	/* Packet type (for long header) */
+	u8	dcid_len;	/* DCID length */
+	u8	scid_len;	/* SCID length */
+};
+
+#define TQUIC_BUILD_SKB_CB(skb) ((struct tquic_build_skb_cb *)((skb)->cb))
+
+/*
+ * tquic_packet_build - Build a QUIC packet for the given packet number space
+ * @conn: TQUIC connection
+ * @pn_space: Packet number space (INITIAL, HANDSHAKE, or APPLICATION)
+ *
+ * This function builds a complete QUIC packet including:
+ * 1. Allocating an sk_buff
+ * 2. Building the appropriate header (long for Initial/Handshake, short for 1-RTT)
+ * 3. Including pending frames for that space (ACK, CRYPTO, STREAM, etc.)
+ * 4. Applying AEAD encryption to the payload
+ * 5. Applying header protection
+ *
+ * Per RFC 9000, the function handles three packet number spaces:
+ * - TQUIC_PN_SPACE_INITIAL (0): Initial packets during handshake
+ * - TQUIC_PN_SPACE_HANDSHAKE (1): Handshake packets
+ * - TQUIC_PN_SPACE_APPLICATION (2): 1-RTT application data packets
+ *
+ * Returns: sk_buff containing the built packet, or NULL on failure
+ */
+struct sk_buff *tquic_packet_build(struct tquic_connection *conn, int pn_space)
+{
+	struct tquic_pn_space *space;
+	struct tquic_path *path;
+	struct sk_buff *skb;
+	struct tquic_build_skb_cb *cb;
+	u8 *header;
+	u8 *payload;
+	u8 *p;
+	u64 pn;
+	int header_len;
+	int payload_len;
+	int pn_len;
+	int pn_offset;
+	int total_len;
+	int remaining;
+	int ret;
+	bool need_ack;
+	bool is_long_header;
+	u8 first_byte;
+	u8 packet_type;
+
+	if (!conn || pn_space < 0 || pn_space >= TQUIC_PN_SPACE_COUNT)
+		return NULL;
+
+	space = &conn->pn_spaces[pn_space];
+	path = conn->active_path;
+
+	if (!path)
+		return NULL;
+
+	/* Check if keys are available and not discarded */
+	if (!space->keys_available || space->keys_discarded)
+		return NULL;
+
+	/*
+	 * Allocate working buffers for header and payload construction.
+	 * We build the packet in these buffers first, then copy to the skb
+	 * after encryption is complete.
+	 */
+	header = kmalloc(128, GFP_ATOMIC);
+	payload = kmalloc(path->mtu, GFP_ATOMIC);
+	if (!header || !payload) {
+		kfree(header);
+		kfree(payload);
+		return NULL;
+	}
+
+	/*
+	 * Get next packet number and increment atomically.
+	 * RFC 9000 Section 12.3: Packet numbers MUST increase by at least 1.
+	 */
+	pn = space->next_pn++;
+
+	/*
+	 * Determine packet type based on packet number space.
+	 * Per RFC 9000:
+	 * - Initial packets use long header with type 0x00
+	 * - Handshake packets use long header with type 0x02
+	 * - Application data (1-RTT) uses short header
+	 */
+	is_long_header = (pn_space != TQUIC_PN_SPACE_APPLICATION);
+
+	/*
+	 * Calculate packet number length.
+	 * RFC 9000 Section 17.1: PN length is encoded using 2 bits,
+	 * representing 1-4 bytes. For simplicity and to ensure packets
+	 * are not rejected due to truncated PNs, we use 4 bytes for
+	 * long headers and minimal encoding for short headers.
+	 */
+	if (is_long_header) {
+		pn_len = 4;
+	} else {
+		/* For short header, use minimal encoding based on distance from largest_acked */
+		u64 diff = pn - space->largest_acked;
+		if (diff < 128)
+			pn_len = 1;
+		else if (diff < 32768)
+			pn_len = 2;
+		else if (diff < 8388608)
+			pn_len = 3;
+		else
+			pn_len = 4;
+	}
+
+	/*
+	 * Build packet header
+	 */
+	p = header;
+
+	if (is_long_header) {
+		/*
+		 * Long Header Format (RFC 9000 Section 17.2):
+		 *
+		 * +-+-+-+-+-+-+-+-+
+		 * |1|1|T T|X X X X|  First byte
+		 * +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+		 * |                         Version (32)                         |
+		 * +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+		 * | DCID Len (8)  |
+		 * +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+		 * |               Destination Connection ID (0..160)           ...
+		 * +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+		 * | SCID Len (8)  |
+		 * +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+		 * |                 Source Connection ID (0..160)              ...
+		 * +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+		 */
+		switch (pn_space) {
+		case TQUIC_PN_SPACE_INITIAL:
+			packet_type = 0x00;  /* Initial */
+			break;
+		case TQUIC_PN_SPACE_HANDSHAKE:
+			packet_type = 0x02;  /* Handshake */
+			break;
+		default:
+			packet_type = 0x01;  /* 0-RTT (shouldn't reach here) */
+			break;
+		}
+
+		/* First byte: form(1) | fixed(1) | type(2) | reserved(2) | pn_len(2) */
+		first_byte = 0x80 | 0x40 | (packet_type << 4) | (pn_len - 1);
+		*p++ = first_byte;
+
+		/* Version (4 bytes, big-endian) */
+		*p++ = (conn->version >> 24) & 0xff;
+		*p++ = (conn->version >> 16) & 0xff;
+		*p++ = (conn->version >> 8) & 0xff;
+		*p++ = conn->version & 0xff;
+
+		/* DCID Length + DCID */
+		*p++ = conn->dcid.len;
+		if (conn->dcid.len > 0) {
+			memcpy(p, conn->dcid.id, conn->dcid.len);
+			p += conn->dcid.len;
+		}
+
+		/* SCID Length + SCID */
+		*p++ = conn->scid.len;
+		if (conn->scid.len > 0) {
+			memcpy(p, conn->scid.id, conn->scid.len);
+			p += conn->scid.len;
+		}
+
+		/* Token (Initial packets only) */
+		if (pn_space == TQUIC_PN_SPACE_INITIAL) {
+			/* Token length (0 for client initial without retry) */
+			*p++ = 0;
+		}
+
+		/* Length field placeholder - will be filled after payload is built */
+		/* We reserve 2 bytes for length (sufficient for packets up to 16383 bytes) */
+		pn_offset = p - header + 2;  /* After length field */
+
+	} else {
+		/*
+		 * Short Header Format (RFC 9000 Section 17.3):
+		 *
+		 * +-+-+-+-+-+-+-+-+
+		 * |0|1|S|R|R|K|P P|  First byte
+		 * +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+		 * |               Destination Connection ID (0..160)           ...
+		 * +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+		 * |                      Packet Number (8/16/24/32)            ...
+		 * +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+		 */
+		packet_type = 0xff;  /* Not used for short header */
+
+		/* First byte: form(0) | fixed(1) | spin(0) | reserved(2) | key_phase | pn_len(2) */
+		first_byte = 0x40 | (pn_len - 1);  /* Key phase 0, spin bit 0 */
+		*p++ = first_byte;
+
+		/* DCID (no length field - known from connection state) */
+		if (conn->dcid.len > 0) {
+			memcpy(p, conn->dcid.id, conn->dcid.len);
+			p += conn->dcid.len;
+		}
+
+		pn_offset = p - header;
+	}
+
+	/*
+	 * Build payload with pending frames
+	 */
+	payload_len = 0;
+	remaining = path->mtu - (p - header) - pn_len - 16;  /* 16 = AEAD tag */
+
+	if (is_long_header)
+		remaining -= 2;  /* Account for length field */
+
+	if (remaining <= 0) {
+		kfree(header);
+		kfree(payload);
+		return NULL;
+	}
+
+	/*
+	 * Check if we need to send an ACK frame for this space.
+	 * RFC 9000 Section 13.2: ACK frames MUST be sent in packets
+	 * of the same encryption level as the packets being acknowledged.
+	 */
+	need_ack = tquic_ack_should_send(conn, pn_space);
+
+	if (need_ack) {
+		/*
+		 * Generate ACK frame. We use a simplified ACK with just
+		 * the largest acknowledged packet number and first range.
+		 */
+		u8 *ack_start = payload + payload_len;
+		u64 ack_delay;
+		u64 first_range;
+		int ack_len;
+
+		/* Frame type: ACK (0x02) */
+		*ack_start = 0x02;
+		ack_len = 1;
+
+		/* Largest Acknowledged */
+		ret = tquic_varint_encode(space->largest_recv_pn,
+					  ack_start + ack_len,
+					  remaining - ack_len);
+		if (ret < 0)
+			goto skip_ack;
+		ack_len += ret;
+
+		/* ACK Delay (in microseconds, scaled by ack_delay_exponent) */
+		ack_delay = 0;  /* Simplified - would compute from receive time */
+		ret = tquic_varint_encode(ack_delay, ack_start + ack_len,
+					  remaining - ack_len);
+		if (ret < 0)
+			goto skip_ack;
+		ack_len += ret;
+
+		/* ACK Range Count (0 = only first range) */
+		ret = tquic_varint_encode(0, ack_start + ack_len,
+					  remaining - ack_len);
+		if (ret < 0)
+			goto skip_ack;
+		ack_len += ret;
+
+		/* First ACK Range */
+		first_range = space->largest_recv_pn;  /* Simplified */
+		ret = tquic_varint_encode(first_range, ack_start + ack_len,
+					  remaining - ack_len);
+		if (ret < 0)
+			goto skip_ack;
+		ack_len += ret;
+
+		payload_len += ack_len;
+		remaining -= ack_len;
+		space->last_ack_time = ktime_get();
+	}
+
+skip_ack:
+	/*
+	 * Add pending control frames from the connection's control_frames queue.
+	 * These are pre-built frames waiting to be sent.
+	 */
+	while (!skb_queue_empty(&conn->control_frames) && remaining > 0) {
+		struct sk_buff *frame_skb;
+
+		frame_skb = skb_peek(&conn->control_frames);
+		if (!frame_skb)
+			break;
+
+		if (frame_skb->len > remaining)
+			break;
+
+		/* Dequeue and copy frame data to payload */
+		frame_skb = skb_dequeue(&conn->control_frames);
+		memcpy(payload + payload_len, frame_skb->data, frame_skb->len);
+		payload_len += frame_skb->len;
+		remaining -= frame_skb->len;
+		kfree_skb(frame_skb);
+	}
+
+	/*
+	 * RFC 9000 Section 14.1: Initial packets MUST be padded to at least
+	 * 1200 bytes to prevent amplification attacks.
+	 */
+	if (pn_space == TQUIC_PN_SPACE_INITIAL) {
+		int min_payload = 1200 - (p - header) - 2 - pn_len - 16;
+		if (payload_len < min_payload && min_payload <= remaining + payload_len) {
+			/* Add PADDING frames (0x00) */
+			int padding = min_payload - payload_len;
+			memset(payload + payload_len, 0, padding);
+			payload_len += padding;
+		}
+	}
+
+	/*
+	 * If no payload was generated, we shouldn't send an empty packet
+	 * (unless there was an ACK to send).
+	 */
+	if (payload_len == 0 && !need_ack) {
+		kfree(header);
+		kfree(payload);
+		return NULL;
+	}
+
+	/*
+	 * Complete the header with Length field (long header only) and PN
+	 */
+	if (is_long_header) {
+		/* Length = PN length + payload length + AEAD tag (16 bytes) */
+		u64 length = pn_len + payload_len + 16;
+		int len_bytes;
+
+		/* Encode length using 2-byte varint (0x40 prefix) */
+		header[pn_offset - 2] = 0x40 | ((length >> 8) & 0x3f);
+		header[pn_offset - 1] = length & 0xff;
+		len_bytes = 2;
+
+		header_len = pn_offset;
+	} else {
+		header_len = pn_offset;
+	}
+
+	/* Encode packet number */
+	switch (pn_len) {
+	case 1:
+		header[header_len++] = pn & 0xff;
+		break;
+	case 2:
+		header[header_len++] = (pn >> 8) & 0xff;
+		header[header_len++] = pn & 0xff;
+		break;
+	case 3:
+		header[header_len++] = (pn >> 16) & 0xff;
+		header[header_len++] = (pn >> 8) & 0xff;
+		header[header_len++] = pn & 0xff;
+		break;
+	case 4:
+		header[header_len++] = (pn >> 24) & 0xff;
+		header[header_len++] = (pn >> 16) & 0xff;
+		header[header_len++] = (pn >> 8) & 0xff;
+		header[header_len++] = pn & 0xff;
+		break;
+	}
+
+	/*
+	 * Allocate sk_buff for the complete packet
+	 */
+	total_len = header_len + payload_len + 16;  /* 16 = AEAD tag */
+	skb = alloc_skb(TQUIC_OUTPUT_SKB_HEADROOM + total_len, GFP_ATOMIC);
+	if (!skb) {
+		kfree(header);
+		kfree(payload);
+		return NULL;
+	}
+
+	skb_reserve(skb, TQUIC_OUTPUT_SKB_HEADROOM);
+
+	/* Copy header to skb */
+	skb_put_data(skb, header, header_len);
+
+	/* Copy payload to skb */
+	skb_put_data(skb, payload, payload_len);
+
+	/* Set up packet control block for crypto */
+	cb = TQUIC_BUILD_SKB_CB(skb);
+	cb->pn = pn;
+	cb->header_len = header_len;
+	cb->pn_len = pn_len;
+	cb->packet_type = packet_type;
+	cb->dcid_len = conn->dcid.len;
+	cb->scid_len = is_long_header ? conn->scid.len : 0;
+
+	/*
+	 * Apply AEAD encryption to the payload (RFC 9001 Section 5.3).
+	 * The header serves as Additional Authenticated Data (AAD).
+	 * The nonce is constructed from the IV XORed with the packet number.
+	 */
+	if (conn->crypto_state) {
+		ret = tquic_crypto_encrypt(conn->crypto_state, skb, pn);
+		if (ret < 0) {
+			kfree_skb(skb);
+			kfree(header);
+			kfree(payload);
+			return NULL;
+		}
+	}
+
+	/*
+	 * Apply header protection (RFC 9001 Section 5.4).
+	 * This masks the packet number and part of the first byte to
+	 * make it impossible to determine packet numbers without decryption.
+	 */
+	if (conn->crypto_state) {
+		ret = tquic_crypto_protect_header(conn->crypto_state, skb,
+						  pn_offset, pn_len);
+		if (ret < 0) {
+			kfree_skb(skb);
+			kfree(header);
+			kfree(payload);
+			return NULL;
+		}
+	}
+
+	/* Set socket owner for memory accounting */
+	if (conn->sk)
+		skb_set_owner_w(skb, conn->sk);
+
+	/* Update packet number space state */
+	space->largest_sent = pn;
+
+	/* Update connection statistics */
+	conn->stats.tx_packets++;
+
+	kfree(header);
+	kfree(payload);
+
+	return skb;
+}
+EXPORT_SYMBOL(tquic_packet_build);
+
+/*
  * Module Initialization
  */
 
@@ -1056,21 +1684,13 @@ void tquic_stream_handle_stop_sending(struct tquic_stream *stream, u64 error_cod
 }
 EXPORT_SYMBOL(tquic_stream_handle_stop_sending);
 
-/* Helper to receive stream data */
-int tquic_stream_recv_data(struct tquic_stream *stream, u64 offset,
-			   const u8 *data, u32 len, bool fin)
-{
-	/* Simplified implementation - queue data for stream */
-	if (fin) {
-		stream->fin_received = 1;
-	}
-
-	/* Wake up readers */
-	wake_up(&stream->wait);
-
-	return 0;
-}
-EXPORT_SYMBOL(tquic_stream_recv_data);
+/*
+ * tquic_stream_recv_data is defined in core/stream.c with full implementation.
+ * It has signature:
+ *   int tquic_stream_recv_data(struct tquic_stream_manager *mgr,
+ *                              struct tquic_stream *stream,
+ *                              u64 offset, struct sk_buff *skb, bool fin)
+ */
 
 /* Process a frame in NEW_CONNECTION_ID format */
 int tquic_frame_process_new_cid(struct tquic_connection *conn,
@@ -1121,103 +1741,12 @@ int tquic_frame_process_new_cid(struct tquic_connection *conn,
 }
 EXPORT_SYMBOL(tquic_frame_process_new_cid);
 
-/* Variable-length integer decoder */
-int tquic_varint_decode(const u8 *data, size_t len, u64 *value)
-{
-	u8 prefix;
-	int varint_len;
-
-	if (len < 1)
-		return -EINVAL;
-
-	prefix = data[0] >> 6;
-
-	switch (prefix) {
-	case 0:
-		*value = data[0] & 0x3f;
-		return 1;
-	case 1:
-		if (len < 2)
-			return -EINVAL;
-		*value = ((u64)(data[0] & 0x3f) << 8) | data[1];
-		return 2;
-	case 2:
-		if (len < 4)
-			return -EINVAL;
-		*value = ((u64)(data[0] & 0x3f) << 24) |
-			 ((u64)data[1] << 16) |
-			 ((u64)data[2] << 8) |
-			 data[3];
-		return 4;
-	case 3:
-		if (len < 8)
-			return -EINVAL;
-		*value = ((u64)(data[0] & 0x3f) << 56) |
-			 ((u64)data[1] << 48) |
-			 ((u64)data[2] << 40) |
-			 ((u64)data[3] << 32) |
-			 ((u64)data[4] << 24) |
-			 ((u64)data[5] << 16) |
-			 ((u64)data[6] << 8) |
-			 data[7];
-		return 8;
-	}
-
-	return -EINVAL;
-}
-EXPORT_SYMBOL(tquic_varint_decode);
-
-/* Variable-length integer encoder (RFC 9000 Section 16) */
-int tquic_varint_encode(u64 value, u8 *data, size_t len)
-{
-	if (value <= TQUIC_VARINT_1BYTE_MAX) {
-		if (len < 1)
-			return -ENOSPC;
-		data[0] = value;
-		return 1;
-	} else if (value <= TQUIC_VARINT_2BYTE_MAX) {
-		if (len < 2)
-			return -ENOSPC;
-		data[0] = TQUIC_VARINT_2BYTE_PREFIX | (value >> 8);
-		data[1] = value & 0xff;
-		return 2;
-	} else if (value <= TQUIC_VARINT_4BYTE_MAX) {
-		if (len < 4)
-			return -ENOSPC;
-		data[0] = TQUIC_VARINT_4BYTE_PREFIX | (value >> 24);
-		data[1] = (value >> 16) & 0xff;
-		data[2] = (value >> 8) & 0xff;
-		data[3] = value & 0xff;
-		return 4;
-	} else {
-		if (len < 8)
-			return -ENOSPC;
-		data[0] = TQUIC_VARINT_8BYTE_PREFIX | (value >> 56);
-		data[1] = (value >> 48) & 0xff;
-		data[2] = (value >> 40) & 0xff;
-		data[3] = (value >> 32) & 0xff;
-		data[4] = (value >> 24) & 0xff;
-		data[5] = (value >> 16) & 0xff;
-		data[6] = (value >> 8) & 0xff;
-		data[7] = value & 0xff;
-		return 8;
-	}
-}
-EXPORT_SYMBOL(tquic_varint_encode);
-
-/* Get varint encoded length (RFC 9000 Section 16) */
-int tquic_varint_len(u64 value)
-{
-	if (value <= TQUIC_VARINT_1BYTE_MAX)
-		return 1;
-	else if (value <= TQUIC_VARINT_2BYTE_MAX)
-		return 2;
-	else if (value <= TQUIC_VARINT_4BYTE_MAX)
-		return 4;
-	else
-		return 8;
-}
-EXPORT_SYMBOL(tquic_varint_len);
+/*
+ * Variable-length integer functions (tquic_varint_decode, tquic_varint_encode,
+ * tquic_varint_len) are defined in core/varint.c and exported with
+ * EXPORT_SYMBOL_GPL. This file uses those functions via the declarations
+ * in <net/tquic.h> or <net/tquic_frame.h>.
+ */
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Linux QUIC Authors");

@@ -638,7 +638,7 @@ static void bbrv3_on_ack(void *cong_data, u64 bytes_acked, u64 rtt_us)
 	case BBR3_DRAIN:
 		bbrv3_check_drain_done(bbr);
 		/* Check bytes-in-flight, not cwnd, per BBRv3 spec */
-		if (bbr->path && bbr->path->bytes_in_flight <= bbrv3_bdp(bbr))
+		if (bbr->path && bbr->path->cc.bytes_in_flight <= bbrv3_bdp(bbr))
 			bbrv3_enter_probe_bw(bbr);
 		break;
 
@@ -717,7 +717,7 @@ static bool bbrv3_can_send(void *cong_data, u64 bytes)
 		return true;
 
 	/* Check bytes-in-flight + new packet against cwnd */
-	inflight = bbr->path ? bbr->path->bytes_in_flight : 0;
+	inflight = bbr->path ? bbr->path->cc.bytes_in_flight : 0;
 	return (inflight + bytes) <= bbr->cwnd;
 }
 

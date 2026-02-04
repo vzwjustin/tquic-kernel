@@ -1293,10 +1293,12 @@ static int __init tquic_init(void)
 		if (err)
 			goto out_stream_cache;
 
-		err = percpu_counter_init(&tquic_orphan_count, 0, GFP_KERNEL);
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 4, 0)
+		/* Only pre-6.4 uses percpu_counter for orphan count */
+		err = percpu_counter_init(&tquic_orphan_count_percpu, 0, GFP_KERNEL);
 		if (err)
 			goto out_sockets_counter;
-
+#endif
 		tquic_percpu_initialized = true;
 	}
 
@@ -1375,7 +1377,9 @@ out_proto:
 out_orphan_counter:
 	if (!tquic_percpu_initialized)
 		goto out_stream_cache;
-	percpu_counter_destroy(&tquic_orphan_count);
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 4, 0)
+	percpu_counter_destroy(&tquic_orphan_count_percpu);
+#endif
 out_sockets_counter:
 	percpu_counter_destroy(&tquic_sockets_allocated);
 	tquic_percpu_initialized = false;
@@ -1405,7 +1409,9 @@ static void __exit tquic_exit(void)
 	tquic_proto_unregister_all();
 
 	if (tquic_percpu_initialized) {
-		percpu_counter_destroy(&tquic_orphan_count);
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 4, 0)
+		percpu_counter_destroy(&tquic_orphan_count_percpu);
+#endif
 		percpu_counter_destroy(&tquic_sockets_allocated);
 		tquic_percpu_initialized = false;
 	}

@@ -116,35 +116,43 @@ static void test_pm_flags_no_overlap(struct kunit *test)
 
 static void test_path_state_transitions(struct kunit *test)
 {
-	/* Verify path state enum values */
-	KUNIT_EXPECT_EQ(test, 0, (int)TQUIC_PATH_IDLE);
-	KUNIT_EXPECT_EQ(test, 1, (int)TQUIC_PATH_VALIDATING);
-	KUNIT_EXPECT_EQ(test, 2, (int)TQUIC_PATH_ACTIVE);
-	KUNIT_EXPECT_EQ(test, 3, (int)TQUIC_PATH_STANDBY);
-	KUNIT_EXPECT_EQ(test, 4, (int)TQUIC_PATH_FAILED);
+	/* Verify path state enum values per include/net/tquic.h */
+	KUNIT_EXPECT_EQ(test, 0, (int)TQUIC_PATH_UNUSED);
+	KUNIT_EXPECT_EQ(test, 1, (int)TQUIC_PATH_PENDING);
+	KUNIT_EXPECT_EQ(test, 2, (int)TQUIC_PATH_VALIDATED);
+	KUNIT_EXPECT_EQ(test, 3, (int)TQUIC_PATH_ACTIVE);
+	KUNIT_EXPECT_EQ(test, 4, (int)TQUIC_PATH_STANDBY);
+	KUNIT_EXPECT_EQ(test, 6, (int)TQUIC_PATH_FAILED);
+	KUNIT_EXPECT_EQ(test, 7, (int)TQUIC_PATH_CLOSED);
 }
 
 static void test_path_state_valid_transitions(struct kunit *test)
 {
 	/* Valid transitions:
-	 * IDLE -> VALIDATING (start validation)
-	 * VALIDATING -> ACTIVE (validation success)
-	 * VALIDATING -> FAILED (validation failure)
+	 * UNUSED -> PENDING (start validation)
+	 * PENDING -> VALIDATED (validation passed)
+	 * VALIDATED -> ACTIVE (path in use)
+	 * PENDING -> FAILED (validation failure)
 	 * ACTIVE -> STANDBY (demote)
 	 * STANDBY -> ACTIVE (promote)
 	 * ACTIVE -> FAILED (loss of connectivity)
 	 * STANDBY -> FAILED (loss of connectivity)
+	 * Any -> CLOSED (removal)
 	 */
 
-	/* Initial state should be IDLE */
-	enum tquic_path_state state = TQUIC_PATH_IDLE;
-	KUNIT_EXPECT_EQ(test, TQUIC_PATH_IDLE, state);
+	/* Initial state should be UNUSED */
+	enum tquic_path_state state = TQUIC_PATH_UNUSED;
+	KUNIT_EXPECT_EQ(test, TQUIC_PATH_UNUSED, state);
 
-	/* Transition to VALIDATING */
-	state = TQUIC_PATH_VALIDATING;
-	KUNIT_EXPECT_EQ(test, TQUIC_PATH_VALIDATING, state);
+	/* Transition to PENDING (validation in progress) */
+	state = TQUIC_PATH_PENDING;
+	KUNIT_EXPECT_EQ(test, TQUIC_PATH_PENDING, state);
 
-	/* Transition to ACTIVE on success */
+	/* Transition to VALIDATED on validation success */
+	state = TQUIC_PATH_VALIDATED;
+	KUNIT_EXPECT_EQ(test, TQUIC_PATH_VALIDATED, state);
+
+	/* Transition to ACTIVE (path in use) */
 	state = TQUIC_PATH_ACTIVE;
 	KUNIT_EXPECT_EQ(test, TQUIC_PATH_ACTIVE, state);
 

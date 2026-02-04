@@ -18,6 +18,7 @@
 #include <crypto/utils.h>
 #include <net/sock.h>
 #include <net/tquic.h>
+#include <net/tquic_pm.h>
 #include <uapi/linux/tquic_pm.h>
 
 /* Path validation constants */
@@ -120,8 +121,8 @@ void tquic_path_validation_timeout(struct timer_list *t)
 		path->validation.challenge_pending = false;
 		del_timer(&path->validation.timer);
 
-		/* Emit path failed event */
-		tquic_nl_path_event(conn, path, TQUIC_PM_EVENT_FAILED);
+		/* Emit path failed event via PM netlink */
+		tquic_pm_nl_send_event(net, conn, path, TQUIC_PM_EVENT_FAILED);
 
 		/* Trigger failover to other paths */
 		tquic_bond_path_failed(conn, path);
@@ -351,8 +352,10 @@ int tquic_path_handle_response(struct tquic_connection *conn,
 	/* Update activity timestamp */
 	path->last_activity = now;
 
-	/* Emit validation success event */
-	tquic_nl_path_event(conn, path, TQUIC_PM_EVENT_VALIDATED);
+	/* Emit validation success event via PM netlink */
+	if (conn && conn->sk)
+		tquic_pm_nl_send_event(sock_net(conn->sk), conn, path,
+				       TQUIC_PM_EVENT_VALIDATED);
 
 	/* Notify bonding layer path is available again */
 	tquic_bond_path_recovered(conn, path);

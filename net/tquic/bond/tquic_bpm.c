@@ -33,156 +33,162 @@
 #include <net/addrconf.h>
 
 #include "tquic_bonding.h"
+#include "tquic_bpm.h"
 
 /*
  * Path States (RFC 9000 Section 8.2 compliant)
+ *
+ * Note: enum tquic_bpm_path_state is defined in include/net/tquic.h
+ * We define local path state values for the path manager that map
+ * to the main enum values.
  */
-enum tquic_path_state {
-	TQUIC_PATH_CREATED = 0,		/* Path allocated, not yet validated */
-	TQUIC_PATH_VALIDATING,		/* PATH_CHALLENGE sent, awaiting response */
-	TQUIC_PATH_VALIDATED,		/* PATH_RESPONSE received, path valid */
-	TQUIC_PATH_ACTIVE,		/* Path in active use for data */
-	TQUIC_PATH_STANDBY,		/* Valid but not primary */
-	TQUIC_PATH_FAILED,		/* Path failed, awaiting cleanup */
-	TQUIC_PATH_CLOSING,		/* Path being torn down */
+/* enum tquic_bpm_path_state is defined in tquic_path.h */
 
-	__TQUIC_PATH_STATE_MAX
+static const char __maybe_unused *tquic_bpm_path_state_names[] = {
+	[TQUIC_BPM_PATH_CREATED] = "CREATED",
+	[TQUIC_BPM_PATH_VALIDATING] = "VALIDATING",
+	[TQUIC_BPM_PATH_VALIDATED] = "VALIDATED",
+	[TQUIC_BPM_PATH_ACTIVE] = "ACTIVE",
+	[TQUIC_BPM_PATH_STANDBY] = "STANDBY",
+	[TQUIC_BPM_PATH_FAILED] = "FAILED",
+	[TQUIC_BPM_PATH_CLOSING] = "CLOSING",
 };
 
-static const char *tquic_path_state_names[] = {
-	[TQUIC_PATH_CREATED]	= "CREATED",
-	[TQUIC_PATH_VALIDATING]	= "VALIDATING",
-	[TQUIC_PATH_VALIDATED]	= "VALIDATED",
-	[TQUIC_PATH_ACTIVE]	= "ACTIVE",
-	[TQUIC_PATH_STANDBY]	= "STANDBY",
-	[TQUIC_PATH_FAILED]	= "FAILED",
-	[TQUIC_PATH_CLOSING]	= "CLOSING",
-};
+/* Backward-compatible aliases for path state constants */
+#define TQUIC_BPM_PATH_UNUSED TQUIC_BPM_PATH_CREATED
+#define TQUIC_BPM_PATH_CREATED TQUIC_BPM_PATH_CREATED
+#define TQUIC_BPM_PATH_VALIDATING TQUIC_BPM_PATH_VALIDATING
+#define TQUIC_BPM_PATH_VALIDATED TQUIC_BPM_PATH_VALIDATED
+#define TQUIC_BPM_PATH_ACTIVE TQUIC_BPM_PATH_ACTIVE
+#define TQUIC_BPM_PATH_STANDBY TQUIC_BPM_PATH_STANDBY
+#define TQUIC_BPM_PATH_FAILED TQUIC_BPM_PATH_FAILED
+#define TQUIC_BPM_PATH_CLOSED TQUIC_BPM_PATH_CLOSING
+#define TQUIC_BPM_PATH_PENDING TQUIC_BPM_PATH_VALIDATING
+
+/* Alias for state name array (backwards compatibility) */
+#define tquic_bpm_path_state_names tquic_bpm_path_state_names
 
 /*
  * WAN Interface Types
  */
 enum tquic_wan_type {
 	TQUIC_WAN_UNKNOWN = 0,
-	TQUIC_WAN_ETHERNET,		/* Wired ethernet */
-	TQUIC_WAN_WIFI,			/* 802.11 wireless */
-	TQUIC_WAN_CELLULAR_3G,		/* 3G/HSPA */
-	TQUIC_WAN_CELLULAR_4G,		/* LTE */
-	TQUIC_WAN_CELLULAR_5G,		/* 5G NR */
-	TQUIC_WAN_SATELLITE,		/* Satellite link */
-	TQUIC_WAN_VPN,			/* VPN tunnel */
+	TQUIC_WAN_ETHERNET, /* Wired ethernet */
+	TQUIC_WAN_WIFI, /* 802.11 wireless */
+	TQUIC_WAN_CELLULAR_3G, /* 3G/HSPA */
+	TQUIC_WAN_CELLULAR_4G, /* LTE */
+	TQUIC_WAN_CELLULAR_5G, /* 5G NR */
+	TQUIC_WAN_SATELLITE, /* Satellite link */
+	TQUIC_WAN_VPN, /* VPN tunnel */
 
 	__TQUIC_WAN_TYPE_MAX
 };
 
 static const char *tquic_wan_type_names[] = {
-	[TQUIC_WAN_UNKNOWN]	= "unknown",
-	[TQUIC_WAN_ETHERNET]	= "ethernet",
-	[TQUIC_WAN_WIFI]	= "wifi",
-	[TQUIC_WAN_CELLULAR_3G]	= "3g",
-	[TQUIC_WAN_CELLULAR_4G]	= "lte",
-	[TQUIC_WAN_CELLULAR_5G]	= "5g",
-	[TQUIC_WAN_SATELLITE]	= "satellite",
-	[TQUIC_WAN_VPN]		= "vpn",
+	[TQUIC_WAN_UNKNOWN] = "unknown",     [TQUIC_WAN_ETHERNET] = "ethernet",
+	[TQUIC_WAN_WIFI] = "wifi",	     [TQUIC_WAN_CELLULAR_3G] = "3g",
+	[TQUIC_WAN_CELLULAR_4G] = "lte",     [TQUIC_WAN_CELLULAR_5G] = "5g",
+	[TQUIC_WAN_SATELLITE] = "satellite", [TQUIC_WAN_VPN] = "vpn",
 };
 
 /*
  * Path validation constants (RFC 9000)
  */
-#define TQUIC_PATH_CHALLENGE_SIZE	8	/* 8-byte random data */
-#define TQUIC_PATH_VALIDATION_TIMEOUT	(3 * HZ)  /* 3 seconds initial */
-#define TQUIC_PATH_VALIDATION_MAX_RETRIES 3
-#define TQUIC_PATH_PROBE_TIMEOUT	(30 * HZ) /* Probe every 30 seconds */
-#define TQUIC_PATH_FAIL_THRESHOLD	5	/* Consecutive failures */
-#define TQUIC_MAX_PATHS			8	/* Max paths per connection */
-#define TQUIC_PATH_MTU_MIN		1200	/* QUIC minimum MTU */
+#define TQUIC_BPM_PATH_CHALLENGE_SIZE 8 /* 8-byte random data */
+#define TQUIC_BPM_PATH_VALIDATION_TIMEOUT (3 * HZ) /* 3 seconds initial */
+#define TQUIC_BPM_PATH_VALIDATION_MAX_RETRIES 3
+#define TQUIC_BPM_PATH_PROBE_TIMEOUT (30 * HZ) /* Probe every 30 seconds */
+#define TQUIC_BPM_PATH_FAIL_THRESHOLD 5 /* Consecutive failures */
+#define TQUIC_MAX_PATHS 8 /* Max paths per connection */
+#define TQUIC_BPM_PATH_MTU_MIN 1200 /* QUIC minimum MTU */
 
 /*
  * Path quality scoring constants
  * Total score is 0-1000, higher is better
  */
-#define TQUIC_PATH_SCORE_MAX		1000	/* Maximum path score */
-#define TQUIC_PATH_SCORE_RTT_MAX	400	/* Max points for RTT */
-#define TQUIC_PATH_SCORE_LOSS_MAX	400	/* Max points for loss rate */
-#define TQUIC_PATH_SCORE_BW_MAX		200	/* Max points for bandwidth */
+#define TQUIC_BPM_PATH_SCORE_MAX 1000 /* Maximum path score */
+#define TQUIC_BPM_PATH_SCORE_RTT_MAX 400 /* Max points for RTT */
+#define TQUIC_BPM_PATH_SCORE_LOSS_MAX 400 /* Max points for loss rate */
+#define TQUIC_BPM_PATH_SCORE_BW_MAX 200 /* Max points for bandwidth */
 
 /* RTT thresholds for scoring (microseconds) */
-#define TQUIC_PATH_RTT_IDEAL		20000	/* 20ms - full points */
-#define TQUIC_PATH_RTT_POOR		500000	/* 500ms - zero points */
+#define TQUIC_BPM_PATH_RTT_IDEAL 20000 /* 20ms - full points */
+#define TQUIC_BPM_PATH_RTT_POOR 500000 /* 500ms - zero points */
 
 /* Bandwidth thresholds for scoring (bytes/sec) */
-#define TQUIC_PATH_BW_EXCELLENT		100000000	/* 100 MB/s */
-#define TQUIC_PATH_BW_GOOD		10000000	/* 10 MB/s */
-#define TQUIC_PATH_BW_FAIR		1000000		/* 1 MB/s */
-#define TQUIC_PATH_BW_POOR		100000		/* 100 KB/s */
+#define TQUIC_BPM_PATH_BW_EXCELLENT 100000000 /* 100 MB/s */
+#define TQUIC_BPM_PATH_BW_GOOD 10000000 /* 10 MB/s */
+#define TQUIC_BPM_PATH_BW_FAIR 1000000 /* 1 MB/s */
+#define TQUIC_BPM_PATH_BW_POOR 100000 /* 100 KB/s */
 
 /* Loss rate threshold (permille - parts per thousand) */
-#define TQUIC_PATH_LOSS_THRESHOLD	100	/* 10% loss = zero points */
+#define TQUIC_BPM_PATH_LOSS_THRESHOLD 100 /* 10% loss = zero points */
 
 /*
  * Congestion control state per path
  */
-struct tquic_path_cc {
-	u32		cwnd;		/* Congestion window (bytes) */
-	u32		ssthresh;	/* Slow start threshold */
-	u32		bytes_in_flight;
-	u32		bytes_acked;
-	u32		bytes_lost;
-	u64		pacing_rate;	/* bytes per second */
-	u8		in_recovery:1;
-	u8		in_slow_start:1;
-	ktime_t		congestion_start;
+struct tquic_bpm_path_cc {
+	u32 cwnd; /* Congestion window (bytes) */
+	u32 ssthresh; /* Slow start threshold */
+	u32 bytes_in_flight;
+	u32 bytes_acked;
+	u32 bytes_lost;
+	u64 smoothed_rtt_us; /* Smoothed RTT in microseconds */
+	u64 pacing_rate; /* bytes per second */
+	u8 in_recovery : 1;
+	u8 in_slow_start : 1;
+	ktime_t congestion_start;
 };
 
 /*
  * Path metrics
  */
-struct tquic_path_metrics {
+struct tquic_bpm_path_metrics {
 	/* RTT measurements (in microseconds) */
-	u32		srtt;		/* Smoothed RTT */
-	u32		rttvar;		/* RTT variance */
-	u32		min_rtt;	/* Minimum observed RTT */
-	u32		latest_rtt;	/* Most recent RTT sample */
+	u32 srtt; /* Smoothed RTT */
+	u32 rttvar; /* RTT variance */
+	u32 min_rtt; /* Minimum observed RTT */
+	u32 latest_rtt; /* Most recent RTT sample */
 
 	/* Bandwidth estimation */
-	u64		bandwidth;	/* Estimated bandwidth (bytes/sec) */
-	u64		bandwidth_hi;	/* High watermark */
-	u64		bandwidth_lo;	/* Low watermark */
+	u64 bandwidth; /* Estimated bandwidth (bytes/sec) */
+	u64 bandwidth_hi; /* High watermark */
+	u64 bandwidth_lo; /* Low watermark */
 
 	/* Loss statistics */
-	u64		packets_sent;
-	u64		packets_acked;
-	u64		packets_lost;
-	u32		loss_rate;	/* Loss rate * 1000 (permille) */
+	u64 packets_sent;
+	u64 packets_acked;
+	u64 packets_lost;
+	u32 loss_rate; /* Loss rate * 1000 (permille) */
 
 	/* Timing */
-	ktime_t		last_send;
-	ktime_t		last_recv;
-	ktime_t		last_rtt_update;
+	ktime_t last_send;
+	ktime_t last_recv;
+	ktime_t last_rtt_update;
 };
 
 /*
  * Address information for a path endpoint
  */
 struct tquic_addr_info {
-	sa_family_t	family;
-	__be16		port;
+	sa_family_t family;
+	__be16 port;
 	union {
-		__be32		addr4;
-		struct in6_addr	addr6;
+		__be32 addr4;
+		struct in6_addr addr6;
 	};
 };
 
 /*
  * Path validation context
  */
-struct tquic_path_validation {
-	u8		challenge_data[TQUIC_PATH_CHALLENGE_SIZE];
-	u8		response_data[TQUIC_PATH_CHALLENGE_SIZE];
-	u8		retries;
-	bool		challenge_pending;
-	bool		response_received;
-	ktime_t		challenge_sent;
+struct tquic_bpm_path_validation {
+	u8 challenge_data[TQUIC_BPM_PATH_CHALLENGE_SIZE];
+	u8 response_data[TQUIC_BPM_PATH_CHALLENGE_SIZE];
+	u8 retries;
+	bool challenge_pending;
+	bool response_received;
+	ktime_t challenge_sent;
 	struct timer_list timer;
 };
 
@@ -192,142 +198,156 @@ struct tquic_path_validation {
  * Represents a network path between local and remote endpoints.
  * Each path maintains its own congestion control state.
  */
-struct tquic_path {
-	struct list_head	list;		/* Link in path manager */
-	struct rcu_head		rcu;
+struct tquic_bpm_path {
+	struct list_head list; /* Link in path manager */
+	struct rcu_head rcu;
 
 	/* Path identification */
-	u32			path_id;
-	u8			local_cid[20];	/* Local connection ID */
-	u8			remote_cid[20];	/* Remote connection ID */
-	u8			local_cid_len;
-	u8			remote_cid_len;
+	u32 path_id;
+	u8 local_cid[20]; /* Local connection ID */
+	u8 remote_cid[20]; /* Remote connection ID */
+	u8 local_cid_len;
+	u8 remote_cid_len;
 
 	/* Endpoints */
-	struct tquic_addr_info	local_addr;
-	struct tquic_addr_info	remote_addr;
-	int			ifindex;	/* Network interface index */
-	struct net_device	*dev;		/* Network device (RCU) */
+	struct tquic_addr_info local_addr;
+	struct tquic_addr_info remote_addr;
+	int ifindex; /* Network interface index */
+	struct net_device *dev; /* Network device (RCU) */
 
 	/* State */
-	enum tquic_path_state	state;
-	spinlock_t		state_lock;
-	refcount_t		refcnt;
+	enum tquic_bpm_path_state state;
+	spinlock_t state_lock;
+	refcount_t refcnt;
 
 	/* WAN information */
-	enum tquic_wan_type	wan_type;
-	s8			signal_strength; /* dBm for cellular, -1 if N/A */
-	u8			signal_quality;	/* 0-100% quality indicator */
+	enum tquic_wan_type wan_type;
+	s8 signal_strength; /* dBm for cellular, -1 if N/A */
+	u8 signal_quality; /* 0-100% quality indicator */
 
 	/* Path validation */
-	struct tquic_path_validation validation;
+	struct tquic_bpm_path_validation validation;
 
 	/* Congestion control */
-	struct tquic_path_cc	cc;
-	spinlock_t		cc_lock;
+	struct tquic_bpm_path_cc cc;
+	spinlock_t cc_lock;
 
 	/* Metrics */
-	struct tquic_path_metrics metrics;
+	struct tquic_bpm_path_metrics metrics;
 
 	/* Flags */
-	u8			is_primary:1;	/* Primary path */
-	u8			is_backup:1;	/* Backup only */
-	u8			peer_migrated:1; /* Peer initiated migration */
-	u8			nat_rebinding:1; /* NAT rebinding detected */
-	u8			ecn_capable:1;	/* ECN supported */
-	u8			mtu_probing:1;	/* MTU discovery active */
+	u8 is_primary : 1; /* Primary path */
+	u8 is_backup : 1; /* Backup only */
+	u8 peer_migrated : 1; /* Peer initiated migration */
+	u8 nat_rebinding : 1; /* NAT rebinding detected */
+	u8 ecn_capable : 1; /* ECN supported */
+	u8 mtu_probing : 1; /* MTU discovery active */
 
 	/* Multipath extension state (draft-ietf-quic-multipath) */
-	u64			status_seq_num;	/* PATH_STATUS sequence number */
+	u64 status_seq_num; /* PATH_STATUS sequence number */
 
 	/* MTU */
-	u16			mtu;
-	u16			mtu_probe_target;
+	u16 mtu;
+	u16 mtu_probe_target;
 
-	/* Statistics */
-	u64			tx_bytes;
-	u64			rx_bytes;
-	u32			tx_packets;
-	u32			rx_packets;
-	u32			consecutive_failures;
+	/* Statistics - compatible with include/net/tquic.h tquic_bpm_path_stats */
+	struct {
+		u64 tx_packets;
+		u64 tx_bytes;
+		u64 rx_packets;
+		u64 rx_bytes;
+		u64 acked_bytes;
+		u64 lost_packets;
+		u32 rtt_min;
+		u32 rtt_smoothed;
+		u32 rtt_variance;
+		u64 bandwidth;
+		u32 cwnd;
+	} stats;
+
+	u32 consecutive_failures;
+
+	/* Scheduling parameters */
+	u8 priority; /* Lower = preferred */
+	u8 weight; /* For weighted schedulers */
 
 	/* Timestamps */
-	ktime_t			created;
-	ktime_t			validated;
-	ktime_t			last_activity;
+	ktime_t created;
+	ktime_t validated;
+	ktime_t last_activity;
 
 	/* Back pointer to path manager */
-	struct tquic_path_manager *pm;
+	struct tquic_bpm_path_manager *pm;
 };
 
 /*
  * Path Manager per connection
  */
-struct tquic_path_manager {
-	struct list_head	path_list;	/* List of paths */
-	spinlock_t		lock;
-	refcount_t		refcnt;
+struct tquic_bpm_path_manager {
+	struct list_head path_list; /* List of paths */
+	spinlock_t lock;
+	refcount_t refcnt;
 
 	/* Path count and limits */
-	u8			path_count;
-	u8			active_count;
-	u8			max_paths;
+	u8 path_count;
+	u8 active_count;
+	u8 max_paths;
 
 	/* ID allocation */
-	u32			next_path_id;
+	u32 next_path_id;
 	DECLARE_BITMAP(path_id_bitmap, TQUIC_MAX_PATHS);
 
 	/* Primary path tracking */
-	struct tquic_path __rcu	*primary_path;
-	struct tquic_path __rcu	*backup_path;
+	struct tquic_bpm_path __rcu *primary_path;
+	struct tquic_bpm_path __rcu *backup_path;
 
 	/* Work queue for async operations */
-	struct work_struct	discover_work;
-	struct work_struct	failover_work;
-	struct delayed_work	probe_work;
+	struct work_struct discover_work;
+	struct work_struct failover_work;
+	struct delayed_work probe_work;
 
 	/* Discovery state */
-	bool			discovery_enabled;
-	bool			auto_failover;
-	ktime_t			last_discovery;
+	bool discovery_enabled;
+	bool auto_failover;
+	ktime_t last_discovery;
 
 	/* Network namespace */
-	struct net		*net;
+	struct net *net;
 
 	/* Bonding state machine context (Phase 05) */
 	struct tquic_bonding_ctx *bonding;
 
 	/* Callbacks */
-	void			*cb_ctx;
-	void (*on_path_available)(void *ctx, struct tquic_path *path);
-	void (*on_path_failed)(void *ctx, struct tquic_path *path);
-	void (*on_migration_complete)(void *ctx, struct tquic_path *old,
-				      struct tquic_path *new);
+	void *cb_ctx;
+	void (*on_path_available)(void *ctx, struct tquic_bpm_path *path);
+	void (*on_path_failed)(void *ctx, struct tquic_bpm_path *path);
+	void (*on_migration_complete)(void *ctx, struct tquic_bpm_path *old,
+				      struct tquic_bpm_path *new);
 
 	/* Statistics */
-	u32			paths_created;
-	u32			paths_validated;
-	u32			paths_failed;
-	u32			migrations;
+	u32 paths_created;
+	u32 paths_validated;
+	u32 paths_failed;
+	u32 migrations;
 
 	/* RCU */
-	struct rcu_head		rcu;
+	struct rcu_head rcu;
 };
 
 /*
  * Global path manager registry
  */
-static DEFINE_SPINLOCK(tquic_pm_list_lock);
-static LIST_HEAD(tquic_pm_list);
-static struct workqueue_struct *tquic_pm_wq;
+static DEFINE_SPINLOCK(tquic_bpm_list_lock);
+static LIST_HEAD(tquic_bpm_list);
+static struct workqueue_struct *tquic_bpm_wq;
 static struct notifier_block tquic_netdev_notifier;
-static atomic_t tquic_pm_count = ATOMIC_INIT(0);
+static atomic_t tquic_bpm_count = ATOMIC_INIT(0);
 
 /* Forward declarations */
-static void tquic_path_validation_timeout(struct timer_list *timer);
-static void tquic_pm_probe_work_fn(struct work_struct *work);
-static void tquic_pm_discover_work_fn(struct work_struct *work);
-static void tquic_pm_failover_work_fn(struct work_struct *work);
+static void tquic_bpm_path_validation_timeout(struct timer_list *timer);
+static void tquic_bpm_probe_work_fn(struct work_struct *work);
+static void tquic_bpm_discover_work_fn(struct work_struct *work);
+static void tquic_bpm_failover_work_fn(struct work_struct *work);
 
 /*
  * ============================================================================
@@ -360,20 +380,22 @@ static void tquic_addr_from_sockaddr(struct tquic_addr_info *info,
 	memset(info, 0, sizeof(*info));
 
 	if (addr->sa_family == AF_INET) {
-		const struct sockaddr_in *sin = (const struct sockaddr_in *)addr;
+		const struct sockaddr_in *sin =
+			(const struct sockaddr_in *)addr;
 		info->family = AF_INET;
 		info->port = sin->sin_port;
 		info->addr4 = sin->sin_addr.s_addr;
 	} else if (addr->sa_family == AF_INET6) {
-		const struct sockaddr_in6 *sin6 = (const struct sockaddr_in6 *)addr;
+		const struct sockaddr_in6 *sin6 =
+			(const struct sockaddr_in6 *)addr;
 		info->family = AF_INET6;
 		info->port = sin6->sin6_port;
 		info->addr6 = sin6->sin6_addr;
 	}
 }
 
-static void tquic_addr_to_sockaddr(const struct tquic_addr_info *info,
-				   struct sockaddr_storage *addr)
+static void __maybe_unused tquic_addr_to_sockaddr(
+	const struct tquic_addr_info *info, struct sockaddr_storage *addr)
 {
 	memset(addr, 0, sizeof(*addr));
 
@@ -396,26 +418,29 @@ static void tquic_addr_to_sockaddr(const struct tquic_addr_info *info,
  * ============================================================================
  */
 
-#define TQUIC_INITIAL_CWND	(10 * TQUIC_PATH_MTU_MIN)
-#define TQUIC_MIN_CWND		(2 * TQUIC_PATH_MTU_MIN)
-#define TQUIC_INITIAL_SSTHRESH	UINT_MAX
+#define TQUIC_INITIAL_CWND (10 * TQUIC_BPM_PATH_MTU_MIN)
+#define TQUIC_MIN_CWND (2 * TQUIC_BPM_PATH_MTU_MIN)
+#define TQUIC_INITIAL_SSTHRESH UINT_MAX
+#define TQUIC_INITIAL_RTT_US 333000 /* 333ms initial RTT estimate */
 
-static void tquic_cc_init(struct tquic_path_cc *cc)
+static void tquic_cc_init(struct tquic_bpm_path_cc *cc)
 {
 	cc->cwnd = TQUIC_INITIAL_CWND;
 	cc->ssthresh = TQUIC_INITIAL_SSTHRESH;
 	cc->bytes_in_flight = 0;
 	cc->bytes_acked = 0;
 	cc->bytes_lost = 0;
+	cc->smoothed_rtt_us = TQUIC_INITIAL_RTT_US;
 	cc->pacing_rate = 0;
 	cc->in_recovery = false;
 	cc->in_slow_start = true;
 	cc->congestion_start = 0;
 }
 
-static void tquic_cc_on_ack(struct tquic_path *path, u32 bytes_acked)
+static void __maybe_unused tquic_cc_on_ack(struct tquic_bpm_path *path,
+					   u32 bytes_acked)
 {
-	struct tquic_path_cc *cc = &path->cc;
+	struct tquic_bpm_path_cc *cc = &path->cc;
 
 	spin_lock_bh(&path->cc_lock);
 
@@ -451,9 +476,10 @@ static void tquic_cc_on_ack(struct tquic_path *path, u32 bytes_acked)
 					      bytes_acked);
 }
 
-static void tquic_cc_on_loss(struct tquic_path *path, u32 bytes_lost)
+static void __maybe_unused tquic_cc_on_loss(struct tquic_bpm_path *path,
+					    u32 bytes_lost)
 {
-	struct tquic_path_cc *cc = &path->cc;
+	struct tquic_bpm_path_cc *cc = &path->cc;
 
 	spin_lock_bh(&path->cc_lock);
 
@@ -476,9 +502,9 @@ static void tquic_cc_on_loss(struct tquic_path *path, u32 bytes_lost)
 					       bytes_lost);
 }
 
-static u32 tquic_cc_available_cwnd(struct tquic_path *path)
+static u32 tquic_cc_available_cwnd(struct tquic_bpm_path *path)
 {
-	struct tquic_path_cc *cc = &path->cc;
+	struct tquic_bpm_path_cc *cc = &path->cc;
 	u32 available;
 
 	spin_lock_bh(&path->cc_lock);
@@ -497,11 +523,10 @@ static u32 tquic_cc_available_cwnd(struct tquic_path *path)
  * ============================================================================
  */
 
-#define TQUIC_RTT_ALPHA		8	/* SRTT smoothing factor 1/8 */
-#define TQUIC_RTTVAR_BETA	4	/* RTTVAR smoothing factor 1/4 */
-#define TQUIC_INITIAL_RTT_US	333000	/* 333ms initial RTT estimate */
+#define TQUIC_RTT_ALPHA 8 /* SRTT smoothing factor 1/8 */
+#define TQUIC_RTTVAR_BETA 4 /* RTTVAR smoothing factor 1/4 */
 
-static void tquic_metrics_init(struct tquic_path_metrics *m)
+static void tquic_metrics_init(struct tquic_bpm_path_metrics *m)
 {
 	m->srtt = TQUIC_INITIAL_RTT_US;
 	m->rttvar = TQUIC_INITIAL_RTT_US / 2;
@@ -520,15 +545,15 @@ static void tquic_metrics_init(struct tquic_path_metrics *m)
 }
 
 /**
- * tquic_path_update_rtt - Update RTT measurements for a path
+ * tquic_bpm_path_update_rtt - Update RTT measurements for a path
  * @path: Path to update
  * @rtt_sample: New RTT sample in microseconds
  *
  * Implements RFC 6298 style RTT estimation with adjustments for QUIC.
  */
-void tquic_path_update_rtt(struct tquic_path *path, u32 rtt_sample)
+void tquic_bpm_path_update_rtt(struct tquic_bpm_path *path, u32 rtt_sample)
 {
-	struct tquic_path_metrics *m = &path->metrics;
+	struct tquic_bpm_path_metrics *m = &path->metrics;
 	s32 delta;
 
 	if (rtt_sample == 0)
@@ -545,6 +570,8 @@ void tquic_path_update_rtt(struct tquic_path *path, u32 rtt_sample)
 	if (m->srtt == TQUIC_INITIAL_RTT_US) {
 		m->srtt = rtt_sample;
 		m->rttvar = rtt_sample / 2;
+		/* Sync to cc struct for bonding/scheduler access */
+		path->cc.smoothed_rtt_us = rtt_sample;
 		return;
 	}
 
@@ -556,21 +583,24 @@ void tquic_path_update_rtt(struct tquic_path *path, u32 rtt_sample)
 		delta = -delta;
 	m->rttvar = m->rttvar + (delta - m->rttvar) / TQUIC_RTTVAR_BETA;
 
+	/* Sync to cc struct for bonding/scheduler access */
+	path->cc.smoothed_rtt_us = m->srtt;
+
 	pr_debug("path %u: RTT updated srtt=%u rttvar=%u min=%u\n",
 		 path->path_id, m->srtt, m->rttvar, m->min_rtt);
 }
-EXPORT_SYMBOL_GPL(tquic_path_update_rtt);
+EXPORT_SYMBOL_GPL(tquic_bpm_path_update_rtt);
 
 /**
- * tquic_path_update_bandwidth - Update bandwidth estimate for a path
+ * tquic_bpm_path_update_bandwidth - Update bandwidth estimate for a path
  * @path: Path to update
  * @bytes: Bytes acknowledged
  * @interval_us: Time interval in microseconds
  */
-void tquic_path_update_bandwidth(struct tquic_path *path, u64 bytes,
+void tquic_bpm_path_update_bandwidth(struct tquic_bpm_path *path, u64 bytes,
 				 u64 interval_us)
 {
-	struct tquic_path_metrics *m = &path->metrics;
+	struct tquic_bpm_path_metrics *m = &path->metrics;
 	u64 bw;
 
 	if (interval_us == 0)
@@ -594,15 +624,15 @@ void tquic_path_update_bandwidth(struct tquic_path *path, u64 bytes,
 	pr_debug("path %u: bandwidth updated to %llu bytes/sec\n",
 		 path->path_id, m->bandwidth);
 }
-EXPORT_SYMBOL_GPL(tquic_path_update_bandwidth);
+EXPORT_SYMBOL_GPL(tquic_bpm_path_update_bandwidth);
 
 /**
- * tquic_path_update_loss_rate - Update loss rate for a path
+ * tquic_bpm_path_update_loss_rate - Update loss rate for a path
  * @path: Path to update
  */
-void tquic_path_update_loss_rate(struct tquic_path *path)
+void tquic_bpm_path_update_loss_rate(struct tquic_bpm_path *path)
 {
-	struct tquic_path_metrics *m = &path->metrics;
+	struct tquic_bpm_path_metrics *m = &path->metrics;
 	u64 total;
 
 	total = m->packets_acked + m->packets_lost;
@@ -614,54 +644,54 @@ void tquic_path_update_loss_rate(struct tquic_path *path)
 	/* Calculate loss rate in permille (parts per thousand) */
 	m->loss_rate = (u32)div64_u64(m->packets_lost * 1000, total);
 
-	pr_debug("path %u: loss rate %u permille (%llu/%llu)\n",
-		 path->path_id, m->loss_rate, m->packets_lost, total);
+	pr_debug("path %u: loss rate %u permille (%llu/%llu)\n", path->path_id,
+		 m->loss_rate, m->packets_lost, total);
 }
-EXPORT_SYMBOL_GPL(tquic_path_update_loss_rate);
+EXPORT_SYMBOL_GPL(tquic_bpm_path_update_loss_rate);
 
 /**
- * tquic_path_get_score - Calculate quality score for a path
+ * tquic_bpm_path_get_score - Calculate quality score for a path
  * @path: Path to evaluate
  *
  * Returns a quality score from 0-1000, higher is better.
  * Score considers RTT, bandwidth, and loss rate.
  */
-u32 tquic_path_get_score(struct tquic_path *path)
+u32 tquic_bpm_path_get_score(struct tquic_bpm_path *path)
 {
-	struct tquic_path_metrics *m = &path->metrics;
-	u32 score = TQUIC_PATH_SCORE_MAX;
+	struct tquic_bpm_path_metrics *m = &path->metrics;
+	u32 score = TQUIC_BPM_PATH_SCORE_MAX;
 	u32 rtt_score, loss_score, bw_score;
-	u32 rtt_range = TQUIC_PATH_RTT_POOR - TQUIC_PATH_RTT_IDEAL;
+	u32 rtt_range = TQUIC_BPM_PATH_RTT_POOR - TQUIC_BPM_PATH_RTT_IDEAL;
 
-	/* RTT component (max TQUIC_PATH_SCORE_RTT_MAX points) */
-	if (m->srtt < TQUIC_PATH_RTT_IDEAL)
-		rtt_score = TQUIC_PATH_SCORE_RTT_MAX;
-	else if (m->srtt > TQUIC_PATH_RTT_POOR)
+	/* RTT component (max TQUIC_BPM_PATH_SCORE_RTT_MAX points) */
+	if (m->srtt < TQUIC_BPM_PATH_RTT_IDEAL)
+		rtt_score = TQUIC_BPM_PATH_SCORE_RTT_MAX;
+	else if (m->srtt > TQUIC_BPM_PATH_RTT_POOR)
 		rtt_score = 0;
 	else
-		rtt_score = TQUIC_PATH_SCORE_RTT_MAX -
-			    (m->srtt - TQUIC_PATH_RTT_IDEAL) *
-			    TQUIC_PATH_SCORE_RTT_MAX / rtt_range;
+		rtt_score = TQUIC_BPM_PATH_SCORE_RTT_MAX -
+			    (m->srtt - TQUIC_BPM_PATH_RTT_IDEAL) *
+				    TQUIC_BPM_PATH_SCORE_RTT_MAX / rtt_range;
 
-	/* Loss rate component (max TQUIC_PATH_SCORE_LOSS_MAX points) */
+	/* Loss rate component (max TQUIC_BPM_PATH_SCORE_LOSS_MAX points) */
 	if (m->loss_rate == 0)
-		loss_score = TQUIC_PATH_SCORE_LOSS_MAX;
-	else if (m->loss_rate >= TQUIC_PATH_LOSS_THRESHOLD)
+		loss_score = TQUIC_BPM_PATH_SCORE_LOSS_MAX;
+	else if (m->loss_rate >= TQUIC_BPM_PATH_LOSS_THRESHOLD)
 		loss_score = 0;
 	else
-		loss_score = TQUIC_PATH_SCORE_LOSS_MAX -
-			     m->loss_rate * TQUIC_PATH_SCORE_LOSS_MAX /
-			     TQUIC_PATH_LOSS_THRESHOLD;
+		loss_score = TQUIC_BPM_PATH_SCORE_LOSS_MAX -
+			     m->loss_rate * TQUIC_BPM_PATH_SCORE_LOSS_MAX /
+				     TQUIC_BPM_PATH_LOSS_THRESHOLD;
 
-	/* Bandwidth component (max TQUIC_PATH_SCORE_BW_MAX points) */
-	if (m->bandwidth >= TQUIC_PATH_BW_EXCELLENT)
-		bw_score = TQUIC_PATH_SCORE_BW_MAX;
-	else if (m->bandwidth >= TQUIC_PATH_BW_GOOD)
-		bw_score = TQUIC_PATH_SCORE_BW_MAX * 3 / 4;
-	else if (m->bandwidth >= TQUIC_PATH_BW_FAIR)
-		bw_score = TQUIC_PATH_SCORE_BW_MAX / 2;
-	else if (m->bandwidth >= TQUIC_PATH_BW_POOR)
-		bw_score = TQUIC_PATH_SCORE_BW_MAX / 4;
+	/* Bandwidth component (max TQUIC_BPM_PATH_SCORE_BW_MAX points) */
+	if (m->bandwidth >= TQUIC_BPM_PATH_BW_EXCELLENT)
+		bw_score = TQUIC_BPM_PATH_SCORE_BW_MAX;
+	else if (m->bandwidth >= TQUIC_BPM_PATH_BW_GOOD)
+		bw_score = TQUIC_BPM_PATH_SCORE_BW_MAX * 3 / 4;
+	else if (m->bandwidth >= TQUIC_BPM_PATH_BW_FAIR)
+		bw_score = TQUIC_BPM_PATH_SCORE_BW_MAX / 2;
+	else if (m->bandwidth >= TQUIC_BPM_PATH_BW_POOR)
+		bw_score = TQUIC_BPM_PATH_SCORE_BW_MAX / 4;
 	else
 		bw_score = 0;
 
@@ -673,19 +703,19 @@ u32 tquic_path_get_score(struct tquic_path *path)
 		/* No modifier for wired */
 		break;
 	case TQUIC_WAN_WIFI:
-		score = score * 95 / 100;  /* 5% penalty */
+		score = score * 95 / 100; /* 5% penalty */
 		break;
 	case TQUIC_WAN_CELLULAR_5G:
-		score = score * 90 / 100;  /* 10% penalty */
+		score = score * 90 / 100; /* 10% penalty */
 		break;
 	case TQUIC_WAN_CELLULAR_4G:
-		score = score * 85 / 100;  /* 15% penalty */
+		score = score * 85 / 100; /* 15% penalty */
 		break;
 	case TQUIC_WAN_CELLULAR_3G:
-		score = score * 70 / 100;  /* 30% penalty */
+		score = score * 70 / 100; /* 30% penalty */
 		break;
 	case TQUIC_WAN_SATELLITE:
-		score = score * 60 / 100;  /* 40% penalty for latency */
+		score = score * 60 / 100; /* 40% penalty for latency */
 		break;
 	default:
 		break;
@@ -709,7 +739,7 @@ u32 tquic_path_get_score(struct tquic_path *path)
 
 	return min(score, 1000U);
 }
-EXPORT_SYMBOL_GPL(tquic_path_get_score);
+EXPORT_SYMBOL_GPL(tquic_bpm_path_get_score);
 
 /*
  * ============================================================================
@@ -748,7 +778,7 @@ enum tquic_wan_type tquic_wan_detect(struct net_device *dev)
 		if (strncmp(dev->name, "wwan", 4) == 0 ||
 		    strncmp(dev->name, "rmnet", 5) == 0 ||
 		    strncmp(dev->name, "ccmni", 5) == 0)
-			return TQUIC_WAN_CELLULAR_4G;  /* Assume LTE default */
+			return TQUIC_WAN_CELLULAR_4G; /* Assume LTE default */
 
 		/* Check for VPN tunnels */
 		if (strncmp(dev->name, "tun", 3) == 0 ||
@@ -858,14 +888,14 @@ EXPORT_SYMBOL_GPL(tquic_wan_get_signal_strength);
  */
 
 /**
- * tquic_path_alloc - Allocate a new path structure
+ * tquic_bpm_path_alloc - Allocate a new path structure
  * @gfp: Memory allocation flags
  *
  * Returns allocated path or NULL on failure.
  */
-struct tquic_path *tquic_path_alloc(gfp_t gfp)
+struct tquic_bpm_path *tquic_bpm_path_alloc(gfp_t gfp)
 {
-	struct tquic_path *path;
+	struct tquic_bpm_path *path;
 
 	path = kzalloc(sizeof(*path), gfp);
 	if (!path)
@@ -876,31 +906,33 @@ struct tquic_path *tquic_path_alloc(gfp_t gfp)
 	spin_lock_init(&path->cc_lock);
 	refcount_set(&path->refcnt, 1);
 
-	path->state = TQUIC_PATH_CREATED;
-	path->mtu = TQUIC_PATH_MTU_MIN;
+	path->state = TQUIC_BPM_PATH_UNUSED;
+	path->mtu = TQUIC_BPM_PATH_MTU_MIN;
 	path->status_seq_num = 0;
-	path->signal_strength = -128;  /* Unknown */
+	path->signal_strength = -128; /* Unknown */
+	path->priority = 128; /* Default priority (middle) */
+	path->weight = 100; /* Default weight */
 	path->created = ktime_get();
 
 	tquic_cc_init(&path->cc);
 	tquic_metrics_init(&path->metrics);
 
 	/* Initialize validation timer */
-	timer_setup(&path->validation.timer, tquic_path_validation_timeout, 0);
+	timer_setup(&path->validation.timer, tquic_bpm_path_validation_timeout, 0);
 
 	pr_debug("path allocated %p\n", path);
 
 	return path;
 }
-EXPORT_SYMBOL_GPL(tquic_path_alloc);
+EXPORT_SYMBOL_GPL(tquic_bpm_path_alloc);
 
 /**
- * tquic_path_free - Free a path structure
+ * tquic_bpm_path_free - Free a path structure
  * @path: Path to free
  *
  * Should be called after all references are released.
  */
-void tquic_path_free(struct tquic_path *path)
+void tquic_bpm_path_free(struct tquic_bpm_path *path)
 {
 	if (!path)
 		return;
@@ -914,35 +946,35 @@ void tquic_path_free(struct tquic_path *path)
 	pr_debug("path %u freed\n", path->path_id);
 	kfree(path);
 }
-EXPORT_SYMBOL_GPL(tquic_path_free);
+EXPORT_SYMBOL_GPL(tquic_bpm_path_free);
 
-static void tquic_path_free_rcu(struct rcu_head *head)
+static void tquic_bpm_path_free_rcu(struct rcu_head *head)
 {
-	struct tquic_path *path = container_of(head, struct tquic_path, rcu);
-	tquic_path_free(path);
+	struct tquic_bpm_path *path = container_of(head, struct tquic_bpm_path, rcu);
+	tquic_bpm_path_free(path);
 }
 
 /**
- * tquic_path_get - Get a reference to a path
+ * tquic_bpm_path_get - Get a reference to a path
  * @path: Path to reference
  */
-static inline void tquic_path_get(struct tquic_path *path)
+static inline void tquic_bpm_path_get(struct tquic_bpm_path *path)
 {
 	refcount_inc(&path->refcnt);
 }
 
 /**
- * tquic_path_put - Release a reference to a path
+ * tquic_bpm_path_put - Release a reference to a path
  * @path: Path to release
  */
-static inline void tquic_path_put(struct tquic_path *path)
+static inline void tquic_bpm_path_put(struct tquic_bpm_path *path)
 {
 	if (refcount_dec_and_test(&path->refcnt))
-		call_rcu(&path->rcu, tquic_path_free_rcu);
+		call_rcu(&path->rcu, tquic_bpm_path_free_rcu);
 }
 
 /**
- * tquic_path_init - Initialize a path with addresses
+ * tquic_bpm_path_init - Initialize a path with addresses
  * @path: Path to initialize
  * @local: Local address
  * @remote: Remote address
@@ -950,10 +982,8 @@ static inline void tquic_path_put(struct tquic_path *path)
  *
  * Returns 0 on success, negative error code on failure.
  */
-int tquic_path_init(struct tquic_path *path,
-		    const struct sockaddr *local,
-		    const struct sockaddr *remote,
-		    int ifindex)
+int tquic_bpm_path_init(struct tquic_bpm_path *path, const struct sockaddr *local,
+		    const struct sockaddr *remote, int ifindex)
 {
 	struct net_device *dev;
 
@@ -969,7 +999,8 @@ int tquic_path_init(struct tquic_path *path,
 
 	/* Get network device reference */
 	rcu_read_lock();
-	dev = dev_get_by_index_rcu(path->pm ? path->pm->net : &init_net, ifindex);
+	dev = dev_get_by_index_rcu(path->pm ? path->pm->net : &init_net,
+				   ifindex);
 	if (dev) {
 		dev_hold(dev);
 		path->dev = dev;
@@ -978,20 +1009,21 @@ int tquic_path_init(struct tquic_path *path,
 
 		/* Get MTU from device */
 		path->mtu = min_t(u16, dev->mtu, 65535);
-		if (path->mtu < TQUIC_PATH_MTU_MIN)
-			path->mtu = TQUIC_PATH_MTU_MIN;
+		if (path->mtu < TQUIC_BPM_PATH_MTU_MIN)
+			path->mtu = TQUIC_BPM_PATH_MTU_MIN;
 	}
 	rcu_read_unlock();
 
 	pr_debug("path %u initialized: ifindex=%d wan_type=%s mtu=%u\n",
 		 path->path_id, ifindex,
 		 path->wan_type < __TQUIC_WAN_TYPE_MAX ?
-		 tquic_wan_type_names[path->wan_type] : "unknown",
+			 tquic_wan_type_names[path->wan_type] :
+			 "unknown",
 		 path->mtu);
 
 	return 0;
 }
-EXPORT_SYMBOL_GPL(tquic_path_init);
+EXPORT_SYMBOL_GPL(tquic_bpm_path_init);
 
 /*
  * ============================================================================
@@ -1000,18 +1032,19 @@ EXPORT_SYMBOL_GPL(tquic_path_init);
  */
 
 /**
- * tquic_path_set_state - Change path state
+ * tquic_bpm_path_set_state - Change path state
  * @path: Path to modify
  * @new_state: New state
  *
  * Returns 0 on success, negative error code on invalid transition.
  */
-int tquic_path_set_state(struct tquic_path *path, enum tquic_path_state new_state)
+int tquic_bpm_path_set_state(struct tquic_bpm_path *path,
+			 enum tquic_bpm_path_state new_state)
 {
-	enum tquic_path_state old_state;
+	enum tquic_bpm_path_state old_state;
 	int ret = 0;
 
-	if (!path || new_state >= __TQUIC_PATH_STATE_MAX)
+	if (!path || new_state > TQUIC_BPM_PATH_CLOSED)
 		return -EINVAL;
 
 	spin_lock_bh(&path->state_lock);
@@ -1020,45 +1053,45 @@ int tquic_path_set_state(struct tquic_path *path, enum tquic_path_state new_stat
 
 	/* Validate state transitions */
 	switch (new_state) {
-	case TQUIC_PATH_VALIDATING:
-		if (old_state != TQUIC_PATH_CREATED &&
-		    old_state != TQUIC_PATH_STANDBY) {
+	case TQUIC_BPM_PATH_PENDING:
+		if (old_state != TQUIC_BPM_PATH_UNUSED &&
+		    old_state != TQUIC_BPM_PATH_STANDBY) {
 			ret = -EINVAL;
 			goto out;
 		}
 		break;
 
-	case TQUIC_PATH_VALIDATED:
-		if (old_state != TQUIC_PATH_VALIDATING) {
+	case TQUIC_BPM_PATH_VALIDATED:
+		if (old_state != TQUIC_BPM_PATH_PENDING) {
 			ret = -EINVAL;
 			goto out;
 		}
 		path->validated = ktime_get();
 		break;
 
-	case TQUIC_PATH_ACTIVE:
-		if (old_state != TQUIC_PATH_VALIDATED &&
-		    old_state != TQUIC_PATH_STANDBY) {
+	case TQUIC_BPM_PATH_ACTIVE:
+		if (old_state != TQUIC_BPM_PATH_VALIDATED &&
+		    old_state != TQUIC_BPM_PATH_STANDBY) {
 			ret = -EINVAL;
 			goto out;
 		}
 		break;
 
-	case TQUIC_PATH_STANDBY:
-		if (old_state != TQUIC_PATH_VALIDATED &&
-		    old_state != TQUIC_PATH_ACTIVE) {
+	case TQUIC_BPM_PATH_STANDBY:
+		if (old_state != TQUIC_BPM_PATH_VALIDATED &&
+		    old_state != TQUIC_BPM_PATH_ACTIVE) {
 			ret = -EINVAL;
 			goto out;
 		}
 		break;
 
-	case TQUIC_PATH_FAILED:
+	case TQUIC_BPM_PATH_FAILED:
 		/* Can transition to failed from any state */
 		break;
 
-	case TQUIC_PATH_CLOSING:
+	case TQUIC_BPM_PATH_CLOSED:
 		/* Can close from any state except CREATED */
-		if (old_state == TQUIC_PATH_CREATED) {
+		if (old_state == TQUIC_BPM_PATH_UNUSED) {
 			ret = -EINVAL;
 			goto out;
 		}
@@ -1073,14 +1106,14 @@ int tquic_path_set_state(struct tquic_path *path, enum tquic_path_state new_stat
 	path->last_activity = ktime_get();
 
 	pr_debug("path %u: state %s -> %s\n", path->path_id,
-		 tquic_path_state_names[old_state],
-		 tquic_path_state_names[new_state]);
+		 tquic_bpm_path_state_names[old_state],
+		 tquic_bpm_path_state_names[new_state]);
 
 out:
 	spin_unlock_bh(&path->state_lock);
 	return ret;
 }
-EXPORT_SYMBOL_GPL(tquic_path_set_state);
+EXPORT_SYMBOL_GPL(tquic_bpm_path_set_state);
 
 /*
  * ============================================================================
@@ -1088,25 +1121,26 @@ EXPORT_SYMBOL_GPL(tquic_path_set_state);
  * ============================================================================
  */
 
-static void tquic_path_validation_timeout(struct timer_list *timer)
+static void tquic_bpm_path_validation_timeout(struct timer_list *timer)
 {
-	struct tquic_path_validation *val = container_of(timer,
-			struct tquic_path_validation, timer);
-	struct tquic_path *path = container_of(val, struct tquic_path, validation);
+	struct tquic_bpm_path_validation *val =
+		container_of(timer, struct tquic_bpm_path_validation, timer);
+	struct tquic_bpm_path *path =
+		container_of(val, struct tquic_bpm_path, validation);
 
 	spin_lock_bh(&path->state_lock);
 
-	if (path->state != TQUIC_PATH_VALIDATING) {
+	if (path->state != TQUIC_BPM_PATH_PENDING) {
 		spin_unlock_bh(&path->state_lock);
 		return;
 	}
 
-	if (val->retries >= TQUIC_PATH_VALIDATION_MAX_RETRIES) {
+	if (val->retries >= TQUIC_BPM_PATH_VALIDATION_MAX_RETRIES) {
 		/* Validation failed */
 		pr_info("path %u: validation timeout after %u retries\n",
 			path->path_id, val->retries);
 
-		path->state = TQUIC_PATH_FAILED;
+		path->state = TQUIC_BPM_PATH_FAILED;
 		path->consecutive_failures++;
 
 		spin_unlock_bh(&path->state_lock);
@@ -1128,21 +1162,21 @@ static void tquic_path_validation_timeout(struct timer_list *timer)
 	pr_debug("path %u: validation retry %u\n", path->path_id, val->retries);
 
 	/* Reschedule with exponential backoff */
-	mod_timer(&val->timer, jiffies +
-		  (TQUIC_PATH_VALIDATION_TIMEOUT << val->retries));
+	mod_timer(&val->timer,
+		  jiffies + (TQUIC_BPM_PATH_VALIDATION_TIMEOUT << val->retries));
 }
 
 /**
- * tquic_path_validate - Start path validation
+ * tquic_bpm_path_validate - Start path validation
  * @path: Path to validate
  *
  * Initiates PATH_CHALLENGE/PATH_RESPONSE exchange per RFC 9000.
  * Returns 0 on success, negative error code on failure.
  */
-int tquic_path_validate(struct tquic_path *path)
+int tquic_bpm_path_validate(struct tquic_bpm_path *path)
 {
-	struct tquic_path_validation *val;
-	int ret;
+	struct tquic_bpm_path_validation *val;
+	/* int ret; unused */
 
 	if (!path)
 		return -EINVAL;
@@ -1152,48 +1186,48 @@ int tquic_path_validate(struct tquic_path *path)
 	spin_lock_bh(&path->state_lock);
 
 	/* Check if already validating or validated */
-	if (path->state == TQUIC_PATH_VALIDATING) {
+	if (path->state == TQUIC_BPM_PATH_PENDING) {
 		spin_unlock_bh(&path->state_lock);
 		return -EINPROGRESS;
 	}
 
-	if (path->state == TQUIC_PATH_VALIDATED ||
-	    path->state == TQUIC_PATH_ACTIVE) {
+	if (path->state == TQUIC_BPM_PATH_VALIDATED ||
+	    path->state == TQUIC_BPM_PATH_ACTIVE) {
 		spin_unlock_bh(&path->state_lock);
-		return 0;  /* Already valid */
+		return 0; /* Already valid */
 	}
 
 	/* Generate random challenge data */
-	get_random_bytes(val->challenge_data, TQUIC_PATH_CHALLENGE_SIZE);
+	get_random_bytes(val->challenge_data, TQUIC_BPM_PATH_CHALLENGE_SIZE);
 
 	val->retries = 0;
 	val->challenge_pending = true;
 	val->response_received = false;
 	val->challenge_sent = ktime_get();
 
-	path->state = TQUIC_PATH_VALIDATING;
+	path->state = TQUIC_BPM_PATH_PENDING;
 
 	spin_unlock_bh(&path->state_lock);
 
 	/* Start validation timer */
-	mod_timer(&val->timer, jiffies + TQUIC_PATH_VALIDATION_TIMEOUT);
+	mod_timer(&val->timer, jiffies + TQUIC_BPM_PATH_VALIDATION_TIMEOUT);
 
 	pr_debug("path %u: validation started\n", path->path_id);
 
 	return 0;
 }
-EXPORT_SYMBOL_GPL(tquic_path_validate);
+EXPORT_SYMBOL_GPL(tquic_bpm_path_validate);
 
 /**
- * tquic_path_challenge_send - Get PATH_CHALLENGE data to send
+ * tquic_bpm_path_challenge_send - Get PATH_CHALLENGE data to send
  * @path: Path being validated
  * @data: Buffer to receive challenge data (8 bytes)
  *
  * Returns 0 on success with data filled, negative if no challenge pending.
  */
-int tquic_path_challenge_send(struct tquic_path *path, u8 *data)
+int tquic_bpm_path_challenge_send(struct tquic_bpm_path *path, u8 *data)
 {
-	struct tquic_path_validation *val;
+	struct tquic_bpm_path_validation *val;
 
 	if (!path || !data)
 		return -EINVAL;
@@ -1202,12 +1236,12 @@ int tquic_path_challenge_send(struct tquic_path *path, u8 *data)
 
 	spin_lock_bh(&path->state_lock);
 
-	if (!val->challenge_pending || path->state != TQUIC_PATH_VALIDATING) {
+	if (!val->challenge_pending || path->state != TQUIC_BPM_PATH_PENDING) {
 		spin_unlock_bh(&path->state_lock);
 		return -ENOENT;
 	}
 
-	memcpy(data, val->challenge_data, TQUIC_PATH_CHALLENGE_SIZE);
+	memcpy(data, val->challenge_data, TQUIC_BPM_PATH_CHALLENGE_SIZE);
 	val->challenge_pending = false;
 
 	spin_unlock_bh(&path->state_lock);
@@ -1216,18 +1250,18 @@ int tquic_path_challenge_send(struct tquic_path *path, u8 *data)
 
 	return 0;
 }
-EXPORT_SYMBOL_GPL(tquic_path_challenge_send);
+EXPORT_SYMBOL_GPL(tquic_bpm_path_challenge_send);
 
 /**
- * tquic_path_response_recv - Process received PATH_RESPONSE
+ * tquic_bpm_path_response_recv - Process received PATH_RESPONSE
  * @path: Path being validated
  * @data: Response data received (8 bytes)
  *
  * Returns 0 on success (validation complete), negative on mismatch.
  */
-int tquic_path_response_recv(struct tquic_path *path, const u8 *data)
+int tquic_bpm_path_response_recv(struct tquic_bpm_path *path, const u8 *data)
 {
-	struct tquic_path_validation *val;
+	struct tquic_bpm_path_validation *val;
 	ktime_t rtt;
 
 	if (!path || !data)
@@ -1237,37 +1271,37 @@ int tquic_path_response_recv(struct tquic_path *path, const u8 *data)
 
 	spin_lock_bh(&path->state_lock);
 
-	if (path->state != TQUIC_PATH_VALIDATING) {
+	if (path->state != TQUIC_BPM_PATH_PENDING) {
 		spin_unlock_bh(&path->state_lock);
 		return -ENOENT;
 	}
 
 	/* Verify response matches challenge */
-	if (memcmp(data, val->challenge_data, TQUIC_PATH_CHALLENGE_SIZE) != 0) {
+	if (memcmp(data, val->challenge_data, TQUIC_BPM_PATH_CHALLENGE_SIZE) != 0) {
 		spin_unlock_bh(&path->state_lock);
 		pr_debug("path %u: PATH_RESPONSE mismatch\n", path->path_id);
 		return -EINVAL;
 	}
 
 	/* Validation successful */
-	memcpy(val->response_data, data, TQUIC_PATH_CHALLENGE_SIZE);
+	memcpy(val->response_data, data, TQUIC_BPM_PATH_CHALLENGE_SIZE);
 	val->response_received = true;
 
 	/* Calculate RTT from this exchange */
 	rtt = ktime_sub(ktime_get(), val->challenge_sent);
-	tquic_path_update_rtt(path, ktime_to_us(rtt));
+	tquic_bpm_path_update_rtt(path, ktime_to_us(rtt));
 
 	/* Stop validation timer */
 	del_timer(&val->timer);
 
-	path->state = TQUIC_PATH_VALIDATED;
+	path->state = TQUIC_BPM_PATH_VALIDATED;
 	path->validated = ktime_get();
 	path->consecutive_failures = 0;
 
 	spin_unlock_bh(&path->state_lock);
 
-	pr_info("path %u: validation complete, RTT=%lld us\n",
-		path->path_id, ktime_to_us(rtt));
+	pr_info("path %u: validation complete, RTT=%lld us\n", path->path_id,
+		ktime_to_us(rtt));
 
 	/* Notify path manager */
 	if (path->pm) {
@@ -1278,15 +1312,15 @@ int tquic_path_response_recv(struct tquic_path *path, const u8 *data)
 
 	return 0;
 }
-EXPORT_SYMBOL_GPL(tquic_path_response_recv);
+EXPORT_SYMBOL_GPL(tquic_bpm_path_response_recv);
 
 /**
- * tquic_path_validation_complete - Check if path validation is complete
+ * tquic_bpm_path_validation_complete - Check if path validation is complete
  * @path: Path to check
  *
  * Returns true if path is validated, false otherwise.
  */
-bool tquic_path_validation_complete(struct tquic_path *path)
+bool tquic_bpm_path_validation_complete(struct tquic_bpm_path *path)
 {
 	bool complete;
 
@@ -1294,14 +1328,14 @@ bool tquic_path_validation_complete(struct tquic_path *path)
 		return false;
 
 	spin_lock_bh(&path->state_lock);
-	complete = (path->state == TQUIC_PATH_VALIDATED ||
-		    path->state == TQUIC_PATH_ACTIVE ||
-		    path->state == TQUIC_PATH_STANDBY);
+	complete = (path->state == TQUIC_BPM_PATH_VALIDATED ||
+		    path->state == TQUIC_BPM_PATH_ACTIVE ||
+		    path->state == TQUIC_BPM_PATH_STANDBY);
 	spin_unlock_bh(&path->state_lock);
 
 	return complete;
 }
-EXPORT_SYMBOL_GPL(tquic_path_validation_complete);
+EXPORT_SYMBOL_GPL(tquic_bpm_path_validation_complete);
 
 /*
  * ============================================================================
@@ -1310,15 +1344,15 @@ EXPORT_SYMBOL_GPL(tquic_path_validation_complete);
  */
 
 /**
- * tquic_pm_init - Initialize path manager for a connection
+ * tquic_bpm_init - Initialize path manager for a connection
  * @net: Network namespace
  * @gfp: Memory allocation flags
  *
  * Returns initialized path manager or NULL on failure.
  */
-struct tquic_path_manager *tquic_pm_init(struct net *net, gfp_t gfp)
+struct tquic_bpm_path_manager *tquic_bpm_init(struct net *net, gfp_t gfp)
 {
-	struct tquic_path_manager *pm;
+	struct tquic_bpm_path_manager *pm;
 
 	pm = kzalloc(sizeof(*pm), gfp);
 	if (!pm)
@@ -1336,9 +1370,9 @@ struct tquic_path_manager *tquic_pm_init(struct net *net, gfp_t gfp)
 	pm->discovery_enabled = true;
 	pm->auto_failover = true;
 
-	INIT_WORK(&pm->discover_work, tquic_pm_discover_work_fn);
-	INIT_WORK(&pm->failover_work, tquic_pm_failover_work_fn);
-	INIT_DELAYED_WORK(&pm->probe_work, tquic_pm_probe_work_fn);
+	INIT_WORK(&pm->discover_work, tquic_bpm_discover_work_fn);
+	INIT_WORK(&pm->failover_work, tquic_bpm_failover_work_fn);
+	INIT_DELAYED_WORK(&pm->probe_work, tquic_bpm_probe_work_fn);
 
 	/* Initialize bonding state machine */
 	pm->bonding = tquic_bonding_init(pm, gfp);
@@ -1353,25 +1387,25 @@ struct tquic_path_manager *tquic_pm_init(struct net *net, gfp_t gfp)
 	pm->on_path_failed = tquic_bonding_on_path_failed;
 
 	/* Register with global list */
-	spin_lock_bh(&tquic_pm_list_lock);
-	list_add_tail_rcu(&pm->path_list, &tquic_pm_list);
-	spin_unlock_bh(&tquic_pm_list_lock);
+	spin_lock_bh(&tquic_bpm_list_lock);
+	list_add_tail_rcu(&pm->path_list, &tquic_bpm_list);
+	spin_unlock_bh(&tquic_bpm_list_lock);
 
-	atomic_inc(&tquic_pm_count);
+	atomic_inc(&tquic_bpm_count);
 
 	pr_debug("path manager initialized %p (bonding=%p)\n", pm, pm->bonding);
 
 	return pm;
 }
-EXPORT_SYMBOL_GPL(tquic_pm_init);
+EXPORT_SYMBOL_GPL(tquic_bpm_init);
 
 /**
- * tquic_pm_destroy - Destroy path manager
+ * tquic_bpm_destroy - Destroy path manager
  * @pm: Path manager to destroy
  */
-void tquic_pm_destroy(struct tquic_path_manager *pm)
+void tquic_bpm_destroy(struct tquic_bpm_path_manager *pm)
 {
-	struct tquic_path *path, *tmp;
+	struct tquic_bpm_path *path, *tmp;
 
 	if (!pm)
 		return;
@@ -1382,16 +1416,16 @@ void tquic_pm_destroy(struct tquic_path_manager *pm)
 	cancel_delayed_work_sync(&pm->probe_work);
 
 	/* Remove from global list */
-	spin_lock_bh(&tquic_pm_list_lock);
+	spin_lock_bh(&tquic_bpm_list_lock);
 	list_del_rcu(&pm->path_list);
-	spin_unlock_bh(&tquic_pm_list_lock);
+	spin_unlock_bh(&tquic_bpm_list_lock);
 
 	/* Free all paths */
 	spin_lock_bh(&pm->lock);
 	list_for_each_entry_safe(path, tmp, &pm->path_list, list) {
 		list_del_init(&path->list);
 		path->pm = NULL;
-		tquic_path_put(path);
+		tquic_bpm_path_put(path);
 	}
 	spin_unlock_bh(&pm->lock);
 
@@ -1403,16 +1437,16 @@ void tquic_pm_destroy(struct tquic_path_manager *pm)
 		pm->bonding = NULL;
 	}
 
-	atomic_dec(&tquic_pm_count);
+	atomic_dec(&tquic_bpm_count);
 
 	pr_debug("path manager destroyed %p\n", pm);
 
 	kfree(pm);
 }
-EXPORT_SYMBOL_GPL(tquic_pm_destroy);
+EXPORT_SYMBOL_GPL(tquic_bpm_destroy);
 
 /**
- * tquic_pm_add_path - Add a new path to the manager
+ * tquic_bpm_add_path - Add a new path to the manager
  * @pm: Path manager
  * @local: Local address
  * @remote: Remote address
@@ -1420,12 +1454,11 @@ EXPORT_SYMBOL_GPL(tquic_pm_destroy);
  *
  * Returns the new path or ERR_PTR on failure.
  */
-struct tquic_path *tquic_pm_add_path(struct tquic_path_manager *pm,
+struct tquic_bpm_path *tquic_bpm_add_path(struct tquic_bpm_path_manager *pm,
 				     const struct sockaddr *local,
-				     const struct sockaddr *remote,
-				     int ifindex)
+				     const struct sockaddr *remote, int ifindex)
 {
-	struct tquic_path *path, *existing;
+	struct tquic_bpm_path *path, *existing;
 	struct tquic_addr_info local_info, remote_info;
 	u32 path_id;
 	int ret;
@@ -1440,8 +1473,10 @@ struct tquic_path *tquic_pm_add_path(struct tquic_path_manager *pm,
 
 	/* Check for existing path with same addresses */
 	list_for_each_entry(existing, &pm->path_list, list) {
-		if (tquic_addr_equal(&existing->local_addr, &local_info, true) &&
-		    tquic_addr_equal(&existing->remote_addr, &remote_info, true)) {
+		if (tquic_addr_equal(&existing->local_addr, &local_info,
+				     true) &&
+		    tquic_addr_equal(&existing->remote_addr, &remote_info,
+				     true)) {
 			spin_unlock_bh(&pm->lock);
 			return ERR_PTR(-EEXIST);
 		}
@@ -1463,16 +1498,16 @@ struct tquic_path *tquic_pm_add_path(struct tquic_path_manager *pm,
 	spin_unlock_bh(&pm->lock);
 
 	/* Allocate and initialize path */
-	path = tquic_path_alloc(GFP_KERNEL);
+	path = tquic_bpm_path_alloc(GFP_KERNEL);
 	if (!path)
 		return ERR_PTR(-ENOMEM);
 
 	path->path_id = path_id;
 	path->pm = pm;
 
-	ret = tquic_path_init(path, local, remote, ifindex);
+	ret = tquic_bpm_path_init(path, local, remote, ifindex);
 	if (ret) {
-		tquic_path_free(path);
+		tquic_bpm_path_free(path);
 		return ERR_PTR(ret);
 	}
 
@@ -1481,7 +1516,7 @@ struct tquic_path *tquic_pm_add_path(struct tquic_path_manager *pm,
 	/* Double-check after reacquiring lock */
 	if (pm->path_count >= pm->max_paths) {
 		spin_unlock_bh(&pm->lock);
-		tquic_path_free(path);
+		tquic_bpm_path_free(path);
 		return ERR_PTR(-ENOSPC);
 	}
 
@@ -1499,10 +1534,11 @@ struct tquic_path *tquic_pm_add_path(struct tquic_path_manager *pm,
 
 	spin_unlock_bh(&pm->lock);
 
-	pr_info("path %u added: ifindex=%d wan_type=%s\n",
-		path->path_id, ifindex,
+	pr_info("path %u added: ifindex=%d wan_type=%s\n", path->path_id,
+		ifindex,
 		path->wan_type < __TQUIC_WAN_TYPE_MAX ?
-		tquic_wan_type_names[path->wan_type] : "unknown");
+			tquic_wan_type_names[path->wan_type] :
+			"unknown");
 
 	/* Notify bonding state machine of new path */
 	if (pm->bonding)
@@ -1510,16 +1546,17 @@ struct tquic_path *tquic_pm_add_path(struct tquic_path_manager *pm,
 
 	return path;
 }
-EXPORT_SYMBOL_GPL(tquic_pm_add_path);
+EXPORT_SYMBOL_GPL(tquic_bpm_add_path);
 
 /**
- * tquic_pm_remove_path - Remove a path from the manager
+ * tquic_bpm_remove_path - Remove a path from the manager
  * @pm: Path manager
  * @path: Path to remove
  */
-void tquic_pm_remove_path(struct tquic_path_manager *pm, struct tquic_path *path)
+void tquic_bpm_remove_path(struct tquic_bpm_path_manager *pm,
+			  struct tquic_bpm_path *path)
 {
-	struct tquic_path *primary, *backup, *iter;
+	struct tquic_bpm_path *primary, *backup, *iter;
 	bool need_failover = false;
 
 	if (!pm || !path)
@@ -1553,9 +1590,10 @@ void tquic_pm_remove_path(struct tquic_path_manager *pm, struct tquic_path *path
 		} else {
 			/* Find any validated path */
 			list_for_each_entry(iter, &pm->path_list, list) {
-				if (iter->state == TQUIC_PATH_VALIDATED ||
-				    iter->state == TQUIC_PATH_ACTIVE) {
-					rcu_assign_pointer(pm->primary_path, iter);
+				if (iter->state == TQUIC_BPM_PATH_VALIDATED ||
+				    iter->state == TQUIC_BPM_PATH_ACTIVE) {
+					rcu_assign_pointer(pm->primary_path,
+							   iter);
 					iter->is_primary = true;
 					need_failover = true;
 					break;
@@ -1574,28 +1612,28 @@ void tquic_pm_remove_path(struct tquic_path_manager *pm, struct tquic_path *path
 	if (pm->bonding)
 		tquic_bonding_on_path_removed(pm->bonding, path);
 
-	tquic_path_set_state(path, TQUIC_PATH_CLOSING);
+	tquic_bpm_path_set_state(path, TQUIC_BPM_PATH_CLOSED);
 
 	pr_info("path %u removed\n", path->path_id);
 
 	path->pm = NULL;
-	tquic_path_put(path);
+	tquic_bpm_path_put(path);
 
 	if (need_failover && pm->auto_failover)
-		queue_work(tquic_pm_wq, &pm->failover_work);
+		queue_work(tquic_bpm_wq, &pm->failover_work);
 }
-EXPORT_SYMBOL_GPL(tquic_pm_remove_path);
+EXPORT_SYMBOL_GPL(tquic_bpm_remove_path);
 
 /**
- * tquic_pm_get_path - Get path by ID
+ * tquic_bpm_get_path - Get path by ID
  * @pm: Path manager
  * @path_id: Path ID to find
  *
  * Returns path with incremented reference count, or NULL if not found.
  */
-struct tquic_path *tquic_pm_get_path(struct tquic_path_manager *pm, u32 path_id)
+struct tquic_bpm_path *tquic_bpm_get_path(struct tquic_bpm_path_manager *pm, u32 path_id)
 {
-	struct tquic_path *path;
+	struct tquic_bpm_path *path;
 
 	if (!pm)
 		return NULL;
@@ -1603,7 +1641,7 @@ struct tquic_path *tquic_pm_get_path(struct tquic_path_manager *pm, u32 path_id)
 	rcu_read_lock();
 	list_for_each_entry_rcu(path, &pm->path_list, list) {
 		if (path->path_id == path_id) {
-			tquic_path_get(path);
+			tquic_bpm_path_get(path);
 			rcu_read_unlock();
 			return path;
 		}
@@ -1612,21 +1650,21 @@ struct tquic_path *tquic_pm_get_path(struct tquic_path_manager *pm, u32 path_id)
 
 	return NULL;
 }
-EXPORT_SYMBOL_GPL(tquic_pm_get_path);
+EXPORT_SYMBOL_GPL(tquic_bpm_get_path);
 
 /**
- * tquic_pm_get_active_paths - Get list of active paths
+ * tquic_bpm_get_active_paths - Get list of active paths
  * @pm: Path manager
  * @paths: Array to fill with path pointers
  * @max_paths: Maximum paths to return
  *
  * Returns number of active paths found.
- * Caller must call tquic_path_put() on each returned path.
+ * Caller must call tquic_bpm_path_put() on each returned path.
  */
-int tquic_pm_get_active_paths(struct tquic_path_manager *pm,
-			      struct tquic_path **paths, int max_paths)
+int tquic_bpm_get_active_paths(struct tquic_bpm_path_manager *pm,
+			      struct tquic_bpm_path **paths, int max_paths)
 {
-	struct tquic_path *path;
+	struct tquic_bpm_path *path;
 	int count = 0;
 
 	if (!pm || !paths || max_paths <= 0)
@@ -1637,9 +1675,9 @@ int tquic_pm_get_active_paths(struct tquic_path_manager *pm,
 		if (count >= max_paths)
 			break;
 
-		if (path->state == TQUIC_PATH_ACTIVE ||
-		    path->state == TQUIC_PATH_VALIDATED) {
-			tquic_path_get(path);
+		if (path->state == TQUIC_BPM_PATH_ACTIVE ||
+		    path->state == TQUIC_BPM_PATH_VALIDATED) {
+			tquic_bpm_path_get(path);
 			paths[count++] = path;
 		}
 	}
@@ -1647,7 +1685,7 @@ int tquic_pm_get_active_paths(struct tquic_path_manager *pm,
 
 	return count;
 }
-EXPORT_SYMBOL_GPL(tquic_pm_get_active_paths);
+EXPORT_SYMBOL_GPL(tquic_bpm_get_active_paths);
 
 /*
  * ============================================================================
@@ -1672,7 +1710,7 @@ static bool tquic_is_wan_interface(struct net_device *dev)
 	/* Exclude certain device types */
 	switch (dev->type) {
 	case ARPHRD_LOOPBACK:
-	case ARPHRD_SIT:	/* IPv6 in IPv4 tunnel */
+	case ARPHRD_SIT: /* IPv6 in IPv4 tunnel */
 		return false;
 	}
 
@@ -1692,12 +1730,12 @@ static bool tquic_is_wan_interface(struct net_device *dev)
 }
 
 /**
- * tquic_pm_discover_paths - Discover available network interfaces
+ * tquic_bpm_discover_paths - Discover available network interfaces
  * @pm: Path manager
  *
  * Scans network interfaces and adds paths for WAN-suitable interfaces.
  */
-void tquic_pm_discover_paths(struct tquic_path_manager *pm)
+void tquic_bpm_discover_paths(struct tquic_bpm_path_manager *pm)
 {
 	struct net_device *dev;
 	struct in_device *in_dev;
@@ -1721,11 +1759,6 @@ void tquic_pm_discover_paths(struct tquic_path_manager *pm)
 		in_dev = __in_dev_get_rcu(dev);
 		if (in_dev) {
 			in_dev_for_each_ifa_rcu(ifa, in_dev) {
-				struct sockaddr_in local = {
-					.sin_family = AF_INET,
-					.sin_addr.s_addr = ifa->ifa_local,
-				};
-
 				pr_debug("discovered interface %s addr %pI4\n",
 					 dev->name, &ifa->ifa_local);
 
@@ -1761,14 +1794,14 @@ void tquic_pm_discover_paths(struct tquic_path_manager *pm)
 
 	pr_debug("path discovery complete: %d interfaces found\n", count);
 }
-EXPORT_SYMBOL_GPL(tquic_pm_discover_paths);
+EXPORT_SYMBOL_GPL(tquic_bpm_discover_paths);
 
-static void tquic_pm_discover_work_fn(struct work_struct *work)
+static void tquic_bpm_discover_work_fn(struct work_struct *work)
 {
-	struct tquic_path_manager *pm = container_of(work,
-			struct tquic_path_manager, discover_work);
+	struct tquic_bpm_path_manager *pm =
+		container_of(work, struct tquic_bpm_path_manager, discover_work);
 
-	tquic_pm_discover_paths(pm);
+	tquic_bpm_discover_paths(pm);
 }
 
 /*
@@ -1778,17 +1811,17 @@ static void tquic_pm_discover_work_fn(struct work_struct *work)
  */
 
 /**
- * tquic_pm_netdev_event - Handle network device events
+ * tquic_bpm_netdev_event - Handle network device events
  * @nb: Notifier block
  * @event: Event type
  * @ptr: Network device
  */
-static int tquic_pm_netdev_event(struct notifier_block *nb,
-				 unsigned long event, void *ptr)
+static int tquic_bpm_netdev_event(struct notifier_block *nb, unsigned long event,
+				 void *ptr)
 {
 	struct net_device *dev = netdev_notifier_info_to_dev(ptr);
-	struct tquic_path_manager *pm;
-	struct tquic_path *path;
+	struct tquic_bpm_path_manager *pm;
+	struct tquic_bpm_path *path;
 	bool found;
 
 	switch (event) {
@@ -1797,9 +1830,10 @@ static int tquic_pm_netdev_event(struct notifier_block *nb,
 		if (tquic_is_wan_interface(dev)) {
 			/* Trigger discovery on all path managers */
 			rcu_read_lock();
-			list_for_each_entry_rcu(pm, &tquic_pm_list, path_list) {
+			list_for_each_entry_rcu(pm, &tquic_bpm_list, path_list) {
 				if (pm->discovery_enabled)
-					queue_work(tquic_pm_wq, &pm->discover_work);
+					queue_work(tquic_bpm_wq,
+						   &pm->discover_work);
 			}
 			rcu_read_unlock();
 		}
@@ -1809,13 +1843,14 @@ static int tquic_pm_netdev_event(struct notifier_block *nb,
 		pr_debug("netdev DOWN: %s\n", dev->name);
 		/* Mark paths on this interface as failed */
 		rcu_read_lock();
-		list_for_each_entry_rcu(pm, &tquic_pm_list, path_list) {
+		list_for_each_entry_rcu(pm, &tquic_bpm_list, path_list) {
 			spin_lock_bh(&pm->lock);
 			list_for_each_entry(path, &pm->path_list, list) {
 				if (path->ifindex == dev->ifindex &&
-				    path->state != TQUIC_PATH_FAILED) {
+				    path->state != TQUIC_BPM_PATH_FAILED) {
 					spin_unlock_bh(&pm->lock);
-					tquic_path_set_state(path, TQUIC_PATH_FAILED);
+					tquic_bpm_path_set_state(path,
+							     TQUIC_BPM_PATH_FAILED);
 					spin_lock_bh(&pm->lock);
 					pm->paths_failed++;
 				}
@@ -1823,33 +1858,36 @@ static int tquic_pm_netdev_event(struct notifier_block *nb,
 			spin_unlock_bh(&pm->lock);
 
 			if (pm->auto_failover)
-				queue_work(tquic_pm_wq, &pm->failover_work);
+				queue_work(tquic_bpm_wq, &pm->failover_work);
 		}
 		rcu_read_unlock();
 		break;
 
 	case NETDEV_CHANGE:
-		pr_debug("netdev CHANGE: %s carrier=%d\n",
-			 dev->name, netif_carrier_ok(dev));
+		pr_debug("netdev CHANGE: %s carrier=%d\n", dev->name,
+			 netif_carrier_ok(dev));
 
 		rcu_read_lock();
-		list_for_each_entry_rcu(pm, &tquic_pm_list, path_list) {
+		list_for_each_entry_rcu(pm, &tquic_bpm_list, path_list) {
 			found = false;
 			spin_lock_bh(&pm->lock);
 			list_for_each_entry(path, &pm->path_list, list) {
 				if (path->ifindex == dev->ifindex) {
 					found = true;
 					if (!netif_carrier_ok(dev) &&
-					    path->state != TQUIC_PATH_FAILED) {
+					    path->state != TQUIC_BPM_PATH_FAILED) {
 						spin_unlock_bh(&pm->lock);
-						tquic_path_set_state(path, TQUIC_PATH_FAILED);
+						tquic_bpm_path_set_state(
+							path,
+							TQUIC_BPM_PATH_FAILED);
 						spin_lock_bh(&pm->lock);
 						pm->paths_failed++;
 					} else if (netif_carrier_ok(dev) &&
-						   path->state == TQUIC_PATH_FAILED) {
+						   path->state ==
+							   TQUIC_BPM_PATH_FAILED) {
 						/* Carrier restored, revalidate */
 						spin_unlock_bh(&pm->lock);
-						tquic_path_validate(path);
+						tquic_bpm_path_validate(path);
 						spin_lock_bh(&pm->lock);
 					}
 				}
@@ -1857,7 +1895,7 @@ static int tquic_pm_netdev_event(struct notifier_block *nb,
 			spin_unlock_bh(&pm->lock);
 
 			if (found && pm->auto_failover)
-				queue_work(tquic_pm_wq, &pm->failover_work);
+				queue_work(tquic_bpm_wq, &pm->failover_work);
 		}
 		rcu_read_unlock();
 		break;
@@ -1865,13 +1903,14 @@ static int tquic_pm_netdev_event(struct notifier_block *nb,
 	case NETDEV_CHANGEMTU:
 		/* Update MTU on affected paths */
 		rcu_read_lock();
-		list_for_each_entry_rcu(pm, &tquic_pm_list, path_list) {
+		list_for_each_entry_rcu(pm, &tquic_bpm_list, path_list) {
 			spin_lock_bh(&pm->lock);
 			list_for_each_entry(path, &pm->path_list, list) {
 				if (path->ifindex == dev->ifindex) {
-					u16 new_mtu = min_t(u16, dev->mtu, 65535);
-					if (new_mtu < TQUIC_PATH_MTU_MIN)
-						new_mtu = TQUIC_PATH_MTU_MIN;
+					u16 new_mtu =
+						min_t(u16, dev->mtu, 65535);
+					if (new_mtu < TQUIC_BPM_PATH_MTU_MIN)
+						new_mtu = TQUIC_BPM_PATH_MTU_MIN;
 					path->mtu = new_mtu;
 				}
 			}
@@ -1885,7 +1924,7 @@ static int tquic_pm_netdev_event(struct notifier_block *nb,
 }
 
 static struct notifier_block tquic_netdev_notifier = {
-	.notifier_call = tquic_pm_netdev_event,
+	.notifier_call = tquic_bpm_netdev_event,
 };
 
 /*
@@ -1901,25 +1940,25 @@ static struct notifier_block tquic_netdev_notifier = {
  *
  * Returns 0 on success, negative error code on failure.
  */
-int tquic_migrate_to_path(struct tquic_path_manager *pm,
-			  struct tquic_path *new_path)
+int tquic_migrate_to_path(struct tquic_bpm_path_manager *pm,
+			  struct tquic_bpm_path *new_path)
 {
-	struct tquic_path *old_path;
+	struct tquic_bpm_path *old_path;
 	int ret;
 
 	if (!pm || !new_path)
 		return -EINVAL;
 
 	/* Validate new path first if needed */
-	if (new_path->state == TQUIC_PATH_CREATED) {
-		ret = tquic_path_validate(new_path);
+	if (new_path->state == TQUIC_BPM_PATH_UNUSED) {
+		ret = tquic_bpm_path_validate(new_path);
 		if (ret)
 			return ret;
-		return -EINPROGRESS;  /* Will complete async */
+		return -EINPROGRESS; /* Will complete async */
 	}
 
-	if (new_path->state != TQUIC_PATH_VALIDATED &&
-	    new_path->state != TQUIC_PATH_STANDBY) {
+	if (new_path->state != TQUIC_BPM_PATH_VALIDATED &&
+	    new_path->state != TQUIC_BPM_PATH_STANDBY) {
 		return -EINVAL;
 	}
 
@@ -1930,24 +1969,24 @@ int tquic_migrate_to_path(struct tquic_path_manager *pm,
 
 	if (old_path == new_path) {
 		spin_unlock_bh(&pm->lock);
-		return 0;  /* Already primary */
+		return 0; /* Already primary */
 	}
 
 	/* Demote old primary */
 	if (old_path) {
 		old_path->is_primary = false;
-		if (old_path->state == TQUIC_PATH_ACTIVE)
-			tquic_path_set_state(old_path, TQUIC_PATH_STANDBY);
+		if (old_path->state == TQUIC_BPM_PATH_ACTIVE)
+			tquic_bpm_path_set_state(old_path, TQUIC_BPM_PATH_STANDBY);
 	}
 
 	/* Promote new path */
 	rcu_assign_pointer(pm->primary_path, new_path);
 	new_path->is_primary = true;
 	new_path->is_backup = false;
-	tquic_path_set_state(new_path, TQUIC_PATH_ACTIVE);
+	tquic_bpm_path_set_state(new_path, TQUIC_BPM_PATH_ACTIVE);
 
 	/* Old primary becomes backup if still valid */
-	if (old_path && old_path->state == TQUIC_PATH_STANDBY) {
+	if (old_path && old_path->state == TQUIC_BPM_PATH_STANDBY) {
 		rcu_assign_pointer(pm->backup_path, old_path);
 		old_path->is_backup = true;
 	}
@@ -1956,8 +1995,8 @@ int tquic_migrate_to_path(struct tquic_path_manager *pm,
 
 	spin_unlock_bh(&pm->lock);
 
-	pr_info("migrated to path %u (was path %u)\n",
-		new_path->path_id, old_path ? old_path->path_id : 0);
+	pr_info("migrated to path %u (was path %u)\n", new_path->path_id,
+		old_path ? old_path->path_id : 0);
 
 	/* Notify callback */
 	if (pm->on_migration_complete)
@@ -1974,10 +2013,10 @@ EXPORT_SYMBOL_GPL(tquic_migrate_to_path);
  *
  * Returns 0 on success, negative error code on failure.
  */
-int tquic_handle_migration(struct tquic_path_manager *pm,
+int tquic_handle_migration(struct tquic_bpm_path_manager *pm,
 			   const struct sockaddr *new_remote)
 {
-	struct tquic_path *path;
+	struct tquic_bpm_path *path;
 	struct tquic_addr_info remote_info;
 	bool found = false;
 
@@ -1994,12 +2033,12 @@ int tquic_handle_migration(struct tquic_path_manager *pm,
 			path->peer_migrated = true;
 
 			/* Revalidate this path */
-			if (path->state == TQUIC_PATH_VALIDATED ||
-			    path->state == TQUIC_PATH_STANDBY) {
-				tquic_path_get(path);
+			if (path->state == TQUIC_BPM_PATH_VALIDATED ||
+			    path->state == TQUIC_BPM_PATH_STANDBY) {
+				tquic_bpm_path_get(path);
 				rcu_read_unlock();
 				tquic_migrate_to_path(pm, path);
-				tquic_path_put(path);
+				tquic_bpm_path_put(path);
 				return 0;
 			}
 			break;
@@ -2016,7 +2055,7 @@ int tquic_handle_migration(struct tquic_path_manager *pm,
 			 * Take reference before unlocking RCU to ensure
 			 * path survives beyond the RCU read section.
 			 */
-			tquic_path_get(path);
+			tquic_bpm_path_get(path);
 			rcu_read_unlock();
 
 			spin_lock_bh(&path->state_lock);
@@ -2025,8 +2064,8 @@ int tquic_handle_migration(struct tquic_path_manager *pm,
 			spin_unlock_bh(&path->state_lock);
 
 			/* Revalidate path with new address */
-			tquic_path_validate(path);
-			tquic_path_put(path);
+			tquic_bpm_path_validate(path);
+			tquic_bpm_path_put(path);
 			return 0;
 		}
 		rcu_read_unlock();
@@ -2043,15 +2082,15 @@ EXPORT_SYMBOL_GPL(tquic_handle_migration);
  */
 
 /**
- * tquic_pm_select_path - Select best path for sending a packet
+ * tquic_bpm_select_path - Select best path for sending a packet
  * @pm: Path manager
  *
  * Returns selected path with reference, or NULL if no path available.
  * Implements weighted selection based on path quality scores.
  */
-struct tquic_path *tquic_pm_select_path(struct tquic_path_manager *pm)
+struct tquic_bpm_path *tquic_bpm_select_path(struct tquic_bpm_path_manager *pm)
 {
-	struct tquic_path *path, *best = NULL;
+	struct tquic_bpm_path *path, *best = NULL;
 	u32 best_score = 0;
 	u32 available_cwnd;
 
@@ -2062,35 +2101,35 @@ struct tquic_path *tquic_pm_select_path(struct tquic_path_manager *pm)
 
 	/* First, try the primary path if it has available cwnd */
 	path = rcu_dereference(pm->primary_path);
-	if (path && (path->state == TQUIC_PATH_ACTIVE ||
-		     path->state == TQUIC_PATH_VALIDATED)) {
+	if (path && (path->state == TQUIC_BPM_PATH_ACTIVE ||
+		     path->state == TQUIC_BPM_PATH_VALIDATED)) {
 		available_cwnd = tquic_cc_available_cwnd(path);
 		if (available_cwnd >= path->mtu) {
-			tquic_path_get(path);
+			tquic_bpm_path_get(path);
 			rcu_read_unlock();
 			return path;
 		}
 		best = path;
-		best_score = tquic_path_get_score(path);
+		best_score = tquic_bpm_path_get_score(path);
 	}
 
 	/* Check other paths */
 	list_for_each_entry_rcu(path, &pm->path_list, list) {
 		u32 score;
 
-		if (path->state != TQUIC_PATH_ACTIVE &&
-		    path->state != TQUIC_PATH_VALIDATED &&
-		    path->state != TQUIC_PATH_STANDBY)
+		if (path->state != TQUIC_BPM_PATH_ACTIVE &&
+		    path->state != TQUIC_BPM_PATH_VALIDATED &&
+		    path->state != TQUIC_BPM_PATH_STANDBY)
 			continue;
 
 		if (path->is_backup && best != NULL)
-			continue;  /* Skip backup if we have non-backup */
+			continue; /* Skip backup if we have non-backup */
 
 		available_cwnd = tquic_cc_available_cwnd(path);
 		if (available_cwnd < path->mtu)
-			continue;  /* Skip if cwnd exhausted */
+			continue; /* Skip if cwnd exhausted */
 
-		score = tquic_path_get_score(path);
+		score = tquic_bpm_path_get_score(path);
 		if (score > best_score) {
 			best = path;
 			best_score = score;
@@ -2098,13 +2137,13 @@ struct tquic_path *tquic_pm_select_path(struct tquic_path_manager *pm)
 	}
 
 	if (best)
-		tquic_path_get(best);
+		tquic_bpm_path_get(best);
 
 	rcu_read_unlock();
 
 	return best;
 }
-EXPORT_SYMBOL_GPL(tquic_pm_select_path);
+EXPORT_SYMBOL_GPL(tquic_bpm_select_path);
 
 /*
  * ============================================================================
@@ -2112,56 +2151,59 @@ EXPORT_SYMBOL_GPL(tquic_pm_select_path);
  * ============================================================================
  */
 
-static void tquic_pm_probe_work_fn(struct work_struct *work)
+static void tquic_bpm_probe_work_fn(struct work_struct *work)
 {
 	struct delayed_work *dwork = to_delayed_work(work);
-	struct tquic_path_manager *pm = container_of(dwork,
-			struct tquic_path_manager, probe_work);
-	struct tquic_path *path;
+	struct tquic_bpm_path_manager *pm =
+		container_of(dwork, struct tquic_bpm_path_manager, probe_work);
+	struct tquic_bpm_path *path;
 	ktime_t now = ktime_get();
 	ktime_t threshold;
 
-	threshold = ktime_sub_ms(now, TQUIC_PATH_PROBE_TIMEOUT * 1000 / HZ);
+	threshold = ktime_sub_ms(now, TQUIC_BPM_PATH_PROBE_TIMEOUT * 1000 / HZ);
 
 	rcu_read_lock();
 	list_for_each_entry_rcu(path, &pm->path_list, list) {
 		/* Skip paths that are being validated or already failed */
-		if (path->state == TQUIC_PATH_VALIDATING ||
-		    path->state == TQUIC_PATH_FAILED ||
-		    path->state == TQUIC_PATH_CLOSING)
+		if (path->state == TQUIC_BPM_PATH_PENDING ||
+		    path->state == TQUIC_BPM_PATH_FAILED ||
+		    path->state == TQUIC_BPM_PATH_CLOSED)
 			continue;
 
 		/* Check if path needs probing */
 		if (ktime_before(path->last_activity, threshold)) {
 			/* No recent activity, revalidate */
-			tquic_path_validate(path);
+			tquic_bpm_path_validate(path);
 		}
 
 		/* Update signal strength for cellular paths */
 		if (path->wan_type >= TQUIC_WAN_CELLULAR_3G &&
 		    path->wan_type <= TQUIC_WAN_CELLULAR_5G) {
-			path->signal_strength = tquic_wan_get_signal_strength(path->dev);
+			path->signal_strength =
+				tquic_wan_get_signal_strength(path->dev);
 		}
 
 		/* Update loss rate */
-		tquic_path_update_loss_rate(path);
+		tquic_bpm_path_update_loss_rate(path);
 	}
 	rcu_read_unlock();
 
 	/* Reschedule */
-	queue_delayed_work(tquic_pm_wq, &pm->probe_work, TQUIC_PATH_PROBE_TIMEOUT);
+	queue_delayed_work(tquic_bpm_wq, &pm->probe_work,
+			   TQUIC_BPM_PATH_PROBE_TIMEOUT);
 }
 
 /**
  * tquic_wan_monitor_start - Start monitoring WAN interfaces
  * @pm: Path manager
  */
-void tquic_wan_monitor_start(struct tquic_path_manager *pm)
+void tquic_wan_monitor_start(struct tquic_bpm_path_manager *pm)
 {
 	if (!pm)
 		return;
 
-	queue_delayed_work(tquic_pm_wq, &pm->probe_work, TQUIC_PATH_PROBE_TIMEOUT);
+	queue_delayed_work(tquic_bpm_wq, &pm->probe_work,
+			   TQUIC_BPM_PATH_PROBE_TIMEOUT);
 	pr_debug("WAN monitoring started\n");
 }
 EXPORT_SYMBOL_GPL(tquic_wan_monitor_start);
@@ -2172,11 +2214,11 @@ EXPORT_SYMBOL_GPL(tquic_wan_monitor_start);
  * ============================================================================
  */
 
-static void tquic_pm_failover_work_fn(struct work_struct *work)
+static void tquic_bpm_failover_work_fn(struct work_struct *work)
 {
-	struct tquic_path_manager *pm = container_of(work,
-			struct tquic_path_manager, failover_work);
-	struct tquic_path *primary, *backup, *best, *path;
+	struct tquic_bpm_path_manager *pm =
+		container_of(work, struct tquic_bpm_path_manager, failover_work);
+	struct tquic_bpm_path *primary, *backup, *best, *path;
 	u32 best_score = 0;
 
 	spin_lock_bh(&pm->lock);
@@ -2187,17 +2229,17 @@ static void tquic_pm_failover_work_fn(struct work_struct *work)
 					   lockdep_is_held(&pm->lock));
 
 	/* Check if primary is still valid */
-	if (primary && (primary->state == TQUIC_PATH_ACTIVE ||
-			primary->state == TQUIC_PATH_VALIDATED)) {
+	if (primary && (primary->state == TQUIC_BPM_PATH_ACTIVE ||
+			primary->state == TQUIC_BPM_PATH_VALIDATED)) {
 		spin_unlock_bh(&pm->lock);
-		return;  /* Primary is fine */
+		return; /* Primary is fine */
 	}
 
 	pr_info("primary path failed, initiating failover\n");
 
 	/* Try backup first */
-	if (backup && (backup->state == TQUIC_PATH_VALIDATED ||
-		       backup->state == TQUIC_PATH_STANDBY)) {
+	if (backup && (backup->state == TQUIC_BPM_PATH_VALIDATED ||
+		       backup->state == TQUIC_BPM_PATH_STANDBY)) {
 		best = backup;
 	} else {
 		/* Find best available path */
@@ -2208,12 +2250,12 @@ static void tquic_pm_failover_work_fn(struct work_struct *work)
 			if (path == primary)
 				continue;
 
-			if (path->state != TQUIC_PATH_VALIDATED &&
-			    path->state != TQUIC_PATH_STANDBY &&
-			    path->state != TQUIC_PATH_ACTIVE)
+			if (path->state != TQUIC_BPM_PATH_VALIDATED &&
+			    path->state != TQUIC_BPM_PATH_STANDBY &&
+			    path->state != TQUIC_BPM_PATH_ACTIVE)
 				continue;
 
-			score = tquic_path_get_score(path);
+			score = tquic_bpm_path_get_score(path);
 			if (score > best_score) {
 				best = path;
 				best_score = score;
@@ -2236,12 +2278,13 @@ static void tquic_pm_failover_work_fn(struct work_struct *work)
  * ============================================================================
  */
 
-int __init tquic_path_init_module(void)
+int __init tquic_bpm_path_init_module(void)
 {
 	int ret;
 
-	tquic_pm_wq = alloc_workqueue("tquic_pm", WQ_MEM_RECLAIM | WQ_HIGHPRI, 0);
-	if (!tquic_pm_wq) {
+	tquic_bpm_wq =
+		alloc_workqueue("tquic_pm", WQ_MEM_RECLAIM | WQ_HIGHPRI, 0);
+	if (!tquic_bpm_wq) {
 		pr_err("failed to create workqueue\n");
 		return -ENOMEM;
 	}
@@ -2249,7 +2292,7 @@ int __init tquic_path_init_module(void)
 	ret = register_netdevice_notifier(&tquic_netdev_notifier);
 	if (ret) {
 		pr_err("failed to register netdevice notifier: %d\n", ret);
-		destroy_workqueue(tquic_pm_wq);
+		destroy_workqueue(tquic_bpm_wq);
 		return ret;
 	}
 
@@ -2257,13 +2300,13 @@ int __init tquic_path_init_module(void)
 	return 0;
 }
 
-void __exit tquic_path_exit_module(void)
+void __exit tquic_bpm_path_exit_module(void)
 {
 	unregister_netdevice_notifier(&tquic_netdev_notifier);
-	destroy_workqueue(tquic_pm_wq);
+	destroy_workqueue(tquic_bpm_wq);
 
 	/* Wait for all path managers to be destroyed */
-	WARN_ON(atomic_read(&tquic_pm_count) != 0);
+	WARN_ON(atomic_read(&tquic_bpm_count) != 0);
 
 	pr_info("TQUIC path manager unloaded\n");
 }

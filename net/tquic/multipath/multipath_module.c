@@ -56,9 +56,15 @@ static void __exit tquic_multipath_module_exit(void)
 	pr_info("tquic_multipath: RFC 9369 extension exited\n");
 }
 
+/*
+ * Module init/exit only for in-tree builds.
+ * For out-of-tree builds, tquic_main.c handles init/exit.
+ */
+#ifndef TQUIC_OUT_OF_TREE
 module_init(tquic_multipath_module_init);
 module_exit(tquic_multipath_module_exit);
 
 MODULE_DESCRIPTION("TQUIC Multipath Extension (RFC 9369)");
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Linux Foundation");
+#endif /* !TQUIC_OUT_OF_TREE */

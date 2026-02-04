@@ -30,6 +30,7 @@
 #include <linux/jiffies.h>
 #include <net/sock.h>
 #include <net/tcp.h>
+#include <net/ipv6.h>
 
 #include "quic_over_tcp.h"
 #include "../protocol.h"
@@ -345,24 +346,29 @@ static void cc_state_init(struct quic_tcp_cc_state *cc)
 
 static void cc_state_update_from_tcp(struct quic_tcp_connection *conn)
 {
-	struct tcp_info info;
-	int len = sizeof(info);
-	int ret;
+	struct sock *sk;
+	struct tcp_sock *tp;
 
 	if (!conn || !conn->tcp_sk)
 		return;
 
-	/* Get TCP congestion control info */
-	ret = kernel_getsockopt(conn->tcp_sk, SOL_TCP, TCP_INFO,
-				(char *)&info, &len);
-	if (ret < 0)
+	sk = conn->tcp_sk->sk;
+	if (!sk)
+		return;
+
+	/*
+	 * Kernel 6.12+ removed kernel_getsockopt().
+	 * Access tcp_sock fields directly via tcp_sk() macro.
+	 */
+	tp = tcp_sk(sk);
+	if (!tp)
 		return;
 
 	spin_lock(&conn->cc_state.lock);
 
-	conn->cc_state.tcp_cwnd = info.tcpi_snd_cwnd * info.tcpi_snd_mss;
-	conn->cc_state.tcp_rtt = info.tcpi_rtt;
-	conn->cc_state.tcp_rtt_var = info.tcpi_rttvar;
+	conn->cc_state.tcp_cwnd = tp->snd_cwnd * tp->mss_cache;
+	conn->cc_state.tcp_rtt = tp->srtt_us >> 3;  /* Convert from shifted value */
+	conn->cc_state.tcp_rtt_var = tp->mdev_us >> 2;  /* RTT variance */
 	conn->cc_state.last_update = ktime_get();
 
 	spin_unlock(&conn->cc_state.lock);
@@ -605,19 +611,22 @@ int quic_tcp_set_keepalive(struct quic_tcp_connection *conn,
 
 	/* Also configure TCP keepalive if requested */
 	if (ka->tcp_enabled && conn->tcp_sk) {
-		int one = 1;
+		struct sock *sk = conn->tcp_sk->sk;
 		int idle = ka->interval_ms / 1000;
 		int intvl = ka->interval_ms / 1000 / 3;
-		int cnt = 3;
 
-		kernel_setsockopt(conn->tcp_sk, SOL_SOCKET, SO_KEEPALIVE,
-				  (char *)&one, sizeof(one));
-		kernel_setsockopt(conn->tcp_sk, SOL_TCP, TCP_KEEPIDLE,
-				  (char *)&idle, sizeof(idle));
-		kernel_setsockopt(conn->tcp_sk, SOL_TCP, TCP_KEEPINTVL,
-				  (char *)&intvl, sizeof(intvl));
-		kernel_setsockopt(conn->tcp_sk, SOL_TCP, TCP_KEEPCNT,
-				  (char *)&cnt, sizeof(cnt));
+		/*
+		 * Kernel 6.12+ removed kernel_setsockopt().
+		 * Access socket fields directly instead.
+		 */
+		lock_sock(sk);
+		sock_set_keepalive(sk);
+		if (idle > 0)
+			tcp_sock_set_keepidle(sk, idle);
+		if (intvl > 0)
+			tcp_sock_set_keepintvl(sk, intvl);
+		tcp_sock_set_keepcnt(sk, 3);
+		release_sock(sk);
 	}
 
 	return 0;
@@ -1062,8 +1071,6 @@ EXPORT_SYMBOL_GPL(quic_tcp_set_listener_callback);
 int quic_tcp_set_config(struct quic_tcp_connection *conn,
 			struct quic_tcp_config *config)
 {
-	int one = 1, zero = 0;
-
 	if (!conn || !config)
 		return -EINVAL;
 
@@ -1073,18 +1080,19 @@ int quic_tcp_set_config(struct quic_tcp_connection *conn,
 
 	/* Apply TCP socket options */
 	if (conn->tcp_sk) {
-		if (config->tcp_nodelay) {
-			kernel_setsockopt(conn->tcp_sk, IPPROTO_TCP, TCP_NODELAY,
-					  (char *)&one, sizeof(one));
-		}
+		struct sock *sk = conn->tcp_sk->sk;
 
-		if (config->tcp_cork) {
-			kernel_setsockopt(conn->tcp_sk, IPPROTO_TCP, TCP_CORK,
-					  (char *)&one, sizeof(one));
-		} else {
-			kernel_setsockopt(conn->tcp_sk, IPPROTO_TCP, TCP_CORK,
-					  (char *)&zero, sizeof(zero));
-		}
+		/*
+		 * Kernel 6.12+ removed kernel_setsockopt().
+		 * Use tcp_sock_set_* helpers instead.
+		 */
+		if (config->tcp_nodelay)
+			tcp_sock_set_nodelay(sk);
+
+		if (config->tcp_cork)
+			tcp_sock_set_cork(sk, true);
+		else
+			tcp_sock_set_cork(sk, false);
 	}
 
 	/* Update CC mode */
@@ -1235,11 +1243,11 @@ struct quic_tcp_connection *quic_tcp_connect(struct sockaddr *addr,
 	init_connection_defaults(conn);
 
 	/* Set socket options */
-	{
-		int one = 1;
-		kernel_setsockopt(conn->tcp_sk, IPPROTO_TCP, TCP_NODELAY,
-				  (char *)&one, sizeof(one));
-	}
+	/*
+	 * Kernel 6.12+ removed kernel_setsockopt().
+	 * Use tcp_sock_set_nodelay() helper instead.
+	 */
+	tcp_sock_set_nodelay(conn->tcp_sk->sk);
 
 	/* Setup callbacks before connect */
 	setup_tcp_callbacks(conn);
@@ -1423,7 +1431,7 @@ struct quic_tcp_listener *quic_tcp_listen(u16 port)
 {
 	struct quic_tcp_listener *listener;
 	struct sockaddr_in6 addr;
-	int ret, one = 1;
+	int ret;
 
 	if (!quic_tcp_initialized)
 		return ERR_PTR(-ENODEV);
@@ -1439,10 +1447,23 @@ struct quic_tcp_listener *quic_tcp_listen(u16 port)
 		goto err_free;
 
 	/* Set socket options */
-	kernel_setsockopt(listener->tcp_sk, SOL_SOCKET, SO_REUSEADDR,
-			  (char *)&one, sizeof(one));
-	kernel_setsockopt(listener->tcp_sk, IPPROTO_IPV6, IPV6_V6ONLY,
-			  (char *)&one, sizeof(one));
+	/*
+	 * Kernel 6.12+ removed kernel_setsockopt().
+	 * Access socket fields directly.
+	 */
+	{
+		struct sock *sk = listener->tcp_sk->sk;
+
+		lock_sock(sk);
+		sk->sk_reuse = SK_CAN_REUSE;
+		/* Set IPV6_V6ONLY via ipv6_pinfo->ipv6only flag */
+		if (sk->sk_family == AF_INET6) {
+			struct ipv6_pinfo *np = inet6_sk(sk);
+			if (np)
+				np->ipv6only = 1;
+		}
+		release_sock(sk);
+	}
 
 	/* Bind */
 	memset(&addr, 0, sizeof(addr));

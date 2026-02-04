@@ -23,6 +23,9 @@
 /* Rate limiting for events */
 static DEFINE_RATELIMIT_STATE(tquic_pm_event_rl, HZ, 100);
 
+/* Forward declaration - defined later in this file */
+static struct genl_family tquic_pm_genl_family;
+
 /*
  * Multicast groups for PM netlink family
  * Following MPTCP pattern: events group requires CAP_NET_ADMIN

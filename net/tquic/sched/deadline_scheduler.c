@@ -232,17 +232,17 @@ static u64 edf_estimate_path_delivery(struct tquic_path *path, size_t data_len)
 	/* Base RTT */
 	rtt_us = path->stats.rtt_smoothed;
 	if (rtt_us == 0)
-		rtt_us = 100000;  /* 100ms default */
+		rtt_us = 100000; /* 100ms default */
 
 	/* Bandwidth estimate */
 	bandwidth = path->stats.bandwidth;
 	if (bandwidth == 0) {
 		/* Derive from cwnd and RTT */
 		if (path->stats.cwnd > 0 && rtt_us > 0)
-			bandwidth = div64_u64((u64)path->stats.cwnd * 1000000ULL,
-					      rtt_us);
+			bandwidth = div64_u64(
+				(u64)path->stats.cwnd * 1000000ULL, rtt_us);
 		else
-			bandwidth = 125000;  /* 1 Mbps default */
+			bandwidth = 125000; /* 1 Mbps default */
 	}
 
 	/* Transmission delay */
@@ -267,7 +267,8 @@ static u64 edf_estimate_path_delivery(struct tquic_path *path, size_t data_len)
 		}
 	}
 
-	return rtt_us + tx_delay_us + queue_delay_us + jitter_us + loss_overhead_us;
+	return rtt_us + tx_delay_us + queue_delay_us + jitter_us +
+	       loss_overhead_us;
 }
 
 /**
@@ -301,7 +302,7 @@ static void edf_score_path(struct tquic_path *path, ktime_t deadline,
 		/* Deadline already passed */
 		score->can_meet_deadline = false;
 		score->slack_us = time_remaining_us;
-		score->score = delivery_us + 1000000;  /* 1s penalty */
+		score->score = delivery_us + 1000000; /* 1s penalty */
 	} else if (delivery_us <= (u64)time_remaining_us) {
 		/* Can meet deadline */
 		score->can_meet_deadline = true;
@@ -329,8 +330,8 @@ static void edf_score_path(struct tquic_path *path, ktime_t deadline,
 		score->slack_us = time_remaining_us - delivery_us;
 
 		/* Penalty proportional to how much we miss by */
-		score->score = delivery_us +
-			       (delivery_us - time_remaining_us) * 2;
+		score->score =
+			delivery_us + (delivery_us - time_remaining_us) * 2;
 	}
 }
 
@@ -467,8 +468,8 @@ static bool edf_check_admission(struct tquic_edf_scheduler *sched,
  *
  * Returns: New scheduler, or NULL on failure
  */
-struct tquic_edf_scheduler *tquic_edf_scheduler_create(
-	struct tquic_connection *conn, u32 max_entries)
+struct tquic_edf_scheduler *
+tquic_edf_scheduler_create(struct tquic_connection *conn, u32 max_entries)
 {
 	struct tquic_edf_scheduler *sched;
 
@@ -521,8 +522,7 @@ void tquic_edf_scheduler_destroy(struct tquic_edf_scheduler *sched)
 	spin_unlock_bh(&sched->lock);
 
 	pr_info("tquic_edf: Scheduler stats - scheduled=%llu met=%llu missed=%llu\n",
-		sched->stats.entries_scheduled,
-		sched->stats.deadlines_met,
+		sched->stats.entries_scheduled, sched->stats.deadlines_met,
 		sched->stats.deadlines_missed);
 
 	kfree(sched);
@@ -539,11 +539,8 @@ EXPORT_SYMBOL_GPL(tquic_edf_scheduler_destroy);
  *
  * Returns: 0 on success, negative errno on failure
  */
-int tquic_edf_enqueue(struct tquic_edf_scheduler *sched,
-		      struct sk_buff *skb,
-		      u64 stream_id,
-		      u64 deadline_us,
-		      u8 priority)
+int tquic_edf_enqueue(struct tquic_edf_scheduler *sched, struct sk_buff *skb,
+		      u64 stream_id, u64 deadline_us, u8 priority)
 {
 	struct tquic_edf_entry *entry;
 
@@ -686,7 +683,7 @@ EXPORT_SYMBOL_GPL(tquic_edf_get_next_deadline);
  */
 int tquic_edf_cancel_stream(struct tquic_edf_scheduler *sched, u64 stream_id)
 {
-	struct tquic_edf_entry *entry, *tmp;
+	struct tquic_edf_entry *entry;
 	struct rb_node *node, *next;
 	int cancelled = 0;
 
@@ -886,21 +883,21 @@ int __init tquic_edf_scheduler_init(void)
 {
 	/* Create memory caches */
 	edf_entry_cache = kmem_cache_create("tquic_edf_entry",
-					    sizeof(struct tquic_edf_entry),
-					    0, SLAB_HWCACHE_ALIGN, NULL);
+					    sizeof(struct tquic_edf_entry), 0,
+					    SLAB_HWCACHE_ALIGN, NULL);
 	if (!edf_entry_cache)
 		return -ENOMEM;
 
-	edf_stream_queue_cache = kmem_cache_create("tquic_edf_stream_queue",
-						   sizeof(struct tquic_stream_edf_queue),
-						   0, SLAB_HWCACHE_ALIGN, NULL);
+	edf_stream_queue_cache = kmem_cache_create(
+		"tquic_edf_stream_queue", sizeof(struct tquic_stream_edf_queue),
+		0, SLAB_HWCACHE_ALIGN, NULL);
 	if (!edf_stream_queue_cache) {
 		kmem_cache_destroy(edf_entry_cache);
 		return -ENOMEM;
 	}
 
 	/* Register as pluggable scheduler */
-	tquic_sched_register(&tquic_sched_edf);
+	tquic_register_scheduler(&tquic_sched_edf);
 
 	pr_info("tquic: EDF (Earliest Deadline First) scheduler initialized\n");
 	return 0;
@@ -908,7 +905,7 @@ int __init tquic_edf_scheduler_init(void)
 
 void __exit tquic_edf_scheduler_exit(void)
 {
-	tquic_sched_unregister(&tquic_sched_edf);
+	tquic_unregister_scheduler(&tquic_sched_edf);
 
 	if (edf_stream_queue_cache)
 		kmem_cache_destroy(edf_stream_queue_cache);

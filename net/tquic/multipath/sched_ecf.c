@@ -25,6 +25,7 @@
 #include <linux/ktime.h>
 #include <linux/rculist.h>
 #include <linux/spinlock.h>
+#include <net/tquic.h>
 
 #include "tquic_sched.h"
 
@@ -443,7 +444,7 @@ static void ecf_loss_detected(struct tquic_connection *conn,
 /**
  * ECF scheduler operations structure
  */
-static struct tquic_sched_ops tquic_sched_ecf = {
+static struct tquic_mp_sched_ops tquic_mp_sched_ecf = {
 	.name		= "ecf",
 	.owner		= THIS_MODULE,
 	.get_path	= ecf_get_path,
@@ -465,7 +466,7 @@ int __init tquic_sched_ecf_init(void)
 
 	pr_info("Initializing TQUIC ECF scheduler\n");
 
-	ret = tquic_register_scheduler(&tquic_sched_ecf);
+	ret = tquic_mp_register_scheduler(&tquic_mp_sched_ecf);
 	if (ret) {
 		pr_err("Failed to register ecf scheduler: %d\n", ret);
 		return ret;
@@ -479,7 +480,7 @@ int __init tquic_sched_ecf_init(void)
 void __exit tquic_sched_ecf_exit(void)
 {
 	pr_info("Unloading TQUIC ECF scheduler\n");
-	tquic_unregister_scheduler(&tquic_sched_ecf);
+	tquic_mp_unregister_scheduler(&tquic_mp_sched_ecf);
 }
 
 /* Note: module_init/exit handled by main protocol.c */

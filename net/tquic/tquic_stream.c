@@ -132,10 +132,9 @@ static int tquic_stream_rmem_charge(struct sock *sk, struct sk_buff *skb)
 
 	/*
 	 * Check receive buffer limits.
-	 * Note: sk_rmem_alloc is still atomic_t (only sk_wmem_alloc changed
-	 * to refcount_t in modern kernels).
+	 * Use sk_rmem_alloc_get() for kernel 6.12+ compatibility.
 	 */
-	if (atomic_read(&sk->sk_rmem_alloc) + amt > sk->sk_rcvbuf)
+	if (sk_rmem_alloc_get(sk) + amt > sk->sk_rcvbuf)
 		return -ENOBUFS;
 
 	sk_mem_charge(sk, amt);
@@ -484,14 +483,18 @@ int tquic_stream_send_fin(struct tquic_connection *conn,
 EXPORT_SYMBOL_GPL(tquic_stream_send_fin);
 
 /**
- * tquic_stream_lookup - Find a stream by ID in a connection
+ * tquic_conn_stream_lookup - Find a stream by ID in a connection
  * @conn: Connection to search
  * @stream_id: Stream ID to find
  *
+ * This version searches directly via the connection's rb-tree.
+ * For operations through the stream_manager abstraction, use
+ * tquic_stream_lookup() from core/stream.c.
+ *
  * Returns: Stream pointer on success, NULL if not found
  */
-struct tquic_stream *tquic_stream_lookup(struct tquic_connection *conn,
-					 u64 stream_id)
+struct tquic_stream *tquic_conn_stream_lookup(struct tquic_connection *conn,
+					      u64 stream_id)
 {
 	struct rb_node *node;
 	struct tquic_stream *stream;
@@ -518,7 +521,7 @@ struct tquic_stream *tquic_stream_lookup(struct tquic_connection *conn,
 	spin_unlock_bh(&conn->lock);
 	return NULL;
 }
-EXPORT_SYMBOL_GPL(tquic_stream_lookup);
+EXPORT_SYMBOL_GPL(tquic_conn_stream_lookup);
 
 /*
  * =============================================================================

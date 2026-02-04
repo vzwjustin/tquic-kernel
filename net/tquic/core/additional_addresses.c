@@ -1057,18 +1057,21 @@ int tquic_additional_addr_on_tp_received(struct tquic_connection *conn,
 	}
 
 	/*
-	 * Register CIDs and reset tokens with the CID manager.
+	 * Register CIDs and reset tokens with the CID pool.
 	 * This is critical for proper stateless reset detection.
+	 * Use tquic_cid_add_remote() which works with struct tquic_connection
+	 * and internally handles the cid_pool (struct tquic_cid_pool *).
 	 */
 	if (conn->cid_pool) {
 		u64 seq_num = remote_addrs->seq_num_base;
 
 		spin_lock_bh(&remote_addrs->lock);
 		list_for_each_entry(entry, &remote_addrs->addresses, list) {
-			ret = tquic_cid_register_remote(conn->cid_pool,
-							&entry->cid,
-							seq_num++,
-							entry->stateless_reset_token);
+			ret = tquic_cid_add_remote(conn,
+						   &entry->cid,
+						   seq_num++,
+						   0, /* retire_prior_to */
+						   entry->stateless_reset_token);
 			if (ret < 0) {
 				pr_warn("tquic_additional_addr: failed to register CID: %d\n",
 					ret);

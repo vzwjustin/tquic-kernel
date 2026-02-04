@@ -12,8 +12,8 @@
 #include <linux/timer.h>
 #include <linux/jiffies.h>
 #include <net/tquic.h>
-#include "trace.h"
-#include "key_update.h"
+#include "diag/trace.h"
+#include "crypto/key_update.h"
 
 /* Timer constants per RFC 9002 */
 #define QUIC_TIMER_GRANULARITY_MS	1	/* Timer granularity in ms */

@@ -74,8 +74,10 @@ static void __exit tquic_pm_module_exit(void)
 	pr_info("tquic_pm: path manager subsystem exited\n");
 }
 
+#ifndef TQUIC_OUT_OF_TREE
 module_init(tquic_pm_module_init);
 module_exit(tquic_pm_module_exit);
+#endif /* TQUIC_OUT_OF_TREE */
 
 MODULE_DESCRIPTION("TQUIC Path Manager");
 MODULE_LICENSE("GPL");

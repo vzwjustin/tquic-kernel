@@ -21,6 +21,7 @@
 #include <net/route.h>
 #include <net/addrconf.h>
 #include <net/tquic.h>
+#include <net/tquic_pm.h>
 #include <net/tquic_pmtud.h>
 #include <uapi/linux/tquic_pm.h>
 #include "../cong/tquic_cong.h"
@@ -31,32 +32,15 @@
 #include "../tquic_preferred_addr.h"
 
 /* Path probe configuration */
-#define TQUIC_PM_PROBE_INTERVAL_MS	1000	/* 1 second */
-#define TQUIC_PM_PROBE_TIMEOUT_MS	3000	/* 3 seconds */
-#define TQUIC_PM_MAX_PROBES		3	/* Max probes before failure */
-#define TQUIC_PM_RTT_ALPHA		8	/* SRTT smoothing factor (1/8) */
-#define TQUIC_PM_RTT_BETA		4	/* RTTVAR smoothing factor (1/4) */
+#define TQUIC_PM_PROBE_INTERVAL_MS 1000 /* 1 second */
+#define TQUIC_PM_PROBE_TIMEOUT_MS 3000 /* 3 seconds */
+#define TQUIC_PM_MAX_PROBES 3 /* Max probes before failure */
+#define TQUIC_PM_RTT_ALPHA 8 /* SRTT smoothing factor (1/8) */
+#define TQUIC_PM_RTT_BETA 4 /* RTTVAR smoothing factor (1/4) */
 
 /* Bandwidth estimation */
-#define TQUIC_PM_BW_WINDOW_MS		1000	/* 1 second window */
-#define TQUIC_PM_BW_FILTER_SIZE		10	/* Max-filter size */
-
-/* Path manager state per connection */
-struct tquic_pm_state {
-	struct tquic_connection *conn;
-
-	/* Probe scheduling */
-	struct delayed_work probe_work;
-	u32 probe_interval;
-
-	/* Interface monitoring */
-	struct notifier_block netdev_notifier;
-	bool monitoring;
-
-	/* Auto-discovery settings */
-	bool auto_discover;
-	bool prefer_ipv6;
-};
+#define TQUIC_PM_BW_WINDOW_MS 1000 /* 1 second window */
+#define TQUIC_PM_BW_FILTER_SIZE 10 /* Max-filter size */
 
 /* Per-path probing state */
 struct tquic_path_probe {
@@ -68,8 +52,7 @@ struct tquic_path_probe {
 
 /* Forward declarations */
 int tquic_pm_discover_addresses(struct tquic_connection *conn,
-				struct sockaddr_storage *addrs,
-				int max_addrs);
+				struct sockaddr_storage *addrs, int max_addrs);
 
 /*
  * Calculate smoothed RTT using RFC 6298 algorithm
@@ -86,11 +69,13 @@ static void tquic_pm_update_rtt(struct tquic_path *path, u32 rtt_sample_us)
 		/* Update SRTT and RTTVAR */
 		s32 delta = rtt_sample_us - stats->rtt_smoothed;
 
-		stats->rtt_variance = stats->rtt_variance -
+		stats->rtt_variance =
+			stats->rtt_variance -
 			(stats->rtt_variance / TQUIC_PM_RTT_BETA) +
 			(abs(delta) / TQUIC_PM_RTT_BETA);
 
-		stats->rtt_smoothed = stats->rtt_smoothed -
+		stats->rtt_smoothed =
+			stats->rtt_smoothed -
 			(stats->rtt_smoothed / TQUIC_PM_RTT_ALPHA) +
 			(rtt_sample_us / TQUIC_PM_RTT_ALPHA);
 	}
@@ -103,23 +88,6 @@ static void tquic_pm_update_rtt(struct tquic_path *path, u32 rtt_sample_us)
 /*
  * Estimate bandwidth using delivery rate
  */
-static void tquic_pm_update_bandwidth(struct tquic_path *path,
-				      u64 bytes_delivered, u64 interval_us)
-{
-	u64 bw;
-
-	if (interval_us == 0)
-		return;
-
-	/* Calculate bytes per second */
-	bw = (bytes_delivered * 1000000ULL) / interval_us;
-
-	/* Simple exponential smoothing */
-	if (path->stats.bandwidth == 0)
-		path->stats.bandwidth = bw;
-	else
-		path->stats.bandwidth = (path->stats.bandwidth * 7 + bw) / 8;
-}
 
 /*
  * Send PATH_CHALLENGE frame on a path
@@ -160,8 +128,7 @@ static int tquic_pm_send_challenge(struct tquic_connection *conn,
  * Uses the core tquic_send_path_response() from tquic_output.c.
  */
 int tquic_pm_send_response(struct tquic_connection *conn,
-			   struct tquic_path *path,
-			   const u8 *challenge_data)
+			   struct tquic_path *path, const u8 *challenge_data)
 {
 	if (!conn || !path || !challenge_data)
 		return -EINVAL;
@@ -175,8 +142,7 @@ EXPORT_SYMBOL_GPL(tquic_pm_send_response);
  * Handle PATH_RESPONSE - validates the path
  */
 int tquic_pm_handle_response(struct tquic_connection *conn,
-			     struct tquic_path *path,
-			     const u8 *data)
+			     struct tquic_path *path, const u8 *data)
 {
 	ktime_t now = ktime_get();
 	u32 rtt_us;
@@ -211,8 +177,8 @@ EXPORT_SYMBOL_GPL(tquic_pm_handle_response);
  */
 static void tquic_pm_probe_work(struct work_struct *work)
 {
-	struct tquic_pm_state *pm = container_of(work, struct tquic_pm_state,
-						 probe_work.work);
+	struct tquic_pm_state *pm =
+		container_of(work, struct tquic_pm_state, probe_work.work);
 	struct tquic_connection *conn = pm->conn;
 	struct tquic_path *path;
 	ktime_t now = ktime_get();
@@ -235,7 +201,8 @@ static void tquic_pm_probe_work(struct work_struct *work)
 				if (path->state != TQUIC_PATH_FAILED) {
 					path->state = TQUIC_PATH_FAILED;
 					pr_warn("tquic_pm: path %u failed after %u probes\n",
-						path->path_id, path->probe_count);
+						path->path_id,
+						path->probe_count);
 					/* Notify bonding layer */
 					tquic_bond_path_failed(conn, path);
 				}
@@ -255,11 +222,11 @@ static void tquic_pm_probe_work(struct work_struct *work)
 /*
  * Handle network device events for path discovery
  */
-static int tquic_pm_netdev_event(struct notifier_block *nb,
-				 unsigned long event, void *ptr)
+static int tquic_pm_netdev_event(struct notifier_block *nb, unsigned long event,
+				 void *ptr)
 {
-	struct tquic_pm_state *pm = container_of(nb, struct tquic_pm_state,
-						 netdev_notifier);
+	struct tquic_pm_state *pm =
+		container_of(nb, struct tquic_pm_state, netdev_notifier);
 	struct net_device *dev = netdev_notifier_info_to_dev(ptr);
 
 	if (!pm->auto_discover)
@@ -273,14 +240,17 @@ static int tquic_pm_netdev_event(struct notifier_block *nb,
 			struct sockaddr_storage addrs[TQUIC_MAX_PATHS];
 			int num_addrs, i;
 
-			num_addrs = tquic_pm_discover_addresses(pm->conn, addrs,
-								TQUIC_MAX_PATHS);
+			num_addrs = tquic_pm_discover_addresses(
+				pm->conn, addrs, TQUIC_MAX_PATHS);
 			for (i = 0; i < num_addrs; i++) {
 				/* Try to add path if remote addr is known */
 				if (pm->conn->active_path) {
-					tquic_conn_add_path(pm->conn,
+					tquic_conn_add_path(
+						pm->conn,
 						(struct sockaddr *)&addrs[i],
-						(struct sockaddr *)&pm->conn->active_path->remote_addr);
+						(struct sockaddr *)&pm->conn
+							->active_path
+							->remote_addr);
 				}
 			}
 		}
@@ -298,8 +268,9 @@ static int tquic_pm_netdev_event(struct notifier_block *nb,
 				    path->state == TQUIC_PATH_STANDBY) {
 					path->state = TQUIC_PATH_FAILED;
 					tquic_bond_path_failed(pm->conn, path);
-					pr_debug("tquic_pm: path %u failed (interface down)\n",
-						 path->path_id);
+					pr_debug(
+						"tquic_pm: path %u failed (interface down)\n",
+						path->path_id);
 				}
 			}
 		}
@@ -307,9 +278,11 @@ static int tquic_pm_netdev_event(struct notifier_block *nb,
 
 	case NETDEV_CHANGE:
 		if (netif_carrier_ok(dev)) {
-			pr_debug("tquic_pm: interface %s carrier up\n", dev->name);
+			pr_debug("tquic_pm: interface %s carrier up\n",
+				 dev->name);
 		} else {
-			pr_debug("tquic_pm: interface %s carrier down\n", dev->name);
+			pr_debug("tquic_pm: interface %s carrier down\n",
+				 dev->name);
 		}
 		break;
 	}
@@ -321,8 +294,7 @@ static int tquic_pm_netdev_event(struct notifier_block *nb,
  * Discover available local addresses for path creation
  */
 int tquic_pm_discover_addresses(struct tquic_connection *conn,
-				struct sockaddr_storage *addrs,
-				int max_addrs)
+				struct sockaddr_storage *addrs, int max_addrs)
 {
 	struct net_device *dev;
 	struct in_device *in_dev;
@@ -364,7 +336,8 @@ int tquic_pm_discover_addresses(struct tquic_connection *conn,
 				struct inet6_ifaddr *ifp;
 
 				read_lock_bh(&idev->lock);
-				list_for_each_entry(ifp, &idev->addr_list, if_list) {
+				list_for_each_entry(ifp, &idev->addr_list,
+						    if_list) {
 					if (count >= max_addrs)
 						break;
 					/* Skip link-local addresses for WAN bonding */
@@ -373,7 +346,8 @@ int tquic_pm_discover_addresses(struct tquic_connection *conn,
 						continue;
 
 					struct sockaddr_in6 *sin6 =
-						(struct sockaddr_in6 *)&addrs[count];
+						(struct sockaddr_in6
+							 *)&addrs[count];
 					sin6->sin6_family = AF_INET6;
 					sin6->sin6_addr = ifp->addr;
 					sin6->sin6_port = 0;
@@ -480,7 +454,7 @@ struct tquic_pm_state *tquic_pm_init(struct tquic_connection *conn)
 
 	pm->conn = conn;
 	pm->probe_interval = TQUIC_PM_PROBE_INTERVAL_MS;
-	pm->auto_discover = false;  /* Manual path management by default */
+	pm->auto_discover = false; /* Manual path management by default */
 	pm->prefer_ipv6 = false;
 
 	INIT_DELAYED_WORK(&pm->probe_work, tquic_pm_probe_work);
@@ -571,7 +545,7 @@ EXPORT_SYMBOL_GPL(tquic_path_validate);
  * Helper: Get path by ID with lock held
  */
 struct tquic_path *tquic_conn_get_path_locked(struct tquic_connection *conn,
-					       u32 path_id)
+					      u32 path_id)
 {
 	struct tquic_path *path;
 
@@ -606,7 +580,8 @@ static u64 tquic_path_inflight_bytes(struct tquic_path *path)
 static bool tquic_path_has_inflight(struct tquic_path *path)
 {
 	return tquic_path_inflight_bytes(path) > 0 ||
-	       path->stats.tx_packets > (path->stats.rx_packets + path->stats.lost_packets);
+	       path->stats.tx_packets >
+		       (path->stats.rx_packets + path->stats.lost_packets);
 }
 
 /*
@@ -626,10 +601,10 @@ static bool tquic_path_has_inflight(struct tquic_path *path)
  *   3. Timeout expiry (hard limit to prevent indefinite blocking)
  */
 static void tquic_path_drain_data(struct tquic_connection *conn,
-				   struct tquic_path *path)
+				  struct tquic_path *path)
 {
 	unsigned long timeout = jiffies + msecs_to_jiffies(5000);
-	unsigned long check_interval_ms = 50;  /* Start with 50ms checks */
+	unsigned long check_interval_ms = 50; /* Start with 50ms checks */
 	u64 last_inflight = 0;
 	u64 current_inflight;
 	int stall_count = 0;
@@ -642,8 +617,9 @@ static void tquic_path_drain_data(struct tquic_connection *conn,
 
 		/* Path fully drained - all data acknowledged */
 		if (!tquic_path_has_inflight(path)) {
-			pr_debug("tquic: path %u drain complete (all data acked)\n",
-				 path->path_id);
+			pr_debug(
+				"tquic: path %u drain complete (all data acked)\n",
+				path->path_id);
 			return;
 		}
 
@@ -655,8 +631,9 @@ static void tquic_path_drain_data(struct tquic_connection *conn,
 			 * have been retransmitted on another path
 			 */
 			if (stall_count > 10) {
-				pr_debug("tquic: path %u drain stalled, continuing (inflight=%llu)\n",
-					 path->path_id, current_inflight);
+				pr_debug(
+					"tquic: path %u drain stalled, continuing (inflight=%llu)\n",
+					path->path_id, current_inflight);
 				return;
 			}
 		} else {
@@ -681,8 +658,8 @@ static void tquic_path_drain_data(struct tquic_connection *conn,
  * Initialize path structure
  */
 static struct tquic_path *tquic_path_alloc(struct tquic_connection *conn,
-					    struct sockaddr *local,
-					    struct sockaddr *remote)
+					   struct sockaddr *local,
+					   struct sockaddr *remote)
 {
 	struct tquic_path *path;
 	static atomic_t path_id_gen = ATOMIC_INIT(0);
@@ -700,14 +677,14 @@ static struct tquic_path *tquic_path_alloc(struct tquic_connection *conn,
 	if (local)
 		memcpy(&path->local_addr, local,
 		       local->sa_family == AF_INET ?
-		       sizeof(struct sockaddr_in) :
-		       sizeof(struct sockaddr_in6));
+			       sizeof(struct sockaddr_in) :
+			       sizeof(struct sockaddr_in6));
 
 	if (remote)
 		memcpy(&path->remote_addr, remote,
 		       remote->sa_family == AF_INET ?
-		       sizeof(struct sockaddr_in) :
-		       sizeof(struct sockaddr_in6));
+			       sizeof(struct sockaddr_in) :
+			       sizeof(struct sockaddr_in6));
 
 	/* Determine network device for this path (for interface tracking) */
 	if (local && local->sa_family == AF_INET && conn->sk) {
@@ -771,8 +748,7 @@ static void tquic_path_init_validation(struct tquic_path *path)
  * RCU-safe path addition
  */
 int tquic_conn_add_path_safe(struct tquic_connection *conn,
-			       struct sockaddr *local,
-			       struct sockaddr *remote)
+			     struct sockaddr *local, struct sockaddr *remote)
 {
 	struct tquic_path *path;
 	int ret;
@@ -809,7 +785,7 @@ int tquic_conn_add_path_safe(struct tquic_connection *conn,
 #endif
 
 	/* Initialize congestion control for this path */
-	ret = tquic_cong_init_path(path, NULL);  /* NULL = use default CC */
+	ret = tquic_cong_init_path(path, NULL); /* NULL = use default CC */
 	if (ret) {
 		pr_warn("tquic: failed to init CC for path %u: %d\n",
 			path->path_id, ret);
@@ -835,8 +811,9 @@ int tquic_conn_add_path_safe(struct tquic_connection *conn,
 	/* Initialize NAT lifecycle management for this path */
 	ret = tquic_nat_lifecycle_init(path, conn);
 	if (ret) {
-		pr_debug("tquic: NAT lifecycle init for path %u: %d (optional)\n",
-			 path->path_id, ret);
+		pr_debug(
+			"tquic: NAT lifecycle init for path %u: %d (optional)\n",
+			path->path_id, ret);
 		/* Continue without lifecycle - it's optional */
 	}
 
@@ -851,11 +828,13 @@ int tquic_conn_add_path_safe(struct tquic_connection *conn,
 	if (ret < 0)
 		pr_debug("tquic: path validation start failed: %d\n", ret);
 
-	/* Emit event */
-	tquic_nl_path_event(conn, path, TQUIC_PM_EVENT_CREATED);
+	/* Emit event via PM netlink */
+	if (conn && conn->sk)
+		tquic_pm_nl_send_event(sock_net(conn->sk), conn, path,
+				       TQUIC_PM_EVENT_CREATED);
 
-	pr_info("tquic: added path %u (%pISpc -> %pISpc)\n",
-		path->path_id, &path->local_addr, &path->remote_addr);
+	pr_info("tquic: added path %u (%pISpc -> %pISpc)\n", path->path_id,
+		&path->local_addr, &path->remote_addr);
 
 	return path->path_id;
 }
@@ -864,8 +843,7 @@ EXPORT_SYMBOL_GPL(tquic_conn_add_path_safe);
 /*
  * RCU-safe path removal
  */
-int tquic_conn_remove_path_safe(struct tquic_connection *conn,
-				 u32 path_id)
+int tquic_conn_remove_path_safe(struct tquic_connection *conn, u32 path_id)
 {
 	struct tquic_path *path;
 
@@ -892,8 +870,10 @@ int tquic_conn_remove_path_safe(struct tquic_connection *conn,
 	/* Drain in-flight data (wait for ACKs or timeout) */
 	tquic_path_drain_data(conn, path);
 
-	/* Emit removal event */
-	tquic_nl_path_event(conn, path, TQUIC_PM_EVENT_REMOVED);
+	/* Emit removal event via PM netlink */
+	if (conn && conn->sk)
+		tquic_pm_nl_send_event(sock_net(conn->sk), conn, path,
+				       TQUIC_PM_EVENT_REMOVED);
 
 	/* Cancel validation timer */
 	del_timer_sync(&path->validation.timer);
@@ -1078,13 +1058,17 @@ bool tquic_pm_check_address_change(struct tquic_connection *conn,
 		tquic_update_observed_address(ad_state, from_addr, &changed);
 
 		/* Send OBSERVED_ADDRESS to peer if enabled */
-		if (ad_state->config.enabled && ad_state->config.report_on_change) {
-			int ret = tquic_send_observed_address(conn, ad_state, from_addr);
+		if (ad_state->config.enabled &&
+		    ad_state->config.report_on_change) {
+			int ret = tquic_send_observed_address(conn, ad_state,
+							      from_addr);
 			if (ret == -EAGAIN) {
-				pr_debug("tquic_pm: OBSERVED_ADDRESS rate limited\n");
+				pr_debug(
+					"tquic_pm: OBSERVED_ADDRESS rate limited\n");
 			} else if (ret < 0) {
-				pr_debug("tquic_pm: failed to send OBSERVED_ADDRESS: %d\n",
-					 ret);
+				pr_debug(
+					"tquic_pm: failed to send OBSERVED_ADDRESS: %d\n",
+					ret);
 			}
 		}
 
@@ -1157,7 +1141,8 @@ int tquic_pm_init_address_discovery(struct tquic_connection *conn)
 	}
 
 	/* Enable if negotiated */
-	if (conn->negotiated_params && conn->negotiated_params->address_discovery_enabled) {
+	if (conn->negotiated_params &&
+	    conn->negotiated_params->address_discovery_enabled) {
 		state->config.enabled = true;
 		state->config.report_on_change = true;
 	}
@@ -1287,7 +1272,7 @@ int tquic_pm_add_local_additional_address(struct tquic_connection *conn,
 
 	/* Auto-generate CID if not provided */
 	if (!cid || cid->len == 0) {
-		auto_cid.len = 8;  /* Default CID length */
+		auto_cid.len = 8; /* Default CID length */
 		get_random_bytes(auto_cid.id, auto_cid.len);
 		cid = &auto_cid;
 
@@ -1297,7 +1282,8 @@ int tquic_pm_add_local_additional_address(struct tquic_connection *conn,
 		 */
 	}
 
-	ret = tquic_additional_addr_add(local_addrs, ip_version, addr, cid, NULL);
+	ret = tquic_additional_addr_add(local_addrs, ip_version, addr, cid,
+					NULL);
 	if (ret < 0)
 		return ret;
 
@@ -1315,8 +1301,8 @@ EXPORT_SYMBOL_GPL(tquic_pm_add_local_additional_address);
  *
  * Return: 0 on success, negative error code on failure
  */
-int tquic_pm_remove_local_additional_address(struct tquic_connection *conn,
-					     const struct sockaddr_storage *addr)
+int tquic_pm_remove_local_additional_address(
+	struct tquic_connection *conn, const struct sockaddr_storage *addr)
 {
 	struct tquic_additional_addresses *local_addrs;
 
@@ -1341,13 +1327,12 @@ EXPORT_SYMBOL_GPL(tquic_pm_remove_local_additional_address);
  *
  * Return: New path on success, ERR_PTR on failure
  */
-struct tquic_path *tquic_pm_create_path_to_additional(
-	struct tquic_connection *conn,
-	struct tquic_additional_address *addr_entry)
+struct tquic_path *
+tquic_pm_create_path_to_additional(struct tquic_connection *conn,
+				   struct tquic_additional_address *addr_entry)
 {
 	struct tquic_path *path;
 	struct sockaddr_storage local_addr;
-	int ret;
 
 	if (!conn || !addr_entry)
 		return ERR_PTR(-EINVAL);
@@ -1398,8 +1383,9 @@ EXPORT_SYMBOL_GPL(tquic_pm_create_path_to_additional);
  *
  * Return: 0 on success, negative error code on failure
  */
-int tquic_pm_validate_additional_address(struct tquic_connection *conn,
-					 struct tquic_additional_address *addr_entry)
+int tquic_pm_validate_additional_address(
+	struct tquic_connection *conn,
+	struct tquic_additional_address *addr_entry)
 {
 	struct tquic_path *path;
 	int ret;
@@ -1440,9 +1426,9 @@ EXPORT_SYMBOL_GPL(tquic_pm_validate_additional_address);
  *
  * Return: Best address entry, or NULL if none available
  */
-struct tquic_additional_address *tquic_pm_get_best_additional_address(
-	struct tquic_connection *conn,
-	enum tquic_addr_select_policy policy)
+struct tquic_additional_address *
+tquic_pm_get_best_additional_address(struct tquic_connection *conn,
+				     enum tquic_addr_select_policy policy)
 {
 	struct tquic_additional_addresses *remote_addrs;
 	struct tquic_additional_address *best;
@@ -1459,7 +1445,8 @@ struct tquic_additional_address *tquic_pm_get_best_additional_address(
 		current_family = conn->active_path->remote_addr.ss_family;
 
 	spin_lock_bh(&remote_addrs->lock);
-	best = tquic_additional_addr_select(remote_addrs, policy, current_family);
+	best = tquic_additional_addr_select(remote_addrs, policy,
+					    current_family);
 	spin_unlock_bh(&remote_addrs->lock);
 
 	return best;
@@ -1488,14 +1475,15 @@ void tquic_pm_on_path_validated_additional(struct tquic_connection *conn,
 		return;
 
 	spin_lock_bh(&remote_addrs->lock);
-	addr_entry = tquic_additional_addr_find(remote_addrs, &path->remote_addr);
+	addr_entry =
+		tquic_additional_addr_find(remote_addrs, &path->remote_addr);
 	if (addr_entry) {
 		tquic_additional_addr_validate(addr_entry);
 
 		/* Update RTT estimate */
 		if (path->stats.rtt_smoothed > 0)
-			tquic_additional_addr_update_rtt(addr_entry,
-							 path->stats.rtt_smoothed);
+			tquic_additional_addr_update_rtt(
+				addr_entry, path->stats.rtt_smoothed);
 	}
 	spin_unlock_bh(&remote_addrs->lock);
 }
@@ -1522,7 +1510,8 @@ void tquic_pm_on_path_failed_additional(struct tquic_connection *conn,
 		return;
 
 	spin_lock_bh(&remote_addrs->lock);
-	addr_entry = tquic_additional_addr_find(remote_addrs, &path->remote_addr);
+	addr_entry =
+		tquic_additional_addr_find(remote_addrs, &path->remote_addr);
 	if (addr_entry)
 		tquic_additional_addr_invalidate(addr_entry);
 	spin_unlock_bh(&remote_addrs->lock);
@@ -1560,7 +1549,7 @@ int tquic_pm_coordinate_preferred_and_additional(struct tquic_connection *conn)
 
 		/* Prefer preferred_address if available and not yet tried */
 		if (pref_state == TQUIC_PREF_ADDR_AVAILABLE)
-			return 1;  /* Use preferred address */
+			return 1; /* Use preferred address */
 
 		/* If preferred address is validating, wait for it */
 		if (pref_state == TQUIC_PREF_ADDR_VALIDATING)
@@ -1586,10 +1575,10 @@ int tquic_pm_coordinate_preferred_and_additional(struct tquic_connection *conn)
 		spin_unlock_bh(&remote_addrs->lock);
 
 		if (has_validated || has_active)
-			return 2;  /* Use additional addresses */
+			return 2; /* Use additional addresses */
 	}
 
-	return 0;  /* No migration option available */
+	return 0; /* No migration option available */
 }
 EXPORT_SYMBOL_GPL(tquic_pm_coordinate_preferred_and_additional);
 

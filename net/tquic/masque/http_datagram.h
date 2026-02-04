@@ -92,6 +92,9 @@ struct http_datagram_flow {
 	u64 stream_id;
 	u64 quarter_stream_id;
 
+	/* Parent manager reference for accessing connection */
+	struct http_datagram_manager *mgr;
+
 	/* Context management */
 	struct rb_root contexts;
 	u32 num_contexts;

@@ -14,9 +14,11 @@
 #include <linux/list.h>
 #include <linux/bitmap.h>
 #include <linux/ktime.h>
+#include <linux/atomic.h>
 #include <net/tquic.h>
 #include <net/tquic_frame.h>
 #include "ack_frequency.h"
+#include "varint.h"
 
 /*
  * Maximum number of ACK ranges to track per packet number space.
@@ -86,14 +88,6 @@ struct tquic_local_pn_space {
 	struct tquic_ack_info	recv_ack_info;
 	u8			keys_available:1;
 	u8			keys_discarded:1;
-};
-
-/*
- * Transport parameters structure (local definition)
- */
-struct tquic_transport_params {
-	u64 max_ack_delay;
-	u32 ack_delay_exponent;
 };
 
 /*

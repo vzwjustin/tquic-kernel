@@ -206,6 +206,9 @@ int tquic_mp_select_new_active_path(struct tquic_connection *conn,
  * duplicated code from tquic_mp_initiate_path_abandon, tquic_mp_retire_path_cids,
  * tquic_mp_issue_path_cid, and tquic_mp_send_path_status.
  *
+ * tquic_build_short_header builds the complete packet (header + payload)
+ * into a buffer, so we pass the frame data as the payload parameter.
+ *
  * Returns 0 on success or negative error code on failure.
  */
 static int tquic_mp_send_control_frame(struct tquic_connection *conn,
@@ -213,20 +216,15 @@ static int tquic_mp_send_control_frame(struct tquic_connection *conn,
 				       const u8 *frame_buf, int frame_len)
 {
 	struct sk_buff *skb;
-	int header_len;
-	u8 header[64];
+	int pkt_len;
+	u8 *pkt_buf;
+	size_t pkt_buf_len;
 	u64 pkt_num;
 	int pn_len;
 	int ret;
 
 	if (!conn || !path || !frame_buf || frame_len <= 0)
 		return -EINVAL;
-
-	skb = alloc_skb(frame_len + TQUIC_SKB_RESERVE + MAX_HEADER, GFP_KERNEL);
-	if (!skb)
-		return -ENOMEM;
-
-	skb_reserve(skb, MAX_HEADER);
 
 	/* Get packet number atomically */
 	spin_lock(&conn->lock);
@@ -243,19 +241,39 @@ static int tquic_mp_send_control_frame(struct tquic_connection *conn,
 	else
 		pn_len = 4;
 
-	/* Build short header using connection's destination CID (peer's CID) */
-	header_len = tquic_build_short_header(conn->dcid.id, conn->dcid.len,
-					      pkt_num, pn_len,
-					      0, 0,  /* key_phase, spin_bit */
-					      frame_buf, frame_len,
-					      header, sizeof(header));
-	if (header_len < 0) {
-		kfree_skb(skb);
-		return header_len;
+	/*
+	 * Calculate buffer size for packet:
+	 * - 1 byte first byte
+	 * - dcid_len bytes for DCID
+	 * - pn_len bytes for packet number
+	 * - frame_len bytes for payload
+	 */
+	pkt_buf_len = 1 + conn->dcid.len + pn_len + frame_len;
+	pkt_buf = kmalloc(pkt_buf_len, GFP_KERNEL);
+	if (!pkt_buf)
+		return -ENOMEM;
+
+	/* Build complete short header packet (header + payload) */
+	pkt_len = tquic_build_short_header(conn->dcid.id, conn->dcid.len,
+					   pkt_num, pn_len,
+					   0, 0,  /* key_phase, spin_bit */
+					   frame_buf, frame_len,
+					   pkt_buf, pkt_buf_len);
+	if (pkt_len < 0) {
+		kfree(pkt_buf);
+		return pkt_len;
 	}
 
-	skb_put_data(skb, header, header_len);
-	skb_put_data(skb, frame_buf, frame_len);
+	/* Allocate skb for the complete packet */
+	skb = alloc_skb(pkt_len + MAX_HEADER, GFP_KERNEL);
+	if (!skb) {
+		kfree(pkt_buf);
+		return -ENOMEM;
+	}
+
+	skb_reserve(skb, MAX_HEADER);
+	skb_put_data(skb, pkt_buf, pkt_len);
+	kfree(pkt_buf);
 
 	ret = tquic_output_packet(conn, path, skb);
 	if (ret < 0) {
@@ -496,7 +514,7 @@ int tquic_mp_initiate_path_abandon(struct tquic_connection *conn,
 		}
 	}
 
-	pr_debug("tquic_mp: sent PATH_ABANDON for path %llu (error=%llu)\n",
+	pr_debug("tquic_mp: sent PATH_ABANDON for path %u (error=%llu)\n",
 		 path->path_id, error_code);
 
 	/* Mark path for closing */
@@ -1337,5 +1355,7 @@ void __exit tquic_mp_abandon_exit(void)
 	pr_info("tquic: Multipath path abandonment and CID management cleaned up\n");
 }
 
+#ifndef TQUIC_OUT_OF_TREE
 MODULE_DESCRIPTION("TQUIC Path Abandonment for Multipath (RFC 9369)");
 MODULE_LICENSE("GPL");
+#endif

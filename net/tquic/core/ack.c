@@ -1411,12 +1411,10 @@ int tquic_on_ack_received(struct tquic_loss_state *loss, int pn_space,
 	/*
 	 * Step 8: Notify congestion controller of acknowledged packets
 	 */
-	if (path && path->cong && acked_bytes > 0) {
-		struct tquic_cong_ops *cong_ops = path->cong;
-
-		if (cong_ops->on_ack)
-			cong_ops->on_ack(path->cong, acked_bytes,
-					 loss->rtt.latest_rtt);
+	if (path && path->cong_ops && acked_bytes > 0) {
+		if (path->cong_ops->on_ack)
+			path->cong_ops->on_ack(path->cong, acked_bytes,
+					       loss->rtt.latest_rtt);
 	}
 
 	/*
@@ -1428,11 +1426,9 @@ int tquic_on_ack_received(struct tquic_loss_state *loss, int pn_space,
 		list_for_each_entry(pkt, &lost_packets, list)
 			lost_bytes += pkt->sent_bytes;
 
-		if (path && path->cong) {
-			struct tquic_cong_ops *cong_ops = path->cong;
-
-			if (cong_ops->on_loss)
-				cong_ops->on_loss(path->cong, lost_bytes);
+		if (path && path->cong_ops) {
+			if (path->cong_ops->on_loss)
+				path->cong_ops->on_loss(path->cong, lost_bytes);
 		}
 
 		/* Update path and connection stats */
@@ -1654,11 +1650,9 @@ handle_lost:
 			lost_bytes += pkt->sent_bytes;
 
 		/* Notify congestion controller */
-		if (path && path->cong) {
-			struct tquic_cong_ops *cong_ops = path->cong;
-
-			if (cong_ops->on_loss)
-				cong_ops->on_loss(path->cong, lost_bytes);
+		if (path && path->cong_ops) {
+			if (path->cong_ops->on_loss)
+				path->cong_ops->on_loss(path->cong, lost_bytes);
 		}
 
 		if (path)
@@ -1827,15 +1821,13 @@ void tquic_process_ecn(struct tquic_loss_state *loss,
 	/*
 	 * Signal congestion if ECN-CE count increased
 	 */
-	if (ce_delta > 0 && path && path->cong) {
-		struct tquic_cong_ops *cong_ops = path->cong;
-
+	if (ce_delta > 0 && path && path->cong_ops) {
 		pr_debug("tquic: ECN congestion experienced (CE +%llu)\n",
 			 ce_delta);
 
 		/* Treat as packet loss for congestion control */
-		if (cong_ops->on_loss)
-			cong_ops->on_loss(path->cong, 0);
+		if (path->cong_ops->on_loss)
+			path->cong_ops->on_loss(path->cong, 0);
 	}
 }
 

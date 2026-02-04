@@ -24,6 +24,9 @@
 #include <net/tquic.h>
 #include "cong/tquic_cong.h"
 
+/* Forward declaration from core/quic_loss.c */
+void tquic_set_loss_detection_timer(struct tquic_connection *conn);
+
 /* Timer configuration constants (in microseconds unless noted) */
 #define TQUIC_TIMER_GRANULARITY_US	1000		/* 1ms granularity */
 #define TQUIC_INITIAL_RTT_US		333000		/* 333ms initial RTT */
@@ -1804,6 +1807,62 @@ void tquic_timer_get_recovery_stats(struct tquic_timer_state *ts,
 	spin_unlock_bh(&rs->lock);
 }
 EXPORT_SYMBOL_GPL(tquic_timer_get_recovery_stats);
+
+/*
+ * ============================================================================
+ * Legacy conn->timers[] Compatibility
+ * ============================================================================
+ *
+ * Some core code paths still schedule per-connection timers via
+ * tquic_timer_set/cancel/update. Provide lightweight helpers that operate on
+ * conn->timers[] without pulling in the legacy quic_timer.c implementation.
+ */
+
+static unsigned long tquic_timer_deadline_to_jiffies(ktime_t when)
+{
+	s64 delta_ns = ktime_to_ns(ktime_sub(when, ktime_get()));
+	unsigned long delta_jiffies;
+
+	if (delta_ns <= 0)
+		return jiffies;
+
+	delta_jiffies = nsecs_to_jiffies(delta_ns);
+	if (delta_jiffies == 0)
+		delta_jiffies = 1;
+
+	return jiffies + delta_jiffies;
+}
+
+void tquic_timer_set(struct tquic_connection *conn, u8 timer_type, ktime_t when)
+{
+	if (!conn)
+		return;
+
+	if (timer_type >= TQUIC_TIMER_MAX)
+		return;
+
+	mod_timer(&conn->timers[timer_type], tquic_timer_deadline_to_jiffies(when));
+}
+
+void tquic_timer_cancel(struct tquic_connection *conn, u8 timer_type)
+{
+	if (!conn)
+		return;
+
+	if (timer_type >= TQUIC_TIMER_MAX)
+		return;
+
+	del_timer(&conn->timers[timer_type]);
+}
+
+void tquic_timer_update(struct tquic_connection *conn)
+{
+	if (!conn)
+		return;
+
+	/* Loss timer is managed by tquic_set_loss_detection_timer() */
+	tquic_set_loss_detection_timer(conn);
+}
 
 /*
  * ============================================================================

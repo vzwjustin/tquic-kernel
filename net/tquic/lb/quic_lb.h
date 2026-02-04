@@ -14,6 +14,7 @@
 #include <linux/types.h>
 #include <linux/spinlock.h>
 #include <crypto/aes.h>
+#include <crypto/skcipher.h>
 
 /* QUIC-LB configuration rotation codepoints (3 bits, 0-6, 7 reserved) */
 #define TQUIC_LB_CONFIG_ROTATION_MASK	0xE0
@@ -58,7 +59,7 @@ enum tquic_lb_mode {
  * @server_id: Server identifier
  * @encryption_key: AES-128-ECB key (NULL for plaintext mode)
  * @mode: Encoding mode (plaintext, single-pass, four-pass)
- * @aes_tfm: AES cipher transform for encryption
+ * @aes_tfm: AES ECB skcipher transform for encryption (kernel 6.12+ API)
  * @nonce_counter: Counter for nonce generation
  * @lock: Spinlock for thread safety
  */
@@ -69,7 +70,7 @@ struct tquic_lb_config {
 	u8 server_id[TQUIC_LB_SERVER_ID_MAX_LEN];
 	u8 encryption_key[TQUIC_LB_AES_BLOCK_SIZE];
 	enum tquic_lb_mode mode;
-	struct crypto_cipher *aes_tfm;
+	struct crypto_sync_skcipher *aes_tfm;
 	u64 nonce_counter;
 	spinlock_t lock;
 };

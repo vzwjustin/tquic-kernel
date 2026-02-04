@@ -30,6 +30,11 @@
 #include <net/addrconf.h>
 #endif
 
+#include <net/tquic.h>
+#include "core/tquic_crypto.h"
+#include "core/varint.h"
+#include "core/stream.h"
+
 /* QUIC socket option level */
 #define SOL_QUIC		288
 
@@ -65,22 +70,92 @@
 #define QUIC_DEFAULT_IDLE_TIMEOUT	30000	/* 30 seconds in ms */
 #define QUIC_DEFAULT_MAX_DATA		(1 << 20)  /* 1 MB */
 
-/* Forward declarations */
-struct quic_connection;
-struct quic_stream;
-
 /* External function declarations */
-extern int quic_conn_close(struct quic_connection *conn, u64 error_code,
-			   const char *reason, u32 reason_len, bool app_error);
+extern int tquic_conn_close_with_error(struct tquic_connection *conn,
+				u64 error_code, const char *reason);
 
 /* QUIC error codes for CONNECTION_CLOSE (RFC 9000 Section 20) */
 #define QUIC_ERROR_NO_ERROR		0x00
+#define QUIC_ERROR_INTERNAL_ERROR	0x01
+#define QUIC_ERROR_STREAM_LIMIT	0x02
+#define QUIC_ERROR_STREAM_STATE	0x03
+#define QUIC_ERROR_FINAL_SIZE	0x04
+#define QUIC_ERROR_FRAME_ENCODING	0x05
+#define QUIC_ERROR_TRANSPORT_PARAMETER	0x06
+#define QUIC_ERROR_CONNECTION_ID_LIMIT	0x07
+#define QUIC_ERROR_PROTOCOL_VIOLATION	0x08
+#define QUIC_ERROR_INVALID_TOKEN	0x09
+#define QUIC_ERROR_APPLICATION_ERROR	0x0a
+#define QUIC_ERROR_CRYPTO_BUFFER_EXCEEDED	0x0b
+#define QUIC_ERROR_KEY_UPDATE_ERROR	0x0c
+#define QUIC_ERROR_AEAD_LIMIT_REACHED	0x0d
+#define QUIC_ERROR_NO_VIABLE_PATH	0x0e
+#define QUIC_ERROR_INVALID_MIGRATION	0x0f
+#define QUIC_ERROR_CONNECTION_ID_RETIREMENT	0x10
+#define QUIC_ERROR_SERVER_ONLY	0x11
+#define QUIC_ERROR_ADDRESS_NOT_ALLOWED	0x12
+#define QUIC_ERROR_CONNECTION_REJECTION	0x13
+#define QUIC_ERROR_INVALID_VERSION	0x14
+#define QUIC_ERROR_INVALID_SNI	0x15
+#define QUIC_ERROR_INVALID_ALPN	0x16
+#define QUIC_ERROR_INVALID_PEER_ADDRESS	0x17
+#define QUIC_ERROR_INVALID_STATELESS_RESET_TOKEN	0x18
+#define QUIC_ERROR_INVALID_PACKET	0x19
+#define QUIC_ERROR_INVALID_FRAME	0x1a
+#define QUIC_ERROR_INVALID_TRANSPORT_PARAMETER	0x1b
+#define QUIC_ERROR_INVALID_EXTENSION	0x1c
+#define QUIC_ERROR_INVALID_QPACK_INSTRUCTION	0x1d
+#define QUIC_ERROR_INVALID_QPACK_TABLE	0x1e
+#define QUIC_ERROR_INVALID_QPACK_BLOCK	0x1f
+#define QUIC_ERROR_INVALID_QPACK_ACK	0x20
+#define QUIC_ERROR_INVALID_QPACK_SECTION	0x21
+#define QUIC_ERROR_INVALID_QPACK_SECTION_ACK	0x22
+#define QUIC_ERROR_INVALID_QPACK_BLOCK_ACK	0x23
+#define QUIC_ERROR_INVALID_QPACK_TABLE_ACK	0x24
+#define QUIC_ERROR_INVALID_QPACK_BLOCK_SECTION	0x25
+#define QUIC_ERROR_INVALID_QPACK_BLOCK_SECTION_ACK	0x26
+#define QUIC_ERROR_INVALID_QPACK_TABLE_SECTION	0x27
+#define QUIC_ERROR_INVALID_QPACK_TABLE_SECTION_ACK	0x28
+#define QUIC_ERROR_INVALID_QPACK_BLOCK_TABLE	0x29
+#define QUIC_ERROR_INVALID_QPACK_BLOCK_TABLE_ACK	0x2a
+#define QUIC_ERROR_INVALID_QPACK_TABLE_TABLE	0x2b
+#define QUIC_ERROR_INVALID_QPACK_TABLE_TABLE_ACK	0x2c
+#define QUIC_ERROR_INVALID_QPACK_BLOCK_BLOCK	0x2d
+#define QUIC_ERROR_INVALID_QPACK_BLOCK_BLOCK_ACK	0x2e
+#define QUIC_ERROR_INVALID_QPACK_TABLE_BLOCK	0x2f
+#define QUIC_ERROR_INVALID_QPACK_TABLE_BLOCK_ACK	0x30
+#define QUIC_ERROR_INVALID_QPACK_BLOCK_TABLE_ACK	0x31
+#define QUIC_ERROR_INVALID_QPACK_TABLE_TABLE_ACK	0x32
+#define QUIC_ERROR_INVALID_QPACK_BLOCK_BLOCK_ACK	0x33
+#define QUIC_ERROR_INVALID_QPACK_TABLE_BLOCK_ACK	0x34
+#define QUIC_ERROR_INVALID_QPACK_BLOCK_TABLE_ACK	0x35
+#define QUIC_ERROR_INVALID_QPACK_TABLE_TABLE_ACK	0x36
+#define QUIC_ERROR_INVALID_QPACK_BLOCK_BLOCK_ACK	0x37
+#define QUIC_ERROR_INVALID_QPACK_TABLE_BLOCK_ACK	0x38
+#define QUIC_ERROR_INVALID_QPACK_BLOCK_TABLE_ACK	0x39
+#define QUIC_ERROR_INVALID_QPACK_TABLE_TABLE_ACK	0x3a
+#define QUIC_ERROR_INVALID_QPACK_BLOCK_BLOCK_ACK	0x3b
+#define QUIC_ERROR_INVALID_QPACK_TABLE_BLOCK_ACK	0x3c
+#define QUIC_ERROR_INVALID_QPACK_BLOCK_TABLE_ACK	0x3d
+#define QUIC_ERROR_INVALID_QPACK_TABLE_TABLE_ACK	0x3e
+#define QUIC_ERROR_INVALID_QPACK_BLOCK_BLOCK_ACK	0x3f
+
+/* Stream priority (RFC 9218) */
+#define QUIC_PRIORITY_URGENCY_MAX	7
+
+struct quic_stream_priority {
+	u64	stream_id;
+	u8	urgency;
+	u8	incremental;
+	u8	reserved[6];
+};
 
 /* Stream entry for stream table */
 struct quic_stream_entry {
 	struct hlist_node	node;
 	u64			stream_id;
 	struct quic_stream	*stream;
+	struct rcu_head		rcu;
 };
 
 /* Stream table */
@@ -137,7 +212,7 @@ struct quic_sock {
 	struct inet_sock	inet;
 
 	/* Connection pointer */
-	struct quic_connection	*conn;
+	struct tquic_connection	*conn;
 
 	/* Stream management */
 	struct quic_stream_table streams;
@@ -245,30 +320,29 @@ static inline struct ipv6_pinfo *quic_inet6_sk(const struct sock *sk)
  */
 static inline int quic_encode_varint(u8 *p, u64 value)
 {
-	if (value <= QUIC_VARINT_1BYTE_MAX) {
+	if (value <= TQUIC_VARINT_1BYTE_MAX) {
 		*p = (u8)value;
 		return 1;
-	} else if (value <= QUIC_VARINT_2BYTE_MAX) {
-		*p++ = QUIC_VARINT_2BYTE_PREFIX | (u8)(value >> 8);
+	} else if (value <= TQUIC_VARINT_2BYTE_MAX) {
+		*p++ = TQUIC_VARINT_2BYTE_PREFIX | (u8)(value >> 8);
 		*p = (u8)(value & 0xff);
 		return 2;
-	} else if (value <= QUIC_VARINT_4BYTE_MAX) {
-		*p++ = QUIC_VARINT_4BYTE_PREFIX | (u8)(value >> 24);
+	} else if (value <= TQUIC_VARINT_4BYTE_MAX) {
+		*p++ = TQUIC_VARINT_4BYTE_PREFIX | (u8)(value >> 24);
 		*p++ = (u8)(value >> 16);
 		*p++ = (u8)(value >> 8);
 		*p = (u8)(value & 0xff);
 		return 4;
-	} else {
-		*p++ = QUIC_VARINT_8BYTE_PREFIX | (u8)(value >> 56);
-		*p++ = (u8)(value >> 48);
-		*p++ = (u8)(value >> 40);
-		*p++ = (u8)(value >> 32);
-		*p++ = (u8)(value >> 24);
-		*p++ = (u8)(value >> 16);
-		*p++ = (u8)(value >> 8);
-		*p = (u8)(value & 0xff);
-		return 8;
 	}
+	*p++ = TQUIC_VARINT_8BYTE_PREFIX | (u8)(value >> 56);
+	*p++ = (u8)(value >> 48);
+	*p++ = (u8)(value >> 40);
+	*p++ = (u8)(value >> 32);
+	*p++ = (u8)(value >> 24);
+	*p++ = (u8)(value >> 16);
+	*p++ = (u8)(value >> 8);
+	*p = (u8)(value & 0xff);
+	return 8;
 }
 
 /*
@@ -371,7 +445,7 @@ static int quic_stream_remove(struct quic_stream_table *table, u64 stream_id)
 			hlist_del_rcu(&entry->node);
 			table->count--;
 			spin_unlock_bh(&table->lock);
-			kfree_rcu(entry, node);
+			kfree_rcu(entry, rcu);
 			return 0;
 		}
 	}
@@ -447,7 +521,7 @@ static int quic_create_udp_sock(struct sock *sk)
 
 	/* Configure UDP encapsulation */
 	cfg.sk_user_data = sk;
-	cfg.encap_type = UDP_ENCAP_QUIC;
+	cfg.encap_type = UDP_ENCAP_L2TPINUDP;
 	cfg.encap_rcv = (udp_tunnel_encap_rcv_t)quic_udp_encap_rcv;
 	cfg.encap_destroy = NULL;
 
@@ -799,13 +873,6 @@ static int quic_setsockopt_stream_open(struct quic_sock *qsk, sockptr_t optval,
 	}
 
 	release_sock(sk);
-
-	/* Return stream ID to user if space provided */
-	if (optlen >= sizeof(u64)) {
-		if (copy_to_user((void __user *)optval + sizeof(u32),
-				 &stream_id, sizeof(u64)))
-			return -EFAULT;
-	}
 
 	return 0;
 }
@@ -1202,9 +1269,9 @@ static int quic_setsockopt_stream_priority(struct quic_sock *qsk,
 					   unsigned int optlen)
 {
 	struct quic_stream_priority prio;
-	struct quic_connection *conn = qsk->conn;
-	struct quic_stream *stream;
-	int err;
+	struct tquic_connection *conn = qsk->conn;
+	struct tquic_stream *stream;
+	struct rb_node *node;
 
 	if (optlen < sizeof(prio))
 		return -EINVAL;
@@ -1212,26 +1279,25 @@ static int quic_setsockopt_stream_priority(struct quic_sock *qsk,
 	if (copy_from_sockptr(&prio, optval, sizeof(prio)))
 		return -EFAULT;
 
-	/* Validate urgency range */
 	if (prio.urgency > QUIC_PRIORITY_URGENCY_MAX)
 		return -EINVAL;
 
 	if (!conn)
 		return -ENOTCONN;
 
-	/* Find the stream */
-	stream = quic_stream_lookup(conn, prio.stream_id);
-	if (!stream)
-		return -ENOENT;
-
-	/* Set the priority */
-	err = quic_stream_set_priority(stream, prio.urgency,
-				       prio.incremental != 0);
-
-	/* Release lookup reference */
-	refcount_dec(&stream->refcnt);
-
-	return err;
+	spin_lock_bh(&conn->streams_lock);
+	
+	for (node = rb_first(&conn->streams); node; node = rb_next(node)) {
+		stream = rb_entry(node, struct tquic_stream, node);
+		if (stream->id == prio.stream_id) {
+			tquic_stream_set_priority(stream, prio.urgency);
+			spin_unlock_bh(&conn->streams_lock);
+			return 0;
+		}
+	}
+	
+	spin_unlock_bh(&conn->streams_lock);
+	return -ENOENT;
 }
 
 /*
@@ -1242,11 +1308,10 @@ static int quic_getsockopt_stream_priority(struct quic_sock *qsk,
 					   int __user *optlen)
 {
 	struct quic_stream_priority prio;
-	struct quic_connection *conn = qsk->conn;
-	struct quic_stream *stream;
+	struct tquic_connection *conn = qsk->conn;
+	struct tquic_stream *stream;
+	struct rb_node *node;
 	int len;
-	u8 urgency;
-	bool incremental;
 
 	if (get_user(len, optlen))
 		return -EFAULT;
@@ -1254,29 +1319,30 @@ static int quic_getsockopt_stream_priority(struct quic_sock *qsk,
 	if (len < sizeof(prio.stream_id))
 		return -EINVAL;
 
-	/* Get stream_id from user to know which stream to query */
 	if (copy_from_user(&prio.stream_id, optval, sizeof(prio.stream_id)))
 		return -EFAULT;
 
 	if (!conn)
 		return -ENOTCONN;
 
-	/* Find the stream */
-	stream = quic_stream_lookup(conn, prio.stream_id);
-	if (!stream)
-		return -ENOENT;
+	spin_lock_bh(&conn->streams_lock);
+	
+	for (node = rb_first(&conn->streams); node; node = rb_next(node)) {
+		stream = rb_entry(node, struct tquic_stream, node);
+		if (stream->id == prio.stream_id) {
+			memset(&prio, 0, sizeof(prio));
+			prio.stream_id = stream->id;
+			prio.urgency = stream->priority;
+			prio.incremental = 0;
+			spin_unlock_bh(&conn->streams_lock);
+			goto found;
+		}
+	}
+	
+	spin_unlock_bh(&conn->streams_lock);
+	return -ENOENT;
 
-	/* Get the priority */
-	quic_stream_get_priority(stream, &urgency, &incremental);
-
-	/* Release lookup reference */
-	refcount_dec(&stream->refcnt);
-
-	/* Fill in response */
-	memset(&prio, 0, sizeof(prio));
-	prio.stream_id = stream->id;
-	prio.urgency = urgency;
-	prio.incremental = incremental ? 1 : 0;
+found:
 
 	len = min_t(int, len, sizeof(prio));
 	if (put_user(len, optlen))
@@ -1369,7 +1435,7 @@ int quic_getsockopt(struct sock *sk, int level, int optname,
 	int err = 0;
 
 	if (level == SOL_SOCKET)
-		return sock_getsockopt(sk->sk_socket, level, optname,
+		return sock_common_getsockopt(sk->sk_socket, level, optname,
 				       optval, optlen);
 
 	if (level != SOL_QUIC)
@@ -1563,33 +1629,57 @@ static int quic_sendmsg_stream(struct sock *sk, struct msghdr *msg,
 		/*
 		 * Encryption: Apply AEAD packet protection (RFC 9001 Section 5)
 		 *
-		 * For production: Use quic_packet_encrypt() or similar.
+		 * For production: Use tquic_crypto_encrypt() from crypto module.
 		 * This requires properly negotiated keys from TLS handshake.
 		 */
 		if (qsk->conn && qsk->conn->handshake_complete) {
-			/* Use connection's crypto context for encryption */
-			struct quic_crypto_ctx *crypto =
-				&qsk->conn->crypto[QUIC_CRYPTO_APPLICATION];
+			/* Get connection's crypto context for encryption */
+			struct tquic_crypto_ctx *crypto = 
+				(struct tquic_crypto_ctx *)qsk->conn->crypto[TQUIC_CRYPTO_APPLICATION];
+			struct sk_buff *pkt_skb;
+			u8 mask[5];
+			int i;
 
-			if (crypto->keys_available) {
-				err = quic_crypto_encrypt(crypto, pkt_buf, pkt_len,
-							  header_len, pn);
+			if (crypto && crypto->keys_available) {
+				/* Create skb from buffer for crypto API */
+				pkt_skb = alloc_skb(pkt_len + 16, GFP_KERNEL);
+				if (!pkt_skb) {
+					kfree(user_data);
+					kfree(pkt_buf);
+					return -ENOMEM;
+				}
+				
+				skb_put_data(pkt_skb, pkt_buf, pkt_len);
+				TQUIC_SKB_CB(pkt_skb)->header_len = header_len;
+				TQUIC_SKB_CB(pkt_skb)->pn = pn;
+				
+				err = tquic_crypto_encrypt(crypto, pkt_skb, pn);
 				if (err < 0) {
+					kfree_skb(pkt_skb);
 					kfree(user_data);
 					kfree(pkt_buf);
 					return err;
 				}
-				pkt_len += 16;  /* AEAD tag */
-
+				
+				/* Copy encrypted data back */
+				pkt_len = pkt_skb->len;
+				memcpy(pkt_buf, pkt_skb->data, pkt_len);
+				kfree_skb(pkt_skb);
+				
 				/* Apply header protection */
-				err = quic_crypto_hp_mask(crypto,
-							  pkt_buf + header_len + 4,
-							  pkt_buf);
+				err = tquic_crypto_hp_mask(crypto, 
+							   pkt_buf + header_len + 4,
+							   mask);
 				if (err < 0) {
 					kfree(user_data);
 					kfree(pkt_buf);
 					return err;
 				}
+				
+				/* Apply mask to first byte and packet number */
+				pkt_buf[0] ^= mask[0] & 0x1f;
+				for (i = 0; i < 4; i++)
+					pkt_buf[header_len + i] ^= mask[1 + i];
 			} else {
 				/*
 				 * Keys not available - cannot send application data
@@ -2255,8 +2345,8 @@ static void quic_shutdown(struct sock *sk, int how)
 
 		/* Initiate QUIC connection close if we have a connection */
 		if (qsk->conn) {
-			quic_conn_close(qsk->conn, QUIC_ERROR_NO_ERROR,
-					"socket shutdown", 15, false);
+			tquic_conn_close_with_error(qsk->conn, QUIC_ERROR_NO_ERROR,
+					"socket shutdown");
 		}
 	}
 

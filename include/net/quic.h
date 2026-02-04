@@ -25,6 +25,7 @@
 #include <net/udp.h>
 #include <crypto/aead.h>
 #include <crypto/hash.h>
+#include <crypto/skcipher.h>
 #include <uapi/linux/quic.h>
 
 /* Forward declarations */
@@ -190,8 +191,8 @@ struct quic_crypto_secret {
 struct quic_crypto_ctx {
 	struct crypto_aead	*tx_aead;
 	struct crypto_aead	*rx_aead;
-	struct crypto_cipher	*tx_hp;
-	struct crypto_cipher	*rx_hp;
+	struct crypto_sync_skcipher *tx_hp;	/* Header protection (kernel 6.12+ API) */
+	struct crypto_sync_skcipher *rx_hp;	/* Header protection (kernel 6.12+ API) */
 	struct crypto_shash	*hash;
 	struct quic_crypto_secret tx;
 	struct quic_crypto_secret rx;

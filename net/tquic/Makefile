@@ -15,13 +15,17 @@
 
 # Include paths for headers
 # $(src)/../.. points to the project root where include/uapi/linux/in.h defines IPPROTO_TQUIC
-ccflags-y += -I$(src)/include -I$(src)/../quic -I$(src)/../..
+ccflags-y += -I$(src)/include -I$(src)/../quic -I$(src)/../.. -I$(src)/diag -DTQUIC_OUT_OF_TREE
+# Suppress warnings treated as errors during development (remove for production)
+ccflags-y += -Wno-error=unused-function -Wno-error=unused-variable
+ccflags-y += -Wno-error=missing-prototypes
 
 obj-$(CONFIG_TQUIC) += tquic.o
 
 # Main TQUIC module - ALL components in single block to avoid make evaluation issues
 tquic-y := \
 	tquic_main.o \
+	out_of_tree_stubs.o \
 	tquic_proto.o \
 	tquic_socket.o \
 	tquic_stream.o \
@@ -54,22 +58,20 @@ tquic-y := \
 	tquic_ack_frequency.o \
 	security_hardening.o \
 	cong/tquic_cong.o \
+	cong/cong_data.o \
 	cong/persistent_cong.o \
-	quic_socket.o \
-	quic_timer.o \
-	quic_stream.o \
-	quic_sysctl.o \
-	quic_offload.o \
+	cong/coupled.o \
+	cong/bbrv2.o \
+	cong/bbrv3.o \
+	cong/prague.o \
 	core/varint.o \
 	core/connection.o \
 	core/stream.o \
 	core/frame.o \
 	core/packet.o \
-	core/ack.o \
 	core/ack_frequency.o \
 	core/flow_control.o \
 	core/transport_params.o \
-	core/cid.o \
 	core/address_discovery.o \
 	core/receive_timestamps.o \
 	core/reliable_reset.o \
@@ -95,18 +97,17 @@ tquic-y := \
 	bond/bonding.o \
 	bond/tquic_bonding.o \
 	bond/tquic_failover.o \
-	bond/tquic_path.o \
 	bond/tquic_reorder.o \
 	bond/cong_coupled.o \
 	pm/pm_types.o \
 	pm/pm_kernel.o \
+	pm/pm_netlink.o \
 	pm/path_manager.o \
 	pm/path_validation.o \
 	pm/nat_keepalive.o \
 	pm/nat_lifecycle.o \
 	pm/pm_module.o \
 	sched/scheduler.o \
-	sched/reorder.o \
 	sched/deadline_scheduler.o \
 	sched/deadline_aware.o \
 	multipath/mp_frame.o \
@@ -114,12 +115,12 @@ tquic-y := \
 	multipath/mp_deadline.o \
 	multipath/path_abandon.o \
 	multipath/multipath_module.o \
-	multipath/tquic_scheduler.o \
 	multipath/sched_minrtt.o \
-	multipath/sched_aggregate.o \
-	multipath/sched_weighted.o \
-	multipath/sched_blest.o \
 	multipath/sched_ecf.o \
+	multipath/sched_blest.o \
+	multipath/sched_weighted.o \
+	multipath/sched_aggregate.o \
+	crypto/cert_verify.o \
 	crypto/tls.o \
 	crypto/header_protection.o \
 	crypto/key_update.o \
@@ -144,7 +145,7 @@ tquic-$(CONFIG_TQUIC_IO_URING) += io_uring.o
 # Optional separate modules (if corresponding CONFIG is =m)
 obj-$(CONFIG_TQUIC_WAN_BONDING) += tquic_bond.o
 tquic_bond-y := bond/bonding.o bond/tquic_bonding.o bond/tquic_failover.o \
-	bond/tquic_path.o bond/tquic_reorder.o bond/cong_coupled.o
+	bond/tquic_reorder.o bond/cong_coupled.o
 
 obj-$(CONFIG_TQUIC_PATH_MANAGER) += tquic_pm.o
 tquic_pm-y := pm/pm_types.o pm/pm_kernel.o pm/path_manager.o \
@@ -153,7 +154,7 @@ tquic_pm-$(CONFIG_TQUIC_PM_NETLINK) += pm/pm_netlink.o
 tquic_pm-$(CONFIG_TQUIC_PM_USERSPACE) += pm/pm_userspace.o
 
 obj-$(CONFIG_TQUIC_SCHEDULER) += tquic_sched.o
-tquic_sched-y := sched/scheduler.o sched/reorder.o \
+tquic_sched-y := sched/scheduler.o \
 	sched/deadline_scheduler.o sched/deadline_aware.o
 
 # Congestion Control
@@ -209,12 +210,7 @@ tquic_multipath-y := \
 	multipath/mp_deadline.o \
 	multipath/path_abandon.o \
 	multipath/multipath_module.o \
-	multipath/tquic_scheduler.o \
-	multipath/sched_minrtt.o \
-	multipath/sched_aggregate.o \
-	multipath/sched_weighted.o \
-	multipath/sched_blest.o \
-	multipath/sched_ecf.o
+
 
 # Crypto support - separate module
 obj-$(CONFIG_TQUIC_CRYPTO) += tquic_crypto.o

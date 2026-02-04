@@ -17,6 +17,7 @@
 #include <linux/slab.h>
 #include <crypto/hash.h>
 #include <crypto/aead.h>
+#include <crypto/skcipher.h>
 
 /*
  * TLS 1.3 Cipher Suite Identifiers
@@ -102,8 +103,8 @@ struct tquic_crypto_secret {
 struct tquic_crypto_ctx {
 	struct crypto_aead	*tx_aead;
 	struct crypto_aead	*rx_aead;
-	struct crypto_cipher	*tx_hp;
-	struct crypto_cipher	*rx_hp;
+	struct crypto_sync_skcipher	*tx_hp;
+	struct crypto_sync_skcipher	*rx_hp;
 	struct crypto_shash	*hash;
 	struct tquic_crypto_secret tx;
 	struct tquic_crypto_secret rx;
@@ -182,7 +183,7 @@ static inline void tquic_crypto_wrapper_free(struct tquic_crypto_wrapper *wrappe
  */
 
 /**
- * tquic_crypto_init - Initialize a TQUIC crypto context
+ * tquic_crypto_ctx_init - Initialize a TQUIC crypto context
  * @ctx: Context to initialize
  * @cipher_type: TLS cipher suite identifier (e.g., TQUIC_CIPHER_AES_128_GCM_SHA256)
  *
@@ -191,24 +192,24 @@ static inline void tquic_crypto_wrapper_free(struct tquic_crypto_wrapper *wrappe
  *
  * Return: 0 on success, negative error code on failure
  */
-int tquic_crypto_init(struct tquic_crypto_ctx *ctx, u16 cipher_type);
+int tquic_crypto_ctx_init(struct tquic_crypto_ctx *ctx, u16 cipher_type);
 
 /**
- * tquic_crypto_destroy - Free resources in a TQUIC crypto context
+ * tquic_crypto_ctx_destroy - Free resources in a TQUIC crypto context
  * @ctx: Context to destroy
  *
  * Releases all resources associated with the crypto context, including
  * zeroizing sensitive key material. The context structure itself is
  * not freed (it's typically embedded in the connection structure).
  */
-void tquic_crypto_destroy(struct tquic_crypto_ctx *ctx);
+void tquic_crypto_ctx_destroy(struct tquic_crypto_ctx *ctx);
 
 /*
  * Key Derivation Functions (RFC 9001)
  */
 
 /**
- * tquic_crypto_derive_initial_secrets - Derive initial packet protection keys
+ * tquic_crypto_derive_init_secrets - Derive initial packet protection keys
  * @conn: TQUIC connection
  * @cid: Destination Connection ID
  *
@@ -218,8 +219,8 @@ void tquic_crypto_destroy(struct tquic_crypto_ctx *ctx);
  *
  * Return: 0 on success, negative error code on failure
  */
-int tquic_crypto_derive_initial_secrets(struct tquic_connection *conn,
-				       struct tquic_cid *cid);
+int tquic_crypto_derive_init_secrets(struct tquic_connection *conn,
+				     struct tquic_cid *cid);
 
 /**
  * tquic_crypto_derive_secrets - Derive traffic secrets and keys
