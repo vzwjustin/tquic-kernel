@@ -202,6 +202,9 @@ static struct ctl_table tquic_fallback_table[] = {
 	{ }
 };
 
+/* Number of valid entries (exclude the null terminator). */
+#define TQUIC_FALLBACK_SYSCTL_ENTRIES (ARRAY_SIZE(tquic_fallback_table) - 1)
+
 static struct ctl_table_header *tquic_fallback_sysctl_header;
 
 /*
@@ -856,9 +859,10 @@ int tquic_fallback_init(void)
 	}
 
 	/* Register sysctl */
-	tquic_fallback_sysctl_header = register_net_sysctl(&init_net,
-							   "net/tquic",
-							   tquic_fallback_table);
+	tquic_fallback_sysctl_header = register_net_sysctl_sz(&init_net,
+							      "net/tquic",
+							      tquic_fallback_table,
+							      TQUIC_FALLBACK_SYSCTL_ENTRIES);
 	if (!tquic_fallback_sysctl_header) {
 		unregister_pernet_subsys(&tquic_fallback_net_ops);
 		tquic_over_tcp_exit();

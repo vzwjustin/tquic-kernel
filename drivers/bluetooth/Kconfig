@@ -1,0 +1,8 @@
+# SPDX-License-Identifier: GPL-2.0
+#
+# Placeholder Bluetooth Kconfig for trimmed tree.
+#
+
+menu "Bluetooth drivers (stub)"
+
+endmenu

@@ -1,0 +1,8 @@
+# SPDX-License-Identifier: GPL-2.0
+#
+# Placeholder ipu-v3 Kconfig for trimmed tree.
+#
+
+menu "IPU v3 drivers (stub)"
+
+endmenu

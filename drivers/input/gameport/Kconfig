@@ -1,0 +1,8 @@
+# SPDX-License-Identifier: GPL-2.0
+#
+# Placeholder gameport Kconfig for trimmed tree.
+#
+
+menu "Input gameport drivers (stub)"
+
+endmenu

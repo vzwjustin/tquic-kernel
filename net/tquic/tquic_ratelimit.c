@@ -1120,6 +1120,9 @@ static struct ctl_table tquic_rl_sysctl_table[] = {
 	{ }
 };
 
+/* Number of valid entries (exclude the null terminator). */
+#define TQUIC_RL_SYSCTL_TABLE_ENTRIES (ARRAY_SIZE(tquic_rl_sysctl_table) - 1)
+
 /* Sysctl accessor functions */
 int tquic_sysctl_get_ratelimit_enabled(void)
 {
@@ -1147,8 +1150,9 @@ EXPORT_SYMBOL_GPL(tquic_sysctl_get_burst_limit);
 
 int tquic_ratelimit_sysctl_init(void)
 {
-	tquic_rl_sysctl_header = register_net_sysctl(&init_net, "net/tquic",
-						     tquic_rl_sysctl_table);
+	tquic_rl_sysctl_header = register_net_sysctl_sz(&init_net, "net/tquic",
+							tquic_rl_sysctl_table,
+							TQUIC_RL_SYSCTL_TABLE_ENTRIES);
 	if (!tquic_rl_sysctl_header)
 		return -ENOMEM;
 

@@ -1110,6 +1110,13 @@ int tquic_crypto_derive_secrets(struct tquic_crypto_ctx *ctx,
 	return 0;
 }
 
+int tquic_crypto_derive_initial_secrets(struct tquic_connection *conn,
+					const struct tquic_cid *cid)
+{
+	return tquic_crypto_derive_init_secrets(conn, (struct tquic_cid *)cid);
+}
+EXPORT_SYMBOL_GPL(tquic_crypto_derive_initial_secrets);
+
 static void tquic_crypto_compute_nonce(const u8 *iv, u64 pn, u8 *nonce)
 {
 	int i;

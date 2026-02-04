@@ -24,6 +24,7 @@ struct net;
 struct tquic_connection;
 struct tquic_path;
 struct tquic_bonding_ctx;
+struct ctl_table_header;
 
 /*
  * Path Manager Types
@@ -96,6 +97,9 @@ struct tquic_pm_pernet {
 
 	/* Path ID allocation */
 	unsigned long next_path_id; /* Bitmap for path ID allocation */
+
+	/* Sysctl registration (per-netns) */
+	struct ctl_table_header *sysctl_header;
 };
 
 /*

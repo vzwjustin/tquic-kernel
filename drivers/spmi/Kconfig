@@ -1,0 +1,8 @@
+# SPDX-License-Identifier: GPL-2.0
+#
+# Placeholder SPMI Kconfig for trimmed tree.
+#
+
+menu "SPMI drivers (stub)"
+
+endmenu
