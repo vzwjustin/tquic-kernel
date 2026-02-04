@@ -209,7 +209,7 @@ void tquic_crypto_ctx_destroy(struct tquic_crypto_ctx *ctx);
  */
 
 /**
- * tquic_crypto_derive_init_secrets - Derive initial packet protection keys
+ * tquic_crypto_derive_initial_secrets - Derive initial packet protection keys
  * @conn: TQUIC connection
  * @cid: Destination Connection ID
  *
@@ -219,8 +219,8 @@ void tquic_crypto_ctx_destroy(struct tquic_crypto_ctx *ctx);
  *
  * Return: 0 on success, negative error code on failure
  */
-int tquic_crypto_derive_init_secrets(struct tquic_connection *conn,
-				     struct tquic_cid *cid);
+int tquic_crypto_derive_initial_secrets(struct tquic_connection *conn,
+					struct tquic_cid *cid);
 
 /**
  * tquic_crypto_derive_secrets - Derive traffic secrets and keys

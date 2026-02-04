@@ -2,7 +2,7 @@
 
 ## Status: RESOLVED
 
-All previously undefined symbols have been fixed as of this commit.
+All previously undefined symbols have been fixed with real implementations.
 
 ## Previously undefined symbols (now fixed)
 
@@ -11,10 +11,10 @@ All previously undefined symbols have been fixed as of this commit.
 - `tquic_scheduler_init` - **FIXED**: Added `multipath/tquic_scheduler.o` to build
 - `tquic_scheduler_exit` - **FIXED**: Added `multipath/tquic_scheduler.o` to build
 - `tquic_mp_sched_find` - **FIXED**: Added `multipath/tquic_scheduler.o` to build
-- `tquic_pm_get_path` - **FIXED**: Added stub in `out_of_tree_stubs.c`
-- `tquic_pm_get_active_paths` - **FIXED**: Added stub in `out_of_tree_stubs.c`
-- `tquic_crypto_derive_initial_secrets` - **FIXED**: Added wrapper in `out_of_tree_stubs.c`
-- `tquic_path_state_names` - **FIXED**: Added definition in `out_of_tree_stubs.c`
+- `tquic_pm_get_path` - **FIXED**: Real implementation in `pm/path_manager.c`
+- `tquic_pm_get_active_paths` - **FIXED**: Real implementation in `pm/path_manager.c`
+- `tquic_crypto_derive_initial_secrets` - **FIXED**: Renamed function in `core/quic_crypto.c`
+- `tquic_path_state_names` - **FIXED**: Exported from `pm/path_manager.c`
 
 ## Resolution details
 
@@ -27,22 +27,25 @@ All previously undefined symbols have been fixed as of this commit.
 - Provides `tquic_scheduler_init`, `tquic_scheduler_exit`, and `tquic_mp_sched_find`
 
 ### 3. PM APIs for bonding/mp_frame
-- Added stubs in `out_of_tree_stubs.c`:
-  - `tquic_pm_get_path()` returns NULL
-  - `tquic_pm_get_active_paths()` returns 0
-- These are minimal stubs; full implementation requires real path manager integration
+- Implemented real functions in `pm/path_manager.c`:
+  - `tquic_pm_get_path()` - looks up path by ID via connection's path list
+  - `tquic_pm_get_active_paths()` - returns array of ACTIVE/VALIDATED paths
+- Declarations added to `include/net/tquic_pm.h`
 
-### 4. Crypto API name mismatch
-- Added wrapper `tquic_crypto_derive_initial_secrets()` that calls
-  `tquic_crypto_derive_init_secrets()` (the actual implementation)
+### 4. Crypto API name fix
+- Renamed `tquic_crypto_derive_init_secrets()` to `tquic_crypto_derive_initial_secrets()`
+  in `core/quic_crypto.c` to match the declared API
+- Updated declaration in `core/tquic_crypto.h`
 
 ### 5. Path state name table
-- Added global `tquic_path_state_names[]` array in `out_of_tree_stubs.c`
+- Added global `tquic_path_state_names[]` array in `pm/path_manager.c`
 - Matches the `enum tquic_path_state` in `include/net/tquic.h`
+- Declaration added to `include/net/tquic_pm.h`
 
 ## Notes
 
-- `net/tquic/out_of_tree_stubs.c` is compiled when `TQUIC_OUT_OF_TREE` is defined
+- `net/tquic/out_of_tree_stubs.c` provides minimal stubs only for symbols from
+  subsystems not included in out-of-tree builds (tracing, module lifecycle)
 - All objects are consolidated into single `tquic.ko` to avoid circular dependencies
 - New objects should be added to both `net/tquic/Kbuild` and `net/tquic/Makefile`
 

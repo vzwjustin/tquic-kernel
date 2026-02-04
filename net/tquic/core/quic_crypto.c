@@ -934,8 +934,8 @@ void tquic_crypto_ctx_destroy(struct tquic_crypto_ctx *ctx)
 	memset(ctx, 0, sizeof(*ctx));
 }
 
-int tquic_crypto_derive_init_secrets(struct tquic_connection *conn,
-				     struct tquic_cid *cid)
+int tquic_crypto_derive_initial_secrets(struct tquic_connection *conn,
+					struct tquic_cid *cid)
 {
 	struct tquic_crypto_wrapper *wrapper = tquic_crypto_wrapper_get(conn);
 	struct tquic_crypto_ctx *ctx;

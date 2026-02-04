@@ -209,4 +209,12 @@ void tquic_pm_on_path_failed_additional(struct tquic_connection *conn,
 					struct tquic_path *path);
 int tquic_pm_coordinate_preferred_and_additional(struct tquic_connection *conn);
 
+/* Path lookup and enumeration APIs */
+struct tquic_path *tquic_pm_get_path(struct tquic_pm_state *pm, u32 path_id);
+int tquic_pm_get_active_paths(struct tquic_path_manager *pm,
+			      struct tquic_path **paths, int max_paths);
+
+/* Path state name table for debug/trace output */
+extern const char *tquic_path_state_names[];
+
 #endif /* _NET_TQUIC_PM_H */

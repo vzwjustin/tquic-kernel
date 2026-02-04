@@ -50,6 +50,23 @@ struct tquic_path_probe {
 	u8 attempts;
 };
 
+/**
+ * tquic_path_state_names - Human-readable path state names
+ *
+ * Indexed by enum tquic_path_state values for debug output and tracing.
+ */
+const char *tquic_path_state_names[] = {
+	[TQUIC_PATH_UNUSED]      = "UNUSED",
+	[TQUIC_PATH_PENDING]     = "PENDING",
+	[TQUIC_PATH_VALIDATED]   = "VALIDATED",
+	[TQUIC_PATH_ACTIVE]      = "ACTIVE",
+	[TQUIC_PATH_STANDBY]     = "STANDBY",
+	[TQUIC_PATH_UNAVAILABLE] = "UNAVAILABLE",
+	[TQUIC_PATH_FAILED]      = "FAILED",
+	[TQUIC_PATH_CLOSED]      = "CLOSED",
+};
+EXPORT_SYMBOL_GPL(tquic_path_state_names);
+
 /* Forward declarations */
 int tquic_pm_discover_addresses(struct tquic_connection *conn,
 				struct sockaddr_storage *addrs, int max_addrs);
@@ -557,6 +574,79 @@ struct tquic_path *tquic_conn_get_path_locked(struct tquic_connection *conn,
 	return NULL;
 }
 EXPORT_SYMBOL_GPL(tquic_conn_get_path_locked);
+
+/**
+ * tquic_pm_get_path - Get path by ID from path manager state
+ * @pm: Path manager state
+ * @path_id: Path ID to look up
+ *
+ * Looks up a path by its ID using the connection's path list.
+ * Caller must hold appropriate locks or be in RCU read-side critical section.
+ *
+ * Return: Pointer to path if found, NULL otherwise
+ */
+struct tquic_path *tquic_pm_get_path(struct tquic_pm_state *pm, u32 path_id)
+{
+	struct tquic_path *path;
+
+	if (!pm || !pm->conn)
+		return NULL;
+
+	rcu_read_lock();
+	list_for_each_entry_rcu(path, &pm->conn->paths, list) {
+		if (path->path_id == path_id) {
+			rcu_read_unlock();
+			return path;
+		}
+	}
+	rcu_read_unlock();
+
+	return NULL;
+}
+EXPORT_SYMBOL_GPL(tquic_pm_get_path);
+
+/**
+ * tquic_pm_get_active_paths - Get array of active/validated paths
+ * @pm: Path manager (uses pm->conn->paths)
+ * @paths: Output array to fill with path pointers
+ * @max_paths: Maximum number of paths to return
+ *
+ * Populates @paths array with pointers to paths that are in ACTIVE or
+ * VALIDATED state. These are paths that can be used for data transmission.
+ *
+ * Return: Number of paths copied to array (0 to max_paths)
+ */
+int tquic_pm_get_active_paths(struct tquic_path_manager *pm,
+			      struct tquic_path **paths, int max_paths)
+{
+	struct tquic_connection *conn;
+	struct tquic_path *path;
+	int count = 0;
+
+	if (!pm || !paths || max_paths <= 0)
+		return 0;
+
+	/* tquic_path_manager is often used interchangeably with tquic_pm_state */
+	conn = ((struct tquic_pm_state *)pm)->conn;
+	if (!conn)
+		return 0;
+
+	rcu_read_lock();
+	list_for_each_entry_rcu(path, &conn->paths, list) {
+		if (count >= max_paths)
+			break;
+
+		/* Only include paths usable for data transmission */
+		if (path->state == TQUIC_PATH_ACTIVE ||
+		    path->state == TQUIC_PATH_VALIDATED) {
+			paths[count++] = path;
+		}
+	}
+	rcu_read_unlock();
+
+	return count;
+}
+EXPORT_SYMBOL_GPL(tquic_pm_get_active_paths);
 
 /*
  * Calculate bytes in-flight on a specific path
