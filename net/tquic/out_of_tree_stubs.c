@@ -3,7 +3,8 @@
  * TQUIC out-of-tree build stubs
  *
  * Provide minimal implementations for symbols that are not built
- * in the out-of-tree configuration.
+ * in the out-of-tree configuration. These are typically symbols
+ * from subsystems not included in the out-of-tree build.
  */
 
 #include <linux/module.h>
