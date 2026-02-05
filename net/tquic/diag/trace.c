@@ -11,6 +11,7 @@
 
 #define CREATE_TRACE_POINTS
 #include "trace.h"
-
-MODULE_LICENSE("GPL");
-MODULE_DESCRIPTION("QUIC Tracepoint Definitions");
+/*
+ * Tracepoints are built into the owning object/module. Keep module metadata
+ * in the top-level TQUIC module instead of the tracepoint translation unit.
+ */
