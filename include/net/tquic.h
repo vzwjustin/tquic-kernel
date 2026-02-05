@@ -14,6 +14,7 @@
 #include <linux/types.h>
 #include <linux/socket.h>
 #include <linux/skbuff.h>
+#include <linux/version.h>
 #include <linux/timer.h>
 #include <linux/workqueue.h>
 #include <net/tquic/crypto/cert_verify.h>
@@ -1698,8 +1699,15 @@ struct tquic_cong_ops {
 	struct list_head list;
 };
 
+/* Socket address type compatibility */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 13, 0)
+#define TQUIC_SOCKADDR struct sockaddr_unsized
+#else
+#define TQUIC_SOCKADDR struct sockaddr
+#endif
+
 /* Core API functions */
-int tquic_connect(struct sock *sk, struct sockaddr_unsized *addr, int addr_len);
+int tquic_connect(struct sock *sk, TQUIC_SOCKADDR *addr, int addr_len);
 int tquic_accept(struct sock *sk, struct sock **newsk, int flags, bool kern);
 int tquic_sendmsg(struct sock *sk, struct msghdr *msg, size_t len);
 int tquic_recvmsg(struct sock *sk, struct msghdr *msg, size_t len, int flags,
@@ -1893,6 +1901,7 @@ void tquic_conn_state_cleanup(struct tquic_connection *conn);
 /* Stream management */
 struct tquic_stream_manager;	/* Forward declaration */
 struct tquic_stream *tquic_stream_open(struct tquic_connection *conn, bool bidi);
+struct tquic_stream *tquic_conn_stream_lookup(struct tquic_connection *conn, u64 stream_id);
 void tquic_stream_close(struct tquic_stream *stream);
 void tquic_stream_destroy(struct tquic_stream_manager *mgr, struct tquic_stream *stream);
 int tquic_stream_send(struct tquic_stream *stream, const void *data, size_t len, bool fin);

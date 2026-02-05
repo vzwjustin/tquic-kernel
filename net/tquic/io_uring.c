@@ -23,10 +23,13 @@
 #include <linux/socket.h>
 #include <linux/file.h>
 #include <linux/uio.h>
+#include <linux/vmalloc.h>
 #include <linux/io_uring.h>
 #include <linux/io_uring_types.h>
 #include <net/sock.h>
 #include <net/tquic.h>
+
+#include <io_uring/io_uring.h>
 
 #include "protocol.h"
 #include "io_uring.h"
@@ -371,7 +374,7 @@ int io_tquic_recv(struct io_kiocb *req, unsigned int issue_flags)
 		msg.msg_flags |= MSG_DONTWAIT;
 
 	/* Perform receive */
-	ret = tquic_recvmsg(sk, &msg, iov.iov_len, msg.msg_flags);
+	ret = tquic_recvmsg(sk, &msg, iov.iov_len, msg.msg_flags, NULL);
 
 	if (ret == -EAGAIN) {
 		if (!(issue_flags & IO_URING_F_NONBLOCK))
@@ -439,7 +442,7 @@ int io_tquic_recv_multishot(struct io_kiocb *req, unsigned int issue_flags)
 	msg.msg_flags = sr->flags | MSG_DONTWAIT;
 
 	/* Perform receive */
-	ret = tquic_recvmsg(sk, &msg, iov.iov_len, msg.msg_flags);
+	ret = tquic_recvmsg(sk, &msg, iov.iov_len, msg.msg_flags, NULL);
 
 	/* Update statistics */
 	uctx = tquic_uring_ctx_get(sk);
@@ -595,7 +598,7 @@ int io_tquic_recvmsg(struct io_kiocb *req, unsigned int issue_flags)
 	if (issue_flags & IO_URING_F_NONBLOCK)
 		msg->msg_flags |= MSG_DONTWAIT;
 
-	ret = tquic_recvmsg(sk, msg, msg->msg_iter.count, msg->msg_flags);
+	ret = tquic_recvmsg(sk, msg, msg->msg_iter.count, msg->msg_flags, NULL);
 
 	if (ret == -EAGAIN && !(issue_flags & IO_URING_F_NONBLOCK))
 		return IOU_RETRY;
