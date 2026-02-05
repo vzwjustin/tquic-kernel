@@ -182,6 +182,9 @@ int tquic_fc_stream_init(struct tquic_stream *stream,
 	sfc->final_size = 0;
 	sfc->final_size_known = false;
 
+	/* Store the allocated flow control state in the stream */
+	stream->fc = sfc;
+
 	return 0;
 }
 EXPORT_SYMBOL_GPL(tquic_fc_stream_init);
@@ -192,7 +195,13 @@ EXPORT_SYMBOL_GPL(tquic_fc_stream_init);
  */
 void tquic_fc_stream_cleanup(struct tquic_stream *stream)
 {
-	/* Stream flow control state would be freed here */
+	if (!stream)
+		return;
+
+	if (stream->fc) {
+		kfree(stream->fc);
+		stream->fc = NULL;
+	}
 }
 EXPORT_SYMBOL_GPL(tquic_fc_stream_cleanup);
 
@@ -218,7 +227,7 @@ bool tquic_fc_conn_can_send(struct tquic_fc_state *fc, u64 bytes)
 	bool can_send;
 	unsigned long flags;
 
-	if (!fc)
+	if (unlikely(!fc))
 		return false;
 
 	spin_lock_irqsave(&fc->conn.lock, flags);
@@ -240,7 +249,7 @@ u64 tquic_fc_conn_get_credit(struct tquic_fc_state *fc)
 	u64 credit;
 	unsigned long flags;
 
-	if (!fc)
+	if (unlikely(!fc))
 		return 0;
 
 	spin_lock_irqsave(&fc->conn.lock, flags);
@@ -269,7 +278,7 @@ int tquic_fc_conn_data_sent(struct tquic_fc_state *fc, u64 bytes)
 	unsigned long flags;
 	int ret = 0;
 
-	if (!fc)
+	if (unlikely(!fc))
 		return -EINVAL;
 
 	spin_lock_irqsave(&fc->conn.lock, flags);
@@ -589,7 +598,7 @@ bool tquic_fc_stream_can_send(struct tquic_fc_stream_state *stream, u64 bytes)
 	bool can_send;
 	unsigned long flags;
 
-	if (!stream)
+	if (unlikely(!stream))
 		return false;
 
 	spin_lock_irqsave(&stream->lock, flags);
@@ -676,7 +685,7 @@ int tquic_fc_stream_data_received(struct tquic_fc_stream_state *stream,
 	u64 end_offset;
 	int ret = 0;
 
-	if (!stream)
+	if (unlikely(!stream))
 		return -EINVAL;
 
 	end_offset = offset + length;

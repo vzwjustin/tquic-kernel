@@ -683,7 +683,6 @@ int tquic_stream_set_reliable_reset(struct tquic_stream *stream,
 				    u64 reliable_size)
 {
 	struct tquic_stream_ext *ext;
-	struct tquic_reliable_reset_state *state;
 
 	if (!stream)
 		return -EINVAL;
@@ -693,31 +692,11 @@ int tquic_stream_set_reliable_reset(struct tquic_stream *stream,
 		return -EINVAL;
 
 	/*
-	 * Allocate or reuse reset state.
-	 * For simplicity, we store this in a dynamically allocated structure.
-	 * In production, this could be embedded in stream_ext.
-	 */
-	state = kzalloc(sizeof(*state), GFP_ATOMIC);
-	if (!state)
-		return -ENOMEM;
-
-	state->pending = true;
-	state->error_code = error_code;
-	state->final_size = final_size;
-	state->reliable_size = reliable_size;
-	state->bytes_delivered = ext->recv_next;
-
-	/*
-	 * Store state pointer. In a full implementation, this would use
-	 * a proper field in tquic_stream_ext. For now, we reuse an
-	 * available pointer field or add one.
-	 *
-	 * Note: This is a simplified approach. Production code should
-	 * add a dedicated field to tquic_stream_ext.
+	 * Store reset state directly in stream_ext fields.
+	 * Note: A full implementation should add dedicated fields to
+	 * tquic_stream_ext for reliable_reset_state tracking.
 	 */
 	ext->rst_received = true;  /* Mark that reset is in progress */
-
-	/* Store in error_code field until reset completes */
 	ext->error_code = error_code;
 	ext->final_size = final_size;
 
@@ -727,8 +706,6 @@ int tquic_stream_set_reliable_reset(struct tquic_stream *stream,
 	 */
 	if (ext->recv_max < reliable_size)
 		ext->recv_max = reliable_size;
-
-	kfree(state);  /* State is stored in ext fields */
 
 	return 0;
 }

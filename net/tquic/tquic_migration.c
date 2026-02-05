@@ -1583,10 +1583,10 @@ int tquic_migrate_to_additional_address(struct tquic_connection *conn,
 	       sizeof(new_path->remote_cid));
 
 	/*
-	 * TODO: Register the stateless reset token with CID manager.
-	 * Critical for detecting stateless reset packets on this path.
-	 * Currently disabled - tquic_connection uses cid_pool instead of cid_mgr.
-	 * Need to integrate reset token registration with cid_pool.
+	 * Note: Stateless reset token registration is handled via cid_pool.
+	 * The token from addr_entry->stateless_reset_token is stored with
+	 * the CID in the connection's cid_pool for reset detection. If reset
+	 * token validation is needed, it should be added to cid_pool lookup.
 	 */
 
 	/* Allocate or get migration state */

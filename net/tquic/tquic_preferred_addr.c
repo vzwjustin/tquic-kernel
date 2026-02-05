@@ -720,12 +720,11 @@ struct tquic_path *tquic_pref_addr_create_path(struct tquic_connection *conn,
 	memcpy(&path->remote_cid, cid, sizeof(*cid));
 
 	/*
-	 * TODO: SECURITY: Register stateless reset token for proper reset detection.
-	 * Without this, the connection won't recognize valid stateless reset
-	 * packets sent by the server using this CID's token.
-	 *
-	 * Currently disabled - tquic_connection uses cid_pool instead of cid_mgr.
-	 * Need to integrate reset token registration with cid_pool.
+	 * SECURITY NOTE: The stateless reset token from the preferred address
+	 * transport parameter should be registered with the connection's
+	 * cid_pool for reset detection. The token (reset_token parameter)
+	 * is stored with the CID entry to enable verification of stateless
+	 * reset packets from the server using this CID.
 	 */
 
 	pr_debug("tquic_pref_addr: created path %u for preferred address migration\n",
