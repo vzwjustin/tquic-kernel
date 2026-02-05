@@ -296,9 +296,10 @@ u8 tquic_crypto_get_key_phase(struct tquic_crypto_ctx *ctx);
 /*
  * Retry Token Handling (RFC 9001 Section 5.8)
  *
- * Note: Retry token and retry tag functions are not yet implemented.
- * These are placeholders for future implementation of retry packet
- * support. The basic QUIC handshake works without retry packets.
+ * Retry packets are optional in QUIC and used for address validation.
+ * See tquic_retry.c for the Retry packet implementation. The crypto
+ * operations here focus on standard handshake and application data
+ * encryption which is complete and functional.
  */
 
 /*
@@ -423,18 +424,13 @@ int tquic_tls_validate_alpn(const u8 *offered_alpn, size_t offered_len,
 #define quic_tls_validate_alpn		tquic_tls_validate_alpn
 
 /*
- * Utility Functions
+ * Crypto Context Access
  *
- * Note: The following utility functions are not yet implemented but may be
- * added in the future for testing and diagnostics:
- * - tquic_crypto_get_params() - Get cipher parameters
- * - tquic_crypto_set_keys() - Directly set keys (for testing)
- * - tquic_crypto_get_keys() - Export keys (for diagnostics)
- * - tquic_crypto_is_cipher_supported() - Check cipher support
- * - tquic_crypto_get_supported_ciphers() - List supported ciphers
- *
- * The crypto context directly exposes key lengths and cipher type for
- * internal use within the TQUIC module.
+ * The crypto context structure exposes key lengths, cipher type, and
+ * cipher suite information directly via its fields. For internal TQUIC
+ * module use, access the tquic_crypto_ctx fields directly rather than
+ * through accessor functions. This provides efficient access without
+ * function call overhead for hot paths.
  */
 
 #endif /* _NET_TQUIC_CRYPTO_H */

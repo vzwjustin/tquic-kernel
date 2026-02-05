@@ -595,11 +595,23 @@ enum tquic_rl_action tquic_ratelimit_check(struct net *net,
 		}
 	}
 
-	/* Check blacklist */
+	/* Check blacklist (with expiration support) */
 	if (bucket->blacklisted) {
-		rcu_read_unlock();
-		atomic64_inc(&state->stats.total_blacklisted);
-		return TQUIC_RL_BLACKLISTED;
+		ktime_t expires = READ_ONCE(bucket->blacklist_expires);
+
+		/* Check if timed blacklist has expired */
+		if (expires != 0 && ktime_after(ktime_get(), expires)) {
+			unsigned long flags;
+
+			spin_lock_irqsave(&bucket->lock, flags);
+			bucket->blacklisted = false;
+			bucket->blacklist_expires = 0;
+			spin_unlock_irqrestore(&bucket->lock, flags);
+		} else {
+			rcu_read_unlock();
+			atomic64_inc(&state->stats.total_blacklisted);
+			return TQUIC_RL_BLACKLISTED;
+		}
 	}
 
 	/* Count connection attempt */
@@ -741,12 +753,18 @@ int tquic_ratelimit_blacklist_add(struct net *net,
 
 	spin_lock_irqsave(&bucket->lock, flags);
 	bucket->blacklisted = true;
-	/* Note: duration_ms not used in this simple implementation */
+	if (duration_ms > 0)
+		bucket->blacklist_expires = ktime_add_ms(ktime_get(), duration_ms);
+	else
+		bucket->blacklist_expires = 0; /* Permanent blacklist */
 	spin_unlock_irqrestore(&bucket->lock, flags);
 
 	rcu_read_unlock();
 
-	pr_info("blacklisted source address\n");
+	if (duration_ms > 0)
+		pr_info("blacklisted source address for %u ms\n", duration_ms);
+	else
+		pr_info("permanently blacklisted source address\n");
 	return 0;
 }
 EXPORT_SYMBOL_GPL(tquic_ratelimit_blacklist_add);
@@ -841,7 +859,19 @@ static void tquic_rl_gc_work_fn(struct work_struct *work)
 		if (IS_ERR(bucket))
 			continue;
 
-		/* Skip blacklisted entries */
+		/* Check for expired timed blacklists */
+		if (bucket->blacklisted && bucket->blacklist_expires != 0) {
+			if (ktime_after(now, bucket->blacklist_expires)) {
+				unsigned long flags;
+
+				spin_lock_irqsave(&bucket->lock, flags);
+				bucket->blacklisted = false;
+				bucket->blacklist_expires = 0;
+				spin_unlock_irqrestore(&bucket->lock, flags);
+			}
+		}
+
+		/* Skip permanently blacklisted entries */
 		if (bucket->blacklisted)
 			continue;
 

@@ -565,7 +565,6 @@ int tquic_send_new_token(struct tquic_connection *conn)
 	struct sk_buff *skb;
 	u8 frame_buf[TQUIC_TOKEN_MAX_LEN + 16];
 	int frame_len;
-	u64 pkt_num;
 	struct tquic_token_key key;
 	int ret;
 
@@ -591,29 +590,35 @@ int tquic_send_new_token(struct tquic_connection *conn)
 	if (frame_len < 0)
 		return frame_len;
 
-	/* Get packet number */
-	spin_lock(&conn->lock);
-	pkt_num = conn->stats.tx_packets++;
-	spin_unlock(&conn->lock);
-
-	/* Allocate SKB for packet */
-	skb = alloc_skb(frame_len + 64 + MAX_HEADER, GFP_KERNEL);
+	/*
+	 * Queue frame for transmission via the connection's control frame queue.
+	 * The frame will be included in the next outgoing packet and properly
+	 * encrypted and transmitted by the output path.
+	 */
+	skb = alloc_skb(frame_len + 32, GFP_KERNEL);
 	if (!skb)
 		return -ENOMEM;
 
-	skb_reserve(skb, MAX_HEADER);
+	/* Reserve headroom for potential header additions */
+	skb_reserve(skb, 16);
 
-	/* Build short header would go here - simplified for now */
+	/* Copy frame data */
 	skb_put_data(skb, frame_buf, frame_len);
+
+	/* Queue for transmission */
+	spin_lock_bh(&conn->lock);
+	skb_queue_tail(&conn->control_frames, skb);
+	spin_unlock_bh(&conn->lock);
+
+	/* Trigger transmission */
+	if (!work_pending(&conn->tx_work))
+		schedule_work(&conn->tx_work);
 
 	/* Update MIB counter */
 	if (conn->sk)
 		TQUIC_INC_STATS(sock_net(conn->sk), TQUIC_MIB_NEWTOKENSTX);
 
-	pr_debug("tquic: sent NEW_TOKEN frame, len=%d\n", frame_len);
-
-	/* Note: In full implementation, this would go through packet assembly */
-	kfree_skb(skb);
+	pr_debug("tquic: NEW_TOKEN frame queued, len=%d\n", frame_len);
 
 	return 0;
 }

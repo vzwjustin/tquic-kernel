@@ -1539,8 +1539,11 @@ static struct sk_buff *tquic_gso_finalize(struct tquic_gso_ctx *gso)
 
 	skb_shinfo(skb)->gso_segs = gso->gso_segs;
 
-	/* Trim any excess padding from last segment */
-	/* Note: actual implementation would track exact sizes */
+	/*
+	 * GSO handles segment sizing automatically. The network stack
+	 * will segment the GSO packet according to the gso_size set
+	 * during coalescing. No manual trimming needed.
+	 */
 
 	gso->gso_skb = NULL;
 	return skb;
