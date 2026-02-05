@@ -64,7 +64,6 @@ tquic-y := \
 	tquic_ack_frequency.o \
 	security_hardening.o \
 	napi.o \
-	io_uring.o \
 	cong/tquic_cong.o \
 	cong/cong_data.o \
 	cong/persistent_cong.o \
@@ -140,6 +139,9 @@ tquic-y := \
 	crypto/handshake.o \
 	crypto/crypto_module.o \
 	crypto/hw_offload.o
+
+# Optional io_uring support
+tquic-$(CONFIG_TQUIC_IO_URING) += io_uring.o
 
 # Congestion Control algorithms (standalone modules)
 tquic_cubic-y := cong/cubic.o

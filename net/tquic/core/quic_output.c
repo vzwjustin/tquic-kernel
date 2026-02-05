@@ -279,7 +279,7 @@ static int tquic_bind_udp_socket(struct tquic_sock *tsk,
 		return -ENOENT;
 
 	/* Use kernel_bind to bind the UDP socket */
-	err = kernel_bind(sock, (struct sockaddr_unsized *)addr, addr_len);
+	err = kernel_bind(sock, (struct sockaddr *)addr, addr_len);
 	if (err)
 		return err;
 
@@ -316,7 +316,7 @@ static int tquic_connect_udp_socket(struct tquic_sock *tsk,
 		return -ENOENT;
 
 	/* Use kernel_connect to connect the UDP socket */
-	err = kernel_connect(sock, (struct sockaddr_unsized *)addr, addr_len, O_NONBLOCK);
+	err = kernel_connect(sock, (struct sockaddr *)addr, addr_len, O_NONBLOCK);
 	if (err && err != -EINPROGRESS)
 		return err;
 

@@ -40,6 +40,7 @@
 #endif
 #include <net/tquic.h>
 
+#include "tquic_compat.h"
 #include "protocol.h"
 
 /* UDP tunnel encapsulation type for TQUIC */
@@ -1001,7 +1002,7 @@ int tquic_udp_connect(struct tquic_udp_sock *us,
 	if (us->family == AF_INET) {
 		struct sockaddr_in *sin = (struct sockaddr_in *)remote;
 
-		err = kernel_connect(us->sock, (struct sockaddr_unsized *)sin,
+		err = kernel_connect(us->sock, (struct sockaddr *)sin,
 				     sizeof(*sin), 0);
 		if (err)
 			return err;
@@ -1013,7 +1014,7 @@ int tquic_udp_connect(struct tquic_udp_sock *us,
 	else if (us->family == AF_INET6) {
 		struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)remote;
 
-		err = kernel_connect(us->sock, (struct sockaddr_unsized *)sin6,
+		err = kernel_connect(us->sock, (struct sockaddr *)sin6,
 				     sizeof(*sin6), 0);
 		if (err)
 			return err;
@@ -1346,16 +1347,15 @@ static int tquic_udp_xmit_skb4(struct tquic_udp_sock *us, struct sk_buff *skb)
 	}
 
 	/* Use udp_tunnel_xmit_skb for proper encapsulation */
-	udp_tunnel_xmit_skb(rt, sk, skb,
-			    saddr, daddr,
-			    0,			/* TOS */
-			    ip4_dst_hoplimit(&rt->dst),
-			    0,			/* DF */
-			    us->local_port,
-			    us->remote_port,
-			    false,		/* xnet */
-			    !us->csum_offload,	/* nocheck */
-			    0);			/* ipcb_flags */
+	TQUIC_UDP_TUNNEL_XMIT_SKB(rt, sk, skb,
+				  saddr, daddr,
+				  0,			/* TOS */
+				  ip4_dst_hoplimit(&rt->dst),
+				  0,			/* DF */
+				  us->local_port,
+				  us->remote_port,
+				  false,		/* xnet */
+				  !us->csum_offload);	/* nocheck */
 
 	us->stats.tx_packets++;
 	us->stats.tx_bytes += skb->len;
@@ -1403,17 +1403,16 @@ static int tquic_udp_xmit_skb6(struct tquic_udp_sock *us, struct sk_buff *skb)
 		dst_cache_set_ip6(&us->dst_cache, dst, &fl6.saddr);
 	}
 
-	udp_tunnel6_xmit_skb(dst, sk, skb,
-			     NULL,		/* dev */
-			     &us->local_addr.sin6.sin6_addr,
-			     &us->remote_addr.sin6.sin6_addr,
-			     0,			/* prio */
-			     ip6_dst_hoplimit(dst),
-			     0,			/* label */
-			     us->local_port,
-			     us->remote_port,
-			     !us->csum_offload,	/* nocheck */
-			     0);		/* ip6cb_flags */
+	TQUIC_UDP_TUNNEL6_XMIT_SKB(dst, sk, skb,
+				  NULL,		/* dev */
+				  &us->local_addr.sin6.sin6_addr,
+				  &us->remote_addr.sin6.sin6_addr,
+				  0,			/* prio */
+				  ip6_dst_hoplimit(dst),
+				  0,			/* label */
+				  us->local_port,
+				  us->remote_port,
+				  !us->csum_offload);	/* nocheck */
 
 	us->stats.tx_packets++;
 	us->stats.tx_bytes += skb->len;

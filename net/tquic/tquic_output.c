@@ -30,6 +30,7 @@
 #include <crypto/skcipher.h>
 #include <net/tquic.h>
 
+#include "tquic_compat.h"
 #include "protocol.h"
 
 #include "tquic_mib.h"
@@ -1656,7 +1657,7 @@ int tquic_output_packet(struct tquic_connection *conn,
 	 * Note: flowi4_tos renamed to flowi4_dscp in newer kernels.
 	 */
 	if (net && tquic_pernet(net)->ecn_enabled)
-		fl4.flowi4_dscp = TQUIC_IP_ECN_ECT0;
+		TQUIC_FLOWI4_SET_DSCP(fl4, TQUIC_IP_ECN_ECT0);
 
 	/* Route lookup */
 	rt = ip_route_output_key(net ?: &init_net, &fl4);

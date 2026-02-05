@@ -28,6 +28,7 @@
 #include <net/sock.h>
 #include <net/tquic.h>
 
+#include "tquic_compat.h"
 #include "protocol.h"
 
 /*
@@ -273,8 +274,8 @@ int tquic_sendmsg_zerocopy(struct sock *sk, struct msghdr *msg, size_t len,
 		/* Allocate new zerocopy tracking structure */
 		skb = skb_peek_tail(&stream->send_buf);
 		/* devmem parameter added in kernel 6.12+ */
-		uarg = msg_zerocopy_realloc(sk, len, skb ? skb_zcopy(skb) : NULL,
-					    false);
+		uarg = TQUIC_MSG_ZEROCOPY_REALLOC(sk, len,
+						  skb ? skb_zcopy(skb) : NULL);
 		if (!uarg) {
 			err = -ENOBUFS;
 			goto out_err;
@@ -302,8 +303,8 @@ int tquic_sendmsg_zerocopy(struct sock *sk, struct msghdr *msg, size_t len,
 			 * into skb frags without copying data.
 			 * binding parameter added in kernel 6.12+
 			 */
-			err = skb_zerocopy_iter_stream(sk, new_skb, msg, chunk,
-						       uarg, NULL);
+			err = TQUIC_SKB_ZEROCOPY_ITER_STREAM(sk, new_skb, msg,
+							     chunk, uarg);
 			if (err < 0) {
 				kfree_skb(new_skb);
 				if (err == -EMSGSIZE || err == -EEXIST) {

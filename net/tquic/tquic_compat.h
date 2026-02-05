@@ -22,6 +22,7 @@
 
 #include <linux/timer.h>
 #include <linux/hrtimer.h>
+#include <linux/version.h>
 
 /*
  * Timer API compatibility for kernel 6.12+
@@ -55,6 +56,57 @@
  */
 #ifndef del_timer_sync
 #define del_timer_sync(t) timer_delete_sync(t)
+#endif
+
+/*
+ * hrtimer_setup() is not available on older kernels.
+ */
+#ifndef hrtimer_setup
+#define hrtimer_setup(timer, fn, clock_id, mode)                 \
+	do {                                                     \
+		hrtimer_init((timer), (clock_id), (mode));       \
+		(timer)->function = (fn);                        \
+	} while (0)
+#endif
+
+/*
+ * flowi4_dscp replaced flowi4_tos on newer kernels.
+ */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 19, 0)
+#define TQUIC_FLOWI4_SET_DSCP(fl4, dscp) ((fl4).flowi4_dscp = (dscp))
+#else
+#define TQUIC_FLOWI4_SET_DSCP(fl4, dscp) ((fl4).flowi4_tos = (dscp))
+#endif
+
+/*
+ * Zerocopy helpers gained devmem/binding parameters in newer kernels.
+ */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 19, 0)
+#define TQUIC_MSG_ZEROCOPY_REALLOC(sk, size, uarg) \
+	msg_zerocopy_realloc(sk, size, uarg, false)
+#define TQUIC_SKB_ZEROCOPY_ITER_STREAM(sk, skb, msg, len, uarg) \
+	skb_zerocopy_iter_stream(sk, skb, msg, len, uarg, NULL)
+#else
+#define TQUIC_MSG_ZEROCOPY_REALLOC(sk, size, uarg) \
+	msg_zerocopy_realloc(sk, size, uarg)
+#define TQUIC_SKB_ZEROCOPY_ITER_STREAM(sk, skb, msg, len, uarg) \
+	skb_zerocopy_iter_stream(sk, skb, msg, len, uarg)
+#endif
+
+/*
+ * udp_tunnel_xmit_skb() gained an ipcb_flags parameter in newer kernels.
+ * Keep a wrapper to handle both signatures.
+ */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 19, 0)
+#define TQUIC_UDP_TUNNEL_XMIT_SKB(rt, sk, skb, saddr, daddr, tos, ttl, df, sport, dport, xnet, nocheck) \
+	udp_tunnel_xmit_skb(rt, sk, skb, saddr, daddr, tos, ttl, df, sport, dport, xnet, nocheck, 0)
+#define TQUIC_UDP_TUNNEL6_XMIT_SKB(dst, sk, skb, dev, saddr, daddr, prio, ttl, label, sport, dport, nocheck) \
+	udp_tunnel6_xmit_skb(dst, sk, skb, dev, saddr, daddr, prio, ttl, label, sport, dport, nocheck, 0)
+#else
+#define TQUIC_UDP_TUNNEL_XMIT_SKB(rt, sk, skb, saddr, daddr, tos, ttl, df, sport, dport, xnet, nocheck) \
+	udp_tunnel_xmit_skb(rt, sk, skb, saddr, daddr, tos, ttl, df, sport, dport, xnet, nocheck)
+#define TQUIC_UDP_TUNNEL6_XMIT_SKB(dst, sk, skb, dev, saddr, daddr, prio, ttl, label, sport, dport, nocheck) \
+	udp_tunnel6_xmit_skb(dst, sk, skb, dev, saddr, daddr, prio, ttl, label, sport, dport, nocheck)
 #endif
 
 #endif /* _TQUIC_COMPAT_H */

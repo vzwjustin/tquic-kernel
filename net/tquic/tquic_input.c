@@ -28,6 +28,7 @@
 #include <crypto/aead.h>
 #include <net/tquic.h>
 
+#include "tquic_compat.h"
 #include "tquic_mib.h"
 #include "cong/tquic_cong.h"
 #include "crypto/key_update.h"
