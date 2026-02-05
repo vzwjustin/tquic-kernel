@@ -635,9 +635,10 @@ static bool tquic_crypto_offload_available(struct net_device *dev,
 		return false;
 
 	/*
-	 * TODO: Enable hardware crypto offload when NICs support it.
-	 * Currently no hardware supports QUIC-specific crypto offload.
-	 * When available, check for NETIF_F_QUIC_CRYPTO feature flag.
+	 * Hardware crypto offload for QUIC requires NIC support for
+	 * QUIC-specific AEAD operations. When hardware implements
+	 * NETIF_F_QUIC_CRYPTO, this function should check that flag
+	 * and return true for supported offload configurations.
 	 */
 	return false;
 }

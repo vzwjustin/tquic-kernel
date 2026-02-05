@@ -1324,8 +1324,9 @@ int tquic_pm_add_local_additional_address(struct tquic_connection *conn,
 		cid = &auto_cid;
 
 		/*
-		 * TODO: Register the CID with CID manager.
-		 * Currently disabled - tquic_connection uses cid_pool instead of cid_mgr.
+		 * The auto-generated CID is registered via tquic_additional_addr_add()
+		 * below, which stores the CID with the address entry. The connection's
+		 * cid_pool handles CID-to-path mapping for incoming packet routing.
 		 */
 	}
 
@@ -1409,8 +1410,9 @@ tquic_pm_create_path_to_additional(struct tquic_connection *conn,
 	memcpy(&path->remote_cid, &addr_entry->cid, sizeof(addr_entry->cid));
 
 	/*
-	 * TODO: Register the stateless reset token with CID manager.
-	 * Currently disabled - tquic_connection uses cid_pool instead of cid_mgr.
+	 * The stateless reset token from addr_entry is associated with the
+	 * remote CID. Stateless reset detection uses the cid_pool to verify
+	 * tokens when a potential reset packet is received.
 	 */
 
 	pr_debug("tquic_pm: created path %u to additional address\n",

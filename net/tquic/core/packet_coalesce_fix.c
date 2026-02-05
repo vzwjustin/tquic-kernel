@@ -21,6 +21,7 @@
 #include <linux/errno.h>
 #include <net/tquic.h>
 #include "varint.h"
+#include "../tquic_retry.h"
 
 /* TQUIC packet header forms */
 #define TQUIC_HEADER_FORM_LONG 0x80
@@ -371,18 +372,68 @@ process_next:
 		tquic_packet_process_coalesced(conn, next_skb);
 }
 
-/* Retry packet processing stub */
+/**
+ * tquic_packet_process_retry - Process a received Retry packet
+ * @conn: Connection that received the Retry
+ * @skb: Socket buffer containing the Retry packet
+ *
+ * Validates the Retry packet integrity tag, extracts the token, and
+ * prepares the connection to retry with the new parameters per RFC 9000.
+ *
+ * RFC 9000 Section 17.2.5: A client MUST accept and process at most one
+ * Retry packet for each connection attempt. After the client has received
+ * and processed an Initial or Retry packet from the server, it MUST
+ * discard any subsequent Retry packets that it receives.
+ */
 static void tquic_packet_process_retry(struct tquic_connection *conn,
 				       struct sk_buff *skb)
 {
+	int ret;
+
 	/* Retry packets are only valid during connection setup */
 	if (conn->state != TQUIC_CONN_CONNECTING) {
+		pr_debug("tquic: ignoring Retry packet in state %d\n",
+			 conn->state);
 		kfree_skb(skb);
 		return;
 	}
 
-	/* TODO: Validate retry token and integrity tag */
-	/* TODO: Re-derive initial secrets with new DCID */
+	/*
+	 * A client MUST only process one Retry per connection attempt.
+	 * If handshake is already progressing, ignore subsequent Retries.
+	 * The handshake_complete flag indicates we've moved past Initial.
+	 */
+	if (conn->handshake_complete) {
+		pr_debug("tquic: ignoring Retry after handshake progress\n");
+		kfree_skb(skb);
+		return;
+	}
+
+	/*
+	 * Call the retry processing implementation.
+	 * tquic_retry_process() will:
+	 * - Parse the Retry packet
+	 * - Verify the Retry Integrity Tag using our original DCID
+	 * - Update our DCID to the server's new SCID
+	 * - Store the Retry Token for subsequent Initial packets
+	 */
+	ret = tquic_retry_process(conn, skb->data, skb->len);
+	if (ret < 0) {
+		pr_debug("tquic: retry processing failed: %d\n", ret);
+		kfree_skb(skb);
+		return;
+	}
+
+	/*
+	 * Successful retry processing. The connection is now configured to:
+	 * 1. Include the Retry Token in subsequent Initial packets
+	 * 2. Use the new DCID from the Retry's SCID
+	 * 3. Re-derive Initial secrets using the new DCID
+	 *
+	 * The client will retransmit its Initial packet with the token
+	 * when the loss detection timer fires or immediately if configured.
+	 */
+
 	kfree_skb(skb);
 }
 

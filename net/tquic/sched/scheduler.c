@@ -692,43 +692,16 @@ static struct tquic_path *owd_select(void *state, struct tquic_connection *conn,
 		if (path->state != TQUIC_PATH_ACTIVE)
 			continue;
 
-		/* Try to get OWD information for this path */
-		if (NULL /* TODO: conn->owd_state when OWD integrated */) {
-			ret = tquic_owd_get_path_info(NULL /* TODO: conn->owd_state when OWD integrated */, path, &info);
-			if (ret == 0 && info.confidence > 50) {
-				/* Use directional delay based on traffic type */
-				if (data->prefer_forward)
-					effective_delay = info.forward_delay_us;
-				else
-					effective_delay = info.reverse_delay_us;
-
-				/*
-				 * For asymmetric paths, prefer the direction
-				 * that matches our traffic pattern.
-				 */
-				if (info.is_asymmetric) {
-					/*
-					 * Boost score for paths where asymmetry
-					 * favors our traffic direction.
-					 */
-					if (data->prefer_forward &&
-					    info.asymmetry_ratio < 1000) {
-						/* Forward is faster than reverse */
-						effective_delay = effective_delay * 90 / 100;
-					} else if (!data->prefer_forward &&
-						   info.asymmetry_ratio > 1000) {
-						/* Reverse is faster than forward */
-						effective_delay = effective_delay * 90 / 100;
-					}
-				}
-			} else {
-				/* Fall back to RTT/2 estimate */
-				effective_delay = path->stats.rtt_smoothed / 2;
-			}
-		} else {
-			/* No OWD state - use RTT/2 */
-			effective_delay = path->stats.rtt_smoothed / 2;
-		}
+		/*
+		 * Estimate one-way delay using RTT/2.
+		 *
+		 * When OWD measurement (draft-huitema-quic-1wd) is negotiated
+		 * and active on the connection, we can use directional delay
+		 * measurements from tquic_owd_get_path_info() for more accurate
+		 * path selection, especially on asymmetric links. For now, we
+		 * use the symmetric RTT/2 approximation.
+		 */
+		effective_delay = path->stats.rtt_smoothed / 2;
 
 		/*
 		 * Apply hysteresis: if this is the current path, give it
@@ -830,14 +803,8 @@ static struct tquic_path *owd_ecf_select(void *state __maybe_unused,
 					 struct sk_buff *skb)
 {
 	struct tquic_path *path, *best = NULL;
-	struct tquic_owd_path_info info __maybe_unused;
 	u64 min_completion = ULLONG_MAX;
 	u32 pkt_size = skb->len;
-	bool have_owd __maybe_unused = false;
-
-	/* Check if OWD data is available */
-	if (NULL /* TODO: conn->owd_state when OWD integrated */ && tquic_owd_has_valid_estimates(NULL /* TODO: conn->owd_state when OWD integrated */))
-		have_owd = true;
 
 	rcu_read_lock();
 	list_for_each_entry_rcu(path, &conn->paths, list) {
@@ -859,18 +826,12 @@ static struct tquic_path *owd_ecf_select(void *state __maybe_unused,
 		if (in_flight_bytes > path->stats.cwnd)
 			in_flight_bytes = path->stats.cwnd;
 
-		/* Get delay estimate - use OWD if available */
-		if (have_owd && NULL /* TODO: conn->owd_state when OWD integrated */) {
-			int ret = tquic_owd_get_path_info(NULL /* TODO: conn->owd_state when OWD integrated */, path, &info);
-			if (ret == 0 && info.confidence > 30) {
-				/* Use forward delay for data delivery time */
-				delay_us = info.forward_delay_us;
-			} else {
-				delay_us = path->stats.rtt_smoothed / 2;
-			}
-		} else {
-			delay_us = path->stats.rtt_smoothed / 2;
-		}
+		/*
+		 * Estimate one-way delay for completion time calculation.
+		 * When OWD measurement is integrated, use forward_delay_us
+		 * from tquic_owd_get_path_info() for accurate delivery time.
+		 */
+		delay_us = path->stats.rtt_smoothed / 2;
 
 		if (delay_us <= 0)
 			delay_us = 50000;  /* 50ms default */
