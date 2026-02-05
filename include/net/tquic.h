@@ -113,6 +113,7 @@ bool tquic_sysctl_prefer_v2(void);
 struct tquic_sock;
 struct tquic_connection;
 struct tquic_stream;
+struct tquic_fc_stream_state;
 struct tquic_path;
 struct tquic_frame;
 struct tquic_packet;
@@ -529,6 +530,7 @@ struct tquic_stream {
 	u64 recv_offset;
 	u64 max_send_data;
 	u64 max_recv_data;
+	struct tquic_fc_stream_state *fc;
 
 	u8 priority;
 	bool blocked;

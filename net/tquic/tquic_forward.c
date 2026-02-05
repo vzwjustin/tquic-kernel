@@ -41,6 +41,7 @@
 #endif
 
 #include "protocol.h"
+#include "tquic_compat.h"
 #include "tquic_tunnel.h"
 
 /*
