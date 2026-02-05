@@ -23,6 +23,7 @@
 #include <linux/pipe_fs_i.h>
 #include <linux/splice.h>
 #include <linux/workqueue.h>
+#include <linux/timer.h>
 #include <linux/list.h>
 #include <linux/hashtable.h>
 #include <linux/inetdevice.h>
