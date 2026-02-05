@@ -746,7 +746,7 @@ static int tquic_build_new_connection_id_frame(u8 *buf, size_t buf_len,
  * @cid: The new CID to advertise
  * @reset_token: Stateless reset token for the CID
  *
- * Builds and transmits a NEW_CONNECTION_ID frame to the peer.
+ * Builds and queues a NEW_CONNECTION_ID frame for transmission to the peer.
  * This frame advertises a new connection ID that the peer can use
  * when sending packets to us.
  *
@@ -758,19 +758,15 @@ void tquic_send_new_connection_id(struct tquic_connection *conn,
 				  const u8 *reset_token)
 {
 	struct tquic_cid_pool *pool = conn->cid_pool;
-	struct tquic_path *path;
 	struct sk_buff *skb;
 	u8 *frame_buf;
-	u8 *pkt_buf;
 	int frame_len;
 	u64 retire_prior_to;
-	size_t pkt_len;
 
 	if (!conn || !cid || !reset_token || !pool)
 		return;
 
-	path = conn->active_path;
-	if (!path) {
+	if (!conn->active_path) {
 		pr_debug("tquic: NEW_CONNECTION_ID: no active path\n");
 		return;
 	}
@@ -798,64 +794,34 @@ void tquic_send_new_connection_id(struct tquic_connection *conn,
 	}
 
 	/*
-	 * Build packet with short header
-	 * Layout: [short header][frame payload][padding to min size]
-	 *
-	 * For simplicity, we use a fixed 64-byte header area reservation
-	 * and build the packet directly. Production would integrate with
-	 * the packet assembly infrastructure in tquic_output.c.
+	 * Queue frame for transmission via the connection's control frame queue.
+	 * The frame will be included in the next outgoing packet and properly
+	 * encrypted and transmitted by the output path.
 	 */
-	pkt_len = 64 + frame_len;  /* Header + frame */
-	skb = alloc_skb(pkt_len + 128, GFP_ATOMIC);  /* Extra for IP/UDP headers */
+	skb = alloc_skb(frame_len + 32, GFP_ATOMIC);
 	if (!skb) {
 		kfree(frame_buf);
 		return;
 	}
 
-	skb_reserve(skb, 128);  /* Reserve space for network headers */
+	/* Reserve headroom for potential header additions */
+	skb_reserve(skb, 16);
 
-	/* Build minimal short header */
-	pkt_buf = skb_put(skb, 1 + path->remote_cid.len);
-
-	/* First byte: form=0, fixed=1, spin=0, reserved=00, key_phase=0, pn_len=00 */
-	pkt_buf[0] = 0x40;  /* Fixed bit set */
-
-	/* Destination Connection ID */
-	if (path->remote_cid.len > 0)
-		memcpy(pkt_buf + 1, path->remote_cid.id, path->remote_cid.len);
-
-	/* Packet number (1 byte for simplicity) */
-	{
-		u8 pkt_num_byte;
-
-		spin_lock(&conn->lock);
-		pkt_num_byte = (u8)(conn->stats.tx_packets++ & 0xff);
-		spin_unlock(&conn->lock);
-
-		skb_put_u8(skb, pkt_num_byte);
-	}
-
-	/* Append frame payload */
+	/* Copy frame data */
 	skb_put_data(skb, frame_buf, frame_len);
 	kfree(frame_buf);
 
-	/* Send via the path's output mechanism */
-	if (conn->sk && path->dev) {
-		/* Queue for transmission - will be encrypted and sent */
-		skb->dev = path->dev;
-		skb->sk = conn->sk;
+	/* Queue for transmission */
+	spin_lock_bh(&conn->lock);
+	skb_queue_tail(&conn->control_frames, skb);
+	spin_unlock_bh(&conn->lock);
 
-		/*
-		 * Note: In a full implementation, this would go through
-		 * tquic_output_packet() for proper encryption and pacing.
-		 * For now, we queue it for the output path to process.
-		 */
-		pr_debug("tquic: NEW_CONNECTION_ID sent seq=%llu len=%u retire_prior_to=%llu\n",
-			 cid->seq_num, cid->len, retire_prior_to);
-	}
+	/* Trigger transmission */
+	if (!work_pending(&conn->tx_work))
+		schedule_work(&conn->tx_work);
 
-	/* In production, hand off to output path; for now just free */
-	kfree_skb(skb);
+	pr_debug("tquic: NEW_CONNECTION_ID queued seq=%llu len=%u retire_prior_to=%llu\n",
+		 cid->seq_num, cid->len, retire_prior_to);
 }
 
 /*

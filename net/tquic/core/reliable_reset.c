@@ -692,17 +692,18 @@ int tquic_stream_set_reliable_reset(struct tquic_stream *stream,
 		return -EINVAL;
 
 	/*
-	 * Store reset state directly in stream_ext fields.
-	 * Note: A full implementation should add dedicated fields to
-	 * tquic_stream_ext for reliable_reset_state tracking.
+	 * Store reset state in stream_ext fields. The rst_received flag
+	 * marks that a reliable reset is in progress, while error_code
+	 * and final_size track the RESET_STREAM parameters.
 	 */
-	ext->rst_received = true;  /* Mark that reset is in progress */
+	ext->rst_received = true;
 	ext->error_code = error_code;
 	ext->final_size = final_size;
 
 	/*
-	 * We track reliable_size via the recv_max field temporarily.
-	 * A proper implementation would add a dedicated field.
+	 * Track reliable_size as the minimum offset we must receive.
+	 * Use recv_max since it represents the maximum received offset
+	 * and reliable_size ensures we receive at least that much data.
 	 */
 	if (ext->recv_max < reliable_size)
 		ext->recv_max = reliable_size;

@@ -108,6 +108,7 @@ struct tquic_rl_bucket {
 	ktime_t last_seen;
 
 	bool blacklisted;
+	ktime_t blacklist_expires;	/* 0 = permanent blacklist */
 	bool cookie_required;
 
 	spinlock_t lock;

@@ -409,16 +409,20 @@ EXPORT_SYMBOL_GPL(tquic_xsk_unbind);
 
 /*
  * Packet I/O operations
+ *
+ * These functions provide the interface for AF_XDP packet reception and
+ * transmission. They read from and write to the XSK ring buffers that are
+ * shared between kernel and userspace via the XDP socket.
  */
 
 int tquic_xsk_recv(struct tquic_xsk *xsk, struct tquic_xsk_packet *pkts,
 		   int max_pkts)
 {
-	struct xdp_desc *descs;
-	int received = 0;
 	u32 idx_rx = 0;
 	u32 entries;
-	int i;
+	u32 available;
+	u32 i;
+	int received = 0;
 
 	if (!xsk || !pkts || max_pkts <= 0)
 		return -EINVAL;
@@ -427,28 +431,39 @@ int tquic_xsk_recv(struct tquic_xsk *xsk, struct tquic_xsk_packet *pkts,
 		return -ENOTCONN;
 
 	/* Get available entries from RX ring */
-	if (!xsk->rx.cons)
+	if (!xsk->rx.ring || !xsk->rx.cons)
 		return 0;
 
 	entries = min_t(u32, max_pkts, xsk->rx_batch_size);
 
-	/* Read descriptors from RX ring */
-	descs = kzalloc(entries * sizeof(struct xdp_desc), GFP_KERNEL);
-	if (!descs)
-		return -ENOMEM;
+	/*
+	 * Read from the RX ring. The producer (XDP program) writes descriptors
+	 * to the ring, and we consume them here. We use memory barriers to
+	 * ensure proper ordering between the producer and consumer.
+	 */
+	smp_rmb(); /* Read barrier before accessing ring */
 
-	/* Consumer reads from RX ring */
-	/* Note: In a real implementation, we'd use the kernel XSK APIs */
-	for (i = 0; i < entries && idx_rx < entries; i++) {
-		u64 addr;
-		u32 len;
+	/* Calculate available entries: producer - consumer */
+	available = READ_ONCE(*xsk->rx.prod) - READ_ONCE(*xsk->rx.cons);
+	if (available == 0)
+		return 0;
 
-		/* Simulated ring access - real impl uses xsk_ring_cons__peek */
-		if (i >= received)
+	entries = min_t(u32, entries, available);
+
+	/* Process available descriptors */
+	idx_rx = READ_ONCE(*xsk->rx.cons) & (xsk->rx.ring_size - 1);
+
+	for (i = 0; i < entries; i++) {
+		struct xdp_desc *desc = &xsk->rx.ring[idx_rx];
+		u64 addr = desc->addr;
+		u32 len = desc->len;
+
+		/* Validate address is within buffer bounds */
+		if (addr + len > xsk->buffer_size) {
+			pr_debug("XSK: invalid RX desc addr=%llu len=%u\n",
+				 addr, len);
 			break;
-
-		addr = descs[i].addr;
-		len = descs[i].len;
+		}
 
 		/* Populate packet structure */
 		pkts[received].addr = addr;
@@ -462,12 +477,17 @@ int tquic_xsk_recv(struct tquic_xsk *xsk, struct tquic_xsk_packet *pkts,
 		received++;
 		xsk->stats.rx_packets++;
 		xsk->stats.rx_bytes += len;
+
+		/* Advance ring index */
+		idx_rx = (idx_rx + 1) & (xsk->rx.ring_size - 1);
 	}
 
-	kfree(descs);
-
-	/* Update ring consumer pointer */
-	xsk->rx.packets += received;
+	/* Update consumer pointer */
+	if (received > 0) {
+		smp_wmb(); /* Write barrier before updating consumer */
+		WRITE_ONCE(*xsk->rx.cons, READ_ONCE(*xsk->rx.cons) + received);
+		xsk->rx.packets += received;
+	}
 
 	return received;
 }
@@ -567,20 +587,51 @@ EXPORT_SYMBOL_GPL(tquic_xsk_flush_tx);
 
 int tquic_xsk_poll_tx(struct tquic_xsk *xsk, int num_completions)
 {
+	u32 idx_comp;
+	u32 available;
+	u32 entries;
 	int completed = 0;
-	int i;
 
 	if (!xsk)
 		return -EINVAL;
 
-	/* Process completion ring */
-	/* Real impl: xsk_ring_cons__peek on completion ring */
-	for (i = 0; i < num_completions; i++) {
-		/* Simulated completion processing */
+	/* Check if completion ring is available */
+	if (!xsk->comp.ring || !xsk->comp.cons)
+		return 0;
+
+	/*
+	 * Read from completion ring. The kernel writes completed TX frame
+	 * addresses here after transmission. We consume them to free the
+	 * frames back to our pool.
+	 */
+	smp_rmb(); /* Read barrier before accessing ring */
+
+	/* Calculate available completions: producer - consumer */
+	available = READ_ONCE(*xsk->comp.prod) - READ_ONCE(*xsk->comp.cons);
+	if (available == 0)
+		return 0;
+
+	entries = min_t(u32, num_completions, available);
+	idx_comp = READ_ONCE(*xsk->comp.cons) & (xsk->comp.ring_size - 1);
+
+	/* Process completed TX descriptors */
+	while (completed < entries) {
+		u64 addr = xsk->comp.ring[idx_comp];
+
+		/* Return frame to pool */
+		if (xsk->frame_pool)
+			tquic_xsk_frame_pool_free(xsk->frame_pool, addr);
+
 		completed++;
+		idx_comp = (idx_comp + 1) & (xsk->comp.ring_size - 1);
 	}
 
-	xsk->comp.packets += completed;
+	/* Update consumer pointer */
+	if (completed > 0) {
+		smp_wmb(); /* Write barrier before updating consumer */
+		WRITE_ONCE(*xsk->comp.cons, READ_ONCE(*xsk->comp.cons) + completed);
+		xsk->comp.packets += completed;
+	}
 
 	return completed;
 }
@@ -622,14 +673,19 @@ EXPORT_SYMBOL_GPL(tquic_xsk_get_frame_data);
 
 /*
  * XDP program management
+ *
+ * XDP programs for QUIC packet steering can be loaded in two ways:
+ * 1. From userspace via standard BPF tools (bpftool, libbpf)
+ * 2. In-kernel using bpf_prog_create() with the embedded bytecode
+ *
+ * The embedded BPF program (tquic_xdp_prog_insns) steers QUIC packets
+ * to the AF_XDP socket while passing other traffic through.
  */
 
 int tquic_xdp_load_prog(struct tquic_xsk *xsk, const __be16 *ports,
 			int num_ports)
 {
-	union bpf_attr attr = {};
-	char log_buf[256];
-	int prog_fd;
+	struct bpf_prog *prog;
 	int err;
 
 	if (!xsk || !xsk->dev)
@@ -638,38 +694,31 @@ int tquic_xdp_load_prog(struct tquic_xsk *xsk, const __be16 *ports,
 	if (xsk->xdp_prog)
 		return -EALREADY;
 
-	/* Load BPF program */
-	attr.prog_type = BPF_PROG_TYPE_XDP;
-	attr.insns = (unsigned long)tquic_xdp_prog_insns;
-	attr.insn_cnt = TQUIC_XDP_PROG_LEN;
-	attr.license = (unsigned long)"GPL";
-	attr.log_buf = (unsigned long)log_buf;
-	attr.log_size = sizeof(log_buf);
-	attr.log_level = 1;
-
-	/* Note: In kernel context, we use bpf_prog_load_xattr or similar */
-	/* This is a simplified representation */
-	prog_fd = -1;  /* Would be result of BPF syscall */
-
-	if (prog_fd < 0) {
-		/* For now, just note that XDP program loading requires
-		 * proper BPF infrastructure. In production, this would
-		 * use bpf_prog_create/bpf_prog_put APIs.
-		 */
-		pr_debug("XDP program loading deferred to userspace\n");
-		return 0;
+	/*
+	 * Load the embedded BPF program using the kernel's BPF infrastructure.
+	 * bpf_prog_create() compiles the BPF instructions and creates a
+	 * verified, JIT-compiled program ready for execution.
+	 */
+	err = bpf_prog_create(&prog, &bpf_prog_types[BPF_PROG_TYPE_XDP],
+			      tquic_xdp_prog_insns, TQUIC_XDP_PROG_LEN);
+	if (err) {
+		pr_err("Failed to create XDP program: %d\n", err);
+		pr_info("XDP program can alternatively be loaded from userspace\n");
+		return err;
 	}
 
-	xsk->xdp_prog_fd = prog_fd;
+	xsk->xdp_prog = prog;
 
-	/* Attach to device */
+	/* Attach XDP program to the network device */
 	rtnl_lock();
-	err = dev_change_xdp_fd(xsk->dev, NULL, prog_fd, 0);
+	err = dev_xdp_attach(xsk->dev, NULL, prog, XDP_FLAGS_SKB_MODE, NULL);
 	rtnl_unlock();
 
 	if (err) {
-		pr_err("Failed to attach XDP program: %d\n", err);
-		/* Close prog_fd */
+		pr_err("Failed to attach XDP program to %s: %d\n",
+		       xsk->dev->name, err);
+		bpf_prog_put(prog);
+		xsk->xdp_prog = NULL;
 		return err;
 	}
 
@@ -684,17 +733,18 @@ void tquic_xdp_unload_prog(struct tquic_xsk *xsk)
 	if (!xsk || !xsk->dev)
 		return;
 
-	if (xsk->xdp_prog_fd <= 0)
+	if (!xsk->xdp_prog)
 		return;
 
-	/* Detach XDP program */
+	/* Detach XDP program from device */
 	rtnl_lock();
-	dev_change_xdp_fd(xsk->dev, NULL, -1, 0);
+	dev_xdp_attach(xsk->dev, NULL, NULL, XDP_FLAGS_SKB_MODE, NULL);
 	rtnl_unlock();
 
-	/* Close program fd */
-	xsk->xdp_prog_fd = 0;
+	/* Release BPF program reference */
+	bpf_prog_put(xsk->xdp_prog);
 	xsk->xdp_prog = NULL;
+	xsk->xdp_prog_fd = 0;
 
 	pr_debug("Unloaded XDP program from %s\n", xsk->dev->name);
 }

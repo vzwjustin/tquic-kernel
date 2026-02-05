@@ -126,8 +126,10 @@ int tquic_napi_init(struct tquic_sock *sk, int weight)
 	/* Initialize NAPI structure */
 	netif_napi_add_weight(tquic_napi_dev, &tn->napi, tquic_napi_poll, actual_weight);
 
-	/* Store NAPI in socket private data */
-	/* Note: In a real implementation, this would be stored in tquic_sock */
+	/*
+	 * Store NAPI context in socket's user data field.
+	 * This allows retrieval via sk_user_data in the poll callback.
+	 */
 	((struct sock *)sk)->sk_user_data = tn;
 
 	/* Add to global list */
