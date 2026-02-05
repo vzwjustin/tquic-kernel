@@ -381,7 +381,7 @@ static void tquic_ack_update_recv_ranges(struct tquic_connection *conn,
 							ack_info->ranges[i].ack_range_len = 0;
 
 							/* Update next range's gap */
-							if (i + 1 < ack_info->ack_range_count + 1) {
+							if (i < ack_info->ack_range_count) {
 								ack_info->ranges[i + 1].gap =
 									pn - (prev_end - gap - 2) - 2;
 							}
@@ -392,8 +392,8 @@ static void tquic_ack_update_recv_ranges(struct tquic_connection *conn,
 						}
 
 						prev_end = next_range_start;
-					} else {
-						/* Append at end */
+					} else if (i < TQUIC_ACK_MAX_RANGES) {
+						/* Append at end (bounds-checked) */
 						ack_info->ranges[i].gap = prev_end - pn - 2;
 						ack_info->ranges[i].ack_range_len = 0;
 						ack_info->ack_range_count++;

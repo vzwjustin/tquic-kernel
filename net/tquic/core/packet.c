@@ -575,7 +575,12 @@ int tquic_parse_long_header(const u8 *data, size_t len,
 	 * values up to 2^62-1. A malicious packet could specify a huge
 	 * payload_len to cause offset + payload_len to overflow, bypassing
 	 * the bounds check and causing buffer over-read.
+	 *
+	 * On 32-bit systems, size_t is 32 bits. Reject payload_len values
+	 * that would truncate when cast to size_t.
 	 */
+	if (hdr->payload_len > SIZE_MAX)
+		return -EPROTO;
 	{
 		size_t end_offset;
 
