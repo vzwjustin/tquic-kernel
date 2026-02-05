@@ -265,14 +265,14 @@ static int tquic_napi_poll(struct napi_struct *napi, int budget)
 	atomic64_inc(&tquic_napi_global_stats.total_polls);
 
 	/* Process up to budget packets from the receive queue */
-	while (work_done < budget) {
+	while (likely(work_done < budget)) {
 		spin_lock_irqsave(&tn->lock, flags);
 		skb = __skb_dequeue(&tn->rx_queue);
-		if (skb)
+		if (likely(skb))
 			atomic_dec(&tn->rx_queue_len);
 		spin_unlock_irqrestore(&tn->lock, flags);
 
-		if (!skb)
+		if (unlikely(!skb))
 			break;
 
 		/* Process the received packet */
@@ -615,11 +615,11 @@ int tquic_napi_rx_queue(struct tquic_napi *tn, struct sk_buff *skb)
 {
 	unsigned long flags;
 
-	if (!tn || !skb)
+	if (unlikely(!tn || !skb))
 		return -EINVAL;
 
-	/* Check queue capacity */
-	if (atomic_read(&tn->rx_queue_len) >= TQUIC_NAPI_RX_QUEUE_LEN) {
+	/* Check queue capacity - rarely full under normal operation */
+	if (unlikely(atomic_read(&tn->rx_queue_len) >= TQUIC_NAPI_RX_QUEUE_LEN)) {
 		tn->stats.rx_queue_full++;
 		return -ENOBUFS;
 	}
