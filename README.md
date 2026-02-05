@@ -111,6 +111,14 @@ The comprehensive audit addressed vulnerabilities across:
 
 See [CLAUDE.md](CLAUDE.md) for development workflow and coding standards.
 
+## Documentation
+
+- Quick Start: `docs/QUICKSTART_DIETPI.md`
+- Architecture: `docs/ARCHITECTURE.md`
+- Configuration: `docs/CONFIGURATION.md`
+- Troubleshooting: `docs/TROUBLESHOOTING.md`
+- Roadmap: `docs/ROADMAP.md`
+
 ## Features
 
 ### Core QUIC Protocol (RFC 9000)
