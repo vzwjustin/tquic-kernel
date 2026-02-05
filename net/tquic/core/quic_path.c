@@ -17,9 +17,35 @@
 #include "../diag/tracepoints.h"
 #include "../protocol.h"
 
-/* Forward declarations for trace functions (defined in diag/tracepoints.c) */
+/*
+ * Path validation trace hook. The full tracepoints module isn't built
+ * out-of-tree, so provide a lightweight implementation here.
+ */
 void tquic_trace_path_validated(struct tquic_connection *conn, u32 path_id,
-				u64 validation_time_us);
+				u64 validation_time_us)
+{
+	if (!conn)
+		return;
+
+	pr_debug("tquic: path %u validated in %llu us\n",
+		 path_id, validation_time_us);
+}
+EXPORT_SYMBOL_GPL(tquic_trace_path_validated);
+
+/*
+ * Human-readable path state names (exported for diagnostics).
+ */
+const char *tquic_path_state_names[] = {
+	[TQUIC_PATH_UNUSED]	= "UNUSED",
+	[TQUIC_PATH_PENDING]	= "PENDING",
+	[TQUIC_PATH_VALIDATED]	= "VALID",
+	[TQUIC_PATH_ACTIVE]	= "ACTIVE",
+	[TQUIC_PATH_STANDBY]	= "STANDBY",
+	[TQUIC_PATH_UNAVAILABLE]= "UNAVAIL",
+	[TQUIC_PATH_FAILED]	= "FAILED",
+	[TQUIC_PATH_CLOSED]	= "CLOSED",
+};
+EXPORT_SYMBOL_GPL(tquic_path_state_names);
 
 /* Path management constants per RFC 9000 */
 #define TQUIC_PATH_CHALLENGE_SIZE 8
@@ -55,6 +81,18 @@ void tquic_path_exit(void)
 {
 	kmem_cache_destroy(tquic_path_cache);
 }
+
+int __init tquic_path_init_module(void)
+{
+	return tquic_path_init();
+}
+EXPORT_SYMBOL_GPL(tquic_path_init_module);
+
+void __exit tquic_path_exit_module(void)
+{
+	tquic_path_exit();
+}
+EXPORT_SYMBOL_GPL(tquic_path_exit_module);
 
 /*
  * Initialize RTT measurements for a new path
@@ -272,6 +310,12 @@ void tquic_path_destroy(struct tquic_path *path)
 
 	kmem_cache_free(tquic_path_cache, path);
 }
+
+void tquic_path_put(struct tquic_path *path)
+{
+	/* No refcounting yet; path lifetime is connection-managed. */
+}
+EXPORT_SYMBOL_GPL(tquic_path_put);
 
 /*
  * Generate cryptographically random challenge data

@@ -1132,8 +1132,8 @@ config TQUIC_AF_XDP
 	    - Low-latency real-time applications
 	    - Network function virtualization (NFV)
 
-	To compile this as a module, choose M here: the module will
-	  be called tquic_af_xdp.
+	  To compile this as a module, choose M here: the module will
+	    be called tquic_af_xdp.
 
 	  If unsure, say N.
 

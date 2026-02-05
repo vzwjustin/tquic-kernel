@@ -905,6 +905,8 @@ struct tquic_http3_stream_info {
  *   args.flags = TQUIC_URING_BUF_RING_DESTROY;
  *   args.bgid = group_id_to_destroy;
  */
+#ifndef TQUIC_URING_BUF_RING_ARGS_DEFINED
+#define TQUIC_URING_BUF_RING_ARGS_DEFINED
 struct tquic_uring_buf_ring_args {
 	__u16	bgid;		/* Buffer group ID */
 	__u16	flags;		/* TQUIC_URING_BUF_RING_* flags */
@@ -912,6 +914,7 @@ struct tquic_uring_buf_ring_args {
 	__u32	buf_count;	/* Number of buffers */
 	__u32	reserved;	/* Must be 0 */
 };
+#endif
 
 /* Buffer ring flags */
 #define TQUIC_URING_BUF_RING_CREATE	(1 << 0)	/* Create new ring */
@@ -929,6 +932,8 @@ struct tquic_uring_buf_ring_args {
  *
  * Used with getsockopt to retrieve io_uring performance statistics.
  */
+#ifndef TQUIC_URING_STATS_DEFINED
+#define TQUIC_URING_STATS_DEFINED
 struct tquic_uring_stats {
 	__u64	sends;
 	__u64	recvs;
@@ -938,6 +943,7 @@ struct tquic_uring_stats {
 	__u64	retries;
 	__u64	overflow_events;
 };
+#endif
 
 /* Get io_uring statistics (read-only) */
 #define TQUIC_URING_STATS		203

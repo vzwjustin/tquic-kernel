@@ -22,7 +22,6 @@
 #include <linux/slab.h>
 #include <linux/skbuff.h>
 #include <linux/netdevice.h>
-#include <linux/napi.h>
 #include <linux/percpu.h>
 #include <linux/cpu.h>
 #include <linux/proc_fs.h>

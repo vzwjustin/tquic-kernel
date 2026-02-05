@@ -389,6 +389,10 @@ static struct ctl_table tquic_persistent_cong_sysctl[] = {
 	{ }
 };
 
+/* Number of valid entries (exclude the null terminator). */
+#define TQUIC_PERSISTENT_CONG_SYSCTL_ENTRIES \
+	(ARRAY_SIZE(tquic_persistent_cong_sysctl) - 1)
+
 /*
  * =============================================================================
  * Module Interface
@@ -403,9 +407,10 @@ int __init tquic_persistent_cong_module_init(void)
 		tquic_persistent_cong_threshold);
 
 	/* Register sysctl - Note: In practice, add to main tquic_sysctl_table */
-	persistent_cong_sysctl_header = register_net_sysctl(&init_net,
-							    "net/tquic",
-							    tquic_persistent_cong_sysctl);
+	persistent_cong_sysctl_header = register_net_sysctl_sz(&init_net,
+							       "net/tquic",
+							       tquic_persistent_cong_sysctl,
+							       TQUIC_PERSISTENT_CONG_SYSCTL_ENTRIES);
 	if (!persistent_cong_sysctl_header)
 		pr_warn("tquic_persistent_cong: failed to register sysctl\n");
 

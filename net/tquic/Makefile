@@ -25,7 +25,6 @@ obj-$(CONFIG_TQUIC) += tquic.o
 # Main TQUIC module - ALL components in single block to avoid make evaluation issues
 tquic-y := \
 	tquic_main.o \
-	out_of_tree_stubs.o \
 	tquic_proto.o \
 	tquic_socket.o \
 	tquic_stream.o \
@@ -107,6 +106,7 @@ tquic-y := \
 	pm/path_validation.o \
 	pm/nat_keepalive.o \
 	pm/nat_lifecycle.o \
+	pm/pm_userspace.o \
 	pm/pm_module.o \
 	sched/scheduler.o \
 	sched/deadline_scheduler.o \
@@ -115,6 +115,7 @@ tquic-y := \
 	multipath/mp_ack.o \
 	multipath/mp_deadline.o \
 	multipath/path_abandon.o \
+	multipath/mp_sched_registry.o \
 	multipath/multipath_module.o \
 	multipath/sched_minrtt.o \
 	multipath/sched_ecf.o \

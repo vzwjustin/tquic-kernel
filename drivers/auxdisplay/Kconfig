@@ -1,0 +1,8 @@
+# SPDX-License-Identifier: GPL-2.0
+#
+# Placeholder auxdisplay Kconfig for trimmed tree.
+#
+
+menu "Auxiliary display drivers (stub)"
+
+endmenu

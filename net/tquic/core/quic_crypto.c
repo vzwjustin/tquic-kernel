@@ -934,8 +934,17 @@ void tquic_crypto_ctx_destroy(struct tquic_crypto_ctx *ctx)
 	memset(ctx, 0, sizeof(*ctx));
 }
 
-int tquic_crypto_derive_initial_secrets(struct tquic_connection *conn,
-					struct tquic_cid *cid)
+void tquic_crypto_destroy(void *crypto)
+{
+	if (!crypto)
+		return;
+
+	tquic_crypto_ctx_destroy((struct tquic_crypto_ctx *)crypto);
+}
+EXPORT_SYMBOL_GPL(tquic_crypto_destroy);
+
+int tquic_crypto_derive_init_secrets(struct tquic_connection *conn,
+				     struct tquic_cid *cid)
 {
 	struct tquic_crypto_wrapper *wrapper = tquic_crypto_wrapper_get(conn);
 	struct tquic_crypto_ctx *ctx;
@@ -1109,6 +1118,13 @@ int tquic_crypto_derive_secrets(struct tquic_crypto_ctx *ctx,
 
 	return 0;
 }
+
+int tquic_crypto_derive_initial_secrets(struct tquic_connection *conn,
+					const struct tquic_cid *cid)
+{
+	return tquic_crypto_derive_init_secrets(conn, (struct tquic_cid *)cid);
+}
+EXPORT_SYMBOL_GPL(tquic_crypto_derive_initial_secrets);
 
 static void tquic_crypto_compute_nonce(const u8 *iv, u64 pn, u8 *nonce)
 {

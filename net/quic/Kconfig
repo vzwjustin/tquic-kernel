@@ -7,7 +7,7 @@ menuconfig QUIC
 	tristate "QUIC: A UDP-Based Multiplexed and Secure Transport"
 	depends on INET
 	depends on CRYPTO
-	depends on CRYPTO_AEAD
+	select CRYPTO_AEAD
 	select CRYPTO_AES
 	select CRYPTO_GCM
 	select CRYPTO_CHACHA20POLY1305

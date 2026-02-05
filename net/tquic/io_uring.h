@@ -501,6 +501,8 @@ struct tquic_uring_ctx *tquic_uring_ctx_get(struct sock *sk);
  * @buf_count: Number of buffers
  * @flags: Configuration flags
  */
+#ifndef TQUIC_URING_BUF_RING_ARGS_DEFINED
+#define TQUIC_URING_BUF_RING_ARGS_DEFINED
 struct tquic_uring_buf_ring_args {
 	__u16	bgid;
 	__u16	flags;
@@ -508,6 +510,7 @@ struct tquic_uring_buf_ring_args {
 	__u32	buf_count;
 	__u32	reserved;
 };
+#endif
 
 /* Buffer ring flags */
 #define TQUIC_URING_BUF_RING_CREATE	(1 << 0)	/* Create new ring */
@@ -529,6 +532,8 @@ struct tquic_uring_buf_ring_args {
  * @retries: Operation retries
  * @overflow_events: CQE overflow events
  */
+#ifndef TQUIC_URING_STATS_DEFINED
+#define TQUIC_URING_STATS_DEFINED
 struct tquic_uring_stats {
 	__u64	sends;
 	__u64	recvs;
@@ -538,6 +543,7 @@ struct tquic_uring_stats {
 	__u64	retries;
 	__u64	overflow_events;
 };
+#endif
 
 /**
  * tquic_uring_get_stats - Get io_uring statistics

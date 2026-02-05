@@ -62,6 +62,7 @@ EXPORT_SYMBOL_GPL(tquic_net_id);
 static struct percpu_counter tquic_sockets_allocated_counter;
 static atomic_long_t tquic_memory_allocated;
 static unsigned long tquic_memory_pressure;
+static DEFINE_PER_CPU(int, tquic_memory_per_cpu_fw_alloc);
 
 /* TQUIC sysctl memory limits (in pages) */
 static long sysctl_tquic_mem[3] = {
@@ -418,6 +419,7 @@ static struct proto tquic_prot = {
 	.sockets_allocated = &tquic_sockets_allocated_counter,
 	.memory_allocated = &tquic_memory_allocated,
 	.memory_pressure = &tquic_memory_pressure,
+	.per_cpu_fw_alloc = &tquic_memory_per_cpu_fw_alloc,
 	.sysctl_mem	= sysctl_tquic_mem,
 	.sysctl_wmem	= sysctl_tquic_wmem,
 	.sysctl_rmem	= sysctl_tquic_rmem,
@@ -485,6 +487,7 @@ static struct proto tquicv6_prot = {
 	.sockets_allocated = &tquic_sockets_allocated_counter,
 	.memory_allocated = &tquic_memory_allocated,
 	.memory_pressure = &tquic_memory_pressure,
+	.per_cpu_fw_alloc = &tquic_memory_per_cpu_fw_alloc,
 	.sysctl_mem	= sysctl_tquic_mem,
 	.sysctl_wmem	= sysctl_tquic_wmem,
 	.sysctl_rmem	= sysctl_tquic_rmem,
@@ -616,7 +619,8 @@ static struct ctl_table tquic_net_sysctl_table[] = {
 	{ }
 };
 
-#define TQUIC_SYSCTL_TABLE_SIZE ARRAY_SIZE(tquic_net_sysctl_table)
+/* Number of valid entries (exclude the null terminator). */
+#define TQUIC_SYSCTL_TABLE_SIZE (ARRAY_SIZE(tquic_net_sysctl_table) - 1)
 
 static int tquic_net_sysctl_register(struct net *net)
 {

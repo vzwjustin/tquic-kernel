@@ -215,6 +215,9 @@ static struct ctl_table tquic_pm_sysctl_table[] = {
 	{ }
 };
 
+/* Number of valid entries (exclude the null terminator). */
+#define TQUIC_PM_SYSCTL_TABLE_ENTRIES (ARRAY_SIZE(tquic_pm_sysctl_table) - 1)
+
 /*
  * Per-netns initialization and cleanup
  */
@@ -252,10 +255,15 @@ static int __net_init tquic_pm_net_init(struct net *net)
 		table[4].data = &pernet->event_rate_limit;
 
 		hdr = register_net_sysctl_sz(net, "net/tquic/pm", table,
-					     ARRAY_SIZE(tquic_pm_sysctl_table));
+					     TQUIC_PM_SYSCTL_TABLE_ENTRIES);
 		if (!hdr) {
 			kfree(table);
+#ifdef TQUIC_OUT_OF_TREE
+			pr_warn("TQUIC PM: sysctl registration failed; continuing without /proc/sys/net/tquic/pm\n");
+			return 0;
+#else
 			return -ENOMEM;
+#endif
 		}
 	} else {
 		/* init_net: use static table, point .data to pernet */
@@ -265,11 +273,20 @@ static int __net_init tquic_pm_net_init(struct net *net)
 		tquic_pm_sysctl_table[3].data = &pernet->validation_retries;
 		tquic_pm_sysctl_table[4].data = &pernet->event_rate_limit;
 
-		hdr = register_net_sysctl(net, "net/tquic/pm",
-					  tquic_pm_sysctl_table);
-		if (!hdr)
+		hdr = register_net_sysctl_sz(net, "net/tquic/pm",
+					     tquic_pm_sysctl_table,
+					     TQUIC_PM_SYSCTL_TABLE_ENTRIES);
+		if (!hdr) {
+#ifdef TQUIC_OUT_OF_TREE
+			pr_warn("TQUIC PM: sysctl registration failed; continuing without /proc/sys/net/tquic/pm\n");
+			return 0;
+#else
 			return -ENOMEM;
+#endif
+		}
 	}
+
+	pernet->sysctl_header = hdr;
 
 	/* Call PM-specific init if registered */
 	if (pm_ops[pernet->pm_type] && pm_ops[pernet->pm_type]->init)
@@ -284,6 +301,15 @@ static void __net_exit tquic_pm_net_exit(struct net *net)
 	struct tquic_pm_endpoint *ep, *tmp;
 
 	pernet = net_generic(net, tquic_pm_pernet_id);
+
+	if (pernet->sysctl_header) {
+		const struct ctl_table *table = pernet->sysctl_header->ctl_table_arg;
+
+		unregister_net_sysctl_table(pernet->sysctl_header);
+		if (!net_eq(net, &init_net))
+			kfree((void *)table);
+		pernet->sysctl_header = NULL;
+	}
 
 	/* Call PM-specific cleanup */
 	if (pm_ops[pernet->pm_type] && pm_ops[pernet->pm_type]->release)

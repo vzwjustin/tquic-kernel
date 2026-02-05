@@ -1,0 +1,8 @@
+# SPDX-License-Identifier: GPL-2.0
+#
+# Placeholder Kconfig for trimmed tree.
+#
+
+menu "drm (stub)"
+
+endmenu

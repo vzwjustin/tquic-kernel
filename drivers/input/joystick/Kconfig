@@ -1,0 +1,8 @@
+# SPDX-License-Identifier: GPL-2.0
+#
+# Placeholder joystick Kconfig for trimmed tree.
+#
+
+menu "Input joystick drivers (stub)"
+
+endmenu

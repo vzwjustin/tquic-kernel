@@ -1,0 +1,8 @@
+# SPDX-License-Identifier: GPL-2.0
+#
+# Placeholder media Kconfig for trimmed tree.
+#
+
+menu "Media drivers (stub)"
+
+endmenu

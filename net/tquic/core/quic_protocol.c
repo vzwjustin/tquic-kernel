@@ -972,7 +972,7 @@ static int tquic_stream_connect(struct socket *sock, struct sockaddr *addr,
 	struct sock *sk = sock->sk;
 	int err;
 
-	err = tquic_connect(sk, addr, addr_len);
+	err = tquic_connect(sk, (struct sockaddr *)addr, addr_len);
 	if (err)
 		return err;
 

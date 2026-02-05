@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: GPL-2.0
+#
+# Placeholder arch crypto Kconfig for trimmed tree.
+
+menu "Arch crypto (stub)"
+
+endmenu

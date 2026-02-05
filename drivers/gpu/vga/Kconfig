@@ -1,0 +1,8 @@
+# SPDX-License-Identifier: GPL-2.0
+#
+# Placeholder VGA Kconfig for trimmed tree.
+#
+
+menu "VGA drivers (stub)"
+
+endmenu

@@ -1,0 +1,8 @@
+# SPDX-License-Identifier: GPL-2.0
+#
+# Placeholder ISDN Kconfig for trimmed tree.
+#
+
+menu "ISDN drivers (stub)"
+
+endmenu

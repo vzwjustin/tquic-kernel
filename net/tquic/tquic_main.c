@@ -19,6 +19,7 @@
 #include <linux/skbuff.h>
 #include <linux/proc_fs.h>
 #include <linux/seq_file.h>
+#include <linux/timer.h>
 #include <net/sock.h>
 #include <net/protocol.h>
 #include <net/inet_common.h>
