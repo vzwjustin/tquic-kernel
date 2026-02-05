@@ -540,7 +540,8 @@ int tquic_generate_ack_frame(struct tquic_loss_state *loss, int pn_space,
 
 	spin_lock(&loss->lock);
 
-	if (list_empty(&loss->ack_ranges[pn_space])) {
+	if (list_empty(&loss->ack_ranges[pn_space]) ||
+	    loss->num_ack_ranges[pn_space] == 0) {
 		spin_unlock(&loss->lock);
 		return -ENODATA;
 	}
@@ -676,7 +677,8 @@ int tquic_generate_ack_frame_with_timestamps(struct tquic_loss_state *loss,
 
 	spin_lock(&loss->lock);
 
-	if (list_empty(&loss->ack_ranges[pn_space])) {
+	if (list_empty(&loss->ack_ranges[pn_space]) ||
+	    loss->num_ack_ranges[pn_space] == 0) {
 		spin_unlock(&loss->lock);
 		return -ENODATA;
 	}
@@ -854,7 +856,8 @@ int tquic_generate_ack_1wd_frame(struct tquic_loss_state *loss, int pn_space,
 
 	spin_lock(&loss->lock);
 
-	if (list_empty(&loss->ack_ranges[pn_space])) {
+	if (list_empty(&loss->ack_ranges[pn_space]) ||
+	    loss->num_ack_ranges[pn_space] == 0) {
 		spin_unlock(&loss->lock);
 		return -ENODATA;
 	}
@@ -1581,16 +1584,23 @@ static void tquic_loss_detection_timeout(struct timer_list *t)
 	int earliest_space = -1;
 	int lost_count = 0;
 
-	conn = loss->path ? loss->path->list.next ?
-		container_of(loss->path->list.next, struct tquic_connection,
-			     paths) : NULL : NULL;
-
-	if (!conn)
-		return;
+	/*
+	 * Acquire the lock before dereferencing loss->path to prevent
+	 * races with concurrent path removal or destruction.
+	 */
+	spin_lock(&loss->lock);
 
 	path = loss->path;
+	if (!path || !path->list.next) {
+		spin_unlock(&loss->lock);
+		return;
+	}
 
-	spin_lock(&loss->lock);
+	conn = container_of(path->list.next, struct tquic_connection, paths);
+	if (!conn) {
+		spin_unlock(&loss->lock);
+		return;
+	}
 
 	/*
 	 * RFC 9002 Section 6.2.1: Check for lost packets first

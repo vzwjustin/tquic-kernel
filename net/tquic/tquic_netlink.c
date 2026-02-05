@@ -919,7 +919,6 @@ err_free:
  */
 struct tquic_dump_ctx {
 	u64 conn_id;
-	u32 path_id;
 	int idx;
 };
 
@@ -1349,7 +1348,7 @@ int tquic_nl_send_event(struct net *net, enum tquic_event_type event,
 		goto nla_put_failure;
 	if (nla_put_u64_64bit(skb, TQUIC_NL_ATTR_CONN_ID, conn_id, TQUIC_NL_ATTR_PAD))
 		goto nla_put_failure;
-	if (path_id && nla_put_u32(skb, TQUIC_NL_ATTR_PATH_ID, path_id))
+	if (nla_put_u32(skb, TQUIC_NL_ATTR_PATH_ID, path_id))
 		goto nla_put_failure;
 	if (reason && nla_put_u32(skb, TQUIC_NL_ATTR_EVENT_REASON, reason))
 		goto nla_put_failure;
