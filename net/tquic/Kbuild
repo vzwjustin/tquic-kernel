@@ -10,22 +10,26 @@
 # module_init/exit are wrapped with #ifndef TQUIC_OUT_OF_TREE.
 #
 
-# Include paths for headers
-ccflags-y += -I$(src)/include -I$(src)/../quic -I$(src)/../.. -I$(src)/diag -DTQUIC_OUT_OF_TREE
-# Suppress warnings treated as errors during development (remove for production)
-ccflags-y += -Wno-error=unused-function -Wno-error=unused-variable
-ccflags-y += -Wno-error=missing-prototypes
+ifneq ($(KBUILD_EXTMOD),)
+  # External module build: kbuild prefers `Kbuild` over `Makefile`, so keep
+  # a dedicated external-module recipe behind the `KBUILD_EXTMOD` guard.
 
-# For out-of-tree builds, build one main module plus CC algorithms
-obj-m += tquic.o
-obj-m += tquic_cubic.o
-obj-m += tquic_bbr.o
-obj-m += tquic_copa.o
-obj-m += tquic_westwood.o
-obj-m += tquic_bbrv2.o
-obj-m += tquic_prague.o
-obj-m += tquic_l4s.o
-obj-m += tquic_accecn.o
+  # Include paths for headers
+  ccflags-y += -I$(src)/include -I$(src)/../quic -I$(src)/../.. -I$(src)/diag -DTQUIC_OUT_OF_TREE
+  # Suppress warnings treated as errors during development (remove for production)
+  ccflags-y += -Wno-error=unused-function -Wno-error=unused-variable
+  ccflags-y += -Wno-error=missing-prototypes
+
+  # For out-of-tree builds, build one main module plus CC algorithms
+  obj-m += tquic.o
+  obj-m += tquic_cubic.o
+  obj-m += tquic_bbr.o
+  obj-m += tquic_copa.o
+  obj-m += tquic_westwood.o
+  obj-m += tquic_bbrv2.o
+  obj-m += tquic_prague.o
+  obj-m += tquic_l4s.o
+  obj-m += tquic_accecn.o
 
 # Main TQUIC module - consolidated for out-of-tree build
 # This must match the Makefile tquic-y list for consistency
@@ -156,3 +160,9 @@ tquic_accecn-y := cong/accecn.o
 # Extra CFLAGS for out-of-tree build
 # Use the tquic-kernel include directory for TQUIC headers
 ccflags-y += -I$(src) -I$(src)/include -I$(src)/../../include -DTQUIC_OUT_OF_TREE
+else
+  # In-tree kernel build: honor Kconfig (CONFIG_TQUIC, etc).
+  # This avoids forcing TQUIC into module builds, which can break on
+  # non-exported internal symbols.
+  include $(src)/Makefile
+endif
