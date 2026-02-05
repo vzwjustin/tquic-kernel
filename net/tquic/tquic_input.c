@@ -18,6 +18,7 @@
 #include <linux/ipv6.h>
 #include <linux/rhashtable.h>
 #include <linux/random.h>
+#include <linux/hrtimer.h>
 #include <net/sock.h>
 #include <net/udp.h>
 #include <net/udp_tunnel.h>
@@ -1832,6 +1833,14 @@ static u64 tquic_decode_pkt_num(u8 *buf, int pkt_num_len, u64 largest_pn)
  */
 
 /*
+ * GRO flush timer callback
+ */
+static enum hrtimer_restart tquic_gro_flush_timer(struct hrtimer *timer)
+{
+	return HRTIMER_NORESTART;
+}
+
+/*
  * Initialize GRO state
  */
 struct tquic_gro_state *tquic_gro_init(void)
@@ -1844,7 +1853,9 @@ struct tquic_gro_state *tquic_gro_init(void)
 
 	skb_queue_head_init(&gro->hold_queue);
 	spin_lock_init(&gro->lock);
-	hrtimer_init(&gro->flush_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+	/* Use hrtimer_setup (new API) instead of hrtimer_init */
+	hrtimer_setup(&gro->flush_timer, tquic_gro_flush_timer,
+		      CLOCK_MONOTONIC, HRTIMER_MODE_REL);
 
 	return gro;
 }

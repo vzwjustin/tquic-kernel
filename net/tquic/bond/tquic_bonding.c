@@ -49,14 +49,14 @@ EXPORT_SYMBOL_GPL(tquic_bonding_state_names);
 /*
  * Forward declarations for path manager integration
  */
-struct tquic_path_manager;
+struct tquic_pm_state;
 struct tquic_path;
 
 /*
  * External path manager functions we need
- * (defined in tquic_path.c)
+ * (defined in pm/path_manager.c)
  */
-extern int tquic_pm_get_active_paths(struct tquic_path_manager *pm,
+extern int tquic_pm_get_active_paths(struct tquic_pm_state *pm,
 				     struct tquic_path **paths, int max_paths);
 
 /*

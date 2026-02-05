@@ -42,13 +42,15 @@
 #define TQUIC_MAX_HASH_SIZE	48
 
 /*
- * Encryption levels
+ * Encryption levels (may be defined in include/net/tquic.h)
  */
+#ifndef TQUIC_CRYPTO_INITIAL
 #define TQUIC_CRYPTO_INITIAL		0
 #define TQUIC_CRYPTO_HANDSHAKE		1
 #define TQUIC_CRYPTO_APPLICATION	2
 #define TQUIC_CRYPTO_EARLY_DATA		3
 #define TQUIC_CRYPTO_MAX		4
+#endif
 
 /*
  * TQUIC error codes
@@ -220,7 +222,7 @@ void tquic_crypto_ctx_destroy(struct tquic_crypto_ctx *ctx);
  * Return: 0 on success, negative error code on failure
  */
 int tquic_crypto_derive_initial_secrets(struct tquic_connection *conn,
-					struct tquic_cid *cid);
+					const struct tquic_cid *cid);
 
 /**
  * tquic_crypto_derive_secrets - Derive traffic secrets and keys

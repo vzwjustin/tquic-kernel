@@ -32,6 +32,7 @@
 #include "receive_timestamps.h"
 #include "one_way_delay.h"
 #include "ack.h"
+#include "../tquic_compat.h"
 
 /*
  * RFC 9002 Constants

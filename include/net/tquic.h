@@ -72,10 +72,11 @@ bool tquic_sysctl_prefer_v2(void);
 #define TQUIC_TIMER_MAX		7
 
 /* Crypto level indices */
-#define TQUIC_CRYPTO_INITIAL	0
-#define TQUIC_CRYPTO_HANDSHAKE	1
+#define TQUIC_CRYPTO_INITIAL		0
+#define TQUIC_CRYPTO_HANDSHAKE		1
 #define TQUIC_CRYPTO_APPLICATION	2
-#define TQUIC_CRYPTO_MAX	3
+#define TQUIC_CRYPTO_EARLY_DATA		3
+#define TQUIC_CRYPTO_MAX		4
 
 /* Stream limits (RFC 9000 maximum values) */
 #define TQUIC_MAX_STREAM_COUNT_BIDI	(1ULL << 60)
@@ -1698,7 +1699,7 @@ struct tquic_cong_ops {
 };
 
 /* Core API functions */
-int tquic_connect(struct sock *sk, struct sockaddr *addr, int addr_len);
+int tquic_connect(struct sock *sk, struct sockaddr_unsized *addr, int addr_len);
 int tquic_accept(struct sock *sk, struct sock **newsk, int flags, bool kern);
 int tquic_sendmsg(struct sock *sk, struct msghdr *msg, size_t len);
 int tquic_recvmsg(struct sock *sk, struct msghdr *msg, size_t len, int flags,

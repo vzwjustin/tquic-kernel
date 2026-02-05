@@ -13,6 +13,7 @@
 #include <net/tquic_frame.h>
 #include "../diag/trace.h"
 #include "mp_frame.h"
+#include "tquic_crypto.h"
 
 /* TQUIC packet header forms */
 #define TQUIC_HEADER_FORM_LONG	0x80
@@ -25,12 +26,7 @@
 #define TQUIC_LONG_TYPE_HANDSHAKE	0x02
 #define TQUIC_LONG_TYPE_RETRY		0x03
 
-/* Crypto levels (mapping to PN spaces) */
-#define TQUIC_CRYPTO_INITIAL		0
-#define TQUIC_CRYPTO_HANDSHAKE		1
-#define TQUIC_CRYPTO_APPLICATION	2
-#define TQUIC_CRYPTO_EARLY_DATA		3
-#define TQUIC_CRYPTO_MAX		4
+/* Crypto levels (mapping to PN spaces) - defined in tquic_crypto.h */
 
 /* Packet types for SKB CB */
 #define TQUIC_PACKET_1RTT		4
@@ -47,17 +43,7 @@
 /* Error codes */
 #define TQUIC_ERROR_FLOW_CONTROL_ERROR	0x03
 
-/* TQUIC packet control block for skb->cb */
-struct tquic_skb_cb {
-	u64	pn;
-	u32	header_len;
-	u8	pn_len;
-	u8	packet_type;
-	u8	dcid_len;
-	u8	scid_len;
-};
-
-#define TQUIC_SKB_CB(skb) ((struct tquic_skb_cb *)((skb)->cb))
+/* struct tquic_skb_cb and TQUIC_SKB_CB are defined in tquic_crypto.h */
 
 /* Forward declarations for internal functions */
 static void tquic_packet_process_retry(struct tquic_connection *conn,
@@ -85,10 +71,7 @@ int tquic_ack_frequency_process(struct tquic_connection *conn, const u8 *data, i
 int tquic_immediate_ack_process(struct tquic_connection *conn);
 void tquic_loss_detection_on_packet_sent(struct tquic_connection *conn, void *sent);
 void tquic_loss_detection_on_ack_received(struct tquic_connection *conn, void *ack_info, u8 level);
-int tquic_crypto_encrypt(void *ctx, struct sk_buff *skb, u64 pn);
-int tquic_crypto_decrypt(void *ctx, struct sk_buff *skb, u64 pn);
-int tquic_crypto_protect_header(void *ctx, struct sk_buff *skb, int pn_offset, u8 pn_len);
-int tquic_crypto_unprotect_header(void *ctx, struct sk_buff *skb, u8 *pn_offset, u8 *pn_len);
+/* tquic_crypto_* functions declared in tquic_crypto.h */
 int tquic_flow_check_recv_limits(struct tquic_stream *stream, u64 offset, u64 len);
 void tquic_stream_handle_reset(struct tquic_stream *stream, u64 error_code, u64 final_size);
 void tquic_stream_handle_stop_sending(struct tquic_stream *stream, u64 error_code);

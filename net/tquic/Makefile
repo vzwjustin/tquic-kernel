@@ -19,6 +19,8 @@ ccflags-y += -I$(src)/include -I$(src)/../quic -I$(src)/../.. -I$(src)/diag -DTQ
 # Suppress warnings treated as errors during development (remove for production)
 ccflags-y += -Wno-error=unused-function -Wno-error=unused-variable
 ccflags-y += -Wno-error=missing-prototypes
+# Timer API compatibility: del_timer_sync was renamed to timer_delete_sync in 6.2+
+ccflags-y += -Ddel_timer_sync=timer_delete_sync
 
 obj-$(CONFIG_TQUIC) += tquic.o
 

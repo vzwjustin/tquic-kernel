@@ -31,6 +31,7 @@
 #include <crypto/hmac.h>
 #include <crypto/utils.h>
 #include <net/tquic.h>
+#include "../tquic_compat.h"
 
 /* CID pool configuration */
 #define TQUIC_CID_POOL_MIN		4	/* Minimum CIDs to maintain */

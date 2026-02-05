@@ -15,6 +15,7 @@
 struct tquic_mib;
 struct tquic_error_ring;
 struct tquic_sched_ops;
+struct tquic_sched_internal;
 struct tquic_cong_ops;
 
 /* Scheduler name buffer size (matches TQUIC_SCHED_NAME_MAX) */
@@ -60,8 +61,8 @@ struct netns_tquic {
 	struct tquic_mib __percpu *mib;
 	struct tquic_error_ring *error_ring;
 
-	/* Per-netns default scheduler (RCU protected) */
-	struct tquic_sched_ops __rcu *default_scheduler;
+	/* Per-netns default scheduler (RCU protected, internal scheduler type) */
+	struct tquic_sched_internal __rcu *default_scheduler;
 
 	/* Sysctl buffer for scheduler name */
 	char sched_name[NETNS_TQUIC_SCHED_NAME_MAX];

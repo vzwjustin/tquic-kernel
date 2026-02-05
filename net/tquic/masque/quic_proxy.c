@@ -34,6 +34,7 @@
 #include <linux/workqueue.h>
 #include <linux/random.h>
 #include <net/tquic.h>
+#include "../tquic_compat.h"
 
 #include "quic_proxy.h"
 #include "connect_udp.h"

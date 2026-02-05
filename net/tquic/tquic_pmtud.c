@@ -32,6 +32,7 @@
 #include <net/tquic_pmtud.h>
 #include "protocol.h"
 #include "cong/tquic_cong.h"
+#include "tquic_compat.h"
 
 /*
  * =============================================================================

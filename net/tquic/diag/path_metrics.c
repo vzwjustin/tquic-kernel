@@ -29,6 +29,7 @@
 #include <net/sock.h>
 #include <net/net_namespace.h>
 #include <net/tquic.h>
+#include "../tquic_compat.h"
 #include <uapi/linux/tquic.h>
 #include <uapi/linux/tquic_diag.h>
 

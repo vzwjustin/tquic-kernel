@@ -64,8 +64,8 @@ static void tquic_set_lockdep_class(struct sock *sk, bool is_ipv6)
 
 /* Socket operations */
 static int tquic_release(struct socket *sock);
-static int tquic_bind(struct socket *sock, struct sockaddr *addr, int addr_len);
-static int tquic_connect_socket(struct socket *sock, struct sockaddr *addr,
+static int tquic_bind(struct socket *sock, struct sockaddr_unsized *uaddr, int addr_len);
+static int tquic_connect_socket(struct socket *sock, struct sockaddr_unsized *uaddr,
 				int addr_len, int flags);
 static int tquic_accept_socket(struct socket *sock, struct socket *newsock,
 			       struct proto_accept_arg *arg);
@@ -225,9 +225,11 @@ static int tquic_release(struct socket *sock)
 
 /*
  * Bind socket to address
+ * Note: Modern kernels (6.x+) use sockaddr_unsized for proto_ops callbacks.
  */
-static int tquic_bind(struct socket *sock, struct sockaddr *addr, int addr_len)
+static int tquic_bind(struct socket *sock, struct sockaddr_unsized *uaddr, int addr_len)
 {
+	struct sockaddr *addr = (struct sockaddr *)uaddr;
 	struct sock *sk = sock->sk;
 	struct tquic_sock *tsk = tquic_sk(sk);
 
@@ -244,13 +246,14 @@ static int tquic_bind(struct socket *sock, struct sockaddr *addr, int addr_len)
 
 /*
  * Connect to remote address
+ * Note: Modern kernels (6.x+) use sockaddr_unsized for proto_ops callbacks.
  */
-static int tquic_connect_socket(struct socket *sock, struct sockaddr *addr,
+static int tquic_connect_socket(struct socket *sock, struct sockaddr_unsized *uaddr,
 				int addr_len, int flags)
 {
 	struct sock *sk = sock->sk;
 
-	return tquic_connect(sk, addr, addr_len);
+	return tquic_connect(sk, uaddr, addr_len);
 }
 
 /*
@@ -264,8 +267,14 @@ static int tquic_connect_socket(struct socket *sock, struct sockaddr *addr,
  *   TCP_CLOSE -> TCP_SYN_SENT -> TCP_ESTABLISHED (success)
  *   TCP_CLOSE -> TCP_SYN_SENT -> TCP_CLOSE (failure)
  */
-int tquic_connect(struct sock *sk, struct sockaddr *addr, int addr_len)
+/*
+ * Note: Modern kernels (6.x+) changed proto.connect signature to use
+ * struct sockaddr_unsized * for length-unbounded addresses. We cast
+ * internally since TQUIC uses fixed sockaddr_storage.
+ */
+int tquic_connect(struct sock *sk, struct sockaddr_unsized *uaddr, int addr_len)
 {
+	struct sockaddr *addr = (struct sockaddr *)uaddr;
 	struct tquic_sock *tsk = tquic_sk(sk);
 	struct tquic_connection *conn = tsk->conn;
 	int ret;

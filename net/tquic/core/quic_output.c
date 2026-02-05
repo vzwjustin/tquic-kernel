@@ -139,10 +139,10 @@ struct tquic_stream_info {
 	u32	stream_flags;
 };
 
-/* Stream flags */
-#define TQUIC_STREAM_FLAG_NEW	0x01
-#define TQUIC_STREAM_FLAG_UNI	0x02
-#define TQUIC_STREAM_FLAG_FIN	0x04
+/* Stream cmsg flags (distinct from wire format flags in tquic_frame.h) */
+#define TQUIC_CMSG_FLAG_NEW	0x01	/* Create new stream */
+#define TQUIC_CMSG_FLAG_UNI	0x02	/* Unidirectional stream */
+#define TQUIC_CMSG_FLAG_FIN	0x04	/* Send FIN with last data */
 
 /* Recv chunk for stream reassembly */
 struct tquic_recv_chunk {
@@ -279,7 +279,7 @@ static int tquic_bind_udp_socket(struct tquic_sock *tsk,
 		return -ENOENT;
 
 	/* Use kernel_bind to bind the UDP socket */
-	err = kernel_bind(sock, addr, addr_len);
+	err = kernel_bind(sock, (struct sockaddr_unsized *)addr, addr_len);
 	if (err)
 		return err;
 
@@ -316,7 +316,7 @@ static int tquic_connect_udp_socket(struct tquic_sock *tsk,
 		return -ENOENT;
 
 	/* Use kernel_connect to connect the UDP socket */
-	err = kernel_connect(sock, addr, addr_len, O_NONBLOCK);
+	err = kernel_connect(sock, (struct sockaddr_unsized *)addr, addr_len, O_NONBLOCK);
 	if (err && err != -EINPROGRESS)
 		return err;
 
@@ -1072,8 +1072,8 @@ int tquic_do_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 	}
 
 	/* Find or create stream */
-	if (flags & TQUIC_STREAM_FLAG_NEW) {
-		stream = tquic_stream_open(conn, !(flags & TQUIC_STREAM_FLAG_UNI));
+	if (flags & TQUIC_CMSG_FLAG_NEW) {
+		stream = tquic_stream_open(conn, !(flags & TQUIC_CMSG_FLAG_UNI));
 		if (!stream)
 			return -ENOMEM;
 		stream_id = stream->id;
@@ -1106,7 +1106,7 @@ int tquic_do_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 		if (stream->send_offset > 0)
 			*data |= TQUIC_STREAM_FLAG_OFF;
 
-		if (remaining <= chunk_size && (flags & TQUIC_STREAM_FLAG_FIN))
+		if (remaining <= chunk_size && (flags & TQUIC_CMSG_FLAG_FIN))
 			*data |= TQUIC_STREAM_FLAG_FIN;
 
 		/* Encode stream ID */
@@ -1163,7 +1163,7 @@ int tquic_do_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 	if (sent > 0)
 		schedule_work(&conn->tx_work);
 
-	if (flags & TQUIC_STREAM_FLAG_FIN)
+	if (flags & TQUIC_CMSG_FLAG_FIN)
 		stream->fin_sent = 1;
 
 	err = sent;

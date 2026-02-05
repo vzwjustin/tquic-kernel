@@ -31,9 +31,31 @@
 #include <net/checksum.h>
 #include <net/tquic.h>
 #include <crypto/aead.h>
+#include "tquic_cid.h"
 
 /* QUIC GSO type flag for skb_shared_info */
 #define SKB_GSO_QUIC	SKB_GSO_UDP_L4
+
+/*
+ * QUIC offload operations structure
+ * Used for optional hardware crypto offload hooks
+ */
+struct tquic_offload_ops {
+	int (*encrypt)(struct sk_buff *skb, void *ctx);
+	int (*decrypt)(struct sk_buff *skb, void *ctx);
+	struct sk_buff *(*gso_segment)(struct sk_buff *skb, netdev_features_t features);
+	struct sk_buff *(*gro_receive)(struct list_head *head, struct sk_buff *skb);
+	int (*gro_complete)(struct sk_buff *skb, int nhoff);
+};
+
+/*
+ * Backlog receive handler for deferred packet processing
+ */
+static inline int tquic_backlog_rcv(struct sock *sk, struct sk_buff *skb)
+{
+	/* Process packet from backlog - pass to socket receive queue */
+	return sock_queue_rcv_skb(sk, skb);
+}
 
 /* QUIC header constants */
 #define QUIC_HEADER_FORM_LONG	0x80
@@ -48,6 +70,13 @@
 #define QUIC_PKT_0RTT		0x10
 #define QUIC_PKT_HANDSHAKE	0x20
 #define QUIC_PKT_RETRY		0x30
+
+/* Local aliases for QUIC constants (map to TQUIC_* from header) */
+#define QUIC_MAX_CONNECTION_ID_LEN	TQUIC_MAX_CID_LEN
+#define QUIC_CRYPTO_INITIAL		TQUIC_CRYPTO_INITIAL
+#define QUIC_CRYPTO_HANDSHAKE		TQUIC_CRYPTO_HANDSHAKE
+#define QUIC_CRYPTO_APPLICATION		TQUIC_CRYPTO_APPLICATION
+#define QUIC_CRYPTO_EARLY_DATA		1  /* Between INITIAL and HANDSHAKE */
 
 /* Maximum number of segments in a GSO batch */
 #define QUIC_GSO_MAX_SEGS	64
@@ -75,6 +104,15 @@ struct tquic_offload_cb {
 
 #define TQUIC_OFFLOAD_CB(skb) ((struct tquic_offload_cb *)((skb)->cb))
 
+/* Crypto context for hardware offload operations */
+struct tquic_crypto_ctx {
+	void	*key;		/* Encryption key reference */
+	void	*iv;		/* Initialization vector */
+	u8	level;		/* Crypto level (TQUIC_CRYPTO_*) */
+	u8	key_phase;	/* Key phase for rotation */
+	u16	tag_len;	/* AEAD tag length */
+};
+
 /* Crypto offload context stored in skb extension */
 struct tquic_crypto_offload {
 	u64	pn;
@@ -89,12 +127,12 @@ struct tquic_crypto_offload {
 DEFINE_STATIC_KEY_FALSE(tquic_encap_needed_key);
 EXPORT_SYMBOL(tquic_encap_needed_key);
 
-/* Forward declarations */
+/* Forward declarations - local static versions for offload layer */
 static struct sk_buff *tquic_gso_segment(struct sk_buff *skb,
 					netdev_features_t features);
-static struct sk_buff *tquic_gro_receive(struct list_head *head,
-					struct sk_buff *skb);
-static int tquic_gro_complete(struct sk_buff *skb, int nhoff);
+static struct sk_buff *tquic_offload_gro_receive(struct list_head *head,
+						struct sk_buff *skb);
+static int tquic_offload_gro_complete(struct sk_buff *skb, int nhoff);
 
 /* Parse QUIC packet header for offload processing */
 static int tquic_parse_header(struct sk_buff *skb, struct tquic_offload_cb *cb)
@@ -468,7 +506,7 @@ static bool tquic_gro_same_flow(struct sk_buff *skb1, struct sk_buff *skb2)
 }
 
 /* GRO receive callback for QUIC packets */
-static struct sk_buff *tquic_gro_receive(struct list_head *head,
+static struct sk_buff *tquic_offload_gro_receive(struct list_head *head,
 					struct sk_buff *skb)
 {
 	struct sk_buff *pp = NULL;
@@ -533,7 +571,7 @@ out:
 }
 
 /* GRO complete callback for QUIC */
-static int tquic_gro_complete(struct sk_buff *skb, int nhoff)
+static int tquic_offload_gro_complete(struct sk_buff *skb, int nhoff)
 {
 	struct udphdr *uh = (struct udphdr *)(skb->data + nhoff);
 	__be16 newlen = htons(skb->len - nhoff);
@@ -654,239 +692,20 @@ EXPORT_SYMBOL(tquic_crypto_offload_decrypt);
 /*
  * UDP Encapsulation Support
  *
- * QUIC runs over UDP and uses these functions to setup the UDP
- * encapsulation layer for sending and receiving packets.
+ * QUIC runs over UDP. The main UDP encapsulation functions are defined in
+ * tquic_udp.c which provides the complete UDP tunnel integration for TQUIC.
+ *
+ * This file only provides the offload-layer specific helpers used by the
+ * GRO/GSO callbacks defined below.
  */
-
-/* UDP encap receive callback */
-static int tquic_udp_encap_recv(struct sock *sk, struct sk_buff *skb)
-{
-	struct tquic_sock *qsk;
-	struct tquic_connection *conn;
-	struct tquic_connection_id dcid;
-	struct tquic_cid_entry *entry;
-	u8 *data;
-	int offset;
-
-	if (!sk)
-		goto drop;
-
-	/* Parse enough of the QUIC header to get the DCID */
-	if (skb->len < 1)
-		goto drop;
-
-	data = skb->data;
-
-	if (data[0] & QUIC_HEADER_FORM_LONG) {
-		/* Long header */
-		if (skb->len < 6)
-			goto drop;
-
-		offset = 5;
-		dcid.len = data[offset++];
-
-		if (dcid.len > QUIC_MAX_CONNECTION_ID_LEN || skb->len < offset + dcid.len)
-			goto drop;
-
-		memcpy(dcid.data, data + offset, dcid.len);
-	} else {
-		/* Short header - DCID starts at byte 1 */
-		/* Need to know expected length from connection context */
-		dcid.len = 8;  /* Default length */
-
-		if (skb->len < 1 + dcid.len)
-			goto drop;
-
-		memcpy(dcid.data, data + 1, dcid.len);
-	}
-
-	/* Look up connection by DCID */
-	entry = tquic_cid_hash_lookup(&dcid);
-	if (!entry)
-		goto try_sock;
-
-	/* Found connection - deliver to it */
-	conn = container_of(entry->list.next, struct tquic_connection, scid_list);
-	if (conn && conn->qsk) {
-		qsk = conn->qsk;
-		return tquic_udp_recv((struct sock *)qsk, skb);
-	}
-
-try_sock:
-	/* Try the socket directly for new connections */
-	qsk = (struct tquic_sock *)sk->sk_user_data;
-	if (qsk)
-		return tquic_udp_recv((struct sock *)qsk, skb);
-
-drop:
-	kfree_skb(skb);
-	return 0;
-}
-
-/* UDP encap error callback */
-static int tquic_udp_encap_err(struct sock *sk, struct sk_buff *skb, int err,
-			      __be16 port, u32 info, u8 *payload)
-{
-	/* Handle ICMP errors for QUIC connections */
-	struct tquic_sock *qsk = (struct tquic_sock *)sk->sk_user_data;
-
-	if (!qsk || !qsk->conn)
-		return -ENOENT;
-
-	/* Log error for debugging */
-	pr_debug("QUIC: UDP encap error %d for connection\n", err);
-
-	return 0;
-}
-
-/* Initialize UDP encapsulation for a QUIC socket */
-int tquic_udp_encap_init(struct tquic_sock *qsk)
-{
-	struct sock *sk = (struct sock *)qsk;
-	struct socket *sock;
-	struct udp_sock *up;
-	int err;
-	int family = sk->sk_family;
-
-	/* Create UDP socket for encapsulation */
-	err = sock_create_kern(sock_net(sk), family, SOCK_DGRAM, IPPROTO_UDP, &sock);
-	if (err)
-		return err;
-
-	/* Setup UDP encapsulation */
-	up = udp_sk(sock->sk);
-
-	/* Set encapsulation type */
-	inet_sk(sock->sk)->inet_num = 0;  /* Let kernel assign port */
-
-	/* Configure encapsulation callbacks */
-	udp_sk(sock->sk)->encap_type = UDP_ENCAP_GTP0;  /* Reuse existing type */
-	udp_sk(sock->sk)->encap_rcv = tquic_udp_encap_recv;
-	udp_sk(sock->sk)->encap_err_rcv = tquic_udp_encap_err;
-
-	/* Link back to QUIC socket */
-	sock->sk->sk_user_data = qsk;
-
-	/* Enable GRO for better receive performance */
-	udp_set_bit(GRO_ENABLED, up);
-
-	/* Save reference */
-	qsk->udp_sock = sock;
-
-	/* Enable encap needed static key */
-	static_branch_inc(&tquic_encap_needed_key);
-
-	return 0;
-}
-EXPORT_SYMBOL(tquic_udp_encap_init);
-
-/* Destroy UDP encapsulation for a QUIC socket */
-void tquic_udp_encap_destroy(struct tquic_sock *qsk)
-{
-	if (qsk->udp_sock) {
-		/* Clear user data before closing */
-		qsk->udp_sock->sk->sk_user_data = NULL;
-
-		/* Disable encapsulation callbacks */
-		udp_sk(qsk->udp_sock->sk)->encap_type = 0;
-		udp_sk(qsk->udp_sock->sk)->encap_rcv = NULL;
-		udp_sk(qsk->udp_sock->sk)->encap_err_rcv = NULL;
-
-		sock_release(qsk->udp_sock);
-		qsk->udp_sock = NULL;
-
-		static_branch_dec(&tquic_encap_needed_key);
-	}
-}
-EXPORT_SYMBOL(tquic_udp_encap_destroy);
-
-/* Send a QUIC packet via UDP */
-int tquic_udp_send(struct tquic_sock *tsk, struct sk_buff *skb,
-		   struct tquic_path *path)
-{
-	struct socket *sock = tsk->udp_sock;
-	struct sockaddr *dest;
-	struct msghdr msg;
-	struct kvec iov;
-	int len;
-	int err;
-
-	if (!sock)
-		return -ENOENT;
-
-	if (!path)
-		return -EINVAL;
-
-	/* Extract destination address from path */
-	dest = (struct sockaddr *)&path->remote_addr;
-
-	/* Setup message */
-	memset(&msg, 0, sizeof(msg));
-	msg.msg_name = dest;
-
-	if (dest->sa_family == AF_INET)
-		msg.msg_namelen = sizeof(struct sockaddr_in);
-	else if (dest->sa_family == AF_INET6)
-		msg.msg_namelen = sizeof(struct sockaddr_in6);
-	else
-		return -EAFNOSUPPORT;
-
-	iov.iov_base = skb->data;
-	iov.iov_len = skb->len;
-
-	len = skb->len;
-
-	/* Send via UDP socket */
-	err = kernel_sendmsg(sock, &msg, &iov, 1, len);
-	if (err < 0)
-		return err;
-
-	return 0;
-}
-EXPORT_SYMBOL(tquic_udp_send);
-
-/* Receive callback for QUIC UDP packets */
-int tquic_udp_recv(struct sock *sk, struct sk_buff *skb)
-{
-	struct tquic_sock *qsk = tquic_sk(sk);
-	struct tquic_connection *conn = qsk->conn;
-	struct tquic_offload_cb *cb = TQUIC_OFFLOAD_CB(skb);
-	int err;
-
-	/* Parse header for processing */
-	err = tquic_parse_header(skb, cb);
-	if (err) {
-		kfree_skb(skb);
-		return 0;
-	}
-
-	if (conn) {
-		/* Existing connection - process packet */
-		tquic_packet_process(conn, skb);
-	} else if (sk->sk_state == TCP_LISTEN) {
-		/* Server socket - queue for accept */
-		if (sock_owned_by_user(sk)) {
-			if (sk_add_backlog(sk, skb, sk->sk_rcvbuf))
-				kfree_skb(skb);
-		} else {
-			tquic_backlog_rcv(sk, skb);
-		}
-	} else {
-		/* No connection and not listening - drop */
-		kfree_skb(skb);
-	}
-
-	return 0;
-}
-EXPORT_SYMBOL(tquic_udp_recv);
 
 /* QUIC offload operations structure */
 static const struct tquic_offload_ops tquic_offload_ops = {
 	.encrypt	= NULL,  /* Use software by default */
 	.decrypt	= NULL,  /* Use software by default */
 	.gso_segment	= tquic_gso_segment,
-	.gro_receive	= tquic_gro_receive,
-	.gro_complete	= tquic_gro_complete,
+	.gro_receive	= tquic_offload_gro_receive,
+	.gro_complete	= tquic_offload_gro_complete,
 };
 
 const struct tquic_offload_ops *tquic_offload = &tquic_offload_ops;
@@ -924,7 +743,7 @@ skip:
 	skb_gro_postpull_rcsum(skb, uh, sizeof(struct udphdr));
 
 	/* Call QUIC GRO */
-	pp = tquic_gro_receive(head, skb);
+	pp = tquic_offload_gro_receive(head, skb);
 
 	return pp;
 
@@ -945,7 +764,7 @@ static int quic4_gro_complete(struct sk_buff *skb, int nhoff)
 		uh->check = ~udp_v4_check(skb->len - nhoff, iph->saddr,
 					  iph->daddr, 0);
 
-	return tquic_gro_complete(skb, nhoff);
+	return tquic_offload_gro_complete(skb, nhoff);
 }
 
 #if IS_ENABLED(CONFIG_IPV6)
@@ -981,7 +800,7 @@ skip:
 	skb_gro_postpull_rcsum(skb, uh, sizeof(struct udphdr));
 
 	/* Call QUIC GRO */
-	pp = tquic_gro_receive(head, skb);
+	pp = tquic_offload_gro_receive(head, skb);
 
 	return pp;
 
@@ -1002,7 +821,7 @@ static int quic6_gro_complete(struct sk_buff *skb, int nhoff)
 		uh->check = ~udp_v6_check(skb->len - nhoff, &ipv6h->saddr,
 					  &ipv6h->daddr, 0);
 
-	return tquic_gro_complete(skb, nhoff);
+	return tquic_offload_gro_complete(skb, nhoff);
 }
 #endif /* CONFIG_IPV6 */
 
@@ -1042,35 +861,11 @@ static struct net_offload quic6_offload __read_mostly = {
 };
 #endif
 
-/* Module initialization */
-int __init tquic_offload_init(void)
-{
-	int err;
-
-	pr_info("QUIC: Initializing offload support\n");
-
-	/* Register QUIC offload for UDP encapsulation
-	 * Note: QUIC uses existing UDP offload infrastructure rather than
-	 * registering its own protocol offload, since QUIC packets are
-	 * UDP packets at the IP layer.
-	 */
-
-	pr_info("QUIC: Hardware offload support initialized\n");
-	pr_info("QUIC: GSO/GRO support enabled\n");
-
-	return 0;
-}
-
-void __exit tquic_offload_exit(void)
-{
-	pr_info("QUIC: Removing offload support\n");
-
-	/* Offload handlers are unregistered automatically when the
-	 * UDP sockets are closed
-	 */
-
-	pr_info("QUIC: Offload support removed\n");
-}
+/*
+ * Module initialization is handled by tquic_offload.c which provides the
+ * tquic_offload_init() and tquic_offload_exit() functions for the complete
+ * GRO/GSO offload implementation.
+ */
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Linux QUIC Authors");

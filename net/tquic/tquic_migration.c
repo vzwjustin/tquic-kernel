@@ -33,6 +33,8 @@
 #include "tquic_preferred_addr.h"
 #include "core/additional_addresses.h"
 
+#include "tquic_compat.h"
+
 /* Sysctl accessor forward declaration */
 int tquic_sysctl_get_prefer_preferred_address(void);
 

@@ -184,9 +184,9 @@ static bool tquic_percpu_initialized __read_mostly;
 
 /* Forward declarations for proto_ops callbacks */
 static int tquic_stream_release(struct socket *sock);
-static int tquic_stream_bind(struct socket *sock, struct sockaddr *addr,
+static int tquic_stream_bind(struct socket *sock, struct sockaddr_unsized *addr,
 			     int addr_len);
-static int tquic_stream_connect(struct socket *sock, struct sockaddr *addr,
+static int tquic_stream_connect(struct socket *sock, struct sockaddr_unsized *addr,
 				int addr_len, int flags);
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
 static int tquic_stream_accept(struct socket *sock, struct socket *newsock,
@@ -214,9 +214,9 @@ static int tquic_stream_recvmsg(struct socket *sock, struct msghdr *msg,
 
 /* Forward declarations for proto callbacks */
 static void tquic_proto_close(struct sock *sk, long timeout);
-static int tquic_proto_pre_connect(struct sock *sk, struct sockaddr *addr,
+static int tquic_proto_pre_connect(struct sock *sk, struct sockaddr_unsized *addr,
 				   int addr_len);
-static int tquic_proto_connect(struct sock *sk, struct sockaddr *addr,
+static int tquic_proto_connect(struct sock *sk, struct sockaddr_unsized *addr,
 			       int addr_len);
 static int tquic_proto_disconnect(struct sock *sk, int flags);
 static struct sock *tquic_proto_accept(struct sock *sk,
@@ -236,7 +236,7 @@ static int tquic_proto_getsockopt(struct sock *sk, int level, int optname,
 static int tquic_proto_sendmsg(struct sock *sk, struct msghdr *msg, size_t len);
 static int tquic_proto_recvmsg(struct sock *sk, struct msghdr *msg, size_t len,
 			       int flags, int *addr_len);
-static int tquic_proto_bind(struct sock *sk, struct sockaddr *addr,
+static int tquic_proto_bind(struct sock *sk, struct sockaddr_unsized *addr,
 			    int addr_len);
 static int tquic_proto_backlog_rcv(struct sock *sk, struct sk_buff *skb);
 static void tquic_proto_release_cb(struct sock *sk);
@@ -276,13 +276,8 @@ static struct proto tquic_prot = {
 	.sysctl_wmem		= sysctl_tquic_wmem,
 	.sysctl_rmem		= sysctl_tquic_rmem,
 	.sockets_allocated	= &tquic_sockets_allocated,
-	#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
-	.orphan_count		= &tquic_orphan_count_percpu,
+	/* orphan_count removed in kernel 6.12+ */
 	.memory_pressure	= &tquic_memory_pressure_val,
-#else
-	.orphan_count		= &tquic_orphan_count_percpu,
-	.memory_pressure	= &tquic_memory_pressure_val,
-#endif
 	.obj_size		= sizeof(struct tquic_sock),
 	.slab_flags		= SLAB_TYPESAFE_BY_RCU,
 	.no_autobind		= true,
@@ -316,13 +311,8 @@ static struct proto tquicv6_prot = {
 	.sysctl_wmem		= sysctl_tquic_wmem,
 	.sysctl_rmem		= sysctl_tquic_rmem,
 	.sockets_allocated	= &tquic_sockets_allocated,
-	#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
-	.orphan_count		= &tquic_orphan_count_percpu,
+	/* orphan_count removed in kernel 6.12+ */
 	.memory_pressure	= &tquic_memory_pressure_val,
-#else
-	.orphan_count		= &tquic_orphan_count_percpu,
-	.memory_pressure	= &tquic_memory_pressure_val,
-#endif
 	.obj_size		= sizeof(struct tquic_sock),
 	.slab_flags		= SLAB_TYPESAFE_BY_RCU,
 	.no_autobind		= true,
@@ -350,18 +340,20 @@ static void tquic_proto_close(struct sock *sk, long timeout)
 	release_sock(sk);
 }
 
-static int tquic_proto_pre_connect(struct sock *sk, struct sockaddr *addr,
+static int tquic_proto_pre_connect(struct sock *sk, struct sockaddr_unsized *uaddr,
 				   int addr_len)
 {
+	struct sockaddr *addr = (struct sockaddr *)uaddr;
 	if (addr->sa_family != AF_INET && addr->sa_family != AF_INET6)
 		return -EAFNOSUPPORT;
 
 	return 0;
 }
 
-static int tquic_proto_connect(struct sock *sk, struct sockaddr *addr,
+static int tquic_proto_connect(struct sock *sk, struct sockaddr_unsized *uaddr,
 			       int addr_len)
 {
+	struct sockaddr *addr = (struct sockaddr *)uaddr;
 	struct tquic_sock *tsk = tquic_sk(sk);
 	struct tquic_connection *conn;
 	int err;
@@ -862,8 +854,10 @@ static int tquic_proto_recvmsg(struct sock *sk, struct msghdr *msg, size_t len,
 	return tquic_recvmsg(sk, msg, len, flags, addr_len);
 }
 
-static int tquic_proto_bind(struct sock *sk, struct sockaddr *addr, int addr_len)
+static int tquic_proto_bind(struct sock *sk, struct sockaddr_unsized *uaddr,
+			    int addr_len)
 {
+	struct sockaddr *addr = (struct sockaddr *)uaddr;
 	struct tquic_sock *tsk = tquic_sk(sk);
 
 	/* Store bind address */
@@ -959,20 +953,20 @@ static int tquic_stream_release(struct socket *sock)
 	return 0;
 }
 
-static int tquic_stream_bind(struct socket *sock, struct sockaddr *addr,
+static int tquic_stream_bind(struct socket *sock, struct sockaddr_unsized *addr,
 			     int addr_len)
 {
 	struct sock *sk = sock->sk;
 	return tquic_proto_bind(sk, addr, addr_len);
 }
 
-static int tquic_stream_connect(struct socket *sock, struct sockaddr *addr,
+static int tquic_stream_connect(struct socket *sock, struct sockaddr_unsized *addr,
 				int addr_len, int flags)
 {
 	struct sock *sk = sock->sk;
 	int err;
 
-	err = tquic_connect(sk, (struct sockaddr *)addr, addr_len);
+	err = tquic_connect(sk, addr, addr_len);
 	if (err)
 		return err;
 

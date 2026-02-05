@@ -27,6 +27,13 @@ struct tquic_bonding_ctx;
 struct ctl_table_header;
 
 /*
+ * Forward declare tquic_pm_state and create an alias.
+ * Some code uses tquic_path_manager interchangeably with tquic_pm_state.
+ */
+struct tquic_pm_state;
+#define tquic_path_manager tquic_pm_state
+
+/*
  * Path Manager Types
  *
  * Following MPTCP pattern, path managers can be either kernel-driven
@@ -215,7 +222,7 @@ int tquic_pm_coordinate_preferred_and_additional(struct tquic_connection *conn);
 
 /* Path lookup and enumeration APIs */
 struct tquic_path *tquic_pm_get_path(struct tquic_pm_state *pm, u32 path_id);
-int tquic_pm_get_active_paths(struct tquic_path_manager *pm,
+int tquic_pm_get_active_paths(struct tquic_pm_state *pm,
 			      struct tquic_path **paths, int max_paths);
 
 /* Path state name table for debug/trace output */

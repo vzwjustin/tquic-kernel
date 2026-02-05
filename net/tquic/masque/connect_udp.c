@@ -32,6 +32,7 @@
 #include <net/ip.h>
 #include <net/ipv6.h>
 #include <net/tquic.h>
+#include "../tquic_compat.h"
 #include <net/tquic_http3.h>
 #include <linux/unaligned.h>
 
