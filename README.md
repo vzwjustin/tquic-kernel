@@ -4,7 +4,9 @@
 
 ## Overview
 
-TQUIC is a complete, production-ready kernel module implementing the QUIC protocol (RFC 9000, 9001, 9002) with multipath support for WAN bonding. Unlike userspace QUIC implementations, TQUIC operates directly in the Linux kernel for maximum performance and integration with the networking stack.
+TQUIC is an **experimental** kernel module implementing the QUIC protocol (RFC 9000, 9001, 9002) with multipath support for WAN bonding. Unlike userspace QUIC implementations, TQUIC operates directly in the Linux kernel for maximum performance and integration with the networking stack.
+
+> **⚠️ NOT PRODUCTION READY**: This project is under active development. APIs may change, and there may be undiscovered bugs. Use at your own risk in non-production environments.
 
 **260,766 lines of C code** (38,410 in net/quic + 214,594 in net/tquic + 7,762 headers) implementing the full QUIC/HTTP3 stack with advanced multipath, security, and performance features.
 
@@ -89,7 +91,7 @@ All stub implementations and placeholders have been replaced with production cod
 - ✅ PRR (Proportional Rate Reduction)
 - ✅ ACK_FREQUENCY extension
 
-**Status:** Production-ready with zero known security vulnerabilities.
+**Status:** Experimental - security audit completed but not production ready.
 
 ### Latest Release (Commit 26224b56 - February 2026)
 **Changes:** 24 files modified, +1,298 insertions, -379 deletions
@@ -542,13 +544,13 @@ Design targets for production deployment:
 | Interop Testing | ✅ Framework Ready | Test harness in `net/tquic/test/interop/` |
 | Performance Testing | ✅ Framework Ready | KUnit performance tests available |
 
-**Production Status:** Ready for deployment. All security vulnerabilities addressed, all protocol features implemented, comprehensive testing complete.
+**Development Status:** Experimental. Security audit completed, protocol features implemented, testing framework ready. Not recommended for production use.
 
 ## Author
 
 **Justin Adams** ([@vzwjustin](https://github.com/vzwjustin))
 
-Designed and built from the ground up as a true kernel-level QUIC implementation for real-world WAN bonding. This is not a port or wrapper—it's a native Linux kernel module engineered for production deployment.
+Designed and built from the ground up as a true kernel-level QUIC implementation for real-world WAN bonding. This is not a port or wrapper—it's a native Linux kernel module. Currently experimental and under active development.
 
 ## Acknowledgments
 
