@@ -1034,18 +1034,21 @@ static void tquic_v4_protosw_exit(void)
 
 static int tquic_v4_add_protocol(void)
 {
-	if (inet_add_protocol(&tquic_protocol, IPPROTO_TQUIC) < 0) {
-		pr_err("Failed to register TQUIC protocol handler\n");
-		return -EAGAIN;
-	}
-
-	pr_info("TQUIC IPv4 protocol handler registered\n");
+	/*
+	 * TQUIC uses UDP encapsulation (like standard QUIC per RFC 9000).
+	 * Raw IP protocol handlers are only for protocols < 256.
+	 * IPPROTO_TQUIC (263) is used for socket creation identification
+	 * but packets are received via UDP, not raw IP.
+	 *
+	 * Skip raw protocol registration - UDP encap is handled in tquic_udp.c
+	 */
+	pr_info("TQUIC uses UDP encapsulation, no raw IP protocol handler needed\n");
 	return 0;
 }
 
 static void tquic_v4_del_protocol(void)
 {
-	inet_del_protocol(&tquic_protocol, IPPROTO_TQUIC);
+	/* Nothing to unregister - UDP encapsulation doesn't use inet_add_protocol */
 }
 
 /*
@@ -1078,18 +1081,17 @@ static void tquic_v6_protosw_exit(void)
 
 static int tquic_v6_add_protocol(void)
 {
-	if (inet6_add_protocol(&tquicv6_protocol, IPPROTO_TQUIC) < 0) {
-		pr_err("Failed to register TQUICv6 protocol handler\n");
-		return -EAGAIN;
-	}
-
-	pr_info("TQUIC IPv6 protocol handler registered\n");
+	/*
+	 * TQUIC uses UDP encapsulation (like standard QUIC per RFC 9000).
+	 * Skip raw protocol registration - UDP encap is handled in tquic_udp.c
+	 */
+	pr_info("TQUICv6 uses UDP encapsulation, no raw IP protocol handler needed\n");
 	return 0;
 }
 
 static void tquic_v6_del_protocol(void)
 {
-	inet6_del_protocol(&tquicv6_protocol, IPPROTO_TQUIC);
+	/* Nothing to unregister - UDP encapsulation doesn't use inet6_add_protocol */
 }
 
 #else /* !CONFIG_IPV6 */

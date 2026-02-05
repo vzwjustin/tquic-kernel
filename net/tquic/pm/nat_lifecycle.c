@@ -53,6 +53,7 @@
 #include <linux/sort.h>
 #include <net/sock.h>
 #include <net/tquic.h>
+#include "../tquic_compat.h"
 
 #include "nat_lifecycle.h"
 #include "nat_keepalive.h"

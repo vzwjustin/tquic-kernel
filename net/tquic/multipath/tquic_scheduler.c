@@ -37,7 +37,9 @@
 /*
  * Maximum number of paths supported per connection
  */
+#ifndef TQUIC_MAX_PATHS
 #define TQUIC_MAX_PATHS		8
+#endif
 
 /*
  * Scheduler name maximum length
@@ -63,10 +65,12 @@
  * The external multipath scheduler API (tquic_mp_sched_ops) uses the
  * enum tquic_path_state defined in <net/tquic.h>.
  */
-#define TQUIC_INT_PATH_ACTIVE	0	/* Path is active and usable */
-#define TQUIC_INT_PATH_STANDBY	1	/* Path is standby (backup only) */
-#define TQUIC_INT_PATH_FAILED	2	/* Path has failed */
-#define TQUIC_INT_PATH_PROBING	3	/* Path is being probed */
+enum tquic_int_path_state {
+	TQUIC_INT_PATH_ACTIVE = 0,	/* Path is active and usable */
+	TQUIC_INT_PATH_STANDBY = 1,	/* Path is standby (backup only) */
+	TQUIC_INT_PATH_FAILED = 2,	/* Path has failed */
+	TQUIC_INT_PATH_PROBING = 3,	/* Path is being probed */
+};
 
 /*
  * Forward declarations for internal scheduler types
@@ -113,7 +117,7 @@ struct tquic_int_path_cc {
  */
 struct tquic_int_path {
 	u8			path_id;
-	int			state;	/* TQUIC_INT_PATH_* values */
+	enum tquic_int_path_state state;	/* Internal path state */
 	u32			weight;		/* Configured weight */
 	u32			priority;	/* Priority (lower = higher) */
 
@@ -165,6 +169,9 @@ struct tquic_int_connection {
 
 	/* Connection state for scheduler set check */
 	int			state;
+
+	/* Socket reference for per-netns scheduler lookup */
+	struct sock		*sk;
 
 	struct rcu_head		rcu;
 };
@@ -503,7 +510,7 @@ int tquic_sched_set(struct tquic_connection *conn, const char *name)
 		return -EISCONN;
 
 	rcu_read_lock();
-	new_sched = tquic_sched_find(name);
+	new_sched = tquic_int_sched_find(name);
 	if (!new_sched) {
 		rcu_read_unlock();
 		return -ENOENT;
@@ -1962,9 +1969,12 @@ void tquic_path_remove(struct tquic_connection *conn, u8 path_id)
 EXPORT_SYMBOL_GPL(tquic_path_remove);
 
 /*
- * Mark a path as validated and active
+ * Mark an internal path as validated and active
+ *
+ * Note: This is for internal scheduler paths (tquic_int_path).
+ * The public API tquic_path_validate() in tquic.h takes struct tquic_path *.
  */
-void tquic_path_validate(struct tquic_connection *conn, u8 path_id)
+void tquic_int_path_validate(struct tquic_connection *conn, u8 path_id)
 {
 	struct tquic_path *path;
 
@@ -1981,38 +1991,12 @@ void tquic_path_validate(struct tquic_connection *conn, u8 path_id)
 
 	spin_unlock(&conn->lock);
 }
-EXPORT_SYMBOL_GPL(tquic_path_validate);
+EXPORT_SYMBOL_GPL(tquic_int_path_validate);
 
 /*
- * Set path state
+ * tquic_path_set_state is defined in core/quic_path.c and exported from there.
+ * Use the implementation from the core path module.
  */
-void tquic_path_set_state(struct tquic_connection *conn, u8 path_id,
-			  enum tquic_path_state state)
-{
-	struct tquic_path *path;
-	enum tquic_path_state old_state;
-
-	spin_lock(&conn->lock);
-
-	path = tquic_find_path(conn, path_id);
-	if (!path) {
-		spin_unlock(&conn->lock);
-		return;
-	}
-
-	old_state = READ_ONCE(path->state);
-	/* Use WRITE_ONCE for lockless readers in schedulers */
-	WRITE_ONCE(path->state, state);
-
-	/* Update active count */
-	if (old_state == TQUIC_PATH_ACTIVE && state != TQUIC_PATH_ACTIVE)
-		conn->active_paths--;
-	else if (old_state != TQUIC_PATH_ACTIVE && state == TQUIC_PATH_ACTIVE)
-		conn->active_paths++;
-
-	spin_unlock(&conn->lock);
-}
-EXPORT_SYMBOL_GPL(tquic_path_set_state);
 
 /*
  * Check if failover queue has pending retransmissions
@@ -2049,10 +2033,13 @@ struct tquic_sent_packet *tquic_sched_get_failover_packet(struct tquic_failover_
 EXPORT_SYMBOL_GPL(tquic_sched_get_failover_packet);
 
 /*
- * Select path(s) for sending
+ * Select path(s) for sending (internal scheduler API)
+ *
+ * Note: This is for internal schedulers using tquic_path_selection.
+ * The public API tquic_select_path() in tquic.h returns struct tquic_path *.
  */
-int tquic_select_path(struct tquic_connection *conn,
-		      struct tquic_path_selection *sel)
+int tquic_int_select_path(struct tquic_connection *conn,
+			  struct tquic_path_selection *sel)
 {
 	int ret;
 
@@ -2065,7 +2052,7 @@ int tquic_select_path(struct tquic_connection *conn,
 
 	return ret;
 }
-EXPORT_SYMBOL_GPL(tquic_select_path);
+EXPORT_SYMBOL_GPL(tquic_int_select_path);
 
 /*
  * Report feedback to scheduler
@@ -2206,7 +2193,7 @@ static int tquic_sched_stats_show(struct seq_file *m, void *v)
 	seq_puts(m, "========================\n\n");
 
 	/* Get per-netns default scheduler name */
-	default_name = tquic_sched_get_default(net);
+	default_name = tquic_mp_sched_get_default(net);
 	if (!default_name)
 		default_name = "aggregate";
 
@@ -2228,14 +2215,15 @@ static int tquic_sched_stats_show(struct seq_file *m, void *v)
 
 static int tquic_sched_stats_open(struct inode *inode, struct file *file)
 {
-	return single_open_net(inode, file, tquic_sched_stats_show);
+	return single_open(file, tquic_sched_stats_show,
+			   pde_data(inode));
 }
 
 static const struct proc_ops tquic_sched_stats_ops = {
 	.proc_open	= tquic_sched_stats_open,
 	.proc_read	= seq_read,
 	.proc_lseek	= seq_lseek,
-	.proc_release	= single_release_net,
+	.proc_release	= single_release,
 };
 
 /*
@@ -2327,7 +2315,7 @@ tquic_get_default_sched_netns(struct net *net)
  * This allows containers to have different default schedulers.
  * The scheduler is validated before being set.
  */
-int tquic_sched_set_default(struct net *net, const char *name)
+int tquic_mp_sched_set_default(struct net *net, const char *name)
 {
 	struct tquic_sched_internal *sched, *old;
 
@@ -2335,7 +2323,7 @@ int tquic_sched_set_default(struct net *net, const char *name)
 		return -EINVAL;
 
 	rcu_read_lock();
-	sched = tquic_sched_find(name);
+	sched = tquic_int_sched_find(name);
 	if (!sched) {
 		rcu_read_unlock();
 		return -ENOENT;
@@ -2361,12 +2349,12 @@ int tquic_sched_set_default(struct net *net, const char *name)
 
 	return 0;
 }
-EXPORT_SYMBOL_GPL(tquic_sched_set_default);
+EXPORT_SYMBOL_GPL(tquic_mp_sched_set_default);
 
 /*
  * Get default scheduler name for a network namespace
  */
-const char *tquic_sched_get_default(struct net *net)
+const char *tquic_mp_sched_get_default(struct net *net)
 {
 	struct tquic_sched_internal *sched;
 	const char *name;
@@ -2384,21 +2372,25 @@ const char *tquic_sched_get_default(struct net *net)
 
 	return name;
 }
-EXPORT_SYMBOL_GPL(tquic_sched_get_default);
+EXPORT_SYMBOL_GPL(tquic_mp_sched_get_default);
 
 /* =========================================================================
- * Per-Connection Scheduler Initialization (New API from tquic_sched.h)
+ * Per-Connection Scheduler Initialization (Internal API)
+ *
+ * Note: These functions work with internal scheduler types (tquic_int_connection).
+ * The public API in tquic_sched.h uses different types. These internal functions
+ * are exported for use by other internal TQUIC modules.
  * ========================================================================= */
 
 /*
- * Initialize scheduler for a connection
+ * Initialize internal scheduler for a connection
  *
  * Per CONTEXT.md: "Scheduler locked at connection establishment,
  * cannot change mid-connection"
  *
  * If name is NULL or empty, uses per-netns default.
  */
-int tquic_sched_init_conn(struct tquic_connection *conn, const char *name)
+int tquic_int_mp_sched_init_conn(struct tquic_connection *conn, const char *name)
 {
 	struct tquic_sched_internal *sched;
 	struct net *net;
@@ -2415,7 +2407,7 @@ int tquic_sched_init_conn(struct tquic_connection *conn, const char *name)
 	if (name && name[0]) {
 		/* Explicit scheduler name specified */
 		rcu_read_lock();
-		sched = tquic_sched_find(name);
+		sched = tquic_int_sched_find(name);
 		rcu_read_unlock();
 	} else {
 		/* Use per-netns default */
@@ -2465,12 +2457,12 @@ int tquic_sched_init_conn(struct tquic_connection *conn, const char *name)
 
 	return 0;
 }
-EXPORT_SYMBOL_GPL(tquic_sched_init_conn);
+EXPORT_SYMBOL_GPL(tquic_int_mp_sched_init_conn);
 
 /*
- * Release scheduler resources for a connection
+ * Release internal scheduler resources for a connection
  */
-void tquic_sched_release_conn(struct tquic_connection *conn)
+void tquic_int_mp_sched_release_conn(struct tquic_connection *conn)
 {
 	struct tquic_sched_internal *sched;
 
@@ -2490,14 +2482,19 @@ void tquic_sched_release_conn(struct tquic_connection *conn)
 	if (sched)
 		module_put(sched->owner);
 }
-EXPORT_SYMBOL_GPL(tquic_sched_release_conn);
+EXPORT_SYMBOL_GPL(tquic_int_mp_sched_release_conn);
 
 /*
- * Get path selection for next packet (new API with path_result struct)
+ * Get path selection for next packet (internal API with path_result struct)
+ *
+ * Note: This function works with internal scheduler types. The returned
+ * path pointers in result are actually tquic_int_path pointers cast to
+ * the public tquic_path type. Callers within the internal scheduler code
+ * should cast back to tquic_int_path as needed.
  */
-int tquic_sched_get_path(struct tquic_connection *conn,
-			 struct tquic_sched_path_result *result,
-			 u32 flags)
+int tquic_int_mp_sched_get_path(struct tquic_connection *conn,
+				struct tquic_sched_path_result *result,
+				u32 flags)
 {
 	struct tquic_sched_internal *sched;
 	int ret;
@@ -2518,6 +2515,10 @@ int tquic_sched_get_path(struct tquic_connection *conn,
 	 * The existing select_path uses tquic_path_selection struct.
 	 * We adapt it to the new tquic_sched_path_result struct.
 	 * The internal select_path fills sel->paths[] and sel->num_paths.
+	 *
+	 * Cast through void * to avoid macro interference with the cast.
+	 * The internal tquic_int_path and public tquic_path are separate
+	 * types, but the scheduler code knows to handle them appropriately.
 	 */
 	{
 		struct tquic_path_selection sel = {0};
@@ -2525,9 +2526,9 @@ int tquic_sched_get_path(struct tquic_connection *conn,
 
 		ret = sched->select_path(conn, &sel);
 		if (ret == 0 && sel.num_paths > 0) {
-			result->primary = sel.paths[0];
+			result->primary = (void *)sel.paths[0];
 			if (sel.num_paths > 1)
-				result->backup = sel.paths[1];
+				result->backup = (void *)sel.paths[1];
 			if (sel.duplicate)
 				result->flags |= TQUIC_SCHED_REDUNDANT;
 		}
@@ -2537,7 +2538,7 @@ int tquic_sched_get_path(struct tquic_connection *conn,
 
 	return ret;
 }
-EXPORT_SYMBOL_GPL(tquic_sched_get_path);
+EXPORT_SYMBOL_GPL(tquic_int_mp_sched_get_path);
 
 /* =========================================================================
  * Global Default Scheduler Configuration (Legacy API)
@@ -2551,7 +2552,7 @@ int tquic_set_default_scheduler(const char *name)
 	struct tquic_sched_internal *sched;
 
 	rcu_read_lock();
-	sched = tquic_sched_find(name);
+	sched = tquic_int_sched_find(name);
 	rcu_read_unlock();
 
 	if (!sched)
@@ -2662,13 +2663,13 @@ int tquic_register_scheduler(struct tquic_sched_ops *sched)
 {
 	struct tquic_sched_ops *existing;
 
-	if (!sched || !sched->name[0]) {
+	if (!sched || !sched->name || !sched->name[0]) {
 		pr_err("Invalid scheduler: missing name\n");
 		return -EINVAL;
 	}
 
-	if (!sched->get_path) {
-		pr_err("Scheduler '%s': missing required get_path callback\n",
+	if (!sched->select) {
+		pr_err("Scheduler '%s': missing required select callback\n",
 		       sched->name);
 		return -EINVAL;
 	}
@@ -2742,23 +2743,27 @@ EXPORT_SYMBOL_GPL(tquic_new_sched_find);
  * @path: Path that received the ACK
  * @acked_bytes: Number of bytes acknowledged
  *
- * Called from the ACK processing path to notify schedulers that
- * implement the ack_received callback.
+ * Called from the ACK processing path to notify internal schedulers
+ * via their feedback callback. For multipath schedulers, use
+ * tquic_mp_sched_notify_ack() instead.
  */
 void tquic_new_sched_notify_ack(struct tquic_connection *conn,
 				struct tquic_path *path,
 				u64 acked_bytes)
 {
-	struct tquic_sched_ops *sched;
+	struct tquic_sched_feedback fb;
 
 	if (!conn || !path)
 		return;
 
-	rcu_read_lock();
-	sched = conn->scheduler;
-	if (sched && sched->ack_received)
-		sched->ack_received(conn, path, acked_bytes);
-	rcu_read_unlock();
+	fb.path_id = path->path_id;
+	fb.is_ack = true;
+	fb.packet_number = 0;
+	fb.rtt_us = path->cc.smoothed_rtt_us;
+	fb.bytes = (u32)acked_bytes;
+	fb.timestamp = tquic_get_time_us();
+
+	tquic_sched_feedback(conn, &fb);
 }
 EXPORT_SYMBOL_GPL(tquic_new_sched_notify_ack);
 
@@ -2768,23 +2773,27 @@ EXPORT_SYMBOL_GPL(tquic_new_sched_notify_ack);
  * @path: Path that detected loss
  * @lost_bytes: Number of bytes lost
  *
- * Called from the loss detection path to notify schedulers that
- * implement the loss_detected callback.
+ * Called from the loss detection path to notify internal schedulers
+ * via their feedback callback. For multipath schedulers, use
+ * tquic_mp_sched_notify_loss() instead.
  */
 void tquic_new_sched_notify_loss(struct tquic_connection *conn,
 				 struct tquic_path *path,
 				 u64 lost_bytes)
 {
-	struct tquic_sched_ops *sched;
+	struct tquic_sched_feedback fb;
 
 	if (!conn || !path)
 		return;
 
-	rcu_read_lock();
-	sched = conn->scheduler;
-	if (sched && sched->loss_detected)
-		sched->loss_detected(conn, path, lost_bytes);
-	rcu_read_unlock();
+	fb.path_id = path->path_id;
+	fb.is_ack = false;
+	fb.packet_number = 0;
+	fb.rtt_us = 0;
+	fb.bytes = (u32)lost_bytes;
+	fb.timestamp = tquic_get_time_us();
+
+	tquic_sched_feedback(conn, &fb);
 }
 EXPORT_SYMBOL_GPL(tquic_new_sched_notify_loss);
 
@@ -2807,6 +2816,14 @@ EXPORT_SYMBOL_GPL(tquic_new_sched_notify_loss);
 #undef TQUIC_PATH_FAILED
 #undef TQUIC_PATH_PROBING
 #undef TQUIC_CONN_IDLE
+
+/*
+ * Multipath Scheduler Registration (in-tree only)
+ *
+ * For out-of-tree builds, these functions are provided by mp_sched_registry.c
+ * which has simpler implementations that don't depend on in-kernel netns fields.
+ */
+#ifndef TQUIC_OUT_OF_TREE
 
 /*
  * Global list for multipath schedulers (tquic_mp_sched_ops)
@@ -2921,7 +2938,7 @@ void tquic_mp_sched_notify_ack(struct tquic_connection *conn,
 		return;
 
 	rcu_read_lock();
-	sched = conn->scheduler;
+	sched = (struct tquic_mp_sched_ops *)conn->scheduler;
 	if (sched && sched->ack_received)
 		sched->ack_received(conn, path, acked_bytes);
 	rcu_read_unlock();
@@ -2947,7 +2964,7 @@ void tquic_mp_sched_notify_loss(struct tquic_connection *conn,
 		return;
 
 	rcu_read_lock();
-	sched = conn->scheduler;
+	sched = (struct tquic_mp_sched_ops *)conn->scheduler;
 	if (sched && sched->loss_detected)
 		sched->loss_detected(conn, path, lost_bytes);
 	rcu_read_unlock();
@@ -3024,5 +3041,7 @@ void __exit tquic_scheduler_exit(void)
 
 	pr_info("TQUIC scheduler framework unloaded\n");
 }
+
+#endif /* !TQUIC_OUT_OF_TREE */
 
 /* Note: module_init/exit handled by main protocol.c */

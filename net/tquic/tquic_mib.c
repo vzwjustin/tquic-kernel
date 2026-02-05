@@ -102,8 +102,7 @@ static const struct snmp_mib tquic_snmp_list[] = {
 	SNMP_MIB_ITEM("EquicKeyUpdate", TQUIC_MIB_EQUIC_KEY_UPDATE),
 	SNMP_MIB_ITEM("EquicAeadLimit", TQUIC_MIB_EQUIC_AEAD_LIMIT),
 	SNMP_MIB_ITEM("EquicNoViablePath", TQUIC_MIB_EQUIC_NO_VIABLE_PATH),
-
-	SNMP_MIB_SENTINEL
+	/* Kernel 6.12+: No sentinel needed - use ARRAY_SIZE() for iteration */
 };
 
 /**

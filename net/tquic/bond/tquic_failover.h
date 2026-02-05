@@ -112,6 +112,9 @@ struct tquic_retx_queue {
 	size_t			bytes;		/* Total bytes queued */
 };
 
+/* Forward declaration */
+struct tquic_failover_ctx;
+
 /*
  * Path timeout tracking
  *
@@ -123,6 +126,8 @@ struct tquic_path_timeout {
 	u32			timeout_ms;	/* Calculated timeout */
 	bool			timeout_armed;	/* Timeout timer active */
 	struct delayed_work	timeout_work;	/* Timeout work */
+	struct tquic_failover_ctx *fc;		/* Parent context */
+	u8			path_id;	/* Path identifier */
 };
 
 /*

@@ -33,6 +33,7 @@
 #include "varint.h"
 #include "ack.h"
 #include "ack_frequency.h"
+#include "../tquic_compat.h"
 
 /*
  * =============================================================================

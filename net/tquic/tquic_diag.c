@@ -466,7 +466,7 @@ static const struct inet_diag_handler tquic_diag_handler = {
 	.dump_one	 = tquic_diag_dump_one,
 	.idiag_get_info  = tquic_diag_get_info,
 	.idiag_get_aux   = tquic_diag_get_aux,
-	.idiag_get_aux_size = tquic_diag_get_aux_size,
+	/* idiag_get_aux_size removed in kernel 6.12+ */
 	.idiag_type	 = IPPROTO_TQUIC,
 	.idiag_info_size = sizeof(struct tquic_info),
 };

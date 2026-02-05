@@ -29,10 +29,16 @@
  * The sender must not send more data than the receiver has advertised.
  */
 
-/* Default flow control window sizes */
+/* Default flow control window sizes (may be defined in tquic.h) */
+#ifndef TQUIC_DEFAULT_MAX_DATA
 #define TQUIC_DEFAULT_MAX_DATA			(16 * 1024 * 1024)	/* 16 MB */
+#endif
+#ifndef TQUIC_DEFAULT_MAX_STREAM_DATA
 #define TQUIC_DEFAULT_MAX_STREAM_DATA		(1 * 1024 * 1024)	/* 1 MB */
+#endif
+#ifndef TQUIC_DEFAULT_MAX_STREAMS
 #define TQUIC_DEFAULT_MAX_STREAMS		256
+#endif
 
 /* Flow control auto-tuning parameters */
 #define TQUIC_FC_WINDOW_UPDATE_THRESHOLD	2	/* Update at 1/2 window */
@@ -40,9 +46,13 @@
 #define TQUIC_FC_MAX_WINDOW			(64 * 1024 * 1024)	/* 64 MB */
 #define TQUIC_FC_AUTOTUNE_MULTIPLIER		2	/* Double window on autotune */
 
-/* Maximum data and stream limits */
+/* Maximum data and stream limits (may be defined in tquic.h) */
+#ifndef TQUIC_MAX_DATA
 #define TQUIC_MAX_DATA				((1ULL << 62) - 1)
+#endif
+#ifndef TQUIC_MAX_STREAMS
 #define TQUIC_MAX_STREAMS			((1ULL << 60) - 1)
+#endif
 
 /*
  * Flow control uses struct tquic_flow_control from <net/tquic.h>

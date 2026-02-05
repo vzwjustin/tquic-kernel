@@ -628,37 +628,43 @@ int tquic_mp_generate_ack(struct tquic_mp_path_ack_state *state,
 			  int pn_space, u8 *buf, size_t buf_len,
 			  bool include_ecn, u8 ack_delay_exponent)
 {
-	struct tquic_mp_ack frame;
+	struct tquic_mp_ack *frame;
 	struct tquic_mp_ack_range_entry *range;
 	u64 prev_smallest;
 	u32 range_idx = 0;
+	int ret;
 
 	if (!state || !buf)
 		return -EINVAL;
+
+	/* Allocate frame dynamically - it's too large for stack */
+	frame = kzalloc(sizeof(*frame), GFP_ATOMIC);
+	if (!frame)
+		return -ENOMEM;
 
 	spin_lock(&state->lock);
 
 	if (list_empty(&state->ack_ranges[pn_space])) {
 		spin_unlock(&state->lock);
+		kfree(frame);
 		return -ENODATA;
 	}
 
-	memset(&frame, 0, sizeof(frame));
-	frame.path_id = state->path_id;
-	frame.has_ecn = include_ecn && state->ecn_validated;
+	frame->path_id = state->path_id;
+	frame->has_ecn = include_ecn && state->ecn_validated;
 
 	/* Get largest acknowledged from first range */
 	range = list_first_entry(&state->ack_ranges[pn_space],
 				 struct tquic_mp_ack_range_entry, list);
-	frame.largest_ack = range->end;
-	frame.first_ack_range = range->end - range->start;
+	frame->largest_ack = range->end;
+	frame->first_ack_range = range->end - range->start;
 
 	/* Calculate ACK delay */
-	frame.ack_delay = ktime_us_delta(ktime_get(),
+	frame->ack_delay = ktime_us_delta(ktime_get(),
 					 state->largest_received_time[pn_space]);
 
 	/* Count additional ranges (excluding first) */
-	frame.ack_range_count = state->num_ack_ranges[pn_space] - 1;
+	frame->ack_range_count = state->num_ack_ranges[pn_space] - 1;
 
 	/* Build additional ranges */
 	prev_smallest = range->start;
@@ -666,23 +672,25 @@ int tquic_mp_generate_ack(struct tquic_mp_path_ack_state *state,
 		if (range_idx >= TQUIC_MP_MAX_ACK_RANGES)
 			break;
 
-		frame.ranges[range_idx].gap = prev_smallest - range->end - 2;
-		frame.ranges[range_idx].ack_range_len = range->end - range->start;
+		frame->ranges[range_idx].gap = prev_smallest - range->end - 2;
+		frame->ranges[range_idx].ack_range_len = range->end - range->start;
 		prev_smallest = range->start;
 		range_idx++;
 	}
 
 	/* ECN counts if requested */
-	if (frame.has_ecn) {
-		frame.ect0_count = state->ecn_acked.ect0;
-		frame.ect1_count = state->ecn_acked.ect1;
-		frame.ecn_ce_count = state->ecn_acked.ce;
+	if (frame->has_ecn) {
+		frame->ect0_count = state->ecn_acked.ect0;
+		frame->ect1_count = state->ecn_acked.ect1;
+		frame->ecn_ce_count = state->ecn_acked.ce;
 	}
 
 	spin_unlock(&state->lock);
 
 	/* Write the frame */
-	return tquic_mp_write_ack(&frame, buf, buf_len, ack_delay_exponent);
+	ret = tquic_mp_write_ack(frame, buf, buf_len, ack_delay_exponent);
+	kfree(frame);
+	return ret;
 }
 EXPORT_SYMBOL_GPL(tquic_mp_generate_ack);
 

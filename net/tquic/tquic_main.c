@@ -53,11 +53,9 @@ MODULE_VERSION("1.0.0");
 /* Global state */
 struct rhashtable tquic_conn_table;
 EXPORT_SYMBOL_GPL(tquic_conn_table);
-static DEFINE_SPINLOCK(tquic_lock);
 static struct kmem_cache *tquic_conn_cache;
 static struct kmem_cache *tquic_stream_cache;
 static struct kmem_cache *tquic_path_cache;
-static struct proc_dir_entry *tquic_proc_dir;
 
 /* Connection hashtable params */
 static const struct rhashtable_params tquic_conn_params = {
@@ -67,13 +65,10 @@ static const struct rhashtable_params tquic_conn_params = {
 	.automatic_shrinking = true,
 };
 
-/* Registered schedulers */
-static LIST_HEAD(tquic_schedulers);
-static DEFINE_RWLOCK(tquic_sched_lock);
-
-/* Registered congestion controllers */
-static LIST_HEAD(tquic_cong_list);
-static DEFINE_RWLOCK(tquic_cong_lock);
+/*
+ * Scheduler registration is handled by multipath/tquic_scheduler.c which
+ * provides tquic_register_scheduler() and tquic_unregister_scheduler().
+ */
 
 /* Default scheduler name */
 static char tquic_default_scheduler[TQUIC_MAX_SCHED_NAME] = "minrtt";
@@ -121,7 +116,7 @@ void tquic_conn_destroy(struct tquic_connection *conn)
 	/* Free all paths */
 	list_for_each_entry_safe(path, tmp_path, &conn->paths, list) {
 		list_del(&path->list);
-		del_timer_sync(&path->validation_timer);
+		timer_delete_sync(&path->validation_timer);
 		kmem_cache_free(tquic_path_cache, path);
 	}
 
@@ -264,8 +259,8 @@ int tquic_conn_remove_path(struct tquic_connection *conn, u32 path_id)
 		return -ENOENT;
 
 	/* Stop validation timer */
-	del_timer_sync(&path->validation.timer);
-	del_timer_sync(&path->validation_timer);
+	timer_delete_sync(&path->validation.timer);
+	timer_delete_sync(&path->validation_timer);
 
 	/* Flush response queue */
 	skb_queue_purge(&path->response.queue);
@@ -556,28 +551,11 @@ EXPORT_SYMBOL_GPL(tquic_stream_close);
 
 /*
  * Scheduler Registration
+ *
+ * tquic_register_scheduler() and tquic_unregister_scheduler() are defined
+ * in multipath/tquic_scheduler.c which provides the complete scheduler
+ * registration framework with validation and per-netns support.
  */
-
-int tquic_register_scheduler(struct tquic_sched_ops *ops)
-{
-	write_lock(&tquic_sched_lock);
-	list_add_tail(&ops->list, &tquic_schedulers);
-	write_unlock(&tquic_sched_lock);
-
-	pr_info("tquic: registered scheduler '%s'\n", ops->name);
-	return 0;
-}
-EXPORT_SYMBOL_GPL(tquic_register_scheduler);
-
-void tquic_unregister_scheduler(struct tquic_sched_ops *ops)
-{
-	write_lock(&tquic_sched_lock);
-	list_del(&ops->list);
-	write_unlock(&tquic_sched_lock);
-
-	pr_info("tquic: unregistered scheduler '%s'\n", ops->name);
-}
-EXPORT_SYMBOL_GPL(tquic_unregister_scheduler);
 
 /*
  * Congestion Control Registration

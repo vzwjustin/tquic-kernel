@@ -31,7 +31,7 @@
 #include <linux/uaccess.h>
 #include <crypto/public_key.h>
 #include <crypto/hash.h>
-#include <crypto/akcipher.h>
+#include <crypto/sig.h>
 #include <keys/asymmetric-type.h>
 #include <keys/system_keyring.h>
 #include <net/tquic.h>
@@ -1498,17 +1498,18 @@ out:
  *
  * This is the core signature verification function. It performs standalone cryptographic
  * signature verification for intermediate certificates not in the keyring.
+ *
+ * Uses the newer crypto_sig API (kernel 6.x+) which provides a simpler synchronous
+ * interface for signature verification.
  */
 int tquic_x509_verify_signature(const struct tquic_x509_cert *cert,
 				const struct tquic_x509_cert *issuer)
 {
-	struct crypto_akcipher *tfm = NULL;
-	struct akcipher_request *req = NULL;
-	struct scatterlist sg_sig, sg_digest;
+	struct crypto_sig *tfm = NULL;
 	u8 digest[64];
 	u32 digest_len = 0;
 	int ret;
-	DECLARE_CRYPTO_WAIT(wait);
+	const char *alg_name;
 
 	if (!cert || !issuer)
 		return -EINVAL;
@@ -1538,77 +1539,57 @@ int tquic_x509_verify_signature(const struct tquic_x509_cert *cert,
 		return ret;
 	}
 
-	/* Verify signature based on algorithm type */
+	/* Select algorithm name based on signature algorithm type */
 	switch (cert->signature.pubkey_algo) {
 	case TQUIC_PUBKEY_ALGO_RSA:
-		tfm = crypto_alloc_akcipher("pkcs1pad(rsa,sha256)", 0, 0);
+		alg_name = "pkcs1pad(rsa,sha256)";
 		break;
 	case TQUIC_PUBKEY_ALGO_ECDSA_P256:
 	case TQUIC_PUBKEY_ALGO_ECDSA_P384:
 	case TQUIC_PUBKEY_ALGO_ECDSA_P521:
-		tfm = crypto_alloc_akcipher("ecdsa", 0, 0);
+		alg_name = "ecdsa";
 		break;
 	case TQUIC_PUBKEY_ALGO_ED25519:
-		/*
-		 * Ed25519 (RFC 8032) uses the "ed25519" algorithm in the
-		 * kernel crypto API. For signature verification, we use
-		 * the akcipher interface similar to ECDSA.
-		 */
-		tfm = crypto_alloc_akcipher("ed25519", 0, 0);
-		if (IS_ERR(tfm)) {
-			/*
-			 * Ed25519 may not be available in all kernel configs.
-			 * This is a security-critical path - do NOT accept
-			 * unverified signatures.
-			 */
-			pr_warn("tquic_cert: Ed25519 not available in kernel, "
-				"certificate signature cannot be verified\n");
-			return -EOPNOTSUPP;
-		}
+		alg_name = "ed25519";
 		break;
 	default:
 		pr_debug("tquic_cert: Unsupported signature algorithm\n");
 		return -EINVAL;
 	}
 
+	/* Allocate signature verification tfm */
+	tfm = crypto_alloc_sig(alg_name, 0, 0);
 	if (IS_ERR(tfm)) {
 		ret = PTR_ERR(tfm);
-		pr_debug("tquic_cert: Failed to allocate akcipher: %d\n", ret);
+		pr_debug("tquic_cert: Failed to allocate sig tfm for %s: %d\n",
+			 alg_name, ret);
+		if (cert->signature.pubkey_algo == TQUIC_PUBKEY_ALGO_ED25519) {
+			pr_warn("tquic_cert: Ed25519 not available in kernel, "
+				"certificate signature cannot be verified\n");
+			return -EOPNOTSUPP;
+		}
 		return ret;
 	}
 
 	/* Set public key from issuer certificate */
-	ret = crypto_akcipher_set_pub_key(tfm, issuer->pubkey.key_data,
-					  issuer->pubkey.key_len);
+	ret = crypto_sig_set_pubkey(tfm, issuer->pubkey.key_data,
+				    issuer->pubkey.key_len);
 	if (ret) {
 		pr_debug("tquic_cert: Failed to set public key: %d\n", ret);
 		goto out_free_tfm;
 	}
 
-	req = akcipher_request_alloc(tfm, GFP_KERNEL);
-	if (!req) {
-		ret = -ENOMEM;
-		goto out_free_tfm;
-	}
-
-	/* Set up scatter-gather lists for verification */
-	sg_init_one(&sg_sig, cert->signature.signature, cert->signature.sig_len);
-	sg_init_one(&sg_digest, digest, digest_len);
-
-	akcipher_request_set_crypt(req, &sg_sig, &sg_digest,
-				   cert->signature.sig_len, digest_len);
-	akcipher_request_set_callback(req, CRYPTO_TFM_REQ_MAY_BACKLOG,
-				      crypto_req_done, &wait);
-
-	ret = crypto_wait_req(crypto_akcipher_verify(req), &wait);
+	/* Verify signature: pass signature and digest to verify */
+	ret = crypto_sig_verify(tfm,
+				cert->signature.signature, cert->signature.sig_len,
+				digest, digest_len);
 	if (ret) {
 		pr_debug("tquic_cert: Signature verification failed: %d\n", ret);
 		ret = -EKEYREJECTED;
 	}
 
-	akcipher_request_free(req);
 out_free_tfm:
-	crypto_free_akcipher(tfm);
+	crypto_free_sig(tfm);
 	return ret;
 }
 EXPORT_SYMBOL_GPL(tquic_x509_verify_signature);

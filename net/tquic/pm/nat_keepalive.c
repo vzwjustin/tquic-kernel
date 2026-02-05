@@ -41,6 +41,7 @@
 #include <linux/if_arp.h>		/* ARPHRD_ETHER */
 #include <net/sock.h>
 #include <net/tquic.h>
+#include "../tquic_compat.h"
 
 #include "nat_keepalive.h"
 #include "nat_lifecycle.h"

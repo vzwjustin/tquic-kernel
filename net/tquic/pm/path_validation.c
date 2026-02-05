@@ -18,6 +18,7 @@
 #include <crypto/utils.h>
 #include <net/sock.h>
 #include <net/tquic.h>
+#include "../tquic_compat.h"
 #include <net/tquic_pm.h>
 #include <uapi/linux/tquic_pm.h>
 

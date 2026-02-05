@@ -50,22 +50,11 @@ struct tquic_path_probe {
 	u8 attempts;
 };
 
-/**
- * tquic_path_state_names - Human-readable path state names
- *
- * Indexed by enum tquic_path_state values for debug output and tracing.
+/*
+ * tquic_path_state_names is defined in core/quic_path.c
+ * and exported from there. Use the definition from the core module.
  */
-const char *tquic_path_state_names[] = {
-	[TQUIC_PATH_UNUSED]      = "UNUSED",
-	[TQUIC_PATH_PENDING]     = "PENDING",
-	[TQUIC_PATH_VALIDATED]   = "VALIDATED",
-	[TQUIC_PATH_ACTIVE]      = "ACTIVE",
-	[TQUIC_PATH_STANDBY]     = "STANDBY",
-	[TQUIC_PATH_UNAVAILABLE] = "UNAVAILABLE",
-	[TQUIC_PATH_FAILED]      = "FAILED",
-	[TQUIC_PATH_CLOSED]      = "CLOSED",
-};
-EXPORT_SYMBOL_GPL(tquic_path_state_names);
+extern const char *tquic_path_state_names[];
 
 /* Forward declarations */
 int tquic_pm_discover_addresses(struct tquic_connection *conn,
@@ -254,8 +243,13 @@ static int tquic_pm_netdev_event(struct notifier_block *nb, unsigned long event,
 		pr_debug("tquic_pm: interface %s came up\n", dev->name);
 		/* Discover paths through this interface */
 		if (pm->conn) {
-			struct sockaddr_storage addrs[TQUIC_MAX_PATHS];
+			struct sockaddr_storage *addrs;
 			int num_addrs, i;
+
+			addrs = kmalloc_array(TQUIC_MAX_PATHS,
+					      sizeof(*addrs), GFP_ATOMIC);
+			if (!addrs)
+				break;
 
 			num_addrs = tquic_pm_discover_addresses(
 				pm->conn, addrs, TQUIC_MAX_PATHS);
@@ -270,6 +264,7 @@ static int tquic_pm_netdev_event(struct notifier_block *nb, unsigned long event,
 							->remote_addr);
 				}
 			}
+			kfree(addrs);
 		}
 		break;
 
@@ -605,48 +600,10 @@ struct tquic_path *tquic_pm_get_path(struct tquic_pm_state *pm, u32 path_id)
 }
 EXPORT_SYMBOL_GPL(tquic_pm_get_path);
 
-/**
- * tquic_pm_get_active_paths - Get array of active/validated paths
- * @pm: Path manager (uses pm->conn->paths)
- * @paths: Output array to fill with path pointers
- * @max_paths: Maximum number of paths to return
- *
- * Populates @paths array with pointers to paths that are in ACTIVE or
- * VALIDATED state. These are paths that can be used for data transmission.
- *
- * Return: Number of paths copied to array (0 to max_paths)
+/*
+ * NOTE: tquic_pm_get_active_paths is defined at end of file to avoid
+ * duplicate symbol errors. See the implementation near MODULE_DESCRIPTION.
  */
-int tquic_pm_get_active_paths(struct tquic_path_manager *pm,
-			      struct tquic_path **paths, int max_paths)
-{
-	struct tquic_connection *conn;
-	struct tquic_path *path;
-	int count = 0;
-
-	if (!pm || !paths || max_paths <= 0)
-		return 0;
-
-	/* tquic_path_manager is often used interchangeably with tquic_pm_state */
-	conn = ((struct tquic_pm_state *)pm)->conn;
-	if (!conn)
-		return 0;
-
-	rcu_read_lock();
-	list_for_each_entry_rcu(path, &conn->paths, list) {
-		if (count >= max_paths)
-			break;
-
-		/* Only include paths usable for data transmission */
-		if (path->state == TQUIC_PATH_ACTIVE ||
-		    path->state == TQUIC_PATH_VALIDATED) {
-			paths[count++] = path;
-		}
-	}
-	rcu_read_unlock();
-
-	return count;
-}
-EXPORT_SYMBOL_GPL(tquic_pm_get_active_paths);
 
 /*
  * Calculate bytes in-flight on a specific path
@@ -1672,19 +1629,12 @@ int tquic_pm_coordinate_preferred_and_additional(struct tquic_connection *conn)
 }
 EXPORT_SYMBOL_GPL(tquic_pm_coordinate_preferred_and_additional);
 
-struct tquic_path *tquic_pm_get_path(struct tquic_pm_state *pm, u32 path_id)
-{
-	if (!pm || !pm->conn)
-		return NULL;
+/* tquic_pm_get_path defined earlier in file (line ~588) */
 
-	return tquic_conn_get_path(pm->conn, path_id);
-}
-EXPORT_SYMBOL_GPL(tquic_pm_get_path);
-
-int tquic_pm_get_active_paths(struct tquic_path_manager *pm,
+int tquic_pm_get_active_paths(struct tquic_pm_state *pm,
 			      struct tquic_path **paths, int max_paths)
 {
-	struct tquic_pm_state *state = (struct tquic_pm_state *)pm;
+	struct tquic_pm_state *state = pm;
 	struct tquic_connection *conn;
 	struct tquic_path *path;
 	int count = 0;

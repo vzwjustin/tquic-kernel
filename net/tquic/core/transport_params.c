@@ -1904,8 +1904,8 @@ int tquic_tp_apply(struct tquic_connection *conn,
 	}
 	spin_unlock_bh(&conn->datagram.lock);
 
-	pr_debug("tquic: applied transport params - idle=%u max_data=%llu/%llu multipath=%d pref_addr=%d migration_disabled=%d datagram=%d\n",
-		 negotiated->idle_timeout,
+	pr_debug("tquic: applied transport params - idle=%llu max_data=%llu/%llu multipath=%d pref_addr=%d migration_disabled=%d datagram=%d\n",
+		 (unsigned long long)negotiated->idle_timeout,
 		 negotiated->max_data_send,
 		 negotiated->max_data_recv,
 		 negotiated->multipath_enabled,

@@ -38,6 +38,8 @@
 #include "tquic_stateless_reset.h"
 #include "security_hardening.h"
 
+#include "tquic_compat.h"
+
 /* Frame type constants */
 #define TQUIC_FRAME_NEW_CONNECTION_ID		0x18
 #define TQUIC_FRAME_RETIRE_CONNECTION_ID	0x19

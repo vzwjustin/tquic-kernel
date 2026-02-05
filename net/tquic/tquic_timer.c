@@ -24,6 +24,8 @@
 #include <net/tquic.h>
 #include "cong/tquic_cong.h"
 
+#include "tquic_compat.h"
+
 /* Forward declaration from core/quic_loss.c */
 void tquic_set_loss_detection_timer(struct tquic_connection *conn);
 
@@ -541,8 +543,8 @@ struct tquic_timer_state *tquic_timer_state_alloc(struct tquic_connection *conn)
 	timer_setup(&ts->keepalive_timer, tquic_timer_keepalive_expired, 0);
 
 	/* Setup high-resolution pacing timer */
-	hrtimer_init(&ts->pacing_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
-	ts->pacing_timer.function = tquic_timer_pacing_expired;
+	hrtimer_setup(&ts->pacing_timer, tquic_timer_pacing_expired,
+		      CLOCK_MONOTONIC, HRTIMER_MODE_REL);
 
 	/* Setup workqueue items */
 	INIT_WORK(&ts->timer_work, tquic_timer_work_fn);

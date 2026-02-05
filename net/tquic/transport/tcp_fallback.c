@@ -39,6 +39,7 @@
 #include <net/sock.h>
 #include <net/net_namespace.h>
 #include <net/tquic.h>
+#include "../tquic_compat.h"
 
 #include "quic_over_tcp.h"
 #include "../protocol.h"

@@ -993,7 +993,6 @@ static inline void tquic_udp_sock_hold(struct tquic_udp_sock *us)
 int tquic_udp_connect(struct tquic_udp_sock *us,
 		      struct sockaddr_storage *remote)
 {
-	struct sock *sk = us->sock->sk;
 	int err;
 
 	if (test_bit(TQUIC_UDSOCK_F_CONNECTED, &us->flags))
@@ -1002,7 +1001,7 @@ int tquic_udp_connect(struct tquic_udp_sock *us,
 	if (us->family == AF_INET) {
 		struct sockaddr_in *sin = (struct sockaddr_in *)remote;
 
-		err = kernel_connect(us->sock, (struct sockaddr *)sin,
+		err = kernel_connect(us->sock, (struct sockaddr_unsized *)sin,
 				     sizeof(*sin), 0);
 		if (err)
 			return err;
@@ -1014,7 +1013,7 @@ int tquic_udp_connect(struct tquic_udp_sock *us,
 	else if (us->family == AF_INET6) {
 		struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)remote;
 
-		err = kernel_connect(us->sock, (struct sockaddr *)sin6,
+		err = kernel_connect(us->sock, (struct sockaddr_unsized *)sin6,
 				     sizeof(*sin6), 0);
 		if (err)
 			return err;
@@ -1355,7 +1354,8 @@ static int tquic_udp_xmit_skb4(struct tquic_udp_sock *us, struct sk_buff *skb)
 			    us->local_port,
 			    us->remote_port,
 			    false,		/* xnet */
-			    !us->csum_offload);	/* nocheck */
+			    !us->csum_offload,	/* nocheck */
+			    0);			/* ipcb_flags */
 
 	us->stats.tx_packets++;
 	us->stats.tx_bytes += skb->len;
@@ -1412,7 +1412,8 @@ static int tquic_udp_xmit_skb6(struct tquic_udp_sock *us, struct sk_buff *skb)
 			     0,			/* label */
 			     us->local_port,
 			     us->remote_port,
-			     !us->csum_offload);	/* nocheck */
+			     !us->csum_offload,	/* nocheck */
+			     0);		/* ip6cb_flags */
 
 	us->stats.tx_packets++;
 	us->stats.tx_bytes += skb->len;

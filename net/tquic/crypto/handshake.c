@@ -19,6 +19,8 @@
 #include <crypto/ecdh.h>
 #include <crypto/curve25519.h>
 #include <crypto/akcipher.h>
+#include <crypto/sig.h>
+#include <crypto/utils.h>
 #include <net/tquic.h>
 #include "cert_verify.h"
 
@@ -1309,9 +1311,14 @@ int tquic_hs_generate_client_hello(struct tquic_handshake *hs,
 {
 	u8 *p = buf;
 	u8 *msg_len_ptr;
-	u8 extensions[2048];
+	u8 *extensions;
 	u32 ext_len;
 	int ret;
+
+	/* Allocate extensions buffer dynamically to reduce stack usage */
+	extensions = kzalloc(2048, GFP_KERNEL);
+	if (!extensions)
+		return -ENOMEM;
 
 	/* Generate random */
 	get_random_bytes(hs->client_random, TLS_RANDOM_LEN);
@@ -1320,8 +1327,10 @@ int tquic_hs_generate_client_hello(struct tquic_handshake *hs,
 	hs->key_share.group = TLS_GROUP_X25519;
 	hs->key_share.public_key = kzalloc(32, GFP_KERNEL);
 	hs->key_share.private_key = kzalloc(32, GFP_KERNEL);
-	if (!hs->key_share.public_key || !hs->key_share.private_key)
+	if (!hs->key_share.public_key || !hs->key_share.private_key) {
+		kfree(extensions);
 		return -ENOMEM;
+	}
 
 	get_random_bytes(hs->key_share.private_key, 32);
 	hs->key_share.private_key_len = 32;
@@ -1339,13 +1348,16 @@ int tquic_hs_generate_client_hello(struct tquic_handshake *hs,
 	if (!curve25519_generate_public(hs->key_share.public_key,
 					hs->key_share.private_key)) {
 		pr_warn("tquic_hs: X25519 public key generation failed\n");
+		kfree(extensions);
 		return -EINVAL;
 	}
 
 	/* Build extensions */
-	ret = tquic_hs_build_ch_extensions(hs, extensions, sizeof(extensions), &ext_len);
-	if (ret < 0)
+	ret = tquic_hs_build_ch_extensions(hs, extensions, 2048, &ext_len);
+	if (ret < 0) {
+		kfree(extensions);
 		return ret;
+	}
 
 	/* Handshake header */
 	*p++ = TLS_HS_CLIENT_HELLO;
@@ -1386,6 +1398,9 @@ int tquic_hs_generate_client_hello(struct tquic_handshake *hs,
 	/* Extensions */
 	memcpy(p, extensions, ext_len);
 	p += ext_len;
+
+	/* Free extensions buffer - no longer needed after memcpy */
+	kfree(extensions);
 
 	/* Fill in message length */
 	msg_len_ptr[0] = ((p - msg_len_ptr - 3) >> 16) & 0xff;
@@ -2192,14 +2207,11 @@ int tquic_hs_process_certificate_verify(struct tquic_handshake *hs,
 		u32 content_len;
 		u32 content_hash_len;
 		struct tquic_x509_cert *cert = NULL;
-		struct crypto_akcipher *tfm = NULL;
-		struct akcipher_request *req = NULL;
+		struct crypto_sig *sig_tfm = NULL;
 		struct crypto_shash *hash_tfm = NULL;
-		struct scatterlist sg_sig, sg_hash;
 		const char *hash_alg;
-		const char *akcipher_alg;
+		const char *sig_alg_name;
 		int err;
-		DECLARE_CRYPTO_WAIT(wait);
 
 		/* Verify we have a peer certificate */
 		if (!hs->peer_cert || hs->peer_cert_len == 0) {
@@ -2249,31 +2261,31 @@ int tquic_hs_process_certificate_verify(struct tquic_handshake *hs,
 		case 0x0804:  /* rsa_pss_rsae_sha256 */
 			hash_alg = "sha256";
 			content_hash_len = 32;
-			akcipher_alg = NULL;  /* Use RSA-PSS path */
+			sig_alg_name = NULL;  /* Use RSA-PSS path */
 			break;
 		case 0x0805:  /* rsa_pss_rsae_sha384 */
 			hash_alg = "sha384";
 			content_hash_len = 48;
-			akcipher_alg = NULL;  /* Use RSA-PSS path */
+			sig_alg_name = NULL;  /* Use RSA-PSS path */
 			break;
 		case 0x0806:  /* rsa_pss_rsae_sha512 */
 			hash_alg = "sha512";
 			content_hash_len = 64;
-			akcipher_alg = NULL;  /* Use RSA-PSS path */
+			sig_alg_name = NULL;  /* Use RSA-PSS path */
 			break;
 		case 0x0403:  /* ecdsa_secp256r1_sha256 */
 			hash_alg = "sha256";
-			akcipher_alg = "ecdsa-nist-p256";
+			sig_alg_name = "ecdsa-nist-p256";
 			content_hash_len = 32;
 			break;
 		case 0x0503:  /* ecdsa_secp384r1_sha384 */
 			hash_alg = "sha384";
-			akcipher_alg = "ecdsa-nist-p384";
+			sig_alg_name = "ecdsa-nist-p384";
 			content_hash_len = 48;
 			break;
 		case 0x0603:  /* ecdsa_secp521r1_sha512 */
 			hash_alg = "sha512";
-			akcipher_alg = "ecdsa-nist-p521";
+			sig_alg_name = "ecdsa-nist-p521";
 			content_hash_len = 64;
 			break;
 		default:
@@ -2312,9 +2324,10 @@ int tquic_hs_process_certificate_verify(struct tquic_handshake *hs,
 		/*
 		 * Verify signature based on algorithm type.
 		 * RSA-PSS requires special handling with EMSA-PSS verification.
-		 * ECDSA uses the kernel's native signature verification.
+		 * ECDSA uses the kernel's native signature verification via
+		 * the crypto_sig API (kernel 6.x+).
 		 */
-		if (akcipher_alg == NULL) {
+		if (sig_alg_name == NULL) {
 			/* RSA-PSS verification (RFC 8017 Section 8.1.2) */
 			err = tquic_verify_rsa_pss(cert->pubkey.key_data,
 						   cert->pubkey.key_len,
@@ -2329,58 +2342,38 @@ int tquic_hs_process_certificate_verify(struct tquic_handshake *hs,
 			}
 			pr_debug("tquic_hs: RSA-PSS CertificateVerify verified successfully\n");
 		} else {
-			/* ECDSA verification using kernel crypto API */
-			tfm = crypto_alloc_akcipher(akcipher_alg, 0, 0);
-			if (IS_ERR(tfm)) {
-				err = PTR_ERR(tfm);
-				pr_warn("tquic_hs: Failed to allocate akcipher %s: %d\n",
-					akcipher_alg, err);
+			/* ECDSA verification using crypto_sig API */
+			sig_tfm = crypto_alloc_sig(sig_alg_name, 0, 0);
+			if (IS_ERR(sig_tfm)) {
+				err = PTR_ERR(sig_tfm);
+				pr_warn("tquic_hs: Failed to allocate sig %s: %d\n",
+					sig_alg_name, err);
 				tquic_x509_cert_free(cert);
 				return err;
 			}
 
 			/* Set public key from peer certificate */
-			err = crypto_akcipher_set_pub_key(tfm, cert->pubkey.key_data,
-							  cert->pubkey.key_len);
+			err = crypto_sig_set_pubkey(sig_tfm, cert->pubkey.key_data,
+						    cert->pubkey.key_len);
 			if (err) {
 				pr_warn("tquic_hs: Failed to set public key: %d\n", err);
-				goto out_free;
-			}
-
-			/* Allocate request */
-			req = akcipher_request_alloc(tfm, GFP_KERNEL);
-			if (!req) {
-				err = -ENOMEM;
-				pr_warn("tquic_hs: Failed to allocate akcipher request\n");
-				goto out_free;
-			}
-
-			/* Set up scatter-gather lists */
-			sg_init_one(&sg_sig, p, sig_len);  /* p points to signature */
-			sg_init_one(&sg_hash, content_hash, content_hash_len);
-
-			akcipher_request_set_crypt(req, &sg_sig, &sg_hash,
-						   sig_len, content_hash_len);
-			akcipher_request_set_callback(req, CRYPTO_TFM_REQ_MAY_BACKLOG,
-						      crypto_req_done, &wait);
-
-			/* Perform ECDSA signature verification */
-			err = crypto_wait_req(crypto_akcipher_verify(req), &wait);
-			if (err) {
-				pr_warn("tquic_hs: ECDSA signature verification FAILED: %d\n",
-					err);
-				akcipher_request_free(req);
-				goto out_free;
-			}
-
-			pr_debug("tquic_hs: ECDSA CertificateVerify verified successfully\n");
-			akcipher_request_free(req);
-out_free:
-			crypto_free_akcipher(tfm);
-			if (err) {
+				crypto_free_sig(sig_tfm);
 				tquic_x509_cert_free(cert);
 				return err;
 			}
+
+			/* Perform ECDSA signature verification (synchronous) */
+			err = crypto_sig_verify(sig_tfm, p, sig_len,
+						content_hash, content_hash_len);
+			crypto_free_sig(sig_tfm);
+			if (err) {
+				pr_warn("tquic_hs: ECDSA signature verification FAILED: %d\n",
+					err);
+				tquic_x509_cert_free(cert);
+				return err;
+			}
+
+			pr_debug("tquic_hs: ECDSA CertificateVerify verified successfully\n");
 		}
 
 		tquic_x509_cert_free(cert);

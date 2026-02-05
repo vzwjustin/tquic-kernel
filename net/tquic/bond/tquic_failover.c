@@ -103,16 +103,9 @@ static void tquic_failover_timeout_work(struct work_struct *work)
 {
 	struct tquic_path_timeout *pt = container_of(work,
 					struct tquic_path_timeout, timeout_work.work);
-	struct tquic_failover_ctx *fc;
+	struct tquic_failover_ctx *fc = pt->fc;
 	u64 now, elapsed_us;
-	u8 path_id;
-
-	/* Recover path_id from array position */
-	fc = container_of(pt - (pt - &fc->path_timeouts[0]),
-			  struct tquic_failover_ctx, path_timeouts[0]);
-
-	/* Calculate path_id from offset */
-	path_id = pt - fc->path_timeouts;
+	u8 path_id = pt->path_id;
 
 	now = tquic_get_time_us();
 	elapsed_us = now - pt->last_ack_time;
@@ -183,6 +176,8 @@ struct tquic_failover_ctx *tquic_failover_init(struct tquic_bonding_ctx *bonding
 		pt->srtt_us = TQUIC_FAILOVER_DEFAULT_SRTT_US;
 		pt->timeout_ms = TQUIC_FAILOVER_MIN_TIMEOUT_MS;
 		pt->timeout_armed = false;
+		pt->fc = fc;
+		pt->path_id = i;
 		INIT_DELAYED_WORK(&pt->timeout_work, tquic_failover_timeout_work);
 	}
 

@@ -12,6 +12,7 @@
 #include <linux/timer.h>
 #include <linux/jiffies.h>
 #include <net/tquic.h>
+#include "tquic_compat.h"
 #include "diag/trace.h"
 #include "crypto/key_update.h"
 

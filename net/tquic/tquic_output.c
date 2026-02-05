@@ -1173,6 +1173,9 @@ static struct tquic_path *tquic_select_path_lb(struct tquic_connection *conn,
  * =============================================================================
  */
 
+/* Forward declaration for hrtimer callback */
+static enum hrtimer_restart tquic_pacing_timer(struct hrtimer *timer);
+
 /*
  * Initialize pacing state for a path
  */
@@ -1194,7 +1197,8 @@ struct tquic_pacing_state *tquic_pacing_init(struct tquic_path *path)
 
 	INIT_WORK(&pacing->work, tquic_pacing_work);
 
-	hrtimer_init(&pacing->timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+	/* Use hrtimer_setup (new API) instead of hrtimer_init + function assignment */
+	hrtimer_setup(&pacing->timer, tquic_pacing_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
 
 	return pacing;
 }
@@ -1643,12 +1647,13 @@ int tquic_output_packet(struct tquic_connection *conn,
 	fl4.flowi4_proto = IPPROTO_UDP;
 
 	/*
-	 * Set ECN marking in TOS field if enabled.
+	 * Set ECN marking in DSCP field if enabled.
 	 * Per RFC 9000 Section 13.4.1: "An endpoint that supports ECN
 	 * marks all IP packets that it sends with the ECT(0) codepoint."
+	 * Note: flowi4_tos renamed to flowi4_dscp in newer kernels.
 	 */
 	if (net && tquic_pernet(net)->ecn_enabled)
-		fl4.flowi4_tos = TQUIC_IP_ECN_ECT0;
+		fl4.flowi4_dscp = TQUIC_IP_ECN_ECT0;
 
 	/* Route lookup */
 	rt = ip_route_output_key(net ?: &init_net, &fl4);

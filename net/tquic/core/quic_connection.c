@@ -26,6 +26,7 @@
 #include "transport_params.h"
 #include "../tquic_cid.h"
 #include "../diag/trace.h"
+#include "../tquic_compat.h"
 
 /* Forward declarations for functions defined in other compilation units */
 void tquic_loss_detection_on_timeout(struct tquic_connection *conn);

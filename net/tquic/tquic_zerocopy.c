@@ -272,7 +272,9 @@ int tquic_sendmsg_zerocopy(struct sock *sk, struct msghdr *msg, size_t len,
 	} else {
 		/* Allocate new zerocopy tracking structure */
 		skb = skb_peek_tail(&stream->send_buf);
-		uarg = msg_zerocopy_realloc(sk, len, skb ? skb_zcopy(skb) : NULL);
+		/* devmem parameter added in kernel 6.12+ */
+		uarg = msg_zerocopy_realloc(sk, len, skb ? skb_zcopy(skb) : NULL,
+					    false);
 		if (!uarg) {
 			err = -ENOBUFS;
 			goto out_err;
@@ -298,9 +300,10 @@ int tquic_sendmsg_zerocopy(struct sock *sk, struct msghdr *msg, size_t len,
 			/*
 			 * Use zerocopy path - map user pages directly
 			 * into skb frags without copying data.
+			 * binding parameter added in kernel 6.12+
 			 */
 			err = skb_zerocopy_iter_stream(sk, new_skb, msg, chunk,
-						       uarg);
+						       uarg, NULL);
 			if (err < 0) {
 				kfree_skb(new_skb);
 				if (err == -EMSGSIZE || err == -EEXIST) {
