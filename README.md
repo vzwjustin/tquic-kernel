@@ -8,6 +8,36 @@ TQUIC is a complete, production-ready kernel module implementing the QUIC protoc
 
 **260,766 lines of C code** (38,410 in net/quic + 214,594 in net/tquic + 7,762 headers) implementing the full QUIC/HTTP3 stack with advanced multipath, security, and performance features.
 
+## Initialization (dmesg)
+
+The module initializes the WAN bonding and core subsystems on load. Example from `dmesg`:
+
+```
+tquic: initializing TQUIC WAN bonding subsystem
+tquic_timer: timer subsystem initialized
+tquic_udp: UDP tunnel subsystem initialized
+tquic: token subsystem initialized
+tquic: stateless reset subsystem initialized
+tquic_retry: initialized (key=..., nonce=...)
+tquic_pmtud: PMTUD subsystem initialized (enabled=1)
+tquic: tunnel subsystem initialized
+tquic: QUIC-LEAK defense initialized (limit=64 MB, per-IP=1024 KB)
+tquic_cert: Certificate verification module initialized
+tquic_hw_offload: initialized (AES-NI:yes AVX2:yes AVX-512:no VAES:yes)
+tquic: BBRv2 congestion control initialized
+tquic: Multipath ACK processing initialized (RFC 9369)
+TQUIC-BOND: TQUIC bonding state machine initialized
+TQUIC PM: Netlink interface initialized
+TQUIC: TQUIC netlink interface registered (family: tquic, version: 1)
+tquic: sysctl interface registered at /proc/sys/net/tquic/
+tquic: TQUIC protocol handler initialized successfully
+tquic: GRO/GSO offload support initialized
+tquic: rate_limit: module initialized (global=10000/s burst=1000, per-ip=100/s)
+tquic: TQUIC WAN bonding subsystem initialized
+```
+
+See `TQUIC_PORTING_GAPS.md` for features that are intentionally disabled or not yet ported on Debian 6.12 builds.
+
 ## 🔒 Security Audit Completed (February 2026)
 
 TQUIC has undergone a comprehensive security audit with all critical and high-priority issues resolved across the entire codebase:
