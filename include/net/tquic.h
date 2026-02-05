@@ -16,6 +16,7 @@
 #include <linux/skbuff.h>
 #include <linux/timer.h>
 #include <linux/workqueue.h>
+#include <net/tquic/crypto/cert_verify.h>
 #include <linux/rhashtable.h>
 #include <linux/refcount.h>
 #include <linux/udp.h>
@@ -2126,11 +2127,6 @@ bool tquic_crypto_handshake_complete(struct tquic_crypto_state *crypto);
 struct tquic_cert_verify_ctx;
 struct tquic_handshake;
 
-/* Verification modes */
-#define TQUIC_CERT_VERIFY_NONE		0  /* No verification (INSECURE) */
-#define TQUIC_CERT_VERIFY_OPTIONAL	1  /* Verify if present, allow missing */
-#define TQUIC_CERT_VERIFY_REQUIRED	2  /* Full verification required */
-
 /* Context management */
 struct tquic_cert_verify_ctx *tquic_cert_verify_ctx_alloc(gfp_t gfp);
 void tquic_cert_verify_ctx_free(struct tquic_cert_verify_ctx *ctx);
@@ -2138,7 +2134,8 @@ void tquic_cert_verify_ctx_free(struct tquic_cert_verify_ctx *ctx);
 /* Configuration */
 int tquic_cert_verify_set_hostname(struct tquic_cert_verify_ctx *ctx,
 				   const char *hostname, u32 len);
-int tquic_cert_verify_set_mode(struct tquic_cert_verify_ctx *ctx, int mode);
+int tquic_cert_verify_set_mode(struct tquic_cert_verify_ctx *ctx,
+			       enum tquic_cert_verify_mode mode);
 int tquic_cert_verify_set_keyring(struct tquic_cert_verify_ctx *ctx,
 				  struct key *keyring);
 

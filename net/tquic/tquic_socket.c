@@ -289,7 +289,7 @@ int tquic_connect(struct sock *sk, struct sockaddr *addr, int addr_len)
 		goto out_unlock;
 
 	/* Initialize connection state machine for client mode */
-	ret = tquic_conn_client_connect(conn, addr);
+	ret = tquic_conn_client_connect(conn, (struct sockaddr *)addr);
 	if (ret < 0)
 		goto out_unlock;
 
@@ -1254,8 +1254,8 @@ static int tquic_setsockopt(struct socket *sock, int level, int optname,
 		if (copy_from_sockptr(&args, optval, sizeof(args)))
 			return -EFAULT;
 
-		/* Validate reserved field */
-		if (args.flags != 0 || args.reserved != 0)
+		/* Validate reserved flags */
+		if (args.flags != 0)
 			return -EINVAL;
 
 		lock_sock(sk);
