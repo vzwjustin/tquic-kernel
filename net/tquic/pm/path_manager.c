@@ -24,6 +24,7 @@
 #include <net/tquic_pm.h>
 #include <net/tquic_pmtud.h>
 #include <uapi/linux/tquic_pm.h>
+#include "../tquic_compat.h"
 #include "../cong/tquic_cong.h"
 #include "../protocol.h"
 #include "../core/additional_addresses.h"

@@ -17,6 +17,8 @@
 #include <linux/spinlock.h>
 #include <net/tquic.h>
 
+#include "../tquic_compat.h"
+
 /* Reorder buffer configuration */
 #define TQUIC_REORDER_DEFAULT_SIZE	256
 #define TQUIC_REORDER_MAX_SIZE		4096

@@ -38,6 +38,8 @@
 
 #include <net/tquic.h>
 
+#include "tquic_compat.h"
+
 /* QUIC packet header constants */
 #define QUIC_FORM_BIT			0x80	/* Long vs Short header */
 #define QUIC_FIXED_BIT			0x40	/* Must be 1 */

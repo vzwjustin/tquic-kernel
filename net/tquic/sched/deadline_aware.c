@@ -24,6 +24,8 @@
 #include <linux/math64.h>
 #include <net/tquic.h>
 
+#include "../tquic_compat.h"
+
 #include "deadline_aware.h"
 #include "../core/varint.h"
 

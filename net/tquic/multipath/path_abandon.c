@@ -22,6 +22,8 @@
 #include <linux/random.h>
 #include <net/tquic.h>
 
+#include "../tquic_compat.h"
+
 #include "mp_frame.h"
 
 /*

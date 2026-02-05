@@ -32,6 +32,8 @@
 #include <net/route.h>
 #include <net/addrconf.h>
 
+#include "../tquic_compat.h"
+
 #include "tquic_bonding.h"
 #include "tquic_bpm.h"
 

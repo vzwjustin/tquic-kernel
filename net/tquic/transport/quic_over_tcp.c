@@ -32,6 +32,8 @@
 #include <net/tcp.h>
 #include <net/ipv6.h>
 
+#include "../tquic_compat.h"
+
 #include "quic_over_tcp.h"
 #include "../protocol.h"
 
