@@ -672,6 +672,7 @@ int __init tquic_init(void)
 {
 	int err;
 
+	pr_info("tquic: written by Justin Adams\n");
 	pr_info("tquic: initializing TQUIC WAN bonding subsystem\n");
 
 	/* Create slab caches */
