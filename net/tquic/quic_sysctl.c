@@ -2,7 +2,7 @@
 /*
  * QUIC sysctl interface
  *
- * Runtime configuration via /proc/sys/net/quic/
+ * Runtime configuration via /proc/sys/net/tquic/
  *
  * Copyright (c) 2024 Linux QUIC Authors
  */
@@ -16,7 +16,7 @@
  * QUIC sysctl variables
  *
  * These provide runtime-tunable parameters for the QUIC implementation.
- * Values can be modified via /proc/sys/net/quic/ or sysctl(8).
+ * Values can be modified via /proc/sys/net/tquic/ or sysctl(8).
  */
 
 /* Maximum number of concurrent connections (global limit) */
@@ -101,7 +101,7 @@ static struct ctl_table_header *tquic_sysctl_header;
 /*
  * QUIC sysctl table
  *
- * All parameters are exposed under /proc/sys/net/quic/
+ * All parameters are exposed under /proc/sys/net/tquic/
  */
 static struct ctl_table tquic_sysctl_table[] = {
 	{
@@ -361,7 +361,7 @@ EXPORT_SYMBOL_GPL(tquic_sysctl_handshake_timeout_ms);
 /**
  * tquic_sysctl_register - Register QUIC sysctl entries
  *
- * Creates /proc/sys/net/quic/ directory with all QUIC parameters.
+ * Creates /proc/sys/net/tquic/ directory with all QUIC parameters.
  * Must be called during module initialization.
  *
  * Returns 0 on success, negative error code on failure.
@@ -375,14 +375,14 @@ int __init tquic_sysctl_register(void)
 		return -ENOMEM;
 	}
 
-	pr_info("TQUIC: sysctl interface registered at /proc/sys/net/quic\n");
+	pr_info("TQUIC: sysctl interface registered at /proc/sys/net/tquic\n");
 	return 0;
 }
 
 /**
  * tquic_sysctl_unregister - Unregister QUIC sysctl entries
  *
- * Removes /proc/sys/net/quic/ directory and all entries.
+ * Removes /proc/sys/net/tquic/ directory and all entries.
  * Must be called during module cleanup.
  */
 void tquic_sysctl_unregister(void)

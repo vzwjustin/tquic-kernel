@@ -3,8 +3,8 @@
 # QUIC configuration
 #
 
-menuconfig QUIC
-	tristate "QUIC: A UDP-Based Multiplexed and Secure Transport"
+menuconfig IP_QUIC
+	tristate "TQUIC: WAN Bonding over QUIC"
 	depends on INET
 	depends on CRYPTO
 	select CRYPTO_AEAD
@@ -13,32 +13,21 @@ menuconfig QUIC
 	select CRYPTO_CHACHA20POLY1305
 	select CRYPTO_SHA256
 	select CRYPTO_SHA512
+	select KEYS
+	select ASYMMETRIC_KEY_TYPE
+	select NET_UDP_TUNNEL
 	help
-	  QUIC (RFC 9000) is a UDP-based multiplexed and secure transport
-	  protocol designed for HTTP/3 and general-purpose use. It provides
-	  built-in encryption using TLS 1.3, multiplexed streams to avoid
-	  head-of-line blocking, and connection migration support.
+	  TQUIC is a kernel-level QUIC implementation (RFC 9000/9001/9002)
+	  with multipath WAN bonding capabilities. It can aggregate multiple
+	  network paths (e.g. LTE/5G/WiFi/wired) into a single logical
+	  connection with failover and bandwidth aggregation.
 
-	  This implementation provides kernel-level QUIC support that can be
-	  used by applications through the socket API, similar to how TCP
-	  sockets work. Key features include:
-
-	    - Multiplexed streams within a single connection
-	    - Low-latency connection establishment (0-RTT and 1-RTT)
-	    - Connection migration and multi-path support
-	    - Congestion control and loss recovery
-	    - Hardware offload support for improved performance
-
-	  The userspace handshake is performed via the handshake upcall
-	  mechanism, allowing the kernel to handle data transfer while
-	  userspace libraries manage the TLS handshake.
-
-	  To compile this protocol support as a module, choose M here: the
-	  module will be called quic.
+	  To compile this as a module, choose M here: the module will be
+	  called quic.
 
 	  If unsure, say N.
 
-if QUIC
+if IP_QUIC
 
 config QUIC_DEBUG
 	bool "QUIC debugging messages"
@@ -53,4 +42,6 @@ config QUIC_DEBUG
 
 	  If unsure, say N.
 
-endif # QUIC
+source "net/tquic/Kconfig"
+
+endif # IP_QUIC

@@ -1817,7 +1817,7 @@ EXPORT_SYMBOL_GPL(tquic_timer_get_recovery_stats);
  *
  * Some core code paths still schedule per-connection timers via
  * tquic_timer_set/cancel/update. Provide lightweight helpers that operate on
- * conn->timers[] without pulling in the legacy quic_timer.c implementation.
+ * conn->timers[] without pulling in the deprecated standalone timer code.
  */
 
 static unsigned long tquic_timer_deadline_to_jiffies(ktime_t when)

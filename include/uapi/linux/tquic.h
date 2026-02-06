@@ -498,7 +498,8 @@ enum tquic_nl_groups {
  * Connection Migration Socket Options
  *
  * Note: Full migration implementation in Phase 4 (Path Manager).
- * Phase 2 provides API surface with stub implementations.
+ * Migration is implemented in-kernel; these sockopts are part of the userspace
+ * API.
  */
 #define TQUIC_MIGRATE           70  /* Trigger explicit migration to new address */
 #define TQUIC_MIGRATE_STATUS    71  /* Get migration status (read-only) */

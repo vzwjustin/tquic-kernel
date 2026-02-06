@@ -15,21 +15,10 @@
 #include <net/tquic.h>
 #include "ack.h"
 #include "../cong/tquic_cong.h"
+#include "../diag/trace.h"
 
 /* Forward declarations */
 void tquic_loss_detection_detect_lost(struct tquic_connection *conn, u8 pn_space_idx);
-
-/*
- * Tracing support - provide stubs if trace header not available
- */
-#if defined(CONFIG_TQUIC_TRACING) && __has_include("../diag/trace.h")
-#include "../diag/trace.h"
-#else
-/* Tracing stub macros when tracing is not available */
-#define trace_tquic_packet_acked(conn_id, pn, space)		do { } while (0)
-#define trace_tquic_rtt_update(conn_id, latest, min, smoothed, var) do { } while (0)
-#define trace_tquic_packet_lost(conn_id, pn, space)		do { } while (0)
-#endif
 
 /*
  * Helper to extract connection ID as u64 for tracing/debugging.
@@ -627,7 +616,7 @@ void tquic_loss_detection_on_ack_received(struct tquic_connection *conn,
 			continue;
 
 		/* This packet is newly acknowledged */
-		trace_tquic_packet_acked(tquic_trace_conn_id(&conn->scid),
+		trace_quic_packet_acked(tquic_trace_conn_id(&conn->scid),
 					pkt->pn, pn_space_idx);
 
 		if (pkt->ack_eliciting) {
@@ -677,7 +666,7 @@ void tquic_loss_detection_on_ack_received(struct tquic_connection *conn,
 
 		tquic_rtt_update(&path->rtt, latest_rtt, ack_delay_us);
 
-		trace_tquic_rtt_update(tquic_trace_conn_id(&conn->scid),
+		trace_quic_rtt_update(tquic_trace_conn_id(&conn->scid),
 				      path->rtt.latest_rtt, path->rtt.min_rtt,
 				      path->rtt.smoothed_rtt, path->rtt.rtt_var);
 
@@ -799,7 +788,7 @@ void tquic_loss_detection_detect_lost(struct tquic_connection *conn, u8 pn_space
 		    pn_space->largest_acked ||
 		    ktime_before(pkt->sent_time, pkt_time_threshold)) {
 			/* Mark as lost */
-			trace_tquic_packet_lost(tquic_trace_conn_id(&conn->scid),
+			trace_quic_packet_lost(tquic_trace_conn_id(&conn->scid),
 					       pkt->pn, pn_space_idx);
 
 			if (pkt->ack_eliciting)
