@@ -403,7 +403,6 @@ struct tquic_connection *tquic_conn_create(struct tquic_sock *tsk, bool is_serve
 {
 	struct tquic_connection *conn;
 	struct tquic_cid_entry *scid_entry;
-	struct tquic_path *path;
 	int i;
 
 	conn = kzalloc(sizeof(*conn), GFP_KERNEL);
@@ -420,6 +419,13 @@ struct tquic_connection *tquic_conn_create(struct tquic_sock *tsk, bool is_serve
 	tquic_conn_generate_cid(&conn->scid, 8);
 	INIT_LIST_HEAD(&conn->scid_list);
 	INIT_LIST_HEAD(&conn->dcid_list);
+
+	/* Initialize path list/limits; actual path(s) are created on connect/accept. */
+	INIT_LIST_HEAD(&conn->paths);
+	spin_lock_init(&conn->paths_lock);
+	conn->active_path = NULL;
+	conn->num_paths = 0;
+	conn->max_paths = TQUIC_MAX_PATHS;
 
 	/* Create initial source CID entry */
 	scid_entry = tquic_cid_entry_create(&conn->scid, 0);
@@ -459,14 +465,6 @@ struct tquic_connection *tquic_conn_create(struct tquic_sock *tsk, bool is_serve
 	tquic_conn_init_local_params(conn, &tsk->config);
 	tquic_conn_init_flow_control(conn);
 
-	/* Initialize paths */
-	INIT_LIST_HEAD(&conn->paths);
-	path = tquic_path_create(conn, NULL, NULL);
-	if (!path)
-		goto err_free_pn_spaces;  /* pn_spaces was just allocated */
-	conn->active_path = path;
-	conn->num_paths = 1;
-
 	/* Initialize timers */
 	timer_setup(&conn->timers[TQUIC_TIMER_LOSS], tquic_timer_loss_cb, 0);
 	timer_setup(&conn->timers[TQUIC_TIMER_ACK], tquic_timer_ack_cb, 0);
@@ -482,7 +480,7 @@ struct tquic_connection *tquic_conn_create(struct tquic_sock *tsk, bool is_serve
 
 	/* Initialize loss detection */
 	if (tquic_loss_detection_init(conn) < 0)
-		goto err_free_path;
+		goto err_free_pn_spaces;
 
 	/* Initialize pending frame queues */
 	skb_queue_head_init(&conn->pending_frames);
@@ -513,8 +511,6 @@ struct tquic_connection *tquic_conn_create(struct tquic_sock *tsk, bool is_serve
 
 	return conn;
 
-err_free_path:
-	tquic_path_destroy(path);
 err_free_pn_spaces:
 	kfree(conn->pn_spaces);
 err_free_scid:

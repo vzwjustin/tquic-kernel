@@ -1,4 +1,4 @@
-.PHONY: all clean deb
+.PHONY: all clean deb smoke
 
 all:
 	cd tquicd && go build -o tquicd .
@@ -9,3 +9,6 @@ clean:
 
 deb:
 	dpkg-buildpackage -us -uc -b
+
+smoke:
+	./smoke/tquic-smoke.sh

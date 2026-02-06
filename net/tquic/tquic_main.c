@@ -642,6 +642,10 @@ extern void __exit tquic_prague_exit(void);
 extern int __init tquic_nl_init(void);
 extern void __exit tquic_nl_exit(void);
 
+/* CID hash used by core/quic_connection.c (socket creation path) */
+extern int tquic_cid_hash_init(void);
+extern void tquic_cid_hash_cleanup(void);
+
 /*
  * Module Initialization
  */
@@ -682,6 +686,11 @@ int __init tquic_init(void)
 	err = rhashtable_init(&tquic_conn_table, &tquic_conn_params);
 	if (err)
 		goto err_hashtable;
+
+	/* Initialize CID cache/hash used by the connection-creation path */
+	err = tquic_cid_hash_init();
+	if (err)
+		goto err_cid_hash;
 
 	/* Initialize global CID table */
 	err = tquic_cid_table_init();
@@ -1037,6 +1046,8 @@ err_udp:
 err_timer:
 	tquic_cid_table_exit();
 err_cid_table:
+	tquic_cid_hash_cleanup();
+err_cid_hash:
 	rhashtable_destroy(&tquic_conn_table);
 err_hashtable:
 	kmem_cache_destroy(tquic_path_cache);
@@ -1123,6 +1134,7 @@ void __exit tquic_exit(void)
 	tquic_udp_exit();
 	tquic_timer_exit();
 	tquic_cid_table_exit();
+	tquic_cid_hash_cleanup();
 
 	/* Cleanup global data structures */
 	rhashtable_destroy(&tquic_conn_table);

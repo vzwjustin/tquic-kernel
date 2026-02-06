@@ -99,7 +99,7 @@ kernel_connect(sock, (struct sockaddr_unsized *)sin, sizeof(*sin), 0);
 
 ### 5. Protocol Number (IPPROTO_TQUIC)
 
-**Issue**: `IPPROTO_TQUIC = 263` exceeds 8-bit range for `inet_add_protocol()`
+**Note**: In this tree, `IPPROTO_TQUIC = 253` (a classic 8-bit IP protocol number).
 
 **Context**: QUIC runs over UDP (RFC 9000), not as a raw IP protocol. The protocol number is used for socket identification, not raw IP protocol handling.
 
@@ -180,8 +180,8 @@ make -C /lib/modules/$(uname -r)/build M=$(pwd) modules
 ### "incompatible pointer type 'struct sockaddr *'"
 **Fix**: Update function signatures to use `struct sockaddr_unsized *`
 
-### "unsigned conversion from 'int' to 'unsigned char' changes value from '263'"
-**Fix**: Skip `inet_add_protocol()` for TQUIC (uses UDP encapsulation)
+### "unsigned conversion from 'int' to 'unsigned char' changes value ..."
+**Fix**: Ensure you are not trying to register a raw IP protocol handler for TQUIC; TQUIC uses UDP encapsulation.
 
 ### "too few arguments to function 'udp_tunnel_xmit_skb'"
 **Fix**: Check kernel version's UDP tunnel API and update parameters

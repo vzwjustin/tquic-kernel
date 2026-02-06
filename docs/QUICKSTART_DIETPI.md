@@ -66,10 +66,16 @@ ls /proc/sys/net/tquic | head -n 10
 python3 - <<'PY'
 import socket
 for fam,name in [(socket.AF_INET,"AF_INET"),(socket.AF_INET6,"AF_INET6")]:
-    s = socket.socket(fam, socket.SOCK_DGRAM, 253)
+    s = socket.socket(fam, socket.SOCK_DGRAM, 253)  # IPPROTO_TQUIC
     print(f"{name} SOCK_DGRAM proto 253 OK")
     s.close()
 PY
 ```
 
 If the module loads and sysctls are present, the core TQUIC stack is working.
+
+Alternatively, run the bundled smoke script from this repo (as root):
+
+```bash
+tools/tquic/smoke/tquic-smoke.sh
+```

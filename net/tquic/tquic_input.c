@@ -104,7 +104,6 @@ static int tquic_process_frames(struct tquic_connection *conn,
 				struct tquic_path *path,
 				u8 *payload, size_t len,
 				int enc_level, u64 pkt_num);
-
 /*
  * Per-path ECN tracking state for detecting CE count increases
  * Per RFC 9002 Section 7.1: Only respond to *increases* in CE count
@@ -130,6 +129,9 @@ struct tquic_rx_ctx {
 	bool ack_eliciting;
 	u8 key_phase_bit;  /* Key phase from short header (RFC 9001 Section 6) */
 };
+
+static int tquic_process_path_abandon_frame(struct tquic_rx_ctx *ctx);
+static int tquic_process_path_status_frame(struct tquic_rx_ctx *ctx);
 
 /* GRO state per socket */
 struct tquic_gro_state {

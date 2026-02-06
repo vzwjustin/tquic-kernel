@@ -13,8 +13,9 @@
 #include <linux/in.h>
 
 /*
- * Protocol number for TQUIC is defined in <linux/in.h> as IPPROTO_TQUIC = 263.
- * This follows MPTCP (262) in the protocol number space.
+ * Protocol number for TQUIC sockets is defined in <linux/in.h> as IPPROTO_TQUIC.
+ *
+ * In this tree, TQUIC uses a classic 8-bit IP protocol number (253).
  */
 
 /* Socket options at SOL_TQUIC level */

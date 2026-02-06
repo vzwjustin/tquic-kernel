@@ -115,7 +115,8 @@ See [CLAUDE.md](CLAUDE.md) for development workflow and coding standards.
 
 ## Documentation
 
-- Quick Start: `docs/QUICKSTART_DIETPI.md`
+- Quick Start (Ubuntu Server 25): `docs/QUICKSTART_UBUNTU25.md`
+- Quick Start (DietPi, Debian 6.12): `docs/QUICKSTART_DIETPI.md`
 - Architecture: `docs/ARCHITECTURE.md`
 - Configuration: `docs/CONFIGURATION.md`
 - Troubleshooting: `docs/TROUBLESHOOTING.md`
