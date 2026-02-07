@@ -1287,7 +1287,7 @@ static int quic_setsockopt_stream_priority(struct quic_sock *qsk,
 		return -ENOTCONN;
 
 	spin_lock_bh(&conn->streams_lock);
-	
+
 	for (node = rb_first(&conn->streams); node; node = rb_next(node)) {
 		stream = rb_entry(node, struct tquic_stream, node);
 		if (stream->id == prio.stream_id) {
@@ -1296,7 +1296,7 @@ static int quic_setsockopt_stream_priority(struct quic_sock *qsk,
 			return 0;
 		}
 	}
-	
+
 	spin_unlock_bh(&conn->streams_lock);
 	return -ENOENT;
 }
@@ -1327,7 +1327,7 @@ static int quic_getsockopt_stream_priority(struct quic_sock *qsk,
 		return -ENOTCONN;
 
 	spin_lock_bh(&conn->streams_lock);
-	
+
 	for (node = rb_first(&conn->streams); node; node = rb_next(node)) {
 		stream = rb_entry(node, struct tquic_stream, node);
 		if (stream->id == prio.stream_id) {
@@ -1339,7 +1339,7 @@ static int quic_getsockopt_stream_priority(struct quic_sock *qsk,
 			goto found;
 		}
 	}
-	
+
 	spin_unlock_bh(&conn->streams_lock);
 	return -ENOENT;
 
@@ -1635,7 +1635,7 @@ static int quic_sendmsg_stream(struct sock *sk, struct msghdr *msg,
 		 */
 		if (qsk->conn && qsk->conn->handshake_complete) {
 			/* Get connection's crypto context for encryption */
-			struct tquic_crypto_ctx *crypto = 
+			struct tquic_crypto_ctx *crypto =
 				(struct tquic_crypto_ctx *)qsk->conn->crypto[TQUIC_CRYPTO_APPLICATION];
 			struct sk_buff *pkt_skb;
 			u8 mask[5];
@@ -1649,11 +1649,11 @@ static int quic_sendmsg_stream(struct sock *sk, struct msghdr *msg,
 					kfree(pkt_buf);
 					return -ENOMEM;
 				}
-				
+
 				skb_put_data(pkt_skb, pkt_buf, pkt_len);
 				TQUIC_SKB_CB(pkt_skb)->header_len = header_len;
 				TQUIC_SKB_CB(pkt_skb)->pn = pn;
-				
+
 				err = tquic_crypto_encrypt(crypto, pkt_skb, pn);
 				if (err < 0) {
 					kfree_skb(pkt_skb);
@@ -1661,14 +1661,14 @@ static int quic_sendmsg_stream(struct sock *sk, struct msghdr *msg,
 					kfree(pkt_buf);
 					return err;
 				}
-				
+
 				/* Copy encrypted data back */
 				pkt_len = pkt_skb->len;
 				memcpy(pkt_buf, pkt_skb->data, pkt_len);
 				kfree_skb(pkt_skb);
-				
+
 				/* Apply header protection */
-				err = tquic_crypto_hp_mask(crypto, 
+				err = tquic_crypto_hp_mask(crypto,
 							   pkt_buf + header_len + 4,
 							   mask);
 				if (err < 0) {
@@ -1676,7 +1676,7 @@ static int quic_sendmsg_stream(struct sock *sk, struct msghdr *msg,
 					kfree(pkt_buf);
 					return err;
 				}
-				
+
 				/* Apply mask to first byte and packet number */
 				pkt_buf[0] ^= mask[0] & 0x1f;
 				for (i = 0; i < 4; i++)

@@ -1367,6 +1367,8 @@ EXPORT_SYMBOL_GPL(tquic_server_queue_packet);
 void tquic_server_check_path_recovery(struct tquic_connection *conn)
 {
 	struct tquic_path *path;
+	u32 recover_path_id;
+	bool found = false;
 
 	if (!conn)
 		return;
@@ -1383,23 +1385,32 @@ restart:
 					path->state = TQUIC_PATH_PENDING;
 
 				/*
-				 * Drop lock before calling into validation
-				 * (may sleep or acquire other locks), then
-				 * restart iteration since the list may have
-				 * changed while the lock was released.
+				 * Save path_id before dropping lock to avoid
+				 * use-after-free if path is removed concurrently.
 				 */
-				spin_unlock_bh(&conn->paths_lock);
-
-				tquic_path_start_validation(conn, path);
-
-				pr_debug("tquic: attempting path %u recovery\n",
-					 path->path_id);
-
-				goto restart;
+				recover_path_id = path->path_id;
+				found = true;
+				break;
 			}
 		}
 	}
 	spin_unlock_bh(&conn->paths_lock);
+
+	if (found) {
+		found = false;
+		/*
+		 * Re-lookup path under conn lock in validation function.
+		 * tquic_path_start_validation may sleep or acquire other locks.
+		 */
+		path = tquic_conn_get_path_locked(conn, recover_path_id);
+		if (path)
+			tquic_path_start_validation(conn, path);
+
+		pr_debug("tquic: attempting path %u recovery\n",
+			 recover_path_id);
+
+		goto restart;
+	}
 }
 EXPORT_SYMBOL_GPL(tquic_server_check_path_recovery);
 

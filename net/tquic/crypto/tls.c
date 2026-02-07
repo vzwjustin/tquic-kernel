@@ -277,6 +277,10 @@ static int tquic_hkdf_expand_label(struct crypto_shash *hash,
 	int ret;
 	u32 i, n;
 
+	/* Bounds check: 2 + 1 + 6 + label_len + 1 must fit in hkdf_label[] */
+	if (10 + label_len > sizeof(hkdf_label))
+		return -EINVAL;
+
 	/* Construct HKDF label: length + "tls13 " + label + context (empty) */
 	*p++ = (out_len >> 8) & 0xff;
 	*p++ = out_len & 0xff;

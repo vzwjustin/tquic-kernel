@@ -1032,9 +1032,17 @@ static const struct proc_ops tquic_napi_proc_ops = {
  * for TQUIC NAPI instances to attach to.
  */
 
+/* Minimal ndo_start_xmit for the dummy device - drop any stray packets */
+static netdev_tx_t tquic_napi_dummy_xmit(struct sk_buff *skb,
+					  struct net_device *dev)
+{
+	kfree_skb(skb);
+	return NETDEV_TX_OK;
+}
+
 /* Minimal net_device_ops for the NAPI dummy device */
 static const struct net_device_ops tquic_napi_netdev_ops = {
-	/* No operations needed - this is a dummy device for NAPI attachment */
+	.ndo_start_xmit = tquic_napi_dummy_xmit,
 };
 
 static void tquic_napi_dev_setup(struct net_device *dev)

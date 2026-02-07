@@ -1338,18 +1338,16 @@ int tquic_crypto_update_keys(struct tquic_connection *conn)
 				strlen(tquic_ku_label), NULL, 0,
 				new_secret, ctx->tx.secret_len);
 	if (err)
-		return err;
+		goto out;
 
-	/* Derive new keys from new secret */
-	memcpy(ctx->tx.secret, new_secret, ctx->tx.secret_len);
-
-	err = tquic_hkdf_expand_label(&hkdf, ctx->tx.secret, tquic_key_label,
+	/* Derive key and IV from new secret before committing it */
+	err = tquic_hkdf_expand_label(&hkdf, new_secret, tquic_key_label,
 				strlen(tquic_key_label), NULL, 0,
 				ctx->tx.key, ctx->tx.key_len);
 	if (err)
 		goto out;
 
-	err = tquic_hkdf_expand_label(&hkdf, ctx->tx.secret, tquic_iv_label,
+	err = tquic_hkdf_expand_label(&hkdf, new_secret, tquic_iv_label,
 				strlen(tquic_iv_label), NULL, 0,
 				ctx->tx.iv, ctx->tx.iv_len);
 	if (err)
@@ -1359,6 +1357,12 @@ int tquic_crypto_update_keys(struct tquic_connection *conn)
 	err = crypto_aead_setkey(ctx->tx_aead, ctx->tx.key, ctx->tx.key_len);
 	if (err)
 		goto out;
+
+	/*
+	 * Commit the new secret only after all derived values are
+	 * successfully installed, keeping the crypto context consistent.
+	 */
+	memcpy(ctx->tx.secret, new_secret, ctx->tx.secret_len);
 
 	/* Toggle key phase */
 	ctx->key_phase = !ctx->key_phase;

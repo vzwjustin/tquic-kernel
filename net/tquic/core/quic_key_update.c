@@ -148,7 +148,7 @@ extern int tquic_hkdf_expand_label(struct hkdf_ctx *ctx, const u8 *prk,
  */
 static int tquic_key_update_tx(struct tquic_connection *conn)
 {
-	struct tquic_crypto_ctx *ctx = 
+	struct tquic_crypto_ctx *ctx =
 		(struct tquic_crypto_ctx *)conn->crypto[TQUIC_CRYPTO_APPLICATION];
 	struct hkdf_ctx hkdf;
 	u8 new_secret[64];
@@ -165,20 +165,17 @@ static int tquic_key_update_tx(struct tquic_connection *conn)
 				strlen(tquic_ku_label), NULL, 0,
 				new_secret, ctx->tx.secret_len);
 	if (err)
-		return err;
+		goto out;
 
-	/* Update TX secret */
-	memcpy(ctx->tx.secret, new_secret, ctx->tx.secret_len);
-
-	/* Derive new TX key */
-	err = tquic_hkdf_expand_label(&hkdf, ctx->tx.secret, tquic_key_label,
+	/* Derive new TX key from new secret before committing */
+	err = tquic_hkdf_expand_label(&hkdf, new_secret, tquic_key_label,
 				strlen(tquic_key_label), NULL, 0,
 				ctx->tx.key, ctx->tx.key_len);
 	if (err)
 		goto out;
 
 	/* Derive new TX IV */
-	err = tquic_hkdf_expand_label(&hkdf, ctx->tx.secret, tquic_iv_label,
+	err = tquic_hkdf_expand_label(&hkdf, new_secret, tquic_iv_label,
 				strlen(tquic_iv_label), NULL, 0,
 				ctx->tx.iv, ctx->tx.iv_len);
 	if (err)
@@ -186,6 +183,11 @@ static int tquic_key_update_tx(struct tquic_connection *conn)
 
 	/* Install new key on TX AEAD */
 	err = crypto_aead_setkey(ctx->tx_aead, ctx->tx.key, ctx->tx.key_len);
+	if (err)
+		goto out;
+
+	/* Commit secret only after all derived values succeed */
+	memcpy(ctx->tx.secret, new_secret, ctx->tx.secret_len);
 
 out:
 	memzero_explicit(new_secret, sizeof(new_secret));
@@ -204,7 +206,7 @@ out:
  */
 static int tquic_key_update_rx(struct tquic_connection *conn)
 {
-	struct tquic_crypto_ctx *ctx = 
+	struct tquic_crypto_ctx *ctx =
 		(struct tquic_crypto_ctx *)conn->crypto[TQUIC_CRYPTO_APPLICATION];
 	struct hkdf_ctx hkdf;
 	u8 new_secret[64];
@@ -272,20 +274,17 @@ static int tquic_key_update_rx(struct tquic_connection *conn)
 				strlen(tquic_ku_label), NULL, 0,
 				new_secret, ctx->rx.secret_len);
 	if (err)
-		return err;
+		goto out;
 
-	/* Update RX secret */
-	memcpy(ctx->rx.secret, new_secret, ctx->rx.secret_len);
-
-	/* Derive new RX key */
-	err = tquic_hkdf_expand_label(&hkdf, ctx->rx.secret, tquic_key_label,
+	/* Derive new RX key from new secret before committing */
+	err = tquic_hkdf_expand_label(&hkdf, new_secret, tquic_key_label,
 				strlen(tquic_key_label), NULL, 0,
 				ctx->rx.key, ctx->rx.key_len);
 	if (err)
 		goto out;
 
 	/* Derive new RX IV */
-	err = tquic_hkdf_expand_label(&hkdf, ctx->rx.secret, tquic_iv_label,
+	err = tquic_hkdf_expand_label(&hkdf, new_secret, tquic_iv_label,
 				strlen(tquic_iv_label), NULL, 0,
 				ctx->rx.iv, ctx->rx.iv_len);
 	if (err)
@@ -293,6 +292,11 @@ static int tquic_key_update_rx(struct tquic_connection *conn)
 
 	/* Install new key on RX AEAD */
 	err = crypto_aead_setkey(ctx->rx_aead, ctx->rx.key, ctx->rx.key_len);
+	if (err)
+		goto out;
+
+	/* Commit secret only after all derived values succeed */
+	memcpy(ctx->rx.secret, new_secret, ctx->rx.secret_len);
 
 out:
 	memzero_explicit(new_secret, sizeof(new_secret));
@@ -317,7 +321,7 @@ out:
  */
 int tquic_crypto_initiate_key_update(struct tquic_connection *conn)
 {
-	struct tquic_crypto_ctx *ctx = 
+	struct tquic_crypto_ctx *ctx =
 		(struct tquic_crypto_ctx *)conn->crypto[TQUIC_CRYPTO_APPLICATION];
 	struct tquic_pn_space *pn_space = &conn->pn_spaces[TQUIC_PN_SPACE_APPLICATION];
 	int err;
@@ -362,7 +366,7 @@ EXPORT_SYMBOL_GPL(tquic_crypto_initiate_key_update);
  */
 int tquic_crypto_on_key_phase_change(struct tquic_connection *conn, u8 rx_key_phase)
 {
-	struct tquic_crypto_ctx *ctx = 
+	struct tquic_crypto_ctx *ctx =
 		(struct tquic_crypto_ctx *)conn->crypto[TQUIC_CRYPTO_APPLICATION];
 	ktime_t discard_time;
 	int err;
@@ -543,7 +547,7 @@ EXPORT_SYMBOL_GPL(tquic_crypto_on_key_phase_change);
  */
 void tquic_crypto_discard_old_keys(struct tquic_connection *conn)
 {
-	struct tquic_crypto_ctx *ctx = 
+	struct tquic_crypto_ctx *ctx =
 		(struct tquic_crypto_ctx *)conn->crypto[TQUIC_CRYPTO_APPLICATION];
 
 	if (!ctx)

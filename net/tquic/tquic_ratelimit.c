@@ -948,7 +948,7 @@ static void tquic_rl_rate_calc_work_fn(struct work_struct *work)
 		elapsed_ms = 1;
 
 	count = atomic_xchg(&state->rate_window_count, 0);
-	rate = (count * 1000) / elapsed_ms;
+	rate = (int)(((u64)count * 1000) / elapsed_ms);
 
 	state->rate_window_start = now;
 

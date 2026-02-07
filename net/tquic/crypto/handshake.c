@@ -799,6 +799,11 @@ static int tquic_hs_hkdf_expand_label(struct tquic_handshake *hs,
 
 	hash_len = crypto_shash_digestsize(hs->hmac);
 
+	/* Bounds check: 2 (length) + 1 (label_len) + total_label_len
+	 * + 1 (context_len) + context_len must fit in hkdf_label[] */
+	if (3 + total_label_len + 1 + context_len > sizeof(hkdf_label))
+		return -EINVAL;
+
 	/* HkdfLabel structure */
 	*p++ = (out_len >> 8) & 0xff;
 	*p++ = out_len & 0xff;

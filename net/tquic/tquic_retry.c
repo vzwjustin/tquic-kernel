@@ -366,7 +366,10 @@ int tquic_retry_token_create(struct tquic_retry_state *state,
 	/* Generate random nonce and prepend to token */
 	get_random_bytes(nonce, sizeof(nonce));
 
-	/* Copy key under lock, then release lock before crypto operations */
+	/*
+	 * Copy key and configure AEAD under lock to prevent concurrent
+	 * free of state->aead between the NULL check and usage.
+	 */
 	spin_lock_irqsave(&state->lock, flags);
 
 	if (!state->aead) {
@@ -376,16 +379,16 @@ int tquic_retry_token_create(struct tquic_retry_state *state,
 	}
 
 	memcpy(local_key, state->token_key, sizeof(local_key));
-	spin_unlock_irqrestore(&state->lock, flags);
-
 	ret = crypto_aead_setkey(state->aead, local_key, 16);
 	memzero_explicit(local_key, sizeof(local_key));
 	if (ret) {
+		spin_unlock_irqrestore(&state->lock, flags);
 		kfree(encrypted);
 		return ret;
 	}
 
 	req = aead_request_alloc(state->aead, GFP_ATOMIC);
+	spin_unlock_irqrestore(&state->lock, flags);
 	if (!req) {
 		kfree(encrypted);
 		return -ENOMEM;
@@ -461,7 +464,10 @@ int tquic_retry_token_validate(struct tquic_retry_state *state,
 
 	memcpy(decrypted, token + 12, enc_len);
 
-	/* Copy key under lock, then release lock before crypto operations */
+	/*
+	 * Copy key and configure AEAD under lock to prevent concurrent
+	 * free of state->aead between the NULL check and usage.
+	 */
 	spin_lock_irqsave(&state->lock, flags);
 
 	if (!state->aead) {
@@ -471,16 +477,16 @@ int tquic_retry_token_validate(struct tquic_retry_state *state,
 	}
 
 	memcpy(local_key, state->token_key, sizeof(local_key));
-	spin_unlock_irqrestore(&state->lock, flags);
-
 	ret = crypto_aead_setkey(state->aead, local_key, 16);
 	memzero_explicit(local_key, sizeof(local_key));
 	if (ret) {
+		spin_unlock_irqrestore(&state->lock, flags);
 		kfree(decrypted);
 		return ret;
 	}
 
 	req = aead_request_alloc(state->aead, GFP_ATOMIC);
+	spin_unlock_irqrestore(&state->lock, flags);
 	if (!req) {
 		kfree(decrypted);
 		return -ENOMEM;

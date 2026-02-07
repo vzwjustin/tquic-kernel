@@ -179,8 +179,28 @@ static inline struct tquic_crypto_wrapper *tquic_crypto_wrapper_alloc(gfp_t gfp)
  */
 static inline void tquic_crypto_wrapper_free(struct tquic_crypto_wrapper *wrapper)
 {
+	int i;
+
 	if (!wrapper)
 		return;
+
+	/* Free crypto handles before zeroizing the struct */
+	for (i = 0; i < TQUIC_CRYPTO_MAX; i++) {
+		struct tquic_crypto_ctx *ctx = &wrapper->crypto[i];
+
+		if (ctx->tx_aead)
+			crypto_free_aead(ctx->tx_aead);
+		if (ctx->rx_aead)
+			crypto_free_aead(ctx->rx_aead);
+		if (ctx->rx_aead_prev)
+			crypto_free_aead(ctx->rx_aead_prev);
+		if (ctx->tx_hp)
+			crypto_free_sync_skcipher(ctx->tx_hp);
+		if (ctx->rx_hp)
+			crypto_free_sync_skcipher(ctx->rx_hp);
+		if (ctx->hash)
+			crypto_free_shash(ctx->hash);
+	}
 
 	/* Zeroize key material before freeing to prevent lingering secrets */
 	memzero_explicit(wrapper, sizeof(*wrapper));
