@@ -502,6 +502,9 @@ struct tquic_connection *tquic_conn_create(struct tquic_sock *tsk, bool is_serve
 	conn->max_early_data = 0;
 	conn->early_data_sent = 0;
 
+	/* Initialize datagram state (wait queue, recv queue, etc.) */
+	tquic_datagram_init(conn);
+
 	/* Initialize statistics */
 	memset(&conn->stats, 0, sizeof(conn->stats));
 

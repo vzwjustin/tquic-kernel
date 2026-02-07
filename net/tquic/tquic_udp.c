@@ -169,6 +169,7 @@ static struct sk_buff *tquic_udp_gro_receive(struct sock *sk,
 					     struct sk_buff *skb);
 static int tquic_udp_gro_complete(struct sock *sk, struct sk_buff *skb,
 				  int nhoff);
+static void tquic_udp_sock_cleanup_work(struct work_struct *work);
 
 /*
  * Port number management
@@ -748,7 +749,10 @@ static struct tquic_udp_sock *tquic_udp_sock_lookup(__be16 port)
 	spin_lock_bh(&tquic_udp_hash_lock);
 	hash_for_each_possible(tquic_udp_sock_hash, us, hash_node, key) {
 		if (us->local_port == port) {
-			refcount_inc(&us->refcnt);
+			if (!refcount_inc_not_zero(&us->refcnt)) {
+				spin_unlock_bh(&tquic_udp_hash_lock);
+				return NULL;
+			}
 			spin_unlock_bh(&tquic_udp_hash_lock);
 			return us;
 		}
@@ -929,6 +933,7 @@ static struct tquic_udp_sock *tquic_udp_sock_alloc(void)
 
 	refcount_set(&us->refcnt, 1);
 	INIT_HLIST_NODE(&us->hash_node);
+	INIT_WORK(&us->cleanup_work, tquic_udp_sock_cleanup_work);
 
 	return us;
 }
@@ -964,7 +969,6 @@ void tquic_udp_sock_put(struct tquic_udp_sock *us)
 		tquic_udp_sock_hash_remove(us);
 
 		/* Schedule cleanup in process context */
-		INIT_WORK(&us->cleanup_work, tquic_udp_sock_cleanup_work);
 		schedule_work(&us->cleanup_work);
 	}
 }
@@ -1002,7 +1006,7 @@ int tquic_udp_connect(struct tquic_udp_sock *us,
 	if (us->family == AF_INET) {
 		struct sockaddr_in *sin = (struct sockaddr_in *)remote;
 
-		err = kernel_connect(us->sock, (struct sockaddr *)sin,
+		err = kernel_connect(us->sock, (struct sockaddr_unsized *)sin,
 				     sizeof(*sin), 0);
 		if (err)
 			return err;
@@ -1014,7 +1018,7 @@ int tquic_udp_connect(struct tquic_udp_sock *us,
 	else if (us->family == AF_INET6) {
 		struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)remote;
 
-		err = kernel_connect(us->sock, (struct sockaddr *)sin6,
+		err = kernel_connect(us->sock, (struct sockaddr_unsized *)sin6,
 				     sizeof(*sin6), 0);
 		if (err)
 			return err;
@@ -1139,7 +1143,8 @@ static int tquic_udp_encap_recv(struct sock *sk, struct sk_buff *skb)
 
 	/* Fall through to drop if delivery failed */
 drop:
-	us->stats.rx_errors++;
+	if (us)
+		us->stats.rx_errors++;
 	kfree_skb(skb);
 	return 0;
 }

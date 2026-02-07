@@ -2618,7 +2618,7 @@ EXPORT_SYMBOL_GPL(tquic_conn_state_cleanup);
  * Module Initialization
  */
 
-static int __init tquic_connection_init(void)
+int __init tquic_connection_init(void)
 {
 	int ret;
 
@@ -2655,7 +2655,7 @@ static int __init tquic_connection_init(void)
 	return 0;
 }
 
-static void __exit tquic_connection_exit(void)
+void __exit tquic_connection_exit(void)
 {
 	/* Cleanup retry token AEAD */
 	if (tquic_retry_aead) {

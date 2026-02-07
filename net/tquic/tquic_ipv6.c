@@ -388,7 +388,7 @@ static int tquic_v6_tunnel_setup(struct tquic_connection *conn,
 
 	/* Bind to local address */
 	if (path->local_addr.ss_family == AF_INET6) {
-		err = kernel_bind(sock, (struct sockaddr *)&path->local_addr,
+		err = kernel_bind(sock, (struct sockaddr_unsized *)&path->local_addr,
 				  sizeof(struct sockaddr_in6));
 		if (err) {
 			sock_release(sock);

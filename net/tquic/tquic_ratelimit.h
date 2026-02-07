@@ -61,6 +61,9 @@
 #define TQUIC_COOKIE_SECRET_LEN		32		/* 256-bit secret */
 #define TQUIC_COOKIE_ROTATE_INTERVAL_MS	300000		/* 5 minutes */
 
+/* Maximum number of rate limit buckets to prevent memory exhaustion */
+#define TQUIC_RATELIMIT_MAX_BUCKETS	65536
+
 /* Attack detection thresholds */
 #define TQUIC_RL_ATTACK_THRESHOLD	10000		/* conn/sec triggers attack mode */
 #define TQUIC_RL_ATTACK_HYSTERESIS_MS	30000		/* 30 sec hysteresis */
@@ -178,6 +181,7 @@ struct tquic_rl_stats {
 struct tquic_rl_state {
 	struct rhashtable ht;
 	struct rhashtable_params ht_params;
+	atomic_t bucket_count;
 
 	struct tquic_rl_stats stats;
 

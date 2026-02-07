@@ -17,6 +17,7 @@
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/slab.h>
+#include <linux/string.h>
 #include <linux/random.h>
 #include <linux/time64.h>
 #include <linux/in.h>
@@ -581,14 +582,18 @@ int tquic_send_new_token(struct tquic_connection *conn)
 
 	/* Initialize a key for this connection (in production, use persistent key) */
 	ret = tquic_token_init_key(&key);
-	if (ret)
+	if (ret) {
+		memzero_explicit(&key, sizeof(key));
 		return ret;
+	}
 
 	/* Generate NEW_TOKEN frame */
 	frame_len = tquic_gen_new_token_frame(&key, &path->remote_addr,
 					      frame_buf, sizeof(frame_buf));
-	if (frame_len < 0)
-		return frame_len;
+	if (frame_len < 0) {
+		ret = frame_len;
+		goto out_clear_key;
+	}
 
 	/*
 	 * Queue frame for transmission via the connection's control frame queue.
@@ -596,8 +601,10 @@ int tquic_send_new_token(struct tquic_connection *conn)
 	 * encrypted and transmitted by the output path.
 	 */
 	skb = alloc_skb(frame_len + 32, GFP_KERNEL);
-	if (!skb)
-		return -ENOMEM;
+	if (!skb) {
+		ret = -ENOMEM;
+		goto out_clear_key;
+	}
 
 	/* Reserve headroom for potential header additions */
 	skb_reserve(skb, 16);
@@ -620,7 +627,12 @@ int tquic_send_new_token(struct tquic_connection *conn)
 
 	pr_debug("tquic: NEW_TOKEN frame queued, len=%d\n", frame_len);
 
-	return 0;
+	ret = 0;
+
+out_clear_key:
+	/* Clear key material from stack on all paths */
+	memzero_explicit(&key, sizeof(key));
+	return ret;
 }
 EXPORT_SYMBOL_GPL(tquic_send_new_token);
 

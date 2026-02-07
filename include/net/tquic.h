@@ -1704,7 +1704,7 @@ struct tquic_cong_ops {
 };
 
 /* Socket address type compatibility */
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 13, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 19, 0)
 #define TQUIC_SOCKADDR struct sockaddr_unsized
 #else
 #define TQUIC_SOCKADDR struct sockaddr

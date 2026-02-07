@@ -61,9 +61,10 @@ extern struct rhashtable tquic_conn_table;
 extern const struct rhashtable_params tquic_conn_params;
 
 /*
- * Helper to count streams in the connection's rb-tree
+ * Helper to count streams in the connection's rb-tree.
+ * Caller must hold conn->lock.
  */
-static u32 tquic_count_streams(struct tquic_connection *conn)
+static u32 tquic_count_streams_locked(struct tquic_connection *conn)
 {
 	struct rb_node *node;
 	u32 count = 0;
@@ -73,6 +74,23 @@ static u32 tquic_count_streams(struct tquic_connection *conn)
 
 	for (node = rb_first(&conn->streams); node; node = rb_next(node))
 		count++;
+
+	return count;
+}
+
+/*
+ * Wrapper that acquires the connection lock before counting streams.
+ */
+static u32 tquic_count_streams(struct tquic_connection *conn)
+{
+	u32 count;
+
+	if (!conn)
+		return 0;
+
+	spin_lock_bh(&conn->lock);
+	count = tquic_count_streams_locked(conn);
+	spin_unlock_bh(&conn->lock);
 
 	return count;
 }
@@ -403,10 +421,13 @@ static int tquic_diag_get_aux(struct sock *sk, bool net_admin,
 	}
 
 	/* Per-path information as nested attributes */
+	spin_lock_bh(&conn->lock);
 	if (!list_empty(&conn->paths)) {
 		paths_nest = nla_nest_start(skb, TQUIC_DIAG_ATTR_PATHS);
-		if (!paths_nest)
+		if (!paths_nest) {
+			spin_unlock_bh(&conn->lock);
 			return -EMSGSIZE;
+		}
 
 		list_for_each_entry(path, &conn->paths, list) {
 			struct nlattr *path_nest;
@@ -414,6 +435,7 @@ static int tquic_diag_get_aux(struct sock *sk, bool net_admin,
 			path_nest = nla_nest_start(skb, 0);
 			if (!path_nest) {
 				nla_nest_cancel(skb, paths_nest);
+				spin_unlock_bh(&conn->lock);
 				return -EMSGSIZE;
 			}
 
@@ -446,11 +468,13 @@ static int tquic_diag_get_aux(struct sock *sk, bool net_admin,
 path_error:
 			nla_nest_cancel(skb, path_nest);
 			nla_nest_cancel(skb, paths_nest);
+			spin_unlock_bh(&conn->lock);
 			return -EMSGSIZE;
 		}
 
 		nla_nest_end(skb, paths_nest);
 	}
+	spin_unlock_bh(&conn->lock);
 
 	return 0;
 }

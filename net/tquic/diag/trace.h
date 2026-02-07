@@ -26,7 +26,7 @@
  * Prefer real kernel trace events when the trace header is available.
  * For out-of-tree builds that don't ship trace events, fall back to no-ops.
  */
-#if __has_include(<trace/events/quic.h>)
+#if __has_include(<trace/events/quic.h>) && !defined(TQUIC_OUT_OF_TREE)
 /*
  * Define the path where trace headers are located.
  * This is needed for TRACE_INCLUDE_PATH to resolve correctly.

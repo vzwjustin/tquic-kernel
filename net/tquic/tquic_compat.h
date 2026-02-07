@@ -59,14 +59,24 @@
 #endif
 
 /*
- * hrtimer_setup() is not available on older kernels.
+ * hrtimer_setup() replaced hrtimer_init() in 6.12.
+ * On 6.12+, hrtimer_setup() is native and hrtimer_init() no longer exists.
+ * Only define the compat macro on pre-6.12 kernels.
  */
-#ifndef hrtimer_setup
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 12, 0)
 #define hrtimer_setup(timer, fn, clock_id, mode)                 \
 	do {                                                     \
 		hrtimer_init((timer), (clock_id), (mode));       \
 		(timer)->function = (fn);                        \
 	} while (0)
+#endif /* < 6.12 */
+
+/*
+ * sockaddr_unsized was introduced in 6.19 for kernel_bind/kernel_connect.
+ * On older kernels, these functions take struct sockaddr *.
+ */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 19, 0)
+#define sockaddr_unsized sockaddr
 #endif
 
 /*
@@ -79,9 +89,9 @@
 #endif
 
 /*
- * Zerocopy helpers gained devmem/binding parameters in newer kernels.
+ * Zerocopy helpers gained devmem/binding parameters in 6.12+.
  */
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 19, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
 #define TQUIC_MSG_ZEROCOPY_REALLOC(sk, size, uarg) \
 	msg_zerocopy_realloc(sk, size, uarg, false)
 #define TQUIC_SKB_ZEROCOPY_ITER_STREAM(sk, skb, msg, len, uarg) \
@@ -94,10 +104,11 @@
 #endif
 
 /*
- * udp_tunnel_xmit_skb() gained an ipcb_flags parameter in newer kernels.
- * Keep a wrapper to handle both signatures.
+ * udp_tunnel_xmit_skb() gained an ipcb_flags parameter in 6.12+.
+ * Always pass 0 for ipcb_flags on kernels that have the 13-arg version.
+ * For kernels older than 6.12, the 12-arg version is used.
  */
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 19, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
 #define TQUIC_UDP_TUNNEL_XMIT_SKB(rt, sk, skb, saddr, daddr, tos, ttl, df, sport, dport, xnet, nocheck) \
 	udp_tunnel_xmit_skb(rt, sk, skb, saddr, daddr, tos, ttl, df, sport, dport, xnet, nocheck, 0)
 #define TQUIC_UDP_TUNNEL6_XMIT_SKB(dst, sk, skb, dev, saddr, daddr, prio, ttl, label, sport, dport, nocheck) \

@@ -51,6 +51,7 @@
 
 #include "protocol.h"
 #include "tquic_mib.h"
+#include "tquic_compat.h"
 
 /* Network namespace identifier (exported for protocol.h inline accessor) */
 unsigned int tquic_net_id __read_mostly;
@@ -501,7 +502,8 @@ static const struct proto_ops tquic_inet6_ops = {
 static struct proto tquicv6_prot = {
 	.name		= "TQUICv6",
 	.owner		= THIS_MODULE,
-	.obj_size	= sizeof(struct tquic_sock),
+	.obj_size	= sizeof(struct tquic6_sock),
+	.ipv6_pinfo_offset = offsetof(struct tquic6_sock, inet6),
 	.init		= tquic_init_sock,
 	.destroy	= tquic_destroy_sock,
 	.close		= tquic_close,

@@ -314,6 +314,13 @@ int io_tquic_recv_prep(struct io_kiocb *req, const struct io_uring_sqe *sqe)
 	sr->addr = NULL;
 	sr->retry_count = 0;
 
+	/* Cache buffer address and length from SQE during prep phase.
+	 * Repurpose iov/iovcnt fields (unused in recv path) to avoid
+	 * exceeding io_cmd_data size limit.
+	 */
+	sr->iov = (struct iovec *)(unsigned long)READ_ONCE(sqe->addr);
+	sr->iovcnt = READ_ONCE(sqe->len);
+
 	/* Check for multishot mode */
 	ioprio = READ_ONCE(sqe->ioprio);
 	sr->multishot = !!(ioprio & IORING_RECV_MULTISHOT);
@@ -363,9 +370,9 @@ int io_tquic_recv(struct io_kiocb *req, unsigned int issue_flags)
 		goto done;
 	}
 
-	/* Set up receive buffer */
-	iov.iov_base = (void __user *)req->cqe.user_data;
-	iov.iov_len = READ_ONCE(req->cqe.res);
+	/* Set up receive buffer from prep-phase cached values */
+	iov.iov_base = (void __user *)(unsigned long)sr->iov;
+	iov.iov_len = sr->iovcnt;
 
 	iov_iter_init(&msg.msg_iter, ITER_DEST, &iov, 1, iov.iov_len);
 	msg.msg_flags = sr->flags;

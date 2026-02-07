@@ -563,11 +563,17 @@ enum tquic_rl_action tquic_ratelimit_check(struct net *net,
 	if (!bucket) {
 		rcu_read_unlock();
 
+		/* Check if bucket count exceeds maximum */
+		if (atomic_read(&state->bucket_count) >= TQUIC_RATELIMIT_MAX_BUCKETS) {
+			/* Too many buckets - fail closed to prevent memory exhaustion */
+			return TQUIC_RL_RATE_LIMITED;
+		}
+
 		/* Allocate new bucket */
 		bucket = tquic_rl_bucket_alloc(src_addr);
 		if (!bucket) {
-			/* Memory pressure - be lenient */
-			return TQUIC_RL_ACCEPT;
+			/* Memory pressure - fail closed for safety */
+			return TQUIC_RL_RATE_LIMITED;
 		}
 
 		/* Insert into hash table */
@@ -581,16 +587,21 @@ enum tquic_rl_action tquic_ratelimit_check(struct net *net,
 						   tquic_rl_ht_params);
 			if (!bucket) {
 				rcu_read_unlock();
-				return TQUIC_RL_ACCEPT;
+				/* Lookup error - fail closed */
+				return TQUIC_RL_RATE_LIMITED;
 			}
 		} else {
-			/* Successfully inserted - lookup again under RCU */
+			/* Successfully inserted */
+			atomic_inc(&state->bucket_count);
+
+			/* Lookup again under RCU */
 			rcu_read_lock();
 			bucket = rhashtable_lookup(&state->ht, src_addr,
 						   tquic_rl_ht_params);
 			if (!bucket) {
 				rcu_read_unlock();
-				return TQUIC_RL_ACCEPT;
+				/* Lookup error - fail closed */
+				return TQUIC_RL_RATE_LIMITED;
 			}
 		}
 	}
@@ -880,6 +891,7 @@ static void tquic_rl_gc_work_fn(struct work_struct *work)
 			/* Remove from hash table */
 			rhashtable_remove_fast(&state->ht, &bucket->node,
 					       tquic_rl_ht_params);
+			atomic_dec(&state->bucket_count);
 			tquic_rl_bucket_put(bucket);
 			removed++;
 		}
@@ -915,7 +927,23 @@ static void tquic_rl_rate_calc_work_fn(struct work_struct *work)
 	if (!state->initialized)
 		return;
 
+	/*
+	 * Use time_after() for safe jiffies comparison to handle
+	 * wrap-around correctly.
+	 */
+	if (!time_after(now, state->rate_window_start)) {
+		/* Timer wrapped or no time elapsed - reset window */
+		state->rate_window_start = now;
+		atomic_set(&state->rate_window_count, 0);
+		goto reschedule;
+	}
+
 	elapsed_ms = jiffies_to_msecs(now - state->rate_window_start);
+
+	/* Cap elapsed_ms to a reasonable maximum (10 seconds) */
+	if (elapsed_ms > 10000)
+		elapsed_ms = 10000;
+
 	if (elapsed_ms == 0)
 		elapsed_ms = 1;
 
@@ -933,6 +961,7 @@ static void tquic_rl_rate_calc_work_fn(struct work_struct *work)
 	/* Check attack mode */
 	tquic_rl_check_attack_mode(state);
 
+reschedule:
 	/* Reschedule */
 	if (state->initialized) {
 		schedule_delayed_work(&state->rate_calc_work,
@@ -1213,6 +1242,7 @@ int tquic_ratelimit_init(struct net *net)
 
 	memset(state, 0, sizeof(*state));
 	spin_lock_init(&state->lock);
+	atomic_set(&state->bucket_count, 0);
 	state->net = net;
 
 	/* Initialize hash table */
@@ -1283,6 +1313,7 @@ void tquic_ratelimit_exit(struct net *net)
 			continue;
 		rhashtable_remove_fast(&state->ht, &bucket->node,
 				       tquic_rl_ht_params);
+		atomic_dec(&state->bucket_count);
 		tquic_rl_bucket_put(bucket);
 	}
 

@@ -697,6 +697,11 @@ int __init tquic_init(void)
 	if (err)
 		goto err_cid_table;
 
+	/* Initialize connection state machine (CID lookup table, retry AEAD) */
+	err = tquic_connection_init();
+	if (err)
+		goto err_connection;
+
 	/* Initialize timer subsystem */
 	err = tquic_timer_init();
 	if (err)
@@ -1044,6 +1049,8 @@ err_token:
 err_udp:
 	tquic_timer_exit();
 err_timer:
+	tquic_connection_exit();
+err_connection:
 	tquic_cid_table_exit();
 err_cid_table:
 	tquic_cid_hash_cleanup();
@@ -1133,6 +1140,7 @@ void __exit tquic_exit(void)
 	tquic_token_exit();
 	tquic_udp_exit();
 	tquic_timer_exit();
+	tquic_connection_exit();
 	tquic_cid_table_exit();
 	tquic_cid_hash_cleanup();
 

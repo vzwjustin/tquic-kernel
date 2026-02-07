@@ -19,6 +19,7 @@
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/slab.h>
+#include <linux/string.h>
 #include <linux/rhashtable.h>
 #include <linux/atomic.h>
 #include <linux/workqueue.h>
@@ -262,6 +263,10 @@ static void tquic_client_free_rcu(struct rcu_head *head)
 	struct tquic_client *client;
 
 	client = container_of(head, struct tquic_client, rcu_head);
+
+	/* Clear sensitive PSK material before freeing */
+	memzero_explicit(client->psk, sizeof(client->psk));
+
 	kfree(client);
 }
 
@@ -271,9 +276,11 @@ static void tquic_client_free_rcu(struct rcu_head *head)
  * @identity_len: Length of identity
  *
  * Called during TLS handshake to find matching client configuration.
- * RCU protected - caller must be in RCU read section.
+ * On success, returns with rcu_read_lock() held -- the caller MUST call
+ * rcu_read_unlock() when it is done with the returned pointer.
+ * On failure (NULL return), no RCU lock is held.
  *
- * Returns: Client pointer or NULL if not found
+ * Returns: Client pointer (RCU read lock held) or NULL if not found
  */
 struct tquic_client *tquic_client_lookup_by_psk(const char *identity,
 						size_t identity_len)
@@ -294,8 +301,10 @@ struct tquic_client *tquic_client_lookup_by_psk(const char *identity,
 	rcu_read_lock();
 	client = rhashtable_lookup(&tquic_client_table, lookup_key,
 				   tquic_client_params);
-	rcu_read_unlock();
+	if (!client)
+		rcu_read_unlock();
 
+	/* If client is found, rcu_read_lock remains held; caller must unlock */
 	return client;
 }
 EXPORT_SYMBOL_GPL(tquic_client_lookup_by_psk);
@@ -328,6 +337,7 @@ int tquic_client_register(const char *identity, size_t identity_len,
 	mutex_lock(&tquic_client_mutex);
 	if (!tquic_client_table_initialized) {
 		mutex_unlock(&tquic_client_mutex);
+		memzero_explicit(client->psk, sizeof(client->psk));
 		kfree(client);
 		return -ENODEV;
 	}
@@ -337,12 +347,13 @@ int tquic_client_register(const char *identity, size_t identity_len,
 	mutex_unlock(&tquic_client_mutex);
 
 	if (ret) {
+		memzero_explicit(client->psk, sizeof(client->psk));
 		kfree(client);
 		return ret;
 	}
 
-	pr_info("tquic: registered client '%.*s'\n",
-		(int)identity_len, identity);
+	pr_debug("tquic: registered client '%.*s'\n",
+		 (int)identity_len, identity);
 	return 0;
 }
 EXPORT_SYMBOL_GPL(tquic_client_register);
@@ -386,8 +397,8 @@ int tquic_client_unregister(const char *identity, size_t identity_len)
 	if (ret == 0) {
 		/* Defer freeing until RCU grace period */
 		call_rcu(&client->rcu_head, tquic_client_free_rcu);
-		pr_info("tquic: unregistered client '%.*s'\n",
-			(int)identity_len, identity);
+		pr_debug("tquic: unregistered client '%.*s'\n",
+			 (int)identity_len, identity);
 	}
 
 	return ret;
@@ -475,6 +486,7 @@ int tquic_server_get_client_psk(const char *identity, size_t identity_len,
 		return -ENOENT;
 
 	memcpy(psk, client->psk, 32);
+	rcu_read_unlock();
 	return 0;
 }
 EXPORT_SYMBOL_GPL(tquic_server_get_client_psk);
@@ -507,6 +519,7 @@ int tquic_client_set_rate_limit(const char *identity, size_t identity_len,
 	client->rate_last_refill = ktime_get();
 	spin_unlock_irqrestore(&client->rate_lock, flags);
 
+	rcu_read_unlock();
 	return 0;
 }
 EXPORT_SYMBOL_GPL(tquic_client_set_rate_limit);
@@ -532,6 +545,7 @@ int tquic_client_set_session_ttl(const char *identity, size_t identity_len,
 		ttl_ms = TQUIC_DEFAULT_SESSION_TTL_MS;
 
 	client->session_ttl = ttl_ms;
+	rcu_read_unlock();
 	return 0;
 }
 EXPORT_SYMBOL_GPL(tquic_client_set_session_ttl);
@@ -562,6 +576,7 @@ int tquic_client_get_stats(const char *identity, size_t identity_len,
 	if (rx_bytes)
 		*rx_bytes = atomic64_read(&client->rx_bytes);
 
+	rcu_read_unlock();
 	return 0;
 }
 EXPORT_SYMBOL_GPL(tquic_client_get_stats);
@@ -737,11 +752,36 @@ int __init tquic_server_init(void)
 
 /**
  * tquic_server_exit - Cleanup server subsystem
+ *
+ * Walks the rhashtable to clear sensitive material from all remaining
+ * client entries before destroying the table.
  */
 void __exit tquic_server_exit(void)
 {
+	struct rhashtable_iter iter;
+	struct tquic_client *client;
+
 	mutex_lock(&tquic_client_mutex);
 	if (tquic_client_table_initialized) {
+		/* Walk the table and scrub all client entries */
+		rhashtable_walk_enter(&tquic_client_table, &iter);
+		rhashtable_walk_start(&iter);
+
+		while ((client = rhashtable_walk_next(&iter)) != NULL) {
+			if (IS_ERR(client))
+				continue;
+			/* Remove entry from table */
+			rhashtable_remove_fast(&tquic_client_table,
+					       &client->node,
+					       tquic_client_params);
+			/* Clear sensitive PSK material */
+			memzero_explicit(client->psk, sizeof(client->psk));
+			kfree(client);
+		}
+
+		rhashtable_walk_stop(&iter);
+		rhashtable_walk_exit(&iter);
+
 		rhashtable_destroy(&tquic_client_table);
 		tquic_client_table_initialized = false;
 	}

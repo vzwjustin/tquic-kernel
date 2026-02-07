@@ -15,6 +15,7 @@
 #include <linux/socket.h>
 #include <linux/skbuff.h>
 #include <linux/slab.h>
+#include <linux/ktime.h>
 #include <crypto/hash.h>
 #include <crypto/aead.h>
 #include <crypto/skcipher.h>
@@ -123,6 +124,7 @@ struct tquic_crypto_ctx {
 	u8			rx_key_phase:1;
 	u8			key_update_pending:1;
 	u64			key_update_pn;
+	ktime_t			last_key_update;
 };
 
 /* TQUIC packet control block for skb->cb */
@@ -177,6 +179,11 @@ static inline struct tquic_crypto_wrapper *tquic_crypto_wrapper_alloc(gfp_t gfp)
  */
 static inline void tquic_crypto_wrapper_free(struct tquic_crypto_wrapper *wrapper)
 {
+	if (!wrapper)
+		return;
+
+	/* Zeroize key material before freeing to prevent lingering secrets */
+	memzero_explicit(wrapper, sizeof(*wrapper));
 	kfree(wrapper);
 }
 
