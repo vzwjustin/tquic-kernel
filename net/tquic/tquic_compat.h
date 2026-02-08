@@ -283,10 +283,16 @@ static const int tquic_sysctl_two = 2;
 /*
  * Zerocopy helpers: msg_zerocopy_realloc and skb_zerocopy_iter_stream
  * require kernel >= 6.7 due to ubuf_info struct split and API changes.
- * These macros are only used by tquic_zerocopy.c which is itself guarded
- * at >= 6.7, so they are only defined for that version range.
+ * In 6.13+, msg_zerocopy_realloc gained a bool devmem parameter and
+ * skb_zerocopy_iter_stream gained a struct net_devmem_dmabuf_binding *
+ * parameter. Pass false/NULL for TQUIC (no devmem support).
  */
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 7, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 13, 0)
+#define TQUIC_MSG_ZEROCOPY_REALLOC(sk, size, uarg) \
+	msg_zerocopy_realloc(sk, size, uarg, false)
+#define TQUIC_SKB_ZEROCOPY_ITER_STREAM(sk, skb, msg, len, uarg) \
+	skb_zerocopy_iter_stream(sk, skb, msg, len, uarg, NULL)
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(6, 7, 0)
 #define TQUIC_MSG_ZEROCOPY_REALLOC(sk, size, uarg) \
 	msg_zerocopy_realloc(sk, size, uarg)
 #define TQUIC_SKB_ZEROCOPY_ITER_STREAM(sk, skb, msg, len, uarg) \
