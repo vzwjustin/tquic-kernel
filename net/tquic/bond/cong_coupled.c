@@ -362,6 +362,7 @@ void coupled_cc_update_path(struct coupled_cc_ctx *ctx, u8 path_id,
 {
 	struct coupled_path_state *path;
 	u64 old_cwnd;
+	int i;
 
 	spin_lock_bh(&ctx->lock);
 
@@ -387,7 +388,7 @@ void coupled_cc_update_path(struct coupled_cc_ctx *ctx, u8 path_id,
 	/* Update RTT bounds */
 	ctx->min_rtt_us = U64_MAX;
 	ctx->max_rtt_us = 0;
-	for (int i = 0; i < ctx->num_paths; i++) {
+	for (i = 0; i < ctx->num_paths; i++) {
 		if (ctx->paths[i].active && ctx->paths[i].rtt_us > 0) {
 			if (ctx->paths[i].rtt_us < ctx->min_rtt_us)
 				ctx->min_rtt_us = ctx->paths[i].rtt_us;

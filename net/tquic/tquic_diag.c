@@ -494,10 +494,6 @@ path_error:
  * .owner field: added in 5.11, removed in 6.5
  */
 static const struct inet_diag_handler tquic_diag_handler = {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0) && \
-    LINUX_VERSION_CODE < KERNEL_VERSION(6, 5, 0)
-	.owner		 = THIS_MODULE,
-#endif
 	.dump		 = tquic_diag_dump,
 	.dump_one	 = tquic_diag_dump_one,
 	.idiag_get_info  = tquic_diag_get_info,
@@ -519,6 +515,15 @@ void __exit tquic_diag_exit(void)
 	inet_diag_unregister(&tquic_diag_handler);
 }
 
+MODULE_LICENSE("GPL");
+MODULE_DESCRIPTION("TQUIC socket monitoring via SOCK_DIAG");
+/*
+ * Per RESEARCH.md pitfall #4: MODULE_ALIAS enables auto-loading
+ * when ss queries IPPROTO_TQUIC.
+ * Format: AF_INET (2) - IPPROTO_TQUIC (263)
+ */
+MODULE_ALIAS_NET_PF_PROTO_TYPE(PF_NETLINK, NETLINK_SOCK_DIAG, 2-263);
+
 #else /* LINUX_VERSION_CODE < 5.7.0 */
 
 /*
@@ -537,13 +542,7 @@ void __exit tquic_diag_exit(void)
 {
 }
 
-#endif /* LINUX_VERSION_CODE >= 5.7.0 */
-
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("TQUIC socket monitoring via SOCK_DIAG");
-/*
- * Per RESEARCH.md pitfall #4: MODULE_ALIAS enables auto-loading
- * when ss queries IPPROTO_TQUIC.
- * Format: AF_INET (2) - IPPROTO_TQUIC (263)
- */
-MODULE_ALIAS_NET_PF_PROTO_TYPE(PF_NETLINK, NETLINK_SOCK_DIAG, 2-263);
+
+#endif /* LINUX_VERSION_CODE >= 5.7.0 */

@@ -615,6 +615,8 @@ EXPORT_SYMBOL_GPL(tquic_bonding_derive_weights);
 int tquic_bonding_set_path_weight(struct tquic_bonding_ctx *bc, u8 path_id,
 				  u32 weight)
 {
+	int i;
+
 	if (!bc)
 		return -EINVAL;
 
@@ -637,7 +639,7 @@ int tquic_bonding_set_path_weight(struct tquic_bonding_ctx *bc, u8 path_id,
 
 	/* Recalculate total weight */
 	bc->weights.total_weight = 0;
-	for (int i = 0; i < TQUIC_MAX_PATHS; i++) {
+	for (i = 0; i < TQUIC_MAX_PATHS; i++) {
 		bc->weights.total_weight += bc->weights.path_weights[i];
 	}
 

@@ -13,6 +13,10 @@
  * Reference: TCP zerocopy implementation (net/ipv4/tcp.c)
  */
 
+#include <linux/version.h>
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 7, 0)
+
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/slab.h>
@@ -207,15 +211,6 @@ static void tquic_zc_entry_put(struct tquic_zc_entry *entry)
  * =============================================================================
  */
 
-/**
- * tquic_zerocopy_callback - Callback when zerocopy transmission completes
- * @sk: Socket
- * @uarg: User buffer argument
- * @success: Whether transmission succeeded
- *
- * Called from skb destructor when zerocopy pages can be released.
- * Sends notification to userspace via error queue.
- */
 /**
  * tquic_zerocopy_complete - Zerocopy completion callback
  * @skb: Socket buffer being completed
@@ -1087,6 +1082,120 @@ int tquic_skb_orphan_frags_rx(struct sk_buff *skb, gfp_t gfp)
 	return skb_orphan_frags_rx(skb, gfp);
 }
 EXPORT_SYMBOL_GPL(tquic_skb_orphan_frags_rx);
+
+#else /* LINUX_VERSION_CODE < KERNEL_VERSION(6, 7, 0) */
+
+/*
+ * Zerocopy is not supported on kernels older than 6.7 due to
+ * incompatible ubuf_info, msg_zerocopy, and skb zerocopy APIs.
+ * Provide correct fallback implementations that return appropriate
+ * error codes or no-ops.
+ */
+
+#include <linux/module.h>
+#include <linux/errno.h>
+#include <linux/skbuff.h>
+#include <net/sock.h>
+#include <net/tquic.h>
+
+#include "protocol.h"
+
+int tquic_zc_state_alloc(struct tquic_connection *conn)
+{
+	return 0;
+}
+EXPORT_SYMBOL_GPL(tquic_zc_state_alloc);
+
+void tquic_zc_state_free(struct tquic_connection *conn)
+{
+}
+EXPORT_SYMBOL_GPL(tquic_zc_state_free);
+
+int tquic_sendmsg_zerocopy(struct sock *sk, struct msghdr *msg, size_t len,
+			   struct tquic_stream *stream)
+{
+	return -EOPNOTSUPP;
+}
+EXPORT_SYMBOL_GPL(tquic_sendmsg_zerocopy);
+
+int tquic_check_zerocopy_flag(struct sock *sk, struct msghdr *msg, int flags)
+{
+	return 0;
+}
+EXPORT_SYMBOL_GPL(tquic_check_zerocopy_flag);
+
+ssize_t tquic_sendpage(struct socket *sock, struct page *page,
+		       int offset, size_t size, int flags)
+{
+	return -EOPNOTSUPP;
+}
+EXPORT_SYMBOL_GPL(tquic_sendpage);
+
+ssize_t tquic_splice_read(struct socket *sock, loff_t *ppos,
+			  struct pipe_inode_info *pipe, size_t len,
+			  unsigned int flags)
+{
+	return -EOPNOTSUPP;
+}
+EXPORT_SYMBOL_GPL(tquic_splice_read);
+
+size_t tquic_recvmsg_peek_size(struct sock *sk, struct tquic_stream *stream)
+{
+	return 0;
+}
+EXPORT_SYMBOL_GPL(tquic_recvmsg_peek_size);
+
+struct page *tquic_rx_page_pool_alloc(struct tquic_connection *conn)
+{
+	return NULL;
+}
+EXPORT_SYMBOL_GPL(tquic_rx_page_pool_alloc);
+
+struct sk_buff *tquic_rx_build_skb_from_page(struct tquic_connection *conn,
+					     struct page *page,
+					     unsigned int offset,
+					     unsigned int len)
+{
+	return NULL;
+}
+EXPORT_SYMBOL_GPL(tquic_rx_build_skb_from_page);
+
+int tquic_set_zerocopy(struct sock *sk, int val)
+{
+	return -EOPNOTSUPP;
+}
+EXPORT_SYMBOL_GPL(tquic_set_zerocopy);
+
+int tquic_get_zerocopy(struct sock *sk)
+{
+	return 0;
+}
+EXPORT_SYMBOL_GPL(tquic_get_zerocopy);
+
+void tquic_zc_complete(struct sock *sk, u32 id)
+{
+}
+EXPORT_SYMBOL_GPL(tquic_zc_complete);
+
+void tquic_zc_abort(struct sock *sk, u32 id, int err)
+{
+}
+EXPORT_SYMBOL_GPL(tquic_zc_abort);
+
+int tquic_skb_zerocopy_setup(struct sk_buff *skb, struct page *page,
+			     unsigned int offset, unsigned int len)
+{
+	return -EOPNOTSUPP;
+}
+EXPORT_SYMBOL_GPL(tquic_skb_zerocopy_setup);
+
+int tquic_skb_orphan_frags_rx(struct sk_buff *skb, gfp_t gfp)
+{
+	return skb_orphan_frags_rx(skb, gfp);
+}
+EXPORT_SYMBOL_GPL(tquic_skb_orphan_frags_rx);
+
+#endif /* LINUX_VERSION_CODE >= KERNEL_VERSION(6, 7, 0) */
 
 /*
  * =============================================================================

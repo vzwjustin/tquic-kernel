@@ -254,15 +254,17 @@ static const int tquic_sysctl_two = 2;
 #endif
 
 /*
- * Zerocopy helpers: msg_zerocopy_realloc takes 3 args and
- * skb_zerocopy_iter_stream takes 5 args on all released kernels (5.4-6.15).
- * The devmem TX patchset may add extra parameters in a future kernel;
- * update these macros when that lands.
+ * Zerocopy helpers: msg_zerocopy_realloc and skb_zerocopy_iter_stream
+ * require kernel >= 6.7 due to ubuf_info struct split and API changes.
+ * These macros are only used by tquic_zerocopy.c which is itself guarded
+ * at >= 6.7, so they are only defined for that version range.
  */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 7, 0)
 #define TQUIC_MSG_ZEROCOPY_REALLOC(sk, size, uarg) \
 	msg_zerocopy_realloc(sk, size, uarg)
 #define TQUIC_SKB_ZEROCOPY_ITER_STREAM(sk, skb, msg, len, uarg) \
 	skb_zerocopy_iter_stream(sk, skb, msg, len, uarg)
+#endif
 
 /*
  * udp_tunnel_xmit_skb() gained an ipcb_flags parameter in 6.13+.
