@@ -17,6 +17,8 @@ on:
       - 'include/net/tquic_http3.h'
       - 'include/net/tquic_pm.h'
       - 'include/net/tquic_pmtud.h'
+      - 'include/crypto/**'
+      - 'include/uapi/**'
       - '.github/workflows/build.yml'
   pull_request:
     paths:
