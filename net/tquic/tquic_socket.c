@@ -67,7 +67,7 @@ static void tquic_set_lockdep_class(struct sock *sk, bool is_ipv6)
 int tquic_sock_bind(struct socket *sock, TQUIC_SOCKADDR *uaddr, int addr_len);
 int tquic_connect_socket(struct socket *sock, TQUIC_SOCKADDR *uaddr,
 			 int addr_len, int flags);
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 7, 0)
 int tquic_accept_socket(struct socket *sock, struct socket *newsock,
 			struct proto_accept_arg *arg);
 #else
@@ -387,7 +387,7 @@ out:
  * This is called by the socket layer. It calls tquic_accept() to get
  * the child socket from the accept queue, then grafts it onto newsock.
  */
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 7, 0)
 int tquic_accept_socket(struct socket *sock, struct socket *newsock,
 			struct proto_accept_arg *arg)
 {

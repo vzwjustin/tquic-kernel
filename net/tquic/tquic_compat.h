@@ -34,7 +34,15 @@
  * - Timer API: from_timer() -> timer_container_of()
  * - Timer API: del_timer() -> timer_delete()
  * - Timer API: del_timer_sync() -> timer_delete_sync()
+ * - Zerocopy: msg_zerocopy_realloc/skb_zerocopy_iter_stream gained params
+ *
+ * Kernel 6.13+ compatibility:
+ * - udp_tunnel_xmit_skb/udp_tunnel6_xmit_skb gained ipcb_flags param
+ *
+ * Kernel 6.15+ compatibility:
  * - Timer API: hrtimer_init() -> hrtimer_setup()
+ *
+ * Kernel 6.19+ compatibility:
  * - Socket API: struct sockaddr -> struct sockaddr_unsized in callbacks
  * - Flow routing: flowi4_tos -> flowi4_dscp
  */
@@ -217,17 +225,17 @@ static const int tquic_sysctl_two = 2;
 #endif
 
 /*
- * hrtimer_setup() replaced hrtimer_init() in 6.12.
- * On 6.12+, hrtimer_setup() is native and hrtimer_init() no longer exists.
- * Only define the compat macro on pre-6.12 kernels.
+ * hrtimer_setup() replaced hrtimer_init() in 6.15.
+ * On 6.15+, hrtimer_setup() is native and hrtimer_init() no longer exists.
+ * Only define the compat macro on pre-6.15 kernels.
  */
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 12, 0)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 15, 0)
 #define hrtimer_setup(timer, fn, clock_id, mode)                 \
 	do {                                                     \
 		hrtimer_init((timer), (clock_id), (mode));       \
 		(timer)->function = (fn);                        \
 	} while (0)
-#endif /* < 6.12 */
+#endif /* < 6.15 */
 
 /*
  * sockaddr_unsized was introduced in 6.19 for kernel_bind/kernel_connect.
@@ -262,11 +270,11 @@ static const int tquic_sysctl_two = 2;
 #endif
 
 /*
- * udp_tunnel_xmit_skb() gained an ipcb_flags parameter in 6.12+.
+ * udp_tunnel_xmit_skb() gained an ipcb_flags parameter in 6.13+.
  * Always pass 0 for ipcb_flags on kernels that have the 13-arg version.
- * For kernels older than 6.12, the 12-arg version is used.
+ * For kernels older than 6.13, the 12-arg version is used.
  */
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 13, 0)
 #define TQUIC_UDP_TUNNEL_XMIT_SKB(rt, sk, skb, saddr, daddr, tos, ttl, df, sport, dport, xnet, nocheck) \
 	udp_tunnel_xmit_skb(rt, sk, skb, saddr, daddr, tos, ttl, df, sport, dport, xnet, nocheck, 0)
 #define TQUIC_UDP_TUNNEL6_XMIT_SKB(dst, sk, skb, dev, saddr, daddr, prio, ttl, label, sport, dport, nocheck) \
@@ -279,16 +287,16 @@ static const int tquic_sysctl_two = 2;
 #endif
 
 /* ========================================================================
- * Kernel < 6.4: proto_accept_arg struct was introduced in 6.4
+ * Kernel < 6.7: proto_accept_arg struct was introduced in 6.7
  * Provide a polyfill for older kernels.
  * ======================================================================== */
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 4, 0)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 7, 0)
 struct proto_accept_arg {
 	int flags;
 	int err;
 	bool kern;
 };
-#endif /* < 6.4 */
+#endif /* < 6.7 */
 
 /* ========================================================================
  * Kernel < 6.4: per_cpu_fw_alloc field in struct proto
@@ -310,24 +318,15 @@ struct proto_accept_arg {
 #endif
 
 /* ========================================================================
- * Kernel < 6.4: sysctl_mem type changed from int[] to long[]
+ * sysctl_mem type: has been long[] since before 5.4
  * ======================================================================== */
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
 #define TQUIC_SYSCTL_MEM_TYPE long
-#else
-#define TQUIC_SYSCTL_MEM_TYPE int
-#endif
 
 /* ========================================================================
- * Kernel < 6.4: proto.hash return type changed from void to int
+ * proto.hash return type: has been int since before 5.4
  * ======================================================================== */
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
 #define TQUIC_PROTO_HASH_RET int
 #define TQUIC_PROTO_HASH_RETURN return 0
-#else
-#define TQUIC_PROTO_HASH_RET void
-#define TQUIC_PROTO_HASH_RETURN
-#endif
 
 /* ========================================================================
  * Kernel < 5.19: proto.recvmsg had 6 args (extra noblock param)

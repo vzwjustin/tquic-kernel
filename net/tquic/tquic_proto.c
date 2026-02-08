@@ -53,6 +53,15 @@
 #include "tquic_mib.h"
 #include "tquic_compat.h"
 
+/*
+ * On < 5.9, sockptr_t doesn't exist in <net/tquic.h> (parsed before
+ * tquic_compat.h).  Forward-declare with the polyfilled type here.
+ */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 9, 0)
+int tquic_sock_setsockopt(struct socket *sock, int level, int optname,
+			  sockptr_t optval, unsigned int optlen);
+#endif
+
 /* Network namespace identifier (exported for protocol.h inline accessor) */
 unsigned int tquic_net_id __read_mostly;
 EXPORT_SYMBOL_GPL(tquic_net_id);

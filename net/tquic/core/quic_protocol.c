@@ -30,12 +30,8 @@ static struct kmem_cache *tquic_sock_cachep __read_mostly;
 static struct kmem_cache *tquic_conn_cachep __read_mostly;
 static struct kmem_cache *tquic_stream_cachep __read_mostly;
 
-/* Sysctl variables */
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
+/* Sysctl variables - sysctl_mem has been long[] since before 5.4 */
 long sysctl_tquic_mem[3] __read_mostly;
-#else
-int sysctl_tquic_mem[3] __read_mostly;
-#endif
 int sysctl_tquic_wmem[3] __read_mostly = { 4096, 16384, 4194304 };
 int sysctl_tquic_rmem[3] __read_mostly = { 4096, 131072, 6291456 };
 
@@ -189,7 +185,7 @@ static int tquic_stream_bind(struct socket *sock, TQUIC_SOCKADDR *addr,
 			     int addr_len);
 static int tquic_stream_connect(struct socket *sock, TQUIC_SOCKADDR *addr,
 				int addr_len, int flags);
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 7, 0)
 static int tquic_stream_accept(struct socket *sock, struct socket *newsock,
 			       struct proto_accept_arg *arg);
 #else
@@ -220,8 +216,13 @@ static int tquic_proto_pre_connect(struct sock *sk, TQUIC_SOCKADDR *addr,
 static int tquic_proto_connect(struct sock *sk, TQUIC_SOCKADDR *addr,
 			       int addr_len);
 static int tquic_proto_disconnect(struct sock *sk, int flags);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 7, 0)
 static struct sock *tquic_proto_accept(struct sock *sk,
 				       struct proto_accept_arg *arg);
+#else
+static struct sock *tquic_proto_accept(struct sock *sk,
+				       int flags, int *err, bool kern);
+#endif
 static int tquic_proto_ioctl(struct sock *sk, int cmd, int *karg);
 static int tquic_proto_init_sock(struct sock *sk);
 static void tquic_proto_destroy_sock(struct sock *sk);
@@ -241,13 +242,25 @@ static int tquic_proto_bind(struct sock *sk, TQUIC_SOCKADDR *addr,
 			    int addr_len);
 static int tquic_proto_backlog_rcv(struct sock *sk, struct sk_buff *skb);
 static void tquic_proto_release_cb(struct sock *sk);
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
 static int tquic_proto_hash(struct sock *sk);
-#else
-static void tquic_proto_hash(struct sock *sk);
-#endif
 static void tquic_proto_unhash(struct sock *sk);
 static int tquic_proto_get_port(struct sock *sk, unsigned short snum);
+
+/* Compat wrapper for proto.setsockopt on kernels < 5.9 (no sockptr_t) */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 9, 0)
+static int tquic_proto_setsockopt_compat(struct sock *sk, int level,
+					 int optname, char __user *optval,
+					 unsigned int optlen)
+{
+	return tquic_proto_setsockopt(sk, level, optname,
+				      USER_SOCKPTR(optval), optlen);
+}
+#endif
+
+/* Compat wrapper for proto.recvmsg on kernels < 5.19 (6-arg signature) */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 19, 0)
+TQUIC_DEFINE_RECVMSG_WRAPPER(tquic_proto_recvmsg_compat, tquic_proto_recvmsg)
+#endif
 
 /* TQUIC protocol identifier */
 static struct proto tquic_prot = {
@@ -262,10 +275,18 @@ static struct proto tquic_prot = {
 	.init			= tquic_proto_init_sock,
 	.destroy		= tquic_proto_destroy_sock,
 	.shutdown		= tquic_proto_shutdown,
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)
 	.setsockopt		= tquic_proto_setsockopt,
+#else
+	.setsockopt		= tquic_proto_setsockopt_compat,
+#endif
 	.getsockopt		= tquic_proto_getsockopt,
 	.sendmsg		= tquic_proto_sendmsg,
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 19, 0)
 	.recvmsg		= tquic_proto_recvmsg,
+#else
+	.recvmsg		= tquic_proto_recvmsg_compat,
+#endif
 	.bind			= tquic_proto_bind,
 	.backlog_rcv		= tquic_proto_backlog_rcv,
 	.release_cb		= tquic_proto_release_cb,
@@ -297,10 +318,18 @@ static struct proto tquicv6_prot = {
 	.init			= tquic_proto_init_sock,
 	.destroy		= tquic_proto_destroy_sock,
 	.shutdown		= tquic_proto_shutdown,
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)
 	.setsockopt		= tquic_proto_setsockopt,
+#else
+	.setsockopt		= tquic_proto_setsockopt_compat,
+#endif
 	.getsockopt		= tquic_proto_getsockopt,
 	.sendmsg		= tquic_proto_sendmsg,
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 19, 0)
 	.recvmsg		= tquic_proto_recvmsg,
+#else
+	.recvmsg		= tquic_proto_recvmsg_compat,
+#endif
 	.bind			= tquic_proto_bind,
 	.backlog_rcv		= tquic_proto_backlog_rcv,
 	.release_cb		= tquic_proto_release_cb,
@@ -403,6 +432,7 @@ static int tquic_proto_disconnect(struct sock *sk, int flags)
 	return 0;
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 7, 0)
 static struct sock *tquic_proto_accept(struct sock *sk,
 				       struct proto_accept_arg *arg)
 {
@@ -461,6 +491,66 @@ static struct sock *tquic_proto_accept(struct sock *sk,
 	release_sock(sk);
 	return newsk;
 }
+#else
+static struct sock *tquic_proto_accept(struct sock *sk,
+				       int flags, int *err, bool kern)
+{
+	struct tquic_sock *tsk = tquic_sk(sk);
+	struct tquic_sock *newtsk;
+	struct sock *newsk;
+	DEFINE_WAIT(wait);
+
+	lock_sock(sk);
+
+	if (sk->sk_state != TCP_LISTEN) {
+		*err = -EINVAL;
+		release_sock(sk);
+		return NULL;
+	}
+
+	while (list_empty(&tsk->accept_queue)) {
+		if (flags & O_NONBLOCK) {
+			*err = -EAGAIN;
+			release_sock(sk);
+			return NULL;
+		}
+
+		prepare_to_wait_exclusive(sk_sleep(sk), &wait,
+					  TASK_INTERRUPTIBLE);
+		release_sock(sk);
+
+		if (signal_pending(current)) {
+			finish_wait(sk_sleep(sk), &wait);
+			*err = -ERESTARTSYS;
+			return NULL;
+		}
+
+		schedule();
+		lock_sock(sk);
+		finish_wait(sk_sleep(sk), &wait);
+	}
+
+	newsk = sk_alloc(sock_net(sk), sk->sk_family, GFP_KERNEL,
+#if IS_ENABLED(CONFIG_IPV6)
+			 sk->sk_family == AF_INET6 ? &tquicv6_prot :
+#endif
+			 &tquic_prot, false);
+	if (!newsk) {
+		*err = -ENOMEM;
+		release_sock(sk);
+		return NULL;
+	}
+
+	sock_init_data(NULL, newsk);
+	newtsk = tquic_sk(newsk);
+
+	newsk->sk_state = TCP_ESTABLISHED;
+	*err = 0;
+
+	release_sock(sk);
+	return newsk;
+}
+#endif
 
 static int tquic_proto_ioctl(struct sock *sk, int cmd, int *karg)
 {
@@ -897,18 +987,11 @@ static void tquic_proto_release_cb(struct sock *sk)
 	}
 }
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
 static int tquic_proto_hash(struct sock *sk)
 {
 	/* TQUIC uses connection IDs for demuxing, not port hash */
 	return 0;
 }
-#else
-static void tquic_proto_hash(struct sock *sk)
-{
-	/* TQUIC uses connection IDs for demuxing, not port hash */
-}
-#endif
 
 static void tquic_proto_unhash(struct sock *sk)
 {
@@ -926,6 +1009,17 @@ static int tquic_proto_get_port(struct sock *sk, unsigned short snum)
 	return 0;
 }
 
+/* Compat wrapper for proto_ops.setsockopt on kernels < 5.9 (no sockptr_t) */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 9, 0)
+static int tquic_stream_setsockopt_compat(struct socket *sock, int level,
+					  int optname, char __user *optval,
+					  unsigned int optlen)
+{
+	return tquic_stream_setsockopt(sock, level, optname,
+				       USER_SOCKPTR(optval), optlen);
+}
+#endif
+
 static const struct proto_ops tquic_stream_ops = {
 	.family		= PF_INET,
 	.owner		= THIS_MODULE,
@@ -939,7 +1033,11 @@ static const struct proto_ops tquic_stream_ops = {
 	.ioctl		= tquic_stream_ioctl,
 	.listen		= tquic_stream_listen,
 	.shutdown	= tquic_stream_shutdown,
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)
 	.setsockopt	= tquic_stream_setsockopt,
+#else
+	.setsockopt	= tquic_stream_setsockopt_compat,
+#endif
 	.getsockopt	= tquic_stream_getsockopt,
 	.sendmsg	= tquic_stream_sendmsg,
 	.recvmsg	= tquic_stream_recvmsg,
@@ -1001,7 +1099,7 @@ static int tquic_stream_connect(struct socket *sock, TQUIC_SOCKADDR *addr,
 	return 0;
 }
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 7, 0)
 static int tquic_stream_accept(struct socket *sock, struct socket *newsock,
 			       struct proto_accept_arg *arg)
 {

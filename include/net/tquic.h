@@ -2212,14 +2212,22 @@ void __exit tquic_proto_exit(void);
 /* Socket operations (tquic_socket.c) */
 int tquic_init_sock(struct sock *sk);
 void tquic_destroy_sock(struct sock *sk);
+/*
+ * sockptr_t was introduced in 5.9; on older kernels, the compat wrapper
+ * in tquic_proto.c bridges the old char __user * interface.  Hide this
+ * declaration from pre-5.9 kernels where sockptr_t is not yet defined
+ * at the point this header is parsed.
+ */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)
 int tquic_sock_setsockopt(struct socket *sock, int level, int optname,
 			  sockptr_t optval, unsigned int optlen);
+#endif
 int tquic_sock_getsockopt(struct socket *sock, int level, int optname,
 			  char __user *optval, int __user *optlen);
 int tquic_sock_bind(struct socket *sock, TQUIC_SOCKADDR *uaddr, int addr_len);
 int tquic_connect_socket(struct socket *sock, TQUIC_SOCKADDR *uaddr,
 			 int addr_len, int flags);
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 7, 0)
 int tquic_accept_socket(struct socket *sock, struct socket *newsock,
 			struct proto_accept_arg *arg);
 #else
