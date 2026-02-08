@@ -1,0 +1,175 @@
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# CI workflow: Build TQUIC kernel module against multiple Linux kernel versions.
+# Targets Linux 5.4+ LTS and stable releases to validate backward compatibility.
+#
+name: Kernel Module Build
+
+on:
+  push:
+    paths:
+      - 'net/quic/**'
+      - 'net/tquic/**'
+      - 'include/net/quic/**'
+      - 'include/net/tquic/**'
+      - 'include/net/tquic.h'
+      - 'include/net/tquic_frame.h'
+      - 'include/net/tquic_http3.h'
+      - 'include/net/tquic_pm.h'
+      - 'include/net/tquic_pmtud.h'
+      - '.github/workflows/build.yml'
+  pull_request:
+    paths:
+      - 'net/quic/**'
+      - 'net/tquic/**'
+      - 'include/net/quic/**'
+      - 'include/net/tquic/**'
+      - 'include/net/tquic.h'
+      - 'include/net/tquic_frame.h'
+      - 'include/net/tquic_http3.h'
+      - 'include/net/tquic_pm.h'
+      - 'include/net/tquic_pmtud.h'
+      - '.github/workflows/build.yml'
+
+jobs:
+  build:
+    name: "Build / Linux ${{ matrix.kernel }}"
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - kernel: "5.4"
+            kernel_full: "5.4.291"
+            kernel_major: "5"
+          - kernel: "5.10"
+            kernel_full: "5.10.235"
+            kernel_major: "5"
+          - kernel: "5.15"
+            kernel_full: "5.15.179"
+            kernel_major: "5"
+          - kernel: "6.1"
+            kernel_full: "6.1.129"
+            kernel_major: "6"
+          - kernel: "6.6"
+            kernel_full: "6.6.76"
+            kernel_major: "6"
+          - kernel: "6.12"
+            kernel_full: "6.12.13"
+            kernel_major: "6"
+
+    steps:
+      - name: Checkout TQUIC source
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            build-essential bc kmod cpio flex bison \
+            libssl-dev libelf-dev dwarves
+
+      - name: Cache kernel source
+        uses: actions/cache@v4
+        id: kernel-cache
+        with:
+          path: ~/kernel-src/linux-${{ matrix.kernel_full }}
+          key: kernel-${{ matrix.kernel_full }}-prepared-v2
+
+      - name: Download kernel source
+        if: steps.kernel-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/kernel-src && cd ~/kernel-src
+          MAJOR="${{ matrix.kernel_major }}"
+          KVER="${{ matrix.kernel_full }}"
+
+          # kernel.org URL pattern: v5.x or v6.x subdirectory
+          URL="https://cdn.kernel.org/pub/linux/kernel/v${MAJOR}.x/linux-${KVER}.tar.xz"
+          echo "Downloading ${URL} ..."
+          curl -fSL --retry 3 --retry-delay 5 -o "linux-${KVER}.tar.xz" "${URL}"
+          tar xf "linux-${KVER}.tar.xz"
+          rm -f "linux-${KVER}.tar.xz"
+
+      - name: Prepare kernel headers
+        if: steps.kernel-cache.outputs.cache-hit != 'true'
+        run: |
+          cd ~/kernel-src/linux-${{ matrix.kernel_full }}
+          # Use a minimal defconfig and enable the crypto/net options TQUIC needs
+          make defconfig
+          # Enable dependencies that TQUIC selects
+          scripts/config --enable CONFIG_NET
+          scripts/config --enable CONFIG_INET
+          scripts/config --enable CONFIG_CRYPTO
+          scripts/config --enable CONFIG_CRYPTO_AEAD
+          scripts/config --enable CONFIG_CRYPTO_AES
+          scripts/config --enable CONFIG_CRYPTO_GCM
+          scripts/config --enable CONFIG_CRYPTO_CHACHA20POLY1305
+          scripts/config --enable CONFIG_CRYPTO_SHA256
+          scripts/config --enable CONFIG_CRYPTO_SHA512
+          scripts/config --module CONFIG_NET_UDP_TUNNEL
+          scripts/config --enable CONFIG_IPV6
+          # Prepare headers and scripts (no full kernel compilation)
+          make modules_prepare
+
+      - name: Build TQUIC module (out-of-tree)
+        run: |
+          KDIR=~/kernel-src/linux-${{ matrix.kernel_full }}
+          TQUIC_SRC="${GITHUB_WORKSPACE}/net/tquic"
+          echo "Building TQUIC against kernel ${{ matrix.kernel_full }} ..."
+          echo "  KDIR=${KDIR}"
+          echo "  TQUIC_SRC=${TQUIC_SRC}"
+
+          # Build the out-of-tree module using the Kbuild file
+          make -C "${KDIR}" M="${TQUIC_SRC}" modules \
+            EXTRA_CFLAGS="-I${GITHUB_WORKSPACE}/include -I${GITHUB_WORKSPACE}/net/quic" \
+            W=1 2>&1 | tee build.log
+
+          echo ""
+          echo "=== Build artifacts ==="
+          find "${TQUIC_SRC}" -name '*.ko' -exec ls -lh {} \;
+
+      - name: Check for build warnings
+        run: |
+          WARNS=$(grep -c ' warning:' build.log || true)
+          echo "Build completed with ${WARNS} warning(s)."
+          if [ "${WARNS}" -gt 0 ]; then
+            echo "::warning::Build produced ${WARNS} compiler warning(s)"
+            grep ' warning:' build.log | head -30
+          fi
+
+      - name: Verify module info
+        run: |
+          TQUIC_SRC="${GITHUB_WORKSPACE}/net/tquic"
+          KO=$(find "${TQUIC_SRC}" -name 'tquic.ko' -print -quit)
+          if [ -z "${KO}" ]; then
+            echo "::error::tquic.ko not found - build may have failed"
+            exit 1
+          fi
+          echo "=== modinfo ==="
+          modinfo "${KO}" || true
+
+  checkpatch:
+    name: "Checkpatch"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run checkpatch on TQUIC files
+        run: |
+          # Check only the TQUIC-specific source files
+          ERRORS=0
+          for f in $(find net/quic net/tquic include/net/tquic* include/net/quic* \
+                     -name '*.c' -o -name '*.h' 2>/dev/null | head -50); do
+            echo "--- Checking ${f} ---"
+            # Use --terse and ignore some warnings that are noisy for large files
+            perl scripts/checkpatch.pl --no-tree --strict -f "${f}" \
+              --ignore LONG_LINE,FILE_PATH_CHANGES,SPDX_LICENSE_TAG \
+              --terse --show-types 2>&1 | tail -5 || ERRORS=$((ERRORS + 1))
+          done
+          echo ""
+          echo "Checked files with ${ERRORS} file(s) having issues."
+          # Don't fail the build on style issues - just report them
+          exit 0
