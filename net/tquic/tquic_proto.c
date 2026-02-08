@@ -66,7 +66,7 @@ static unsigned long tquic_memory_pressure;
 static DEFINE_PER_CPU(int, tquic_memory_per_cpu_fw_alloc);
 
 /* TQUIC sysctl memory limits (in pages) */
-static long sysctl_tquic_mem[3] = {
+static TQUIC_SYSCTL_MEM_TYPE sysctl_tquic_mem[3] = {
 	768 * 1024,	/* Low threshold */
 	1024 * 1024,	/* Pressure threshold */
 	1536 * 1024	/* Hard limit */
@@ -418,6 +418,17 @@ static int tquic_inet6_release(struct socket *sock)
 }
 #endif
 
+/* Compat wrapper for proto_ops.setsockopt on kernels < 5.9 (no sockptr_t) */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 9, 0)
+static int tquic_sock_setsockopt_compat(struct socket *sock, int level,
+					int optname, char __user *optval,
+					unsigned int optlen)
+{
+	return tquic_sock_setsockopt(sock, level, optname,
+				     USER_SOCKPTR(optval), optlen);
+}
+#endif
+
 /* IPv4 proto_ops */
 static const struct proto_ops tquic_inet_ops = {
 	.family		= PF_INET,
@@ -432,7 +443,11 @@ static const struct proto_ops tquic_inet_ops = {
 	.ioctl		= tquic_sock_ioctl,
 	.listen		= tquic_sock_listen,
 	.shutdown	= tquic_sock_shutdown,
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)
 	.setsockopt	= tquic_sock_setsockopt,
+#else
+	.setsockopt	= tquic_sock_setsockopt_compat,
+#endif
 	.getsockopt	= tquic_sock_getsockopt,
 	.sendmsg	= tquic_sendmsg_socket,
 	.recvmsg	= tquic_recvmsg_socket,
@@ -444,14 +459,19 @@ static const struct proto_ops tquic_inet_ops = {
  * QUIC uses UDP encapsulation, so we don't participate in the inet
  * hash tables.  Provide simple no-op stubs for .hash / .unhash.
  */
-static int tquic_proto_hash(struct sock *sk)
+static TQUIC_PROTO_HASH_RET tquic_proto_hash(struct sock *sk)
 {
-	return 0;
+	TQUIC_PROTO_HASH_RETURN;
 }
 
 static void tquic_proto_unhash(struct sock *sk)
 {
 }
+
+/* Compat wrapper for proto.recvmsg on kernels < 5.19 (6-arg signature) */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 19, 0)
+TQUIC_DEFINE_RECVMSG_WRAPPER(tquic_recvmsg_compat, tquic_recvmsg)
+#endif
 
 /* TQUIC protocol definition for IPv4 */
 static struct proto tquic_prot = {
@@ -463,14 +483,18 @@ static struct proto tquic_prot = {
 	.close		= tquic_close,
 	.connect	= tquic_connect,
 	.sendmsg	= tquic_sendmsg,
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 19, 0)
 	.recvmsg	= tquic_recvmsg,
+#else
+	.recvmsg	= tquic_recvmsg_compat,
+#endif
 	.hash		= tquic_proto_hash,
 	.unhash		= tquic_proto_unhash,
 	.get_port	= inet_csk_get_port,
 	.sockets_allocated = &tquic_sockets_allocated_counter,
 	.memory_allocated = &tquic_memory_allocated,
 	.memory_pressure = &tquic_memory_pressure,
-	.per_cpu_fw_alloc = &tquic_memory_per_cpu_fw_alloc,
+	TQUIC_PROTO_PER_CPU_FW_ALLOC(&tquic_memory_per_cpu_fw_alloc)
 	.sysctl_mem	= sysctl_tquic_mem,
 	.sysctl_wmem	= sysctl_tquic_wmem,
 	.sysctl_rmem	= sysctl_tquic_rmem,
@@ -513,7 +537,11 @@ static const struct proto_ops tquic_inet6_ops = {
 	.ioctl		= tquic_sock_ioctl,
 	.listen		= tquic_sock_listen,
 	.shutdown	= tquic_sock_shutdown,
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)
 	.setsockopt	= tquic_sock_setsockopt,
+#else
+	.setsockopt	= tquic_sock_setsockopt_compat,
+#endif
 	.getsockopt	= tquic_sock_getsockopt,
 	.sendmsg	= tquic_sendmsg_socket,
 	.recvmsg	= tquic_recvmsg_socket,
@@ -529,20 +557,24 @@ static struct proto tquicv6_prot = {
 	.name		= "TQUICv6",
 	.owner		= THIS_MODULE,
 	.obj_size	= sizeof(struct tquic6_sock),
-	.ipv6_pinfo_offset = offsetof(struct tquic6_sock, inet6),
+	TQUIC_PROTO_IPV6_PINFO_OFFSET(struct tquic6_sock, inet6)
 	.init		= tquic_init_sock,
 	.destroy	= tquic_destroy_sock,
 	.close		= tquic_close,
 	.connect	= tquic_connect,
 	.sendmsg	= tquic_sendmsg,
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 19, 0)
 	.recvmsg	= tquic_recvmsg,
+#else
+	.recvmsg	= tquic_recvmsg_compat,
+#endif
 	.hash		= tquic_proto_hash,
 	.unhash		= tquic_proto_unhash,
 	.get_port	= inet_csk_get_port,
 	.sockets_allocated = &tquic_sockets_allocated_counter,
 	.memory_allocated = &tquic_memory_allocated,
 	.memory_pressure = &tquic_memory_pressure,
-	.per_cpu_fw_alloc = &tquic_memory_per_cpu_fw_alloc,
+	TQUIC_PROTO_PER_CPU_FW_ALLOC(&tquic_memory_per_cpu_fw_alloc)
 	.sysctl_mem	= sysctl_tquic_mem,
 	.sysctl_wmem	= sysctl_tquic_wmem,
 	.sysctl_rmem	= sysctl_tquic_rmem,

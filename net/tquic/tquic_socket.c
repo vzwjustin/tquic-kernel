@@ -67,8 +67,13 @@ static void tquic_set_lockdep_class(struct sock *sk, bool is_ipv6)
 int tquic_sock_bind(struct socket *sock, TQUIC_SOCKADDR *uaddr, int addr_len);
 int tquic_connect_socket(struct socket *sock, TQUIC_SOCKADDR *uaddr,
 			 int addr_len, int flags);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
 int tquic_accept_socket(struct socket *sock, struct socket *newsock,
 			struct proto_accept_arg *arg);
+#else
+int tquic_accept_socket(struct socket *sock, struct socket *newsock,
+			int flags, bool kern);
+#endif
 int tquic_sock_getname(struct socket *sock, struct sockaddr *addr, int peer);
 __poll_t tquic_poll_socket(struct file *file, struct socket *sock,
 			   poll_table *wait);
@@ -382,6 +387,7 @@ out:
  * This is called by the socket layer. It calls tquic_accept() to get
  * the child socket from the accept queue, then grafts it onto newsock.
  */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
 int tquic_accept_socket(struct socket *sock, struct socket *newsock,
 			struct proto_accept_arg *arg)
 {
@@ -399,6 +405,25 @@ int tquic_accept_socket(struct socket *sock, struct socket *newsock,
 
 	return 0;
 }
+#else
+int tquic_accept_socket(struct socket *sock, struct socket *newsock,
+			int flags, bool kern)
+{
+	struct sock *sk = sock->sk;
+	struct sock *newsk;
+	int err;
+
+	err = tquic_accept(sk, &newsk, flags, kern);
+	if (err < 0)
+		return err;
+
+	/* Graft the child socket onto newsock */
+	sock_graft(newsk, newsock);
+	newsock->state = SS_CONNECTED;
+
+	return 0;
+}
+#endif
 
 /**
  * tquic_accept - Accept incoming connection from listen queue

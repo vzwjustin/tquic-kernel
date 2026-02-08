@@ -2219,8 +2219,13 @@ int tquic_sock_getsockopt(struct socket *sock, int level, int optname,
 int tquic_sock_bind(struct socket *sock, TQUIC_SOCKADDR *uaddr, int addr_len);
 int tquic_connect_socket(struct socket *sock, TQUIC_SOCKADDR *uaddr,
 			 int addr_len, int flags);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
 int tquic_accept_socket(struct socket *sock, struct socket *newsock,
 			struct proto_accept_arg *arg);
+#else
+int tquic_accept_socket(struct socket *sock, struct socket *newsock,
+			int flags, bool kern);
+#endif
 int tquic_sock_getname(struct socket *sock, struct sockaddr *addr, int peer);
 __poll_t tquic_poll_socket(struct file *file, struct socket *sock,
 			   struct poll_table_struct *wait);

@@ -278,4 +278,70 @@ static const int tquic_sysctl_two = 2;
 	udp_tunnel6_xmit_skb(dst, sk, skb, dev, saddr, daddr, prio, ttl, label, sport, dport, nocheck)
 #endif
 
+/* ========================================================================
+ * Kernel < 6.4: proto_accept_arg struct was introduced in 6.4
+ * Provide a polyfill for older kernels.
+ * ======================================================================== */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 4, 0)
+struct proto_accept_arg {
+	int flags;
+	int err;
+	bool kern;
+};
+#endif /* < 6.4 */
+
+/* ========================================================================
+ * Kernel < 6.4: per_cpu_fw_alloc field in struct proto
+ * ======================================================================== */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
+#define TQUIC_PROTO_PER_CPU_FW_ALLOC(var) .per_cpu_fw_alloc = (var),
+#else
+#define TQUIC_PROTO_PER_CPU_FW_ALLOC(var)
+#endif
+
+/* ========================================================================
+ * Kernel < 6.4: ipv6_pinfo_offset field in struct proto
+ * ======================================================================== */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
+#define TQUIC_PROTO_IPV6_PINFO_OFFSET(type, member) \
+	.ipv6_pinfo_offset = offsetof(type, member),
+#else
+#define TQUIC_PROTO_IPV6_PINFO_OFFSET(type, member)
+#endif
+
+/* ========================================================================
+ * Kernel < 6.4: sysctl_mem type changed from int[] to long[]
+ * ======================================================================== */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
+#define TQUIC_SYSCTL_MEM_TYPE long
+#else
+#define TQUIC_SYSCTL_MEM_TYPE int
+#endif
+
+/* ========================================================================
+ * Kernel < 6.4: proto.hash return type changed from void to int
+ * ======================================================================== */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
+#define TQUIC_PROTO_HASH_RET int
+#define TQUIC_PROTO_HASH_RETURN return 0
+#else
+#define TQUIC_PROTO_HASH_RET void
+#define TQUIC_PROTO_HASH_RETURN
+#endif
+
+/* ========================================================================
+ * Kernel < 5.19: proto.recvmsg had 6 args (extra noblock param)
+ * Provide a wrapper macro to adapt the new 5-arg signature.
+ * ======================================================================== */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 19, 0)
+#define TQUIC_DEFINE_RECVMSG_WRAPPER(name, inner)			\
+	static int name(struct sock *sk, struct msghdr *msg, size_t len,\
+			int noblock, int flags, int *addr_len)		\
+	{								\
+		if (noblock)						\
+			flags |= MSG_DONTWAIT;				\
+		return inner(sk, msg, len, flags, addr_len);		\
+	}
+#endif /* < 5.19 */
+
 #endif /* _TQUIC_COMPAT_H */

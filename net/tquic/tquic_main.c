@@ -29,8 +29,12 @@
 #include <net/tquic_pm.h>
 #include "protocol.h"
 #include "grease.h"
+#if IS_ENABLED(CONFIG_TQUIC_IO_URING)
 #include "io_uring.h"
+#endif
+#if IS_ENABLED(CONFIG_TQUIC_NAPI)
 #include "napi.h"
+#endif
 /* Use core ack_frequency.h instead of wrapper to avoid conflicting declarations */
 #include "core/ack_frequency.h"
 #include "tquic_preferred_addr.h"
@@ -40,6 +44,7 @@
 #include "tquic_stateless_reset.h"
 #include "tquic_token.h"
 #include "tquic_compat.h"
+#include "tquic_init.h"
 
 /* Forward declarations for ACK frequency module (in tquic_ack_frequency.c) */
 extern int tquic_ack_freq_module_init(void);
@@ -246,8 +251,10 @@ int tquic_conn_remove_path(struct tquic_connection *conn, u32 path_id)
 
 			/* Update active path if needed */
 			if (conn->active_path == path) {
-				conn->active_path = list_first_entry_or_null(
-					&conn->paths, struct tquic_path, list);
+				conn->active_path =
+					list_first_entry_or_null(&conn->paths,
+								 struct tquic_path,
+								 list);
 			}
 
 			found = true;
@@ -452,8 +459,7 @@ void tquic_pm_conn_release(struct tquic_connection *conn)
 	}
 
 	/* Free PM-specific private data if any */
-	if (pm_state->priv)
-		kfree(pm_state->priv);
+	kfree(pm_state->priv);
 
 	kfree(pm_state);
 	conn->pm = NULL;
@@ -572,80 +578,8 @@ EXPORT_SYMBOL_GPL(tquic_stream_close);
  */
 
 /*
- * External subsystem initialization function declarations
+ * External subsystem initialization function declarations are now in tquic_init.h
  */
-
-/* Crypto subsystem */
-extern int __init tquic_cert_verify_init(void);
-extern void __exit tquic_cert_verify_exit(void);
-extern int __init tquic_zero_rtt_module_init(void);
-extern void __exit tquic_zero_rtt_module_exit(void);
-extern int __init tquic_hw_offload_init(void);
-extern void __exit tquic_hw_offload_exit(void);
-
-/* Scheduler framework and schedulers */
-extern int __init tquic_scheduler_init(void);
-extern void __exit tquic_scheduler_exit(void);
-extern int __init tquic_sched_minrtt_init(void);
-extern void __exit tquic_sched_minrtt_exit(void);
-extern int __init tquic_sched_aggregate_init(void);
-extern void __exit tquic_sched_aggregate_exit(void);
-extern int __init tquic_sched_weighted_init(void);
-extern void __exit tquic_sched_weighted_exit(void);
-extern int __init tquic_sched_blest_init(void);
-extern void __exit tquic_sched_blest_exit(void);
-extern int __init tquic_sched_ecf_init(void);
-extern void __exit tquic_sched_ecf_exit(void);
-
-/* Multipath extensions */
-extern int __init tquic_mp_ack_init(void);
-extern void __exit tquic_mp_ack_exit(void);
-extern int __init tquic_mp_frame_init(void);
-extern void __exit tquic_mp_frame_exit(void);
-extern int __init tquic_mp_abandon_init(void);
-extern void __exit tquic_mp_abandon_exit(void);
-extern int __init tquic_mp_deadline_init(void);
-extern void __exit tquic_mp_deadline_exit(void);
-
-/* Bonding subsystem */
-extern int __init tquic_bonding_init_module(void);
-extern void __exit tquic_bonding_exit_module(void);
-extern int __init tquic_path_init_module(void);
-extern void __exit tquic_path_exit_module(void);
-extern int __init coupled_cc_init_module(void);
-extern void __exit coupled_cc_exit_module(void);
-
-/* Path managers */
-extern int __init tquic_pm_types_init(void);
-extern void __exit tquic_pm_types_exit(void);
-extern int __init tquic_pm_nl_init(void);
-extern void __exit tquic_pm_nl_exit(void);
-extern int __init tquic_pm_userspace_init(void);
-extern void __exit tquic_pm_userspace_exit(void);
-extern int __init tquic_pm_kernel_module_init(void);
-extern void __exit tquic_pm_kernel_module_exit(void);
-extern int __init tquic_nat_keepalive_module_init(void);
-extern void __exit tquic_nat_keepalive_module_exit(void);
-extern int __init tquic_nat_lifecycle_module_init(void);
-extern void __exit tquic_nat_lifecycle_module_exit(void);
-
-/* Congestion control algorithms */
-extern int __init tquic_cong_data_module_init(void);
-extern void __exit tquic_cong_data_module_exit(void);
-extern int __init tquic_bbrv2_init(void);
-extern void __exit tquic_bbrv2_exit(void);
-extern int __init tquic_bbrv3_init(void);
-extern void __exit tquic_bbrv3_exit(void);
-extern int __init tquic_prague_init(void);
-extern void __exit tquic_prague_exit(void);
-
-/* Netlink - tquic_netlink.c uses tquic_nl_init/exit */
-extern int __init tquic_nl_init(void);
-extern void __exit tquic_nl_exit(void);
-
-/* CID hash used by core/quic_connection.c (socket creation path) */
-extern int tquic_cid_hash_init(void);
-extern void tquic_cid_hash_cleanup(void);
 
 /*
  * Module Initialization
