@@ -35,6 +35,8 @@
 #include <net/protocol.h>
 #include <net/inet_common.h>
 #include <net/inet6_hashtables.h>
+#include <net/inet_hashtables.h>
+#include <net/tcp.h>
 #include <net/inet6_connection_sock.h>
 #include <net/ipv6.h>
 #include <net/transp_v6.h>
@@ -54,13 +56,10 @@
  */
 
 /* Forward declarations */
-static int tquic_v6_connect(struct sock *sk, struct sockaddr *addr, int addr_len);
+static int tquic_v6_connect(struct sock *sk, struct sockaddr_unsized *addr, int addr_len);
 static void tquic_v6_mtu_reduced(struct sock *sk);
 static int tquic_v6_init_sock(struct sock *sk);
 static void tquic_v6_destroy_sock(struct sock *sk);
-static int tquic_v6_err(struct sk_buff *skb, struct inet6_skb_parm *opt,
-			u8 type, u8 code, int offset, __be32 info);
-static int tquic_v6_rcv(struct sk_buff *skb);
 
 /*
  * Helper to get ipv6_pinfo from tquic socket - alias for consistency
@@ -115,30 +114,6 @@ static inline bool tquic_addr_is_v4mapped(const struct sockaddr_storage *addr)
 		return ipv6_addr_v4mapped(&sin6->sin6_addr);
 	}
 	return false;
-}
-
-/* Convert sockaddr to IPv6, mapping IPv4 if needed */
-static int tquic_addr_to_v6(const struct sockaddr_storage *src,
-			    struct sockaddr_in6 *dst)
-{
-	memset(dst, 0, sizeof(*dst));
-	dst->sin6_family = AF_INET6;
-
-	if (src->ss_family == AF_INET6) {
-		const struct sockaddr_in6 *sin6 = (const struct sockaddr_in6 *)src;
-		dst->sin6_addr = sin6->sin6_addr;
-		dst->sin6_port = sin6->sin6_port;
-		dst->sin6_flowinfo = sin6->sin6_flowinfo;
-		dst->sin6_scope_id = sin6->sin6_scope_id;
-	} else if (src->ss_family == AF_INET) {
-		const struct sockaddr_in *sin = (const struct sockaddr_in *)src;
-		ipv6_addr_set_v4mapped(sin->sin_addr.s_addr, &dst->sin6_addr);
-		dst->sin6_port = sin->sin_port;
-	} else {
-		return -EAFNOSUPPORT;
-	}
-
-	return 0;
 }
 
 /* Convert IPv4-mapped IPv6 to IPv4 sockaddr */
@@ -246,13 +221,6 @@ static unsigned int tquic_v6_ext_hdr_len(struct sock *sk)
 	return len;
 }
 
-/* Check if extension headers affect MTU */
-static unsigned int tquic_v6_overhead(struct sock *sk)
-{
-	return sizeof(struct ipv6hdr) + sizeof(struct udphdr) +
-	       tquic_v6_ext_hdr_len(sk);
-}
-
 /*
  * Path MTU Discovery for IPv6
  */
@@ -297,49 +265,6 @@ static void tquic_v6_mtu_reduced(struct sock *sk)
 	}
 }
 
-/* Perform PMTU discovery for a path */
-static int tquic_v6_path_pmtu_probe(struct tquic_connection *conn,
-				    struct tquic_path *path, u32 probe_size)
-{
-	struct sock *sk = conn->sk;
-	struct ipv6_pinfo *np;
-	struct dst_entry *dst;
-	struct flowi6 fl6;
-	const struct sockaddr_in6 *local, *remote;
-
-	if (!sk || sk->sk_family != AF_INET6)
-		return -EINVAL;
-
-	if (path->remote_addr.ss_family != AF_INET6)
-		return -EINVAL;
-
-	np = tquic_inet6_sk(sk);
-	local = (const struct sockaddr_in6 *)&path->local_addr;
-	remote = (const struct sockaddr_in6 *)&path->remote_addr;
-
-	memset(&fl6, 0, sizeof(fl6));
-	fl6.flowi6_proto = IPPROTO_UDP;
-	fl6.daddr = remote->sin6_addr;
-	fl6.saddr = local->sin6_addr;
-	fl6.fl6_dport = remote->sin6_port;
-	fl6.fl6_sport = local->sin6_port;
-	fl6.flowlabel = tquic_v6_path_get_flowlabel(conn, path);
-	fl6.flowi6_oif = sk->sk_bound_dev_if;
-
-	dst = ip6_dst_lookup_flow(sock_net(sk), sk, &fl6, NULL);
-	if (IS_ERR(dst))
-		return PTR_ERR(dst);
-
-	/* Check if probe size is feasible */
-	if (probe_size > dst_mtu(dst)) {
-		dst_release(dst);
-		return -EMSGSIZE;
-	}
-
-	dst_release(dst);
-	return 0;
-}
-
 /* Update path MTU from ICMPv6 too big message */
 static void tquic_v6_path_update_pmtu(struct tquic_connection *conn,
 				      struct tquic_path *path, u32 mtu)
@@ -361,112 +286,8 @@ static void tquic_v6_path_update_pmtu(struct tquic_connection *conn,
 }
 
 /*
- * IPv6 UDP tunnel integration
- */
-
-/* Setup UDP tunnel for IPv6 path */
-static int tquic_v6_tunnel_setup(struct tquic_connection *conn,
-				 struct tquic_path *path)
-{
-	struct sock *sk = conn->sk;
-	struct udp_tunnel_sock_cfg cfg = {};
-	struct socket *sock;
-	int err;
-
-	/* Create UDP socket for this path */
-	err = sock_create_kern(sock_net(sk), AF_INET6, SOCK_DGRAM,
-			       IPPROTO_UDP, &sock);
-	if (err)
-		return err;
-
-	/* Configure encapsulation */
-	cfg.sk_user_data = conn;
-	cfg.encap_type = UDP_ENCAP_L2TPINUDP;  /* Similar encapsulation */
-	cfg.encap_destroy = NULL;
-
-	setup_udp_tunnel_sock(sock_net(sk), sock, &cfg);
-
-	/* Bind to local address */
-	if (path->local_addr.ss_family == AF_INET6) {
-		err = kernel_bind(sock, (struct sockaddr_unsized *)&path->local_addr,
-				  sizeof(struct sockaddr_in6));
-		if (err) {
-			sock_release(sock);
-			return err;
-		}
-	}
-
-	return 0;
-}
-
-/* Transmit packet over IPv6 UDP tunnel */
-static int tquic_v6_tunnel_xmit(struct tquic_connection *conn,
-				struct tquic_path *path,
-				struct sk_buff *skb)
-{
-	struct sock *sk = conn->sk;
-	struct ipv6_pinfo *np;
-	struct dst_entry *dst;
-	struct flowi6 fl6;
-	const struct sockaddr_in6 *remote;
-	__be32 flowlabel;
-	int err;
-
-	if (!sk || sk->sk_family != AF_INET6)
-		return -EINVAL;
-
-	if (path->remote_addr.ss_family != AF_INET6)
-		return -EAFNOSUPPORT;
-
-	np = tquic_inet6_sk(sk);
-	remote = (const struct sockaddr_in6 *)&path->remote_addr;
-
-	/* Build flow */
-	memset(&fl6, 0, sizeof(fl6));
-	fl6.flowi6_proto = IPPROTO_UDP;
-	fl6.daddr = remote->sin6_addr;
-	if (!ipv6_addr_any(&sk->sk_v6_rcv_saddr))
-		fl6.saddr = sk->sk_v6_rcv_saddr;
-	fl6.fl6_dport = remote->sin6_port;
-	fl6.fl6_sport = inet_sk(sk)->inet_sport;
-	fl6.flowi6_oif = sk->sk_bound_dev_if;
-	fl6.flowi6_mark = sk->sk_mark;
-
-	/* Apply flow label */
-	flowlabel = tquic_v6_path_get_flowlabel(conn, path);
-	fl6.flowlabel = ip6_make_flowinfo(np->tclass, flowlabel);
-
-	/* Route lookup */
-	dst = ip6_dst_lookup_flow(sock_net(sk), sk, &fl6, NULL);
-	if (IS_ERR(dst))
-		return PTR_ERR(dst);
-
-	skb_dst_set(skb, dst);
-
-	/* Set checksum */
-	skb->ip_summed = CHECKSUM_PARTIAL;
-	skb->csum_start = skb_transport_header(skb) - skb->head;
-	skb->csum_offset = offsetof(struct udphdr, check);
-
-	/* Transmit */
-	err = ip6_xmit(sk, skb, &fl6, sk->sk_mark, rcu_dereference(np->opt),
-		       np->tclass, sk->sk_priority);
-
-	return net_xmit_eval(err);
-}
-
-/*
  * Dual-stack support
  */
-
-/* Check if socket supports dual-stack */
-static bool tquic_v6_is_dualstack(struct sock *sk)
-{
-	if (sk->sk_family != AF_INET6)
-		return false;
-
-	return !ipv6_only_sock(sk);
-}
 
 /* Handle connection to IPv4-mapped address */
 static int tquic_v6_connect_mapped(struct sock *sk, struct sockaddr_in6 *sin6)
@@ -487,16 +308,16 @@ static int tquic_v6_connect_mapped(struct sock *sk, struct sockaddr_in6 *sin6)
 	memcpy(&tsk->connect_addr, sin6, sizeof(*sin6));
 
 	/* Call IPv4 connect path */
-	return tquic_connect(sk, (struct sockaddr *)&sin, sizeof(sin));
+	return tquic_connect(sk, (struct sockaddr_unsized *)&sin, sizeof(sin));
 }
 
 /*
  * IPv6 connection establishment
  */
 
-static int tquic_v6_connect(struct sock *sk, struct sockaddr *addr, int addr_len)
+static int tquic_v6_connect(struct sock *sk, struct sockaddr_unsized *addr, int addr_len)
 {
-	struct sockaddr_in6 *usin = (struct sockaddr_in6 *)addr;
+	struct sockaddr_in6 *usin;
 	struct tquic_sock *tsk = tquic_sk(sk);
 	struct tquic_connection *conn = tsk->conn;
 	struct ipv6_pinfo *np = tquic_inet6_sk(sk);
@@ -508,6 +329,9 @@ static int tquic_v6_connect(struct sock *sk, struct sockaddr *addr, int addr_len
 
 	if (addr_len < SIN6_LEN_RFC2133)
 		return -EINVAL;
+
+	/* Now safe to cast */
+	usin = (struct sockaddr_in6 *)addr;
 
 	if (usin->sin6_family != AF_INET6)
 		return -EAFNOSUPPORT;
@@ -732,113 +556,6 @@ failure:
 }
 
 /*
- * ICMPv6 error handling
- */
-
-static int tquic_v6_err(struct sk_buff *skb, struct inet6_skb_parm *opt,
-			u8 type, u8 code, int offset, __be32 info)
-{
-	const struct ipv6hdr *hdr = (const struct ipv6hdr *)skb->data;
-	const struct udphdr *uh = (struct udphdr *)(skb->data + offset);
-	struct net *net = dev_net_rcu(skb->dev);
-	struct tquic_connection *conn;
-	struct tquic_path *path;
-	struct sock *sk;
-	int err;
-	bool fatal;
-
-	/* Lookup the socket */
-	sk = __udp6_lib_lookup(net, &hdr->daddr, uh->dest,
-			       &hdr->saddr, uh->source,
-			       inet6_iif(skb), inet6_sdif(skb),
-			       net->ipv4.udp_table, skb);
-	if (!sk) {
-		__ICMP6_INC_STATS(net, __in6_dev_get(skb->dev),
-				  ICMP6_MIB_INERRORS);
-		return -ENOENT;
-	}
-
-	fatal = icmpv6_err_convert(type, code, &err);
-
-	bh_lock_sock(sk);
-
-	if (sock_owned_by_user(sk) && type != ICMPV6_PKT_TOOBIG) {
-		__NET_INC_STATS(net, LINUX_MIB_LOCKDROPPEDICMPS);
-		goto out;
-	}
-
-	/* Handle specific ICMPv6 types */
-	switch (type) {
-	case ICMPV6_PKT_TOOBIG:
-		{
-			u32 mtu = ntohl(info);
-
-			/* Enforce minimum IPv6 MTU */
-			if (mtu < IPV6_MIN_MTU)
-				goto out;
-
-			/* Update path MTU */
-			conn = tquic_sk(sk)->conn;
-			if (conn) {
-				list_for_each_entry(path, &conn->paths, list) {
-					if (tquic_path_get_family(path) == AF_INET6)
-						tquic_v6_path_update_pmtu(conn, path, mtu);
-				}
-			}
-
-			/* Also update socket PMTU */
-			inet6_csk_update_pmtu(sk, mtu);
-			break;
-		}
-
-	case ICMPV6_DEST_UNREACH:
-		if (code == ICMPV6_NOROUTE ||
-		    code == ICMPV6_ADDR_UNREACH ||
-		    code == ICMPV6_PORT_UNREACH) {
-			/* Path may have failed */
-			conn = tquic_sk(sk)->conn;
-			if (conn && conn->scheduler) {
-				/* Find affected path and mark as failed */
-				list_for_each_entry(path, &conn->paths, list) {
-					const struct sockaddr_in6 *remote;
-
-					if (path->remote_addr.ss_family != AF_INET6)
-						continue;
-
-					remote = (const struct sockaddr_in6 *)&path->remote_addr;
-					if (ipv6_addr_equal(&remote->sin6_addr, &hdr->daddr)) {
-						path->state = TQUIC_PATH_FAILED;
-						tquic_bond_path_failed(conn, path);
-						break;
-					}
-				}
-			}
-		}
-
-		if (!sock_owned_by_user(sk) && fatal) {
-			WRITE_ONCE(sk->sk_err, err);
-			sk_error_report(sk);
-		} else {
-			WRITE_ONCE(sk->sk_err_soft, err);
-		}
-		break;
-
-	case NDISC_REDIRECT:
-		if (!sock_owned_by_user(sk)) {
-			struct dst_entry *dst = __sk_dst_check(sk, np_cookie(sk));
-			if (dst)
-				dst->ops->redirect(dst, sk, skb);
-		}
-		break;
-	}
-
-out:
-	bh_unlock_sock(sk);
-	sock_put(sk);
-	return 0;
-}
-
-/*
  * IPv6 socket options
  */
 
@@ -884,7 +601,7 @@ static int tquic_v6_setsockopt(struct socket *sock, int level, int optname,
 				return -EINVAL;
 			if (copy_from_sockptr(&val, optval, sizeof(val)))
 				return -EFAULT;
-			np->dontfrag = !!val;
+			inet_assign_bit(DONTFRAG, sk, !!val);
 			break;
 
 		case IPV6_RECVPATHMTU:
@@ -959,7 +676,7 @@ static int tquic_v6_getsockopt(struct socket *sock, int level, int optname,
 			break;
 
 		case IPV6_DONTFRAG:
-			val = np->dontfrag;
+			val = inet_test_bit(DONTFRAG, sk);
 			break;
 
 		case IPV6_V6ONLY:
@@ -1089,77 +806,6 @@ static void tquic_he_fallback_work(struct work_struct *work)
 	}
 }
 
-/* Start Happy Eyeballs connection attempt */
-static int tquic_he_connect(struct sock *sk,
-			    const struct sockaddr_in6 *ipv6_addr,
-			    const struct sockaddr_in *ipv4_addr)
-{
-	struct tquic_sock *tsk = tquic_sk(sk);
-	struct tquic_connection *conn = tsk->conn;
-	struct tquic_happy_eyeballs *he;
-	int err;
-
-	if (!conn)
-		return -EINVAL;
-
-	/* Initialize Happy Eyeballs state */
-	he = tquic_he_init(conn);
-	if (!he)
-		return -ENOMEM;
-
-	/* Store addresses */
-	if (ipv6_addr)
-		memcpy(&he->ipv6_addr, ipv6_addr, sizeof(*ipv6_addr));
-	if (ipv4_addr)
-		memcpy(&he->ipv4_addr, ipv4_addr, sizeof(*ipv4_addr));
-
-	/* Prefer IPv6: attempt it first */
-	if (he->prefer_ipv6 && ipv6_addr && ipv6_addr->sin6_family == AF_INET6) {
-		he->ipv6_attempted = true;
-		he->ipv6_start_time = ktime_get();
-
-		/* Start fallback timer */
-		if (ipv4_addr && ipv4_addr->sin_family == AF_INET) {
-			mod_timer(&he->fallback_timer,
-				  jiffies + msecs_to_jiffies(he->resolution_delay_ms));
-		}
-
-		/* Attempt IPv6 connection */
-		err = tquic_v6_connect(sk, (struct sockaddr *)ipv6_addr,
-				       sizeof(*ipv6_addr));
-		if (err == 0) {
-			he->ipv6_connected = true;
-			he->winner = AF_INET6;
-			del_timer(&he->fallback_timer);
-		} else {
-			he->ipv6_error = err;
-			/* Immediately try IPv4 on failure */
-			if (he->allow_fallback)
-				schedule_work(&he->work);
-		}
-	} else if (ipv4_addr && ipv4_addr->sin_family == AF_INET) {
-		/* IPv4 only */
-		he->ipv4_attempted = true;
-		he->ipv4_start_time = ktime_get();
-		err = tquic_connect(sk, (struct sockaddr *)ipv4_addr,
-				    sizeof(*ipv4_addr));
-		if (err == 0) {
-			he->ipv4_connected = true;
-			he->winner = AF_INET;
-		} else {
-			he->ipv4_error = err;
-		}
-	} else {
-		tquic_he_cleanup(he);
-		return -EINVAL;
-	}
-
-	/* Store Happy Eyeballs state in connection (for cleanup) */
-	/* In a full implementation, this would be stored properly */
-
-	return err;
-}
-
 /*
  * IPv6 path management for WAN bonding
  */
@@ -1275,7 +921,7 @@ static int tquic_v6_init_sock(struct sock *sk)
 	tsk->conn->scheduler = tquic_bond_init(tsk->conn);
 
 	/* Initialize IPv6-specific state */
-	np->mc_loop = 1;
+	inet_set_bit(MC6_LOOP, sk);
 	np->hop_limit = -1;
 	np->mcast_hops = IPV6_DEFAULT_MCASTHOPS;
 	np->tclass = -1;
@@ -1305,7 +951,6 @@ static void tquic_v6_destroy_sock(struct sock *sk)
 		tsk->conn = NULL;
 	}
 
-	inet6_destroy_sock(sk);
 
 	pr_debug("tquic: IPv6 socket destroyed\n");
 }
@@ -1318,7 +963,7 @@ static const struct inet_connection_sock_af_ops tquic_v6_af_ops = {
 	.queue_xmit	= inet6_csk_xmit,
 	.send_check	= NULL,  /* QUIC handles its own checksums */
 	.rebuild_header	= inet6_sk_rebuild_header,
-	.sk_rx_dst_set	= inet6_sk_rx_dst_set,
+	.sk_rx_dst_set	= inet_sk_rx_dst_set,
 	.conn_request	= NULL,  /* QUIC handles connection requests */
 	.syn_recv_sock	= NULL,  /* QUIC handles this */
 	.net_header_len	= sizeof(struct ipv6hdr),
@@ -1377,15 +1022,18 @@ static int tquic_v6_release(struct socket *sock)
 	return 0;
 }
 
-static int tquic_v6_bind(struct socket *sock, struct sockaddr *addr, int addr_len)
+static int tquic_v6_bind(struct socket *sock, struct sockaddr_unsized *addr, int addr_len)
 {
 	struct sock *sk = sock->sk;
 	struct tquic_sock *tsk = tquic_sk(sk);
-	struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)addr;
+	struct sockaddr_in6 *sin6;
 	int addr_type;
 
 	if (addr_len < SIN6_LEN_RFC2133)
 		return -EINVAL;
+
+	/* Now safe to cast */
+	sin6 = (struct sockaddr_in6 *)addr;
 
 	if (sin6->sin6_family != AF_INET6)
 		return -EAFNOSUPPORT;
@@ -1417,7 +1065,7 @@ static int tquic_v6_bind(struct socket *sock, struct sockaddr *addr, int addr_le
 	return 0;
 }
 
-static int tquic_v6_connect_socket(struct socket *sock, struct sockaddr *addr,
+static int tquic_v6_connect_socket(struct socket *sock, struct sockaddr_unsized *addr,
 				   int addr_len, int flags)
 {
 	return tquic_v6_connect(sock->sk, addr, addr_len);
@@ -1504,7 +1152,7 @@ static struct pernet_operations tquic6_net_ops = {
  * Module initialization
  */
 
-static int __init __maybe_unused tquic6_init(void)
+int __init tquic6_init(void)
 {
 	int ret;
 
@@ -1545,7 +1193,7 @@ err_protosw:
 	return ret;
 }
 
-static void __exit __maybe_unused tquic6_exit(void)
+void __exit tquic6_exit(void)
 {
 	pr_info("tquic: shutting down IPv6 support\n");
 
