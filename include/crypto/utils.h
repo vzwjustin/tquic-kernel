@@ -30,11 +30,13 @@ static inline int crypto_memneq(const void *a, const void *b, size_t size)
 {
 	return __crypto_memneq(a, b, size) != 0UL ? 1 : 0;
 }
-#endif /* >= 6.4 */
-
+#else
 /*
- * On < 6.4, crypto_memneq is provided by crypto/algapi.h which
- * is included transitively. Nothing needed here.
+ * On < 6.4, crypto_memneq is provided by crypto/algapi.h.
+ * Include it explicitly since our local header shadows the kernel's
+ * crypto/utils.h and breaks transitive inclusion.
  */
+#include <crypto/algapi.h>
+#endif /* >= 6.4 */
 
 #endif	/* _TQUIC_CRYPTO_UTILS_COMPAT_H */

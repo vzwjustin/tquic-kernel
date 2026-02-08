@@ -42,16 +42,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # 5.4 LTS (EOL Dec 2025, last release archived on kernel.org)
-          - kernel: "5.4"
-            kernel_full: "5.4.302"
-            kernel_major: "5"
-          - kernel: "5.10"
-            kernel_full: "5.10.249"
-            kernel_major: "5"
-          - kernel: "5.15"
-            kernel_full: "5.15.199"
-            kernel_major: "5"
           - kernel: "6.1"
             kernel_full: "6.1.162"
             kernel_major: "6"
