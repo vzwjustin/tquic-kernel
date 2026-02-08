@@ -382,14 +382,130 @@ struct proto_accept_arg {
  * struct genl_dumpit_info layout and availability vary widely.
  */
 
-/* resv_start_op: added in ~5.15 to struct genl_family.
+/* resv_start_op: added in 5.16 to struct genl_family.
  * On older kernels this field does not exist, so we must guard the
  * designated initializer.
  */
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 16, 0)
 #define TQUIC_GENL_RESV_START_OP(val) .resv_start_op = (val),
 #else
 #define TQUIC_GENL_RESV_START_OP(val)
+#endif
+
+/* ========================================================================
+ * GRO / GSO / Offload compatibility
+ * ======================================================================== */
+
+#include <linux/netdevice.h>
+
+/*
+ * napi_gro_cb.is_flist: added in 5.11 for frag_list GRO.
+ * On older kernels this field does not exist; stub it out.
+ */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 11, 0)
+#define TQUIC_NAPI_GRO_CB_SET_IS_FLIST(skb, val) do { } while (0)
+#else
+#define TQUIC_NAPI_GRO_CB_SET_IS_FLIST(skb, val) \
+	(NAPI_GRO_CB(skb)->is_flist = (val))
+#endif
+
+/*
+ * SKB_GSO_FRAGLIST: added in 5.6. On older kernels, frag_list GSO
+ * is not available; define it to 0 so bitwise tests always fail and
+ * the code gracefully falls through to other paths.
+ */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 6, 0)
+#ifndef SKB_GSO_FRAGLIST
+#define SKB_GSO_FRAGLIST	0
+#endif
+#endif
+
+/*
+ * skb_segment_list(): added in 5.6. On older kernels it does not exist.
+ * Guard callers with TQUIC_HAS_SKB_SEGMENT_LIST.
+ */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 6, 0)
+#define TQUIC_HAS_SKB_SEGMENT_LIST 1
+#else
+#define TQUIC_HAS_SKB_SEGMENT_LIST 0
+#endif
+
+/*
+ * __udp_gso_segment(): gained a third bool is_ipv6 parameter in 5.6.
+ * On 5.4 it takes only (skb, features).
+ */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 6, 0)
+#define TQUIC_UDP_GSO_SEGMENT(skb, features, is_ipv6) \
+	__udp_gso_segment(skb, features)
+#else
+#define TQUIC_UDP_GSO_SEGMENT(skb, features, is_ipv6) \
+	__udp_gso_segment(skb, features, is_ipv6)
+#endif
+
+/*
+ * napi_gro_cb.network_offsets[]: added in 6.5 (commit that introduced
+ * per-encapsulation network offsets). Before 6.5, use network_offset
+ * (singular, no array). Before ~5.18 there was no network_offset at all;
+ * fall back to computing it from skb network header.
+ */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 5, 0)
+#define TQUIC_GRO_NETWORK_OFFSET(skb) \
+	NAPI_GRO_CB(skb)->network_offsets[(skb)->encapsulation]
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(5, 18, 0)
+#define TQUIC_GRO_NETWORK_OFFSET(skb) \
+	NAPI_GRO_CB(skb)->network_offset
+#else
+#define TQUIC_GRO_NETWORK_OFFSET(skb) \
+	(skb_network_header(skb) - skb_mac_header(skb))
+#endif
+
+/*
+ * skb_gro_receive_network_offset(): added in 6.5 along with network_offsets.
+ * Provide a compat definition for older kernels.
+ */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 5, 0)
+static inline int tquic_skb_gro_receive_network_offset(const struct sk_buff *skb)
+{
+	return skb_network_offset(skb);
+}
+#define skb_gro_receive_network_offset(skb) \
+	tquic_skb_gro_receive_network_offset(skb)
+#endif
+
+/*
+ * skb_gro_checksum_try_convert(): on 5.4 this may not be available
+ * as a standalone function. Provide a no-op compat for pre-5.5.
+ */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 5, 0)
+#define tquic_gro_checksum_try_convert(skb, proto, compute_pseudo) \
+	do { } while (0)
+#else
+#define tquic_gro_checksum_try_convert(skb, proto, compute_pseudo) \
+	skb_gro_checksum_try_convert(skb, proto, compute_pseudo)
+#endif
+
+/*
+ * udp_tunnel_encap_enable(): signature changed across versions.
+ * On 5.4/5.10 the underlying function may not take struct sock *.
+ * Use udp_encap_enable() directly on pre-5.11 kernels.
+ */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 11, 0)
+#define tquic_udp_tunnel_encap_enable(sk)		\
+	do {						\
+		udp_encap_enable();			\
+	} while (0)
+#else
+#define tquic_udp_tunnel_encap_enable(sk) udp_tunnel_encap_enable(sk)
+#endif
+
+/*
+ * skb_gro_receive_list(): added in 5.6 with frag_list GRO support.
+ * On older kernels, frag_list GRO is not available.
+ */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 6, 0)
+#define TQUIC_HAS_GRO_RECEIVE_LIST 1
+#else
+#define TQUIC_HAS_GRO_RECEIVE_LIST 0
 #endif
 
 #endif /* _TQUIC_COMPAT_H */

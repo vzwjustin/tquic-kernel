@@ -31,6 +31,7 @@
 /* Public scheduler API */
 #include "tquic_sched.h"
 #include "../tquic_compat.h"
+#include "../protocol.h"
 
 /* Failover integration for retransmit queue priority */
 #include "../bond/tquic_failover.h"
@@ -2307,7 +2308,9 @@ static char tquic_default_sched_name[TQUIC_SCHED_NAME_MAX] = "adaptive";
 static inline struct tquic_sched_internal *
 tquic_get_default_sched_netns(struct net *net)
 {
-	return rcu_dereference(net->tquic.default_scheduler);
+	struct tquic_net *tn = tquic_pernet(net);
+
+	return (struct tquic_sched_internal *)rcu_dereference(tn->default_scheduler);
 }
 
 /*
@@ -2319,9 +2322,12 @@ tquic_get_default_sched_netns(struct net *net)
 int tquic_mp_sched_set_default(struct net *net, const char *name)
 {
 	struct tquic_sched_internal *sched, *old;
+	struct tquic_net *tn;
 
 	if (!net || !name || !name[0])
 		return -EINVAL;
+
+	tn = tquic_pernet(net);
 
 	rcu_read_lock();
 	sched = tquic_int_sched_find(name);
@@ -2337,10 +2343,12 @@ int tquic_mp_sched_set_default(struct net *net, const char *name)
 	rcu_read_unlock();
 
 	spin_lock(&tquic_sched_list_lock);
-	old = rcu_dereference_protected(net->tquic.default_scheduler,
-					lockdep_is_held(&tquic_sched_list_lock));
-	rcu_assign_pointer(net->tquic.default_scheduler, sched);
-	strscpy(net->tquic.sched_name, name, NETNS_TQUIC_SCHED_NAME_MAX);
+	old = (struct tquic_sched_internal *)
+		rcu_dereference_protected(tn->default_scheduler,
+					  lockdep_is_held(&tquic_sched_list_lock));
+	rcu_assign_pointer(tn->default_scheduler,
+			   (struct tquic_sched_ops *)sched);
+	strscpy(tn->sched_name, name, TQUIC_NET_SCHED_NAME_MAX);
 	spin_unlock(&tquic_sched_list_lock);
 
 	if (old)
@@ -2589,12 +2597,12 @@ EXPORT_SYMBOL_GPL(tquic_get_default_scheduler);
  */
 static int __net_init tquic_sched_net_init(struct net *net)
 {
+	struct tquic_net *tn = tquic_pernet(net);
 	struct proc_dir_entry *pde;
 
 	/* Initialize per-netns default scheduler to aggregate */
-	RCU_INIT_POINTER(net->tquic.default_scheduler, NULL);
-	strscpy(net->tquic.sched_name, "aggregate",
-		sizeof(net->tquic.sched_name));
+	RCU_INIT_POINTER(tn->default_scheduler, NULL);
+	strscpy(tn->sched_name, "aggregate", sizeof(tn->sched_name));
 
 	/* Create per-netns proc entry */
 	pde = proc_mkdir("tquic", net->proc_net);
@@ -2609,6 +2617,7 @@ static int __net_init tquic_sched_net_init(struct net *net)
 
 static void __net_exit tquic_sched_net_exit(struct net *net)
 {
+	struct tquic_net *tn = tquic_pernet(net);
 	struct tquic_sched_internal *sched;
 
 	/*
@@ -2621,8 +2630,8 @@ static void __net_exit tquic_sched_net_exit(struct net *net)
 	 *    we call module_put()
 	 */
 	rcu_read_lock();
-	sched = rcu_dereference(net->tquic.default_scheduler);
-	RCU_INIT_POINTER(net->tquic.default_scheduler, NULL);
+	sched = (struct tquic_sched_internal *)rcu_dereference(tn->default_scheduler);
+	RCU_INIT_POINTER(tn->default_scheduler, NULL);
 	rcu_read_unlock();
 
 	if (sched)

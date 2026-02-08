@@ -30,7 +30,9 @@
 #include <net/ipv6.h>
 #include <net/checksum.h>
 #include <net/tquic.h>
+#include <net/ip6_checksum.h>
 #include <crypto/aead.h>
+#include "tquic_compat.h"
 #include "tquic_cid.h"
 
 /* QUIC GSO type flag for skb_shared_info */
@@ -735,8 +737,8 @@ static struct sk_buff *quic4_gro_receive(struct list_head *head,
 						 inet_gro_compute_pseudo))
 		goto flush;
 	else if (uh->check)
-		skb_gro_checksum_try_convert(skb, IPPROTO_UDP,
-					     inet_gro_compute_pseudo);
+		tquic_gro_checksum_try_convert(skb, IPPROTO_UDP,
+					       inet_gro_compute_pseudo);
 
 skip:
 	/* Pull UDP header */
@@ -757,7 +759,7 @@ flush:
 static int quic4_gro_complete(struct sk_buff *skb, int nhoff)
 {
 	const struct iphdr *iph = (struct iphdr *)(skb->data +
-			NAPI_GRO_CB(skb)->network_offsets[skb->encapsulation]);
+			TQUIC_GRO_NETWORK_OFFSET(skb));
 	struct udphdr *uh = (struct udphdr *)(skb->data + nhoff);
 
 	/* Update UDP checksum with final length */
@@ -792,8 +794,8 @@ static struct sk_buff *quic6_gro_receive(struct list_head *head,
 						 ip6_gro_compute_pseudo))
 		goto flush;
 	else if (uh->check)
-		skb_gro_checksum_try_convert(skb, IPPROTO_UDP,
-					     ip6_gro_compute_pseudo);
+		tquic_gro_checksum_try_convert(skb, IPPROTO_UDP,
+					       ip6_gro_compute_pseudo);
 
 skip:
 	/* Pull UDP header */
@@ -814,7 +816,7 @@ flush:
 static int quic6_gro_complete(struct sk_buff *skb, int nhoff)
 {
 	const struct ipv6hdr *ipv6h = (struct ipv6hdr *)(skb->data +
-			NAPI_GRO_CB(skb)->network_offsets[skb->encapsulation]);
+			TQUIC_GRO_NETWORK_OFFSET(skb));
 	struct udphdr *uh = (struct udphdr *)(skb->data + nhoff);
 
 	/* Update UDP checksum with final length */

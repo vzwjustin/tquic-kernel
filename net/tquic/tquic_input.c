@@ -524,6 +524,7 @@ static int tquic_process_ack_frame(struct tquic_rx_ctx *ctx)
 	bool has_ecn;
 	u8 frame_type;
 	int ret;
+	u64 i;
 
 	frame_type = ctx->data[ctx->offset];
 	has_ecn = (frame_type == TQUIC_FRAME_ACK_ECN);
@@ -562,7 +563,7 @@ static int tquic_process_ack_frame(struct tquic_rx_ctx *ctx)
 		return -EINVAL;
 
 	/* Process additional ACK ranges */
-	for (u64 i = 0; i < ack_range_count; i++) {
+	for (i = 0; i < ack_range_count; i++) {
 		u64 gap, range;
 
 		ret = tquic_decode_varint(ctx->data + ctx->offset,
@@ -1815,9 +1816,10 @@ static u64 tquic_decode_pkt_num(u8 *buf, int pkt_num_len, u64 largest_pn)
 	u64 truncated_pn = 0;
 	u64 expected_pn, pn_win, pn_hwin, pn_mask;
 	u64 candidate_pn;
+	int i;
 
 	/* Read truncated packet number */
-	for (int i = 0; i < pkt_num_len; i++)
+	for (i = 0; i < pkt_num_len; i++)
 		truncated_pn = (truncated_pn << 8) | buf[i];
 
 	/* Reconstruct full packet number */
@@ -2639,7 +2641,7 @@ int tquic_setup_udp_encap(struct sock *sk)
 	udp_sk(sk)->encap_rcv = tquic_encap_recv;
 
 	/* Enable GRO */
-	udp_tunnel_encap_enable(sk);
+	tquic_udp_tunnel_encap_enable(sk);
 
 	return 0;
 }

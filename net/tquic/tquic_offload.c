@@ -35,6 +35,7 @@
 #include <net/udp_tunnel.h>
 #include <net/tquic.h>
 
+#include "tquic_compat.h"
 #include "tquic_mib.h"
 
 /* GRO configuration */
@@ -271,11 +272,11 @@ static struct sk_buff *tquic_gro_receive_segment(struct list_head *head,
 			return NULL;
 		}
 
-#ifdef TQUIC_OUT_OF_TREE
+#if !TQUIC_HAS_GRO_RECEIVE_LIST || defined(TQUIC_OUT_OF_TREE)
 		/*
-		 * skb_gro_receive_list is not exported for out-of-tree modules.
-		 * Flush this packet instead of coalescing - GRO aggregation
-		 * is disabled for out-of-tree builds.
+		 * skb_gro_receive_list is not available on pre-5.6 kernels
+		 * or not exported for out-of-tree modules.
+		 * Flush this packet instead of coalescing.
 		 */
 		NAPI_GRO_CB(skb)->flush = 1;
 		return pp;
@@ -321,7 +322,7 @@ struct sk_buff *tquic_gro_receive(struct list_head *head, struct sk_buff *skb,
 	int flush = 1;
 
 	/* Set up for frag_list GRO */
-	NAPI_GRO_CB(skb)->is_flist = 1;
+	TQUIC_NAPI_GRO_CB_SET_IS_FLIST(skb, 1);
 
 	/* Validate UDP length */
 	if (ntohs(uh->len) < sizeof(*uh)) {
@@ -418,8 +419,8 @@ static struct sk_buff *tquic4_gro_receive(struct list_head *head,
 						 inet_gro_compute_pseudo))
 		goto flush;
 	else if (uh->check)
-		skb_gro_checksum_try_convert(skb, IPPROTO_UDP,
-					     inet_gro_compute_pseudo);
+		tquic_gro_checksum_try_convert(skb, IPPROTO_UDP,
+					       inet_gro_compute_pseudo);
 
 skip:
 	return tquic_gro_receive(head, skb, uh, sk);
@@ -438,7 +439,7 @@ flush:
  */
 static int tquic4_gro_complete(struct sk_buff *skb, int nhoff)
 {
-	const u16 offset = NAPI_GRO_CB(skb)->network_offsets[skb->encapsulation];
+	const u16 offset = TQUIC_GRO_NETWORK_OFFSET(skb);
 	const struct iphdr *iph = (struct iphdr *)(skb->data + offset);
 	struct udphdr *uh = (struct udphdr *)(skb->data + nhoff);
 
@@ -480,8 +481,8 @@ static struct sk_buff *tquic6_gro_receive(struct list_head *head,
 						 ip6_gro_compute_pseudo))
 		goto flush;
 	else if (uh->check)
-		skb_gro_checksum_try_convert(skb, IPPROTO_UDP,
-					     ip6_gro_compute_pseudo);
+		tquic_gro_checksum_try_convert(skb, IPPROTO_UDP,
+					       ip6_gro_compute_pseudo);
 
 skip:
 	return tquic_gro_receive(head, skb, uh, sk);
@@ -500,7 +501,7 @@ flush:
  */
 static int tquic6_gro_complete(struct sk_buff *skb, int nhoff)
 {
-	const u16 offset = NAPI_GRO_CB(skb)->network_offsets[skb->encapsulation];
+	const u16 offset = TQUIC_GRO_NETWORK_OFFSET(skb);
 	const struct ipv6hdr *ipv6h = (struct ipv6hdr *)(skb->data + offset);
 	struct udphdr *uh = (struct udphdr *)(skb->data + nhoff);
 
@@ -538,13 +539,16 @@ static struct sk_buff *tquic_gso_segment(struct sk_buff *skb,
 		return segs;
 
 	/* Use standard UDP GSO segmentation */
+#if TQUIC_HAS_SKB_SEGMENT_LIST
 	if (skb_shinfo(skb)->gso_type & SKB_GSO_FRAGLIST) {
 		/* Frag list case - segment by list elements */
 		segs = skb_segment_list(skb, features, skb_mac_header_len(skb));
-	} else {
+	} else
+#endif
+	{
 		/* Standard UDP L4 GSO */
-		segs = __udp_gso_segment(skb, features,
-					 skb->protocol == htons(ETH_P_IPV6));
+		segs = TQUIC_UDP_GSO_SEGMENT(skb, features,
+					     skb->protocol == htons(ETH_P_IPV6));
 	}
 
 	return segs;
@@ -699,7 +703,7 @@ int tquic_setup_gro(struct sock *sk)
 	up->gro_complete = tquic_gro_complete_udp;
 
 	/* Enable GRO for this socket */
-	udp_tunnel_encap_enable(sk);
+	tquic_udp_tunnel_encap_enable(sk);
 
 	pr_debug("tquic: GRO enabled for socket %p\n", sk);
 

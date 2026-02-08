@@ -20,6 +20,7 @@
 #include <net/inet_connection_sock.h>
 #include <net/tquic.h>
 #include <uapi/linux/tquic_diag.h>
+#include <linux/version.h>
 #include "protocol.h"
 
 /*
@@ -485,7 +486,9 @@ path_error:
  * Registered with inet_diag_register() for IPPROTO_TQUIC (263).
  */
 static const struct inet_diag_handler tquic_diag_handler = {
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 7, 0)
 	.owner		 = THIS_MODULE,
+#endif
 	.dump		 = tquic_diag_dump,
 	.dump_one	 = tquic_diag_dump_one,
 	.idiag_get_info  = tquic_diag_get_info,

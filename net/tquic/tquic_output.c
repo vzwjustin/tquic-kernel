@@ -869,6 +869,7 @@ static int tquic_apply_header_protection(struct tquic_connection *conn,
 	int pkt_num_offset;
 	int pkt_num_len;
 	int ret;
+	int i;
 
 	if (!conn->crypto_state)
 		return -EINVAL;
@@ -924,7 +925,7 @@ static int tquic_apply_header_protection(struct tquic_connection *conn,
 		header[0] ^= (mask[0] & 0x1f);  /* Protect low 5 bits */
 
 	/* Apply mask to packet number */
-	for (int i = 0; i < pkt_num_len; i++)
+	for (i = 0; i < pkt_num_len; i++)
 		header[pkt_num_offset + i] ^= mask[1 + i];
 
 	return 0;
