@@ -20,7 +20,7 @@
 #include <crypto/curve25519.h>
 #include <crypto/akcipher.h>
 #include <crypto/sig.h>
-#include "../tquic_compat.h"
+#include <crypto/utils.h>
 #include <net/tquic.h>
 #include "cert_verify.h"
 

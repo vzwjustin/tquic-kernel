@@ -29,6 +29,7 @@
 #include <linux/refcount.h>
 #include <crypto/hash.h>
 #include <crypto/hmac.h>
+#include <crypto/utils.h>
 #include <net/tquic.h>
 #include "../tquic_compat.h"
 

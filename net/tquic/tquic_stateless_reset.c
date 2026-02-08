@@ -44,7 +44,7 @@
 #include <linux/in.h>
 #include <linux/in6.h>
 #include <crypto/hash.h>
-#include "tquic_compat.h"
+#include <crypto/utils.h>
 #include <net/sock.h>
 #include <net/udp.h>
 #include <net/ip.h>

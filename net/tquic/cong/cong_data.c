@@ -22,7 +22,7 @@
 #include <linux/ktime.h>
 #include <linux/unaligned.h>
 #include <crypto/hash.h>
-#include "../tquic_compat.h"
+#include <crypto/utils.h>
 #include <net/tquic.h>
 
 #include "cong_data.h"

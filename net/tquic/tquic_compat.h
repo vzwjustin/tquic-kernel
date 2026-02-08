@@ -597,18 +597,6 @@ static inline u8 get_random_u8(void)
 #endif
 
 /* ========================================================================
- * crypto/utils.h: split out from crypto/algapi.h in ~6.4
- * On older kernels, crypto_memneq etc. live in crypto/algapi.h.
- * The local include/crypto/utils.h shadows the kernel's on 6.1+
- * causing redefinition errors. Use this compat include instead.
- * ======================================================================== */
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
-#include <crypto/utils.h>
-#else
-#include <crypto/algapi.h>
-#endif
-
-/* ========================================================================
  * Kernel < 5.10: register_netdevice_notifier_net() not available
  * Fall back to global register_netdevice_notifier().
  * ======================================================================== */
