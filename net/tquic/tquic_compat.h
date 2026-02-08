@@ -34,7 +34,6 @@
  * - Timer API: from_timer() -> timer_container_of()
  * - Timer API: del_timer() -> timer_delete()
  * - Timer API: del_timer_sync() -> timer_delete_sync()
- * - Zerocopy: msg_zerocopy_realloc/skb_zerocopy_iter_stream gained params
  *
  * Kernel 6.13+ compatibility:
  * - udp_tunnel_xmit_skb/udp_tunnel6_xmit_skb gained ipcb_flags param
@@ -255,19 +254,15 @@ static const int tquic_sysctl_two = 2;
 #endif
 
 /*
- * Zerocopy helpers gained devmem/binding parameters in 6.12+.
+ * Zerocopy helpers: msg_zerocopy_realloc takes 3 args and
+ * skb_zerocopy_iter_stream takes 5 args on all released kernels (5.4-6.15).
+ * The devmem TX patchset may add extra parameters in a future kernel;
+ * update these macros when that lands.
  */
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
-#define TQUIC_MSG_ZEROCOPY_REALLOC(sk, size, uarg) \
-	msg_zerocopy_realloc(sk, size, uarg, false)
-#define TQUIC_SKB_ZEROCOPY_ITER_STREAM(sk, skb, msg, len, uarg) \
-	skb_zerocopy_iter_stream(sk, skb, msg, len, uarg, NULL)
-#else
 #define TQUIC_MSG_ZEROCOPY_REALLOC(sk, size, uarg) \
 	msg_zerocopy_realloc(sk, size, uarg)
 #define TQUIC_SKB_ZEROCOPY_ITER_STREAM(sk, skb, msg, len, uarg) \
 	skb_zerocopy_iter_stream(sk, skb, msg, len, uarg)
-#endif
 
 /*
  * udp_tunnel_xmit_skb() gained an ipcb_flags parameter in 6.13+.
@@ -285,6 +280,16 @@ static const int tquic_sysctl_two = 2;
 #define TQUIC_UDP_TUNNEL6_XMIT_SKB(dst, sk, skb, dev, saddr, daddr, prio, ttl, label, sport, dport, nocheck) \
 	udp_tunnel6_xmit_skb(dst, sk, skb, dev, saddr, daddr, prio, ttl, label, sport, dport, nocheck)
 #endif
+
+/* ========================================================================
+ * Kernel < 6.11: ctl_table became const in sysctl handlers in 6.11
+ * On older kernels, handler functions take non-const struct ctl_table *.
+ * ======================================================================== */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 11, 0)
+#define TQUIC_CTL_TABLE const struct ctl_table
+#else
+#define TQUIC_CTL_TABLE struct ctl_table
+#endif /* 6.11 ctl_table const */
 
 /* ========================================================================
  * Kernel < 6.7: proto_accept_arg struct was introduced in 6.7
@@ -342,5 +347,49 @@ struct proto_accept_arg {
 		return inner(sk, msg, len, flags, addr_len);		\
 	}
 #endif /* < 5.19 */
+
+/* ========================================================================
+ * Genetlink API compatibility for tquic_netlink.c
+ * ======================================================================== */
+#include <net/genetlink.h>
+
+/* GENL_MCAST_CAP_NET_ADMIN: added in ~6.10 along with the .flags field
+ * in struct genl_multicast_group. On older kernels neither the macro nor
+ * the struct field exist, so we must omit the entire field initializer.
+ */
+#ifdef GENL_MCAST_CAP_NET_ADMIN
+#define TQUIC_GENL_MCAST_FLAGS(val) .flags = (val),
+#else
+#define TQUIC_GENL_MCAST_FLAGS(val)
+#endif
+
+/* GENL_REQ_ATTR_CHECK: added in ~5.16. Returns true (error) if the
+ * required attribute is missing, and sets extack message automatically.
+ * On older kernels, fall back to a simple NULL check on info->attrs[].
+ */
+#ifndef GENL_REQ_ATTR_CHECK
+#define GENL_REQ_ATTR_CHECK(info, attr)			\
+	({						\
+		 !((info)->attrs[attr]);			\
+	})
+#endif
+
+/* genl_info_dump(): added in 6.4 to retrieve genl_info from dump cb.
+ * On older kernels, attrs must be obtained differently:
+ *   5.10 - 6.3: genl_dumpit_info(cb)->attrs
+ *   < 5.10:     re-parse from cb->nlh
+ * Compat handled inline in tquic_netlink.c rather than here because
+ * struct genl_dumpit_info layout and availability vary widely.
+ */
+
+/* resv_start_op: added in ~5.15 to struct genl_family.
+ * On older kernels this field does not exist, so we must guard the
+ * designated initializer.
+ */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0)
+#define TQUIC_GENL_RESV_START_OP(val) .resv_start_op = (val),
+#else
+#define TQUIC_GENL_RESV_START_OP(val)
+#endif
 
 #endif /* _TQUIC_COMPAT_H */

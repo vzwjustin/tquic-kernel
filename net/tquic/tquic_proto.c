@@ -762,7 +762,7 @@ static int tquic_net_sysctl_register(struct net *net)
 static void tquic_net_sysctl_unregister(struct net *net)
 {
 	struct tquic_net *tn = tquic_pernet(net);
-	const struct ctl_table *table;
+	TQUIC_CTL_TABLE *table;
 
 	if (tn->sysctl_header) {
 		table = tn->sysctl_header->ctl_table_arg;

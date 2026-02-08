@@ -32,6 +32,7 @@
 #include <uapi/linux/tquic.h>
 #include <uapi/linux/tquic_pm.h>
 
+#include "tquic_compat.h"
 #include "multipath/tquic_sched.h"
 
 /*
@@ -247,7 +248,7 @@ struct genl_family tquic_genl_family;
 static const struct genl_multicast_group tquic_mcgrps[] = {
 	[TQUIC_MCGRP_EVENTS_OFFSET] = {
 		.name = TQUIC_MCGRP_EVENTS,
-		.flags = GENL_MCAST_CAP_NET_ADMIN,
+		TQUIC_GENL_MCAST_FLAGS(GENL_MCAST_CAP_NET_ADMIN)
 	},
 };
 
@@ -934,24 +935,37 @@ struct tquic_dump_ctx {
 static int tquic_nl_cmd_path_dump(struct sk_buff *skb,
 				  struct netlink_callback *cb)
 {
-	const struct genl_info *info = genl_info_dump(cb);
 	struct net *net = sock_net(skb->sk);
 	struct tquic_dump_ctx *ctx = (struct tquic_dump_ctx *)cb->ctx;
 	struct tquic_nl_conn_info *conn;
 	struct tquic_nl_path_info *path;
 	void *hdr;
 	int idx = 0;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
+	const struct genl_info *info = genl_info_dump(cb);
+	struct nlattr **attrs = (struct nlattr **)info->attrs;
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
+	struct nlattr **attrs =
+		(struct nlattr **)genl_dumpit_info(cb)->attrs;
+#else
+	struct nlattr *attrs_buf[TQUIC_NL_ATTR_MAX + 1];
+	struct nlattr **attrs = attrs_buf;
 
-	if (!info->attrs[TQUIC_NL_ATTR_CONN_ID]) {
-		NL_SET_ERR_MSG(info->extack, "Connection ID required");
+	if (nlmsg_parse(cb->nlh, GENL_HDRLEN, attrs_buf, TQUIC_NL_ATTR_MAX,
+			tquic_nl_policy, cb->extack))
+		return -EINVAL;
+#endif
+
+	if (!attrs[TQUIC_NL_ATTR_CONN_ID]) {
+		NL_SET_ERR_MSG(cb->extack, "Connection ID required");
 		return -EINVAL;
 	}
 
-	ctx->conn_id = nla_get_u64(info->attrs[TQUIC_NL_ATTR_CONN_ID]);
+	ctx->conn_id = nla_get_u64(attrs[TQUIC_NL_ATTR_CONN_ID]);
 
 	conn = tquic_conn_lookup(net, ctx->conn_id);
 	if (!conn) {
-		NL_SET_ERR_MSG(info->extack, "Connection not found");
+		NL_SET_ERR_MSG(cb->extack, "Connection not found");
 		return -ENOENT;
 	}
 
@@ -1567,7 +1581,7 @@ struct genl_family tquic_genl_family __ro_after_init = {
 	.module = THIS_MODULE,
 	.ops = tquic_genl_ops,
 	.n_ops = ARRAY_SIZE(tquic_genl_ops),
-	.resv_start_op = __TQUIC_NL_CMD_MAX,
+	TQUIC_GENL_RESV_START_OP(__TQUIC_NL_CMD_MAX)
 	.mcgrps = tquic_mcgrps,
 	.n_mcgrps = ARRAY_SIZE(tquic_mcgrps),
 };

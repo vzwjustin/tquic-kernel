@@ -304,7 +304,7 @@ static void __net_exit tquic_pm_net_exit(struct net *net)
 	pernet = net_generic(net, tquic_pm_pernet_id);
 
 	if (pernet->sysctl_header) {
-		const struct ctl_table *table = pernet->sysctl_header->ctl_table_arg;
+		TQUIC_CTL_TABLE *table = pernet->sysctl_header->ctl_table_arg;
 
 		unregister_net_sysctl_table(pernet->sysctl_header);
 		if (!net_eq(net, &init_net))

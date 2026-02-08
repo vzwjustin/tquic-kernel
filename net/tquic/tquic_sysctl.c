@@ -223,7 +223,7 @@ const char *tquic_cong_get_default_name(struct net *net);
  * On read: Returns current default scheduler name
  * On write: Validates scheduler exists and sets as default
  */
-static int proc_tquic_scheduler(const struct ctl_table *table, int write,
+static int proc_tquic_scheduler(TQUIC_CTL_TABLE *table, int write,
 				void *buffer, size_t *lenp, loff_t *ppos)
 {
 	struct net *net = current->nsproxy->net_ns;
@@ -292,7 +292,7 @@ static int proc_tquic_scheduler(const struct ctl_table *table, int write,
  * On read: Returns current default CC algorithm name
  * On write: Validates CC algorithm exists and sets as default
  */
-static int proc_tquic_cc_algorithm(const struct ctl_table *table, int write,
+static int proc_tquic_cc_algorithm(TQUIC_CTL_TABLE *table, int write,
 				   void *buffer, size_t *lenp, loff_t *ppos)
 {
 	struct net *net = current->nsproxy->net_ns;
@@ -356,7 +356,7 @@ static int proc_tquic_cc_algorithm(const struct ctl_table *table, int write,
  *
  * Set to 0 to disable BBR auto-selection.
  */
-static int proc_tquic_bbr_rtt_threshold(const struct ctl_table *table, int write,
+static int proc_tquic_bbr_rtt_threshold(TQUIC_CTL_TABLE *table, int write,
 					void *buffer, size_t *lenp, loff_t *ppos)
 {
 	struct net *net = current->nsproxy->net_ns;
@@ -387,7 +387,7 @@ static int proc_tquic_bbr_rtt_threshold(const struct ctl_table *table, int write
  * Handles reading/writing net.tquic.cc_coupled which enables/disables
  * coupled congestion control for multipath TCP-fairness.
  */
-static int proc_tquic_cc_coupled(const struct ctl_table *table, int write,
+static int proc_tquic_cc_coupled(TQUIC_CTL_TABLE *table, int write,
 				 void *buffer, size_t *lenp, loff_t *ppos)
 {
 	struct net *net = current->nsproxy->net_ns;
@@ -420,7 +420,7 @@ static int proc_tquic_cc_coupled(const struct ctl_table *table, int write,
  * ECN (Explicit Congestion Notification) for congestion signaling.
  * Per CONTEXT.md: "ECN support: available but off by default"
  */
-static int proc_tquic_ecn_enabled(const struct ctl_table *table, int write,
+static int proc_tquic_ecn_enabled(TQUIC_CTL_TABLE *table, int write,
 				  void *buffer, size_t *lenp, loff_t *ppos)
 {
 	struct net *net = current->nsproxy->net_ns;
@@ -455,7 +455,7 @@ static int proc_tquic_ecn_enabled(const struct ctl_table *table, int write,
  * Per RFC 9002 Section 7.2: ECN reduction is typically less aggressive
  * than loss-based reduction (0.8 vs 0.7 for CUBIC).
  */
-static int proc_tquic_ecn_beta(const struct ctl_table *table, int write,
+static int proc_tquic_ecn_beta(TQUIC_CTL_TABLE *table, int write,
 			       void *buffer, size_t *lenp, loff_t *ppos)
 {
 	struct net *net = current->nsproxy->net_ns;
@@ -482,7 +482,7 @@ static int proc_tquic_ecn_beta(const struct ctl_table *table, int write,
 }
 
 /* Legacy global sysctl handler (for compatibility) */
-static int tquic_sysctl_scheduler(const struct ctl_table *table, int write,
+static int tquic_sysctl_scheduler(TQUIC_CTL_TABLE *table, int write,
 				  void *buffer, size_t *lenp, loff_t *ppos)
 {
 	int ret;
@@ -506,7 +506,7 @@ static int tquic_sysctl_scheduler(const struct ctl_table *table, int write,
 	return 0;
 }
 
-static int tquic_sysctl_bond_mode(const struct ctl_table *table, int write,
+static int tquic_sysctl_bond_mode(TQUIC_CTL_TABLE *table, int write,
 				  void *buffer, size_t *lenp, loff_t *ppos)
 {
 	int ret;
@@ -529,7 +529,7 @@ static int tquic_sysctl_bond_mode(const struct ctl_table *table, int write,
  * Handles reading/writing net.tquic.pacing_enabled which enables/disables
  * pacing for TQUIC connections. Pacing is enabled by default per CONTEXT.md.
  */
-static int proc_tquic_pacing_enabled(const struct ctl_table *table, int write,
+static int proc_tquic_pacing_enabled(TQUIC_CTL_TABLE *table, int write,
 				     void *buffer, size_t *lenp, loff_t *ppos)
 {
 	struct net *net = current->nsproxy->net_ns;
@@ -561,7 +561,7 @@ static int proc_tquic_pacing_enabled(const struct ctl_table *table, int write,
  * the number of consecutive losses in same round before path degradation.
  * Default is 5 per RESEARCH.md recommendation.
  */
-static int proc_tquic_path_degrade_threshold(const struct ctl_table *table, int write,
+static int proc_tquic_path_degrade_threshold(TQUIC_CTL_TABLE *table, int write,
 					     void *buffer, size_t *lenp,
 					     loff_t *ppos)
 {
@@ -599,7 +599,7 @@ static int proc_tquic_path_degrade_threshold(const struct ctl_table *table, int 
  *   - May include reserved transport parameters (31*N + 27)
  *   - May include reserved versions in Version Negotiation
  */
-static int proc_tquic_grease_enabled(const struct ctl_table *table, int write,
+static int proc_tquic_grease_enabled(TQUIC_CTL_TABLE *table, int write,
 				     void *buffer, size_t *lenp, loff_t *ppos)
 {
 	struct net *net = current->nsproxy->net_ns;

@@ -344,7 +344,7 @@ EXPORT_SYMBOL_GPL(tquic_on_persistent_congestion);
  *
  * Handles reading/writing net.tquic.persistent_cong_threshold
  */
-static int proc_tquic_persistent_cong_threshold(const struct ctl_table *table,
+static int proc_tquic_persistent_cong_threshold(TQUIC_CTL_TABLE *table,
 						int write, void *buffer,
 						size_t *lenp, loff_t *ppos)
 {
