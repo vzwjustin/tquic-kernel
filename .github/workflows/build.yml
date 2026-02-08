@@ -51,6 +51,9 @@ jobs:
           - kernel: "6.12"
             kernel_full: "6.12.69"
             kernel_major: "6"
+          - kernel: "6.18"
+            kernel_full: "6.18.9"
+            kernel_major: "6"
 
     steps:
       - name: Checkout TQUIC source
