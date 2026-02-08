@@ -32,7 +32,7 @@
 #include <linux/in6.h>
 #include <crypto/aead.h>
 #include <crypto/aes.h>
-#include <crypto/utils.h>
+#include "tquic_compat.h"
 #include <net/sock.h>
 #include <net/udp.h>
 #include <net/ip.h>

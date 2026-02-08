@@ -22,7 +22,6 @@
 #include <linux/crc32.h>
 #include <linux/string.h>
 #include <linux/overflow.h>
-#include <crypto/utils.h>
 #include <net/tquic.h>
 #include <net/tquic_frame.h>
 #include <linux/unaligned.h>

@@ -26,7 +26,6 @@
 #include <linux/workqueue.h>
 #include <linux/random.h>
 #include <linux/netdevice.h>
-#include <crypto/utils.h>
 #include <net/sock.h>
 #include <net/tquic.h>
 #include "protocol.h"

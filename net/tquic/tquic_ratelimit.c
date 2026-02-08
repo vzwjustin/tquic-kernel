@@ -42,7 +42,6 @@
 #include <linux/sysctl.h>
 #include <linux/netfilter.h>
 #include <crypto/hash.h>
-#include <crypto/utils.h>
 #include <net/sock.h>
 #include <net/net_namespace.h>
 #include <net/netns/generic.h>

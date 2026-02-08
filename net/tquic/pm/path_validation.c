@@ -15,7 +15,6 @@
 #include <linux/timer.h>
 #include <linux/random.h>
 #include <linux/skbuff.h>
-#include <crypto/utils.h>
 #include <net/sock.h>
 #include <net/tquic.h>
 #include "../tquic_compat.h"

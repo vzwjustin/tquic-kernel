@@ -504,11 +504,15 @@ static int parse_san_extension(const u8 *data, u32 len,
 	return 0;
 
 err_free:
-	for (u32 i = 0; i < name_count; i++)
-		kfree(names[i]);
-	kfree(names);
-	for (u32 i = 0; i < addr_count; i++)
-		kfree(ips[i]);
+	{
+		u32 j;
+
+		for (j = 0; j < name_count; j++)
+			kfree(names[j]);
+		kfree(names);
+		for (j = 0; j < addr_count; j++)
+			kfree(ips[j]);
+	}
 	kfree(ips);
 	kfree(ip_lengths);
 	return -ENOMEM;
