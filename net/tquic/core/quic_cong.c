@@ -19,7 +19,6 @@
 #include <linux/types.h>
 #include <linux/math64.h>
 #include <linux/random.h>
-#include <linux/minmax.h>
 #include <net/tquic.h>
 
 /*

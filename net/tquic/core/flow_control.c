@@ -19,7 +19,6 @@
 #include <linux/slab.h>
 #include <linux/spinlock.h>
 #include <linux/ktime.h>
-#include <linux/minmax.h>
 #include <net/tquic.h>
 
 #include "flow_control.h"

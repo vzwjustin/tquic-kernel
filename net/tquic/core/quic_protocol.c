@@ -226,10 +226,10 @@ static struct sock *tquic_proto_accept(struct sock *sk,
 static int tquic_proto_ioctl(struct sock *sk, int cmd, int *karg);
 static int tquic_proto_init_sock(struct sock *sk);
 static void tquic_proto_destroy_sock(struct sock *sk);
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
-static void tquic_proto_shutdown(struct sock *sk, int how);
-#else
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 7, 0)
 static int tquic_proto_shutdown(struct sock *sk, int how);
+#else
+static void tquic_proto_shutdown(struct sock *sk, int how);
 #endif
 static int tquic_proto_setsockopt(struct sock *sk, int level, int optname,
 				  sockptr_t optval, unsigned int optlen);
@@ -262,6 +262,26 @@ static int tquic_proto_setsockopt_compat(struct sock *sk, int level,
 TQUIC_DEFINE_RECVMSG_WRAPPER(tquic_proto_recvmsg_compat, tquic_proto_recvmsg)
 #endif
 
+/*
+ * Compat wrapper for proto.ioctl on kernels < 6.4.
+ * Before 6.4, proto.ioctl signature is:
+ *   int (*)(struct sock *, int cmd, unsigned long arg)
+ * From 6.4+, it changed to:
+ *   int (*)(struct sock *, int cmd, int *karg)
+ */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 4, 0)
+static int tquic_proto_ioctl_compat(struct sock *sk, int cmd, unsigned long arg)
+{
+	int karg;
+	int err;
+
+	err = tquic_proto_ioctl(sk, cmd, &karg);
+	if (!err && put_user(karg, (int __user *)arg))
+		return -EFAULT;
+	return err;
+}
+#endif
+
 /* TQUIC protocol identifier */
 static struct proto tquic_prot = {
 	.name			= "TQUIC",
@@ -271,7 +291,11 @@ static struct proto tquic_prot = {
 	.connect		= tquic_proto_connect,
 	.disconnect		= tquic_proto_disconnect,
 	.accept			= tquic_proto_accept,
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
 	.ioctl			= tquic_proto_ioctl,
+#else
+	.ioctl			= tquic_proto_ioctl_compat,
+#endif
 	.init			= tquic_proto_init_sock,
 	.destroy		= tquic_proto_destroy_sock,
 	.shutdown		= tquic_proto_shutdown,
@@ -314,7 +338,11 @@ static struct proto tquicv6_prot = {
 	.connect		= tquic_proto_connect,
 	.disconnect		= tquic_proto_disconnect,
 	.accept			= tquic_proto_accept,
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
 	.ioctl			= tquic_proto_ioctl,
+#else
+	.ioctl			= tquic_proto_ioctl_compat,
+#endif
 	.init			= tquic_proto_init_sock,
 	.destroy		= tquic_proto_destroy_sock,
 	.shutdown		= tquic_proto_shutdown,
@@ -645,20 +673,7 @@ static void tquic_proto_destroy_sock(struct sock *sk)
 	/* (would need to close child connections) */
 }
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
-static void tquic_proto_shutdown(struct sock *sk, int how)
-{
-	struct tquic_sock *tsk = tquic_sk(sk);
-	struct tquic_connection *conn = tsk->conn;
-
-	if (!conn)
-		return;
-
-	if ((how & SEND_SHUTDOWN) && conn->state == TQUIC_CONN_CONNECTED) {
-		tquic_conn_close_with_error(conn, EQUIC_NO_ERROR, NULL);
-	}
-}
-#else
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 7, 0)
 static int tquic_proto_shutdown(struct sock *sk, int how)
 {
 	struct tquic_sock *tsk = tquic_sk(sk);
@@ -672,6 +687,19 @@ static int tquic_proto_shutdown(struct sock *sk, int how)
 	}
 
 	return 0;
+}
+#else
+static void tquic_proto_shutdown(struct sock *sk, int how)
+{
+	struct tquic_sock *tsk = tquic_sk(sk);
+	struct tquic_connection *conn = tsk->conn;
+
+	if (!conn)
+		return;
+
+	if ((how & SEND_SHUTDOWN) && conn->state == TQUIC_CONN_CONNECTED) {
+		tquic_conn_close_with_error(conn, EQUIC_NO_ERROR, NULL);
+	}
 }
 #endif
 
@@ -1241,11 +1269,11 @@ out:
 static int tquic_stream_shutdown(struct socket *sock, int how)
 {
 	struct sock *sk = sock->sk;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 7, 0)
+	return tquic_proto_shutdown(sk, how);
+#else
 	tquic_proto_shutdown(sk, how);
 	return 0;
-#else
-	return tquic_proto_shutdown(sk, how);
 #endif
 }
 

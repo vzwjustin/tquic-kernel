@@ -571,12 +571,12 @@ static inline void skb_frag_fill_page_desc(skb_frag_t *frag,
  * Kernel < 6.2: get_random_u8() was introduced in 6.2
  * Fall back to get_random_u32() truncated to u8.
  * ======================================================================== */
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 2, 0)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 1, 0)
 static inline u8 get_random_u8(void)
 {
 	return (u8)get_random_u32();
 }
-#endif /* < 6.2 */
+#endif /* < 6.1 */
 
 /* ========================================================================
  * Kernel < 6.12: GENL_MCAST_CAP_NET_ADMIN was introduced in 6.12

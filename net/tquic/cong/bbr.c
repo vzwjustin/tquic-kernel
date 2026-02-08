@@ -11,7 +11,6 @@
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/slab.h>
-#include <linux/minmax.h>
 #include <net/tquic.h>
 #include "persistent_cong.h"
 
