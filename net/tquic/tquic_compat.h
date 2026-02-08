@@ -17,6 +17,16 @@
  * - sockptr_t: polyfill for kernels before 5.9
  * - SYSCTL_ZERO/ONE/TWO: define missing sysctl limit constants
  *
+ * Kernel 5.4 - 5.16 compatibility:
+ * - pde_data: renamed from PDE_DATA in 5.17
+ *
+ * Kernel 5.4 - 6.0 compatibility:
+ * - netif_napi_add_weight: introduced in 6.1 (weight param removed
+ *   from netif_napi_add)
+ *
+ * Kernel 5.4 - 6.1 compatibility:
+ * - get_random_u32_below: introduced in 6.2, replaces prandom_u32_max
+ *
  * Kernel 5.4 - 6.5 compatibility:
  * - register_net_sysctl_sz: fall back to register_net_sysctl
  *
@@ -135,6 +145,34 @@ static const int tquic_sysctl_two = 2;
 #define register_net_sysctl_sz(net, path, table, table_size) \
 	register_net_sysctl(net, path, table)
 #endif /* < 6.6 */
+
+/* ========================================================================
+ * Kernel 5.4 - 5.16: pde_data() was introduced in 5.17
+ * Older kernels provide the PDE_DATA() macro instead.
+ * ======================================================================== */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 17, 0)
+#define pde_data(inode) PDE_DATA(inode)
+#endif /* < 5.17 */
+
+/* ========================================================================
+ * Kernel 5.4 - 6.0: netif_napi_add_weight()
+ * In 6.1, the weight parameter was removed from netif_napi_add() and a
+ * separate netif_napi_add_weight() was introduced for callers that need
+ * a non-default weight. On pre-6.1 kernels, map it to the 4-arg form.
+ * ======================================================================== */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 1, 0)
+#define netif_napi_add_weight(dev, napi, poll, weight) \
+	netif_napi_add(dev, napi, poll, weight)
+#endif /* < 6.1 */
+
+/* ========================================================================
+ * Kernel 5.4 - 6.1: get_random_u32_below()
+ * Introduced in 6.2 as a cleaner replacement for prandom_u32_max().
+ * On pre-6.2, fall back to prandom_u32_max() which is available 5.4+.
+ * ======================================================================== */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 2, 0)
+#define get_random_u32_below(ceil) prandom_u32_max(ceil)
+#endif /* < 6.2 */
 
 /*
  * Timer API compatibility for kernel 6.12+

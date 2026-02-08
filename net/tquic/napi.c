@@ -32,6 +32,7 @@
 
 #include "napi.h"
 #include "protocol.h"
+#include "tquic_compat.h"
 
 /*
  * =============================================================================
