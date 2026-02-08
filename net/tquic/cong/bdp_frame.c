@@ -15,7 +15,9 @@
 #include <linux/random.h>
 #include <linux/timekeeping.h>
 #include <crypto/hash.h>
-#include <crypto/sha2.h>
+#ifndef SHA256_DIGEST_SIZE
+#define SHA256_DIGEST_SIZE 32
+#endif
 #include <net/tquic.h>
 
 #include "bdp_frame.h"

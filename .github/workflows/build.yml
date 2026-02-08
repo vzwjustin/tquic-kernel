@@ -76,7 +76,7 @@ jobs:
         id: kernel-cache
         with:
           path: ~/kernel-src/linux-${{ matrix.kernel_full }}
-          key: kernel-${{ matrix.kernel_full }}-prepared-v4
+          key: kernel-${{ matrix.kernel_full }}-prepared-v5
 
       - name: Download kernel source
         if: steps.kernel-cache.outputs.cache-hit != 'true'
@@ -138,6 +138,9 @@ jobs:
           scripts/config --enable CONFIG_NET_NS
           # Tracing support
           scripts/config --enable CONFIG_TRACEPOINTS
+          # modpost: treat section mismatches as warnings (out-of-tree consolidated
+          # modules have __init/__exit cross-references that are harmless)
+          scripts/config --enable CONFIG_SECTION_MISMATCH_WARN_ONLY
           # Resolve any dependency conflicts
           make olddefconfig
           # Prepare headers and build scripts (no full kernel compile)

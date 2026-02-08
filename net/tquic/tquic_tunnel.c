@@ -302,8 +302,8 @@ static int tquic_tunnel_create_tcp_socket(struct tquic_tunnel *tunnel,
 
 	/* Enable TCP Fast Open per CONTEXT.md */
 	val = 1;
-	err = sock->ops->setsockopt(sock, SOL_TCP, TCP_FASTOPEN_CONNECT,
-				    KERNEL_SOCKPTR(&val), sizeof(val));
+	err = tquic_kernel_setsockopt(sock, SOL_TCP, TCP_FASTOPEN_CONNECT,
+				     &val, sizeof(val));
 	if (err < 0) {
 		/* TFO failure is non-fatal, continue without it */
 		pr_debug("tquic: TCP_FASTOPEN_CONNECT failed: %d\n", err);
@@ -321,8 +321,8 @@ static int tquic_tunnel_create_tcp_socket(struct tquic_tunnel *tunnel,
 	/* Enable TPROXY mode if requested */
 	if (is_tproxy) {
 		val = 1;
-		err = sock->ops->setsockopt(sock, SOL_IP, IP_TRANSPARENT,
-					    KERNEL_SOCKPTR(&val), sizeof(val));
+		err = tquic_kernel_setsockopt(sock, SOL_IP, IP_TRANSPARENT,
+					     &val, sizeof(val));
 		if (err < 0) {
 			/*
 			 * IP_TRANSPARENT requires CAP_NET_ADMIN. If it fails,

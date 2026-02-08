@@ -30,6 +30,9 @@
  * Kernel 5.4 - 6.5 compatibility:
  * - register_net_sysctl_sz: fall back to register_net_sysctl
  *
+ * Kernel 5.4 - 6.7 compatibility:
+ * - alloc_netdev_dummy: introduced in 6.8, polyfill via alloc_netdev
+ *
  * Kernel 6.12+ compatibility:
  * - Timer API: from_timer() -> timer_container_of()
  * - Timer API: del_timer() -> timer_delete()
@@ -122,6 +125,30 @@ static inline bool sockptr_is_null(sockptr_t sp)
 	return !sp.user;
 }
 #endif /* < 5.9 */
+
+/*
+ * tquic_kernel_setsockopt - set socket option from kernel space.
+ * On < 5.9, sock->ops->setsockopt() takes char __user *, not sockptr_t.
+ * Use kernel_setsockopt() which existed on these older kernels.
+ * On >= 5.9, kernel_setsockopt() was removed; use sockptr_t interface.
+ */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 9, 0)
+static inline int tquic_kernel_setsockopt(struct socket *sock, int level,
+					  int optname, void *optval,
+					  unsigned int optlen)
+{
+	return kernel_setsockopt(sock, level, optname,
+				 (char __user *)optval, optlen);
+}
+#else
+static inline int tquic_kernel_setsockopt(struct socket *sock, int level,
+					  int optname, void *optval,
+					  unsigned int optlen)
+{
+	return sock->ops->setsockopt(sock, level, optname,
+				     KERNEL_SOCKPTR(optval), optlen);
+}
+#endif
 
 /* ========================================================================
  * Kernel 5.4 - 5.7: SYSCTL_ZERO / SYSCTL_ONE / SYSCTL_TWO
@@ -505,5 +532,23 @@ static inline int tquic_skb_gro_receive_network_offset(const struct sk_buff *skb
 #else
 #define TQUIC_HAS_GRO_RECEIVE_LIST 0
 #endif
+
+/* ========================================================================
+ * Kernel < 6.8: alloc_netdev_dummy() was introduced in 6.8
+ * Provide a compat wrapper using alloc_netdev() with a minimal setup
+ * function, which works on all kernels 5.4+.
+ * ======================================================================== */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 8, 0)
+static inline void tquic_compat_dummy_setup(struct net_device *dev)
+{
+	/* Minimal setup - matches what alloc_netdev_dummy does */
+}
+
+static inline struct net_device *alloc_netdev_dummy(int sizeof_priv)
+{
+	return alloc_netdev(sizeof_priv, "tquic%d", NET_NAME_ENUM,
+			    tquic_compat_dummy_setup);
+}
+#endif /* < 6.8 */
 
 #endif /* _TQUIC_COMPAT_H */
