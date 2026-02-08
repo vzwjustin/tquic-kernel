@@ -8,6 +8,28 @@
  * between kernel versions. Include this header in any TQUIC source file
  * that uses timer, socket, or other APIs that vary by kernel version.
  *
+ * Supported kernel range: 5.4+
+ *
+ * Kernel 5.4 - 5.5 compatibility:
+ * - proc_ops: use struct file_operations instead of struct proc_ops
+ *
+ * Kernel 5.4 - 5.8 compatibility:
+ * - sockptr_t: polyfill for kernels before 5.9
+ * - SYSCTL_ZERO/ONE/TWO: define missing sysctl limit constants
+ *
+ * Kernel 5.4 - 5.16 compatibility:
+ * - pde_data: renamed from PDE_DATA in 5.17
+ *
+ * Kernel 5.4 - 6.0 compatibility:
+ * - netif_napi_add_weight: introduced in 6.1 (weight param removed
+ *   from netif_napi_add)
+ *
+ * Kernel 5.4 - 6.1 compatibility:
+ * - get_random_u32_below: introduced in 6.2, replaces prandom_u32_max
+ *
+ * Kernel 5.4 - 6.5 compatibility:
+ * - register_net_sysctl_sz: fall back to register_net_sysctl
+ *
  * Kernel 6.12+ compatibility:
  * - Timer API: from_timer() -> timer_container_of()
  * - Timer API: del_timer() -> timer_delete()
@@ -23,6 +45,134 @@
 #include <linux/timer.h>
 #include <linux/hrtimer.h>
 #include <linux/version.h>
+#include <linux/sysctl.h>
+#include <linux/proc_fs.h>
+
+/* ========================================================================
+ * Kernel 5.4 - 5.5: proc_ops was introduced in 5.6
+ * On older kernels, proc entries use struct file_operations directly.
+ * ======================================================================== */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 6, 0)
+#define proc_ops			file_operations
+#define proc_open			open
+#define proc_read			read
+#define proc_write			write
+#define proc_lseek			llseek
+#define proc_release			release
+#define proc_poll			poll
+#define proc_ioctl			unlocked_ioctl
+#define proc_mmap			mmap
+#endif /* < 5.6 */
+
+/* ========================================================================
+ * Kernel 5.4 - 5.8: sockptr_t was introduced in 5.9
+ * Provide a minimal polyfill so setsockopt/getsockopt handlers compile.
+ * ======================================================================== */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 9, 0)
+#include <linux/uaccess.h>
+
+typedef struct {
+	union {
+		void		*kernel;
+		void __user	*user;
+	};
+	bool	is_kernel;
+} sockptr_t;
+
+static inline sockptr_t USER_SOCKPTR(void __user *p)
+{
+	return (sockptr_t) { .user = p, .is_kernel = false };
+}
+
+static inline sockptr_t KERNEL_SOCKPTR(void *p)
+{
+	return (sockptr_t) { .kernel = p, .is_kernel = true };
+}
+
+static inline int copy_from_sockptr(void *dst, sockptr_t src, size_t size)
+{
+	if (src.is_kernel) {
+		memcpy(dst, src.kernel, size);
+		return 0;
+	}
+	return copy_from_user(dst, src.user, size);
+}
+
+static inline int copy_from_sockptr_offset(void *dst, sockptr_t src,
+					   size_t offset, size_t size)
+{
+	if (src.is_kernel) {
+		memcpy(dst, src.kernel + offset, size);
+		return 0;
+	}
+	return copy_from_user(dst, src.user + offset, size);
+}
+
+static inline bool sockptr_is_null(sockptr_t sp)
+{
+	if (sp.is_kernel)
+		return !sp.kernel;
+	return !sp.user;
+}
+#endif /* < 5.9 */
+
+/* ========================================================================
+ * Kernel 5.4 - 5.7: SYSCTL_ZERO / SYSCTL_ONE / SYSCTL_TWO
+ * These sysctl boundary constants were added in 5.8.
+ * ======================================================================== */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 8, 0)
+static const int tquic_sysctl_zero;
+static const int tquic_sysctl_one = 1;
+static const int tquic_sysctl_two = 2;
+
+#ifndef SYSCTL_ZERO
+#define SYSCTL_ZERO	((void *)&tquic_sysctl_zero)
+#endif
+#ifndef SYSCTL_ONE
+#define SYSCTL_ONE	((void *)&tquic_sysctl_one)
+#endif
+#ifndef SYSCTL_TWO
+#define SYSCTL_TWO	((void *)&tquic_sysctl_two)
+#endif
+#endif /* < 5.8 */
+
+/* ========================================================================
+ * Kernel 5.4 - 6.5: register_net_sysctl_sz()
+ * This variant with an explicit table-size parameter was added in 6.6.
+ * Fall back to register_net_sysctl() and ignore the size argument.
+ * ======================================================================== */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 6, 0)
+#define register_net_sysctl_sz(net, path, table, table_size) \
+	register_net_sysctl(net, path, table)
+#endif /* < 6.6 */
+
+/* ========================================================================
+ * Kernel 5.4 - 5.16: pde_data() was introduced in 5.17
+ * Older kernels provide the PDE_DATA() macro instead.
+ * ======================================================================== */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 17, 0)
+#define pde_data(inode) PDE_DATA(inode)
+#endif /* < 5.17 */
+
+/* ========================================================================
+ * Kernel 5.4 - 6.0: netif_napi_add_weight()
+ * In 6.1, the weight parameter was removed from netif_napi_add() and a
+ * separate netif_napi_add_weight() was introduced for callers that need
+ * a non-default weight. On pre-6.1 kernels, map it to the 4-arg form.
+ * ======================================================================== */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 1, 0)
+#define netif_napi_add_weight(dev, napi, poll, weight) \
+	netif_napi_add(dev, napi, poll, weight)
+#endif /* < 6.1 */
+
+/* ========================================================================
+ * Kernel 5.4 - 6.1: get_random_u32_below()
+ * Introduced in 6.2 as a cleaner replacement for prandom_u32_max().
+ * On pre-6.2, fall back to prandom_u32_max() which is available 5.4+.
+ * ======================================================================== */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 2, 0)
+#define get_random_u32_below(ceil) prandom_u32_max(ceil)
+#endif /* < 6.2 */
 
 /*
  * Timer API compatibility for kernel 6.12+

@@ -509,6 +509,7 @@ static struct tquic_cong_ops tquic_westwood_ops = {
 	.can_send = tquic_westwood_can_send,
 };
 
+#ifndef TQUIC_OUT_OF_TREE
 static int __init tquic_westwood_module_init(void)
 {
 	pr_info("TQUIC Westwood+ congestion control loaded\n");
@@ -523,6 +524,7 @@ static void __exit tquic_westwood_module_exit(void)
 
 module_init(tquic_westwood_module_init);
 module_exit(tquic_westwood_module_exit);
+#endif /* !TQUIC_OUT_OF_TREE */
 
 MODULE_DESCRIPTION("TQUIC Westwood+ Congestion Control");
 MODULE_AUTHOR("Linux Foundation");

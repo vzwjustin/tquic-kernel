@@ -28,6 +28,7 @@
 
 #include "protocol.h"
 #include "tquic_mib.h"
+#include "tquic_compat.h"
 #include "tquic_ratelimit.h"
 
 /* External reference to global connection table from tquic_main.c */

@@ -30,6 +30,7 @@
 
 /* Public scheduler API */
 #include "tquic_sched.h"
+#include "../tquic_compat.h"
 
 /* Failover integration for retransmit queue priority */
 #include "../bond/tquic_failover.h"
