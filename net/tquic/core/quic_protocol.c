@@ -24,6 +24,7 @@
 #include <net/udp.h>
 #include <net/tquic.h>
 #include <net/tquic/handshake.h>
+#include "../tquic_compat.h"
 
 static struct kmem_cache *tquic_sock_cachep __read_mostly;
 static struct kmem_cache *tquic_conn_cachep __read_mostly;

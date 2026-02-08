@@ -37,6 +37,7 @@
 #include <net/tquic.h>
 
 #include "cert_verify.h"
+#include "../tquic_compat.h"
 
 /*
  * TLS alert code definitions (for handshake integration)

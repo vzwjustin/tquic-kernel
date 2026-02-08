@@ -52,6 +52,7 @@
 #include "tquic_ratelimit.h"
 #include "tquic_mib.h"
 #include "protocol.h"
+#include "tquic_compat.h"
 
 /*
  * =============================================================================

@@ -26,6 +26,7 @@
 #include <linux/math64.h>
 #include <linux/random.h>
 #include <net/tquic.h>
+#include "../tquic_compat.h"
 #include "persistent_cong.h"
 
 /* Algorithm selection */
