@@ -242,12 +242,8 @@ static int tquic_create_udp_socket(struct tquic_sock *tsk, int family)
 	/* Link to TQUIC socket for callback dispatch */
 	sk->sk_user_data = tsk;
 
-	/*
-	 * Enable GRO (Generic Receive Offload) on the UDP socket.
-	 * For kernel 6.12+, we use set_bit() on udp_flags directly
-	 * instead of kernel_setsockopt(UDP_GRO).
-	 */
-	set_bit(UDP_FLAGS_GRO_ENABLED, &up->udp_flags);
+	/* Enable GRO (Generic Receive Offload) on the UDP socket */
+	tquic_udp_enable_gro(sk);
 
 	/* Store the socket in the TQUIC socket structure */
 	tsk->udp_sock = sock;

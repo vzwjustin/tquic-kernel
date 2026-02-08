@@ -596,4 +596,22 @@ static inline u8 get_random_u8(void)
 #define cancel_work(work)	cancel_work_sync(work)
 #endif
 
+/* ========================================================================
+ * UDP GRO enable: API changed multiple times
+ * - 6.7+: set_bit(UDP_FLAGS_GRO_ENABLED, &udp_sk(sk)->udp_flags)
+ * - 5.15-6.6: udp_sk(sk)->gro_enabled = 1
+ * - < 5.15: no direct GRO enable (use setsockopt)
+ * ======================================================================== */
+#include <net/udp.h>
+static inline void tquic_udp_enable_gro(struct sock *sk)
+{
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 7, 0)
+	set_bit(UDP_FLAGS_GRO_ENABLED, &udp_sk(sk)->udp_flags);
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0)
+	udp_sk(sk)->gro_enabled = 1;
+#else
+	/* GRO not easily available on < 5.15; skip */
+#endif
+}
+
 #endif /* _TQUIC_COMPAT_H */
