@@ -161,13 +161,12 @@ static inline unsigned int tquic_get_validated_initial_rtt(void)
 
 static atomic_long_t tquic_memory_allocated;
 static struct percpu_counter tquic_sockets_allocated;
+static unsigned long tquic_memory_pressure_val;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
 /* Kernel 6.4+ uses percpu unsigned int for orphan_count */
 static DEFINE_PER_CPU(unsigned int, tquic_orphan_count_percpu);
-static unsigned long tquic_memory_pressure_val;
 #else
 static struct percpu_counter tquic_orphan_count_percpu;
-static int tquic_memory_pressure_val;
 #endif
 
 /*
@@ -226,11 +225,7 @@ static struct sock *tquic_proto_accept(struct sock *sk,
 static int tquic_proto_ioctl(struct sock *sk, int cmd, int *karg);
 static int tquic_proto_init_sock(struct sock *sk);
 static void tquic_proto_destroy_sock(struct sock *sk);
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 7, 0)
-static int tquic_proto_shutdown(struct sock *sk, int how);
-#else
 static void tquic_proto_shutdown(struct sock *sk, int how);
-#endif
 static int tquic_proto_setsockopt(struct sock *sk, int level, int optname,
 				  sockptr_t optval, unsigned int optlen);
 static int tquic_proto_getsockopt(struct sock *sk, int level, int optname,
@@ -673,22 +668,6 @@ static void tquic_proto_destroy_sock(struct sock *sk)
 	/* (would need to close child connections) */
 }
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 7, 0)
-static int tquic_proto_shutdown(struct sock *sk, int how)
-{
-	struct tquic_sock *tsk = tquic_sk(sk);
-	struct tquic_connection *conn = tsk->conn;
-
-	if (!conn)
-		return -ENOTCONN;
-
-	if ((how & SEND_SHUTDOWN) && conn->state == TQUIC_CONN_CONNECTED) {
-		tquic_conn_close_with_error(conn, EQUIC_NO_ERROR, NULL);
-	}
-
-	return 0;
-}
-#else
 static void tquic_proto_shutdown(struct sock *sk, int how)
 {
 	struct tquic_sock *tsk = tquic_sk(sk);
@@ -701,7 +680,6 @@ static void tquic_proto_shutdown(struct sock *sk, int how)
 		tquic_conn_close_with_error(conn, EQUIC_NO_ERROR, NULL);
 	}
 }
-#endif
 
 static int tquic_proto_setsockopt(struct sock *sk, int level, int optname,
 				  sockptr_t optval, unsigned int optlen)
@@ -1269,12 +1247,8 @@ out:
 static int tquic_stream_shutdown(struct socket *sock, int how)
 {
 	struct sock *sk = sock->sk;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 7, 0)
-	return tquic_proto_shutdown(sk, how);
-#else
 	tquic_proto_shutdown(sk, how);
 	return 0;
-#endif
 }
 
 static int tquic_stream_setsockopt(struct socket *sock, int level, int optname,

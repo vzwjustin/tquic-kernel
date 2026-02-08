@@ -1994,6 +1994,10 @@ ssize_t tquic_stream_splice_read(struct tquic_stream_manager *mgr,
 				 struct pipe_inode_info *pipe,
 				 size_t len, unsigned int flags)
 {
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 5, 0)
+	/* pipe ring API (head/tail/ring_size) was introduced in 5.5 */
+	return -EOPNOTSUPP;
+#else
 	size_t spliced = 0;
 	unsigned int head, tail, mask;
 
@@ -2013,7 +2017,7 @@ ssize_t tquic_stream_splice_read(struct tquic_stream_manager *mgr,
 		if (!skb)
 			break;
 
-		/* Check if pipe has space (kernel 6.12+ API) */
+		/* Check if pipe has space */
 		head = pipe->head;
 		tail = pipe->tail;
 		mask = pipe->ring_size - 1;
@@ -2066,6 +2070,7 @@ ssize_t tquic_stream_splice_read(struct tquic_stream_manager *mgr,
 	spin_unlock(&mgr->lock);
 
 	return spliced;
+#endif /* >= 5.5 */
 }
 EXPORT_SYMBOL_GPL(tquic_stream_splice_read);
 

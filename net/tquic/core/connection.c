@@ -34,6 +34,7 @@
 #include <net/udp.h>
 #include <net/tquic.h>
 
+#include "../tquic_compat.h"
 #include "varint.h"
 #include "../tquic_stateless_reset.h"
 #include "../protocol.h"

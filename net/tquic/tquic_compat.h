@@ -587,4 +587,13 @@ static inline u8 get_random_u8(void)
 #define GENL_MCAST_CAP_NET_ADMIN 0
 #endif
 
+/* ========================================================================
+ * Kernel < 5.15: cancel_work() was introduced in 5.15.
+ * On older kernels, fall back to cancel_work_sync() which has been
+ * available since long before 5.4.
+ * ======================================================================== */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 15, 0)
+#define cancel_work(work)	cancel_work_sync(work)
+#endif
+
 #endif /* _TQUIC_COMPAT_H */
