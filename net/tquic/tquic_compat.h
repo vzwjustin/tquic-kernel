@@ -175,14 +175,37 @@ static const int tquic_sysctl_two = 2;
 #endif /* < 6.2 */
 
 /*
- * Timer API compatibility for kernel 6.12+
+ * Timer API compatibility
  *
- * The timer callback mechanism changed:
- * - Old: void callback(unsigned long data)
- * - New: void callback(struct timer_list *t)
+ * In kernel 6.12, the timer API was renamed:
+ *   del_timer()      -> timer_delete()
+ *   del_timer_sync() -> timer_delete_sync()
+ *   from_timer()     -> timer_container_of()
  *
- * The from_timer() macro was replaced with timer_container_of() in 6.12.
+ * Provide both directions:
+ *   - On pre-6.12: map new names (timer_delete*) to old names (del_timer*)
+ *   - On 6.12+:    map old names (del_timer*) to new names (timer_delete*)
  */
+
+/* Pre-6.12: provide the new-style timer_delete* API via old del_timer* */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 12, 0)
+#ifndef timer_delete
+#define timer_delete(t) del_timer(t)
+#endif
+#ifndef timer_delete_sync
+#define timer_delete_sync(t) del_timer_sync(t)
+#endif
+#endif /* < 6.12 */
+
+/* 6.12+: provide old del_timer* names via new timer_delete* */
+#ifndef del_timer
+#define del_timer(t) timer_delete(t)
+#endif
+#ifndef del_timer_sync
+#define del_timer_sync(t) timer_delete_sync(t)
+#endif
+
+/* from_timer() was replaced with timer_container_of() in 6.12 */
 #ifndef from_timer
 #ifdef timer_container_of
 #define from_timer(var, callback_timer, timer_fieldname) \
@@ -191,21 +214,6 @@ static const int tquic_sysctl_two = 2;
 #define from_timer(var, callback_timer, timer_fieldname) \
 	container_of(callback_timer, typeof(*var), timer_fieldname)
 #endif
-#endif
-
-/*
- * del_timer() was renamed to timer_delete() in newer kernels
- */
-#ifndef del_timer
-#define del_timer(t) timer_delete(t)
-#endif
-
-/*
- * del_timer_sync() was renamed to timer_delete_sync() in newer kernels
- * (This is also handled via Makefile -D flag, but define here as backup)
- */
-#ifndef del_timer_sync
-#define del_timer_sync(t) timer_delete_sync(t)
 #endif
 
 /*

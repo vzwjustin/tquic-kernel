@@ -25,6 +25,7 @@
 #include <crypto/skcipher.h>
 #include <crypto/aes.h>
 #include <net/tquic.h>
+#include "../tquic_compat.h"
 
 #ifdef CONFIG_X86
 #include <asm/cpufeature.h>

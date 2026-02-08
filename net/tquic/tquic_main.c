@@ -39,6 +39,7 @@
 #include "tquic_retry.h"
 #include "tquic_stateless_reset.h"
 #include "tquic_token.h"
+#include "tquic_compat.h"
 
 /* Forward declarations for ACK frequency module (in tquic_ack_frequency.c) */
 extern int tquic_ack_freq_module_init(void);

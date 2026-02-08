@@ -31,6 +31,7 @@
 #include <net/tquic.h>
 #include <net/net_namespace.h>
 #include "../protocol.h"
+#include "../tquic_compat.h"
 #include "persistent_cong.h"
 #include "../tquic_mib.h"
 

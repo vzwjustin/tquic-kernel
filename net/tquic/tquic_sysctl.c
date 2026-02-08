@@ -16,6 +16,7 @@
 #include <net/tquic.h>
 
 #include "protocol.h"
+#include "tquic_compat.h"
 
 /* Global tunables */
 static int tquic_enabled = 1;

@@ -23,6 +23,7 @@
 #include <net/tquic.h>
 
 #include "protocol.h"
+#include "tquic_compat.h"
 #include "cong/tquic_cong.h"
 #include "tquic_zerocopy.h"
 
