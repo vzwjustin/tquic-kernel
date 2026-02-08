@@ -564,11 +564,11 @@ static int tquic_errors_seq_show(struct seq_file *seq, void *v)
 	for (i = 0; i < entry->scid_len && i < 8; i++)
 		snprintf(scid_hex + i * 2, 3, "%02x", entry->scid[i]);
 	if (entry->scid_len > 8)
-		strcat(scid_hex, "...");
+		strscpy(scid_hex + 16, "...", sizeof(scid_hex) - 16);
 	else if (entry->scid_len > 0)
 		scid_hex[entry->scid_len * 2] = '\0';
 	else
-		strcpy(scid_hex, "-");
+		strscpy(scid_hex, "-", sizeof(scid_hex));
 
 	/* Output: timestamp  error  scid  local  remote  path  message */
 	seq_printf(seq, "%lld.%03ld  %3u (%-24s)  %-16s  %-20pISpc  %-20pISpc  %4u  %s\n",

@@ -264,7 +264,8 @@ static int tquic_packet_parse_long(struct sk_buff *skb, u8 first_byte)
 		return -EINVAL;
 
 	/* Version (4 bytes) */
-	version = (data[1] << 24) | (data[2] << 16) | (data[3] << 8) | data[4];
+	version = ((u32)data[1] << 24) | ((u32)data[2] << 16) |
+		  ((u32)data[3] << 8) | data[4];
 	offset = 5;
 
 	/* Destination Connection ID Length (1 byte) */
@@ -526,8 +527,8 @@ int tquic_packet_parse(struct sk_buff *skb, struct tquic_packet *pkt)
 	if (first_byte & TQUIC_HEADER_FORM_LONG) {
 		err = tquic_packet_parse_long(skb, first_byte);
 	} else {
-		/* For short header, need to know expected DCID length */
-		err = tquic_packet_parse_short(skb, first_byte, 8);
+		/* For short header, use expected DCID length from packet */
+		err = tquic_packet_parse_short(skb, first_byte, pkt->hdr.dcid_len);
 	}
 
 	return err;
