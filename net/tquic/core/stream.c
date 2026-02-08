@@ -29,6 +29,7 @@
 #include <linux/mm.h>
 #include <net/sock.h>
 #include <net/tquic.h>
+#include "../tquic_compat.h"
 
 /* Stream ID bit layout per QUIC spec:
  * Bit 0: Initiator (0 = client, 1 = server)

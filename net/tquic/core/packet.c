@@ -27,6 +27,7 @@
 #include <net/tquic_frame.h>
 #include <linux/unaligned.h>
 
+#include "../tquic_compat.h"
 #include "varint.h"
 
 /* QUIC v1 packet type constants (RFC 9000) */

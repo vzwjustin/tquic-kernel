@@ -25,6 +25,8 @@
 #include <linux/percpu.h>
 #include <net/busy_poll.h>
 
+#include "tquic_compat.h"
+
 struct tquic_sock;
 struct tquic_connection;
 struct tquic_path;

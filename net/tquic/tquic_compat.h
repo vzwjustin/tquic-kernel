@@ -551,4 +551,40 @@ static inline struct net_device *alloc_netdev_dummy(int sizeof_priv)
 }
 #endif /* < 6.8 */
 
+/* ========================================================================
+ * Kernel < 6.2: skb_frag_fill_page_desc() was introduced in 6.2
+ * On older kernels, populate the frag fields individually using helpers
+ * that have been available since well before 5.4.
+ * ======================================================================== */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 2, 0)
+static inline void skb_frag_fill_page_desc(skb_frag_t *frag,
+					    struct page *page,
+					    int off, int size)
+{
+	__skb_frag_set_page(frag, page);
+	skb_frag_off_set(frag, off);
+	skb_frag_size_set(frag, size);
+}
+#endif /* < 6.2 */
+
+/* ========================================================================
+ * Kernel < 6.2: get_random_u8() was introduced in 6.2
+ * Fall back to get_random_u32() truncated to u8.
+ * ======================================================================== */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 2, 0)
+static inline u8 get_random_u8(void)
+{
+	return (u8)get_random_u32();
+}
+#endif /* < 6.2 */
+
+/* ========================================================================
+ * Kernel < 6.12: GENL_MCAST_CAP_NET_ADMIN was introduced in 6.12
+ * On older kernels, multicast group flags field doesn't exist or doesn't
+ * support this flag; define as 0 (no capability check).
+ * ======================================================================== */
+#ifndef GENL_MCAST_CAP_NET_ADMIN
+#define GENL_MCAST_CAP_NET_ADMIN 0
+#endif
+
 #endif /* _TQUIC_COMPAT_H */

@@ -933,6 +933,7 @@ int tquic_napi_setsockopt(struct sock *sk, int level, int optname,
 		return -EOPNOTSUPP;
 #endif
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
 	case SO_BUSY_POLL_BUDGET:
 #ifdef CONFIG_NET_RX_BUSY_POLL
 		if (val < 1 || val > NAPI_POLL_WEIGHT)
@@ -942,6 +943,7 @@ int tquic_napi_setsockopt(struct sock *sk, int level, int optname,
 #else
 		return -EOPNOTSUPP;
 #endif
+#endif /* >= 5.11 */
 
 	default:
 		return -ENOPROTOOPT;
@@ -977,6 +979,7 @@ int tquic_napi_getsockopt(struct sock *sk, int level, int optname,
 		return -EOPNOTSUPP;
 #endif
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
 	case SO_BUSY_POLL_BUDGET:
 #ifdef CONFIG_NET_RX_BUSY_POLL
 		val = READ_ONCE(sk->sk_busy_poll_budget);
@@ -984,6 +987,7 @@ int tquic_napi_getsockopt(struct sock *sk, int level, int optname,
 #else
 		return -EOPNOTSUPP;
 #endif
+#endif /* >= 5.11 */
 
 	default:
 		return -ENOPROTOOPT;
