@@ -8,10 +8,17 @@
  * enabling visibility of TQUIC connections in the ss utility.
  *
  * Following the MPTCP pattern in net/mptcp/mptcp_diag.c
+ *
+ * Requires kernel >= 5.7 due to inet_diag API refactoring
+ * (inet_sk_diag_fill, dump, dump_one signatures all changed in 5.7).
  */
 
 #include <linux/kernel.h>
 #include <linux/module.h>
+#include <linux/version.h>
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 7, 0)
+
 #include <linux/net.h>
 #include <linux/inet_diag.h>
 #include <linux/netlink.h>
@@ -20,7 +27,6 @@
 #include <net/inet_connection_sock.h>
 #include <net/tquic.h>
 #include <uapi/linux/tquic_diag.h>
-#include <linux/version.h>
 #include "protocol.h"
 
 /*
@@ -484,16 +490,18 @@ path_error:
  * TQUIC inet_diag handler
  *
  * Registered with inet_diag_register() for IPPROTO_TQUIC (263).
+ *
+ * .owner field: added in 5.11, removed in 6.5
  */
 static const struct inet_diag_handler tquic_diag_handler = {
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 7, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0) && \
+    LINUX_VERSION_CODE < KERNEL_VERSION(6, 5, 0)
 	.owner		 = THIS_MODULE,
 #endif
 	.dump		 = tquic_diag_dump,
 	.dump_one	 = tquic_diag_dump_one,
 	.idiag_get_info  = tquic_diag_get_info,
 	.idiag_get_aux   = tquic_diag_get_aux,
-	/* idiag_get_aux_size removed in kernel 6.12+ */
 	.idiag_type	 = IPPROTO_TQUIC,
 	.idiag_info_size = sizeof(struct tquic_info),
 };
@@ -510,6 +518,26 @@ void __exit tquic_diag_exit(void)
 {
 	inet_diag_unregister(&tquic_diag_handler);
 }
+
+#else /* LINUX_VERSION_CODE < 5.7.0 */
+
+/*
+ * TQUIC diag (ss tool support) requires the inet_diag API that was
+ * refactored in kernel 5.7 (inet_sk_diag_fill, dump, and dump_one
+ * callback signatures all changed). On kernels < 5.7, diag support
+ * is not available - TQUIC connections will not appear in ss output
+ * but all other functionality works normally.
+ */
+int __init tquic_diag_init(void)
+{
+	return 0;
+}
+
+void __exit tquic_diag_exit(void)
+{
+}
+
+#endif /* LINUX_VERSION_CODE >= 5.7.0 */
 
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("TQUIC socket monitoring via SOCK_DIAG");

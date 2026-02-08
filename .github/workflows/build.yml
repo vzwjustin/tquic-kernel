@@ -76,7 +76,7 @@ jobs:
         id: kernel-cache
         with:
           path: ~/kernel-src/linux-${{ matrix.kernel_full }}
-          key: kernel-${{ matrix.kernel_full }}-prepared-v3
+          key: kernel-${{ matrix.kernel_full }}-prepared-v4
 
       - name: Download kernel source
         if: steps.kernel-cache.outputs.cache-hit != 'true'
@@ -118,6 +118,10 @@ jobs:
           scripts/config --enable CONFIG_CRYPTO_SKCIPHER2
           scripts/config --enable CONFIG_CRYPTO_AKCIPHER
           scripts/config --enable CONFIG_CRYPTO_AKCIPHER2
+          # Key subsystem (required by cert_verify for asymmetric key types)
+          scripts/config --enable CONFIG_KEYS
+          scripts/config --enable CONFIG_ASYMMETRIC_KEY_TYPE
+          scripts/config --enable CONFIG_ASYMMETRIC_PUBLIC_KEY_SUBTYPE
           # UDP tunnel (TQUIC dependency)
           scripts/config --enable CONFIG_NET_UDP_TUNNEL
           # Networking features used by TQUIC

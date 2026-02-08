@@ -444,16 +444,13 @@ struct proto_accept_arg {
 
 /*
  * napi_gro_cb.network_offsets[]: added in 6.5 (commit that introduced
- * per-encapsulation network offsets). Before 6.5, use network_offset
- * (singular, no array). Before ~5.18 there was no network_offset at all;
- * fall back to computing it from skb network header.
+ * per-encapsulation network offsets). Before 6.5, fall back to computing
+ * it from skb network header (network_offset singular existed briefly
+ * but is not available on all pre-6.5 kernels).
  */
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 5, 0)
 #define TQUIC_GRO_NETWORK_OFFSET(skb) \
 	NAPI_GRO_CB(skb)->network_offsets[(skb)->encapsulation]
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(5, 18, 0)
-#define TQUIC_GRO_NETWORK_OFFSET(skb) \
-	NAPI_GRO_CB(skb)->network_offset
 #else
 #define TQUIC_GRO_NETWORK_OFFSET(skb) \
 	(skb_network_header(skb) - skb_mac_header(skb))
@@ -485,17 +482,16 @@ static inline int tquic_skb_gro_receive_network_offset(const struct sk_buff *skb
 #endif
 
 /*
- * udp_tunnel_encap_enable(): signature changed across versions.
- * On 5.4/5.10 the underlying function may not take struct sock *.
- * Use udp_encap_enable() directly on pre-5.11 kernels.
+ * udp_tunnel_encap_enable(): changed from struct socket * to struct sock *
+ * in kernel 6.7. On pre-6.7, use udp_encap_enable() which takes no args.
  */
-#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 11, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 7, 0)
+#define tquic_udp_tunnel_encap_enable(sk) udp_tunnel_encap_enable(sk)
+#else
 #define tquic_udp_tunnel_encap_enable(sk)		\
 	do {						\
 		udp_encap_enable();			\
 	} while (0)
-#else
-#define tquic_udp_tunnel_encap_enable(sk) udp_tunnel_encap_enable(sk)
 #endif
 
 /*
