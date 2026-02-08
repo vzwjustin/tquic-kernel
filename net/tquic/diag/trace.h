@@ -22,7 +22,11 @@
 
 #include <uapi/linux/quic.h>
 
-#ifndef TQUIC_OUT_OF_TREE
+/*
+ * Prefer real kernel trace events when the trace header is available.
+ * For out-of-tree builds that don't ship trace events, fall back to no-ops.
+ */
+#if __has_include(<trace/events/quic.h>) && !defined(TQUIC_OUT_OF_TREE)
 /*
  * Define the path where trace headers are located.
  * This is needed for TRACE_INCLUDE_PATH to resolve correctly.
@@ -38,12 +42,15 @@
 
 #include <trace/events/quic.h>
 #else
-/* Stub tracepoints for out-of-tree builds without kernel trace events. */
+/* No kernel trace events available: compile out trace calls. */
 #define trace_quic_conn_create(...)			do { } while (0)
 #define trace_quic_conn_destroy(...)			do { } while (0)
 #define trace_quic_conn_state_change(...)		do { } while (0)
 #define trace_quic_handshake_complete(...)		do { } while (0)
-#endif /* TQUIC_OUT_OF_TREE */
+#define trace_quic_packet_acked(...)			do { } while (0)
+#define trace_quic_packet_lost(...)			do { } while (0)
+#define trace_quic_rtt_update(...)			do { } while (0)
+#endif
 
 /*
  * Helper function to extract connection ID as u64 for tracing.

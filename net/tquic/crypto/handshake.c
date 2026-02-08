@@ -423,172 +423,154 @@ static int tquic_encode_transport_params(struct tquic_hs_transport_params *param
 					 bool is_server)
 {
 	u8 *p = buf;
+	u8 *end = buf + buf_len;
 	u8 varint[8];
 	u32 vlen;
 
+/* Macro to check buffer space before writing a varint */
+#define TP_CHECK_SPACE(needed) do {		\
+	if (p + (needed) > end)			\
+		return -ENOSPC;			\
+} while (0)
+
+/* Macro to encode a varint with bounds check */
+#define TP_ENCODE_VARINT(val) do {		\
+	hs_varint_encode((val), varint, &vlen);	\
+	TP_CHECK_SPACE(vlen);			\
+	memcpy(p, varint, vlen);		\
+	p += vlen;				\
+} while (0)
+
+/* Macro to copy data with bounds check */
+#define TP_COPY(src, len) do {			\
+	TP_CHECK_SPACE(len);			\
+	memcpy(p, (src), (len));		\
+	p += (len);				\
+} while (0)
+
+/* Macro to write a single byte with bounds check */
+#define TP_WRITE_BYTE(b) do {			\
+	TP_CHECK_SPACE(1);			\
+	*p++ = (b);				\
+} while (0)
+
 	/* max_idle_timeout */
 	if (params->max_idle_timeout > 0) {
-		hs_varint_encode(QUIC_TP_MAX_IDLE_TIMEOUT, p, &vlen);
-		p += vlen;
-		hs_varint_encode(8, p, &vlen);
-		p += vlen;
-		hs_varint_encode(params->max_idle_timeout, p, &vlen);
-		p += vlen;
+		TP_ENCODE_VARINT(QUIC_TP_MAX_IDLE_TIMEOUT);
+		TP_ENCODE_VARINT(8);
+		TP_ENCODE_VARINT(params->max_idle_timeout);
 	}
 
 	/* max_udp_payload_size */
 	if (params->max_udp_payload_size > 0) {
-		hs_varint_encode(QUIC_TP_MAX_UDP_PAYLOAD_SIZE, p, &vlen);
-		p += vlen;
-		hs_varint_encode(8, p, &vlen);
-		p += vlen;
-		hs_varint_encode(params->max_udp_payload_size, p, &vlen);
-		p += vlen;
+		TP_ENCODE_VARINT(QUIC_TP_MAX_UDP_PAYLOAD_SIZE);
+		TP_ENCODE_VARINT(8);
+		TP_ENCODE_VARINT(params->max_udp_payload_size);
 	}
 
 	/* initial_max_data */
-	hs_varint_encode(QUIC_TP_INITIAL_MAX_DATA, p, &vlen);
-	p += vlen;
-	hs_varint_encode(8, p, &vlen);
-	p += vlen;
-	hs_varint_encode(params->initial_max_data, p, &vlen);
-	p += vlen;
+	TP_ENCODE_VARINT(QUIC_TP_INITIAL_MAX_DATA);
+	TP_ENCODE_VARINT(8);
+	TP_ENCODE_VARINT(params->initial_max_data);
 
 	/* initial_max_stream_data_bidi_local */
-	hs_varint_encode(QUIC_TP_INITIAL_MAX_STREAM_DATA_BIDI_LOCAL, p, &vlen);
-	p += vlen;
-	hs_varint_encode(8, p, &vlen);
-	p += vlen;
-	hs_varint_encode(params->initial_max_stream_data_bidi_local, p, &vlen);
-	p += vlen;
+	TP_ENCODE_VARINT(QUIC_TP_INITIAL_MAX_STREAM_DATA_BIDI_LOCAL);
+	TP_ENCODE_VARINT(8);
+	TP_ENCODE_VARINT(params->initial_max_stream_data_bidi_local);
 
 	/* initial_max_stream_data_bidi_remote */
-	hs_varint_encode(QUIC_TP_INITIAL_MAX_STREAM_DATA_BIDI_REMOTE, p, &vlen);
-	p += vlen;
-	hs_varint_encode(8, p, &vlen);
-	p += vlen;
-	hs_varint_encode(params->initial_max_stream_data_bidi_remote, p, &vlen);
-	p += vlen;
+	TP_ENCODE_VARINT(QUIC_TP_INITIAL_MAX_STREAM_DATA_BIDI_REMOTE);
+	TP_ENCODE_VARINT(8);
+	TP_ENCODE_VARINT(params->initial_max_stream_data_bidi_remote);
 
 	/* initial_max_stream_data_uni */
-	hs_varint_encode(QUIC_TP_INITIAL_MAX_STREAM_DATA_UNI, p, &vlen);
-	p += vlen;
-	hs_varint_encode(8, p, &vlen);
-	p += vlen;
-	hs_varint_encode(params->initial_max_stream_data_uni, p, &vlen);
-	p += vlen;
+	TP_ENCODE_VARINT(QUIC_TP_INITIAL_MAX_STREAM_DATA_UNI);
+	TP_ENCODE_VARINT(8);
+	TP_ENCODE_VARINT(params->initial_max_stream_data_uni);
 
 	/* initial_max_streams_bidi */
-	hs_varint_encode(QUIC_TP_INITIAL_MAX_STREAMS_BIDI, p, &vlen);
-	p += vlen;
-	hs_varint_encode(8, p, &vlen);
-	p += vlen;
-	hs_varint_encode(params->initial_max_streams_bidi, p, &vlen);
-	p += vlen;
+	TP_ENCODE_VARINT(QUIC_TP_INITIAL_MAX_STREAMS_BIDI);
+	TP_ENCODE_VARINT(8);
+	TP_ENCODE_VARINT(params->initial_max_streams_bidi);
 
 	/* initial_max_streams_uni */
-	hs_varint_encode(QUIC_TP_INITIAL_MAX_STREAMS_UNI, p, &vlen);
-	p += vlen;
-	hs_varint_encode(8, p, &vlen);
-	p += vlen;
-	hs_varint_encode(params->initial_max_streams_uni, p, &vlen);
-	p += vlen;
+	TP_ENCODE_VARINT(QUIC_TP_INITIAL_MAX_STREAMS_UNI);
+	TP_ENCODE_VARINT(8);
+	TP_ENCODE_VARINT(params->initial_max_streams_uni);
 
 	/* ack_delay_exponent */
 	if (params->ack_delay_exponent != 3) {
-		hs_varint_encode(QUIC_TP_ACK_DELAY_EXPONENT, p, &vlen);
-		p += vlen;
-		hs_varint_encode(1, p, &vlen);
-		p += vlen;
-		*p++ = params->ack_delay_exponent;
+		TP_ENCODE_VARINT(QUIC_TP_ACK_DELAY_EXPONENT);
+		TP_ENCODE_VARINT(1);
+		TP_WRITE_BYTE(params->ack_delay_exponent);
 	}
 
 	/* max_ack_delay */
 	if (params->max_ack_delay != 25) {
-		hs_varint_encode(QUIC_TP_MAX_ACK_DELAY, p, &vlen);
-		p += vlen;
-		hs_varint_encode(8, p, &vlen);
-		p += vlen;
-		hs_varint_encode(params->max_ack_delay, p, &vlen);
-		p += vlen;
+		TP_ENCODE_VARINT(QUIC_TP_MAX_ACK_DELAY);
+		TP_ENCODE_VARINT(8);
+		TP_ENCODE_VARINT(params->max_ack_delay);
 	}
 
 	/* disable_active_migration */
 	if (params->disable_active_migration) {
-		hs_varint_encode(QUIC_TP_DISABLE_ACTIVE_MIGRATION, p, &vlen);
-		p += vlen;
-		hs_varint_encode(0, p, &vlen);
-		p += vlen;
+		TP_ENCODE_VARINT(QUIC_TP_DISABLE_ACTIVE_MIGRATION);
+		TP_ENCODE_VARINT(0);
 	}
 
 	/* active_connection_id_limit */
-	hs_varint_encode(QUIC_TP_ACTIVE_CONN_ID_LIMIT, p, &vlen);
-	p += vlen;
-	hs_varint_encode(8, p, &vlen);
-	p += vlen;
-	hs_varint_encode(params->active_conn_id_limit, p, &vlen);
-	p += vlen;
+	TP_ENCODE_VARINT(QUIC_TP_ACTIVE_CONN_ID_LIMIT);
+	TP_ENCODE_VARINT(8);
+	TP_ENCODE_VARINT(params->active_conn_id_limit);
 
 	/* initial_source_connection_id */
 	if (params->initial_scid_len > 0) {
-		hs_varint_encode(QUIC_TP_INITIAL_SCID, p, &vlen);
-		p += vlen;
-		hs_varint_encode(params->initial_scid_len, p, &vlen);
-		p += vlen;
-		memcpy(p, params->initial_scid, params->initial_scid_len);
-		p += params->initial_scid_len;
+		TP_ENCODE_VARINT(QUIC_TP_INITIAL_SCID);
+		TP_ENCODE_VARINT(params->initial_scid_len);
+		TP_COPY(params->initial_scid, params->initial_scid_len);
 	}
 
 	/* Server-only parameters */
 	if (is_server) {
 		/* original_destination_connection_id */
 		if (params->original_dcid_len > 0) {
-			hs_varint_encode(QUIC_TP_ORIGINAL_DCID, p, &vlen);
-			p += vlen;
-			hs_varint_encode(params->original_dcid_len, p, &vlen);
-			p += vlen;
-			memcpy(p, params->original_dcid, params->original_dcid_len);
-			p += params->original_dcid_len;
+			TP_ENCODE_VARINT(QUIC_TP_ORIGINAL_DCID);
+			TP_ENCODE_VARINT(params->original_dcid_len);
+			TP_COPY(params->original_dcid, params->original_dcid_len);
 		}
 
 		/* stateless_reset_token */
 		if (params->has_stateless_reset_token) {
-			hs_varint_encode(QUIC_TP_STATELESS_RESET_TOKEN, p, &vlen);
-			p += vlen;
-			hs_varint_encode(16, p, &vlen);
-			p += vlen;
-			memcpy(p, params->stateless_reset_token, 16);
-			p += 16;
+			TP_ENCODE_VARINT(QUIC_TP_STATELESS_RESET_TOKEN);
+			TP_ENCODE_VARINT(16);
+			TP_COPY(params->stateless_reset_token, 16);
 		}
 
 		/* retry_source_connection_id */
 		if (params->has_retry_scid) {
-			hs_varint_encode(QUIC_TP_RETRY_SCID, p, &vlen);
-			p += vlen;
-			hs_varint_encode(params->retry_scid_len, p, &vlen);
-			p += vlen;
-			memcpy(p, params->retry_scid, params->retry_scid_len);
-			p += params->retry_scid_len;
+			TP_ENCODE_VARINT(QUIC_TP_RETRY_SCID);
+			TP_ENCODE_VARINT(params->retry_scid_len);
+			TP_COPY(params->retry_scid, params->retry_scid_len);
 		}
 	}
 
 	/* max_datagram_frame_size (for DATAGRAM extension) */
 	if (params->max_datagram_frame_size > 0) {
-		hs_varint_encode(QUIC_TP_MAX_DATAGRAM_FRAME_SIZE, p, &vlen);
-		p += vlen;
-		hs_varint_encode(8, p, &vlen);
-		p += vlen;
-		hs_varint_encode(params->max_datagram_frame_size, p, &vlen);
-		p += vlen;
+		TP_ENCODE_VARINT(QUIC_TP_MAX_DATAGRAM_FRAME_SIZE);
+		TP_ENCODE_VARINT(8);
+		TP_ENCODE_VARINT(params->max_datagram_frame_size);
 	}
 
 	/* grease_quic_bit (RFC 9287) - zero-length parameter */
 	if (params->grease_quic_bit) {
-		hs_varint_encode(QUIC_TP_GREASE_QUIC_BIT, p, &vlen);
-		p += vlen;
-		hs_varint_encode(0, p, &vlen);  /* Zero-length value */
-		p += vlen;
+		TP_ENCODE_VARINT(QUIC_TP_GREASE_QUIC_BIT);
+		TP_ENCODE_VARINT(0);  /* Zero-length value */
 	}
+
+#undef TP_CHECK_SPACE
+#undef TP_ENCODE_VARINT
+#undef TP_COPY
+#undef TP_WRITE_BYTE
 
 	*out_len = p - buf;
 	return 0;
@@ -837,38 +819,43 @@ static int tquic_hs_hkdf_expand_label(struct tquic_handshake *hs,
 	n = (out_len + hash_len - 1) / hash_len;
 
 	for (i = 0; i < n; i++) {
+		u8 counter = i + 1; /* RFC 5869: counter is 1-based */
+
 		ret = crypto_shash_setkey(hs->hmac, secret, secret_len);
 		if (ret)
-			return ret;
+			goto out_zeroize;
 
 		ret = crypto_shash_init(desc);
 		if (ret)
-			return ret;
+			goto out_zeroize;
 
 		if (i > 0) {
 			ret = crypto_shash_update(desc, t, hash_len);
 			if (ret)
-				return ret;
+				goto out_zeroize;
 		}
 
 		ret = crypto_shash_update(desc, hkdf_label, p - hkdf_label);
 		if (ret)
-			return ret;
+			goto out_zeroize;
 
-		t[0] = i + 1;
-		ret = crypto_shash_update(desc, t, 1);
+		ret = crypto_shash_update(desc, &counter, 1);
 		if (ret)
-			return ret;
+			goto out_zeroize;
 
 		ret = crypto_shash_final(desc, t);
 		if (ret)
-			return ret;
+			goto out_zeroize;
 
 		memcpy(out + i * hash_len, t,
 		       min_t(u32, hash_len, out_len - i * hash_len));
 	}
 
-	return 0;
+	ret = 0;
+
+out_zeroize:
+	memzero_explicit(t, sizeof(t));
+	return ret;
 }
 
 /*
@@ -887,6 +874,12 @@ static int tquic_hs_derive_secret(struct tquic_handshake *hs,
 /*
  * Update transcript hash
  */
+/* Maximum transcript size: 256 KB should be more than enough for any
+ * TLS 1.3 handshake (typical is a few KB). This prevents unbounded
+ * memory growth from malicious or malformed handshake data.
+ */
+#define TQUIC_MAX_TRANSCRIPT_SIZE	(256 * 1024)
+
 static int tquic_hs_update_transcript(struct tquic_handshake *hs,
 				      const u8 *data, u32 len)
 {
@@ -894,6 +887,13 @@ static int tquic_hs_update_transcript(struct tquic_handshake *hs,
 	u8 *new_buf;
 
 	new_len = hs->transcript_len + len;
+
+	/* Check for overflow and enforce maximum transcript size */
+	if (new_len < hs->transcript_len || new_len > TQUIC_MAX_TRANSCRIPT_SIZE) {
+		pr_warn("tquic_hs: transcript size overflow (%u + %u)\n",
+			hs->transcript_len, len);
+		return -EOVERFLOW;
+	}
 
 	if (new_len > hs->transcript_alloc) {
 		u32 new_alloc = max(new_len * 2, 4096U);
@@ -971,6 +971,7 @@ static int tquic_hs_derive_early_secrets(struct tquic_handshake *hs,
 		ret = tquic_hs_derive_secret(hs, hs->early_secret,
 					     "ext binder", NULL, 0,
 					     binder_key, hash_len);
+		memzero_explicit(binder_key, sizeof(binder_key));
 		if (ret)
 			return ret;
 	}
@@ -2737,6 +2738,7 @@ int tquic_hs_compute_binder(struct tquic_handshake *hs,
 			    u8 *binder, u32 *binder_len)
 {
 	u8 binder_key[TLS_SECRET_MAX_LEN];
+	u8 finished_key[TLS_SECRET_MAX_LEN];
 	u8 transcript_hash[TLS_SECRET_MAX_LEN];
 	SHASH_DESC_ON_STACK(desc, hs->hash_tfm);
 	SHASH_DESC_ON_STACK(hmac_desc, hs->hmac);
@@ -2750,54 +2752,56 @@ int tquic_hs_compute_binder(struct tquic_handshake *hs,
 				     "res binder", NULL, 0,
 				     binder_key, hash_len);
 	if (ret < 0)
-		return ret;
+		goto out_zeroize;
 
 	/* Compute transcript hash of partial ClientHello (without binders) */
 	desc->tfm = hs->hash_tfm;
 
 	ret = crypto_shash_init(desc);
 	if (ret)
-		return ret;
+		goto out_zeroize;
 
 	ret = crypto_shash_update(desc, partial_ch, partial_ch_len);
 	if (ret)
-		return ret;
+		goto out_zeroize;
 
 	ret = crypto_shash_final(desc, transcript_hash);
 	if (ret)
-		return ret;
+		goto out_zeroize;
 
 	/* Compute finished key */
-	u8 finished_key[TLS_SECRET_MAX_LEN];
-
 	ret = tquic_hs_hkdf_expand_label(hs, binder_key, hash_len,
 					 "finished", NULL, 0,
 					 finished_key, hash_len);
 	if (ret < 0)
-		return ret;
+		goto out_zeroize;
 
 	/* Compute binder = HMAC(finished_key, transcript_hash) */
 	hmac_desc->tfm = hs->hmac;
 
 	ret = crypto_shash_setkey(hs->hmac, finished_key, hash_len);
 	if (ret)
-		return ret;
+		goto out_zeroize;
 
 	ret = crypto_shash_init(hmac_desc);
 	if (ret)
-		return ret;
+		goto out_zeroize;
 
 	ret = crypto_shash_update(hmac_desc, transcript_hash, hash_len);
 	if (ret)
-		return ret;
+		goto out_zeroize;
 
 	ret = crypto_shash_final(hmac_desc, binder);
 	if (ret)
-		return ret;
+		goto out_zeroize;
 
 	*binder_len = hash_len;
+	ret = 0;
 
-	return 0;
+out_zeroize:
+	memzero_explicit(binder_key, sizeof(binder_key));
+	memzero_explicit(finished_key, sizeof(finished_key));
+	return ret;
 }
 EXPORT_SYMBOL_GPL(tquic_hs_compute_binder);
 

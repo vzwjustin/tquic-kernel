@@ -590,6 +590,10 @@ void tquic_cid_retire_remote(struct tquic_connection *conn, u64 seq_num);
 int __init tquic_cid_table_init(void);
 void __exit tquic_cid_table_exit(void);
 
+/* Connection state machine init/exit (core/connection.c) */
+int __init tquic_connection_init(void);
+void __exit tquic_connection_exit(void);
+
 /*
  * =============================================================================
  * CONNECTION MIGRATION

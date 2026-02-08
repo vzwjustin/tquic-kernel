@@ -32,6 +32,7 @@
 
 #include "protocol.h"
 #include "tquic_tunnel.h"
+#include "tquic_compat.h"
 
 /*
  * Traffic classification for QoS - uses defines from net/tquic.h:
@@ -355,7 +356,7 @@ static int tquic_tunnel_create_tcp_socket(struct tquic_tunnel *tunnel,
 	}
 
 	/* Bind to allocated port */
-	err = sock->ops->bind(sock, (struct sockaddr *)&bind_addr,
+	err = sock->ops->bind(sock, (struct sockaddr_unsized *)&bind_addr,
 			      family == AF_INET ? sizeof(struct sockaddr_in) :
 						  sizeof(struct sockaddr_in6));
 	if (err < 0) {
@@ -400,7 +401,7 @@ static void tquic_tunnel_connect_work(struct work_struct *work)
 	spin_unlock_bh(&tunnel->lock);
 
 	/* Non-blocking connect */
-	err = sock->ops->connect(sock, (struct sockaddr *)&tunnel->dest_addr,
+	err = sock->ops->connect(sock, (struct sockaddr_unsized *)&tunnel->dest_addr,
 				 addr_len, O_NONBLOCK);
 
 	if (err == 0 || err == -EINPROGRESS) {

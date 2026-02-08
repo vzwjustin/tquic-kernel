@@ -30,7 +30,9 @@
  *
  * For out-of-tree builds, the system's linux/in.h doesn't include
  * IPPROTO_TQUIC. Define it here if not already defined.
- * Protocol number 253 is in the unassigned range and fits in u8.
+ *
+ * NOTE:
+ * TQUIC is wired to a classic 8-bit IP protocol number in this tree.
  */
 #ifndef IPPROTO_TQUIC
 #define IPPROTO_TQUIC	253
@@ -1702,7 +1704,7 @@ struct tquic_cong_ops {
 };
 
 /* Socket address type compatibility */
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 13, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 19, 0)
 #define TQUIC_SOCKADDR struct sockaddr_unsized
 #else
 #define TQUIC_SOCKADDR struct sockaddr
@@ -2207,9 +2209,30 @@ void __exit tquic_sysctl_exit(void);
 int __init tquic_proto_init(void);
 void __exit tquic_proto_exit(void);
 
-/* Socket registration */
-int __init tquic_socket_init(void);
-void __exit tquic_socket_exit(void);
+/* Socket operations (tquic_socket.c) */
+int tquic_init_sock(struct sock *sk);
+void tquic_destroy_sock(struct sock *sk);
+int tquic_sock_setsockopt(struct socket *sock, int level, int optname,
+			  sockptr_t optval, unsigned int optlen);
+int tquic_sock_getsockopt(struct socket *sock, int level, int optname,
+			  char __user *optval, int __user *optlen);
+int tquic_sock_bind(struct socket *sock, TQUIC_SOCKADDR *uaddr, int addr_len);
+int tquic_connect_socket(struct socket *sock, TQUIC_SOCKADDR *uaddr,
+			 int addr_len, int flags);
+int tquic_accept_socket(struct socket *sock, struct socket *newsock,
+			struct proto_accept_arg *arg);
+int tquic_sock_getname(struct socket *sock, struct sockaddr *addr, int peer);
+__poll_t tquic_poll_socket(struct file *file, struct socket *sock,
+			   struct poll_table_struct *wait);
+int tquic_sock_listen(struct socket *sock, int backlog);
+int tquic_sock_shutdown(struct socket *sock, int how);
+int tquic_sock_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg);
+int tquic_sendmsg_socket(struct socket *sock, struct msghdr *msg, size_t len);
+int tquic_recvmsg_socket(struct socket *sock, struct msghdr *msg,
+			 size_t len, int flags);
+ssize_t tquic_splice_read_socket(struct socket *sock, loff_t *ppos,
+				 struct pipe_inode_info *pipe,
+				 size_t len, unsigned int flags);
 
 /* Diagnostics (ss tool integration) */
 int __init tquic_diag_init(void);

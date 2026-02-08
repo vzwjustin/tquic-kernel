@@ -51,6 +51,7 @@
 
 #include "protocol.h"
 #include "tquic_mib.h"
+#include "tquic_compat.h"
 
 /* Network namespace identifier (exported for protocol.h inline accessor) */
 unsigned int tquic_net_id __read_mostly;
@@ -336,11 +337,18 @@ static const struct inet6_protocol tquicv6_protocol = {
 /*
  * Socket Creation Callback
  */
+#if IS_ENABLED(CONFIG_IPV6)
+static struct proto tquicv6_prot;
+static const struct proto_ops tquic_inet6_ops;
+#endif
 static int tquic_create_socket(struct net *net, struct socket *sock,
 			       int protocol, int kern)
 {
 	struct tquic_net *tn = tquic_pernet(net);
+	struct proto *prot;
+	const struct proto_ops *ops;
 	struct sock *sk;
+	int family;
 
 	if (!tn->enabled)
 		return -EPROTONOSUPPORT;
@@ -351,19 +359,38 @@ static int tquic_create_socket(struct net *net, struct socket *sock,
 
 	sock->state = SS_UNCONNECTED;
 
+	/*
+	 * Select the correct protocol struct and ops based on socket family.
+	 * Using the wrong proto for IPv6 causes inet6_sk() to compute
+	 * a bad offset, leading to a crash in __ipv6_sock_ac_close().
+	 */
+	family = sock->ops ? sock->ops->family : PF_INET;
+
+#if IS_ENABLED(CONFIG_IPV6)
+	if (family == PF_INET6) {
+		prot = &tquicv6_prot;
+		ops = &tquic_inet6_ops;
+	} else
+#endif
+	{
+		prot = &tquic_prot;
+		ops = &tquic_inet_ops;
+	}
+
 	/* Allocate sock structure */
-	sk = sk_alloc(net, PF_INET, GFP_KERNEL, &tquic_prot, kern);
+	sk = sk_alloc(net, family, GFP_KERNEL, prot, kern);
 	if (!sk)
 		return -ENOBUFS;
 
 	sock_init_data(sock, sk);
 	sk->sk_protocol = protocol;
-	sock->ops = &tquic_inet_ops;
+	sock->ops = ops;
 
 	/* Additional TQUIC-specific socket initialization */
 	atomic64_inc(&tn->total_connections);
 
-	pr_debug("created TQUIC socket, protocol=%d\n", protocol);
+	pr_debug("created TQUIC socket, family=%d protocol=%d\n",
+		 family, protocol);
 
 	return 0;
 }
@@ -372,49 +399,73 @@ static int tquic_create_socket(struct net *net, struct socket *sock,
  * IPv4 Socket Operations
  */
 
-/* Socket release */
+/* Socket release helpers */
 static int tquic_inet_release(struct socket *sock)
 {
-	struct sock *sk = sock->sk;
-
-	if (!sk)
+	if (!sock->sk)
 		return 0;
 
 	return inet_release(sock);
 }
+
+#if IS_ENABLED(CONFIG_IPV6)
+static int tquic_inet6_release(struct socket *sock)
+{
+	if (!sock->sk)
+		return 0;
+
+	return inet6_release(sock);
+}
+#endif
 
 /* IPv4 proto_ops */
 static const struct proto_ops tquic_inet_ops = {
 	.family		= PF_INET,
 	.owner		= THIS_MODULE,
 	.release	= tquic_inet_release,
-	.bind		= inet_bind,
-	.connect	= inet_stream_connect,
+	.bind		= tquic_sock_bind,
+	.connect	= tquic_connect_socket,
 	.socketpair	= sock_no_socketpair,
-	.accept		= inet_accept,
-	.getname	= inet_getname,
-	.poll		= tcp_poll,
-	.ioctl		= inet_ioctl,
-	.listen		= inet_listen,
-	.shutdown	= inet_shutdown,
-	.setsockopt	= sock_common_setsockopt,
-	.getsockopt	= sock_common_getsockopt,
-	.sendmsg	= inet_sendmsg,
-	.recvmsg	= inet_recvmsg,
+	.accept		= tquic_accept_socket,
+	.getname	= tquic_sock_getname,
+	.poll		= tquic_poll_socket,
+	.ioctl		= tquic_sock_ioctl,
+	.listen		= tquic_sock_listen,
+	.shutdown	= tquic_sock_shutdown,
+	.setsockopt	= tquic_sock_setsockopt,
+	.getsockopt	= tquic_sock_getsockopt,
+	.sendmsg	= tquic_sendmsg_socket,
+	.recvmsg	= tquic_recvmsg_socket,
 	.mmap		= sock_no_mmap,
+	.splice_read	= tquic_splice_read_socket,
 };
+
+/*
+ * QUIC uses UDP encapsulation, so we don't participate in the inet
+ * hash tables.  Provide simple no-op stubs for .hash / .unhash.
+ */
+static int tquic_proto_hash(struct sock *sk)
+{
+	return 0;
+}
+
+static void tquic_proto_unhash(struct sock *sk)
+{
+}
 
 /* TQUIC protocol definition for IPv4 */
 static struct proto tquic_prot = {
 	.name		= "TQUIC",
 	.owner		= THIS_MODULE,
 	.obj_size	= sizeof(struct tquic_sock),
+	.init		= tquic_init_sock,
+	.destroy	= tquic_destroy_sock,
 	.close		= tquic_close,
 	.connect	= tquic_connect,
 	.sendmsg	= tquic_sendmsg,
 	.recvmsg	= tquic_recvmsg,
-	.hash		= inet_hash,
-	.unhash		= inet_unhash,
+	.hash		= tquic_proto_hash,
+	.unhash		= tquic_proto_unhash,
 	.get_port	= inet_csk_get_port,
 	.sockets_allocated = &tquic_sockets_allocated_counter,
 	.memory_allocated = &tquic_memory_allocated,
@@ -431,7 +482,7 @@ static struct inet_protosw tquic_stream_protosw = {
 	.protocol	= IPPROTO_TQUIC,
 	.prot		= &tquic_prot,
 	.ops		= &tquic_inet_ops,
-	.flags		= INET_PROTOSW_PERMANENT | INET_PROTOSW_ICSK,
+	.flags		= INET_PROTOSW_ICSK,
 };
 
 /* inet_protosw for TQUIC over IPv4 - SOCK_DGRAM (for connectionless mode) */
@@ -440,7 +491,7 @@ static struct inet_protosw tquic_dgram_protosw = {
 	.protocol	= IPPROTO_TQUIC,
 	.prot		= &tquic_prot,
 	.ops		= &tquic_inet_ops,
-	.flags		= INET_PROTOSW_PERMANENT,
+	.flags		= 0,
 };
 
 /*
@@ -452,21 +503,22 @@ static struct inet_protosw tquic_dgram_protosw = {
 static const struct proto_ops tquic_inet6_ops = {
 	.family		= PF_INET6,
 	.owner		= THIS_MODULE,
-	.release	= tquic_inet_release,
-	.bind		= inet6_bind,
-	.connect	= inet_stream_connect,
+	.release	= tquic_inet6_release,
+	.bind		= tquic_sock_bind,
+	.connect	= tquic_connect_socket,
 	.socketpair	= sock_no_socketpair,
-	.accept		= inet_accept,
-	.getname	= inet6_getname,
-	.poll		= tcp_poll,
-	.ioctl		= inet6_ioctl,
-	.listen		= inet_listen,
-	.shutdown	= inet_shutdown,
-	.setsockopt	= sock_common_setsockopt,
-	.getsockopt	= sock_common_getsockopt,
-	.sendmsg	= inet_sendmsg,
-	.recvmsg	= inet_recvmsg,
+	.accept		= tquic_accept_socket,
+	.getname	= tquic_sock_getname,
+	.poll		= tquic_poll_socket,
+	.ioctl		= tquic_sock_ioctl,
+	.listen		= tquic_sock_listen,
+	.shutdown	= tquic_sock_shutdown,
+	.setsockopt	= tquic_sock_setsockopt,
+	.getsockopt	= tquic_sock_getsockopt,
+	.sendmsg	= tquic_sendmsg_socket,
+	.recvmsg	= tquic_recvmsg_socket,
 	.mmap		= sock_no_mmap,
+	.splice_read	= tquic_splice_read_socket,
 #ifdef CONFIG_COMPAT
 	.compat_ioctl	= inet6_compat_ioctl,
 #endif
@@ -476,13 +528,16 @@ static const struct proto_ops tquic_inet6_ops = {
 static struct proto tquicv6_prot = {
 	.name		= "TQUICv6",
 	.owner		= THIS_MODULE,
-	.obj_size	= sizeof(struct tquic_sock),
+	.obj_size	= sizeof(struct tquic6_sock),
+	.ipv6_pinfo_offset = offsetof(struct tquic6_sock, inet6),
+	.init		= tquic_init_sock,
+	.destroy	= tquic_destroy_sock,
 	.close		= tquic_close,
 	.connect	= tquic_connect,
 	.sendmsg	= tquic_sendmsg,
 	.recvmsg	= tquic_recvmsg,
-	.hash		= inet_hash,
-	.unhash		= inet_unhash,
+	.hash		= tquic_proto_hash,
+	.unhash		= tquic_proto_unhash,
 	.get_port	= inet_csk_get_port,
 	.sockets_allocated = &tquic_sockets_allocated_counter,
 	.memory_allocated = &tquic_memory_allocated,
@@ -499,7 +554,7 @@ static struct inet_protosw tquicv6_stream_protosw = {
 	.protocol	= IPPROTO_TQUIC,
 	.prot		= &tquicv6_prot,
 	.ops		= &tquic_inet6_ops,
-	.flags		= INET_PROTOSW_PERMANENT | INET_PROTOSW_ICSK,
+	.flags		= INET_PROTOSW_ICSK,
 };
 
 /* inet6_protosw for TQUIC over IPv6 - SOCK_DGRAM */
@@ -508,7 +563,7 @@ static struct inet_protosw tquicv6_dgram_protosw = {
 	.protocol	= IPPROTO_TQUIC,
 	.prot		= &tquicv6_prot,
 	.ops		= &tquic_inet6_ops,
-	.flags		= INET_PROTOSW_PERMANENT,
+	.flags		= 0,
 };
 
 #endif /* CONFIG_IPV6 */

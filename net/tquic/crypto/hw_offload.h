@@ -352,7 +352,7 @@ bool tquic_qat_is_available(struct tquic_qat_ctx *ctx);
 
 #else /* !CONFIG_CRYPTO_DEV_QAT */
 
-/* Stub implementations when QAT is not compiled */
+/* No-op implementations when QAT is not compiled */
 struct tquic_qat_ctx {
 	bool qat_available;
 };

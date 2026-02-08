@@ -26,6 +26,7 @@
 #include <linux/workqueue.h>
 #include <linux/random.h>
 #include <linux/netdevice.h>
+#include <crypto/utils.h>
 #include <net/sock.h>
 #include <net/tquic.h>
 #include "protocol.h"
@@ -41,10 +42,25 @@ int tquic_sysctl_get_prefer_preferred_address(void);
 /* Timer callback forward declaration */
 static void tquic_migration_timeout(struct timer_list *t);
 
+/* Type-safe accessor forward declarations */
+static inline struct tquic_migration_state *
+tquic_conn_get_migration_state(struct tquic_connection *conn);
+static inline struct tquic_session_state *
+tquic_conn_get_session_state(struct tquic_connection *conn);
+
 /* Migration constants */
 #define TQUIC_MIGRATION_PTO_MULTIPLIER	3	/* 3x PTO for validation timeout */
 #define TQUIC_MIGRATION_MAX_RETRIES	3	/* Max PATH_CHALLENGE retries */
 #define TQUIC_MIGRATION_DEFAULT_TIMEOUT_MS 1000	/* Default 1s timeout */
+
+/*
+ * State machine magic numbers for type discrimination.
+ * conn->state_machine is a void pointer that may hold either a
+ * tquic_migration_state or a tquic_session_state.  The magic field
+ * (first member of each struct) allows safe down-casting.
+ */
+#define TQUIC_SM_MAGIC_MIGRATION	0x4D494752	/* "MIGR" */
+#define TQUIC_SM_MAGIC_SESSION		0x53455353	/* "SESS" */
 
 /* Path quality degradation thresholds */
 #define TQUIC_PATH_DEGRADED_RTT_MULT	3	/* RTT > 3x min_rtt = degraded */
@@ -78,6 +94,7 @@ struct tquic_client {
 
 /**
  * struct tquic_migration_state - Migration state machine
+ * @magic: Type discriminator, must be TQUIC_SM_MAGIC_MIGRATION
  * @status: Current migration status (TQUIC_MIGRATE_*)
  * @old_path: Previous active path
  * @new_path: Target path for migration
@@ -94,6 +111,7 @@ struct tquic_client {
  * @lock: Protects migration state
  */
 struct tquic_migration_state {
+	u32 magic;
 	enum tquic_migrate_status status;
 	struct tquic_path *old_path;
 	struct tquic_path *new_path;
@@ -462,6 +480,7 @@ static struct tquic_migration_state *tquic_migration_state_alloc(
 	if (!ms)
 		return NULL;
 
+	ms->magic = TQUIC_SM_MAGIC_MIGRATION;
 	ms->status = TQUIC_MIGRATE_NONE;
 	spin_lock_init(&ms->lock);
 	timer_setup(&ms->timer, tquic_migration_timeout, 0);
@@ -613,7 +632,7 @@ int tquic_migrate_auto(struct tquic_connection *conn,
 		return -ENOTCONN;
 
 	/* Check if migration is already in progress */
-	ms = (struct tquic_migration_state *)conn->state_machine;
+	ms = tquic_conn_get_migration_state(conn);
 	if (ms && ms->status == TQUIC_MIGRATE_PROBING)
 		return -EBUSY;
 
@@ -793,7 +812,7 @@ int tquic_migrate_explicit(struct tquic_connection *conn,
 	}
 
 	/* Check if migration is already in progress */
-	ms = (struct tquic_migration_state *)conn->state_machine;
+	ms = tquic_conn_get_migration_state(conn);
 	if (ms && ms->status == TQUIC_MIGRATE_PROBING)
 		return -EBUSY;
 
@@ -896,7 +915,7 @@ int tquic_migration_get_status(struct tquic_connection *conn,
 	if (!conn)
 		return 0;
 
-	ms = (struct tquic_migration_state *)conn->state_machine;
+	ms = tquic_conn_get_migration_state(conn);
 	if (!ms)
 		return 0;
 
@@ -942,7 +961,7 @@ void tquic_migration_cleanup(struct tquic_connection *conn)
 		return;
 
 	/* Clean up general migration state */
-	ms = (struct tquic_migration_state *)conn->state_machine;
+	ms = tquic_conn_get_migration_state(conn);
 	if (ms) {
 		/* Cancel timer */
 		del_timer_sync(&ms->timer);
@@ -1021,7 +1040,7 @@ int tquic_migration_handle_path_response(struct tquic_connection *conn,
 		return ret;
 
 	/* Check if this completes a pending migration */
-	ms = (struct tquic_migration_state *)conn->state_machine;
+	ms = tquic_conn_get_migration_state(conn);
 	if (!ms || ms->status != TQUIC_MIGRATE_PROBING)
 		return 0;
 
@@ -1032,8 +1051,8 @@ int tquic_migration_handle_path_response(struct tquic_connection *conn,
 		return 0;
 	}
 
-	/* Verify challenge data matches */
-	if (memcmp(data, ms->challenge_data, 8) != 0) {
+	/* Verify challenge data matches (constant-time to avoid timing leaks) */
+	if (crypto_memneq(data, ms->challenge_data, 8)) {
 		spin_unlock_bh(&ms->lock);
 		pr_debug("tquic: PATH_RESPONSE mismatch for migration\n");
 		return -EINVAL;
@@ -1147,8 +1166,10 @@ EXPORT_SYMBOL_GPL(tquic_server_handle_migration);
 
 /**
  * struct tquic_session_state - Session state preserved during path loss
+ * @magic: Type discriminator, must be TQUIC_SM_MAGIC_SESSION
  */
 struct tquic_session_state {
+	u32 magic;
 	struct tquic_connection *conn;
 	struct timer_list timer;
 	ktime_t start_time;
@@ -1156,6 +1177,50 @@ struct tquic_session_state {
 	struct sk_buff_head packet_queue;
 	u32 queue_timeout_ms;
 };
+
+/**
+ * tquic_conn_get_migration_state - Type-safe accessor for migration state
+ * @conn: Connection whose state_machine to access
+ *
+ * Validates the magic number before returning a typed pointer.
+ * Returns NULL if state_machine is NULL or has wrong magic.
+ */
+static inline struct tquic_migration_state *
+tquic_conn_get_migration_state(struct tquic_connection *conn)
+{
+	struct tquic_migration_state *ms;
+
+	if (!conn->state_machine)
+		return NULL;
+
+	ms = (struct tquic_migration_state *)conn->state_machine;
+	if (ms->magic != TQUIC_SM_MAGIC_MIGRATION)
+		return NULL;
+
+	return ms;
+}
+
+/**
+ * tquic_conn_get_session_state - Type-safe accessor for session state
+ * @conn: Connection whose state_machine to access
+ *
+ * Validates the magic number before returning a typed pointer.
+ * Returns NULL if state_machine is NULL or has wrong magic.
+ */
+static inline struct tquic_session_state *
+tquic_conn_get_session_state(struct tquic_connection *conn)
+{
+	struct tquic_session_state *ss;
+
+	if (!conn->state_machine)
+		return NULL;
+
+	ss = (struct tquic_session_state *)conn->state_machine;
+	if (ss->magic != TQUIC_SM_MAGIC_SESSION)
+		return NULL;
+
+	return ss;
+}
 
 static void tquic_session_ttl_expired(struct timer_list *t)
 {
@@ -1208,6 +1273,7 @@ int tquic_server_start_session_ttl(struct tquic_connection *conn)
 	if (!state)
 		return -ENOMEM;
 
+	state->magic = TQUIC_SM_MAGIC_SESSION;
 	state->conn = conn;
 	state->start_time = ktime_get();
 	state->ttl_ms = ttl_ms;
@@ -1235,7 +1301,7 @@ int tquic_server_session_resume(struct tquic_connection *conn,
 	if (!conn || !path)
 		return -EINVAL;
 
-	state = (struct tquic_session_state *)conn->state_machine;
+	state = tquic_conn_get_session_state(conn);
 	if (!state)
 		return 0;
 
@@ -1269,7 +1335,7 @@ int tquic_server_queue_packet(struct tquic_connection *conn,
 	if (!conn || !skb)
 		return -EINVAL;
 
-	state = (struct tquic_session_state *)conn->state_machine;
+	state = tquic_conn_get_session_state(conn);
 	if (!state) {
 		kfree_skb(skb);
 		return 0;
@@ -1305,6 +1371,7 @@ void tquic_server_check_path_recovery(struct tquic_connection *conn)
 	if (!conn)
 		return;
 
+restart:
 	spin_lock_bh(&conn->paths_lock);
 	list_for_each_entry(path, &conn->paths, list) {
 		if (path->state == TQUIC_PATH_UNAVAILABLE) {
@@ -1315,12 +1382,20 @@ void tquic_server_check_path_recovery(struct tquic_connection *conn)
 				if (path->state == TQUIC_PATH_UNUSED)
 					path->state = TQUIC_PATH_PENDING;
 
+				/*
+				 * Drop lock before calling into validation
+				 * (may sleep or acquire other locks), then
+				 * restart iteration since the list may have
+				 * changed while the lock was released.
+				 */
 				spin_unlock_bh(&conn->paths_lock);
+
 				tquic_path_start_validation(conn, path);
-				spin_lock_bh(&conn->paths_lock);
 
 				pr_debug("tquic: attempting path %u recovery\n",
 					 path->path_id);
+
+				goto restart;
 			}
 		}
 	}
@@ -1370,7 +1445,7 @@ int tquic_migrate_to_preferred_address(struct tquic_connection *conn)
 	}
 
 	/* Check if migration is already in progress */
-	ms = (struct tquic_migration_state *)conn->state_machine;
+	ms = tquic_conn_get_migration_state(conn);
 	if (ms && ms->status == TQUIC_MIGRATE_PROBING)
 		return -EBUSY;
 
@@ -1547,7 +1622,7 @@ int tquic_migrate_to_additional_address(struct tquic_connection *conn,
 	}
 
 	/* Check if migration is already in progress */
-	ms = (struct tquic_migration_state *)conn->state_machine;
+	ms = tquic_conn_get_migration_state(conn);
 	if (ms && ms->status == TQUIC_MIGRATE_PROBING)
 		return -EBUSY;
 
@@ -1591,13 +1666,11 @@ int tquic_migrate_to_additional_address(struct tquic_connection *conn,
 
 	/* Allocate or get migration state */
 	if (!ms) {
-		ms = kzalloc(sizeof(*ms), GFP_KERNEL);
+		ms = tquic_migration_state_alloc(conn);
 		if (!ms) {
 			tquic_path_free(new_path);
 			return -ENOMEM;
 		}
-		spin_lock_init(&ms->lock);
-		timer_setup(&ms->timer, NULL, 0);
 		INIT_WORK(&ms->work, tquic_migration_work_handler);
 		conn->state_machine = ms;
 	}

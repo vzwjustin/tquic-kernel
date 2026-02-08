@@ -131,10 +131,10 @@ struct hkdf_ctx {
 	u32 hash_len;
 };
 
-extern int hkdf_expand_label(struct hkdf_ctx *ctx, const u8 *prk,
-			     const char *label, size_t label_len,
-			     const u8 *context, size_t context_len,
-			     u8 *out, size_t out_len);
+extern int tquic_hkdf_expand_label(struct hkdf_ctx *ctx, const u8 *prk,
+				   const char *label, size_t label_len,
+				   const u8 *context, size_t context_len,
+				   u8 *out, size_t out_len);
 
 /*
  * tquic_key_update_tx - Update transmit keys for key update
@@ -161,7 +161,7 @@ static int tquic_key_update_tx(struct tquic_connection *conn)
 	hkdf.hash_len = ctx->tx.secret_len;
 
 	/* Derive new secret from current TX secret */
-	err = hkdf_expand_label(&hkdf, ctx->tx.secret, tquic_ku_label,
+	err = tquic_hkdf_expand_label(&hkdf, ctx->tx.secret, tquic_ku_label,
 				strlen(tquic_ku_label), NULL, 0,
 				new_secret, ctx->tx.secret_len);
 	if (err)
@@ -171,14 +171,14 @@ static int tquic_key_update_tx(struct tquic_connection *conn)
 	memcpy(ctx->tx.secret, new_secret, ctx->tx.secret_len);
 
 	/* Derive new TX key */
-	err = hkdf_expand_label(&hkdf, ctx->tx.secret, tquic_key_label,
+	err = tquic_hkdf_expand_label(&hkdf, ctx->tx.secret, tquic_key_label,
 				strlen(tquic_key_label), NULL, 0,
 				ctx->tx.key, ctx->tx.key_len);
 	if (err)
 		goto out;
 
 	/* Derive new TX IV */
-	err = hkdf_expand_label(&hkdf, ctx->tx.secret, tquic_iv_label,
+	err = tquic_hkdf_expand_label(&hkdf, ctx->tx.secret, tquic_iv_label,
 				strlen(tquic_iv_label), NULL, 0,
 				ctx->tx.iv, ctx->tx.iv_len);
 	if (err)
@@ -268,7 +268,7 @@ static int tquic_key_update_rx(struct tquic_connection *conn)
 	}
 
 	/* Derive new RX secret from current RX secret */
-	err = hkdf_expand_label(&hkdf, ctx->rx.secret, tquic_ku_label,
+	err = tquic_hkdf_expand_label(&hkdf, ctx->rx.secret, tquic_ku_label,
 				strlen(tquic_ku_label), NULL, 0,
 				new_secret, ctx->rx.secret_len);
 	if (err)
@@ -278,14 +278,14 @@ static int tquic_key_update_rx(struct tquic_connection *conn)
 	memcpy(ctx->rx.secret, new_secret, ctx->rx.secret_len);
 
 	/* Derive new RX key */
-	err = hkdf_expand_label(&hkdf, ctx->rx.secret, tquic_key_label,
+	err = tquic_hkdf_expand_label(&hkdf, ctx->rx.secret, tquic_key_label,
 				strlen(tquic_key_label), NULL, 0,
 				ctx->rx.key, ctx->rx.key_len);
 	if (err)
 		goto out;
 
 	/* Derive new RX IV */
-	err = hkdf_expand_label(&hkdf, ctx->rx.secret, tquic_iv_label,
+	err = tquic_hkdf_expand_label(&hkdf, ctx->rx.secret, tquic_iv_label,
 				strlen(tquic_iv_label), NULL, 0,
 				ctx->rx.iv, ctx->rx.iv_len);
 	if (err)

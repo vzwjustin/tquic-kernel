@@ -23,6 +23,7 @@
 #include <linux/rbtree.h>
 #include <linux/spinlock.h>
 #include <linux/timer.h>
+#include <crypto/algapi.h>
 #include <linux/workqueue.h>
 #include <linux/random.h>
 #include <linux/jhash.h>
@@ -352,11 +353,29 @@ static int tquic_conn_set_state(struct tquic_connection *conn,
 		break;
 
 	case TQUIC_CONN_CLOSED:
-		/* Cancel all pending work */
-		cancel_work_sync(&cs->close_work);
-		cancel_work_sync(&cs->migration_work);
-		cancel_delayed_work_sync(&cs->drain_work);
-		cancel_delayed_work_sync(&cs->validation_work);
+		/*
+		 * Cancel all pending work.
+		 *
+		 * CRITICAL: Use non-blocking cancellation to avoid self-deadlock.
+		 * This state transition can be called from work handlers themselves
+		 * (e.g., tquic_drain_timeout -> tquic_conn_enter_closed), so we
+		 * cannot use cancel_*_work_sync which would wait for the currently
+		 * executing work to complete (= deadlock).
+		 *
+		 * cancel_*_work() returns true if it canceled a pending work,
+		 * false if the work wasn't pending (already running or completed).
+		 * This is safe because:
+		 * 1. If work is pending: it gets canceled before execution
+		 * 2. If work is running: it's either this function's caller
+		 *    (won't wait on itself) or another work item that will
+		 *    complete independently
+		 * 3. Work items check conn->state before taking action
+		 */
+		cancel_work(&cs->close_work);
+		cancel_work(&cs->migration_work);
+		cancel_delayed_work(&cs->drain_work);
+		cancel_delayed_work(&cs->validation_work);
+
 		/*
 		 * Wake up all waiters - connection is fully closed,
 		 * both socket state change and datagram waiters.
@@ -475,13 +494,26 @@ struct tquic_cid_entry *tquic_conn_add_local_cid(struct tquic_connection *conn)
 	}
 	entry->has_reset_token = true;
 
-	spin_lock(&conn->lock);
+	spin_lock_bh(&conn->lock);
 	list_add_tail(&entry->list, &cs->local_cids);
 
 	/* Register in global lookup table */
-	rhashtable_insert_fast(&cid_lookup_table, &entry->hash_node,
-			       cid_hash_params);
-	spin_unlock(&conn->lock);
+	{
+		int err;
+
+		err = rhashtable_insert_fast(&cid_lookup_table,
+					     &entry->hash_node,
+					     cid_hash_params);
+		if (err) {
+			list_del(&entry->list);
+			spin_unlock_bh(&conn->lock);
+			cs->next_local_cid_seq--;
+			kfree(entry);
+			pr_warn("tquic: rhashtable insert failed: %d\n", err);
+			return NULL;
+		}
+	}
+	spin_unlock_bh(&conn->lock);
 
 	pr_debug("tquic: added local CID seq=%llu\n", entry->cid.seq_num);
 
@@ -517,11 +549,11 @@ int tquic_conn_add_remote_cid(struct tquic_connection *conn,
 		entry->has_reset_token = true;
 	}
 
-	spin_lock(&conn->lock);
+	spin_lock_bh(&conn->lock);
 	list_add_tail(&entry->list, &cs->remote_cids);
 	if (seq >= cs->next_remote_cid_seq)
 		cs->next_remote_cid_seq = seq + 1;
-	spin_unlock(&conn->lock);
+	spin_unlock_bh(&conn->lock);
 
 	pr_debug("tquic: added remote CID seq=%llu\n", seq);
 
@@ -549,7 +581,7 @@ int tquic_conn_retire_cid(struct tquic_connection *conn, u64 seq, bool is_local)
 
 	cid_list = is_local ? &cs->local_cids : &cs->remote_cids;
 
-	spin_lock(&conn->lock);
+	spin_lock_bh(&conn->lock);
 	list_for_each_entry(entry, cid_list, list) {
 		if (entry->cid.seq_num == seq) {
 			entry->retired = true;
@@ -557,7 +589,7 @@ int tquic_conn_retire_cid(struct tquic_connection *conn, u64 seq, bool is_local)
 			break;
 		}
 	}
-	spin_unlock(&conn->lock);
+	spin_unlock_bh(&conn->lock);
 
 	if (!found)
 		return -ENOENT;
@@ -650,7 +682,7 @@ bool tquic_verify_stateless_reset(struct tquic_connection *conn,
 	/* Check against known reset tokens */
 	list_for_each_entry(entry, &cs->remote_cids, list) {
 		if (entry->has_reset_token &&
-		    memcmp(entry->stateless_reset_token, token, 16) == 0) {
+		    crypto_memneq(entry->stateless_reset_token, token, 16) == 0) {
 			pr_debug("tquic: received stateless reset\n");
 			return true;
 		}
@@ -1341,9 +1373,9 @@ int tquic_send_path_challenge(struct tquic_connection *conn,
 	/* Store challenge data in path for matching response */
 	memcpy(path->challenge_data, challenge->data, 8);
 
-	spin_lock(&conn->lock);
+	spin_lock_bh(&conn->lock);
 	list_add_tail(&challenge->list, &cs->pending_challenges);
-	spin_unlock(&conn->lock);
+	spin_unlock_bh(&conn->lock);
 
 	/* Schedule validation timeout */
 	schedule_delayed_work(&cs->validation_work,
@@ -1438,17 +1470,17 @@ int tquic_handle_path_response(struct tquic_connection *conn,
 	if (!cs)
 		return -EINVAL;
 
-	spin_lock(&conn->lock);
+	spin_lock_bh(&conn->lock);
 	list_for_each_entry_safe(challenge, tmp, &cs->pending_challenges, list) {
 		if (challenge->path == path &&
-		    memcmp(challenge->data, data, 8) == 0) {
+		    crypto_memneq(challenge->data, data, 8) == 0) {
 			list_del(&challenge->list);
 			kfree(challenge);
 			found = true;
 			break;
 		}
 	}
-	spin_unlock(&conn->lock);
+	spin_unlock_bh(&conn->lock);
 
 	if (!found) {
 		pr_debug("tquic: unexpected PATH_RESPONSE\n");
@@ -1504,10 +1536,10 @@ int tquic_conn_migrate_to_path(struct tquic_connection *conn,
 		return -EINVAL;
 	}
 
-	spin_lock(&conn->lock);
+	spin_lock_bh(&conn->lock);
 
 	if (cs->migration_in_progress) {
-		spin_unlock(&conn->lock);
+		spin_unlock_bh(&conn->lock);
 		return -EBUSY;
 	}
 
@@ -1515,7 +1547,7 @@ int tquic_conn_migrate_to_path(struct tquic_connection *conn,
 	cs->migration_target = new_path;
 	cs->migration_start = ktime_get();
 
-	spin_unlock(&conn->lock);
+	spin_unlock_bh(&conn->lock);
 
 	/* Start path validation on new path */
 	if (new_path->state == TQUIC_PATH_PENDING) {
@@ -1572,10 +1604,10 @@ static void tquic_migration_work_handler(struct work_struct *work)
 	struct tquic_connection *conn = cs->conn;
 	struct tquic_path *target;
 
-	spin_lock(&conn->lock);
+	spin_lock_bh(&conn->lock);
 
 	if (!cs->migration_in_progress) {
-		spin_unlock(&conn->lock);
+		spin_unlock_bh(&conn->lock);
 		return;
 	}
 
@@ -1590,7 +1622,7 @@ static void tquic_migration_work_handler(struct work_struct *work)
 		pr_info("tquic: migration complete to path %u\n", target->path_id);
 	}
 
-	spin_unlock(&conn->lock);
+	spin_unlock_bh(&conn->lock);
 }
 
 /*
@@ -2618,7 +2650,7 @@ EXPORT_SYMBOL_GPL(tquic_conn_state_cleanup);
  * Module Initialization
  */
 
-static int __init tquic_connection_init(void)
+int __init tquic_connection_init(void)
 {
 	int ret;
 
@@ -2655,7 +2687,7 @@ static int __init tquic_connection_init(void)
 	return 0;
 }
 
-static void __exit tquic_connection_exit(void)
+void __exit tquic_connection_exit(void)
 {
 	/* Cleanup retry token AEAD */
 	if (tquic_retry_aead) {

@@ -34,6 +34,7 @@
 #include "core/tquic_crypto.h"
 #include "core/varint.h"
 #include "core/stream.h"
+#include "tquic_compat.h"
 
 /* QUIC socket option level */
 #define SOL_QUIC		288
@@ -500,7 +501,7 @@ static int quic_create_udp_sock(struct sock *sk)
 			.sin_port = inet_sk(sk)->inet_sport,
 			.sin_addr.s_addr = inet_sk(sk)->inet_saddr,
 		};
-		err = kernel_bind(sock, (struct sockaddr *)&addr, sizeof(addr));
+		err = kernel_bind(sock, (struct sockaddr_unsized *)&addr, sizeof(addr));
 	}
 #if IS_ENABLED(CONFIG_IPV6)
 	else if (family == AF_INET6) {
@@ -509,7 +510,7 @@ static int quic_create_udp_sock(struct sock *sk)
 			.sin6_port = inet_sk(sk)->inet_sport,
 		};
 		addr.sin6_addr = sk->sk_v6_rcv_saddr;
-		err = kernel_bind(sock, (struct sockaddr *)&addr, sizeof(addr));
+		err = kernel_bind(sock, (struct sockaddr_unsized *)&addr, sizeof(addr));
 	}
 #endif
 

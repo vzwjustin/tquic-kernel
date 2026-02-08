@@ -541,6 +541,9 @@ void tquic_tls_init(struct tquic_connection *conn, bool is_server)
 {
 	struct tquic_tls_ctx *ctx = tquic_tls_ctx_get(conn);
 
+	if (!ctx)
+		return;
+
 	memset(ctx, 0, sizeof(*ctx));
 	ctx->state = TQUIC_TLS_STATE_INITIAL;
 	ctx->is_server = is_server ? 1 : 0;
@@ -557,6 +560,9 @@ EXPORT_SYMBOL_GPL(tquic_tls_init);
 void tquic_tls_start_handshake(struct tquic_connection *conn)
 {
 	struct tquic_tls_ctx *ctx = tquic_tls_ctx_get(conn);
+
+	if (!ctx)
+		return;
 
 	if (ctx->state != TQUIC_TLS_STATE_INITIAL) {
 		pr_warn("TQUIC-TLS: start_handshake called in state %s\n",
@@ -596,6 +602,9 @@ int tquic_tls_process_handshake_message(struct tquic_connection *conn,
 	u8 msg_type;
 	u32 msg_len;
 	int err;
+
+	if (!ctx)
+		return -EINVAL;
 
 	if (len < 4) {
 		pr_warn("TQUIC-TLS: message too short (%u bytes)\n", len);
@@ -644,6 +653,9 @@ bool tquic_tls_is_handshake_complete(struct tquic_connection *conn)
 {
 	struct tquic_tls_ctx *ctx = tquic_tls_ctx_get(conn);
 
+	if (!ctx)
+		return false;
+
 	return ctx->handshake_complete;
 }
 EXPORT_SYMBOL_GPL(tquic_tls_is_handshake_complete);
@@ -657,6 +669,9 @@ EXPORT_SYMBOL_GPL(tquic_tls_is_handshake_complete);
 int tquic_tls_get_state(struct tquic_connection *conn)
 {
 	struct tquic_tls_ctx *ctx = tquic_tls_ctx_get(conn);
+
+	if (!ctx)
+		return -EINVAL;
 
 	return ctx->state;
 }
@@ -672,6 +687,9 @@ EXPORT_SYMBOL_GPL(tquic_tls_get_state);
 void tquic_tls_set_psk_mode(struct tquic_connection *conn, bool using_psk)
 {
 	struct tquic_tls_ctx *ctx = tquic_tls_ctx_get(conn);
+
+	if (!ctx)
+		return;
 
 	ctx->using_psk = using_psk ? 1 : 0;
 }
@@ -691,6 +709,9 @@ u64 tquic_tls_process_alert(struct tquic_connection *conn,
 {
 	struct tquic_tls_ctx *ctx = tquic_tls_ctx_get(conn);
 
+	if (!ctx)
+		return TQUIC_ERROR_CRYPTO_BASE + TLS_ALERT_INTERNAL_ERROR;
+
 	return tquic_tls_handle_alert(ctx, alert_level, alert_desc);
 }
 EXPORT_SYMBOL_GPL(tquic_tls_process_alert);
@@ -705,6 +726,9 @@ bool tquic_tls_in_error_state(struct tquic_connection *conn)
 {
 	struct tquic_tls_ctx *ctx = tquic_tls_ctx_get(conn);
 
+	if (!ctx)
+		return true;
+
 	return ctx->state == TQUIC_TLS_STATE_ERROR;
 }
 EXPORT_SYMBOL_GPL(tquic_tls_in_error_state);
@@ -718,6 +742,9 @@ EXPORT_SYMBOL_GPL(tquic_tls_in_error_state);
 u8 tquic_tls_get_alert_code(struct tquic_connection *conn)
 {
 	struct tquic_tls_ctx *ctx = tquic_tls_ctx_get(conn);
+
+	if (!ctx)
+		return TLS_ALERT_INTERNAL_ERROR;
 
 	return ctx->alert_code;
 }
@@ -750,10 +777,10 @@ static int hkdf_extract(struct hkdf_ctx *ctx, const u8 *salt, size_t salt_len,
 	return crypto_shash_digest(desc, ikm, ikm_len, prk);
 }
 
-int hkdf_expand_label(struct hkdf_ctx *ctx, const u8 *prk,
-			     const char *label, size_t label_len,
-			     const u8 *context, size_t context_len,
-			     u8 *out, size_t out_len)
+int tquic_hkdf_expand_label(struct hkdf_ctx *ctx, const u8 *prk,
+			   const char *label, size_t label_len,
+			   const u8 *context, size_t context_len,
+			   u8 *out, size_t out_len)
 {
 	SHASH_DESC_ON_STACK(desc, ctx->hash);
 	u8 info[256];
@@ -762,6 +789,20 @@ int hkdf_expand_label(struct hkdf_ctx *ctx, const u8 *prk,
 	size_t done = 0;
 	u8 iter = 1;
 	int err;
+
+	/*
+	 * Bounds check: label and context must fit within the info buffer.
+	 * info layout: 2 (length) + 1 (label_len byte) + 6 ("tls13 ") +
+	 *              label_len + 1 (context_len byte) + context_len
+	 * Must not exceed sizeof(info) = 256.
+	 * Also enforce TLS 1.3 limits: label < 246 (255 - 6 - "tls13 "),
+	 * context <= 255.
+	 */
+	if (label_len > 245 || context_len > 255)
+		return -EINVAL;
+
+	if (10 + label_len + context_len > sizeof(info))
+		return -EOVERFLOW;
 
 	/* Build HKDF-Expand-Label info
 	 * struct {
@@ -805,7 +846,7 @@ int hkdf_expand_label(struct hkdf_ctx *ctx, const u8 *prk,
 
 		err = crypto_shash_digest(desc, input, input_len, t);
 		if (err)
-			return err;
+			goto out_zeroize;
 
 		copy_len = min(out_len - done, (size_t)ctx->hash_len);
 		memcpy(out + done, t, copy_len);
@@ -813,7 +854,11 @@ int hkdf_expand_label(struct hkdf_ctx *ctx, const u8 *prk,
 		iter++;
 	}
 
-	return 0;
+	err = 0;
+
+out_zeroize:
+	memzero_explicit(t, sizeof(t));
+	return err;
 }
 
 int tquic_crypto_ctx_init(struct tquic_crypto_ctx *ctx, u16 cipher_type)
@@ -931,7 +976,10 @@ void tquic_crypto_ctx_destroy(struct tquic_crypto_ctx *ctx)
 	if (ctx->tx_aead)
 		crypto_free_aead(ctx->tx_aead);
 
-	memset(ctx, 0, sizeof(*ctx));
+	/* Use memzero_explicit to prevent compiler from optimizing away
+	 * the clearing of key material (secrets, keys, IVs).
+	 */
+	memzero_explicit(ctx, sizeof(*ctx));
 }
 
 void tquic_crypto_destroy(void *crypto)
@@ -980,13 +1028,13 @@ int tquic_crypto_derive_init_secrets(struct tquic_connection *conn,
 		goto out;
 
 	/* Derive client and server secrets */
-	err = hkdf_expand_label(&hkdf, initial_secret, tquic_client_in_label,
+	err = tquic_hkdf_expand_label(&hkdf, initial_secret, tquic_client_in_label,
 				strlen(tquic_client_in_label), NULL, 0,
 				client_secret, 32);
 	if (err)
 		goto out;
 
-	err = hkdf_expand_label(&hkdf, initial_secret, tquic_server_in_label,
+	err = tquic_hkdf_expand_label(&hkdf, initial_secret, tquic_server_in_label,
 				strlen(tquic_server_in_label), NULL, 0,
 				server_secret, 32);
 	if (err)
@@ -1010,38 +1058,38 @@ int tquic_crypto_derive_init_secrets(struct tquic_connection *conn,
 	}
 
 	/* Derive TX keys */
-	err = hkdf_expand_label(&hkdf, ctx->tx.secret, tquic_key_label,
+	err = tquic_hkdf_expand_label(&hkdf, ctx->tx.secret, tquic_key_label,
 				strlen(tquic_key_label), NULL, 0,
 				ctx->tx.key, ctx->tx.key_len);
 	if (err)
 		goto out;
 
-	err = hkdf_expand_label(&hkdf, ctx->tx.secret, tquic_iv_label,
+	err = tquic_hkdf_expand_label(&hkdf, ctx->tx.secret, tquic_iv_label,
 				strlen(tquic_iv_label), NULL, 0,
 				ctx->tx.iv, ctx->tx.iv_len);
 	if (err)
 		goto out;
 
-	err = hkdf_expand_label(&hkdf, ctx->tx.secret, tquic_hp_label,
+	err = tquic_hkdf_expand_label(&hkdf, ctx->tx.secret, tquic_hp_label,
 				strlen(tquic_hp_label), NULL, 0,
 				ctx->tx.hp_key, ctx->tx.hp_key_len);
 	if (err)
 		goto out;
 
 	/* Derive RX keys */
-	err = hkdf_expand_label(&hkdf, ctx->rx.secret, tquic_key_label,
+	err = tquic_hkdf_expand_label(&hkdf, ctx->rx.secret, tquic_key_label,
 				strlen(tquic_key_label), NULL, 0,
 				ctx->rx.key, ctx->rx.key_len);
 	if (err)
 		goto out;
 
-	err = hkdf_expand_label(&hkdf, ctx->rx.secret, tquic_iv_label,
+	err = tquic_hkdf_expand_label(&hkdf, ctx->rx.secret, tquic_iv_label,
 				strlen(tquic_iv_label), NULL, 0,
 				ctx->rx.iv, ctx->rx.iv_len);
 	if (err)
 		goto out;
 
-	err = hkdf_expand_label(&hkdf, ctx->rx.secret, tquic_hp_label,
+	err = tquic_hkdf_expand_label(&hkdf, ctx->rx.secret, tquic_hp_label,
 				strlen(tquic_hp_label), NULL, 0,
 				ctx->rx.hp_key, ctx->rx.hp_key_len);
 	if (err)
@@ -1096,21 +1144,21 @@ int tquic_crypto_derive_secrets(struct tquic_crypto_ctx *ctx,
 	hkdf.hash_len = secret_len;
 
 	/* Derive key */
-	err = hkdf_expand_label(&hkdf, secret, tquic_key_label,
+	err = tquic_hkdf_expand_label(&hkdf, secret, tquic_key_label,
 				strlen(tquic_key_label), NULL, 0,
 				ctx->tx.key, ctx->tx.key_len);
 	if (err)
 		return err;
 
 	/* Derive IV */
-	err = hkdf_expand_label(&hkdf, secret, tquic_iv_label,
+	err = tquic_hkdf_expand_label(&hkdf, secret, tquic_iv_label,
 				strlen(tquic_iv_label), NULL, 0,
 				ctx->tx.iv, ctx->tx.iv_len);
 	if (err)
 		return err;
 
 	/* Derive HP key */
-	err = hkdf_expand_label(&hkdf, secret, tquic_hp_label,
+	err = tquic_hkdf_expand_label(&hkdf, secret, tquic_hp_label,
 				strlen(tquic_hp_label), NULL, 0,
 				ctx->tx.hp_key, ctx->tx.hp_key_len);
 	if (err)
@@ -1253,10 +1301,14 @@ int tquic_crypto_hp_mask(struct tquic_crypto_ctx *ctx, const u8 *sample,
 	return err;
 }
 
+/* Minimum interval between key updates (1 second) */
+#define TQUIC_KEY_UPDATE_MIN_INTERVAL_NS	(1000000000ULL)
+
 int tquic_crypto_update_keys(struct tquic_connection *conn)
 {
 	struct tquic_crypto_wrapper *wrapper = tquic_crypto_wrapper_get(conn);
 	struct tquic_crypto_ctx *ctx;
+	ktime_t now;
 
 	if (!wrapper)
 		return -EINVAL;
@@ -1269,11 +1321,20 @@ int tquic_crypto_update_keys(struct tquic_connection *conn)
 	if (!ctx->hash || !ctx->keys_available)
 		return -EINVAL;
 
+	/* Rate limit key updates to prevent abuse (min 1 second interval) */
+	now = ktime_get();
+	if (ctx->last_key_update &&
+	    ktime_to_ns(ktime_sub(now, ctx->last_key_update)) <
+	    TQUIC_KEY_UPDATE_MIN_INTERVAL_NS) {
+		pr_warn("TQUIC: key update rate limited (too frequent)\n");
+		return -EAGAIN;
+	}
+
 	hkdf.hash = ctx->hash;
 	hkdf.hash_len = ctx->tx.secret_len;
 
 	/* Derive new secret from current secret */
-	err = hkdf_expand_label(&hkdf, ctx->tx.secret, tquic_ku_label,
+	err = tquic_hkdf_expand_label(&hkdf, ctx->tx.secret, tquic_ku_label,
 				strlen(tquic_ku_label), NULL, 0,
 				new_secret, ctx->tx.secret_len);
 	if (err)
@@ -1282,13 +1343,13 @@ int tquic_crypto_update_keys(struct tquic_connection *conn)
 	/* Derive new keys from new secret */
 	memcpy(ctx->tx.secret, new_secret, ctx->tx.secret_len);
 
-	err = hkdf_expand_label(&hkdf, ctx->tx.secret, tquic_key_label,
+	err = tquic_hkdf_expand_label(&hkdf, ctx->tx.secret, tquic_key_label,
 				strlen(tquic_key_label), NULL, 0,
 				ctx->tx.key, ctx->tx.key_len);
 	if (err)
 		goto out;
 
-	err = hkdf_expand_label(&hkdf, ctx->tx.secret, tquic_iv_label,
+	err = tquic_hkdf_expand_label(&hkdf, ctx->tx.secret, tquic_iv_label,
 				strlen(tquic_iv_label), NULL, 0,
 				ctx->tx.iv, ctx->tx.iv_len);
 	if (err)
@@ -1301,6 +1362,9 @@ int tquic_crypto_update_keys(struct tquic_connection *conn)
 
 	/* Toggle key phase */
 	ctx->key_phase = !ctx->key_phase;
+
+	/* Record time of successful key update for rate limiting */
+	ctx->last_key_update = now;
 
 out:
 	memzero_explicit(new_secret, sizeof(new_secret));

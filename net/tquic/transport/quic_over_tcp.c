@@ -1473,7 +1473,7 @@ struct quic_tcp_listener *quic_tcp_listen(u16 port)
 	addr.sin6_port = htons(port);
 	addr.sin6_addr = in6addr_any;
 
-	ret = kernel_bind(listener->tcp_sk, (struct sockaddr *)&addr,
+	ret = kernel_bind(listener->tcp_sk, (struct sockaddr_unsized *)&addr,
 			  sizeof(addr));
 	if (ret)
 		goto err_sock;

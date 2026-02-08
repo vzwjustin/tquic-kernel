@@ -87,7 +87,7 @@ enum {
 #define IPPROTO_SMC		IPPROTO_SMC
   IPPROTO_MPTCP = 262,		/* Multipath TCP connection		*/
 #define IPPROTO_MPTCP		IPPROTO_MPTCP
-  IPPROTO_TQUIC = 263,		/* Transport QUIC with multipath	*/
+  IPPROTO_TQUIC = 253,		/* Transport QUIC with multipath	*/
 #define IPPROTO_TQUIC		IPPROTO_TQUIC
   IPPROTO_MAX
 };

@@ -27,7 +27,7 @@ struct netns_mib {
 #ifdef CONFIG_MPTCP
 	DEFINE_SNMP_STAT(struct mptcp_mib, mptcp_statistics);
 #endif
-#if IS_ENABLED(CONFIG_TQUIC)
+#if IS_ENABLED(CONFIG_IP_QUIC)
 	DEFINE_SNMP_STAT(struct tquic_mib, tquic_statistics);
 #endif
 

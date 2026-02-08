@@ -440,7 +440,11 @@ static struct sock *tquic_proto_accept(struct sock *sk,
 		finish_wait(sk_sleep(sk), &wait);
 	}
 
-	newsk = sk_alloc(sock_net(sk), sk->sk_family, GFP_KERNEL, &tquic_prot, false);
+	newsk = sk_alloc(sock_net(sk), sk->sk_family, GFP_KERNEL,
+#if IS_ENABLED(CONFIG_IPV6)
+			 sk->sk_family == AF_INET6 ? &tquicv6_prot :
+#endif
+			 &tquic_prot, false);
 	if (!newsk) {
 		arg->err = -ENOMEM;
 		release_sock(sk);

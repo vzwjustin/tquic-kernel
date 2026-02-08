@@ -40,6 +40,9 @@
 #include "tquic_ratelimit.h"
 #include "rate_limit.h"
 
+/* Maximum ACK ranges to prevent resource exhaustion from malicious frames */
+#define TQUIC_MAX_ACK_RANGES		256
+
 /* QUIC frame types (must match tquic_output.c) */
 #define TQUIC_FRAME_PADDING		0x00
 #define TQUIC_FRAME_PING		0x01
@@ -92,7 +95,7 @@
 #define TQUIC_VERSION_NEGOTIATION	0x00000000
 
 /* Stateless reset */
-#define TQUIC_STATELESS_RESET_MIN_LEN	21
+#define TQUIC_STATELESS_RESET_MIN_LEN	22  /* RFC 9000 Section 10.3 */
 #define TQUIC_STATELESS_RESET_TOKEN_LEN	16
 
 /* GRO configuration */
@@ -104,7 +107,6 @@ static int tquic_process_frames(struct tquic_connection *conn,
 				struct tquic_path *path,
 				u8 *payload, size_t len,
 				int enc_level, u64 pkt_num);
-
 /*
  * Per-path ECN tracking state for detecting CE count increases
  * Per RFC 9002 Section 7.1: Only respond to *increases* in CE count
@@ -130,6 +132,9 @@ struct tquic_rx_ctx {
 	bool ack_eliciting;
 	u8 key_phase_bit;  /* Key phase from short header (RFC 9001 Section 6) */
 };
+
+static int tquic_process_path_abandon_frame(struct tquic_rx_ctx *ctx);
+static int tquic_process_path_status_frame(struct tquic_rx_ctx *ctx);
 
 /* GRO state per socket */
 struct tquic_gro_state {
@@ -287,15 +292,8 @@ static int tquic_decrypt_payload(struct tquic_connection *conn,
 					    pkt_num, out, out_len);
 	}
 
-	/* No crypto state - copy as-is for testing */
-	if (payload_len > 16) {
-		memcpy(out, payload, payload_len - 16);
-		*out_len = payload_len - 16;
-	} else {
-		*out_len = 0;
-	}
-
-	return 0;
+	/* No crypto state - cannot process packet */
+	return -ENOKEY;
 }
 
 /*
@@ -390,14 +388,14 @@ static int tquic_process_version_negotiation(struct tquic_connection *conn,
 	versions = data + 7 + dcid_len + scid_len;
 	versions_len = len - 7 - dcid_len - scid_len;
 
-	pr_info("tquic: received version negotiation, offered versions:\n");
+	pr_debug("tquic: received version negotiation, offered versions:\n");
 
 	/* Check each offered version */
 	for (i = 0; i + 4 <= versions_len; i += 4) {
 		u32 version = (versions[i] << 24) | (versions[i + 1] << 16) |
 			      (versions[i + 2] << 8) | versions[i + 3];
 
-		pr_info("  0x%08x\n", version);
+		pr_debug("  0x%08x\n", version);
 
 		if (version == TQUIC_VERSION_1 || version == TQUIC_VERSION_2)
 			found = true;
@@ -558,6 +556,10 @@ static int tquic_process_ack_frame(struct tquic_rx_ctx *ctx)
 	if (ret < 0)
 		return ret;
 	ctx->offset += ret;
+
+	/* Reject excessive ACK ranges to prevent resource exhaustion */
+	if (ack_range_count > TQUIC_MAX_ACK_RANGES)
+		return -EINVAL;
 
 	/* Process additional ACK ranges */
 	for (u64 i = 0; i < ack_range_count; i++) {
@@ -772,6 +774,9 @@ static int tquic_process_stream_frame(struct tquic_rx_ctx *ctx)
 		/* Length extends to end of packet */
 		length = ctx->len - ctx->offset;
 	}
+
+	if (length > 65535)
+		return -EINVAL;
 
 	if (ctx->offset + length > ctx->len)
 		return -EINVAL;
@@ -1077,8 +1082,8 @@ static int tquic_process_connection_close_frame(struct tquic_rx_ctx *ctx, bool a
 		return -EINVAL;
 	ctx->offset += reason_len;
 
-	pr_info("tquic: received CONNECTION_CLOSE, error=%llu frame_type=%llu\n",
-		error_code, frame_type);
+	pr_info_ratelimited("tquic: received CONNECTION_CLOSE, error=%llu frame_type=%llu\n",
+			    error_code, frame_type);
 
 	/* Transition to draining state */
 	spin_lock(&ctx->conn->lock);
@@ -1629,6 +1634,7 @@ static int tquic_process_frames(struct tquic_connection *conn,
 	struct tquic_rx_ctx ctx;
 	int ret = 0;
 	u8 frame_type;
+	size_t prev_offset;
 
 	ctx.conn = conn;
 	ctx.path = path;
@@ -1640,6 +1646,7 @@ static int tquic_process_frames(struct tquic_connection *conn,
 	ctx.ack_eliciting = false;
 
 	while (ctx.offset < ctx.len) {
+		prev_offset = ctx.offset;
 		frame_type = ctx.data[ctx.offset];
 
 		/* Handle frame based on type */
@@ -1702,6 +1709,10 @@ static int tquic_process_frames(struct tquic_connection *conn,
 
 		if (ret < 0)
 			break;
+
+		/* Detect stuck parsing (no progress made) */
+		if (ctx.offset == prev_offset)
+			return -EPROTO;
 	}
 
 	/* Send ACK if packet was ack-eliciting */
@@ -1983,7 +1994,7 @@ static int tquic_process_packet(struct tquic_connection *conn,
 	int pkt_num_len;
 	u64 pkt_num;
 	u8 *payload;
-	size_t payload_len, decrypted_len;
+	size_t payload_len, decrypted_len = 0;
 	u8 *decrypted;
 	int ret;
 
@@ -2143,11 +2154,19 @@ static int tquic_process_packet(struct tquic_connection *conn,
 		/* Parse token for Initial packets */
 		if (pkt_type == TQUIC_PKT_INITIAL) {
 			u64 token_len;
+			size_t remaining_len;
+
 			ret = tquic_decode_varint(data + ctx.offset,
 						  len - ctx.offset, &token_len);
 			if (ret < 0)
 				return ret;
-			ctx.offset += ret + token_len;
+			ctx.offset += ret;
+
+			remaining_len = len - ctx.offset;
+			if (token_len > remaining_len)
+				return -EINVAL;
+
+			ctx.offset += token_len;
 		}
 
 		/* Parse length field */
@@ -2364,9 +2383,9 @@ int tquic_udp_recv(struct sock *sk, struct sk_buff *skb)
 		sin6_local->sin6_port = udp_hdr(skb)->dest;
 	}
 
-	/* Get UDP payload */
-	data = skb->data + sizeof(struct udphdr);
-	len = skb->len - sizeof(struct udphdr);
+	/* Get QUIC payload - UDP header already stripped by encap layer */
+	data = skb->data;
+	len = skb->len;
 
 	if (len < 1) {
 		kfree_skb(skb);
@@ -2420,6 +2439,11 @@ int tquic_udp_recv(struct sock *sk, struct sk_buff *skb)
 
 				if (offset < len) {
 					scid_len = data[offset];
+					if (scid_len > TQUIC_MAX_CID_LEN ||
+					    offset + 1 + scid_len > len) {
+						kfree_skb(skb);
+						return -EINVAL;
+					}
 					offset += 1 + scid_len;
 
 					/* Parse token length (varint) */
@@ -2493,21 +2517,25 @@ int tquic_udp_recv(struct sock *sk, struct sk_buff *skb)
 	}
 
 	/* Check for stateless reset (received from peer) */
-	if (len >= TQUIC_STATELESS_RESET_MIN_LEN &&
-	    !(data[0] & TQUIC_HEADER_FORM_LONG)) {
-		/* Try to find connection for reset check */
-		if (len > 1) {
-			u8 dcid_len = min_t(size_t, len - 1, TQUIC_MAX_CID_LEN);
-			conn = tquic_lookup_by_dcid(data + 1, dcid_len);
-		}
+	if (len < TQUIC_STATELESS_RESET_MIN_LEN)
+		goto not_reset;
 
-		if (conn && tquic_is_stateless_reset_internal(conn, data, len)) {
-			tquic_handle_stateless_reset(conn);
-			kfree_skb(skb);
-			return 0;
-		}
+	if (data[0] & TQUIC_HEADER_FORM_LONG)
+		goto not_reset;
+
+	/* Try to find connection for reset check */
+	if (len > 1) {
+		u8 dcid_len = min_t(size_t, len - 1, TQUIC_MAX_CID_LEN);
+		conn = tquic_lookup_by_dcid(data + 1, dcid_len);
 	}
 
+	if (conn && tquic_is_stateless_reset_internal(conn, data, len)) {
+		tquic_handle_stateless_reset(conn);
+		kfree_skb(skb);
+		return 0;
+	}
+
+not_reset:
 	/* Check for version negotiation */
 	if (tquic_is_version_negotiation(data, len)) {
 		/* Need connection context */
@@ -2663,7 +2691,14 @@ int tquic_process_coalesced(struct tquic_connection *conn,
 			if (offset + 6 + dcid_len > total_len)
 				break;
 
+			/* Bounds check before reading scid_len */
+			if (offset + 6 + dcid_len >= total_len)
+				break;
+
 			scid_len = data[offset + 6 + dcid_len];
+			if (offset + 7 + dcid_len + scid_len > total_len)
+				break;
+
 			hdr_len = 7 + dcid_len + scid_len;
 
 			/* Token for Initial packets */

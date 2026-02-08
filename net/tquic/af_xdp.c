@@ -35,6 +35,7 @@
 
 #include "af_xdp.h"
 #include "protocol.h"
+#include "tquic_compat.h"
 
 /*
  * XDP program bytecode for QUIC packet steering
@@ -380,7 +381,7 @@ int tquic_xsk_bind(struct tquic_xsk *xsk)
 		sxdp.sxdp_flags |= XDP_ZEROCOPY;
 
 	/* Bind socket to device queue */
-	err = kernel_bind(xsk->sock, (struct sockaddr *)&sxdp, sizeof(sxdp));
+	err = kernel_bind(xsk->sock, (struct sockaddr_unsized *)&sxdp, sizeof(sxdp));
 	if (err) {
 		pr_err("Failed to bind XSK to %s queue %d: %d\n",
 		       xsk->dev->name, xsk->queue_id, err);

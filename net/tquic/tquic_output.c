@@ -1764,9 +1764,7 @@ int tquic_xmit(struct tquic_connection *conn, struct tquic_stream *stream,
 	if (conn->state != TQUIC_CONN_CONNECTED)
 		return -ENOTCONN;
 
-	spin_lock(&conn->lock);
-	pkt_num = conn->stats.tx_packets++;
-	spin_unlock(&conn->lock);
+	pkt_num = atomic64_inc_return(&conn->pkt_num_tx) - 1;
 
 	/* Process data in MTU-sized chunks */
 	while (offset < len || (fin && offset == len)) {
@@ -1852,37 +1850,27 @@ int tquic_send_ack(struct tquic_connection *conn, struct tquic_path *path,
 {
 	struct tquic_frame_ctx ctx;
 	struct sk_buff *skb;
-	u8 *buf;
+	u8 buf_stack[128];
 	int ret;
 	u64 pkt_num;
 
-	buf = kmalloc(128, GFP_ATOMIC);
-	if (!buf)
-		return -ENOMEM;
-
 	ctx.conn = conn;
 	ctx.path = path;
-	ctx.buf = buf;
-	ctx.buf_len = 128;
+	ctx.buf = buf_stack;
+	ctx.buf_len = sizeof(buf_stack);
 	ctx.offset = 0;
 	ctx.ack_eliciting = false;
 
 	ret = tquic_gen_ack_frame(&ctx, largest_ack, ack_delay, 0, ack_range);
-	if (ret < 0) {
-		kfree(buf);
+	if (ret < 0)
 		return ret;
-	}
 
-	spin_lock(&conn->lock);
-	pkt_num = conn->stats.tx_packets++;
-	spin_unlock(&conn->lock);
+	pkt_num = atomic64_inc_return(&conn->pkt_num_tx) - 1;
 
 	/* Build minimal packet with ACK */
 	skb = alloc_skb(ctx.offset + 64 + MAX_HEADER, GFP_ATOMIC);
-	if (!skb) {
-		kfree(buf);
+	if (!skb)
 		return -ENOMEM;
-	}
 
 	skb_reserve(skb, MAX_HEADER);
 
@@ -1907,8 +1895,7 @@ int tquic_send_ack(struct tquic_connection *conn, struct tquic_path *path,
 			skb_put_data(skb, header, header_len);
 	}
 
-	skb_put_data(skb, buf, ctx.offset);
-	kfree(buf);
+	skb_put_data(skb, buf_stack, ctx.offset);
 
 	return tquic_output_packet(conn, path, skb);
 }
@@ -1954,9 +1941,7 @@ int tquic_send_connection_close(struct tquic_connection *conn,
 		return ret;
 	}
 
-	spin_lock(&conn->lock);
-	pkt_num = conn->stats.tx_packets++;
-	spin_unlock(&conn->lock);
+	pkt_num = atomic64_inc_return(&conn->pkt_num_tx) - 1;
 
 	/* Build packet */
 	skb = alloc_skb(ctx.offset + 64 + MAX_HEADER, GFP_ATOMIC);
@@ -2132,8 +2117,8 @@ int tquic_output_flush(struct tquic_connection *conn)
 			INIT_LIST_HEAD(&frame->list);
 			list_add_tail(&frame->list, &frames);
 
-			/* Get next packet number */
-			pkt_num = conn->stats.tx_packets++;
+			/* Get next packet number (lock-free) */
+			pkt_num = atomic64_inc_return(&conn->pkt_num_tx) - 1;
 
 			/* Release lock while sending (may sleep in crypto) */
 			spin_unlock_bh(&conn->lock);
@@ -2401,10 +2386,8 @@ int tquic_send_datagram(struct tquic_connection *conn,
 		return ret;
 	}
 
-	/* Get packet number */
-	spin_lock(&conn->lock);
-	pkt_num = conn->stats.tx_packets++;
-	spin_unlock(&conn->lock);
+	/* Get packet number (lock-free) */
+	pkt_num = atomic64_inc_return(&conn->pkt_num_tx) - 1;
 
 	/* Allocate SKB */
 	skb = alloc_skb(ctx.offset + 64 + MAX_HEADER, GFP_ATOMIC);

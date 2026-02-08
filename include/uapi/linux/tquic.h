@@ -13,8 +13,9 @@
 #include <linux/in.h>
 
 /*
- * Protocol number for TQUIC is defined in <linux/in.h> as IPPROTO_TQUIC = 263.
- * This follows MPTCP (262) in the protocol number space.
+ * Protocol number for TQUIC sockets is defined in <linux/in.h> as IPPROTO_TQUIC.
+ *
+ * In this tree, TQUIC uses a classic 8-bit IP protocol number (253).
  */
 
 /* Socket options at SOL_TQUIC level */
@@ -498,7 +499,8 @@ enum tquic_nl_groups {
  * Connection Migration Socket Options
  *
  * Note: Full migration implementation in Phase 4 (Path Manager).
- * Phase 2 provides API surface with stub implementations.
+ * Migration is implemented in-kernel; these sockopts are part of the userspace
+ * API.
  */
 #define TQUIC_MIGRATE           70  /* Trigger explicit migration to new address */
 #define TQUIC_MIGRATE_STATUS    71  /* Get migration status (read-only) */

@@ -232,20 +232,47 @@ bool tquic_pre_hs_can_allocate(const struct sockaddr_storage *addr, size_t size)
 int tquic_pre_hs_alloc(const struct sockaddr_storage *addr, size_t size)
 {
 	struct tquic_pre_hs_ip_entry *entry;
+	u64 new_total;
+	u64 new_per_ip;
 
 	if (!pre_hs_initialized)
 		return 0;
 
-	if (!tquic_pre_hs_can_allocate(addr, size))
+	/* Atomically add to global counter and check limit */
+	new_total = atomic64_add_return(size, &pre_hs_state.total_memory);
+	if (new_total > pre_hs_state.memory_limit) {
+		atomic64_sub(size, &pre_hs_state.total_memory);
+		pr_debug("tquic: pre-handshake global memory limit exceeded "
+			 "(total=%llu, limit=%llu)\n",
+			 new_total, pre_hs_state.memory_limit);
 		return -ENOMEM;
+	}
 
-	/* Update global counter */
-	atomic64_add(size, &pre_hs_state.total_memory);
-
-	/* Update per-IP counter */
+	/* Update per-IP counter with rollback on failure */
 	entry = find_or_create_ip_entry(addr, true);
 	if (entry) {
-		atomic64_add(size, &entry->memory_used);
+		new_per_ip = atomic64_add_return(size, &entry->memory_used);
+		if (new_per_ip > pre_hs_state.per_ip_budget) {
+			atomic64_sub(size, &entry->memory_used);
+			atomic64_sub(size, &pre_hs_state.total_memory);
+			pr_debug("tquic: pre-handshake per-IP limit exceeded "
+				 "(used=%llu, budget=%llu)\n",
+				 new_per_ip, pre_hs_state.per_ip_budget);
+			tquic_security_event(TQUIC_SEC_EVENT_PRE_HS_LIMIT,
+					     addr, "per-IP memory limit");
+			return -ENOMEM;
+		}
+
+		/* Check connection count per IP */
+		if (atomic_read(&entry->conn_count) >= TQUIC_PRE_HS_MAX_CONNS_PER_IP) {
+			atomic64_sub(size, &entry->memory_used);
+			atomic64_sub(size, &pre_hs_state.total_memory);
+			pr_debug("tquic: pre-handshake connection limit per IP\n");
+			tquic_security_event(TQUIC_SEC_EVENT_PRE_HS_LIMIT,
+					     addr, "per-IP connection limit");
+			return -ENOMEM;
+		}
+
 		atomic_inc(&entry->conn_count);
 	}
 

@@ -113,8 +113,8 @@ void tquic_stateless_reset_generate_token(const struct tquic_cid *cid,
 	tfm = crypto_alloc_shash("hmac(sha256)", 0, 0);
 	if (IS_ERR(tfm)) {
 		pr_warn("tquic: failed to allocate HMAC-SHA256 for reset token\n");
-		/* Fallback: use static key directly (less secure) */
-		memcpy(token, static_key, TQUIC_STATELESS_RESET_TOKEN_LEN);
+		/* Fallback: use random bytes to avoid leaking static key */
+		get_random_bytes(token, TQUIC_STATELESS_RESET_TOKEN_LEN);
 		return;
 	}
 
@@ -124,7 +124,7 @@ void tquic_stateless_reset_generate_token(const struct tquic_cid *cid,
 	if (ret) {
 		pr_warn("tquic: HMAC setkey failed: %d\n", ret);
 		crypto_free_shash(tfm);
-		memcpy(token, static_key, TQUIC_STATELESS_RESET_TOKEN_LEN);
+		get_random_bytes(token, TQUIC_STATELESS_RESET_TOKEN_LEN);
 		return;
 	}
 
@@ -132,7 +132,7 @@ void tquic_stateless_reset_generate_token(const struct tquic_cid *cid,
 	desc = kzalloc(sizeof(*desc) + crypto_shash_descsize(tfm), GFP_ATOMIC);
 	if (!desc) {
 		crypto_free_shash(tfm);
-		memcpy(token, static_key, TQUIC_STATELESS_RESET_TOKEN_LEN);
+		get_random_bytes(token, TQUIC_STATELESS_RESET_TOKEN_LEN);
 		return;
 	}
 
@@ -142,7 +142,7 @@ void tquic_stateless_reset_generate_token(const struct tquic_cid *cid,
 	ret = crypto_shash_digest(desc, cid->id, cid->len, hmac_result);
 	if (ret) {
 		pr_warn("tquic: HMAC digest failed: %d\n", ret);
-		memcpy(token, static_key, TQUIC_STATELESS_RESET_TOKEN_LEN);
+		get_random_bytes(token, TQUIC_STATELESS_RESET_TOKEN_LEN);
 	} else {
 		/* Truncate to 128 bits (first 16 bytes) */
 		memcpy(token, hmac_result, TQUIC_STATELESS_RESET_TOKEN_LEN);

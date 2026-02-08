@@ -37,7 +37,7 @@
 #include <net/netns/smc.h>
 #include <net/netns/bpf.h>
 #include <net/netns/mctp.h>
-#if IS_ENABLED(CONFIG_TQUIC)
+#if IS_ENABLED(CONFIG_IP_QUIC)
 #include <net/netns/tquic.h>
 #endif
 #include <net/net_trackers.h>
@@ -195,7 +195,7 @@ struct net {
 #if IS_ENABLED(CONFIG_SMC)
 	struct netns_smc	smc;
 #endif
-#if IS_ENABLED(CONFIG_TQUIC)
+#if IS_ENABLED(CONFIG_IP_QUIC)
 	struct netns_tquic	tquic;
 #endif
 #ifdef CONFIG_DEBUG_NET_SMALL_RTNL

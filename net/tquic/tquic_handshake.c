@@ -18,6 +18,7 @@
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/slab.h>
+#include <linux/string.h>
 #include <linux/completion.h>
 #include <linux/jiffies.h>
 #include <linux/ratelimit.h>
@@ -427,6 +428,7 @@ int tquic_start_handshake(struct sock *sk)
 
 err_free:
 	tsk->handshake_state = NULL;
+	memzero_explicit(hs, sizeof(*hs));
 	kfree(hs);
 	return ret;
 }
@@ -531,6 +533,9 @@ void tquic_handshake_cleanup(struct sock *sk)
 	tls_handshake_cancel(sk);
 
 	tsk->handshake_state = NULL;
+
+	/* Zero sensitive handshake material before freeing */
+	memzero_explicit(hs, sizeof(*hs));
 	kfree(hs);
 
 	pr_debug("tquic: handshake state cleaned up\n");
@@ -572,6 +577,14 @@ EXPORT_SYMBOL_GPL(tquic_handshake_in_progress);
 static void tquic_server_handshake_done(void *data, int status,
 					key_serial_t peerid);
 
+/*
+ * Sentinel value for conn->crypto_state indicating that crypto keys have
+ * been installed by the net/handshake infrastructure and the connection is
+ * ready for encrypted communication.  This is intentionally a non-NULL,
+ * non-dereferenceable pointer used solely as a boolean flag.
+ */
+#define TQUIC_CRYPTO_STATE_SENTINEL	((void *)1)
+
 /**
  * tquic_install_crypto_state - Install crypto keys after handshake
  * @sk: Socket with completed handshake
@@ -589,7 +602,7 @@ void tquic_install_crypto_state(struct sock *sk)
 		return;
 
 	/* Mark crypto as ready - keys extracted by net/handshake infrastructure */
-	conn->crypto_state = (void *)1;  /* Non-NULL indicates ready */
+	conn->crypto_state = TQUIC_CRYPTO_STATE_SENTINEL;
 	tsk->flags |= TQUIC_F_HANDSHAKE_DONE;
 
 	pr_debug("tquic: crypto state installed\n");
@@ -1218,12 +1231,11 @@ int tquic_server_psk_callback(struct sock *sk, const char *identity,
 	if (!identity || identity_len == 0 || !psk)
 		return -EINVAL;
 
-	/* Look up client by PSK identity */
+	/* Look up client by PSK identity (returns with rcu_read_lock held) */
 	client = tquic_client_lookup_by_psk(identity, identity_len);
 	if (!client) {
 		if (__ratelimit(&tquic_psk_reject_log)) {
-			pr_info("tquic: unknown PSK identity '%.*s'\n",
-				(int)identity_len, identity);
+			pr_debug("tquic: unknown PSK identity\n");
 		}
 		TQUIC_INC_STATS(sock_net(sk), TQUIC_MIB_HANDSHAKESFAILED);
 		return -ENOENT;
@@ -1232,18 +1244,23 @@ int tquic_server_psk_callback(struct sock *sk, const char *identity,
 	/* Check rate limit before accepting connection */
 	if (!tquic_client_rate_limit_check(client)) {
 		if (__ratelimit(&tquic_psk_reject_log)) {
-			pr_info("tquic: rate limited PSK identity '%.*s'\n",
-				(int)identity_len, identity);
+			pr_debug("tquic: PSK connection rate limited\n");
 		}
+		rcu_read_unlock();
 		TQUIC_INC_STATS(sock_net(sk), TQUIC_MIB_HANDSHAKESFAILED);
 		return -EQUIC_CONNECTION_REFUSED;
 	}
 
+	/*
+	 * Release RCU before calling tquic_server_get_client_psk which
+	 * acquires its own RCU read lock internally.
+	 */
+	rcu_read_unlock();
+
 	/* Get PSK for this client */
 	ret = tquic_server_get_client_psk(identity, identity_len, psk);
 	if (ret < 0) {
-		pr_debug("tquic: failed to get PSK for '%.*s': %d\n",
-			 (int)identity_len, identity, ret);
+		pr_debug("tquic: failed to get PSK: %d\n", ret);
 		return ret;
 	}
 
@@ -1256,8 +1273,7 @@ int tquic_server_psk_callback(struct sock *sk, const char *identity,
 		}
 	}
 
-	pr_debug("tquic: PSK authentication successful for '%.*s'\n",
-		 (int)identity_len, identity);
+	pr_debug("tquic: PSK authentication successful\n");
 	return 0;
 }
 EXPORT_SYMBOL_GPL(tquic_server_psk_callback);

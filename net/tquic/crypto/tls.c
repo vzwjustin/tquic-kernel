@@ -295,40 +295,45 @@ static int tquic_hkdf_expand_label(struct crypto_shash *hash,
 	    crypto_shash_digestsize(hash);
 
 	for (i = 0; i < n; i++) {
+		u8 counter = i + 1; /* RFC 5869: counter is 1-based */
+
 		ret = crypto_shash_setkey(hash, secret, secret_len);
 		if (ret)
-			return ret;
+			goto out_zeroize;
 
 		ret = crypto_shash_init(desc);
 		if (ret)
-			return ret;
+			goto out_zeroize;
 
 		if (i > 0) {
 			ret = crypto_shash_update(desc, t,
 						  crypto_shash_digestsize(hash));
 			if (ret)
-				return ret;
+				goto out_zeroize;
 		}
 
 		ret = crypto_shash_update(desc, hkdf_label, hkdf_label_len);
 		if (ret)
-			return ret;
+			goto out_zeroize;
 
-		t[0] = i + 1;
-		ret = crypto_shash_update(desc, t, 1);
+		ret = crypto_shash_update(desc, &counter, 1);
 		if (ret)
-			return ret;
+			goto out_zeroize;
 
 		ret = crypto_shash_final(desc, t);
 		if (ret)
-			return ret;
+			goto out_zeroize;
 
 		memcpy(out + i * crypto_shash_digestsize(hash), t,
 		       min_t(size_t, crypto_shash_digestsize(hash),
 			     out_len - i * crypto_shash_digestsize(hash)));
 	}
 
-	return 0;
+	ret = 0;
+
+out_zeroize:
+	memzero_explicit(t, sizeof(t));
+	return ret;
 }
 
 /*
@@ -556,26 +561,25 @@ static void tquic_create_nonce(const u8 *iv, u64 pkt_num, u8 *nonce)
 static void tquic_create_nonce_multipath(const u8 *iv, u64 pkt_num,
 					 u32 path_id, u8 *nonce)
 {
-	u64 combined;
 	int i;
 
 	memcpy(nonce, iv, 12);
 
 	/*
-	 * Combine path_id and packet number:
-	 * The path_id goes in the high 32 bits, packet number in low 32 bits.
-	 * This provides cryptographic domain separation between paths.
-	 *
-	 * Note: packet numbers are typically less than 2^32, so this works well.
-	 * For the rare case of >4B packets on a single path, the high bits of
-	 * packet number overlap with path_id, but this is still unique per path.
+	 * Combine path_id and packet number per draft-ietf-quic-multipath:
+	 * XOR the full 62-bit packet number into the low 8 bytes first,
+	 * then XOR the path_id into bytes 4..7 of the nonce. This ensures
+	 * the full packet number space is used and provides cryptographic
+	 * domain separation between paths without truncation.
 	 */
-	combined = ((u64)path_id << 32) | (pkt_num & 0xFFFFFFFFULL);
 
-	/* XOR the combined value into the low 8 bytes of nonce */
-	for (i = 0; i < 8; i++) {
-		nonce[11 - i] ^= (combined >> (i * 8)) & 0xff;
-	}
+	/* XOR full 8-byte packet number into nonce (same as single-path) */
+	for (i = 0; i < 8; i++)
+		nonce[11 - i] ^= (pkt_num >> (i * 8)) & 0xff;
+
+	/* XOR path_id into nonce bytes 4..7 for path separation */
+	for (i = 0; i < 4; i++)
+		nonce[7 - i] ^= (path_id >> (i * 8)) & 0xff;
 }
 
 /*

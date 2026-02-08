@@ -381,8 +381,10 @@ ssize_t tquic_forward_splice(struct tquic_tunnel *tunnel, int direction)
 			}
 
 			/* Enqueue to QUIC stream send buffer */
-			skb_queue_tail(&stream->send_buf, skb);
+			spin_lock_bh(&stream->send_buf.lock);
+			__skb_queue_tail(&stream->send_buf, skb);
 			stream->send_offset += err;
+			spin_unlock_bh(&stream->send_buf.lock);
 			total += err;
 
 			/* Limit to splice buffer size per call */
@@ -755,10 +757,9 @@ ssize_t tquic_forward_hairpin(struct tquic_tunnel *tunnel,
 
 		__skb_queue_tail(&dst_stream->send_buf, skb);
 	}
-	spin_unlock_bh(&dst_stream->send_buf.lock);
-
-	/* Update stream send offset */
+	/* Update stream send offset while still holding the lock */
 	dst_stream->send_offset += total_bytes;
+	spin_unlock_bh(&dst_stream->send_buf.lock);
 
 	/*
 	 * Wake up peer connection to trigger transmission.
@@ -1275,10 +1276,8 @@ int tquic_forward_signal_mtu(struct tquic_tunnel *tunnel, u32 new_mtu)
 	 */
 	spin_lock_bh(&stream->send_buf.lock);
 	__skb_queue_head(&stream->send_buf, skb);  /* High priority - head of queue */
-	spin_unlock_bh(&stream->send_buf.lock);
-
-	/* Update send offset */
 	stream->send_offset += sizeof(frame);
+	spin_unlock_bh(&stream->send_buf.lock);
 
 	/* Wake stream to trigger transmission */
 	tquic_stream_wake(stream);
@@ -1538,8 +1537,8 @@ void __exit tquic_forward_exit(void)
 	}
 	spin_unlock_bh(&tquic_pmtu_lock);
 
-	/* Wait for RCU callbacks to complete */
-	synchronize_rcu();
+	/* Wait for all RCU callbacks (including kfree_rcu) to complete */
+	rcu_barrier();
 
 	pr_info("tquic: forwarding subsystem cleaned up\n");
 }

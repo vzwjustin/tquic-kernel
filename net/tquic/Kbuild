@@ -45,7 +45,6 @@ tquic-y := \
 	tquic_output.o \
 	tquic_input.o \
 	tquic_offload.o \
-	quic_offload.o \
 	tquic_timer.o \
 	tquic_cid.o \
 	tquic_migration.o \

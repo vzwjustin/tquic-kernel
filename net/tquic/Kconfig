@@ -1,36 +1,8 @@
 # SPDX-License-Identifier: GPL-2.0-only
 #
-# TQUIC WAN Bonding configuration
+# TQUIC configuration (sub-options for CONFIG_IP_QUIC)
 #
-
-menuconfig TQUIC
-	tristate "TQUIC: WAN Bonding over QUIC"
-	depends on INET
-	select CRYPTO
-	select CRYPTO_AES
-	select CRYPTO_GCM
-	select KEYS
-	select ASYMMETRIC_KEY_TYPE
-	select NET_UDP_TUNNEL
-	select TQUIC_CERT_VERIFY
-	select TQUIC_WAN_BONDING
-	select TQUIC_SCHEDULER
-	help
-	  TQUIC (Transport QUIC) provides WAN bonding capabilities using
-	  the QUIC protocol. It enables aggregating multiple WAN connections
-	  (such as LTE, 5G, WiFi, and wired links) into a single logical
-	  connection with seamless failover and bandwidth aggregation.
-
-	  TQUIC implements connection migration, multipath support, and
-	  intelligent path selection to optimize throughput and reliability
-	  across heterogeneous network links.
-
-	  To compile this driver as a module, choose M here: the module
-	  will be called tquic.
-
-	  If unsure, say N.
-
-if TQUIC
+# This file is sourced from `net/quic/Kconfig` under `if IP_QUIC`.
 
 config TQUIC_CORE
 	tristate "TQUIC Core Protocol"
@@ -129,7 +101,7 @@ config TQUIC_SCHEDULER
 
 config TQUIC_CONG
 	bool "TQUIC Congestion Control Framework"
-	depends on TQUIC
+	depends on TQUIC_CORE
 	default y
 	help
 	  Congestion control framework for TQUIC multipath connections.
@@ -1236,5 +1208,3 @@ config TQUIC_FUZZ
 	  be called tquic_fuzz.
 
 	  If unsure, say N.
-
-endif # TQUIC

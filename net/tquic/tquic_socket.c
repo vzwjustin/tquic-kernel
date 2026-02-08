@@ -62,87 +62,45 @@ static void tquic_set_lockdep_class(struct sock *sk, bool is_ipv6)
 		&tquic_lock_keys[is_ipv6]);
 }
 
-/* Socket operations */
-static int tquic_release(struct socket *sock);
-static int tquic_bind(struct socket *sock, TQUIC_SOCKADDR *uaddr, int addr_len);
-static int tquic_connect_socket(struct socket *sock, TQUIC_SOCKADDR *uaddr,
-				int addr_len, int flags);
-static int tquic_accept_socket(struct socket *sock, struct socket *newsock,
-			       struct proto_accept_arg *arg);
-static int tquic_getname(struct socket *sock, struct sockaddr *addr, int peer);
-static __poll_t tquic_poll_socket(struct file *file, struct socket *sock,
-				  poll_table *wait);
-static int tquic_listen(struct socket *sock, int backlog);
-static int tquic_shutdown(struct socket *sock, int how);
-static int tquic_setsockopt(struct socket *sock, int level, int optname,
-			    sockptr_t optval, unsigned int optlen);
-static int tquic_getsockopt(struct socket *sock, int level, int optname,
-			    char __user *optval, int __user *optlen);
-static int tquic_sendmsg_socket(struct socket *sock, struct msghdr *msg,
-				size_t len);
-static int tquic_recvmsg_socket(struct socket *sock, struct msghdr *msg,
-				size_t len, int flags);
-static int tquic_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg);
+/* Socket operations (exported - used by tquic_proto.c) */
+int tquic_sock_bind(struct socket *sock, TQUIC_SOCKADDR *uaddr, int addr_len);
+int tquic_connect_socket(struct socket *sock, TQUIC_SOCKADDR *uaddr,
+			 int addr_len, int flags);
+int tquic_accept_socket(struct socket *sock, struct socket *newsock,
+			struct proto_accept_arg *arg);
+int tquic_sock_getname(struct socket *sock, struct sockaddr *addr, int peer);
+__poll_t tquic_poll_socket(struct file *file, struct socket *sock,
+			   poll_table *wait);
+int tquic_sock_listen(struct socket *sock, int backlog);
+int tquic_sock_shutdown(struct socket *sock, int how);
+int tquic_sock_setsockopt(struct socket *sock, int level, int optname,
+			  sockptr_t optval, unsigned int optlen);
+int tquic_sock_getsockopt(struct socket *sock, int level, int optname,
+			  char __user *optval, int __user *optlen);
+int tquic_sendmsg_socket(struct socket *sock, struct msghdr *msg,
+			 size_t len);
+int tquic_recvmsg_socket(struct socket *sock, struct msghdr *msg,
+			 size_t len, int flags);
+int tquic_sock_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg);
 
-/* Zero-copy operations (forward declarations) */
-static ssize_t tquic_splice_read_socket(struct socket *sock, loff_t *ppos,
-					struct pipe_inode_info *pipe,
-					size_t len, unsigned int flags);
+/* Zero-copy operations (exported) */
+ssize_t tquic_splice_read_socket(struct socket *sock, loff_t *ppos,
+				 struct pipe_inode_info *pipe,
+				 size_t len, unsigned int flags);
 
 /* Protocol operations */
-static int tquic_init_sock(struct sock *sk);
-static void tquic_destroy_sock(struct sock *sk);
-static int tquic_hash(struct sock *sk);
-static void tquic_unhash(struct sock *sk);
-static int tquic_get_port(struct sock *sk, unsigned short snum);
-
-/* Socket family operations */
-static const struct proto_ops tquic_proto_ops = {
-	.family		= PF_INET,
-	.owner		= THIS_MODULE,
-	.release	= tquic_release,
-	.bind		= tquic_bind,
-	.connect	= tquic_connect_socket,
-	.socketpair	= sock_no_socketpair,
-	.accept		= tquic_accept_socket,
-	.getname	= tquic_getname,
-	.poll		= tquic_poll_socket,
-	.ioctl		= tquic_ioctl,
-	.listen		= tquic_listen,
-	.shutdown	= tquic_shutdown,
-	.setsockopt	= tquic_setsockopt,
-	.getsockopt	= tquic_getsockopt,
-	.sendmsg	= tquic_sendmsg_socket,
-	.recvmsg	= tquic_recvmsg_socket,
-	.mmap		= sock_no_mmap,
-	.splice_read	= tquic_splice_read_socket,	/* Zero-copy splice support */
-};
-
-/* Socket protocol definition */
-static struct proto tquic_prot = {
-	.name		= "TQUIC",
-	.owner		= THIS_MODULE,
-	.obj_size	= sizeof(struct tquic_sock),
-	.init		= tquic_init_sock,
-	.destroy	= tquic_destroy_sock,
-	.hash		= tquic_hash,
-	.unhash		= tquic_unhash,
-	.get_port	= tquic_get_port,
-	.close		= tquic_close,
-	.connect	= tquic_connect,
-	.sendmsg	= tquic_sendmsg,
-	.recvmsg	= tquic_recvmsg,
-};
+int tquic_init_sock(struct sock *sk);
+void tquic_destroy_sock(struct sock *sk);
 
 /*
  * Initialize a TQUIC socket
  */
-static int tquic_init_sock(struct sock *sk)
+int tquic_init_sock(struct sock *sk)
 {
 	struct tquic_sock *tsk = tquic_sk(sk);
 
-	/* Initialize lockdep class for this socket (IPv4) */
-	tquic_set_lockdep_class(sk, false);
+	/* Initialize lockdep class for this socket (IPv4 or IPv6) */
+	tquic_set_lockdep_class(sk, sk->sk_family == AF_INET6);
 
 	/* Initialize connection socket */
 	inet_sk_set_state(sk, TCP_CLOSE);
@@ -154,6 +112,7 @@ static int tquic_init_sock(struct sock *sk)
 	tsk->accept_queue_len = 0;
 	tsk->max_accept_queue = 128;
 	tsk->flags = 0;
+	init_waitqueue_head(&tsk->event_wait);
 
 	/* Clear requested scheduler (will use per-netns default if not set) */
 	tsk->requested_scheduler[0] = '\0';
@@ -186,9 +145,13 @@ static int tquic_init_sock(struct sock *sk)
 /*
  * Destroy a TQUIC socket
  */
-static void tquic_destroy_sock(struct sock *sk)
+void tquic_destroy_sock(struct sock *sk)
 {
 	struct tquic_sock *tsk = tquic_sk(sk);
+
+	/* Ensure any listen-table registration is removed before final free. */
+	if (sk->sk_state == TCP_LISTEN)
+		tquic_unregister_listener(sk);
 
 	/* Clean up any in-progress handshake */
 	tquic_handshake_cleanup(sk);
@@ -204,30 +167,10 @@ static void tquic_destroy_sock(struct sock *sk)
 }
 
 /*
- * Release socket
- */
-static int tquic_release(struct socket *sock)
-{
-	struct sock *sk = sock->sk;
-
-	if (!sk)
-		return 0;
-
-	/* Unregister from listener table if we were listening */
-	if (sk->sk_state == TCP_LISTEN)
-		tquic_unregister_listener(sk);
-
-	sock->sk = NULL;
-	sock_put(sk);
-
-	return 0;
-}
-
-/*
  * Bind socket to address
  * Note: sockaddr type varies by kernel; use TQUIC_SOCKADDR for compatibility.
  */
-static int tquic_bind(struct socket *sock, TQUIC_SOCKADDR *uaddr, int addr_len)
+int tquic_sock_bind(struct socket *sock, TQUIC_SOCKADDR *uaddr, int addr_len)
 {
 	struct sockaddr *addr = (struct sockaddr *)uaddr;
 	struct sock *sk = sock->sk;
@@ -248,8 +191,8 @@ static int tquic_bind(struct socket *sock, TQUIC_SOCKADDR *uaddr, int addr_len)
  * Connect to remote address
  * Note: sockaddr type varies by kernel; use TQUIC_SOCKADDR for compatibility.
  */
-static int tquic_connect_socket(struct socket *sock, TQUIC_SOCKADDR *uaddr,
-				int addr_len, int flags)
+int tquic_connect_socket(struct socket *sock, TQUIC_SOCKADDR *uaddr,
+			 int addr_len, int flags)
 {
 	struct sock *sk = sock->sk;
 
@@ -387,7 +330,7 @@ EXPORT_SYMBOL_GPL(tquic_connect);
  * Sets up the socket to receive incoming QUIC connections.
  * Registers with the UDP demux layer and transitions to TCP_LISTEN state.
  */
-static int tquic_listen(struct socket *sock, int backlog)
+int tquic_sock_listen(struct socket *sock, int backlog)
 {
 	struct sock *sk = sock->sk;
 	struct tquic_sock *tsk = tquic_sk(sk);
@@ -438,8 +381,8 @@ out:
  * This is called by the socket layer. It calls tquic_accept() to get
  * the child socket from the accept queue, then grafts it onto newsock.
  */
-static int tquic_accept_socket(struct socket *sock, struct socket *newsock,
-			       struct proto_accept_arg *arg)
+int tquic_accept_socket(struct socket *sock, struct socket *newsock,
+			struct proto_accept_arg *arg)
 {
 	struct sock *sk = sock->sk;
 	struct sock *newsk;
@@ -547,7 +490,7 @@ EXPORT_SYMBOL_GPL(tquic_accept);
 /*
  * Get socket name
  */
-static int tquic_getname(struct socket *sock, struct sockaddr *addr, int peer)
+int tquic_sock_getname(struct socket *sock, struct sockaddr *addr, int peer)
 {
 	struct sock *sk = sock->sk;
 	struct tquic_sock *tsk = tquic_sk(sk);
@@ -570,8 +513,8 @@ static int tquic_getname(struct socket *sock, struct sockaddr *addr, int peer)
 /*
  * Poll for events
  */
-static __poll_t tquic_poll_socket(struct file *file, struct socket *sock,
-				  poll_table *wait)
+__poll_t tquic_poll_socket(struct file *file, struct socket *sock,
+			  poll_table *wait)
 {
 	return tquic_poll(file, sock, wait);
 }
@@ -623,7 +566,7 @@ EXPORT_SYMBOL_GPL(tquic_poll);
 /*
  * Shutdown connection
  */
-static int tquic_shutdown(struct socket *sock, int how)
+int tquic_sock_shutdown(struct socket *sock, int how)
 {
 	struct sock *sk = sock->sk;
 	struct tquic_sock *tsk = tquic_sk(sk);
@@ -671,7 +614,7 @@ EXPORT_SYMBOL_GPL(tquic_close);
  * Handles TQUIC-specific ioctls, primarily TQUIC_NEW_STREAM which creates
  * new stream file descriptors. Falls back to inet_ioctl for standard ioctls.
  */
-static int tquic_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
+int tquic_sock_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 {
 	struct sock *sk = sock->sk;
 	struct tquic_sock *tsk = tquic_sk(sk);
@@ -741,8 +684,8 @@ static int tquic_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 /*
  * Set socket options
  */
-static int tquic_setsockopt(struct socket *sock, int level, int optname,
-			    sockptr_t optval, unsigned int optlen)
+int tquic_sock_setsockopt(struct socket *sock, int level, int optname,
+			  sockptr_t optval, unsigned int optlen)
 {
 	struct sock *sk = sock->sk;
 	struct tquic_sock *tsk = tquic_sk(sk);
@@ -1322,8 +1265,8 @@ static int tquic_setsockopt(struct socket *sock, int level, int optname,
 /*
  * Get socket options
  */
-static int tquic_getsockopt(struct socket *sock, int level, int optname,
-			    char __user *optval, int __user *optlen)
+int tquic_sock_getsockopt(struct socket *sock, int level, int optname,
+			  char __user *optval, int __user *optlen)
 {
 	struct sock *sk = sock->sk;
 	struct tquic_sock *tsk = tquic_sk(sk);
@@ -1834,8 +1777,8 @@ static int tquic_getsockopt(struct socket *sock, int level, int optname,
 /*
  * Send message
  */
-static int tquic_sendmsg_socket(struct socket *sock, struct msghdr *msg,
-				size_t len)
+int tquic_sendmsg_socket(struct socket *sock, struct msghdr *msg,
+			 size_t len)
 {
 	return tquic_sendmsg(sock->sk, msg, len);
 }
@@ -2018,8 +1961,8 @@ EXPORT_SYMBOL_GPL(tquic_sendmsg);
 /*
  * Receive message
  */
-static int tquic_recvmsg_socket(struct socket *sock, struct msghdr *msg,
-				size_t len, int flags)
+int tquic_recvmsg_socket(struct socket *sock, struct msghdr *msg,
+			 size_t len, int flags)
 {
 	return tquic_recvmsg(sock->sk, msg, len, flags, NULL);
 }
@@ -2203,23 +2146,6 @@ int tquic_recvmsg(struct sock *sk, struct msghdr *msg, size_t len, int flags,
 EXPORT_SYMBOL_GPL(tquic_recvmsg);
 
 /*
- * Hash/unhash operations (minimal for now)
- */
-static int tquic_hash(struct sock *sk)
-{
-	return 0;
-}
-
-static void tquic_unhash(struct sock *sk)
-{
-}
-
-static int tquic_get_port(struct sock *sk, unsigned short snum)
-{
-	return 0;
-}
-
-/*
  * =============================================================================
  * Zero-Copy I/O Operations
  * =============================================================================
@@ -2238,39 +2164,9 @@ static int tquic_get_port(struct sock *sk, unsigned short snum)
  *
  * Returns: Number of bytes spliced on success, negative errno on failure
  */
-static ssize_t tquic_splice_read_socket(struct socket *sock, loff_t *ppos,
-					struct pipe_inode_info *pipe,
-					size_t len, unsigned int flags)
+ssize_t tquic_splice_read_socket(struct socket *sock, loff_t *ppos,
+				 struct pipe_inode_info *pipe,
+				 size_t len, unsigned int flags)
 {
 	return tquic_splice_read(sock, ppos, pipe, len, flags);
-}
-
-/*
- * Socket registration
- */
-static struct inet_protosw tquic_protosw = {
-	.type = SOCK_STREAM,
-	.protocol = IPPROTO_TQUIC,
-	.prot = &tquic_prot,
-	.ops = &tquic_proto_ops,
-};
-
-int __init tquic_socket_init(void)
-{
-	int ret;
-
-	ret = proto_register(&tquic_prot, 1);
-	if (ret)
-		return ret;
-
-	inet_register_protosw(&tquic_protosw);
-
-	pr_info("tquic: socket interface registered\n");
-	return 0;
-}
-
-void __exit tquic_socket_exit(void)
-{
-	inet_unregister_protosw(&tquic_protosw);
-	proto_unregister(&tquic_prot);
 }
