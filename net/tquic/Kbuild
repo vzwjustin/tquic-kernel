@@ -14,25 +14,21 @@ ifneq ($(KBUILD_EXTMOD),)
   # External module build: kbuild prefers `Kbuild` over `Makefile`, so keep
   # a dedicated external-module recipe behind the `KBUILD_EXTMOD` guard.
 
-  # Include paths for headers
-  ccflags-y += -I$(src)/include -I$(src)/../quic -I$(src)/../.. -I$(src)/diag -DTQUIC_OUT_OF_TREE
+  # Include paths for headers:
+  #   $(src)            - local headers (protocol.h, napi.h, etc.)
+  #   $(src)/../../include - project include/ tree (net/tquic.h, uapi/linux/tquic.h)
+  #   $(src)/../..      - project root (resolves <net/tquic/crypto/...> from source tree)
+  #   $(src)/diag       - diagnostic/tracing headers
+  ccflags-y += -I$(src) -I$(src)/../../include -I$(src)/../.. -I$(src)/diag
+  ccflags-y += -DTQUIC_OUT_OF_TREE
   # Suppress warnings treated as errors during development (remove for production)
   ccflags-y += -Wno-error=unused-function -Wno-error=unused-variable
   ccflags-y += -Wno-error=missing-prototypes
 
   # For out-of-tree builds, build one main module plus CC algorithms
   obj-m += tquic.o
-  obj-m += tquic_cubic.o
-  obj-m += tquic_bbr.o
-  obj-m += tquic_copa.o
-  obj-m += tquic_westwood.o
-  obj-m += tquic_bbrv2.o
-  obj-m += tquic_prague.o
-  obj-m += tquic_l4s.o
-  obj-m += tquic_accecn.o
 
 # Main TQUIC module - consolidated for out-of-tree build
-# This must match the Makefile tquic-y list for consistency
 tquic-y := \
 	tquic_main.o \
 	tquic_proto.o \
@@ -45,6 +41,7 @@ tquic-y := \
 	tquic_output.o \
 	tquic_input.o \
 	tquic_offload.o \
+	quic_offload.o \
 	tquic_timer.o \
 	tquic_cid.o \
 	tquic_migration.o \
@@ -74,6 +71,12 @@ tquic-y := \
 	cong/bbrv2.o \
 	cong/bbrv3.o \
 	cong/prague.o \
+	cong/cubic.o \
+	cong/bbr.o \
+	cong/copa.o \
+	cong/westwood.o \
+	cong/l4s.o \
+	cong/accecn.o \
 	core/varint.o \
 	core/connection.o \
 	core/stream.o \
@@ -143,22 +146,6 @@ tquic-y := \
 	crypto/crypto_module.o \
 	crypto/hw_offload.o
 
-# Optional io_uring support
-tquic-$(CONFIG_TQUIC_IO_URING) += io_uring.o
-
-# Congestion Control algorithms (standalone modules)
-tquic_cubic-y := cong/cubic.o
-tquic_bbr-y := cong/bbr.o
-tquic_copa-y := cong/copa.o
-tquic_westwood-y := cong/westwood.o
-tquic_bbrv2-y := cong/bbrv2.o
-tquic_prague-y := cong/prague.o
-tquic_l4s-y := cong/l4s.o
-tquic_accecn-y := cong/accecn.o
-
-# Extra CFLAGS for out-of-tree build
-# Use the tquic-kernel include directory for TQUIC headers
-ccflags-y += -I$(src) -I$(src)/include -I$(src)/../../include -DTQUIC_OUT_OF_TREE
 else
   # In-tree kernel build: honor Kconfig (CONFIG_TQUIC, etc).
   # This avoids forcing TQUIC into module builds, which can break on

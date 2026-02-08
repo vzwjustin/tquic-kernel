@@ -425,6 +425,7 @@ static struct tquic_cong_ops tquic_cubic_ops = {
 	.can_send = tquic_cubic_can_send,
 };
 
+#ifndef TQUIC_OUT_OF_TREE
 static int __init tquic_cubic_module_init(void)
 {
 	return tquic_register_cong(&tquic_cubic_ops);
@@ -437,6 +438,7 @@ static void __exit tquic_cubic_module_exit(void)
 
 module_init(tquic_cubic_module_init);
 module_exit(tquic_cubic_module_exit);
+#endif /* !TQUIC_OUT_OF_TREE */
 
 MODULE_DESCRIPTION("TQUIC CUBIC Congestion Control");
 MODULE_LICENSE("GPL");

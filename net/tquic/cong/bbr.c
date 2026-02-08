@@ -548,6 +548,7 @@ static struct tquic_cong_ops tquic_bbr_ops = {
 	.can_send = tquic_bbr_can_send,
 };
 
+#ifndef TQUIC_OUT_OF_TREE
 static int __init tquic_bbr_module_init(void)
 {
 	return tquic_register_cong(&tquic_bbr_ops);
@@ -560,6 +561,7 @@ static void __exit tquic_bbr_module_exit(void)
 
 module_init(tquic_bbr_module_init);
 module_exit(tquic_bbr_module_exit);
+#endif /* !TQUIC_OUT_OF_TREE */
 
 MODULE_DESCRIPTION("TQUIC BBR Congestion Control");
 MODULE_LICENSE("GPL");

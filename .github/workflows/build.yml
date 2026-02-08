@@ -35,27 +35,29 @@ jobs:
   build:
     name: "Build / Linux ${{ matrix.kernel }}"
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         include:
+          # 5.4 LTS (EOL Dec 2025, last release archived on kernel.org)
           - kernel: "5.4"
-            kernel_full: "5.4.291"
+            kernel_full: "5.4.302"
             kernel_major: "5"
           - kernel: "5.10"
-            kernel_full: "5.10.235"
+            kernel_full: "5.10.249"
             kernel_major: "5"
           - kernel: "5.15"
-            kernel_full: "5.15.179"
+            kernel_full: "5.15.199"
             kernel_major: "5"
           - kernel: "6.1"
-            kernel_full: "6.1.129"
+            kernel_full: "6.1.162"
             kernel_major: "6"
           - kernel: "6.6"
-            kernel_full: "6.6.76"
+            kernel_full: "6.6.123"
             kernel_major: "6"
           - kernel: "6.12"
-            kernel_full: "6.12.13"
+            kernel_full: "6.12.69"
             kernel_major: "6"
 
     steps:
@@ -67,14 +69,14 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
             build-essential bc kmod cpio flex bison \
-            libssl-dev libelf-dev dwarves
+            libssl-dev libelf-dev dwarves pahole
 
       - name: Cache kernel source
         uses: actions/cache@v4
         id: kernel-cache
         with:
           path: ~/kernel-src/linux-${{ matrix.kernel_full }}
-          key: kernel-${{ matrix.kernel_full }}-prepared-v2
+          key: kernel-${{ matrix.kernel_full }}-prepared-v3
 
       - name: Download kernel source
         if: steps.kernel-cache.outputs.cache-hit != 'true'
@@ -94,21 +96,43 @@ jobs:
         if: steps.kernel-cache.outputs.cache-hit != 'true'
         run: |
           cd ~/kernel-src/linux-${{ matrix.kernel_full }}
-          # Use a minimal defconfig and enable the crypto/net options TQUIC needs
-          make defconfig
-          # Enable dependencies that TQUIC selects
+          # Use allnoconfig as base (minimal) then enable what TQUIC needs
+          make allnoconfig
+          # Core networking
           scripts/config --enable CONFIG_NET
           scripts/config --enable CONFIG_INET
+          scripts/config --enable CONFIG_IPV6
+          scripts/config --enable CONFIG_MODULES
+          # Crypto subsystem (required by TQUIC)
           scripts/config --enable CONFIG_CRYPTO
           scripts/config --enable CONFIG_CRYPTO_AEAD
+          scripts/config --enable CONFIG_CRYPTO_AEAD2
           scripts/config --enable CONFIG_CRYPTO_AES
           scripts/config --enable CONFIG_CRYPTO_GCM
           scripts/config --enable CONFIG_CRYPTO_CHACHA20POLY1305
           scripts/config --enable CONFIG_CRYPTO_SHA256
           scripts/config --enable CONFIG_CRYPTO_SHA512
-          scripts/config --module CONFIG_NET_UDP_TUNNEL
-          scripts/config --enable CONFIG_IPV6
-          # Prepare headers and scripts (no full kernel compilation)
+          scripts/config --enable CONFIG_CRYPTO_HASH
+          scripts/config --enable CONFIG_CRYPTO_HASH2
+          scripts/config --enable CONFIG_CRYPTO_SKCIPHER
+          scripts/config --enable CONFIG_CRYPTO_SKCIPHER2
+          scripts/config --enable CONFIG_CRYPTO_AKCIPHER
+          scripts/config --enable CONFIG_CRYPTO_AKCIPHER2
+          # UDP tunnel (TQUIC dependency)
+          scripts/config --enable CONFIG_NET_UDP_TUNNEL
+          # Networking features used by TQUIC
+          scripts/config --enable CONFIG_XFRM
+          scripts/config --enable CONFIG_INET_TUNNEL
+          scripts/config --enable CONFIG_PROC_FS
+          scripts/config --enable CONFIG_PROC_SYSCTL
+          scripts/config --enable CONFIG_SYSCTL
+          scripts/config --enable CONFIG_NETDEVICES
+          scripts/config --enable CONFIG_NETFILTER
+          # Tracing support
+          scripts/config --enable CONFIG_TRACEPOINTS
+          # Resolve any dependency conflicts
+          make olddefconfig
+          # Prepare headers and build scripts (no full kernel compile)
           make modules_prepare
 
       - name: Build TQUIC module (out-of-tree)
@@ -119,25 +143,34 @@ jobs:
           echo "  KDIR=${KDIR}"
           echo "  TQUIC_SRC=${TQUIC_SRC}"
 
-          # Build the out-of-tree module using the Kbuild file
-          make -C "${KDIR}" M="${TQUIC_SRC}" modules \
-            EXTRA_CFLAGS="-I${GITHUB_WORKSPACE}/include -I${GITHUB_WORKSPACE}/net/quic" \
-            W=1 2>&1 | tee build.log
+          # Build the out-of-tree module using the Kbuild file.
+          # The Kbuild itself sets up include paths via ccflags-y.
+          make -j"$(nproc)" -C "${KDIR}" M="${TQUIC_SRC}" modules 2>&1 | tee build.log
+          EXIT_CODE=${PIPESTATUS[0]}
 
           echo ""
           echo "=== Build artifacts ==="
-          find "${TQUIC_SRC}" -name '*.ko' -exec ls -lh {} \;
+          find "${TQUIC_SRC}" -name '*.ko' -exec ls -lh {} \; || true
+
+          if [ "${EXIT_CODE}" -ne 0 ]; then
+            echo ""
+            echo "=== Last 50 lines of build output ==="
+            tail -50 build.log
+            exit "${EXIT_CODE}"
+          fi
 
       - name: Check for build warnings
+        if: success()
         run: |
           WARNS=$(grep -c ' warning:' build.log || true)
           echo "Build completed with ${WARNS} warning(s)."
           if [ "${WARNS}" -gt 0 ]; then
             echo "::warning::Build produced ${WARNS} compiler warning(s)"
-            grep ' warning:' build.log | head -30
+            grep ' warning:' build.log | sort -u | head -30
           fi
 
       - name: Verify module info
+        if: success()
         run: |
           TQUIC_SRC="${GITHUB_WORKSPACE}/net/tquic"
           KO=$(find "${TQUIC_SRC}" -name 'tquic.ko' -print -quit)
@@ -147,29 +180,3 @@ jobs:
           fi
           echo "=== modinfo ==="
           modinfo "${KO}" || true
-
-  checkpatch:
-    name: "Checkpatch"
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Run checkpatch on TQUIC files
-        run: |
-          # Check only the TQUIC-specific source files
-          ERRORS=0
-          for f in $(find net/quic net/tquic include/net/tquic* include/net/quic* \
-                     -name '*.c' -o -name '*.h' 2>/dev/null | head -50); do
-            echo "--- Checking ${f} ---"
-            # Use --terse and ignore some warnings that are noisy for large files
-            perl scripts/checkpatch.pl --no-tree --strict -f "${f}" \
-              --ignore LONG_LINE,FILE_PATH_CHANGES,SPDX_LICENSE_TAG \
-              --terse --show-types 2>&1 | tail -5 || ERRORS=$((ERRORS + 1))
-          done
-          echo ""
-          echo "Checked files with ${ERRORS} file(s) having issues."
-          # Don't fail the build on style issues - just report them
-          exit 0

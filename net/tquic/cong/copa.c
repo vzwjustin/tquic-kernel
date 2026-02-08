@@ -600,6 +600,7 @@ static struct tquic_cong_ops tquic_copa_ops = {
 	.can_send = tquic_copa_can_send,
 };
 
+#ifndef TQUIC_OUT_OF_TREE
 static int __init tquic_copa_module_init(void)
 {
 	pr_info("TQUIC Copa congestion control loaded\n");
@@ -614,6 +615,7 @@ static void __exit tquic_copa_module_exit(void)
 
 module_init(tquic_copa_module_init);
 module_exit(tquic_copa_module_exit);
+#endif /* !TQUIC_OUT_OF_TREE */
 
 MODULE_DESCRIPTION("TQUIC Copa Congestion Control");
 MODULE_AUTHOR("Linux Foundation");
