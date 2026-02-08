@@ -406,7 +406,7 @@ static int tquic_pm_kernel_init(struct net *net)
 
 	/* Register netdevice notifier */
 	kdata->netdev_notifier.notifier_call = tquic_pm_kernel_netdev_event;
-	ret = register_netdevice_notifier_net(net, &kdata->netdev_notifier);
+	ret = tquic_register_netdevice_notifier_net(net, &kdata->netdev_notifier);
 	if (ret < 0) {
 		pr_err("TQUIC PM kernel: Failed to register netdev notifier: %d\n",
 		       ret);

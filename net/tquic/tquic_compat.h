@@ -597,6 +597,57 @@ static inline u8 get_random_u8(void)
 #endif
 
 /* ========================================================================
+ * Kernel < 5.10: register_netdevice_notifier_net() not available
+ * Fall back to global register_netdevice_notifier().
+ * ======================================================================== */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 10, 0)
+static inline int
+tquic_register_netdevice_notifier_net(struct net *net,
+				      struct notifier_block *nb)
+{
+	return register_netdevice_notifier(nb);
+}
+static inline int
+tquic_unregister_netdevice_notifier_net(struct net *net,
+					struct notifier_block *nb)
+{
+	return unregister_netdevice_notifier(nb);
+}
+#else
+#define tquic_register_netdevice_notifier_net(net, nb) \
+	register_netdevice_notifier_net(net, nb)
+#define tquic_unregister_netdevice_notifier_net(net, nb) \
+	unregister_netdevice_notifier_net(net, nb)
+#endif
+
+/* ========================================================================
+ * Kernel < 5.13: proc_dou8vec_minmax() was introduced in 5.13
+ * Provide a compat implementation using proc_dointvec_minmax with a
+ * temporary int variable to handle the u8 <-> int size mismatch.
+ * ======================================================================== */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 13, 0)
+static inline int proc_dou8vec_minmax(struct ctl_table *table, int write,
+				      void __user *buffer, size_t *lenp,
+				      loff_t *ppos)
+{
+	struct ctl_table tmp;
+	unsigned int val;
+	int ret;
+
+	tmp = *table;
+	tmp.maxlen = sizeof(val);
+	tmp.data = &val;
+
+	val = *(u8 *)table->data;
+	ret = proc_dointvec_minmax(&tmp, write, buffer, lenp, ppos);
+	if (!ret && write)
+		*(u8 *)table->data = val;
+
+	return ret;
+}
+#endif
+
+/* ========================================================================
  * UDP GRO enable: API changed multiple times
  * - 6.7+: set_bit(UDP_FLAGS_GRO_ENABLED, &udp_sk(sk)->udp_flags)
  * - 5.15-6.6: udp_sk(sk)->gro_enabled = 1
@@ -605,12 +656,17 @@ static inline u8 get_random_u8(void)
 #include <net/udp.h>
 static inline void tquic_udp_enable_gro(struct sock *sk)
 {
+	/*
+	 * UDP GRO enable API history:
+	 * - 6.4+: set_bit(UDP_FLAGS_GRO_ENABLED, &udp_sk->udp_flags)
+	 *   (gro_enabled merged into udp_flags bitfield)
+	 * - < 6.4: no reliable direct-set method across all versions;
+	 *   the kernel enables GRO via udp_sock_set_gro() or setsockopt
+	 *   internally. For out-of-tree, just skip — GRO is a performance
+	 *   optimization, not a correctness requirement.
+	 */
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 7, 0)
 	set_bit(UDP_FLAGS_GRO_ENABLED, &udp_sk(sk)->udp_flags);
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0)
-	udp_sk(sk)->gro_enabled = 1;
-#else
-	/* GRO not easily available on < 5.15; skip */
 #endif
 }
 

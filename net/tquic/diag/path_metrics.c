@@ -693,7 +693,7 @@ void tquic_metrics_unsubscribe_conn(struct tquic_connection *conn)
 EXPORT_SYMBOL_GPL(tquic_metrics_unsubscribe_conn);
 
 /* Netlink operations */
-static const struct genl_small_ops tquic_metrics_ops[] = {
+static const struct genl_ops tquic_metrics_ops[] = {
 	{
 		.cmd = TQUIC_NL_CMD_GET_PATH_METRICS,
 		.validate = GENL_DONT_VALIDATE_STRICT | GENL_DONT_VALIDATE_DUMP,
@@ -723,8 +723,8 @@ static struct genl_family tquic_metrics_family __ro_after_init = {
 	.maxattr = TQUIC_METRICS_ATTR_MAX,
 	.policy = tquic_metrics_policy,
 	.module = THIS_MODULE,
-	.small_ops = tquic_metrics_ops,
-	.n_small_ops = ARRAY_SIZE(tquic_metrics_ops),
+	.ops = tquic_metrics_ops,
+	.n_ops = ARRAY_SIZE(tquic_metrics_ops),
 	.mcgrps = tquic_metrics_mcgrps,
 	.n_mcgrps = ARRAY_SIZE(tquic_metrics_mcgrps),
 };

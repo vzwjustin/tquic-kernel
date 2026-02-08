@@ -35,7 +35,7 @@ static struct genl_family tquic_pm_genl_family;
 static const struct genl_multicast_group tquic_pm_mcgrps[] = {
 	[TQUIC_PM_CMD_GRP_OFFSET] = { .name = TQUIC_PM_CMD_GRP_NAME },
 	[TQUIC_PM_EV_GRP_OFFSET]  = { .name = TQUIC_PM_EV_GRP_NAME,
-				      .flags = GENL_MCAST_CAP_NET_ADMIN },
+				      TQUIC_GENL_MCAST_FLAGS(GENL_MCAST_CAP_NET_ADMIN) },
 };
 
 /*
@@ -640,7 +640,7 @@ EXPORT_SYMBOL_GPL(tquic_pm_nl_send_event);
 /*
  * Genetlink operations
  */
-static const struct genl_small_ops tquic_pm_nl_ops[] = {
+static const struct genl_ops tquic_pm_nl_ops[] = {
 	{
 		.cmd		= TQUIC_PM_CMD_ADD_PATH,
 		.doit		= tquic_pm_nl_add_path,
@@ -678,9 +678,9 @@ static struct genl_family tquic_pm_genl_family __ro_after_init = {
 	.policy		= tquic_pm_policy,
 	.netnsok	= true,
 	.module		= THIS_MODULE,
-	.small_ops	= tquic_pm_nl_ops,
-	.n_small_ops	= ARRAY_SIZE(tquic_pm_nl_ops),
-	.resv_start_op	= TQUIC_PM_CMD_REMOVE + 1,
+	.ops		= tquic_pm_nl_ops,
+	.n_ops		= ARRAY_SIZE(tquic_pm_nl_ops),
+	TQUIC_GENL_RESV_START_OP(TQUIC_PM_CMD_REMOVE + 1)
 	.mcgrps		= tquic_pm_mcgrps,
 	.n_mcgrps	= ARRAY_SIZE(tquic_pm_mcgrps),
 };
