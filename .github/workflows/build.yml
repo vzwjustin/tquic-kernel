@@ -87,7 +87,7 @@ jobs:
           # kernel.org URL pattern: v5.x or v6.x subdirectory
           # RC kernels are in the testing/ subdirectory
           if [ "${{ matrix.kernel_testing }}" = "true" ]; then
-            URL="https://cdn.kernel.org/pub/linux/kernel/v${MAJOR}.x/testing/linux-${KVER}.tar.gz"
+            URL="https://git.kernel.org/torvalds/t/linux-${KVER}.tar.gz"
           else
             URL="https://cdn.kernel.org/pub/linux/kernel/v${MAJOR}.x/linux-${KVER}.tar.xz"
           fi
