@@ -274,7 +274,7 @@ static const int tquic_sysctl_two = 2;
 /*
  * flowi4_dscp replaced flowi4_tos on newer kernels.
  */
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 19, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 18, 0)
 #define TQUIC_FLOWI4_SET_DSCP(fl4, dscp) ((fl4).flowi4_dscp = (dscp))
 #else
 #define TQUIC_FLOWI4_SET_DSCP(fl4, dscp) ((fl4).flowi4_tos = (dscp))
