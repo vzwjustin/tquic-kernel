@@ -54,6 +54,10 @@ jobs:
           - kernel: "6.18"
             kernel_full: "6.18.9"
             kernel_major: "6"
+          - kernel: "6.19-rc8"
+            kernel_full: "6.19-rc8"
+            kernel_major: "6"
+            kernel_testing: true
 
     steps:
       - name: Checkout TQUIC source
@@ -81,11 +85,17 @@ jobs:
           KVER="${{ matrix.kernel_full }}"
 
           # kernel.org URL pattern: v5.x or v6.x subdirectory
-          URL="https://cdn.kernel.org/pub/linux/kernel/v${MAJOR}.x/linux-${KVER}.tar.xz"
+          # RC kernels are in the testing/ subdirectory
+          if [ "${{ matrix.kernel_testing }}" = "true" ]; then
+            URL="https://cdn.kernel.org/pub/linux/kernel/v${MAJOR}.x/testing/linux-${KVER}.tar.gz"
+          else
+            URL="https://cdn.kernel.org/pub/linux/kernel/v${MAJOR}.x/linux-${KVER}.tar.xz"
+          fi
           echo "Downloading ${URL} ..."
-          curl -fSL --retry 3 --retry-delay 5 -o "linux-${KVER}.tar.xz" "${URL}"
-          tar xf "linux-${KVER}.tar.xz"
-          rm -f "linux-${KVER}.tar.xz"
+          ARCHIVE="linux-${KVER}.tar.${URL##*.}"
+          curl -fSL --retry 3 --retry-delay 5 -o "${ARCHIVE}" "${URL}"
+          tar xf "${ARCHIVE}"
+          rm -f "${ARCHIVE}"
 
       - name: Prepare kernel headers
         if: steps.kernel-cache.outputs.cache-hit != 'true'
