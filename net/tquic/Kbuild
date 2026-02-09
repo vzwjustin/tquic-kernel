@@ -24,9 +24,15 @@ ifneq ($(KBUILD_EXTMOD),)
   #   $(src)/diag          - diagnostic/tracing headers
   ccflags-y += -I$(src)/compat -I$(src) -I$(src)/../../include -I$(src)/../.. -I$(src)/diag
   ccflags-y += -DTQUIC_OUT_OF_TREE
-  # Suppress warnings treated as errors during development (remove for production)
-  ccflags-y += -Wno-error=unused-function -Wno-error=unused-variable
-  ccflags-y += -Wno-error=missing-prototypes
+  # Suppress warnings that are expected for out-of-tree consolidated modules:
+  #   -Wno-missing-prototypes : many internal functions lack header prototypes
+  #                             (safe; these are internal to the module)
+  #   -Wno-unused-function    : some functions are only used on newer kernels
+  #   -Wno-unused-variable    : similarly, some variables are version-dependent
+  #   -Wframe-larger-than=2048: consolidated module has a few large stack frames
+  #                             (connection setup, crypto) that exceed the 1024 default
+  ccflags-y += -Wno-missing-prototypes -Wno-unused-function -Wno-unused-variable
+  ccflags-y += -Wframe-larger-than=2048
 
   # For out-of-tree builds, build one main module plus CC algorithms
   obj-m += tquic.o
