@@ -139,5 +139,20 @@ int tquic_hs_get_transport_params(struct tquic_handshake *hs,
 bool tquic_hs_is_complete(struct tquic_handshake *hs);
 const char *tquic_hs_get_alpn(struct tquic_handshake *hs);
 bool tquic_hs_early_data_accepted(struct tquic_handshake *hs);
+enum tquic_hs_state tquic_hs_get_state(struct tquic_handshake *hs);
+
+/* Secret accessors for QUIC key installation */
+u16 tquic_hs_get_cipher_suite(struct tquic_handshake *hs);
+int tquic_hs_get_handshake_secrets(struct tquic_handshake *hs,
+				   u8 *client_secret, u32 *client_len,
+				   u8 *server_secret, u32 *server_len);
+int tquic_hs_get_app_secrets(struct tquic_handshake *hs,
+			     u8 *client_secret, u32 *client_len,
+			     u8 *server_secret, u32 *server_len);
+
+/* TLS record processing for inline handshake */
+int tquic_hs_process_record(struct tquic_handshake *hs,
+			    const u8 *data, u32 len,
+			    u8 *out_buf, u32 out_buf_len, u32 *out_len);
 
 #endif /* _NET_TQUIC_HANDSHAKE_H */

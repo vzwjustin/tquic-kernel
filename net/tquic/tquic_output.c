@@ -2198,6 +2198,120 @@ int tquic_output_flush(struct tquic_connection *conn)
 EXPORT_SYMBOL_GPL(tquic_output_flush);
 
 /*
+ * tquic_output_flush_crypto - Flush pending CRYPTO frame data
+ * @conn: Connection with pending crypto data
+ *
+ * Drains the per-PN-space crypto_buffer queues and sends CRYPTO frames
+ * containing TLS handshake messages. Called after the inline TLS state
+ * machine generates response messages (e.g., ClientHello, Finished).
+ *
+ * CRYPTO frames use the following format (RFC 9000 Section 19.6):
+ *   Type (0x06) + Offset (varint) + Length (varint) + Data
+ *
+ * Returns: Number of CRYPTO frames sent, or negative errno on error
+ */
+int tquic_output_flush_crypto(struct tquic_connection *conn)
+{
+	struct tquic_path *path;
+	struct sk_buff *crypto_skb;
+	struct sk_buff *send_skb;
+	u8 frame_hdr[32];
+	int hdr_len;
+	int frames_sent = 0;
+	int space;
+	u64 crypto_offset;
+	int ret;
+
+	if (!conn)
+		return -EINVAL;
+
+	path = conn->active_path;
+	if (!path)
+		return -ENOENT;
+
+	/*
+	 * Process each PN space's crypto buffer.
+	 * Initial and Handshake spaces carry TLS handshake messages.
+	 */
+	for (space = 0; space < TQUIC_PN_SPACE_COUNT; space++) {
+		crypto_offset = 0;
+
+		while ((crypto_skb = skb_dequeue(&conn->crypto_buffer[space]))) {
+			u32 data_len = crypto_skb->len;
+
+			/*
+			 * Build CRYPTO frame header:
+			 *   Type (varint) + Offset (varint) + Length (varint)
+			 */
+			hdr_len = 0;
+
+			/* Frame type: CRYPTO (0x06) */
+			ret = tquic_encode_varint(frame_hdr + hdr_len,
+						  sizeof(frame_hdr) - hdr_len,
+						  TQUIC_FRAME_CRYPTO);
+			if (ret < 0) {
+				kfree_skb(crypto_skb);
+				return ret;
+			}
+			hdr_len += ret;
+
+			/* Offset */
+			ret = tquic_encode_varint(frame_hdr + hdr_len,
+						  sizeof(frame_hdr) - hdr_len,
+						  crypto_offset);
+			if (ret < 0) {
+				kfree_skb(crypto_skb);
+				return ret;
+			}
+			hdr_len += ret;
+
+			/* Length */
+			ret = tquic_encode_varint(frame_hdr + hdr_len,
+						  sizeof(frame_hdr) - hdr_len,
+						  data_len);
+			if (ret < 0) {
+				kfree_skb(crypto_skb);
+				return ret;
+			}
+			hdr_len += ret;
+
+			/* Allocate send skb with header + data */
+			send_skb = alloc_skb(hdr_len + data_len + 128,
+					     GFP_ATOMIC);
+			if (!send_skb) {
+				kfree_skb(crypto_skb);
+				return -ENOMEM;
+			}
+
+			/* Reserve headroom for QUIC packet header */
+			skb_reserve(send_skb, 64);
+
+			/* Copy frame header */
+			skb_put_data(send_skb, frame_hdr, hdr_len);
+
+			/* Copy crypto data */
+			skb_put_data(send_skb, crypto_skb->data, data_len);
+
+			crypto_offset += data_len;
+			kfree_skb(crypto_skb);
+
+			/* Send the CRYPTO frame */
+			ret = tquic_output_packet(conn, path, send_skb);
+			if (ret < 0) {
+				pr_debug("tquic: failed to send CRYPTO frame: %d\n",
+					 ret);
+				return ret;
+			}
+
+			frames_sent++;
+		}
+	}
+
+	return frames_sent;
+}
+EXPORT_SYMBOL_GPL(tquic_output_flush_crypto);
+
+/*
  * =============================================================================
  * DATAGRAM Frame Support (RFC 9221)
  * =============================================================================

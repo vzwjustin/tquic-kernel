@@ -740,6 +740,194 @@ TRACE_EVENT(tquic_scheduler_decision,
 		  __entry->reason, __entry->candidate_count)
 );
 
+/*
+ * =============================================================================
+ * Handshake Tracepoints
+ * =============================================================================
+ */
+
+/**
+ * tquic:handshake_start - TLS handshake initiated
+ * @conn_id: Connection ID
+ * @is_server: Server or client role
+ * @has_session_ticket: Whether 0-RTT was attempted
+ * @verify_mode: Certificate verification mode
+ */
+TRACE_EVENT(tquic_handshake_start,
+
+	TP_PROTO(u64 conn_id, bool is_server, bool has_session_ticket,
+		 u32 verify_mode),
+
+	TP_ARGS(conn_id, is_server, has_session_ticket, verify_mode),
+
+	TP_STRUCT__entry(
+		__field(u64, conn_id)
+		__field(bool, is_server)
+		__field(bool, has_session_ticket)
+		__field(u32, verify_mode)
+	),
+
+	TP_fast_assign(
+		__entry->conn_id = conn_id;
+		__entry->is_server = is_server;
+		__entry->has_session_ticket = has_session_ticket;
+		__entry->verify_mode = verify_mode;
+	),
+
+	TP_printk("conn=%llu role=%s ticket=%d verify=%u",
+		  __entry->conn_id,
+		  __entry->is_server ? "server" : "client",
+		  __entry->has_session_ticket, __entry->verify_mode)
+);
+
+/**
+ * tquic:handshake_complete - TLS handshake completed
+ * @conn_id: Connection ID
+ * @status: Result (0=success, negative=error)
+ * @duration_us: Handshake duration in microseconds
+ * @cipher_suite: Negotiated cipher suite
+ * @early_data: Whether 0-RTT was used
+ */
+TRACE_EVENT(tquic_handshake_complete,
+
+	TP_PROTO(u64 conn_id, int status, u64 duration_us,
+		 u32 cipher_suite, bool early_data),
+
+	TP_ARGS(conn_id, status, duration_us, cipher_suite, early_data),
+
+	TP_STRUCT__entry(
+		__field(u64, conn_id)
+		__field(int, status)
+		__field(u64, duration_us)
+		__field(u32, cipher_suite)
+		__field(bool, early_data)
+	),
+
+	TP_fast_assign(
+		__entry->conn_id = conn_id;
+		__entry->status = status;
+		__entry->duration_us = duration_us;
+		__entry->cipher_suite = cipher_suite;
+		__entry->early_data = early_data;
+	),
+
+	TP_printk("conn=%llu status=%d duration=%lluus cipher=0x%04x early_data=%d",
+		  __entry->conn_id, __entry->status, __entry->duration_us,
+		  __entry->cipher_suite, __entry->early_data)
+);
+
+/*
+ * =============================================================================
+ * Bonding/Failover Tracepoints
+ * =============================================================================
+ */
+
+/**
+ * tquic:failover - Path failover event
+ * @conn_id: Connection ID
+ * @failed_path_id: Path that failed
+ * @new_path_id: Path switched to
+ * @reason: Failover reason (timeout, loss, manual)
+ * @rtt_us: RTT on failed path at time of failover
+ */
+TRACE_EVENT(tquic_failover,
+
+	TP_PROTO(u64 conn_id, u32 failed_path_id, u32 new_path_id,
+		 u32 reason, u64 rtt_us),
+
+	TP_ARGS(conn_id, failed_path_id, new_path_id, reason, rtt_us),
+
+	TP_STRUCT__entry(
+		__field(u64, conn_id)
+		__field(u32, failed_path_id)
+		__field(u32, new_path_id)
+		__field(u32, reason)
+		__field(u64, rtt_us)
+	),
+
+	TP_fast_assign(
+		__entry->conn_id = conn_id;
+		__entry->failed_path_id = failed_path_id;
+		__entry->new_path_id = new_path_id;
+		__entry->reason = reason;
+		__entry->rtt_us = rtt_us;
+	),
+
+	TP_printk("conn=%llu failed=%u new=%u reason=%u rtt=%lluus",
+		  __entry->conn_id, __entry->failed_path_id,
+		  __entry->new_path_id, __entry->reason, __entry->rtt_us)
+);
+
+/**
+ * tquic:bond_state - Bonding state change
+ * @conn_id: Connection ID
+ * @bond_mode: Current bonding mode
+ * @active_paths: Number of active paths
+ * @total_bandwidth: Estimated aggregate bandwidth (bytes/sec)
+ */
+TRACE_EVENT(tquic_bond_state,
+
+	TP_PROTO(u64 conn_id, u32 bond_mode, u32 active_paths,
+		 u64 total_bandwidth),
+
+	TP_ARGS(conn_id, bond_mode, active_paths, total_bandwidth),
+
+	TP_STRUCT__entry(
+		__field(u64, conn_id)
+		__field(u32, bond_mode)
+		__field(u32, active_paths)
+		__field(u64, total_bandwidth)
+	),
+
+	TP_fast_assign(
+		__entry->conn_id = conn_id;
+		__entry->bond_mode = bond_mode;
+		__entry->active_paths = active_paths;
+		__entry->total_bandwidth = total_bandwidth;
+	),
+
+	TP_printk("conn=%llu mode=%u paths=%u bandwidth=%llu",
+		  __entry->conn_id, __entry->bond_mode,
+		  __entry->active_paths, __entry->total_bandwidth)
+);
+
+/**
+ * tquic:frame_debug - Frame-level debug trace
+ * @conn_id: Connection ID
+ * @frame_type: QUIC frame type (RFC 9000 Table 3)
+ * @length: Frame length in bytes
+ * @path_id: Path ID
+ * @is_send: Sending (true) or receiving (false)
+ */
+TRACE_EVENT(tquic_frame_debug,
+
+	TP_PROTO(u64 conn_id, u32 frame_type, u32 length,
+		 u32 path_id, bool is_send),
+
+	TP_ARGS(conn_id, frame_type, length, path_id, is_send),
+
+	TP_STRUCT__entry(
+		__field(u64, conn_id)
+		__field(u32, frame_type)
+		__field(u32, length)
+		__field(u32, path_id)
+		__field(bool, is_send)
+	),
+
+	TP_fast_assign(
+		__entry->conn_id = conn_id;
+		__entry->frame_type = frame_type;
+		__entry->length = length;
+		__entry->path_id = path_id;
+		__entry->is_send = is_send;
+	),
+
+	TP_printk("conn=%llu frame=0x%02x len=%u path=%u dir=%s",
+		  __entry->conn_id, __entry->frame_type,
+		  __entry->length, __entry->path_id,
+		  __entry->is_send ? "tx" : "rx")
+);
+
 #endif /* _TQUIC_TRACEPOINTS_H */
 
 /* This must be outside the header guard */

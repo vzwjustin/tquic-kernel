@@ -3013,6 +3013,193 @@ bool tquic_hs_early_data_accepted(struct tquic_handshake *hs)
 EXPORT_SYMBOL_GPL(tquic_hs_early_data_accepted);
 
 /*
+ * Get current handshake state
+ */
+enum tquic_hs_state tquic_hs_get_state(struct tquic_handshake *hs)
+{
+	return hs ? hs->state : TQUIC_HS_ERROR;
+}
+EXPORT_SYMBOL_GPL(tquic_hs_get_state);
+
+/*
+ * Get negotiated cipher suite
+ */
+u16 tquic_hs_get_cipher_suite(struct tquic_handshake *hs)
+{
+	return hs ? hs->cipher_suite : 0;
+}
+EXPORT_SYMBOL_GPL(tquic_hs_get_cipher_suite);
+
+/*
+ * Get handshake-level traffic secrets
+ *
+ * Returns the client_handshake_secret and server_handshake_secret derived
+ * after ServerHello is processed. These are used to derive handshake-level
+ * packet protection keys for CRYPTO frame exchange.
+ */
+int tquic_hs_get_handshake_secrets(struct tquic_handshake *hs,
+				   u8 *client_secret, u32 *client_len,
+				   u8 *server_secret, u32 *server_len)
+{
+	if (!hs || !client_secret || !client_len ||
+	    !server_secret || !server_len)
+		return -EINVAL;
+
+	/* Handshake secrets available after ServerHello processing */
+	if (hs->state < TQUIC_HS_WAIT_EE && hs->state != TQUIC_HS_COMPLETE)
+		return -EAGAIN;
+
+	memcpy(client_secret, hs->client_handshake_secret, hs->hash_len);
+	*client_len = hs->hash_len;
+	memcpy(server_secret, hs->server_handshake_secret, hs->hash_len);
+	*server_len = hs->hash_len;
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(tquic_hs_get_handshake_secrets);
+
+/*
+ * Get application-level traffic secrets
+ *
+ * Returns the client_app_secret and server_app_secret derived after the
+ * handshake completes. These are used for 1-RTT packet protection.
+ */
+int tquic_hs_get_app_secrets(struct tquic_handshake *hs,
+			     u8 *client_secret, u32 *client_len,
+			     u8 *server_secret, u32 *server_len)
+{
+	if (!hs || !client_secret || !client_len ||
+	    !server_secret || !server_len)
+		return -EINVAL;
+
+	/* App secrets only available after handshake completion */
+	if (hs->state != TQUIC_HS_COMPLETE)
+		return -EAGAIN;
+
+	memcpy(client_secret, hs->client_app_secret, hs->hash_len);
+	*client_len = hs->hash_len;
+	memcpy(server_secret, hs->server_app_secret, hs->hash_len);
+	*server_len = hs->hash_len;
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(tquic_hs_get_app_secrets);
+
+/*
+ * Process a TLS record from a CRYPTO frame
+ *
+ * Routes the incoming TLS handshake message to the appropriate processing
+ * function based on the current state machine state. Generates response
+ * messages (if any) into out_buf.
+ *
+ * @hs: Handshake context
+ * @data: TLS record data (handshake message type + length + payload)
+ * @len: Length of input data
+ * @out_buf: Buffer for response messages (ClientHello, Finished, etc.)
+ * @out_buf_len: Size of output buffer
+ * @out_len: Number of bytes written to out_buf
+ *
+ * Returns: 0 on success, negative errno on error
+ */
+int tquic_hs_process_record(struct tquic_handshake *hs,
+			    const u8 *data, u32 len,
+			    u8 *out_buf, u32 out_buf_len, u32 *out_len)
+{
+	u8 msg_type;
+	u32 msg_len;
+	const u8 *msg_data;
+	int ret;
+
+	if (!hs || !data || len < 4)
+		return -EINVAL;
+
+	*out_len = 0;
+
+	/*
+	 * Parse TLS handshake message header:
+	 *   msg_type (1 byte) + length (3 bytes) + body
+	 */
+	msg_type = data[0];
+	msg_len = ((u32)data[1] << 16) | ((u32)data[2] << 8) | data[3];
+
+	if (4 + msg_len > len)
+		return -EINVAL;
+
+	msg_data = data + 4;
+
+	switch (msg_type) {
+	case TLS_HS_SERVER_HELLO:
+		if (hs->state != TQUIC_HS_WAIT_SH)
+			return -EPROTO;
+		ret = tquic_hs_process_server_hello(hs, data, 4 + msg_len);
+		break;
+
+	case TLS_HS_ENCRYPTED_EXTENSIONS:
+		if (hs->state != TQUIC_HS_WAIT_EE)
+			return -EPROTO;
+		ret = tquic_hs_process_encrypted_extensions(hs, data,
+							    4 + msg_len);
+		break;
+
+	case TLS_HS_CERTIFICATE_REQUEST:
+		if (hs->state != TQUIC_HS_WAIT_CERT_CR)
+			return -EPROTO;
+		/*
+		 * Certificate request - note it and advance state.
+		 * We don't support client certificates yet, so we'll
+		 * send an empty Certificate message later.
+		 */
+		hs->client_auth_requested = true;
+		hs->state = TQUIC_HS_WAIT_CERT;
+		ret = 0;
+		break;
+
+	case TLS_HS_CERTIFICATE:
+		if (hs->state != TQUIC_HS_WAIT_CERT &&
+		    hs->state != TQUIC_HS_WAIT_CERT_CR)
+			return -EPROTO;
+		ret = tquic_hs_process_certificate(hs, data, 4 + msg_len);
+		break;
+
+	case TLS_HS_CERTIFICATE_VERIFY:
+		if (hs->state != TQUIC_HS_WAIT_CV)
+			return -EPROTO;
+		ret = tquic_hs_process_certificate_verify(hs, data,
+							  4 + msg_len);
+		break;
+
+	case TLS_HS_FINISHED:
+		if (hs->state != TQUIC_HS_WAIT_FINISHED)
+			return -EPROTO;
+		ret = tquic_hs_process_finished(hs, data, 4 + msg_len);
+		if (ret < 0)
+			break;
+
+		/*
+		 * After processing server Finished, generate client Finished.
+		 * This is the last client handshake message.
+		 */
+		ret = tquic_hs_generate_finished(hs, out_buf, out_buf_len,
+						 out_len);
+		break;
+
+	case TLS_HS_NEW_SESSION_TICKET:
+		ret = tquic_hs_process_new_session_ticket(hs, data,
+							  4 + msg_len);
+		break;
+
+	default:
+		pr_debug("tquic_hs: unexpected message type %u in state %d\n",
+			 msg_type, hs->state);
+		ret = -EPROTO;
+		break;
+	}
+
+	return ret;
+}
+EXPORT_SYMBOL_GPL(tquic_hs_process_record);
+
+/*
  * Cleanup handshake context
  */
 void tquic_hs_cleanup(struct tquic_handshake *hs)

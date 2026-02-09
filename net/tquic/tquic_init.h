@@ -87,4 +87,8 @@ void tquic_nl_exit(void);
 int tquic_cid_hash_init(void);
 void tquic_cid_hash_cleanup(void);
 
+/* Debug infrastructure (debugfs) */
+int tquic_debug_init(void);
+void tquic_debug_exit(void);
+
 #endif /* _TQUIC_INIT_H */
