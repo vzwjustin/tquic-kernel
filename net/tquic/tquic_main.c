@@ -888,12 +888,19 @@ int __init tquic_init(void)
 	if (err)
 		goto err_ratelimit;
 
+	/* Initialize debug infrastructure (debugfs) */
+	err = tquic_debug_init();
+	if (err)
+		goto err_debug;
+
 	pr_info("tquic: TQUIC WAN bonding subsystem initialized\n");
 	pr_info("tquic: Default bond mode: %d, scheduler: %s, congestion: %s\n",
 		tquic_default_bond_mode, tquic_default_scheduler, tquic_default_cong);
 
 	return 0;
 
+err_debug:
+	tquic_ratelimit_module_exit();
 err_ratelimit:
 	tquic_rate_limit_module_exit();
 err_rate_limit:
@@ -1022,6 +1029,7 @@ void __exit tquic_exit(void)
 	pr_info("tquic: shutting down TQUIC WAN bonding subsystem\n");
 
 	/* Cleanup in reverse order of initialization */
+	tquic_debug_exit();
 	tquic_ratelimit_module_exit();
 	tquic_rate_limit_module_exit();
 	tquic_offload_exit();

@@ -537,6 +537,121 @@ void tquic_trace_scheduler_decision(struct tquic_connection *conn,
 }
 EXPORT_SYMBOL_GPL(tquic_trace_scheduler_decision);
 
+/**
+ * tquic_trace_handshake_start - Trace handshake initiation
+ * @conn: Connection structure
+ * @is_server: Server or client role
+ * @has_session_ticket: Whether 0-RTT was attempted
+ * @verify_mode: Certificate verification mode
+ */
+void tquic_trace_handshake_start(struct tquic_connection *conn,
+				 bool is_server, bool has_session_ticket,
+				 u32 verify_mode)
+{
+	if (!conn)
+		return;
+
+	trace_tquic_handshake_start(
+		conn->id,
+		is_server,
+		has_session_ticket,
+		verify_mode
+	);
+}
+EXPORT_SYMBOL_GPL(tquic_trace_handshake_start);
+
+/**
+ * tquic_trace_handshake_complete - Trace handshake completion
+ * @conn: Connection structure
+ * @status: Result (0=success, negative=error)
+ * @duration_us: Handshake duration in microseconds
+ */
+void tquic_trace_handshake_complete(struct tquic_connection *conn,
+				    int status, u64 duration_us)
+{
+	if (!conn)
+		return;
+
+	trace_tquic_handshake_complete(
+		conn->id,
+		status,
+		duration_us,
+		conn->cipher_suite,
+		conn->early_data_accepted
+	);
+}
+EXPORT_SYMBOL_GPL(tquic_trace_handshake_complete);
+
+/**
+ * tquic_trace_failover - Trace path failover event
+ * @conn: Connection structure
+ * @failed_path_id: Path that failed
+ * @new_path_id: Path switched to
+ * @reason: Failover reason
+ * @rtt_us: RTT on failed path at time of failover
+ */
+void tquic_trace_failover(struct tquic_connection *conn,
+			  u32 failed_path_id, u32 new_path_id,
+			  u32 reason, u64 rtt_us)
+{
+	if (!conn)
+		return;
+
+	trace_tquic_failover(
+		conn->id,
+		failed_path_id,
+		new_path_id,
+		reason,
+		rtt_us
+	);
+}
+EXPORT_SYMBOL_GPL(tquic_trace_failover);
+
+/**
+ * tquic_trace_bond_state - Trace bonding state change
+ * @conn: Connection structure
+ * @bond_mode: Current bonding mode
+ * @active_paths: Number of active paths
+ * @total_bandwidth: Estimated aggregate bandwidth
+ */
+void tquic_trace_bond_state(struct tquic_connection *conn,
+			    u32 bond_mode, u32 active_paths,
+			    u64 total_bandwidth)
+{
+	if (!conn)
+		return;
+
+	trace_tquic_bond_state(
+		conn->id,
+		bond_mode,
+		active_paths,
+		total_bandwidth
+	);
+}
+EXPORT_SYMBOL_GPL(tquic_trace_bond_state);
+
+/**
+ * tquic_trace_frame_debug - Trace frame-level event
+ * @conn: Connection structure (may be NULL)
+ * @frame_type: QUIC frame type
+ * @length: Frame length
+ * @path_id: Path ID
+ * @is_send: Sending or receiving
+ */
+void tquic_trace_frame_debug(struct tquic_connection *conn,
+			     u32 frame_type, u32 length,
+			     u32 path_id, bool is_send)
+{
+	trace_tquic_frame_debug(
+		conn ? conn->id : 0,
+		frame_type,
+		length,
+		path_id,
+		is_send
+	);
+}
+EXPORT_SYMBOL_GPL(tquic_trace_frame_debug);
+
 /*
  * =============================================================================
  * BPF Iterator Support

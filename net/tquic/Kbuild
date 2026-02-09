@@ -154,7 +154,8 @@ tquic-y := \
 	crypto/zero_rtt.o \
 	crypto/handshake.o \
 	crypto/crypto_module.o \
-	crypto/hw_offload.o
+	crypto/hw_offload.o \
+	tquic_debug.o
 
   # io_uring integration requires kernel-internal io_uring headers;
   # only available when building against a kernel with CONFIG_TQUIC_IO_URING.
