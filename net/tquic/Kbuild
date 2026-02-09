@@ -74,7 +74,6 @@ tquic-y := \
 	tquic_ack_frequency.o \
 	security_hardening.o \
 	napi.o \
-	io_uring.o \
 	cong/tquic_cong.o \
 	cong/cong_data.o \
 	cong/persistent_cong.o \
@@ -156,6 +155,12 @@ tquic-y := \
 	crypto/handshake.o \
 	crypto/crypto_module.o \
 	crypto/hw_offload.o
+
+  # io_uring integration requires kernel-internal io_uring headers;
+  # only available when building against a kernel with CONFIG_TQUIC_IO_URING.
+  ifdef CONFIG_TQUIC_IO_URING
+    tquic-y += io_uring.o
+  endif
 
 else
   # In-tree kernel build: net/quic/Makefile already builds quic.ko
