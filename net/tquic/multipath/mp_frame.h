@@ -13,8 +13,8 @@
  *   - PATH_STATUS (0x43)
  */
 
-#ifndef _TQUIC_MP_FRAME_H
-#define _TQUIC_MP_FRAME_H
+#ifndef _TQUIC_MULTIPATH_MP_FRAME_H
+#define _TQUIC_MULTIPATH_MP_FRAME_H
 
 #include <linux/types.h>
 #include <linux/list.h>
@@ -430,4 +430,4 @@ int __init tquic_mp_frame_init(void);
  */
 void __exit tquic_mp_frame_exit(void);
 
-#endif /* _TQUIC_MP_FRAME_H */
+#endif /* _TQUIC_MULTIPATH_MP_FRAME_H */

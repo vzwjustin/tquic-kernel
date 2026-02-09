@@ -190,6 +190,16 @@ struct tquic_stream_manager {
 	u64 max_data_remote;
 	u64 data_sent;
 	u64 data_received;
+
+	/*
+	 * SECURITY: Stream creation rate limiting
+	 */
+	ktime_t rate_limit_window_start;
+	u32 streams_in_window;
+	u32 max_streams_per_window;
+	u32 rate_limit_window_ms;
+	u32 consecutive_limit_hits;
+	bool rate_limit_exceeded;
 };
 
 /**
@@ -225,6 +235,29 @@ static inline bool tquic_stream_id_is_uni(u64 stream_id)
 static inline int tquic_stream_id_type(u64 stream_id)
 {
 	return stream_id & STREAM_ID_MASK;
+}
+
+static inline bool tquic_stream_is_local(struct tquic_stream_manager *mgr,
+					 u64 stream_id)
+{
+	bool is_server = tquic_stream_id_is_server(stream_id);
+	return mgr->is_server == is_server;
+}
+
+static inline bool tquic_stream_can_send(struct tquic_stream_manager *mgr,
+					 struct tquic_stream *stream)
+{
+	if (tquic_stream_id_is_bidi(stream->id))
+		return true;
+	return tquic_stream_is_local(mgr, stream->id);
+}
+
+static inline bool tquic_stream_can_recv(struct tquic_stream_manager *mgr,
+					 struct tquic_stream *stream)
+{
+	if (tquic_stream_id_is_bidi(stream->id))
+		return true;
+	return !tquic_stream_is_local(mgr, stream->id);
 }
 
 /* Stream manager API */

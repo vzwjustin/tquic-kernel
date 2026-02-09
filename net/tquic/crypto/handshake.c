@@ -67,10 +67,7 @@
 #define TLS_EXT_KEY_SHARE		51
 #define TLS_EXT_QUIC_TRANSPORT_PARAMS	0x39
 
-/* TLS 1.3 Cipher Suites */
-#define TLS_AES_128_GCM_SHA256		0x1301
-#define TLS_AES_256_GCM_SHA384		0x1302
-#define TLS_CHACHA20_POLY1305_SHA256	0x1303
+/* TLS 1.3 Cipher Suites (common ones defined in <net/tquic/handshake.h>) */
 #define TLS_AES_128_CCM_SHA256		0x1304
 #define TLS_AES_128_CCM_8_SHA256	0x1305
 
@@ -98,16 +95,8 @@
 #define TLS_PSK_KE			0
 #define TLS_PSK_DHE_KE			1
 
-/* Key sizes and limits */
-#define TLS_SECRET_MAX_LEN		48
-#define TLS_KEY_MAX_LEN			32
-#define TLS_IV_MAX_LEN			12
-#define TLS_FINISHED_MAX_LEN		48
-#define TLS_RANDOM_LEN			32
-#define TLS_SESSION_ID_MAX_LEN		32
+/* Key sizes and limits (common ones defined in <net/tquic/handshake.h>) */
 #define TLS_CERT_MAX_LEN		16384
-#define TLS_MAX_ALPN_LEN		255
-#define TLS_MAX_SNI_LEN			255
 
 /* QUIC Transport Parameters */
 #define QUIC_TP_ORIGINAL_DCID			0x00
@@ -129,21 +118,6 @@
 #define QUIC_TP_RETRY_SCID			0x10
 #define QUIC_TP_MAX_DATAGRAM_FRAME_SIZE		0x20
 #define QUIC_TP_GREASE_QUIC_BIT			0x2ab2
-
-/* Handshake state machine */
-enum tquic_hs_state {
-	TQUIC_HS_START = 0,
-	TQUIC_HS_WAIT_SH,
-	TQUIC_HS_WAIT_EE,
-	TQUIC_HS_WAIT_CERT_CR,
-	TQUIC_HS_WAIT_CERT,
-	TQUIC_HS_WAIT_CV,
-	TQUIC_HS_WAIT_FINISHED,
-	TQUIC_HS_WAIT_EOED,
-	TQUIC_HS_WAIT_CERT_REQ,
-	TQUIC_HS_COMPLETE,
-	TQUIC_HS_ERROR,
-};
 
 /* Alert descriptions */
 enum tls_alert {
@@ -176,33 +150,6 @@ enum tls_alert {
 	TLS_ALERT_NO_APPLICATION_PROTOCOL = 120,
 };
 
-/* QUIC transport parameters structure */
-struct tquic_hs_transport_params {
-	u64 original_dcid_len;
-	u8 original_dcid[TQUIC_MAX_CID_LEN];
-	u64 max_idle_timeout;
-	u8 stateless_reset_token[16];
-	bool has_stateless_reset_token;
-	u64 max_udp_payload_size;
-	u64 initial_max_data;
-	u64 initial_max_stream_data_bidi_local;
-	u64 initial_max_stream_data_bidi_remote;
-	u64 initial_max_stream_data_uni;
-	u64 initial_max_streams_bidi;
-	u64 initial_max_streams_uni;
-	u64 ack_delay_exponent;
-	u64 max_ack_delay;
-	bool disable_active_migration;
-	u64 active_conn_id_limit;
-	u64 initial_scid_len;
-	u8 initial_scid[TQUIC_MAX_CID_LEN];
-	u64 retry_scid_len;
-	u8 retry_scid[TQUIC_MAX_CID_LEN];
-	bool has_retry_scid;
-	u64 max_datagram_frame_size;
-	bool grease_quic_bit;
-};
-
 /* PSK identity for session resumption */
 struct tquic_psk_identity {
 	u8 *identity;
@@ -210,21 +157,6 @@ struct tquic_psk_identity {
 	u32 obfuscated_ticket_age;
 	u8 binder[TLS_FINISHED_MAX_LEN];
 	u32 binder_len;
-};
-
-/* Session ticket for resumption */
-struct tquic_session_ticket {
-	u32 lifetime;
-	u32 age_add;
-	u8 nonce[255];
-	u8 nonce_len;
-	u8 *ticket;
-	u32 ticket_len;
-	u8 resumption_secret[TLS_SECRET_MAX_LEN];
-	u32 resumption_secret_len;
-	u16 cipher_suite;
-	u64 creation_time;
-	struct tquic_hs_transport_params params;
 };
 
 /* Key share entry */

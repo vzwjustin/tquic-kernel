@@ -184,13 +184,19 @@ bool tquic_mp_frame_is_multipath(u8 first_byte);
 int tquic_mp_frame_process(struct tquic_connection *conn, const u8 *data, int len);
 
 /*
- * Compatibility aliases for code using old quic_* naming
- * These are provided by the implementation via __attribute__((alias))
+ * Compatibility aliases for code using old quic_* naming.
+ *
+ * When the implementation file (mp_frame.c) provides these as proper
+ * symbol aliases via __attribute__((alias)), it defines
+ * _TQUIC_MP_FRAME_ALIASES to suppress these macros and avoid
+ * redefinition conflicts.
  */
+#ifndef _TQUIC_MP_FRAME_ALIASES
 #define quic_frame_process_path_abandon		tquic_frame_process_path_abandon
 #define quic_frame_process_path_status		tquic_frame_process_path_status
 #define quic_mp_frame_is_multipath		tquic_mp_frame_is_multipath
 #define quic_mp_frame_process			tquic_mp_frame_process
+#endif
 
 /* Legacy constant aliases */
 #define QUIC_MP_FRAME_PATH_ABANDON		TQUIC_MP_FRAME_PATH_ABANDON

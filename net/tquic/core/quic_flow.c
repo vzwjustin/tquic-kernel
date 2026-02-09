@@ -41,7 +41,10 @@
 #define TQUIC_DEFAULT_MAX_STREAMS		256
 #endif
 
-/* Flow control auto-tuning parameters */
+/* Flow control auto-tuning parameters - override values from flow_control.h */
+#undef TQUIC_FC_WINDOW_UPDATE_THRESHOLD
+#undef TQUIC_FC_MIN_WINDOW
+#undef TQUIC_FC_MAX_WINDOW
 #define TQUIC_FC_WINDOW_UPDATE_THRESHOLD	2	/* Update at 1/2 window */
 #define TQUIC_FC_MIN_WINDOW			(64 * 1024)	/* 64 KB */
 #define TQUIC_FC_MAX_WINDOW			(64 * 1024 * 1024)	/* 64 MB */

@@ -1419,6 +1419,9 @@ static bool tquic_is_mp_extended_frame(struct tquic_rx_ctx *ctx)
 	return (frame_type >= 0x15c0 && frame_type <= 0x15cff);
 }
 
+static int tquic_process_path_abandon_frame(struct tquic_rx_ctx *ctx);
+static int tquic_process_path_status_frame(struct tquic_rx_ctx *ctx);
+
 /**
  * tquic_process_mp_extended_frame - Process extended multipath frames
  * @ctx: Receive context

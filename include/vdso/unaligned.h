@@ -1,23 +1,15 @@
 /* SPDX-License-Identifier: GPL-2.0 */
-/*
- * TQUIC compatibility shim for <vdso/unaligned.h>
- *
- * On >= 6.12, the kernel provides this natively.
- * On <  6.12, it does not exist; <asm/unaligned.h> handles everything.
- */
-
 #ifndef __VDSO_UNALIGNED_H
 #define __VDSO_UNALIGNED_H
 
-#include <linux/version.h>
+#define __get_unaligned_t(type, ptr) ({							\
+	const struct { type x; } __packed * __get_pptr = (typeof(__get_pptr))(ptr);	\
+	__get_pptr->x;									\
+})
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
-#include_next <vdso/unaligned.h>
-#else
-/*
- * Pre-6.12: __get_unaligned_t / __put_unaligned_t are provided by
- * <asm/unaligned.h> via architecture-specific paths.  Nothing to add.
- */
-#endif
+#define __put_unaligned_t(type, val, ptr) do {						\
+	struct { type x; } __packed * __put_pptr = (typeof(__put_pptr))(ptr);		\
+	__put_pptr->x = (val);								\
+} while (0)
 
 #endif /* __VDSO_UNALIGNED_H */

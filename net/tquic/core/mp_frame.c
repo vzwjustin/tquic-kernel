@@ -14,6 +14,7 @@
 #include <linux/workqueue.h>
 #include <net/tquic.h>
 #include "varint.h"
+#define _TQUIC_MP_FRAME_ALIASES	/* suppress macro aliases; we provide symbol aliases below */
 #include "mp_frame.h"
 #include "../bond/tquic_bonding.h"
 

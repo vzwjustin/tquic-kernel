@@ -1,22 +1,46 @@
-/* SPDX-License-Identifier: GPL-2.0 */
-/*
- * TQUIC compatibility shim for <linux/unaligned/packed_struct.h>
- *
- * On >= 6.12, the kernel's own <linux/unaligned.h> pulls in its own copy.
- * On <  6.12, <asm/unaligned.h> provides everything needed.
- * This file exists only to prevent build errors if something still
- * references the path directly.
- */
-
 #ifndef _LINUX_UNALIGNED_PACKED_STRUCT_H
 #define _LINUX_UNALIGNED_PACKED_STRUCT_H
 
-#include <linux/version.h>
+#include <linux/types.h>
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
-#include_next <linux/unaligned/packed_struct.h>
-#else
-#include <asm/unaligned.h>
-#endif
+struct __una_u16 { u16 x; } __packed;
+struct __una_u32 { u32 x; } __packed;
+struct __una_u64 { u64 x; } __packed;
+
+static inline u16 __get_unaligned_cpu16(const void *p)
+{
+	const struct __una_u16 *ptr = (const struct __una_u16 *)p;
+	return ptr->x;
+}
+
+static inline u32 __get_unaligned_cpu32(const void *p)
+{
+	const struct __una_u32 *ptr = (const struct __una_u32 *)p;
+	return ptr->x;
+}
+
+static inline u64 __get_unaligned_cpu64(const void *p)
+{
+	const struct __una_u64 *ptr = (const struct __una_u64 *)p;
+	return ptr->x;
+}
+
+static inline void __put_unaligned_cpu16(u16 val, void *p)
+{
+	struct __una_u16 *ptr = (struct __una_u16 *)p;
+	ptr->x = val;
+}
+
+static inline void __put_unaligned_cpu32(u32 val, void *p)
+{
+	struct __una_u32 *ptr = (struct __una_u32 *)p;
+	ptr->x = val;
+}
+
+static inline void __put_unaligned_cpu64(u64 val, void *p)
+{
+	struct __una_u64 *ptr = (struct __una_u64 *)p;
+	ptr->x = val;
+}
 
 #endif /* _LINUX_UNALIGNED_PACKED_STRUCT_H */
