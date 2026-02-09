@@ -246,24 +246,31 @@ sudo sysctl -w net.ipv4.tcp_congestion_control=bbr
 ```python
 import socket
 
-# Create QUIC socket (requires QUIC library)
-# This is just to verify kernel support exists
+# TQUIC uses SOCK_STREAM with protocol number 262
 try:
-    # IPPROTO_QUIC should be available
-    sock = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM, 262)  # QUIC proto number
-    print("QUIC socket created successfully!")
+    # IPv4
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM, 262)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind(('0.0.0.0', 44333))
+    sock.listen(1)
+    print("QUIC IPv4 socket created and listening!")
     sock.close()
+
+    # IPv6
+    sock6 = socket.socket(socket.AF_INET6, socket.SOCK_STREAM, 262)
+    sock6.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock6.bind(('::', 44334))
+    sock6.listen(1)
+    print("QUIC IPv6 socket created and listening!")
+    sock6.close()
 except Exception as e:
     print(f"Error: {e}")
 ```
 
 ### Check QUIC Protocol Number
 ```bash
-# QUIC uses protocol 262
-grep -i quic /etc/protocols
-
-# Or check kernel headers
-grep "IPPROTO_QUIC" /usr/include/netinet/in.h
+# TQUIC uses SOCK_STREAM with protocol 262
+cat /proc/net/protocols | grep TQUIC
 ```
 
 ---
