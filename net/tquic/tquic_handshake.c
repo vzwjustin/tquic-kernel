@@ -57,6 +57,10 @@ int tquic_crypto_install_keys(struct tquic_crypto_state *crypto, int level,
 			      const u8 *read_secret, size_t read_secret_len,
 			      const u8 *write_secret, size_t write_secret_len);
 
+/* Forward declaration for inline handshake crypto frame processing */
+int tquic_inline_hs_recv_crypto(struct sock *sk, const u8 *data, u32 len,
+				int enc_level);
+
 /*
  * Rate limit state for PSK rejection logging
  */
@@ -814,7 +818,7 @@ static void tquic_inline_hs_apply_transport_params(struct sock *sk)
 	conn->remote_params.max_ack_delay = peer_tp.max_ack_delay;
 	conn->remote_params.disable_active_migration =
 		peer_tp.disable_active_migration;
-	conn->remote_params.active_conn_id_limit =
+	conn->remote_params.active_connection_id_limit =
 		peer_tp.active_conn_id_limit;
 
 	/* Apply flow control limits */
@@ -836,7 +840,7 @@ static void tquic_inline_hs_apply_transport_params(struct sock *sk)
  *
  * Returns: 0 on success, negative errno on error
  */
-int tquic_inline_hs_install_keys(struct sock *sk, int level)
+static int tquic_inline_hs_install_keys(struct sock *sk, int level)
 {
 	struct tquic_sock *tsk = tquic_sk(sk);
 	struct tquic_handshake *ihs = tsk->inline_hs;
@@ -845,7 +849,7 @@ int tquic_inline_hs_install_keys(struct sock *sk, int level)
 	u8 client_key[TLS_KEY_MAX_LEN], server_key[TLS_KEY_MAX_LEN];
 	u8 client_iv[TLS_IV_MAX_LEN], server_iv[TLS_IV_MAX_LEN];
 	u8 client_hp[TLS_KEY_MAX_LEN], server_hp[TLS_KEY_MAX_LEN];
-	u32 ck_len, sk_len, ci_len, si_len, ch_len, sh_len;
+	u32 ck_len, svk_len, ci_len, si_len, chp_len, shp_len;
 	u8 client_secret[TLS_SECRET_MAX_LEN];
 	u8 server_secret[TLS_SECRET_MAX_LEN];
 	u32 cs_len, ss_len;
@@ -871,10 +875,10 @@ int tquic_inline_hs_install_keys(struct sock *sk, int level)
 	ret = tquic_hs_get_quic_keys(ihs, hs_level,
 				     client_key, &ck_len,
 				     client_iv, &ci_len,
-				     client_hp, &ch_len,
-				     server_key, &sk_len,
+				     client_hp, &chp_len,
+				     server_key, &svk_len,
 				     server_iv, &si_len,
-				     server_hp, &sh_len);
+				     server_hp, &shp_len);
 	if (ret < 0) {
 		pr_debug("tquic: failed to derive keys for level %d: %d\n",
 			 level, ret);
@@ -1021,8 +1025,10 @@ int tquic_inline_hs_recv_crypto(struct sock *sk, const u8 *data, u32 len,
 		TQUIC_INC_STATS(sock_net(sk), TQUIC_MIB_CURRESTAB);
 
 		/* Wake up waiters */
-		if (tsk->handshake_state)
+		if (tsk->handshake_state) {
+			tsk->handshake_state->status = 0;
 			complete(&tsk->handshake_state->done);
+		}
 
 		pr_debug("tquic: inline TLS handshake complete\n");
 	}
