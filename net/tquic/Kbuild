@@ -15,11 +15,14 @@ ifneq ($(KBUILD_EXTMOD),)
   # a dedicated external-module recipe behind the `KBUILD_EXTMOD` guard.
 
   # Include paths for headers:
-  #   $(src)            - local headers (protocol.h, napi.h, etc.)
+  #   $(src)/compat        - compat shim headers (searched AFTER kernel's LINUXINCLUDE
+  #                          but BEFORE the project include/ tree; provides fallback
+  #                          headers for APIs that moved between kernel versions)
+  #   $(src)               - local headers (protocol.h, napi.h, etc.)
   #   $(src)/../../include - project include/ tree (net/tquic.h, uapi/linux/tquic.h)
-  #   $(src)/../..      - project root (resolves <net/tquic/crypto/...> from source tree)
-  #   $(src)/diag       - diagnostic/tracing headers
-  ccflags-y += -I$(src) -I$(src)/../../include -I$(src)/../.. -I$(src)/diag
+  #   $(src)/../..         - project root (resolves <net/tquic/crypto/...> from source tree)
+  #   $(src)/diag          - diagnostic/tracing headers
+  ccflags-y += -I$(src)/compat -I$(src) -I$(src)/../../include -I$(src)/../.. -I$(src)/diag
   ccflags-y += -DTQUIC_OUT_OF_TREE
   # Suppress warnings treated as errors during development (remove for production)
   ccflags-y += -Wno-error=unused-function -Wno-error=unused-variable
