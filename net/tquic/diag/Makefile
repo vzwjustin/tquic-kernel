@@ -3,6 +3,10 @@
 # Makefile for the TQUIC Diagnostics subsystem
 #
 
+# Include paths matching parent net/tquic/Makefile
+ccflags-y += -I$(src)/.. -I$(src)/../../.. -I$(src) -DTQUIC_OUT_OF_TREE
+ccflags-y += -Wno-missing-prototypes -Wno-missing-declarations
+
 obj-$(CONFIG_TQUIC_DIAG) += tquic_diag_module.o
 
 tquic_diag_module-y := path_metrics.o tracepoints.o

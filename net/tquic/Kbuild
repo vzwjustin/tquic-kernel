@@ -74,6 +74,7 @@ tquic-y := \
 	tquic_ack_frequency.o \
 	security_hardening.o \
 	napi.o \
+	io_uring.o \
 	cong/tquic_cong.o \
 	cong/cong_data.o \
 	cong/persistent_cong.o \
@@ -157,8 +158,7 @@ tquic-y := \
 	crypto/hw_offload.o
 
 else
-  # In-tree kernel build: honor Kconfig (CONFIG_TQUIC, etc).
-  # This avoids forcing TQUIC into module builds, which can break on
-  # non-exported internal symbols.
-  include $(src)/Makefile
+  # In-tree kernel build: net/quic/Makefile already builds quic.ko
+  # which includes all tquic source files via the net/quic/tquic symlink.
+  # Nothing to build here to avoid duplicate symbol exports.
 endif

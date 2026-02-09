@@ -367,9 +367,9 @@ void capsule_parser_cleanup(struct capsule_parser *parser)
 	spin_lock_bh(&parser->lock);
 
 	/* Free current capsule if any */
-	if (parser->current) {
-		capsule_free(parser->current);
-		parser->current = NULL;
+	if (parser->cur_capsule) {
+		capsule_free(parser->cur_capsule);
+		parser->cur_capsule = NULL;
 	}
 
 	/* Free pending capsules */
@@ -424,11 +424,11 @@ int capsule_parser_feed(struct capsule_parser *parser,
 							    &parser->header);
 				if (ret >= 0) {
 					/* Header complete, allocate capsule */
-					parser->current = capsule_alloc(
+					parser->cur_capsule = capsule_alloc(
 						parser->header.type,
 						parser->header.length,
 						GFP_ATOMIC);
-					if (!parser->current) {
+					if (!parser->cur_capsule) {
 						parser->state = CAPSULE_PARSE_ERROR;
 						spin_unlock_bh(&parser->lock);
 						return -ENOMEM;
@@ -440,9 +440,9 @@ int capsule_parser_feed(struct capsule_parser *parser,
 
 					if (parser->header.length == 0) {
 						/* No value, capsule complete */
-						list_add_tail(&parser->current->list,
+						list_add_tail(&parser->cur_capsule->list,
 							      &parser->pending);
-						parser->current = NULL;
+						parser->cur_capsule = NULL;
 						parser->state = CAPSULE_PARSE_TYPE;
 					} else {
 						parser->state = CAPSULE_PARSE_VALUE;
@@ -462,16 +462,16 @@ int capsule_parser_feed(struct capsule_parser *parser,
 			/* Copy value bytes */
 			while (consumed < len &&
 			       parser->value_offset < parser->header.length) {
-				parser->current->value[parser->value_offset++] =
+				parser->cur_capsule->value[parser->value_offset++] =
 					data[consumed++];
 			}
 
 			/* Check if value complete */
 			if (parser->value_offset >= parser->header.length) {
 				/* Capsule complete */
-				list_add_tail(&parser->current->list,
+				list_add_tail(&parser->cur_capsule->list,
 					      &parser->pending);
-				parser->current = NULL;
+				parser->cur_capsule = NULL;
 				parser->state = CAPSULE_PARSE_TYPE;
 				parser->buf_len = 0;
 				parser->value_offset = 0;

@@ -143,7 +143,7 @@ struct capsule_parser {
 	u8 buffer[CAPSULE_PARSE_BUFFER_SIZE];
 	size_t buf_len;
 	size_t value_offset;
-	struct capsule *current;
+	struct capsule *cur_capsule;
 	struct list_head pending;
 	spinlock_t lock;
 };

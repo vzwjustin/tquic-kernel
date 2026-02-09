@@ -3,6 +3,10 @@
 # Makefile for TQUIC HTTP/3 support (RFC 9114)
 #
 
+# Include paths matching parent net/tquic/Makefile
+ccflags-y += -I$(src)/.. -I$(src)/../../.. -I$(src)/../diag -DTQUIC_OUT_OF_TREE
+ccflags-y += -Wno-missing-prototypes -Wno-missing-declarations
+
 # HTTP/3 module
 obj-$(CONFIG_TQUIC_HTTP3) += tquic_http3.o
 

@@ -11,6 +11,10 @@
 #   - connect_ip.o: CONNECT-IP (RFC 9484)
 #
 
+# Include paths matching parent net/tquic/Makefile
+ccflags-y += -I$(src)/.. -I$(src)/../../.. -I$(src)/../diag -DTQUIC_OUT_OF_TREE
+ccflags-y += -Wno-missing-prototypes -Wno-missing-declarations
+
 obj-$(CONFIG_TQUIC_MASQUE) += tquic_masque.o
 
 tquic_masque-y := \
