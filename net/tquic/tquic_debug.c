@@ -70,14 +70,14 @@ static const char *tquic_debug_conn_state(enum tquic_conn_state state)
 static const char *tquic_debug_path_state(enum tquic_path_state state)
 {
 	switch (state) {
-	case TQUIC_PATH_IDLE:		return "IDLE";
-	case TQUIC_PATH_VALIDATING:	return "VALIDATING";
+	case TQUIC_PATH_UNUSED:		return "UNUSED";
+	case TQUIC_PATH_PENDING:	return "PENDING";
 	case TQUIC_PATH_VALIDATED:	return "VALIDATED";
 	case TQUIC_PATH_ACTIVE:		return "ACTIVE";
-	case TQUIC_PATH_DEGRADED:	return "DEGRADED";
+	case TQUIC_PATH_STANDBY:	return "STANDBY";
 	case TQUIC_PATH_UNAVAILABLE:	return "UNAVAIL";
 	case TQUIC_PATH_FAILED:		return "FAILED";
-	case TQUIC_PATH_CLOSING:	return "CLOSING";
+	case TQUIC_PATH_CLOSED:		return "CLOSED";
 	default:			return "?";
 	}
 }

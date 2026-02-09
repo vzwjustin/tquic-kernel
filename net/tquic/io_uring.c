@@ -764,7 +764,7 @@ struct tquic_io_buf_ring *tquic_io_buf_ring_create(
 		br->br->bufs[i].bid = i;
 	}
 
-	pr_debug("tquic: created buffer ring bgid=%d count=%d size=%zu\n",
+	pr_debug("tquic: created buffer ring bgid=%d count=%zu size=%zu\n",
 		 bgid, ring_size, buf_size);
 
 	return br;
