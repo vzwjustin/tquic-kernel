@@ -19,6 +19,7 @@
 #include <linux/spinlock.h>
 #include <net/tquic.h>
 #include <net/tquic_frame.h>
+#include "flow_control.h"
 
 /*
  * RFC 9000 Section 4 - Flow Control

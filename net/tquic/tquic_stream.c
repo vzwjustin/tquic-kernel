@@ -123,7 +123,7 @@ static void tquic_stream_wmem_uncharge(struct sock *sk, struct sk_buff *skb)
  *
  * Returns: 0 on success, -ENOBUFS if memory limit exceeded
  */
-static int tquic_stream_rmem_charge(struct sock *sk, struct sk_buff *skb)
+static int __maybe_unused tquic_stream_rmem_charge(struct sock *sk, struct sk_buff *skb)
 {
 	int amt = skb->truesize;
 

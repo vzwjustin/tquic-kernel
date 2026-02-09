@@ -26,9 +26,9 @@
 #include <net/tquic/handshake.h>
 #include "../tquic_compat.h"
 
-static struct kmem_cache *tquic_sock_cachep __read_mostly;
-static struct kmem_cache *tquic_conn_cachep __read_mostly;
-static struct kmem_cache *tquic_stream_cachep __read_mostly;
+static struct kmem_cache __maybe_unused *tquic_sock_cachep __read_mostly;
+static struct kmem_cache __maybe_unused *tquic_conn_cachep __read_mostly;
+static struct kmem_cache __maybe_unused *tquic_stream_cachep __read_mostly;
 
 /* Sysctl variables - sysctl_mem has been long[] since before 5.4 */
 long sysctl_tquic_mem[3] __read_mostly;
@@ -164,9 +164,9 @@ static struct percpu_counter tquic_sockets_allocated;
 static unsigned long tquic_memory_pressure_val;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
 /* Kernel 6.4+ uses percpu unsigned int for orphan_count */
-static DEFINE_PER_CPU(unsigned int, tquic_orphan_count_percpu);
+static DEFINE_PER_CPU(unsigned int, tquic_orphan_count_percpu) __maybe_unused;
 #else
-static struct percpu_counter tquic_orphan_count_percpu;
+static struct percpu_counter __maybe_unused tquic_orphan_count_percpu;
 #endif
 
 /*
@@ -176,7 +176,7 @@ static struct percpu_counter tquic_orphan_count_percpu;
  * twice causes kernel warnings, double percpu_counter_init leaks memory).
  */
 static bool tquic_proto_registered __read_mostly;
-static bool tquic_percpu_initialized __read_mostly;
+static bool __maybe_unused tquic_percpu_initialized __read_mostly;
 
 /* Forward declarations for proto_ops callbacks */
 static int tquic_stream_release(struct socket *sock);
@@ -1313,7 +1313,7 @@ static const struct net_proto_family tquic_family_ops = {
 	.owner	= THIS_MODULE,
 };
 
-static int __init tquic_proto_register_all(void)
+static int __init __maybe_unused tquic_proto_register_all(void)
 {
 	int err;
 
@@ -1339,7 +1339,7 @@ static int __init tquic_proto_register_all(void)
 	return 0;
 }
 
-static void tquic_proto_unregister_all(void)
+static void __maybe_unused tquic_proto_unregister_all(void)
 {
 	if (!tquic_proto_registered)
 		return;

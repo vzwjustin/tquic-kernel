@@ -156,7 +156,7 @@ EXPORT_SYMBOL_GPL(tquic_zc_state_free);
  * =============================================================================
  */
 
-static struct tquic_zc_entry *tquic_zc_entry_alloc(gfp_t gfp)
+static struct tquic_zc_entry __maybe_unused *tquic_zc_entry_alloc(gfp_t gfp)
 {
 	struct tquic_zc_entry *entry;
 
@@ -194,12 +194,12 @@ static void tquic_zc_entry_free(struct tquic_zc_entry *entry)
 	kfree(entry);
 }
 
-static void tquic_zc_entry_get(struct tquic_zc_entry *entry)
+static void __maybe_unused tquic_zc_entry_get(struct tquic_zc_entry *entry)
 {
 	atomic_inc(&entry->refcnt);
 }
 
-static void tquic_zc_entry_put(struct tquic_zc_entry *entry)
+static void __maybe_unused tquic_zc_entry_put(struct tquic_zc_entry *entry)
 {
 	if (atomic_dec_and_test(&entry->refcnt))
 		tquic_zc_entry_free(entry);
@@ -220,9 +220,9 @@ static void tquic_zc_entry_put(struct tquic_zc_entry *entry)
  * Called when zerocopy transmission completes. Uses the standard
  * msg_zerocopy_ubuf_ops for completion notification.
  */
-static void tquic_zerocopy_complete(struct sk_buff *skb,
-				    struct ubuf_info *uarg,
-				    bool success)
+static void __maybe_unused tquic_zerocopy_complete(struct sk_buff *skb,
+						   struct ubuf_info *uarg,
+						   bool success)
 {
 	/* Use the standard zerocopy ops for completion */
 	if (uarg && uarg->ops && uarg->ops->complete)
@@ -413,7 +413,6 @@ ssize_t tquic_sendpage(struct socket *sock, struct page *page,
 	struct tquic_connection *conn;
 	struct tquic_stream *stream;
 	struct sk_buff *skb;
-	int err;
 
 	if (!sk)
 		return -ENOTCONN;
@@ -625,7 +624,6 @@ static int tquic_splice_data_recv(read_descriptor_t *desc,
  */
 static int __tquic_splice_read(struct sock *sk, struct tquic_splice_state *tss)
 {
-	struct tquic_sock *tsk = tquic_sk(sk);
 	struct tquic_stream *stream = tss->stream;
 	read_descriptor_t rd_desc = {
 		.arg.data = tss,

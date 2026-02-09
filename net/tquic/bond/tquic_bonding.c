@@ -95,12 +95,12 @@ static struct workqueue_struct *tquic_bond_wq;
  * Count paths by state from path manager
  * Must be called with bc->state_lock held or from callback context
  */
-static void tquic_bonding_count_paths(struct tquic_bonding_ctx *bc, int *active,
+static void __maybe_unused tquic_bonding_count_paths(struct tquic_bonding_ctx *bc, int *active,
 				      int *pending, int *failed, int *degraded)
 {
 	struct tquic_path *paths[TQUIC_MAX_PATHS];
 	int count, i;
-	int a = 0, p = 0, f = 0, d = 0;
+	int a = 0;
 
 	if (!bc || !bc->pm) {
 		*active = *pending = *failed = *degraded = 0;
@@ -110,7 +110,6 @@ static void tquic_bonding_count_paths(struct tquic_bonding_ctx *bc, int *active,
 	count = tquic_pm_get_active_paths(bc->pm, paths, TQUIC_MAX_PATHS);
 
 	for (i = 0; i < count; i++) {
-		struct tquic_path *path = paths[i];
 		/* Access path state - this is safe under RCU */
 		/* We use a simplified state check here */
 		a++; /* Count all returned paths as active for now */

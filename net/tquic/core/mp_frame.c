@@ -14,6 +14,7 @@
 #include <linux/workqueue.h>
 #include <net/tquic.h>
 #include "varint.h"
+#include "mp_frame.h"
 #include "../bond/tquic_bonding.h"
 
 /*
@@ -759,6 +760,16 @@ EXPORT_SYMBOL_GPL(tquic_mp_frame_process);
  * Compatibility aliases for old function names
  * These allow existing code that uses quic_* names to still compile
  */
+
+/* Forward declarations for alias targets */
+int quic_frame_process_path_abandon(struct tquic_connection *conn,
+				    const u8 *data, int len);
+int quic_frame_process_path_status(struct tquic_connection *conn,
+				   const u8 *data, int len, bool backup);
+bool quic_mp_frame_is_multipath(u8 first_byte);
+int quic_mp_frame_process(struct tquic_connection *conn,
+			  const u8 *data, int len);
+
 int quic_frame_process_path_abandon(struct tquic_connection *conn,
 				    const u8 *data, int len)
 	__attribute__((alias("tquic_frame_process_path_abandon")));

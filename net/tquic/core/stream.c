@@ -30,6 +30,7 @@
 #include <net/sock.h>
 #include <net/tquic.h>
 #include "../tquic_compat.h"
+#include "stream.h"
 
 /* Stream ID bit layout per QUIC spec:
  * Bit 0: Initiator (0 = client, 1 = server)
@@ -522,8 +523,8 @@ static struct tquic_stream_ext *tquic_stream_ext_alloc(
  * @mgr: Stream manager
  * @ext: Extended state to free
  */
-static void tquic_stream_ext_free(struct tquic_stream_manager *mgr,
-				  struct tquic_stream_ext *ext)
+static void __maybe_unused tquic_stream_ext_free(struct tquic_stream_manager *mgr,
+						 struct tquic_stream_ext *ext)
 {
 	struct tquic_stream_gap *gap, *tmp_gap;
 	struct rb_node *node;

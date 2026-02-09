@@ -786,7 +786,6 @@ int tquic_frame_process_all(struct tquic_connection *conn, struct sk_buff *skb,
 	int offset = 0;
 
 	while (offset < len) {
-		u8 frame_type = data[offset];
 		int frame_len;
 
 		frame_len = tquic_frame_process_one(conn, data + offset,

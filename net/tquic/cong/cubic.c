@@ -96,7 +96,7 @@ static u64 cubic_calc_w(struct tquic_cubic *cubic, u64 t)
 /*
  * Calculate TCP-friendly window
  */
-static u64 cubic_tcp_friendliness(struct tquic_cubic *cubic, u64 t)
+static u64 __maybe_unused cubic_tcp_friendliness(struct tquic_cubic *cubic, u64 t)
 {
 	/* Simplified TCP-friendly calculation */
 	return cubic->tcp_cwnd + (t * 1200 / cubic->w_max);
@@ -331,7 +331,7 @@ static void tquic_cubic_on_ecn(void *state, u64 ecn_ce_count)
  * Start a new congestion round (called on ACK of new data)
  * Resets ECN round tracking per RFC 9002.
  */
-static void tquic_cubic_new_round(struct tquic_cubic *cubic)
+static void __maybe_unused tquic_cubic_new_round(struct tquic_cubic *cubic)
 {
 	cubic->ecn_in_round = false;
 }
@@ -409,7 +409,7 @@ static void tquic_cubic_on_persistent_cong(void *state,
 	cubic->ecn_in_round = false;
 }
 
-static struct tquic_cong_ops tquic_cubic_ops = {
+static struct tquic_cong_ops __maybe_unused tquic_cubic_ops = {
 	.name = "cubic",
 	.owner = THIS_MODULE,
 	.init = tquic_cubic_init,

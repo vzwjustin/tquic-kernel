@@ -423,7 +423,7 @@ static void tquic_cid_gen_random(struct tquic_cid *cid, u8 len)
  *
  * Returns 0 if equal, non-zero otherwise.
  */
-static int tquic_cid_compare(const struct tquic_cid *a, const struct tquic_cid *b)
+static int __maybe_unused tquic_cid_compare(const struct tquic_cid *a, const struct tquic_cid *b)
 {
 	if (a->len != b->len)
 		return a->len - b->len;

@@ -542,7 +542,7 @@ static void *bbrv3_init(struct tquic_path *path)
 
 	/* Initialize filters */
 	bbrv3_minmax_reset(&bbr->bw_filter, 2 * NSEC_PER_SEC);
-	bbrv3_minmax_reset(&bbr->rtt_filter, 10 * NSEC_PER_SEC);
+	bbrv3_minmax_reset(&bbr->rtt_filter, 10ULL * NSEC_PER_SEC);
 
 	/* Initialize state */
 	bbr->bw = 0;

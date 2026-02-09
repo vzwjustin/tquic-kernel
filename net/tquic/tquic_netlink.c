@@ -33,6 +33,7 @@
 #include <uapi/linux/tquic_pm.h>
 
 #include "tquic_compat.h"
+#include "tquic_init.h"
 #include "multipath/tquic_sched.h"
 
 /*
@@ -241,6 +242,27 @@ static struct tquic_net *tquic_get_net(struct net *net)
  * Forward declarations
  */
 struct genl_family tquic_genl_family;
+
+/* Prototypes for exported functions not declared in a public header */
+int tquic_nl_send_event(struct net *net, enum tquic_event_type event,
+			u64 conn_id, u32 path_id, u32 reason, gfp_t gfp);
+int tquic_nl_migration_event(struct net *net, u64 conn_id, u32 old_path_id,
+			     u32 new_path_id, u32 reason, gfp_t gfp);
+bool tquic_nl_has_listeners(struct net *net);
+void tquic_nl_notify_path_up(struct net *net, u64 conn_id,
+			     const struct tquic_nl_path_info *path);
+void tquic_nl_notify_path_down(struct net *net, u64 conn_id,
+			       const struct tquic_nl_path_info *path,
+			       u32 reason);
+void tquic_nl_notify_path_change(struct net *net, u64 conn_id,
+				 const struct tquic_nl_path_info *path);
+void tquic_nl_notify_migration(struct net *net, u64 conn_id, u32 old_path_id,
+			       u32 new_path_id, u32 reason);
+void tquic_path_update_metrics(struct tquic_nl_path_info *path, u32 rtt,
+			       u64 bandwidth, u32 loss_rate);
+void tquic_path_info_update_stats(struct tquic_nl_path_info *path,
+				  u64 tx_packets, u64 rx_packets,
+				  u64 tx_bytes, u64 rx_bytes);
 
 /*
  * Multicast groups

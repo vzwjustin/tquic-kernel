@@ -197,7 +197,7 @@ EXPORT_SYMBOL_GPL(tquic_cong_find);
  *
  * Return: Pointer to CC ops if found, NULL otherwise
  */
-static struct tquic_cong_ops *tquic_cong_find_key(u32 key)
+static struct tquic_cong_ops __maybe_unused *tquic_cong_find_key(u32 key)
 {
 	struct tquic_cong_ops *ca;
 

@@ -14,8 +14,37 @@
 #include <crypto/algapi.h>
 #include <net/tquic.h>
 #include <net/tquic_frame.h>
+#include <net/tquic_pm.h>
 #include "../diag/tracepoints.h"
 #include "../protocol.h"
+#include "../tquic_init.h"
+
+/* Forward declarations to silence -Wmissing-prototypes */
+void tquic_trace_path_validated(struct tquic_connection *conn, u32 path_id,
+				u64 validation_time_us);
+int __init tquic_path_init(void);
+void tquic_path_exit(void);
+void tquic_path_put(struct tquic_path *path);
+void tquic_path_on_validated(struct tquic_path *path);
+bool tquic_path_verify_response(struct tquic_path *path, const u8 *data);
+int tquic_path_migrate(struct tquic_connection *conn, struct tquic_path *path);
+void tquic_path_mtu_discovery_start(struct tquic_path *path);
+int tquic_path_mtu_probe(struct tquic_path *path);
+void tquic_path_mtu_probe_acked(struct tquic_path *path, u32 probe_size);
+void tquic_path_mtu_probe_lost(struct tquic_path *path, u32 probe_size);
+void tquic_path_rtt_update(struct tquic_path *path, u32 latest_rtt_us,
+			   u32 ack_delay_us);
+u32 tquic_path_pto(struct tquic_path *path);
+void tquic_path_on_data_sent(struct tquic_path *path, u32 bytes);
+void tquic_path_on_data_received(struct tquic_path *path, u32 bytes);
+bool tquic_path_can_send(struct tquic_path *path, u32 bytes);
+struct tquic_path *tquic_path_find(struct tquic_connection *conn,
+				   struct sockaddr *remote);
+int tquic_path_get_info(struct tquic_path *path, struct tquic_path_info *info);
+void tquic_path_on_probe_timeout(struct tquic_path *path);
+bool tquic_path_needs_probe(struct tquic_path *path);
+void tquic_path_set_state(struct tquic_connection *conn, u8 path_id,
+			  enum tquic_path_state state);
 
 /*
  * Path validation trace hook. The full tracepoints module isn't built
@@ -181,7 +210,7 @@ static bool tquic_path_addr_equal(const struct sockaddr_storage *a,
  *
  * Note: The exported tquic_path_create is in tquic_migration.c
  */
-static struct tquic_path *
+static struct tquic_path * __maybe_unused
 tquic_path_create_internal(struct tquic_connection *conn,
 			   struct sockaddr *local, struct sockaddr *remote)
 {

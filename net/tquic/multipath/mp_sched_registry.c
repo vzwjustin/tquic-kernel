@@ -14,6 +14,8 @@
 #include <linux/string.h>
 #include <net/tquic.h>
 
+#include "../tquic_init.h"
+
 static DEFINE_SPINLOCK(tquic_mp_sched_list_lock);
 static LIST_HEAD(tquic_mp_sched_list);
 

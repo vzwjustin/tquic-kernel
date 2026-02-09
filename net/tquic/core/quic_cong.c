@@ -98,6 +98,31 @@ struct tquic_stats {
 	u8		congestion_state;
 };
 
+/* Forward declarations to silence -Wmissing-prototypes */
+void tquic_cc_init(struct tquic_cc_state *cc, enum tquic_cc_algo algo);
+void tquic_cc_on_packet_sent(struct tquic_cc_state *cc, u32 bytes);
+void tquic_cc_on_ack(struct tquic_cc_state *cc, u64 acked_bytes,
+		     struct tquic_rtt *rtt);
+void tquic_cc_on_loss(struct tquic_cc_state *cc, u64 lost_bytes);
+void tquic_cc_on_congestion_event(struct tquic_cc_state *cc);
+u64 tquic_cc_pacing_delay(struct tquic_cc_state *cc, u32 bytes);
+u64 tquic_cc_prr_get_snd_cnt(struct tquic_cc_state *cc);
+bool tquic_cc_can_send(struct tquic_cc_state *cc, u32 bytes);
+void tquic_cc_on_persistent_congestion(struct tquic_cc_state *cc);
+void tquic_cc_on_pto(struct tquic_cc_state *cc);
+void tquic_cc_get_info(struct tquic_cc_state *cc, struct tquic_stats *stats);
+void tquic_cc_set_app_limited(struct tquic_cc_state *cc, bool limited);
+bool tquic_cc_in_slow_start(struct tquic_cc_state *cc);
+bool tquic_cc_in_recovery(struct tquic_cc_state *cc);
+void tquic_cc_exit_recovery(struct tquic_cc_state *cc);
+u64 tquic_cc_get_cwnd(struct tquic_cc_state *cc);
+u64 tquic_cc_get_pacing_rate(struct tquic_cc_state *cc);
+u64 tquic_cc_get_ssthresh(struct tquic_cc_state *cc);
+u64 tquic_cc_get_bytes_in_flight(struct tquic_cc_state *cc);
+void tquic_cc_set_cwnd(struct tquic_cc_state *cc, u64 cwnd);
+void tquic_cc_set_algo(struct tquic_cc_state *cc, enum tquic_cc_algo algo);
+const char *tquic_cc_algo_name(enum tquic_cc_algo algo);
+
 /* RFC 9002 constants */
 #define TQUIC_INITIAL_CWND_PACKETS	10
 #define TQUIC_INITIAL_CWND_MIN		(2 * TQUIC_MAX_PACKET_SIZE)

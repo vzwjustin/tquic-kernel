@@ -25,6 +25,7 @@
 #include "../tquic_compat.h"
 
 #include "mp_frame.h"
+#include "path_abandon.h"
 
 /*
  * Path abandonment error codes (RFC 9369)
@@ -183,12 +184,6 @@ static struct kmem_cache *mp_cid_state_cache;
 
 /* SKB reserve size for QUIC packet headers */
 #define TQUIC_SKB_RESERVE	128
-
-/* Forward declarations */
-int tquic_mp_retire_path_cids(struct tquic_connection *conn,
-			      struct tquic_path *path);
-int tquic_mp_select_new_active_path(struct tquic_connection *conn,
-				    struct tquic_path *excluded_path);
 
 /*
  * =============================================================================

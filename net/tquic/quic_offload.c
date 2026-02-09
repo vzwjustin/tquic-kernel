@@ -845,7 +845,7 @@ static struct sk_buff *quic6_gso_segment(struct sk_buff *skb,
 #endif
 
 /* Net offload structure for QUIC over IPv4 */
-static struct net_offload quic4_offload __read_mostly = {
+static struct net_offload __maybe_unused quic4_offload __read_mostly = {
 	.callbacks = {
 		.gso_segment	= quic4_gso_segment,
 		.gro_receive	= quic4_gro_receive,
@@ -855,7 +855,7 @@ static struct net_offload quic4_offload __read_mostly = {
 
 #if IS_ENABLED(CONFIG_IPV6)
 /* Net offload structure for QUIC over IPv6 */
-static struct net_offload quic6_offload __read_mostly = {
+static struct net_offload __maybe_unused quic6_offload __read_mostly = {
 	.callbacks = {
 		.gso_segment	= quic6_gso_segment,
 		.gro_receive	= quic6_gro_receive,

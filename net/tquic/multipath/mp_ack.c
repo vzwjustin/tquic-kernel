@@ -26,6 +26,7 @@
 #include <net/tquic.h>
 
 #include "mp_frame.h"
+#include "mp_ack.h"
 #include "../core/varint.h"
 
 /*
@@ -257,7 +258,7 @@ static void mp_rtt_update(struct tquic_mp_rtt_state *rtt,
  *
  * Returns PTO in microseconds.
  */
-static u64 mp_get_pto(struct tquic_mp_path_ack_state *state, int pn_space)
+static u64 __maybe_unused mp_get_pto(struct tquic_mp_path_ack_state *state, int pn_space)
 {
 	struct tquic_mp_rtt_state *rtt = &state->rtt;
 	u64 pto;
@@ -371,7 +372,7 @@ static void mp_sent_packet_remove(struct tquic_mp_path_ack_state *state,
  *
  * Returns the sent packet or NULL if not found.
  */
-static struct tquic_mp_sent_packet *mp_sent_packet_find(
+static struct tquic_mp_sent_packet __maybe_unused *mp_sent_packet_find(
 	struct tquic_mp_path_ack_state *state, int pn_space, u64 pn)
 {
 	struct rb_node *node = state->sent_packets[pn_space].rb_node;

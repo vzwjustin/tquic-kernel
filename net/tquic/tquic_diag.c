@@ -330,7 +330,7 @@ static void tquic_diag_get_info(struct sock *sk, struct inet_diag_msg *r,
  * Returns the size needed for extended attributes including CIDs
  * and per-path information.
  */
-static size_t tquic_diag_get_aux_size(struct sock *sk, bool net_admin)
+static size_t __maybe_unused tquic_diag_get_aux_size(struct sock *sk, bool net_admin)
 {
 	struct tquic_sock *tsk = tquic_sk(sk);
 	struct tquic_connection *conn = tsk->conn;

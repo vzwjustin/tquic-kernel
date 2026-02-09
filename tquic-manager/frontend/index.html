@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TQUIC Manager</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <header class="header">
+            <div class="header-content">
+                <h1>🚀 TQUIC Manager</h1>
+                <div class="master-toggle">
+                    <label class="toggle-label">Master Control</label>
+                    <label class="switch">
+                        <input type="checkbox" id="masterToggle">
+                        <span class="slider"></span>
+                    </label>
+                    <span id="masterStatus" class="status-badge">OFF</span>
+                </div>
+            </div>
+        </header>
+
+        <!-- Status Cards -->
+        <div class="status-grid">
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-icon">📊</span>
+                    <h3>TQUIC Status</h3>
+                </div>
+                <div class="card-body">
+                    <div class="stat">
+                        <span class="stat-label">State:</span>
+                        <span id="tquicState" class="stat-value">Loading...</span>
+                    </div>
+                    <div class="stat">
+                        <span class="stat-label">Congestion Control:</span>
+                        <span id="ccAlgorithm" class="stat-value">-</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-icon">🔧</span>
+                    <h3>Loaded Modules</h3>
+                </div>
+                <div class="card-body">
+                    <div id="modulesList" class="modules-list">
+                        Loading...
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Settings Sections -->
+        <div class="settings-container">
+            <!-- Core Settings -->
+            <div class="settings-section">
+                <h2 class="section-title">⚙️ Core Settings</h2>
+                <div class="settings-grid" id="coreSettings">
+                    <!-- Dynamically populated -->
+                </div>
+            </div>
+
+            <!-- Network Settings -->
+            <div class="settings-section">
+                <h2 class="section-title">🌐 Network Settings</h2>
+                <div class="settings-grid" id="networkSettings">
+                    <!-- Dynamically populated -->
+                </div>
+            </div>
+
+            <!-- Performance Settings -->
+            <div class="settings-section">
+                <h2 class="section-title">⚡ Performance Settings</h2>
+                <div class="settings-grid" id="performanceSettings">
+                    <!-- Dynamically populated -->
+                </div>
+            </div>
+
+            <!-- Security Settings -->
+            <div class="settings-section">
+                <h2 class="section-title">🔒 Security Settings</h2>
+                <div class="settings-grid" id="securitySettings">
+                    <!-- Dynamically populated -->
+                </div>
+            </div>
+        </div>
+
+        <!-- Footer -->
+        <footer class="footer">
+            <p>Last updated: <span id="lastUpdate">Never</span></p>
+            <p>Auto-refresh: <span class="refresh-indicator">●</span> 5s</p>
+        </footer>
+    </div>
+
+    <!-- Toast Notification -->
+    <div id="toast" class="toast"></div>
+
+    <script src="app.js"></script>
+</body>
+</html>

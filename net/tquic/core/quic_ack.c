@@ -186,7 +186,7 @@ static u64 tquic_ack_compute_delay(struct tquic_connection *conn, u8 pn_space)
  *
  * Returns the ACK delay in microseconds.
  */
-u64 tquic_ack_decode_delay(struct tquic_connection *conn, u64 encoded_delay)
+static u64 tquic_ack_decode_delay(struct tquic_connection *conn, u64 encoded_delay)
 {
 	struct tquic_ack_conn_ctx *ctx = tquic_ack_ctx(conn);
 	u32 ack_delay_exponent;
@@ -488,8 +488,8 @@ void tquic_ack_on_packet_received(struct tquic_connection *conn, u64 pn,
  * Call this when a packet containing ack-eliciting frames is received.
  * This helps determine when to send immediate ACKs.
  */
-void tquic_ack_on_ack_eliciting_received(struct tquic_connection *conn,
-					 u8 pn_space)
+static void tquic_ack_on_ack_eliciting_received(struct tquic_connection *conn,
+						u8 pn_space)
 {
 	struct tquic_ack_conn_ctx *ctx;
 	struct tquic_local_pn_space *space;
@@ -518,8 +518,8 @@ void tquic_ack_on_ack_eliciting_received(struct tquic_connection *conn,
  *
  * Updates ECN counters for inclusion in ACK_ECN frames.
  */
-void tquic_ack_on_ecn_received(struct tquic_connection *conn, u8 pn_space,
-			       u8 ecn)
+static void tquic_ack_on_ecn_received(struct tquic_connection *conn, u8 pn_space,
+				      u8 ecn)
 {
 	struct tquic_ack_conn_ctx *ctx;
 	struct tquic_local_pn_space *space;
@@ -859,8 +859,8 @@ int tquic_ack_create(struct tquic_connection *conn, u8 pn_space,
  *
  * Returns the number of bytes consumed, or negative error code.
  */
-int tquic_ack_parse(struct tquic_connection *conn, const u8 *data, int len,
-		    struct tquic_ack_info *ack_info)
+static int tquic_ack_parse(struct tquic_connection *conn, const u8 *data,
+			   int len, struct tquic_ack_info *ack_info)
 {
 	int offset = 0;
 	int varint_len;
@@ -979,7 +979,7 @@ int tquic_ack_parse(struct tquic_connection *conn, const u8 *data, int len,
  *
  * Returns true if the packet number is within the acknowledged ranges.
  */
-bool tquic_ack_ranges_contain(const struct tquic_ack_info *ack_info, u64 pn)
+static bool tquic_ack_ranges_contain(const struct tquic_ack_info *ack_info, u64 pn)
 {
 	u64 largest = ack_info->largest_acked;
 	u64 smallest;
@@ -1012,7 +1012,7 @@ bool tquic_ack_ranges_contain(const struct tquic_ack_info *ack_info, u64 pn)
  *
  * Returns the smallest packet number in the acknowledged ranges.
  */
-u64 tquic_ack_get_smallest_acked(const struct tquic_ack_info *ack_info)
+static u64 tquic_ack_get_smallest_acked(const struct tquic_ack_info *ack_info)
 {
 	u64 largest = ack_info->largest_acked;
 	u64 smallest;
@@ -1040,7 +1040,7 @@ u64 tquic_ack_get_smallest_acked(const struct tquic_ack_info *ack_info)
  *
  * Clears all ACK tracking state. Used when discarding packet number spaces.
  */
-void tquic_ack_reset(struct tquic_connection *conn, u8 pn_space)
+static void tquic_ack_reset(struct tquic_connection *conn, u8 pn_space)
 {
 	struct tquic_ack_conn_ctx *ctx;
 	struct tquic_local_pn_space *space;
@@ -1071,7 +1071,7 @@ void tquic_ack_reset(struct tquic_connection *conn, u8 pn_space)
  *
  * Initializes ACK tracking structures for the specified space.
  */
-void tquic_ack_space_init(struct tquic_connection *conn, u8 pn_space)
+static void tquic_ack_space_init(struct tquic_connection *conn, u8 pn_space)
 {
 	struct tquic_ack_conn_ctx *ctx;
 	struct tquic_local_pn_space *space;

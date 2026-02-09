@@ -31,6 +31,7 @@
 /* Public scheduler API */
 #include "tquic_sched.h"
 #include "../tquic_compat.h"
+#include "../tquic_init.h"
 #include "../protocol.h"
 
 /* Failover integration for retransmit queue priority */
@@ -268,6 +269,53 @@ static struct tquic_sched_internal *tquic_default_scheduler;
  * Procfs for statistics (created per-netns via pernet_operations)
  */
 
+/* Forward declarations to silence -Wmissing-prototypes */
+void tquic_sched_get_available(char *buf, size_t maxlen);
+int tquic_sched_set(struct tquic_connection *conn, const char *name);
+const char *tquic_sched_get(struct tquic_connection *conn);
+int tquic_weighted_set_weights(struct tquic_connection *conn,
+			       const u32 *weights, int num_weights);
+int tquic_redundant_set_level(struct tquic_connection *conn, u8 level);
+bool tquic_redundant_is_duplicate(struct tquic_connection *conn, u64 seq);
+int tquic_adaptive_configure(struct tquic_connection *conn,
+			     bool coupled_cc, bool reinjection,
+			     u32 rtt_weight, u32 loss_weight,
+			     u32 bw_weight, u32 cwnd_weight);
+int tquic_adaptive_reinject(struct tquic_connection *conn,
+			    u64 packet_number, u8 original_path_id);
+struct tquic_connection *tquic_connection_alloc(u64 conn_id, gfp_t gfp);
+void tquic_connection_free(struct tquic_connection *conn);
+struct tquic_path *tquic_path_add(struct tquic_connection *conn, u8 path_id,
+				  int ifindex, gfp_t gfp);
+void tquic_path_remove(struct tquic_connection *conn, u8 path_id);
+bool tquic_sched_has_failover_pending(struct tquic_failover_ctx *fc);
+struct tquic_sent_packet *tquic_sched_get_failover_packet(
+		struct tquic_failover_ctx *fc);
+void tquic_sched_feedback(struct tquic_connection *conn,
+			  const struct tquic_sched_feedback *fb);
+void tquic_path_packet_sent(struct tquic_connection *conn, u8 path_id,
+			    u32 bytes);
+void tquic_path_packet_acked(struct tquic_connection *conn, u8 path_id,
+			     u32 bytes, u64 rtt_us);
+void tquic_path_packet_lost(struct tquic_connection *conn, u8 path_id,
+			    u64 packet_number, u32 bytes);
+void tquic_get_conn_stats(struct tquic_connection *conn,
+			  u64 *total_packets, u64 *total_bytes,
+			  u64 *sched_decisions, u64 *path_switches,
+			  u64 *reinjections);
+void tquic_get_path_stats(struct tquic_connection *conn, u8 path_id,
+			  u64 *packets_sent, u64 *bytes_sent,
+			  u64 *packets_acked, u64 *packets_lost,
+			  u64 *smoothed_rtt_us, u64 *min_rtt_us,
+			  u32 *cwnd, u32 *loss_rate);
+int tquic_set_default_scheduler(const char *name);
+const char *tquic_get_default_scheduler(void);
+struct tquic_sched_ops *tquic_new_sched_find(const char *name);
+void tquic_new_sched_notify_ack(struct tquic_connection *conn,
+				struct tquic_path *path, u64 acked_bytes);
+void tquic_new_sched_notify_loss(struct tquic_connection *conn,
+				 struct tquic_path *path, u64 lost_bytes);
+
 /* =========================================================================
  * Utility Functions
  * ========================================================================= */
@@ -312,7 +360,7 @@ static struct tquic_path *tquic_find_path(struct tquic_connection *conn, u8 path
  *
  * Must be called with rcu_read_lock() held.
  */
-static int tquic_count_active_paths(struct tquic_connection *conn)
+static int __maybe_unused tquic_count_active_paths(struct tquic_connection *conn)
 {
 	struct tquic_path *path;
 	int count = 0;
@@ -420,7 +468,7 @@ static struct tquic_sched_internal *tquic_int_sched_find(const char *name)
  * Note: This is for internal schedulers (tquic_sched_internal). The public
  * scheduler API uses tquic_sched_register() from sched/scheduler.c.
  */
-static int tquic_int_sched_register(struct tquic_sched_internal *sched)
+static int __maybe_unused tquic_int_sched_register(struct tquic_sched_internal *sched)
 {
 	int ret = 0;
 
@@ -452,7 +500,7 @@ static int tquic_int_sched_register(struct tquic_sched_internal *sched)
 /*
  * Unregister an internal scheduler
  */
-static void tquic_int_sched_unregister(struct tquic_sched_internal *sched)
+static void __maybe_unused tquic_int_sched_unregister(struct tquic_sched_internal *sched)
 {
 	if (!sched)
 		return;
@@ -693,7 +741,7 @@ static void tquic_rr_path_removed(struct tquic_connection *conn,
 	pr_debug("RR: path %u removed\n", path->path_id);
 }
 
-static struct tquic_sched_internal tquic_sched_rr = {
+static struct tquic_sched_internal __maybe_unused tquic_sched_rr = {
 	.name		= "round-robin",
 	.owner		= THIS_MODULE,
 	.init		= tquic_rr_init,
@@ -899,7 +947,7 @@ static void tquic_weighted_path_removed(struct tquic_connection *conn,
 		wd->current_path_idx = 0;
 }
 
-static struct tquic_sched_internal tquic_sched_weighted = {
+static struct tquic_sched_internal __maybe_unused tquic_sched_weighted = {
 	.name		= "weighted",
 	.owner		= THIS_MODULE,
 	.init		= tquic_weighted_init,
@@ -1120,7 +1168,7 @@ static void tquic_lowlat_path_removed(struct tquic_connection *conn,
 	}
 }
 
-static struct tquic_sched_internal tquic_sched_lowlat = {
+static struct tquic_sched_internal __maybe_unused tquic_sched_lowlat = {
 	.name		= "lowlat",
 	.owner		= THIS_MODULE,
 	.init		= tquic_lowlat_init,
@@ -1295,7 +1343,7 @@ static void tquic_redundant_path_removed(struct tquic_connection *conn,
 	pr_debug("Redundant: path %u removed\n", path->path_id);
 }
 
-static struct tquic_sched_internal tquic_sched_redundant = {
+static struct tquic_sched_internal __maybe_unused tquic_sched_redundant = {
 	.name		= "redundant",
 	.owner		= THIS_MODULE,
 	.init		= tquic_redundant_init,
@@ -1799,7 +1847,7 @@ int tquic_adaptive_reinject(struct tquic_connection *conn,
 }
 EXPORT_SYMBOL_GPL(tquic_adaptive_reinject);
 
-static struct tquic_sched_internal tquic_sched_adaptive = {
+static struct tquic_sched_internal __maybe_unused tquic_sched_adaptive = {
 	.name		= "adaptive",
 	.owner		= THIS_MODULE,
 	.init		= tquic_adaptive_init,
@@ -2643,7 +2691,7 @@ static void __net_exit tquic_sched_net_exit(struct net *net)
 	pr_debug("TQUIC scheduler exited for netns\n");
 }
 
-static struct pernet_operations tquic_sched_net_ops = {
+static struct pernet_operations __maybe_unused tquic_sched_net_ops = {
 	.init = tquic_sched_net_init,
 	.exit = tquic_sched_net_exit,
 };

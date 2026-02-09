@@ -196,7 +196,7 @@ struct tquic_stream_recv_buf {
  *
  * Returns 0 on success, negative error code on failure.
  */
-static int tquic_create_udp_socket(struct tquic_sock *tsk, int family)
+static int __maybe_unused tquic_create_udp_socket(struct tquic_sock *tsk, int family)
 {
 	struct socket *sock;
 	struct sock *sk;
@@ -262,8 +262,8 @@ static int tquic_create_udp_socket(struct tquic_sock *tsk, int family)
  *
  * Returns 0 on success, negative error code on failure.
  */
-static int tquic_bind_udp_socket(struct tquic_sock *tsk,
-				 struct sockaddr *addr, int addr_len)
+static int __maybe_unused tquic_bind_udp_socket(struct tquic_sock *tsk,
+						struct sockaddr *addr, int addr_len)
 {
 	struct socket *sock;
 	int err;
@@ -299,8 +299,8 @@ static int tquic_bind_udp_socket(struct tquic_sock *tsk,
  *
  * Returns 0 on success, negative error code on failure.
  */
-static int tquic_connect_udp_socket(struct tquic_sock *tsk,
-				    struct sockaddr *addr, int addr_len)
+static int __maybe_unused tquic_connect_udp_socket(struct tquic_sock *tsk,
+						   struct sockaddr *addr, int addr_len)
 {
 	struct socket *sock;
 	int err;
@@ -561,8 +561,8 @@ static int tquic_xmit_skb(struct sk_buff *skb, struct tquic_connection *conn)
  *
  * Returns number of bytes sent on success, negative error code on failure.
  */
-static int tquic_sendmsg_locked(struct tquic_sock *tsk, struct sk_buff *skb,
-				struct sockaddr *dest)
+static int __maybe_unused tquic_sendmsg_locked(struct tquic_sock *tsk, struct sk_buff *skb,
+					       struct sockaddr *dest)
 {
 	struct socket *sock;
 	struct msghdr msg;
@@ -628,7 +628,7 @@ static int tquic_sendmsg_locked(struct tquic_sock *tsk, struct sk_buff *skb,
  *   10 = ECT(0) - preferred for QUIC
  *   11 = CE (Congestion Experienced)
  */
-static void tquic_output_set_ecn(struct socket *sock, struct tquic_path *path)
+static void __maybe_unused tquic_output_set_ecn(struct socket *sock, struct tquic_path *path)
 {
 	u8 ecn_marking;
 
@@ -775,7 +775,7 @@ EXPORT_SYMBOL(tquic_output_batch);
  */
 
 /* Calculate pacing delay for next packet */
-static ktime_t tquic_pacing_delay(struct tquic_connection *conn, u32 bytes)
+static ktime_t __maybe_unused tquic_pacing_delay(struct tquic_connection *conn, u32 bytes)
 {
 	struct tquic_path *path = conn->active_path;
 	u64 delay_ns;
@@ -1002,7 +1002,7 @@ EXPORT_SYMBOL(tquic_output_coalesced);
 /* Retransmit a packet */
 int tquic_retransmit(struct tquic_connection *conn, struct tquic_sent_packet *pkt)
 {
-	struct sk_buff *skb, *clone;
+	struct sk_buff *clone;
 	int err;
 
 	if (!pkt->skb)
@@ -1628,7 +1628,7 @@ EXPORT_SYMBOL(tquic_packet_build);
  */
 
 /* Initialize output subsystem */
-int __init tquic_output_init(void)
+static int __init tquic_output_init(void)
 {
 	int cpu;
 
@@ -1646,7 +1646,7 @@ int __init tquic_output_init(void)
 }
 
 /* Cleanup output subsystem */
-void __exit tquic_output_exit(void)
+static void __exit tquic_output_exit(void)
 {
 	int cpu;
 

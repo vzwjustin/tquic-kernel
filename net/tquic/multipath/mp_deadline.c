@@ -473,7 +473,7 @@ struct tquic_path_quality_sample {
  * @path: Path sampled
  * @sample: Quality sample
  */
-void mp_deadline_record_quality_sample(
+static void mp_deadline_record_quality_sample(
 	struct tquic_mp_deadline_coordinator *coord,
 	struct tquic_path *path,
 	struct tquic_path_quality_sample *sample)

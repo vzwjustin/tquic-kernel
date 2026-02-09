@@ -1,0 +1,16 @@
+[Unit]
+Description=TQUIC Manager Web Interface
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/tquic-manager/backend
+ExecStart=/usr/bin/python3 /opt/tquic-manager/backend/app.py
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

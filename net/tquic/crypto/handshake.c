@@ -22,6 +22,7 @@
 #include <crypto/sig.h>
 #include <crypto/utils.h>
 #include <net/tquic.h>
+#include <net/tquic/handshake.h>
 #include "cert_verify.h"
 
 /* TLS 1.3 Version */
@@ -942,8 +943,8 @@ static int tquic_hs_transcript_hash(struct tquic_handshake *hs,
 /*
  * TLS 1.3 Key Schedule - derive early secrets for 0-RTT
  */
-static int tquic_hs_derive_early_secrets(struct tquic_handshake *hs,
-					 const u8 *psk, u32 psk_len)
+static int __maybe_unused tquic_hs_derive_early_secrets(struct tquic_handshake *hs,
+							const u8 *psk, u32 psk_len)
 {
 	u8 zero_salt[TLS_SECRET_MAX_LEN] = {0};
 	u8 transcript_hash[TLS_SECRET_MAX_LEN];
@@ -986,7 +987,6 @@ static int tquic_hs_derive_handshake_secrets(struct tquic_handshake *hs)
 {
 	u8 derived[TLS_SECRET_MAX_LEN];
 	u8 transcript_hash[TLS_SECRET_MAX_LEN];
-	u8 empty_hash[TLS_SECRET_MAX_LEN];
 	u32 hash_len;
 	int ret;
 
@@ -1129,7 +1129,6 @@ static int tquic_hs_build_ch_extensions(struct tquic_handshake *hs,
 {
 	u8 *p = buf;
 	u8 *ext_len_ptr;
-	u8 *list_len_ptr;
 	u8 transport_params[1024];
 	u32 tp_len;
 	int ret;

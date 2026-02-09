@@ -26,6 +26,24 @@
 
 #include "deadline_aware.h"
 
+/* Forward declarations for exported functions not in a public header */
+struct tquic_edf_scheduler;
+struct tquic_edf_stats;
+struct tquic_edf_scheduler *
+tquic_edf_scheduler_create(struct tquic_connection *conn, u32 max_entries);
+void tquic_edf_scheduler_destroy(struct tquic_edf_scheduler *sched);
+int tquic_edf_enqueue(struct tquic_edf_scheduler *sched, struct sk_buff *skb,
+		      u64 stream_id, u64 deadline_us, u8 priority);
+struct sk_buff *tquic_edf_dequeue(struct tquic_edf_scheduler *sched,
+				  struct tquic_path **path);
+struct sk_buff *tquic_edf_peek(struct tquic_edf_scheduler *sched);
+ktime_t tquic_edf_get_next_deadline(struct tquic_edf_scheduler *sched);
+int tquic_edf_cancel_stream(struct tquic_edf_scheduler *sched, u64 stream_id);
+void tquic_edf_update_path(struct tquic_edf_scheduler *sched,
+			   struct tquic_path *path);
+void tquic_edf_get_stats(struct tquic_edf_scheduler *sched,
+			 struct tquic_edf_stats *stats);
+
 /*
  * =============================================================================
  * EDF Scheduler Data Structures
@@ -879,7 +897,7 @@ static struct tquic_sched_ops tquic_sched_edf = {
  * =============================================================================
  */
 
-int __init tquic_edf_scheduler_init(void)
+static int __init tquic_edf_scheduler_init(void)
 {
 	/* Create memory caches */
 	edf_entry_cache = kmem_cache_create("tquic_edf_entry",
@@ -903,7 +921,7 @@ int __init tquic_edf_scheduler_init(void)
 	return 0;
 }
 
-void __exit tquic_edf_scheduler_exit(void)
+static void __exit tquic_edf_scheduler_exit(void)
 {
 	tquic_unregister_scheduler(&tquic_sched_edf);
 

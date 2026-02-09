@@ -260,7 +260,7 @@ static struct tquic_path *rr_select(void *state, struct tquic_connection *conn,
 	return conn->active_path;
 }
 
-static struct tquic_sched_ops tquic_sched_rr = {
+static struct tquic_sched_ops __maybe_unused tquic_sched_rr = {
 	.name = "roundrobin",
 	.init = rr_init,
 	.release = rr_release,
@@ -289,7 +289,7 @@ static struct tquic_path *minrtt_select(void *state, struct tquic_connection *co
 	return best ?: conn->active_path;
 }
 
-static struct tquic_sched_ops tquic_sched_minrtt = {
+static struct tquic_sched_ops __maybe_unused tquic_sched_minrtt = {
 	.name = "minrtt",
 	.select = minrtt_select,
 };
@@ -363,7 +363,7 @@ static void wrr_feedback(void *state, struct tquic_path *path,
 	/* This is a simplified implementation */
 }
 
-static struct tquic_sched_ops tquic_sched_wrr = {
+static struct tquic_sched_ops __maybe_unused tquic_sched_wrr = {
 	.name = "weighted",
 	.init = wrr_init,
 	.release = wrr_release,
@@ -438,7 +438,7 @@ static struct tquic_path *blest_select(void *state, struct tquic_connection *con
 	return best ?: conn->active_path;
 }
 
-static struct tquic_sched_ops tquic_sched_blest = {
+static struct tquic_sched_ops __maybe_unused tquic_sched_blest = {
 	.name = "blest",
 	.init = blest_init,
 	.release = blest_release,
@@ -457,7 +457,7 @@ static struct tquic_path *redundant_select(void *state,
 	return NULL;
 }
 
-static struct tquic_sched_ops tquic_sched_redundant = {
+static struct tquic_sched_ops __maybe_unused tquic_sched_redundant = {
 	.name = "redundant",
 	.select = redundant_select,
 };
@@ -603,7 +603,7 @@ static void ecf_feedback(void *state, struct tquic_path *path,
 	 */
 }
 
-static struct tquic_sched_ops tquic_sched_ecf = {
+static struct tquic_sched_ops __maybe_unused tquic_sched_ecf = {
 	.name = "ecf",
 	.init = ecf_init,
 	.release = ecf_release,
@@ -752,7 +752,7 @@ static void owd_feedback(void *state, struct tquic_path *path,
 	 */
 }
 
-static struct tquic_sched_ops tquic_sched_owd = {
+static struct tquic_sched_ops __maybe_unused tquic_sched_owd = {
 	.name = "owd",
 	.init = owd_init,
 	.release = owd_release,
@@ -868,7 +868,7 @@ static struct tquic_path *owd_ecf_select(void *state __maybe_unused,
 	return best ?: conn->active_path;
 }
 
-static struct tquic_sched_ops tquic_sched_owd_ecf = {
+static struct tquic_sched_ops __maybe_unused tquic_sched_owd_ecf = {
 	.name = "owd-ecf",
 	.init = owd_ecf_init,
 	.release = owd_ecf_release,

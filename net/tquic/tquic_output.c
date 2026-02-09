@@ -211,7 +211,7 @@ static int tquic_gen_padding_frame(struct tquic_frame_ctx *ctx, size_t len)
 /*
  * Generate PING frame
  */
-static int tquic_gen_ping_frame(struct tquic_frame_ctx *ctx)
+static int __maybe_unused tquic_gen_ping_frame(struct tquic_frame_ctx *ctx)
 {
 	if (ctx->offset + 1 > ctx->buf_len)
 		return -ENOSPC;
@@ -363,7 +363,7 @@ static int tquic_gen_stream_frame(struct tquic_frame_ctx *ctx,
 /*
  * Generate MAX_DATA frame
  */
-static int tquic_gen_max_data_frame(struct tquic_frame_ctx *ctx, u64 max_data)
+static int __maybe_unused tquic_gen_max_data_frame(struct tquic_frame_ctx *ctx, u64 max_data)
 {
 	u8 *start = ctx->buf + ctx->offset;
 	int ret;
@@ -387,8 +387,8 @@ static int tquic_gen_max_data_frame(struct tquic_frame_ctx *ctx, u64 max_data)
 /*
  * Generate MAX_STREAM_DATA frame
  */
-static int tquic_gen_max_stream_data_frame(struct tquic_frame_ctx *ctx,
-					   u64 stream_id, u64 max_data)
+static int __maybe_unused tquic_gen_max_stream_data_frame(struct tquic_frame_ctx *ctx,
+							  u64 stream_id, u64 max_data)
 {
 	u8 *start = ctx->buf + ctx->offset;
 	int ret;
@@ -452,10 +452,10 @@ static int tquic_gen_path_response_frame(struct tquic_frame_ctx *ctx,
 /*
  * Generate NEW_CONNECTION_ID frame
  */
-static int tquic_gen_new_connection_id_frame(struct tquic_frame_ctx *ctx,
-					     u64 seq_num, u64 retire_prior_to,
-					     const struct tquic_cid *cid,
-					     const u8 stateless_reset_token[16])
+static int __maybe_unused tquic_gen_new_connection_id_frame(struct tquic_frame_ctx *ctx,
+							    u64 seq_num, u64 retire_prior_to,
+							    const struct tquic_cid *cid,
+							    const u8 stateless_reset_token[16])
 {
 	u8 *start = ctx->buf + ctx->offset;
 	int ret;
@@ -1133,11 +1133,10 @@ EXPORT_SYMBOL_GPL(tquic_select_path);
  * Select path with load balancing
  * Caller must hold conn->lock to protect path list iteration.
  */
-static struct tquic_path *tquic_select_path_lb(struct tquic_connection *conn,
-					       struct sk_buff *skb, u32 flags)
+static struct tquic_path __maybe_unused *tquic_select_path_lb(struct tquic_connection *conn,
+							      struct sk_buff *skb, u32 flags)
 {
 	struct tquic_path *path, *best = NULL;
-	u64 min_inflight = ULLONG_MAX;
 	u32 best_score = 0;
 
 	lockdep_assert_held(&conn->lock);
@@ -1280,9 +1279,6 @@ void tquic_update_pacing(struct sock *sk, struct tquic_path *path)
 	if (smp_load_acquire(&sk->sk_pacing_status) == SK_PACING_NEEDED) {
 		/* Internal pacing needed - FQ not available */
 		if (path->conn && path->conn->scheduler) {
-			struct tquic_pacing_state *pacing;
-			struct tquic_bond_state *bond = path->conn->scheduler;
-
 			/* Update internal pacing state if available */
 			/* Note: Per-path pacing state would be accessed here */
 		}
@@ -1469,7 +1465,7 @@ EXPORT_SYMBOL_GPL(tquic_pacing_send);
 /*
  * Check if GSO is supported and beneficial
  */
-static bool tquic_gso_supported(struct tquic_path *path)
+static bool __maybe_unused tquic_gso_supported(struct tquic_path *path)
 {
 	/* GSO is beneficial for high-bandwidth paths */
 	return path->mtu >= 1200 && path->stats.bandwidth > 1000000;
@@ -1478,8 +1474,8 @@ static bool tquic_gso_supported(struct tquic_path *path)
 /*
  * Initialize GSO context
  */
-static int tquic_gso_init(struct tquic_gso_ctx *gso, struct tquic_path *path,
-			  u16 max_segs)
+static int __maybe_unused tquic_gso_init(struct tquic_gso_ctx *gso, struct tquic_path *path,
+					 u16 max_segs)
 {
 	gso->gso_size = path->mtu - 48;  /* Leave room for UDP/IP headers */
 	gso->gso_segs = 0;
@@ -1503,8 +1499,8 @@ static int tquic_gso_init(struct tquic_gso_ctx *gso, struct tquic_path *path,
 /*
  * Add a segment to GSO SKB
  */
-static int tquic_gso_add_segment(struct tquic_gso_ctx *gso,
-				 const u8 *data, size_t len)
+static int __maybe_unused tquic_gso_add_segment(struct tquic_gso_ctx *gso,
+						const u8 *data, size_t len)
 {
 	if (gso->gso_segs >= TQUIC_GSO_MAX_SEGS)
 		return -ENOSPC;
@@ -1530,7 +1526,7 @@ static int tquic_gso_add_segment(struct tquic_gso_ctx *gso,
 /*
  * Finalize GSO SKB
  */
-static struct sk_buff *tquic_gso_finalize(struct tquic_gso_ctx *gso)
+static struct sk_buff __maybe_unused *tquic_gso_finalize(struct tquic_gso_ctx *gso)
 {
 	struct sk_buff *skb = gso->gso_skb;
 
@@ -1579,8 +1575,8 @@ static struct sk_buff *tquic_gso_finalize(struct tquic_gso_ctx *gso)
  * Sets ECT(0) marking in IP header if ECN is enabled.
  * Called before packet transmission.
  */
-static void tquic_set_ecn_marking(struct sk_buff *skb,
-				  struct tquic_connection *conn)
+static void __maybe_unused tquic_set_ecn_marking(struct sk_buff *skb,
+						  struct tquic_connection *conn)
 {
 	struct net *net = NULL;
 	struct iphdr *iph;
@@ -1629,7 +1625,6 @@ int tquic_output_packet(struct tquic_connection *conn,
 {
 	struct flowi4 fl4;
 	struct rtable *rt;
-	struct sock *sk;
 	struct sockaddr_in *local, *remote;
 	struct net *net = NULL;
 	int ret;

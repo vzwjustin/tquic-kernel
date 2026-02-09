@@ -12,7 +12,7 @@
 #include "hw_offload.h"
 #include "zero_rtt.h"
 
-static int __init tquic_crypto_module_init(void)
+static int __init __maybe_unused tquic_crypto_module_init(void)
 {
 	int ret;
 
@@ -46,7 +46,7 @@ err_cert_verify:
 	return ret;
 }
 
-static void __exit tquic_crypto_module_exit(void)
+static void __exit __maybe_unused tquic_crypto_module_exit(void)
 {
 	tquic_zero_rtt_module_exit();
 #if IS_ENABLED(CONFIG_TQUIC_CERT_VERIFY)

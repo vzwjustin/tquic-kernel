@@ -95,6 +95,7 @@
 #define TQUIC_VERSION_NEGOTIATION	0x00000000
 
 /* Stateless reset */
+#undef TQUIC_STATELESS_RESET_MIN_LEN
 #define TQUIC_STATELESS_RESET_MIN_LEN	22  /* RFC 9000 Section 10.3 */
 #define TQUIC_STATELESS_RESET_TOKEN_LEN	16
 
@@ -132,9 +133,6 @@ struct tquic_rx_ctx {
 	bool ack_eliciting;
 	u8 key_phase_bit;  /* Key phase from short header (RFC 9001 Section 6) */
 };
-
-static int tquic_process_path_abandon_frame(struct tquic_rx_ctx *ctx);
-static int tquic_process_path_status_frame(struct tquic_rx_ctx *ctx);
 
 /* GRO state per socket */
 struct tquic_gro_state {
@@ -237,8 +235,8 @@ static struct tquic_path *tquic_find_path_by_addr(struct tquic_connection *conn,
 /*
  * Find path by local connection ID
  */
-static struct tquic_path *tquic_find_path_by_cid(struct tquic_connection *conn,
-						 const u8 *cid, u8 cid_len)
+static struct tquic_path __maybe_unused *tquic_find_path_by_cid(struct tquic_connection *conn,
+							       const u8 *cid, u8 cid_len)
 {
 	struct tquic_path *path;
 
@@ -416,7 +414,7 @@ static int tquic_process_version_negotiation(struct tquic_connection *conn,
 /*
  * Send version negotiation response (server side)
  */
-static int tquic_send_version_negotiation_internal(struct sock *sk,
+static int __maybe_unused tquic_send_version_negotiation_internal(struct sock *sk,
 					  const struct sockaddr *addr,
 					  const u8 *dcid, u8 dcid_len,
 					  const u8 *scid, u8 scid_len)
@@ -882,7 +880,6 @@ static int tquic_process_max_data_frame(struct tquic_rx_ctx *ctx)
 static int tquic_process_max_stream_data_frame(struct tquic_rx_ctx *ctx)
 {
 	u64 stream_id, max_data;
-	struct tquic_stream *stream;
 	int ret;
 
 	ctx->offset++;  /* Skip frame type */
@@ -1915,8 +1912,8 @@ static bool tquic_gro_can_coalesce(struct sk_buff *skb1, struct sk_buff *skb2)
 /*
  * Attempt to merge packets for GRO
  */
-static struct sk_buff *tquic_gro_receive_internal(struct tquic_gro_state *gro,
-					 struct sk_buff *skb)
+static struct sk_buff __maybe_unused *tquic_gro_receive_internal(struct tquic_gro_state *gro,
+								struct sk_buff *skb)
 {
 	struct sk_buff *held;
 
@@ -2634,8 +2631,6 @@ static int tquic_encap_recv(struct sock *sk, struct sk_buff *skb)
  */
 int tquic_setup_udp_encap(struct sock *sk)
 {
-	struct udp_sock *up = udp_sk(sk);
-
 	/* Set encapsulation callback */
 	udp_sk(sk)->encap_type = 1;  /* Custom encapsulation */
 	udp_sk(sk)->encap_rcv = tquic_encap_recv;

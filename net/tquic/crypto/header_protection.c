@@ -99,6 +99,47 @@ struct tquic_hp_ctx {
 	spinlock_t lock;
 };
 
+/* Forward declarations to silence -Wmissing-prototypes */
+int tquic_hp_extract_sample(const u8 *packet, size_t packet_len,
+			    size_t pn_offset, u8 *sample);
+int tquic_hp_detect_pn_length(u8 first_byte);
+int tquic_hp_protect_long(struct tquic_hp_ctx *ctx, u8 *packet,
+			  size_t packet_len, size_t pn_offset,
+			  enum tquic_hp_enc_level level);
+int tquic_hp_unprotect_long(struct tquic_hp_ctx *ctx, u8 *packet,
+			    size_t packet_len, size_t pn_offset,
+			    enum tquic_hp_enc_level level, u8 *pn_len);
+int tquic_hp_protect_short(struct tquic_hp_ctx *ctx, u8 *packet,
+			   size_t packet_len, size_t pn_offset);
+int tquic_hp_unprotect_short(struct tquic_hp_ctx *ctx, u8 *packet,
+			     size_t packet_len, size_t pn_offset,
+			     u8 *pn_len, u8 *key_phase);
+u8 tquic_hp_get_key_phase(struct tquic_hp_ctx *ctx);
+void tquic_hp_set_key_phase(struct tquic_hp_ctx *ctx, u8 phase);
+int tquic_hp_set_key(struct tquic_hp_ctx *ctx, enum tquic_hp_enc_level level,
+		     int direction, const u8 *key, size_t key_len, u16 cipher);
+void tquic_hp_clear_key(struct tquic_hp_ctx *ctx,
+			enum tquic_hp_enc_level level, int direction);
+int tquic_hp_set_next_key(struct tquic_hp_ctx *ctx, int direction,
+			  const u8 *key, size_t key_len, u16 cipher);
+void tquic_hp_rotate_keys(struct tquic_hp_ctx *ctx);
+u64 tquic_hp_decode_pn(u64 truncated_pn, u8 pn_len, u64 largest_pn);
+u8 tquic_hp_encode_pn_length(u64 pn, u64 largest_acked);
+u64 tquic_hp_read_pn(const u8 *packet, u8 pn_len);
+void tquic_hp_write_pn(u8 *packet, u64 pn, u8 pn_len);
+void tquic_hp_set_level(struct tquic_hp_ctx *ctx,
+			enum tquic_hp_enc_level read_level,
+			enum tquic_hp_enc_level write_level);
+struct tquic_hp_ctx *tquic_hp_ctx_alloc(void);
+void tquic_hp_ctx_free(struct tquic_hp_ctx *ctx);
+int tquic_hp_protect(struct tquic_hp_ctx *ctx, u8 *packet,
+		     size_t packet_len, size_t pn_offset);
+int tquic_hp_unprotect(struct tquic_hp_ctx *ctx, u8 *packet,
+		       size_t packet_len, size_t pn_offset,
+		       u8 *pn_len, u8 *key_phase);
+bool tquic_hp_has_key(struct tquic_hp_ctx *ctx, enum tquic_hp_enc_level level,
+		      int direction);
+
 /*
  * Generate HP mask using AES-ECB
  *
@@ -159,7 +200,6 @@ static int tquic_hp_mask_chacha20(struct tquic_hp_key *hp_key,
 	struct skcipher_request *req;
 	struct scatterlist sg;
 	u8 zeros[TQUIC_HP_MASK_LEN] = {0};
-	u8 output[TQUIC_HP_MASK_LEN];
 	DECLARE_CRYPTO_WAIT(wait);
 	int ret;
 

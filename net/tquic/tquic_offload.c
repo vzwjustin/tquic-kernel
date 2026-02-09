@@ -318,7 +318,6 @@ struct sk_buff *tquic_gro_receive(struct list_head *head, struct sk_buff *skb,
 				  struct udphdr *uh, struct sock *sk)
 {
 	struct sk_buff *pp = NULL;
-	unsigned int off = skb_gro_offset(skb);
 	int flush = 1;
 
 	/* Set up for frag_list GRO */
@@ -561,7 +560,7 @@ static struct sk_buff *tquic_gso_segment(struct sk_buff *skb,
  */
 
 /* IPv4 TQUIC offload structure */
-static struct net_offload tquic4_offload = {
+static struct net_offload __maybe_unused tquic4_offload = {
 	.callbacks = {
 		.gso_segment	= tquic_gso_segment,
 		.gro_receive	= tquic4_gro_receive,
@@ -571,7 +570,7 @@ static struct net_offload tquic4_offload = {
 
 #if IS_ENABLED(CONFIG_IPV6)
 /* IPv6 TQUIC offload structure */
-static struct net_offload tquic6_offload = {
+static struct net_offload __maybe_unused tquic6_offload = {
 	.callbacks = {
 		.gso_segment	= tquic_gso_segment,
 		.gro_receive	= tquic6_gro_receive,
@@ -744,8 +743,6 @@ EXPORT_SYMBOL_GPL(tquic_clear_gro);
  */
 int __init tquic_offload_init(void)
 {
-	int ret;
-
 	pr_info("tquic: initializing GRO/GSO offload support\n");
 
 	/* Initialize statistics */

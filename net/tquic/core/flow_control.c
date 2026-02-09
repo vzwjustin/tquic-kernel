@@ -1936,7 +1936,6 @@ int tquic_fc_stream_check_recv(struct tquic_fc_state *fc,
 			       struct tquic_fc_stream_state *stream_fc,
 			       u64 offset, u64 length, bool fin)
 {
-	u64 end_offset = offset + length;
 	int ret;
 
 	if (!fc || !stream_fc)

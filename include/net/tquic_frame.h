@@ -315,6 +315,7 @@ const char *tquic_frame_type_name(u8 type);
 bool tquic_frame_is_ack_eliciting(u8 type);
 bool tquic_frame_is_probing(u8 type);
 bool tquic_frame_allowed_in_pn_space(u8 type, int pn_space);
+size_t tquic_varint_encode_len(u64 val);
 
 /**
  * tquic_is_stream_frame - Check if frame type is a STREAM frame

@@ -1570,7 +1570,7 @@ EXPORT_SYMBOL_GPL(tquic_coupled_on_loss_ext);
  * =============================================================================
  */
 
-static int __init tquic_coupled_init(void)
+static int __init __maybe_unused tquic_coupled_init(void)
 {
 	int ret;
 
@@ -1623,7 +1623,7 @@ err_olia:
 	return ret;
 }
 
-static void __exit tquic_coupled_exit(void)
+static void __exit __maybe_unused tquic_coupled_exit(void)
 {
 	pr_info("tquic_coupled: unloading coupled multipath congestion control\n");
 

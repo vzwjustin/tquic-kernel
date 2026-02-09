@@ -394,7 +394,7 @@ static void *bbrv2_init(struct tquic_path *path)
 
 	/* Initialize filters with 10 RTT window (assume 100ms initially) */
 	bbr_minmax_reset(&bbr->bw_filter, NSEC_PER_SEC);
-	bbr_minmax_reset(&bbr->rtt_filter, 10 * NSEC_PER_SEC);
+	bbr_minmax_reset(&bbr->rtt_filter, 10ULL * NSEC_PER_SEC);
 
 	/* Get initial cwnd from path stats or use default */
 	initial_cwnd = 10 * bbr_get_mss(bbr);

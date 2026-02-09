@@ -23,6 +23,25 @@
 #include <linux/rbtree.h>
 #include <net/tquic.h>
 
+/* Forward declarations for exported functions not in a public header */
+void tquic_sched_add_stream(struct tquic_connection *conn,
+			    struct tquic_stream *stream);
+void tquic_sched_remove_stream(struct tquic_connection *conn,
+			       struct tquic_stream *stream);
+struct tquic_stream *tquic_sched_next_stream(struct tquic_connection *conn);
+int tquic_stream_set_extensible_priority(struct tquic_stream *stream,
+					 u8 urgency, bool incremental);
+void tquic_stream_get_priority(struct tquic_stream *stream, u8 *urgency,
+			       bool *incremental);
+int tquic_stream_priority_update(struct tquic_connection *conn, u64 stream_id,
+				 u8 urgency, bool incremental);
+int tquic_frame_build_priority_update(struct tquic_connection *conn,
+				      struct tquic_stream *stream);
+int tquic_frame_process_priority_update(struct tquic_connection *conn,
+					const u8 *data, int len);
+void tquic_stream_init_priority(struct tquic_stream *stream);
+void tquic_sched_release(struct tquic_connection *conn);
+
 /*
  * Number of priority levels (urgency 0-7)
  */

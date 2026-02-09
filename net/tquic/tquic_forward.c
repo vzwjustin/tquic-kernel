@@ -120,7 +120,8 @@ static inline void tquic_free_pipe(struct pipe_inode_info *pipe)
 
 /* Client list for hairpin detection */
 static LIST_HEAD(tquic_forward_client_list);
-static DEFINE_SPINLOCK(tquic_forward_client_lock);
+static spinlock_t __maybe_unused tquic_forward_client_lock =
+	__SPIN_LOCK_UNLOCKED(tquic_forward_client_lock);
 
 /**
  * struct tquic_hairpin_entry - Hairpin route entry
@@ -183,7 +184,7 @@ struct tquic_splice_state {
  *
  * Returns: Splice state or NULL on failure
  */
-static struct tquic_splice_state *tquic_splice_state_alloc(void)
+static struct tquic_splice_state __maybe_unused *tquic_splice_state_alloc(void)
 {
 	struct tquic_splice_state *state;
 
@@ -208,7 +209,7 @@ static struct tquic_splice_state *tquic_splice_state_alloc(void)
  * tquic_splice_state_free - Free splice state
  * @state: State to free
  */
-static void tquic_splice_state_free(struct tquic_splice_state *state)
+static void __maybe_unused tquic_splice_state_free(struct tquic_splice_state *state)
 {
 	if (!state)
 		return;
@@ -418,9 +419,9 @@ EXPORT_SYMBOL_GPL(tquic_forward_splice);
  *
  * Returns: Bytes moved
  */
-static size_t tquic_forward_skb_splice(struct sk_buff_head *from_queue,
-				       struct sk_buff_head *to_queue,
-				       size_t max_bytes)
+static size_t __maybe_unused tquic_forward_skb_splice(struct sk_buff_head *from_queue,
+						      struct sk_buff_head *to_queue,
+						      size_t max_bytes)
 {
 	struct sk_buff *skb;
 	size_t moved = 0;
@@ -471,9 +472,9 @@ static size_t tquic_forward_skb_splice(struct sk_buff_head *from_queue,
  *
  * Returns: true if client owns this address/port, false otherwise
  */
-static bool tquic_forward_client_owns_address(struct tquic_client *client,
-					      const struct sockaddr_storage *addr,
-					      __be16 port)
+static bool __maybe_unused tquic_forward_client_owns_address(struct tquic_client *client,
+							     const struct sockaddr_storage *addr,
+							     __be16 port)
 {
 	u16 port_h, range_start, range_end;
 
@@ -1392,7 +1393,7 @@ EXPORT_SYMBOL_GPL(tquic_forward_check_df);
  * Called when data arrives on the outbound TCP socket.
  * Triggers forwarding back to the QUIC stream.
  */
-static void tquic_forward_data_ready(struct sock *sk)
+static void __maybe_unused tquic_forward_data_ready(struct sock *sk)
 {
 	struct tquic_tunnel *tunnel;
 
@@ -1421,8 +1422,6 @@ static void tquic_forward_data_ready(struct sock *sk)
  */
 int tquic_forward_setup_tcp_callbacks(struct tquic_tunnel *tunnel)
 {
-	struct sock *sk;
-
 	if (!tunnel)
 		return -EINVAL;
 

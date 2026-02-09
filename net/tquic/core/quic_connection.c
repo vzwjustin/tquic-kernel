@@ -79,7 +79,7 @@ static inline u64 tquic_trace_conn_id(const struct tquic_cid *cid)
 	return id;
 }
 
-static struct kmem_cache *tquic_conn_cache __read_mostly;
+static struct kmem_cache __maybe_unused *tquic_conn_cache __read_mostly;
 static struct kmem_cache *tquic_cid_cache __read_mostly;
 
 /* rhashtable parameters for connection ID lookup */
@@ -90,7 +90,8 @@ static const struct rhashtable_params tquic_cid_rht_params = {
 };
 
 static struct rhashtable tquic_cid_rht;
-static DEFINE_SPINLOCK(tquic_cid_rht_lock);
+static spinlock_t __maybe_unused tquic_cid_rht_lock =
+	__SPIN_LOCK_UNLOCKED(tquic_cid_rht_lock);
 
 int tquic_cid_hash_init(void)
 {
@@ -117,25 +118,25 @@ void tquic_cid_hash_cleanup(void)
 	kmem_cache_destroy(tquic_cid_cache);
 }
 
-int tquic_cid_hash_add(struct tquic_cid_entry *entry)
+static int tquic_cid_hash_add(struct tquic_cid_entry *entry)
 {
 	return rhashtable_insert_fast(&tquic_cid_rht, &entry->node,
 				      tquic_cid_rht_params);
 }
 
-void tquic_cid_hash_del(struct tquic_cid_entry *entry)
+static void tquic_cid_hash_del(struct tquic_cid_entry *entry)
 {
 	rhashtable_remove_fast(&tquic_cid_rht, &entry->node,
 			       tquic_cid_rht_params);
 }
 
-struct tquic_cid_entry *tquic_cid_hash_lookup(struct tquic_cid *cid)
+static struct tquic_cid_entry *tquic_cid_hash_lookup(struct tquic_cid *cid)
 {
 	return rhashtable_lookup_fast(&tquic_cid_rht, cid,
 				      tquic_cid_rht_params);
 }
 
-struct tquic_connection *tquic_conn_lookup(struct tquic_cid *cid)
+static struct tquic_connection *tquic_conn_lookup(struct tquic_cid *cid)
 {
 	struct tquic_cid_entry *entry;
 
@@ -201,7 +202,7 @@ static void tquic_pn_space_init(struct tquic_pn_space *pn_space)
 	pn_space->keys_discarded = 0;
 }
 
-static void tquic_pn_space_destroy(struct tquic_pn_space *pn_space)
+static void __maybe_unused tquic_pn_space_destroy(struct tquic_pn_space *pn_space)
 {
 	struct tquic_sent_packet *pkt, *tmp;
 
@@ -595,8 +596,8 @@ void tquic_conn_destroy(struct tquic_connection *conn)
 }
 #endif /* TQUIC_OUT_OF_TREE */
 
-int tquic_conn_connect(struct tquic_connection *conn,
-		       struct sockaddr *addr, int addr_len)
+static int tquic_conn_connect(struct tquic_connection *conn,
+			      struct sockaddr *addr, int addr_len)
 {
 	struct tquic_sock *tsk = conn->tsk;
 	struct tquic_path *path = conn->active_path;
@@ -639,7 +640,7 @@ int tquic_conn_connect(struct tquic_connection *conn,
 	return 0;
 }
 
-int tquic_conn_accept(struct tquic_connection *conn)
+static int tquic_conn_accept(struct tquic_connection *conn)
 {
 	spin_lock_bh(&conn->lock);
 	if (conn->state != TQUIC_CONN_IDLE) {
@@ -652,8 +653,8 @@ int tquic_conn_accept(struct tquic_connection *conn)
 	return 0;
 }
 
-int tquic_conn_close(struct tquic_connection *conn, u64 error_code,
-		     const char *reason, u32 reason_len, bool app_error)
+static int tquic_conn_close(struct tquic_connection *conn, u64 error_code,
+			    const char *reason, u32 reason_len, bool app_error)
 {
 	spin_lock_bh(&conn->lock);
 	if (conn->state == TQUIC_CONN_CLOSED ||
@@ -690,7 +691,7 @@ int tquic_conn_close(struct tquic_connection *conn, u64 error_code,
 	return 0;
 }
 
-void tquic_conn_set_state(struct tquic_connection *conn, enum tquic_conn_state state)
+static void tquic_conn_set_state(struct tquic_connection *conn, enum tquic_conn_state state)
 {
 	enum tquic_conn_state old_state;
 
@@ -750,8 +751,8 @@ out:
 }
 
 /* Generate new connection ID */
-int tquic_conn_new_cid(struct tquic_connection *conn,
-		       struct tquic_cid *new_cid)
+static int tquic_conn_new_cid(struct tquic_connection *conn,
+			      struct tquic_cid *new_cid)
 {
 	struct tquic_cid_entry *entry;
 	u64 seq = conn->next_scid_seq++;
@@ -791,10 +792,10 @@ int tquic_conn_retire_cid(struct tquic_connection *conn, u64 seq, bool is_local)
 #endif /* TQUIC_OUT_OF_TREE */
 
 /* Process NEW_CONNECTION_ID from peer */
-int tquic_conn_add_peer_cid(struct tquic_connection *conn,
-			    struct tquic_cid *cid,
-			    u64 seq, u64 retire_prior_to,
-			    const u8 *reset_token)
+static int tquic_conn_add_peer_cid(struct tquic_connection *conn,
+				   struct tquic_cid *cid,
+				   u64 seq, u64 retire_prior_to,
+				   const u8 *reset_token)
 {
 	struct tquic_cid_entry *entry, *tmp;
 
@@ -823,13 +824,13 @@ int tquic_conn_add_peer_cid(struct tquic_connection *conn,
 }
 
 /* Get active destination CID */
-struct tquic_cid *tquic_conn_get_dcid(struct tquic_connection *conn)
+static struct tquic_cid *tquic_conn_get_dcid(struct tquic_connection *conn)
 {
 	return &conn->dcid;
 }
 
 /* Rotate to next destination CID */
-int tquic_conn_rotate_dcid(struct tquic_connection *conn)
+static int tquic_conn_rotate_dcid(struct tquic_connection *conn)
 {
 	struct tquic_cid_entry *entry;
 
