@@ -814,7 +814,7 @@ static void tquic_inline_hs_apply_transport_params(struct sock *sk)
 	conn->remote_params.max_ack_delay = peer_tp.max_ack_delay;
 	conn->remote_params.disable_active_migration =
 		peer_tp.disable_active_migration;
-	conn->remote_params.active_conn_id_limit =
+	conn->remote_params.active_connection_id_limit =
 		peer_tp.active_conn_id_limit;
 
 	/* Apply flow control limits */
