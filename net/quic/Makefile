@@ -120,7 +120,8 @@ quic-y := \
 	tquic/crypto/zero_rtt.o \
 	tquic/crypto/handshake.o \
 	tquic/crypto/crypto_module.o \
-	tquic/crypto/hw_offload.o
+	tquic/crypto/hw_offload.o \
+	tquic/tquic_debug.o
 
 # Tracing support
 quic-$(CONFIG_TRACEPOINTS) += tquic/diag/trace.o
