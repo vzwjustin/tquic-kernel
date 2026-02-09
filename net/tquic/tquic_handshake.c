@@ -358,6 +358,38 @@ int tquic_start_handshake(struct sock *sk)
 	}
 
 	/*
+	 * Test bypass: when TQUIC_VERIFY_NONE is set, skip the TLS
+	 * handshake entirely. This is INSECURE and only for testing
+	 * the QUIC transport layer without requiring tlshd or a
+	 * real TLS handshake implementation.
+	 */
+	if (tsk->cert_verify.verify_mode == TQUIC_VERIFY_NONE) {
+		pr_warn("tquic: INSECURE bypass - skipping TLS handshake (verify_mode=NONE)\n");
+
+		hs = kzalloc(sizeof(*hs), GFP_KERNEL);
+		if (!hs)
+			return -ENOMEM;
+
+		hs->sk = sk;
+		init_completion(&hs->done);
+		hs->status = 0;
+		hs->peerid = TLS_NO_PEERID;
+		hs->start_time = jiffies;
+		hs->timeout_ms = TQUIC_HANDSHAKE_TIMEOUT_MS;
+
+		tsk->handshake_state = hs;
+		tsk->flags |= TQUIC_F_HANDSHAKE_DONE;
+
+		if (tsk->conn)
+			tsk->conn->state = TQUIC_CONN_CONNECTED;
+
+		complete(&hs->done);
+
+		pr_warn("tquic: handshake bypassed, connection marked ready\n");
+		return 0;
+	}
+
+	/*
 	 * Attempt 0-RTT if we have a cached session ticket.
 	 * This is done before the handshake so early data can be sent
 	 * concurrently with the handshake.

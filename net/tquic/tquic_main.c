@@ -50,6 +50,12 @@
 extern int tquic_ack_freq_module_init(void);
 extern void tquic_ack_freq_module_exit(void);
 
+#ifdef TQUIC_OUT_OF_TREE
+/* Forward declarations for sched framework (in sched/scheduler.c) */
+extern int tquic_sched_framework_init(void);
+extern void tquic_sched_framework_exit(void);
+#endif
+
 /* Module info */
 MODULE_AUTHOR("Linux Foundation");
 MODULE_DESCRIPTION("TQUIC: WAN Bonding over QUIC");
@@ -760,6 +766,13 @@ int __init tquic_init(void)
 	if (err)
 		goto err_scheduler;
 
+#ifdef TQUIC_OUT_OF_TREE
+	/* Register built-in old-style schedulers for the sched/ framework */
+	err = tquic_sched_framework_init();
+	if (err)
+		goto err_scheduler;
+#endif
+
 	/* Initialize individual schedulers */
 	err = tquic_sched_minrtt_init();
 	if (err)
@@ -932,6 +945,9 @@ err_sched_weighted:
 err_sched_aggregate:
 	tquic_sched_minrtt_exit();
 err_sched_minrtt:
+#ifdef TQUIC_OUT_OF_TREE
+	tquic_sched_framework_exit();
+#endif
 	tquic_scheduler_exit();
 err_scheduler:
 	tquic_mp_deadline_exit();
@@ -1041,6 +1057,9 @@ void __exit tquic_exit(void)
 	tquic_sched_weighted_exit();
 	tquic_sched_aggregate_exit();
 	tquic_sched_minrtt_exit();
+#ifdef TQUIC_OUT_OF_TREE
+	tquic_sched_framework_exit();
+#endif
 	tquic_scheduler_exit();
 
 	/* Cleanup multipath extensions */

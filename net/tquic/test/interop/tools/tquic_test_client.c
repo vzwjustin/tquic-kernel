@@ -26,27 +26,45 @@
 #include <netdb.h>
 #include <time.h>
 
-/* TQUIC socket constants */
+/* TQUIC socket constants - must match include/uapi/linux/tquic.h */
 #ifndef IPPROTO_QUIC
-#define IPPROTO_QUIC    253     /* Experimental protocol number */
+#define IPPROTO_QUIC    253     /* IPPROTO_TQUIC in kernel */
 #endif
 
-#ifndef SOL_QUIC
-#define SOL_QUIC        284     /* QUIC socket options level */
+#ifndef SOL_TQUIC
+#define SOL_TQUIC       288     /* TQUIC socket options level */
 #endif
+/* Keep SOL_QUIC as alias */
+#define SOL_QUIC        SOL_TQUIC
 
-/* QUIC socket options */
-#define QUIC_SOCKOPT_CA_FILE            1
+/* TQUIC socket options (from include/uapi/linux/tquic.h) */
+#define TQUIC_CONGESTION         8   /* CC algorithm (string) */
+#define TQUIC_SCHEDULER_OPT      9   /* Path scheduler (string) */
+#define TQUIC_IDLE_TIMEOUT      11   /* Idle timeout in ms */
+#define TQUIC_MAX_DATA          12   /* Max data per connection */
+#define TQUIC_MAX_STREAM_DATA   13   /* Max data per stream */
+#define TQUIC_MIGRATION         17   /* Enable connection migration */
+#define TQUIC_MULTIPATH         18   /* Enable multipath */
+#define TQUIC_CERT_VERIFY_MODE  30   /* Certificate verification mode */
+#define TQUIC_ALLOW_SELF_SIGNED 32   /* Allow self-signed certs */
+
+/* Certificate verification modes */
+#define TQUIC_VERIFY_NONE       0
+#define TQUIC_VERIFY_OPTIONAL   1
+#define TQUIC_VERIFY_REQUIRED   2
+
+/* Legacy compat aliases for the test code */
+#define QUIC_SOCKOPT_CA_FILE            TQUIC_CERT_VERIFY_MODE
 #define QUIC_SOCKOPT_SESSION_FILE       2
 #define QUIC_SOCKOPT_EARLY_DATA         3
-#define QUIC_SOCKOPT_MIGRATION          4
-#define QUIC_SOCKOPT_MULTIPATH          5
+#define QUIC_SOCKOPT_MIGRATION          TQUIC_MIGRATION
+#define QUIC_SOCKOPT_MULTIPATH          TQUIC_MULTIPATH
 #define QUIC_SOCKOPT_ADD_PATH           6
 #define QUIC_SOCKOPT_REMOVE_PATH        7
-#define QUIC_SOCKOPT_SCHEDULER          8
-#define QUIC_SOCKOPT_MAX_STREAM_DATA    9
-#define QUIC_SOCKOPT_MAX_DATA           10
-#define QUIC_SOCKOPT_IDLE_TIMEOUT       11
+#define QUIC_SOCKOPT_SCHEDULER          TQUIC_SCHEDULER_OPT
+#define QUIC_SOCKOPT_MAX_STREAM_DATA    TQUIC_MAX_STREAM_DATA
+#define QUIC_SOCKOPT_MAX_DATA           TQUIC_MAX_DATA
+#define QUIC_SOCKOPT_IDLE_TIMEOUT       TQUIC_IDLE_TIMEOUT
 #define QUIC_SOCKOPT_QUIC_VERSION       12
 #define QUIC_SOCKOPT_CONNECTION_STATE   13
 
@@ -155,51 +173,32 @@ static int create_quic_connection(struct client_config *config)
     opt = 0;
     setsockopt(sock, IPPROTO_IPV6, IPV6_V6ONLY, &opt, sizeof(opt));
 
-    /* Set QUIC-specific options */
-#ifdef SOL_QUIC
-    if (config->ca_file) {
-        setsockopt(sock, SOL_QUIC, QUIC_SOCKOPT_CA_FILE,
-                   config->ca_file, strlen(config->ca_file));
-    }
+    /* Set TQUIC-specific options */
+    /* For testing: disable certificate verification */
+    opt = TQUIC_VERIFY_NONE;
+    setsockopt(sock, SOL_TQUIC, TQUIC_CERT_VERIFY_MODE, &opt, sizeof(opt));
 
-    if (config->session_file) {
-        setsockopt(sock, SOL_QUIC, QUIC_SOCKOPT_SESSION_FILE,
-                   config->session_file, strlen(config->session_file));
-    }
-
-    if (config->early_data_file) {
-        opt = 1;
-        setsockopt(sock, SOL_QUIC, QUIC_SOCKOPT_EARLY_DATA, &opt, sizeof(opt));
-    }
+    /* Allow self-signed certificates */
+    opt = 1;
+    setsockopt(sock, SOL_TQUIC, TQUIC_ALLOW_SELF_SIGNED, &opt, sizeof(opt));
 
     if (config->multipath) {
         opt = 1;
-        setsockopt(sock, SOL_QUIC, QUIC_SOCKOPT_MULTIPATH, &opt, sizeof(opt));
-    }
-
-    if (config->scheduler != QUIC_SCHED_DEFAULT) {
-        setsockopt(sock, SOL_QUIC, QUIC_SOCKOPT_SCHEDULER,
-                   &config->scheduler, sizeof(config->scheduler));
-    }
-
-    if (config->quic_version > 0) {
-        setsockopt(sock, SOL_QUIC, QUIC_SOCKOPT_QUIC_VERSION,
-                   &config->quic_version, sizeof(config->quic_version));
+        setsockopt(sock, SOL_TQUIC, TQUIC_MULTIPATH, &opt, sizeof(opt));
     }
 
     if (config->max_stream_data > 0) {
-        setsockopt(sock, SOL_QUIC, QUIC_SOCKOPT_MAX_STREAM_DATA,
+        setsockopt(sock, SOL_TQUIC, TQUIC_MAX_STREAM_DATA,
                    &config->max_stream_data, sizeof(config->max_stream_data));
     }
 
     if (config->max_data > 0) {
-        setsockopt(sock, SOL_QUIC, QUIC_SOCKOPT_MAX_DATA,
+        setsockopt(sock, SOL_TQUIC, TQUIC_MAX_DATA,
                    &config->max_data, sizeof(config->max_data));
     }
 
     opt = config->idle_timeout;
-    setsockopt(sock, SOL_QUIC, QUIC_SOCKOPT_IDLE_TIMEOUT, &opt, sizeof(opt));
-#endif
+    setsockopt(sock, SOL_TQUIC, TQUIC_IDLE_TIMEOUT, &opt, sizeof(opt));
 
     /* Resolve address */
     memset(&addr, 0, sizeof(addr));

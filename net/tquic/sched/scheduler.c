@@ -27,17 +27,10 @@ static DEFINE_SPINLOCK(tquic_sched_lock);
 static struct tquic_sched_ops *default_scheduler;
 
 /*
- * Scheduler registration
+ * Internal scheduler registration (always available).
+ * Adds a scheduler to the sched_list used by tquic_sched_default().
  */
-#ifndef TQUIC_OUT_OF_TREE
-/**
- * tquic_register_scheduler - Register a scheduler with the framework
- * @ops: Scheduler operations structure
- *
- * This is the standard API declared in net/tquic.h for registering
- * schedulers. Returns 0 on success.
- */
-int tquic_register_scheduler(struct tquic_sched_ops *ops)
+static int __tquic_sched_register(struct tquic_sched_ops *ops)
 {
 	if (!ops || !ops->name || !ops->select)
 		return -EINVAL;
@@ -54,20 +47,8 @@ int tquic_register_scheduler(struct tquic_sched_ops *ops)
 	pr_info("tquic_sched: registered scheduler '%s'\n", ops->name);
 	return 0;
 }
-EXPORT_SYMBOL_GPL(tquic_register_scheduler);
 
-/* Alias for backwards compatibility within sched/ subsystem */
-int tquic_sched_register(struct tquic_sched_ops *ops)
-{
-	return tquic_register_scheduler(ops);
-}
-EXPORT_SYMBOL_GPL(tquic_sched_register);
-
-/**
- * tquic_unregister_scheduler - Unregister a scheduler from the framework
- * @ops: Scheduler operations structure
- */
-void tquic_unregister_scheduler(struct tquic_sched_ops *ops)
+static void __tquic_sched_unregister(struct tquic_sched_ops *ops)
 {
 	spin_lock(&tquic_sched_lock);
 
@@ -84,12 +65,33 @@ void tquic_unregister_scheduler(struct tquic_sched_ops *ops)
 
 	pr_info("tquic_sched: unregistered scheduler '%s'\n", ops->name);
 }
+
+/*
+ * Exported scheduler registration (in-tree only to avoid duplicate
+ * symbol with multipath/tquic_scheduler.c in consolidated builds).
+ */
+#ifndef TQUIC_OUT_OF_TREE
+int tquic_register_scheduler(struct tquic_sched_ops *ops)
+{
+	return __tquic_sched_register(ops);
+}
+EXPORT_SYMBOL_GPL(tquic_register_scheduler);
+
+int tquic_sched_register(struct tquic_sched_ops *ops)
+{
+	return __tquic_sched_register(ops);
+}
+EXPORT_SYMBOL_GPL(tquic_sched_register);
+
+void tquic_unregister_scheduler(struct tquic_sched_ops *ops)
+{
+	__tquic_sched_unregister(ops);
+}
 EXPORT_SYMBOL_GPL(tquic_unregister_scheduler);
 
-/* Alias for backwards compatibility within sched/ subsystem */
 void tquic_sched_unregister(struct tquic_sched_ops *ops)
 {
-	tquic_unregister_scheduler(ops);
+	__tquic_sched_unregister(ops);
 }
 EXPORT_SYMBOL_GPL(tquic_sched_unregister);
 #endif /* !TQUIC_OUT_OF_TREE */
@@ -145,8 +147,17 @@ struct tquic_sched_ops *tquic_sched_default(void)
 
 	rcu_read_lock();
 	ops = rcu_dereference(default_scheduler);
-	if (ops && !try_module_get(ops->owner))
-		ops = NULL;
+	if (ops) {
+		pr_warn("tquic_sched: default_scheduler='%s' owner=%px\n",
+			ops->name, ops->owner);
+		if (!try_module_get(ops->owner)) {
+			pr_warn("tquic_sched: try_module_get FAILED for owner=%px\n",
+				ops->owner);
+			ops = NULL;
+		}
+	} else {
+		pr_warn("tquic_sched: default_scheduler is NULL!\n");
+	}
 	rcu_read_unlock();
 
 	return ops;
@@ -181,15 +192,30 @@ EXPORT_SYMBOL_GPL(tquic_sched_set_default);
 void *tquic_sched_init_conn(struct tquic_connection *conn,
 			    struct tquic_sched_ops *ops)
 {
-	if (!ops)
+	void *result;
+
+	pr_warn("tquic_sched: init_conn called, ops=%px conn=%px\n", ops, conn);
+
+	if (!ops) {
 		ops = tquic_sched_default();
+		pr_warn("tquic_sched: got default ops=%px\n", ops);
+	}
 
-	if (!ops)
+	if (!ops) {
+		pr_warn("tquic_sched: no ops available, returning NULL\n");
 		return NULL;
+	}
 
-	if (ops->init)
-		return ops->init(conn);
+	pr_warn("tquic_sched: using scheduler '%s', init=%px\n",
+		ops->name, ops->init);
 
+	if (ops->init) {
+		result = ops->init(conn);
+		pr_warn("tquic_sched: init() returned %px\n", result);
+		return result;
+	}
+
+	pr_warn("tquic_sched: no init callback, returning ops=%px\n", ops);
 	return ops;  /* Return ops as state if no init needed */
 }
 EXPORT_SYMBOL_GPL(tquic_sched_init_conn);
@@ -876,22 +902,23 @@ static struct tquic_sched_ops __maybe_unused tquic_sched_owd_ecf = {
 };
 
 /*
- * Module initialization
+ * Module initialization - always compiled so built-in schedulers
+ * are available for both in-tree and out-of-tree builds.
  */
 #ifndef TQUIC_OUT_OF_TREE
 static int __init tquic_sched_module_init(void)
 {
 	/* Register built-in schedulers */
-	tquic_sched_register(&tquic_sched_rr);
-	tquic_sched_register(&tquic_sched_minrtt);
-	tquic_sched_register(&tquic_sched_wrr);
-	tquic_sched_register(&tquic_sched_blest);
-	tquic_sched_register(&tquic_sched_redundant);
-	tquic_sched_register(&tquic_sched_ecf);
+	__tquic_sched_register(&tquic_sched_rr);
+	__tquic_sched_register(&tquic_sched_minrtt);
+	__tquic_sched_register(&tquic_sched_wrr);
+	__tquic_sched_register(&tquic_sched_blest);
+	__tquic_sched_register(&tquic_sched_redundant);
+	__tquic_sched_register(&tquic_sched_ecf);
 
 	/* Register OWD-aware schedulers (draft-huitema-quic-1wd) */
-	tquic_sched_register(&tquic_sched_owd);
-	tquic_sched_register(&tquic_sched_owd_ecf);
+	__tquic_sched_register(&tquic_sched_owd);
+	__tquic_sched_register(&tquic_sched_owd_ecf);
 
 	/* Set minrtt as default */
 	tquic_sched_set_default("minrtt");
@@ -903,16 +930,16 @@ static int __init tquic_sched_module_init(void)
 static void __exit tquic_sched_module_exit(void)
 {
 	/* Unregister OWD-aware schedulers */
-	tquic_sched_unregister(&tquic_sched_owd_ecf);
-	tquic_sched_unregister(&tquic_sched_owd);
+	__tquic_sched_unregister(&tquic_sched_owd_ecf);
+	__tquic_sched_unregister(&tquic_sched_owd);
 
 	/* Unregister built-in schedulers */
-	tquic_sched_unregister(&tquic_sched_ecf);
-	tquic_sched_unregister(&tquic_sched_redundant);
-	tquic_sched_unregister(&tquic_sched_blest);
-	tquic_sched_unregister(&tquic_sched_wrr);
-	tquic_sched_unregister(&tquic_sched_minrtt);
-	tquic_sched_unregister(&tquic_sched_rr);
+	__tquic_sched_unregister(&tquic_sched_ecf);
+	__tquic_sched_unregister(&tquic_sched_redundant);
+	__tquic_sched_unregister(&tquic_sched_blest);
+	__tquic_sched_unregister(&tquic_sched_wrr);
+	__tquic_sched_unregister(&tquic_sched_minrtt);
+	__tquic_sched_unregister(&tquic_sched_rr);
 
 	pr_info("tquic_sched: scheduler framework cleanup complete\n");
 }
@@ -922,4 +949,39 @@ module_exit(tquic_sched_module_exit);
 
 MODULE_DESCRIPTION("TQUIC Multipath Packet Scheduler Framework");
 MODULE_LICENSE("GPL");
+#else /* TQUIC_OUT_OF_TREE */
+/*
+ * Out-of-tree: register built-in schedulers via explicit init/exit
+ * called from tquic_main.c (no separate module_init).
+ */
+int tquic_sched_framework_init(void)
+{
+	__tquic_sched_register(&tquic_sched_rr);
+	__tquic_sched_register(&tquic_sched_minrtt);
+	__tquic_sched_register(&tquic_sched_wrr);
+	__tquic_sched_register(&tquic_sched_blest);
+	__tquic_sched_register(&tquic_sched_redundant);
+	__tquic_sched_register(&tquic_sched_ecf);
+	__tquic_sched_register(&tquic_sched_owd);
+	__tquic_sched_register(&tquic_sched_owd_ecf);
+
+	tquic_sched_set_default("minrtt");
+
+	pr_info("tquic_sched: scheduler framework initialized\n");
+	return 0;
+}
+
+void tquic_sched_framework_exit(void)
+{
+	__tquic_sched_unregister(&tquic_sched_owd_ecf);
+	__tquic_sched_unregister(&tquic_sched_owd);
+	__tquic_sched_unregister(&tquic_sched_ecf);
+	__tquic_sched_unregister(&tquic_sched_redundant);
+	__tquic_sched_unregister(&tquic_sched_blest);
+	__tquic_sched_unregister(&tquic_sched_wrr);
+	__tquic_sched_unregister(&tquic_sched_minrtt);
+	__tquic_sched_unregister(&tquic_sched_rr);
+
+	pr_info("tquic_sched: scheduler framework cleanup complete\n");
+}
 #endif
