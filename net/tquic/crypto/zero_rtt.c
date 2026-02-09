@@ -320,15 +320,15 @@ static int ticket_cmp(const char *a, u8 a_len, const char *b, u8 b_len)
 /*
  * Find ticket in RB-tree
  */
-static struct tquic_session_ticket *ticket_store_find_locked(
+static struct tquic_zero_rtt_ticket *ticket_store_find_locked(
 	struct tquic_ticket_store *store,
 	const char *server_name, u8 server_name_len)
 {
 	struct rb_node *node = store->tickets.rb_node;
 
 	while (node) {
-		struct tquic_session_ticket *ticket =
-			rb_entry(node, struct tquic_session_ticket, node);
+		struct tquic_zero_rtt_ticket *ticket =
+			rb_entry(node, struct tquic_zero_rtt_ticket, node);
 		int cmp = ticket_cmp(server_name, server_name_len,
 				     ticket->server_name, ticket->server_name_len);
 
@@ -347,14 +347,14 @@ static struct tquic_session_ticket *ticket_store_find_locked(
  * Insert ticket into RB-tree
  */
 static int ticket_store_insert_locked(struct tquic_ticket_store *store,
-				      struct tquic_session_ticket *ticket)
+				      struct tquic_zero_rtt_ticket *ticket)
 {
 	struct rb_node **new = &store->tickets.rb_node;
 	struct rb_node *parent = NULL;
 
 	while (*new) {
-		struct tquic_session_ticket *existing =
-			rb_entry(*new, struct tquic_session_ticket, node);
+		struct tquic_zero_rtt_ticket *existing =
+			rb_entry(*new, struct tquic_zero_rtt_ticket, node);
 		int cmp = ticket_cmp(ticket->server_name, ticket->server_name_len,
 				     existing->server_name, existing->server_name_len);
 
@@ -379,7 +379,7 @@ static int ticket_store_insert_locked(struct tquic_ticket_store *store,
  * Remove ticket from store
  */
 static void ticket_store_remove_locked(struct tquic_ticket_store *store,
-				       struct tquic_session_ticket *ticket)
+				       struct tquic_zero_rtt_ticket *ticket)
 {
 	rb_erase(&ticket->node, &store->tickets);
 	list_del(&ticket->list);
@@ -389,7 +389,7 @@ static void ticket_store_remove_locked(struct tquic_ticket_store *store,
 /*
  * Free ticket memory
  */
-static void ticket_free(struct tquic_session_ticket *ticket)
+static void ticket_free(struct tquic_zero_rtt_ticket *ticket)
 {
 	if (!ticket)
 		return;
@@ -404,13 +404,13 @@ static void ticket_free(struct tquic_session_ticket *ticket)
  */
 static void ticket_store_evict_oldest_locked(struct tquic_ticket_store *store)
 {
-	struct tquic_session_ticket *oldest;
+	struct tquic_zero_rtt_ticket *oldest;
 
 	if (list_empty(&store->lru_list))
 		return;
 
 	oldest = list_last_entry(&store->lru_list,
-				 struct tquic_session_ticket, list);
+				 struct tquic_zero_rtt_ticket, list);
 	ticket_store_remove_locked(store, oldest);
 	ticket_free(oldest);
 }
@@ -418,7 +418,7 @@ static void ticket_store_evict_oldest_locked(struct tquic_ticket_store *store)
 /*
  * Check if ticket is expired
  */
-static bool ticket_is_expired(struct tquic_session_ticket *ticket)
+static bool ticket_is_expired(struct tquic_zero_rtt_ticket *ticket)
 {
 	u64 now = ktime_get_real_seconds();
 	u64 age;
@@ -438,9 +438,9 @@ static bool ticket_is_expired(struct tquic_session_ticket *ticket)
 
 int tquic_zero_rtt_store_ticket(const char *server_name, u8 server_name_len,
 				const u8 *ticket_data, u32 ticket_len,
-				const struct tquic_session_ticket_plaintext *plaintext)
+				const struct tquic_zero_rtt_ticket_plaintext *plaintext)
 {
-	struct tquic_session_ticket *ticket, *old;
+	struct tquic_zero_rtt_ticket *ticket, *old;
 	int ret;
 
 	if (!server_name || server_name_len == 0 || server_name_len > 255)
@@ -504,10 +504,10 @@ int tquic_zero_rtt_store_ticket(const char *server_name, u8 server_name_len,
 }
 EXPORT_SYMBOL_GPL(tquic_zero_rtt_store_ticket);
 
-struct tquic_session_ticket *tquic_zero_rtt_lookup_ticket(
+struct tquic_zero_rtt_ticket *tquic_zero_rtt_lookup_ticket(
 	const char *server_name, u8 server_name_len)
 {
-	struct tquic_session_ticket *ticket;
+	struct tquic_zero_rtt_ticket *ticket;
 
 	if (!server_name || server_name_len == 0)
 		return NULL;
@@ -539,7 +539,7 @@ struct tquic_session_ticket *tquic_zero_rtt_lookup_ticket(
 }
 EXPORT_SYMBOL_GPL(tquic_zero_rtt_lookup_ticket);
 
-void tquic_zero_rtt_put_ticket(struct tquic_session_ticket *ticket)
+void tquic_zero_rtt_put_ticket(struct tquic_zero_rtt_ticket *ticket)
 {
 	if (!ticket)
 		return;
@@ -551,7 +551,7 @@ EXPORT_SYMBOL_GPL(tquic_zero_rtt_put_ticket);
 
 void tquic_zero_rtt_remove_ticket(const char *server_name, u8 server_name_len)
 {
-	struct tquic_session_ticket *ticket;
+	struct tquic_zero_rtt_ticket *ticket;
 
 	if (!server_name || server_name_len == 0)
 		return;
@@ -912,7 +912,7 @@ EXPORT_SYMBOL_GPL(tquic_replay_filter_check);
  * =============================================================================
  */
 
-int tquic_session_ticket_encode(const struct tquic_session_ticket_plaintext *plaintext,
+int tquic_session_ticket_encode(const struct tquic_zero_rtt_ticket_plaintext *plaintext,
 				const u8 *ticket_key, u32 key_len,
 				u8 *out, u32 *out_len)
 {
@@ -1045,7 +1045,7 @@ EXPORT_SYMBOL_GPL(tquic_session_ticket_encode);
 
 int tquic_session_ticket_decode(const u8 *ticket, u32 ticket_len,
 				const u8 *ticket_key, u32 key_len,
-				struct tquic_session_ticket_plaintext *out)
+				struct tquic_zero_rtt_ticket_plaintext *out)
 {
 	struct crypto_aead *aead;
 	struct aead_request *req;
@@ -1256,7 +1256,7 @@ int tquic_zero_rtt_attempt(struct tquic_connection *conn,
 			   const char *server_name, u8 server_name_len)
 {
 	struct tquic_zero_rtt_state_s *state;
-	struct tquic_session_ticket *ticket;
+	struct tquic_zero_rtt_ticket *ticket;
 	int ret;
 
 	if (!conn || !conn->zero_rtt_state)
@@ -1837,7 +1837,7 @@ int __init tquic_zero_rtt_module_init(void)
 
 void __exit tquic_zero_rtt_module_exit(void)
 {
-	struct tquic_session_ticket *ticket, *tmp;
+	struct tquic_zero_rtt_ticket *ticket, *tmp;
 
 	/* Clean up ticket store */
 	spin_lock_bh(&global_ticket_store.lock);

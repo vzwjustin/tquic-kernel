@@ -69,8 +69,8 @@ struct tquic_hs_transport_params {
 	bool grease_quic_bit;
 };
 
-/* Session ticket for TLS resumption (handshake layer) */
-struct tquic_hs_session_ticket {
+/* Session ticket for resumption */
+struct tquic_session_ticket {
 	u32 lifetime;
 	u32 age_add;
 	u8 nonce[255];

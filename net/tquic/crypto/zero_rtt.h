@@ -138,7 +138,7 @@ struct tquic_session_ticket_plaintext {
 };
 
 /**
- * struct tquic_session_ticket - Stored session ticket
+ * struct tquic_zero_rtt_ticket - Stored session ticket for 0-RTT cache
  * @node: RB-tree node for lookup by server name
  * @list: List node for LRU eviction
  * @server_name: Server hostname (SNI)
@@ -148,7 +148,7 @@ struct tquic_session_ticket_plaintext {
  * @plaintext: Decrypted ticket content
  * @refcount: Reference counter
  */
-struct tquic_session_ticket {
+struct tquic_zero_rtt_ticket {
 	struct rb_node node;
 	struct list_head list;
 	char server_name[256];
@@ -231,7 +231,7 @@ struct tquic_zero_rtt_keys {
 struct tquic_zero_rtt_state_s {
 	enum tquic_zero_rtt_state state;
 	struct tquic_zero_rtt_keys keys;
-	struct tquic_session_ticket *ticket;
+	struct tquic_zero_rtt_ticket *ticket;
 	u64 early_data_max;
 	u64 early_data_sent;
 	u64 early_data_received;
@@ -347,14 +347,14 @@ int tquic_zero_rtt_store_ticket(const char *server_name, u8 server_name_len,
  * Returns: Session ticket or NULL if not found/expired
  *          Caller must call tquic_zero_rtt_put_ticket() when done
  */
-struct tquic_session_ticket *tquic_zero_rtt_lookup_ticket(
+struct tquic_zero_rtt_ticket *tquic_zero_rtt_lookup_ticket(
 	const char *server_name, u8 server_name_len);
 
 /**
  * tquic_zero_rtt_put_ticket - Release reference to session ticket
  * @ticket: Ticket to release
  */
-void tquic_zero_rtt_put_ticket(struct tquic_session_ticket *ticket);
+void tquic_zero_rtt_put_ticket(struct tquic_zero_rtt_ticket *ticket);
 
 /**
  * tquic_zero_rtt_remove_ticket - Remove ticket for server
