@@ -31,7 +31,8 @@ ifneq ($(KBUILD_EXTMOD),)
   #   -Wno-unused-variable    : similarly, some variables are version-dependent
   #   -Wframe-larger-than=2048: consolidated module has a few large stack frames
   #                             (connection setup, crypto) that exceed the 1024 default
-  ccflags-y += -Wno-missing-prototypes -Wno-unused-function -Wno-unused-variable
+  ccflags-y += -Wno-missing-prototypes -Wno-missing-declarations
+  ccflags-y += -Wno-unused-function -Wno-unused-variable
   ccflags-y += -Wframe-larger-than=2048
 
   # For out-of-tree builds, build one main module plus CC algorithms
