@@ -53,6 +53,12 @@ quic-y := \
 	tquic/cong/bbrv2.o \
 	tquic/cong/bbrv3.o \
 	tquic/cong/prague.o \
+	tquic/cong/cubic.o \
+	tquic/cong/bbr.o \
+	tquic/cong/copa.o \
+	tquic/cong/westwood.o \
+	tquic/cong/l4s.o \
+	tquic/cong/accecn.o \
 	tquic/core/varint.o \
 	tquic/core/connection.o \
 	tquic/core/stream.o \
@@ -122,6 +128,10 @@ quic-y := \
 	tquic/crypto/crypto_module.o \
 	tquic/crypto/hw_offload.o \
 	tquic/tquic_debug.o
+
+# Diagnostics (tracepoints.o excluded pending struct field fixes)
+quic-$(CONFIG_TQUIC_DIAG) += tquic/diag/path_metrics.o
+quic-$(CONFIG_TQUIC_QLOG) += tquic/diag/qlog.o tquic/diag/qlog_v2.o
 
 # Tracing support
 quic-$(CONFIG_TRACEPOINTS) += tquic/diag/trace.o
