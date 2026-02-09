@@ -438,7 +438,7 @@ static bool ticket_is_expired(struct tquic_zero_rtt_ticket *ticket)
 
 int tquic_zero_rtt_store_ticket(const char *server_name, u8 server_name_len,
 				const u8 *ticket_data, u32 ticket_len,
-				const struct tquic_zero_rtt_ticket_plaintext *plaintext)
+				const struct tquic_session_ticket_plaintext *plaintext)
 {
 	struct tquic_zero_rtt_ticket *ticket, *old;
 	int ret;
@@ -912,7 +912,7 @@ EXPORT_SYMBOL_GPL(tquic_replay_filter_check);
  * =============================================================================
  */
 
-int tquic_session_ticket_encode(const struct tquic_zero_rtt_ticket_plaintext *plaintext,
+int tquic_session_ticket_encode(const struct tquic_session_ticket_plaintext *plaintext,
 				const u8 *ticket_key, u32 key_len,
 				u8 *out, u32 *out_len)
 {
@@ -1045,7 +1045,7 @@ EXPORT_SYMBOL_GPL(tquic_session_ticket_encode);
 
 int tquic_session_ticket_decode(const u8 *ticket, u32 ticket_len,
 				const u8 *ticket_key, u32 key_len,
-				struct tquic_zero_rtt_ticket_plaintext *out)
+				struct tquic_session_ticket_plaintext *out)
 {
 	struct crypto_aead *aead;
 	struct aead_request *req;
