@@ -1351,6 +1351,9 @@ struct tquic_sock {
 	/* Handshake state (NULL when not in handshake) */
 	struct tquic_handshake_state *handshake_state;
 
+	/* Inline TLS 1.3 handshake context (NULL when using tlshd) */
+	struct tquic_handshake *inline_hs;
+
 	/* Socket flags (TQUIC_F_*) - see net/tquic/protocol.h */
 	u32 flags;
 
@@ -2068,6 +2071,7 @@ int tquic_send_ack(struct tquic_connection *conn, struct tquic_path *path,
 int tquic_send_connection_close(struct tquic_connection *conn,
 				u64 error_code, const char *reason);
 int tquic_output_flush(struct tquic_connection *conn);
+int tquic_output_flush_crypto(struct tquic_connection *conn);
 int tquic_output_packet(struct tquic_connection *conn,
 			struct tquic_path *path, struct sk_buff *skb);
 

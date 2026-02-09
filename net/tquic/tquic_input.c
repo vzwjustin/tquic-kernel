@@ -108,6 +108,10 @@ static int tquic_process_frames(struct tquic_connection *conn,
 				struct tquic_path *path,
 				u8 *payload, size_t len,
 				int enc_level, u64 pkt_num);
+
+/* From tquic_handshake.c - inline TLS handshake processing */
+int tquic_inline_hs_recv_crypto(struct sock *sk, const u8 *data, u32 len,
+				int enc_level);
 /*
  * Per-path ECN tracking state for detecting CE count increases
  * Per RFC 9002 Section 7.1: Only respond to *increases* in CE count
@@ -718,8 +722,30 @@ static int tquic_process_crypto_frame(struct tquic_rx_ctx *ctx)
 	if (ctx->offset + length > ctx->len)
 		return -EINVAL;
 
-	/* Process crypto data */
-	/* This would feed into the TLS handshake state machine */
+	/*
+	 * Feed CRYPTO frame data into the inline TLS handshake state machine.
+	 * The data is a TLS handshake message (ClientHello, ServerHello, etc.)
+	 * carried in the CRYPTO frame payload.
+	 *
+	 * Per RFC 9001 Section 4: "CRYPTO frames can be sent at all encryption
+	 * levels except 0-RTT."
+	 */
+	if (ctx->conn && ctx->conn->tsk && ctx->conn->tsk->inline_hs) {
+		struct sock *sk = (struct sock *)ctx->conn->tsk;
+
+		ret = tquic_inline_hs_recv_crypto(sk,
+						  ctx->data + ctx->offset,
+						  (u32)length,
+						  ctx->enc_level);
+		if (ret < 0) {
+			pr_debug("tquic: CRYPTO frame processing failed: %d\n",
+				 ret);
+			ctx->offset += length;
+			return ret;
+		}
+	} else {
+		pr_debug("tquic: CRYPTO frame received but no inline handshake active\n");
+	}
 
 	ctx->offset += length;
 	ctx->ack_eliciting = true;

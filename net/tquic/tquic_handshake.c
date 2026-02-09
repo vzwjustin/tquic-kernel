@@ -26,6 +26,7 @@
 #include <net/sock.h>
 #include <net/handshake.h>
 #include <net/tquic.h>
+#include <net/tquic/handshake.h>
 #include <uapi/linux/tquic.h>
 
 #include "protocol.h"
@@ -45,6 +46,16 @@ int tquic_server_bind_client(struct tquic_connection *conn,
 			     struct tquic_client *client);
 int tquic_server_get_client_psk(const char *identity, size_t identity_len,
 				u8 *psk);
+
+/*
+ * Forward declarations for crypto/tls.c functions
+ */
+struct tquic_crypto_state;
+struct tquic_crypto_state *tquic_crypto_init_versioned(
+	const struct tquic_cid *scid, bool is_server, u32 version);
+int tquic_crypto_install_keys(struct tquic_crypto_state *crypto, int level,
+			      const u8 *read_secret, size_t read_secret_len,
+			      const u8 *write_secret, size_t write_secret_len);
 
 /*
  * Rate limit state for PSK rejection logging
@@ -390,6 +401,135 @@ int tquic_start_handshake(struct sock *sk)
 	}
 
 	/*
+	 * Inline TLS 1.3 handshake path.
+	 *
+	 * When possible, perform the TLS handshake directly in-kernel
+	 * using the crypto/handshake.c state machine. This avoids the
+	 * round-trip to the tlshd userspace daemon and is required for
+	 * proper QUIC-TLS integration where CRYPTO frames carry the
+	 * handshake messages.
+	 *
+	 * The inline path:
+	 * 1. Allocates a tquic_handshake context
+	 * 2. Configures SNI, ALPN, transport params
+	 * 3. Generates ClientHello into crypto_buffer[INITIAL]
+	 * 4. Returns - further processing happens via CRYPTO frame rx
+	 */
+	{
+		struct tquic_handshake *ihs;
+		struct tquic_hs_transport_params tp;
+		u8 *ch_buf;
+		u32 ch_len = 0;
+		struct sk_buff *ch_skb;
+
+		ihs = tquic_hs_init(false);
+		if (!ihs) {
+			pr_warn("tquic: inline handshake init failed, falling back to tlshd\n");
+			goto tlshd_fallback;
+		}
+
+		/* Configure SNI */
+		if (tsk->server_name[0] != '\0') {
+			ret = tquic_hs_set_sni(ihs, tsk->server_name);
+			if (ret < 0) {
+				tquic_hs_cleanup(ihs);
+				goto tlshd_fallback;
+			}
+		}
+
+		/* Set ALPN - default to h3 for QUIC */
+		{
+			const char *alpn_protos[] = { "h3" };
+
+			ret = tquic_hs_set_alpn(ihs, alpn_protos, 1);
+			if (ret < 0) {
+				tquic_hs_cleanup(ihs);
+				goto tlshd_fallback;
+			}
+		}
+
+		/* Configure local transport parameters from connection */
+		memset(&tp, 0, sizeof(tp));
+		tp.max_idle_timeout = tsk->conn->idle_timeout;
+		tp.max_udp_payload_size = 65527;
+		tp.initial_max_data = tsk->conn->max_data_local;
+		tp.initial_max_stream_data_bidi_local =
+			tsk->conn->local_params.initial_max_stream_data_bidi_local;
+		tp.initial_max_stream_data_bidi_remote =
+			tsk->conn->local_params.initial_max_stream_data_bidi_remote;
+		tp.initial_max_stream_data_uni =
+			tsk->conn->local_params.initial_max_stream_data_uni;
+		tp.initial_max_streams_bidi = tsk->conn->max_streams_bidi;
+		tp.initial_max_streams_uni = tsk->conn->max_streams_uni;
+		tp.ack_delay_exponent = 3;
+		tp.max_ack_delay = 25;
+		tp.active_conn_id_limit = 8;
+		tp.disable_active_migration = tsk->conn->migration_disabled;
+
+		/* Set initial SCID */
+		tp.initial_scid_len = tsk->conn->scid.len;
+		if (tsk->conn->scid.len > 0)
+			memcpy(tp.initial_scid, tsk->conn->scid.id,
+			       tsk->conn->scid.len);
+
+		ret = tquic_hs_set_transport_params(ihs, &tp);
+		if (ret < 0) {
+			tquic_hs_cleanup(ihs);
+			goto tlshd_fallback;
+		}
+
+		/* Generate ClientHello */
+		ch_buf = kmalloc(4096, GFP_KERNEL);
+		if (!ch_buf) {
+			tquic_hs_cleanup(ihs);
+			goto tlshd_fallback;
+		}
+
+		ret = tquic_hs_generate_client_hello(ihs, ch_buf, 4096,
+						     &ch_len);
+		if (ret < 0) {
+			kfree(ch_buf);
+			tquic_hs_cleanup(ihs);
+			goto tlshd_fallback;
+		}
+
+		/* Queue ClientHello in Initial crypto buffer */
+		ch_skb = alloc_skb(ch_len, GFP_KERNEL);
+		if (!ch_skb) {
+			kfree(ch_buf);
+			tquic_hs_cleanup(ihs);
+			goto tlshd_fallback;
+		}
+		skb_put_data(ch_skb, ch_buf, ch_len);
+		kfree(ch_buf);
+
+		skb_queue_tail(&tsk->conn->crypto_buffer[TQUIC_PN_SPACE_INITIAL],
+			       ch_skb);
+
+		/* Allocate handshake tracking state */
+		hs = kzalloc(sizeof(*hs), GFP_KERNEL);
+		if (!hs) {
+			tquic_hs_cleanup(ihs);
+			return -ENOMEM;
+		}
+
+		hs->sk = sk;
+		init_completion(&hs->done);
+		hs->status = -ETIMEDOUT;
+		hs->peerid = TLS_NO_PEERID;
+		hs->start_time = jiffies;
+		hs->timeout_ms = TQUIC_HANDSHAKE_TIMEOUT_MS;
+
+		tsk->handshake_state = hs;
+		tsk->inline_hs = ihs;
+
+		pr_debug("tquic: inline TLS handshake initiated, ClientHello queued (%u bytes)\n",
+			 ch_len);
+		return 0;
+	}
+
+tlshd_fallback:
+	/*
 	 * Attempt 0-RTT if we have a cached session ticket.
 	 * This is done before the handshake so early data can be sent
 	 * concurrently with the handshake.
@@ -564,6 +704,12 @@ void tquic_handshake_cleanup(struct sock *sk)
 	 */
 	tls_handshake_cancel(sk);
 
+	/* Clean up inline handshake if present */
+	if (tsk->inline_hs) {
+		tquic_hs_cleanup(tsk->inline_hs);
+		tsk->inline_hs = NULL;
+	}
+
 	tsk->handshake_state = NULL;
 
 	/* Zero sensitive handshake material before freeing */
@@ -592,6 +738,321 @@ bool tquic_handshake_in_progress(struct sock *sk)
 	       !(tsk->flags & TQUIC_F_HANDSHAKE_DONE);
 }
 EXPORT_SYMBOL_GPL(tquic_handshake_in_progress);
+
+/*
+ * =============================================================================
+ * Inline TLS Handshake - CRYPTO Frame Processing
+ * =============================================================================
+ *
+ * These functions implement in-kernel processing of TLS handshake messages
+ * carried in QUIC CRYPTO frames. This avoids the round-trip to the tlshd
+ * userspace daemon and provides proper QUIC-TLS integration.
+ */
+
+/**
+ * tquic_inline_hs_abort - Abort inline handshake on error
+ * @sk: Socket with inline handshake
+ * @err: Error code
+ *
+ * Cleans up the inline handshake state and marks the handshake as failed.
+ */
+static void tquic_inline_hs_abort(struct sock *sk, int err)
+{
+	struct tquic_sock *tsk = tquic_sk(sk);
+
+	pr_debug("tquic: inline handshake aborted: %d\n", err);
+
+	if (tsk->inline_hs) {
+		tquic_hs_cleanup(tsk->inline_hs);
+		tsk->inline_hs = NULL;
+	}
+
+	TQUIC_INC_STATS(sock_net(sk), TQUIC_MIB_HANDSHAKESFAILED);
+
+	if (tsk->handshake_state) {
+		tsk->handshake_state->status = err;
+		complete(&tsk->handshake_state->done);
+	}
+}
+
+/**
+ * tquic_inline_hs_apply_transport_params - Apply peer transport parameters
+ * @sk: Socket with completed inline handshake
+ *
+ * Copies the peer's transport parameters from the TLS handshake context
+ * into the QUIC connection's remote_params structure.
+ */
+static void tquic_inline_hs_apply_transport_params(struct sock *sk)
+{
+	struct tquic_sock *tsk = tquic_sk(sk);
+	struct tquic_handshake *ihs = tsk->inline_hs;
+	struct tquic_connection *conn = tsk->conn;
+	struct tquic_hs_transport_params peer_tp;
+
+	if (!ihs || !conn)
+		return;
+
+	if (tquic_hs_get_transport_params(ihs, &peer_tp) < 0)
+		return;
+
+	/* Apply peer transport parameters to connection */
+	conn->remote_params.max_idle_timeout = peer_tp.max_idle_timeout;
+	conn->remote_params.max_udp_payload_size = peer_tp.max_udp_payload_size;
+	conn->remote_params.initial_max_data = peer_tp.initial_max_data;
+	conn->remote_params.initial_max_stream_data_bidi_local =
+		peer_tp.initial_max_stream_data_bidi_local;
+	conn->remote_params.initial_max_stream_data_bidi_remote =
+		peer_tp.initial_max_stream_data_bidi_remote;
+	conn->remote_params.initial_max_stream_data_uni =
+		peer_tp.initial_max_stream_data_uni;
+	conn->remote_params.initial_max_streams_bidi =
+		peer_tp.initial_max_streams_bidi;
+	conn->remote_params.initial_max_streams_uni =
+		peer_tp.initial_max_streams_uni;
+	conn->remote_params.ack_delay_exponent =
+		peer_tp.ack_delay_exponent;
+	conn->remote_params.max_ack_delay = peer_tp.max_ack_delay;
+	conn->remote_params.disable_active_migration =
+		peer_tp.disable_active_migration;
+	conn->remote_params.active_conn_id_limit =
+		peer_tp.active_conn_id_limit;
+
+	/* Apply flow control limits */
+	conn->max_data_remote = peer_tp.initial_max_data;
+	conn->max_streams_bidi = peer_tp.initial_max_streams_bidi;
+	conn->max_streams_uni = peer_tp.initial_max_streams_uni;
+
+	pr_debug("tquic: applied peer transport params: max_data=%llu, max_streams_bidi=%llu\n",
+		 peer_tp.initial_max_data, peer_tp.initial_max_streams_bidi);
+}
+
+/**
+ * tquic_inline_hs_install_keys - Install QUIC keys from inline handshake
+ * @sk: Socket with inline handshake
+ * @level: Crypto level to install (TQUIC_CRYPTO_HANDSHAKE or APPLICATION)
+ *
+ * Derives QUIC packet protection keys from the TLS secrets and installs
+ * them into the connection's crypto state.
+ *
+ * Returns: 0 on success, negative errno on error
+ */
+int tquic_inline_hs_install_keys(struct sock *sk, int level)
+{
+	struct tquic_sock *tsk = tquic_sk(sk);
+	struct tquic_handshake *ihs = tsk->inline_hs;
+	struct tquic_connection *conn = tsk->conn;
+	struct tquic_crypto_state *crypto;
+	u8 client_key[TLS_KEY_MAX_LEN], server_key[TLS_KEY_MAX_LEN];
+	u8 client_iv[TLS_IV_MAX_LEN], server_iv[TLS_IV_MAX_LEN];
+	u8 client_hp[TLS_KEY_MAX_LEN], server_hp[TLS_KEY_MAX_LEN];
+	u32 ck_len, sk_len, ci_len, si_len, ch_len, sh_len;
+	u8 client_secret[TLS_SECRET_MAX_LEN];
+	u8 server_secret[TLS_SECRET_MAX_LEN];
+	u32 cs_len, ss_len;
+	int hs_level;
+	int ret;
+
+	if (!ihs || !conn)
+		return -EINVAL;
+
+	/* Map TQUIC_CRYPTO_* to tquic_hs_get_quic_keys level param */
+	switch (level) {
+	case TQUIC_CRYPTO_HANDSHAKE:
+		hs_level = 1;
+		break;
+	case TQUIC_CRYPTO_APPLICATION:
+		hs_level = 2;
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	/* Derive QUIC keys from the handshake secrets */
+	ret = tquic_hs_get_quic_keys(ihs, hs_level,
+				     client_key, &ck_len,
+				     client_iv, &ci_len,
+				     client_hp, &ch_len,
+				     server_key, &sk_len,
+				     server_iv, &si_len,
+				     server_hp, &sh_len);
+	if (ret < 0) {
+		pr_debug("tquic: failed to derive keys for level %d: %d\n",
+			 level, ret);
+		return ret;
+	}
+
+	/* Get secrets for crypto state installation */
+	if (level == TQUIC_CRYPTO_HANDSHAKE) {
+		ret = tquic_hs_get_handshake_secrets(ihs,
+						     client_secret, &cs_len,
+						     server_secret, &ss_len);
+	} else {
+		ret = tquic_hs_get_app_secrets(ihs,
+					       client_secret, &cs_len,
+					       server_secret, &ss_len);
+	}
+	if (ret < 0) {
+		pr_debug("tquic: failed to get secrets for level %d: %d\n",
+			 level, ret);
+		goto out_zero;
+	}
+
+	/*
+	 * Install keys into the connection's crypto state.
+	 * For client: write_secret = client_secret, read_secret = server_secret
+	 */
+	crypto = conn->crypto_state;
+	if (!crypto) {
+		/* Initialize crypto state if not yet done */
+		crypto = tquic_crypto_init_versioned(&conn->scid,
+						     conn->is_server,
+						     conn->version);
+		if (!crypto) {
+			ret = -ENOMEM;
+			goto out_zero;
+		}
+		conn->crypto_state = crypto;
+	}
+
+	ret = tquic_crypto_install_keys(crypto, level,
+					server_secret, ss_len,
+					client_secret, cs_len);
+	if (ret < 0) {
+		pr_debug("tquic: failed to install keys for level %d: %d\n",
+			 level, ret);
+	}
+
+out_zero:
+	memzero_explicit(client_key, sizeof(client_key));
+	memzero_explicit(server_key, sizeof(server_key));
+	memzero_explicit(client_iv, sizeof(client_iv));
+	memzero_explicit(server_iv, sizeof(server_iv));
+	memzero_explicit(client_hp, sizeof(client_hp));
+	memzero_explicit(server_hp, sizeof(server_hp));
+	memzero_explicit(client_secret, sizeof(client_secret));
+	memzero_explicit(server_secret, sizeof(server_secret));
+
+	return ret;
+}
+
+/**
+ * tquic_inline_hs_recv_crypto - Process received CRYPTO frame data
+ * @sk: Socket with inline handshake in progress
+ * @data: CRYPTO frame payload (TLS handshake messages)
+ * @len: Length of data
+ * @enc_level: Encryption level the data was received at
+ *
+ * Called from tquic_process_crypto_frame() when inline TLS is active.
+ * Routes the TLS handshake message through the state machine, generates
+ * any response messages, and installs keys as they become available.
+ *
+ * Returns: 0 on success, negative errno on error
+ */
+int tquic_inline_hs_recv_crypto(struct sock *sk, const u8 *data, u32 len,
+				int enc_level)
+{
+	struct tquic_sock *tsk = tquic_sk(sk);
+	struct tquic_handshake *ihs = tsk->inline_hs;
+	struct tquic_connection *conn = tsk->conn;
+	enum tquic_hs_state prev_state;
+	u8 *resp_buf = NULL;
+	u32 resp_len = 0;
+	struct sk_buff *resp_skb;
+	int pn_space;
+	int ret;
+
+	if (!ihs || !conn)
+		return -EINVAL;
+
+	prev_state = tquic_hs_get_state(ihs);
+
+	/* Allocate buffer for response messages */
+	resp_buf = kmalloc(4096, GFP_ATOMIC);
+	if (!resp_buf)
+		return -ENOMEM;
+
+	/* Process the TLS record through the state machine */
+	ret = tquic_hs_process_record(ihs, data, len,
+				      resp_buf, 4096, &resp_len);
+	if (ret < 0) {
+		pr_debug("tquic: inline hs process_record failed: %d\n", ret);
+		kfree(resp_buf);
+		tquic_inline_hs_abort(sk, ret);
+		return ret;
+	}
+
+	/*
+	 * Install keys when the state machine transitions to a new level.
+	 *
+	 * After ServerHello: handshake-level keys become available
+	 * After server Finished: application-level keys become available
+	 */
+	if (prev_state == TQUIC_HS_WAIT_SH &&
+	    tquic_hs_get_state(ihs) >= TQUIC_HS_WAIT_EE) {
+		/* Install handshake-level keys */
+		ret = tquic_inline_hs_install_keys(sk, TQUIC_CRYPTO_HANDSHAKE);
+		if (ret < 0) {
+			kfree(resp_buf);
+			tquic_inline_hs_abort(sk, ret);
+			return ret;
+		}
+		conn->crypto_level = TQUIC_CRYPTO_HANDSHAKE;
+	}
+
+	if (tquic_hs_is_complete(ihs) && !conn->handshake_complete) {
+		/* Install application-level keys */
+		ret = tquic_inline_hs_install_keys(sk, TQUIC_CRYPTO_APPLICATION);
+		if (ret < 0) {
+			kfree(resp_buf);
+			tquic_inline_hs_abort(sk, ret);
+			return ret;
+		}
+
+		/* Apply peer transport parameters */
+		tquic_inline_hs_apply_transport_params(sk);
+
+		/* Mark handshake complete */
+		conn->handshake_complete = true;
+		conn->crypto_level = TQUIC_CRYPTO_APPLICATION;
+		conn->state = TQUIC_CONN_CONNECTED;
+		tsk->flags |= TQUIC_F_HANDSHAKE_DONE;
+
+		TQUIC_INC_STATS(sock_net(sk), TQUIC_MIB_HANDSHAKESCOMPLETE);
+		TQUIC_INC_STATS(sock_net(sk), TQUIC_MIB_CURRESTAB);
+
+		/* Wake up waiters */
+		if (tsk->handshake_state)
+			complete(&tsk->handshake_state->done);
+
+		pr_debug("tquic: inline TLS handshake complete\n");
+	}
+
+	/* Queue any response messages */
+	if (resp_len > 0) {
+		resp_skb = alloc_skb(resp_len, GFP_ATOMIC);
+		if (!resp_skb) {
+			kfree(resp_buf);
+			return -ENOMEM;
+		}
+		skb_put_data(resp_skb, resp_buf, resp_len);
+
+		/*
+		 * Response goes to the appropriate PN space:
+		 * - If we're in handshake level, use HANDSHAKE space
+		 * - Client Finished goes in HANDSHAKE space
+		 */
+		if (conn->crypto_level >= TQUIC_CRYPTO_HANDSHAKE)
+			pn_space = TQUIC_PN_SPACE_HANDSHAKE;
+		else
+			pn_space = TQUIC_PN_SPACE_INITIAL;
+
+		skb_queue_tail(&conn->crypto_buffer[pn_space], resp_skb);
+	}
+
+	kfree(resp_buf);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(tquic_inline_hs_recv_crypto);
 
 /*
  * =============================================================================
