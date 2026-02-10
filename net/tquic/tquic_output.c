@@ -1487,8 +1487,17 @@ static int __maybe_unused tquic_gso_init(struct tquic_gso_ctx *gso, struct tquic
 	gso->current_seg = 0;
 	gso->total_len = 0;
 
-	/* Allocate GSO SKB */
-	gso->gso_skb = alloc_skb(gso->gso_size * max_segs + MAX_HEADER, GFP_ATOMIC);
+	/* Allocate GSO SKB -- check for multiplication overflow */
+	{
+		size_t alloc_size;
+
+		if (check_mul_overflow((size_t)gso->gso_size,
+				       (size_t)max_segs, &alloc_size) ||
+		    check_add_overflow(alloc_size, (size_t)MAX_HEADER,
+				       &alloc_size))
+			return -EOVERFLOW;
+		gso->gso_skb = alloc_skb(alloc_size, GFP_ATOMIC);
+	}
 	if (!gso->gso_skb)
 		return -ENOMEM;
 

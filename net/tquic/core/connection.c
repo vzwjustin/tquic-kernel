@@ -952,6 +952,15 @@ int tquic_send_version_negotiation(struct tquic_connection *conn,
 	u8 *p = packet;
 	int i;
 
+	/* Validate CID lengths against buffer capacity.
+	 * Header is 5 + 1 + scid->len + 1 + dcid->len + versions.
+	 * Ensure we don't overflow the 256-byte stack buffer.
+	 */
+	if (scid->len > TQUIC_MAX_CID_LEN || dcid->len > TQUIC_MAX_CID_LEN)
+		return -EINVAL;
+	if (5 + 1 + scid->len + 1 + dcid->len + 4 * 4 > sizeof(packet))
+		return -ENOSPC;
+
 	/* Long header with version 0 */
 	*p++ = 0x80;  /* Long header */
 	*p++ = 0x00; *p++ = 0x00; *p++ = 0x00; *p++ = 0x00;  /* Version 0 */

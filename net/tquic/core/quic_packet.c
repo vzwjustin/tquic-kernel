@@ -233,13 +233,15 @@ static void quic_packet_deliver_stream_data(struct tquic_stream *stream, u64 off
 
 	/*
 	 * SECURITY: alloc_skb() takes an unsigned int size parameter.
-	 * len is u64 from the stream frame; if it exceeds UINT_MAX the
-	 * cast would silently truncate, allocating a tiny buffer while
-	 * skb_put_data copies len bytes -- causing a heap overflow.
-	 * Cap at a reasonable maximum (stream_len is already validated
-	 * against packet bounds by the caller, but defense in depth).
+	 * len is u64 from the stream frame; if it exceeds a reasonable
+	 * limit the cast would silently truncate, allocating a tiny
+	 * buffer while skb_put_data copies len bytes -- heap overflow.
+	 *
+	 * Cap at 16KB (max_stream_data typical limit) rather than U32_MAX
+	 * for defense in depth.  Individual QUIC packets are at most
+	 * ~1500 bytes (PMTU), so anything larger is suspect.
 	 */
-	if (len > U32_MAX)
+	if (len > 16384)
 		return;
 
 	/* Allocate an skb to hold the data */
