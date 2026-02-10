@@ -447,10 +447,12 @@ static void blest_path_removed(struct tquic_connection *conn,
 {
 	struct blest_sched_data *sd = conn->sched_priv;
 	struct blest_path_state *ps;
+	unsigned long irqflags;
 
 	if (!sd)
 		return;
 
+	spin_lock_irqsave(&sd->lock, irqflags);
 	ps = blest_find_path_state(sd, path->path_id);
 	if (ps) {
 		ps->valid = false;
@@ -460,6 +462,7 @@ static void blest_path_removed(struct tquic_connection *conn,
 	/* If current path was removed, invalidate selection */
 	if (sd->current_path_id == path->path_id)
 		sd->current_path_id = TQUIC_INVALID_PATH_ID;
+	spin_unlock_irqrestore(&sd->lock, irqflags);
 }
 
 /**
@@ -518,13 +521,17 @@ static void blest_ack_received(struct tquic_connection *conn,
 {
 	struct blest_sched_data *sd = conn->sched_priv;
 	struct blest_path_state *ps;
+	unsigned long irqflags;
 
 	if (!sd)
 		return;
 
+	spin_lock_irqsave(&sd->lock, irqflags);
 	ps = blest_find_path_state(sd, path->path_id);
-	if (!ps)
+	if (!ps) {
+		spin_unlock_irqrestore(&sd->lock, irqflags);
 		return;
+	}
 
 	/* Decrease inflight by acknowledged bytes */
 	if (ps->inflight_bytes >= acked_bytes)
@@ -546,6 +553,7 @@ static void blest_ack_received(struct tquic_connection *conn,
 
 	if (ps->send_rate < BLEST_MIN_SEND_RATE)
 		ps->send_rate = BLEST_MIN_SEND_RATE;
+	spin_unlock_irqrestore(&sd->lock, irqflags);
 }
 
 /**
@@ -562,13 +570,17 @@ static void blest_loss_detected(struct tquic_connection *conn,
 {
 	struct blest_sched_data *sd = conn->sched_priv;
 	struct blest_path_state *ps;
+	unsigned long irqflags;
 
 	if (!sd)
 		return;
 
+	spin_lock_irqsave(&sd->lock, irqflags);
 	ps = blest_find_path_state(sd, path->path_id);
-	if (!ps)
+	if (!ps) {
+		spin_unlock_irqrestore(&sd->lock, irqflags);
 		return;
+	}
 
 	/* Lost packets are no longer in flight */
 	if (ps->inflight_bytes >= lost_bytes)
@@ -578,6 +590,7 @@ static void blest_loss_detected(struct tquic_connection *conn,
 
 	pr_debug("blest: path %u loss %llu bytes, inflight now %llu\n",
 		 path->path_id, lost_bytes, ps->inflight_bytes);
+	spin_unlock_irqrestore(&sd->lock, irqflags);
 }
 
 /**
