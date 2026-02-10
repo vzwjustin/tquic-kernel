@@ -186,7 +186,7 @@ Parked. Only revisit if new evidence surfaces.
   - Verify: `rg -n "__skb_dequeue" "net/tquic/napi.c"`
   - Fix: Use the same batch-splice pattern as `tquic_napi_poll()`: splice the queue to a local list under a single lock acquisition, then process without holdi
 
-- [ ] **CF-029** -- GSO SKB Allocation Multiplication Overflow
+- [x] **CF-029** -- GSO SKB Allocation Multiplication Overflow
   - Severity: S0 | Sources: B,C | Priority: 10.0
   - Evidence: file:1, sym:2, lines:1, snippet:3
   - Missing: Kernel log / stack trace / error output demonstrating the issue
@@ -249,7 +249,7 @@ Parked. Only revisit if new evidence surfaces.
   - Verify: `rg -n "tquic_conn_set_state" "net/tquic/tquic_input.c"`
   - Fix: Use the state machine: call `tquic_conn_set_state(conn, TQUIC_CONN_CLOSED, TQUIC_REASON_PEER_CLOSE)` instead. Risk: Locking/ordering changes can cause
 
-- [ ] **CF-060** -- Stream Data Delivery Uses u64 Length with u32 alloc_skb
+- [x] **CF-060** -- Stream Data Delivery Uses u64 Length with u32 alloc_skb
   - Severity: S0 | Sources: B,C | Priority: 10.0
   - Evidence: file:1, sym:2, lines:1, snippet:2
   - Missing: Kernel log / stack trace / error output demonstrating the issue
@@ -335,7 +335,7 @@ Parked. Only revisit if new evidence surfaces.
   - Verify: `sed -n '842,842p' net/quic/tquic/crypto/handshake.c`
   - Fix: Use `check_mul_overflow` or cap `new_alloc` more conservatively: ```c u32 new_alloc; if (check_mul_overflow(new_len, 2U, &new_alloc))     new_alloc = 
 
-- [ ] **CF-069** -- Version Negotiation Packet Overflow -- Unsanitized CID Lengths in tquic_send_version_negotiation
+- [x] **CF-069** -- Version Negotiation Packet Overflow -- Unsanitized CID Lengths in tquic_send_version_negotiation
   - Severity: S0 | Sources: B,C | Priority: 10.0
   - Evidence: file:1, sym:4, lines:4, snippet:2
   - Missing: Kernel log / stack trace / error output demonstrating the issue
@@ -784,7 +784,7 @@ Parked. Only revisit if new evidence surfaces.
   - Verify: `rg -n "qpack_decoder" "net/quic/tquic/http3/qpack_decoder.c"`
   - Fix: Replace stack buffers with heap allocation (kmalloc with GFP_ATOMIC). The value_buf alone at 8192 bytes is dangerously large for kernel stack. Alterna
 
-- [ ] **CF-052** -- Retry Token Address Validation Uses Non-Constant-Time Comparison
+- [x] **CF-052** -- Retry Token Address Validation Uses Non-Constant-Time Comparison
   - Severity: S0 | Sources: B,C | Priority: 10.0
   - Evidence: file:1, sym:3, snippet:1
   - Missing: Exact line range(s) where the fault manifests; Kernel log / stack trace / error output demonstrating the issue
@@ -1256,7 +1256,7 @@ Parked. Only revisit if new evidence surfaces.
 
 #### Build (1)
 
-- [ ] **CF-063** -- tquic_send_connection_close() -- SKB leak and unencrypted packet on header failure
+- [x] **CF-063** -- tquic_send_connection_close() -- SKB leak and unencrypted packet on header failure
   - Severity: S0 | Sources: B,C | Priority: 10.0
   - Evidence: file:1, sym:4, snippet:1
   - Missing: Exact line range(s) where the fault manifests; Kernel log / stack trace / error output demonstrating the issue
