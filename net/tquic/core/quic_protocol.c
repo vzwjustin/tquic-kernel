@@ -429,7 +429,7 @@ static int tquic_proto_connect(struct sock *sk, TQUIC_SOCKADDR *uaddr,
 
 	err = tquic_conn_client_connect(conn, addr);
 	if (err) {
-		tquic_conn_destroy(conn);
+		tquic_conn_put(conn);
 		tsk->conn = NULL;
 		goto out;
 	}
@@ -450,7 +450,7 @@ static int tquic_proto_disconnect(struct sock *sk, int flags)
 
 	if (conn) {
 		tquic_conn_close_with_error(conn, EQUIC_NO_ERROR, NULL);
-		tquic_conn_destroy(conn);
+		tquic_conn_put(conn);
 		tsk->conn = NULL;
 	}
 
@@ -663,7 +663,7 @@ static void tquic_proto_destroy_sock(struct sock *sk)
 	struct tquic_sock *tsk = tquic_sk(sk);
 
 	if (tsk->conn) {
-		tquic_conn_destroy(tsk->conn);
+		tquic_conn_put(tsk->conn);
 		tsk->conn = NULL;
 	}
 

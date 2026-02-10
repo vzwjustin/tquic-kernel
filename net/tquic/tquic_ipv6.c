@@ -962,7 +962,7 @@ static void tquic_v6_destroy_sock(struct sock *sk)
 			tquic_bond_cleanup(tsk->conn->scheduler);
 			tsk->conn->scheduler = NULL;
 		}
-		tquic_conn_destroy(tsk->conn);
+		tquic_conn_put(tsk->conn);
 		tsk->conn = NULL;
 	}
 

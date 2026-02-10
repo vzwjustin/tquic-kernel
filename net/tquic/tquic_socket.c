@@ -176,7 +176,7 @@ void tquic_destroy_sock(struct sock *sk)
 		 */
 		WRITE_ONCE(tsk->conn, NULL);
 		WRITE_ONCE(tsk->default_stream, NULL);
-		tquic_conn_destroy(conn);
+		tquic_conn_put(conn);
 	}
 
 	tquic_dbg("socket destroyed\n");

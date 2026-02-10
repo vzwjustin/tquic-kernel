@@ -25,6 +25,7 @@
  * tquic_conn_create() can insert new connections.
  */
 extern struct rhashtable tquic_conn_table;
+extern struct kmem_cache *tquic_conn_cache;
 static const struct rhashtable_params tquic_conn_table_params = {
 	.key_len = sizeof(struct tquic_cid),
 	.key_offset = offsetof(struct tquic_connection, scid),
@@ -85,7 +86,6 @@ static inline u64 tquic_trace_conn_id(const struct tquic_cid *cid)
 	return id;
 }
 
-static struct kmem_cache __maybe_unused *tquic_conn_cache __read_mostly;
 static struct kmem_cache *tquic_cid_cache __read_mostly;
 
 /* rhashtable parameters for connection ID lookup */
@@ -197,11 +197,25 @@ static struct tquic_cid_entry *tquic_cid_entry_create(
 	return entry;
 }
 
+static void tquic_cid_entry_rcu_free(struct rcu_head *head)
+{
+	struct tquic_cid_entry *entry = container_of(head,
+						     struct tquic_cid_entry,
+						     rcu);
+
+	kmem_cache_free(tquic_cid_cache, entry);
+}
+
 static void tquic_cid_entry_destroy(struct tquic_cid_entry *entry)
 {
 	list_del(&entry->list);
 	tquic_cid_hash_del(entry);
-	kmem_cache_free(tquic_cid_cache, entry);
+	/*
+	 * Defer freeing until an RCU grace period has elapsed so that
+	 * concurrent rcu_read_lock() holders in tquic_conn_lookup()
+	 * do not access freed memory.
+	 */
+	call_rcu(&entry->rcu, tquic_cid_entry_rcu_free);
 }
 
 static void tquic_pn_space_init(struct tquic_pn_space *pn_space)
@@ -469,7 +483,7 @@ struct tquic_connection *tquic_conn_create(struct tquic_sock *tsk, bool is_serve
 	struct tquic_cid_entry *scid_entry;
 	int i;
 
-	conn = kzalloc(sizeof(*conn), GFP_KERNEL);
+	conn = kmem_cache_zalloc(tquic_conn_cache, GFP_KERNEL);
 	if (!conn)
 		return NULL;
 
@@ -599,7 +613,7 @@ err_free_pn_spaces:
 err_free_scid:
 	tquic_cid_entry_destroy(scid_entry);
 err_free_conn:
-	kfree(conn);
+	kmem_cache_free(tquic_conn_cache, conn);
 	return NULL;
 }
 EXPORT_SYMBOL_GPL(tquic_conn_create);
@@ -617,12 +631,11 @@ void tquic_conn_destroy(struct tquic_connection *conn)
 		return;
 
 	/*
-	 * SECURITY FIX (CF-119): Only proceed with destruction if this
-	 * is the last reference. If other code paths still hold a
-	 * reference (e.g., from tquic_conn_lookup()), defer destruction.
+	 * SECURITY FIX (CF-119): This function must only be called from
+	 * tquic_conn_put() when the refcount has already reached zero.
+	 * Direct callers must use tquic_conn_put() instead.
 	 */
-	if (!refcount_dec_and_test(&conn->refcnt))
-		return;
+	WARN_ON_ONCE(refcount_read(&conn->refcnt) != 0);
 
 	trace_quic_conn_destroy(tquic_trace_conn_id(&conn->scid),
 				 conn->error_code);
@@ -679,7 +692,7 @@ void tquic_conn_destroy(struct tquic_connection *conn)
 		skb_queue_purge(&conn->crypto_buffer[i]);
 
 	kfree(conn->reason_phrase);
-	kfree(conn);
+	kmem_cache_free(tquic_conn_cache, conn);
 }
 #endif /* TQUIC_OUT_OF_TREE */
 

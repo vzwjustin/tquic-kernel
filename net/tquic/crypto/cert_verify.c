@@ -2557,20 +2557,18 @@ int tquic_check_revocation(struct tquic_cert_verify_ctx *ctx,
 		if (status == 0) {
 			/*
 			 * CF-007: OCSP signature is NOT verified.
-			 * Hard-fail mode rejects unverified responses
-			 * (fail closed) since a network attacker could
-			 * forge a "good" status.
+			 * Since a network attacker could forge a "good"
+			 * status, we must not trust the response in any
+			 * mode.  Hard-fail rejects outright; soft-fail
+			 * falls through to the no-OCSP path which will
+			 * allow the connection with a warning.
 			 */
-			if (ctx->check_revocation == TQUIC_REVOKE_HARD_FAIL) {
-				pr_warn("tquic_cert: OCSP status good but "
-					"signature NOT verified -- "
-					"rejecting in hard-fail mode\n");
-				return -EKEYREVOKED;
-			}
 			pr_warn("tquic_cert: OCSP status good (%u bytes)"
 				" -- signature NOT verified\n",
 				ctx->ocsp_stapling_len);
-			return 0;
+			if (ctx->check_revocation == TQUIC_REVOKE_HARD_FAIL)
+				return -EKEYREVOKED;
+			goto no_ocsp;
 		}
 
 		if (status == -EKEYREVOKED) {

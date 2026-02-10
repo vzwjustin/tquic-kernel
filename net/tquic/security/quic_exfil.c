@@ -61,6 +61,7 @@ static struct workqueue_struct *exfil_wq;
  * of stale or corrupted cb data as a code address.
  */
 #define TQUIC_EXFIL_CB_MAGIC	0x5158454CU	/* "QXEL" */
+#define TQUIC_DECOY_CB_MAGIC	0x4445434FU	/* "DECO" */
 
 struct tquic_exfil_cb {
 	u32 magic;
@@ -606,12 +607,13 @@ static void traffic_shaper_decoy_work(struct work_struct *work)
 	 */
 	get_random_bytes(skb_put(skb, decoy_size), decoy_size);
 
-	/* Mark as decoy packet in cb for debugging/tracing */
-	skb->cb[0] = 'D';  /* Decoy marker */
-	skb->cb[1] = 'E';
-	skb->cb[2] = 'C';
-	skb->cb[3] = 'O';
-	skb->cb[4] = 'Y';
+	/*
+	 * Mark as decoy packet using typed cb overlay instead of raw byte
+	 * writes. Raw writes risk being misinterpreted as a garbage function
+	 * pointer if this skb is ever dequeued through the exfil validate path.
+	 */
+	memset(skb->cb, 0, sizeof_field(struct sk_buff, cb));
+	((struct tquic_exfil_cb *)skb->cb)->magic = TQUIC_DECOY_CB_MAGIC;
 
 	/* Send via registered callback */
 	shaper->decoy_send_fn(skb);

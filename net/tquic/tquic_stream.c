@@ -36,6 +36,9 @@
 /* Forward declaration for pacing integration (defined in tquic_output.c) */
 extern void tquic_update_pacing(struct sock *sk, struct tquic_path *path);
 
+/* Slab cache for stream objects -- defined in tquic_main.c */
+extern struct kmem_cache *tquic_stream_cache;
+
 /*
  * =============================================================================
  * SOCKET MEMORY ACCOUNTING
@@ -296,7 +299,7 @@ static struct tquic_stream *tquic_stream_alloc(struct tquic_connection *conn,
 	if (!conn)
 		return NULL;
 
-	stream = kzalloc(sizeof(*stream), GFP_KERNEL);
+	stream = kmem_cache_zalloc(tquic_stream_cache, GFP_KERNEL);
 	if (!stream)
 		return NULL;
 
@@ -433,7 +436,7 @@ static void tquic_stream_free(struct tquic_stream *stream)
 
 	tquic_dbg("freed stream id=%llu\n", stream->id);
 
-	kfree(stream);
+	kmem_cache_free(tquic_stream_cache, stream);
 }
 
 /**

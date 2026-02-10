@@ -766,19 +766,15 @@ static int tquic_hs_hkdf_expand_label(struct tquic_handshake *hs,
 	hash_len = crypto_shash_digestsize(hs->hmac);
 
 	/*
-	 * context_len is written as a single byte in the HkdfLabel structure.
-	 * Reject values that would be truncated when cast to u8.
+	 * TLS 1.3 HkdfLabel constraints:
+	 *  - label is "tls13 " + user label, written with a u8 length prefix,
+	 *    so total_label_len (6 + label_len) must fit in a u8 (max 255).
+	 *    Enforce label_len <= 245 to guarantee this.
+	 *  - context_len is written as a single byte (max 255).
+	 *  - The combined HkdfLabel must fit in our stack buffer.
 	 */
-	if (context_len > 255)
-		return -EINVAL;
-
-	/*
-	 * Bounds check: the HkdfLabel structure occupies
-	 * 2 (length) + 1 (label length prefix) + total_label_len +
-	 * 1 (context length prefix) + context_len bytes.
-	 * Reject if this exceeds the stack buffer.
-	 */
-	if (2 + 1 + total_label_len + 1 + context_len > sizeof(hkdf_label))
+	if (label_len > 245 || context_len > 245 ||
+	    (2 + 1 + total_label_len + 1 + context_len) > sizeof(hkdf_label))
 		return -EINVAL;
 
 	/* HkdfLabel structure */

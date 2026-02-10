@@ -37,6 +37,9 @@
 
 #include "tquic_compat.h"
 
+/* Slab cache for path objects -- defined in tquic_main.c */
+extern struct kmem_cache *tquic_path_cache;
+
 /* Sysctl accessor forward declaration */
 int tquic_sysctl_get_prefer_preferred_address(void);
 
@@ -429,7 +432,7 @@ struct tquic_path *tquic_path_create(struct tquic_connection *conn,
 	if (conn->num_paths >= conn->max_paths)
 		return NULL;
 
-	path = kzalloc(sizeof(*path), GFP_KERNEL);
+	path = kmem_cache_zalloc(tquic_path_cache, GFP_KERNEL);
 	if (!path)
 		return NULL;
 
@@ -442,11 +445,11 @@ struct tquic_path *tquic_path_create(struct tquic_connection *conn,
 
 	/* Validate address families before copying */
 	if (local->ss_family != AF_INET && local->ss_family != AF_INET6) {
-		kfree(path);
+		kmem_cache_free(tquic_path_cache, path);
 		return NULL;
 	}
 	if (remote->ss_family != AF_INET && remote->ss_family != AF_INET6) {
-		kfree(path);
+		kmem_cache_free(tquic_path_cache, path);
 		return NULL;
 	}
 
@@ -543,7 +546,7 @@ void tquic_path_free(struct tquic_path *path)
 		synchronize_rcu();
 	}
 
-	kfree(path);
+	kmem_cache_free(tquic_path_cache, path);
 }
 EXPORT_SYMBOL_GPL(tquic_path_free);
 
@@ -1238,6 +1241,18 @@ void tquic_migration_cleanup(struct tquic_connection *conn)
 
 		/* Cancel any pending work */
 		cancel_work_sync(&ms->work);
+
+		/* Release path references taken during migration setup */
+		spin_lock_bh(&ms->lock);
+		if (ms->old_path) {
+			tquic_path_put(ms->old_path);
+			ms->old_path = NULL;
+		}
+		if (ms->new_path) {
+			tquic_path_put(ms->new_path);
+			ms->new_path = NULL;
+		}
+		spin_unlock_bh(&ms->lock);
 
 		/* Clear state */
 		conn->state_machine = NULL;

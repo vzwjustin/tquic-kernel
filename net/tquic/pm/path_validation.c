@@ -141,6 +141,7 @@ void tquic_path_validation_timeout(struct timer_list *t)
 		path->anti_amplification.active = false;
 		del_timer(&path->validation.timer);
 
+		tquic_path_get(path);
 		spin_unlock_bh(&conn->paths_lock);
 
 		/* Emit path failed event via PM netlink */
@@ -149,6 +150,7 @@ void tquic_path_validation_timeout(struct timer_list *t)
 		/* Trigger failover to other paths */
 		tquic_bond_path_failed(conn, path);
 
+		tquic_path_put(path);
 		return;
 	}
 
@@ -156,15 +158,17 @@ void tquic_path_validation_timeout(struct timer_list *t)
 	path->validation.retries++;
 
 	/*
-	 * CF-285: Capture path_id and retry count while still under
-	 * lock to avoid accessing path state after unlock (UAF risk
-	 * if path is freed concurrently).
+	 * CF-285: Take a reference on the path before releasing the
+	 * lock so the path cannot be freed while we send the retry
+	 * challenge and arm the timer.  Cache local copies of fields
+	 * that we only need for logging.
 	 */
 	{
 		u8 retry_path_id = path->path_id;
 		u32 retry_count = path->validation.retries;
 		u32 timeout_us = tquic_validation_timeout_us(path);
 
+		tquic_path_get(path);
 		spin_unlock_bh(&conn->paths_lock);
 
 		/* Resend PATH_CHALLENGE */
@@ -184,6 +188,8 @@ void tquic_path_validation_timeout(struct timer_list *t)
 			spin_unlock_bh(&conn->paths_lock);
 			tquic_bond_path_failed(conn, path);
 		}
+
+		tquic_path_put(path);
 	}
 }
 EXPORT_SYMBOL_GPL(tquic_path_validation_timeout);

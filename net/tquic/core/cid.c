@@ -100,6 +100,7 @@ struct tquic_cid_entry {
 	struct list_head list;
 	refcount_t refcnt;
 	bool is_local;
+	struct rcu_head rcu;
 };
 
 /**
@@ -328,14 +329,30 @@ static struct tquic_cid_entry *tquic_cid_entry_alloc(gfp_t gfp)
 }
 
 /*
- * Free a CID entry
+ * RCU callback to free a CID entry from slab cache
+ */
+static void tquic_cid_entry_free_rcu(struct rcu_head *head)
+{
+	struct tquic_cid_entry *entry = container_of(head,
+						     struct tquic_cid_entry,
+						     rcu);
+
+	kmem_cache_free(tquic_cid_cache, entry);
+}
+
+/*
+ * Free a CID entry.
+ *
+ * Defers freeing via RCU grace period so that concurrent readers
+ * in tquic_cid_lookup() (under rcu_read_lock) do not access
+ * freed memory.
  */
 static void tquic_cid_entry_free(struct tquic_cid_entry *entry)
 {
 	if (!entry)
 		return;
 
-	kmem_cache_free(tquic_cid_cache, entry);
+	call_rcu(&entry->rcu, tquic_cid_entry_free_rcu);
 }
 
 /*

@@ -66,9 +66,12 @@ MODULE_VERSION("1.0.0");
 /* Global state */
 struct rhashtable tquic_conn_table;
 EXPORT_SYMBOL_GPL(tquic_conn_table);
-static struct kmem_cache *tquic_conn_cache;
-static struct kmem_cache *tquic_stream_cache;
-static struct kmem_cache *tquic_path_cache;
+struct kmem_cache *tquic_conn_cache;
+EXPORT_SYMBOL_GPL(tquic_conn_cache);
+struct kmem_cache *tquic_stream_cache;
+EXPORT_SYMBOL_GPL(tquic_stream_cache);
+struct kmem_cache *tquic_path_cache;
+EXPORT_SYMBOL_GPL(tquic_path_cache);
 
 /*
  * Slab cache for per-packet RX decryption buffers.
@@ -136,12 +139,11 @@ void tquic_conn_destroy(struct tquic_connection *conn)
 		return;
 
 	/*
-	 * SECURITY FIX (CF-119): Only proceed with destruction if this
-	 * is the last reference. If other code paths still hold a
-	 * reference (e.g., from tquic_conn_lookup()), defer destruction.
+	 * SECURITY FIX (CF-119): This function must only be called from
+	 * tquic_conn_put() when the refcount has already reached zero.
+	 * Direct callers must use tquic_conn_put() instead.
 	 */
-	if (!refcount_dec_and_test(&conn->refcnt))
-		return;
+	WARN_ON_ONCE(refcount_read(&conn->refcnt) != 0);
 
 	/* Unbind from server client tracking before teardown */
 	tquic_server_unbind_client(conn);
@@ -222,12 +224,10 @@ void tquic_conn_destroy(struct tquic_connection *conn)
 	}
 
 	/*
-	 * SECURITY FIX (CF-134): Use kfree() since tquic_conn_create()
-	 * allocates with kzalloc(), not kmem_cache_alloc(). Using
-	 * kmem_cache_free() on kzalloc'd memory causes allocator
-	 * mismatch corruption.
+	 * SECURITY FIX (CF-134, updated): tquic_conn_create() now uses
+	 * kmem_cache_zalloc(tquic_conn_cache), so free via the same cache.
 	 */
-	kfree(conn);
+	kmem_cache_free(tquic_conn_cache, conn);
 }
 EXPORT_SYMBOL_GPL(tquic_conn_destroy);
 

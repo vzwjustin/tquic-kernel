@@ -95,6 +95,7 @@ struct tquic_cid_entry {
 	struct tquic_path *path;
 	struct rhash_head node;
 	struct list_head list;
+	struct rcu_head rcu;
 };
 
 /**
@@ -360,16 +361,21 @@ void tquic_cid_pool_destroy(struct tquic_connection *conn)
 
 	spin_lock_bh(&pool->lock);
 
-	/* Remove all local CIDs from hash and free */
+	/*
+	 * Remove all local CIDs from hash and free.
+	 * Use kfree_rcu() after rhashtable_remove_fast() to ensure
+	 * concurrent RCU readers (tquic_cid_lookup) have finished
+	 * before the entry memory is reclaimed.
+	 */
 	list_for_each_entry_safe(entry, tmp, &pool->local_cids, list) {
 		if (cid_table_initialized && entry->state == CID_STATE_ACTIVE)
 			rhashtable_remove_fast(&tquic_cid_table, &entry->node,
 					       cid_rht_params);
 		list_del(&entry->list);
-		kfree(entry);
+		kfree_rcu(entry, rcu);
 	}
 
-	/* Free remote CIDs (not in global hash) */
+	/* Free remote CIDs (not in global hash, safe to kfree directly) */
 	list_for_each_entry_safe(entry, tmp, &pool->remote_cids, list) {
 		list_del(&entry->list);
 		kfree(entry);

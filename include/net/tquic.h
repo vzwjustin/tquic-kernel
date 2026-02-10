@@ -1973,6 +1973,7 @@ void tquic_conn_on_packet_received(struct tquic_connection *conn, size_t bytes);
 
 /* Connection lookup */
 struct tquic_connection *tquic_conn_lookup_by_cid(const struct tquic_cid *cid);
+struct tquic_connection *tquic_state_cid_lookup(const struct tquic_cid *cid);
 
 /**
  * tquic_conn_get - Acquire a reference on a connection

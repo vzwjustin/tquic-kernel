@@ -58,6 +58,7 @@ struct tquic_cid_entry {
 	struct tquic_path *path;
 	struct rhash_head node;
 	struct list_head list;
+	struct rcu_head rcu;
 };
 
 /**

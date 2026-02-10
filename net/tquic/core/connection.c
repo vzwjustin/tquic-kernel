@@ -101,8 +101,10 @@ struct tquic_cid_entry {
 	u8 stateless_reset_token[16];
 	bool has_reset_token;
 	bool retired;
+	struct tquic_connection *conn;
 	struct list_head list;
 	struct rhash_head hash_node;
+	struct rcu_head rcu;
 };
 
 /* Pending path challenge/response */
@@ -525,6 +527,7 @@ struct tquic_cid_entry *tquic_conn_add_local_cid(struct tquic_connection *conn)
 		spin_unlock_bh(&conn->lock);
 		return NULL;
 	}
+	entry->conn = conn;
 
 	/*
 	 * Generate stateless reset token deterministically from CID
@@ -592,6 +595,7 @@ int tquic_conn_add_remote_cid(struct tquic_connection *conn,
 	if (!entry)
 		return -ENOMEM;
 
+	entry->conn = conn;
 	if (reset_token) {
 		memcpy(entry->stateless_reset_token, reset_token, 16);
 		entry->has_reset_token = true;
@@ -2822,7 +2826,7 @@ err_free:
 					       &entry->hash_node,
 					       cid_hash_params);
 			list_del(&entry->list);
-			kfree(entry);
+			kfree_rcu(entry, rcu);
 		}
 
 		/* Free remote CIDs */
@@ -2925,20 +2929,59 @@ EXPORT_SYMBOL_GPL(tquic_conn_on_packet_received);
  */
 
 /**
+ * tquic_state_cid_lookup - Lookup connection by CID in state machine table
+ * @cid: The connection ID to look up
+ *
+ * Searches the state machine's cid_lookup_table for a matching CID entry.
+ * This provides a fallback lookup path for CIDs registered via the
+ * connection state machine (tquic_conn_add_local_cid) which are not
+ * present in the CID pool's tquic_cid_table.
+ *
+ * Caller must call tquic_conn_put() on the returned connection when done.
+ *
+ * Returns: Connection pointer with elevated refcount, or NULL if not found.
+ */
+struct tquic_connection *tquic_state_cid_lookup(const struct tquic_cid *cid)
+{
+	struct tquic_cid_entry *entry;
+	struct tquic_connection *conn = NULL;
+
+	if (!cid || cid->len == 0)
+		return NULL;
+
+	rcu_read_lock();
+	entry = rhashtable_lookup_fast(&cid_lookup_table, cid,
+				       cid_hash_params);
+	if (entry && !entry->retired && entry->conn) {
+		if (refcount_inc_not_zero(&entry->conn->refcnt))
+			conn = entry->conn;
+	}
+	rcu_read_unlock();
+
+	return conn;
+}
+EXPORT_SYMBOL_GPL(tquic_state_cid_lookup);
+
+/**
  * tquic_conn_lookup_by_cid - Find connection by CID
  * @cid: The connection ID to look up
  *
- * Delegates to tquic_cid_lookup() which maintains the authoritative
- * CID-to-connection mapping with proper reference counting.
+ * Searches all CID tables: first the CID pool table (tquic_cid_table),
+ * then falls back to the state machine table (cid_lookup_table).
  *
  * Returns the connection owning this CID, or NULL.
  */
 struct tquic_connection *tquic_conn_lookup_by_cid(const struct tquic_cid *cid)
 {
-	/* Delegate to the CID manager's lookup which has the proper
-	 * connection back-pointer and reference counting.
-	 */
-	return tquic_cid_lookup(cid);
+	struct tquic_connection *conn;
+
+	/* Try CID pool table first (the primary RX demux table) */
+	conn = tquic_cid_lookup(cid);
+	if (conn)
+		return conn;
+
+	/* Fall back to state machine CID table */
+	return tquic_state_cid_lookup(cid);
 }
 EXPORT_SYMBOL_GPL(tquic_conn_lookup_by_cid);
 
@@ -2967,15 +3010,20 @@ void tquic_conn_state_cleanup(struct tquic_connection *conn)
 	cancel_delayed_work_sync(&cs->drain_work);
 	cancel_delayed_work_sync(&cs->validation_work);
 
-	/* Free local CIDs */
+	/*
+	 * Free local CIDs.
+	 * Use kfree_rcu() after rhashtable_remove_fast() so that
+	 * concurrent RCU readers in tquic_state_cid_lookup() finish
+	 * before the entry memory is reclaimed.
+	 */
 	list_for_each_entry_safe(entry, tmp, &cs->local_cids, list) {
 		rhashtable_remove_fast(&cid_lookup_table, &entry->hash_node,
 				       cid_hash_params);
 		list_del(&entry->list);
-		kfree(entry);
+		kfree_rcu(entry, rcu);
 	}
 
-	/* Free remote CIDs */
+	/* Free remote CIDs (not in hash table, safe to kfree directly) */
 	list_for_each_entry_safe(entry, tmp, &cs->remote_cids, list) {
 		list_del(&entry->list);
 		kfree(entry);

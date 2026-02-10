@@ -1204,17 +1204,27 @@ static struct tquic_sched_internal __maybe_unused tquic_sched_lowlat = {
  * Redundant Scheduler (Send on Multiple Paths)
  * ========================================================================= */
 
+/*
+ * Sliding-window bitmap deduplication.
+ *
+ * We track a window of TQUIC_DEDUP_WINDOW_SIZE sequence numbers starting
+ * at base_seq.  A set bit means the corresponding seq has been seen.
+ * When a seq arrives beyond the window, we slide base_seq forward and
+ * clear the newly exposed bits.  Sequences below base_seq are considered
+ * already delivered (not duplicates in the QUIC sense, but too old to
+ * track) and are treated as duplicates to avoid double delivery.
+ */
+#define TQUIC_DEDUP_WINDOW_SIZE	2048
+#define TQUIC_DEDUP_BITMAP_LONGS \
+	(TQUIC_DEDUP_WINDOW_SIZE / BITS_PER_LONG)
+
 struct tquic_redundant_data {
 	u8	redundancy_level;	/* Number of paths to use */
 	bool	all_paths;		/* Use all available paths */
 	u64	last_seq_sent;
-	/*
-	 * CF-118: Use full 64-bit packet numbers for deduplication
-	 * instead of 8-bit truncated hash to avoid collisions.
-	 * Initialized to U64_MAX sentinels (invalid QUIC pkt number).
-	 */
-	u64	dedup_window[256];	/* Full packet number dedup */
-	u16	dedup_head;
+	u64	dedup_base_seq;		/* Lowest seq in the window */
+	bool	dedup_initialized;	/* First packet sets base */
+	unsigned long dedup_bitmap[TQUIC_DEDUP_BITMAP_LONGS];
 };
 
 static int tquic_redundant_init(struct tquic_connection *conn)
@@ -1227,9 +1237,9 @@ static int tquic_redundant_init(struct tquic_connection *conn)
 
 	rd->redundancy_level = 2;  /* Default: send on 2 paths */
 	rd->all_paths = false;
-	rd->dedup_head = 0;
-	/* CF-118: Initialize dedup window with U64_MAX sentinels */
-	memset(rd->dedup_window, 0xFF, sizeof(rd->dedup_window));
+	rd->dedup_base_seq = 0;
+	rd->dedup_initialized = false;
+	bitmap_zero(rd->dedup_bitmap, TQUIC_DEDUP_WINDOW_SIZE);
 
 	conn->sched_priv = rd;
 	return 0;
@@ -1335,26 +1345,68 @@ EXPORT_SYMBOL_GPL(tquic_redundant_set_level);
 bool tquic_redundant_is_duplicate(struct tquic_connection *conn, u64 seq)
 {
 	struct tquic_redundant_data *rd;
-	int i;
+	u64 offset, slide, clear_start;
 
 	rd = conn->sched_priv;
 	if (!rd)
 		return false;
 
 	/*
-	 * CF-118: Use full 64-bit packet number for deduplication.
-	 * The previous 8-bit truncation (seq & 0xFF) caused collisions
-	 * every 256 packets, making dedup unreliable.
+	 * First packet initializes the window base.
 	 */
-	for (i = 0; i < 256; i++) {
-		if (rd->dedup_window[i] == seq)
-			return true;  /* Duplicate found */
+	if (!rd->dedup_initialized) {
+		rd->dedup_base_seq = seq;
+		rd->dedup_initialized = true;
+		set_bit(0, rd->dedup_bitmap);
+		return false;
 	}
 
-	/* Not a duplicate, record it */
-	rd->dedup_window[rd->dedup_head] = seq;
-	rd->dedup_head = (rd->dedup_head + 1) & 0xFF;
+	/*
+	 * Sequence below the current window: too old to track,
+	 * treat as duplicate (already delivered or expired).
+	 */
+	if (seq < rd->dedup_base_seq)
+		return true;
 
+	offset = seq - rd->dedup_base_seq;
+
+	/*
+	 * Sequence within the current window: check and set the bit.
+	 */
+	if (offset < TQUIC_DEDUP_WINDOW_SIZE) {
+		if (test_and_set_bit(offset, rd->dedup_bitmap))
+			return true;  /* Already seen */
+		return false;
+	}
+
+	/*
+	 * Sequence beyond the window: slide forward.
+	 * Clear bits that fall out of the new window range.
+	 */
+	slide = offset - TQUIC_DEDUP_WINDOW_SIZE + 1;
+
+	if (slide >= TQUIC_DEDUP_WINDOW_SIZE) {
+		/* Entire window is stale, reset */
+		bitmap_zero(rd->dedup_bitmap, TQUIC_DEDUP_WINDOW_SIZE);
+	} else {
+		/*
+		 * Shift the bitmap forward by 'slide' positions.
+		 * bitmap_shift_right operates on the underlying longs.
+		 */
+		bitmap_shift_right(rd->dedup_bitmap, rd->dedup_bitmap,
+				   slide, TQUIC_DEDUP_WINDOW_SIZE);
+		/*
+		 * Clear any bits beyond the valid portion that
+		 * bitmap_shift_right may not have zeroed due to
+		 * word-granularity clearing.
+		 */
+		clear_start = TQUIC_DEDUP_WINDOW_SIZE - slide;
+		bitmap_clear(rd->dedup_bitmap, clear_start, slide);
+	}
+
+	rd->dedup_base_seq += slide;
+	offset = seq - rd->dedup_base_seq;
+	set_bit(offset, rd->dedup_bitmap);
 	return false;
 }
 EXPORT_SYMBOL_GPL(tquic_redundant_is_duplicate);

@@ -370,7 +370,7 @@ static void tquic_test_free_conn_state(struct tquic_test_conn_state *state)
 	kfree(state->tx_buf);
 
 	if (state->conn) {
-		tquic_conn_destroy(state->conn);
+		tquic_conn_put(state->conn);
 		state->conn = NULL;
 	}
 }

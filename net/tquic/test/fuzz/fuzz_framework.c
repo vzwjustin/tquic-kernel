@@ -628,7 +628,7 @@ static int tquic_fuzz_init_conn(struct tquic_fuzz_conn *fconn, bool is_server)
 	fconn->crypto_state = tquic_crypto_init_versioned(&cid, is_server,
 							  TQUIC_VERSION_1);
 	if (!fconn->crypto_state) {
-		tquic_conn_destroy(fconn->conn);
+		tquic_conn_put(fconn->conn);
 		fconn->conn = NULL;
 		return -ENOMEM;
 	}
@@ -655,7 +655,7 @@ static void tquic_fuzz_cleanup_conn(struct tquic_fuzz_conn *fconn)
 
 	if (fconn->conn) {
 		fconn->conn->crypto_state = NULL;  /* Already freed above */
-		tquic_conn_destroy(fconn->conn);
+		tquic_conn_put(fconn->conn);
 		fconn->conn = NULL;
 	}
 

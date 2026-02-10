@@ -1708,7 +1708,7 @@ static void tquic_server_handshake_done(void *data, int status,
 		tquic_dbg("server handshake failed: %d\n", status);
 		inet_sk_set_state(child_sk, TCP_CLOSE);
 		if (conn) {
-			tquic_conn_destroy(conn);
+			tquic_conn_put(conn);
 			child_tsk->conn = NULL;
 		}
 		sock_put(child_sk);  /* Release reference */
@@ -1814,7 +1814,7 @@ int tquic_server_handshake(struct sock *listener_sk,
 	ret = tquic_conn_server_accept_init(conn, initial_pkt);
 	if (ret < 0) {
 		tquic_dbg("failed to process Initial packet: %d\n", ret);
-		tquic_conn_destroy(conn);
+		tquic_conn_put(conn);
 		child_tsk->conn = NULL;
 		sk_free(child_sk);
 		return ret;
@@ -1823,7 +1823,7 @@ int tquic_server_handshake(struct sock *listener_sk,
 	/* Allocate handshake state */
 	hs = kzalloc(sizeof(*hs), GFP_ATOMIC);
 	if (!hs) {
-		tquic_conn_destroy(conn);
+		tquic_conn_put(conn);
 		child_tsk->conn = NULL;
 		sk_free(child_sk);
 		return -ENOMEM;
@@ -1849,7 +1849,7 @@ int tquic_server_handshake(struct sock *listener_sk,
 		sock_put(child_sk);
 		child_tsk->handshake_state = NULL;
 		kfree_sensitive(hs);
-		tquic_conn_destroy(conn);
+		tquic_conn_put(conn);
 		child_tsk->conn = NULL;
 		sk_free(child_sk);
 		return ret;

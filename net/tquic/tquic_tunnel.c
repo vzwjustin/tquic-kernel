@@ -212,9 +212,44 @@ static int tquic_tunnel_parse_header(const u8 *data, size_t len,
 			return -EACCES;
 		}
 
-		/* Block IPv4-mapped IPv6 addresses to private ranges */
-		if (ipv6_addr_v4mapped(&addr6)) {
+		/*
+		 * Block IPv4-mapped (::ffff:a.b.c.d), IPv4-compatible
+		 * (::a.b.c.d), 6to4 (2002::/16), and Teredo (2001::/32)
+		 * addresses that embed private/loopback IPv4 addresses.
+		 * These bypass the basic IPv6 checks above.
+		 */
+		if (ipv6_addr_v4mapped(&addr6) ||
+		    ipv6_addr_v4compat(&addr6)) {
 			__be32 v4 = addr6.s6_addr32[3];
+
+			if (ipv4_is_loopback(v4) ||
+			    ipv4_is_multicast(v4) ||
+			    ipv4_is_lbcast(v4) ||
+			    ipv4_is_zeronet(v4) ||
+			    ipv4_is_private_10(v4) ||
+			    ipv4_is_private_172(v4) ||
+			    ipv4_is_private_192(v4) ||
+			    ipv4_is_linklocal_169(v4))
+				return -EACCES;
+		}
+
+		/* 6to4 (2002::/16): embedded IPv4 in bits 16-48 */
+		if (addr6.s6_addr[0] == 0x20 &&
+		    addr6.s6_addr[1] == 0x02) {
+			__be32 v4;
+
+			memcpy(&v4, &addr6.s6_addr[2], 4);
+			if (ipv4_is_loopback(v4) ||
+			    ipv4_is_private_10(v4) ||
+			    ipv4_is_private_172(v4) ||
+			    ipv4_is_private_192(v4) ||
+			    ipv4_is_linklocal_169(v4))
+				return -EACCES;
+		}
+
+		/* Teredo (2001:0000::/32): embedded IPv4 at bytes 12-15 (obfuscated) */
+		if (addr6.s6_addr32[0] == htonl(0x20010000)) {
+			__be32 v4 = ~addr6.s6_addr32[3];
 
 			if (ipv4_is_loopback(v4) ||
 			    ipv4_is_private_10(v4) ||

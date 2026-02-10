@@ -221,8 +221,13 @@ EXPORT_SYMBOL_GPL(tquic_bonding_update_rtt_spread);
 static void tquic_bonding_set_state(struct tquic_bonding_ctx *bc,
 				    enum tquic_bonding_state new_state)
 {
-	enum tquic_bonding_state old_state = bc->state;
-	ktime_t now = ktime_get();
+	enum tquic_bonding_state old_state;
+	ktime_t now;
+
+	lockdep_assert_held(&bc->state_lock);
+
+	old_state = bc->state;
+	now = ktime_get();
 
 	if (old_state == new_state)
 		return;
