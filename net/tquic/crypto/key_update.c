@@ -127,6 +127,15 @@ static int tquic_ku_hkdf_expand_label(struct crypto_shash *hash,
 	if (!hash || !secret || !out)
 		return -EINVAL;
 
+	/*
+	 * Bounds check: the HkdfLabel buffer is 256 bytes.
+	 * Contents: 2 (length) + 1 (label length byte) + 6 ("tls13 ")
+	 *         + label_len + 1 (context length byte) = 10 + label_len.
+	 * Reject if this would overflow the stack buffer.
+	 */
+	if (label_len > 245)
+		return -EINVAL;
+
 	hash_len = crypto_shash_digestsize(hash);
 
 	/* Construct HKDF label: length + "tls13 " + label + empty context */

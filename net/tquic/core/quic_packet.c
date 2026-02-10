@@ -518,6 +518,10 @@ static int tquic_packet_get_length(const u8 *data, int len, int *packet_len)
 	if (payload_len > len - offset)
 		return -EINVAL;
 
+	/* Guard against u64 -> int truncation */
+	if (payload_len > INT_MAX - offset)
+		return -EINVAL;
+
 	*packet_len = offset + payload_len;
 	return 0;
 }
@@ -604,6 +608,21 @@ int tquic_packet_process(struct tquic_connection *conn, struct sk_buff *skb)
 	int err;
 	int packet_len;
 	struct sk_buff *next_skb;
+	/*
+	 * Max coalesced packet depth: one per encryption level
+	 * (Initial, 0-RTT, Handshake, Application = 4).
+	 * This bounds stack usage and prevents malicious datagrams
+	 * from causing deep iteration.
+	 */
+	int depth = 0;
+	const int max_depth = 4;
+
+	while (skb) {
+
+	if (depth++ >= max_depth) {
+		kfree_skb(skb);
+		return -EINVAL;
+	}
 
 	if (skb->len < 1) {
 		kfree_skb(skb);
@@ -734,9 +753,11 @@ int tquic_packet_process(struct tquic_connection *conn, struct sk_buff *skb)
 	kfree_skb(skb);
 
 process_next:
-	/* Process any remaining coalesced packets */
-	if (next_skb)
-		return tquic_packet_process(conn, next_skb);
+	/* Continue with any remaining coalesced packets */
+	skb = next_skb;
+
+	} /* end while (skb) */
+
 	return 0;
 }
 

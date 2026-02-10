@@ -397,7 +397,7 @@ static void test_connect_udp_init(struct test_connect_udp_tunnel *tunnel,
 				  const char *host, u16 port)
 {
 	memset(tunnel, 0, sizeof(*tunnel));
-	strncpy(tunnel->host, host, CONNECT_UDP_HOST_MAX - 1);
+	strscpy(tunnel->host, host, CONNECT_UDP_HOST_MAX);
 	tunnel->port = port;
 	tunnel->state = CONNECT_UDP_IDLE;
 	tunnel->context_id = 0;  /* UDP payload uses context ID 0 */

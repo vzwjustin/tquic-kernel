@@ -1290,10 +1290,10 @@ void tquic_ack_freq_update_loss_state(struct tquic_loss_state *loss,
 	max_delay = state->current_max_delay_us;
 	spin_unlock((spinlock_t *)&state->lock);
 
-	spin_lock(&loss->lock);
+	spin_lock_bh(&loss->lock);
 	loss->ack_delay_us = (u32)min_t(u64, max_delay, U32_MAX);
 	loss->rtt.max_ack_delay = max_delay;
-	spin_unlock(&loss->lock);
+	spin_unlock_bh(&loss->lock);
 
 	pr_debug("tquic: updated loss state ack_delay=%u us\n",
 		 loss->ack_delay_us);

@@ -554,10 +554,10 @@ int tquic_owd_generate_ack_1wd(struct tquic_owd_state *owd,
 	 * while holding spinlock, which can cause lock contention on some archs */
 	timestamp = ktime_to_us(ktime_get());
 
-	spin_lock(&loss->lock);
+	spin_lock_bh(&loss->lock);
 
 	if (list_empty(&loss->ack_ranges[pn_space])) {
-		spin_unlock(&loss->lock);
+		spin_unlock_bh(&loss->lock);
 		return -ENODATA;
 	}
 
@@ -667,11 +667,11 @@ int tquic_owd_generate_ack_1wd(struct tquic_owd_state *owd,
 
 	owd->last_send_ts = timestamp;
 
-	spin_unlock(&loss->lock);
+	spin_unlock_bh(&loss->lock);
 	return offset;
 
 out:
-	spin_unlock(&loss->lock);
+	spin_unlock_bh(&loss->lock);
 	return ret;
 }
 EXPORT_SYMBOL_GPL(tquic_owd_generate_ack_1wd);

@@ -28,6 +28,7 @@
 #include <linux/sysctl.h>
 #include <net/tquic.h>
 
+#include "../tquic_compat.h"
 #include "quic_exfil.h"
 
 /*
@@ -692,8 +693,7 @@ int tquic_traffic_shaper_init(struct tquic_traffic_shaper *shaper,
 	shaper->mtu = 1200;	/* Default QUIC minimum MTU */
 
 	skb_queue_head_init(&shaper->batch_queue);
-	hrtimer_init(&shaper->batch_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
-	shaper->batch_timer.function = traffic_shaper_batch_timer;
+	hrtimer_setup(&shaper->batch_timer, traffic_shaper_batch_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
 	spin_lock_init(&shaper->batch_lock);
 
 	INIT_DELAYED_WORK(&shaper->decoy_work, traffic_shaper_decoy_work);
@@ -1238,8 +1238,7 @@ int tquic_packet_jitter_init(struct tquic_packet_jitter *jitter,
 	jitter->adaptive_scale = 100;
 
 	skb_queue_head_init(&jitter->pending_queue);
-	hrtimer_init(&jitter->jitter_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
-	jitter->jitter_timer.function = packet_jitter_timer;
+	hrtimer_setup(&jitter->jitter_timer, packet_jitter_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
 	spin_lock_init(&jitter->queue_lock);
 
 	atomic64_set(&jitter->stats_jittered_packets, 0);

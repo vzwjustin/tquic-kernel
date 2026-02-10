@@ -705,29 +705,29 @@ struct tquic_stream *tquic_stream_create(struct tquic_stream_manager *mgr,
 	u64 stream_id;
 	int ret;
 
-	spin_lock(&mgr->lock);
+	spin_lock_bh(&mgr->lock);
 
 	ret = tquic_stream_alloc_id(mgr, bidi, &stream_id);
 	if (ret) {
-		spin_unlock(&mgr->lock);
+		spin_unlock_bh(&mgr->lock);
 		return ERR_PTR(ret);
 	}
 
 	stream = tquic_stream_create_internal(mgr, stream_id, true);
 	if (!stream) {
-		spin_unlock(&mgr->lock);
+		spin_unlock_bh(&mgr->lock);
 		return ERR_PTR(-ENOMEM);
 	}
 
 	ret = tquic_stream_insert(mgr, stream);
 	if (ret) {
-		spin_unlock(&mgr->lock);
+		spin_unlock_bh(&mgr->lock);
 		tquic_stream_ext_free(mgr, stream->ext);
 		kfree(stream);
 		return ERR_PTR(ret);
 	}
 
-	spin_unlock(&mgr->lock);
+	spin_unlock_bh(&mgr->lock);
 
 	tquic_dbg("created local stream %llu (bidi=%d)\n",
 		  stream_id, bidi);
@@ -749,38 +749,38 @@ struct tquic_stream *tquic_stream_get_or_create(
 	struct tquic_stream *stream;
 	int ret;
 
-	spin_lock(&mgr->lock);
+	spin_lock_bh(&mgr->lock);
 
 	/* Check if stream already exists */
 	stream = tquic_stream_lookup(mgr, stream_id);
 	if (stream) {
-		spin_unlock(&mgr->lock);
+		spin_unlock_bh(&mgr->lock);
 		return stream;
 	}
 
 	/* Validate and accept new remote stream */
 	ret = tquic_stream_accept_id(mgr, stream_id);
 	if (ret) {
-		spin_unlock(&mgr->lock);
+		spin_unlock_bh(&mgr->lock);
 		return ERR_PTR(ret);
 	}
 
 	/* Create the stream */
 	stream = tquic_stream_create_internal(mgr, stream_id, false);
 	if (!stream) {
-		spin_unlock(&mgr->lock);
+		spin_unlock_bh(&mgr->lock);
 		return ERR_PTR(-ENOMEM);
 	}
 
 	ret = tquic_stream_insert(mgr, stream);
 	if (ret) {
-		spin_unlock(&mgr->lock);
+		spin_unlock_bh(&mgr->lock);
 		tquic_stream_ext_free(mgr, stream->ext);
 		kfree(stream);
 		return ERR_PTR(ret);
 	}
 
-	spin_unlock(&mgr->lock);
+	spin_unlock_bh(&mgr->lock);
 
 	tquic_dbg("accepted remote stream %llu\n", stream_id);
 
@@ -803,9 +803,9 @@ void tquic_stream_destroy(struct tquic_stream_manager *mgr,
 		return;
 
 	if (mgr) {
-		spin_lock(&mgr->lock);
+		spin_lock_bh(&mgr->lock);
 		tquic_stream_remove(mgr, stream);
-		spin_unlock(&mgr->lock);
+		spin_unlock_bh(&mgr->lock);
 	}
 
 	/* Get socket for memory accounting */
@@ -995,11 +995,11 @@ ssize_t tquic_stream_write_zerocopy(struct tquic_stream_manager *mgr,
 	if (!tquic_stream_can_send(mgr, stream))
 		return -EINVAL;
 
-	spin_lock(&mgr->lock);
+	spin_lock_bh(&mgr->lock);
 
 	allowed = tquic_stream_send_allowed(mgr, stream, len);
 	if (allowed == 0) {
-		spin_unlock(&mgr->lock);
+		spin_unlock_bh(&mgr->lock);
 		return -EAGAIN;
 	}
 
@@ -1015,7 +1015,7 @@ ssize_t tquic_stream_write_zerocopy(struct tquic_stream_manager *mgr,
 		skb = alloc_skb(0, GFP_ATOMIC);
 		if (!skb) {
 			if (copied == 0) {
-				spin_unlock(&mgr->lock);
+				spin_unlock_bh(&mgr->lock);
 				return -ENOMEM;
 			}
 			break;
@@ -1049,7 +1049,7 @@ ssize_t tquic_stream_write_zerocopy(struct tquic_stream_manager *mgr,
 			tquic_stream_set_state(stream, TQUIC_STREAM_DATA_SENT);
 	}
 
-	spin_unlock(&mgr->lock);
+	spin_unlock_bh(&mgr->lock);
 
 	return copied;
 }
@@ -1182,7 +1182,7 @@ int tquic_stream_recv_data(struct tquic_stream_manager *mgr,
 	    stream->state != TQUIC_STREAM_SIZE_KNOWN)
 		return -EINVAL;
 
-	spin_lock(&mgr->lock);
+	spin_lock_bh(&mgr->lock);
 
 	/*
 	 * SECURITY FIX (CF-233): Check for integer overflow before
@@ -1192,19 +1192,19 @@ int tquic_stream_recv_data(struct tquic_stream_manager *mgr,
 	 * injection.
 	 */
 	if (skb->len > U64_MAX - offset) {
-		spin_unlock(&mgr->lock);
+		spin_unlock_bh(&mgr->lock);
 		return -EOVERFLOW;
 	}
 
 	/* Flow control check */
 	if (offset + skb->len > stream->max_recv_data) {
-		spin_unlock(&mgr->lock);
+		spin_unlock_bh(&mgr->lock);
 		return -EOVERFLOW;  /* Flow control violation */
 	}
 
 	/* Connection-level flow control */
 	if (mgr->data_received + skb->len > mgr->max_data_local) {
-		spin_unlock(&mgr->lock);
+		spin_unlock_bh(&mgr->lock);
 		return -EOVERFLOW;
 	}
 
@@ -1212,7 +1212,7 @@ int tquic_stream_recv_data(struct tquic_stream_manager *mgr,
 	ret = tquic_stream_recv_chunk_insert(mgr, stream, offset,
 					     skb->data, skb->len, skb, fin);
 	if (ret) {
-		spin_unlock(&mgr->lock);
+		spin_unlock_bh(&mgr->lock);
 		return ret;
 	}
 
@@ -1227,7 +1227,7 @@ int tquic_stream_recv_data(struct tquic_stream_manager *mgr,
 			tquic_stream_set_state(stream, TQUIC_STREAM_SIZE_KNOWN);
 	}
 
-	spin_unlock(&mgr->lock);
+	spin_unlock_bh(&mgr->lock);
 
 	/* Wake up any readers */
 	wake_up_interruptible(&stream->wait);
@@ -1254,7 +1254,7 @@ ssize_t tquic_stream_read(struct tquic_stream_manager *mgr,
 	if (!tquic_stream_can_recv(mgr, stream))
 		return -EINVAL;
 
-	spin_lock(&mgr->lock);
+	spin_lock_bh(&mgr->lock);
 
 	while (copied < len && !skb_queue_empty(&stream->recv_buf)) {
 		struct sk_buff *skb;
@@ -1270,7 +1270,7 @@ ssize_t tquic_stream_read(struct tquic_stream_manager *mgr,
 		err = copy_to_iter(skb->data, chunk, to);
 		if (err != chunk) {
 			if (copied == 0) {
-				spin_unlock(&mgr->lock);
+				spin_unlock_bh(&mgr->lock);
 				return -EFAULT;
 			}
 			break;
@@ -1294,7 +1294,7 @@ ssize_t tquic_stream_read(struct tquic_stream_manager *mgr,
 			tquic_stream_set_state(stream, TQUIC_STREAM_DATA_RECVD);
 	}
 
-	spin_unlock(&mgr->lock);
+	spin_unlock_bh(&mgr->lock);
 
 	return copied;
 }
@@ -1315,10 +1315,10 @@ int tquic_stream_shutdown_write(struct tquic_stream_manager *mgr,
 	if (!tquic_stream_can_send(mgr, stream))
 		return -EINVAL;
 
-	spin_lock(&mgr->lock);
+	spin_lock_bh(&mgr->lock);
 
 	if (stream->fin_sent) {
-		spin_unlock(&mgr->lock);
+		spin_unlock_bh(&mgr->lock);
 		return 0;  /* Already sent */
 	}
 
@@ -1329,7 +1329,7 @@ int tquic_stream_shutdown_write(struct tquic_stream_manager *mgr,
 	    stream->state == TQUIC_STREAM_SEND)
 		tquic_stream_set_state(stream, TQUIC_STREAM_DATA_SENT);
 
-	spin_unlock(&mgr->lock);
+	spin_unlock_bh(&mgr->lock);
 
 	tquic_dbg("stream %llu FIN sent\n", stream->id);
 
@@ -1352,12 +1352,12 @@ int tquic_stream_shutdown_read(struct tquic_stream_manager *mgr,
 	if (!tquic_stream_can_recv(mgr, stream))
 		return -EINVAL;
 
-	spin_lock(&mgr->lock);
+	spin_lock_bh(&mgr->lock);
 
 	/* Mark that we sent STOP_SENDING */
 	/* In real impl, would queue STOP_SENDING frame */
 
-	spin_unlock(&mgr->lock);
+	spin_unlock_bh(&mgr->lock);
 
 	tquic_dbg("stream %llu STOP_SENDING error=%llu\n",
 		  stream->id, error_code);
@@ -1388,7 +1388,7 @@ int tquic_stream_reset_send(struct tquic_stream_manager *mgr,
 
 	sk = (mgr->conn) ? mgr->conn->sk : NULL;
 
-	spin_lock(&mgr->lock);
+	spin_lock_bh(&mgr->lock);
 
 	/* Clear send buffer with proper memory accounting */
 	while ((skb = skb_dequeue(&stream->send_buf)) != NULL) {
@@ -1405,14 +1405,14 @@ int tquic_stream_reset_send(struct tquic_stream_manager *mgr,
 
 		ret = tquic_stream_set_state(stream, TQUIC_STREAM_RESET_SENT);
 		if (ret) {
-			spin_unlock(&mgr->lock);
+			spin_unlock_bh(&mgr->lock);
 			tquic_dbg("stream %llu invalid reset_send transition from %d\n",
 				  stream->id, stream->state);
 			return ret;
 		}
 	}
 
-	spin_unlock(&mgr->lock);
+	spin_unlock_bh(&mgr->lock);
 
 	tquic_dbg("stream %llu RST_STREAM sent error=%llu\n",
 		  stream->id, error_code);
@@ -1437,7 +1437,7 @@ int tquic_stream_reset_recv(struct tquic_stream_manager *mgr,
 	if (!tquic_stream_can_recv(mgr, stream))
 		return -EINVAL;
 
-	spin_lock(&mgr->lock);
+	spin_lock_bh(&mgr->lock);
 
 	/* Discard receive buffer */
 	skb_queue_purge(&stream->recv_buf);
@@ -1448,14 +1448,14 @@ int tquic_stream_reset_recv(struct tquic_stream_manager *mgr,
 
 		ret = tquic_stream_set_state(stream, TQUIC_STREAM_RESET_RECVD);
 		if (ret) {
-			spin_unlock(&mgr->lock);
+			spin_unlock_bh(&mgr->lock);
 			tquic_dbg("stream %llu invalid reset_recv transition from %d\n",
 				  stream->id, stream->state);
 			return ret;
 		}
 	}
 
-	spin_unlock(&mgr->lock);
+	spin_unlock_bh(&mgr->lock);
 
 	/* Wake up readers with error */
 	wake_up_interruptible(&stream->wait);
@@ -1503,19 +1503,19 @@ int tquic_stream_set_dependency(struct tquic_stream_manager *mgr,
 	if (weight < 1 || weight > 256)
 		return -EINVAL;
 
-	spin_lock(&mgr->lock);
+	spin_lock_bh(&mgr->lock);
 
 	if (dependency != 0) {
 		parent = tquic_stream_lookup(mgr, dependency);
 		if (!parent) {
-			spin_unlock(&mgr->lock);
+			spin_unlock_bh(&mgr->lock);
 			return -ENOENT;
 		}
 	}
 
 	/* Update dependency (simplified - real impl would update tree) */
 
-	spin_unlock(&mgr->lock);
+	spin_unlock_bh(&mgr->lock);
 
 	tquic_dbg("stream %llu dependency=%llu weight=%u exclusive=%d\n",
 		  stream->id, dependency, weight, exclusive);
@@ -1554,14 +1554,14 @@ EXPORT_SYMBOL_GPL(tquic_stream_update_max_data);
 int tquic_stream_conn_update_max_data(struct tquic_stream_manager *mgr,
 				      u64 max_data)
 {
-	spin_lock(&mgr->lock);
+	spin_lock_bh(&mgr->lock);
 
 	if (max_data > mgr->max_data_remote) {
 		mgr->max_data_remote = max_data;
 		mgr->data_blocked = false;
 	}
 
-	spin_unlock(&mgr->lock);
+	spin_unlock_bh(&mgr->lock);
 
 	return 0;
 }
@@ -1664,7 +1664,7 @@ int tquic_stream_for_each(struct tquic_stream_manager *mgr,
 	struct rb_node *node;
 	int ret;
 
-	spin_lock(&mgr->lock);
+	spin_lock_bh(&mgr->lock);
 
 	for (node = rb_first(&mgr->streams); node; node = rb_next(node)) {
 		struct tquic_stream *stream;
@@ -1672,12 +1672,12 @@ int tquic_stream_for_each(struct tquic_stream_manager *mgr,
 		stream = rb_entry(node, struct tquic_stream, node);
 		ret = cb(stream, ctx);
 		if (ret) {
-			spin_unlock(&mgr->lock);
+			spin_unlock_bh(&mgr->lock);
 			return ret;
 		}
 	}
 
-	spin_unlock(&mgr->lock);
+	spin_unlock_bh(&mgr->lock);
 	return 0;
 }
 EXPORT_SYMBOL_GPL(tquic_stream_for_each);
@@ -1697,7 +1697,7 @@ int tquic_stream_get_sendable(struct tquic_stream_manager *mgr,
 	struct rb_node *node;
 	int count = 0;
 
-	spin_lock(&mgr->lock);
+	spin_lock_bh(&mgr->lock);
 
 	for (node = rb_first(&mgr->streams);
 	     node && count < max_streams;
@@ -1712,7 +1712,7 @@ int tquic_stream_get_sendable(struct tquic_stream_manager *mgr,
 		}
 	}
 
-	spin_unlock(&mgr->lock);
+	spin_unlock_bh(&mgr->lock);
 	return count;
 }
 EXPORT_SYMBOL_GPL(tquic_stream_get_sendable);
@@ -1744,7 +1744,7 @@ ssize_t tquic_stream_splice_read(struct tquic_stream_manager *mgr,
 	if (!tquic_stream_can_recv(mgr, stream))
 		return -EINVAL;
 
-	spin_lock(&mgr->lock);
+	spin_lock_bh(&mgr->lock);
 
 	while (spliced < len && !skb_queue_empty(&stream->recv_buf)) {
 		struct sk_buff *skb;
@@ -1770,7 +1770,7 @@ ssize_t tquic_stream_splice_read(struct tquic_stream_manager *mgr,
 		page = alloc_page(GFP_ATOMIC);
 		if (!page) {
 			if (spliced == 0) {
-				spin_unlock(&mgr->lock);
+				spin_unlock_bh(&mgr->lock);
 				return -ENOMEM;
 			}
 			break;
@@ -1791,7 +1791,7 @@ ssize_t tquic_stream_splice_read(struct tquic_stream_manager *mgr,
 		if (ret < 0) {
 			put_page(page);
 			if (spliced == 0) {
-				spin_unlock(&mgr->lock);
+				spin_unlock_bh(&mgr->lock);
 				return ret;
 			}
 			break;
@@ -1807,7 +1807,7 @@ ssize_t tquic_stream_splice_read(struct tquic_stream_manager *mgr,
 		}
 	}
 
-	spin_unlock(&mgr->lock);
+	spin_unlock_bh(&mgr->lock);
 
 	return spliced;
 #endif /* >= 5.5 */
@@ -1990,7 +1990,7 @@ void tquic_stream_memory_pressure(struct tquic_stream_manager *mgr)
 	struct rb_node *node;
 	struct sock *sk = (mgr->conn) ? mgr->conn->sk : NULL;
 
-	spin_lock(&mgr->lock);
+	spin_lock_bh(&mgr->lock);
 
 	/* Close streams in CLOSED state that haven't been cleaned up */
 	for (node = rb_first(&mgr->streams); node; ) {
@@ -2028,7 +2028,7 @@ void tquic_stream_memory_pressure(struct tquic_stream_manager *mgr)
 		node = next;
 	}
 
-	spin_unlock(&mgr->lock);
+	spin_unlock_bh(&mgr->lock);
 }
 EXPORT_SYMBOL_GPL(tquic_stream_memory_pressure);
 
@@ -2044,7 +2044,7 @@ void tquic_stream_get_buffer_usage(struct tquic_stream_manager *mgr,
 	struct rb_node *node;
 	u64 send = 0, recv = 0;
 
-	spin_lock(&mgr->lock);
+	spin_lock_bh(&mgr->lock);
 
 	for (node = rb_first(&mgr->streams); node; node = rb_next(node)) {
 		struct tquic_stream *stream;
@@ -2059,7 +2059,7 @@ void tquic_stream_get_buffer_usage(struct tquic_stream_manager *mgr,
 			recv += skb->truesize;
 	}
 
-	spin_unlock(&mgr->lock);
+	spin_unlock_bh(&mgr->lock);
 
 	*send_bytes = send;
 	*recv_bytes = recv;
@@ -2083,7 +2083,7 @@ void tquic_stream_manager_destroy(struct tquic_stream_manager *mgr)
 	sk = (mgr->conn) ? mgr->conn->sk : NULL;
 
 	/* Destroy all streams */
-	spin_lock(&mgr->lock);
+	spin_lock_bh(&mgr->lock);
 
 	while ((node = rb_first(&mgr->streams))) {
 		struct tquic_stream *stream;
@@ -2114,7 +2114,7 @@ void tquic_stream_manager_destroy(struct tquic_stream_manager *mgr)
 		kfree(stream);
 	}
 
-	spin_unlock(&mgr->lock);
+	spin_unlock_bh(&mgr->lock);
 
 	/* Destroy caches */
 	if (mgr->chunk_cache)
@@ -2167,13 +2167,13 @@ void tquic_stream_manager_dump(struct tquic_stream_manager *mgr)
 	tquic_info("  Data sent/received: %llu/%llu\n",
 		mgr->data_sent, mgr->data_received);
 
-	spin_lock(&mgr->lock);
+	spin_lock_bh(&mgr->lock);
 	for (node = rb_first(&mgr->streams); node; node = rb_next(node)) {
 		struct tquic_stream *stream;
 		stream = rb_entry(node, struct tquic_stream, node);
 		tquic_stream_dump(stream);
 	}
-	spin_unlock(&mgr->lock);
+	spin_unlock_bh(&mgr->lock);
 }
 EXPORT_SYMBOL_GPL(tquic_stream_manager_dump);
 

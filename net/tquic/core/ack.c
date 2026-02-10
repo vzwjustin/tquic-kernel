@@ -432,7 +432,7 @@ int tquic_record_received_packet(struct tquic_loss_state *loss,
 	ktime_t now = ktime_get();
 	bool merged = false;
 
-	spin_lock(&loss->lock);
+	spin_lock_bh(&loss->lock);
 
 	/* Update largest received */
 	if (pn > loss->largest_received[pn_space]) {
@@ -467,7 +467,7 @@ int tquic_record_received_packet(struct tquic_loss_state *loss,
 		if (pn > range->end + 1) {
 			new_range = tquic_ack_range_alloc(GFP_ATOMIC);
 			if (!new_range) {
-				spin_unlock(&loss->lock);
+				spin_unlock_bh(&loss->lock);
 				return -ENOMEM;
 			}
 
@@ -486,7 +486,7 @@ int tquic_record_received_packet(struct tquic_loss_state *loss,
 	if (!merged) {
 		new_range = tquic_ack_range_alloc(GFP_ATOMIC);
 		if (!new_range) {
-			spin_unlock(&loss->lock);
+			spin_unlock_bh(&loss->lock);
 			return -ENOMEM;
 		}
 
@@ -505,7 +505,7 @@ int tquic_record_received_packet(struct tquic_loss_state *loss,
 		loss->num_ack_ranges[pn_space]--;
 	}
 
-	spin_unlock(&loss->lock);
+	spin_unlock_bh(&loss->lock);
 	return 0;
 }
 EXPORT_SYMBOL_GPL(tquic_record_received_packet);
@@ -547,11 +547,11 @@ int tquic_generate_ack_frame(struct tquic_loss_state *loss, int pn_space,
 	u32 range_count;
 	int ret;
 
-	spin_lock(&loss->lock);
+	spin_lock_bh(&loss->lock);
 
 	if (list_empty(&loss->ack_ranges[pn_space]) ||
 	    loss->num_ack_ranges[pn_space] == 0) {
-		spin_unlock(&loss->lock);
+		spin_unlock_bh(&loss->lock);
 		return -ENODATA;
 	}
 
@@ -631,11 +631,11 @@ int tquic_generate_ack_frame(struct tquic_loss_state *loss, int pn_space,
 			goto out;
 	}
 
-	spin_unlock(&loss->lock);
+	spin_unlock_bh(&loss->lock);
 	return offset;
 
 out:
-	spin_unlock(&loss->lock);
+	spin_unlock_bh(&loss->lock);
 	return ret;
 }
 EXPORT_SYMBOL_GPL(tquic_generate_ack_frame);
@@ -684,11 +684,11 @@ int tquic_generate_ack_frame_with_timestamps(struct tquic_loss_state *loss,
 	/* Check if timestamps should be included */
 	use_timestamps = ts_state && tquic_receive_ts_is_enabled(ts_state);
 
-	spin_lock(&loss->lock);
+	spin_lock_bh(&loss->lock);
 
 	if (list_empty(&loss->ack_ranges[pn_space]) ||
 	    loss->num_ack_ranges[pn_space] == 0) {
-		spin_unlock(&loss->lock);
+		spin_unlock_bh(&loss->lock);
 		return -ENODATA;
 	}
 
@@ -806,11 +806,11 @@ int tquic_generate_ack_frame_with_timestamps(struct tquic_loss_state *loss,
 		}
 	}
 
-	spin_unlock(&loss->lock);
+	spin_unlock_bh(&loss->lock);
 	return offset;
 
 out:
-	spin_unlock(&loss->lock);
+	spin_unlock_bh(&loss->lock);
 	return ret;
 }
 EXPORT_SYMBOL_GPL(tquic_generate_ack_frame_with_timestamps);
@@ -863,11 +863,11 @@ int tquic_generate_ack_1wd_frame(struct tquic_loss_state *loss, int pn_space,
 	if (!tquic_owd_is_enabled(owd_state))
 		return -ENOENT;
 
-	spin_lock(&loss->lock);
+	spin_lock_bh(&loss->lock);
 
 	if (list_empty(&loss->ack_ranges[pn_space]) ||
 	    loss->num_ack_ranges[pn_space] == 0) {
-		spin_unlock(&loss->lock);
+		spin_unlock_bh(&loss->lock);
 		return -ENODATA;
 	}
 
@@ -970,7 +970,7 @@ int tquic_generate_ack_1wd_frame(struct tquic_loss_state *loss, int pn_space,
 	ret = offset;
 
 out:
-	spin_unlock(&loss->lock);
+	spin_unlock_bh(&loss->lock);
 	return ret;
 }
 EXPORT_SYMBOL_GPL(tquic_generate_ack_1wd_frame);
@@ -1362,12 +1362,12 @@ int tquic_on_ack_received(struct tquic_loss_state *loss, int pn_space,
 	if (!loss || !frame || !conn)
 		return -EINVAL;
 
-	spin_lock(&loss->lock);
+	spin_lock_bh(&loss->lock);
 
 	/* Validate largest_acked */
 	if (frame->largest_acked < loss->largest_acked_packet[pn_space]) {
 		/* This is an old ACK, ignore */
-		spin_unlock(&loss->lock);
+		spin_unlock_bh(&loss->lock);
 		return 0;
 	}
 
@@ -1453,7 +1453,7 @@ int tquic_on_ack_received(struct tquic_loss_state *loss, int pn_space,
 	if (includes_ack_eliciting)
 		loss->pto_count = 0;
 
-	spin_unlock(&loss->lock);
+	spin_unlock_bh(&loss->lock);
 
 	/*
 	 * Step 7: Process ECN feedback
@@ -1592,7 +1592,7 @@ int tquic_on_packet_sent(struct tquic_loss_state *loss, int pn_space,
 	if (in_flight)
 		pkt->flags |= TQUIC_PKT_FLAG_IN_FLIGHT;
 
-	spin_lock(&loss->lock);
+	spin_lock_bh(&loss->lock);
 
 	tquic_sent_packet_insert(loss, pkt);
 
@@ -1606,7 +1606,7 @@ int tquic_on_packet_sent(struct tquic_loss_state *loss, int pn_space,
 		loss->ack_eliciting_in_flight[pn_space]++;
 	}
 
-	spin_unlock(&loss->lock);
+	spin_unlock_bh(&loss->lock);
 
 	return 0;
 }
@@ -1637,17 +1637,17 @@ static void tquic_loss_detection_timeout(struct timer_list *t)
 	 * Acquire the lock before dereferencing loss->path to prevent
 	 * races with concurrent path removal or destruction.
 	 */
-	spin_lock(&loss->lock);
+	spin_lock_bh(&loss->lock);
 
 	path = loss->path;
 	if (!path || !path->list.next) {
-		spin_unlock(&loss->lock);
+		spin_unlock_bh(&loss->lock);
 		return;
 	}
 
 	conn = container_of(path->list.next, struct tquic_connection, paths);
 	if (!conn) {
-		spin_unlock(&loss->lock);
+		spin_unlock_bh(&loss->lock);
 		return;
 	}
 
@@ -1666,7 +1666,7 @@ static void tquic_loss_detection_timeout(struct timer_list *t)
 	if (earliest_space >= 0) {
 		lost_count = tquic_detect_and_remove_lost_packets(
 			loss, earliest_space, &lost_packets);
-		spin_unlock(&loss->lock);
+		spin_unlock_bh(&loss->lock);
 		goto handle_lost;
 	}
 
@@ -1676,7 +1676,7 @@ static void tquic_loss_detection_timeout(struct timer_list *t)
 	tquic_info("PTO timeout, count=%u\n", loss->pto_count);
 	loss->pto_count++;
 
-	spin_unlock(&loss->lock);
+	spin_unlock_bh(&loss->lock);
 
 	/*
 	 * Send 1-2 probe packets. RFC 9002 Section 6.2.4 says we should
@@ -1746,7 +1746,7 @@ void tquic_set_loss_detection_timer(struct tquic_loss_state *loss,
 	int pn_space;
 	bool has_ack_eliciting = false;
 
-	spin_lock(&loss->lock);
+	spin_lock_bh(&loss->lock);
 
 	/*
 	 * Check for time-based loss detection
@@ -1776,7 +1776,7 @@ void tquic_set_loss_detection_timer(struct tquic_loss_state *loss,
 	if (!has_ack_eliciting) {
 		/* No ACK-eliciting packets in flight - cancel timer */
 		del_timer(&loss->loss_detection_timer);
-		spin_unlock(&loss->lock);
+		spin_unlock_bh(&loss->lock);
 		return;
 	}
 
@@ -1805,7 +1805,7 @@ void tquic_set_loss_detection_timer(struct tquic_loss_state *loss,
 	timeout = pto_time;
 
 set_timer:
-	spin_unlock(&loss->lock);
+	spin_unlock_bh(&loss->lock);
 
 	if (timeout) {
 		ktime_t now = ktime_get();
@@ -1845,7 +1845,7 @@ void tquic_process_ecn(struct tquic_loss_state *loss,
 	if (!frame->has_ecn)
 		return;
 
-	spin_lock(&loss->lock);
+	spin_lock_bh(&loss->lock);
 
 	/* Calculate deltas */
 	ect0_delta = frame->ecn.ect0 - loss->ecn_acked.ect0;
@@ -1862,7 +1862,7 @@ void tquic_process_ecn(struct tquic_loss_state *loss,
 		tquic_warn("ECN counts decreased, disabling ECN\n");
 		loss->ecn_capable = false;
 		loss->ecn_validated = false;
-		spin_unlock(&loss->lock);
+		spin_unlock_bh(&loss->lock);
 		return;
 	}
 
@@ -1876,7 +1876,7 @@ void tquic_process_ecn(struct tquic_loss_state *loss,
 	/* Update recorded ECN counts */
 	loss->ecn_acked = frame->ecn;
 
-	spin_unlock(&loss->lock);
+	spin_unlock_bh(&loss->lock);
 
 	/*
 	 * Signal congestion if ECN-CE count increased
@@ -1898,7 +1898,7 @@ void tquic_process_ecn(struct tquic_loss_state *loss,
  */
 void tquic_ecn_mark_sent(struct tquic_loss_state *loss, u8 ecn_codepoint)
 {
-	spin_lock(&loss->lock);
+	spin_lock_bh(&loss->lock);
 
 	switch (ecn_codepoint) {
 	case 1: /* ECT(1) */
@@ -1912,7 +1912,7 @@ void tquic_ecn_mark_sent(struct tquic_loss_state *loss, u8 ecn_codepoint)
 		break;
 	}
 
-	spin_unlock(&loss->lock);
+	spin_unlock_bh(&loss->lock);
 }
 EXPORT_SYMBOL_GPL(tquic_ecn_mark_sent);
 
@@ -1981,7 +1981,7 @@ void tquic_loss_state_destroy(struct tquic_loss_state *loss)
 
 	del_timer_sync(&loss->loss_detection_timer);
 
-	spin_lock(&loss->lock);
+	spin_lock_bh(&loss->lock);
 
 	/* Free all sent packets */
 	for (i = 0; i < TQUIC_PN_SPACE_COUNT; i++) {
@@ -1999,7 +1999,7 @@ void tquic_loss_state_destroy(struct tquic_loss_state *loss)
 		}
 	}
 
-	spin_unlock(&loss->lock);
+	spin_unlock_bh(&loss->lock);
 
 	kmem_cache_free(tquic_loss_state_cache, loss);
 }
@@ -2014,7 +2014,7 @@ void tquic_loss_state_reset(struct tquic_loss_state *loss)
 	if (!loss)
 		return;
 
-	spin_lock(&loss->lock);
+	spin_lock_bh(&loss->lock);
 
 	/* Reset RTT to initial values */
 	tquic_rtt_init(&loss->rtt);
@@ -2027,7 +2027,7 @@ void tquic_loss_state_reset(struct tquic_loss_state *loss)
 	loss->packets_in_flight = 0;
 	loss->in_persistent_congestion = false;
 
-	spin_unlock(&loss->lock);
+	spin_unlock_bh(&loss->lock);
 }
 EXPORT_SYMBOL_GPL(tquic_loss_state_reset);
 
@@ -2049,7 +2049,7 @@ void tquic_loss_get_rtt_stats(struct tquic_loss_state *loss,
 			      u64 *latest, u64 *smoothed,
 			      u64 *variance, u64 *min_rtt)
 {
-	spin_lock(&loss->lock);
+	spin_lock_bh(&loss->lock);
 
 	if (latest)
 		*latest = loss->rtt.latest_rtt;
@@ -2061,7 +2061,7 @@ void tquic_loss_get_rtt_stats(struct tquic_loss_state *loss,
 		*min_rtt = (loss->rtt.min_rtt != ULLONG_MAX) ?
 			    loss->rtt.min_rtt : 0;
 
-	spin_unlock(&loss->lock);
+	spin_unlock_bh(&loss->lock);
 }
 EXPORT_SYMBOL_GPL(tquic_loss_get_rtt_stats);
 
@@ -2074,14 +2074,14 @@ EXPORT_SYMBOL_GPL(tquic_loss_get_rtt_stats);
 void tquic_loss_get_in_flight(struct tquic_loss_state *loss,
 			      u64 *bytes, u32 *packets)
 {
-	spin_lock(&loss->lock);
+	spin_lock_bh(&loss->lock);
 
 	if (bytes)
 		*bytes = loss->bytes_in_flight;
 	if (packets)
 		*packets = loss->packets_in_flight;
 
-	spin_unlock(&loss->lock);
+	spin_unlock_bh(&loss->lock);
 }
 EXPORT_SYMBOL_GPL(tquic_loss_get_in_flight);
 
@@ -2105,7 +2105,7 @@ void tquic_loss_state_set_ack_freq(struct tquic_loss_state *loss,
 	if (!loss)
 		return;
 
-	spin_lock(&loss->lock);
+	spin_lock_bh(&loss->lock);
 	loss->ack_freq = ack_freq;
 
 	/*
@@ -2119,7 +2119,7 @@ void tquic_loss_state_set_ack_freq(struct tquic_loss_state *loss,
 			loss->rtt.max_ack_delay = new_delay;
 	}
 
-	spin_unlock(&loss->lock);
+	spin_unlock_bh(&loss->lock);
 }
 EXPORT_SYMBOL_GPL(tquic_loss_state_set_ack_freq);
 
@@ -2143,7 +2143,7 @@ bool tquic_should_send_ack(struct tquic_loss_state *loss,
 	if (!loss)
 		return true;
 
-	spin_lock(&loss->lock);
+	spin_lock_bh(&loss->lock);
 
 	/*
 	 * If ACK frequency extension is active, use its decision logic.
@@ -2172,7 +2172,7 @@ bool tquic_should_send_ack(struct tquic_loss_state *loss,
 		}
 	}
 
-	spin_unlock(&loss->lock);
+	spin_unlock_bh(&loss->lock);
 	return should_ack;
 }
 EXPORT_SYMBOL_GPL(tquic_should_send_ack);
@@ -2191,7 +2191,7 @@ u64 tquic_get_ack_delay(struct tquic_loss_state *loss)
 	if (!loss)
 		return TQUIC_MAX_ACK_DELAY_US;
 
-	spin_lock(&loss->lock);
+	spin_lock_bh(&loss->lock);
 
 	/*
 	 * If ACK frequency extension is active, use its negotiated
@@ -2205,7 +2205,7 @@ u64 tquic_get_ack_delay(struct tquic_loss_state *loss)
 			loss->ack_delay_us : loss->rtt.max_ack_delay;
 	}
 
-	spin_unlock(&loss->lock);
+	spin_unlock_bh(&loss->lock);
 	return delay;
 }
 EXPORT_SYMBOL_GPL(tquic_get_ack_delay);

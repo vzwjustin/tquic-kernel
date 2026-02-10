@@ -604,7 +604,7 @@ static int parse_san_extension(const u8 *data, u32 len,
 					u8 **new_ips;
 					u32 *new_lens;
 
-					if (ip_capacity >= 10000)
+					if (ip_capacity >= 256)
 						goto err_free;
 					new_ips = krealloc_array(ips, new_cap,
 								 sizeof(u8 *),

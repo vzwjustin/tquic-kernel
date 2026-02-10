@@ -685,7 +685,7 @@ struct tquic_proxied_quic_conn *tquic_quic_proxy_register_conn(
 		return ERR_PTR(-ENOMEM);
 
 	/* Set target information */
-	strncpy(pconn->target_host, target_host, sizeof(pconn->target_host) - 1);
+	strscpy(pconn->target_host, target_host, sizeof(pconn->target_host));
 	pconn->target_port = target_port;
 
 	/* Assign connection ID */

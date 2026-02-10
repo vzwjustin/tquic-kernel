@@ -496,6 +496,7 @@ int tquic_crypto_on_key_phase_change(struct tquic_connection *conn, u8 rx_key_ph
 		err = tquic_key_update_rx(conn);
 		if (err) {
 			tquic_conn_warn(conn, "RX key update failed, err=%d\n", err);
+			memzero_explicit(&saved_rx, sizeof(saved_rx));
 			return err;
 		}
 
@@ -543,6 +544,7 @@ int tquic_crypto_on_key_phase_change(struct tquic_connection *conn, u8 rx_key_ph
 				tquic_conn_err(conn, "RX key rollback failed, connection unusable (err=%d)\n",
 					       err);
 				/* Return KEY_UPDATE_ERROR code */
+				memzero_explicit(&saved_rx, sizeof(saved_rx));
 				return -EKEYREJECTED;
 			}
 
@@ -550,6 +552,7 @@ int tquic_crypto_on_key_phase_change(struct tquic_connection *conn, u8 rx_key_ph
 			 * Return original TX update error to caller.
 			 * The connection remains usable with old keys.
 			 */
+			memzero_explicit(&saved_rx, sizeof(saved_rx));
 			return err;
 		}
 
@@ -562,6 +565,7 @@ int tquic_crypto_on_key_phase_change(struct tquic_connection *conn, u8 rx_key_ph
 
 		tquic_conn_info(conn, "responded to peer key update, new phase=%u\n",
 				rx_key_phase);
+		memzero_explicit(&saved_rx, sizeof(saved_rx));
 		return 0;
 	}
 
