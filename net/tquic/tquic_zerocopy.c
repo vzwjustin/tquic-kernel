@@ -359,13 +359,18 @@ int tquic_sendmsg_zerocopy(struct sock *sk, struct msghdr *msg, size_t len,
 			kfree_skb(new_skb);
 			err = -ENOBUFS;
 			goto out_err;
-		}
+			}
 
-		/* Queue the skb to stream send buffer */
-		skb_queue_tail(&stream->send_buf, new_skb);
-		copied += chunk;
-		conn->stats.tx_bytes += chunk;
-	}
+			/* Queue the skb to stream send buffer */
+			spin_lock_bh(&conn->lock);
+			*(u64 *)new_skb->cb = stream->send_offset;
+			stream->send_offset += chunk;
+			conn->fc_data_reserved += chunk;
+			spin_unlock_bh(&conn->lock);
+			skb_queue_tail(&stream->send_buf, new_skb);
+			copied += chunk;
+			conn->stats.tx_bytes += chunk;
+		}
 	}
 
 	/* Trigger transmission */
@@ -445,33 +450,121 @@ ssize_t tquic_sendpage(struct socket *sock, struct page *page,
 	struct tquic_connection *conn;
 	struct tquic_stream *stream;
 	struct sk_buff *skb;
+	bool nonblock;
+	size_t allowed;
+	size_t send_size;
+	ssize_t ret = 0;
 
 	if (!sk)
 		return -ENOTCONN;
 
 	tsk = tquic_sk(sk);
-	conn = tsk->conn;
+	conn = READ_ONCE(tsk->conn);
 
 	if (!conn || READ_ONCE(conn->state) != TQUIC_CONN_CONNECTED)
 		return -ENOTCONN;
+
+	/* Hold a ref so conn cannot be freed while we enqueue skbs. */
+	if (!tquic_conn_get(conn))
+		return -ENOTCONN;
+
+	nonblock = (flags & MSG_DONTWAIT) ||
+		   (sock->file && (sock->file->f_flags & O_NONBLOCK));
 
 	/* Use default stream */
 	stream = tsk->default_stream;
 	if (!stream) {
 		stream = tquic_stream_open(conn, true);
-		if (!stream)
-			return -ENOMEM;
+		if (!stream) {
+			ret = -ENOMEM;
+			goto out_put;
+		}
 		tsk->default_stream = stream;
 	}
 
+	if (size == 0)
+		goto out_put;
+
+	/* Respect stream + connection flow control before building the skb. */
+	allowed = size;
+	spin_lock_bh(&conn->lock);
+	if (stream->send_offset >= stream->max_send_data ||
+	    conn->data_sent + conn->fc_data_reserved >= conn->max_data_remote) {
+		allowed = 0;
+	} else {
+		u64 stream_limit = stream->max_send_data - stream->send_offset;
+		u64 conn_limit = conn->max_data_remote - (conn->data_sent + conn->fc_data_reserved);
+
+		if (allowed > stream_limit)
+			allowed = stream_limit;
+		if (allowed > conn_limit)
+			allowed = conn_limit;
+	}
+	spin_unlock_bh(&conn->lock);
+
+	if (allowed == 0) {
+		if (nonblock) {
+			ret = -EAGAIN;
+			goto out_put;
+		}
+
+		if (wait_event_interruptible(stream->wait,
+				({
+					bool ok;
+					spin_lock_bh(&conn->lock);
+					ok = (stream->send_offset < stream->max_send_data) &&
+					     (conn->data_sent + conn->fc_data_reserved < conn->max_data_remote);
+					spin_unlock_bh(&conn->lock);
+					ok;
+				}) ||
+				stream->state == TQUIC_STREAM_CLOSED ||
+				READ_ONCE(conn->state) != TQUIC_CONN_CONNECTED)) {
+			ret = -EINTR;
+			goto out_put;
+		}
+
+		if (stream->state == TQUIC_STREAM_CLOSED) {
+			ret = -EPIPE;
+			goto out_put;
+		}
+		if (READ_ONCE(conn->state) != TQUIC_CONN_CONNECTED) {
+			ret = -ENOTCONN;
+			goto out_put;
+		}
+
+		/* Recompute after waking. */
+		allowed = size;
+		spin_lock_bh(&conn->lock);
+		if (stream->send_offset >= stream->max_send_data ||
+		    conn->data_sent + conn->fc_data_reserved >= conn->max_data_remote) {
+			allowed = 0;
+		} else {
+			u64 stream_limit = stream->max_send_data - stream->send_offset;
+			u64 conn_limit = conn->max_data_remote - (conn->data_sent + conn->fc_data_reserved);
+
+			if (allowed > stream_limit)
+				allowed = stream_limit;
+			if (allowed > conn_limit)
+				allowed = conn_limit;
+		}
+		spin_unlock_bh(&conn->lock);
+
+		if (allowed == 0) {
+			ret = -EAGAIN;
+			goto out_put;
+		}
+	}
+
+	send_size = min_t(size_t, size, allowed);
+
 	/* Validate size and offset */
-	if (offset < 0 || size > PAGE_SIZE - offset)
-		return -EINVAL;
+	if (offset < 0 || send_size > PAGE_SIZE - offset)
+		goto out_err_inval;
 
 	/* Allocate skb without data buffer - we'll use page frags */
 	skb = alloc_skb(0, GFP_KERNEL);
 	if (!skb)
-		return -ENOMEM;
+		goto out_err_nomem;
 
 	skb->sk = sk;
 
@@ -482,10 +575,10 @@ ssize_t tquic_sendpage(struct socket *sock, struct page *page,
 		 * Use skb_fill_page_desc to add page reference.
 		 */
 		get_page(page);
-		skb_fill_page_desc(skb, 0, page, offset, size);
-		skb->len += size;
-		skb->data_len += size;
-		skb->truesize += size;
+		skb_fill_page_desc(skb, 0, page, offset, send_size);
+		skb->len += send_size;
+		skb->data_len += send_size;
+		skb->truesize += send_size;
 
 		/* Mark for zerocopy completion */
 		skb_shinfo(skb)->flags |= SKBFL_ZEROCOPY_FRAG;
@@ -499,16 +592,16 @@ ssize_t tquic_sendpage(struct socket *sock, struct page *page,
 
 		/* Need to allocate actual data space */
 		kfree_skb(skb);
-		skb = alloc_skb(size, GFP_KERNEL);
+		skb = alloc_skb(send_size, GFP_KERNEL);
 		if (!skb)
-			return -ENOMEM;
+			goto out_err_nomem;
 
 		skb->sk = sk;
-		data = skb_put(skb, size);
+		data = skb_put(skb, send_size);
 
 		/* Map page and copy */
 		vaddr = kmap_local_page(page);
-		memcpy(data, vaddr + offset, size);
+		memcpy(data, vaddr + offset, send_size);
 		kunmap_local(vaddr);
 	}
 
@@ -517,18 +610,35 @@ ssize_t tquic_sendpage(struct socket *sock, struct page *page,
 		skb_set_owner_w(skb, sk);
 	} else {
 		kfree_skb(skb);
-		return -ENOBUFS;
+		ret = -ENOBUFS;
+		goto out_put;
 	}
 
 	/* Queue to stream send buffer */
+	spin_lock_bh(&conn->lock);
+	*(u64 *)skb->cb = stream->send_offset;
+	stream->send_offset += send_size;
+	conn->fc_data_reserved += send_size;
+	spin_unlock_bh(&conn->lock);
 	skb_queue_tail(&stream->send_buf, skb);
-	conn->stats.tx_bytes += size;
+	conn->stats.tx_bytes += send_size;
 
 	/* Trigger transmission */
 	if (tsk->nodelay)
 		tquic_output_flush(conn);
 
-	return size;
+	ret = send_size;
+out_put:
+	tquic_conn_put(conn);
+	return ret;
+
+out_err_inval:
+	ret = -EINVAL;
+	goto out_put;
+
+out_err_nomem:
+	ret = -ENOMEM;
+	goto out_put;
 }
 EXPORT_SYMBOL_GPL(tquic_sendpage);
 
