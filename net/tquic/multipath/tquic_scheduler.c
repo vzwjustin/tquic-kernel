@@ -2152,8 +2152,16 @@ void tquic_path_packet_sent(struct tquic_connection *conn, u8 path_id,
 		path->stats.last_send_time = tquic_get_time_us();
 		path->cc.bytes_in_flight += bytes;
 
-		/* Notify multipath schedulers to update inflight tracking */
-		tquic_mp_sched_notify_sent(conn, path, bytes);
+		/* Notify scheduler inflight tracking (cast: internal
+		 * tquic_int_* types are layout-compatible with public
+		 * tquic_* types used in the notify API declaration).
+		 */
+		{
+			void *c = conn;
+			void *p = path;
+
+			tquic_mp_sched_notify_sent(c, p, bytes);
+		}
 	}
 
 	atomic64_inc(&conn->stats.total_packets);
@@ -2980,85 +2988,6 @@ struct tquic_mp_sched_ops *tquic_mp_sched_find(const char *name)
 	return NULL;
 }
 EXPORT_SYMBOL_GPL(tquic_mp_sched_find);
-
-/**
- * tquic_mp_sched_notify_sent - Notify multipath schedulers of packet send
- * @conn: Connection that sent the packet
- * @path: Path the packet was sent on
- * @sent_bytes: Number of bytes sent
- *
- * Called from the packet send path to notify schedulers that
- * implement the packet_sent callback, allowing them to track
- * per-path inflight data.
- */
-void tquic_mp_sched_notify_sent(struct tquic_connection *conn,
-				struct tquic_path *path,
-				u32 sent_bytes)
-{
-	struct tquic_mp_sched_ops *sched;
-
-	if (!conn || !path)
-		return;
-
-	rcu_read_lock();
-	sched = (struct tquic_mp_sched_ops *)conn->scheduler;
-	if (sched && sched->packet_sent)
-		sched->packet_sent(conn, path, sent_bytes);
-	rcu_read_unlock();
-}
-EXPORT_SYMBOL_GPL(tquic_mp_sched_notify_sent);
-
-/**
- * tquic_mp_sched_notify_ack - Notify multipath schedulers of ACK
- * @conn: Connection that received the ACK
- * @path: Path that received the ACK
- * @acked_bytes: Number of bytes acknowledged
- *
- * Called from the ACK processing path to notify schedulers that
- * implement the ack_received callback.
- */
-void tquic_mp_sched_notify_ack(struct tquic_connection *conn,
-			       struct tquic_path *path,
-			       u64 acked_bytes)
-{
-	struct tquic_mp_sched_ops *sched;
-
-	if (!conn || !path)
-		return;
-
-	rcu_read_lock();
-	sched = (struct tquic_mp_sched_ops *)conn->scheduler;
-	if (sched && sched->ack_received)
-		sched->ack_received(conn, path, acked_bytes);
-	rcu_read_unlock();
-}
-EXPORT_SYMBOL_GPL(tquic_mp_sched_notify_ack);
-
-/**
- * tquic_mp_sched_notify_loss - Notify multipath schedulers of loss
- * @conn: Connection that detected loss
- * @path: Path that detected loss
- * @lost_bytes: Number of bytes lost
- *
- * Called from the loss detection path to notify schedulers that
- * implement the loss_detected callback.
- */
-void tquic_mp_sched_notify_loss(struct tquic_connection *conn,
-				struct tquic_path *path,
-				u64 lost_bytes)
-{
-	struct tquic_mp_sched_ops *sched;
-
-	if (!conn || !path)
-		return;
-
-	rcu_read_lock();
-	sched = (struct tquic_mp_sched_ops *)conn->scheduler;
-	if (sched && sched->loss_detected)
-		sched->loss_detected(conn, path, lost_bytes);
-	rcu_read_unlock();
-}
-EXPORT_SYMBOL_GPL(tquic_mp_sched_notify_loss);
 
 /* =========================================================================
  * Module Initialization
