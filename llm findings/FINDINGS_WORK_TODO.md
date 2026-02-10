@@ -98,14 +98,14 @@ Parked. Only revisit if new evidence surfaces.
   - Verify: `rg -n "cache" "net/tquic/tquic_output.c"`
   - Fix: 1. Use a slab cache (`kmem_cache`) for `tquic_pending_frame` structs (fixed size, high churn). 2. Eliminate the intermediate data copy entirely -- wri
 
-- [ ] **CF-053** -- Retry Token Validation -- Plaintext Buffer Overread
+- [x] **CF-053** -- Retry Token Validation -- Plaintext Buffer Overread
   - Severity: S0 | Sources: B,C | Priority: 10.0
   - Evidence: file:1, lines:1, snippet:3
   - Missing: Function/struct symbol name at the fault site; Kernel log / stack trace / error output demonstrating the issue
   - Verify: `sed -n '1195,1195p' net/tquic/core/connection.c`
   - Fix: Add `if (ciphertext_len > sizeof(plaintext)) return -EINVAL;` before the memcpy. Risk: Fixes in parser/crypto/lifetime code may alter packet acceptanc
 
-- [ ] **CF-054** -- Server Accept CID Parsing Missing Bounds Checks -- Buffer Over-Read
+- [x] **CF-054** -- Server Accept CID Parsing Missing Bounds Checks -- Buffer Over-Read
   - Severity: S0 | Sources: B,C | Priority: 10.0
   - Evidence: file:1, sym:1, lines:2, snippet:3
   - Missing: Kernel log / stack trace / error output demonstrating the issue
@@ -163,7 +163,7 @@ Parked. Only revisit if new evidence surfaces.
   - Verify: `rg -n "comparison" "net/tquic/crypto/cert_verify.c"`
   - Fix: Use `crypto_memneq()` consistently for all comparisons, or use `memcmp()` consistently for non-secret data. The key point is to be consistent and use 
 
-- [ ] **CF-061** -- tquic_conn_server_accept() -- err_free leaks registered CIDs, work items, timers, crypto state
+- [x] **CF-061** -- tquic_conn_server_accept() -- err_free leaks registered CIDs, work items, timers, crypto state
   - Severity: S0 | Sources: B,C | Priority: 10.0
   - Evidence: file:1, sym:6, lines:5, snippet:2
   - Missing: Kernel log / stack trace / error output demonstrating the issue
@@ -279,7 +279,7 @@ Parked. Only revisit if new evidence surfaces.
   - Verify: `rg -n "tquic_hs_process_certificate" "net/tquic/crypto/handshake.c"`
   - Fix: Check `certs_len >= 3` before `certs_len -= 3`, and `certs_len >= 2` before `certs_len -= 2`. Alternatively, track position using pointer arithmetic a
 
-- [ ] **CF-024** -- Capsule Buffer Size Addition Overflow
+- [x] **CF-024** -- Capsule Buffer Size Addition Overflow
   - Severity: S0 | Sources: B,C | Priority: 10.0
   - Evidence: file:1, lines:2, snippet:2
   - Missing: Function/struct symbol name at the fault site; Kernel log / stack trace / error output demonstrating the issue
@@ -293,7 +293,7 @@ Parked. Only revisit if new evidence surfaces.
   - Verify: `rg -n "tquic_gso_ctx" "net/quic/tquic/tquic_output.c"`
   - Fix: Validate cumulative bytes written against SKB tailroom before each `skb_put_data`/`skb_put` call, or check `skb_tailroom(gso->gso_skb) >= len` before 
 
-- [ ] **CF-034** -- Integer overflow in `tquic_hs_build_ch_extensions` PSK identity length calculations
+- [x] **CF-034** -- Integer overflow in `tquic_hs_build_ch_extensions` PSK identity length calculations
   - Severity: S0 | Sources: B,C | Priority: 10.0
   - Evidence: file:1, sym:1, lines:2, snippet:2
   - Missing: Kernel log / stack trace / error output demonstrating the issue
@@ -926,7 +926,7 @@ Parked. Only revisit if new evidence surfaces.
   - Verify: `rg -n "tquic_quic_proxy_register_conn" "net/tquic/masque/quic_proxy.c"`
   - Fix: Set `require_auth = true` by default. Implement mandatory authentication (PSK, certificate, or token-based) in `tquic_quic_proxy_register_conn()` befo
 
-- [ ] **CF-025** -- Complete SSRF in CONNECT-UDP -- No Address Validation
+- [x] **CF-025** -- Complete SSRF in CONNECT-UDP -- No Address Validation
   - Severity: S0 | Sources: B,C | Priority: 10.0
   - Evidence: file:1, sym:11, snippet:1
   - Missing: Exact line range(s) where the fault manifests; Kernel log / stack trace / error output demonstrating the issue
@@ -940,7 +940,7 @@ Parked. Only revisit if new evidence surfaces.
   - Verify: `make M=net/tquic W=1`
   - Fix: The function must return `-EKEYREVOKED` or a similar error when `TQUIC_REVOKE_HARD_FAIL` is set and revocation status cannot be determined.  --- Risk:
 
-- [ ] **CF-039** -- Netfilter Hooks Registered Only in init_net
+- [x] **CF-039** -- Netfilter Hooks Registered Only in init_net
   - Severity: S0 | Sources: B,C | Priority: 10.0
   - Evidence: file:1, sym:1, snippet:1
   - Missing: Exact line range(s) where the fault manifests; Kernel log / stack trace / error output demonstrating the issue
@@ -961,14 +961,14 @@ Parked. Only revisit if new evidence surfaces.
   - Verify: `rg -n "tquic_socket" "net/tquic/tquic_socket.c"`
   - Fix: Add `ns_capable(sock_net(sk)->user_ns, CAP_NET_ADMIN)` checks for privileged options.  --- Risk: Fixes in parser/crypto/lifetime code may alter packet
 
-- [ ] **CF-057** -- SSRF via IPv4-Mapped IPv6 Addresses Bypasses Address Filtering
+- [x] **CF-057** -- SSRF via IPv4-Mapped IPv6 Addresses Bypasses Address Filtering
   - Severity: S0 | Sources: B,C | Priority: 10.0
   - Evidence: file:1, sym:2, snippet:1
   - Missing: Exact line range(s) where the fault manifests; Kernel log / stack trace / error output demonstrating the issue
   - Verify: `rg -n "ipv6_addr_v4mapped" "net/tquic/tquic_tunnel.c"`
   - Fix: Add checks for `ipv6_addr_v4mapped()`, `ipv6_addr_is_isatap()`, private RFC 1918 ranges within mapped addresses, and the unspecified address (`::` Ris
 
-- [ ] **CF-066** -- Tunnel Uses init_net -- Namespace Escape
+- [x] **CF-066** -- Tunnel Uses init_net -- Namespace Escape
   - Severity: S0 | Sources: B,C | Priority: 10.0
   - Evidence: file:1, snippet:1
   - Missing: Exact line range(s) where the fault manifests; Function/struct symbol name at the fault site
@@ -1040,14 +1040,14 @@ Parked. Only revisit if new evidence surfaces.
 
 #### Concurrency (11)
 
-- [ ] **CF-013** -- `tquic_close()` Does Not Hold `lock_sock()` During Connection Teardown
+- [x] **CF-013** -- `tquic_close()` Does Not Hold `lock_sock()` During Connection Teardown
   - Severity: S0 | Sources: B,C | Priority: 10.0
   - Evidence: file:1, sym:12, snippet:3
   - Missing: Exact line range(s) where the fault manifests; Kernel log / stack trace / error output demonstrating the issue
   - Verify: `rg -n "tquic_sock" "net/tquic/tquic_socket.c"`
   - Fix: Establish one synchronization model for this code path and make all state transitions/lookup paths follow it consistently. Risk: Locking/ordering chan
 
-- [ ] **CF-017** -- `tquic_shutdown()` Missing `lock_sock()` -- Race on Connection State
+- [x] **CF-017** -- `tquic_shutdown()` Missing `lock_sock()` -- Race on Connection State
   - Severity: S0 | Sources: B,C | Priority: 10.0
   - Evidence: file:1, sym:9, snippet:2
   - Missing: Exact line range(s) where the fault manifests; Kernel log / stack trace / error output demonstrating the issue
@@ -1061,14 +1061,14 @@ Parked. Only revisit if new evidence surfaces.
   - Verify: `rg -n "blest_get_path" "net/tquic/multipath/sched_blest.c"`
   - Fix: Add `spin_lock_irqsave(&sd->lock, flags)` to `blest_path_removed()`, `blest_ack_received()`, and `blest_loss_detected()`.  --- Risk: Locking/ordering 
 
-- [ ] **CF-026** -- ECF Scheduler Declares Lock But Never Uses It
+- [x] **CF-026** -- ECF Scheduler Declares Lock But Never Uses It
   - Severity: S0 | Sources: B,C | Priority: 10.0
   - Evidence: file:1, sym:1, snippet:1
   - Missing: Exact line range(s) where the fault manifests; Kernel log / stack trace / error output demonstrating the issue
   - Verify: `rg -n "spin_lock_irqsave" "net/tquic/multipath/sched_ecf.c"`
   - Fix: Wrap all accesses to `sd->paths[]` and `sd->current_path_id` in `spin_lock_irqsave(&sd->lock, flags)` Risk: Locking/ordering changes can cause deadloc
 
-- [ ] **CF-036** -- Missing RFC 1918 / Private Network Filtering in IPv4 SSRF Checks
+- [x] **CF-036** -- Missing RFC 1918 / Private Network Filtering in IPv4 SSRF Checks
   - Severity: S0 | Sources: B,C | Priority: 10.0
   - Evidence: file:1, sym:5, snippet:1
   - Missing: Exact line range(s) where the fault manifests; Kernel log / stack trace / error output demonstrating the issue
@@ -1119,7 +1119,7 @@ Parked. Only revisit if new evidence surfaces.
 
 #### Correctness (18)
 
-- [ ] **CF-018** -- `tquic_varint_len()` Returns 0 for Invalid Values Without Error Propagation
+- [x] **CF-018** -- `tquic_varint_len()` Returns 0 for Invalid Values Without Error Propagation
   - Severity: S0 | Sources: B,C | Priority: 10.0
   - Evidence: file:1, sym:3, snippet:1
   - Missing: Exact line range(s) where the fault manifests; Kernel log / stack trace / error output demonstrating the issue
@@ -1133,7 +1133,7 @@ Parked. Only revisit if new evidence surfaces.
   - Verify: `rg -n "tquic_cong_on_ecn" "net/tquic/tquic_input.c"`
   - Fix: Store the previous ECN counts per path (in `struct tquic_ecn_tracking`) and only call `tquic_cong_on_ecn()` with the delta when `ecn_ce > path->ecn.ce
 
-- [ ] **CF-032** -- Hardcoded init_net Namespace Bypass in Socket Creation
+- [x] **CF-032** -- Hardcoded init_net Namespace Bypass in Socket Creation
   - Severity: S0 | Sources: B,C | Priority: 10.0
   - Evidence: file:2, sym:2, snippet:2
   - Missing: Exact line range(s) where the fault manifests; Kernel log / stack trace / error output demonstrating the issue
@@ -1147,7 +1147,7 @@ Parked. Only revisit if new evidence surfaces.
   - Verify: `rg -n "netif_rx" "net/tquic/masque/connect_ip.c"`
   - Fix: Add source and destination address validation in `connect_ip_validate_ip_header()` or a new function called before `netif_rx()`. Block loopback, multi
 
-- [ ] **CF-062** -- tquic_conn_server_accept() -- overrides actual error code with -EINVAL
+- [x] **CF-062** -- tquic_conn_server_accept() -- overrides actual error code with -EINVAL
   - Severity: S0 | Sources: B,C | Priority: 10.0
   - Evidence: file:1, sym:1, snippet:1
   - Missing: Exact line range(s) where the fault manifests; Kernel log / stack trace / error output demonstrating the issue
