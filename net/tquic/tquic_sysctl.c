@@ -50,8 +50,6 @@ static int tquic_min_cwnd = 2;           /* packets */
 static char tquic_scheduler[16] = "minrtt";
 static char tquic_congestion[16] = "cubic";
 
-/* Debug tunables */
-static int tquic_debug_level;
 
 /*
  * Connection Rate Limiting for DoS Protection
