@@ -1171,6 +1171,27 @@ static int tquic_frame_process_stream(struct tquic_connection *conn,
 	/* Find or create stream */
 	stream = tquic_stream_lookup_internal(conn, stream_id);
 	if (!stream) {
+		/*
+		 * RFC 9000 Section 4.6: A peer MUST NOT open more
+		 * streams than the MAX_STREAMS limit allows.  Reject
+		 * new peer-initiated streams that exceed our limit.
+		 */
+		bool is_bidi = !(stream_id & 0x2);
+		bool is_peer = (stream_id & 0x1) != conn->is_server;
+
+		if (is_peer) {
+			u64 max = is_bidi ? conn->local_max_streams_bidi
+					  : conn->local_max_streams_uni;
+			u64 stream_num = stream_id >> 2;
+
+			if (stream_num >= max) {
+				pr_debug("tquic: peer exceeded MAX_STREAMS "
+					 "(id=%llu max=%llu)\n",
+					 stream_id, max);
+				return -EPROTO;
+			}
+		}
+
 		stream = tquic_stream_create_internal(conn, stream_id);
 		if (!stream)
 			return -ENOMEM;

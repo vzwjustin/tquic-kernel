@@ -1922,10 +1922,14 @@ int tquic_x509_verify_signature(const struct tquic_x509_cert *cert,
 	if (!cert || !issuer)
 		return -EINVAL;
 
-	/* Self-signed check: issuer == subject */
+	/* Self-signed check: issuer == subject.
+	 * Use crypto_memneq for constant-time comparison to avoid
+	 * leaking certificate structure via timing side-channels.
+	 */
 	if (cert->issuer_raw && cert->subject_raw &&
 	    cert->issuer_raw_len == cert->subject_raw_len &&
-	    memcmp(cert->issuer_raw, cert->subject_raw, cert->issuer_raw_len) == 0) {
+	    !crypto_memneq(cert->issuer_raw, cert->subject_raw,
+			   cert->issuer_raw_len)) {
 		((struct tquic_x509_cert *)cert)->self_signed = true;
 	}
 

@@ -592,12 +592,28 @@ static int __maybe_unused tquic_send_version_negotiation_internal(struct sock *s
 
 /*
  * Process PADDING frame
+ *
+ * RFC 9000 Section 19.1: A PADDING frame has no semantic value and
+ * can be used to increase the size of a packet.  Limit the scan
+ * to prevent CPU exhaustion on very large encrypted payloads.
  */
+#define TQUIC_MAX_PADDING_BYTES	65536
+
 static int tquic_process_padding_frame(struct tquic_rx_ctx *ctx)
 {
-	/* Just skip padding bytes */
-	while (ctx->offset < ctx->len && ctx->data[ctx->offset] == 0)
+	u32 start = ctx->offset;
+	u32 limit = min_t(u32, ctx->len, start + TQUIC_MAX_PADDING_BYTES);
+
+	while (ctx->offset < limit && ctx->data[ctx->offset] == 0)
 		ctx->offset++;
+
+	/* If we hit the limit and there's still padding, reject as
+	 * excessive -- legitimate QUIC packets are at most ~1500 bytes
+	 * (PMTU) or ~65535 bytes (GSO/jumbo), not more.
+	 */
+	if (ctx->offset >= limit && ctx->offset < ctx->len &&
+	    ctx->data[ctx->offset] == 0)
+		return -EINVAL;
 
 	return 0;
 }
