@@ -611,6 +611,8 @@ int tquic_sock_shutdown(struct socket *sock, int how)
 	struct tquic_sock *tsk = tquic_sk(sk);
 	int ret = 0;
 
+	lock_sock(sk);
+
 	if (tsk->conn && tsk->conn->state == TQUIC_CONN_CONNECTED) {
 		/* Use graceful shutdown via state machine */
 		ret = tquic_conn_shutdown(tsk->conn);
@@ -619,6 +621,7 @@ int tquic_sock_shutdown(struct socket *sock, int how)
 	if ((how & SEND_SHUTDOWN) && (how & RCV_SHUTDOWN))
 		inet_sk_set_state(sk, TCP_CLOSE);
 
+	release_sock(sk);
 	return ret;
 }
 
@@ -628,6 +631,8 @@ int tquic_sock_shutdown(struct socket *sock, int how)
 void tquic_close(struct sock *sk, long timeout)
 {
 	struct tquic_sock *tsk = tquic_sk(sk);
+
+	lock_sock(sk);
 
 	if (tsk->conn) {
 		/* Release path manager state before connection teardown */
@@ -644,6 +649,8 @@ void tquic_close(struct sock *sk, long timeout)
 	}
 
 	inet_sk_set_state(sk, TCP_CLOSE);
+
+	release_sock(sk);
 }
 EXPORT_SYMBOL_GPL(tquic_close);
 

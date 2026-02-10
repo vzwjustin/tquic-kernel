@@ -456,7 +456,13 @@ static int create_udp_socket(struct tquic_connect_udp_tunnel *tunnel,
 	int val;
 	int ret;
 
-	ret = sock_create_kern(&init_net, family, SOCK_DGRAM, IPPROTO_UDP, &sock);
+	/*
+	 * Use the connection's network namespace rather than init_net
+	 * to prevent namespace escape.  tunnel->conn->sk->sk_net
+	 * provides the correct namespace context.
+	 */
+	ret = sock_create_kern(sock_net(tunnel->conn->sk), family,
+			       SOCK_DGRAM, IPPROTO_UDP, &sock);
 	if (ret < 0)
 		return ret;
 
@@ -497,6 +503,61 @@ static int create_udp_socket(struct tquic_connect_udp_tunnel *tunnel,
  *
  * Returns: 0 on success, negative errno on error.
  */
+/*
+ * Validate resolved address to prevent SSRF attacks.
+ * Block connections to loopback, private (RFC 1918), link-local,
+ * multicast, and broadcast addresses.
+ */
+static bool connect_udp_addr_is_safe(const struct sockaddr_storage *addr)
+{
+	if (addr->ss_family == AF_INET) {
+		const struct sockaddr_in *sin =
+			(const struct sockaddr_in *)addr;
+		__be32 a = sin->sin_addr.s_addr;
+
+		if (ipv4_is_loopback(a) || ipv4_is_multicast(a) ||
+		    ipv4_is_lbcast(a) || ipv4_is_zeronet(a))
+			return false;
+
+		/* RFC 1918 private ranges */
+		if (ipv4_is_private_10(a) || ipv4_is_private_172(a) ||
+		    ipv4_is_private_192(a))
+			return false;
+
+		/* Link-local 169.254.0.0/16 */
+		if (ipv4_is_linklocal_169(a))
+			return false;
+
+		return true;
+	}
+
+#if IS_ENABLED(CONFIG_IPV6)
+	if (addr->ss_family == AF_INET6) {
+		const struct sockaddr_in6 *sin6 =
+			(const struct sockaddr_in6 *)addr;
+
+		if (ipv6_addr_loopback(&sin6->sin6_addr) ||
+		    ipv6_addr_is_multicast(&sin6->sin6_addr) ||
+		    __ipv6_addr_type(&sin6->sin6_addr) & IPV6_ADDR_LINKLOCAL)
+			return false;
+
+		/* Block IPv4-mapped IPv6 addresses pointing to private ranges */
+		if (ipv6_addr_v4mapped(&sin6->sin6_addr)) {
+			__be32 v4 = sin6->sin6_addr.s6_addr32[3];
+
+			if (ipv4_is_loopback(v4) || ipv4_is_private_10(v4) ||
+			    ipv4_is_private_172(v4) || ipv4_is_private_192(v4) ||
+			    ipv4_is_linklocal_169(v4))
+				return false;
+		}
+
+		return true;
+	}
+#endif
+
+	return false;  /* Unknown address family -- reject */
+}
+
 static int resolve_target(struct tquic_connect_udp_tunnel *tunnel)
 {
 	struct tquic_connect_udp_target *target = &tunnel->target;
@@ -514,6 +575,12 @@ static int resolve_target(struct tquic_connect_udp_tunnel *tunnel)
 	if (ret == 1) {
 		sin->sin_family = AF_INET;
 		sin->sin_port = htons(target->port);
+
+		if (!connect_udp_addr_is_safe(&target->addr)) {
+			pr_warn("connect-udp: SSRF blocked for %pI4\n",
+				&sin->sin_addr);
+			return -EACCES;
+		}
 		target->resolved = true;
 		return 0;
 	}
@@ -526,6 +593,12 @@ static int resolve_target(struct tquic_connect_udp_tunnel *tunnel)
 	if (ret == 1) {
 		sin6->sin6_family = AF_INET6;
 		sin6->sin6_port = htons(target->port);
+
+		if (!connect_udp_addr_is_safe(&target->addr)) {
+			pr_warn("connect-udp: SSRF blocked for %pI6c\n",
+				&sin6->sin6_addr);
+			return -EACCES;
+		}
 		target->resolved = true;
 		return 0;
 	}

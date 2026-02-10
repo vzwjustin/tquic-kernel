@@ -165,6 +165,8 @@ static inline int tquic_encode_varint(u8 *buf, size_t buf_len, u64 val)
 {
 	int len = tquic_varint_len(val);
 
+	if (len == 0)
+		return -EOVERFLOW;  /* Value exceeds QUIC varint range */
 	if (len > buf_len)
 		return -ENOSPC;
 
@@ -1485,8 +1487,17 @@ static int __maybe_unused tquic_gso_init(struct tquic_gso_ctx *gso, struct tquic
 	gso->current_seg = 0;
 	gso->total_len = 0;
 
-	/* Allocate GSO SKB */
-	gso->gso_skb = alloc_skb(gso->gso_size * max_segs + MAX_HEADER, GFP_ATOMIC);
+	/* Allocate GSO SKB -- check for multiplication overflow */
+	{
+		size_t alloc_size;
+
+		if (check_mul_overflow((size_t)gso->gso_size,
+				       (size_t)max_segs, &alloc_size) ||
+		    check_add_overflow(alloc_size, (size_t)MAX_HEADER,
+				       &alloc_size))
+			return -EOVERFLOW;
+		gso->gso_skb = alloc_skb(alloc_size, GFP_ATOMIC);
+	}
 	if (!gso->gso_skb)
 		return -ENOMEM;
 
@@ -1980,10 +1991,15 @@ int tquic_send_connection_close(struct tquic_connection *conn,
 	{
 		u8 header[64];
 		int header_len = tquic_build_short_header_internal(conn, path, header, 64,
-							  pkt_num, 0, false, false,
-							  conn->grease_state);
-		if (header_len > 0)
-			skb_put_data(skb, header, header_len);
+						  pkt_num, 0, false, false,
+						  conn->grease_state);
+		if (header_len <= 0) {
+			/* Header build failed -- do not send unframed data */
+			kfree_skb(skb);
+			kfree(buf);
+			return header_len ? header_len : -EINVAL;
+		}
+		skb_put_data(skb, header, header_len);
 	}
 
 	skb_put_data(skb, buf, ctx.offset);

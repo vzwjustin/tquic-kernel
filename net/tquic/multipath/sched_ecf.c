@@ -278,12 +278,21 @@ static int ecf_get_path(struct tquic_connection *conn,
 		return -ENOENT;
 	}
 
-	/* Track path switches for diagnostics */
-	if (sd->current_path_id != best->path_id) {
-		pr_debug("ecf: switching to path %u (completion=%llu us), was path %u\n",
-			 best->path_id, min_completion, sd->current_path_id);
-		sd->current_path_id = best->path_id;
-		sd->path_switches++;
+	/* Track path switches for diagnostics -- protect shared scheduler
+	 * state with sd->lock to prevent data races on SMP.
+	 */
+	{
+		unsigned long irqflags;
+
+		spin_lock_irqsave(&sd->lock, irqflags);
+		if (sd->current_path_id != best->path_id) {
+			pr_debug("ecf: switching to path %u (completion=%llu us), was path %u\n",
+				 best->path_id, min_completion,
+				 sd->current_path_id);
+			sd->current_path_id = best->path_id;
+			sd->path_switches++;
+		}
+		spin_unlock_irqrestore(&sd->lock, irqflags);
 	}
 
 	result->primary = best;

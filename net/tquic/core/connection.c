@@ -952,6 +952,15 @@ int tquic_send_version_negotiation(struct tquic_connection *conn,
 	u8 *p = packet;
 	int i;
 
+	/* Validate CID lengths against buffer capacity.
+	 * Header is 5 + 1 + scid->len + 1 + dcid->len + versions.
+	 * Ensure we don't overflow the 256-byte stack buffer.
+	 */
+	if (scid->len > TQUIC_MAX_CID_LEN || dcid->len > TQUIC_MAX_CID_LEN)
+		return -EINVAL;
+	if (5 + 1 + scid->len + 1 + dcid->len + 4 * 4 > sizeof(packet))
+		return -ENOSPC;
+
 	/* Long header with version 0 */
 	*p++ = 0x80;  /* Long header */
 	*p++ = 0x00; *p++ = 0x00; *p++ = 0x00; *p++ = 0x00;  /* Version 0 */
@@ -1208,6 +1217,13 @@ int tquic_validate_retry_token(struct tquic_connection *conn,
 	/* Ciphertext length excludes nonce */
 	ciphertext_len = token_len - TQUIC_RETRY_TOKEN_IV_LEN;
 
+	/* Validate ciphertext fits in the decryption buffer */
+	if (ciphertext_len > sizeof(plaintext)) {
+		tquic_conn_dbg(conn, "retry token too large (%u > %zu)\n",
+			       ciphertext_len, sizeof(plaintext));
+		return -EINVAL;
+	}
+
 	/* Allocate AEAD request */
 	req = aead_request_alloc(tquic_retry_aead, GFP_ATOMIC);
 	if (!req)
@@ -1280,7 +1296,10 @@ int tquic_validate_retry_token(struct tquic_connection *conn,
 	}
 
 	memcpy(&token_hash, p, sizeof(token_hash));
-	if (token_hash != expected_hash) {
+	/* Use constant-time comparison to prevent timing side-channels
+	 * that could leak address information from retry tokens.
+	 */
+	if (crypto_memneq(&token_hash, &expected_hash, sizeof(token_hash))) {
 		tquic_conn_dbg(conn, "retry token address mismatch\n");
 		return -EINVAL;
 	}
@@ -1929,9 +1948,15 @@ int tquic_conn_process_handshake(struct tquic_connection *conn,
 
 				/* Skip past header to find CRYPTO frame */
 				hdr_offset = 5;  /* first_byte + version */
+				if (hdr_offset >= len)
+					return 0;
 				dcid_len = data[hdr_offset++];
+				if (hdr_offset + dcid_len >= len)
+					return 0;
 				hdr_offset += dcid_len;
 				scid_len = data[hdr_offset++];
+				if (hdr_offset + scid_len >= len)
+					return 0;
 				hdr_offset += scid_len;
 
 				/* Parse token length (varint) for Initial */
@@ -2445,14 +2470,22 @@ int tquic_conn_server_accept(struct tquic_connection *conn,
 
 	if (!tquic_version_is_supported(version)) {
 		/* Send Version Negotiation */
-		/* Extract CIDs first for VN response */
+		/* Extract CIDs first for VN response -- validate bounds */
 		offset = 5;
+		if (offset >= len)
+			return -EINVAL;
 		dcid_len = data[offset++];
+		if (dcid_len > TQUIC_MAX_CID_LEN || offset + dcid_len > len)
+			return -EINVAL;
 		memcpy(dcid.id, data + offset, dcid_len);
 		dcid.len = dcid_len;
 		offset += dcid_len;
 
+		if (offset >= len)
+			return -EINVAL;
 		scid_len = data[offset++];
+		if (scid_len > TQUIC_MAX_CID_LEN || offset + scid_len > len)
+			return -EINVAL;
 		memcpy(scid.id, data + offset, scid_len);
 		scid.len = scid_len;
 
@@ -2606,9 +2639,24 @@ int tquic_conn_server_accept(struct tquic_connection *conn,
 	return 0;
 
 err_free:
+	/* Clean up any resources allocated before the error.
+	 * Cancel work items that may have been initialized.
+	 */
+	cancel_work_sync(&cs->close_work);
+	cancel_work_sync(&cs->migration_work);
+	cancel_delayed_work_sync(&cs->drain_work);
+
+	/* Free crypto state if we allocated it */
+	if (conn->crypto_state) {
+		tquic_crypto_free(conn->crypto_state);
+		conn->crypto_state = NULL;
+	}
+
 	kfree(cs);
 	conn->state_machine = NULL;
-	return -EINVAL;
+
+	/* Preserve the actual error code instead of overriding with -EINVAL */
+	return ret ? ret : -EINVAL;
 }
 EXPORT_SYMBOL_GPL(tquic_conn_server_accept);
 

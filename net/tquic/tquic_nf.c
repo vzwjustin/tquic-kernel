@@ -796,13 +796,21 @@ int __init tquic_nf_init(void)
 	hash_init(tquic_nf_cid_hash);
 	hash_init(tquic_nf_addr_hash);
 
-	/* Register netfilter hooks */
+	/*
+	 * Register netfilter hooks.
+	 *
+	 * TODO: Currently hooks are registered only in init_net.
+	 * For proper namespace support, this should use pernet_operations
+	 * so each namespace gets its own hooks.  For now, document the
+	 * limitation.
+	 */
 	ret = nf_register_net_hooks(&init_net, tquic_nf_hooks,
 				    ARRAY_SIZE(tquic_nf_hooks));
 	if (ret) {
 		tquic_err("failed to register netfilter hooks: %d\n", ret);
 		return ret;
 	}
+	pr_info("tquic_nf: hooks registered in init_net only (namespace limitation)\n");
 
 	/* Initialize garbage collection */
 	INIT_WORK(&tquic_nf_gc_work, tquic_nf_gc_work_fn);

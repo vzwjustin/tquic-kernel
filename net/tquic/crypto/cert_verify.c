@@ -1922,10 +1922,14 @@ int tquic_x509_verify_signature(const struct tquic_x509_cert *cert,
 	if (!cert || !issuer)
 		return -EINVAL;
 
-	/* Self-signed check: issuer == subject */
+	/* Self-signed check: issuer == subject.
+	 * Use crypto_memneq for constant-time comparison to avoid
+	 * leaking certificate structure via timing side-channels.
+	 */
 	if (cert->issuer_raw && cert->subject_raw &&
 	    cert->issuer_raw_len == cert->subject_raw_len &&
-	    memcmp(cert->issuer_raw, cert->subject_raw, cert->issuer_raw_len) == 0) {
+	    !crypto_memneq(cert->issuer_raw, cert->subject_raw,
+			   cert->issuer_raw_len)) {
 		((struct tquic_x509_cert *)cert)->self_signed = true;
 	}
 
@@ -2103,27 +2107,41 @@ int tquic_check_revocation(struct tquic_cert_verify_ctx *ctx,
 	/* Check OCSP stapling data if provided */
 	if (ctx->ocsp_stapling && ctx->ocsp_stapling_len > 0) {
 		/*
-		 * OCSP response parsing would go here.
-		 * For now, accept stapled responses as valid.
-		 * A full implementation would:
-		 * 1. Parse the OCSP response
-		 * 2. Verify the OCSP response signature
-		 * 3. Check the certificate status
+		 * Minimal OCSP response validation (RFC 6960):
+		 * A stapled OCSP response must have a valid structure.
+		 * We check the outer SEQUENCE tag and minimum length.
+		 * Full signature verification requires the OCSP responder's
+		 * certificate, which may not be available in kernel context.
+		 *
+		 * NOTE: Without full signature verification, an attacker who
+		 * controls the network can forge OCSP responses.  Log a
+		 * warning so operators know verification is incomplete.
 		 */
-		pr_debug("tquic_cert: OCSP stapling present (%u bytes)\n",
-			 ctx->ocsp_stapling_len);
-		return 0;
+		if (ctx->ocsp_stapling_len < 10 ||
+		    ctx->ocsp_stapling[0] != 0x30) {
+			pr_warn("tquic_cert: OCSP stapling data malformed "
+				"(len=%u, tag=0x%02x)\n",
+				ctx->ocsp_stapling_len,
+				ctx->ocsp_stapling[0]);
+			if (ctx->check_revocation == TQUIC_REVOKE_HARD_FAIL)
+				return -EKEYREVOKED;
+			/* Soft-fail: treat as if no OCSP data */
+		} else {
+			pr_debug("tquic_cert: OCSP stapling present (%u bytes)"
+				 " -- signature NOT verified in kernel\n",
+				 ctx->ocsp_stapling_len);
+			return 0;
+		}
 	}
 
 	/*
 	 * Without OCSP stapling, we cannot perform online revocation
-	 * checking from kernel context. Log a warning in hard-fail mode.
+	 * checking from kernel context.  Hard-fail mode MUST reject.
 	 */
 	if (ctx->check_revocation == TQUIC_REVOKE_HARD_FAIL) {
-		pr_warn("tquic_cert: Revocation check required but no OCSP stapling available\n");
-		/* In production, this should return an error.
-		 * For now, allow to support existing deployments.
-		 */
+		pr_warn("tquic_cert: Revocation check required but no "
+			"OCSP stapling available -- rejecting\n");
+		return -EKEYREVOKED;
 	}
 
 	return 0;
@@ -2586,10 +2604,90 @@ EXPORT_SYMBOL_GPL(tquic_hs_verify_server_cert);
 int tquic_hs_verify_client_cert(struct tquic_handshake *hs,
 				struct tquic_connection *conn)
 {
-	/* Client certificate verification uses same logic
-	 * but checks for client auth EKU instead of server auth
+	struct tquic_cert_verify_ctx *ctx;
+	struct tquic_sock *tsk;
+	int ret;
+
+	if (!hs || !conn)
+		return TLS_ALERT_INTERNAL_ERROR;
+
+	tsk = tquic_sk(conn->sk);
+	if (!tsk)
+		return TLS_ALERT_INTERNAL_ERROR;
+
+	ctx = tquic_cert_verify_ctx_alloc(GFP_KERNEL);
+	if (!ctx)
+		return TLS_ALERT_INTERNAL_ERROR;
+
+	/*
+	 * Client certificate verification differs from server cert:
+	 *  - No hostname verification (client certs don't carry server names)
+	 *  - Verify mode comes from the server's client-auth configuration
+	 *  - Self-signed policy is server-determined
 	 */
-	return tquic_hs_verify_server_cert(hs, conn);
+	ctx->verify_mode = tsk->cert_verify.verify_mode;
+	ctx->verify_hostname = false;  /* Never verify hostname for client certs */
+	ctx->allow_self_signed = tsk->cert_verify.allow_self_signed;
+
+	tquic_cert_verify_set_keyring(ctx, NULL);
+
+	/* Get peer (client) certificate chain from handshake */
+	{
+		extern u8 *tquic_hs_get_peer_cert_chain(struct tquic_handshake *hs,
+							u32 *len);
+		u32 chain_len;
+		u8 *peer_chain = tquic_hs_get_peer_cert_chain(hs, &chain_len);
+
+		if (!peer_chain || chain_len == 0) {
+			if (ctx->verify_mode == TQUIC_CERT_VERIFY_OPTIONAL) {
+				tquic_cert_verify_ctx_free(ctx);
+				return 0;
+			}
+			tquic_cert_verify_ctx_free(ctx);
+			return TLS_ALERT_CERTIFICATE_REQUIRED;
+		}
+
+		ret = tquic_verify_cert_chain(ctx, peer_chain, chain_len);
+	}
+
+	if (ret < 0) {
+		int alert;
+
+		pr_warn("tquic_cert: Client certificate verification failed: %s (depth %u)\n",
+			tquic_cert_verify_get_error(ctx), ctx->error_depth);
+
+		switch (ctx->error_code) {
+		case TQUIC_CERT_ERR_EXPIRED:
+			alert = TLS_ALERT_CERTIFICATE_EXPIRED;
+			break;
+		case TQUIC_CERT_ERR_REVOKED:
+			alert = TLS_ALERT_CERTIFICATE_REVOKED;
+			break;
+		case TQUIC_CERT_ERR_UNTRUSTED:
+		case TQUIC_CERT_ERR_SELF_SIGNED:
+			alert = TLS_ALERT_UNKNOWN_CA;
+			break;
+		case TQUIC_CERT_ERR_KEY_USAGE:
+		case TQUIC_CERT_ERR_CONSTRAINT:
+		case TQUIC_CERT_ERR_NAME_CONSTRAINTS:
+		case TQUIC_CERT_ERR_WEAK_KEY:
+			alert = TLS_ALERT_BAD_CERTIFICATE;
+			break;
+		case TQUIC_CERT_ERR_PARSE:
+			alert = TLS_ALERT_DECODE_ERROR;
+			break;
+		default:
+			alert = TLS_ALERT_BAD_CERTIFICATE;
+			break;
+		}
+
+		tquic_cert_verify_ctx_free(ctx);
+		return alert;
+	}
+
+	pr_debug("tquic_cert: Client certificate verification succeeded\n");
+	tquic_cert_verify_ctx_free(ctx);
+	return 0;
 }
 EXPORT_SYMBOL_GPL(tquic_hs_verify_client_cert);
 

@@ -1469,8 +1469,11 @@ static u64 tquic_adaptive_calc_score(struct tquic_adaptive_data *ad,
 	else
 		bw_score = (path->cc.bandwidth * 1000) / max_bw;
 
-	/* CWND availability score */
-	if (path->cc.cwnd == 0)
+	/* CWND availability score -- guard against u32 underflow when
+	 * bytes_in_flight exceeds cwnd (possible during loss bursts).
+	 */
+	if (path->cc.cwnd == 0 ||
+	    path->cc.bytes_in_flight >= path->cc.cwnd)
 		cwnd_score = 0;
 	else {
 		cwnd_avail = path->cc.cwnd - path->cc.bytes_in_flight;

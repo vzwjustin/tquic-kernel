@@ -1123,52 +1123,56 @@ struct tquic_key_update_state *
 tquic_crypto_get_key_update_state(void *crypto_state)
 {
 	/*
-	 * The crypto_state is opaque here but we know its layout.
-	 * The key_update field is at a fixed offset in tquic_crypto_state.
+	 * Mirror the layout of struct tquic_crypto_state from tls.c so
+	 * that we can use offsetof() rather than a hardcoded byte offset.
+	 * This is still a layering violation -- ideally tls.c would export
+	 * a helper -- but it is at least resilient to field-size changes
+	 * because the compiler computes the offset.
 	 *
-	 * tquic_crypto_state layout (from tls.c):
-	 *   u16 cipher_suite;                      [0]
-	 *   struct tquic_keys read_keys[4];        [2]
-	 *   struct tquic_keys write_keys[4];       [varies]
-	 *   enum tquic_enc_level read_level;       [varies]
-	 *   enum tquic_enc_level write_level;      [varies]
-	 *   u32 key_phase;                         [varies]
-	 *   bool key_update_pending;               [varies]
-	 *   struct tquic_key_update_state *key_update;  [TARGET]
-	 *
-	 * We use offsetof-based access to be resilient to layout changes.
-	 * Since we can't include the full definition here, we use the
-	 * known offset calculation.
+	 * Keep this in sync with struct tquic_crypto_state in tls.c.
 	 */
-	struct {
+#define TQUIC_ENC_LEVEL_COUNT	4
+#define TQUIC_SECRET_MAX_LEN_	64
+#define TQUIC_KEY_MAX_LEN_	32
+#define TQUIC_IV_MAX_LEN_	12
+#define TQUIC_HP_KEY_MAX_LEN_	32
+	struct tquic_crypto_state_mirror {
 		u16 cipher_suite;
-		u8 _padding[2];  /* Alignment */
-		/* read_keys and write_keys occupy the bulk of the struct */
-		/* We skip directly to the key_update pointer using a union trick */
-	} *header = crypto_state;
-
-	/*
-	 * Direct pointer access at known offset.
-	 * This is fragile and should be replaced with a proper API
-	 * exported from tls.c, but provides working integration now.
-	 */
-	struct tquic_crypto_state_ku_accessor {
-		char _before_key_update[304];	/* Approximate offset */
+		u32 version;
+		struct {
+			u8 secret[TQUIC_SECRET_MAX_LEN_];
+			u8 key[TQUIC_KEY_MAX_LEN_];
+			u8 iv[TQUIC_IV_MAX_LEN_];
+			u8 hp_key[TQUIC_HP_KEY_MAX_LEN_];
+			u32 secret_len;
+			u32 key_len;
+			u32 iv_len;
+			bool valid;
+		} read_keys[TQUIC_ENC_LEVEL_COUNT],
+		  write_keys[TQUIC_ENC_LEVEL_COUNT];
+		int read_level;   /* enum tquic_enc_level */
+		int write_level;
+		u32 key_phase;
+		bool key_update_pending;
 		struct tquic_key_update_state *key_update;
-	} *accessor;
+		/* remaining fields omitted */
+	} *cs;
+#undef TQUIC_ENC_LEVEL_COUNT
+#undef TQUIC_SECRET_MAX_LEN_
+#undef TQUIC_KEY_MAX_LEN_
+#undef TQUIC_IV_MAX_LEN_
+#undef TQUIC_HP_KEY_MAX_LEN_
 
 	if (!crypto_state)
 		return NULL;
 
-	/*
-	 * Safety check: verify cipher_suite looks valid (non-zero, known value)
-	 * to catch obvious pointer errors.
-	 */
-	if (header->cipher_suite == 0)
+	cs = crypto_state;
+
+	/* Sanity check: cipher_suite should be a known TLS 1.3 value */
+	if (cs->cipher_suite == 0)
 		return NULL;
 
-	accessor = crypto_state;
-	return accessor->key_update;
+	return cs->key_update;
 }
 EXPORT_SYMBOL_GPL(tquic_crypto_get_key_update_state);
 

@@ -338,6 +338,8 @@ int qpack_dynamic_table_duplicate(struct qpack_dynamic_table *table,
 	struct qpack_dynamic_entry *source, *entry;
 	unsigned long flags;
 	int ret;
+	u8 *saved_name = NULL, *saved_value = NULL;
+	u32 saved_name_len, saved_value_len;
 
 	if (!table)
 		return -EINVAL;
@@ -351,11 +353,30 @@ int qpack_dynamic_table_duplicate(struct qpack_dynamic_table *table,
 		return -ENOENT;
 	}
 
-	/* Temporarily release lock for allocation */
+	/*
+	 * Copy name/value data while holding the lock so the source
+	 * entry cannot be freed (evicted) between lookup and copy.
+	 * Then release the lock for the allocation.
+	 */
+	saved_name_len = source->name_len;
+	saved_value_len = source->value_len;
+	saved_name = kmalloc(saved_name_len, GFP_ATOMIC);
+	saved_value = kmalloc(saved_value_len, GFP_ATOMIC);
+	if (!saved_name || !saved_value) {
+		spin_unlock_irqrestore(&table->lock, flags);
+		kfree(saved_name);
+		kfree(saved_value);
+		return -ENOMEM;
+	}
+	memcpy(saved_name, source->name, saved_name_len);
+	memcpy(saved_value, source->value, saved_value_len);
+
 	spin_unlock_irqrestore(&table->lock, flags);
 
-	entry = qpack_dynamic_entry_alloc(source->name, source->name_len,
-					  source->value, source->value_len);
+	entry = qpack_dynamic_entry_alloc(saved_name, saved_name_len,
+					  saved_value, saved_value_len);
+	kfree(saved_name);
+	kfree(saved_value);
 	if (!entry)
 		return -ENOMEM;
 

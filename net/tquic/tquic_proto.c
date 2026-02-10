@@ -29,6 +29,7 @@
 #include <linux/inetdevice.h>
 
 #include <linux/icmp.h>
+#include <linux/security.h>
 #include <net/net_namespace.h>
 #include <net/netns/generic.h>
 #include <net/sock.h>
@@ -496,6 +497,15 @@ static int tquic_create_socket(struct net *net, struct socket *sock,
 	{
 		prot = &tquic_prot;
 		ops = &tquic_inet_ops;
+	}
+
+	/* Invoke LSM security hooks -- required for SELinux, AppArmor, etc.
+	 * Without this, TQUIC sockets bypass mandatory access controls.
+	 */
+	{
+		int err = security_socket_create(family, sock->type, protocol, kern);
+		if (err)
+			return err;
 	}
 
 	/* Allocate sock structure */

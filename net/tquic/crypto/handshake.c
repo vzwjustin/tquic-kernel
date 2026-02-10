@@ -749,6 +749,15 @@ static int tquic_hs_hkdf_expand_label(struct tquic_handshake *hs,
 
 	hash_len = crypto_shash_digestsize(hs->hmac);
 
+	/*
+	 * Bounds check: the HkdfLabel structure occupies
+	 * 2 (length) + 1 (label length prefix) + total_label_len +
+	 * 1 (context length prefix) + context_len bytes.
+	 * Reject if this exceeds the stack buffer.
+	 */
+	if (2 + 1 + total_label_len + 1 + context_len > sizeof(hkdf_label))
+		return -EINVAL;
+
 	/* HkdfLabel structure */
 	*p++ = (out_len >> 8) & 0xff;
 	*p++ = out_len & 0xff;
@@ -846,7 +855,13 @@ static int tquic_hs_update_transcript(struct tquic_handshake *hs,
 	}
 
 	if (new_len > hs->transcript_alloc) {
-		u32 new_alloc = max(new_len * 2, 4096U);
+		u32 new_alloc;
+
+		/* Guard against u32 overflow in doubling */
+		if (new_len > U32_MAX / 2)
+			new_alloc = TQUIC_MAX_TRANSCRIPT_SIZE;
+		else
+			new_alloc = max(new_len * 2, 4096U);
 
 		new_buf = krealloc(hs->transcript, new_alloc, GFP_KERNEL);
 		if (!new_buf)
@@ -1208,9 +1223,19 @@ static int tquic_hs_build_ch_extensions(struct tquic_handshake *hs,
 		u32 i;
 
 		for (i = 0; i < hs->psk_count; i++) {
-			identities_len += 2 + hs->psk_identities[i].identity_len + 4;
+			u32 entry_len = 2 + hs->psk_identities[i].identity_len + 4;
+
+			/* Guard against u32 overflow */
+			if (entry_len < hs->psk_identities[i].identity_len ||
+			    identities_len + entry_len < identities_len)
+				return -EOVERFLOW;
+			identities_len += entry_len;
 			binders_len += 1 + hs->hash_len;
 		}
+
+		/* Ensure PSK extension fits in remaining buffer */
+		if (p + 4 + 2 + identities_len + 2 + binders_len > buf + buf_len)
+			return -ENOSPC;
 
 		*p++ = (TLS_EXT_PRE_SHARED_KEY >> 8) & 0xff;
 		*p++ = TLS_EXT_PRE_SHARED_KEY & 0xff;
@@ -1454,7 +1479,9 @@ int tquic_hs_process_server_hello(struct tquic_handshake *hs,
 	}
 	p += session_id_len;
 
-	/* Cipher suite */
+	/* Cipher suite -- need 2 bytes */
+	if (p + 2 > end)
+		return -EINVAL;
 	cipher_suite = (p[0] << 8) | p[1];
 	p += 2;
 
@@ -1473,7 +1500,9 @@ int tquic_hs_process_server_hello(struct tquic_handshake *hs,
 	else
 		hs->hash_len = 32;
 
-	/* Compression (must be null) */
+	/* Compression (must be null) -- need 1 byte */
+	if (p >= end)
+		return -EINVAL;
 	compression = *p++;
 	if (compression != 0) {
 		pr_warn("tquic_hs: non-null compression\n");
@@ -1765,19 +1794,21 @@ int tquic_hs_process_certificate(struct tquic_handshake *hs,
 	if (p + certs_len > end)
 		return -EINVAL;
 
-	/* Parse certificate entries */
+	/* Parse certificate entries -- guard each subtraction against
+	 * u32 underflow by checking remaining length first.
+	 */
 	while (p < data + 4 + msg_len && certs_len > 0) {
 		u32 cert_len;
 		u16 ext_len;
 
-		if (p + 3 > end)
+		if (certs_len < 3 || p + 3 > end)
 			break;
 
 		cert_len = (p[0] << 16) | (p[1] << 8) | p[2];
 		p += 3;
 		certs_len -= 3;
 
-		if (p + cert_len > end || cert_len > certs_len)
+		if (cert_len > certs_len || p + cert_len > end)
 			return -EINVAL;
 
 		/* Store first certificate (end-entity) */
@@ -1793,7 +1824,7 @@ int tquic_hs_process_certificate(struct tquic_handshake *hs,
 		certs_len -= cert_len;
 
 		/* Certificate extensions */
-		if (p + 2 > end)
+		if (certs_len < 2 || p + 2 > end)
 			break;
 		ext_len = (p[0] << 8) | p[1];
 		p += 2;
