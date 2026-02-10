@@ -165,6 +165,8 @@ static inline int tquic_encode_varint(u8 *buf, size_t buf_len, u64 val)
 {
 	int len = tquic_varint_len(val);
 
+	if (len == 0)
+		return -EOVERFLOW;  /* Value exceeds QUIC varint range */
 	if (len > buf_len)
 		return -ENOSPC;
 

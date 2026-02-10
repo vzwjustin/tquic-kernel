@@ -2627,9 +2627,24 @@ int tquic_conn_server_accept(struct tquic_connection *conn,
 	return 0;
 
 err_free:
+	/* Clean up any resources allocated before the error.
+	 * Cancel work items that may have been initialized.
+	 */
+	cancel_work_sync(&cs->close_work);
+	cancel_work_sync(&cs->migration_work);
+	cancel_delayed_work_sync(&cs->drain_work);
+
+	/* Free crypto state if we allocated it */
+	if (conn->crypto_state) {
+		tquic_crypto_free(conn->crypto_state);
+		conn->crypto_state = NULL;
+	}
+
 	kfree(cs);
 	conn->state_machine = NULL;
-	return -EINVAL;
+
+	/* Preserve the actual error code instead of overriding with -EINVAL */
+	return ret ? ret : -EINVAL;
 }
 EXPORT_SYMBOL_GPL(tquic_conn_server_accept);
 
