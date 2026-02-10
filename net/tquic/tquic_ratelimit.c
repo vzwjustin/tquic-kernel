@@ -50,6 +50,7 @@
 
 #include "tquic_ratelimit.h"
 #include "tquic_mib.h"
+#include "tquic_debug.h"
 #include "protocol.h"
 #include "tquic_compat.h"
 
@@ -211,7 +212,6 @@ static void tquic_rl_refill_tokens(struct tquic_rl_bucket *bucket)
 	unsigned long now = jiffies;
 	unsigned long elapsed_ms;
 	int tokens, new_tokens, max_tokens;
-	int tokens_per_sec;
 
 	if (!time_after(now, bucket->last_refill))
 		return;
@@ -220,12 +220,29 @@ static void tquic_rl_refill_tokens(struct tquic_rl_bucket *bucket)
 	if (elapsed_ms == 0)
 		return;
 
-	/* Calculate tokens to add based on rate */
-	tokens_per_sec = tquic_rl_params.max_conn_rate * TOKEN_SCALE;
-	new_tokens = (tokens_per_sec * elapsed_ms) / 1000;
+	/*
+	 * Calculate tokens to add based on rate.
+	 *
+	 * Use s64 arithmetic to prevent integer overflow:
+	 * max_conn_rate can be up to 1,000,000 and TOKEN_SCALE is 1000,
+	 * so tokens_per_sec can be up to 1,000,000,000. Multiplying by
+	 * elapsed_ms (which can be large after idle periods) would
+	 * overflow int32. Cap elapsed_ms to prevent excessive refill
+	 * after long idle periods.
+	 */
+	if (elapsed_ms > 10000)
+		elapsed_ms = 10000;
 
-	if (new_tokens <= 0)
-		return;
+	{
+		s64 tokens_per_sec_64 = (s64)tquic_rl_params.max_conn_rate *
+					TOKEN_SCALE;
+		s64 new_tokens_64 = (tokens_per_sec_64 * elapsed_ms) / 1000;
+
+		if (new_tokens_64 <= 0)
+			return;
+
+		new_tokens = (int)min_t(s64, new_tokens_64, INT_MAX);
+	}
 
 	tokens = atomic_read(&bucket->tokens);
 	max_tokens = tquic_rl_params.burst_limit * TOKEN_SCALE;
@@ -287,7 +304,7 @@ static int tquic_rl_init_crypto(void)
 {
 	tquic_rl_hmac_tfm = crypto_alloc_shash("hmac(sha256)", 0, 0);
 	if (IS_ERR(tquic_rl_hmac_tfm)) {
-		pr_err("failed to allocate HMAC transform\n");
+		tquic_err("failed to allocate HMAC transform\n");
 		return PTR_ERR(tquic_rl_hmac_tfm);
 	}
 	return 0;
@@ -325,7 +342,7 @@ static void tquic_rl_rotate_secret_internal(struct tquic_rl_state *state)
 	/* Atomically switch to new secret */
 	WRITE_ONCE(state->current_secret, next);
 
-	pr_debug("rotated cookie secret to generation %u\n",
+	tquic_dbg("rotated cookie secret to generation %u\n",
 		 state->secrets[next].generation);
 }
 
@@ -496,8 +513,10 @@ int tquic_ratelimit_validate_cookie(struct net *net,
 		return -ETIMEDOUT;
 	}
 
-	/* Parse stored DCID */
+	/* Parse stored DCID - validate against max CID length per RFC 9000 */
 	stored_dcid_len = cookie[4];
+	if (stored_dcid_len > TQUIC_MAX_CID_LEN)
+		return -EINVAL;
 	if (cookie_len < 5 + stored_dcid_len + 16)
 		return -EINVAL;
 
@@ -653,7 +672,7 @@ enum tquic_rl_action tquic_ratelimit_check(struct net *net,
 			if (src_addr->ss_family == AF_INET) {
 				const struct sockaddr_in *sin =
 					(const struct sockaddr_in *)src_addr;
-				pr_info("rate limited %pI4 (count=%lld, drops=%lld)\n",
+				tquic_info("rate limited %pI4 (count=%lld, drops=%lld)\n",
 					&sin->sin_addr,
 					atomic64_read(&bucket->conn_count),
 					atomic64_read(&bucket->drop_count));
@@ -662,7 +681,7 @@ enum tquic_rl_action tquic_ratelimit_check(struct net *net,
 			else if (src_addr->ss_family == AF_INET6) {
 				const struct sockaddr_in6 *sin6 =
 					(const struct sockaddr_in6 *)src_addr;
-				pr_info("rate limited %pI6c (count=%lld, drops=%lld)\n",
+				tquic_info("rate limited %pI6c (count=%lld, drops=%lld)\n",
 					&sin6->sin6_addr,
 					atomic64_read(&bucket->conn_count),
 					atomic64_read(&bucket->drop_count));
@@ -773,9 +792,9 @@ int tquic_ratelimit_blacklist_add(struct net *net,
 	rcu_read_unlock();
 
 	if (duration_ms > 0)
-		pr_info("blacklisted source address for %u ms\n", duration_ms);
+		tquic_info("blacklisted source address for %u ms\n", duration_ms);
 	else
-		pr_info("permanently blacklisted source address\n");
+		tquic_info("permanently blacklisted source address\n");
 	return 0;
 }
 EXPORT_SYMBOL_GPL(tquic_ratelimit_blacklist_add);
@@ -804,7 +823,7 @@ int tquic_ratelimit_blacklist_remove(struct net *net,
 
 	rcu_read_unlock();
 
-	pr_info("removed source from blacklist\n");
+	tquic_info("removed source from blacklist\n");
 	return 0;
 }
 EXPORT_SYMBOL_GPL(tquic_ratelimit_blacklist_remove);
@@ -827,8 +846,8 @@ static void tquic_rl_check_attack_mode(struct tquic_rl_state *state)
 			WRITE_ONCE(state->attack_mode, true);
 			state->attack_start = now;
 			atomic64_inc(&state->stats.attack_mode_entered);
-			pr_warn("entering attack mode: rate=%d threshold=%d\n",
-				current_rate, tquic_rl_params.attack_threshold);
+			tquic_warn("entering attack mode: rate=%d threshold=%d\n",
+				   current_rate, tquic_rl_params.attack_threshold);
 		}
 	} else {
 		/* Check if we should exit attack mode */
@@ -837,7 +856,7 @@ static void tquic_rl_check_attack_mode(struct tquic_rl_state *state)
 		if (ktime_to_ms(elapsed) > TQUIC_RL_ATTACK_HYSTERESIS_MS &&
 		    current_rate < tquic_rl_params.attack_threshold / 2) {
 			WRITE_ONCE(state->attack_mode, false);
-			pr_info("exiting attack mode: rate=%d\n", current_rate);
+			tquic_info("exiting attack mode: rate=%d\n", current_rate);
 		}
 	}
 }
@@ -901,7 +920,7 @@ static void tquic_rl_gc_work_fn(struct work_struct *work)
 	rhashtable_walk_exit(&iter);
 
 	if (removed > 0)
-		pr_debug("garbage collected %d stale entries\n", removed);
+		tquic_dbg("garbage collected %d stale entries\n", removed);
 
 	/* Reschedule */
 	if (state->initialized) {
@@ -1215,7 +1234,7 @@ int tquic_ratelimit_sysctl_init(void)
 	if (!tquic_rl_sysctl_header)
 		return -ENOMEM;
 
-	pr_info("sysctl parameters registered at /proc/sys/net/tquic/\n");
+	tquic_info("sysctl parameters registered at /proc/sys/net/tquic/\n");
 	return 0;
 }
 
@@ -1248,7 +1267,7 @@ int tquic_ratelimit_init(struct net *net)
 	/* Initialize hash table */
 	ret = rhashtable_init(&state->ht, &tquic_rl_ht_params);
 	if (ret) {
-		pr_err("failed to initialize hash table: %d\n", ret);
+		tquic_err("failed to initialize hash table: %d\n", ret);
 		return ret;
 	}
 
@@ -1284,7 +1303,7 @@ int tquic_ratelimit_init(struct net *net)
 	schedule_delayed_work(&state->rate_calc_work,
 		msecs_to_jiffies(1000));
 
-	pr_info("initialized for net namespace\n");
+	tquic_info("initialized for net namespace\n");
 	return 0;
 }
 EXPORT_SYMBOL_GPL(tquic_ratelimit_init);
@@ -1327,7 +1346,7 @@ void tquic_ratelimit_exit(struct net *net)
 	memzero_explicit(state->secrets[0].secret, TQUIC_COOKIE_SECRET_LEN);
 	memzero_explicit(state->secrets[1].secret, TQUIC_COOKIE_SECRET_LEN);
 
-	pr_info("cleaned up for net namespace\n");
+	tquic_info("cleaned up for net namespace\n");
 }
 EXPORT_SYMBOL_GPL(tquic_ratelimit_exit);
 
@@ -1375,7 +1394,7 @@ int __init tquic_ratelimit_module_init(void)
 		return ret;
 	}
 
-	pr_info("TQUIC rate limiter initialized\n");
+	tquic_info("rate limiter initialized\n");
 	return 0;
 }
 
@@ -1388,7 +1407,7 @@ void __exit tquic_ratelimit_module_exit(void)
 	/* Wait for RCU callbacks */
 	synchronize_rcu();
 
-	pr_info("TQUIC rate limiter exited\n");
+	tquic_info("rate limiter exited\n");
 }
 
 MODULE_DESCRIPTION("TQUIC Connection Rate Limiting for DDoS Protection");

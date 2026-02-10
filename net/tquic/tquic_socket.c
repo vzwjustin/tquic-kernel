@@ -24,6 +24,7 @@
 
 #include "protocol.h"
 #include "tquic_compat.h"
+#include "tquic_debug.h"
 #include "cong/tquic_cong.h"
 #include "tquic_zerocopy.h"
 
@@ -144,7 +145,7 @@ int tquic_init_sock(struct sock *sk)
 	/* Initialize bonding state */
 	tsk->conn->scheduler = tquic_bond_init(tsk->conn);
 
-	pr_debug("tquic: socket initialized\n");
+	tquic_dbg("socket initialized\n");
 	return 0;
 }
 
@@ -163,13 +164,15 @@ void tquic_destroy_sock(struct sock *sk)
 	tquic_handshake_cleanup(sk);
 
 	if (tsk->conn) {
-		if (tsk->conn->scheduler)
+		if (tsk->conn->scheduler) {
 			tquic_bond_cleanup(tsk->conn->scheduler);
+			tsk->conn->scheduler = NULL;
+		}
 		tquic_conn_destroy(tsk->conn);
 		tsk->conn = NULL;
 	}
 
-	pr_debug("tquic: socket destroyed\n");
+	tquic_dbg("socket destroyed\n");
 }
 
 /*
@@ -262,7 +265,7 @@ int tquic_connect(struct sock *sk, TQUIC_SOCKADDR *uaddr, int addr_len)
 
 		conn->scheduler = tquic_sched_init_conn(conn, sched_ops);
 		if (!conn->scheduler) {
-			pr_warn("tquic: scheduler init failed, using default\n");
+			tquic_warn("scheduler init failed, using default\n");
 			conn->scheduler = tquic_sched_init_conn(conn, NULL);
 			if (!conn->scheduler) {
 				ret = -ENOMEM;
@@ -305,7 +308,7 @@ int tquic_connect(struct sock *sk, TQUIC_SOCKADDR *uaddr, int addr_len)
 	/* Initialize path manager after connection established */
 	ret = tquic_pm_conn_init(conn);
 	if (ret < 0) {
-		pr_warn("tquic: PM init failed (%d), multipath disabled\n", ret);
+		tquic_warn("PM init failed (%d), multipath disabled\n", ret);
 		tsk->flags |= TQUIC_F_PM_DISABLED;
 		tsk->flags &= ~TQUIC_F_MULTIPATH_ENABLED;
 		/*
@@ -318,7 +321,7 @@ int tquic_connect(struct sock *sk, TQUIC_SOCKADDR *uaddr, int addr_len)
 
 	release_sock(sk);
 
-	pr_debug("tquic: client connection established\n");
+	tquic_dbg("client connection established\n");
 	return 0;
 
 out_close:
@@ -365,7 +368,7 @@ int tquic_sock_listen(struct socket *sock, int backlog)
 	/* Register with UDP demux to receive incoming packets */
 	ret = tquic_register_listener(sk);
 	if (ret < 0) {
-		pr_err("tquic: failed to register listener: %d\n", ret);
+		tquic_err("failed to register listener: %d\n", ret);
 		goto out;
 	}
 
@@ -373,7 +376,7 @@ int tquic_sock_listen(struct socket *sock, int backlog)
 	inet_sk_set_state(sk, TCP_LISTEN);
 	sock->state = SS_CONNECTED;  /* Mark as ready for accept */
 
-	pr_debug("tquic: listening on socket, backlog=%d\n", backlog);
+	tquic_dbg("listening on socket, backlog=%d\n", backlog);
 	ret = 0;
 
 out:
@@ -472,7 +475,7 @@ int tquic_accept(struct sock *sk, struct sock **newsk, int flags, bool kern)
 			if (child_tsk->conn)
 				child_tsk->conn->sk = (struct sock *)child_tsk;
 
-			pr_debug("tquic: accept returned connection\n");
+			tquic_dbg("accept returned connection\n");
 			goto out_unlock;
 		}
 		spin_unlock_bh(&sk->sk_lock.slock);
@@ -691,10 +694,10 @@ int tquic_sock_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 			 * The fd is still valid; user can query stream_id via sockopt.
 			 * Return success since the stream was created.
 			 */
-			pr_warn("tquic: failed to copy stream_id to user\n");
+			tquic_warn("failed to copy stream_id to user\n");
 		}
 
-		pr_debug("tquic: ioctl NEW_STREAM returned fd=%d stream_id=%llu\n",
+		tquic_dbg("ioctl NEW_STREAM returned fd=%d stream_id=%llu\n",
 			 ret, stream_id);
 
 		/* Return the file descriptor */
@@ -895,7 +898,7 @@ int tquic_sock_setsockopt(struct socket *sock, int level, int optname,
 			/* Validate CC algorithm exists */
 			struct tquic_cong_ops *ca = tquic_cong_find(name);
 			if (!ca) {
-				pr_warn("tquic: unknown CC algorithm '%s'\n", name);
+				tquic_warn("unknown CC algorithm '%s'\n", name);
 				return -ENOENT;
 			}
 			/* Release module reference from find */
@@ -938,7 +941,7 @@ int tquic_sock_setsockopt(struct socket *sock, int level, int optname,
 		tsk->psk_identity_len = optlen;
 		release_sock(sk);
 
-		pr_debug("tquic: PSK identity set (%d bytes)\n", optlen);
+		tquic_dbg("PSK identity set (%d bytes)\n", optlen);
 		return 0;
 	}
 
@@ -1151,7 +1154,7 @@ int tquic_sock_setsockopt(struct socket *sock, int level, int optname,
 		}
 		tsk->cert_verify.verify_mode = val;
 		if (val == TQUIC_VERIFY_NONE)
-			pr_warn("tquic: Certificate verification disabled for socket - INSECURE\n");
+			tquic_warn("Certificate verification disabled for socket - INSECURE\n");
 		release_sock(sk);
 		return 0;
 
@@ -1186,7 +1189,7 @@ int tquic_sock_setsockopt(struct socket *sock, int level, int optname,
 		tsk->cert_verify.verify_hostname = true;
 		release_sock(sk);
 
-		pr_debug("tquic: Expected hostname set to '%s'\n", hostname);
+		tquic_dbg("Expected hostname set to '%s'\n", hostname);
 		return 0;
 	}
 
@@ -1207,7 +1210,7 @@ int tquic_sock_setsockopt(struct socket *sock, int level, int optname,
 		}
 		tsk->cert_verify.allow_self_signed = !!val;
 		if (val)
-			pr_warn("tquic: Self-signed certificates allowed for socket - INSECURE\n");
+			tquic_warn("Self-signed certificates allowed for socket - INSECURE\n");
 		release_sock(sk);
 		return 0;
 
@@ -1249,7 +1252,7 @@ int tquic_sock_setsockopt(struct socket *sock, int level, int optname,
 		}
 
 		/* Store qlog context (implementation would add to connection) */
-		pr_debug("tquic: qlog enabled for connection, mode=%u\n", args.mode);
+		tquic_dbg("qlog enabled for connection, mode=%u\n", args.mode);
 		release_sock(sk);
 		return 0;
 	}

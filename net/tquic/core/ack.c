@@ -202,12 +202,21 @@ static void tquic_rtt_update(struct tquic_rtt_state *rtt,
 		return;
 	}
 
-	/* Adjust RTT sample by ACK delay if handshake is confirmed */
+	/*
+	 * RFC 9002 Section 5.3: Adjust RTT sample by ACK delay.
+	 * The ACK delay is capped to max_ack_delay, which MUST be
+	 * set from the peer's max_ack_delay transport parameter
+	 * (or overridden by ACK Frequency extension). If max_ack_delay
+	 * is still at its initial value of 25ms but ACK frequency
+	 * negotiated a larger delay, loss detection uses the wrong
+	 * ceiling. We cap to max_ack_delay here regardless.
+	 */
 	adjusted_rtt = rtt_sample;
 	if (is_handshake_confirmed) {
-		u64 max_delay = min(ack_delay, rtt->max_ack_delay);
-		if (rtt_sample >= rtt->min_rtt + max_delay)
-			adjusted_rtt = rtt_sample - max_delay;
+		u64 capped_delay = min(ack_delay, rtt->max_ack_delay);
+
+		if (rtt_sample >= rtt->min_rtt + capped_delay)
+			adjusted_rtt = rtt_sample - capped_delay;
 	}
 
 	/*
@@ -790,8 +799,8 @@ int tquic_generate_ack_frame_with_timestamps(struct tquic_loss_state *loss,
 			 * and return what we have. In practice, the only
 			 * failures would be buffer overflow or missing data.
 			 */
-			pr_debug("tquic: receive timestamp encoding failed: %zd\n",
-				 ts_len);
+			tquic_dbg("receive timestamp encoding failed: %zd\n",
+				  ts_len);
 		} else {
 			offset += ts_len;
 		}
@@ -1018,7 +1027,17 @@ int tquic_parse_ack_frame(const u8 *buf, size_t len,
 	ret = tquic_varint_read(buf, len, &offset, &value);
 	if (ret < 0)
 		return ret;
-	frame->ack_delay = value << ack_delay_exponent;
+
+	/*
+	 * Guard against overflow when decoding ACK delay.
+	 * Cap to a sane maximum (16 seconds) to prevent corrupted
+	 * RTT calculations from attacker-controlled delay values.
+	 */
+	if (value > (U64_MAX >> ack_delay_exponent))
+		frame->ack_delay = 16000000ULL;  /* 16 seconds max */
+	else
+		frame->ack_delay = min_t(u64, value << ack_delay_exponent,
+					 16000000ULL);
 
 	/* ACK Range Count */
 	ret = tquic_varint_read(buf, len, &offset, &value);
@@ -1035,17 +1054,35 @@ int tquic_parse_ack_frame(const u8 *buf, size_t len,
 	if (frame->first_range > frame->largest_acked)
 		return -EINVAL;
 
-	/* Additional ACK Ranges */
-	for (i = 0; i < frame->range_count; i++) {
-		ret = tquic_varint_read(buf, len, &offset,
-					&frame->ranges[i].gap);
-		if (ret < 0)
-			return ret;
+	/*
+	 * Additional ACK Ranges.
+	 * Validate that each gap + range does not cause the running
+	 * packet number to underflow, which would indicate a
+	 * malformed or malicious ACK frame.
+	 */
+	{
+		u64 prev_smallest = frame->largest_acked - frame->first_range;
 
-		ret = tquic_varint_read(buf, len, &offset,
-					&frame->ranges[i].length);
-		if (ret < 0)
-			return ret;
+		for (i = 0; i < frame->range_count; i++) {
+			ret = tquic_varint_read(buf, len, &offset,
+						&frame->ranges[i].gap);
+			if (ret < 0)
+				return ret;
+
+			ret = tquic_varint_read(buf, len, &offset,
+						&frame->ranges[i].length);
+			if (ret < 0)
+				return ret;
+
+			/* Validate no underflow in range calculation */
+			if (prev_smallest < frame->ranges[i].gap + 2)
+				return -EPROTO;
+			prev_smallest -= frame->ranges[i].gap + 2;
+
+			if (frame->ranges[i].length > prev_smallest)
+				return -EPROTO;
+			prev_smallest -= frame->ranges[i].length;
+		}
 	}
 
 	/* ECN counts */
@@ -1079,17 +1116,29 @@ static bool tquic_ack_range_contains(const struct tquic_ack_frame *frame, u64 pn
 	u64 range_start, range_end;
 	u32 i;
 
-	/* Check first range */
+	/* Check first range -- validate no underflow */
 	range_end = frame->largest_acked;
-	range_start = frame->largest_acked - frame->first_range;
+	if (frame->first_range > range_end)
+		return false;
+	range_start = range_end - frame->first_range;
 
 	if (pn >= range_start && pn <= range_end)
 		return true;
 
 	/* Check additional ranges */
 	for (i = 0; i < frame->range_count; i++) {
-		/* Gap: number of unacknowledged packets minus 1 */
+		/*
+		 * Gap: number of unacknowledged packets minus 1.
+		 * Validate that subtraction does not underflow.
+		 * range_start is the smallest pn in previous range.
+		 * Next range_end = range_start - gap - 2.
+		 */
+		if (range_start < frame->ranges[i].gap + 2)
+			return false;
 		range_end = range_start - frame->ranges[i].gap - 2;
+
+		if (frame->ranges[i].length > range_end)
+			return false;
 		range_start = range_end - frame->ranges[i].length;
 
 		if (pn >= range_start && pn <= range_end)
@@ -1262,9 +1311,9 @@ static bool tquic_detect_persistent_congestion(struct tquic_loss_state *loss,
 	lost_range_us = ktime_us_delta(last->sent_time, first->sent_time);
 
 	if (lost_range_us > pc_duration) {
-		pr_debug("tquic: persistent congestion detected "
-			 "(lost range: %lld us, threshold: %llu us)\n",
-			 lost_range_us, pc_duration);
+		tquic_warn("persistent congestion detected "
+			   "(lost range: %lld us, threshold: %llu us)\n",
+			   lost_range_us, pc_duration);
 		return true;
 	}
 
@@ -1445,7 +1494,7 @@ int tquic_on_ack_received(struct tquic_loss_state *loss, int pn_space,
 		if (persistent_congestion) {
 			loss->in_persistent_congestion = true;
 			/* Reset congestion window to minimum */
-			pr_info("tquic: entering persistent congestion\n");
+			tquic_info("entering persistent congestion\n");
 		}
 	}
 
@@ -1478,8 +1527,8 @@ int tquic_on_ack_received(struct tquic_loss_state *loss, int pn_space,
 			 * new packets with the lost data.
 			 */
 			list_for_each_entry_safe(range, rtmp, &pkt->stream_data, list) {
-				pr_debug("tquic: lost stream %llu data at offset %llu len %u\n",
-					 range->stream_id, range->offset, range->length);
+				tquic_dbg("lost stream %llu data at offset %llu len %u\n",
+					  range->stream_id, range->offset, range->length);
 				/*
 				 * The stream layer will handle retransmission when
 				 * it queries for data to send. We just need to ensure
@@ -1624,7 +1673,7 @@ static void tquic_loss_detection_timeout(struct timer_list *t)
 	/*
 	 * RFC 9002 Section 6.2.2: PTO timeout - send probe packets
 	 */
-	pr_debug("tquic: PTO timeout, count=%u\n", loss->pto_count);
+	tquic_info("PTO timeout, count=%u\n", loss->pto_count);
 	loss->pto_count++;
 
 	spin_unlock(&loss->lock);
@@ -1644,7 +1693,7 @@ static void tquic_loss_detection_timeout(struct timer_list *t)
 			/* Build and send a PING packet for each probe */
 			if (path) {
 				tquic_xmit(conn, NULL, ping_frame, 1, false);
-				pr_debug("tquic: sent PTO probe %d\n", i + 1);
+				tquic_dbg("sent PTO probe %d\n", i + 1);
 			}
 		}
 	}
@@ -1810,7 +1859,7 @@ void tquic_process_ecn(struct tquic_loss_state *loss,
 	if (frame->ecn.ect0 < loss->ecn_acked.ect0 ||
 	    frame->ecn.ect1 < loss->ecn_acked.ect1 ||
 	    frame->ecn.ce < loss->ecn_acked.ce) {
-		pr_warn("tquic: ECN counts decreased, disabling ECN\n");
+		tquic_warn("ECN counts decreased, disabling ECN\n");
 		loss->ecn_capable = false;
 		loss->ecn_validated = false;
 		spin_unlock(&loss->lock);
@@ -1833,8 +1882,8 @@ void tquic_process_ecn(struct tquic_loss_state *loss,
 	 * Signal congestion if ECN-CE count increased
 	 */
 	if (ce_delta > 0 && path && path->cong_ops) {
-		pr_debug("tquic: ECN congestion experienced (CE +%llu)\n",
-			 ce_delta);
+		tquic_info("ECN congestion experienced (CE +%llu)\n",
+			   ce_delta);
 
 		/* Treat as packet loss for congestion control */
 		if (path->cong_ops->on_loss)
@@ -1910,8 +1959,8 @@ struct tquic_loss_state *tquic_loss_state_create(struct tquic_path *path)
 	/* ECN enabled by default */
 	loss->ecn_capable = true;
 
-	pr_debug("tquic: created loss state for path %u\n",
-		 path ? path->path_id : 0);
+	tquic_dbg("created loss state for path %u\n",
+		  path ? path->path_id : 0);
 
 	return loss;
 }
@@ -2192,7 +2241,7 @@ int __init tquic_ack_init(void)
 	if (!tquic_loss_state_cache)
 		goto err_loss_state;
 
-	pr_info("tquic: ACK processing and loss detection initialized\n");
+	tquic_info("ACK processing and loss detection initialized\n");
 	return 0;
 
 err_loss_state:
@@ -2215,7 +2264,7 @@ void __exit tquic_ack_exit(void)
 	kmem_cache_destroy(tquic_ack_range_cache);
 	kmem_cache_destroy(tquic_sent_packet_cache);
 
-	pr_info("tquic: ACK processing and loss detection cleaned up\n");
+	tquic_info("ACK processing and loss detection cleaned up\n");
 }
 
 MODULE_DESCRIPTION("TQUIC ACK Processing and Loss Detection (RFC 9002)");

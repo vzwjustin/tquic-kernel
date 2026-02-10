@@ -11,18 +11,9 @@
 #include <linux/random.h>
 #include <net/tquic.h>
 
-/* Include QUIC constants if not already available */
-#ifndef QUIC_MAX_PACKET_SIZE
-#include <uapi/linux/quic.h>
-#endif
-
-/* Fallback definitions if header not available */
-#ifndef QUIC_MAX_PACKET_SIZE
+/* QUIC constants (originally from uapi/linux/quic.h, now defined locally) */
 #define QUIC_MAX_PACKET_SIZE		1500
-#endif
-#ifndef QUIC_ERROR_INTERNAL_ERROR
 #define QUIC_ERROR_INTERNAL_ERROR	0x01
-#endif
 #include "transport_params.h"
 #include "../tquic_cid.h"
 #include "../diag/trace.h"
@@ -35,6 +26,8 @@ bool tquic_ack_should_send(struct tquic_connection *conn, u8 pn_space);
 int tquic_ack_create(struct tquic_connection *conn, u8 pn_space,
 		     struct sk_buff *skb);
 void tquic_crypto_discard_old_keys(struct tquic_connection *conn);
+void tquic_crypto_revert_key_update(struct tquic_connection *conn);
+void tquic_key_update_timeout(struct tquic_connection *conn);
 
 /*
  * struct tquic_sent_packet - Tracks a sent packet for loss detection
@@ -351,6 +344,38 @@ static void tquic_timer_key_discard_cb(struct timer_list *t)
 	tquic_crypto_discard_old_keys(conn);
 }
 
+/*
+ * tquic_timer_key_update_cb - Key update timeout callback
+ *
+ * If we initiated a key update and the peer has not responded with
+ * a packet bearing the new key phase within 3 * PTO, revert the
+ * key update to prevent the connection from being permanently stuck
+ * in the update_pending state.
+ *
+ * Per RFC 9001 Section 6.5, an endpoint SHOULD retain old keys for
+ * some time after a key update to allow for packet reordering.
+ * If the peer never responds, the connection is likely dead, but
+ * reverting the key state at least allows the local side to attempt
+ * continued communication or clean up gracefully.
+ */
+static void tquic_timer_key_update_cb(struct timer_list *t)
+{
+	struct tquic_connection *conn = from_timer(conn, t,
+						   timers[TQUIC_TIMER_KEY_UPDATE]);
+
+	if (!conn)
+		return;
+
+	/*
+	 * Revert key update via both crypto layers.
+	 * The core layer (quic_key_update.c) uses crypto[APPLICATION],
+	 * while the crypto layer (crypto/key_update.c) uses crypto_state.
+	 * Call both; each is a no-op if that layer has no pending update.
+	 */
+	tquic_crypto_revert_key_update(conn);
+	tquic_key_update_timeout(conn);
+}
+
 static void tquic_conn_tx_work(struct work_struct *work)
 {
 	struct tquic_connection *conn = container_of(work, struct tquic_connection, tx_work);
@@ -473,6 +498,7 @@ struct tquic_connection *tquic_conn_create(struct tquic_sock *tsk, bool is_serve
 	timer_setup(&conn->timers[TQUIC_TIMER_HANDSHAKE], tquic_timer_handshake_cb, 0);
 	timer_setup(&conn->timers[TQUIC_TIMER_PATH_PROBE], tquic_timer_path_probe_cb, 0);
 	timer_setup(&conn->timers[TQUIC_TIMER_KEY_DISCARD], tquic_timer_key_discard_cb, 0);
+	timer_setup(&conn->timers[TQUIC_TIMER_KEY_UPDATE], tquic_timer_key_update_cb, 0);
 
 	/* Initialize work queues */
 	INIT_WORK(&conn->tx_work, tquic_conn_tx_work);
@@ -737,6 +763,7 @@ static void tquic_conn_set_state(struct tquic_connection *conn, enum tquic_conn_
 		tquic_timer_cancel(conn, TQUIC_TIMER_ACK);
 		tquic_timer_cancel(conn, TQUIC_TIMER_HANDSHAKE);
 		tquic_timer_cancel(conn, TQUIC_TIMER_PATH_PROBE);
+		tquic_timer_cancel(conn, TQUIC_TIMER_KEY_UPDATE);
 
 		if (conn->tsk)
 			wake_up(&conn->tsk->event_wait);

@@ -22,6 +22,7 @@
 
 #include "mp_frame.h"
 #include "../core/varint.h"
+#include "../tquic_debug.h"
 
 /*
  * =============================================================================

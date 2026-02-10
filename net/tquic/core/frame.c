@@ -28,6 +28,7 @@
 #include <linux/overflow.h>
 #include <net/tquic.h>
 #include <net/tquic_frame.h>
+#include "../tquic_debug.h"
 
 /*
  * SECURITY FIX: Defense against size_t underflow in frame parsing.

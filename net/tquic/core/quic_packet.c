@@ -9,10 +9,11 @@
 
 #include <linux/slab.h>
 #include <linux/skbuff.h>
+#include <crypto/utils.h>
 #include <net/tquic.h>
 #include <net/tquic_frame.h>
 #include "../diag/trace.h"
-#include "mp_frame.h"
+#include "../tquic_debug.h"
 #include "tquic_crypto.h"
 
 /* TQUIC packet header forms */
@@ -230,8 +231,19 @@ static void quic_packet_deliver_stream_data(struct tquic_stream *stream, u64 off
 	if (!stream || !data || len == 0)
 		return;
 
+	/*
+	 * SECURITY: alloc_skb() takes an unsigned int size parameter.
+	 * len is u64 from the stream frame; if it exceeds UINT_MAX the
+	 * cast would silently truncate, allocating a tiny buffer while
+	 * skb_put_data copies len bytes -- causing a heap overflow.
+	 * Cap at a reasonable maximum (stream_len is already validated
+	 * against packet bounds by the caller, but defense in depth).
+	 */
+	if (len > U32_MAX)
+		return;
+
 	/* Allocate an skb to hold the data */
-	skb = alloc_skb(len, GFP_ATOMIC);
+	skb = alloc_skb((unsigned int)len, GFP_ATOMIC);
 	if (!skb)
 		return;
 
@@ -739,26 +751,34 @@ static void tquic_packet_process_retry(struct tquic_connection *conn,
 		return;
 	}
 
-	/* Parse DCID */
+	/*
+	 * SECURITY: Validate DCID length before using it as an offset.
+	 * RFC 9000 limits CID to 20 bytes. A crafted dcid_len of 255
+	 * would advance offset past the buffer boundary.
+	 */
+	if (skb->len < offset + 1)
+		goto drop;
 	dcid_len = data[offset++];
+	if (dcid_len > TQUIC_MAX_CONNECTION_ID_LEN)
+		goto drop;
+	if (skb->len < offset + dcid_len + 1)
+		goto drop;
 	offset += dcid_len;
 
 	/* Parse SCID - this becomes our new DCID */
 	scid_len = data[offset++];
-	if (scid_len > TQUIC_MAX_CID_LEN) {
-		kfree_skb(skb);
-		return;
-	}
+	if (scid_len > TQUIC_MAX_CID_LEN)
+		goto drop;
+	if (skb->len < offset + scid_len)
+		goto drop;
 
 	new_scid.len = scid_len;
 	memcpy(new_scid.id, data + offset, scid_len);
 	offset += scid_len;
 
 	/* The rest is the retry token (minus 16-byte integrity tag) */
-	if (skb->len - offset < 16) {
-		kfree_skb(skb);
-		return;
-	}
+	if (skb->len - offset < 16)
+		goto drop;
 
 	/*
 	 * Store token for retry - in tquic, token storage is managed
@@ -775,6 +795,7 @@ static void tquic_packet_process_retry(struct tquic_connection *conn,
 	/* Resend Initial packet */
 	schedule_work(&conn->tx_work);
 
+drop:
 	kfree_skb(skb);
 }
 
@@ -879,7 +900,8 @@ int tquic_frame_process_one(struct tquic_connection *conn, const u8 *data,
 		if (varint_len < 0) return varint_len;
 		offset += varint_len;
 
-		if (offset + val1 > len)
+		/* SECURITY: Use subtraction to avoid int + u64 overflow */
+		if (val1 > len - offset)
 			return -EINVAL;
 
 		/* Store token - handled via token_state in tquic */
@@ -987,7 +1009,7 @@ int tquic_frame_process_one(struct tquic_connection *conn, const u8 *data,
 			return -EINVAL;
 		/* Validate path challenge response */
 		if (conn->active_path && conn->active_path->validation.challenge_pending) {
-			if (memcmp(data + offset, conn->active_path->validation.challenge_data, 8) == 0) {
+			if (!crypto_memneq(data + offset, conn->active_path->validation.challenge_data, 8)) {
 				conn->active_path->state = TQUIC_PATH_VALIDATED;
 				conn->active_path->validation.challenge_pending = 0;
 			}
@@ -1026,7 +1048,11 @@ int tquic_frame_process_one(struct tquic_connection *conn, const u8 *data,
 					return vlen;
 				off += vlen;
 
-				if (off + datagram_len > len)
+				/*
+				 * SECURITY: Use subtraction to avoid
+				 * int + u64 overflow on 32-bit systems.
+				 */
+				if (datagram_len > len - off)
 					return -EINVAL;
 
 				off += datagram_len;
@@ -1057,13 +1083,10 @@ int tquic_frame_process_one(struct tquic_connection *conn, const u8 *data,
 			return consumed + 2;  /* Include frame type bytes */
 		}
 
-		/* Check for multipath frames */
-		if (tquic_mp_frame_is_multipath(frame_type)) {
-			int consumed = tquic_mp_frame_process(conn, data, len);
-			if (consumed > 0)
-				return consumed;
-			/* Fall through to unknown frame if not recognized */
-		}
+		/*
+		 * Multipath extension frames (RFC 9369) are handled by
+		 * the main input path in tquic_input.c, not here.
+		 */
 
 		/* Unknown frame type */
 		return -EPROTO;

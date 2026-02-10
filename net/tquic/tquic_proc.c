@@ -28,6 +28,7 @@
 
 #include "protocol.h"
 #include "tquic_mib.h"
+#include "tquic_debug.h"
 #include "tquic_compat.h"
 #include "tquic_ratelimit.h"
 
@@ -189,22 +190,33 @@ void tquic_log_error(struct net *net, struct tquic_connection *conn,
 	if (!ring)
 		return;
 
-	/* Get next slot (lock-free) */
-	idx = atomic_fetch_inc(&ring->head) % TQUIC_ERROR_RING_SIZE;
+	/*
+	 * Serialize writers to prevent torn entries visible to readers.
+	 * The ring is small and errors are infrequent, so contention
+	 * is not a concern.
+	 */
+	spin_lock(&ring->lock);
 
-	/* Update count (saturate at ring size) */
+	idx = atomic_read(&ring->head) & (TQUIC_ERROR_RING_SIZE - 1);
+	atomic_inc(&ring->head);
+
+	/* Track total entries written (for reader wrap detection) */
 	if (atomic_read(&ring->count) < TQUIC_ERROR_RING_SIZE)
-		atomic_inc(&ring->count);
+		atomic_set(&ring->count,
+			   min_t(int, atomic_read(&ring->count) + 1,
+				 TQUIC_ERROR_RING_SIZE));
 
 	entry = &ring->entries[idx];
 
-	/* Fill entry */
+	/* Fill entry atomically under lock */
 	entry->timestamp = ktime_get_real();
 	entry->error_code = error_code;
 
 	if (conn) {
-		memcpy(entry->scid, conn->scid.id, conn->scid.len);
-		entry->scid_len = conn->scid.len;
+		u8 len = min_t(u8, conn->scid.len, TQUIC_MAX_CID_LEN);
+
+		memcpy(entry->scid, conn->scid.id, len);
+		entry->scid_len = len;
 
 		if (conn->active_path) {
 			memcpy(&entry->local_addr,
@@ -230,6 +242,8 @@ void tquic_log_error(struct net *net, struct tquic_connection *conn,
 		strscpy(entry->message, msg, sizeof(entry->message));
 	else
 		entry->message[0] = '\0';
+
+	spin_unlock(&ring->lock);
 
 	/* Log important errors to dmesg (ratelimited) */
 	if (error_code != EQUIC_NO_ERROR) {
@@ -395,8 +409,8 @@ static int tquic_conn_seq_show(struct seq_file *seq, void *v)
 	streams_closed = conn->stats.streams_closed;
 	num_paths = conn->num_paths;
 	state = conn->state;
-	scid_len = conn->scid.len;
-	for (i = 0; i < scid_len && i < TQUIC_MAX_CID_LEN; i++)
+	scid_len = min_t(int, conn->scid.len, TQUIC_MAX_CID_LEN);
+	for (i = 0; i < scid_len; i++)
 		sprintf(&scid_hex[i * 2], "%02x", conn->scid.id[i]);
 	scid_hex[scid_len * 2] = '\0';
 	if (conn->active_path) {
@@ -546,42 +560,61 @@ static int tquic_errors_seq_show(struct seq_file *seq, void *v)
 	if (!ring)
 		return 0;
 
-	/* Calculate actual ring index */
-	head = atomic_read(&ring->head);
-	if (iter->count >= TQUIC_ERROR_RING_SIZE) {
-		/* Ring has wrapped, start from oldest */
-		idx = (head + iter->pos) % TQUIC_ERROR_RING_SIZE;
-	} else {
-		/* Ring hasn't wrapped, start from beginning */
-		idx = iter->pos;
+	/*
+	 * Hold lock to get a consistent snapshot of the entry.
+	 * Copy entry data under lock, then format outside it.
+	 */
+	{
+		struct tquic_error_entry local_entry;
+
+		spin_lock(&ring->lock);
+
+		/* Calculate actual ring index with safe unsigned masking */
+		head = atomic_read(&ring->head);
+		if (iter->count >= TQUIC_ERROR_RING_SIZE) {
+			/* Ring has wrapped, start from oldest */
+			idx = (head + iter->pos) & (TQUIC_ERROR_RING_SIZE - 1);
+		} else {
+			/* Ring hasn't wrapped, start from beginning */
+			idx = iter->pos;
+			if (idx >= TQUIC_ERROR_RING_SIZE) {
+				spin_unlock(&ring->lock);
+				return 0;
+			}
+		}
+
+		memcpy(&local_entry, &ring->entries[idx], sizeof(local_entry));
+		spin_unlock(&ring->lock);
+
+		entry = &local_entry;
+
+		/* Format timestamp */
+		ts = ktime_to_timespec64(entry->timestamp);
+
+		/* Format SCID as hex - clamp scid_len for safety */
+		if (entry->scid_len > TQUIC_MAX_CID_LEN)
+			entry->scid_len = TQUIC_MAX_CID_LEN;
+		for (i = 0; i < entry->scid_len && i < 8; i++)
+			snprintf(scid_hex + i * 2, 3, "%02x", entry->scid[i]);
+		if (entry->scid_len > 8)
+			strscpy(scid_hex + 16, "...", sizeof(scid_hex) - 16);
+		else if (entry->scid_len > 0)
+			scid_hex[entry->scid_len * 2] = '\0';
+		else
+			strscpy(scid_hex, "-", sizeof(scid_hex));
+
+		/* Output: timestamp  error  scid  local  remote  path  message */
+		seq_printf(seq, "%lld.%03ld  %3u (%-24s)  %-16s  %-20pISpc  %-20pISpc  %4u  %s\n",
+			   (long long)ts.tv_sec,
+			   ts.tv_nsec / 1000000,
+			   entry->error_code,
+			   tquic_error_name(entry->error_code),
+			   scid_hex,
+			   &entry->local_addr,
+			   &entry->remote_addr,
+			   entry->path_id,
+			   entry->message);
 	}
-
-	entry = &ring->entries[idx];
-
-	/* Format timestamp */
-	ts = ktime_to_timespec64(entry->timestamp);
-
-	/* Format SCID as hex */
-	for (i = 0; i < entry->scid_len && i < 8; i++)
-		snprintf(scid_hex + i * 2, 3, "%02x", entry->scid[i]);
-	if (entry->scid_len > 8)
-		strscpy(scid_hex + 16, "...", sizeof(scid_hex) - 16);
-	else if (entry->scid_len > 0)
-		scid_hex[entry->scid_len * 2] = '\0';
-	else
-		strscpy(scid_hex, "-", sizeof(scid_hex));
-
-	/* Output: timestamp  error  scid  local  remote  path  message */
-	seq_printf(seq, "%lld.%03ld  %3u (%-24s)  %-16s  %-20pISpc  %-20pISpc  %4u  %s\n",
-		   (long long)ts.tv_sec,
-		   ts.tv_nsec / 1000000,
-		   entry->error_code,
-		   tquic_error_name(entry->error_code),
-		   scid_hex,
-		   &entry->local_addr,
-		   &entry->remote_addr,
-		   entry->path_id,
-		   entry->message);
 
 	return 0;
 }
@@ -711,20 +744,25 @@ int tquic_proc_init(struct net *net)
 	if (!tn->error_ring)
 		return -ENOMEM;
 
-	/* Create /proc/net/tquic using proc_create_data for out-of-tree compatibility */
-	p = proc_create_data("tquic", 0444, net->proc_net,
+	/*
+	 * Create /proc/net/tquic using proc_create_data for out-of-tree
+	 * compatibility.  Connection listing exposes endpoint addresses
+	 * and connection IDs -- restrict to root/group to prevent
+	 * information disclosure to unprivileged users.
+	 */
+	p = proc_create_data("tquic", 0440, net->proc_net,
 			     &tquic_conn_proc_ops, net);
 	if (!p)
 		goto err_ring;
 
-	/* Create /proc/net/tquic_stat */
+	/* Create /proc/net/tquic_stat - aggregate counters, less sensitive */
 	p = proc_create_data("tquic_stat", 0444, net->proc_net,
 			     &tquic_stat_proc_ops, net);
 	if (!p)
 		goto err_tquic;
 
-	/* Create /proc/net/tquic_errors */
-	p = proc_create_data("tquic_errors", 0444, net->proc_net,
+	/* Create /proc/net/tquic_errors - contains addresses and CIDs */
+	p = proc_create_data("tquic_errors", 0440, net->proc_net,
 			     &tquic_errors_proc_ops, net);
 	if (!p)
 		goto err_stat;

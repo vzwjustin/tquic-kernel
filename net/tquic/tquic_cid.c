@@ -35,6 +35,7 @@
 #include <linux/skbuff.h>
 #include <net/tquic.h>
 #include "protocol.h"
+#include "tquic_debug.h"
 #include "tquic_stateless_reset.h"
 #include "security_hardening.h"
 
@@ -323,7 +324,7 @@ int tquic_cid_pool_init(struct tquic_connection *conn)
 	/* Copy initial CID to connection for easy access */
 	memcpy(&conn->scid, &entry->cid, sizeof(struct tquic_cid));
 
-	pr_debug("tquic: CID pool initialized, initial CID seq=%llu len=%u\n",
+	tquic_dbg("CID pool initialized, initial CID seq=%llu len=%u\n",
 		 entry->seq_num, entry->cid.len);
 
 	return 0;
@@ -373,7 +374,7 @@ void tquic_cid_pool_destroy(struct tquic_connection *conn)
 	kfree(pool);
 	conn->cid_pool = NULL;
 
-	pr_debug("tquic: CID pool destroyed\n");
+	tquic_dbg("CID pool destroyed\n");
 }
 
 /**
@@ -400,7 +401,7 @@ int tquic_cid_issue(struct tquic_connection *conn, struct tquic_cid *cid)
 	/* Check active CID limit (per RFC 9000, peer sets via transport param) */
 	if (pool->active_count >= pool->active_cid_limit) {
 		spin_unlock_bh(&pool->lock);
-		pr_debug("tquic: CID pool at limit (%u)\n", pool->active_count);
+		tquic_dbg("CID pool at limit (%u)\n", pool->active_count);
 		return -ENOSPC;
 	}
 
@@ -460,7 +461,7 @@ int tquic_cid_issue(struct tquic_connection *conn, struct tquic_cid *cid)
 	/* Queue NEW_CONNECTION_ID frame to notify peer */
 	tquic_send_new_connection_id(conn, cid, entry->reset_token);
 
-	pr_debug("tquic: issued new CID seq=%llu, active=%u\n",
+	tquic_dbg("issued new CID seq=%llu, active=%u\n",
 		 entry->seq_num, pool->active_count);
 
 	return 0;
@@ -496,7 +497,7 @@ int tquic_cid_retire(struct tquic_connection *conn, u64 seq_num)
 					rhashtable_remove_fast(&tquic_cid_table,
 							       &entry->node,
 							       cid_rht_params);
-				pr_debug("tquic: retired CID seq=%llu, active=%u\n",
+				tquic_dbg("retired CID seq=%llu, active=%u\n",
 					 seq_num, pool->active_count);
 			}
 			found = true;
@@ -507,7 +508,7 @@ int tquic_cid_retire(struct tquic_connection *conn, u64 seq_num)
 	spin_unlock_bh(&pool->lock);
 
 	if (!found) {
-		pr_debug("tquic: CID seq=%llu not found for retire\n", seq_num);
+		tquic_dbg("CID seq=%llu not found for retire\n", seq_num);
 		return -ENOENT;
 	}
 
@@ -567,7 +568,7 @@ int tquic_cid_get_for_migration(struct tquic_connection *conn,
 		if (entry->state == CID_STATE_ACTIVE && !entry->path) {
 			memcpy(cid, &entry->cid, sizeof(struct tquic_cid));
 			ret = 0;
-			pr_debug("tquic: found CID for migration seq=%llu\n",
+			tquic_dbg("found CID for migration seq=%llu\n",
 				 entry->seq_num);
 			break;
 		}
@@ -576,7 +577,7 @@ int tquic_cid_get_for_migration(struct tquic_connection *conn,
 	spin_unlock_bh(&pool->lock);
 
 	if (ret < 0)
-		pr_debug("tquic: no CID available for migration (need NEW_CONNECTION_ID from peer)\n");
+		tquic_dbg("no CID available for migration (need NEW_CONNECTION_ID from peer)\n");
 
 	return ret;
 }
@@ -616,7 +617,7 @@ int tquic_cid_add_remote(struct tquic_connection *conn,
 	ret = tquic_cid_security_check_new_cid(&pool->security);
 	if (ret) {
 		if (ret == -EBUSY) {
-			pr_debug("tquic: NEW_CONNECTION_ID rate limited\n");
+			tquic_dbg("NEW_CONNECTION_ID rate limited\n");
 			tquic_security_event(TQUIC_SEC_EVENT_NEW_CID_RATE_LIMIT,
 					     NULL, "rate limit exceeded");
 		}
@@ -640,6 +641,25 @@ int tquic_cid_add_remote(struct tquic_connection *conn,
 
 	spin_lock_bh(&pool->lock);
 
+	/*
+	 * Enforce active_connection_id_limit (RFC 9000 Section 5.1.1).
+	 * Count active (non-retired) remote CIDs and reject if at limit.
+	 */
+	{
+		struct tquic_cid_entry *iter;
+		u32 active_count = 0;
+
+		list_for_each_entry(iter, &pool->remote_cids, list) {
+			if (iter->state == CID_STATE_ACTIVE)
+				active_count++;
+		}
+		if (active_count >= conn->active_connection_id_limit) {
+			spin_unlock_bh(&pool->lock);
+			kfree(entry);
+			return -EPROTO;
+		}
+	}
+
 	list_add(&entry->list, &pool->remote_cids);
 
 	/* Handle retire_prior_to: retire CIDs with seq < retire_prior_to */
@@ -648,7 +668,7 @@ int tquic_cid_add_remote(struct tquic_connection *conn,
 			if (entry->seq_num < retire_prior_to &&
 			    entry->state == CID_STATE_ACTIVE) {
 				entry->state = CID_STATE_RETIRED;
-				pr_debug("tquic: auto-retired remote CID seq=%llu (prior_to=%llu)\n",
+				tquic_dbg("auto-retired remote CID seq=%llu (prior_to=%llu)\n",
 					 entry->seq_num, retire_prior_to);
 			}
 		}
@@ -656,7 +676,7 @@ int tquic_cid_add_remote(struct tquic_connection *conn,
 
 	spin_unlock_bh(&pool->lock);
 
-	pr_debug("tquic: added remote CID seq=%llu len=%u\n", seq_num, cid->len);
+	tquic_dbg("added remote CID seq=%llu len=%u\n", seq_num, cid->len);
 
 	return 0;
 }
@@ -767,7 +787,7 @@ void tquic_send_new_connection_id(struct tquic_connection *conn,
 		return;
 
 	if (!conn->active_path) {
-		pr_debug("tquic: NEW_CONNECTION_ID: no active path\n");
+		tquic_dbg("NEW_CONNECTION_ID: no active path\n");
 		return;
 	}
 
@@ -787,7 +807,7 @@ void tquic_send_new_connection_id(struct tquic_connection *conn,
 							retire_prior_to,
 							reset_token);
 	if (frame_len < 0) {
-		pr_debug("tquic: NEW_CONNECTION_ID: frame build failed (%d)\n",
+		tquic_dbg("NEW_CONNECTION_ID: frame build failed (%d)\n",
 			 frame_len);
 		kfree(frame_buf);
 		return;
@@ -820,7 +840,7 @@ void tquic_send_new_connection_id(struct tquic_connection *conn,
 	if (!work_pending(&conn->tx_work))
 		schedule_work(&conn->tx_work);
 
-	pr_debug("tquic: NEW_CONNECTION_ID queued seq=%llu len=%u retire_prior_to=%llu\n",
+	tquic_dbg("NEW_CONNECTION_ID queued seq=%llu len=%u retire_prior_to=%llu\n",
 		 cid->seq_num, cid->len, retire_prior_to);
 }
 
@@ -904,7 +924,7 @@ void tquic_send_retire_connection_id(struct tquic_connection *conn, u64 seq_num)
 	if (pool) {
 		ret = tquic_cid_security_queue_retire(&pool->security);
 		if (ret == -EPROTO) {
-			pr_warn("tquic: RETIRE_CONNECTION_ID stuffing attack detected "
+			tquic_warn("RETIRE_CONNECTION_ID stuffing attack detected "
 				"(queued >= %d)\n", TQUIC_MAX_QUEUED_RETIRE_CID);
 			tquic_security_event(TQUIC_SEC_EVENT_RETIRE_CID_FLOOD,
 					     NULL, "queue limit exceeded - closing connection");
@@ -917,7 +937,7 @@ void tquic_send_retire_connection_id(struct tquic_connection *conn, u64 seq_num)
 
 	path = conn->active_path;
 	if (!path) {
-		pr_debug("tquic: RETIRE_CONNECTION_ID: no active path\n");
+		tquic_dbg("RETIRE_CONNECTION_ID: no active path\n");
 		if (pool)
 			tquic_cid_security_dequeue_retire(&pool->security);
 		return;
@@ -931,7 +951,7 @@ void tquic_send_retire_connection_id(struct tquic_connection *conn, u64 seq_num)
 	/* Build frame */
 	frame_len = tquic_build_retire_connection_id_frame(frame_buf, 16, seq_num);
 	if (frame_len < 0) {
-		pr_debug("tquic: RETIRE_CONNECTION_ID: frame build failed (%d)\n",
+		tquic_dbg("RETIRE_CONNECTION_ID: frame build failed (%d)\n",
 			 frame_len);
 		kfree(frame_buf);
 		return;
@@ -972,7 +992,7 @@ void tquic_send_retire_connection_id(struct tquic_connection *conn, u64 seq_num)
 		skb->dev = path->dev;
 		skb->sk = conn->sk;
 
-		pr_debug("tquic: RETIRE_CONNECTION_ID sent seq=%llu\n", seq_num);
+		tquic_dbg("RETIRE_CONNECTION_ID sent seq=%llu\n", seq_num);
 	}
 
 	/* In production, hand off to output path */
@@ -1075,7 +1095,7 @@ int tquic_cid_rotate(struct tquic_connection *conn)
 		if (oldest) {
 			/* Update retire_prior_to to retire this CID */
 			pool->retire_prior_to = oldest->seq_num + 1;
-			pr_debug("tquic: CID rotation: updating retire_prior_to=%llu\n",
+			tquic_dbg("CID rotation: updating retire_prior_to=%llu\n",
 				 pool->retire_prior_to);
 		}
 	}
@@ -1089,11 +1109,11 @@ int tquic_cid_rotate(struct tquic_connection *conn)
 	/* Issue new CID (this will send NEW_CONNECTION_ID frame) */
 	ret = tquic_cid_issue(conn, &new_cid);
 	if (ret < 0 && ret != -ENOSPC) {
-		pr_debug("tquic: CID rotation: issue failed (%d)\n", ret);
+		tquic_dbg("CID rotation: issue failed (%d)\n", ret);
 		return ret;
 	}
 
-	pr_debug("tquic: CID rotation complete, new CID seq=%llu\n",
+	tquic_dbg("CID rotation complete, new CID seq=%llu\n",
 		 new_cid.seq_num);
 
 	return 0;
@@ -1176,7 +1196,7 @@ void tquic_cid_update_active_limit(struct tquic_connection *conn, u8 limit)
 	pool->active_cid_limit = limit;
 	spin_unlock_bh(&pool->lock);
 
-	pr_debug("tquic: CID active limit updated to %u\n", limit);
+	tquic_dbg("CID active limit updated to %u\n", limit);
 }
 
 /*
@@ -1280,7 +1300,7 @@ void tquic_cid_handle_peer_retire_prior_to(struct tquic_connection *conn,
 	if (retired_count > 0) {
 		u32 current_count;
 
-		pr_debug("tquic: retired %llu CIDs due to peer retire_prior_to=%llu\n",
+		tquic_dbg("retired %llu CIDs due to peer retire_prior_to=%llu\n",
 			 retired_count, retire_prior_to);
 
 		/* Issue new CIDs to maintain pool size */
@@ -1342,7 +1362,7 @@ int tquic_cid_assign_to_path(struct tquic_connection *conn,
 			memcpy(cid, &entry->cid, sizeof(*cid));
 			ret = 0;
 
-			pr_debug("tquic: assigned CID seq=%llu to path %u\n",
+			tquic_dbg("assigned CID seq=%llu to path %u\n",
 				 entry->seq_num, path->path_id);
 			break;
 		}
@@ -1377,7 +1397,7 @@ void tquic_cid_release_from_path(struct tquic_connection *conn,
 	list_for_each_entry(entry, &pool->remote_cids, list) {
 		if (entry->path == path) {
 			entry->path = NULL;
-			pr_debug("tquic: released CID seq=%llu from path %u\n",
+			tquic_dbg("released CID seq=%llu from path %u\n",
 				 entry->seq_num, path->path_id);
 			break;
 		}
@@ -1458,7 +1478,7 @@ void tquic_cid_retire_remote(struct tquic_connection *conn, u64 seq_num)
 	if (found) {
 		/* Send RETIRE_CONNECTION_ID frame to peer */
 		tquic_send_retire_connection_id(conn, seq_num);
-		pr_debug("tquic: retiring remote CID seq=%llu\n", seq_num);
+		tquic_dbg("retiring remote CID seq=%llu\n", seq_num);
 	}
 }
 
@@ -1475,9 +1495,9 @@ int __init tquic_cid_table_init(void)
 	ret = rhashtable_init(&tquic_cid_table, &cid_rht_params);
 	if (ret == 0) {
 		cid_table_initialized = true;
-		pr_info("tquic: CID hash table initialized\n");
+		tquic_info("CID hash table initialized\n");
 	} else {
-		pr_err("tquic: failed to init CID hash table: %d\n", ret);
+		tquic_err("failed to init CID hash table: %d\n", ret);
 	}
 	return ret;
 }
@@ -1492,7 +1512,7 @@ void __exit tquic_cid_table_exit(void)
 	if (cid_table_initialized) {
 		rhashtable_destroy(&tquic_cid_table);
 		cid_table_initialized = false;
-		pr_info("tquic: CID hash table destroyed\n");
+		tquic_info("CID hash table destroyed\n");
 	}
 }
 

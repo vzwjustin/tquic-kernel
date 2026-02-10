@@ -42,6 +42,7 @@
 #include <net/sock.h>
 #include <net/tquic.h>
 #include "../tquic_compat.h"
+#include "../tquic_debug.h"
 
 #include "nat_keepalive.h"
 #include "nat_lifecycle.h"
@@ -746,7 +747,7 @@ void tquic_nat_keepalive_on_timeout(struct tquic_path *path)
 		/* Adaptive adjustment for failure */
 		tquic_nat_keepalive_adaptive_adjust(state, false);
 
-		pr_warn("tquic: NAT keepalive timeout on path %u\n", path->path_id);
+		tquic_warn("NAT keepalive timeout on path %u\n", path->path_id);
 
 		/* Reschedule with shorter interval */
 		tquic_nat_keepalive_schedule(state);
@@ -1099,8 +1100,8 @@ int __init tquic_nat_keepalive_module_init(void)
 		/* Continue without lifecycle - not fatal */
 	}
 
-	pr_info("tquic: NAT keepalive subsystem initialized (default interval=%u ms)\n",
-		tquic_sysctl_get_nat_keepalive_interval());
+	tquic_info("NAT keepalive subsystem initialized (default interval=%u ms)\n",
+		   tquic_sysctl_get_nat_keepalive_interval());
 
 	return 0;
 }
@@ -1116,7 +1117,7 @@ void __exit tquic_nat_keepalive_module_exit(void)
 		tquic_nat_keepalive_wq = NULL;
 	}
 
-	pr_info("tquic: NAT keepalive subsystem cleaned up\n");
+	tquic_info("NAT keepalive subsystem cleaned up\n");
 }
 
 MODULE_DESCRIPTION("TQUIC NAT Keepalive (RFC 9308 Section 3.5)");

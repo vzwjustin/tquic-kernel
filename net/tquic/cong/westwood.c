@@ -27,6 +27,7 @@
 #include <linux/slab.h>
 #include <linux/math64.h>
 #include <net/tquic.h>
+#include "../tquic_debug.h"
 #include "persistent_cong.h"
 
 /* Westwood+ parameters */
@@ -192,7 +193,7 @@ static void *tquic_westwood_init(struct tquic_path *path)
 	ww->rtt_min_us = WESTWOOD_RTT_MIN_DEFAULT;
 	ww->bw_sample_start = ns_to_ktime(0);
 
-	pr_debug("tquic_westwood: initialized for path %u\n", path->path_id);
+	tquic_dbg("westwood: initialized for path %u\n", path->path_id);
 
 	return ww;
 }
@@ -222,6 +223,18 @@ static void tquic_westwood_on_ack(void *state, u64 bytes_acked, u64 rtt_us)
 		return;
 
 	now = ktime_get();
+
+	/*
+	 * Reset ECN round flag if an RTT has elapsed since the last
+	 * ECN response, per RFC 9002 Section 7.1 (once-per-RTT limit).
+	 */
+	if (ww->ecn_in_round && ww->rtt_current_us > 0) {
+		s64 elapsed = ktime_us_delta(now, ww->last_ecn_time);
+
+		if (elapsed >= (s64)ww->rtt_current_us)
+			ww->ecn_in_round = false;
+	}
+
 	ww->total_bytes_acked += bytes_acked;
 	ww->cumulative_ack += bytes_acked;
 
@@ -238,8 +251,8 @@ static void tquic_westwood_on_ack(void *state, u64 bytes_acked, u64 rtt_us)
 	/* Check if we've exited recovery */
 	if (ww->in_recovery && ww->cumulative_ack > ww->recovery_start) {
 		ww->in_recovery = false;
-		pr_debug("tquic_westwood: exited recovery, cwnd=%llu bw_est=%llu\n",
-			 ww->cwnd, ww->bw_est);
+		tquic_dbg("westwood: exited recovery, cwnd=%llu bw_est=%llu\n",
+			  ww->cwnd, ww->bw_est);
 	}
 
 	/* Don't grow cwnd during recovery */
@@ -255,8 +268,8 @@ static void tquic_westwood_on_ack(void *state, u64 bytes_acked, u64 rtt_us)
 
 		if (ww->cwnd >= ww->ssthresh) {
 			ww->in_slow_start = false;
-			pr_debug("tquic_westwood: exiting slow start, cwnd=%llu\n",
-				 ww->cwnd);
+			tquic_dbg("westwood: exiting slow start, cwnd=%llu\n",
+				  ww->cwnd);
 		}
 		return;
 	}
@@ -307,8 +320,8 @@ static void tquic_westwood_on_loss(void *state, u64 bytes_lost)
 	ww->recovery_start = ww->cumulative_ack + ww->cwnd;
 	ww->in_slow_start = false;
 
-	pr_debug("tquic_westwood: loss detected, cwnd=%llu ssthresh=%llu bw_est=%llu bdp=%llu\n",
-		 ww->cwnd, ww->ssthresh, ww->bw_est, bdp);
+	tquic_warn("westwood: loss, cwnd=%llu ssthresh=%llu bw_est=%llu bdp=%llu\n",
+		   ww->cwnd, ww->ssthresh, ww->bw_est, bdp);
 }
 
 /*
@@ -360,7 +373,7 @@ static void tquic_westwood_on_ecn(void *state, u64 ecn_ce_count)
 	 * Per RFC 9002: Don't respond more than once per RTT.
 	 */
 	if (ww->ecn_in_round) {
-		pr_debug("tquic_westwood: ECN CE ignored (already responded this round)\n");
+		tquic_dbg("westwood: ECN CE ignored (already responded this round)\n");
 		return;
 	}
 
@@ -368,14 +381,14 @@ static void tquic_westwood_on_ecn(void *state, u64 ecn_ce_count)
 	if (ww->rtt_min_us > 0) {
 		time_since_last = ktime_us_delta(now, ww->last_ecn_time);
 		if (time_since_last < ww->rtt_min_us) {
-			pr_debug("tquic_westwood: ECN CE ignored (within RTT window)\n");
+			tquic_dbg("westwood: ECN CE ignored (within RTT window)\n");
 			return;
 		}
 	}
 
 	/* Don't reduce if already in recovery */
 	if (ww->in_recovery) {
-		pr_debug("tquic_westwood: ECN CE ignored (in recovery)\n");
+		tquic_dbg("westwood: ECN CE ignored (in recovery)\n");
 		return;
 	}
 
@@ -413,8 +426,8 @@ static void tquic_westwood_on_ecn(void *state, u64 ecn_ce_count)
 	ww->ecn_in_round = true;
 	ww->last_ecn_time = now;
 
-	pr_debug("tquic_westwood: ECN CE response, ce_count=%llu cwnd=%llu ssthresh=%llu bw_est=%llu bdp=%llu\n",
-		 ecn_ce_count, ww->cwnd, ww->ssthresh, ww->bw_est, bdp);
+	tquic_dbg("westwood: ECN CE response, ce_count=%llu cwnd=%llu ssthresh=%llu bw_est=%llu bdp=%llu\n",
+		  ecn_ce_count, ww->cwnd, ww->ssthresh, ww->bw_est, bdp);
 }
 
 static u64 tquic_westwood_get_cwnd(void *state)
@@ -465,8 +478,8 @@ static void tquic_westwood_on_persistent_cong(void *state,
 	if (!ww || !info)
 		return;
 
-	pr_info("tquic_westwood: persistent congestion, resetting cwnd %llu -> %llu\n",
-		ww->cwnd, info->min_cwnd);
+	tquic_warn("westwood: persistent congestion, cwnd %llu -> %llu\n",
+		   ww->cwnd, info->min_cwnd);
 
 	/* Reset cwnd to minimum per RFC 9002 */
 	ww->cwnd = info->min_cwnd;
@@ -511,14 +524,13 @@ static struct tquic_cong_ops __maybe_unused tquic_westwood_ops = {
 #ifndef TQUIC_OUT_OF_TREE
 static int __init tquic_westwood_module_init(void)
 {
-	pr_info("TQUIC Westwood+ congestion control loaded\n");
+	tquic_info("cc: westwood algorithm registered\n");
 	return tquic_register_cong(&tquic_westwood_ops);
 }
 
 static void __exit tquic_westwood_module_exit(void)
 {
 	tquic_unregister_cong(&tquic_westwood_ops);
-	pr_info("TQUIC Westwood+ congestion control unloaded\n");
 }
 
 module_init(tquic_westwood_module_init);

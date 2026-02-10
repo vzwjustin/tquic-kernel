@@ -31,6 +31,7 @@
 #include <net/tquic.h>
 
 #include "napi.h"
+#include "tquic_debug.h"
 #include "protocol.h"
 #include "tquic_compat.h"
 
@@ -138,6 +139,7 @@ int tquic_napi_init(struct tquic_sock *sk, int weight)
 		return -ENOMEM;
 
 	/* Initialize fields */
+	tn->magic = TQUIC_NAPI_MAGIC;
 	tn->sk = sk;
 	tn->conn = sk->conn;
 	tn->weight = actual_weight;
@@ -189,7 +191,7 @@ void tquic_napi_cleanup(struct tquic_sock *sk)
 	if (!sk)
 		return;
 
-	tn = ((struct sock *)sk)->sk_user_data;
+	tn = tquic_napi_from_sk((struct sock *)sk);
 	if (!tn)
 		return;
 
@@ -227,7 +229,7 @@ void tquic_napi_enable(struct tquic_sock *sk)
 	if (!sk)
 		return;
 
-	tn = ((struct sock *)sk)->sk_user_data;
+	tn = tquic_napi_from_sk((struct sock *)sk);
 	if (!tn || tn->enabled)
 		return;
 
@@ -248,7 +250,7 @@ void tquic_napi_disable(struct tquic_sock *sk)
 	if (!sk)
 		return;
 
-	tn = ((struct sock *)sk)->sk_user_data;
+	tn = tquic_napi_from_sk((struct sock *)sk);
 	if (!tn || !tn->enabled)
 		return;
 
@@ -413,7 +415,7 @@ int tquic_busy_poll_init(struct tquic_sock *sk)
 	if (!sk)
 		return -EINVAL;
 
-	tn = ((struct sock *)sk)->sk_user_data;
+	tn = tquic_napi_from_sk((struct sock *)sk);
 	if (!tn)
 		return -ENOENT;
 
@@ -446,7 +448,7 @@ bool tquic_busy_poll(struct tquic_sock *sk, unsigned long budget)
 	if (!sk)
 		return false;
 
-	tn = ((struct sock *)sk)->sk_user_data;
+	tn = tquic_napi_from_sk((struct sock *)sk);
 	if (!tn || !tn->enabled || !tn->busy_poll_enabled)
 		return false;
 
@@ -498,7 +500,7 @@ int tquic_busy_poll_set_timeout(struct tquic_sock *sk, u32 timeout_us)
 	    timeout_us > TQUIC_BUSY_POLL_MAX_US)
 		return -EINVAL;
 
-	tn = ((struct sock *)sk)->sk_user_data;
+	tn = tquic_napi_from_sk((struct sock *)sk);
 	if (!tn)
 		return -ENOENT;
 
@@ -523,7 +525,7 @@ u32 tquic_busy_poll_get_timeout(struct tquic_sock *sk)
 	if (!sk)
 		return 0;
 
-	tn = ((struct sock *)sk)->sk_user_data;
+	tn = tquic_napi_from_sk((struct sock *)sk);
 	if (!tn)
 		return 0;
 
@@ -642,22 +644,33 @@ EXPORT_SYMBOL_GPL(tquic_napi_percpu_cleanup);
  */
 struct tquic_napi *tquic_napi_percpu_get(struct tquic_napi_percpu *percpu)
 {
+	struct tquic_napi *tn;
 	int cpu;
 
 	if (!percpu)
 		return NULL;
 
-	cpu = smp_processor_id();
+	/*
+	 * Disable preemption to get a stable CPU ID and ensure the
+	 * returned per-CPU pointer remains valid for the caller.
+	 * Caller must call put_cpu() or equivalent when done.
+	 */
+	cpu = get_cpu();
 
 	/* Check if this CPU is active */
 	if (!cpumask_test_cpu(cpu, &percpu->active_cpus)) {
 		/* Fall back to first active CPU */
 		cpu = cpumask_first(&percpu->active_cpus);
-		if (cpu >= nr_cpu_ids)
+		if (cpu >= nr_cpu_ids) {
+			put_cpu();
 			return NULL;
+		}
 	}
 
-	return per_cpu_ptr(percpu->napi, cpu);
+	tn = per_cpu_ptr(percpu->napi, cpu);
+	put_cpu();
+
+	return tn;
 }
 EXPORT_SYMBOL_GPL(tquic_napi_percpu_get);
 
@@ -905,7 +918,7 @@ int tquic_napi_setsockopt(struct sock *sk, int level, int optname,
 	if (!tsk)
 		return -ENOENT;
 
-	tn = sk->sk_user_data;
+	tn = tquic_napi_from_sk(sk);
 	if (!tn)
 		return -ENOENT;
 
@@ -966,7 +979,7 @@ int tquic_napi_getsockopt(struct sock *sk, int level, int optname,
 	if (len < sizeof(int))
 		return -EINVAL;
 
-	tn = sk->sk_user_data;
+	tn = tquic_napi_from_sk(sk);
 	if (!tn)
 		return -ENOENT;
 
@@ -1049,7 +1062,7 @@ int __init tquic_napi_subsys_init(void)
 	/* Create dummy net device for NAPI attachment */
 	tquic_napi_dev = alloc_netdev_dummy(0);
 	if (!tquic_napi_dev) {
-		pr_err("tquic_napi: failed to allocate net device\n");
+		tquic_err("napi:failed to allocate net device\n");
 		return -ENOMEM;
 	}
 
@@ -1057,7 +1070,7 @@ int __init tquic_napi_subsys_init(void)
 	pde = proc_create("tquic_napi", 0444, init_net.proc_net,
 			  &tquic_napi_proc_ops);
 	if (!pde) {
-		pr_warn("tquic_napi: failed to create /proc/net/tquic_napi\n");
+		tquic_warn("napi:failed to create /proc/net/tquic_napi\n");
 		tquic_napi_proc_disabled = true;
 		/*
 		 * Non-fatal - continue without proc file. NAPI statistics
@@ -1068,7 +1081,7 @@ int __init tquic_napi_subsys_init(void)
 		tquic_napi_proc_disabled = false;
 	}
 
-	pr_info("TQUIC NAPI subsystem initialized\n");
+	tquic_info("NAPIsubsystem initialized\n");
 
 	return 0;
 }
@@ -1088,7 +1101,7 @@ void __exit tquic_napi_subsys_exit(void)
 		tquic_napi_dev = NULL;
 	}
 
-	pr_info("TQUIC NAPI subsystem exited\n");
+	tquic_info("NAPIsubsystem exited\n");
 }
 
 MODULE_DESCRIPTION("TQUIC NAPI Polling Support");

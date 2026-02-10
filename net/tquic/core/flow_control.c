@@ -21,6 +21,7 @@
 #include <linux/ktime.h>
 #include <net/tquic.h>
 
+#include "../tquic_debug.h"
 #include "flow_control.h"
 
 /*
@@ -115,7 +116,8 @@ int tquic_fc_init(struct tquic_connection *conn, struct tquic_fc_config *config)
 	/* Store in connection structure */
 	conn->fc = fc;
 
-	pr_debug("tquic_fc: initialized flow control state for connection\n");
+	tquic_conn_dbg(conn, "flow control initialized max_data=%llu\n",
+		       fc->config.initial_max_data);
 
 	return 0;
 }
@@ -137,7 +139,7 @@ void tquic_fc_cleanup(struct tquic_connection *conn)
 		conn->fc = NULL;
 	}
 
-	pr_debug("tquic_fc: cleaned up flow control state\n");
+	tquic_conn_dbg(conn, "flow control cleaned up\n");
 }
 EXPORT_SYMBOL_GPL(tquic_fc_cleanup);
 
@@ -326,7 +328,7 @@ int tquic_fc_conn_data_received(struct tquic_fc_state *fc, u64 bytes)
 
 	/* Check if peer is violating our limit */
 	if (fc->conn.data_received + bytes > fc->conn.max_data_local) {
-		pr_warn("tquic_fc: peer exceeded MAX_DATA limit\n");
+		tquic_warn("peer exceeded MAX_DATA limit\n");
 		ret = -EPROTO;  /* FLOW_CONTROL_ERROR */
 	} else {
 		fc->conn.data_received += bytes;
@@ -398,7 +400,7 @@ int tquic_fc_handle_max_data(struct tquic_fc_state *fc, u64 max_data)
 		}
 
 		fc->stats.max_data_frames_received++;
-		pr_debug("tquic_fc: received MAX_DATA=%llu\n", max_data);
+		tquic_dbg("received MAX_DATA=%llu\n", max_data);
 	}
 
 	spin_unlock_irqrestore(&fc->conn.lock, flags);
@@ -435,8 +437,8 @@ void tquic_fc_handle_data_blocked(struct tquic_fc_state *fc, u64 max_data)
 		/* Consider increasing window */
 		fc->autotune.growth_rate = min(fc->autotune.growth_rate + 64,
 					       512U);  /* Max 2x growth */
-		pr_debug("tquic_fc: peer blocked at %llu, may increase window\n",
-			 max_data);
+		tquic_dbg("peer blocked at %llu, may increase window\n",
+			  max_data);
 	}
 
 	spin_unlock_irqrestore(&fc->conn.lock, flags);
@@ -509,7 +511,7 @@ void tquic_fc_max_data_sent(struct tquic_fc_state *fc, u64 max_data)
 
 	spin_unlock_irqrestore(&fc->conn.lock, flags);
 
-	pr_debug("tquic_fc: sent MAX_DATA=%llu\n", max_data);
+	tquic_dbg("fc: sent MAX_DATA=%llu\n", max_data);
 }
 EXPORT_SYMBOL_GPL(tquic_fc_max_data_sent);
 
@@ -574,7 +576,7 @@ void tquic_fc_data_blocked_sent(struct tquic_fc_state *fc)
 	fc->stats.data_blocked_frames_sent++;
 	spin_unlock_irqrestore(&fc->conn.lock, flags);
 
-	pr_debug("tquic_fc: sent DATA_BLOCKED\n");
+	tquic_dbg("fc: sent DATA_BLOCKED\n");
 }
 EXPORT_SYMBOL_GPL(tquic_fc_data_blocked_sent);
 
@@ -693,8 +695,8 @@ int tquic_fc_stream_data_received(struct tquic_fc_stream_state *stream,
 
 	/* Check for flow control violation */
 	if (end_offset > stream->max_data_local) {
-		pr_warn("tquic_fc: stream %llu exceeded MAX_STREAM_DATA\n",
-			stream->stream_id);
+		tquic_warn("fc: stream %llu exceeded MAX_STREAM_DATA\n",
+			   stream->stream_id);
 		ret = -EPROTO;
 		goto out;
 	}
@@ -708,7 +710,7 @@ int tquic_fc_stream_data_received(struct tquic_fc_stream_state *stream,
 		if (stream->final_size_known) {
 			/* Verify consistent final size */
 			if (end_offset != stream->final_size) {
-				pr_warn("tquic_fc: inconsistent final size\n");
+				tquic_warn("fc: inconsistent final size\n");
 				ret = -EPROTO;
 				goto out;
 			}
@@ -787,8 +789,8 @@ int tquic_fc_handle_max_stream_data(struct tquic_fc_stream_state *stream,
 		if (stream->data_sent < max_data)
 			stream->data_blocked_sent = false;
 
-		pr_debug("tquic_fc: stream %llu MAX_STREAM_DATA=%llu\n",
-			 stream->stream_id, max_data);
+		tquic_dbg("fc: stream %llu MAX_STREAM_DATA=%llu\n",
+			  stream->stream_id, max_data);
 	}
 
 	spin_unlock_irqrestore(&stream->lock, flags);
@@ -814,8 +816,8 @@ void tquic_fc_handle_stream_data_blocked(struct tquic_fc_stream_state *stream,
 	stream->data_blocked_received = true;
 	spin_unlock_irqrestore(&stream->lock, flags);
 
-	pr_debug("tquic_fc: stream %llu blocked at %llu\n",
-		 stream->stream_id, max_data);
+	tquic_dbg("fc: stream %llu blocked at %llu\n",
+		  stream->stream_id, max_data);
 }
 EXPORT_SYMBOL_GPL(tquic_fc_handle_stream_data_blocked);
 
@@ -1096,7 +1098,7 @@ int tquic_fc_bidi_stream_received(struct tquic_fc_state *fc, u64 stream_id)
 
 	/* Check if this would exceed our limit */
 	if (stream_num >= fc->streams.max_streams_bidi_local) {
-		pr_warn("tquic_fc: peer exceeded MAX_STREAMS (bidi)\n");
+		tquic_warn("fc: peer exceeded MAX_STREAMS (bidi)\n");
 		ret = -EPROTO;
 	} else {
 		/* Track highest stream number seen */
@@ -1131,7 +1133,7 @@ int tquic_fc_uni_stream_received(struct tquic_fc_state *fc, u64 stream_id)
 	spin_lock_irqsave(&fc->streams.lock, flags);
 
 	if (stream_num >= fc->streams.max_streams_uni_local) {
-		pr_warn("tquic_fc: peer exceeded MAX_STREAMS (uni)\n");
+		tquic_warn("fc: peer exceeded MAX_STREAMS (uni)\n");
 		ret = -EPROTO;
 	} else {
 		if (stream_num >= fc->streams.streams_uni_received)
@@ -1224,8 +1226,8 @@ void tquic_fc_handle_streams_blocked(struct tquic_fc_state *fc, u64 max_streams,
 
 	spin_unlock_irqrestore(&fc->streams.lock, flags);
 
-	pr_debug("tquic_fc: peer STREAMS_BLOCKED at %llu (%s)\n",
-		 max_streams, bidi ? "bidi" : "uni");
+	tquic_dbg("fc: peer STREAMS_BLOCKED at %llu (%s)\n",
+		  max_streams, bidi ? "bidi" : "uni");
 }
 EXPORT_SYMBOL_GPL(tquic_fc_handle_streams_blocked);
 
@@ -1894,7 +1896,7 @@ void tquic_fc_reset(struct tquic_fc_state *fc)
 
 	fc->blocked_flags = 0;
 
-	pr_debug("tquic_fc: flow control state reset\n");
+	tquic_dbg("fc: flow control state reset\n");
 }
 EXPORT_SYMBOL_GPL(tquic_fc_reset);
 

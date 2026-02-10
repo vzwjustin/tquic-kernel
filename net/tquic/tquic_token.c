@@ -28,6 +28,7 @@
 
 #include "tquic_token.h"
 #include "tquic_mib.h"
+#include "tquic_debug.h"
 
 /* QUIC frame type for NEW_TOKEN */
 #define TQUIC_FRAME_NEW_TOKEN		0x07
@@ -45,6 +46,13 @@ static DEFINE_MUTEX(tquic_token_mutex);
 
 /* Default token lifetime (can be overridden by sysctl) */
 static int tquic_token_lifetime_seconds = TQUIC_TOKEN_DEFAULT_LIFETIME;
+
+/*
+ * Persistent server token key.
+ * Used for NEW_TOKEN frames so that tokens can be validated on
+ * future connections. Initialized once at module load.
+ */
+static struct tquic_token_key tquic_server_token_key;
 
 /*
  * =============================================================================
@@ -239,11 +247,11 @@ int tquic_token_generate(const struct tquic_token_key *key,
 {
 	struct tquic_token_plaintext pt;
 	struct aead_request *req;
-	struct scatterlist sg[2];
+	struct scatterlist sg;
+	u8 *combined = NULL;
 	u8 plaintext[128];
-	u8 ciphertext[128];
 	u8 iv[TQUIC_TOKEN_IV_LEN];
-	u8 aad[TQUIC_TOKEN_AAD_LEN];
+	size_t combined_len;
 	int pt_len;
 	int ret;
 	u8 *p;
@@ -268,11 +276,16 @@ int tquic_token_generate(const struct tquic_token_key *key,
 		memcpy(pt.original_dcid, original_dcid->id, original_dcid->len);
 	}
 
-	/* Serialize plaintext */
+	/* Serialize plaintext with bounds checking */
 	p = plaintext;
 	*p++ = pt.type;
 	*p++ = pt.addr_family;
 	*p++ = pt.addr_len;
+
+	/* Verify serialized size will not exceed buffer */
+	if (3 + pt.addr_len + 8 + TQUIC_TOKEN_RANDOM_LEN > sizeof(plaintext))
+		return -EINVAL;
+
 	memcpy(p, pt.addr, pt.addr_len);
 	p += pt.addr_len;
 
@@ -291,6 +304,8 @@ int tquic_token_generate(const struct tquic_token_key *key,
 
 	/* Original DCID for retry tokens */
 	if (type == TQUIC_TOKEN_TYPE_RETRY && original_dcid) {
+		if ((p - plaintext) + 1 + pt.odcid_len > sizeof(plaintext))
+			return -EINVAL;
 		*p++ = pt.odcid_len;
 		memcpy(p, pt.original_dcid, pt.odcid_len);
 		p += pt.odcid_len;
@@ -318,9 +333,6 @@ int tquic_token_generate(const struct tquic_token_key *key,
 	/* Generate random IV */
 	get_random_bytes(iv, TQUIC_TOKEN_IV_LEN);
 
-	/* Prepare AAD */
-	memcpy(aad, TQUIC_TOKEN_AAD, TQUIC_TOKEN_AAD_LEN);
-
 	/* Allocate request */
 	req = aead_request_alloc(aead, GFP_KERNEL);
 	if (!req) {
@@ -328,14 +340,25 @@ int tquic_token_generate(const struct tquic_token_key *key,
 		return -ENOMEM;
 	}
 
-	/* Prepare ciphertext buffer (plaintext + tag) */
-	memcpy(ciphertext, plaintext, pt_len);
+	/*
+	 * AEAD with AAD: the combined buffer holds AAD || plaintext || tag.
+	 * The AAD provides domain separation so tokens cannot be confused
+	 * with other encrypted data using the same key.
+	 */
+	combined_len = TQUIC_TOKEN_AAD_LEN + pt_len + TQUIC_TOKEN_TAG_LEN;
+	combined = kmalloc(combined_len, GFP_KERNEL);
+	if (!combined) {
+		aead_request_free(req);
+		mutex_unlock(&tquic_token_mutex);
+		return -ENOMEM;
+	}
 
-	/* Set up scatter-gather */
-	sg_init_one(&sg[0], ciphertext, pt_len + TQUIC_TOKEN_TAG_LEN);
+	memcpy(combined, TQUIC_TOKEN_AAD, TQUIC_TOKEN_AAD_LEN);
+	memcpy(combined + TQUIC_TOKEN_AAD_LEN, plaintext, pt_len);
 
-	aead_request_set_crypt(req, &sg[0], &sg[0], pt_len, iv);
-	aead_request_set_ad(req, 0);
+	sg_init_one(&sg, combined, combined_len);
+	aead_request_set_crypt(req, &sg, &sg, pt_len, iv);
+	aead_request_set_ad(req, TQUIC_TOKEN_AAD_LEN);
 
 	/* Encrypt */
 	ret = crypto_aead_encrypt(req);
@@ -343,18 +366,27 @@ int tquic_token_generate(const struct tquic_token_key *key,
 	aead_request_free(req);
 	mutex_unlock(&tquic_token_mutex);
 
-	if (ret)
+	if (ret) {
+		kfree(combined);
 		return ret;
+	}
 
-	/* Assemble token: Version || IV || Ciphertext || Tag */
+	/*
+	 * Assemble token: Version || IV || Ciphertext || Tag
+	 * The ciphertext+tag starts after the AAD in the combined buffer.
+	 */
 	p = token;
 	*p++ = TQUIC_TOKEN_VERSION;
 	memcpy(p, iv, TQUIC_TOKEN_IV_LEN);
 	p += TQUIC_TOKEN_IV_LEN;
-	memcpy(p, ciphertext, pt_len + TQUIC_TOKEN_TAG_LEN);
+	memcpy(p, combined + TQUIC_TOKEN_AAD_LEN,
+	       pt_len + TQUIC_TOKEN_TAG_LEN);
 	p += pt_len + TQUIC_TOKEN_TAG_LEN;
 
 	*token_len = p - token;
+
+	memzero_explicit(combined, combined_len);
+	kfree(combined);
 
 	return 0;
 }
@@ -373,14 +405,14 @@ int tquic_token_validate(const struct tquic_token_key *key,
 			 struct tquic_cid *original_dcid)
 {
 	struct aead_request *req;
-	struct scatterlist sg[1];
-	u8 ciphertext[128];
-	u8 plaintext[128];
+	struct scatterlist sg;
+	u8 *combined = NULL;
 	u8 iv[TQUIC_TOKEN_IV_LEN];
 	u8 version;
-	int ct_len;
+	int ct_len, pt_len;
+	size_t combined_len;
 	int ret;
-	const u8 *p;
+	const u8 *p, *pt_end;
 	u8 type, addr_family, addr_len;
 	u8 addr[TQUIC_TOKEN_ADDR_MAX_LEN];
 	u64 timestamp;
@@ -390,8 +422,8 @@ int tquic_token_validate(const struct tquic_token_key *key,
 	if (!key || !key->valid || !client_addr || !token)
 		return -EINVAL;
 
-	/* Minimum token length: version + IV + tag */
-	if (token_len < 1 + TQUIC_TOKEN_IV_LEN + TQUIC_TOKEN_TAG_LEN)
+	/* Minimum token length: version + IV + at least 1 byte plaintext + tag */
+	if (token_len < 1 + TQUIC_TOKEN_IV_LEN + 1 + TQUIC_TOKEN_TAG_LEN)
 		return -EINVAL;
 
 	/* Check version */
@@ -402,18 +434,30 @@ int tquic_token_validate(const struct tquic_token_key *key,
 	/* Extract IV */
 	memcpy(iv, token + 1, TQUIC_TOKEN_IV_LEN);
 
-	/* Ciphertext length */
+	/* Ciphertext + tag length (excludes version and IV) */
 	ct_len = token_len - 1 - TQUIC_TOKEN_IV_LEN;
-	if (ct_len > sizeof(ciphertext))
+	if (ct_len < (int)TQUIC_TOKEN_TAG_LEN + 1 || ct_len > 256)
 		return -EINVAL;
 
-	memcpy(ciphertext, token + 1 + TQUIC_TOKEN_IV_LEN, ct_len);
+	/*
+	 * Build combined buffer: AAD || ciphertext || tag
+	 * The AAD must match what was used during encryption.
+	 */
+	combined_len = TQUIC_TOKEN_AAD_LEN + ct_len;
+	combined = kmalloc(combined_len, GFP_KERNEL);
+	if (!combined)
+		return -ENOMEM;
+
+	memcpy(combined, TQUIC_TOKEN_AAD, TQUIC_TOKEN_AAD_LEN);
+	memcpy(combined + TQUIC_TOKEN_AAD_LEN,
+	       token + 1 + TQUIC_TOKEN_IV_LEN, ct_len);
 
 	/* Use global AEAD handle */
 	mutex_lock(&tquic_token_mutex);
 
 	if (!tquic_token_aead) {
 		mutex_unlock(&tquic_token_mutex);
+		kfree(combined);
 		return -EINVAL;
 	}
 
@@ -423,6 +467,7 @@ int tquic_token_validate(const struct tquic_token_key *key,
 	ret = crypto_aead_setkey(aead, key->key, TQUIC_TOKEN_KEY_LEN);
 	if (ret) {
 		mutex_unlock(&tquic_token_mutex);
+		kfree(combined);
 		return ret;
 	}
 
@@ -430,40 +475,50 @@ int tquic_token_validate(const struct tquic_token_key *key,
 	req = aead_request_alloc(aead, GFP_KERNEL);
 	if (!req) {
 		mutex_unlock(&tquic_token_mutex);
+		kfree(combined);
 		return -ENOMEM;
 	}
 
-	/* Set up scatter-gather for in-place decryption */
-	memcpy(plaintext, ciphertext, ct_len);
-	sg_init_one(&sg[0], plaintext, ct_len);
+	sg_init_one(&sg, combined, combined_len);
+	aead_request_set_crypt(req, &sg, &sg, ct_len, iv);
+	aead_request_set_ad(req, TQUIC_TOKEN_AAD_LEN);
 
-	aead_request_set_crypt(req, &sg[0], &sg[0], ct_len, iv);
-	aead_request_set_ad(req, 0);
-
-	/* Decrypt */
+	/* Decrypt and authenticate */
 	ret = crypto_aead_decrypt(req);
 
 	aead_request_free(req);
 	mutex_unlock(&tquic_token_mutex);
 
 	if (ret) {
-		/* Decryption failed - invalid token */
+		/* Decryption/authentication failed - invalid token */
+		kfree(combined);
 		return -EINVAL;
 	}
 
-	/* Parse decrypted plaintext */
-	ct_len -= TQUIC_TOKEN_TAG_LEN;  /* Remove tag from length */
-	p = plaintext;
+	/*
+	 * Parse decrypted plaintext (located after AAD in combined buffer).
+	 * The AEAD tag has been consumed, so plaintext length is ct_len - tag.
+	 */
+	pt_len = ct_len - TQUIC_TOKEN_TAG_LEN;
+	p = combined + TQUIC_TOKEN_AAD_LEN;
+	pt_end = p + pt_len;
 
-	if (ct_len < 3)
-		return -EINVAL;
+	/* Need at least: type(1) + family(1) + addr_len(1) = 3 bytes */
+	if (pt_len < 3) {
+		ret = -EINVAL;
+		goto out_free;
+	}
 
 	type = *p++;
 	addr_family = *p++;
 	addr_len = *p++;
 
-	if (addr_len > TQUIC_TOKEN_ADDR_MAX_LEN || ct_len < 3 + addr_len + 8)
-		return -EINVAL;
+	/* Validate addr_len and ensure sufficient remaining data */
+	if (addr_len > TQUIC_TOKEN_ADDR_MAX_LEN ||
+	    p + addr_len + 8 + TQUIC_TOKEN_RANDOM_LEN > pt_end) {
+		ret = -EINVAL;
+		goto out_free;
+	}
 
 	memcpy(addr, p, addr_len);
 	p += addr_len;
@@ -475,34 +530,54 @@ int tquic_token_validate(const struct tquic_token_key *key,
 		    ((u64)p[6] << 8) | p[7];
 	p += 8;
 
-	/* Skip random bytes */
+	/* Skip random bytes (bounds already checked above) */
 	p += TQUIC_TOKEN_RANDOM_LEN;
 
 	/* Check for original DCID (retry tokens) */
 	if (type == TQUIC_TOKEN_TYPE_RETRY && original_dcid) {
 		u8 odcid_len;
-		if (p >= plaintext + ct_len)
-			return -EINVAL;
+
+		if (p >= pt_end) {
+			ret = -EINVAL;
+			goto out_free;
+		}
 		odcid_len = *p++;
-		if (odcid_len > TQUIC_MAX_CID_LEN || p + odcid_len > plaintext + ct_len)
-			return -EINVAL;
+		if (odcid_len > TQUIC_MAX_CID_LEN || p + odcid_len > pt_end) {
+			ret = -EINVAL;
+			goto out_free;
+		}
 		original_dcid->len = odcid_len;
 		memcpy(original_dcid->id, p, odcid_len);
 	}
 
-	/* Validate timestamp */
+	/* Validate timestamp -- check for future tokens first */
 	now = ktime_get_real_seconds();
+	if (timestamp > now + 5) {
+		/* Allow 5 seconds of clock skew, reject far-future tokens */
+		ret = -EINVAL;
+		goto out_free;
+	}
+
 	if (lifetime_secs == 0)
 		lifetime_secs = tquic_token_lifetime_seconds;
 
-	if (now > timestamp + lifetime_secs)
-		return -ETIMEDOUT;
+	if (now > timestamp + lifetime_secs) {
+		ret = -ETIMEDOUT;
+		goto out_free;
+	}
 
 	/* Validate address */
-	if (!tquic_addr_match(client_addr, addr, addr_len, addr_family))
-		return -EACCES;
+	if (!tquic_addr_match(client_addr, addr, addr_len, addr_family)) {
+		ret = -EACCES;
+		goto out_free;
+	}
 
-	return 0;
+	ret = 0;
+
+out_free:
+	memzero_explicit(combined, combined_len);
+	kfree(combined);
+	return ret;
 }
 EXPORT_SYMBOL_GPL(tquic_token_validate);
 
@@ -566,7 +641,6 @@ int tquic_send_new_token(struct tquic_connection *conn)
 	struct sk_buff *skb;
 	u8 frame_buf[TQUIC_TOKEN_MAX_LEN + 16];
 	int frame_len;
-	struct tquic_token_key key;
 	int ret;
 
 	if (!conn || conn->state != TQUIC_CONN_CONNECTED)
@@ -580,20 +654,19 @@ int tquic_send_new_token(struct tquic_connection *conn)
 	if (!path)
 		return -ENETUNREACH;
 
-	/* Initialize a key for this connection (in production, use persistent key) */
-	ret = tquic_token_init_key(&key);
-	if (ret) {
-		memzero_explicit(&key, sizeof(key));
-		return ret;
-	}
+	/*
+	 * Use the persistent server token key so that tokens issued
+	 * here can be validated when the client reconnects later.
+	 */
+	if (!tquic_server_token_key.valid)
+		return -EINVAL;
 
 	/* Generate NEW_TOKEN frame */
-	frame_len = tquic_gen_new_token_frame(&key, &path->remote_addr,
+	frame_len = tquic_gen_new_token_frame(&tquic_server_token_key,
+					      &path->remote_addr,
 					      frame_buf, sizeof(frame_buf));
-	if (frame_len < 0) {
-		ret = frame_len;
-		goto out_clear_key;
-	}
+	if (frame_len < 0)
+		return frame_len;
 
 	/*
 	 * Queue frame for transmission via the connection's control frame queue.
@@ -601,10 +674,8 @@ int tquic_send_new_token(struct tquic_connection *conn)
 	 * encrypted and transmitted by the output path.
 	 */
 	skb = alloc_skb(frame_len + 32, GFP_KERNEL);
-	if (!skb) {
-		ret = -ENOMEM;
-		goto out_clear_key;
-	}
+	if (!skb)
+		return -ENOMEM;
 
 	/* Reserve headroom for potential header additions */
 	skb_reserve(skb, 16);
@@ -625,14 +696,9 @@ int tquic_send_new_token(struct tquic_connection *conn)
 	if (conn->sk)
 		TQUIC_INC_STATS(sock_net(conn->sk), TQUIC_MIB_NEWTOKENSTX);
 
-	pr_debug("tquic: NEW_TOKEN frame queued, len=%d\n", frame_len);
+	tquic_dbg("NEW_TOKEN frame queued, len=%d\n", frame_len);
 
-	ret = 0;
-
-out_clear_key:
-	/* Clear key material from stack on all paths */
-	memzero_explicit(&key, sizeof(key));
-	return ret;
+	return 0;
 }
 EXPORT_SYMBOL_GPL(tquic_send_new_token);
 
@@ -640,7 +706,7 @@ int tquic_process_new_token_frame(struct tquic_connection *conn,
 				  const u8 *data, size_t len)
 {
 	u64 token_len;
-	int ret;
+	int varint_len;
 	const u8 *p = data;
 
 	if (!conn || !data || len < 1)
@@ -651,24 +717,36 @@ int tquic_process_new_token_frame(struct tquic_connection *conn,
 		return -EINVAL;
 
 	/* Parse token length */
-	ret = tquic_token_decode_varint(p, len, &token_len);
-	if (ret < 0)
-		return ret;
-	p += ret;
-	len -= ret;
+	varint_len = tquic_token_decode_varint(p, len, &token_len);
+	if (varint_len < 0)
+		return varint_len;
+	p += varint_len;
+	len -= varint_len;
 
-	if (len < token_len)
+	/* Validate token_len fits in size_t and does not exceed remaining data */
+	if (token_len > TQUIC_TOKEN_MAX_LEN || token_len > len)
 		return -EINVAL;
 
-	/* Store token for future use */
-	/* In production, this would be stored per server address */
-	pr_debug("tquic: received NEW_TOKEN, len=%llu\n", token_len);
+	/* Zero-length tokens are invalid per RFC 9000 Section 19.7 */
+	if (token_len == 0)
+		return -EINVAL;
+
+	/*
+	 * Store the token for future connection attempts to this server.
+	 * The token is bound to the server address from the active path.
+	 */
+	if (conn->active_path && conn->token_state) {
+		tquic_token_store(conn->token_state, p, (u16)token_len,
+				  &conn->active_path->remote_addr);
+	}
+
+	tquic_dbg("received NEW_TOKEN, len=%llu\n", token_len);
 
 	/* Update MIB counter */
 	if (conn->sk)
 		TQUIC_INC_STATS(sock_net(conn->sk), TQUIC_MIB_NEWTOKENSRX);
 
-	return ret + token_len;  /* Return bytes consumed */
+	return varint_len + (int)token_len;  /* Return bytes consumed */
 }
 EXPORT_SYMBOL_GPL(tquic_process_new_token_frame);
 
@@ -783,33 +861,47 @@ EXPORT_SYMBOL_GPL(tquic_token_clear);
 
 int __init tquic_token_init(void)
 {
+	int ret;
+
 	/* Allocate global AEAD handle for token encryption */
 	tquic_token_aead = crypto_alloc_aead("gcm(aes)", 0, 0);
 	if (IS_ERR(tquic_token_aead)) {
-		pr_err("tquic: failed to allocate token AEAD cipher\n");
+		tquic_err("failed to allocate token AEAD cipher\n");
 		return PTR_ERR(tquic_token_aead);
 	}
 
 	/* Set authentication tag length */
 	if (crypto_aead_setauthsize(tquic_token_aead, TQUIC_TOKEN_TAG_LEN)) {
-		pr_err("tquic: failed to set token auth tag size\n");
+		tquic_err("failed to set token auth tag size\n");
 		crypto_free_aead(tquic_token_aead);
 		tquic_token_aead = NULL;
 		return -EINVAL;
 	}
 
-	pr_info("tquic: token subsystem initialized\n");
+	/* Initialize persistent server token key for NEW_TOKEN frames */
+	ret = tquic_token_init_key(&tquic_server_token_key);
+	if (ret) {
+		tquic_err("failed to initialize server token key\n");
+		crypto_free_aead(tquic_token_aead);
+		tquic_token_aead = NULL;
+		return ret;
+	}
+
+	tquic_info("token subsystem initialized\n");
 	return 0;
 }
 
 void __exit tquic_token_exit(void)
 {
+	/* Securely wipe the persistent server token key */
+	memzero_explicit(&tquic_server_token_key, sizeof(tquic_server_token_key));
+
 	if (tquic_token_aead) {
 		crypto_free_aead(tquic_token_aead);
 		tquic_token_aead = NULL;
 	}
 
-	pr_info("tquic: token subsystem cleanup complete\n");
+	tquic_info("token subsystem cleanup complete\n");
 }
 
 MODULE_DESCRIPTION("TQUIC Address Validation Token Support");

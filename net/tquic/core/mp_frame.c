@@ -14,6 +14,7 @@
 #include <linux/workqueue.h>
 #include <net/tquic.h>
 #include "varint.h"
+#include "../tquic_debug.h"
 #define _TQUIC_MP_FRAME_ALIASES	/* suppress macro aliases; we provide symbol aliases below */
 #include "mp_frame.h"
 #include "../bond/tquic_bonding.h"
@@ -118,8 +119,8 @@ int tquic_frame_process_path_abandon(struct tquic_connection *conn,
 	/* Skip reason phrase (for logging, we could store it) */
 	offset += reason_len;
 
-	pr_debug("TQUIC: received PATH_ABANDON path_id=%llu error=%llu\n",
-		 path_id, error_code);
+	tquic_conn_info(conn, "PATH_ABANDON path=%llu error=%llu\n",
+			path_id, error_code);
 
 	/*
 	 * Handle path abandonment per draft-ietf-quic-multipath:
@@ -133,14 +134,16 @@ int tquic_frame_process_path_abandon(struct tquic_connection *conn,
 		struct tquic_bonding_ctx *bc;
 
 		if (!path) {
-			pr_warn("TQUIC: PATH_ABANDON for unknown path %llu\n", path_id);
+			tquic_conn_warn(conn, "PATH_ABANDON for unknown path %llu\n",
+					path_id);
 			return offset;
 		}
 
 		/* Transition to CLOSED state (terminal state for abandoned paths) */
 		if (tquic_path_set_state(path, TQUIC_PATH_CLOSED) < 0) {
-			pr_warn("TQUIC: Invalid state transition to CLOSED for path %u\n",
-				path->path_id);
+			tquic_conn_warn(conn,
+					"invalid transition to CLOSED path %u\n",
+					path->path_id);
 		}
 
 		/*
@@ -210,7 +213,7 @@ int tquic_frame_process_path_status(struct tquic_connection *conn,
 		return varint_len;
 	offset += varint_len;
 
-	pr_debug("TQUIC: received %s path_id=%llu seq=%llu\n",
+	tquic_conn_dbg(conn, "received %s path_id=%llu seq=%llu\n",
 		 backup ? "PATH_STATUS_BACKUP" : "PATH_STATUS_AVAILABLE",
 		 path_id, seq_num);
 
@@ -228,7 +231,8 @@ int tquic_frame_process_path_status(struct tquic_connection *conn,
 		bool state_changed = false;
 
 		if (!path) {
-			pr_warn("TQUIC: PATH_STATUS for unknown path %llu\n", path_id);
+			tquic_conn_warn(conn, "PATH_STATUS unknown path %llu\n",
+					path_id);
 			return offset;
 		}
 
@@ -246,7 +250,7 @@ int tquic_frame_process_path_status(struct tquic_connection *conn,
 		 */
 		if (seq_num < path->status_seq_num) {
 			spin_unlock_bh(&conn->lock);
-			pr_debug("TQUIC: Ignoring old PATH_STATUS seq=%llu (current=%llu)\n",
+			tquic_conn_dbg(conn, "ignoring old PATH_STATUS seq=%llu cur=%llu\n",
 				 seq_num, path->status_seq_num);
 			tquic_path_put(path);
 			return offset;
@@ -280,13 +284,13 @@ int tquic_frame_process_path_status(struct tquic_connection *conn,
 				path->last_activity = ktime_get();
 				state_changed = true;
 
-				pr_debug("TQUIC: path %u: %s via %s frame\n",
+				tquic_conn_dbg(conn, "path %u: %s via %s frame\n",
 					 path->path_id,
 					 tquic_path_state_names[new_state],
 					 backup ? "PATH_STATUS_BACKUP" : "PATH_STATUS_AVAILABLE");
 			}
 		} else {
-			pr_warn("TQUIC: Cannot apply PATH_STATUS to path %u in state %d\n",
+			tquic_conn_warn(conn, "PATH_STATUS bad state path %u state %d\n",
 				path->path_id, path->state);
 		}
 
@@ -518,7 +522,7 @@ int tquic_send_path_abandon(struct tquic_connection *conn, struct tquic_path *pa
 	/* Transition path to CLOSED state */
 	ret = tquic_path_set_state(path, TQUIC_PATH_CLOSED);
 	if (ret < 0) {
-		pr_warn("TQUIC: Failed to transition path %u to CLOSED: %d\n",
+		tquic_conn_warn(conn, "path %u transition to CLOSED failed: %d\n",
 			path->path_id, ret);
 		/* Continue anyway - still send the frame to peer */
 	}
@@ -536,7 +540,7 @@ int tquic_send_path_abandon(struct tquic_connection *conn, struct tquic_path *pa
 	if (!work_pending(&conn->tx_work))
 		schedule_work(&conn->tx_work);
 
-	pr_debug("TQUIC: queued PATH_ABANDON for path %u error=%llu\n",
+	tquic_conn_dbg(conn, "queued PATH_ABANDON path %u error=%llu\n",
 		 path->path_id, error_code);
 
 	/*
@@ -577,7 +581,7 @@ int tquic_send_path_status_backup(struct tquic_connection *conn, struct tquic_pa
 	if (path->state != TQUIC_PATH_VALIDATED &&
 	    path->state != TQUIC_PATH_ACTIVE) {
 		spin_unlock_bh(&conn->lock);
-		pr_warn("TQUIC: Cannot send PATH_STATUS_BACKUP for path %u in state %d\n",
+		tquic_conn_warn(conn, "BACKUP bad state path %u state %d\n",
 			path->path_id, path->state);
 		return -EINVAL;
 	}
@@ -605,7 +609,7 @@ int tquic_send_path_status_backup(struct tquic_connection *conn, struct tquic_pa
 	if (!work_pending(&conn->tx_work))
 		schedule_work(&conn->tx_work);
 
-	pr_debug("TQUIC: queued PATH_STATUS_BACKUP for path %u seq=%llu\n",
+	tquic_conn_dbg(conn, "queued PATH_STATUS_BACKUP path %u seq=%llu\n",
 		 path->path_id, seq_num);
 
 	/*
@@ -646,7 +650,7 @@ int tquic_send_path_status_available(struct tquic_connection *conn, struct tquic
 	if (path->state != TQUIC_PATH_VALIDATED &&
 	    path->state != TQUIC_PATH_STANDBY) {
 		spin_unlock_bh(&conn->lock);
-		pr_warn("TQUIC: Cannot send PATH_STATUS_AVAILABLE for path %u in state %d\n",
+		tquic_conn_warn(conn, "AVAILABLE bad state path %u state %d\n",
 			path->path_id, path->state);
 		return -EINVAL;
 	}
@@ -674,7 +678,7 @@ int tquic_send_path_status_available(struct tquic_connection *conn, struct tquic
 	if (!work_pending(&conn->tx_work))
 		schedule_work(&conn->tx_work);
 
-	pr_debug("TQUIC: queued PATH_STATUS_AVAILABLE for path %u seq=%llu\n",
+	tquic_conn_dbg(conn, "queued PATH_STATUS_AVAILABLE path %u seq=%llu\n",
 		 path->path_id, seq_num);
 
 	/*

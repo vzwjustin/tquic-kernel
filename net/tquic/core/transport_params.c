@@ -18,6 +18,7 @@
 #include <linux/bug.h>
 #include <net/tquic.h>
 
+#include "../tquic_debug.h"
 #include "transport_params.h"
 #include "../tquic_stateless_reset.h"
 
@@ -1123,8 +1124,15 @@ int tquic_tp_decode(const u8 *buf, size_t buflen, bool is_server,
 			return ret;
 		offset += ret;
 
-		/* Check we have enough data */
-		if (buflen - offset < param_len)
+		/*
+		 * SECURITY: Check param_len fits in remaining buffer.
+		 * param_len is u64 from varint (up to 2^62-1). On 32-bit
+		 * systems, comparing u64 against size_t could silently
+		 * truncate. Check against SIZE_MAX first to prevent this.
+		 */
+		if (param_len > SIZE_MAX)
+			return -EINVAL;
+		if (buflen - offset < (size_t)param_len)
 			return -EINVAL;
 
 		/* Process parameter based on ID */
@@ -1471,52 +1479,52 @@ int tquic_tp_validate(const struct tquic_transport_params *params,
 {
 	/* max_udp_payload_size must be >= 1200 */
 	if (params->max_udp_payload_size < MIN_MAX_UDP_PAYLOAD_SIZE) {
-		pr_debug("tquic: max_udp_payload_size too small: %llu\n",
+		tquic_warn("max_udp_payload_size too small: %llu\n",
 			 params->max_udp_payload_size);
 		return -EINVAL;
 	}
 
 	/* ack_delay_exponent must be <= 20 */
 	if (params->ack_delay_exponent > MAX_ACK_DELAY_EXPONENT) {
-		pr_debug("tquic: ack_delay_exponent too large: %u\n",
+		tquic_warn("ack_delay_exponent too large: %u\n",
 			 params->ack_delay_exponent);
 		return -EINVAL;
 	}
 
 	/* max_ack_delay must be < 2^14 */
 	if (params->max_ack_delay >= MAX_MAX_ACK_DELAY) {
-		pr_debug("tquic: max_ack_delay too large: %u\n",
+		tquic_warn("max_ack_delay too large: %u\n",
 			 params->max_ack_delay);
 		return -EINVAL;
 	}
 
 	/* active_connection_id_limit must be >= 2 */
 	if (params->active_connection_id_limit < 2) {
-		pr_debug("tquic: active_connection_id_limit too small: %llu\n",
+		tquic_warn("active_connection_id_limit too small: %llu\n",
 			 params->active_connection_id_limit);
 		return -EINVAL;
 	}
 
 	/* initial_max_streams values must be <= 2^60 */
 	if (params->initial_max_streams_bidi > TQUIC_MAX_STREAM_COUNT_BIDI) {
-		pr_debug("tquic: initial_max_streams_bidi too large\n");
+		tquic_warn("initial_max_streams_bidi too large\n");
 		return -EINVAL;
 	}
 
 	if (params->initial_max_streams_uni > TQUIC_MAX_STREAM_COUNT_UNI) {
-		pr_debug("tquic: initial_max_streams_uni too large\n");
+		tquic_warn("initial_max_streams_uni too large\n");
 		return -EINVAL;
 	}
 
 	/* Server must provide original_destination_connection_id */
 	if (is_server && !params->original_dcid_present) {
-		pr_debug("tquic: server missing original_destination_connection_id\n");
+		tquic_warn("server missing original_destination_connection_id\n");
 		return -EPROTO;
 	}
 
 	/* initial_source_connection_id should be present */
 	if (!params->initial_scid_present) {
-		pr_debug("tquic: missing initial_source_connection_id\n");
+		tquic_warn("missing initial_source_connection_id\n");
 		return -EPROTO;
 	}
 
@@ -1869,11 +1877,11 @@ int tquic_tp_apply(struct tquic_connection *conn,
 		ret = tquic_pref_addr_client_received(conn,
 						      &negotiated->preferred_address);
 		if (ret < 0) {
-			pr_debug("tquic: failed to store preferred address: %d\n",
-				 ret);
+			tquic_conn_warn(conn, "failed to store preferred addr: %d\n",
+					ret);
 			/* Non-fatal: connection continues without preferred addr */
 		} else {
-			pr_info("tquic: stored server's preferred address for migration\n");
+			tquic_conn_info(conn, "stored preferred address for migration\n");
 		}
 	}
 
@@ -1895,8 +1903,8 @@ int tquic_tp_apply(struct tquic_connection *conn,
 		conn->datagram.enabled = true;
 		conn->datagram.max_send_size = negotiated->max_datagram_frame_size;
 		conn->datagram.max_recv_size = negotiated->max_datagram_frame_size;
-		pr_debug("tquic: DATAGRAM enabled, max_size=%llu\n",
-			 negotiated->max_datagram_frame_size);
+		tquic_conn_dbg(conn, "DATAGRAM enabled max_size=%llu\n",
+			       negotiated->max_datagram_frame_size);
 	} else {
 		conn->datagram.enabled = false;
 		conn->datagram.max_send_size = 0;
@@ -1904,14 +1912,13 @@ int tquic_tp_apply(struct tquic_connection *conn,
 	}
 	spin_unlock_bh(&conn->datagram.lock);
 
-	pr_debug("tquic: applied transport params - idle=%llu max_data=%llu/%llu multipath=%d pref_addr=%d migration_disabled=%d datagram=%d\n",
-		 (unsigned long long)negotiated->idle_timeout,
-		 negotiated->max_data_send,
-		 negotiated->max_data_recv,
-		 negotiated->multipath_enabled,
-		 negotiated->preferred_address_present,
-		 negotiated->migration_disabled,
-		 negotiated->datagram_enabled);
+	tquic_conn_info(conn, "params: idle=%llu data=%llu/%llu mp=%d migr=%d dgram=%d\n",
+			(unsigned long long)negotiated->idle_timeout,
+			negotiated->max_data_send,
+			negotiated->max_data_recv,
+			negotiated->multipath_enabled,
+			negotiated->migration_disabled,
+			negotiated->datagram_enabled);
 
 	return 0;
 }
@@ -2001,24 +2008,24 @@ int tquic_tp_validate_cids(const struct tquic_transport_params *params,
 {
 	/* Verify initial_source_connection_id matches */
 	if (!params->initial_scid_present) {
-		pr_debug("tquic: missing initial_source_connection_id\n");
+		tquic_warn("missing initial_source_connection_id\n");
 		return -EPROTO;
 	}
 
 	if (!tquic_tp_cmp_cid(&params->initial_scid, expected_scid)) {
-		pr_debug("tquic: initial_source_connection_id mismatch\n");
+		tquic_warn("initial_source_connection_id mismatch\n");
 		return -EPROTO;
 	}
 
 	/* Server must verify original_destination_connection_id */
 	if (is_server && original_dcid) {
 		if (!params->original_dcid_present) {
-			pr_debug("tquic: missing original_destination_connection_id\n");
+			tquic_warn("missing original_destination_connection_id\n");
 			return -EPROTO;
 		}
 
 		if (!tquic_tp_cmp_cid(&params->original_dcid, original_dcid)) {
-			pr_debug("tquic: original_destination_connection_id mismatch\n");
+			tquic_warn("original_destination_connection_id mismatch\n");
 			return -EPROTO;
 		}
 	}
@@ -2209,64 +2216,65 @@ EXPORT_SYMBOL_GPL(tquic_tp_encoded_size);
 void tquic_tp_debug_print(const struct tquic_transport_params *params,
 			  const char *prefix)
 {
-	pr_debug("%s: Transport Parameters:\n", prefix);
-	pr_debug("%s:   max_idle_timeout: %llu ms\n", prefix,
-		 params->max_idle_timeout);
-	pr_debug("%s:   max_udp_payload_size: %llu\n", prefix,
-		 params->max_udp_payload_size);
-	pr_debug("%s:   initial_max_data: %llu\n", prefix,
-		 params->initial_max_data);
-	pr_debug("%s:   initial_max_stream_data_bidi_local: %llu\n", prefix,
-		 params->initial_max_stream_data_bidi_local);
-	pr_debug("%s:   initial_max_stream_data_bidi_remote: %llu\n", prefix,
-		 params->initial_max_stream_data_bidi_remote);
-	pr_debug("%s:   initial_max_stream_data_uni: %llu\n", prefix,
-		 params->initial_max_stream_data_uni);
-	pr_debug("%s:   initial_max_streams_bidi: %llu\n", prefix,
-		 params->initial_max_streams_bidi);
-	pr_debug("%s:   initial_max_streams_uni: %llu\n", prefix,
-		 params->initial_max_streams_uni);
-	pr_debug("%s:   ack_delay_exponent: %u\n", prefix,
-		 params->ack_delay_exponent);
-	pr_debug("%s:   max_ack_delay: %u ms\n", prefix,
-		 params->max_ack_delay);
-	pr_debug("%s:   disable_active_migration: %s\n", prefix,
-		 params->disable_active_migration ? "yes" : "no");
-	pr_debug("%s:   active_connection_id_limit: %llu\n", prefix,
-		 params->active_connection_id_limit);
-	pr_debug("%s:   enable_multipath: %s\n", prefix,
-		 params->enable_multipath ? "yes" : "no");
-	pr_debug("%s:   max_datagram_frame_size: %llu\n", prefix,
-		 params->max_datagram_frame_size);
-	pr_debug("%s:   grease_quic_bit: %s\n", prefix,
-		 params->grease_quic_bit ? "yes" : "no");
-	pr_debug("%s:   reliable_stream_reset: %s\n", prefix,
-		 params->reliable_stream_reset ? "yes" : "no");
-	pr_debug("%s:   enable_bdp_frame: %s\n", prefix,
-		 params->enable_bdp_frame ? "yes" : "no");
+	tquic_dbg("%s: Transport Parameters:\n", prefix);
+	tquic_dbg("%s:   max_idle_timeout: %llu ms\n", prefix,
+		  params->max_idle_timeout);
+	tquic_dbg("%s:   max_udp_payload_size: %llu\n", prefix,
+		  params->max_udp_payload_size);
+	tquic_dbg("%s:   initial_max_data: %llu\n", prefix,
+		  params->initial_max_data);
+	tquic_dbg("%s:   initial_max_stream_data_bidi_local: %llu\n", prefix,
+		  params->initial_max_stream_data_bidi_local);
+	tquic_dbg("%s:   initial_max_stream_data_bidi_remote: %llu\n", prefix,
+		  params->initial_max_stream_data_bidi_remote);
+	tquic_dbg("%s:   initial_max_stream_data_uni: %llu\n", prefix,
+		  params->initial_max_stream_data_uni);
+	tquic_dbg("%s:   initial_max_streams_bidi: %llu\n", prefix,
+		  params->initial_max_streams_bidi);
+	tquic_dbg("%s:   initial_max_streams_uni: %llu\n", prefix,
+		  params->initial_max_streams_uni);
+	tquic_dbg("%s:   ack_delay_exponent: %u\n", prefix,
+		  params->ack_delay_exponent);
+	tquic_dbg("%s:   max_ack_delay: %u ms\n", prefix,
+		  params->max_ack_delay);
+	tquic_dbg("%s:   disable_active_migration: %s\n", prefix,
+		  params->disable_active_migration ? "yes" : "no");
+	tquic_dbg("%s:   active_connection_id_limit: %llu\n", prefix,
+		  params->active_connection_id_limit);
+	tquic_dbg("%s:   enable_multipath: %s\n", prefix,
+		  params->enable_multipath ? "yes" : "no");
+	tquic_dbg("%s:   max_datagram_frame_size: %llu\n", prefix,
+		  params->max_datagram_frame_size);
+	tquic_dbg("%s:   grease_quic_bit: %s\n", prefix,
+		  params->grease_quic_bit ? "yes" : "no");
+	tquic_dbg("%s:   reliable_stream_reset: %s\n", prefix,
+		  params->reliable_stream_reset ? "yes" : "no");
+	tquic_dbg("%s:   enable_bdp_frame: %s\n", prefix,
+		  params->enable_bdp_frame ? "yes" : "no");
 	if (params->min_ack_delay_present)
-		pr_debug("%s:   min_ack_delay: %llu us\n", prefix,
-			 params->min_ack_delay);
+		tquic_dbg("%s:   min_ack_delay: %llu us\n", prefix,
+			  params->min_ack_delay);
 
 	if (params->initial_scid_present)
-		pr_debug("%s:   initial_source_cid: %*phN\n", prefix,
-			 params->initial_scid.len, params->initial_scid.id);
+		tquic_dbg("%s:   initial_source_cid: %*phN\n", prefix,
+			  params->initial_scid.len, params->initial_scid.id);
 
 	if (params->original_dcid_present)
-		pr_debug("%s:   original_dest_cid: %*phN\n", prefix,
-			 params->original_dcid.len, params->original_dcid.id);
+		tquic_dbg("%s:   original_dest_cid: %*phN\n", prefix,
+			  params->original_dcid.len, params->original_dcid.id);
 
 	if (params->initial_max_path_id_present)
-		pr_debug("%s:   initial_max_path_id: %llu\n", prefix,
-			 params->initial_max_path_id);
+		tquic_dbg("%s:   initial_max_path_id: %llu\n", prefix,
+			  params->initial_max_path_id);
 
 	if (params->version_info_present && params->version_info) {
 		size_t i;
-		pr_debug("%s:   version_info.chosen: 0x%08x\n", prefix,
-			 params->version_info->chosen_version);
+		tquic_dbg("%s:   version_info.chosen: 0x%08x\n", prefix,
+			  params->version_info->chosen_version);
 		for (i = 0; i < params->version_info->num_versions; i++)
-			pr_debug("%s:   version_info.available[%zu]: 0x%08x\n",
-				 prefix, i, params->version_info->available_versions[i]);
+			tquic_dbg("%s:   version_info.available[%zu]: 0x%08x\n",
+				  prefix, i,
+				  params->version_info->available_versions[i]);
 	}
 }
 EXPORT_SYMBOL_GPL(tquic_tp_debug_print);
@@ -2437,8 +2445,8 @@ int tquic_validate_version_info(const struct tquic_version_info *info,
 
 	/* For clients: Chosen Version must match connection version */
 	if (is_client && info->chosen_version != connection_version) {
-		pr_debug("tquic: client version_info chosen (0x%08x) != connection (0x%08x)\n",
-			 info->chosen_version, connection_version);
+		tquic_warn("client version_info chosen (0x%08x) != connection (0x%08x)\n",
+			   info->chosen_version, connection_version);
 		return -TQUIC_ERR_VERSION_NEGOTIATION;
 	}
 
@@ -2453,7 +2461,7 @@ int tquic_validate_version_info(const struct tquic_version_info *info,
 
 	/* Chosen Version should appear in Available Versions */
 	if (info->num_versions > 0 && !chosen_in_available) {
-		pr_warn("tquic: version_info chosen not in available list\n");
+		tquic_warn("version_info chosen not in available list\n");
 		/* This is a SHOULD, not a MUST, so just warn */
 	}
 

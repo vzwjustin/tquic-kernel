@@ -30,6 +30,7 @@
 #include <uapi/linux/tquic.h>
 
 #include "protocol.h"
+#include "tquic_debug.h"
 #include "http3/http3_stream.h"
 
 /* Forward declaration for pacing integration (defined in tquic_output.c) */
@@ -338,7 +339,7 @@ static struct tquic_stream *tquic_stream_alloc(struct tquic_connection *conn,
 
 	init_waitqueue_head(&stream->wait);
 
-	pr_debug("tquic: allocated stream id=%llu bidi=%d\n",
+	tquic_dbg("allocated stream id=%llu bidi=%d\n",
 		 stream->id, is_bidi);
 
 	return stream;
@@ -425,7 +426,7 @@ static void tquic_stream_free(struct tquic_stream *stream)
 		skb_queue_purge(&stream->recv_buf);
 	}
 
-	pr_debug("tquic: freed stream id=%llu\n", stream->id);
+	tquic_dbg("freed stream id=%llu\n", stream->id);
 
 	kfree(stream);
 }
@@ -475,7 +476,7 @@ int tquic_stream_send_fin(struct tquic_connection *conn,
 		stream->state = TQUIC_STREAM_SEND;  /* Half-closed (local) */
 	}
 
-	pr_debug("tquic: sent FIN on stream %llu at offset %llu\n",
+	tquic_dbg("sent FIN on stream %llu at offset %llu\n",
 		 stream->id, stream->send_offset);
 
 	return 0;
@@ -604,7 +605,7 @@ int tquic_stream_socket_create(struct tquic_connection *conn,
 
 	*stream_id = stream->id;
 
-	pr_debug("tquic: created stream socket, id=%llu fd=%d bidi=%d\n",
+	tquic_dbg("created stream socket, id=%llu fd=%d bidi=%d\n",
 		 stream->id, fd, is_bidi);
 
 	return fd;
@@ -749,7 +750,7 @@ static void tquic_stream_trigger_output(struct tquic_connection *conn,
 		 * No active path available. The timer subsystem will
 		 * handle retransmission when a path becomes available.
 		 */
-		pr_debug("tquic: no active path for stream %llu transmission\n",
+		tquic_dbg("no active path for stream %llu transmission\n",
 			 stream->id);
 		return;
 	}
@@ -768,7 +769,7 @@ static void tquic_stream_trigger_output(struct tquic_connection *conn,
 	}
 
 	if (!can_send) {
-		pr_debug("tquic: stream %llu blocked by cwnd (inflight=%llu, cwnd=%u)\n",
+		tquic_dbg("stream %llu blocked by cwnd (inflight=%llu, cwnd=%u)\n",
 			 stream->id, inflight, path->stats.cwnd);
 		return;
 	}
@@ -824,17 +825,17 @@ static void tquic_stream_trigger_output(struct tquic_connection *conn,
 				 * The send_buf will be drained by the frame
 				 * generation code in tquic_output.c.
 				 */
-				pr_debug("tquic: stream %llu nodelay xmit %d bytes\n",
+				tquic_dbg("stream %llu nodelay xmit %d bytes\n",
 					 stream->id, ret);
 			} else if (ret == -EAGAIN) {
 				/*
 				 * Congestion/pacing blocked. The pacing timer
 				 * or ACK processing will retry later.
 				 */
-				pr_debug("tquic: stream %llu xmit blocked\n",
+				tquic_dbg("stream %llu xmit blocked\n",
 					 stream->id);
 			} else {
-				pr_warn("tquic: stream %llu xmit error %d\n",
+				tquic_warn("stream %llu xmit error %d\n",
 					stream->id, ret);
 			}
 		}
@@ -1258,14 +1259,14 @@ int tquic_stream_validate_http3_id(struct tquic_connection *conn,
 			 * Server cannot initiate bidi streams in HTTP/3.
 			 * Server uses push streams (unidirectional) instead.
 			 */
-			pr_err("tquic: server cannot open bidi stream in HTTP/3\n");
+			tquic_err("server cannot open bidi stream in HTTP/3\n");
 			return -H3_STREAM_CREATION_ERROR;
 		}
 
 		/* Validate client-initiated bidi stream ID sequence */
 		if (is_client_initiated) {
 			if ((stream_id & 0x03) != 0x00) {
-				pr_err("tquic: invalid request stream ID %llu\n",
+				tquic_err("invalid request stream ID %llu\n",
 				       stream_id);
 				return -H3_STREAM_CREATION_ERROR;
 			}
@@ -1322,19 +1323,19 @@ int tquic_stream_set_http3_type(struct tquic_stream *stream, u8 type)
 		return -EINVAL;
 
 	if (h3_stream_id_is_bidi(stream->id)) {
-		pr_err("tquic: cannot set type on bidirectional stream\n");
+		tquic_err("cannot set type on bidirectional stream\n");
 		return -EINVAL;
 	}
 
 	if (type > H3_STREAM_TYPE_QPACK_DECODER &&
 	    !H3_STREAM_TYPE_IS_GREASE(type)) {
-		pr_err("tquic: invalid HTTP/3 stream type %u\n", type);
+		tquic_err("invalid HTTP/3 stream type %u\n", type);
 		return -EINVAL;
 	}
 
 	stream->priority = type;
 
-	pr_debug("tquic: set HTTP/3 stream type %s on id=%llu\n",
+	tquic_dbg("set HTTP/3 stream type %s on id=%llu\n",
 		 h3_stream_type_name(type), stream->id);
 
 	return 0;

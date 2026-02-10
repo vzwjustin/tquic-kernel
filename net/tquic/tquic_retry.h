@@ -23,6 +23,7 @@
 #define _NET_TQUIC_RETRY_H
 
 #include <linux/types.h>
+#include <linux/mutex.h>
 #include <linux/skbuff.h>
 #include <net/sock.h>
 #include <net/tquic.h>
@@ -101,7 +102,8 @@ struct tquic_retry_state {
 	u32 token_key_id;
 	u32 token_lifetime;
 	struct crypto_aead *aead;
-	spinlock_t lock;
+	spinlock_t lock;		/* Protects key material */
+	struct mutex crypto_mutex;	/* Serializes AEAD operations */
 };
 
 /*

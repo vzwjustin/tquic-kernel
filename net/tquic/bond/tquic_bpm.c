@@ -21,6 +21,7 @@
 #include <linux/timer.h>
 #include <linux/workqueue.h>
 #include <linux/random.h>
+#include <crypto/utils.h>
 #include <linux/atomic.h>
 #include <linux/refcount.h>
 #include <linux/jhash.h>
@@ -1278,8 +1279,8 @@ int tquic_bpm_path_response_recv(struct tquic_bpm_path *path, const u8 *data)
 		return -ENOENT;
 	}
 
-	/* Verify response matches challenge */
-	if (memcmp(data, val->challenge_data, TQUIC_BPM_PATH_CHALLENGE_SIZE) != 0) {
+	/* Verify response matches challenge (constant-time to prevent timing attacks) */
+	if (crypto_memneq(data, val->challenge_data, TQUIC_BPM_PATH_CHALLENGE_SIZE)) {
 		spin_unlock_bh(&path->state_lock);
 		pr_debug("path %u: PATH_RESPONSE mismatch\n", path->path_id);
 		return -EINVAL;

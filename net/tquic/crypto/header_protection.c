@@ -19,6 +19,8 @@
 #include <linux/unaligned.h>
 #include <net/tquic.h>
 
+#include "../tquic_debug.h"
+
 /* Header protection constants per RFC 9001 */
 #define TQUIC_HP_SAMPLE_LEN		16	/* Sample length for HP */
 #define TQUIC_HP_MASK_LEN		5	/* Mask length (1 byte header + 4 bytes PN) */
@@ -191,47 +193,36 @@ static int tquic_hp_mask_aes(struct tquic_hp_key *hp_key,
  * nonce = sample[4..15]
  * mask = ChaCha20(hp_key, counter, nonce, {0,0,0,0,0})
  *
- * Uses kernel crypto API for portability across kernel versions.
+ * Uses the pre-allocated cipher transform from hp_key->tfm for
+ * performance and to avoid sleeping allocations in atomic context.
  */
 static int tquic_hp_mask_chacha20(struct tquic_hp_key *hp_key,
 				  const u8 *sample, u8 *mask)
 {
-	struct crypto_skcipher *tfm;
 	struct skcipher_request *req;
 	struct scatterlist sg;
 	u8 zeros[TQUIC_HP_MASK_LEN] = {0};
 	DECLARE_CRYPTO_WAIT(wait);
 	int ret;
 
-	tfm = crypto_alloc_skcipher("chacha20", 0, 0);
-	if (IS_ERR(tfm)) {
-		pr_warn("tquic: failed to allocate chacha20: %ld\n", PTR_ERR(tfm));
-		return PTR_ERR(tfm);
-	}
+	if (!hp_key->tfm)
+		return -EINVAL;
 
-	ret = crypto_skcipher_setkey(tfm, hp_key->key, 32);
-	if (ret) {
-		crypto_free_skcipher(tfm);
-		return ret;
-	}
-
-	req = skcipher_request_alloc(tfm, GFP_ATOMIC);
-	if (!req) {
-		crypto_free_skcipher(tfm);
+	req = skcipher_request_alloc(hp_key->tfm, GFP_ATOMIC);
+	if (!req)
 		return -ENOMEM;
-	}
 
 	sg_init_one(&sg, zeros, TQUIC_HP_MASK_LEN);
 	skcipher_request_set_callback(req, CRYPTO_TFM_REQ_MAY_BACKLOG,
 				      crypto_req_done, &wait);
-	skcipher_request_set_crypt(req, &sg, &sg, TQUIC_HP_MASK_LEN, (u8 *)sample);
+	skcipher_request_set_crypt(req, &sg, &sg, TQUIC_HP_MASK_LEN,
+				   (u8 *)sample);
 
 	ret = crypto_wait_req(crypto_skcipher_encrypt(req), &wait);
 	if (ret == 0)
 		memcpy(mask, zeros, TQUIC_HP_MASK_LEN);
 
 	skcipher_request_free(req);
-	crypto_free_skcipher(tfm);
 
 	return ret;
 }
@@ -614,13 +605,29 @@ void tquic_hp_set_key_phase(struct tquic_hp_ctx *ctx, u8 phase)
 EXPORT_SYMBOL_GPL(tquic_hp_set_key_phase);
 
 /*
- * Allocate and configure AES-ECB cipher for header protection
+ * Allocate and configure cipher for header protection.
+ * For AES cipher types, allocates ecb(aes).
+ * For ChaCha20, allocates chacha20.
+ * Must NOT be called under spinlock (may sleep).
  */
-static int tquic_hp_setup_aes(struct tquic_hp_key *hp_key)
+static int tquic_hp_setup_cipher(struct tquic_hp_key *hp_key)
 {
+	const char *alg_name;
 	int ret;
 
-	hp_key->tfm = crypto_alloc_skcipher("ecb(aes)", 0, 0);
+	switch (hp_key->cipher_type) {
+	case TQUIC_HP_CIPHER_AES_128:
+	case TQUIC_HP_CIPHER_AES_256:
+		alg_name = "ecb(aes)";
+		break;
+	case TQUIC_HP_CIPHER_CHACHA20:
+		alg_name = "chacha20";
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	hp_key->tfm = crypto_alloc_skcipher(alg_name, 0, 0);
 	if (IS_ERR(hp_key->tfm)) {
 		ret = PTR_ERR(hp_key->tfm);
 		hp_key->tfm = NULL;
@@ -652,6 +659,7 @@ int tquic_hp_set_key(struct tquic_hp_ctx *ctx, enum tquic_hp_enc_level level,
 		     int direction, const u8 *key, size_t key_len, u16 cipher)
 {
 	struct tquic_hp_key *hp_key;
+	struct crypto_skcipher *old_tfm;
 	unsigned long flags;
 	int ret = 0;
 
@@ -663,13 +671,14 @@ int tquic_hp_set_key(struct tquic_hp_ctx *ctx, enum tquic_hp_enc_level level,
 	else
 		hp_key = &ctx->read_keys[level];
 
+	/*
+	 * Invalidate and save old tfm under lock, then do all sleeping
+	 * operations (crypto_free, crypto_alloc) outside the lock.
+	 */
 	spin_lock_irqsave(&ctx->lock, flags);
-
-	/* Free existing cipher if any */
-	if (hp_key->tfm) {
-		crypto_free_skcipher(hp_key->tfm);
-		hp_key->tfm = NULL;
-	}
+	hp_key->valid = false;
+	old_tfm = hp_key->tfm;
+	hp_key->tfm = NULL;
 
 	/* Determine cipher type and key length based on cipher suite */
 	switch (cipher) {
@@ -707,18 +716,19 @@ int tquic_hp_set_key(struct tquic_hp_ctx *ctx, enum tquic_hp_enc_level level,
 		ret = -EINVAL;
 		goto out;
 	}
+	spin_unlock_irqrestore(&ctx->lock, flags);
 
-	/* Set up AES cipher transform if needed */
-	if (hp_key->cipher_type != TQUIC_HP_CIPHER_CHACHA20) {
-		spin_unlock_irqrestore(&ctx->lock, flags);
-		ret = tquic_hp_setup_aes(hp_key);
-		spin_lock_irqsave(&ctx->lock, flags);
-		if (ret)
-			goto out;
-	}
+	/* Free old tfm outside spinlock (may sleep) */
+	if (old_tfm)
+		crypto_free_skcipher(old_tfm);
 
+	/* Set up cipher transform outside spinlock (may sleep) */
+	ret = tquic_hp_setup_cipher(hp_key);
+	if (ret)
+		return ret;
+
+	spin_lock_irqsave(&ctx->lock, flags);
 	hp_key->valid = true;
-
 out:
 	spin_unlock_irqrestore(&ctx->lock, flags);
 	return ret;
@@ -735,6 +745,7 @@ void tquic_hp_clear_key(struct tquic_hp_ctx *ctx, enum tquic_hp_enc_level level,
 			int direction)
 {
 	struct tquic_hp_key *hp_key;
+	struct crypto_skcipher *old_tfm;
 	unsigned long flags;
 
 	if (!ctx || level >= TQUIC_HP_LEVEL_COUNT)
@@ -747,16 +758,18 @@ void tquic_hp_clear_key(struct tquic_hp_ctx *ctx, enum tquic_hp_enc_level level,
 
 	spin_lock_irqsave(&ctx->lock, flags);
 
-	if (hp_key->tfm) {
-		crypto_free_skcipher(hp_key->tfm);
-		hp_key->tfm = NULL;
-	}
+	old_tfm = hp_key->tfm;
+	hp_key->tfm = NULL;
 
 	memzero_explicit(hp_key->key, sizeof(hp_key->key));
 	hp_key->key_len = 0;
 	hp_key->valid = false;
 
 	spin_unlock_irqrestore(&ctx->lock, flags);
+
+	/* Free cipher transform outside spinlock (may sleep) */
+	if (old_tfm)
+		crypto_free_skcipher(old_tfm);
 }
 EXPORT_SYMBOL_GPL(tquic_hp_clear_key);
 
@@ -776,6 +789,7 @@ int tquic_hp_set_next_key(struct tquic_hp_ctx *ctx, int direction,
 			  const u8 *key, size_t key_len, u16 cipher)
 {
 	struct tquic_hp_key *hp_key;
+	struct crypto_skcipher *old_tfm;
 	unsigned long flags;
 	int ret = 0;
 
@@ -786,11 +800,10 @@ int tquic_hp_set_next_key(struct tquic_hp_ctx *ctx, int direction,
 
 	spin_lock_irqsave(&ctx->lock, flags);
 
-	/* Free existing cipher if any */
-	if (hp_key->tfm) {
-		crypto_free_skcipher(hp_key->tfm);
-		hp_key->tfm = NULL;
-	}
+	/* Invalidate and save old tfm under lock */
+	hp_key->valid = false;
+	old_tfm = hp_key->tfm;
+	hp_key->tfm = NULL;
 
 	/* Set up key based on cipher suite */
 	switch (cipher) {
@@ -828,16 +841,18 @@ int tquic_hp_set_next_key(struct tquic_hp_ctx *ctx, int direction,
 		ret = -EINVAL;
 		goto out;
 	}
+	spin_unlock_irqrestore(&ctx->lock, flags);
 
-	/* Set up AES cipher transform if needed */
-	if (hp_key->cipher_type != TQUIC_HP_CIPHER_CHACHA20) {
-		spin_unlock_irqrestore(&ctx->lock, flags);
-		ret = tquic_hp_setup_aes(hp_key);
-		spin_lock_irqsave(&ctx->lock, flags);
-		if (ret)
-			goto out;
-	}
+	/* Free old tfm outside spinlock (may sleep) */
+	if (old_tfm)
+		crypto_free_skcipher(old_tfm);
 
+	/* Set up cipher transform outside spinlock (may sleep) */
+	ret = tquic_hp_setup_cipher(hp_key);
+	if (ret)
+		return ret;
+
+	spin_lock_irqsave(&ctx->lock, flags);
 	hp_key->valid = true;
 	ctx->key_update_pending = true;
 

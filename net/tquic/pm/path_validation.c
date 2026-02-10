@@ -19,6 +19,7 @@
 #include <net/sock.h>
 #include <net/tquic.h>
 #include "../tquic_compat.h"
+#include "../tquic_debug.h"
 #include <net/tquic_pm.h>
 #include <uapi/linux/tquic_pm.h>
 
@@ -97,6 +98,10 @@ static u32 tquic_validation_timeout_us(struct tquic_path *path)
 
 /*
  * Path validation timeout - retry or mark failed
+ *
+ * Runs in timer/softirq context. Must hold paths_lock when modifying
+ * path state to prevent races with tquic_path_handle_response() and
+ * other concurrent state transitions.
  */
 void tquic_path_validation_timeout(struct timer_list *t)
 {
@@ -109,18 +114,23 @@ void tquic_path_validation_timeout(struct timer_list *t)
 
 	net = sock_net(conn->sk);
 
+	spin_lock_bh(&conn->paths_lock);
+
 	pr_debug("tquic_pm: path %u validation timeout (retry %u)\n",
 		 path->path_id, path->validation.retries);
 
 	/* Check retry limit */
 	if (path->validation.retries >= TQUIC_VALIDATION_MAX_RETRIES) {
 		/* Max retries exceeded - validation failed */
-		pr_warn("tquic_pm: path %u validation failed after %u retries\n",
-			path->path_id, path->validation.retries);
+		tquic_warn("path %u validation failed after %u retries\n",
+			   path->path_id, path->validation.retries);
 
 		path->state = TQUIC_PATH_FAILED;
 		path->validation.challenge_pending = false;
+		path->anti_amplification.active = false;
 		del_timer(&path->validation.timer);
+
+		spin_unlock_bh(&conn->paths_lock);
 
 		/* Emit path failed event via PM netlink */
 		tquic_pm_nl_send_event(net, conn, path, TQUIC_PM_EVENT_FAILED);
@@ -133,6 +143,8 @@ void tquic_path_validation_timeout(struct timer_list *t)
 
 	/* Retry validation */
 	path->validation.retries++;
+
+	spin_unlock_bh(&conn->paths_lock);
 
 	/* Resend PATH_CHALLENGE */
 	if (tquic_path_send_challenge(conn, path) == 0) {
@@ -147,8 +159,11 @@ void tquic_path_validation_timeout(struct timer_list *t)
 	} else {
 		pr_err("tquic_pm: path %u failed to send retry challenge\n",
 		       path->path_id);
+		spin_lock_bh(&conn->paths_lock);
 		path->state = TQUIC_PATH_FAILED;
 		path->validation.challenge_pending = false;
+		path->anti_amplification.active = false;
+		spin_unlock_bh(&conn->paths_lock);
 		tquic_bond_path_failed(conn, path);
 	}
 }
@@ -195,6 +210,17 @@ int tquic_path_start_validation(struct tquic_connection *conn,
 	path->state = TQUIC_PATH_PENDING;
 	path->validation.retries = 0;
 	path->validation.challenge_pending = false;
+
+	/*
+	 * Enable anti-amplification limits (RFC 9000 Section 8.1).
+	 *
+	 * Before path validation completes, an endpoint MUST limit the
+	 * amount of data it sends to the unvalidated address to three
+	 * times the amount of data received from that address.
+	 */
+	path->anti_amplification.bytes_received = 0;
+	path->anti_amplification.bytes_sent = 0;
+	path->anti_amplification.active = true;
 
 	/* Send initial PATH_CHALLENGE */
 	ret = tquic_path_send_challenge(conn, path);
@@ -301,8 +327,15 @@ int tquic_path_handle_response(struct tquic_connection *conn,
 
 	pr_debug("tquic_pm: received PATH_RESPONSE on path %u\n", path->path_id);
 
+	/*
+	 * Acquire paths_lock to prevent races with the validation
+	 * timeout handler which also modifies path state.
+	 */
+	spin_lock_bh(&conn->paths_lock);
+
 	/* Verify challenge is pending */
 	if (!path->validation.challenge_pending) {
+		spin_unlock_bh(&conn->paths_lock);
 		pr_debug("tquic_pm: unexpected PATH_RESPONSE on path %u (no pending challenge)\n",
 			 path->path_id);
 		return -EINVAL;
@@ -318,40 +351,56 @@ int tquic_path_handle_response(struct tquic_connection *conn,
 	 * of where mismatches occur.
 	 */
 	if (crypto_memneq(data, path->validation.challenge_data, 8) != 0) {
-		pr_warn("tquic_pm: PATH_RESPONSE mismatch on path %u\n",
-			path->path_id);
+		spin_unlock_bh(&conn->paths_lock);
+		tquic_warn("PATH_RESPONSE mismatch on path %u\n",
+			   path->path_id);
 		return -EINVAL;
 	}
 
 	/* Calculate RTT sample from challenge_sent to now */
 	rtt_us = ktime_us_delta(now, path->validation.challenge_sent);
 
-	pr_info("tquic_pm: path %u validated - RTT: %u us\n",
-		path->path_id, rtt_us);
+	tquic_info("path %u validated - RTT: %u us\n",
+		   path->path_id, rtt_us);
 
 	/* Update RTT statistics using RFC 6298 algorithm */
 	tquic_pm_update_rtt(path, rtt_us);
 
-	/* Mark path as validated/active
-	 * If recovering from UNAVAILABLE, restore saved state */
-	if (path->saved_state != TQUIC_PATH_UNUSED &&
-	    path->saved_state != TQUIC_PATH_UNAVAILABLE) {
+	/*
+	 * Mark path as validated/active.
+	 *
+	 * If recovering from UNAVAILABLE, restore saved state but only if
+	 * it was a valid operational state. TQUIC_PATH_PENDING must not be
+	 * restored as it would skip the completed validation.
+	 */
+	if (path->saved_state == TQUIC_PATH_ACTIVE ||
+	    path->saved_state == TQUIC_PATH_STANDBY ||
+	    path->saved_state == TQUIC_PATH_VALIDATED) {
 		path->state = path->saved_state;
 		path->saved_state = TQUIC_PATH_UNUSED;
-		pr_info("tquic_pm: path %u recovered to state %d\n",
-			path->path_id, path->state);
+		tquic_info("path %u recovered to state %d\n",
+			   path->path_id, path->state);
 	} else {
 		path->state = TQUIC_PATH_ACTIVE;
+		path->saved_state = TQUIC_PATH_UNUSED;
 	}
 
 	path->validation.challenge_pending = false;
 	path->validation.retries = 0;
+
+	/*
+	 * Disable anti-amplification limits (RFC 9000 Section 8.1).
+	 * Path is now validated so we can send data freely.
+	 */
+	path->anti_amplification.active = false;
 
 	/* Stop retransmission timer */
 	del_timer(&path->validation.timer);
 
 	/* Update activity timestamp */
 	path->last_activity = now;
+
+	spin_unlock_bh(&conn->paths_lock);
 
 	/* Emit validation success event via PM netlink */
 	if (conn && conn->sk)

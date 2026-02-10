@@ -18,6 +18,7 @@
 #include <net/tquic.h>
 
 #include "protocol.h"
+#include "tquic_debug.h"
 #include "tquic_mib.h"
 
 /*
@@ -150,8 +151,8 @@ EXPORT_SYMBOL_GPL(tquic_mib_free);
  */
 void tquic_mib_seq_show_net(struct seq_file *seq, struct net *net)
 {
-	unsigned long sum[ARRAY_SIZE(tquic_snmp_list) - 1];
-	const int cnt = ARRAY_SIZE(tquic_snmp_list) - 1;  /* Exclude sentinel */
+	unsigned long sum[ARRAY_SIZE(tquic_snmp_list)];
+	const int cnt = ARRAY_SIZE(tquic_snmp_list);
 	struct tquic_net *tn;
 	int i, cpu;
 

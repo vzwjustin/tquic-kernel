@@ -31,6 +31,7 @@
 #include <net/tquic.h>
 
 #include "tquic_compat.h"
+#include "tquic_debug.h"
 #include "protocol.h"
 
 #include "tquic_mib.h"
@@ -966,6 +967,13 @@ static int tquic_encrypt_payload(struct tquic_connection *conn,
 
 /*
  * Assemble a complete QUIC packet
+ *
+ * Builds header and payload directly into the skb to avoid per-packet
+ * kmalloc overhead.  The header is built into a small stack buffer
+ * (128 B -- safe for kernel stack), and payload frames are written
+ * straight into the skb linear data area.  After encryption and header
+ * protection the header is prepended, giving a single contiguous
+ * packet in the skb with zero intermediate heap allocations.
  */
 static struct sk_buff *tquic_assemble_packet(struct tquic_connection *conn,
 					     struct tquic_path *path,
@@ -974,125 +982,135 @@ static struct sk_buff *tquic_assemble_packet(struct tquic_connection *conn,
 {
 	struct sk_buff *skb;
 	struct tquic_frame_ctx ctx;
-	u8 *header_buf;
+	u8 header_buf[128];		/* stack -- max QUIC header */
 	u8 *payload_buf;
 	int header_len;
 	int payload_len;
-	int total_len;
+	int max_payload;
 	int ret;
 	bool is_long_header;
 
-	/* Allocate buffers */
-	header_buf = kmalloc(128, GFP_ATOMIC);
-	payload_buf = kmalloc(path->mtu, GFP_ATOMIC);
-	if (unlikely(!header_buf || !payload_buf)) {
-		kfree(header_buf);
-		kfree(payload_buf);
+	/*
+	 * Allocate the skb up-front with room for the maximum possible
+	 * packet: 128 (header) + MTU (payload) + 16 (AEAD tag).
+	 * Reserve MAX_HEADER + 128 so we can later push the header in
+	 * front of the payload that is written at skb->data.
+	 */
+	/*
+	 * Read MTU with READ_ONCE since PMTUD may update path->mtu
+	 * concurrently (via WRITE_ONCE under pmtud->lock).
+	 * Enforce QUIC minimum MTU of 1200 bytes (RFC 9000 Section 14).
+	 */
+	max_payload = READ_ONCE(path->mtu);
+	if (unlikely(max_payload < 1200))
+		max_payload = 1200;
+	skb = alloc_skb(MAX_HEADER + 128 + max_payload + 16, GFP_ATOMIC);
+	if (unlikely(!skb))
 		return NULL;
-	}
+
+	skb_reserve(skb, MAX_HEADER + 128);
+
+	/*
+	 * payload_buf points into the skb linear data area right after
+	 * the reserved header space.  Frames are coalesced directly here.
+	 */
+	payload_buf = skb_put(skb, max_payload + 16);
 
 	/* Initialize frame context */
 	ctx.conn = conn;
 	ctx.path = path;
 	ctx.buf = payload_buf;
-	ctx.buf_len = path->mtu - 128 - 16;  /* Leave room for header and tag */
+	ctx.buf_len = max_payload - 128 - 16;	/* room for header + tag */
 	ctx.offset = 0;
 	ctx.pkt_num = pkt_num;
 	ctx.ack_eliciting = false;
 
 	/* Coalesce frames into payload */
 	ret = tquic_coalesce_frames(conn, &ctx, frames);
-	if (ret < 0) {
-		kfree(header_buf);
-		kfree(payload_buf);
-		return NULL;
-	}
+	if (unlikely(ret < 0))
+		goto err_free_skb;
 
 	payload_len = ctx.offset;
 
 	/* Add padding if needed (minimum packet size) */
 	if (pkt_type == TQUIC_PKT_INITIAL && payload_len < 1200 - 128) {
 		int padding = 1200 - 128 - payload_len;
+
 		tquic_gen_padding_frame(&ctx, padding);
 		payload_len = ctx.offset;
 	}
 
-	/* Build header */
-	is_long_header = (pkt_type != -1);  /* -1 means short header */
+	/* Build header into stack buffer */
+	is_long_header = (pkt_type != -1);	/* -1 means short header */
 
 	/*
 	 * GREASE state: Pass the connection's GREASE state for RFC 9287
-	 * compliant GREASE bit manipulation. The grease_state is initialized
-	 * during connection setup based on per-netns sysctl settings, and
-	 * updated with peer capabilities after transport parameter exchange.
+	 * compliant GREASE bit manipulation.  The grease_state is
+	 * initialized during connection setup based on per-netns sysctl
+	 * settings, and updated with peer capabilities after transport
+	 * parameter exchange.
 	 */
 	if (is_long_header) {
-		header_len = tquic_build_long_header_internal(conn, path, header_buf, 128,
-						     pkt_type, pkt_num, payload_len,
-						     conn->grease_state);
+		header_len = tquic_build_long_header_internal(
+				conn, path, header_buf, sizeof(header_buf),
+				pkt_type, pkt_num, payload_len,
+				conn->grease_state);
 	} else {
 		/*
-		 * For short header packets (1-RTT), get the current key phase
-		 * from the key update state per RFC 9001 Section 6. The key
-		 * phase bit indicates which generation of keys was used.
+		 * For short header packets (1-RTT), get the current key
+		 * phase from the key update state per RFC 9001 Section 6.
+		 * The key phase bit indicates which generation of keys
+		 * was used.
 		 */
 		bool key_phase = false;
+
 		if (conn->crypto_state) {
 			struct tquic_key_update_state *ku_state;
-			ku_state = tquic_crypto_get_key_update_state(conn->crypto_state);
+
+			ku_state = tquic_crypto_get_key_update_state(
+					conn->crypto_state);
 			if (ku_state)
-				key_phase = tquic_key_update_get_phase(ku_state) != 0;
+				key_phase =
+					tquic_key_update_get_phase(ku_state) != 0;
 		}
-		header_len = tquic_build_short_header_internal(conn, path, header_buf, 128,
-						      pkt_num, 0, key_phase, false,
-						      conn->grease_state);
+		header_len = tquic_build_short_header_internal(
+				conn, path, header_buf, sizeof(header_buf),
+				pkt_num, 0, key_phase, false,
+				conn->grease_state);
 	}
 
-	if (header_len < 0) {
-		kfree(header_buf);
-		kfree(payload_buf);
-		return NULL;
-	}
+	if (unlikely(header_len < 0))
+		goto err_free_skb;
 
-	/* Encrypt payload */
+	/* Encrypt payload in-place inside the skb */
 	ret = tquic_encrypt_payload(conn, header_buf, header_len,
 				    payload_buf, payload_len, pkt_num,
 				    is_long_header ? pkt_type : 3);
-	if (ret < 0) {
-		kfree(header_buf);
-		kfree(payload_buf);
-		return NULL;
-	}
+	if (unlikely(ret < 0))
+		goto err_free_skb;
 
 	/* Apply header protection */
 	ret = tquic_apply_header_protection(conn, header_buf, header_len,
 					    payload_buf, payload_len + 16,
 					    is_long_header);
-	if (ret < 0) {
-		kfree(header_buf);
-		kfree(payload_buf);
-		return NULL;
-	}
+	if (unlikely(ret < 0))
+		goto err_free_skb;
 
-	/* Allocate SKB */
-	total_len = header_len + payload_len + 16;  /* 16 = AEAD tag */
-	skb = alloc_skb(total_len + MAX_HEADER, GFP_ATOMIC);
-	if (!skb) {
-		kfree(header_buf);
-		kfree(payload_buf);
-		return NULL;
-	}
+	/*
+	 * Trim the skb tail to the actual encrypted payload size and
+	 * then push the header in front.  skb_put() above reserved
+	 * the maximum; now trim to reality.
+	 */
+	skb_trim(skb, payload_len + 16);
 
-	skb_reserve(skb, MAX_HEADER);
-
-	/* Copy header and encrypted payload */
-	skb_put_data(skb, header_buf, header_len);
-	skb_put_data(skb, payload_buf, payload_len + 16);
-
-	kfree(header_buf);
-	kfree(payload_buf);
+	/* Push header in front of payload */
+	memcpy(skb_push(skb, header_len), header_buf, header_len);
 
 	return skb;
+
+err_free_skb:
+	kfree_skb(skb);
+	return NULL;
 }
 
 /*
@@ -1284,7 +1302,7 @@ void tquic_update_pacing(struct sock *sk, struct tquic_path *path)
 		}
 	}
 
-	pr_debug("tquic: updated pacing rate for path %u: %llu bytes/sec (status=%d)\n",
+	tquic_dbg("updated pacing rate for path %u: %llu bytes/sec (status=%d)\n",
 		 path->path_id, pacing_rate, sk->sk_pacing_status);
 }
 EXPORT_SYMBOL_GPL(tquic_update_pacing);
@@ -1629,8 +1647,27 @@ int tquic_output_packet(struct tquic_connection *conn,
 	struct net *net = NULL;
 	int ret;
 
-	if (!path || !skb)
+	if (unlikely(!path || !skb))
 		return -EINVAL;
+
+	/*
+	 * Enforce path MTU. If the packet (QUIC payload before UDP/IP headers)
+	 * exceeds the current path MTU, drop it rather than send an oversized
+	 * packet that will be silently dropped on the network.
+	 *
+	 * MTU probes bypass this check -- they are intentionally oversized.
+	 * In production, check TQUIC_SKB_CB(skb)->is_mtu_probe.
+	 */
+	{
+		u32 current_mtu = READ_ONCE(path->mtu);
+
+		if (unlikely(skb->len > current_mtu && current_mtu > 0)) {
+			tquic_dbg("output:dropping oversized pkt (%u > MTU %u) on path %u\n",
+				  skb->len, current_mtu, path->path_id);
+			kfree_skb(skb);
+			return -EMSGSIZE;
+		}
+	}
 
 	/* Get addresses */
 	local = (struct sockaddr_in *)&path->local_addr;
@@ -1657,7 +1694,7 @@ int tquic_output_packet(struct tquic_connection *conn,
 
 	/* Route lookup */
 	rt = ip_route_output_key(net ?: &init_net, &fl4);
-	if (IS_ERR(rt)) {
+	if (unlikely(IS_ERR(rt))) {
 		kfree_skb(skb);
 		return PTR_ERR(rt);
 	}
@@ -1754,10 +1791,10 @@ int tquic_xmit(struct tquic_connection *conn, struct tquic_stream *stream,
 	size_t chunk;
 	int ret = 0;
 
-	if (!conn || !stream)
+	if (unlikely(!conn || !stream))
 		return -EINVAL;
 
-	if (conn->state != TQUIC_CONN_CONNECTED)
+	if (unlikely(conn->state != TQUIC_CONN_CONNECTED))
 		return -ENOTCONN;
 
 	pkt_num = atomic64_inc_return(&conn->pkt_num_tx) - 1;
@@ -1771,8 +1808,14 @@ int tquic_xmit(struct tquic_connection *conn, struct tquic_stream *stream,
 			break;
 		}
 
-		/* Calculate chunk size */
-		chunk = min_t(size_t, len - offset, path->mtu - 100);
+		/* Calculate chunk size, enforce QUIC minimum MTU */
+		{
+			u32 mtu = READ_ONCE(path->mtu);
+
+			if (unlikely(mtu < 1200))
+				mtu = 1200;
+			chunk = min_t(size_t, len - offset, mtu - 100);
+		}
 
 		/* Create pending frame */
 		frame = kzalloc(sizeof(*frame), GFP_ATOMIC);
@@ -2004,7 +2047,7 @@ int tquic_output_flush(struct tquic_connection *conn)
 	/* Select path for transmission */
 	path = tquic_select_path(conn, NULL);
 	if (!path || path->state != TQUIC_PATH_ACTIVE) {
-		pr_debug("tquic: output_flush no active path\n");
+		tquic_dbg("output_flush no active path\n");
 		return 0;
 	}
 
@@ -2021,7 +2064,7 @@ int tquic_output_flush(struct tquic_connection *conn)
 	}
 
 	if (cwnd_limited) {
-		pr_debug("tquic: output_flush blocked by cwnd (inflight=%llu, cwnd=%u)\n",
+		tquic_dbg("output_flush blocked by cwnd (inflight=%llu, cwnd=%u)\n",
 			 inflight, path->stats.cwnd);
 		return 0;
 	}
@@ -2030,7 +2073,7 @@ int tquic_output_flush(struct tquic_connection *conn)
 	spin_lock_bh(&conn->lock);
 	if (conn->data_sent >= conn->max_data_remote) {
 		spin_unlock_bh(&conn->lock);
-		pr_debug("tquic: output_flush blocked by connection flow control\n");
+		tquic_dbg("output_flush blocked by connection flow control\n");
 		return 0;
 	}
 	conn_credit = conn->max_data_remote - conn->data_sent;
@@ -2135,7 +2178,7 @@ int tquic_output_flush(struct tquic_connection *conn)
 
 				if (ret >= 0) {
 					packets_sent++;
-					pr_debug("tquic: output_flush sent pkt %llu stream %llu offset %llu len %zu\n",
+					tquic_dbg("output_flush sent pkt %llu stream %llu offset %llu len %zu\n",
 						 pkt_num, stream->id, stream_offset, chunk_size);
 				}
 			} else {
@@ -2298,7 +2341,7 @@ int tquic_output_flush_crypto(struct tquic_connection *conn)
 			/* Send the CRYPTO frame */
 			ret = tquic_output_packet(conn, path, send_skb);
 			if (ret < 0) {
-				pr_debug("tquic: failed to send CRYPTO frame: %d\n",
+				tquic_dbg("failed to send CRYPTO frame: %d\n",
 					 ret);
 				return ret;
 			}

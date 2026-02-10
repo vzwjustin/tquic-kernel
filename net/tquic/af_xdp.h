@@ -101,6 +101,13 @@ struct tquic_xsk_ring {
 		struct xsk_ring_cons *cons;	/* Consumer ring (rx/comp) */
 	};
 
+	/* Ring descriptor arrays (typed per ring role) */
+	union {
+		struct xdp_desc *ring;		/* RX/TX descriptor ring */
+		u64 *comp_addrs;		/* Completion address ring */
+	};
+	u32 ring_size;				/* Ring entry count (power of 2) */
+
 	/* Ring state */
 	u32 cached_prod;		/* Cached producer index */
 	u32 cached_cons;		/* Cached consumer index */

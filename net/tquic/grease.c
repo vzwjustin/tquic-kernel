@@ -20,6 +20,7 @@
 
 #include "protocol.h"
 #include "grease.h"
+#include "tquic_debug.h"
 #include "core/transport_params.h"
 
 /*
@@ -161,7 +162,7 @@ ssize_t tquic_grease_encode_tp(struct tquic_grease_state *state,
 			return ret;
 		offset += ret;
 
-		pr_debug("tquic: encoded grease_quic_bit transport parameter\n");
+		tquic_dbg("encoded grease_quic_bit transport parameter\n");
 	}
 
 	/*
@@ -210,7 +211,7 @@ ssize_t tquic_grease_encode_tp(struct tquic_grease_state *state,
 		/* Track the GREASE TP ID we sent */
 		state->grease_tp_ids[state->grease_tp_count++] = tp_id;
 
-		pr_debug("tquic: encoded GREASE transport param id=0x%llx len=%u\n",
+		tquic_dbg("encoded GREASE transport param id=0x%llx len=%u\n",
 			 tp_id, value_len);
 	}
 
@@ -275,7 +276,7 @@ int tquic_grease_add_versions(u32 *versions, int max_versions, int current_count
 
 	for (i = 0; i < grease_version_cnt && current_count < max_versions; i++) {
 		versions[current_count] = tquic_grease_generate_version();
-		pr_debug("tquic: added GREASE version 0x%08x to VN\n",
+		tquic_dbg("added GREASE version 0x%08x to VN\n",
 			 versions[current_count]);
 		current_count++;
 	}
@@ -324,7 +325,7 @@ EXPORT_SYMBOL_GPL(tquic_net_get_grease_enabled);
  */
 int __init tquic_grease_init(void)
 {
-	pr_info("tquic: GREASE (RFC 9287) support initialized\n");
+	tquic_info("GREASE (RFC 9287) support initialized\n");
 	return 0;
 }
 
@@ -333,5 +334,5 @@ int __init tquic_grease_init(void)
  */
 void __exit tquic_grease_exit(void)
 {
-	pr_debug("tquic: GREASE support cleanup complete\n");
+	tquic_dbg("GREASE support cleanup complete\n");
 }

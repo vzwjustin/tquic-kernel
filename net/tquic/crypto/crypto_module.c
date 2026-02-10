@@ -11,6 +11,7 @@
 #include "cert_verify.h"
 #include "hw_offload.h"
 #include "zero_rtt.h"
+#include "../tquic_debug.h"
 
 static int __init __maybe_unused tquic_crypto_module_init(void)
 {
@@ -32,7 +33,7 @@ static int __init __maybe_unused tquic_crypto_module_init(void)
 	if (ret)
 		goto err_zero_rtt;
 
-	pr_info("tquic_crypto: crypto subsystem initialized\n");
+	tquic_info("crypto subsystem initialized\n");
 	return 0;
 
 err_zero_rtt:
@@ -56,7 +57,7 @@ static void __exit __maybe_unused tquic_crypto_module_exit(void)
 	tquic_hw_offload_exit();
 #endif
 
-	pr_info("tquic_crypto: crypto subsystem exited\n");
+	tquic_info("crypto subsystem exited\n");
 }
 
 #ifndef TQUIC_OUT_OF_TREE

@@ -41,6 +41,7 @@
 
 #include "tquic_retry.h"
 #include "tquic_mib.h"
+#include "tquic_debug.h"
 
 /*
  * =============================================================================
@@ -96,6 +97,48 @@ static DEFINE_MUTEX(tquic_retry_mutex);
 /* Sysctl-controlled values */
 static int tquic_retry_required;	/* 0 = disabled, 1 = enabled */
 static int tquic_retry_token_lifetime = TQUIC_RETRY_TOKEN_LIFETIME_DEFAULT;
+
+/*
+ * Rate limiting for Retry packet generation.
+ * Prevents CPU exhaustion from attackers sending many Initial packets.
+ */
+#define TQUIC_RETRY_RATE_LIMIT_TOKENS		200
+#define TQUIC_RETRY_RATE_LIMIT_REFILL_MS	1000
+#define TQUIC_RETRY_RATE_LIMIT_REFILL_AMOUNT	50
+
+static DEFINE_SPINLOCK(tquic_retry_rate_lock);
+static u32 tquic_retry_rate_tokens = TQUIC_RETRY_RATE_LIMIT_TOKENS;
+static ktime_t tquic_retry_rate_last;
+
+static bool tquic_retry_rate_limit(void)
+{
+	ktime_t now;
+	s64 elapsed_ms;
+	u32 refill;
+
+	spin_lock(&tquic_retry_rate_lock);
+
+	now = ktime_get();
+	elapsed_ms = ktime_ms_delta(now, tquic_retry_rate_last);
+
+	if (elapsed_ms >= TQUIC_RETRY_RATE_LIMIT_REFILL_MS) {
+		refill = (elapsed_ms / TQUIC_RETRY_RATE_LIMIT_REFILL_MS) *
+			 TQUIC_RETRY_RATE_LIMIT_REFILL_AMOUNT;
+		tquic_retry_rate_tokens = min_t(u32,
+						tquic_retry_rate_tokens + refill,
+						TQUIC_RETRY_RATE_LIMIT_TOKENS);
+		tquic_retry_rate_last = now;
+	}
+
+	if (tquic_retry_rate_tokens == 0) {
+		spin_unlock(&tquic_retry_rate_lock);
+		return false;
+	}
+
+	tquic_retry_rate_tokens--;
+	spin_unlock(&tquic_retry_rate_lock);
+	return true;
+}
 
 /*
  * =============================================================================
@@ -172,23 +215,27 @@ int tquic_retry_compute_integrity_tag(u32 version,
 	/* Allocate AEAD cipher */
 	aead = crypto_alloc_aead("gcm(aes)", 0, 0);
 	if (IS_ERR(aead)) {
-		pr_err("tquic_retry: failed to allocate AEAD cipher\n");
+		tquic_err("retry: failed to allocate AEAD cipher\n");
 		return PTR_ERR(aead);
 	}
 
 	ret = crypto_aead_setkey(aead, key, 16);
 	if (ret) {
-		pr_err("tquic_retry: failed to set AEAD key: %d\n", ret);
+		tquic_err("retry: failed to set AEAD key: %d\n", ret);
 		goto out_free_aead;
 	}
 
 	ret = crypto_aead_setauthsize(aead, TQUIC_RETRY_INTEGRITY_TAG_LEN);
 	if (ret) {
-		pr_err("tquic_retry: failed to set auth tag size: %d\n", ret);
+		tquic_err("retry: failed to set auth tag size: %d\n", ret);
 		goto out_free_aead;
 	}
 
 	/* Build Retry Pseudo-Packet as AAD */
+	if (retry_len > 65527) {
+		ret = -EINVAL;
+		goto out_free_aead;
+	}
 	pseudo_len = 1 + odcid_len + retry_len;
 	pseudo_packet = kmalloc(pseudo_len, GFP_KERNEL);
 	if (!pseudo_packet) {
@@ -247,7 +294,7 @@ int tquic_retry_compute_integrity_tag(u32 version,
 	}
 
 	if (ret)
-		pr_debug("tquic_retry: AEAD encrypt failed: %d\n", ret);
+		tquic_dbg("retry:AEAD encrypt failed: %d\n", ret);
 
 out_free_req:
 	aead_request_free(req);
@@ -313,7 +360,7 @@ int tquic_retry_token_create(struct tquic_retry_state *state,
 	u8 *encrypted = NULL;
 	size_t pt_len, enc_len;
 	u8 nonce[12];
-	u8 local_key[16];
+	u8 local_key[32];
 	unsigned long flags;
 	int ret;
 
@@ -356,37 +403,46 @@ int tquic_retry_token_create(struct tquic_retry_state *state,
 	pt_len = sizeof(pt);
 	enc_len = pt_len + 16;  /* plaintext + AEAD tag */
 
-	if (*token_len < enc_len)
+	/* Check output buffer can hold nonce + encrypted data */
+	if (*token_len < 12 + enc_len)
 		return -ENOSPC;
 
 	encrypted = kmalloc(enc_len, GFP_KERNEL);
 	if (!encrypted)
 		return -ENOMEM;
 
-	/* Generate random nonce and prepend to token */
+	/* Generate random nonce */
 	get_random_bytes(nonce, sizeof(nonce));
 
-	/* Copy key under lock, then release lock before crypto operations */
+	/* Copy key under spinlock */
 	spin_lock_irqsave(&state->lock, flags);
+	memcpy(local_key, state->token_key, sizeof(local_key));
+	spin_unlock_irqrestore(&state->lock, flags);
+
+	/*
+	 * Serialize AEAD operations with mutex to prevent concurrent
+	 * setkey/encrypt races on the shared cipher handle.
+	 */
+	mutex_lock(&state->crypto_mutex);
 
 	if (!state->aead) {
-		spin_unlock_irqrestore(&state->lock, flags);
+		mutex_unlock(&state->crypto_mutex);
+		memzero_explicit(local_key, sizeof(local_key));
 		kfree(encrypted);
 		return -EINVAL;
 	}
 
-	memcpy(local_key, state->token_key, sizeof(local_key));
-	spin_unlock_irqrestore(&state->lock, flags);
-
 	ret = crypto_aead_setkey(state->aead, local_key, 16);
 	memzero_explicit(local_key, sizeof(local_key));
 	if (ret) {
+		mutex_unlock(&state->crypto_mutex);
 		kfree(encrypted);
 		return ret;
 	}
 
-	req = aead_request_alloc(state->aead, GFP_ATOMIC);
+	req = aead_request_alloc(state->aead, GFP_KERNEL);
 	if (!req) {
+		mutex_unlock(&state->crypto_mutex);
 		kfree(encrypted);
 		return -ENOMEM;
 	}
@@ -401,6 +457,7 @@ int tquic_retry_token_create(struct tquic_retry_state *state,
 	ret = crypto_aead_encrypt(req);
 
 	aead_request_free(req);
+	mutex_unlock(&state->crypto_mutex);
 
 	if (ret) {
 		kfree(encrypted);
@@ -408,18 +465,16 @@ int tquic_retry_token_create(struct tquic_retry_state *state,
 	}
 
 	/* Token format: nonce (12) || encrypted data + tag */
-	if (*token_len < 12 + enc_len) {
-		kfree(encrypted);
-		return -ENOSPC;
-	}
-
 	memcpy(token, nonce, 12);
 	memcpy(token + 12, encrypted, enc_len);
 	*token_len = 12 + enc_len;
 
 	kfree(encrypted);
 
-	pr_debug("tquic_retry: created token, len=%zu\n", *token_len);
+	/* Wipe sensitive plaintext from stack */
+	memzero_explicit(&pt, sizeof(pt));
+
+	tquic_dbg("retry:created token, len=%zu\n", *token_len);
 	return 0;
 }
 EXPORT_SYMBOL_GPL(tquic_retry_token_create);
@@ -437,7 +492,7 @@ int tquic_retry_token_validate(struct tquic_retry_state *state,
 	struct scatterlist sg;
 	u8 *decrypted = NULL;
 	u8 nonce[12];
-	u8 local_key[16];
+	u8 local_key[32];
 	size_t enc_len, pt_len;
 	u64 now, age;
 	unsigned long flags;
@@ -461,27 +516,35 @@ int tquic_retry_token_validate(struct tquic_retry_state *state,
 
 	memcpy(decrypted, token + 12, enc_len);
 
-	/* Copy key under lock, then release lock before crypto operations */
+	/* Copy key under spinlock */
 	spin_lock_irqsave(&state->lock, flags);
+	memcpy(local_key, state->token_key, sizeof(local_key));
+	spin_unlock_irqrestore(&state->lock, flags);
+
+	/*
+	 * Serialize AEAD operations with mutex to prevent concurrent
+	 * setkey/decrypt races on the shared cipher handle.
+	 */
+	mutex_lock(&state->crypto_mutex);
 
 	if (!state->aead) {
-		spin_unlock_irqrestore(&state->lock, flags);
+		mutex_unlock(&state->crypto_mutex);
+		memzero_explicit(local_key, sizeof(local_key));
 		kfree(decrypted);
 		return -EINVAL;
 	}
 
-	memcpy(local_key, state->token_key, sizeof(local_key));
-	spin_unlock_irqrestore(&state->lock, flags);
-
 	ret = crypto_aead_setkey(state->aead, local_key, 16);
 	memzero_explicit(local_key, sizeof(local_key));
 	if (ret) {
+		mutex_unlock(&state->crypto_mutex);
 		kfree(decrypted);
 		return ret;
 	}
 
-	req = aead_request_alloc(state->aead, GFP_ATOMIC);
+	req = aead_request_alloc(state->aead, GFP_KERNEL);
 	if (!req) {
+		mutex_unlock(&state->crypto_mutex);
 		kfree(decrypted);
 		return -ENOMEM;
 	}
@@ -493,9 +556,10 @@ int tquic_retry_token_validate(struct tquic_retry_state *state,
 	ret = crypto_aead_decrypt(req);
 
 	aead_request_free(req);
+	mutex_unlock(&state->crypto_mutex);
 
 	if (ret) {
-		pr_debug("tquic_retry: token decryption failed: %d\n", ret);
+		tquic_dbg("retry:token decryption failed: %d\n", ret);
 		kfree(decrypted);
 		return -EACCES;  /* Authentication failed */
 	}
@@ -507,23 +571,24 @@ int tquic_retry_token_validate(struct tquic_retry_state *state,
 	}
 
 	memcpy(&pt, decrypted, sizeof(pt));
+	memzero_explicit(decrypted, enc_len);
 	kfree(decrypted);
 
 	/* Validate version */
 	if (pt.version != TQUIC_RETRY_TOKEN_VERSION) {
-		pr_debug("tquic_retry: invalid token version: %u\n", pt.version);
+		tquic_dbg("retry:invalid token version: %u\n", pt.version);
 		return -EINVAL;
 	}
 
 	/* Validate ODCID length */
 	if (pt.odcid_len > TQUIC_MAX_CID_LEN) {
-		pr_debug("tquic_retry: invalid ODCID length: %u\n", pt.odcid_len);
+		tquic_dbg("retry:invalid ODCID length: %u\n", pt.odcid_len);
 		return -EINVAL;
 	}
 
 	/* Validate client address */
 	if (pt.addr_family != client_addr->ss_family) {
-		pr_debug("tquic_retry: address family mismatch\n");
+		tquic_dbg("retry:address family mismatch\n");
 		return -EACCES;
 	}
 
@@ -533,7 +598,7 @@ int tquic_retry_token_validate(struct tquic_retry_state *state,
 		sin = (const struct sockaddr_in *)client_addr;
 		if (pt.client_addr.v4 != sin->sin_addr.s_addr ||
 		    pt.client_port != sin->sin_port) {
-			pr_debug("tquic_retry: IPv4 address mismatch\n");
+			tquic_dbg("retry:IPv4 address mismatch\n");
 			return -EACCES;
 		}
 	} else if (client_addr->ss_family == AF_INET6) {
@@ -543,30 +608,32 @@ int tquic_retry_token_validate(struct tquic_retry_state *state,
 		if (memcmp(&pt.client_addr.v6, &sin6->sin6_addr,
 			   sizeof(struct in6_addr)) != 0 ||
 		    pt.client_port != sin6->sin6_port) {
-			pr_debug("tquic_retry: IPv6 address mismatch\n");
+			tquic_dbg("retry:IPv6 address mismatch\n");
 			return -EACCES;
 		}
 	}
 
-	/* Validate timestamp */
+	/* Validate timestamp -- reject future tokens beyond small skew */
 	now = ktime_get_real_seconds();
-	if (pt.timestamp > now) {
-		pr_debug("tquic_retry: token from future\n");
+	if (pt.timestamp > now + 5) {
+		tquic_dbg("retry:token from future\n");
 		return -EINVAL;
 	}
 
-	age = now - pt.timestamp;
-	if (age > state->token_lifetime) {
-		pr_debug("tquic_retry: token expired (age=%llu, max=%u)\n",
-			 age, state->token_lifetime);
-		return -ETIMEDOUT;
+	if (pt.timestamp <= now) {
+		age = now - pt.timestamp;
+		if (age > state->token_lifetime) {
+			tquic_dbg("retry:token expired (age=%llu, max=%u)\n",
+				 age, state->token_lifetime);
+			return -ETIMEDOUT;
+		}
 	}
 
 	/* Output ODCID */
 	memcpy(odcid, pt.odcid, pt.odcid_len);
 	*odcid_len = pt.odcid_len;
 
-	pr_debug("tquic_retry: token validated successfully\n");
+	tquic_dbg("retry:token validated successfully\n");
 	return 0;
 }
 EXPORT_SYMBOL_GPL(tquic_retry_token_validate);
@@ -765,6 +832,12 @@ int tquic_retry_send(struct sock *sk,
 	if (!tquic_global_retry_state)
 		return -ENODEV;
 
+	/* Rate limit Retry generation to prevent CPU exhaustion */
+	if (!tquic_retry_rate_limit()) {
+		tquic_dbg("retry:rate limited\n");
+		return -EAGAIN;
+	}
+
 	/* Generate new server CID for the Retry */
 	get_random_bytes(new_scid, new_scid_len);
 
@@ -774,7 +847,7 @@ int tquic_retry_send(struct sock *sk,
 				       src_addr,
 				       token, &token_len);
 	if (ret) {
-		pr_debug("tquic_retry: failed to create token: %d\n", ret);
+		tquic_dbg("retry:failed to create token: %d\n", ret);
 		return ret;
 	}
 
@@ -852,7 +925,7 @@ int tquic_retry_send(struct sock *sk,
 		/* Update MIB counter */
 		if (sk)
 			TQUIC_INC_STATS(sock_net(sk), TQUIC_MIB_RETRYPACKETSTX);
-		pr_debug("tquic_retry: sent Retry packet, token_len=%zu\n",
+		tquic_dbg("retry:sent Retry packet, token_len=%zu\n",
 			 token_len);
 	}
 
@@ -882,6 +955,13 @@ int tquic_retry_process(struct tquic_connection *conn,
 	if (!conn || !packet)
 		return -EINVAL;
 
+	/*
+	 * RFC 9000 Section 17.2.5.2: "A client MUST accept and process
+	 * at most one Retry packet for each connection attempt."
+	 */
+	if (conn->retry_received)
+		return -EALREADY;
+
 	/* Parse Retry packet */
 	ret = tquic_retry_parse(packet, packet_len,
 				&version,
@@ -890,7 +970,7 @@ int tquic_retry_process(struct tquic_connection *conn,
 				&token, &token_len,
 				&tag);
 	if (ret) {
-		pr_debug("tquic_retry: failed to parse Retry packet: %d\n", ret);
+		tquic_dbg("retry:failed to parse Retry packet: %d\n", ret);
 		return ret;
 	}
 
@@ -898,7 +978,7 @@ int tquic_retry_process(struct tquic_connection *conn,
 	if (!tquic_retry_verify_integrity_tag(version,
 					      conn->dcid.id, conn->dcid.len,
 					      packet, packet_len)) {
-		pr_debug("tquic_retry: integrity tag verification failed\n");
+		tquic_dbg("retry:integrity tag verification failed\n");
 		/* Update MIB counter for invalid Retry */
 		if (conn->sk)
 			TQUIC_INC_STATS(sock_net(conn->sk), TQUIC_MIB_RETRYERRORS);
@@ -908,7 +988,7 @@ int tquic_retry_process(struct tquic_connection *conn,
 	/* Verify DCID matches our SCID */
 	if (dcid_len != conn->scid.len ||
 	    memcmp(dcid, conn->scid.id, dcid_len) != 0) {
-		pr_debug("tquic_retry: DCID mismatch\n");
+		tquic_dbg("retry:DCID mismatch\n");
 		return -EINVAL;
 	}
 
@@ -920,15 +1000,31 @@ int tquic_retry_process(struct tquic_connection *conn,
 	 */
 	spin_lock(&conn->lock);
 
-	/* Store original DCID if not already stored */
-	/* Note: This would typically be stored in a separate field */
+	/*
+	 * Save the original DCID before overwriting. This is required
+	 * by RFC 9000 Section 7.3 for transport parameter validation:
+	 * the server's original_destination_connection_id transport
+	 * parameter must match the ODCID.
+	 */
+	conn->original_dcid.len = conn->dcid.len;
+	memcpy(conn->original_dcid.id, conn->dcid.id, conn->dcid.len);
 
 	/* Update DCID to server's new SCID */
 	conn->dcid.len = scid_len;
 	memcpy(conn->dcid.id, scid, scid_len);
 
-	/* Store token for next Initial packet */
-	/* Note: Token storage would be in connection's retry state */
+	/*
+	 * Store the retry token for inclusion in the next Initial packet.
+	 * The token_len has already been validated by tquic_retry_parse
+	 * and is bounded by the packet size.
+	 */
+	if (token_len <= sizeof(conn->retry_token)) {
+		memcpy(conn->retry_token, token, token_len);
+		conn->retry_token_len = token_len;
+	}
+
+	/* Mark that we have received a Retry */
+	conn->retry_received = true;
 
 	spin_unlock(&conn->lock);
 
@@ -936,7 +1032,7 @@ int tquic_retry_process(struct tquic_connection *conn,
 	if (conn->sk)
 		TQUIC_INC_STATS(sock_net(conn->sk), TQUIC_MIB_RETRYPACKETSRX);
 
-	pr_debug("tquic_retry: processed Retry, new DCID len=%u, token_len=%zu\n",
+	tquic_dbg("retry:processed Retry, new DCID len=%u, token_len=%zu\n",
 		 scid_len, token_len);
 
 	return 0;
@@ -961,6 +1057,7 @@ struct tquic_retry_state *tquic_retry_state_alloc(void)
 		return NULL;
 
 	spin_lock_init(&state->lock);
+	mutex_init(&state->crypto_mutex);
 	state->token_lifetime = tquic_retry_token_lifetime;
 
 	/* Generate random token encryption key */
@@ -970,7 +1067,7 @@ struct tquic_retry_state *tquic_retry_state_alloc(void)
 	/* Allocate AEAD cipher for token encryption */
 	state->aead = crypto_alloc_aead("gcm(aes)", 0, 0);
 	if (IS_ERR(state->aead)) {
-		pr_err("tquic_retry: failed to allocate token AEAD\n");
+		tquic_err("retry:failed to allocate token AEAD\n");
 		kfree(state);
 		return NULL;
 	}
@@ -981,7 +1078,7 @@ struct tquic_retry_state *tquic_retry_state_alloc(void)
 		return NULL;
 	}
 
-	pr_debug("tquic_retry: allocated state with %u second token lifetime\n",
+	tquic_dbg("retry:allocated state with %u second token lifetime\n",
 		 state->token_lifetime);
 
 	return state;
@@ -1026,7 +1123,7 @@ int tquic_retry_rotate_key(struct tquic_retry_state *state)
 
 	spin_unlock_irqrestore(&state->lock, flags);
 
-	pr_info("tquic_retry: rotated token key, new id=%u\n", new_key_id);
+	tquic_info("retry:rotated token key, new id=%u\n", new_key_id);
 
 	return 0;
 }
@@ -1067,18 +1164,21 @@ EXPORT_SYMBOL_GPL(tquic_retry_get_token_lifetime);
 
 int __init tquic_retry_init(void)
 {
+	/* Initialize rate limiter timestamp */
+	tquic_retry_rate_last = ktime_get();
+
 	mutex_lock(&tquic_retry_mutex);
 
 	tquic_global_retry_state = tquic_retry_state_alloc();
 	if (!tquic_global_retry_state) {
 		mutex_unlock(&tquic_retry_mutex);
-		pr_err("tquic_retry: failed to allocate global state\n");
+		tquic_err("retry: failed to allocate global state\n");
 		return -ENOMEM;
 	}
 
 	mutex_unlock(&tquic_retry_mutex);
 
-	pr_info("tquic_retry: initialized\n");
+	tquic_info("retry subsystem initialized\n");
 	return 0;
 }
 
@@ -1091,7 +1191,7 @@ void __exit tquic_retry_exit(void)
 
 	mutex_unlock(&tquic_retry_mutex);
 
-	pr_info("tquic_retry: exited\n");
+	tquic_info("retry subsystem exited\n");
 }
 
 MODULE_DESCRIPTION("TQUIC Retry Packet Mechanism (RFC 9000 Section 8.1)");

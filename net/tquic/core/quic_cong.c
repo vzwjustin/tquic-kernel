@@ -20,6 +20,7 @@
 #include <linux/math64.h>
 #include <linux/random.h>
 #include <net/tquic.h>
+#include "../tquic_debug.h"
 
 /*
  * Maximum packet size constant
@@ -217,8 +218,13 @@ static u32 cubic_root(u64 a)
 
 	x = ((u32)(((u32)v[shift] + 10) << b)) >> 6;
 
-	/* Newton-Raphson iteration */
-	x = (2 * x + (u32)div64_u64(a, (u64)x * (u64)(x - 1)));
+	/*
+	 * Newton-Raphson iteration for cube root:
+	 *   x = (2*x + a/x^2) / 3
+	 * Multiply-then-divide: x = (2*x + a/(x*x)) / 3
+	 * Approximation: /3 via * 341 >> 10 (341/1024 ~= 1/3)
+	 */
+	x = (2 * x + (u32)div64_u64(a, (u64)x * (u64)x));
 	x = ((x * 341) >> 10);
 
 	return x;
@@ -284,6 +290,9 @@ void tquic_cc_init(struct tquic_cc_state *cc, enum tquic_cc_algo algo)
 		cc->pacing_rate = div64_u64(cc->cwnd * USEC_PER_SEC,
 					    TQUIC_INITIAL_RTT_US);
 	}
+
+	tquic_dbg("cc init algo=%s cwnd=%llu ssthresh=%llu\n",
+		  tquic_cc_algo_name(algo), cc->cwnd, cc->ssthresh);
 }
 EXPORT_SYMBOL_GPL(tquic_cc_init);
 
@@ -393,10 +402,14 @@ static void cubic_on_ack(struct tquic_cc_state *cc, u64 acked_bytes,
 	delta = div64_u64(delta * CUBIC_C * TQUIC_MAX_PACKET_SIZE,
 			  (u64)CUBIC_C_SCALE << 30);
 
-	if (t < cc->cubic_k)
-		target_cwnd = cc->cubic_origin_point - delta;
-	else
+	if (t < cc->cubic_k) {
+		if (delta > cc->cubic_origin_point)
+			target_cwnd = 0;
+		else
+			target_cwnd = cc->cubic_origin_point - delta;
+	} else {
 		target_cwnd = cc->cubic_origin_point + delta;
+	}
 
 	/* TCP-friendly region: ensure we're at least as fast as Reno */
 	/* TCP cwnd grows by ~1.5 MSS per RTT */
@@ -735,6 +748,9 @@ void tquic_cc_on_loss(struct tquic_cc_state *cc, u64 lost_bytes)
 	cc->in_recovery = 1;
 	cc->congestion_recovery_start = now;
 
+	tquic_info("loss: entering recovery cwnd=%llu lost=%llu algo=%s\n",
+		   cc->cwnd, lost_bytes, tquic_cc_algo_name(cc->algo));
+
 	/*
 	 * PRR initialization (RFC 6937)
 	 * Record pipe (bytes in flight) at start of recovery
@@ -1003,6 +1019,9 @@ EXPORT_SYMBOL_GPL(tquic_cc_can_send);
  */
 void tquic_cc_on_persistent_congestion(struct tquic_cc_state *cc)
 {
+	tquic_warn("persistent congestion, resetting cwnd from %llu\n",
+		   cc->cwnd);
+
 	/* Reset to minimum window */
 	cc->cwnd = TQUIC_MIN_CWND;
 	cc->congestion_window = cc->cwnd;

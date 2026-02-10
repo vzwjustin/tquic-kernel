@@ -20,8 +20,6 @@
 #ifndef _QUIC_TRACE_H
 #define _QUIC_TRACE_H
 
-#include <uapi/linux/quic.h>
-
 /*
  * Prefer real kernel trace events when the trace header is available.
  * For out-of-tree builds that don't ship trace events, fall back to no-ops.
@@ -56,14 +54,14 @@
  * Helper function to extract connection ID as u64 for tracing.
  * Uses the first 8 bytes of the connection ID for identification.
  */
-static inline u64 quic_trace_conn_id(const struct quic_connection_id *cid)
+static inline u64 quic_trace_conn_id(const struct tquic_cid *cid)
 {
 	u64 id = 0;
 	int i;
 	int len = cid->len > 8 ? 8 : cid->len;
 
 	for (i = 0; i < len; i++)
-		id = (id << 8) | cid->data[i];
+		id = (id << 8) | cid->id[i];
 
 	return id;
 }

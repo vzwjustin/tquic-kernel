@@ -33,6 +33,7 @@
 #include <uapi/linux/tquic_pm.h>
 
 #include "tquic_compat.h"
+#include "tquic_debug.h"
 #include "tquic_init.h"
 #include "multipath/tquic_sched.h"
 
@@ -692,8 +693,19 @@ static int tquic_nl_cmd_path_add(struct sk_buff *skb, struct genl_info *info)
 	if (info->attrs[TQUIC_NL_ATTR_PATH_IFINDEX])
 		path->ifindex =
 			nla_get_s32(info->attrs[TQUIC_NL_ATTR_PATH_IFINDEX]);
-	if (info->attrs[TQUIC_NL_ATTR_PATH_WEIGHT])
-		path->weight = nla_get_u32(info->attrs[TQUIC_NL_ATTR_PATH_WEIGHT]);
+	if (info->attrs[TQUIC_NL_ATTR_PATH_WEIGHT]) {
+		u32 w = nla_get_u32(info->attrs[TQUIC_NL_ATTR_PATH_WEIGHT]);
+
+		if (w == 0) {
+			spin_unlock_bh(&conn->lock);
+			NL_SET_ERR_MSG(info->extack,
+				       "Path weight must be non-zero");
+			tquic_path_remove_and_free(conn, path);
+			tquic_nl_conn_put(conn);
+			return -EINVAL;
+		}
+		path->weight = w;
+	}
 	if (info->attrs[TQUIC_NL_ATTR_PATH_PRIORITY])
 		path->priority =
 			nla_get_u8(info->attrs[TQUIC_NL_ATTR_PATH_PRIORITY]);
@@ -826,9 +838,18 @@ static int tquic_nl_cmd_path_set(struct sk_buff *skb, struct genl_info *info)
 	}
 
 	/* Update path settings - protected by RCU, but we do atomic updates */
-	if (info->attrs[TQUIC_NL_ATTR_PATH_WEIGHT])
-		WRITE_ONCE(path->weight,
-			   nla_get_u32(info->attrs[TQUIC_NL_ATTR_PATH_WEIGHT]));
+	if (info->attrs[TQUIC_NL_ATTR_PATH_WEIGHT]) {
+		u32 w = nla_get_u32(info->attrs[TQUIC_NL_ATTR_PATH_WEIGHT]);
+
+		if (w == 0) {
+			tquic_nl_path_put(path);
+			tquic_nl_conn_put(conn);
+			NL_SET_ERR_MSG(info->extack,
+				       "Path weight must be non-zero");
+			return -EINVAL;
+		}
+		WRITE_ONCE(path->weight, w);
+	}
 	if (info->attrs[TQUIC_NL_ATTR_PATH_PRIORITY])
 		WRITE_ONCE(path->priority,
 			   nla_get_u8(info->attrs[TQUIC_NL_ATTR_PATH_PRIORITY]));
@@ -1664,19 +1685,19 @@ int __init tquic_nl_init(void)
 
 	ret = register_pernet_subsys(&tquic_net_ops);
 	if (ret) {
-		pr_err("Failed to register per-net operations: %d\n", ret);
+		tquic_err("failed to register per-net operations: %d\n", ret);
 		return ret;
 	}
 
 	ret = genl_register_family(&tquic_genl_family);
 	if (ret) {
-		pr_err("Failed to register netlink family: %d\n", ret);
+		tquic_err("failed to register netlink family: %d\n", ret);
 		unregister_pernet_subsys(&tquic_net_ops);
 		return ret;
 	}
 
-	pr_info("TQUIC netlink interface registered (family: %s, version: %d)\n",
-		TQUIC_NL_GENL_NAME, TQUIC_NL_GENL_VERSION);
+	tquic_info("netlink interface registered (family: %s, version: %d)\n",
+		   TQUIC_NL_GENL_NAME, TQUIC_NL_GENL_VERSION);
 
 	return 0;
 }
@@ -1691,7 +1712,7 @@ void __exit tquic_nl_exit(void)
 	genl_unregister_family(&tquic_genl_family);
 	unregister_pernet_subsys(&tquic_net_ops);
 
-	pr_info("TQUIC netlink interface unregistered\n");
+	tquic_info("netlink interface unregistered\n");
 }
 
 /*

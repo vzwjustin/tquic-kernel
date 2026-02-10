@@ -35,6 +35,7 @@
 #include "../multipath/tquic_sched.h"
 #include "tquic_bonding.h"
 #include "cong_coupled.h"
+#include "../tquic_debug.h"
 
 /*
  * Coupled congestion control constants
@@ -167,9 +168,17 @@ static void coupled_calc_alpha(struct coupled_cc_ctx *ctx)
 		cwnd_rtt = div64_u64(path->cwnd * RTT_SCALE, path->rtt_us);
 		sum_cwnd_rtt += cwnd_rtt;
 
-		/* cwnd_i / rtt_i^2 (scaled by RTT_SCALE^2) */
-		cwnd_rtt2 = div64_u64(path->cwnd * RTT_SCALE * RTT_SCALE,
-				      path->rtt_us * path->rtt_us);
+		/*
+		 * cwnd_i / rtt_i^2 (scaled by RTT_SCALE^2)
+		 *
+		 * Avoid overflow: cwnd * RTT_SCALE^2 overflows u64
+		 * for cwnd > ~18KB. Split into two divisions:
+		 * cwnd_rtt2 = (cwnd * RTT_SCALE / rtt_i) * (RTT_SCALE / rtt_i)
+		 */
+		cwnd_rtt2 = div64_u64(path->cwnd * RTT_SCALE,
+				      path->rtt_us);
+		cwnd_rtt2 = div64_u64(cwnd_rtt2 * RTT_SCALE,
+				      path->rtt_us);
 		if (cwnd_rtt2 > max_cwnd_rtt2)
 			max_cwnd_rtt2 = cwnd_rtt2;
 	}
@@ -180,13 +189,27 @@ static void coupled_calc_alpha(struct coupled_cc_ctx *ctx)
 		return;
 	}
 
-	/* (sum(cwnd_j/rtt_j))^2 - need to prevent overflow */
+	/*
+	 * (sum(cwnd_j/rtt_j))^2 - need to prevent overflow.
+	 * If sum_cwnd_rtt > 2^32, squaring it will overflow u64.
+	 * Scale down sum_cwnd_rtt before squaring. The corresponding
+	 * max_cwnd_rtt2 uses different scaling and is applied separately
+	 * after the division (see below).
+	 */
 	if (sum_cwnd_rtt > (1ULL << 32)) {
-		/* Scale down if too large */
-		u64 scale_factor = sum_cwnd_rtt >> 32;
-		sum_cwnd_rtt = sum_cwnd_rtt / scale_factor;
-		max_cwnd_rtt2 = max_cwnd_rtt2 / scale_factor;
+		u64 shift_count = (fls64(sum_cwnd_rtt) - 32 + 1) / 2 + 1;
+
+		sum_cwnd_rtt >>= shift_count;
+		/*
+		 * We scale down sum_cwnd_rtt by 2^shift_count, so
+		 * sum_cwnd_rtt^2 is scaled by 2^(2*shift_count).
+		 * max_cwnd_rtt2 must be scaled down by the same factor
+		 * to keep the ratio correct.
+		 */
+		max_cwnd_rtt2 >>= (2 * shift_count);
 	}
+	if (sum_cwnd_rtt == 0)
+		sum_cwnd_rtt = 1;
 	sum_cwnd_rtt_sq = sum_cwnd_rtt * sum_cwnd_rtt;
 
 	/* Avoid division by zero */
@@ -202,9 +225,16 @@ static void coupled_calc_alpha(struct coupled_cc_ctx *ctx)
 	 * max_cwnd_rtt2 is scaled by RTT_SCALE^2
 	 * sum_cwnd_rtt_sq is scaled by RTT_SCALE^2
 	 * These cancel out in the division.
+	 *
+	 * Avoid u64 overflow from three-term numerator by dividing first.
 	 */
-	alpha_new = div64_u64(ctx->total_cwnd * max_cwnd_rtt2 * COUPLED_ALPHA_SCALE,
+	alpha_new = div64_u64(ctx->total_cwnd * COUPLED_ALPHA_SCALE,
 			      sum_cwnd_rtt_sq);
+	/* Guard overflow on second multiply */
+	if (alpha_new > 0 && max_cwnd_rtt2 > div64_u64(U64_MAX, alpha_new))
+		alpha_new = COUPLED_ALPHA_MAX;
+	else
+		alpha_new = alpha_new * max_cwnd_rtt2;
 
 	/* Clamp alpha to reasonable range */
 	if (alpha_new > COUPLED_ALPHA_MAX)
@@ -888,10 +918,15 @@ u64 olia_cc_increase(struct coupled_cc_ctx *ctx, u8 path_id,
 	 * limiting the best path's growth.
 	 */
 	if (best_path_idx >= 0 && path->capacity < best_capacity &&
-	    ctx->total_cwnd > 0) {
+	    ctx->total_cwnd > 0 && path->rtt_us > 0) {
 		u64 diff = best_capacity - path->capacity;
-		u64 total_cap_sq = ctx->total_cwnd * ctx->total_cwnd /
-				   (path->rtt_us * path->rtt_us);
+		u64 rtt_sq = path->rtt_us * path->rtt_us;
+		u64 total_cap_sq;
+
+		if (rtt_sq == 0)
+			rtt_sq = 1;
+		total_cap_sq = div64_u64(ctx->total_cwnd * ctx->total_cwnd,
+					 rtt_sq);
 		if (total_cap_sq > 0)
 			epsilon = div64_u64(diff * COUPLED_ALPHA_SCALE, total_cap_sq);
 		else

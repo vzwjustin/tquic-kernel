@@ -41,6 +41,7 @@
 #include <net/tquic.h>
 
 #include "tquic_compat.h"
+#include "tquic_debug.h"
 #include "protocol.h"
 
 /* UDP tunnel encapsulation type for TQUIC */
@@ -316,7 +317,7 @@ int tquic_register_listener(struct sock *sk)
 	tsk->flags |= TQUIC_F_LISTENER_REGISTERED;
 	spin_unlock_bh(&tquic_listener_lock);
 
-	pr_debug("tquic: listener registered, hash=%u\n", hash);
+	tquic_dbg("listener registered, hash=%u\n", hash);
 	return 0;
 }
 EXPORT_SYMBOL_GPL(tquic_register_listener);
@@ -343,7 +344,7 @@ void tquic_unregister_listener(struct sock *sk)
 	/* Ensure RCU readers have completed */
 	synchronize_rcu();
 
-	pr_debug("tquic: listener unregistered\n");
+	tquic_dbg("listener unregistered\n");
 }
 EXPORT_SYMBOL_GPL(tquic_unregister_listener);
 
@@ -1036,7 +1037,7 @@ int tquic_udp_connect(struct tquic_udp_sock *us,
 	/* Clear dst cache on connect */
 	dst_cache_reset(&us->dst_cache);
 
-	pr_debug("tquic_udp: socket connected to remote\n");
+	tquic_dbg("udp:socket connected to remote\n");
 	return 0;
 }
 EXPORT_SYMBOL_GPL(tquic_udp_connect);
@@ -1064,7 +1065,7 @@ static int tquic_udp_encap_recv(struct sock *sk, struct sk_buff *skb)
 	/* Get our socket context */
 	us = rcu_dereference_sk_user_data(sk);
 	if (!us) {
-		pr_debug("tquic_udp: no socket context\n");
+		tquic_dbg("udp:no socket context\n");
 		goto drop;
 	}
 
@@ -1657,7 +1658,7 @@ int tquic_udp_create_path_socket(struct tquic_connection *conn,
 	 */
 	path->cong = us;
 
-	pr_debug("tquic_udp: created socket for path %u (port %u)\n",
+	tquic_dbg("udp:created socket for path %u (port %u)\n",
 		 path->path_id, ntohs(us->local_port));
 
 	return 0;
@@ -1865,7 +1866,7 @@ int tquic_udp_icsk_bind(struct sock *sk, struct sockaddr *uaddr, int addr_len)
 	/* Copy bind address */
 	memcpy(&tsk->bind_addr, uaddr, addr_len);
 
-	pr_debug("tquic_udp: bound to port %u\n", ntohs(us->local_port));
+	tquic_dbg("udp:bound to port %u\n", ntohs(us->local_port));
 
 	return 0;
 }
@@ -1891,7 +1892,7 @@ int __init tquic_udp_init(void)
 	for (i = 0; i < ARRAY_SIZE(tquic_listeners); i++)
 		INIT_HLIST_HEAD(&tquic_listeners[i]);
 
-	pr_info("tquic_udp: UDP tunnel subsystem initialized\n");
+	tquic_info("udp:UDP tunnel subsystem initialized\n");
 	return 0;
 }
 
@@ -1917,7 +1918,7 @@ void __exit tquic_udp_exit(void)
 	}
 	spin_unlock_bh(&tquic_udp_hash_lock);
 
-	pr_info("tquic_udp: UDP tunnel subsystem cleaned up\n");
+	tquic_info("udp:UDP tunnel subsystem cleaned up\n");
 }
 
 MODULE_DESCRIPTION("TQUIC UDP Tunnel Integration");

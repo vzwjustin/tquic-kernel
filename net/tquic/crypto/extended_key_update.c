@@ -28,6 +28,7 @@
 
 #include "extended_key_update.h"
 #include "key_update.h"
+#include "../tquic_debug.h"
 
 /* HKDF labels for extended key update */
 #define TQUIC_EKU_LABEL_PSK_EXTRACT	"quic eku psk"

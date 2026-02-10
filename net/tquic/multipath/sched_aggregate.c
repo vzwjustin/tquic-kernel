@@ -27,6 +27,7 @@
 
 #include "tquic_sched.h"
 #include "../bond/tquic_bonding.h"
+#include "../tquic_debug.h"
 
 /*
  * Capacity calculation constants
@@ -66,8 +67,8 @@ struct aggregate_sched_data {
  */
 static u32 calc_path_capacity(struct tquic_path *path)
 {
-	u64 cwnd = path->cc.cwnd;
-	u32 rtt_us = path->cc.smoothed_rtt_us;
+	u64 cwnd = READ_ONCE(path->cc.cwnd);
+	u64 rtt_us = READ_ONCE(path->cc.smoothed_rtt_us);
 	u64 capacity;
 
 	/* Use default values if metrics not yet available */
@@ -186,6 +187,7 @@ static int aggregate_get_path(struct tquic_connection *conn,
 	list_for_each_entry_rcu(path, &conn->paths, list) {
 		u32 capacity;
 		u32 available;
+		u32 cwnd;
 
 		if (idx >= TQUIC_MAX_PATHS)
 			break;
@@ -198,10 +200,11 @@ static int aggregate_get_path(struct tquic_connection *conn,
 		capacity = sd->path_capacities[idx];
 
 		/* Check if path has cwnd available (not congestion limited) */
-		if (path->cc.cwnd > 0) {
-			u32 in_flight = path->cc.bytes_in_flight;
+		cwnd = READ_ONCE(path->cc.cwnd);
+		if (cwnd > 0) {
+			u32 in_flight = READ_ONCE(path->cc.bytes_in_flight);
 
-			if (in_flight < path->cc.cwnd)
+			if (in_flight < cwnd)
 				available = capacity;
 			else
 				available = 0;  /* Congestion limited */

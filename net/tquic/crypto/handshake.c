@@ -24,10 +24,27 @@
 #include <net/tquic.h>
 #include <net/tquic/handshake.h>
 #include "cert_verify.h"
+#include "../tquic_debug.h"
 
 /* TLS 1.3 Version */
 #define TLS_VERSION_13			0x0304
 #define TLS_LEGACY_VERSION		0x0303
+
+/*
+ * TLS 1.3 downgrade sentinels (RFC 8446 Section 4.1.3).
+ * A TLS 1.3 server that negotiates TLS 1.2 or below places these
+ * values in the last 8 bytes of ServerHello.random.  A TLS 1.3
+ * client MUST check for these and abort with illegal_parameter.
+ */
+#define TLS_DOWNGRADE_SENTINEL_LEN	8
+#define TLS_DOWNGRADE_SENTINEL_OFFSET	(TLS_RANDOM_LEN - TLS_DOWNGRADE_SENTINEL_LEN)
+
+static const u8 tls12_downgrade_sentinel[TLS_DOWNGRADE_SENTINEL_LEN] = {
+	0x44, 0x4f, 0x57, 0x4e, 0x47, 0x52, 0x44, 0x01
+};
+static const u8 tls11_downgrade_sentinel[TLS_DOWNGRADE_SENTINEL_LEN] = {
+	0x44, 0x4f, 0x57, 0x4e, 0x47, 0x52, 0x44, 0x00
+};
 
 /* TLS 1.3 Handshake Message Types */
 #define TLS_HS_CLIENT_HELLO		1
@@ -807,11 +824,11 @@ static int tquic_hs_derive_secret(struct tquic_handshake *hs,
 /*
  * Update transcript hash
  */
-/* Maximum transcript size: 256 KB should be more than enough for any
+/* Maximum transcript size: 128 KB should be more than enough for any
  * TLS 1.3 handshake (typical is a few KB). This prevents unbounded
  * memory growth from malicious or malformed handshake data.
  */
-#define TQUIC_MAX_TRANSCRIPT_SIZE	(256 * 1024)
+#define TQUIC_MAX_TRANSCRIPT_SIZE	(128 * 1024)
 
 static int tquic_hs_update_transcript(struct tquic_handshake *hs,
 				      const u8 *data, u32 len)
@@ -1423,7 +1440,7 @@ int tquic_hs_process_server_hello(struct tquic_handshake *hs,
 		return -EINVAL;
 	/* Verify session ID echoed back */
 	if (session_id_len != hs->session_id_len ||
-	    memcmp(p, hs->session_id, session_id_len) != 0) {
+	    crypto_memneq(p, hs->session_id, session_id_len)) {
 		pr_warn("tquic_hs: session ID mismatch\n");
 		return -EINVAL;
 	}
@@ -1538,7 +1555,28 @@ int tquic_hs_process_server_hello(struct tquic_handshake *hs,
 		p += ext_data_len;
 	}
 
+	/*
+	 * TLS 1.3 downgrade protection (RFC 8446 Section 4.1.3).
+	 *
+	 * If the ServerHello does not include the supported_versions
+	 * extension, the server is negotiating TLS 1.2 or below.
+	 * Check the last 8 bytes of ServerHello.random for the
+	 * downgrade sentinel values.  If present, a TLS 1.3-capable
+	 * server is being forced to downgrade, indicating an attack.
+	 *
+	 * Use crypto_memneq() == 0 to check for a match in constant
+	 * time (returns 0 when buffers are equal).
+	 */
 	if (!found_supported_versions) {
+		const u8 *tail = hs->server_random + TLS_DOWNGRADE_SENTINEL_OFFSET;
+
+		if (!crypto_memneq(tail, tls12_downgrade_sentinel,
+				   TLS_DOWNGRADE_SENTINEL_LEN) ||
+		    !crypto_memneq(tail, tls11_downgrade_sentinel,
+				   TLS_DOWNGRADE_SENTINEL_LEN)) {
+			pr_warn("tquic_hs: TLS 1.3 downgrade sentinel detected in ServerHello.random, aborting (illegal_parameter)\n");
+			return -EPROTO;
+		}
 		pr_warn("tquic_hs: missing supported_versions extension\n");
 		return -EINVAL;
 	}

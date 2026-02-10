@@ -28,6 +28,7 @@
 #include <net/tquic.h>
 
 #include "protocol.h"
+#include "tquic_debug.h"
 #include "tquic_mib.h"
 #include "tquic_retry.h"
 
@@ -196,7 +197,7 @@ bool tquic_client_rate_limit_check(struct tquic_client *client)
 	} else {
 		/* Rate limit hit - log (ratelimited) */
 		if (__ratelimit(&tquic_rate_limit_log)) {
-			pr_info("tquic: rate limit exceeded for client '%.*s'\n",
+			tquic_info("rate limit exceeded for client '%.*s'\n",
 				client->psk_identity_len, client->psk_identity);
 		}
 	}
@@ -352,7 +353,7 @@ int tquic_client_register(const char *identity, size_t identity_len,
 		return ret;
 	}
 
-	pr_debug("tquic: registered client '%.*s'\n",
+	tquic_dbg("registered client '%.*s'\n",
 		 (int)identity_len, identity);
 	return 0;
 }
@@ -397,7 +398,7 @@ int tquic_client_unregister(const char *identity, size_t identity_len)
 	if (ret == 0) {
 		/* Defer freeing until RCU grace period */
 		call_rcu(&client->rcu_head, tquic_client_free_rcu);
-		pr_debug("tquic: unregistered client '%.*s'\n",
+		tquic_dbg("unregistered client '%.*s'\n",
 			 (int)identity_len, identity);
 	}
 
@@ -427,7 +428,7 @@ int tquic_server_bind_client(struct tquic_connection *conn,
 	/* Increment connection count */
 	atomic_inc(&client->connection_count);
 
-	pr_debug("tquic: bound connection to client '%.*s' (count=%d)\n",
+	tquic_dbg("bound connection to client '%.*s' (count=%d)\n",
 		 client->psk_identity_len, client->psk_identity,
 		 atomic_read(&client->connection_count));
 
@@ -455,7 +456,7 @@ void tquic_server_unbind_client(struct tquic_connection *conn)
 	/* Decrement connection count */
 	atomic_dec(&client->connection_count);
 
-	pr_debug("tquic: unbound connection from client '%.*s' (count=%d)\n",
+	tquic_dbg("unbound connection from client '%.*s' (count=%d)\n",
 		 client->psk_identity_len, client->psk_identity,
 		 atomic_read(&client->connection_count));
 
@@ -657,7 +658,7 @@ int tquic_server_check_retry_required(struct sock *sk,
 						 odcid, &odcid_len);
 		if (ret == 0) {
 			/* Valid token - continue with handshake */
-			pr_debug("tquic: valid Retry token, proceeding with handshake\n");
+			tquic_dbg("valid Retry token, proceeding with handshake\n");
 			return 0;
 		}
 
@@ -670,7 +671,7 @@ int tquic_server_check_retry_required(struct sock *sk,
 		 *
 		 * Send a new Retry packet to validate the current address.
 		 */
-		pr_debug("tquic: Retry token validation failed: %d\n", ret);
+		tquic_dbg("Retry token validation failed: %d\n", ret);
 	}
 
 	/*
@@ -688,14 +689,14 @@ int tquic_server_check_retry_required(struct sock *sk,
 	ret = tquic_retry_send(sk, client_addr, version,
 			       dcid, dcid_len, scid, scid_len);
 	if (ret) {
-		pr_debug("tquic: failed to send Retry packet: %d\n", ret);
+		tquic_dbg("failed to send Retry packet: %d\n", ret);
 		return ret;
 	}
 
 	/* Update statistics */
 	TQUIC_INC_STATS(net, TQUIC_MIB_RETRYPACKETSTX);
 
-	pr_debug("tquic: sent Retry packet to client\n");
+	tquic_dbg("sent Retry packet to client\n");
 
 	return 1;  /* Retry sent, drop the Initial packet */
 }
@@ -742,11 +743,11 @@ int __init tquic_server_init(void)
 	mutex_unlock(&tquic_client_mutex);
 
 	if (ret) {
-		pr_err("tquic: failed to initialize client table: %d\n", ret);
+		tquic_err("failed to initialize client table: %d\n", ret);
 		return ret;
 	}
 
-	pr_info("tquic: server subsystem initialized\n");
+	tquic_info("server subsystem initialized\n");
 	return 0;
 }
 
@@ -787,5 +788,5 @@ void __exit tquic_server_exit(void)
 	}
 	mutex_unlock(&tquic_client_mutex);
 
-	pr_info("tquic: server subsystem exited\n");
+	tquic_info("server subsystem exited\n");
 }

@@ -35,6 +35,7 @@
 #include <net/tquic.h>
 
 #include "../tquic_compat.h"
+#include "../tquic_debug.h"
 #include "varint.h"
 #include "../tquic_stateless_reset.h"
 #include "../protocol.h"
@@ -228,7 +229,6 @@ static bool tquic_retry_aead_initialized;
 static void tquic_conn_enter_closing(struct tquic_connection *conn,
 				     u64 error_code, const char *reason);
 static void tquic_conn_enter_draining(struct tquic_connection *conn);
-static void tquic_conn_enter_closed(struct tquic_connection *conn);
 static int tquic_send_close_frame(struct tquic_connection *conn);
 static void tquic_drain_timeout(struct work_struct *work);
 static void tquic_close_work_handler(struct work_struct *work);
@@ -304,14 +304,15 @@ static int tquic_conn_set_state(struct tquic_connection *conn,
 	}
 
 	if (!valid) {
-		pr_warn("tquic: invalid state transition %s -> %s\n",
-			tquic_state_name(old_state), tquic_state_name(new_state));
+		tquic_conn_warn(conn, "invalid state transition %s -> %s\n",
+				tquic_state_name(old_state),
+				tquic_state_name(new_state));
 		return -EINVAL;
 	}
 
-	pr_debug("tquic: connection state %s -> %s (reason=%d)\n",
-		 tquic_state_name(old_state), tquic_state_name(new_state),
-		 reason);
+	tquic_conn_info(conn, "state %s -> %s reason=%d\n",
+			tquic_state_name(old_state),
+			tquic_state_name(new_state), reason);
 
 	conn->state = new_state;
 
@@ -327,7 +328,7 @@ static int tquic_conn_set_state(struct tquic_connection *conn,
 		conn->stats.established_time = ktime_get();
 		/* Notify bonding layer of connection establishment */
 		if (conn->scheduler)
-			pr_debug("tquic: connection established, bonding active\n");
+			tquic_conn_info(conn, "established, bonding active\n");
 		break;
 
 	case TQUIC_CONN_CLOSING:
@@ -510,13 +511,13 @@ struct tquic_cid_entry *tquic_conn_add_local_cid(struct tquic_connection *conn)
 			spin_unlock_bh(&conn->lock);
 			cs->next_local_cid_seq--;
 			kfree(entry);
-			pr_warn("tquic: rhashtable insert failed: %d\n", err);
+			tquic_conn_err(conn, "rhashtable insert failed: %d\n", err);
 			return NULL;
 		}
 	}
 	spin_unlock_bh(&conn->lock);
 
-	pr_debug("tquic: added local CID seq=%llu\n", entry->cid.seq_num);
+	tquic_conn_dbg(conn, "added local CID seq=%llu\n", entry->cid.seq_num);
 
 	return entry;
 }
@@ -556,7 +557,7 @@ int tquic_conn_add_remote_cid(struct tquic_connection *conn,
 		cs->next_remote_cid_seq = seq + 1;
 	spin_unlock_bh(&conn->lock);
 
-	pr_debug("tquic: added remote CID seq=%llu\n", seq);
+	tquic_conn_dbg(conn, "added remote CID seq=%llu\n", seq);
 
 	return 0;
 }
@@ -595,8 +596,8 @@ int tquic_conn_retire_cid(struct tquic_connection *conn, u64 seq, bool is_local)
 	if (!found)
 		return -ENOENT;
 
-	pr_debug("tquic: retired %s CID seq=%llu\n",
-		 is_local ? "local" : "remote", seq);
+	tquic_conn_dbg(conn, "retired %s CID seq=%llu\n",
+		       is_local ? "local" : "remote", seq);
 
 	return 0;
 }
@@ -684,7 +685,7 @@ bool tquic_verify_stateless_reset(struct tquic_connection *conn,
 	list_for_each_entry(entry, &cs->remote_cids, list) {
 		if (entry->has_reset_token &&
 		    crypto_memneq(entry->stateless_reset_token, token, 16) == 0) {
-			pr_debug("tquic: received stateless reset\n");
+			tquic_conn_info(conn, "received stateless reset\n");
 			return true;
 		}
 	}
@@ -733,15 +734,16 @@ int tquic_send_stateless_reset(struct tquic_connection *conn)
 			if (tquic_udp_xmit_on_path(conn, conn->active_path, skb) == 0) {
 				conn->active_path->stats.tx_packets++;
 				conn->active_path->stats.tx_bytes += len;
-				pr_debug("tquic: sent stateless reset on path %u\n",
-					 conn->active_path->path_id);
+				tquic_conn_dbg(conn,
+					       "sent stateless reset on path %u\n",
+					       conn->active_path->path_id);
 				return 0;
 			}
 			/* skb is freed by tquic_udp_xmit_on_path on error */
 		}
 	}
 
-	pr_debug("tquic: failed to send stateless reset\n");
+	tquic_conn_err(conn, "failed to send stateless reset\n");
 	return -EIO;
 }
 EXPORT_SYMBOL_GPL(tquic_send_stateless_reset);
@@ -904,14 +906,14 @@ int tquic_send_version_negotiation(struct tquic_connection *conn,
 			if (tquic_udp_xmit_on_path(conn, conn->active_path, skb) == 0) {
 				conn->active_path->stats.tx_packets++;
 				conn->active_path->stats.tx_bytes += pkt_len;
-				pr_debug("tquic: sent version negotiation on path %u\n",
-					 conn->active_path->path_id);
+				tquic_conn_dbg(conn, "sent version negotiation on path %u\n",
+					       conn->active_path->path_id);
 				return 0;
 			}
 		}
 	}
 
-	pr_debug("tquic: failed to send version negotiation\n");
+	tquic_conn_err(conn, "failed to send version negotiation\n");
 	return -EIO;
 }
 EXPORT_SYMBOL_GPL(tquic_send_version_negotiation);
@@ -939,13 +941,13 @@ int tquic_handle_version_negotiation(struct tquic_connection *conn,
 
 	/* Check for version downgrade attack */
 	if (cs->version_negotiation_done) {
-		pr_warn("tquic: duplicate version negotiation\n");
+		tquic_conn_warn(conn, "duplicate version negotiation\n");
 		return -EPROTO;
 	}
 
 	new_version = tquic_version_select(versions, num_versions);
 	if (new_version == 0) {
-		pr_err("tquic: no common version with server\n");
+		tquic_conn_err(conn, "no common version with server\n");
 		tquic_conn_enter_closing(conn, TQUIC_VERSION_NEGOTIATION_ERROR,
 					 "No compatible version");
 		return -EPROTO;
@@ -956,8 +958,8 @@ int tquic_handle_version_negotiation(struct tquic_connection *conn,
 	cs->version_negotiation_done = true;
 	conn->version = new_version;
 
-	pr_info("tquic: version negotiated: 0x%08x -> 0x%08x\n",
-		cs->original_version, new_version);
+	tquic_conn_info(conn, "version negotiated: 0x%08x -> 0x%08x\n",
+			cs->original_version, new_version);
 
 	/* Restart connection with new version */
 	return tquic_conn_client_restart(conn);
@@ -1023,7 +1025,7 @@ int tquic_generate_retry_token(struct tquic_connection *conn,
 
 	/* Check if AEAD is initialized */
 	if (!tquic_retry_aead_initialized || !tquic_retry_aead) {
-		pr_warn_once("tquic: retry token AEAD not initialized\n");
+		tquic_warn("retry token AEAD not initialized\n");
 		return -ENOKEY;
 	}
 
@@ -1113,7 +1115,7 @@ int tquic_validate_retry_token(struct tquic_connection *conn,
 
 	/* Check if AEAD is initialized */
 	if (!tquic_retry_aead_initialized || !tquic_retry_aead) {
-		pr_warn_once("tquic: retry token AEAD not initialized\n");
+		tquic_warn("retry token AEAD not initialized\n");
 		return -ENOKEY;
 	}
 
@@ -1153,7 +1155,7 @@ int tquic_validate_retry_token(struct tquic_connection *conn,
 	aead_request_free(req);
 
 	if (ret) {
-		pr_debug("tquic: retry token decryption failed\n");
+		tquic_conn_dbg(conn, "retry token decryption failed\n");
 		return -EINVAL;
 	}
 
@@ -1168,7 +1170,7 @@ int tquic_validate_retry_token(struct tquic_connection *conn,
 	now = ktime_get();
 	age_ms = ktime_ms_delta(now, timestamp);
 	if (age_ms > TQUIC_RETRY_TOKEN_LIFETIME_MS) {
-		pr_debug("tquic: retry token expired (age=%llu ms)\n", age_ms);
+		tquic_conn_dbg(conn, "retry token expired (age=%llu ms)\n", age_ms);
 		return -ETIMEDOUT;
 	}
 
@@ -1196,12 +1198,12 @@ int tquic_validate_retry_token(struct tquic_connection *conn,
 
 	memcpy(&token_hash, p, sizeof(token_hash));
 	if (token_hash != expected_hash) {
-		pr_debug("tquic: retry token address mismatch\n");
+		tquic_conn_dbg(conn, "retry token address mismatch\n");
 		return -EINVAL;
 	}
 
 	cs->address_validated = true;
-	pr_debug("tquic: retry token validated\n");
+	tquic_conn_dbg(conn, "retry token validated\n");
 
 	return 0;
 }
@@ -1322,7 +1324,7 @@ int tquic_send_retry(struct tquic_connection *conn,
 		}
 	}
 
-	pr_debug("tquic: sent Retry packet\n");
+	tquic_conn_dbg(conn, "sent Retry packet\n");
 
 	/* Transmit the Retry packet via active path */
 	if (conn->active_path) {
@@ -1382,7 +1384,7 @@ int tquic_send_path_challenge(struct tquic_connection *conn,
 	schedule_delayed_work(&cs->validation_work,
 			      msecs_to_jiffies(cs->validation_timeout_ms));
 
-	pr_debug("tquic: sent PATH_CHALLENGE on path %u\n", path->path_id);
+	tquic_conn_dbg(conn, "sent PATH_CHALLENGE on path %u\n", path->path_id);
 
 	/* Build and transmit PATH_CHALLENGE frame */
 	{
@@ -1414,7 +1416,7 @@ int tquic_send_path_response(struct tquic_connection *conn,
 			     struct tquic_path *path,
 			     const u8 *data)
 {
-	pr_debug("tquic: sent PATH_RESPONSE on path %u\n", path->path_id);
+	tquic_conn_dbg(conn, "sent PATH_RESPONSE on path %u\n", path->path_id);
 
 	/* Build and transmit PATH_RESPONSE frame */
 	{
@@ -1446,7 +1448,7 @@ int tquic_handle_path_challenge(struct tquic_connection *conn,
 				struct tquic_path *path,
 				const u8 *data)
 {
-	pr_debug("tquic: received PATH_CHALLENGE on path %u\n", path->path_id);
+	tquic_conn_dbg(conn, "received PATH_CHALLENGE on path %u\n", path->path_id);
 
 	return tquic_send_path_response(conn, path, data);
 }
@@ -1484,7 +1486,7 @@ int tquic_handle_path_response(struct tquic_connection *conn,
 	spin_unlock_bh(&conn->lock);
 
 	if (!found) {
-		pr_debug("tquic: unexpected PATH_RESPONSE\n");
+		tquic_conn_warn(conn, "unexpected PATH_RESPONSE\n");
 		return -EINVAL;
 	}
 
@@ -1492,7 +1494,7 @@ int tquic_handle_path_response(struct tquic_connection *conn,
 	path->state = TQUIC_PATH_ACTIVE;
 	cs->address_validated = true;
 
-	pr_info("tquic: path %u validated\n", path->path_id);
+	tquic_conn_info(conn, "path %u validated\n", path->path_id);
 
 	/* Notify bonding layer */
 	if (conn->scheduler) {
@@ -1523,12 +1525,12 @@ int tquic_conn_migrate_to_path(struct tquic_connection *conn,
 		return -EINVAL;
 
 	if (cs->migration_disabled) {
-		pr_debug("tquic: migration disabled\n");
+		tquic_conn_dbg(conn, "migration disabled\n");
 		return -EPERM;
 	}
 
 	if (conn->state != TQUIC_CONN_CONNECTED) {
-		pr_debug("tquic: migration only allowed when connected\n");
+		tquic_conn_dbg(conn, "migration only allowed when connected\n");
 		return -EINVAL;
 	}
 
@@ -1558,7 +1560,7 @@ int tquic_conn_migrate_to_path(struct tquic_connection *conn,
 	/* Schedule migration completion */
 	schedule_work(&cs->migration_work);
 
-	pr_info("tquic: initiating migration to path %u\n", new_path->path_id);
+	tquic_conn_info(conn, "initiating migration to path %u\n", new_path->path_id);
 
 	return 0;
 }
@@ -1592,7 +1594,7 @@ int tquic_conn_handle_migration(struct tquic_connection *conn,
 	/* Update path's remote address */
 	memcpy(&path->remote_addr, remote_addr, sizeof(path->remote_addr));
 
-	pr_info("tquic: peer initiated migration on path %u\n", path->path_id);
+	tquic_conn_info(conn, "peer initiated migration on path %u\n", path->path_id);
 
 	return 0;
 }
@@ -1620,7 +1622,7 @@ static void tquic_migration_work_handler(struct work_struct *work)
 		conn->stats.path_migrations++;
 		cs->migration_in_progress = false;
 		cs->migration_target = NULL;
-		pr_info("tquic: migration complete to path %u\n", target->path_id);
+		tquic_conn_info(conn, "migration complete to path %u\n", target->path_id);
 	}
 
 	spin_unlock_bh(&conn->lock);
@@ -1652,7 +1654,7 @@ int tquic_conn_enable_0rtt(struct tquic_connection *conn)
 	 * - ALPN matches
 	 */
 	if (!conn->sk) {
-		pr_debug("tquic: 0-RTT: no socket associated\n");
+		tquic_conn_dbg(conn, "0-RTT: no socket associated\n");
 		return -EINVAL;
 	}
 
@@ -1661,7 +1663,7 @@ int tquic_conn_enable_0rtt(struct tquic_connection *conn)
 
 		/* Check if session ticket exists (stored in socket state) */
 		if (!tsk || !(tsk->flags & TQUIC_F_HAS_SESSION_TICKET)) {
-			pr_debug("tquic: 0-RTT: no valid session ticket\n");
+			tquic_conn_dbg(conn, "0-RTT: no valid session ticket\n");
 			return -ENOENT;
 		}
 
@@ -1670,7 +1672,7 @@ int tquic_conn_enable_0rtt(struct tquic_connection *conn)
 		tsk->flags |= TQUIC_F_ZERO_RTT_ENABLED;
 	}
 
-	pr_debug("tquic: 0-RTT enabled\n");
+	tquic_conn_dbg(conn, "0-RTT enabled\n");
 	return 0;
 }
 EXPORT_SYMBOL_GPL(tquic_conn_enable_0rtt);
@@ -1702,7 +1704,7 @@ int tquic_conn_send_0rtt(struct tquic_connection *conn,
 	memcpy(skb_put(skb, len), data, len);
 	skb_queue_tail(&cs->zero_rtt_buffer, skb);
 
-	pr_debug("tquic: queued %zu bytes of 0-RTT data\n", len);
+	tquic_conn_dbg(conn, "queued %zu bytes of 0-RTT data\n", len);
 
 	return 0;
 }
@@ -1722,7 +1724,7 @@ void tquic_conn_0rtt_accepted(struct tquic_connection *conn)
 		return;
 
 	cs->zero_rtt_accepted = true;
-	pr_info("tquic: 0-RTT accepted by server\n");
+	tquic_conn_info(conn, "0-RTT accepted by server\n");
 }
 EXPORT_SYMBOL_GPL(tquic_conn_0rtt_accepted);
 
@@ -1741,7 +1743,7 @@ void tquic_conn_0rtt_rejected(struct tquic_connection *conn)
 		return;
 
 	cs->zero_rtt_rejected = true;
-	pr_warn("tquic: 0-RTT rejected, retransmitting as 1-RTT\n");
+	tquic_conn_warn(conn, "0-RTT rejected, retransmitting as 1-RTT\n");
 
 	/*
 	 * Move 0-RTT data to regular send queue for 1-RTT retransmission.
@@ -1761,12 +1763,12 @@ void tquic_conn_0rtt_rejected(struct tquic_connection *conn)
 		    sysctl_wmem_max / 2) {
 			/* Add to socket write queue for later transmission */
 			skb_queue_tail(&conn->sk->sk_write_queue, skb);
-			pr_debug("tquic: re-queued 0-RTT data (%u bytes) for 1-RTT\n",
-				 skb->len);
+			tquic_conn_dbg(conn, "re-queued 0-RTT data (%u bytes) for 1-RTT\n",
+				       skb->len);
 		} else {
 			/* Queue full or no socket - drop with warning */
-			pr_warn("tquic: dropping 0-RTT data (%u bytes) - queue full\n",
-				skb->len);
+			tquic_conn_warn(conn, "dropping 0-RTT data (%u bytes) - queue full\n",
+					skb->len);
 			kfree_skb(skb);
 		}
 	}
@@ -1812,8 +1814,8 @@ int tquic_conn_process_handshake(struct tquic_connection *conn,
 	/* Determine packet type */
 	is_initial = ((first_byte & 0x30) == 0x00);
 
-	pr_debug("tquic: processing %s handshake packet\n",
-		 is_initial ? "Initial" : "Handshake");
+	tquic_conn_dbg(conn, "processing %s handshake packet\n",
+		       is_initial ? "Initial" : "Handshake");
 
 	switch (cs->hs_state) {
 	case TQUIC_HS_INITIAL:
@@ -1880,7 +1882,7 @@ int tquic_conn_process_handshake(struct tquic_connection *conn,
 				/* Look for CRYPTO frame type (0x06) */
 				if (payload_offset < len &&
 				    data[payload_offset] == 0x06) {
-					pr_debug("tquic: found CRYPTO frame in ClientHello\n");
+					tquic_conn_dbg(conn, "found CRYPTO frame in ClientHello\n");
 					cs->client_hello_received = true;
 				}
 			}
@@ -1959,6 +1961,7 @@ int tquic_conn_close_with_error(struct tquic_connection *conn,
 	cs->local_close.error_code = error_code;
 	cs->local_close.is_application = false;
 	if (reason) {
+		kfree(cs->local_close.reason_phrase);
 		cs->local_close.reason_len = strlen(reason);
 		cs->local_close.reason_phrase = kstrdup(reason, GFP_ATOMIC);
 	}
@@ -2032,8 +2035,8 @@ static int tquic_send_close_frame(struct tquic_connection *conn)
 		}
 	}
 
-	pr_debug("tquic: sent CONNECTION_CLOSE (error=%llu)\n",
-		 cs->local_close.error_code);
+	tquic_conn_dbg(conn, "sent CONNECTION_CLOSE (error=%llu)\n",
+		       cs->local_close.error_code);
 
 	cs->close_sent = true;
 	cs->close_retries++;
@@ -2063,12 +2066,13 @@ int tquic_conn_handle_close(struct tquic_connection *conn,
 	cs->remote_close.frame_type = frame_type;
 	cs->remote_close.is_application = is_app;
 	if (reason) {
+		kfree(cs->remote_close.reason_phrase);
 		cs->remote_close.reason_phrase = kstrdup(reason, GFP_ATOMIC);
 		cs->remote_close.reason_len = strlen(reason);
 	}
 
-	pr_info("tquic: received CONNECTION_CLOSE (error=%llu, app=%d, reason=%s)\n",
-		error_code, is_app, reason ?: "");
+	tquic_conn_info(conn, "received CONNECTION_CLOSE (error=%llu, app=%d, reason=%s)\n",
+			error_code, is_app, reason ?: "");
 
 	/* Enter draining state */
 	tquic_conn_enter_draining(conn);
@@ -2082,10 +2086,11 @@ static void tquic_conn_enter_draining(struct tquic_connection *conn)
 	tquic_conn_set_state(conn, TQUIC_CONN_DRAINING, TQUIC_REASON_PEER_CLOSE);
 }
 
-static void tquic_conn_enter_closed(struct tquic_connection *conn)
+void tquic_conn_enter_closed(struct tquic_connection *conn)
 {
 	tquic_conn_set_state(conn, TQUIC_CONN_CLOSED, TQUIC_REASON_NORMAL);
 }
+EXPORT_SYMBOL_GPL(tquic_conn_enter_closed);
 
 static void tquic_drain_timeout(struct work_struct *work)
 {
@@ -2094,7 +2099,7 @@ static void tquic_drain_timeout(struct work_struct *work)
 						   drain_work);
 	struct tquic_connection *conn = cs->conn;
 
-	pr_debug("tquic: drain timeout expired\n");
+	tquic_conn_dbg(conn, "drain timeout expired\n");
 	tquic_conn_enter_closed(conn);
 }
 
@@ -2195,7 +2200,7 @@ int tquic_conn_client_connect(struct tquic_connection *conn,
 	/* Transition to connecting state */
 	tquic_conn_set_state(conn, TQUIC_CONN_CONNECTING, TQUIC_REASON_NORMAL);
 
-	pr_info("tquic: client connecting\n");
+	tquic_conn_info(conn, "client connecting\n");
 
 	/*
 	 * Initiate TLS handshake to send Initial packet with CRYPTO frame.
@@ -2209,7 +2214,7 @@ int tquic_conn_client_connect(struct tquic_connection *conn,
 	if (conn->sk) {
 		ret = tquic_start_handshake(conn->sk);
 		if (ret < 0 && ret != -EALREADY) {
-			pr_err("tquic: failed to start handshake: %d\n", ret);
+			tquic_conn_err(conn, "failed to start handshake: %d\n", ret);
 			/*
 			 * Don't fail the connection here - handshake may be
 			 * triggered later when socket operations occur.
@@ -2217,7 +2222,7 @@ int tquic_conn_client_connect(struct tquic_connection *conn,
 			 */
 		}
 	} else {
-		pr_debug("tquic: handshake deferred - no socket yet\n");
+		tquic_conn_dbg(conn, "handshake deferred - no socket yet\n");
 	}
 
 	return 0;
@@ -2243,8 +2248,8 @@ int tquic_conn_client_restart(struct tquic_connection *conn)
 	/* Generate new initial CID */
 	tquic_cid_gen_random(&conn->dcid, TQUIC_DEFAULT_CID_LEN);
 
-	pr_info("tquic: restarting connection with version 0x%08x\n",
-		conn->version);
+	tquic_conn_info(conn, "restarting connection with version 0x%08x\n",
+			conn->version);
 
 	/*
 	 * Restart TLS handshake with the new QUIC version.
@@ -2277,19 +2282,19 @@ int tquic_conn_client_restart(struct tquic_connection *conn)
 								 true,
 								 conn->version);
 		if (!conn->crypto_state) {
-			pr_err("tquic: failed to init crypto for restart (v%s)\n",
-			       conn->version == TQUIC_VERSION_2 ? "2" : "1");
+			tquic_conn_err(conn, "failed to init crypto for restart (v%s)\n",
+				       conn->version == TQUIC_VERSION_2 ? "2" : "1");
 			return -ENOMEM;
 		}
 
 		/* Start new handshake */
 		ret = tquic_start_handshake(conn->sk);
 		if (ret < 0 && ret != -EALREADY) {
-			pr_err("tquic: failed to restart handshake: %d\n", ret);
+			tquic_conn_err(conn, "failed to restart handshake: %d\n", ret);
 			return ret;
 		}
 	} else {
-		pr_debug("tquic: restart deferred - no socket\n");
+		tquic_conn_dbg(conn, "restart deferred - no socket\n");
 	}
 
 	return 0;
@@ -2429,7 +2434,7 @@ int tquic_conn_server_accept(struct tquic_connection *conn,
 	if (ret < 0)
 		goto err_free;
 
-	pr_info("tquic: server accepted connection\n");
+	tquic_conn_info(conn, "server accepted connection\n");
 
 	/*
 	 * Server response: Send Initial + Handshake packets.
@@ -2454,8 +2459,8 @@ int tquic_conn_server_accept(struct tquic_connection *conn,
 								 false,
 								 conn->version);
 		if (!conn->crypto_state) {
-			pr_err("tquic: failed to init server crypto state (v%s)\n",
-			       conn->version == TQUIC_VERSION_2 ? "2" : "1");
+			tquic_conn_err(conn, "failed to init server crypto state (v%s)\n",
+				       conn->version == TQUIC_VERSION_2 ? "2" : "1");
 			ret = -ENOMEM;
 			goto err_free;
 		}
@@ -2643,7 +2648,7 @@ void tquic_conn_state_cleanup(struct tquic_connection *conn)
 	kfree(cs);
 	conn->state_machine = NULL;
 
-	pr_debug("tquic: connection state cleaned up\n");
+	tquic_conn_dbg(conn, "connection state cleaned up\n");
 }
 EXPORT_SYMBOL_GPL(tquic_conn_state_cleanup);
 
@@ -2657,14 +2662,14 @@ int __init tquic_connection_init(void)
 
 	ret = rhashtable_init(&cid_lookup_table, &cid_hash_params);
 	if (ret) {
-		pr_err("tquic: failed to init CID lookup table\n");
+		tquic_err("failed to init CID lookup table\n");
 		return ret;
 	}
 
 	/* Initialize retry token AEAD cipher (AES-128-GCM) */
 	tquic_retry_aead = crypto_alloc_aead("gcm(aes)", 0, 0);
 	if (IS_ERR(tquic_retry_aead)) {
-		pr_err("tquic: failed to allocate retry token AEAD\n");
+		tquic_err("failed to allocate retry token AEAD\n");
 		ret = PTR_ERR(tquic_retry_aead);
 		tquic_retry_aead = NULL;
 		rhashtable_destroy(&cid_lookup_table);
@@ -2673,7 +2678,7 @@ int __init tquic_connection_init(void)
 
 	ret = crypto_aead_setauthsize(tquic_retry_aead, TQUIC_RETRY_TOKEN_TAG_LEN);
 	if (ret) {
-		pr_err("tquic: failed to set AEAD auth size\n");
+		tquic_err("failed to set AEAD auth size\n");
 		crypto_free_aead(tquic_retry_aead);
 		tquic_retry_aead = NULL;
 		rhashtable_destroy(&cid_lookup_table);
@@ -2684,7 +2689,7 @@ int __init tquic_connection_init(void)
 	get_random_bytes(tquic_retry_token_key, TQUIC_RETRY_TOKEN_KEY_LEN);
 	tquic_retry_aead_initialized = true;
 
-	pr_info("tquic: connection state machine initialized\n");
+	tquic_info("connection state machine initialized\n");
 	return 0;
 }
 
@@ -2699,7 +2704,7 @@ void __exit tquic_connection_exit(void)
 	memzero_explicit(tquic_retry_token_key, sizeof(tquic_retry_token_key));
 
 	rhashtable_destroy(&cid_lookup_table);
-	pr_info("tquic: connection state machine cleanup complete\n");
+	tquic_info("connection state machine cleanup complete\n");
 }
 
 #ifndef TQUIC_OUT_OF_TREE

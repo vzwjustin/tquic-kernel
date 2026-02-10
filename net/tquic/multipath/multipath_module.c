@@ -9,6 +9,7 @@
 #include "mp_frame.h"
 #include "mp_ack.h"
 #include "path_abandon.h"
+#include "../tquic_debug.h"
 
 /* mp_deadline.c does not expose a public header */
 extern int __init tquic_mp_deadline_init(void);
@@ -34,7 +35,7 @@ static int __init __maybe_unused tquic_multipath_module_init(void)
 	if (ret)
 		goto err_abandon;
 
-	pr_info("tquic_multipath: RFC 9369 extension initialized\n");
+	tquic_info("multipath RFC 9369 extension initialized\n");
 	return 0;
 
 err_abandon:
@@ -53,7 +54,7 @@ static void __exit __maybe_unused tquic_multipath_module_exit(void)
 	tquic_mp_ack_exit();
 	tquic_mp_frame_exit();
 
-	pr_info("tquic_multipath: RFC 9369 extension exited\n");
+	tquic_info("multipath RFC 9369 extension exited\n");
 }
 
 /*

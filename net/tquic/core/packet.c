@@ -28,6 +28,7 @@
 #include <linux/unaligned.h>
 
 #include "../tquic_compat.h"
+#include "../tquic_debug.h"
 #include "varint.h"
 
 /* QUIC v1 packet type constants (RFC 9000) */
@@ -248,7 +249,13 @@ int tquic_pn_encode_len(u64 pn, u64 largest_acked)
 	/*
 	 * Choose the smallest encoding that can represent twice the
 	 * difference (to allow for packets in flight).
+	 *
+	 * SECURITY: diff * 2 can overflow u64 when diff > 2^63.
+	 * If diff is large enough to overflow, we need 4 bytes anyway,
+	 * so cap at the 4-byte threshold to avoid undefined behavior.
 	 */
+	if (diff >= (1ULL << 63))
+		return 4;
 	range = diff * 2;
 
 	if (range < (1ULL << 7))
@@ -780,9 +787,19 @@ int tquic_build_version_negotiation(const u8 *dcid, u8 dcid_len,
 	size_t offset = 0;
 	int i;
 	size_t needed;
+	size_t versions_size;
 
-	/* Calculate needed space */
-	needed = 1 + 4 + 1 + dcid_len + 1 + scid_len + (4 * num_versions);
+	/*
+	 * SECURITY: Validate num_versions to prevent integer overflow.
+	 * 4 * num_versions could overflow size_t if num_versions is large.
+	 * Also reject negative values since num_versions is int.
+	 */
+	if (num_versions < 0 || num_versions > 1024)
+		return -EINVAL;
+
+	/* Calculate needed space (safe after bounds check above) */
+	versions_size = 4 * (size_t)num_versions;
+	needed = 1 + 4 + 1 + dcid_len + 1 + scid_len + versions_size;
 	if (buflen < needed)
 		return -ENOSPC;
 
@@ -1734,7 +1751,7 @@ int __init tquic_packet_init(void)
 	if (!tquic_packet_cache)
 		return -ENOMEM;
 
-	pr_info("tquic: packet subsystem initialized\n");
+	tquic_info("packet subsystem initialized\n");
 	return 0;
 }
 
@@ -1744,7 +1761,7 @@ int __init tquic_packet_init(void)
 void __exit tquic_packet_exit(void)
 {
 	kmem_cache_destroy(tquic_packet_cache);
-	pr_info("tquic: packet subsystem cleaned up\n");
+	tquic_info("packet subsystem cleaned up\n");
 }
 
 MODULE_DESCRIPTION("TQUIC Packet Parsing and Construction");

@@ -24,6 +24,7 @@
 #include <linux/file.h>
 #include <linux/uio.h>
 #include <linux/vmalloc.h>
+#include <linux/overflow.h>
 #include <linux/io_uring.h>
 #include <linux/io_uring_types.h>
 #include <net/sock.h>
@@ -31,6 +32,7 @@
 
 #include <io_uring/io_uring.h>
 
+#include "tquic_debug.h"
 #include "protocol.h"
 #include "io_uring.h"
 
@@ -194,9 +196,9 @@ int io_tquic_send_prep(struct io_kiocb *req, const struct io_uring_sqe *sqe)
 	sr->done_io = 0;
 	sr->zc.enabled = false;
 
-	/* Get buffer pointer and length */
-	sr->iov = NULL;
-	sr->iovcnt = 0;
+	/* Cache buffer address and length from SQE */
+	sr->iov = (struct iovec *)(unsigned long)READ_ONCE(sqe->addr);
+	sr->iovcnt = READ_ONCE(sqe->len);
 
 	/* Mark as needing async execution if non-blocking would fail */
 	if (!(sr->flags & MSG_DONTWAIT))
@@ -258,9 +260,9 @@ int io_tquic_send(struct io_kiocb *req, unsigned int issue_flags)
 		}
 	}
 
-	/* Set up message */
-	iov.iov_base = (void __user *)req->cqe.user_data;
-	iov.iov_len = READ_ONCE(req->cqe.res);
+	/* Set up message from prep-phase cached values */
+	iov.iov_base = (void __user *)(unsigned long)sr->iov;
+	iov.iov_len = sr->iovcnt;
 
 	iov_iter_init(&msg.msg_iter, ITER_SOURCE, &iov, 1, iov.iov_len);
 	msg.msg_flags = sr->flags;
@@ -441,9 +443,9 @@ int io_tquic_recv_multishot(struct io_kiocb *req, unsigned int issue_flags)
 		goto done_continue;
 	}
 
-	/* Set up receive buffer - would use buffer selection in practice */
-	iov.iov_base = (void __user *)req->cqe.user_data;
-	iov.iov_len = READ_ONCE(req->cqe.res);
+	/* Set up receive buffer from prep-phase cached values */
+	iov.iov_base = (void __user *)(unsigned long)sr->iov;
+	iov.iov_len = sr->iovcnt;
 
 	iov_iter_init(&msg.msg_iter, ITER_DEST, &iov, 1, iov.iov_len);
 	msg.msg_flags = sr->flags | MSG_DONTWAIT;
@@ -639,6 +641,10 @@ int io_tquic_send_zc_prep(struct io_kiocb *req, const struct io_uring_sqe *sqe)
 	sr->zc.enabled = true;
 	sr->zc.notif_seq = 0;
 
+	/* Cache buffer address and length from SQE */
+	sr->iov = (struct iovec *)(unsigned long)READ_ONCE(sqe->addr);
+	sr->iovcnt = READ_ONCE(sqe->len);
+
 	req->flags |= REQ_F_FORCE_ASYNC;
 
 	return 0;
@@ -674,9 +680,9 @@ int io_tquic_send_zc(struct io_kiocb *req, unsigned int issue_flags)
 			tsk->default_stream = stream;
 	}
 
-	/* Set up message with MSG_ZEROCOPY */
-	iov.iov_base = (void __user *)req->cqe.user_data;
-	iov.iov_len = READ_ONCE(req->cqe.res);
+	/* Set up message with MSG_ZEROCOPY from prep-phase cached values */
+	iov.iov_base = (void __user *)(unsigned long)sr->iov;
+	iov.iov_len = sr->iovcnt;
 
 	iov_iter_init(&msg.msg_iter, ITER_SOURCE, &iov, 1, iov.iov_len);
 	msg.msg_flags = sr->flags;
@@ -719,6 +725,7 @@ struct tquic_io_buf_ring *tquic_io_buf_ring_create(
 {
 	struct tquic_io_buf_ring *br;
 	size_t ring_size;
+	size_t br_alloc_sz, buf_alloc_sz;
 	int i;
 
 	if (buf_count <= 0 || buf_count > 32768)
@@ -735,15 +742,22 @@ struct tquic_io_buf_ring *tquic_io_buf_ring_create(
 	ring_size = roundup_pow_of_two(buf_count);
 	br->mask = ring_size - 1;
 
+	/* Check for overflow in allocation sizes */
+	if (check_mul_overflow(sizeof(*br->br), ring_size, &br_alloc_sz) ||
+	    check_mul_overflow(buf_size, ring_size, &buf_alloc_sz)) {
+		kfree(br);
+		return ERR_PTR(-EOVERFLOW);
+	}
+
 	/* Allocate buffer ring structure */
-	br->br = kzalloc(sizeof(*br->br) * ring_size, GFP_KERNEL);
+	br->br = kzalloc(br_alloc_sz, GFP_KERNEL);
 	if (!br->br) {
 		kfree(br);
 		return ERR_PTR(-ENOMEM);
 	}
 
 	/* Allocate buffer memory */
-	br->buf_base = vmalloc(buf_size * ring_size);
+	br->buf_base = vmalloc(buf_alloc_sz);
 	if (!br->buf_base) {
 		kfree(br->br);
 		kfree(br);
@@ -764,7 +778,7 @@ struct tquic_io_buf_ring *tquic_io_buf_ring_create(
 		br->br->bufs[i].bid = i;
 	}
 
-	pr_debug("tquic: created buffer ring bgid=%d count=%zu size=%zu\n",
+	tquic_dbg("created buffer ring bgid=%d count=%zu size=%zu\n",
 		 bgid, ring_size, buf_size);
 
 	return br;
@@ -808,6 +822,9 @@ EXPORT_SYMBOL_GPL(tquic_io_buf_ring_get);
 void tquic_io_buf_ring_put(struct tquic_io_buf_ring *br, u16 bid)
 {
 	u32 tail;
+
+	if (!br || bid >= br->buf_count)
+		return;
 
 	spin_lock(&br->lock);
 
@@ -856,7 +873,7 @@ int tquic_uring_enable_sqpoll(struct tquic_connection *conn)
 	 */
 	uctx->sqpoll_enabled = true;
 
-	pr_debug("tquic: enabled SQPOLL mode for connection\n");
+	tquic_dbg("enabled SQPOLL mode for connection\n");
 	return 0;
 }
 EXPORT_SYMBOL_GPL(tquic_uring_enable_sqpoll);
@@ -873,7 +890,7 @@ void tquic_uring_disable_sqpoll(struct tquic_connection *conn)
 		return;
 
 	uctx->sqpoll_enabled = false;
-	pr_debug("tquic: disabled SQPOLL mode for connection\n");
+	tquic_dbg("disabled SQPOLL mode for connection\n");
 }
 EXPORT_SYMBOL_GPL(tquic_uring_disable_sqpoll);
 
@@ -913,7 +930,7 @@ int tquic_uring_set_cqe_batch_size(struct tquic_connection *conn,
 
 	uctx->cqe_batch_size = batch_size;
 
-	pr_debug("tquic: set CQE batch size to %u\n", batch_size);
+	tquic_dbg("set CQE batch size to %u\n", batch_size);
 	return 0;
 }
 EXPORT_SYMBOL_GPL(tquic_uring_set_cqe_batch_size);
@@ -951,7 +968,7 @@ int tquic_uring_handle_overflow(struct tquic_connection *conn)
 
 	overflow = atomic_xchg(&uctx->cqe_overflow, 0);
 	if (overflow > 0) {
-		pr_warn("tquic: %d CQE overflows detected\n", overflow);
+		tquic_warn("%d CQE overflows detected\n", overflow);
 	}
 
 	return overflow;
@@ -991,7 +1008,7 @@ int tquic_uring_ctx_alloc(struct tquic_connection *conn)
 	/* Store context in connection's dedicated field */
 	conn->uring_ctx = uctx;
 
-	pr_debug("tquic: allocated io_uring context for connection\n");
+	tquic_dbg("allocated io_uring context for connection\n");
 	return 0;
 }
 EXPORT_SYMBOL_GPL(tquic_uring_ctx_alloc);
@@ -1018,7 +1035,7 @@ void tquic_uring_ctx_free(struct tquic_connection *conn)
 
 	kfree(uctx);
 	conn->uring_ctx = NULL;
-	pr_debug("tquic: freed io_uring context\n");
+	tquic_dbg("freed io_uring context\n");
 }
 EXPORT_SYMBOL_GPL(tquic_uring_ctx_free);
 
@@ -1186,6 +1203,9 @@ int tquic_uring_getsockopt(struct sock *sk, int optname,
 	if (get_user(len, optlen))
 		return -EFAULT;
 
+	if (len < 0)
+		return -EINVAL;
+
 	switch (optname) {
 	case TQUIC_URING_SQPOLL:
 		val = tquic_uring_sqpoll_enabled(conn) ? 1 : 0;
@@ -1199,7 +1219,7 @@ int tquic_uring_getsockopt(struct sock *sk, int optname,
 		return -ENOPROTOOPT;
 	}
 
-	len = min_t(int, len, sizeof(int));
+	len = min_t(unsigned int, len, sizeof(int));
 	if (put_user(len, optlen))
 		return -EFAULT;
 	if (copy_to_user(optval, &val, len))
@@ -1217,13 +1237,13 @@ EXPORT_SYMBOL_GPL(tquic_uring_getsockopt);
 
 int __init tquic_io_uring_init(void)
 {
-	pr_info("tquic: io_uring support initialized\n");
+	tquic_info("io_uring support initialized\n");
 	return 0;
 }
 
 void __exit tquic_io_uring_exit(void)
 {
-	pr_info("tquic: io_uring support cleanup\n");
+	tquic_info("io_uring support cleanup\n");
 }
 
 MODULE_DESCRIPTION("TQUIC io_uring Integration");

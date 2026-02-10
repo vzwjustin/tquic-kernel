@@ -34,6 +34,7 @@
 #include "tquic_reorder.h"
 #include "../multipath/tquic_sched.h"
 #include "cong_coupled.h"
+#include "../tquic_debug.h"
 
 /*
  * State name strings for debugging/logging
@@ -238,10 +239,11 @@ static void tquic_bonding_set_state(struct tquic_bonding_ctx *bc,
 	bc->state = new_state;
 	bc->stats.state_changes++;
 
-	pr_info("state transition: %s -> %s (active=%d pending=%d failed=%d)\n",
-		tquic_bonding_state_names[old_state],
-		tquic_bonding_state_names[new_state], bc->active_path_count,
-		bc->pending_path_count, bc->failed_path_count);
+	tquic_info("bond state: %s -> %s (active=%d pending=%d failed=%d)\n",
+		   tquic_bonding_state_names[old_state],
+		   tquic_bonding_state_names[new_state],
+		   bc->active_path_count, bc->pending_path_count,
+		   bc->failed_path_count);
 }
 
 /*
@@ -636,10 +638,16 @@ int tquic_bonding_set_path_weight(struct tquic_bonding_ctx *bc, u8 path_id,
 	bc->weights.path_weights[path_id] = weight;
 	bc->weights.user_override[path_id] = true;
 
-	/* Recalculate total weight */
+	/*
+	 * Recalculate total weight. Only sum weights for paths that
+	 * are actively participating (have a user override or are
+	 * within the active path count range).
+	 */
 	bc->weights.total_weight = 0;
 	for (i = 0; i < TQUIC_MAX_PATHS; i++) {
-		bc->weights.total_weight += bc->weights.path_weights[i];
+		if (i < bc->active_path_count || bc->weights.user_override[i])
+			bc->weights.total_weight +=
+				bc->weights.path_weights[i];
 	}
 
 	spin_unlock_bh(&bc->state_lock);
@@ -746,12 +754,8 @@ void tquic_bonding_on_path_failed(void *ctx, struct tquic_path *path)
 	if (!bc)
 		return;
 
-	/*
-	 * Get path_id from path structure.
-	 * The tquic_path struct has path_id as first field after list linkage.
-	 * We access it through the scheduler's tquic_path definition.
-	 */
-	path_id = ((struct { u8 path_id; } *)path)->path_id;
+	/* Get path_id from path structure directly */
+	path_id = path->path_id;
 
 	spin_lock_bh(&bc->state_lock);
 
@@ -821,15 +825,21 @@ void tquic_bonding_on_path_removed(void *ctx, struct tquic_path *path)
 
 	/*
 	 * Decrement appropriate counter based on path state.
-	 * Since we don't have direct access to path->state here,
-	 * we try to decrement in order of likelihood.
+	 * Access path state directly for correct accounting.
+	 * The tquic_path struct has state as an accessible field.
 	 */
-	if (bc->active_path_count > 0) {
-		bc->active_path_count--;
-	} else if (bc->pending_path_count > 0) {
-		bc->pending_path_count--;
-	} else if (bc->failed_path_count > 0) {
-		bc->failed_path_count--;
+	if (path && path->state == TQUIC_PATH_ACTIVE) {
+		if (bc->active_path_count > 0)
+			bc->active_path_count--;
+	} else if (path && path->state == TQUIC_PATH_FAILED) {
+		if (bc->failed_path_count > 0)
+			bc->failed_path_count--;
+	} else {
+		/* VALIDATING or other state, treat as pending */
+		if (bc->pending_path_count > 0)
+			bc->pending_path_count--;
+		else if (bc->active_path_count > 0)
+			bc->active_path_count--;
 	}
 
 	spin_unlock_bh(&bc->state_lock);

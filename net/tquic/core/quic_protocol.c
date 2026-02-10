@@ -25,6 +25,7 @@
 #include <net/tquic.h>
 #include <net/tquic/handshake.h>
 #include "../tquic_compat.h"
+#include "../tquic_debug.h"
 
 static struct kmem_cache __maybe_unused *tquic_sock_cachep __read_mostly;
 static struct kmem_cache __maybe_unused *tquic_conn_cachep __read_mostly;
@@ -92,7 +93,7 @@ static inline unsigned int tquic_get_validated_idle_timeout(void)
 	unsigned int val = READ_ONCE(tquic_default_idle_timeout_ms);
 
 	if (val < TQUIC_IDLE_TIMEOUT_MIN_MS || val > TQUIC_IDLE_TIMEOUT_MAX_MS) {
-		pr_warn_once("TQUIC: idle_timeout_ms %u out of range, using %u\n",
+		tquic_warn("idle_timeout_ms %u out of range, using %u\n",
 			     val, TQUIC_IDLE_TIMEOUT_DEFAULT_MS);
 		return TQUIC_IDLE_TIMEOUT_DEFAULT_MS;
 	}
@@ -104,7 +105,7 @@ static inline unsigned int tquic_get_validated_handshake_timeout(void)
 	unsigned int val = READ_ONCE(tquic_default_handshake_timeout_ms);
 
 	if (val < TQUIC_HS_TIMEOUT_MIN_MS || val > TQUIC_HS_TIMEOUT_MAX_MS) {
-		pr_warn_once("TQUIC: handshake_timeout_ms %u out of range, using %u\n",
+		tquic_warn("handshake_timeout_ms %u out of range, using %u\n",
 			     val, TQUIC_HS_TIMEOUT_DEFAULT_MS);
 		return TQUIC_HS_TIMEOUT_DEFAULT_MS;
 	}
@@ -116,7 +117,7 @@ static inline unsigned int tquic_get_validated_max_data(void)
 	unsigned int val = READ_ONCE(tquic_default_max_data);
 
 	if (val < TQUIC_MAX_DATA_MIN || val > TQUIC_MAX_DATA_MAX) {
-		pr_warn_once("TQUIC: max_data %u out of range, using %u\n",
+		tquic_warn("max_data %u out of range, using %u\n",
 			     val, TQUIC_MAX_DATA_DEFAULT);
 		return TQUIC_MAX_DATA_DEFAULT;
 	}
@@ -128,7 +129,7 @@ static inline unsigned int tquic_get_validated_max_stream_data(void)
 	unsigned int val = READ_ONCE(tquic_default_max_stream_data);
 
 	if (val < TQUIC_MAX_STREAM_DATA_MIN || val > TQUIC_MAX_STREAM_DATA_MAX) {
-		pr_warn_once("TQUIC: max_stream_data %u out of range, using %u\n",
+		tquic_warn("max_stream_data %u out of range, using %u\n",
 			     val, TQUIC_MAX_STREAM_DATA_DEFAULT);
 		return TQUIC_MAX_STREAM_DATA_DEFAULT;
 	}
@@ -140,7 +141,7 @@ static inline unsigned int tquic_get_validated_max_streams(void)
 	unsigned int val = READ_ONCE(tquic_default_max_streams);
 
 	if (val < TQUIC_MAX_STREAMS_MIN || val > TQUIC_MAX_STREAMS_MAX) {
-		pr_warn_once("TQUIC: max_streams %u out of range, using %u\n",
+		tquic_warn("max_streams %u out of range, using %u\n",
 			     val, TQUIC_MAX_STREAMS_DEFAULT);
 		return TQUIC_MAX_STREAMS_DEFAULT;
 	}
@@ -152,7 +153,7 @@ static inline unsigned int tquic_get_validated_initial_rtt(void)
 	unsigned int val = READ_ONCE(tquic_default_initial_rtt_ms);
 
 	if (val < TQUIC_INITIAL_RTT_MIN_MS || val > TQUIC_INITIAL_RTT_MAX_MS) {
-		pr_warn_once("TQUIC: initial_rtt_ms %u out of range, using %u\n",
+		tquic_warn("initial_rtt_ms %u out of range, using %u\n",
 			     val, TQUIC_INITIAL_RTT_DEFAULT_MS);
 		return TQUIC_INITIAL_RTT_DEFAULT_MS;
 	}
@@ -1319,7 +1320,7 @@ static int __init __maybe_unused tquic_proto_register_all(void)
 
 	/* Guard against double registration */
 	if (tquic_proto_registered) {
-		pr_warn("TQUIC: protocol already registered, skipping\n");
+		tquic_warn("protocol already registered, skipping\n");
 		return 0;
 	}
 
@@ -1386,7 +1387,7 @@ static int __init tquic_init(void)
 
 	/* Guard against double percpu_counter initialization */
 	if (tquic_percpu_initialized) {
-		pr_warn("TQUIC: percpu counters already initialized\n");
+		tquic_warn("percpu counters already initialized\n");
 	} else {
 		err = percpu_counter_init(&tquic_sockets_allocated, 0, GFP_KERNEL);
 		if (err)
@@ -1450,7 +1451,7 @@ static int __init tquic_init(void)
 	if (err)
 		goto out_ecf;
 
-	pr_info("TQUIC: kernel implementation initialized\n");
+	tquic_info("kernel implementation initialized\n");
 	return 0;
 
 out_ecf:
@@ -1519,7 +1520,7 @@ static void __exit tquic_exit(void)
 	kmem_cache_destroy(tquic_conn_cachep);
 	kmem_cache_destroy(tquic_sock_cachep);
 
-	pr_info("TQUIC: kernel implementation unloaded\n");
+	tquic_info("kernel implementation unloaded\n");
 }
 
 module_init(tquic_init);

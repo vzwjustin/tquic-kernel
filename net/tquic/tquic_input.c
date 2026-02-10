@@ -29,6 +29,7 @@
 #include <net/tquic.h>
 
 #include "tquic_compat.h"
+#include "tquic_debug.h"
 #include "tquic_mib.h"
 #include "cong/tquic_cong.h"
 #include "crypto/key_update.h"
@@ -39,6 +40,10 @@
 #include "tquic_ack_frequency.h"
 #include "tquic_ratelimit.h"
 #include "rate_limit.h"
+
+/* Per-packet RX decryption buffer slab cache (allocated in tquic_main.c) */
+#define TQUIC_RX_BUF_SIZE	2048
+extern struct kmem_cache *tquic_rx_buf_cache;
 
 /* Maximum ACK ranges to prevent resource exhaustion from malicious frames */
 #define TQUIC_MAX_ACK_RANGES		256
@@ -328,7 +333,7 @@ static bool tquic_is_stateless_reset_internal(struct tquic_connection *conn,
  */
 static void tquic_handle_stateless_reset(struct tquic_connection *conn)
 {
-	pr_info("tquic: received stateless reset for connection\n");
+	tquic_info("received stateless reset for connection\n");
 
 	spin_lock(&conn->lock);
 	conn->state = TQUIC_CONN_CLOSED;
@@ -378,33 +383,42 @@ static int tquic_process_version_negotiation(struct tquic_connection *conn,
 	if (len < 7)
 		return -EINVAL;
 
-	/* Skip first byte and version (0) */
+	/*
+	 * SECURITY: Validate CID lengths before use as offsets.
+	 * RFC 9000 limits CID to 20 bytes. Without this check, a crafted
+	 * dcid_len of 255 would cause 6 + dcid_len to overflow u8 arithmetic.
+	 * Use size_t arithmetic to prevent narrowing issues.
+	 */
 	dcid_len = data[5];
-	if (len < 6 + dcid_len + 1)
+	if (dcid_len > TQUIC_MAX_CID_LEN)
+		return -EINVAL;
+	if (len < (size_t)6 + dcid_len + 1)
 		return -EINVAL;
 
 	scid_len = data[6 + dcid_len];
-	if (len < 7 + dcid_len + scid_len)
+	if (scid_len > TQUIC_MAX_CID_LEN)
+		return -EINVAL;
+	if (len < (size_t)7 + dcid_len + scid_len)
 		return -EINVAL;
 
 	versions = data + 7 + dcid_len + scid_len;
 	versions_len = len - 7 - dcid_len - scid_len;
 
-	pr_debug("tquic: received version negotiation, offered versions:\n");
+	tquic_dbg("received version negotiation, offered versions:\n");
 
 	/* Check each offered version */
 	for (i = 0; i + 4 <= versions_len; i += 4) {
 		u32 version = (versions[i] << 24) | (versions[i + 1] << 16) |
 			      (versions[i + 2] << 8) | versions[i + 3];
 
-		pr_debug("  0x%08x\n", version);
+		tquic_dbg("  version 0x%08x\n", version);
 
 		if (version == TQUIC_VERSION_1 || version == TQUIC_VERSION_2)
 			found = true;
 	}
 
 	if (!found) {
-		pr_warn("tquic: conn: no compatible version found (local supports v1/v2)\n");
+		tquic_warn("conn: no compatible version found (local supports v1/v2)\n");
 		conn->state = TQUIC_CONN_CLOSED;
 		return -EPROTONOSUPPORT;
 	}
@@ -685,7 +699,7 @@ static int tquic_process_ack_frame(struct tquic_rx_ctx *ctx)
 			 */
 			tquic_cong_on_ecn(ctx->path, ecn_ce);
 
-			pr_debug("tquic: ECN-CE on path %u: ce=%llu ect0=%llu ect1=%llu\n",
+			tquic_dbg("ECN-CE on path %u: ce=%llu ect0=%llu ect1=%llu\n",
 				 ctx->path->path_id, ecn_ce, ecn_ect0, ecn_ect1);
 		}
 	}
@@ -719,7 +733,13 @@ static int tquic_process_crypto_frame(struct tquic_rx_ctx *ctx)
 		return ret;
 	ctx->offset += ret;
 
-	if (ctx->offset + length > ctx->len)
+	/*
+	 * SECURITY: Validate CRYPTO frame length to prevent integer overflow.
+	 * length is u64 from varint decode (up to 2^62-1). On 32-bit systems
+	 * adding to size_t ctx->offset could overflow/wrap. Also reject
+	 * frames larger than the packet itself as obviously malformed.
+	 */
+	if (length > ctx->len || ctx->offset + (size_t)length > ctx->len)
 		return -EINVAL;
 
 	/*
@@ -733,18 +753,25 @@ static int tquic_process_crypto_frame(struct tquic_rx_ctx *ctx)
 	if (ctx->conn && ctx->conn->tsk && ctx->conn->tsk->inline_hs) {
 		struct sock *sk = (struct sock *)ctx->conn->tsk;
 
+		/*
+		 * SECURITY: Validate length fits in u32 before cast.
+		 * CRYPTO frames carrying TLS messages should never exceed
+		 * practical limits. Reject oversized frames.
+		 */
+		if (length > U32_MAX)
+			return -EINVAL;
 		ret = tquic_inline_hs_recv_crypto(sk,
 						  ctx->data + ctx->offset,
 						  (u32)length,
 						  ctx->enc_level);
 		if (ret < 0) {
-			pr_debug("tquic: CRYPTO frame processing failed: %d\n",
+			tquic_dbg("CRYPTO frame processing failed: %d\n",
 				 ret);
 			ctx->offset += length;
 			return ret;
 		}
 	} else {
-		pr_debug("tquic: CRYPTO frame received but no inline handshake active\n");
+		tquic_dbg("CRYPTO frame received but no inline handshake active\n");
 	}
 
 	ctx->offset += length;
@@ -860,6 +887,18 @@ static int tquic_process_stream_frame(struct tquic_rx_ctx *ctx)
 	}
 
 	skb_queue_tail(&stream->recv_buf, data_skb);
+
+	/*
+	 * SECURITY: Validate stream offset + length against RFC 9000 limit.
+	 * Per Section 4.5: "An endpoint MUST treat receipt of data at or
+	 * beyond the final size as a connection error." The maximum stream
+	 * offset is 2^62-1. Check for overflow before
+	 * updating recv_offset.
+	 */
+	if (offset > ((1ULL << 62) - 1) - length) {
+		/* Would exceed 2^62-1 - protocol error */
+		return -EPROTO;
+	}
 	stream->recv_offset = max(stream->recv_offset, offset + length);
 
 	if (fin)
@@ -952,7 +991,7 @@ static int tquic_process_path_challenge_frame(struct tquic_rx_ctx *ctx)
 	ret = tquic_path_handle_challenge(ctx->conn, ctx->path, data);
 	if (ret < 0 && ret != -ENOBUFS) {
 		/* Log error but don't fail packet processing */
-		pr_debug("tquic: PATH_CHALLENGE handling failed: %d\n", ret);
+		tquic_dbg("PATH_CHALLENGE handling failed: %d\n", ret);
 	}
 
 	ctx->ack_eliciting = true;
@@ -1101,10 +1140,15 @@ static int tquic_process_connection_close_frame(struct tquic_rx_ctx *ctx, bool a
 		return ret;
 	ctx->offset += ret;
 
-	/* Skip reason phrase */
-	if (ctx->offset + reason_len > ctx->len)
+	/*
+	 * SECURITY: Validate reason phrase length to prevent integer overflow.
+	 * reason_len is u64 from varint (up to 2^62-1). Adding to size_t
+	 * ctx->offset could overflow on 32-bit. First check against remaining
+	 * bytes which is a safe size_t value.
+	 */
+	if (reason_len > ctx->len - ctx->offset)
 		return -EINVAL;
-	ctx->offset += reason_len;
+	ctx->offset += (size_t)reason_len;
 
 	pr_info_ratelimited("tquic: received CONNECTION_CLOSE, error=%llu frame_type=%llu\n",
 			    error_code, frame_type);
@@ -1184,7 +1228,7 @@ static int tquic_process_new_token(struct tquic_rx_ctx *ctx)
 
 	/* Validate token length */
 	if (token_len > TQUIC_TOKEN_MAX_LEN) {
-		pr_debug("tquic: NEW_TOKEN too large: %llu > %u\n",
+		tquic_dbg("NEW_TOKEN too large: %llu > %u\n",
 			 token_len, TQUIC_TOKEN_MAX_LEN);
 		return -EINVAL;
 	}
@@ -1197,7 +1241,7 @@ static int tquic_process_new_token(struct tquic_rx_ctx *ctx)
 					    ctx->data + ctx->offset,
 					    token_len);
 	if (ret < 0) {
-		pr_debug("tquic: NEW_TOKEN processing failed: %d\n", ret);
+		tquic_dbg("NEW_TOKEN processing failed: %d\n", ret);
 		/* Update MIB counter for invalid token */
 		if (ctx->conn && ctx->conn->sk)
 			TQUIC_INC_STATS(sock_net(ctx->conn->sk), TQUIC_MIB_TOKENSINVALID);
@@ -1210,7 +1254,7 @@ static int tquic_process_new_token(struct tquic_rx_ctx *ctx)
 	ctx->offset += token_len;
 	ctx->ack_eliciting = true;
 
-	pr_debug("tquic: received NEW_TOKEN, len=%llu\n", token_len);
+	tquic_dbg("received NEW_TOKEN, len=%llu\n", token_len);
 
 	return 0;
 }
@@ -1248,19 +1292,24 @@ static int tquic_process_datagram_frame(struct tquic_rx_ctx *ctx)
 		length = ctx->len - ctx->offset;
 	}
 
-	if (ctx->offset + length > ctx->len)
+	/*
+	 * SECURITY: Validate datagram length to prevent integer overflow.
+	 * length is u64; compare against remaining bytes (safe size_t)
+	 * to avoid overflow in ctx->offset + length on 32-bit.
+	 */
+	if (length > ctx->len - ctx->offset)
 		return -EINVAL;
 
 	/* Check if datagram support is enabled on this connection */
 	if (!ctx->conn || !ctx->conn->datagram.enabled) {
 		/* RFC 9221: If not negotiated, this is a protocol error */
-		pr_debug("tquic: received DATAGRAM but not negotiated\n");
+		tquic_dbg("received DATAGRAM but not negotiated\n");
 		return -EPROTO;
 	}
 
 	/* Validate against negotiated maximum size */
 	if (length > ctx->conn->datagram.max_recv_size) {
-		pr_debug("tquic: DATAGRAM too large: %llu > %llu\n",
+		tquic_dbg("DATAGRAM too large: %llu > %llu\n",
 			 length, ctx->conn->datagram.max_recv_size);
 		return -EMSGSIZE;
 	}
@@ -1277,7 +1326,7 @@ static int tquic_process_datagram_frame(struct tquic_rx_ctx *ctx)
 		/* Update MIB counter for dropped datagram */
 		if (ctx->conn->sk)
 			TQUIC_INC_STATS(sock_net(ctx->conn->sk), TQUIC_MIB_DATAGRAMSDROPPED);
-		pr_debug("tquic: DATAGRAM dropped, queue full\n");
+		tquic_dbg("DATAGRAM dropped, queue full\n");
 		/* Continue processing - this is not a fatal error */
 		ctx->offset += length;
 		ctx->ack_eliciting = true;
@@ -1326,7 +1375,7 @@ static int tquic_process_datagram_frame(struct tquic_rx_ctx *ctx)
 	ctx->offset += length;
 	ctx->ack_eliciting = true;
 
-	pr_debug("tquic: received DATAGRAM, len=%llu\n", length);
+	tquic_dbg("received DATAGRAM, len=%llu\n", length);
 
 	return 0;
 }
@@ -1407,7 +1456,7 @@ static int tquic_process_immediate_ack_frame(struct tquic_rx_ctx *ctx)
 
 	ctx->ack_eliciting = true;
 
-	pr_debug("tquic: processed IMMEDIATE_ACK frame\n");
+	tquic_dbg("processed IMMEDIATE_ACK frame\n");
 
 	return 0;
 }
@@ -1470,7 +1519,7 @@ static int tquic_process_mp_extended_frame(struct tquic_rx_ctx *ctx)
 		return tquic_process_path_status_frame(ctx);
 	}
 
-	pr_debug("tquic: unknown extended MP frame type 0x%llx\n", frame_type);
+	tquic_dbg("unknown extended MP frame type 0x%llx\n", frame_type);
 	return -EINVAL;
 }
 
@@ -1496,11 +1545,11 @@ static int tquic_process_path_abandon_frame(struct tquic_rx_ctx *ctx)
 	/* Handle the frame */
 	ret = tquic_mp_handle_path_abandon(ctx->conn, &frame);
 	if (ret < 0) {
-		pr_debug("tquic: PATH_ABANDON handling failed: %d\n", ret);
+		tquic_dbg("PATH_ABANDON handling failed: %d\n", ret);
 		return ret;
 	}
 
-	pr_debug("tquic: processed PATH_ABANDON for path %llu\n", frame.path_id);
+	tquic_dbg("processed PATH_ABANDON for path %llu\n", frame.path_id);
 	return 0;
 }
 
@@ -1526,11 +1575,11 @@ static int tquic_process_mp_new_connection_id_frame(struct tquic_rx_ctx *ctx)
 	/* Handle the frame */
 	ret = tquic_mp_handle_new_connection_id(ctx->conn, &frame);
 	if (ret < 0) {
-		pr_debug("tquic: MP_NEW_CONNECTION_ID handling failed: %d\n", ret);
+		tquic_dbg("MP_NEW_CONNECTION_ID handling failed: %d\n", ret);
 		return ret;
 	}
 
-	pr_debug("tquic: processed MP_NEW_CONNECTION_ID path=%llu seq=%llu\n",
+	tquic_dbg("processed MP_NEW_CONNECTION_ID path=%llu seq=%llu\n",
 		 frame.path_id, frame.seq_num);
 	return 0;
 }
@@ -1557,11 +1606,11 @@ static int tquic_process_mp_retire_connection_id_frame(struct tquic_rx_ctx *ctx)
 	/* Handle the frame */
 	ret = tquic_mp_handle_retire_connection_id(ctx->conn, &frame);
 	if (ret < 0) {
-		pr_debug("tquic: MP_RETIRE_CONNECTION_ID handling failed: %d\n", ret);
+		tquic_dbg("MP_RETIRE_CONNECTION_ID handling failed: %d\n", ret);
 		return ret;
 	}
 
-	pr_debug("tquic: processed MP_RETIRE_CONNECTION_ID path=%llu seq=%llu\n",
+	tquic_dbg("processed MP_RETIRE_CONNECTION_ID path=%llu seq=%llu\n",
 		 frame.path_id, frame.seq_num);
 	return 0;
 }
@@ -1600,10 +1649,10 @@ static int tquic_process_mp_ack_frame(struct tquic_rx_ctx *ctx)
 					TQUIC_PN_SPACE_APPLICATION,
 					&frame, ctx->conn);
 				if (ret < 0) {
-					pr_debug("tquic: MP_ACK processing failed: %d\n", ret);
+					tquic_dbg("MP_ACK processing failed: %d\n", ret);
 					return ret;
 				}
-				pr_debug("tquic: processed MP_ACK path=%llu largest=%llu\n",
+				tquic_dbg("processed MP_ACK path=%llu largest=%llu\n",
 					 frame.path_id, frame.largest_ack);
 				return 0;
 			}
@@ -1612,7 +1661,7 @@ static int tquic_process_mp_ack_frame(struct tquic_rx_ctx *ctx)
 	}
 	spin_unlock(&ctx->conn->paths_lock);
 
-	pr_debug("tquic: MP_ACK for unknown/uninitialized path %llu\n",
+	tquic_dbg("MP_ACK for unknown/uninitialized path %llu\n",
 		 frame.path_id);
 	return 0;
 }
@@ -1639,11 +1688,11 @@ static int tquic_process_path_status_frame(struct tquic_rx_ctx *ctx)
 	/* Handle the frame */
 	ret = tquic_mp_handle_path_status(ctx->conn, &frame);
 	if (ret < 0) {
-		pr_debug("tquic: PATH_STATUS handling failed: %d\n", ret);
+		tquic_dbg("PATH_STATUS handling failed: %d\n", ret);
 		return ret;
 	}
 
-	pr_debug("tquic: processed PATH_STATUS path=%llu status=%llu\n",
+	tquic_dbg("processed PATH_STATUS path=%llu status=%llu\n",
 		 frame.path_id, frame.status);
 	return 0;
 }
@@ -1730,7 +1779,7 @@ static int tquic_process_frames(struct tquic_connection *conn,
 #endif
 		} else {
 			/* Unknown frame type */
-			pr_debug("tquic: unknown frame type 0x%02x\n", frame_type);
+			tquic_dbg("unknown frame type 0x%02x\n", frame_type);
 			ret = -EINVAL;
 		}
 
@@ -2024,6 +2073,7 @@ static int tquic_process_packet(struct tquic_connection *conn,
 	u8 *payload;
 	size_t payload_len, decrypted_len = 0;
 	u8 *decrypted;
+	bool decrypted_from_slab = false;
 	int ret;
 
 	ctx.data = data;
@@ -2036,11 +2086,11 @@ static int tquic_process_packet(struct tquic_connection *conn,
 		ret = tquic_parse_long_header_internal(&ctx, dcid, &dcid_len,
 					      scid, &scid_len,
 					      &version, &pkt_type);
-		if (ret < 0)
+		if (unlikely(ret < 0))
 			return ret;
 
 		/* Handle version negotiation */
-		if (version == TQUIC_VERSION_NEGOTIATION) {
+		if (unlikely(version == TQUIC_VERSION_NEGOTIATION)) {
 			if (conn)
 				return tquic_process_version_negotiation(conn, data, len);
 			return 0;
@@ -2059,7 +2109,7 @@ static int tquic_process_packet(struct tquic_connection *conn,
 		 * Retry packets can only be received on clients during connection
 		 * establishment (TQUIC_CONN_CONNECTING state).
 		 */
-		if (pkt_type == TQUIC_PKT_RETRY) {
+		if (unlikely(pkt_type == TQUIC_PKT_RETRY)) {
 			/* Need connection to process Retry */
 			if (!conn)
 				conn = tquic_lookup_by_dcid(dcid, dcid_len);
@@ -2093,7 +2143,7 @@ static int tquic_process_packet(struct tquic_connection *conn,
 					 * processed a Retry packet for this
 					 * connection."
 					 */
-					pr_debug("tquic: discarding Retry in state %d\n",
+					tquic_dbg("discarding Retry in state %d\n",
 						 conn->state);
 				}
 			}
@@ -2122,7 +2172,7 @@ static int tquic_process_packet(struct tquic_connection *conn,
 				conn = tquic_lookup_by_dcid(dcid, dcid_len);
 
 			if (!conn) {
-				pr_debug("tquic: 0-RTT packet for unknown connection\n");
+				tquic_dbg("0-RTT packet for unknown connection\n");
 				return -ENOENT;
 			}
 
@@ -2136,7 +2186,7 @@ static int tquic_process_packet(struct tquic_connection *conn,
 					 * 0-RTT already rejected - discard packet.
 					 * Client will retransmit as 1-RTT.
 					 */
-					pr_debug("tquic: 0-RTT rejected, discarding\n");
+					tquic_dbg("0-RTT rejected, discarding\n");
 					return 0;
 				}
 
@@ -2152,7 +2202,7 @@ static int tquic_process_packet(struct tquic_connection *conn,
 						if (ret == -EEXIST && conn->sk)
 							TQUIC_INC_STATS(sock_net(conn->sk),
 									TQUIC_MIB_0RTTREPLAYS);
-						pr_debug("tquic: 0-RTT rejected: %d\n", ret);
+						tquic_dbg("0-RTT rejected: %d\n", ret);
 						return 0;
 					}
 					if (conn->sk)
@@ -2161,7 +2211,7 @@ static int tquic_process_packet(struct tquic_connection *conn,
 				}
 			} else {
 				/* Client received 0-RTT packet - shouldn't happen */
-				pr_debug("tquic: client received 0-RTT packet?\n");
+				tquic_dbg("client received 0-RTT packet?\n");
 				return -EPROTO;
 			}
 
@@ -2175,7 +2225,7 @@ static int tquic_process_packet(struct tquic_connection *conn,
 
 		if (!conn) {
 			/* New connection - would handle Initial packet */
-			pr_debug("tquic: no connection found for DCID\n");
+			tquic_dbg("no connection found for DCID\n");
 			return -ENOENT;
 		}
 
@@ -2248,7 +2298,7 @@ static int tquic_process_packet(struct tquic_connection *conn,
 					     data + ctx.offset,
 					     len - ctx.offset,
 					     ctx.is_long_header);
-	if (ret < 0)
+	if (unlikely(ret < 0))
 		return ret;
 
 	/* Decode packet number */
@@ -2259,7 +2309,17 @@ static int tquic_process_packet(struct tquic_connection *conn,
 	payload = data + ctx.offset;
 	payload_len = len - ctx.offset;
 
-	decrypted = kmalloc(payload_len, GFP_ATOMIC);
+	/*
+	 * Use the dedicated slab cache for decryption buffers when the
+	 * payload fits (common case: all standard MTU packets).  Fall
+	 * back to kmalloc for the rare jumbo/GSO case.
+	 */
+	if (likely(payload_len <= TQUIC_RX_BUF_SIZE)) {
+		decrypted = kmem_cache_alloc(tquic_rx_buf_cache, GFP_ATOMIC);
+		decrypted_from_slab = true;
+	} else {
+		decrypted = kmalloc(payload_len, GFP_ATOMIC);
+	}
 	if (unlikely(!decrypted))
 		return -ENOMEM;
 
@@ -2268,15 +2328,18 @@ static int tquic_process_packet(struct tquic_connection *conn,
 	 * - 0-RTT packets use 0-RTT keys from session ticket
 	 * - Other packets use normal crypto state keys
 	 */
-	if (pkt_type == TQUIC_PKT_ZERO_RTT) {
+	if (unlikely(pkt_type == TQUIC_PKT_ZERO_RTT)) {
 		/* Decrypt using 0-RTT keys */
 		ret = tquic_zero_rtt_decrypt(conn, data, ctx.offset,
 					     payload, payload_len,
 					     pkt_num, decrypted, &decrypted_len);
-		if (ret < 0) {
-			kfree(decrypted);
+		if (unlikely(ret < 0)) {
+			if (decrypted_from_slab)
+				kmem_cache_free(tquic_rx_buf_cache, decrypted);
+			else
+				kfree(decrypted);
 			if (ret == -ENOKEY)
-				pr_debug("tquic: 0-RTT decryption failed, no keys\n");
+				tquic_dbg("0-RTT decryption failed, no keys\n");
 			return ret;
 		}
 		/* Update 0-RTT stats */
@@ -2289,7 +2352,7 @@ static int tquic_process_packet(struct tquic_connection *conn,
 					    pkt_num,
 					    pkt_type >= 0 ? pkt_type : 3,
 					    decrypted, &decrypted_len);
-		if (ret < 0) {
+		if (unlikely(ret < 0)) {
 			/*
 			 * Key Update: Decryption failure for short headers might be
 			 * due to key phase change. Try with old keys if available.
@@ -2304,7 +2367,11 @@ static int tquic_process_packet(struct tquic_connection *conn,
 								      decrypted, &decrypted_len);
 			}
 			if (ret < 0) {
-				kfree(decrypted);
+				if (decrypted_from_slab)
+					kmem_cache_free(tquic_rx_buf_cache,
+							decrypted);
+				else
+					kfree(decrypted);
 				return ret;
 			}
 		}
@@ -2326,7 +2393,7 @@ static int tquic_process_packet(struct tquic_connection *conn,
 			if (ctx.key_phase_bit != current_phase) {
 				int ku_ret = tquic_handle_key_phase_change(conn, ctx.key_phase_bit);
 				if (ku_ret < 0)
-					pr_warn("tquic: key phase change %u->%u failed: %d\n",
+					tquic_warn("key phase change %u->%u failed: %d\n",
 						current_phase, ctx.key_phase_bit, ku_ret);
 			}
 			/* Track packet received for key update timing */
@@ -2338,12 +2405,15 @@ static int tquic_process_packet(struct tquic_connection *conn,
 	ret = tquic_process_frames(conn, path, decrypted, decrypted_len,
 				   pkt_type >= 0 ? pkt_type : 3, pkt_num);
 
-	kfree(decrypted);
+	if (decrypted_from_slab)
+		kmem_cache_free(tquic_rx_buf_cache, decrypted);
+	else
+		kfree(decrypted);
 
 	/* Update statistics */
-	if (ret >= 0) {
+	if (likely(ret >= 0)) {
 		conn->stats.rx_packets++;
-		if (path) {
+		if (likely(path)) {
 			path->stats.rx_packets++;
 			path->stats.rx_bytes += len;
 			path->last_activity = ktime_get();
@@ -2354,6 +2424,14 @@ static int tquic_process_packet(struct tquic_connection *conn,
 			TQUIC_INC_STATS(sock_net(conn->sk), TQUIC_MIB_PACKETSRX);
 			TQUIC_ADD_STATS(sock_net(conn->sk), TQUIC_MIB_BYTESRX, len);
 		}
+
+		/*
+		 * RFC 9000 Section 10.1: "An endpoint restarts its idle
+		 * timer when a packet from its peer is received and
+		 * processed successfully."
+		 */
+		if (conn->timer_state)
+			tquic_timer_reset_idle(conn->timer_state);
 	}
 
 	return ret;
@@ -2379,7 +2457,7 @@ int tquic_udp_recv(struct sock *sk, struct sk_buff *skb)
 	size_t len;
 	int ret;
 
-	if (!skb)
+	if (unlikely(!skb))
 		return -EINVAL;
 
 	/* Extract source (remote) address */
@@ -2415,7 +2493,7 @@ int tquic_udp_recv(struct sock *sk, struct sk_buff *skb)
 	data = skb->data;
 	len = skb->len;
 
-	if (len < 1) {
+	if (unlikely(len < 1)) {
 		kfree_skb(skb);
 		return -EINVAL;
 	}
@@ -2450,6 +2528,19 @@ int tquic_udp_recv(struct sock *sk, struct sk_buff *skb)
 			/* Parse enough header to extract DCID */
 			if (len >= 6) {
 				dcid_len = data[5];
+
+				/*
+				 * SECURITY: Validate DCID length before use.
+				 * RFC 9000 limits CID to 20 bytes. Without
+				 * this check, offset = 6 + dcid_len could
+				 * point past the packet buffer, causing
+				 * out-of-bounds reads on data + 6.
+				 */
+				if (dcid_len > TQUIC_MAX_CID_LEN ||
+				    6 + (size_t)dcid_len > len) {
+					kfree_skb(skb);
+					return -EINVAL;
+				}
 				offset = 6 + dcid_len;
 
 				/*
@@ -2565,11 +2656,20 @@ int tquic_udp_recv(struct sock *sk, struct sk_buff *skb)
 
 not_reset:
 	/* Check for version negotiation */
-	if (tquic_is_version_negotiation(data, len)) {
+	if (unlikely(tquic_is_version_negotiation(data, len))) {
 		/* Need connection context */
 		if (len > 6) {
 			u8 dcid_len = data[5];
-			if (len > 6 + dcid_len)
+
+			/*
+			 * SECURITY: Validate DCID length before use.
+			 * A crafted dcid_len > 20 would cause data + 6
+			 * to be passed with an oversized length to
+			 * the connection lookup, potentially reading
+			 * past the packet buffer.
+			 */
+			if (dcid_len <= TQUIC_MAX_CID_LEN &&
+			    len > (size_t)6 + dcid_len)
 				conn = tquic_lookup_by_dcid(data + 6, dcid_len);
 		}
 
@@ -2633,7 +2733,7 @@ not_reset:
 								   &unknown_cid,
 								   static_key,
 								   len);
-					pr_debug("tquic: sent stateless reset for unknown CID\n");
+					tquic_dbg("sent stateless reset for unknown CID\n");
 				}
 			}
 		}

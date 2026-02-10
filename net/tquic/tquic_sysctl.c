@@ -22,6 +22,7 @@
 #include "grease.h"
 #include "pm/nat_keepalive.h"
 #include "tquic_ack_frequency.h"
+#include "tquic_debug.h"
 #include "tquic_token.h"
 #include "security_hardening.h"
 
@@ -315,7 +316,7 @@ static int proc_tquic_scheduler(TQUIC_CTL_TABLE *table, int write,
 	rcu_read_lock();
 	if (!tquic_sched_find(name)) {
 		rcu_read_unlock();
-		pr_warn("tquic: unknown scheduler '%s'\n", name);
+		tquic_warn("unknown scheduler '%s'\n", name);
 		return -ENOENT;
 	}
 	rcu_read_unlock();
@@ -323,7 +324,7 @@ static int proc_tquic_scheduler(TQUIC_CTL_TABLE *table, int write,
 	/* Set default scheduler (global for out-of-tree build, void return) */
 	tquic_sched_set_default(name);
 
-	pr_debug("tquic: netns scheduler set to '%s'\n", name);
+	tquic_dbg("netns scheduler set to '%s'\n", name);
 	return 0;
 }
 
@@ -376,18 +377,18 @@ static int proc_tquic_cc_algorithm(TQUIC_CTL_TABLE *table, int write,
 
 	/* Validate CC algorithm exists */
 	if (!tquic_cong_find(name)) {
-		pr_warn("tquic: unknown CC algorithm '%s'\n", name);
+		tquic_warn("unknown CC algorithm '%s'\n", name);
 		return -ENOENT;
 	}
 
 	/* Set per-netns default CC algorithm */
 	ret = tquic_cong_set_default(net, name);
 	if (ret) {
-		pr_warn("tquic: failed to set CC algorithm '%s': %d\n", name, ret);
+		tquic_warn("failed to set CC algorithm '%s': %d\n", name, ret);
 		return ret;
 	}
 
-	pr_debug("tquic: netns CC algorithm set to '%s'\n", name);
+	tquic_dbg("netns CC algorithm set to '%s'\n", name);
 	return 0;
 }
 
@@ -421,7 +422,7 @@ static int proc_tquic_bbr_rtt_threshold(TQUIC_CTL_TABLE *table, int write,
 		return ret;
 
 	tquic_pernet(net)->bbr_rtt_threshold_ms = val;
-	pr_debug("tquic: netns BBR RTT threshold set to %d ms\n", val);
+	tquic_dbg("netns BBR RTT threshold set to %d ms\n", val);
 	return 0;
 }
 
@@ -452,7 +453,7 @@ static int proc_tquic_cc_coupled(TQUIC_CTL_TABLE *table, int write,
 		return ret;
 
 	tquic_pernet(net)->coupled_enabled = !!val;
-	pr_debug("tquic: netns coupled CC %s\n",
+	tquic_dbg("netns coupled CC %s\n",
 		 val ? "enabled" : "disabled");
 	return 0;
 }
@@ -485,7 +486,7 @@ static int proc_tquic_ecn_enabled(TQUIC_CTL_TABLE *table, int write,
 		return ret;
 
 	tquic_pernet(net)->ecn_enabled = !!val;
-	pr_debug("tquic: netns ECN %s\n", val ? "enabled" : "disabled");
+	tquic_dbg("netns ECN %s\n", val ? "enabled" : "disabled");
 	return 0;
 }
 
@@ -520,7 +521,7 @@ static int proc_tquic_ecn_beta(TQUIC_CTL_TABLE *table, int write,
 		return ret;
 
 	tquic_pernet(net)->ecn_beta = val;
-	pr_debug("tquic: netns ECN beta set to %d/1000 (%d.%d%%)\n",
+	tquic_dbg("netns ECN beta set to %d/1000 (%d.%d%%)\n",
 		 val, val / 10, val % 10);
 	return 0;
 }
@@ -539,7 +540,7 @@ static int __maybe_unused tquic_sysctl_scheduler(TQUIC_CTL_TABLE *table, int wri
 	rcu_read_lock();
 	if (!tquic_sched_find(tquic_scheduler)) {
 		rcu_read_unlock();
-		pr_warn("tquic: unknown scheduler '%s'\n", tquic_scheduler);
+		tquic_warn("unknown scheduler '%s'\n", tquic_scheduler);
 		return -ENOENT;
 	}
 	rcu_read_unlock();
@@ -594,7 +595,7 @@ static int proc_tquic_pacing_enabled(TQUIC_CTL_TABLE *table, int write,
 		return ret;
 
 	tquic_pernet(net)->pacing_enabled = !!val;
-	pr_debug("tquic: netns pacing %s\n", val ? "enabled" : "disabled");
+	tquic_dbg("netns pacing %s\n", val ? "enabled" : "disabled");
 	return 0;
 }
 
@@ -627,7 +628,7 @@ static int proc_tquic_path_degrade_threshold(TQUIC_CTL_TABLE *table, int write,
 		return ret;
 
 	tquic_pernet(net)->path_degrade_threshold = val;
-	pr_debug("tquic: netns path_degrade_threshold set to %d\n", val);
+	tquic_dbg("netns path_degrade_threshold set to %d\n", val);
 	return 0;
 }
 
@@ -664,7 +665,7 @@ static int proc_tquic_grease_enabled(TQUIC_CTL_TABLE *table, int write,
 		return ret;
 
 	tquic_pernet(net)->grease_enabled = !!val;
-	pr_debug("tquic: netns GREASE %s\n", val ? "enabled" : "disabled");
+	tquic_dbg("netns GREASE %s\n", val ? "enabled" : "disabled");
 	return 0;
 }
 
@@ -693,6 +694,15 @@ static int max_qpack_table_capacity = 1048576;  /* 1MB max for QPACK table */
 static int max_cert_verify_mode = 2;      /* required = maximum */
 static int max_revocation_mode = 2;       /* hard_fail = maximum */
 static int max_cert_time_tolerance = 86400;  /* 24 hours max clock skew */
+
+/* Pre-handshake memory limit bounds (1 MB to 512 MB) */
+static unsigned long min_pre_hs_memory = (1UL * 1024 * 1024);	  /* 1 MB */
+static unsigned long max_pre_hs_memory = (512UL * 1024 * 1024);  /* 512 MB */
+static unsigned long min_pre_hs_per_ip = (64UL * 1024);	  /* 64 KB */
+static unsigned long max_pre_hs_per_ip = (64UL * 1024 * 1024);	  /* 64 MB */
+
+/* Debug level bounds */
+static int max_debug_level = 7;
 
 /* Rate limiting min/max values */
 static int max_connections_rate = 1000000;  /* 1M conn/s max */
@@ -907,7 +917,9 @@ static struct ctl_table tquic_sysctl_table[] = {
 		.data		= &tquic_debug_level,
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
-		.proc_handler	= proc_dointvec,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= &zero,
+		.extra2		= &max_debug_level,
 	},
 	{
 		.procname	= "key_update_interval_packets",
@@ -1444,6 +1456,26 @@ static struct ctl_table tquic_sysctl_table[] = {
 		.maxlen		= sizeof(u64),
 		.mode		= 0644,
 		.proc_handler	= proc_doulongvec_minmax,
+		.extra1		= &min_pre_hs_memory,
+		.extra2		= &max_pre_hs_memory,
+	},
+	/*
+	 * pre_handshake_per_ip_budget: Per-IP pre-handshake memory limit
+	 *
+	 * Maximum memory allowed for pre-handshake state from a single
+	 * source IP address. Limits the damage from a single attacker.
+	 *
+	 * Default: 1048576 (1 MB)
+	 * Range: 64KB to 64MB
+	 */
+	{
+		.procname	= "pre_handshake_per_ip_budget",
+		.data		= &tquic_pre_handshake_per_ip_budget,
+		.maxlen		= sizeof(u64),
+		.mode		= 0644,
+		.proc_handler	= proc_doulongvec_minmax,
+		.extra1		= &min_pre_hs_per_ip,
+		.extra2		= &max_pre_hs_per_ip,
 	},
 	/*
 	 * pn_skip_rate: Optimistic ACK attack defense
@@ -2050,7 +2082,7 @@ int __init tquic_sysctl_init(void)
 	if (!tquic_sysctl_header)
 		return -ENOMEM;
 
-	pr_info("tquic: sysctl interface registered at /proc/sys/net/tquic/\n");
+	tquic_info("sysctl interface registered at /proc/sys/net/tquic/\n");
 	return 0;
 }
 

@@ -105,6 +105,10 @@ struct tquic_reorder_buffer {
 	/* Back pointer */
 	void		*priv;		/* Connection context */
 	struct workqueue_struct *wq;	/* Workqueue for timeout */
+
+	/* Delivery callback for timeout-triggered flushes */
+	void		(*deliver_fn)(void *ctx, struct sk_buff *skb);
+	void		*deliver_ctx;
 };
 
 /*
@@ -123,6 +127,11 @@ int tquic_reorder_insert(struct tquic_reorder_buffer *rb, struct sk_buff *skb,
 int tquic_reorder_drain(struct tquic_reorder_buffer *rb,
 			void (*deliver)(void *ctx, struct sk_buff *skb),
 			void *ctx);
+
+/* Set delivery callback for timeout-triggered flushes */
+void tquic_reorder_set_deliver(struct tquic_reorder_buffer *rb,
+			       void (*deliver)(void *ctx, struct sk_buff *skb),
+			       void *ctx);
 
 /* Gap timeout */
 void tquic_reorder_flush_timeout(struct tquic_reorder_buffer *rb,

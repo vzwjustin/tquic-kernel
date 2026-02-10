@@ -28,6 +28,7 @@
 #include "mp_frame.h"
 #include "mp_ack.h"
 #include "../core/varint.h"
+#include "../tquic_debug.h"
 
 /*
  * Per-path ACK state constants

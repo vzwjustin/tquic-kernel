@@ -18,6 +18,43 @@
 struct tquic_handshake;
 struct tquic_connection;
 
+/* Maximum number of name constraint subtrees per certificate */
+#define TQUIC_MAX_NAME_CONSTRAINTS	32
+
+/* GeneralName types used in name constraints (RFC 5280 Section 4.2.1.10) */
+#define TQUIC_NC_TYPE_DNS	2	/* dNSName [2] */
+#define TQUIC_NC_TYPE_EMAIL	1	/* rfc822Name [1] */
+
+/**
+ * struct tquic_name_constraint - A single name constraint subtree entry
+ * @type: GeneralName type (TQUIC_NC_TYPE_DNS, TQUIC_NC_TYPE_EMAIL)
+ * @name: The name/domain string (null-terminated, heap-allocated)
+ * @name_len: Length of name string (excluding null terminator)
+ */
+struct tquic_name_constraint {
+	u8 type;
+	char *name;
+	u32 name_len;
+};
+
+/**
+ * struct tquic_name_constraints - Parsed nameConstraints extension
+ * @permitted: Array of permitted subtree entries
+ * @nr_permitted: Number of permitted subtree entries
+ * @excluded: Array of excluded subtree entries
+ * @nr_excluded: Number of excluded subtree entries
+ * @critical: Whether the extension was marked critical
+ * @has_unsupported_type: A constraint type we cannot process was present
+ */
+struct tquic_name_constraints {
+	struct tquic_name_constraint permitted[TQUIC_MAX_NAME_CONSTRAINTS];
+	u32 nr_permitted;
+	struct tquic_name_constraint excluded[TQUIC_MAX_NAME_CONSTRAINTS];
+	u32 nr_excluded;
+	bool critical;
+	bool has_unsupported_type;
+};
+
 /* Certificate verification modes */
 enum tquic_cert_verify_mode {
 	TQUIC_CERT_VERIFY_NONE     = 0,  /* No verification (insecure) */
@@ -185,6 +222,7 @@ struct tquic_x509_cert {
 	u32 crl_dp_count;
 	char *ocsp_url;
 	u32 ocsp_url_len;
+	struct tquic_name_constraints *name_constraints;
 	struct tquic_x509_cert *next;
 };
 
@@ -287,6 +325,7 @@ struct tquic_cert_chain_entry {
 #define TQUIC_CERT_ERR_ISSUER_MISMATCH	-15
 #define TQUIC_CERT_ERR_PATH_LEN		-16
 #define TQUIC_CERT_ERR_REVOCATION_CHECK	-17
+#define TQUIC_CERT_ERR_NAME_CONSTRAINTS	-18
 
 /*
  * Core API

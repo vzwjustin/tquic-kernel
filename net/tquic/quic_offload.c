@@ -33,6 +33,7 @@
 #include <net/ip6_checksum.h>
 #include <crypto/aead.h>
 #include "tquic_compat.h"
+#include "tquic_debug.h"
 #include "tquic_cid.h"
 
 /* QUIC GSO type flag for skb_shared_info */
@@ -209,7 +210,15 @@ static int tquic_parse_header(struct sk_buff *skb, struct tquic_offload_cb *cb)
 					/* 4 or 8 byte varint - unlikely for token length */
 					return -EINVAL;
 				}
-				offset += varint_len + token_len;
+				offset += varint_len;
+				/*
+				 * Validate that token_len does not exceed
+				 * remaining packet data to prevent integer
+				 * overflow or out-of-bounds access.
+				 */
+				if (token_len > skb->len - offset)
+					return -EINVAL;
+				offset += token_len;
 			}
 			break;
 		case QUIC_PKT_0RTT:
@@ -228,15 +237,21 @@ static int tquic_parse_header(struct sk_buff *skb, struct tquic_offload_cb *cb)
 
 		/* Skip length field (varint) */
 		if (skb->len > offset) {
-			if ((data[offset] & 0xc0) == 0) {
-				offset += 1;
-			} else if ((data[offset] & 0xc0) == 0x40) {
-				offset += 2;
-			} else if ((data[offset] & 0xc0) == 0x80) {
-				offset += 4;
-			} else {
-				offset += 8;
-			}
+			int varint_size;
+
+			if ((data[offset] & 0xc0) == 0)
+				varint_size = 1;
+			else if ((data[offset] & 0xc0) == 0x40)
+				varint_size = 2;
+			else if ((data[offset] & 0xc0) == 0x80)
+				varint_size = 4;
+			else
+				varint_size = 8;
+
+			if (skb->len < offset + varint_size)
+				return -EINVAL;
+
+			offset += varint_size;
 		}
 
 		/* PN length from first byte (low 2 bits after unprotection) */

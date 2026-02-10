@@ -26,6 +26,7 @@
 #include <net/tquic.h>
 #include <net/net_namespace.h>
 #include "../protocol.h"
+#include "../tquic_debug.h"
 #include "tquic_cong.h"
 
 /* Forward declaration for pacing update (defined in tquic_output.c) */
@@ -125,7 +126,7 @@ int tquic_register_cong(struct tquic_cong_ops *ca)
 
 	/* Add to list (RCU-safe) */
 	list_add_tail_rcu(&ca->list, &tquic_cong_list);
-	pr_info("tquic_cong: registered %s\n", ca->name);
+	tquic_info("cc: %s algorithm registered\n", ca->name);
 
 out_unlock:
 	spin_unlock(&tquic_cong_list_lock);
@@ -152,7 +153,7 @@ void tquic_unregister_cong(struct tquic_cong_ops *ca)
 	/* Wait for RCU grace period before returning */
 	synchronize_rcu();
 
-	pr_info("tquic_cong: unregistered %s\n", ca->name);
+	tquic_info("cc: %s algorithm unregistered\n", ca->name);
 }
 EXPORT_SYMBOL_GPL(tquic_unregister_cong);
 
@@ -257,7 +258,7 @@ int tquic_cong_init_path_with_rtt(struct tquic_path *path, struct net *net,
 	if (name && strcmp(name, "auto") == 0) {
 		auto_select = true;
 		algo_name = tquic_cong_select_for_rtt(net, rtt_us);
-		pr_debug("tquic_cong: auto-selected '%s' for path %u (rtt=%llu us)\n",
+		tquic_dbg("cc: auto-selected '%s' for path %u (rtt=%llu us)\n",
 			 algo_name, path->path_id, rtt_us);
 	} else if (name) {
 		algo_name = name;
@@ -277,7 +278,7 @@ int tquic_cong_init_path_with_rtt(struct tquic_path *path, struct net *net,
 	}
 
 	if (!ca) {
-		pr_warn("tquic_cong: algorithm '%s' not found, trying default\n",
+		tquic_warn("cc: algorithm '%s' not found, trying default\n",
 			algo_name);
 		/* Fall back to default */
 		if (strcmp(algo_name, TQUIC_DEFAULT_CC_NAME) != 0) {
@@ -291,7 +292,7 @@ int tquic_cong_init_path_with_rtt(struct tquic_path *path, struct net *net,
 	}
 
 	if (!ca) {
-		pr_warn("tquic_cong: no CC algorithm available for path %u\n",
+		tquic_warn("cc: no algorithm available for path %u\n",
 			path->path_id);
 		/* Initialize with default cwnd, no CC ops */
 		path->cong = NULL;
@@ -304,7 +305,7 @@ int tquic_cong_init_path_with_rtt(struct tquic_path *path, struct net *net,
 	cong_state = ca->init(path);
 	if (!cong_state) {
 		tquic_cong_put(ca);
-		pr_warn("tquic_cong: failed to init %s for path %u\n",
+		tquic_warn("cc: failed to init %s for path %u\n",
 			ca->name, path->path_id);
 		return -ENOMEM;
 	}
@@ -319,8 +320,8 @@ int tquic_cong_init_path_with_rtt(struct tquic_path *path, struct net *net,
 	else
 		path->stats.cwnd = TQUIC_DEFAULT_CWND;
 
-	pr_debug("tquic_cong: initialized %s for path %u (cwnd=%u, auto=%d)\n",
-		 ca->name, path->path_id, path->stats.cwnd, auto_select);
+	tquic_dbg("cc: initialized %s for path %u (cwnd=%u, auto=%d)\n",
+		  ca->name, path->path_id, path->stats.cwnd, auto_select);
 
 	return 0;
 }
@@ -354,7 +355,7 @@ int tquic_cong_init_path(struct tquic_path *path, const char *name)
 	}
 
 	if (!ca) {
-		pr_warn("tquic_cong: algorithm '%s' not found, trying default\n",
+		tquic_warn("cc: algorithm '%s' not found, trying default\n",
 			algo_name);
 		/* Fall back to default */
 		if (strcmp(algo_name, TQUIC_DEFAULT_CC_NAME) != 0) {
@@ -368,7 +369,7 @@ int tquic_cong_init_path(struct tquic_path *path, const char *name)
 	}
 
 	if (!ca) {
-		pr_warn("tquic_cong: no CC algorithm available for path %u\n",
+		tquic_warn("cc: no algorithm available for path %u\n",
 			path->path_id);
 		/* Initialize with default cwnd, no CC ops */
 		path->cong = NULL;
@@ -381,7 +382,7 @@ int tquic_cong_init_path(struct tquic_path *path, const char *name)
 	cong_state = ca->init(path);
 	if (!cong_state) {
 		tquic_cong_put(ca);
-		pr_warn("tquic_cong: failed to init %s for path %u\n",
+		tquic_warn("cc: failed to init %s for path %u\n",
 			ca->name, path->path_id);
 		return -ENOMEM;
 	}
@@ -396,8 +397,8 @@ int tquic_cong_init_path(struct tquic_path *path, const char *name)
 	else
 		path->stats.cwnd = TQUIC_DEFAULT_CWND;
 
-	pr_debug("tquic_cong: initialized %s for path %u (cwnd=%u)\n",
-		 ca->name, path->path_id, path->stats.cwnd);
+	tquic_dbg("cc: initialized %s for path %u (cwnd=%u)\n",
+		  ca->name, path->path_id, path->stats.cwnd);
 
 	return 0;
 }
@@ -423,8 +424,8 @@ void tquic_cong_release_path(struct tquic_path *path)
 		/* Release module reference */
 		tquic_cong_put(ca);
 
-		pr_debug("tquic_cong: released %s for path %u\n",
-			 ca->name, path->path_id);
+		tquic_dbg("cc: released %s for path %u\n",
+			  ca->name, path->path_id);
 	}
 
 	/* Clear path's CC state */
@@ -454,7 +455,7 @@ void tquic_cong_on_ack(struct tquic_path *path, u64 bytes_acked, u64 rtt_us)
 	if (path->path_id < TQUIC_MAX_PATHS) {
 		tracker = &loss_trackers[path->path_id];
 		if (tracker->consecutive_losses > 0) {
-			pr_debug("tquic: path %u loss counter reset on ACK\n",
+			tquic_dbg("cc: path %u loss counter reset on ACK\n",
 				 path->path_id);
 			tracker->consecutive_losses = 0;
 		}
@@ -511,7 +512,7 @@ void tquic_cong_on_loss(struct tquic_path *path, u64 bytes_lost)
 			/* New round - reset counter */
 			tracker->consecutive_losses = 0;
 			tracker->round_start_tx = path->stats.tx_packets;
-			pr_debug("tquic: path %u new loss round, tx=%llu\n",
+			tquic_dbg("cc: path %u new loss round, tx=%llu\n",
 				 path->path_id, path->stats.tx_packets);
 		}
 
@@ -519,14 +520,14 @@ void tquic_cong_on_loss(struct tquic_path *path, u64 bytes_lost)
 		tracker->consecutive_losses++;
 		tracker->last_loss_tx = path->stats.tx_packets;
 
-		pr_debug("tquic: loss on path %u, consecutive=%u (round_start=%llu)\n",
+		tquic_dbg("cc: loss on path %u, consecutive=%u (round_start=%llu)\n",
 			 path->path_id, tracker->consecutive_losses,
 			 tracker->round_start_tx);
 
 		/* Check for degradation threshold */
 		threshold = tquic_get_path_degrade_threshold(path);
 		if (tracker->consecutive_losses >= threshold) {
-			pr_warn("tquic: path %u degraded after %u consecutive losses\n",
+			tquic_warn("cc: path %u degraded after %u consecutive losses\n",
 				path->path_id, tracker->consecutive_losses);
 
 			/* Signal path manager for degradation/failover */
@@ -598,16 +599,16 @@ void tquic_cong_on_persistent_congestion(struct tquic_path *path,
 		if (ca->get_cwnd)
 			path->stats.cwnd = ca->get_cwnd(path->cong);
 
-		pr_debug("tquic_cong: persistent congestion on path %u, new cwnd=%u\n",
-			 path->path_id, path->stats.cwnd);
+		tquic_warn("cc: persistent congestion on path %u, new cwnd=%u\n",
+			   path->path_id, path->stats.cwnd);
 	} else {
 		/*
 		 * Default behavior if CC doesn't implement callback:
 		 * Reset cwnd to minimum
 		 */
 		path->stats.cwnd = (u32)info->min_cwnd;
-		pr_debug("tquic_cong: persistent congestion on path %u (default), cwnd=%u\n",
-			 path->path_id, path->stats.cwnd);
+		tquic_warn("cc: persistent congestion on path %u (default), cwnd=%u\n",
+			   path->path_id, path->stats.cwnd);
 	}
 
 	/* Update pacing rate after persistent congestion */
@@ -818,7 +819,7 @@ int tquic_cong_set_default(struct net *net, const char *name)
 		request_module("tquic-cong-%s", name);
 		ca = tquic_cong_find(name);
 		if (!ca) {
-			pr_warn("tquic_cong: algorithm '%s' not found\n", name);
+			tquic_warn("cc: algorithm '%s' not found\n", name);
 			return -ENOENT;
 		}
 	}
@@ -843,7 +844,7 @@ int tquic_cong_set_default(struct net *net, const char *name)
 	if (old_ca && old_ca->owner)
 		module_put(old_ca->owner);
 
-	pr_debug("tquic_cong: netns default CC set to '%s'\n", name);
+	tquic_dbg("cc: netns default CC set to '%s'\n", name);
 	return 0;
 }
 EXPORT_SYMBOL_GPL(tquic_cong_set_default);
@@ -1009,7 +1010,7 @@ int tquic_cong_enable_coupling(struct tquic_connection *conn,
 
 	/* Already enabled? */
 	if (conn->coupled_cc) {
-		pr_debug("tquic_cong: coupled CC already enabled\n");
+		tquic_dbg("cc: coupled CC already enabled\n");
 		return -EEXIST;
 	}
 
@@ -1029,7 +1030,7 @@ int tquic_cong_enable_coupling(struct tquic_connection *conn,
 		    path->state == TQUIC_PATH_VALIDATED) {
 			ret = tquic_coupled_attach_path(state, path);
 			if (ret < 0) {
-				pr_warn("tquic_cong: failed to attach path %u: %d\n",
+				tquic_warn("cc: failed to attach path %u: %d\n",
 					path->path_id, ret);
 				/* Continue with other paths */
 			}
@@ -1040,7 +1041,7 @@ int tquic_cong_enable_coupling(struct tquic_connection *conn,
 	/* Store coupled state in connection */
 	conn->coupled_cc = state;
 
-	pr_info("tquic_cong: enabled coupled CC (algo=%d) for connection\n", algo);
+	tquic_info("cc: enabled coupled CC (algo=%d) for connection\n", algo);
 	return 0;
 }
 EXPORT_SYMBOL_GPL(tquic_cong_enable_coupling);
@@ -1062,7 +1063,7 @@ void tquic_cong_disable_coupling(struct tquic_connection *conn)
 
 	state = conn->coupled_cc;
 	if (!state) {
-		pr_debug("tquic_cong: coupled CC not enabled\n");
+		tquic_dbg("cc: coupled CC not enabled\n");
 		return;
 	}
 
@@ -1077,7 +1078,7 @@ void tquic_cong_disable_coupling(struct tquic_connection *conn)
 	conn->coupled_cc = NULL;
 	tquic_coupled_destroy(state);
 
-	pr_info("tquic_cong: disabled coupled CC for connection\n");
+	tquic_info("cc: disabled coupled CC for connection\n");
 }
 EXPORT_SYMBOL_GPL(tquic_cong_disable_coupling);
 
@@ -1138,7 +1139,7 @@ void tquic_cong_on_ecn(struct tquic_path *path, u64 ecn_ce_count)
 		tn = net ? tquic_pernet(net) : NULL;
 		if (tn && !tn->ecn_enabled) {
 			/* ECN disabled for this namespace, ignore CE marks */
-			pr_debug("tquic_cong: ECN CE ignored (ecn_enabled=0)\n");
+			tquic_dbg("cc: ECN CE ignored (ecn_enabled=0)\n");
 			return;
 		}
 	}
@@ -1167,7 +1168,7 @@ void tquic_cong_on_ecn(struct tquic_path *path, u64 ecn_ce_count)
 		if (ca->get_cwnd)
 			path->stats.cwnd = ca->get_cwnd(path->cong);
 
-		pr_debug("tquic_cong: ECN CE on path %u via on_ecn, ce_count=%llu, new_cwnd=%u\n",
+		tquic_dbg("cc: ECN CE on path %u via on_ecn, ce_count=%llu, new_cwnd=%u\n",
 			 path->path_id, ecn_ce_count, path->stats.cwnd);
 	} else if (ca->on_loss) {
 		/*
@@ -1181,7 +1182,7 @@ void tquic_cong_on_ecn(struct tquic_path *path, u64 ecn_ce_count)
 		if (ca->get_cwnd)
 			path->stats.cwnd = ca->get_cwnd(path->cong);
 
-		pr_debug("tquic_cong: ECN CE on path %u via on_loss fallback, ce_count=%llu, new_cwnd=%u\n",
+		tquic_dbg("cc: ECN CE on path %u via on_loss fallback, ce_count=%llu, new_cwnd=%u\n",
 			 path->path_id, ecn_ce_count, path->stats.cwnd);
 	}
 

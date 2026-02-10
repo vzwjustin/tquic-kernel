@@ -21,6 +21,7 @@
 #include "bdp_frame.h"
 #include "tquic_cong.h"
 #include "../protocol.h"
+#include "../tquic_debug.h"
 
 /*
  * Careful Resume Parameters
@@ -99,26 +100,25 @@ struct careful_resume_state {
 	void *original_cc_state;	/* Backup of CC-specific state */
 };
 
-/* Per-path Careful Resume state storage (indexed by path_id) */
-static struct careful_resume_state *cr_states[TQUIC_MAX_PATHS];
-static DEFINE_SPINLOCK(cr_states_lock);
+/*
+ * Careful Resume state is stored per-path in the path's private data
+ * (path->cr_state). Using a global array indexed by path_id is unsafe
+ * because path_ids are reused across connections, leading to data
+ * corruption between concurrent connections.
+ *
+ * Instead, we store the state pointer in the path structure.
+ * The tquic_path structure has a void *cr_state field for this purpose.
+ */
 
 /*
- * Get or create Careful Resume state for a path
+ * Get Careful Resume state for a path
  */
 static struct careful_resume_state *get_cr_state(struct tquic_path *path)
 {
-	struct careful_resume_state *state;
-	unsigned long flags;
-
-	if (!path || path->path_id >= TQUIC_MAX_PATHS)
+	if (!path)
 		return NULL;
 
-	spin_lock_irqsave(&cr_states_lock, flags);
-	state = cr_states[path->path_id];
-	spin_unlock_irqrestore(&cr_states_lock, flags);
-
-	return state;
+	return path->cr_state;
 }
 
 /*
@@ -127,25 +127,19 @@ static struct careful_resume_state *get_cr_state(struct tquic_path *path)
 static struct careful_resume_state *create_cr_state(struct tquic_path *path)
 {
 	struct careful_resume_state *state;
-	unsigned long flags;
 
-	if (!path || path->path_id >= TQUIC_MAX_PATHS)
+	if (!path)
 		return NULL;
+
+	/* Check if already exists */
+	if (path->cr_state)
+		return path->cr_state;
 
 	state = kzalloc(sizeof(*state), GFP_KERNEL);
 	if (!state)
 		return NULL;
 
-	spin_lock_irqsave(&cr_states_lock, flags);
-	if (cr_states[path->path_id]) {
-		/* Race: another thread created it */
-		spin_unlock_irqrestore(&cr_states_lock, flags);
-		kfree(state);
-		return cr_states[path->path_id];
-	}
-	cr_states[path->path_id] = state;
-	spin_unlock_irqrestore(&cr_states_lock, flags);
-
+	path->cr_state = state;
 	return state;
 }
 
@@ -155,15 +149,12 @@ static struct careful_resume_state *create_cr_state(struct tquic_path *path)
 static void release_cr_state(struct tquic_path *path)
 {
 	struct careful_resume_state *state;
-	unsigned long flags;
 
-	if (!path || path->path_id >= TQUIC_MAX_PATHS)
+	if (!path)
 		return;
 
-	spin_lock_irqsave(&cr_states_lock, flags);
-	state = cr_states[path->path_id];
-	cr_states[path->path_id] = NULL;
-	spin_unlock_irqrestore(&cr_states_lock, flags);
+	state = path->cr_state;
+	path->cr_state = NULL;
 
 	if (state) {
 		kfree(state->original_cc_state);
@@ -209,10 +200,21 @@ int tquic_careful_resume_init(struct tquic_path *path,
 			     TQUIC_BDP_MIN_CWND * 5);
 	initial_cwnd = max_t(u64, initial_cwnd, TQUIC_BDP_MIN_CWND);
 
-	/* Initialize state */
+	/*
+	 * Initialize state.
+	 *
+	 * Cap the target cwnd at a reasonable maximum to prevent
+	 * an attacker-crafted BDP frame from restoring an absurdly
+	 * large cwnd. The target should not exceed the BDP value
+	 * (which represents actual measured capacity) and should be
+	 * capped at a practical maximum (10MB) to limit damage from
+	 * stale or malicious BDP frames.
+	 */
 	state->active = true;
 	state->phase = TQUIC_CR_PHASE_RECONNECTION;
-	state->target_cwnd = frame->saved_cwnd;
+	state->target_cwnd = min_t(u64, frame->saved_cwnd,
+				   min_t(u64, frame->bdp,
+					  10ULL * 1024 * 1024));
 	state->target_bdp = frame->bdp;
 	state->saved_rtt = frame->saved_rtt;
 	state->initial_cwnd = initial_cwnd;
@@ -232,7 +234,7 @@ int tquic_careful_resume_init(struct tquic_path *path,
 	/* Set path's cwnd to conservative initial value */
 	path->stats.cwnd = initial_cwnd;
 
-	pr_info("tquic_cr: initialized for path %u, target_cwnd=%llu initial=%llu saved_rtt=%llu\n",
+	tquic_info("cr: initialized for path %u, target_cwnd=%llu initial=%llu saved_rtt=%llu\n",
 		path->path_id, state->target_cwnd, initial_cwnd, state->saved_rtt);
 
 	return 0;
@@ -282,7 +284,7 @@ bool tquic_careful_resume_validate(struct tquic_path *path, u64 observed_rtt)
 
 		/* Also require absolute increase above threshold */
 		if (rtt_increase > CR_RTT_INCREASE_THRESHOLD_US) {
-			pr_info("tquic_cr: path %u RTT increased significantly: "
+			tquic_info("cr: path %u RTT increased significantly: "
 				"observed=%llu saved=%llu threshold=%llu\n",
 				path->path_id, observed_rtt, state->saved_rtt,
 				rtt_threshold);
@@ -299,7 +301,7 @@ bool tquic_careful_resume_validate(struct tquic_path *path, u64 observed_rtt)
 		u64 loss_rate = state->bytes_lost * 100 / total;
 
 		if (loss_rate > CR_LOSS_TOLERANCE_PERCENT) {
-			pr_info("tquic_cr: path %u high loss rate during resume: "
+			tquic_info("cr: path %u high loss rate during resume: "
 				"%llu%% (lost=%llu acked=%llu)\n",
 				path->path_id, loss_rate,
 				state->bytes_lost, state->bytes_acked);
@@ -348,7 +350,7 @@ bool tquic_careful_resume_apply(struct tquic_path *path, u64 bytes_acked,
 
 	/* Validate path hasn't changed */
 	if (rtt_us > 0 && !tquic_careful_resume_validate(path, rtt_us)) {
-		pr_info("tquic_cr: validation failed, triggering safe retreat\n");
+		tquic_info("cr: validation failed, triggering safe retreat\n");
 		tquic_careful_resume_safe_retreat(path);
 		return false;
 	}
@@ -381,7 +383,7 @@ bool tquic_careful_resume_apply(struct tquic_path *path, u64 bytes_acked,
 		 */
 		if (state->rtt_samples >= 3) {
 			state->phase = TQUIC_CR_PHASE_UNVALIDATED;
-			pr_debug("tquic_cr: path %u transitioning to unvalidated phase\n",
+			tquic_dbg("cr: path %u transitioning to unvalidated phase\n",
 				 path->path_id);
 		}
 		break;
@@ -422,7 +424,7 @@ bool tquic_careful_resume_apply(struct tquic_path *path, u64 bytes_acked,
 			state->phase = TQUIC_CR_PHASE_NORMAL;
 			state->active = false;
 
-			pr_info("tquic_cr: path %u completed, final cwnd=%llu target=%llu\n",
+			tquic_info("cr: path %u completed, final cwnd=%llu target=%llu\n",
 				path->path_id, new_cwnd, state->target_cwnd);
 
 			return false;  /* Careful Resume complete */
@@ -471,7 +473,7 @@ void tquic_careful_resume_on_loss(struct tquic_path *path, u64 bytes_lost)
 		loss_rate = state->bytes_lost * 100 / total;
 
 		if (loss_rate > CR_LOSS_TOLERANCE_PERCENT) {
-			pr_info("tquic_cr: path %u high loss during resume "
+			tquic_info("cr: path %u high loss during resume "
 				"(%llu%%), triggering retreat\n",
 				path->path_id, loss_rate);
 			tquic_careful_resume_safe_retreat(path);
@@ -529,7 +531,7 @@ void tquic_careful_resume_safe_retreat(struct tquic_path *path)
 		}
 	}
 
-	pr_info("tquic_cr: safe retreat executed for path %u, cwnd reset to %llu\n",
+	tquic_info("cr: safe retreat executed for path %u, cwnd reset to %llu\n",
 		path->path_id, min_cwnd);
 
 	/* Clean up state - will use normal CC from here */
@@ -542,31 +544,17 @@ EXPORT_SYMBOL_GPL(tquic_careful_resume_safe_retreat);
  */
 static int __init tquic_careful_resume_init_module(void)
 {
-	int i;
-
-	for (i = 0; i < TQUIC_MAX_PATHS; i++)
-		cr_states[i] = NULL;
-
-	pr_info("tquic_careful_resume: initialized\n");
+	tquic_info("careful_resume: initialized\n");
 	return 0;
 }
 
 static void __exit tquic_careful_resume_exit_module(void)
 {
-	int i;
-	unsigned long flags;
-
-	spin_lock_irqsave(&cr_states_lock, flags);
-	for (i = 0; i < TQUIC_MAX_PATHS; i++) {
-		if (cr_states[i]) {
-			kfree(cr_states[i]->original_cc_state);
-			kfree(cr_states[i]);
-			cr_states[i] = NULL;
-		}
-	}
-	spin_unlock_irqrestore(&cr_states_lock, flags);
-
-	pr_info("tquic_careful_resume: cleaned up\n");
+	/*
+	 * Per-path CR state is freed when paths are destroyed.
+	 * No global state to clean up.
+	 */
+	tquic_info("careful_resume: cleaned up\n");
 }
 
 module_init(tquic_careful_resume_init_module);

@@ -20,6 +20,7 @@
 #include <linux/skbuff.h>
 #include <linux/workqueue.h>
 #include "tquic_reorder.h"
+#include "../tquic_debug.h"
 
 /* rb_to_skb is defined in linux/skbuff.h */
 
@@ -27,9 +28,28 @@
  * Compare sequence numbers for RB-tree ordering
  * Returns negative if a < b, zero if equal, positive if a > b
  */
-static inline s64 seq_compare(u64 a, u64 b)
+static inline int seq_compare(u64 a, u64 b)
 {
-	return (s64)(a - b);
+	if (a < b)
+		return -1;
+	if (a > b)
+		return 1;
+	return 0;
+}
+
+/*
+ * Gap timeout work handler - flushes stale packets from the reorder buffer
+ * when gaps are not filled within the timeout period.
+ */
+static void tquic_reorder_timeout_handler(struct work_struct *work)
+{
+	struct tquic_reorder_buffer *rb =
+		container_of(work, struct tquic_reorder_buffer,
+			     timeout_work.work);
+
+	if (rb->deliver_fn)
+		tquic_reorder_flush_timeout(rb, rb->deliver_fn,
+					    rb->deliver_ctx);
 }
 
 /*
@@ -100,6 +120,9 @@ int tquic_reorder_init(struct tquic_reorder_buffer *rb, size_t max_bytes,
 
 	rb->wq = wq;
 	rb->priv = priv;
+	rb->deliver_fn = NULL;
+	rb->deliver_ctx = NULL;
+	INIT_DELAYED_WORK(&rb->timeout_work, tquic_reorder_timeout_handler);
 
 	memset(&rb->stats, 0, sizeof(rb->stats));
 
@@ -109,6 +132,23 @@ int tquic_reorder_init(struct tquic_reorder_buffer *rb, size_t max_bytes,
 	return 0;
 }
 EXPORT_SYMBOL_GPL(tquic_reorder_init);
+
+/**
+ * tquic_reorder_set_deliver - Register delivery callback for timeout flushes
+ * @rb: Reorder buffer
+ * @deliver: Callback to deliver each packet
+ * @ctx: Context for callback
+ */
+void tquic_reorder_set_deliver(struct tquic_reorder_buffer *rb,
+			       void (*deliver)(void *ctx, struct sk_buff *skb),
+			       void *ctx)
+{
+	if (!rb)
+		return;
+	rb->deliver_fn = deliver;
+	rb->deliver_ctx = ctx;
+}
+EXPORT_SYMBOL_GPL(tquic_reorder_set_deliver);
 
 /**
  * tquic_reorder_destroy - Destroy reorder buffer and free all packets
@@ -278,9 +318,9 @@ inserted:
 
 	/* Schedule gap timeout if not already scheduled */
 	if (rb->wq && !rb->timeout_scheduled && rb->gap_timeout_ms > 0) {
-		INIT_DELAYED_WORK(&rb->timeout_work, NULL);
-		/* Note: timeout_work handler set by caller */
 		rb->timeout_scheduled = true;
+		mod_delayed_work(rb->wq, &rb->timeout_work,
+				 msecs_to_jiffies(rb->gap_timeout_ms));
 	}
 
 	spin_unlock_bh(&rb->buffer_lock);

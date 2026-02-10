@@ -48,10 +48,12 @@
 #endif
 
 #include <net/tquic.h>
+#include <net/tquic_pmtud.h>
 
 #include "protocol.h"
 #include "tquic_mib.h"
 #include "tquic_compat.h"
+#include "tquic_debug.h"
 
 /*
  * On < 5.9, sockptr_t doesn't exist in <net/tquic.h> (parsed before
@@ -173,8 +175,8 @@ static int tquic_v4_rcv(struct sk_buff *skb)
 		}
 	}
 
-	pr_debug("received TQUIC packet for unknown connection, len=%u\n",
-		 skb->len);
+	tquic_dbg("received packet for unknown connection, len=%u\n",
+		  skb->len);
 	kfree_skb(skb);
 	return 0;
 }
@@ -184,7 +186,7 @@ static int tquic_v4_err(struct sk_buff *skb, u32 info)
 {
 	const struct iphdr *iph = ip_hdr(skb);
 
-	pr_debug("received ICMP error for TQUIC, info=%u\n", info);
+	tquic_dbg("received ICMP error, info=%u\n", info);
 
 	/*
 	 * Handle ICMP errors for TQUIC connections:
@@ -194,21 +196,68 @@ static int tquic_v4_err(struct sk_buff *skb, u32 info)
 	switch (icmp_hdr(skb)->type) {
 	case ICMP_DEST_UNREACH:
 		if (icmp_hdr(skb)->code == ICMP_FRAG_NEEDED) {
-			/* Path MTU discovery */
-			u16 mtu = ntohs(icmp_hdr(skb)->un.frag.mtu);
+			/* Path MTU discovery - ICMP Frag Needed */
+			u32 icmp_mtu = ntohs(icmp_hdr(skb)->un.frag.mtu);
+			u32 quic_mtu;
+			struct tquic_connection *conn;
+			struct tquic_cid dcid;
 
-			/* Find connection by destination IP */
-			/* For now, log the event */
-			pr_debug("TQUIC PMTUD: new MTU=%u for %pI4\n",
-				 mtu, &iph->daddr);
+			/*
+			 * Validate ICMP-reported MTU:
+			 * - Must be at least 68 bytes (IPv4 minimum)
+			 * - Subtract IP+UDP overhead to get QUIC payload MTU
+			 * - Clamp to QUIC minimum of 1200 bytes
+			 *
+			 * An attacker can forge ICMP messages with arbitrary
+			 * MTU values, so we treat this as advisory only.
+			 */
+			if (icmp_mtu < 68) {
+				tquic_dbg("PMTUD: ignoring bogus ICMP MTU=%u\n",
+					  icmp_mtu);
+				break;
+			}
+
+			if (icmp_mtu > TQUIC_IPV4_UDP_OVERHEAD)
+				quic_mtu = icmp_mtu - TQUIC_IPV4_UDP_OVERHEAD;
+			else
+				quic_mtu = TQUIC_PMTUD_BASE_MTU;
+
+			tquic_dbg("PMTUD: ICMP frag-needed MTU=%u (QUIC=%u) for %pI4\n",
+				  icmp_mtu, quic_mtu, &iph->daddr);
+
+			/*
+			 * Try to find the connection and update its path MTU.
+			 * The inner packet (after ICMP header) contains our
+			 * original QUIC header from which we extract the DCID.
+			 */
+			/* Skip to inner IP + UDP payload for QUIC header */
+			if (skb->len >= sizeof(struct iphdr) + 8 + 1) {
+				const u8 *quic_hdr = (const u8 *)(iph + 1) + 8;
+
+				if (!(quic_hdr[0] & 0x80)) {
+					/* Short header - DCID at byte 1 */
+					dcid.len = TQUIC_DEFAULT_CID_LEN;
+					if (skb->len >= sizeof(struct iphdr) +
+					    8 + 1 + dcid.len) {
+						memcpy(dcid.id, quic_hdr + 1,
+						       dcid.len);
+						conn = tquic_conn_lookup_by_cid(
+								&dcid);
+						if (conn && conn->active_path)
+							tquic_pmtud_on_icmp_mtu_update(
+								conn->active_path,
+								quic_mtu);
+					}
+				}
+			}
 		} else {
 			/* Destination unreachable - path may have failed */
-			pr_debug("TQUIC path unreachable: %pI4\n", &iph->daddr);
+			tquic_dbg("path unreachable: %pI4\n", &iph->daddr);
 		}
 		break;
 
 	case ICMP_TIME_EXCEEDED:
-		pr_debug("TQUIC TTL exceeded for %pI4\n", &iph->daddr);
+		tquic_dbg("TTL exceeded for %pI4\n", &iph->daddr);
 		break;
 	}
 
@@ -295,8 +344,8 @@ static int tquic_v6_rcv(struct sk_buff *skb)
 		}
 	}
 
-	pr_debug("received TQUIC v6 packet for unknown connection, len=%u\n",
-		 skb->len);
+	tquic_dbg("received v6 packet for unknown connection, len=%u\n",
+		  skb->len);
 	kfree_skb(skb);
 	return 0;
 }
@@ -307,8 +356,8 @@ static int tquic_v6_err(struct sk_buff *skb, struct inet6_skb_parm *opt,
 {
 	const struct ipv6hdr *ip6h = ipv6_hdr(skb);
 
-	pr_debug("received ICMPv6 error for TQUIC, type=%u code=%u\n",
-		 type, code);
+	tquic_dbg("received ICMPv6 error, type=%u code=%u\n",
+		  type, code);
 
 	/*
 	 * Handle ICMPv6 errors for TQUIC connections:
@@ -317,17 +366,64 @@ static int tquic_v6_err(struct sk_buff *skb, struct inet6_skb_parm *opt,
 	 */
 	switch (type) {
 	case ICMPV6_DEST_UNREACH:
-		pr_debug("TQUIC path unreachable: %pI6c\n", &ip6h->daddr);
+		tquic_dbg("path unreachable: %pI6c\n", &ip6h->daddr);
 		break;
 
-	case ICMPV6_PKT_TOOBIG:
+	case ICMPV6_PKT_TOOBIG: {
 		/* Path MTU discovery for IPv6 */
-		pr_debug("TQUIC PMTUD v6: new MTU=%u for %pI6c\n",
-			 ntohl(info), &ip6h->daddr);
+		u32 icmp_mtu = ntohl(info);
+		u32 quic_mtu;
+		struct tquic_connection *conn;
+		struct tquic_cid dcid;
+
+		/*
+		 * Validate ICMP-reported MTU:
+		 * - IPv6 minimum MTU is 1280 bytes
+		 * - Subtract IPv6+UDP overhead to get QUIC payload MTU
+		 * - Clamp to QUIC minimum of 1200 bytes
+		 */
+		if (icmp_mtu < 1280) {
+			tquic_dbg("PMTUD v6: ignoring bogus MTU=%u\n",
+				  icmp_mtu);
+			break;
+		}
+
+		if (icmp_mtu > TQUIC_IPV6_UDP_OVERHEAD)
+			quic_mtu = icmp_mtu - TQUIC_IPV6_UDP_OVERHEAD;
+		else
+			quic_mtu = TQUIC_PMTUD_BASE_MTU;
+
+		tquic_dbg("PMTUD v6: pkt-too-big MTU=%u (QUIC=%u) for %pI6c\n",
+			  icmp_mtu, quic_mtu, &ip6h->daddr);
+
+		/*
+		 * Try to find the connection and update its path MTU.
+		 * The inner packet after ICMPv6 header contains our
+		 * original IPv6+UDP+QUIC packet.
+		 */
+		if (skb->len >= sizeof(struct ipv6hdr) + 8 + 1) {
+			const u8 *quic_hdr = (const u8 *)(ip6h + 1) + 8;
+
+			if (!(quic_hdr[0] & 0x80)) {
+				/* Short header - DCID at byte 1 */
+				dcid.len = TQUIC_DEFAULT_CID_LEN;
+				if (skb->len >= sizeof(struct ipv6hdr) +
+				    8 + 1 + dcid.len) {
+					memcpy(dcid.id, quic_hdr + 1,
+					       dcid.len);
+					conn = tquic_conn_lookup_by_cid(&dcid);
+					if (conn && conn->active_path)
+						tquic_pmtud_on_icmp_mtu_update(
+							conn->active_path,
+							quic_mtu);
+				}
+			}
+		}
 		break;
+	}
 
 	case ICMPV6_TIME_EXCEED:
-		pr_debug("TQUIC hop limit exceeded for %pI6c\n", &ip6h->daddr);
+		tquic_dbg("hop limit exceeded for %pI6c\n", &ip6h->daddr);
 		break;
 	}
 
@@ -398,8 +494,8 @@ static int tquic_create_socket(struct net *net, struct socket *sock,
 	/* Additional TQUIC-specific socket initialization */
 	atomic64_inc(&tn->total_connections);
 
-	pr_debug("created TQUIC socket, family=%d protocol=%d\n",
-		 family, protocol);
+	tquic_dbg("created socket, family=%d protocol=%d\n",
+		  family, protocol);
 
 	return 0;
 }
@@ -830,7 +926,7 @@ static int __net_init tquic_net_init(struct net *net)
 		goto err_proc;
 #endif
 
-	pr_debug("TQUIC initialized for netns\n");
+	tquic_dbg("initialized for netns\n");
 	return 0;
 
 #ifdef CONFIG_PROC_FS
@@ -1027,7 +1123,7 @@ static void tquic_net_close_all_connections(struct net *net)
 					struct tquic_connection, pm_node);
 		list_del_init(&conn->pm_node);
 
-		pr_debug("tquic: closing connection %p during netns exit\n", conn);
+		tquic_dbg("closing connection %p during netns exit\n", conn);
 
 		/*
 		 * Close the connection. This sends CONNECTION_CLOSE (best effort),
@@ -1057,8 +1153,8 @@ static void tquic_net_close_all_connections(struct net *net)
 	 * Log a warning - the WARN_ON in tquic_net_exit will catch this.
 	 */
 	if (atomic_read(&tn->conn_count) > 0) {
-		pr_warn("tquic: %d connections still active after netns cleanup\n",
-			atomic_read(&tn->conn_count));
+		tquic_warn("%d connections still active after netns cleanup\n",
+			   atomic_read(&tn->conn_count));
 	}
 }
 
@@ -1091,7 +1187,7 @@ static void __net_exit tquic_net_exit(struct net *net)
 	/* Verify all connections are cleaned up */
 	WARN_ON(atomic_read(&tn->conn_count) != 0);
 
-	pr_debug("TQUIC exited for netns\n");
+	tquic_dbg("exited for netns\n");
 }
 
 /* pernet_operations for TQUIC defaults */
@@ -1117,7 +1213,7 @@ static int tquic_v4_protosw_init(void)
 	inet_register_protosw(&tquic_stream_protosw);
 	inet_register_protosw(&tquic_dgram_protosw);
 
-	pr_info("TQUIC IPv4 protosw registered\n");
+	tquic_info("IPv4 protosw registered\n");
 	return 0;
 }
 
@@ -1138,7 +1234,7 @@ static int tquic_v4_add_protocol(void)
 	 *
 	 * Skip raw protocol registration - UDP encap is handled in tquic_udp.c
 	 */
-	pr_info("TQUIC uses UDP encapsulation, no raw IP protocol handler needed\n");
+	tquic_info("uses UDP encapsulation, no raw IP protocol handler needed\n");
 	return 0;
 }
 
@@ -1164,7 +1260,7 @@ static int tquic_v6_protosw_init(void)
 	inet6_register_protosw(&tquicv6_stream_protosw);
 	inet6_register_protosw(&tquicv6_dgram_protosw);
 
-	pr_info("TQUIC IPv6 protosw registered\n");
+	tquic_info("IPv6 protosw registered\n");
 	return 0;
 }
 
@@ -1181,7 +1277,7 @@ static int tquic_v6_add_protocol(void)
 	 * TQUIC uses UDP encapsulation (like standard QUIC per RFC 9000).
 	 * Skip raw protocol registration - UDP encap is handled in tquic_udp.c
 	 */
-	pr_info("TQUICv6 uses UDP encapsulation, no raw IP protocol handler needed\n");
+	tquic_info("v6 uses UDP encapsulation, no raw IP protocol handler needed\n");
 	return 0;
 }
 
@@ -1206,7 +1302,7 @@ int __init tquic_proto_init(void)
 {
 	int ret;
 
-	pr_info("TQUIC protocol handler initializing\n");
+	tquic_info("protocol handler initializing\n");
 
 	/* Register pernet operations first */
 	ret = register_pernet_subsys(&tquic_net_ops);
@@ -1233,7 +1329,7 @@ int __init tquic_proto_init(void)
 	if (ret)
 		goto err_v6_protocol;
 
-	pr_info("TQUIC protocol handler initialized successfully\n");
+	tquic_info("protocol handler initialized successfully\n");
 	return 0;
 
 err_v6_protocol:
@@ -1245,13 +1341,13 @@ err_v6_protosw:
 err_v4_protosw:
 	unregister_pernet_subsys(&tquic_net_ops);
 err_pernet:
-	pr_err("TQUIC protocol handler initialization failed: %d\n", ret);
+	tquic_err("protocol handler initialization failed: %d\n", ret);
 	return ret;
 }
 
 void __exit tquic_proto_exit(void)
 {
-	pr_info("TQUIC protocol handler exiting\n");
+	tquic_info("protocol handler exiting\n");
 
 	/* Unregister protocol handlers */
 	tquic_v6_del_protocol();
@@ -1264,7 +1360,7 @@ void __exit tquic_proto_exit(void)
 	/* Unregister pernet operations */
 	unregister_pernet_subsys(&tquic_net_ops);
 
-	pr_info("TQUIC protocol handler exited\n");
+	tquic_info("protocol handler exited\n");
 }
 
 /*

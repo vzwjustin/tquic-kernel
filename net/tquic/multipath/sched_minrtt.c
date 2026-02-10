@@ -25,6 +25,7 @@
 #include <net/tquic.h>
 
 #include "tquic_sched.h"
+#include "../tquic_debug.h"
 
 /*
  * Default RTT value when no measurements available (100ms in microseconds)

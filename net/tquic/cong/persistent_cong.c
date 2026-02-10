@@ -32,6 +32,7 @@
 #include <net/net_namespace.h>
 #include "../protocol.h"
 #include "../tquic_compat.h"
+#include "../tquic_debug.h"
 #include "persistent_cong.h"
 #include "../tquic_mib.h"
 
@@ -201,7 +202,7 @@ bool tquic_check_persistent_cong(struct tquic_persistent_cong_state *state,
 	 * persistent congestion."
 	 */
 	if (!state->has_rtt_sample) {
-		pr_debug("tquic_persistent_cong: no RTT sample, skipping check\n");
+		tquic_dbg("persistent_cong: no RTT sample, skipping check\n");
 		return false;
 	}
 
@@ -210,7 +211,7 @@ bool tquic_check_persistent_cong(struct tquic_persistent_cong_state *state,
 	 */
 	pc_period = tquic_persistent_cong_period(state, net);
 	if (pc_period == 0) {
-		pr_debug("tquic_persistent_cong: pc_period is 0, skipping\n");
+		tquic_dbg("persistent_cong: pc_period is 0, skipping\n");
 		return false;
 	}
 
@@ -242,7 +243,7 @@ bool tquic_check_persistent_cong(struct tquic_persistent_cong_state *state,
 	 * Need at least 2 ACK-eliciting packets for persistent congestion
 	 */
 	if (ack_eliciting_count < 2) {
-		pr_debug("tquic_persistent_cong: only %d ack-eliciting packets\n",
+		tquic_dbg("persistent_cong: only %d ack-eliciting packets\n",
 			 ack_eliciting_count);
 		return false;
 	}
@@ -258,7 +259,7 @@ bool tquic_check_persistent_cong(struct tquic_persistent_cong_state *state,
 				     earliest_ack_eliciting->send_time);
 
 	if (duration_us < 0) {
-		pr_warn("tquic_persistent_cong: negative duration, time corruption?\n");
+		tquic_warn("persistent_cong: negative duration, time corruption?\n");
 		return false;
 	}
 
@@ -269,7 +270,7 @@ bool tquic_check_persistent_cong(struct tquic_persistent_cong_state *state,
 		state->last_persistent_cong = ktime_get();
 		state->persistent_cong_count++;
 
-		pr_info("tquic_persistent_cong: detected! duration=%lldus period=%lluu count=%llu\n",
+		tquic_warn("persistent_cong: detected! duration=%lldus period=%lluu count=%llu\n",
 			duration_us, pc_period, state->persistent_cong_count);
 
 		/* Increment MIB counter */
@@ -279,7 +280,7 @@ bool tquic_check_persistent_cong(struct tquic_persistent_cong_state *state,
 		return true;
 	}
 
-	pr_debug("tquic_persistent_cong: duration=%lldus < period=%lluu, no PC\n",
+	tquic_dbg("persistent_cong: duration=%lldus < period=%lluu, no PC\n",
 		 duration_us, pc_period);
 
 	return false;
@@ -322,7 +323,7 @@ void tquic_on_persistent_congestion(struct tquic_path *path,
 		 * Reset cwnd to minimum
 		 */
 		path->stats.cwnd = (u32)info->min_cwnd;
-		pr_debug("tquic_persistent_cong: path %u cwnd reset to %u (default)\n",
+		tquic_dbg("persistent_cong: path %u cwnd reset to %u (default)\n",
 			 path->path_id, path->stats.cwnd);
 	}
 
@@ -365,7 +366,7 @@ static int proc_tquic_persistent_cong_threshold(TQUIC_CTL_TABLE *table,
 		return ret;
 
 	tquic_persistent_cong_threshold = val;
-	pr_debug("tquic: persistent_cong_threshold set to %d\n", val);
+	tquic_dbg("persistent_cong: threshold set to %d\n", val);
 	return 0;
 }
 
@@ -404,7 +405,7 @@ static struct ctl_table_header *persistent_cong_sysctl_header;
 
 int __init tquic_persistent_cong_module_init(void)
 {
-	pr_info("tquic_persistent_cong: initializing (threshold=%u)\n",
+	tquic_info("persistent_cong: initializing (threshold=%u)\n",
 		tquic_persistent_cong_threshold);
 
 	/* Register sysctl - Note: In practice, add to main tquic_sysctl_table */
@@ -413,7 +414,7 @@ int __init tquic_persistent_cong_module_init(void)
 							       tquic_persistent_cong_sysctl,
 							       TQUIC_PERSISTENT_CONG_SYSCTL_ENTRIES);
 	if (!persistent_cong_sysctl_header)
-		pr_warn("tquic_persistent_cong: failed to register sysctl\n");
+		tquic_warn("persistent_cong: failed to register sysctl\n");
 
 	return 0;
 }
@@ -423,7 +424,7 @@ void __exit tquic_persistent_cong_module_exit(void)
 	if (persistent_cong_sysctl_header)
 		unregister_net_sysctl_table(persistent_cong_sysctl_header);
 
-	pr_info("tquic_persistent_cong: unloaded\n");
+	tquic_info("persistent_cong: unloaded\n");
 }
 
 MODULE_DESCRIPTION("TQUIC Persistent Congestion Detection (RFC 9002)");

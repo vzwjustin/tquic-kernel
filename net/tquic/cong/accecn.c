@@ -20,6 +20,7 @@
 #include <linux/module.h>
 
 #include "accecn.h"
+#include "../tquic_debug.h"
 
 /**
  * accecn_init - Initialize AccECN context
@@ -153,27 +154,43 @@ int accecn_on_ack_received(struct accecn_ctx *ctx,
 	if (!ctx || !deltas)
 		return -EINVAL;
 
-	/* Calculate deltas from previous counts */
-	deltas->delta_ect0 = ect0_count - ctx->peer_counts.ect0;
-	deltas->delta_ect1 = ect1_count - ctx->peer_counts.ect1;
-	deltas->delta_ce = ce_count - ctx->peer_counts.ce;
-	deltas->newly_acked = acked_packets;
+	/*
+	 * Calculate deltas from previous counts.
+	 * Use signed arithmetic to correctly detect decreases.
+	 * ECN counts are cumulative and should never decrease.
+	 */
+	{
+		s64 d_ect0 = (s64)(ect0_count - ctx->peer_counts.ect0);
+		s64 d_ect1 = (s64)(ect1_count - ctx->peer_counts.ect1);
+		s64 d_ce = (s64)(ce_count - ctx->peer_counts.ce);
 
-	/* Detect count decreases (shouldn't happen - cumulative) */
-	if ((s64)deltas->delta_ect0 < 0 ||
-	    (s64)deltas->delta_ect1 < 0 ||
-	    (s64)deltas->delta_ce < 0) {
-		pr_debug("accecn: ECN count decreased - possible attack or bug\n");
-		/* Could be packet reordering, allow small decreases */
-		if ((s64)deltas->delta_ect0 < -ACCECN_MAX_REORDER ||
-		    (s64)deltas->delta_ect1 < -ACCECN_MAX_REORDER ||
-		    (s64)deltas->delta_ce < -ACCECN_MAX_REORDER) {
-			return -EINVAL;
+		deltas->newly_acked = acked_packets;
+
+		/* Detect count decreases (shouldn't happen - cumulative) */
+		if (d_ect0 < 0 || d_ect1 < 0 || d_ce < 0) {
+			tquic_warn("accecn: ECN count decreased - "
+				   "possible attack or bug\n");
+			/*
+			 * Could be packet reordering, allow small decreases.
+			 * Reject large decreases as invalid.
+			 */
+			if (d_ect0 < -ACCECN_MAX_REORDER ||
+			    d_ect1 < -ACCECN_MAX_REORDER ||
+			    d_ce < -ACCECN_MAX_REORDER) {
+				deltas->delta_ect0 = 0;
+				deltas->delta_ect1 = 0;
+				deltas->delta_ce = 0;
+				return -EINVAL;
+			}
+			/* Clamp to zero */
+			d_ect0 = max(d_ect0, 0LL);
+			d_ect1 = max(d_ect1, 0LL);
+			d_ce = max(d_ce, 0LL);
 		}
-		/* Clamp to zero */
-		deltas->delta_ect0 = max((s64)deltas->delta_ect0, 0LL);
-		deltas->delta_ect1 = max((s64)deltas->delta_ect1, 0LL);
-		deltas->delta_ce = max((s64)deltas->delta_ce, 0LL);
+
+		deltas->delta_ect0 = (u64)d_ect0;
+		deltas->delta_ect1 = (u64)d_ect1;
+		deltas->delta_ce = (u64)d_ce;
 	}
 
 	/* Validate ECN counts */
@@ -187,14 +204,14 @@ int accecn_on_ack_received(struct accecn_ctx *ctx,
 		/* If we sent ECN-marked packets but peer reports fewer */
 		if (sent_ecn > 0 && reported_total == 0 && acked_packets > 0) {
 			ctx->bleaching_detected = true;
-			pr_debug("accecn: ECN bleaching detected\n");
+			tquic_warn("accecn: ECN bleaching detected\n");
 		}
 
 		/* If we sent ECT(0) but peer reports ECT(1) or vice versa */
 		if (ctx->local_counts.ect0 > 0 && ect0_count == 0 &&
 		    ect1_count > ctx->prev_peer_counts.ect1) {
 			ctx->mangling_detected = true;
-			pr_debug("accecn: ECN mangling detected (ECT0->ECT1)\n");
+			tquic_warn("accecn: ECN mangling detected (ECT0->ECT1)\n");
 		}
 	}
 
@@ -239,7 +256,7 @@ void accecn_validate(struct accecn_ctx *ctx)
 		ctx->state = ACCECN_FAILED;
 		ctx->send_ect0 = false;
 		ctx->send_ect1 = false;
-		pr_debug("accecn: ECN validation failed\n");
+		tquic_warn("accecn: ECN validation failed\n");
 		return;
 	}
 
@@ -247,13 +264,13 @@ void accecn_validate(struct accecn_ctx *ctx)
 	if (sent_marked > 0 && recv_marked >= sent_marked / 2) {
 		/* ECN working correctly */
 		ctx->state = ACCECN_CAPABLE;
-		pr_debug("accecn: ECN validated successfully\n");
+		tquic_info("accecn: ECN validated successfully\n");
 	} else if (ctx->validation_needed > 10 && recv_marked == 0) {
 		/* Sent enough packets but no ECN feedback */
 		ctx->state = ACCECN_FAILED;
 		ctx->send_ect0 = false;
 		ctx->send_ect1 = false;
-		pr_debug("accecn: ECN validation failed - no feedback\n");
+		tquic_warn("accecn: ECN validation failed - no feedback\n");
 	}
 	/* Otherwise keep testing */
 }

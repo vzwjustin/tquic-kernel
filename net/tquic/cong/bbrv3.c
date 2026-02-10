@@ -22,6 +22,7 @@
 
 #include "bbrv3.h"
 #include "../protocol.h"
+#include "../tquic_debug.h"
 
 /* Default MTU for calculations */
 #define BBR3_DEFAULT_MSS	1200
@@ -242,6 +243,7 @@ static void bbrv3_enter_startup(struct bbrv3 *bbr)
 	bbr->mode = BBR3_STARTUP;
 	bbr->pacing_gain = BBR3_STARTUP_PACING_GAIN;
 	bbr->cwnd_gain = BBR3_STARTUP_CWND_GAIN;
+	tquic_dbg("bbrv3: state -> STARTUP\n");
 }
 
 static void bbrv3_check_startup_done(struct bbrv3 *bbr)
@@ -295,6 +297,7 @@ static void bbrv3_enter_drain(struct bbrv3 *bbr)
 	bbr->mode = BBR3_DRAIN;
 	bbr->pacing_gain = BBR3_DRAIN_PACING_GAIN;
 	bbr->cwnd_gain = BBR3_STARTUP_CWND_GAIN;
+	tquic_dbg("bbrv3: state -> DRAIN, cwnd=%llu\n", bbr->cwnd);
 }
 
 static void bbrv3_check_drain_done(struct bbrv3 *bbr)
@@ -323,6 +326,8 @@ static void bbrv3_enter_probe_bw(struct bbrv3 *bbr)
 
 	/* Random offset into cycle for fairness */
 	bbr->probe_up_rounds = get_random_u32() % 4;
+	tquic_dbg("bbrv3: state -> PROBE_BW, bw=%llu cwnd=%llu\n",
+		  bbr->bw, bbr->cwnd);
 }
 
 static void bbrv3_advance_probe_bw_cycle(struct bbrv3 *bbr)
@@ -384,6 +389,8 @@ static void bbrv3_enter_probe_rtt(struct bbrv3 *bbr)
 	bbr->cwnd_gain = BBR3_UNIT;
 	bbr->probe_rtt_start = ktime_get();
 	bbr->probe_rtt_round_done = false;
+	tquic_dbg("bbrv3: state -> PROBE_RTT, min_rtt=%u\n",
+		  (u32)bbr->min_rtt_us);
 }
 
 static void bbrv3_check_probe_rtt(struct bbrv3 *bbr)
@@ -472,6 +479,8 @@ static void bbrv3_handle_loss(struct bbrv3 *bbr, u64 bytes_lost)
 
 	bbr->in_loss_recovery = true;
 	bbr->prior_cwnd = bbr->cwnd;
+	tquic_warn("bbrv3: loss event, cwnd=%llu bytes_lost=%llu\n",
+		   bbr->cwnd, bytes_lost);
 
 	/* BBRv3: Apply beta multiplier on loss */
 	bbr->inflight_lo = (bbr->cwnd * bbr->params.beta) >> BBR3_SCALE;
@@ -705,7 +714,8 @@ static void bbrv3_on_persistent_congestion(void *cong_data,
 	bbr->full_bw_count = 0;
 	bbrv3_enter_startup(bbr);
 
-	pr_debug("tquic: BBRv3 persistent congestion - reset to startup\n");
+	tquic_warn("bbrv3: persistent congestion, reset to startup, cwnd=%llu\n",
+		   bbr->cwnd);
 }
 
 static bool bbrv3_can_send(void *cong_data, u64 bytes)
@@ -737,7 +747,7 @@ struct tquic_cong_ops bbrv3_cong_ops = {
 
 int __init tquic_bbrv3_init(void)
 {
-	pr_info("tquic: BBRv3 congestion control initialized\n");
+	tquic_info("cc: bbrv3 algorithm registered\n");
 	return tquic_register_cong(&bbrv3_cong_ops);
 }
 

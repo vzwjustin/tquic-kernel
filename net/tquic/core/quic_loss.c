@@ -15,7 +15,9 @@
 #include <net/tquic.h>
 #include "ack.h"
 #include "../cong/tquic_cong.h"
+#include "../cong/persistent_cong.h"
 #include "../diag/trace.h"
+#include "../tquic_debug.h"
 
 /* Forward declarations */
 void tquic_loss_detection_detect_lost(struct tquic_connection *conn, u8 pn_space_idx);
@@ -765,6 +767,9 @@ void tquic_loss_detection_detect_lost(struct tquic_connection *conn, u8 pn_space
 	 */
 	loss_delay = tquic_loss_time_threshold(&path->rtt);
 
+	tquic_conn_dbg(conn, "detect_lost space=%u loss_delay=%llu us\n",
+		       pn_space_idx, loss_delay);
+
 	/* Calculate the earliest time a packet can be sent and not be lost */
 	pkt_time_threshold = ktime_sub_us(now, loss_delay);
 
@@ -1086,8 +1091,8 @@ static void tquic_loss_send_probe(struct tquic_connection *conn, u8 pn_space_idx
 				return;
 			} else {
 				/* skb_clone failed - log and track the error */
-				pr_warn_ratelimited(
-					"skb_clone failed for probe retransmit, pkt_num=%llu\n",
+				tquic_conn_warn(conn,
+					"skb_clone failed probe retx pn=%llu\n",
 					pkt->pn);
 				spin_unlock_irqrestore(&pn_space->lock, flags);
 				return;
@@ -1145,6 +1150,8 @@ void tquic_loss_detection_on_timeout(struct tquic_connection *conn)
 		tquic_set_loss_detection_timer(conn);
 		return;
 	}
+
+	tquic_conn_info(conn, "PTO timeout pto_count=%u\n", ld->pto_count);
 
 	/*
 	 * RFC 9002 Section 6.2.1:
@@ -1418,8 +1425,8 @@ void tquic_loss_retransmit_unacked(struct tquic_connection *conn)
 					spin_lock_irqsave(&pn_space->lock, flags);
 				} else {
 					/* skb_clone failed - log error and continue */
-					pr_warn_ratelimited(
-						"skb_clone failed for unacked retransmit, pkt_num=%llu\n",
+					tquic_conn_warn(conn,
+						"skb_clone failed retx pn=%llu\n",
 						pkt->pn);
 					/* Continue to next packet to maximize recovery */
 				}
@@ -1505,15 +1512,25 @@ bool tquic_loss_check_persistent_congestion(struct tquic_connection *conn)
 
 	/* 3 * PTO in milliseconds converted to nanoseconds */
 	if (ktime_to_ms(duration) > (u64)pto * 3) {
+		struct tquic_persistent_cong_info pc_info;
+
 		/*
-		 * Reset congestion window to minimum per RFC 9002 Section 7.6.2.
-		 * Minimum CWND is 2 * max_datagram_size.
+		 * Build persistent congestion info for the CC algorithm.
+		 * Per RFC 9002 Section 7.6.2: reset cwnd to minimum
+		 * (2 * max_datagram_size).
 		 */
-		path->cc.cwnd = 2 * path->mtu;
+		memset(&pc_info, 0, sizeof(pc_info));
+		pc_info.min_cwnd = 2 * path->mtu;
+		pc_info.max_datagram_size = path->mtu;
+		pc_info.earliest_send_time = oldest_lost_time;
+		pc_info.latest_send_time = newest_lost_time;
+		pc_info.duration_us = ktime_to_us(duration);
+
+		path->cc.cwnd = pc_info.min_cwnd;
 		path->cc.bytes_in_flight = 0;
 
 		/* Signal persistent congestion to CC algorithm */
-		tquic_cong_on_persistent_congestion(path, NULL);
+		tquic_cong_on_persistent_congestion(path, &pc_info);
 
 		return true;
 	}

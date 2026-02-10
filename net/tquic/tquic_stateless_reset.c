@@ -55,6 +55,7 @@
 
 #include "tquic_stateless_reset.h"
 #include "tquic_mib.h"
+#include "tquic_debug.h"
 #include "tquic_cid.h"
 #include "protocol.h"
 
@@ -112,7 +113,7 @@ void tquic_stateless_reset_generate_token(const struct tquic_cid *cid,
 	/* Allocate HMAC-SHA256 transform */
 	tfm = crypto_alloc_shash("hmac(sha256)", 0, 0);
 	if (IS_ERR(tfm)) {
-		pr_warn("tquic: failed to allocate HMAC-SHA256 for reset token\n");
+		tquic_warn("failed to allocate HMAC-SHA256 for reset token\n");
 		/* Fallback: use random bytes to avoid leaking static key */
 		get_random_bytes(token, TQUIC_STATELESS_RESET_TOKEN_LEN);
 		return;
@@ -122,7 +123,7 @@ void tquic_stateless_reset_generate_token(const struct tquic_cid *cid,
 	ret = crypto_shash_setkey(tfm, static_key,
 				  TQUIC_STATELESS_RESET_SECRET_LEN);
 	if (ret) {
-		pr_warn("tquic: HMAC setkey failed: %d\n", ret);
+		tquic_warn("HMAC setkey failed: %d\n", ret);
 		crypto_free_shash(tfm);
 		get_random_bytes(token, TQUIC_STATELESS_RESET_TOKEN_LEN);
 		return;
@@ -141,7 +142,7 @@ void tquic_stateless_reset_generate_token(const struct tquic_cid *cid,
 	/* Compute HMAC over the CID */
 	ret = crypto_shash_digest(desc, cid->id, cid->len, hmac_result);
 	if (ret) {
-		pr_warn("tquic: HMAC digest failed: %d\n", ret);
+		tquic_warn("HMAC digest failed: %d\n", ret);
 		get_random_bytes(token, TQUIC_STATELESS_RESET_TOKEN_LEN);
 	} else {
 		/* Truncate to 128 bits (first 16 bytes) */
@@ -345,7 +346,7 @@ int tquic_stateless_reset_send(struct sock *sk,
 
 	/* Check rate limit */
 	if (!tquic_stateless_reset_rate_limit(&global_reset_ctx)) {
-		pr_debug("tquic: stateless reset rate limited\n");
+		tquic_dbg("stateless reset rate limited\n");
 		return -EAGAIN;
 	}
 
@@ -442,6 +443,13 @@ int tquic_stateless_reset_send(struct sock *sk,
 			kfree_skb(skb);
 			return PTR_ERR(dst);
 		}
+		if (dst->error) {
+			int err = dst->error;
+
+			dst_release(dst);
+			kfree_skb(skb);
+			return err;
+		}
 
 		skb->protocol = htons(ETH_P_IPV6);
 		skb_dst_set(skb, dst);
@@ -468,7 +476,7 @@ int tquic_stateless_reset_send(struct sock *sk,
 	/* Update statistics */
 	if (ret >= 0) {
 		TQUIC_INC_STATS(net, TQUIC_MIB_STATELESSRESETSTX);
-		pr_debug("tquic: sent stateless reset, len=%d\n", pkt_len);
+		tquic_dbg("sent stateless reset, len=%d\n", pkt_len);
 	}
 
 	return ret;
@@ -580,7 +588,7 @@ bool tquic_stateless_reset_detect_conn(struct tquic_connection *conn,
 
 		if (net)
 			TQUIC_INC_STATS(net, TQUIC_MIB_STATELESSRESETSRX);
-		pr_debug("tquic: detected stateless reset for connection\n");
+		tquic_dbg("detected stateless reset for connection\n");
 	}
 
 	return found;
@@ -734,13 +742,13 @@ int __init tquic_stateless_reset_init(void)
 
 	ret = tquic_stateless_reset_ctx_init(&global_reset_ctx);
 	if (ret) {
-		pr_err("tquic: failed to initialize stateless reset context\n");
+		tquic_err("failed to initialize stateless reset context\n");
 		return ret;
 	}
 
 	global_ctx_initialized = true;
 
-	pr_info("tquic: stateless reset subsystem initialized\n");
+	tquic_info("stateless reset subsystem initialized\n");
 	return 0;
 }
 
@@ -751,7 +759,7 @@ void __exit tquic_stateless_reset_exit(void)
 		global_ctx_initialized = false;
 	}
 
-	pr_info("tquic: stateless reset subsystem exited\n");
+	tquic_info("stateless reset subsystem exited\n");
 }
 
 MODULE_DESCRIPTION("TQUIC Stateless Reset Support");

@@ -28,6 +28,7 @@
 
 #include "deadline_aware.h"
 #include "../core/varint.h"
+#include "../tquic_debug.h"
 
 /* Memory caches */
 static struct kmem_cache *deadline_cache;
@@ -491,9 +492,9 @@ int tquic_deadline_sched_init(struct tquic_connection *conn,
 	 */
 	conn->scheduler = state;
 
-	pr_info("tquic: Deadline scheduler initialized for connection "
-		"(granularity=%u us, max_streams=%u)\n",
-		state->granularity_us, state->max_deadline_streams);
+	tquic_info("Deadline scheduler initialized for connection "
+		   "(granularity=%u us, max_streams=%u)\n",
+		   state->granularity_us, state->max_deadline_streams);
 
 	return 0;
 }
@@ -539,10 +540,10 @@ void tquic_deadline_sched_release(struct tquic_connection *conn)
 	spin_unlock_bh(&state->lock);
 
 	/* Log final statistics */
-	pr_info("tquic: Deadline scheduler stats - total=%llu met=%llu missed=%llu\n",
-		state->stats.total_deadlines,
-		state->stats.deadlines_met,
-		state->stats.deadlines_missed);
+	tquic_info("Deadline scheduler stats - total=%llu met=%llu missed=%llu\n",
+		   state->stats.total_deadlines,
+		   state->stats.deadlines_met,
+		   state->stats.deadlines_missed);
 
 	kfree(state);
 }
@@ -1298,8 +1299,8 @@ int __init tquic_deadline_sched_module_init(void)
 		return -ENOMEM;
 	}
 
-	pr_info("tquic: Deadline-aware multipath scheduler initialized "
-		"(draft-tjohn-quic-multipath-dmtp-01)\n");
+	tquic_info("Deadline-aware multipath scheduler initialized "
+		   "(draft-tjohn-quic-multipath-dmtp-01)\n");
 
 	return 0;
 }
@@ -1315,7 +1316,7 @@ void __exit tquic_deadline_sched_module_exit(void)
 	if (deadline_cache)
 		kmem_cache_destroy(deadline_cache);
 
-	pr_info("tquic: Deadline-aware scheduler cleaned up\n");
+	tquic_info("Deadline-aware scheduler cleaned up\n");
 }
 
 MODULE_DESCRIPTION("TQUIC Deadline-Aware Multipath Scheduler");

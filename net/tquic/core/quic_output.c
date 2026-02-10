@@ -33,6 +33,7 @@
 #include <net/tquic.h>
 #include <net/tquic_frame.h>
 #include "../tquic_compat.h"
+#include "../tquic_debug.h"
 
 /* Output path configuration */
 #define TQUIC_OUTPUT_BATCH_SIZE		16
@@ -64,8 +65,8 @@ static inline u8 tquic_get_validated_ttl(void)
 	unsigned int val = READ_ONCE(tquic_default_ttl);
 
 	if (val < TQUIC_TTL_MIN || val > TQUIC_TTL_MAX) {
-		pr_warn_once("TQUIC: ttl %u out of range [%u-%u], using default %u\n",
-			     val, TQUIC_TTL_MIN, TQUIC_TTL_MAX, TQUIC_TTL_DEFAULT);
+		tquic_warn("ttl %u out of range [%u-%u], using default %u\n",
+			   val, TQUIC_TTL_MIN, TQUIC_TTL_MAX, TQUIC_TTL_DEFAULT);
 		return TQUIC_TTL_DEFAULT;
 	}
 	return (u8)val;
@@ -1641,7 +1642,7 @@ static int __init tquic_output_init(void)
 		state->next_send_time = ns_to_ktime(0);
 	}
 
-	pr_info("TQUIC: Output subsystem initialized\n");
+	tquic_info("output subsystem initialized\n");
 	return 0;
 }
 
@@ -1657,7 +1658,7 @@ static void __exit tquic_output_exit(void)
 		skb_queue_purge(&state->queue);
 	}
 
-	pr_info("TQUIC: Output subsystem cleanup complete\n");
+	tquic_info("output subsystem cleanup complete\n");
 }
 
 /*

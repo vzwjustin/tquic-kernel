@@ -21,12 +21,16 @@
 
 #include <linux/slab.h>
 #include <linux/random.h>
+#include <linux/jhash.h>
 #include <crypto/aead.h>
 #include <crypto/hash.h>
+#include <crypto/utils.h>
 #include <net/tquic.h>
 #include <net/tquic_frame.h>
 #include <net/tquic/handshake.h>
 
+#include "../tquic_debug.h"
+#include "../crypto/zero_rtt.h"
 #include "early_data.h"
 
 /*
@@ -80,19 +84,23 @@ static const char tquic_hp_label[] = "quic hp";
  * Per RFC 9001 Section 8, servers MUST implement anti-replay protection
  */
 #define ANTI_REPLAY_WINDOW_MS 10000 /* 10 second window */
-#define ANTI_REPLAY_HASH_BITS 8
+#define ANTI_REPLAY_HASH_BITS 12
 #define ANTI_REPLAY_HASH_SIZE (1 << ANTI_REPLAY_HASH_BITS)
+#define ANTI_REPLAY_MAX_ENTRIES 65536 /* Bound total memory usage */
 
 struct tquic_anti_replay {
 	spinlock_t lock;
 	ktime_t window_start;
 	struct hlist_head hash[ANTI_REPLAY_HASH_SIZE];
 	u32 count;
+	u32 hash_seed;	/* Random seed for hash function */
 };
 
 struct tquic_anti_replay_entry {
 	struct hlist_node node;
-	u64 ticket_hash;
+	u8 *ticket_data;	/* Full ticket for exact comparison */
+	u32 ticket_len;
+	u64 ticket_hash;	/* Hash for bucket selection */
 	ktime_t time;
 };
 
@@ -108,6 +116,8 @@ void tquic_anti_replay_init(void)
 	spin_lock_init(&anti_replay_state.lock);
 	anti_replay_state.window_start = ktime_get();
 	anti_replay_state.count = 0;
+	get_random_bytes(&anti_replay_state.hash_seed,
+			 sizeof(anti_replay_state.hash_seed));
 
 	for (i = 0; i < ANTI_REPLAY_HASH_SIZE; i++)
 		INIT_HLIST_HEAD(&anti_replay_state.hash[i]);
@@ -130,6 +140,7 @@ void tquic_anti_replay_cleanup(void)
 		hlist_for_each_entry_safe(entry, tmp,
 					  &anti_replay_state.hash[i], node) {
 			hlist_del(&entry->node);
+			kfree(entry->ticket_data);
 			kfree(entry);
 		}
 	}
@@ -140,19 +151,12 @@ void tquic_anti_replay_cleanup(void)
 EXPORT_SYMBOL(tquic_anti_replay_cleanup);
 
 /*
- * Hash a ticket for anti-replay lookup
+ * Hash a ticket for anti-replay bucket selection.
+ * Uses jhash with a secret random seed to prevent prediction attacks.
  */
-static u64 tquic_ticket_hash(const u8 *ticket, u32 len)
+static u64 tquic_ticket_hash(const u8 *ticket, u32 len, u32 seed)
 {
-	u64 hash = 0xcbf29ce484222325ULL; /* FNV-1a offset basis */
-	u32 i;
-
-	for (i = 0; i < len; i++) {
-		hash ^= ticket[i];
-		hash *= 0x100000001b3ULL; /* FNV-1a prime */
-	}
-
-	return hash;
+	return jhash(ticket, len, seed);
 }
 
 /*
@@ -182,7 +186,8 @@ bool tquic_anti_replay_check(const u8 *ticket, u32 ticket_len)
 	if (!ticket || ticket_len == 0)
 		return true; /* Invalid ticket is treated as replay */
 
-	hash = tquic_ticket_hash(ticket, ticket_len);
+	hash = tquic_ticket_hash(ticket, ticket_len,
+				 anti_replay_state.hash_seed);
 	bucket = hash & (ANTI_REPLAY_HASH_SIZE - 1);
 
 	spin_lock_irqsave(&anti_replay_state.lock, flags);
@@ -198,6 +203,7 @@ bool tquic_anti_replay_check(const u8 *ticket, u32 ticket_len)
 				if (ktime_before(entry->time,
 						 window_threshold)) {
 					hlist_del(&entry->node);
+					kfree(entry->ticket_data);
 					kfree(entry);
 					anti_replay_state.count--;
 				}
@@ -206,33 +212,68 @@ bool tquic_anti_replay_check(const u8 *ticket, u32 ticket_len)
 		anti_replay_state.window_start = now;
 	}
 
-	/* Check for replay */
+	/*
+	 * Check for replay with exact ticket comparison.
+	 * Hash alone is not sufficient -- collisions would cause false
+	 * positives. We use the hash for bucket selection but compare
+	 * the full ticket data for correctness.
+	 */
 	hlist_for_each_entry(entry, &anti_replay_state.hash[bucket], node) {
-		if (entry->ticket_hash == hash) {
+		if (entry->ticket_hash == hash &&
+		    entry->ticket_len == ticket_len &&
+		    crypto_memneq(entry->ticket_data, ticket,
+				  ticket_len) == 0) {
 			replay = true;
 			goto out;
 		}
 	}
 
-	/* Not a replay - record this ticket */
+	/*
+	 * Enforce entry limit to prevent memory exhaustion.
+	 * An attacker sending unique tickets could grow the table
+	 * unboundedly without this check.
+	 */
+	if (anti_replay_state.count >= ANTI_REPLAY_MAX_ENTRIES) {
+		tquic_warn("anti-replay table full, rejecting 0-RTT\n");
+		replay = true;
+		goto out;
+	}
+
+	/*
+	 * Not a replay - record this ticket.
+	 * On allocation failure, treat as replay (reject) rather than
+	 * silently allowing. This is the safe default: denying 0-RTT
+	 * only forces a full handshake, whereas allowing a potential
+	 * replay could have application-level side effects.
+	 */
 	new_entry = kmalloc(sizeof(*new_entry), GFP_ATOMIC);
-	if (new_entry) {
-		new_entry->ticket_hash = hash;
-		new_entry->time = now;
-		hlist_add_head(&new_entry->node,
-			       &anti_replay_state.hash[bucket]);
-		anti_replay_state.count++;
+	if (!new_entry) {
+		tquic_warn("anti-replay entry alloc failed, rejecting 0-RTT\n");
+		replay = true;
+		goto out;
 	}
-	/* On allocation failure, allow the request but log warning */
-	else {
-		pr_warn_ratelimited("TQUIC: anti-replay entry alloc failed\n");
+
+	new_entry->ticket_data = kmalloc(ticket_len, GFP_ATOMIC);
+	if (!new_entry->ticket_data) {
+		kfree(new_entry);
+		tquic_warn("anti-replay ticket alloc failed, rejecting 0-RTT\n");
+		replay = true;
+		goto out;
 	}
+
+	memcpy(new_entry->ticket_data, ticket, ticket_len);
+	new_entry->ticket_len = ticket_len;
+	new_entry->ticket_hash = hash;
+	new_entry->time = now;
+	hlist_add_head(&new_entry->node,
+		       &anti_replay_state.hash[bucket]);
+	anti_replay_state.count++;
 
 out:
 	spin_unlock_irqrestore(&anti_replay_state.lock, flags);
 
 	if (replay)
-		pr_debug("TQUIC: 0-RTT replay detected, rejecting\n");
+		tquic_warn("0-RTT replay detected, rejecting\n");
 
 	return replay;
 }
@@ -328,7 +369,7 @@ int tquic_early_data_derive_keys(struct tquic_connection *conn,
 	 * initialized, which is handled by tquic_crypto_init_versioned().
 	 */
 
-	pr_debug("TQUIC: 0-RTT keys derived successfully\n");
+	tquic_conn_dbg(conn, "0-RTT keys derived\n");
 
 out_free_hash:
 	memzero_explicit(early_secret, sizeof(early_secret));
@@ -508,7 +549,7 @@ struct sk_buff *tquic_early_data_build_packet(struct tquic_connection *conn,
 	 * with the crypto layer.
 	 */
 
-	pr_debug("TQUIC: Built 0-RTT packet header, pn=%llu, hdr_len=%d\n", pn,
+	tquic_conn_dbg(conn, "0-RTT packet pn=%llu hdr_len=%d\n", pn,
 		 header_len);
 
 	return skb;
@@ -536,7 +577,7 @@ int tquic_early_data_process_packet(struct tquic_connection *conn,
 	 * This is managed through the zero_rtt_state.
 	 */
 	if (!conn->zero_rtt_state) {
-		pr_debug("TQUIC: 0-RTT keys not available, rejecting\n");
+		tquic_conn_dbg(conn, "0-RTT keys not available\n");
 		return -ENOKEY;
 	}
 
@@ -549,7 +590,7 @@ int tquic_early_data_process_packet(struct tquic_connection *conn,
 	 * processing and coordinates between the various subsystems.
 	 */
 
-	pr_debug("TQUIC: Processing 0-RTT packet, len=%d\n", skb->len);
+	tquic_conn_dbg(conn, "processing 0-RTT packet len=%d\n", skb->len);
 
 	return 0;
 }
@@ -571,15 +612,39 @@ void tquic_early_data_reject(struct tquic_connection *conn)
 	if (!conn)
 		return;
 
-	pr_info("TQUIC: 0-RTT rejected, will retransmit as 1-RTT\n");
+	tquic_conn_info(conn, "0-RTT rejected, retransmit as 1-RTT\n");
 
 	/*
-	 * The zero_rtt_state module handles the actual rejection
-	 * processing, including:
-	 * - Marking 0-RTT as rejected
-	 * - Moving buffered 0-RTT data to 1-RTT queue
-	 * - Clearing 0-RTT crypto context
+	 * RFC 9001 Section 4.6.2: When 0-RTT is rejected, all 0-RTT
+	 * data MUST be retransmitted in 1-RTT packets after the handshake
+	 * completes.
+	 *
+	 * Mark 0-RTT as rejected and clear 0-RTT crypto state. The loss
+	 * detection module (quic_loss.c) treats all sent 0-RTT packets as
+	 * lost when the 0-RTT state transitions to REJECTED, which triggers
+	 * the normal retransmission path using 1-RTT keys once the handshake
+	 * completes.
+	 *
+	 * Stream data sent in 0-RTT remains in the stream send buffers and
+	 * will be re-framed and sent in 1-RTT packets by the output path.
 	 */
+	tquic_zero_rtt_reject(conn);
+
+	/*
+	 * Reset early data counters so the connection does not
+	 * incorrectly account for data that was never delivered.
+	 */
+	if (conn->zero_rtt_state) {
+		conn->zero_rtt_state->early_data_sent = 0;
+		conn->zero_rtt_state->early_data_received = 0;
+	}
+
+	/*
+	 * Mark all streams that had 0-RTT data as needing retransmission.
+	 * The stream layer retains the original data in send buffers;
+	 * resetting the stream send offset causes it to be re-sent.
+	 */
+	conn->early_data_sent = 0;
 }
 EXPORT_SYMBOL(tquic_early_data_reject);
 
@@ -595,7 +660,7 @@ void tquic_early_data_accept(struct tquic_connection *conn)
 	if (!conn)
 		return;
 
-	pr_debug("TQUIC: 0-RTT accepted by server\n");
+	tquic_conn_info(conn, "0-RTT accepted by server\n");
 }
 EXPORT_SYMBOL(tquic_early_data_accept);
 
@@ -626,12 +691,12 @@ int tquic_early_data_init(struct tquic_connection *conn,
 	    ticket->resumption_secret_len > 0) {
 		err = tquic_early_data_derive_keys(conn, ticket);
 		if (err) {
-			pr_debug("TQUIC: Failed to derive 0-RTT keys: %d\n",
+			tquic_conn_warn(conn, "failed to derive 0-RTT keys: %d\n",
 				 err);
 			return err;
 		}
 
-		pr_debug("TQUIC: 0-RTT initialized for client\n");
+		tquic_conn_dbg(conn, "0-RTT initialized for client\n");
 	}
 
 	return 0;
@@ -680,7 +745,8 @@ int tquic_session_ticket_store(struct tquic_sock *tsk,
 	 * See: tquic_zero_rtt_store_ticket() in crypto/zero_rtt.c
 	 */
 
-	pr_debug("TQUIC: Session ticket stored, len=%u\n", ticket->ticket_len);
+	pr_debug("tquic: session ticket stored len=%u\n",
+		 ticket->ticket_len);
 
 	return 0;
 }

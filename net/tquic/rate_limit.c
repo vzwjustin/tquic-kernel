@@ -38,6 +38,7 @@
 
 #include "rate_limit.h"
 #include "tquic_mib.h"
+#include "tquic_debug.h"
 #include "protocol.h"
 
 /*
@@ -141,18 +142,19 @@ bool tquic_rate_limiter_allow(struct tquic_rate_limiter *limiter)
 	bool allowed;
 
 	/*
-	 * Fast path: Try atomic subtract without lock.
-	 * This works when bucket has tokens and doesn't need refill.
+	 * Fast path: Try atomic compare-and-swap without lock.
+	 * This avoids the race where multiple CPUs see sufficient
+	 * tokens and all subtract, driving the count deeply negative.
 	 */
-	tokens = atomic64_read(&limiter->tokens);
-	if (tokens >= cost) {
-		if (atomic64_add_negative(-cost, &limiter->tokens)) {
-			/* Went negative, restore and fall through to slow path */
-			atomic64_add(cost, &limiter->tokens);
-		} else {
+	do {
+		tokens = atomic64_read(&limiter->tokens);
+		if (tokens < cost)
+			break;  /* Not enough tokens - fall to slow path */
+		if (atomic64_try_cmpxchg(&limiter->tokens, &tokens,
+					  tokens - cost))
 			return true;
-		}
-	}
+		/* CAS failed - another CPU modified tokens, retry */
+	} while (tokens >= cost);
 
 	/*
 	 * Slow path: Need to refill and/or check more carefully.
@@ -368,8 +370,13 @@ static bool tquic_rate_limit_check_per_ip(struct tquic_rate_limit_state *state,
 		/* Allocate new entry */
 		entry = tquic_rate_limit_entry_alloc(addr);
 		if (!entry) {
-			/* Memory pressure - allow to avoid false positives */
-			return true;
+			/*
+			 * Memory pressure - fail closed to prevent bypass.
+			 * Under DDoS conditions, allowing all connections when
+			 * memory is scarce would defeat the rate limiter.
+			 */
+			atomic64_inc(&state->stats.total_per_ip_denied);
+			return false;
 		}
 
 		/* Insert into hash table */
@@ -383,7 +390,7 @@ static bool tquic_rate_limit_check_per_ip(struct tquic_rate_limit_state *state,
 						  tquic_rate_limit_ht_params);
 			if (!entry) {
 				rcu_read_unlock();
-				return true;  /* Fail open */
+				return false;  /* Fail closed */
 			}
 		} else {
 			/* Successfully inserted */
@@ -394,7 +401,7 @@ static bool tquic_rate_limit_check_per_ip(struct tquic_rate_limit_state *state,
 						  tquic_rate_limit_ht_params);
 			if (!entry) {
 				rcu_read_unlock();
-				return true;
+				return false;  /* Fail closed */
 			}
 		}
 	}
@@ -417,7 +424,7 @@ static bool tquic_rate_limit_check_per_ip(struct tquic_rate_limit_state *state,
 			if (addr->ss_family == AF_INET) {
 				const struct sockaddr_in *sin =
 					(const struct sockaddr_in *)addr;
-				pr_info("per-IP rate limit: %pI4 (attempts=%lld, drops=%lld)\n",
+				tquic_info("per-IP rate limit: %pI4 (attempts=%lld, drops=%lld)\n",
 					&sin->sin_addr,
 					atomic64_read(&entry->conn_count),
 					atomic64_read(&entry->drop_count));
@@ -426,7 +433,7 @@ static bool tquic_rate_limit_check_per_ip(struct tquic_rate_limit_state *state,
 			else if (addr->ss_family == AF_INET6) {
 				const struct sockaddr_in6 *sin6 =
 					(const struct sockaddr_in6 *)addr;
-				pr_info("per-IP rate limit: %pI6c (attempts=%lld, drops=%lld)\n",
+				tquic_info("per-IP rate limit: %pI6c (attempts=%lld, drops=%lld)\n",
 					&sin6->sin6_addr,
 					atomic64_read(&entry->conn_count),
 					atomic64_read(&entry->drop_count));
@@ -529,7 +536,7 @@ static void tquic_rate_limit_gc_work_fn(struct work_struct *work)
 	rhashtable_walk_exit(&iter);
 
 	if (removed > 0)
-		pr_debug("garbage collected %d stale entries\n", removed);
+		tquic_dbg("garbage collected %d stale entries\n", removed);
 
 	/* Reschedule */
 	if (state->initialized) {
@@ -689,7 +696,7 @@ int tquic_rate_limit_init(struct net *net)
 	/* Initialize per-IP hash table */
 	ret = rhashtable_init(&state->per_ip_ht, &tquic_rate_limit_ht_params);
 	if (ret) {
-		pr_err("failed to initialize per-IP hash table: %d\n", ret);
+		tquic_err("failed to initialize per-IP hash table: %d\n", ret);
 		return ret;
 	}
 
@@ -709,7 +716,7 @@ int tquic_rate_limit_init(struct net *net)
 	schedule_delayed_work(&state->rate_calc_work,
 			      msecs_to_jiffies(1000));
 
-	pr_info("initialized for net namespace\n");
+	tquic_info("initialized for net namespace\n");
 	return 0;
 }
 EXPORT_SYMBOL_GPL(tquic_rate_limit_init);
@@ -750,7 +757,7 @@ void tquic_rate_limit_exit(struct net *net)
 	/* Cleanup global limiter */
 	tquic_rate_limiter_cleanup(&state->global_limiter);
 
-	pr_info("cleaned up for net namespace\n");
+	tquic_info("cleaned up for net namespace\n");
 }
 EXPORT_SYMBOL_GPL(tquic_rate_limit_exit);
 
@@ -783,14 +790,14 @@ int __init tquic_rate_limit_module_init(void)
 
 	ret = register_pernet_subsys(&tquic_rate_limit_net_ops);
 	if (ret) {
-		pr_err("failed to register pernet operations: %d\n", ret);
+		tquic_err("rate_limit: failed to register pernet operations: %d\n", ret);
 		return ret;
 	}
 
-	pr_info("module initialized (global=%d/s burst=%d, per-ip=%d/s)\n",
-		tquic_rate_limit_config.max_connections_per_second,
-		tquic_rate_limit_config.max_connections_burst,
-		tquic_rate_limit_config.per_ip_rate_limit);
+	tquic_info("rate_limit: initialized (global=%d/s burst=%d, per-ip=%d/s)\n",
+		   tquic_rate_limit_config.max_connections_per_second,
+		   tquic_rate_limit_config.max_connections_burst,
+		   tquic_rate_limit_config.per_ip_rate_limit);
 
 	return 0;
 }
@@ -802,7 +809,7 @@ void __exit tquic_rate_limit_module_exit(void)
 	/* Wait for RCU callbacks */
 	synchronize_rcu();
 
-	pr_info("module exited\n");
+	tquic_info("rate_limit: module exited\n");
 }
 
 MODULE_DESCRIPTION("TQUIC Connection Rate Limiting for DoS Protection");

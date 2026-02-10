@@ -33,6 +33,7 @@
 #include "../tquic_compat.h"
 #include "../tquic_init.h"
 #include "../protocol.h"
+#include "../tquic_debug.h"
 
 /* Failover integration for retransmit queue priority */
 #include "../bond/tquic_failover.h"
@@ -2150,6 +2151,9 @@ void tquic_path_packet_sent(struct tquic_connection *conn, u8 path_id,
 		atomic64_add(bytes, &path->stats.bytes_sent);
 		path->stats.last_send_time = tquic_get_time_us();
 		path->cc.bytes_in_flight += bytes;
+
+		/* Notify multipath schedulers to update inflight tracking */
+		tquic_mp_sched_notify_sent(conn, path, bytes);
 	}
 
 	atomic64_inc(&conn->stats.total_packets);
@@ -2976,6 +2980,33 @@ struct tquic_mp_sched_ops *tquic_mp_sched_find(const char *name)
 	return NULL;
 }
 EXPORT_SYMBOL_GPL(tquic_mp_sched_find);
+
+/**
+ * tquic_mp_sched_notify_sent - Notify multipath schedulers of packet send
+ * @conn: Connection that sent the packet
+ * @path: Path the packet was sent on
+ * @sent_bytes: Number of bytes sent
+ *
+ * Called from the packet send path to notify schedulers that
+ * implement the packet_sent callback, allowing them to track
+ * per-path inflight data.
+ */
+void tquic_mp_sched_notify_sent(struct tquic_connection *conn,
+				struct tquic_path *path,
+				u32 sent_bytes)
+{
+	struct tquic_mp_sched_ops *sched;
+
+	if (!conn || !path)
+		return;
+
+	rcu_read_lock();
+	sched = (struct tquic_mp_sched_ops *)conn->scheduler;
+	if (sched && sched->packet_sent)
+		sched->packet_sent(conn, path, sent_bytes);
+	rcu_read_unlock();
+}
+EXPORT_SYMBOL_GPL(tquic_mp_sched_notify_sent);
 
 /**
  * tquic_mp_sched_notify_ack - Notify multipath schedulers of ACK

@@ -28,8 +28,10 @@
 #include <linux/tcp.h>
 #include <net/tquic.h>
 #include <net/dsfield.h>
+#include <net/inet_ecn.h>
 
 #include "protocol.h"
+#include "tquic_debug.h"
 
 /*
  * Forward declaration for tunnel structure
@@ -229,21 +231,27 @@ void tquic_qos_mark_skb(struct sk_buff *skb, void *tunnel_ptr)
 	skb->priority = traffic_class;
 
 	/*
-	 * Set DSCP in IP header for external QoS
+	 * Set DSCP in IP header for external QoS.
+	 *
+	 * Use INET_ECN_MASK (0x03) as the preserve mask to keep the
+	 * ECN bits intact. A mask of 0 would destroy ECN signaling
+	 * which is critical for QUIC congestion control (especially
+	 * Prague/L4S). The dsfield functions apply: new = (old & mask) | dscp,
+	 * so mask=0x03 preserves the low 2 ECN bits while replacing DSCP.
 	 */
 	if (skb->protocol == htons(ETH_P_IP)) {
 		if (!pskb_may_pull(skb, sizeof(struct iphdr)))
 			return;
 
 		iph = ip_hdr(skb);
-		ipv4_change_dsfield(iph, 0, dscp);
+		ipv4_change_dsfield(iph, INET_ECN_MASK, dscp);
 
 	} else if (skb->protocol == htons(ETH_P_IPV6)) {
 		if (!pskb_may_pull(skb, sizeof(struct ipv6hdr)))
 			return;
 
 		ip6h = ipv6_hdr(skb);
-		ipv6_change_dsfield(ip6h, 0, dscp);
+		ipv6_change_dsfield(ip6h, INET_ECN_MASK, dscp);
 	}
 }
 EXPORT_SYMBOL_GPL(tquic_qos_mark_skb);
@@ -287,15 +295,18 @@ EXPORT_SYMBOL_GPL(tquic_qos_get_priority);
  * @packets: Packets in this class
  * @bytes: Bytes in this class
  * @drops: Packets dropped due to shaping
+ *
+ * All fields use atomic64_t to prevent torn reads/writes on 32-bit
+ * architectures and data races from concurrent updates.
  */
 struct tquic_qos_stats {
-	u64 packets;
-	u64 bytes;
-	u64 drops;
+	atomic64_t packets;
+	atomic64_t bytes;
+	atomic64_t drops;
 };
 
 /* Per-netns QoS stats would go here */
-static struct tquic_qos_stats qos_stats[4] __read_mostly;
+static struct tquic_qos_stats qos_stats[4];
 
 /**
  * tquic_qos_update_stats - Update per-class statistics
@@ -307,9 +318,8 @@ void tquic_qos_update_stats(u8 traffic_class, u64 bytes)
 	if (traffic_class > 3)
 		return;
 
-	/* Simple atomic-like update - not strictly atomic but good enough */
-	qos_stats[traffic_class].packets++;
-	qos_stats[traffic_class].bytes += bytes;
+	atomic64_inc(&qos_stats[traffic_class].packets);
+	atomic64_add(bytes, &qos_stats[traffic_class].bytes);
 }
 EXPORT_SYMBOL_GPL(tquic_qos_update_stats);
 
@@ -326,11 +336,11 @@ void tquic_qos_get_stats(u8 traffic_class, u64 *packets, u64 *bytes, u64 *drops)
 		return;
 
 	if (packets)
-		*packets = qos_stats[traffic_class].packets;
+		*packets = atomic64_read(&qos_stats[traffic_class].packets);
 	if (bytes)
-		*bytes = qos_stats[traffic_class].bytes;
+		*bytes = atomic64_read(&qos_stats[traffic_class].bytes);
 	if (drops)
-		*drops = qos_stats[traffic_class].drops;
+		*drops = atomic64_read(&qos_stats[traffic_class].drops);
 }
 EXPORT_SYMBOL_GPL(tquic_qos_get_stats);
 
@@ -345,8 +355,14 @@ EXPORT_SYMBOL_GPL(tquic_qos_get_stats);
  */
 int __init tquic_qos_init(void)
 {
-	memset(qos_stats, 0, sizeof(qos_stats));
-	pr_info("tquic: QoS classification initialized\n");
+	int i;
+
+	for (i = 0; i < 4; i++) {
+		atomic64_set(&qos_stats[i].packets, 0);
+		atomic64_set(&qos_stats[i].bytes, 0);
+		atomic64_set(&qos_stats[i].drops, 0);
+	}
+	tquic_info("QoS classification initialized\n");
 	return 0;
 }
 
@@ -355,7 +371,7 @@ int __init tquic_qos_init(void)
  */
 void __exit tquic_qos_exit(void)
 {
-	pr_info("tquic: QoS classification cleaned up\n");
+	tquic_info("QoS classification cleaned up\n");
 }
 
 /*

@@ -54,6 +54,7 @@
 #include <net/sock.h>
 #include <net/tquic.h>
 #include "../tquic_compat.h"
+#include "../tquic_debug.h"
 
 #include "nat_lifecycle.h"
 #include "nat_keepalive.h"
@@ -472,8 +473,8 @@ static void tquic_nat_refresh_timer_fn(struct timer_list *t)
 		atomic64_inc(&tquic_nat_lifecycle_global_stats.total_binding_losses);
 		state->binding_changes++;
 
-		pr_warn("tquic: NAT binding expired on path %u (since_refresh=%lld ms)\n",
-			state->path ? state->path->path_id : 0, since_refresh_ms);
+		tquic_warn("NAT binding expired on path %u (since_refresh=%lld ms)\n",
+			   state->path ? state->path->path_id : 0, since_refresh_ms);
 
 	} else if (time_to_expiry_ms <
 		   (timeout_ms * TQUIC_NAT_EXPIRY_WARNING_PERCENT) / 100) {
@@ -825,11 +826,16 @@ enum tquic_nat_binding_state tquic_nat_lifecycle_binding_check(
 	if (!state)
 		return TQUIC_NAT_BINDING_UNKNOWN;
 
+	/*
+	 * Get timeout first, outside lock, since tquic_nat_lifecycle_get_timeout()
+	 * also acquires state->lock. This avoids a recursive lock deadlock.
+	 */
+	timeout_ms = tquic_nat_lifecycle_get_timeout(state);
+
 	spin_lock_bh(&state->lock);
 
 	now = ktime_get();
 	since_refresh_ms = ktime_ms_delta(now, state->last_binding_refresh);
-	timeout_ms = tquic_nat_lifecycle_get_timeout(state);
 
 	/* Determine binding state */
 	if (since_refresh_ms >= timeout_ms) {
@@ -1260,7 +1266,7 @@ int __init tquic_nat_lifecycle_module_init(void)
 		return -ENOMEM;
 	}
 
-	pr_info("tquic: NAT lifecycle subsystem initialized\n");
+	tquic_info("NAT lifecycle subsystem initialized\n");
 
 	return 0;
 }
@@ -1273,7 +1279,7 @@ void __exit tquic_nat_lifecycle_module_exit(void)
 		tquic_nat_lifecycle_wq = NULL;
 	}
 
-	pr_info("tquic: NAT lifecycle subsystem cleaned up\n");
+	tquic_info("NAT lifecycle subsystem cleaned up\n");
 }
 
 MODULE_DESCRIPTION("TQUIC NAT Lifecycle Management");

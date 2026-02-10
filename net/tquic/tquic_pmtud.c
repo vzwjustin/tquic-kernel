@@ -31,6 +31,7 @@
 #include <net/tquic.h>
 #include <net/tquic_pmtud.h>
 #include "protocol.h"
+#include "tquic_debug.h"
 #include "cong/tquic_cong.h"
 #include "tquic_compat.h"
 
@@ -65,9 +66,7 @@
 #define TQUIC_BLACK_HOLE_THRESHOLD	6	/* Consecutive losses */
 #define TQUIC_BLACK_HOLE_PERIOD_MS	60000	/* 1 minute observation */
 
-/* IP/UDP overhead for MTU calculation */
-#define TQUIC_IPV4_UDP_OVERHEAD		28	/* 20 + 8 */
-#define TQUIC_IPV6_UDP_OVERHEAD		48	/* 40 + 8 */
+/* IP/UDP overhead constants are in <net/tquic_pmtud.h> */
 
 /*
  * =============================================================================
@@ -307,9 +306,9 @@ int tquic_pmtud_init_path(struct tquic_path *path)
 
 	/* Store PMTUD state in path's dedicated field */
 	path->pmtud_state = pmtud;
-	path->mtu = pmtud->plpmtu;
+	WRITE_ONCE(path->mtu, pmtud->plpmtu);
 
-	pr_debug("tquic_pmtud: initialized path %u, base=%u, max=%u\n",
+	tquic_dbg("pmtud:initialized path %u, base=%u, max=%u\n",
 		 path->path_id, pmtud->base_plpmtu, pmtud->max_plpmtu);
 
 	return 0;
@@ -339,7 +338,7 @@ void tquic_pmtud_release_path(struct tquic_path *path)
 	path->pmtud_state = NULL;
 	kfree(pmtud);
 
-	pr_debug("tquic_pmtud: released state for path %u\n", path->path_id);
+	tquic_dbg("pmtud:released state for path %u\n", path->path_id);
 }
 EXPORT_SYMBOL_GPL(tquic_pmtud_release_path);
 
@@ -359,8 +358,8 @@ static u32 tquic_pmtud_calc_next_probe_size(struct tquic_pmtud_state_info *pmtud
 {
 	u32 mid;
 
-	/* Binary search: probe the midpoint between low and high */
-	mid = (pmtud->search_low + pmtud->search_high) / 2;
+	/* Binary search: probe the midpoint (overflow-safe calculation) */
+	mid = pmtud->search_low + (pmtud->search_high - pmtud->search_low) / 2;
 
 	/* Round up to nice boundary (8 bytes) */
 	mid = ALIGN(mid, 8);
@@ -487,11 +486,30 @@ static int tquic_pmtud_send_probe(struct tquic_path *path, u32 probe_size)
 	/* Mark as MTU probe in SKB control block */
 	/* In production: TQUIC_SKB_CB(skb)->is_mtu_probe = true; */
 
+	/*
+	 * Set Don't Fragment flag so the probe tests the actual path MTU
+	 * instead of being silently fragmented by the IP layer.
+	 */
+	skb->ip_summed = CHECKSUM_NONE;
+	skb->ignore_df = 0;  /* Respect DF */
+
 	/* Send via path */
 	ret = tquic_udp_xmit_on_path(conn, path, skb);
 
 	if (ret >= 0) {
-		pr_debug("tquic_pmtud: sent probe pkt %llu size %u on path %u\n",
+		struct tquic_pmtud_state_info *pmtud = path->pmtud_state;
+
+		/*
+		 * Record the probe packet number so ACK/loss callbacks
+		 * can match the response to this probe.
+		 */
+		if (pmtud) {
+			spin_lock_bh(&pmtud->lock);
+			pmtud->probe_pkt_num = pkt_num;
+			spin_unlock_bh(&pmtud->lock);
+		}
+
+		tquic_dbg("pmtud:sent probe pkt %llu size %u on path %u\n",
 			 pkt_num, probe_size, path->path_id);
 	}
 
@@ -507,17 +525,25 @@ static int tquic_pmtud_send_probe(struct tquic_path *path, u32 probe_size)
 /**
  * tquic_pmtud_enter_searching - Enter SEARCHING state and send first probe
  * @pmtud: PMTUD state
+ *
+ * Acquires pmtud->lock internally. Caller must NOT hold the lock.
  */
 static void tquic_pmtud_enter_searching(struct tquic_pmtud_state_info *pmtud)
 {
+	unsigned long flags;
+
+	spin_lock_irqsave(&pmtud->lock, flags);
+
 	pmtud->state = TQUIC_PMTUD_SEARCHING;
 	pmtud->search_low = pmtud->plpmtu;
 	pmtud->search_high = pmtud->max_plpmtu;
 	pmtud->probe_count = 0;
 	pmtud->probed_size = tquic_pmtud_calc_next_probe_size(pmtud);
 
-	pr_debug("tquic_pmtud: entering SEARCHING, probing %u (low=%u, high=%u)\n",
+	tquic_dbg("pmtud:entering SEARCHING, probing %u (low=%u, high=%u)\n",
 		 pmtud->probed_size, pmtud->search_low, pmtud->search_high);
+
+	spin_unlock_irqrestore(&pmtud->lock, flags);
 
 	/* Schedule probe send via work */
 	queue_work(tquic_pmtud_wq, &pmtud->work);
@@ -544,18 +570,18 @@ static void tquic_pmtud_probe_success(struct tquic_pmtud_state_info *pmtud,
 		pmtud->plpmtu = probed_size;
 		pmtud->search_low = probed_size;
 
-		/* Update path MTU */
+		/* Update path MTU atomically for concurrent readers */
 		if (pmtud->path)
-			pmtud->path->mtu = probed_size;
+			WRITE_ONCE(pmtud->path->mtu, probed_size);
 
-		pr_info("tquic_pmtud: path %u MTU increased to %u\n",
+		tquic_info("pmtud:path %u MTU increased to %u\n",
 			pmtud->path ? pmtud->path->path_id : 0, probed_size);
 	}
 
 	/* Check if search is complete */
 	if (pmtud->search_high - pmtud->search_low < TQUIC_PMTU_SEARCH_THRESHOLD) {
 		pmtud->state = TQUIC_PMTUD_SEARCH_COMPLETE;
-		pr_info("tquic_pmtud: search complete, MTU=%u\n", pmtud->plpmtu);
+		tquic_info("pmtud:search complete, MTU=%u\n", pmtud->plpmtu);
 
 		/* Schedule raise timer to re-probe later */
 		mod_timer(&pmtud->timer,
@@ -564,7 +590,7 @@ static void tquic_pmtud_probe_success(struct tquic_pmtud_state_info *pmtud,
 		/* Continue searching with larger size */
 		pmtud->probed_size = tquic_pmtud_calc_next_probe_size(pmtud);
 
-		pr_debug("tquic_pmtud: continuing search, next probe=%u\n",
+		tquic_dbg("pmtud:continuing search, next probe=%u\n",
 			 pmtud->probed_size);
 
 		/* Schedule next probe */
@@ -591,13 +617,13 @@ static void tquic_pmtud_probe_failed(struct tquic_pmtud_state_info *pmtud)
 		pmtud->search_high = pmtud->probed_size - 1;
 		pmtud->probe_count = 0;
 
-		pr_debug("tquic_pmtud: size %u too large after %d probes\n",
+		tquic_dbg("pmtud:size %u too large after %d probes\n",
 			 pmtud->probed_size, TQUIC_MAX_PROBES);
 
 		/* Check if search is complete */
 		if (pmtud->search_high - pmtud->search_low < TQUIC_PMTU_SEARCH_THRESHOLD) {
 			pmtud->state = TQUIC_PMTUD_SEARCH_COMPLETE;
-			pr_info("tquic_pmtud: search complete, MTU=%u\n",
+			tquic_info("pmtud:search complete, MTU=%u\n",
 				pmtud->plpmtu);
 
 			/* Schedule raise timer */
@@ -610,7 +636,7 @@ static void tquic_pmtud_probe_failed(struct tquic_pmtud_state_info *pmtud)
 		}
 	} else {
 		/* Retry same size */
-		pr_debug("tquic_pmtud: retrying probe %u (attempt %d)\n",
+		tquic_dbg("pmtud:retrying probe %u (attempt %d)\n",
 			 pmtud->probed_size, pmtud->probe_count + 1);
 
 		/* Schedule probe timer for retry */
@@ -630,39 +656,36 @@ static void tquic_pmtud_probe_failed(struct tquic_pmtud_state_info *pmtud)
  */
 
 /**
- * tquic_pmtud_black_hole_detected - Handle suspected MTU black hole
+ * tquic_pmtud_black_hole_detected_locked - Handle suspected MTU black hole
  * @pmtud: PMTUD state
  *
  * Called when too many consecutive losses occur, suggesting packets
  * larger than BASE_PLPMTU are being silently dropped.
+ *
+ * Caller MUST hold pmtud->lock.
  */
-static void tquic_pmtud_black_hole_detected(struct tquic_pmtud_state_info *pmtud)
+static void tquic_pmtud_black_hole_detected_locked(struct tquic_pmtud_state_info *pmtud)
 {
-	unsigned long spin_flags;
-
-	spin_lock_irqsave(&pmtud->lock, spin_flags);
-
-	pr_warn("tquic_pmtud: black hole detected on path %u, falling back to BASE\n",
+	tquic_warn("pmtud:black hole detected on path %u, falling back to BASE\n",
 		pmtud->path ? pmtud->path->path_id : 0);
 
 	/* Fall back to base MTU */
 	pmtud->state = TQUIC_PMTUD_ERROR;
 	pmtud->plpmtu = TQUIC_BASE_PLPMTU;
 
-	/* Update path MTU */
+	/* Update path MTU atomically for concurrent readers */
 	if (pmtud->path)
-		pmtud->path->mtu = TQUIC_BASE_PLPMTU;
+		WRITE_ONCE(pmtud->path->mtu, TQUIC_BASE_PLPMTU);
 
 	/* Reset search bounds */
 	pmtud->search_low = TQUIC_BASE_PLPMTU;
 	pmtud->search_high = pmtud->max_plpmtu;
 	pmtud->black_hole_count = 0;
+	pmtud->probe_pending = false;
 
 	/* Schedule re-probe after delay */
 	mod_timer(&pmtud->timer,
 		  jiffies + msecs_to_jiffies(TQUIC_BLACK_HOLE_PERIOD_MS));
-
-	spin_unlock_irqrestore(&pmtud->lock, spin_flags);
 }
 
 /**
@@ -703,13 +726,12 @@ void tquic_pmtud_on_packet_loss(struct tquic_path *path, u32 pkt_size)
 						pmtud->black_hole_start);
 
 		if (elapsed_ms < TQUIC_BLACK_HOLE_PERIOD_MS) {
+			tquic_pmtud_black_hole_detected_locked(pmtud);
 			spin_unlock_bh(&pmtud->lock);
-			tquic_pmtud_black_hole_detected(pmtud);
 			return;
-		} else {
-			/* Reset observation period */
-			pmtud->black_hole_count = 0;
 		}
+		/* Reset observation period */
+		pmtud->black_hole_count = 0;
 	}
 
 	spin_unlock_bh(&pmtud->lock);
@@ -853,7 +875,7 @@ static void tquic_pmtud_work_fn(struct work_struct *work)
 				  jiffies + msecs_to_jiffies(tquic_pmtud_probe_interval));
 		} else {
 			/* Send failed - retry later */
-			pr_warn("tquic_pmtud: probe send failed: %d\n", ret);
+			tquic_warn("pmtud:probe send failed: %d\n", ret);
 			mod_timer(&pmtud->timer,
 				  jiffies + msecs_to_jiffies(1000));
 		}
@@ -886,14 +908,16 @@ int tquic_pmtud_start(struct tquic_path *path)
 		return 0;
 
 	/* Initialize PMTUD state if not already done */
-	ret = tquic_pmtud_init_path(path);
-	if (ret)
-		return ret;
+	if (!path->pmtud_state) {
+		ret = tquic_pmtud_init_path(path);
+		if (ret)
+			return ret;
+	}
 
 	/* In production, pmtud would be retrieved from path structure */
 	/* For now, we'd need to track it separately or store in path->ext */
 
-	pr_debug("tquic_pmtud: started for path %u\n", path->path_id);
+	tquic_dbg("pmtud:started for path %u\n", path->path_id);
 
 	return 0;
 }
@@ -910,7 +934,7 @@ void tquic_pmtud_stop(struct tquic_path *path)
 
 	tquic_pmtud_release_path(path);
 
-	pr_debug("tquic_pmtud: stopped for path %u\n", path->path_id);
+	tquic_dbg("pmtud:stopped for path %u\n", path->path_id);
 }
 EXPORT_SYMBOL_GPL(tquic_pmtud_stop);
 
@@ -931,9 +955,7 @@ void tquic_pmtud_on_probe_ack(struct tquic_path *path, u64 pkt_num,
 	if (!path)
 		return;
 
-	/* In production, pmtud would be retrieved from path structure */
-	pmtud = NULL;
-
+	pmtud = path->pmtud_state;
 	if (!pmtud)
 		return;
 
@@ -966,9 +988,7 @@ void tquic_pmtud_on_probe_lost(struct tquic_path *path, u64 pkt_num)
 	if (!path)
 		return;
 
-	/* In production, pmtud would be retrieved from path structure */
-	pmtud = NULL;
-
+	pmtud = path->pmtud_state;
 	if (!pmtud)
 		return;
 
@@ -998,7 +1018,7 @@ u32 tquic_pmtud_get_mtu(struct tquic_path *path)
 	if (!path)
 		return TQUIC_BASE_PLPMTU;
 
-	return path->mtu;
+	return READ_ONCE(path->mtu);
 }
 EXPORT_SYMBOL_GPL(tquic_pmtud_get_mtu);
 
@@ -1022,9 +1042,7 @@ int tquic_pmtud_set_max_mtu(struct tquic_path *path, u32 max_mtu)
 	if (max_mtu < TQUIC_BASE_PLPMTU)
 		return -EINVAL;
 
-	/* In production, pmtud would be retrieved from path structure */
-	pmtud = NULL;
-
+	pmtud = path->pmtud_state;
 	if (!pmtud)
 		return -ENOENT;
 
@@ -1036,6 +1054,101 @@ int tquic_pmtud_set_max_mtu(struct tquic_path *path, u32 max_mtu)
 	return 0;
 }
 EXPORT_SYMBOL_GPL(tquic_pmtud_set_max_mtu);
+
+/**
+ * tquic_pmtud_on_icmp_mtu_update - Handle ICMP-reported MTU decrease
+ * @path: Path whose MTU is being reported
+ * @new_mtu: QUIC payload MTU reported by ICMP (IP MTU minus IP/UDP overhead)
+ *
+ * Called from the ICMP error handler when a Packet Too Big or
+ * Fragmentation Needed message is received. The reported MTU is
+ * validated and clamped before being applied to prevent attackers from
+ * using spoofed ICMP to break the connection.
+ *
+ * Per RFC 9000 Section 14.3: "An endpoint MUST NOT reduce its MTU below
+ * the smallest allowed maximum datagram size" (1200 bytes).
+ *
+ * Per RFC 8899 Section 4.6: PTB messages from the network should
+ * be treated as advisory hints, not authoritative. DPLPMTUD will
+ * re-probe to confirm the actual PMTU.
+ */
+void tquic_pmtud_on_icmp_mtu_update(struct tquic_path *path, u32 new_mtu)
+{
+	struct tquic_pmtud_state_info *pmtud;
+	u32 current_mtu;
+
+	if (!path)
+		return;
+
+	/*
+	 * Clamp ICMP-reported MTU to QUIC minimum.
+	 * An attacker could send forged ICMP with absurdly small MTU
+	 * (e.g., 68 bytes for IPv4) to cause denial of service.
+	 * QUIC mandates 1200 bytes minimum.
+	 */
+	if (new_mtu < TQUIC_BASE_PLPMTU)
+		new_mtu = TQUIC_BASE_PLPMTU;
+
+	/* Cap at our configured maximum */
+	if (new_mtu > TQUIC_MAX_PLPMTU_ABSOLUTE)
+		new_mtu = TQUIC_MAX_PLPMTU_ABSOLUTE;
+
+	current_mtu = READ_ONCE(path->mtu);
+
+	/* Only process MTU decreases -- increases need probe confirmation */
+	if (new_mtu >= current_mtu)
+		return;
+
+	pmtud = path->pmtud_state;
+	if (!pmtud) {
+		/*
+		 * No PMTUD state -- just update path MTU directly.
+		 * This can happen before PMTUD is started.
+		 */
+		WRITE_ONCE(path->mtu, new_mtu);
+		tquic_info("pmtud:ICMP MTU decrease to %u on path %u (no state)\n",
+			   new_mtu, path->path_id);
+		return;
+	}
+
+	spin_lock_bh(&pmtud->lock);
+
+	/*
+	 * Only decrease if the reported MTU is less than our current
+	 * confirmed MTU. This prevents replay of old ICMP messages
+	 * from reducing MTU after we have already confirmed a larger one.
+	 */
+	if (new_mtu < pmtud->plpmtu) {
+		pmtud->plpmtu = new_mtu;
+		WRITE_ONCE(path->mtu, new_mtu);
+
+		/* Adjust search bounds */
+		pmtud->search_high = min(pmtud->search_high, new_mtu);
+		if (pmtud->search_low > new_mtu)
+			pmtud->search_low = TQUIC_BASE_PLPMTU;
+
+		/*
+		 * Move to SEARCHING to re-probe and confirm.
+		 * The ICMP report is advisory; DPLPMTUD must confirm.
+		 */
+		if (pmtud->state == TQUIC_PMTUD_SEARCH_COMPLETE ||
+		    pmtud->state == TQUIC_PMTUD_SEARCHING) {
+			pmtud->state = TQUIC_PMTUD_BASE;
+			pmtud->probe_pending = false;
+			pmtud->probe_count = 0;
+
+			/* Re-probe after a short delay */
+			mod_timer(&pmtud->timer,
+				  jiffies + msecs_to_jiffies(1000));
+		}
+
+		tquic_info("pmtud:ICMP MTU decrease to %u on path %u\n",
+			   new_mtu, path->path_id);
+	}
+
+	spin_unlock_bh(&pmtud->lock);
+}
+EXPORT_SYMBOL_GPL(tquic_pmtud_on_icmp_mtu_update);
 
 /*
  * =============================================================================
@@ -1084,7 +1197,7 @@ int __init tquic_pmtud_init(void)
 	if (!tquic_pmtud_wq)
 		return -ENOMEM;
 
-	pr_info("tquic_pmtud: PMTUD subsystem initialized (enabled=%d)\n",
+	tquic_info("pmtud:PMTUD subsystem initialized (enabled=%d)\n",
 		tquic_pmtud_enabled);
 
 	return 0;
@@ -1100,7 +1213,7 @@ void __exit tquic_pmtud_exit(void)
 		destroy_workqueue(tquic_pmtud_wq);
 	}
 
-	pr_info("tquic_pmtud: PMTUD subsystem shutdown\n");
+	tquic_info("pmtud:PMTUD subsystem shutdown\n");
 }
 
 MODULE_DESCRIPTION("TQUIC Path MTU Discovery (DPLPMTUD)");

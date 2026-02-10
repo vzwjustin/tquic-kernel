@@ -47,6 +47,7 @@
 #include <net/udp_tunnel.h>
 #include <net/tquic.h>
 #include "tquic_compat.h"
+#include "tquic_debug.h"
 
 #include "protocol.h"
 
@@ -258,7 +259,7 @@ static void tquic_v6_mtu_reduced(struct sock *sk)
 
 			if (path_mtu < path->mtu) {
 				path->mtu = path_mtu;
-				pr_debug("tquic: path %u MTU reduced to %u\n",
+				tquic_dbg("path %u MTU reduced to %u\n",
 					 path->path_id, path_mtu);
 			}
 		}
@@ -280,7 +281,7 @@ static void tquic_v6_path_update_pmtu(struct tquic_connection *conn,
 
 	if (path_mtu < path->mtu) {
 		path->mtu = path_mtu;
-		pr_info("tquic: path %u PMTU updated to %u (ICMPv6)\n",
+		tquic_info("path %u PMTU updated to %u (ICMPv6)\n",
 			path->path_id, path_mtu);
 	}
 }
@@ -451,7 +452,7 @@ static int tquic_v6_connect(struct sock *sk, struct sockaddr_unsized *addr, int 
 	 */
 	err = tquic_conn_client_connect(conn, (struct sockaddr *)usin);
 	if (err < 0) {
-		pr_err("tquic: IPv6 client connect init failed: %d\n", err);
+		tquic_err("IPv6 client connect init failed: %d\n", err);
 		goto failure;
 	}
 
@@ -467,7 +468,7 @@ static int tquic_v6_connect(struct sock *sk, struct sockaddr_unsized *addr, int 
 
 		conn->scheduler = tquic_sched_init_conn(conn, sched_ops);
 		if (!conn->scheduler) {
-			pr_warn("tquic: IPv6 scheduler init failed, using default\n");
+			tquic_warn("IPv6 scheduler init failed, using default\n");
 			conn->scheduler = tquic_sched_init_conn(conn, NULL);
 			if (!conn->scheduler) {
 				err = -ENOMEM;
@@ -486,7 +487,7 @@ static int tquic_v6_connect(struct sock *sk, struct sockaddr_unsized *addr, int 
 	if (!conn->timer_state) {
 		conn->timer_state = tquic_timer_state_alloc(conn);
 		if (!conn->timer_state) {
-			pr_warn("tquic: IPv6 timer state alloc failed\n");
+			tquic_warn("IPv6 timer state alloc failed\n");
 			/* Continue without timer - basic operation still works */
 		}
 	}
@@ -501,7 +502,7 @@ static int tquic_v6_connect(struct sock *sk, struct sockaddr_unsized *addr, int 
 	 */
 	err = tquic_start_handshake(sk);
 	if (err < 0 && err != -EALREADY) {
-		pr_err("tquic: IPv6 handshake start failed: %d\n", err);
+		tquic_err("IPv6 handshake start failed: %d\n", err);
 		goto failure_close;
 	}
 
@@ -515,7 +516,7 @@ static int tquic_v6_connect(struct sock *sk, struct sockaddr_unsized *addr, int 
 	 */
 	err = tquic_wait_for_handshake(sk, TQUIC_HANDSHAKE_TIMEOUT_MS);
 	if (err < 0) {
-		pr_err("tquic: IPv6 handshake failed: %d\n", err);
+		tquic_err("IPv6 handshake failed: %d\n", err);
 		goto failure_close;
 	}
 
@@ -532,7 +533,7 @@ static int tquic_v6_connect(struct sock *sk, struct sockaddr_unsized *addr, int 
 	/* Initialize path manager after connection established */
 	err = tquic_pm_conn_init(conn);
 	if (err < 0) {
-		pr_warn("tquic: IPv6 PM init failed: %d\n", err);
+		tquic_warn("IPv6 PM init failed: %d\n", err);
 		/* Continue anyway - PM is optional for basic operation */
 	}
 
@@ -540,7 +541,7 @@ static int tquic_v6_connect(struct sock *sk, struct sockaddr_unsized *addr, int 
 	if (conn->timer_state)
 		tquic_timer_set_idle(conn->timer_state);
 
-	pr_debug("tquic: IPv6 connected to %pI6c:%u\n",
+	tquic_dbg("IPv6 connected to %pI6c:%u\n",
 		 &usin->sin6_addr, ntohs(usin->sin6_port));
 
 	return 0;
@@ -802,7 +803,7 @@ static void tquic_he_fallback_work(struct work_struct *work)
 				    (struct sockaddr *)&he->ipv4_addr,
 				    (struct sockaddr *)&he->ipv4_addr);
 
-		pr_debug("tquic: Happy Eyeballs starting IPv4 fallback\n");
+		tquic_dbg("Happy Eyeballs starting IPv4 fallback\n");
 	}
 }
 
@@ -858,7 +859,7 @@ int tquic_v6_discover_addresses(struct tquic_connection *conn,
 
 	rcu_read_unlock();
 
-	pr_debug("tquic: discovered %d IPv6 addresses\n", count);
+	tquic_dbg("discovered %d IPv6 addresses\n", count);
 	return count;
 }
 EXPORT_SYMBOL_GPL(tquic_v6_discover_addresses);
@@ -887,7 +888,7 @@ int tquic_v6_add_path(struct tquic_connection *conn,
 			tquic_v6_path_set_flowlabel(path,
 				tquic_v6_generate_flowlabel(conn, path));
 
-			pr_debug("tquic: added IPv6 path %d: %pI6c -> %pI6c\n",
+			tquic_dbg("added IPv6 path %d: %pI6c -> %pI6c\n",
 				 err, &local->sin6_addr, &remote->sin6_addr);
 		}
 	}
@@ -932,7 +933,7 @@ static int tquic_v6_init_sock(struct sock *sk)
 
 	sk->sk_gso_type = SKB_GSO_UDP_L4;
 
-	pr_debug("tquic: IPv6 socket initialized\n");
+	tquic_dbg("IPv6 socket initialized\n");
 	return 0;
 }
 
@@ -945,14 +946,16 @@ static void tquic_v6_destroy_sock(struct sock *sk)
 
 	/* Base TQUIC cleanup */
 	if (tsk->conn) {
-		if (tsk->conn->scheduler)
+		if (tsk->conn->scheduler) {
 			tquic_bond_cleanup(tsk->conn->scheduler);
+			tsk->conn->scheduler = NULL;
+		}
 		tquic_conn_destroy(tsk->conn);
 		tsk->conn = NULL;
 	}
 
 
-	pr_debug("tquic: IPv6 socket destroyed\n");
+	tquic_dbg("IPv6 socket destroyed\n");
 }
 
 /*
@@ -1156,32 +1159,32 @@ int __init tquic6_init(void)
 {
 	int ret;
 
-	pr_info("tquic: initializing IPv6 support\n");
+	tquic_info("initializing IPv6 support\n");
 
 	/* Register IPv6 protocol handler */
 	ret = proto_register(&tquic6_prot, 1);
 	if (ret) {
-		pr_err("tquic: failed to register IPv6 protocol: %d\n", ret);
+		tquic_err("failed to register IPv6 protocol: %d\n", ret);
 		return ret;
 	}
 
 	/* Register inet6 protosw */
 	ret = inet6_register_protosw(&tquic6_protosw);
 	if (ret) {
-		pr_err("tquic: failed to register inet6 protosw: %d\n", ret);
+		tquic_err("failed to register inet6 protosw: %d\n", ret);
 		goto err_protosw;
 	}
 
 	/* Register per-net operations */
 	ret = register_pernet_subsys(&tquic6_net_ops);
 	if (ret) {
-		pr_err("tquic: failed to register pernet subsys: %d\n", ret);
+		tquic_err("failed to register pernet subsys: %d\n", ret);
 		goto err_pernet;
 	}
 
-	pr_info("tquic: IPv6 support initialized\n");
-	pr_info("tquic: Dual-stack support enabled\n");
-	pr_info("tquic: Happy Eyeballs enabled (IPv6 preferred, delay=%dms)\n",
+	tquic_info("IPv6 support initialized\n");
+	tquic_info("Dual-stack support enabled\n");
+	tquic_info("Happy Eyeballs enabled (IPv6 preferred, delay=%dms)\n",
 		TQUIC_HE_RESOLUTION_DELAY_MS);
 
 	return 0;
@@ -1195,13 +1198,13 @@ err_protosw:
 
 void __exit tquic6_exit(void)
 {
-	pr_info("tquic: shutting down IPv6 support\n");
+	tquic_info("shutting down IPv6 support\n");
 
 	unregister_pernet_subsys(&tquic6_net_ops);
 	inet6_unregister_protosw(&tquic6_protosw);
 	proto_unregister(&tquic6_prot);
 
-	pr_info("tquic: IPv6 support unloaded\n");
+	tquic_info("IPv6 support unloaded\n");
 }
 
 /*

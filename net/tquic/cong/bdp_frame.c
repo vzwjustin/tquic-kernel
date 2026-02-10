@@ -24,6 +24,7 @@
 #include "tquic_cong.h"
 #include "../core/varint.h"
 #include "../protocol.h"
+#include "../tquic_debug.h"
 
 /*
  * =============================================================================
@@ -55,7 +56,7 @@ int tquic_bdp_init(struct tquic_connection *conn)
 
 	conn->bdp_state = bdp;
 
-	pr_debug("tquic_bdp: initialized BDP state for connection\n");
+	tquic_dbg("bdp: initialized BDP state for connection\n");
 	return 0;
 }
 EXPORT_SYMBOL_GPL(tquic_bdp_init);
@@ -82,7 +83,7 @@ void tquic_bdp_release(struct tquic_connection *conn)
 	kfree(bdp);
 	conn->bdp_state = NULL;
 
-	pr_debug("tquic_bdp: released BDP state\n");
+	tquic_dbg("bdp: released BDP state\n");
 }
 EXPORT_SYMBOL_GPL(tquic_bdp_release);
 
@@ -111,7 +112,7 @@ int tquic_bdp_set_hmac_key(struct tquic_connection *conn, const u8 *key,
 	bdp->hmac_key_set = true;
 	spin_unlock_irqrestore(&bdp->lock, flags);
 
-	pr_debug("tquic_bdp: HMAC key set (%zu bytes)\n", key_len);
+	tquic_dbg("bdp: HMAC key set (%zu bytes)\n", key_len);
 	return 0;
 }
 EXPORT_SYMBOL_GPL(tquic_bdp_set_hmac_key);
@@ -180,7 +181,7 @@ ssize_t tquic_encode_bdp_frame(const struct tquic_bdp_frame *frame,
 	memcpy(buf + offset, frame->hmac, TQUIC_BDP_HMAC_LEN);
 	offset += TQUIC_BDP_HMAC_LEN;
 
-	pr_debug("tquic_bdp: encoded frame, bdp=%llu cwnd=%llu rtt=%llu lifetime=%llu\n",
+	tquic_dbg("bdp: encoded frame, bdp=%llu cwnd=%llu rtt=%llu lifetime=%llu\n",
 		 frame->bdp, frame->saved_cwnd, frame->saved_rtt, frame->lifetime);
 
 	return offset;
@@ -206,7 +207,7 @@ ssize_t tquic_decode_bdp_frame(const u8 *buf, size_t buflen,
 		return ret;
 
 	if (frame_type != TQUIC_FRAME_BDP) {
-		pr_debug("tquic_bdp: unexpected frame type 0x%llx\n", frame_type);
+		tquic_dbg("bdp: unexpected frame type 0x%llx\n", frame_type);
 		return -EPROTO;
 	}
 
@@ -242,7 +243,7 @@ ssize_t tquic_decode_bdp_frame(const u8 *buf, size_t buflen,
 	memcpy(frame->hmac, buf + offset, TQUIC_BDP_HMAC_LEN);
 	offset += TQUIC_BDP_HMAC_LEN;
 
-	pr_debug("tquic_bdp: decoded frame, bdp=%llu cwnd=%llu rtt=%llu lifetime=%llu\n",
+	tquic_dbg("bdp: decoded frame, bdp=%llu cwnd=%llu rtt=%llu lifetime=%llu\n",
 		 frame->bdp, frame->saved_cwnd, frame->saved_rtt, frame->lifetime);
 
 	return offset;
@@ -343,7 +344,7 @@ int tquic_bdp_compute_hmac(struct tquic_connection *conn,
 	/* Allocate HMAC transform */
 	tfm = crypto_alloc_shash("hmac(sha256)", 0, 0);
 	if (IS_ERR(tfm)) {
-		pr_err("tquic_bdp: failed to allocate hmac(sha256)\n");
+		tquic_err("bdp: failed to allocate hmac(sha256)\n");
 		return PTR_ERR(tfm);
 	}
 
@@ -361,14 +362,14 @@ int tquic_bdp_compute_hmac(struct tquic_connection *conn,
 	spin_unlock_irqrestore(&bdp->lock, flags);
 
 	if (ret < 0) {
-		pr_err("tquic_bdp: failed to set HMAC key: %d\n", ret);
+		tquic_err("bdp: failed to set HMAC key: %d\n", ret);
 		goto out;
 	}
 
 	/* Compute HMAC */
 	ret = crypto_shash_digest(desc, hmac_data, hmac_data_len, full_hmac);
 	if (ret < 0) {
-		pr_err("tquic_bdp: HMAC computation failed: %d\n", ret);
+		tquic_err("bdp: HMAC computation failed: %d\n", ret);
 		goto out;
 	}
 
@@ -376,7 +377,7 @@ int tquic_bdp_compute_hmac(struct tquic_connection *conn,
 	memcpy(frame->hmac, full_hmac, TQUIC_BDP_HMAC_LEN);
 	ret = 0;
 
-	pr_debug("tquic_bdp: computed HMAC for frame\n");
+	tquic_dbg("bdp: computed HMAC for frame\n");
 
 out:
 	memzero_explicit(full_hmac, sizeof(full_hmac));
@@ -408,13 +409,13 @@ int tquic_bdp_verify_hmac(struct tquic_connection *conn,
 
 	/* Constant-time comparison */
 	if (crypto_memneq(verify_frame.hmac, frame->hmac, TQUIC_BDP_HMAC_LEN)) {
-		pr_debug("tquic_bdp: HMAC verification failed\n");
+		tquic_dbg("bdp: HMAC verification failed\n");
 		memzero_explicit(&verify_frame, sizeof(verify_frame));
 		return -EBADMSG;
 	}
 
 	memzero_explicit(&verify_frame, sizeof(verify_frame));
-	pr_debug("tquic_bdp: HMAC verification succeeded\n");
+	tquic_dbg("bdp: HMAC verification succeeded\n");
 	return 0;
 }
 EXPORT_SYMBOL_GPL(tquic_bdp_verify_hmac);
@@ -506,7 +507,7 @@ int tquic_generate_bdp_frame(struct tquic_connection *conn,
 		return -ENOENT;
 
 	if (!bdp->enabled) {
-		pr_debug("tquic_bdp: extension not enabled\n");
+		tquic_dbg("bdp: extension not enabled\n");
 		return -ENOENT;
 	}
 
@@ -517,7 +518,7 @@ int tquic_generate_bdp_frame(struct tquic_connection *conn,
 	rtt = path->stats.rtt_smoothed;
 
 	if (cwnd < TQUIC_BDP_MIN_CWND || rtt < TQUIC_BDP_MIN_RTT_US) {
-		pr_debug("tquic_bdp: insufficient CC state for BDP frame\n");
+		tquic_dbg("bdp: insufficient CC state for BDP frame\n");
 		return -EAGAIN;
 	}
 
@@ -537,7 +538,7 @@ int tquic_generate_bdp_frame(struct tquic_connection *conn,
 	if (ret < 0)
 		return ret;
 
-	pr_info("tquic_bdp: generated frame, bdp=%llu cwnd=%llu rtt=%llu\n",
+	tquic_info("bdp: generated frame, bdp=%llu cwnd=%llu rtt=%llu\n",
 		frame->bdp, frame->saved_cwnd, frame->saved_rtt);
 
 	/* Store in connection state */
@@ -569,24 +570,41 @@ int tquic_validate_bdp_frame(struct tquic_connection *conn,
 
 	/* Validate ranges */
 	if (frame->bdp < TQUIC_BDP_MIN_BDP || frame->bdp > TQUIC_BDP_MAX_BDP) {
-		pr_debug("tquic_bdp: BDP out of range: %llu\n", frame->bdp);
+		tquic_dbg("bdp: BDP out of range: %llu\n", frame->bdp);
 		return -ERANGE;
 	}
 
 	if (frame->saved_cwnd < TQUIC_BDP_MIN_CWND ||
 	    frame->saved_cwnd > TQUIC_BDP_MAX_CWND) {
-		pr_debug("tquic_bdp: cwnd out of range: %llu\n", frame->saved_cwnd);
+		tquic_dbg("bdp: cwnd out of range: %llu\n", frame->saved_cwnd);
 		return -ERANGE;
 	}
 
 	if (frame->saved_rtt < TQUIC_BDP_MIN_RTT_US ||
 	    frame->saved_rtt > TQUIC_BDP_MAX_RTT_US) {
-		pr_debug("tquic_bdp: RTT out of range: %llu\n", frame->saved_rtt);
+		tquic_dbg("bdp: RTT out of range: %llu\n", frame->saved_rtt);
 		return -ERANGE;
 	}
 
 	if (frame->lifetime > TQUIC_BDP_MAX_LIFETIME_SEC) {
-		pr_debug("tquic_bdp: lifetime too long: %llu\n", frame->lifetime);
+		tquic_dbg("bdp: lifetime too long: %llu\n", frame->lifetime);
+		return -ERANGE;
+	}
+
+	if (frame->lifetime == 0) {
+		tquic_dbg("bdp: zero lifetime\n");
+		return -ERANGE;
+	}
+
+	/*
+	 * Validate saved_cwnd is consistent with BDP and RTT.
+	 * BDP = cwnd should hold approximately. Reject frames where
+	 * saved_cwnd vastly exceeds BDP (more than 4x), which suggests
+	 * manipulation or corruption.
+	 */
+	if (frame->saved_cwnd > frame->bdp * 4) {
+		tquic_dbg("bdp: cwnd %llu inconsistent with BDP %llu\n",
+			  frame->saved_cwnd, frame->bdp);
 		return -ERANGE;
 	}
 
@@ -597,7 +615,7 @@ int tquic_validate_bdp_frame(struct tquic_connection *conn,
 
 	if (crypto_memneq(expected_token, frame->endpoint_token,
 			  TQUIC_BDP_TOKEN_LEN)) {
-		pr_debug("tquic_bdp: endpoint token mismatch\n");
+		tquic_dbg("bdp: endpoint token mismatch\n");
 		memzero_explicit(expected_token, sizeof(expected_token));
 		return -EACCES;
 	}
@@ -606,11 +624,11 @@ int tquic_validate_bdp_frame(struct tquic_connection *conn,
 	/* Verify HMAC */
 	ret = tquic_bdp_verify_hmac(conn, frame);
 	if (ret < 0) {
-		pr_debug("tquic_bdp: HMAC verification failed\n");
+		tquic_dbg("bdp: HMAC verification failed\n");
 		return ret;
 	}
 
-	pr_info("tquic_bdp: frame validated successfully\n");
+	tquic_info("bdp: frame validated successfully\n");
 	return 0;
 }
 EXPORT_SYMBOL_GPL(tquic_validate_bdp_frame);
@@ -641,7 +659,7 @@ int tquic_apply_bdp_frame(struct tquic_connection *conn,
 	/* Initialize Careful Resume */
 	ret = tquic_careful_resume_init(path, frame);
 	if (ret < 0) {
-		pr_warn("tquic_bdp: Careful Resume init failed: %d\n", ret);
+		tquic_warn("bdp: Careful Resume init failed: %d\n", ret);
 		return ret;
 	}
 
@@ -652,7 +670,7 @@ int tquic_apply_bdp_frame(struct tquic_connection *conn,
 	bdp->cr_target_cwnd = frame->saved_cwnd;
 	spin_unlock_bh(&bdp->lock);
 
-	pr_info("tquic_bdp: applied BDP frame, target cwnd=%llu\n",
+	tquic_info("bdp: applied BDP frame, target cwnd=%llu\n",
 		frame->saved_cwnd);
 
 	return 0;
@@ -727,7 +745,7 @@ int tquic_bdp_store_for_reconnect(struct tquic_connection *conn,
 	bdp->have_saved = true;
 	spin_unlock_bh(&bdp->lock);
 
-	pr_debug("tquic_bdp: stored frame for reconnection\n");
+	tquic_dbg("bdp: stored frame for reconnection\n");
 	return 0;
 }
 EXPORT_SYMBOL_GPL(tquic_bdp_store_for_reconnect);
@@ -756,7 +774,7 @@ int tquic_bdp_restore_for_reconnect(struct tquic_connection *conn,
 	memcpy(frame, &bdp->saved, sizeof(*frame));
 	spin_unlock_bh(&bdp->lock);
 
-	pr_debug("tquic_bdp: restored frame for reconnection\n");
+	tquic_dbg("bdp: restored frame for reconnection\n");
 	return 0;
 }
 EXPORT_SYMBOL_GPL(tquic_bdp_restore_for_reconnect);
@@ -804,7 +822,7 @@ void tquic_careful_resume_complete(struct tquic_connection *conn,
 	bdp->cr_phase = TQUIC_CR_PHASE_NORMAL;
 	spin_unlock_bh(&bdp->lock);
 
-	pr_info("tquic_bdp: Careful Resume completed successfully\n");
+	tquic_info("bdp: Careful Resume completed successfully\n");
 }
 EXPORT_SYMBOL_GPL(tquic_careful_resume_complete);
 

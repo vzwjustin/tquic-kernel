@@ -630,11 +630,13 @@ int tquic_handle_ack_frequency_frame(struct tquic_ack_frequency_state *state,
 		/* Continue but use our minimum instead */
 	}
 
-	/* Update state with new values */
+	/* Update state with new values, clamped to safe bounds */
 	state->last_recv_seq = frame->sequence_number;
-	state->current_threshold = frame->ack_eliciting_threshold;
-	state->current_max_delay_us = max(frame->request_max_ack_delay,
-					  state->min_ack_delay_us);
+	state->current_threshold = min_t(u64, frame->ack_eliciting_threshold,
+					 TQUIC_ACK_FREQ_MAX_THRESHOLD);
+	state->current_max_delay_us = min_t(u64,
+		max(frame->request_max_ack_delay, state->min_ack_delay_us),
+		TQUIC_MIN_ACK_DELAY_MAX_US);
 
 	/*
 	 * Per Section 4.3: "If the Reorder Threshold is set to 0, it
@@ -646,7 +648,9 @@ int tquic_handle_ack_frequency_frame(struct tquic_ack_frequency_state *state,
 		state->current_reorder_threshold = 0;
 	} else {
 		state->ignore_order = false;
-		state->current_reorder_threshold = frame->reorder_threshold;
+		state->current_reorder_threshold = min_t(u64,
+			frame->reorder_threshold,
+			TQUIC_ACK_FREQ_MAX_REORDER);
 	}
 
 	/* Transition to active state on first frame */
@@ -748,13 +752,7 @@ bool tquic_ack_freq_should_ack(struct tquic_ack_frequency_state *state,
 	/* Increment packet counter */
 	state->packets_since_ack++;
 
-	/* Check ack-eliciting threshold */
-	if (state->packets_since_ack >= threshold) {
-		should_ack = true;
-		goto out;
-	}
-
-	/* Check reorder threshold (if not ignoring order) */
+	/* Check reorder threshold before updating largest (if not ignoring order) */
 	if (!state->ignore_order && state->current_reorder_threshold > 0) {
 		if (pn < state->largest_pn_received) {
 			gap = state->largest_pn_received - pn;
@@ -769,9 +767,15 @@ bool tquic_ack_freq_should_ack(struct tquic_ack_frequency_state *state,
 		}
 	}
 
-	/* Update largest received */
+	/* Update largest received -- must happen for every packet */
 	if (pn > state->largest_pn_received)
 		state->largest_pn_received = pn;
+
+	/* Check ack-eliciting threshold */
+	if (state->packets_since_ack >= threshold) {
+		should_ack = true;
+		goto out;
+	}
 
 out:
 	spin_unlock(&state->lock);
@@ -1271,17 +1275,25 @@ EXPORT_SYMBOL_GPL(tquic_ack_freq_set_application_hint);
 void tquic_ack_freq_update_loss_state(struct tquic_loss_state *loss,
 				      const struct tquic_ack_frequency_state *state)
 {
+	u64 max_delay;
+
 	if (!loss || !state)
 		return;
 
+	/*
+	 * Read ACK frequency state first, then update loss state.
+	 * Avoids nested locking (state->lock then loss->lock) which
+	 * could deadlock with tquic_loss_state_set_ack_freq() that
+	 * acquires loss->lock then calls into ACK freq under state->lock.
+	 */
 	spin_lock((spinlock_t *)&state->lock);
-	spin_lock(&loss->lock);
-
-	loss->ack_delay_us = (u32)state->current_max_delay_us;
-	loss->rtt.max_ack_delay = state->current_max_delay_us;
-
-	spin_unlock(&loss->lock);
+	max_delay = state->current_max_delay_us;
 	spin_unlock((spinlock_t *)&state->lock);
+
+	spin_lock(&loss->lock);
+	loss->ack_delay_us = (u32)min_t(u64, max_delay, U32_MAX);
+	loss->rtt.max_ack_delay = max_delay;
+	spin_unlock(&loss->lock);
 
 	pr_debug("tquic: updated loss state ack_delay=%u us\n",
 		 loss->ack_delay_us);

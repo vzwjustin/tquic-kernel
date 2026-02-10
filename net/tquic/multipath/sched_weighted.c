@@ -26,6 +26,7 @@
 
 #include "tquic_sched.h"
 #include "../bond/tquic_bonding.h"
+#include "../tquic_debug.h"
 
 /*
  * Deficit Round-Robin constants

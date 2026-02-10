@@ -21,6 +21,7 @@
 #include <linux/slab.h>
 #include <linux/math64.h>
 #include <net/tquic.h>
+#include "../tquic_debug.h"
 #include "persistent_cong.h"
 
 /* Copa parameters */
@@ -244,8 +245,8 @@ static void *tquic_copa_init(struct tquic_path *path)
 	copa->rtt_min_us = 0;
 	copa->rtt_standing_us = 0;
 
-	pr_debug("tquic_copa: initialized for path %u, delta=%u\n",
-		 path->path_id, copa->delta);
+	tquic_dbg("copa: initialized for path %u, delta=%u\n",
+		  path->path_id, copa->delta);
 
 	return copa;
 }
@@ -279,6 +280,17 @@ static void tquic_copa_on_ack(void *state, u64 bytes_acked, u64 rtt_us)
 	now = ktime_get();
 	copa->bytes_acked_total += bytes_acked;
 
+	/*
+	 * Reset ECN round flag if an RTT has elapsed since the last
+	 * ECN response, per RFC 9002 Section 7.1 (once-per-RTT limit).
+	 */
+	if (copa->ecn_in_round && copa->rtt_min_us > 0) {
+		s64 elapsed = ktime_us_delta(now, copa->last_ecn_time);
+
+		if (elapsed >= (s64)copa->rtt_min_us)
+			copa->ecn_in_round = false;
+	}
+
 	/* Update RTT measurements */
 	copa_update_min_rtt(copa, rtt_us, now);
 	copa_update_standing_rtt(copa, rtt_us, now);
@@ -296,8 +308,8 @@ static void tquic_copa_on_ack(void *state, u64 bytes_acked, u64 rtt_us)
 			if (delay_ratio > COPA_DELTA_SCALE + COPA_DELTA_SCALE / copa->delta) {
 				copa->in_slow_start = false;
 				copa->ssthresh = copa->cwnd;
-				pr_debug("tquic_copa: exiting slow start, cwnd=%llu\n",
-					 copa->cwnd);
+				tquic_dbg("copa: exiting slow start, cwnd=%llu\n",
+					  copa->cwnd);
 			}
 		}
 
@@ -325,16 +337,23 @@ static void tquic_copa_on_ack(void *state, u64 bytes_acked, u64 rtt_us)
 
 	/* Apply velocity-adjusted cwnd change */
 	if (target > copa->cwnd) {
-		/* Increase cwnd */
-		adjustment = (copa->velocity * bytes_acked * copa->delta) /
-			     (copa->cwnd * COPA_DELTA_SCALE);
+		/* Increase cwnd (guard against cwnd == 0) */
+		if (copa->cwnd > 0) {
+			adjustment = (copa->velocity * bytes_acked * copa->delta) /
+				     (copa->cwnd * COPA_DELTA_SCALE);
+		} else {
+			adjustment = bytes_acked;
+		}
 		adjustment = max(adjustment, (u64)1);
 		copa->cwnd += adjustment;
 	} else if (target < copa->cwnd) {
-		/* Decrease cwnd */
+		/* Decrease cwnd (guard against underflow) */
 		adjustment = (copa->velocity * copa->cwnd) /
 			     (copa->delta * 2 + COPA_DELTA_SCALE);
-		adjustment = min(adjustment, copa->cwnd - COPA_MIN_CWND);
+		if (copa->cwnd > COPA_MIN_CWND)
+			adjustment = min(adjustment, copa->cwnd - (u64)COPA_MIN_CWND);
+		else
+			adjustment = 0;
 		copa->cwnd -= adjustment;
 	}
 
@@ -380,8 +399,8 @@ static void tquic_copa_on_loss(void *state, u64 bytes_lost)
 		copa->cwnd = copa->ssthresh;
 	}
 
-	pr_debug("tquic_copa: loss detected, cwnd=%llu velocity=%u\n",
-		 copa->cwnd, copa->velocity);
+	tquic_warn("copa: loss detected, cwnd=%llu velocity=%u\n",
+		   copa->cwnd, copa->velocity);
 }
 
 /*
@@ -436,7 +455,7 @@ static void tquic_copa_on_ecn(void *state, u64 ecn_ce_count)
 	 * Use min_rtt for rate limiting.
 	 */
 	if (copa->ecn_in_round) {
-		pr_debug("tquic_copa: ECN CE ignored (already responded this round)\n");
+		tquic_dbg("copa: ECN CE ignored (already responded this round)\n");
 		return;
 	}
 
@@ -444,7 +463,7 @@ static void tquic_copa_on_ecn(void *state, u64 ecn_ce_count)
 	if (copa->rtt_min_us > 0) {
 		time_since_last = ktime_us_delta(now, copa->last_ecn_time);
 		if (time_since_last < copa->rtt_min_us) {
-			pr_debug("tquic_copa: ECN CE ignored (within RTT window)\n");
+			tquic_dbg("copa: ECN CE ignored (within RTT window)\n");
 			return;
 		}
 	}
@@ -499,8 +518,8 @@ static void tquic_copa_on_ecn(void *state, u64 ecn_ce_count)
 	copa->ecn_in_round = true;
 	copa->last_ecn_time = now;
 
-	pr_debug("tquic_copa: ECN CE response, ce_count=%llu total=%llu cwnd=%llu delta=%u\n",
-		 ecn_ce_count, copa->ecn_ce_total, copa->cwnd, copa->delta);
+	tquic_dbg("copa: ECN CE response, ce_count=%llu total=%llu cwnd=%llu delta=%u\n",
+		  ecn_ce_count, copa->ecn_ce_total, copa->cwnd, copa->delta);
 }
 
 static u64 tquic_copa_get_cwnd(void *state)
@@ -547,8 +566,8 @@ static void tquic_copa_on_persistent_cong(void *state,
 	if (!copa || !info)
 		return;
 
-	pr_info("tquic_copa: persistent congestion, resetting cwnd %llu -> %llu\n",
-		copa->cwnd, info->min_cwnd);
+	tquic_warn("copa: persistent congestion, cwnd %llu -> %llu\n",
+		   copa->cwnd, info->min_cwnd);
 
 	/* Reset cwnd to minimum per RFC 9002 */
 	copa->cwnd = info->min_cwnd;
@@ -602,14 +621,13 @@ static struct tquic_cong_ops __maybe_unused tquic_copa_ops = {
 #ifndef TQUIC_OUT_OF_TREE
 static int __init tquic_copa_module_init(void)
 {
-	pr_info("TQUIC Copa congestion control loaded\n");
+	tquic_info("cc: copa algorithm registered\n");
 	return tquic_register_cong(&tquic_copa_ops);
 }
 
 static void __exit tquic_copa_module_exit(void)
 {
 	tquic_unregister_cong(&tquic_copa_ops);
-	pr_info("TQUIC Copa congestion control unloaded\n");
 }
 
 module_init(tquic_copa_module_init);

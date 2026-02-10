@@ -396,4 +396,20 @@ int tquic_key_update_get_old_read_keys(struct tquic_key_update_state *state,
 				       u8 *key, u32 *key_len,
 				       u8 *iv, u32 *iv_len);
 
+/*
+ * =============================================================================
+ * Key Update Timeout
+ * =============================================================================
+ */
+
+/**
+ * tquic_key_update_timeout - Handle key update timeout
+ * @conn: TQUIC connection
+ *
+ * Called when the peer has not responded with the new key phase
+ * within 3 * PTO.  Reverts the key update to prevent the connection
+ * from being permanently stuck in the update_pending state.
+ */
+void tquic_key_update_timeout(struct tquic_connection *conn);
+
 #endif /* _TQUIC_KEY_UPDATE_H */

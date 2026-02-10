@@ -36,6 +36,7 @@
 #include <net/tquic.h>
 
 #include "tquic_compat.h"
+#include "tquic_debug.h"
 #include "tquic_mib.h"
 
 /* GRO configuration */
@@ -704,7 +705,7 @@ int tquic_setup_gro(struct sock *sk)
 	/* Enable GRO for this socket */
 	tquic_udp_tunnel_encap_enable(sk);
 
-	pr_debug("tquic: GRO enabled for socket %p\n", sk);
+	tquic_dbg("GRO enabled for socket %p\n", sk);
 
 	return 0;
 }
@@ -743,7 +744,7 @@ EXPORT_SYMBOL_GPL(tquic_clear_gro);
  */
 int __init tquic_offload_init(void)
 {
-	pr_info("tquic: initializing GRO/GSO offload support\n");
+	tquic_info("initializing GRO/GSO offload support\n");
 
 	/* Initialize statistics */
 	atomic64_set(&tquic_gro_stats.coalesced_packets, 0);
@@ -761,7 +762,7 @@ int __init tquic_offload_init(void)
 	 * TQUIC-specific features and optimize accordingly.
 	 */
 
-	pr_info("tquic: GRO/GSO offload support initialized\n");
+	tquic_info("GRO/GSO offload support initialized\n");
 
 	return 0;
 }
@@ -773,14 +774,14 @@ int __init tquic_offload_init(void)
  */
 void __exit tquic_offload_exit(void)
 {
-	pr_info("tquic: removing GRO/GSO offload support\n");
+	tquic_info("removing GRO/GSO offload support\n");
 
 	/*
 	 * Per-socket GRO callbacks are cleaned up when sockets close.
 	 * No global cleanup needed for UDP-based offload.
 	 */
 
-	pr_info("tquic: GRO/GSO offload support removed\n");
+	tquic_info("GRO/GSO offload support removed\n");
 }
 
 MODULE_DESCRIPTION("TQUIC GRO/GSO Offload Support");

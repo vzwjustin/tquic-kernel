@@ -15,6 +15,7 @@
 #include <net/tquic.h>
 
 #include "../tquic_init.h"
+#include "../tquic_debug.h"
 
 static DEFINE_SPINLOCK(tquic_mp_sched_list_lock);
 static LIST_HEAD(tquic_mp_sched_list);
@@ -48,7 +49,7 @@ int tquic_mp_register_scheduler(struct tquic_mp_sched_ops *sched)
 	list_add_tail_rcu(&sched->list, &tquic_mp_sched_list);
 	spin_unlock(&tquic_mp_sched_list_lock);
 
-	pr_info("Registered multipath scheduler: %s\n", sched->name);
+	tquic_info("registered multipath scheduler: %s\n", sched->name);
 	return 0;
 }
 EXPORT_SYMBOL_GPL(tquic_mp_register_scheduler);
@@ -75,7 +76,7 @@ void tquic_mp_unregister_scheduler(struct tquic_mp_sched_ops *sched)
 		return;
 
 	synchronize_rcu();
-	pr_info("Unregistered multipath scheduler: %s\n", sched->name);
+	tquic_info("unregistered multipath scheduler: %s\n", sched->name);
 }
 EXPORT_SYMBOL_GPL(tquic_mp_unregister_scheduler);
 
@@ -90,6 +91,31 @@ struct tquic_mp_sched_ops *tquic_mp_sched_find(const char *name)
 	return NULL;
 }
 EXPORT_SYMBOL_GPL(tquic_mp_sched_find);
+
+void tquic_mp_sched_notify_sent(struct tquic_connection *conn,
+				struct tquic_path *path, u32 sent_bytes)
+{
+	struct tquic_mp_sched_ops *sched;
+	struct tquic_mp_sched_ops *iter;
+
+	if (!conn || !path)
+		return;
+
+	rcu_read_lock();
+	sched = conn->scheduler;
+	if (sched) {
+		list_for_each_entry_rcu(iter, &tquic_mp_sched_list, list) {
+			if (iter == sched) {
+				if (iter->packet_sent)
+					iter->packet_sent(conn, path,
+							  sent_bytes);
+				break;
+			}
+		}
+	}
+	rcu_read_unlock();
+}
+EXPORT_SYMBOL_GPL(tquic_mp_sched_notify_sent);
 
 void tquic_mp_sched_notify_ack(struct tquic_connection *conn,
 			       struct tquic_path *path, u64 acked_bytes)

@@ -14,6 +14,7 @@
 #include <linux/timer.h>
 #include <linux/workqueue.h>
 #include <linux/random.h>
+#include <crypto/utils.h>
 #include <linux/netdevice.h>
 #include <linux/inetdevice.h>
 #include <linux/rtnetlink.h>
@@ -25,6 +26,7 @@
 #include <net/tquic_pmtud.h>
 #include <uapi/linux/tquic_pm.h>
 #include "../tquic_compat.h"
+#include "../tquic_debug.h"
 #include "../cong/tquic_cong.h"
 #include "../protocol.h"
 #include "../core/additional_addresses.h"
@@ -154,8 +156,8 @@ int tquic_pm_handle_response(struct tquic_connection *conn,
 	ktime_t now = ktime_get();
 	u32 rtt_us;
 
-	/* Verify challenge data matches */
-	if (memcmp(data, path->challenge_data, 8) != 0) {
+	/* Verify challenge data matches (constant-time to prevent timing attacks) */
+	if (crypto_memneq(data, path->challenge_data, 8)) {
 		pr_debug("tquic_pm: PATH_RESPONSE mismatch on path %u\n",
 			 path->path_id);
 		return -EINVAL;
@@ -168,8 +170,8 @@ int tquic_pm_handle_response(struct tquic_connection *conn,
 	/* Path is validated */
 	if (path->state == TQUIC_PATH_PENDING) {
 		path->state = TQUIC_PATH_ACTIVE;
-		pr_info("tquic_pm: path %u validated (RTT: %u us)\n",
-			path->path_id, rtt_us);
+		tquic_info("path %u validated (RTT: %u us)\n",
+			   path->path_id, rtt_us);
 	}
 
 	path->probe_count = 0;
@@ -181,6 +183,11 @@ EXPORT_SYMBOL_GPL(tquic_pm_handle_response);
 
 /*
  * Probe all paths periodically
+ *
+ * Uses paths_lock when modifying path state to prevent races with
+ * concurrent validation timeouts and response handlers. Probing
+ * (sending PATH_CHALLENGE) is done outside the lock to avoid
+ * holding the lock across potentially blocking I/O.
  */
 static void tquic_pm_probe_work(struct work_struct *work)
 {
@@ -188,10 +195,14 @@ static void tquic_pm_probe_work(struct work_struct *work)
 		container_of(work, struct tquic_pm_state, probe_work.work);
 	struct tquic_connection *conn = pm->conn;
 	struct tquic_path *path;
+	struct tquic_path *probe_paths[TQUIC_MAX_PATHS];
+	struct tquic_path *fail_paths[TQUIC_MAX_PATHS];
+	int num_probe = 0, num_fail = 0;
 	ktime_t now = ktime_get();
+	int i;
 
-	rcu_read_lock();
-	list_for_each_entry_rcu(path, &conn->paths, list) {
+	spin_lock_bh(&conn->paths_lock);
+	list_for_each_entry(path, &conn->paths, list) {
 		s64 idle_ms;
 
 		/* Skip unused/closed paths */
@@ -207,19 +218,28 @@ static void tquic_pm_probe_work(struct work_struct *work)
 				/* Path has failed */
 				if (path->state != TQUIC_PATH_FAILED) {
 					path->state = TQUIC_PATH_FAILED;
-					pr_warn("tquic_pm: path %u failed after %u probes\n",
-						path->path_id,
-						path->probe_count);
-					/* Notify bonding layer */
-					tquic_bond_path_failed(conn, path);
+					if (num_fail < TQUIC_MAX_PATHS)
+						fail_paths[num_fail++] = path;
 				}
 			} else {
-				/* Send probe */
-				tquic_pm_send_challenge(conn, path);
+				if (num_probe < TQUIC_MAX_PATHS)
+					probe_paths[num_probe++] = path;
 			}
 		}
 	}
-	rcu_read_unlock();
+	spin_unlock_bh(&conn->paths_lock);
+
+	/* Send probes outside lock */
+	for (i = 0; i < num_probe; i++)
+		tquic_pm_send_challenge(conn, probe_paths[i]);
+
+	/* Notify bonding layer about failures outside lock */
+	for (i = 0; i < num_fail; i++) {
+		tquic_warn("path %u failed after %u probes\n",
+			   fail_paths[i]->path_id,
+			   fail_paths[i]->probe_count);
+		tquic_bond_path_failed(conn, fail_paths[i]);
+	}
 
 	/* Reschedule */
 	schedule_delayed_work(&pm->probe_work,
@@ -271,19 +291,27 @@ static int tquic_pm_netdev_event(struct notifier_block *nb, unsigned long event,
 
 	case NETDEV_DOWN:
 		pr_debug("tquic_pm: interface %s went down\n", dev->name);
-		/* Mark paths through this interface as failed */
+		/* Mark paths through this specific interface as failed */
 		if (pm->conn) {
 			struct tquic_path *path;
 
 			list_for_each_entry(path, &pm->conn->paths, list) {
-				/* Check if path uses this interface */
+				/*
+				 * Only mark paths that actually use the
+				 * interface that went down. Without this
+				 * check, all active paths would be marked
+				 * failed even if they use different interfaces.
+				 */
+				if (path->dev != dev)
+					continue;
+
 				if (path->state == TQUIC_PATH_ACTIVE ||
 				    path->state == TQUIC_PATH_STANDBY) {
 					path->state = TQUIC_PATH_FAILED;
 					tquic_bond_path_failed(pm->conn, path);
 					pr_debug(
-						"tquic_pm: path %u failed (interface down)\n",
-						path->path_id);
+						"tquic_pm: path %u failed (interface %s down)\n",
+						path->path_id, dev->name);
 				}
 			}
 		}
@@ -577,27 +605,33 @@ EXPORT_SYMBOL_GPL(tquic_conn_get_path_locked);
  * @path_id: Path ID to look up
  *
  * Looks up a path by its ID using the connection's path list.
- * Caller must hold appropriate locks or be in RCU read-side critical section.
+ * Uses paths_lock for safe access, ensuring the returned pointer
+ * remains valid even after the function returns.
+ *
+ * Caller must be prepared that the path may be freed after this
+ * returns if it doesn't hold paths_lock or otherwise prevent removal.
+ * For RCU-safe lookup, use tquic_conn_get_path_locked() with paths_lock held.
  *
  * Return: Pointer to path if found, NULL otherwise
  */
 struct tquic_path *tquic_pm_get_path(struct tquic_pm_state *pm, u32 path_id)
 {
 	struct tquic_path *path;
+	struct tquic_path *found = NULL;
 
 	if (!pm || !pm->conn)
 		return NULL;
 
-	rcu_read_lock();
-	list_for_each_entry_rcu(path, &pm->conn->paths, list) {
+	spin_lock_bh(&pm->conn->paths_lock);
+	list_for_each_entry(path, &pm->conn->paths, list) {
 		if (path->path_id == path_id) {
-			rcu_read_unlock();
-			return path;
+			found = path;
+			break;
 		}
 	}
-	rcu_read_unlock();
+	spin_unlock_bh(&pm->conn->paths_lock);
 
-	return NULL;
+	return found;
 }
 EXPORT_SYMBOL_GPL(tquic_pm_get_path);
 
@@ -771,6 +805,14 @@ static struct tquic_path *tquic_path_alloc(struct tquic_connection *conn,
 	skb_queue_head_init(&path->response.queue);
 	atomic_set(&path->response.count, 0);
 
+	/*
+	 * Anti-amplification state (RFC 9000 Section 8.1).
+	 * New paths start with limits active until validated.
+	 */
+	path->anti_amplification.bytes_received = 0;
+	path->anti_amplification.bytes_sent = 0;
+	path->anti_amplification.active = true;
+
 	/* Default MTU (will be updated via PMTU discovery) */
 	path->mtu = 1200;
 	path->priority = 0;
@@ -881,8 +923,8 @@ int tquic_conn_add_path_safe(struct tquic_connection *conn,
 		tquic_pm_nl_send_event(sock_net(conn->sk), conn, path,
 				       TQUIC_PM_EVENT_CREATED);
 
-	pr_info("tquic: added path %u (%pISpc -> %pISpc)\n", path->path_id,
-		&path->local_addr, &path->remote_addr);
+	tquic_info("added path %u (%pISpc -> %pISpc)\n", path->path_id,
+		   &path->local_addr, &path->remote_addr);
 
 	return path->path_id;
 }
@@ -966,7 +1008,7 @@ int tquic_conn_remove_path_safe(struct tquic_connection *conn, u32 path_id)
 	/* Free after RCU grace period */
 	kfree_rcu(path, rcu_head);
 
-	pr_info("tquic: removed path %u\n", path_id);
+	tquic_info("removed path %u\n", path_id);
 
 	return 0;
 }
@@ -1037,19 +1079,37 @@ EXPORT_SYMBOL_GPL(tquic_conn_lookup_by_token);
 
 /*
  * Flush all paths from connection
+ *
+ * Removes all non-active paths from the connection's path list.
+ * Must acquire paths_lock to prevent races with concurrent path
+ * additions, removals, and RCU readers.
  */
 void tquic_conn_flush_paths(struct tquic_connection *conn)
 {
 	struct tquic_path *path, *tmp;
+	LIST_HEAD(remove_list);
 
+	spin_lock_bh(&conn->paths_lock);
 	list_for_each_entry_safe(path, tmp, &conn->paths, list) {
 		/* Don't remove active path */
 		if (path == conn->active_path)
 			continue;
 
-		list_del(&path->list);
-		kfree(path);
+		list_del_rcu(&path->list);
 		conn->num_paths--;
+		list_add(&path->list, &remove_list);
+	}
+	spin_unlock_bh(&conn->paths_lock);
+
+	/* Free paths after RCU grace period */
+	synchronize_rcu();
+	list_for_each_entry_safe(path, tmp, &remove_list, list) {
+		list_del(&path->list);
+		del_timer_sync(&path->validation.timer);
+		skb_queue_purge(&path->response.queue);
+		if (path->dev)
+			dev_put(path->dev);
+		kfree(path);
 	}
 }
 EXPORT_SYMBOL_GPL(tquic_conn_flush_paths);
@@ -1120,10 +1180,33 @@ bool tquic_pm_check_address_change(struct tquic_connection *conn,
 			}
 		}
 
-		/* Update path's remote address if NAT rebind confirmed */
+		/*
+		 * Update path's remote address and trigger re-validation.
+		 *
+		 * RFC 9000 Section 9.3: An endpoint MUST perform path
+		 * validation if it detects any change to a peer's address.
+		 * Until the new path is validated, the endpoint MUST limit
+		 * data sent to the new address (anti-amplification).
+		 */
 		spin_lock_bh(&conn->paths_lock);
 		memcpy(&path->remote_addr, from_addr, sizeof(*from_addr));
+
+		/* Save current state and set to pending for re-validation */
+		if (path->state == TQUIC_PATH_ACTIVE ||
+		    path->state == TQUIC_PATH_STANDBY ||
+		    path->state == TQUIC_PATH_VALIDATED) {
+			path->saved_state = path->state;
+			path->state = TQUIC_PATH_PENDING;
+		}
+
+		/* Enable anti-amplification limits on the new address */
+		path->anti_amplification.bytes_received = 0;
+		path->anti_amplification.bytes_sent = 0;
+		path->anti_amplification.active = true;
 		spin_unlock_bh(&conn->paths_lock);
+
+		/* Start path validation to the new address */
+		tquic_path_start_validation(conn, path);
 	}
 
 	return nat_rebind;

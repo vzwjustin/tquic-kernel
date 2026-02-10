@@ -22,6 +22,7 @@
 #include <linux/if_ether.h>
 #include <net/tquic.h>
 #include <net/inet_ecn.h>
+#include "../tquic_debug.h"
 
 /* Forward declaration for ack.h types */
 #include "ack.h"
@@ -146,7 +147,7 @@ int tquic_ecn_validate_ack(struct tquic_path *path, struct tquic_ack_frame *ack)
 	if (ack->ecn.ect0 < path->ecn.ect0_acked ||
 	    ack->ecn.ect1 < path->ecn.ect1_acked ||
 	    ack->ecn.ce < path->ecn.ce_acked) {
-		pr_debug("TQUIC: ECN validation failed: counts decreased\n");
+		tquic_warn("ECN validation failed: counts decreased\n");
 		path->ecn.ecn_failed = 1;
 		path->ecn.ecn_testing = 0;
 		path->ecn.ecn_capable = 0;
@@ -167,7 +168,8 @@ int tquic_ecn_validate_ack(struct tquic_path *path, struct tquic_ack_frame *ack)
 	 * not exceed what we sent.
 	 */
 	if (total_ect_acked > total_ect_sent) {
-		pr_debug("TQUIC: ECN validation failed: more acked than sent\n");
+		tquic_warn("ECN validation failed: acked %llu > sent %llu\n",
+			   total_ect_acked, total_ect_sent);
 		path->ecn.ecn_failed = 1;
 		path->ecn.ecn_testing = 0;
 		path->ecn.ecn_capable = 0;
@@ -185,12 +187,18 @@ int tquic_ecn_validate_ack(struct tquic_path *path, struct tquic_ack_frame *ack)
 	/*
 	 * If we're in testing mode and received valid ECN feedback,
 	 * mark the path as ECN capable.
+	 *
+	 * Per RFC 9000 Section 13.4.2.1: require that the total ECN
+	 * count increase is at least a meaningful fraction of packets
+	 * sent, to prevent trivial spoofing.
 	 */
-	if (path->ecn.ecn_testing && total_ect_acked > 0) {
+	if (path->ecn.ecn_testing && total_ect_acked > 0 &&
+	    total_ect_sent >= 10 &&
+	    total_ect_acked >= total_ect_sent / 2) {
 		path->ecn.ecn_validated = 1;
 		path->ecn.ecn_capable = 1;
 		path->ecn.ecn_testing = 0;
-		pr_debug("TQUIC: ECN validation successful for path\n");
+		tquic_info("ECN validation successful for path\n");
 	}
 
 	return new_ce_count > 0 ? new_ce_count : 0;
@@ -217,8 +225,8 @@ void tquic_ecn_process_ce(struct tquic_connection *conn,
 	 * An increase in ECN-CE count indicates congestion.
 	 * The sender MUST reduce its congestion window.
 	 */
-	pr_debug("TQUIC: ECN-CE received, count=%llu, triggering congestion\n",
-		 ce_count);
+	tquic_conn_info(conn, "ECN-CE count=%llu, congestion event\n",
+			ce_count);
 
 	/*
 	 * Trigger congestion control response via the tquic cong framework.
@@ -336,7 +344,7 @@ void tquic_ecn_disable(struct tquic_path *path)
 	path->ecn.ecn_testing = 0;
 	path->ecn.ecn_marking = TQUIC_ECN_NOT_ECT;
 
-	pr_debug("TQUIC: ECN disabled for path\n");
+	tquic_info("ECN disabled for path %u\n", path->path_id);
 }
 EXPORT_SYMBOL(tquic_ecn_disable);
 

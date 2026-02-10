@@ -19,8 +19,14 @@
 #define TQUIC_ECN_ECT0		0x02	/* Classic ECN */
 #define TQUIC_ECN_CE		0x03	/* Congestion Experienced */
 
-/* L4S detection thresholds */
-#define TQUIC_L4S_CE_THRESHOLD		2	/* CE marks to detect L4S AQM */
+/*
+ * L4S detection thresholds.
+ *
+ * CE threshold must be high enough that an attacker cannot easily forge
+ * enough CE marks to force L4S mode. Require multiple CE marks across
+ * multiple probe rounds.
+ */
+#define TQUIC_L4S_CE_THRESHOLD		10	/* CE marks to detect L4S AQM */
 #define TQUIC_L4S_CLASSIC_THRESHOLD	5	/* Loss events to detect classic */
 
 /**

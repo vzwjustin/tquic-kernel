@@ -39,6 +39,7 @@
 #include <net/tquic.h>
 
 #include "tquic_compat.h"
+#include "tquic_debug.h"
 
 /* QUIC packet header constants */
 #define QUIC_FORM_BIT			0x80	/* Long vs Short header */
@@ -63,6 +64,9 @@
 #define TQUIC_NF_TIMEOUT_ESTABLISHED	300
 #define TQUIC_NF_TIMEOUT_HANDSHAKE	30
 #define TQUIC_NF_TIMEOUT_IDLE		60
+
+/* Maximum tracked connections to prevent memory exhaustion from spoofed IPs */
+#define TQUIC_NF_MAX_CONNECTIONS	65536
 
 /* Maximum connection ID length */
 #define QUIC_MAX_CID_LEN		20
@@ -390,8 +394,10 @@ static unsigned int tquic_nf_hook_in(void *priv, struct sk_buff *skb,
 	struct tquic_nf_pkt_info pkt_info;
 	struct tquic_nf_conn *conn;
 	const u8 *quic_data;
+	unsigned int udp_len_host;
 	size_t quic_len;
 	int udp_offset;
+	int total_pull;
 	__be16 dport;
 
 	if (!skb)
@@ -407,6 +413,8 @@ static unsigned int tquic_nf_hook_in(void *priv, struct sk_buff *skb,
 	if (!pskb_may_pull(skb, udp_offset + sizeof(struct udphdr)))
 		return NF_ACCEPT;
 
+	/* Re-fetch iph after pskb_may_pull may have reallocated */
+	iph = ip_hdr(skb);
 	uh = (struct udphdr *)(skb->data + udp_offset);
 	dport = uh->dest;
 
@@ -414,12 +422,35 @@ static unsigned int tquic_nf_hook_in(void *priv, struct sk_buff *skb,
 	if (dport != htons(443) && dport != htons(8443) && dport != htons(4433))
 		return NF_ACCEPT;
 
-	/* Get QUIC payload */
-	quic_data = (u8 *)uh + sizeof(struct udphdr);
-	quic_len = ntohs(uh->len) - sizeof(struct udphdr);
-
-	if (quic_len < 1)
+	/*
+	 * Validate UDP length to prevent integer underflow.
+	 * uh->len includes the UDP header itself and must be at least
+	 * sizeof(struct udphdr) + 1 for a minimal QUIC packet.
+	 */
+	udp_len_host = ntohs(uh->len);
+	if (udp_len_host <= sizeof(struct udphdr))
 		return NF_ACCEPT;
+
+	quic_len = udp_len_host - sizeof(struct udphdr);
+
+	/*
+	 * Pull the full UDP payload into the linear region so that
+	 * quic_data pointer is valid. Without this, data in skb page
+	 * frags would be inaccessible via direct pointer.
+	 */
+	total_pull = udp_offset + udp_len_host;
+	if (total_pull > skb->len)
+		total_pull = skb->len;
+
+	if (!pskb_may_pull(skb, total_pull))
+		return NF_ACCEPT;
+
+	/* Re-fetch headers after potential reallocation */
+	iph = ip_hdr(skb);
+	uh = (struct udphdr *)(skb->data + udp_offset);
+
+	/* Get QUIC payload - now guaranteed to be in linear region */
+	quic_data = (u8 *)uh + sizeof(struct udphdr);
 
 	/* Parse QUIC header */
 	if (tquic_nf_parse_packet(quic_data, quic_len, &pkt_info) < 0)
@@ -459,6 +490,10 @@ static unsigned int tquic_nf_hook_in(void *priv, struct sk_buff *skb,
 
 	/* New connection - create tracking entry for Initial packets */
 	if (pkt_info.is_long_header && pkt_info.pkt_type == QUIC_LH_TYPE_INITIAL) {
+		/* Enforce maximum connection tracking limit */
+		if (atomic64_read(&tquic_nf_conn_count) >= TQUIC_NF_MAX_CONNECTIONS)
+			return NF_ACCEPT;
+
 		conn = tquic_nf_conn_alloc();
 		if (conn) {
 			conn->dcid = pkt_info.dcid;
@@ -482,7 +517,7 @@ static unsigned int tquic_nf_hook_in(void *priv, struct sk_buff *skb,
 			}
 
 			tquic_nf_conn_insert(conn);
-			pr_debug("tquic_nf: new connection tracked\n");
+			tquic_dbg("nf:new connection tracked\n");
 		}
 	}
 
@@ -517,19 +552,29 @@ static unsigned int tquic_nf_hook_in6(void *priv, struct sk_buff *skb,
 	struct tquic_nf_pkt_info pkt_info;
 	struct tquic_nf_conn *conn;
 	const u8 *quic_data;
+	unsigned int udp_len_host;
 	size_t quic_len;
+	int total_pull;
 	__be16 dport;
 
 	if (!skb)
 		return NF_ACCEPT;
 
 	ip6h = ipv6_hdr(skb);
+
+	/*
+	 * Only handle direct UDP next header. IPv6 extension headers
+	 * would require walking the extension header chain which is
+	 * complex and not needed for basic QUIC tracking.
+	 */
 	if (ip6h->nexthdr != IPPROTO_UDP)
 		return NF_ACCEPT;
 
 	if (!pskb_may_pull(skb, sizeof(struct ipv6hdr) + sizeof(struct udphdr)))
 		return NF_ACCEPT;
 
+	/* Re-fetch after potential reallocation */
+	ip6h = ipv6_hdr(skb);
 	uh = (struct udphdr *)(skb->data + sizeof(struct ipv6hdr));
 	dport = uh->dest;
 
@@ -537,11 +582,26 @@ static unsigned int tquic_nf_hook_in6(void *priv, struct sk_buff *skb,
 	if (dport != htons(443) && dport != htons(8443) && dport != htons(4433))
 		return NF_ACCEPT;
 
-	quic_data = (u8 *)uh + sizeof(struct udphdr);
-	quic_len = ntohs(uh->len) - sizeof(struct udphdr);
-
-	if (quic_len < 1)
+	/* Validate UDP length to prevent integer underflow */
+	udp_len_host = ntohs(uh->len);
+	if (udp_len_host <= sizeof(struct udphdr))
 		return NF_ACCEPT;
+
+	quic_len = udp_len_host - sizeof(struct udphdr);
+
+	/* Pull full UDP payload into linear region for safe access */
+	total_pull = sizeof(struct ipv6hdr) + udp_len_host;
+	if (total_pull > skb->len)
+		total_pull = skb->len;
+
+	if (!pskb_may_pull(skb, total_pull))
+		return NF_ACCEPT;
+
+	/* Re-fetch after potential reallocation */
+	ip6h = ipv6_hdr(skb);
+	uh = (struct udphdr *)(skb->data + sizeof(struct ipv6hdr));
+
+	quic_data = (u8 *)uh + sizeof(struct udphdr);
 
 	if (tquic_nf_parse_packet(quic_data, quic_len, &pkt_info) < 0)
 		return NF_ACCEPT;
@@ -569,6 +629,10 @@ static unsigned int tquic_nf_hook_in6(void *priv, struct sk_buff *skb,
 
 	/* New IPv6 connection */
 	if (pkt_info.is_long_header && pkt_info.pkt_type == QUIC_LH_TYPE_INITIAL) {
+		/* Enforce maximum connection tracking limit */
+		if (atomic64_read(&tquic_nf_conn_count) >= TQUIC_NF_MAX_CONNECTIONS)
+			return NF_ACCEPT;
+
 		conn = tquic_nf_conn_alloc();
 		if (conn) {
 			struct sockaddr_in6 *local, *remote;
@@ -726,7 +790,7 @@ int __init tquic_nf_init(void)
 {
 	int ret;
 
-	pr_info("TQUIC Netfilter integration initializing\n");
+	tquic_info("netfilter integration initializing\n");
 
 	/* Initialize hash tables */
 	hash_init(tquic_nf_cid_hash);
@@ -736,7 +800,7 @@ int __init tquic_nf_init(void)
 	ret = nf_register_net_hooks(&init_net, tquic_nf_hooks,
 				    ARRAY_SIZE(tquic_nf_hooks));
 	if (ret) {
-		pr_err("Failed to register netfilter hooks: %d\n", ret);
+		tquic_err("failed to register netfilter hooks: %d\n", ret);
 		return ret;
 	}
 
@@ -750,7 +814,7 @@ int __init tquic_nf_init(void)
 					  &tquic_nf_proc_ops);
 #endif
 
-	pr_info("TQUIC Netfilter integration initialized\n");
+	tquic_info("netfilter integration initialized\n");
 	return 0;
 }
 
@@ -760,7 +824,7 @@ void __exit tquic_nf_exit(void)
 	struct hlist_node *tmp;
 	int bkt;
 
-	pr_info("TQUIC Netfilter integration exiting\n");
+	tquic_info("netfilter integration exiting\n");
 
 #ifdef CONFIG_PROC_FS
 	if (tquic_nf_proc_entry)
@@ -787,7 +851,7 @@ void __exit tquic_nf_exit(void)
 	/* Wait for RCU grace period */
 	synchronize_rcu();
 
-	pr_info("TQUIC Netfilter integration exited\n");
+	tquic_info("netfilter integration exited\n");
 }
 
 EXPORT_SYMBOL_GPL(tquic_nf_init);

@@ -12,6 +12,7 @@
 #include <linux/kernel.h>
 #include <linux/slab.h>
 #include <net/tquic.h>
+#include "../tquic_debug.h"
 #include "persistent_cong.h"
 
 /* BBR parameters */
@@ -228,7 +229,7 @@ static void *tquic_bbr_init(struct tquic_path *path)
 	bbr->cwnd = 10 * 1200;
 	bbr->min_rtt_us = UINT_MAX;
 
-	pr_debug("tquic_bbr: initialized for path %u\n", path->path_id);
+	tquic_dbg("bbr: initialized for path %u\n", path->path_id);
 
 	return bbr;
 }
@@ -254,6 +255,18 @@ static void tquic_bbr_on_ack(void *state, u64 bytes_acked, u64 rtt_us)
 
 	if (!bbr)
 		return;
+
+	/*
+	 * Reset ECN round flag if an RTT has elapsed since the last
+	 * ECN response, per RFC 9002 Section 7.1 (once-per-RTT limit).
+	 */
+	if (bbr->ecn_in_round && bbr->min_rtt_us > 0 &&
+	    bbr->min_rtt_us != UINT_MAX) {
+		s64 elapsed = ktime_us_delta(ktime_get(), bbr->last_ecn_time);
+
+		if (elapsed >= (s64)bbr->min_rtt_us)
+			bbr->ecn_in_round = false;
+	}
 
 	/* Update min RTT */
 	if (rtt_us < bbr->min_rtt_us || bbr->min_rtt_us == UINT_MAX) {
@@ -285,13 +298,28 @@ static void tquic_bbr_on_ack(void *state, u64 bytes_acked, u64 rtt_us)
 		break;
 
 	case BBR_DRAIN:
-		/* Drain excess queue */
+		/*
+		 * Drain excess queue built up during STARTUP.
+		 * Stay in DRAIN until estimated inflight <= BDP.
+		 * BBR_DRAIN_GAIN < 1.0, so pacing rate < BtlBw,
+		 * which will gradually reduce the queue.
+		 */
 		bbr->pacing_gain = BBR_DRAIN_GAIN;
-		/* Transition to PROBE_BW when inflight drops */
-		bbr->mode = BBR_PROBE_BW;
-		bbr->cycle_idx = 0;
-		bbr->cycle_stamp = now_ms;
-		bbr->pacing_gain = bbr_pacing_cycle[0];
+		if (bbr->bw > 0 && bbr->min_rtt_us != UINT_MAX) {
+			u64 bdp = bbr->bw * bbr->min_rtt_us / 1000000;
+
+			/*
+			 * Transition to PROBE_BW once inflight has
+			 * drained to the estimated BDP. Use cwnd as
+			 * a proxy for inflight.
+			 */
+			if (bbr->cwnd <= bdp) {
+				bbr->mode = BBR_PROBE_BW;
+				bbr->cycle_idx = 0;
+				bbr->cycle_stamp = now_ms;
+				bbr->pacing_gain = bbr_pacing_cycle[0];
+			}
+		}
 		break;
 
 	case BBR_PROBE_BW:
@@ -356,7 +384,7 @@ static void tquic_bbr_on_ecn(void *state, u64 ecn_ce_count)
 	 * Use time-based rate limiting.
 	 */
 	if (bbr->ecn_in_round) {
-		pr_debug("tquic_bbr: ECN CE ignored (already responded this round)\n");
+		tquic_dbg("bbr: ECN CE ignored (already responded this round)\n");
 		return;
 	}
 
@@ -364,7 +392,7 @@ static void tquic_bbr_on_ecn(void *state, u64 ecn_ce_count)
 	if (bbr->min_rtt_us > 0 && bbr->min_rtt_us != UINT_MAX) {
 		time_since_last = ktime_us_delta(now, bbr->last_ecn_time);
 		if (time_since_last < bbr->min_rtt_us) {
-			pr_debug("tquic_bbr: ECN CE ignored (within RTT window)\n");
+			tquic_dbg("bbr: ECN CE ignored (within RTT window)\n");
 			return;
 		}
 	}
@@ -443,8 +471,8 @@ static void tquic_bbr_on_ecn(void *state, u64 ecn_ce_count)
 	/* Update pacing rate after changes */
 	bbr_set_pacing_rate(bbr);
 
-	pr_debug("tquic_bbr: ECN CE response, ce_count=%llu total=%llu cwnd=%llu inflight_hi=%llu\n",
-		 ecn_ce_count, bbr->ecn_ce_total, bbr->cwnd, bbr->inflight_hi);
+	tquic_dbg("bbr: ECN CE response, ce_count=%llu total=%llu cwnd=%llu inflight_hi=%llu\n",
+		  ecn_ce_count, bbr->ecn_ce_total, bbr->cwnd, bbr->inflight_hi);
 }
 
 static void tquic_bbr_on_rtt(void *state, u64 rtt_us)
@@ -497,8 +525,8 @@ static void tquic_bbr_on_persistent_cong(void *state,
 	if (!bbr || !info)
 		return;
 
-	pr_info("tquic_bbr: persistent congestion, resetting cwnd %llu -> %llu\n",
-		bbr->cwnd, info->min_cwnd);
+	tquic_warn("bbr: persistent congestion, cwnd %llu -> %llu\n",
+		   bbr->cwnd, info->min_cwnd);
 
 	/* Reset cwnd to minimum per RFC 9002 */
 	bbr->cwnd = info->min_cwnd;

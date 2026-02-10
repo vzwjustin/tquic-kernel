@@ -22,6 +22,7 @@
 #include <linux/list.h>
 #include <linux/rbtree.h>
 #include <net/tquic.h>
+#include "../tquic_debug.h"
 
 /* Forward declarations for exported functions not in a public header */
 void tquic_sched_add_stream(struct tquic_connection *conn,
@@ -200,6 +201,8 @@ int tquic_sched_init(struct tquic_connection *conn)
 	}
 
 	conn->priority_state = state;
+
+	tquic_conn_dbg(conn, "priority scheduler initialized\n");
 	return 0;
 }
 EXPORT_SYMBOL_GPL(tquic_sched_init);

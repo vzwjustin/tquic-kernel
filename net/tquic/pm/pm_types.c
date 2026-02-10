@@ -17,6 +17,7 @@
 #include <net/tquic.h>
 #include <net/tquic_pm.h>
 #include "../tquic_compat.h"
+#include "../tquic_debug.h"
 
 /* Per-netns sysctl configuration */
 static int pm_type_min = TQUIC_PM_TYPE_KERNEL;

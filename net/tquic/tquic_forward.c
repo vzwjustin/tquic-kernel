@@ -41,6 +41,7 @@
 #endif
 
 #include "protocol.h"
+#include "tquic_debug.h"
 #include "tquic_compat.h"
 #include "tquic_tunnel.h"
 
@@ -59,6 +60,9 @@
 
 /* Maximum pending hairpin connections per client */
 #define TQUIC_MAX_HAIRPIN_PENDING	64
+
+/* Maximum bytes per hairpin forward operation to prevent amplification */
+#define TQUIC_HAIRPIN_MAX_BYTES_PER_OP	(256 * 1024)  /* 256 KB */
 
 /*
  * =============================================================================
@@ -334,8 +338,16 @@ ssize_t tquic_forward_splice(struct tquic_tunnel *tunnel, int direction)
 		char *buf;
 		size_t bufsize = TQUIC_SPLICE_BUFSIZE;
 
-		/* Allocate temporary receive buffer */
-		buf = kmalloc(bufsize, GFP_KERNEL);
+		/*
+		 * Allocate temporary receive buffer.
+		 *
+		 * Use GFP_NOIO since this function may be called from
+		 * work queue context where I/O recursion could occur.
+		 * The caller context determines if sleeping is safe;
+		 * GFP_NOIO is safe in all non-atomic contexts while
+		 * avoiding I/O recursion deadlocks.
+		 */
+		buf = kmalloc(bufsize, GFP_NOIO);
 		if (!buf)
 			return -ENOMEM;
 
@@ -670,7 +682,7 @@ ssize_t tquic_forward_hairpin(struct tquic_tunnel *tunnel,
 		if (IS_ERR(dst_stream)) {
 			spin_unlock_bh(&peer_conn->lock);
 			err = PTR_ERR(dst_stream);
-			pr_debug("tquic: hairpin stream creation failed: %d\n", err);
+			tquic_dbg("hairpin stream creation failed: %d\n", err);
 			return err;
 		}
 	}
@@ -685,9 +697,14 @@ ssize_t tquic_forward_hairpin(struct tquic_tunnel *tunnel,
 	 */
 	__skb_queue_head_init(&tx_queue);
 
-	/* Dequeue all available data from source stream */
+	/*
+	 * Dequeue available data from source stream, limited to
+	 * TQUIC_HAIRPIN_MAX_BYTES_PER_OP per operation to prevent
+	 * a single client from flooding another through hairpin.
+	 */
 	spin_lock_bh(&src_stream->recv_buf.lock);
-	while ((skb = __skb_dequeue(&src_stream->recv_buf)) != NULL) {
+	while (total_bytes < TQUIC_HAIRPIN_MAX_BYTES_PER_OP &&
+	       (skb = __skb_dequeue(&src_stream->recv_buf)) != NULL) {
 		struct tquic_hairpin_header *hdr;
 		unsigned int payload_offset = 0;
 
@@ -768,7 +785,7 @@ ssize_t tquic_forward_hairpin(struct tquic_tunnel *tunnel,
 	 */
 	tquic_stream_wake(dst_stream);
 
-	pr_debug("tquic: hairpin forwarded %zd bytes, hop=%u\n",
+	tquic_dbg("hairpin forwarded %zd bytes, hop=%u\n",
 		 total_bytes, hop_count + 1);
 
 	return total_bytes;
@@ -864,7 +881,7 @@ int tquic_forward_setup_nat(struct net_device *dev)
 	 * We just verify the output device is up and has a route.
 	 */
 	if (!(dev->flags & IFF_UP)) {
-		pr_warn("tquic: NAT device %s is down\n", dev->name);
+		tquic_warn("NAT device %s is down\n", dev->name);
 		return -ENETDOWN;
 	}
 
@@ -894,6 +911,7 @@ EXPORT_SYMBOL_GPL(tquic_forward_setup_nat);
 #define TQUIC_PMTU_DEFAULT_IPV4		1500
 #define TQUIC_PMTU_DEFAULT_IPV6		1280
 #define TQUIC_PMTU_CACHE_TIMEOUT_MS	(10 * 60 * 1000)  /* 10 minutes */
+#define TQUIC_PMTU_CACHE_MAX_ENTRIES	4096	/* Maximum cache entries */
 
 /**
  * struct tquic_pmtu_entry - PMTU cache entry
@@ -919,6 +937,7 @@ struct tquic_pmtu_entry {
 static DEFINE_HASHTABLE(tquic_pmtu_cache, TQUIC_PMTU_CACHE_BITS);
 static DEFINE_SPINLOCK(tquic_pmtu_lock);
 static struct timer_list tquic_pmtu_gc_timer;
+static atomic_t tquic_pmtu_entry_count = ATOMIC_INIT(0);
 
 /**
  * tquic_pmtu_hash_addr - Hash destination address for PMTU lookup
@@ -1029,6 +1048,12 @@ static int tquic_fwd_pmtu_update(const struct sockaddr_storage *dest,
 		return 0;
 	}
 
+	/* Enforce maximum cache entries to prevent memory exhaustion */
+	if (atomic_read(&tquic_pmtu_entry_count) >= TQUIC_PMTU_CACHE_MAX_ENTRIES) {
+		spin_unlock_bh(&tquic_pmtu_lock);
+		return -ENOSPC;
+	}
+
 	/* Create new entry */
 	entry = kzalloc(sizeof(*entry), GFP_ATOMIC);
 	if (!entry) {
@@ -1043,6 +1068,7 @@ static int tquic_fwd_pmtu_update(const struct sockaddr_storage *dest,
 	entry->df_required = df_required;
 
 	hash_add_rcu(tquic_pmtu_cache, &entry->node, hash);
+	atomic_inc(&tquic_pmtu_entry_count);
 
 	spin_unlock_bh(&tquic_pmtu_lock);
 
@@ -1063,6 +1089,7 @@ static void tquic_pmtu_gc_callback(struct timer_list *t)
 	hash_for_each_safe(tquic_pmtu_cache, bkt, tmp, entry, node) {
 		if (time_after(jiffies, entry->expires)) {
 			hash_del_rcu(&entry->node);
+			atomic_dec(&tquic_pmtu_entry_count);
 			kfree_rcu(entry, rcu_head);
 		}
 	}
@@ -1187,7 +1214,7 @@ static int tquic_forward_send_icmp_toobig(struct tquic_tunnel *tunnel,
 		 */
 		icmp_send(skb, ICMP_DEST_UNREACH, ICMP_FRAG_NEEDED,
 			  htonl(mtu));
-		pr_debug("tquic: sent ICMPv4 frag-needed, mtu=%u\n", mtu);
+		tquic_dbg("sent ICMPv4 frag-needed, mtu=%u\n", mtu);
 
 #if IS_ENABLED(CONFIG_IPV6)
 	} else if (tunnel->dest_addr.ss_family == AF_INET6) {
@@ -1195,7 +1222,7 @@ static int tquic_forward_send_icmp_toobig(struct tquic_tunnel *tunnel,
 		 * IPv6: Generate ICMPv6 Type 2 (Packet Too Big)
 		 */
 		icmpv6_send(skb, ICMPV6_PKT_TOOBIG, 0, mtu);
-		pr_debug("tquic: sent ICMPv6 packet-too-big, mtu=%u\n", mtu);
+		tquic_dbg("sent ICMPv6 packet-too-big, mtu=%u\n", mtu);
 #endif
 	} else {
 		return -EAFNOSUPPORT;
@@ -1237,7 +1264,7 @@ int tquic_forward_signal_mtu(struct tquic_tunnel *tunnel, u32 new_mtu)
 	/* Update PMTU cache */
 	err = tquic_fwd_pmtu_update(&tunnel->dest_addr, new_mtu, true);
 	if (err < 0) {
-		pr_warn("tquic: failed to update PMTU cache: %d\n", err);
+		tquic_warn("failed to update PMTU cache: %d\n", err);
 		/* Continue anyway - signaling is more important */
 	}
 
@@ -1283,7 +1310,7 @@ int tquic_forward_signal_mtu(struct tquic_tunnel *tunnel, u32 new_mtu)
 	/* Wake stream to trigger transmission */
 	tquic_stream_wake(stream);
 
-	pr_debug("tquic: signaled MTU %u to router via QUIC stream %llu\n",
+	tquic_dbg("signaled MTU %u to router via QUIC stream %llu\n",
 		 new_mtu, stream->id);
 
 	return 0;
@@ -1310,7 +1337,7 @@ int tquic_forward_handle_icmp_toobig(struct tquic_tunnel *tunnel,
 	if (!tunnel)
 		return -EINVAL;
 
-	pr_debug("tquic: received ICMP too-big, mtu=%u\n", mtu);
+	tquic_dbg("received ICMP too-big, mtu=%u\n", mtu);
 
 	/* Signal the new MTU to the router */
 	err = tquic_forward_signal_mtu(tunnel, mtu);
@@ -1369,7 +1396,7 @@ int tquic_forward_check_df(struct tquic_tunnel *tunnel, struct sk_buff *skb)
 		 * This honors the DF bit per RFC 791.
 		 */
 		tquic_forward_send_icmp_toobig(tunnel, skb, mtu);
-		pr_debug("tquic: dropping DF packet, len=%u > mtu=%u\n",
+		tquic_dbg("dropping DF packet, len=%u > mtu=%u\n",
 			 skb->len, mtu);
 		return -EMSGSIZE;
 	}
@@ -1463,11 +1490,11 @@ int tquic_forward_check_gro_gso(struct net_device *dev)
 	features = dev->features;
 
 	if (!(features & NETIF_F_GRO))
-		pr_warn("tquic: GRO disabled on %s - performance may suffer\n",
+		tquic_warn("GRO disabled on %s - performance may suffer\n",
 			dev->name);
 
 	if (!(features & NETIF_F_GSO))
-		pr_warn("tquic: GSO disabled on %s - performance may suffer\n",
+		tquic_warn("GSO disabled on %s - performance may suffer\n",
 			dev->name);
 
 	return 0;
@@ -1501,7 +1528,7 @@ int __init tquic_forward_init(void)
 	mod_timer(&tquic_pmtu_gc_timer,
 		  jiffies + msecs_to_jiffies(TQUIC_PMTU_CACHE_TIMEOUT_MS / 2));
 
-	pr_info("tquic: forwarding subsystem initialized (hairpin + PMTU cache)\n");
+	tquic_info("forwarding subsystem initialized (hairpin + PMTU cache)\n");
 	return 0;
 }
 
@@ -1532,6 +1559,7 @@ void __exit tquic_forward_exit(void)
 	spin_lock_bh(&tquic_pmtu_lock);
 	hash_for_each_safe(tquic_pmtu_cache, bkt, tmp, pmtu_entry, node) {
 		hash_del_rcu(&pmtu_entry->node);
+		atomic_dec(&tquic_pmtu_entry_count);
 		kfree_rcu(pmtu_entry, rcu_head);
 	}
 	spin_unlock_bh(&tquic_pmtu_lock);
@@ -1539,5 +1567,5 @@ void __exit tquic_forward_exit(void)
 	/* Wait for all RCU callbacks (including kfree_rcu) to complete */
 	rcu_barrier();
 
-	pr_info("tquic: forwarding subsystem cleaned up\n");
+	tquic_info("forwarding subsystem cleaned up\n");
 }

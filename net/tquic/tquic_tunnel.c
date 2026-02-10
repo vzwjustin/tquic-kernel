@@ -31,6 +31,7 @@
 #include <net/ipv6.h>
 
 #include "protocol.h"
+#include "tquic_debug.h"
 #include "tquic_tunnel.h"
 #include "tquic_compat.h"
 
@@ -145,6 +146,7 @@ static int tquic_tunnel_parse_header(const u8 *data, size_t len,
 
 	if (af_byte == 4) {
 		struct sockaddr_in *sin;
+		__be32 addr4;
 
 		hdr_len = TQUIC_TUNNEL_HDR_IPV4_LEN;
 		if (len < hdr_len)
@@ -152,8 +154,27 @@ static int tquic_tunnel_parse_header(const u8 *data, size_t len,
 
 		sin = (struct sockaddr_in *)&tunnel->dest_addr;
 		sin->sin_family = AF_INET;
-		memcpy(&sin->sin_addr.s_addr, &data[1], 4);
+		memcpy(&addr4, &data[1], 4);
+
+		/*
+		 * Reject dangerous destination addresses to prevent SSRF.
+		 * An attacker controlling the QUIC stream must not be able
+		 * to make the VPS connect to localhost or internal services.
+		 */
+		if (ipv4_is_loopback(addr4) ||
+		    ipv4_is_multicast(addr4) ||
+		    ipv4_is_lbcast(addr4) ||
+		    ipv4_is_zeronet(addr4)) {
+			return -EACCES;
+		}
+
+		sin->sin_addr.s_addr = addr4;
 		memcpy(&tunnel->dest_port, &data[5], 2);
+
+		/* Reject port 0 - undefined connect behavior */
+		if (tunnel->dest_port == 0)
+			return -EINVAL;
+
 		sin->sin_port = tunnel->dest_port;
 
 		/* QoS hint at offset 7 */
@@ -163,6 +184,7 @@ static int tquic_tunnel_parse_header(const u8 *data, size_t len,
 
 	} else if (af_byte == 6) {
 		struct sockaddr_in6 *sin6;
+		struct in6_addr addr6;
 
 		hdr_len = TQUIC_TUNNEL_HDR_IPV6_LEN;
 		if (len < hdr_len)
@@ -170,8 +192,26 @@ static int tquic_tunnel_parse_header(const u8 *data, size_t len,
 
 		sin6 = (struct sockaddr_in6 *)&tunnel->dest_addr;
 		sin6->sin6_family = AF_INET6;
-		memcpy(&sin6->sin6_addr, &data[1], 16);
+		memcpy(&addr6, &data[1], 16);
+
+		/*
+		 * Reject dangerous destination addresses to prevent SSRF.
+		 * Block loopback (::1), multicast (ff00::/8), and
+		 * link-local (fe80::/10) addresses.
+		 */
+		if (ipv6_addr_loopback(&addr6) ||
+		    ipv6_addr_is_multicast(&addr6) ||
+		    ipv6_addr_type(&addr6) & IPV6_ADDR_LINKLOCAL) {
+			return -EACCES;
+		}
+
+		sin6->sin6_addr = addr6;
 		memcpy(&tunnel->dest_port, &data[17], 2);
+
+		/* Reject port 0 - undefined connect behavior */
+		if (tunnel->dest_port == 0)
+			return -EINVAL;
+
 		sin6->sin6_port = tunnel->dest_port;
 
 		/* QoS hint at offset 19 */
@@ -307,7 +347,7 @@ static int tquic_tunnel_create_tcp_socket(struct tquic_tunnel *tunnel,
 				     &val, sizeof(val));
 	if (err < 0) {
 		/* TFO failure is non-fatal, continue without it */
-		pr_debug("tquic: TCP_FASTOPEN_CONNECT failed: %d\n", err);
+		tquic_dbg("TCP_FASTOPEN_CONNECT failed: %d\n", err);
 	}
 
 	/*
@@ -331,11 +371,11 @@ static int tquic_tunnel_create_tcp_socket(struct tquic_tunnel *tunnel,
 			 * packet processing to use TPROXY logic incorrectly.
 			 */
 			if (capable(CAP_NET_ADMIN)) {
-				pr_err("tquic: IP_TRANSPARENT failed despite CAP_NET_ADMIN: %d\n", err);
+				tquic_err("IP_TRANSPARENT failed despite CAP_NET_ADMIN: %d\n", err);
 				sock_release(sock);
 				return err;
 			}
-			pr_info("tquic: IP_TRANSPARENT requires CAP_NET_ADMIN, using normal mode\n");
+			tquic_info("IP_TRANSPARENT requires CAP_NET_ADMIN, using normal mode\n");
 			tunnel->is_tproxy = false;
 		} else {
 			tunnel->is_tproxy = true;
@@ -385,13 +425,19 @@ static void tquic_tunnel_connect_work(struct work_struct *work)
 	int addr_len;
 
 	tunnel = container_of(work, struct tquic_tunnel, connect_work);
-	sock = tunnel->tcp_sock;
 
-	if (!sock) {
-		tunnel->state = TQUIC_TUNNEL_CLOSED;
+	spin_lock_bh(&tunnel->lock);
+	if (tunnel->state == TQUIC_TUNNEL_CLOSED ||
+	    tunnel->state == TQUIC_TUNNEL_CLOSING ||
+	    !tunnel->tcp_sock) {
+		if (tunnel->state != TQUIC_TUNNEL_CLOSED)
+			tunnel->state = TQUIC_TUNNEL_CLOSED;
+		spin_unlock_bh(&tunnel->lock);
 		tquic_tunnel_put(tunnel);
 		return;
 	}
+	sock = tunnel->tcp_sock;
+	spin_unlock_bh(&tunnel->lock);
 
 	addr_len = tunnel->dest_addr.ss_family == AF_INET ?
 		   sizeof(struct sockaddr_in) :
@@ -417,10 +463,23 @@ static void tquic_tunnel_connect_work(struct work_struct *work)
 		spin_lock_bh(&tunnel->lock);
 		tunnel->state = TQUIC_TUNNEL_CLOSED;
 		spin_unlock_bh(&tunnel->lock);
-		pr_debug("tquic: tunnel connect failed: %d\n", err);
+		tquic_dbg("tunnel connect failed: %d\n", err);
 	}
 
 	tquic_tunnel_put(tunnel);
+}
+
+/**
+ * tquic_tunnel_forward_work - Placeholder for data forwarding work
+ * @work: Work structure embedded in tunnel
+ *
+ * Actual forwarding logic is in tquic_forward.c; this prevents a NULL
+ * function pointer dereference if forward_work is queued before the
+ * forwarding subsystem sets it up.
+ */
+static void tquic_tunnel_forward_work(struct work_struct *work)
+{
+	/* Forward work is handled by tquic_forward.c when connected */
 }
 
 /**
@@ -466,7 +525,7 @@ struct tquic_tunnel *tquic_tunnel_create(struct tquic_client *client,
 
 	/* Initialize work items */
 	INIT_WORK(&tunnel->connect_work, tquic_tunnel_connect_work);
-	INIT_WORK(&tunnel->forward_work, NULL);  /* Set up in forward.c */
+	INIT_WORK(&tunnel->forward_work, tquic_tunnel_forward_work);
 
 	/* Add to client's tunnel list */
 	spin_lock_bh(&client->tunnels_lock);
@@ -480,7 +539,7 @@ struct tquic_tunnel *tquic_tunnel_create(struct tquic_client *client,
 	if (tquic_tunnel_wq)
 		queue_work(tquic_tunnel_wq, &tunnel->connect_work);
 
-	pr_debug("tquic: created tunnel to port %d, class %d\n",
+	tquic_dbg("created tunnel to port %d, class %d\n",
 		 ntohs(tunnel->dest_port), tunnel->traffic_class);
 
 	return tunnel;
@@ -542,7 +601,7 @@ struct tquic_tunnel *tquic_tunnel_create_tproxy(struct tquic_client *client,
 	if (tquic_tunnel_wq)
 		queue_work(tquic_tunnel_wq, &tunnel->connect_work);
 
-	pr_debug("tquic: created TPROXY tunnel to port %d\n",
+	tquic_dbg("created TPROXY tunnel to port %d\n",
 		 ntohs(tunnel->dest_port));
 
 	return tunnel;
@@ -649,6 +708,7 @@ int tquic_tunnel_icmp_forward(struct tquic_tunnel *tunnel,
 	 * This enables ping/traceroute to work from router's perspective.
 	 */
 
+	spin_lock_bh(&tunnel->lock);
 	if (direction == 0) {
 		/* TX: QUIC stream -> raw socket -> internet */
 		tunnel->stats.packets_tx++;
@@ -658,6 +718,7 @@ int tquic_tunnel_icmp_forward(struct tquic_tunnel *tunnel,
 		tunnel->stats.packets_rx++;
 		tunnel->stats.bytes_rx += skb->len;
 	}
+	spin_unlock_bh(&tunnel->lock);
 
 	/*
 	 * Full implementation would:
@@ -697,9 +758,9 @@ int tquic_tunnel_handle_icmp_error(struct tquic_tunnel *tunnel,
 	 */
 	if (type == 3 && code == 4) {
 		/* IPv4 Fragmentation Needed - info contains MTU */
-		pr_debug("tquic: PMTUD signal MTU=%u\n", info);
+		tquic_dbg("PMTUD signal MTU=%u\n", info);
 		if (tquic_forward_signal_mtu(tunnel, info))
-			pr_debug("tquic: PMTUD signal failed for MTU=%u\n", info);
+			tquic_dbg("PMTUD signal failed for MTU=%u\n", info);
 	}
 
 	return 0;
@@ -722,7 +783,7 @@ int __init tquic_tunnel_init(void)
 	if (!tquic_tunnel_wq)
 		return -ENOMEM;
 
-	pr_info("tquic: tunnel subsystem initialized\n");
+	tquic_info("tunnel subsystem initialized\n");
 	return 0;
 }
 
@@ -737,7 +798,7 @@ void __exit tquic_tunnel_exit(void)
 		tquic_tunnel_wq = NULL;
 	}
 
-	pr_info("tquic: tunnel subsystem cleaned up\n");
+	tquic_info("tunnel subsystem cleaned up\n");
 }
 
 /*
@@ -811,6 +872,7 @@ int tquic_tunnel_get_stats(struct tquic_tunnel *tunnel,
 	if (!tunnel)
 		return -EINVAL;
 
+	spin_lock_bh(&tunnel->lock);
 	if (bytes_tx)
 		*bytes_tx = tunnel->stats.bytes_tx;
 	if (bytes_rx)
@@ -819,6 +881,7 @@ int tquic_tunnel_get_stats(struct tquic_tunnel *tunnel,
 		*packets_tx = tunnel->stats.packets_tx;
 	if (packets_rx)
 		*packets_rx = tunnel->stats.packets_rx;
+	spin_unlock_bh(&tunnel->lock);
 
 	return 0;
 }

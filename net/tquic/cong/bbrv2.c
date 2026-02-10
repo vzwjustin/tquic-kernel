@@ -21,6 +21,7 @@
 #include <linux/random.h>
 
 #include "bbrv2.h"
+#include "../tquic_debug.h"
 
 /* Default MTU for calculations */
 #define BBR_DEFAULT_MSS		1200
@@ -265,9 +266,12 @@ static void bbr_set_cwnd(struct bbrv2 *bbr)
  */
 static void bbr_enter_startup(struct bbrv2 *bbr)
 {
+	enum bbr_mode old_mode = bbr->mode;
+
 	bbr->mode = BBR_STARTUP;
 	bbr->pacing_gain = BBR_HIGH_GAIN;
 	bbr->cwnd_gain = BBR_HIGH_GAIN;
+	tquic_dbg("bbrv2: state %u -> STARTUP\n", old_mode);
 }
 
 /**
@@ -279,6 +283,7 @@ static void bbr_enter_drain(struct bbrv2 *bbr)
 	bbr->mode = BBR_DRAIN;
 	bbr->pacing_gain = BBR_DRAIN_GAIN;
 	bbr->cwnd_gain = BBR_HIGH_GAIN;
+	tquic_dbg("bbrv2: state -> DRAIN, cwnd=%u\n", bbr->cwnd);
 }
 
 /**
@@ -295,6 +300,8 @@ static void bbr_enter_probe_bw(struct bbrv2 *bbr)
 	/* Random start position in cycle for fairness */
 	bbr->cycle_idx = get_random_u32() % BBR_GAIN_CYCLE_LEN;
 	bbr->cycle_start = ktime_get_ns();
+	tquic_dbg("bbrv2: state -> PROBE_BW, bw=%llu cwnd=%u\n",
+		  bbr->bw, bbr->cwnd);
 }
 
 /**
@@ -307,6 +314,8 @@ static void bbr_enter_probe_rtt(struct bbrv2 *bbr)
 	bbr->pacing_gain = BBR_UNIT;
 	bbr->cwnd_gain = BBR_UNIT;
 	bbr->probe_rtt_start = ktime_get_ns();
+	tquic_dbg("bbrv2: state -> PROBE_RTT, min_rtt=%u\n",
+		  (u32)bbr->min_rtt_us);
 }
 
 /**
@@ -568,6 +577,8 @@ static void bbrv2_on_loss(void *cong_data, u64 bytes_lost)
 
 	/* Reduce cwnd */
 	bbr->cwnd = bbr->inflight_lo;
+	tquic_warn("bbrv2: loss recovery, cwnd %u -> %u\n",
+		   bbr->prior_cwnd, bbr->cwnd);
 
 	/* Exit Startup if we see loss */
 	if (bbr->mode == BBR_STARTUP) {
@@ -609,15 +620,18 @@ static void bbrv2_on_persistent_congestion(void *cong_data,
 					   struct tquic_persistent_cong_info *info)
 {
 	struct bbrv2 *bbr = cong_data;
-	u32 mss;
+	u32 mss, old_cwnd;
 
 	if (!bbr)
 		return;
 
 	mss = bbr_get_mss(bbr);
+	old_cwnd = bbr->cwnd;
 
 	/* Reset to minimum cwnd per RFC 9002 Section 7.6 */
 	bbr->cwnd = 2 * mss;
+	tquic_warn("bbrv2: persistent congestion, cwnd %u -> %u\n",
+		   old_cwnd, bbr->cwnd);
 	bbr->inflight_lo = bbr->cwnd;
 	bbr->inflight_hi = 0;
 	bbr->in_loss_recovery = false;
@@ -663,7 +677,7 @@ struct tquic_cong_ops bbrv2_cong_ops = {
 
 int __init tquic_bbrv2_init(void)
 {
-	pr_info("tquic: BBRv2 congestion control initialized\n");
+	tquic_info("cc: bbrv2 algorithm registered\n");
 	return tquic_register_cong(&bbrv2_cong_ops);
 }
 

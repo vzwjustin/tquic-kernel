@@ -17,6 +17,7 @@
 
 #include "prague.h"
 #include "l4s.h"
+#include "../tquic_debug.h"
 
 /* Default parameters */
 static u32 prague_alpha_init = PRAGUE_ALPHA_MAX / 16;	/* 6.25% */
@@ -206,6 +207,8 @@ static void prague_ecn_reduce(struct prague *p)
 	p->prior_cwnd = p->cwnd;
 	p->cwnd = max(p->cwnd - reduction, PRAGUE_MIN_CWND * mss);
 	p->state = PRAGUE_ECN_REDUCED;
+	tquic_dbg("prague: ECN reduce, cwnd %llu -> %llu alpha=%u\n",
+		  p->prior_cwnd, p->cwnd, p->alpha);
 
 	/* Exit slow start on first ECN mark */
 	if (p->in_slow_start) {
@@ -337,6 +340,8 @@ static void prague_on_loss(void *cong_data, u64 bytes_lost)
 	p->ssthresh = p->cwnd;
 	p->state = PRAGUE_RECOVERY;
 	p->in_slow_start = false;
+	tquic_warn("prague: loss, cwnd %llu -> %llu\n",
+		   p->loss_cwnd, p->cwnd);
 }
 
 /**
@@ -361,6 +366,8 @@ static void prague_on_persistent_congestion(void *cong_data,
 	p->state = PRAGUE_OPEN;
 	p->in_slow_start = true;
 	p->alpha = prague_alpha_init;
+	tquic_warn("prague: persistent congestion, cwnd reset to %llu\n",
+		   p->cwnd);
 }
 
 /**
@@ -396,7 +403,7 @@ struct tquic_cong_ops prague_cong_ops = {
 
 int __init tquic_prague_init(void)
 {
-	pr_info("tquic: Prague congestion control initialized\n");
+	tquic_info("cc: prague algorithm registered\n");
 	return tquic_register_cong(&prague_cong_ops);
 }
 

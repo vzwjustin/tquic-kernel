@@ -23,6 +23,7 @@
 #include <net/tquic.h>
 
 #include "../tquic_compat.h"
+#include "../tquic_debug.h"
 
 #include "mp_frame.h"
 #include "path_abandon.h"
@@ -430,8 +431,8 @@ int tquic_mp_handle_path_abandon(struct tquic_connection *conn,
 		tquic_mp_select_new_active_path(conn, path);
 	}
 
-	pr_info("tquic_mp: path %llu abandoned by peer (error=%llu)\n",
-		frame->path_id, frame->error_code);
+	tquic_warn("path %llu abandoned by peer (error=%llu)\n",
+		   frame->path_id, frame->error_code);
 
 	return 0;
 }

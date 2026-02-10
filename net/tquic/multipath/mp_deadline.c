@@ -31,6 +31,7 @@
 
 #include "mp_frame.h"
 #include "../sched/deadline_aware.h"
+#include "../tquic_debug.h"
 
 /*
  * =============================================================================

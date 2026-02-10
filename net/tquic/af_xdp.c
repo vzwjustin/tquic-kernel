@@ -29,11 +29,15 @@
 #include <linux/filter.h>
 #include <linux/vmalloc.h>
 #include <linux/uaccess.h>
+#include <linux/overflow.h>
+#include <linux/capability.h>
+#include <linux/nsproxy.h>
 #include <net/sock.h>
 #include <net/xdp_sock_drv.h>
 #include <net/tquic.h>
 
 #include "af_xdp.h"
+#include "tquic_debug.h"
 #include "protocol.h"
 #include "tquic_compat.h"
 
@@ -139,23 +143,41 @@ static const struct bpf_insn tquic_xdp_prog_insns[] = {
  * Frame pool implementation
  */
 
+/* Maximum frames to prevent resource exhaustion and integer overflow */
+#define TQUIC_XSK_MAX_FRAMES		(1U << 20)	/* 1M frames */
+#define TQUIC_XSK_MAX_FRAME_SIZE	(64U * 1024)	/* 64KB per frame */
+
 static struct tquic_xsk_frame_pool *
 tquic_xsk_frame_pool_create(u32 num_frames, u32 frame_size)
 {
 	struct tquic_xsk_frame_pool *pool;
+	size_t frames_sz, freelist_sz;
 	u32 i;
+
+	/* Validate bounds to prevent overflow and resource exhaustion */
+	if (num_frames == 0 || num_frames > TQUIC_XSK_MAX_FRAMES)
+		return ERR_PTR(-EINVAL);
+	if (frame_size == 0 || frame_size > TQUIC_XSK_MAX_FRAME_SIZE)
+		return ERR_PTR(-EINVAL);
+
+	/* Check for overflow in allocation sizes */
+	if (check_mul_overflow((size_t)num_frames,
+			       sizeof(struct tquic_xsk_frame_meta), &frames_sz))
+		return ERR_PTR(-EOVERFLOW);
+	if (check_mul_overflow((size_t)num_frames, sizeof(u32), &freelist_sz))
+		return ERR_PTR(-EOVERFLOW);
 
 	pool = kzalloc(sizeof(*pool), GFP_KERNEL);
 	if (!pool)
 		return ERR_PTR(-ENOMEM);
 
-	pool->frames = vzalloc(num_frames * sizeof(struct tquic_xsk_frame_meta));
+	pool->frames = vzalloc(frames_sz);
 	if (!pool->frames) {
 		kfree(pool);
 		return ERR_PTR(-ENOMEM);
 	}
 
-	pool->free_list = vzalloc(num_frames * sizeof(u32));
+	pool->free_list = vzalloc(freelist_sz);
 	if (!pool->free_list) {
 		vfree(pool->frames);
 		kfree(pool);
@@ -200,14 +222,15 @@ static int tquic_xsk_frame_pool_alloc(struct tquic_xsk_frame_pool *pool,
 	spin_lock_irqsave(&pool->lock, flags);
 
 	if (pool->free_count == 0) {
-		spin_unlock_irqrestore(&pool->lock, flags);
 		pool->alloc_failures++;
+		spin_unlock_irqrestore(&pool->lock, flags);
 		return -ENOMEM;
 	}
 
 	idx = pool->free_list[pool->free_head];
 	pool->free_head = (pool->free_head + 1) % pool->num_frames;
 	pool->free_count--;
+	pool->alloc_count++;
 
 	pool->frames[idx].state = TQUIC_XSK_FRAME_TX;
 	atomic_set(&pool->frames[idx].refcnt, 1);
@@ -215,7 +238,6 @@ static int tquic_xsk_frame_pool_alloc(struct tquic_xsk_frame_pool *pool,
 	spin_unlock_irqrestore(&pool->lock, flags);
 
 	*addr = pool->frames[idx].addr;
-	pool->alloc_count++;
 
 	return 0;
 }
@@ -226,6 +248,9 @@ static void tquic_xsk_frame_pool_free(struct tquic_xsk_frame_pool *pool,
 	u32 idx;
 	unsigned long flags;
 
+	if (!pool || pool->frame_size == 0)
+		return;
+
 	idx = addr / pool->frame_size;
 	if (idx >= pool->num_frames)
 		return;
@@ -235,14 +260,20 @@ static void tquic_xsk_frame_pool_free(struct tquic_xsk_frame_pool *pool,
 
 	spin_lock_irqsave(&pool->lock, flags);
 
+	/* Prevent double-free: only free if not already free */
+	if (pool->frames[idx].state == TQUIC_XSK_FRAME_FREE) {
+		spin_unlock_irqrestore(&pool->lock, flags);
+		WARN_ONCE(1, "tquic_xsk: double-free of frame idx %u\n", idx);
+		return;
+	}
+
 	pool->frames[idx].state = TQUIC_XSK_FRAME_FREE;
 	pool->free_tail = (pool->free_tail + 1) % pool->num_frames;
 	pool->free_list[pool->free_tail] = idx;
 	pool->free_count++;
+	pool->free_count_stat++;
 
 	spin_unlock_irqrestore(&pool->lock, flags);
-
-	pool->free_count_stat++;
 }
 
 /*
@@ -255,15 +286,20 @@ int tquic_xsk_create(struct tquic_xsk **xsk_out, const char *ifname,
 	struct tquic_xsk *xsk;
 	struct net_device *dev;
 	u32 frame_size, num_frames;
+	size_t buffer_size;
 	int err;
 
 	if (!xsk_out || !ifname)
 		return -EINVAL;
 
+	/* XDP socket creation requires CAP_NET_ADMIN */
+	if (!capable(CAP_NET_ADMIN))
+		return -EPERM;
+
 	/* Find network device */
-	dev = dev_get_by_name(&init_net, ifname);
+	dev = dev_get_by_name(current->nsproxy->net_ns, ifname);
 	if (!dev) {
-		pr_err("Device %s not found\n", ifname);
+		tquic_err("xdp: device %s not found\n", ifname);
 		return -ENODEV;
 	}
 
@@ -274,18 +310,32 @@ int tquic_xsk_create(struct tquic_xsk **xsk_out, const char *ifname,
 		return -ENOMEM;
 	}
 
-	/* Set configuration */
+	/* Set configuration with validation */
 	frame_size = config && config->frame_size ?
 		     config->frame_size : TQUIC_XSK_DEFAULT_FRAME_SIZE;
 	num_frames = config && config->num_frames ?
 		     config->num_frames : TQUIC_XSK_DEFAULT_NUM_FRAMES;
+
+	/* Validate frame parameters against pool limits */
+	if (frame_size > TQUIC_XSK_MAX_FRAME_SIZE ||
+	    num_frames > TQUIC_XSK_MAX_FRAMES) {
+		err = -EINVAL;
+		goto err_free_xsk;
+	}
+
+	/* Check for overflow in buffer_size calculation */
+	if (check_mul_overflow((size_t)frame_size, (size_t)num_frames,
+			       &buffer_size)) {
+		err = -EOVERFLOW;
+		goto err_free_xsk;
+	}
 
 	xsk->dev = dev;
 	xsk->queue_id = queue_id;
 	xsk->frame_size = frame_size;
 	xsk->num_frames = num_frames;
 	xsk->headroom = XDP_PACKET_HEADROOM;
-	xsk->buffer_size = (size_t)frame_size * num_frames;
+	xsk->buffer_size = buffer_size;
 	xsk->rx_batch_size = TQUIC_XSK_DEFAULT_BATCH_SIZE;
 	xsk->tx_batch_size = TQUIC_XSK_DEFAULT_BATCH_SIZE;
 	xsk->mode = config ? config->mode : TQUIC_XDP_COPY;
@@ -310,11 +360,11 @@ int tquic_xsk_create(struct tquic_xsk **xsk_out, const char *ifname,
 	/* Create AF_XDP socket */
 	err = sock_create_kern(&init_net, AF_XDP, SOCK_RAW, 0, &xsk->sock);
 	if (err) {
-		pr_err("Failed to create AF_XDP socket: %d\n", err);
+		tquic_err("xdp: failed tocreate AF_XDP socket: %d\n", err);
 		goto err_free_pool;
 	}
 
-	pr_debug("Created XSK for %s queue %d: %u frames x %u bytes\n",
+	tquic_dbg("xdp: created XSKfor %s queue %d: %u frames x %u bytes\n",
 		 ifname, queue_id, num_frames, frame_size);
 
 	*xsk_out = xsk;
@@ -383,14 +433,14 @@ int tquic_xsk_bind(struct tquic_xsk *xsk)
 	/* Bind socket to device queue */
 	err = kernel_bind(xsk->sock, (struct sockaddr_unsized *)&sxdp, sizeof(sxdp));
 	if (err) {
-		pr_err("Failed to bind XSK to %s queue %d: %d\n",
+		tquic_err("xdp: failed tobind XSK to %s queue %d: %d\n",
 		       xsk->dev->name, xsk->queue_id, err);
 		return err;
 	}
 
 	xsk->bound = true;
 
-	pr_debug("Bound XSK to %s queue %d (mode=%s)\n",
+	tquic_dbg("xdp: bound XSKto %s queue %d (mode=%s)\n",
 		 xsk->dev->name, xsk->queue_id,
 		 xsk->mode == TQUIC_XDP_ZEROCOPY ? "zerocopy" : "copy");
 
@@ -461,7 +511,7 @@ int tquic_xsk_recv(struct tquic_xsk *xsk, struct tquic_xsk_packet *pkts,
 
 		/* Validate address is within buffer bounds */
 		if (addr + len > xsk->buffer_size) {
-			pr_debug("XSK: invalid RX desc addr=%llu len=%u\n",
+			tquic_dbg("xdp:invalid RX desc addr=%llu len=%u\n",
 				 addr, len);
 			break;
 		}
@@ -617,7 +667,7 @@ int tquic_xsk_poll_tx(struct tquic_xsk *xsk, int num_completions)
 
 	/* Process completed TX descriptors */
 	while (completed < entries) {
-		u64 addr = xsk->comp.ring[idx_comp];
+		u64 addr = xsk->comp.comp_addrs[idx_comp];
 
 		/* Return frame to pool */
 		if (xsk->frame_pool)
@@ -692,6 +742,10 @@ int tquic_xdp_load_prog(struct tquic_xsk *xsk, const __be16 *ports,
 	if (!xsk || !xsk->dev)
 		return -EINVAL;
 
+	/* Attaching XDP programs requires CAP_NET_ADMIN */
+	if (!capable(CAP_NET_ADMIN))
+		return -EPERM;
+
 	if (xsk->xdp_prog)
 		return -EALREADY;
 
@@ -703,8 +757,8 @@ int tquic_xdp_load_prog(struct tquic_xsk *xsk, const __be16 *ports,
 	err = bpf_prog_create(&prog, &bpf_prog_types[BPF_PROG_TYPE_XDP],
 			      tquic_xdp_prog_insns, TQUIC_XDP_PROG_LEN);
 	if (err) {
-		pr_err("Failed to create XDP program: %d\n", err);
-		pr_info("XDP program can alternatively be loaded from userspace\n");
+		tquic_err("xdp: failed tocreate XDP program: %d\n", err);
+		tquic_info("xdp: programcan alternatively be loaded from userspace\n");
 		return err;
 	}
 
@@ -716,14 +770,14 @@ int tquic_xdp_load_prog(struct tquic_xsk *xsk, const __be16 *ports,
 	rtnl_unlock();
 
 	if (err) {
-		pr_err("Failed to attach XDP program to %s: %d\n",
+		tquic_err("xdp: failed toattach XDP program to %s: %d\n",
 		       xsk->dev->name, err);
 		bpf_prog_put(prog);
 		xsk->xdp_prog = NULL;
 		return err;
 	}
 
-	pr_info("Loaded XDP program on %s\n", xsk->dev->name);
+	tquic_info("xdp: loadedprogram on %s\n", xsk->dev->name);
 
 	return 0;
 }
@@ -747,7 +801,7 @@ void tquic_xdp_unload_prog(struct tquic_xsk *xsk)
 	xsk->xdp_prog = NULL;
 	xsk->xdp_prog_fd = 0;
 
-	pr_debug("Unloaded XDP program from %s\n", xsk->dev->name);
+	tquic_dbg("xdp: unloadedprogram from %s\n", xsk->dev->name);
 }
 EXPORT_SYMBOL_GPL(tquic_xdp_unload_prog);
 
@@ -782,12 +836,15 @@ int tquic_xsk_attach(struct sock *sk, struct tquic_xsk *xsk)
 	if (!tsk->conn)
 		return -ENOTCONN;
 
+	lock_sock(sk);
+
 	/* Store XSK reference in connection */
-	/* Note: Would need to add xsk field to tquic_connection */
 	tquic_xsk_get(xsk);
 	xsk->conn = tsk->conn;
 
-	pr_debug("Attached XSK to TQUIC socket\n");
+	release_sock(sk);
+
+	tquic_dbg("xdp: attached XSK to TQUIC socket\n");
 
 	return 0;
 }
@@ -796,6 +853,7 @@ EXPORT_SYMBOL_GPL(tquic_xsk_attach);
 void tquic_xsk_detach(struct sock *sk)
 {
 	struct tquic_sock *tsk;
+	struct tquic_xsk *xsk;
 
 	if (!sk)
 		return;
@@ -804,8 +862,23 @@ void tquic_xsk_detach(struct sock *sk)
 	if (!tsk->conn)
 		return;
 
-	/* Would release XSK reference from connection */
-	pr_debug("Detached XSK from TQUIC socket\n");
+	lock_sock(sk);
+
+	/*
+	 * Retrieve and release XSK reference from connection.
+	 * The XSK stores a back-pointer to conn; use it to find
+	 * and release the matching XSK.
+	 */
+	xsk = tsk->conn->xsk;
+	if (xsk) {
+		xsk->conn = NULL;
+		tsk->conn->xsk = NULL;
+		tquic_xsk_put(xsk);
+	}
+
+	release_sock(sk);
+
+	tquic_dbg("xdp: detached XSK from TQUIC socket\n");
 }
 EXPORT_SYMBOL_GPL(tquic_xsk_detach);
 
@@ -820,7 +893,7 @@ int tquic_xsk_attach_path(struct tquic_connection *conn,
 	tquic_xsk_get(xsk);
 	xsk->path = path;
 
-	pr_debug("Attached XSK to path %u\n", path->path_id);
+	tquic_dbg("xdp: attached XSK to path %u\n", path->path_id);
 
 	return 0;
 }
@@ -829,11 +902,20 @@ EXPORT_SYMBOL_GPL(tquic_xsk_attach_path);
 void tquic_xsk_detach_path(struct tquic_connection *conn,
 			   struct tquic_path *path)
 {
+	struct tquic_xsk *xsk;
+
 	if (!conn || !path)
 		return;
 
-	/* Would release XSK reference from path */
-	pr_debug("Detached XSK from path %u\n", path->path_id);
+	/* Release XSK reference from path */
+	xsk = path->xsk;
+	if (xsk) {
+		xsk->path = NULL;
+		path->xsk = NULL;
+		tquic_xsk_put(xsk);
+	}
+
+	tquic_dbg("xdp: detached XSK from path %u\n", path->path_id);
 }
 EXPORT_SYMBOL_GPL(tquic_xsk_detach_path);
 
@@ -847,6 +929,10 @@ int tquic_xsk_setsockopt(struct sock *sk, sockptr_t optval,
 	struct tquic_xdp_config config = {};
 	struct tquic_xsk *xsk = NULL;
 	int err;
+
+	/* XDP configuration requires CAP_NET_ADMIN */
+	if (!capable(CAP_NET_ADMIN))
+		return -EPERM;
 
 	if (optlen < sizeof(config))
 		return -EINVAL;
@@ -949,7 +1035,7 @@ EXPORT_SYMBOL_GPL(tquic_xsk_wakeup);
 
 bool tquic_xsk_fill_ring_empty(struct tquic_xsk *xsk)
 {
-	if (!xsk)
+	if (!xsk || !xsk->frame_pool)
 		return true;
 
 	/* Check if fill ring needs replenishment */
@@ -1031,13 +1117,13 @@ EXPORT_SYMBOL_GPL(tquic_xsk_zerocopy_supported);
 
 int __init tquic_af_xdp_init(void)
 {
-	pr_info("TQUIC AF_XDP support initialized\n");
+	tquic_info("AF_XDPsupport initialized\n");
 	return 0;
 }
 
 void __exit tquic_af_xdp_exit(void)
 {
-	pr_info("TQUIC AF_XDP support exiting\n");
+	tquic_info("AF_XDPsupport exiting\n");
 }
 
 module_init(tquic_af_xdp_init);

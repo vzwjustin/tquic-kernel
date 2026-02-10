@@ -20,12 +20,14 @@
 #include <linux/seq_file.h>
 #include <linux/percpu.h>
 #include <linux/atomic.h>
+#include <linux/math64.h>
 #include <crypto/aead.h>
 #include <crypto/hash.h>
 #include <crypto/skcipher.h>
 #include <crypto/aes.h>
 #include <net/tquic.h>
 #include "../tquic_compat.h"
+#include "../tquic_debug.h"
 
 #ifdef CONFIG_X86
 #include <asm/cpufeature.h>
@@ -122,7 +124,9 @@ struct tquic_crypto_ctx {
 /**
  * struct tquic_hw_packet - Packet structure for batch crypto operations
  * @data:          Packet data pointer
- * @len:           Packet length
+ * @len:           Packet data length (plaintext for encrypt, ciphertext for decrypt)
+ * @data_buf_len:  Total allocated size of data buffer. For encryption, must be
+ *                 at least len + 16 to accommodate the AEAD authentication tag.
  * @pkt_num:       Packet number for nonce construction
  * @aad:           Additional authenticated data
  * @aad_len:       AAD length
@@ -134,6 +138,7 @@ struct tquic_crypto_ctx {
 struct tquic_hw_packet {
 	u8 *data;
 	size_t len;
+	size_t data_buf_len;
 	u64 pkt_num;
 	u8 *aad;
 	size_t aad_len;
@@ -509,8 +514,10 @@ int tquic_hw_encrypt_packet(struct tquic_crypto_ctx *ctx,
 	tquic_hw_create_nonce(ctx->iv, pkt_num, nonce);
 
 	req = aead_request_alloc(ctx->aead, GFP_ATOMIC);
-	if (!req)
-		return -ENOMEM;
+	if (!req) {
+		ret = -ENOMEM;
+		goto out_zeroize;
+	}
 
 	/* Set up scatter-gather lists */
 	sg_init_table(sg_src, 2);
@@ -549,6 +556,8 @@ int tquic_hw_encrypt_packet(struct tquic_crypto_ctx *ctx,
 		this_cpu_add(tquic_crypto_stats.total_bytes, pt_len);
 	}
 
+out_zeroize:
+	memzero_explicit(nonce, sizeof(nonce));
 	return ret;
 }
 EXPORT_SYMBOL_GPL(tquic_hw_encrypt_packet);
@@ -586,8 +595,10 @@ int tquic_hw_decrypt_packet(struct tquic_crypto_ctx *ctx,
 	tquic_hw_create_nonce(ctx->iv, pkt_num, nonce);
 
 	req = aead_request_alloc(ctx->aead, GFP_ATOMIC);
-	if (!req)
-		return -ENOMEM;
+	if (!req) {
+		ret = -ENOMEM;
+		goto out_zeroize;
+	}
 
 	/* Set up scatter-gather lists */
 	sg_init_table(sg_src, 2);
@@ -610,6 +621,8 @@ int tquic_hw_decrypt_packet(struct tquic_crypto_ctx *ctx,
 		this_cpu_add(tquic_crypto_stats.total_bytes, *pt_len);
 	}
 
+out_zeroize:
+	memzero_explicit(nonce, sizeof(nonce));
 	return ret;
 }
 EXPORT_SYMBOL_GPL(tquic_hw_decrypt_packet);
@@ -680,13 +693,17 @@ int tquic_crypto_batch_encrypt(struct tquic_crypto_ctx *ctx,
 	/* Process packets (crypto API handles AVX-512 internally) */
 	for (i = 0; i < count; i++) {
 		struct tquic_hw_packet *pkt = &pkts[i];
-
-		/*
-		 * Allocate temporary buffer for ciphertext.
-		 * In production, this should use a pre-allocated buffer pool.
-		 */
 		u8 *ct_buf;
 		size_t ct_buf_len = pkt->len + 16;
+
+		/*
+		 * Validate that the caller's data buffer is large enough
+		 * to hold the ciphertext (plaintext + 16-byte auth tag).
+		 */
+		if (pkt->data_buf_len < ct_buf_len) {
+			pkt->result = -ENOSPC;
+			continue;
+		}
 
 		ct_buf = kmalloc(ct_buf_len, GFP_ATOMIC);
 		if (!ct_buf) {
@@ -701,7 +718,6 @@ int tquic_crypto_batch_encrypt(struct tquic_crypto_ctx *ctx,
 						      ct_buf, &ct_len);
 
 		if (pkt->result == 0) {
-			/* Copy ciphertext back */
 			memcpy(pkt->data, ct_buf, ct_len);
 			pkt->len = ct_len;
 			success++;
@@ -901,12 +917,16 @@ int tquic_qat_encrypt(struct tquic_qat_ctx *ctx,
 	tquic_hw_create_nonce(iv, pkt_num, nonce);
 
 	ret = crypto_aead_setkey(ctx->tfm, key, key_len);
-	if (ret)
+	if (ret) {
+		memzero_explicit(nonce, sizeof(nonce));
 		return ret;
+	}
 
 	req = aead_request_alloc(ctx->tfm, GFP_KERNEL);
-	if (!req)
+	if (!req) {
+		memzero_explicit(nonce, sizeof(nonce));
 		return -ENOMEM;
+	}
 
 	sg_init_table(sg_src, 2);
 	sg_set_buf(&sg_src[0], aad, aad_len);
@@ -924,6 +944,7 @@ int tquic_qat_encrypt(struct tquic_qat_ctx *ctx,
 	ret = crypto_wait_req(crypto_aead_encrypt(req), &wait);
 
 	aead_request_free(req);
+	memzero_explicit(nonce, sizeof(nonce));
 
 	if (ret == 0) {
 		*ct_len = pt_len + 16;
@@ -1051,9 +1072,9 @@ static int tquic_crypto_caps_show(struct seq_file *m, void *v)
 	seq_printf(m, "  Batch ops:       %llu\n", stats.batch_ops);
 	seq_printf(m, "  Batch packets:   %llu\n", stats.batch_packets);
 
-	if (stats.batch_ops > 0) {
+	if (stats.batch_ops > 0 && stats.batch_packets >= stats.batch_ops) {
 		seq_printf(m, "  Avg batch size:  %llu\n",
-			   stats.batch_packets / stats.batch_ops);
+			   div64_u64(stats.batch_packets, stats.batch_ops));
 	}
 
 	seq_puts(m, "\n");

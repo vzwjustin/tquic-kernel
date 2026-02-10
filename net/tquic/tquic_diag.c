@@ -27,6 +27,7 @@
 #include <net/inet_connection_sock.h>
 #include <net/tquic.h>
 #include <uapi/linux/tquic_diag.h>
+#include "tquic_debug.h"
 #include "protocol.h"
 
 /*
@@ -335,6 +336,7 @@ static size_t __maybe_unused tquic_diag_get_aux_size(struct sock *sk, bool net_a
 	struct tquic_sock *tsk = tquic_sk(sk);
 	struct tquic_connection *conn = tsk->conn;
 	size_t size = 0;
+	u32 num_paths;
 
 	if (!conn)
 		return 0;
@@ -345,20 +347,25 @@ static size_t __maybe_unused tquic_diag_get_aux_size(struct sock *sk, bool net_a
 	/* Stream count */
 	size += nla_total_size(sizeof(u32));
 
-	/* CIDs are only visible to CAP_NET_ADMIN (sensitive info) */
+	/*
+	 * CIDs are only visible to CAP_NET_ADMIN (sensitive info).
+	 * Use maximum CID length for size estimation to avoid racing
+	 * with CID changes between get_aux_size and get_aux calls.
+	 */
 	if (net_admin) {
-		/* SCID */
-		size += nla_total_size(conn->scid.len);
+		/* SCID - use max possible CID length (20 per RFC 9000) */
+		size += nla_total_size(TQUIC_MAX_CID_LEN);
 		/* DCID */
-		size += nla_total_size(conn->dcid.len);
+		size += nla_total_size(TQUIC_MAX_CID_LEN);
 	}
 
 	/* Per-path info: nested attribute with path data */
-	if (conn->num_paths > 0) {
+	num_paths = READ_ONCE(conn->num_paths);
+	if (num_paths > 0) {
 		/* Nest header */
 		size += nla_total_size(0);
 		/* Each path: id + state + rtt + cwnd + tx + rx + lost */
-		size += conn->num_paths * (
+		size += num_paths * (
 			nla_total_size(sizeof(u32)) +   /* path_id */
 			nla_total_size(sizeof(u8)) +    /* state */
 			nla_total_size(sizeof(u32)) +   /* rtt */
@@ -397,38 +404,53 @@ static int tquic_diag_get_aux(struct sock *sk, bool net_admin,
 	if (!conn)
 		return 0;
 
-	/* QUIC version */
-	if (nla_put_u32(skb, TQUIC_DIAG_ATTR_VERSION, conn->version))
-		return -EMSGSIZE;
-
 	/* Stream count */
 	stream_count = tquic_count_streams(conn);
-	if (nla_put_u32(skb, TQUIC_DIAG_ATTR_STREAMS, stream_count))
+
+	/*
+	 * Read version, CIDs, and path list under conn->lock to get a
+	 * consistent snapshot. CIDs can change during key update and
+	 * the len/id pair must be read atomically.
+	 */
+	spin_lock_bh(&conn->lock);
+
+	/* QUIC version */
+	if (nla_put_u32(skb, TQUIC_DIAG_ATTR_VERSION, conn->version)) {
+		spin_unlock_bh(&conn->lock);
 		return -EMSGSIZE;
+	}
+
+	if (nla_put_u32(skb, TQUIC_DIAG_ATTR_STREAMS, stream_count)) {
+		spin_unlock_bh(&conn->lock);
+		return -EMSGSIZE;
+	}
 
 	/*
 	 * Connection IDs - only visible to CAP_NET_ADMIN
-	 * Per CONTEXT.md: CIDs are sensitive and needed for packet
-	 * capture correlation, so require admin privileges.
+	 * CIDs are sensitive and needed for packet capture correlation,
+	 * so require admin privileges.
 	 */
 	if (net_admin) {
 		/* Source CID - full raw bytes for hex display */
 		if (conn->scid.len > 0) {
 			if (nla_put(skb, TQUIC_DIAG_ATTR_SCID,
-				    conn->scid.len, conn->scid.id))
+				    conn->scid.len, conn->scid.id)) {
+				spin_unlock_bh(&conn->lock);
 				return -EMSGSIZE;
+			}
 		}
 
 		/* Destination CID */
 		if (conn->dcid.len > 0) {
 			if (nla_put(skb, TQUIC_DIAG_ATTR_DCID,
-				    conn->dcid.len, conn->dcid.id))
+				    conn->dcid.len, conn->dcid.id)) {
+				spin_unlock_bh(&conn->lock);
 				return -EMSGSIZE;
+			}
 		}
 	}
 
-	/* Per-path information as nested attributes */
-	spin_lock_bh(&conn->lock);
+	/* Per-path information as nested attributes (still under lock) */
 	if (!list_empty(&conn->paths)) {
 		paths_nest = nla_nest_start(skb, TQUIC_DIAG_ATTR_PATHS);
 		if (!paths_nest) {

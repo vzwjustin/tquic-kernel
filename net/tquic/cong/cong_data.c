@@ -27,6 +27,7 @@
 
 #include "cong_data.h"
 #include "tquic_cong.h"
+#include "../tquic_debug.h"
 #include "../core/varint.h"
 
 /*
@@ -431,11 +432,11 @@ int tquic_cong_data_validate(struct tquic_connection *conn,
 	/* Validate timestamp (not too old, not in future) */
 	now = get_current_timestamp();
 	if (data->timestamp > now + 60) {
-		pr_debug("tquic: cong_data timestamp in future\n");
+		tquic_dbg("cong_data: timestamp in future\n");
 		return -EINVAL;
 	}
 	if (now - data->timestamp > TQUIC_CONG_DATA_MAX_LIFETIME_SEC) {
-		pr_debug("tquic: cong_data expired (age %llu sec)\n",
+		tquic_dbg("cong_data: expired (age %llu sec)\n",
 			 now - data->timestamp);
 		return -ESTALE;
 	}
@@ -443,21 +444,21 @@ int tquic_cong_data_validate(struct tquic_connection *conn,
 	/* Validate BWE */
 	if (data->bwe < TQUIC_CONG_DATA_MIN_BWE_BPS ||
 	    data->bwe > TQUIC_CONG_DATA_MAX_BWE_BPS) {
-		pr_debug("tquic: cong_data BWE out of range: %llu\n", data->bwe);
+		tquic_dbg("cong_data: BWE out of range: %llu\n", data->bwe);
 		return -ERANGE;
 	}
 
 	/* Validate min_rtt */
 	if (data->min_rtt < TQUIC_CONG_DATA_MIN_RTT_US ||
 	    data->min_rtt > TQUIC_CONG_DATA_MAX_RTT_US) {
-		pr_debug("tquic: cong_data min_rtt out of range: %llu\n",
+		tquic_dbg("cong_data: min_rtt out of range: %llu\n",
 			 data->min_rtt);
 		return -ERANGE;
 	}
 
 	/* Validate loss rate */
 	if (data->loss_rate > TQUIC_CONG_DATA_MAX_LOSS_RATE) {
-		pr_debug("tquic: cong_data loss_rate out of range: %u\n",
+		tquic_dbg("cong_data: loss_rate out of range: %u\n",
 			 data->loss_rate);
 		return -ERANGE;
 	}
@@ -466,7 +467,7 @@ int tquic_cong_data_validate(struct tquic_connection *conn,
 	if (data->flags & TQUIC_CONG_DATA_FLAG_HAS_CWND) {
 		if (data->cwnd < TQUIC_CONG_DATA_MIN_CWND ||
 		    data->cwnd > TQUIC_CONG_DATA_MAX_CWND) {
-			pr_debug("tquic: cong_data cwnd out of range: %llu\n",
+			tquic_dbg("cong_data: cwnd out of range: %llu\n",
 				 data->cwnd);
 			return -ERANGE;
 		}
@@ -475,7 +476,7 @@ int tquic_cong_data_validate(struct tquic_connection *conn,
 	if (data->flags & TQUIC_CONG_DATA_FLAG_HAS_SSTHRESH) {
 		if (data->ssthresh < TQUIC_CONG_DATA_MIN_SSTHRESH ||
 		    data->ssthresh > TQUIC_CONG_DATA_MAX_SSTHRESH) {
-			pr_debug("tquic: cong_data ssthresh out of range: %llu\n",
+			tquic_dbg("cong_data: ssthresh out of range: %llu\n",
 				 data->ssthresh);
 			return -ERANGE;
 		}
@@ -516,7 +517,7 @@ int tquic_cong_data_apply(struct tquic_connection *conn,
 	if (data->flags & TQUIC_CONG_DATA_FLAG_AUTHENTICATED) {
 		ret = tquic_cong_data_verify_hmac(conn, data);
 		if (ret < 0) {
-			pr_debug("tquic: cong_data HMAC verification failed\n");
+			tquic_dbg("cong_data: HMAC verification failed\n");
 			return ret;
 		}
 	}
@@ -525,7 +526,7 @@ int tquic_cong_data_apply(struct tquic_connection *conn,
 
 	/* Check sequence number for ordering */
 	if (data->seq_num <= state->last_received_seq && state->have_received) {
-		pr_debug("tquic: cong_data out of order seq %llu <= %llu\n",
+		tquic_dbg("cong_data: out of order seq %llu <= %llu\n",
 			 data->seq_num, state->last_received_seq);
 		spin_unlock_irqrestore(&state->lock, flags_lock);
 		return -EALREADY;
@@ -557,7 +558,7 @@ int tquic_cong_data_apply(struct tquic_connection *conn,
 
 	/* Don't apply if current state is already better */
 	if (current_cwnd >= target_cwnd) {
-		pr_debug("tquic: cong_data current cwnd %llu >= target %llu\n",
+		tquic_dbg("cong_data: current cwnd %llu >= target %llu\n",
 			 current_cwnd, target_cwnd);
 		spin_unlock_irqrestore(&state->lock, flags_lock);
 		return 0;
@@ -583,7 +584,7 @@ int tquic_cong_data_apply(struct tquic_connection *conn,
 
 	spin_unlock_irqrestore(&state->lock, flags_lock);
 
-	pr_debug("tquic: Careful Resume started: current=%llu target=%llu saved_rtt=%llu\n",
+	tquic_dbg("cong_data: Careful Resume started: current=%llu target=%llu saved_rtt=%llu\n",
 		 current_cwnd, target_cwnd, data->min_rtt);
 
 	return 0;
@@ -636,7 +637,7 @@ bool tquic_cong_data_on_ack(struct tquic_connection *conn,
 			rtt_ratio = (rtt_us * 100) / state->validated_rtt;
 			if (rtt_ratio > TQUIC_CONG_DATA_RTT_RATIO_THRESHOLD) {
 				/* RTT much higher than saved - retreat */
-				pr_debug("tquic: CR RTT validation failed: %llu vs %llu (ratio %llu%%)\n",
+				tquic_dbg("cong_data: CR RTT validation failed: %llu vs %llu (ratio %llu%%)\n",
 					 rtt_us, state->validated_rtt, rtt_ratio);
 				spin_unlock_irqrestore(&state->lock, flags_lock);
 				tquic_cong_data_safe_retreat(conn, path);
@@ -648,7 +649,7 @@ bool tquic_cong_data_on_ack(struct tquic_connection *conn,
 		if (state->acks_since_apply >= 3) {
 			/* RTT validated, move to ramping */
 			state->apply_phase = TQUIC_CONG_DATA_PHASE_RAMPING;
-			pr_debug("tquic: CR RTT validated, entering RAMPING phase\n");
+			tquic_dbg("cong_data: CR RTT validated, entering RAMPING phase\n");
 		}
 		in_progress = true;
 		break;
@@ -663,7 +664,7 @@ bool tquic_cong_data_on_ack(struct tquic_connection *conn,
 		if (current_cwnd >= state->target_cwnd) {
 			/* Reached target, complete */
 			state->apply_phase = TQUIC_CONG_DATA_PHASE_COMPLETE;
-			pr_debug("tquic: CR complete: cwnd=%llu target=%llu\n",
+			tquic_dbg("cong_data: CR complete: cwnd=%llu target=%llu\n",
 				 current_cwnd, state->target_cwnd);
 			in_progress = false;
 		} else {
@@ -726,7 +727,7 @@ void tquic_cong_data_on_loss(struct tquic_connection *conn,
 
 		if (loss_rate > TQUIC_CONG_DATA_LOSS_THRESHOLD) {
 			/* Loss rate too high - retreat */
-			pr_debug("tquic: CR loss threshold exceeded: %llu\n",
+			tquic_warn("cong_data: CR loss threshold exceeded: %llu\n",
 				 loss_rate);
 			spin_unlock_irqrestore(&state->lock, flags_lock);
 			tquic_cong_data_safe_retreat(conn, path);
@@ -762,7 +763,7 @@ void tquic_cong_data_safe_retreat(struct tquic_connection *conn,
 	spin_unlock_irqrestore(&state->lock, flags_lock);
 
 	/* Reset to minimum cwnd and start slow start */
-	pr_info("tquic: Careful Resume safe retreat executed\n");
+	tquic_warn("cong_data: Careful Resume safe retreat executed\n");
 
 	/* The actual cwnd reset is done by the CC algorithm
 	 * by calling tquic_cong_on_persistent_congestion or similar
@@ -1035,7 +1036,7 @@ ssize_t tquic_cong_data_handle_frame(struct tquic_connection *conn,
 	/* Apply the received data */
 	ret = tquic_cong_data_apply(conn, conn->active_path, &data);
 	if (ret < 0 && ret != -EALREADY) {
-		pr_debug("tquic: Failed to apply CONGESTION_DATA: %d\n", ret);
+		tquic_dbg("cong_data: failed to apply CONGESTION_DATA: %d\n", ret);
 		/* Don't return error - frame was parsed successfully */
 	}
 
@@ -1141,7 +1142,7 @@ int tquic_cong_data_import(struct tquic_connection *conn,
 		return -EINVAL;
 
 	if (export->version != TQUIC_CONG_DATA_VERSION) {
-		pr_debug("tquic: cong_data import version mismatch: %u\n",
+		tquic_dbg("cong_data: import version mismatch: %u\n",
 			 export->version);
 		return -EINVAL;
 	}
@@ -1155,7 +1156,7 @@ int tquic_cong_data_import(struct tquic_connection *conn,
 
 	age = now - export->export_time;
 	if (age > TQUIC_CONG_DATA_MAX_LIFETIME_SEC) {
-		pr_debug("tquic: cong_data import expired (age %llu sec)\n", age);
+		tquic_dbg("cong_data: import expired (age %llu sec)\n", age);
 		return -ESTALE;
 	}
 
@@ -1292,7 +1293,7 @@ int __init tquic_cong_data_module_init(void)
 		cong_data_cache[i].valid = false;
 	}
 
-	pr_info("tquic: Congestion Control Data Exchange initialized\n");
+	tquic_info("cong_data: initialized\n");
 	return 0;
 }
 
@@ -1300,7 +1301,7 @@ void __exit tquic_cong_data_module_exit(void)
 {
 	/* Clear any sensitive data in cache */
 	memset(cong_data_cache, 0, sizeof(cong_data_cache));
-	pr_info("tquic: Congestion Control Data Exchange cleanup complete\n");
+	tquic_info("cong_data: cleanup complete\n");
 }
 
 MODULE_DESCRIPTION("TQUIC Congestion Control Data Exchange");

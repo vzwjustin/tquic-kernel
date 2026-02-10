@@ -87,8 +87,12 @@ struct tquic_napi_stats {
 	u32 avg_batch_size;
 };
 
+/* Magic value to identify tquic_napi in sk_user_data */
+#define TQUIC_NAPI_MAGIC	0x54514E41	/* "TQNA" */
+
 /**
  * struct tquic_napi - NAPI structure for TQUIC
+ * @magic: Magic value for type identification (TQUIC_NAPI_MAGIC)
  * @napi: Kernel NAPI structure
  * @sk: Associated TQUIC socket
  * @conn: Associated connection (for quick access)
@@ -106,6 +110,7 @@ struct tquic_napi_stats {
  * @list: Linkage in global NAPI list
  */
 struct tquic_napi {
+	u32 magic;
 	struct napi_struct napi;
 	struct tquic_sock *sk;
 	struct tquic_connection *conn;
@@ -451,6 +456,26 @@ void __exit tquic_napi_subsys_exit(void);
  * Inline Helper Functions
  * =============================================================================
  */
+
+/**
+ * tquic_napi_from_sk - Safely retrieve TQUIC NAPI from socket
+ * @sk: Socket with potential NAPI in sk_user_data
+ *
+ * Returns: tquic_napi pointer if valid, NULL otherwise
+ */
+static inline struct tquic_napi *tquic_napi_from_sk(struct sock *sk)
+{
+	struct tquic_napi *tn;
+
+	if (!sk)
+		return NULL;
+
+	tn = sk->sk_user_data;
+	if (!tn || tn->magic != TQUIC_NAPI_MAGIC)
+		return NULL;
+
+	return tn;
+}
 
 /**
  * tquic_napi_is_enabled - Check if NAPI is enabled

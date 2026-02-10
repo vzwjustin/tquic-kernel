@@ -15,6 +15,7 @@
 #include <net/tquic.h>
 
 #include "../tquic_compat.h"
+#include "../tquic_debug.h"
 #include <net/tquic_pm.h>
 #include <uapi/linux/tquic_pm.h>
 
@@ -230,12 +231,6 @@ static int tquic_pm_nl_add_path(struct sk_buff *skb, struct genl_info *info)
 	int if_idx = 0;
 	int err;
 
-	/* Require CAP_NET_ADMIN */
-	if (!netlink_capable(skb, CAP_NET_ADMIN)) {
-		GENL_SET_ERR_MSG(info, "operation requires CAP_NET_ADMIN");
-		return -EPERM;
-	}
-
 	if (!info->attrs[TQUIC_PM_ATTR_TOKEN]) {
 		GENL_SET_ERR_MSG(info, "missing connection token");
 		return -EINVAL;
@@ -336,10 +331,12 @@ static int tquic_pm_nl_add_path(struct sk_buff *skb, struct genl_info *info)
 	err = tquic_conn_add_path(conn, (struct sockaddr *)&local_addr,
 				  (struct sockaddr *)&remote_addr);
 	if (err) {
+		tquic_conn_put(conn);
 		GENL_SET_ERR_MSG(info, "failed to add path");
 		return err;
 	}
 
+	tquic_conn_put(conn);
 	return 0;
 }
 
@@ -354,12 +351,6 @@ static int tquic_pm_nl_del_path(struct sk_buff *skb, struct genl_info *info)
 	u32 token;
 	u8 path_id;
 	int err;
-
-	/* Require CAP_NET_ADMIN */
-	if (!netlink_capable(skb, CAP_NET_ADMIN)) {
-		GENL_SET_ERR_MSG(info, "operation requires CAP_NET_ADMIN");
-		return -EPERM;
-	}
 
 	if (!info->attrs[TQUIC_PM_ATTR_TOKEN]) {
 		GENL_SET_ERR_MSG(info, "missing connection token");
@@ -384,10 +375,12 @@ static int tquic_pm_nl_del_path(struct sk_buff *skb, struct genl_info *info)
 	/* Remove path */
 	err = tquic_conn_remove_path(conn, path_id);
 	if (err) {
+		tquic_conn_put(conn);
 		GENL_SET_ERR_MSG(info, "failed to remove path");
 		return err;
 	}
 
+	tquic_conn_put(conn);
 	return 0;
 }
 
@@ -429,14 +422,17 @@ static int tquic_pm_nl_get_path(struct sk_buff *skb, struct genl_info *info)
 	/* Find path */
 	path = tquic_conn_get_path(conn, path_id);
 	if (!path) {
+		tquic_conn_put(conn);
 		GENL_SET_ERR_MSG(info, "path not found");
 		return -ENOENT;
 	}
 
 	/* Build response */
 	msg = nlmsg_new(NLMSG_DEFAULT_SIZE, GFP_KERNEL);
-	if (!msg)
+	if (!msg) {
+		tquic_conn_put(conn);
 		return -ENOMEM;
+	}
 
 	hdr = genlmsg_put_reply(msg, info, &tquic_pm_genl_family, 0,
 				TQUIC_PM_CMD_GET_PATH);
@@ -458,12 +454,14 @@ static int tquic_pm_nl_get_path(struct sk_buff *skb, struct genl_info *info)
 	}
 
 	genlmsg_end(msg, hdr);
+	tquic_conn_put(conn);
 	return genlmsg_reply(msg, info);
 
 cancel_msg:
 	genlmsg_cancel(msg, hdr);
 free_msg:
 	nlmsg_free(msg);
+	tquic_conn_put(conn);
 	return err;
 }
 
@@ -478,12 +476,6 @@ static int tquic_pm_nl_set_flags(struct sk_buff *skb, struct genl_info *info)
 	struct tquic_path *path;
 	u32 token, flags;
 	u8 path_id;
-
-	/* Require CAP_NET_ADMIN */
-	if (!netlink_capable(skb, CAP_NET_ADMIN)) {
-		GENL_SET_ERR_MSG(info, "operation requires CAP_NET_ADMIN");
-		return -EPERM;
-	}
 
 	if (!info->attrs[TQUIC_PM_ATTR_TOKEN]) {
 		GENL_SET_ERR_MSG(info, "missing connection token");
@@ -513,17 +505,20 @@ static int tquic_pm_nl_set_flags(struct sk_buff *skb, struct genl_info *info)
 
 	path = tquic_conn_get_path(conn, path_id);
 	if (!path) {
+		tquic_conn_put(conn);
 		GENL_SET_ERR_MSG(info, "path not found");
 		return -ENOENT;
 	}
 
-	/* Update flags */
-	path->flags = flags;
+	/* Update flags atomically for concurrent readers */
+	WRITE_ONCE(path->flags, flags);
 
 	/* Update priority if provided */
 	if (info->attrs[TQUIC_PM_ATTR_PRIORITY])
-		path->priority = nla_get_u8(info->attrs[TQUIC_PM_ATTR_PRIORITY]);
+		WRITE_ONCE(path->priority,
+			   nla_get_u8(info->attrs[TQUIC_PM_ATTR_PRIORITY]));
 
+	tquic_conn_put(conn);
 	return 0;
 }
 
@@ -536,12 +531,6 @@ static int tquic_pm_nl_flush_paths(struct sk_buff *skb, struct genl_info *info)
 {
 	struct tquic_connection *conn;
 	u32 token;
-
-	/* Require CAP_NET_ADMIN */
-	if (!netlink_capable(skb, CAP_NET_ADMIN)) {
-		GENL_SET_ERR_MSG(info, "operation requires CAP_NET_ADMIN");
-		return -EPERM;
-	}
 
 	if (!info->attrs[TQUIC_PM_ATTR_TOKEN]) {
 		GENL_SET_ERR_MSG(info, "missing connection token");
@@ -560,6 +549,7 @@ static int tquic_pm_nl_flush_paths(struct sk_buff *skb, struct genl_info *info)
 	/* Flush all paths */
 	tquic_conn_flush_paths(conn);
 
+	tquic_conn_put(conn);
 	return 0;
 }
 

@@ -70,6 +70,7 @@
 
 #include "zero_rtt.h"
 #include "../tquic_mib.h"
+#include "../tquic_debug.h"
 
 /*
  * =============================================================================
@@ -90,15 +91,15 @@ static bool server_ticket_key_valid;
 /*
  * Cryptographically random seeds for replay filter bloom hash.
  * Initialized at module load to prevent hash prediction attacks.
- * Rotated periodically to limit the window for seed compromise attacks.
+ *
+ * Seeds are NOT rotated after initialization because rotating seeds
+ * invalidates all existing bloom filter entries, creating a window
+ * where replays are undetectable. The TTL-based bloom filter rotation
+ * already provides freshness guarantees. Seeds from the kernel CSPRNG
+ * are cryptographically strong and do not need periodic renewal.
  */
 static u32 replay_hash_seed1 __read_mostly;
 static u32 replay_hash_seed2 __read_mostly;
-static DEFINE_SPINLOCK(replay_seed_lock);
-static ktime_t replay_seed_last_rotation;
-
-/* Seed rotation interval: 1 hour (in seconds) */
-#define TQUIC_REPLAY_SEED_ROTATION_INTERVAL	3600
 
 /* TLS 1.3 cipher suites */
 #define TLS_AES_128_GCM_SHA256		0x1301
@@ -227,6 +228,16 @@ static int tquic_hkdf_expand_label(struct crypto_shash *hash,
 	u32 i, n, hash_len;
 
 	hash_len = crypto_shash_digestsize(hash);
+
+	/*
+	 * Bounds check: hkdf_label buffer is 256 bytes.
+	 * Total size: 2 (length) + 1 (label_len_byte) + 6 ("tls13 ")
+	 *           + label_len + 1 (context_len_byte) + context_len
+	 *           = 10 + label_len + context_len
+	 */
+	if (label_len > 245 || context_len > 245 ||
+	    (10 + label_len + context_len) > sizeof(hkdf_label))
+		return -EINVAL;
 
 	/* Construct HKDF label: length || "tls13 " || label || context */
 	*p++ = (out_len >> 8) & 0xff;
@@ -601,7 +612,7 @@ int tquic_zero_rtt_derive_keys(struct tquic_zero_rtt_keys *keys,
 	/* Allocate hash transform */
 	hash = crypto_alloc_shash(tquic_cipher_to_hash_name(cipher_suite), 0, 0);
 	if (IS_ERR(hash)) {
-		pr_err("tquic: failed to allocate hash for 0-RTT key derivation\n");
+		tquic_err("failed to allocate hash for 0-RTT key derivation\n");
 		return PTR_ERR(hash);
 	}
 
@@ -764,67 +775,37 @@ void tquic_replay_filter_cleanup(struct tquic_replay_filter *filter)
 EXPORT_SYMBOL_GPL(tquic_replay_filter_cleanup);
 
 /*
- * Rotate bloom filter buckets based on TTL
+ * Rotate bloom filter buckets based on TTL.
+ *
+ * Two-bucket scheme: the bitmap is split into two halves:
+ *   Bucket 0: bits [0, TQUIC_REPLAY_BLOOM_BITS/2)
+ *   Bucket 1: bits [TQUIC_REPLAY_BLOOM_BITS/2, TQUIC_REPLAY_BLOOM_BITS)
+ *
+ * New entries are inserted into BOTH buckets (current and previous).
+ * On rotation, the OLDER bucket is cleared. This ensures entries survive
+ * for at least TTL/2 and at most TTL.
  */
 static void replay_filter_rotate(struct tquic_replay_filter *filter)
 {
 	ktime_t now = ktime_get();
 	s64 elapsed;
+	u32 half = TQUIC_REPLAY_BLOOM_BITS / 2;
+	u32 old_bucket;
 
 	elapsed = ktime_to_ms(ktime_sub(now, filter->last_rotation));
 
 	/* Rotate every TTL/2 to maintain coverage */
 	if (elapsed > (filter->ttl_seconds * 500)) {
-		/* Clear half the bits by rotating */
-		bitmap_zero(filter->bits, TQUIC_REPLAY_BLOOM_BITS / 2);
+		/* Clear the bucket that is about to become stale */
+		old_bucket = filter->current_bucket ^ 1;
+		if (old_bucket == 0)
+			bitmap_zero(filter->bits, half);
+		else
+			bitmap_zero(filter->bits + (half / BITS_PER_LONG),
+				    half);
 		filter->last_rotation = now;
 		filter->current_bucket ^= 1;
 	}
-}
-
-/*
- * tquic_replay_rotate_seeds - Rotate bloom filter hash seeds periodically
- *
- * SECURITY: Periodic seed rotation limits the window for attacks that exploit
- * knowledge of the hash seeds. Even if an attacker discovers the seeds through
- * timing analysis or other side channels, the seeds will change within the
- * rotation interval, forcing re-discovery.
- *
- * This function should be called periodically (e.g., during filter operations).
- * It uses a spinlock to ensure thread-safe seed updates.
- *
- * Note: When seeds rotate, old bloom filter entries may produce false negatives.
- * This is acceptable because:
- *   1. Replay protection already has a TTL-based expiration
- *   2. The bloom filter is probabilistic by design
- *   3. Security (unpredictable seeds) outweighs perfect replay detection
- */
-static void tquic_replay_rotate_seeds(void)
-{
-	ktime_t now;
-	s64 elapsed_seconds;
-	unsigned long flags;
-
-	now = ktime_get();
-
-	spin_lock_irqsave(&replay_seed_lock, flags);
-
-	elapsed_seconds = ktime_to_ms(ktime_sub(now, replay_seed_last_rotation)) / 1000;
-
-	if (elapsed_seconds >= TQUIC_REPLAY_SEED_ROTATION_INTERVAL) {
-		/*
-		 * Generate new cryptographically secure seeds.
-		 * get_random_bytes() uses the kernel CSPRNG which provides
-		 * cryptographic-quality randomness.
-		 */
-		get_random_bytes(&replay_hash_seed1, sizeof(replay_hash_seed1));
-		get_random_bytes(&replay_hash_seed2, sizeof(replay_hash_seed2));
-		replay_seed_last_rotation = now;
-
-		pr_debug("tquic: rotated replay filter hash seeds\n");
-	}
-
-	spin_unlock_irqrestore(&replay_seed_lock, flags);
 }
 
 /*
@@ -842,9 +823,16 @@ static void tquic_replay_rotate_seeds(void)
  * The seeds MUST be initialized before this function is called.
  * See tquic_zero_rtt_module_init() for initialization.
  */
-static void replay_filter_hash(const u8 *data, u32 len, u32 *indices)
+/*
+ * Compute bloom filter hash indices within a single bucket (half the bitmap).
+ * Each bucket occupies TQUIC_REPLAY_BLOOM_BITS/2 bits.
+ * The bucket_offset parameter selects which half: 0 or TQUIC_REPLAY_BLOOM_BITS/2.
+ */
+static void replay_filter_hash(const u8 *data, u32 len,
+				u32 bucket_offset, u32 *indices)
 {
 	u32 h1, h2;
+	u32 half = TQUIC_REPLAY_BLOOM_BITS / 2;
 	int i;
 
 	/*
@@ -856,37 +844,54 @@ static void replay_filter_hash(const u8 *data, u32 len, u32 *indices)
 	h2 = jhash(data, len, replay_hash_seed2);
 
 	for (i = 0; i < TQUIC_REPLAY_BLOOM_HASHES; i++)
-		indices[i] = (h1 + i * h2) % TQUIC_REPLAY_BLOOM_BITS;
+		indices[i] = bucket_offset + (h1 + i * h2) % half;
 }
 
 int tquic_replay_filter_check(struct tquic_replay_filter *filter,
 			      const u8 *ticket, u32 ticket_len)
 {
-	u32 indices[TQUIC_REPLAY_BLOOM_HASHES];
-	bool is_replay = true;
+	u32 indices_cur[TQUIC_REPLAY_BLOOM_HASHES];
+	u32 indices_prev[TQUIC_REPLAY_BLOOM_HASHES];
+	u32 half = TQUIC_REPLAY_BLOOM_BITS / 2;
+	u32 cur_offset, prev_offset;
+	bool is_replay;
 	int i;
 
 	if (!filter || !ticket || ticket_len == 0)
 		return -EINVAL;
-
-	/*
-	 * SECURITY: Rotate hash seeds periodically to limit the exposure
-	 * window if seeds are compromised through side-channel attacks.
-	 */
-	tquic_replay_rotate_seeds();
-
-	replay_filter_hash(ticket, ticket_len, indices);
 
 	spin_lock_bh(&filter->lock);
 
 	/* Rotate if needed */
 	replay_filter_rotate(filter);
 
-	/* Check if all bits are set (potential replay) */
+	/*
+	 * Compute hash indices for both buckets.
+	 * Check both because the ticket may have been inserted in either.
+	 */
+	cur_offset = filter->current_bucket * half;
+	prev_offset = (filter->current_bucket ^ 1) * half;
+
+	replay_filter_hash(ticket, ticket_len, cur_offset, indices_cur);
+	replay_filter_hash(ticket, ticket_len, prev_offset, indices_prev);
+
+	/* Check current bucket: all bits set means potential replay */
+	is_replay = true;
 	for (i = 0; i < TQUIC_REPLAY_BLOOM_HASHES; i++) {
-		if (!test_bit(indices[i], filter->bits)) {
+		if (!test_bit(indices_cur[i], filter->bits)) {
 			is_replay = false;
 			break;
+		}
+	}
+
+	/* Also check previous bucket if current didn't match */
+	if (!is_replay) {
+		is_replay = true;
+		for (i = 0; i < TQUIC_REPLAY_BLOOM_HASHES; i++) {
+			if (!test_bit(indices_prev[i], filter->bits)) {
+				is_replay = false;
+				break;
+			}
 		}
 	}
 
@@ -896,9 +901,14 @@ int tquic_replay_filter_check(struct tquic_replay_filter *filter,
 		return -EEXIST;
 	}
 
-	/* Set bits to mark ticket as seen */
-	for (i = 0; i < TQUIC_REPLAY_BLOOM_HASHES; i++)
-		set_bit(indices[i], filter->bits);
+	/*
+	 * Set bits in BOTH buckets to ensure the entry is detectable
+	 * regardless of when the next rotation occurs.
+	 */
+	for (i = 0; i < TQUIC_REPLAY_BLOOM_HASHES; i++) {
+		set_bit(indices_cur[i], filter->bits);
+		set_bit(indices_prev[i], filter->bits);
+	}
 
 	spin_unlock_bh(&filter->lock);
 
@@ -931,10 +941,16 @@ int tquic_session_ticket_encode(const struct tquic_session_ticket_plaintext *pla
 	if (key_len != TQUIC_SESSION_TICKET_KEY_LEN)
 		return -EINVAL;
 
-	/* Calculate payload size */
-	payload_len = plaintext->psk_len + 4 + 8 + 2 +	/* PSK, max_age, creation_time, cipher */
-		      1 + plaintext->alpn_len +		/* ALPN length + data */
-		      4 + plaintext->transport_params_len;	/* TP length + data */
+	/* Validate PSK length */
+	if (plaintext->psk_len == 0 ||
+	    plaintext->psk_len > TQUIC_ZERO_RTT_SECRET_MAX_LEN)
+		return -EINVAL;
+
+	/* Calculate payload size: psk_len(1) + PSK + max_age(4) + creation_time(8) +
+	 * cipher(2) + alpn_len(1) + ALPN + tp_len(4) + TP */
+	payload_len = 1 + plaintext->psk_len + 4 + 8 + 2 +
+		      1 + plaintext->alpn_len +
+		      4 + plaintext->transport_params_len;
 
 	header_len = 1 + TQUIC_SESSION_TICKET_NONCE_LEN;	/* Version + Nonce */
 
@@ -975,7 +991,8 @@ int tquic_session_ticket_encode(const struct tquic_session_ticket_plaintext *pla
 	/* Build payload */
 	p = payload;
 
-	/* PSK */
+	/* PSK length (1 byte) + PSK */
+	*p++ = plaintext->psk_len;
 	memcpy(p, plaintext->psk, plaintext->psk_len);
 	p += plaintext->psk_len;
 
@@ -1124,10 +1141,18 @@ int tquic_session_ticket_decode(const u8 *ticket, u32 ticket_len,
 	memset(out, 0, sizeof(*out));
 	p = payload;
 
-	/* PSK (first 32 or 48 bytes based on cipher) */
-	/* For simplicity, assume 32-byte PSK (SHA-256) */
-	out->psk_len = 32;
-	if (payload_len < out->psk_len + 4 + 8 + 2 + 1) {
+	/* PSK length (1 byte) + PSK */
+	if (payload_len < 1) {
+		ret = -EINVAL;
+		goto out_free;
+	}
+	out->psk_len = *p++;
+	if (out->psk_len == 0 ||
+	    out->psk_len > TQUIC_ZERO_RTT_SECRET_MAX_LEN) {
+		ret = -EINVAL;
+		goto out_free;
+	}
+	if (payload_len < 1 + out->psk_len + 4 + 8 + 2 + 1) {
 		ret = -EINVAL;
 		goto out_free;
 	}
@@ -1323,7 +1348,15 @@ int tquic_zero_rtt_accept(struct tquic_connection *conn)
 	state->state = TQUIC_0RTT_ACCEPTED;
 	state->early_data_received = 0;
 
-	pr_debug("tquic: 0-RTT accepted\n");
+	/*
+	 * Set early data limit for receive side.
+	 * Use the negotiated value or default if not set.
+	 */
+	if (state->early_data_max == 0)
+		state->early_data_max = 16384;
+
+	tquic_info("0-RTT accepted (max_early_data=%llu)\n",
+		   state->early_data_max);
 
 	/* MIB counter (TQUIC_MIB_0RTTACCEPTED) is updated by caller in tquic_input.c */
 
@@ -1344,7 +1377,7 @@ void tquic_zero_rtt_reject(struct tquic_connection *conn)
 	/* Wipe keys since they won't be used */
 	memzero_explicit(&state->keys, sizeof(state->keys));
 
-	pr_debug("tquic: 0-RTT rejected\n");
+	tquic_info("0-RTT rejected\n");
 }
 EXPORT_SYMBOL_GPL(tquic_zero_rtt_reject);
 
@@ -1360,7 +1393,7 @@ void tquic_zero_rtt_confirmed(struct tquic_connection *conn)
 	if (state->state == TQUIC_0RTT_ATTEMPTING)
 		state->state = TQUIC_0RTT_ACCEPTED;
 
-	pr_debug("tquic: 0-RTT confirmed\n");
+	tquic_info("0-RTT confirmed\n");
 }
 EXPORT_SYMBOL_GPL(tquic_zero_rtt_confirmed);
 
@@ -1386,7 +1419,12 @@ bool tquic_zero_rtt_can_send(struct tquic_connection *conn)
 	if (!state->keys.valid)
 		return false;
 
-	if (state->early_data_sent >= state->early_data_max)
+	/*
+	 * Check under pn_lock to prevent TOCTOU with tquic_zero_rtt_encrypt()
+	 * which increments early_data_sent. Without this, multiple callers
+	 * could pass this check concurrently and collectively exceed the limit.
+	 */
+	if (READ_ONCE(state->early_data_sent) >= state->early_data_max)
 		return false;
 
 	return true;
@@ -1458,9 +1496,21 @@ int tquic_zero_rtt_encrypt(struct tquic_connection *conn,
 		return -EINVAL;
 	}
 
+	/*
+	 * Atomically check early data limit and reserve this PN.
+	 * Both checks under the same lock prevent TOCTOU races where
+	 * multiple threads pass tquic_zero_rtt_can_send() concurrently
+	 * and collectively exceed the early data limit.
+	 */
+	if (state->early_data_sent + payload_len > state->early_data_max) {
+		spin_unlock_irqrestore(&state->pn_lock, flags);
+		return -EDQUOT;
+	}
+
 	/* Reserve this PN before releasing lock to prevent races */
 	state->largest_sent_pn = pkt_num;
 	state->send_pn_initialized = true;
+	state->early_data_sent += payload_len;
 
 	spin_unlock_irqrestore(&state->pn_lock, flags);
 
@@ -1510,7 +1560,7 @@ int tquic_zero_rtt_encrypt(struct tquic_connection *conn,
 
 	if (ret == 0) {
 		*out_len = payload_len + 16;
-		state->early_data_sent += payload_len;
+		/* early_data_sent already incremented under pn_lock above */
 	}
 
 	return ret;
@@ -1650,6 +1700,19 @@ int tquic_zero_rtt_decrypt(struct tquic_connection *conn,
 
 	if (payload_len < 16)
 		return -EINVAL;
+
+	/*
+	 * Enforce early data size limit on receive side.
+	 * RFC 9001 Section 4.6.1: server MUST NOT accept more 0-RTT data
+	 * than max_early_data allows. Without this check, a malicious client
+	 * can send unlimited 0-RTT data, exhausting server resources.
+	 */
+	if (state->early_data_received + (payload_len - 16) > state->early_data_max) {
+		pr_debug("TQUIC: 0-RTT early data limit exceeded: received=%llu + %zu > max=%llu\n",
+			 state->early_data_received, payload_len - 16,
+			 state->early_data_max);
+		return -EDQUOT;
+	}
 
 	/*
 	 * =======================================================================
@@ -1811,12 +1874,11 @@ int __init tquic_zero_rtt_module_init(void)
 	 * With random seeds, the attacker cannot predict hash outputs
 	 * without access to kernel memory.
 	 *
-	 * Seeds are rotated periodically (see TQUIC_REPLAY_SEED_ROTATION_INTERVAL)
-	 * to limit exposure window if compromised via side-channel attacks.
+	 * Seeds are fixed for the module lifetime; see the comment at
+	 * the seed declaration for why rotation is not performed.
 	 */
 	get_random_bytes(&replay_hash_seed1, sizeof(replay_hash_seed1));
 	get_random_bytes(&replay_hash_seed2, sizeof(replay_hash_seed2));
-	replay_seed_last_rotation = ktime_get();
 
 	/* Initialize global replay filter */
 	ret = tquic_replay_filter_init(&global_replay_filter,
@@ -1830,7 +1892,7 @@ int __init tquic_zero_rtt_module_init(void)
 	get_random_bytes(server_ticket_key, sizeof(server_ticket_key));
 	server_ticket_key_valid = true;
 
-	pr_info("tquic: 0-RTT early data support initialized\n");
+	tquic_info("0-RTT early data support initialized\n");
 
 	return 0;
 }
@@ -1854,7 +1916,7 @@ void __exit tquic_zero_rtt_module_exit(void)
 	memzero_explicit(server_ticket_key, sizeof(server_ticket_key));
 	server_ticket_key_valid = false;
 
-	pr_info("tquic: 0-RTT early data support cleaned up\n");
+	tquic_info("0-RTT early data support cleaned up\n");
 }
 
 MODULE_DESCRIPTION("TQUIC 0-RTT Early Data Support (RFC 9001)");

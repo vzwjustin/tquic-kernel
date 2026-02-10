@@ -28,6 +28,7 @@
 #include <net/tquic.h>
 
 #include "tquic_sched.h"
+#include "../tquic_debug.h"
 
 /*
  * Default values for BLEST calculations
@@ -462,6 +463,48 @@ static void blest_path_removed(struct tquic_connection *conn,
 }
 
 /**
+ * blest_packet_sent - Handle packet send to update inflight tracking
+ * @conn: Connection
+ * @path: Path the packet was sent on
+ * @sent_bytes: Number of bytes sent
+ *
+ * Increase inflight for this path and update send timestamp.
+ */
+static void blest_packet_sent(struct tquic_connection *conn,
+			      struct tquic_path *path,
+			      u32 sent_bytes)
+{
+	struct blest_sched_data *sd = conn->sched_priv;
+	struct blest_path_state *ps;
+	unsigned long irqflags;
+
+	if (!sd)
+		return;
+
+	spin_lock_irqsave(&sd->lock, irqflags);
+	ps = blest_find_path_state(sd, path->path_id);
+	if (!ps) {
+		ps = blest_alloc_path_state(sd, path->path_id);
+		if (ps) {
+			ps->rtt_us = path->cc.smoothed_rtt_us;
+			if (ps->rtt_us == 0)
+				ps->rtt_us = BLEST_DEFAULT_RTT_US;
+			if (path->cc.cwnd > 0 && ps->rtt_us > 0)
+				ps->send_rate = (u64)path->cc.cwnd *
+						1000000ULL / ps->rtt_us;
+			else
+				ps->send_rate = BLEST_MIN_SEND_RATE;
+		}
+	}
+
+	if (ps) {
+		ps->inflight_bytes += sent_bytes;
+		ps->last_send_time_us = ktime_get_ns() / 1000;
+	}
+	spin_unlock_irqrestore(&sd->lock, irqflags);
+}
+
+/**
  * blest_ack_received - Handle ACK feedback to update inflight tracking
  * @conn: Connection
  * @path: Path that received ACK
@@ -548,6 +591,7 @@ static struct tquic_mp_sched_ops tquic_mp_sched_blest = {
 	.release	= blest_release,
 	.path_added	= blest_path_added,
 	.path_removed	= blest_path_removed,
+	.packet_sent	= blest_packet_sent,
 	.ack_received	= blest_ack_received,
 	.loss_detected	= blest_loss_detected,
 };

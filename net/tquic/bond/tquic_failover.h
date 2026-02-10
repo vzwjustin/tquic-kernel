@@ -44,6 +44,21 @@ struct tquic_connection;
 #define TQUIC_FAILOVER_DEFAULT_SRTT_US	100000	/* Default 100ms SRTT */
 
 /*
+ * Hysteresis constants for path flap prevention
+ *
+ * Prevent rapid oscillation between active and failed states under
+ * unstable network conditions. A path must exhibit N consecutive
+ * failures before being marked failed, and N consecutive successes
+ * before being restored. Additionally, a minimum stabilization
+ * period must elapse before a failed path can be re-enabled.
+ */
+#define TQUIC_HYST_FAIL_THRESHOLD	3	/* Consecutive failures to fail */
+#define TQUIC_HYST_RECOVER_THRESHOLD	5	/* Consecutive successes to restore */
+#define TQUIC_HYST_MIN_STABLE_MS	2000	/* Minimum 2s stability period */
+#define TQUIC_HYST_RTT_STABLE_MULT	2	/* Or 2x SRTT, whichever larger */
+#define TQUIC_HYST_MAX_STABLE_MS	30000	/* Cap stabilization at 30s */
+
+/*
  * Retransmit queue limits
  */
 #define TQUIC_FAILOVER_MAX_QUEUED	1024	/* Max packets in retransmit queue */
@@ -116,9 +131,24 @@ struct tquic_retx_queue {
 struct tquic_failover_ctx;
 
 /*
+ * Path hysteresis state
+ *
+ * Tracks whether a path is considered healthy, degraded (experiencing
+ * intermittent failures), or failed. Transitions require sustained
+ * consecutive events to prevent flapping.
+ */
+enum tquic_path_hyst_state {
+	TQUIC_PATH_HYST_HEALTHY = 0,	/* Path operating normally */
+	TQUIC_PATH_HYST_DEGRADED,	/* Failures seen, not yet failed */
+	TQUIC_PATH_HYST_FAILED,		/* Confirmed failed */
+	TQUIC_PATH_HYST_RECOVERING,	/* Failed, receiving ACKs again */
+};
+
+/*
  * Path timeout tracking
  *
- * Per-path state for failure detection.
+ * Per-path state for failure detection with hysteresis to prevent
+ * flapping under unstable network conditions.
  */
 struct tquic_path_timeout {
 	u64			last_ack_time;	/* Last ACK received (us) */
@@ -128,6 +158,13 @@ struct tquic_path_timeout {
 	struct delayed_work	timeout_work;	/* Timeout work */
 	struct tquic_failover_ctx *fc;		/* Parent context */
 	u8			path_id;	/* Path identifier */
+
+	/* Hysteresis state for flap prevention */
+	enum tquic_path_hyst_state hyst_state;	/* Current hysteresis state */
+	u32			consec_failures;/* Consecutive timeout failures */
+	u32			consec_successes;/* Consecutive ACK successes */
+	u64			last_state_change_us; /* Timestamp of last transition */
+	u64			fail_time_us;	/* When path entered FAILED state */
 };
 
 /*
@@ -185,6 +222,8 @@ struct tquic_failover_ctx {
 		u64		failover_time_ns;	/* Total failover time */
 		u64		rhashtable_errors;	/* rhashtable walk errors */
 		u64		hash_insert_errors;	/* Hash table insertion errors */
+		u64		flaps_suppressed;	/* Transitions blocked by hysteresis */
+		u64		path_recoveries;	/* Paths restored from FAILED */
 	} stats;
 
 	/* Back pointer */
@@ -300,6 +339,30 @@ void tquic_failover_update_path_ack(struct tquic_failover_ctx *fc,
  */
 void tquic_failover_arm_timeout(struct tquic_failover_ctx *fc, u8 path_id);
 
+/**
+ * tquic_failover_path_hyst_state - Get hysteresis state name for a path
+ * @fc: Failover context
+ * @path_id: Path identifier
+ *
+ * Returns string name of the current hysteresis state for debugging.
+ */
+const char *tquic_failover_path_hyst_state(struct tquic_failover_ctx *fc,
+					   u8 path_id);
+
+/**
+ * tquic_failover_is_path_usable - Check if path is usable for sending
+ * @fc: Failover context
+ * @path_id: Path identifier
+ *
+ * A path is usable if its hysteresis state is HEALTHY. Paths in DEGRADED
+ * state are still usable but are being monitored. Paths in FAILED or
+ * RECOVERING states are not usable.
+ *
+ * Returns: true if path can be used for sending
+ */
+bool tquic_failover_is_path_usable(struct tquic_failover_ctx *fc,
+				   u8 path_id);
+
 /*
  * ============================================================================
  * Retransmit Queue API
@@ -393,6 +456,8 @@ struct tquic_failover_stats {
 	u64	packets_retransmitted;
 	u64	path_failures;
 	u64	duplicates_detected;
+	u64	flaps_suppressed;
+	u64	path_recoveries;
 	u32	current_tracked;
 	u32	current_retx_queue;
 };

@@ -13,6 +13,7 @@
 #include <linux/slab.h>
 #include <linux/math64.h>
 #include <net/tquic.h>
+#include "../tquic_debug.h"
 #include "persistent_cong.h"
 
 /* CUBIC parameters */
@@ -79,14 +80,29 @@ static u64 cubic_calc_w(struct tquic_cubic *cubic, u64 t)
 {
 	u64 offs, delta, bic_target;
 
-	/* W_cubic(t) = C(t-K)^3 + W_max */
+	/*
+	 * W_cubic(t) = C(t-K)^3 + W_max
+	 *
+	 * To avoid overflow in C * offs^3, compute in steps:
+	 * First compute offs^2, then multiply by offs, then by C,
+	 * shifting progressively to keep values in range.
+	 * offs is in milliseconds, so for a 10-second epoch offs <= 10000.
+	 * offs^3 can be up to 10^12, times C=410 is ~4*10^14, which fits u64
+	 * but we must be careful with the shift order.
+	 */
 	if (t < cubic->k) {
 		offs = cubic->k - t;
-		delta = (TQUIC_CUBIC_C * offs * offs * offs) >> 30;
-		bic_target = cubic->origin_point - delta;
+		/* Split the shift: (C * offs * offs) >> 10 first, then * offs >> 20 */
+		delta = (TQUIC_CUBIC_C * offs * offs) >> 10;
+		delta = (delta * offs) >> 20;
+		if (delta > cubic->origin_point)
+			bic_target = 0;
+		else
+			bic_target = cubic->origin_point - delta;
 	} else {
 		offs = t - cubic->k;
-		delta = (TQUIC_CUBIC_C * offs * offs * offs) >> 30;
+		delta = (TQUIC_CUBIC_C * offs * offs) >> 10;
+		delta = (delta * offs) >> 20;
 		bic_target = cubic->origin_point + delta;
 	}
 
@@ -98,7 +114,9 @@ static u64 cubic_calc_w(struct tquic_cubic *cubic, u64 t)
  */
 static u64 __maybe_unused cubic_tcp_friendliness(struct tquic_cubic *cubic, u64 t)
 {
-	/* Simplified TCP-friendly calculation */
+	/* Simplified TCP-friendly calculation (guard w_max == 0) */
+	if (cubic->w_max == 0)
+		return cubic->tcp_cwnd;
 	return cubic->tcp_cwnd + (t * 1200 / cubic->w_max);
 }
 
@@ -117,7 +135,7 @@ static void *tquic_cubic_init(struct tquic_path *path)
 	cubic->ssthresh = ULLONG_MAX;
 	cubic->in_slow_start = true;
 
-	pr_debug("tquic_cubic: initialized for path %u\n", path->path_id);
+	tquic_dbg("cubic: initialized for path %u\n", path->path_id);
 
 	return cubic;
 }
@@ -146,6 +164,19 @@ static void tquic_cubic_on_ack(void *state, u64 bytes_acked, u64 rtt_us)
 
 	if (!cubic)
 		return;
+
+	/*
+	 * New round detection: if an RTT has elapsed since the last
+	 * ECN response, we are in a new round. Reset ecn_in_round
+	 * so we can respond to ECN-CE in the new round per RFC 9002
+	 * Section 7.1.
+	 */
+	if (cubic->ecn_in_round && cubic->rtt_us > 0) {
+		s64 elapsed = ktime_us_delta(ktime_get(), cubic->last_ecn_time);
+
+		if (elapsed >= (s64)cubic->rtt_us)
+			cubic->ecn_in_round = false;
+	}
 
 	if (cubic->in_slow_start) {
 		/* Slow start: increase cwnd exponentially */
@@ -186,14 +217,16 @@ static void tquic_cubic_on_ack(void *state, u64 bytes_acked, u64 rtt_us)
 	if (target < cubic->tcp_cwnd)
 		target = cubic->tcp_cwnd;
 
-	/* Increase cwnd */
-	if (target > cubic->cwnd) {
+	/* Increase cwnd (guard against division by zero) */
+	if (target > cubic->cwnd && cubic->cwnd > 0) {
 		u64 inc = (target - cubic->cwnd) * bytes_acked / cubic->cwnd;
+
 		cubic->cwnd += inc;
 	}
 
-	/* Update TCP emulation */
-	cubic->tcp_cwnd += bytes_acked / cubic->cwnd;
+	/* Update TCP emulation (guard against division by zero) */
+	if (cubic->cwnd > 0)
+		cubic->tcp_cwnd += bytes_acked / cubic->cwnd;
 }
 
 /*
@@ -225,8 +258,8 @@ static void tquic_cubic_on_loss(void *state, u64 bytes_lost)
 	cubic->epoch_start = 0;
 	cubic->in_slow_start = false;
 
-	pr_debug("tquic_cubic: loss detected, cwnd=%llu ssthresh=%llu\n",
-		 cubic->cwnd, cubic->ssthresh);
+	tquic_warn("cubic: loss detected, cwnd=%llu ssthresh=%llu\n",
+		   cubic->cwnd, cubic->ssthresh);
 }
 
 /*
@@ -274,7 +307,7 @@ static void tquic_cubic_on_ecn(void *state, u64 ecn_ce_count)
 	 * per RTT. This is a conservative approximation.
 	 */
 	if (cubic->ecn_in_round) {
-		pr_debug("tquic_cubic: ECN CE ignored (already responded this round)\n");
+		tquic_dbg("cubic: ECN CE ignored (already responded this round)\n");
 		return;
 	}
 
@@ -282,7 +315,7 @@ static void tquic_cubic_on_ecn(void *state, u64 ecn_ce_count)
 	if (cubic->rtt_us > 0) {
 		time_since_last = ktime_us_delta(now, cubic->last_ecn_time);
 		if (time_since_last < cubic->rtt_us) {
-			pr_debug("tquic_cubic: ECN CE ignored (within RTT window)\n");
+			tquic_dbg("cubic: ECN CE ignored (within RTT window)\n");
 			return;
 		}
 	}
@@ -323,17 +356,8 @@ static void tquic_cubic_on_ecn(void *state, u64 ecn_ce_count)
 	cubic->ecn_in_round = true;
 	cubic->last_ecn_time = now;
 
-	pr_debug("tquic_cubic: ECN CE response, ce_count=%llu cwnd=%llu ssthresh=%llu\n",
-		 ecn_ce_count, cubic->cwnd, cubic->ssthresh);
-}
-
-/*
- * Start a new congestion round (called on ACK of new data)
- * Resets ECN round tracking per RFC 9002.
- */
-static void __maybe_unused tquic_cubic_new_round(struct tquic_cubic *cubic)
-{
-	cubic->ecn_in_round = false;
+	tquic_dbg("cubic: ECN CE response, ce_count=%llu cwnd=%llu ssthresh=%llu\n",
+		  ecn_ce_count, cubic->cwnd, cubic->ssthresh);
 }
 
 static u64 tquic_cubic_get_cwnd(void *state)
@@ -349,9 +373,16 @@ static u64 tquic_cubic_get_pacing_rate(void *state)
 	if (!cubic)
 		return 0;
 
-	/* Simple pacing rate estimate: cwnd / RTT */
-	/* This would need actual RTT tracking */
-	return cubic->cwnd * 10;  /* Simplified */
+	/*
+	 * Pacing rate = cwnd / RTT (in bytes per second).
+	 * Use 1.25x multiplier for headroom, similar to TCP pacing.
+	 * If no RTT sample yet, use a conservative default (100ms).
+	 */
+	if (cubic->rtt_us > 0)
+		return cubic->cwnd * USEC_PER_SEC * 5 / (cubic->rtt_us * 4);
+
+	/* No RTT sample: assume 100ms */
+	return cubic->cwnd * USEC_PER_SEC * 5 / (100000 * 4);
 }
 
 static bool tquic_cubic_can_send(void *state, u64 bytes)
@@ -386,8 +417,8 @@ static void tquic_cubic_on_persistent_cong(void *state,
 	if (!cubic || !info)
 		return;
 
-	pr_info("tquic_cubic: persistent congestion, resetting cwnd %llu -> %llu\n",
-		cubic->cwnd, info->min_cwnd);
+	tquic_warn("cubic: persistent congestion, cwnd %llu -> %llu\n",
+		   cubic->cwnd, info->min_cwnd);
 
 	/* Reset to minimum cwnd per RFC 9002 */
 	cubic->cwnd = info->min_cwnd;

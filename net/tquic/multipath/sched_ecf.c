@@ -28,6 +28,7 @@
 #include <net/tquic.h>
 
 #include "tquic_sched.h"
+#include "../tquic_debug.h"
 
 /*
  * Default values for ECF calculations
@@ -378,6 +379,36 @@ static void ecf_path_removed(struct tquic_connection *conn,
 }
 
 /**
+ * ecf_packet_sent - Handle packet send to update inflight tracking
+ * @conn: Connection
+ * @path: Path the packet was sent on
+ * @sent_bytes: Number of bytes sent
+ *
+ * Increase inflight for this path so that completion time estimates
+ * accurately reflect the queue depth.
+ */
+static void ecf_packet_sent(struct tquic_connection *conn,
+			    struct tquic_path *path,
+			    u32 sent_bytes)
+{
+	struct ecf_sched_data *sd = conn->sched_priv;
+	struct ecf_path_state *ps;
+
+	if (!sd)
+		return;
+
+	ps = ecf_find_path_state(sd, path->path_id);
+	if (!ps) {
+		ps = ecf_alloc_path_state(sd, path->path_id);
+		if (ps)
+			ecf_update_rate_from_path(ps, path);
+	}
+
+	if (ps)
+		ps->inflight_bytes += sent_bytes;
+}
+
+/**
  * ecf_ack_received - Handle ACK feedback to update inflight and rate
  * @conn: Connection
  * @path: Path that received ACK
@@ -452,6 +483,7 @@ static struct tquic_mp_sched_ops tquic_mp_sched_ecf = {
 	.release	= ecf_release,
 	.path_added	= ecf_path_added,
 	.path_removed	= ecf_path_removed,
+	.packet_sent	= ecf_packet_sent,
 	.ack_received	= ecf_ack_received,
 	.loss_detected	= ecf_loss_detected,
 };

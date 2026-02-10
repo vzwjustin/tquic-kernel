@@ -7,6 +7,7 @@
 #include <linux/kernel.h>
 
 #include <net/tquic_pm.h>
+#include "../tquic_debug.h"
 
 #include "nat_keepalive.h"
 
@@ -41,7 +42,7 @@ static int __init __maybe_unused tquic_pm_module_init(void)
 	if (ret)
 		goto err_keepalive;
 
-	pr_info("tquic_pm: path manager subsystem initialized\n");
+	tquic_info("path manager subsystem initialized\n");
 	return 0;
 
 err_keepalive:
@@ -71,7 +72,7 @@ static void __exit __maybe_unused tquic_pm_module_exit(void)
 	tquic_pm_kernel_module_exit();
 	tquic_pm_types_exit();
 
-	pr_info("tquic_pm: path manager subsystem exited\n");
+	tquic_info("path manager subsystem exited\n");
 }
 
 #ifndef TQUIC_OUT_OF_TREE

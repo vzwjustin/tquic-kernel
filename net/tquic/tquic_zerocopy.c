@@ -106,7 +106,7 @@ int tquic_zc_state_alloc(struct tquic_connection *conn)
 	/* Store state in connection's dedicated field */
 	conn->zc_state = zc;
 
-	pr_debug("tquic: zero-copy state allocated\n");
+	tquic_dbg("zero-copy state allocated\n");
 	return 0;
 }
 EXPORT_SYMBOL_GPL(tquic_zc_state_alloc);
@@ -146,7 +146,7 @@ void tquic_zc_state_free(struct tquic_connection *conn)
 	kfree(zc);
 	conn->zc_state = NULL;
 
-	pr_debug("tquic: zero-copy state freed\n");
+	tquic_dbg("zero-copy state freed\n");
 }
 EXPORT_SYMBOL_GPL(tquic_zc_state_free);
 
@@ -260,6 +260,17 @@ int tquic_sendmsg_zerocopy(struct sock *sk, struct msghdr *msg, size_t len,
 	/* Check if zerocopy is enabled on socket */
 	if (!sock_flag(sk, SOCK_ZEROCOPY))
 		return -EOPNOTSUPP;
+
+	/*
+	 * Enforce maximum outstanding zerocopy buffers to prevent
+	 * unbounded page pinning which could exhaust system memory.
+	 */
+	if (conn->zc_state) {
+		struct tquic_zc_state *zc = conn->zc_state;
+
+		if (zc->outstanding >= TQUIC_ZC_MAX_OUTSTANDING)
+			return -ENOBUFS;
+	}
 
 	/* Get or allocate user buffer info for zerocopy tracking */
 	if (msg->msg_ubuf) {
@@ -379,7 +390,7 @@ int tquic_check_zerocopy_flag(struct sock *sk, struct msghdr *msg, int flags)
 	/* Check for scatter-gather support (preferred but not required) */
 	if (!(sk->sk_route_caps & NETIF_F_SG)) {
 		/* Will fallback to copy with notification */
-		pr_debug("tquic: zerocopy fallback to copy (no SG support)\n");
+		tquic_dbg("zerocopy fallback to copy (no SG support)\n");
 	}
 
 	return 0;
@@ -903,10 +914,10 @@ int tquic_set_zerocopy(struct sock *sk, int val)
 		 * (we can fallback to copy with notification).
 		 */
 		sock_set_flag(sk, SOCK_ZEROCOPY);
-		pr_debug("tquic: zerocopy enabled on socket\n");
+		tquic_dbg("zerocopy enabled on socket\n");
 	} else {
 		sock_reset_flag(sk, SOCK_ZEROCOPY);
-		pr_debug("tquic: zerocopy disabled on socket\n");
+		tquic_dbg("zerocopy disabled on socket\n");
 	}
 
 	return 0;
@@ -1096,6 +1107,7 @@ EXPORT_SYMBOL_GPL(tquic_skb_orphan_frags_rx);
 #include <net/sock.h>
 #include <net/tquic.h>
 
+#include "tquic_debug.h"
 #include "protocol.h"
 
 int tquic_zc_state_alloc(struct tquic_connection *conn)

@@ -19,6 +19,7 @@
 #include <net/tquic_frame.h>
 #include "ack_frequency.h"
 #include "varint.h"
+#include "../tquic_debug.h"
 
 /*
  * Maximum number of ACK ranges to track per packet number space.
@@ -190,13 +191,36 @@ static u64 tquic_ack_decode_delay(struct tquic_connection *conn, u64 encoded_del
 {
 	struct tquic_ack_conn_ctx *ctx = tquic_ack_ctx(conn);
 	u32 ack_delay_exponent;
+	u64 decoded;
 
 	/* Use peer's ack_delay_exponent */
 	ack_delay_exponent = ctx->remote_params.ack_delay_exponent;
 	if (ack_delay_exponent == 0)
 		ack_delay_exponent = TQUIC_DEFAULT_ACK_DELAY_EXP;
 
-	return encoded_delay << ack_delay_exponent;
+	/*
+	 * Guard against overflow: if encoded_delay would overflow
+	 * when shifted, cap to a maximum sane value. Per RFC 9000,
+	 * ack_delay_exponent is at most 20 and max_ack_delay is
+	 * at most 2^14 ms. Cap decoded delay to 16 seconds.
+	 */
+	if (encoded_delay > (U64_MAX >> ack_delay_exponent))
+		return TQUIC_MAX_ACK_DELAY_US;
+
+	decoded = encoded_delay << ack_delay_exponent;
+
+	/* Cap to peer's max_ack_delay or a sane upper bound */
+	if (ctx->remote_params.max_ack_delay > 0) {
+		u64 max_us = ctx->remote_params.max_ack_delay * 1000;
+
+		if (decoded > max_us)
+			decoded = max_us;
+	} else if (decoded > 16000000ULL) {
+		/* Fallback: 16 seconds absolute max */
+		decoded = 16000000ULL;
+	}
+
+	return decoded;
 }
 
 /*
@@ -988,15 +1012,22 @@ static bool tquic_ack_ranges_contain(const struct tquic_ack_info *ack_info, u64 
 	if (!ack_info || ack_info->ack_range_count == 0)
 		return false;
 
-	/* Check first range */
+	/* Check first range -- validate no underflow */
+	if (ack_info->ranges[0].ack_range_len > largest)
+		return false;
 	smallest = largest - ack_info->ranges[0].ack_range_len;
 	if (pn >= smallest && pn <= largest)
 		return true;
 
 	/* Check additional ranges */
 	for (i = 1; i < ack_info->ack_range_count; i++) {
-		/* Calculate next range bounds */
+		/* Validate subtraction does not underflow */
+		if (smallest < ack_info->ranges[i].gap + 2)
+			return false;
 		largest = smallest - ack_info->ranges[i].gap - 2;
+
+		if (ack_info->ranges[i].ack_range_len > largest)
+			return false;
 		smallest = largest - ack_info->ranges[i].ack_range_len;
 
 		if (pn >= smallest && pn <= largest)
@@ -1021,12 +1052,19 @@ static u64 tquic_ack_get_smallest_acked(const struct tquic_ack_info *ack_info)
 	if (!ack_info || ack_info->ack_range_count == 0)
 		return 0;
 
-	/* Start with first range */
+	/* Start with first range -- validate no underflow */
+	if (ack_info->ranges[0].ack_range_len > largest)
+		return 0;
 	smallest = largest - ack_info->ranges[0].ack_range_len;
 
 	/* Traverse to last range */
 	for (i = 1; i < ack_info->ack_range_count; i++) {
+		if (smallest < ack_info->ranges[i].gap + 2)
+			return 0;
 		largest = smallest - ack_info->ranges[i].gap - 2;
+
+		if (ack_info->ranges[i].ack_range_len > largest)
+			return 0;
 		smallest = largest - ack_info->ranges[i].ack_range_len;
 	}
 
@@ -1118,7 +1156,7 @@ int __init tquic_ack_init(void)
 	atomic64_set(&tquic_ack_stats.delayed_acks, 0);
 	atomic64_set(&tquic_ack_stats.immediate_acks, 0);
 
-	pr_debug("TQUIC ACK subsystem initialized\n");
+	tquic_info("ACK subsystem initialized\n");
 	return 0;
 }
 
@@ -1130,7 +1168,7 @@ int __init tquic_ack_init(void)
  */
 void __exit tquic_ack_exit(void)
 {
-	pr_debug("TQUIC ACK stats: sent=%lld received=%lld ranges=%lld delayed=%lld immediate=%lld\n",
+	tquic_dbg("ACK stats: sent=%lld recv=%lld ranges=%lld delayed=%lld imm=%lld\n",
 		 atomic64_read(&tquic_ack_stats.acks_sent),
 		 atomic64_read(&tquic_ack_stats.acks_received),
 		 atomic64_read(&tquic_ack_stats.ack_ranges_sent),

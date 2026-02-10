@@ -12,6 +12,7 @@
  *   - rhashtable for O(1) sent packet lookup by packet number
  *   - Retransmit queue with priority over new data
  *   - 3x SRTT path timeout for failure detection
+ *   - Hysteresis state machine to prevent path flapping
  *   - Bitmap-based receiver deduplication
  */
 
@@ -26,6 +27,7 @@
 
 #include "tquic_failover.h"
 #include "tquic_bonding.h"
+#include "../tquic_debug.h"
 
 /*
  * ============================================================================
@@ -95,6 +97,70 @@ static void tquic_sent_packet_free(struct tquic_sent_packet *sp)
 
 /*
  * ============================================================================
+ * Hysteresis helpers
+ * ============================================================================
+ */
+
+static const char * const tquic_hyst_state_names[] = {
+	[TQUIC_PATH_HYST_HEALTHY]	= "HEALTHY",
+	[TQUIC_PATH_HYST_DEGRADED]	= "DEGRADED",
+	[TQUIC_PATH_HYST_FAILED]	= "FAILED",
+	[TQUIC_PATH_HYST_RECOVERING]	= "RECOVERING",
+};
+
+/**
+ * tquic_hyst_stable_time_us - Calculate minimum stabilization time
+ * @pt: Path timeout structure with current SRTT
+ *
+ * Returns the minimum time (in microseconds) a failed path must remain
+ * stable (receiving consecutive ACKs) before it can be restored.
+ * This is max(TQUIC_HYST_MIN_STABLE_MS, TQUIC_HYST_RTT_STABLE_MULT * SRTT),
+ * capped at TQUIC_HYST_MAX_STABLE_MS.
+ */
+static u64 tquic_hyst_stable_time_us(struct tquic_path_timeout *pt)
+{
+	u64 rtt_based_us;
+	u64 min_us;
+	u64 result;
+
+	min_us = (u64)TQUIC_HYST_MIN_STABLE_MS * 1000;
+	rtt_based_us = pt->srtt_us * TQUIC_HYST_RTT_STABLE_MULT;
+
+	result = max(min_us, rtt_based_us);
+	return min(result, (u64)TQUIC_HYST_MAX_STABLE_MS * 1000);
+}
+
+/**
+ * tquic_hyst_transition - Transition path hysteresis state
+ * @pt: Path timeout structure
+ * @new_state: Target hysteresis state
+ *
+ * Records the state change and resets the appropriate counters.
+ * Caller must hold appropriate locks if needed.
+ */
+static void tquic_hyst_transition(struct tquic_path_timeout *pt,
+				  enum tquic_path_hyst_state new_state)
+{
+	enum tquic_path_hyst_state old_state = pt->hyst_state;
+
+	if (old_state == new_state)
+		return;
+
+	pt->hyst_state = new_state;
+	pt->last_state_change_us = tquic_get_time_us();
+
+	if (new_state == TQUIC_PATH_HYST_FAILED)
+		pt->fail_time_us = pt->last_state_change_us;
+
+	pr_info("path %u hysteresis: %s -> %s (failures=%u successes=%u)\n",
+		pt->path_id,
+		tquic_hyst_state_names[old_state],
+		tquic_hyst_state_names[new_state],
+		pt->consec_failures, pt->consec_successes);
+}
+
+/*
+ * ============================================================================
  * Path Timeout Handling
  * ============================================================================
  */
@@ -111,24 +177,91 @@ static void tquic_failover_timeout_work(struct work_struct *work)
 	elapsed_us = now - pt->last_ack_time;
 
 	/* Check if timeout has actually elapsed */
-	if (elapsed_us >= (u64)pt->timeout_ms * 1000) {
-		pr_info("path %u timeout: %llu us since last ACK (timeout=%u ms)\n",
-			path_id, elapsed_us, pt->timeout_ms);
-
-		pt->timeout_armed = false;
-
-		/* Trigger path failure */
-		tquic_failover_on_path_failed(fc, path_id);
-	} else {
+	if (elapsed_us < (u64)pt->timeout_ms * 1000) {
 		/* Reschedule for remaining time */
-		u32 remaining_ms = (pt->timeout_ms * 1000 - elapsed_us) / 1000;
+		u32 remaining_ms;
 
+		remaining_ms = (pt->timeout_ms * 1000 - elapsed_us) / 1000;
 		if (remaining_ms < 1)
 			remaining_ms = 1;
 
 		queue_delayed_work(fc->wq, &pt->timeout_work,
 				   msecs_to_jiffies(remaining_ms));
+		return;
 	}
+
+	/*
+	 * Timeout has elapsed - apply hysteresis before declaring failure.
+	 * Increment consecutive failure count and reset success counter.
+	 * Only trigger actual failover after reaching the threshold.
+	 */
+	pt->consec_failures++;
+	pt->consec_successes = 0;
+
+	pr_info("path %u timeout: %llu us since last ACK (timeout=%u ms, "
+		"consec_failures=%u/%u, hyst_state=%s)\n",
+		path_id, elapsed_us, pt->timeout_ms,
+		pt->consec_failures, TQUIC_HYST_FAIL_THRESHOLD,
+		tquic_hyst_state_names[pt->hyst_state]);
+
+	switch (pt->hyst_state) {
+	case TQUIC_PATH_HYST_HEALTHY:
+		/*
+		 * First failure(s) on a healthy path - enter DEGRADED.
+		 * Don't immediately fail; wait for sustained failures.
+		 */
+		tquic_hyst_transition(pt, TQUIC_PATH_HYST_DEGRADED);
+		if (pt->consec_failures >= TQUIC_HYST_FAIL_THRESHOLD)
+			goto do_failover;
+
+		/*
+		 * Re-arm timeout to keep monitoring. The path stays
+		 * usable during DEGRADED state.
+		 */
+		pt->timeout_armed = false;
+		break;
+
+	case TQUIC_PATH_HYST_DEGRADED:
+		/*
+		 * Already degraded, check if we have enough consecutive
+		 * failures to confirm the path is truly failed.
+		 */
+		if (pt->consec_failures >= TQUIC_HYST_FAIL_THRESHOLD)
+			goto do_failover;
+
+		/* Not enough failures yet, keep monitoring */
+		pt->timeout_armed = false;
+		break;
+
+	case TQUIC_PATH_HYST_RECOVERING:
+		/*
+		 * Path was recovering but timed out again. Reset recovery
+		 * progress and return to FAILED. This prevents premature
+		 * restoration of an unstable path.
+		 */
+		pt->consec_successes = 0;
+		tquic_hyst_transition(pt, TQUIC_PATH_HYST_FAILED);
+		fc->stats.flaps_suppressed++;
+		pt->timeout_armed = false;
+		break;
+
+	case TQUIC_PATH_HYST_FAILED:
+		/*
+		 * Already failed, nothing further to do. The path remains
+		 * in FAILED state until enough consecutive ACKs arrive.
+		 */
+		pt->timeout_armed = false;
+		break;
+	}
+
+	return;
+
+do_failover:
+	tquic_hyst_transition(pt, TQUIC_PATH_HYST_FAILED);
+	pt->timeout_armed = false;
+
+	/* Trigger the actual path failure and packet requeue */
+	tquic_failover_on_path_failed(fc, path_id);
 }
 
 /*
@@ -168,17 +301,26 @@ struct tquic_failover_ctx *tquic_failover_init(struct tquic_bonding_ctx *bonding
 	fc->retx_queue.count = 0;
 	fc->retx_queue.bytes = 0;
 
-	/* Initialize per-path timeout tracking */
+	/* Initialize per-path timeout tracking with hysteresis */
 	for (i = 0; i < 8; i++) {
 		struct tquic_path_timeout *pt = &fc->path_timeouts[i];
+		u64 now_us = tquic_get_time_us();
 
-		pt->last_ack_time = tquic_get_time_us();
+		pt->last_ack_time = now_us;
 		pt->srtt_us = TQUIC_FAILOVER_DEFAULT_SRTT_US;
 		pt->timeout_ms = TQUIC_FAILOVER_MIN_TIMEOUT_MS;
 		pt->timeout_armed = false;
 		pt->fc = fc;
 		pt->path_id = i;
-		INIT_DELAYED_WORK(&pt->timeout_work, tquic_failover_timeout_work);
+		INIT_DELAYED_WORK(&pt->timeout_work,
+				  tquic_failover_timeout_work);
+
+		/* Hysteresis state */
+		pt->hyst_state = TQUIC_PATH_HYST_HEALTHY;
+		pt->consec_failures = 0;
+		pt->consec_successes = 0;
+		pt->last_state_change_us = now_us;
+		pt->fail_time_us = 0;
 	}
 
 	/* Initialize receiver deduplication */
@@ -443,7 +585,15 @@ int tquic_failover_on_path_failed(struct tquic_failover_ctx *fc, u8 path_id)
 			/*
 			 * Mark for requeue but don't remove from rhashtable.
 			 * The packet stays tracked for duplicate ACK handling.
+			 * Enforce a safety limit to prevent memory exhaustion
+			 * during catastrophic path failure with large BDP.
 			 */
+			if (requeued >= TQUIC_FAILOVER_MAX_QUEUED) {
+				pr_warn_ratelimited(
+					"path %u: requeue limit reached (%d)\n",
+					path_id, requeued);
+				break;
+			}
 			sp->in_retx_queue = true;
 			list_add_tail(&sp->retx_list, &requeue_list);
 			requeued++;
@@ -489,20 +639,26 @@ int tquic_failover_on_path_failed(struct tquic_failover_ctx *fc, u8 path_id)
 EXPORT_SYMBOL_GPL(tquic_failover_on_path_failed);
 
 /**
- * tquic_failover_update_path_ack - Update path ACK timestamp
+ * tquic_failover_update_path_ack - Update path ACK timestamp and hysteresis
+ *
+ * Each ACK reception counts as a consecutive success. When a path is in
+ * FAILED or RECOVERING state, enough consecutive successes over a minimum
+ * stabilization period will restore the path to HEALTHY.
  */
 void tquic_failover_update_path_ack(struct tquic_failover_ctx *fc,
 				    u8 path_id, u64 srtt_us)
 {
 	struct tquic_path_timeout *pt;
 	u32 timeout_ms;
+	u64 now_us;
 
 	if (!fc || path_id >= 8)
 		return;
 
 	pt = &fc->path_timeouts[path_id];
+	now_us = tquic_get_time_us();
 
-	pt->last_ack_time = tquic_get_time_us();
+	pt->last_ack_time = now_us;
 	pt->srtt_us = srtt_us;
 
 	/* Calculate timeout: 3x SRTT */
@@ -510,11 +666,70 @@ void tquic_failover_update_path_ack(struct tquic_failover_ctx *fc,
 	timeout_ms = clamp(timeout_ms,
 			   (u32)TQUIC_FAILOVER_MIN_TIMEOUT_MS,
 			   (u32)TQUIC_FAILOVER_MAX_TIMEOUT_MS);
-
 	pt->timeout_ms = timeout_ms;
 
-	pr_debug("path %u: updated ACK time, SRTT=%llu us, timeout=%u ms\n",
-		 path_id, srtt_us, timeout_ms);
+	/*
+	 * Process hysteresis on ACK reception.
+	 * Each ACK increments consecutive successes and resets failures.
+	 */
+	pt->consec_successes++;
+	pt->consec_failures = 0;
+
+	switch (pt->hyst_state) {
+	case TQUIC_PATH_HYST_HEALTHY:
+		/* Already healthy, nothing to do */
+		break;
+
+	case TQUIC_PATH_HYST_DEGRADED:
+		/*
+		 * Path was degraded but is now receiving ACKs again.
+		 * Require enough consecutive successes to confirm
+		 * stability before returning to HEALTHY.
+		 */
+		if (pt->consec_successes >= TQUIC_HYST_RECOVER_THRESHOLD) {
+			tquic_hyst_transition(pt, TQUIC_PATH_HYST_HEALTHY);
+			pt->consec_successes = 0;
+		}
+		break;
+
+	case TQUIC_PATH_HYST_FAILED:
+		/*
+		 * Path was failed and is now getting ACKs. Enter
+		 * RECOVERING state to begin the stabilization period.
+		 * The path is not yet usable for new data.
+		 */
+		tquic_hyst_transition(pt, TQUIC_PATH_HYST_RECOVERING);
+		break;
+
+	case TQUIC_PATH_HYST_RECOVERING:
+		/*
+		 * Path is recovering. Check both the consecutive success
+		 * threshold AND the minimum stabilization period.
+		 * The path must have been failed for long enough, and
+		 * must have received enough consecutive ACKs since.
+		 */
+		if (pt->consec_successes >= TQUIC_HYST_RECOVER_THRESHOLD) {
+			u64 stable_us = tquic_hyst_stable_time_us(pt);
+			u64 since_fail_us = now_us - pt->fail_time_us;
+
+			if (since_fail_us >= stable_us) {
+				tquic_hyst_transition(pt,
+						     TQUIC_PATH_HYST_HEALTHY);
+				pt->consec_successes = 0;
+				fc->stats.path_recoveries++;
+				pr_info("path %u: recovered after %llu ms\n",
+					path_id,
+					since_fail_us / 1000);
+			}
+		}
+		break;
+	}
+
+	pr_debug("path %u: ACK received, SRTT=%llu us, timeout=%u ms, "
+		 "hyst=%s consec_ok=%u\n",
+		 path_id, srtt_us, timeout_ms,
+		 tquic_hyst_state_names[pt->hyst_state],
+		 pt->consec_successes);
 }
 EXPORT_SYMBOL_GPL(tquic_failover_update_path_ack);
 
@@ -530,13 +745,47 @@ void tquic_failover_arm_timeout(struct tquic_failover_ctx *fc, u8 path_id)
 
 	pt = &fc->path_timeouts[path_id];
 
-	if (!pt->timeout_armed) {
-		pt->timeout_armed = true;
+	if (!xchg(&pt->timeout_armed, true)) {
 		queue_delayed_work(fc->wq, &pt->timeout_work,
 				   msecs_to_jiffies(pt->timeout_ms));
 	}
 }
 EXPORT_SYMBOL_GPL(tquic_failover_arm_timeout);
+
+/**
+ * tquic_failover_path_hyst_state - Get hysteresis state name for a path
+ */
+const char *tquic_failover_path_hyst_state(struct tquic_failover_ctx *fc,
+					   u8 path_id)
+{
+	if (!fc || path_id >= 8)
+		return "UNKNOWN";
+
+	return tquic_hyst_state_names[fc->path_timeouts[path_id].hyst_state];
+}
+EXPORT_SYMBOL_GPL(tquic_failover_path_hyst_state);
+
+/**
+ * tquic_failover_is_path_usable - Check if path is usable for sending
+ *
+ * A path is usable only if it is HEALTHY or DEGRADED. Paths in FAILED
+ * or RECOVERING state must not be used until they have demonstrated
+ * stability through consecutive ACKs over the stabilization period.
+ */
+bool tquic_failover_is_path_usable(struct tquic_failover_ctx *fc,
+				   u8 path_id)
+{
+	enum tquic_path_hyst_state state;
+
+	if (!fc || path_id >= 8)
+		return false;
+
+	state = READ_ONCE(fc->path_timeouts[path_id].hyst_state);
+
+	return state == TQUIC_PATH_HYST_HEALTHY ||
+	       state == TQUIC_PATH_HYST_DEGRADED;
+}
+EXPORT_SYMBOL_GPL(tquic_failover_is_path_usable);
 
 /*
  * ============================================================================
@@ -755,6 +1004,8 @@ void tquic_failover_get_stats(struct tquic_failover_ctx *fc,
 	stats->packets_retransmitted = fc->stats.packets_retransmitted;
 	stats->path_failures = fc->stats.path_failures;
 	stats->duplicates_detected = fc->dedup.duplicates_detected;
+	stats->flaps_suppressed = fc->stats.flaps_suppressed;
+	stats->path_recoveries = fc->stats.path_recoveries;
 	stats->current_tracked = fc->sent_count;
 	stats->current_retx_queue = fc->retx_queue.count;
 }

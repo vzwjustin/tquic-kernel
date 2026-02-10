@@ -16,6 +16,7 @@
 #include <net/tquic_frame.h>
 #include <net/tquic_pm.h>
 #include "../diag/tracepoints.h"
+#include "../tquic_debug.h"
 #include "../protocol.h"
 #include "../tquic_init.h"
 
@@ -56,8 +57,8 @@ void tquic_trace_path_validated(struct tquic_connection *conn, u32 path_id,
 	if (!conn)
 		return;
 
-	pr_debug("tquic: path %u validated in %llu us\n",
-		 path_id, validation_time_us);
+	tquic_conn_info(conn, "path %u validated in %llu us\n",
+			path_id, validation_time_us);
 }
 EXPORT_SYMBOL_GPL(tquic_trace_path_validated);
 
@@ -83,7 +84,13 @@ EXPORT_SYMBOL_GPL(tquic_path_state_names);
 #define TQUIC_PATH_VALIDATION_TIMEOUT_MS 30000
 #define TQUIC_PATH_MTU_MIN 1200
 #define TQUIC_PATH_MTU_MAX 65535
-#define TQUIC_PATH_MTU_INITIAL 1280
+/*
+ * Initial path MTU: Use QUIC minimum (1200 bytes, RFC 9000 Section 14)
+ * rather than IPv6 minimum (1280). This ensures consistency with the
+ * PMTUD subsystem which uses 1200 as its base, and avoids sending
+ * packets larger than QUIC minimum before MTU is confirmed.
+ */
+#define TQUIC_PATH_MTU_INITIAL 1200
 #define TQUIC_PATH_MTU_PROBE_SIZE 16
 
 /* MTU discovery probe sizes per RFC 8899 */
@@ -295,6 +302,9 @@ tquic_path_create_internal(struct tquic_connection *conn,
 		list_add_tail(&path->list, &conn->paths);
 		conn->num_paths++;
 		spin_unlock(&conn->paths_lock);
+
+		tquic_conn_info(conn, "path %u created, mtu=%u\n",
+				path->path_id, path->mtu);
 	}
 
 	return path;
@@ -435,6 +445,8 @@ int tquic_path_validate_start(struct tquic_path *path)
 			/* Validation timed out - path is unusable */
 			path->validation.challenge_pending = false;
 			path->state = TQUIC_PATH_FAILED;
+			tquic_warn("path %u validation timed out\n",
+				   path->path_id);
 			return -ETIMEDOUT;
 		}
 
@@ -443,6 +455,8 @@ int tquic_path_validate_start(struct tquic_path *path)
 
 	/* Update state to pending */
 	path->state = TQUIC_PATH_PENDING;
+
+	tquic_dbg("path %u validation starting\n", path->path_id);
 
 	/* Send initial PATH_CHALLENGE */
 	return tquic_path_challenge(path);
@@ -486,8 +500,11 @@ void tquic_path_on_validated(struct tquic_path *path)
 	/* Notify path manager via netlink */
 	tquic_nl_path_event(conn, path, TQUIC_PATH_EVENT_ACTIVE);
 
-	/* Start MTU discovery on the validated path */
-	tquic_pmtud_init_path(path);
+	/* Start MTU discovery on the validated path.
+	 * tquic_pmtud_start() calls tquic_pmtud_init_path() internally,
+	 * so do not call init separately to avoid double-allocating
+	 * PMTUD state and leaking the first allocation.
+	 */
 	tquic_pmtud_start(path);
 }
 
@@ -703,8 +720,8 @@ void tquic_path_mtu_probe_lost(struct tquic_path *path, u32 probe_size)
 	 * RFC 9000 recommends waiting at least 1 PTO before retrying
 	 * with a smaller probe size.
 	 */
-	pr_debug("TQUIC: MTU probe lost at size %u, keeping MTU %u\n",
-		 probe_size, path->mtu);
+	tquic_dbg("MTU probe lost at size %u, keeping MTU %u\n",
+		  probe_size, path->mtu);
 }
 
 /*

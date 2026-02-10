@@ -87,10 +87,10 @@ tquic-y := \
 	core/quic_flow.o \
 	core/quic_loss.o \
 	core/quic_path.o \
+	core/ack.o \
 	core/quic_ack.o \
 	core/quic_ack_frequency.o \
 	core/quic_key_update.o \
-	core/mp_frame.o \
 	core/packet_coalesce_fix.o \
 	core/early_data.o \
 	core/priority.o \
@@ -98,6 +98,7 @@ tquic-y := \
 	bond/tquic_bonding.o \
 	bond/tquic_failover.o \
 	bond/tquic_reorder.o \
+	bond/tquic_bpm.o \
 	bond/cong_coupled.o \
 	pm/pm_types.o \
 	pm/pm_kernel.o \

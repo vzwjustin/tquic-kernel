@@ -19,6 +19,8 @@
 #include <net/sock.h>
 #include <net/tquic.h>
 
+#include "../tquic_debug.h"
+
 /* Path quality metrics for scheduling decisions */
 struct tquic_path_quality {
 	u64 score;           /* Combined quality score */
@@ -60,10 +62,13 @@ static void tquic_calc_path_quality(struct tquic_path *path,
 	}
 
 	/* Apply priority weighting */
-	score = score * (256 - path->priority) / 256;
+	score = score * (256 - min_t(u32, path->priority, 255)) / 256;
 
-	/* Apply explicit weight */
-	score = score * path->weight;
+	/* Apply explicit weight, guard overflow */
+	if (path->weight > 0 && score <= div64_u64(U64_MAX, path->weight))
+		score = score * path->weight;
+	else
+		score = U64_MAX;
 
 	quality->score = score;
 	quality->available_cwnd = stats->cwnd;
@@ -470,7 +475,8 @@ void tquic_bond_path_failed(struct tquic_connection *conn,
 	if (!bond)
 		return;
 
-	pr_info("tquic: path %u failed, initiating failover\n", path->path_id);
+	tquic_warn("path %u failed, initiating failover\n", path->path_id);
+	tquic_trace_failover(conn, path->path_id, 0, 0, 0);
 
 	spin_lock(&conn->lock);
 
@@ -499,9 +505,12 @@ void tquic_bond_path_failed(struct tquic_connection *conn,
 		if (new_active) {
 			conn->active_path = new_active;
 			bond->stats.failovers++;
-			pr_info("tquic: failed over to path %u\n", new_active->path_id);
+			tquic_info("failed over to path %u\n",
+				   new_active->path_id);
+			tquic_trace_failover(conn, path->path_id,
+					     new_active->path_id, 0, 0);
 		} else {
-			pr_warn("tquic: no paths available for failover\n");
+			tquic_warn("no paths available for failover\n");
 		}
 	}
 
@@ -526,14 +535,15 @@ void tquic_bond_path_recovered(struct tquic_connection *conn,
 
 	if (path->state == TQUIC_PATH_FAILED) {
 		path->state = TQUIC_PATH_STANDBY;
-		pr_info("tquic: path %u recovered (standby)\n", path->path_id);
+		tquic_info("path %u recovered (standby)\n", path->path_id);
 
 		/* Promote to active if it was the primary */
 		if (path == bond->primary_path) {
 			path->state = TQUIC_PATH_ACTIVE;
 			if (bond->mode == TQUIC_BOND_MODE_FAILOVER)
 				conn->active_path = path;
-			pr_info("tquic: primary path %u restored\n", path->path_id);
+			tquic_info("primary path %u restored\n",
+				   path->path_id);
 		}
 	}
 
@@ -655,7 +665,8 @@ struct tquic_bond_state *tquic_bond_init(struct tquic_connection *conn)
 	bond->stats.total_paths = conn->num_paths;
 	bond->stats.active_paths = conn->num_paths;
 
-	pr_debug("tquic: initialized bonding state for connection\n");
+	tquic_info("initialized bonding state mode=%u reorder_window=%u\n",
+		   bond->mode, bond->reorder_window);
 
 	return bond;
 }
@@ -688,7 +699,7 @@ int tquic_bond_set_mode(struct tquic_connection *conn, u8 mode)
 		return -EINVAL;
 
 	bond->mode = mode;
-	pr_info("tquic: set bonding mode to %u\n", mode);
+	tquic_info("set bonding mode to %u\n", mode);
 
 	return 0;
 }
@@ -710,7 +721,7 @@ int tquic_bond_set_primary(struct tquic_connection *conn, u32 path_id)
 		return -ENOENT;
 
 	bond->primary_path = path;
-	pr_info("tquic: set primary path to %u\n", path_id);
+	tquic_info("set primary path to %u\n", path_id);
 
 	return 0;
 }
@@ -746,20 +757,24 @@ EXPORT_SYMBOL_GPL(tquic_bond_get_stats);
 int tquic_bond_set_path_weight(struct tquic_connection *conn, u32 path_id, u32 weight)
 {
 	struct tquic_path *path;
+	int ret = -ENOENT;
 
 	if (!conn || weight > 100)
 		return -EINVAL;
 
+	spin_lock(&conn->lock);
 	list_for_each_entry(path, &conn->paths, list) {
 		if (path->path_id == path_id) {
 			path->weight = weight;
-			pr_debug("tquic_bond: path %u weight set to %u\n",
-				 path_id, weight);
-			return 0;
+			tquic_dbg("bond: path %u weight set to %u\n",
+				  path_id, weight);
+			ret = 0;
+			break;
 		}
 	}
+	spin_unlock(&conn->lock);
 
-	return -ENOENT;
+	return ret;
 }
 EXPORT_SYMBOL_GPL(tquic_bond_set_path_weight);
 
@@ -794,8 +809,8 @@ void tquic_bond_interface_down(struct tquic_connection *conn,
 			failed_count++;
 			bond->stats.failed_paths++;
 
-			pr_debug("tquic: path %u failed (interface %s down)\n",
-				 path->path_id, dev->name);
+			tquic_warn("path %u failed (interface %s down)\n",
+				   path->path_id, dev->name);
 		}
 	}
 
@@ -815,12 +830,16 @@ void tquic_bond_interface_down(struct tquic_connection *conn,
 			bond->primary_path = new_primary;
 			conn->active_path = new_primary;
 			bond->stats.failovers++;
-			pr_info("tquic: failover to path %u after interface %s down\n",
-				new_primary->path_id, dev->name);
+			tquic_warn("failover to path %u after interface %s down\n",
+				   new_primary->path_id, dev->name);
+			tquic_trace_failover(conn,
+					     bond->primary_path ?
+					     bond->primary_path->path_id : 0,
+					     new_primary->path_id, 2, 0);
 		} else {
 			bond->primary_path = NULL;
-			pr_warn("tquic: no available paths after interface %s down\n",
-				dev->name);
+			tquic_err("no available paths after interface %s down\n",
+				  dev->name);
 		}
 	}
 

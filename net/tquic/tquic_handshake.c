@@ -30,9 +30,11 @@
 #include <uapi/linux/tquic.h>
 
 #include "protocol.h"
+#include "tquic_debug.h"
 #include "tquic_mib.h"
 #include "tquic_token.h"
 #include "crypto/zero_rtt.h"
+#include "core/early_data.h"
 #include "core/varint.h"
 
 /*
@@ -102,7 +104,7 @@ int tquic_attempt_zero_rtt(struct sock *sk, const char *server_name,
 
 	/* Check if 0-RTT is enabled */
 	if (!tquic_sysctl_get_zero_rtt_enabled()) {
-		pr_debug("tquic: 0-RTT disabled via sysctl\n");
+		tquic_dbg("0-RTT disabled via sysctl\n");
 		return -ENOENT;
 	}
 
@@ -118,7 +120,7 @@ int tquic_attempt_zero_rtt(struct sock *sk, const char *server_name,
 	if (ret == 0) {
 		/* Update MIB counter for 0-RTT attempt */
 		TQUIC_INC_STATS(sock_net(sk), TQUIC_MIB_0RTTATTEMPTED);
-		pr_debug("tquic: 0-RTT attempt started for %.*s\n",
+		tquic_dbg("0-RTT attempt started for %.*s\n",
 			 server_name_len, server_name);
 	}
 
@@ -138,6 +140,62 @@ EXPORT_SYMBOL_GPL(tquic_attempt_zero_rtt);
  * - Remove the session ticket from cache
  * - Mark early data for retransmission as 1-RTT
  */
+/*
+ * tquic_validate_zero_rtt_transport_params - Validate 0-RTT transport params
+ *
+ * RFC 9001 Section 4.6.1: A client that receives transport parameters from
+ * a server in a new handshake MUST check that the values are at least as
+ * permissive as the values remembered from the session ticket. If any
+ * transport parameter is reduced below the remembered value, the client
+ * MUST reject 0-RTT.
+ *
+ * Returns: true if params are compatible, false if 0-RTT must be rejected
+ */
+static bool tquic_validate_zero_rtt_transport_params(
+	struct tquic_connection *conn)
+{
+	struct tquic_zero_rtt_state_s *state = conn->zero_rtt_state;
+	struct tquic_session_ticket_plaintext *saved;
+
+	if (!state || !state->ticket)
+		return true;	/* No saved params to check */
+
+	saved = &state->ticket->plaintext;
+
+	/*
+	 * Transport parameters that MUST NOT be reduced:
+	 * - initial_max_data
+	 * - initial_max_stream_data_bidi_local
+	 * - initial_max_stream_data_bidi_remote
+	 * - initial_max_stream_data_uni
+	 * - initial_max_streams_bidi
+	 * - initial_max_streams_uni
+	 *
+	 * We compare the new server transport parameters (in remote_params)
+	 * against the saved parameters from the session ticket. If any
+	 * value is lower, 0-RTT data may have violated the new limits.
+	 */
+	if (conn->remote_params.initial_max_data <
+	    conn->max_data_remote) {
+		tquic_dbg("0-RTT: server reduced initial_max_data\n");
+		return false;
+	}
+
+	if (conn->remote_params.initial_max_streams_bidi <
+	    conn->max_streams_bidi) {
+		tquic_dbg("0-RTT: server reduced max_streams_bidi\n");
+		return false;
+	}
+
+	if (conn->remote_params.initial_max_streams_uni <
+	    conn->max_streams_uni) {
+		tquic_dbg("0-RTT: server reduced max_streams_uni\n");
+		return false;
+	}
+
+	return true;
+}
+
 void tquic_handle_zero_rtt_response(struct sock *sk, bool accepted)
 {
 	struct tquic_sock *tsk = tquic_sk(sk);
@@ -150,9 +208,25 @@ void tquic_handle_zero_rtt_response(struct sock *sk, bool accepted)
 	state = conn->zero_rtt_state;
 
 	if (accepted) {
+		/*
+		 * RFC 9001 Section 4.6.1: Validate that new transport
+		 * parameters are at least as permissive as the remembered
+		 * values. If the server reduced limits, we must treat 0-RTT
+		 * as rejected because our early data may have exceeded
+		 * the new limits.
+		 */
+		if (!tquic_validate_zero_rtt_transport_params(conn)) {
+			tquic_dbg("0-RTT transport params incompatible, "
+				 "treating as rejected\n");
+			accepted = false;
+			/* Fall through to rejection path below */
+		}
+	}
+
+	if (accepted) {
 		tquic_zero_rtt_confirmed(conn);
 		TQUIC_INC_STATS(sock_net(sk), TQUIC_MIB_0RTTACCEPTED);
-		pr_debug("tquic: 0-RTT accepted by server\n");
+		tquic_dbg("0-RTT accepted by server\n");
 	} else {
 		/* Remove stale ticket */
 		if (state->ticket) {
@@ -161,7 +235,14 @@ void tquic_handle_zero_rtt_response(struct sock *sk, bool accepted)
 		}
 		tquic_zero_rtt_reject(conn);
 		TQUIC_INC_STATS(sock_net(sk), TQUIC_MIB_0RTTREJECTED);
-		pr_debug("tquic: 0-RTT rejected by server\n");
+		tquic_dbg("0-RTT rejected by server\n");
+
+		/*
+		 * Trigger retransmission of 0-RTT data as 1-RTT.
+		 * This calls tquic_zero_rtt_reject() and moves buffered
+		 * 0-RTT packets to the 1-RTT retransmit queue.
+		 */
+		tquic_early_data_reject(conn);
 	}
 }
 EXPORT_SYMBOL_GPL(tquic_handle_zero_rtt_response);
@@ -265,11 +346,17 @@ void tquic_handshake_done(void *data, int status, key_serial_t peerid)
 	struct sock *sk = hs->sk;
 	struct tquic_sock *tsk = tquic_sk(sk);
 
-	pr_debug("tquic: handshake completed, status=%d peerid=%d\n",
+	tquic_dbg("handshake completed, status=%d peerid=%d\n",
 		 status, peerid);
 
 	hs->status = status;
 	hs->peerid = peerid;
+
+	if (tsk->conn) {
+		u64 duration_us = jiffies_to_usecs(jiffies - hs->start_time);
+
+		tquic_trace_handshake_complete(tsk->conn, status, duration_us);
+	}
 
 	if (status == 0) {
 		/*
@@ -286,14 +373,14 @@ void tquic_handshake_done(void *data, int status, key_serial_t peerid)
 		TQUIC_INC_STATS(sock_net(sk), TQUIC_MIB_HANDSHAKESCOMPLETE);
 		TQUIC_INC_STATS(sock_net(sk), TQUIC_MIB_CURRESTAB);
 
-		pr_debug("tquic: TLS handshake successful, connection ready\n");
+		tquic_dbg("TLS handshake successful, connection ready\n");
 	} else {
 		/*
 		 * Handshake failed - map status to EQUIC error if needed.
 		 * The tlshd daemon returns standard errno values.
 		 */
 		TQUIC_INC_STATS(sock_net(sk), TQUIC_MIB_HANDSHAKESFAILED);
-		pr_debug("tquic: TLS handshake failed with status %d\n", status);
+		tquic_dbg("TLS handshake failed with status %d\n", status);
 	}
 
 	/* Wake up any thread waiting in tquic_wait_for_handshake() */
@@ -357,14 +444,17 @@ int tquic_start_handshake(struct sock *sk)
 	if (!sk || !tsk->conn)
 		return -EINVAL;
 
+	tquic_trace_handshake_start(tsk->conn, tsk->conn->is_server,
+				    false, tsk->cert_verify.verify_mode);
+
 	/* Check if handshake already in progress or completed */
 	if (tsk->handshake_state) {
-		pr_debug("tquic: handshake already in progress\n");
+		tquic_dbg("handshake already in progress\n");
 		return -EALREADY;
 	}
 
 	if (tsk->flags & TQUIC_F_HANDSHAKE_DONE) {
-		pr_debug("tquic: handshake already completed\n");
+		tquic_dbg("handshake already completed\n");
 		return -EISCONN;
 	}
 
@@ -375,7 +465,7 @@ int tquic_start_handshake(struct sock *sk)
 	 * real TLS handshake implementation.
 	 */
 	if (tsk->cert_verify.verify_mode == TQUIC_VERIFY_NONE) {
-		pr_warn("tquic: INSECURE bypass - skipping TLS handshake (verify_mode=NONE)\n");
+		tquic_warn("INSECURE bypass - skipping TLS handshake (verify_mode=NONE)\n");
 
 		hs = kzalloc(sizeof(*hs), GFP_KERNEL);
 		if (!hs)
@@ -396,7 +486,7 @@ int tquic_start_handshake(struct sock *sk)
 
 		complete(&hs->done);
 
-		pr_warn("tquic: handshake bypassed, connection marked ready\n");
+		tquic_warn("handshake bypassed, connection marked ready\n");
 		return 0;
 	}
 
@@ -424,7 +514,7 @@ int tquic_start_handshake(struct sock *sk)
 
 		ihs = tquic_hs_init(false);
 		if (!ihs) {
-			pr_warn("tquic: inline handshake init failed, falling back to tlshd\n");
+			tquic_warn("inline handshake init failed, falling back to tlshd\n");
 			goto tlshd_fallback;
 		}
 
@@ -523,7 +613,7 @@ int tquic_start_handshake(struct sock *sk)
 		tsk->handshake_state = hs;
 		tsk->inline_hs = ihs;
 
-		pr_debug("tquic: inline TLS handshake initiated, ClientHello queued (%u bytes)\n",
+		tquic_dbg("inline TLS handshake initiated, ClientHello queued (%u bytes)\n",
 			 ch_len);
 		return 0;
 	}
@@ -542,7 +632,7 @@ tlshd_fallback:
 		zero_rtt_ret = tquic_attempt_zero_rtt(sk, tsk->server_name,
 						      strlen(tsk->server_name));
 		if (zero_rtt_ret == 0) {
-			pr_debug("tquic: 0-RTT enabled for handshake\n");
+			tquic_dbg("0-RTT enabled for handshake\n");
 			/* 0-RTT is possible - mark connection as able to send early data */
 			tsk->flags |= TQUIC_F_ZERO_RTT_ENABLED;
 		}
@@ -591,11 +681,11 @@ tlshd_fallback:
 	 */
 	ret = tls_client_hello_x509(&args, GFP_KERNEL);
 	if (ret) {
-		pr_debug("tquic: tls_client_hello_x509 failed: %d\n", ret);
+		tquic_dbg("tls_client_hello_x509 failed: %d\n", ret);
 		goto err_free;
 	}
 
-	pr_debug("tquic: TLS handshake initiated\n");
+	tquic_dbg("TLS handshake initiated\n");
 	return 0;
 
 err_free:
@@ -651,14 +741,14 @@ int tquic_wait_for_handshake(struct sock *sk, u32 timeout_ms)
 
 	if (ret < 0) {
 		/* Interrupted by signal */
-		pr_debug("tquic: handshake wait interrupted\n");
+		tquic_dbg("handshake wait interrupted\n");
 		tls_handshake_cancel(sk);
 		return -EINTR;
 	}
 
 	if (ret == 0) {
 		/* Timeout expired */
-		pr_debug("tquic: handshake timed out after %u ms\n", timeout_ms);
+		tquic_dbg("handshake timed out after %u ms\n", timeout_ms);
 		tls_handshake_cancel(sk);
 		TQUIC_INC_STATS(sock_net(sk), TQUIC_MIB_HANDSHAKESTIMEOUT);
 		return -EQUIC_HANDSHAKE_TIMEOUT;
@@ -666,11 +756,11 @@ int tquic_wait_for_handshake(struct sock *sk, u32 timeout_ms)
 
 	/* Handshake completed - check status */
 	if (hs->status != 0) {
-		pr_debug("tquic: handshake completed with error %d\n", hs->status);
+		tquic_dbg("handshake completed with error %d\n", hs->status);
 		return tquic_map_handshake_error(hs->status);
 	}
 
-	pr_debug("tquic: handshake completed successfully\n");
+	tquic_dbg("handshake completed successfully\n");
 	return 0;
 }
 EXPORT_SYMBOL_GPL(tquic_wait_for_handshake);
@@ -716,7 +806,7 @@ void tquic_handshake_cleanup(struct sock *sk)
 	memzero_explicit(hs, sizeof(*hs));
 	kfree(hs);
 
-	pr_debug("tquic: handshake state cleaned up\n");
+	tquic_dbg("handshake state cleaned up\n");
 }
 EXPORT_SYMBOL_GPL(tquic_handshake_cleanup);
 
@@ -760,7 +850,7 @@ static void tquic_inline_hs_abort(struct sock *sk, int err)
 {
 	struct tquic_sock *tsk = tquic_sk(sk);
 
-	pr_debug("tquic: inline handshake aborted: %d\n", err);
+	tquic_dbg("inline handshake aborted: %d\n", err);
 
 	if (tsk->inline_hs) {
 		tquic_hs_cleanup(tsk->inline_hs);
@@ -822,7 +912,7 @@ static void tquic_inline_hs_apply_transport_params(struct sock *sk)
 	conn->max_streams_bidi = peer_tp.initial_max_streams_bidi;
 	conn->max_streams_uni = peer_tp.initial_max_streams_uni;
 
-	pr_debug("tquic: applied peer transport params: max_data=%llu, max_streams_bidi=%llu\n",
+	tquic_dbg("applied peer transport params: max_data=%llu, max_streams_bidi=%llu\n",
 		 peer_tp.initial_max_data, peer_tp.initial_max_streams_bidi);
 }
 
@@ -876,7 +966,7 @@ int tquic_inline_hs_install_keys(struct sock *sk, int level)
 				     server_iv, &si_len,
 				     server_hp, &sh_len);
 	if (ret < 0) {
-		pr_debug("tquic: failed to derive keys for level %d: %d\n",
+		tquic_dbg("failed to derive keys for level %d: %d\n",
 			 level, ret);
 		return ret;
 	}
@@ -892,7 +982,7 @@ int tquic_inline_hs_install_keys(struct sock *sk, int level)
 					       server_secret, &ss_len);
 	}
 	if (ret < 0) {
-		pr_debug("tquic: failed to get secrets for level %d: %d\n",
+		tquic_dbg("failed to get secrets for level %d: %d\n",
 			 level, ret);
 		goto out_zero;
 	}
@@ -918,7 +1008,7 @@ int tquic_inline_hs_install_keys(struct sock *sk, int level)
 					server_secret, ss_len,
 					client_secret, cs_len);
 	if (ret < 0) {
-		pr_debug("tquic: failed to install keys for level %d: %d\n",
+		tquic_dbg("failed to install keys for level %d: %d\n",
 			 level, ret);
 	}
 
@@ -975,7 +1065,7 @@ int tquic_inline_hs_recv_crypto(struct sock *sk, const u8 *data, u32 len,
 	ret = tquic_hs_process_record(ihs, data, len,
 				      resp_buf, 4096, &resp_len);
 	if (ret < 0) {
-		pr_debug("tquic: inline hs process_record failed: %d\n", ret);
+		tquic_dbg("inline hs process_record failed: %d\n", ret);
 		kfree(resp_buf);
 		tquic_inline_hs_abort(sk, ret);
 		return ret;
@@ -1024,7 +1114,7 @@ int tquic_inline_hs_recv_crypto(struct sock *sk, const u8 *data, u32 len,
 		if (tsk->handshake_state)
 			complete(&tsk->handshake_state->done);
 
-		pr_debug("tquic: inline TLS handshake complete\n");
+		tquic_dbg("inline TLS handshake complete\n");
 	}
 
 	/* Queue any response messages */
@@ -1098,7 +1188,7 @@ void tquic_install_crypto_state(struct sock *sk)
 	conn->crypto_state = TQUIC_CRYPTO_STATE_SENTINEL;
 	tsk->flags |= TQUIC_F_HANDSHAKE_DONE;
 
-	pr_debug("tquic: crypto state installed\n");
+	tquic_dbg("crypto state installed\n");
 }
 EXPORT_SYMBOL_GPL(tquic_install_crypto_state);
 
@@ -1169,7 +1259,7 @@ static int tquic_conn_server_accept_init(struct tquic_connection *conn,
 
 	/* Need at least minimum header: first byte + version + dcid_len + scid_len */
 	if (len < TQUIC_INITIAL_PKT_MIN_LEN) {
-		pr_debug("tquic: Initial packet too short: %zu bytes\n", len);
+		tquic_dbg("Initial packet too short: %zu bytes\n", len);
 		return -EINVAL;
 	}
 
@@ -1187,20 +1277,20 @@ static int tquic_conn_server_accept_init(struct tquic_connection *conn,
 
 	/* Verify this is a long header packet */
 	if (!(first_byte & TQUIC_HEADER_FORM_MASK)) {
-		pr_debug("tquic: Not a long header packet\n");
+		tquic_dbg("Not a long header packet\n");
 		return -EINVAL;
 	}
 
 	/* Verify fixed bit is set (RFC 9000 Section 17.2) */
 	if (!(first_byte & TQUIC_FIXED_BIT_MASK)) {
-		pr_debug("tquic: Fixed bit not set in Initial packet\n");
+		tquic_dbg("Fixed bit not set in Initial packet\n");
 		return -EINVAL;
 	}
 
 	/* Verify packet type is Initial (00) */
 	pkt_type = (first_byte & TQUIC_LONG_PKT_TYPE_MASK) >> TQUIC_LONG_PKT_TYPE_SHIFT;
 	if (pkt_type != TQUIC_PKT_TYPE_INITIAL) {
-		pr_debug("tquic: Not an Initial packet, type=%u\n", pkt_type);
+		tquic_dbg("Not an Initial packet, type=%u\n", pkt_type);
 		return -EINVAL;
 	}
 
@@ -1208,7 +1298,7 @@ static int tquic_conn_server_accept_init(struct tquic_connection *conn,
 	 * Parse Version (4 bytes, network byte order)
 	 */
 	if (offset + 4 > len) {
-		pr_debug("tquic: Packet too short for version\n");
+		tquic_dbg("Packet too short for version\n");
 		return -EINVAL;
 	}
 
@@ -1217,7 +1307,7 @@ static int tquic_conn_server_accept_init(struct tquic_connection *conn,
 
 	/* Validate version - must be QUIC v1 or v2 */
 	if (version != TQUIC_VERSION_1 && version != TQUIC_VERSION_2) {
-		pr_debug("tquic: Unsupported QUIC version: 0x%08x\n", version);
+		tquic_dbg("Unsupported QUIC version: 0x%08x\n", version);
 		return -EPROTONOSUPPORT;
 	}
 
@@ -1228,13 +1318,13 @@ static int tquic_conn_server_accept_init(struct tquic_connection *conn,
 	 * Per RFC 9000 Section 17.2: 0-20 bytes
 	 */
 	if (offset >= len) {
-		pr_debug("tquic: Packet too short for DCID length\n");
+		tquic_dbg("Packet too short for DCID length\n");
 		return -EINVAL;
 	}
 
 	dcid_len = data[offset++];
 	if (dcid_len > TQUIC_MAX_CID_LEN) {
-		pr_debug("tquic: DCID length exceeds maximum: %u > %u\n",
+		tquic_dbg("DCID length exceeds maximum: %u > %u\n",
 			 dcid_len, TQUIC_MAX_CID_LEN);
 		return -EINVAL;
 	}
@@ -1244,7 +1334,7 @@ static int tquic_conn_server_accept_init(struct tquic_connection *conn,
 	 * This is what the client used to address us - becomes our SCID
 	 */
 	if (offset + dcid_len > len) {
-		pr_debug("tquic: Packet too short for DCID\n");
+		tquic_dbg("Packet too short for DCID\n");
 		return -EINVAL;
 	}
 
@@ -1258,13 +1348,13 @@ static int tquic_conn_server_accept_init(struct tquic_connection *conn,
 	 * Per RFC 9000 Section 17.2: 0-20 bytes
 	 */
 	if (offset >= len) {
-		pr_debug("tquic: Packet too short for SCID length\n");
+		tquic_dbg("Packet too short for SCID length\n");
 		return -EINVAL;
 	}
 
 	scid_len = data[offset++];
 	if (scid_len > TQUIC_MAX_CID_LEN) {
-		pr_debug("tquic: SCID length exceeds maximum: %u > %u\n",
+		tquic_dbg("SCID length exceeds maximum: %u > %u\n",
 			 scid_len, TQUIC_MAX_CID_LEN);
 		return -EINVAL;
 	}
@@ -1274,7 +1364,7 @@ static int tquic_conn_server_accept_init(struct tquic_connection *conn,
 	 * This is the client's CID - becomes our DCID (peer's CID)
 	 */
 	if (offset + scid_len > len) {
-		pr_debug("tquic: Packet too short for SCID\n");
+		tquic_dbg("Packet too short for SCID\n");
 		return -EINVAL;
 	}
 
@@ -1290,13 +1380,13 @@ static int tquic_conn_server_accept_init(struct tquic_connection *conn,
 	 */
 	ret = tquic_varint_read(data, len, &offset, &token_len);
 	if (ret < 0) {
-		pr_debug("tquic: Failed to parse token length: %d\n", ret);
+		tquic_dbg("Failed to parse token length: %d\n", ret);
 		return -EINVAL;
 	}
 
 	/* Validate token length is reasonable */
 	if (token_len > len - offset) {
-		pr_debug("tquic: Token length exceeds remaining data: %llu > %zu\n",
+		tquic_dbg("Token length exceeds remaining data: %llu > %zu\n",
 			 token_len, len - offset);
 		return -EINVAL;
 	}
@@ -1320,7 +1410,7 @@ static int tquic_conn_server_accept_init(struct tquic_connection *conn,
 		struct tquic_cid original_dcid;
 		int token_ret;
 
-		pr_debug("tquic: Initial packet has %llu byte token\n", token_len);
+		tquic_dbg("Initial packet has %llu byte token\n", token_len);
 
 		/* Get client address from path or connection */
 		memset(&client_addr, 0, sizeof(client_addr));
@@ -1353,7 +1443,7 @@ static int tquic_conn_server_accept_init(struct tquic_connection *conn,
 			 * The original_dcid should match what we derive
 			 * Initial keys from.
 			 */
-			pr_debug("tquic: Valid retry token, address validated\n");
+			tquic_dbg("Valid retry token, address validated\n");
 			/* Mark address as validated - skip amplification limit */
 			if (conn->active_path)
 				conn->active_path->state = TQUIC_PATH_VALIDATED;
@@ -1369,7 +1459,7 @@ static int tquic_conn_server_accept_init(struct tquic_connection *conn,
 				NULL);  /* No DCID for NEW_TOKEN */
 
 			if (token_ret == 0) {
-				pr_debug("tquic: Valid NEW_TOKEN, address validated\n");
+				tquic_dbg("Valid NEW_TOKEN, address validated\n");
 				if (conn->active_path)
 					conn->active_path->state = TQUIC_PATH_VALIDATED;
 			} else {
@@ -1378,7 +1468,7 @@ static int tquic_conn_server_accept_init(struct tquic_connection *conn,
 				 * apply amplification limits until address
 				 * is validated via PATH_CHALLENGE/RESPONSE.
 				 */
-				pr_debug("tquic: Token validation failed: %d\n",
+				tquic_dbg("Token validation failed: %d\n",
 					 token_ret);
 			}
 		}
@@ -1391,13 +1481,13 @@ static int tquic_conn_server_accept_init(struct tquic_connection *conn,
 	 */
 	ret = tquic_varint_read(data, len, &offset, &payload_len);
 	if (ret < 0) {
-		pr_debug("tquic: Failed to parse payload length: %d\n", ret);
+		tquic_dbg("Failed to parse payload length: %d\n", ret);
 		return -EINVAL;
 	}
 
 	/* Validate payload length is reasonable */
 	if (payload_len > len - offset) {
-		pr_debug("tquic: Payload length exceeds remaining data: %llu > %zu\n",
+		tquic_dbg("Payload length exceeds remaining data: %llu > %zu\n",
 			 payload_len, len - offset);
 		return -EINVAL;
 	}
@@ -1441,7 +1531,7 @@ static int tquic_conn_server_accept_init(struct tquic_connection *conn,
 	/* Mark as server-side connection in handshake phase */
 	conn->state = TQUIC_CONN_CONNECTING;
 
-	pr_debug("tquic: Parsed Initial packet: version=0x%08x, "
+	tquic_dbg("Parsed Initial packet: version=0x%08x, "
 		 "dcid_len=%u, scid_len=%u, token_len=%llu\n",
 		 version, dcid_len, scid_len, token_len);
 
@@ -1496,7 +1586,7 @@ static void tquic_server_handshake_done(void *data, int status,
 	struct tquic_sock *listen_tsk;
 
 	if (!conn) {
-		pr_debug("tquic: server handshake callback with NULL conn\n");
+		tquic_dbg("server handshake callback with NULL conn\n");
 		return;
 	}
 
@@ -1527,13 +1617,13 @@ static void tquic_server_handshake_done(void *data, int status,
 			/* Wake up accept() waiters */
 			listener_sk->sk_data_ready(listener_sk);
 
-			pr_debug("tquic: server handshake complete, child queued\n");
+			tquic_dbg("server handshake complete, child queued\n");
 		} else {
-			pr_warn("tquic: server handshake done but no valid listener\n");
+			tquic_warn("server handshake done but no valid listener\n");
 		}
 	} else {
 		/* Handshake failed - clean up child */
-		pr_debug("tquic: server handshake failed: %d\n", status);
+		tquic_dbg("server handshake failed: %d\n", status);
 		inet_sk_set_state(child_sk, TCP_CLOSE);
 		if (conn) {
 			tquic_conn_destroy(conn);
@@ -1574,7 +1664,7 @@ int tquic_server_handshake(struct sock *listener_sk,
 
 	/* Check accept queue space */
 	if (listen_tsk->accept_queue_len >= listen_tsk->max_accept_queue) {
-		pr_debug("tquic: accept queue full, refusing connection\n");
+		tquic_dbg("accept queue full, refusing connection\n");
 		return -ECONNREFUSED;
 	}
 
@@ -1582,7 +1672,7 @@ int tquic_server_handshake(struct sock *listener_sk,
 	child_sk = sk_alloc(sock_net(listener_sk), listener_sk->sk_family,
 			    GFP_ATOMIC, listener_sk->sk_prot, true);
 	if (!child_sk) {
-		pr_debug("tquic: failed to allocate child socket\n");
+		tquic_dbg("failed to allocate child socket\n");
 		return -ENOMEM;
 	}
 
@@ -1598,7 +1688,7 @@ int tquic_server_handshake(struct sock *listener_sk,
 	/* Create connection for child (server-side) */
 	conn = tquic_conn_create(child_tsk, true);
 	if (!conn) {
-		pr_debug("tquic: failed to create connection for child\n");
+		tquic_dbg("failed to create connection for child\n");
 		sk_free(child_sk);
 		return -ENOMEM;
 	}
@@ -1631,17 +1721,17 @@ int tquic_server_handshake(struct sock *listener_sk,
 
 		conn->scheduler = tquic_sched_init_conn(conn, sched_ops);
 		if (!conn->scheduler) {
-			pr_warn("tquic: scheduler init failed for child, using default\n");
+			tquic_warn("scheduler init failed for child, using default\n");
 			conn->scheduler = tquic_sched_init_conn(conn, NULL);
 			if (!conn->scheduler)
-				pr_debug("tquic: default scheduler init failed\n");
+				tquic_dbg("default scheduler init failed\n");
 		}
 	}
 
 	/* Process Initial packet to extract CIDs */
 	ret = tquic_conn_server_accept_init(conn, initial_pkt);
 	if (ret < 0) {
-		pr_debug("tquic: failed to process Initial packet: %d\n", ret);
+		tquic_dbg("failed to process Initial packet: %d\n", ret);
 		tquic_conn_destroy(conn);
 		child_tsk->conn = NULL;
 		sk_free(child_sk);
@@ -1673,7 +1763,7 @@ int tquic_server_handshake(struct sock *listener_sk,
 	/* Initiate server TLS handshake */
 	ret = tquic_start_server_handshake(child_sk, hs);
 	if (ret < 0) {
-		pr_debug("tquic: failed to start server handshake: %d\n", ret);
+		tquic_dbg("failed to start server handshake: %d\n", ret);
 		sock_put(child_sk);
 		child_tsk->handshake_state = NULL;
 		kfree(hs);
@@ -1684,7 +1774,7 @@ int tquic_server_handshake(struct sock *listener_sk,
 	}
 
 	/* Handshake proceeds async; child added to accept queue on completion */
-	pr_debug("tquic: server handshake initiated for incoming connection\n");
+	tquic_dbg("server handshake initiated for incoming connection\n");
 	return 0;
 }
 EXPORT_SYMBOL_GPL(tquic_server_handshake);
@@ -1728,7 +1818,7 @@ int tquic_server_psk_callback(struct sock *sk, const char *identity,
 	client = tquic_client_lookup_by_psk(identity, identity_len);
 	if (!client) {
 		if (__ratelimit(&tquic_psk_reject_log)) {
-			pr_debug("tquic: unknown PSK identity\n");
+			tquic_dbg("unknown PSK identity\n");
 		}
 		TQUIC_INC_STATS(sock_net(sk), TQUIC_MIB_HANDSHAKESFAILED);
 		return -ENOENT;
@@ -1737,7 +1827,7 @@ int tquic_server_psk_callback(struct sock *sk, const char *identity,
 	/* Check rate limit before accepting connection */
 	if (!tquic_client_rate_limit_check(client)) {
 		if (__ratelimit(&tquic_psk_reject_log)) {
-			pr_debug("tquic: PSK connection rate limited\n");
+			tquic_dbg("PSK connection rate limited\n");
 		}
 		rcu_read_unlock();
 		TQUIC_INC_STATS(sock_net(sk), TQUIC_MIB_HANDSHAKESFAILED);
@@ -1753,7 +1843,7 @@ int tquic_server_psk_callback(struct sock *sk, const char *identity,
 	/* Get PSK for this client */
 	ret = tquic_server_get_client_psk(identity, identity_len, psk);
 	if (ret < 0) {
-		pr_debug("tquic: failed to get PSK: %d\n", ret);
+		tquic_dbg("failed to get PSK: %d\n", ret);
 		return ret;
 	}
 
@@ -1761,12 +1851,12 @@ int tquic_server_psk_callback(struct sock *sk, const char *identity,
 	if (conn) {
 		ret = tquic_server_bind_client(conn, client);
 		if (ret < 0) {
-			pr_warn("tquic: failed to bind client: %d\n", ret);
+			tquic_warn("failed to bind client: %d\n", ret);
 			/* Continue anyway - binding is for stats */
 		}
 	}
 
-	pr_debug("tquic: PSK authentication successful\n");
+	tquic_dbg("PSK authentication successful\n");
 	return 0;
 }
 EXPORT_SYMBOL_GPL(tquic_server_psk_callback);

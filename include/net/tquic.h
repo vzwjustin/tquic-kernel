@@ -72,7 +72,8 @@ bool tquic_sysctl_prefer_v2(void);
 #define TQUIC_TIMER_PATH_PROBE	4
 #define TQUIC_TIMER_PACING	5
 #define TQUIC_TIMER_KEY_DISCARD	6
-#define TQUIC_TIMER_MAX		7
+#define TQUIC_TIMER_KEY_UPDATE	7	/* Key update timeout (3 * PTO) */
+#define TQUIC_TIMER_MAX		8
 
 /* Crypto level indices */
 #define TQUIC_CRYPTO_INITIAL		0
@@ -454,6 +455,19 @@ struct tquic_path {
 		struct timer_list timer;      /* Retransmission timer */
 	} validation;
 
+	/*
+	 * Anti-amplification state (RFC 9000 Section 8.1)
+	 *
+	 * Before a path is validated, an endpoint MUST NOT send more than
+	 * three times the amount of data received from that address.
+	 * This prevents the endpoint from being used as an amplifier.
+	 */
+	struct {
+		u64 bytes_received;           /* Bytes received on unvalidated path */
+		u64 bytes_sent;               /* Bytes sent on unvalidated path */
+		bool active;                  /* Anti-amplification limits in effect */
+	} anti_amplification;
+
 	/* Response queue (prevent memory exhaustion - RFC 9000 Section 8.2) */
 	struct {
 		struct sk_buff_head queue;    /* Pending PATH_RESPONSE frames */
@@ -497,6 +511,15 @@ struct tquic_path {
 	 * Works in conjunction with nat_keepalive_state for optimal NAT handling.
 	 */
 	void *nat_lifecycle_state;	/* struct tquic_nat_lifecycle_state * */
+
+	/*
+	 * Careful Resume state (BDP frame extension)
+	 *
+	 * Per-path state for Careful Resume algorithm. Allocated by
+	 * tquic_careful_resume_init(), freed by release_cr_state().
+	 * NULL when Careful Resume is not active on this path.
+	 */
+	void *cr_state;			/* struct careful_resume_state * */
 
 	struct rcu_head rcu_head;	/* RCU callback for kfree_rcu */
 };
@@ -854,6 +877,17 @@ struct tquic_connection {
 
 	/* Original Destination Connection ID (for transport param validation) */
 	struct tquic_cid original_dcid;
+
+	/*
+	 * Retry state (RFC 9000 Section 8.1)
+	 *
+	 * When a client receives a Retry packet, the token from that
+	 * packet must be included in the subsequent Initial packet.
+	 * The ODCID is stored in original_dcid above.
+	 */
+	u8 retry_token[256];		/* Token from Retry packet */
+	size_t retry_token_len;		/* Length of retry token */
+	bool retry_received;		/* True after Retry processing */
 
 	/* Transport parameters (RFC 9000 Section 18) */
 	struct tquic_transport_params local_params;
@@ -1534,6 +1568,8 @@ struct tquic_mp_sched_ops {
 			     struct tquic_path *path);
 
 	/* Optional feedback hooks */
+	void (*packet_sent)(struct tquic_connection *conn,
+			    struct tquic_path *path, u32 sent_bytes);
 	void (*ack_received)(struct tquic_connection *conn,
 			     struct tquic_path *path, u64 acked_bytes);
 	void (*loss_detected)(struct tquic_connection *conn,
@@ -1546,6 +1582,8 @@ void tquic_mp_unregister_scheduler(struct tquic_mp_sched_ops *sched);
 struct tquic_mp_sched_ops *tquic_mp_sched_find(const char *name);
 
 /* Multipath scheduler notification API */
+void tquic_mp_sched_notify_sent(struct tquic_connection *conn,
+				struct tquic_path *path, u32 sent_bytes);
 void tquic_mp_sched_notify_ack(struct tquic_connection *conn,
 			       struct tquic_path *path, u64 acked_bytes);
 void tquic_mp_sched_notify_loss(struct tquic_connection *conn,
@@ -1851,6 +1889,7 @@ int tquic_conn_close_with_error(struct tquic_connection *conn,
 				u64 error_code, const char *reason);
 int tquic_conn_close_app(struct tquic_connection *conn,
 			 u64 error_code, const char *reason);
+void tquic_conn_enter_closed(struct tquic_connection *conn);
 int tquic_conn_handle_close(struct tquic_connection *conn,
 			    u64 error_code, u64 frame_type,
 			    const char *reason, bool is_app);

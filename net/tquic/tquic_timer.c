@@ -25,6 +25,7 @@
 #include "cong/tquic_cong.h"
 
 #include "tquic_compat.h"
+#include "tquic_debug.h"
 
 /* Forward declaration from core/quic_loss.c */
 void tquic_set_loss_detection_timer(struct tquic_connection *conn);
@@ -562,7 +563,7 @@ struct tquic_timer_state *tquic_timer_state_alloc(struct tquic_connection *conn)
 
 	ts->active = true;
 
-	pr_debug("tquic_timer: allocated state for connection\n");
+	tquic_dbg("timer:allocated state for connection\n");
 
 	return ts;
 
@@ -628,7 +629,7 @@ void tquic_timer_state_free(struct tquic_timer_state *ts)
 		kfree(rs);
 	}
 
-	pr_debug("tquic_timer: freed state\n");
+	tquic_dbg("timer:freed state\n");
 
 	kfree(ts);
 }
@@ -662,7 +663,7 @@ static void tquic_timer_idle_expired(struct timer_list *t)
 	/* Schedule work to handle connection close */
 	queue_work(ts->wq, &ts->timer_work);
 
-	pr_debug("tquic_timer: idle timeout expired\n");
+	tquic_dbg("timer:idle timeout expired\n");
 }
 
 /**
@@ -721,7 +722,7 @@ static void tquic_timer_ack_delay_expired(struct timer_list *t)
 	/* Schedule work to send pending ACKs */
 	queue_work(ts->wq, &ts->timer_work);
 
-	pr_debug("tquic_timer: ACK delay expired\n");
+	tquic_dbg("timer:ACK delay expired\n");
 }
 
 /**
@@ -790,7 +791,7 @@ static void tquic_timer_loss_expired(struct timer_list *t)
 	/* Schedule retransmission work */
 	queue_work(ts->wq, &ts->retransmit_work);
 
-	pr_debug("tquic_timer: loss timer expired\n");
+	tquic_dbg("timer:loss timer expired\n");
 }
 
 /**
@@ -849,7 +850,7 @@ static int tquic_detect_lost_packets(struct tquic_timer_state *ts, int pn_space)
 						   pkt->sent_bytes);
 			}
 
-			pr_debug("tquic_timer: packet %llu declared lost\n",
+			tquic_dbg("timer:packet %llu declared lost\n",
 				 pkt->pkt_num);
 		}
 	}
@@ -946,7 +947,7 @@ static void tquic_timer_pto_expired(struct timer_list *t)
 		rs->in_persistent_congestion = true;
 		rs->congestion_window = 2 * 1200; /* Minimum window */
 		rs->ssthresh = rs->congestion_window;
-		pr_debug("tquic_timer: entering persistent congestion\n");
+		tquic_dbg("timer:entering persistent congestion\n");
 	}
 	spin_unlock(&rs->lock);
 
@@ -956,7 +957,7 @@ static void tquic_timer_pto_expired(struct timer_list *t)
 	/* Schedule probe transmission */
 	queue_work(ts->wq, &ts->retransmit_work);
 
-	pr_debug("tquic_timer: PTO expired, count=%u\n", rs->pto_count);
+	tquic_dbg("timer:PTO expired, count=%u\n", rs->pto_count);
 }
 
 /**
@@ -1055,7 +1056,7 @@ static void tquic_timer_drain_expired(struct timer_list *t)
 	/* Schedule connection cleanup */
 	queue_work(ts->wq, &ts->timer_work);
 
-	pr_debug("tquic_timer: drain period completed\n");
+	tquic_dbg("timer:drain period completed\n");
 }
 
 /**
@@ -1096,7 +1097,7 @@ void tquic_timer_start_drain(struct tquic_timer_state *ts)
 
 	spin_unlock_bh(&ts->lock);
 
-	pr_debug("tquic_timer: started drain period, duration=%llu us\n",
+	tquic_dbg("timer:started drain period, duration=%llu us\n",
 		 drain_duration);
 }
 EXPORT_SYMBOL_GPL(tquic_timer_start_drain);
@@ -1127,7 +1128,7 @@ static void tquic_timer_keepalive_expired(struct timer_list *t)
 	/* Schedule PING transmission */
 	queue_work(ts->wq, &ts->timer_work);
 
-	pr_debug("tquic_timer: keep-alive triggered\n");
+	tquic_dbg("timer:keep-alive triggered\n");
 }
 
 /**
@@ -1321,7 +1322,7 @@ static void tquic_path_validation_expired(struct timer_list *t)
 	if (path->probe_count >= TQUIC_PATH_CHALLENGE_RETRIES) {
 		/* Path validation failed */
 		path->state = TQUIC_PATH_FAILED;
-		pr_debug("tquic_timer: path %u validation failed\n", path->path_id);
+		tquic_dbg("timer:path %u validation failed\n", path->path_id);
 	} else {
 		/* Retry path challenge */
 		unsigned long expires;
@@ -1329,7 +1330,7 @@ static void tquic_path_validation_expired(struct timer_list *t)
 		expires = jiffies + msecs_to_jiffies(TQUIC_PATH_CHALLENGE_TIMEOUT_MS);
 		mod_timer(&path->validation_timer, expires);
 
-		pr_debug("tquic_timer: path %u validation retry %u\n",
+		tquic_dbg("timer:path %u validation retry %u\n",
 			 path->path_id, path->probe_count);
 	}
 
@@ -1361,7 +1362,7 @@ void tquic_timer_start_path_validation(struct tquic_connection *conn,
 
 	spin_unlock_bh(&conn->lock);
 
-	pr_debug("tquic_timer: started path %u validation\n", path->path_id);
+	tquic_dbg("timer:started path %u validation\n", path->path_id);
 }
 EXPORT_SYMBOL_GPL(tquic_timer_start_path_validation);
 
@@ -1381,7 +1382,7 @@ void tquic_timer_path_validated(struct tquic_connection *conn,
 
 	spin_unlock_bh(&conn->lock);
 
-	pr_debug("tquic_timer: path %u validated successfully\n", path->path_id);
+	tquic_dbg("timer:path %u validated successfully\n", path->path_id);
 }
 EXPORT_SYMBOL_GPL(tquic_timer_path_validated);
 
@@ -1415,12 +1416,11 @@ static void tquic_timer_work_fn(struct work_struct *work)
 
 	/* Handle idle timeout */
 	if (test_bit(TQUIC_TIMER_IDLE_BIT, &pending)) {
-		spin_lock_bh(&conn->lock);
 		if (conn->state == TQUIC_CONN_CONNECTED) {
-			conn->state = TQUIC_CONN_CLOSING;
-			/* Would trigger connection close */
+			tquic_conn_close_with_error(conn,
+						    TQUIC_NO_ERROR,
+						    "idle timeout");
 		}
-		spin_unlock_bh(&conn->lock);
 	}
 
 	/* Handle ACK delay expiration */
@@ -1431,10 +1431,7 @@ static void tquic_timer_work_fn(struct work_struct *work)
 
 	/* Handle drain completion */
 	if (test_bit(TQUIC_TIMER_DRAIN_BIT, &pending)) {
-		spin_lock_bh(&conn->lock);
-		conn->state = TQUIC_CONN_CLOSED;
-		spin_unlock_bh(&conn->lock);
-		/* Would complete connection cleanup */
+		tquic_conn_enter_closed(conn);
 	}
 
 	/* Handle keep-alive */
@@ -1480,7 +1477,7 @@ static void tquic_retransmit_work_fn(struct work_struct *work)
 		for (i = 0; i < TQUIC_PN_SPACE_COUNT; i++) {
 			lost = tquic_detect_lost_packets(ts, i);
 			if (lost > 0) {
-				pr_debug("tquic_timer: detected %d lost packets in space %d\n",
+				tquic_dbg("timer:detected %d lost packets in space %d\n",
 					 lost, i);
 				/* Would trigger retransmission */
 				/* tquic_retransmit_lost(ts->conn, i); */
@@ -1894,7 +1891,7 @@ int __init tquic_timer_init(void)
 		return -ENOMEM;
 	}
 
-	pr_info("tquic_timer: timer subsystem initialized\n");
+	tquic_info("timer:timer subsystem initialized\n");
 
 	return 0;
 }
@@ -1912,7 +1909,7 @@ void __exit tquic_timer_exit(void)
 	if (tquic_sent_pkt_cache)
 		kmem_cache_destroy(tquic_sent_pkt_cache);
 
-	pr_info("tquic_timer: timer subsystem shutdown\n");
+	tquic_info("timer:timer subsystem shutdown\n");
 }
 
 MODULE_DESCRIPTION("TQUIC Timer and Recovery System");

@@ -18,6 +18,7 @@
 #include <net/tquic.h>
 
 #include "../core/one_way_delay.h"
+#include "../tquic_debug.h"
 
 /* Registered schedulers */
 static LIST_HEAD(tquic_sched_list);
@@ -44,7 +45,7 @@ static int __tquic_sched_register(struct tquic_sched_ops *ops)
 
 	spin_unlock(&tquic_sched_lock);
 
-	pr_info("tquic_sched: registered scheduler '%s'\n", ops->name);
+	tquic_info("registered scheduler '%s'\n", ops->name);
 	return 0;
 }
 
@@ -63,7 +64,7 @@ static void __tquic_sched_unregister(struct tquic_sched_ops *ops)
 
 	synchronize_rcu();
 
-	pr_info("tquic_sched: unregistered scheduler '%s'\n", ops->name);
+	tquic_info("unregistered scheduler '%s'\n", ops->name);
 }
 
 /*
@@ -181,7 +182,7 @@ int tquic_sched_set_default(const char *name)
 
 	module_put(ops->owner);
 
-	pr_info("tquic_sched: set default scheduler to '%s'\n", name);
+	tquic_info("set default scheduler to '%s'\n", name);
 	return 0;
 }
 EXPORT_SYMBOL_GPL(tquic_sched_set_default);
@@ -923,7 +924,7 @@ static int __init tquic_sched_module_init(void)
 	/* Set minrtt as default */
 	tquic_sched_set_default("minrtt");
 
-	pr_info("tquic_sched: scheduler framework initialized\n");
+	tquic_info("scheduler framework initialized\n");
 	return 0;
 }
 
@@ -941,7 +942,7 @@ static void __exit tquic_sched_module_exit(void)
 	__tquic_sched_unregister(&tquic_sched_minrtt);
 	__tquic_sched_unregister(&tquic_sched_rr);
 
-	pr_info("tquic_sched: scheduler framework cleanup complete\n");
+	tquic_info("scheduler framework cleanup complete\n");
 }
 
 module_init(tquic_sched_module_init);
@@ -967,7 +968,7 @@ int tquic_sched_framework_init(void)
 
 	tquic_sched_set_default("minrtt");
 
-	pr_info("tquic_sched: scheduler framework initialized\n");
+	tquic_info("scheduler framework initialized\n");
 	return 0;
 }
 
@@ -982,6 +983,6 @@ void tquic_sched_framework_exit(void)
 	__tquic_sched_unregister(&tquic_sched_minrtt);
 	__tquic_sched_unregister(&tquic_sched_rr);
 
-	pr_info("tquic_sched: scheduler framework cleanup complete\n");
+	tquic_info("scheduler framework cleanup complete\n");
 }
 #endif

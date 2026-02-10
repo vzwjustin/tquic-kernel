@@ -30,6 +30,7 @@
 #include <net/sock.h>
 #include <net/tquic.h>
 #include "../tquic_compat.h"
+#include "../tquic_debug.h"
 #include "stream.h"
 
 /* Stream ID bit layout per QUIC spec:
@@ -62,8 +63,10 @@ struct tquic_stream_manager *tquic_stream_manager_create(
 	struct tquic_stream_manager *mgr;
 
 	mgr = kzalloc(sizeof(*mgr), GFP_KERNEL);
-	if (!mgr)
+	if (!mgr) {
+		tquic_conn_err(conn, "stream manager alloc failed\n");
 		return NULL;
+	}
 
 	mgr->conn = conn;
 	mgr->is_server = is_server;
@@ -185,8 +188,8 @@ static struct tquic_stream_ext *tquic_stream_ext_alloc(
  * @mgr: Stream manager
  * @ext: Extended state to free
  */
-static void __maybe_unused tquic_stream_ext_free(struct tquic_stream_manager *mgr,
-						 struct tquic_stream_ext *ext)
+static void tquic_stream_ext_free(struct tquic_stream_manager *mgr,
+				  struct tquic_stream_ext *ext)
 {
 	struct tquic_stream_gap *gap, *tmp_gap;
 	struct rb_node *node;
@@ -309,10 +312,10 @@ static int tquic_stream_set_state(struct tquic_stream *stream,
 	}
 
 	stream->state = new_state;
-	pr_debug("tquic: stream %llu state %s -> %s\n",
-		 stream->id,
-		 tquic_stream_state_name(old_state),
-		 tquic_stream_state_name(new_state));
+	tquic_dbg("stream %llu state %s -> %s\n",
+		  stream->id,
+		  tquic_stream_state_name(old_state),
+		  tquic_stream_state_name(new_state));
 
 	return 0;
 }
@@ -428,8 +431,11 @@ static int tquic_stream_alloc_id(struct tquic_stream_manager *mgr,
 	}
 
 	/* Check stream limit */
-	if (*counter >= max_streams)
+	if (*counter >= max_streams) {
+		tquic_warn("stream limit reached: %u >= %llu\n",
+			   *counter, max_streams);
 		return -ENOSPC;
+	}
 
 	*stream_id = next_id;
 
@@ -482,7 +488,7 @@ static int tquic_stream_check_rate_limit(struct tquic_stream_manager *mgr,
 
 	/* Check for abuse flag - connection should be terminated */
 	if (mgr->rate_limit_exceeded) {
-		pr_warn("tquic_stream: connection flagged for stream abuse\n");
+		tquic_warn("connection flagged for stream abuse\n");
 		return -ECONNABORTED;
 	}
 
@@ -499,16 +505,16 @@ static int tquic_stream_check_rate_limit(struct tquic_stream_manager *mgr,
 	if (mgr->streams_in_window + new_streams > mgr->max_streams_per_window) {
 		mgr->consecutive_limit_hits++;
 
-		pr_debug("tquic_stream: rate limit hit (%u streams in %lld ms, consecutive=%u)\n",
-			 mgr->streams_in_window, elapsed_ms,
-			 mgr->consecutive_limit_hits);
+		tquic_warn("stream rate limit hit (%u streams in %lld ms, consecutive=%u)\n",
+			   mgr->streams_in_window, elapsed_ms,
+			   mgr->consecutive_limit_hits);
 
 		/*
 		 * If we've hit the limit multiple times consecutively,
 		 * flag this connection as potentially abusive.
 		 */
 		if (mgr->consecutive_limit_hits >= TQUIC_STREAM_RATE_ABUSE_THRESHOLD) {
-			pr_warn("tquic_stream: connection flagged for stream exhaustion attack\n");
+			tquic_err("connection flagged for stream exhaustion attack\n");
 			mgr->rate_limit_exceeded = true;
 			return -ECONNABORTED;
 		}
@@ -572,8 +578,8 @@ static int tquic_stream_accept_id(struct tquic_stream_manager *mgr,
 	 * This enforces the peer's advertised stream limit.
 	 */
 	if (*counter + new_streams > max_streams) {
-		pr_debug("tquic_stream: MAX_STREAMS exceeded (have=%u, want=%llu, max=%llu)\n",
-			 *counter, new_streams, max_streams);
+		tquic_dbg("MAX_STREAMS exceeded (have=%u, want=%llu, max=%llu)\n",
+			  *counter, new_streams, max_streams);
 		return -ENOSPC;
 	}
 
@@ -681,14 +687,15 @@ struct tquic_stream *tquic_stream_create(struct tquic_stream_manager *mgr,
 	ret = tquic_stream_insert(mgr, stream);
 	if (ret) {
 		spin_unlock(&mgr->lock);
+		tquic_stream_ext_free(mgr, stream->ext);
 		kfree(stream);
 		return ERR_PTR(ret);
 	}
 
 	spin_unlock(&mgr->lock);
 
-	pr_debug("tquic: created local stream %llu (bidi=%d)\n",
-		 stream_id, bidi);
+	tquic_dbg("created local stream %llu (bidi=%d)\n",
+		  stream_id, bidi);
 
 	return stream;
 }
@@ -733,13 +740,14 @@ struct tquic_stream *tquic_stream_get_or_create(
 	ret = tquic_stream_insert(mgr, stream);
 	if (ret) {
 		spin_unlock(&mgr->lock);
+		tquic_stream_ext_free(mgr, stream->ext);
 		kfree(stream);
 		return ERR_PTR(ret);
 	}
 
 	spin_unlock(&mgr->lock);
 
-	pr_debug("tquic: accepted remote stream %llu\n", stream_id);
+	tquic_dbg("accepted remote stream %llu\n", stream_id);
 
 	return stream;
 }
@@ -784,12 +792,16 @@ void tquic_stream_destroy(struct tquic_stream_manager *mgr,
 		kfree_skb(skb);
 	}
 
+	/* Free extended stream state if allocated */
+	if (stream->ext && mgr)
+		tquic_stream_ext_free(mgr, stream->ext);
+
 	/* Wake any waiters */
 	wake_up_all(&stream->wait);
 
-	kfree(stream);
+	tquic_dbg("destroyed stream %llu\n", stream->id);
 
-	pr_debug("tquic: destroyed stream %llu\n", stream->id);
+	kfree(stream);
 }
 EXPORT_SYMBOL_GPL(tquic_stream_destroy);
 
@@ -1266,7 +1278,7 @@ int tquic_stream_shutdown_write(struct tquic_stream_manager *mgr,
 
 	spin_unlock(&mgr->lock);
 
-	pr_debug("tquic: stream %llu FIN sent\n", stream->id);
+	tquic_dbg("stream %llu FIN sent\n", stream->id);
 
 	return 0;
 }
@@ -1294,8 +1306,8 @@ int tquic_stream_shutdown_read(struct tquic_stream_manager *mgr,
 
 	spin_unlock(&mgr->lock);
 
-	pr_debug("tquic: stream %llu STOP_SENDING error=%llu\n",
-		 stream->id, error_code);
+	tquic_dbg("stream %llu STOP_SENDING error=%llu\n",
+		  stream->id, error_code);
 
 	return 0;
 }
@@ -1339,8 +1351,8 @@ int tquic_stream_reset_send(struct tquic_stream_manager *mgr,
 
 	spin_unlock(&mgr->lock);
 
-	pr_debug("tquic: stream %llu RST_STREAM sent error=%llu\n",
-		 stream->id, error_code);
+	tquic_dbg("stream %llu RST_STREAM sent error=%llu\n",
+		  stream->id, error_code);
 
 	return 0;
 }
@@ -1375,8 +1387,8 @@ int tquic_stream_reset_recv(struct tquic_stream_manager *mgr,
 	/* Wake up readers with error */
 	wake_up_interruptible(&stream->wait);
 
-	pr_debug("tquic: stream %llu RST_STREAM received error=%llu final=%llu\n",
-		 stream->id, error_code, final_size);
+	tquic_info("stream %llu RST_STREAM received error=%llu final=%llu\n",
+		   stream->id, error_code, final_size);
 
 	return 0;
 }
@@ -1431,8 +1443,8 @@ int tquic_stream_set_dependency(struct tquic_stream_manager *mgr,
 
 	spin_unlock(&mgr->lock);
 
-	pr_debug("tquic: stream %llu dependency=%llu weight=%u exclusive=%d\n",
-		 stream->id, dependency, weight, exclusive);
+	tquic_dbg("stream %llu dependency=%llu weight=%u exclusive=%d\n",
+		  stream->id, dependency, weight, exclusive);
 
 	return 0;
 }
@@ -1998,6 +2010,7 @@ void tquic_stream_manager_destroy(struct tquic_stream_manager *mgr)
 			kfree_skb(skb);
 		}
 		wake_up_all(&stream->wait);
+		tquic_stream_ext_free(mgr, stream->ext);
 		kfree(stream);
 	}
 
@@ -2023,19 +2036,19 @@ EXPORT_SYMBOL_GPL(tquic_stream_manager_destroy);
  */
 void tquic_stream_dump(struct tquic_stream *stream)
 {
-	pr_info("Stream %llu:\n", stream->id);
-	pr_info("  State: %s\n", tquic_stream_state_name(stream->state));
-	pr_info("  Send offset: %llu, max: %llu\n",
-		stream->send_offset, stream->max_send_data);
-	pr_info("  Recv offset: %llu, max: %llu\n",
-		stream->recv_offset, stream->max_recv_data);
-	pr_info("  Priority: %u, blocked: %d\n",
-		stream->priority, stream->blocked);
-	pr_info("  FIN sent: %d, received: %d\n",
-		stream->fin_sent, stream->fin_received);
-	pr_info("  Send buf: %u skbs, recv buf: %u skbs\n",
-		skb_queue_len(&stream->send_buf),
-		skb_queue_len(&stream->recv_buf));
+	tquic_info("Stream %llu:\n", stream->id);
+	tquic_info("  State: %s\n", tquic_stream_state_name(stream->state));
+	tquic_info("  Send offset: %llu, max: %llu\n",
+		   stream->send_offset, stream->max_send_data);
+	tquic_info("  Recv offset: %llu, max: %llu\n",
+		   stream->recv_offset, stream->max_recv_data);
+	tquic_info("  Priority: %u, blocked: %d\n",
+		   stream->priority, stream->blocked);
+	tquic_info("  FIN sent: %d, received: %d\n",
+		   stream->fin_sent, stream->fin_received);
+	tquic_info("  Send buf: %u skbs, recv buf: %u skbs\n",
+		   skb_queue_len(&stream->send_buf),
+		   skb_queue_len(&stream->recv_buf));
 }
 EXPORT_SYMBOL_GPL(tquic_stream_dump);
 
@@ -2047,11 +2060,11 @@ void tquic_stream_manager_dump(struct tquic_stream_manager *mgr)
 {
 	struct rb_node *node;
 
-	pr_info("Stream Manager (%s):\n", mgr->is_server ? "server" : "client");
-	pr_info("  Total streams: %u\n", mgr->stream_count);
-	pr_info("  Bidi local/remote: %u/%u\n", mgr->bidi_local, mgr->bidi_remote);
-	pr_info("  Uni local/remote: %u/%u\n", mgr->uni_local, mgr->uni_remote);
-	pr_info("  Data sent/received: %llu/%llu\n",
+	tquic_info("Stream Manager (%s):\n", mgr->is_server ? "server" : "client");
+	tquic_info("  Total streams: %u\n", mgr->stream_count);
+	tquic_info("  Bidi local/remote: %u/%u\n", mgr->bidi_local, mgr->bidi_remote);
+	tquic_info("  Uni local/remote: %u/%u\n", mgr->uni_local, mgr->uni_remote);
+	tquic_info("  Data sent/received: %llu/%llu\n",
 		mgr->data_sent, mgr->data_received);
 
 	spin_lock(&mgr->lock);

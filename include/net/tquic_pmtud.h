@@ -23,6 +23,10 @@
 /* QUIC minimum MTU - packets MUST be at least this size (RFC 9000) */
 #define TQUIC_PMTUD_BASE_MTU		1200
 
+/* IP/UDP overhead for MTU calculation */
+#define TQUIC_IPV4_UDP_OVERHEAD		28	/* 20 (IPv4) + 8 (UDP) */
+#define TQUIC_IPV6_UDP_OVERHEAD		48	/* 40 (IPv6) + 8 (UDP) */
+
 /* Default maximum MTU to probe for (Ethernet) */
 #define TQUIC_PMTUD_MAX_MTU_DEFAULT	1500
 
@@ -200,6 +204,18 @@ u32 tquic_pmtud_get_mtu(struct tquic_path *path);
  * Return: 0 on success, negative error on failure
  */
 int tquic_pmtud_set_max_mtu(struct tquic_path *path, u32 max_mtu);
+
+/**
+ * tquic_pmtud_on_icmp_mtu_update - Handle ICMP-reported MTU decrease
+ * @path: Path whose MTU is being reported
+ * @new_mtu: QUIC payload MTU (IP MTU minus IP/UDP overhead)
+ *
+ * Called from ICMP error handlers. Validates and clamps the reported
+ * MTU before applying it. Per RFC 9000 Section 14.3, the MTU will
+ * never be reduced below 1200 bytes. Triggers DPLPMTUD re-probing
+ * to confirm the new MTU.
+ */
+void tquic_pmtud_on_icmp_mtu_update(struct tquic_path *path, u32 new_mtu);
 
 /**
  * tquic_pmtud_get_stats - Get PMTUD statistics for a path

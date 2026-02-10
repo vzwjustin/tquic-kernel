@@ -37,6 +37,7 @@
 
 #include "protocol.h"
 #include "tquic_preferred_addr.h"
+#include "tquic_debug.h"
 #include "tquic_stateless_reset.h"
 #include "core/transport_params.h"
 
@@ -85,20 +86,20 @@ int tquic_pref_addr_server_set_ipv4(struct tquic_pref_addr_config *config,
 
 	/* Validate address is not zero */
 	if (addr->sin_addr.s_addr == 0) {
-		pr_debug("tquic_pref_addr: IPv4 address cannot be zero\n");
+		tquic_dbg("pref_addr:IPv4 address cannot be zero\n");
 		return -EINVAL;
 	}
 
 	/* Validate port is set */
 	if (addr->sin_port == 0) {
-		pr_debug("tquic_pref_addr: IPv4 port cannot be zero\n");
+		tquic_dbg("pref_addr:IPv4 port cannot be zero\n");
 		return -EINVAL;
 	}
 
 	memcpy(&config->ipv4_addr, addr, sizeof(*addr));
 	config->ipv4_valid = true;
 
-	pr_debug("tquic_pref_addr: server IPv4 set to %pI4:%u\n",
+	tquic_dbg("pref_addr:server IPv4 set to %pI4:%u\n",
 		 &addr->sin_addr, ntohs(addr->sin_port));
 
 	return 0;
@@ -123,20 +124,20 @@ int tquic_pref_addr_server_set_ipv6(struct tquic_pref_addr_config *config,
 
 	/* Validate address is not all zeros */
 	if (ipv6_addr_any(&addr->sin6_addr)) {
-		pr_debug("tquic_pref_addr: IPv6 address cannot be all zeros\n");
+		tquic_dbg("pref_addr:IPv6 address cannot be all zeros\n");
 		return -EINVAL;
 	}
 
 	/* Validate port is set */
 	if (addr->sin6_port == 0) {
-		pr_debug("tquic_pref_addr: IPv6 port cannot be zero\n");
+		tquic_dbg("pref_addr:IPv6 port cannot be zero\n");
 		return -EINVAL;
 	}
 
 	memcpy(&config->ipv6_addr, addr, sizeof(*addr));
 	config->ipv6_valid = true;
 
-	pr_debug("tquic_pref_addr: server IPv6 set to %pI6c:%u\n",
+	tquic_dbg("pref_addr:server IPv6 set to %pI6c:%u\n",
 		 &addr->sin6_addr, ntohs(addr->sin6_port));
 
 	return 0;
@@ -182,7 +183,7 @@ int tquic_pref_addr_server_set_cid(struct tquic_pref_addr_config *config,
 		}
 	}
 
-	pr_debug("tquic_pref_addr: server CID set (len=%u)\n", cid->len);
+	tquic_dbg("pref_addr:server CID set (len=%u)\n", cid->len);
 
 	return 0;
 }
@@ -207,13 +208,13 @@ int tquic_pref_addr_server_generate(struct tquic_connection *conn,
 
 	/* Must have at least one valid address */
 	if (!config->ipv4_valid && !config->ipv6_valid) {
-		pr_debug("tquic_pref_addr: no valid addresses configured\n");
+		tquic_dbg("pref_addr:no valid addresses configured\n");
 		return -EINVAL;
 	}
 
 	/* Must have a CID */
 	if (config->cid.len == 0) {
-		pr_debug("tquic_pref_addr: CID not set\n");
+		tquic_dbg("pref_addr:CID not set\n");
 		return -EINVAL;
 	}
 
@@ -244,7 +245,7 @@ int tquic_pref_addr_server_generate(struct tquic_connection *conn,
 
 	params->preferred_address_present = true;
 
-	pr_debug("tquic_pref_addr: generated preferred_address for connection\n");
+	tquic_dbg("pref_addr:generated preferred_address for connection\n");
 
 	return 0;
 }
@@ -359,7 +360,7 @@ int tquic_pref_addr_client_init(struct tquic_connection *conn)
 	 */
 	conn->preferred_addr = migration;
 
-	pr_debug("tquic_pref_addr: client migration state initialized\n");
+	tquic_dbg("pref_addr:client migration state initialized\n");
 
 	return 0;
 }
@@ -392,7 +393,7 @@ void tquic_pref_addr_client_cleanup(struct tquic_connection *conn)
 	kfree(migration);
 	conn->preferred_addr = NULL;
 
-	pr_debug("tquic_pref_addr: client migration state cleaned up\n");
+	tquic_dbg("pref_addr:client migration state cleaned up\n");
 }
 EXPORT_SYMBOL_GPL(tquic_pref_addr_client_cleanup);
 
@@ -417,7 +418,7 @@ int tquic_pref_addr_client_decode(const u8 *buf, size_t len,
 	/* Minimum length: IPv4(6) + IPv6(18) + CID len(1) + token(16) = 41 */
 	min_len = 4 + 2 + 16 + 2 + 1 + TQUIC_STATELESS_RESET_TOKEN_LEN;
 	if (len < min_len) {
-		pr_debug("tquic_pref_addr: decode buffer too short: %zu < %zu\n",
+		tquic_dbg("pref_addr:decode buffer too short: %zu < %zu\n",
 			 len, min_len);
 		return -EINVAL;
 	}
@@ -443,13 +444,13 @@ int tquic_pref_addr_client_decode(const u8 *buf, size_t len,
 	/* CID length (1 byte) */
 	cid_len = buf[offset++];
 	if (cid_len > TQUIC_MAX_CID_LEN) {
-		pr_debug("tquic_pref_addr: CID length too large: %u\n", cid_len);
+		tquic_dbg("pref_addr:CID length too large: %u\n", cid_len);
 		return -EINVAL;
 	}
 
 	/* Check remaining length */
 	if (len - offset < cid_len + TQUIC_STATELESS_RESET_TOKEN_LEN) {
-		pr_debug("tquic_pref_addr: not enough data for CID and token\n");
+		tquic_dbg("pref_addr:not enough data for CID and token\n");
 		return -EINVAL;
 	}
 
@@ -464,7 +465,7 @@ int tquic_pref_addr_client_decode(const u8 *buf, size_t len,
 	memcpy(pref_addr->stateless_reset_token, buf + offset,
 	       TQUIC_STATELESS_RESET_TOKEN_LEN);
 
-	pr_debug("tquic_pref_addr: decoded - IPv4=%pI4:%u IPv6=%pI6c:%u CID len=%u\n",
+	tquic_dbg("pref_addr:decoded - IPv4=%pI4:%u IPv6=%pI6c:%u CID len=%u\n",
 		 pref_addr->ipv4_addr, pref_addr->ipv4_port,
 		 pref_addr->ipv6_addr, pref_addr->ipv6_port,
 		 pref_addr->cid.len);
@@ -497,6 +498,18 @@ int tquic_pref_addr_client_received(struct tquic_connection *conn,
 	if (!conn || !pref_addr)
 		return -EINVAL;
 
+	/*
+	 * RFC 9000 Section 18.2: preferred_address is a server-only
+	 * transport parameter. Only clients should process it. Reject
+	 * if this connection is a server (is_server == true) to prevent
+	 * a malicious client from redirecting the server's traffic.
+	 */
+	if (conn->is_server) {
+		tquic_warn("pref_addr:server must not process "
+			   "preferred_address from client\n");
+		return -EINVAL;
+	}
+
 	migration = conn->preferred_addr;
 	if (!migration) {
 		/* Initialize if not already done */
@@ -506,24 +519,32 @@ int tquic_pref_addr_client_received(struct tquic_connection *conn,
 		migration = conn->preferred_addr;
 	}
 
-	/* Check if IPv4 is valid (non-zero address and port) */
+	/* Check if IPv4 is valid (non-zero, non-loopback, non-broadcast) */
 	if (pref_addr->ipv4_port != 0) {
 		u32 v4_addr;
+
 		memcpy(&v4_addr, pref_addr->ipv4_addr, 4);
-		if (v4_addr != 0)
+		if (v4_addr != 0 &&
+		    !ipv4_is_loopback(v4_addr) &&
+		    !ipv4_is_multicast(v4_addr) &&
+		    v4_addr != htonl(INADDR_BROADCAST))
 			has_ipv4 = true;
 	}
 
-	/* Check if IPv6 is valid (non-zero address and port) */
+	/* Check if IPv6 is valid (non-zero, non-loopback, non-link-local) */
 	if (pref_addr->ipv6_port != 0) {
 		struct in6_addr v6_addr;
+
 		memcpy(&v6_addr, pref_addr->ipv6_addr, 16);
-		if (!ipv6_addr_any(&v6_addr))
+		if (!ipv6_addr_any(&v6_addr) &&
+		    !ipv6_addr_loopback(&v6_addr) &&
+		    !ipv6_addr_v4mapped(&v6_addr) &&
+		    !ipv6_addr_is_multicast(&v6_addr))
 			has_ipv6 = true;
 	}
 
 	if (!has_ipv4 && !has_ipv6) {
-		pr_debug("tquic_pref_addr: no valid addresses in preferred_address\n");
+		tquic_dbg("pref_addr:no valid addresses in preferred_address\n");
 		return -EINVAL;
 	}
 
@@ -554,8 +575,8 @@ int tquic_pref_addr_client_received(struct tquic_connection *conn,
 
 	migration->state = TQUIC_PREF_ADDR_AVAILABLE;
 
-	pr_info("tquic_pref_addr: received preferred_address (IPv4=%d IPv6=%d)\n",
-		has_ipv4, has_ipv6);
+	tquic_info("received preferred_address (IPv4=%d IPv6=%d)\n",
+		   has_ipv4, has_ipv6);
 
 	return 0;
 }
@@ -727,7 +748,7 @@ struct tquic_path *tquic_pref_addr_create_path(struct tquic_connection *conn,
 	 * reset packets from the server using this CID.
 	 */
 
-	pr_debug("tquic_pref_addr: created path %u for preferred address migration\n",
+	tquic_dbg("pref_addr:created path %u for preferred address migration\n",
 		 path->path_id);
 
 	return path;
@@ -770,7 +791,7 @@ int tquic_pref_addr_client_start_migration(struct tquic_connection *conn)
 		return -EINVAL;
 
 	if (!tquic_pref_addr_client_can_migrate(conn)) {
-		pr_debug("tquic_pref_addr: migration not possible\n");
+		tquic_dbg("pref_addr:migration not possible\n");
 		return -EINVAL;
 	}
 
@@ -779,7 +800,7 @@ int tquic_pref_addr_client_start_migration(struct tquic_connection *conn)
 	/* Select address family */
 	ret = tquic_pref_addr_client_select_address(conn, &family);
 	if (ret) {
-		pr_debug("tquic_pref_addr: no suitable address for migration\n");
+		tquic_dbg("pref_addr:no suitable address for migration\n");
 		return ret;
 	}
 
@@ -798,7 +819,7 @@ int tquic_pref_addr_client_start_migration(struct tquic_connection *conn)
 					   &migration->server_addr.cid,
 					   migration->server_addr.reset_token);
 	if (IS_ERR(path)) {
-		pr_err("tquic_pref_addr: failed to create migration path\n");
+		tquic_err("failed to create migration path\n");
 		return PTR_ERR(path);
 	}
 
@@ -811,15 +832,15 @@ int tquic_pref_addr_client_start_migration(struct tquic_connection *conn)
 	/* Start path validation */
 	ret = tquic_pref_addr_validate_path(conn, path);
 	if (ret) {
-		pr_err("tquic_pref_addr: failed to start validation: %d\n", ret);
+		tquic_err("pref_addr:failed to start validation: %d\n", ret);
 		migration->state = TQUIC_PREF_ADDR_FAILED;
 		tquic_path_free(path);
 		migration->migration_path = NULL;
 		return ret;
 	}
 
-	pr_info("tquic_pref_addr: started migration to preferred address (family=%u)\n",
-		family);
+	tquic_info("started migration to preferred address (family=%u)\n",
+		   family);
 
 	return 0;
 }
@@ -846,7 +867,7 @@ int tquic_pref_addr_client_on_validated(struct tquic_connection *conn,
 		return -EINVAL;
 
 	if (path != migration->migration_path) {
-		pr_debug("tquic_pref_addr: validated path is not migration path\n");
+		tquic_dbg("pref_addr:validated path is not migration path\n");
 		return -EINVAL;
 	}
 
@@ -865,8 +886,8 @@ int tquic_pref_addr_client_on_validated(struct tquic_connection *conn,
 	migration->migration_path = NULL;  /* Now owned by connection */
 	migration->migration_successes++;
 
-	pr_info("tquic_pref_addr: successfully migrated to preferred address (path %u)\n",
-		path->path_id);
+	tquic_info("successfully migrated to preferred address (path %u)\n",
+		   path->path_id);
 
 	/* Notify via netlink */
 	tquic_nl_path_event(conn, path, TQUIC_PATH_EVENT_ACTIVE);
@@ -891,7 +912,7 @@ void tquic_pref_addr_client_on_failed(struct tquic_connection *conn, int error)
 	if (!migration)
 		return;
 
-	pr_warn("tquic_pref_addr: migration failed (error=%d)\n", error);
+	tquic_warn("preferred address migration failed (error=%d)\n", error);
 
 	migration->state = TQUIC_PREF_ADDR_FAILED;
 	migration->validation_failures++;
@@ -925,11 +946,11 @@ void tquic_pref_addr_client_abort(struct tquic_connection *conn)
 		return;
 
 	if (migration->state != TQUIC_PREF_ADDR_VALIDATING) {
-		pr_debug("tquic_pref_addr: no migration in progress to abort\n");
+		tquic_dbg("pref_addr:no migration in progress to abort\n");
 		return;
 	}
 
-	pr_info("tquic_pref_addr: aborting migration to preferred address\n");
+	tquic_info("pref_addr:aborting migration to preferred address\n");
 
 	/* Clean up migration path */
 	if (migration->migration_path) {
@@ -1022,13 +1043,13 @@ EXPORT_SYMBOL_GPL(tquic_pref_addr_auto_migrate);
 
 int __init tquic_pref_addr_init(void)
 {
-	pr_info("tquic_pref_addr: preferred address support initialized\n");
+	tquic_info("preferred address support initialized\n");
 	return 0;
 }
 
 void __exit tquic_pref_addr_exit(void)
 {
-	pr_info("tquic_pref_addr: preferred address support cleaned up\n");
+	tquic_info("preferred address support cleaned up\n");
 }
 
 MODULE_DESCRIPTION("TQUIC Preferred Address Transport Parameter and Migration");

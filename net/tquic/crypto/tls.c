@@ -17,6 +17,8 @@
 #include <crypto/aes.h>
 #include <net/tquic.h>
 
+#include "../tquic_debug.h"
+
 /* TLS 1.3 constants */
 #define TLS_HANDSHAKE_TYPE_CLIENT_HELLO	1
 #define TLS_HANDSHAKE_TYPE_SERVER_HELLO	2
@@ -276,6 +278,14 @@ static int tquic_hkdf_expand_label(struct crypto_shash *hash,
 	u8 t[64];
 	int ret;
 	u32 i, n;
+
+	/*
+	 * Validate label_len to prevent stack buffer overflow.
+	 * Max content: 2 (length) + 1 (prefix_len) + 6 ("tls13 ") +
+	 *              label_len + 1 (context len) <= 256
+	 */
+	if (label_len > 245)
+		return -EINVAL;
 
 	/* Construct HKDF label: length + "tls13 " + label + context (empty) */
 	*p++ = (out_len >> 8) & 0xff;
@@ -591,6 +601,7 @@ int tquic_encrypt_packet(struct tquic_crypto_state *crypto,
 			 u64 pkt_num, u8 *out, size_t *out_len)
 {
 	struct tquic_keys *keys = &crypto->write_keys[crypto->write_level];
+	DECLARE_CRYPTO_WAIT(wait);
 	u8 nonce[12];
 	struct aead_request *req;
 	struct scatterlist sg[2];
@@ -602,14 +613,16 @@ int tquic_encrypt_packet(struct tquic_crypto_state *crypto,
 	tquic_create_nonce(keys->iv, pkt_num, nonce);
 
 	req = aead_request_alloc(crypto->aead, GFP_ATOMIC);
-	if (!req)
-		return -ENOMEM;
+	if (!req) {
+		ret = -ENOMEM;
+		goto out_zeroize;
+	}
 
 	/* Set up AEAD request */
 	ret = crypto_aead_setkey(crypto->aead, keys->key, keys->key_len);
 	if (ret) {
 		aead_request_free(req);
-		return ret;
+		goto out_zeroize;
 	}
 
 	sg_init_table(sg, 2);
@@ -618,12 +631,18 @@ int tquic_encrypt_packet(struct tquic_crypto_state *crypto,
 
 	aead_request_set_crypt(req, sg, sg, payload_len, nonce);
 	aead_request_set_ad(req, header_len);
+	aead_request_set_callback(req, CRYPTO_TFM_REQ_MAY_BACKLOG,
+				  crypto_req_done, &wait);
 
-	ret = crypto_aead_encrypt(req);
+	ret = crypto_wait_req(crypto_aead_encrypt(req), &wait);
 
 	aead_request_free(req);
 
-	*out_len = payload_len + 16;  /* Payload + auth tag */
+	if (ret == 0)
+		*out_len = payload_len + 16;  /* Payload + auth tag */
+
+out_zeroize:
+	memzero_explicit(nonce, sizeof(nonce));
 	return ret;
 }
 EXPORT_SYMBOL_GPL(tquic_encrypt_packet);
@@ -637,6 +656,7 @@ int tquic_decrypt_packet(struct tquic_crypto_state *crypto,
 			 u64 pkt_num, u8 *out, size_t *out_len)
 {
 	struct tquic_keys *keys = &crypto->read_keys[crypto->read_level];
+	DECLARE_CRYPTO_WAIT(wait);
 	u8 nonce[12];
 	struct aead_request *req;
 	struct scatterlist sg[2];
@@ -651,13 +671,15 @@ int tquic_decrypt_packet(struct tquic_crypto_state *crypto,
 	tquic_create_nonce(keys->iv, pkt_num, nonce);
 
 	req = aead_request_alloc(crypto->aead, GFP_ATOMIC);
-	if (!req)
-		return -ENOMEM;
+	if (!req) {
+		ret = -ENOMEM;
+		goto out_zeroize;
+	}
 
 	ret = crypto_aead_setkey(crypto->aead, keys->key, keys->key_len);
 	if (ret) {
 		aead_request_free(req);
-		return ret;
+		goto out_zeroize;
 	}
 
 	sg_init_table(sg, 2);
@@ -666,14 +688,18 @@ int tquic_decrypt_packet(struct tquic_crypto_state *crypto,
 
 	aead_request_set_crypt(req, sg, sg, payload_len, nonce);
 	aead_request_set_ad(req, header_len);
+	aead_request_set_callback(req, CRYPTO_TFM_REQ_MAY_BACKLOG,
+				  crypto_req_done, &wait);
 
-	ret = crypto_aead_decrypt(req);
+	ret = crypto_wait_req(crypto_aead_decrypt(req), &wait);
 
 	aead_request_free(req);
 
 	if (ret == 0)
 		*out_len = payload_len - 16;  /* Remove auth tag */
 
+out_zeroize:
+	memzero_explicit(nonce, sizeof(nonce));
 	return ret;
 }
 EXPORT_SYMBOL_GPL(tquic_decrypt_packet);
@@ -691,6 +717,7 @@ int tquic_encrypt_packet_multipath(struct tquic_crypto_state *crypto,
 				   u8 *out, size_t *out_len)
 {
 	struct tquic_keys *keys = &crypto->write_keys[crypto->write_level];
+	DECLARE_CRYPTO_WAIT(wait);
 	u8 nonce[12];
 	struct aead_request *req;
 	struct scatterlist sg[2];
@@ -703,13 +730,15 @@ int tquic_encrypt_packet_multipath(struct tquic_crypto_state *crypto,
 	tquic_create_nonce_multipath(keys->iv, pkt_num, path_id, nonce);
 
 	req = aead_request_alloc(crypto->aead, GFP_ATOMIC);
-	if (!req)
-		return -ENOMEM;
+	if (!req) {
+		ret = -ENOMEM;
+		goto out_zeroize;
+	}
 
 	ret = crypto_aead_setkey(crypto->aead, keys->key, keys->key_len);
 	if (ret) {
 		aead_request_free(req);
-		return ret;
+		goto out_zeroize;
 	}
 
 	sg_init_table(sg, 2);
@@ -718,12 +747,18 @@ int tquic_encrypt_packet_multipath(struct tquic_crypto_state *crypto,
 
 	aead_request_set_crypt(req, sg, sg, payload_len, nonce);
 	aead_request_set_ad(req, header_len);
+	aead_request_set_callback(req, CRYPTO_TFM_REQ_MAY_BACKLOG,
+				  crypto_req_done, &wait);
 
-	ret = crypto_aead_encrypt(req);
+	ret = crypto_wait_req(crypto_aead_encrypt(req), &wait);
 
 	aead_request_free(req);
 
-	*out_len = payload_len + 16;
+	if (ret == 0)
+		*out_len = payload_len + 16;
+
+out_zeroize:
+	memzero_explicit(nonce, sizeof(nonce));
 	return ret;
 }
 EXPORT_SYMBOL_GPL(tquic_encrypt_packet_multipath);
@@ -741,6 +776,7 @@ int tquic_decrypt_packet_multipath(struct tquic_crypto_state *crypto,
 				   u8 *out, size_t *out_len)
 {
 	struct tquic_keys *keys = &crypto->read_keys[crypto->read_level];
+	DECLARE_CRYPTO_WAIT(wait);
 	u8 nonce[12];
 	struct aead_request *req;
 	struct scatterlist sg[2];
@@ -756,13 +792,15 @@ int tquic_decrypt_packet_multipath(struct tquic_crypto_state *crypto,
 	tquic_create_nonce_multipath(keys->iv, pkt_num, path_id, nonce);
 
 	req = aead_request_alloc(crypto->aead, GFP_ATOMIC);
-	if (!req)
-		return -ENOMEM;
+	if (!req) {
+		ret = -ENOMEM;
+		goto out_zeroize;
+	}
 
 	ret = crypto_aead_setkey(crypto->aead, keys->key, keys->key_len);
 	if (ret) {
 		aead_request_free(req);
-		return ret;
+		goto out_zeroize;
 	}
 
 	sg_init_table(sg, 2);
@@ -771,14 +809,18 @@ int tquic_decrypt_packet_multipath(struct tquic_crypto_state *crypto,
 
 	aead_request_set_crypt(req, sg, sg, payload_len, nonce);
 	aead_request_set_ad(req, header_len);
+	aead_request_set_callback(req, CRYPTO_TFM_REQ_MAY_BACKLOG,
+				  crypto_req_done, &wait);
 
-	ret = crypto_aead_decrypt(req);
+	ret = crypto_wait_req(crypto_aead_decrypt(req), &wait);
 
 	aead_request_free(req);
 
 	if (ret == 0)
 		*out_len = payload_len - 16;
 
+out_zeroize:
+	memzero_explicit(nonce, sizeof(nonce));
 	return ret;
 }
 EXPORT_SYMBOL_GPL(tquic_decrypt_packet_multipath);
@@ -812,14 +854,14 @@ struct tquic_crypto_state *tquic_crypto_init_versioned(const struct tquic_cid *d
 	/* Allocate crypto transforms */
 	crypto->aead = crypto_alloc_aead("gcm(aes)", 0, 0);
 	if (IS_ERR(crypto->aead)) {
-		pr_err("tquic_crypto: failed to allocate AEAD\n");
+		tquic_err("failed to allocate AEAD\n");
 		kfree(crypto);
 		return NULL;
 	}
 
 	crypto->hash = crypto_alloc_shash("hmac(sha256)", 0, 0);
 	if (IS_ERR(crypto->hash)) {
-		pr_err("tquic_crypto: failed to allocate HMAC\n");
+		tquic_err("failed to allocate HMAC\n");
 		crypto_free_aead(crypto->aead);
 		kfree(crypto);
 		return NULL;
@@ -827,7 +869,7 @@ struct tquic_crypto_state *tquic_crypto_init_versioned(const struct tquic_cid *d
 
 	crypto->hp_cipher = crypto_alloc_skcipher("ecb(aes)", 0, 0);
 	if (IS_ERR(crypto->hp_cipher)) {
-		pr_err("tquic_crypto: failed to allocate HP cipher\n");
+		tquic_err("failed to allocate HP cipher\n");
 		crypto_free_shash(crypto->hash);
 		crypto_free_aead(crypto->aead);
 		kfree(crypto);
@@ -837,7 +879,7 @@ struct tquic_crypto_state *tquic_crypto_init_versioned(const struct tquic_cid *d
 	/* Allocate header protection context */
 	crypto->hp_ctx = tquic_hp_ctx_alloc();
 	if (!crypto->hp_ctx) {
-		pr_err("tquic_crypto: failed to allocate HP context\n");
+		tquic_err("failed to allocate HP context\n");
 		crypto_free_skcipher(crypto->hp_cipher);
 		crypto_free_shash(crypto->hash);
 		crypto_free_aead(crypto->aead);
@@ -848,7 +890,7 @@ struct tquic_crypto_state *tquic_crypto_init_versioned(const struct tquic_cid *d
 	/* Set AEAD auth tag length */
 	ret = crypto_aead_setauthsize(crypto->aead, 16);
 	if (ret) {
-		pr_err("tquic_crypto: failed to set auth tag size: %d\n", ret);
+		tquic_err("failed to set auth tag size: %d\n", ret);
 		tquic_crypto_cleanup(crypto);
 		return NULL;
 	}
@@ -856,8 +898,8 @@ struct tquic_crypto_state *tquic_crypto_init_versioned(const struct tquic_cid *d
 	/* Derive initial keys using version-appropriate salt and labels */
 	ret = tquic_derive_initial_keys_versioned(crypto, dcid, is_server, version);
 	if (ret) {
-		pr_err("tquic_crypto: failed to derive initial keys for v%s\n",
-		       version == TQUIC_VERSION_2 ? "2" : "1");
+		tquic_err("failed to derive initial keys for v%s\n",
+			  version == TQUIC_VERSION_2 ? "2" : "1");
 		tquic_crypto_cleanup(crypto);
 		return NULL;
 	}
@@ -865,7 +907,7 @@ struct tquic_crypto_state *tquic_crypto_init_versioned(const struct tquic_cid *d
 	/* Set up initial HP keys */
 	ret = tquic_setup_hp_keys(crypto, TQUIC_ENC_INITIAL);
 	if (ret) {
-		pr_err("tquic_crypto: failed to set up initial HP keys\n");
+		tquic_err("failed to set up initial HP keys\n");
 		tquic_crypto_cleanup(crypto);
 		return NULL;
 	}
@@ -876,8 +918,8 @@ struct tquic_crypto_state *tquic_crypto_init_versioned(const struct tquic_cid *d
 	/* Sync HP context levels */
 	tquic_hp_set_level(crypto->hp_ctx, TQUIC_ENC_INITIAL, TQUIC_ENC_INITIAL);
 
-	pr_debug("tquic_crypto: initialized crypto state for QUIC v%s\n",
-		 version == TQUIC_VERSION_2 ? "2" : "1");
+	tquic_dbg("initialized crypto state for QUIC v%s\n",
+		  version == TQUIC_VERSION_2 ? "2" : "1");
 
 	return crypto;
 }
@@ -901,6 +943,8 @@ EXPORT_SYMBOL_GPL(tquic_crypto_init);
  */
 void tquic_crypto_cleanup(struct tquic_crypto_state *crypto)
 {
+	int i;
+
 	if (!crypto)
 		return;
 
@@ -917,7 +961,20 @@ void tquic_crypto_cleanup(struct tquic_crypto_state *crypto)
 	if (crypto->hp_cipher && !IS_ERR(crypto->hp_cipher))
 		crypto_free_skcipher(crypto->hp_cipher);
 
-	kfree(crypto->transcript);
+	/* Zeroize all key material before freeing */
+	for (i = 0; i < TQUIC_ENC_LEVEL_COUNT; i++) {
+		memzero_explicit(&crypto->read_keys[i],
+				 sizeof(crypto->read_keys[i]));
+		memzero_explicit(&crypto->write_keys[i],
+				 sizeof(crypto->write_keys[i]));
+	}
+
+	/* Zeroize transcript (may contain sensitive handshake data) */
+	if (crypto->transcript) {
+		memzero_explicit(crypto->transcript, crypto->transcript_alloc);
+		kfree(crypto->transcript);
+	}
+
 	kfree(crypto);
 }
 EXPORT_SYMBOL_GPL(tquic_crypto_cleanup);
@@ -1089,8 +1146,8 @@ int tquic_crypto_install_keys(struct tquic_crypto_state *crypto,
 	if (ret)
 		return ret;
 
-	pr_debug("tquic_crypto: installed keys for level %d (v%s)\n",
-		 level, version == TQUIC_VERSION_2 ? "2" : "1");
+	tquic_info("installed keys for level %d (v%s)\n",
+		   level, version == TQUIC_VERSION_2 ? "2" : "1");
 
 	return 0;
 }

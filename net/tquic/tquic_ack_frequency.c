@@ -33,6 +33,7 @@
 
 #include "tquic_ack_frequency.h"
 #include "tquic_mib.h"
+#include "tquic_debug.h"
 #include "core/ack_frequency.h"
 
 /*
@@ -193,7 +194,7 @@ int tquic_ack_freq_conn_init(struct tquic_connection *conn)
 	/* Store in connection */
 	conn->ack_freq_state = state;
 
-	pr_debug("tquic: ACK frequency state initialized for connection\n");
+	tquic_dbg("ACK frequency state initialized for connection\n");
 
 	return 0;
 }
@@ -218,7 +219,7 @@ void tquic_ack_freq_conn_cleanup(struct tquic_connection *conn)
 	tquic_ack_freq_state_destroy(state);
 	conn->ack_freq_state = NULL;
 
-	pr_debug("tquic: ACK frequency state cleaned up for connection\n");
+	tquic_dbg("ACK frequency state cleaned up for connection\n");
 }
 EXPORT_SYMBOL_GPL(tquic_ack_freq_conn_cleanup);
 
@@ -242,7 +243,7 @@ void tquic_ack_freq_conn_enable(struct tquic_connection *conn,
 	/* Use core implementation to enable */
 	tquic_ack_freq_enable(state, peer_min_ack_delay);
 
-	pr_debug("tquic: ACK frequency enabled for connection, "
+	tquic_dbg("ACK frequency enabled for connection, "
 		 "peer_min_ack_delay=%llu us\n", peer_min_ack_delay);
 }
 EXPORT_SYMBOL_GPL(tquic_ack_freq_conn_enable);
@@ -429,7 +430,7 @@ int tquic_gen_ack_frequency_frame(struct tquic_connection *conn,
 		spin_unlock(&state->lock);
 	}
 
-	pr_debug("tquic: generated ACK_FREQUENCY frame: seq=%llu threshold=%llu "
+	tquic_dbg("generated ACK_FREQUENCY frame: seq=%llu threshold=%llu "
 		 "max_delay=%llu reorder=%llu\n",
 		 next_seq, ack_eliciting_threshold,
 		 request_max_ack_delay, reorder_threshold);
@@ -457,7 +458,7 @@ int tquic_gen_immediate_ack_frame(u8 *buf, size_t buf_len)
 	if (ret < 0)
 		return ret;
 
-	pr_debug("tquic: generated IMMEDIATE_ACK frame\n");
+	tquic_dbg("generated IMMEDIATE_ACK frame\n");
 
 	return ret;
 }
@@ -504,7 +505,7 @@ int tquic_parse_ack_frequency_frame(const u8 *buf, size_t buf_len,
 
 	/* Validate threshold - must be non-zero */
 	if (frame->ack_eliciting_threshold == 0) {
-		pr_warn("tquic: ACK_FREQUENCY with zero threshold is invalid\n");
+		tquic_warn("ACK_FREQUENCY with zero threshold is invalid\n");
 		return -EINVAL;
 	}
 
@@ -521,7 +522,7 @@ int tquic_parse_ack_frequency_frame(const u8 *buf, size_t buf_len,
 		return ret;
 	p += ret;
 
-	pr_debug("tquic: parsed ACK_FREQUENCY frame: seq=%llu threshold=%llu "
+	tquic_dbg("parsed ACK_FREQUENCY frame: seq=%llu threshold=%llu "
 		 "max_delay=%llu reorder=%llu\n",
 		 frame->sequence_number, frame->ack_eliciting_threshold,
 		 frame->request_max_ack_delay, frame->reorder_threshold);
@@ -551,12 +552,12 @@ int tquic_parse_immediate_ack_frame(const u8 *buf, size_t buf_len)
 		return ret;
 
 	if (frame_type != TQUIC_FRAME_IMMEDIATE_ACK) {
-		pr_warn("tquic: expected IMMEDIATE_ACK (0x1f), got 0x%llx\n",
+		tquic_warn("expected IMMEDIATE_ACK (0x1f), got 0x%llx\n",
 			frame_type);
 		return -EINVAL;
 	}
 
-	pr_debug("tquic: parsed IMMEDIATE_ACK frame\n");
+	tquic_dbg("parsed IMMEDIATE_ACK frame\n");
 
 	return ret;
 }
@@ -588,7 +589,7 @@ int tquic_conn_handle_ack_frequency_frame(struct tquic_connection *conn,
 
 	/* Validate the frame */
 	if (frame->ack_eliciting_threshold == 0) {
-		pr_warn("tquic: ACK_FREQUENCY with zero threshold is invalid\n");
+		tquic_warn("ACK_FREQUENCY with zero threshold is invalid\n");
 		return -EINVAL;
 	}
 
@@ -600,7 +601,7 @@ int tquic_conn_handle_ack_frequency_frame(struct tquic_connection *conn,
 			return ret;
 	} else {
 		/* Extension not fully initialized - just log */
-		pr_debug("tquic: received ACK_FREQUENCY but state not initialized\n");
+		tquic_dbg("received ACK_FREQUENCY but state not initialized\n");
 	}
 
 	/* Update MIB counter */
@@ -633,7 +634,7 @@ int tquic_conn_handle_immediate_ack_frame(struct tquic_connection *conn)
 	}
 
 	/* Extension not fully initialized - just log */
-	pr_debug("tquic: received IMMEDIATE_ACK, will ACK next packet immediately\n");
+	tquic_dbg("received IMMEDIATE_ACK, will ACK next packet immediately\n");
 
 	return 0;
 }
@@ -778,18 +779,12 @@ bool tquic_ack_freq_should_ack(struct tquic_ack_frequency_state *state,
 	/* Increment packet counter */
 	state->packets_since_ack++;
 
-	/* Check ack-eliciting threshold */
-	if (state->packets_since_ack >= threshold) {
-		should_ack = true;
-		goto out;
-	}
-
-	/* Check reorder threshold (if not ignoring order) */
+	/* Check reorder threshold before updating largest (if not ignoring order) */
 	if (!state->ignore_order && state->current_reorder_threshold > 0) {
 		if (pn < state->largest_pn_received) {
 			gap = state->largest_pn_received - pn;
 			if (gap >= state->current_reorder_threshold) {
-				pr_debug("tquic: reorder threshold exceeded "
+				tquic_dbg("reorder threshold exceeded "
 					 "(gap=%llu >= %llu)\n",
 					 gap, state->current_reorder_threshold);
 				state->reordering_detected = true;
@@ -799,9 +794,15 @@ bool tquic_ack_freq_should_ack(struct tquic_ack_frequency_state *state,
 		}
 	}
 
-	/* Update largest received */
+	/* Update largest received -- must happen for every packet */
 	if (pn > state->largest_pn_received)
 		state->largest_pn_received = pn;
+
+	/* Check ack-eliciting threshold */
+	if (state->packets_since_ack >= threshold) {
+		should_ack = true;
+		goto out;
+	}
 
 out:
 	spin_unlock(&state->lock);
@@ -908,7 +909,7 @@ int tquic_ack_freq_decode_tp(const u8 *buf, size_t buf_len, u64 *min_ack_delay_u
 	/* Validate range */
 	if (*min_ack_delay_us < TQUIC_MIN_ACK_DELAY_MIN_US ||
 	    *min_ack_delay_us > TQUIC_MIN_ACK_DELAY_MAX_US) {
-		pr_warn("tquic: min_ack_delay out of range: %llu\n",
+		tquic_warn("min_ack_delay out of range: %llu\n",
 			*min_ack_delay_us);
 		return -EINVAL;
 	}
@@ -960,7 +961,7 @@ int tquic_ack_freq_conn_request_update(struct tquic_connection *conn,
 						     reorder_threshold);
 	}
 
-	pr_debug("tquic: scheduled ACK_FREQUENCY update: threshold=%llu "
+	tquic_dbg("scheduled ACK_FREQUENCY update: threshold=%llu "
 		 "delay=%llu reorder=%llu\n",
 		 ack_elicit_threshold, max_ack_delay_us, reorder_threshold);
 
@@ -988,12 +989,13 @@ int tquic_ack_freq_conn_request_immediate_ack(struct tquic_connection *conn)
 
 	state = conn_get_ack_freq_state(conn);
 	if (state) {
-		/* Request immediate ACK by setting the flag directly */
+		spin_lock(&state->lock);
 		state->immediate_ack_request = true;
+		spin_unlock(&state->lock);
 		return 0;
 	}
 
-	pr_debug("tquic: scheduled IMMEDIATE_ACK request\n");
+	tquic_dbg("scheduled IMMEDIATE_ACK request\n");
 
 	return 0;
 }
@@ -1201,12 +1203,12 @@ int tquic_ack_freq_module_init(void)
 	/* Initialize core ACK frequency module */
 	ret = tquic_ack_freq_init();
 	if (ret) {
-		pr_err("tquic: failed to initialize ACK frequency core: %d\n",
-		       ret);
+		tquic_err("failed to initialize ACK frequency core: %d\n",
+			  ret);
 		return ret;
 	}
 
-	pr_info("tquic: ACK frequency extension module initialized\n");
+	tquic_info("ACK frequency extension module initialized\n");
 	return 0;
 }
 EXPORT_SYMBOL_GPL(tquic_ack_freq_module_init);
@@ -1221,7 +1223,7 @@ void tquic_ack_freq_module_exit(void)
 	/* Clean up core ACK frequency module */
 	tquic_ack_freq_exit();
 
-	pr_info("tquic: ACK frequency extension module cleaned up\n");
+	tquic_info("ACK frequency extension module cleaned up\n");
 }
 EXPORT_SYMBOL_GPL(tquic_ack_freq_module_exit);
 

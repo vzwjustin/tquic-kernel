@@ -17,6 +17,7 @@
 #include <net/inet_ecn.h>
 
 #include "l4s.h"
+#include "../tquic_debug.h"
 
 /* ECN mask - 2 bits for ECN codepoint in TOS/DSCP field */
 #ifndef INET_ECN_MASK
@@ -204,7 +205,17 @@ void tquic_l4s_on_ack(struct tquic_l4s_ctx *ctx,
 	if (!ctx)
 		return;
 
-	/* Calculate deltas from previous counts */
+	/*
+	 * Calculate deltas from previous counts using signed arithmetic
+	 * to correctly detect decreases from peer bugs or attacks.
+	 */
+	if (ce_count < ctx->stats.ce_recv ||
+	    ect1_count < ctx->stats.ect1_recv) {
+		/* Counts decreased -- ignore this feedback */
+		tquic_dbg("l4s: ECN count decreased, ignoring feedback\n");
+		return;
+	}
+
 	delta_ce = ce_count - ctx->stats.ce_recv;
 	delta_ect1 = ect1_count - ctx->stats.ect1_recv;
 
@@ -219,8 +230,9 @@ void tquic_l4s_on_ack(struct tquic_l4s_ctx *ctx,
 
 		/* Calculate CE fraction for alpha update */
 		if (delta_ect1 + delta_ce > 0) {
-			ce_fraction = (delta_ce * TQUIC_L4S_ALPHA_SCALE) /
-				      (delta_ect1 + delta_ce);
+			ce_fraction = (u32)div64_u64(
+				delta_ce * TQUIC_L4S_ALPHA_SCALE,
+				delta_ect1 + delta_ce);
 			tquic_l4s_update_alpha(ctx, ce_fraction);
 		}
 	}
@@ -273,7 +285,7 @@ void tquic_l4s_detect(struct tquic_l4s_ctx *ctx)
 		if (ctx->ce_count >= TQUIC_L4S_CE_THRESHOLD) {
 			ctx->state = TQUIC_L4S_ENABLED;
 			ctx->capable = true;
-			pr_debug("tquic: L4S detected on path\n");
+			tquic_info("l4s: L4S detected on path\n");
 			return;
 		}
 
@@ -281,7 +293,7 @@ void tquic_l4s_detect(struct tquic_l4s_ctx *ctx)
 		if (ctx->loss_count >= TQUIC_L4S_CLASSIC_THRESHOLD) {
 			ctx->state = TQUIC_L4S_DISABLED;
 			ctx->capable = false;
-			pr_debug("tquic: Classic AQM detected, disabling L4S\n");
+			tquic_info("l4s: classic AQM detected, disabling L4S\n");
 			return;
 		}
 
@@ -306,14 +318,27 @@ void tquic_l4s_detect(struct tquic_l4s_ctx *ctx)
 		break;
 
 	case TQUIC_L4S_ENABLED:
-		/* Monitor for path changes - excessive loss suggests change */
+		/*
+		 * Monitor for path changes - excessive loss suggests change.
+		 * Use a window-based approach: only count losses since the
+		 * last successful L4S period to avoid accumulation over time.
+		 * Reset loss_count periodically after confirming L4S is stable.
+		 */
 		if (ctx->loss_count >= TQUIC_L4S_CLASSIC_THRESHOLD * 2) {
 			/* Path may have changed, restart probing */
 			ctx->state = TQUIC_L4S_PROBING;
 			ctx->probe_round = 0;
 			ctx->ce_count = 0;
 			ctx->loss_count = 0;
-			pr_debug("tquic: Path change detected, reprobing L4S\n");
+			tquic_info("l4s: path change detected, reprobing L4S\n");
+		} else if (ctx->ce_count > TQUIC_L4S_CE_THRESHOLD * 2) {
+			/*
+			 * Sufficient CE marks confirm L4S is still active.
+			 * Reset counters to prevent accumulation-based
+			 * false reprobing.
+			 */
+			ctx->ce_count = 0;
+			ctx->loss_count = 0;
 		}
 		break;
 

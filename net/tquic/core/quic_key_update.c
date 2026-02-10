@@ -21,6 +21,7 @@
 #include <crypto/hash.h>
 #include <net/tquic.h>
 #include <net/tquic_frame.h>
+#include "../tquic_debug.h"
 
 /* Key update header - internal definitions for crypto state */
 
@@ -96,9 +97,22 @@ struct tquic_crypto_ctx {
 };
 
 /*
- * Timer function declaration (from tquic_timer.c)
+ * Timer function declarations (from tquic_timer.c)
  */
 void tquic_timer_set(struct tquic_connection *conn, u8 timer_type, ktime_t when);
+void tquic_timer_cancel(struct tquic_connection *conn, u8 timer_type);
+
+/* RTT measurement (from quic_loss.c) */
+u32 tquic_rtt_pto(struct tquic_rtt_state *rtt);
+
+/*
+ * Key update timeout multiplier.
+ * If the peer has not responded with the new key phase within
+ * 3 * PTO, revert the key update to prevent permanent stuck state.
+ * 3 * PTO is consistent with the draining period and persistent
+ * congestion threshold in RFC 9002.
+ */
+#define TQUIC_KEY_UPDATE_TIMEOUT_PTO_MULT	3
 
 /*
  * TQUIC_SKB_CB - Get control block from skb
@@ -243,7 +257,7 @@ static int tquic_key_update_rx(struct tquic_connection *conn)
 		ctx->rx_aead_prev = NULL;
 		ctx->rx_prev_valid = 0;
 		/* Continue without previous key support - not fatal */
-		pr_debug("TQUIC: could not allocate previous RX AEAD\n");
+		tquic_conn_warn(conn, "could not allocate previous RX AEAD\n");
 	} else {
 		/* Copy current RX secret to previous */
 		memcpy(&ctx->rx_prev, &ctx->rx, sizeof(ctx->rx_prev));
@@ -341,8 +355,24 @@ int tquic_crypto_initiate_key_update(struct tquic_connection *conn)
 	ctx->key_update_pending = 1;
 	ctx->key_update_pn = pn_space->next_pn;
 
-	pr_debug("TQUIC: initiated key update, new phase=%u, first_pn=%llu\n",
-		 ctx->key_phase, ctx->key_update_pn);
+	/*
+	 * Arm the key update timeout timer.  If the peer does not respond
+	 * with a packet bearing the new key phase within 3 * PTO, the
+	 * timer callback will revert the update so the connection does
+	 * not get permanently stuck in the update_pending state.
+	 */
+	if (conn->active_path) {
+		u32 pto_ms = tquic_rtt_pto(&conn->active_path->rtt);
+		ktime_t deadline;
+
+		deadline = ktime_add_ms(ktime_get(),
+					TQUIC_KEY_UPDATE_TIMEOUT_PTO_MULT *
+					pto_ms);
+		tquic_timer_set(conn, TQUIC_TIMER_KEY_UPDATE, deadline);
+	}
+
+	tquic_conn_info(conn, "key update initiated phase=%u first_pn=%llu\n",
+			ctx->key_phase, ctx->key_update_pn);
 
 	return 0;
 }
@@ -381,8 +411,9 @@ int tquic_crypto_on_key_phase_change(struct tquic_connection *conn, u8 rx_key_ph
 	 * yet confirmed by peer), this is a consecutive update error.
 	 */
 	if (ctx->key_update_pending && rx_key_phase != ctx->key_phase) {
-		pr_err("TQUIC: consecutive key update detected (pending=%u, rx=%u, current=%u)\n",
-		       ctx->key_update_pending, rx_key_phase, ctx->key_phase);
+		tquic_conn_err(conn, "consecutive key update (pending=%u rx=%u cur=%u)\n",
+			       ctx->key_update_pending, rx_key_phase,
+			       ctx->key_phase);
 		/*
 		 * Return KEY_UPDATE_ERROR. Caller should close connection
 		 * with error code 0x0E (KEY_UPDATE_ERROR per RFC 9001).
@@ -408,8 +439,8 @@ int tquic_crypto_on_key_phase_change(struct tquic_connection *conn, u8 rx_key_ph
 		 */
 		err = tquic_key_update_rx(conn);
 		if (err) {
-			pr_err("TQUIC: RX key update failed in confirmation phase (err=%d)\n",
-			       err);
+			tquic_conn_err(conn, "RX key update failed in confirmation phase (err=%d)\n",
+				       err);
 			/*
 			 * This is a critical failure. TX keys are already updated
 			 * but RX keys failed. Per RFC 9001, this makes the
@@ -422,12 +453,18 @@ int tquic_crypto_on_key_phase_change(struct tquic_connection *conn, u8 rx_key_ph
 		ctx->rx_key_phase = rx_key_phase;
 		ctx->key_update_pending = 0;
 
+		/*
+		 * Peer confirmed our key update -- cancel the timeout
+		 * timer that would otherwise revert the update.
+		 */
+		tquic_timer_cancel(conn, TQUIC_TIMER_KEY_UPDATE);
+
 		/* Start timer to discard old RX keys (RFC 9001 Section 6.1) */
 		discard_time = ktime_add_ms(ktime_get(), TQUIC_KEY_DISCARD_TIMEOUT_MS);
 		tquic_timer_set(conn, TQUIC_TIMER_KEY_DISCARD, discard_time);
 
-		pr_debug("TQUIC: key update confirmed by peer, phase=%u\n",
-			 rx_key_phase);
+		tquic_conn_info(conn, "key update confirmed by peer, phase=%u\n",
+				rx_key_phase);
 		return 0;
 	}
 
@@ -458,7 +495,7 @@ int tquic_crypto_on_key_phase_change(struct tquic_connection *conn, u8 rx_key_ph
 		 */
 		err = tquic_key_update_rx(conn);
 		if (err) {
-			pr_warn("TQUIC: RX key update failed, err=%d\n", err);
+			tquic_conn_warn(conn, "RX key update failed, err=%d\n", err);
 			return err;
 		}
 
@@ -476,8 +513,8 @@ int tquic_crypto_on_key_phase_change(struct tquic_connection *conn, u8 rx_key_ph
 			 * Per RFC 9001 Section 6.2, asymmetric key state causes
 			 * decryption failures and connection breakage.
 			 */
-			pr_warn("TQUIC: TX key update failed after RX update, rolling back (err=%d)\n",
-				err);
+			tquic_conn_warn(conn, "TX key update failed after RX update, rolling back (err=%d)\n",
+					err);
 
 			/* Rollback: restore saved RX state */
 			memcpy(&ctx->rx, &saved_rx, sizeof(ctx->rx));
@@ -503,8 +540,8 @@ int tquic_crypto_on_key_phase_change(struct tquic_connection *conn, u8 rx_key_ph
 				 * inconsistent state. Per RFC 9001, this is a
 				 * fatal error requiring connection termination.
 				 */
-				pr_err("TQUIC: RX key rollback failed, connection unusable (err=%d)\n",
-				       err);
+				tquic_conn_err(conn, "RX key rollback failed, connection unusable (err=%d)\n",
+					       err);
 				/* Return KEY_UPDATE_ERROR code */
 				return -EKEYREJECTED;
 			}
@@ -523,8 +560,8 @@ int tquic_crypto_on_key_phase_change(struct tquic_connection *conn, u8 rx_key_ph
 		discard_time = ktime_add_ms(ktime_get(), TQUIC_KEY_DISCARD_TIMEOUT_MS);
 		tquic_timer_set(conn, TQUIC_TIMER_KEY_DISCARD, discard_time);
 
-		pr_debug("TQUIC: responded to peer key update, new phase=%u\n",
-			 rx_key_phase);
+		tquic_conn_info(conn, "responded to peer key update, new phase=%u\n",
+				rx_key_phase);
 		return 0;
 	}
 
@@ -557,9 +594,164 @@ void tquic_crypto_discard_old_keys(struct tquic_connection *conn)
 	ctx->rx_prev_valid = 0;
 	memzero_explicit(&ctx->rx_prev, sizeof(ctx->rx_prev));
 
-	pr_debug("TQUIC: discarded old keys\n");
+	tquic_conn_dbg(conn, "discarded old keys\n");
 }
 EXPORT_SYMBOL_GPL(tquic_crypto_discard_old_keys);
+
+/*
+ * tquic_crypto_revert_key_update - Revert a timed-out key update
+ * @conn: TQUIC connection
+ *
+ * Called by the TQUIC_TIMER_KEY_UPDATE timer when the peer has not
+ * responded with the new key phase within 3 * PTO.  This prevents
+ * the connection from being permanently stuck in the key_update_pending
+ * state.
+ *
+ * The revert process:
+ * 1. Toggle key_phase back to the pre-update value
+ * 2. Restore TX keys from the old read keys (which were saved as a
+ *    snapshot of the pre-update generation when we initiated)
+ * 3. Clear the key_update_pending flag
+ *
+ * After revert, the endpoint can attempt a fresh key update later
+ * if desired, or close the connection if the peer is unresponsive.
+ *
+ * NOTE: This is a recovery mechanism.  If the peer is truly
+ * unreachable, the idle or loss timers will eventually close the
+ * connection.  The purpose here is solely to unblock the key update
+ * state machine so it does not prevent further key updates.
+ */
+void tquic_crypto_revert_key_update(struct tquic_connection *conn)
+{
+	struct tquic_crypto_ctx *ctx;
+	int err;
+
+	if (!conn)
+		return;
+
+	ctx = (struct tquic_crypto_ctx *)conn->crypto[TQUIC_CRYPTO_APPLICATION];
+	if (!ctx)
+		return;
+
+	if (!ctx->key_update_pending) {
+		/* Update was confirmed before the timer fired -- nothing to do */
+		return;
+	}
+
+	tquic_conn_warn(conn,
+			"key update timed out (peer did not respond), reverting phase=%u\n",
+			ctx->key_phase);
+
+	/*
+	 * Revert the TX key phase to the value before we initiated.
+	 * Since initiation toggled the phase, toggling again restores it.
+	 */
+	ctx->key_phase = !ctx->key_phase;
+
+	/*
+	 * Restore TX keys from the current RX secret.
+	 *
+	 * When we initiated the key update in tquic_crypto_initiate_key_update(),
+	 * the old TX secret was already overwritten by tquic_key_update_tx().
+	 * However, the RX keys have not been updated yet (that happens only
+	 * when the peer confirms), so the current RX secret still corresponds
+	 * to the pre-update generation.  We can re-derive TX keys from the
+	 * current RX secret because at this point both directions should use
+	 * the same generation of secrets.
+	 */
+	memcpy(ctx->tx.secret, ctx->rx.secret, ctx->rx.secret_len);
+	ctx->tx.secret_len = ctx->rx.secret_len;
+
+	/*
+	 * Validate cipher type before attempting key derivation.
+	 */
+	switch (ctx->cipher_type) {
+	case TQUIC_CIPHER_AES_128_GCM_SHA256:
+	case TQUIC_CIPHER_AES_256_GCM_SHA384:
+	case TQUIC_CIPHER_CHACHA20_POLY1305_SHA256:
+		break;
+	default:
+		tquic_conn_err(conn,
+			       "key update revert: unknown cipher type 0x%x\n",
+			       ctx->cipher_type);
+		ctx->key_update_pending = 0;
+		return;
+	}
+
+	/*
+	 * Re-derive TX key and IV from the restored secret using the same
+	 * HKDF-Expand-Label derivation used during initial key install.
+	 */
+	{
+		struct hkdf_ctx hkdf = {
+			.hash = ctx->hash,
+			.hash_len = ctx->tx.secret_len,
+		};
+
+		err = tquic_hkdf_expand_label(&hkdf, ctx->tx.secret,
+					       tquic_key_label,
+					       strlen(tquic_key_label),
+					       NULL, 0,
+					       ctx->tx.key, ctx->tx.key_len);
+		if (err) {
+			tquic_conn_err(conn,
+				       "key update revert: TX key derive failed (err=%d)\n",
+				       err);
+			ctx->key_update_pending = 0;
+			return;
+		}
+
+		err = tquic_hkdf_expand_label(&hkdf, ctx->tx.secret,
+					       tquic_iv_label,
+					       strlen(tquic_iv_label),
+					       NULL, 0,
+					       ctx->tx.iv, ctx->tx.iv_len);
+		if (err) {
+			tquic_conn_err(conn,
+				       "key update revert: TX IV derive failed (err=%d)\n",
+				       err);
+			ctx->key_update_pending = 0;
+			return;
+		}
+	}
+
+	/* Install the restored key on the TX AEAD transform */
+	err = crypto_aead_setkey(ctx->tx_aead, ctx->tx.key, ctx->tx.key_len);
+	if (err) {
+		tquic_conn_err(conn,
+			       "key update revert: TX AEAD setkey failed (err=%d)\n",
+			       err);
+		/*
+		 * The TX AEAD is now in an indeterminate state.
+		 * The connection is likely unusable; fall through
+		 * and clear the pending flag so cleanup can proceed.
+		 */
+	}
+
+	/* Clear the pending flag so future key updates can proceed */
+	ctx->key_update_pending = 0;
+
+	/*
+	 * Discard old (pre-update) read keys if they were saved --
+	 * they are no longer meaningful since we reverted.
+	 */
+	if (ctx->rx_prev_valid) {
+		if (ctx->rx_aead_prev) {
+			crypto_free_aead(ctx->rx_aead_prev);
+			ctx->rx_aead_prev = NULL;
+		}
+		ctx->rx_prev_valid = 0;
+		memzero_explicit(&ctx->rx_prev, sizeof(ctx->rx_prev));
+	}
+
+	/* Cancel the key discard timer if it was armed */
+	tquic_timer_cancel(conn, TQUIC_TIMER_KEY_DISCARD);
+
+	tquic_conn_info(conn,
+			"key update reverted, restored phase=%u\n",
+			ctx->key_phase);
+}
+EXPORT_SYMBOL_GPL(tquic_crypto_revert_key_update);
 
 /*
  * Compute nonce for AEAD encryption/decryption

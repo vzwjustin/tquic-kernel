@@ -31,6 +31,7 @@
 #include <linux/uaccess.h>
 #include <crypto/public_key.h>
 #include <crypto/hash.h>
+#include <crypto/utils.h>
 #include <crypto/sig.h>
 #include <keys/asymmetric-type.h>
 #include <keys/system_keyring.h>
@@ -38,6 +39,7 @@
 
 #include "cert_verify.h"
 #include "../tquic_compat.h"
+#include "../tquic_debug.h"
 
 /*
  * TLS alert code definitions (for handshake integration)
@@ -76,6 +78,8 @@ static const u8 oid_authority_key_id[] = { 0x55, 0x1d, 0x23 };
 static const u8 oid_subject_key_id[] = { 0x55, 0x1d, 0x0e };
 static const u8 oid_crl_distribution_points[] = { 0x55, 0x1d, 0x1f };
 static const u8 oid_authority_info_access[] = { 0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x01, 0x01 };
+/* Name Constraints OID: 2.5.29.30 */
+static const u8 oid_name_constraints[] = { 0x55, 0x1d, 0x1e };
 
 /* Common Name OID: 2.5.4.3 */
 static const u8 oid_common_name[] = { 0x55, 0x04, 0x03 };
@@ -639,6 +643,385 @@ static int parse_basic_constraints(const u8 *data, u32 len,
 }
 
 /*
+ * Parse a GeneralSubtrees sequence into name_constraint array entries.
+ * Each GeneralSubtree is SEQUENCE { GeneralName, minimum, maximum }.
+ * We only extract dNSName [2] and rfc822Name [1] types.
+ */
+static int parse_general_subtrees(const u8 *data, u32 len,
+				  struct tquic_name_constraint *out,
+				  u32 max_entries, u32 *nr_entries,
+				  bool *has_unsupported)
+{
+	const u8 *p = data;
+	const u8 *end = data + len;
+	u32 count = 0;
+
+	while (p < end && count < max_entries) {
+		u32 subtree_content, subtree_total;
+		u32 name_content, name_hdr;
+		u8 tag;
+		int ret;
+
+		/* Each GeneralSubtree is a SEQUENCE */
+		ret = asn1_get_tag_length(p, end - p, ASN1_SEQUENCE,
+					  &subtree_content, &subtree_total);
+		if (ret < 0)
+			break;
+
+		const u8 *st = p + (subtree_total - subtree_content);
+		u32 st_len = subtree_content;
+
+		if (st_len < 2) {
+			p += subtree_total;
+			continue;
+		}
+
+		/* First element is GeneralName (context-tagged) */
+		tag = st[0];
+
+		ret = asn1_get_length(st + 1, st_len - 1,
+				      &name_content, &name_hdr);
+		if (ret < 0) {
+			p += subtree_total;
+			continue;
+		}
+
+		/*
+		 * dNSName [2] IMPLICIT IA5String
+		 * rfc822Name [1] IMPLICIT IA5String
+		 */
+		if ((tag & 0xc0) == 0x80) {
+			u8 name_type = tag & 0x1f;
+
+			if (name_type == TQUIC_NC_TYPE_DNS ||
+			    name_type == TQUIC_NC_TYPE_EMAIL) {
+				const u8 *name_data = st + 1 + name_hdr;
+				char *name;
+
+				if (name_content > 255) {
+					p += subtree_total;
+					continue;
+				}
+
+				name = kmalloc(name_content + 1, GFP_KERNEL);
+				if (!name)
+					return -ENOMEM;
+
+				memcpy(name, name_data, name_content);
+				name[name_content] = '\0';
+
+				out[count].type = name_type;
+				out[count].name = name;
+				out[count].name_len = name_content;
+				count++;
+			} else {
+				/*
+				 * Unsupported GeneralName type (e.g.
+				 * directoryName, iPAddress, uniformResourceIdentifier).
+				 */
+				*has_unsupported = true;
+			}
+		} else {
+			*has_unsupported = true;
+		}
+
+		p += subtree_total;
+	}
+
+	*nr_entries = count;
+	return 0;
+}
+
+/*
+ * Parse nameConstraints extension value (RFC 5280 Section 4.2.1.10)
+ *
+ * NameConstraints ::= SEQUENCE {
+ *   permittedSubtrees  [0] GeneralSubtrees OPTIONAL,
+ *   excludedSubtrees   [1] GeneralSubtrees OPTIONAL
+ * }
+ */
+static int parse_name_constraints(const u8 *data, u32 len,
+				  bool critical,
+				  struct tquic_name_constraints **out)
+{
+	struct tquic_name_constraints *nc;
+	const u8 *p;
+	const u8 *end;
+	u32 seq_content, seq_total;
+	int ret;
+
+	ret = asn1_get_tag_length(data, len, ASN1_SEQUENCE,
+				  &seq_content, &seq_total);
+	if (ret < 0)
+		return ret;
+
+	nc = kzalloc(sizeof(*nc), GFP_KERNEL);
+	if (!nc)
+		return -ENOMEM;
+
+	nc->critical = critical;
+
+	p = data + (seq_total - seq_content);
+	end = p + seq_content;
+
+	while (p < end) {
+		u8 tag = p[0];
+		u32 content_len, hdr_len;
+
+		if (p + 2 > end)
+			break;
+
+		ret = asn1_get_length(p + 1, end - p - 1,
+				      &content_len, &hdr_len);
+		if (ret < 0)
+			break;
+
+		/* permittedSubtrees [0] IMPLICIT GeneralSubtrees */
+		if (tag == 0xa0) {
+			ret = parse_general_subtrees(
+				p + 1 + hdr_len, content_len,
+				nc->permitted,
+				TQUIC_MAX_NAME_CONSTRAINTS,
+				&nc->nr_permitted,
+				&nc->has_unsupported_type);
+			if (ret < 0)
+				goto err_free;
+		}
+		/* excludedSubtrees [1] IMPLICIT GeneralSubtrees */
+		else if (tag == 0xa1) {
+			ret = parse_general_subtrees(
+				p + 1 + hdr_len, content_len,
+				nc->excluded,
+				TQUIC_MAX_NAME_CONSTRAINTS,
+				&nc->nr_excluded,
+				&nc->has_unsupported_type);
+			if (ret < 0)
+				goto err_free;
+		}
+
+		p += 1 + hdr_len + content_len;
+	}
+
+	*out = nc;
+	return 0;
+
+err_free:
+	{
+		u32 i;
+
+		for (i = 0; i < nc->nr_permitted; i++)
+			kfree(nc->permitted[i].name);
+		for (i = 0; i < nc->nr_excluded; i++)
+			kfree(nc->excluded[i].name);
+	}
+	kfree(nc);
+	return ret;
+}
+
+/*
+ * Free a name_constraints structure
+ */
+static void free_name_constraints(struct tquic_name_constraints *nc)
+{
+	u32 i;
+
+	if (!nc)
+		return;
+
+	for (i = 0; i < nc->nr_permitted; i++)
+		kfree(nc->permitted[i].name);
+	for (i = 0; i < nc->nr_excluded; i++)
+		kfree(nc->excluded[i].name);
+	kfree(nc);
+}
+
+/*
+ * Check whether @name is within the subtree defined by @constraint.
+ *
+ * For DNS names (RFC 5280 Section 4.2.1.10):
+ *   - An empty constraint matches everything.
+ *   - A constraint starting with "." matches any name that ends with
+ *     that suffix (e.g. ".example.com" matches "foo.example.com").
+ *   - Otherwise, the name must exactly equal the constraint or end
+ *     with "." + constraint.
+ *
+ * For email/rfc822Name:
+ *   - If constraint contains "@", full address match.
+ *   - If constraint starts with ".", domain suffix match on the
+ *     domain part of the address.
+ *   - Otherwise the domain part must exactly match.
+ */
+static bool name_in_subtree(const char *name, u32 name_len,
+			    const struct tquic_name_constraint *constraint)
+{
+	const char *cname = constraint->name;
+	u32 clen = constraint->name_len;
+
+	if (clen == 0)
+		return true;
+
+	if (constraint->type == TQUIC_NC_TYPE_DNS) {
+		/* Leading dot: suffix match */
+		if (cname[0] == '.') {
+			if (name_len > clen &&
+			    strncasecmp(name + name_len - clen,
+					cname, clen) == 0)
+				return true;
+			/* Also match if name equals constraint without dot */
+			if (name_len == clen - 1 &&
+			    strncasecmp(name, cname + 1, clen - 1) == 0)
+				return true;
+			return false;
+		}
+		/* Exact or parent-domain match */
+		if (name_len == clen &&
+		    strncasecmp(name, cname, clen) == 0)
+			return true;
+		if (name_len > clen + 1 &&
+		    name[name_len - clen - 1] == '.' &&
+		    strncasecmp(name + name_len - clen, cname, clen) == 0)
+			return true;
+		return false;
+	}
+
+	if (constraint->type == TQUIC_NC_TYPE_EMAIL) {
+		const char *at;
+
+		/* Constraint with "@": full address match */
+		if (memchr(cname, '@', clen)) {
+			return name_len == clen &&
+			       strncasecmp(name, cname, clen) == 0;
+		}
+
+		/* Find "@" in the name to isolate domain */
+		at = memchr(name, '@', name_len);
+		if (!at)
+			return false;
+
+		{
+			u32 domain_off = (u32)(at - name) + 1;
+			const char *domain = name + domain_off;
+			u32 domain_len = name_len - domain_off;
+
+			if (cname[0] == '.') {
+				/* Domain suffix match */
+				if (domain_len > clen &&
+				    strncasecmp(domain + domain_len - clen,
+						cname, clen) == 0)
+					return true;
+				if (domain_len == clen - 1 &&
+				    strncasecmp(domain,
+						cname + 1, clen - 1) == 0)
+					return true;
+				return false;
+			}
+			/* Exact domain match */
+			return domain_len == clen &&
+			       strncasecmp(domain, cname, clen) == 0;
+		}
+	}
+
+	return false;
+}
+
+/*
+ * Check a single name against name constraints.
+ * Returns 0 if the name passes, -EKEYREJECTED if it violates constraints.
+ */
+static int check_name_against_constraints(
+	const char *name, u32 name_len, u8 name_type,
+	const struct tquic_name_constraints *nc)
+{
+	u32 i;
+	bool found_type_in_permitted = false;
+
+	/* Check excluded subtrees first -- any match is a rejection */
+	for (i = 0; i < nc->nr_excluded; i++) {
+		if (nc->excluded[i].type != name_type)
+			continue;
+		if (name_in_subtree(name, name_len, &nc->excluded[i])) {
+			pr_debug("tquic_cert: name '%.*s' in excluded subtree '%s'\n",
+				 name_len, name, nc->excluded[i].name);
+			return -EKEYREJECTED;
+		}
+	}
+
+	/*
+	 * Check permitted subtrees.  Per RFC 5280 Section 4.2.1.10:
+	 * if permittedSubtrees contains entries for this name type,
+	 * the name MUST fall within at least one of them.
+	 */
+	for (i = 0; i < nc->nr_permitted; i++) {
+		if (nc->permitted[i].type != name_type)
+			continue;
+		found_type_in_permitted = true;
+		if (name_in_subtree(name, name_len, &nc->permitted[i]))
+			return 0;
+	}
+
+	if (found_type_in_permitted) {
+		pr_debug("tquic_cert: name '%.*s' not in any permitted subtree\n",
+			 name_len, name);
+		return -EKEYREJECTED;
+	}
+
+	/* No permitted entries for this type -- name is unconstrained */
+	return 0;
+}
+
+/*
+ * Validate a subject certificate against a CA's name constraints.
+ * Checks the subject's CN (as a DNS name) and all SAN entries.
+ *
+ * Returns 0 on success, -EKEYREJECTED on constraint violation.
+ */
+static int check_name_constraints(const struct tquic_x509_cert *subject,
+				  const struct tquic_name_constraints *nc)
+{
+	int ret;
+	u32 i;
+
+	if (!nc)
+		return 0;
+
+	/*
+	 * If the extension is critical and contains a constraint type
+	 * we cannot process, we must reject (RFC 5280 Section 4.2).
+	 */
+	if (nc->critical && nc->has_unsupported_type) {
+		pr_debug("tquic_cert: critical nameConstraints has unsupported type\n");
+		return -EKEYREJECTED;
+	}
+
+	/* Check SAN DNS names */
+	for (i = 0; i < subject->san_dns_count; i++) {
+		ret = check_name_against_constraints(
+			subject->san_dns[i],
+			strlen(subject->san_dns[i]),
+			TQUIC_NC_TYPE_DNS, nc);
+		if (ret < 0)
+			return ret;
+	}
+
+	/*
+	 * If no SAN DNS names, fall back to checking CN as a DNS name.
+	 * Per RFC 6125 the CN should only be checked when no SAN is
+	 * present, and the same applies to name constraints per
+	 * RFC 5280 Section 4.2.1.10 guidance.
+	 */
+	if (subject->san_dns_count == 0 && subject->subject &&
+	    subject->subject_len > 0) {
+		ret = check_name_against_constraints(
+			subject->subject, subject->subject_len,
+			TQUIC_NC_TYPE_DNS, nc);
+		if (ret < 0)
+			return ret;
+	}
+
+	return 0;
+}
+
+/*
  * Parse X.509 certificate extensions
  */
 static int parse_extensions(struct tquic_x509_cert *cert,
@@ -655,7 +1038,7 @@ static int parse_extensions(struct tquic_x509_cert *cert,
 		u32 oid_content_len, oid_total_len;
 		const u8 *ext_data;
 		int ret;
-		bool critical __maybe_unused = false;
+		bool critical = false;
 
 		/* Each Extension is a SEQUENCE */
 		ret = asn1_get_tag_length(p, end - p, ASN1_SEQUENCE,
@@ -761,6 +1144,16 @@ static int parse_extensions(struct tquic_x509_cert *cert,
 							cert->skid_len = skid_content;
 						}
 					}
+				}
+
+				/* Name Constraints */
+				if (oid_content_len == sizeof(oid_name_constraints) &&
+				    memcmp(oid, oid_name_constraints,
+					   sizeof(oid_name_constraints)) == 0) {
+					parse_name_constraints(
+						val, val_content_len,
+						critical,
+						&cert->name_constraints);
 				}
 
 				/* Authority Key Identifier */
@@ -1223,7 +1616,7 @@ struct tquic_x509_cert *tquic_x509_cert_parse(const u8 *data, u32 len, gfp_t gfp
 	/* Check if self-signed */
 	if (cert->issuer_raw && cert->subject_raw &&
 	    cert->issuer_raw_len == cert->subject_raw_len &&
-	    memcmp(cert->issuer_raw, cert->subject_raw, cert->issuer_raw_len) == 0) {
+	    !crypto_memneq(cert->issuer_raw, cert->subject_raw, cert->issuer_raw_len)) {
 		cert->self_signed = true;
 	}
 
@@ -1249,6 +1642,7 @@ void tquic_x509_cert_free(struct tquic_x509_cert *cert)
 	kfree(cert->akid);
 	kfree(cert->skid);
 	kfree(cert->ocsp_url);
+	free_name_constraints(cert->name_constraints);
 
 	if (cert->san_dns) {
 		for (i = 0; i < cert->san_dns_count; i++)
@@ -1529,8 +1923,8 @@ int tquic_x509_verify_signature(const struct tquic_x509_cert *cert,
 	/* Verify issuer's subject matches cert's issuer */
 	if (cert->issuer_raw && issuer->subject_raw) {
 		if (cert->issuer_raw_len != issuer->subject_raw_len ||
-		    memcmp(cert->issuer_raw, issuer->subject_raw,
-			   cert->issuer_raw_len) != 0) {
+		    crypto_memneq(cert->issuer_raw, issuer->subject_raw,
+				  cert->issuer_raw_len)) {
 			pr_debug("tquic_cert: Issuer DN mismatch\n");
 			return -EKEYREJECTED;
 		}
@@ -1859,6 +2253,31 @@ static int verify_chain(struct tquic_cert_verify_ctx *ctx, bool is_server)
 				ctx->error_msg = "Path length constraint violated";
 				return -EKEYREJECTED;
 			}
+
+			/*
+			 * Name constraints (RFC 5280 Section 4.2.1.10):
+			 * If this CA has nameConstraints, verify all
+			 * subordinate certificates in the chain comply.
+			 * Walk from the leaf (ctx->chain) up to but not
+			 * including the current CA certificate.
+			 */
+			if (cert->name_constraints) {
+				struct tquic_x509_cert *sub;
+
+				for (sub = ctx->chain; sub && sub != cert;
+				     sub = sub->next) {
+					ret = check_name_constraints(
+						sub,
+						cert->name_constraints);
+					if (ret < 0) {
+						ctx->error_code =
+							TQUIC_CERT_ERR_NAME_CONSTRAINTS;
+						ctx->error_msg =
+							"Name constraints violated";
+						return -EKEYREJECTED;
+					}
+				}
+			}
 		}
 
 		/* Check revocation status */
@@ -2133,6 +2552,7 @@ int tquic_hs_verify_server_cert(struct tquic_handshake *hs,
 		case TQUIC_CERT_ERR_HOSTNAME:
 		case TQUIC_CERT_ERR_KEY_USAGE:
 		case TQUIC_CERT_ERR_CONSTRAINT:
+		case TQUIC_CERT_ERR_NAME_CONSTRAINTS:
 		case TQUIC_CERT_ERR_WEAK_KEY:
 			alert = TLS_ALERT_BAD_CERTIFICATE;
 			break;

@@ -25,6 +25,7 @@
 #include <net/tquic.h>
 
 #include "deadline_aware.h"
+#include "../tquic_debug.h"
 
 /* Forward declarations for exported functions not in a public header */
 struct tquic_edf_scheduler;
@@ -917,7 +918,7 @@ static int __init tquic_edf_scheduler_init(void)
 	/* Register as pluggable scheduler */
 	tquic_register_scheduler(&tquic_sched_edf);
 
-	pr_info("tquic: EDF (Earliest Deadline First) scheduler initialized\n");
+	tquic_info("EDF (Earliest Deadline First) scheduler initialized\n");
 	return 0;
 }
 
@@ -931,7 +932,7 @@ static void __exit tquic_edf_scheduler_exit(void)
 	if (edf_entry_cache)
 		kmem_cache_destroy(edf_entry_cache);
 
-	pr_info("tquic: EDF scheduler cleaned up\n");
+	tquic_info("EDF scheduler cleaned up\n");
 }
 
 MODULE_DESCRIPTION("TQUIC EDF (Earliest Deadline First) Scheduler");

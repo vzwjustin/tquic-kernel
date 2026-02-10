@@ -26,6 +26,7 @@
 #include "security_hardening.h"
 #include "protocol.h"
 #include "tquic_mib.h"
+#include "tquic_debug.h"
 
 /*
  * =============================================================================
@@ -97,14 +98,14 @@ int tquic_pre_hs_init(void)
 
 	ret = rhashtable_init(&pre_hs_state.ip_table, &pre_hs_ip_params);
 	if (ret) {
-		pr_err("tquic: failed to init pre-handshake IP table: %d\n", ret);
+		tquic_err("failed to init pre-handshake IP table: %d\n", ret);
 		return ret;
 	}
 
 	pre_hs_initialized = true;
-	pr_info("tquic: QUIC-LEAK defense initialized (limit=%llu MB, per-IP=%llu KB)\n",
-		pre_hs_state.memory_limit / (1024 * 1024),
-		pre_hs_state.per_ip_budget / 1024);
+	tquic_info("QUIC-LEAK defense initialized (limit=%llu MB, per-IP=%llu KB)\n",
+		   pre_hs_state.memory_limit / (1024 * 1024),
+		   pre_hs_state.per_ip_budget / 1024);
 
 	return 0;
 }
@@ -119,17 +120,23 @@ void tquic_pre_hs_exit(void)
 
 	rhashtable_destroy(&pre_hs_state.ip_table);
 	pre_hs_initialized = false;
-	pr_info("tquic: QUIC-LEAK defense shutdown\n");
+	tquic_info("QUIC-LEAK defense shutdown\n");
 }
 
-/* Find or create per-IP entry */
+/*
+ * Find or create per-IP entry.
+ *
+ * Note: The returned entry is safe to use because entries are never removed
+ * while pre_hs_initialized is true (only tquic_pre_hs_exit destroys the
+ * table). Callers access entry fields via atomics only.
+ */
 static struct tquic_pre_hs_ip_entry *
 find_or_create_ip_entry(const struct sockaddr_storage *addr, bool create)
 {
 	struct tquic_pre_hs_ip_entry *entry;
 	u32 hash = compute_ip_hash(addr);
 
-	/* Try to find existing entry */
+	/* Try to find existing entry under RCU protection */
 	rcu_read_lock();
 	entry = rhashtable_lookup_fast(&pre_hs_state.ip_table, &hash,
 				       pre_hs_ip_params);
@@ -191,7 +198,7 @@ bool tquic_pre_hs_can_allocate(const struct sockaddr_storage *addr, size_t size)
 	/* Check global limit */
 	total = atomic64_read(&pre_hs_state.total_memory);
 	if (total + size > pre_hs_state.memory_limit) {
-		pr_debug("tquic: pre-handshake global memory limit exceeded "
+		tquic_dbg("pre-handshake global memory limit exceeded "
 			 "(total=%llu, limit=%llu)\n",
 			 total, pre_hs_state.memory_limit);
 		return false;
@@ -202,7 +209,7 @@ bool tquic_pre_hs_can_allocate(const struct sockaddr_storage *addr, size_t size)
 	if (entry) {
 		per_ip = atomic64_read(&entry->memory_used);
 		if (per_ip + size > pre_hs_state.per_ip_budget) {
-			pr_debug("tquic: pre-handshake per-IP limit exceeded "
+			tquic_dbg("pre-handshake per-IP limit exceeded "
 				 "(used=%llu, budget=%llu)\n",
 				 per_ip, pre_hs_state.per_ip_budget);
 			tquic_security_event(TQUIC_SEC_EVENT_PRE_HS_LIMIT,
@@ -212,7 +219,7 @@ bool tquic_pre_hs_can_allocate(const struct sockaddr_storage *addr, size_t size)
 
 		/* Check connection count per IP */
 		if (atomic_read(&entry->conn_count) >= TQUIC_PRE_HS_MAX_CONNS_PER_IP) {
-			pr_debug("tquic: pre-handshake connection limit per IP\n");
+			tquic_dbg("pre-handshake connection limit per IP\n");
 			tquic_security_event(TQUIC_SEC_EVENT_PRE_HS_LIMIT,
 					     addr, "per-IP connection limit");
 			return false;
@@ -242,7 +249,7 @@ int tquic_pre_hs_alloc(const struct sockaddr_storage *addr, size_t size)
 	new_total = atomic64_add_return(size, &pre_hs_state.total_memory);
 	if (new_total > pre_hs_state.memory_limit) {
 		atomic64_sub(size, &pre_hs_state.total_memory);
-		pr_debug("tquic: pre-handshake global memory limit exceeded "
+		tquic_dbg("pre-handshake global memory limit exceeded "
 			 "(total=%llu, limit=%llu)\n",
 			 new_total, pre_hs_state.memory_limit);
 		return -ENOMEM;
@@ -255,7 +262,7 @@ int tquic_pre_hs_alloc(const struct sockaddr_storage *addr, size_t size)
 		if (new_per_ip > pre_hs_state.per_ip_budget) {
 			atomic64_sub(size, &entry->memory_used);
 			atomic64_sub(size, &pre_hs_state.total_memory);
-			pr_debug("tquic: pre-handshake per-IP limit exceeded "
+			tquic_dbg("pre-handshake per-IP limit exceeded "
 				 "(used=%llu, budget=%llu)\n",
 				 new_per_ip, pre_hs_state.per_ip_budget);
 			tquic_security_event(TQUIC_SEC_EVENT_PRE_HS_LIMIT,
@@ -267,7 +274,7 @@ int tquic_pre_hs_alloc(const struct sockaddr_storage *addr, size_t size)
 		if (atomic_read(&entry->conn_count) >= TQUIC_PRE_HS_MAX_CONNS_PER_IP) {
 			atomic64_sub(size, &entry->memory_used);
 			atomic64_sub(size, &pre_hs_state.total_memory);
-			pr_debug("tquic: pre-handshake connection limit per IP\n");
+			tquic_dbg("pre-handshake connection limit per IP\n");
 			tquic_security_event(TQUIC_SEC_EVENT_PRE_HS_LIMIT,
 					     addr, "per-IP connection limit");
 			return -ENOMEM;
@@ -323,7 +330,7 @@ void tquic_pre_hs_connection_complete(const struct sockaddr_storage *addr)
 		atomic64_sub(memory_used, &pre_hs_state.total_memory);
 		atomic_dec(&entry->conn_count);
 
-		pr_debug("tquic: handshake complete, released %llu bytes from pre-hs accounting\n",
+		tquic_dbg("handshake complete, released %llu bytes from pre-hs accounting\n",
 			 memory_used);
 	}
 }
@@ -387,7 +394,7 @@ int tquic_cid_security_check_new_cid(struct tquic_cid_security *sec)
 	elapsed_ms = ktime_ms_delta(now, sec->last_new_cid_time);
 	if (elapsed_ms < TQUIC_NEW_CID_MIN_INTERVAL_MS) {
 		spin_unlock_bh(&sec->lock);
-		pr_debug("tquic: NEW_CONNECTION_ID rate limited (interval=%lldms)\n",
+		tquic_dbg("NEW_CONNECTION_ID rate limited (interval=%lldms)\n",
 			 elapsed_ms);
 		return -EBUSY;
 	}
@@ -402,9 +409,9 @@ int tquic_cid_security_check_new_cid(struct tquic_cid_security *sec)
 
 	if (sec->new_cid_count >= TQUIC_NEW_CID_RATE_LIMIT) {
 		spin_unlock_bh(&sec->lock);
-		pr_warn("tquic: NEW_CONNECTION_ID rate limit exceeded "
-			"(count=%u, limit=%u)\n",
-			sec->new_cid_count, TQUIC_NEW_CID_RATE_LIMIT);
+		tquic_warn("NEW_CONNECTION_ID rate limit exceeded "
+			   "(count=%u, limit=%u)\n",
+			   sec->new_cid_count, TQUIC_NEW_CID_RATE_LIMIT);
 		return -EBUSY;
 	}
 
@@ -432,9 +439,9 @@ int tquic_cid_security_queue_retire(struct tquic_cid_security *sec)
 	count = atomic_inc_return(&sec->queued_retire_frames);
 	if (count > TQUIC_MAX_QUEUED_RETIRE_CID) {
 		atomic_dec(&sec->queued_retire_frames);
-		pr_warn("tquic: RETIRE_CONNECTION_ID stuffing attack detected "
-			"(queued=%d, limit=%d)\n",
-			count, TQUIC_MAX_QUEUED_RETIRE_CID);
+		tquic_warn("RETIRE_CONNECTION_ID stuffing attack detected "
+			   "(queued=%d, limit=%d)\n",
+			   count, TQUIC_MAX_QUEUED_RETIRE_CID);
 		return -EPROTO;
 	}
 
@@ -557,7 +564,7 @@ void tquic_pn_record_skip(struct tquic_pn_skip_state *state, u64 pn, u8 pn_space
 
 	spin_unlock_bh(&state->lock);
 
-	pr_debug("tquic: recorded skipped PN %llu in space %u\n", pn, pn_space);
+	tquic_dbg("recorded skipped PN %llu in space %u\n", pn, pn_space);
 }
 
 /**
@@ -590,10 +597,10 @@ bool tquic_pn_check_optimistic_ack(struct tquic_pn_skip_state *state,
 			age_ms = ktime_ms_delta(now, entry->skip_time);
 			if (age_ms < 60000) {  /* 60 second window */
 				spin_unlock_bh(&state->lock);
-				pr_warn("tquic: OPTIMISTIC ACK ATTACK DETECTED! "
-					"Peer ACKed skipped PN %llu in space %u "
-					"(skipped %lld ms ago)\n",
-					acked_pn, pn_space, age_ms);
+				tquic_warn("OPTIMISTIC ACK ATTACK DETECTED! "
+				   "Peer ACKed skipped PN %llu in space %u "
+				   "(skipped %lld ms ago)\n",
+				   acked_pn, pn_space, age_ms);
 				return true;
 			}
 		}
@@ -678,9 +685,9 @@ int tquic_ack_validation_check(struct tquic_ack_validation_state *state,
 	spin_unlock_bh(&state->lock);
 
 	if (largest_acked > largest_sent) {
-		pr_warn("tquic: INVALID ACK DETECTED! "
-			"ACK.largest=%llu > largest_sent=%llu in space %u\n",
-			largest_acked, largest_sent, pn_space);
+		tquic_warn("INVALID ACK DETECTED! "
+			   "ACK.largest=%llu > largest_sent=%llu in space %u\n",
+			   largest_acked, largest_sent, pn_space);
 		return -EPROTO;
 	}
 
@@ -870,7 +877,7 @@ int __init tquic_security_hardening_init(void)
 	if (ret)
 		return ret;
 
-	pr_info("tquic: security hardening initialized\n");
+	tquic_info("security hardening initialized\n");
 	return 0;
 }
 
@@ -880,7 +887,7 @@ int __init tquic_security_hardening_init(void)
 void __exit tquic_security_hardening_exit(void)
 {
 	tquic_pre_hs_exit();
-	pr_info("tquic: security hardening shutdown\n");
+	tquic_info("security hardening shutdown\n");
 }
 
 EXPORT_SYMBOL_GPL(tquic_pre_hs_init);

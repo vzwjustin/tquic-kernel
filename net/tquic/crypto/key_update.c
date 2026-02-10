@@ -25,6 +25,7 @@
 
 #include "key_update.h"
 #include "extended_key_update.h"
+#include "../tquic_debug.h"
 
 /* Key update HKDF label per RFC 9001 Section 6.1 */
 #define TQUIC_HKDF_LABEL_KU		"quic ku"
@@ -39,6 +40,14 @@
 
 /* Minimum time between key updates (prevent rapid cycling) */
 #define TQUIC_KEY_UPDATE_COOLDOWN_MS		1000
+
+/*
+ * Key update timeout: if the peer does not respond with the new key
+ * phase within this many PTOs, revert the key update.  3 * PTO is
+ * consistent with the draining period in RFC 9000 and the persistent
+ * congestion threshold in RFC 9002.
+ */
+#define TQUIC_KEY_UPDATE_TIMEOUT_PTO_MULT	3
 
 /* Cipher suite identifiers */
 #define TLS_AES_128_GCM_SHA256		0x1301
@@ -403,8 +412,24 @@ int tquic_initiate_key_update(struct tquic_connection *conn)
 	/* Update HP context */
 	tquic_hp_set_key_phase(hp_ctx, state->current_phase);
 
-	pr_debug("tquic: initiated key update, new phase=%d, total_updates=%llu\n",
-		 state->current_phase, state->total_key_updates);
+	tquic_info("initiated key update, new phase=%d, total_updates=%llu\n",
+		   state->current_phase, state->total_key_updates);
+
+	/*
+	 * Arm the key update timeout timer.  If the peer does not
+	 * respond with a packet bearing the new key phase within
+	 * 3 * PTO, the timer callback will revert the update so
+	 * the connection does not get permanently stuck.
+	 */
+	if (conn->active_path) {
+		u32 pto_ms = tquic_rtt_pto(&conn->active_path->rtt);
+		ktime_t deadline;
+
+		deadline = ktime_add_ms(ktime_get(),
+					TQUIC_KEY_UPDATE_TIMEOUT_PTO_MULT *
+					pto_ms);
+		tquic_timer_set(conn, TQUIC_TIMER_KEY_UPDATE, deadline);
+	}
 
 out_unlock:
 	spin_unlock_irqrestore(&state->lock, flags);
@@ -467,6 +492,9 @@ int tquic_handle_key_phase_change(struct tquic_connection *conn, u8 received_pha
 		state->update_pending = false;
 		state->peer_update_received = false;
 
+		/* Cancel the key update timeout timer */
+		tquic_timer_cancel(conn, TQUIC_TIMER_KEY_UPDATE);
+
 		/* Pre-compute next generation for future updates */
 		spin_unlock_irqrestore(&state->lock, flags);
 		ret = tquic_ku_derive_next_generation(state,
@@ -474,7 +502,7 @@ int tquic_handle_key_phase_change(struct tquic_connection *conn, u8 received_pha
 						      &state->next_write);
 		spin_lock_irqsave(&state->lock, flags);
 
-		pr_debug("tquic: key update confirmed by peer ACK\n");
+		tquic_info("key update confirmed by peer ACK\n");
 	} else {
 		/*
 		 * Peer initiated the update - we need to:
@@ -526,8 +554,8 @@ int tquic_handle_key_phase_change(struct tquic_connection *conn, u8 received_pha
 		/* Update HP context */
 		tquic_hp_set_key_phase(hp_ctx, state->current_phase);
 
-		pr_debug("tquic: responded to peer key update, new phase=%d\n",
-			 state->current_phase);
+		tquic_info("responded to peer key update, new phase=%d\n",
+			   state->current_phase);
 	}
 
 out_unlock:
@@ -1226,6 +1254,104 @@ int tquic_key_update_get_old_read_keys(struct tquic_key_update_state *state,
 	return 0;
 }
 EXPORT_SYMBOL_GPL(tquic_key_update_get_old_read_keys);
+
+/*
+ * =============================================================================
+ * Key Update Timeout / Revert
+ * =============================================================================
+ */
+
+/**
+ * tquic_key_update_timeout - Handle key update timeout
+ * @conn: TQUIC connection
+ *
+ * Called when the TQUIC_TIMER_KEY_UPDATE timer fires because the peer
+ * has not responded with a packet bearing the new key phase within
+ * 3 * PTO.  Reverts the key update so the connection is not
+ * permanently stuck in the update_pending state.
+ *
+ * The revert restores the previous key phase and write keys so
+ * that the endpoint can continue communicating (or at least
+ * clean up gracefully via idle/loss timeout).
+ */
+void tquic_key_update_timeout(struct tquic_connection *conn)
+{
+	struct tquic_key_update_state *state;
+	struct tquic_hp_ctx *hp_ctx;
+	unsigned long flags;
+
+	if (!conn || !conn->crypto_state)
+		return;
+
+	state = tquic_crypto_get_key_update_state(conn->crypto_state);
+	if (!state)
+		return;
+
+	hp_ctx = tquic_crypto_get_hp_ctx(conn->crypto_state);
+
+	spin_lock_irqsave(&state->lock, flags);
+
+	if (!state->update_pending) {
+		/*
+		 * Confirmed before the timer fired -- nothing to do.
+		 */
+		spin_unlock_irqrestore(&state->lock, flags);
+		return;
+	}
+
+	tquic_info("key update timed out (peer did not respond), reverting phase=%d\n",
+		   state->current_phase);
+
+	/*
+	 * Revert the key phase to the pre-update value.
+	 * Initiation toggled it, so toggle again to restore.
+	 */
+	state->current_phase ^= 1;
+
+	/*
+	 * Restore write keys from old_read.  When we initiated the
+	 * update, old_read was set to a copy of current_read (the
+	 * pre-update generation).  Since RX keys have not been
+	 * rotated yet (that only happens on peer confirmation), the
+	 * old_read snapshot is still valid for the previous gen.
+	 *
+	 * We copy old_read -> current_write to get back to the
+	 * generation that the peer last acknowledged.
+	 */
+	if (state->old_keys_valid && state->old_read.valid) {
+		state->current_write = state->old_read;
+	} else {
+		/*
+		 * Fallback: use current_read which should still be
+		 * the pre-update generation since RX was not rotated.
+		 */
+		if (state->current_read.valid)
+			state->current_write = state->current_read;
+	}
+
+	/* Invalidate pre-computed next-gen keys so they are re-derived */
+	state->next_write.valid = false;
+
+	/* Clear pending state */
+	state->update_pending = false;
+	state->total_key_updates--;  /* Don't count the failed attempt */
+
+	/* Discard old keys -- no longer meaningful after revert */
+	if (state->old_keys_valid) {
+		memzero_explicit(&state->old_read, sizeof(state->old_read));
+		state->old_keys_valid = false;
+	}
+
+	/* Restore HP context to reverted phase */
+	if (hp_ctx)
+		tquic_hp_set_key_phase(hp_ctx, state->current_phase);
+
+	spin_unlock_irqrestore(&state->lock, flags);
+
+	tquic_info("key update reverted, restored phase=%d\n",
+		   state->current_phase);
+}
+EXPORT_SYMBOL_GPL(tquic_key_update_timeout);
 
 MODULE_DESCRIPTION("TQUIC TLS 1.3 Key Update Mechanism");
 MODULE_LICENSE("GPL");

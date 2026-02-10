@@ -23,6 +23,7 @@
 #include <net/net_namespace.h>
 #include <net/tquic.h>
 #include "../tquic_compat.h"
+#include "../tquic_debug.h"
 #include <net/tquic_pm.h>
 
 /* Kernel PM private data per-namespace */

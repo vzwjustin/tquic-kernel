@@ -27,6 +27,7 @@
 #include <linux/random.h>
 #include <net/tquic.h>
 #include "../tquic_compat.h"
+#include "../tquic_debug.h"
 #include "persistent_cong.h"
 
 /* Algorithm selection */
@@ -342,9 +343,26 @@ static u64 lia_calc_alpha(struct coupled_state *state)
 	 *
 	 * Scale for fixed-point arithmetic:
 	 * alpha_scaled = total_cwnd * max_rtt * SCALE^2 / sum_cwnd_rtt^2
+	 *
+	 * Split to avoid u64 overflow from three-term numerator.
+	 * Divide first by denominator, then multiply by remaining.
 	 */
-	alpha = div64_u64(total_cwnd * max_rtt * COUPLED_ALPHA_SCALE,
-			  sum_cwnd_rtt * sum_cwnd_rtt / COUPLED_SCALE);
+	{
+		u64 denominator;
+
+		denominator = sum_cwnd_rtt * sum_cwnd_rtt / COUPLED_SCALE;
+		if (denominator == 0)
+			denominator = 1;
+
+		alpha = div64_u64(total_cwnd * COUPLED_ALPHA_SCALE,
+				  denominator);
+
+		/* Guard against overflow on multiply by max_rtt */
+		if (alpha > 0 && max_rtt > div64_u64(U64_MAX, alpha))
+			alpha = U64_MAX;
+		else
+			alpha = alpha * max_rtt;
+	}
 
 	return alpha;
 }
@@ -388,6 +406,8 @@ static u64 olia_calc_alpha(struct coupled_state *state)
 	u64 total_cwnd;
 	u32 best_rtt;
 	u64 alpha;
+	u64 rtt_sq;
+	u64 denominator;
 
 	total_cwnd = coupled_sum_cwnd(state);
 	sum_cwnd_rtt = coupled_sum_cwnd_rtt(state);
@@ -397,11 +417,28 @@ static u64 olia_calc_alpha(struct coupled_state *state)
 	 * OLIA alpha formula (RFC 6356):
 	 * alpha = cwnd_total * best_rtt^2 / (sum(cwnd_j * rtt_best / rtt_j))^2
 	 *
-	 * This ensures the aggregate is TCP-friendly
+	 * This ensures the aggregate is TCP-friendly.
+	 *
+	 * To avoid u64 overflow from four-term multiplication, split into
+	 * two separate divisions:
+	 *   alpha = (total_cwnd * ALPHA_SCALE / denom) * (best_rtt^2 / 1)
+	 * where denom = sum_cwnd_rtt^2 / COUPLED_SCALE + 1
 	 */
-	alpha = div64_u64(total_cwnd * (u64)best_rtt * best_rtt *
-			  COUPLED_ALPHA_SCALE,
-			  sum_cwnd_rtt * sum_cwnd_rtt / COUPLED_SCALE + 1);
+	denominator = sum_cwnd_rtt * sum_cwnd_rtt / COUPLED_SCALE + 1;
+	rtt_sq = (u64)best_rtt * best_rtt;
+
+	/*
+	 * First compute total_cwnd * ALPHA_SCALE / denominator,
+	 * then multiply by rtt_sq. This avoids the four-way
+	 * multiplication that can overflow u64.
+	 */
+	alpha = div64_u64(total_cwnd * COUPLED_ALPHA_SCALE, denominator);
+
+	/* Guard against overflow on the second multiply */
+	if (alpha > 0 && rtt_sq > div64_u64(U64_MAX, alpha))
+		alpha = U64_MAX;
+	else
+		alpha = alpha * rtt_sq;
 
 	return alpha;
 }
@@ -426,18 +463,37 @@ static u64 olia_calc_increase(struct coupled_state *state,
 	/*
 	 * Main increase term:
 	 * (cwnd_i / rtt_i^2) / max_j(cwnd_j / rtt_j^2) * alpha / cwnd_total
+	 *
+	 * Rewrite to avoid overflow: divide first, then multiply.
+	 * ratio = my_cwnd_rtt2 / max_cwnd_rtt2 (0..1 in fixed-point)
+	 * increase = ratio * alpha / total_cwnd
 	 */
-	increase = div64_u64(my_cwnd_rtt2 * alpha,
-			     max_cwnd_rtt2 * total_cwnd / COUPLED_ALPHA_SCALE + 1);
+	{
+		u64 ratio;
+		u64 denom;
+
+		ratio = div64_u64(my_cwnd_rtt2 * COUPLED_ALPHA_SCALE,
+				  max_cwnd_rtt2);
+		denom = total_cwnd ?: 1;
+		increase = div64_u64(ratio * (alpha / COUPLED_SCALE + 1),
+				     denom);
+	}
 
 	/*
 	 * Epsilon term for opportunistic increase:
 	 * epsilon / cwnd_i
 	 *
-	 * This allows paths with unused capacity to grow faster
+	 * This allows paths with unused capacity to grow faster.
+	 * Guard sf->cwnd * OLIA_EPSILON_DEN against zero denominator.
 	 */
-	epsilon_term = div64_u64(COUPLED_ALPHA_SCALE * OLIA_EPSILON_NUM,
-				 sf->cwnd * OLIA_EPSILON_DEN);
+	{
+		u64 eps_denom = sf->cwnd * OLIA_EPSILON_DEN;
+
+		if (eps_denom == 0)
+			eps_denom = 1;
+		epsilon_term = div64_u64(COUPLED_ALPHA_SCALE * OLIA_EPSILON_NUM,
+					 eps_denom);
+	}
 
 	/* Add epsilon only if this path appears to have unused capacity */
 	if (sf->rtt_us <= state->best_rtt + SBD_RTT_VARIANCE_THRESH)
@@ -596,7 +652,7 @@ static void coupled_update_sbd(struct coupled_state *state)
 	state->sbd.detected = (max_corr > SBD_CORR_THRESH);
 
 	if (state->sbd.detected) {
-		pr_debug("tquic_coupled: shared bottleneck detected "
+		tquic_dbg("coupled: shared bottleneck detected "
 			 "(correlation=%d)\n", max_corr);
 	}
 }
@@ -676,8 +732,9 @@ static void bbr_update_bw(struct coupled_subflow *sf, u64 bytes_acked,
 	if (rtt_us == 0)
 		return;
 
-	/* Calculate delivery rate */
-	bw_sample = bytes_acked * 1000000 / rtt_us;
+	/* Calculate delivery rate, avoiding u64 overflow */
+	bw_sample = div64_u64(bytes_acked * 1000ULL,
+			      rtt_us) * 1000ULL;
 
 	/* Max filter for bandwidth */
 	if (bw_sample > sf->bbr_bw)
@@ -804,7 +861,7 @@ static struct coupled_subflow *coupled_add_subflow(struct coupled_state *state,
 	state->num_subflows++;
 	spin_unlock(&state->lock);
 
-	pr_debug("tquic_coupled: added subflow for path %u (total: %u)\n",
+	tquic_dbg("coupled: added subflow for path %u (total: %u)\n",
 		 path->path_id, state->num_subflows);
 
 	return sf;
@@ -818,7 +875,7 @@ static void coupled_remove_subflow(struct coupled_state *state,
 	state->num_subflows--;
 	spin_unlock(&state->lock);
 
-	pr_debug("tquic_coupled: removed subflow for path %u (total: %u)\n",
+	tquic_dbg("coupled: removed subflow for path %u (total: %u)\n",
 		 sf->path_id, state->num_subflows);
 
 	kfree(sf);
@@ -867,7 +924,7 @@ static void *coupled_init(struct tquic_path *path)
 
 		conn->scheduler = state;
 
-		pr_info("tquic_coupled: initialized for connection (algo: OLIA)\n");
+		tquic_info("coupled: initialized for connection (algo: OLIA)\n");
 	}
 
 	/* Add subflow for this path */
@@ -912,7 +969,7 @@ static void coupled_release(void *cong_data)
 		kfree(state->sbd.corr_matrix);
 		kfree(state);
 		conn->scheduler = NULL;
-		pr_info("tquic_coupled: released for connection\n");
+		tquic_info("coupled: released for connection\n");
 	} else {
 		/* Update alpha without this subflow */
 		coupled_update_alpha(state);
@@ -986,7 +1043,7 @@ static void coupled_on_ack(void *cong_data, u64 bytes_acked, u64 rtt_us)
 		/* Exit slow start if cwnd >= ssthresh */
 		if (sf->cwnd >= sf->ssthresh) {
 			sf->in_slow_start = false;
-			pr_debug("tquic_coupled: path %u exiting slow start "
+			tquic_dbg("coupled: path %u exiting slow start "
 				 "(cwnd=%llu)\n", sf->path_id, sf->cwnd);
 		}
 
@@ -1016,9 +1073,10 @@ static void coupled_on_ack(void *cong_data, u64 bytes_acked, u64 rtt_us)
 	increase = increase * bytes_acked / COUPLED_ALPHA_SCALE;
 
 	/* If CUBIC is enabled, take max of coupled and CUBIC increase */
-	if (state->use_cubic && sf->cubic_cwnd > sf->cwnd) {
+	if (state->use_cubic && sf->cubic_cwnd > sf->cwnd && sf->cwnd > 0) {
 		u64 cubic_inc = sf->cubic_cwnd - sf->cwnd;
-		cubic_inc = cubic_inc * bytes_acked / sf->cwnd;
+
+		cubic_inc = div64_u64(cubic_inc * bytes_acked, sf->cwnd);
 		increase = max(increase, cubic_inc);
 	}
 
@@ -1075,7 +1133,7 @@ static void coupled_on_loss(void *cong_data, u64 bytes_lost)
 	if (sf->path)
 		sf->path->stats.cwnd = (u32)min(sf->cwnd, (u64)UINT_MAX);
 
-	pr_debug("tquic_coupled: loss on path %u, cwnd=%llu ssthresh=%llu\n",
+	tquic_warn("coupled: loss on path %u, cwnd=%llu ssthresh=%llu\n",
 		 sf->path_id, sf->cwnd, sf->ssthresh);
 
 	/* Update global alpha after loss */
@@ -1138,9 +1196,9 @@ static u64 coupled_get_pacing_rate(void *cong_data)
 	if (sf->bbr_pacing_rate > 0)
 		return sf->bbr_pacing_rate;
 
-	/* Estimate based on cwnd and RTT */
+	/* Estimate based on cwnd and RTT, avoid overflow */
 	if (sf->rtt_us > 0)
-		return sf->cwnd * 1000000 / sf->rtt_us;
+		return div64_u64(sf->cwnd * 1000ULL, sf->rtt_us) * 1000ULL;
 
 	return sf->cwnd * 10;  /* Fallback */
 }
@@ -1181,7 +1239,7 @@ static void coupled_on_persistent_cong(void *cong_data,
 	conn = container_of(sf->path->list.prev, struct tquic_connection, paths);
 	state = conn->scheduler;
 
-	pr_info("tquic_coupled: persistent congestion on path %u, cwnd %llu -> %llu\n",
+	tquic_warn("coupled: persistent congestion on path %u, cwnd %llu -> %llu\n",
 		sf->path_id, sf->cwnd, info->min_cwnd);
 
 	/* Reset this subflow's cwnd to minimum per RFC 9002 */
@@ -1390,7 +1448,7 @@ struct tquic_coupled_state *tquic_coupled_create(struct tquic_connection *conn,
 
 	state->sbd.check_interval = 1000;  /* 1 second */
 
-	pr_info("tquic_coupled: created coupled state (algo=%d)\n", state->algo);
+	tquic_info("coupled: created coupled state (algo=%d)\n", state->algo);
 
 	return (struct tquic_coupled_state *)state;
 }
@@ -1423,7 +1481,7 @@ void tquic_coupled_destroy(struct tquic_coupled_state *cstate)
 	kfree(state->sbd.corr_matrix);
 	kfree(state);
 
-	pr_info("tquic_coupled: destroyed coupled state\n");
+	tquic_info("coupled: destroyed coupled state\n");
 }
 EXPORT_SYMBOL_GPL(tquic_coupled_destroy);
 
@@ -1446,15 +1504,18 @@ int tquic_coupled_attach_path(struct tquic_coupled_state *cstate,
 	if (!state || !path)
 		return -EINVAL;
 
-	/* Check if already attached */
+	/* Check if already attached under lock */
+	spin_lock(&state->lock);
 	sf = coupled_find_subflow(state, path->path_id);
 	if (sf) {
-		pr_debug("tquic_coupled: path %u already attached\n",
+		spin_unlock(&state->lock);
+		tquic_dbg("coupled: path %u already attached\n",
 			 path->path_id);
 		return -EEXIST;
 	}
+	spin_unlock(&state->lock);
 
-	/* Add subflow for this path */
+	/* Add subflow for this path (takes lock internally) */
 	sf = coupled_add_subflow(state, path);
 	if (!sf)
 		return -ENOMEM;
@@ -1462,7 +1523,7 @@ int tquic_coupled_attach_path(struct tquic_coupled_state *cstate,
 	/* Update global alpha with new subflow */
 	coupled_update_alpha(state);
 
-	pr_debug("tquic_coupled: attached path %u\n", path->path_id);
+	tquic_dbg("coupled: attached path %u\n", path->path_id);
 	return 0;
 }
 EXPORT_SYMBOL_GPL(tquic_coupled_attach_path);
@@ -1484,19 +1545,23 @@ void tquic_coupled_detach_path(struct tquic_coupled_state *cstate,
 	if (!state || !path)
 		return;
 
+	spin_lock(&state->lock);
 	sf = coupled_find_subflow(state, path->path_id);
 	if (!sf) {
-		pr_debug("tquic_coupled: path %u not attached\n", path->path_id);
+		spin_unlock(&state->lock);
+		tquic_dbg("coupled: path %u not attached\n", path->path_id);
 		return;
 	}
+	spin_unlock(&state->lock);
 
+	/* Remove subflow (takes lock internally) */
 	coupled_remove_subflow(state, sf);
 
 	/* Update alpha without this subflow */
 	if (state->num_subflows > 0)
 		coupled_update_alpha(state);
 
-	pr_debug("tquic_coupled: detached path %u\n", path->path_id);
+	tquic_dbg("coupled: detached path %u\n", path->path_id);
 }
 EXPORT_SYMBOL_GPL(tquic_coupled_detach_path);
 
@@ -1522,7 +1587,7 @@ void tquic_coupled_on_ack_ext(struct tquic_coupled_state *cstate,
 
 	sf = coupled_find_subflow(state, path->path_id);
 	if (!sf) {
-		pr_debug("tquic_coupled: ACK on unattached path %u\n",
+		tquic_dbg("coupled: ACK on unattached path %u\n",
 			 path->path_id);
 		return;
 	}
@@ -1554,7 +1619,7 @@ void tquic_coupled_on_loss_ext(struct tquic_coupled_state *cstate,
 
 	sf = coupled_find_subflow(state, path->path_id);
 	if (!sf) {
-		pr_debug("tquic_coupled: loss on unattached path %u\n",
+		tquic_dbg("coupled: loss on unattached path %u\n",
 			 path->path_id);
 		return;
 	}
@@ -1574,30 +1639,30 @@ static int __init __maybe_unused tquic_coupled_init(void)
 {
 	int ret;
 
-	pr_info("tquic_coupled: initializing coupled multipath congestion control\n");
+	tquic_info("coupled: initializing multipath congestion control\n");
 
 	/* Register all algorithm variants */
 	ret = tquic_register_cong(&tquic_coupled_ops);
 	if (ret) {
-		pr_err("tquic_coupled: failed to register 'coupled'\n");
+		tquic_err("coupled: failed to register 'coupled'\n");
 		return ret;
 	}
 
 	ret = tquic_register_cong(&tquic_olia_ops);
 	if (ret) {
-		pr_err("tquic_coupled: failed to register 'olia'\n");
+		tquic_err("coupled: failed to register 'olia'\n");
 		goto err_olia;
 	}
 
 	ret = tquic_register_cong(&tquic_lia_ops);
 	if (ret) {
-		pr_err("tquic_coupled: failed to register 'lia'\n");
+		tquic_err("coupled: failed to register 'lia'\n");
 		goto err_lia;
 	}
 
 	ret = tquic_register_cong(&tquic_balia_ops);
 	if (ret) {
-		pr_err("tquic_coupled: failed to register 'balia'\n");
+		tquic_err("coupled: failed to register 'balia'\n");
 		goto err_balia;
 	}
 
@@ -1608,8 +1673,8 @@ static int __init __maybe_unused tquic_coupled_init(void)
 	}
 #endif
 
-	pr_info("tquic_coupled: registered algorithms: coupled, olia, lia, balia\n");
-	pr_info("tquic_coupled: features: SBD=%d, CUBIC=%d, BBR=%d\n",
+	tquic_info("coupled: registered algorithms: coupled, olia, lia, balia\n");
+	tquic_info("coupled: features: SBD=%d, CUBIC=%d, BBR=%d\n",
 		coupled_sbd_enabled, coupled_use_cubic, coupled_use_bbr);
 
 	return 0;
@@ -1625,7 +1690,7 @@ err_olia:
 
 static void __exit __maybe_unused tquic_coupled_exit(void)
 {
-	pr_info("tquic_coupled: unloading coupled multipath congestion control\n");
+	tquic_info("coupled: unloading multipath congestion control\n");
 
 #ifdef CONFIG_PROC_FS
 	if (coupled_proc_dir) {
@@ -1639,7 +1704,7 @@ static void __exit __maybe_unused tquic_coupled_exit(void)
 	tquic_unregister_cong(&tquic_olia_ops);
 	tquic_unregister_cong(&tquic_coupled_ops);
 
-	pr_info("tquic_coupled: unloaded\n");
+	tquic_info("coupled: unloaded\n");
 }
 
 #ifndef TQUIC_OUT_OF_TREE

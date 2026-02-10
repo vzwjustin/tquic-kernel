@@ -17,6 +17,7 @@
 #include <linux/btf_ids.h>
 #include <linux/filter.h>
 #include <net/tquic.h>
+#include "tquic_debug.h"
 
 /* BPF struct_ops for TQUIC scheduler */
 static struct bpf_struct_ops bpf_tquic_sched_ops;
@@ -253,6 +254,8 @@ __bpf_kfunc struct tquic_path *bpf_tquic_path_next(struct tquic_scheduler *sched
 						   struct tquic_path *path)
 {
 	struct list_head *next;
+	struct tquic_path *iter;
+	bool found = false;
 
 	if (!sched || !sched->pm)
 		return NULL;
@@ -261,8 +264,24 @@ __bpf_kfunc struct tquic_path *bpf_tquic_path_next(struct tquic_scheduler *sched
 		/* Return first path */
 		if (list_empty(&sched->pm->paths))
 			return NULL;
-		return list_first_entry(&sched->pm->paths, struct tquic_path, list);
+		return list_first_entry(&sched->pm->paths,
+					struct tquic_path, list);
 	}
+
+	/*
+	 * Validate that 'path' is actually a member of the path list.
+	 * This prevents BPF programs from passing stale or forged
+	 * pointers that could cause traversal of arbitrary memory.
+	 */
+	list_for_each_entry(iter, &sched->pm->paths, list) {
+		if (iter == path) {
+			found = true;
+			break;
+		}
+	}
+
+	if (!found)
+		return NULL;
 
 	next = path->list.next;
 	if (next == &sched->pm->paths)
@@ -682,7 +701,7 @@ static void __bpf_tquic_sched_on_packet_lost(struct tquic_scheduler *sched,
 			 */
 			path->weight--;
 
-			pr_debug("tquic: degraded path %u weight to %u "
+			tquic_dbg("degraded path %u weight to %u "
 				 "(loss_rate=%llu%%)\n",
 				 path->path_id, path->weight, loss_rate_pct);
 		}
@@ -952,18 +971,18 @@ static int __init bpf_tquic_sched_kfunc_init(void)
 
 	ret = register_bpf_struct_ops(&bpf_tquic_sched_ops, tquic_scheduler_ops);
 	if (ret) {
-		pr_err("TQUIC: Failed to register BPF struct_ops: %d\n", ret);
+		tquic_err("Failed to register BPF struct_ops: %d\n", ret);
 		return ret;
 	}
 
-	pr_info("TQUIC: BPF scheduler struct_ops registered\n");
+	tquic_info("BPF scheduler struct_ops registered\n");
 	return 0;
 }
 
 static void __exit bpf_tquic_sched_kfunc_exit(void)
 {
 	/* BPF struct_ops cleanup is handled by the kernel */
-	pr_info("TQUIC: BPF scheduler struct_ops unloaded\n");
+	tquic_info("BPF scheduler struct_ops unloaded\n");
 }
 
 #ifdef MODULE
