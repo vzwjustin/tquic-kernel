@@ -300,6 +300,9 @@ static void tquic_timer_loss_cb(struct timer_list *t)
 {
 	struct tquic_connection *conn = from_timer(conn, t, timers[TQUIC_TIMER_LOSS]);
 
+	if (READ_ONCE(conn->state) == TQUIC_CONN_CLOSED)
+		return;
+
 	tquic_loss_detection_on_timeout(conn);
 	tquic_timer_update(conn);
 }
@@ -308,6 +311,9 @@ static void tquic_timer_ack_cb(struct timer_list *t)
 {
 	struct tquic_connection *conn = from_timer(conn, t, timers[TQUIC_TIMER_ACK]);
 	int i;
+
+	if (READ_ONCE(conn->state) == TQUIC_CONN_CLOSED)
+		return;
 
 	for (i = 0; i < TQUIC_PN_SPACE_COUNT; i++) {
 		if (tquic_ack_should_send(conn, i)) {
@@ -356,12 +362,14 @@ static void tquic_timer_path_probe_cb(struct timer_list *t)
 	struct tquic_connection *conn = from_timer(conn, t, timers[TQUIC_TIMER_PATH_PROBE]);
 	struct tquic_path *path;
 
+	spin_lock_bh(&conn->paths_lock);
 	list_for_each_entry(path, &conn->paths, list) {
 		if (path->validation.challenge_pending &&
 		    path->state != TQUIC_PATH_VALIDATED) {
 			tquic_path_challenge(path);
 		}
 	}
+	spin_unlock_bh(&conn->paths_lock);
 }
 
 static void tquic_timer_key_discard_cb(struct timer_list *t)

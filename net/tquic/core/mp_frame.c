@@ -127,9 +127,15 @@ int tquic_frame_process_path_abandon(struct tquic_connection *conn,
 	 * 4. Trigger failover if this was an active path
 	 */
 	if (conn->pm) {
-		struct tquic_path *path = tquic_pm_get_path(conn->pm, (u32)path_id);
+		struct tquic_path *path;
 		struct tquic_bonding_ctx *bc;
 
+		if (path_id > U32_MAX) {
+			tquic_dbg("path_id %llu exceeds u32 range\n", path_id);
+			return -EPROTO;
+		}
+
+		path = tquic_pm_get_path(conn->pm, (u32)path_id);
 		if (!path) {
 			tquic_conn_warn(conn, "PATH_ABANDON for unknown path %llu\n",
 					path_id);
@@ -222,11 +228,17 @@ int tquic_frame_process_path_status(struct tquic_connection *conn,
 	 * Sequence numbers prevent reordering issues (RFC 9000 Section 13.3)
 	 */
 	if (conn->pm) {
-		struct tquic_path *path = tquic_pm_get_path(conn->pm, (u32)path_id);
+		struct tquic_path *path;
 		struct tquic_bonding_ctx *bc;
 		enum tquic_path_state old_state, new_state;
 		bool state_changed = false;
 
+		if (path_id > U32_MAX) {
+			tquic_dbg("path_id %llu exceeds u32 range\n", path_id);
+			return -EPROTO;
+		}
+
+		path = tquic_pm_get_path(conn->pm, (u32)path_id);
 		if (!path) {
 			tquic_conn_warn(conn, "PATH_STATUS unknown path %llu\n",
 					path_id);

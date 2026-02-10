@@ -503,6 +503,8 @@ int tquic_stream_flow_control_check_recv_limit(struct tquic_stream *stream,
 	 * Check if receiving this data would exceed the stream-level
 	 * flow control limit we advertised to the peer.
 	 */
+	if (len > U64_MAX - offset)
+		return -EOVERFLOW;
 	new_highest = offset + len;
 	if (new_highest > stream->max_recv_data) {
 		/*

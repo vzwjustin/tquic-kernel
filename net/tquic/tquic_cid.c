@@ -550,7 +550,7 @@ struct tquic_connection *tquic_cid_lookup(const struct tquic_cid *cid)
 	entry = rhashtable_lookup_fast(&tquic_cid_table, cid, cid_rht_params);
 	if (entry && entry->state == CID_STATE_ACTIVE) {
 		conn = entry->conn;
-		if (conn && !refcount_inc_not_zero(&conn->refcount))
+		if (conn && !refcount_inc_not_zero(&conn->refcnt))
 			conn = NULL;
 	}
 	rcu_read_unlock();

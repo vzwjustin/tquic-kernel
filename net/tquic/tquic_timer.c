@@ -899,10 +899,10 @@ void tquic_timer_update_loss_timer(struct tquic_timer_state *ts)
 	for (i = 0; i < TQUIC_PN_SPACE_COUNT; i++) {
 		struct tquic_pn_space *pns = &rs->pn_spaces[i];
 
-		spin_lock_bh(&pns->lock);
+		spin_lock(&pns->lock);
 		if (ktime_before(pns->loss_time, earliest_loss))
 			earliest_loss = pns->loss_time;
-		spin_unlock_bh(&pns->lock);
+		spin_unlock(&pns->lock);
 	}
 
 	if (earliest_loss == KTIME_MAX) {
@@ -945,7 +945,7 @@ static void tquic_timer_pto_expired(struct timer_list *t)
 
 	rs = ts->recovery;
 
-	spin_lock_bh(&rs->lock);
+	spin_lock(&rs->lock);
 	rs->pto_count++;
 
 	/* Check for persistent congestion */
@@ -956,7 +956,7 @@ static void tquic_timer_pto_expired(struct timer_list *t)
 		rs->ssthresh = rs->congestion_window;
 		tquic_dbg("timer:entering persistent congestion\n");
 	}
-	spin_unlock_bh(&rs->lock);
+	spin_unlock(&rs->lock);
 
 	set_bit(TQUIC_TIMER_PTO_BIT, &ts->pending_timer_mask);
 	spin_unlock_irqrestore(&ts->lock, flags);
@@ -992,9 +992,9 @@ void tquic_timer_update_pto(struct tquic_timer_state *ts)
 		struct tquic_pn_space *pns = &rs->pn_spaces[i];
 		ktime_t timeout;
 
-		spin_lock_bh(&pns->lock);
+		spin_lock(&pns->lock);
 		if (pns->ack_eliciting_in_flight == 0) {
-			spin_unlock_bh(&pns->lock);
+			spin_unlock(&pns->lock);
 			continue;
 		}
 
@@ -1005,7 +1005,7 @@ void tquic_timer_update_pto(struct tquic_timer_state *ts)
 			list_for_each_entry(pkt, &pns->sent_list, list) {
 				if (pkt->ack_eliciting &&
 				    pkt->state == TQUIC_PKT_OUTSTANDING) {
-					spin_lock_bh(&rs->lock);
+					spin_lock(&rs->lock);
 					pto_duration = tquic_get_pto_duration(rs, i);
 					/*
 				 * CF-214: Clamp pto_count to prevent
@@ -1013,7 +1013,11 @@ void tquic_timer_update_pto(struct tquic_timer_state *ts)
 				 * bit width, and cap exponential backoff.
 				 */
 				pto_duration *= (1ULL << min_t(u32, rs->pto_count, 16));
-					spin_unlock_bh(&rs->lock);
+					spin_unlock(&rs->lock);
+
+					/* Cap maximum PTO to 60 seconds (60,000,000 us) */
+					if (pto_duration > 60000000ULL)
+						pto_duration = 60000000ULL;
 
 					timeout = ktime_add_us(pkt->sent_time, pto_duration);
 					if (ktime_before(timeout, earliest_timeout))
@@ -1022,7 +1026,7 @@ void tquic_timer_update_pto(struct tquic_timer_state *ts)
 				}
 			}
 		}
-		spin_unlock_bh(&pns->lock);
+		spin_unlock(&pns->lock);
 	}
 
 	if (earliest_timeout == KTIME_MAX) {
@@ -1097,13 +1101,20 @@ void tquic_timer_start_drain(struct tquic_timer_state *ts)
 	del_timer(&ts->loss_timer);
 	del_timer(&ts->pto_timer);
 	del_timer(&ts->keepalive_timer);
+
+	/*
+	 * Release ts->lock before hrtimer_cancel to avoid AB-BA deadlock:
+	 * the pacing hrtimer callback takes ts->lock.
+	 */
+	spin_unlock_irqrestore(&ts->lock, flags);
 	hrtimer_cancel(&ts->pacing_timer);
+	spin_lock_irqsave(&ts->lock, flags);
 
 	/* Set drain timeout to 3 * PTO */
-	spin_lock_bh(&rs->lock);
+	spin_lock(&rs->lock);
 	drain_duration = TQUIC_DRAIN_TIMEOUT_MULTIPLIER *
 			 tquic_get_pto_duration(rs, TQUIC_PN_SPACE_APPLICATION);
-	spin_unlock_bh(&rs->lock);
+	spin_unlock(&rs->lock);
 
 	expires = jiffies + usecs_to_jiffies(drain_duration);
 	mod_timer(&ts->drain_timer, expires);
@@ -1334,7 +1345,7 @@ static void tquic_path_validation_expired(struct timer_list *t)
 		return;
 
 	/* Ensure connection is still alive before accessing */
-	if (!refcount_inc_not_zero(&conn->refcount))
+	if (!refcount_inc_not_zero(&conn->refcnt))
 		return;
 
 	spin_lock_bh(&conn->lock);

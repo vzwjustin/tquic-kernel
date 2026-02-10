@@ -1043,7 +1043,12 @@ int tquic_parse_ack_frame(const u8 *buf, size_t len,
 	ret = tquic_varint_read(buf, len, &offset, &value);
 	if (ret < 0)
 		return ret;
-	frame->range_count = (u32)min_t(u64, value, TQUIC_MAX_ACK_RANGES);
+	if (value > TQUIC_MAX_ACK_RANGES) {
+		tquic_dbg("ACK range_count %llu exceeds maximum %u\n",
+			  value, TQUIC_MAX_ACK_RANGES);
+		return -EPROTO;
+	}
+	frame->range_count = (u32)value;
 
 	/* First ACK Range */
 	ret = tquic_varint_read(buf, len, &offset, &frame->first_range);
