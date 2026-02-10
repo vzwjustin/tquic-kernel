@@ -1287,7 +1287,10 @@ int tquic_validate_retry_token(struct tquic_connection *conn,
 	}
 
 	memcpy(&token_hash, p, sizeof(token_hash));
-	if (token_hash != expected_hash) {
+	/* Use constant-time comparison to prevent timing side-channels
+	 * that could leak address information from retry tokens.
+	 */
+	if (crypto_memneq(&token_hash, &expected_hash, sizeof(token_hash))) {
 		tquic_conn_dbg(conn, "retry token address mismatch\n");
 		return -EINVAL;
 	}

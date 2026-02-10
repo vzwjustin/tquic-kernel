@@ -1982,10 +1982,15 @@ int tquic_send_connection_close(struct tquic_connection *conn,
 	{
 		u8 header[64];
 		int header_len = tquic_build_short_header_internal(conn, path, header, 64,
-							  pkt_num, 0, false, false,
-							  conn->grease_state);
-		if (header_len > 0)
-			skb_put_data(skb, header, header_len);
+						  pkt_num, 0, false, false,
+						  conn->grease_state);
+		if (header_len <= 0) {
+			/* Header build failed -- do not send unframed data */
+			kfree_skb(skb);
+			kfree(buf);
+			return header_len ? header_len : -EINVAL;
+		}
+		skb_put_data(skb, header, header_len);
 	}
 
 	skb_put_data(skb, buf, ctx.offset);
