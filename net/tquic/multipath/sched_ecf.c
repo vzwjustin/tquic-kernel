@@ -302,7 +302,7 @@ static void ecf_init(struct tquic_connection *conn)
 {
 	struct ecf_sched_data *sd;
 
-	sd = kzalloc(sizeof(*sd), GFP_KERNEL);
+	sd = kzalloc(sizeof(*sd), GFP_ATOMIC);
 	if (!sd)
 		return;
 

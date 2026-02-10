@@ -225,9 +225,9 @@ static int tquic_mp_send_control_frame(struct tquic_connection *conn,
 		return -EINVAL;
 
 	/* Get packet number atomically */
-	spin_lock(&conn->lock);
+	spin_lock_bh(&conn->lock);
 	pkt_num = conn->stats.tx_packets++;
-	spin_unlock(&conn->lock);
+	spin_unlock_bh(&conn->lock);
 
 	/* Calculate packet number length (1-4 bytes based on value) */
 	if (pkt_num < 0x100)
@@ -1047,9 +1047,9 @@ int tquic_mp_handle_retire_connection_id(struct tquic_connection *conn,
 	}
 
 	/* Update statistics */
-	spin_lock(&conn->lock);
+	spin_lock_bh(&conn->lock);
 	/* Could track CID retirements in connection stats here */
-	spin_unlock(&conn->lock);
+	spin_unlock_bh(&conn->lock);
 
 	return 0;
 }

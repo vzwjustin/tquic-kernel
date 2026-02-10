@@ -265,10 +265,8 @@ static void tquic_client_free_rcu(struct rcu_head *head)
 
 	client = container_of(head, struct tquic_client, rcu_head);
 
-	/* Clear sensitive PSK material before freeing */
-	memzero_explicit(client->psk, sizeof(client->psk));
-
-	kfree(client);
+	/* Clear entire struct including PSK material before freeing */
+	kfree_sensitive(client);
 }
 
 /**
@@ -338,8 +336,7 @@ int tquic_client_register(const char *identity, size_t identity_len,
 	mutex_lock(&tquic_client_mutex);
 	if (!tquic_client_table_initialized) {
 		mutex_unlock(&tquic_client_mutex);
-		memzero_explicit(client->psk, sizeof(client->psk));
-		kfree(client);
+		kfree_sensitive(client);
 		return -ENODEV;
 	}
 
@@ -348,8 +345,7 @@ int tquic_client_register(const char *identity, size_t identity_len,
 	mutex_unlock(&tquic_client_mutex);
 
 	if (ret) {
-		memzero_explicit(client->psk, sizeof(client->psk));
-		kfree(client);
+		kfree_sensitive(client);
 		return ret;
 	}
 
@@ -775,9 +771,8 @@ void __exit tquic_server_exit(void)
 			rhashtable_remove_fast(&tquic_client_table,
 					       &client->node,
 					       tquic_client_params);
-			/* Clear sensitive PSK material */
-			memzero_explicit(client->psk, sizeof(client->psk));
-			kfree(client);
+			/* Clear entire struct including PSK material */
+			kfree_sensitive(client);
 		}
 
 		rhashtable_walk_stop(&iter);

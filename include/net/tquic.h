@@ -120,6 +120,7 @@ struct tquic_fc_stream_state;
 struct tquic_path;
 struct tquic_frame;
 struct tquic_packet;
+struct tquic_xsk;
 
 /**
  * struct tquic_rtt_state - RTT measurement state (RFC 9002 Section 5)
@@ -520,6 +521,9 @@ struct tquic_path {
 	 * NULL when Careful Resume is not active on this path.
 	 */
 	void *cr_state;			/* struct careful_resume_state * */
+
+	/* AF_XDP socket for kernel-bypass packet I/O on this path */
+	struct tquic_xsk *xsk;
 
 	struct rcu_head rcu_head;	/* RCU callback for kfree_rcu */
 };
@@ -1284,6 +1288,9 @@ struct tquic_connection {
 	 * confirms mutual support. Freed by tquic_cong_data_release().
 	 */
 	void *cong_data_state;	/* struct tquic_cong_data_state * */
+
+	/* AF_XDP socket for kernel-bypass packet I/O */
+	struct tquic_xsk *xsk;
 
 	spinlock_t lock;
 	refcount_t refcnt;

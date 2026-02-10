@@ -448,9 +448,9 @@ static int tquic_pmtud_send_probe(struct tquic_path *path, u32 probe_size)
 	}
 
 	/* Get packet number */
-	spin_lock(&conn->lock);
+	spin_lock_bh(&conn->lock);
 	pkt_num = conn->stats.tx_packets++;
-	spin_unlock(&conn->lock);
+	spin_unlock_bh(&conn->lock);
 
 	/* Allocate SKB */
 	skb = alloc_skb(probe_size + MAX_HEADER, GFP_ATOMIC);

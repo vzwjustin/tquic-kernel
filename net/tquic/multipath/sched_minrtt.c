@@ -98,7 +98,7 @@ static void minrtt_init(struct tquic_connection *conn)
 {
 	struct minrtt_sched_data *sd;
 
-	sd = kzalloc(sizeof(*sd), GFP_KERNEL);
+	sd = kzalloc(sizeof(*sd), GFP_ATOMIC);
 	if (!sd)
 		return;
 
@@ -375,7 +375,7 @@ static void rr_init(struct tquic_connection *conn)
 {
 	struct rr_sched_data *rd;
 
-	rd = kzalloc(sizeof(*rd), GFP_KERNEL);
+	rd = kzalloc(sizeof(*rd), GFP_ATOMIC);
 	if (!rd)
 		return;
 

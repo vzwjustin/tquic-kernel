@@ -637,10 +637,10 @@ static void tquic_migration_work_handler(struct work_struct *work)
 
 	/* Complete migration unless probe-only */
 	if (!(ms->flags & TQUIC_MIGRATE_FLAG_PROBE_ONLY)) {
-		spin_lock(&conn->lock);
+		spin_lock_bh(&conn->lock);
 		conn->active_path = new_path;
 		conn->stats.path_migrations++;
-		spin_unlock(&conn->lock);
+		spin_unlock_bh(&conn->lock);
 
 		tquic_info("migration complete to path %u (RTT: %u us)\n",
 			new_path->path_id, ms->probe_rtt);

@@ -375,7 +375,7 @@ static void blest_init(struct tquic_connection *conn)
 {
 	struct blest_sched_data *sd;
 
-	sd = kzalloc(sizeof(*sd), GFP_KERNEL);
+	sd = kzalloc(sizeof(*sd), GFP_ATOMIC);
 	if (!sd)
 		return;
 

@@ -583,6 +583,7 @@ struct tquic_napi_percpu *tquic_napi_percpu_init(struct tquic_connection *conn,
 		tn = per_cpu_ptr(percpu->napi, cpu);
 
 		/* Initialize per-CPU NAPI */
+		tn->magic = TQUIC_NAPI_MAGIC;
 		tn->conn = conn;
 		tn->weight = TQUIC_NAPI_DEFAULT_WEIGHT;
 		tn->state = TQUIC_NAPI_STATE_DISABLED;

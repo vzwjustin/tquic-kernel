@@ -7,8 +7,8 @@
  * Copyright (c) 2024-2026 Linux TQUIC Authors
  */
 
-#ifndef _TQUIC_ACK_FREQUENCY_H
-#define _TQUIC_ACK_FREQUENCY_H
+#ifndef _TQUIC_CORE_ACK_FREQUENCY_H
+#define _TQUIC_CORE_ACK_FREQUENCY_H
 
 #include <linux/types.h>
 #include <linux/skbuff.h>
@@ -134,4 +134,4 @@ void tquic_ack_frequency_module_exit(void);
 #define quic_ack_frequency_module_init	tquic_ack_frequency_module_init
 #define quic_ack_frequency_module_exit	tquic_ack_frequency_module_exit
 
-#endif /* _TQUIC_ACK_FREQUENCY_H */
+#endif /* _TQUIC_CORE_ACK_FREQUENCY_H */

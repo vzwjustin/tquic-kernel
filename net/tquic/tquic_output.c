@@ -1133,7 +1133,7 @@ struct tquic_path *tquic_select_path(struct tquic_connection *conn,
 	 * The bonding path selection functions iterate conn->paths
 	 * which can change concurrently if paths are added/removed.
 	 */
-	spin_lock(&conn->lock);
+	spin_lock_bh(&conn->lock);
 
 	/* Use bonding path selection if scheduler is set */
 	if (conn->scheduler)
@@ -1141,7 +1141,7 @@ struct tquic_path *tquic_select_path(struct tquic_connection *conn,
 	else
 		selected = conn->active_path;
 
-	spin_unlock(&conn->lock);
+	spin_unlock_bh(&conn->lock);
 
 	return selected;
 }

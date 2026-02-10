@@ -164,7 +164,7 @@ static void weighted_init(struct tquic_connection *conn)
 	struct weighted_sched_data *sd;
 	int i;
 
-	sd = kzalloc(sizeof(*sd), GFP_KERNEL);
+	sd = kzalloc(sizeof(*sd), GFP_ATOMIC);
 	if (!sd)
 		return;
 

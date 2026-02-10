@@ -7,8 +7,8 @@
  * Copyright (c) 2024-2026 Linux TQUIC Implementation Authors
  */
 
-#ifndef _NET_TQUIC_CRYPTO_H
-#define _NET_TQUIC_CRYPTO_H
+#ifndef _NET_TQUIC_QUIC_CRYPTO_H
+#define _NET_TQUIC_QUIC_CRYPTO_H
 
 #include <linux/types.h>
 #include <linux/socket.h>
@@ -433,4 +433,4 @@ int tquic_tls_validate_alpn(const u8 *offered_alpn, size_t offered_len,
  * function call overhead for hot paths.
  */
 
-#endif /* _NET_TQUIC_CRYPTO_H */
+#endif /* _NET_TQUIC_QUIC_CRYPTO_H */

@@ -1836,7 +1836,7 @@ int tquic_tp_apply(struct tquic_connection *conn,
 {
 	int ret;
 
-	spin_lock(&conn->lock);
+	spin_lock_bh(&conn->lock);
 
 	/* Apply idle timeout */
 	conn->idle_timeout = negotiated->idle_timeout;
@@ -1859,7 +1859,7 @@ int tquic_tp_apply(struct tquic_connection *conn,
 	 */
 	conn->migration_disabled = negotiated->migration_disabled;
 
-	spin_unlock(&conn->lock);
+	spin_unlock_bh(&conn->lock);
 
 	/*
 	 * Handle preferred address (RFC 9000 Section 9.6)

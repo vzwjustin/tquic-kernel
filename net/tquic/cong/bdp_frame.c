@@ -325,6 +325,7 @@ int tquic_bdp_compute_hmac(struct tquic_connection *conn,
 	struct shash_desc *desc;
 	u8 hmac_data[64];
 	u8 full_hmac[SHA256_DIGEST_SIZE];
+	u8 local_key[TQUIC_BDP_HMAC_KEY_LEN];
 	size_t hmac_data_len;
 	unsigned long flags;
 	int ret;
@@ -356,10 +357,13 @@ int tquic_bdp_compute_hmac(struct tquic_connection *conn,
 
 	desc->tfm = tfm;
 
-	/* Set HMAC key */
+	/* Copy key under lock, then set it outside lock context */
 	spin_lock_irqsave(&bdp->lock, flags);
-	ret = crypto_shash_setkey(tfm, bdp->hmac_key, TQUIC_BDP_HMAC_KEY_LEN);
+	memcpy(local_key, bdp->hmac_key, TQUIC_BDP_HMAC_KEY_LEN);
 	spin_unlock_irqrestore(&bdp->lock, flags);
+
+	ret = crypto_shash_setkey(tfm, local_key, TQUIC_BDP_HMAC_KEY_LEN);
+	memzero_explicit(local_key, TQUIC_BDP_HMAC_KEY_LEN);
 
 	if (ret < 0) {
 		tquic_err("bdp: failed to set HMAC key: %d\n", ret);

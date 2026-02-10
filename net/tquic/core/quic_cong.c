@@ -192,40 +192,19 @@ static const int bbr_pacing_gain[] = {
 static u32 cubic_root(u64 a)
 {
 	u32 x, b, shift;
-	static const u8 v[] = {
-		0,   54,   54,   54,  118,  118,  118,  118,
-		123,  129,  134,  138,  143,  147,  151,  156,
-		157,  161,  164,  168,  170,  173,  176,  179,
-		181,  185,  187,  190,  192,  194,  197,  199,
-		200,  202,  204,  206,  209,  211,  213,  215,
-		217,  219,  221,  222,  224,  225,  227,  229,
-		231,  232,  234,  236,  237,  239,  240,  242,
-		244,  245,  246,  248,  250,  251,  252,  254,
-	};
 
 	if (a == 0)
 		return 0;
 
+	/* Initial approximation */
 	b = fls64(a);
-	if (b < 7)
-		return ((u32)v[(u32)a] + 35) >> 6;
+	shift = (b + 2) / 3;
+	x = 1 << shift;
 
-	b = ((b * 84) >> 8) - 1;
-	shift = (a >> (b * 3));
-
-	if (shift >= 64)
-		shift = 63;
-
-	x = ((u32)(((u32)v[shift] + 10) << b)) >> 6;
-
-	/*
-	 * Newton-Raphson iteration for cube root:
-	 *   x = (2*x + a/x^2) / 3
-	 * Multiply-then-divide: x = (2*x + a/(x*x)) / 3
-	 * Approximation: /3 via * 341 >> 10 (341/1024 ~= 1/3)
-	 */
-	x = (2 * x + (u32)div64_u64(a, (u64)x * (u64)x));
-	x = ((x * 341) >> 10);
+	/* Newton-Raphson iterations */
+	x = (2 * x + (u32)div64_u64(a, (u64)x * x)) / 3;
+	x = (2 * x + (u32)div64_u64(a, (u64)x * x)) / 3;
+	x = (2 * x + (u32)div64_u64(a, (u64)x * x)) / 3;
 
 	return x;
 }

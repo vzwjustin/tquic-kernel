@@ -3249,7 +3249,7 @@ void tquic_hs_cleanup(struct tquic_handshake *hs)
 
 	/* Free key share */
 	kfree(hs->key_share.public_key);
-	kfree(hs->key_share.private_key);
+	kfree_sensitive(hs->key_share.private_key);
 
 	/* Free transcript */
 	kfree(hs->transcript);
@@ -3281,7 +3281,7 @@ void tquic_hs_cleanup(struct tquic_handshake *hs)
 	/* Free certificates */
 	kfree(hs->peer_cert);
 	kfree(hs->local_cert);
-	kfree(hs->local_key);
+	kfree_sensitive(hs->local_key);
 
 	/* Free crypto transforms */
 	if (hs->hash_tfm && !IS_ERR(hs->hash_tfm))

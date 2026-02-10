@@ -75,15 +75,6 @@ extern struct kmem_cache *tquic_rx_buf_cache;
 #define TQUIC_FRAME_HANDSHAKE_DONE	0x1e
 #define TQUIC_FRAME_DATAGRAM		0x30  /* 0x30-0x31 */
 /* ACK frequency frame types defined in core/ack_frequency.h */
-/* RFC 9369 Multipath frames - 1-byte types */
-#define TQUIC_FRAME_MP_NEW_CONNECTION_ID 0x40
-#define TQUIC_FRAME_MP_RETIRE_CONNECTION_ID 0x41
-#define TQUIC_FRAME_MP_ACK		0x42
-#define TQUIC_FRAME_MP_ACK_ECN		0x43
-/* RFC 9369 Multipath frames - extended types (varint encoded) */
-#define TQUIC_MP_FRAME_PATH_ABANDON	0x15c0
-#define TQUIC_MP_FRAME_PATH_STATUS	0x15c08
-
 /* Packet header constants */
 #define TQUIC_HEADER_FORM_LONG		0x80
 #define TQUIC_HEADER_FIXED_BIT		0x40
@@ -335,9 +326,9 @@ static void tquic_handle_stateless_reset(struct tquic_connection *conn)
 {
 	tquic_info("received stateless reset for connection\n");
 
-	spin_lock(&conn->lock);
+	spin_lock_bh(&conn->lock);
 	conn->state = TQUIC_CONN_CLOSED;
-	spin_unlock(&conn->lock);
+	spin_unlock_bh(&conn->lock);
 
 	/* Notify upper layer */
 	if (conn->sk)
@@ -1501,7 +1492,7 @@ static int tquic_process_path_status_frame(struct tquic_rx_ctx *ctx);
  * tquic_process_mp_extended_frame - Process extended multipath frames
  * @ctx: Receive context
  *
- * Handles PATH_ABANDON (0x15c0) and PATH_STATUS (0x15c08).
+ * Handles PATH_ABANDON (0x15c0) and PATH_STATUS (0x15c1).
  */
 static int tquic_process_mp_extended_frame(struct tquic_rx_ctx *ctx)
 {

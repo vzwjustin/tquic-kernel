@@ -373,9 +373,9 @@ int tquic_gen_ack_frequency_frame(struct tquic_connection *conn,
 	state = conn_get_ack_freq_state(conn);
 	if (!state) {
 		/* Fallback: use connection stats for sequence */
-		spin_lock(&conn->lock);
+		spin_lock_bh(&conn->lock);
 		next_seq = conn->stats.tx_packets & 0xFFFF;
-		spin_unlock(&conn->lock);
+		spin_unlock_bh(&conn->lock);
 	} else {
 		/* Get next sequence number from state */
 		spin_lock(&state->lock);
@@ -675,9 +675,9 @@ bool tquic_ack_freq_on_packet_received(struct tquic_connection *conn,
 	}
 
 	/* Default behavior: ACK every 2 packets */
-	spin_lock(&conn->lock);
+	spin_lock_bh(&conn->lock);
 	conn->stats.rx_packets++;
-	spin_unlock(&conn->lock);
+	spin_unlock_bh(&conn->lock);
 
 	return (conn->stats.rx_packets % 2) == 0;
 }

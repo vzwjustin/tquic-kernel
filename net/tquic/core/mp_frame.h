@@ -3,7 +3,7 @@
  * TQUIC Multipath Extension Frame Definitions
  *
  * Frame types and processing functions for PATH_ABANDON, PATH_STATUS_BACKUP,
- * and PATH_STATUS_AVAILABLE frames per draft-ietf-quic-multipath-16.
+ * and PATH_STATUS_AVAILABLE frames per RFC 9369.
  *
  * Copyright (c) 2024-2026 Linux QUIC Authors
  */
@@ -18,17 +18,14 @@ struct tquic_connection;
 struct tquic_path;
 
 /*
- * Multipath frame type constants (draft-ietf-quic-multipath-16)
- *
- * These are the experimental values used for implementation testing.
- * Final IANA-assigned values will be shorter (TBD-02 through TBD-04).
+ * Multipath frame type constants (RFC 9369)
  */
-#define TQUIC_MP_FRAME_PATH_ABANDON		0x15228c05ULL
-#define TQUIC_MP_FRAME_PATH_STATUS_BACKUP	0x15228c07ULL
-#define TQUIC_MP_FRAME_PATH_STATUS_AVAILABLE	0x15228c08ULL
+#define TQUIC_MP_FRAME_PATH_ABANDON		0x15c0
+#define TQUIC_MP_FRAME_PATH_STATUS_BACKUP	0x15c2
+#define TQUIC_MP_FRAME_PATH_STATUS_AVAILABLE	0x15c3
 
 /*
- * PATH_ABANDON error codes (draft-ietf-quic-multipath-16 Section 4.2)
+ * PATH_ABANDON error codes (RFC 9369 Section 5.3)
  */
 #define TQUIC_MP_PATH_ERR_NO_ERROR		0x00
 #define TQUIC_MP_PATH_ERR_NO_VIABLE_PATH	0x10

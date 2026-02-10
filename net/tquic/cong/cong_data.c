@@ -128,9 +128,8 @@ void tquic_cong_data_release(struct tquic_connection *conn)
 
 	state = conn->cong_data_state;
 	if (state) {
-		/* Clear sensitive data */
-		memzero_explicit(state->hmac_key, sizeof(state->hmac_key));
-		kfree(state);
+		/* Clear sensitive data (kfree_sensitive zeros entire allocation) */
+		kfree_sensitive(state);
 		conn->cong_data_state = NULL;
 	}
 }

@@ -652,7 +652,7 @@ void tquic_failover_update_path_ack(struct tquic_failover_ctx *fc,
 	u32 timeout_ms;
 	u64 now_us;
 
-	if (!fc || path_id >= 8)
+	if (!fc || path_id >= ARRAY_SIZE(fc->path_timeouts))
 		return;
 
 	pt = &fc->path_timeouts[path_id];
@@ -740,7 +740,7 @@ void tquic_failover_arm_timeout(struct tquic_failover_ctx *fc, u8 path_id)
 {
 	struct tquic_path_timeout *pt;
 
-	if (!fc || !fc->wq || path_id >= 8)
+	if (!fc || !fc->wq || path_id >= ARRAY_SIZE(fc->path_timeouts))
 		return;
 
 	pt = &fc->path_timeouts[path_id];
@@ -758,7 +758,7 @@ EXPORT_SYMBOL_GPL(tquic_failover_arm_timeout);
 const char *tquic_failover_path_hyst_state(struct tquic_failover_ctx *fc,
 					   u8 path_id)
 {
-	if (!fc || path_id >= 8)
+	if (!fc || path_id >= ARRAY_SIZE(fc->path_timeouts))
 		return "UNKNOWN";
 
 	return tquic_hyst_state_names[fc->path_timeouts[path_id].hyst_state];
@@ -777,7 +777,7 @@ bool tquic_failover_is_path_usable(struct tquic_failover_ctx *fc,
 {
 	enum tquic_path_hyst_state state;
 
-	if (!fc || path_id >= 8)
+	if (!fc || path_id >= ARRAY_SIZE(fc->path_timeouts))
 		return false;
 
 	state = READ_ONCE(fc->path_timeouts[path_id].hyst_state);

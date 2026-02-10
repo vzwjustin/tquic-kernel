@@ -573,7 +573,7 @@ int tquic_sched_set(struct tquic_connection *conn, const char *name)
 	}
 	rcu_read_unlock();
 
-	spin_lock(&conn->lock);
+	spin_lock_bh(&conn->lock);
 
 	old_sched = conn->sched;
 
@@ -589,13 +589,13 @@ int tquic_sched_set(struct tquic_connection *conn, const char *name)
 		ret = new_sched->init(conn);
 		if (ret) {
 			conn->sched = old_sched;
-			spin_unlock(&conn->lock);
+			spin_unlock_bh(&conn->lock);
 			module_put(new_sched->owner);
 			return ret;
 		}
 	}
 
-	spin_unlock(&conn->lock);
+	spin_unlock_bh(&conn->lock);
 
 	if (old_sched)
 		module_put(old_sched->owner);
@@ -892,11 +892,11 @@ int tquic_weighted_set_weights(struct tquic_connection *conn,
 	struct tquic_path *path;
 	int i;
 
-	spin_lock(&conn->lock);
+	spin_lock_bh(&conn->lock);
 
 	wd = conn->sched_priv;
 	if (!wd || strcmp(conn->sched->name, "weighted") != 0) {
-		spin_unlock(&conn->lock);
+		spin_unlock_bh(&conn->lock);
 		return -EINVAL;
 	}
 
@@ -917,7 +917,7 @@ int tquic_weighted_set_weights(struct tquic_connection *conn,
 		i++;
 	}
 
-	spin_unlock(&conn->lock);
+	spin_unlock_bh(&conn->lock);
 
 	return 0;
 }
@@ -1281,11 +1281,11 @@ int tquic_redundant_set_level(struct tquic_connection *conn, u8 level)
 {
 	struct tquic_redundant_data *rd;
 
-	spin_lock(&conn->lock);
+	spin_lock_bh(&conn->lock);
 
 	rd = conn->sched_priv;
 	if (!rd || strcmp(conn->sched->name, "redundant") != 0) {
-		spin_unlock(&conn->lock);
+		spin_unlock_bh(&conn->lock);
 		return -EINVAL;
 	}
 
@@ -1296,7 +1296,7 @@ int tquic_redundant_set_level(struct tquic_connection *conn, u8 level)
 		rd->redundancy_level = min_t(u8, level, TQUIC_MAX_PATHS);
 	}
 
-	spin_unlock(&conn->lock);
+	spin_unlock_bh(&conn->lock);
 
 	return 0;
 }
@@ -1765,11 +1765,11 @@ int tquic_adaptive_configure(struct tquic_connection *conn,
 {
 	struct tquic_adaptive_data *ad;
 
-	spin_lock(&conn->lock);
+	spin_lock_bh(&conn->lock);
 
 	ad = conn->sched_priv;
 	if (!ad || strcmp(conn->sched->name, "adaptive") != 0) {
-		spin_unlock(&conn->lock);
+		spin_unlock_bh(&conn->lock);
 		return -EINVAL;
 	}
 
@@ -1779,7 +1779,7 @@ int tquic_adaptive_configure(struct tquic_connection *conn,
 
 	/* Validate weights sum to 1000 */
 	if (rtt_weight + loss_weight + bw_weight + cwnd_weight != 1000) {
-		spin_unlock(&conn->lock);
+		spin_unlock_bh(&conn->lock);
 		return -EINVAL;
 	}
 
@@ -1788,7 +1788,7 @@ int tquic_adaptive_configure(struct tquic_connection *conn,
 	ad->bw_weight = bw_weight;
 	ad->cwnd_weight = cwnd_weight;
 
-	spin_unlock(&conn->lock);
+	spin_unlock_bh(&conn->lock);
 
 	return 0;
 }
@@ -1805,11 +1805,11 @@ int tquic_adaptive_reinject(struct tquic_connection *conn,
 	u64 best_score = 0;
 	int path_idx = 0;
 
-	spin_lock(&conn->lock);
+	spin_lock_bh(&conn->lock);
 
 	ad = conn->sched_priv;
 	if (!ad || !ad->reinjection_enabled) {
-		spin_unlock(&conn->lock);
+		spin_unlock_bh(&conn->lock);
 		return -EINVAL;
 	}
 
@@ -1838,7 +1838,7 @@ int tquic_adaptive_reinject(struct tquic_connection *conn,
 		path_idx++;
 	}
 
-	spin_unlock(&conn->lock);
+	spin_unlock_bh(&conn->lock);
 
 	if (!best)
 		return -ENOENT;
@@ -1912,7 +1912,7 @@ void tquic_connection_free(struct tquic_connection *conn)
 	if (!conn)
 		return;
 
-	spin_lock(&conn->lock);
+	spin_lock_bh(&conn->lock);
 
 	/* Release scheduler */
 	if (conn->sched) {
@@ -1928,7 +1928,7 @@ void tquic_connection_free(struct tquic_connection *conn)
 		kfree(path);
 	}
 
-	spin_unlock(&conn->lock);
+	spin_unlock_bh(&conn->lock);
 
 	kfree(conn);
 }
@@ -1963,11 +1963,11 @@ struct tquic_path *tquic_path_add(struct tquic_connection *conn, u8 path_id,
 
 	INIT_LIST_HEAD(&path->list);
 
-	spin_lock(&conn->lock);
+	spin_lock_bh(&conn->lock);
 
 	/* Check for duplicate */
 	if (tquic_find_path(conn, path_id)) {
-		spin_unlock(&conn->lock);
+		spin_unlock_bh(&conn->lock);
 		kfree(path);
 		return NULL;
 	}
@@ -1979,7 +1979,7 @@ struct tquic_path *tquic_path_add(struct tquic_connection *conn, u8 path_id,
 	if (conn->sched && conn->sched->path_added)
 		conn->sched->path_added(conn, path);
 
-	spin_unlock(&conn->lock);
+	spin_unlock_bh(&conn->lock);
 
 	return path;
 }
@@ -1992,11 +1992,11 @@ void tquic_path_remove(struct tquic_connection *conn, u8 path_id)
 {
 	struct tquic_path *path;
 
-	spin_lock(&conn->lock);
+	spin_lock_bh(&conn->lock);
 
 	path = tquic_find_path(conn, path_id);
 	if (!path) {
-		spin_unlock(&conn->lock);
+		spin_unlock_bh(&conn->lock);
 		return;
 	}
 
@@ -2010,7 +2010,7 @@ void tquic_path_remove(struct tquic_connection *conn, u8 path_id)
 	if (path->state == TQUIC_PATH_ACTIVE)
 		conn->active_paths--;
 
-	spin_unlock(&conn->lock);
+	spin_unlock_bh(&conn->lock);
 
 	synchronize_rcu();
 
@@ -2029,7 +2029,7 @@ void tquic_int_path_validate(struct tquic_connection *conn, u8 path_id)
 {
 	struct tquic_path *path;
 
-	spin_lock(&conn->lock);
+	spin_lock_bh(&conn->lock);
 
 	path = tquic_find_path(conn, path_id);
 	if (path && !path->validated) {
@@ -2040,7 +2040,7 @@ void tquic_int_path_validate(struct tquic_connection *conn, u8 path_id)
 		conn->active_paths++;
 	}
 
-	spin_unlock(&conn->lock);
+	spin_unlock_bh(&conn->lock);
 }
 EXPORT_SYMBOL_GPL(tquic_int_path_validate);
 
@@ -2487,7 +2487,7 @@ int tquic_int_mp_sched_init_conn(struct tquic_connection *conn, const char *name
 	if (!try_module_get(sched->owner))
 		return -EBUSY;
 
-	spin_lock(&conn->lock);
+	spin_lock_bh(&conn->lock);
 
 	/* Release any existing scheduler */
 	if (conn->sched) {
@@ -2505,13 +2505,13 @@ int tquic_int_mp_sched_init_conn(struct tquic_connection *conn, const char *name
 		int ret = sched->init(conn);
 		if (ret) {
 			conn->sched = NULL;
-			spin_unlock(&conn->lock);
+			spin_unlock_bh(&conn->lock);
 			module_put(sched->owner);
 			return ret;
 		}
 	}
 
-	spin_unlock(&conn->lock);
+	spin_unlock_bh(&conn->lock);
 
 	pr_debug("Connection %llx: scheduler initialized to %s\n",
 		 conn->conn_id, sched->name);
@@ -2530,7 +2530,7 @@ void tquic_int_mp_sched_release_conn(struct tquic_connection *conn)
 	if (!conn)
 		return;
 
-	spin_lock(&conn->lock);
+	spin_lock_bh(&conn->lock);
 	sched = conn->sched;
 	if (sched) {
 		if (sched->release)
@@ -2538,7 +2538,7 @@ void tquic_int_mp_sched_release_conn(struct tquic_connection *conn)
 		conn->sched = NULL;
 		conn->sched_priv = NULL;
 	}
-	spin_unlock(&conn->lock);
+	spin_unlock_bh(&conn->lock);
 
 	if (sched)
 		module_put(sched->owner);

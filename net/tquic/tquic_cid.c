@@ -977,9 +977,9 @@ void tquic_send_retire_connection_id(struct tquic_connection *conn, u64 seq_num)
 	{
 		u8 pkt_num_byte;
 
-		spin_lock(&conn->lock);
+		spin_lock_bh(&conn->lock);
 		pkt_num_byte = (u8)(conn->stats.tx_packets++ & 0xff);
-		spin_unlock(&conn->lock);
+		spin_unlock_bh(&conn->lock);
 
 		skb_put_u8(skb, pkt_num_byte);
 	}

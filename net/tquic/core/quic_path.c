@@ -229,6 +229,9 @@ tquic_path_create_internal(struct tquic_connection *conn,
 	if (!path)
 		return NULL;
 
+	/* RFC 9000 §8.1: New paths are unvalidated, enforce anti-amplification */
+	path->anti_amplification.active = true;
+
 	INIT_LIST_HEAD(&path->list);
 	INIT_LIST_HEAD(&path->pm_list);
 
@@ -404,9 +407,9 @@ int tquic_path_challenge(struct tquic_path *path)
 	path->validation.challenge_sent = ktime_get();
 
 	/* Queue the frame for transmission */
-	spin_lock(&conn->lock);
+	spin_lock_bh(&conn->lock);
 	skb_queue_tail(&conn->control_frames, skb);
-	spin_unlock(&conn->lock);
+	spin_unlock_bh(&conn->lock);
 
 	/* Schedule transmission */
 	schedule_work(&conn->tx_work);
@@ -670,9 +673,9 @@ int tquic_path_mtu_probe(struct tquic_path *path)
 	}
 
 	/* Queue the probe packet */
-	spin_lock(&conn->lock);
+	spin_lock_bh(&conn->lock);
 	skb_queue_tail(&conn->control_frames, skb);
-	spin_unlock(&conn->lock);
+	spin_unlock_bh(&conn->lock);
 
 	schedule_work(&conn->tx_work);
 
@@ -998,7 +1001,7 @@ void tquic_path_set_state(struct tquic_connection *conn, u8 path_id,
 	struct tquic_path *path = NULL;
 	struct tquic_path *p;
 
-	spin_lock(&conn->lock);
+	spin_lock_bh(&conn->lock);
 	spin_lock(&conn->paths_lock);
 	list_for_each_entry(p, &conn->paths, list) {
 		if (p->path_id == path_id) {
@@ -1013,6 +1016,6 @@ void tquic_path_set_state(struct tquic_connection *conn, u8 path_id,
 		if (state == TQUIC_PATH_ACTIVE && !conn->active_path)
 			conn->active_path = path;
 	}
-	spin_unlock(&conn->lock);
+	spin_unlock_bh(&conn->lock);
 }
 EXPORT_SYMBOL_GPL(tquic_path_set_state);

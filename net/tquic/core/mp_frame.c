@@ -20,14 +20,11 @@
 #include "../bond/tquic_bonding.h"
 
 /*
- * Multipath Extension Frame Types (draft-ietf-quic-multipath-16)
- *
- * These are the experimental values used for implementation testing.
- * Final IANA-assigned values will be shorter (TBD-02 through TBD-04).
+ * Multipath Extension Frame Types (RFC 9369)
  */
-#define TQUIC_FRAME_PATH_ABANDON		0x15228c05
-#define TQUIC_FRAME_PATH_STATUS_BACKUP		0x15228c07
-#define TQUIC_FRAME_PATH_STATUS_AVAILABLE	0x15228c08
+#define TQUIC_FRAME_PATH_ABANDON		0x15c0
+#define TQUIC_FRAME_PATH_STATUS_BACKUP		0x15c2
+#define TQUIC_FRAME_PATH_STATUS_AVAILABLE	0x15c3
 
 /* Forward declarations for path management */
 extern const char *tquic_path_state_names[];
@@ -67,9 +64,9 @@ static int tquic_mp_queue_frame(struct tquic_connection *conn, struct sk_buff *s
  * @data: Frame data
  * @len: Length of frame data
  *
- * PATH_ABANDON frame format (draft-ietf-quic-multipath-16 Section 4.2):
+ * PATH_ABANDON frame format (RFC 9369 Section 5.3):
  *   PATH_ABANDON Frame {
- *     Type (i) = 0x15228c05,
+ *     Type (i) = 0x15c0,
  *     Path Identifier (i),
  *     Error Code (i),
  *     Reason Phrase Length (i),
@@ -175,11 +172,11 @@ EXPORT_SYMBOL_GPL(tquic_frame_process_path_abandon);
  * @conn: TQUIC connection
  * @data: Frame data
  * @len: Length of frame data
- * @backup: true for PATH_STATUS_BACKUP (0x15228c07), false for PATH_STATUS_AVAILABLE (0x15228c08)
+ * @backup: true for PATH_STATUS_BACKUP (0x15c2), false for PATH_STATUS_AVAILABLE (0x15c3)
  *
- * PATH_STATUS frame format (draft-ietf-quic-multipath-16 Section 4.3):
+ * PATH_STATUS frame format (RFC 9369 Section 5.6):
  *   PATH_STATUS Frame {
- *     Type (i) = 0x15228c07 (backup) or 0x15228c08 (available),
+ *     Type (i) = 0x15c2 (backup/standby) or 0x15c3 (available),
  *     Path Identifier (i),
  *     Path Status Sequence Number (i),
  *   }
@@ -709,11 +706,11 @@ EXPORT_SYMBOL_GPL(tquic_send_path_status_available);
 bool tquic_mp_frame_is_multipath(u8 first_byte)
 {
 	/*
-	 * Multipath frames have type 0x15228c05-0x15228c08.
-	 * These start with 0xc0 | 0x15 = 0xd5 when varint encoded.
-	 * (4-byte varint prefix is 0xc0)
+	 * Multipath frames have type 0x15c0-0x15c3.
+	 * These are 2-byte varint encoded (prefix 0x40).
+	 * 0x15c0 encodes as 0x55 0xc0, so first byte is 0x55.
 	 */
-	return (first_byte == 0xd5);
+	return (first_byte == 0x55);
 }
 EXPORT_SYMBOL_GPL(tquic_mp_frame_is_multipath);
 

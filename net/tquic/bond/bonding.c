@@ -21,6 +21,10 @@
 
 #include "../tquic_debug.h"
 
+/* Anti-amplification check from tquic_migration.c (RFC 9000 §8.1) */
+extern bool tquic_path_anti_amplification_check(struct tquic_path *path,
+						u64 bytes);
+
 /* Path quality metrics for scheduling decisions */
 struct tquic_path_quality {
 	u64 score;           /* Combined quality score */
@@ -418,6 +422,7 @@ struct tquic_path *tquic_bond_select_path(struct tquic_connection *conn,
 {
 	struct tquic_bond_state *bond = conn->scheduler;
 	struct tquic_path *selected;
+	struct tquic_path *fallback;
 
 	/* conn->lock must be held by caller (tquic_select_path) */
 	if (!bond)
@@ -428,26 +433,34 @@ struct tquic_path *tquic_bond_select_path(struct tquic_connection *conn,
 		/* Use primary unless it's down */
 		if (bond->primary_path &&
 		    bond->primary_path->state == TQUIC_PATH_ACTIVE)
-			return bond->primary_path;
-		return conn->active_path;
+			selected = bond->primary_path;
+		else
+			selected = conn->active_path;
+		break;
 
 	case TQUIC_BOND_MODE_ROUNDROBIN:
-		return tquic_select_roundrobin(bond, skb);
+		selected = tquic_select_roundrobin(bond, skb);
+		break;
 
 	case TQUIC_BOND_MODE_WEIGHTED:
-		return tquic_select_weighted(bond, skb);
+		selected = tquic_select_weighted(bond, skb);
+		break;
 
 	case TQUIC_BOND_MODE_MINRTT:
-		return tquic_select_minrtt(bond, skb);
+		selected = tquic_select_minrtt(bond, skb);
+		break;
 
 	case TQUIC_BOND_MODE_AGGREGATE:
-		return tquic_select_aggregate(bond, skb);
+		selected = tquic_select_aggregate(bond, skb);
+		break;
 
 	case TQUIC_BOND_MODE_BLEST:
-		return tquic_select_blest(bond, skb);
+		selected = tquic_select_blest(bond, skb);
+		break;
 
 	case TQUIC_BOND_MODE_ECF:
-		return tquic_select_ecf(bond, skb);
+		selected = tquic_select_ecf(bond, skb);
+		break;
 
 	case TQUIC_BOND_MODE_REDUNDANT:
 		/* Redundant sends on all paths */
@@ -456,6 +469,32 @@ struct tquic_path *tquic_bond_select_path(struct tquic_connection *conn,
 
 	default:
 		selected = conn->active_path;
+	}
+
+	/*
+	 * RFC 9000 §8.1: Check anti-amplification limit on unvalidated paths.
+	 * If the selected path exceeds the 3x amplification limit, try to
+	 * find an alternate path that can send.
+	 */
+	if (selected && selected->anti_amplification.active &&
+	    !tquic_path_anti_amplification_check(selected, skb->len)) {
+		fallback = NULL;
+		list_for_each_entry(fallback, &conn->paths, list) {
+			if (fallback == selected)
+				continue;
+			if (fallback->state != TQUIC_PATH_ACTIVE)
+				continue;
+			if (!fallback->anti_amplification.active ||
+			    tquic_path_anti_amplification_check(fallback,
+								skb->len))
+				break;
+		}
+		/*
+		 * list_for_each_entry sets fallback to the list head sentinel
+		 * when no suitable path is found; check for that case.
+		 */
+		if (&fallback->list != &conn->paths)
+			selected = fallback;
 	}
 
 	return selected;
@@ -478,7 +517,7 @@ void tquic_bond_path_failed(struct tquic_connection *conn,
 	tquic_warn("path %u failed, initiating failover\n", path->path_id);
 	tquic_trace_failover(conn, path->path_id, 0, 0, 0);
 
-	spin_lock(&conn->lock);
+	spin_lock_bh(&conn->lock);
 
 	path->state = TQUIC_PATH_FAILED;
 
@@ -516,7 +555,7 @@ void tquic_bond_path_failed(struct tquic_connection *conn,
 
 	bond->stats.failed_paths++;
 
-	spin_unlock(&conn->lock);
+	spin_unlock_bh(&conn->lock);
 }
 EXPORT_SYMBOL_GPL(tquic_bond_path_failed);
 
@@ -531,7 +570,7 @@ void tquic_bond_path_recovered(struct tquic_connection *conn,
 	if (!bond)
 		return;
 
-	spin_lock(&conn->lock);
+	spin_lock_bh(&conn->lock);
 
 	if (path->state == TQUIC_PATH_FAILED) {
 		path->state = TQUIC_PATH_STANDBY;
@@ -547,7 +586,7 @@ void tquic_bond_path_recovered(struct tquic_connection *conn,
 		}
 	}
 
-	spin_unlock(&conn->lock);
+	spin_unlock_bh(&conn->lock);
 }
 EXPORT_SYMBOL_GPL(tquic_bond_path_recovered);
 
@@ -762,7 +801,7 @@ int tquic_bond_set_path_weight(struct tquic_connection *conn, u32 path_id, u32 w
 	if (!conn || weight > 100)
 		return -EINVAL;
 
-	spin_lock(&conn->lock);
+	spin_lock_bh(&conn->lock);
 	list_for_each_entry(path, &conn->paths, list) {
 		if (path->path_id == path_id) {
 			path->weight = weight;
@@ -772,7 +811,7 @@ int tquic_bond_set_path_weight(struct tquic_connection *conn, u32 path_id, u32 w
 			break;
 		}
 	}
-	spin_unlock(&conn->lock);
+	spin_unlock_bh(&conn->lock);
 
 	return ret;
 }
@@ -800,7 +839,7 @@ void tquic_bond_interface_down(struct tquic_connection *conn,
 	if (!bond)
 		return;
 
-	spin_lock(&conn->lock);
+	spin_lock_bh(&conn->lock);
 
 	/* Mark all paths using this interface as failed */
 	list_for_each_entry(path, &conn->paths, list) {
@@ -843,7 +882,7 @@ void tquic_bond_interface_down(struct tquic_connection *conn,
 		}
 	}
 
-	spin_unlock(&conn->lock);
+	spin_unlock_bh(&conn->lock);
 }
 EXPORT_SYMBOL_GPL(tquic_bond_interface_down);
 

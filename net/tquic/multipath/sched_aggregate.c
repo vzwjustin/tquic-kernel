@@ -249,7 +249,7 @@ static void aggregate_init(struct tquic_connection *conn)
 {
 	struct aggregate_sched_data *sd;
 
-	sd = kzalloc(sizeof(*sd), GFP_KERNEL);
+	sd = kzalloc(sizeof(*sd), GFP_ATOMIC);
 	if (!sd)
 		return;
 

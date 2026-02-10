@@ -998,7 +998,7 @@ int tquic_retry_process(struct tquic_connection *conn,
 	 * - Update DCID to server's new SCID
 	 * - Store token for inclusion in next Initial
 	 */
-	spin_lock(&conn->lock);
+	spin_lock_bh(&conn->lock);
 
 	/*
 	 * Save the original DCID before overwriting. This is required
@@ -1026,7 +1026,7 @@ int tquic_retry_process(struct tquic_connection *conn,
 	/* Mark that we have received a Retry */
 	conn->retry_received = true;
 
-	spin_unlock(&conn->lock);
+	spin_unlock_bh(&conn->lock);
 
 	/* Update MIB counter for processed Retry */
 	if (conn->sk)

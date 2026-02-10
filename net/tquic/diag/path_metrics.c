@@ -397,18 +397,23 @@ int tquic_nl_get_path_metrics(struct sk_buff *skb, struct genl_info *info)
 		return -ENOENT;
 
 	path = tquic_conn_get_path(conn, path_id);
-	if (!path)
+	if (!path) {
+		tquic_conn_put(conn);
 		return -ENOENT;
+	}
 
 	/* Allocate response message */
 	msg = nlmsg_new(NLMSG_DEFAULT_SIZE, GFP_KERNEL);
-	if (!msg)
+	if (!msg) {
+		tquic_conn_put(conn);
 		return -ENOMEM;
+	}
 
 	hdr = genlmsg_put(msg, info->snd_portid, info->snd_seq,
 			  &tquic_metrics_family, 0, TQUIC_NL_CMD_GET_PATH_METRICS);
 	if (!hdr) {
 		nlmsg_free(msg);
+		tquic_conn_put(conn);
 		return -EMSGSIZE;
 	}
 
@@ -421,10 +426,12 @@ int tquic_nl_get_path_metrics(struct sk_buff *skb, struct genl_info *info)
 	if (tquic_nl_put_path_metrics(msg, &metrics)) {
 		genlmsg_cancel(msg, hdr);
 		nlmsg_free(msg);
+		tquic_conn_put(conn);
 		return -EMSGSIZE;
 	}
 
 	genlmsg_end(msg, hdr);
+	tquic_conn_put(conn);
 	return genlmsg_reply(msg, info);
 }
 
@@ -460,13 +467,16 @@ static int tquic_nl_get_all_paths(struct sk_buff *skb, struct genl_info *info)
 
 	/* Allocate response message */
 	msg = nlmsg_new(NLMSG_DEFAULT_SIZE * conn->num_paths, GFP_KERNEL);
-	if (!msg)
+	if (!msg) {
+		tquic_conn_put(conn);
 		return -ENOMEM;
+	}
 
 	hdr = genlmsg_put(msg, info->snd_portid, info->snd_seq,
 			  &tquic_metrics_family, 0, TQUIC_NL_CMD_GET_ALL_PATHS);
 	if (!hdr) {
 		nlmsg_free(msg);
+		tquic_conn_put(conn);
 		return -EMSGSIZE;
 	}
 
@@ -474,6 +484,7 @@ static int tquic_nl_get_all_paths(struct sk_buff *skb, struct genl_info *info)
 	if (nla_put_u32(msg, TQUIC_METRICS_ATTR_CONN_TOKEN, token)) {
 		genlmsg_cancel(msg, hdr);
 		nlmsg_free(msg);
+		tquic_conn_put(conn);
 		return -EMSGSIZE;
 	}
 
@@ -482,6 +493,7 @@ static int tquic_nl_get_all_paths(struct sk_buff *skb, struct genl_info *info)
 	if (!paths_nest) {
 		genlmsg_cancel(msg, hdr);
 		nlmsg_free(msg);
+		tquic_conn_put(conn);
 		return -EMSGSIZE;
 	}
 
@@ -496,6 +508,7 @@ static int tquic_nl_get_all_paths(struct sk_buff *skb, struct genl_info *info)
 			nla_nest_cancel(msg, paths_nest);
 			genlmsg_cancel(msg, hdr);
 			nlmsg_free(msg);
+			tquic_conn_put(conn);
 			return -EMSGSIZE;
 		}
 
@@ -506,6 +519,7 @@ static int tquic_nl_get_all_paths(struct sk_buff *skb, struct genl_info *info)
 			nla_nest_cancel(msg, paths_nest);
 			genlmsg_cancel(msg, hdr);
 			nlmsg_free(msg);
+			tquic_conn_put(conn);
 			return -EMSGSIZE;
 		}
 
@@ -515,6 +529,7 @@ static int tquic_nl_get_all_paths(struct sk_buff *skb, struct genl_info *info)
 
 	nla_nest_end(msg, paths_nest);
 	genlmsg_end(msg, hdr);
+	tquic_conn_put(conn);
 	return genlmsg_reply(msg, info);
 }
 
@@ -649,8 +664,10 @@ static int tquic_nl_subscribe_events(struct sk_buff *skb, struct genl_info *info
 		return -ENOENT;
 
 	sub = kzalloc(sizeof(*sub), GFP_KERNEL);
-	if (!sub)
+	if (!sub) {
+		tquic_conn_put(conn);
 		return -ENOMEM;
+	}
 
 	sub->conn = conn;
 	sub->portid = info->snd_portid;
@@ -678,17 +695,22 @@ static int tquic_nl_subscribe_events(struct sk_buff *skb, struct genl_info *info
 void tquic_metrics_unsubscribe_conn(struct tquic_connection *conn)
 {
 	struct tquic_metrics_subscription *sub, *tmp;
+	LIST_HEAD(to_free);
 
 	spin_lock_bh(&subscriptions_lock);
 	list_for_each_entry_safe(sub, tmp, &metrics_subscriptions, list) {
-		if (sub->conn == conn) {
-			list_del(&sub->list);
-			del_timer_sync(&sub->timer);
-			cancel_work_sync(&sub->work);
-			kfree(sub);
-		}
+		if (sub->conn == conn)
+			list_move(&sub->list, &to_free);
 	}
 	spin_unlock_bh(&subscriptions_lock);
+
+	list_for_each_entry_safe(sub, tmp, &to_free, list) {
+		list_del(&sub->list);
+		del_timer_sync(&sub->timer);
+		cancel_work_sync(&sub->work);
+		tquic_conn_put(sub->conn);
+		kfree(sub);
+	}
 }
 EXPORT_SYMBOL_GPL(tquic_metrics_unsubscribe_conn);
 
@@ -1254,15 +1276,22 @@ void __exit tquic_path_metrics_exit(struct net *net)
 {
 	struct tquic_metrics_subscription *sub, *tmp;
 
-	/* Cancel all subscriptions */
-	spin_lock_bh(&subscriptions_lock);
-	list_for_each_entry_safe(sub, tmp, &metrics_subscriptions, list) {
-		list_del(&sub->list);
-		del_timer_sync(&sub->timer);
-		cancel_work_sync(&sub->work);
-		kfree(sub);
+	/* Cancel all subscriptions - splice under lock, then free outside */
+	{
+		LIST_HEAD(to_free);
+
+		spin_lock_bh(&subscriptions_lock);
+		list_splice_init(&metrics_subscriptions, &to_free);
+		spin_unlock_bh(&subscriptions_lock);
+
+		list_for_each_entry_safe(sub, tmp, &to_free, list) {
+			list_del(&sub->list);
+			del_timer_sync(&sub->timer);
+			cancel_work_sync(&sub->work);
+			tquic_conn_put(sub->conn);
+			kfree(sub);
+		}
 	}
-	spin_unlock_bh(&subscriptions_lock);
 
 	/* Unregister netlink family */
 	genl_unregister_family(&tquic_metrics_family);

@@ -340,6 +340,12 @@ int tquic_xsk_create(struct tquic_xsk **xsk_out, const char *ifname,
 	xsk->tx_batch_size = TQUIC_XSK_DEFAULT_BATCH_SIZE;
 	xsk->mode = config ? config->mode : TQUIC_XDP_COPY;
 
+	/* Initialize ring sizes (must be power of 2 for index masking) */
+	xsk->rx.ring_size = TQUIC_XSK_DEFAULT_RING_SIZE;
+	xsk->tx.ring_size = TQUIC_XSK_DEFAULT_RING_SIZE;
+	xsk->fill.ring_size = TQUIC_XSK_DEFAULT_RING_SIZE;
+	xsk->comp.ring_size = TQUIC_XSK_DEFAULT_RING_SIZE;
+
 	refcount_set(&xsk->refcnt, 1);
 
 	/* Allocate UMEM buffer */
@@ -838,9 +844,14 @@ int tquic_xsk_attach(struct sock *sk, struct tquic_xsk *xsk)
 
 	lock_sock(sk);
 
+	/* Release any previously attached XSK */
+	if (tsk->conn->xsk)
+		tquic_xsk_put(tsk->conn->xsk);
+
 	/* Store XSK reference in connection */
 	tquic_xsk_get(xsk);
 	xsk->conn = tsk->conn;
+	tsk->conn->xsk = xsk;
 
 	release_sock(sk);
 
@@ -889,9 +900,14 @@ int tquic_xsk_attach_path(struct tquic_connection *conn,
 	if (!conn || !path || !xsk)
 		return -EINVAL;
 
+	/* Release any previously attached XSK on this path */
+	if (path->xsk)
+		tquic_xsk_put(path->xsk);
+
 	/* Per-path XSK attachment for multipath */
 	tquic_xsk_get(xsk);
 	xsk->path = path;
+	path->xsk = xsk;
 
 	tquic_dbg("xdp: attached XSK to path %u\n", path->path_id);
 

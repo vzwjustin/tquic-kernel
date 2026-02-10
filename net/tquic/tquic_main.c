@@ -183,7 +183,7 @@ void tquic_conn_destroy(struct tquic_connection *conn)
 	}
 
 	/* Free crypto state if allocated */
-	kfree(conn->crypto_state);
+	tquic_crypto_cleanup(conn->crypto_state);
 
 	/* Free scheduler state if allocated */
 	kfree(conn->scheduler);
@@ -274,14 +274,14 @@ int tquic_conn_add_path(struct tquic_connection *conn,
 	/* Legacy challenge data - still used by some code */
 	get_random_bytes(path->challenge_data, sizeof(path->challenge_data));
 
-	spin_lock(&conn->lock);
+	spin_lock_bh(&conn->lock);
 	list_add_tail(&path->list, &conn->paths);
 	conn->num_paths++;
 
 	/* First path becomes active */
 	if (!conn->active_path)
 		conn->active_path = path;
-	spin_unlock(&conn->lock);
+	spin_unlock_bh(&conn->lock);
 
 	tquic_conn_dbg(conn, "added path %u\n", path->path_id);
 
@@ -299,12 +299,12 @@ int tquic_conn_remove_path(struct tquic_connection *conn, u32 path_id)
 	struct tquic_path *path, *tmp;
 	bool found = false;
 
-	spin_lock(&conn->lock);
+	spin_lock_bh(&conn->lock);
 	list_for_each_entry_safe(path, tmp, &conn->paths, list) {
 		if (path->path_id == path_id) {
 			/* Don't remove last path */
 			if (conn->num_paths <= 1) {
-				spin_unlock(&conn->lock);
+				spin_unlock_bh(&conn->lock);
 				return -EINVAL;
 			}
 
@@ -323,7 +323,7 @@ int tquic_conn_remove_path(struct tquic_connection *conn, u32 path_id)
 			break;
 		}
 	}
-	spin_unlock(&conn->lock);
+	spin_unlock_bh(&conn->lock);
 
 	if (!found)
 		return -ENOENT;
@@ -348,14 +348,14 @@ struct tquic_path *tquic_conn_get_path(struct tquic_connection *conn, u32 path_i
 {
 	struct tquic_path *path;
 
-	spin_lock(&conn->lock);
+	spin_lock_bh(&conn->lock);
 	list_for_each_entry(path, &conn->paths, list) {
 		if (path->path_id == path_id) {
-			spin_unlock(&conn->lock);
+			spin_unlock_bh(&conn->lock);
 			return path;
 		}
 	}
-	spin_unlock(&conn->lock);
+	spin_unlock_bh(&conn->lock);
 
 	return NULL;
 }
@@ -363,14 +363,14 @@ EXPORT_SYMBOL_GPL(tquic_conn_get_path);
 
 void tquic_conn_migrate(struct tquic_connection *conn, struct tquic_path *new_path)
 {
-	spin_lock(&conn->lock);
+	spin_lock_bh(&conn->lock);
 	if (new_path->state == TQUIC_PATH_ACTIVE ||
 	    new_path->state == TQUIC_PATH_STANDBY) {
 		conn->active_path = new_path;
 		conn->stats.path_migrations++;
 		tquic_conn_info(conn, "migrated to path %u\n", new_path->path_id);
 	}
-	spin_unlock(&conn->lock);
+	spin_unlock_bh(&conn->lock);
 }
 EXPORT_SYMBOL_GPL(tquic_conn_migrate);
 
@@ -543,10 +543,10 @@ struct tquic_stream *tquic_stream_open(struct tquic_connection *conn, bool bidi)
 		return NULL;
 
 	/* Allocate stream ID, enforcing MAX_STREAMS per RFC 9000 Section 4.6 */
-	spin_lock(&conn->lock);
+	spin_lock_bh(&conn->lock);
 	if (bidi) {
 		if (conn->next_stream_id_bidi / 4 >= conn->max_streams_bidi) {
-			spin_unlock(&conn->lock);
+			spin_unlock_bh(&conn->lock);
 			kmem_cache_free(tquic_stream_cache, stream);
 			return NULL;
 		}
@@ -554,14 +554,14 @@ struct tquic_stream *tquic_stream_open(struct tquic_connection *conn, bool bidi)
 		conn->next_stream_id_bidi += 4;
 	} else {
 		if (conn->next_stream_id_uni / 4 >= conn->max_streams_uni) {
-			spin_unlock(&conn->lock);
+			spin_unlock_bh(&conn->lock);
 			kmem_cache_free(tquic_stream_cache, stream);
 			return NULL;
 		}
 		stream_id = conn->next_stream_id_uni;
 		conn->next_stream_id_uni += 4;
 	}
-	spin_unlock(&conn->lock);
+	spin_unlock_bh(&conn->lock);
 
 	stream->id = stream_id;
 	stream->state = TQUIC_STREAM_OPEN;
@@ -576,7 +576,7 @@ struct tquic_stream *tquic_stream_open(struct tquic_connection *conn, bool bidi)
 	init_waitqueue_head(&stream->wait);
 
 	/* Insert into connection's stream tree */
-	spin_lock(&conn->lock);
+	spin_lock_bh(&conn->lock);
 	link = &conn->streams.rb_node;
 	while (*link) {
 		struct tquic_stream *entry;
@@ -592,7 +592,7 @@ struct tquic_stream *tquic_stream_open(struct tquic_connection *conn, bool bidi)
 	rb_link_node(&stream->node, parent, link);
 	rb_insert_color(&stream->node, &conn->streams);
 	conn->stats.streams_opened++;
-	spin_unlock(&conn->lock);
+	spin_unlock_bh(&conn->lock);
 
 	return stream;
 }
@@ -603,10 +603,10 @@ void tquic_stream_close(struct tquic_stream *stream)
 	struct tquic_connection *conn = stream->conn;
 	struct sk_buff *skb;
 
-	spin_lock(&conn->lock);
+	spin_lock_bh(&conn->lock);
 	rb_erase(&stream->node, &conn->streams);
 	conn->stats.streams_closed++;
-	spin_unlock(&conn->lock);
+	spin_unlock_bh(&conn->lock);
 
 	/* Purge with proper memory accounting */
 	while ((skb = skb_dequeue(&stream->send_buf)) != NULL) {
