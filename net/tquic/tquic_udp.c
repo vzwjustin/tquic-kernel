@@ -1751,10 +1751,12 @@ int tquic_udp_encap_init(struct tquic_sock *tsk)
 		return -EINVAL;
 
 	conn = tsk->conn;
-	if (!conn || !conn->active_path)
+	if (!conn)
 		return -EINVAL;
 
-	path = conn->active_path;
+	path = READ_ONCE(conn->active_path);
+	if (!path)
+		return -EINVAL;
 
 	/* Seed local address from bound socket if path hasn't been set yet. */
 	if (path->local_addr.ss_family == 0 &&
@@ -1801,7 +1803,7 @@ int tquic_udp_send(struct tquic_sock *tsk, struct sk_buff *skb,
 	}
 
 	if (!path)
-		path = conn->active_path;
+		path = READ_ONCE(conn->active_path);
 	if (!path) {
 		kfree_skb(skb);
 		return -EINVAL;

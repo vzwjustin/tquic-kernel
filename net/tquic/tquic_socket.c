@@ -715,6 +715,8 @@ int tquic_sock_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 	lock_sock(sk);
 	tsk = tquic_sk(sk);
 	conn = tsk->conn;
+	if (conn)
+		tquic_conn_get(conn);
 	release_sock(sk);
 
 	switch (cmd) {
@@ -726,12 +728,16 @@ int tquic_sock_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 		int ret;
 
 		/* Must be connected */
-		if (!conn || conn->state != TQUIC_CONN_CONNECTED)
-			return -ENOTCONN;
+		if (!conn || conn->state != TQUIC_CONN_CONNECTED) {
+			ret = -ENOTCONN;
+			goto out;
+		}
 
 		/* Copy args from userspace */
-		if (copy_from_user(&args, uarg, sizeof(args)))
-			return -EFAULT;
+		if (copy_from_user(&args, uarg, sizeof(args))) {
+			ret = -EFAULT;
+			goto out;
+		}
 
 		/*
 		 * CF-083: Validate reserved field is zeroed and flags
@@ -739,11 +745,15 @@ int tquic_sock_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 		 * sets reserved fields -- this ensures forward
 		 * compatibility when new fields are added.
 		 */
-		if (args.reserved != 0)
-			return -EINVAL;
+		if (args.reserved != 0) {
+			ret = -EINVAL;
+			goto out;
+		}
 
-		if (args.flags & ~((__u32)TQUIC_STREAM_UNIDI))
-			return -EINVAL;
+		if (args.flags & ~((__u32)TQUIC_STREAM_UNIDI)) {
+			ret = -EINVAL;
+			goto out;
+		}
 
 		is_bidi = !(args.flags & TQUIC_STREAM_UNIDI);
 		nonblock = !!(sock->file->f_flags & O_NONBLOCK);
@@ -754,12 +764,13 @@ int tquic_sock_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 		 */
 		ret = tquic_wait_for_stream_credit(conn, is_bidi, nonblock);
 		if (ret < 0)
-			return ret;
+			goto out;
 
 		/* Create stream socket */
-		ret = tquic_stream_socket_create(conn, sk, args.flags, &stream_id);
+		ret = tquic_stream_socket_create(conn, sk, args.flags,
+						 &stream_id);
 		if (ret < 0)
-			return ret;
+			goto out;
 
 		/*
 		 * CF-083: Zero reserved field before copying back to
@@ -780,13 +791,20 @@ int tquic_sock_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 			 ret, stream_id);
 
 		/* Return the file descriptor */
-		return ret;
+		goto out;
 	}
 
 	default:
 		/* Fall back to inet_ioctl for standard socket ioctls */
+		if (conn)
+			tquic_conn_put(conn);
 		return inet_ioctl(sock, cmd, arg);
 	}
+
+out:
+	if (conn)
+		tquic_conn_put(conn);
+	return ret;
 }
 
 /*

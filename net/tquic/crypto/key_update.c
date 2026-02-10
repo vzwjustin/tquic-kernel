@@ -164,8 +164,11 @@ static int tquic_ku_hkdf_expand_label(struct crypto_shash *hash,
 		if (ret)
 			goto out;
 
-		t[0] = i + 1;
-		ret = crypto_shash_update(desc, t, 1);
+		{
+			u8 counter = i + 1;
+
+			ret = crypto_shash_update(desc, &counter, 1);
+		}
 		if (ret)
 			goto out;
 

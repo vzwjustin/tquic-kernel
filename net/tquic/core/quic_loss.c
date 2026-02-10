@@ -1034,7 +1034,15 @@ void tquic_set_loss_detection_timer(struct tquic_connection *conn)
 	pto = tquic_rtt_pto_for_space(&conn->active_path->rtt,
 				      (u8)pto_space,
 				      conn->handshake_confirmed);
-	pto <<= conn->pto_count;  /* Exponential backoff */
+	/* Cap exponential backoff to prevent shift overflow and bound PTO */
+	{
+		u8 shift = min_t(u8, conn->pto_count, 30);
+
+		pto <<= shift;
+		/* Cap maximum PTO to 60 seconds */
+		if (pto > 60000000ULL)
+			pto = 60000000ULL;
+	}
 
 	if (conn->time_of_last_ack_eliciting)
 		timeout = ktime_add_ms(conn->time_of_last_ack_eliciting, pto);

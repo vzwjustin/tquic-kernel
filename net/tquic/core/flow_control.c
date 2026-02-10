@@ -662,14 +662,19 @@ int tquic_fc_stream_data_sent(struct tquic_fc_stream_state *stream, u64 bytes)
 
 	spin_lock_irqsave(&stream->lock, flags);
 
-	if (stream->data_sent + bytes > stream->max_data_remote) {
-		stream->blocked_at = stream->max_data_remote;
-		ret = -ENOSPC;
-	} else {
-		stream->data_sent += bytes;
+	{
+		u64 sum;
 
-		if (stream->data_sent >= stream->max_data_remote)
+		if (check_add_overflow(stream->data_sent, bytes, &sum) ||
+		    sum > stream->max_data_remote) {
 			stream->blocked_at = stream->max_data_remote;
+			ret = -ENOSPC;
+		} else {
+			stream->data_sent += bytes;
+
+			if (stream->data_sent >= stream->max_data_remote)
+				stream->blocked_at = stream->max_data_remote;
+		}
 	}
 
 	spin_unlock_irqrestore(&stream->lock, flags);
@@ -1536,8 +1541,17 @@ void tquic_fc_release_credit(struct tquic_fc_state *fc,
 			     struct tquic_fc_stream_state *stream,
 			     u64 bytes)
 {
-	/* Credits are not actually reserved until committed */
-	/* This is a no-op in our implementation */
+	unsigned long flags;
+
+	if (!stream || bytes == 0)
+		return;
+
+	spin_lock_irqsave(&stream->lock, flags);
+	if (stream->data_reserved >= bytes)
+		stream->data_reserved -= bytes;
+	else
+		stream->data_reserved = 0;
+	spin_unlock_irqrestore(&stream->lock, flags);
 }
 EXPORT_SYMBOL_GPL(tquic_fc_release_credit);
 
@@ -1555,6 +1569,18 @@ void tquic_fc_commit_credit(struct tquic_fc_state *fc,
 {
 	if (!fc || !stream)
 		return;
+
+	/* Reduce reserved credit now that transmission succeeded */
+	{
+		unsigned long flags;
+
+		spin_lock_irqsave(&stream->lock, flags);
+		if (stream->data_reserved >= bytes)
+			stream->data_reserved -= bytes;
+		else
+			stream->data_reserved = 0;
+		spin_unlock_irqrestore(&stream->lock, flags);
+	}
 
 	/* Update connection level */
 	tquic_fc_conn_data_sent(fc, bytes);

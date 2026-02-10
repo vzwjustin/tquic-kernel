@@ -871,10 +871,9 @@ int tquic_pref_addr_client_on_validated(struct tquic_connection *conn,
 		return -EINVAL;
 	}
 
-	old_path = conn->active_path;
-
 	/* Switch to the new path */
 	spin_lock_bh(&conn->lock);
+	old_path = conn->active_path;
 	conn->active_path = path;
 	path->state = TQUIC_PATH_ACTIVE;
 	if (old_path && old_path != path)

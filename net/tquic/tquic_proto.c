@@ -998,21 +998,28 @@ static void tquic_net_close_connection(struct tquic_connection *conn,
 	 * We avoid entering the full closing/draining state machine since
 	 * we need immediate cleanup.
 	 */
+	spin_lock_bh(&conn->lock);
 	if (conn->state == TQUIC_CONN_CONNECTED ||
 	    conn->state == TQUIC_CONN_CONNECTING) {
 		/*
 		 * Attempt to send CONNECTION_CLOSE without waiting.
-		 * tquic_send_connection_close handles state validation internally.
+		 * tquic_send_connection_close handles state validation
+		 * internally.  Drop the lock while sending since it may
+		 * sleep or acquire other locks.
 		 * Errors are ignored - we're shutting down regardless.
 		 */
-		tquic_send_connection_close(conn, 0x00, "namespace shutdown");
+		spin_unlock_bh(&conn->lock);
+		tquic_send_connection_close(conn, 0x00,
+					    "namespace shutdown");
+		spin_lock_bh(&conn->lock);
 	}
 
 	/*
 	 * Mark connection as closed immediately to prevent any further
 	 * packet processing or state machine activity.
 	 */
-	conn->state = TQUIC_CONN_CLOSED;
+	WRITE_ONCE(conn->state, TQUIC_CONN_CLOSED);
+	spin_unlock_bh(&conn->lock);
 
 	/*
 	 * Unlink socket from connection before destroying.
@@ -1025,7 +1032,7 @@ static void tquic_net_close_connection(struct tquic_connection *conn,
 		struct tquic_sock *tsk = tquic_sk(sk);
 
 		if (tsk)
-			tsk->conn = NULL;
+			WRITE_ONCE(tsk->conn, NULL);
 		conn->sk = NULL;
 	}
 

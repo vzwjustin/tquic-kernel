@@ -1090,6 +1090,7 @@ struct tquic_connection {
 
 	/* Connection ID pool (tquic_cid.c) */
 	void *cid_pool;
+	u64 cid_retire_prior_to;	/* Last retire_prior_to from peer */
 
 	/* Path manager state */
 	struct tquic_pm_state *pm;

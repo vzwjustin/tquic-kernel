@@ -44,6 +44,7 @@
 #include "rate_limit.h"
 #include "security_hardening.h"
 #include "tquic_cid.h"
+#include "core/flow_control.h"
 
 /* Per-packet RX decryption buffer slab cache (allocated in tquic_main.c) */
 #define TQUIC_RX_BUF_SIZE	2048
@@ -303,9 +304,10 @@ static struct tquic_path *tquic_find_path_by_addr(struct tquic_connection *conn,
 	 * CF-179: Fast-path -- check the connection's active_path first
 	 * without taking the lock.  Most packets arrive on the active
 	 * path, so this avoids the spinlock overhead on the hot path.
-	 * READ_ONCE prevents the compiler from re-reading the pointer.
+	 * The caller holds rcu_read_lock(), so use rcu_dereference()
+	 * for proper RCU annotation.
 	 */
-	path = READ_ONCE(conn->active_path);
+	path = rcu_dereference(conn->active_path);
 	if (path && tquic_sockaddr_equal(&path->remote_addr, addr))
 		return path;
 
@@ -541,8 +543,11 @@ static int tquic_process_version_negotiation(struct tquic_connection *conn,
 
 	/* Check each offered version (cap log output to prevent flooding) */
 	for (i = 0; i + 4 <= versions_len; i += 4) {
-		u32 version = (versions[i] << 24) | (versions[i + 1] << 16) |
-			      (versions[i + 2] << 8) | versions[i + 3];
+		/* CF-157: cast to u32 before shift to avoid signed overflow */
+		u32 version = ((u32)versions[i] << 24) |
+			      ((u32)versions[i + 1] << 16) |
+			      ((u32)versions[i + 2] << 8) |
+			      (u32)versions[i + 3];
 
 		/*
 		 * RFC 9000 Section 6.1: A client MUST discard a VN packet
@@ -817,7 +822,14 @@ static int tquic_process_ack_frame(struct tquic_rx_ctx *ctx)
 		/* C-5: use negotiated ack_delay_exponent per RFC 9000 Section 19.3 */
 		u8 ade = (ctx->conn) ?
 			ctx->conn->remote_params.ack_delay_exponent : 3;
-		u64 ack_delay_us = ack_delay << ade;
+		u64 ack_delay_us;
+
+		/* Clamp ade to RFC 9000 maximum of 20 */
+		ade = min_t(u8, ade, 20);
+		ack_delay_us = ack_delay << ade;
+		/* Cap to 16 seconds to prevent absurd values */
+		if (ack_delay_us > 16000000ULL)
+			ack_delay_us = 16000000ULL;
 		u64 rtt_us;
 
 		/*
@@ -1099,6 +1111,45 @@ static int tquic_process_stream_frame(struct tquic_rx_ctx *ctx)
 		}
 	}
 
+	/*
+	 * Validate BEFORE allocating/enqueuing to prevent SKB leaks.
+	 * All checks that can return -EPROTO must happen before the
+	 * skb is allocated and enqueued into stream->recv_buf.
+	 */
+
+	/*
+	 * SECURITY: Validate stream offset + length against RFC 9000 limit.
+	 * Per Section 4.5: "An endpoint MUST treat receipt of data at or
+	 * beyond the final size as a connection error." The maximum stream
+	 * offset is 2^62-1. Check for overflow before proceeding.
+	 */
+	if (offset > ((1ULL << 62) - 1) - length)
+		return -EPROTO;
+
+	if (fin) {
+		u64 final_size = offset + length;
+
+		/*
+		 * CF-349: RFC 9000 Section 4.5 - Final size consistency.
+		 * If we already know the final size, it must match.
+		 * Also, data beyond the final size is a protocol error.
+		 */
+		if (stream->fin_received && stream->final_size != final_size)
+			return -EPROTO;
+	} else if (stream->fin_received) {
+		/* Data beyond the known final size is an error */
+		if (offset + length > stream->final_size)
+			return -EPROTO;
+	}
+
+	/*
+	 * RFC 9000 Section 4.1: Enforce receive flow control limits.
+	 * Check both stream-level and connection-level limits before
+	 * accepting the data.
+	 */
+	if (tquic_flow_check_recv_limits(stream, offset, length))
+		return -EDQUOT;
+
 	/* Copy data to stream receive buffer */
 	data_skb = alloc_skb(length, GFP_ATOMIC);
 	if (!data_skb)
@@ -1119,38 +1170,16 @@ static int tquic_process_stream_frame(struct tquic_rx_ctx *ctx)
 
 	skb_queue_tail(&stream->recv_buf, data_skb);
 
-	/*
-	 * SECURITY: Validate stream offset + length against RFC 9000 limit.
-	 * Per Section 4.5: "An endpoint MUST treat receipt of data at or
-	 * beyond the final size as a connection error." The maximum stream
-	 * offset is 2^62-1. Check for overflow before
-	 * updating recv_offset.
-	 */
-	if (offset > ((1ULL << 62) - 1) - length) {
-		/* Would exceed 2^62-1 - protocol error */
-		return -EPROTO;
-	}
+	/* Update recv_offset and final_size after successful enqueue */
 	stream->recv_offset = max(stream->recv_offset, offset + length);
 
-	if (fin) {
-		u64 final_size = offset + length;
-
-		/*
-		 * CF-349: RFC 9000 Section 4.5 - Final size consistency.
-		 * If we already know the final size, it must match.
-		 * Also, data beyond the final size is a protocol error.
-		 */
-		if (stream->fin_received && stream->final_size != final_size)
-			return -EPROTO;
-		if (!stream->fin_received) {
-			stream->fin_received = true;
-			stream->final_size = final_size;
-		}
-	} else if (stream->fin_received) {
-		/* Data beyond the known final size is an error */
-		if (offset + length > stream->final_size)
-			return -EPROTO;
+	if (fin && !stream->fin_received) {
+		stream->fin_received = true;
+		stream->final_size = offset + length;
 	}
+
+	/* Notify flow control of received data */
+	tquic_flow_on_stream_data_recvd(stream, offset, length);
 
 	ctx->offset += length;
 	ctx->ack_eliciting = true;
@@ -1356,12 +1385,26 @@ static int tquic_process_new_connection_id_frame(struct tquic_rx_ctx *ctx)
 		return -EINVAL;
 	}
 
-	/* Retire CIDs with sequence numbers below retire_prior_to */
+	/*
+	 * Retire CIDs with sequence numbers below retire_prior_to.
+	 * Only retire newly-covered CIDs to prevent DoS from large
+	 * retire_prior_to values (up to 2^62) causing kernel soft lockup.
+	 * Also cap per-frame iteration as defense in depth.
+	 */
 	if (ctx->conn && retire_prior_to > 0) {
-		u64 i;
+		u64 prev_retire = ctx->conn->cid_retire_prior_to;
 
-		for (i = 0; i < retire_prior_to; i++)
-			tquic_conn_retire_cid(ctx->conn, i, false);
+		if (retire_prior_to > prev_retire) {
+			u64 i;
+			u64 count = 0;
+
+			for (i = prev_retire; i < retire_prior_to; i++) {
+				tquic_conn_retire_cid(ctx->conn, i, false);
+				if (++count >= 256)
+					break;
+			}
+			ctx->conn->cid_retire_prior_to = retire_prior_to;
+		}
 	}
 
 	ctx->ack_eliciting = true;

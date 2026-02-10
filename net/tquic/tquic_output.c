@@ -1833,6 +1833,11 @@ int tquic_xmit(struct tquic_connection *conn, struct tquic_stream *stream,
 	if (unlikely(!conn || !stream))
 		return -EINVAL;
 
+	/* RFC 9000 Section 10.2.2: MUST NOT send packets in draining state */
+	if (unlikely(READ_ONCE(conn->state) == TQUIC_CONN_DRAINING ||
+		     READ_ONCE(conn->state) == TQUIC_CONN_CLOSED))
+		return -ESHUTDOWN;
+
 	if (unlikely(conn->state != TQUIC_CONN_CONNECTED))
 		return -ENOTCONN;
 

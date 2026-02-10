@@ -285,8 +285,10 @@ static int tquic_hkdf_expand_label(struct crypto_shash *hash,
 	 * Max content: 2 (length) + 1 (prefix_len) + 6 ("tls13 ") +
 	 *              label_len + 1 (context len) <= 256
 	 */
-	if (label_len > 245)
-		return -EINVAL;
+	if (label_len > 245) {
+		ret = -EINVAL;
+		goto out_zeroize;
+	}
 
 	/* Construct HKDF label: length + "tls13 " + label + context (empty) */
 	*p++ = (out_len >> 8) & 0xff;
@@ -344,6 +346,7 @@ static int tquic_hkdf_expand_label(struct crypto_shash *hash,
 
 out_zeroize:
 	memzero_explicit(t, sizeof(t));
+	memzero_explicit(hkdf_label, sizeof(hkdf_label));
 	return ret;
 }
 
