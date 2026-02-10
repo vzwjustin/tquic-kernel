@@ -787,15 +787,21 @@ static int tquic_process_ack_frame(struct tquic_rx_ctx *ctx)
 		 */
 		if (has_ecn && ecn_ce > 0) {
 			/*
-			 * Track previous ECN-CE count to detect increase.
-			 * For now, treat any reported CE count as new marks.
-			 * A full implementation would compare against
-			 * previously reported values.
+			 * RFC 9002 Section 7.1: respond only to *increases*
+			 * in the peer's reported CE count, not the absolute
+			 * value.  The peer sends cumulative counters in each
+			 * ACK_ECN frame.
 			 */
-			tquic_cong_on_ecn(ctx->path, ecn_ce);
+			u64 prev_ce = ctx->path->ecn_ce_count_prev;
+			u64 delta = (ecn_ce > prev_ce) ? ecn_ce - prev_ce : 0;
 
-			tquic_dbg("ECN-CE on path %u: ce=%llu ect0=%llu ect1=%llu\n",
-				 ctx->path->path_id, ecn_ce, ecn_ect0, ecn_ect1);
+			if (delta > 0) {
+				tquic_cong_on_ecn(ctx->path, delta);
+				ctx->path->ecn_ce_count_prev = ecn_ce;
+			}
+
+			tquic_dbg("ECN-CE on path %u: ce=%llu (delta=%llu) ect0=%llu ect1=%llu\n",
+				 ctx->path->path_id, ecn_ce, delta, ecn_ect0, ecn_ect1);
 		}
 	}
 

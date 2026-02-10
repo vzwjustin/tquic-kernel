@@ -855,7 +855,13 @@ static int tquic_hs_update_transcript(struct tquic_handshake *hs,
 	}
 
 	if (new_len > hs->transcript_alloc) {
-		u32 new_alloc = max(new_len * 2, 4096U);
+		u32 new_alloc;
+
+		/* Guard against u32 overflow in doubling */
+		if (new_len > U32_MAX / 2)
+			new_alloc = TQUIC_MAX_TRANSCRIPT_SIZE;
+		else
+			new_alloc = max(new_len * 2, 4096U);
 
 		new_buf = krealloc(hs->transcript, new_alloc, GFP_KERNEL);
 		if (!new_buf)

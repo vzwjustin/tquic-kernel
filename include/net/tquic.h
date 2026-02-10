@@ -382,6 +382,11 @@ struct tquic_path {
 	 */
 	struct tquic_ecn_state ecn;
 
+	/* Previous ECN-CE count from peer's ACK_ECN frame, used to
+	 * compute deltas per RFC 9002 Section 7.1.
+	 */
+	u64 ecn_ce_count_prev;
+
 	void *cong;  /* Congestion control state */
 	struct tquic_cong_ops *cong_ops;  /* Current CC algorithm ops */
 

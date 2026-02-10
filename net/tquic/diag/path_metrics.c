@@ -28,6 +28,11 @@
 #include <net/genetlink.h>
 #include <net/sock.h>
 #include <net/net_namespace.h>
+
+/* Cap for netlink allocations to prevent unbounded memory use */
+#ifndef TQUIC_MAX_PATHS
+#define TQUIC_MAX_PATHS		16
+#endif
 #include <net/tquic.h>
 #include "../tquic_compat.h"
 #include <uapi/linux/tquic.h>
@@ -465,8 +470,14 @@ static int tquic_nl_get_all_paths(struct sk_buff *skb, struct genl_info *info)
 	if (!conn)
 		return -ENOENT;
 
-	/* Allocate response message */
-	msg = nlmsg_new(NLMSG_DEFAULT_SIZE * conn->num_paths, GFP_KERNEL);
+	/* Allocate response message -- cap to prevent unbounded allocation
+	 * from attacker-influenced num_paths values.
+	 */
+	{
+		u32 capped_paths = min_t(u32, conn->num_paths, TQUIC_MAX_PATHS);
+
+		msg = nlmsg_new(NLMSG_DEFAULT_SIZE * capped_paths, GFP_KERNEL);
+	}
 	if (!msg) {
 		tquic_conn_put(conn);
 		return -ENOMEM;
@@ -571,7 +582,9 @@ static void tquic_metrics_send_update(struct work_struct *work)
 	if (!conn || conn->state == TQUIC_CONN_CLOSED)
 		return;
 
-	msg = nlmsg_new(NLMSG_DEFAULT_SIZE * conn->num_paths, GFP_KERNEL);
+	msg = nlmsg_new(NLMSG_DEFAULT_SIZE * min_t(u32, conn->num_paths,
+						   TQUIC_MAX_PATHS),
+			GFP_KERNEL);
 	if (!msg)
 		return;
 
