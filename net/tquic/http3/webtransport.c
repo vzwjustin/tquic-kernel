@@ -25,6 +25,13 @@ static struct kmem_cache *wt_session_cache;
 static struct kmem_cache *wt_stream_cache;
 
 /*
+ * Maximum size of the capsule reassembly buffer per session.
+ * This limits memory consumption from peers that send very large
+ * capsules or drip-feed data to grow the buffer indefinitely.
+ */
+#define WT_MAX_CAPSULE_BUF_SIZE		(64 * 1024)	/* 64 KB */
+
+/*
  * =============================================================================
  * Module Initialization
  * =============================================================================
@@ -94,24 +101,35 @@ void webtransport_context_destroy(struct webtransport_context *ctx)
 {
 	struct webtransport_session *session, *tmp;
 	unsigned long flags;
+	LIST_HEAD(close_list);
 
 	if (!ctx)
 		return;
 
+	/*
+	 * Move all sessions to a local list under the lock, then
+	 * release the lock before calling webtransport_session_put()
+	 * which may sleep.  This avoids the previous pattern of
+	 * dropping and reacquiring the lock during iteration, which
+	 * allowed the list to be modified by concurrent operations
+	 * while we were iterating over it.
+	 */
 	spin_lock_irqsave(&ctx->lock, flags);
 
-	/* Close all sessions */
 	list_for_each_entry_safe(session, tmp, &ctx->session_list, list) {
 		list_del(&session->list);
 		rb_erase(&session->tree_node, &ctx->sessions);
-		spin_unlock_irqrestore(&ctx->lock, flags);
-
-		webtransport_session_put(session);
-
-		spin_lock_irqsave(&ctx->lock, flags);
+		ctx->session_count--;
+		list_add(&session->list, &close_list);
 	}
 
 	spin_unlock_irqrestore(&ctx->lock, flags);
+
+	/* Now close sessions without holding the spinlock */
+	list_for_each_entry_safe(session, tmp, &close_list, list) {
+		list_del(&session->list);
+		webtransport_session_put(session);
+	}
 
 	kfree(ctx);
 }
@@ -1889,11 +1907,26 @@ int wt_process_session_stream_data(struct webtransport_session *session,
 			/* Need more data - buffer the remainder */
 			if (len - offset > 0) {
 				size_t remain = len - offset;
+				size_t new_size;
 				u8 *newbuf;
 
+				new_size = session->capsule_buf_used + remain;
+
+				/*
+				 * Enforce maximum capsule buffer size to
+				 * prevent unbounded memory growth from a
+				 * malicious or misbehaving peer.
+				 */
+				if (new_size > WT_MAX_CAPSULE_BUF_SIZE) {
+					pr_warn("webtransport: session %llu capsule buffer limit exceeded (%zu > %u)\n",
+						session->session_id,
+						new_size,
+						WT_MAX_CAPSULE_BUF_SIZE);
+					return -ENOBUFS;
+				}
+
 				newbuf = krealloc(session->capsule_buf,
-						  session->capsule_buf_used + remain,
-						  GFP_KERNEL);
+						  new_size, GFP_KERNEL);
 				if (!newbuf)
 					return -ENOMEM;
 

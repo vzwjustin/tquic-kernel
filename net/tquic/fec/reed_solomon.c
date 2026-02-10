@@ -579,13 +579,32 @@ int tquic_rs_decode(const u8 **symbols, const u16 *lengths,
 	if (num_erasures > 32 || max_len > 65535)
 		return -EINVAL;
 
-	/* Allocate working buffers using overflow-safe kmalloc_array */
+	/*
+	 * Allocate working buffers individually so that earlier successful
+	 * allocations are freed via the out label if a later one fails.
+	 * The out label calls kfree() on all four pointers which are
+	 * initialized to NULL by the caller/declaration.
+	 */
 	decode_matrix = kmalloc_array(num_erasures, num_erasures, GFP_ATOMIC);
-	inv_matrix = kmalloc_array(num_erasures, num_erasures, GFP_ATOMIC);
-	syndrome = kmalloc_array(num_erasures, max_len, GFP_ATOMIC);
-	repair_used = kmalloc_array(num_erasures, sizeof(int), GFP_ATOMIC);
+	if (!decode_matrix) {
+		ret = -ENOMEM;
+		goto out;
+	}
 
-	if (!decode_matrix || !inv_matrix || !syndrome || !repair_used) {
+	inv_matrix = kmalloc_array(num_erasures, num_erasures, GFP_ATOMIC);
+	if (!inv_matrix) {
+		ret = -ENOMEM;
+		goto out;
+	}
+
+	syndrome = kmalloc_array(num_erasures, max_len, GFP_ATOMIC);
+	if (!syndrome) {
+		ret = -ENOMEM;
+		goto out;
+	}
+
+	repair_used = kmalloc_array(num_erasures, sizeof(int), GFP_ATOMIC);
+	if (!repair_used) {
 		ret = -ENOMEM;
 		goto out;
 	}

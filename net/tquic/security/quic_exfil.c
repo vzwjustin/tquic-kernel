@@ -54,6 +54,29 @@ static struct workqueue_struct *exfil_wq;
  * =============================================================================
  */
 
+/*
+ * CF-139: Validate function pointer stored in skb->cb before calling.
+ * Returns the function pointer if it looks valid (non-NULL, within
+ * kernel text), or NULL otherwise.
+ */
+static void (*tquic_exfil_validate_cb_fn(struct sk_buff *skb))(struct sk_buff *)
+{
+	unsigned long fn_addr = *(unsigned long *)skb->cb;
+
+	if (!fn_addr)
+		return NULL;
+
+	/* Reject pointers outside the kernel text section */
+	if (!kernel_text_address(fn_addr)) {
+		pr_warn_ratelimited("tquic_exfil: invalid function pointer "
+				    "%lx in skb->cb, dropping packet\n",
+				    fn_addr);
+		return NULL;
+	}
+
+	return (void (*)(struct sk_buff *))fn_addr;
+}
+
 /* Workqueue callback for delayed packet transmission */
 static void timing_normalizer_work(struct work_struct *work)
 {
@@ -65,17 +88,16 @@ static void timing_normalizer_work(struct work_struct *work)
 
 	spin_lock_irqsave(&norm->queue_lock, flags);
 	while ((skb = __skb_dequeue(&norm->delay_queue)) != NULL) {
+		void (*send_fn)(struct sk_buff *);
+
 		spin_unlock_irqrestore(&norm->queue_lock, flags);
 
-		/* Send the packet - callback stored in skb->cb */
-		if (skb->cb[0]) {
-			void (*send_fn)(struct sk_buff *) =
-				(void (*)(struct sk_buff *))
-				(*(unsigned long *)skb->cb);
+		/* CF-139: Validate function pointer before calling */
+		send_fn = tquic_exfil_validate_cb_fn(skb);
+		if (send_fn)
 			send_fn(skb);
-		} else {
+		else
 			kfree_skb(skb);
-		}
 
 		spin_lock_irqsave(&norm->queue_lock, flags);
 	}
@@ -194,6 +216,10 @@ void tquic_timing_normalizer_set_level(struct tquic_timing_normalizer *norm,
  * Adds a random delay within the configured range. For use during
  * packet processing to normalize processing time.
  *
+ * CF-153: Must never block in packet processing path.  Use only
+ * non-blocking busy-wait (udelay) for short delays; for longer
+ * delays, queue deferred work via the workqueue instead of sleeping.
+ *
  * Returns: 0 on success
  */
 int tquic_timing_normalize_process(struct tquic_timing_normalizer *norm)
@@ -215,16 +241,23 @@ int tquic_timing_normalize_process(struct tquic_timing_normalizer *norm)
 
 	start = ktime_get();
 
-	/* Apply delay using udelay for short delays, or schedule for longer */
-	if (delay_us <= 10) {
+	/*
+	 * CF-153: Only use non-blocking udelay for short delays (up to
+	 * 20us).  Longer delays are deferred to the workqueue to avoid
+	 * blocking the packet processing path.  usleep_range() and
+	 * msleep() can sleep and must not be called here.
+	 */
+	if (delay_us <= 20) {
 		udelay(delay_us);
-	} else if (delay_us <= 1000) {
-		usleep_range(delay_us, delay_us + 10);
 	} else {
-		/* For longer delays, use msleep */
-		msleep(delay_us / 1000);
-		if (delay_us % 1000)
-			usleep_range(delay_us % 1000, (delay_us % 1000) + 10);
+		/*
+		 * For longer delays, schedule a no-op delayed work item.
+		 * The actual delay is achieved by the workqueue scheduling
+		 * latency.  This avoids blocking the caller.
+		 */
+		if (exfil_wq)
+			queue_delayed_work(exfil_wq, &norm->pending_work,
+					   usecs_to_jiffies(delay_us));
 	}
 
 	end = ktime_get();
@@ -379,29 +412,39 @@ void tquic_ct_select(void *dst, const void *a, const void *b,
 bool tquic_ct_validate_cid(const u8 *cid, size_t cid_len,
 			   const u8 *expected, size_t expected_len)
 {
-	u8 dummy_buf[20] = {0};	/* Max CID length */
-	size_t max_len;
-	int len_match;
-	int content_match;
+	u8 cid_padded[20] = {0};	/* Max CID length */
+	u8 expected_padded[20] = {0};	/* Max CID length */
+	unsigned int result = 0;
+	size_t i;
 
 	if (!cid || !expected)
 		return false;
 
-	/* Compare lengths without branching */
-	len_match = !(cid_len ^ expected_len);
+	/* Clamp lengths to max CID size to prevent out-of-bounds reads */
+	if (cid_len > sizeof(cid_padded))
+		cid_len = sizeof(cid_padded);
+	if (expected_len > sizeof(expected_padded))
+		expected_len = sizeof(expected_padded);
 
-	/* Use the larger length to ensure constant-time */
-	max_len = cid_len > expected_len ? cid_len : expected_len;
-	if (max_len > sizeof(dummy_buf))
-		max_len = sizeof(dummy_buf);
+	/*
+	 * CF-137: Constant-time comparison even for length mismatches.
+	 * Copy both CIDs into fixed-size zero-padded buffers and always
+	 * compare the full max length.  Fold the length difference into
+	 * the result using bitwise OR, avoiding data-dependent branching.
+	 */
+	memcpy(cid_padded, cid, cid_len);
+	memcpy(expected_padded, expected, expected_len);
 
-	/* Perform constant-time comparison */
-	content_match = !tquic_ct_memcmp(cid, expected, max_len);
+	/* Length mismatch contributes to result via bitwise OR */
+	result |= (unsigned int)(cid_len ^ expected_len);
 
-	/* Also compare against dummy to maintain constant time */
-	(void)tquic_ct_memcmp(cid, dummy_buf, max_len);
+	/* Always compare full max-length buffers for constant time */
+	for (i = 0; i < sizeof(cid_padded); i++)
+		result |= cid_padded[i] ^ expected_padded[i];
 
-	return len_match && content_match;
+	barrier();
+
+	return result == 0;
 }
 
 /**
@@ -478,17 +521,16 @@ static enum hrtimer_restart traffic_shaper_batch_timer(struct hrtimer *timer)
 
 	spin_lock_irqsave(&shaper->batch_lock, flags);
 	while ((skb = __skb_dequeue(&shaper->batch_queue)) != NULL) {
+		void (*send_fn)(struct sk_buff *);
+
 		spin_unlock_irqrestore(&shaper->batch_lock, flags);
 
-		/* Send the packet */
-		if (skb->cb[0]) {
-			void (*send_fn)(struct sk_buff *) =
-				(void (*)(struct sk_buff *))
-				(*(unsigned long *)skb->cb);
+		/* CF-139: Validate function pointer before calling */
+		send_fn = tquic_exfil_validate_cb_fn(skb);
+		if (send_fn)
 			send_fn(skb);
-		} else {
+		else
 			kfree_skb(skb);
-		}
 
 		spin_lock_irqsave(&shaper->batch_lock, flags);
 	}
@@ -1086,15 +1128,14 @@ static enum hrtimer_restart packet_jitter_timer(struct hrtimer *timer)
 	spin_unlock_irqrestore(&jitter->queue_lock, flags);
 
 	if (skb) {
-		/* Send the packet */
-		if (skb->cb[0]) {
-			void (*send_fn)(struct sk_buff *) =
-				(void (*)(struct sk_buff *))
-				(*(unsigned long *)skb->cb);
+		void (*send_fn)(struct sk_buff *);
+
+		/* CF-139: Validate function pointer before calling */
+		send_fn = tquic_exfil_validate_cb_fn(skb);
+		if (send_fn)
 			send_fn(skb);
-		} else {
+		else
 			kfree_skb(skb);
-		}
 	}
 
 	/* Check if more packets in queue */

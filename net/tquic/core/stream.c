@@ -48,6 +48,14 @@
 #define STREAM_TYPE_CLIENT_UNI		0x02
 #define STREAM_TYPE_SERVER_UNI		0x03
 
+/*
+ * SECURITY FIX (CF-136): Define a named constant for "unknown final size"
+ * instead of using bare -1, which relies on implicit signed-to-unsigned
+ * conversion. Use S64_MAX as the sentinel value for the s64 final_size
+ * field, avoiding signed overflow concerns.
+ */
+#define TQUIC_STREAM_SIZE_UNKNOWN	S64_MAX
+
 /* Memory pool initialization */
 
 /**
@@ -174,7 +182,7 @@ static struct tquic_stream_ext *tquic_stream_ext_alloc(
 	ext->weight = 16;
 	ext->sndbuf_limit = TQUIC_STREAM_SNDBUF_DEFAULT;
 	ext->rcvbuf_limit = TQUIC_STREAM_RCVBUF_DEFAULT;
-	ext->final_size = -1;
+	ext->final_size = TQUIC_STREAM_SIZE_UNKNOWN;
 
 	atomic_set(&ext->zerocopy_refs, 0);
 
@@ -271,8 +279,18 @@ static int tquic_stream_set_state(struct tquic_stream *stream,
 		break;
 
 	case TQUIC_STREAM_OPEN:
-		/* Can go to SIZE_KNOWN, DATA_SENT, RESET_SENT, RESET_RECVD */
-		if (new_state != TQUIC_STREAM_SIZE_KNOWN &&
+		/*
+		 * SECURITY FIX (CF-152): OPEN represents a bidirectional
+		 * stream with both send and recv sides active (RFC 9000
+		 * Section 3). Allow transitions to:
+		 * - SEND: recv side completed (peer sent FIN)
+		 * - RECV: send side completed (local sent FIN)
+		 * - SIZE_KNOWN, DATA_SENT: send-side completion
+		 * - RESET_SENT, RESET_RECVD: reset in either direction
+		 */
+		if (new_state != TQUIC_STREAM_SEND &&
+		    new_state != TQUIC_STREAM_RECV &&
+		    new_state != TQUIC_STREAM_SIZE_KNOWN &&
 		    new_state != TQUIC_STREAM_DATA_SENT &&
 		    new_state != TQUIC_STREAM_RESET_SENT &&
 		    new_state != TQUIC_STREAM_RESET_RECVD)
@@ -1147,6 +1165,18 @@ int tquic_stream_recv_data(struct tquic_stream_manager *mgr,
 		return -EINVAL;
 
 	spin_lock(&mgr->lock);
+
+	/*
+	 * SECURITY FIX (CF-233): Check for integer overflow before
+	 * the flow control comparison. If skb->len is large relative
+	 * to offset, their sum can wrap around u64, bypassing the
+	 * flow control check entirely and allowing unbounded data
+	 * injection.
+	 */
+	if (skb->len > U64_MAX - offset) {
+		spin_unlock(&mgr->lock);
+		return -EOVERFLOW;
+	}
 
 	/* Flow control check */
 	if (offset + skb->len > stream->max_recv_data) {

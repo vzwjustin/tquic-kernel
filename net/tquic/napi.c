@@ -48,15 +48,6 @@ static DEFINE_SPINLOCK(tquic_napi_list_lock);
 /* Virtual net_device for NAPI registration */
 static struct net_device *tquic_napi_dev;
 
-/* Per-netns NAPI statistics */
-struct tquic_napi_global_stats {
-	atomic64_t total_packets;
-	atomic64_t total_polls;
-	atomic64_t busy_poll_packets;
-};
-
-static struct tquic_napi_global_stats tquic_napi_global_stats;
-
 /* Per-CPU statistics for scalable stat updates */
 struct tquic_napi_pcpu_stats {
 	u64 total_packets;
@@ -305,7 +296,6 @@ static int tquic_napi_poll(struct napi_struct *napi, int budget)
 	start_time = ktime_get();
 	tn->stats.poll_cycles++;
 	this_cpu_inc(tquic_napi_pcpu_stats.total_polls);
-	atomic64_inc(&tquic_napi_global_stats.total_polls);
 
 	/*
 	 * Batch dequeue: take the lock once, splice the entire queue
@@ -344,7 +334,6 @@ static int tquic_napi_poll(struct napi_struct *napi, int budget)
 	/* Update statistics */
 	tn->stats.packets_polled += work_done;
 	this_cpu_add(tquic_napi_pcpu_stats.total_packets, work_done);
-	atomic64_add(work_done, &tquic_napi_global_stats.total_packets);
 
 	if (work_done == 0)
 		tn->stats.poll_empty++;
@@ -442,6 +431,7 @@ bool tquic_busy_poll(struct tquic_sock *sk, unsigned long budget)
 {
 	struct tquic_napi *tn;
 	struct sk_buff *skb;
+	struct sk_buff_head local_queue;
 	unsigned long work_done = 0;
 	unsigned long flags;
 
@@ -456,14 +446,20 @@ bool tquic_busy_poll(struct tquic_sock *sk, unsigned long budget)
 	tn->state = TQUIC_NAPI_STATE_BUSY_POLL;
 	tn->stats.busy_poll_cycles++;
 
-	/* Process packets up to budget */
-	while (work_done < budget) {
-		spin_lock_irqsave(&tn->lock, flags);
-		skb = __skb_dequeue(&tn->rx_queue);
-		if (skb)
-			atomic_dec(&tn->rx_queue_len);
-		spin_unlock_irqrestore(&tn->lock, flags);
+	/*
+	 * Batch-splice: take the lock once, move the entire queue to a
+	 * local list, then process without holding the lock (CF-023).
+	 */
+	__skb_queue_head_init(&local_queue);
 
+	spin_lock_irqsave(&tn->lock, flags);
+	skb_queue_splice_init(&tn->rx_queue, &local_queue);
+	atomic_set(&tn->rx_queue_len, 0);
+	spin_unlock_irqrestore(&tn->lock, flags);
+
+	/* Process packets up to budget from the local queue */
+	while (work_done < budget) {
+		skb = __skb_dequeue(&local_queue);
 		if (!skb)
 			break;
 
@@ -471,10 +467,19 @@ bool tquic_busy_poll(struct tquic_sock *sk, unsigned long budget)
 		work_done++;
 	}
 
+	/* Re-queue any unprocessed skbs back to the rx_queue */
+	if (!skb_queue_empty(&local_queue)) {
+		int remaining = skb_queue_len(&local_queue);
+
+		spin_lock_irqsave(&tn->lock, flags);
+		skb_queue_splice(&local_queue, &tn->rx_queue);
+		atomic_add(remaining, &tn->rx_queue_len);
+		spin_unlock_irqrestore(&tn->lock, flags);
+	}
+
 	/* Update statistics */
 	tn->stats.busy_poll_packets += work_done;
 	this_cpu_add(tquic_napi_pcpu_stats.busy_poll_packets, work_done);
-	atomic64_add(work_done, &tquic_napi_global_stats.busy_poll_packets);
 
 	/* Restore state */
 	tn->state = TQUIC_NAPI_STATE_ENABLED;
@@ -866,14 +871,10 @@ void tquic_napi_proc_show(struct seq_file *seq)
 {
 	struct tquic_napi *tn;
 	u64 total_packets, total_polls, busy_packets;
-	u64 pcpu_packets, pcpu_polls, pcpu_busy;
 
-	total_packets = atomic64_read(&tquic_napi_global_stats.total_packets);
-	total_polls = atomic64_read(&tquic_napi_global_stats.total_polls);
-	busy_packets = atomic64_read(&tquic_napi_global_stats.busy_poll_packets);
-
-	/* Aggregate per-CPU stats for more accurate accounting */
-	tquic_napi_aggregate_pcpu_stats(&pcpu_packets, &pcpu_polls, &pcpu_busy);
+	/* Use per-CPU aggregation as the single source of truth (CF-217) */
+	tquic_napi_aggregate_pcpu_stats(&total_packets, &total_polls,
+					&busy_packets);
 
 	seq_puts(seq, "TquicNapi:\n");
 	seq_printf(seq, "  TotalPacketsPolled: %llu\n", total_packets);
@@ -1054,11 +1055,6 @@ static const struct proc_ops tquic_napi_proc_ops = {
 int __init tquic_napi_subsys_init(void)
 {
 	struct proc_dir_entry *pde;
-
-	/* Initialize global stats */
-	atomic64_set(&tquic_napi_global_stats.total_packets, 0);
-	atomic64_set(&tquic_napi_global_stats.total_polls, 0);
-	atomic64_set(&tquic_napi_global_stats.busy_poll_packets, 0);
 
 	/* Create dummy net device for NAPI attachment */
 	tquic_napi_dev = alloc_netdev_dummy(0);

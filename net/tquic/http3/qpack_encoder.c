@@ -698,7 +698,30 @@ int qpack_encoder_process_decoder_stream(struct qpack_encoder *enc,
 				return ret;
 			offset += consumed;
 
+			if (value == 0) {
+				pr_warn("qpack: insert count increment of 0 is invalid\n");
+				return -QPACK_DECODER_STREAM_ERROR;
+			}
+
 			spin_lock_irqsave(&enc->lock, flags);
+
+			/*
+			 * Validate the increment:
+			 * 1. The addition must not overflow u64.
+			 * 2. The result must not exceed insert_count, since
+			 *    the decoder cannot acknowledge more entries than
+			 *    have been inserted.
+			 */
+			if (value > U64_MAX - enc->known_received_count ||
+			    enc->known_received_count + value >
+			    enc->dynamic_table.insert_count) {
+				spin_unlock_irqrestore(&enc->lock, flags);
+				pr_warn("qpack: insert count increment %llu would exceed insert_count %llu (known %llu)\n",
+					value,
+					enc->dynamic_table.insert_count,
+					enc->known_received_count);
+				return -QPACK_ENCODER_STREAM_ERROR;
+			}
 
 			/* Update known received count */
 			enc->known_received_count += value;

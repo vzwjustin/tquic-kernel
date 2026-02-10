@@ -839,9 +839,9 @@ static int tquic_detect_lost_packets(struct tquic_timer_state *ts, int pn_space)
 
 			/* Update bytes in flight */
 			if (pkt->in_flight) {
-				spin_lock(&rs->lock);
+				spin_lock_bh(&rs->lock);
 				rs->bytes_in_flight -= pkt->sent_bytes;
-				spin_unlock(&rs->lock);
+				spin_unlock_bh(&rs->lock);
 			}
 
 			/* Notify congestion controller of loss */
@@ -893,10 +893,10 @@ void tquic_timer_update_loss_timer(struct tquic_timer_state *ts)
 	for (i = 0; i < TQUIC_PN_SPACE_COUNT; i++) {
 		struct tquic_pn_space *pns = &rs->pn_spaces[i];
 
-		spin_lock(&pns->lock);
+		spin_lock_bh(&pns->lock);
 		if (ktime_before(pns->loss_time, earliest_loss))
 			earliest_loss = pns->loss_time;
-		spin_unlock(&pns->lock);
+		spin_unlock_bh(&pns->lock);
 	}
 
 	if (earliest_loss == KTIME_MAX) {
@@ -938,7 +938,7 @@ static void tquic_timer_pto_expired(struct timer_list *t)
 
 	rs = ts->recovery;
 
-	spin_lock(&rs->lock);
+	spin_lock_bh(&rs->lock);
 	rs->pto_count++;
 
 	/* Check for persistent congestion */
@@ -949,7 +949,7 @@ static void tquic_timer_pto_expired(struct timer_list *t)
 		rs->ssthresh = rs->congestion_window;
 		tquic_dbg("timer:entering persistent congestion\n");
 	}
-	spin_unlock(&rs->lock);
+	spin_unlock_bh(&rs->lock);
 
 	set_bit(TQUIC_TIMER_PTO_BIT, &ts->pending_timer_mask);
 	spin_unlock_bh(&ts->lock);
@@ -985,9 +985,9 @@ void tquic_timer_update_pto(struct tquic_timer_state *ts)
 		struct tquic_pn_space *pns = &rs->pn_spaces[i];
 		ktime_t timeout;
 
-		spin_lock(&pns->lock);
+		spin_lock_bh(&pns->lock);
 		if (pns->ack_eliciting_in_flight == 0) {
-			spin_unlock(&pns->lock);
+			spin_unlock_bh(&pns->lock);
 			continue;
 		}
 
@@ -998,10 +998,10 @@ void tquic_timer_update_pto(struct tquic_timer_state *ts)
 			list_for_each_entry(pkt, &pns->sent_list, list) {
 				if (pkt->ack_eliciting &&
 				    pkt->state == TQUIC_PKT_OUTSTANDING) {
-					spin_lock(&rs->lock);
+					spin_lock_bh(&rs->lock);
 					pto_duration = tquic_get_pto_duration(rs, i);
 					pto_duration *= (1 << rs->pto_count);
-					spin_unlock(&rs->lock);
+					spin_unlock_bh(&rs->lock);
 
 					timeout = ktime_add_us(pkt->sent_time, pto_duration);
 					if (ktime_before(timeout, earliest_timeout))
@@ -1010,7 +1010,7 @@ void tquic_timer_update_pto(struct tquic_timer_state *ts)
 				}
 			}
 		}
-		spin_unlock(&pns->lock);
+		spin_unlock_bh(&pns->lock);
 	}
 
 	if (earliest_timeout == KTIME_MAX) {
@@ -1087,10 +1087,10 @@ void tquic_timer_start_drain(struct tquic_timer_state *ts)
 	hrtimer_cancel(&ts->pacing_timer);
 
 	/* Set drain timeout to 3 * PTO */
-	spin_lock(&rs->lock);
+	spin_lock_bh(&rs->lock);
 	drain_duration = TQUIC_DRAIN_TIMEOUT_MULTIPLIER *
 			 tquic_get_pto_duration(rs, TQUIC_PN_SPACE_APPLICATION);
-	spin_unlock(&rs->lock);
+	spin_unlock_bh(&rs->lock);
 
 	expires = jiffies + usecs_to_jiffies(drain_duration);
 	mod_timer(&ts->drain_timer, expires);
@@ -1636,11 +1636,11 @@ int tquic_timer_on_ack_received(struct tquic_timer_state *ts, int pn_space,
 		if (pkt && pkt->state == TQUIC_PKT_OUTSTANDING) {
 			u64 rtt_sample = ktime_us_delta(now, pkt->sent_time);
 
-			spin_lock(&rs->lock);
+			spin_lock_bh(&rs->lock);
 			tquic_update_rtt(rs, ack_delay_us, rtt_sample, is_handshake);
 			rs->pto_count = 0;
 			rs->in_persistent_congestion = false;
-			spin_unlock(&rs->lock);
+			spin_unlock_bh(&rs->lock);
 		}
 	}
 
@@ -1664,9 +1664,9 @@ int tquic_timer_on_ack_received(struct tquic_timer_state *ts, int pn_space,
 				pns->ack_eliciting_in_flight--;
 
 			if (pkt->in_flight) {
-				spin_lock(&rs->lock);
+				spin_lock_bh(&rs->lock);
 				rs->bytes_in_flight -= pkt->sent_bytes;
-				spin_unlock(&rs->lock);
+				spin_unlock_bh(&rs->lock);
 			}
 
 			/* Notify congestion controller */

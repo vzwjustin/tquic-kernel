@@ -29,6 +29,7 @@
 #include <linux/spinlock.h>
 #include <linux/rbtree.h>
 #include <linux/list.h>
+#include <linux/refcount.h>
 #include <net/tquic.h>
 
 #include "http3_stream.h"
@@ -279,6 +280,8 @@ static struct h3_stream *h3_stream_alloc(void)
 	h3s->priority_incremental = false;
 	h3s->priority_valid = false;
 
+	refcount_set(&h3s->refcnt, 1);
+
 	return h3s;
 }
 
@@ -293,6 +296,34 @@ static void h3_stream_free(struct h3_stream *h3s)
 
 	kmem_cache_free(h3_stream_cache, h3s);
 }
+
+/**
+ * h3_stream_get - Increment stream reference count
+ * @h3s: Stream to reference
+ */
+void h3_stream_get(struct h3_stream *h3s)
+{
+	if (h3s)
+		refcount_inc(&h3s->refcnt);
+}
+EXPORT_SYMBOL_GPL(h3_stream_get);
+
+/**
+ * h3_stream_put - Decrement stream reference count, free when zero
+ * @h3s: Stream to release
+ *
+ * Callers that obtain a stream reference via h3_stream_lookup() must
+ * call h3_stream_put() when they are done using the stream.
+ */
+void h3_stream_put(struct h3_stream *h3s)
+{
+	if (!h3s)
+		return;
+
+	if (refcount_dec_and_test(&h3s->refcnt))
+		h3_stream_free(h3s);
+}
+EXPORT_SYMBOL_GPL(h3_stream_put);
 
 /**
  * h3_stream_insert - Insert stream into connection's tree
@@ -353,7 +384,10 @@ static void h3_stream_remove(struct h3_connection *h3conn, struct h3_stream *h3s
  * @h3conn: HTTP/3 connection
  * @stream_id: QUIC stream ID
  *
- * Return: Stream or NULL if not found
+ * On success the returned stream has an elevated reference count.
+ * The caller must call h3_stream_put() when the stream is no longer needed.
+ *
+ * Return: Stream (with incremented refcount) or NULL if not found
  */
 struct h3_stream *h3_stream_lookup(struct h3_connection *h3conn, u64 stream_id)
 {
@@ -372,6 +406,7 @@ struct h3_stream *h3_stream_lookup(struct h3_connection *h3conn, u64 stream_id)
 		else if (stream_id > h3s->base->id)
 			node = node->rb_right;
 		else {
+			refcount_inc(&h3s->refcnt);
 			spin_unlock(&h3conn->lock);
 			return h3s;
 		}
@@ -798,7 +833,7 @@ void h3_stream_close(struct h3_connection *h3conn, struct h3_stream *h3s)
 	if (h3s->base)
 		tquic_stream_close(h3s->base);
 
-	h3_stream_free(h3s);
+	h3_stream_put(h3s);
 }
 EXPORT_SYMBOL_GPL(h3_stream_close);
 
@@ -911,7 +946,7 @@ void h3_connection_destroy(struct h3_connection *h3conn)
 
 		if (h3s->base)
 			tquic_stream_close(h3s->base);
-		h3_stream_free(h3s);
+		h3_stream_put(h3s);
 	}
 
 	kmem_cache_free(h3_connection_cache, h3conn);
@@ -1067,8 +1102,11 @@ EXPORT_SYMBOL_GPL(h3_connection_open_control_streams);
 int h3_connection_send_settings(struct h3_connection *h3conn)
 {
 	struct h3_stream *control = h3conn->local_control;
+	u8 settings_payload[48];
 	u8 buf[64];
-	u8 *p = buf;
+	u8 *p;
+	u8 *sp = settings_payload;
+	size_t settings_len;
 	int ret;
 
 	if (!control) {
@@ -1076,67 +1114,80 @@ int h3_connection_send_settings(struct h3_connection *h3conn)
 		return -ENOTCONN;
 	}
 
-	/* Build SETTINGS frame */
+	/*
+	 * Two-pass approach: first encode the settings payload into a
+	 * temporary buffer to determine its exact length, then encode the
+	 * frame header (type + varint length) followed by the payload.
+	 * This avoids the previous truncating cast of settings_len to u8.
+	 */
+
+	/* QPACK_MAX_TABLE_CAPACITY if non-zero */
+	if (h3conn->local_settings.qpack_max_table_capacity > 0) {
+		ret = h3_varint_encode(H3_SETTINGS_QPACK_MAX_TABLE_CAPACITY,
+				       sp, settings_payload + sizeof(settings_payload) - sp);
+		if (ret < 0)
+			return ret;
+		sp += ret;
+
+		ret = h3_varint_encode(h3conn->local_settings.qpack_max_table_capacity,
+				       sp, settings_payload + sizeof(settings_payload) - sp);
+		if (ret < 0)
+			return ret;
+		sp += ret;
+	}
+
+	/* MAX_FIELD_SECTION_SIZE if non-zero */
+	if (h3conn->local_settings.max_field_section_size > 0) {
+		ret = h3_varint_encode(H3_SETTINGS_MAX_FIELD_SECTION_SIZE,
+				       sp, settings_payload + sizeof(settings_payload) - sp);
+		if (ret < 0)
+			return ret;
+		sp += ret;
+
+		ret = h3_varint_encode(h3conn->local_settings.max_field_section_size,
+				       sp, settings_payload + sizeof(settings_payload) - sp);
+		if (ret < 0)
+			return ret;
+		sp += ret;
+	}
+
+	/* QPACK_BLOCKED_STREAMS if non-zero */
+	if (h3conn->local_settings.qpack_blocked_streams > 0) {
+		ret = h3_varint_encode(H3_SETTINGS_QPACK_BLOCKED_STREAMS,
+				       sp, settings_payload + sizeof(settings_payload) - sp);
+		if (ret < 0)
+			return ret;
+		sp += ret;
+
+		ret = h3_varint_encode(h3conn->local_settings.qpack_blocked_streams,
+				       sp, settings_payload + sizeof(settings_payload) - sp);
+		if (ret < 0)
+			return ret;
+		sp += ret;
+	}
+
+	settings_len = sp - settings_payload;
+
+	/* Now build the complete frame: type (varint) + length (varint) + payload */
+	p = buf;
+
 	/* Frame type */
 	ret = h3_varint_encode(H3_FRAME_SETTINGS, p, buf + sizeof(buf) - p);
 	if (ret < 0)
 		return ret;
 	p += ret;
 
-	/* Frame length placeholder - we'll calculate and encode settings */
-	u8 *len_pos = p;
-	p += 1;  /* Reserve space for length (will be small) */
+	/* Frame length as proper varint */
+	ret = h3_varint_encode(settings_len, p, buf + sizeof(buf) - p);
+	if (ret < 0)
+		return ret;
+	p += ret;
 
-	u8 *settings_start = p;
-
-	/* QPACK_MAX_TABLE_CAPACITY if non-zero */
-	if (h3conn->local_settings.qpack_max_table_capacity > 0) {
-		ret = h3_varint_encode(H3_SETTINGS_QPACK_MAX_TABLE_CAPACITY,
-				       p, buf + sizeof(buf) - p);
-		if (ret < 0)
-			return ret;
-		p += ret;
-
-		ret = h3_varint_encode(h3conn->local_settings.qpack_max_table_capacity,
-				       p, buf + sizeof(buf) - p);
-		if (ret < 0)
-			return ret;
-		p += ret;
-	}
-
-	/* MAX_FIELD_SECTION_SIZE if non-zero */
-	if (h3conn->local_settings.max_field_section_size > 0) {
-		ret = h3_varint_encode(H3_SETTINGS_MAX_FIELD_SECTION_SIZE,
-				       p, buf + sizeof(buf) - p);
-		if (ret < 0)
-			return ret;
-		p += ret;
-
-		ret = h3_varint_encode(h3conn->local_settings.max_field_section_size,
-				       p, buf + sizeof(buf) - p);
-		if (ret < 0)
-			return ret;
-		p += ret;
-	}
-
-	/* QPACK_BLOCKED_STREAMS if non-zero */
-	if (h3conn->local_settings.qpack_blocked_streams > 0) {
-		ret = h3_varint_encode(H3_SETTINGS_QPACK_BLOCKED_STREAMS,
-				       p, buf + sizeof(buf) - p);
-		if (ret < 0)
-			return ret;
-		p += ret;
-
-		ret = h3_varint_encode(h3conn->local_settings.qpack_blocked_streams,
-				       p, buf + sizeof(buf) - p);
-		if (ret < 0)
-			return ret;
-		p += ret;
-	}
-
-	/* Encode frame length */
-	size_t settings_len = p - settings_start;
-	*len_pos = (u8)settings_len;
+	/* Copy settings payload */
+	if (p + settings_len > buf + sizeof(buf))
+		return -ENOBUFS;
+	memcpy(p, settings_payload, settings_len);
+	p += settings_len;
 
 	/* Send on control stream */
 	ret = tquic_stream_send(control->base, buf, p - buf, false);

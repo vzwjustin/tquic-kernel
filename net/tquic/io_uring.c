@@ -796,24 +796,32 @@ void tquic_io_buf_ring_destroy(struct tquic_io_buf_ring *br)
 }
 EXPORT_SYMBOL_GPL(tquic_io_buf_ring_destroy);
 
+/*
+ * Lockless SPSC ring operations.
+ *
+ * The buffer ring is used in a single-producer / single-consumer pattern:
+ * - Consumer (io_uring kernel side) calls get/advance
+ * - Producer (completion path) calls put
+ *
+ * Use smp_load_acquire / smp_store_release on head and tail to ensure
+ * correct ordering without a spinlock on every get/put.
+ */
 void *tquic_io_buf_ring_get(struct tquic_io_buf_ring *br, u16 *bid)
 {
 	void *buf;
-	u32 head;
+	u32 head, tail;
 
-	spin_lock(&br->lock);
+	head = br->head;
+	tail = smp_load_acquire(&br->tail);
 
-	if (br->head == br->tail) {
-		spin_unlock(&br->lock);
+	if (head == tail)
 		return NULL;
-	}
 
-	head = br->head & br->mask;
+	head &= br->mask;
 	*bid = br->br->bufs[head].bid;
 	buf = (void *)(unsigned long)br->br->bufs[head].addr;
-	br->head++;
 
-	spin_unlock(&br->lock);
+	smp_store_release(&br->head, br->head + 1);
 
 	return buf;
 }
@@ -826,23 +834,18 @@ void tquic_io_buf_ring_put(struct tquic_io_buf_ring *br, u16 bid)
 	if (!br || bid >= br->buf_count)
 		return;
 
-	spin_lock(&br->lock);
-
 	tail = br->tail & br->mask;
 	br->br->bufs[tail].bid = bid;
 	br->br->bufs[tail].addr = (u64)(br->buf_base + bid * br->buf_size);
 	br->br->bufs[tail].len = br->buf_size;
-	br->tail++;
 
-	spin_unlock(&br->lock);
+	smp_store_release(&br->tail, br->tail + 1);
 }
 EXPORT_SYMBOL_GPL(tquic_io_buf_ring_put);
 
 void tquic_io_buf_ring_advance(struct tquic_io_buf_ring *br, unsigned int count)
 {
-	spin_lock(&br->lock);
-	br->head += count;
-	spin_unlock(&br->lock);
+	smp_store_release(&br->head, br->head + count);
 }
 EXPORT_SYMBOL_GPL(tquic_io_buf_ring_advance);
 

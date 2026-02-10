@@ -364,6 +364,13 @@ void tquic_bonding_destroy(struct tquic_bonding_ctx *bc)
 	if (!bc)
 		return;
 
+	/* Signal that destruction is in progress so that code which
+	 * drops and reacquires state_lock can detect this and bail out.
+	 */
+	spin_lock_bh(&bc->state_lock);
+	bc->destroying = true;
+	spin_unlock_bh(&bc->state_lock);
+
 	/* Cancel pending work */
 	cancel_work_sync(&bc->weight_work);
 
@@ -458,6 +465,14 @@ void tquic_bonding_update_state(struct tquic_bonding_ctx *bc)
 			spin_unlock_bh(&bc->state_lock);
 			tquic_bonding_free_reorder(bc);
 			spin_lock_bh(&bc->state_lock);
+
+			/*
+			 * If tquic_bonding_destroy() ran while the lock
+			 * was dropped, bail out -- the context is being
+			 * torn down and further state changes are unsafe.
+			 */
+			if (bc->destroying)
+				goto out_unlock;
 
 			/*
 			 * Re-evaluate state after reacquiring lock.

@@ -587,21 +587,25 @@ int tquic_stream_socket_create(struct tquic_connection *conn,
 	ss->parent_sk = parent_sk;
 	init_waitqueue_head(&ss->wait);
 
-	/* Store stream socket state in sk_user_data */
-	sock->sk->sk_user_data = ss;
-
-	/* Add stream to connection's stream tree */
-	tquic_stream_add_to_conn(conn, stream);
-
-	/* Get file descriptor for the socket */
+	/*
+	 * Get file descriptor BEFORE linking sk_user_data and adding
+	 * the stream to the connection tree.  tquic_sock_map_fd() calls
+	 * sock_release() on failure, which invokes tquic_stream_release().
+	 * If sk_user_data were already set, the release handler would
+	 * free ss and stream, and then this error path would free them
+	 * again -- a double-free.
+	 */
 	fd = tquic_sock_map_fd(sock, O_CLOEXEC);
 	if (fd < 0) {
-		/* Note: tquic_sock_map_fd calls sock_release on failure */
-		tquic_stream_remove_from_conn(conn, stream);
+		/* sock was released by tquic_sock_map_fd on failure */
 		kfree(ss);
 		tquic_stream_free(stream);
 		return fd;
 	}
+
+	/* Socket has a valid fd now -- safe to link everything */
+	sock->sk->sk_user_data = ss;
+	tquic_stream_add_to_conn(conn, stream);
 
 	*stream_id = stream->id;
 

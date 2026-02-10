@@ -164,12 +164,19 @@ void tquic_destroy_sock(struct sock *sk)
 	tquic_handshake_cleanup(sk);
 
 	if (tsk->conn) {
-		if (tsk->conn->scheduler) {
-			tquic_bond_cleanup(tsk->conn->scheduler);
-			tsk->conn->scheduler = NULL;
+		struct tquic_connection *conn = tsk->conn;
+
+		if (conn->scheduler) {
+			tquic_bond_cleanup(conn->scheduler);
+			conn->scheduler = NULL;
 		}
-		tquic_conn_destroy(tsk->conn);
-		tsk->conn = NULL;
+		/*
+		 * CF-051: Use WRITE_ONCE to publish NULL to concurrent
+		 * readers in poll/sendmsg/recvmsg that use READ_ONCE.
+		 */
+		WRITE_ONCE(tsk->conn, NULL);
+		WRITE_ONCE(tsk->default_stream, NULL);
+		tquic_conn_destroy(conn);
 	}
 
 	tquic_dbg("socket destroyed\n");
@@ -458,15 +465,18 @@ int tquic_accept(struct sock *sk, struct sock **newsk, int flags, bool kern)
 
 	/* Wait for incoming connection */
 	for (;;) {
-		/* Check accept queue under spinlock */
-		spin_lock_bh(&sk->sk_lock.slock);
+		/*
+		 * CF-169: lock_sock() is already held, which provides
+		 * serialization on the accept queue.  The inner
+		 * spin_lock_bh(&sk->sk_lock.slock) was redundant and
+		 * could deadlock since lock_sock() acquires the same lock.
+		 */
 		if (!list_empty(&tsk->accept_queue)) {
 			child_tsk = list_first_entry(&tsk->accept_queue,
 						     struct tquic_sock,
 						     accept_list);
 			list_del_init(&child_tsk->accept_list);
 			tsk->accept_queue_len--;
-			spin_unlock_bh(&sk->sk_lock.slock);
 
 			/* Return the child socket */
 			*newsk = (struct sock *)child_tsk;
@@ -478,7 +488,6 @@ int tquic_accept(struct sock *sk, struct sock **newsk, int flags, bool kern)
 			tquic_dbg("accept returned connection\n");
 			goto out_unlock;
 		}
-		spin_unlock_bh(&sk->sk_lock.slock);
 
 		/* Non-blocking mode */
 		if (flags & O_NONBLOCK) {
@@ -1480,7 +1489,16 @@ int tquic_sock_getsockopt(struct socket *sock, int level, int optname,
 			return -ENOENT;
 		}
 
-		if (len < identity_len) {
+		/*
+		 * CF-190: Validate identity_len is within buffer bounds
+		 * in addition to the user-supplied length check.
+		 */
+		if (identity_len > TQUIC_MAX_PSK_IDENTITY_LEN) {
+			release_sock(sk);
+			return -EINVAL;
+		}
+
+		if (identity_len > len) {
 			release_sock(sk);
 			return -EINVAL;
 		}
@@ -1911,7 +1929,8 @@ static int tquic_sendmsg_datagram(struct sock *sk, struct msghdr *msg,
 int tquic_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 {
 	struct tquic_sock *tsk = tquic_sk(sk);
-	struct tquic_connection *conn = tsk->conn;
+	/* CF-051: Use READ_ONCE to safely read conn set to NULL by destroy */
+	struct tquic_connection *conn = READ_ONCE(tsk->conn);
 	struct tquic_stream *stream;
 	struct sk_buff *skb;
 	int copied = 0;
@@ -2139,7 +2158,8 @@ int tquic_recvmsg(struct sock *sk, struct msghdr *msg, size_t len, int flags,
 		  int *addr_len)
 {
 	struct tquic_sock *tsk = tquic_sk(sk);
-	struct tquic_connection *conn = tsk->conn;
+	/* CF-051: Use READ_ONCE to safely read conn set to NULL by destroy */
+	struct tquic_connection *conn = READ_ONCE(tsk->conn);
 	struct tquic_stream *stream;
 	struct sk_buff *skb;
 	int copied = 0;

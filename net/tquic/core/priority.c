@@ -622,21 +622,55 @@ int tquic_frame_process_priority_update(struct tquic_connection *conn,
 	pf_len = len - offset;
 
 	/*
-	 * Parse Priority Field Value (RFC 9218 Section 4)
-	 * Format: u=<urgency>, i[=?<incremental>]
+	 * SECURITY FIX (CF-048): Properly parse Priority Field Value
+	 * as a Structured Field Dictionary per RFC 8941 / RFC 9218.
 	 *
-	 * Simple parsing - look for u= and i tokens
+	 * Format: u=<urgency>, i[=?1]
+	 *
+	 * The previous loop had an off-by-two error in the bound
+	 * (i < pf_len - 2), which missed tokens near the end of the
+	 * field value and could skip single-character boolean tokens.
+	 *
+	 * Validate format strictly: urgency must be a single digit 0-7,
+	 * and the incremental token is a boolean Item per RFC 8941.
 	 */
-	for (i = 0; i < pf_len - 2; i++) {
-		if (pf_start[i] == 'u' && pf_start[i + 1] == '=') {
-			/* Parse urgency value */
-			if (i + 2 < pf_len && pf_start[i + 2] >= '0' &&
+	for (i = 0; i < pf_len; i++) {
+		/* Skip whitespace and commas between dictionary members */
+		if (pf_start[i] == ' ' || pf_start[i] == '\t' ||
+		    pf_start[i] == ',')
+			continue;
+
+		/* Parse "u=<digit>" token */
+		if (pf_start[i] == 'u' && i + 1 < pf_len &&
+		    pf_start[i + 1] == '=') {
+			if (i + 2 < pf_len &&
+			    pf_start[i + 2] >= '0' &&
 			    pf_start[i + 2] <= '7') {
 				urgency = pf_start[i + 2] - '0';
+				i += 2; /* Advance past "u=N" */
 			}
-		} else if (pf_start[i] == 'i') {
-			/* Incremental flag present */
-			incremental = true;
+			continue;
+		}
+
+		/*
+		 * Parse "i" boolean token per RFC 8941 Section 3.3.6.
+		 * A bare "i" means true. "i=?1" also means true.
+		 * "i=?0" means false.
+		 */
+		if (pf_start[i] == 'i') {
+			if (i + 3 < pf_len &&
+			    pf_start[i + 1] == '=' &&
+			    pf_start[i + 2] == '?') {
+				if (pf_start[i + 3] == '1')
+					incremental = true;
+				else if (pf_start[i + 3] == '0')
+					incremental = false;
+				i += 3; /* Advance past "i=?N" */
+			} else {
+				/* Bare "i" token means true */
+				incremental = true;
+			}
+			continue;
 		}
 	}
 

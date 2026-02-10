@@ -225,11 +225,15 @@ struct tquic_nl_conn_info {
 	u32 next_path_id;
 };
 
+/* CF-154: Maximum number of connections per network namespace */
+#define TQUIC_NL_MAX_CONNECTIONS	4096
+
 /* Per-network namespace data */
 struct tquic_net {
 	struct list_head connections;
 	spinlock_t conn_lock;
 	DECLARE_HASHTABLE(conn_hash, 8);
+	u32 conn_count;
 };
 
 static unsigned int tquic_net_id;
@@ -370,6 +374,13 @@ static void tquic_nl_conn_put(struct tquic_nl_conn_info *conn)
 {
 	if (refcount_dec_and_test(&conn->refcnt)) {
 		struct tquic_nl_path_info *path, *tmp;
+		struct tquic_net *tnet = tquic_get_net(conn->net);
+
+		/* CF-154: Decrement connection count on final release */
+		spin_lock_bh(&tnet->conn_lock);
+		if (tnet->conn_count > 0)
+			tnet->conn_count--;
+		spin_unlock_bh(&tnet->conn_lock);
 
 		list_for_each_entry_safe(path, tmp, &conn->paths, list) {
 			list_del_rcu(&path->list);
@@ -385,6 +396,17 @@ static struct tquic_nl_conn_info *tquic_conn_info_create(struct net *net,
 	struct tquic_net *tnet = tquic_get_net(net);
 	struct tquic_nl_conn_info *conn;
 
+	/*
+	 * CF-154: Enforce per-namespace connection limit to prevent
+	 * unbounded connection creation via netlink.
+	 */
+	spin_lock_bh(&tnet->conn_lock);
+	if (tnet->conn_count >= TQUIC_NL_MAX_CONNECTIONS) {
+		spin_unlock_bh(&tnet->conn_lock);
+		return NULL;
+	}
+	spin_unlock_bh(&tnet->conn_lock);
+
 	conn = kzalloc(sizeof(*conn), GFP_KERNEL);
 	if (!conn)
 		return NULL;
@@ -397,8 +419,15 @@ static struct tquic_nl_conn_info *tquic_conn_info_create(struct net *net,
 	strscpy(conn->scheduler, "default", sizeof(conn->scheduler));
 
 	spin_lock_bh(&tnet->conn_lock);
+	/* Re-check limit under lock to avoid races */
+	if (tnet->conn_count >= TQUIC_NL_MAX_CONNECTIONS) {
+		spin_unlock_bh(&tnet->conn_lock);
+		kfree(conn);
+		return NULL;
+	}
 	hash_add_rcu(tnet->conn_hash, &conn->hash_node, conn_id);
 	list_add_tail_rcu(&conn->list, &tnet->connections);
+	tnet->conn_count++;
 	spin_unlock_bh(&tnet->conn_lock);
 
 	return conn;

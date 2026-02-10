@@ -163,9 +163,12 @@ static int tquic_parse_header(struct sk_buff *skb, struct tquic_offload_cb *cb)
 		if (skb->len < 6)
 			return -EINVAL;
 
-		/* Version field */
-		version = (data[1] << 24) | (data[2] << 16) |
-			  (data[3] << 8) | data[4];
+		/* Version field - cast to u32 before shifting to avoid
+		 * undefined behavior when u8 is promoted to int and
+		 * shifted left by 24 (sign bit overflow).
+		 */
+		version = ((u32)data[1] << 24) | ((u32)data[2] << 16) |
+			  ((u32)data[3] << 8) | (u32)data[4];
 		offset = 5;
 
 		/* DCID length */

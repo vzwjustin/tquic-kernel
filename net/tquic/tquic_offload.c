@@ -35,6 +35,8 @@
 #include <net/udp_tunnel.h>
 #include <net/tquic.h>
 
+#include <linux/percpu.h>
+
 #include "tquic_compat.h"
 #include "tquic_debug.h"
 #include "tquic_mib.h"
@@ -53,17 +55,19 @@
 #define TQUIC_MAX_CID_LEN		20
 
 /*
- * GRO statistics - exported via /proc/net/tquic/stats
+ * GRO statistics - per-CPU counters to avoid cache-line bouncing on
+ * the hot path (incremented on every received packet).  Readers sum
+ * across all CPUs when reporting via /proc.
  */
-struct tquic_gro_stats {
-	atomic64_t coalesced_packets;	/* Packets coalesced via GRO */
-	atomic64_t gro_flush_count;	/* Number of GRO flushes */
-	atomic64_t gro_held_count;	/* Current held packets */
-	atomic64_t total_aggregation;	/* Sum of aggregation counts */
-	atomic64_t aggregation_samples;	/* Number of aggregation samples */
+struct tquic_gro_stats_cpu {
+	u64 coalesced_packets;
+	u64 gro_flush_count;
+	u64 gro_held_count;
+	u64 total_aggregation;
+	u64 aggregation_samples;
 };
 
-static struct tquic_gro_stats tquic_gro_stats;
+static DEFINE_PER_CPU(struct tquic_gro_stats_cpu, tquic_gro_stats_cpu);
 
 /*
  * =============================================================================
@@ -292,13 +296,13 @@ static struct sk_buff *tquic_gro_receive_segment(struct list_head *head,
 #endif
 
 		/* Update statistics */
-		atomic64_inc(&tquic_gro_stats.coalesced_packets);
+		this_cpu_inc(tquic_gro_stats_cpu.coalesced_packets);
 
 		return pp;
 	}
 
 	/* No match found - packet will be held */
-	atomic64_inc(&tquic_gro_stats.gro_held_count);
+	this_cpu_inc(tquic_gro_stats_cpu.gro_held_count);
 
 	return NULL;
 }
@@ -377,10 +381,10 @@ int tquic_gro_complete(struct sk_buff *skb, int nhoff)
 	__skb_incr_checksum_unnecessary(skb);
 
 	/* Update statistics */
-	atomic64_inc(&tquic_gro_stats.gro_flush_count);
-	atomic64_add(aggregation_count, &tquic_gro_stats.total_aggregation);
-	atomic64_inc(&tquic_gro_stats.aggregation_samples);
-	atomic64_sub(aggregation_count, &tquic_gro_stats.gro_held_count);
+	this_cpu_inc(tquic_gro_stats_cpu.gro_flush_count);
+	this_cpu_add(tquic_gro_stats_cpu.total_aggregation, aggregation_count);
+	this_cpu_inc(tquic_gro_stats_cpu.aggregation_samples);
+	this_cpu_sub(tquic_gro_stats_cpu.gro_held_count, aggregation_count);
 
 	return 0;
 }
@@ -594,12 +598,20 @@ static struct net_offload __maybe_unused tquic6_offload = {
  */
 void tquic_gro_stats_show(struct seq_file *seq)
 {
-	u64 coalesced = atomic64_read(&tquic_gro_stats.coalesced_packets);
-	u64 flushes = atomic64_read(&tquic_gro_stats.gro_flush_count);
-	u64 held = atomic64_read(&tquic_gro_stats.gro_held_count);
-	u64 total_agg = atomic64_read(&tquic_gro_stats.total_aggregation);
-	u64 samples = atomic64_read(&tquic_gro_stats.aggregation_samples);
-	u64 avg_agg = 0;
+	u64 coalesced = 0, flushes = 0, held = 0;
+	u64 total_agg = 0, samples = 0, avg_agg = 0;
+	int cpu;
+
+	for_each_possible_cpu(cpu) {
+		const struct tquic_gro_stats_cpu *s;
+
+		s = per_cpu_ptr(&tquic_gro_stats_cpu, cpu);
+		coalesced += READ_ONCE(s->coalesced_packets);
+		flushes   += READ_ONCE(s->gro_flush_count);
+		held      += READ_ONCE(s->gro_held_count);
+		total_agg += READ_ONCE(s->total_aggregation);
+		samples   += READ_ONCE(s->aggregation_samples);
+	}
 
 	if (samples > 0)
 		avg_agg = total_agg / samples;
@@ -621,13 +633,24 @@ EXPORT_SYMBOL_GPL(tquic_gro_stats_show);
  */
 void tquic_gro_get_stats(u64 *coalesced, u64 *flushes, u64 *avg_aggregation)
 {
-	u64 total_agg = atomic64_read(&tquic_gro_stats.total_aggregation);
-	u64 samples = atomic64_read(&tquic_gro_stats.aggregation_samples);
+	u64 tot_coalesced = 0, tot_flushes = 0;
+	u64 total_agg = 0, samples = 0;
+	int cpu;
+
+	for_each_possible_cpu(cpu) {
+		const struct tquic_gro_stats_cpu *s;
+
+		s = per_cpu_ptr(&tquic_gro_stats_cpu, cpu);
+		tot_coalesced += READ_ONCE(s->coalesced_packets);
+		tot_flushes   += READ_ONCE(s->gro_flush_count);
+		total_agg     += READ_ONCE(s->total_aggregation);
+		samples       += READ_ONCE(s->aggregation_samples);
+	}
 
 	if (coalesced)
-		*coalesced = atomic64_read(&tquic_gro_stats.coalesced_packets);
+		*coalesced = tot_coalesced;
 	if (flushes)
-		*flushes = atomic64_read(&tquic_gro_stats.gro_flush_count);
+		*flushes = tot_flushes;
 	if (avg_aggregation) {
 		if (samples > 0)
 			*avg_aggregation = total_agg / samples;
@@ -746,12 +769,7 @@ int __init tquic_offload_init(void)
 {
 	tquic_info("initializing GRO/GSO offload support\n");
 
-	/* Initialize statistics */
-	atomic64_set(&tquic_gro_stats.coalesced_packets, 0);
-	atomic64_set(&tquic_gro_stats.gro_flush_count, 0);
-	atomic64_set(&tquic_gro_stats.gro_held_count, 0);
-	atomic64_set(&tquic_gro_stats.total_aggregation, 0);
-	atomic64_set(&tquic_gro_stats.aggregation_samples, 0);
+	/* Per-CPU stats are zero-initialized by DEFINE_PER_CPU */
 
 	/*
 	 * Note: TQUIC runs over UDP, so we leverage the existing UDP
