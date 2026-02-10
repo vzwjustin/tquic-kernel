@@ -19,6 +19,7 @@
 #include <linux/rhashtable.h>
 #include <linux/random.h>
 #include <linux/hrtimer.h>
+#include <linux/overflow.h>
 #include <net/sock.h>
 #include <net/udp.h>
 #include <net/udp_tunnel.h>
@@ -40,6 +41,8 @@
 #include "tquic_ack_frequency.h"
 #include "tquic_ratelimit.h"
 #include "rate_limit.h"
+#include "security_hardening.h"
+#include "tquic_cid.h"
 
 /* Per-packet RX decryption buffer slab cache (allocated in tquic_main.c) */
 #define TQUIC_RX_BUF_SIZE	2048
@@ -99,6 +102,20 @@ extern struct kmem_cache *tquic_rx_buf_cache;
 #define TQUIC_GRO_MAX_HOLD		10
 #define TQUIC_GRO_FLUSH_TIMEOUT_US	1000
 
+/* Maximum token length for coalesced packet parsing */
+#define TQUIC_COALESCED_MAX_TOKEN_LEN	512
+
+/*
+ * Forward declarations for header protection (crypto/header_protection.c).
+ * These are EXPORT_SYMBOL_GPL but lack a shared header file.
+ */
+struct tquic_hp_ctx;
+struct tquic_crypto_state;
+int tquic_hp_unprotect(struct tquic_hp_ctx *ctx, u8 *packet,
+		       size_t packet_len, size_t pn_offset,
+		       u8 *pn_len, u8 *key_phase);
+struct tquic_hp_ctx *tquic_crypto_get_hp_ctx(struct tquic_crypto_state *crypto);
+
 /* Forward declarations */
 static int tquic_process_frames(struct tquic_connection *conn,
 				struct tquic_path *path,
@@ -131,6 +148,7 @@ struct tquic_rx_ctx {
 	int enc_level;
 	bool is_long_header;
 	bool ack_eliciting;
+	bool immediate_ack_seen;  /* Only process first IMMEDIATE_ACK per pkt */
 	u8 key_phase_bit;  /* Key phase from short header (RFC 9001 Section 6) */
 };
 
@@ -218,35 +236,51 @@ static struct tquic_connection *tquic_lookup_by_dcid(const u8 *dcid, u8 dcid_len
 
 /*
  * Find path by source address
+ *
+ * Caller must NOT hold paths_lock. This function acquires it internally.
+ * The returned path pointer is safe to use only while the caller ensures
+ * the connection remains valid (e.g., holding a connection reference).
  */
 static struct tquic_path *tquic_find_path_by_addr(struct tquic_connection *conn,
 						  struct sockaddr_storage *addr)
 {
 	struct tquic_path *path;
+	struct tquic_path *found = NULL;
 
+	spin_lock_bh(&conn->paths_lock);
 	list_for_each_entry(path, &conn->paths, list) {
-		if (memcmp(&path->remote_addr, addr, sizeof(*addr)) == 0)
-			return path;
+		if (memcmp(&path->remote_addr, addr, sizeof(*addr)) == 0) {
+			found = path;
+			break;
+		}
 	}
+	spin_unlock_bh(&conn->paths_lock);
 
-	return NULL;
+	return found;
 }
 
 /*
  * Find path by local connection ID
+ *
+ * Caller must NOT hold paths_lock. This function acquires it internally.
  */
 static struct tquic_path __maybe_unused *tquic_find_path_by_cid(struct tquic_connection *conn,
 							       const u8 *cid, u8 cid_len)
 {
 	struct tquic_path *path;
+	struct tquic_path *found = NULL;
 
+	spin_lock_bh(&conn->paths_lock);
 	list_for_each_entry(path, &conn->paths, list) {
 		if (path->local_cid.len == cid_len &&
-		    memcmp(path->local_cid.id, cid, cid_len) == 0)
-			return path;
+		    memcmp(path->local_cid.id, cid, cid_len) == 0) {
+			found = path;
+			break;
+		}
 	}
+	spin_unlock_bh(&conn->paths_lock);
 
-	return NULL;
+	return found;
 }
 
 /*
@@ -257,14 +291,45 @@ static struct tquic_path __maybe_unused *tquic_find_path_by_cid(struct tquic_con
 
 /*
  * Remove header protection
+ *
+ * Delegates to tquic_hp_unprotect() from crypto/header_protection.c when
+ * the connection has an HP context initialised. When crypto state is not
+ * yet available (e.g. first Initial packet before keys are derived), HP
+ * removal is a no-op because the Initial keys are derived from the DCID
+ * and the caller handles that separately.
  */
 static int tquic_remove_header_protection(struct tquic_connection *conn,
 					  u8 *header, int header_len,
 					  u8 *payload, int payload_len,
 					  bool is_long_header)
 {
-	/* Header protection removal is the inverse of application */
-	/* For initial implementation, assume header protection is disabled */
+	struct tquic_hp_ctx *hp;
+	u8 pn_len = 0;
+	u8 key_phase = 0;
+	size_t total_len;
+	int ret;
+
+	if (!conn || !conn->crypto_state)
+		return 0;
+
+	/*
+	 * The crypto module exposes an HP context through the opaque
+	 * crypto_state.  If no HP keys have been installed yet (e.g.
+	 * during Initial packet processing before key derivation),
+	 * crypto_state will not carry an HP context and we skip removal.
+	 */
+	hp = tquic_crypto_get_hp_ctx(conn->crypto_state);
+	if (!hp)
+		return 0;
+
+	total_len = (size_t)header_len + (size_t)payload_len;
+	ret = tquic_hp_unprotect(hp, header, total_len,
+				 (size_t)header_len, &pn_len, &key_phase);
+	if (ret < 0) {
+		tquic_dbg("header protection removal failed: %d\n", ret);
+		return ret;
+	}
+
 	return 0;
 }
 
@@ -324,15 +389,21 @@ static bool tquic_is_stateless_reset_internal(struct tquic_connection *conn,
  */
 static void tquic_handle_stateless_reset(struct tquic_connection *conn)
 {
+	struct sock *sk;
+
 	tquic_info("received stateless reset for connection\n");
 
 	spin_lock_bh(&conn->lock);
 	conn->state = TQUIC_CONN_CLOSED;
+	conn->error_code = EQUIC_NO_ERROR;
+
+	/* Read sk under lock to prevent use-after-free */
+	sk = READ_ONCE(conn->sk);
 	spin_unlock_bh(&conn->lock);
 
 	/* Notify upper layer */
-	if (conn->sk)
-		conn->sk->sk_state_change(conn->sk);
+	if (sk)
+		sk->sk_state_change(sk);
 }
 
 /*
@@ -410,7 +481,8 @@ static int tquic_process_version_negotiation(struct tquic_connection *conn,
 
 	if (!found) {
 		tquic_warn("conn: no compatible version found (local supports v1/v2)\n");
-		conn->state = TQUIC_CONN_CLOSED;
+		tquic_conn_close_with_error(conn, EQUIC_NO_ERROR,
+					    "no compatible version");
 		return -EPROTONOSUPPORT;
 	}
 
@@ -734,6 +806,21 @@ static int tquic_process_crypto_frame(struct tquic_rx_ctx *ctx)
 		return -EINVAL;
 
 	/*
+	 * SECURITY: Check pre-handshake memory allocation limits before
+	 * processing CRYPTO frames at Initial/Handshake level.
+	 * This prevents resource exhaustion from bogus Initial packets.
+	 */
+	if (ctx->enc_level == TQUIC_PKT_INITIAL ||
+	    ctx->enc_level == TQUIC_PKT_HANDSHAKE) {
+		if (ctx->conn && ctx->path &&
+		    !tquic_pre_hs_can_allocate(&ctx->path->remote_addr,
+					       (size_t)length)) {
+			tquic_dbg("CRYPTO frame rejected: pre-HS memory limit\n");
+			return -ENOMEM;
+		}
+	}
+
+	/*
 	 * Feed CRYPTO frame data into the inline TLS handshake state machine.
 	 * The data is a TLS handshake message (ClientHello, ServerHello, etc.)
 	 * carried in the CRYPTO frame payload.
@@ -824,12 +911,15 @@ static int tquic_process_stream_frame(struct tquic_rx_ctx *ctx)
 	if (ctx->offset + length > ctx->len)
 		return -EINVAL;
 
-	/* Find or create stream */
+	/* Find or create stream - hold streams_lock during RB-tree walk */
 	stream = NULL;
+	spin_lock_bh(&ctx->conn->streams_lock);
 	{
 		struct rb_node *node = ctx->conn->streams.rb_node;
+
 		while (node) {
-			struct tquic_stream *s = rb_entry(node, struct tquic_stream, node);
+			struct tquic_stream *s = rb_entry(node,
+						struct tquic_stream, node);
 			if (stream_id < s->id)
 				node = node->rb_left;
 			else if (stream_id > s->id)
@@ -840,13 +930,13 @@ static int tquic_process_stream_frame(struct tquic_rx_ctx *ctx)
 			}
 		}
 	}
+	spin_unlock_bh(&ctx->conn->streams_lock);
 
 	if (!stream) {
-		/* Create new stream for incoming data */
-		stream = tquic_stream_open(ctx->conn, (stream_id & 0x02) == 0);
+		/* Create new stream for incoming data, validating MAX_STREAMS */
+		stream = tquic_stream_open_incoming(ctx->conn, stream_id);
 		if (!stream)
 			return -ENOMEM;
-		stream->id = stream_id;
 	}
 
 	/* Copy data to stream receive buffer */
@@ -1066,6 +1156,23 @@ static int tquic_process_new_connection_id_frame(struct tquic_rx_ctx *ctx)
 	memcpy(reset_token, ctx->data + ctx->offset, 16);
 	ctx->offset += 16;
 
+	/*
+	 * SECURITY: Check CID security limits before processing.
+	 * This prevents CVE-2024-22189 Retire CID stuffing attacks
+	 * by rate-limiting NEW_CONNECTION_ID frames.
+	 */
+	if (ctx->conn && ctx->conn->cid_pool) {
+		struct tquic_cid_pool *pool = ctx->conn->cid_pool;
+		int sret;
+
+		sret = tquic_cid_security_check_new_cid(&pool->security);
+		if (sret < 0) {
+			tquic_dbg("NEW_CONNECTION_ID rejected by security check: %d\n",
+				 sret);
+			return sret;
+		}
+	}
+
 	/* Store new CID for future use */
 	/* This would be added to a CID pool */
 
@@ -1144,10 +1251,13 @@ static int tquic_process_connection_close_frame(struct tquic_rx_ctx *ctx, bool a
 	pr_info_ratelimited("tquic: received CONNECTION_CLOSE, error=%llu frame_type=%llu\n",
 			    error_code, frame_type);
 
-	/* Transition to draining state */
-	spin_lock(&ctx->conn->lock);
-	ctx->conn->state = TQUIC_CONN_DRAINING;
-	spin_unlock(&ctx->conn->lock);
+	/*
+	 * Transition to draining state via connection close handler.
+	 * Use tquic_conn_handle_close() which properly validates state
+	 * transitions rather than bypassing the state machine.
+	 */
+	tquic_conn_handle_close(ctx->conn, error_code, frame_type,
+				NULL, app);
 
 	/* Update MIB counters for connection close */
 	if (ctx->conn && ctx->conn->sk) {
@@ -1173,14 +1283,30 @@ static int tquic_process_handshake_done_frame(struct tquic_rx_ctx *ctx)
 {
 	ctx->offset++;  /* Skip frame type */
 
-	/* Mark handshake as complete (client side) */
-	if (ctx->conn->crypto_state) {
-		/* Set handshake_complete flag */
+	/*
+	 * RFC 9000 Section 19.20: "A server MUST NOT send a
+	 * HANDSHAKE_DONE frame." Therefore only clients process it.
+	 * Servers receiving HANDSHAKE_DONE is a protocol violation.
+	 */
+	if (ctx->conn->is_server) {
+		tquic_dbg("server received HANDSHAKE_DONE - protocol violation\n");
+		ctx->conn->error_code = EQUIC_PROTOCOL_VIOLATION;
+		return -EPROTO;
 	}
 
+	/* Mark handshake as complete (client side) */
+	if (ctx->conn->crypto_state)
+		ctx->conn->handshake_confirmed = true;
+
+	/*
+	 * Transition to CONNECTED via the proper close handler
+	 * rather than directly assigning state.
+	 */
 	spin_lock(&ctx->conn->lock);
-	if (ctx->conn->state == TQUIC_CONN_CONNECTING)
+	if (ctx->conn->state == TQUIC_CONN_CONNECTING) {
 		ctx->conn->state = TQUIC_CONN_CONNECTED;
+		ctx->conn->handshake_complete = true;
+	}
 	spin_unlock(&ctx->conn->lock);
 
 	ctx->ack_eliciting = true;
@@ -1440,6 +1566,17 @@ static int tquic_process_immediate_ack_frame(struct tquic_rx_ctx *ctx)
 
 	ctx->offset += ret;
 
+	/*
+	 * SECURITY: Only process the first IMMEDIATE_ACK per packet
+	 * to prevent flooding attacks that force excessive ACK generation.
+	 */
+	if (ctx->immediate_ack_seen) {
+		tquic_dbg("duplicate IMMEDIATE_ACK in packet, ignoring\n");
+		ctx->ack_eliciting = true;
+		return 0;
+	}
+	ctx->immediate_ack_seen = true;
+
 	/* Handle the frame */
 	ret = tquic_conn_handle_immediate_ack_frame(ctx->conn);
 	if (ret < 0)
@@ -1629,16 +1766,21 @@ static int tquic_process_mp_ack_frame(struct tquic_rx_ctx *ctx)
 	ctx->offset += ret;
 	/* MP_ACK is NOT ack-eliciting (RFC 9000 Section 13.2) */
 
-	/* Find the path for this ACK */
+	/*
+	 * Find the path for this ACK.
+	 * Keep paths_lock held during tquic_mp_on_ack_received() to
+	 * prevent the path from being freed while we access it.
+	 * tquic_mp_on_ack_received() must not sleep.
+	 */
 	spin_lock(&ctx->conn->paths_lock);
 	list_for_each_entry(path, &ctx->conn->paths, list) {
 		if (path->path_id == frame.path_id) {
 			ack_state = path->mp_ack_state;
 			if (ack_state) {
-				spin_unlock(&ctx->conn->paths_lock);
 				ret = tquic_mp_on_ack_received(ack_state,
 					TQUIC_PN_SPACE_APPLICATION,
 					&frame, ctx->conn);
+				spin_unlock(&ctx->conn->paths_lock);
 				if (ret < 0) {
 					tquic_dbg("MP_ACK processing failed: %d\n", ret);
 					return ret;
@@ -1702,6 +1844,18 @@ static int tquic_process_frames(struct tquic_connection *conn,
 	int ret = 0;
 	u8 frame_type;
 	size_t prev_offset;
+	bool is_0rtt = (enc_level == TQUIC_PKT_ZERO_RTT);
+	bool is_1rtt = (enc_level == 3);	/* Short header / Application */
+	bool is_initial = (enc_level == TQUIC_PKT_INITIAL);
+	bool is_handshake = (enc_level == TQUIC_PKT_HANDSHAKE);
+
+	/*
+	 * RFC 9000 Section 10.2: In DRAINING state, no frames should be
+	 * processed. In CLOSING state, only CONNECTION_CLOSE is relevant
+	 * (to determine if peer has also initiated close).
+	 */
+	if (conn->state == TQUIC_CONN_DRAINING)
+		return 0;
 
 	ctx.conn = conn;
 	ctx.path = path;
@@ -1711,10 +1865,35 @@ static int tquic_process_frames(struct tquic_connection *conn,
 	ctx.pkt_num = pkt_num;
 	ctx.enc_level = enc_level;
 	ctx.ack_eliciting = false;
+	ctx.immediate_ack_seen = false;
 
 	while (ctx.offset < ctx.len) {
 		prev_offset = ctx.offset;
 		frame_type = ctx.data[ctx.offset];
+
+		/*
+		 * RFC 9000 Section 10.2.1: In CLOSING state, only
+		 * CONNECTION_CLOSE frames are processed. All other
+		 * frames are silently ignored.
+		 */
+		if (conn->state == TQUIC_CONN_CLOSING) {
+			if (frame_type != TQUIC_FRAME_CONNECTION_CLOSE &&
+			    frame_type != TQUIC_FRAME_CONNECTION_CLOSE_APP)
+				return 0;
+		}
+
+		/*
+		 * RFC 9000 Section 12.4, Table 3: Validate frame types
+		 * against the current encryption level.
+		 *
+		 * - PADDING, PING, CONNECTION_CLOSE: all levels
+		 * - ACK/ACK_ECN: all except 0-RTT
+		 * - CRYPTO: Initial, Handshake, 1-RTT (not 0-RTT)
+		 * - STREAM (0x08-0x0f): 0-RTT and 1-RTT only
+		 * - HANDSHAKE_DONE (0x1e): 1-RTT only
+		 * - NEW_TOKEN (0x07): 1-RTT only
+		 * - Most other frames: 0-RTT and 1-RTT only
+		 */
 
 		/* Handle frame based on type */
 		if (frame_type == TQUIC_FRAME_PADDING) {
@@ -1723,32 +1902,121 @@ static int tquic_process_frames(struct tquic_connection *conn,
 			ret = tquic_process_ping_frame(&ctx);
 		} else if (frame_type == TQUIC_FRAME_ACK ||
 			   frame_type == TQUIC_FRAME_ACK_ECN) {
+			/* ACK frames forbidden in 0-RTT packets */
+			if (is_0rtt) {
+				conn->error_code = EQUIC_FRAME_ENCODING;
+				tquic_conn_close_with_error(conn,
+					EQUIC_FRAME_ENCODING,
+					"ACK in 0-RTT");
+				return -EPROTO;
+			}
 			ret = tquic_process_ack_frame(&ctx);
 		} else if (frame_type == TQUIC_FRAME_CRYPTO) {
+			/* CRYPTO frames forbidden in 0-RTT */
+			if (is_0rtt) {
+				conn->error_code = EQUIC_FRAME_ENCODING;
+				tquic_conn_close_with_error(conn,
+					EQUIC_FRAME_ENCODING,
+					"CRYPTO in 0-RTT");
+				return -EPROTO;
+			}
 			ret = tquic_process_crypto_frame(&ctx);
 		} else if (frame_type == TQUIC_FRAME_NEW_TOKEN) {
+			/* NEW_TOKEN only in 1-RTT */
+			if (!is_1rtt) {
+				conn->error_code = EQUIC_FRAME_ENCODING;
+				tquic_conn_close_with_error(conn,
+					EQUIC_FRAME_ENCODING,
+					"NEW_TOKEN not in 1-RTT");
+				return -EPROTO;
+			}
 			ret = tquic_process_new_token(&ctx);
 		} else if ((frame_type & 0xf8) == TQUIC_FRAME_STREAM) {
+			/* STREAM frames only in 0-RTT and 1-RTT */
+			if (is_initial || is_handshake) {
+				conn->error_code = EQUIC_FRAME_ENCODING;
+				tquic_conn_close_with_error(conn,
+					EQUIC_FRAME_ENCODING,
+					"STREAM in Initial/Handshake");
+				return -EPROTO;
+			}
 			ret = tquic_process_stream_frame(&ctx);
 		} else if (frame_type == TQUIC_FRAME_MAX_DATA) {
+			if (is_initial || is_handshake) {
+				conn->error_code = EQUIC_FRAME_ENCODING;
+				tquic_conn_close_with_error(conn,
+					EQUIC_FRAME_ENCODING,
+					"MAX_DATA in Initial/Handshake");
+				return -EPROTO;
+			}
 			ret = tquic_process_max_data_frame(&ctx);
 		} else if (frame_type == TQUIC_FRAME_MAX_STREAM_DATA) {
+			if (is_initial || is_handshake) {
+				conn->error_code = EQUIC_FRAME_ENCODING;
+				tquic_conn_close_with_error(conn,
+					EQUIC_FRAME_ENCODING,
+					"MAX_STREAM_DATA in Initial/HS");
+				return -EPROTO;
+			}
 			ret = tquic_process_max_stream_data_frame(&ctx);
 		} else if (frame_type == TQUIC_FRAME_PATH_CHALLENGE) {
+			if (is_initial || is_handshake) {
+				conn->error_code = EQUIC_FRAME_ENCODING;
+				tquic_conn_close_with_error(conn,
+					EQUIC_FRAME_ENCODING,
+					"PATH_CHALLENGE in Initial/HS");
+				return -EPROTO;
+			}
 			ret = tquic_process_path_challenge_frame(&ctx);
 		} else if (frame_type == TQUIC_FRAME_PATH_RESPONSE) {
+			if (is_initial || is_handshake) {
+				conn->error_code = EQUIC_FRAME_ENCODING;
+				tquic_conn_close_with_error(conn,
+					EQUIC_FRAME_ENCODING,
+					"PATH_RESPONSE in Initial/HS");
+				return -EPROTO;
+			}
 			ret = tquic_process_path_response_frame(&ctx);
 		} else if (frame_type == TQUIC_FRAME_NEW_CONNECTION_ID) {
+			if (is_initial || is_handshake) {
+				conn->error_code = EQUIC_FRAME_ENCODING;
+				tquic_conn_close_with_error(conn,
+					EQUIC_FRAME_ENCODING,
+					"NEW_CID in Initial/HS");
+				return -EPROTO;
+			}
 			ret = tquic_process_new_connection_id_frame(&ctx);
 		} else if (frame_type == TQUIC_FRAME_RETIRE_CONNECTION_ID) {
+			if (is_initial || is_handshake) {
+				conn->error_code = EQUIC_FRAME_ENCODING;
+				tquic_conn_close_with_error(conn,
+					EQUIC_FRAME_ENCODING,
+					"RETIRE_CID in Initial/HS");
+				return -EPROTO;
+			}
 			ret = tquic_process_retire_connection_id_frame(&ctx);
 		} else if (frame_type == TQUIC_FRAME_CONNECTION_CLOSE) {
 			ret = tquic_process_connection_close_frame(&ctx, false);
 		} else if (frame_type == TQUIC_FRAME_CONNECTION_CLOSE_APP) {
 			ret = tquic_process_connection_close_frame(&ctx, true);
 		} else if (frame_type == TQUIC_FRAME_HANDSHAKE_DONE) {
+			/* HANDSHAKE_DONE only in 1-RTT */
+			if (!is_1rtt) {
+				conn->error_code = EQUIC_FRAME_ENCODING;
+				tquic_conn_close_with_error(conn,
+					EQUIC_FRAME_ENCODING,
+					"HANDSHAKE_DONE not in 1-RTT");
+				return -EPROTO;
+			}
 			ret = tquic_process_handshake_done_frame(&ctx);
 		} else if ((frame_type & 0xfe) == TQUIC_FRAME_DATAGRAM) {
+			if (is_initial || is_handshake) {
+				conn->error_code = EQUIC_FRAME_ENCODING;
+				tquic_conn_close_with_error(conn,
+					EQUIC_FRAME_ENCODING,
+					"DATAGRAM in Initial/HS");
+				return -EPROTO;
+			}
 			ret = tquic_process_datagram_frame(&ctx);
 		} else if (frame_type == TQUIC_FRAME_ACK_FREQUENCY) {
 			ret = tquic_process_ack_frequency_frame(&ctx);
@@ -1769,9 +2037,17 @@ static int tquic_process_frames(struct tquic_connection *conn,
 			ret = tquic_process_mp_extended_frame(&ctx);
 #endif
 		} else {
-			/* Unknown frame type */
+			/*
+			 * Unknown frame type - RFC 9000 Section 12.4:
+			 * "An endpoint MUST treat the receipt of a frame of
+			 * unknown type as a connection error of type
+			 * FRAME_ENCODING_ERROR."
+			 */
 			tquic_dbg("unknown frame type 0x%02x\n", frame_type);
-			ret = -EINVAL;
+			conn->error_code = EQUIC_FRAME_ENCODING;
+			tquic_conn_close_with_error(conn, EQUIC_FRAME_ENCODING,
+						    "unknown frame type");
+			return -EPROTO;
 		}
 
 		if (ret < 0)
@@ -2560,9 +2836,18 @@ int tquic_udp_recv(struct sock *sk, struct sk_buff *skb)
 					if (offset < len) {
 						u64 tlen;
 						int vlen;
+
 						vlen = tquic_decode_varint(data + offset,
 									   len - offset, &tlen);
-						if (vlen > 0 && offset + vlen + tlen <= len) {
+						/*
+						 * SECURITY: Validate tlen to prevent
+						 * u64 wrap in offset + vlen + tlen.
+						 * Use safe subtraction instead.
+						 */
+						if (vlen > 0 &&
+						    tlen <= TQUIC_MAX_TOKEN_LEN &&
+						    (size_t)vlen <= len - offset &&
+						    tlen <= len - offset - vlen) {
 							token = data + offset + vlen;
 							token_len = tlen;
 						}
@@ -2805,6 +3090,14 @@ int tquic_process_coalesced(struct tquic_connection *conn,
 
 			/* Skip version (4 bytes) */
 			dcid_len = data[offset + 5];
+
+			/*
+			 * SECURITY: Validate CID length per RFC 9000.
+			 * Matches validation in tquic_parse_long_header().
+			 */
+			if (dcid_len > TQUIC_MAX_CID_LEN)
+				break;
+
 			if (offset + 6 + dcid_len > total_len)
 				break;
 
@@ -2813,6 +3106,9 @@ int tquic_process_coalesced(struct tquic_connection *conn,
 				break;
 
 			scid_len = data[offset + 6 + dcid_len];
+			if (scid_len > TQUIC_MAX_CID_LEN)
+				break;
+
 			if (offset + 7 + dcid_len + scid_len > total_len)
 				break;
 
@@ -2821,25 +3117,52 @@ int tquic_process_coalesced(struct tquic_connection *conn,
 			/* Token for Initial packets */
 			if (((first_byte & 0x30) >> 4) == TQUIC_PKT_INITIAL) {
 				u64 token_len;
-				int vlen = tquic_decode_varint(data + offset + hdr_len,
-							       total_len - offset - hdr_len,
-							       &token_len);
+				size_t token_addition;
+				int vlen = tquic_decode_varint(
+						data + offset + hdr_len,
+						total_len - offset - hdr_len,
+						&token_len);
 				if (vlen < 0)
 					break;
-				hdr_len += vlen + token_len;
+
+				/*
+				 * SECURITY: Validate token_len against
+				 * reasonable max and use check_add_overflow
+				 * to prevent integer overflow in hdr_len.
+				 */
+				if (token_len >
+				    TQUIC_COALESCED_MAX_TOKEN_LEN)
+					break;
+				if (check_add_overflow((size_t)vlen,
+						       (size_t)token_len,
+						       &token_addition))
+					break;
+				if (check_add_overflow(hdr_len,
+						       token_addition,
+						       &hdr_len))
+					break;
+				if (offset + hdr_len > total_len)
+					break;
 			}
 
 			/* Length field */
 			{
-				int vlen = tquic_decode_varint(data + offset + hdr_len,
-							       total_len - offset - hdr_len,
-							       &pkt_len_val);
+				int vlen = tquic_decode_varint(
+						data + offset + hdr_len,
+						total_len - offset - hdr_len,
+						&pkt_len_val);
 				if (vlen < 0)
 					break;
 				hdr_len += vlen;
 			}
 
-			pkt_len = hdr_len + pkt_len_val;
+			/*
+			 * SECURITY: Use check_add_overflow to prevent
+			 * integer overflow in pkt_len computation.
+			 */
+			if (check_add_overflow(hdr_len, (size_t)pkt_len_val,
+					       &pkt_len))
+				break;
 		} else {
 			/* Short header - extends to end of datagram */
 			pkt_len = total_len - offset;

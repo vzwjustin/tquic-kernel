@@ -760,7 +760,10 @@ u64 tquic_cong_get_pacing_rate(struct tquic_path *path)
 		/* rate = cwnd / RTT (in bytes/sec)
 		 * cwnd is in bytes, RTT is in microseconds
 		 * rate = cwnd * USEC_PER_SEC / rtt_us
+		 *
+		 * Cap cwnd before multiplication to prevent u64 overflow.
 		 */
+		cwnd = min_t(u64, cwnd, U64_MAX / USEC_PER_SEC);
 		rate = div64_u64(cwnd * USEC_PER_SEC, path->stats.rtt_smoothed);
 	}
 

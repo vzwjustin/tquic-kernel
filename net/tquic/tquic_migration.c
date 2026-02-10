@@ -85,20 +85,19 @@ tquic_conn_get_session_state(struct tquic_connection *conn);
 bool tquic_path_anti_amplification_check(struct tquic_path *path, u64 bytes)
 {
 	u64 limit;
+	u64 sent, received;
 
 	if (!path->anti_amplification.active)
 		return true;
 
-	limit = path->anti_amplification.bytes_received *
-		TQUIC_ANTI_AMPLIFICATION_LIMIT;
+	received = atomic64_read(&path->anti_amplification.bytes_received);
+	sent = atomic64_read(&path->anti_amplification.bytes_sent);
+	limit = received * TQUIC_ANTI_AMPLIFICATION_LIMIT;
 
-	if (path->anti_amplification.bytes_sent + bytes > limit) {
+	if (sent + bytes > limit) {
 		pr_debug("tquic: anti-amplification blocked on path %u "
 			 "(sent=%llu, recv=%llu, limit=%llu)\n",
-			 path->path_id,
-			 path->anti_amplification.bytes_sent,
-			 path->anti_amplification.bytes_received,
-			 limit);
+			 path->path_id, sent, received, limit);
 		return false;
 	}
 
@@ -114,7 +113,7 @@ EXPORT_SYMBOL_GPL(tquic_path_anti_amplification_check);
 void tquic_path_anti_amplification_sent(struct tquic_path *path, u64 bytes)
 {
 	if (path->anti_amplification.active)
-		path->anti_amplification.bytes_sent += bytes;
+		atomic64_add(bytes, &path->anti_amplification.bytes_sent);
 }
 EXPORT_SYMBOL_GPL(tquic_path_anti_amplification_sent);
 
@@ -126,9 +125,36 @@ EXPORT_SYMBOL_GPL(tquic_path_anti_amplification_sent);
 void tquic_path_anti_amplification_received(struct tquic_path *path, u64 bytes)
 {
 	if (path->anti_amplification.active)
-		path->anti_amplification.bytes_received += bytes;
+		atomic64_add(bytes, &path->anti_amplification.bytes_received);
 }
 EXPORT_SYMBOL_GPL(tquic_path_anti_amplification_received);
+
+/**
+ * tquic_path_can_send_on - Check if active_path is in a sendable state
+ * @conn: Connection to check
+ *
+ * Verifies that conn->active_path->state is ACTIVE or VALIDATED before
+ * the output path sends data.  During NAT rebinding the active_path may
+ * temporarily be in PENDING state; callers must fall back to another
+ * path or respect anti-amplification limits.
+ *
+ * Returns: true if the active path is in a sendable state
+ */
+bool tquic_path_can_send_on(struct tquic_connection *conn)
+{
+	struct tquic_path *path;
+
+	if (!conn)
+		return false;
+
+	path = READ_ONCE(conn->active_path);
+	if (!path)
+		return false;
+
+	return path->state == TQUIC_PATH_ACTIVE ||
+	       path->state == TQUIC_PATH_VALIDATED;
+}
+EXPORT_SYMBOL_GPL(tquic_path_can_send_on);
 
 /* Forward declaration for tquic_client */
 struct tquic_client {
@@ -411,9 +437,13 @@ struct tquic_path *tquic_path_create(struct tquic_connection *conn,
 	 * New paths start with anti-amplification limits active.
 	 * These are lifted when path validation completes.
 	 */
-	path->anti_amplification.bytes_received = 0;
-	path->anti_amplification.bytes_sent = 0;
+	atomic64_set(&path->anti_amplification.bytes_received, 0);
+	atomic64_set(&path->anti_amplification.bytes_sent, 0);
 	path->anti_amplification.active = true;
+
+	/* Initialize challenge rate limiting */
+	path->challenge_rate.challenge_count = 0;
+	path->challenge_rate.window_start = ktime_get();
 
 	INIT_LIST_HEAD(&path->list);
 
@@ -552,6 +582,7 @@ static struct tquic_migration_state *tquic_migration_state_alloc(
 	ms->status = TQUIC_MIGRATE_NONE;
 	spin_lock_init(&ms->lock);
 	timer_setup(&ms->timer, tquic_migration_timeout, 0);
+	INIT_WORK(&ms->work, tquic_migration_work_handler);
 
 	return ms;
 }
@@ -624,6 +655,13 @@ static void tquic_migration_work_handler(struct work_struct *work)
 		return;
 
 	conn = ms->new_path->conn;
+
+	/*
+	 * Check connection state before proceeding.  If the connection
+	 * is closing or draining we must not switch the active path.
+	 */
+	if (READ_ONCE(conn->state) != TQUIC_CONN_CONNECTED)
+		return;
 
 	spin_lock_bh(&ms->lock);
 
@@ -725,6 +763,16 @@ int tquic_migrate_auto(struct tquic_connection *conn,
 			 * RFC 9000 Section 9.3: Must validate before sending
 			 * significant data. Save old state for recovery and
 			 * enable anti-amplification limits.
+			 *
+			 * Note: During NAT rebinding, conn->active_path may
+			 * still point to this path even though its state is
+			 * set to PENDING.  The multipath scheduler and output
+			 * path helpers correctly exclude PENDING paths from
+			 * selection (see tquic_path_can_send_on() below and
+			 * sched_*.c path iterators).  The anti-amplification
+			 * check in tquic_path_anti_amplification_check()
+			 * further constrains data sent on the unvalidated
+			 * path.
 			 */
 			if (path->state == TQUIC_PATH_ACTIVE ||
 			    path->state == TQUIC_PATH_STANDBY ||
@@ -733,8 +781,9 @@ int tquic_migrate_auto(struct tquic_connection *conn,
 			path->state = TQUIC_PATH_PENDING;
 
 			/* Enable anti-amplification (RFC 9000 Section 8.1) */
-			path->anti_amplification.bytes_received = 0;
-			path->anti_amplification.bytes_sent = 0;
+			atomic64_set(&path->anti_amplification.bytes_received,
+				     0);
+			atomic64_set(&path->anti_amplification.bytes_sent, 0);
 			path->anti_amplification.active = true;
 			spin_unlock_bh(&conn->paths_lock);
 
@@ -941,8 +990,10 @@ int tquic_migrate_explicit(struct tquic_connection *conn,
 		conn->state_machine = ms;
 	}
 
-	/* Set up migration work handler */
-	INIT_WORK(&ms->work, tquic_migration_work_handler);
+	/*
+	 * INIT_WORK was already called in tquic_migration_state_alloc().
+	 * No need to re-initialize the work struct here.
+	 */
 
 	/* Set up migration state */
 	spin_lock_bh(&ms->lock);
@@ -1230,8 +1281,8 @@ int tquic_server_handle_migration(struct tquic_connection *conn,
 		 * Server must not send more than 3x the data received from
 		 * the new client address until that address is validated.
 		 */
-		path->anti_amplification.bytes_received = 0;
-		path->anti_amplification.bytes_sent = 0;
+		atomic64_set(&path->anti_amplification.bytes_received, 0);
+		atomic64_set(&path->anti_amplification.bytes_sent, 0);
 		path->anti_amplification.active = true;
 		spin_unlock_bh(&conn->paths_lock);
 

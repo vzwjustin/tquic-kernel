@@ -575,11 +575,15 @@ int tquic_rs_decode(const u8 **symbols, const u16 *lengths,
 	if (max_len == 0)
 		return -EINVAL;
 
-	/* Allocate working buffers */
-	decode_matrix = kmalloc(num_erasures * num_erasures, GFP_ATOMIC);
-	inv_matrix = kmalloc(num_erasures * num_erasures, GFP_ATOMIC);
-	syndrome = kmalloc(num_erasures * max_len, GFP_ATOMIC);
-	repair_used = kmalloc(num_erasures * sizeof(int), GFP_ATOMIC);
+	/* Sanity-check dimensions to prevent multiplication overflow */
+	if (num_erasures > 32 || max_len > 65535)
+		return -EINVAL;
+
+	/* Allocate working buffers using overflow-safe kmalloc_array */
+	decode_matrix = kmalloc_array(num_erasures, num_erasures, GFP_ATOMIC);
+	inv_matrix = kmalloc_array(num_erasures, num_erasures, GFP_ATOMIC);
+	syndrome = kmalloc_array(num_erasures, max_len, GFP_ATOMIC);
+	repair_used = kmalloc_array(num_erasures, sizeof(int), GFP_ATOMIC);
 
 	if (!decode_matrix || !inv_matrix || !syndrome || !repair_used) {
 		ret = -ENOMEM;

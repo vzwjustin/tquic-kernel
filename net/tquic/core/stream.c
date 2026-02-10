@@ -271,7 +271,12 @@ static int tquic_stream_set_state(struct tquic_stream *stream,
 		break;
 
 	case TQUIC_STREAM_OPEN:
-		/* Can go to SIZE_KNOWN, RESET_SENT, RESET_RECVD */
+		/* Can go to SIZE_KNOWN, DATA_SENT, RESET_SENT, RESET_RECVD */
+		if (new_state != TQUIC_STREAM_SIZE_KNOWN &&
+		    new_state != TQUIC_STREAM_DATA_SENT &&
+		    new_state != TQUIC_STREAM_RESET_SENT &&
+		    new_state != TQUIC_STREAM_RESET_RECVD)
+			return -EINVAL;
 		break;
 
 	case TQUIC_STREAM_SEND:
@@ -1346,8 +1351,18 @@ int tquic_stream_reset_send(struct tquic_stream_manager *mgr,
 		kfree_skb(skb);
 	}
 
-	/* Record error and transition state */
-	stream->state = TQUIC_STREAM_RESET_SENT;
+	/* Record error and transition state via validator */
+	{
+		int ret;
+
+		ret = tquic_stream_set_state(stream, TQUIC_STREAM_RESET_SENT);
+		if (ret) {
+			spin_unlock(&mgr->lock);
+			tquic_dbg("stream %llu invalid reset_send transition from %d\n",
+				  stream->id, stream->state);
+			return ret;
+		}
+	}
 
 	spin_unlock(&mgr->lock);
 
@@ -1379,8 +1394,18 @@ int tquic_stream_reset_recv(struct tquic_stream_manager *mgr,
 	/* Discard receive buffer */
 	skb_queue_purge(&stream->recv_buf);
 
-	/* Transition state */
-	stream->state = TQUIC_STREAM_RESET_RECVD;
+	/* Transition state via validator */
+	{
+		int ret;
+
+		ret = tquic_stream_set_state(stream, TQUIC_STREAM_RESET_RECVD);
+		if (ret) {
+			spin_unlock(&mgr->lock);
+			tquic_dbg("stream %llu invalid reset_recv transition from %d\n",
+				  stream->id, stream->state);
+			return ret;
+		}
+	}
 
 	spin_unlock(&mgr->lock);
 

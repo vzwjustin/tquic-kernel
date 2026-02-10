@@ -232,7 +232,10 @@ bool tquic_fc_conn_can_send(struct tquic_fc_state *fc, u64 bytes)
 		return false;
 
 	spin_lock_irqsave(&fc->conn.lock, flags);
-	can_send = (fc->conn.data_sent + bytes) <= fc->conn.max_data_remote;
+	if (fc->conn.max_data_remote >= fc->conn.data_sent)
+		can_send = bytes <= (fc->conn.max_data_remote - fc->conn.data_sent);
+	else
+		can_send = false;
 	spin_unlock_irqrestore(&fc->conn.lock, flags);
 
 	return can_send;
@@ -284,8 +287,9 @@ int tquic_fc_conn_data_sent(struct tquic_fc_state *fc, u64 bytes)
 
 	spin_lock_irqsave(&fc->conn.lock, flags);
 
-	/* Check if this would exceed the limit */
-	if (fc->conn.data_sent + bytes > fc->conn.max_data_remote) {
+	/* Check if this would exceed the limit (subtraction avoids u64 overflow) */
+	if (fc->conn.max_data_remote < fc->conn.data_sent ||
+	    bytes > fc->conn.max_data_remote - fc->conn.data_sent) {
 		/* Record that we're blocked */
 		fc->conn.blocked_at = fc->conn.max_data_remote;
 		fc->blocked_flags |= TQUIC_FC_BLOCKED_CONN_DATA;
@@ -326,8 +330,9 @@ int tquic_fc_conn_data_received(struct tquic_fc_state *fc, u64 bytes)
 
 	spin_lock_irqsave(&fc->conn.lock, flags);
 
-	/* Check if peer is violating our limit */
-	if (fc->conn.data_received + bytes > fc->conn.max_data_local) {
+	/* Check if peer is violating our limit (subtraction avoids u64 overflow) */
+	if (fc->conn.max_data_local < fc->conn.data_received ||
+	    bytes > fc->conn.max_data_local - fc->conn.data_received) {
 		tquic_warn("peer exceeded MAX_DATA limit\n");
 		ret = -EPROTO;  /* FLOW_CONTROL_ERROR */
 	} else {
@@ -689,6 +694,9 @@ int tquic_fc_stream_data_received(struct tquic_fc_stream_state *stream,
 	if (unlikely(!stream))
 		return -EINVAL;
 
+	/* Check for u64 overflow before computing end offset */
+	if (length > U64_MAX - offset)
+		return -EOVERFLOW;
 	end_offset = offset + length;
 
 	spin_lock_irqsave(&stream->lock, flags);
@@ -748,9 +756,19 @@ void tquic_fc_stream_data_consumed(struct tquic_fc_stream_state *stream,
 	 * Update when consumed data exceeds threshold of current window
 	 */
 	{
-		u64 consumed_since_update = stream->data_consumed -
-			(stream->last_max_data_sent - stream->max_data_local);
-		u64 threshold = stream->max_data_local /
+		u64 diff;
+		u64 consumed_since_update;
+		u64 threshold;
+
+		/* Guard against underflow in the difference calculations */
+		if (stream->last_max_data_sent < stream->max_data_local)
+			goto out_unlock;
+		diff = stream->last_max_data_sent - stream->max_data_local;
+		if (stream->data_consumed < diff)
+			goto out_unlock;
+		consumed_since_update = stream->data_consumed - diff;
+
+		threshold = stream->max_data_local /
 			TQUIC_FC_WINDOW_UPDATE_THRESHOLD;
 
 		if (consumed_since_update >= threshold) {
@@ -759,6 +777,8 @@ void tquic_fc_stream_data_consumed(struct tquic_fc_stream_state *stream,
 			stream->needs_max_stream_data = true;
 		}
 	}
+
+out_unlock:
 
 	spin_unlock_irqrestore(&stream->lock, flags);
 }
@@ -1550,11 +1570,20 @@ bool tquic_fc_should_update_conn_window(struct tquic_fc_state *fc)
 		return false;
 
 	/* Calculate how much window is still available */
+	if (fc->conn.max_data_local < fc->conn.data_received)
+		return false;
 	available_window = fc->conn.max_data_local - fc->conn.data_received;
 
-	/* Calculate how much was consumed since last update */
-	consumed_since_update = fc->conn.data_consumed -
-		(fc->conn.last_max_data_sent - fc->conn.max_data_local);
+	/* Calculate how much was consumed since last update (guard underflow) */
+	if (fc->conn.last_max_data_sent < fc->conn.max_data_local)
+		return false;
+	{
+		u64 diff = fc->conn.last_max_data_sent - fc->conn.max_data_local;
+
+		if (fc->conn.data_consumed < diff)
+			return false;
+		consumed_since_update = fc->conn.data_consumed - diff;
+	}
 
 	/*
 	 * RFC 9000 recommends sending MAX_DATA when the receiver has consumed
@@ -1586,8 +1615,20 @@ bool tquic_fc_should_update_stream_window(struct tquic_fc_stream_state *stream,
 
 	spin_lock_irqsave(&stream->lock, flags);
 
-	consumed_since_update = stream->data_consumed -
-		(stream->last_max_data_sent - stream->max_data_local);
+	/* Guard against underflow in difference calculations */
+	if (stream->last_max_data_sent < stream->max_data_local) {
+		spin_unlock_irqrestore(&stream->lock, flags);
+		return false;
+	}
+	{
+		u64 diff = stream->last_max_data_sent - stream->max_data_local;
+
+		if (stream->data_consumed < diff) {
+			spin_unlock_irqrestore(&stream->lock, flags);
+			return false;
+		}
+		consumed_since_update = stream->data_consumed - diff;
+	}
 
 	update_threshold = stream->max_data_local / TQUIC_FC_WINDOW_UPDATE_THRESHOLD;
 

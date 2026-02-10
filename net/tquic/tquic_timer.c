@@ -1395,6 +1395,10 @@ EXPORT_SYMBOL_GPL(tquic_timer_path_validated);
 /**
  * tquic_timer_work_fn - Main timer work function
  * @work: Work struct
+ *
+ * Lock ordering: ts->lock is acquired first, then conn->lock if needed.
+ * The connection reference is held across the entire work function to
+ * prevent use-after-free after dropping ts->lock.
  */
 static void tquic_timer_work_fn(struct work_struct *work)
 {
@@ -1410,6 +1414,16 @@ static void tquic_timer_work_fn(struct work_struct *work)
 	}
 
 	conn = ts->conn;
+
+	/*
+	 * Take a reference on the connection while we hold ts->lock
+	 * to ensure conn remains valid after we drop the lock below.
+	 */
+	if (!tquic_conn_get(conn)) {
+		spin_unlock_bh(&ts->lock);
+		return;
+	}
+
 	pending = ts->pending_timer_mask;
 	ts->pending_timer_mask = 0;
 	spin_unlock_bh(&ts->lock);
@@ -1448,6 +1462,8 @@ static void tquic_timer_work_fn(struct work_struct *work)
 		/* Would trigger packet transmission */
 		/* tquic_transmit_pending(conn); */
 	}
+
+	tquic_conn_put(conn);
 }
 
 /**

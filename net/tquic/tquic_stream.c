@@ -636,6 +636,13 @@ static int tquic_stream_release(struct socket *sock)
 	conn = ss->conn;
 
 	if (stream && conn) {
+		/*
+		 * Take a connection refcount to ensure the connection
+		 * stays alive while we clean up the stream.
+		 */
+		if (!tquic_conn_get(conn))
+			goto out;
+
 		/* Send FIN if not already sent and stream is still writable */
 		if (!stream->fin_sent &&
 		    (stream->state == TQUIC_STREAM_OPEN ||
@@ -647,8 +654,10 @@ static int tquic_stream_release(struct socket *sock)
 		tquic_stream_remove_from_conn(conn, stream);
 
 		tquic_stream_free(stream);
+		tquic_conn_put(conn);
 	}
 
+out:
 	sock->sk->sk_user_data = NULL;
 	kfree(ss);
 
@@ -897,22 +906,37 @@ static int tquic_stream_sendmsg(struct socket *sock, struct msghdr *msg,
 
 	stream = ss->stream;
 	conn = ss->conn;
+
+	/*
+	 * Take a connection refcount so the connection cannot be
+	 * destroyed while we are sending.  If the refcount is already
+	 * zero the connection is being torn down.
+	 */
+	if (!tquic_conn_get(conn))
+		return -ENOTCONN;
+
 	nonblock = (msg->msg_flags & MSG_DONTWAIT) ||
 		   (sock->file->f_flags & O_NONBLOCK);
 
 	/* Check stream and connection state */
 	if (stream->state == TQUIC_STREAM_CLOSED ||
-	    stream->state == TQUIC_STREAM_RESET_SENT)
+	    stream->state == TQUIC_STREAM_RESET_SENT) {
+		tquic_conn_put(conn);
 		return -EPIPE;
+	}
 
-	if (conn->state != TQUIC_CONN_CONNECTED)
+	if (conn->state != TQUIC_CONN_CONNECTED) {
+		tquic_conn_put(conn);
 		return -ENOTCONN;
+	}
 
 	/* Check flow control before copying data */
 	allowed = tquic_stream_check_flow_control(conn, stream, len);
 	if (allowed == 0) {
-		if (nonblock)
-			return -EAGAIN;
+		if (nonblock) {
+			copied = -EAGAIN;
+			goto out_put;
+		}
 
 		/*
 		 * Block waiting for flow control credit.
@@ -921,42 +945,100 @@ static int tquic_stream_sendmsg(struct socket *sock, struct msghdr *msg,
 		if (wait_event_interruptible(stream->wait,
 				tquic_stream_check_flow_control(conn, stream, len) > 0 ||
 				stream->state == TQUIC_STREAM_CLOSED ||
-				conn->state != TQUIC_CONN_CONNECTED))
-			return -EINTR;
+				conn->state != TQUIC_CONN_CONNECTED)) {
+			copied = -EINTR;
+			goto out_put;
+		}
 
 		/* Re-check state after waking */
-		if (stream->state == TQUIC_STREAM_CLOSED)
-			return -EPIPE;
-		if (conn->state != TQUIC_CONN_CONNECTED)
-			return -ENOTCONN;
+		if (stream->state == TQUIC_STREAM_CLOSED) {
+			copied = -EPIPE;
+			goto out_put;
+		}
+		if (conn->state != TQUIC_CONN_CONNECTED) {
+			copied = -ENOTCONN;
+			goto out_put;
+		}
 
 		allowed = tquic_stream_check_flow_control(conn, stream, len);
-		if (allowed == 0)
-			return -EAGAIN;
+		if (allowed == 0) {
+			copied = -EAGAIN;
+			goto out_put;
+		}
 	}
 
 	/* Limit to flow control allowed amount */
 	if (len > allowed)
 		len = allowed;
 
+	/*
+	 * Atomically reserve connection-level flow control credit for
+	 * the entire send under conn->lock.  This prevents the TOCTOU
+	 * race where two concurrent sendmsg() calls both pass the
+	 * check and together exceed MAX_DATA.
+	 */
+	spin_lock_bh(&conn->lock);
+	if (conn->data_sent + len > conn->max_data_remote) {
+		if (conn->data_sent >= conn->max_data_remote) {
+			spin_unlock_bh(&conn->lock);
+			if (nonblock) {
+				copied = -EAGAIN;
+				goto out_put;
+			}
+			copied = -EAGAIN;
+			goto out_put;
+		}
+		len = conn->max_data_remote - conn->data_sent;
+	}
+	conn->data_sent += len;
+	spin_unlock_bh(&conn->lock);
+
 	/* Copy data to stream send buffer in chunks */
 	while (copied < len) {
 		size_t chunk = min_t(size_t, len - copied, 1200);
 
 		skb = alloc_skb(chunk, GFP_KERNEL);
-		if (!skb)
-			return copied > 0 ? copied : -ENOMEM;
+		if (!skb) {
+			if (copied == 0) {
+				/*
+				 * Return the reserved credit since
+				 * nothing was actually queued.
+				 */
+				spin_lock_bh(&conn->lock);
+				conn->data_sent -= (len - copied);
+				spin_unlock_bh(&conn->lock);
+				copied = -ENOMEM;
+			} else {
+				/* Return unused portion of reservation */
+				spin_lock_bh(&conn->lock);
+				conn->data_sent -= (len - copied);
+				spin_unlock_bh(&conn->lock);
+			}
+			goto out_put;
+		}
 
 		if (copy_from_iter(skb_put(skb, chunk), chunk,
 				   &msg->msg_iter) != chunk) {
 			kfree_skb(skb);
-			return copied > 0 ? copied : -EFAULT;
+			/* Return unused portion of reservation */
+			spin_lock_bh(&conn->lock);
+			conn->data_sent -= (len - copied);
+			spin_unlock_bh(&conn->lock);
+			if (copied == 0)
+				copied = -EFAULT;
+			goto out_put;
 		}
 
 		/* Charge socket memory for this buffer */
 		if (tquic_stream_wmem_charge(ss->parent_sk, skb)) {
 			kfree_skb(skb);
-			return copied > 0 ? copied : -ENOBUFS;
+			/* Return unused portion of reservation */
+			spin_lock_bh(&conn->lock);
+			conn->data_sent -= (len - copied);
+			spin_unlock_bh(&conn->lock);
+			if (copied == 0)
+				copied = -ENOBUFS;
+			goto out_put;
 		}
 
 		/* Store stream offset in skb->cb for frame generation */
@@ -965,11 +1047,6 @@ static int tquic_stream_sendmsg(struct socket *sock, struct msghdr *msg,
 		skb_queue_tail(&stream->send_buf, skb);
 		stream->send_offset += chunk;
 		copied += chunk;
-
-		/* Update connection-level data tracking */
-		spin_lock_bh(&conn->lock);
-		conn->data_sent += chunk;
-		spin_unlock_bh(&conn->lock);
 	}
 
 	/*
@@ -979,6 +1056,8 @@ static int tquic_stream_sendmsg(struct socket *sock, struct msghdr *msg,
 	 */
 	tquic_stream_trigger_output(conn, stream, ss->parent_sk);
 
+out_put:
+	tquic_conn_put(conn);
 	return copied;
 }
 

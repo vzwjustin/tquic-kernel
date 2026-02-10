@@ -275,8 +275,12 @@ static void tquic_client_free_rcu(struct rcu_head *head)
  * @identity_len: Length of identity
  *
  * Called during TLS handshake to find matching client configuration.
+ *
+ * WARNING: RCU locking contract
  * On success, returns with rcu_read_lock() held -- the caller MUST call
- * rcu_read_unlock() when it is done with the returned pointer.
+ * rcu_read_unlock() when it is done with the returned pointer.  Failing
+ * to release the RCU read lock will stall RCU grace periods and can lead
+ * to unbounded memory growth or soft-lockups.
  * On failure (NULL return), no RCU lock is held.
  *
  * Returns: Client pointer (RCU read lock held) or NULL if not found

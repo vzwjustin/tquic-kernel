@@ -148,37 +148,41 @@ static int tquic_ku_hkdf_expand_label(struct crypto_shash *hash,
 	for (i = 0; i < n; i++) {
 		ret = crypto_shash_setkey(hash, secret, secret_len);
 		if (ret)
-			return ret;
+			goto out;
 
 		ret = crypto_shash_init(desc);
 		if (ret)
-			return ret;
+			goto out;
 
 		if (i > 0) {
 			ret = crypto_shash_update(desc, t, hash_len);
 			if (ret)
-				return ret;
+				goto out;
 		}
 
 		ret = crypto_shash_update(desc, hkdf_label, hkdf_label_len);
 		if (ret)
-			return ret;
+			goto out;
 
 		t[0] = i + 1;
 		ret = crypto_shash_update(desc, t, 1);
 		if (ret)
-			return ret;
+			goto out;
 
 		ret = crypto_shash_final(desc, t);
 		if (ret)
-			return ret;
+			goto out;
 
 		memcpy(out + i * hash_len, t,
 		       min_t(size_t, hash_len, out_len - i * hash_len));
 	}
 
+	ret = 0;
+
+out:
 	memzero_explicit(t, sizeof(t));
-	return 0;
+	memzero_explicit(hkdf_label, sizeof(hkdf_label));
+	return ret;
 }
 
 /*
@@ -382,15 +386,43 @@ int tquic_initiate_key_update(struct tquic_connection *conn)
 
 	/* Pre-compute next generation write keys if not already done */
 	if (!state->next_write.valid) {
+		struct tquic_key_generation staged_next;
+		struct tquic_key_generation staged_cur_write;
+
+		/*
+		 * Copy current_write under lock for use during derivation.
+		 * Drop the lock while deriving to avoid sleeping with
+		 * spinlock held, then re-check state for consistency.
+		 */
+		staged_cur_write = state->current_write;
+		memset(&staged_next, 0, sizeof(staged_next));
 		spin_unlock_irqrestore(&state->lock, flags);
 
 		ret = tquic_ku_derive_next_generation(state,
-						      &state->current_write,
-						      &state->next_write);
-		if (ret)
+						      &staged_cur_write,
+						      &staged_next);
+		memzero_explicit(&staged_cur_write,
+				 sizeof(staged_cur_write));
+		if (ret) {
+			memzero_explicit(&staged_next,
+					 sizeof(staged_next));
 			return ret;
+		}
 
 		spin_lock_irqsave(&state->lock, flags);
+
+		/*
+		 * Re-check: if state changed while we were unlocked
+		 * (concurrent key update), discard our staged keys.
+		 */
+		if (state->update_pending || state->next_write.valid) {
+			memzero_explicit(&staged_next,
+					 sizeof(staged_next));
+			ret = -EINPROGRESS;
+			goto out_unlock;
+		}
+
+		state->next_write = staged_next;
 	}
 
 	/* Rotate write keys: current -> old, next -> current */
@@ -489,18 +521,35 @@ int tquic_handle_key_phase_change(struct tquic_connection *conn, u8 received_pha
 		 * We initiated the update - this packet confirms peer
 		 * has updated their keys. Complete the update.
 		 */
+		struct tquic_key_generation staged_next;
+		struct tquic_key_generation staged_cur_write;
+
 		state->update_pending = false;
 		state->peer_update_received = false;
 
 		/* Cancel the key update timeout timer */
 		tquic_timer_cancel(conn, TQUIC_TIMER_KEY_UPDATE);
 
-		/* Pre-compute next generation for future updates */
+		/*
+		 * Pre-compute next generation for future updates.
+		 * Use staging to avoid modifying state while unlocked.
+		 */
+		staged_cur_write = state->current_write;
+		memset(&staged_next, 0, sizeof(staged_next));
 		spin_unlock_irqrestore(&state->lock, flags);
+
 		ret = tquic_ku_derive_next_generation(state,
-						      &state->current_write,
-						      &state->next_write);
+						      &staged_cur_write,
+						      &staged_next);
+		memzero_explicit(&staged_cur_write,
+				 sizeof(staged_cur_write));
+
 		spin_lock_irqsave(&state->lock, flags);
+		if (ret == 0)
+			state->next_write = staged_next;
+		else
+			memzero_explicit(&staged_next,
+					 sizeof(staged_next));
 
 		tquic_info("key update confirmed by peer ACK\n");
 	} else {
@@ -510,8 +559,62 @@ int tquic_handle_key_phase_change(struct tquic_connection *conn, u8 received_pha
 		 * 2. Derive new write keys to respond with same phase
 		 * 3. Update our key phase
 		 */
+		struct tquic_key_generation staged_read;
+		struct tquic_key_generation staged_write;
+		struct tquic_key_generation staged_cur_read;
+		struct tquic_key_generation staged_cur_write;
+
 		state->peer_update_received = true;
 		state->peer_initiated_updates++;
+
+		/*
+		 * Snapshot current keys under lock, then derive new
+		 * keys into local staging variables while unlocked.
+		 */
+		staged_cur_read = state->current_read;
+		staged_cur_write = state->current_write;
+		memset(&staged_read, 0, sizeof(staged_read));
+		memset(&staged_write, 0, sizeof(staged_write));
+		spin_unlock_irqrestore(&state->lock, flags);
+
+		/* Derive new read keys */
+		ret = tquic_ku_derive_next_generation(state,
+						      &staged_cur_read,
+						      &staged_read);
+		if (ret) {
+			memzero_explicit(&staged_cur_read,
+					 sizeof(staged_cur_read));
+			memzero_explicit(&staged_cur_write,
+					 sizeof(staged_cur_write));
+			memzero_explicit(&staged_read,
+					 sizeof(staged_read));
+			spin_lock_irqsave(&state->lock, flags);
+			state->peer_update_received = false;
+			state->peer_initiated_updates--;
+			goto out_unlock;
+		}
+
+		/* Derive new write keys */
+		ret = tquic_ku_derive_next_generation(state,
+						      &staged_cur_write,
+						      &staged_write);
+		memzero_explicit(&staged_cur_read,
+				 sizeof(staged_cur_read));
+		memzero_explicit(&staged_cur_write,
+				 sizeof(staged_cur_write));
+		if (ret) {
+			memzero_explicit(&staged_read,
+					 sizeof(staged_read));
+			memzero_explicit(&staged_write,
+					 sizeof(staged_write));
+			spin_lock_irqsave(&state->lock, flags);
+			state->peer_update_received = false;
+			state->peer_initiated_updates--;
+			goto out_unlock;
+		}
+
+		/* Re-acquire lock and commit the staged keys */
+		spin_lock_irqsave(&state->lock, flags);
 
 		/* Save old read keys for packets in flight */
 		state->old_read = state->current_read;
@@ -519,29 +622,9 @@ int tquic_handle_key_phase_change(struct tquic_connection *conn, u8 received_pha
 		state->old_key_discard_time = ktime_add_ms(ktime_get(),
 							   3 * conn->idle_timeout);
 
-		/* Derive new read keys */
-		spin_unlock_irqrestore(&state->lock, flags);
-		ret = tquic_ku_derive_next_generation(state,
-						      &state->current_read,
-						      &state->next_read);
-		if (ret)
-			return ret;
-
-		/* Rotate: next -> current */
-		spin_lock_irqsave(&state->lock, flags);
-		state->current_read = state->next_read;
+		state->current_read = staged_read;
+		state->current_write = staged_write;
 		memset(&state->next_read, 0, sizeof(state->next_read));
-
-		/* Now derive new write keys */
-		spin_unlock_irqrestore(&state->lock, flags);
-		ret = tquic_ku_derive_next_generation(state,
-						      &state->current_write,
-						      &state->next_write);
-		if (ret)
-			return ret;
-
-		spin_lock_irqsave(&state->lock, flags);
-		state->current_write = state->next_write;
 		memset(&state->next_write, 0, sizeof(state->next_write));
 
 		/* Toggle our key phase to match peer */
@@ -832,17 +915,35 @@ EXPORT_SYMBOL_GPL(tquic_key_update_install_secrets);
  *
  * Called after each packet is sent to track statistics.
  * May trigger automatic key update based on configured thresholds.
+ *
+ * Returns 0 on success, -ENOSPC if the AEAD confidentiality limit has
+ * been reached and a key update is required before further encryption.
  */
-void tquic_key_update_on_packet_sent(struct tquic_key_update_state *state)
+int tquic_key_update_on_packet_sent(struct tquic_key_update_state *state)
 {
 	unsigned long flags;
+	int ret = 0;
 
 	if (!state)
-		return;
+		return -EINVAL;
 
 	spin_lock_irqsave(&state->lock, flags);
 	state->packets_sent++;
+
+	/*
+	 * Hard enforcement of AEAD confidentiality limits per
+	 * RFC 9001 Section 6.6. If the counter reaches the limit,
+	 * refuse further encryption until a key update occurs.
+	 */
+	if (state->packets_sent >= state->confidentiality_limit) {
+		pr_err("tquic_key_update: AEAD confidentiality limit reached "
+		       "(sent=%llu, limit=%llu), key update required\n",
+		       state->packets_sent, state->confidentiality_limit);
+		ret = -ENOSPC;
+	}
+
 	spin_unlock_irqrestore(&state->lock, flags);
+	return ret;
 }
 EXPORT_SYMBOL_GPL(tquic_key_update_on_packet_sent);
 

@@ -44,23 +44,26 @@ static void tquic_calc_path_quality(struct tquic_path *path,
 	struct tquic_path_stats *stats = &path->stats;
 	u64 score = 0;
 
-	if (path->state != TQUIC_PATH_ACTIVE) {
+	if (READ_ONCE(path->state) != TQUIC_PATH_ACTIVE) {
 		quality->score = 0;
 		quality->can_send = false;
 		return;
 	}
 
 	/* Base score from RTT (lower is better) */
-	if (stats->rtt_smoothed > 0)
-		score = 1000000000ULL / stats->rtt_smoothed;
+	if (READ_ONCE(stats->rtt_smoothed) > 0)
+		score = 1000000000ULL / READ_ONCE(stats->rtt_smoothed);
 
 	/* Adjust for bandwidth */
-	if (stats->bandwidth > 0)
-		score = (score * stats->bandwidth) >> 20;
+	if (READ_ONCE(stats->bandwidth) > 0)
+		score = (score * READ_ONCE(stats->bandwidth)) >> 20;
 
 	/* Penalize for loss */
-	if (stats->tx_packets > 0) {
-		u64 loss_rate = (stats->lost_packets * 100) / stats->tx_packets;
+	if (READ_ONCE(stats->tx_packets) > 0) {
+		u64 tx_pkts = READ_ONCE(stats->tx_packets);
+		u64 lost_pkts = READ_ONCE(stats->lost_packets);
+		u64 loss_rate = (lost_pkts * 100) / tx_pkts;
+
 		if (loss_rate > 0)
 			score = score * (100 - min(loss_rate, 90ULL)) / 100;
 	}
@@ -75,17 +78,18 @@ static void tquic_calc_path_quality(struct tquic_path *path,
 		score = U64_MAX;
 
 	quality->score = score;
-	quality->available_cwnd = stats->cwnd;
+	quality->available_cwnd = READ_ONCE(stats->cwnd);
 	/*
 	 * Track in-flight bytes from path statistics.
 	 * This is updated by the congestion control module.
 	 * Use signed arithmetic to detect underflow.
 	 */
-	quality->inflight = (s64)stats->tx_bytes -
-			    ((s64)stats->rx_bytes + (s64)stats->lost_packets * 1200);
+	quality->inflight = (s64)READ_ONCE(stats->tx_bytes) -
+			    ((s64)READ_ONCE(stats->rx_bytes) +
+			     (s64)READ_ONCE(stats->lost_packets) * 1200);
 	if (quality->inflight < 0)
 		quality->inflight = 0;
-	quality->est_delivery = stats->rtt_smoothed;
+	quality->est_delivery = READ_ONCE(stats->rtt_smoothed);
 	quality->can_send = (quality->available_cwnd > (u64)quality->inflight);
 }
 
@@ -102,16 +106,19 @@ static struct tquic_path *tquic_select_minrtt(struct tquic_bond_state *bond,
 
 	/* conn->lock must be held by caller */
 	list_for_each_entry(path, &conn->paths, list) {
-		if (path->state != TQUIC_PATH_ACTIVE)
+		u32 rtt;
+
+		if (READ_ONCE(path->state) != TQUIC_PATH_ACTIVE)
 			continue;
 
-		if (path->stats.rtt_smoothed < min_rtt) {
-			min_rtt = path->stats.rtt_smoothed;
+		rtt = READ_ONCE(path->stats.rtt_smoothed);
+		if (rtt < min_rtt) {
+			min_rtt = rtt;
 			best = path;
 		}
 	}
 
-	return best ?: conn->active_path;
+	return best ?: READ_ONCE(conn->active_path);
 }
 
 /*
@@ -130,19 +137,19 @@ static struct tquic_path *tquic_select_roundrobin(struct tquic_bond_state *bond,
 	/* conn->lock must be held by caller */
 	/* Count active paths first to avoid bias from inactive paths */
 	list_for_each_entry(path, &conn->paths, list) {
-		if (path->state == TQUIC_PATH_ACTIVE)
+		if (READ_ONCE(path->state) == TQUIC_PATH_ACTIVE)
 			active_count++;
 	}
 
 	/* Guard against division by zero when no active paths exist */
 	if (unlikely(active_count == 0))
-		return conn->active_path;
+		return READ_ONCE(conn->active_path);
 
-	target = bond->rr_counter++ % active_count;
+	target = (u32)atomic_inc_return(&bond->rr_counter) % active_count;
 
 	/* Select the target'th active path */
 	list_for_each_entry(path, &conn->paths, list) {
-		if (path->state != TQUIC_PATH_ACTIVE)
+		if (READ_ONCE(path->state) != TQUIC_PATH_ACTIVE)
 			continue;
 
 		if (idx == target)
@@ -151,7 +158,7 @@ static struct tquic_path *tquic_select_roundrobin(struct tquic_bond_state *bond,
 	}
 
 	/* Fallback should not be reached, but handle defensively */
-	return conn->active_path;
+	return READ_ONCE(conn->active_path);
 }
 
 /*
@@ -167,18 +174,18 @@ static struct tquic_path *tquic_select_weighted(struct tquic_bond_state *bond,
 
 	/* Calculate total weight of active paths */
 	list_for_each_entry(path, &conn->paths, list) {
-		if (path->state == TQUIC_PATH_ACTIVE)
+		if (READ_ONCE(path->state) == TQUIC_PATH_ACTIVE)
 			total_weight += path->weight;
 	}
 
 	if (total_weight == 0)
-		return conn->active_path;
+		return READ_ONCE(conn->active_path);
 
 	/* Select based on weight */
-	target = bond->rr_counter++ % total_weight;
+	target = (u32)atomic_inc_return(&bond->rr_counter) % total_weight;
 
 	list_for_each_entry(path, &conn->paths, list) {
-		if (path->state != TQUIC_PATH_ACTIVE)
+		if (READ_ONCE(path->state) != TQUIC_PATH_ACTIVE)
 			continue;
 
 		cumulative += path->weight;
@@ -188,7 +195,7 @@ static struct tquic_path *tquic_select_weighted(struct tquic_bond_state *bond,
 		}
 	}
 
-	return selected ?: conn->active_path;
+	return selected ?: READ_ONCE(conn->active_path);
 }
 
 /*
@@ -202,7 +209,7 @@ static struct tquic_path *tquic_select_aggregate(struct tquic_bond_state *bond,
 	struct tquic_path_quality quality, best_quality = {0};
 
 	list_for_each_entry(path, &conn->paths, list) {
-		if (path->state != TQUIC_PATH_ACTIVE)
+		if (READ_ONCE(path->state) != TQUIC_PATH_ACTIVE)
 			continue;
 
 		tquic_calc_path_quality(path, &quality);
@@ -221,15 +228,17 @@ static struct tquic_path *tquic_select_aggregate(struct tquic_bond_state *bond,
 		u32 max_cwnd = 0;
 
 		list_for_each_entry(path, &conn->paths, list) {
-			if (path->state == TQUIC_PATH_ACTIVE &&
-			    path->stats.cwnd > max_cwnd) {
-				max_cwnd = path->stats.cwnd;
+			u32 pcwnd = READ_ONCE(path->stats.cwnd);
+
+			if (READ_ONCE(path->state) == TQUIC_PATH_ACTIVE &&
+			    pcwnd > max_cwnd) {
+				max_cwnd = pcwnd;
 				best = path;
 			}
 		}
 	}
 
-	return best ?: conn->active_path;
+	return best ?: READ_ONCE(conn->active_path);
 }
 
 /*
@@ -246,8 +255,9 @@ static struct tquic_path *tquic_select_blest(struct tquic_bond_state *bond,
 	list_for_each_entry(path, &conn->paths, list) {
 		struct tquic_path_quality quality;
 		u64 completion_time;
+		u64 bw;
 
-		if (path->state != TQUIC_PATH_ACTIVE)
+		if (READ_ONCE(path->state) != TQUIC_PATH_ACTIVE)
 			continue;
 
 		tquic_calc_path_quality(path, &quality);
@@ -259,8 +269,9 @@ static struct tquic_path *tquic_select_blest(struct tquic_bond_state *bond,
 		completion_time = quality.est_delivery;
 
 		/* Add queuing delay estimate */
-		if (path->stats.bandwidth > 0)
-			completion_time += (skb->len * 1000000ULL) / path->stats.bandwidth;
+		bw = READ_ONCE(path->stats.bandwidth);
+		if (bw > 0)
+			completion_time += (skb->len * 1000000ULL) / bw;
 
 		if (completion_time < min_completion) {
 			min_completion = completion_time;
@@ -268,7 +279,7 @@ static struct tquic_path *tquic_select_blest(struct tquic_bond_state *bond,
 		}
 	}
 
-	return best ?: conn->active_path;
+	return best ?: READ_ONCE(conn->active_path);
 }
 
 /*
@@ -304,8 +315,10 @@ static struct tquic_path *tquic_select_ecf(struct tquic_bond_state *bond,
 		u64 queue_drain_time;
 		u64 rtt_us;
 		u64 bandwidth;
+		u64 tx_bytes, acked_bytes;
+		u32 cwnd;
 
-		if (path->state != TQUIC_PATH_ACTIVE)
+		if (READ_ONCE(path->state) != TQUIC_PATH_ACTIVE)
 			continue;
 
 		/*
@@ -313,8 +326,10 @@ static struct tquic_path *tquic_select_ecf(struct tquic_bond_state *bond,
 		 * In-flight = transmitted bytes - acknowledged bytes
 		 * This is data "on the wire" waiting for ACK.
 		 */
-		if (path->stats.tx_bytes > path->stats.acked_bytes)
-			in_flight_bytes = path->stats.tx_bytes - path->stats.acked_bytes;
+		tx_bytes = READ_ONCE(path->stats.tx_bytes);
+		acked_bytes = READ_ONCE(path->stats.acked_bytes);
+		if (tx_bytes > acked_bytes)
+			in_flight_bytes = tx_bytes - acked_bytes;
 		else
 			in_flight_bytes = 0;
 
@@ -323,24 +338,25 @@ static struct tquic_path *tquic_select_ecf(struct tquic_bond_state *bond,
 		 * We shouldn't have more in-flight than cwnd allows;
 		 * if tracking shows this, packets were likely lost.
 		 */
-		if (in_flight_bytes > path->stats.cwnd)
-			in_flight_bytes = path->stats.cwnd;
+		cwnd = READ_ONCE(path->stats.cwnd);
+		if (in_flight_bytes > cwnd)
+			in_flight_bytes = cwnd;
 
 		/* Get RTT in microseconds (full RTT for completion estimate) */
-		rtt_us = path->stats.rtt_smoothed;
+		rtt_us = READ_ONCE(path->stats.rtt_smoothed);
 		if (rtt_us == 0)
 			rtt_us = 100000;  /* 100ms default */
 
 		/* Get bandwidth in bytes/second */
-		bandwidth = path->stats.bandwidth;
+		bandwidth = READ_ONCE(path->stats.bandwidth);
 		if (bandwidth == 0) {
 			/*
 			 * No bandwidth estimate available yet.
 			 * Derive from congestion window and RTT:
-			 * BW ≈ cwnd / RTT (basic BDP relationship)
+			 * BW = cwnd / RTT (basic BDP relationship)
 			 */
-			if (path->stats.cwnd > 0 && rtt_us > 0)
-				bandwidth = (u64)path->stats.cwnd * 1000000ULL / rtt_us;
+			if (cwnd > 0 && rtt_us > 0)
+				bandwidth = (u64)cwnd * 1000000ULL / rtt_us;
 			else
 				bandwidth = 125000;  /* 1 Mbps fallback */
 		}
@@ -350,7 +366,7 @@ static struct tquic_path *tquic_select_ecf(struct tquic_bond_state *bond,
 		 * Completion_Time = RTT + (In_Flight + Pkt_Size) / Bandwidth
 		 *
 		 * Units: RTT is microseconds, bandwidth is bytes/sec
-		 * (bytes / bytes_per_sec) = seconds → *1000000 for microseconds
+		 * (bytes / bytes_per_sec) = seconds -> *1000000 for microseconds
 		 */
 		queue_drain_time = ((in_flight_bytes + pkt_size) * 1000000ULL) / bandwidth;
 		completion_time = rtt_us + queue_drain_time;
@@ -360,9 +376,12 @@ static struct tquic_path *tquic_select_ecf(struct tquic_bond_state *bond,
 		 * A path with loss requires retransmissions, effectively
 		 * multiplying completion time by 1/(1-loss_rate).
 		 */
-		if (path->stats.tx_packets > 100 && path->stats.lost_packets > 0) {
-			u64 loss_pct = (path->stats.lost_packets * 100) /
-				       path->stats.tx_packets;
+		if (READ_ONCE(path->stats.tx_packets) > 100 &&
+		    READ_ONCE(path->stats.lost_packets) > 0) {
+			u64 tx_pkts = READ_ONCE(path->stats.tx_packets);
+			u64 lost_pkts = READ_ONCE(path->stats.lost_packets);
+			u64 loss_pct = (lost_pkts * 100) / tx_pkts;
+
 			if (loss_pct > 0 && loss_pct < 50)
 				completion_time = (completion_time * 100) / (100 - loss_pct);
 		}
@@ -373,7 +392,7 @@ static struct tquic_path *tquic_select_ecf(struct tquic_bond_state *bond,
 		}
 	}
 
-	return best ?: conn->active_path;
+	return best ?: READ_ONCE(conn->active_path);
 }
 
 /*
@@ -389,7 +408,7 @@ static int __maybe_unused tquic_send_redundant(struct tquic_bond_state *bond,
 	list_for_each_entry(path, &conn->paths, list) {
 		struct sk_buff *clone;
 
-		if (path->state != TQUIC_PATH_ACTIVE)
+		if (READ_ONCE(path->state) != TQUIC_PATH_ACTIVE)
 			continue;
 
 		clone = skb_clone(skb, GFP_ATOMIC);
@@ -426,16 +445,16 @@ struct tquic_path *tquic_bond_select_path(struct tquic_connection *conn,
 
 	/* conn->lock must be held by caller (tquic_select_path) */
 	if (!bond)
-		return conn->active_path;
+		return READ_ONCE(conn->active_path);
 
 	switch (bond->mode) {
 	case TQUIC_BOND_MODE_FAILOVER:
 		/* Use primary unless it's down */
 		if (bond->primary_path &&
-		    bond->primary_path->state == TQUIC_PATH_ACTIVE)
+		    READ_ONCE(bond->primary_path->state) == TQUIC_PATH_ACTIVE)
 			selected = bond->primary_path;
 		else
-			selected = conn->active_path;
+			selected = READ_ONCE(conn->active_path);
 		break;
 
 	case TQUIC_BOND_MODE_ROUNDROBIN:
@@ -464,11 +483,11 @@ struct tquic_path *tquic_bond_select_path(struct tquic_connection *conn,
 
 	case TQUIC_BOND_MODE_REDUNDANT:
 		/* Redundant sends on all paths */
-		selected = conn->active_path;
+		selected = READ_ONCE(conn->active_path);
 		break;
 
 	default:
-		selected = conn->active_path;
+		selected = READ_ONCE(conn->active_path);
 	}
 
 	/*
@@ -482,7 +501,7 @@ struct tquic_path *tquic_bond_select_path(struct tquic_connection *conn,
 		list_for_each_entry(fallback, &conn->paths, list) {
 			if (fallback == selected)
 				continue;
-			if (fallback->state != TQUIC_PATH_ACTIVE)
+			if (READ_ONCE(fallback->state) != TQUIC_PATH_ACTIVE)
 				continue;
 			if (!fallback->anti_amplification.active ||
 			    tquic_path_anti_amplification_check(fallback,
@@ -519,7 +538,7 @@ void tquic_bond_path_failed(struct tquic_connection *conn,
 
 	spin_lock_bh(&conn->lock);
 
-	path->state = TQUIC_PATH_FAILED;
+	WRITE_ONCE(path->state, TQUIC_PATH_FAILED);
 
 	/* Find new active path */
 	if (conn->active_path == path) {
@@ -535,14 +554,14 @@ void tquic_bond_path_failed(struct tquic_connection *conn,
 			list_for_each_entry(p, &conn->paths, list) {
 				if (p != path && p->state == TQUIC_PATH_STANDBY) {
 					new_active = p;
-					p->state = TQUIC_PATH_ACTIVE;
+					WRITE_ONCE(p->state, TQUIC_PATH_ACTIVE);
 					break;
 				}
 			}
 		}
 
 		if (new_active) {
-			conn->active_path = new_active;
+			WRITE_ONCE(conn->active_path, new_active);
 			bond->stats.failovers++;
 			tquic_info("failed over to path %u\n",
 				   new_active->path_id);
@@ -573,14 +592,14 @@ void tquic_bond_path_recovered(struct tquic_connection *conn,
 	spin_lock_bh(&conn->lock);
 
 	if (path->state == TQUIC_PATH_FAILED) {
-		path->state = TQUIC_PATH_STANDBY;
+		WRITE_ONCE(path->state, TQUIC_PATH_STANDBY);
 		tquic_info("path %u recovered (standby)\n", path->path_id);
 
 		/* Promote to active if it was the primary */
 		if (path == bond->primary_path) {
-			path->state = TQUIC_PATH_ACTIVE;
+			WRITE_ONCE(path->state, TQUIC_PATH_ACTIVE);
 			if (bond->mode == TQUIC_BOND_MODE_FAILOVER)
-				conn->active_path = path;
+				WRITE_ONCE(conn->active_path, path);
 			tquic_info("primary path %u restored\n",
 				   path->path_id);
 		}
@@ -844,7 +863,7 @@ void tquic_bond_interface_down(struct tquic_connection *conn,
 	/* Mark all paths using this interface as failed */
 	list_for_each_entry(path, &conn->paths, list) {
 		if (path->dev == dev && path->state == TQUIC_PATH_ACTIVE) {
-			path->state = TQUIC_PATH_FAILED;
+			WRITE_ONCE(path->state, TQUIC_PATH_FAILED);
 			failed_count++;
 			bond->stats.failed_paths++;
 
@@ -867,7 +886,7 @@ void tquic_bond_interface_down(struct tquic_connection *conn,
 
 		if (new_primary) {
 			bond->primary_path = new_primary;
-			conn->active_path = new_primary;
+			WRITE_ONCE(conn->active_path, new_primary);
 			bond->stats.failovers++;
 			tquic_warn("failover to path %u after interface %s down\n",
 				   new_primary->path_id, dev->name);

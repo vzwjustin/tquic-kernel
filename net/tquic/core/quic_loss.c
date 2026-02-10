@@ -252,15 +252,22 @@ void tquic_rtt_update(struct tquic_rtt_state *rtt, u64 latest_rtt, u64 ack_delay
 }
 
 /**
- * tquic_rtt_pto - Calculate Probe Timeout (PTO) value
+ * tquic_rtt_pto_for_space - Calculate PTO for a specific packet number space
  * @rtt: RTT state structure
+ * @pn_space: Packet number space (Initial, Handshake, or Application)
+ * @handshake_confirmed: Whether the handshake has been confirmed
  *
  * RFC 9002 Section 6.2.1:
  * PTO = smoothed_rtt + max(4*rttvar, kGranularity) + max_ack_delay
  *
+ * max_ack_delay is only included for the Application Data space after
+ * the handshake has been confirmed. During handshake, Initial and
+ * Handshake packets are not delayed by the peer's ack delay timer.
+ *
  * Returns PTO in milliseconds.
  */
-u32 tquic_rtt_pto(struct tquic_rtt_state *rtt)
+static u32 tquic_rtt_pto_for_space(struct tquic_rtt_state *rtt,
+				   u8 pn_space, bool handshake_confirmed)
 {
 	u64 pto_us;
 	u64 var_component;
@@ -270,11 +277,36 @@ u32 tquic_rtt_pto(struct tquic_rtt_state *rtt)
 	if (var_component < TQUIC_GRANULARITY_US)
 		var_component = TQUIC_GRANULARITY_US;
 
-	/* PTO = smoothed_rtt + max(4*rttvar, kGranularity) + max_ack_delay */
-	pto_us = rtt->smoothed_rtt + var_component + TQUIC_MAX_ACK_DELAY_US;
+	/* PTO = smoothed_rtt + max(4*rttvar, kGranularity) */
+	pto_us = rtt->smoothed_rtt + var_component;
+
+	/*
+	 * RFC 9002 Section 6.2.1:
+	 * max_ack_delay is only added for Application Data packets
+	 * once the handshake is confirmed.
+	 */
+	if (pn_space == TQUIC_PN_SPACE_APPLICATION && handshake_confirmed)
+		pto_us += TQUIC_MAX_ACK_DELAY_US;
 
 	/* Convert to milliseconds, rounding up */
 	return (u32)((pto_us + 999) / 1000);
+}
+
+/**
+ * tquic_rtt_pto - Calculate Probe Timeout (PTO) value
+ * @rtt: RTT state structure
+ *
+ * RFC 9002 Section 6.2.1:
+ * PTO = smoothed_rtt + max(4*rttvar, kGranularity) + max_ack_delay
+ *
+ * This is the legacy API that always includes max_ack_delay,
+ * suitable for Application Data space with confirmed handshake.
+ *
+ * Returns PTO in milliseconds.
+ */
+u32 tquic_rtt_pto(struct tquic_rtt_state *rtt)
+{
+	return tquic_rtt_pto_for_space(rtt, TQUIC_PN_SPACE_APPLICATION, true);
 }
 
 /**
@@ -343,32 +375,16 @@ static bool tquic_conn_has_ack_eliciting_in_flight(struct tquic_connection *conn
 }
 
 /*
- * Per-connection loss detection state
+ * Loss detection state is stored directly in struct tquic_connection:
+ *   conn->pto_count
+ *   conn->loss_detection_timer
+ *   conn->time_of_last_ack_eliciting
+ *   conn->packet_threshold
+ *   conn->time_threshold
  *
- * RFC 9002 defines loss detection variables that we track per-connection.
- * These are stored separately since tquic_connection may not have all fields.
+ * The previous per-CPU approach was incorrect since loss detection
+ * state must be per-connection, not per-CPU.
  */
-struct tquic_loss_detection {
-	u32 pto_count;			/* Consecutive PTO count */
-	ktime_t loss_detection_timer;	/* Timer value */
-	ktime_t time_of_last_ack_eliciting; /* Time of last ACK-eliciting send */
-	u32 packet_threshold;		/* kPacketThreshold */
-	u32 time_threshold;		/* kTimeThreshold numerator */
-};
-
-/* Global/per-connection loss detection state - embedded in timer_state */
-static DEFINE_PER_CPU(struct tquic_loss_detection, tquic_loss_state);
-
-/*
- * Get loss detection state for a connection.
- * This uses timer_state if available, otherwise per-CPU fallback.
- */
-static inline struct tquic_loss_detection *tquic_get_loss_state(
-	struct tquic_connection *conn)
-{
-	/* For now, use per-CPU state as fallback */
-	return this_cpu_ptr(&tquic_loss_state);
-}
 
 /**
  * tquic_loss_detection_init - Initialize loss detection state
@@ -380,7 +396,6 @@ static inline struct tquic_loss_detection *tquic_get_loss_state(
  */
 int tquic_loss_detection_init(struct tquic_connection *conn)
 {
-	struct tquic_loss_detection *ld;
 	int i;
 
 	if (!conn)
@@ -390,27 +405,22 @@ int tquic_loss_detection_init(struct tquic_connection *conn)
 	if (conn->active_path)
 		tquic_rtt_init(&conn->active_path->rtt);
 
-	/* Get or allocate loss detection state */
-	ld = tquic_get_loss_state(conn);
-	if (!ld)
-		return -ENOMEM;
-
-	/* Initialize loss detection variables */
-	ld->pto_count = 0;
-	ld->loss_detection_timer = 0;
-	ld->time_of_last_ack_eliciting = 0;
+	/* Initialize loss detection variables directly on connection */
+	conn->pto_count = 0;
+	conn->loss_detection_timer = 0;
+	conn->time_of_last_ack_eliciting = 0;
 
 	/*
 	 * RFC 9002 Section 6.1.1:
 	 * kPacketThreshold is the maximum reordering in packets.
 	 */
-	ld->packet_threshold = TQUIC_PACKET_THRESHOLD;
+	conn->packet_threshold = TQUIC_PACKET_THRESHOLD;
 
 	/*
 	 * RFC 9002 Section 6.1.2:
 	 * kTimeThreshold is the maximum reordering in time.
 	 */
-	ld->time_threshold = TQUIC_TIME_THRESHOLD_NUMER;
+	conn->time_threshold = TQUIC_TIME_THRESHOLD_NUMER;
 
 	/* Initialize packet number space loss state */
 	if (conn->pn_spaces) {
@@ -438,7 +448,6 @@ void tquic_loss_detection_on_packet_sent(struct tquic_connection *conn,
 {
 	struct tquic_pn_space *pn_space;
 	struct tquic_path *path;
-	struct tquic_loss_detection *ld;
 	unsigned long flags;
 
 	if (!conn || !pkt)
@@ -449,7 +458,6 @@ void tquic_loss_detection_on_packet_sent(struct tquic_connection *conn,
 
 	path = conn->active_path;
 	pn_space = &conn->pn_spaces[pkt->pn_space];
-	ld = tquic_get_loss_state(conn);
 
 	spin_lock_irqsave(&pn_space->lock, flags);
 
@@ -459,8 +467,7 @@ void tquic_loss_detection_on_packet_sent(struct tquic_connection *conn,
 	/* Track ack-eliciting packets in flight */
 	if (pkt->ack_eliciting) {
 		pn_space->ack_eliciting_in_flight++;
-		if (ld)
-			ld->time_of_last_ack_eliciting = pkt->sent_time;
+		conn->time_of_last_ack_eliciting = pkt->sent_time;
 	}
 
 	spin_unlock_irqrestore(&pn_space->lock, flags);
@@ -493,13 +500,16 @@ static u64 tquic_loss_get_ack_delay_us(struct tquic_connection *conn,
 	u64 ack_delay_us;
 
 	/*
-	 * RFC 9000 Section 18.2: ack_delay_exponent defaults to 3.
-	 * ack_delay is encoded as ack_delay_encoded * 2^ack_delay_exponent
+	 * RFC 9000 Section 18.2: ack_delay_exponent defaults to 3
+	 * when the transport parameter is absent. A negotiated value
+	 * of 0 is valid. Values above 20 are invalid per RFC 9000.
 	 */
-	if (ack_delay_exponent == 0)
-		ack_delay_exponent = 3;
+	if (ack_delay_exponent > 20)
+		return 0; /* Invalid exponent, treat as zero delay */
 
 	ack_delay_us = ack_delay_encoded << ack_delay_exponent;
+	/* Cap at 16 seconds to prevent absurd values */
+	ack_delay_us = min_t(u64, ack_delay_us, 16000000ULL);
 
 	/*
 	 * RFC 9002 Section 5.3: ack_delay must not exceed max_ack_delay
@@ -535,6 +545,8 @@ static bool tquic_loss_is_pn_acked(struct tquic_ack_frame *ack, u64 pn)
 	 * First ACK Range acknowledges [largest_acked - first_ack_range, largest_acked]
 	 */
 	range_end = ack->largest_acked;
+	if (ack->first_range > range_end)
+		return false; /* malformed ACK */
 	range_start = range_end - ack->first_range;
 
 	if (pn >= range_start && pn <= range_end)
@@ -547,7 +559,11 @@ static bool tquic_loss_is_pn_acked(struct tquic_ack_frame *ack, u64 pn)
 		 * - Gap: Number of unacknowledged packets before this range
 		 * - ACK Range: Number of acknowledged packets in this range
 		 */
+		if (ack->ranges[i].gap + 2 > range_start)
+			return false; /* malformed ACK */
 		range_end = range_start - ack->ranges[i].gap - 2;
+		if (ack->ranges[i].length > range_end)
+			return false; /* malformed ACK */
 		range_start = range_end - ack->ranges[i].length;
 
 		if (pn >= range_start && pn <= range_end)
@@ -572,7 +588,6 @@ void tquic_loss_detection_on_ack_received(struct tquic_connection *conn,
 {
 	struct tquic_pn_space *pn_space;
 	struct tquic_path *path;
-	struct tquic_loss_detection *ld;
 	struct tquic_sent_packet *pkt, *tmp;
 	struct tquic_sent_packet *newly_acked = NULL;
 	ktime_t largest_acked_sent_time = 0;
@@ -594,7 +609,6 @@ void tquic_loss_detection_on_ack_received(struct tquic_connection *conn,
 
 	path = conn->active_path;
 	pn_space = &conn->pn_spaces[pn_space_idx];
-	ld = tquic_get_loss_state(conn);
 
 	if (pn_space->keys_discarded)
 		return;
@@ -698,8 +712,8 @@ void tquic_loss_detection_on_ack_received(struct tquic_connection *conn,
 	}
 
 	/* Reset PTO count since we got a valid ACK */
-	if (includes_ack_eliciting && ld)
-		ld->pto_count = 0;
+	if (includes_ack_eliciting)
+		conn->pto_count = 0;
 
 	/* Detect and handle lost packets */
 	tquic_loss_detection_detect_lost(conn, pn_space_idx);
@@ -727,7 +741,6 @@ void tquic_loss_detection_detect_lost(struct tquic_connection *conn, u8 pn_space
 {
 	struct tquic_pn_space *pn_space;
 	struct tquic_path *path;
-	struct tquic_loss_detection *ld;
 	struct tquic_sent_packet *pkt, *tmp;
 	struct list_head lost_list;
 	ktime_t now;
@@ -748,7 +761,6 @@ void tquic_loss_detection_detect_lost(struct tquic_connection *conn, u8 pn_space
 
 	path = conn->active_path;
 	pn_space = &conn->pn_spaces[pn_space_idx];
-	ld = tquic_get_loss_state(conn);
 
 	if (pn_space->keys_discarded)
 		return;
@@ -789,7 +801,7 @@ void tquic_loss_detection_detect_lost(struct tquic_connection *conn, u8 pn_space
 		 *   largest_acked, OR
 		 * - It was sent kTimeThreshold ago
 		 */
-		if (pkt->pn + (ld ? ld->packet_threshold : TQUIC_PACKET_THRESHOLD) <=
+		if (pkt->pn + conn->packet_threshold <=
 		    pn_space->largest_acked ||
 		    ktime_before(pkt->sent_time, pkt_time_threshold)) {
 			/* Mark as lost */
@@ -905,8 +917,6 @@ static int tquic_loss_get_pto_time_space(struct tquic_connection *conn)
 	if (!conn->active_path)
 		return TQUIC_PN_SPACE_APPLICATION;
 
-	pto = tquic_rtt_pto(&conn->active_path->rtt);
-
 	/* Use handshake_complete from connection state */
 	handshake_complete = conn->handshake_complete;
 
@@ -925,6 +935,9 @@ static int tquic_loss_get_pto_time_space(struct tquic_connection *conn)
 			if (!tquic_pn_space_has_ack_eliciting_in_flight(pn_space))
 				continue;
 
+			pto = tquic_rtt_pto_for_space(
+				&conn->active_path->rtt, i,
+				conn->handshake_confirmed);
 			t = ktime_add_ms(pn_space->last_ack_time, pto);
 			if (ktime_before(t, earliest_time)) {
 				earliest_time = t;
@@ -969,7 +982,6 @@ static int tquic_loss_get_pto_time_space(struct tquic_connection *conn)
  */
 void tquic_set_loss_detection_timer(struct tquic_connection *conn)
 {
-	struct tquic_loss_detection *ld;
 	ktime_t timeout = 0;
 	int loss_space;
 	int pto_space;
@@ -981,16 +993,13 @@ void tquic_set_loss_detection_timer(struct tquic_connection *conn)
 	if (!conn->active_path)
 		return;
 
-	ld = tquic_get_loss_state(conn);
-
 	/*
 	 * RFC 9002 Section 6.2.2.1:
 	 * If no ack-eliciting packets in flight, cancel timer.
 	 */
 	if (!tquic_conn_has_ack_eliciting_in_flight(conn) &&
 	    conn->handshake_complete) {
-		if (ld)
-			ld->loss_detection_timer = 0;
+		conn->loss_detection_timer = 0;
 		tquic_timer_cancel(conn, TQUIC_TIMER_LOSS);
 		return;
 	}
@@ -1011,8 +1020,7 @@ void tquic_set_loss_detection_timer(struct tquic_connection *conn)
 	 */
 	pto_space = tquic_loss_get_pto_time_space(conn);
 	if (pto_space < 0) {
-		if (ld)
-			ld->loss_detection_timer = 0;
+		conn->loss_detection_timer = 0;
 		tquic_timer_cancel(conn, TQUIC_TIMER_LOSS);
 		return;
 	}
@@ -1021,13 +1029,15 @@ void tquic_set_loss_detection_timer(struct tquic_connection *conn)
 	 * RFC 9002 Section 6.2.1:
 	 * PTO = smoothed_rtt + max(4*rttvar, kGranularity) + max_ack_delay
 	 * The timer is set for PTO * (2 ^ pto_count)
+	 * max_ack_delay only included for Application Data with confirmed HS.
 	 */
-	pto = tquic_rtt_pto(&conn->active_path->rtt);
-	if (ld)
-		pto <<= ld->pto_count;  /* Exponential backoff */
+	pto = tquic_rtt_pto_for_space(&conn->active_path->rtt,
+				      (u8)pto_space,
+				      conn->handshake_confirmed);
+	pto <<= conn->pto_count;  /* Exponential backoff */
 
-	if (ld && ld->time_of_last_ack_eliciting)
-		timeout = ktime_add_ms(ld->time_of_last_ack_eliciting, pto);
+	if (conn->time_of_last_ack_eliciting)
+		timeout = ktime_add_ms(conn->time_of_last_ack_eliciting, pto);
 	else
 		timeout = ktime_add_ms(ktime_get(), pto);
 
@@ -1036,8 +1046,7 @@ void tquic_set_loss_detection_timer(struct tquic_connection *conn)
 		timeout = ktime_add_us(ktime_get(), 1);
 
 set_timer:
-	if (ld)
-		ld->loss_detection_timer = timeout;
+	conn->loss_detection_timer = timeout;
 	tquic_timer_set(conn, TQUIC_TIMER_LOSS, timeout);
 }
 
@@ -1127,15 +1136,12 @@ static void tquic_loss_send_probe(struct tquic_connection *conn, u8 pn_space_idx
  */
 void tquic_loss_detection_on_timeout(struct tquic_connection *conn)
 {
-	struct tquic_loss_detection *ld;
 	int loss_space;
 	int pto_space;
 	ktime_t now = ktime_get();
 
 	if (!conn || !conn->pn_spaces)
 		return;
-
-	ld = tquic_get_loss_state(conn);
 
 	/*
 	 * RFC 9002 Section 6.2.1:
@@ -1151,7 +1157,7 @@ void tquic_loss_detection_on_timeout(struct tquic_connection *conn)
 		return;
 	}
 
-	tquic_conn_info(conn, "PTO timeout pto_count=%u\n", ld->pto_count);
+	tquic_conn_info(conn, "PTO timeout pto_count=%u\n", conn->pto_count);
 
 	/*
 	 * RFC 9002 Section 6.2.1:
@@ -1174,8 +1180,7 @@ void tquic_loss_detection_on_timeout(struct tquic_connection *conn)
 	}
 
 	if (pto_space >= 0) {
-		if (ld)
-			ld->pto_count++;
+		conn->pto_count++;
 
 		/*
 		 * RFC 9002 Section 6.2.4:

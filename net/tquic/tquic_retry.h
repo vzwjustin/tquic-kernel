@@ -87,13 +87,18 @@ struct tquic_retry_token_plaintext {
 	u8 random[8];		/* Random padding for uniqueness */
 };
 
+/* Number of AEAD cipher instances in the token crypto pool */
+#define TQUIC_RETRY_AEAD_POOL_SIZE	8
+
 /**
  * struct tquic_retry_state - Server-side Retry state
  * @enabled: Whether Retry is required for new connections
  * @token_key: Secret key for token encryption (32 bytes)
  * @token_key_id: Key identifier for key rotation
  * @token_lifetime: Token validity period in seconds
- * @aead: AEAD cipher for token encryption
+ * @aead_pool: Pool of AEAD ciphers for parallel token operations
+ * @pool_locks: Per-slot mutexes for the AEAD pool
+ * @pool_size: Number of AEAD instances in the pool
  * @lock: Protects key material
  */
 struct tquic_retry_state {
@@ -101,9 +106,10 @@ struct tquic_retry_state {
 	u8 token_key[32];
 	u32 token_key_id;
 	u32 token_lifetime;
-	struct crypto_aead *aead;
+	struct crypto_aead *aead_pool[TQUIC_RETRY_AEAD_POOL_SIZE];
+	struct mutex pool_locks[TQUIC_RETRY_AEAD_POOL_SIZE];
+	u32 pool_size;
 	spinlock_t lock;		/* Protects key material */
-	struct mutex crypto_mutex;	/* Serializes AEAD operations */
 };
 
 /*

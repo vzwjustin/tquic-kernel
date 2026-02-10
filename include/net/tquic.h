@@ -82,9 +82,14 @@ bool tquic_sysctl_prefer_v2(void);
 #define TQUIC_CRYPTO_EARLY_DATA		3
 #define TQUIC_CRYPTO_MAX		4
 
-/* Stream limits (RFC 9000 maximum values) */
-#define TQUIC_MAX_STREAM_COUNT_BIDI	(1ULL << 60)
-#define TQUIC_MAX_STREAM_COUNT_UNI	(1ULL << 60)
+/*
+ * Stream limits - practical defaults for DoS prevention.
+ * RFC 9000 allows up to 2^60 but that is an absolute maximum, not a
+ * sensible default.  These can be raised via sysctl or transport
+ * parameter negotiation.
+ */
+#define TQUIC_MAX_STREAM_COUNT_BIDI	256
+#define TQUIC_MAX_STREAM_COUNT_UNI	256
 
 /* Flow control defaults */
 #define TQUIC_DEFAULT_MAX_DATA		(1 << 20)   /* 1 MB */
@@ -462,12 +467,31 @@ struct tquic_path {
 	 * Before a path is validated, an endpoint MUST NOT send more than
 	 * three times the amount of data received from that address.
 	 * This prevents the endpoint from being used as an amplifier.
+	 *
+	 * Counters use atomic64_t because they are read in
+	 * tquic_path_anti_amplification_check() and written in
+	 * tquic_path_anti_amplification_sent/received() potentially
+	 * from different contexts (softirq vs process) without a
+	 * shared lock.
 	 */
 	struct {
-		u64 bytes_received;           /* Bytes received on unvalidated path */
-		u64 bytes_sent;               /* Bytes sent on unvalidated path */
+		atomic64_t bytes_received;    /* Bytes received on unvalidated path */
+		atomic64_t bytes_sent;        /* Bytes sent on unvalidated path */
 		bool active;                  /* Anti-amplification limits in effect */
 	} anti_amplification;
+
+	/*
+	 * PATH_CHALLENGE response rate limiting.
+	 *
+	 * Limits the number of PATH_RESPONSE frames sent per RTT to
+	 * prevent resource exhaustion from excessive PATH_CHALLENGE
+	 * frames.  The counter resets each RTT interval.
+	 */
+	struct {
+		u32 challenge_count;          /* Challenges responded to in window */
+		ktime_t window_start;         /* Start of current rate limit window */
+#define TQUIC_MAX_CHALLENGE_RESPONSES_PER_RTT	4
+	} challenge_rate;
 
 	/* Response queue (prevent memory exhaustion - RFC 9000 Section 8.2) */
 	struct {
@@ -897,7 +921,15 @@ struct tquic_connection {
 	struct tquic_transport_params local_params;
 	struct tquic_transport_params remote_params;
 
-	/* Flow control state */
+	/*
+	 * Flow control state (authoritative)
+	 *
+	 * These are the canonical flow control structures.  The legacy
+	 * per-field counters (max_data_local, max_data_remote, data_sent,
+	 * data_received) below are DEPRECATED and should not be used in
+	 * new code -- use local_fc / remote_fc or the tquic_fc_state
+	 * pointed to by conn->fc instead.
+	 */
 	struct tquic_flow_control local_fc;
 	struct tquic_flow_control remote_fc;
 
@@ -931,7 +963,11 @@ struct tquic_connection {
 	struct list_head dcid_list;	/* List of destination CIDs */
 	struct list_head scid_list;	/* List of source CIDs */
 
-	/* Flow control */
+	/*
+	 * Legacy flow control fields -- DEPRECATED.
+	 * Use conn->local_fc / conn->remote_fc or conn->fc instead.
+	 * Kept for existing callers that have not yet been migrated.
+	 */
 	u64 max_data_local;
 	u64 max_data_remote;
 	u64 data_sent;
@@ -1211,7 +1247,6 @@ struct tquic_connection {
 	 * Scheduled via tasklet_hi_schedule() for high-priority processing.
 	 */
 	struct tasklet_struct tx_tasklet;
-	bool tasklet_scheduled;
 
 	/*
 	 * Control frame queue (RESET_STREAM, STOP_SENDING, etc.)
@@ -1312,6 +1347,7 @@ struct tquic_connection {
 #define TQUIC_CONN_FLAG_DRAINING		3  /* Connection draining */
 #define TQUIC_CONN_FLAG_IMMEDIATE_ACK		4  /* Send ACK immediately */
 #define TQUIC_CONN_FLAG_KEY_UPDATE_PENDING	5  /* Key update in progress */
+#define TQUIC_CONN_FLAG_TASKLET_SCHED		6  /* TX tasklet is scheduled */
 
 /* Backwards compatibility alias */
 #define TQUIC_PATH_RESPONSE_PENDING	TQUIC_CONN_FLAG_PATH_RESPONSE_PENDING
@@ -1345,7 +1381,7 @@ struct tquic_bond_state {
 
 	struct tquic_bond_stats stats;
 
-	u32 rr_counter;
+	atomic_t rr_counter;
 	struct tquic_path *primary_path;
 
 	bool failover_pending;
@@ -1954,6 +1990,8 @@ void tquic_conn_state_cleanup(struct tquic_connection *conn);
 /* Stream management */
 struct tquic_stream_manager;	/* Forward declaration */
 struct tquic_stream *tquic_stream_open(struct tquic_connection *conn, bool bidi);
+struct tquic_stream *tquic_stream_open_incoming(struct tquic_connection *conn,
+						u64 stream_id);
 struct tquic_stream *tquic_conn_stream_lookup(struct tquic_connection *conn, u64 stream_id);
 void tquic_stream_close(struct tquic_stream *stream);
 void tquic_stream_destroy(struct tquic_stream_manager *mgr, struct tquic_stream *stream);

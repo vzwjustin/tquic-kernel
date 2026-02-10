@@ -309,8 +309,12 @@ u8 tquic_key_update_get_phase(struct tquic_key_update_state *state);
  *
  * Called after each packet is sent to track statistics
  * for automatic key update triggering.
+ *
+ * Returns 0 on success, -ENOSPC if the AEAD confidentiality limit
+ * has been reached and a key update is required before further
+ * encryption.
  */
-void tquic_key_update_on_packet_sent(struct tquic_key_update_state *state);
+int tquic_key_update_on_packet_sent(struct tquic_key_update_state *state);
 
 /**
  * tquic_key_update_on_packet_received - Track packet received

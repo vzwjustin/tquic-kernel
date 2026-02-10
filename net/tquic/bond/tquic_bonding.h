@@ -112,6 +112,9 @@ struct tquic_capacity_weights {
 #define TQUIC_BOND_F_REORDER_RETRY	BIT(2)	/* Retry reorder alloc scheduled */
 #define TQUIC_BOND_F_COUPLED_CC		BIT(3)	/* Coupled CC enabled */
 
+/* Bit flags for tquic_bonding_ctx.flags (atomic bit operations) */
+#define TQUIC_BOND_WEIGHT_UPDATE_PENDING	0	/* Weight update work queued */
+
 /* Forward declaration for coupled congestion control */
 struct coupled_cc_ctx;
 
@@ -150,19 +153,19 @@ struct tquic_bonding_ctx {
 
 	/* Work for async weight updates */
 	struct work_struct weight_work;
-	bool weight_update_pending;
+	unsigned long async_flags;	/* TQUIC_BOND_WEIGHT_UPDATE_PENDING etc. */
 
 	/* Back pointer to path manager */
 	struct tquic_path_manager *pm;
 
-	/* Statistics */
+	/* Statistics (atomic for lockless increment from multiple contexts) */
 	struct {
-		u64 state_changes;		/* Total state transitions */
-		u64 weight_updates;		/* Weight recalculations */
+		atomic64_t state_changes;	/* Total state transitions */
+		atomic64_t weight_updates;	/* Weight recalculations */
 		u64 time_in_bonded_ns;		/* Time spent in BONDED state */
 		ktime_t bonded_start;		/* When entered BONDED state */
 		u64 bytes_aggregated;		/* Bytes sent via aggregation */
-		u64 failover_events;		/* Failover count */
+		atomic64_t failover_events;	/* Failover count */
 	} stats;
 };
 
@@ -230,7 +233,7 @@ enum tquic_bonding_state tquic_bonding_get_state(struct tquic_bonding_ctx *bc);
  */
 static inline bool tquic_bonding_is_active(struct tquic_bonding_ctx *bc)
 {
-	return bc && bc->state == TQUIC_BOND_ACTIVE;
+	return bc && READ_ONCE(bc->state) == TQUIC_BOND_ACTIVE;
 }
 
 /*
@@ -398,7 +401,7 @@ void tquic_bonding_update_rtt_spread(struct tquic_bonding_ctx *bc,
 static inline struct tquic_reorder_buffer *
 tquic_bonding_get_reorder(struct tquic_bonding_ctx *bc)
 {
-	if (!bc || bc->state == TQUIC_BOND_SINGLE_PATH)
+	if (!bc || READ_ONCE(bc->state) == TQUIC_BOND_SINGLE_PATH)
 		return NULL;
 	return bc->reorder;
 }

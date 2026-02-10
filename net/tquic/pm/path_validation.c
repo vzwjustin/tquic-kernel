@@ -303,9 +303,8 @@ int tquic_path_handle_challenge(struct tquic_connection *conn,
 		conn->sk->sk_data_ready(conn->sk);
 
 		/* Schedule immediate transmission via tasklet */
-		if (conn->tasklet_scheduled) {
+		if (test_bit(TQUIC_CONN_FLAG_TASKLET_SCHED, &conn->flags))
 			tasklet_hi_schedule(&conn->tx_tasklet);
-		}
 
 		pr_debug("tquic_pm: triggered immediate PATH_RESPONSE transmission on path %u\n",
 			 path->path_id);

@@ -367,6 +367,17 @@ static bool tquic_rate_limit_check_per_ip(struct tquic_rate_limit_state *state,
 	if (!entry) {
 		rcu_read_unlock();
 
+		/*
+		 * Enforce per-IP entry cap to prevent unbounded memory
+		 * growth under DDoS.  When the limit is reached, fall
+		 * back to global-only rate limiting (return true here
+		 * so the caller still checks the global limiter).
+		 */
+		if (state->max_ip_entries &&
+		    atomic_read(&state->ip_entry_count) >=
+		    (int)state->max_ip_entries)
+			return true;  /* fall back to global limit */
+
 		/* Allocate new entry */
 		entry = tquic_rate_limit_entry_alloc(addr);
 		if (!entry) {
@@ -393,7 +404,8 @@ static bool tquic_rate_limit_check_per_ip(struct tquic_rate_limit_state *state,
 				return false;  /* Fail closed */
 			}
 		} else {
-			/* Successfully inserted */
+			/* Successfully inserted - track entry count */
+			atomic_inc(&state->ip_entry_count);
 			atomic_inc(&state->stats.active_entries);
 
 			rcu_read_lock();
@@ -526,6 +538,7 @@ static void tquic_rate_limit_gc_work_fn(struct work_struct *work)
 						   &entry->node,
 						   tquic_rate_limit_ht_params) == 0) {
 				tquic_rate_limit_entry_put(entry);
+				atomic_dec(&state->ip_entry_count);
 				atomic_dec(&state->stats.active_entries);
 				removed++;
 			}
@@ -707,6 +720,10 @@ int tquic_rate_limit_init(struct net *net)
 	/* Initialize rate window */
 	state->rate_window_start = jiffies;
 	atomic_set(&state->rate_window_count, 0);
+
+	/* Cap per-IP hash table to prevent unbounded memory growth */
+	state->max_ip_entries = 100000;
+	atomic_set(&state->ip_entry_count, 0);
 
 	state->initialized = true;
 

@@ -185,17 +185,29 @@ void tquic_conn_destroy(struct tquic_connection *conn)
 	/* Free crypto state if allocated */
 	tquic_crypto_cleanup(conn->crypto_state);
 
-	/* Free scheduler state if allocated */
-	kfree(conn->scheduler);
-
 	/*
-	 * Ensure an RCU grace period has passed before freeing the connection.
-	 * tquic_pm_conn_release() uses list_del_rcu() to remove the connection
-	 * from the per-netns list, and concurrent RCU readers
-	 * (tquic_conn_lookup_by_token) may still hold references to this
-	 * memory until the grace period completes.
+	 * NULL the scheduler pointer before the RCU grace period so that
+	 * any concurrent reader that still sees the connection will not
+	 * dereference freed memory.  The actual kfree() is deferred until
+	 * after synchronize_rcu().
 	 */
-	synchronize_rcu();
+	{
+		void *sched = conn->scheduler;
+
+		conn->scheduler = NULL;
+
+		/*
+		 * Ensure an RCU grace period has passed before freeing
+		 * the connection.  tquic_pm_conn_release() uses
+		 * list_del_rcu() to remove the connection from the
+		 * per-netns list, and concurrent RCU readers
+		 * (tquic_conn_lookup_by_token) may still hold references
+		 * to this memory until the grace period completes.
+		 */
+		synchronize_rcu();
+
+		kfree(sched);
+	}
 
 	kmem_cache_free(tquic_conn_cache, conn);
 }
@@ -597,6 +609,89 @@ struct tquic_stream *tquic_stream_open(struct tquic_connection *conn, bool bidi)
 	return stream;
 }
 EXPORT_SYMBOL_GPL(tquic_stream_open);
+
+/**
+ * tquic_stream_open_incoming - Create a stream for a remotely-initiated stream ID
+ * @conn: QUIC connection
+ * @stream_id: Stream ID received from the peer
+ *
+ * Validates the stream ID against the local MAX_STREAMS limit advertised
+ * to the peer.  If the peer exceeds the limit this is a protocol violation
+ * (STREAM_LIMIT_ERROR, RFC 9000 Section 4.6).
+ *
+ * Returns: new stream on success, NULL if limit exceeded or OOM.
+ */
+struct tquic_stream *tquic_stream_open_incoming(struct tquic_connection *conn,
+						u64 stream_id)
+{
+	struct tquic_stream *stream;
+	struct rb_node **link, *parent = NULL;
+	bool bidi = (stream_id & 0x02) == 0;
+	u64 stream_seq = stream_id >> 2;
+
+	/* Validate against MAX_STREAMS limit (RFC 9000 Section 4.6) */
+	spin_lock_bh(&conn->lock);
+	if (bidi) {
+		if (stream_seq >= conn->max_streams_bidi) {
+			spin_unlock_bh(&conn->lock);
+			pr_debug("tquic: peer exceeded MAX_STREAMS bidi limit (%llu >= %llu)\n",
+				 stream_seq, conn->max_streams_bidi);
+			return NULL;
+		}
+	} else {
+		if (stream_seq >= conn->max_streams_uni) {
+			spin_unlock_bh(&conn->lock);
+			pr_debug("tquic: peer exceeded MAX_STREAMS uni limit (%llu >= %llu)\n",
+				 stream_seq, conn->max_streams_uni);
+			return NULL;
+		}
+	}
+	spin_unlock_bh(&conn->lock);
+
+	stream = kmem_cache_zalloc(tquic_stream_cache, GFP_ATOMIC);
+	if (!stream)
+		return NULL;
+
+	stream->id = stream_id;
+	stream->state = TQUIC_STREAM_OPEN;
+	stream->conn = conn;
+
+	skb_queue_head_init(&stream->send_buf);
+	skb_queue_head_init(&stream->recv_buf);
+
+	stream->max_send_data = TQUIC_DEFAULT_MAX_STREAM_DATA;
+	stream->max_recv_data = TQUIC_DEFAULT_MAX_STREAM_DATA;
+
+	init_waitqueue_head(&stream->wait);
+
+	/* Insert into connection's stream tree */
+	spin_lock_bh(&conn->lock);
+	link = &conn->streams.rb_node;
+	while (*link) {
+		struct tquic_stream *entry;
+
+		parent = *link;
+		entry = rb_entry(parent, struct tquic_stream, node);
+
+		if (stream->id < entry->id)
+			link = &parent->rb_left;
+		else if (stream->id > entry->id) {
+			link = &parent->rb_right;
+		} else {
+			/* Stream already exists - race with another packet */
+			spin_unlock_bh(&conn->lock);
+			kmem_cache_free(tquic_stream_cache, stream);
+			return entry;
+		}
+	}
+	rb_link_node(&stream->node, parent, link);
+	rb_insert_color(&stream->node, &conn->streams);
+	conn->stats.streams_opened++;
+	spin_unlock_bh(&conn->lock);
+
+	return stream;
+}
+EXPORT_SYMBOL_GPL(tquic_stream_open_incoming);
 
 void tquic_stream_close(struct tquic_stream *stream)
 {

@@ -1277,6 +1277,10 @@ int tquic_hs_generate_client_hello(struct tquic_handshake *hs,
 	hs->key_share.public_key = kzalloc(32, GFP_KERNEL);
 	hs->key_share.private_key = kzalloc(32, GFP_KERNEL);
 	if (!hs->key_share.public_key || !hs->key_share.private_key) {
+		kfree_sensitive(hs->key_share.private_key);
+		hs->key_share.private_key = NULL;
+		kfree(hs->key_share.public_key);
+		hs->key_share.public_key = NULL;
 		kfree(extensions);
 		return -ENOMEM;
 	}
@@ -1297,6 +1301,10 @@ int tquic_hs_generate_client_hello(struct tquic_handshake *hs,
 	if (!curve25519_generate_public(hs->key_share.public_key,
 					hs->key_share.private_key)) {
 		pr_warn("tquic_hs: X25519 public key generation failed\n");
+		kfree_sensitive(hs->key_share.private_key);
+		hs->key_share.private_key = NULL;
+		kfree(hs->key_share.public_key);
+		hs->key_share.public_key = NULL;
 		kfree(extensions);
 		return -EINVAL;
 	}

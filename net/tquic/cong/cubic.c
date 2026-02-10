@@ -377,12 +377,21 @@ static u64 tquic_cubic_get_pacing_rate(void *state)
 	 * Pacing rate = cwnd / RTT (in bytes per second).
 	 * Use 1.25x multiplier for headroom, similar to TCP pacing.
 	 * If no RTT sample yet, use a conservative default (100ms).
+	 *
+	 * Cap cwnd before multiplication to prevent u64 overflow:
+	 * cwnd * USEC_PER_SEC * 5 must fit in u64.
 	 */
-	if (cubic->rtt_us > 0)
-		return cubic->cwnd * USEC_PER_SEC * 5 / (cubic->rtt_us * 4);
+	{
+		u64 capped = min_t(u64, cubic->cwnd,
+				   U64_MAX / (USEC_PER_SEC * 5));
 
-	/* No RTT sample: assume 100ms */
-	return cubic->cwnd * USEC_PER_SEC * 5 / (100000 * 4);
+		if (cubic->rtt_us > 0)
+			return div64_u64(capped * USEC_PER_SEC * 5,
+					 (u64)cubic->rtt_us * 4);
+
+		/* No RTT sample: assume 100ms */
+		return div64_u64(capped * USEC_PER_SEC * 5, 100000ULL * 4);
+	}
 }
 
 static bool tquic_cubic_can_send(void *state, u64 bytes)

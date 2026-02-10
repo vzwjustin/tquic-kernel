@@ -446,8 +446,11 @@ static u64 tquic_westwood_get_pacing_rate(void *state)
 	/*
 	 * Pacing rate based on cwnd / RTT
 	 * Could also use bw_est directly
+	 *
+	 * Cap cwnd before multiplication to prevent u64 overflow.
 	 */
-	return ww->cwnd * USEC_PER_SEC / ww->rtt_min_us;
+	return div64_u64(min_t(u64, ww->cwnd, U64_MAX / USEC_PER_SEC) *
+			 USEC_PER_SEC, ww->rtt_min_us);
 }
 
 static bool tquic_westwood_can_send(void *state, u64 bytes)

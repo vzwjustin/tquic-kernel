@@ -237,7 +237,7 @@ static void tquic_bonding_set_state(struct tquic_bonding_ctx *bc,
 	}
 
 	bc->state = new_state;
-	bc->stats.state_changes++;
+	atomic64_inc(&bc->stats.state_changes);
 
 	tquic_info("bond state: %s -> %s (active=%d pending=%d failed=%d)\n",
 		   tquic_bonding_state_names[old_state],
@@ -255,7 +255,7 @@ static void tquic_bonding_weight_work_fn(struct work_struct *work)
 		container_of(work, struct tquic_bonding_ctx, weight_work);
 
 	tquic_bonding_derive_weights(bc);
-	bc->weight_update_pending = false;
+	clear_bit(TQUIC_BOND_WEIGHT_UPDATE_PENDING, &bc->async_flags);
 }
 
 /*
@@ -263,8 +263,9 @@ static void tquic_bonding_weight_work_fn(struct work_struct *work)
  */
 static void tquic_bonding_schedule_weight_update(struct tquic_bonding_ctx *bc)
 {
-	if (!bc->weight_update_pending && tquic_bond_wq) {
-		bc->weight_update_pending = true;
+	if (tquic_bond_wq &&
+	    !test_and_set_bit(TQUIC_BOND_WEIGHT_UPDATE_PENDING,
+			      &bc->async_flags)) {
 		queue_work(tquic_bond_wq, &bc->weight_work);
 	}
 }
@@ -339,15 +340,15 @@ struct tquic_bonding_ctx *tquic_bonding_init(struct tquic_path_manager *pm,
 
 	/* Initialize weight work */
 	INIT_WORK(&bc->weight_work, tquic_bonding_weight_work_fn);
-	bc->weight_update_pending = false;
+	bc->async_flags = 0;
 
 	/* Statistics */
-	bc->stats.state_changes = 0;
-	bc->stats.weight_updates = 0;
+	atomic64_set(&bc->stats.state_changes, 0);
+	atomic64_set(&bc->stats.weight_updates, 0);
 	bc->stats.time_in_bonded_ns = 0;
 	bc->stats.bonded_start = 0;
 	bc->stats.bytes_aggregated = 0;
-	bc->stats.failover_events = 0;
+	atomic64_set(&bc->stats.failover_events, 0);
 
 	pr_debug("bonding context initialized\n");
 
@@ -382,8 +383,9 @@ void tquic_bonding_destroy(struct tquic_bonding_ctx *bc)
 	tquic_bonding_free_reorder(bc);
 
 	pr_debug(
-		"bonding context destroyed (state_changes=%llu time_bonded=%lluns)\n",
-		bc->stats.state_changes, bc->stats.time_in_bonded_ns);
+		"bonding context destroyed (state_changes=%lld time_bonded=%lluns)\n",
+		(long long)atomic64_read(&bc->stats.state_changes),
+		bc->stats.time_in_bonded_ns);
 
 	kfree(bc);
 }
@@ -456,6 +458,28 @@ void tquic_bonding_update_state(struct tquic_bonding_ctx *bc)
 			spin_unlock_bh(&bc->state_lock);
 			tquic_bonding_free_reorder(bc);
 			spin_lock_bh(&bc->state_lock);
+
+			/*
+			 * Re-evaluate state after reacquiring lock.
+			 * Path counts may have changed while lock was
+			 * dropped.
+			 */
+			total_usable = bc->active_path_count;
+			if (total_usable >= 2) {
+				if (bc->failed_path_count > 0 ||
+				    bc->degraded_path_count > 0)
+					new_state = TQUIC_BOND_DEGRADED;
+				else
+					new_state = TQUIC_BOND_ACTIVE;
+			} else if (total_usable == 1 &&
+				   bc->pending_path_count > 0) {
+				new_state = TQUIC_BOND_PENDING;
+			} else {
+				new_state = TQUIC_BOND_SINGLE_PATH;
+			}
+
+			if (bc->state == new_state)
+				goto out_unlock;
 		}
 
 		tquic_bonding_set_state(bc, new_state);
@@ -485,6 +509,7 @@ void tquic_bonding_update_state(struct tquic_bonding_ctx *bc)
 		}
 	}
 
+out_unlock:
 	spin_unlock_bh(&bc->state_lock);
 }
 EXPORT_SYMBOL_GPL(tquic_bonding_update_state);
@@ -602,7 +627,7 @@ void tquic_bonding_derive_weights(struct tquic_bonding_ctx *bc)
 	}
 	bc->weights.total_weight = total_weight;
 	bc->weights.last_update = ktime_get();
-	bc->stats.weight_updates++;
+	atomic64_inc(&bc->stats.weight_updates);
 
 	spin_unlock_bh(&bc->state_lock);
 
@@ -763,7 +788,7 @@ void tquic_bonding_on_path_failed(void *ctx, struct tquic_path *path)
 	if (bc->active_path_count > 0)
 		bc->active_path_count--;
 	bc->failed_path_count++;
-	bc->stats.failover_events++;
+	atomic64_inc(&bc->stats.failover_events);
 
 	spin_unlock_bh(&bc->state_lock);
 
@@ -871,7 +896,7 @@ void tquic_bonding_on_ack_received(struct tquic_connection *conn,
 	 * Only forward to scheduler when bonding is active.
 	 * In SINGLE_PATH mode, there's no scheduling decision to inform.
 	 */
-	if (bc->state == TQUIC_BOND_SINGLE_PATH)
+	if (READ_ONCE(bc->state) == TQUIC_BOND_SINGLE_PATH)
 		return;
 
 	/*
@@ -904,7 +929,7 @@ void tquic_bonding_on_loss_detected(struct tquic_connection *conn,
 	 * Only forward to scheduler when bonding is active.
 	 * In SINGLE_PATH mode, there's no scheduling decision to inform.
 	 */
-	if (bc->state == TQUIC_BOND_SINGLE_PATH)
+	if (READ_ONCE(bc->state) == TQUIC_BOND_SINGLE_PATH)
 		return;
 
 	/*
@@ -950,10 +975,10 @@ void tquic_bonding_get_info(struct tquic_bonding_ctx *bc,
 	for (i = 0; i < TQUIC_MAX_PATHS; i++)
 		info->weights[i] = bc->weights.path_weights[i];
 
-	info->state_changes = bc->stats.state_changes;
-	info->weight_updates = bc->stats.weight_updates;
+	info->state_changes = atomic64_read(&bc->stats.state_changes);
+	info->weight_updates = atomic64_read(&bc->stats.weight_updates);
 	info->bytes_aggregated = bc->stats.bytes_aggregated;
-	info->failover_events = bc->stats.failover_events;
+	info->failover_events = atomic64_read(&bc->stats.failover_events);
 
 	/* Calculate current time in bonded if still bonded */
 	if (bc->state == TQUIC_BOND_ACTIVE) {

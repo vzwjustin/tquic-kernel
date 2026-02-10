@@ -68,12 +68,30 @@ struct tquic_session_ticket *tquic_session_ticket_retrieve(struct tquic_sock *ts
 bool tquic_session_ticket_valid(const struct tquic_session_ticket *ticket);
 
 /*
- * Helper macro to check if 0-RTT is enabled and valid
+ * Helper to check if 0-RTT is enabled and valid.
+ *
+ * LOCKING: Caller must hold conn->lock to ensure early_data_sent and
+ * max_early_data are read atomically with respect to concurrent updates
+ * from the transmit path.
+ *
+ * The pn_spaces array (not the void *crypto[] array) holds the
+ * keys_available flag for each packet number space.
  */
-#define tquic_can_send_early_data(conn) \
-	((conn)->early_data_enabled && \
-	 !(conn)->early_data_rejected && \
-	 (conn)->early_data_sent < (conn)->max_early_data && \
-	 (conn)->crypto[TQUIC_PN_SPACE_APPLICATION].keys_available)
+static inline bool tquic_can_send_early_data(struct tquic_connection *conn)
+{
+	struct tquic_pn_space *pn;
+
+	if (!conn->early_data_enabled || conn->early_data_rejected)
+		return false;
+
+	if (conn->early_data_sent >= conn->max_early_data)
+		return false;
+
+	if (!conn->pn_spaces)
+		return false;
+
+	pn = &conn->pn_spaces[TQUIC_PN_SPACE_APPLICATION];
+	return pn->keys_available;
+}
 
 #endif /* _NET_TQUIC_EARLY_DATA_H */

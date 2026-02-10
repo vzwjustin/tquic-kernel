@@ -39,6 +39,14 @@
 #include "grease.h"
 #include "crypto/key_update.h"
 #include "tquic_token.h"
+#include "core/mp_frame.h"
+
+/* Forward declarations for header protection (crypto/tls.c, header_protection.c) */
+struct tquic_crypto_state;
+struct tquic_hp_ctx;
+extern struct tquic_hp_ctx *tquic_crypto_get_hp_ctx(struct tquic_crypto_state *crypto);
+extern int tquic_hp_protect(struct tquic_hp_ctx *ctx, u8 *packet,
+			    size_t packet_len, size_t pn_offset);
 
 /* QUIC frame types */
 #define TQUIC_FRAME_PADDING		0x00
@@ -70,7 +78,7 @@
 #define TQUIC_FRAME_MP_NEW_CONNECTION_ID 0x40
 #define TQUIC_FRAME_MP_RETIRE_CONNECTION_ID 0x41
 #define TQUIC_FRAME_MP_ACK		0x42
-#define TQUIC_FRAME_PATH_ABANDON	0x43
+#define TQUIC_FRAME_PATH_ABANDON	TQUIC_MP_FRAME_PATH_ABANDON
 
 /* Packet header flags */
 #define TQUIC_HEADER_FORM_LONG		0x80
@@ -856,78 +864,46 @@ static int tquic_build_short_header_internal(struct tquic_connection *conn,
 /*
  * Apply header protection using AES-ECB
  */
+/*
+ * Apply header protection per RFC 9001 Section 5.4.
+ *
+ * Delegates to the fully-implemented tquic_hp_protect() in
+ * crypto/header_protection.c, which handles both long and short
+ * headers, AES-ECB and ChaCha20 cipher suites, and proper mask
+ * generation.
+ *
+ * The packet buffer must contain the complete packet (header + payload)
+ * with the packet number at @pn_offset already written in cleartext.
+ *
+ * If HP keys are not yet available (e.g. during Initial before keys
+ * are derived), the function logs a debug message and returns 0 so
+ * that packet sending is not blocked.
+ */
 static int tquic_apply_header_protection(struct tquic_connection *conn,
-					 u8 *header, int header_len,
-					 u8 *payload, int payload_len,
-					 bool is_long_header)
+					 u8 *packet, size_t packet_len,
+					 size_t pn_offset)
 {
-	struct crypto_skcipher *hp_cipher;
-	struct skcipher_request *req;
-	struct scatterlist sg;
-	u8 sample[16];
-	u8 mask[16];
-	int sample_offset;
-	int pkt_num_offset;
-	int pkt_num_len;
+	struct tquic_hp_ctx *hp_ctx;
 	int ret;
-	int i;
 
 	if (!conn->crypto_state)
-		return -EINVAL;
+		return 0;  /* No crypto yet (Initial); skip HP */
 
-	/* Get HP cipher from crypto state */
-	/* hp_cipher = ((struct tquic_crypto_state *)conn->crypto_state)->hp_cipher; */
-	/* For now, use a simplified approach */
-	return 0;  /* Header protection disabled for initial implementation */
+	hp_ctx = tquic_crypto_get_hp_ctx(conn->crypto_state);
+	if (!hp_ctx)
+		return 0;  /* HP context not allocated; skip HP */
 
-	/* Sample starts 4 bytes after packet number */
-	if (is_long_header) {
-		pkt_num_offset = header_len - 4;  /* Assuming 4-byte pn */
-		pkt_num_len = (header[0] & 0x03) + 1;
-	} else {
-		pkt_num_offset = 1 + conn->dcid.len;
-		pkt_num_len = (header[0] & 0x03) + 1;
+	ret = tquic_hp_protect(hp_ctx, packet, packet_len, pn_offset);
+	if (ret) {
+		/*
+		 * HP keys may not be installed yet for the current
+		 * encryption level.  Log and continue -- the packet
+		 * can still be sent (e.g. Initial packets before HP
+		 * key derivation).
+		 */
+		tquic_dbg("output: header protection failed: %d\n", ret);
+		return 0;
 	}
-
-	sample_offset = pkt_num_offset + 4;
-	if (sample_offset + 16 > header_len + payload_len)
-		return -EINVAL;
-
-	/* Extract sample (16 bytes starting at sample_offset) */
-	if (sample_offset < header_len) {
-		int from_header = min(16, header_len - sample_offset);
-		memcpy(sample, header + sample_offset, from_header);
-		if (from_header < 16)
-			memcpy(sample + from_header, payload, 16 - from_header);
-	} else {
-		memcpy(sample, payload + (sample_offset - header_len), 16);
-	}
-
-	/* Encrypt sample to get mask */
-	req = skcipher_request_alloc(hp_cipher, GFP_ATOMIC);
-	if (!req)
-		return -ENOMEM;
-
-	sg_init_one(&sg, sample, 16);
-	skcipher_request_set_crypt(req, &sg, &sg, 16, NULL);
-
-	ret = crypto_skcipher_encrypt(req);
-	skcipher_request_free(req);
-
-	if (ret)
-		return ret;
-
-	memcpy(mask, sample, 16);
-
-	/* Apply mask to first byte */
-	if (is_long_header)
-		header[0] ^= (mask[0] & 0x0f);  /* Protect low 4 bits */
-	else
-		header[0] ^= (mask[0] & 0x1f);  /* Protect low 5 bits */
-
-	/* Apply mask to packet number */
-	for (i = 0; i < pkt_num_len; i++)
-		header[pkt_num_offset + i] ^= mask[1 + i];
 
 	return 0;
 }
@@ -1089,13 +1065,6 @@ static struct sk_buff *tquic_assemble_packet(struct tquic_connection *conn,
 	if (unlikely(ret < 0))
 		goto err_free_skb;
 
-	/* Apply header protection */
-	ret = tquic_apply_header_protection(conn, header_buf, header_len,
-					    payload_buf, payload_len + 16,
-					    is_long_header);
-	if (unlikely(ret < 0))
-		goto err_free_skb;
-
 	/*
 	 * Trim the skb tail to the actual encrypted payload size and
 	 * then push the header in front.  skb_put() above reserved
@@ -1105,6 +1074,22 @@ static struct sk_buff *tquic_assemble_packet(struct tquic_connection *conn,
 
 	/* Push header in front of payload */
 	memcpy(skb_push(skb, header_len), header_buf, header_len);
+
+	/*
+	 * Apply header protection over the contiguous packet in the skb.
+	 * The pn_offset is header_len minus the packet number length.
+	 * For both long and short headers, the packet number is at the
+	 * end of the header, so pn_offset = header_len - pn_len.
+	 * We encoded 4-byte packet numbers, so pn_offset = header_len - 4.
+	 */
+	if (header_len < 5) {
+		ret = -EINVAL;
+		goto err_free_skb;
+	}
+	ret = tquic_apply_header_protection(conn, skb->data, skb->len,
+					    header_len - 4);
+	if (unlikely(ret < 0))
+		goto err_free_skb;
 
 	return skb;
 

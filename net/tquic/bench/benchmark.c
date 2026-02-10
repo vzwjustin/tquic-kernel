@@ -285,7 +285,7 @@ static void compute_stats(struct tquic_bench_sample *samples, u32 count,
 
 	/* Compute percentiles */
 	for (i = 0; i < BENCH_PERCENTILES; i++) {
-		u32 idx = (percentile_indices[i] * count) / 1000;
+		u32 idx = (u32)((u64)percentile_indices[i] * count / 1000);
 		if (idx >= count)
 			idx = count - 1;
 		stats->percentiles[i] = values[idx];

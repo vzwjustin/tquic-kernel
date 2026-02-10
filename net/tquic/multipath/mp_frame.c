@@ -686,7 +686,11 @@ int tquic_mp_parse_ack(const u8 *buf, size_t len,
 			       &ack_delay_raw, &consumed);
 	if (ret < 0)
 		return ret;
-	frame->ack_delay = ack_delay_raw << ack_delay_exponent;
+	/* RFC 9000 Section 18.2: ack_delay_exponent values above 20 are invalid */
+	if (ack_delay_exponent > 20)
+		return -EPROTO;
+	frame->ack_delay = min_t(u64, ack_delay_raw << ack_delay_exponent,
+				 16000000ULL); /* cap at 16s */
 	offset += consumed;
 
 	/* ACK Range Count */

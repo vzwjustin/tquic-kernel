@@ -366,8 +366,11 @@ void tquic_handshake_done(void *data, int status, key_serial_t peerid)
 		 */
 		tsk->flags |= TQUIC_F_HANDSHAKE_DONE;
 
-		if (tsk->conn)
+		if (tsk->conn) {
+			spin_lock_bh(&tsk->conn->lock);
 			tsk->conn->state = TQUIC_CONN_CONNECTED;
+			spin_unlock_bh(&tsk->conn->lock);
+		}
 
 		/* Update MIB counters for successful handshake */
 		TQUIC_INC_STATS(sock_net(sk), TQUIC_MIB_HANDSHAKESCOMPLETE);
@@ -481,8 +484,11 @@ int tquic_start_handshake(struct sock *sk)
 		tsk->handshake_state = hs;
 		tsk->flags |= TQUIC_F_HANDSHAKE_DONE;
 
-		if (tsk->conn)
+		if (tsk->conn) {
+			spin_lock_bh(&tsk->conn->lock);
 			tsk->conn->state = TQUIC_CONN_CONNECTED;
+			spin_unlock_bh(&tsk->conn->lock);
+		}
 
 		complete(&hs->done);
 
@@ -583,10 +589,23 @@ int tquic_start_handshake(struct sock *sk)
 			goto tlshd_fallback;
 		}
 
+		/*
+		 * Allocate handshake tracking state BEFORE queueing the
+		 * SKB.  If this allocation fails we can return cleanly
+		 * without having queued an SKB that nobody will free.
+		 */
+		hs = kzalloc(sizeof(*hs), GFP_KERNEL);
+		if (!hs) {
+			kfree(ch_buf);
+			tquic_hs_cleanup(ihs);
+			return -ENOMEM;
+		}
+
 		/* Queue ClientHello in Initial crypto buffer */
 		ch_skb = alloc_skb(ch_len, GFP_KERNEL);
 		if (!ch_skb) {
 			kfree(ch_buf);
+			kfree(hs);
 			tquic_hs_cleanup(ihs);
 			goto tlshd_fallback;
 		}
@@ -595,13 +614,6 @@ int tquic_start_handshake(struct sock *sk)
 
 		skb_queue_tail(&tsk->conn->crypto_buffer[TQUIC_PN_SPACE_INITIAL],
 			       ch_skb);
-
-		/* Allocate handshake tracking state */
-		hs = kzalloc(sizeof(*hs), GFP_KERNEL);
-		if (!hs) {
-			tquic_hs_cleanup(ihs);
-			return -ENOMEM;
-		}
 
 		hs->sk = sk;
 		init_completion(&hs->done);
@@ -1104,7 +1116,9 @@ int tquic_inline_hs_recv_crypto(struct sock *sk, const u8 *data, u32 len,
 		/* Mark handshake complete */
 		conn->handshake_complete = true;
 		conn->crypto_level = TQUIC_CRYPTO_APPLICATION;
+		spin_lock_bh(&conn->lock);
 		conn->state = TQUIC_CONN_CONNECTED;
+		spin_unlock_bh(&conn->lock);
 		tsk->flags |= TQUIC_F_HANDSHAKE_DONE;
 
 		TQUIC_INC_STATS(sock_net(sk), TQUIC_MIB_HANDSHAKESCOMPLETE);
@@ -1529,7 +1543,9 @@ static int tquic_conn_server_accept_init(struct tquic_connection *conn,
 	conn->role = TQUIC_ROLE_SERVER;
 
 	/* Mark as server-side connection in handshake phase */
+	spin_lock_bh(&conn->lock);
 	conn->state = TQUIC_CONN_CONNECTING;
+	spin_unlock_bh(&conn->lock);
 
 	tquic_dbg("Parsed Initial packet: version=0x%08x, "
 		 "dcid_len=%u, scid_len=%u, token_len=%llu\n",
@@ -1597,7 +1613,9 @@ static void tquic_server_handshake_done(void *data, int status,
 		tquic_install_crypto_state(child_sk);
 		child_tsk->flags |= TQUIC_F_HANDSHAKE_DONE;
 		inet_sk_set_state(child_sk, TCP_ESTABLISHED);
+		spin_lock_bh(&conn->lock);
 		conn->state = TQUIC_CONN_CONNECTED;
+		spin_unlock_bh(&conn->lock);
 
 		/* Initialize path manager for server-side connection */
 		tquic_pm_conn_init(conn);

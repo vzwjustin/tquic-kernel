@@ -212,18 +212,18 @@ struct tquic_failover_ctx {
 	/* Workqueue for timeout handling */
 	struct workqueue_struct	*wq;
 
-	/* Statistics */
+	/* Statistics (atomic for lockless access from multiple contexts) */
 	struct {
-		u64		packets_tracked;	/* Total packets tracked */
-		u64		packets_acked;		/* Packets ACKed normally */
-		u64		packets_requeued;	/* Packets requeued on failure */
-		u64		packets_retransmitted;	/* Packets retransmitted */
-		u64		path_failures;		/* Path failure events */
-		u64		failover_time_ns;	/* Total failover time */
-		u64		rhashtable_errors;	/* rhashtable walk errors */
-		u64		hash_insert_errors;	/* Hash table insertion errors */
-		u64		flaps_suppressed;	/* Transitions blocked by hysteresis */
-		u64		path_recoveries;	/* Paths restored from FAILED */
+		atomic64_t	packets_tracked;	/* Total packets tracked */
+		atomic64_t	packets_acked;		/* Packets ACKed normally */
+		atomic64_t	packets_requeued;	/* Packets requeued on failure */
+		atomic64_t	packets_retransmitted;	/* Packets retransmitted */
+		atomic64_t	path_failures;		/* Path failure events */
+		atomic64_t	failover_time_ns;	/* Total failover time */
+		atomic64_t	rhashtable_errors;	/* rhashtable walk errors */
+		atomic64_t	hash_insert_errors;	/* Hash table insertion errors */
+		atomic64_t	flaps_suppressed;	/* Transitions blocked by hysteresis */
+		atomic64_t	path_recoveries;	/* Paths restored from FAILED */
 	} stats;
 
 	/* Back pointer */

@@ -25,6 +25,7 @@
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/slab.h>
+#include <linux/smp.h>
 #include <linux/random.h>
 #include <linux/time.h>
 #include <linux/net.h>
@@ -93,6 +94,16 @@ EXPORT_SYMBOL_GPL(tquic_retry_integrity_nonce_v2);
  */
 static struct tquic_retry_state *tquic_global_retry_state;
 static DEFINE_MUTEX(tquic_retry_mutex);
+
+/*
+ * Cached AEAD ciphers for Retry Integrity Tag computation.
+ *
+ * The retry integrity key is fixed per RFC version, so a single cached
+ * instance per version is correct.  Protected by integrity_aead_lock.
+ */
+static DEFINE_MUTEX(integrity_aead_lock);
+static struct crypto_aead *integrity_aead_v1;
+static struct crypto_aead *integrity_aead_v2;
 
 /* Sysctl-controlled values */
 static int tquic_retry_required;	/* 0 = disabled, 1 = enabled */
@@ -167,11 +178,59 @@ static int tquic_retry_get_key_nonce(u32 version, const u8 **key,
 		*nonce = tquic_retry_integrity_nonce_v2;
 		return 0;
 	default:
-		/* Default to v1 for unknown versions */
-		*key = tquic_retry_integrity_key_v1;
-		*nonce = tquic_retry_integrity_nonce_v1;
-		return 0;
+		/* Reject unrecognized versions instead of silently using v1 */
+		return -EPROTONOSUPPORT;
 	}
+}
+
+/*
+ * Get or lazily allocate the cached AEAD cipher for a given QUIC version.
+ *
+ * The retry integrity key is fixed per RFC version, so a single cached
+ * instance per version is correct.  Caller must hold integrity_aead_lock.
+ */
+static struct crypto_aead *tquic_retry_get_integrity_aead(u32 version)
+{
+	struct crypto_aead **cached;
+	const u8 *key;
+	const u8 *nonce;
+	struct crypto_aead *aead;
+	int ret;
+
+	ret = tquic_retry_get_key_nonce(version, &key, &nonce);
+	if (ret)
+		return ERR_PTR(ret);
+
+	if (version == TQUIC_VERSION_1)
+		cached = &integrity_aead_v1;
+	else
+		cached = &integrity_aead_v2;
+
+	if (*cached)
+		return *cached;
+
+	aead = crypto_alloc_aead("gcm(aes)", 0, 0);
+	if (IS_ERR(aead)) {
+		tquic_err("retry: failed to allocate integrity AEAD\n");
+		return aead;
+	}
+
+	ret = crypto_aead_setkey(aead, key, 16);
+	if (ret) {
+		tquic_err("retry: failed to set integrity AEAD key: %d\n", ret);
+		crypto_free_aead(aead);
+		return ERR_PTR(ret);
+	}
+
+	ret = crypto_aead_setauthsize(aead, TQUIC_RETRY_INTEGRITY_TAG_LEN);
+	if (ret) {
+		tquic_err("retry: failed to set auth tag size: %d\n", ret);
+		crypto_free_aead(aead);
+		return ERR_PTR(ret);
+	}
+
+	*cached = aead;
+	return aead;
 }
 
 /**
@@ -193,11 +252,12 @@ int tquic_retry_compute_integrity_tag(u32 version,
 				      const u8 *retry_packet, size_t retry_len,
 				      u8 *tag)
 {
-	struct crypto_aead *aead = NULL;
+	struct crypto_aead *aead;
 	struct aead_request *req = NULL;
-	struct scatterlist sg_aad, sg_out;
+	struct scatterlist sg_out;
 	u8 *pseudo_packet = NULL;
-	size_t pseudo_len;
+	u8 *combined = NULL;
+	size_t pseudo_len, combined_len;
 	const u8 *key, *nonce;
 	int ret;
 
@@ -207,40 +267,29 @@ int tquic_retry_compute_integrity_tag(u32 version,
 	if (odcid_len > TQUIC_MAX_CID_LEN)
 		return -EINVAL;
 
-	/* Get version-specific key and nonce */
+	/* Get version-specific nonce */
 	ret = tquic_retry_get_key_nonce(version, &key, &nonce);
 	if (ret)
 		return ret;
 
-	/* Allocate AEAD cipher */
-	aead = crypto_alloc_aead("gcm(aes)", 0, 0);
+	if (retry_len > 65527)
+		return -EINVAL;
+
+	/* Get or lazily allocate the cached AEAD cipher for this version */
+	mutex_lock(&integrity_aead_lock);
+	aead = tquic_retry_get_integrity_aead(version);
 	if (IS_ERR(aead)) {
-		tquic_err("retry: failed to allocate AEAD cipher\n");
-		return PTR_ERR(aead);
-	}
-
-	ret = crypto_aead_setkey(aead, key, 16);
-	if (ret) {
-		tquic_err("retry: failed to set AEAD key: %d\n", ret);
-		goto out_free_aead;
-	}
-
-	ret = crypto_aead_setauthsize(aead, TQUIC_RETRY_INTEGRITY_TAG_LEN);
-	if (ret) {
-		tquic_err("retry: failed to set auth tag size: %d\n", ret);
-		goto out_free_aead;
+		ret = PTR_ERR(aead);
+		mutex_unlock(&integrity_aead_lock);
+		return ret;
 	}
 
 	/* Build Retry Pseudo-Packet as AAD */
-	if (retry_len > 65527) {
-		ret = -EINVAL;
-		goto out_free_aead;
-	}
 	pseudo_len = 1 + odcid_len + retry_len;
 	pseudo_packet = kmalloc(pseudo_len, GFP_KERNEL);
 	if (!pseudo_packet) {
 		ret = -ENOMEM;
-		goto out_free_aead;
+		goto out_unlock;
 	}
 
 	pseudo_packet[0] = odcid_len;
@@ -256,52 +305,40 @@ int tquic_retry_compute_integrity_tag(u32 version,
 
 	/*
 	 * AEAD encrypt with empty plaintext:
-	 * - Input: AAD only (pseudo_packet)
-	 * - Output: 16-byte tag
+	 * - Input: AAD (pseudo_packet) with zero-length plaintext
+	 * - Output: 16-byte authentication tag
+	 *
+	 * The combined buffer holds AAD followed by space for the tag.
+	 * The scatterlist covers the entire buffer; aead_request_set_ad
+	 * tells the cipher how many leading bytes are AAD.
 	 */
-	sg_init_one(&sg_aad, pseudo_packet, pseudo_len);
-	sg_init_one(&sg_out, tag, TQUIC_RETRY_INTEGRITY_TAG_LEN);
+	combined_len = pseudo_len + TQUIC_RETRY_INTEGRITY_TAG_LEN;
+	combined = kzalloc(combined_len, GFP_KERNEL);
+	if (!combined) {
+		ret = -ENOMEM;
+		goto out_free_req;
+	}
 
+	memcpy(combined, pseudo_packet, pseudo_len);
+
+	sg_init_one(&sg_out, combined, combined_len);
 	aead_request_set_crypt(req, &sg_out, &sg_out, 0, (u8 *)nonce);
 	aead_request_set_ad(req, pseudo_len);
 
-	/* Use internal AAD handling - copy data for AAD */
-	{
-		u8 *combined;
-		size_t combined_len = pseudo_len + TQUIC_RETRY_INTEGRITY_TAG_LEN;
-
-		combined = kzalloc(combined_len, GFP_KERNEL);
-		if (!combined) {
-			ret = -ENOMEM;
-			goto out_free_req;
-		}
-
-		/* Copy AAD and prepare for encryption */
-		memcpy(combined, pseudo_packet, pseudo_len);
-
-		sg_init_one(&sg_out, combined, combined_len);
-		aead_request_set_crypt(req, &sg_out, &sg_out, 0, (u8 *)nonce);
-		aead_request_set_ad(req, pseudo_len);
-
-		ret = crypto_aead_encrypt(req);
-		if (ret == 0) {
-			/* Extract tag from end */
-			memcpy(tag, combined + pseudo_len,
-			       TQUIC_RETRY_INTEGRITY_TAG_LEN);
-		}
-
-		kfree(combined);
-	}
-
-	if (ret)
+	ret = crypto_aead_encrypt(req);
+	if (ret == 0)
+		memcpy(tag, combined + pseudo_len,
+		       TQUIC_RETRY_INTEGRITY_TAG_LEN);
+	else
 		tquic_dbg("retry:AEAD encrypt failed: %d\n", ret);
 
+	kfree(combined);
 out_free_req:
 	aead_request_free(req);
 out_free_pseudo:
 	kfree(pseudo_packet);
-out_free_aead:
-	crypto_free_aead(aead);
+out_unlock:
+	mutex_unlock(&integrity_aead_lock);
 
 	return ret;
 }
@@ -420,44 +457,50 @@ int tquic_retry_token_create(struct tquic_retry_state *state,
 	spin_unlock_irqrestore(&state->lock, flags);
 
 	/*
-	 * Serialize AEAD operations with mutex to prevent concurrent
-	 * setkey/encrypt races on the shared cipher handle.
+	 * Pick an AEAD instance from the pool based on current CPU.
+	 * Each slot has its own mutex, allowing parallel token
+	 * operations from different CPUs.
 	 */
-	mutex_lock(&state->crypto_mutex);
+	{
+		u32 slot = raw_smp_processor_id() % state->pool_size;
 
-	if (!state->aead) {
-		mutex_unlock(&state->crypto_mutex);
+		mutex_lock(&state->pool_locks[slot]);
+
+		if (!state->aead_pool[slot]) {
+			mutex_unlock(&state->pool_locks[slot]);
+			memzero_explicit(local_key, sizeof(local_key));
+			kfree(encrypted);
+			return -EINVAL;
+		}
+
+		ret = crypto_aead_setkey(state->aead_pool[slot],
+					 local_key, 16);
 		memzero_explicit(local_key, sizeof(local_key));
-		kfree(encrypted);
-		return -EINVAL;
+		if (ret) {
+			mutex_unlock(&state->pool_locks[slot]);
+			kfree(encrypted);
+			return ret;
+		}
+
+		req = aead_request_alloc(state->aead_pool[slot], GFP_KERNEL);
+		if (!req) {
+			mutex_unlock(&state->pool_locks[slot]);
+			kfree(encrypted);
+			return -ENOMEM;
+		}
+
+		/* Copy plaintext to output, then encrypt in place */
+		memcpy(encrypted, &pt, pt_len);
+
+		sg_init_one(&sg, encrypted, enc_len);
+		aead_request_set_crypt(req, &sg, &sg, pt_len, nonce);
+		aead_request_set_ad(req, 0);
+
+		ret = crypto_aead_encrypt(req);
+
+		aead_request_free(req);
+		mutex_unlock(&state->pool_locks[slot]);
 	}
-
-	ret = crypto_aead_setkey(state->aead, local_key, 16);
-	memzero_explicit(local_key, sizeof(local_key));
-	if (ret) {
-		mutex_unlock(&state->crypto_mutex);
-		kfree(encrypted);
-		return ret;
-	}
-
-	req = aead_request_alloc(state->aead, GFP_KERNEL);
-	if (!req) {
-		mutex_unlock(&state->crypto_mutex);
-		kfree(encrypted);
-		return -ENOMEM;
-	}
-
-	/* Copy plaintext to output, then encrypt in place */
-	memcpy(encrypted, &pt, pt_len);
-
-	sg_init_one(&sg, encrypted, enc_len);
-	aead_request_set_crypt(req, &sg, &sg, pt_len, nonce);
-	aead_request_set_ad(req, 0);
-
-	ret = crypto_aead_encrypt(req);
-
-	aead_request_free(req);
-	mutex_unlock(&state->crypto_mutex);
 
 	if (ret) {
 		kfree(encrypted);
@@ -522,41 +565,47 @@ int tquic_retry_token_validate(struct tquic_retry_state *state,
 	spin_unlock_irqrestore(&state->lock, flags);
 
 	/*
-	 * Serialize AEAD operations with mutex to prevent concurrent
-	 * setkey/decrypt races on the shared cipher handle.
+	 * Pick an AEAD instance from the pool based on current CPU.
+	 * Each slot has its own mutex, allowing parallel token
+	 * validation from different CPUs.
 	 */
-	mutex_lock(&state->crypto_mutex);
+	{
+		u32 slot = raw_smp_processor_id() % state->pool_size;
 
-	if (!state->aead) {
-		mutex_unlock(&state->crypto_mutex);
+		mutex_lock(&state->pool_locks[slot]);
+
+		if (!state->aead_pool[slot]) {
+			mutex_unlock(&state->pool_locks[slot]);
+			memzero_explicit(local_key, sizeof(local_key));
+			kfree(decrypted);
+			return -EINVAL;
+		}
+
+		ret = crypto_aead_setkey(state->aead_pool[slot],
+					 local_key, 16);
 		memzero_explicit(local_key, sizeof(local_key));
-		kfree(decrypted);
-		return -EINVAL;
+		if (ret) {
+			mutex_unlock(&state->pool_locks[slot]);
+			kfree(decrypted);
+			return ret;
+		}
+
+		req = aead_request_alloc(state->aead_pool[slot], GFP_KERNEL);
+		if (!req) {
+			mutex_unlock(&state->pool_locks[slot]);
+			kfree(decrypted);
+			return -ENOMEM;
+		}
+
+		sg_init_one(&sg, decrypted, enc_len);
+		aead_request_set_crypt(req, &sg, &sg, enc_len, nonce);
+		aead_request_set_ad(req, 0);
+
+		ret = crypto_aead_decrypt(req);
+
+		aead_request_free(req);
+		mutex_unlock(&state->pool_locks[slot]);
 	}
-
-	ret = crypto_aead_setkey(state->aead, local_key, 16);
-	memzero_explicit(local_key, sizeof(local_key));
-	if (ret) {
-		mutex_unlock(&state->crypto_mutex);
-		kfree(decrypted);
-		return ret;
-	}
-
-	req = aead_request_alloc(state->aead, GFP_KERNEL);
-	if (!req) {
-		mutex_unlock(&state->crypto_mutex);
-		kfree(decrypted);
-		return -ENOMEM;
-	}
-
-	sg_init_one(&sg, decrypted, enc_len);
-	aead_request_set_crypt(req, &sg, &sg, enc_len, nonce);
-	aead_request_set_ad(req, 0);
-
-	ret = crypto_aead_decrypt(req);
-
-	aead_request_free(req);
-	mutex_unlock(&state->crypto_mutex);
 
 	if (ret) {
 		tquic_dbg("retry:token decryption failed: %d\n", ret);
@@ -1051,37 +1100,52 @@ EXPORT_SYMBOL_GPL(tquic_retry_process);
 struct tquic_retry_state *tquic_retry_state_alloc(void)
 {
 	struct tquic_retry_state *state;
+	struct crypto_aead *aead;
+	int i;
 
 	state = kzalloc(sizeof(*state), GFP_KERNEL);
 	if (!state)
 		return NULL;
 
 	spin_lock_init(&state->lock);
-	mutex_init(&state->crypto_mutex);
+	state->pool_size = TQUIC_RETRY_AEAD_POOL_SIZE;
 	state->token_lifetime = tquic_retry_token_lifetime;
 
 	/* Generate random token encryption key */
 	get_random_bytes(state->token_key, sizeof(state->token_key));
 	state->token_key_id = 0;
 
-	/* Allocate AEAD cipher for token encryption */
-	state->aead = crypto_alloc_aead("gcm(aes)", 0, 0);
-	if (IS_ERR(state->aead)) {
-		tquic_err("retry:failed to allocate token AEAD\n");
-		kfree(state);
-		return NULL;
+	/* Allocate AEAD cipher pool for parallel token operations */
+	for (i = 0; i < state->pool_size; i++) {
+		mutex_init(&state->pool_locks[i]);
+
+		aead = crypto_alloc_aead("gcm(aes)", 0, 0);
+		if (IS_ERR(aead)) {
+			tquic_err("retry:failed to allocate token AEAD[%d]\n",
+				  i);
+			goto err_free_pool;
+		}
+
+		if (crypto_aead_setauthsize(aead, 16)) {
+			crypto_free_aead(aead);
+			goto err_free_pool;
+		}
+
+		state->aead_pool[i] = aead;
 	}
 
-	if (crypto_aead_setauthsize(state->aead, 16)) {
-		crypto_free_aead(state->aead);
-		kfree(state);
-		return NULL;
-	}
-
-	tquic_dbg("retry:allocated state with %u second token lifetime\n",
-		 state->token_lifetime);
+	tquic_dbg("retry:allocated state with %u second token lifetime, pool=%u\n",
+		 state->token_lifetime, state->pool_size);
 
 	return state;
+
+err_free_pool:
+	while (--i >= 0) {
+		if (state->aead_pool[i])
+			crypto_free_aead(state->aead_pool[i]);
+	}
+	kfree(state);
+	return NULL;
 }
 EXPORT_SYMBOL_GPL(tquic_retry_state_alloc);
 
@@ -1090,11 +1154,15 @@ EXPORT_SYMBOL_GPL(tquic_retry_state_alloc);
  */
 void tquic_retry_state_free(struct tquic_retry_state *state)
 {
+	int i;
+
 	if (!state)
 		return;
 
-	if (state->aead && !IS_ERR(state->aead))
-		crypto_free_aead(state->aead);
+	for (i = 0; i < state->pool_size; i++) {
+		if (state->aead_pool[i] && !IS_ERR(state->aead_pool[i]))
+			crypto_free_aead(state->aead_pool[i]);
+	}
 
 	/* Clear sensitive key material */
 	memzero_explicit(state->token_key, sizeof(state->token_key));
@@ -1190,6 +1258,18 @@ void __exit tquic_retry_exit(void)
 	tquic_global_retry_state = NULL;
 
 	mutex_unlock(&tquic_retry_mutex);
+
+	/* Free cached integrity AEAD ciphers */
+	mutex_lock(&integrity_aead_lock);
+	if (integrity_aead_v1) {
+		crypto_free_aead(integrity_aead_v1);
+		integrity_aead_v1 = NULL;
+	}
+	if (integrity_aead_v2) {
+		crypto_free_aead(integrity_aead_v2);
+		integrity_aead_v2 = NULL;
+	}
+	mutex_unlock(&integrity_aead_lock);
 
 	tquic_info("retry subsystem exited\n");
 }

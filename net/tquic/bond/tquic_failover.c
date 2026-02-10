@@ -141,12 +141,12 @@ static u64 tquic_hyst_stable_time_us(struct tquic_path_timeout *pt)
 static void tquic_hyst_transition(struct tquic_path_timeout *pt,
 				  enum tquic_path_hyst_state new_state)
 {
-	enum tquic_path_hyst_state old_state = pt->hyst_state;
+	enum tquic_path_hyst_state old_state = READ_ONCE(pt->hyst_state);
 
 	if (old_state == new_state)
 		return;
 
-	pt->hyst_state = new_state;
+	WRITE_ONCE(pt->hyst_state, new_state);
 	pt->last_state_change_us = tquic_get_time_us();
 
 	if (new_state == TQUIC_PATH_HYST_FAILED)
@@ -195,23 +195,23 @@ static void tquic_failover_timeout_work(struct work_struct *work)
 	 * Increment consecutive failure count and reset success counter.
 	 * Only trigger actual failover after reaching the threshold.
 	 */
-	pt->consec_failures++;
-	pt->consec_successes = 0;
+	WRITE_ONCE(pt->consec_failures, READ_ONCE(pt->consec_failures) + 1);
+	WRITE_ONCE(pt->consec_successes, 0);
 
 	pr_info("path %u timeout: %llu us since last ACK (timeout=%u ms, "
 		"consec_failures=%u/%u, hyst_state=%s)\n",
 		path_id, elapsed_us, pt->timeout_ms,
-		pt->consec_failures, TQUIC_HYST_FAIL_THRESHOLD,
-		tquic_hyst_state_names[pt->hyst_state]);
+		READ_ONCE(pt->consec_failures), TQUIC_HYST_FAIL_THRESHOLD,
+		tquic_hyst_state_names[READ_ONCE(pt->hyst_state)]);
 
-	switch (pt->hyst_state) {
+	switch (READ_ONCE(pt->hyst_state)) {
 	case TQUIC_PATH_HYST_HEALTHY:
 		/*
 		 * First failure(s) on a healthy path - enter DEGRADED.
 		 * Don't immediately fail; wait for sustained failures.
 		 */
 		tquic_hyst_transition(pt, TQUIC_PATH_HYST_DEGRADED);
-		if (pt->consec_failures >= TQUIC_HYST_FAIL_THRESHOLD)
+		if (READ_ONCE(pt->consec_failures) >= TQUIC_HYST_FAIL_THRESHOLD)
 			goto do_failover;
 
 		/*
@@ -226,7 +226,7 @@ static void tquic_failover_timeout_work(struct work_struct *work)
 		 * Already degraded, check if we have enough consecutive
 		 * failures to confirm the path is truly failed.
 		 */
-		if (pt->consec_failures >= TQUIC_HYST_FAIL_THRESHOLD)
+		if (READ_ONCE(pt->consec_failures) >= TQUIC_HYST_FAIL_THRESHOLD)
 			goto do_failover;
 
 		/* Not enough failures yet, keep monitoring */
@@ -239,9 +239,9 @@ static void tquic_failover_timeout_work(struct work_struct *work)
 		 * progress and return to FAILED. This prevents premature
 		 * restoration of an unstable path.
 		 */
-		pt->consec_successes = 0;
+		WRITE_ONCE(pt->consec_successes, 0);
 		tquic_hyst_transition(pt, TQUIC_PATH_HYST_FAILED);
-		fc->stats.flaps_suppressed++;
+		atomic64_inc(&fc->stats.flaps_suppressed);
 		pt->timeout_armed = false;
 		break;
 
@@ -333,7 +333,16 @@ struct tquic_failover_ctx *tquic_failover_init(struct tquic_bonding_ctx *bonding
 	fc->bonding = bonding;
 
 	/* Initialize statistics */
-	memset(&fc->stats, 0, sizeof(fc->stats));
+	atomic64_set(&fc->stats.packets_tracked, 0);
+	atomic64_set(&fc->stats.packets_acked, 0);
+	atomic64_set(&fc->stats.packets_requeued, 0);
+	atomic64_set(&fc->stats.packets_retransmitted, 0);
+	atomic64_set(&fc->stats.path_failures, 0);
+	atomic64_set(&fc->stats.failover_time_ns, 0);
+	atomic64_set(&fc->stats.rhashtable_errors, 0);
+	atomic64_set(&fc->stats.hash_insert_errors, 0);
+	atomic64_set(&fc->stats.flaps_suppressed, 0);
+	atomic64_set(&fc->stats.path_recoveries, 0);
 
 	pr_debug("failover context initialized\n");
 
@@ -353,11 +362,9 @@ void tquic_failover_destroy(struct tquic_failover_ctx *fc)
 	if (!fc)
 		return;
 
-	/* Cancel all path timeout work */
-	for (i = 0; i < 8; i++) {
-		if (fc->path_timeouts[i].timeout_armed)
-			cancel_delayed_work_sync(&fc->path_timeouts[i].timeout_work);
-	}
+	/* Cancel all path timeout work (safe to call even if never queued) */
+	for (i = 0; i < 8; i++)
+		cancel_delayed_work_sync(&fc->path_timeouts[i].timeout_work);
 
 	/* Free all packets in retransmit queue */
 	spin_lock_bh(&fc->retx_queue.lock);
@@ -378,7 +385,7 @@ void tquic_failover_destroy(struct tquic_failover_ctx *fc)
 				pr_err_ratelimited(
 					"rhashtable walk error: %ld during destroy\n",
 					err);
-				fc->stats.rhashtable_errors++;
+				atomic64_inc(&fc->stats.rhashtable_errors);
 			}
 			continue;
 		}
@@ -393,9 +400,10 @@ void tquic_failover_destroy(struct tquic_failover_ctx *fc)
 
 	rhashtable_destroy(&fc->sent_packets);
 
-	pr_debug("failover context destroyed (tracked=%llu acked=%llu requeued=%llu)\n",
-		 fc->stats.packets_tracked, fc->stats.packets_acked,
-		 fc->stats.packets_requeued);
+	pr_debug("failover context destroyed (tracked=%lld acked=%lld requeued=%lld)\n",
+		 (long long)atomic64_read(&fc->stats.packets_tracked),
+		 (long long)atomic64_read(&fc->stats.packets_acked),
+		 (long long)atomic64_read(&fc->stats.packets_requeued));
 
 	kfree(fc);
 }
@@ -453,13 +461,13 @@ int tquic_failover_track_sent(struct tquic_failover_ctx *fc,
 			pr_err_ratelimited(
 				"failed to track packet %llu: error %d\n",
 				packet_number, ret);
-			fc->stats.hash_insert_errors++;
+			atomic64_inc(&fc->stats.hash_insert_errors);
 		}
 		return ret;
 	}
 
 	fc->sent_count++;
-	fc->stats.packets_tracked++;
+	atomic64_inc(&fc->stats.packets_tracked);
 
 	spin_unlock_bh(&fc->sent_packets_lock);
 
@@ -493,18 +501,22 @@ int tquic_failover_on_ack(struct tquic_failover_ctx *fc, u64 packet_number)
 	rhashtable_remove_fast(&fc->sent_packets, &sp->hash_node,
 			       tquic_sent_packet_params);
 	fc->sent_count--;
-	fc->stats.packets_acked++;
+	atomic64_inc(&fc->stats.packets_acked);
 
 	spin_unlock_bh(&fc->sent_packets_lock);
 
-	/* If in retransmit queue, remove it */
-	if (sp->in_retx_queue) {
-		spin_lock_bh(&fc->retx_queue.lock);
-		list_del(&sp->retx_list);
+	/*
+	 * Remove from retransmit queue if present.
+	 * Use list_empty() as authoritative check under lock to avoid
+	 * TOCTOU race with the in_retx_queue flag.
+	 */
+	spin_lock_bh(&fc->retx_queue.lock);
+	if (!list_empty(&sp->retx_list)) {
+		list_del_init(&sp->retx_list);
 		fc->retx_queue.count--;
 		fc->retx_queue.bytes -= sp->len;
-		spin_unlock_bh(&fc->retx_queue.lock);
 	}
+	spin_unlock_bh(&fc->retx_queue.lock);
 
 	pr_debug("acked packet %llu (retx_count=%u)\n",
 		 packet_number, sp->retx_count);
@@ -576,7 +588,7 @@ int tquic_failover_on_path_failed(struct tquic_failover_ctx *fc, u8 path_id)
 				pr_warn_ratelimited(
 					"rhashtable walk error: %ld during path %u failover\n",
 					err, path_id);
-				fc->stats.rhashtable_errors++;
+				atomic64_inc(&fc->stats.rhashtable_errors);
 			}
 			continue;
 		}
@@ -616,11 +628,12 @@ int tquic_failover_on_path_failed(struct tquic_failover_ctx *fc, u8 path_id)
 
 		spin_unlock_bh(&fc->retx_queue.lock);
 
-		fc->stats.packets_requeued += requeued;
+		atomic64_add(requeued, &fc->stats.packets_requeued);
 	}
 
-	fc->stats.path_failures++;
-	fc->stats.failover_time_ns += ktime_to_ns(ktime_sub(ktime_get(), start));
+	atomic64_inc(&fc->stats.path_failures);
+	atomic64_add(ktime_to_ns(ktime_sub(ktime_get(), start)),
+		     &fc->stats.failover_time_ns);
 
 	pr_info("path %u: requeued %d packets for retransmission\n",
 		path_id, requeued);
@@ -631,7 +644,7 @@ int tquic_failover_on_path_failed(struct tquic_failover_ctx *fc, u8 path_id)
 		 * The bonding layer's on_path_failed callback should already
 		 * be called by the path manager. This is just for coordination.
 		 */
-		fc->bonding->stats.failover_events++;
+		atomic64_inc(&fc->bonding->stats.failover_events);
 	}
 
 	return requeued;
@@ -672,10 +685,10 @@ void tquic_failover_update_path_ack(struct tquic_failover_ctx *fc,
 	 * Process hysteresis on ACK reception.
 	 * Each ACK increments consecutive successes and resets failures.
 	 */
-	pt->consec_successes++;
-	pt->consec_failures = 0;
+	WRITE_ONCE(pt->consec_successes, READ_ONCE(pt->consec_successes) + 1);
+	WRITE_ONCE(pt->consec_failures, 0);
 
-	switch (pt->hyst_state) {
+	switch (READ_ONCE(pt->hyst_state)) {
 	case TQUIC_PATH_HYST_HEALTHY:
 		/* Already healthy, nothing to do */
 		break;
@@ -686,9 +699,9 @@ void tquic_failover_update_path_ack(struct tquic_failover_ctx *fc,
 		 * Require enough consecutive successes to confirm
 		 * stability before returning to HEALTHY.
 		 */
-		if (pt->consec_successes >= TQUIC_HYST_RECOVER_THRESHOLD) {
+		if (READ_ONCE(pt->consec_successes) >= TQUIC_HYST_RECOVER_THRESHOLD) {
 			tquic_hyst_transition(pt, TQUIC_PATH_HYST_HEALTHY);
-			pt->consec_successes = 0;
+			WRITE_ONCE(pt->consec_successes, 0);
 		}
 		break;
 
@@ -708,15 +721,15 @@ void tquic_failover_update_path_ack(struct tquic_failover_ctx *fc,
 		 * The path must have been failed for long enough, and
 		 * must have received enough consecutive ACKs since.
 		 */
-		if (pt->consec_successes >= TQUIC_HYST_RECOVER_THRESHOLD) {
+		if (READ_ONCE(pt->consec_successes) >= TQUIC_HYST_RECOVER_THRESHOLD) {
 			u64 stable_us = tquic_hyst_stable_time_us(pt);
 			u64 since_fail_us = now_us - pt->fail_time_us;
 
 			if (since_fail_us >= stable_us) {
 				tquic_hyst_transition(pt,
 						     TQUIC_PATH_HYST_HEALTHY);
-				pt->consec_successes = 0;
-				fc->stats.path_recoveries++;
+				WRITE_ONCE(pt->consec_successes, 0);
+				atomic64_inc(&fc->stats.path_recoveries);
 				pr_info("path %u: recovered after %llu ms\n",
 					path_id,
 					since_fail_us / 1000);
@@ -728,8 +741,8 @@ void tquic_failover_update_path_ack(struct tquic_failover_ctx *fc,
 	pr_debug("path %u: ACK received, SRTT=%llu us, timeout=%u ms, "
 		 "hyst=%s consec_ok=%u\n",
 		 path_id, srtt_us, timeout_ms,
-		 tquic_hyst_state_names[pt->hyst_state],
-		 pt->consec_successes);
+		 tquic_hyst_state_names[READ_ONCE(pt->hyst_state)],
+		 READ_ONCE(pt->consec_successes));
 }
 EXPORT_SYMBOL_GPL(tquic_failover_update_path_ack);
 
@@ -761,7 +774,7 @@ const char *tquic_failover_path_hyst_state(struct tquic_failover_ctx *fc,
 	if (!fc || path_id >= ARRAY_SIZE(fc->path_timeouts))
 		return "UNKNOWN";
 
-	return tquic_hyst_state_names[fc->path_timeouts[path_id].hyst_state];
+	return tquic_hyst_state_names[READ_ONCE(fc->path_timeouts[path_id].hyst_state)];
 }
 EXPORT_SYMBOL_GPL(tquic_failover_path_hyst_state);
 
@@ -865,7 +878,7 @@ struct tquic_sent_packet *tquic_failover_get_next(struct tquic_failover_ctx *fc)
 	fc->retx_queue.bytes -= sp->len;
 
 	sp->retx_count++;
-	fc->stats.packets_retransmitted++;
+	atomic64_inc(&fc->stats.packets_retransmitted);
 
 	spin_unlock_bh(&fc->retx_queue.lock);
 
@@ -998,16 +1011,16 @@ void tquic_failover_get_stats(struct tquic_failover_ctx *fc,
 		return;
 	}
 
-	stats->packets_tracked = fc->stats.packets_tracked;
-	stats->packets_acked = fc->stats.packets_acked;
-	stats->packets_requeued = fc->stats.packets_requeued;
-	stats->packets_retransmitted = fc->stats.packets_retransmitted;
-	stats->path_failures = fc->stats.path_failures;
+	stats->packets_tracked = atomic64_read(&fc->stats.packets_tracked);
+	stats->packets_acked = atomic64_read(&fc->stats.packets_acked);
+	stats->packets_requeued = atomic64_read(&fc->stats.packets_requeued);
+	stats->packets_retransmitted = atomic64_read(&fc->stats.packets_retransmitted);
+	stats->path_failures = atomic64_read(&fc->stats.path_failures);
 	stats->duplicates_detected = fc->dedup.duplicates_detected;
-	stats->flaps_suppressed = fc->stats.flaps_suppressed;
-	stats->path_recoveries = fc->stats.path_recoveries;
+	stats->flaps_suppressed = atomic64_read(&fc->stats.flaps_suppressed);
+	stats->path_recoveries = atomic64_read(&fc->stats.path_recoveries);
 	stats->current_tracked = fc->sent_count;
-	stats->current_retx_queue = fc->retx_queue.count;
+	stats->current_retx_queue = READ_ONCE(fc->retx_queue.count);
 }
 EXPORT_SYMBOL_GPL(tquic_failover_get_stats);
 

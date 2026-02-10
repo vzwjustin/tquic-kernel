@@ -945,8 +945,11 @@ void tquic_send_retire_connection_id(struct tquic_connection *conn, u64 seq_num)
 
 	/* Allocate frame buffer */
 	frame_buf = kmalloc(16, GFP_ATOMIC);
-	if (!frame_buf)
+	if (!frame_buf) {
+		if (pool)
+			tquic_cid_security_dequeue_retire(&pool->security);
 		return;
+	}
 
 	/* Build frame */
 	frame_len = tquic_build_retire_connection_id_frame(frame_buf, 16, seq_num);

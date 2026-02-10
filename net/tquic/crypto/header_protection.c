@@ -615,6 +615,12 @@ static int tquic_hp_setup_cipher(struct tquic_hp_key *hp_key)
 	const char *alg_name;
 	int ret;
 
+	/* Free any existing transform to prevent leaks on overwrite */
+	if (hp_key->tfm) {
+		crypto_free_skcipher(hp_key->tfm);
+		hp_key->tfm = NULL;
+	}
+
 	switch (hp_key->cipher_type) {
 	case TQUIC_HP_CIPHER_AES_128:
 	case TQUIC_HP_CIPHER_AES_256:

@@ -150,8 +150,10 @@ static int tquic_v4_rcv(struct sk_buff *skb)
 
 		conn = tquic_conn_lookup_by_cid(&dcid);
 		if (conn) {
+			struct tquic_path *apath = READ_ONCE(conn->active_path);
+
 			/* Deliver to connection's active path */
-			tquic_udp_deliver_to_conn(conn, conn->active_path, skb);
+			tquic_udp_deliver_to_conn(conn, apath, skb);
 			return 0;
 		}
 	} else {
@@ -170,7 +172,9 @@ static int tquic_v4_rcv(struct sk_buff *skb)
 
 		conn = tquic_conn_lookup_by_cid(&dcid);
 		if (conn) {
-			tquic_udp_deliver_to_conn(conn, conn->active_path, skb);
+			struct tquic_path *apath = READ_ONCE(conn->active_path);
+
+			tquic_udp_deliver_to_conn(conn, apath, skb);
 			return 0;
 		}
 	}
@@ -201,6 +205,7 @@ static int tquic_v4_err(struct sk_buff *skb, u32 info)
 			u32 quic_mtu;
 			struct tquic_connection *conn;
 			struct tquic_cid dcid;
+			struct tquic_path *apath;
 
 			/*
 			 * Validate ICMP-reported MTU:
@@ -243,10 +248,13 @@ static int tquic_v4_err(struct sk_buff *skb, u32 info)
 						       dcid.len);
 						conn = tquic_conn_lookup_by_cid(
 								&dcid);
-						if (conn && conn->active_path)
-							tquic_pmtud_on_icmp_mtu_update(
-								conn->active_path,
-								quic_mtu);
+						if (conn) {
+							apath = READ_ONCE(conn->active_path);
+							if (apath)
+								tquic_pmtud_on_icmp_mtu_update(
+									apath,
+									quic_mtu);
+						}
 					}
 				}
 			}
@@ -321,7 +329,9 @@ static int tquic_v6_rcv(struct sk_buff *skb)
 
 		conn = tquic_conn_lookup_by_cid(&dcid);
 		if (conn) {
-			tquic_udp_deliver_to_conn(conn, conn->active_path, skb);
+			struct tquic_path *apath = READ_ONCE(conn->active_path);
+
+			tquic_udp_deliver_to_conn(conn, apath, skb);
 			return 0;
 		}
 	} else {
@@ -339,7 +349,9 @@ static int tquic_v6_rcv(struct sk_buff *skb)
 
 		conn = tquic_conn_lookup_by_cid(&dcid);
 		if (conn) {
-			tquic_udp_deliver_to_conn(conn, conn->active_path, skb);
+			struct tquic_path *apath = READ_ONCE(conn->active_path);
+
+			tquic_udp_deliver_to_conn(conn, apath, skb);
 			return 0;
 		}
 	}
@@ -375,6 +387,7 @@ static int tquic_v6_err(struct sk_buff *skb, struct inet6_skb_parm *opt,
 		u32 quic_mtu;
 		struct tquic_connection *conn;
 		struct tquic_cid dcid;
+		struct tquic_path *apath;
 
 		/*
 		 * Validate ICMP-reported MTU:
@@ -412,10 +425,13 @@ static int tquic_v6_err(struct sk_buff *skb, struct inet6_skb_parm *opt,
 					memcpy(dcid.id, quic_hdr + 1,
 					       dcid.len);
 					conn = tquic_conn_lookup_by_cid(&dcid);
-					if (conn && conn->active_path)
-						tquic_pmtud_on_icmp_mtu_update(
-							conn->active_path,
-							quic_mtu);
+					if (conn) {
+						apath = READ_ONCE(conn->active_path);
+						if (apath)
+							tquic_pmtud_on_icmp_mtu_update(
+								apath,
+								quic_mtu);
+					}
 				}
 			}
 		}
@@ -1007,8 +1023,10 @@ static void tquic_net_close_connection(struct tquic_connection *conn,
 	atomic_dec(&tn->conn_count);
 
 	/*
-	 * Use tquic_conn_destroy for full cleanup.
-	 * This handles:
+	 * Do NOT call tquic_conn_destroy() here.  The caller holds a
+	 * reference taken during collection and will drop it via
+	 * tquic_conn_put().  When the refcount reaches zero,
+	 * tquic_conn_put() triggers tquic_conn_destroy() which handles:
 	 * - State machine cleanup (cancels work items, frees CID entries)
 	 * - Global hash table removal
 	 * - Timer state freeing (cancels all timers)
@@ -1017,7 +1035,6 @@ static void tquic_net_close_connection(struct tquic_connection *conn,
 	 * - Crypto/scheduler/other state freeing
 	 * - kmem_cache_free for the connection
 	 */
-	tquic_conn_destroy(conn);
 }
 
 /*
@@ -1126,25 +1143,21 @@ static void tquic_net_close_all_connections(struct net *net)
 		tquic_dbg("closing connection %p during netns exit\n", conn);
 
 		/*
-		 * Close the connection. This sends CONNECTION_CLOSE (best effort),
-		 * decrements conn_count, and calls tquic_conn_destroy.
+		 * Close the connection. This sends CONNECTION_CLOSE (best
+		 * effort), decrements conn_count, and marks the connection
+		 * as CLOSED.  It does NOT call tquic_conn_destroy directly
+		 * any more -- destruction is handled by tquic_conn_put()
+		 * when the refcount reaches zero.
 		 */
 		tquic_net_close_connection(conn, tn);
 
 		/*
 		 * Drop the reference we took during collection.
-		 * Note: tquic_conn_destroy already freed the connection memory,
-		 * so we must NOT access conn after tquic_net_close_connection.
-		 * The refcount_dec would be a use-after-free.
-		 *
-		 * However, if something else still holds a reference (unlikely
-		 * during netns exit), the connection wouldn't be freed yet.
-		 * To be safe, we don't touch conn after destroy.
-		 *
-		 * The reference we took is now "leaked" if there were other
-		 * references, but this only happens during abnormal shutdown
-		 * and the memory will be freed when those references are dropped.
+		 * tquic_conn_put() will call tquic_conn_destroy() if
+		 * this is the last reference, avoiding the previous
+		 * use-after-free on the refcount.
 		 */
+		tquic_conn_put(conn);
 	}
 
 	/*

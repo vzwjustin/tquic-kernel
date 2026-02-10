@@ -552,6 +552,8 @@ __poll_t tquic_poll(struct file *file, struct socket *sock, poll_table *wait)
 {
 	struct sock *sk = sock->sk;
 	struct tquic_sock *tsk = tquic_sk(sk);
+	struct tquic_connection *conn;
+	struct tquic_stream *stream;
 	__poll_t mask = 0;
 
 	sock_poll_wait(file, sock, wait);
@@ -560,9 +562,17 @@ __poll_t tquic_poll(struct file *file, struct socket *sock, poll_table *wait)
 		if (tsk->accept_queue_len > 0)
 			mask |= EPOLLIN | EPOLLRDNORM;
 	} else if (sk->sk_state == TCP_ESTABLISHED) {
+		/*
+		 * Use READ_ONCE() to prevent the compiler from caching
+		 * stale pointer values.  The teardown path must use
+		 * WRITE_ONCE() when setting these to NULL before freeing.
+		 */
+		conn = READ_ONCE(tsk->conn);
+		stream = READ_ONCE(tsk->default_stream);
+
 		/* Check if stream data available to read */
-		if (tsk->conn && tsk->default_stream) {
-			if (!skb_queue_empty(&tsk->default_stream->recv_buf))
+		if (conn && stream) {
+			if (!skb_queue_empty(&stream->recv_buf))
 				mask |= EPOLLIN | EPOLLRDNORM;
 		}
 
@@ -573,8 +583,8 @@ __poll_t tquic_poll(struct file *file, struct socket *sock, poll_table *wait)
 		 * has at least one datagram queued. This allows poll/epoll
 		 * to wake on datagram arrival.
 		 */
-		if (tsk->conn && tsk->conn->datagram.enabled) {
-			if (!skb_queue_empty(&tsk->conn->datagram.recv_queue))
+		if (conn && conn->datagram.enabled) {
+			if (!skb_queue_empty(&conn->datagram.recv_queue))
 				mask |= EPOLLIN | EPOLLRDNORM;
 		}
 

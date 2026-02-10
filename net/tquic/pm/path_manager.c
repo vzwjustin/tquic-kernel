@@ -136,11 +136,58 @@ static int tquic_pm_send_challenge(struct tquic_connection *conn,
  *
  * Uses the core tquic_send_path_response() from tquic_output.c.
  */
+/**
+ * tquic_pm_challenge_rate_check - Check per-path PATH_CHALLENGE rate limit
+ * @path: Path to check
+ *
+ * Limits PATH_RESPONSE generation to TQUIC_MAX_CHALLENGE_RESPONSES_PER_RTT
+ * per smoothed RTT interval (or 1 second if no RTT estimate is available).
+ * This prevents resource exhaustion from a flood of PATH_CHALLENGE frames.
+ *
+ * Returns: true if a PATH_RESPONSE may be sent, false if rate-limited.
+ */
+static bool tquic_pm_challenge_rate_check(struct tquic_path *path)
+{
+	ktime_t now = ktime_get();
+	u64 window_us;
+	s64 elapsed_us;
+
+	/* Use smoothed RTT as window, minimum 1 second */
+	window_us = path->stats.rtt_smoothed;
+	if (window_us == 0)
+		window_us = 1000000;  /* 1 second default */
+
+	elapsed_us = ktime_us_delta(now, path->challenge_rate.window_start);
+
+	/* Reset window if expired */
+	if (elapsed_us >= (s64)window_us) {
+		path->challenge_rate.challenge_count = 0;
+		path->challenge_rate.window_start = now;
+	}
+
+	if (path->challenge_rate.challenge_count >=
+	    TQUIC_MAX_CHALLENGE_RESPONSES_PER_RTT) {
+		pr_debug("tquic_pm: PATH_CHALLENGE rate limited on path %u "
+			 "(%u/%u in window)\n",
+			 path->path_id,
+			 path->challenge_rate.challenge_count,
+			 TQUIC_MAX_CHALLENGE_RESPONSES_PER_RTT);
+		return false;
+	}
+
+	path->challenge_rate.challenge_count++;
+	return true;
+}
+
 int tquic_pm_send_response(struct tquic_connection *conn,
 			   struct tquic_path *path, const u8 *challenge_data)
 {
 	if (!conn || !path || !challenge_data)
 		return -EINVAL;
+
+	/* Apply per-path rate limit for PATH_RESPONSE generation */
+	if (!tquic_pm_challenge_rate_check(path))
+		return -EAGAIN;
 
 	/* Use the core transmission function from tquic_output.c */
 	return tquic_send_path_response(conn, path, challenge_data);
@@ -229,17 +276,27 @@ static void tquic_pm_probe_work(struct work_struct *work)
 	}
 	spin_unlock_bh(&conn->paths_lock);
 
-	/* Send probes outside lock */
+	/*
+	 * Send probes and notify failures outside paths_lock.
+	 *
+	 * Path pointers saved above were collected under paths_lock.
+	 * Paths are freed via kfree_rcu() so they remain valid during
+	 * an RCU read-side critical section.  Hold rcu_read_lock()
+	 * while accessing the saved path pointers to prevent them
+	 * from being freed underneath us.
+	 */
+	rcu_read_lock();
 	for (i = 0; i < num_probe; i++)
 		tquic_pm_send_challenge(conn, probe_paths[i]);
 
-	/* Notify bonding layer about failures outside lock */
+	/* Notify bonding layer about failures */
 	for (i = 0; i < num_fail; i++) {
 		tquic_warn("path %u failed after %u probes\n",
 			   fail_paths[i]->path_id,
 			   fail_paths[i]->probe_count);
 		tquic_bond_path_failed(conn, fail_paths[i]);
 	}
+	rcu_read_unlock();
 
 	/* Reschedule */
 	schedule_delayed_work(&pm->probe_work,
@@ -255,6 +312,7 @@ static int tquic_pm_netdev_event(struct notifier_block *nb, unsigned long event,
 	struct tquic_pm_state *pm =
 		container_of(nb, struct tquic_pm_state, netdev_notifier);
 	struct net_device *dev = netdev_notifier_info_to_dev(ptr);
+	int i;
 
 	if (!pm->auto_discover)
 		return NOTIFY_DONE;
@@ -291,11 +349,24 @@ static int tquic_pm_netdev_event(struct notifier_block *nb, unsigned long event,
 
 	case NETDEV_DOWN:
 		pr_debug("tquic_pm: interface %s went down\n", dev->name);
-		/* Mark paths through this specific interface as failed */
+		/*
+		 * Mark paths through this specific interface as failed.
+		 *
+		 * Lock ordering: conn->paths_lock is acquired here.
+		 * tquic_bond_path_failed() must not reacquire paths_lock;
+		 * it only accesses bond/scheduler state which uses its
+		 * own lock (bond->lock).  We copy failed paths into a
+		 * local array so we can call tquic_bond_path_failed()
+		 * outside the lock, avoiding any potential lock inversion.
+		 */
 		if (pm->conn) {
+			struct tquic_connection *conn = pm->conn;
 			struct tquic_path *path;
+			struct tquic_path *failed[TQUIC_MAX_PATHS];
+			int nfail = 0;
 
-			list_for_each_entry(path, &pm->conn->paths, list) {
+			spin_lock_bh(&conn->paths_lock);
+			list_for_each_entry(path, &conn->paths, list) {
 				/*
 				 * Only mark paths that actually use the
 				 * interface that went down. Without this
@@ -308,12 +379,18 @@ static int tquic_pm_netdev_event(struct notifier_block *nb, unsigned long event,
 				if (path->state == TQUIC_PATH_ACTIVE ||
 				    path->state == TQUIC_PATH_STANDBY) {
 					path->state = TQUIC_PATH_FAILED;
-					tquic_bond_path_failed(pm->conn, path);
+					if (nfail < TQUIC_MAX_PATHS)
+						failed[nfail++] = path;
 					pr_debug(
 						"tquic_pm: path %u failed (interface %s down)\n",
 						path->path_id, dev->name);
 				}
 			}
+			spin_unlock_bh(&conn->paths_lock);
+
+			/* Notify bonding layer outside paths_lock */
+			for (i = 0; i < nfail; i++)
+				tquic_bond_path_failed(conn, failed[i]);
 		}
 		break;
 
@@ -809,9 +886,13 @@ static struct tquic_path *tquic_path_alloc(struct tquic_connection *conn,
 	 * Anti-amplification state (RFC 9000 Section 8.1).
 	 * New paths start with limits active until validated.
 	 */
-	path->anti_amplification.bytes_received = 0;
-	path->anti_amplification.bytes_sent = 0;
+	atomic64_set(&path->anti_amplification.bytes_received, 0);
+	atomic64_set(&path->anti_amplification.bytes_sent, 0);
 	path->anti_amplification.active = true;
+
+	/* Initialize challenge rate limiting */
+	path->challenge_rate.challenge_count = 0;
+	path->challenge_rate.window_start = ktime_get();
 
 	/* Default MTU (will be updated via PMTU discovery) */
 	path->mtu = 1200;
@@ -1200,8 +1281,8 @@ bool tquic_pm_check_address_change(struct tquic_connection *conn,
 		}
 
 		/* Enable anti-amplification limits on the new address */
-		path->anti_amplification.bytes_received = 0;
-		path->anti_amplification.bytes_sent = 0;
+		atomic64_set(&path->anti_amplification.bytes_received, 0);
+		atomic64_set(&path->anti_amplification.bytes_sent, 0);
 		path->anti_amplification.active = true;
 		spin_unlock_bh(&conn->paths_lock);
 

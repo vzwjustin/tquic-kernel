@@ -262,36 +262,41 @@ static int tquic_hkdf_expand_label(struct crypto_shash *hash,
 	for (i = 0; i < n; i++) {
 		ret = crypto_shash_setkey(hash, secret, secret_len);
 		if (ret)
-			return ret;
+			goto out_zeroize;
 
 		ret = crypto_shash_init(desc);
 		if (ret)
-			return ret;
+			goto out_zeroize;
 
 		if (i > 0) {
 			ret = crypto_shash_update(desc, t, hash_len);
 			if (ret)
-				return ret;
+				goto out_zeroize;
 		}
 
 		ret = crypto_shash_update(desc, hkdf_label, hkdf_label_len);
 		if (ret)
-			return ret;
+			goto out_zeroize;
 
 		t[0] = i + 1;
 		ret = crypto_shash_update(desc, t, 1);
 		if (ret)
-			return ret;
+			goto out_zeroize;
 
 		ret = crypto_shash_final(desc, t);
 		if (ret)
-			return ret;
+			goto out_zeroize;
 
 		memcpy(out + i * hash_len, t,
 		       min_t(u32, hash_len, out_len - i * hash_len));
 	}
 
-	return 0;
+	ret = 0;
+
+out_zeroize:
+	memzero_explicit(t, sizeof(t));
+	memzero_explicit(hkdf_label, sizeof(hkdf_label));
+	return ret;
 }
 
 /*

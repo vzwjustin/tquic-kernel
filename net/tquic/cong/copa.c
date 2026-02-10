@@ -339,8 +339,16 @@ static void tquic_copa_on_ack(void *state, u64 bytes_acked, u64 rtt_us)
 	if (target > copa->cwnd) {
 		/* Increase cwnd (guard against cwnd == 0) */
 		if (copa->cwnd > 0) {
-			adjustment = (copa->velocity * bytes_acked * copa->delta) /
-				     (copa->cwnd * COPA_DELTA_SCALE);
+			/*
+			 * Avoid overflow in velocity * bytes_acked * delta.
+			 * Compute (velocity * delta) / (cwnd * COPA_DELTA_SCALE)
+			 * first (smaller intermediate), then multiply by
+			 * bytes_acked.
+			 */
+			u64 factor = div64_u64(
+				(u64)copa->velocity * copa->delta,
+				(u64)copa->cwnd * COPA_DELTA_SCALE);
+			adjustment = factor * bytes_acked;
 		} else {
 			adjustment = bytes_acked;
 		}
@@ -362,7 +370,11 @@ static void tquic_copa_on_ack(void *state, u64 bytes_acked, u64 rtt_us)
 update_pacing:
 	/* Update pacing rate: cwnd / RTT_min */
 	if (copa->rtt_min_us > 0) {
-		copa->pacing_rate = copa->cwnd * USEC_PER_SEC / copa->rtt_min_us;
+		/* Cap cwnd before multiplication to prevent u64 overflow */
+		u64 capped = min_t(u64, copa->cwnd, U64_MAX / USEC_PER_SEC);
+
+		copa->pacing_rate = div64_u64(capped * USEC_PER_SEC,
+					      copa->rtt_min_us);
 	}
 
 	copa->last_cwnd = copa->cwnd;

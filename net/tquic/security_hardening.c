@@ -88,7 +88,7 @@ int tquic_pre_hs_init(void)
 {
 	int ret;
 
-	if (pre_hs_initialized)
+	if (smp_load_acquire(&pre_hs_initialized))
 		return 0;
 
 	spin_lock_init(&pre_hs_state.lock);
@@ -102,7 +102,7 @@ int tquic_pre_hs_init(void)
 		return ret;
 	}
 
-	pre_hs_initialized = true;
+	smp_store_release(&pre_hs_initialized, true);
 	tquic_info("QUIC-LEAK defense initialized (limit=%llu MB, per-IP=%llu KB)\n",
 		   pre_hs_state.memory_limit / (1024 * 1024),
 		   pre_hs_state.per_ip_budget / 1024);
@@ -115,11 +115,11 @@ int tquic_pre_hs_init(void)
  */
 void tquic_pre_hs_exit(void)
 {
-	if (!pre_hs_initialized)
+	if (!smp_load_acquire(&pre_hs_initialized))
 		return;
 
 	rhashtable_destroy(&pre_hs_state.ip_table);
-	pre_hs_initialized = false;
+	smp_store_release(&pre_hs_initialized, false);
 	tquic_info("QUIC-LEAK defense shutdown\n");
 }
 
@@ -135,8 +135,10 @@ find_or_create_ip_entry(const struct sockaddr_storage *addr, bool create)
 {
 	struct tquic_pre_hs_ip_entry *entry;
 	u32 hash = compute_ip_hash(addr);
+	int retries = 0;
 
 	/* Try to find existing entry under RCU protection */
+retry:
 	rcu_read_lock();
 	entry = rhashtable_lookup_fast(&pre_hs_state.ip_table, &hash,
 				       pre_hs_ip_params);
@@ -168,12 +170,16 @@ find_or_create_ip_entry(const struct sockaddr_storage *addr, bool create)
 				   pre_hs_ip_params)) {
 		spin_unlock_bh(&pre_hs_state.lock);
 		kfree(entry);
-		/* Retry lookup - race condition */
-		rcu_read_lock();
-		entry = rhashtable_lookup_fast(&pre_hs_state.ip_table, &hash,
-					       pre_hs_ip_params);
-		rcu_read_unlock();
-		return entry;
+
+		/*
+		 * Insert failed (-EEXIST) -- another CPU raced us.
+		 * Retry the lookup under RCU, but bound retries to
+		 * prevent an infinite loop if something is wrong.
+		 */
+		if (++retries < 3)
+			goto retry;
+
+		return NULL;
 	}
 	spin_unlock_bh(&pre_hs_state.lock);
 
@@ -192,7 +198,7 @@ bool tquic_pre_hs_can_allocate(const struct sockaddr_storage *addr, size_t size)
 	struct tquic_pre_hs_ip_entry *entry;
 	u64 total, per_ip;
 
-	if (!pre_hs_initialized)
+	if (!smp_load_acquire(&pre_hs_initialized))
 		return true;
 
 	/* Check global limit */
@@ -242,7 +248,7 @@ int tquic_pre_hs_alloc(const struct sockaddr_storage *addr, size_t size)
 	u64 new_total;
 	u64 new_per_ip;
 
-	if (!pre_hs_initialized)
+	if (!smp_load_acquire(&pre_hs_initialized))
 		return 0;
 
 	/* Atomically add to global counter and check limit */
@@ -295,7 +301,7 @@ void tquic_pre_hs_free(const struct sockaddr_storage *addr, size_t size)
 {
 	struct tquic_pre_hs_ip_entry *entry;
 
-	if (!pre_hs_initialized)
+	if (!smp_load_acquire(&pre_hs_initialized))
 		return;
 
 	/* Update global counter */
@@ -321,7 +327,7 @@ void tquic_pre_hs_connection_complete(const struct sockaddr_storage *addr)
 	struct tquic_pre_hs_ip_entry *entry;
 	u64 memory_used;
 
-	if (!pre_hs_initialized)
+	if (!smp_load_acquire(&pre_hs_initialized))
 		return;
 
 	entry = find_or_create_ip_entry(addr, false);

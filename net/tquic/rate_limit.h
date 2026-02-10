@@ -187,6 +187,8 @@ struct tquic_rate_limit_stats {
  * @net: Network namespace
  * @initialized: State is initialized
  * @lock: Global state lock
+ * @max_ip_entries: Maximum per-IP hash table entries (0 = unlimited)
+ * @ip_entry_count: Current number of per-IP entries
  */
 struct tquic_rate_limit_state {
 	struct tquic_rate_limiter global_limiter;
@@ -206,6 +208,9 @@ struct tquic_rate_limit_state {
 	bool initialized;
 
 	spinlock_t lock;
+
+	u32 max_ip_entries;
+	atomic_t ip_entry_count;
 };
 
 /*

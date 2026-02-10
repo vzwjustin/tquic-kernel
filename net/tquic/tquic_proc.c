@@ -213,19 +213,21 @@ void tquic_log_error(struct net *net, struct tquic_connection *conn,
 	entry->error_code = error_code;
 
 	if (conn) {
+		struct tquic_path *apath;
 		u8 len = min_t(u8, conn->scid.len, TQUIC_MAX_CID_LEN);
 
 		memcpy(entry->scid, conn->scid.id, len);
 		entry->scid_len = len;
 
-		if (conn->active_path) {
+		apath = READ_ONCE(conn->active_path);
+		if (apath) {
 			memcpy(&entry->local_addr,
-			       &conn->active_path->local_addr,
+			       &apath->local_addr,
 			       sizeof(entry->local_addr));
 			memcpy(&entry->remote_addr,
-			       &conn->active_path->remote_addr,
+			       &apath->remote_addr,
 			       sizeof(entry->remote_addr));
-			entry->path_id = conn->active_path->path_id;
+			entry->path_id = apath->path_id;
 		} else {
 			memset(&entry->local_addr, 0, sizeof(entry->local_addr));
 			memset(&entry->remote_addr, 0, sizeof(entry->remote_addr));

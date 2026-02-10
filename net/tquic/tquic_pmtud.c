@@ -330,7 +330,14 @@ void tquic_pmtud_release_path(struct tquic_path *path)
 	if (!pmtud)
 		return;
 
-	/* Stop timer and cancel pending work */
+	/*
+	 * Stop timer and cancel pending work before freeing.
+	 * del_timer_sync() and cancel_work_sync() are safe to call
+	 * even if the timer/work was never armed, since the struct
+	 * was zero-initialized via kzalloc and then set up via
+	 * timer_setup()/INIT_WORK() during init.  We always call
+	 * both to handle any possible partial-init ordering.
+	 */
 	del_timer_sync(&pmtud->timer);
 	cancel_work_sync(&pmtud->work);
 

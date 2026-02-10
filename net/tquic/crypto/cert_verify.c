@@ -412,8 +412,8 @@ static int parse_san_extension(const u8 *data, u32 len,
 	u32 *ip_lengths = NULL;
 	u32 name_count = 0;
 	u32 addr_count = 0;
-	u32 name_capacity = 4;
-	u32 ip_capacity = 4;
+	size_t name_capacity = 4;
+	size_t ip_capacity = 4;
 
 	names = kcalloc(name_capacity, sizeof(char *), GFP_KERNEL);
 	if (!names)
@@ -448,10 +448,14 @@ static int parse_san_extension(const u8 *data, u32 len,
 		/* dNSName is context tag [2] */
 		if ((tag & 0x1f) == 2 && (tag & 0xc0) == 0x80) {
 			if (name_count >= name_capacity) {
-				u32 new_cap = name_capacity * 2;
-				char **new_names = krealloc(names,
-							    new_cap * sizeof(char *),
-							    GFP_KERNEL);
+				size_t new_cap = name_capacity * 2;
+				char **new_names;
+
+				if (name_capacity >= 10000)
+					goto err_free;
+				new_names = krealloc_array(names, new_cap,
+							   sizeof(char *),
+							   GFP_KERNEL);
 				if (!new_names)
 					goto err_free;
 				names = new_names;
@@ -470,19 +474,24 @@ static int parse_san_extension(const u8 *data, u32 len,
 		else if ((tag & 0x1f) == 7 && (tag & 0xc0) == 0x80) {
 			if (content_len == 4 || content_len == 16) {
 				if (addr_count >= ip_capacity) {
-					u32 new_cap = ip_capacity * 2;
-					u8 **new_ips = krealloc(ips,
-								new_cap * sizeof(u8 *),
-								GFP_KERNEL);
-					u32 *new_lens = krealloc(ip_lengths,
-								 new_cap * sizeof(u32),
-								 GFP_KERNEL);
-					if (!new_ips || !new_lens) {
-						kfree(new_ips);
-						kfree(new_lens);
+					size_t new_cap = ip_capacity * 2;
+					u8 **new_ips;
+					u32 *new_lens;
+
+					if (ip_capacity >= 10000)
 						goto err_free;
-					}
+					new_ips = krealloc_array(ips, new_cap,
+								 sizeof(u8 *),
+								 GFP_KERNEL);
+					if (!new_ips)
+						goto err_free;
 					ips = new_ips;
+					new_lens = krealloc_array(ip_lengths,
+								  new_cap,
+								  sizeof(u32),
+								  GFP_KERNEL);
+					if (!new_lens)
+						goto err_free;
 					ip_lengths = new_lens;
 					ip_capacity = new_cap;
 				}

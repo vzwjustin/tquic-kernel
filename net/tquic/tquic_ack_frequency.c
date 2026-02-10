@@ -36,6 +36,10 @@
 #include "tquic_debug.h"
 #include "core/ack_frequency.h"
 
+/* Bounds for received ACK_FREQUENCY frame parameters */
+#define TQUIC_MIN_ACK_DELAY_US		1000	/* 1ms minimum */
+#define TQUIC_MAX_ACK_THRESHOLD		256	/* max ack-eliciting threshold */
+
 /*
  * =============================================================================
  * Variable Length Integer Helpers (RFC 9000 Section 16)
@@ -583,6 +587,7 @@ int tquic_conn_handle_ack_frequency_frame(struct tquic_connection *conn,
 					  const struct tquic_ack_frequency_frame *frame)
 {
 	struct tquic_ack_frequency_state *state;
+	struct tquic_ack_frequency_frame clamped;
 
 	if (!conn || !frame)
 		return -EINVAL;
@@ -593,10 +598,21 @@ int tquic_conn_handle_ack_frequency_frame(struct tquic_connection *conn,
 		return -EINVAL;
 	}
 
+	/*
+	 * Clamp received parameters to safe bounds before applying.
+	 * This prevents a peer from setting extreme values that could
+	 * degrade ACK responsiveness or waste resources.
+	 */
+	clamped = *frame;
+	if (clamped.request_max_ack_delay < TQUIC_MIN_ACK_DELAY_US)
+		clamped.request_max_ack_delay = TQUIC_MIN_ACK_DELAY_US;
+	if (clamped.ack_eliciting_threshold > TQUIC_MAX_ACK_THRESHOLD)
+		clamped.ack_eliciting_threshold = TQUIC_MAX_ACK_THRESHOLD;
+
 	state = conn_get_ack_freq_state(conn);
 	if (state) {
 		/* Use core state-level implementation */
-		int ret = tquic_handle_ack_frequency_frame(state, frame);
+		int ret = tquic_handle_ack_frequency_frame(state, &clamped);
 		if (ret < 0)
 			return ret;
 	} else {

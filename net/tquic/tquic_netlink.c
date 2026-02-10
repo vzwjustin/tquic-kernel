@@ -837,11 +837,13 @@ static int tquic_nl_cmd_path_set(struct sk_buff *skb, struct genl_info *info)
 		return -ENOENT;
 	}
 
-	/* Update path settings - protected by RCU, but we do atomic updates */
+	/* Update path settings under conn->lock for consistency */
+	spin_lock_bh(&conn->lock);
 	if (info->attrs[TQUIC_NL_ATTR_PATH_WEIGHT]) {
 		u32 w = nla_get_u32(info->attrs[TQUIC_NL_ATTR_PATH_WEIGHT]);
 
 		if (w == 0) {
+			spin_unlock_bh(&conn->lock);
 			tquic_nl_path_put(path);
 			tquic_nl_conn_put(conn);
 			NL_SET_ERR_MSG(info->extack,
@@ -860,6 +862,7 @@ static int tquic_nl_cmd_path_set(struct sk_buff *skb, struct genl_info *info)
 		u8 state = nla_get_u8(info->attrs[TQUIC_NL_ATTR_PATH_STATE]);
 
 		if (state >= __TQUIC_NL_PATH_STATE_MAX) {
+			spin_unlock_bh(&conn->lock);
 			tquic_nl_path_put(path);
 			tquic_nl_conn_put(conn);
 			NL_SET_ERR_MSG(info->extack, "Invalid path state");
@@ -867,6 +870,7 @@ static int tquic_nl_cmd_path_set(struct sk_buff *skb, struct genl_info *info)
 		}
 		WRITE_ONCE(path->state, state);
 	}
+	spin_unlock_bh(&conn->lock);
 
 	tquic_nl_path_put(path);
 	tquic_nl_conn_put(conn);

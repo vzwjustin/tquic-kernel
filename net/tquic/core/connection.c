@@ -24,6 +24,7 @@
 #include <linux/spinlock.h>
 #include <linux/timer.h>
 #include <crypto/algapi.h>
+#include <crypto/hash.h>
 #include <linux/workqueue.h>
 #include <linux/random.h>
 #include <linux/jhash.h>
@@ -278,8 +279,13 @@ static int tquic_conn_set_state(struct tquic_connection *conn,
 		break;
 
 	case TQUIC_CONN_CONNECTING:
+		/*
+		 * DRAINING is valid from CONNECTING because the peer may
+		 * send CONNECTION_CLOSE during the handshake (RFC 9000).
+		 */
 		valid = (new_state == TQUIC_CONN_CONNECTED ||
 			 new_state == TQUIC_CONN_CLOSING ||
+			 new_state == TQUIC_CONN_DRAINING ||
 			 new_state == TQUIC_CONN_CLOSED);
 		break;
 
@@ -358,25 +364,43 @@ static int tquic_conn_set_state(struct tquic_connection *conn,
 		/*
 		 * Cancel all pending work.
 		 *
-		 * CRITICAL: Use non-blocking cancellation to avoid self-deadlock.
-		 * This state transition can be called from work handlers themselves
-		 * (e.g., tquic_drain_timeout -> tquic_conn_enter_closed), so we
-		 * cannot use cancel_*_work_sync which would wait for the currently
-		 * executing work to complete (= deadlock).
+		 * Determine if we are being called from within a work
+		 * callback context (e.g., tquic_drain_timeout ->
+		 * tquic_conn_enter_closed). If so, we must use non-sync
+		 * variants to avoid self-deadlock since cancel_work_sync
+		 * waits for the currently executing work to complete.
 		 *
-		 * cancel_*_work() returns true if it canceled a pending work,
-		 * false if the work wasn't pending (already running or completed).
-		 * This is safe because:
-		 * 1. If work is pending: it gets canceled before execution
-		 * 2. If work is running: it's either this function's caller
-		 *    (won't wait on itself) or another work item that will
-		 *    complete independently
-		 * 3. Work items check conn->state before taking action
+		 * If NOT in a work context, use sync variants to ensure
+		 * no work is still executing when we proceed to free
+		 * resources.
+		 *
+		 * current_work() returns the work_struct currently being
+		 * executed on this CPU's workqueue, or NULL if not in a
+		 * work context.
 		 */
-		cancel_work(&cs->close_work);
-		cancel_work(&cs->migration_work);
-		cancel_delayed_work(&cs->drain_work);
-		cancel_delayed_work(&cs->validation_work);
+		if (current_work() == &cs->close_work ||
+		    current_work() == &cs->migration_work ||
+		    current_work() == &cs->drain_work.work ||
+		    current_work() == &cs->validation_work.work) {
+			/*
+			 * In work context: use non-sync cancel.
+			 * The currently executing work is the caller,
+			 * other works check conn->state before acting.
+			 */
+			cancel_work(&cs->close_work);
+			cancel_work(&cs->migration_work);
+			cancel_delayed_work(&cs->drain_work);
+			cancel_delayed_work(&cs->validation_work);
+		} else {
+			/*
+			 * Not in work context: safe to use sync variants
+			 * which guarantee all work has completed on return.
+			 */
+			cancel_work_sync(&cs->close_work);
+			cancel_work_sync(&cs->migration_work);
+			cancel_delayed_work_sync(&cs->drain_work);
+			cancel_delayed_work_sync(&cs->validation_work);
+		}
 
 		/*
 		 * Wake up all waiters - connection is fully closed,
@@ -613,16 +637,21 @@ struct tquic_cid *tquic_conn_get_active_cid(struct tquic_connection *conn)
 {
 	struct tquic_conn_state_machine *cs = conn->state_machine;
 	struct tquic_cid_entry *entry;
+	struct tquic_cid *result = &conn->dcid;
 
 	if (!cs)
 		return &conn->dcid;
 
+	spin_lock_bh(&conn->lock);
 	list_for_each_entry(entry, &cs->remote_cids, list) {
-		if (!entry->retired)
-			return &entry->cid;
+		if (!entry->retired) {
+			result = &entry->cid;
+			break;
+		}
 	}
+	spin_unlock_bh(&conn->lock);
 
-	return &conn->dcid;
+	return result;
 }
 EXPORT_SYMBOL_GPL(tquic_conn_get_active_cid);
 
@@ -636,24 +665,72 @@ EXPORT_SYMBOL_GPL(tquic_conn_get_active_cid);
  * @static_key: Server's static key
  * @token: Output buffer (16 bytes)
  *
- * Generates a deterministic stateless reset token using HMAC.
+ * Generates a deterministic stateless reset token using HMAC-SHA256
+ * truncated to 128 bits, per RFC 9000 Section 10.3.2.
  */
 void tquic_generate_stateless_reset_token(const struct tquic_cid *cid,
 					  const u8 *static_key,
 					  u8 *token)
 {
-	/* Simple token generation using jhash */
-	u32 hash1, hash2, hash3, hash4;
+	struct crypto_shash *tfm;
+	struct shash_desc *desc;
+	u8 hmac_out[32]; /* SHA-256 output */
+	int ret;
 
-	hash1 = jhash(cid->id, cid->len, 0x51c0 | (static_key[0] << 8));
-	hash2 = jhash(cid->id, cid->len, 0x51c1 | (static_key[1] << 8));
-	hash3 = jhash(cid->id, cid->len, 0x51c2 | (static_key[2] << 8));
-	hash4 = jhash(cid->id, cid->len, 0x51c3 | (static_key[3] << 8));
+	/*
+	 * Use HMAC-SHA256 for cryptographically secure token generation.
+	 * The token must be unpredictable to prevent spoofed stateless
+	 * resets (RFC 9000 Section 10.3).
+	 */
+	tfm = crypto_alloc_shash("hmac(sha256)", 0, 0);
+	if (IS_ERR(tfm)) {
+		/*
+		 * Fallback: delegate to tquic_stateless_reset_generate_token
+		 * which already implements proper HMAC-SHA256.
+		 */
+		tquic_stateless_reset_generate_token(cid, static_key, token);
+		return;
+	}
 
-	memcpy(token, &hash1, 4);
-	memcpy(token + 4, &hash2, 4);
-	memcpy(token + 8, &hash3, 4);
-	memcpy(token + 12, &hash4, 4);
+	desc = kzalloc(sizeof(*desc) + crypto_shash_descsize(tfm),
+		       GFP_ATOMIC);
+	if (!desc) {
+		crypto_free_shash(tfm);
+		tquic_stateless_reset_generate_token(cid, static_key, token);
+		return;
+	}
+
+	desc->tfm = tfm;
+
+	ret = crypto_shash_setkey(tfm, static_key,
+				  TQUIC_STATELESS_RESET_SECRET_LEN);
+	if (ret)
+		goto fallback;
+
+	ret = crypto_shash_init(desc);
+	if (ret)
+		goto fallback;
+
+	ret = crypto_shash_update(desc, cid->id, cid->len);
+	if (ret)
+		goto fallback;
+
+	ret = crypto_shash_final(desc, hmac_out);
+	if (ret)
+		goto fallback;
+
+	/* Truncate HMAC-SHA256 to 128 bits for the reset token */
+	memcpy(token, hmac_out, 16);
+	memzero_explicit(hmac_out, sizeof(hmac_out));
+
+	kfree(desc);
+	crypto_free_shash(tfm);
+	return;
+
+fallback:
+	kfree(desc);
+	crypto_free_shash(tfm);
+	tquic_stateless_reset_generate_token(cid, static_key, token);
 }
 EXPORT_SYMBOL_GPL(tquic_generate_stateless_reset_token);
 
@@ -672,6 +749,7 @@ bool tquic_verify_stateless_reset(struct tquic_connection *conn,
 	struct tquic_conn_state_machine *cs = conn->state_machine;
 	struct tquic_cid_entry *entry;
 	const u8 *token;
+	bool found = false;
 
 	if (len < 21)  /* Minimum: 1 byte header + 4 random + 16 token */
 		return false;
@@ -681,16 +759,21 @@ bool tquic_verify_stateless_reset(struct tquic_connection *conn,
 	if (!cs)
 		return false;
 
-	/* Check against known reset tokens */
+	/* Check against known reset tokens under lock */
+	spin_lock_bh(&conn->lock);
 	list_for_each_entry(entry, &cs->remote_cids, list) {
 		if (entry->has_reset_token &&
 		    crypto_memneq(entry->stateless_reset_token, token, 16) == 0) {
-			tquic_conn_info(conn, "received stateless reset\n");
-			return true;
+			found = true;
+			break;
 		}
 	}
+	spin_unlock_bh(&conn->lock);
 
-	return false;
+	if (found)
+		tquic_conn_info(conn, "received stateless reset\n");
+
+	return found;
 }
 EXPORT_SYMBOL_GPL(tquic_verify_stateless_reset);
 
@@ -2083,6 +2166,19 @@ EXPORT_SYMBOL_GPL(tquic_conn_handle_close);
 
 static void tquic_conn_enter_draining(struct tquic_connection *conn)
 {
+	struct tquic_conn_state_machine *cs = conn->state_machine;
+
+	/*
+	 * Recompute drain timeout using current RTT measurements if
+	 * available, since RTT data may not have been present when
+	 * the state machine was first initialized.
+	 */
+	if (cs && conn->active_path &&
+	    conn->active_path->rtt.samples > 0) {
+		cs->drain_timeout_ms = 3 * tquic_rtt_pto(
+			&conn->active_path->rtt);
+	}
+
 	tquic_conn_set_state(conn, TQUIC_CONN_DRAINING, TQUIC_REASON_PEER_CLOSE);
 }
 
@@ -2169,7 +2265,17 @@ int tquic_conn_client_connect(struct tquic_connection *conn,
 	cs->hs_state = TQUIC_HS_INITIAL;
 	cs->active_cid_limit = 2;
 	cs->validation_timeout_ms = 3000;
-	cs->drain_timeout_ms = 3 * TQUIC_DEFAULT_RTT;
+	/*
+	 * Drain timeout: Use 3 * PTO if RTT measurements are available,
+	 * otherwise fall back to static default per RFC 9000 Section 10.2.
+	 * PTO = smoothed_rtt + max(4 * rttvar, 1ms) + max_ack_delay
+	 */
+	if (conn->active_path && conn->active_path->rtt.samples > 0) {
+		cs->drain_timeout_ms = 3 * tquic_rtt_pto(
+			&conn->active_path->rtt);
+	} else {
+		cs->drain_timeout_ms = 3 * TQUIC_DEFAULT_RTT;
+	}
 	cs->amplification_limit = 3;
 
 	INIT_LIST_HEAD(&cs->local_cids);
@@ -2365,7 +2471,16 @@ int tquic_conn_server_accept(struct tquic_connection *conn,
 	cs->hs_state = TQUIC_HS_INITIAL;
 	cs->active_cid_limit = 2;
 	cs->validation_timeout_ms = 3000;
-	cs->drain_timeout_ms = 3 * TQUIC_DEFAULT_RTT;
+	/*
+	 * Drain timeout: Use 3 * PTO if RTT measurements are available,
+	 * otherwise fall back to static default per RFC 9000 Section 10.2.
+	 */
+	if (conn->active_path && conn->active_path->rtt.samples > 0) {
+		cs->drain_timeout_ms = 3 * tquic_rtt_pto(
+			&conn->active_path->rtt);
+	} else {
+		cs->drain_timeout_ms = 3 * TQUIC_DEFAULT_RTT;
+	}
 	cs->amplification_limit = 3;
 	cs->address_validated = false;
 
