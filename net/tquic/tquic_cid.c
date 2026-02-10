@@ -653,7 +653,7 @@ int tquic_cid_add_remote(struct tquic_connection *conn,
 			if (iter->state == CID_STATE_ACTIVE)
 				active_count++;
 		}
-		if (active_count >= conn->active_connection_id_limit) {
+		if (active_count >= conn->remote_params.active_connection_id_limit) {
 			spin_unlock_bh(&pool->lock);
 			kfree(entry);
 			return -EPROTO;

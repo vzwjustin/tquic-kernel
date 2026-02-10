@@ -563,6 +563,8 @@ EXPORT_SYMBOL_GPL(tquic_migration_path_event);
  * =============================================================================
  */
 
+static void tquic_migration_work_handler(struct work_struct *work);
+
 /**
  * tquic_migration_state_alloc - Allocate migration state
  * @conn: Connection

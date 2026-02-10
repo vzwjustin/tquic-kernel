@@ -1432,7 +1432,7 @@ static void tquic_timer_work_fn(struct work_struct *work)
 	if (test_bit(TQUIC_TIMER_IDLE_BIT, &pending)) {
 		if (conn->state == TQUIC_CONN_CONNECTED) {
 			tquic_conn_close_with_error(conn,
-						    TQUIC_NO_ERROR,
+						    EQUIC_NO_ERROR,
 						    "idle timeout");
 		}
 	}
