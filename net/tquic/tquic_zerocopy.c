@@ -33,6 +33,7 @@
 #include <net/tquic.h>
 
 #include "tquic_compat.h"
+#include "tquic_debug.h"
 #include "protocol.h"
 
 /*
@@ -1107,7 +1108,6 @@ EXPORT_SYMBOL_GPL(tquic_skb_orphan_frags_rx);
 #include <net/sock.h>
 #include <net/tquic.h>
 
-#include "tquic_debug.h"
 #include "protocol.h"
 
 int tquic_zc_state_alloc(struct tquic_connection *conn)

@@ -635,8 +635,10 @@ void tquic_early_data_reject(struct tquic_connection *conn)
 	 * incorrectly account for data that was never delivered.
 	 */
 	if (conn->zero_rtt_state) {
-		conn->zero_rtt_state->early_data_sent = 0;
-		conn->zero_rtt_state->early_data_received = 0;
+		struct tquic_zero_rtt_state_s *zrs = conn->zero_rtt_state;
+
+		zrs->early_data_sent = 0;
+		zrs->early_data_received = 0;
 	}
 
 	/*
