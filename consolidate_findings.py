@@ -64,6 +64,18 @@ STOPWORDS = {
 	"could",
 	"should",
 	"will",
+	"critical",
+	"high",
+	"medium",
+	"low",
+	"bug",
+	"finding",
+	"issue",
+	"issues",
+	"vulnerability",
+	"risk",
+	"missing",
+	"lack",
 }
 
 GENERIC_SYMBOLS = {
@@ -114,26 +126,35 @@ def load_findings(path: Path, source_letter: str) -> list[Finding]:
 	for i, item in enumerate(items):
 		if not isinstance(item, dict):
 			continue
-		evidence = item.get("evidence") or {}
+		title = str(item.get("title", "")).strip() or f"Untitled finding {i+1}"
+		impact = str(item.get("impact", "")).strip()
+		root_cause = str(item.get("root_cause_hypothesis", "")).strip()
+		fix_suggestion = str(item.get("fix_suggestion", "")).strip()
+		notes = str(item.get("notes", "")).strip()
+		evidence = normalize_evidence(item.get("evidence") or {})
+		evidence = enrich_evidence(
+			evidence,
+			text_fields=[title, impact, root_cause, notes, fix_suggestion],
+		)
 		out.append(
 			Finding(
 				source=source_letter,
 				id=str(item.get("id", f"{source_letter}-{i+1}")),
-				title=str(item.get("title", "")).strip() or f"Untitled finding {i+1}",
+				title=title,
 				category=normalize_category(str(item.get("category", "correctness"))),
 				severity=normalize_severity(str(item.get("severity", "S2"))),
 				confidence=normalize_confidence(str(item.get("confidence", "medium"))),
-				impact=str(item.get("impact", "")).strip(),
-				evidence=normalize_evidence(evidence),
+				impact=impact,
+				evidence=evidence,
 				repro=item.get("repro") if isinstance(item.get("repro"), dict) else {},
-				root_cause_hypothesis=str(item.get("root_cause_hypothesis", "")).strip(),
-				fix_suggestion=str(item.get("fix_suggestion", "")).strip(),
+				root_cause_hypothesis=root_cause,
+				fix_suggestion=fix_suggestion,
 				tests_to_add=[
 					str(t).strip()
 					for t in item.get("tests_to_add", [])
 					if isinstance(t, str) and str(t).strip()
 				],
-				notes=str(item.get("notes", "")).strip(),
+				notes=notes,
 			)
 		)
 	return out
@@ -211,6 +232,78 @@ def normalize_evidence(evidence: dict[str, Any]) -> dict[str, list[str]]:
 	}
 
 
+def extract_paths_from_text(text: str) -> list[str]:
+	paths = []
+	for m in re.finditer(r"(?:/[^ \t\n`'\"]+)?(net/(?:tquic|quic)/[^\s`'\":)]+)", text):
+		path = normalize_path(m.group(1))
+		if path:
+			paths.append(path)
+	return dedupe_list(paths)
+
+
+def extract_line_ranges_from_text(text: str, file_paths: list[str]) -> list[str]:
+	ranges = []
+
+	# Direct path:start-end pattern.
+	for m in re.finditer(r"((?:/[^ \t\n`'\"]+)?net/(?:tquic|quic)/[^\s`'\":)]+):(\d+)-(\d+)", text):
+		p = normalize_path(m.group(1))
+		ranges.append(f"{p}:{m.group(2)}-{m.group(3)}")
+
+	# "Line: 123" or "Lines: 100-120" pattern.
+	for m in re.finditer(r"[Ll]ines?\s*[:=]\s*(\d+)(?:\s*[-–]\s*(\d+))?", text):
+		start = m.group(1)
+		end = m.group(2) or start
+		if file_paths:
+			ranges.append(f"{file_paths[0]}:{start}-{end}")
+
+	return dedupe_list(ranges)
+
+
+def extract_symbols_from_text(text: str) -> list[str]:
+	symbols = []
+
+	for m in re.finditer(r"`([A-Za-z_][A-Za-z0-9_]{2,})\(\)`", text):
+		s = normalize_symbol(m.group(1))
+		if s:
+			symbols.append(s)
+
+	for m in re.finditer(r"\b((?:tquic|quic|h3|qpack)_[A-Za-z0-9_]{2,})\b", text):
+		s = normalize_symbol(m.group(1))
+		if s:
+			symbols.append(s)
+
+	return dedupe_list(symbols)
+
+
+def enrich_evidence(
+	evidence: dict[str, list[str]],
+	text_fields: list[str],
+) -> dict[str, list[str]]:
+	combined_text = "\n".join(t for t in text_fields if t)
+	if not combined_text:
+		return evidence
+
+	paths = list(evidence["file_paths"])
+	paths.extend(extract_paths_from_text(combined_text))
+	paths = dedupe_list(paths)
+
+	line_ranges = list(evidence["line_ranges"])
+	line_ranges.extend(extract_line_ranges_from_text(combined_text, paths))
+	line_ranges = dedupe_list(line_ranges)
+
+	symbols = list(evidence["symbols"])
+	symbols.extend(extract_symbols_from_text(combined_text))
+	symbols = dedupe_list(symbols)
+
+	return {
+		"file_paths": paths,
+		"symbols": symbols,
+		"line_ranges": line_ranges,
+		"snippets": evidence["snippets"],
+		"logs_or_errors": evidence["logs_or_errors"],
+	}
+
+
 def normalize_line_range(line_range: str) -> str:
 	lr = line_range.strip().replace("\\", "/")
 	if not lr:
@@ -249,6 +342,12 @@ def title_keywords(title: str) -> list[str]:
 	return dedupe_list(out)[:8]
 
 
+def title_signature(tokens: list[str]) -> str:
+	if not tokens:
+		return "untitled"
+	return "-".join(sorted(tokens)[:6])
+
+
 def primary_file(evidence: dict[str, list[str]]) -> str:
 	if evidence["file_paths"]:
 		return evidence["file_paths"][0]
@@ -284,8 +383,9 @@ def jaccard(a: set[str], b: set[str]) -> float:
 def has_strong_evidence(finding: Finding) -> bool:
 	ev = finding.evidence
 	has_path = bool(ev["file_paths"])
-	has_precise = bool(ev["line_ranges"] or ev["snippets"] or ev["logs_or_errors"])
-	return has_path and has_precise
+	has_line = bool(ev["line_ranges"])
+	has_context = bool(ev["snippets"] or ev["logs_or_errors"])
+	return has_path and has_line and has_context
 
 
 def has_any_evidence(finding: Finding) -> bool:
@@ -304,41 +404,141 @@ def dedupe_list(items: list[str]) -> list[str]:
 	return out
 
 
-def cluster_findings(findings: list[Finding]) -> list[list[Finding]]:
-	clusters: dict[str, list[Finding]] = {}
-	secondary: dict[str, list[str]] = defaultdict(list)
-	rep_tokens: dict[str, set[str]] = {}
+def _range_entries(finding: Finding) -> list[tuple[str, int, int]]:
+	entries = []
+	for lr in finding.evidence["line_ranges"]:
+		m = re.match(r"([^:]+):(\d+)-(\d+)$", lr)
+		if not m:
+			continue
+		p, s, e = m.groups()
+		start = int(s)
+		end = int(e)
+		if end < start:
+			start, end = end, start
+		entries.append((p, start, end))
+	return entries
 
+
+def ranges_overlap(a: Finding, b: Finding) -> bool:
+	a_ranges = _range_entries(a)
+	b_ranges = _range_entries(b)
+	if not a_ranges or not b_ranges:
+		return False
+	for ap, as_, ae in a_ranges:
+		for bp, bs, be in b_ranges:
+			if ap != bp:
+				continue
+			if max(as_, bs) <= min(ae, be):
+				return True
+	return False
+
+
+def cluster_findings(findings: list[Finding]) -> list[list[Finding]]:
 	for f in findings:
 		f.title_tokens = title_keywords(f.title)
 		f.primary_file = primary_file(f.evidence)
 		f.primary_symbol = primary_symbol(f.evidence)
 		f.fingerprint = build_fingerprint(f)
 
-		if f.fingerprint in clusters:
-			clusters[f.fingerprint].append(f)
-			rep_tokens[f.fingerprint].update(f.title_tokens)
-			continue
+	parent = list(range(len(findings)))
 
-		secondary_key = f"{f.primary_file}|{f.primary_symbol}|{f.category}"
-		matched_fp = ""
-		best_score = 0.0
-		for cand_fp in secondary.get(secondary_key, []):
-			score = jaccard(set(f.title_tokens), rep_tokens[cand_fp])
-			if score > best_score:
-				best_score = score
-				matched_fp = cand_fp
+	def find(i: int) -> int:
+		while parent[i] != i:
+			parent[i] = parent[parent[i]]
+			i = parent[i]
+		return i
 
-		# Keep fingerprint as primary heuristic; allow title-variant merge.
-		if matched_fp and best_score >= 0.45:
-			clusters[matched_fp].append(f)
-			rep_tokens[matched_fp].update(f.title_tokens)
+	def union(a: int, b: int) -> None:
+		ra = find(a)
+		rb = find(b)
+		if ra != rb:
+			parent[rb] = ra
+
+	# 1) Strict fingerprint clustering.
+	fp_index: dict[str, int] = {}
+	for i, f in enumerate(findings):
+		if f.fingerprint in fp_index:
+			union(i, fp_index[f.fingerprint])
 		else:
-			clusters[f.fingerprint] = [f]
-			secondary[secondary_key].append(f.fingerprint)
-			rep_tokens[f.fingerprint] = set(f.title_tokens)
+			fp_index[f.fingerprint] = i
 
-	return list(clusters.values())
+	# 2) Fuzzy merge on same primary file.
+	by_file: dict[str, list[int]] = defaultdict(list)
+	for i, f in enumerate(findings):
+		by_file[f.primary_file].append(i)
+
+	for file_path, idxs in by_file.items():
+		if file_path == "unknown_file":
+			continue
+		for x in range(len(idxs)):
+			i = idxs[x]
+			for y in range(x + 1, len(idxs)):
+				j = idxs[y]
+				if find(i) == find(j):
+					continue
+				if should_merge(findings[i], findings[j]):
+					union(i, j)
+
+	# 3) Limited fuzzy merge for unknown-file items.
+	unknown_buckets: dict[tuple[str, str], list[int]] = defaultdict(list)
+	for i, f in enumerate(findings):
+		if f.primary_file != "unknown_file":
+			continue
+		sig = title_signature(f.title_tokens)[:40]
+		unknown_buckets[(f.category, sig)].append(i)
+
+	for (_, _), idxs in unknown_buckets.items():
+		for x in range(len(idxs)):
+			i = idxs[x]
+			for y in range(x + 1, len(idxs)):
+				j = idxs[y]
+				if find(i) == find(j):
+					continue
+				if should_merge(findings[i], findings[j]):
+					union(i, j)
+
+	grouped: dict[int, list[Finding]] = defaultdict(list)
+	for i, f in enumerate(findings):
+		grouped[find(i)].append(f)
+
+	return list(grouped.values())
+
+
+def should_merge(a: Finding, b: Finding) -> bool:
+	a_tokens = set(a.title_tokens)
+	b_tokens = set(b.title_tokens)
+	title_sim = jaccard(a_tokens, b_tokens)
+	same_file = a.primary_file == b.primary_file and a.primary_file != "unknown_file"
+	same_category = a.category == b.category
+	symbol_known = (
+		a.primary_symbol != "unknown_symbol"
+		and b.primary_symbol != "unknown_symbol"
+	)
+	symbol_match = symbol_known and a.primary_symbol == b.primary_symbol
+	range_overlap = ranges_overlap(a, b)
+
+	if same_file:
+		if range_overlap and title_sim >= 0.20:
+			return True
+		if symbol_match and (title_sim >= 0.25 or same_category):
+			return True
+		if title_sim >= 0.58 and (same_category or symbol_match):
+			return True
+		if title_sim >= 0.72:
+			return True
+
+	if symbol_match and title_sim >= 0.65 and (same_category or same_file):
+		return True
+
+	if (
+		a.primary_file == "unknown_file"
+		and b.primary_file == "unknown_file"
+		and same_category
+		and title_sim >= 0.85
+	):
+		return True
+
+	return False
 
 
 def best_title(cluster: list[Finding]) -> str:
@@ -478,9 +678,10 @@ def verification_commands(
 ) -> list[str]:
 	cmds = []
 	if primary_path != "unknown_file":
-		cmds.append(f"rg -n \"{re.escape(primary_symbol_name)}\" \"{primary_path}\"")
+		if primary_symbol_name != "unknown_symbol":
+			cmds.append(f"rg -n \"{primary_symbol_name}\" \"{primary_path}\"")
 		if first_keyword:
-			cmds.append(f"rg -n \"{re.escape(first_keyword)}\" \"{primary_path}\"")
+			cmds.append(f"rg -n \"{first_keyword}\" \"{primary_path}\"")
 	cmds.append("make M=net/tquic W=1")
 	cmds.append("make M=net/tquic C=1")
 	return dedupe_list(cmds)[:5]
