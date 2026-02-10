@@ -526,7 +526,14 @@ def should_merge(a: Finding, b: Finding) -> bool:
 	)
 
 	# Title-signature equality is strong for normalized findings.
-	if a_sig == b_sig and same_category and (same_file or one_unknown_file):
+	if a_sig == b_sig and (same_file or one_unknown_file):
+		return True
+	if (
+		a_sig == b_sig
+		and a.primary_file == "unknown_file"
+		and b.primary_file == "unknown_file"
+		and title_sim >= 0.95
+	):
 		return True
 
 	if same_file:
