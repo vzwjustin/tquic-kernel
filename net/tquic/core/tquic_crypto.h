@@ -112,6 +112,7 @@ struct tquic_crypto_ctx {
 	struct tquic_crypto_secret tx;
 	struct tquic_crypto_secret rx;
 	u16			cipher_type;
+	u8			local_cid_len;	/* CF-378: local CID length for short header parsing */
 	u8			key_phase:1;
 	u8			keys_available:1;
 

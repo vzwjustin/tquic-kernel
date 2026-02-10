@@ -70,8 +70,21 @@ struct tquic_loss_tracker {
 	u64 last_loss_tx;         /* tx_packets at last loss */
 };
 
-/* Per-path loss trackers (indexed by path_id, limited to TQUIC_MAX_PATHS) */
+/*
+ * CF-272: Per-path loss trackers (indexed by path_id).
+ * These are global, not per-connection. This is acceptable because
+ * path degradation detection is a coarse heuristic -- false resets from
+ * other connections sharing a path_id are benign (they just reset the
+ * consecutive loss counter). The lock (loss_trackers_lock) below
+ * prevents data corruption from concurrent access.
+ */
 static struct tquic_loss_tracker loss_trackers[TQUIC_MAX_PATHS];
+
+/*
+ * CF-305: Protect global loss tracker array from concurrent access.
+ * ACK and loss events can arrive on different CPUs for different paths.
+ */
+static DEFINE_SPINLOCK(loss_trackers_lock);
 
 /*
  * Get threshold from netns or use default
@@ -80,8 +93,12 @@ static int tquic_get_path_degrade_threshold(struct tquic_path *path)
 {
 	struct net *net = NULL;
 
-	if (path && path->conn && path->conn->sk)
-		net = sock_net(path->conn->sk);
+	if (path && path->conn) {
+		struct sock *sk = READ_ONCE(path->conn->sk);
+
+		if (sk)
+			net = sock_net(sk);
+	}
 
 	if (net) {
 		struct tquic_net *tn = tquic_pernet(net);
@@ -451,14 +468,16 @@ void tquic_cong_on_ack(struct tquic_path *path, u64 bytes_acked, u64 rtt_us)
 	if (!path)
 		return;
 
-	/* Reset consecutive loss counter on successful ACK */
+	/* CF-305: Reset consecutive loss counter on successful ACK */
 	if (path->path_id < TQUIC_MAX_PATHS) {
+		spin_lock_bh(&loss_trackers_lock);
 		tracker = &loss_trackers[path->path_id];
 		if (tracker->consecutive_losses > 0) {
 			tquic_dbg("cc: path %u loss counter reset on ACK\n",
 				 path->path_id);
 			tracker->consecutive_losses = 0;
 		}
+		spin_unlock_bh(&loss_trackers_lock);
 	}
 
 	ca = path->cong_ops;
@@ -498,8 +517,11 @@ void tquic_cong_on_loss(struct tquic_path *path, u64 bytes_lost)
 	if (!path)
 		return;
 
-	/* Track consecutive losses for path degradation */
+	/* CF-305: Track consecutive losses for path degradation under lock */
 	if (path->path_id < TQUIC_MAX_PATHS) {
+		bool degraded = false;
+
+		spin_lock_bh(&loss_trackers_lock);
 		tracker = &loss_trackers[path->path_id];
 
 		/* Calculate packets per cwnd (for round detection) */
@@ -529,14 +551,14 @@ void tquic_cong_on_loss(struct tquic_path *path, u64 bytes_lost)
 		if (tracker->consecutive_losses >= threshold) {
 			tquic_warn("cc: path %u degraded after %u consecutive losses\n",
 				path->path_id, tracker->consecutive_losses);
-
-			/* Signal path manager for degradation/failover */
-			if (path->conn)
-				tquic_bond_path_failed(path->conn, path);
-
-			/* Reset counter after degradation */
 			tracker->consecutive_losses = 0;
+			degraded = true;
 		}
+		spin_unlock_bh(&loss_trackers_lock);
+
+		/* Signal path manager outside the lock */
+		if (degraded && path->conn)
+			tquic_bond_path_failed(path->conn, path);
 	}
 
 	/* Call CC's on_loss */
@@ -586,8 +608,12 @@ void tquic_cong_on_persistent_congestion(struct tquic_path *path,
 		return;
 
 	/* Get network namespace for MIB counter */
-	if (path->conn && path->conn->sk)
-		net = sock_net(path->conn->sk);
+	if (path->conn) {
+		struct sock *sk = READ_ONCE(path->conn->sk);
+
+		if (sk)
+			net = sock_net(sk);
+	}
 
 	ca = path->cong_ops;
 
@@ -647,8 +673,12 @@ bool tquic_cong_check_persistent_congestion(struct tquic_path *path,
 		return false;
 
 	/* Get network namespace */
-	if (path->conn && path->conn->sk)
-		net = sock_net(path->conn->sk);
+	if (path->conn) {
+		struct sock *sk = READ_ONCE(path->conn->sk);
+
+		if (sk)
+			net = sock_net(sk);
+	}
 
 	/* Initialize persistent congestion state from current RTT */
 	tquic_persistent_cong_init(&pc_state);
@@ -1191,7 +1221,11 @@ void tquic_cong_on_ecn(struct tquic_path *path, u64 ecn_ce_count)
 		 * Fallback: Treat ECN CE similar to loss.
 		 * Estimate 1200 bytes (MTU) per CE mark for CWND reduction.
 		 */
-		u64 ecn_bytes = ecn_ce_count * 1200;
+		u64 ecn_bytes;
+
+		/* CF-337: Guard against multiplication overflow */
+		if (check_mul_overflow(ecn_ce_count, (u64)1200, &ecn_bytes))
+			ecn_bytes = U64_MAX;
 		ca->on_loss(path->cong, ecn_bytes);
 
 		/* Update path stats from CC state */

@@ -106,18 +106,18 @@ static const struct rhashtable_params tquic_conn_params = {
 /* Default scheduler name */
 static char tquic_default_scheduler[TQUIC_MAX_SCHED_NAME] = "minrtt";
 module_param_string(scheduler, tquic_default_scheduler,
-		    sizeof(tquic_default_scheduler), 0644);
+		    sizeof(tquic_default_scheduler), 0600);
 MODULE_PARM_DESC(scheduler, "Default packet scheduler for WAN bonding");
 
 /* Default congestion control */
 static char tquic_default_cong[TQUIC_MAX_CONG_NAME] = "cubic";
 module_param_string(congestion, tquic_default_cong,
-		    sizeof(tquic_default_cong), 0644);
+		    sizeof(tquic_default_cong), 0600);
 MODULE_PARM_DESC(congestion, "Default congestion control algorithm");
 
 /* Default bonding mode */
 static int tquic_default_bond_mode = TQUIC_BOND_MODE_AGGREGATE;
-module_param_named(bond_mode, tquic_default_bond_mode, int, 0644);
+module_param_named(bond_mode, tquic_default_bond_mode, int, 0600);
 MODULE_PARM_DESC(bond_mode, "Default WAN bonding mode");
 
 /*

@@ -197,8 +197,8 @@ bool tquic_client_rate_limit_check(struct tquic_client *client)
 	} else {
 		/* Rate limit hit - log (ratelimited) */
 		if (__ratelimit(&tquic_rate_limit_log)) {
-			tquic_info("rate limit exceeded for client '%.*s'\n",
-				client->psk_identity_len, client->psk_identity);
+			tquic_info("rate limit exceeded for client (id_len=%d)\n",
+				client->psk_identity_len);
 		}
 	}
 
@@ -428,8 +428,8 @@ int tquic_server_bind_client(struct tquic_connection *conn,
 	/* Increment connection count */
 	atomic_inc(&client->connection_count);
 
-	tquic_dbg("bound connection to client '%.*s' (count=%d)\n",
-		 client->psk_identity_len, client->psk_identity,
+	tquic_dbg("bound connection to client (id_len=%d, count=%d)\n",
+		 client->psk_identity_len,
 		 atomic_read(&client->connection_count));
 
 	return 0;
@@ -456,8 +456,8 @@ void tquic_server_unbind_client(struct tquic_connection *conn)
 	/* Decrement connection count */
 	atomic_dec(&client->connection_count);
 
-	tquic_dbg("unbound connection from client '%.*s' (count=%d)\n",
-		 client->psk_identity_len, client->psk_identity,
+	tquic_dbg("unbound connection from client (id_len=%d, count=%d)\n",
+		 client->psk_identity_len,
 		 atomic_read(&client->connection_count));
 
 	conn->client = NULL;

@@ -2068,13 +2068,16 @@ EXPORT_SYMBOL_GPL(tquic_sysctl_get_nat_keepalive_adaptive);
 /* Number of actual sysctl entries (excluding null terminator) */
 #define TQUIC_SYSCTL_TABLE_ENTRIES (ARRAY_SIZE(tquic_sysctl_table) - 1)
 
-int __init tquic_sysctl_init(void)
+int __init tquic_sysctl_init(struct net *net)
 {
 	/*
 	 * Kernel 6.x requires register_net_sysctl_sz() with explicit size
 	 * to avoid validation errors on the null terminator entry.
+	 *
+	 * Register in the provided network namespace (not init_net only)
+	 * so that sysctl parameters are available in containers.
 	 */
-	tquic_sysctl_header = register_net_sysctl_sz(&init_net, "net/tquic",
+	tquic_sysctl_header = register_net_sysctl_sz(net, "net/tquic",
 						     tquic_sysctl_table,
 						     TQUIC_SYSCTL_TABLE_ENTRIES);
 	if (!tquic_sysctl_header)

@@ -39,13 +39,13 @@ static struct kmem_cache *wt_stream_cache;
 
 int webtransport_init(void)
 {
-	wt_session_cache = kmem_cache_create("webtransport_session",
+	wt_session_cache = kmem_cache_create("tquic_wt_session",
 					     sizeof(struct webtransport_session),
 					     0, SLAB_HWCACHE_ALIGN, NULL);
 	if (!wt_session_cache)
 		return -ENOMEM;
 
-	wt_stream_cache = kmem_cache_create("webtransport_stream",
+	wt_stream_cache = kmem_cache_create("tquic_wt_stream",
 					    sizeof(struct webtransport_stream),
 					    0, SLAB_HWCACHE_ALIGN, NULL);
 	if (!wt_stream_cache) {

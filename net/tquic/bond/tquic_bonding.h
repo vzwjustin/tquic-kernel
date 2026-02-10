@@ -27,12 +27,11 @@ struct tquic_reorder_buffer;  /* Defined in tquic_bonding.c, implemented in 05-0
 struct tquic_failover_ctx;    /* Defined in tquic_failover.h, implemented in 05-03 */
 
 /*
- * Maximum number of paths per bonded connection
- * Note: May be overridden by include/net/tquic.h if included first
+ * CF-295: Use canonical TQUIC_MAX_PATHS from include/net/tquic.h (16).
+ * The previous local definition of 8 could cause array size mismatches
+ * depending on header inclusion order.
  */
-#ifndef TQUIC_MAX_PATHS
-#define TQUIC_MAX_PATHS			8
-#endif
+#include <net/tquic.h>
 
 /*
  * Capacity weight constants
@@ -155,6 +154,9 @@ struct tquic_bonding_ctx {
 	/* Work for async weight updates */
 	struct work_struct weight_work;
 	unsigned long async_flags;	/* TQUIC_BOND_WEIGHT_UPDATE_PENDING etc. */
+
+	/* CF-269: Rate limit for weight recalculation in loss path */
+	unsigned long last_weight_update;
 
 	/* Back pointer to path manager */
 	struct tquic_path_manager *pm;

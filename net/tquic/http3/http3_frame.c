@@ -249,17 +249,23 @@ int h3_parse_settings_frame(struct h3_frame_parser *p, u64 frame_len,
 			    struct tquic_h3_frame_settings_entry *entries_buf,
 			    u32 max_entries)
 {
-	const u8 *end = p->buf + frame_len;
+	const u8 *end;
 	u32 count = 0;
 	int ret;
+
+	/* Validate frame_len fits in size_t before pointer arithmetic */
+	if (frame_len > (u64)SIZE_MAX)
+		return -EINVAL;
 
 	if (!h3_parser_remaining(p, frame_len))
 		return -EAGAIN;
 
+	end = p->buf + (size_t)frame_len;
+
 	frame->entries = entries_buf;
 	frame->count = 0;
 
-	while (p->buf < end && count < max_entries) {
+	while (p->buf < end) {
 		u64 id, value;
 
 		/* Parse setting identifier */
@@ -278,7 +284,11 @@ int h3_parse_settings_frame(struct h3_frame_parser *p, u64 frame_len,
 		if (tquic_h3_is_grease_id(id))
 			continue;
 
-		if (entries_buf) {
+		/*
+		 * CF-333: Don't write past entries_buf boundary,
+		 * but keep parsing to validate the rest of the frame.
+		 */
+		if (count < max_entries && entries_buf) {
 			entries_buf[count].id = id;
 			entries_buf[count].value = value;
 		}

@@ -229,6 +229,15 @@ int tquic_token_rotate_key(struct tquic_token_key *old_key,
 	new_key->generation = old_key ? old_key->generation + 1 : 1;
 	new_key->valid = true;
 
+	/*
+	 * CF-425: Zeroize the old key material to prevent it from
+	 * lingering in memory after rotation.
+	 */
+	if (old_key) {
+		memzero_explicit(old_key->key, TQUIC_TOKEN_KEY_LEN);
+		old_key->valid = false;
+	}
+
 	return 0;
 }
 EXPORT_SYMBOL_GPL(tquic_token_rotate_key);

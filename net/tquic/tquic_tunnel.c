@@ -101,6 +101,9 @@ static void tquic_port_free(struct tquic_client *client, __be16 port)
 	if (!client || port == 0)
 		return;
 
+	/* Guard against unsigned underflow if port < port_range_start */
+	if (ntohs(port) < ntohs(client->port_range_start))
+		return;
 	bit = ntohs(port) - ntohs(client->port_range_start);
 	if (bit >= TQUIC_PORTS_PER_CLIENT)
 		return;
@@ -164,7 +167,11 @@ static int tquic_tunnel_parse_header(const u8 *data, size_t len,
 		if (ipv4_is_loopback(addr4) ||
 		    ipv4_is_multicast(addr4) ||
 		    ipv4_is_lbcast(addr4) ||
-		    ipv4_is_zeronet(addr4)) {
+		    ipv4_is_zeronet(addr4) ||
+		    ipv4_is_private_10(addr4) ||
+		    ipv4_is_private_172(addr4) ||
+		    ipv4_is_private_192(addr4) ||
+		    ipv4_is_linklocal_169(addr4)) {
 			return -EACCES;
 		}
 
@@ -203,6 +210,18 @@ static int tquic_tunnel_parse_header(const u8 *data, size_t len,
 		    ipv6_addr_is_multicast(&addr6) ||
 		    ipv6_addr_type(&addr6) & IPV6_ADDR_LINKLOCAL) {
 			return -EACCES;
+		}
+
+		/* Block IPv4-mapped IPv6 addresses to private ranges */
+		if (ipv6_addr_v4mapped(&addr6)) {
+			__be32 v4 = addr6.s6_addr32[3];
+
+			if (ipv4_is_loopback(v4) ||
+			    ipv4_is_private_10(v4) ||
+			    ipv4_is_private_172(v4) ||
+			    ipv4_is_private_192(v4) ||
+			    ipv4_is_linklocal_169(v4))
+				return -EACCES;
 		}
 
 		sin6->sin6_addr = addr6;
@@ -365,27 +384,22 @@ static int tquic_tunnel_create_tcp_socket(struct tquic_tunnel *tunnel,
 	 */
 	/* Note: Would set SO_BINDTODEVICE here if device name known */
 
-	/* Enable TPROXY mode if requested */
+	/* Enable TPROXY mode if requested - require CAP_NET_ADMIN first */
 	if (is_tproxy) {
+		if (!capable(CAP_NET_ADMIN)) {
+			tquic_err("TPROXY requires CAP_NET_ADMIN\n");
+			sock_release(sock);
+			return -EPERM;
+		}
 		val = 1;
 		err = tquic_kernel_setsockopt(sock, SOL_IP, IP_TRANSPARENT,
 					     &val, sizeof(val));
 		if (err < 0) {
-			/*
-			 * IP_TRANSPARENT requires CAP_NET_ADMIN. If it fails,
-			 * we must NOT set is_tproxy=true as that would cause
-			 * packet processing to use TPROXY logic incorrectly.
-			 */
-			if (capable(CAP_NET_ADMIN)) {
-				tquic_err("IP_TRANSPARENT failed despite CAP_NET_ADMIN: %d\n", err);
-				sock_release(sock);
-				return err;
-			}
-			tquic_info("IP_TRANSPARENT requires CAP_NET_ADMIN, using normal mode\n");
-			tunnel->is_tproxy = false;
-		} else {
-			tunnel->is_tproxy = true;
+			tquic_err("IP_TRANSPARENT failed: %d\n", err);
+			sock_release(sock);
+			return err;
 		}
+		tunnel->is_tproxy = true;
 	}
 
 	/* Set up bind address with allocated port */
@@ -646,6 +660,15 @@ void tquic_tunnel_close(struct tquic_tunnel *tunnel)
 		list_del_init(&tunnel->list);
 		spin_unlock_bh(&tunnel->client->tunnels_lock);
 	}
+
+	/*
+	 * CF-491/CF-254: Cancel both connect_work and forward_work before
+	 * shutting down the TCP socket and releasing the tunnel reference.
+	 * Without this, a pending work item could fire after the tunnel
+	 * is freed.
+	 */
+	cancel_work_sync(&tunnel->connect_work);
+	cancel_work_sync(&tunnel->forward_work);
 
 	/* Shutdown TCP socket */
 	if (tunnel->tcp_sock) {

@@ -584,8 +584,11 @@ static void traffic_shaper_decoy_work(struct work_struct *work)
 	 * We randomize the size to avoid creating a recognizable pattern.
 	 */
 	get_random_bytes(&rand_val, sizeof(rand_val));
-	/* Random size between 64 and MTU bytes */
-	decoy_size = 64 + (rand_val % (shaper->mtu - 64 + 1));
+	/* Random size between 64 and MTU bytes, guard against underflow */
+	if (shaper->mtu <= 64)
+		decoy_size = shaper->mtu ? shaper->mtu : 64;
+	else
+		decoy_size = 64 + (rand_val % (shaper->mtu - 64 + 1));
 
 	/* Allocate sk_buff for decoy packet - use GFP_KERNEL since workqueue
 	 * runs in process context that can sleep */
@@ -595,8 +598,12 @@ static void traffic_shaper_decoy_work(struct work_struct *work)
 
 	skb_reserve(skb, NET_SKB_PAD + NET_IP_ALIGN);
 
-	/* Fill with PADDING frame (0x00 bytes) */
-	memset(skb_put(skb, decoy_size), 0x00, decoy_size);
+	/*
+	 * CF-368: Fill decoy packets with random data instead of all-zero
+	 * PADDING frames.  All-zero payloads are trivially fingerprinted
+	 * by a passive observer, defeating the purpose of decoy traffic.
+	 */
+	get_random_bytes(skb_put(skb, decoy_size), decoy_size);
 
 	/* Mark as decoy packet in cb for debugging/tracing */
 	skb->cb[0] = 'D';  /* Decoy marker */
@@ -1514,6 +1521,12 @@ void tquic_exfil_ctx_set_level(struct tquic_exfil_ctx *ctx,
 	if (!ctx)
 		return;
 
+	/*
+	 * CF-371: Hold ctx->lock across the destroy/reinit sequence to
+	 * prevent concurrent readers from seeing a half-torn-down state.
+	 */
+	spin_lock_bh(&ctx->lock);
+
 	ctx->level = level;
 	ctx->enabled = (level != TQUIC_EXFIL_LEVEL_NONE);
 
@@ -1523,13 +1536,21 @@ void tquic_exfil_ctx_set_level(struct tquic_exfil_ctx *ctx,
 
 	/* Reinitialize shaper and spin with new level */
 	tquic_traffic_shaper_destroy(&ctx->shaper);
-	tquic_traffic_shaper_init(&ctx->shaper, level);
+	if (tquic_traffic_shaper_init(&ctx->shaper, level))
+		pr_warn("tquic_exfil: shaper reinit failed for level %d\n",
+			level);
 
 	tquic_spin_randomizer_destroy(&ctx->spin_rand);
-	tquic_spin_randomizer_init(&ctx->spin_rand, level);
+	if (tquic_spin_randomizer_init(&ctx->spin_rand, level))
+		pr_warn("tquic_exfil: spin_rand reinit failed for level %d\n",
+			level);
 
 	tquic_packet_jitter_destroy(&ctx->jitter);
-	tquic_packet_jitter_init(&ctx->jitter, level);
+	if (tquic_packet_jitter_init(&ctx->jitter, level))
+		pr_warn("tquic_exfil: jitter reinit failed for level %d\n",
+			level);
+
+	spin_unlock_bh(&ctx->lock);
 }
 
 /**
@@ -1827,7 +1848,3 @@ EXPORT_SYMBOL_GPL(tquic_exfil_exit);
 
 /* Event reporting */
 EXPORT_SYMBOL_GPL(tquic_exfil_event);
-
-MODULE_DESCRIPTION("TQUIC QUIC-Exfil Mitigation (draft-iab-quic-exfil)");
-MODULE_LICENSE("GPL");
-MODULE_AUTHOR("Linux Foundation");

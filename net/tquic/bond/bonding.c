@@ -16,6 +16,7 @@
 #include <linux/workqueue.h>
 #include <linux/timer.h>
 #include <linux/random.h>
+#include <asm/unaligned.h>
 #include <net/sock.h>
 #include <net/tquic.h>
 
@@ -81,14 +82,32 @@ static void tquic_calc_path_quality(struct tquic_path *path,
 	quality->available_cwnd = READ_ONCE(stats->cwnd);
 	/*
 	 * Track in-flight bytes from path statistics.
-	 * This is updated by the congestion control module.
-	 * Use signed arithmetic to detect underflow.
+	 * Use unsigned arithmetic with underflow guard to avoid
+	 * s64 overflow when u64 counters exceed S64_MAX.
 	 */
-	quality->inflight = (s64)READ_ONCE(stats->tx_bytes) -
-			    ((s64)READ_ONCE(stats->rx_bytes) +
-			     (s64)READ_ONCE(stats->lost_packets) * 1200);
-	if (quality->inflight < 0)
-		quality->inflight = 0;
+	{
+		u64 tx = READ_ONCE(stats->tx_bytes);
+		u64 rx = READ_ONCE(stats->rx_bytes);
+		u64 lost_pkts = READ_ONCE(stats->lost_packets);
+		u64 lost_est;
+		u64 acked;
+
+		/* Guard multiplication overflow */
+		if (lost_pkts > U64_MAX / 1200)
+			lost_est = U64_MAX;
+		else
+			lost_est = lost_pkts * 1200;
+
+		/* Saturating addition for rx + lost_est */
+		if (check_add_overflow(rx, lost_est, &acked))
+			acked = U64_MAX;
+
+		if (tx > acked)
+			quality->inflight = (s64)min(tx - acked,
+						     (u64)S64_MAX);
+		else
+			quality->inflight = 0;
+	}
 	quality->est_delivery = READ_ONCE(stats->rtt_smoothed);
 	quality->can_send = (quality->available_cwnd > (u64)quality->inflight);
 }
@@ -172,10 +191,14 @@ static struct tquic_path *tquic_select_weighted(struct tquic_bond_state *bond,
 	u32 total_weight = 0;
 	u32 target, cumulative = 0;
 
-	/* Calculate total weight of active paths */
+	/*
+	 * CF-307: Calculate total weight of active paths with overflow
+	 * guard. Clamp individual weights to prevent corrupt values from
+	 * causing wraparound.
+	 */
 	list_for_each_entry(path, &conn->paths, list) {
 		if (READ_ONCE(path->state) == TQUIC_PATH_ACTIVE)
-			total_weight += path->weight;
+			total_weight += min_t(u32, path->weight, 1000);
 	}
 
 	if (total_weight == 0)
@@ -617,6 +640,10 @@ int tquic_bond_reorder_insert(struct tquic_bond_state *bond,
 {
 	struct sk_buff *pos;
 
+	/* Store sequence number in skb cb using put_unaligned for safety */
+	BUILD_BUG_ON(sizeof(u64) > sizeof(skb->cb));
+	put_unaligned(seq, (u64 *)skb->cb);
+
 	spin_lock(&bond->reorder_lock);
 
 	/* Check if within reorder window */
@@ -635,7 +662,7 @@ int tquic_bond_reorder_insert(struct tquic_bond_state *bond,
 
 	/* Insert in sequence order */
 	skb_queue_walk(&bond->reorder_queue, pos) {
-		u64 pos_seq = *(u64 *)pos->cb;  /* Stored in skb control block */
+		u64 pos_seq = get_unaligned((u64 *)pos->cb);
 		if (seq < pos_seq) {
 			__skb_queue_before(&bond->reorder_queue, pos, skb);
 			spin_unlock(&bond->reorder_lock);
@@ -662,7 +689,7 @@ int tquic_bond_reorder_deliver(struct tquic_bond_state *bond)
 	spin_lock(&bond->reorder_lock);
 
 	while ((skb = skb_peek(&bond->reorder_queue)) != NULL) {
-		u64 seq = *(u64 *)skb->cb;
+		u64 seq = get_unaligned((u64 *)skb->cb);
 
 		if (seq != bond->reorder_next_seq)
 			break;

@@ -445,6 +445,7 @@ int tquic_initiate_key_update(struct tquic_connection *conn)
 	state->last_key_update = ktime_get();
 	state->packets_sent = 0;
 	state->total_key_updates++;
+	state->pending_generation = state->total_key_updates;
 
 	/* Update HP context */
 	tquic_hp_set_key_phase(hp_ctx, state->current_phase);
@@ -1112,6 +1113,44 @@ int tquic_key_update_get_current_keys(struct tquic_key_update_state *state,
 EXPORT_SYMBOL_GPL(tquic_key_update_get_current_keys);
 
 /**
+ * tquic_key_update_get_current_secret - Get current traffic secret
+ * @state: Key update state
+ * @direction: 0 = read, 1 = write
+ * @secret: Output buffer for traffic secret
+ * @secret_len: Output secret length
+ *
+ * Returns 0 on success, negative error code on failure.
+ */
+int tquic_key_update_get_current_secret(struct tquic_key_update_state *state,
+					int direction,
+					u8 *secret, u32 *secret_len)
+{
+	struct tquic_key_generation *gen;
+	unsigned long flags;
+
+	if (!state)
+		return -EINVAL;
+
+	spin_lock_irqsave(&state->lock, flags);
+
+	gen = direction ? &state->current_write : &state->current_read;
+
+	if (!gen->valid) {
+		spin_unlock_irqrestore(&state->lock, flags);
+		return -ENOKEY;
+	}
+
+	if (secret && secret_len) {
+		memcpy(secret, gen->secret, gen->secret_len);
+		*secret_len = gen->secret_len;
+	}
+
+	spin_unlock_irqrestore(&state->lock, flags);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(tquic_key_update_get_current_secret);
+
+/**
  * tquic_key_update_get_phase - Get current key phase
  * @state: Key update state
  *
@@ -1468,6 +1507,16 @@ void tquic_key_update_timeout(struct tquic_connection *conn)
 		/*
 		 * Confirmed before the timer fired -- nothing to do.
 		 */
+		spin_unlock_irqrestore(&state->lock, flags);
+		return;
+	}
+
+	/*
+	 * Verify we are reverting the same key update that armed
+	 * this timer, not a subsequent one (race with concurrent
+	 * initiation that confirmed and re-initiated).
+	 */
+	if (state->pending_generation != state->total_key_updates) {
 		spin_unlock_irqrestore(&state->lock, flags);
 		return;
 	}

@@ -490,13 +490,14 @@ static struct h3_push_entry *h3_push_entry_create(struct tquic_http3_conn *h3con
 	if (entry)
 		return NULL;  /* Already exists */
 
-	/* Count existing entries */
+	/* Check limit with early-out to avoid full O(n) traversal */
 	{
 		int count = 0;
-		list_for_each_entry(entry, head, node)
-			count++;
-		if (count >= H3_PUSH_MAX_TRACKED)
-			return NULL;  /* Too many pushes */
+
+		list_for_each_entry(entry, head, node) {
+			if (++count >= H3_PUSH_MAX_TRACKED)
+				return NULL;  /* Too many pushes */
+		}
 	}
 
 	entry = kzalloc(sizeof(*entry), GFP_ATOMIC);

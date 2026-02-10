@@ -224,25 +224,73 @@ static inline u32 ring_buffer_count(struct tquic_qlog *qlog)
 static struct tquic_qlog_event_entry *ring_buffer_alloc_entry(
 						struct tquic_qlog *qlog)
 {
-	u32 head, next_head;
+	u32 head, next_head, tail;
 	struct tquic_qlog_event_entry *entry;
 
-	head = atomic_read(&qlog->head);
-	next_head = (head + 1) & qlog->ring_mask;
+	/*
+	 * Use cmpxchg loop for proper lock-free multi-producer safety.
+	 * smp_load_acquire / atomic_cmpxchg ensure visibility across CPUs.
+	 */
+	do {
+		head = smp_load_acquire(&qlog->head.counter);
+		next_head = (head + 1) & qlog->ring_mask;
+		tail = smp_load_acquire(&qlog->tail.counter);
 
-	/* Check if buffer is full */
-	if (next_head == atomic_read(&qlog->tail)) {
-		/* Lossy mode: advance tail to overwrite oldest */
-		qlog->stats.ring_overflows++;
-		qlog->stats.events_dropped++;
-		atomic_set(&qlog->tail,
-			   (atomic_read(&qlog->tail) + 1) & qlog->ring_mask);
-	}
+		/* Check if buffer is full */
+		if (next_head == tail) {
+			u32 new_tail;
+
+			/* Lossy mode: advance tail to overwrite oldest */
+			qlog->stats.ring_overflows++;
+			qlog->stats.events_dropped++;
+			new_tail = (tail + 1) & qlog->ring_mask;
+			atomic_cmpxchg(&qlog->tail, tail, new_tail);
+		}
+	} while (atomic_cmpxchg(&qlog->head, head, next_head) != head);
 
 	entry = &qlog->ring[head];
-	atomic_set(&qlog->head, next_head);
 
 	return entry;
+}
+
+/**
+ * qlog_json_escape - Write a JSON-escaped string to a buffer
+ * @dst: Destination buffer
+ * @dst_len: Destination buffer size
+ * @src: Source string (NUL-terminated)
+ *
+ * Escapes \, ", and control characters (< 0x20) for JSON output.
+ * Return: Number of bytes written (excluding NUL), or -ENOSPC.
+ */
+static int qlog_json_escape(char *dst, size_t dst_len, const char *src)
+{
+	size_t i = 0;
+	const char *s;
+
+	if (!src || !dst || dst_len == 0)
+		return 0;
+
+	for (s = src; *s != '\0'; s++) {
+		unsigned char c = (unsigned char)*s;
+
+		if (c == '"' || c == '\\') {
+			if (i + 2 >= dst_len)
+				return -ENOSPC;
+			dst[i++] = '\\';
+			dst[i++] = c;
+		} else if (c < 0x20) {
+			/* Encode control chars as \uXXXX */
+			if (i + 6 >= dst_len)
+				return -ENOSPC;
+			i += snprintf(dst + i, dst_len - i, "\\u%04x", c);
+		} else {
+			if (i + 1 >= dst_len)
+				return -ENOSPC;
+			dst[i++] = c;
+		}
+	}
+	dst[i] = '\0';
+	return i;
 }
 
 /*
@@ -898,6 +946,7 @@ int tquic_qlog_emit_json(struct tquic_qlog *qlog,
 			 char *buf, size_t buflen)
 {
 	const char *event_name;
+	char escaped_name[64];
 	int len = 0;
 	u64 time_ms;
 
@@ -906,6 +955,11 @@ int tquic_qlog_emit_json(struct tquic_qlog *qlog,
 
 	event_name = get_event_name(entry->event_type);
 
+	/* JSON-escape the event name to prevent malformed output */
+	if (qlog_json_escape(escaped_name, sizeof(escaped_name),
+			     event_name) < 0)
+		return -ENOSPC;
+
 	/* Convert timestamp to milliseconds with 3 decimal places */
 	time_ms = entry->timestamp_ns / 1000000;
 
@@ -913,10 +967,18 @@ int tquic_qlog_emit_json(struct tquic_qlog *qlog,
 	len = snprintf(buf, buflen,
 		       "\x1e{\"time\":%llu.%03llu,\"name\":\"%s\",\"data\":{",
 		       time_ms, (entry->timestamp_ns / 1000) % 1000,
-		       event_name);
+		       escaped_name);
 
 	if (len >= buflen)
 		return -ENOSPC;
+
+	/*
+	 * CF-419: All subsequent snprintf calls use buflen - len.
+	 * Clamp len to buflen to prevent size_t underflow in
+	 * the (buflen - len) argument when snprintf returns a
+	 * value indicating truncation.
+	 */
+#define QLOG_CLAMP_LEN() do { if (len >= buflen) len = buflen - 1; } while (0)
 
 	/* Event-specific data per draft-12 */
 	switch (entry->event_type) {
@@ -933,6 +995,7 @@ int tquic_qlog_emit_json(struct tquic_qlog *qlog,
 				pkt_type, pkt->header.packet_number,
 				pkt->header.packet_size,
 				pkt->is_coalesced ? "true" : "false");
+		QLOG_CLAMP_LEN();
 
 		if (entry->event_type == QLOG_TRANSPORT_PACKET_SENT) {
 			len += snprintf(buf + len, buflen - len,
@@ -1237,7 +1300,11 @@ ssize_t tquic_qlog_read_events(struct tquic_qlog *qlog,
 	while (tail != head && total < count) {
 		struct tquic_qlog_event_entry *entry = &qlog->ring[tail];
 
-		/* Format as JSON */
+		/*
+		 * Format the entry as JSON under the lock, then advance
+		 * the tail pointer.  This ensures the entry is read
+		 * consistently before it could be overwritten by writers.
+		 */
 		json_len = tquic_qlog_emit_json(qlog, entry,
 						json_buf, 1024);
 		if (json_len <= 0)
@@ -1245,6 +1312,10 @@ ssize_t tquic_qlog_read_events(struct tquic_qlog *qlog,
 
 		if (total + json_len > count)
 			break;
+
+		/* Advance tail while still holding the lock */
+		tail = (tail + 1) & qlog->ring_mask;
+		atomic_set(&qlog->tail, tail);
 
 		spin_unlock_irqrestore(&qlog->lock, flags);
 
@@ -1256,8 +1327,6 @@ ssize_t tquic_qlog_read_events(struct tquic_qlog *qlog,
 		total += json_len;
 
 		spin_lock_irqsave(&qlog->lock, flags);
-		tail = (tail + 1) & qlog->ring_mask;
-		atomic_set(&qlog->tail, tail);
 		head = atomic_read(&qlog->head);
 	}
 

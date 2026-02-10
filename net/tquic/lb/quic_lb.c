@@ -41,6 +41,10 @@ struct tquic_lb_config *tquic_lb_config_create(u8 config_rotation,
 {
 	struct tquic_lb_config *cfg;
 
+	/* All LB configuration requires administrative privilege */
+	if (!capable(CAP_NET_ADMIN))
+		return NULL;
+
 	/* Validate parameters */
 	if (config_rotation > TQUIC_LB_CONFIG_ROTATION_MAX)
 		return NULL;
@@ -297,12 +301,16 @@ int tquic_lb_encrypt_four_pass(struct tquic_lb_config *cfg,
 		/* Prepare round input: right half padded to 16 bytes */
 		memset(tmp, 0, sizeof(tmp));
 		memcpy(tmp, right, half_len);
-		tmp[15] = round;  /* Include round number */
+		/*
+		 * CF-385: XOR the round number instead of overwriting
+		 * to avoid clobbering data when half_len >= 16.
+		 */
+		tmp[15] ^= round;
 
 		/* Apply AES-ECB round function */
 		ret = tquic_lb_aes_encrypt_block(cfg->aes_tfm, tmp, round_out);
 		if (ret)
-			return ret;
+			goto out_zeroize;
 
 		/* XOR with left half */
 		for (i = 0; i < half_len; i++)
@@ -320,7 +328,14 @@ int tquic_lb_encrypt_four_pass(struct tquic_lb_config *cfg,
 	memcpy(ciphertext, left, half_len);
 	memcpy(ciphertext + half_len, right, len - half_len);
 
-	return 0;
+	ret = 0;
+
+out_zeroize:
+	memzero_explicit(left, sizeof(left));
+	memzero_explicit(right, sizeof(right));
+	memzero_explicit(tmp, sizeof(tmp));
+	memzero_explicit(round_out, sizeof(round_out));
+	return ret;
 }
 EXPORT_SYMBOL_GPL(tquic_lb_encrypt_four_pass);
 
@@ -366,12 +381,13 @@ int tquic_lb_decrypt_four_pass(struct tquic_lb_config *cfg,
 		/* Prepare round input */
 		memset(tmp, 0, sizeof(tmp));
 		memcpy(tmp, right, half_len);
-		tmp[15] = round;
+		/* CF-385: XOR round number to avoid data overlap */
+		tmp[15] ^= round;
 
 		/* Apply AES-ECB round function */
 		ret = tquic_lb_aes_encrypt_block(cfg->aes_tfm, tmp, round_out);
 		if (ret)
-			return ret;
+			goto out_zeroize_dec;
 
 		/* XOR with left half */
 		for (i = 0; i < half_len; i++)
@@ -381,6 +397,13 @@ int tquic_lb_decrypt_four_pass(struct tquic_lb_config *cfg,
 	/* Combine halves into output */
 	memcpy(plaintext, left, half_len);
 	memcpy(plaintext + half_len, right, len - half_len);
+	ret = 0;
+
+out_zeroize_dec:
+	memzero_explicit(left, sizeof(left));
+	memzero_explicit(right, sizeof(right));
+	memzero_explicit(tmp, sizeof(tmp));
+	memzero_explicit(round_out, sizeof(round_out));
 
 	return 0;
 }

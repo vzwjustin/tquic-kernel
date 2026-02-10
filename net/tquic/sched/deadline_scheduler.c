@@ -587,11 +587,9 @@ int tquic_edf_enqueue(struct tquic_edf_scheduler *sched, struct sk_buff *skb,
 	INIT_LIST_HEAD(&entry->list_node);
 	RB_CLEAR_NODE(&entry->node);
 
-	/* Pre-select path */
-	entry->selected_path = edf_select_path(sched, entry);
-
-	/* Insert into EDF tree */
+	/* Insert into EDF tree and select path under lock */
 	spin_lock_bh(&sched->lock);
+	entry->selected_path = edf_select_path(sched, entry);
 	edf_tree_insert(&sched->edf_tree, entry);
 	sched->entry_count++;
 	spin_unlock_bh(&sched->lock);

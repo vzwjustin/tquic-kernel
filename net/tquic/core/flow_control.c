@@ -603,12 +603,17 @@ bool tquic_fc_stream_can_send(struct tquic_fc_stream_state *stream, u64 bytes)
 {
 	bool can_send;
 	unsigned long flags;
+	u64 sum;
 
 	if (unlikely(!stream))
 		return false;
 
 	spin_lock_irqsave(&stream->lock, flags);
-	can_send = (stream->data_sent + bytes) <= stream->max_data_remote;
+	/* Guard against u64 overflow in addition */
+	if (unlikely(check_add_overflow(stream->data_sent, bytes, &sum)))
+		can_send = false;
+	else
+		can_send = sum <= stream->max_data_remote;
 	spin_unlock_irqrestore(&stream->lock, flags);
 
 	return can_send;
@@ -1498,7 +1503,23 @@ int tquic_fc_reserve_credit(struct tquic_fc_state *fc,
 	if (bytes > credit.effective_credit)
 		return -ENOSPC;
 
-	/* Credit will be committed when transmission succeeds */
+	/*
+	 * CF-428: Actually track reserved credit on the stream to prevent
+	 * concurrent callers from reserving the same credit.
+	 */
+	{
+		unsigned long flags;
+
+		spin_lock_irqsave(&stream->lock, flags);
+		if (stream->data_sent + stream->data_reserved + bytes >
+		    stream->max_data_remote) {
+			spin_unlock_irqrestore(&stream->lock, flags);
+			return -ENOSPC;
+		}
+		stream->data_reserved += bytes;
+		spin_unlock_irqrestore(&stream->lock, flags);
+	}
+
 	return 0;
 }
 EXPORT_SYMBOL_GPL(tquic_fc_reserve_credit);

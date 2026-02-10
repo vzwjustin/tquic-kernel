@@ -85,21 +85,37 @@ tquic_conn_get_session_state(struct tquic_connection *conn);
 bool tquic_path_anti_amplification_check(struct tquic_path *path, u64 bytes)
 {
 	u64 limit;
-	u64 sent, received;
+	u64 sent, received, new_sent;
 
 	if (!path->anti_amplification.active)
 		return true;
 
-	received = atomic64_read(&path->anti_amplification.bytes_received);
-	sent = atomic64_read(&path->anti_amplification.bytes_sent);
-	limit = received * TQUIC_ANTI_AMPLIFICATION_LIMIT;
+	/*
+	 * Use atomic cmpxchg loop to make check-and-update atomic,
+	 * preventing TOCTOU race (CF-439, CF-461).
+	 */
+	do {
+		received = atomic64_read(&path->anti_amplification.bytes_received);
+		sent = atomic64_read(&path->anti_amplification.bytes_sent);
 
-	if (sent + bytes > limit) {
-		pr_debug("tquic: anti-amplification blocked on path %u "
-			 "(sent=%llu, recv=%llu, limit=%llu)\n",
-			 path->path_id, sent, received, limit);
-		return false;
-	}
+		/*
+		 * CF-170: Use check_mul_overflow to prevent integer
+		 * overflow when computing the amplification limit.
+		 */
+		if (check_mul_overflow(received,
+				       (u64)TQUIC_ANTI_AMPLIFICATION_LIMIT,
+				       &limit))
+			limit = U64_MAX;
+
+		if (check_add_overflow(sent, bytes, &new_sent) ||
+		    new_sent > limit) {
+			pr_debug("tquic: anti-amplification blocked on path %u "
+				 "(sent=%llu, recv=%llu, limit=%llu)\n",
+				 path->path_id, sent, received, limit);
+			return false;
+		}
+	} while (atomic64_cmpxchg(&path->anti_amplification.bytes_sent,
+				   sent, new_sent) != sent);
 
 	return true;
 }
@@ -112,6 +128,11 @@ EXPORT_SYMBOL_GPL(tquic_path_anti_amplification_check);
  */
 void tquic_path_anti_amplification_sent(struct tquic_path *path, u64 bytes)
 {
+	/*
+	 * Note: When tquic_path_anti_amplification_check() was called first,
+	 * bytes were already added atomically in the check. Only call this
+	 * for bytes sent without a prior check (e.g., mandatory frames).
+	 */
 	if (path->anti_amplification.active)
 		atomic64_add(bytes, &path->anti_amplification.bytes_sent);
 }
@@ -268,9 +289,9 @@ static bool tquic_path_is_degraded(struct tquic_path *path)
 			return true;
 	}
 
-	/* Check packet loss */
+	/* Check packet loss -- use div64_u64 to avoid overflow */
 	if (stats->tx_packets > 100) {
-		loss_rate = (stats->lost_packets * 100) / stats->tx_packets;
+		loss_rate = div64_u64(stats->lost_packets * 100, stats->tx_packets);
 		if (loss_rate > TQUIC_PATH_DEGRADED_LOSS_PCT)
 			return true;
 	}
@@ -295,25 +316,34 @@ static u64 tquic_path_compute_score(struct tquic_path *path)
 	    path->state != TQUIC_PATH_STANDBY)
 		return 0;
 
-	/* Factor in RTT (lower is better) */
+	/* Factor in RTT (lower is better) -- use div64_u64 for safety */
 	if (stats->rtt_smoothed > 0)
-		score = score * 1000 / stats->rtt_smoothed;
+		score = div64_u64(score * 1000, stats->rtt_smoothed);
 
-	/* Factor in bandwidth (higher is better) */
-	if (stats->bandwidth > 0)
-		score = (score * stats->bandwidth) >> 20;
+	/* Factor in bandwidth (higher is better) - divide first to prevent overflow */
+	if (stats->bandwidth > 0) {
+		u64 bw = stats->bandwidth;
+
+		if (score > 0 && bw > div64_u64(U64_MAX, score) >> 20)
+			score = U64_MAX >> 20;
+		score = (score * bw) >> 20;
+	}
 
 	/* Penalize for loss */
 	if (stats->tx_packets > 0 && stats->lost_packets > 0) {
-		u64 loss_pct = (stats->lost_packets * 100) / stats->tx_packets;
-		score = score * (100 - min(loss_pct, 90ULL)) / 100;
+		u64 loss_pct = div64_u64(stats->lost_packets * 100,
+					 stats->tx_packets);
+		score = div64_u64(score * (100 - min(loss_pct, 90ULL)), 100);
 	}
 
 	/* Apply priority (lower priority value = preferred) */
-	score = score * (256 - path->priority) / 256;
+	score = div64_u64(score * (256 - path->priority), 256);
 
-	/* Apply weight */
-	score = score * path->weight;
+	/* Apply weight - cap to prevent overflow */
+	if (path->weight > 0 && score > div64_u64(U64_MAX, path->weight))
+		score = U64_MAX;
+	else
+		score = score * path->weight;
 
 	return score;
 }
@@ -391,7 +421,6 @@ struct tquic_path *tquic_path_create(struct tquic_connection *conn,
 				     const struct sockaddr_storage *remote)
 {
 	struct tquic_path *path;
-	static atomic_t path_id_gen = ATOMIC_INIT(0);
 
 	if (!conn || !local || !remote)
 		return NULL;
@@ -404,11 +433,22 @@ struct tquic_path *tquic_path_create(struct tquic_connection *conn,
 	if (!path)
 		return NULL;
 
-	/* Initialize path */
+	/* Initialize path -- use per-connection counter, not global static */
+	refcount_set(&path->refcnt, 1);
 	path->conn = conn;
-	path->path_id = atomic_inc_return(&path_id_gen);
+	path->path_id = conn->num_paths;
 	path->state = TQUIC_PATH_PENDING;
 	path->saved_state = TQUIC_PATH_UNUSED;
+
+	/* Validate address families before copying */
+	if (local->ss_family != AF_INET && local->ss_family != AF_INET6) {
+		kfree(path);
+		return NULL;
+	}
+	if (remote->ss_family != AF_INET && remote->ss_family != AF_INET6) {
+		kfree(path);
+		return NULL;
+	}
 
 	/* Copy addresses */
 	memcpy(&path->local_addr, local,
@@ -692,8 +732,14 @@ static void tquic_migration_work_handler(struct work_struct *work)
 	}
 
 	ms->status = TQUIC_MIGRATE_NONE;
-	ms->old_path = NULL;
-	ms->new_path = NULL;
+	if (ms->old_path) {
+		tquic_path_put(ms->old_path);
+		ms->old_path = NULL;
+	}
+	if (ms->new_path) {
+		tquic_path_put(ms->new_path);
+		ms->new_path = NULL;
+	}
 
 	spin_unlock_bh(&ms->lock);
 
@@ -826,9 +872,16 @@ int tquic_migrate_auto(struct tquic_connection *conn,
 
 	tquic_dbg("auto-migration triggered by path degradation\n");
 
-	/* Find best alternative path */
-	rcu_read_lock();
-	list_for_each_entry_rcu(iter, &conn->paths, list) {
+	/*
+	 * Find best alternative path.
+	 *
+	 * Use paths_lock instead of RCU to keep best_path valid after
+	 * the search.  Under plain rcu_read_lock() the path could be
+	 * freed after rcu_read_unlock(), leading to use-after-free when
+	 * we store it in migration state and call validation helpers.
+	 */
+	spin_lock_bh(&conn->paths_lock);
+	list_for_each_entry(iter, &conn->paths, list) {
 		u64 score;
 
 		/* Skip current degraded path */
@@ -847,7 +900,7 @@ int tquic_migrate_auto(struct tquic_connection *conn,
 			best_path = iter;
 		}
 	}
-	rcu_read_unlock();
+	spin_unlock_bh(&conn->paths_lock);
 
 	if (!best_path) {
 		tquic_dbg("no alternative path for migration\n");
@@ -876,7 +929,10 @@ int tquic_migrate_auto(struct tquic_connection *conn,
 	spin_lock_bh(&ms->lock);
 
 	ms->status = TQUIC_MIGRATE_PROBING;
+	if (conn->active_path)
+		tquic_path_get(conn->active_path);
 	ms->old_path = conn->active_path;
+	tquic_path_get(best_path);
 	ms->new_path = best_path;
 	ms->retries = 0;
 	ms->flags = 0;
@@ -896,7 +952,10 @@ int tquic_migrate_auto(struct tquic_connection *conn,
 	if (ret < 0) {
 		spin_lock_bh(&ms->lock);
 		ms->status = TQUIC_MIGRATE_NONE;
+		tquic_path_put(ms->new_path);
 		ms->new_path = NULL;
+		tquic_path_put(ms->old_path);
+		ms->old_path = NULL;
 		spin_unlock_bh(&ms->lock);
 		return ret;
 	}
@@ -1011,14 +1070,17 @@ int tquic_migrate_explicit(struct tquic_connection *conn,
 			conn->state_machine = ms;
 		}
 
-		spin_lock(&ms->lock);
+		spin_lock_bh(&ms->lock);
 		ms->status = TQUIC_MIGRATE_PROBING;
+		if (conn->active_path)
+			tquic_path_get(conn->active_path);
 		ms->old_path = conn->active_path;
+		tquic_path_get(new_path);
 		ms->new_path = new_path;
 		ms->retries = 0;
 		ms->flags = flags;
 		ms->error_code = 0;
-		spin_unlock(&ms->lock);
+		spin_unlock_bh(&ms->lock);
 
 		spin_unlock_bh(&conn->paths_lock);
 	} else {
@@ -1058,7 +1120,10 @@ int tquic_migrate_explicit(struct tquic_connection *conn,
 		/* Set up migration state */
 		spin_lock_bh(&ms->lock);
 		ms->status = TQUIC_MIGRATE_PROBING;
+		if (conn->active_path)
+			tquic_path_get(conn->active_path);
 		ms->old_path = conn->active_path;
+		tquic_path_get(new_path);
 		ms->new_path = new_path;
 		ms->retries = 0;
 		ms->flags = flags;
@@ -1306,7 +1371,7 @@ int tquic_server_handle_migration(struct tquic_connection *conn,
 		return -EINVAL;
 
 	/* Only server-side connections should call this */
-	if (conn->role != TQUIC_ROLE_SERVER) {
+	if (READ_ONCE(conn->role) != TQUIC_ROLE_SERVER) {
 		tquic_dbg("migration handler called on client connection\n");
 		return -EINVAL;
 	}
@@ -1582,11 +1647,15 @@ EXPORT_SYMBOL_GPL(tquic_server_queue_packet);
 void tquic_server_check_path_recovery(struct tquic_connection *conn)
 {
 	struct tquic_path *path;
+	int restarts = 0;
 
 	if (!conn)
 		return;
 
 restart:
+	/* CF-526: Bound restart iterations to prevent infinite loop */
+	if (++restarts > conn->max_paths)
+		return;
 	spin_lock_bh(&conn->paths_lock);
 	list_for_each_entry(path, &conn->paths, list) {
 		if (path->state == TQUIC_PATH_UNAVAILABLE) {
@@ -1900,10 +1969,13 @@ int tquic_migrate_to_additional_address(struct tquic_connection *conn,
 		conn->state_machine = ms;
 	}
 
-	/* Set up migration state */
+	/* Set up migration state with proper path references */
 	spin_lock_bh(&ms->lock);
 	ms->status = TQUIC_MIGRATE_PROBING;
+	if (conn->active_path)
+		tquic_path_get(conn->active_path);
 	ms->old_path = conn->active_path;
+	tquic_path_get(new_path);
 	ms->new_path = new_path;
 	ms->retries = 0;
 	ms->flags = 0;
@@ -1916,7 +1988,12 @@ int tquic_migrate_to_additional_address(struct tquic_connection *conn,
 		spin_lock_bh(&ms->lock);
 		ms->status = TQUIC_MIGRATE_FAILED;
 		ms->error_code = -ret;
+		tquic_path_put(ms->new_path);
 		ms->new_path = NULL;
+		if (ms->old_path) {
+			tquic_path_put(ms->old_path);
+			ms->old_path = NULL;
+		}
 		spin_unlock_bh(&ms->lock);
 		tquic_path_free(new_path);
 		return ret;

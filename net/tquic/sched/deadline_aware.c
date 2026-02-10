@@ -294,8 +294,11 @@ static u64 deadline_estimate_delivery_time(struct tquic_path *path,
 	/* Transmission time */
 	tx_time_us = div64_u64(data_len * 1000000ULL, bandwidth);
 
-	/* Queue delay based on bytes in flight */
-	in_flight = path->stats.tx_bytes - path->stats.acked_bytes;
+	/* Queue delay based on bytes in flight -- guard underflow */
+	if (path->stats.tx_bytes > path->stats.acked_bytes)
+		in_flight = path->stats.tx_bytes - path->stats.acked_bytes;
+	else
+		in_flight = 0;
 	if (in_flight > path->stats.cwnd)
 		in_flight = path->stats.cwnd;
 	queue_delay_us = div64_u64(in_flight * 1000000ULL, bandwidth);
@@ -441,6 +444,12 @@ EXPORT_SYMBOL_GPL(tquic_deadline_select_path);
  * =============================================================================
  */
 
+/* Timer callback placeholder for deadline scheduler periodic checks */
+static void deadline_sched_timer_cb(struct timer_list *t)
+{
+	/* Currently unused -- timer is not armed. Reserved for future use. */
+}
+
 /**
  * tquic_deadline_sched_init - Initialize deadline scheduler
  */
@@ -472,7 +481,7 @@ int tquic_deadline_sched_init(struct tquic_connection *conn,
 	spin_lock_init(&state->lock);
 
 	/* Initialize timer for periodic deadline checks */
-	timer_setup(&state->scheduler_timer, NULL, 0);
+	timer_setup(&state->scheduler_timer, deadline_sched_timer_cb, 0);
 
 	/* Initialize path capabilities */
 	list_for_each_entry(path, &conn->paths, list) {

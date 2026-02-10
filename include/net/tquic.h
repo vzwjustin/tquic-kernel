@@ -361,6 +361,7 @@ struct tquic_path_stats {
  * @rcu_head: RCU callback head for deferred freeing
  */
 struct tquic_path {
+	refcount_t refcnt;		/* Reference count */
 	struct tquic_connection *conn;
 	enum tquic_path_state state;
 	enum tquic_path_state saved_state;	/* State before unavailable */
@@ -964,6 +965,14 @@ struct tquic_connection {
 	u64 max_stream_id_bidi;		/* Maximum stream ID for bidi streams */
 	u64 max_stream_id_uni;		/* Maximum stream ID for uni streams */
 
+	/*
+	 * Per-type stream counters for HTTP/3 unidirectional streams.
+	 * Indexed by H3_STREAM_TYPE_* (0-3). Avoids O(n) scans
+	 * in tquic_stream_count_by_type().
+	 */
+#define TQUIC_H3_STREAM_TYPE_MAX	4
+	int h3_uni_stream_count[TQUIC_H3_STREAM_TYPE_MAX];
+
 	/* Connection ID management */
 	struct list_head dcid_list;	/* List of destination CIDs */
 	struct list_head scid_list;	/* List of source CIDs */
@@ -978,7 +987,13 @@ struct tquic_connection {
 	u64 data_sent;
 	u64 data_received;
 
-	/* Packet number tracking for application packet space */
+	/*
+	 * Packet number tracking for application packet space.
+	 * Must be atomic: TX paths (tquic_xmit, tquic_send_ack,
+	 * tquic_send_connection_close, tquic_output_flush) are NOT
+	 * always serialized by conn->lock, so concurrent callers
+	 * need atomic increments for unique, monotonic packet numbers.
+	 */
 	atomic64_t pkt_num_tx;		/* Next TX packet number */
 	atomic64_t pkt_num_rx;		/* Highest RX packet number seen */
 
@@ -1987,6 +2002,31 @@ static inline void tquic_conn_put(struct tquic_connection *conn)
 {
 	if (refcount_dec_and_test(&conn->refcnt))
 		tquic_conn_destroy(conn);
+}
+
+/**
+ * tquic_path_get - Acquire a reference on a path
+ * @path: Path to reference
+ *
+ * Returns: true if reference was acquired, false if path is being destroyed
+ */
+static inline bool tquic_path_get(struct tquic_path *path)
+{
+	return refcount_inc_not_zero(&path->refcnt);
+}
+
+/**
+ * tquic_path_put - Release a reference on a path
+ * @path: Path to release
+ *
+ * Decrements the path's reference count. When the count reaches zero,
+ * the path is freed.
+ */
+void tquic_path_free(struct tquic_path *path);
+static inline void tquic_path_put(struct tquic_path *path)
+{
+	if (refcount_dec_and_test(&path->refcnt))
+		tquic_path_free(path);
 }
 
 /* State machine cleanup */

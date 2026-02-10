@@ -273,6 +273,9 @@ int tquic_cid_pool_init(struct tquic_connection *conn)
 	/* Generate initial local CID */
 	entry = kzalloc(sizeof(*entry), GFP_KERNEL);
 	if (!entry) {
+		/* CF-426: Cancel timer/work before freeing pool */
+		del_timer_sync(&pool->rotation_timer);
+		cancel_work_sync(&pool->rotation_work);
 		kfree(pool);
 		return -ENOMEM;
 	}
@@ -310,6 +313,9 @@ int tquic_cid_pool_init(struct tquic_connection *conn)
 					     cid_rht_params);
 		if (ret < 0) {
 			kfree(entry);
+			/* CF-426: Cancel timer/work before freeing pool */
+			del_timer_sync(&pool->rotation_timer);
+			cancel_work_sync(&pool->rotation_work);
 			kfree(pool);
 			return ret;
 		}
@@ -512,8 +518,13 @@ int tquic_cid_retire(struct tquic_connection *conn, u64 seq_num)
 		return -ENOENT;
 	}
 
-	/* Queue RETIRE_CONNECTION_ID acknowledgment frame */
-	tquic_send_retire_connection_id(conn, seq_num);
+	/*
+	 * Peer asked to retire our local CID. We do NOT send
+	 * RETIRE_CONNECTION_ID back (that's for retiring REMOTE CIDs).
+	 * Instead, issue a replacement CID if we have room.
+	 */
+	if (pool->active_count < pool->active_cid_limit)
+		tquic_cid_issue(conn, NULL);
 
 	return 0;
 }
@@ -530,15 +541,21 @@ int tquic_cid_retire(struct tquic_connection *conn, u64 seq_num)
 struct tquic_connection *tquic_cid_lookup(const struct tquic_cid *cid)
 {
 	struct tquic_cid_entry *entry;
+	struct tquic_connection *conn = NULL;
 
 	if (!cid_table_initialized || !cid || cid->len == 0)
 		return NULL;
 
+	rcu_read_lock();
 	entry = rhashtable_lookup_fast(&tquic_cid_table, cid, cid_rht_params);
-	if (entry && entry->state == CID_STATE_ACTIVE)
-		return entry->conn;
+	if (entry && entry->state == CID_STATE_ACTIVE) {
+		conn = entry->conn;
+		if (conn && !refcount_inc_not_zero(&conn->refcount))
+			conn = NULL;
+	}
+	rcu_read_unlock();
 
-	return NULL;
+	return conn;
 }
 
 /**

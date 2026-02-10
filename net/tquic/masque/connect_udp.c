@@ -1103,9 +1103,11 @@ int tquic_connect_udp_sendv(struct tquic_connect_udp_tunnel *tunnel,
 	if (!tunnel || !iov || iovcnt <= 0)
 		return -EINVAL;
 
-	/* Calculate total length */
-	for (i = 0; i < iovcnt; i++)
-		total_len += iov[i].iov_len;
+	/* Calculate total length with overflow check */
+	for (i = 0; i < iovcnt; i++) {
+		if (check_add_overflow(total_len, iov[i].iov_len, &total_len))
+			return -EOVERFLOW;
+	}
 
 	if (total_len > TQUIC_CONNECT_UDP_MAX_PAYLOAD)
 		return -EMSGSIZE;

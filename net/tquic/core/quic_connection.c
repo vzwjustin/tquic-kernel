@@ -584,6 +584,9 @@ struct tquic_connection *tquic_conn_create(struct tquic_sock *tsk, bool is_serve
 	return conn;
 
 err_free_pn_spaces:
+	/* Clean up timers initialized above */
+	for (i = 0; i < TQUIC_TIMER_MAX; i++)
+		del_timer_sync(&conn->timers[i]);
 	kfree(conn->pn_spaces);
 err_free_scid:
 	tquic_cid_entry_destroy(scid_entry);

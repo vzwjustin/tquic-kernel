@@ -279,7 +279,8 @@ int tquic_fec_receive_source(struct tquic_fec_state *state,
 		dec->stats.blocks_received++;
 	}
 
-	spin_lock(&block->lock);
+	/* CF-476: Use nested annotation for inner lock under dec->lock */
+	spin_lock_nested(&block->lock, SINGLE_DEPTH_NESTING);
 
 	/* Check for duplicate */
 	list_for_each_entry(symbol, &block->source_symbols, list) {
@@ -549,8 +550,12 @@ static int attempt_rs_recovery(struct tquic_fec_source_block *block, int gf_bits
 	for (i = 0; i < num_erasures; i++) {
 		symbol = kzalloc(sizeof(*symbol), GFP_ATOMIC);
 		if (!symbol) {
-			kfree(recovered[i]);
-			continue;
+			/* Free this and all remaining recovery buffers */
+			int j;
+
+			for (j = i; j < num_erasures; j++)
+				kfree(recovered[j]);
+			break;
 		}
 
 		symbol->data = recovered[i];
@@ -621,7 +626,8 @@ int tquic_fec_receive_repair(struct tquic_fec_state *state,
 		dec->stats.blocks_received++;
 	}
 
-	spin_lock(&block->lock);
+	/* CF-476: Use nested annotation for inner lock under dec->lock */
+	spin_lock_nested(&block->lock, SINGLE_DEPTH_NESTING);
 
 	/* Update block info if we learned it */
 	if (block->num_source == 0)
@@ -703,7 +709,8 @@ int tquic_fec_recover(struct tquic_fec_state *state,
 
 	dec = &state->decoder;
 
-	spin_lock(&block->lock);
+	/* CF-476: Use nested annotation for inner lock under dec->lock */
+	spin_lock_nested(&block->lock, SINGLE_DEPTH_NESTING);
 
 	if (block->complete || block->recovered) {
 		spin_unlock(&block->lock);
@@ -805,6 +812,9 @@ ssize_t tquic_fec_decode_repair_frame(const u8 *buf, size_t buflen,
 	ret = decode_varint(buf + offset, buflen - offset, &value);
 	if (ret < 0)
 		return ret;
+	/* CF-287: Validate block_id fits in u32 */
+	if (value > U32_MAX)
+		return -EOVERFLOW;
 	frame->block_id = (u32)value;
 	offset += ret;
 
@@ -818,8 +828,10 @@ ssize_t tquic_fec_decode_repair_frame(const u8 *buf, size_t buflen,
 		return -EINVAL;
 	frame->source_block_length = buf[offset++];
 
-	/* FEC Scheme (1 byte) */
+	/* FEC Scheme (1 byte) - validate against known schemes */
 	if (buflen - offset < 1)
+		return -EINVAL;
+	if (buf[offset] >= __TQUIC_FEC_SCHEME_MAX)
 		return -EINVAL;
 	frame->scheme = (enum tquic_fec_scheme)buf[offset++];
 
@@ -827,6 +839,14 @@ ssize_t tquic_fec_decode_repair_frame(const u8 *buf, size_t buflen,
 	ret = decode_varint(buf + offset, buflen - offset, &value);
 	if (ret < 0)
 		return ret;
+	/*
+	 * CF-287: Validate that repair_length fits in u16 before
+	 * truncating. Without this check, a varint value > 65535
+	 * silently truncates, causing the length check below to
+	 * pass when the actual data is far larger.
+	 */
+	if (value > U16_MAX)
+		return -EOVERFLOW;
 	frame->repair_length = (u16)value;
 	offset += ret;
 

@@ -227,10 +227,14 @@ static void coupled_calc_alpha(struct coupled_cc_ctx *ctx)
 	 * sum_cwnd_rtt_sq is scaled by RTT_SCALE^2
 	 * These cancel out in the division.
 	 *
-	 * Avoid u64 overflow from three-term numerator by dividing first.
+	 * Guard u64 overflow on total_cwnd * SCALE before dividing.
 	 */
-	alpha_new = div64_u64(ctx->total_cwnd * COUPLED_ALPHA_SCALE,
-			      sum_cwnd_rtt_sq);
+	if (check_mul_overflow(ctx->total_cwnd, (u64)COUPLED_ALPHA_SCALE,
+			       &alpha_new)) {
+		alpha_new = COUPLED_ALPHA_MAX;
+	} else {
+		alpha_new = div64_u64(alpha_new, sum_cwnd_rtt_sq);
+	}
 	/* Guard overflow on second multiply */
 	if (alpha_new > 0 && max_cwnd_rtt2 > div64_u64(U64_MAX, alpha_new))
 		alpha_new = COUPLED_ALPHA_MAX;
@@ -941,17 +945,24 @@ u64 olia_cc_increase(struct coupled_cc_ctx *ctx, u8 path_id,
 	if (best_path_idx >= 0 && path->capacity < best_capacity &&
 	    ctx->total_cwnd > 0 && path->rtt_us > 0) {
 		u64 diff = best_capacity - path->capacity;
-		u64 rtt_sq = path->rtt_us * path->rtt_us;
-		u64 total_cap_sq;
+		u64 rtt_sq, total_cap_sq, num;
 
-		if (rtt_sq == 0)
-			rtt_sq = 1;
-		total_cap_sq = div64_u64(ctx->total_cwnd * ctx->total_cwnd,
-					 rtt_sq);
-		if (total_cap_sq > 0)
-			epsilon = div64_u64(diff * COUPLED_ALPHA_SCALE, total_cap_sq);
-		else
+		/* Guard against overflow in rtt_us * rtt_us */
+		if (check_mul_overflow(path->rtt_us, path->rtt_us, &rtt_sq) ||
+		    rtt_sq == 0)
+			rtt_sq = U64_MAX;
+		/* Guard against overflow in total_cwnd * total_cwnd */
+		if (check_mul_overflow(ctx->total_cwnd, ctx->total_cwnd, &num))
+			num = U64_MAX;
+		total_cap_sq = div64_u64(num, rtt_sq);
+		if (total_cap_sq > 0) {
+			if (check_mul_overflow(diff, (u64)COUPLED_ALPHA_SCALE,
+					       &num))
+				num = U64_MAX;
+			epsilon = div64_u64(num, total_cap_sq);
+		} else {
 			epsilon = 0;
+		}
 	} else {
 		epsilon = 0;
 	}

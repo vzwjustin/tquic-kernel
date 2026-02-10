@@ -382,9 +382,9 @@ int tquic_gen_ack_frequency_frame(struct tquic_connection *conn,
 		spin_unlock_bh(&conn->lock);
 	} else {
 		/* Get next sequence number from state */
-		spin_lock(&state->lock);
+		spin_lock_bh(&state->lock);
 		next_seq = ++state->last_sent_seq;
-		spin_unlock(&state->lock);
+		spin_unlock_bh(&state->lock);
 	}
 
 	/* Calculate required size */
@@ -429,9 +429,9 @@ int tquic_gen_ack_frequency_frame(struct tquic_connection *conn,
 
 	/* Update statistics */
 	if (state) {
-		spin_lock(&state->lock);
+		spin_lock_bh(&state->lock);
 		state->frames_sent++;
-		spin_unlock(&state->lock);
+		spin_unlock_bh(&state->lock);
 	}
 
 	tquic_dbg("generated ACK_FREQUENCY frame: seq=%llu threshold=%llu "
@@ -736,9 +736,9 @@ bool tquic_ack_freq_should_ack_immediately(struct tquic_connection *conn)
 
 	state = conn_get_ack_freq_state(conn);
 	if (state) {
-		spin_lock(&state->lock);
+		spin_lock_bh(&state->lock);
 		immediate = state->immediate_ack_pending;
-		spin_unlock(&state->lock);
+		spin_unlock_bh(&state->lock);
 	}
 
 	return immediate;
@@ -767,7 +767,7 @@ bool tquic_ack_freq_should_ack(struct tquic_ack_frequency_state *state,
 	if (!ack_eliciting)
 		return false;  /* Non-ack-eliciting packets don't trigger ACKs */
 
-	spin_lock(&state->lock);
+	spin_lock_bh(&state->lock);
 
 	/* Extension not enabled - use default behavior */
 	if (!state->enabled) {
@@ -821,7 +821,7 @@ bool tquic_ack_freq_should_ack(struct tquic_ack_frequency_state *state,
 	}
 
 out:
-	spin_unlock(&state->lock);
+	spin_unlock_bh(&state->lock);
 	return should_ack;
 }
 EXPORT_SYMBOL_GPL(tquic_ack_freq_should_ack);
@@ -1005,9 +1005,9 @@ int tquic_ack_freq_conn_request_immediate_ack(struct tquic_connection *conn)
 
 	state = conn_get_ack_freq_state(conn);
 	if (state) {
-		spin_lock(&state->lock);
+		spin_lock_bh(&state->lock);
 		state->immediate_ack_request = true;
-		spin_unlock(&state->lock);
+		spin_unlock_bh(&state->lock);
 		return 0;
 	}
 

@@ -46,6 +46,14 @@ static const u8 tls11_downgrade_sentinel[TLS_DOWNGRADE_SENTINEL_LEN] = {
 	0x44, 0x4f, 0x57, 0x4e, 0x47, 0x52, 0x44, 0x00
 };
 
+/* SHA-256 hash of "HelloRetryRequest" (RFC 8446 Section 4.1.3) */
+static const u8 hrr_random[32] = {
+	0xcf, 0x21, 0xad, 0x74, 0xe5, 0x9a, 0x61, 0x11,
+	0xbe, 0x1d, 0x8c, 0x02, 0x1e, 0x65, 0xb8, 0x91,
+	0xc2, 0xa2, 0x11, 0x16, 0x7a, 0xbb, 0x8c, 0x5e,
+	0x07, 0x9e, 0x09, 0xe2, 0xc8, 0xa8, 0x33, 0x9c
+};
+
 /* TLS 1.3 Handshake Message Types */
 #define TLS_HS_CLIENT_HELLO		1
 #define TLS_HS_SERVER_HELLO		2
@@ -289,22 +297,30 @@ static int tquic_hs_transcript_hash(struct tquic_handshake *hs,
 /*
  * Variable-length integer encoding (QUIC style)
  */
-static int hs_varint_encode(u64 val, u8 *buf, u32 *len)
+static int hs_varint_encode(u64 val, u8 *buf, u32 buf_size, u32 *len)
 {
 	if (val < 0x40) {
+		if (buf_size < 1)
+			return -ENOSPC;
 		buf[0] = val;
 		*len = 1;
 	} else if (val < 0x4000) {
+		if (buf_size < 2)
+			return -ENOSPC;
 		buf[0] = 0x40 | (val >> 8);
 		buf[1] = val & 0xff;
 		*len = 2;
 	} else if (val < 0x40000000) {
+		if (buf_size < 4)
+			return -ENOSPC;
 		buf[0] = 0x80 | (val >> 24);
 		buf[1] = (val >> 16) & 0xff;
 		buf[2] = (val >> 8) & 0xff;
 		buf[3] = val & 0xff;
 		*len = 4;
 	} else {
+		if (buf_size < 8)
+			return -ENOSPC;
 		buf[0] = 0xc0 | (val >> 56);
 		buf[1] = (val >> 48) & 0xff;
 		buf[2] = (val >> 40) & 0xff;
@@ -385,7 +401,7 @@ static int tquic_encode_transport_params(struct tquic_hs_transport_params *param
 
 /* Macro to encode a varint with bounds check */
 #define TP_ENCODE_VARINT(val) do {		\
-	hs_varint_encode((val), varint, &vlen);	\
+	hs_varint_encode((val), varint, sizeof(varint), &vlen);	\
 	TP_CHECK_SPACE(vlen);			\
 	memcpy(p, varint, vlen);		\
 	p += vlen;				\
@@ -821,6 +837,8 @@ static int tquic_hs_hkdf_expand_label(struct tquic_handshake *hs,
 
 out_zeroize:
 	memzero_explicit(t, sizeof(t));
+	/* CF-340: Zeroize hkdf_label which may contain key-derived data */
+	memzero_explicit(hkdf_label, sizeof(hkdf_label));
 	return ret;
 }
 
@@ -943,9 +961,15 @@ static int __maybe_unused tquic_hs_derive_early_secrets(struct tquic_handshake *
 		ret = tquic_hs_derive_secret(hs, hs->early_secret,
 					     "ext binder", NULL, 0,
 					     binder_key, hash_len);
-		memzero_explicit(binder_key, sizeof(binder_key));
-		if (ret)
+		/*
+		 * CF-339: Check the return value before zeroing the
+		 * binder key, so the error path still zeroizes.
+		 */
+		if (ret) {
+			memzero_explicit(binder_key, sizeof(binder_key));
 			goto out_zeroize;
+		}
+		memzero_explicit(binder_key, sizeof(binder_key));
 	}
 
 	ret = 0;
@@ -1347,6 +1371,15 @@ int tquic_hs_generate_client_hello(struct tquic_handshake *hs,
 	u32 ext_len;
 	int ret;
 
+	/*
+	 * Minimum buffer: 4 (hs header) + 2 (version) + 32 (random)
+	 * + 1 (session_id_len) + 32 (session_id) + 2 (cipher suites len)
+	 * + 6 (cipher suites) + 2 (compression) = 81 bytes, plus extensions.
+	 */
+#define TQUIC_CH_MIN_BUF_LEN 256
+	if (!buf || buf_len < TQUIC_CH_MIN_BUF_LEN)
+		return -EINVAL;
+
 	/* Allocate extensions buffer dynamically to reduce stack usage */
 	extensions = kzalloc(2048, GFP_KERNEL);
 	if (!extensions)
@@ -1354,6 +1387,16 @@ int tquic_hs_generate_client_hello(struct tquic_handshake *hs,
 
 	/* Generate random */
 	get_random_bytes(hs->client_random, TLS_RANDOM_LEN);
+
+	/*
+	 * CF-522: Verify the random is not all-zero.  While astronomically
+	 * unlikely with a properly seeded CSPRNG, an all-zero random would
+	 * be a catastrophic protocol failure.
+	 */
+	if (mem_is_zero(hs->client_random, TLS_RANDOM_LEN)) {
+		kfree_sensitive(extensions);
+		return -EIO;
+	}
 
 	/* Generate X25519 key pair */
 	hs->key_share.group = TLS_GROUP_X25519;
@@ -1509,14 +1552,6 @@ int tquic_hs_process_server_hello(struct tquic_handshake *hs,
 	p += TLS_RANDOM_LEN;
 
 	/* Check for HelloRetryRequest magic */
-	/* SHA-256 hash of "HelloRetryRequest" */
-	static const u8 hrr_random[32] = {
-		0xcf, 0x21, 0xad, 0x74, 0xe5, 0x9a, 0x61, 0x11,
-		0xbe, 0x1d, 0x8c, 0x02, 0x1e, 0x65, 0xb8, 0x91,
-		0xc2, 0xa2, 0x11, 0x16, 0x7a, 0xbb, 0x8c, 0x5e,
-		0x07, 0x9e, 0x09, 0xe2, 0xc8, 0xa8, 0x33, 0x9c
-	};
-
 	if (memcmp(hs->server_random, hrr_random, 32) == 0) {
 		/* HelloRetryRequest - need to restart with new parameters */
 		pr_debug("tquic_hs: received HelloRetryRequest\n");
@@ -1762,7 +1797,9 @@ int tquic_hs_process_encrypted_extensions(struct tquic_handshake *hs,
 				u16 list_len = (p[0] << 8) | p[1];
 				u8 proto_len = p[2];
 
-				if (list_len >= proto_len + 1 && proto_len > 0) {
+				if (list_len >= proto_len + 1 &&
+				    proto_len > 0 &&
+				    3 + proto_len <= ext_data_len) {
 					kfree(hs->alpn_selected);
 					hs->alpn_selected = kmalloc(proto_len + 1, GFP_KERNEL);
 					if (hs->alpn_selected) {
@@ -1869,6 +1906,16 @@ int tquic_hs_process_certificate(struct tquic_handshake *hs,
 		certs_len -= 3;
 
 		if (cert_len > certs_len || p + cert_len > end)
+			return -EINVAL;
+
+		/*
+		 * CF-342: Cap individual certificate size to prevent
+		 * unbounded kernel allocation from attacker-controlled
+		 * certificate length fields.  16 KiB is generous for
+		 * any reasonable X.509 certificate.
+		 */
+#define TLS_CERT_MAX_LEN	(16 * 1024)
+		if (cert_len > TLS_CERT_MAX_LEN)
 			return -EINVAL;
 
 		/* Store first certificate (end-entity) */
@@ -2288,14 +2335,7 @@ int tquic_hs_process_certificate_verify(struct tquic_handshake *hs,
 			return -EINVAL;
 		}
 
-		/* Build content to verify */
-		memset(cp, 0x20, 64);  /* 64 spaces */
-		cp += 64;
-		memcpy(cp, "TLS 1.3, server CertificateVerify", 33);
-		cp += 33;
-		*cp++ = 0x00;
-
-		/* Get transcript hash */
+		/* Get transcript hash first to validate size */
 		{
 			u32 hash_len_out;
 			int ret = tquic_hs_transcript_hash(hs, transcript_hash,
@@ -2306,6 +2346,45 @@ int tquic_hs_process_certificate_verify(struct tquic_handshake *hs,
 			}
 			hash_len = hash_len_out;
 		}
+
+		/*
+		 * CF-341: Validate that the transcript hash fits within
+		 * the content buffer.  Layout: 64 spaces + 33 label +
+		 * 1 NUL separator + hash_len = 98 + hash_len.
+		 */
+		if (hash_len > 64 || 98 + hash_len > sizeof(content)) {
+			pr_warn("tquic_hs: transcript hash too large (%d)\n",
+				hash_len);
+			return -EINVAL;
+		}
+
+		/*
+		 * CF-524: Use the correct context string based on
+		 * whether we are verifying a server or client CV.
+		 * Per RFC 8446 Section 4.4.3, the string differs.
+		 */
+		{
+			const char *cv_label;
+			u32 cv_label_len;
+
+			if (hs->is_server) {
+				/* We're server, verifying client's CV */
+				cv_label = "TLS 1.3, client CertificateVerify";
+				cv_label_len = 33;
+			} else {
+				/* We're client, verifying server's CV */
+				cv_label = "TLS 1.3, server CertificateVerify";
+				cv_label_len = 33;
+			}
+
+			/* Build content to verify */
+			memset(cp, 0x20, 64);  /* 64 spaces */
+			cp += 64;
+			memcpy(cp, cv_label, cv_label_len);
+			cp += cv_label_len;
+			*cp++ = 0x00;
+		}
+
 		memcpy(cp, transcript_hash, hash_len);
 		cp += hash_len;
 		content_len = cp - content;
@@ -2726,8 +2805,35 @@ int tquic_hs_process_new_session_ticket(struct tquic_handshake *hs,
 	ext_len = (p[0] << 8) | p[1];
 	p += 2;
 
-	/* Parse extensions (early_data max size, etc.) */
-	/* Skip for now */
+	/*
+	 * CF-525: Parse extensions to extract early_data max_size.
+	 * The early_data extension (type 0x002a) in NewSessionTicket
+	 * carries max_early_data_size per RFC 8446 Section 4.6.1.
+	 */
+	if (p + ext_len > end) {
+		ext_len = end - p;  /* Clamp to remaining data */
+	}
+	{
+		const u8 *ext_end = p + ext_len;
+		const u8 *ep = p;
+
+		while (ep + 4 <= ext_end) {
+			u16 etype = (ep[0] << 8) | ep[1];
+			u16 elen = (ep[2] << 8) | ep[3];
+
+			ep += 4;
+			if (ep + elen > ext_end)
+				break;
+
+			if (etype == 0x002a && elen == 4) {
+				/* early_data extension */
+				hs->session_ticket->max_early_data =
+					get_unaligned_be32(ep);
+			}
+			ep += elen;
+		}
+		p = ext_end;
+	}
 
 	/* Derive PSK from resumption secret */
 	/* PSK = HKDF-Expand-Label(resumption_secret, "resumption", nonce, hash_len) */
@@ -2765,10 +2871,19 @@ int tquic_hs_setup_psk(struct tquic_handshake *hs,
 {
 	struct tquic_psk_identity *psk;
 	u64 now;
-	u32 age;
+	u64 age_seconds;
+	u32 age_ms;
 	u32 obfuscated_age;
 
 	if (!ticket || !ticket->ticket)
+		return -EINVAL;
+
+	/*
+	 * CF-167: Validate ticket lifetime per RFC 8446 Section 4.6.1:
+	 * "Servers MUST NOT use any value greater than 604800 seconds
+	 * (7 days)."
+	 */
+	if (ticket->lifetime > 604800)
 		return -EINVAL;
 
 	/* Check ticket expiration */
@@ -2793,9 +2908,14 @@ int tquic_hs_setup_psk(struct tquic_handshake *hs,
 	memcpy(psk->identity, ticket->ticket, ticket->ticket_len);
 	psk->identity_len = ticket->ticket_len;
 
-	/* Compute obfuscated ticket age */
-	age = (now - ticket->creation_time) * 1000;  /* Convert to ms */
-	obfuscated_age = age + ticket->age_add;
+	/*
+	 * CF-167: Compute ticket age safely using u64 intermediate.
+	 * The age in seconds is bounded by ticket->lifetime (max 604800),
+	 * so age_seconds * 1000 fits in u32 (max 604800000).
+	 */
+	age_seconds = now - ticket->creation_time;
+	age_ms = (u32)(age_seconds * 1000);
+	obfuscated_age = age_ms + ticket->age_add;
 	psk->obfuscated_ticket_age = obfuscated_age;
 
 	hs->psk_count = 1;
@@ -2806,8 +2926,37 @@ int tquic_hs_setup_psk(struct tquic_handshake *hs,
 	else
 		hs->hash_len = 32;
 
-	/* Store session ticket for early data */
-	hs->session_ticket = ticket;
+	/* Copy session ticket for early data (caller retains ownership) */
+	if (hs->session_ticket) {
+		kfree(hs->session_ticket->ticket);
+		kfree(hs->session_ticket);
+	}
+	hs->session_ticket = kzalloc(sizeof(*hs->session_ticket), GFP_KERNEL);
+	if (!hs->session_ticket) {
+		kfree(psk->identity);
+		kfree(hs->psk_identities);
+		hs->psk_identities = NULL;
+		hs->psk_count = 0;
+		return -ENOMEM;
+	}
+	memcpy(hs->session_ticket, ticket, sizeof(*ticket));
+	if (ticket->ticket && ticket->ticket_len > 0) {
+		hs->session_ticket->ticket = kmalloc(ticket->ticket_len,
+						     GFP_KERNEL);
+		if (!hs->session_ticket->ticket) {
+			kfree(hs->session_ticket);
+			hs->session_ticket = NULL;
+			kfree(psk->identity);
+			kfree(hs->psk_identities);
+			hs->psk_identities = NULL;
+			hs->psk_count = 0;
+			return -ENOMEM;
+		}
+		memcpy(hs->session_ticket->ticket, ticket->ticket,
+		       ticket->ticket_len);
+	} else {
+		hs->session_ticket->ticket = NULL;
+	}
 
 	pr_debug("tquic_hs: set up PSK for resumption\n");
 
@@ -3048,7 +3197,7 @@ struct tquic_handshake *tquic_hs_init(bool is_server)
 err_hash:
 	crypto_free_shash(hs->hash_tfm);
 err_transcript:
-	kfree(hs->transcript);
+	kfree_sensitive(hs->transcript);
 err_free:
 	kfree(hs);
 	return NULL;
@@ -3203,6 +3352,13 @@ int tquic_hs_get_handshake_secrets(struct tquic_handshake *hs,
 	if (hs->state < TQUIC_HS_WAIT_EE && hs->state != TQUIC_HS_COMPLETE)
 		return -EAGAIN;
 
+	/*
+	 * CF-523: Validate that output buffers are large enough for
+	 * the hash length to prevent buffer overflows.
+	 */
+	if (*client_len < hs->hash_len || *server_len < hs->hash_len)
+		return -ENOSPC;
+
 	memcpy(client_secret, hs->client_handshake_secret, hs->hash_len);
 	*client_len = hs->hash_len;
 	memcpy(server_secret, hs->server_handshake_secret, hs->hash_len);
@@ -3229,6 +3385,10 @@ int tquic_hs_get_app_secrets(struct tquic_handshake *hs,
 	/* App secrets only available after handshake completion */
 	if (hs->state != TQUIC_HS_COMPLETE)
 		return -EAGAIN;
+
+	/* CF-523: Validate output buffer sizes */
+	if (*client_len < hs->hash_len || *server_len < hs->hash_len)
+		return -ENOSPC;
 
 	memcpy(client_secret, hs->client_app_secret, hs->hash_len);
 	*client_len = hs->hash_len;
@@ -3367,8 +3527,8 @@ void tquic_hs_cleanup(struct tquic_handshake *hs)
 	kfree(hs->key_share.public_key);
 	kfree_sensitive(hs->key_share.private_key);
 
-	/* Free transcript */
-	kfree(hs->transcript);
+	/* Free transcript - contains handshake data, must zeroize */
+	kfree_sensitive(hs->transcript);
 
 	/* Free ALPN */
 	if (hs->alpn_list) {
@@ -3420,8 +3580,12 @@ void tquic_hs_cleanup(struct tquic_handshake *hs)
 	memzero_explicit(hs->client_finished_key, sizeof(hs->client_finished_key));
 	memzero_explicit(hs->server_finished_key, sizeof(hs->server_finished_key));
 	memzero_explicit(hs->shared_secret, sizeof(hs->shared_secret));
+	/* CF-521: Also zeroize exporter and resumption secrets */
+	memzero_explicit(hs->exporter_secret, sizeof(hs->exporter_secret));
+	memzero_explicit(hs->resumption_secret, sizeof(hs->resumption_secret));
 
-	kfree(hs);
+	/* CF-429: Use kfree_sensitive for struct with crypto secrets */
+	kfree_sensitive(hs);
 }
 EXPORT_SYMBOL_GPL(tquic_hs_cleanup);
 

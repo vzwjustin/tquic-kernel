@@ -115,9 +115,10 @@ struct tquic_napi {
 	struct tquic_sock *sk;
 	struct tquic_connection *conn;
 
-	/* Receive queue */
+	/* Hot path: receive queue (accessed on every packet) */
 	struct sk_buff_head rx_queue;
 	atomic_t rx_queue_len;
+	spinlock_t lock;
 
 	/* Configuration */
 	int weight;
@@ -126,8 +127,8 @@ struct tquic_napi {
 	bool busy_poll_enabled;
 	u32 busy_poll_timeout_us;
 
-	/* Statistics */
-	struct tquic_napi_stats stats;
+	/* Cold path: statistics and coalescing on separate cacheline */
+	struct tquic_napi_stats stats ____cacheline_aligned_in_smp;
 
 	/* Adaptive interrupt coalescing */
 	struct {
@@ -137,7 +138,6 @@ struct tquic_napi {
 		bool enabled;		/* Adaptive coalescing enabled */
 	} coalesce;
 
-	spinlock_t lock;
 	int cpu;
 	struct list_head list;
 };

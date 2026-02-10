@@ -29,6 +29,7 @@
 #include <linux/slab.h>
 #include <linux/list.h>
 #include <linux/hashtable.h>
+#include <linux/jhash.h>
 #include <linux/spinlock.h>
 #include <linux/timer.h>
 #include <linux/workqueue.h>
@@ -142,15 +143,12 @@ static void cid_put(struct quic_proxy_cid *c)
  *
  * Returns: Hash key.
  */
+static u32 cid_hash_secret __read_mostly;
+
 static inline u32 cid_hash_key(const u8 *cid, u8 len)
 {
-	u32 hash = 0;
-	int i;
-
-	for (i = 0; i < len; i++)
-		hash = (hash * 31) + cid[i];
-
-	return hash;
+	net_get_random_once(&cid_hash_secret, sizeof(cid_hash_secret));
+	return jhash(cid, len, cid_hash_secret);
 }
 
 /**
@@ -410,6 +408,14 @@ static void idle_timer_callback(struct timer_list *t)
 		if (idle_ms >= proxy->config.idle_timeout_ms &&
 		    pconn->state == QUIC_PROXY_CONN_ACTIVE) {
 			pconn->state = QUIC_PROXY_CONN_DRAINING;
+			/* Remove CID hash entry while holding the lock */
+			hash_del(&pconn->dcid_hash_node);
+			/*
+			 * Take a reference for the to_remove list so the
+			 * connection cannot be freed by another path before
+			 * we finish processing it outside the lock.
+			 */
+			proxied_conn_get(pconn);
 			list_move_tail(&pconn->list, &to_remove);
 		}
 	}
@@ -420,6 +426,9 @@ static void idle_timer_callback(struct timer_list *t)
 	list_for_each_entry_safe(pconn, tmp, &to_remove, list) {
 		list_del(&pconn->list);
 		tquic_quic_proxy_deregister_conn(pconn, QUIC_PROXY_DEREG_TIMEOUT, 0);
+		/* Drop the extra reference taken above */
+		proxied_conn_put(pconn);
+		/* Drop the original list reference */
 		proxied_conn_put(pconn);
 	}
 

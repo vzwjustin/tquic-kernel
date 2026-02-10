@@ -55,7 +55,7 @@ struct tquic_zc_entry {
 	u64			stream_id;	/* Associated stream */
 	u64			offset;		/* Stream offset */
 	size_t			len;		/* Data length */
-	atomic_t		refcnt;		/* Reference count */
+	refcount_t		refcnt;		/* Reference count */
 	bool			completed;	/* Transmission complete */
 };
 
@@ -166,7 +166,7 @@ static struct tquic_zc_entry __maybe_unused *tquic_zc_entry_alloc(gfp_t gfp)
 		return NULL;
 
 	INIT_LIST_HEAD(&entry->list);
-	atomic_set(&entry->refcnt, 1);
+	refcount_set(&entry->refcnt, 1);
 	entry->completed = false;
 
 	return entry;
@@ -197,12 +197,12 @@ static void tquic_zc_entry_free(struct tquic_zc_entry *entry)
 
 static void __maybe_unused tquic_zc_entry_get(struct tquic_zc_entry *entry)
 {
-	atomic_inc(&entry->refcnt);
+	refcount_inc(&entry->refcnt);
 }
 
 static void __maybe_unused tquic_zc_entry_put(struct tquic_zc_entry *entry)
 {
-	if (atomic_dec_and_test(&entry->refcnt))
+	if (refcount_dec_and_test(&entry->refcnt))
 		tquic_zc_entry_free(entry);
 }
 

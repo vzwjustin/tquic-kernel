@@ -2513,6 +2513,10 @@ int tquic_tp_set_version_info(struct tquic_transport_params *params,
 	if (count > TQUIC_MAX_AVAILABLE_VERSIONS)
 		return -EINVAL;
 
+	/* Check for multiplication overflow: count * sizeof(u32) */
+	if (count > SIZE_MAX / sizeof(u32))
+		return -EOVERFLOW;
+
 	/* Free existing version_info if present */
 	if (params->version_info)
 		tquic_version_info_free(params->version_info);

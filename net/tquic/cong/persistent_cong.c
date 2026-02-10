@@ -179,6 +179,9 @@ static int lost_packet_cmp(const void *a, const void *b)
  * lost packets span the persistent congestion period. A more complete
  * implementation would track all in-flight packets.
  *
+ * Note: This function sorts @lost_packets in-place by send time.
+ * Callers must not depend on the original array order after this call.
+ *
  * Return: true if persistent congestion detected, false otherwise
  */
 bool tquic_check_persistent_cong(struct tquic_persistent_cong_state *state,

@@ -948,11 +948,19 @@ void tquic_bonding_on_loss_detected(struct tquic_connection *conn,
 		return;
 
 	/*
-	 * Force weight recalculation on loss (cwnd will have changed).
-	 * Loss events should trigger immediate recalculation since
-	 * the capacity of the affected path has changed significantly.
+	 * CF-269: Rate-limit weight recalculation in the loss path.
+	 * derive_weights() is expensive (iterates all paths, reads
+	 * atomics, does divisions). Limit to once per jiffy to avoid
+	 * CPU spikes during burst losses while still being responsive.
 	 */
-	tquic_bonding_derive_weights(bc);
+	{
+		unsigned long now = jiffies;
+		unsigned long last = READ_ONCE(bc->last_weight_update);
+
+		if (time_after_eq(now, last + 1) &&
+		    cmpxchg(&bc->last_weight_update, last, now) == last)
+			tquic_bonding_derive_weights(bc);
+	}
 
 	/* Notify scheduler of loss for feedback-driven path selection */
 	if (conn)

@@ -102,7 +102,7 @@ static const char *tquic_wan_type_names[] = {
 #define TQUIC_BPM_PATH_VALIDATION_MAX_RETRIES 3
 #define TQUIC_BPM_PATH_PROBE_TIMEOUT (30 * HZ) /* Probe every 30 seconds */
 #define TQUIC_BPM_PATH_FAIL_THRESHOLD 5 /* Consecutive failures */
-#define TQUIC_MAX_PATHS 8 /* Max paths per connection */
+/* CF-295: Remove local definition; use canonical TQUIC_MAX_PATHS from tquic.h */
 #define TQUIC_BPM_PATH_MTU_MIN 1200 /* QUIC minimum MTU */
 
 /*
@@ -1002,8 +1002,11 @@ int tquic_bpm_path_init(struct tquic_bpm_path *path, const struct sockaddr *loca
 
 	/* Get network device reference */
 	rcu_read_lock();
-	dev = dev_get_by_index_rcu(path->pm ? path->pm->net : &init_net,
-				   ifindex);
+	if (!path->pm || !path->pm->net) {
+		rcu_read_unlock();
+		return -EINVAL;
+	}
+	dev = dev_get_by_index_rcu(path->pm->net, ifindex);
 	if (dev) {
 		dev_hold(dev);
 		path->dev = dev;

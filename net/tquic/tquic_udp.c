@@ -1268,8 +1268,10 @@ static struct sk_buff *tquic_udp_gro_receive(struct sock *sk,
 	struct tquic_udp_sock *us;
 	struct udphdr *uh;
 
+	rcu_read_lock();
 	us = rcu_dereference_sk_user_data(sk);
 	if (!us || !us->gro_enabled) {
+		rcu_read_unlock();
 		NAPI_GRO_CB(skb)->flush = 1;
 		return NULL;
 	}
@@ -1281,6 +1283,7 @@ static struct sk_buff *tquic_udp_gro_receive(struct sock *sk,
 	uh = udp_hdr(skb);
 
 	/* Use TQUIC-specific GRO receive for packet aggregation */
+	rcu_read_unlock();
 	return tquic_gro_receive_udp(sk, head, skb);
 }
 
@@ -1300,9 +1303,11 @@ static int tquic_udp_gro_complete(struct sock *sk, struct sk_buff *skb,
 {
 	struct tquic_udp_sock *us;
 
+	rcu_read_lock();
 	us = rcu_dereference_sk_user_data(sk);
 	if (us)
 		us->stats.gro_merged++;
+	rcu_read_unlock();
 
 	/* Use TQUIC-specific GRO complete */
 	return tquic_gro_complete_udp(sk, skb, nhoff);

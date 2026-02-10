@@ -332,8 +332,13 @@ u64 tquic_pn_decode(const u8 *data, int len, u64 largest_pn)
 	u64 pn_mask;
 	u64 candidate_pn;
 
+	/*
+	 * CF-401: Return U64_MAX as sentinel for invalid input.
+	 * 0 is a valid packet number; U64_MAX exceeds the 2^62-1
+	 * limit and is therefore unambiguously invalid.
+	 */
 	if (len < 1 || len > 4)
-		return 0;
+		return U64_MAX;
 
 	/* Read truncated packet number */
 	switch (len) {

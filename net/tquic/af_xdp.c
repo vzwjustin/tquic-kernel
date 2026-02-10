@@ -292,8 +292,12 @@ int tquic_xsk_create(struct tquic_xsk **xsk_out, const char *ifname,
 	if (!xsk_out || !ifname)
 		return -EINVAL;
 
-	/* XDP socket creation requires CAP_NET_ADMIN */
-	if (!capable(CAP_NET_ADMIN))
+	/*
+	 * CF-500: Use ns_capable() for namespace-aware permission check.
+	 * capable() checks against init_user_ns, which is incorrect
+	 * for containers/namespaces.
+	 */
+	if (!ns_capable(current->nsproxy->net_ns->user_ns, CAP_NET_ADMIN))
 		return -EPERM;
 
 	/* Find network device */
@@ -751,8 +755,8 @@ int tquic_xdp_load_prog(struct tquic_xsk *xsk, const __be16 *ports,
 	if (!xsk || !xsk->dev)
 		return -EINVAL;
 
-	/* Attaching XDP programs requires CAP_NET_ADMIN */
-	if (!capable(CAP_NET_ADMIN))
+	/* CF-500: namespace-aware permission check for XDP program attach */
+	if (!ns_capable(current->nsproxy->net_ns->user_ns, CAP_NET_ADMIN))
 		return -EPERM;
 
 	if (xsk->xdp_prog)
@@ -949,8 +953,8 @@ int tquic_xsk_setsockopt(struct sock *sk, sockptr_t optval,
 	struct tquic_xsk *xsk = NULL;
 	int err;
 
-	/* XDP configuration requires CAP_NET_ADMIN */
-	if (!capable(CAP_NET_ADMIN))
+	/* CF-500: namespace-aware permission check for XDP configuration */
+	if (!ns_capable(current->nsproxy->net_ns->user_ns, CAP_NET_ADMIN))
 		return -EPERM;
 
 	if (optlen < sizeof(config))

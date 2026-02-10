@@ -144,30 +144,40 @@ static int tquic_priority_queue_frame(struct tquic_connection *conn,
 static struct tquic_priority_stream_ext *
 tquic_stream_get_priority_ext(struct tquic_stream *stream)
 {
-	struct tquic_priority_stream_ext *ext;
+	struct tquic_priority_stream_ext *ext, *new_ext;
 
 	if (!stream)
 		return NULL;
 
-	/* Check if already allocated */
-	ext = stream->ext;
+	/* Check if already allocated (use READ_ONCE to prevent tearing) */
+	ext = READ_ONCE(stream->ext);
 	if (ext)
 		return ext;
 
 	/* Allocate new priority extension */
-	ext = kzalloc(sizeof(*ext), GFP_ATOMIC);
-	if (!ext)
+	new_ext = kzalloc(sizeof(*new_ext), GFP_ATOMIC);
+	if (!new_ext)
 		return NULL;
 
-	ext->stream = stream;
-	ext->urgency = TQUIC_PRIORITY_URGENCY_DEFAULT;
-	ext->incremental = 0;
-	ext->scheduled = 0;
-	INIT_LIST_HEAD(&ext->sched_node);
-	refcount_set(&ext->refcnt, 1);
+	new_ext->stream = stream;
+	new_ext->urgency = TQUIC_PRIORITY_URGENCY_DEFAULT;
+	new_ext->incremental = 0;
+	new_ext->scheduled = 0;
+	INIT_LIST_HEAD(&new_ext->sched_node);
+	refcount_set(&new_ext->refcnt, 1);
 
-	stream->ext = ext;
-	return ext;
+	/*
+	 * CF-612: Use cmpxchg to handle race where two threads both
+	 * see ext==NULL and try to allocate simultaneously.
+	 */
+	ext = cmpxchg(&stream->ext, NULL, new_ext);
+	if (ext) {
+		/* Another thread won the race, free our allocation */
+		kfree(new_ext);
+		return ext;
+	}
+
+	return new_ext;
 }
 
 /**

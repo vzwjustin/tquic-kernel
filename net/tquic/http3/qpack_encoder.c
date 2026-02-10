@@ -791,7 +791,7 @@ int qpack_encoder_insert_name_ref(struct qpack_encoder *enc,
 				  bool is_static, u64 name_index,
 				  const char *value, u16 value_len)
 {
-	u8 buf[QPACK_MAX_HEADER_VALUE_LEN + 32];
+	u8 *buf;
 	size_t offset = 0;
 	size_t encoded_len;
 	int ret;
@@ -799,21 +799,31 @@ int qpack_encoder_insert_name_ref(struct qpack_encoder *enc,
 	if (!enc || !enc->encoder_stream)
 		return -EINVAL;
 
+	buf = kmalloc(QPACK_MAX_HEADER_VALUE_LEN + 32, GFP_ATOMIC);
+	if (!buf)
+		return -ENOMEM;
+
 	/* Encode: 1T (6-bit index) where T=1 for static */
 	if (is_static)
-		ret = qpack_encode_integer(name_index, 6, 0xC0, buf, sizeof(buf), &encoded_len);
+		ret = qpack_encode_integer(name_index, 6, 0xC0, buf,
+					   QPACK_MAX_HEADER_VALUE_LEN + 32,
+					   &encoded_len);
 	else
-		ret = qpack_encode_integer(name_index, 6, 0x80, buf, sizeof(buf), &encoded_len);
+		ret = qpack_encode_integer(name_index, 6, 0x80, buf,
+					   QPACK_MAX_HEADER_VALUE_LEN + 32,
+					   &encoded_len);
 
 	if (ret)
-		return ret;
+		goto out_free;
 	offset = encoded_len;
 
 	/* Encode value */
 	ret = qpack_encode_string(value, value_len, enc->use_huffman,
-				  buf + offset, sizeof(buf) - offset, &encoded_len);
+				  buf + offset,
+				  QPACK_MAX_HEADER_VALUE_LEN + 32 - offset,
+				  &encoded_len);
 	if (ret)
-		return ret;
+		goto out_free;
 	offset += encoded_len;
 
 	/* Insert into local dynamic table */
@@ -828,10 +838,14 @@ int qpack_encoder_insert_name_ref(struct qpack_encoder *enc,
 	/* Note: For dynamic reference, caller should provide name separately */
 
 	if (ret)
-		return ret;
+		goto out_free;
 
 	/* Send instruction on encoder stream */
-	return tquic_stream_send(enc->encoder_stream, buf, offset, false);
+	ret = tquic_stream_send(enc->encoder_stream, buf, offset, false);
+
+out_free:
+	kfree(buf);
+	return ret;
 }
 EXPORT_SYMBOL_GPL(qpack_encoder_insert_name_ref);
 
@@ -849,7 +863,9 @@ int qpack_encoder_insert_literal(struct qpack_encoder *enc,
 				 const char *name, u16 name_len,
 				 const char *value, u16 value_len)
 {
-	u8 buf[QPACK_MAX_HEADER_NAME_LEN + QPACK_MAX_HEADER_VALUE_LEN + 64];
+	const size_t buf_size = QPACK_MAX_HEADER_NAME_LEN +
+				QPACK_MAX_HEADER_VALUE_LEN + 64;
+	u8 *buf;
 	size_t offset = 0;
 	size_t encoded_len;
 	int ret;
@@ -857,30 +873,38 @@ int qpack_encoder_insert_literal(struct qpack_encoder *enc,
 	if (!enc || !enc->encoder_stream || !name)
 		return -EINVAL;
 
+	buf = kmalloc(buf_size, GFP_ATOMIC);
+	if (!buf)
+		return -ENOMEM;
+
 	/* Encode: 01 (6-bit name length prefix) + name + value */
 	ret = qpack_encode_string(name, name_len, enc->use_huffman,
-				  buf, sizeof(buf), &encoded_len);
+				  buf, buf_size, &encoded_len);
 	if (ret)
-		return ret;
+		goto out_free;
 
 	/* Set prefix: 01xxxxxx */
 	buf[0] = (buf[0] & 0x3F) | 0x40;
 	offset = encoded_len;
 
 	ret = qpack_encode_string(value, value_len, enc->use_huffman,
-				  buf + offset, sizeof(buf) - offset, &encoded_len);
+				  buf + offset, buf_size - offset, &encoded_len);
 	if (ret)
-		return ret;
+		goto out_free;
 	offset += encoded_len;
 
 	/* Insert into local dynamic table */
 	ret = qpack_dynamic_table_insert(&enc->dynamic_table,
 					 name, name_len, value, value_len);
 	if (ret)
-		return ret;
+		goto out_free;
 
 	/* Send instruction on encoder stream */
-	return tquic_stream_send(enc->encoder_stream, buf, offset, false);
+	ret = tquic_stream_send(enc->encoder_stream, buf, offset, false);
+
+out_free:
+	kfree(buf);
+	return ret;
 }
 EXPORT_SYMBOL_GPL(qpack_encoder_insert_literal);
 

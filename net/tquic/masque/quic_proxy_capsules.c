@@ -683,7 +683,7 @@ int quic_proxy_decode_packet(
 	/* Packet data */
 	if (buf_len - offset < capsule->packet_len)
 		return -EINVAL;
-	capsule->packet = (u8 *)(buf + offset);
+	capsule->packet = buf + offset;
 	offset += capsule->packet_len;
 
 	return offset;

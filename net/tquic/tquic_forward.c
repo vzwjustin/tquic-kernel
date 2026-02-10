@@ -871,6 +871,10 @@ int tquic_forward_setup_nat(struct net_device *dev)
 	if (!dev)
 		return -EINVAL;
 
+	/* Packet forwarding requires administrative privilege */
+	if (!capable(CAP_NET_ADMIN))
+		return -EPERM;
+
 	/*
 	 * NAT masquerade is configured externally via nftables:
 	 *

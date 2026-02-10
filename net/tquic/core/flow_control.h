@@ -106,6 +106,7 @@ struct tquic_fc_conn_state {
  * @max_data_local: Local MAX_STREAM_DATA (we advertise)
  * @max_data_remote: Remote MAX_STREAM_DATA (peer advertises)
  * @data_sent: Data sent on this stream
+ * @data_reserved: Data reserved for pending transmission (CF-428)
  * @data_received: Data received on this stream
  * @data_consumed: Data consumed by application
  * @max_data_next: Next MAX_STREAM_DATA to send
@@ -131,6 +132,7 @@ struct tquic_fc_stream_state {
 	/* Remote limits (send direction) */
 	u64 max_data_remote;
 	u64 data_sent;
+	u64 data_reserved;	/* CF-428: Bytes reserved but not yet sent */
 	u64 blocked_at;
 	bool data_blocked_sent;
 	bool data_blocked_received;

@@ -33,6 +33,7 @@
 #include <net/tquic.h>
 
 #include "http3_stream.h"
+#include "http3_frame.h"
 #include "../core/varint.h"
 
 /* SLAB caches for HTTP/3 structures */
@@ -40,112 +41,8 @@ static struct kmem_cache *h3_connection_cache;
 static struct kmem_cache *h3_stream_cache;
 
 /*
- * =============================================================================
- * Varint Encoding/Decoding Helpers
- * =============================================================================
+ * Varint encode/decode are provided by http3_frame.h / http3_frame.c.
  */
-
-/**
- * h3_varint_decode - Decode a QUIC variable-length integer
- * @data: Input buffer
- * @len: Buffer length
- * @value: Output value
- *
- * Return: Number of bytes consumed, or negative error
- */
-static int h3_varint_decode(const u8 *data, size_t len, u64 *value)
-{
-	u8 prefix;
-	int varint_len;
-
-	if (len < 1)
-		return -EINVAL;
-
-	prefix = data[0] >> 6;
-	varint_len = 1 << prefix;
-
-	if (len < varint_len)
-		return -EAGAIN;
-
-	switch (varint_len) {
-	case 1:
-		*value = data[0] & 0x3f;
-		break;
-	case 2:
-		*value = ((u64)(data[0] & 0x3f) << 8) | data[1];
-		break;
-	case 4:
-		*value = ((u64)(data[0] & 0x3f) << 24) |
-			 ((u64)data[1] << 16) |
-			 ((u64)data[2] << 8) |
-			 data[3];
-		break;
-	case 8:
-		*value = ((u64)(data[0] & 0x3f) << 56) |
-			 ((u64)data[1] << 48) |
-			 ((u64)data[2] << 40) |
-			 ((u64)data[3] << 32) |
-			 ((u64)data[4] << 24) |
-			 ((u64)data[5] << 16) |
-			 ((u64)data[6] << 8) |
-			 data[7];
-		break;
-	default:
-		return -EINVAL;
-	}
-
-	return varint_len;
-}
-
-/**
- * h3_varint_encode - Encode a QUIC variable-length integer
- * @value: Value to encode
- * @buf: Output buffer
- * @buflen: Buffer length
- *
- * Return: Number of bytes written, or negative error
- */
-static int h3_varint_encode(u64 value, u8 *buf, size_t buflen)
-{
-	int len;
-
-	if (value <= 63) {
-		len = 1;
-		if (buflen < len)
-			return -ENOBUFS;
-		buf[0] = (u8)value;
-	} else if (value <= 16383) {
-		len = 2;
-		if (buflen < len)
-			return -ENOBUFS;
-		buf[0] = 0x40 | (u8)(value >> 8);
-		buf[1] = (u8)value;
-	} else if (value <= 1073741823) {
-		len = 4;
-		if (buflen < len)
-			return -ENOBUFS;
-		buf[0] = 0x80 | (u8)(value >> 24);
-		buf[1] = (u8)(value >> 16);
-		buf[2] = (u8)(value >> 8);
-		buf[3] = (u8)value;
-	} else if (value <= 4611686018427387903ULL) {
-		len = 8;
-		if (buflen < len)
-			return -ENOBUFS;
-		buf[0] = 0xc0 | (u8)(value >> 56);
-		buf[1] = (u8)(value >> 48);
-		buf[2] = (u8)(value >> 40);
-		buf[3] = (u8)(value >> 32);
-		buf[4] = (u8)(value >> 24);
-		buf[5] = (u8)(value >> 16);
-		buf[6] = (u8)(value >> 8);
-		buf[7] = (u8)value;
-	} else {
-		return -ERANGE;
-	}
-
-	return len;
-}
 
 /**
  * h3_varint_len - Get encoded length of a value
@@ -393,7 +290,7 @@ struct h3_stream *h3_stream_lookup(struct h3_connection *h3conn, u64 stream_id)
 {
 	struct rb_node *node;
 
-	spin_lock(&h3conn->lock);
+	spin_lock_bh(&h3conn->lock);
 
 	node = h3conn->streams.rb_node;
 	while (node) {
@@ -407,12 +304,12 @@ struct h3_stream *h3_stream_lookup(struct h3_connection *h3conn, u64 stream_id)
 			node = node->rb_right;
 		else {
 			refcount_inc(&h3s->refcnt);
-			spin_unlock(&h3conn->lock);
+			spin_unlock_bh(&h3conn->lock);
 			return h3s;
 		}
 	}
 
-	spin_unlock(&h3conn->lock);
+	spin_unlock_bh(&h3conn->lock);
 	return NULL;
 }
 EXPORT_SYMBOL_GPL(h3_stream_lookup);
@@ -467,9 +364,9 @@ struct h3_stream *h3_stream_create_request(struct h3_connection *h3conn)
 	h3s->request_state = H3_REQUEST_IDLE;
 
 	/* Insert into connection's stream tree */
-	spin_lock(&h3conn->lock);
+	spin_lock_bh(&h3conn->lock);
 	ret = h3_stream_insert(h3conn, h3s);
-	spin_unlock(&h3conn->lock);
+	spin_unlock_bh(&h3conn->lock);
 
 	if (ret) {
 		h3_stream_free(h3s);
@@ -531,9 +428,9 @@ struct h3_stream *h3_stream_create_push(struct h3_connection *h3conn,
 	h3s->push_state = H3_PUSH_ACTIVE;
 
 	/* Insert into connection's stream tree */
-	spin_lock(&h3conn->lock);
+	spin_lock_bh(&h3conn->lock);
 	ret = h3_stream_insert(h3conn, h3s);
-	spin_unlock(&h3conn->lock);
+	spin_unlock_bh(&h3conn->lock);
 
 	if (ret) {
 		h3_stream_free(h3s);
@@ -587,9 +484,9 @@ struct h3_stream *h3_stream_accept(struct h3_connection *h3conn,
 		h3s->type_received = true;  /* No type byte for bidi */
 	}
 
-	spin_lock(&h3conn->lock);
+	spin_lock_bh(&h3conn->lock);
 	ret = h3_stream_insert(h3conn, h3s);
-	spin_unlock(&h3conn->lock);
+	spin_unlock_bh(&h3conn->lock);
 
 	if (ret) {
 		h3_stream_free(h3s);
@@ -825,9 +722,9 @@ void h3_stream_close(struct h3_connection *h3conn, struct h3_stream *h3s)
 		/* This would normally trigger H3_CLOSED_CRITICAL_STREAM error */
 	}
 
-	spin_lock(&h3conn->lock);
+	spin_lock_bh(&h3conn->lock);
 	h3_stream_remove(h3conn, h3s);
-	spin_unlock(&h3conn->lock);
+	spin_unlock_bh(&h3conn->lock);
 
 	/* Close underlying QUIC stream */
 	if (h3s->base)
@@ -928,7 +825,7 @@ void h3_connection_destroy(struct h3_connection *h3conn)
 	 * sleep (e.g., for crypto teardown), so it must not be
 	 * called with a spinlock held.
 	 */
-	spin_lock(&h3conn->lock);
+	spin_lock_bh(&h3conn->lock);
 
 	while ((node = rb_first(&h3conn->streams))) {
 		h3s = rb_entry(node, struct h3_stream, node);
@@ -937,7 +834,7 @@ void h3_connection_destroy(struct h3_connection *h3conn)
 		list_add(&h3s->list, &close_list);
 	}
 
-	spin_unlock(&h3conn->lock);
+	spin_unlock_bh(&h3conn->lock);
 
 	/* Now close streams without holding the spinlock */
 	while (!list_empty(&close_list)) {
@@ -989,9 +886,9 @@ int h3_connection_open_control_streams(struct h3_connection *h3conn)
 	h3s->is_uni = true;
 	h3s->is_request_stream = false;
 
-	spin_lock(&h3conn->lock);
+	spin_lock_bh(&h3conn->lock);
 	ret = h3_stream_insert(h3conn, h3s);
-	spin_unlock(&h3conn->lock);
+	spin_unlock_bh(&h3conn->lock);
 
 	if (ret) {
 		h3_stream_free(h3s);
@@ -1029,9 +926,9 @@ int h3_connection_open_control_streams(struct h3_connection *h3conn)
 	h3s->type = H3_STREAM_TYPE_QPACK_ENCODER;
 	h3s->is_uni = true;
 
-	spin_lock(&h3conn->lock);
+	spin_lock_bh(&h3conn->lock);
 	ret = h3_stream_insert(h3conn, h3s);
-	spin_unlock(&h3conn->lock);
+	spin_unlock_bh(&h3conn->lock);
 
 	if (ret) {
 		h3_stream_free(h3s);
@@ -1068,9 +965,9 @@ int h3_connection_open_control_streams(struct h3_connection *h3conn)
 	h3s->type = H3_STREAM_TYPE_QPACK_DECODER;
 	h3s->is_uni = true;
 
-	spin_lock(&h3conn->lock);
+	spin_lock_bh(&h3conn->lock);
 	ret = h3_stream_insert(h3conn, h3s);
-	spin_unlock(&h3conn->lock);
+	spin_unlock_bh(&h3conn->lock);
 
 	if (ret) {
 		h3_stream_free(h3s);
@@ -1361,13 +1258,13 @@ EXPORT_SYMBOL_GPL(h3_connection_send_max_push_id);
 int __init tquic_http3_streams_init(void)
 {
 	/* Create SLAB caches */
-	h3_connection_cache = kmem_cache_create("h3_connection",
+	h3_connection_cache = kmem_cache_create("tquic_h3_conn",
 						sizeof(struct h3_connection),
 						0, SLAB_HWCACHE_ALIGN, NULL);
 	if (!h3_connection_cache)
 		return -ENOMEM;
 
-	h3_stream_cache = kmem_cache_create("h3_stream",
+	h3_stream_cache = kmem_cache_create("tquic_h3_stream",
 					    sizeof(struct h3_stream),
 					    0, SLAB_HWCACHE_ALIGN, NULL);
 	if (!h3_stream_cache) {

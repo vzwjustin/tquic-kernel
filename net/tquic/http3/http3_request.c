@@ -36,6 +36,7 @@
 #include <net/tquic.h>
 
 #include "http3_stream.h"
+#include "http3_frame.h"
 #include "../core/varint.h"
 
 /*
@@ -75,55 +76,9 @@ static int h3_build_frame_header(u64 frame_type, u64 payload_len,
 	return p - buf;
 }
 
-/**
- * h3_varint_encode - Encode a QUIC variable-length integer
- * @value: Value to encode
- * @buf: Output buffer
- * @buflen: Buffer length
- *
- * Return: Number of bytes written, or negative error
+/*
+ * Varint encode/decode are provided by http3_frame.h / http3_frame.c.
  */
-static int h3_varint_encode(u64 value, u8 *buf, size_t buflen)
-{
-	int len;
-
-	if (value <= 63) {
-		len = 1;
-		if (buflen < len)
-			return -ENOBUFS;
-		buf[0] = (u8)value;
-	} else if (value <= 16383) {
-		len = 2;
-		if (buflen < len)
-			return -ENOBUFS;
-		buf[0] = 0x40 | (u8)(value >> 8);
-		buf[1] = (u8)value;
-	} else if (value <= 1073741823) {
-		len = 4;
-		if (buflen < len)
-			return -ENOBUFS;
-		buf[0] = 0x80 | (u8)(value >> 24);
-		buf[1] = (u8)(value >> 16);
-		buf[2] = (u8)(value >> 8);
-		buf[3] = (u8)value;
-	} else if (value <= 4611686018427387903ULL) {
-		len = 8;
-		if (buflen < len)
-			return -ENOBUFS;
-		buf[0] = 0xc0 | (u8)(value >> 56);
-		buf[1] = (u8)(value >> 48);
-		buf[2] = (u8)(value >> 40);
-		buf[3] = (u8)(value >> 32);
-		buf[4] = (u8)(value >> 24);
-		buf[5] = (u8)(value >> 16);
-		buf[6] = (u8)(value >> 8);
-		buf[7] = (u8)value;
-	} else {
-		return -ERANGE;
-	}
-
-	return len;
-}
 
 /*
  * =============================================================================
@@ -519,58 +474,6 @@ static int h3_parse_frame_header(const u8 *data, size_t len,
 }
 
 /**
- * h3_varint_decode - Decode a QUIC variable-length integer
- * @data: Input buffer
- * @len: Buffer length
- * @value: Output value
- *
- * Return: Number of bytes consumed, or negative error
- */
-static int h3_varint_decode(const u8 *data, size_t len, u64 *value)
-{
-	u8 prefix;
-	int varint_len;
-
-	if (len < 1)
-		return -EAGAIN;
-
-	prefix = data[0] >> 6;
-	varint_len = 1 << prefix;
-
-	if (len < varint_len)
-		return -EAGAIN;
-
-	switch (varint_len) {
-	case 1:
-		*value = data[0] & 0x3f;
-		break;
-	case 2:
-		*value = ((u64)(data[0] & 0x3f) << 8) | data[1];
-		break;
-	case 4:
-		*value = ((u64)(data[0] & 0x3f) << 24) |
-			 ((u64)data[1] << 16) |
-			 ((u64)data[2] << 8) |
-			 data[3];
-		break;
-	case 8:
-		*value = ((u64)(data[0] & 0x3f) << 56) |
-			 ((u64)data[1] << 48) |
-			 ((u64)data[2] << 40) |
-			 ((u64)data[3] << 32) |
-			 ((u64)data[4] << 24) |
-			 ((u64)data[5] << 16) |
-			 ((u64)data[6] << 8) |
-			 data[7];
-		break;
-	default:
-		return -EINVAL;
-	}
-
-	return varint_len;
-}
-
-/**
  * h3_stream_recv_headers - Receive and process HEADERS frame
  * @h3s: HTTP/3 stream
  * @buf: Output buffer for header block
@@ -610,6 +513,10 @@ int h3_stream_recv_headers(struct h3_stream *h3s, void *buf, size_t len)
 		/* Not a HEADERS frame, could be DATA */
 		return -EAGAIN;
 	}
+
+	/* CF-377: Validate payload_len against protocol max */
+	if (payload_len > H3_MAX_FRAME_PAYLOAD_SIZE)
+		return -H3_FRAME_ERROR;
 
 	if (payload_len > len)
 		return -ENOBUFS;
@@ -873,24 +780,70 @@ int h3_control_recv_frame(struct h3_stream *h3s, u64 frame_type,
 
 	switch (frame_type) {
 	case H3_FRAME_SETTINGS:
-		pr_debug("h3: received SETTINGS frame\n");
-		/* Parse settings - implementation would extract parameters */
+		/*
+		 * CF-193: Actually parse SETTINGS payload per RFC 9114
+		 * Section 7.2.4. Delegate to the existing settings
+		 * receiver which validates identifier/value pairs.
+		 */
+		pr_debug("h3: received SETTINGS frame (%zu bytes)\n", len);
+		if (h3s->h3conn) {
+			int sret = h3_connection_recv_settings(h3s->h3conn,
+							       data, len);
+			if (sret < 0)
+				return sret;
+		}
 		break;
 
-	case H3_FRAME_GOAWAY:
-		pr_debug("h3: received GOAWAY frame\n");
-		/* Parse stream ID from GOAWAY */
-		break;
+	case H3_FRAME_GOAWAY: {
+		/*
+		 * CF-193: Parse GOAWAY stream ID (single varint).
+		 * RFC 9114 Section 5.2.
+		 */
+		u64 goaway_id;
+		int vret;
 
-	case H3_FRAME_MAX_PUSH_ID:
-		pr_debug("h3: received MAX_PUSH_ID frame\n");
-		/* Parse and update max push ID */
+		pr_debug("h3: received GOAWAY frame (%zu bytes)\n", len);
+		vret = tquic_varint_decode(data, len, &goaway_id);
+		if (vret < 0)
+			return -EINVAL;
+		if (h3s->h3conn)
+			h3_connection_recv_goaway(h3s->h3conn, goaway_id);
 		break;
+	}
 
-	case H3_FRAME_CANCEL_PUSH:
-		pr_debug("h3: received CANCEL_PUSH frame\n");
-		/* Parse push ID and cancel */
+	case H3_FRAME_MAX_PUSH_ID: {
+		/*
+		 * CF-193: Parse MAX_PUSH_ID (single varint).
+		 * RFC 9114 Section 7.2.7.
+		 */
+		u64 push_id;
+		int vret;
+
+		pr_debug("h3: received MAX_PUSH_ID frame (%zu bytes)\n", len);
+		vret = tquic_varint_decode(data, len, &push_id);
+		if (vret < 0)
+			return -EINVAL;
+		if (h3s->h3conn)
+			h3_connection_set_max_push_id(h3s->h3conn, push_id);
 		break;
+	}
+
+	case H3_FRAME_CANCEL_PUSH: {
+		/*
+		 * CF-193: Parse CANCEL_PUSH (single varint push ID).
+		 * RFC 9114 Section 7.2.3.
+		 */
+		u64 push_id;
+		int vret;
+
+		pr_debug("h3: received CANCEL_PUSH frame (%zu bytes)\n", len);
+		vret = tquic_varint_decode(data, len, &push_id);
+		if (vret < 0)
+			return -EINVAL;
+		if (h3s->h3conn)
+			h3_push_cancel(h3s->h3conn, push_id);
+		break;
+	}
 
 	case H3_FRAME_DATA:
 	case H3_FRAME_HEADERS:
@@ -929,10 +882,19 @@ struct h3_stream *h3_stream_lookup_by_push_id(struct h3_connection *h3conn,
 {
 	struct rb_node *node;
 	struct h3_stream *h3s;
+	int checked = 0;
 
 	spin_lock(&h3conn->lock);
 
+	/*
+	 * CF-274: Linear scan through rb_tree by push_id. Bounded by
+	 * stream_count to prevent excessive CPU under lock if the tree
+	 * is large. Push streams are rare in practice.
+	 */
 	for (node = rb_first(&h3conn->streams); node; node = rb_next(node)) {
+		if (++checked > h3conn->stream_count)
+			break;
+
 		h3s = rb_entry(node, struct h3_stream, node);
 
 		if (h3s->type == H3_STREAM_TYPE_PUSH &&

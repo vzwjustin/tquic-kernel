@@ -228,6 +228,14 @@ static int ecf_get_path(struct tquic_connection *conn,
 	 * For each path, calculate completion time and find minimum.
 	 * Also track second-best for backup path.
 	 */
+	/*
+	 * Hold sd->lock for the entire path evaluation loop.
+	 * This serializes find-or-alloc of path state entries with
+	 * ecf_path_added/ecf_path_removed, preventing duplicate
+	 * allocations and data races on the paths[] array.
+	 */
+	spin_lock(&sd->lock);
+
 	list_for_each_entry_rcu(path, &conn->paths, list) {
 		struct ecf_path_state *ps;
 		u64 completion;
@@ -274,26 +282,21 @@ static int ecf_get_path(struct tquic_connection *conn,
 	}
 
 	if (!best) {
+		spin_unlock(&sd->lock);
 		rcu_read_unlock();
 		return -ENOENT;
 	}
 
-	/* Track path switches for diagnostics -- protect shared scheduler
-	 * state with sd->lock to prevent data races on SMP.
-	 */
-	{
-		unsigned long irqflags;
-
-		spin_lock_irqsave(&sd->lock, irqflags);
-		if (sd->current_path_id != best->path_id) {
-			pr_debug("ecf: switching to path %u (completion=%llu us), was path %u\n",
-				 best->path_id, min_completion,
-				 sd->current_path_id);
-			sd->current_path_id = best->path_id;
-			sd->path_switches++;
-		}
-		spin_unlock_irqrestore(&sd->lock, irqflags);
+	/* Track path switches for diagnostics */
+	if (sd->current_path_id != best->path_id) {
+		pr_debug("ecf: switching to path %u (completion=%llu us), was path %u\n",
+			 best->path_id, min_completion,
+			 sd->current_path_id);
+		sd->current_path_id = best->path_id;
+		sd->path_switches++;
 	}
+
+	spin_unlock(&sd->lock);
 
 	result->primary = best;
 	result->backup = second_best;  /* Second-best for failover */
@@ -349,6 +352,12 @@ static void ecf_path_added(struct tquic_connection *conn,
 	if (!sd)
 		return;
 
+	/*
+	 * Hold sd->lock around the find-or-alloc to prevent a
+	 * concurrent ecf_get_path() from allocating a duplicate
+	 * slot for the same path_id.
+	 */
+	spin_lock(&sd->lock);
 	ps = ecf_find_path_state(sd, path->path_id);
 	if (!ps)
 		ps = ecf_alloc_path_state(sd, path->path_id);
@@ -358,6 +367,7 @@ static void ecf_path_added(struct tquic_connection *conn,
 		pr_debug("ecf: path %u added (rtt=%u us, rate=%llu bytes/s)\n",
 			 path->path_id, ps->rtt_us, ps->send_rate);
 	}
+	spin_unlock(&sd->lock);
 }
 
 /**
@@ -376,6 +386,7 @@ static void ecf_path_removed(struct tquic_connection *conn,
 	if (!sd)
 		return;
 
+	spin_lock(&sd->lock);
 	ps = ecf_find_path_state(sd, path->path_id);
 	if (ps) {
 		ps->valid = false;
@@ -385,6 +396,7 @@ static void ecf_path_removed(struct tquic_connection *conn,
 	/* If current path was removed, invalidate selection */
 	if (sd->current_path_id == path->path_id)
 		sd->current_path_id = TQUIC_INVALID_PATH_ID;
+	spin_unlock(&sd->lock);
 }
 
 /**
@@ -406,6 +418,7 @@ static void ecf_packet_sent(struct tquic_connection *conn,
 	if (!sd)
 		return;
 
+	spin_lock(&sd->lock);
 	ps = ecf_find_path_state(sd, path->path_id);
 	if (!ps) {
 		ps = ecf_alloc_path_state(sd, path->path_id);
@@ -415,6 +428,7 @@ static void ecf_packet_sent(struct tquic_connection *conn,
 
 	if (ps)
 		ps->inflight_bytes += sent_bytes;
+	spin_unlock(&sd->lock);
 }
 
 /**
@@ -435,9 +449,12 @@ static void ecf_ack_received(struct tquic_connection *conn,
 	if (!sd)
 		return;
 
+	spin_lock(&sd->lock);
 	ps = ecf_find_path_state(sd, path->path_id);
-	if (!ps)
+	if (!ps) {
+		spin_unlock(&sd->lock);
 		return;
+	}
 
 	/* Decrease inflight by acknowledged bytes */
 	if (ps->inflight_bytes >= acked_bytes)
@@ -447,6 +464,7 @@ static void ecf_ack_received(struct tquic_connection *conn,
 
 	/* Update rate from path metrics */
 	ecf_update_rate_from_path(ps, path);
+	spin_unlock(&sd->lock);
 }
 
 /**
@@ -467,9 +485,12 @@ static void ecf_loss_detected(struct tquic_connection *conn,
 	if (!sd)
 		return;
 
+	spin_lock(&sd->lock);
 	ps = ecf_find_path_state(sd, path->path_id);
-	if (!ps)
+	if (!ps) {
+		spin_unlock(&sd->lock);
 		return;
+	}
 
 	/* Lost packets are no longer in flight */
 	if (ps->inflight_bytes >= lost_bytes)
@@ -479,6 +500,7 @@ static void ecf_loss_detected(struct tquic_connection *conn,
 
 	pr_debug("ecf: path %u loss %llu bytes, inflight now %llu\n",
 		 path->path_id, lost_bytes, ps->inflight_bytes);
+	spin_unlock(&sd->lock);
 }
 
 /**

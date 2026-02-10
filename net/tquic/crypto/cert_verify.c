@@ -480,7 +480,11 @@ static int parse_san_extension(const u8 *data, u32 len,
 				size_t new_cap = name_capacity * 2;
 				char **new_names;
 
-				if (name_capacity >= 10000)
+				/*
+				 * CF-560: Tighten SAN name capacity limit.
+				 * 256 DNS names is generous for any real cert.
+				 */
+				if (name_capacity >= 256)
 					goto err_free;
 				new_names = krealloc_array(names, new_cap,
 							   sizeof(char *),
@@ -489,6 +493,16 @@ static int parse_san_extension(const u8 *data, u32 len,
 					goto err_free;
 				names = new_names;
 				name_capacity = new_cap;
+			}
+
+			/*
+			 * CF-413: Reject SAN DNS names containing embedded
+			 * NUL bytes to prevent truncation attacks where
+			 * "evil.com\0.good.com" matches "evil.com".
+			 */
+			if (memchr(p + 1 + hdr_len, 0, content_len)) {
+				p += 1 + hdr_len + content_len;
+				continue;
 			}
 
 			names[name_count] = kmalloc(content_len + 1, GFP_KERNEL);
@@ -660,9 +674,20 @@ static int parse_basic_constraints(const u8 *data, u32 len,
 
 	/* Optional CA BOOLEAN */
 	if (p < end && p[0] == 0x01) {  /* BOOLEAN */
-		if (p + 3 <= end) {
+		/*
+		 * CF-555: Parse the BOOLEAN properly instead of
+		 * hardcoding length=3.  DER BOOLEAN is always
+		 * 01 01 xx but validate the length byte.
+		 */
+		if (p + 2 <= end && p[1] == 0x01 && p + 3 <= end) {
 			*is_ca = (p[2] != 0);
 			p += 3;
+		} else if (p + 2 <= end) {
+			/* Non-standard BOOLEAN length - skip it */
+			u32 blen = p[1];
+
+			if (p + 2 + blen <= end)
+				p += 2 + blen;
 		}
 	}
 
@@ -1127,7 +1152,11 @@ static int parse_extensions(struct tquic_x509_cert *cert,
 								  &seq_content_len,
 								  &seq_total_len);
 					if (ret == 0) {
-						parse_san_extension(
+						/*
+						 * CF-360: Check and propagate
+						 * errors from SAN parsing.
+						 */
+						ret = parse_san_extension(
 							val + (seq_total_len - seq_content_len),
 							seq_content_len,
 							&cert->san_dns,
@@ -1135,6 +1164,8 @@ static int parse_extensions(struct tquic_x509_cert *cert,
 							&cert->san_ip,
 							&cert->san_ip_len,
 							&cert->san_ip_count);
+						if (ret < 0)
+							return ret;
 					}
 				}
 
@@ -1329,6 +1360,10 @@ static int parse_time(const u8 *data, u32 len, s64 *time_out)
 	} else {
 		return -EINVAL;
 	}
+
+	/* Validate year range to prevent mktime64 issues */
+	if (year < 1970 || year > 9999)
+		return -EINVAL;
 
 	*time_out = mktime64(year, month, day, hour, min, sec);
 
@@ -1696,6 +1731,13 @@ struct tquic_x509_cert *tquic_x509_cert_parse(const u8 *data, u32 len, gfp_t gfp
 
 	/* Parse signature */
 	const u8 *after_tbs = cert->tbs + cert->tbs_len;
+
+	/* Validate tbs pointer is within parsed data bounds */
+	if (after_tbs < cert->tbs || after_tbs > p + content_len) {
+		tquic_x509_cert_free(cert);
+		return NULL;
+	}
+
 	u32 remaining = content_len - (after_tbs - p);
 
 	ret = parse_signature(cert, after_tbs, remaining);
@@ -2037,18 +2079,24 @@ int tquic_x509_verify_signature(const struct tquic_x509_cert *cert,
 	switch (cert->signature.pubkey_algo) {
 	case TQUIC_PUBKEY_ALGO_RSA:
 		/*
-		 * Currently only SHA-256 is supported for RSA/RSA-PSS
-		 * certificate signatures. Reject other hash algorithms
-		 * until full RSA-PSS AlgorithmIdentifier parameter
-		 * parsing is implemented.
+		 * Construct RSA algorithm name dynamically from the
+		 * certificate's hash algorithm.
 		 */
-		if (cert->signature.hash_algo != TQUIC_HASH_SHA256) {
-			pr_debug("tquic_cert: RSA-PSS with non-SHA-256 hash "
-				 "not yet supported (hash_algo=%d)\n",
+		switch (cert->signature.hash_algo) {
+		case TQUIC_HASH_SHA256:
+			alg_name = "pkcs1pad(rsa,sha256)";
+			break;
+		case TQUIC_HASH_SHA384:
+			alg_name = "pkcs1pad(rsa,sha384)";
+			break;
+		case TQUIC_HASH_SHA512:
+			alg_name = "pkcs1pad(rsa,sha512)";
+			break;
+		default:
+			pr_debug("tquic_cert: unsupported RSA hash algo %d\n",
 				 cert->signature.hash_algo);
 			return -EOPNOTSUPP;
 		}
-		alg_name = "pkcs1pad(rsa,sha256)";
 		break;
 	case TQUIC_PUBKEY_ALGO_ECDSA_P256:
 	case TQUIC_PUBKEY_ALGO_ECDSA_P384:
@@ -2609,6 +2657,35 @@ static int verify_chain(struct tquic_cert_verify_ctx *ctx, bool is_server)
 			return ret;
 		}
 
+		/*
+		 * Verify issuer-subject linkage and signature BEFORE
+		 * checking trust anchors.  This ensures the chain is
+		 * properly linked and prevents accepting a certificate
+		 * that matches a trust anchor but was not actually
+		 * issued by it (CF-361).
+		 */
+		if (cert->next) {
+			/* Verify issuer-subject DN linkage */
+			if (cert->issuer_raw && cert->next->subject_raw) {
+				if (cert->issuer_raw_len !=
+				    cert->next->subject_raw_len ||
+				    crypto_memneq(cert->issuer_raw,
+						  cert->next->subject_raw,
+						  cert->issuer_raw_len)) {
+					ctx->error_code = TQUIC_CERT_ERR_SIG_VERIFY;
+					ctx->error_msg = "Issuer-subject linkage mismatch in chain";
+					return -EKEYREJECTED;
+				}
+			}
+
+			ret = tquic_x509_verify_signature(cert, cert->next);
+			if (ret < 0) {
+				ctx->error_code = TQUIC_CERT_ERR_SIG_VERIFY;
+				ctx->error_msg = "Certificate signature verification failed";
+				return ret;
+			}
+		}
+
 		/* Check if this certificate is a trust anchor */
 		ret = find_trust_anchor(ctx, cert);
 		if (ret == 0) {
@@ -2625,16 +2702,6 @@ static int verify_chain(struct tquic_cert_verify_ctx *ctx, bool is_server)
 			ctx->error_code = TQUIC_CERT_ERR_SELF_SIGNED;
 			ctx->error_msg = "Self-signed certificate not trusted";
 			return -ENOKEY;
-		}
-
-		/* Verify signature against next cert (issuer) */
-		if (cert->next) {
-			ret = tquic_x509_verify_signature(cert, cert->next);
-			if (ret < 0) {
-				ctx->error_code = TQUIC_CERT_ERR_SIG_VERIFY;
-				ctx->error_msg = "Certificate signature verification failed";
-				return ret;
-			}
 		}
 	}
 
@@ -2677,6 +2744,15 @@ int tquic_verify_cert_chain(struct tquic_cert_verify_ctx *ctx,
 
 		if (cert_len == 0 || p + cert_len > end)
 			break;
+
+		/* Early chain length check to avoid parsing excess certs */
+		if (ctx->chain_len >= TQUIC_MAX_CERT_CHAIN_LEN) {
+			ctx->error_code = TQUIC_CERT_ERR_CHAIN_TOO_LONG;
+			ctx->error_msg = "Certificate chain too long";
+			tquic_x509_chain_free(ctx->chain);
+			ctx->chain = NULL;
+			return -EMLINK;
+		}
 
 		struct tquic_x509_cert *cert = tquic_x509_cert_parse(p, cert_len, GFP_KERNEL);
 		if (!cert) {
@@ -3172,10 +3248,10 @@ static ssize_t tquic_proc_trusted_cas_write(struct file *file,
 	if (!capable(CAP_NET_ADMIN))
 		return -EPERM;
 
-	if (count > TQUIC_MAX_CERT_SIZE)
+	if (count > TQUIC_MAX_CERT_SIZE || count == 0)
 		return -EINVAL;
 
-	kbuf = kmalloc(count + 1, GFP_KERNEL);
+	kbuf = kmalloc(size_add(count, 1), GFP_KERNEL);
 	if (!kbuf)
 		return -ENOMEM;
 
@@ -3255,7 +3331,7 @@ int __init tquic_cert_verify_init(void)
 	/* Create procfs entries */
 	tquic_cert_proc_dir = proc_mkdir("tquic_cert", init_net.proc_net);
 	if (tquic_cert_proc_dir) {
-		proc_create("trusted_cas", 0644, tquic_cert_proc_dir,
+		proc_create("trusted_cas", 0600, tquic_cert_proc_dir,
 			    &tquic_proc_trusted_cas_ops);
 		proc_create("config", 0444, tquic_cert_proc_dir,
 			    &tquic_proc_verify_config_ops);

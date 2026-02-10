@@ -572,7 +572,7 @@ struct quic_proxy_packet_capsule {
 	bool compressed;
 	u8 compress_index;
 	u16 packet_len;
-	u8 *packet;
+	const u8 *packet;
 };
 
 /**

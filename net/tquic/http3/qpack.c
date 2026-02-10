@@ -403,11 +403,18 @@ int qpack_huffman_decode(const u8 *src, size_t src_len,
 	u8 bit_count = 0;
 	size_t src_offset = 0;
 	int sym;
+	/*
+	 * Bound total iterations to prevent O(n*256) algorithmic
+	 * complexity attacks.  Huffman coding expands by at most 7:5
+	 * for HPACK/QPACK, so src_len * 2 is a generous bound.
+	 */
+	size_t max_output = min(dst_len, src_len * 2 + 1);
 
 	if (!src || !dst || !decoded_len)
 		return -EINVAL;
 
-	while (src_offset < src_len || bit_count > 0) {
+	while ((src_offset < src_len || bit_count > 0) &&
+	       dst_offset < max_output) {
 		/* Refill bit buffer */
 		while (bit_count < 24 && src_offset < src_len) {
 			bit_buffer = (bit_buffer << 8) | src[src_offset++];
@@ -578,12 +585,12 @@ int qpack_decode_integer(const u8 *buf, size_t buf_len, u8 prefix_bits,
 		if (offset >= buf_len)
 			return -ENODATA;
 
+		/* Overflow check - must be before shift to prevent UB */
+		if (shift > 62)
+			return -EOVERFLOW;
+
 		result += (u64)(buf[offset] & 0x7F) << shift;
 		shift += 7;
-
-		/* Overflow check */
-		if (shift > 63)
-			return -EOVERFLOW;
 
 	} while (buf[offset++] & 0x80);
 
@@ -748,15 +755,35 @@ EXPORT_SYMBOL_GPL(qpack_header_list_init);
  *
  * Returns: 0 on success, negative error code on failure
  */
+/*
+ * Safety limits for header lists to prevent memory exhaustion.
+ * An attacker could send header blocks with thousands of headers,
+ * each triggering kernel memory allocations.
+ */
+#define QPACK_MAX_HEADER_COUNT	256
+#define QPACK_MAX_HEADER_LIST_SIZE	(64 * 1024)	/* 64 KB */
+
 int qpack_header_list_add(struct qpack_header_list *list,
 			  const char *name, u16 name_len,
 			  const char *value, u16 value_len,
 			  bool never_index)
 {
 	struct qpack_header_field *hdr;
+	u64 entry_size;
 
 	if (!list || !name)
 		return -EINVAL;
+
+	/*
+	 * Enforce header count and total size limits to prevent
+	 * memory exhaustion from malicious header blocks.
+	 */
+	if (list->count >= QPACK_MAX_HEADER_COUNT)
+		return -E2BIG;
+
+	entry_size = (u64)name_len + value_len + 32;
+	if (list->total_size + entry_size > QPACK_MAX_HEADER_LIST_SIZE)
+		return -E2BIG;
 
 	hdr = kzalloc(sizeof(*hdr), GFP_KERNEL);
 	if (!hdr)

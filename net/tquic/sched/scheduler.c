@@ -36,14 +36,14 @@ static int __tquic_sched_register(struct tquic_sched_ops *ops)
 	if (!ops || !ops->name || !ops->select)
 		return -EINVAL;
 
-	spin_lock(&tquic_sched_lock);
+	spin_lock_bh(&tquic_sched_lock);
 	list_add_tail_rcu(&ops->list, &tquic_sched_list);
 
 	/* First registered becomes default */
 	if (!default_scheduler)
 		default_scheduler = ops;
 
-	spin_unlock(&tquic_sched_lock);
+	spin_unlock_bh(&tquic_sched_lock);
 
 	tquic_info("registered scheduler '%s'\n", ops->name);
 	return 0;
@@ -51,7 +51,7 @@ static int __tquic_sched_register(struct tquic_sched_ops *ops)
 
 static void __tquic_sched_unregister(struct tquic_sched_ops *ops)
 {
-	spin_lock(&tquic_sched_lock);
+	spin_lock_bh(&tquic_sched_lock);
 
 	list_del_rcu(&ops->list);
 
@@ -60,7 +60,7 @@ static void __tquic_sched_unregister(struct tquic_sched_ops *ops)
 			&tquic_sched_list, struct tquic_sched_ops, list);
 	}
 
-	spin_unlock(&tquic_sched_lock);
+	spin_unlock_bh(&tquic_sched_lock);
 
 	synchronize_rcu();
 
@@ -149,11 +149,10 @@ struct tquic_sched_ops *tquic_sched_default(void)
 	rcu_read_lock();
 	ops = rcu_dereference(default_scheduler);
 	if (ops) {
-		pr_warn("tquic_sched: default_scheduler='%s' owner=%px\n",
-			ops->name, ops->owner);
+		pr_debug("tquic_sched: default_scheduler='%s'\n",
+			 ops->name);
 		if (!try_module_get(ops->owner)) {
-			pr_warn("tquic_sched: try_module_get FAILED for owner=%px\n",
-				ops->owner);
+			pr_warn("tquic_sched: try_module_get FAILED\n");
 			ops = NULL;
 		}
 	} else {
@@ -176,9 +175,9 @@ int tquic_sched_set_default(const char *name)
 	if (!ops)
 		return -ENOENT;
 
-	spin_lock(&tquic_sched_lock);
+	spin_lock_bh(&tquic_sched_lock);
 	default_scheduler = ops;
-	spin_unlock(&tquic_sched_lock);
+	spin_unlock_bh(&tquic_sched_lock);
 
 	module_put(ops->owner);
 
@@ -195,28 +194,27 @@ void *tquic_sched_init_conn(struct tquic_connection *conn,
 {
 	void *result;
 
-	pr_warn("tquic_sched: init_conn called, ops=%px conn=%px\n", ops, conn);
+	pr_debug("tquic_sched: init_conn called\n");
 
 	if (!ops) {
 		ops = tquic_sched_default();
-		pr_warn("tquic_sched: got default ops=%px\n", ops);
+		pr_debug("tquic_sched: using default ops\n");
 	}
 
 	if (!ops) {
-		pr_warn("tquic_sched: no ops available, returning NULL\n");
+		pr_debug("tquic_sched: no ops available, returning NULL\n");
 		return NULL;
 	}
 
-	pr_warn("tquic_sched: using scheduler '%s', init=%px\n",
-		ops->name, ops->init);
+	pr_debug("tquic_sched: using scheduler '%s'\n", ops->name);
 
 	if (ops->init) {
 		result = ops->init(conn);
-		pr_warn("tquic_sched: init() returned %px\n", result);
+		pr_debug("tquic_sched: init() completed\n");
 		return result;
 	}
 
-	pr_warn("tquic_sched: no init callback, returning ops=%px\n", ops);
+	pr_debug("tquic_sched: no init callback\n");
 	return ops;  /* Return ops as state if no init needed */
 }
 EXPORT_SYMBOL_GPL(tquic_sched_init_conn);
@@ -360,11 +358,26 @@ static struct tquic_path *wrr_select(void *state, struct tquic_connection *conn,
 	struct wrr_sched_data *data = state;
 	struct tquic_path *path;
 	u32 target, cumulative = 0;
+	u32 tw;
 
-	if (!data || data->total_weight == 0)
+	if (!data)
 		return conn->active_path;
 
-	target = atomic_inc_return(&data->counter) % data->total_weight;
+	/*
+	 * Recompute total_weight from the current path list to avoid
+	 * stale values after path add/remove events.
+	 */
+	tw = 0;
+	list_for_each_entry(path, &conn->paths, list) {
+		if (path->state == TQUIC_PATH_ACTIVE)
+			tw += path->weight;
+	}
+	data->total_weight = tw;
+
+	if (tw == 0)
+		return conn->active_path;
+
+	target = atomic_inc_return(&data->counter) % tw;
 
 	list_for_each_entry(path, &conn->paths, list) {
 		if (path->state != TQUIC_PATH_ACTIVE)

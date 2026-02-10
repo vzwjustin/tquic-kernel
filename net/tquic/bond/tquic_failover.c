@@ -118,6 +118,15 @@ static const char * const tquic_hyst_state_names[] = {
 	[TQUIC_PATH_HYST_RECOVERING]	= "RECOVERING",
 };
 
+/* CF-392: Bounds-safe accessor for state name */
+static inline const char *tquic_hyst_state_name(unsigned int state)
+{
+	if (state >= ARRAY_SIZE(tquic_hyst_state_names) ||
+	    !tquic_hyst_state_names[state])
+		return "UNKNOWN";
+	return tquic_hyst_state_names[state];
+}
+
 /**
  * tquic_hyst_stable_time_us - Calculate minimum stabilization time
  * @pt: Path timeout structure with current SRTT
@@ -164,8 +173,8 @@ static void tquic_hyst_transition(struct tquic_path_timeout *pt,
 
 	pr_info("path %u hysteresis: %s -> %s (failures=%u successes=%u)\n",
 		pt->path_id,
-		tquic_hyst_state_names[old_state],
-		tquic_hyst_state_names[new_state],
+		tquic_hyst_state_name(old_state),
+		tquic_hyst_state_name(new_state),
 		pt->consec_failures, pt->consec_successes);
 }
 
@@ -214,7 +223,7 @@ static void tquic_failover_timeout_work(struct work_struct *work)
 		spinlock_t *hyst_lock;
 
 		hyst_lock = &tquic_hyst_locks[path_id % TQUIC_HYST_LOCK_COUNT];
-		spin_lock(hyst_lock);
+		spin_lock_bh(hyst_lock);
 
 		pt->consec_failures++;
 		pt->consec_successes = 0;
@@ -224,7 +233,7 @@ static void tquic_failover_timeout_work(struct work_struct *work)
 			"hyst_state=%s)\n",
 			path_id, elapsed_us, pt->timeout_ms,
 			pt->consec_failures, TQUIC_HYST_FAIL_THRESHOLD,
-			tquic_hyst_state_names[pt->hyst_state]);
+			tquic_hyst_state_name(pt->hyst_state));
 
 		switch (pt->hyst_state) {
 		case TQUIC_PATH_HYST_HEALTHY:
@@ -277,7 +286,7 @@ static void tquic_failover_timeout_work(struct work_struct *work)
 			pt->timeout_armed = false;
 		}
 
-		spin_unlock(hyst_lock);
+		spin_unlock_bh(hyst_lock);
 
 		if (trigger_failover)
 			tquic_failover_on_path_failed(fc, path_id);
@@ -520,7 +529,8 @@ int tquic_failover_on_ack(struct tquic_failover_ctx *fc, u64 packet_number)
 	/* Remove from tracking */
 	rhashtable_remove_fast(&fc->sent_packets, &sp->hash_node,
 			       tquic_sent_packet_params);
-	fc->sent_count--;
+	if (fc->sent_count > 0)
+		fc->sent_count--;
 	atomic64_inc(&fc->stats.packets_acked);
 
 	spin_unlock_bh(&fc->sent_packets_lock);
@@ -728,7 +738,7 @@ void tquic_failover_update_path_ack(struct tquic_failover_ctx *fc,
 		spinlock_t *hyst_lock;
 
 		hyst_lock = &tquic_hyst_locks[path_id % TQUIC_HYST_LOCK_COUNT];
-		spin_lock(hyst_lock);
+		spin_lock_bh(hyst_lock);
 
 		pt->consec_successes++;
 		pt->consec_failures = 0;
@@ -790,13 +800,13 @@ void tquic_failover_update_path_ack(struct tquic_failover_ctx *fc,
 			break;
 		}
 
-		spin_unlock(hyst_lock);
+		spin_unlock_bh(hyst_lock);
 	}
 
 	pr_debug("path %u: ACK received, SRTT=%llu us, timeout=%u ms, "
 		 "hyst=%s consec_ok=%u\n",
 		 path_id, srtt_us, timeout_ms,
-		 tquic_hyst_state_names[READ_ONCE(pt->hyst_state)],
+		 tquic_hyst_state_name(READ_ONCE(pt->hyst_state)),
 		 READ_ONCE(pt->consec_successes));
 }
 EXPORT_SYMBOL_GPL(tquic_failover_update_path_ack);
@@ -829,7 +839,7 @@ const char *tquic_failover_path_hyst_state(struct tquic_failover_ctx *fc,
 	if (!fc || path_id >= ARRAY_SIZE(fc->path_timeouts))
 		return "UNKNOWN";
 
-	return tquic_hyst_state_names[READ_ONCE(fc->path_timeouts[path_id].hyst_state)];
+	return tquic_hyst_state_name(READ_ONCE(fc->path_timeouts[path_id].hyst_state));
 }
 EXPORT_SYMBOL_GPL(tquic_failover_path_hyst_state);
 

@@ -66,7 +66,9 @@ int tquic_fec_scheduler_init(struct tquic_fec_state *state,
 
 	spin_lock_init(&sched->lock);
 
-	sched->target_fec_rate = initial_rate ? initial_rate : FEC_DEFAULT_RATE;
+	sched->target_fec_rate = initial_rate ?
+				min_t(u8, initial_rate, 100) :
+				FEC_DEFAULT_RATE;
 	sched->min_fec_rate = FEC_MIN_RATE;
 	sched->max_fec_rate = FEC_MAX_RATE;
 	sched->adaptive = adaptive;
@@ -105,12 +107,19 @@ static void update_loss_rate(struct tquic_fec_scheduler *sched)
 		return;
 	}
 
-	/* Calculate current window loss rate (permille) */
-	new_rate = (sched->loss_count * 1000) / sched->packet_count;
+	/*
+	 * Calculate current window loss rate (permille).
+	 * Use u64 intermediate to prevent u32 overflow on loss_count * 1000.
+	 */
+	new_rate = (u32)div64_u64((u64)sched->loss_count * 1000,
+				  sched->packet_count);
+	if (new_rate > 1000)
+		new_rate = 1000;
 
 	/* EWMA: new_avg = old_avg + (new_sample - old_avg) / 16 */
 	sched->current_loss_rate = sched->current_loss_rate +
-		((int)new_rate - (int)sched->current_loss_rate) / (1 << EWMA_SHIFT);
+		((s32)new_rate - (s32)sched->current_loss_rate) /
+		(1 << EWMA_SHIFT);
 }
 
 /**

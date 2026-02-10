@@ -409,6 +409,11 @@ static void tquic_stream_free(struct tquic_stream *stream)
 	if (!stream)
 		return;
 
+	/* Decrement per-type stream counter */
+	if (stream->conn && h3_stream_id_is_uni(stream->id) &&
+	    stream->priority < TQUIC_H3_STREAM_TYPE_MAX)
+		stream->conn->h3_uni_stream_count[stream->priority]--;
+
 	/*
 	 * Get the parent socket for memory accounting.
 	 * If the connection or socket is already gone, fall back
@@ -644,8 +649,14 @@ static int tquic_stream_release(struct socket *sock)
 		 * Take a connection refcount to ensure the connection
 		 * stays alive while we clean up the stream.
 		 */
-		if (!tquic_conn_get(conn))
+		if (!tquic_conn_get(conn)) {
+			/*
+			 * CF-635: Connection is being destroyed.
+			 * Still free the stream to avoid a leak.
+			 */
+			tquic_stream_free(stream);
 			goto out;
+		}
 
 		/* Send FIN if not already sent and stream is still writable */
 		if (!stream->fin_sent &&
@@ -685,9 +696,18 @@ static size_t tquic_stream_check_flow_control(struct tquic_connection *conn,
 	size_t allowed = len;
 	u64 stream_limit, conn_limit;
 
+	/*
+	 * CF-297: Hold conn->lock across both stream-level and
+	 * connection-level flow control checks to prevent TOCTOU
+	 * races with concurrent sendmsg() on other streams sharing
+	 * the same connection-level limit.
+	 */
+	spin_lock_bh(&conn->lock);
+
 	/* Check stream-level flow control */
 	if (stream->send_offset >= stream->max_send_data) {
 		stream->blocked = true;
+		spin_unlock_bh(&conn->lock);
 		return 0;
 	}
 
@@ -696,7 +716,6 @@ static size_t tquic_stream_check_flow_control(struct tquic_connection *conn,
 		allowed = stream_limit;
 
 	/* Check connection-level flow control */
-	spin_lock_bh(&conn->lock);
 	if (conn->data_sent >= conn->max_data_remote) {
 		spin_unlock_bh(&conn->lock);
 		return 0;
@@ -705,6 +724,7 @@ static size_t tquic_stream_check_flow_control(struct tquic_connection *conn,
 	conn_limit = conn->max_data_remote - conn->data_sent;
 	if (allowed > conn_limit)
 		allowed = conn_limit;
+
 	spin_unlock_bh(&conn->lock);
 
 	return allowed;
@@ -774,7 +794,8 @@ static void tquic_stream_trigger_output(struct tquic_connection *conn,
 	 * and the timer/recovery subsystem processes them.
 	 */
 	if (path->stats.cwnd > 0) {
-		inflight = path->stats.tx_bytes - path->stats.acked_bytes;
+		inflight = (path->stats.tx_bytes > path->stats.acked_bytes) ?
+			   path->stats.tx_bytes - path->stats.acked_bytes : 0;
 		can_send = (inflight < path->stats.cwnd);
 	} else {
 		/* No cwnd limit set yet (initial state) */
@@ -1003,30 +1024,29 @@ static int tquic_stream_sendmsg(struct socket *sock, struct msghdr *msg,
 
 		skb = alloc_skb(chunk, GFP_KERNEL);
 		if (!skb) {
-			if (copied == 0) {
-				/*
-				 * Return the reserved credit since
-				 * nothing was actually queued.
-				 */
-				spin_lock_bh(&conn->lock);
-				conn->data_sent -= (len - copied);
-				spin_unlock_bh(&conn->lock);
+			u64 unreserve = len - copied;
+
+			spin_lock_bh(&conn->lock);
+			if (conn->data_sent >= unreserve)
+				conn->data_sent -= unreserve;
+			else
+				conn->data_sent = 0;
+			spin_unlock_bh(&conn->lock);
+			if (copied == 0)
 				copied = -ENOMEM;
-			} else {
-				/* Return unused portion of reservation */
-				spin_lock_bh(&conn->lock);
-				conn->data_sent -= (len - copied);
-				spin_unlock_bh(&conn->lock);
-			}
 			goto out_put;
 		}
 
 		if (copy_from_iter(skb_put(skb, chunk), chunk,
 				   &msg->msg_iter) != chunk) {
+			u64 unreserve = len - copied;
+
 			kfree_skb(skb);
-			/* Return unused portion of reservation */
 			spin_lock_bh(&conn->lock);
-			conn->data_sent -= (len - copied);
+			if (conn->data_sent >= unreserve)
+				conn->data_sent -= unreserve;
+			else
+				conn->data_sent = 0;
 			spin_unlock_bh(&conn->lock);
 			if (copied == 0)
 				copied = -EFAULT;
@@ -1035,10 +1055,14 @@ static int tquic_stream_sendmsg(struct socket *sock, struct msghdr *msg,
 
 		/* Charge socket memory for this buffer */
 		if (tquic_stream_wmem_charge(ss->parent_sk, skb)) {
+			u64 unreserve = len - copied;
+
 			kfree_skb(skb);
-			/* Return unused portion of reservation */
 			spin_lock_bh(&conn->lock);
-			conn->data_sent -= (len - copied);
+			if (conn->data_sent >= unreserve)
+				conn->data_sent -= unreserve;
+			else
+				conn->data_sent = 0;
 			spin_unlock_bh(&conn->lock);
 			if (copied == 0)
 				copied = -ENOBUFS;
@@ -1441,6 +1465,10 @@ int tquic_stream_set_http3_type(struct tquic_stream *stream, u8 type)
 
 	stream->priority = type;
 
+	/* Update per-type counter for O(1) stream counting */
+	if (type < TQUIC_H3_STREAM_TYPE_MAX && stream->conn)
+		stream->conn->h3_uni_stream_count[type]++;
+
 	tquic_dbg("set HTTP/3 stream type %s on id=%llu\n",
 		 h3_stream_type_name(type), stream->id);
 
@@ -1528,29 +1556,13 @@ EXPORT_SYMBOL_GPL(tquic_stream_lookup_by_id);
  */
 int tquic_stream_count_by_type(struct tquic_connection *conn, u8 type)
 {
-	struct rb_node *node;
-	int count = 0;
-
 	if (!conn)
 		return 0;
 
-	spin_lock_bh(&conn->lock);
+	/* Use O(1) per-type counters for known HTTP/3 stream types */
+	if (type < TQUIC_H3_STREAM_TYPE_MAX)
+		return conn->h3_uni_stream_count[type];
 
-	for (node = rb_first(&conn->streams); node; node = rb_next(node)) {
-		struct tquic_stream *stream;
-
-		stream = rb_entry(node, struct tquic_stream, node);
-
-		/* Only count unidirectional streams */
-		if (!h3_stream_id_is_uni(stream->id))
-			continue;
-
-		if (stream->priority == type)
-			count++;
-	}
-
-	spin_unlock_bh(&conn->lock);
-
-	return count;
+	return 0;
 }
 EXPORT_SYMBOL_GPL(tquic_stream_count_by_type);

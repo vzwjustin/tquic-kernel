@@ -771,9 +771,9 @@ struct tquic_io_buf_ring *tquic_io_buf_ring_create(
 	br->tail = ring_size;  /* All buffers initially available */
 	spin_lock_init(&br->lock);
 
-	/* Initialize buffer entries */
+	/* Initialize buffer entries with IDs only (no kernel addresses) */
 	for (i = 0; i < ring_size; i++) {
-		br->br->bufs[i].addr = (u64)(br->buf_base + i * buf_size);
+		br->br->bufs[i].addr = 0;
 		br->br->bufs[i].len = buf_size;
 		br->br->bufs[i].bid = i;
 	}
@@ -819,7 +819,8 @@ void *tquic_io_buf_ring_get(struct tquic_io_buf_ring *br, u16 *bid)
 
 	head &= br->mask;
 	*bid = br->br->bufs[head].bid;
-	buf = (void *)(unsigned long)br->br->bufs[head].addr;
+	/* Compute address from base + bid instead of storing kernel addr */
+	buf = br->buf_base + (size_t)*bid * br->buf_size;
 
 	smp_store_release(&br->head, br->head + 1);
 
@@ -836,7 +837,7 @@ void tquic_io_buf_ring_put(struct tquic_io_buf_ring *br, u16 bid)
 
 	tail = br->tail & br->mask;
 	br->br->bufs[tail].bid = bid;
-	br->br->bufs[tail].addr = (u64)(br->buf_base + bid * br->buf_size);
+	br->br->bufs[tail].addr = 0;	/* Address computed from bid at get time */
 	br->br->bufs[tail].len = br->buf_size;
 
 	smp_store_release(&br->tail, br->tail + 1);
@@ -1206,7 +1207,8 @@ int tquic_uring_getsockopt(struct sock *sk, int optname,
 	if (get_user(len, optlen))
 		return -EFAULT;
 
-	if (len < 0)
+	/* CF-543: Reject zero-length reads; sizeof(int) minimum for int opts */
+	if (len < (int)sizeof(int))
 		return -EINVAL;
 
 	switch (optname) {

@@ -23,9 +23,9 @@
 
 /*
  * Maximum payload size for safety. Very large payloads may indicate
- * a malformed frame or attack.
+ * a malformed frame or attack. 1MB is generous for HTTP/3 frames.
  */
-#define H3_MAX_FRAME_PAYLOAD_SIZE	(16 * 1024 * 1024)
+#define H3_MAX_FRAME_PAYLOAD_SIZE	(1 * 1024 * 1024)
 
 /*
  * Frame parsing result codes
@@ -118,6 +118,16 @@ static inline bool h3_parser_remaining(struct h3_frame_parser *p, size_t bytes)
 
 static inline void h3_parser_advance(struct h3_frame_parser *p, size_t bytes)
 {
+	/*
+	 * Defense-in-depth: prevent size_t underflow on p->len.
+	 * Callers should validate bounds via h3_parser_remaining() or
+	 * h3_varint_decode() before calling, but clamp here to avoid
+	 * silent buffer over-reads if a caller is ever buggy.
+	 */
+	if (unlikely(bytes > p->len)) {
+		WARN_ON_ONCE(1);
+		bytes = p->len;
+	}
 	p->buf += bytes;
 	p->len -= bytes;
 	p->consumed += bytes;

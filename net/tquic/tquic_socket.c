@@ -245,8 +245,15 @@ int tquic_connect(struct sock *sk, TQUIC_SOCKADDR *uaddr, int addr_len)
 	struct tquic_connection *conn;
 	int ret;
 
-	if (addr_len < sizeof(struct sockaddr_in))
-		return -EINVAL;
+	if (addr->sa_family == AF_INET) {
+		if (addr_len < sizeof(struct sockaddr_in))
+			return -EINVAL;
+	} else if (addr->sa_family == AF_INET6) {
+		if (addr_len < sizeof(struct sockaddr_in6))
+			return -EINVAL;
+	} else {
+		return -EAFNOSUPPORT;
+	}
 
 	lock_sock(sk);
 
@@ -356,7 +363,11 @@ int tquic_connect(struct sock *sk, TQUIC_SOCKADDR *uaddr, int addr_len)
 
 out_close:
 	inet_sk_set_state(sk, TCP_CLOSE);
-	sk->sk_err = -ret;  /* Store error for getsockopt */
+	/*
+	 * CF-241: sk_err uses positive errno values per kernel convention.
+	 * ret is already negative (e.g., -ECONNREFUSED), so negate it.
+	 */
+	WRITE_ONCE(sk->sk_err, -ret);
 out_unlock:
 	release_sock(sk);
 	/* CF-085: Drop the connection reference taken at function entry */
@@ -697,9 +708,14 @@ EXPORT_SYMBOL_GPL(tquic_close);
 int tquic_sock_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 {
 	struct sock *sk = sock->sk;
-	struct tquic_sock *tsk = tquic_sk(sk);
-	struct tquic_connection *conn = tsk->conn;
+	struct tquic_sock *tsk;
+	struct tquic_connection *conn;
 	void __user *uarg = (void __user *)arg;
+
+	lock_sock(sk);
+	tsk = tquic_sk(sk);
+	conn = tsk->conn;
+	release_sock(sk);
 
 	switch (cmd) {
 	case TQUIC_NEW_STREAM: {
@@ -786,11 +802,25 @@ int tquic_sock_setsockopt(struct socket *sock, int level, int optname,
 	if (level != SOL_TQUIC)
 		return -ENOPROTOOPT;
 
-	if (optlen < sizeof(int))
-		return -EINVAL;
+	/*
+	 * Variable-length options (PSK identity, etc.) handle their
+	 * own optlen validation below.  For all other (integer) options,
+	 * require exactly sizeof(int).
+	 */
+	switch (optname) {
+	case TQUIC_PSK_IDENTITY:
+		/* Variable-length, validated in its case block */
+		break;
+	default:
+		if (optlen != sizeof(int))
+			return -EINVAL;
+		break;
+	}
 
-	if (copy_from_sockptr(&val, optval, sizeof(val)))
-		return -EFAULT;
+	if (optlen >= sizeof(int)) {
+		if (copy_from_sockptr(&val, optval, sizeof(val)))
+			return -EFAULT;
+	}
 
 	switch (optname) {
 	case TQUIC_NODELAY:
@@ -817,6 +847,13 @@ int tquic_sock_setsockopt(struct socket *sock, int level, int optname,
 		return 0;
 
 	case TQUIC_IDLE_TIMEOUT:
+		/*
+		 * RFC 9000 Section 10.1: idle_timeout in milliseconds.
+		 * Cap at 600000ms (10 minutes) to prevent unreasonable values.
+		 * A value of 0 disables the idle timeout.
+		 */
+		if (val > 600000)
+			return -ERANGE;
 		if (tsk->conn)
 			tsk->conn->idle_timeout = val;
 		break;
@@ -855,6 +892,7 @@ int tquic_sock_setsockopt(struct socket *sock, int level, int optname,
 
 	case TQUIC_MIGRATE: {
 		struct tquic_migrate_args args;
+		sa_family_t family;
 
 		if (optlen < sizeof(args))
 			return -EINVAL;
@@ -863,6 +901,33 @@ int tquic_sock_setsockopt(struct socket *sock, int level, int optname,
 			return -EFAULT;
 
 		if (args.reserved != 0)
+			return -EINVAL;
+
+		/*
+		 * CF-208: Validate the address family and basic
+		 * structure before passing to migration code.
+		 * Without this, a malformed sockaddr could cause
+		 * undefined behavior in the path lookup code.
+		 */
+		family = args.local_addr.ss_family;
+		if (family != AF_INET && family != AF_INET6)
+			return -EAFNOSUPPORT;
+
+		if (family == AF_INET) {
+			struct sockaddr_in *sin =
+				(struct sockaddr_in *)&args.local_addr;
+			if (sin->sin_addr.s_addr == INADDR_ANY)
+				return -EINVAL;
+		} else {
+			struct sockaddr_in6 *sin6 =
+				(struct sockaddr_in6 *)&args.local_addr;
+			if (ipv6_addr_any(&sin6->sin6_addr))
+				return -EINVAL;
+		}
+
+		/* CF-208: Validate known flags only */
+		if (args.flags & ~(TQUIC_MIGRATE_FLAG_PROBE_ONLY |
+				   TQUIC_MIGRATE_FLAG_FORCE))
 			return -EINVAL;
 
 		if (tsk->conn)
@@ -914,8 +979,11 @@ int tquic_sock_setsockopt(struct socket *sock, int level, int optname,
 			ret = -EISCONN;
 		} else if (tsk->conn) {
 			/* Connection exists but idle, init scheduler now */
-			struct tquic_sched_ops *sched_ops = tquic_sched_find(name);
+			struct tquic_sched_ops *sched_ops;
 
+			rcu_read_lock();
+			sched_ops = tquic_sched_find(name);
+			rcu_read_unlock();
 			if (sched_ops) {
 				tsk->conn->scheduler = tquic_sched_init_conn(tsk->conn, sched_ops);
 				if (!tsk->conn->scheduler)
@@ -1975,6 +2043,10 @@ static int tquic_sendmsg_datagram(struct sock *sk, struct msghdr *msg,
 	if (len > conn->datagram.max_send_size)
 		return -EMSGSIZE;
 
+	/* CF-350: Cap allocation to prevent excessive kernel memory usage */
+	if (len > 65535)
+		return -EMSGSIZE;
+
 	/* Allocate buffer for datagram payload */
 	buf = kmalloc(len, GFP_KERNEL);
 	if (!buf)
@@ -2250,6 +2322,8 @@ int tquic_recvmsg(struct sock *sk, struct msghdr *msg, size_t len, int flags,
 	if (!stream)
 		return 0;
 
+	lock_sock(sk);
+
 	while (copied < len && !skb_queue_empty(&stream->recv_buf)) {
 		size_t chunk;
 
@@ -2276,6 +2350,8 @@ int tquic_recvmsg(struct sock *sk, struct msghdr *msg, size_t len, int flags,
 
 		conn->stats.rx_bytes += chunk;
 	}
+
+	release_sock(sk);
 
 	return copied;
 }

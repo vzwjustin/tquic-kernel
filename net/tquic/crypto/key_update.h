@@ -112,6 +112,7 @@ struct tquic_key_update_state {
 	bool handshake_confirmed;
 	bool old_keys_valid;
 	bool keys_installing;		/* Derivation in progress */
+	u64 pending_generation;		/* Generation armed for timeout */
 
 	/* Cipher configuration */
 	u16 cipher_suite;
@@ -289,6 +290,23 @@ int tquic_key_update_get_current_keys(struct tquic_key_update_state *state,
 				      int direction,
 				      u8 *key, u32 *key_len,
 				      u8 *iv, u32 *iv_len);
+
+/**
+ * tquic_key_update_get_current_secret - Get current traffic secret
+ * @state: Key update state
+ * @direction: 0 = read (decrypt), 1 = write (encrypt)
+ * @secret: Output buffer for traffic secret (must be TQUIC_SECRET_MAX_LEN)
+ * @secret_len: Output: secret length
+ *
+ * Retrieves the current application traffic secret for the given direction.
+ * This is the secret from which AEAD keys and IVs are derived, and is needed
+ * for extended key update PSK mixing via HKDF-Extract.
+ *
+ * Returns 0 on success, -ENOKEY if keys not available.
+ */
+int tquic_key_update_get_current_secret(struct tquic_key_update_state *state,
+					int direction,
+					u8 *secret, u32 *secret_len);
 
 /**
  * tquic_key_update_get_phase - Get current key phase

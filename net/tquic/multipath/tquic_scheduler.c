@@ -556,10 +556,6 @@ int tquic_sched_set(struct tquic_connection *conn, const char *name)
 	struct tquic_sched_internal *old_sched, *new_sched;
 	int ret = 0;
 
-	/* Cannot change scheduler after connection established */
-	if (conn->state != TQUIC_CONN_IDLE)
-		return -EISCONN;
-
 	rcu_read_lock();
 	new_sched = tquic_int_sched_find(name);
 	if (!new_sched) {
@@ -574,6 +570,13 @@ int tquic_sched_set(struct tquic_connection *conn, const char *name)
 	rcu_read_unlock();
 
 	spin_lock_bh(&conn->lock);
+
+	/* Cannot change scheduler after connection established (under lock) */
+	if (conn->state != TQUIC_CONN_IDLE) {
+		spin_unlock_bh(&conn->lock);
+		module_put(new_sched->owner);
+		return -EISCONN;
+	}
 
 	old_sched = conn->sched;
 
@@ -663,45 +666,59 @@ static int tquic_rr_select_path(struct tquic_connection *conn,
 	sel->num_paths = 0;
 	sel->duplicate = false;
 
-	if (conn->num_paths == 0)
-		return -ENOENT;
-
 	rcu_read_lock();
 
-	/* Find starting point */
-	list_for_each_entry_rcu(path, &conn->paths, list) {
-		if (path->path_id >= rr->next_path_id) {
-			start_path = path;
-			break;
-		}
-	}
+	/*
+	 * CF-289: Read num_paths once under RCU to avoid TOCTOU.
+	 * The list is RCU-protected, so the snapshot is consistent
+	 * with the list traversal below.
+	 */
+	{
+		int snap_num_paths = READ_ONCE(conn->num_paths);
 
-	if (!start_path)
-		start_path = list_first_entry_or_null(&conn->paths,
-						      struct tquic_path, list);
-
-	if (!start_path) {
-		rcu_read_unlock();
-		return -ENOENT;
-	}
-
-	/* Round-robin through paths, skipping failed/standby */
-	path = start_path;
-	do {
-		if (tquic_path_can_send(path)) {
-			selected = path;
-			break;
+		if (snap_num_paths == 0) {
+			rcu_read_unlock();
+			return -ENOENT;
 		}
 
-		/* Move to next path (circular) */
-		if (list_is_last(&path->list, &conn->paths))
-			path = list_first_entry(&conn->paths,
-						struct tquic_path, list);
-		else
-			path = list_next_entry(path, list);
+		/* Find starting point */
+		list_for_each_entry_rcu(path, &conn->paths, list) {
+			if (path->path_id >= rr->next_path_id) {
+				start_path = path;
+				break;
+			}
+		}
 
-		attempts++;
-	} while (path != start_path && attempts < conn->num_paths);
+		if (!start_path)
+			start_path = list_first_entry_or_null(&conn->paths,
+							      struct tquic_path,
+							      list);
+
+		if (!start_path) {
+			rcu_read_unlock();
+			return -ENOENT;
+		}
+
+		/* Round-robin through paths, skipping failed/standby */
+		path = start_path;
+		do {
+			if (tquic_path_can_send(path)) {
+				selected = path;
+				break;
+			}
+
+			/* Move to next path (circular) */
+			if (list_is_last(&path->list, &conn->paths))
+				path = list_first_entry(&conn->paths,
+							struct tquic_path,
+							list);
+			else
+				path = list_next_entry(path, list);
+
+			attempts++;
+		} while (path != start_path &&
+			 attempts < snap_num_paths);
+	}
 
 	if (selected) {
 		sel->paths[0] = selected;
@@ -819,7 +836,8 @@ static int tquic_weighted_select_path(struct tquic_connection *conn,
 
 	rcu_read_lock();
 
-	start_idx = wd->current_path_idx % conn->num_paths;
+	start_idx = wd->current_path_idx % min_t(int, conn->num_paths,
+					       TQUIC_MAX_PATHS);
 	path_idx = start_idx;
 
 	/*
@@ -832,6 +850,8 @@ static int tquic_weighted_select_path(struct tquic_connection *conn,
 
 		list_for_each_entry_rcu(path, &conn->paths, list) {
 			if (idx == path_idx) {
+				if (path_idx >= TQUIC_MAX_PATHS)
+					break;
 				if (tquic_path_can_send(path)) {
 					struct tquic_weighted_path_data *pd;
 
@@ -2171,16 +2191,12 @@ void tquic_path_packet_sent(struct tquic_connection *conn, u8 path_id,
 		path->stats.last_send_time = tquic_get_time_us();
 		path->cc.bytes_in_flight += bytes;
 
-		/* Notify scheduler inflight tracking (cast: internal
-		 * tquic_int_* types are layout-compatible with public
-		 * tquic_* types used in the notify API declaration).
+		/*
+		 * CF-252: Call scheduler notify directly without void*
+		 * casts that bypass type checking. The types are the
+		 * same (struct tquic_connection *, struct tquic_path *).
 		 */
-		{
-			void *c = conn;
-			void *p = path;
-
-			tquic_mp_sched_notify_sent(c, p, bytes);
-		}
+		tquic_mp_sched_notify_sent(conn, path, bytes);
 	}
 
 	atomic64_inc(&conn->stats.total_packets);

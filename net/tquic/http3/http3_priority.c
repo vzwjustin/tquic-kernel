@@ -248,10 +248,13 @@ int http3_priority_state_init(struct tquic_connection *conn)
 		return -ENOMEM;
 
 	/* Initialize urgency buckets */
-	for (i = 0; i < HTTP3_PRIORITY_NUM_BUCKETS; i++)
+	for (i = 0; i < HTTP3_PRIORITY_NUM_BUCKETS; i++) {
 		INIT_LIST_HEAD(&state->buckets[i]);
+		INIT_LIST_HEAD(&state->push_buckets[i]);
+	}
 
 	state->streams = RB_ROOT;
+	state->push_streams = RB_ROOT;
 	spin_lock_init(&state->lock);
 	state->enabled = true;
 	state->conn = conn;
@@ -324,6 +327,10 @@ int http3_priority_stream_init(struct tquic_connection *conn,
 	state = conn->priority_state;
 	if (!state || !state->enabled)
 		return 0;
+
+	/* CF-479: Limit tracked streams to prevent resource exhaustion */
+	if (state->stream_count >= 65536)
+		return -ENOSPC;
 
 	ps = kmem_cache_zalloc(state->cache, GFP_ATOMIC);
 	if (!ps)
