@@ -28,6 +28,7 @@
 #include <net/gro.h>
 #include <crypto/aead.h>
 #include <net/tquic.h>
+#include <net/tquic_frame.h>
 
 #include "tquic_compat.h"
 #include "tquic_debug.h"
