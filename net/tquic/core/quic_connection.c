@@ -629,7 +629,7 @@ void tquic_conn_destroy(struct tquic_connection *conn)
 	cancel_work_sync(&conn->close_work);
 
 	/* Destroy streams */
-	spin_lock(&conn->streams_lock);
+	spin_lock_bh(&conn->streams_lock);
 	node = rb_first(&conn->streams);
 	while (node) {
 		stream = rb_entry(node, struct tquic_stream, node);
@@ -637,7 +637,7 @@ void tquic_conn_destroy(struct tquic_connection *conn)
 		rb_erase(&stream->node, &conn->streams);
 		tquic_stream_destroy(NULL, stream);
 	}
-	spin_unlock(&conn->streams_lock);
+	spin_unlock_bh(&conn->streams_lock);
 
 	/* Destroy paths */
 	list_for_each_entry_safe(path, tmp_path, &conn->paths, list) {

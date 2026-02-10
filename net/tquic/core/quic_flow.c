@@ -781,9 +781,6 @@ void tquic_streams_on_stream_opened(struct tquic_connection *conn,
 void tquic_streams_on_peer_stream_opened(struct tquic_connection *conn,
 					bool unidirectional)
 {
-	spin_lock_bh(&conn->lock);
-	spin_unlock_bh(&conn->lock);
-
 	/* Check if we should send MAX_STREAMS to allow more peer streams */
 	tquic_streams_check_update(conn, unidirectional);
 }

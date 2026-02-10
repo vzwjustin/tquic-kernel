@@ -374,14 +374,14 @@ int tquic_mp_handle_path_abandon(struct tquic_connection *conn,
 		 frame->path_id, frame->error_code);
 
 	/* Find the path */
-	spin_lock(&conn->paths_lock);
+	spin_lock_bh(&conn->paths_lock);
 	list_for_each_entry(path, &conn->paths, list) {
 		if (path->path_id == frame->path_id) {
 			found = true;
 			break;
 		}
 	}
-	spin_unlock(&conn->paths_lock);
+	spin_unlock_bh(&conn->paths_lock);
 
 	if (!found) {
 		pr_debug("tquic_mp: PATH_ABANDON for unknown path %llu\n",
@@ -399,11 +399,11 @@ int tquic_mp_handle_path_abandon(struct tquic_connection *conn,
 		path->abandon_state = abandon_state;
 	}
 
-	spin_lock(&abandon_state->lock);
+	spin_lock_bh(&abandon_state->lock);
 
 	/* Check if already abandoned */
 	if (abandon_state->abandon_state == TQUIC_MP_ABANDON_COMPLETE) {
-		spin_unlock(&abandon_state->lock);
+		spin_unlock_bh(&abandon_state->lock);
 		return 0;
 	}
 
@@ -417,7 +417,7 @@ int tquic_mp_handle_path_abandon(struct tquic_connection *conn,
 
 	abandon_state->abandon_state = TQUIC_MP_ABANDON_RECEIVED;
 
-	spin_unlock(&abandon_state->lock);
+	spin_unlock_bh(&abandon_state->lock);
 
 	/* Mark path as closed */
 	path->state = TQUIC_PATH_CLOSED;
@@ -882,7 +882,7 @@ int tquic_mp_handle_new_connection_id(struct tquic_connection *conn,
 		 frame->path_id, frame->seq_num, frame->retire_prior_to);
 
 	/* Find the path */
-	spin_lock(&conn->paths_lock);
+	spin_lock_bh(&conn->paths_lock);
 	list_for_each_entry(path, &conn->paths, list) {
 		if (path->path_id == frame->path_id) {
 			found = true;
@@ -891,7 +891,7 @@ int tquic_mp_handle_new_connection_id(struct tquic_connection *conn,
 	}
 
 	if (!found) {
-		spin_unlock(&conn->paths_lock);
+		spin_unlock_bh(&conn->paths_lock);
 		pr_debug("tquic_mp: MP_NEW_CONNECTION_ID for unknown path %llu\n",
 			 frame->path_id);
 		return -ENOENT;
@@ -911,7 +911,7 @@ int tquic_mp_handle_new_connection_id(struct tquic_connection *conn,
 			 frame->path_id, frame->seq_num, frame->cid_len);
 	}
 
-	spin_unlock(&conn->paths_lock);
+	spin_unlock_bh(&conn->paths_lock);
 
 	/*
 	 * RFC 9000 Section 5.1.2: CID Retirement
@@ -971,7 +971,7 @@ int tquic_mp_handle_retire_connection_id(struct tquic_connection *conn,
 		 frame->path_id, frame->seq_num);
 
 	/* Find the path */
-	spin_lock(&conn->paths_lock);
+	spin_lock_bh(&conn->paths_lock);
 	list_for_each_entry(path, &conn->paths, list) {
 		if (path->path_id == frame->path_id) {
 			found = true;
@@ -980,7 +980,7 @@ int tquic_mp_handle_retire_connection_id(struct tquic_connection *conn,
 	}
 
 	if (!found) {
-		spin_unlock(&conn->paths_lock);
+		spin_unlock_bh(&conn->paths_lock);
 		pr_debug("tquic_mp: MP_RETIRE_CONNECTION_ID for unknown path %llu\n",
 			 frame->path_id);
 		/*
@@ -1004,7 +1004,7 @@ int tquic_mp_handle_retire_connection_id(struct tquic_connection *conn,
 			 frame->seq_num, path->path_id);
 	}
 
-	spin_unlock(&conn->paths_lock);
+	spin_unlock_bh(&conn->paths_lock);
 
 	if (!cid_matched) {
 		/*
@@ -1085,7 +1085,7 @@ int tquic_mp_handle_path_status(struct tquic_connection *conn,
 		 frame->path_id, frame->status, frame->priority);
 
 	/* Find the path */
-	spin_lock(&conn->paths_lock);
+	spin_lock_bh(&conn->paths_lock);
 	list_for_each_entry(path, &conn->paths, list) {
 		if (path->path_id == frame->path_id) {
 			found = true;
@@ -1094,7 +1094,7 @@ int tquic_mp_handle_path_status(struct tquic_connection *conn,
 	}
 
 	if (!found) {
-		spin_unlock(&conn->paths_lock);
+		spin_unlock_bh(&conn->paths_lock);
 		pr_debug("tquic_mp: PATH_STATUS for unknown path %llu\n",
 			 frame->path_id);
 		return -ENOENT;
@@ -1103,17 +1103,17 @@ int tquic_mp_handle_path_status(struct tquic_connection *conn,
 	/* Get abandonment state for sequence tracking */
 	abandon_state = path->abandon_state;
 	if (abandon_state) {
-		spin_lock(&abandon_state->lock);
+		spin_lock_bh(&abandon_state->lock);
 
 		/* Check sequence number - ignore old status updates */
 		if (frame->seq_num <= abandon_state->status_seq.remote_seq) {
-			spin_unlock(&abandon_state->lock);
-			spin_unlock(&conn->paths_lock);
+			spin_unlock_bh(&abandon_state->lock);
+			spin_unlock_bh(&conn->paths_lock);
 			return 0;
 		}
 
 		abandon_state->status_seq.remote_seq = frame->seq_num;
-		spin_unlock(&abandon_state->lock);
+		spin_unlock_bh(&abandon_state->lock);
 	}
 
 	/* Update path based on status */
@@ -1141,7 +1141,7 @@ int tquic_mp_handle_path_status(struct tquic_connection *conn,
 	/* Update priority */
 	path->priority = (u8)min_t(u64, frame->priority, 255);
 
-	spin_unlock(&conn->paths_lock);
+	spin_unlock_bh(&conn->paths_lock);
 
 	return 0;
 }
@@ -1227,7 +1227,7 @@ int tquic_mp_select_new_active_path(struct tquic_connection *conn,
 	if (!conn)
 		return -EINVAL;
 
-	spin_lock(&conn->paths_lock);
+	spin_lock_bh(&conn->paths_lock);
 
 	list_for_each_entry(path, &conn->paths, list) {
 		u64 score;
@@ -1268,7 +1268,7 @@ int tquic_mp_select_new_active_path(struct tquic_connection *conn,
 		pr_warn("tquic_mp: no available paths after abandonment\n");
 	}
 
-	spin_unlock(&conn->paths_lock);
+	spin_unlock_bh(&conn->paths_lock);
 
 	return best_path ? 0 : -ENOENT;
 }

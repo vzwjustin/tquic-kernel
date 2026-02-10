@@ -2029,7 +2029,7 @@ static int tquic_process_mp_ack_frame(struct tquic_rx_ctx *ctx)
 	 * prevent the path from being freed while we access it.
 	 * tquic_mp_on_ack_received() must not sleep.
 	 */
-	spin_lock(&ctx->conn->paths_lock);
+	spin_lock_bh(&ctx->conn->paths_lock);
 	list_for_each_entry(path, &ctx->conn->paths, list) {
 		if (path->path_id == frame.path_id) {
 			ack_state = path->mp_ack_state;
@@ -2037,7 +2037,7 @@ static int tquic_process_mp_ack_frame(struct tquic_rx_ctx *ctx)
 				ret = tquic_mp_on_ack_received(ack_state,
 					TQUIC_PN_SPACE_APPLICATION,
 					&frame, ctx->conn);
-				spin_unlock(&ctx->conn->paths_lock);
+				spin_unlock_bh(&ctx->conn->paths_lock);
 				if (ret < 0) {
 					tquic_dbg("MP_ACK processing failed: %d\n", ret);
 					return ret;
@@ -2049,7 +2049,7 @@ static int tquic_process_mp_ack_frame(struct tquic_rx_ctx *ctx)
 			break;
 		}
 	}
-	spin_unlock(&ctx->conn->paths_lock);
+	spin_unlock_bh(&ctx->conn->paths_lock);
 
 	tquic_dbg("MP_ACK for unknown/uninitialized path %llu\n",
 		 frame.path_id);

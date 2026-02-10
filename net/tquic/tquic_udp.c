@@ -1218,6 +1218,7 @@ int tquic_udp_deliver_to_conn(struct tquic_connection *conn,
 
 	/* Fallback: queue to default stream for basic functionality */
 	if (tsk->default_stream) {
+		memset(skb->cb, 0, sizeof(skb->cb));
 		skb_queue_tail(&tsk->default_stream->recv_buf, skb);
 		conn->sk->sk_data_ready(conn->sk);
 		return 0;

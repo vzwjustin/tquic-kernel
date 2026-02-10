@@ -339,6 +339,7 @@ void tquic_packet_process_coalesced(struct tquic_connection *conn,
 	pn = tquic_decode_pn(atomic64_read(&conn->pkt_num_rx), truncated_pn,
 			     pn_len);
 
+	memset(TQUIC_SKB_CB(skb), 0, sizeof(struct tquic_skb_cb));
 	TQUIC_SKB_CB(skb)->pn = pn;
 	TQUIC_SKB_CB(skb)->pn_len = pn_len;
 	TQUIC_SKB_CB(skb)->header_len = pn_offset + pn_len;

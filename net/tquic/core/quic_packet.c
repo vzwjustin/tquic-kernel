@@ -135,9 +135,8 @@ static struct tquic_stream *tquic_stream_lookup_internal(struct tquic_connection
 							 u64 stream_id)
 {
 	struct rb_node *node;
-	unsigned long flags;
 
-	spin_lock_irqsave(&conn->streams_lock, flags);
+	spin_lock_bh(&conn->streams_lock);
 	node = conn->streams.rb_node;
 	while (node) {
 		struct tquic_stream *stream = rb_entry(node, struct tquic_stream, node);
@@ -147,11 +146,11 @@ static struct tquic_stream *tquic_stream_lookup_internal(struct tquic_connection
 		else if (stream_id > stream->id)
 			node = node->rb_right;
 		else {
-			spin_unlock_irqrestore(&conn->streams_lock, flags);
+			spin_unlock_bh(&conn->streams_lock);
 			return stream;
 		}
 	}
-	spin_unlock_irqrestore(&conn->streams_lock, flags);
+	spin_unlock_bh(&conn->streams_lock);
 	return NULL;
 }
 
@@ -160,7 +159,6 @@ static struct tquic_stream *tquic_stream_create_internal(struct tquic_connection
 {
 	struct tquic_stream *stream;
 	struct rb_node **link, *parent = NULL;
-	unsigned long flags;
 
 	stream = kzalloc(sizeof(*stream), GFP_ATOMIC);
 	if (!stream)
@@ -174,7 +172,7 @@ static struct tquic_stream *tquic_stream_create_internal(struct tquic_connection
 	init_waitqueue_head(&stream->wait);
 
 	/* Insert into rb_tree */
-	spin_lock_irqsave(&conn->streams_lock, flags);
+	spin_lock_bh(&conn->streams_lock);
 	link = &conn->streams.rb_node;
 	while (*link) {
 		struct tquic_stream *s = rb_entry(*link, struct tquic_stream, node);
@@ -186,7 +184,7 @@ static struct tquic_stream *tquic_stream_create_internal(struct tquic_connection
 	}
 	rb_link_node(&stream->node, parent, link);
 	rb_insert_color(&stream->node, &conn->streams);
-	spin_unlock_irqrestore(&conn->streams_lock, flags);
+	spin_unlock_bh(&conn->streams_lock);
 
 	return stream;
 }

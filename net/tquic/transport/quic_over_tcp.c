@@ -1043,10 +1043,10 @@ void quic_tcp_set_packet_callback(struct quic_tcp_connection *conn,
 	if (!conn)
 		return;
 
-	spin_lock(&conn->lock);
+	spin_lock_bh(&conn->lock);
 	conn->packet_callback = callback;
 	conn->callback_data = data;
-	spin_unlock(&conn->lock);
+	spin_unlock_bh(&conn->lock);
 }
 EXPORT_SYMBOL_GPL(quic_tcp_set_packet_callback);
 
@@ -1076,9 +1076,9 @@ int quic_tcp_set_config(struct quic_tcp_connection *conn,
 	if (!conn || !config)
 		return -EINVAL;
 
-	spin_lock(&conn->lock);
+	spin_lock_bh(&conn->lock);
 	memcpy(&conn->config, config, sizeof(*config));
-	spin_unlock(&conn->lock);
+	spin_unlock_bh(&conn->lock);
 
 	/* Apply TCP socket options */
 	if (conn->tcp_sk) {
@@ -1117,9 +1117,9 @@ int quic_tcp_get_config(struct quic_tcp_connection *conn,
 	if (!conn || !config)
 		return -EINVAL;
 
-	spin_lock(&conn->lock);
+	spin_lock_bh(&conn->lock);
 	memcpy(config, &conn->config, sizeof(*config));
-	spin_unlock(&conn->lock);
+	spin_unlock_bh(&conn->lock);
 
 	return 0;
 }

@@ -70,7 +70,7 @@ extern const struct rhashtable_params tquic_conn_params;
 
 /*
  * Helper to count streams in the connection's rb-tree.
- * Caller must hold conn->lock.
+ * Caller must hold conn->streams_lock.
  */
 static u32 tquic_count_streams_locked(struct tquic_connection *conn)
 {
@@ -87,7 +87,8 @@ static u32 tquic_count_streams_locked(struct tquic_connection *conn)
 }
 
 /*
- * Wrapper that acquires the connection lock before counting streams.
+ * Wrapper that acquires streams_lock before counting streams.
+ * The streams rb-tree is protected by conn->streams_lock, not conn->lock.
  */
 static u32 tquic_count_streams(struct tquic_connection *conn)
 {
@@ -96,9 +97,9 @@ static u32 tquic_count_streams(struct tquic_connection *conn)
 	if (!conn)
 		return 0;
 
-	spin_lock_bh(&conn->lock);
+	spin_lock_bh(&conn->streams_lock);
 	count = tquic_count_streams_locked(conn);
-	spin_unlock_bh(&conn->lock);
+	spin_unlock_bh(&conn->streams_lock);
 
 	return count;
 }
