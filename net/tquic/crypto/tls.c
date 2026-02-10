@@ -477,20 +477,20 @@ static int tquic_derive_initial_keys_versioned(struct tquic_crypto_state *crypto
 				 dcid->id, dcid->len,
 				 initial_secret, sizeof(initial_secret));
 	if (ret)
-		return ret;
+		goto out_zeroize;
 
 	/* Derive client and server secrets */
 	ret = tquic_hkdf_expand_label(crypto->hash, initial_secret, 32,
 				      "client in", 9,
 				      client_secret, 32);
 	if (ret)
-		return ret;
+		goto out_zeroize;
 
 	ret = tquic_hkdf_expand_label(crypto->hash, initial_secret, 32,
 				      "server in", 9,
 				      server_secret, 32);
 	if (ret)
-		return ret;
+		goto out_zeroize;
 
 	/* Set up read/write keys based on role */
 	if (is_server) {
@@ -516,18 +516,21 @@ static int tquic_derive_initial_keys_versioned(struct tquic_crypto_state *crypto
 	/* Derive actual keys using version-appropriate labels */
 	ret = tquic_derive_keys_versioned(crypto, read_keys, version);
 	if (ret)
-		return ret;
+		goto out_zeroize;
 
 	ret = tquic_derive_keys_versioned(crypto, write_keys, version);
 	if (ret)
-		return ret;
+		goto out_zeroize;
 
+	ret = 0;
+
+out_zeroize:
 	/* Clear sensitive intermediate secrets */
 	memzero_explicit(initial_secret, sizeof(initial_secret));
 	memzero_explicit(client_secret, sizeof(client_secret));
 	memzero_explicit(server_secret, sizeof(server_secret));
 
-	return 0;
+	return ret;
 }
 
 /*

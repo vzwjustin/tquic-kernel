@@ -77,7 +77,7 @@ static int weighted_get_path(struct tquic_connection *conn,
 		return -EINVAL;
 
 	rcu_read_lock();
-	spin_lock(&sd->lock);
+	spin_lock_bh(&sd->lock);
 
 	/* Count active paths and sync weights from path structure */
 	idx = 0;
@@ -154,7 +154,7 @@ static int weighted_get_path(struct tquic_connection *conn,
 	}
 
 out:
-	spin_unlock(&sd->lock);
+	spin_unlock_bh(&sd->lock);
 	rcu_read_unlock();
 	return ret;
 }
@@ -209,9 +209,9 @@ static void weighted_path_removed(struct tquic_connection *conn,
 	struct weighted_sched_data *sd = conn->sched_priv;
 
 	if (sd) {
-		spin_lock(&sd->lock);
+		spin_lock_bh(&sd->lock);
 		sd->current_path_idx = 0;
-		spin_unlock(&sd->lock);
+		spin_unlock_bh(&sd->lock);
 	}
 }
 

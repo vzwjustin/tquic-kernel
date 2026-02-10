@@ -234,7 +234,7 @@ static int ecf_get_path(struct tquic_connection *conn,
 	 * ecf_path_added/ecf_path_removed, preventing duplicate
 	 * allocations and data races on the paths[] array.
 	 */
-	spin_lock(&sd->lock);
+	spin_lock_bh(&sd->lock);
 
 	list_for_each_entry_rcu(path, &conn->paths, list) {
 		struct ecf_path_state *ps;
@@ -282,7 +282,7 @@ static int ecf_get_path(struct tquic_connection *conn,
 	}
 
 	if (!best) {
-		spin_unlock(&sd->lock);
+		spin_unlock_bh(&sd->lock);
 		rcu_read_unlock();
 		return -ENOENT;
 	}
@@ -296,7 +296,7 @@ static int ecf_get_path(struct tquic_connection *conn,
 		sd->path_switches++;
 	}
 
-	spin_unlock(&sd->lock);
+	spin_unlock_bh(&sd->lock);
 
 	result->primary = best;
 	result->backup = second_best;  /* Second-best for failover */
@@ -357,7 +357,7 @@ static void ecf_path_added(struct tquic_connection *conn,
 	 * concurrent ecf_get_path() from allocating a duplicate
 	 * slot for the same path_id.
 	 */
-	spin_lock(&sd->lock);
+	spin_lock_bh(&sd->lock);
 	ps = ecf_find_path_state(sd, path->path_id);
 	if (!ps)
 		ps = ecf_alloc_path_state(sd, path->path_id);
@@ -367,7 +367,7 @@ static void ecf_path_added(struct tquic_connection *conn,
 		pr_debug("ecf: path %u added (rtt=%u us, rate=%llu bytes/s)\n",
 			 path->path_id, ps->rtt_us, ps->send_rate);
 	}
-	spin_unlock(&sd->lock);
+	spin_unlock_bh(&sd->lock);
 }
 
 /**
@@ -386,7 +386,7 @@ static void ecf_path_removed(struct tquic_connection *conn,
 	if (!sd)
 		return;
 
-	spin_lock(&sd->lock);
+	spin_lock_bh(&sd->lock);
 	ps = ecf_find_path_state(sd, path->path_id);
 	if (ps) {
 		ps->valid = false;
@@ -396,7 +396,7 @@ static void ecf_path_removed(struct tquic_connection *conn,
 	/* If current path was removed, invalidate selection */
 	if (sd->current_path_id == path->path_id)
 		sd->current_path_id = TQUIC_INVALID_PATH_ID;
-	spin_unlock(&sd->lock);
+	spin_unlock_bh(&sd->lock);
 }
 
 /**
@@ -418,7 +418,7 @@ static void ecf_packet_sent(struct tquic_connection *conn,
 	if (!sd)
 		return;
 
-	spin_lock(&sd->lock);
+	spin_lock_bh(&sd->lock);
 	ps = ecf_find_path_state(sd, path->path_id);
 	if (!ps) {
 		ps = ecf_alloc_path_state(sd, path->path_id);
@@ -428,7 +428,7 @@ static void ecf_packet_sent(struct tquic_connection *conn,
 
 	if (ps)
 		ps->inflight_bytes += sent_bytes;
-	spin_unlock(&sd->lock);
+	spin_unlock_bh(&sd->lock);
 }
 
 /**
@@ -449,10 +449,10 @@ static void ecf_ack_received(struct tquic_connection *conn,
 	if (!sd)
 		return;
 
-	spin_lock(&sd->lock);
+	spin_lock_bh(&sd->lock);
 	ps = ecf_find_path_state(sd, path->path_id);
 	if (!ps) {
-		spin_unlock(&sd->lock);
+		spin_unlock_bh(&sd->lock);
 		return;
 	}
 
@@ -464,7 +464,7 @@ static void ecf_ack_received(struct tquic_connection *conn,
 
 	/* Update rate from path metrics */
 	ecf_update_rate_from_path(ps, path);
-	spin_unlock(&sd->lock);
+	spin_unlock_bh(&sd->lock);
 }
 
 /**
@@ -485,10 +485,10 @@ static void ecf_loss_detected(struct tquic_connection *conn,
 	if (!sd)
 		return;
 
-	spin_lock(&sd->lock);
+	spin_lock_bh(&sd->lock);
 	ps = ecf_find_path_state(sd, path->path_id);
 	if (!ps) {
-		spin_unlock(&sd->lock);
+		spin_unlock_bh(&sd->lock);
 		return;
 	}
 
@@ -500,7 +500,7 @@ static void ecf_loss_detected(struct tquic_connection *conn,
 
 	pr_debug("ecf: path %u loss %llu bytes, inflight now %llu\n",
 		 path->path_id, lost_bytes, ps->inflight_bytes);
-	spin_unlock(&sd->lock);
+	spin_unlock_bh(&sd->lock);
 }
 
 /**

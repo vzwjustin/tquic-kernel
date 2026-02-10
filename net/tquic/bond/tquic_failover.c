@@ -331,7 +331,7 @@ struct tquic_failover_ctx *tquic_failover_init(struct tquic_bonding_ctx *bonding
 	fc->retx_queue.bytes = 0;
 
 	/* Initialize per-path timeout tracking with hysteresis */
-	for (i = 0; i < 8; i++) {
+	for (i = 0; i < ARRAY_SIZE(fc->path_timeouts); i++) {
 		struct tquic_path_timeout *pt = &fc->path_timeouts[i];
 		u64 now_us = tquic_get_time_us();
 
@@ -392,7 +392,7 @@ void tquic_failover_destroy(struct tquic_failover_ctx *fc)
 		return;
 
 	/* Cancel all path timeout work (safe to call even if never queued) */
-	for (i = 0; i < 8; i++)
+	for (i = 0; i < ARRAY_SIZE(fc->path_timeouts); i++)
 		cancel_delayed_work_sync(&fc->path_timeouts[i].timeout_work);
 
 	/* Free all packets in retransmit queue */

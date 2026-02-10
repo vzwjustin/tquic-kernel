@@ -405,7 +405,7 @@ out_zeroize_dec:
 	memzero_explicit(tmp, sizeof(tmp));
 	memzero_explicit(round_out, sizeof(round_out));
 
-	return 0;
+	return ret;
 }
 EXPORT_SYMBOL_GPL(tquic_lb_decrypt_four_pass);
 

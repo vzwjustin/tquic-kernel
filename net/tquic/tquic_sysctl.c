@@ -669,6 +669,7 @@ static int proc_tquic_grease_enabled(TQUIC_CTL_TABLE *table, int write,
 
 /* Min/max values for integer tunables */
 static int zero;
+static unsigned long zero_ul;
 static int one = 1;
 static int sixteen = 16;
 static int ten = 10;
@@ -925,7 +926,7 @@ static struct ctl_table tquic_sysctl_table[] = {
 		.maxlen		= sizeof(unsigned long),
 		.mode		= 0644,
 		.proc_handler	= proc_doulongvec_minmax,
-		.extra1		= &zero,
+		.extra1		= &zero_ul,
 		.extra2		= &max_key_update_packets,
 	},
 	{

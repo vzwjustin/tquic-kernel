@@ -873,7 +873,7 @@ void tquic_key_update_state_free(struct tquic_key_update_state *state)
 	memzero_explicit(&state->next_write, sizeof(state->next_write));
 	memzero_explicit(&state->old_read, sizeof(state->old_read));
 
-	kfree(state);
+	kfree_sensitive(state);
 }
 EXPORT_SYMBOL_GPL(tquic_key_update_state_free);
 
