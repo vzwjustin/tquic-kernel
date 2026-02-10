@@ -313,7 +313,7 @@ static void tquic_diag_get_info(struct sock *sk, struct inet_diag_msg *r,
 	if (!conn)
 		return;
 
-	info->state = conn->state;
+	info->state = READ_ONCE(conn->state);
 	info->paths_active = conn->num_paths;
 	info->streams_active = tquic_count_streams(conn);
 

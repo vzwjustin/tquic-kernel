@@ -329,7 +329,7 @@ static int tquic_conn_set_state(struct tquic_connection *conn,
 		return -EINVAL;
 	}
 
-	conn->state = new_state;
+	WRITE_ONCE(conn->state, new_state);
 	spin_unlock_bh(&conn->lock);
 
 	tquic_conn_info(conn, "state %s -> %s reason=%d\n",
@@ -1072,7 +1072,7 @@ int tquic_handle_version_negotiation(struct tquic_connection *conn,
 		return -EINVAL;
 
 	/* VN only valid during handshake */
-	if (conn->state != TQUIC_CONN_CONNECTING)
+	if (READ_ONCE(conn->state) != TQUIC_CONN_CONNECTING)
 		return -EINVAL;
 
 	/* Check for version downgrade attack */
@@ -1788,7 +1788,7 @@ int tquic_conn_migrate_to_path(struct tquic_connection *conn,
 		return -EPERM;
 	}
 
-	if (conn->state != TQUIC_CONN_CONNECTED) {
+	if (READ_ONCE(conn->state) != TQUIC_CONN_CONNECTED) {
 		tquic_conn_dbg(conn, "migration only allowed when connected\n");
 		return -EINVAL;
 	}
@@ -1953,7 +1953,7 @@ int tquic_conn_send_0rtt(struct tquic_connection *conn,
 	if (!cs || !cs->zero_rtt_enabled)
 		return -EINVAL;
 
-	if (conn->state != TQUIC_CONN_CONNECTING)
+	if (READ_ONCE(conn->state) != TQUIC_CONN_CONNECTING)
 		return -EINVAL;
 
 	skb = alloc_skb(len, GFP_KERNEL);
@@ -2216,9 +2216,9 @@ int tquic_conn_close_with_error(struct tquic_connection *conn,
 	if (!cs)
 		return -EINVAL;
 
-	if (conn->state == TQUIC_CONN_CLOSING ||
-	    conn->state == TQUIC_CONN_DRAINING ||
-	    conn->state == TQUIC_CONN_CLOSED) {
+	if (READ_ONCE(conn->state) == TQUIC_CONN_CLOSING ||
+	    READ_ONCE(conn->state) == TQUIC_CONN_DRAINING ||
+	    READ_ONCE(conn->state) == TQUIC_CONN_CLOSED) {
 		return 0;  /* Already closing */
 	}
 
@@ -2327,8 +2327,8 @@ int tquic_conn_handle_close(struct tquic_connection *conn,
 		return -EINVAL;
 
 	/* CF-366: Ignore duplicate close if already draining/closed */
-	if (conn->state == TQUIC_CONN_DRAINING ||
-	    conn->state == TQUIC_CONN_CLOSED)
+	if (READ_ONCE(conn->state) == TQUIC_CONN_DRAINING ||
+	    READ_ONCE(conn->state) == TQUIC_CONN_CLOSED)
 		return 0;
 
 	cs->close_received = true;
@@ -2386,7 +2386,7 @@ static void tquic_drain_timeout(struct work_struct *work)
 	 * CF-533: This delayed work is shared between close retransmission
 	 * scheduling and drain timeout. Distinguish by connection state.
 	 */
-	if (conn->state == TQUIC_CONN_CLOSING) {
+	if (READ_ONCE(conn->state) == TQUIC_CONN_CLOSING) {
 		/* Retransmit close frame */
 		cs->close_retries++;
 		schedule_work(&cs->close_work);
@@ -2403,7 +2403,7 @@ static void tquic_close_work_handler(struct work_struct *work)
 						   close_work);
 	struct tquic_connection *conn = cs->conn;
 
-	if (conn->state != TQUIC_CONN_CLOSING)
+	if (READ_ONCE(conn->state) != TQUIC_CONN_CLOSING)
 		return;
 
 	/* Retransmit CONNECTION_CLOSE if needed */

@@ -301,10 +301,10 @@ tquic_path_create_internal(struct tquic_connection *conn,
 
 	/* Add to connection's path list if connection provided */
 	if (conn) {
-		spin_lock(&conn->paths_lock);
+		spin_lock_bh(&conn->paths_lock);
 		list_add_tail(&path->list, &conn->paths);
 		conn->num_paths++;
-		spin_unlock(&conn->paths_lock);
+		spin_unlock_bh(&conn->paths_lock);
 
 		tquic_conn_info(conn, "path %u created, mtu=%u\n",
 				path->path_id, path->mtu);
@@ -859,15 +859,15 @@ struct tquic_path *tquic_path_find(struct tquic_connection *conn,
 	if (tquic_path_copy_addr(&remote_storage, remote))
 		return NULL;
 
-	spin_lock(&conn->paths_lock);
+	spin_lock_bh(&conn->paths_lock);
 	list_for_each_entry(path, &conn->paths, list) {
 		if (tquic_path_addr_equal(&path->remote_addr,
 					  &remote_storage)) {
-			spin_unlock(&conn->paths_lock);
+			spin_unlock_bh(&conn->paths_lock);
 			return path;
 		}
 	}
-	spin_unlock(&conn->paths_lock);
+	spin_unlock_bh(&conn->paths_lock);
 
 	return NULL;
 }
@@ -1002,14 +1002,14 @@ void tquic_path_set_state(struct tquic_connection *conn, u8 path_id,
 	struct tquic_path *p;
 
 	spin_lock_bh(&conn->lock);
-	spin_lock(&conn->paths_lock);
+	spin_lock_bh(&conn->paths_lock);
 	list_for_each_entry(p, &conn->paths, list) {
 		if (p->path_id == path_id) {
 			path = p;
 			break;
 		}
 	}
-	spin_unlock(&conn->paths_lock);
+	spin_unlock_bh(&conn->paths_lock);
 
 	if (path) {
 		WRITE_ONCE(path->state, state);

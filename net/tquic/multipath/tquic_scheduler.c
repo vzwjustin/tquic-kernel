@@ -2503,7 +2503,7 @@ int tquic_int_mp_sched_init_conn(struct tquic_connection *conn, const char *name
 		return -EINVAL;
 
 	/* Scheduler can only be set before connection established */
-	if (conn->state != TQUIC_CONN_IDLE)
+	if (READ_ONCE(conn->state) != TQUIC_CONN_IDLE)
 		return -EISCONN;
 
 	net = sock_net(conn->sk);

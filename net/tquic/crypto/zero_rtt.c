@@ -69,6 +69,7 @@
 #include <net/tquic.h>
 
 #include "zero_rtt.h"
+#include "../core/transport_params.h"
 #include "../tquic_mib.h"
 #include "../tquic_debug.h"
 
@@ -1403,6 +1404,63 @@ int tquic_zero_rtt_attempt(struct tquic_connection *conn,
 }
 EXPORT_SYMBOL_GPL(tquic_zero_rtt_attempt);
 
+/*
+ * tquic_zero_rtt_validate_server_tp - Server-side 0-RTT transport param check
+ *
+ * RFC 9000 Section 7.4.1: The server MUST NOT reduce transport parameters
+ * below what was previously advertised in the session ticket. If the server's
+ * current limits are lower, it must reject 0-RTT.
+ *
+ * Returns: true if params are compatible, false if 0-RTT must be rejected
+ */
+static bool tquic_zero_rtt_validate_server_tp(struct tquic_connection *conn,
+					      struct tquic_zero_rtt_state_s *state)
+{
+	struct tquic_session_ticket_plaintext *saved;
+	struct tquic_transport_params remembered;
+	int ret;
+
+	if (!state->ticket)
+		return true;
+
+	saved = &state->ticket->plaintext;
+	if (saved->transport_params_len == 0)
+		return true; /* No saved params — allow (legacy ticket) */
+
+	ret = tquic_tp_decode(saved->transport_params,
+			      saved->transport_params_len,
+			      true, &remembered);
+	if (ret) {
+		pr_debug("tquic: 0-RTT: cannot decode ticket TP, rejecting\n");
+		return false;
+	}
+
+	/*
+	 * Compare server's current local_params against what was
+	 * stored in the session ticket. Reject if any limit decreased.
+	 */
+	if (conn->local_params.initial_max_data <
+	    remembered.initial_max_data)
+		return false;
+	if (conn->local_params.initial_max_stream_data_bidi_local <
+	    remembered.initial_max_stream_data_bidi_local)
+		return false;
+	if (conn->local_params.initial_max_stream_data_bidi_remote <
+	    remembered.initial_max_stream_data_bidi_remote)
+		return false;
+	if (conn->local_params.initial_max_stream_data_uni <
+	    remembered.initial_max_stream_data_uni)
+		return false;
+	if (conn->local_params.initial_max_streams_bidi <
+	    remembered.initial_max_streams_bidi)
+		return false;
+	if (conn->local_params.initial_max_streams_uni <
+	    remembered.initial_max_streams_uni)
+		return false;
+
+	return true;
+}
+
 int tquic_zero_rtt_accept(struct tquic_connection *conn)
 {
 	struct tquic_zero_rtt_state_s *state;
@@ -1423,6 +1481,17 @@ int tquic_zero_rtt_accept(struct tquic_connection *conn)
 			state->state = TQUIC_0RTT_REJECTED;
 			return -EEXIST;
 		}
+	}
+
+	/*
+	 * RFC 9000 Section 7.4.1: Server MUST NOT accept 0-RTT if it
+	 * would reduce transport parameters below previously advertised
+	 * values stored in the session ticket.
+	 */
+	if (!tquic_zero_rtt_validate_server_tp(conn, state)) {
+		pr_debug("tquic: 0-RTT rejected: server reduced TP limits\n");
+		state->state = TQUIC_0RTT_REJECTED;
+		return -ERANGE;
 	}
 
 	state->state = TQUIC_0RTT_ACCEPTED;

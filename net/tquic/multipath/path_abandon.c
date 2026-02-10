@@ -329,7 +329,7 @@ void tquic_mp_abandon_state_destroy(struct tquic_mp_path_abandon_state *state)
 
 	del_timer_sync(&state->abandon_timer);
 
-	spin_lock(&state->lock);
+	spin_lock_bh(&state->lock);
 
 	/* Free CID retire entries */
 	list_for_each_entry_safe(entry, tmp, &state->cids_to_retire, list) {
@@ -337,7 +337,7 @@ void tquic_mp_abandon_state_destroy(struct tquic_mp_path_abandon_state *state)
 		kmem_cache_free(mp_cid_retire_cache, entry);
 	}
 
-	spin_unlock(&state->lock);
+	spin_unlock_bh(&state->lock);
 
 	kmem_cache_free(mp_abandon_state_cache, state);
 }
@@ -472,18 +472,18 @@ int tquic_mp_initiate_path_abandon(struct tquic_connection *conn,
 		path->abandon_state = abandon_state;
 	}
 
-	spin_lock(&abandon_state->lock);
+	spin_lock_bh(&abandon_state->lock);
 
 	/* Check if already abandoning */
 	if (abandon_state->abandon_state != TQUIC_MP_ABANDON_NONE) {
-		spin_unlock(&abandon_state->lock);
+		spin_unlock_bh(&abandon_state->lock);
 		return -EALREADY;
 	}
 
 	abandon_state->abandon_state = TQUIC_MP_ABANDON_PENDING;
 	abandon_state->error_code = error_code;
 
-	spin_unlock(&abandon_state->lock);
+	spin_unlock_bh(&abandon_state->lock);
 
 	/* Build PATH_ABANDON frame */
 	memset(&frame, 0, sizeof(frame));
@@ -690,7 +690,7 @@ tquic_mp_cid_state_destroy(struct tquic_mp_cid_state *state)
 	if (!state)
 		return;
 
-	spin_lock(&state->lock);
+	spin_lock_bh(&state->lock);
 
 	/* Free all remote CIDs */
 	list_for_each_entry_safe(rcid, rtmp, &state->remote_cids, list) {
@@ -713,7 +713,7 @@ tquic_mp_cid_state_destroy(struct tquic_mp_cid_state *state)
 			kmem_cache_free(mp_pending_retire_cache, pret);
 	}
 
-	spin_unlock(&state->lock);
+	spin_unlock_bh(&state->lock);
 
 	if (mp_cid_state_cache)
 		kmem_cache_free(mp_cid_state_cache, state);
@@ -1175,7 +1175,7 @@ int tquic_mp_send_path_status(struct tquic_connection *conn,
 		path->abandon_state = abandon_state;
 	}
 
-	spin_lock(&abandon_state->lock);
+	spin_lock_bh(&abandon_state->lock);
 	abandon_state->status_seq.local_seq++;
 
 	/* Build PATH_STATUS frame */
@@ -1187,7 +1187,7 @@ int tquic_mp_send_path_status(struct tquic_connection *conn,
 
 	abandon_state->status_seq.last_status = status;
 
-	spin_unlock(&abandon_state->lock);
+	spin_unlock_bh(&abandon_state->lock);
 
 	/* Encode frame */
 	len = tquic_mp_write_path_status(&frame, buf, sizeof(buf));

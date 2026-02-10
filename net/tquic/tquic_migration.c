@@ -782,7 +782,7 @@ int tquic_migrate_auto(struct tquic_connection *conn,
 	if (!conn)
 		return -EINVAL;
 
-	if (conn->state != TQUIC_CONN_CONNECTED)
+	if (READ_ONCE(conn->state) != TQUIC_CONN_CONNECTED)
 		return -ENOTCONN;
 
 	/* Check if migration is already in progress */
@@ -1008,7 +1008,7 @@ int tquic_migrate_explicit(struct tquic_connection *conn,
 	if (!conn || !new_local)
 		return -EINVAL;
 
-	if (conn->state != TQUIC_CONN_CONNECTED)
+	if (READ_ONCE(conn->state) != TQUIC_CONN_CONNECTED)
 		return -ENOTCONN;
 
 	/*
@@ -1726,7 +1726,7 @@ int tquic_migrate_to_preferred_address(struct tquic_connection *conn)
 	if (!conn)
 		return -EINVAL;
 
-	if (conn->state != TQUIC_CONN_CONNECTED)
+	if (READ_ONCE(conn->state) != TQUIC_CONN_CONNECTED)
 		return -ENOTCONN;
 
 	if (conn->role != TQUIC_ROLE_CLIENT) {
@@ -1899,7 +1899,7 @@ int tquic_migrate_to_additional_address(struct tquic_connection *conn,
 	if (!conn || !addr_entry)
 		return -EINVAL;
 
-	if (conn->state != TQUIC_CONN_CONNECTED)
+	if (READ_ONCE(conn->state) != TQUIC_CONN_CONNECTED)
 		return -ENOTCONN;
 
 	/*
@@ -2167,7 +2167,7 @@ int tquic_migrate_validate_all_additional(struct tquic_connection *conn)
 	if (!conn)
 		return -EINVAL;
 
-	if (conn->state != TQUIC_CONN_CONNECTED)
+	if (READ_ONCE(conn->state) != TQUIC_CONN_CONNECTED)
 		return -ENOTCONN;
 
 	remote_addrs = conn->additional_remote_addrs;

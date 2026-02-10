@@ -1049,7 +1049,7 @@ int tquic_do_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 	size_t sent = 0;
 	int err;
 
-	if (!conn || conn->state != TQUIC_STATE_CONNECTED)
+	if (!conn || READ_ONCE(conn->state) != TQUIC_STATE_CONNECTED)
 		return -ENOTCONN;
 
 	/* Parse control message for stream info */

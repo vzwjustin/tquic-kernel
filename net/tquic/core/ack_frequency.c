@@ -101,11 +101,11 @@ static void tquic_ack_freq_adjustment_work(struct work_struct *work)
 	u64 new_reorder;
 	bool should_update = false;
 
-	spin_lock(&state->lock);
+	spin_lock_bh(&state->lock);
 
 	if (!state->enabled ||
 	    state->nego_state != TQUIC_ACK_FREQ_STATE_ACTIVE) {
-		spin_unlock(&state->lock);
+		spin_unlock_bh(&state->lock);
 		return;
 	}
 
@@ -151,7 +151,7 @@ static void tquic_ack_freq_adjustment_work(struct work_struct *work)
 		should_update = true;
 	}
 
-	spin_unlock(&state->lock);
+	spin_unlock_bh(&state->lock);
 
 	if (should_update)
 		pr_debug("tquic: scheduled ACK frequency adjustment: "
@@ -287,7 +287,7 @@ void tquic_ack_freq_enable(struct tquic_ack_frequency_state *state,
 	if (!state)
 		return;
 
-	spin_lock(&state->lock);
+	spin_lock_bh(&state->lock);
 
 	/* Validate peer's min_ack_delay */
 	if (peer_min_ack_delay < TQUIC_MIN_ACK_DELAY_MIN_US ||
@@ -307,7 +307,7 @@ void tquic_ack_freq_enable(struct tquic_ack_frequency_state *state,
 							 peer_min_ack_delay);
 	state->pending_frame.reorder_threshold = state->current_reorder_threshold;
 
-	spin_unlock(&state->lock);
+	spin_unlock_bh(&state->lock);
 
 	pr_debug("tquic: ACK frequency enabled, peer_min_ack_delay=%llu us\n",
 		 peer_min_ack_delay);
@@ -724,7 +724,7 @@ bool tquic_ack_freq_should_ack(struct tquic_ack_frequency_state *state,
 	if (!ack_eliciting)
 		return false;  /* Non-ack-eliciting packets don't trigger ACKs */
 
-	spin_lock(&state->lock);
+	spin_lock_bh(&state->lock);
 
 	/* Extension not enabled - use default behavior */
 	if (!state->enabled) {
@@ -778,7 +778,7 @@ bool tquic_ack_freq_should_ack(struct tquic_ack_frequency_state *state,
 	}
 
 out:
-	spin_unlock(&state->lock);
+	spin_unlock_bh(&state->lock);
 	return should_ack;
 }
 EXPORT_SYMBOL_GPL(tquic_ack_freq_should_ack);
@@ -794,7 +794,7 @@ void tquic_ack_freq_on_ack_sent(struct tquic_ack_frequency_state *state)
 	if (!state)
 		return;
 
-	spin_lock(&state->lock);
+	spin_lock_bh(&state->lock);
 	state->packets_since_ack = 0;
 	state->last_ack_sent_time = ktime_get();
 
@@ -803,7 +803,7 @@ void tquic_ack_freq_on_ack_sent(struct tquic_ack_frequency_state *state)
 		del_timer(&state->ack_timer);
 		state->ack_timer_armed = false;
 	}
-	spin_unlock(&state->lock);
+	spin_unlock_bh(&state->lock);
 }
 EXPORT_SYMBOL_GPL(tquic_ack_freq_on_ack_sent);
 
@@ -889,7 +889,7 @@ int tquic_ack_freq_request_update(struct tquic_ack_frequency_state *state,
 	if (threshold == 0 || threshold > TQUIC_ACK_FREQ_MAX_THRESHOLD)
 		return -EINVAL;
 
-	spin_lock(&state->lock);
+	spin_lock_bh(&state->lock);
 
 	/*
 	 * Per Section 4.2: "An endpoint MUST NOT request a max_ack_delay
@@ -908,7 +908,7 @@ int tquic_ack_freq_request_update(struct tquic_ack_frequency_state *state,
 	state->pending_frame.reorder_threshold = reorder;
 	state->ack_frequency_pending = true;
 
-	spin_unlock(&state->lock);
+	spin_unlock_bh(&state->lock);
 
 	pr_debug("tquic: scheduled ACK_FREQUENCY update: threshold=%llu "
 		 "max_delay=%llu reorder=%llu\n",
@@ -932,9 +932,9 @@ int tquic_ack_freq_request_immediate_ack(struct tquic_ack_frequency_state *state
 	if (!state->enabled)
 		return -EOPNOTSUPP;
 
-	spin_lock(&state->lock);
+	spin_lock_bh(&state->lock);
 	state->immediate_ack_request = true;
-	spin_unlock(&state->lock);
+	spin_unlock_bh(&state->lock);
 
 	pr_debug("tquic: IMMEDIATE_ACK requested\n");
 
@@ -959,7 +959,7 @@ int tquic_ack_freq_generate_pending(struct tquic_ack_frequency_state *state,
 	if (!state || !buf)
 		return -EINVAL;
 
-	spin_lock(&state->lock);
+	spin_lock_bh(&state->lock);
 
 	/* Generate IMMEDIATE_ACK if requested */
 	if (state->immediate_ack_request) {
@@ -990,7 +990,7 @@ int tquic_ack_freq_generate_pending(struct tquic_ack_frequency_state *state,
 		}
 	}
 
-	spin_unlock(&state->lock);
+	spin_unlock_bh(&state->lock);
 
 	return (int)(p - buf);
 }
@@ -1034,7 +1034,7 @@ void tquic_ack_freq_on_congestion_event(struct tquic_ack_frequency_state *state,
 	if (!state)
 		return;
 
-	spin_lock(&state->lock);
+	spin_lock_bh(&state->lock);
 
 	if (state->in_congestion != in_recovery) {
 		state->in_congestion = in_recovery;
@@ -1057,7 +1057,7 @@ void tquic_ack_freq_on_congestion_event(struct tquic_ack_frequency_state *state,
 		}
 	}
 
-	spin_unlock(&state->lock);
+	spin_unlock_bh(&state->lock);
 
 	if (in_recovery)
 		pr_debug("tquic: entered congestion recovery, adjusting ACK freq\n");
@@ -1080,7 +1080,7 @@ void tquic_ack_freq_on_rtt_update(struct tquic_ack_frequency_state *state,
 	if (!state || !state->enabled)
 		return;
 
-	spin_lock(&state->lock);
+	spin_lock_bh(&state->lock);
 
 	/*
 	 * Adjust max ACK delay based on RTT:
@@ -1122,7 +1122,7 @@ void tquic_ack_freq_on_rtt_update(struct tquic_ack_frequency_state *state,
 		}
 	}
 
-	spin_unlock(&state->lock);
+	spin_unlock_bh(&state->lock);
 }
 EXPORT_SYMBOL_GPL(tquic_ack_freq_on_rtt_update);
 
@@ -1137,7 +1137,7 @@ void tquic_ack_freq_on_bandwidth_update(struct tquic_ack_frequency_state *state,
 	if (!state || !state->enabled)
 		return;
 
-	spin_lock(&state->lock);
+	spin_lock_bh(&state->lock);
 
 	/*
 	 * High bandwidth paths can tolerate less frequent ACKs.
@@ -1159,7 +1159,7 @@ void tquic_ack_freq_on_bandwidth_update(struct tquic_ack_frequency_state *state,
 			TQUIC_ACK_FREQ_DEFAULT_MAX_DELAY_US;
 	}
 
-	spin_unlock(&state->lock);
+	spin_unlock_bh(&state->lock);
 }
 EXPORT_SYMBOL_GPL(tquic_ack_freq_on_bandwidth_update);
 
@@ -1174,7 +1174,7 @@ void tquic_ack_freq_on_reordering(struct tquic_ack_frequency_state *state,
 	if (!state || !state->enabled)
 		return;
 
-	spin_lock(&state->lock);
+	spin_lock_bh(&state->lock);
 
 	state->reordering_detected = true;
 	state->last_adjustment_reason = TQUIC_ACK_FREQ_REASON_REORDERING;
@@ -1194,7 +1194,7 @@ void tquic_ack_freq_on_reordering(struct tquic_ack_frequency_state *state,
 			 state->dynamic_params.reorder_threshold, gap);
 	}
 
-	spin_unlock(&state->lock);
+	spin_unlock_bh(&state->lock);
 }
 EXPORT_SYMBOL_GPL(tquic_ack_freq_on_reordering);
 
@@ -1207,7 +1207,7 @@ void tquic_ack_freq_on_ecn(struct tquic_ack_frequency_state *state)
 	if (!state || !state->enabled)
 		return;
 
-	spin_lock(&state->lock);
+	spin_lock_bh(&state->lock);
 
 	state->last_adjustment_reason = TQUIC_ACK_FREQ_REASON_ECN;
 
@@ -1222,7 +1222,7 @@ void tquic_ack_freq_on_ecn(struct tquic_ack_frequency_state *state)
 			queue_work(tquic_ack_freq_wq, &state->adjustment_work);
 	}
 
-	spin_unlock(&state->lock);
+	spin_unlock_bh(&state->lock);
 
 	pr_debug("tquic: ECN signal received, increasing ACK frequency\n");
 }
@@ -1241,7 +1241,7 @@ void tquic_ack_freq_set_application_hint(struct tquic_ack_frequency_state *state
 	if (!state)
 		return;
 
-	spin_lock(&state->lock);
+	spin_lock_bh(&state->lock);
 
 	state->latency_sensitive = latency_sensitive;
 	state->throughput_focused = throughput_focused;
@@ -1253,7 +1253,7 @@ void tquic_ack_freq_set_application_hint(struct tquic_ack_frequency_state *state
 			queue_work(tquic_ack_freq_wq, &state->adjustment_work);
 	}
 
-	spin_unlock(&state->lock);
+	spin_unlock_bh(&state->lock);
 
 	pr_debug("tquic: application hint set: latency_sensitive=%d "
 		 "throughput_focused=%d\n",

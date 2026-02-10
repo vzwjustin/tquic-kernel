@@ -252,7 +252,7 @@ int tquic_sendmsg_zerocopy(struct sock *sk, struct msghdr *msg, size_t len,
 	size_t copied = 0;
 	int err;
 
-	if (!conn || conn->state != TQUIC_CONN_CONNECTED)
+	if (!conn || READ_ONCE(conn->state) != TQUIC_CONN_CONNECTED)
 		return -ENOTCONN;
 
 	if (!stream)
@@ -452,7 +452,7 @@ ssize_t tquic_sendpage(struct socket *sock, struct page *page,
 	tsk = tquic_sk(sk);
 	conn = tsk->conn;
 
-	if (!conn || conn->state != TQUIC_CONN_CONNECTED)
+	if (!conn || READ_ONCE(conn->state) != TQUIC_CONN_CONNECTED)
 		return -ENOTCONN;
 
 	/* Use default stream */
@@ -723,7 +723,7 @@ ssize_t tquic_splice_read(struct socket *sock, loff_t *ppos,
 	tsk = tquic_sk(sk);
 	conn = tsk->conn;
 
-	if (!conn || conn->state != TQUIC_CONN_CONNECTED)
+	if (!conn || READ_ONCE(conn->state) != TQUIC_CONN_CONNECTED)
 		return -ENOTCONN;
 
 	/* Use default stream for simple API */

@@ -637,7 +637,7 @@ ssize_t tquic_forward_hairpin(struct tquic_tunnel *tunnel,
 		return -ENOTCONN;
 
 	/* Check connection state - must be established */
-	if (peer_conn->state != TQUIC_CONN_CONNECTED)
+	if (READ_ONCE(peer_conn->state) != TQUIC_CONN_CONNECTED)
 		return -ENOTCONN;
 
 	/*
@@ -1278,7 +1278,7 @@ int tquic_forward_signal_mtu(struct tquic_tunnel *tunnel, u32 new_mtu)
 		return -ENOTCONN;
 
 	/* Check connection state */
-	if (stream->conn->state != TQUIC_CONN_CONNECTED)
+	if (READ_ONCE(stream->conn->state) != TQUIC_CONN_CONNECTED)
 		return -ENOTCONN;
 
 	/*

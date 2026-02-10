@@ -706,7 +706,7 @@ static int tquic_conn_connect(struct tquic_connection *conn,
 
 	spin_lock_bh(&conn->lock);
 	conn->pn_spaces[TQUIC_PN_SPACE_INITIAL].keys_available = 1;
-	conn->state = TQUIC_CONN_CONNECTING;
+	WRITE_ONCE(conn->state, TQUIC_CONN_CONNECTING);
 	spin_unlock_bh(&conn->lock);
 
 	/* Start handshake timer */
@@ -727,7 +727,7 @@ static int tquic_conn_accept(struct tquic_connection *conn)
 		return -EINVAL;
 	}
 
-	conn->state = TQUIC_CONN_CONNECTING;
+	WRITE_ONCE(conn->state, TQUIC_CONN_CONNECTING);
 	spin_unlock_bh(&conn->lock);
 	return 0;
 }
@@ -756,7 +756,7 @@ static int tquic_conn_close(struct tquic_connection *conn, u64 error_code,
 		/* On allocation failure, proceed without reason phrase */
 	}
 
-	conn->state = TQUIC_CONN_CLOSING;
+	WRITE_ONCE(conn->state, TQUIC_CONN_CLOSING);
 	spin_unlock_bh(&conn->lock);
 
 	/* Send CONNECTION_CLOSE frame */
@@ -776,7 +776,7 @@ static void tquic_conn_set_state(struct tquic_connection *conn, enum tquic_conn_
 
 	spin_lock_bh(&conn->lock);
 	old_state = conn->state;
-	conn->state = state;
+	WRITE_ONCE(conn->state, state);
 
 	trace_quic_conn_state_change(tquic_trace_conn_id(&conn->scid),
 				      old_state, state);

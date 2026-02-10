@@ -1187,15 +1187,15 @@ int tquic_udp_deliver_to_conn(struct tquic_connection *conn,
 		/* Check packet type */
 		if (data[0] & 0x80) {
 			/* Long header packet - handle during handshake */
-			if (conn->state == TQUIC_CONN_CONNECTING ||
-			    conn->state == TQUIC_CONN_IDLE) {
+			if (READ_ONCE(conn->state) == TQUIC_CONN_CONNECTING ||
+			    READ_ONCE(conn->state) == TQUIC_CONN_IDLE) {
 				/* Process handshake packet */
 				tquic_conn_process_handshake(conn, skb);
 				return 0;
 			}
 		} else {
 			/* Short header (1-RTT) packet */
-			if (conn->state == TQUIC_CONN_CONNECTED) {
+			if (READ_ONCE(conn->state) == TQUIC_CONN_CONNECTED) {
 				/*
 				 * For connected state, process via coalesced
 				 * packet handler which handles decryption

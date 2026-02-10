@@ -748,7 +748,7 @@ static void tquic_packet_process_retry(struct tquic_connection *conn,
 	u8 dcid_len, scid_len;
 	struct tquic_cid new_scid;
 
-	if (conn->state != TQUIC_CONN_CONNECTING) {
+	if (READ_ONCE(conn->state) != TQUIC_CONN_CONNECTING) {
 		kfree_skb(skb);
 		return;
 	}
@@ -1025,7 +1025,9 @@ int tquic_frame_process_one(struct tquic_connection *conn, const u8 *data,
 	case TQUIC_FRAME_HANDSHAKE_DONE:
 		if (conn->role == TQUIC_ROLE_CLIENT) {
 			set_bit(TQUIC_CONN_FLAG_HANDSHAKE_DONE, &conn->flags);
-			conn->state = TQUIC_CONN_CONNECTED;
+			spin_lock_bh(&conn->lock);
+			WRITE_ONCE(conn->state, TQUIC_CONN_CONNECTED);
+			spin_unlock_bh(&conn->lock);
 		}
 		return 1;
 
@@ -1408,7 +1410,9 @@ static int tquic_frame_process_connection_close(struct tquic_connection *conn,
 	offset += reason_len;
 
 	/* Enter draining state */
-	conn->state = TQUIC_CONN_DRAINING;
+	spin_lock_bh(&conn->lock);
+	WRITE_ONCE(conn->state, TQUIC_CONN_DRAINING);
+	spin_unlock_bh(&conn->lock);
 	set_bit(TQUIC_CONN_FLAG_DRAINING, &conn->flags);
 
 	return offset;

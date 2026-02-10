@@ -761,7 +761,7 @@ static void tquic_stream_trigger_output(struct tquic_connection *conn,
 	bool nodelay = false;
 	bool pacing_enabled = true;
 
-	if (!conn || conn->state != TQUIC_CONN_CONNECTED)
+	if (!conn || READ_ONCE(conn->state) != TQUIC_CONN_CONNECTED)
 		return;
 
 	/* Get socket options if available */
@@ -950,7 +950,7 @@ static int tquic_stream_sendmsg(struct socket *sock, struct msghdr *msg,
 		return -EPIPE;
 	}
 
-	if (conn->state != TQUIC_CONN_CONNECTED) {
+	if (READ_ONCE(conn->state) != TQUIC_CONN_CONNECTED) {
 		tquic_conn_put(conn);
 		return -ENOTCONN;
 	}
@@ -970,7 +970,7 @@ static int tquic_stream_sendmsg(struct socket *sock, struct msghdr *msg,
 		if (wait_event_interruptible(stream->wait,
 				tquic_stream_check_flow_control(conn, stream, len) > 0 ||
 				stream->state == TQUIC_STREAM_CLOSED ||
-				conn->state != TQUIC_CONN_CONNECTED)) {
+				READ_ONCE(conn->state) != TQUIC_CONN_CONNECTED)) {
 			copied = -EINTR;
 			goto out_put;
 		}
@@ -980,7 +980,7 @@ static int tquic_stream_sendmsg(struct socket *sock, struct msghdr *msg,
 			copied = -EPIPE;
 			goto out_put;
 		}
-		if (conn->state != TQUIC_CONN_CONNECTED) {
+		if (READ_ONCE(conn->state) != TQUIC_CONN_CONNECTED) {
 			copied = -ENOTCONN;
 			goto out_put;
 		}
@@ -1317,7 +1317,7 @@ int tquic_wait_for_stream_credit(struct tquic_connection *conn,
 				    conn->next_stream_id_uni) >> 2) <
 			(is_bidi ? conn->max_streams_bidi :
 				   conn->max_streams_uni) ||
-			conn->state != TQUIC_CONN_CONNECTED);
+			READ_ONCE(conn->state) != TQUIC_CONN_CONNECTED);
 }
 EXPORT_SYMBOL_GPL(tquic_wait_for_stream_credit);
 

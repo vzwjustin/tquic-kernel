@@ -658,7 +658,7 @@ int tquic_sock_shutdown(struct socket *sock, int how)
 
 	lock_sock(sk);
 
-	if (tsk->conn && tsk->conn->state == TQUIC_CONN_CONNECTED) {
+	if (tsk->conn && READ_ONCE(tsk->conn->state) == TQUIC_CONN_CONNECTED) {
 		/* Use graceful shutdown via state machine */
 		ret = tquic_conn_shutdown(tsk->conn);
 	}
@@ -687,8 +687,8 @@ void tquic_close(struct sock *sk, long timeout)
 		 * If we're still connected, initiate graceful close.
 		 * The connection close will proceed through CLOSING -> DRAINING -> CLOSED.
 		 */
-		if (tsk->conn->state == TQUIC_CONN_CONNECTED ||
-		    tsk->conn->state == TQUIC_CONN_CONNECTING) {
+		if (READ_ONCE(tsk->conn->state) == TQUIC_CONN_CONNECTED ||
+		    READ_ONCE(tsk->conn->state) == TQUIC_CONN_CONNECTING) {
 			tquic_conn_close_with_error(tsk->conn, 0x00, NULL);
 		}
 	}
@@ -728,7 +728,7 @@ int tquic_sock_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 		int ret;
 
 		/* Must be connected */
-		if (!conn || conn->state != TQUIC_CONN_CONNECTED) {
+		if (!conn || READ_ONCE(conn->state) != TQUIC_CONN_CONNECTED) {
 			ret = -ENOTCONN;
 			goto out;
 		}
@@ -993,7 +993,7 @@ int tquic_sock_setsockopt(struct socket *sock, int level, int optname,
 		 * Must be called before connect/listen.
 		 * Check connection state if one exists.
 		 */
-		if (tsk->conn && tsk->conn->state != TQUIC_CONN_IDLE) {
+		if (tsk->conn && READ_ONCE(tsk->conn->state) != TQUIC_CONN_IDLE) {
 			ret = -EISCONN;
 		} else if (tsk->conn) {
 			/* Connection exists but idle, init scheduler now */
@@ -1123,7 +1123,7 @@ int tquic_sock_setsockopt(struct socket *sock, int level, int optname,
 		 * Must be set before connect().
 		 */
 		lock_sock(sk);
-		if (tsk->conn && tsk->conn->state != TQUIC_CONN_IDLE) {
+		if (tsk->conn && READ_ONCE(tsk->conn->state) != TQUIC_CONN_IDLE) {
 			release_sock(sk);
 			return -EISCONN;
 		}
@@ -1181,7 +1181,7 @@ int tquic_sock_setsockopt(struct socket *sock, int level, int optname,
 		 * Must be set before connect().
 		 */
 		lock_sock(sk);
-		if (tsk->conn && tsk->conn->state != TQUIC_CONN_IDLE) {
+		if (tsk->conn && READ_ONCE(tsk->conn->state) != TQUIC_CONN_IDLE) {
 			release_sock(sk);
 			return -EISCONN;
 		}
@@ -1268,7 +1268,7 @@ int tquic_sock_setsockopt(struct socket *sock, int level, int optname,
 			return -EINVAL;
 
 		lock_sock(sk);
-		if (tsk->conn && tsk->conn->state != TQUIC_CONN_IDLE) {
+		if (tsk->conn && READ_ONCE(tsk->conn->state) != TQUIC_CONN_IDLE) {
 			release_sock(sk);
 			return -EISCONN;
 		}
@@ -1308,7 +1308,7 @@ int tquic_sock_setsockopt(struct socket *sock, int level, int optname,
 			return -EINVAL;
 
 		lock_sock(sk);
-		if (tsk->conn && tsk->conn->state != TQUIC_CONN_IDLE) {
+		if (tsk->conn && READ_ONCE(tsk->conn->state) != TQUIC_CONN_IDLE) {
 			release_sock(sk);
 			return -EISCONN;
 		}
@@ -1345,7 +1345,7 @@ int tquic_sock_setsockopt(struct socket *sock, int level, int optname,
 		hostname[optlen] = '\0';
 
 		lock_sock(sk);
-		if (tsk->conn && tsk->conn->state != TQUIC_CONN_IDLE) {
+		if (tsk->conn && READ_ONCE(tsk->conn->state) != TQUIC_CONN_IDLE) {
 			release_sock(sk);
 			return -EISCONN;
 		}
@@ -1374,7 +1374,7 @@ int tquic_sock_setsockopt(struct socket *sock, int level, int optname,
 			return -EPERM;
 
 		lock_sock(sk);
-		if (tsk->conn && tsk->conn->state != TQUIC_CONN_IDLE) {
+		if (tsk->conn && READ_ONCE(tsk->conn->state) != TQUIC_CONN_IDLE) {
 			release_sock(sk);
 			return -EISCONN;
 		}
@@ -1498,7 +1498,7 @@ int tquic_sock_getsockopt(struct socket *sock, int level, int optname,
 			return -EINVAL;
 		if (tsk->conn) {
 			struct tquic_info info = {0};
-			info.state = tsk->conn->state;
+			info.state = READ_ONCE(tsk->conn->state);
 			info.version = tsk->conn->version;
 			info.paths_active = tsk->conn->num_paths;
 			info.bytes_sent = tsk->conn->stats.tx_bytes;
@@ -2050,7 +2050,7 @@ static int tquic_sendmsg_datagram(struct sock *sk, struct msghdr *msg,
 	void *buf;
 	int ret;
 
-	if (!conn || conn->state != TQUIC_CONN_CONNECTED)
+	if (!conn || READ_ONCE(conn->state) != TQUIC_CONN_CONNECTED)
 		return -ENOTCONN;
 
 	/* Verify datagram support is negotiated */
@@ -2096,7 +2096,7 @@ int tquic_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 	int copied = 0;
 	int flags = msg->msg_flags;
 
-	if (!conn || conn->state != TQUIC_CONN_CONNECTED)
+	if (!conn || READ_ONCE(conn->state) != TQUIC_CONN_CONNECTED)
 		return -ENOTCONN;
 
 	/*
@@ -2216,8 +2216,8 @@ static int tquic_recvmsg_datagram(struct sock *sk, struct msghdr *msg,
 	long timeo;
 	int ret;
 
-	if (!conn || (conn->state != TQUIC_CONN_CONNECTED &&
-		      conn->state != TQUIC_CONN_CLOSING))
+	if (!conn || (READ_ONCE(conn->state) != TQUIC_CONN_CONNECTED &&
+		      READ_ONCE(conn->state) != TQUIC_CONN_CLOSING))
 		return -ENOTCONN;
 
 	/* Verify datagram support is negotiated */
@@ -2251,7 +2251,7 @@ retry:
 			!skb_queue_empty(&conn->datagram.recv_queue) ||
 			    sk->sk_err ||
 			    (sk->sk_shutdown & RCV_SHUTDOWN) ||
-			    conn->state == TQUIC_CONN_CLOSED,
+			    READ_ONCE(conn->state) == TQUIC_CONN_CLOSED,
 			timeo);
 
 		if (ret < 0)
@@ -2261,7 +2261,7 @@ retry:
 			return -EAGAIN;
 
 		/* Re-check connection state */
-		if (conn->state == TQUIC_CONN_CLOSED)
+		if (READ_ONCE(conn->state) == TQUIC_CONN_CLOSED)
 			return -ENOTCONN;
 
 		if (sk->sk_err)
@@ -2324,7 +2324,7 @@ int tquic_recvmsg(struct sock *sk, struct msghdr *msg, size_t len, int flags,
 	struct sk_buff *skb;
 	int copied = 0;
 
-	if (!conn || conn->state != TQUIC_CONN_CONNECTED)
+	if (!conn || READ_ONCE(conn->state) != TQUIC_CONN_CONNECTED)
 		return -ENOTCONN;
 
 	/*

@@ -583,16 +583,17 @@ EXPORT_SYMBOL_GPL(tquic_timer_state_alloc);
 void tquic_timer_state_free(struct tquic_timer_state *ts)
 {
 	struct tquic_recovery_state *rs;
+	unsigned long flags;
 	int i;
 
 	if (!ts)
 		return;
 
 	/* Mark as shutting down */
-	spin_lock_bh(&ts->lock);
+	spin_lock_irqsave(&ts->lock, flags);
 	ts->shutting_down = true;
 	ts->active = false;
-	spin_unlock_bh(&ts->lock);
+	spin_unlock_irqrestore(&ts->lock, flags);
 
 	/* Cancel all timers */
 	del_timer_sync(&ts->idle_timer);
@@ -649,16 +650,17 @@ static void tquic_timer_idle_expired(struct timer_list *t)
 {
 	struct tquic_timer_state *ts = from_timer(ts, t, idle_timer);
 	struct tquic_connection *conn;
+	unsigned long flags;
 
-	spin_lock_bh(&ts->lock);
+	spin_lock_irqsave(&ts->lock, flags);
 	if (!ts->active || ts->shutting_down) {
-		spin_unlock_bh(&ts->lock);
+		spin_unlock_irqrestore(&ts->lock, flags);
 		return;
 	}
 
 	conn = ts->conn;
 	set_bit(TQUIC_TIMER_IDLE_BIT, &ts->pending_timer_mask);
-	spin_unlock_bh(&ts->lock);
+	spin_unlock_irqrestore(&ts->lock, flags);
 
 	/* Schedule work to handle connection close */
 	queue_work(ts->wq, &ts->timer_work);
@@ -672,17 +674,17 @@ static void tquic_timer_idle_expired(struct timer_list *t)
  */
 void tquic_timer_set_idle(struct tquic_timer_state *ts)
 {
-	unsigned long expires;
+	unsigned long expires, flags;
 
-	spin_lock_bh(&ts->lock);
+	spin_lock_irqsave(&ts->lock, flags);
 	if (!ts->active) {
-		spin_unlock_bh(&ts->lock);
+		spin_unlock_irqrestore(&ts->lock, flags);
 		return;
 	}
 
 	expires = jiffies + usecs_to_jiffies(ts->idle_timeout_us);
 	mod_timer(&ts->idle_timer, expires);
-	spin_unlock_bh(&ts->lock);
+	spin_unlock_irqrestore(&ts->lock, flags);
 }
 EXPORT_SYMBOL_GPL(tquic_timer_set_idle);
 
@@ -709,15 +711,16 @@ EXPORT_SYMBOL_GPL(tquic_timer_reset_idle);
 static void tquic_timer_ack_delay_expired(struct timer_list *t)
 {
 	struct tquic_timer_state *ts = from_timer(ts, t, ack_delay_timer);
+	unsigned long flags;
 
-	spin_lock_bh(&ts->lock);
+	spin_lock_irqsave(&ts->lock, flags);
 	if (!ts->active || ts->shutting_down) {
-		spin_unlock_bh(&ts->lock);
+		spin_unlock_irqrestore(&ts->lock, flags);
 		return;
 	}
 
 	set_bit(TQUIC_TIMER_ACK_DELAY_BIT, &ts->pending_timer_mask);
-	spin_unlock_bh(&ts->lock);
+	spin_unlock_irqrestore(&ts->lock, flags);
 
 	/* Schedule work to send pending ACKs */
 	queue_work(ts->wq, &ts->timer_work);
@@ -734,11 +737,11 @@ static void tquic_timer_ack_delay_expired(struct timer_list *t)
  */
 void tquic_timer_set_ack_delay(struct tquic_timer_state *ts)
 {
-	unsigned long expires;
+	unsigned long expires, flags;
 
-	spin_lock_bh(&ts->lock);
+	spin_lock_irqsave(&ts->lock, flags);
 	if (!ts->active) {
-		spin_unlock_bh(&ts->lock);
+		spin_unlock_irqrestore(&ts->lock, flags);
 		return;
 	}
 
@@ -747,7 +750,7 @@ void tquic_timer_set_ack_delay(struct tquic_timer_state *ts)
 		expires = jiffies + usecs_to_jiffies(ts->ack_delay_us);
 		mod_timer(&ts->ack_delay_timer, expires);
 	}
-	spin_unlock_bh(&ts->lock);
+	spin_unlock_irqrestore(&ts->lock, flags);
 }
 EXPORT_SYMBOL_GPL(tquic_timer_set_ack_delay);
 
@@ -759,9 +762,11 @@ EXPORT_SYMBOL_GPL(tquic_timer_set_ack_delay);
  */
 void tquic_timer_cancel_ack_delay(struct tquic_timer_state *ts)
 {
-	spin_lock_bh(&ts->lock);
+	unsigned long flags;
+
+	spin_lock_irqsave(&ts->lock, flags);
 	del_timer(&ts->ack_delay_timer);
-	spin_unlock_bh(&ts->lock);
+	spin_unlock_irqrestore(&ts->lock, flags);
 }
 EXPORT_SYMBOL_GPL(tquic_timer_cancel_ack_delay);
 
@@ -778,15 +783,16 @@ EXPORT_SYMBOL_GPL(tquic_timer_cancel_ack_delay);
 static void tquic_timer_loss_expired(struct timer_list *t)
 {
 	struct tquic_timer_state *ts = from_timer(ts, t, loss_timer);
+	unsigned long flags;
 
-	spin_lock_bh(&ts->lock);
+	spin_lock_irqsave(&ts->lock, flags);
 	if (!ts->active || ts->shutting_down) {
-		spin_unlock_bh(&ts->lock);
+		spin_unlock_irqrestore(&ts->lock, flags);
 		return;
 	}
 
 	set_bit(TQUIC_TIMER_LOSS_BIT, &ts->pending_timer_mask);
-	spin_unlock_bh(&ts->lock);
+	spin_unlock_irqrestore(&ts->lock, flags);
 
 	/* Schedule retransmission work */
 	queue_work(ts->wq, &ts->retransmit_work);
@@ -880,12 +886,12 @@ void tquic_timer_update_loss_timer(struct tquic_timer_state *ts)
 {
 	struct tquic_recovery_state *rs = ts->recovery;
 	ktime_t earliest_loss = KTIME_MAX;
-	unsigned long expires;
+	unsigned long expires, flags;
 	int i;
 
-	spin_lock_bh(&ts->lock);
+	spin_lock_irqsave(&ts->lock, flags);
 	if (!ts->active) {
-		spin_unlock_bh(&ts->lock);
+		spin_unlock_irqrestore(&ts->lock, flags);
 		return;
 	}
 
@@ -911,7 +917,7 @@ void tquic_timer_update_loss_timer(struct tquic_timer_state *ts)
 		mod_timer(&ts->loss_timer, expires);
 	}
 
-	spin_unlock_bh(&ts->lock);
+	spin_unlock_irqrestore(&ts->lock, flags);
 }
 EXPORT_SYMBOL_GPL(tquic_timer_update_loss_timer);
 
@@ -929,10 +935,11 @@ static void tquic_timer_pto_expired(struct timer_list *t)
 {
 	struct tquic_timer_state *ts = from_timer(ts, t, pto_timer);
 	struct tquic_recovery_state *rs;
+	unsigned long flags;
 
-	spin_lock_bh(&ts->lock);
+	spin_lock_irqsave(&ts->lock, flags);
 	if (!ts->active || ts->shutting_down) {
-		spin_unlock_bh(&ts->lock);
+		spin_unlock_irqrestore(&ts->lock, flags);
 		return;
 	}
 
@@ -952,7 +959,7 @@ static void tquic_timer_pto_expired(struct timer_list *t)
 	spin_unlock_bh(&rs->lock);
 
 	set_bit(TQUIC_TIMER_PTO_BIT, &ts->pending_timer_mask);
-	spin_unlock_bh(&ts->lock);
+	spin_unlock_irqrestore(&ts->lock, flags);
 
 	/* Schedule probe transmission */
 	queue_work(ts->wq, &ts->retransmit_work);
@@ -968,13 +975,13 @@ void tquic_timer_update_pto(struct tquic_timer_state *ts)
 {
 	struct tquic_recovery_state *rs = ts->recovery;
 	ktime_t now, earliest_timeout = KTIME_MAX;
-	unsigned long expires;
+	unsigned long expires, flags;
 	u64 pto_duration;
 	int i;
 
-	spin_lock_bh(&ts->lock);
+	spin_lock_irqsave(&ts->lock, flags);
 	if (!ts->active) {
-		spin_unlock_bh(&ts->lock);
+		spin_unlock_irqrestore(&ts->lock, flags);
 		return;
 	}
 
@@ -1031,7 +1038,7 @@ void tquic_timer_update_pto(struct tquic_timer_state *ts)
 		mod_timer(&ts->pto_timer, expires);
 	}
 
-	spin_unlock_bh(&ts->lock);
+	spin_unlock_irqrestore(&ts->lock, flags);
 }
 EXPORT_SYMBOL_GPL(tquic_timer_update_pto);
 
@@ -1048,15 +1055,16 @@ EXPORT_SYMBOL_GPL(tquic_timer_update_pto);
 static void tquic_timer_drain_expired(struct timer_list *t)
 {
 	struct tquic_timer_state *ts = from_timer(ts, t, drain_timer);
+	unsigned long flags;
 
-	spin_lock_bh(&ts->lock);
+	spin_lock_irqsave(&ts->lock, flags);
 	if (!ts->active || ts->shutting_down) {
-		spin_unlock_bh(&ts->lock);
+		spin_unlock_irqrestore(&ts->lock, flags);
 		return;
 	}
 
 	set_bit(TQUIC_TIMER_DRAIN_BIT, &ts->pending_timer_mask);
-	spin_unlock_bh(&ts->lock);
+	spin_unlock_irqrestore(&ts->lock, flags);
 
 	/* Schedule connection cleanup */
 	queue_work(ts->wq, &ts->timer_work);
@@ -1074,12 +1082,12 @@ static void tquic_timer_drain_expired(struct timer_list *t)
 void tquic_timer_start_drain(struct tquic_timer_state *ts)
 {
 	struct tquic_recovery_state *rs = ts->recovery;
-	unsigned long expires;
+	unsigned long expires, flags;
 	u64 drain_duration;
 
-	spin_lock_bh(&ts->lock);
+	spin_lock_irqsave(&ts->lock, flags);
 	if (!ts->active) {
-		spin_unlock_bh(&ts->lock);
+		spin_unlock_irqrestore(&ts->lock, flags);
 		return;
 	}
 
@@ -1100,7 +1108,7 @@ void tquic_timer_start_drain(struct tquic_timer_state *ts)
 	expires = jiffies + usecs_to_jiffies(drain_duration);
 	mod_timer(&ts->drain_timer, expires);
 
-	spin_unlock_bh(&ts->lock);
+	spin_unlock_irqrestore(&ts->lock, flags);
 
 	tquic_dbg("timer:started drain period, duration=%llu us\n",
 		 drain_duration);
@@ -1120,15 +1128,16 @@ EXPORT_SYMBOL_GPL(tquic_timer_start_drain);
 static void tquic_timer_keepalive_expired(struct timer_list *t)
 {
 	struct tquic_timer_state *ts = from_timer(ts, t, keepalive_timer);
+	unsigned long flags;
 
-	spin_lock_bh(&ts->lock);
+	spin_lock_irqsave(&ts->lock, flags);
 	if (!ts->active || ts->shutting_down) {
-		spin_unlock_bh(&ts->lock);
+		spin_unlock_irqrestore(&ts->lock, flags);
 		return;
 	}
 
 	set_bit(TQUIC_TIMER_KEEPALIVE_BIT, &ts->pending_timer_mask);
-	spin_unlock_bh(&ts->lock);
+	spin_unlock_irqrestore(&ts->lock, flags);
 
 	/* Schedule PING transmission */
 	queue_work(ts->wq, &ts->timer_work);
@@ -1143,11 +1152,11 @@ static void tquic_timer_keepalive_expired(struct timer_list *t)
  */
 void tquic_timer_set_keepalive(struct tquic_timer_state *ts, u32 interval_ms)
 {
-	unsigned long expires;
+	unsigned long expires, flags;
 
-	spin_lock_bh(&ts->lock);
+	spin_lock_irqsave(&ts->lock, flags);
 	if (!ts->active) {
-		spin_unlock_bh(&ts->lock);
+		spin_unlock_irqrestore(&ts->lock, flags);
 		return;
 	}
 
@@ -1160,7 +1169,7 @@ void tquic_timer_set_keepalive(struct tquic_timer_state *ts, u32 interval_ms)
 		mod_timer(&ts->keepalive_timer, expires);
 	}
 
-	spin_unlock_bh(&ts->lock);
+	spin_unlock_irqrestore(&ts->lock, flags);
 }
 EXPORT_SYMBOL_GPL(tquic_timer_set_keepalive);
 
@@ -1170,18 +1179,18 @@ EXPORT_SYMBOL_GPL(tquic_timer_set_keepalive);
  */
 void tquic_timer_reset_keepalive(struct tquic_timer_state *ts)
 {
-	unsigned long expires;
+	unsigned long expires, flags;
 
-	spin_lock_bh(&ts->lock);
+	spin_lock_irqsave(&ts->lock, flags);
 	if (!ts->active || ts->keepalive_interval_us == 0) {
-		spin_unlock_bh(&ts->lock);
+		spin_unlock_irqrestore(&ts->lock, flags);
 		return;
 	}
 
 	expires = jiffies + usecs_to_jiffies(ts->keepalive_interval_us);
 	mod_timer(&ts->keepalive_timer, expires);
 
-	spin_unlock_bh(&ts->lock);
+	spin_unlock_irqrestore(&ts->lock, flags);
 }
 EXPORT_SYMBOL_GPL(tquic_timer_reset_keepalive);
 
@@ -1230,10 +1239,11 @@ void tquic_timer_schedule_pacing(struct tquic_timer_state *ts, u32 bytes_to_send
 {
 	ktime_t now, next_time;
 	s64 interval_ns;
+	unsigned long flags;
 
-	spin_lock_bh(&ts->lock);
+	spin_lock_irqsave(&ts->lock, flags);
 	if (!ts->active || ts->pacing_rate == 0) {
-		spin_unlock_bh(&ts->lock);
+		spin_unlock_irqrestore(&ts->lock, flags);
 		return;
 	}
 
@@ -1254,7 +1264,7 @@ void tquic_timer_schedule_pacing(struct tquic_timer_state *ts, u32 bytes_to_send
 	hrtimer_start(&ts->pacing_timer, ktime_sub(next_time, now),
 		      HRTIMER_MODE_REL);
 
-	spin_unlock_bh(&ts->lock);
+	spin_unlock_irqrestore(&ts->lock, flags);
 }
 EXPORT_SYMBOL_GPL(tquic_timer_schedule_pacing);
 
@@ -1265,9 +1275,11 @@ EXPORT_SYMBOL_GPL(tquic_timer_schedule_pacing);
  */
 void tquic_timer_set_pacing_rate(struct tquic_timer_state *ts, u64 rate)
 {
-	spin_lock_bh(&ts->lock);
+	unsigned long flags;
+
+	spin_lock_irqsave(&ts->lock, flags);
 	ts->pacing_rate = rate;
-	spin_unlock_bh(&ts->lock);
+	spin_unlock_irqrestore(&ts->lock, flags);
 }
 EXPORT_SYMBOL_GPL(tquic_timer_set_pacing_rate);
 
@@ -1281,16 +1293,17 @@ bool tquic_timer_can_send_paced(struct tquic_timer_state *ts)
 {
 	ktime_t now;
 	bool can_send;
+	unsigned long flags;
 
-	spin_lock_bh(&ts->lock);
+	spin_lock_irqsave(&ts->lock, flags);
 	if (!ts->active || ts->pacing_rate == 0) {
-		spin_unlock_bh(&ts->lock);
+		spin_unlock_irqrestore(&ts->lock, flags);
 		return true;
 	}
 
 	now = ktime_get();
 	can_send = !ktime_after(ts->next_pacing_time, now);
-	spin_unlock_bh(&ts->lock);
+	spin_unlock_irqrestore(&ts->lock, flags);
 
 	return can_send;
 }
@@ -1422,11 +1435,11 @@ static void tquic_timer_work_fn(struct work_struct *work)
 	struct tquic_timer_state *ts = container_of(work, struct tquic_timer_state,
 						    timer_work);
 	struct tquic_connection *conn;
-	unsigned long pending;
+	unsigned long pending, flags;
 
-	spin_lock_bh(&ts->lock);
+	spin_lock_irqsave(&ts->lock, flags);
 	if (!ts->active || ts->shutting_down) {
-		spin_unlock_bh(&ts->lock);
+		spin_unlock_irqrestore(&ts->lock, flags);
 		return;
 	}
 
@@ -1437,17 +1450,17 @@ static void tquic_timer_work_fn(struct work_struct *work)
 	 * to ensure conn remains valid after we drop the lock below.
 	 */
 	if (!tquic_conn_get(conn)) {
-		spin_unlock_bh(&ts->lock);
+		spin_unlock_irqrestore(&ts->lock, flags);
 		return;
 	}
 
 	pending = ts->pending_timer_mask;
 	ts->pending_timer_mask = 0;
-	spin_unlock_bh(&ts->lock);
+	spin_unlock_irqrestore(&ts->lock, flags);
 
 	/* Handle idle timeout */
 	if (test_bit(TQUIC_TIMER_IDLE_BIT, &pending)) {
-		if (conn->state == TQUIC_CONN_CONNECTED) {
+		if (READ_ONCE(conn->state) == TQUIC_CONN_CONNECTED) {
 			tquic_conn_close_with_error(conn,
 						    EQUIC_NO_ERROR,
 						    "idle timeout");
@@ -1493,12 +1506,12 @@ static void tquic_retransmit_work_fn(struct work_struct *work)
 						    retransmit_work);
 	struct tquic_connection *conn;
 	struct tquic_recovery_state *rs;
-	unsigned long pending;
+	unsigned long pending, flags;
 	int i, lost;
 
-	spin_lock_bh(&ts->lock);
+	spin_lock_irqsave(&ts->lock, flags);
 	if (!ts->active || ts->shutting_down) {
-		spin_unlock_bh(&ts->lock);
+		spin_unlock_irqrestore(&ts->lock, flags);
 		return;
 	}
 
@@ -1510,13 +1523,13 @@ static void tquic_retransmit_work_fn(struct work_struct *work)
 	 * Loss detection and PTO handling access conn->active_path.
 	 */
 	if (!tquic_conn_get(conn)) {
-		spin_unlock_bh(&ts->lock);
+		spin_unlock_irqrestore(&ts->lock, flags);
 		return;
 	}
 
 	rs = ts->recovery;
 	pending = ts->pending_timer_mask;
-	spin_unlock_bh(&ts->lock);
+	spin_unlock_irqrestore(&ts->lock, flags);
 
 	/* Handle loss detection */
 	if (test_bit(TQUIC_TIMER_LOSS_BIT, &pending)) {
@@ -1558,10 +1571,11 @@ static void tquic_path_work_fn(struct work_struct *work)
 	struct tquic_timer_state *ts = container_of(work, struct tquic_timer_state,
 						    path_work);
 	struct tquic_connection *conn;
+	unsigned long flags;
 
-	spin_lock_bh(&ts->lock);
+	spin_lock_irqsave(&ts->lock, flags);
 	if (!ts->active || ts->shutting_down) {
-		spin_unlock_bh(&ts->lock);
+		spin_unlock_irqrestore(&ts->lock, flags);
 		return;
 	}
 
@@ -1573,10 +1587,10 @@ static void tquic_path_work_fn(struct work_struct *work)
 	 * Path work handlers access conn for validation and failover.
 	 */
 	if (!tquic_conn_get(conn)) {
-		spin_unlock_bh(&ts->lock);
+		spin_unlock_irqrestore(&ts->lock, flags);
 		return;
 	}
-	spin_unlock_bh(&ts->lock);
+	spin_unlock_irqrestore(&ts->lock, flags);
 
 	/* Handle path-related work like validation retries, failover, etc. */
 

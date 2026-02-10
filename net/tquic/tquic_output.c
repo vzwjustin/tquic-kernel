@@ -1838,7 +1838,7 @@ int tquic_xmit(struct tquic_connection *conn, struct tquic_stream *stream,
 		     READ_ONCE(conn->state) == TQUIC_CONN_CLOSED))
 		return -ESHUTDOWN;
 
-	if (unlikely(conn->state != TQUIC_CONN_CONNECTED))
+	if (unlikely(READ_ONCE(conn->state) != TQUIC_CONN_CONNECTED))
 		return -ENOTCONN;
 
 	pkt_num = atomic64_inc_return(&conn->pkt_num_tx) - 1;
@@ -2104,7 +2104,7 @@ int tquic_output_flush(struct tquic_connection *conn)
 	if (!conn)
 		return -EINVAL;
 
-	if (conn->state != TQUIC_CONN_CONNECTED)
+	if (READ_ONCE(conn->state) != TQUIC_CONN_CONNECTED)
 		return -ENOTCONN;
 
 	/* Select path for transmission */
@@ -2568,7 +2568,7 @@ int tquic_send_datagram(struct tquic_connection *conn,
 	if (!conn)
 		return -EINVAL;
 
-	if (conn->state != TQUIC_CONN_CONNECTED)
+	if (READ_ONCE(conn->state) != TQUIC_CONN_CONNECTED)
 		return -ENOTCONN;
 
 	/* Check if datagrams are negotiated */
@@ -2740,8 +2740,8 @@ static int tquic_datagram_wait_data(struct tquic_connection *conn, long *timeo)
 		!skb_queue_empty(&conn->datagram.recv_queue) ||
 		    (sk && sk->sk_err) ||
 		    (sk && (sk->sk_shutdown & RCV_SHUTDOWN)) ||
-		    conn->state == TQUIC_CONN_CLOSED ||
-		    conn->state == TQUIC_CONN_DRAINING,
+		    READ_ONCE(conn->state) == TQUIC_CONN_CLOSED ||
+		    READ_ONCE(conn->state) == TQUIC_CONN_DRAINING,
 		*timeo);
 
 	if (ret < 0) {
@@ -2767,8 +2767,8 @@ static int tquic_datagram_wait_data(struct tquic_connection *conn, long *timeo)
 		return -ENOTCONN;
 
 	/* Check for connection close */
-	if (conn->state == TQUIC_CONN_CLOSED ||
-	    conn->state == TQUIC_CONN_DRAINING)
+	if (READ_ONCE(conn->state) == TQUIC_CONN_CLOSED ||
+	    READ_ONCE(conn->state) == TQUIC_CONN_DRAINING)
 		return -ENOTCONN;
 
 	/* Data should be available now */
@@ -2788,8 +2788,8 @@ int tquic_recv_datagram(struct tquic_connection *conn,
 	if (!conn)
 		return -EINVAL;
 
-	if (conn->state != TQUIC_CONN_CONNECTED &&
-	    conn->state != TQUIC_CONN_CLOSING)
+	if (READ_ONCE(conn->state) != TQUIC_CONN_CONNECTED &&
+	    READ_ONCE(conn->state) != TQUIC_CONN_CLOSING)
 		return -ENOTCONN;
 
 	/* Check if datagrams are negotiated */
@@ -2842,8 +2842,8 @@ retry:
 		 * Re-check connection state after waking up.
 		 * Connection may have transitioned while we were sleeping.
 		 */
-		if (conn->state != TQUIC_CONN_CONNECTED &&
-		    conn->state != TQUIC_CONN_CLOSING)
+		if (READ_ONCE(conn->state) != TQUIC_CONN_CONNECTED &&
+		    READ_ONCE(conn->state) != TQUIC_CONN_CLOSING)
 			return -ENOTCONN;
 
 		/* Retry to get the datagram */

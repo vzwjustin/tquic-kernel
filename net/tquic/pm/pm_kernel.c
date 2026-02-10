@@ -303,7 +303,7 @@ static int tquic_pm_kernel_netdev_event(struct notifier_block *nb,
 			spin_lock_bh(&kdata->conn_lock);
 			list_for_each_entry_safe(conn, tmp, &kdata->conn_list, pm_node) {
 				/* Skip if connection not established yet */
-				if (conn->state != TQUIC_CONN_CONNECTED)
+				if (READ_ONCE(conn->state) != TQUIC_CONN_CONNECTED)
 					continue;
 
 				/* First: try to recover unavailable paths */
@@ -315,7 +315,7 @@ static int tquic_pm_kernel_netdev_event(struct notifier_block *nb,
 			if (tquic_pm_kernel_should_add_path(dev, pernet)) {
 				spin_lock_bh(&kdata->conn_lock);
 				list_for_each_entry_safe(conn, tmp, &kdata->conn_list, pm_node) {
-					if (conn->state != TQUIC_CONN_CONNECTED)
+					if (READ_ONCE(conn->state) != TQUIC_CONN_CONNECTED)
 						continue;
 
 					tquic_pm_kernel_try_add_path(conn, dev, pernet);
@@ -346,7 +346,7 @@ static int tquic_pm_kernel_netdev_event(struct notifier_block *nb,
 
 			spin_lock_bh(&kdata->conn_lock);
 			list_for_each_entry_safe(conn, tmp, &kdata->conn_list, pm_node) {
-				if (conn->state != TQUIC_CONN_CONNECTED)
+				if (READ_ONCE(conn->state) != TQUIC_CONN_CONNECTED)
 					continue;
 
 				tquic_pm_kernel_try_recover(conn, dev);

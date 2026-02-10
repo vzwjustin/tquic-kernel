@@ -482,7 +482,7 @@ static int tquic_debug_hs_show(struct seq_file *seq, void *v)
 		   conn->token,
 		   tquic_debug_role(conn->role),
 		   hs_status,
-		   tquic_debug_conn_state(conn->state),
+		   tquic_debug_conn_state(READ_ONCE(conn->state)),
 		   version,
 		   hs_time_us,
 		   conn->early_data_accepted ? "yes" :

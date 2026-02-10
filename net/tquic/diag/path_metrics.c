@@ -579,7 +579,7 @@ static void tquic_metrics_send_update(struct work_struct *work)
 	struct sk_buff *msg;
 	void *hdr;
 
-	if (!conn || conn->state == TQUIC_CONN_CLOSED)
+	if (!conn || READ_ONCE(conn->state) == TQUIC_CONN_CLOSED)
 		return;
 
 	msg = nlmsg_new(NLMSG_DEFAULT_SIZE * min_t(u32, conn->num_paths,

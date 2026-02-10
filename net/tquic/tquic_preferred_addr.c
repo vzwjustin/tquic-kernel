@@ -616,7 +616,7 @@ bool tquic_pref_addr_client_can_migrate(struct tquic_connection *conn)
 		return false;
 
 	/* Must be in connected state (handshake complete) */
-	if (conn->state != TQUIC_CONN_CONNECTED)
+	if (READ_ONCE(conn->state) != TQUIC_CONN_CONNECTED)
 		return false;
 
 	/*

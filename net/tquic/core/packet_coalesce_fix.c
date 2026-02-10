@@ -391,9 +391,9 @@ static void tquic_packet_process_retry(struct tquic_connection *conn,
 	int ret;
 
 	/* Retry packets are only valid during connection setup */
-	if (conn->state != TQUIC_CONN_CONNECTING) {
+	if (READ_ONCE(conn->state) != TQUIC_CONN_CONNECTING) {
 		pr_debug("tquic: ignoring Retry packet in state %d\n",
-			 conn->state);
+			 READ_ONCE(conn->state));
 		kfree_skb(skb);
 		return;
 	}

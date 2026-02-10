@@ -527,7 +527,9 @@ static int tquic_v6_connect(struct sock *sk, struct sockaddr_unsized *addr, int 
 	}
 
 	/* Handshake succeeded - mark connection as established */
-	conn->state = TQUIC_CONN_CONNECTED;
+	spin_lock_bh(&conn->lock);
+	WRITE_ONCE(conn->state, TQUIC_CONN_CONNECTED);
+	spin_unlock_bh(&conn->lock);
 	inet_sk_set_state(sk, TCP_ESTABLISHED);
 
 	/* Initialize path manager after connection established */

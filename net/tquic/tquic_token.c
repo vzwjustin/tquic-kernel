@@ -656,7 +656,7 @@ int tquic_send_new_token(struct tquic_connection *conn)
 	int frame_len;
 	int ret;
 
-	if (!conn || conn->state != TQUIC_CONN_CONNECTED)
+	if (!conn || READ_ONCE(conn->state) != TQUIC_CONN_CONNECTED)
 		return -EINVAL;
 
 	/* Only server sends NEW_TOKEN */

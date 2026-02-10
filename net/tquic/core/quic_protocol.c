@@ -380,9 +380,11 @@ static void tquic_proto_close(struct sock *sk, long timeout)
 
 	lock_sock(sk);
 
-	if (conn && conn->state != TQUIC_CONN_CLOSED) {
+	if (conn && READ_ONCE(conn->state) != TQUIC_CONN_CLOSED) {
 		tquic_conn_close_with_error(conn, EQUIC_NO_ERROR, NULL);
-		conn->state = TQUIC_CONN_CLOSING;
+		spin_lock_bh(&conn->lock);
+		WRITE_ONCE(conn->state, TQUIC_CONN_CLOSING);
+		spin_unlock_bh(&conn->lock);
 		/* Set timer for draining period */
 		if (conn->active_path && conn->timer_state) {
 			/* 3 * smoothed_rtt draining period per RFC 9000 */
@@ -677,7 +679,7 @@ static void tquic_proto_shutdown(struct sock *sk, int how)
 	if (!conn)
 		return;
 
-	if ((how & SEND_SHUTDOWN) && conn->state == TQUIC_CONN_CONNECTED) {
+	if ((how & SEND_SHUTDOWN) && READ_ONCE(conn->state) == TQUIC_CONN_CONNECTED) {
 		tquic_conn_close_with_error(conn, EQUIC_NO_ERROR, NULL);
 	}
 }
@@ -882,7 +884,7 @@ static int tquic_proto_getsockopt(struct sock *sk, int level, int optname,
 		}
 		if (tsk->conn) {
 			struct tquic_info info = {
-				.state = tsk->conn->state,
+				.state = READ_ONCE(tsk->conn->state),
 				.paths_active = tsk->conn->num_paths,
 				.version = tsk->conn->version,
 				.idle_timeout = tsk->conn->idle_timeout,
@@ -936,7 +938,7 @@ static int tquic_proto_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 	struct tquic_sock *tsk = tquic_sk(sk);
 	struct tquic_connection *conn = tsk->conn;
 
-	if (!conn || conn->state != TQUIC_CONN_CONNECTED)
+	if (!conn || READ_ONCE(conn->state) != TQUIC_CONN_CONNECTED)
 		return -ENOTCONN;
 
 	/* Use tquic_sendmsg from tquic.h */
@@ -1085,7 +1087,7 @@ static int tquic_stream_connect(struct socket *sock, TQUIC_SOCKADDR *addr,
 		struct tquic_sock *tsk = tquic_sk(sk);
 		DEFINE_WAIT(wait);
 
-		while (tsk->conn && tsk->conn->state == TQUIC_CONN_CONNECTING) {
+		while (tsk->conn && READ_ONCE(tsk->conn->state) == TQUIC_CONN_CONNECTING) {
 			prepare_to_wait(sk_sleep(sk), &wait, TASK_INTERRUPTIBLE);
 
 			if (signal_pending(current)) {
@@ -1099,7 +1101,7 @@ static int tquic_stream_connect(struct socket *sock, TQUIC_SOCKADDR *addr,
 			finish_wait(sk_sleep(sk), &wait);
 		}
 
-		if (!tsk->conn || tsk->conn->state != TQUIC_CONN_CONNECTED)
+		if (!tsk->conn || READ_ONCE(tsk->conn->state) != TQUIC_CONN_CONNECTED)
 			return -ECONNREFUSED;
 	}
 
@@ -1191,7 +1193,7 @@ static __poll_t tquic_stream_poll(struct file *file, struct socket *sock,
 		mask |= EPOLLRDHUP;
 
 	if (conn) {
-		if (conn->state == TQUIC_CONN_CONNECTED) {
+		if (READ_ONCE(conn->state) == TQUIC_CONN_CONNECTED) {
 			if (sk_rmem_alloc_get(sk) > 0)
 				mask |= EPOLLIN | EPOLLRDNORM;
 

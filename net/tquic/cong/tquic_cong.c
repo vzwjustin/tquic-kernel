@@ -1070,7 +1070,7 @@ int tquic_cong_enable_coupling(struct tquic_connection *conn,
 		return -ENOMEM;
 
 	/* Attach all existing paths */
-	spin_lock(&conn->paths_lock);
+	spin_lock_bh(&conn->paths_lock);
 	list_for_each_entry(path, &conn->paths, list) {
 		if (path->state == TQUIC_PATH_ACTIVE ||
 		    path->state == TQUIC_PATH_VALIDATED) {
@@ -1082,7 +1082,7 @@ int tquic_cong_enable_coupling(struct tquic_connection *conn,
 			}
 		}
 	}
-	spin_unlock(&conn->paths_lock);
+	spin_unlock_bh(&conn->paths_lock);
 
 	/* Store coupled state in connection */
 	conn->coupled_cc = state;
@@ -1114,11 +1114,11 @@ void tquic_cong_disable_coupling(struct tquic_connection *conn)
 	}
 
 	/* Detach all paths */
-	spin_lock(&conn->paths_lock);
+	spin_lock_bh(&conn->paths_lock);
 	list_for_each_entry(path, &conn->paths, list) {
 		tquic_coupled_detach_path(state, path);
 	}
-	spin_unlock(&conn->paths_lock);
+	spin_unlock_bh(&conn->paths_lock);
 
 	/* Clear connection reference and destroy state */
 	conn->coupled_cc = NULL;

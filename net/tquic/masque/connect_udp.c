@@ -706,7 +706,7 @@ int tquic_connect_udp_connect(struct tquic_connection *conn,
 		return -EINVAL;
 
 	/* Check connection state */
-	if (conn->state != TQUIC_CONN_CONNECTED)
+	if (READ_ONCE(conn->state) != TQUIC_CONN_CONNECTED)
 		return -ENOTCONN;
 
 	/* Allocate tunnel */

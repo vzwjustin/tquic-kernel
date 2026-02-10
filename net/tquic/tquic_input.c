@@ -2112,7 +2112,7 @@ static int tquic_process_frames(struct tquic_connection *conn,
 	 * processed. In CLOSING state, only CONNECTION_CLOSE is relevant
 	 * (to determine if peer has also initiated close).
 	 */
-	if (conn->state == TQUIC_CONN_DRAINING)
+	if (READ_ONCE(conn->state) == TQUIC_CONN_DRAINING)
 		return 0;
 
 	ctx.conn = conn;
@@ -2154,7 +2154,7 @@ static int tquic_process_frames(struct tquic_connection *conn,
 		 * CONNECTION_CLOSE frames are processed. All other
 		 * frames are silently ignored.
 		 */
-		if (conn->state == TQUIC_CONN_CLOSING) {
+		if (READ_ONCE(conn->state) == TQUIC_CONN_CLOSING) {
 			if (frame_type != TQUIC_FRAME_CONNECTION_CLOSE &&
 			    frame_type != TQUIC_FRAME_CONNECTION_CLOSE_APP)
 				return 0;
@@ -2721,7 +2721,7 @@ static int tquic_process_packet(struct tquic_connection *conn,
 				 * packet that contains a DCID field that is
 				 * not equal to the SCID field of its Initial."
 				 */
-				if (conn->state == TQUIC_CONN_CONNECTING) {
+				if (READ_ONCE(conn->state) == TQUIC_CONN_CONNECTING) {
 					ret = tquic_retry_process(conn, data, len);
 					if (ret == 0) {
 						/* Update MIB counter */
@@ -2744,7 +2744,7 @@ static int tquic_process_packet(struct tquic_connection *conn,
 					 * connection."
 					 */
 					tquic_dbg("discarding Retry in state %d\n",
-						 conn->state);
+						 READ_ONCE(conn->state));
 				}
 			}
 			return 0;  /* Discard Retry packet after processing */

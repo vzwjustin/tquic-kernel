@@ -119,7 +119,7 @@ static int io_tquic_check_connected(struct tquic_sock *tsk)
 	if (sk->sk_state != TCP_ESTABLISHED)
 		return -ENOTCONN;
 
-	if (!tsk->conn || tsk->conn->state != TQUIC_CONN_CONNECTED)
+	if (!tsk->conn || READ_ONCE(tsk->conn->state) != TQUIC_CONN_CONNECTED)
 		return -ENOTCONN;
 
 	return 0;

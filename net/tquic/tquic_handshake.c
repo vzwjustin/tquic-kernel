@@ -35,6 +35,7 @@
 #include "tquic_token.h"
 #include "crypto/zero_rtt.h"
 #include "core/early_data.h"
+#include "core/transport_params.h"
 #include "core/varint.h"
 
 /*
@@ -156,39 +157,66 @@ static bool tquic_validate_zero_rtt_transport_params(
 {
 	struct tquic_zero_rtt_state_s *state = conn->zero_rtt_state;
 	struct tquic_session_ticket_plaintext *saved;
+	struct tquic_transport_params remembered;
+	int ret;
 
 	if (!state || !state->ticket)
 		return true;	/* No saved params to check */
 
 	saved = &state->ticket->plaintext;
 
+	/* No saved transport params — cannot validate, reject 0-RTT */
+	if (saved->transport_params_len == 0) {
+		tquic_dbg("0-RTT: no saved transport params in ticket\n");
+		return false;
+	}
+
+	/* Decode the remembered transport parameters from session ticket */
+	ret = tquic_tp_decode(saved->transport_params,
+			      saved->transport_params_len,
+			      true, &remembered);
+	if (ret) {
+		tquic_dbg("0-RTT: failed to decode saved transport params\n");
+		return false;
+	}
+
 	/*
-	 * Transport parameters that MUST NOT be reduced:
-	 * - initial_max_data
-	 * - initial_max_stream_data_bidi_local
-	 * - initial_max_stream_data_bidi_remote
-	 * - initial_max_stream_data_uni
-	 * - initial_max_streams_bidi
-	 * - initial_max_streams_uni
-	 *
-	 * We compare the new server transport parameters (in remote_params)
-	 * against the saved parameters from the session ticket. If any
-	 * value is lower, 0-RTT data may have violated the new limits.
+	 * RFC 9000 Section 7.4.1: All six transport parameters that
+	 * MUST NOT be reduced below the remembered values.
+	 * Compare new server params against the saved session ticket params.
 	 */
 	if (conn->remote_params.initial_max_data <
-	    conn->max_data_remote) {
+	    remembered.initial_max_data) {
 		tquic_dbg("0-RTT: server reduced initial_max_data\n");
 		return false;
 	}
 
+	if (conn->remote_params.initial_max_stream_data_bidi_local <
+	    remembered.initial_max_stream_data_bidi_local) {
+		tquic_dbg("0-RTT: server reduced max_stream_data_bidi_local\n");
+		return false;
+	}
+
+	if (conn->remote_params.initial_max_stream_data_bidi_remote <
+	    remembered.initial_max_stream_data_bidi_remote) {
+		tquic_dbg("0-RTT: server reduced max_stream_data_bidi_remote\n");
+		return false;
+	}
+
+	if (conn->remote_params.initial_max_stream_data_uni <
+	    remembered.initial_max_stream_data_uni) {
+		tquic_dbg("0-RTT: server reduced max_stream_data_uni\n");
+		return false;
+	}
+
 	if (conn->remote_params.initial_max_streams_bidi <
-	    conn->max_streams_bidi) {
+	    remembered.initial_max_streams_bidi) {
 		tquic_dbg("0-RTT: server reduced max_streams_bidi\n");
 		return false;
 	}
 
 	if (conn->remote_params.initial_max_streams_uni <
-	    conn->max_streams_uni) {
+	    remembered.initial_max_streams_uni) {
 		tquic_dbg("0-RTT: server reduced max_streams_uni\n");
 		return false;
 	}
@@ -292,14 +320,30 @@ int tquic_store_session_ticket(struct sock *sk, const char *server_name,
 	plaintext.cipher_suite = cipher_suite;
 
 	/*
-	 * CF-527: ALPN and transport parameters should be stored for
-	 * 0-RTT resumption validation (RFC 9001 Section 4.6.1).
-	 * Currently not populated because struct tquic_connection
-	 * does not carry the negotiated ALPN. This needs to be added
-	 * so that 0-RTT is only accepted when ALPN matches.
+	 * CF-527: Store transport parameters for 0-RTT validation
+	 * (RFC 9000 Section 7.4.1). The server's transport params are
+	 * stored so the client can verify the server doesn't reduce
+	 * limits when accepting 0-RTT in a future connection.
 	 */
 	plaintext.alpn_len = 0;
-	plaintext.transport_params_len = 0;
+	{
+		struct tquic_sock *tsk = tquic_sk(sk);
+		struct tquic_connection *conn = tsk ? tsk->conn : NULL;
+
+		if (conn) {
+			ssize_t tp_len;
+
+			tp_len = tquic_tp_encode(&conn->remote_params,
+						 true, plaintext.transport_params,
+						 sizeof(plaintext.transport_params));
+			if (tp_len > 0)
+				plaintext.transport_params_len = tp_len;
+			else
+				plaintext.transport_params_len = 0;
+		} else {
+			plaintext.transport_params_len = 0;
+		}
+	}
 
 	return tquic_zero_rtt_store_ticket(server_name, server_name_len,
 					   ticket_data, ticket_len, &plaintext);
@@ -374,7 +418,7 @@ void tquic_handshake_done(void *data, int status, key_serial_t peerid)
 
 		if (tsk->conn) {
 			spin_lock_bh(&tsk->conn->lock);
-			tsk->conn->state = TQUIC_CONN_CONNECTED;
+			WRITE_ONCE(tsk->conn->state, TQUIC_CONN_CONNECTED);
 			spin_unlock_bh(&tsk->conn->lock);
 		}
 
@@ -492,7 +536,7 @@ int tquic_start_handshake(struct sock *sk)
 
 		if (tsk->conn) {
 			spin_lock_bh(&tsk->conn->lock);
-			tsk->conn->state = TQUIC_CONN_CONNECTED;
+			WRITE_ONCE(tsk->conn->state, TQUIC_CONN_CONNECTED);
 			spin_unlock_bh(&tsk->conn->lock);
 		}
 
@@ -1132,7 +1176,7 @@ int tquic_inline_hs_recv_crypto(struct sock *sk, const u8 *data, u32 len,
 		conn->handshake_complete = true;
 		conn->crypto_level = TQUIC_CRYPTO_APPLICATION;
 		spin_lock_bh(&conn->lock);
-		conn->state = TQUIC_CONN_CONNECTED;
+		WRITE_ONCE(conn->state, TQUIC_CONN_CONNECTED);
 		spin_unlock_bh(&conn->lock);
 		tsk->flags |= TQUIC_F_HANDSHAKE_DONE;
 
@@ -1564,7 +1608,7 @@ static int tquic_conn_server_accept_init(struct tquic_connection *conn,
 
 	/* Mark as server-side connection in handshake phase */
 	spin_lock_bh(&conn->lock);
-	conn->state = TQUIC_CONN_CONNECTING;
+	WRITE_ONCE(conn->state, TQUIC_CONN_CONNECTING);
 	spin_unlock_bh(&conn->lock);
 
 	tquic_dbg("Parsed Initial packet: version=0x%08x, "
@@ -1634,7 +1678,7 @@ static void tquic_server_handshake_done(void *data, int status,
 		child_tsk->flags |= TQUIC_F_HANDSHAKE_DONE;
 		inet_sk_set_state(child_sk, TCP_ESTABLISHED);
 		spin_lock_bh(&conn->lock);
-		conn->state = TQUIC_CONN_CONNECTED;
+		WRITE_ONCE(conn->state, TQUIC_CONN_CONNECTED);
 		spin_unlock_bh(&conn->lock);
 
 		/* Initialize path manager for server-side connection */

@@ -484,7 +484,7 @@ void tquic_mp_ack_state_destroy(struct tquic_mp_path_ack_state *state)
 	if (!state)
 		return;
 
-	spin_lock(&state->lock);
+	spin_lock_bh(&state->lock);
 
 	/* Free all sent packets */
 	for (i = 0; i < TQUIC_PN_SPACE_COUNT; i++) {
@@ -502,7 +502,7 @@ void tquic_mp_ack_state_destroy(struct tquic_mp_path_ack_state *state)
 		}
 	}
 
-	spin_unlock(&state->lock);
+	spin_unlock_bh(&state->lock);
 
 	kmem_cache_free(mp_ack_state_cache, state);
 }
@@ -534,7 +534,7 @@ int tquic_mp_record_received(struct tquic_mp_path_ack_state *state,
 	if (!state)
 		return -EINVAL;
 
-	spin_lock(&state->lock);
+	spin_lock_bh(&state->lock);
 
 	/* Update largest received */
 	if (pn > state->largest_received[pn_space]) {
@@ -566,7 +566,7 @@ int tquic_mp_record_received(struct tquic_mp_path_ack_state *state,
 		if (pn > range->end + 1) {
 			new_range = mp_ack_range_alloc(GFP_ATOMIC);
 			if (!new_range) {
-				spin_unlock(&state->lock);
+				spin_unlock_bh(&state->lock);
 				return -ENOMEM;
 			}
 
@@ -585,7 +585,7 @@ int tquic_mp_record_received(struct tquic_mp_path_ack_state *state,
 	if (!merged) {
 		new_range = mp_ack_range_alloc(GFP_ATOMIC);
 		if (!new_range) {
-			spin_unlock(&state->lock);
+			spin_unlock_bh(&state->lock);
 			return -ENOMEM;
 		}
 
@@ -604,7 +604,7 @@ int tquic_mp_record_received(struct tquic_mp_path_ack_state *state,
 		state->num_ack_ranges[pn_space]--;
 	}
 
-	spin_unlock(&state->lock);
+	spin_unlock_bh(&state->lock);
 	return 0;
 }
 EXPORT_SYMBOL_GPL(tquic_mp_record_received);
@@ -644,10 +644,10 @@ int tquic_mp_generate_ack(struct tquic_mp_path_ack_state *state,
 	if (!frame)
 		return -ENOMEM;
 
-	spin_lock(&state->lock);
+	spin_lock_bh(&state->lock);
 
 	if (list_empty(&state->ack_ranges[pn_space])) {
-		spin_unlock(&state->lock);
+		spin_unlock_bh(&state->lock);
 		kfree(frame);
 		return -ENODATA;
 	}
@@ -687,7 +687,7 @@ int tquic_mp_generate_ack(struct tquic_mp_path_ack_state *state,
 		frame->ecn_ce_count = state->ecn_acked.ce;
 	}
 
-	spin_unlock(&state->lock);
+	spin_unlock_bh(&state->lock);
 
 	/* Write the frame */
 	ret = tquic_mp_write_ack(frame, buf, buf_len, ack_delay_exponent);
@@ -835,12 +835,12 @@ int tquic_mp_on_ack_received(struct tquic_mp_path_ack_state *state,
 		return -EINVAL;
 	}
 
-	spin_lock(&state->lock);
+	spin_lock_bh(&state->lock);
 
 	/* Validate largest_acked */
 	if (frame->largest_ack < state->largest_acked[pn_space]) {
 		/* Old ACK, ignore */
-		spin_unlock(&state->lock);
+		spin_unlock_bh(&state->lock);
 		return 0;
 	}
 
@@ -878,7 +878,7 @@ int tquic_mp_on_ack_received(struct tquic_mp_path_ack_state *state,
 		u64 rtt_sample = ktime_us_delta(now, largest_acked_pkt->sent_time);
 
 		if (rtt_sample > 0) {
-			bool confirmed = (conn && conn->state == TQUIC_CONN_CONNECTED);
+			bool confirmed = (conn && READ_ONCE(conn->state) == TQUIC_CONN_CONNECTED);
 
 			mp_rtt_update(&state->rtt, rtt_sample,
 				      frame->ack_delay, confirmed);
@@ -903,11 +903,11 @@ int tquic_mp_on_ack_received(struct tquic_mp_path_ack_state *state,
 	if (includes_ack_eliciting)
 		state->pto_count = 0;
 
-	spin_unlock(&state->lock);
+	spin_unlock_bh(&state->lock);
 
 	/* Process ECN feedback */
 	if (frame->has_ecn) {
-		spin_lock(&state->lock);
+		spin_lock_bh(&state->lock);
 
 		if (frame->ect0_count < state->ecn_acked.ect0 ||
 		    frame->ect1_count < state->ecn_acked.ect1 ||
@@ -933,7 +933,7 @@ int tquic_mp_on_ack_received(struct tquic_mp_path_ack_state *state,
 			}
 		}
 
-		spin_unlock(&state->lock);
+		spin_unlock_bh(&state->lock);
 	}
 
 	/* Notify congestion controller of acked bytes */
@@ -1017,7 +1017,7 @@ int tquic_mp_on_packet_sent(struct tquic_mp_path_ack_state *state,
 	if (in_flight)
 		pkt->flags |= TQUIC_MP_PKT_IN_FLIGHT;
 
-	spin_lock(&state->lock);
+	spin_lock_bh(&state->lock);
 
 	mp_sent_packet_insert(state, pkt);
 
@@ -1031,7 +1031,7 @@ int tquic_mp_on_packet_sent(struct tquic_mp_path_ack_state *state,
 		state->ack_eliciting_in_flight[pn_space]++;
 	}
 
-	spin_unlock(&state->lock);
+	spin_unlock_bh(&state->lock);
 
 	return 0;
 }
@@ -1058,7 +1058,7 @@ void tquic_mp_get_rtt_stats(struct tquic_mp_path_ack_state *state,
 	if (!state)
 		return;
 
-	spin_lock(&state->lock);
+	spin_lock_bh(&state->lock);
 
 	if (latest)
 		*latest = state->rtt.latest_rtt;
@@ -1070,7 +1070,7 @@ void tquic_mp_get_rtt_stats(struct tquic_mp_path_ack_state *state,
 		*min_rtt = (state->rtt.min_rtt != ULLONG_MAX) ?
 			   state->rtt.min_rtt : 0;
 
-	spin_unlock(&state->lock);
+	spin_unlock_bh(&state->lock);
 }
 EXPORT_SYMBOL_GPL(tquic_mp_get_rtt_stats);
 
@@ -1086,14 +1086,14 @@ void tquic_mp_get_in_flight(struct tquic_mp_path_ack_state *state,
 	if (!state)
 		return;
 
-	spin_lock(&state->lock);
+	spin_lock_bh(&state->lock);
 
 	if (bytes)
 		*bytes = state->bytes_in_flight;
 	if (packets)
 		*packets = state->packets_in_flight;
 
-	spin_unlock(&state->lock);
+	spin_unlock_bh(&state->lock);
 }
 EXPORT_SYMBOL_GPL(tquic_mp_get_in_flight);
 
