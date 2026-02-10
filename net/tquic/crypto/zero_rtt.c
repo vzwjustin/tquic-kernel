@@ -1188,7 +1188,9 @@ int tquic_session_ticket_decode(const u8 *ticket, u32 ticket_len,
 		ret = -EINVAL;
 		goto out_free;
 	}
-	out->max_age = (p[0] << 24) | (p[1] << 16) | (p[2] << 8) | p[3];
+	/* CF-157: cast to u32 before shift to avoid signed overflow */
+	out->max_age = ((u32)p[0] << 24) | ((u32)p[1] << 16) |
+		       ((u32)p[2] << 8) | (u32)p[3];
 	p += 4;
 
 	/* Creation time (8 bytes) */
@@ -1230,8 +1232,9 @@ int tquic_session_ticket_decode(const u8 *ticket, u32 ticket_len,
 		ret = -EINVAL;
 		goto out_free;
 	}
-	out->transport_params_len = (p[0] << 24) | (p[1] << 16) |
-				    (p[2] << 8) | p[3];
+	/* CF-157: cast to u32 before shift to avoid signed overflow */
+	out->transport_params_len = ((u32)p[0] << 24) | ((u32)p[1] << 16) |
+				    ((u32)p[2] << 8) | (u32)p[3];
 	p += 4;
 
 	if (out->transport_params_len > sizeof(out->transport_params) ||

@@ -22,6 +22,7 @@
 #include <linux/jhash.h>
 #include <linux/rculist.h>
 #include <linux/timer.h>
+#include <net/net_namespace.h>
 
 #if IS_ENABLED(CONFIG_IPV6)
 #include <linux/ipv6.h>
@@ -745,6 +746,24 @@ static const struct nf_hook_ops tquic_nf_hooks[] = {
 #endif
 };
 
+/* CF-039: register netfilter hooks in all network namespaces */
+static int __net_init tquic_nf_net_init(struct net *net)
+{
+	return nf_register_net_hooks(net, tquic_nf_hooks,
+				     ARRAY_SIZE(tquic_nf_hooks));
+}
+
+static void __net_exit tquic_nf_net_exit(struct net *net)
+{
+	nf_unregister_net_hooks(net, tquic_nf_hooks,
+				ARRAY_SIZE(tquic_nf_hooks));
+}
+
+static struct pernet_operations tquic_nf_net_ops = {
+	.init = tquic_nf_net_init,
+	.exit = tquic_nf_net_exit,
+};
+
 /*
  * Proc interface for connection listing
  */
@@ -811,21 +830,12 @@ int __init tquic_nf_init(void)
 	hash_init(tquic_nf_cid_hash);
 	hash_init(tquic_nf_addr_hash);
 
-	/*
-	 * Register netfilter hooks.
-	 *
-	 * TODO: Currently hooks are registered only in init_net.
-	 * For proper namespace support, this should use pernet_operations
-	 * so each namespace gets its own hooks.  For now, document the
-	 * limitation.
-	 */
-	ret = nf_register_net_hooks(&init_net, tquic_nf_hooks,
-				    ARRAY_SIZE(tquic_nf_hooks));
+	/* CF-039: register hooks in all network namespaces via pernet_operations */
+	ret = register_pernet_subsys(&tquic_nf_net_ops);
 	if (ret) {
 		tquic_err("failed to register netfilter hooks: %d\n", ret);
 		return ret;
 	}
-	pr_info("tquic_nf: hooks registered in init_net only (namespace limitation)\n");
 
 	/* Initialize garbage collection */
 	INIT_WORK(&tquic_nf_gc_work, tquic_nf_gc_work_fn);
@@ -858,9 +868,8 @@ void __exit tquic_nf_exit(void)
 	del_timer_sync(&tquic_nf_gc_timer);
 	cancel_work_sync(&tquic_nf_gc_work);
 
-	/* Unregister hooks */
-	nf_unregister_net_hooks(&init_net, tquic_nf_hooks,
-				ARRAY_SIZE(tquic_nf_hooks));
+	/* CF-039: unregister hooks from all network namespaces */
+	unregister_pernet_subsys(&tquic_nf_net_ops);
 
 	/* Free all connections */
 	spin_lock_bh(&tquic_nf_lock);

@@ -24,6 +24,7 @@
 #include <linux/in6.h>
 #include <crypto/aead.h>
 #include <crypto/gcm.h>
+#include <crypto/utils.h>
 #include <net/tquic.h>
 
 #include "tquic_token.h"
@@ -92,12 +93,15 @@ static bool tquic_addr_match(const struct sockaddr_storage *addr,
 	if (addr->ss_family != family)
 		return false;
 
+	/* CF-052: constant-time address comparison */
 	if (family == AF_INET) {
 		const struct sockaddr_in *sin = (const struct sockaddr_in *)addr;
-		return len == 4 && memcmp(&sin->sin_addr.s_addr, buf, 4) == 0;
+		return len == 4 &&
+		       !crypto_memneq(&sin->sin_addr.s_addr, buf, 4);
 	} else if (family == AF_INET6) {
 		const struct sockaddr_in6 *sin6 = (const struct sockaddr_in6 *)addr;
-		return len == 16 && memcmp(&sin6->sin6_addr, buf, 16) == 0;
+		return len == 16 &&
+		       !crypto_memneq(&sin6->sin6_addr, buf, 16);
 	}
 
 	return false;

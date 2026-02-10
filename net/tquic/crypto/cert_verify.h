@@ -290,6 +290,8 @@ struct tquic_cert_verify_ctx {
 	u32 error_depth;
 	u8 *ocsp_stapling;
 	u32 ocsp_stapling_len;
+	/* CF-003: use client EKU for client certificate verification */
+	bool is_server;
 };
 
 /**

@@ -216,7 +216,97 @@ static int asn1_get_tag_length(const u8 *data, u32 data_len, u8 expected_tag,
 /*
  * Identify signature algorithm from OID
  */
+/* Hash algorithm OIDs for RSA-PSS parameter parsing (RFC 4055) */
+static const u8 oid_sha256_hash[] = {
+	0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01
+};
+static const u8 oid_sha384_hash[] = {
+	0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x02
+};
+static const u8 oid_sha512_hash[] = {
+	0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x03
+};
+
+/*
+ * CF-150: parse RSA-PSS hash from AlgorithmIdentifier
+ *
+ * RSA-PSS parameters (RFC 4055 Section 3.1):
+ *   RSASSA-PSS-params ::= SEQUENCE {
+ *     hashAlgorithm      [0] HashAlgorithm DEFAULT sha1,
+ *     maskGenAlgorithm   [1] MaskGenAlgorithm DEFAULT mgf1SHA1,
+ *     saltLength         [2] INTEGER DEFAULT 20,
+ *     trailerField       [3] TrailerField DEFAULT trailerFieldBC
+ *   }
+ *
+ * Returns the hash algo from the [0] tagged hashAlgorithm field,
+ * or TQUIC_HASH_SHA256 if parameters are absent (RFC 4055 default
+ * is SHA-1 but TLS 1.3 only uses SHA-256/384/512 with RSA-PSS).
+ */
+static enum tquic_hash_algo parse_rsa_pss_hash(const u8 *params,
+					       u32 params_len)
+{
+	const u8 *p, *seq_end;
+	u32 content_len, total_len, oid_content_len, oid_total_len;
+	int ret;
+
+	if (!params || params_len == 0)
+		return TQUIC_HASH_SHA256;
+
+	/* Parameters should be a SEQUENCE */
+	ret = asn1_get_tag_length(params, params_len, ASN1_SEQUENCE,
+				  &content_len, &total_len);
+	if (ret < 0)
+		return TQUIC_HASH_SHA256;
+
+	p = params + (total_len - content_len);
+	seq_end = p + content_len;
+
+	/* Look for [0] EXPLICIT hashAlgorithm */
+	if (p >= seq_end || p[0] != 0xA0)
+		return TQUIC_HASH_SHA256;
+
+	ret = asn1_get_length(p + 1, seq_end - p - 1,
+			      &content_len, &total_len);
+	if (ret < 0)
+		return TQUIC_HASH_SHA256;
+
+	p += 1 + total_len;
+	/* p now points at hashAlgorithm AlgorithmIdentifier content */
+	/* Rewind to content start */
+	p -= content_len;
+
+	/* Inner AlgorithmIdentifier SEQUENCE */
+	ret = asn1_get_tag_length(p, content_len, ASN1_SEQUENCE,
+				  &content_len, &total_len);
+	if (ret < 0)
+		return TQUIC_HASH_SHA256;
+
+	p += total_len - content_len;
+
+	/* Extract the hash OID */
+	ret = asn1_get_tag_length(p, content_len, ASN1_OID,
+				  &oid_content_len, &oid_total_len);
+	if (ret < 0)
+		return TQUIC_HASH_SHA256;
+
+	p += oid_total_len - oid_content_len;
+
+	if (oid_content_len == sizeof(oid_sha256_hash) &&
+	    memcmp(p, oid_sha256_hash, oid_content_len) == 0)
+		return TQUIC_HASH_SHA256;
+	if (oid_content_len == sizeof(oid_sha384_hash) &&
+	    memcmp(p, oid_sha384_hash, oid_content_len) == 0)
+		return TQUIC_HASH_SHA384;
+	if (oid_content_len == sizeof(oid_sha512_hash) &&
+	    memcmp(p, oid_sha512_hash, oid_content_len) == 0)
+		return TQUIC_HASH_SHA512;
+
+	/* Unrecognized hash OID -- default to SHA-256 */
+	return TQUIC_HASH_SHA256;
+}
+
 static void identify_sig_algo(const u8 *oid, u32 oid_len,
+			      const u8 *params, u32 params_len,
 			      enum tquic_hash_algo *hash_algo,
 			      enum tquic_pubkey_algo *pubkey_algo)
 {
@@ -249,15 +339,8 @@ static void identify_sig_algo(const u8 *oid, u32 oid_len,
 		*pubkey_algo = TQUIC_PUBKEY_ALGO_ECDSA_P521;
 	} else if (oid_len == sizeof(oid_rsa_pss) &&
 		   memcmp(oid, oid_rsa_pss, oid_len) == 0) {
-		/*
-		 * RSA-PSS: hash algorithm should be extracted from the
-		 * AlgorithmIdentifier parameters. Currently only SHA-256
-		 * is supported. Callers must verify the actual hash
-		 * algorithm matches before using this result.
-		 * TODO: Parse RSA-PSS AlgorithmIdentifier parameters
-		 * to extract the actual hash algorithm.
-		 */
-		*hash_algo = TQUIC_HASH_SHA256;
+		/* CF-150: parse RSA-PSS hash from AlgorithmIdentifier */
+		*hash_algo = parse_rsa_pss_hash(params, params_len);
 		*pubkey_algo = TQUIC_PUBKEY_ALGO_RSA;
 	} else if (oid_len == sizeof(oid_ed25519) &&
 		   memcmp(oid, oid_ed25519, oid_len) == 0) {
@@ -1398,9 +1481,20 @@ static int parse_signature(struct tquic_x509_cert *cert,
 	cert->signature.algo = algo_seq + (oid_total_len - oid_content_len);
 	cert->signature.algo_len = oid_content_len;
 
-	identify_sig_algo(cert->signature.algo, cert->signature.algo_len,
-			  &cert->signature.hash_algo,
-			  &cert->signature.pubkey_algo);
+	/* Parameters follow the OID within the AlgorithmIdentifier SEQUENCE */
+	{
+		const u8 *sig_params = algo_seq + oid_total_len;
+		u32 sig_params_len = 0;
+
+		if (oid_total_len < content_len)
+			sig_params_len = content_len - oid_total_len;
+
+		identify_sig_algo(cert->signature.algo,
+				  cert->signature.algo_len,
+				  sig_params, sig_params_len,
+				  &cert->signature.hash_algo,
+				  &cert->signature.pubkey_algo);
+	}
 
 	p += total_len;
 
@@ -2428,14 +2522,23 @@ int tquic_check_revocation(struct tquic_cert_verify_ctx *ctx,
 		int status;
 
 		/*
+		 * CF-007: verify OCSP response signature
+		 *
 		 * OCSP response validation (RFC 6960):
 		 * Parse the response to extract the certificate status.
-		 * Full signature verification requires the OCSP responder's
-		 * certificate, which may not be available in kernel context.
 		 *
-		 * NOTE: Without full signature verification, an attacker who
-		 * controls the network can forge OCSP responses.  Log a
-		 * warning so operators know verification is incomplete.
+		 * Signature verification status:
+		 *   - The OCSP BasicResponse signature over tbsResponseData
+		 *     is NOT verified because the OCSP responder certificate
+		 *     may not be available in kernel context.
+		 *   - The responder cert chain to a trusted root is NOT
+		 *     verified for the same reason.
+		 *
+		 * Because the signature is not verified, an on-path attacker
+		 * can forge OCSP responses.  In hard-fail mode we therefore
+		 * reject the connection (fail closed) rather than trusting
+		 * an unverified "good" status.  In soft-fail mode the
+		 * parsed status is accepted with a warning.
 		 */
 		if (ctx->ocsp_stapling_len < 10 ||
 		    ctx->ocsp_stapling[0] != 0x30) {
@@ -2452,9 +2555,21 @@ int tquic_check_revocation(struct tquic_cert_verify_ctx *ctx,
 		status = parse_ocsp_cert_status(ctx->ocsp_stapling,
 						ctx->ocsp_stapling_len);
 		if (status == 0) {
-			pr_debug("tquic_cert: OCSP status good (%u bytes)"
-				 " -- signature NOT verified in kernel\n",
-				 ctx->ocsp_stapling_len);
+			/*
+			 * CF-007: OCSP signature is NOT verified.
+			 * Hard-fail mode rejects unverified responses
+			 * (fail closed) since a network attacker could
+			 * forge a "good" status.
+			 */
+			if (ctx->check_revocation == TQUIC_REVOKE_HARD_FAIL) {
+				pr_warn("tquic_cert: OCSP status good but "
+					"signature NOT verified -- "
+					"rejecting in hard-fail mode\n");
+				return -EKEYREVOKED;
+			}
+			pr_warn("tquic_cert: OCSP status good (%u bytes)"
+				" -- signature NOT verified\n",
+				ctx->ocsp_stapling_len);
 			return 0;
 		}
 
@@ -2834,8 +2949,8 @@ int tquic_verify_cert_chain(struct tquic_cert_verify_ctx *ctx,
 		}
 	}
 
-	/* Verify the chain (assuming server cert for now) */
-	ret = verify_chain(ctx, true);
+	/* CF-003: use ctx->is_server to select correct EKU check */
+	ret = verify_chain(ctx, ctx->is_server);
 	if (ret < 0)
 		return ret;
 
@@ -2889,6 +3004,7 @@ int tquic_hs_verify_server_cert(struct tquic_handshake *hs,
 	ctx->verify_mode = tsk->cert_verify.verify_mode;
 	ctx->verify_hostname = tsk->cert_verify.verify_hostname;
 	ctx->allow_self_signed = tsk->cert_verify.allow_self_signed;
+	ctx->is_server = true;  /* Verifying a server certificate */
 
 	/* Set hostname: prefer explicit setting, fall back to server_name (SNI) */
 	if (tsk->cert_verify.expected_hostname_len > 0) {
@@ -2998,6 +3114,8 @@ int tquic_hs_verify_client_cert(struct tquic_handshake *hs,
 	ctx->verify_mode = tsk->cert_verify.verify_mode;
 	ctx->verify_hostname = false;  /* Never verify hostname for client certs */
 	ctx->allow_self_signed = tsk->cert_verify.allow_self_signed;
+	/* CF-003: use client EKU for client certificate verification */
+	ctx->is_server = false;
 
 	tquic_cert_verify_set_keyring(ctx, NULL);
 

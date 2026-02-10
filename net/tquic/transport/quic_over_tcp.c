@@ -1221,12 +1221,14 @@ struct quic_tcp_connection *quic_tcp_connect(struct sockaddr *addr,
 	if (ret)
 		goto err_free_rx;
 
-	/*
-	 * SECURITY FIX (CF-077): Use the QUIC connection's network
-	 * namespace instead of init_net to support containers/namespaces.
-	 */
-	ret = sock_create_kern(quic_conn && quic_conn->sk ?
-			       sock_net(quic_conn->sk) : &init_net,
+	/* CF-077: refuse to create socket without valid namespace */
+	if (!quic_conn || !quic_conn->sk) {
+		pr_warn_once("tquic_tcp: cannot create socket without connection\n");
+		ret = -EINVAL;
+		goto err_free_tx;
+	}
+
+	ret = sock_create_kern(sock_net(quic_conn->sk),
 			       addr->sa_family,
 			       SOCK_STREAM,
 			       IPPROTO_TCP,

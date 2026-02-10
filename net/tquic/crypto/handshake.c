@@ -2740,13 +2740,17 @@ int tquic_hs_process_new_session_ticket(struct tquic_handshake *hs,
 	/* Ticket lifetime */
 	if (p + 4 > end)
 		return -EINVAL;
-	lifetime = (p[0] << 24) | (p[1] << 16) | (p[2] << 8) | p[3];
+	/* CF-157: cast to u32 before shift to avoid signed overflow */
+	lifetime = ((u32)p[0] << 24) | ((u32)p[1] << 16) |
+		   ((u32)p[2] << 8) | (u32)p[3];
 	p += 4;
 
 	/* Ticket age add */
 	if (p + 4 > end)
 		return -EINVAL;
-	age_add = (p[0] << 24) | (p[1] << 16) | (p[2] << 8) | p[3];
+	/* CF-157: cast to u32 before shift to avoid signed overflow */
+	age_add = ((u32)p[0] << 24) | ((u32)p[1] << 16) |
+		  ((u32)p[2] << 8) | (u32)p[3];
 	p += 4;
 
 	/* Ticket nonce */

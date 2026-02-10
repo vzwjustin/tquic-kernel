@@ -900,6 +900,9 @@ int tquic_migrate_auto(struct tquic_connection *conn,
 			best_path = iter;
 		}
 	}
+	/* CF-130: take path ref inside lock to prevent UAF */
+	if (best_path)
+		tquic_path_get(best_path);
 	spin_unlock_bh(&conn->paths_lock);
 
 	if (!best_path) {
@@ -917,11 +920,14 @@ int tquic_migrate_auto(struct tquic_connection *conn,
 		if (conn->state_machine) {
 			tquic_warn("auto-migration: state_machine "
 				   "type conflict\n");
+			tquic_path_put(best_path);
 			return -EBUSY;
 		}
 		ms = tquic_migration_state_alloc(conn);
-		if (!ms)
+		if (!ms) {
+			tquic_path_put(best_path);
 			return -ENOMEM;
+		}
 		conn->state_machine = ms;
 	}
 
@@ -932,7 +938,7 @@ int tquic_migrate_auto(struct tquic_connection *conn,
 	if (conn->active_path)
 		tquic_path_get(conn->active_path);
 	ms->old_path = conn->active_path;
-	tquic_path_get(best_path);
+	/* best_path ref already taken under paths_lock (CF-130) */
 	ms->new_path = best_path;
 	ms->retries = 0;
 	ms->flags = 0;

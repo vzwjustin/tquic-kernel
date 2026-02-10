@@ -493,7 +493,9 @@ static bool tquic_is_version_negotiation(const u8 *data, size_t len)
 	if (!(data[0] & TQUIC_HEADER_FORM_LONG))
 		return false;
 
-	version = (data[1] << 24) | (data[2] << 16) | (data[3] << 8) | data[4];
+	/* CF-157: cast to u32 before shift to avoid signed overflow */
+	version = ((u32)data[1] << 24) | ((u32)data[2] << 16) |
+		  ((u32)data[3] << 8) | (u32)data[4];
 
 	return version == TQUIC_VERSION_NEGOTIATION;
 }
@@ -812,8 +814,10 @@ static int tquic_process_ack_frame(struct tquic_rx_ctx *ctx)
 	/* Update RTT estimate and notify congestion control */
 	if (ctx->path) {
 		ktime_t now = ktime_get();
-		/* Convert ack_delay to microseconds */
-		u64 ack_delay_us = ack_delay * 8;  /* Default exponent = 3 */
+		/* C-5: use negotiated ack_delay_exponent per RFC 9000 Section 19.3 */
+		u8 ade = (ctx->conn) ?
+			ctx->conn->remote_params.ack_delay_exponent : 3;
+		u64 ack_delay_us = ack_delay << ade;
 		u64 rtt_us;
 
 		/*
@@ -832,21 +836,22 @@ static int tquic_process_ack_frame(struct tquic_rx_ctx *ctx)
 
 		/*
 		 * Calculate bytes acknowledged from first_ack_range.
-		 * Simplified: use first_ack_range * 1200 (MTU) as estimate.
-		 * Full implementation would use packet tracking.
 		 *
+		 * H-1: use actual path MTU instead of hardcoded 1200.
 		 * CF-073: Use safe arithmetic to prevent overflow.
 		 * first_ack_range is a u64 from varint decode (up to
-		 * 2^62-1), so adding 1 or multiplying by 1200 can
+		 * 2^62-1), so adding 1 or multiplying by mtu can
 		 * overflow.
 		 */
 		{
 			u64 acked_pkts, bytes_acked;
+			u64 mtu = (ctx->path->mtu > 0) ?
+				ctx->path->mtu : 1200;
 
 			if (check_add_overflow(first_ack_range, (u64)1,
 					       &acked_pkts))
-				acked_pkts = U64_MAX / 1200;
-			if (check_mul_overflow(acked_pkts, (u64)1200,
+				acked_pkts = U64_MAX / mtu;
+			if (check_mul_overflow(acked_pkts, mtu,
 					       &bytes_acked))
 				bytes_acked = U64_MAX;
 

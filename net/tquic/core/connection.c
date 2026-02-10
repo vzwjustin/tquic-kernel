@@ -27,6 +27,7 @@
 #include <crypto/hash.h>
 #include <linux/workqueue.h>
 #include <linux/random.h>
+#include <asm/unaligned.h>
 #include <linux/jhash.h>
 #include <linux/rhashtable.h>
 #include <crypto/aead.h>
@@ -512,9 +513,13 @@ struct tquic_cid_entry *tquic_conn_add_local_cid(struct tquic_connection *conn)
 	/* Generate new CID */
 	tquic_cid_gen_random(&new_cid, TQUIC_DEFAULT_CID_LEN);
 
+	/* CF-362: increment sequence under lock to prevent races */
+	spin_lock_bh(&conn->lock);
 	entry = tquic_cid_entry_create(&new_cid, cs->next_local_cid_seq++);
-	if (!entry)
+	if (!entry) {
+		spin_unlock_bh(&conn->lock);
 		return NULL;
+	}
 
 	/*
 	 * Generate stateless reset token deterministically from CID
@@ -533,7 +538,6 @@ struct tquic_cid_entry *tquic_conn_add_local_cid(struct tquic_connection *conn)
 	}
 	entry->has_reset_token = true;
 
-	spin_lock_bh(&conn->lock);
 	list_add_tail(&entry->list, &cs->local_cids);
 
 	/* Register in global lookup table */
@@ -545,8 +549,8 @@ struct tquic_cid_entry *tquic_conn_add_local_cid(struct tquic_connection *conn)
 					     cid_hash_params);
 		if (err) {
 			list_del(&entry->list);
-			spin_unlock_bh(&conn->lock);
 			cs->next_local_cid_seq--;
+			spin_unlock_bh(&conn->lock);
 			kfree(entry);
 			tquic_conn_err(conn, "rhashtable insert failed: %d\n", err);
 			return NULL;
@@ -984,7 +988,7 @@ int tquic_send_version_negotiation(struct tquic_connection *conn,
 	 */
 	if (scid->len > TQUIC_MAX_CID_LEN || dcid->len > TQUIC_MAX_CID_LEN)
 		return -EINVAL;
-	if (5 + 1 + scid->len + 1 + dcid->len + 4 * 4 > sizeof(packet))
+	if (5 + 1 + scid->len + 1 + dcid->len + 5 * 4 > sizeof(packet))
 		return -ENOSPC;
 
 	/*
@@ -1008,6 +1012,15 @@ int tquic_send_version_negotiation(struct tquic_connection *conn,
 	for (i = 0; tquic_supported_versions[i] != 0; i++) {
 		u32 ver = cpu_to_be32(tquic_supported_versions[i]);
 		memcpy(p, &ver, 4);
+		p += 4;
+	}
+
+	/* H-5: add version greasing per RFC 9000 Section 6.3 */
+	{
+		u32 grease_version;
+
+		grease_version = (get_random_u32() & 0xf0f0f0f0) | 0x0a0a0a0a;
+		put_unaligned_be32(grease_version, p);
 		p += 4;
 	}
 
@@ -1449,23 +1462,32 @@ int tquic_send_retry(struct tquic_connection *conn,
 	p += token_len;
 
 	/*
-	 * Compute and append Retry Integrity Tag (RFC 9001 Section 5.8).
+	 * Compute and append Retry Integrity Tag.
 	 * The tag is computed over a pseudo-retry packet which includes
 	 * the original DCID length and value prepended to the retry packet.
 	 *
-	 * Key and nonce are defined in RFC 9001 for QUIC v1:
-	 * Key:   0xbe0c690b9f66575a1d766b54e368c84e
-	 * Nonce: 0x461599d35d632bf2239825bb
+	 * H-7: support both v1 (RFC 9001 Section 5.8) and
+	 * v2 (RFC 9369 Section 5.8) retry integrity keys.
 	 */
 	{
-		static const u8 retry_key[16] = {
+		static const u8 retry_key_v1[16] = {
 			0xbe, 0x0c, 0x69, 0x0b, 0x9f, 0x66, 0x57, 0x5a,
 			0x1d, 0x76, 0x6b, 0x54, 0xe3, 0x68, 0xc8, 0x4e
 		};
-		static const u8 retry_nonce[12] = {
+		static const u8 retry_nonce_v1[12] = {
 			0x46, 0x15, 0x99, 0xd3, 0x5d, 0x63, 0x2b, 0xf2,
 			0x23, 0x98, 0x25, 0xbb
 		};
+		static const u8 retry_key_v2[16] = {
+			0x8f, 0xb4, 0xb0, 0x1b, 0x56, 0xac, 0x48, 0xe2,
+			0x60, 0xfb, 0xcb, 0xce, 0xad, 0x7c, 0xcc, 0x92
+		};
+		static const u8 retry_nonce_v2[12] = {
+			0xd8, 0x69, 0x69, 0xbc, 0x2d, 0x7c, 0x6d, 0x99,
+			0x90, 0xef, 0xb0, 0x4a
+		};
+		const u8 *retry_key;
+		const u8 *retry_nonce;
 		u8 *pseudo_packet;
 		u8 *pp;
 		u8 tag[16];
@@ -1474,6 +1496,14 @@ int tquic_send_retry(struct tquic_connection *conn,
 		struct scatterlist sg_in, sg_out;
 		size_t pseudo_len, pkt_len;
 		int tag_ret;
+
+		if (conn->version == TQUIC_VERSION_2) {
+			retry_key = retry_key_v2;
+			retry_nonce = retry_nonce_v2;
+		} else {
+			retry_key = retry_key_v1;
+			retry_nonce = retry_nonce_v1;
+		}
 
 		pseudo_packet = kmalloc(TQUIC_RETRY_PSEUDO_BUF_SIZE,
 					GFP_ATOMIC);
@@ -1503,7 +1533,7 @@ int tquic_send_retry(struct tquic_connection *conn,
 		/* Compute tag using AES-128-GCM */
 		aead = crypto_alloc_aead("gcm(aes)", 0, 0);
 		if (!IS_ERR(aead)) {
-			crypto_aead_setkey(aead, retry_key, sizeof(retry_key));
+			crypto_aead_setkey(aead, retry_key, 16);
 			crypto_aead_setauthsize(aead, 16);
 
 			req = aead_request_alloc(aead, GFP_ATOMIC);
@@ -2786,9 +2816,28 @@ int tquic_conn_server_accept(struct tquic_connection *conn,
 	return 0;
 
 err_free:
-	/* Clean up any resources allocated before the error.
-	 * Cancel work items that may have been initialized.
-	 */
+	/* CF-061: purge zero_rtt_buffer and clean up CIDs on error */
+	{
+		struct tquic_cid_entry *entry, *tmp;
+
+		/* Free local CIDs and remove from hash table */
+		list_for_each_entry_safe(entry, tmp, &cs->local_cids, list) {
+			rhashtable_remove_fast(&cid_lookup_table,
+					       &entry->hash_node,
+					       cid_hash_params);
+			list_del(&entry->list);
+			kfree(entry);
+		}
+
+		/* Free remote CIDs */
+		list_for_each_entry_safe(entry, tmp, &cs->remote_cids, list) {
+			list_del(&entry->list);
+			kfree(entry);
+		}
+	}
+	skb_queue_purge(&cs->zero_rtt_buffer);
+
+	/* Cancel work items that may have been initialized */
 	cancel_work_sync(&cs->close_work);
 	cancel_work_sync(&cs->migration_work);
 	cancel_delayed_work_sync(&cs->drain_work);
