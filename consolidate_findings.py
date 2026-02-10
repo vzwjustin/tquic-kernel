@@ -481,7 +481,26 @@ def cluster_findings(findings: list[Finding]) -> list[list[Finding]]:
 				if should_merge(findings[i], findings[j]):
 					union(i, j)
 
-	# 3) Limited fuzzy merge for unknown-file items.
+	# 3) Signature bucket merge to catch known/unknown metadata asymmetry.
+	by_sig: dict[str, list[int]] = defaultdict(list)
+	for i, f in enumerate(findings):
+		sig = title_signature(f.title_tokens)
+		if sig != "untitled":
+			by_sig[sig].append(i)
+
+	for _, idxs in by_sig.items():
+		if len(idxs) < 2:
+			continue
+		for x in range(len(idxs)):
+			i = idxs[x]
+			for y in range(x + 1, len(idxs)):
+				j = idxs[y]
+				if find(i) == find(j):
+					continue
+				if should_merge(findings[i], findings[j]):
+					union(i, j)
+
+	# 4) Limited fuzzy merge for unknown-file items.
 	unknown_buckets: dict[tuple[str, str], list[int]] = defaultdict(list)
 	for i, f in enumerate(findings):
 		if f.primary_file != "unknown_file":
