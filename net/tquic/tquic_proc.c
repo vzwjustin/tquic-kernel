@@ -122,14 +122,14 @@ struct tquic_error_entry {
 /**
  * struct tquic_error_ring - Error ring buffer
  * @entries: Array of error entries
- * @head: Next write position (atomic for lock-free write)
+ * @head: Next write position (protected by lock)
  * @count: Number of entries written (saturates at RING_SIZE)
- * @lock: Spinlock for reading consistent entries
+ * @lock: Spinlock protecting all ring state
  */
 struct tquic_error_ring {
 	struct tquic_error_entry entries[TQUIC_ERROR_RING_SIZE];
-	atomic_t head;
-	atomic_t count;
+	unsigned int head;
+	unsigned int count;
 	spinlock_t lock;
 };
 
@@ -147,8 +147,8 @@ static struct tquic_error_ring *tquic_error_ring_alloc(void)
 		return NULL;
 
 	spin_lock_init(&ring->lock);
-	atomic_set(&ring->head, 0);
-	atomic_set(&ring->count, 0);
+	ring->head = 0;
+	ring->count = 0;
 
 	return ring;
 }
@@ -195,16 +195,14 @@ void tquic_log_error(struct net *net, struct tquic_connection *conn,
 	 * The ring is small and errors are infrequent, so contention
 	 * is not a concern.
 	 */
-	spin_lock(&ring->lock);
+	spin_lock_bh(&ring->lock);
 
-	idx = atomic_read(&ring->head) & (TQUIC_ERROR_RING_SIZE - 1);
-	atomic_inc(&ring->head);
+	idx = ring->head & (TQUIC_ERROR_RING_SIZE - 1);
+	ring->head++;
 
 	/* Track total entries written (for reader wrap detection) */
-	if (atomic_read(&ring->count) < TQUIC_ERROR_RING_SIZE)
-		atomic_set(&ring->count,
-			   min_t(int, atomic_read(&ring->count) + 1,
-				 TQUIC_ERROR_RING_SIZE));
+	if (ring->count < TQUIC_ERROR_RING_SIZE)
+		ring->count++;
 
 	entry = &ring->entries[idx];
 
@@ -245,7 +243,7 @@ void tquic_log_error(struct net *net, struct tquic_connection *conn,
 	else
 		entry->message[0] = '\0';
 
-	spin_unlock(&ring->lock);
+	spin_unlock_bh(&ring->lock);
 
 	/* Log important errors to dmesg (ratelimited) */
 	if (error_code != EQUIC_NO_ERROR) {
@@ -413,7 +411,8 @@ static int tquic_conn_seq_show(struct seq_file *seq, void *v)
 	state = conn->state;
 	scid_len = min_t(int, conn->scid.len, TQUIC_MAX_CID_LEN);
 	for (i = 0; i < scid_len; i++)
-		sprintf(&scid_hex[i * 2], "%02x", conn->scid.id[i]);
+		snprintf(&scid_hex[i * 2], sizeof(scid_hex) - i * 2,
+			 "%02x", conn->scid.id[i]);
 	scid_hex[scid_len * 2] = '\0';
 	if (conn->active_path) {
 		memcpy(&local_addr, &conn->active_path->local_addr,
@@ -498,7 +497,9 @@ static void *tquic_errors_seq_start(struct seq_file *seq, loff_t *pos)
 	if (!ring)
 		return NULL;
 
-	iter->count = atomic_read(&ring->count);
+	spin_lock_bh(&ring->lock);
+	iter->count = ring->count;
+	spin_unlock_bh(&ring->lock);
 	if (iter->count == 0)
 		return NULL;
 
@@ -569,10 +570,10 @@ static int tquic_errors_seq_show(struct seq_file *seq, void *v)
 	{
 		struct tquic_error_entry local_entry;
 
-		spin_lock(&ring->lock);
+		spin_lock_bh(&ring->lock);
 
 		/* Calculate actual ring index with safe unsigned masking */
-		head = atomic_read(&ring->head);
+		head = ring->head;
 		if (iter->count >= TQUIC_ERROR_RING_SIZE) {
 			/* Ring has wrapped, start from oldest */
 			idx = (head + iter->pos) & (TQUIC_ERROR_RING_SIZE - 1);
@@ -580,13 +581,13 @@ static int tquic_errors_seq_show(struct seq_file *seq, void *v)
 			/* Ring hasn't wrapped, start from beginning */
 			idx = iter->pos;
 			if (idx >= TQUIC_ERROR_RING_SIZE) {
-				spin_unlock(&ring->lock);
+				spin_unlock_bh(&ring->lock);
 				return 0;
 			}
 		}
 
 		memcpy(&local_entry, &ring->entries[idx], sizeof(local_entry));
-		spin_unlock(&ring->lock);
+		spin_unlock_bh(&ring->lock);
 
 		entry = &local_entry;
 

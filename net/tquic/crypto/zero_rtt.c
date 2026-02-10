@@ -428,7 +428,8 @@ static void ticket_store_evict_oldest_locked(struct tquic_ticket_store *store)
 	oldest = list_last_entry(&store->lru_list,
 				 struct tquic_zero_rtt_ticket, list);
 	ticket_store_remove_locked(store, oldest);
-	ticket_free(oldest);
+	/* Use refcount-based free to avoid racing with lookup holders */
+	tquic_zero_rtt_put_ticket(oldest);
 }
 
 /*
@@ -579,7 +580,8 @@ void tquic_zero_rtt_remove_ticket(const char *server_name, u8 server_name_len)
 	if (ticket) {
 		ticket_store_remove_locked(&global_ticket_store, ticket);
 		spin_unlock_bh(&global_ticket_store.lock);
-		ticket_free(ticket);
+		/* Use refcount-based free in case another thread holds a ref */
+		tquic_zero_rtt_put_ticket(ticket);
 		return;
 	}
 
@@ -702,6 +704,11 @@ int tquic_zero_rtt_derive_keys(struct tquic_zero_rtt_keys *keys,
 
 out:
 	memzero_explicit(early_secret, sizeof(early_secret));
+	memzero_explicit(empty_hash, sizeof(empty_hash));
+	memzero_explicit(zeros, sizeof(zeros));
+	/* On error, zeroize any partial key material in the output struct */
+	if (ret)
+		memzero_explicit(keys, sizeof(*keys));
 	crypto_free_shash(hash);
 	return ret;
 }
@@ -891,12 +898,23 @@ int tquic_replay_filter_check(struct tquic_replay_filter *filter,
 
 	/* Also check previous bucket if current didn't match */
 	if (!is_replay) {
-		is_replay = true;
+		bool found_in_prev = true;
+
 		for (i = 0; i < TQUIC_REPLAY_BLOOM_HASHES; i++) {
 			if (!test_bit(indices_prev[i], filter->bits)) {
-				is_replay = false;
+				found_in_prev = false;
 				break;
 			}
+		}
+		if (found_in_prev) {
+			is_replay = true;
+			/*
+			 * Replicate to current bucket to prevent false
+			 * negatives after the previous bucket is cleared
+			 * during rotation.
+			 */
+			for (i = 0; i < TQUIC_REPLAY_BLOOM_HASHES; i++)
+				set_bit(indices_cur[i], filter->bits);
 		}
 	}
 

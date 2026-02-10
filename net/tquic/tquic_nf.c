@@ -142,17 +142,24 @@ static atomic64_t tquic_nf_packets_seen = ATOMIC64_INIT(0);
  * Hash functions
  */
 
+static u32 tquic_nf_hash_secret __read_mostly;
+
 static u32 tquic_nf_cid_hash_fn(const struct tquic_nf_cid *cid)
 {
-	return jhash(cid->id, cid->len, 0);
+	net_get_random_once(&tquic_nf_hash_secret,
+			    sizeof(tquic_nf_hash_secret));
+	return jhash(cid->id, cid->len, tquic_nf_hash_secret);
 }
 
 static u32 tquic_nf_addr_hash_fn(const struct sockaddr_storage *addr)
 {
+	net_get_random_once(&tquic_nf_hash_secret,
+			    sizeof(tquic_nf_hash_secret));
 	if (addr->ss_family == AF_INET) {
 		const struct sockaddr_in *sin = (const struct sockaddr_in *)addr;
 		return jhash_2words(sin->sin_addr.s_addr,
-				    (__force u32)sin->sin_port, 0);
+				    (__force u32)sin->sin_port,
+				    tquic_nf_hash_secret);
 	}
 #if IS_ENABLED(CONFIG_IPV6)
 	else if (addr->ss_family == AF_INET6) {
@@ -222,13 +229,21 @@ static struct tquic_nf_conn *tquic_nf_conn_find_by_cid(const struct tquic_nf_cid
 	hash_for_each_possible_rcu(tquic_nf_cid_hash, conn, hash_node, hash) {
 		if (conn->scid.len == cid->len &&
 		    memcmp(conn->scid.id, cid->id, cid->len) == 0) {
-			tquic_nf_conn_get(conn);
+			/*
+			 * CF-494: Use refcount_inc_not_zero under RCU to
+			 * handle the case where the connection's refcount
+			 * has already hit zero but the RCU callback has
+			 * not yet freed it.
+			 */
+			if (!refcount_inc_not_zero(&conn->refcnt))
+				continue;
 			rcu_read_unlock();
 			return conn;
 		}
 		if (conn->dcid.len == cid->len &&
 		    memcmp(conn->dcid.id, cid->id, cid->len) == 0) {
-			tquic_nf_conn_get(conn);
+			if (!refcount_inc_not_zero(&conn->refcnt))
+				continue;
 			rcu_read_unlock();
 			return conn;
 		}
@@ -358,13 +373,13 @@ static int tquic_nf_parse_packet(const u8 *data, size_t len,
 		/* Short header format */
 		info->spin_bit = !!(first_byte & QUIC_SH_SPIN_BIT);
 
-		/* For short headers, we need to know the expected DCID length
-		 * This would typically come from connection state
-		 * Use a default of 8 bytes for stateless parsing
+		/* For short headers, we need to know the expected DCID length.
+		 * Use a default of 8 bytes for stateless parsing but
+		 * require at least that many bytes to avoid truncated CIDs.
 		 */
 		info->dcid.len = 8;
 		if (len < info->dcid.len)
-			info->dcid.len = len;
+			return -EINVAL;
 		memcpy(info->dcid.id, p, info->dcid.len);
 		p += info->dcid.len;
 

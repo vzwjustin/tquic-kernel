@@ -186,7 +186,12 @@ static u32 bbr_inflight(struct bbrv2 *bbr, u32 gain)
 	inflight = bbr_bdp(bbr);
 	inflight = (inflight * gain) >> BBR_SCALE;
 
-	return max((u32)inflight, (u32)(BBR_MIN_CWND * mss));
+	/*
+	 * CF-172: Saturate to U32_MAX instead of silently truncating.
+	 * The u64 result of bdp * gain could exceed U32_MAX on high-BDP
+	 * paths, causing the cwnd to wrap to a tiny value.
+	 */
+	return max(min_t(u64, inflight, U32_MAX), (u64)(BBR_MIN_CWND * mss));
 }
 
 /**

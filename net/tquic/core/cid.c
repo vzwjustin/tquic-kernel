@@ -471,6 +471,7 @@ static struct tquic_cid_entry *tquic_cid_create_local(
 	/* Generate stateless reset token */
 	ret = tquic_cid_generate_reset_token(&entry->cid, entry->reset_token);
 	if (ret) {
+		mgr->next_local_seq--;
 		tquic_cid_entry_free(entry);
 		return NULL;
 	}
@@ -478,6 +479,7 @@ static struct tquic_cid_entry *tquic_cid_create_local(
 	/* Register in global table */
 	ret = tquic_cid_register(entry);
 	if (ret) {
+		mgr->next_local_seq--;
 		tquic_cid_entry_free(entry);
 		return NULL;
 	}
@@ -1461,6 +1463,7 @@ int tquic_cid_set_preferred_addr(struct tquic_cid_manager *mgr,
 	} else {
 		ret = tquic_cid_generate_reset_token(cid, entry->reset_token);
 		if (ret) {
+			mgr->next_local_seq--;
 			tquic_cid_entry_free(entry);
 			return ret;
 		}
@@ -1468,6 +1471,7 @@ int tquic_cid_set_preferred_addr(struct tquic_cid_manager *mgr,
 
 	ret = tquic_cid_register(entry);
 	if (ret) {
+		mgr->next_local_seq--;
 		tquic_cid_entry_free(entry);
 		return ret;
 	}
@@ -1598,14 +1602,8 @@ int tquic_cid_register_local(struct tquic_cid_manager *mgr,
 	if (!entry)
 		return -ENOMEM;
 
-	/* Get next sequence number */
-	spin_lock(&mgr->lock);
-	seq_num = mgr->next_local_seq++;
-	spin_unlock(&mgr->lock);
-
 	/* Initialize entry */
 	memcpy(&entry->cid, cid, sizeof(*cid));
-	entry->seq_num = seq_num;
 	entry->retire_prior_to = 0;
 	entry->conn = mgr->conn;
 	entry->state = TQUIC_CID_STATE_ACTIVE;
@@ -1616,15 +1614,27 @@ int tquic_cid_register_local(struct tquic_cid_manager *mgr,
 	/* Generate reset token */
 	tquic_cid_generate_reset_token(cid, entry->reset_token);
 
-	/* Add to local CID list */
+	/* Atomically assign sequence, add to list, and register */
 	spin_lock(&mgr->lock);
+	seq_num = mgr->next_local_seq++;
+	entry->seq_num = seq_num;
+	entry->cid.seq_num = seq_num;
 	list_add_tail(&entry->list, &mgr->local_cids);
 	mgr->local_cid_count++;
 	spin_unlock(&mgr->lock);
 
 	/* Register in global lookup table */
-	rhashtable_insert_fast(&tquic_cid_table, &entry->node,
-			       tquic_cid_table.p);
+	ret = rhashtable_insert_fast(&tquic_cid_table, &entry->node,
+				     tquic_cid_table.p);
+	if (ret) {
+		spin_lock(&mgr->lock);
+		list_del(&entry->list);
+		mgr->local_cid_count--;
+		mgr->next_local_seq--;
+		spin_unlock(&mgr->lock);
+		kmem_cache_free(tquic_cid_cache, entry);
+		return ret;
+	}
 
 	pr_debug("tquic_cid: registered local CID (seq=%llu, len=%u)\n",
 		 seq_num, cid->len);

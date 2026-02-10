@@ -49,6 +49,7 @@ struct weighted_path_state {
  * in the round-robin cycle.
  */
 struct weighted_sched_data {
+	spinlock_t lock;	/* Protects paths[], current_path_idx */
 	struct weighted_path_state paths[TQUIC_MAX_PATHS];
 	u8 current_path_idx;    /* Current position in RR cycle */
 };
@@ -70,11 +71,13 @@ static int weighted_get_path(struct tquic_connection *conn,
 	struct tquic_path *path;
 	int idx, start_idx;
 	int active_count = 0;
+	int ret = -ENOENT;
 
 	if (!sd)
 		return -EINVAL;
 
 	rcu_read_lock();
+	spin_lock(&sd->lock);
 
 	/* Count active paths and sync weights from path structure */
 	idx = 0;
@@ -85,7 +88,7 @@ static int weighted_get_path(struct tquic_connection *conn,
 		if (path->state == TQUIC_PATH_ACTIVE) {
 			active_count++;
 			/* Sync weight from path structure (set via PM netlink) */
-			if (path->weight > 0)
+			if (path->weight > 0 && path->weight <= 1000)
 				sd->paths[idx].weight = path->weight;
 			else
 				sd->paths[idx].weight = TQUIC_DEFAULT_WEIGHT;
@@ -93,10 +96,8 @@ static int weighted_get_path(struct tquic_connection *conn,
 		idx++;
 	}
 
-	if (active_count == 0) {
-		rcu_read_unlock();
-		return -ENOENT;
-	}
+	if (active_count == 0)
+		goto out;
 
 	/* Deficit Round-Robin: find path with positive deficit */
 	start_idx = sd->current_path_idx % TQUIC_MAX_PATHS;
@@ -129,8 +130,8 @@ static int weighted_get_path(struct tquic_connection *conn,
 				result->backup = NULL;
 				result->flags = 0;
 
-				rcu_read_unlock();
-				return 0;
+				ret = 0;
+				goto out;
 			}
 		}
 
@@ -147,13 +148,15 @@ static int weighted_get_path(struct tquic_connection *conn,
 			result->primary = path;
 			result->backup = NULL;
 			result->flags = 0;
-			rcu_read_unlock();
-			return 0;
+			ret = 0;
+			goto out;
 		}
 	}
 
+out:
+	spin_unlock(&sd->lock);
 	rcu_read_unlock();
-	return -ENOENT;
+	return ret;
 }
 
 /*
@@ -168,6 +171,7 @@ static void weighted_init(struct tquic_connection *conn)
 	if (!sd)
 		return;
 
+	spin_lock_init(&sd->lock);
 	for (i = 0; i < TQUIC_MAX_PATHS; i++) {
 		sd->paths[i].weight = TQUIC_DEFAULT_WEIGHT;
 		sd->paths[i].deficit = 0;
@@ -204,8 +208,11 @@ static void weighted_path_removed(struct tquic_connection *conn,
 {
 	struct weighted_sched_data *sd = conn->sched_priv;
 
-	if (sd)
+	if (sd) {
+		spin_lock(&sd->lock);
 		sd->current_path_idx = 0;
+		spin_unlock(&sd->lock);
+	}
 }
 
 /*

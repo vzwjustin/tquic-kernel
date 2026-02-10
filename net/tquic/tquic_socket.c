@@ -195,10 +195,18 @@ int tquic_sock_bind(struct socket *sock, TQUIC_SOCKADDR *uaddr, int addr_len)
 	if (addr_len < sizeof(struct sockaddr_in))
 		return -EINVAL;
 
+	/*
+	 * CF-074: Hold socket lock to prevent races with concurrent
+	 * tquic_connect() which reads bind_addr under lock_sock().
+	 */
+	lock_sock(sk);
+
 	memcpy(&tsk->bind_addr, addr, min_t(size_t, addr_len,
 					    sizeof(struct sockaddr_storage)));
 
 	inet_sk_set_state(sk, TCP_CLOSE);
+
+	release_sock(sk);
 
 	return 0;
 }
@@ -234,16 +242,35 @@ int tquic_connect(struct sock *sk, TQUIC_SOCKADDR *uaddr, int addr_len)
 {
 	struct sockaddr *addr = (struct sockaddr *)uaddr;
 	struct tquic_sock *tsk = tquic_sk(sk);
-	struct tquic_connection *conn = tsk->conn;
+	struct tquic_connection *conn;
 	int ret;
 
-	if (!conn)
-		return -EINVAL;
-
-	if (addr_len < sizeof(struct sockaddr_in))
-		return -EINVAL;
+	if (addr->sa_family == AF_INET) {
+		if (addr_len < sizeof(struct sockaddr_in))
+			return -EINVAL;
+	} else if (addr->sa_family == AF_INET6) {
+		if (addr_len < sizeof(struct sockaddr_in6))
+			return -EINVAL;
+	} else {
+		return -EAFNOSUPPORT;
+	}
 
 	lock_sock(sk);
+
+	/*
+	 * CF-085: Read conn under lock_sock and take a reference to
+	 * prevent use-after-free during the handshake wait window
+	 * where release_sock() is called temporarily.
+	 */
+	conn = tsk->conn;
+	if (!conn) {
+		release_sock(sk);
+		return -EINVAL;
+	}
+	if (!tquic_conn_get(conn)) {
+		release_sock(sk);
+		return -EINVAL;
+	}
 
 	/* Store peer address */
 	memcpy(&tsk->connect_addr, addr,
@@ -328,14 +355,23 @@ int tquic_connect(struct sock *sk, TQUIC_SOCKADDR *uaddr, int addr_len)
 
 	release_sock(sk);
 
+	/* CF-085: Drop the connection reference taken at function entry */
+	tquic_conn_put(conn);
+
 	tquic_dbg("client connection established\n");
 	return 0;
 
 out_close:
 	inet_sk_set_state(sk, TCP_CLOSE);
-	sk->sk_err = -ret;  /* Store error for getsockopt */
+	/*
+	 * CF-241: sk_err uses positive errno values per kernel convention.
+	 * ret is already negative (e.g., -ECONNREFUSED), so negate it.
+	 */
+	WRITE_ONCE(sk->sk_err, -ret);
 out_unlock:
 	release_sock(sk);
+	/* CF-085: Drop the connection reference taken at function entry */
+	tquic_conn_put(conn);
 	return ret;
 }
 EXPORT_SYMBOL_GPL(tquic_connect);
@@ -672,9 +708,14 @@ EXPORT_SYMBOL_GPL(tquic_close);
 int tquic_sock_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 {
 	struct sock *sk = sock->sk;
-	struct tquic_sock *tsk = tquic_sk(sk);
-	struct tquic_connection *conn = tsk->conn;
+	struct tquic_sock *tsk;
+	struct tquic_connection *conn;
 	void __user *uarg = (void __user *)arg;
+
+	lock_sock(sk);
+	tsk = tquic_sk(sk);
+	conn = tsk->conn;
+	release_sock(sk);
 
 	switch (cmd) {
 	case TQUIC_NEW_STREAM: {
@@ -692,8 +733,16 @@ int tquic_sock_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 		if (copy_from_user(&args, uarg, sizeof(args)))
 			return -EFAULT;
 
-		/* Validate flags */
-		if (args.flags > TQUIC_STREAM_UNIDI || args.reserved != 0)
+		/*
+		 * CF-083: Validate reserved field is zeroed and flags
+		 * contain no unknown bits.  Reject any request that
+		 * sets reserved fields -- this ensures forward
+		 * compatibility when new fields are added.
+		 */
+		if (args.reserved != 0)
+			return -EINVAL;
+
+		if (args.flags & ~((__u32)TQUIC_STREAM_UNIDI))
 			return -EINVAL;
 
 		is_bidi = !(args.flags & TQUIC_STREAM_UNIDI);
@@ -712,8 +761,12 @@ int tquic_sock_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 		if (ret < 0)
 			return ret;
 
-		/* Copy stream ID back to userspace */
+		/*
+		 * CF-083: Zero reserved field before copying back to
+		 * userspace to prevent any kernel info leak.
+		 */
 		args.stream_id = stream_id;
+		args.reserved = 0;
 		if (copy_to_user(uarg, &args, sizeof(args))) {
 			/*
 			 * We created the fd but can't return the stream_id.
@@ -749,11 +802,25 @@ int tquic_sock_setsockopt(struct socket *sock, int level, int optname,
 	if (level != SOL_TQUIC)
 		return -ENOPROTOOPT;
 
-	if (optlen < sizeof(int))
-		return -EINVAL;
+	/*
+	 * Variable-length options (PSK identity, etc.) handle their
+	 * own optlen validation below.  For all other (integer) options,
+	 * require exactly sizeof(int).
+	 */
+	switch (optname) {
+	case TQUIC_PSK_IDENTITY:
+		/* Variable-length, validated in its case block */
+		break;
+	default:
+		if (optlen != sizeof(int))
+			return -EINVAL;
+		break;
+	}
 
-	if (copy_from_sockptr(&val, optval, sizeof(val)))
-		return -EFAULT;
+	if (optlen >= sizeof(int)) {
+		if (copy_from_sockptr(&val, optval, sizeof(val)))
+			return -EFAULT;
+	}
 
 	switch (optname) {
 	case TQUIC_NODELAY:
@@ -780,6 +847,13 @@ int tquic_sock_setsockopt(struct socket *sock, int level, int optname,
 		return 0;
 
 	case TQUIC_IDLE_TIMEOUT:
+		/*
+		 * RFC 9000 Section 10.1: idle_timeout in milliseconds.
+		 * Cap at 600000ms (10 minutes) to prevent unreasonable values.
+		 * A value of 0 disables the idle timeout.
+		 */
+		if (val > 600000)
+			return -ERANGE;
 		if (tsk->conn)
 			tsk->conn->idle_timeout = val;
 		break;
@@ -818,6 +892,7 @@ int tquic_sock_setsockopt(struct socket *sock, int level, int optname,
 
 	case TQUIC_MIGRATE: {
 		struct tquic_migrate_args args;
+		sa_family_t family;
 
 		if (optlen < sizeof(args))
 			return -EINVAL;
@@ -826,6 +901,33 @@ int tquic_sock_setsockopt(struct socket *sock, int level, int optname,
 			return -EFAULT;
 
 		if (args.reserved != 0)
+			return -EINVAL;
+
+		/*
+		 * CF-208: Validate the address family and basic
+		 * structure before passing to migration code.
+		 * Without this, a malformed sockaddr could cause
+		 * undefined behavior in the path lookup code.
+		 */
+		family = args.local_addr.ss_family;
+		if (family != AF_INET && family != AF_INET6)
+			return -EAFNOSUPPORT;
+
+		if (family == AF_INET) {
+			struct sockaddr_in *sin =
+				(struct sockaddr_in *)&args.local_addr;
+			if (sin->sin_addr.s_addr == INADDR_ANY)
+				return -EINVAL;
+		} else {
+			struct sockaddr_in6 *sin6 =
+				(struct sockaddr_in6 *)&args.local_addr;
+			if (ipv6_addr_any(&sin6->sin6_addr))
+				return -EINVAL;
+		}
+
+		/* CF-208: Validate known flags only */
+		if (args.flags & ~(TQUIC_MIGRATE_FLAG_PROBE_ONLY |
+				   TQUIC_MIGRATE_FLAG_FORCE))
 			return -EINVAL;
 
 		if (tsk->conn)
@@ -877,8 +979,11 @@ int tquic_sock_setsockopt(struct socket *sock, int level, int optname,
 			ret = -EISCONN;
 		} else if (tsk->conn) {
 			/* Connection exists but idle, init scheduler now */
-			struct tquic_sched_ops *sched_ops = tquic_sched_find(name);
+			struct tquic_sched_ops *sched_ops;
 
+			rcu_read_lock();
+			sched_ops = tquic_sched_find(name);
+			rcu_read_unlock();
 			if (sched_ops) {
 				tsk->conn->scheduler = tquic_sched_init_conn(tsk->conn, sched_ops);
 				if (!tsk->conn->scheduler)
@@ -952,8 +1057,14 @@ int tquic_sock_setsockopt(struct socket *sock, int level, int optname,
 		 * For server sockets: Store identity for later use
 		 *
 		 * Must be set before connect().
+		 *
+		 * CF-042: Requires CAP_NET_ADMIN - key material is
+		 * security-sensitive.
 		 */
 		char identity[64];
+
+		if (!ns_capable(sock_net(sk)->user_ns, CAP_NET_ADMIN))
+			return -EPERM;
 
 		if (optlen < 1 || optlen > 64)
 			return -EINVAL;
@@ -1169,7 +1280,12 @@ int tquic_sock_setsockopt(struct socket *sock, int level, int optname,
 		 *
 		 * WARNING: Using NONE leaves connections vulnerable to MITM attacks.
 		 * Must be set before connect().
+		 *
+		 * CF-042: Requires CAP_NET_ADMIN - controls TLS verification.
 		 */
+		if (!ns_capable(sock_net(sk)->user_ns, CAP_NET_ADMIN))
+			return -EPERM;
+
 		if (val < TQUIC_VERIFY_NONE || val > TQUIC_VERIFY_REQUIRED)
 			return -EINVAL;
 
@@ -1195,8 +1311,13 @@ int tquic_sock_setsockopt(struct socket *sock, int level, int optname,
 		 * certificate, or when using a different name than the SNI.
 		 *
 		 * Must be set before connect().
+		 *
+		 * CF-042: Requires CAP_NET_ADMIN - controls TLS verification.
 		 */
 		char hostname[TQUIC_MAX_HOSTNAME_LEN + 1];
+
+		if (!ns_capable(sock_net(sk)->user_ns, CAP_NET_ADMIN))
+			return -EPERM;
 
 		if (optlen <= 0 || optlen > TQUIC_MAX_HOSTNAME_LEN)
 			return -EINVAL;
@@ -1228,7 +1349,12 @@ int tquic_sock_setsockopt(struct socket *sock, int level, int optname,
 		 * no authentication and are vulnerable to MITM attacks.
 		 *
 		 * Must be set before connect().
+		 *
+		 * CF-042: Requires CAP_NET_ADMIN - weakens TLS security.
 		 */
+		if (!ns_capable(sock_net(sk)->user_ns, CAP_NET_ADMIN))
+			return -EPERM;
+
 		lock_sock(sk);
 		if (tsk->conn && tsk->conn->state != TQUIC_CONN_IDLE) {
 			release_sock(sk);
@@ -1250,8 +1376,14 @@ int tquic_sock_setsockopt(struct socket *sock, int level, int optname,
 		 * detailed configuration options.
 		 *
 		 * Must be called after connect() (connection must exist).
+		 *
+		 * CF-042: Requires CAP_NET_ADMIN - exposes connection
+		 * internals and can affect performance.
 		 */
 		struct tquic_qlog_args args;
+
+		if (!ns_capable(sock_net(sk)->user_ns, CAP_NET_ADMIN))
+			return -EPERM;
 		struct tquic_qlog *qlog;
 
 		if (optlen < sizeof(args))
@@ -1290,8 +1422,14 @@ int tquic_sock_setsockopt(struct socket *sock, int level, int optname,
 		 * Dynamically update the event filter mask for an active
 		 * qlog session. This allows enabling/disabling specific
 		 * event categories at runtime.
+		 *
+		 * CF-042: Requires CAP_NET_ADMIN - controls diagnostic
+		 * tracing.
 		 */
 		u64 mask;
+
+		if (!ns_capable(sock_net(sk)->user_ns, CAP_NET_ADMIN))
+			return -EPERM;
 
 		if (optlen < sizeof(mask))
 			return -EINVAL;
@@ -1905,6 +2043,10 @@ static int tquic_sendmsg_datagram(struct sock *sk, struct msghdr *msg,
 	if (len > conn->datagram.max_send_size)
 		return -EMSGSIZE;
 
+	/* CF-350: Cap allocation to prevent excessive kernel memory usage */
+	if (len > 65535)
+		return -EMSGSIZE;
+
 	/* Allocate buffer for datagram payload */
 	buf = kmalloc(len, GFP_KERNEL);
 	if (!buf)
@@ -2180,6 +2322,8 @@ int tquic_recvmsg(struct sock *sk, struct msghdr *msg, size_t len, int flags,
 	if (!stream)
 		return 0;
 
+	lock_sock(sk);
+
 	while (copied < len && !skb_queue_empty(&stream->recv_buf)) {
 		size_t chunk;
 
@@ -2206,6 +2350,8 @@ int tquic_recvmsg(struct sock *sk, struct msghdr *msg, size_t len, int flags,
 
 		conn->stats.rx_bytes += chunk;
 	}
+
+	release_sock(sk);
 
 	return copied;
 }

@@ -292,8 +292,12 @@ int tquic_xsk_create(struct tquic_xsk **xsk_out, const char *ifname,
 	if (!xsk_out || !ifname)
 		return -EINVAL;
 
-	/* XDP socket creation requires CAP_NET_ADMIN */
-	if (!capable(CAP_NET_ADMIN))
+	/*
+	 * CF-500: Use ns_capable() for namespace-aware permission check.
+	 * capable() checks against init_user_ns, which is incorrect
+	 * for containers/namespaces.
+	 */
+	if (!ns_capable(current->nsproxy->net_ns->user_ns, CAP_NET_ADMIN))
 		return -EPERM;
 
 	/* Find network device */
@@ -363,8 +367,11 @@ int tquic_xsk_create(struct tquic_xsk **xsk_out, const char *ifname,
 		goto err_free_buffer;
 	}
 
-	/* Create AF_XDP socket */
-	err = sock_create_kern(&init_net, AF_XDP, SOCK_RAW, 0, &xsk->sock);
+	/*
+	 * SECURITY FIX (CF-071): Use the device's network namespace
+	 * instead of init_net to support containerized environments.
+	 */
+	err = sock_create_kern(dev_net(dev), AF_XDP, SOCK_RAW, 0, &xsk->sock);
 	if (err) {
 		tquic_err("xdp: failed tocreate AF_XDP socket: %d\n", err);
 		goto err_free_pool;
@@ -748,8 +755,8 @@ int tquic_xdp_load_prog(struct tquic_xsk *xsk, const __be16 *ports,
 	if (!xsk || !xsk->dev)
 		return -EINVAL;
 
-	/* Attaching XDP programs requires CAP_NET_ADMIN */
-	if (!capable(CAP_NET_ADMIN))
+	/* CF-500: namespace-aware permission check for XDP program attach */
+	if (!ns_capable(current->nsproxy->net_ns->user_ns, CAP_NET_ADMIN))
 		return -EPERM;
 
 	if (xsk->xdp_prog)
@@ -946,8 +953,8 @@ int tquic_xsk_setsockopt(struct sock *sk, sockptr_t optval,
 	struct tquic_xsk *xsk = NULL;
 	int err;
 
-	/* XDP configuration requires CAP_NET_ADMIN */
-	if (!capable(CAP_NET_ADMIN))
+	/* CF-500: namespace-aware permission check for XDP configuration */
+	if (!ns_capable(current->nsproxy->net_ns->user_ns, CAP_NET_ADMIN))
 		return -EPERM;
 
 	if (optlen < sizeof(config))
@@ -1093,7 +1100,8 @@ bool tquic_xsk_supported(const char *ifname)
 	if (!ifname)
 		return false;
 
-	dev = dev_get_by_name(&init_net, ifname);
+	/* SECURITY FIX (CF-071): Use caller's network namespace */
+	dev = dev_get_by_name(current->nsproxy->net_ns, ifname);
 	if (!dev)
 		return false;
 
@@ -1114,7 +1122,8 @@ bool tquic_xsk_zerocopy_supported(const char *ifname)
 	if (!ifname)
 		return false;
 
-	dev = dev_get_by_name(&init_net, ifname);
+	/* SECURITY FIX (CF-071): Use caller's network namespace */
+	dev = dev_get_by_name(current->nsproxy->net_ns, ifname);
 	if (!dev)
 		return false;
 

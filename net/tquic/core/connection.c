@@ -268,8 +268,19 @@ static int tquic_conn_set_state(struct tquic_connection *conn,
 				enum tquic_state_reason reason)
 {
 	struct tquic_conn_state_machine *cs = conn->state_machine;
-	enum tquic_conn_state old_state = conn->state;
+	enum tquic_conn_state old_state;
 	bool valid = false;
+
+	/*
+	 * SECURITY FIX (CF-095): Hold conn->lock across the read of
+	 * old_state and the write of new_state to make the transition
+	 * atomic with respect to concurrent callers. The lock is
+	 * released before performing side-effect actions (work
+	 * scheduling, timer cancellation) that must not run under
+	 * spinlock.
+	 */
+	spin_lock_bh(&conn->lock);
+	old_state = conn->state;
 
 	/* Validate state transition */
 	switch (old_state) {
@@ -310,23 +321,25 @@ static int tquic_conn_set_state(struct tquic_connection *conn,
 	}
 
 	if (!valid) {
+		spin_unlock_bh(&conn->lock);
 		tquic_conn_warn(conn, "invalid state transition %s -> %s\n",
 				tquic_state_name(old_state),
 				tquic_state_name(new_state));
 		return -EINVAL;
 	}
 
+	conn->state = new_state;
+	spin_unlock_bh(&conn->lock);
+
 	tquic_conn_info(conn, "state %s -> %s reason=%d\n",
 			tquic_state_name(old_state),
 			tquic_state_name(new_state), reason);
-
-	conn->state = new_state;
 
 	/* Perform state-specific entry actions */
 	switch (new_state) {
 	case TQUIC_CONN_CONNECTING:
 		cs->hs_state = TQUIC_HS_INITIAL;
-		conn->stats.established_time = ktime_get();
+		/* established_time is set on CONNECTED, not here */
 		break;
 
 	case TQUIC_CONN_CONNECTED:
@@ -448,7 +461,7 @@ static void tquic_cid_gen_random(struct tquic_cid *cid, u8 len)
  *
  * Returns 0 if equal, non-zero otherwise.
  */
-static int __maybe_unused tquic_cid_compare(const struct tquic_cid *a, const struct tquic_cid *b)
+static int tquic_cid_compare(const struct tquic_cid *a, const struct tquic_cid *b)
 {
 	if (a->len != b->len)
 		return a->len - b->len;
@@ -612,6 +625,17 @@ int tquic_conn_retire_cid(struct tquic_connection *conn, u64 seq, bool is_local)
 		if (entry->cid.seq_num == seq) {
 			entry->retired = true;
 			found = true;
+
+			/*
+			 * CF-159: Remove local CIDs from the lookup hash
+			 * table when retiring. Without this, the CID
+			 * remains routable and packets using the retired
+			 * CID would still reach this connection.
+			 */
+			if (is_local)
+				rhashtable_remove_fast(&cid_lookup_table,
+						       &entry->hash_node,
+						       cid_hash_params);
 			break;
 		}
 	}
@@ -631,13 +655,13 @@ EXPORT_SYMBOL_GPL(tquic_conn_retire_cid);
  * tquic_conn_get_active_cid - Get the currently active remote CID
  * @conn: The connection
  *
- * Returns the first non-retired remote CID for use in outgoing packets.
+ * Returns a pointer to conn->dcid which is stable for the connection
+ * lifetime, after copying the active CID into it under the lock.
  */
 struct tquic_cid *tquic_conn_get_active_cid(struct tquic_connection *conn)
 {
 	struct tquic_conn_state_machine *cs = conn->state_machine;
 	struct tquic_cid_entry *entry;
-	struct tquic_cid *result = &conn->dcid;
 
 	if (!cs)
 		return &conn->dcid;
@@ -645,13 +669,15 @@ struct tquic_cid *tquic_conn_get_active_cid(struct tquic_connection *conn)
 	spin_lock_bh(&conn->lock);
 	list_for_each_entry(entry, &cs->remote_cids, list) {
 		if (!entry->retired) {
-			result = &entry->cid;
+			/* Copy CID data into stable conn->dcid under lock */
+			memcpy(&conn->dcid, &entry->cid,
+			       sizeof(conn->dcid));
 			break;
 		}
 	}
 	spin_unlock_bh(&conn->lock);
 
-	return result;
+	return &conn->dcid;
 }
 EXPORT_SYMBOL_GPL(tquic_conn_get_active_cid);
 
@@ -961,8 +987,12 @@ int tquic_send_version_negotiation(struct tquic_connection *conn,
 	if (5 + 1 + scid->len + 1 + dcid->len + 4 * 4 > sizeof(packet))
 		return -ENOSPC;
 
-	/* Long header with version 0 */
-	*p++ = 0x80;  /* Long header */
+	/*
+	 * Long header with version 0.
+	 * RFC 9000 Section 17.2.1: "The value in the Unused field is
+	 * selected randomly by the server." Randomize bits 0-6.
+	 */
+	*p++ = 0x80 | (get_random_u8() & 0x7f);
 	*p++ = 0x00; *p++ = 0x00; *p++ = 0x00; *p++ = 0x00;  /* Version 0 */
 
 	/* Swap DCIDs (send their SCID as DCID) */
@@ -1023,6 +1053,7 @@ int tquic_handle_version_negotiation(struct tquic_connection *conn,
 {
 	struct tquic_conn_state_machine *cs = conn->state_machine;
 	u32 new_version;
+	int i;
 
 	if (!cs)
 		return -EINVAL;
@@ -1035,6 +1066,19 @@ int tquic_handle_version_negotiation(struct tquic_connection *conn,
 	if (cs->version_negotiation_done) {
 		tquic_conn_warn(conn, "duplicate version negotiation\n");
 		return -EPROTO;
+	}
+
+	/*
+	 * RFC 9000 Section 6.1: A client MUST discard a Version Negotiation
+	 * packet that lists the QUIC version selected by the client.
+	 */
+	for (i = 0; i < num_versions; i++) {
+		if (versions[i] == conn->version) {
+			tquic_conn_warn(conn,
+					"VN lists our current version 0x%08x, discarding\n",
+					conn->version);
+			return -EPROTO;
+		}
 	}
 
 	new_version = tquic_version_select(versions, num_versions);
@@ -1132,12 +1176,12 @@ int tquic_generate_retry_token(struct tquic_connection *conn,
 	if (!req)
 		return -ENOMEM;
 
-	spin_lock(&tquic_retry_aead_lock);
+	spin_lock_bh(&tquic_retry_aead_lock);
 
 	ret = crypto_aead_setkey(tquic_retry_aead, tquic_retry_token_key,
 				 TQUIC_RETRY_TOKEN_KEY_LEN);
 	if (ret) {
-		spin_unlock(&tquic_retry_aead_lock);
+		spin_unlock_bh(&tquic_retry_aead_lock);
 		aead_request_free(req);
 		return ret;
 	}
@@ -1154,7 +1198,7 @@ int tquic_generate_retry_token(struct tquic_connection *conn,
 
 	ret = crypto_aead_encrypt(req);
 
-	spin_unlock(&tquic_retry_aead_lock);
+	spin_unlock_bh(&tquic_retry_aead_lock);
 	aead_request_free(req);
 
 	if (ret)
@@ -1229,12 +1273,12 @@ int tquic_validate_retry_token(struct tquic_connection *conn,
 	if (!req)
 		return -ENOMEM;
 
-	spin_lock(&tquic_retry_aead_lock);
+	spin_lock_bh(&tquic_retry_aead_lock);
 
 	ret = crypto_aead_setkey(tquic_retry_aead, tquic_retry_token_key,
 				 TQUIC_RETRY_TOKEN_KEY_LEN);
 	if (ret) {
-		spin_unlock(&tquic_retry_aead_lock);
+		spin_unlock_bh(&tquic_retry_aead_lock);
 		aead_request_free(req);
 		return ret;
 	}
@@ -1250,7 +1294,7 @@ int tquic_validate_retry_token(struct tquic_connection *conn,
 
 	ret = crypto_aead_decrypt(req);
 
-	spin_unlock(&tquic_retry_aead_lock);
+	spin_unlock_bh(&tquic_retry_aead_lock);
 	aead_request_free(req);
 
 	if (ret) {
@@ -1378,10 +1422,17 @@ int tquic_send_retry(struct tquic_connection *conn,
 		goto out_free;
 	}
 
-	/* Build Retry packet */
-	*p++ = 0xf0;  /* Long header, Retry type */
-	memcpy(p, &conn->version, 4);
-	p += 4;
+	/* Build Retry packet header with correct version encoding.
+	 * Long header: form(1) | fixed(1) | type(2) | unused(4)
+	 * 0x80 | 0x40 | (0x03 << 4) = 0xf0
+	 */
+	*p++ = 0xf0;
+	{
+		__be32 ver = cpu_to_be32(conn->version);
+
+		memcpy(p, &ver, 4);
+		p += 4;
+	}
 
 	/* DCID (client's SCID) */
 	*p++ = conn->scid.len;
@@ -1538,6 +1589,23 @@ int tquic_send_path_challenge(struct tquic_connection *conn,
 	memcpy(path->challenge_data, challenge->data, 8);
 
 	spin_lock_bh(&conn->lock);
+	/*
+	 * CF-435: Limit pending path challenges to prevent resource
+	 * exhaustion from unbounded challenge creation.
+	 */
+	{
+		int pcount = 0;
+		struct tquic_path_challenge *pc;
+
+		list_for_each_entry(pc, &cs->pending_challenges, list)
+			if (++pcount >= 8)
+				break;
+		if (pcount >= 8) {
+			spin_unlock_bh(&conn->lock);
+			kfree(challenge);
+			return -ENOSPC;
+		}
+	}
 	list_add_tail(&challenge->list, &cs->pending_challenges);
 	spin_unlock_bh(&conn->lock);
 
@@ -2228,6 +2296,11 @@ int tquic_conn_handle_close(struct tquic_connection *conn,
 	if (!cs)
 		return -EINVAL;
 
+	/* CF-366: Ignore duplicate close if already draining/closed */
+	if (conn->state == TQUIC_CONN_DRAINING ||
+	    conn->state == TQUIC_CONN_CLOSED)
+		return 0;
+
 	cs->close_received = true;
 	cs->remote_close.error_code = error_code;
 	cs->remote_close.frame_type = frame_type;
@@ -2278,6 +2351,17 @@ static void tquic_drain_timeout(struct work_struct *work)
 	struct tquic_conn_state_machine *cs = container_of(dwork, struct tquic_conn_state_machine,
 						   drain_work);
 	struct tquic_connection *conn = cs->conn;
+
+	/*
+	 * CF-533: This delayed work is shared between close retransmission
+	 * scheduling and drain timeout. Distinguish by connection state.
+	 */
+	if (conn->state == TQUIC_CONN_CLOSING) {
+		/* Retransmit close frame */
+		cs->close_retries++;
+		schedule_work(&cs->close_work);
+		return;
+	}
 
 	tquic_conn_dbg(conn, "drain timeout expired\n");
 	tquic_conn_enter_closed(conn);

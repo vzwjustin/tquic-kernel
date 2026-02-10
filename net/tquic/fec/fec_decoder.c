@@ -279,7 +279,8 @@ int tquic_fec_receive_source(struct tquic_fec_state *state,
 		dec->stats.blocks_received++;
 	}
 
-	spin_lock(&block->lock);
+	/* CF-476: Use nested annotation for inner lock under dec->lock */
+	spin_lock_nested(&block->lock, SINGLE_DEPTH_NESTING);
 
 	/* Check for duplicate */
 	list_for_each_entry(symbol, &block->source_symbols, list) {
@@ -334,9 +335,14 @@ EXPORT_SYMBOL_GPL(tquic_fec_receive_source);
 static int attempt_xor_recovery(struct tquic_fec_source_block *block)
 {
 	struct tquic_fec_symbol *symbol, *repair = NULL;
-	const u8 *symbols[TQUIC_FEC_MAX_SOURCE_SYMBOLS];
-	u16 lengths[TQUIC_FEC_MAX_SOURCE_SYMBOLS];
-	u8 recovered_data[TQUIC_FEC_MAX_SYMBOL_SIZE];
+	/*
+	 * SECURITY FIX (CF-097): Move large arrays from stack to heap.
+	 * Combined stack usage of symbols[] + lengths[] + recovered_data[]
+	 * exceeded safe kernel stack limits (~4KB on some architectures).
+	 */
+	const u8 **symbols;
+	u16 *lengths;
+	u8 *recovered_data;
 	u16 recovered_len = 0;
 	int missing_idx = -1;
 	int idx = 0;
@@ -353,10 +359,22 @@ static int attempt_xor_recovery(struct tquic_fec_source_block *block)
 	if (!repair)
 		return 0;  /* No repair symbol available */
 
-	/* Count missing source symbols and find the missing one */
-	for (i = 0; i < block->num_source; i++) {
-		symbols[i] = NULL;
-		lengths[i] = 0;
+	/* Allocate working arrays on the heap */
+	symbols = kcalloc(block->num_source, sizeof(*symbols), GFP_ATOMIC);
+	if (!symbols)
+		return -ENOMEM;
+
+	lengths = kcalloc(block->num_source, sizeof(*lengths), GFP_ATOMIC);
+	if (!lengths) {
+		kfree(symbols);
+		return -ENOMEM;
+	}
+
+	recovered_data = kmalloc(TQUIC_FEC_MAX_SYMBOL_SIZE, GFP_ATOMIC);
+	if (!recovered_data) {
+		kfree(lengths);
+		kfree(symbols);
+		return -ENOMEM;
 	}
 
 	list_for_each_entry(symbol, &block->source_symbols, list) {
@@ -369,33 +387,44 @@ static int attempt_xor_recovery(struct tquic_fec_source_block *block)
 	/* Count missing */
 	for (i = 0; i < block->num_source; i++) {
 		if (!symbols[i]) {
-			if (missing_idx >= 0)
-				return 0;  /* More than one missing - XOR can't help */
+			if (missing_idx >= 0) {
+				ret = 0;  /* More than one missing - XOR can't help */
+				goto out_free;
+			}
 			missing_idx = i;
 		}
 	}
 
-	if (missing_idx < 0)
-		return 0;  /* Nothing missing */
+	if (missing_idx < 0) {
+		ret = 0;  /* Nothing missing */
+		goto out_free;
+	}
 
 	/* Perform XOR recovery */
 	ret = tquic_xor_decode(symbols, lengths, block->num_source,
 			       repair->data, repair->length,
 			       recovered_data, &recovered_len);
 	if (ret < 0)
-		return ret;
+		goto out_free;
 
 	/* Create recovered symbol */
 	symbol = decoder_alloc_symbol(0, missing_idx, recovered_data,
 				      recovered_len, false);
-	if (!symbol)
-		return -ENOMEM;
+	if (!symbol) {
+		ret = -ENOMEM;
+		goto out_free;
+	}
 
 	list_add_tail(&symbol->list, &block->source_symbols);
 	block->num_received++;
 	block->recovered = true;
+	ret = 1;
 
-	return 1;
+out_free:
+	kfree(recovered_data);
+	kfree(lengths);
+	kfree(symbols);
+	return ret;
 }
 
 /**
@@ -408,24 +437,55 @@ static int attempt_xor_recovery(struct tquic_fec_source_block *block)
 static int attempt_rs_recovery(struct tquic_fec_source_block *block, int gf_bits)
 {
 	struct tquic_fec_symbol *symbol;
-	const u8 *symbols[TQUIC_FEC_MAX_SOURCE_SYMBOLS];
-	u16 lengths[TQUIC_FEC_MAX_SOURCE_SYMBOLS];
-	const u8 *repair[TQUIC_FEC_MAX_REPAIR_SYMBOLS];
-	u16 repair_lens[TQUIC_FEC_MAX_REPAIR_SYMBOLS];
-	u8 erasure_pos[TQUIC_FEC_MAX_SOURCE_SYMBOLS];
-	u8 *recovered[TQUIC_FEC_MAX_SOURCE_SYMBOLS];
-	u16 recovered_lens[TQUIC_FEC_MAX_SOURCE_SYMBOLS];
+	/*
+	 * SECURITY FIX (CF-097): Move large arrays from stack to heap.
+	 * Seven arrays totaling ~5.5KB exceeded safe kernel stack limits.
+	 * Use a single allocation for all arrays to reduce overhead.
+	 */
+	const u8 **symbols;
+	u16 *lengths;
+	const u8 **repair_syms;
+	u16 *repair_lens;
+	u8 *erasure_pos;
+	u8 **recovered;
+	u16 *recovered_lens;
+	void *work_buf;
+	size_t alloc_size;
 	int num_repair = 0;
 	int num_erasures = 0;
 	int i, ret;
 	int recovered_count = 0;
 
-	/* Initialize arrays */
-	for (i = 0; i < block->num_source; i++) {
-		symbols[i] = NULL;
-		lengths[i] = 0;
-		recovered[i] = NULL;
-	}
+	/*
+	 * Single allocation for all working arrays:
+	 *   symbols[num_source]       - const u8 * pointers
+	 *   lengths[num_source]       - u16
+	 *   repair_syms[MAX_REPAIR]   - const u8 * pointers
+	 *   repair_lens[MAX_REPAIR]   - u16
+	 *   erasure_pos[num_source]   - u8
+	 *   recovered[num_source]     - u8 * pointers
+	 *   recovered_lens[num_source]- u16
+	 */
+	alloc_size = block->num_source * sizeof(const u8 *) +
+		     block->num_source * sizeof(u16) +
+		     TQUIC_FEC_MAX_REPAIR_SYMBOLS * sizeof(const u8 *) +
+		     TQUIC_FEC_MAX_REPAIR_SYMBOLS * sizeof(u16) +
+		     block->num_source * sizeof(u8) +
+		     block->num_source * sizeof(u8 *) +
+		     block->num_source * sizeof(u16);
+
+	work_buf = kzalloc(alloc_size, GFP_ATOMIC);
+	if (!work_buf)
+		return -ENOMEM;
+
+	/* Partition the allocation into individual arrays */
+	symbols = work_buf;
+	lengths = (u16 *)&symbols[block->num_source];
+	repair_syms = (const u8 **)&lengths[block->num_source];
+	repair_lens = (u16 *)&repair_syms[TQUIC_FEC_MAX_REPAIR_SYMBOLS];
+	erasure_pos = (u8 *)&repair_lens[TQUIC_FEC_MAX_REPAIR_SYMBOLS];
+	recovered = (u8 **)&erasure_pos[block->num_source];
+	recovered_lens = (u16 *)&recovered[block->num_source];
 
 	/* Collect received source symbols */
 	list_for_each_entry(symbol, &block->source_symbols, list) {
@@ -442,22 +502,26 @@ static int attempt_rs_recovery(struct tquic_fec_source_block *block, int gf_bits
 		}
 	}
 
-	if (num_erasures == 0)
+	if (num_erasures == 0) {
+		kfree(work_buf);
 		return 0;  /* Nothing to recover */
+	}
 
 	/* Collect repair symbols */
 	list_for_each_entry(symbol, &block->repair_symbols, list) {
 		if (symbol->is_repair && symbol->received &&
 		    num_repair < TQUIC_FEC_MAX_REPAIR_SYMBOLS) {
-			repair[num_repair] = symbol->data;
+			repair_syms[num_repair] = symbol->data;
 			repair_lens[num_repair] = symbol->length;
 			num_repair++;
 		}
 	}
 
 	/* Need at least as many repair symbols as erasures */
-	if (num_repair < num_erasures)
+	if (num_repair < num_erasures) {
+		kfree(work_buf);
 		return 0;  /* Not enough repair symbols */
+	}
 
 	/* Allocate recovery buffers */
 	for (i = 0; i < num_erasures; i++) {
@@ -465,18 +529,20 @@ static int attempt_rs_recovery(struct tquic_fec_source_block *block, int gf_bits
 		if (!recovered[i]) {
 			while (--i >= 0)
 				kfree(recovered[i]);
+			kfree(work_buf);
 			return -ENOMEM;
 		}
 	}
 
 	/* Perform RS decoding */
 	ret = tquic_rs_decode(symbols, lengths, block->num_source,
-			      repair, repair_lens, num_repair,
+			      repair_syms, repair_lens, num_repair,
 			      erasure_pos, num_erasures,
 			      recovered, recovered_lens, gf_bits);
 	if (ret < 0) {
 		for (i = 0; i < num_erasures; i++)
 			kfree(recovered[i]);
+		kfree(work_buf);
 		return ret;
 	}
 
@@ -484,8 +550,12 @@ static int attempt_rs_recovery(struct tquic_fec_source_block *block, int gf_bits
 	for (i = 0; i < num_erasures; i++) {
 		symbol = kzalloc(sizeof(*symbol), GFP_ATOMIC);
 		if (!symbol) {
-			kfree(recovered[i]);
-			continue;
+			/* Free this and all remaining recovery buffers */
+			int j;
+
+			for (j = i; j < num_erasures; j++)
+				kfree(recovered[j]);
+			break;
 		}
 
 		symbol->data = recovered[i];
@@ -503,6 +573,7 @@ static int attempt_rs_recovery(struct tquic_fec_source_block *block, int gf_bits
 	if (recovered_count > 0)
 		block->recovered = true;
 
+	kfree(work_buf);
 	return recovered_count;
 }
 
@@ -555,7 +626,8 @@ int tquic_fec_receive_repair(struct tquic_fec_state *state,
 		dec->stats.blocks_received++;
 	}
 
-	spin_lock(&block->lock);
+	/* CF-476: Use nested annotation for inner lock under dec->lock */
+	spin_lock_nested(&block->lock, SINGLE_DEPTH_NESTING);
 
 	/* Update block info if we learned it */
 	if (block->num_source == 0)
@@ -637,7 +709,8 @@ int tquic_fec_recover(struct tquic_fec_state *state,
 
 	dec = &state->decoder;
 
-	spin_lock(&block->lock);
+	/* CF-476: Use nested annotation for inner lock under dec->lock */
+	spin_lock_nested(&block->lock, SINGLE_DEPTH_NESTING);
 
 	if (block->complete || block->recovered) {
 		spin_unlock(&block->lock);
@@ -739,6 +812,9 @@ ssize_t tquic_fec_decode_repair_frame(const u8 *buf, size_t buflen,
 	ret = decode_varint(buf + offset, buflen - offset, &value);
 	if (ret < 0)
 		return ret;
+	/* CF-287: Validate block_id fits in u32 */
+	if (value > U32_MAX)
+		return -EOVERFLOW;
 	frame->block_id = (u32)value;
 	offset += ret;
 
@@ -752,8 +828,10 @@ ssize_t tquic_fec_decode_repair_frame(const u8 *buf, size_t buflen,
 		return -EINVAL;
 	frame->source_block_length = buf[offset++];
 
-	/* FEC Scheme (1 byte) */
+	/* FEC Scheme (1 byte) - validate against known schemes */
 	if (buflen - offset < 1)
+		return -EINVAL;
+	if (buf[offset] >= __TQUIC_FEC_SCHEME_MAX)
 		return -EINVAL;
 	frame->scheme = (enum tquic_fec_scheme)buf[offset++];
 
@@ -761,6 +839,14 @@ ssize_t tquic_fec_decode_repair_frame(const u8 *buf, size_t buflen,
 	ret = decode_varint(buf + offset, buflen - offset, &value);
 	if (ret < 0)
 		return ret;
+	/*
+	 * CF-287: Validate that repair_length fits in u16 before
+	 * truncating. Without this check, a varint value > 65535
+	 * silently truncates, causing the length check below to
+	 * pass when the actual data is far larger.
+	 */
+	if (value > U16_MAX)
+		return -EOVERFLOW;
 	frame->repair_length = (u16)value;
 	offset += ret;
 

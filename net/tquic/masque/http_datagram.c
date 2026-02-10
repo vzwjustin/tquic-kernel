@@ -302,6 +302,21 @@ struct http_datagram_flow *http_datagram_flow_create(
 	/* Insert into manager's flow tree */
 	spin_lock_bh(&mgr->lock);
 
+	/*
+	 * CF-398: Limit the number of concurrent datagram flows to
+	 * prevent resource exhaustion from a peer opening unbounded
+	 * streams.  1024 is generous for any reasonable use case.
+	 */
+#define HTTP_DATAGRAM_MAX_FLOWS	1024
+	if (mgr->num_flows >= HTTP_DATAGRAM_MAX_FLOWS) {
+		spin_unlock_bh(&mgr->lock);
+		if (flow_cache)
+			kmem_cache_free(flow_cache, flow);
+		else
+			kfree(flow);
+		return ERR_PTR(-ENOSPC);
+	}
+
 	ret = flow_tree_insert(&mgr->flows, flow);
 	if (ret < 0) {
 		spin_unlock_bh(&mgr->lock);
@@ -892,13 +907,13 @@ EXPORT_SYMBOL_GPL(http_datagram_flow_get_stats);
  */
 int __init http_datagram_init(void)
 {
-	flow_cache = kmem_cache_create("http_datagram_flow",
+	flow_cache = kmem_cache_create("tquic_http_dgram_flow",
 				       sizeof(struct http_datagram_flow),
 				       0, SLAB_HWCACHE_ALIGN, NULL);
 	if (!flow_cache)
 		return -ENOMEM;
 
-	context_cache = kmem_cache_create("http_datagram_context",
+	context_cache = kmem_cache_create("tquic_http_dgram_ctx",
 					  sizeof(struct http_datagram_context),
 					  0, SLAB_HWCACHE_ALIGN, NULL);
 	if (!context_cache) {

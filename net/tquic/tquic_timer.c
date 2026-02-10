@@ -1000,7 +1000,12 @@ void tquic_timer_update_pto(struct tquic_timer_state *ts)
 				    pkt->state == TQUIC_PKT_OUTSTANDING) {
 					spin_lock_bh(&rs->lock);
 					pto_duration = tquic_get_pto_duration(rs, i);
-					pto_duration *= (1 << rs->pto_count);
+					/*
+				 * CF-214: Clamp pto_count to prevent
+				 * undefined behavior from shifting past
+				 * bit width, and cap exponential backoff.
+				 */
+				pto_duration *= (1ULL << min_t(u32, rs->pto_count, 16));
 					spin_unlock_bh(&rs->lock);
 
 					timeout = ktime_add_us(pkt->sent_time, pto_duration);
@@ -1309,13 +1314,24 @@ static void tquic_path_validation_expired(struct timer_list *t)
 	struct tquic_path *path = from_timer(path, t, validation_timer);
 	struct tquic_connection *conn;
 
-	/* Get connection from path */
-	conn = path->conn;
+	/* Get connection from path - use READ_ONCE for safe access */
+	conn = READ_ONCE(path->conn);
 
 	if (!conn)
 		return;
 
+	/* Ensure connection is still alive before accessing */
+	if (!refcount_inc_not_zero(&conn->refcount))
+		return;
+
 	spin_lock_bh(&conn->lock);
+
+	/* Re-check path state under lock in case path was freed */
+	if (path->state == TQUIC_PATH_FAILED) {
+		spin_unlock_bh(&conn->lock);
+		tquic_conn_put(conn);
+		return;
+	}
 
 	path->probe_count++;
 
@@ -1335,6 +1351,7 @@ static void tquic_path_validation_expired(struct timer_list *t)
 	}
 
 	spin_unlock_bh(&conn->lock);
+	tquic_conn_put(conn);
 }
 
 /**
@@ -1474,12 +1491,25 @@ static void tquic_retransmit_work_fn(struct work_struct *work)
 {
 	struct tquic_timer_state *ts = container_of(work, struct tquic_timer_state,
 						    retransmit_work);
+	struct tquic_connection *conn;
 	struct tquic_recovery_state *rs;
 	unsigned long pending;
 	int i, lost;
 
 	spin_lock_bh(&ts->lock);
 	if (!ts->active || ts->shutting_down) {
+		spin_unlock_bh(&ts->lock);
+		return;
+	}
+
+	conn = ts->conn;
+
+	/*
+	 * Take a reference on the connection while we hold ts->lock
+	 * to ensure conn remains valid after we drop the lock below.
+	 * Loss detection and PTO handling access conn->active_path.
+	 */
+	if (!tquic_conn_get(conn)) {
 		spin_unlock_bh(&ts->lock);
 		return;
 	}
@@ -1496,7 +1526,7 @@ static void tquic_retransmit_work_fn(struct work_struct *work)
 				tquic_dbg("timer:detected %d lost packets in space %d\n",
 					 lost, i);
 				/* Would trigger retransmission */
-				/* tquic_retransmit_lost(ts->conn, i); */
+				/* tquic_retransmit_lost(conn, i); */
 			}
 		}
 
@@ -1510,11 +1540,13 @@ static void tquic_retransmit_work_fn(struct work_struct *work)
 		 * PTO requires sending 1-2 ack-eliciting packets.
 		 * Prefer retransmitting lost/unacked data, but send PING if none.
 		 */
-		/* tquic_send_pto_probe(ts->conn); */
+		/* tquic_send_pto_probe(conn); */
 
 		/* Update PTO timer */
 		tquic_timer_update_pto(ts);
 	}
+
+	tquic_conn_put(conn);
 }
 
 /**
@@ -1525,15 +1557,30 @@ static void tquic_path_work_fn(struct work_struct *work)
 {
 	struct tquic_timer_state *ts = container_of(work, struct tquic_timer_state,
 						    path_work);
+	struct tquic_connection *conn;
 
 	spin_lock_bh(&ts->lock);
 	if (!ts->active || ts->shutting_down) {
 		spin_unlock_bh(&ts->lock);
 		return;
 	}
+
+	conn = ts->conn;
+
+	/*
+	 * Take a reference on the connection while we hold ts->lock
+	 * to ensure conn remains valid after we drop the lock below.
+	 * Path work handlers access conn for validation and failover.
+	 */
+	if (!tquic_conn_get(conn)) {
+		spin_unlock_bh(&ts->lock);
+		return;
+	}
 	spin_unlock_bh(&ts->lock);
 
 	/* Handle path-related work like validation retries, failover, etc. */
+
+	tquic_conn_put(conn);
 }
 
 /*

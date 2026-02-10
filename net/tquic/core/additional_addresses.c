@@ -166,33 +166,16 @@ int tquic_additional_addr_add(struct tquic_additional_addresses *addrs,
 		return -EINVAL;
 	}
 
-	spin_lock_bh(&addrs->lock);
-
-	/* Check capacity */
-	if (addrs->count >= addrs->max_count) {
-		spin_unlock_bh(&addrs->lock);
-		pr_debug("tquic_additional_addr: list full (max=%u)\n",
-			 addrs->max_count);
-		return -ENOSPC;
-	}
-
-	/* Check for duplicate address */
-	list_for_each_entry(existing, &addrs->addresses, list) {
-		if (sockaddr_storage_equal(&existing->addr, addr)) {
-			spin_unlock_bh(&addrs->lock);
-			pr_debug("tquic_additional_addr: duplicate address\n");
-			return -EEXIST;
-		}
-	}
-
-	spin_unlock_bh(&addrs->lock);
-
-	/* Allocate new entry */
+	/*
+	 * CF-330: Pre-allocate the entry before taking the lock so we can
+	 * use GFP_KERNEL, then do the duplicate check and insert atomically
+	 * under the lock to eliminate the TOCTOU race.
+	 */
 	entry = kzalloc(sizeof(*entry), GFP_KERNEL);
 	if (!entry)
 		return -ENOMEM;
 
-	/* Initialize entry */
+	/* Initialize entry before taking the lock */
 	INIT_LIST_HEAD(&entry->list);
 	entry->ip_version = ip_version;
 	memcpy(&entry->addr, addr,
@@ -205,19 +188,37 @@ int tquic_additional_addr_add(struct tquic_additional_addresses *addrs,
 		memcpy(entry->stateless_reset_token, reset_token,
 		       TQUIC_STATELESS_RESET_TOKEN_LEN);
 	} else {
-		/* Generate random token */
 		get_random_bytes(entry->stateless_reset_token,
 				 TQUIC_STATELESS_RESET_TOKEN_LEN);
 	}
 
 	entry->validated = false;
 	entry->active = true;
-	entry->priority = addrs->count;  /* Lower indices = higher priority */
 	entry->rtt_estimate = 0;
 	entry->last_used = ktime_get();
 
-	/* Add to list */
 	spin_lock_bh(&addrs->lock);
+
+	/* Check capacity */
+	if (addrs->count >= addrs->max_count) {
+		spin_unlock_bh(&addrs->lock);
+		kfree(entry);
+		pr_debug("tquic_additional_addr: list full (max=%u)\n",
+			 addrs->max_count);
+		return -ENOSPC;
+	}
+
+	/* Check for duplicate address */
+	list_for_each_entry(existing, &addrs->addresses, list) {
+		if (sockaddr_storage_equal(&existing->addr, addr)) {
+			spin_unlock_bh(&addrs->lock);
+			kfree(entry);
+			pr_debug("tquic_additional_addr: duplicate address\n");
+			return -EEXIST;
+		}
+	}
+
+	entry->priority = addrs->count;  /* Lower indices = higher priority */
 	list_add_tail(&entry->list, &addrs->addresses);
 	addrs->count++;
 	spin_unlock_bh(&addrs->lock);

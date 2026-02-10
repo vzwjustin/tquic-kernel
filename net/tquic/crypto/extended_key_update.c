@@ -835,14 +835,13 @@ int tquic_eku_derive_keys(struct tquic_connection *conn, bool include_psk)
 
 	/* Check if PSK should be included */
 	if (include_psk && (state->flags & TQUIC_EKU_FLAG_PSK_INJECTED)) {
-		size_t secret_len = 32;  /* SHA-256 default */
-		u8 current_secret[48];
-		u32 key_len;
+		u8 current_secret[TQUIC_SECRET_MAX_LEN];
+		u32 secret_len;
 
-		/* Get current secret from base key update state */
-		ret = tquic_key_update_get_current_keys(ku_state, 1,
-							current_secret, &key_len,
-							NULL, NULL);
+		/* Get current traffic secret (not derived key) */
+		ret = tquic_key_update_get_current_secret(ku_state, 1,
+							  current_secret,
+							  &secret_len);
 		if (ret) {
 			spin_unlock_irqrestore(&state->lock, flags);
 			return ret;

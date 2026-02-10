@@ -199,21 +199,17 @@ static int tquic_debug_conn_show(struct seq_file *seq, void *v)
 	/* Version */
 	seq_printf(seq, "0x%08x ", conn->version);
 
-	/* SCID as hex */
-	for (i = 0; i < conn->scid.len && i < 16; i++)
+	/* SCID as hex (up to TQUIC_MAX_CID_LEN = 20 bytes) */
+	for (i = 0; i < conn->scid.len && i < TQUIC_MAX_CID_LEN; i++)
 		seq_printf(seq, "%02x", conn->scid.id[i]);
-	if (conn->scid.len > 16)
-		seq_puts(seq, "..");
-	for (i = conn->scid.len * 2; i < 34; i++)
+	for (i = conn->scid.len * 2; i < TQUIC_MAX_CID_LEN * 2 + 2; i++)
 		seq_putc(seq, ' ');
 	seq_putc(seq, ' ');
 
-	/* DCID as hex */
-	for (i = 0; i < conn->dcid.len && i < 16; i++)
+	/* DCID as hex (up to TQUIC_MAX_CID_LEN = 20 bytes) */
+	for (i = 0; i < conn->dcid.len && i < TQUIC_MAX_CID_LEN; i++)
 		seq_printf(seq, "%02x", conn->dcid.id[i]);
-	if (conn->dcid.len > 16)
-		seq_puts(seq, "..");
-	for (i = conn->dcid.len * 2; i < 34; i++)
+	for (i = conn->dcid.len * 2; i < TQUIC_MAX_CID_LEN * 2 + 2; i++)
 		seq_putc(seq, ' ');
 	seq_putc(seq, ' ');
 

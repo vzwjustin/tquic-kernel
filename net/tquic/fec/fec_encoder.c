@@ -16,6 +16,21 @@
 
 #include "fec.h"
 
+/* Slab cache for FEC symbols to avoid per-packet GFP_ATOMIC allocations */
+static struct kmem_cache *fec_symbol_cache __read_mostly;
+
+void __init tquic_fec_encoder_cache_init(void)
+{
+	fec_symbol_cache = kmem_cache_create("tquic_fec_symbol",
+					     sizeof(struct tquic_fec_symbol),
+					     0, SLAB_HWCACHE_ALIGN, NULL);
+}
+
+void tquic_fec_encoder_cache_destroy(void)
+{
+	kmem_cache_destroy(fec_symbol_cache);
+}
+
 /*
  * =============================================================================
  * Source Block Management
@@ -63,7 +78,10 @@ static void free_symbol(struct tquic_fec_symbol *symbol)
 		return;
 
 	kfree(symbol->data);
-	kfree(symbol);
+	if (fec_symbol_cache)
+		kmem_cache_free(fec_symbol_cache, symbol);
+	else
+		kfree(symbol);
 }
 
 /**
@@ -108,7 +126,10 @@ static struct tquic_fec_symbol *alloc_symbol(u64 pkt_num, u8 symbol_id,
 {
 	struct tquic_fec_symbol *symbol;
 
-	symbol = kzalloc(sizeof(*symbol), GFP_ATOMIC);
+	if (fec_symbol_cache)
+		symbol = kmem_cache_zalloc(fec_symbol_cache, GFP_ATOMIC);
+	else
+		symbol = kzalloc(sizeof(*symbol), GFP_ATOMIC);
 	if (!symbol)
 		return NULL;
 
@@ -272,15 +293,16 @@ int tquic_fec_add_source_symbol(struct tquic_fec_state *state,
 		goto out;
 	}
 
-	spin_lock(&block->lock);
+	/*
+	 * No need for block->lock here: the block is enc->current_block
+	 * and we hold enc->lock, so no concurrent access is possible.
+	 */
 	list_add_tail(&symbol->list, &block->source_symbols);
 	block->num_received++;
 	block->last_pkt_num = pkt_num;
 
 	if (length > block->max_symbol_size)
 		block->max_symbol_size = length;
-
-	spin_unlock(&block->lock);
 
 	enc->symbols_in_block++;
 	enc->stats.symbols_encoded++;
@@ -308,13 +330,26 @@ EXPORT_SYMBOL_GPL(tquic_fec_add_source_symbol);
  */
 static struct tquic_fec_symbol *generate_xor_repair(struct tquic_fec_source_block *block)
 {
-	struct tquic_fec_symbol *symbol, *repair;
-	const u8 *symbols[TQUIC_FEC_MAX_SOURCE_SYMBOLS];
-	u16 lengths[TQUIC_FEC_MAX_SOURCE_SYMBOLS];
-	u8 repair_data[TQUIC_FEC_MAX_SYMBOL_SIZE];
+	struct tquic_fec_symbol *symbol, *repair = NULL;
+	const u8 **symbols;
+	u16 *lengths;
+	u8 *repair_data;
 	u16 repair_len = 0;
 	int idx = 0;
 	int ret;
+
+	/*
+	 * Allocate work buffers dynamically to avoid ~4KB stack usage
+	 * (symbols array + lengths array + repair_data combined exceed
+	 * safe kernel stack limits on deeply nested paths).
+	 */
+	symbols = kmalloc_array(TQUIC_FEC_MAX_SOURCE_SYMBOLS,
+				sizeof(*symbols), GFP_ATOMIC);
+	lengths = kmalloc_array(TQUIC_FEC_MAX_SOURCE_SYMBOLS,
+				sizeof(*lengths), GFP_ATOMIC);
+	repair_data = kmalloc(TQUIC_FEC_MAX_SYMBOL_SIZE, GFP_ATOMIC);
+	if (!symbols || !lengths || !repair_data)
+		goto out_free;
 
 	/* Collect source symbols */
 	list_for_each_entry(symbol, &block->source_symbols, list) {
@@ -328,13 +363,15 @@ static struct tquic_fec_symbol *generate_xor_repair(struct tquic_fec_source_bloc
 	/* Generate XOR parity */
 	ret = tquic_xor_encode(symbols, lengths, idx, repair_data, &repair_len);
 	if (ret < 0)
-		return NULL;
+		goto out_free;
 
 	/* Allocate repair symbol */
 	repair = alloc_symbol(0, 0, repair_data, repair_len, true);
-	if (!repair)
-		return NULL;
 
+out_free:
+	kfree(repair_data);
+	kfree(lengths);
+	kfree(symbols);
 	return repair;
 }
 
@@ -394,8 +431,12 @@ static int generate_rs_repair(struct tquic_fec_source_block *block,
 	for (i = 0; i < num_repair; i++) {
 		repair_sym = kzalloc(sizeof(*repair_sym), GFP_ATOMIC);
 		if (!repair_sym) {
-			kfree(repair_bufs[i]);
-			continue;
+			/* Free this and all remaining repair buffers */
+			int j;
+
+			for (j = i; j < num_repair; j++)
+				kfree(repair_bufs[j]);
+			break;
 		}
 
 		repair_sym->data = repair_bufs[i];
@@ -448,7 +489,10 @@ int tquic_fec_generate_repair(struct tquic_fec_state *state,
 					 struct tquic_fec_source_block, list);
 	}
 
-	spin_lock(&block->lock);
+	/*
+	 * No need for block->lock here: the block is from enc->pending_blocks
+	 * and we hold enc->lock, so no concurrent access is possible.
+	 */
 
 	/* Generate repair symbols based on scheme */
 	switch (enc->scheme) {
@@ -475,8 +519,6 @@ int tquic_fec_generate_repair(struct tquic_fec_state *state,
 		ret = -EINVAL;
 		break;
 	}
-
-	spin_unlock(&block->lock);
 
 	if (ret > 0)
 		enc->stats.repair_symbols_sent += ret;
@@ -573,7 +615,7 @@ ssize_t tquic_fec_encode_repair_frame(struct tquic_fec_state *state,
 		return -EINVAL;
 
 	/* Find the repair symbol */
-	spin_lock(&block->lock);
+	spin_lock_bh(&block->lock);
 	list_for_each_entry(sym, &block->repair_symbols, list) {
 		if (idx == repair_id) {
 			repair = sym;
@@ -583,14 +625,14 @@ ssize_t tquic_fec_encode_repair_frame(struct tquic_fec_state *state,
 	}
 
 	if (!repair) {
-		spin_unlock(&block->lock);
+		spin_unlock_bh(&block->lock);
 		return -ENOENT;
 	}
 
 	/* Frame type */
 	ret = encode_varint(buf + offset, buflen - offset, TQUIC_FRAME_FEC_REPAIR);
 	if (ret < 0) {
-		spin_unlock(&block->lock);
+		spin_unlock_bh(&block->lock);
 		return ret;
 	}
 	offset += ret;
@@ -598,28 +640,28 @@ ssize_t tquic_fec_encode_repair_frame(struct tquic_fec_state *state,
 	/* Block ID */
 	ret = encode_varint(buf + offset, buflen - offset, block->block_id);
 	if (ret < 0) {
-		spin_unlock(&block->lock);
+		spin_unlock_bh(&block->lock);
 		return ret;
 	}
 	offset += ret;
 
 	/* Repair Symbol ID (1 byte) */
 	if (buflen - offset < 1) {
-		spin_unlock(&block->lock);
+		spin_unlock_bh(&block->lock);
 		return -ENOSPC;
 	}
 	buf[offset++] = repair_id;
 
 	/* Source Block Length (1 byte) */
 	if (buflen - offset < 1) {
-		spin_unlock(&block->lock);
+		spin_unlock_bh(&block->lock);
 		return -ENOSPC;
 	}
 	buf[offset++] = block->num_source;
 
 	/* FEC Scheme (1 byte) */
 	if (buflen - offset < 1) {
-		spin_unlock(&block->lock);
+		spin_unlock_bh(&block->lock);
 		return -ENOSPC;
 	}
 	buf[offset++] = (u8)block->scheme;
@@ -627,20 +669,20 @@ ssize_t tquic_fec_encode_repair_frame(struct tquic_fec_state *state,
 	/* Repair Length */
 	ret = encode_varint(buf + offset, buflen - offset, repair->length);
 	if (ret < 0) {
-		spin_unlock(&block->lock);
+		spin_unlock_bh(&block->lock);
 		return ret;
 	}
 	offset += ret;
 
 	/* Repair Data */
 	if (buflen - offset < repair->length) {
-		spin_unlock(&block->lock);
+		spin_unlock_bh(&block->lock);
 		return -ENOSPC;
 	}
 	memcpy(buf + offset, repair->data, repair->length);
 	offset += repair->length;
 
-	spin_unlock(&block->lock);
+	spin_unlock_bh(&block->lock);
 
 	return offset;
 }
@@ -725,7 +767,10 @@ bool tquic_fec_get_pending_repair(struct tquic_fec_state *state,
 	block = list_first_entry(&enc->pending_blocks,
 				 struct tquic_fec_source_block, list);
 
-	spin_lock(&block->lock);
+	/*
+	 * No need for block->lock: the block is on enc->pending_blocks
+	 * and we hold enc->lock, so no concurrent access is possible.
+	 */
 
 	/* Get first unsent repair symbol */
 	list_for_each_entry(repair, &block->repair_symbols, list) {
@@ -761,8 +806,6 @@ bool tquic_fec_get_pending_repair(struct tquic_fec_state *state,
 		if (all_sent)
 			list_del_init(&block->list);
 	}
-
-	spin_unlock(&block->lock);
 
 out:
 	spin_unlock_bh(&enc->lock);

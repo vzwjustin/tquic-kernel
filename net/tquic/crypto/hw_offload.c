@@ -690,40 +690,53 @@ int tquic_crypto_batch_encrypt(struct tquic_crypto_ctx *ctx,
 	}
 #endif
 
-	/* Process packets (crypto API handles AVX-512 internally) */
-	for (i = 0; i < count; i++) {
-		struct tquic_hw_packet *pkt = &pkts[i];
-		u8 *ct_buf;
-		size_t ct_buf_len = pkt->len + 16;
+	/*
+	 * Allocate a single buffer sized for the largest packet in the batch
+	 * to avoid per-packet kmalloc in the hot path.
+	 */
+	{
+		size_t max_buf_len = 0;
+		u8 *shared_buf;
 
-		/*
-		 * Validate that the caller's data buffer is large enough
-		 * to hold the ciphertext (plaintext + 16-byte auth tag).
-		 */
-		if (pkt->data_buf_len < ct_buf_len) {
-			pkt->result = -ENOSPC;
-			continue;
+		for (i = 0; i < count; i++) {
+			size_t need = pkts[i].len + 16;
+
+			if (need > max_buf_len)
+				max_buf_len = need;
 		}
 
-		ct_buf = kmalloc(ct_buf_len, GFP_ATOMIC);
-		if (!ct_buf) {
-			pkt->result = -ENOMEM;
-			continue;
+		shared_buf = kmalloc(max_buf_len, GFP_ATOMIC);
+		if (!shared_buf)
+			return -ENOMEM;
+
+		for (i = 0; i < count; i++) {
+			struct tquic_hw_packet *pkt = &pkts[i];
+			size_t ct_buf_len = pkt->len + 16;
+
+			/*
+			 * Validate that the caller's data buffer is large
+			 * enough to hold the ciphertext (plaintext + 16-byte
+			 * auth tag).
+			 */
+			if (pkt->data_buf_len < ct_buf_len) {
+				pkt->result = -ENOSPC;
+				continue;
+			}
+
+			pkt->result = tquic_hw_encrypt_packet(ctx,
+					pkt->aad, pkt->aad_len,
+					pkt->data, pkt->len,
+					pkt->pkt_num,
+					shared_buf, &ct_len);
+
+			if (pkt->result == 0) {
+				memcpy(pkt->data, shared_buf, ct_len);
+				pkt->len = ct_len;
+				success++;
+			}
 		}
 
-		pkt->result = tquic_hw_encrypt_packet(ctx,
-						      pkt->aad, pkt->aad_len,
-						      pkt->data, pkt->len,
-						      pkt->pkt_num,
-						      ct_buf, &ct_len);
-
-		if (pkt->result == 0) {
-			memcpy(pkt->data, ct_buf, ct_len);
-			pkt->len = ct_len;
-			success++;
-		}
-
-		kfree(ct_buf);
+		kfree(shared_buf);
 	}
 
 	return success;
@@ -759,36 +772,45 @@ int tquic_crypto_batch_decrypt(struct tquic_crypto_ctx *ctx,
 	}
 #endif
 
-	for (i = 0; i < count; i++) {
-		struct tquic_hw_packet *pkt = &pkts[i];
-		u8 *pt_buf;
-		size_t pt_buf_len;
+	/*
+	 * Allocate a single buffer sized for the largest packet in the batch
+	 * to avoid per-packet kmalloc in the hot path.
+	 */
+	{
+		size_t max_buf_len = 0;
+		u8 *shared_buf;
 
-		if (pkt->len < 16) {
-			pkt->result = -EINVAL;
-			continue;
+		for (i = 0; i < count; i++) {
+			if (pkts[i].len > max_buf_len)
+				max_buf_len = pkts[i].len;
 		}
 
-		pt_buf_len = pkt->len - 16;
-		pt_buf = kmalloc(pt_buf_len, GFP_ATOMIC);
-		if (!pt_buf) {
-			pkt->result = -ENOMEM;
-			continue;
+		shared_buf = kmalloc(max_buf_len, GFP_ATOMIC);
+		if (!shared_buf)
+			return -ENOMEM;
+
+		for (i = 0; i < count; i++) {
+			struct tquic_hw_packet *pkt = &pkts[i];
+
+			if (pkt->len < 16) {
+				pkt->result = -EINVAL;
+				continue;
+			}
+
+			pkt->result = tquic_hw_decrypt_packet(ctx,
+					pkt->aad, pkt->aad_len,
+					pkt->data, pkt->len,
+					pkt->pkt_num,
+					shared_buf, &pt_len);
+
+			if (pkt->result == 0) {
+				memcpy(pkt->data, shared_buf, pt_len);
+				pkt->len = pt_len;
+				success++;
+			}
 		}
 
-		pkt->result = tquic_hw_decrypt_packet(ctx,
-						      pkt->aad, pkt->aad_len,
-						      pkt->data, pkt->len,
-						      pkt->pkt_num,
-						      pt_buf, &pt_len);
-
-		if (pkt->result == 0) {
-			memcpy(pkt->data, pt_buf, pt_len);
-			pkt->len = pt_len;
-			success++;
-		}
-
-		kfree(pt_buf);
+		kfree(shared_buf);
 	}
 
 	return success;
@@ -813,6 +835,8 @@ struct tquic_qat_ctx {
 	struct crypto_aead *tfm;
 	bool qat_available;
 	u16 cipher_suite;
+	u8 cached_key[32];	/* Cache last-set key to avoid redundant setkey */
+	size_t cached_key_len;
 };
 
 /**
@@ -916,10 +940,16 @@ int tquic_qat_encrypt(struct tquic_qat_ctx *ctx,
 
 	tquic_hw_create_nonce(iv, pkt_num, nonce);
 
-	ret = crypto_aead_setkey(ctx->tfm, key, key_len);
-	if (ret) {
-		memzero_explicit(nonce, sizeof(nonce));
-		return ret;
+	/* Only set key when it has changed to avoid expensive per-call setkey */
+	if (key_len != ctx->cached_key_len ||
+	    crypto_memneq(key, ctx->cached_key, key_len)) {
+		ret = crypto_aead_setkey(ctx->tfm, key, key_len);
+		if (ret) {
+			memzero_explicit(nonce, sizeof(nonce));
+			return ret;
+		}
+		memcpy(ctx->cached_key, key, min(key_len, sizeof(ctx->cached_key)));
+		ctx->cached_key_len = key_len;
 	}
 
 	req = aead_request_alloc(ctx->tfm, GFP_KERNEL);

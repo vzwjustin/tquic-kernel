@@ -55,26 +55,53 @@ static struct workqueue_struct *exfil_wq;
  */
 
 /*
- * CF-139: Validate function pointer stored in skb->cb before calling.
- * Returns the function pointer if it looks valid (non-NULL, within
- * kernel text), or NULL otherwise.
+ * SECURITY FIX (CF-113): Use a proper typed struct for skb->cb instead
+ * of raw function-pointer casts. A magic tag prevents misinterpretation
+ * of stale or corrupted cb data as a code address.
+ */
+#define TQUIC_EXFIL_CB_MAGIC	0x5158454CU	/* "QXEL" */
+
+struct tquic_exfil_cb {
+	u32 magic;
+	void (*send_fn)(struct sk_buff *);
+};
+
+static inline void tquic_exfil_set_cb_fn(struct sk_buff *skb,
+					  void (*fn)(struct sk_buff *))
+{
+	struct tquic_exfil_cb *ecb = (struct tquic_exfil_cb *)skb->cb;
+
+	BUILD_BUG_ON(sizeof(struct tquic_exfil_cb) >
+		     sizeof_field(struct sk_buff, cb));
+
+	ecb->magic = TQUIC_EXFIL_CB_MAGIC;
+	ecb->send_fn = fn;
+}
+
+/*
+ * Validate function pointer stored in skb->cb before calling.
+ * Returns the function pointer if magic matches and the address
+ * is within kernel text, or NULL otherwise.
  */
 static void (*tquic_exfil_validate_cb_fn(struct sk_buff *skb))(struct sk_buff *)
 {
-	unsigned long fn_addr = *(unsigned long *)skb->cb;
+	struct tquic_exfil_cb *ecb = (struct tquic_exfil_cb *)skb->cb;
 
-	if (!fn_addr)
+	if (ecb->magic != TQUIC_EXFIL_CB_MAGIC)
+		return NULL;
+
+	if (!ecb->send_fn)
 		return NULL;
 
 	/* Reject pointers outside the kernel text section */
-	if (!kernel_text_address(fn_addr)) {
+	if (!kernel_text_address((unsigned long)ecb->send_fn)) {
 		pr_warn_ratelimited("tquic_exfil: invalid function pointer "
-				    "%lx in skb->cb, dropping packet\n",
-				    fn_addr);
+				    "%px in skb->cb, dropping packet\n",
+				    ecb->send_fn);
 		return NULL;
 	}
 
-	return (void (*)(struct sk_buff *))fn_addr;
+	return ecb->send_fn;
 }
 
 /* Workqueue callback for delayed packet transmission */
@@ -300,8 +327,8 @@ int tquic_timing_normalize_send(struct tquic_timing_normalizer *norm,
 	delay_us = norm->delay_min_us +
 		   (rand_val % (norm->delay_max_us - norm->delay_min_us + 1));
 
-	/* Store send function in skb->cb */
-	*(unsigned long *)skb->cb = (unsigned long)send_fn;
+	/* Store send function in skb->cb via typed accessor */
+	tquic_exfil_set_cb_fn(skb, send_fn);
 
 	/* Queue packet */
 	spin_lock_irqsave(&norm->queue_lock, flags);
@@ -557,8 +584,11 @@ static void traffic_shaper_decoy_work(struct work_struct *work)
 	 * We randomize the size to avoid creating a recognizable pattern.
 	 */
 	get_random_bytes(&rand_val, sizeof(rand_val));
-	/* Random size between 64 and MTU bytes */
-	decoy_size = 64 + (rand_val % (shaper->mtu - 64 + 1));
+	/* Random size between 64 and MTU bytes, guard against underflow */
+	if (shaper->mtu <= 64)
+		decoy_size = shaper->mtu ? shaper->mtu : 64;
+	else
+		decoy_size = 64 + (rand_val % (shaper->mtu - 64 + 1));
 
 	/* Allocate sk_buff for decoy packet - use GFP_KERNEL since workqueue
 	 * runs in process context that can sleep */
@@ -568,8 +598,12 @@ static void traffic_shaper_decoy_work(struct work_struct *work)
 
 	skb_reserve(skb, NET_SKB_PAD + NET_IP_ALIGN);
 
-	/* Fill with PADDING frame (0x00 bytes) */
-	memset(skb_put(skb, decoy_size), 0x00, decoy_size);
+	/*
+	 * CF-368: Fill decoy packets with random data instead of all-zero
+	 * PADDING frames.  All-zero payloads are trivially fingerprinted
+	 * by a passive observer, defeating the purpose of decoy traffic.
+	 */
+	get_random_bytes(skb_put(skb, decoy_size), decoy_size);
 
 	/* Mark as decoy packet in cb for debugging/tracing */
 	skb->cb[0] = 'D';  /* Decoy marker */
@@ -820,8 +854,8 @@ int tquic_traffic_shaper_batch_send(struct tquic_traffic_shaper *shaper,
 		return 0;
 	}
 
-	/* Store send function in skb->cb */
-	*(unsigned long *)skb->cb = (unsigned long)send_fn;
+	/* Store send function in skb->cb via typed accessor */
+	tquic_exfil_set_cb_fn(skb, send_fn);
 
 	spin_lock_irqsave(&shaper->batch_lock, flags);
 	__skb_queue_tail(&shaper->batch_queue, skb);
@@ -1347,8 +1381,8 @@ int tquic_packet_jitter_send(struct tquic_packet_jitter *jitter,
 		return 0;
 	}
 
-	/* Store send function in skb->cb */
-	*(unsigned long *)skb->cb = (unsigned long)send_fn;
+	/* Store send function in skb->cb via typed accessor */
+	tquic_exfil_set_cb_fn(skb, send_fn);
 
 	spin_lock_irqsave(&jitter->queue_lock, flags);
 	start_timer = skb_queue_empty(&jitter->pending_queue);
@@ -1487,6 +1521,12 @@ void tquic_exfil_ctx_set_level(struct tquic_exfil_ctx *ctx,
 	if (!ctx)
 		return;
 
+	/*
+	 * CF-371: Hold ctx->lock across the destroy/reinit sequence to
+	 * prevent concurrent readers from seeing a half-torn-down state.
+	 */
+	spin_lock_bh(&ctx->lock);
+
 	ctx->level = level;
 	ctx->enabled = (level != TQUIC_EXFIL_LEVEL_NONE);
 
@@ -1496,13 +1536,21 @@ void tquic_exfil_ctx_set_level(struct tquic_exfil_ctx *ctx,
 
 	/* Reinitialize shaper and spin with new level */
 	tquic_traffic_shaper_destroy(&ctx->shaper);
-	tquic_traffic_shaper_init(&ctx->shaper, level);
+	if (tquic_traffic_shaper_init(&ctx->shaper, level))
+		pr_warn("tquic_exfil: shaper reinit failed for level %d\n",
+			level);
 
 	tquic_spin_randomizer_destroy(&ctx->spin_rand);
-	tquic_spin_randomizer_init(&ctx->spin_rand, level);
+	if (tquic_spin_randomizer_init(&ctx->spin_rand, level))
+		pr_warn("tquic_exfil: spin_rand reinit failed for level %d\n",
+			level);
 
 	tquic_packet_jitter_destroy(&ctx->jitter);
-	tquic_packet_jitter_init(&ctx->jitter, level);
+	if (tquic_packet_jitter_init(&ctx->jitter, level))
+		pr_warn("tquic_exfil: jitter reinit failed for level %d\n",
+			level);
+
+	spin_unlock_bh(&ctx->lock);
 }
 
 /**
@@ -1800,7 +1848,3 @@ EXPORT_SYMBOL_GPL(tquic_exfil_exit);
 
 /* Event reporting */
 EXPORT_SYMBOL_GPL(tquic_exfil_event);
-
-MODULE_DESCRIPTION("TQUIC QUIC-Exfil Mitigation (draft-iab-quic-exfil)");
-MODULE_LICENSE("GPL");
-MODULE_AUTHOR("Linux Foundation");

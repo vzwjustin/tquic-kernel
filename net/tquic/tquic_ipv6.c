@@ -550,7 +550,8 @@ failure_close:
 	/* Clean up handshake state on failure */
 	tquic_handshake_cleanup(sk);
 	inet_sk_set_state(sk, TCP_CLOSE);
-	sk->sk_err = -err;
+	/* CF-241: sk_err uses positive errno values; use WRITE_ONCE */
+	WRITE_ONCE(sk->sk_err, -err);
 failure:
 	sk->sk_route_caps = 0;
 	return err;
@@ -689,19 +690,24 @@ static int tquic_v6_getsockopt(struct socket *sock, int level, int optname,
 				struct ip6_mtuinfo mtuinfo;
 				struct dst_entry *dst;
 
+				if (len < sizeof(mtuinfo))
+					return -EINVAL;
+
 				memset(&mtuinfo, 0, sizeof(mtuinfo));
 
 				rcu_read_lock();
 				dst = __sk_dst_get(sk);
-				if (dst) {
-					mtuinfo.ip6m_mtu = dst_mtu(dst);
-					mtuinfo.ip6m_addr.sin6_family = AF_INET6;
-					mtuinfo.ip6m_addr.sin6_addr = sk->sk_v6_daddr;
+				if (!dst) {
+					rcu_read_unlock();
+					return -ENOTCONN;
 				}
+				mtuinfo.ip6m_mtu = dst_mtu(dst);
 				rcu_read_unlock();
 
-				if (len < sizeof(mtuinfo))
-					return -EINVAL;
+				mtuinfo.ip6m_addr.sin6_family = AF_INET6;
+				mtuinfo.ip6m_addr.sin6_port = sk->sk_dport;
+				mtuinfo.ip6m_addr.sin6_addr = sk->sk_v6_daddr;
+
 				if (copy_to_user(optval, &mtuinfo, sizeof(mtuinfo)))
 					return -EFAULT;
 				if (put_user(sizeof(mtuinfo), optlen))
@@ -819,11 +825,15 @@ int tquic_v6_discover_addresses(struct tquic_connection *conn,
 	struct net_device *dev;
 	struct inet6_dev *idev;
 	struct inet6_ifaddr *ifa;
+	struct net *net;
 	int count = 0;
+
+	/* CF-103: Use connection's namespace instead of init_net */
+	net = (conn && conn->sk) ? sock_net(conn->sk) : current->nsproxy->net_ns;
 
 	rcu_read_lock();
 
-	for_each_netdev_rcu(&init_net, dev) {
+	for_each_netdev_rcu(net, dev) {
 		/* Skip loopback and down interfaces */
 		if (dev->flags & IFF_LOOPBACK)
 			continue;

@@ -116,6 +116,17 @@ void tquic_path_validation_timeout(struct timer_list *t)
 
 	spin_lock_bh(&conn->paths_lock);
 
+	/*
+	 * Check whether the validation was already completed by
+	 * tquic_path_handle_response() racing with this timer.
+	 * If challenge_pending is false the response arrived between
+	 * the timer firing and acquiring paths_lock -- nothing to do.
+	 */
+	if (!path->validation.challenge_pending) {
+		spin_unlock_bh(&conn->paths_lock);
+		return;
+	}
+
 	pr_debug("tquic_pm: path %u validation timeout (retry %u)\n",
 		 path->path_id, path->validation.retries);
 
@@ -144,27 +155,35 @@ void tquic_path_validation_timeout(struct timer_list *t)
 	/* Retry validation */
 	path->validation.retries++;
 
-	spin_unlock_bh(&conn->paths_lock);
-
-	/* Resend PATH_CHALLENGE */
-	if (tquic_path_send_challenge(conn, path) == 0) {
-		/* Schedule next timeout with adaptive value */
+	/*
+	 * CF-285: Capture path_id and retry count while still under
+	 * lock to avoid accessing path state after unlock (UAF risk
+	 * if path is freed concurrently).
+	 */
+	{
+		u8 retry_path_id = path->path_id;
+		u32 retry_count = path->validation.retries;
 		u32 timeout_us = tquic_validation_timeout_us(path);
 
-		pr_debug("tquic_pm: path %u retry %u scheduled in %u us\n",
-			 path->path_id, path->validation.retries, timeout_us);
-
-		mod_timer(&path->validation.timer,
-			  jiffies + usecs_to_jiffies(timeout_us));
-	} else {
-		pr_err("tquic_pm: path %u failed to send retry challenge\n",
-		       path->path_id);
-		spin_lock_bh(&conn->paths_lock);
-		path->state = TQUIC_PATH_FAILED;
-		path->validation.challenge_pending = false;
-		path->anti_amplification.active = false;
 		spin_unlock_bh(&conn->paths_lock);
-		tquic_bond_path_failed(conn, path);
+
+		/* Resend PATH_CHALLENGE */
+		if (tquic_path_send_challenge(conn, path) == 0) {
+			pr_debug("tquic_pm: path %u retry %u scheduled in %u us\n",
+				 retry_path_id, retry_count, timeout_us);
+
+			mod_timer(&path->validation.timer,
+				  jiffies + usecs_to_jiffies(timeout_us));
+		} else {
+			pr_err("tquic_pm: path %u failed to send retry challenge\n",
+			       retry_path_id);
+			spin_lock_bh(&conn->paths_lock);
+			path->state = TQUIC_PATH_FAILED;
+			path->validation.challenge_pending = false;
+			path->anti_amplification.active = false;
+			spin_unlock_bh(&conn->paths_lock);
+			tquic_bond_path_failed(conn, path);
+		}
 	}
 }
 EXPORT_SYMBOL_GPL(tquic_path_validation_timeout);
@@ -256,7 +275,8 @@ int tquic_path_handle_challenge(struct tquic_connection *conn,
 
 	/* Check response queue depth to prevent memory exhaustion
 	 * RFC 9000 Section 8.2.1: Limit outstanding responses */
-	if (atomic_read(&path->response.count) >= TQUIC_MAX_PENDING_RESPONSES) {
+	/* CF-556: Use skb_queue_len as single source of truth for count */
+	if (skb_queue_len(&path->response.queue) >= TQUIC_MAX_PENDING_RESPONSES) {
 		pr_warn("tquic_pm: path %u response queue full (%d), dropping challenge\n",
 			path->path_id, TQUIC_MAX_PENDING_RESPONSES);
 		return -ENOBUFS;

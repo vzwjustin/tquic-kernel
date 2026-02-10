@@ -74,6 +74,7 @@ struct tquic_hp_key {
 	u8 cipher_type;
 	bool valid;
 	struct crypto_skcipher *tfm;	/* For AES-ECB */
+	struct skcipher_request *req;	/* Pre-allocated request */
 };
 
 /**
@@ -161,9 +162,13 @@ static int tquic_hp_mask_aes(struct tquic_hp_key *hp_key,
 	if (!hp_key->tfm)
 		return -EINVAL;
 
-	req = skcipher_request_alloc(hp_key->tfm, GFP_ATOMIC);
-	if (!req)
-		return -ENOMEM;
+	/* Use pre-allocated request if available, else fall back */
+	req = hp_key->req;
+	if (!req) {
+		req = skcipher_request_alloc(hp_key->tfm, GFP_ATOMIC);
+		if (!req)
+			return -ENOMEM;
+	}
 
 	/* Set up scatterlists for single block encryption */
 	sg_init_one(&sg_in, sample, AES_BLOCK_SIZE);
@@ -179,7 +184,8 @@ static int tquic_hp_mask_aes(struct tquic_hp_key *hp_key,
 		memcpy(mask, ecb_output, TQUIC_HP_MASK_LEN);
 	}
 
-	skcipher_request_free(req);
+	if (req != hp_key->req)
+		skcipher_request_free(req);
 	memzero_explicit(ecb_output, sizeof(ecb_output));
 
 	return ret;
@@ -208,9 +214,13 @@ static int tquic_hp_mask_chacha20(struct tquic_hp_key *hp_key,
 	if (!hp_key->tfm)
 		return -EINVAL;
 
-	req = skcipher_request_alloc(hp_key->tfm, GFP_ATOMIC);
-	if (!req)
-		return -ENOMEM;
+	/* Use pre-allocated request if available, else fall back */
+	req = hp_key->req;
+	if (!req) {
+		req = skcipher_request_alloc(hp_key->tfm, GFP_ATOMIC);
+		if (!req)
+			return -ENOMEM;
+	}
 
 	sg_init_one(&sg, zeros, TQUIC_HP_MASK_LEN);
 	skcipher_request_set_callback(req, CRYPTO_TFM_REQ_MAY_BACKLOG,
@@ -222,7 +232,8 @@ static int tquic_hp_mask_chacha20(struct tquic_hp_key *hp_key,
 	if (ret == 0)
 		memcpy(mask, zeros, TQUIC_HP_MASK_LEN);
 
-	skcipher_request_free(req);
+	if (req != hp_key->req)
+		skcipher_request_free(req);
 
 	return ret;
 }
@@ -616,6 +627,10 @@ static int tquic_hp_setup_cipher(struct tquic_hp_key *hp_key)
 	int ret;
 
 	/* Free any existing transform to prevent leaks on overwrite */
+	if (hp_key->req) {
+		skcipher_request_free(hp_key->req);
+		hp_key->req = NULL;
+	}
 	if (hp_key->tfm) {
 		crypto_free_skcipher(hp_key->tfm);
 		hp_key->tfm = NULL;
@@ -645,6 +660,14 @@ static int tquic_hp_setup_cipher(struct tquic_hp_key *hp_key)
 		crypto_free_skcipher(hp_key->tfm);
 		hp_key->tfm = NULL;
 		return ret;
+	}
+
+	/* Pre-allocate skcipher request to avoid per-call GFP_ATOMIC alloc */
+	hp_key->req = skcipher_request_alloc(hp_key->tfm, GFP_KERNEL);
+	if (!hp_key->req) {
+		crypto_free_skcipher(hp_key->tfm);
+		hp_key->tfm = NULL;
+		return -ENOMEM;
 	}
 
 	return 0;
@@ -887,14 +910,16 @@ void tquic_hp_rotate_keys(struct tquic_hp_ctx *ctx)
 	if (!ctx->key_update_pending)
 		goto out;
 
-	/* Rotate read key */
+	/* Rotate read key - zeroize old key material */
 	tmp = ctx->read_keys[TQUIC_HP_LEVEL_APPLICATION];
 	ctx->read_keys[TQUIC_HP_LEVEL_APPLICATION] = ctx->next_read_key;
+	memzero_explicit(tmp.key, sizeof(tmp.key));
 	ctx->next_read_key = tmp;
 
-	/* Rotate write key */
+	/* Rotate write key - zeroize old key material */
 	tmp = ctx->write_keys[TQUIC_HP_LEVEL_APPLICATION];
 	ctx->write_keys[TQUIC_HP_LEVEL_APPLICATION] = ctx->next_write_key;
+	memzero_explicit(tmp.key, sizeof(tmp.key));
 	ctx->next_write_key = tmp;
 
 	/* Toggle key phase */
@@ -1055,6 +1080,10 @@ EXPORT_SYMBOL_GPL(tquic_hp_ctx_alloc);
  */
 static void tquic_hp_free_key(struct tquic_hp_key *hp_key)
 {
+	if (hp_key->req) {
+		skcipher_request_free(hp_key->req);
+		hp_key->req = NULL;
+	}
 	if (hp_key->tfm) {
 		crypto_free_skcipher(hp_key->tfm);
 		hp_key->tfm = NULL;

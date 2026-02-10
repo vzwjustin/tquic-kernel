@@ -26,6 +26,7 @@
 #include <linux/spinlock.h>
 #include <linux/workqueue.h>
 #include <linux/atomic.h>
+#include <linux/refcount.h>
 
 /*
  * =============================================================================
@@ -161,6 +162,9 @@ struct tquic_nic_device {
 	u32 max_batch;
 	struct tquic_nic_stats stats;
 	spinlock_t lock;
+	refcount_t refcnt;	/* SECURITY FIX (CF-084): reference counting */
+	bool dead;		/* Set during unregister to prevent new ops */
+	struct completion unregister_done; /* Wait for refs to drain */
 	void *priv;
 };
 

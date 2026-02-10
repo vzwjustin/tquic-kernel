@@ -204,7 +204,7 @@ struct tquic_failover_ctx {
 	struct tquic_retx_queue	retx_queue;
 
 	/* Per-path timeout tracking */
-	struct tquic_path_timeout path_timeouts[16]; /* TQUIC_MAX_PATHS */
+	struct tquic_path_timeout path_timeouts[TQUIC_MAX_PATHS];
 
 	/* Receiver deduplication */
 	struct tquic_dedup_state dedup;

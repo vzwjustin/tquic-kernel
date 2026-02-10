@@ -352,7 +352,7 @@ static int tquic_parse_ack_frame(const u8 *buf, size_t buf_len,
 	 * A malicious peer could send huge range count to exhaust resources
 	 * or overflow array bounds.
 	 */
-	if (frame->ack.ack_range_count > max_ranges)
+	if (frame->ack.ack_range_count > (u64)max_ranges)
 		return -EOVERFLOW;
 
 	/* First ACK Range */
@@ -362,6 +362,15 @@ static int tquic_parse_ack_frame(const u8 *buf, size_t buf_len,
 	ret = FRAME_ADVANCE_SAFE(p, remaining, consumed);
 	if (ret < 0)
 		return ret;
+
+	/*
+	 * CF-207: Validate first_ack_range <= largest_ack per RFC 9000
+	 * Section 19.3.1: "The smallest value is determined by subtracting
+	 * the First ACK Range value from the Largest Acknowledged."
+	 * If first_ack_range > largest_ack, the subtraction would underflow.
+	 */
+	if (frame->ack.first_ack_range > frame->ack.largest_ack)
+		return -EINVAL;
 
 	/*
 	 * Additional ACK Ranges - each contains Gap + ACK Range Length.

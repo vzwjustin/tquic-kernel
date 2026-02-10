@@ -216,10 +216,10 @@ static struct ctl_table_header *tquic_fallback_sysctl_header;
 
 static void fallback_record_loss(struct tquic_fallback_ctx *ctx, u8 loss_pct)
 {
-	spin_lock(&ctx->lock);
+	spin_lock_bh(&ctx->lock);
 	ctx->loss_samples[ctx->loss_index] = loss_pct;
 	ctx->loss_index = (ctx->loss_index + 1) % LOSS_SAMPLE_COUNT;
-	spin_unlock(&ctx->lock);
+	spin_unlock_bh(&ctx->lock);
 }
 
 static u8 fallback_get_avg_loss(struct tquic_fallback_ctx *ctx)
@@ -228,14 +228,14 @@ static u8 fallback_get_avg_loss(struct tquic_fallback_ctx *ctx)
 	u32 total = 0;
 	int count = 0;
 
-	spin_lock(&ctx->lock);
+	spin_lock_bh(&ctx->lock);
 	for (i = 0; i < LOSS_SAMPLE_COUNT; i++) {
 		if (ctx->loss_samples[i] > 0) {
 			total += ctx->loss_samples[i];
 			count++;
 		}
 	}
-	spin_unlock(&ctx->lock);
+	spin_unlock_bh(&ctx->lock);
 
 	return count > 0 ? (total / count) : 0;
 }
@@ -384,12 +384,12 @@ static void fallback_do_fallback(struct work_struct *work)
 	net = sock_net(ctx->conn->sk);
 	fn = tquic_fallback_pernet(net);
 
-	spin_lock(&ctx->lock);
+	spin_lock_bh(&ctx->lock);
 	if (ctx->state != FALLBACK_STATE_FALLING_BACK) {
-		spin_unlock(&ctx->lock);
+		spin_unlock_bh(&ctx->lock);
 		return;
 	}
-	spin_unlock(&ctx->lock);
+	spin_unlock_bh(&ctx->lock);
 
 	/* Get remote address from active (primary) path */
 	spin_lock_bh(&ctx->conn->paths_lock);
@@ -411,9 +411,9 @@ static void fallback_do_fallback(struct work_struct *work)
 	if (IS_ERR(tcp_conn)) {
 		pr_err("tquic_fallback: failed to create TCP connection: %ld\n",
 		       PTR_ERR(tcp_conn));
-		spin_lock(&ctx->lock);
+		spin_lock_bh(&ctx->lock);
 		ctx->state = FALLBACK_STATE_UDP;  /* Revert to UDP */
-		spin_unlock(&ctx->lock);
+		spin_unlock_bh(&ctx->lock);
 		return;
 	}
 
@@ -426,11 +426,11 @@ static void fallback_do_fallback(struct work_struct *work)
 	 * The QUIC connection will route packets through this TCP transport.
 	 */
 
-	spin_lock(&ctx->lock);
+	spin_lock_bh(&ctx->lock);
 	ctx->tcp_conn = tcp_conn;
 	ctx->state = FALLBACK_STATE_TCP;
 	ctx->fallback_time = ktime_get();
-	spin_unlock(&ctx->lock);
+	spin_unlock_bh(&ctx->lock);
 
 	/* Update statistics */
 	atomic64_inc(&fn->fallback_count);
@@ -482,19 +482,19 @@ int tquic_fallback_trigger(struct tquic_fallback_ctx *ctx,
 	if (!fn->enabled)
 		return -EOPNOTSUPP;
 
-	spin_lock(&ctx->lock);
+	spin_lock_bh(&ctx->lock);
 
 	/* Check if already in TCP mode */
 	if (ctx->state == FALLBACK_STATE_TCP ||
 	    ctx->state == FALLBACK_STATE_FALLING_BACK) {
-		spin_unlock(&ctx->lock);
+		spin_unlock_bh(&ctx->lock);
 		return -EALREADY;
 	}
 
 	ctx->state = FALLBACK_STATE_FALLING_BACK;
 	ctx->reason = reason;
 
-	spin_unlock(&ctx->lock);
+	spin_unlock_bh(&ctx->lock);
 
 	/* Schedule fallback work */
 	queue_work(system_wq, &ctx->fallback_work);
@@ -533,13 +533,13 @@ static void fallback_do_recovery(struct work_struct *work)
 	net = sock_net(ctx->conn->sk);
 	fn = tquic_fallback_pernet(net);
 
-	spin_lock(&ctx->lock);
+	spin_lock_bh(&ctx->lock);
 	if (ctx->state != FALLBACK_STATE_TCP) {
-		spin_unlock(&ctx->lock);
+		spin_unlock_bh(&ctx->lock);
 		return;
 	}
 	ctx->state = FALLBACK_STATE_RECOVERING;
-	spin_unlock(&ctx->lock);
+	spin_unlock_bh(&ctx->lock);
 
 	/*
 	 * Send a UDP probe packet to test if UDP is now available.
@@ -555,7 +555,7 @@ static void fallback_do_recovery(struct work_struct *work)
 		pr_info("tquic_fallback: loss rate %u%% below threshold, recovering to UDP\n",
 			avg_loss);
 
-		spin_lock(&ctx->lock);
+		spin_lock_bh(&ctx->lock);
 
 		/* Close TCP connection */
 		if (ctx->tcp_conn) {
@@ -566,15 +566,15 @@ static void fallback_do_recovery(struct work_struct *work)
 		ctx->state = FALLBACK_STATE_UDP;
 		ctx->reason = FALLBACK_REASON_NONE;
 
-		spin_unlock(&ctx->lock);
+		spin_unlock_bh(&ctx->lock);
 
 		atomic64_inc(&fn->recovery_count);
 		pr_info("tquic_fallback: recovered to UDP transport\n");
 	} else {
 		/* Still high loss, stay on TCP */
-		spin_lock(&ctx->lock);
+		spin_lock_bh(&ctx->lock);
 		ctx->state = FALLBACK_STATE_TCP;
-		spin_unlock(&ctx->lock);
+		spin_unlock_bh(&ctx->lock);
 
 		/* Schedule next probe */
 		mod_timer(&ctx->probe_timer,
@@ -651,9 +651,9 @@ bool tquic_fallback_is_active(struct tquic_fallback_ctx *ctx)
 	if (!ctx)
 		return false;
 
-	spin_lock(&ctx->lock);
+	spin_lock_bh(&ctx->lock);
 	active = (ctx->state == FALLBACK_STATE_TCP);
-	spin_unlock(&ctx->lock);
+	spin_unlock_bh(&ctx->lock);
 
 	return active;
 }
@@ -672,10 +672,10 @@ struct quic_tcp_connection *tquic_fallback_get_tcp_conn(struct tquic_fallback_ct
 	if (!ctx)
 		return NULL;
 
-	spin_lock(&ctx->lock);
+	spin_lock_bh(&ctx->lock);
 	if (ctx->state == FALLBACK_STATE_TCP)
 		conn = ctx->tcp_conn;
-	spin_unlock(&ctx->lock);
+	spin_unlock_bh(&ctx->lock);
 
 	return conn;
 }
@@ -695,14 +695,14 @@ int tquic_fallback_send(struct tquic_fallback_ctx *ctx,
 	if (!ctx)
 		return -EINVAL;
 
-	spin_lock(&ctx->lock);
+	spin_lock_bh(&ctx->lock);
 
 	if (ctx->state == FALLBACK_STATE_TCP && ctx->tcp_conn) {
-		spin_unlock(&ctx->lock);
+		spin_unlock_bh(&ctx->lock);
 		return quic_tcp_send(ctx->tcp_conn, data, len);
 	}
 
-	spin_unlock(&ctx->lock);
+	spin_unlock_bh(&ctx->lock);
 
 	/* UDP path - would use normal QUIC send path */
 	return -EOPNOTSUPP;

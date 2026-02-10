@@ -477,6 +477,7 @@ struct tquic_quic_proxy_state {
 	/* State */
 	bool active;
 	bool is_server;
+	bool authenticated;	/* Set by auth handler before registering conns */
 };
 
 /*
@@ -571,7 +572,7 @@ struct quic_proxy_packet_capsule {
 	bool compressed;
 	u8 compress_index;
 	u16 packet_len;
-	u8 *packet;
+	const u8 *packet;
 };
 
 /**

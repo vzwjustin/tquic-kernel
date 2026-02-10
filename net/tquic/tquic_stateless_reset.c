@@ -86,6 +86,10 @@ static int tquic_stateless_reset_enabled = 1;
  * =============================================================================
  */
 
+/* Cached HMAC-SHA256 transform to avoid per-call crypto_alloc_shash */
+static struct crypto_shash *reset_token_tfm __read_mostly;
+static DEFINE_MUTEX(reset_token_tfm_lock);
+
 /*
  * Generate stateless reset token using HMAC-SHA256
  *
@@ -99,7 +103,6 @@ void tquic_stateless_reset_generate_token(const struct tquic_cid *cid,
 					  const u8 *static_key,
 					  u8 *token)
 {
-	struct crypto_shash *tfm;
 	struct shash_desc *desc;
 	u8 hmac_result[32];  /* SHA256 produces 32 bytes */
 	int ret;
@@ -110,34 +113,42 @@ void tquic_stateless_reset_generate_token(const struct tquic_cid *cid,
 		return;
 	}
 
-	/* Allocate HMAC-SHA256 transform */
-	tfm = crypto_alloc_shash("hmac(sha256)", 0, 0);
-	if (IS_ERR(tfm)) {
-		tquic_warn("failed to allocate HMAC-SHA256 for reset token\n");
-		/* Fallback: use random bytes to avoid leaking static key */
-		get_random_bytes(token, TQUIC_STATELESS_RESET_TOKEN_LEN);
-		return;
+	/* Lazily allocate cached HMAC-SHA256 transform */
+	if (unlikely(!reset_token_tfm)) {
+		mutex_lock(&reset_token_tfm_lock);
+		if (!reset_token_tfm) {
+			reset_token_tfm = crypto_alloc_shash("hmac(sha256)",
+							     0, 0);
+			if (IS_ERR(reset_token_tfm)) {
+				tquic_warn("failed to allocate HMAC-SHA256 for reset token\n");
+				reset_token_tfm = NULL;
+				mutex_unlock(&reset_token_tfm_lock);
+				get_random_bytes(token,
+						 TQUIC_STATELESS_RESET_TOKEN_LEN);
+				return;
+			}
+		}
+		mutex_unlock(&reset_token_tfm_lock);
 	}
 
 	/* Set the static key */
-	ret = crypto_shash_setkey(tfm, static_key,
+	ret = crypto_shash_setkey(reset_token_tfm, static_key,
 				  TQUIC_STATELESS_RESET_SECRET_LEN);
 	if (ret) {
 		tquic_warn("HMAC setkey failed: %d\n", ret);
-		crypto_free_shash(tfm);
 		get_random_bytes(token, TQUIC_STATELESS_RESET_TOKEN_LEN);
 		return;
 	}
 
 	/* Allocate descriptor */
-	desc = kzalloc(sizeof(*desc) + crypto_shash_descsize(tfm), GFP_ATOMIC);
+	desc = kzalloc(sizeof(*desc) + crypto_shash_descsize(reset_token_tfm),
+		       GFP_ATOMIC);
 	if (!desc) {
-		crypto_free_shash(tfm);
 		get_random_bytes(token, TQUIC_STATELESS_RESET_TOKEN_LEN);
 		return;
 	}
 
-	desc->tfm = tfm;
+	desc->tfm = reset_token_tfm;
 
 	/* Compute HMAC over the CID */
 	ret = crypto_shash_digest(desc, cid->id, cid->len, hmac_result);
@@ -149,9 +160,8 @@ void tquic_stateless_reset_generate_token(const struct tquic_cid *cid,
 		memcpy(token, hmac_result, TQUIC_STATELESS_RESET_TOKEN_LEN);
 	}
 
-	/* Cleanup */
+	/* Cleanup descriptor only (tfm is cached) */
 	kfree(desc);
-	crypto_free_shash(tfm);
 
 	/* Wipe intermediate result */
 	memzero_explicit(hmac_result, sizeof(hmac_result));
@@ -281,7 +291,7 @@ static bool tquic_stateless_reset_rate_limit(struct tquic_stateless_reset_ctx *c
 	if (!ctx)
 		return false;
 
-	spin_lock(&ctx->lock);
+	spin_lock_bh(&ctx->lock);
 
 	now = ktime_get();
 	elapsed_ms = ktime_ms_delta(now, ctx->rate_limit_last);
@@ -298,14 +308,14 @@ static bool tquic_stateless_reset_rate_limit(struct tquic_stateless_reset_ctx *c
 
 	/* Check if we have tokens available */
 	if (ctx->rate_limit_tokens == 0) {
-		spin_unlock(&ctx->lock);
+		spin_unlock_bh(&ctx->lock);
 		return false;  /* Rate limited */
 	}
 
 	/* Consume a token */
 	ctx->rate_limit_tokens--;
 
-	spin_unlock(&ctx->lock);
+	spin_unlock_bh(&ctx->lock);
 	return true;  /* Allowed */
 }
 
@@ -366,8 +376,12 @@ int tquic_stateless_reset_send(struct sock *sk,
 		return pkt_len;
 	}
 
-	/* Get network namespace */
-	net = sk ? sock_net(sk) : &init_net;
+	/* Get network namespace - never fall back to init_net */
+	if (!sk) {
+		kfree(pkt_buf);
+		return -EINVAL;
+	}
+	net = sock_net(sk);
 
 	/* Allocate SKB */
 	skb = alloc_skb(pkt_len + MAX_HEADER + sizeof(struct udphdr), GFP_ATOMIC);
@@ -678,9 +692,9 @@ void tquic_stateless_reset_set_enabled(struct tquic_stateless_reset_ctx *ctx,
 	if (!ctx)
 		return;
 
-	spin_lock(&ctx->lock);
+	spin_lock_bh(&ctx->lock);
 	ctx->enabled = enabled;
-	spin_unlock(&ctx->lock);
+	spin_unlock_bh(&ctx->lock);
 }
 EXPORT_SYMBOL_GPL(tquic_stateless_reset_set_enabled);
 
@@ -691,9 +705,9 @@ bool tquic_stateless_reset_is_enabled(struct tquic_stateless_reset_ctx *ctx)
 	if (!ctx)
 		return false;
 
-	spin_lock(&ctx->lock);
+	spin_lock_bh(&ctx->lock);
 	enabled = ctx->enabled;
-	spin_unlock(&ctx->lock);
+	spin_unlock_bh(&ctx->lock);
 
 	return enabled;
 }
@@ -706,8 +720,11 @@ EXPORT_SYMBOL_GPL(tquic_stateless_reset_is_enabled);
  */
 
 /*
- * Get the global static key for token generation
- * Used by CID management when generating tokens for NEW_CONNECTION_ID
+ * Get the global static key for token generation.
+ * Used by CID management when generating tokens for NEW_CONNECTION_ID.
+ *
+ * CF-420: Removed EXPORT_SYMBOL_GPL to prevent external modules
+ * from accessing raw key material.  This is module-internal only.
  */
 const u8 *tquic_stateless_reset_get_static_key(void)
 {
@@ -716,7 +733,6 @@ const u8 *tquic_stateless_reset_get_static_key(void)
 
 	return global_reset_ctx.static_key;
 }
-EXPORT_SYMBOL_GPL(tquic_stateless_reset_get_static_key);
 
 /*
  * =============================================================================

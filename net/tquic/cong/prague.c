@@ -289,8 +289,12 @@ static void prague_on_ecn(void *cong_data, u64 ecn_ce_count)
 
 	mss = prague_get_mss(p);
 
-	/* Estimate CE bytes (assume uniform distribution) */
-	ce_bytes = ecn_ce_count * mss;
+	/*
+	 * CF-212: Use check_mul_overflow to prevent integer overflow.
+	 * ecn_ce_count comes from the ACK frame and could be very large.
+	 */
+	if (check_mul_overflow(ecn_ce_count, (u64)mss, &ce_bytes))
+		ce_bytes = U64_MAX;
 
 	/* Update alpha estimate */
 	prague_update_alpha(p, p->acked_bytes_ecn + ce_bytes, ce_bytes);

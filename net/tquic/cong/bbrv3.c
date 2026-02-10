@@ -434,9 +434,13 @@ static void bbrv3_handle_ecn(struct bbrv3 *bbr, u64 ce_count)
 
 	bbr->ecn_in_round += ce_count;
 
-	/* Calculate ECN marking ratio */
+	/* Calculate ECN marking ratio -- guard against overflow and div-by-zero */
 	if (bbr->ecn_ect_count > 0) {
-		ce_ratio = (ce_count * 100) / (bbr->ecn_ect_count + ce_count);
+		u64 total = bbr->ecn_ect_count + ce_count;
+
+		if (unlikely(total < bbr->ecn_ect_count))
+			total = U64_MAX; /* overflow */
+		ce_ratio = div64_u64(ce_count * 100, total);
 	} else {
 		ce_ratio = 100;
 	}

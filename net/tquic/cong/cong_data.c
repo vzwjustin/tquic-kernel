@@ -633,7 +633,9 @@ bool tquic_cong_data_on_ack(struct tquic_connection *conn,
 		 * If RTT is significantly higher, the path may have changed
 		 */
 		if (state->validated_rtt > 0) {
-			rtt_ratio = (rtt_us * 100) / state->validated_rtt;
+			u64 vrtt = state->validated_rtt;
+
+			rtt_ratio = vrtt ? (rtt_us * 100) / vrtt : 0;
 			if (rtt_ratio > TQUIC_CONG_DATA_RTT_RATIO_THRESHOLD) {
 				/* RTT much higher than saved - retreat */
 				tquic_dbg("cong_data: CR RTT validation failed: %llu vs %llu (ratio %llu%%)\n",
@@ -718,11 +720,21 @@ void tquic_cong_data_on_loss(struct tquic_connection *conn,
 
 	state->bytes_lost_since_apply += bytes_lost;
 
-	/* Calculate loss rate during resume */
+	/*
+	 * CF-465: Calculate loss rate during resume.
+	 * Guard against u64 addition overflow in the denominator,
+	 * and ensure denominator is never zero.
+	 */
 	if (state->bytes_acked_since_apply > 0) {
+		u64 denom = state->bytes_acked_since_apply +
+			    state->bytes_lost_since_apply;
+
+		/* Protect against u64 addition wrapping */
+		if (denom < state->bytes_acked_since_apply)
+			denom = U64_MAX;
+
 		loss_rate = (state->bytes_lost_since_apply * 10000) /
-			    (state->bytes_acked_since_apply +
-			     state->bytes_lost_since_apply);
+			    denom;
 
 		if (loss_rate > TQUIC_CONG_DATA_LOSS_THRESHOLD) {
 			/* Loss rate too high - retreat */
@@ -858,7 +870,10 @@ int tquic_cong_data_compute_hmac(struct tquic_connection *conn,
 	ret = 0;
 
 out_free_desc:
-	kfree(desc);
+	/* CF-541: Zeroize HMAC output and message buffer on all paths */
+	memzero_explicit(full_hmac, sizeof(full_hmac));
+	memzero_explicit(msg, sizeof(msg));
+	kfree_sensitive(desc);
 out_free_tfm:
 	crypto_free_shash(tfm);
 	return ret;

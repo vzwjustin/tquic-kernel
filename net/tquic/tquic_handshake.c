@@ -291,7 +291,13 @@ int tquic_store_session_ticket(struct sock *sk, const char *server_name,
 	plaintext.creation_time = ktime_get_real_seconds();
 	plaintext.cipher_suite = cipher_suite;
 
-	/* ALPN and transport params would be filled from connection state */
+	/*
+	 * CF-527: ALPN and transport parameters should be stored for
+	 * 0-RTT resumption validation (RFC 9001 Section 4.6.1).
+	 * Currently not populated because struct tquic_connection
+	 * does not carry the negotiated ALPN. This needs to be added
+	 * so that 0-RTT is only accepted when ALPN matches.
+	 */
 	plaintext.alpn_len = 0;
 	plaintext.transport_params_len = 0;
 
@@ -601,11 +607,19 @@ int tquic_start_handshake(struct sock *sk)
 			return -ENOMEM;
 		}
 
+		/* Defensive cap: ch_len must fit within the 4096-byte buffer */
+		if (ch_len == 0 || ch_len > 4096) {
+			kfree(ch_buf);
+			kfree_sensitive(hs);
+			tquic_hs_cleanup(ihs);
+			goto tlshd_fallback;
+		}
+
 		/* Queue ClientHello in Initial crypto buffer */
 		ch_skb = alloc_skb(ch_len, GFP_KERNEL);
 		if (!ch_skb) {
 			kfree(ch_buf);
-			kfree(hs);
+			kfree_sensitive(hs);
 			tquic_hs_cleanup(ihs);
 			goto tlshd_fallback;
 		}
@@ -702,8 +716,8 @@ tlshd_fallback:
 
 err_free:
 	tsk->handshake_state = NULL;
-	memzero_explicit(hs, sizeof(*hs));
-	kfree(hs);
+	/* CF-429: Use kfree_sensitive for key-material structs */
+	kfree_sensitive(hs);
 	return ret;
 }
 EXPORT_SYMBOL_GPL(tquic_start_handshake);
@@ -814,9 +828,8 @@ void tquic_handshake_cleanup(struct sock *sk)
 
 	tsk->handshake_state = NULL;
 
-	/* Zero sensitive handshake material before freeing */
-	memzero_explicit(hs, sizeof(*hs));
-	kfree(hs);
+	/* CF-429: Use kfree_sensitive for key-material structs */
+	kfree_sensitive(hs);
 
 	tquic_dbg("handshake state cleaned up\n");
 }
@@ -950,7 +963,9 @@ int tquic_inline_hs_install_keys(struct sock *sk, int level)
 	u32 ck_len, sk_len, ci_len, si_len, ch_len, sh_len;
 	u8 client_secret[TLS_SECRET_MAX_LEN];
 	u8 server_secret[TLS_SECRET_MAX_LEN];
-	u32 cs_len, ss_len;
+	/* CF-523: Initialize with buffer sizes for bounds checking */
+	u32 cs_len = sizeof(client_secret);
+	u32 ss_len = sizeof(server_secret);
 	int hs_level;
 	int ret;
 
@@ -1133,6 +1148,11 @@ int tquic_inline_hs_recv_crypto(struct sock *sk, const u8 *data, u32 len,
 
 	/* Queue any response messages */
 	if (resp_len > 0) {
+		/* Defensive cap: resp_len must fit within the 4096-byte buffer */
+		if (resp_len > 4096) {
+			kfree(resp_buf);
+			return -EINVAL;
+		}
 		resp_skb = alloc_skb(resp_len, GFP_ATOMIC);
 		if (!resp_skb) {
 			kfree(resp_buf);
@@ -1784,7 +1804,7 @@ int tquic_server_handshake(struct sock *listener_sk,
 		tquic_dbg("failed to start server handshake: %d\n", ret);
 		sock_put(child_sk);
 		child_tsk->handshake_state = NULL;
-		kfree(hs);
+		kfree_sensitive(hs);
 		tquic_conn_destroy(conn);
 		child_tsk->conn = NULL;
 		sk_free(child_sk);

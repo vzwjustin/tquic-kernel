@@ -229,6 +229,13 @@ static int decode_header_indexed_post_base(struct qpack_decoder *dec,
 	return ret;
 }
 
+/* Forward declaration -- defined below qpack_decode_headers() */
+static int qpack_decode_header_fields(struct qpack_decoder *dec,
+				      const u8 *data, size_t len,
+				      size_t offset, u64 base,
+				      struct qpack_header_list *headers,
+				      char *name_buf, char *value_buf);
+
 /**
  * qpack_decode_headers - Decode header block
  * @dec: Decoder
@@ -377,14 +384,70 @@ int qpack_decode_headers(struct qpack_decoder *dec,
 		return -EAGAIN;
 	}
 
-	/* Decode header field lines */
+	/*
+	 * Heap-allocate decode buffers to avoid kernel stack overflow.
+	 * QPACK_MAX_HEADER_VALUE_LEN (8192) alone exceeds safe stack usage.
+	 */
+	{
+		char *name_buf, *value_buf;
+
+		name_buf = kmalloc(QPACK_MAX_HEADER_NAME_LEN, GFP_ATOMIC);
+		value_buf = kmalloc(QPACK_MAX_HEADER_VALUE_LEN, GFP_ATOMIC);
+		if (!name_buf || !value_buf) {
+			kfree(name_buf);
+			kfree(value_buf);
+			qpack_header_list_destroy(headers);
+			return -ENOMEM;
+		}
+
+		ret = qpack_decode_header_fields(dec, data, len, offset,
+						 base, headers,
+						 name_buf, value_buf);
+		kfree(name_buf);
+		kfree(value_buf);
+
+		if (ret < 0) {
+			qpack_header_list_destroy(headers);
+			return ret;
+		}
+	}
+
+	/* Send Section Acknowledgment */
+	if (required_insert_count > 0 && dec->decoder_stream) {
+		qpack_decoder_send_section_ack(dec, stream_id);
+	}
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(qpack_decode_headers);
+
+/**
+ * qpack_decode_header_fields - Decode header field lines with provided buffers
+ * @dec: Decoder
+ * @data: Encoded header block
+ * @len: Data length
+ * @offset: Starting offset within data
+ * @base: Base value for dynamic table addressing
+ * @headers: Output header list
+ * @name_buf: Pre-allocated name buffer (QPACK_MAX_HEADER_NAME_LEN bytes)
+ * @value_buf: Pre-allocated value buffer (QPACK_MAX_HEADER_VALUE_LEN bytes)
+ *
+ * Returns: final offset on success, negative error code on failure
+ */
+static int qpack_decode_header_fields(struct qpack_decoder *dec,
+				      const u8 *data, size_t len,
+				      size_t offset, u64 base,
+				      struct qpack_header_list *headers,
+				      char *name_buf, char *value_buf)
+{
+	size_t consumed;
+	u64 index;
+	size_t name_len, value_len;
+	bool never_index;
+	int ret;
+
 	while (offset < len) {
 		u8 first_byte = data[offset];
-		u64 index;
-		char name_buf[QPACK_MAX_HEADER_NAME_LEN];
-		char value_buf[QPACK_MAX_HEADER_VALUE_LEN];
-		size_t name_len, value_len;
-		bool never_index;
 
 		if (first_byte & 0x80) {
 			/* Indexed Field Line: 1xxxxxxx */
@@ -393,7 +456,7 @@ int qpack_decode_headers(struct qpack_decoder *dec,
 			ret = qpack_decode_integer(data + offset, len - offset,
 						   6, &index, &consumed);
 			if (ret)
-				goto error;
+				return ret;
 			offset += consumed;
 
 			if (is_static) {
@@ -403,7 +466,7 @@ int qpack_decode_headers(struct qpack_decoder *dec,
 								    base, headers);
 			}
 			if (ret)
-				goto error;
+				return ret;
 
 		} else if (first_byte & 0x40) {
 			/* Literal with Name Reference: 01xxxxxx */
@@ -413,7 +476,7 @@ int qpack_decode_headers(struct qpack_decoder *dec,
 			ret = qpack_decode_integer(data + offset, len - offset,
 						   4, &index, &consumed);
 			if (ret)
-				goto error;
+				return ret;
 			offset += consumed;
 
 			/* Get name from table */
@@ -422,11 +485,11 @@ int qpack_decode_headers(struct qpack_decoder *dec,
 				entry = qpack_static_get(index);
 				if (!entry) {
 					ret = -EINVAL;
-					goto error;
+					return ret;
 				}
-				if (entry->name_len >= sizeof(name_buf)) {
+				if (entry->name_len >= QPACK_MAX_HEADER_NAME_LEN) {
 					ret = -ENOSPC;
-					goto error;
+					return ret;
 				}
 				memcpy(name_buf, entry->name, entry->name_len);
 				name_len = entry->name_len;
@@ -440,12 +503,12 @@ int qpack_decode_headers(struct qpack_decoder *dec,
 				if (!entry) {
 					spin_unlock_irqrestore(&dec->lock, flags);
 					ret = -EINVAL;
-					goto error;
+					return ret;
 				}
-				if (entry->name_len >= sizeof(name_buf)) {
+				if (entry->name_len >= QPACK_MAX_HEADER_NAME_LEN) {
 					spin_unlock_irqrestore(&dec->lock, flags);
 					ret = -ENOSPC;
-					goto error;
+					return ret;
 				}
 				memcpy(name_buf, entry->name, entry->name_len);
 				name_len = entry->name_len;
@@ -454,17 +517,17 @@ int qpack_decode_headers(struct qpack_decoder *dec,
 
 			/* Decode value */
 			ret = qpack_decode_string(data + offset, len - offset,
-						  value_buf, sizeof(value_buf),
+						  value_buf, QPACK_MAX_HEADER_VALUE_LEN,
 						  &value_len, &consumed);
 			if (ret)
-				goto error;
+				return ret;
 			offset += consumed;
 
 			ret = qpack_header_list_add(headers, name_buf, name_len,
 						    value_buf, value_len,
 						    never_index);
 			if (ret)
-				goto error;
+				return ret;
 
 		} else if (first_byte & 0x20) {
 			/* Literal with Literal Name: 001xxxxx */
@@ -472,38 +535,38 @@ int qpack_decode_headers(struct qpack_decoder *dec,
 
 			/* Decode name */
 			ret = qpack_decode_string(data + offset, len - offset,
-						  name_buf, sizeof(name_buf),
+						  name_buf, QPACK_MAX_HEADER_NAME_LEN,
 						  &name_len, &consumed);
 			if (ret)
-				goto error;
+				return ret;
 			offset += consumed;
 
 			/* Decode value */
 			ret = qpack_decode_string(data + offset, len - offset,
-						  value_buf, sizeof(value_buf),
+						  value_buf, QPACK_MAX_HEADER_VALUE_LEN,
 						  &value_len, &consumed);
 			if (ret)
-				goto error;
+				return ret;
 			offset += consumed;
 
 			ret = qpack_header_list_add(headers, name_buf, name_len,
 						    value_buf, value_len,
 						    never_index);
 			if (ret)
-				goto error;
+				return ret;
 
 		} else if (first_byte & 0x10) {
 			/* Indexed Field Line with Post-Base Index: 0001xxxx */
 			ret = qpack_decode_integer(data + offset, len - offset,
 						   4, &index, &consumed);
 			if (ret)
-				goto error;
+				return ret;
 			offset += consumed;
 
 			ret = decode_header_indexed_post_base(dec, index, base,
 							      headers);
 			if (ret)
-				goto error;
+				return ret;
 
 		} else {
 			/* Literal with Post-Base Name Reference: 0000xxxx */
@@ -512,7 +575,7 @@ int qpack_decode_headers(struct qpack_decoder *dec,
 			ret = qpack_decode_integer(data + offset, len - offset,
 						   3, &index, &consumed);
 			if (ret)
-				goto error;
+				return ret;
 			offset += consumed;
 
 			/* Get name from post-base dynamic table entry */
@@ -526,12 +589,12 @@ int qpack_decode_headers(struct qpack_decoder *dec,
 				if (!entry) {
 					spin_unlock_irqrestore(&dec->lock, flags);
 					ret = -EINVAL;
-					goto error;
+					return ret;
 				}
-				if (entry->name_len >= sizeof(name_buf)) {
+				if (entry->name_len >= QPACK_MAX_HEADER_NAME_LEN) {
 					spin_unlock_irqrestore(&dec->lock, flags);
 					ret = -ENOSPC;
-					goto error;
+					return ret;
 				}
 				memcpy(name_buf, entry->name, entry->name_len);
 				name_len = entry->name_len;
@@ -540,32 +603,22 @@ int qpack_decode_headers(struct qpack_decoder *dec,
 
 			/* Decode value */
 			ret = qpack_decode_string(data + offset, len - offset,
-						  value_buf, sizeof(value_buf),
+						  value_buf, QPACK_MAX_HEADER_VALUE_LEN,
 						  &value_len, &consumed);
 			if (ret)
-				goto error;
+				return ret;
 			offset += consumed;
 
 			ret = qpack_header_list_add(headers, name_buf, name_len,
 						    value_buf, value_len,
 						    never_index);
 			if (ret)
-				goto error;
+				return ret;
 		}
 	}
 
-	/* Send Section Acknowledgment */
-	if (required_insert_count > 0 && dec->decoder_stream) {
-		qpack_decoder_send_section_ack(dec, stream_id);
-	}
-
 	return 0;
-
-error:
-	qpack_header_list_destroy(headers);
-	return ret;
 }
-EXPORT_SYMBOL_GPL(qpack_decode_headers);
 
 /**
  * qpack_decoder_process_encoder_stream - Process encoder stream data
@@ -587,14 +640,25 @@ int qpack_decoder_process_encoder_stream(struct qpack_decoder *dec,
 	size_t offset = 0;
 	u64 value, index;
 	size_t consumed;
-	char name_buf[QPACK_MAX_HEADER_NAME_LEN];
-	char value_buf[QPACK_MAX_HEADER_VALUE_LEN];
+	char *name_buf, *value_buf;
 	size_t name_len, value_len;
 	int ret;
 	u64 inserts_before = 0;
 
 	if (!dec || !data || len == 0)
 		return -EINVAL;
+
+	/*
+	 * Heap-allocate decode buffers to avoid kernel stack overflow.
+	 * QPACK_MAX_HEADER_VALUE_LEN (8192) alone exceeds safe stack usage.
+	 */
+	name_buf = kmalloc(QPACK_MAX_HEADER_NAME_LEN, GFP_ATOMIC);
+	value_buf = kmalloc(QPACK_MAX_HEADER_VALUE_LEN, GFP_ATOMIC);
+	if (!name_buf || !value_buf) {
+		kfree(name_buf);
+		kfree(value_buf);
+		return -ENOMEM;
+	}
 
 	inserts_before = dec->dynamic_table.insert_count;
 
@@ -608,23 +672,25 @@ int qpack_decoder_process_encoder_stream(struct qpack_decoder *dec,
 			ret = qpack_decode_integer(data + offset, len - offset,
 						   6, &index, &consumed);
 			if (ret)
-				return ret;
+				goto out_free;
 			offset += consumed;
 
 			/* Decode value */
 			ret = qpack_decode_string(data + offset, len - offset,
-						  value_buf, sizeof(value_buf),
+						  value_buf, QPACK_MAX_HEADER_VALUE_LEN,
 						  &value_len, &consumed);
 			if (ret)
-				return ret;
+				goto out_free;
 			offset += consumed;
 
 			/* Get name and insert */
 			if (is_static) {
 				const struct qpack_static_entry *entry;
 				entry = qpack_static_get(index);
-				if (!entry)
-					return -EINVAL;
+				if (!entry) {
+					ret = -EINVAL;
+					goto out_free;
+				}
 
 				ret = qpack_dynamic_table_insert(&dec->dynamic_table,
 								 entry->name,
@@ -640,12 +706,14 @@ int qpack_decoder_process_encoder_stream(struct qpack_decoder *dec,
 								index);
 				if (!entry) {
 					spin_unlock_irqrestore(&dec->lock, flags);
-					return -EINVAL;
+					ret = -EINVAL;
+					goto out_free;
 				}
 
-				if (entry->name_len >= sizeof(name_buf)) {
+				if (entry->name_len >= QPACK_MAX_HEADER_NAME_LEN) {
 					spin_unlock_irqrestore(&dec->lock, flags);
-					return -ENOSPC;
+					ret = -ENOSPC;
+					goto out_free;
 				}
 				memcpy(name_buf, entry->name, entry->name_len);
 				name_len = entry->name_len;
@@ -656,58 +724,58 @@ int qpack_decoder_process_encoder_stream(struct qpack_decoder *dec,
 								 value_buf, value_len);
 			}
 			if (ret)
-				return ret;
+				goto out_free;
 
 		} else if (first_byte & 0x40) {
 			/* Insert With Literal Name: 01xxxxxx */
 
 			/* Decode name */
 			ret = qpack_decode_string(data + offset, len - offset,
-						  name_buf, sizeof(name_buf),
+						  name_buf, QPACK_MAX_HEADER_NAME_LEN,
 						  &name_len, &consumed);
 			if (ret)
-				return ret;
+				goto out_free;
 			offset += consumed;
 
 			/* Decode value */
 			ret = qpack_decode_string(data + offset, len - offset,
-						  value_buf, sizeof(value_buf),
+						  value_buf, QPACK_MAX_HEADER_VALUE_LEN,
 						  &value_len, &consumed);
 			if (ret)
-				return ret;
+				goto out_free;
 			offset += consumed;
 
 			ret = qpack_dynamic_table_insert(&dec->dynamic_table,
 							 name_buf, name_len,
 							 value_buf, value_len);
 			if (ret)
-				return ret;
+				goto out_free;
 
 		} else if (first_byte & 0x20) {
 			/* Set Dynamic Table Capacity: 001xxxxx */
 			ret = qpack_decode_integer(data + offset, len - offset,
 						   5, &value, &consumed);
 			if (ret)
-				return ret;
+				goto out_free;
 			offset += consumed;
 
 			ret = qpack_dynamic_table_set_capacity(&dec->dynamic_table,
 							       value);
 			if (ret)
-				return ret;
+				goto out_free;
 
 		} else {
 			/* Duplicate: 000xxxxx */
 			ret = qpack_decode_integer(data + offset, len - offset,
 						   5, &index, &consumed);
 			if (ret)
-				return ret;
+				goto out_free;
 			offset += consumed;
 
 			ret = qpack_dynamic_table_duplicate(&dec->dynamic_table,
 							    index);
 			if (ret)
-				return ret;
+				goto out_free;
 		}
 	}
 
@@ -721,7 +789,12 @@ int qpack_decoder_process_encoder_stream(struct qpack_decoder *dec,
 		qpack_decoder_process_blocked_streams(dec);
 	}
 
-	return 0;
+	ret = 0;
+
+out_free:
+	kfree(name_buf);
+	kfree(value_buf);
+	return ret;
 }
 EXPORT_SYMBOL_GPL(qpack_decoder_process_encoder_stream);
 

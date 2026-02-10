@@ -119,8 +119,8 @@ static void tquic_rate_limiter_refill(struct tquic_rate_limiter *limiter)
 	if (elapsed_ms == 0)
 		return;
 
-	/* Calculate tokens to add */
-	new_tokens = elapsed_ms * limiter->refill_rate;
+	/* Calculate tokens to add; cast elapsed_ms to s64 for 32-bit safety */
+	new_tokens = (s64)elapsed_ms * limiter->refill_rate;
 	if (new_tokens <= 0)
 		return;
 
@@ -601,7 +601,11 @@ static void tquic_rate_limit_rate_calc_work_fn(struct work_struct *work)
 		elapsed_ms = 1;
 
 	count = atomic_xchg(&state->rate_window_count, 0);
-	rate = (count * 1000) / elapsed_ms;
+	/*
+	 * Cast count to s64 before multiplying by 1000 to prevent
+	 * integer overflow when count exceeds INT_MAX/1000 (~2.1M).
+	 */
+	rate = (int)(((s64)count * 1000) / elapsed_ms);
 
 	state->rate_window_start = now;
 

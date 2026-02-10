@@ -94,12 +94,17 @@ static inline u64 unapply_exponent(u64 scaled, u8 exponent)
  */
 static inline u32 ring_index(u32 head, s32 offset, u32 size)
 {
-	s32 idx = (s32)head + offset;
+	s32 idx;
 
-	while (idx < 0)
+	/* CF-335: Guard against size==0 to avoid infinite loop / div-by-zero */
+	if (size == 0)
+		return 0;
+
+	idx = ((s32)head + offset) % (s32)size;
+	if (idx < 0)
 		idx += size;
 
-	return (u32)(idx % size);
+	return (u32)idx;
 }
 
 /*

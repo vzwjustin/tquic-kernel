@@ -135,6 +135,7 @@ struct tquic_pending_frame {
 struct tquic_pacing_state {
 	struct hrtimer timer;
 	struct work_struct work;
+	struct tquic_connection *conn;	/* owning connection */
 	struct tquic_path *path;
 	struct sk_buff_head queue;
 	spinlock_t lock;
@@ -822,9 +823,10 @@ static int tquic_build_short_header_internal(struct tquic_connection *conn,
 	int pkt_num_len;
 	u8 first_byte;
 	bool grease_fixed_bit;
+	u8 pn_scratch[4];  /* CF-624: stack scratch instead of buf+64 */
 
 	/* Calculate minimal packet number encoding */
-	pkt_num_len = tquic_encode_pkt_num(buf + 64, pkt_num, largest_acked);
+	pkt_num_len = tquic_encode_pkt_num(pn_scratch, pkt_num, largest_acked);
 
 	/*
 	 * RFC 9287 Section 3: GREASE the Fixed Bit
@@ -1401,38 +1403,56 @@ static void tquic_pacing_work(struct work_struct *work)
 	struct tquic_pacing_state *pacing = container_of(work,
 							 struct tquic_pacing_state,
 							 work);
+	struct sk_buff_head batch;
 	struct sk_buff *skb;
 	ktime_t now;
 	ktime_t gap;
 	int sent = 0;
+	int batch_count = 0;
 
+	__skb_queue_head_init(&batch);
+
+	/*
+	 * Dequeue a batch of packets under a single lock hold,
+	 * then send them all without the lock.
+	 */
 	spin_lock_bh(&pacing->lock);
 
 	now = ktime_get();
 
 	while ((skb = skb_peek(&pacing->queue)) != NULL) {
 		/* Check if we can send */
-		if (ktime_after(pacing->next_send_time, now) && sent > 0)
+		if (ktime_after(pacing->next_send_time, now) && batch_count > 0)
 			break;
 
 		/* Check burst limit */
-		if (sent >= pacing->max_tokens)
+		if (batch_count >= pacing->max_tokens)
 			break;
 
 		skb = __skb_dequeue(&pacing->queue);
-		spin_unlock_bh(&pacing->lock);
+		__skb_queue_tail(&batch, skb);
+		batch_count++;
+	}
 
-		/* Actually send the packet */
-		tquic_output_packet(NULL, pacing->path, skb);
+	spin_unlock_bh(&pacing->lock);
 
-		spin_lock_bh(&pacing->lock);
+	/* Send all dequeued packets without holding the lock */
+	while ((skb = __skb_dequeue(&batch)) != NULL) {
+		/*
+		 * CF-258/CF-296: Save skb->len before sending because
+		 * tquic_output_packet() may consume the skb.
+		 */
+		unsigned int pkt_len = skb->len;
 
-		/* Update next send time */
-		gap = tquic_pacing_calc_gap(pacing, skb->len);
-		pacing->next_send_time = ktime_add(now, gap);
-		now = ktime_get();
+		tquic_output_packet(pacing->conn, pacing->path, skb);
+
+		gap = tquic_pacing_calc_gap(pacing, pkt_len);
+		now = ktime_add(now, gap);
 		sent++;
 	}
+
+	spin_lock_bh(&pacing->lock);
+	pacing->next_send_time = now;
 
 	/* Schedule timer for next packet if queue not empty */
 	if (!skb_queue_empty(&pacing->queue)) {
@@ -1656,6 +1676,7 @@ int tquic_output_packet(struct tquic_connection *conn,
 	struct rtable *rt;
 	struct sockaddr_in *local, *remote;
 	struct net *net = NULL;
+	unsigned int skb_len;
 	int ret;
 
 	if (unlikely(!path || !skb))
@@ -1703,8 +1724,12 @@ int tquic_output_packet(struct tquic_connection *conn,
 	if (net && tquic_pernet(net)->ecn_enabled)
 		TQUIC_FLOWI4_SET_DSCP(fl4, TQUIC_IP_ECN_ECT0);
 
-	/* Route lookup */
-	rt = ip_route_output_key(net ?: &init_net, &fl4);
+	/* Route lookup - never fall back to init_net for namespace isolation */
+	if (!net) {
+		kfree_skb(skb);
+		return -EINVAL;
+	}
+	rt = ip_route_output_key(net, &fl4);
 	if (unlikely(IS_ERR(rt))) {
 		kfree_skb(skb);
 		return PTR_ERR(rt);
@@ -1752,19 +1777,22 @@ int tquic_output_packet(struct tquic_connection *conn,
 		}
 	}
 
-	/* Send via IP */
-	ret = ip_local_out(&init_net, NULL, skb);
+	/* Save skb->len before ip_local_out() which may consume the SKB */
+	skb_len = skb->len;
 
-	/* Update path statistics */
+	/* Send via IP */
+	ret = ip_local_out(net, NULL, skb);
+
+	/* Update path statistics -- SKB must not be touched after this point */
 	if (ret >= 0) {
 		path->stats.tx_packets++;
-		path->stats.tx_bytes += skb->len;
-		path->last_activity = ktime_get();
+		path->stats.tx_bytes += skb_len;
+		WRITE_ONCE(path->last_activity, ktime_get());
 
 		/* Update MIB counters for packet transmission */
 		if (conn && conn->sk) {
 			TQUIC_INC_STATS(sock_net(conn->sk), TQUIC_MIB_PACKETSTX);
-			TQUIC_ADD_STATS(sock_net(conn->sk), TQUIC_MIB_BYTESTX, skb->len);
+			TQUIC_ADD_STATS(sock_net(conn->sk), TQUIC_MIB_BYTESTX, skb_len);
 		}
 
 		/*
@@ -2086,7 +2114,8 @@ int tquic_output_flush(struct tquic_connection *conn)
 	 * If cwnd is exhausted, we'll be woken by ACK processing.
 	 */
 	if (path->stats.cwnd > 0) {
-		inflight = path->stats.tx_bytes - path->stats.acked_bytes;
+		inflight = (path->stats.tx_bytes > path->stats.acked_bytes) ?
+			   path->stats.tx_bytes - path->stats.acked_bytes : 0;
 		cwnd_limited = (inflight >= path->stats.cwnd);
 	} else {
 		/* No cwnd limit set yet (initial state) - allow sending */
@@ -2213,13 +2242,14 @@ int tquic_output_flush(struct tquic_connection *conn)
 						 pkt_num, stream->id, stream_offset, chunk_size);
 				}
 			} else {
-				/* Cleanup frame on assembly failure */
+				/* CF-615: Cleanup frame on assembly failure */
 				struct tquic_pending_frame *f, *tmp;
 				list_for_each_entry_safe(f, tmp, &frames, list) {
 					list_del(&f->list);
 					kfree(f->data);
 					kmem_cache_free(tquic_frame_cache, f);
 				}
+				ret = -ENOMEM;
 			}
 
 			/* Re-acquire lock and update state */
@@ -2557,7 +2587,9 @@ int tquic_send_datagram(struct tquic_connection *conn,
 			return -EAGAIN;
 	}
 
-	/* Allocate buffer for frame generation */
+	/* Validate MTU and allocate buffer for frame generation */
+	if (path->mtu == 0 || path->mtu > 65535)
+		return -EINVAL;
 	buf = kmalloc(path->mtu, GFP_ATOMIC);
 	if (!buf)
 		return -ENOMEM;
@@ -2746,6 +2778,7 @@ int tquic_recv_datagram(struct tquic_connection *conn,
 	unsigned long irqflags;
 	int ret;
 	long timeo;
+	int retries = 0;
 
 	if (!conn)
 		return -EINVAL;
@@ -2770,6 +2803,9 @@ int tquic_recv_datagram(struct tquic_connection *conn,
 		timeo = (flags & MSG_DONTWAIT) ? 0 : MAX_SCHEDULE_TIMEOUT;
 
 retry:
+	/* CF-450: Prevent infinite loop under signal pressure */
+	if (++retries > 3)
+		return -EAGAIN;
 	spin_lock_irqsave(&conn->datagram.lock, irqflags);
 
 	/* Check for available datagram */

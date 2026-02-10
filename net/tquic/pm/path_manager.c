@@ -312,7 +312,6 @@ static int tquic_pm_netdev_event(struct notifier_block *nb, unsigned long event,
 	struct tquic_pm_state *pm =
 		container_of(nb, struct tquic_pm_state, netdev_notifier);
 	struct net_device *dev = netdev_notifier_info_to_dev(ptr);
-	int i;
 
 	if (!pm->auto_discover)
 		return NOTIFY_DONE;
@@ -417,11 +416,15 @@ int tquic_pm_discover_addresses(struct tquic_connection *conn,
 	struct net_device *dev;
 	struct in_device *in_dev;
 	const struct in_ifaddr *ifa;
+	struct net *net;
 	int count = 0;
+
+	/* CF-103: Use connection's namespace instead of init_net */
+	net = (conn && conn->sk) ? sock_net(conn->sk) : current->nsproxy->net_ns;
 
 	rtnl_lock();
 
-	for_each_netdev(&init_net, dev) {
+	for_each_netdev(net, dev) {
 		/* Skip loopback and down interfaces */
 		if (dev->flags & IFF_LOOPBACK)
 			continue;
@@ -821,14 +824,14 @@ static struct tquic_path *tquic_path_alloc(struct tquic_connection *conn,
 					   struct sockaddr *remote)
 {
 	struct tquic_path *path;
-	static atomic_t path_id_gen = ATOMIC_INIT(0);
 
 	path = kzalloc(sizeof(*path), GFP_KERNEL);
 	if (!path)
 		return NULL;
 
+	/* CF-477: Use per-connection counter instead of global static */
 	path->conn = conn;
-	path->path_id = atomic_inc_return(&path_id_gen);
+	path->path_id = conn->num_paths;
 	path->state = TQUIC_PATH_UNUSED;
 	path->saved_state = TQUIC_PATH_UNUSED;
 

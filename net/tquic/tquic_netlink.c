@@ -465,7 +465,15 @@ static struct tquic_nl_path_info *tquic_nl_path_create(struct tquic_nl_conn_info
 	if (!path)
 		return NULL;
 
-	refcount_set(&path->refcnt, 1);
+	/*
+	 * CF-078: Initialize refcount to 2: one reference for the
+	 * conn->paths list entry and one for the caller's returned
+	 * pointer.  Previously set to 1, which caused refcount
+	 * underflow when tquic_path_remove_and_free() dropped both
+	 * the list and caller references via two tquic_nl_path_put()
+	 * calls.
+	 */
+	refcount_set(&path->refcnt, 2);
 	path->state = TQUIC_NL_PATH_STATE_UNKNOWN;
 	path->weight = 1;
 
@@ -1012,7 +1020,11 @@ static int tquic_nl_cmd_path_dump(struct sk_buff *skb,
 				  struct netlink_callback *cb)
 {
 	struct net *net = sock_net(skb->sk);
-	struct tquic_dump_ctx *ctx = (struct tquic_dump_ctx *)cb->ctx;
+	/* CF-345: Verify dump context fits in cb->ctx storage */
+	struct tquic_dump_ctx *ctx;
+
+	BUILD_BUG_ON(sizeof(*ctx) > sizeof(cb->ctx));
+	ctx = (struct tquic_dump_ctx *)cb->ctx;
 	struct tquic_nl_conn_info *conn;
 	struct tquic_nl_path_info *path;
 	void *hdr;
@@ -1616,12 +1628,12 @@ static const struct genl_ops tquic_genl_ops[] = {
 	{
 		.cmd = TQUIC_NL_CMD_PATH_GET,
 		.doit = tquic_nl_cmd_path_get,
-		.flags = GENL_ADMIN_PERM,
+		/* Read-only: no GENL_ADMIN_PERM needed */
 	},
 	{
 		.cmd = TQUIC_NL_CMD_PATH_LIST,
 		.dumpit = tquic_nl_cmd_path_dump,
-		.flags = GENL_ADMIN_PERM,
+		/* Read-only: no GENL_ADMIN_PERM needed */
 	},
 	{
 		.cmd = TQUIC_NL_CMD_SCHED_SET,
@@ -1631,17 +1643,17 @@ static const struct genl_ops tquic_genl_ops[] = {
 	{
 		.cmd = TQUIC_NL_CMD_SCHED_GET,
 		.doit = tquic_nl_cmd_sched_get,
-		.flags = GENL_ADMIN_PERM,
+		/* Read-only: no GENL_ADMIN_PERM needed */
 	},
 	{
 		.cmd = TQUIC_NL_CMD_STATS_GET,
 		.doit = tquic_nl_cmd_stats_get,
-		.flags = GENL_ADMIN_PERM,
+		/* Read-only: no GENL_ADMIN_PERM needed */
 	},
 	{
 		.cmd = TQUIC_NL_CMD_CONN_GET,
 		.doit = tquic_nl_cmd_conn_get,
-		.flags = GENL_ADMIN_PERM,
+		/* Read-only: no GENL_ADMIN_PERM needed */
 	},
 };
 
@@ -1661,7 +1673,7 @@ struct genl_family tquic_genl_family __ro_after_init = {
 	.mcgrps = tquic_mcgrps,
 	.n_mcgrps = ARRAY_SIZE(tquic_mcgrps),
 };
-EXPORT_SYMBOL_GPL(tquic_genl_family);
+/* genl_family not exported - access only through defined API functions */
 
 /*
  * Per-network namespace initialization

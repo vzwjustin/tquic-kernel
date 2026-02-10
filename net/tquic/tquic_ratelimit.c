@@ -273,7 +273,8 @@ static bool tquic_rl_try_consume_token(struct tquic_rl_bucket *bucket)
 	tokens = atomic_read(&bucket->tokens);
 
 	if (tokens >= TOKEN_SCALE) {
-		atomic_sub(TOKEN_SCALE, &bucket->tokens);
+		/* Held under lock -- use atomic_set to prevent underflow */
+		atomic_set(&bucket->tokens, tokens - TOKEN_SCALE);
 		allowed = true;
 	} else {
 		allowed = false;

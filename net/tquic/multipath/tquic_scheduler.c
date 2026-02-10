@@ -556,10 +556,6 @@ int tquic_sched_set(struct tquic_connection *conn, const char *name)
 	struct tquic_sched_internal *old_sched, *new_sched;
 	int ret = 0;
 
-	/* Cannot change scheduler after connection established */
-	if (conn->state != TQUIC_CONN_IDLE)
-		return -EISCONN;
-
 	rcu_read_lock();
 	new_sched = tquic_int_sched_find(name);
 	if (!new_sched) {
@@ -574,6 +570,13 @@ int tquic_sched_set(struct tquic_connection *conn, const char *name)
 	rcu_read_unlock();
 
 	spin_lock_bh(&conn->lock);
+
+	/* Cannot change scheduler after connection established (under lock) */
+	if (conn->state != TQUIC_CONN_IDLE) {
+		spin_unlock_bh(&conn->lock);
+		module_put(new_sched->owner);
+		return -EISCONN;
+	}
 
 	old_sched = conn->sched;
 
@@ -663,45 +666,59 @@ static int tquic_rr_select_path(struct tquic_connection *conn,
 	sel->num_paths = 0;
 	sel->duplicate = false;
 
-	if (conn->num_paths == 0)
-		return -ENOENT;
-
 	rcu_read_lock();
 
-	/* Find starting point */
-	list_for_each_entry_rcu(path, &conn->paths, list) {
-		if (path->path_id >= rr->next_path_id) {
-			start_path = path;
-			break;
-		}
-	}
+	/*
+	 * CF-289: Read num_paths once under RCU to avoid TOCTOU.
+	 * The list is RCU-protected, so the snapshot is consistent
+	 * with the list traversal below.
+	 */
+	{
+		int snap_num_paths = READ_ONCE(conn->num_paths);
 
-	if (!start_path)
-		start_path = list_first_entry_or_null(&conn->paths,
-						      struct tquic_path, list);
-
-	if (!start_path) {
-		rcu_read_unlock();
-		return -ENOENT;
-	}
-
-	/* Round-robin through paths, skipping failed/standby */
-	path = start_path;
-	do {
-		if (tquic_path_can_send(path)) {
-			selected = path;
-			break;
+		if (snap_num_paths == 0) {
+			rcu_read_unlock();
+			return -ENOENT;
 		}
 
-		/* Move to next path (circular) */
-		if (list_is_last(&path->list, &conn->paths))
-			path = list_first_entry(&conn->paths,
-						struct tquic_path, list);
-		else
-			path = list_next_entry(path, list);
+		/* Find starting point */
+		list_for_each_entry_rcu(path, &conn->paths, list) {
+			if (path->path_id >= rr->next_path_id) {
+				start_path = path;
+				break;
+			}
+		}
 
-		attempts++;
-	} while (path != start_path && attempts < conn->num_paths);
+		if (!start_path)
+			start_path = list_first_entry_or_null(&conn->paths,
+							      struct tquic_path,
+							      list);
+
+		if (!start_path) {
+			rcu_read_unlock();
+			return -ENOENT;
+		}
+
+		/* Round-robin through paths, skipping failed/standby */
+		path = start_path;
+		do {
+			if (tquic_path_can_send(path)) {
+				selected = path;
+				break;
+			}
+
+			/* Move to next path (circular) */
+			if (list_is_last(&path->list, &conn->paths))
+				path = list_first_entry(&conn->paths,
+							struct tquic_path,
+							list);
+			else
+				path = list_next_entry(path, list);
+
+			attempts++;
+		} while (path != start_path &&
+			 attempts < snap_num_paths);
+	}
 
 	if (selected) {
 		sel->paths[0] = selected;
@@ -819,7 +836,8 @@ static int tquic_weighted_select_path(struct tquic_connection *conn,
 
 	rcu_read_lock();
 
-	start_idx = wd->current_path_idx % conn->num_paths;
+	start_idx = wd->current_path_idx % min_t(int, conn->num_paths,
+					       TQUIC_MAX_PATHS);
 	path_idx = start_idx;
 
 	/*
@@ -832,6 +850,8 @@ static int tquic_weighted_select_path(struct tquic_connection *conn,
 
 		list_for_each_entry_rcu(path, &conn->paths, list) {
 			if (idx == path_idx) {
+				if (path_idx >= TQUIC_MAX_PATHS)
+					break;
 				if (tquic_path_can_send(path)) {
 					struct tquic_weighted_path_data *pd;
 
@@ -1188,7 +1208,12 @@ struct tquic_redundant_data {
 	u8	redundancy_level;	/* Number of paths to use */
 	bool	all_paths;		/* Use all available paths */
 	u64	last_seq_sent;
-	u8	dedup_window[256];	/* Received sequence dedup */
+	/*
+	 * CF-118: Use full 64-bit packet numbers for deduplication
+	 * instead of 8-bit truncated hash to avoid collisions.
+	 * Initialized to U64_MAX sentinels (invalid QUIC pkt number).
+	 */
+	u64	dedup_window[256];	/* Full packet number dedup */
 	u16	dedup_head;
 };
 
@@ -1203,6 +1228,8 @@ static int tquic_redundant_init(struct tquic_connection *conn)
 	rd->redundancy_level = 2;  /* Default: send on 2 paths */
 	rd->all_paths = false;
 	rd->dedup_head = 0;
+	/* CF-118: Initialize dedup window with U64_MAX sentinels */
+	memset(rd->dedup_window, 0xFF, sizeof(rd->dedup_window));
 
 	conn->sched_priv = rd;
 	return 0;
@@ -1308,24 +1335,24 @@ EXPORT_SYMBOL_GPL(tquic_redundant_set_level);
 bool tquic_redundant_is_duplicate(struct tquic_connection *conn, u64 seq)
 {
 	struct tquic_redundant_data *rd;
-	u8 seq_byte;
 	int i;
 
 	rd = conn->sched_priv;
 	if (!rd)
 		return false;
 
-	seq_byte = (u8)(seq & 0xFF);
-
-	/* Check recent sequence numbers */
+	/*
+	 * CF-118: Use full 64-bit packet number for deduplication.
+	 * The previous 8-bit truncation (seq & 0xFF) caused collisions
+	 * every 256 packets, making dedup unreliable.
+	 */
 	for (i = 0; i < 256; i++) {
-		if (rd->dedup_window[i] == seq_byte) {
+		if (rd->dedup_window[i] == seq)
 			return true;  /* Duplicate found */
-		}
 	}
 
 	/* Not a duplicate, record it */
-	rd->dedup_window[rd->dedup_head] = seq_byte;
+	rd->dedup_window[rd->dedup_head] = seq;
 	rd->dedup_head = (rd->dedup_head + 1) & 0xFF;
 
 	return false;
@@ -1616,7 +1643,7 @@ static void tquic_adaptive_feedback(struct tquic_connection *conn,
 				    const struct tquic_sched_feedback *fb)
 {
 	struct tquic_adaptive_data *ad = conn->sched_priv;
-	struct tquic_path *path;
+	struct tquic_path *path, *found = NULL;
 	int path_idx = 0;
 
 	if (!ad)
@@ -1624,17 +1651,26 @@ static void tquic_adaptive_feedback(struct tquic_connection *conn,
 
 	rcu_read_lock();
 
-	/* Find path and its state */
+	/*
+	 * CF-019: Use a separate 'found' pointer to track whether a
+	 * matching path was located. After list_for_each_entry_rcu()
+	 * exits without break, the iterator points to the list head
+	 * container, not a valid entry.
+	 */
 	list_for_each_entry_rcu(path, &conn->paths, list) {
-		if (path->path_id == fb->path_id)
+		if (path->path_id == fb->path_id) {
+			found = path;
 			break;
+		}
 		path_idx++;
 	}
 
-	if (path->path_id != fb->path_id) {
+	if (!found) {
 		rcu_read_unlock();
 		return;
 	}
+
+	path = found;
 
 	if (fb->is_ack) {
 		struct tquic_adaptive_path_state *ps;
@@ -2155,16 +2191,12 @@ void tquic_path_packet_sent(struct tquic_connection *conn, u8 path_id,
 		path->stats.last_send_time = tquic_get_time_us();
 		path->cc.bytes_in_flight += bytes;
 
-		/* Notify scheduler inflight tracking (cast: internal
-		 * tquic_int_* types are layout-compatible with public
-		 * tquic_* types used in the notify API declaration).
+		/*
+		 * CF-252: Call scheduler notify directly without void*
+		 * casts that bypass type checking. The types are the
+		 * same (struct tquic_connection *, struct tquic_path *).
 		 */
-		{
-			void *c = conn;
-			void *p = path;
-
-			tquic_mp_sched_notify_sent(c, p, bytes);
-		}
+		tquic_mp_sched_notify_sent(conn, path, bytes);
 	}
 
 	atomic64_inc(&conn->stats.total_packets);

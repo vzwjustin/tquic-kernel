@@ -150,13 +150,15 @@ static int tquic_diag_dump_one(struct netlink_callback *cb,
 			continue;
 		}
 
-		sk = conn->sk;
+		sk = READ_ONCE(conn->sk);
 		if (!sk || !net_eq(sock_net(sk), net))
 			continue;
 
 		if (sock_i_ino(sk) == req->id.idiag_cookie[0]) {
-			if (!refcount_inc_not_zero(&sk->sk_refcnt))
+			if (!refcount_inc_not_zero(&sk->sk_refcnt)) {
 				conn = NULL;
+				continue;
+			}
 			break;
 		}
 		conn = NULL;
@@ -232,7 +234,7 @@ static void tquic_diag_dump(struct sk_buff *skb, struct netlink_callback *cb,
 			continue;
 		}
 
-		sk = conn->sk;
+		sk = READ_ONCE(conn->sk);
 		if (!sk)
 			goto next;
 

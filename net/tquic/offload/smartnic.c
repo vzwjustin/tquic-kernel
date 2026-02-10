@@ -22,6 +22,7 @@
 #include <linux/slab.h>
 #include <linux/list.h>
 #include <linux/spinlock.h>
+#include <linux/completion.h>
 #include <linux/netdevice.h>
 #include <linux/rhashtable.h>
 #include <linux/jhash.h>
@@ -190,15 +191,15 @@ struct tquic_nic_device *tquic_nic_register(struct net_device *netdev,
 	}
 
 	/* Check if already registered */
-	spin_lock(&tquic_nic_lock);
+	spin_lock_bh(&tquic_nic_lock);
 	list_for_each_entry(dev, &tquic_nic_devices, list) {
 		if (dev->netdev == netdev) {
-			spin_unlock(&tquic_nic_lock);
+			spin_unlock_bh(&tquic_nic_lock);
 			NIC_ERR("device %s already registered\n", netdev->name);
 			return ERR_PTR(-EEXIST);
 		}
 	}
-	spin_unlock(&tquic_nic_lock);
+	spin_unlock_bh(&tquic_nic_lock);
 
 	/* Allocate device structure */
 	dev = kzalloc(sizeof(*dev), GFP_KERNEL);
@@ -210,6 +211,9 @@ struct tquic_nic_device *tquic_nic_register(struct net_device *netdev,
 	dev->caps = caps;
 	dev->priv = priv;
 	spin_lock_init(&dev->lock);
+	refcount_set(&dev->refcnt, 1);
+	dev->dead = false;
+	init_completion(&dev->unregister_done);
 
 	/* Set defaults */
 	dev->ciphers = TQUIC_NIC_CIPHER_AES_128_GCM |
@@ -229,9 +233,9 @@ struct tquic_nic_device *tquic_nic_register(struct net_device *netdev,
 	}
 
 	/* Add to device list */
-	spin_lock(&tquic_nic_lock);
+	spin_lock_bh(&tquic_nic_lock);
 	list_add_tail(&dev->list, &tquic_nic_devices);
-	spin_unlock(&tquic_nic_lock);
+	spin_unlock_bh(&tquic_nic_lock);
 
 	NIC_INFO("registered device %s (caps=0x%x)\n", netdev->name, caps);
 
@@ -247,11 +251,29 @@ void tquic_nic_unregister(struct tquic_nic_device *dev)
 	if (!dev)
 		return;
 
-	/* Remove from device list */
-	spin_lock(&tquic_nic_lock);
-	list_del(&dev->list);
-	spin_unlock(&tquic_nic_lock);
+	/* Mark device as dead to prevent new operations */
+	spin_lock_bh(&dev->lock);
+	dev->dead = true;
+	spin_unlock_bh(&dev->lock);
 
+	/* Remove from device list so no new references are taken */
+	spin_lock_bh(&tquic_nic_lock);
+	list_del(&dev->list);
+	spin_unlock_bh(&tquic_nic_lock);
+
+	/*
+	 * Drop the initial reference. If other users hold references
+	 * (via tquic_nic_find), wait for them to call tquic_nic_put.
+	 */
+	if (refcount_dec_and_test(&dev->refcnt)) {
+		/* No outstanding references, cleanup now */
+		goto cleanup;
+	}
+
+	/* Wait for all outstanding references to be released */
+	wait_for_completion(&dev->unregister_done);
+
+cleanup:
 	/* Cleanup device */
 	if (dev->ops && dev->ops->cleanup)
 		dev->ops->cleanup(dev);
@@ -275,18 +297,38 @@ struct tquic_nic_device *tquic_nic_find(struct net_device *netdev)
 	if (!netdev)
 		return NULL;
 
-	spin_lock(&tquic_nic_lock);
+	spin_lock_bh(&tquic_nic_lock);
 	list_for_each_entry(dev, &tquic_nic_devices, list) {
-		if (dev->netdev == netdev) {
-			spin_unlock(&tquic_nic_lock);
+		if (dev->netdev == netdev && !dev->dead) {
+			/*
+			 * SECURITY FIX (CF-084): Take a reference before
+			 * returning the pointer so the device cannot be
+			 * freed while the caller is using it.
+			 * Caller must call tquic_nic_put() when done.
+			 */
+			refcount_inc(&dev->refcnt);
+			spin_unlock_bh(&tquic_nic_lock);
 			return dev;
 		}
 	}
-	spin_unlock(&tquic_nic_lock);
+	spin_unlock_bh(&tquic_nic_lock);
 
 	return NULL;
 }
 EXPORT_SYMBOL_GPL(tquic_nic_find);
+
+/**
+ * tquic_nic_put - Release reference to SmartNIC device
+ * @dev: The device to release (may be NULL)
+ *
+ * Callers of tquic_nic_find() must call this when done with the device.
+ */
+void tquic_nic_put(struct tquic_nic_device *dev)
+{
+	if (dev && refcount_dec_and_test(&dev->refcnt))
+		complete(&dev->unregister_done);
+}
+EXPORT_SYMBOL_GPL(tquic_nic_put);
 
 /*
  * =============================================================================
@@ -315,6 +357,12 @@ int tquic_offload_key_install(struct tquic_nic_device *dev,
 	/* Extract key from connection's crypto state */
 	memset(&key, 0, sizeof(key));
 
+	/*
+	 * Hold dev->lock once for both TX and RX key installation
+	 * to avoid taking the lock per key operation.
+	 */
+	spin_lock_bh(&dev->lock);
+
 	/* Get write key (for TX encryption) */
 	if (conn->crypto_state && conn->crypto_state->tx_secret) {
 		memcpy(key.key, conn->crypto_state->tx_secret,
@@ -323,11 +371,10 @@ int tquic_offload_key_install(struct tquic_nic_device *dev,
 		key.cipher_suite = conn->crypto_state->cipher_suite;
 		atomic_set(&key.refcount, 1);
 
-		spin_lock(&dev->lock);
 		ret = dev->ops->add_key(dev, &key);
-		spin_unlock(&dev->lock);
 
 		if (ret < 0) {
+			spin_unlock_bh(&dev->lock);
 			NIC_ERR("failed to add TX key: %d\n", ret);
 			return ret;
 		}
@@ -346,11 +393,10 @@ int tquic_offload_key_install(struct tquic_nic_device *dev,
 		key.cipher_suite = conn->crypto_state->cipher_suite;
 		atomic_set(&key.refcount, 1);
 
-		spin_lock(&dev->lock);
 		ret = dev->ops->add_key(dev, &key);
-		spin_unlock(&dev->lock);
 
 		if (ret < 0) {
+			spin_unlock_bh(&dev->lock);
 			NIC_ERR("failed to add RX key: %d\n", ret);
 			return ret;
 		}
@@ -359,6 +405,8 @@ int tquic_offload_key_install(struct tquic_nic_device *dev,
 		atomic64_inc(&dev->stats.key_updates);
 		NIC_DBG(2, "installed RX key %d for conn\n", ret);
 	}
+
+	spin_unlock_bh(&dev->lock);
 
 	conn->hw_offload_enabled = true;
 	conn->hw_offload_dev = dev;
@@ -394,9 +442,9 @@ int tquic_offload_key_update(struct tquic_nic_device *dev,
 		key.key_len = conn->crypto_state->key_len;
 		key.cipher_suite = conn->crypto_state->cipher_suite;
 
-		spin_lock(&dev->lock);
+		spin_lock_bh(&dev->lock);
 		ret = dev->ops->update_key(dev, conn->hw_tx_key_id, &key);
-		spin_unlock(&dev->lock);
+		spin_unlock_bh(&dev->lock);
 
 		if (ret < 0) {
 			NIC_ERR("failed to update TX key: %d\n", ret);
@@ -414,9 +462,9 @@ int tquic_offload_key_update(struct tquic_nic_device *dev,
 		       min_t(size_t, conn->crypto_state->key_len, sizeof(key.key)));
 		key.key_len = conn->crypto_state->key_len;
 
-		spin_lock(&dev->lock);
+		spin_lock_bh(&dev->lock);
 		ret = dev->ops->update_key(dev, conn->hw_rx_key_id, &key);
-		spin_unlock(&dev->lock);
+		spin_unlock_bh(&dev->lock);
 
 		if (ret < 0) {
 			NIC_ERR("failed to update RX key: %d\n", ret);
@@ -463,9 +511,9 @@ int tquic_offload_cid_add(struct tquic_nic_device *dev,
 	entry.key_id = conn->hw_rx_key_id;
 	entry.queue_id = conn->cpu_affinity % dev->netdev->real_num_rx_queues;
 
-	spin_lock(&dev->lock);
+	spin_lock_bh(&dev->lock);
 	ret = dev->ops->add_cid(dev, &entry);
-	spin_unlock(&dev->lock);
+	spin_unlock_bh(&dev->lock);
 
 	if (ret < 0) {
 		NIC_ERR("failed to add CID: %d\n", ret);
@@ -475,9 +523,9 @@ int tquic_offload_cid_add(struct tquic_nic_device *dev,
 	/* Configure flow steering if supported */
 	if (tquic_nic_has_capability(dev, TQUIC_NIC_CAP_FLOW_STEER) &&
 	    dev->ops->set_flow_steer) {
-		spin_lock(&dev->lock);
+		spin_lock_bh(&dev->lock);
 		ret = dev->ops->set_flow_steer(dev, cid, cid_len, entry.queue_id);
-		spin_unlock(&dev->lock);
+		spin_unlock_bh(&dev->lock);
 
 		if (ret == 0)
 			atomic64_inc(&dev->stats.flow_steer_ok);
@@ -505,9 +553,9 @@ int tquic_offload_cid_del(struct tquic_nic_device *dev,
 	if (!dev->ops->del_cid)
 		return -EOPNOTSUPP;
 
-	spin_lock(&dev->lock);
+	spin_lock_bh(&dev->lock);
 	ret = dev->ops->del_cid(dev, cid, cid_len);
-	spin_unlock(&dev->lock);
+	spin_unlock_bh(&dev->lock);
 
 	if (ret < 0) {
 		NIC_ERR("failed to delete CID: %d\n", ret);
@@ -557,9 +605,9 @@ int tquic_offload_rx(struct tquic_nic_device *dev, struct sk_buff *skb,
 		pn = conn->rx_pn_next;
 	}
 
-	spin_lock(&dev->lock);
+	spin_lock_bh(&dev->lock);
 	ret = dev->ops->decrypt(dev, skb, conn->hw_rx_key_id, pn);
-	spin_unlock(&dev->lock);
+	spin_unlock_bh(&dev->lock);
 
 	if (ret < 0) {
 		atomic64_inc(&dev->stats.decrypt_fail);
@@ -599,9 +647,9 @@ int tquic_offload_tx(struct tquic_nic_device *dev, struct sk_buff *skb,
 	/* Get packet number for encryption */
 	pn = conn->tx_pn_next;
 
-	spin_lock(&dev->lock);
+	spin_lock_bh(&dev->lock);
 	ret = dev->ops->encrypt(dev, skb, conn->hw_tx_key_id, pn);
-	spin_unlock(&dev->lock);
+	spin_unlock_bh(&dev->lock);
 
 	if (ret < 0) {
 		atomic64_inc(&dev->stats.encrypt_fail);
@@ -632,6 +680,11 @@ int tquic_offload_batch_rx(struct tquic_nic_device *dev,
 	u64 *pns;
 	int ret, i;
 
+	/* CF-418: Bound the batch count to prevent oversized allocations */
+#define TQUIC_BATCH_MAX	256
+	if (count <= 0 || count > TQUIC_BATCH_MAX)
+		return -EINVAL;
+
 	if (!offload_enabled || !dev || !skbs || count <= 0 || !conn)
 		return -EINVAL;
 
@@ -654,10 +707,10 @@ int tquic_offload_batch_rx(struct tquic_nic_device *dev,
 			pns[i] = conn->rx_pn_next + i;  /* Fallback */
 	}
 
-	spin_lock(&dev->lock);
+	spin_lock_bh(&dev->lock);
 	ret = dev->ops->batch_decrypt(dev, skbs, count,
 				      conn->hw_rx_key_id, pns);
-	spin_unlock(&dev->lock);
+	spin_unlock_bh(&dev->lock);
 
 	kfree(pns);
 
@@ -686,6 +739,10 @@ int tquic_offload_batch_tx(struct tquic_nic_device *dev,
 	if (!offload_enabled || !dev || !skbs || count <= 0 || !conn)
 		return -EINVAL;
 
+	/* CF-418: Bound the batch count */
+	if (count > TQUIC_BATCH_MAX)
+		return -EINVAL;
+
 	if (!conn->hw_offload_enabled)
 		return -EOPNOTSUPP;
 
@@ -702,10 +759,10 @@ int tquic_offload_batch_tx(struct tquic_nic_device *dev,
 	for (i = 0; i < count; i++)
 		pns[i] = conn->tx_pn_next++;
 
-	spin_lock(&dev->lock);
+	spin_lock_bh(&dev->lock);
 	ret = dev->ops->batch_encrypt(dev, skbs, count,
 				      conn->hw_tx_key_id, pns);
-	spin_unlock(&dev->lock);
+	spin_unlock_bh(&dev->lock);
 
 	kfree(pns);
 
@@ -734,7 +791,7 @@ static int tquic_nic_stats_show(struct seq_file *m, void *v)
 	seq_puts(m, "TQUIC SmartNIC Offload Statistics\n");
 	seq_puts(m, "==================================\n\n");
 
-	spin_lock(&tquic_nic_lock);
+	spin_lock_bh(&tquic_nic_lock);
 	list_for_each_entry(dev, &tquic_nic_devices, list) {
 		seq_printf(m, "Device: %s\n", dev->netdev->name);
 		seq_printf(m, "  Capabilities: 0x%x\n", dev->caps);
@@ -764,7 +821,7 @@ static int tquic_nic_stats_show(struct seq_file *m, void *v)
 			   atomic64_read(&dev->stats.batch_ops));
 		seq_puts(m, "\n");
 	}
-	spin_unlock(&tquic_nic_lock);
+	spin_unlock_bh(&tquic_nic_lock);
 
 	if (list_empty(&tquic_nic_devices))
 		seq_puts(m, "No SmartNIC devices registered\n");
@@ -827,14 +884,14 @@ void tquic_smartnic_exit(void)
 	remove_proc_entry("tquic_smartnic", NULL);
 
 	/* Unregister all devices */
-	spin_lock(&tquic_nic_lock);
+	spin_lock_bh(&tquic_nic_lock);
 	list_for_each_entry_safe(dev, tmp, &tquic_nic_devices, list) {
 		list_del(&dev->list);
 		if (dev->ops->cleanup)
 			dev->ops->cleanup(dev);
 		kfree(dev);
 	}
-	spin_unlock(&tquic_nic_lock);
+	spin_unlock_bh(&tquic_nic_lock);
 
 	/* Destroy workqueue */
 	if (offload_wq) {

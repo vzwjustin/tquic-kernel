@@ -1013,6 +1013,9 @@ int tquic_crypto_derive_init_secrets(struct tquic_connection *conn,
 	if (err)
 		return err;
 
+	/* CF-378: Store local CID length for short header parsing */
+	ctx->local_cid_len = cid ? cid->len : 0;
+
 	hkdf.hash = ctx->hash;
 	hkdf.hash_len = 32;  /* SHA-256 */
 
@@ -1449,8 +1452,14 @@ int tquic_crypto_unprotect_header(struct tquic_crypto_ctx *ctx, struct sk_buff *
 		/* For Initial packets, also need to skip token length and token */
 		/* Simplified: assume handshake packet without token */
 	} else {
-		/* Short header - DCID starts at byte 1 */
-		*pn_offset = 1 + 8;  /* Assume 8-byte connection ID */
+		/*
+		 * CF-378: Use the known local CID length instead of
+		 * hardcoding 8 bytes.  The receiver always knows the
+		 * length of its own CIDs.
+		 */
+		u8 local_cid_len = ctx->local_cid_len;
+
+		*pn_offset = 1 + local_cid_len;
 	}
 
 	sample_offset = *pn_offset + 4;

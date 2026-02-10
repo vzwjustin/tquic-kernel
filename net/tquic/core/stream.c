@@ -122,24 +122,36 @@ struct tquic_stream_manager *tquic_stream_manager_create(
 	mgr->consecutive_limit_hits = 0;
 	mgr->rate_limit_exceeded = false;
 
-	/* Create SLAB caches */
-	mgr->stream_cache = kmem_cache_create("tquic_stream_ext",
-					      sizeof(struct tquic_stream_ext),
-					      0, SLAB_HWCACHE_ALIGN, NULL);
-	if (!mgr->stream_cache)
-		goto err_stream_cache;
+	/*
+	 * Create SLAB caches with unique names per connection (CF-334/CF-384).
+	 * kmem_cache_create() requires globally unique names.
+	 */
+	{
+		static atomic_t cache_id = ATOMIC_INIT(0);
+		int id = atomic_inc_return(&cache_id);
+		char name[48];
 
-	mgr->gap_cache = kmem_cache_create("tquic_stream_gap",
-					   sizeof(struct tquic_stream_gap),
-					   0, SLAB_HWCACHE_ALIGN, NULL);
-	if (!mgr->gap_cache)
-		goto err_gap_cache;
+		snprintf(name, sizeof(name), "tquic_stream_ext_%d", id);
+		mgr->stream_cache = kmem_cache_create(name,
+						      sizeof(struct tquic_stream_ext),
+						      0, SLAB_HWCACHE_ALIGN, NULL);
+		if (!mgr->stream_cache)
+			goto err_stream_cache;
 
-	mgr->chunk_cache = kmem_cache_create("tquic_recv_chunk",
-					     sizeof(struct tquic_recv_chunk),
-					     0, SLAB_HWCACHE_ALIGN, NULL);
-	if (!mgr->chunk_cache)
-		goto err_chunk_cache;
+		snprintf(name, sizeof(name), "tquic_stream_gap_%d", id);
+		mgr->gap_cache = kmem_cache_create(name,
+						   sizeof(struct tquic_stream_gap),
+						   0, SLAB_HWCACHE_ALIGN, NULL);
+		if (!mgr->gap_cache)
+			goto err_gap_cache;
+
+		snprintf(name, sizeof(name), "tquic_recv_chunk_%d", id);
+		mgr->chunk_cache = kmem_cache_create(name,
+						     sizeof(struct tquic_recv_chunk),
+						     0, SLAB_HWCACHE_ALIGN, NULL);
+		if (!mgr->chunk_cache)
+			goto err_chunk_cache;
+	}
 
 	return mgr;
 
@@ -810,7 +822,9 @@ void tquic_stream_destroy(struct tquic_stream_manager *mgr,
 	while ((skb = skb_dequeue(&stream->recv_buf)) != NULL) {
 		if (sk) {
 			sk_mem_uncharge(sk, skb->truesize);
-			atomic_sub(skb->truesize, &sk->sk_rmem_alloc);
+			atomic_sub(min_t(int, skb->truesize,
+				   atomic_read(&sk->sk_rmem_alloc)),
+				   &sk->sk_rmem_alloc);
 		}
 		kfree_skb(skb);
 	}
@@ -853,7 +867,11 @@ static size_t tquic_stream_send_allowed(struct tquic_stream_manager *mgr,
 	if (stream->fin_sent)
 		return 0;
 
-	/* Stream-level flow control */
+	/* Stream-level flow control - guard against underflow */
+	if (stream->send_offset >= stream->max_send_data) {
+		stream->blocked = true;
+		return 0;
+	}
 	stream_limit = stream->max_send_data - stream->send_offset;
 	if (allowed > stream_limit) {
 		allowed = stream_limit;
@@ -891,7 +909,7 @@ ssize_t tquic_stream_write(struct tquic_stream_manager *mgr,
 	if (!tquic_stream_can_send(mgr, stream))
 		return -EINVAL;
 
-	spin_lock(&mgr->lock);
+	spin_lock_bh(&mgr->lock);
 
 	while (copied < len) {
 		struct sk_buff *skb;
@@ -900,7 +918,7 @@ ssize_t tquic_stream_write(struct tquic_stream_manager *mgr,
 		allowed = tquic_stream_send_allowed(mgr, stream, len - copied);
 		if (allowed == 0) {
 			if (copied == 0) {
-				spin_unlock(&mgr->lock);
+				spin_unlock_bh(&mgr->lock);
 				return -EAGAIN;
 			}
 			break;
@@ -912,7 +930,7 @@ ssize_t tquic_stream_write(struct tquic_stream_manager *mgr,
 		skb = alloc_skb(chunk, GFP_ATOMIC);
 		if (!skb) {
 			if (copied == 0) {
-				spin_unlock(&mgr->lock);
+				spin_unlock_bh(&mgr->lock);
 				return -ENOMEM;
 			}
 			break;
@@ -922,7 +940,7 @@ ssize_t tquic_stream_write(struct tquic_stream_manager *mgr,
 		if (err != chunk) {
 			kfree_skb(skb);
 			if (copied == 0) {
-				spin_unlock(&mgr->lock);
+				spin_unlock_bh(&mgr->lock);
 				return -EFAULT;
 			}
 			break;
@@ -946,7 +964,7 @@ ssize_t tquic_stream_write(struct tquic_stream_manager *mgr,
 			tquic_stream_set_state(stream, TQUIC_STREAM_DATA_SENT);
 	}
 
-	spin_unlock(&mgr->lock);
+	spin_unlock_bh(&mgr->lock);
 
 	return copied;
 }
@@ -1460,7 +1478,8 @@ EXPORT_SYMBOL_GPL(tquic_stream_reset_recv);
  */
 int tquic_stream_set_priority(struct tquic_stream *stream, u8 priority)
 {
-	stream->priority = priority;
+	/* CF-636: Use WRITE_ONCE to prevent torn writes from concurrent readers */
+	WRITE_ONCE(stream->priority, priority);
 	return 0;
 }
 EXPORT_SYMBOL_GPL(tquic_stream_set_priority);
@@ -1836,12 +1855,32 @@ ssize_t tquic_stream_sendfile(struct tquic_stream_manager *mgr,
 			}
 		}
 
-		/* Read from file */
-		ret = kernel_read(file, page_address(pages[0]), chunk, offset);
-		if (ret <= 0) {
-			for (i = 0; i < nr_pages; i++)
-				put_page(pages[i]);
-			return sent > 0 ? sent : (ret ? ret : -EIO);
+		/* Read from file into each page individually */
+		{
+			size_t page_read_total = 0;
+			size_t remaining = chunk;
+
+			for (i = 0; i < nr_pages && remaining > 0; i++) {
+				size_t to_read = min_t(size_t, remaining,
+						       PAGE_SIZE);
+
+				ret = kernel_read(file,
+						  page_address(pages[i]),
+						  to_read, offset);
+				if (ret <= 0)
+					break;
+				page_read_total += ret;
+				remaining -= ret;
+				if ((size_t)ret < to_read)
+					break; /* short read */
+			}
+			if (page_read_total == 0) {
+				for (i = 0; i < nr_pages; i++)
+					put_page(pages[i]);
+				return sent > 0 ? sent :
+				       (ret ? ret : -EIO);
+			}
+			ret = page_read_total;
 		}
 
 		/* Write to stream using zero-copy */
@@ -1975,10 +2014,14 @@ void tquic_stream_memory_pressure(struct tquic_stream_manager *mgr)
 			while ((skb = skb_dequeue(&stream->recv_buf)) != NULL) {
 				if (sk) {
 					sk_mem_uncharge(sk, skb->truesize);
-					atomic_sub(skb->truesize, &sk->sk_rmem_alloc);
+					atomic_sub(min_t(int, skb->truesize,
+				   atomic_read(&sk->sk_rmem_alloc)),
+				   &sk->sk_rmem_alloc);
 				}
 				kfree_skb(skb);
 			}
+			/* CF-432: Free extended state before stream */
+			kfree(stream->ext);
 			kfree(stream);
 		}
 
@@ -2060,7 +2103,9 @@ void tquic_stream_manager_destroy(struct tquic_stream_manager *mgr)
 		while ((skb = skb_dequeue(&stream->recv_buf)) != NULL) {
 			if (sk) {
 				sk_mem_uncharge(sk, skb->truesize);
-				atomic_sub(skb->truesize, &sk->sk_rmem_alloc);
+				atomic_sub(min_t(int, skb->truesize,
+				   atomic_read(&sk->sk_rmem_alloc)),
+				   &sk->sk_rmem_alloc);
 			}
 			kfree_skb(skb);
 		}

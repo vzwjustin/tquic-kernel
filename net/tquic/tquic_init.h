@@ -91,4 +91,8 @@ void tquic_cid_hash_cleanup(void);
 int tquic_debug_init(void);
 void tquic_debug_exit(void);
 
+/* Sysctl accessors (defined in tquic_sysctl.c) */
+u32 tquic_sysctl_get_preferred_version(void);
+bool tquic_sysctl_prefer_v2(void);
+
 #endif /* _TQUIC_INIT_H */

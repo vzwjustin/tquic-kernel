@@ -49,37 +49,35 @@ void tquic_sched_release(struct tquic_connection *conn);
 #define TQUIC_PRIORITY_LEVELS 8
 
 /*
- * tquic_stream_lookup - Look up a stream by ID within a connection
+ * tquic_stream_lookup_locked - Look up a stream by ID within a connection
  * @conn: TQUIC connection
  * @stream_id: Stream ID to find
  *
- * Searches the connection's stream rb_tree for the given stream ID.
+ * CF-081: Searches the connection's stream rb_tree for the given stream ID.
  * Returns the stream pointer if found, NULL otherwise.
- * Caller must hold appropriate locks.
+ *
+ * IMPORTANT: conn->lock MUST be held by the caller and remains held on
+ * return. This ensures the returned stream pointer stays valid until the
+ * caller releases the lock, preventing use-after-free.
  */
-static struct tquic_stream *tquic_stream_lookup(struct tquic_connection *conn,
-						u64 stream_id)
+static struct tquic_stream *tquic_stream_lookup_locked(
+		struct tquic_connection *conn, u64 stream_id)
 {
 	struct rb_node *node;
 	struct tquic_stream *stream;
 
-	if (!conn)
-		return NULL;
+	lockdep_assert_held(&conn->lock);
 
-	spin_lock_bh(&conn->lock);
 	node = conn->streams.rb_node;
 	while (node) {
 		stream = rb_entry(node, struct tquic_stream, node);
-		if (stream_id < stream->id) {
+		if (stream_id < stream->id)
 			node = node->rb_left;
-		} else if (stream_id > stream->id) {
+		else if (stream_id > stream->id)
 			node = node->rb_right;
-		} else {
-			spin_unlock_bh(&conn->lock);
+		else
 			return stream;
-		}
 	}
-	spin_unlock_bh(&conn->lock);
 
 	return NULL;
 }
@@ -146,30 +144,40 @@ static int tquic_priority_queue_frame(struct tquic_connection *conn,
 static struct tquic_priority_stream_ext *
 tquic_stream_get_priority_ext(struct tquic_stream *stream)
 {
-	struct tquic_priority_stream_ext *ext;
+	struct tquic_priority_stream_ext *ext, *new_ext;
 
 	if (!stream)
 		return NULL;
 
-	/* Check if already allocated */
-	ext = stream->ext;
+	/* Check if already allocated (use READ_ONCE to prevent tearing) */
+	ext = READ_ONCE(stream->ext);
 	if (ext)
 		return ext;
 
 	/* Allocate new priority extension */
-	ext = kzalloc(sizeof(*ext), GFP_ATOMIC);
-	if (!ext)
+	new_ext = kzalloc(sizeof(*new_ext), GFP_ATOMIC);
+	if (!new_ext)
 		return NULL;
 
-	ext->stream = stream;
-	ext->urgency = TQUIC_PRIORITY_URGENCY_DEFAULT;
-	ext->incremental = 0;
-	ext->scheduled = 0;
-	INIT_LIST_HEAD(&ext->sched_node);
-	refcount_set(&ext->refcnt, 1);
+	new_ext->stream = stream;
+	new_ext->urgency = TQUIC_PRIORITY_URGENCY_DEFAULT;
+	new_ext->incremental = 0;
+	new_ext->scheduled = 0;
+	INIT_LIST_HEAD(&new_ext->sched_node);
+	refcount_set(&new_ext->refcnt, 1);
 
-	stream->ext = ext;
-	return ext;
+	/*
+	 * CF-612: Use cmpxchg to handle race where two threads both
+	 * see ext==NULL and try to allocate simultaneously.
+	 */
+	ext = cmpxchg(&stream->ext, NULL, new_ext);
+	if (ext) {
+		/* Another thread won the race, free our allocation */
+		kfree(new_ext);
+		return ext;
+	}
+
+	return new_ext;
 }
 
 /**
@@ -494,12 +502,21 @@ int tquic_stream_priority_update(struct tquic_connection *conn, u64 stream_id,
 	if (!conn)
 		return -EINVAL;
 
-	stream = tquic_stream_lookup(conn, stream_id);
-	if (!stream)
+	/*
+	 * CF-081: Hold conn->lock across both the stream lookup and the
+	 * priority update to prevent use-after-free. Without the lock,
+	 * the stream could be destroyed between lookup and use.
+	 */
+	spin_lock_bh(&conn->lock);
+	stream = tquic_stream_lookup_locked(conn, stream_id);
+	if (!stream) {
+		spin_unlock_bh(&conn->lock);
 		return -ENOENT;
+	}
 
 	err = tquic_stream_set_extensible_priority(stream, urgency,
 						   incremental);
+	spin_unlock_bh(&conn->lock);
 
 	return err;
 }

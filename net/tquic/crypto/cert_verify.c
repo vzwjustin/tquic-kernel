@@ -480,7 +480,11 @@ static int parse_san_extension(const u8 *data, u32 len,
 				size_t new_cap = name_capacity * 2;
 				char **new_names;
 
-				if (name_capacity >= 10000)
+				/*
+				 * CF-560: Tighten SAN name capacity limit.
+				 * 256 DNS names is generous for any real cert.
+				 */
+				if (name_capacity >= 256)
 					goto err_free;
 				new_names = krealloc_array(names, new_cap,
 							   sizeof(char *),
@@ -489,6 +493,16 @@ static int parse_san_extension(const u8 *data, u32 len,
 					goto err_free;
 				names = new_names;
 				name_capacity = new_cap;
+			}
+
+			/*
+			 * CF-413: Reject SAN DNS names containing embedded
+			 * NUL bytes to prevent truncation attacks where
+			 * "evil.com\0.good.com" matches "evil.com".
+			 */
+			if (memchr(p + 1 + hdr_len, 0, content_len)) {
+				p += 1 + hdr_len + content_len;
+				continue;
 			}
 
 			names[name_count] = kmalloc(content_len + 1, GFP_KERNEL);
@@ -660,9 +674,20 @@ static int parse_basic_constraints(const u8 *data, u32 len,
 
 	/* Optional CA BOOLEAN */
 	if (p < end && p[0] == 0x01) {  /* BOOLEAN */
-		if (p + 3 <= end) {
+		/*
+		 * CF-555: Parse the BOOLEAN properly instead of
+		 * hardcoding length=3.  DER BOOLEAN is always
+		 * 01 01 xx but validate the length byte.
+		 */
+		if (p + 2 <= end && p[1] == 0x01 && p + 3 <= end) {
 			*is_ca = (p[2] != 0);
 			p += 3;
+		} else if (p + 2 <= end) {
+			/* Non-standard BOOLEAN length - skip it */
+			u32 blen = p[1];
+
+			if (p + 2 + blen <= end)
+				p += 2 + blen;
 		}
 	}
 
@@ -1127,7 +1152,11 @@ static int parse_extensions(struct tquic_x509_cert *cert,
 								  &seq_content_len,
 								  &seq_total_len);
 					if (ret == 0) {
-						parse_san_extension(
+						/*
+						 * CF-360: Check and propagate
+						 * errors from SAN parsing.
+						 */
+						ret = parse_san_extension(
 							val + (seq_total_len - seq_content_len),
 							seq_content_len,
 							&cert->san_dns,
@@ -1135,6 +1164,8 @@ static int parse_extensions(struct tquic_x509_cert *cert,
 							&cert->san_ip,
 							&cert->san_ip_len,
 							&cert->san_ip_count);
+						if (ret < 0)
+							return ret;
 					}
 				}
 
@@ -1236,9 +1267,25 @@ static int parse_extensions(struct tquic_x509_cert *cert,
 /*
  * Parse UTC Time or Generalized Time
  */
+/*
+ * Parse a two-digit decimal field, validating that both characters are
+ * ASCII digits and that the resulting value is within [min_val, max_val].
+ * Returns 0 on success, -EINVAL on bad characters or out-of-range value.
+ */
+static int parse_2digit(const char *s, int min_val, int max_val, int *out)
+{
+	if (s[0] < '0' || s[0] > '9' || s[1] < '0' || s[1] > '9')
+		return -EINVAL;
+	*out = (s[0] - '0') * 10 + (s[1] - '0');
+	if (*out < min_val || *out > max_val)
+		return -EINVAL;
+	return 0;
+}
+
 static int parse_time(const u8 *data, u32 len, s64 *time_out)
 {
 	int year, month, day, hour, min, sec;
+	int yy;
 
 	if (len < 13)
 		return -EINVAL;
@@ -1246,36 +1293,77 @@ static int parse_time(const u8 *data, u32 len, s64 *time_out)
 	if (data[0] == ASN1_UTC_TIME) {
 		/* YYMMDDhhmmssZ */
 		u32 content_len, hdr_len;
-		int ret = asn1_get_length(data + 1, len - 1, &content_len, &hdr_len);
+		const char *t;
+		int ret = asn1_get_length(data + 1, len - 1,
+					  &content_len, &hdr_len);
 		if (ret < 0 || content_len < 12)
 			return -EINVAL;
 
-		const char *t = (const char *)data + 1 + hdr_len;
-		year = (t[0] - '0') * 10 + (t[1] - '0');
-		year += (year < 50) ? 2000 : 1900;
-		month = (t[2] - '0') * 10 + (t[3] - '0');
-		day = (t[4] - '0') * 10 + (t[5] - '0');
-		hour = (t[6] - '0') * 10 + (t[7] - '0');
-		min = (t[8] - '0') * 10 + (t[9] - '0');
-		sec = (t[10] - '0') * 10 + (t[11] - '0');
+		t = (const char *)data + 1 + hdr_len;
+
+		ret = parse_2digit(t, 0, 99, &yy);
+		if (ret < 0)
+			return ret;
+		year = yy + ((yy < 50) ? 2000 : 1900);
+
+		ret = parse_2digit(t + 2, 1, 12, &month);
+		if (ret < 0)
+			return ret;
+		ret = parse_2digit(t + 4, 1, 31, &day);
+		if (ret < 0)
+			return ret;
+		ret = parse_2digit(t + 6, 0, 23, &hour);
+		if (ret < 0)
+			return ret;
+		ret = parse_2digit(t + 8, 0, 59, &min);
+		if (ret < 0)
+			return ret;
+		ret = parse_2digit(t + 10, 0, 59, &sec);
+		if (ret < 0)
+			return ret;
 	} else if (data[0] == ASN1_GENERALIZED_TIME) {
 		/* YYYYMMDDhhmmssZ */
 		u32 content_len, hdr_len;
-		int ret = asn1_get_length(data + 1, len - 1, &content_len, &hdr_len);
+		const char *t;
+		int yy_hi, yy_lo;
+		int ret = asn1_get_length(data + 1, len - 1,
+					  &content_len, &hdr_len);
 		if (ret < 0 || content_len < 14)
 			return -EINVAL;
 
-		const char *t = (const char *)data + 1 + hdr_len;
-		year = (t[0] - '0') * 1000 + (t[1] - '0') * 100 +
-		       (t[2] - '0') * 10 + (t[3] - '0');
-		month = (t[4] - '0') * 10 + (t[5] - '0');
-		day = (t[6] - '0') * 10 + (t[7] - '0');
-		hour = (t[8] - '0') * 10 + (t[9] - '0');
-		min = (t[10] - '0') * 10 + (t[11] - '0');
-		sec = (t[12] - '0') * 10 + (t[13] - '0');
+		t = (const char *)data + 1 + hdr_len;
+
+		/* Year: 4 digits parsed as two 2-digit pairs */
+		ret = parse_2digit(t, 0, 99, &yy_hi);
+		if (ret < 0)
+			return ret;
+		ret = parse_2digit(t + 2, 0, 99, &yy_lo);
+		if (ret < 0)
+			return ret;
+		year = yy_hi * 100 + yy_lo;
+
+		ret = parse_2digit(t + 4, 1, 12, &month);
+		if (ret < 0)
+			return ret;
+		ret = parse_2digit(t + 6, 1, 31, &day);
+		if (ret < 0)
+			return ret;
+		ret = parse_2digit(t + 8, 0, 23, &hour);
+		if (ret < 0)
+			return ret;
+		ret = parse_2digit(t + 10, 0, 59, &min);
+		if (ret < 0)
+			return ret;
+		ret = parse_2digit(t + 12, 0, 59, &sec);
+		if (ret < 0)
+			return ret;
 	} else {
 		return -EINVAL;
 	}
+
+	/* Validate year range to prevent mktime64 issues */
+	if (year < 1970 || year > 9999)
+		return -EINVAL;
 
 	*time_out = mktime64(year, month, day, hour, min, sec);
 
@@ -1643,6 +1731,13 @@ struct tquic_x509_cert *tquic_x509_cert_parse(const u8 *data, u32 len, gfp_t gfp
 
 	/* Parse signature */
 	const u8 *after_tbs = cert->tbs + cert->tbs_len;
+
+	/* Validate tbs pointer is within parsed data bounds */
+	if (after_tbs < cert->tbs || after_tbs > p + content_len) {
+		tquic_x509_cert_free(cert);
+		return NULL;
+	}
+
 	u32 remaining = content_len - (after_tbs - p);
 
 	ret = parse_signature(cert, after_tbs, remaining);
@@ -1984,18 +2079,24 @@ int tquic_x509_verify_signature(const struct tquic_x509_cert *cert,
 	switch (cert->signature.pubkey_algo) {
 	case TQUIC_PUBKEY_ALGO_RSA:
 		/*
-		 * Currently only SHA-256 is supported for RSA/RSA-PSS
-		 * certificate signatures. Reject other hash algorithms
-		 * until full RSA-PSS AlgorithmIdentifier parameter
-		 * parsing is implemented.
+		 * Construct RSA algorithm name dynamically from the
+		 * certificate's hash algorithm.
 		 */
-		if (cert->signature.hash_algo != TQUIC_HASH_SHA256) {
-			pr_debug("tquic_cert: RSA-PSS with non-SHA-256 hash "
-				 "not yet supported (hash_algo=%d)\n",
+		switch (cert->signature.hash_algo) {
+		case TQUIC_HASH_SHA256:
+			alg_name = "pkcs1pad(rsa,sha256)";
+			break;
+		case TQUIC_HASH_SHA384:
+			alg_name = "pkcs1pad(rsa,sha384)";
+			break;
+		case TQUIC_HASH_SHA512:
+			alg_name = "pkcs1pad(rsa,sha512)";
+			break;
+		default:
+			pr_debug("tquic_cert: unsupported RSA hash algo %d\n",
 				 cert->signature.hash_algo);
 			return -EOPNOTSUPP;
 		}
-		alg_name = "pkcs1pad(rsa,sha256)";
 		break;
 	case TQUIC_PUBKEY_ALGO_ECDSA_P256:
 	case TQUIC_PUBKEY_ALGO_ECDSA_P384:
@@ -2136,6 +2237,183 @@ static int check_key_size(const struct tquic_cert_verify_ctx *ctx,
  * - OCSP stapling (data provided in TLS handshake)
  * - Basic CRL checking if CRL is pre-loaded
  */
+
+/*
+ * Parse a stapled OCSP response to extract the certificate status.
+ *
+ * Navigates the ASN.1 structure per RFC 6960 to extract:
+ *   - The OCSPResponseStatus (must be 0 = successful)
+ *   - The CertStatus from the first SingleResponse
+ *
+ * Returns:
+ *   0            certificate status is "good"
+ *   -EKEYREVOKED certificate is revoked
+ *   -ENODATA     status cannot be determined (parse error, unknown, or
+ *                non-successful response status)
+ */
+static int parse_ocsp_cert_status(const u8 *data, u32 len)
+{
+	const u8 *p = data;
+	u32 remaining = len;
+	u32 content_len, total_len, hdr_len;
+	u32 skip;
+	int ret;
+
+	/* Outer SEQUENCE (OCSPResponse) */
+	ret = asn1_get_tag_length(p, remaining, ASN1_SEQUENCE,
+				  &content_len, &total_len);
+	if (ret < 0)
+		return -ENODATA;
+	p += total_len - content_len;
+	remaining = content_len;
+
+	/* ENUMERATED responseStatus (tag 0x0A) */
+	if (remaining < 3 || p[0] != 0x0A)
+		return -ENODATA;
+	ret = asn1_get_length(p + 1, remaining - 1, &content_len, &hdr_len);
+	if (ret < 0 || content_len != 1)
+		return -ENODATA;
+
+	/* responseStatus must be 0 (successful) */
+	if (p[1 + hdr_len] != 0)
+		return -ENODATA;
+
+	skip = 1 + hdr_len + content_len;
+	p += skip;
+	remaining -= skip;
+
+	/* [0] EXPLICIT responseBytes */
+	if (remaining < 2 || p[0] != 0xA0)
+		return -ENODATA;
+	ret = asn1_get_length(p + 1, remaining - 1, &content_len, &hdr_len);
+	if (ret < 0)
+		return -ENODATA;
+	p += 1 + hdr_len;
+	remaining = content_len;
+
+	/* SEQUENCE (ResponseBytes) */
+	ret = asn1_get_tag_length(p, remaining, ASN1_SEQUENCE,
+				  &content_len, &total_len);
+	if (ret < 0)
+		return -ENODATA;
+	p += total_len - content_len;
+	remaining = content_len;
+
+	/* OID responseType -- skip */
+	ret = asn1_get_tag_length(p, remaining, ASN1_OID,
+				  &content_len, &total_len);
+	if (ret < 0)
+		return -ENODATA;
+	p += total_len;
+	remaining -= total_len;
+
+	/* OCTET STRING (contains DER-encoded BasicOCSPResponse) */
+	ret = asn1_get_tag_length(p, remaining, ASN1_OCTET_STRING,
+				  &content_len, &total_len);
+	if (ret < 0)
+		return -ENODATA;
+	p += total_len - content_len;
+	remaining = content_len;
+
+	/* SEQUENCE (BasicOCSPResponse) */
+	ret = asn1_get_tag_length(p, remaining, ASN1_SEQUENCE,
+				  &content_len, &total_len);
+	if (ret < 0)
+		return -ENODATA;
+	p += total_len - content_len;
+	remaining = content_len;
+
+	/* SEQUENCE (tbsResponseData) */
+	ret = asn1_get_tag_length(p, remaining, ASN1_SEQUENCE,
+				  &content_len, &total_len);
+	if (ret < 0)
+		return -ENODATA;
+	p += total_len - content_len;
+	remaining = content_len;
+
+	/* Optional [0] EXPLICIT version -- skip if present */
+	if (remaining > 0 && p[0] == 0xA0) {
+		ret = asn1_get_length(p + 1, remaining - 1,
+				      &content_len, &hdr_len);
+		if (ret < 0)
+			return -ENODATA;
+		skip = 1 + hdr_len + content_len;
+		if (skip > remaining)
+			return -ENODATA;
+		p += skip;
+		remaining -= skip;
+	}
+
+	/* ResponderID -- CHOICE: [1] byName or [2] byKey -- skip */
+	if (remaining < 2)
+		return -ENODATA;
+	if (p[0] != 0xA1 && p[0] != 0xA2)
+		return -ENODATA;
+	ret = asn1_get_length(p + 1, remaining - 1,
+			      &content_len, &hdr_len);
+	if (ret < 0)
+		return -ENODATA;
+	skip = 1 + hdr_len + content_len;
+	if (skip > remaining)
+		return -ENODATA;
+	p += skip;
+	remaining -= skip;
+
+	/* GeneralizedTime (producedAt) -- skip */
+	if (remaining < 2 || p[0] != ASN1_GENERALIZED_TIME)
+		return -ENODATA;
+	ret = asn1_get_length(p + 1, remaining - 1,
+			      &content_len, &hdr_len);
+	if (ret < 0)
+		return -ENODATA;
+	skip = 1 + hdr_len + content_len;
+	if (skip > remaining)
+		return -ENODATA;
+	p += skip;
+	remaining -= skip;
+
+	/* SEQUENCE OF SingleResponse (responses) */
+	ret = asn1_get_tag_length(p, remaining, ASN1_SEQUENCE,
+				  &content_len, &total_len);
+	if (ret < 0)
+		return -ENODATA;
+	p += total_len - content_len;
+	remaining = content_len;
+
+	/* First SingleResponse SEQUENCE */
+	ret = asn1_get_tag_length(p, remaining, ASN1_SEQUENCE,
+				  &content_len, &total_len);
+	if (ret < 0)
+		return -ENODATA;
+	p += total_len - content_len;
+	remaining = content_len;
+
+	/* CertID SEQUENCE -- skip */
+	ret = asn1_get_tag_length(p, remaining, ASN1_SEQUENCE,
+				  &content_len, &total_len);
+	if (ret < 0)
+		return -ENODATA;
+	if (total_len > remaining)
+		return -ENODATA;
+	p += total_len;
+	remaining -= total_len;
+
+	/* CertStatus -- the context-specific tag reveals the status */
+	if (remaining < 1)
+		return -ENODATA;
+
+	if (p[0] == 0x80) {
+		/* good [0] IMPLICIT NULL */
+		return 0;
+	} else if (p[0] == 0xA1) {
+		/* revoked [1] IMPLICIT RevokedInfo */
+		return -EKEYREVOKED;
+	}
+
+	/* unknown [2] or unrecognized -- cannot determine status */
+	return -ENODATA;
+}
+
 int tquic_check_revocation(struct tquic_cert_verify_ctx *ctx,
 			   const struct tquic_x509_cert *cert)
 {
@@ -2147,10 +2425,11 @@ int tquic_check_revocation(struct tquic_cert_verify_ctx *ctx,
 
 	/* Check OCSP stapling data if provided */
 	if (ctx->ocsp_stapling && ctx->ocsp_stapling_len > 0) {
+		int status;
+
 		/*
-		 * Minimal OCSP response validation (RFC 6960):
-		 * A stapled OCSP response must have a valid structure.
-		 * We check the outer SEQUENCE tag and minimum length.
+		 * OCSP response validation (RFC 6960):
+		 * Parse the response to extract the certificate status.
 		 * Full signature verification requires the OCSP responder's
 		 * certificate, which may not be available in kernel context.
 		 *
@@ -2167,21 +2446,43 @@ int tquic_check_revocation(struct tquic_cert_verify_ctx *ctx,
 			if (ctx->check_revocation == TQUIC_REVOKE_HARD_FAIL)
 				return -EKEYREVOKED;
 			/* Soft-fail: treat as if no OCSP data */
-		} else {
-			pr_debug("tquic_cert: OCSP stapling present (%u bytes)"
+			goto no_ocsp;
+		}
+
+		status = parse_ocsp_cert_status(ctx->ocsp_stapling,
+						ctx->ocsp_stapling_len);
+		if (status == 0) {
+			pr_debug("tquic_cert: OCSP status good (%u bytes)"
 				 " -- signature NOT verified in kernel\n",
 				 ctx->ocsp_stapling_len);
 			return 0;
 		}
+
+		if (status == -EKEYREVOKED) {
+			pr_warn("tquic_cert: OCSP response indicates "
+				"certificate is revoked\n");
+			return -EKEYREVOKED;
+		}
+
+		/*
+		 * Could not determine revocation status from the OCSP
+		 * response (parse error, non-successful response, or
+		 * unknown cert status).
+		 */
+		pr_warn("tquic_cert: OCSP response present but certificate "
+			"status could not be determined\n");
+		if (ctx->check_revocation == TQUIC_REVOKE_HARD_FAIL)
+			return -EKEYREVOKED;
 	}
 
+no_ocsp:
 	/*
-	 * Without OCSP stapling, we cannot perform online revocation
+	 * Without usable OCSP stapling, we cannot perform online revocation
 	 * checking from kernel context.  Hard-fail mode MUST reject.
 	 */
 	if (ctx->check_revocation == TQUIC_REVOKE_HARD_FAIL) {
 		pr_warn("tquic_cert: Revocation check required but no "
-			"OCSP stapling available -- rejecting\n");
+			"usable OCSP stapling available -- rejecting\n");
 		return -EKEYREVOKED;
 	}
 
@@ -2356,6 +2657,35 @@ static int verify_chain(struct tquic_cert_verify_ctx *ctx, bool is_server)
 			return ret;
 		}
 
+		/*
+		 * Verify issuer-subject linkage and signature BEFORE
+		 * checking trust anchors.  This ensures the chain is
+		 * properly linked and prevents accepting a certificate
+		 * that matches a trust anchor but was not actually
+		 * issued by it (CF-361).
+		 */
+		if (cert->next) {
+			/* Verify issuer-subject DN linkage */
+			if (cert->issuer_raw && cert->next->subject_raw) {
+				if (cert->issuer_raw_len !=
+				    cert->next->subject_raw_len ||
+				    crypto_memneq(cert->issuer_raw,
+						  cert->next->subject_raw,
+						  cert->issuer_raw_len)) {
+					ctx->error_code = TQUIC_CERT_ERR_SIG_VERIFY;
+					ctx->error_msg = "Issuer-subject linkage mismatch in chain";
+					return -EKEYREJECTED;
+				}
+			}
+
+			ret = tquic_x509_verify_signature(cert, cert->next);
+			if (ret < 0) {
+				ctx->error_code = TQUIC_CERT_ERR_SIG_VERIFY;
+				ctx->error_msg = "Certificate signature verification failed";
+				return ret;
+			}
+		}
+
 		/* Check if this certificate is a trust anchor */
 		ret = find_trust_anchor(ctx, cert);
 		if (ret == 0) {
@@ -2372,16 +2702,6 @@ static int verify_chain(struct tquic_cert_verify_ctx *ctx, bool is_server)
 			ctx->error_code = TQUIC_CERT_ERR_SELF_SIGNED;
 			ctx->error_msg = "Self-signed certificate not trusted";
 			return -ENOKEY;
-		}
-
-		/* Verify signature against next cert (issuer) */
-		if (cert->next) {
-			ret = tquic_x509_verify_signature(cert, cert->next);
-			if (ret < 0) {
-				ctx->error_code = TQUIC_CERT_ERR_SIG_VERIFY;
-				ctx->error_msg = "Certificate signature verification failed";
-				return ret;
-			}
 		}
 	}
 
@@ -2424,6 +2744,15 @@ int tquic_verify_cert_chain(struct tquic_cert_verify_ctx *ctx,
 
 		if (cert_len == 0 || p + cert_len > end)
 			break;
+
+		/* Early chain length check to avoid parsing excess certs */
+		if (ctx->chain_len >= TQUIC_MAX_CERT_CHAIN_LEN) {
+			ctx->error_code = TQUIC_CERT_ERR_CHAIN_TOO_LONG;
+			ctx->error_msg = "Certificate chain too long";
+			tquic_x509_chain_free(ctx->chain);
+			ctx->chain = NULL;
+			return -EMLINK;
+		}
 
 		struct tquic_x509_cert *cert = tquic_x509_cert_parse(p, cert_len, GFP_KERNEL);
 		if (!cert) {
@@ -2919,10 +3248,10 @@ static ssize_t tquic_proc_trusted_cas_write(struct file *file,
 	if (!capable(CAP_NET_ADMIN))
 		return -EPERM;
 
-	if (count > TQUIC_MAX_CERT_SIZE)
+	if (count > TQUIC_MAX_CERT_SIZE || count == 0)
 		return -EINVAL;
 
-	kbuf = kmalloc(count + 1, GFP_KERNEL);
+	kbuf = kmalloc(size_add(count, 1), GFP_KERNEL);
 	if (!kbuf)
 		return -ENOMEM;
 
@@ -3002,7 +3331,7 @@ int __init tquic_cert_verify_init(void)
 	/* Create procfs entries */
 	tquic_cert_proc_dir = proc_mkdir("tquic_cert", init_net.proc_net);
 	if (tquic_cert_proc_dir) {
-		proc_create("trusted_cas", 0644, tquic_cert_proc_dir,
+		proc_create("trusted_cas", 0600, tquic_cert_proc_dir,
 			    &tquic_proc_trusted_cas_ops);
 		proc_create("config", 0444, tquic_cert_proc_dir,
 			    &tquic_proc_verify_config_ops);
