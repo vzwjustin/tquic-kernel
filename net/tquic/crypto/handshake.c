@@ -1223,9 +1223,19 @@ static int tquic_hs_build_ch_extensions(struct tquic_handshake *hs,
 		u32 i;
 
 		for (i = 0; i < hs->psk_count; i++) {
-			identities_len += 2 + hs->psk_identities[i].identity_len + 4;
+			u32 entry_len = 2 + hs->psk_identities[i].identity_len + 4;
+
+			/* Guard against u32 overflow */
+			if (entry_len < hs->psk_identities[i].identity_len ||
+			    identities_len + entry_len < identities_len)
+				return -EOVERFLOW;
+			identities_len += entry_len;
 			binders_len += 1 + hs->hash_len;
 		}
+
+		/* Ensure PSK extension fits in remaining buffer */
+		if (p + 4 + 2 + identities_len + 2 + binders_len > buf + buf_len)
+			return -ENOSPC;
 
 		*p++ = (TLS_EXT_PRE_SHARED_KEY >> 8) & 0xff;
 		*p++ = TLS_EXT_PRE_SHARED_KEY & 0xff;

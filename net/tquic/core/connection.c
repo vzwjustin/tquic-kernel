@@ -1208,6 +1208,13 @@ int tquic_validate_retry_token(struct tquic_connection *conn,
 	/* Ciphertext length excludes nonce */
 	ciphertext_len = token_len - TQUIC_RETRY_TOKEN_IV_LEN;
 
+	/* Validate ciphertext fits in the decryption buffer */
+	if (ciphertext_len > sizeof(plaintext)) {
+		tquic_conn_dbg(conn, "retry token too large (%u > %zu)\n",
+			       ciphertext_len, sizeof(plaintext));
+		return -EINVAL;
+	}
+
 	/* Allocate AEAD request */
 	req = aead_request_alloc(tquic_retry_aead, GFP_ATOMIC);
 	if (!req)
@@ -1929,9 +1936,15 @@ int tquic_conn_process_handshake(struct tquic_connection *conn,
 
 				/* Skip past header to find CRYPTO frame */
 				hdr_offset = 5;  /* first_byte + version */
+				if (hdr_offset >= len)
+					return 0;
 				dcid_len = data[hdr_offset++];
+				if (hdr_offset + dcid_len >= len)
+					return 0;
 				hdr_offset += dcid_len;
 				scid_len = data[hdr_offset++];
+				if (hdr_offset + scid_len >= len)
+					return 0;
 				hdr_offset += scid_len;
 
 				/* Parse token length (varint) for Initial */
@@ -2445,14 +2458,22 @@ int tquic_conn_server_accept(struct tquic_connection *conn,
 
 	if (!tquic_version_is_supported(version)) {
 		/* Send Version Negotiation */
-		/* Extract CIDs first for VN response */
+		/* Extract CIDs first for VN response -- validate bounds */
 		offset = 5;
+		if (offset >= len)
+			return -EINVAL;
 		dcid_len = data[offset++];
+		if (dcid_len > TQUIC_MAX_CID_LEN || offset + dcid_len > len)
+			return -EINVAL;
 		memcpy(dcid.id, data + offset, dcid_len);
 		dcid.len = dcid_len;
 		offset += dcid_len;
 
+		if (offset >= len)
+			return -EINVAL;
 		scid_len = data[offset++];
+		if (scid_len > TQUIC_MAX_CID_LEN || offset + scid_len > len)
+			return -EINVAL;
 		memcpy(scid.id, data + offset, scid_len);
 		scid.len = scid_len;
 

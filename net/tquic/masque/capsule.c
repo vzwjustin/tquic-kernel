@@ -846,7 +846,9 @@ int capsule_send(struct tquic_stream *stream, struct capsule *cap)
 	if (!stream || !cap)
 		return -EINVAL;
 
-	/* Calculate buffer size */
+	/* Calculate buffer size -- guard against addition overflow */
+	if (cap->length > SIZE_MAX - CAPSULE_MAX_HEADER_SIZE)
+		return -EOVERFLOW;
 	buf_len = CAPSULE_MAX_HEADER_SIZE + cap->length;
 
 	buf = kmalloc(buf_len, GFP_KERNEL);
@@ -890,7 +892,9 @@ int capsule_send_raw(struct tquic_stream *stream, u64 type,
 	if (payload_len > 0 && !payload)
 		return -EINVAL;
 
-	/* Calculate buffer size */
+	/* Calculate buffer size -- guard against addition overflow */
+	if (payload_len > SIZE_MAX - CAPSULE_MAX_HEADER_SIZE)
+		return -EOVERFLOW;
 	buf_len = CAPSULE_MAX_HEADER_SIZE + payload_len;
 
 	buf = kmalloc(buf_len, GFP_KERNEL);
