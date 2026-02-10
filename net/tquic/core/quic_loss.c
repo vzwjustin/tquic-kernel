@@ -19,6 +19,9 @@
 #include "../diag/trace.h"
 #include "../tquic_debug.h"
 
+/* Maximum PTO probes before declaring connection dead */
+#define TQUIC_MAX_PTO_COUNT		6
+
 /* Forward declarations */
 void tquic_loss_detection_detect_lost(struct tquic_connection *conn, u8 pn_space_idx);
 
@@ -614,6 +617,22 @@ void tquic_loss_detection_on_ack_received(struct tquic_connection *conn,
 		return;
 
 	/*
+	 * RFC 9000 Section 13.1: If an endpoint receives an ACK frame
+	 * that acknowledges a packet number it has not yet sent, it
+	 * SHOULD signal a connection error of type PROTOCOL_VIOLATION.
+	 */
+	if (ack->largest_acked > pn_space->largest_sent) {
+		tquic_dbg("ACK for unsent pkt: largest_acked=%llu > largest_sent=%llu in space %u\n",
+			 ack->largest_acked, pn_space->largest_sent,
+			 pn_space_idx);
+		conn->error_code = EQUIC_PROTOCOL_VIOLATION;
+		tquic_conn_close_with_error(conn,
+			EQUIC_PROTOCOL_VIOLATION,
+			"ACK for unsent packet");
+		return;
+	}
+
+	/*
 	 * RFC 9002 Section 5.1:
 	 * If the largest_acked is less than the largest acked packet number,
 	 * this ACK is not advancing our knowledge and can be ignored.
@@ -1189,6 +1208,21 @@ void tquic_loss_detection_on_timeout(struct tquic_connection *conn)
 
 	if (pto_space >= 0) {
 		conn->pto_count++;
+
+		/*
+		 * Limit PTO probes to prevent connections from persisting
+		 * indefinitely when the peer is unreachable.
+		 * TQUIC_MAX_PTO_COUNT defined at top of this file.
+		 */
+		if (conn->pto_count > TQUIC_MAX_PTO_COUNT) {
+			tquic_conn_info(conn,
+					"PTO limit exceeded (%u), closing\n",
+					conn->pto_count);
+			conn->error_code = 0;
+			conn->state = TQUIC_CONN_DRAINING;
+			conn->draining = true;
+			return;
+		}
 
 		/*
 		 * RFC 9002 Section 6.2.4:

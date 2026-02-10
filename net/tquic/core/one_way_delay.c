@@ -405,10 +405,10 @@ int tquic_owd_init(struct tquic_owd_state *owd, u64 local_resolution_us)
 	    local_resolution_us > TQUIC_OWD_MAX_RESOLUTION_US)
 		return -ERANGE;
 
-	spin_lock(&owd->lock);
+	spin_lock_bh(&owd->lock);
 	owd->local_resolution_us = local_resolution_us;
 	owd->reference_time = ktime_get();
-	spin_unlock(&owd->lock);
+	spin_unlock_bh(&owd->lock);
 
 	return 0;
 }
@@ -424,7 +424,7 @@ int tquic_owd_enable(struct tquic_owd_state *owd, u64 peer_resolution_us)
 	    peer_resolution_us > TQUIC_OWD_MAX_RESOLUTION_US)
 		return -ERANGE;
 
-	spin_lock(&owd->lock);
+	spin_lock_bh(&owd->lock);
 
 	owd->peer_resolution_us = peer_resolution_us;
 
@@ -434,7 +434,7 @@ int tquic_owd_enable(struct tquic_owd_state *owd, u64 peer_resolution_us)
 
 	owd->flags |= TQUIC_OWD_FLAG_ENABLED | TQUIC_OWD_FLAG_ACTIVE;
 
-	spin_unlock(&owd->lock);
+	spin_unlock_bh(&owd->lock);
 
 	pr_debug("tquic_owd: enabled with resolution %llu us\n",
 		 owd->effective_resolution_us);
@@ -446,12 +446,11 @@ EXPORT_SYMBOL_GPL(tquic_owd_enable);
 void tquic_owd_reset(struct tquic_owd_state *owd)
 {
 	struct tquic_owd_timestamp_record *rec, *tmp;
-	unsigned long flags;
 
 	if (!owd)
 		return;
 
-	spin_lock_irqsave(&owd->lock, flags);
+	spin_lock_bh(&owd->lock);
 
 	/* Free timestamp records */
 	list_for_each_entry_safe(rec, tmp, &owd->ts_records_list, list) {
@@ -482,7 +481,7 @@ void tquic_owd_reset(struct tquic_owd_state *owd)
 	/* Reset reference time */
 	owd->reference_time = ktime_get();
 
-	spin_unlock_irqrestore(&owd->lock, flags);
+	spin_unlock_bh(&owd->lock);
 }
 EXPORT_SYMBOL_GPL(tquic_owd_reset);
 
@@ -786,7 +785,6 @@ int tquic_owd_on_packet_sent(struct tquic_owd_state *owd, u64 pn,
 			     ktime_t send_time, u32 path_id)
 {
 	struct tquic_owd_timestamp_record *rec;
-	unsigned long flags;
 	int ret;
 
 	if (!owd)
@@ -799,7 +797,7 @@ int tquic_owd_on_packet_sent(struct tquic_owd_state *owd, u64 pn,
 	if (!rec)
 		return -ENOMEM;
 
-	spin_lock_irqsave(&owd->lock, flags);
+	spin_lock_bh(&owd->lock);
 
 	/* Clean up old records if needed */
 	if (owd->ts_records_count >= MAX_TS_RECORDS)
@@ -807,12 +805,12 @@ int tquic_owd_on_packet_sent(struct tquic_owd_state *owd, u64 pn,
 
 	ret = ts_record_insert(owd, rec);
 	if (ret < 0) {
-		spin_unlock_irqrestore(&owd->lock, flags);
+		spin_unlock_bh(&owd->lock);
 		ts_record_free(rec);
 		return ret;
 	}
 
-	spin_unlock_irqrestore(&owd->lock, flags);
+	spin_unlock_bh(&owd->lock);
 	return 0;
 }
 EXPORT_SYMBOL_GPL(tquic_owd_on_packet_sent);
@@ -966,7 +964,6 @@ int tquic_owd_on_ack_1wd_received(struct tquic_owd_state *owd,
 {
 	struct tquic_owd_timestamp_record *rec;
 	struct tquic_owd_sample sample;
-	unsigned long flags;
 	int ret;
 
 	if (!owd || !frame)
@@ -975,12 +972,12 @@ int tquic_owd_on_ack_1wd_received(struct tquic_owd_state *owd,
 	if (!(owd->flags & TQUIC_OWD_FLAG_ENABLED))
 		return 0;
 
-	spin_lock_irqsave(&owd->lock, flags);
+	spin_lock_bh(&owd->lock);
 
 	/* Find the send timestamp for the largest acknowledged packet */
 	rec = ts_record_lookup(owd, frame->largest_acked);
 	if (!rec) {
-		spin_unlock_irqrestore(&owd->lock, flags);
+		spin_unlock_bh(&owd->lock);
 		return -ENOENT;  /* No record found - packet too old */
 	}
 
@@ -988,7 +985,7 @@ int tquic_owd_on_ack_1wd_received(struct tquic_owd_state *owd,
 	ret = tquic_owd_calculate(owd, rec->send_time, frame->receive_timestamp,
 				  recv_time, &sample);
 	if (ret < 0) {
-		spin_unlock_irqrestore(&owd->lock, flags);
+		spin_unlock_bh(&owd->lock);
 		return ret;
 	}
 
@@ -1006,7 +1003,7 @@ int tquic_owd_on_ack_1wd_received(struct tquic_owd_state *owd,
 	ts_record_remove(owd, rec);
 	ts_record_free(rec);
 
-	spin_unlock_irqrestore(&owd->lock, flags);
+	spin_unlock_bh(&owd->lock);
 
 	return 0;
 }

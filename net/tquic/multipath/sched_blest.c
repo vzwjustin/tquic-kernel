@@ -290,10 +290,14 @@ static int blest_get_path(struct tquic_connection *conn,
 
 	/* Single path: no blocking estimation needed */
 	if (active_count == 1) {
+		spin_unlock_irqrestore(&sd->lock, irqflags);
+		if (!tquic_path_get(fast_path)) {
+			rcu_read_unlock();
+			return -ENOENT;
+		}
 		result->primary = fast_path;
 		result->backup = NULL;
 		result->flags = 0;
-		spin_unlock_irqrestore(&sd->lock, irqflags);
 		rcu_read_unlock();
 		return 0;
 	}
@@ -355,14 +359,29 @@ static int blest_get_path(struct tquic_connection *conn,
 	if (!best)
 		best = fast_path;  /* Default to fast path if all block */
 
-	result->primary = best;
-	result->backup = (best != fast_path) ? fast_path : NULL;
-	result->flags = 0;
-
 	/* Update current path tracking */
 	sd->current_path_id = best->path_id;
 
 	spin_unlock_irqrestore(&sd->lock, irqflags);
+
+	/*
+	 * Take references on path pointers before leaving RCU section.
+	 * Callers must call tquic_path_put() when done with the result.
+	 */
+	if (!tquic_path_get(best)) {
+		rcu_read_unlock();
+		return -ENOENT;
+	}
+
+	result->primary = best;
+	result->backup = NULL;
+	result->flags = 0;
+
+	if (best != fast_path && fast_path) {
+		if (tquic_path_get(fast_path))
+			result->backup = fast_path;
+	}
+
 	rcu_read_unlock();
 	return 0;
 }

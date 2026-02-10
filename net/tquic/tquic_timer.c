@@ -1699,6 +1699,18 @@ int tquic_timer_on_ack_received(struct tquic_timer_state *ts, int pn_space,
 
 	spin_lock_bh(&pns->lock);
 
+	/*
+	 * RFC 9000 Section 13.1: If an endpoint receives an ACK frame
+	 * that acknowledges a packet number it has not yet sent, it
+	 * SHOULD signal a connection error of type PROTOCOL_VIOLATION.
+	 */
+	if (largest_acked > pns->largest_sent) {
+		spin_unlock_bh(&pns->lock);
+		tquic_dbg("ACK for unsent pkt: largest_acked=%llu > largest_sent=%llu in space %u\n",
+			 largest_acked, pns->largest_sent, pn_space);
+		return -EPROTO;
+	}
+
 	/* Update largest acked */
 	if (pns->largest_acked == U64_MAX || largest_acked > pns->largest_acked) {
 		pns->largest_acked = largest_acked;

@@ -162,14 +162,14 @@ void tquic_receive_ts_destroy(struct tquic_receive_ts_state *state)
 	if (!state)
 		return;
 
-	spin_lock(&state->lock);
+	spin_lock_bh(&state->lock);
 
 	if (state->ring_buffer) {
 		kvfree(state->ring_buffer);
 		state->ring_buffer = NULL;
 	}
 
-	spin_unlock(&state->lock);
+	spin_unlock_bh(&state->lock);
 
 	pr_debug("tquic: receive timestamps state destroyed\n");
 }
@@ -186,7 +186,7 @@ void tquic_receive_ts_reset(struct tquic_receive_ts_state *state)
 	if (!state)
 		return;
 
-	spin_lock(&state->lock);
+	spin_lock_bh(&state->lock);
 
 	/* Clear ring buffer */
 	for (i = 0; i < TQUIC_RECEIVE_TS_RINGBUF_SIZE; i++)
@@ -201,7 +201,7 @@ void tquic_receive_ts_reset(struct tquic_receive_ts_state *state)
 	state->timestamp_basis_us = 0;
 	state->timestamp_basis_pn = 0;
 
-	spin_unlock(&state->lock);
+	spin_unlock_bh(&state->lock);
 
 	pr_debug("tquic: receive timestamps state reset\n");
 }
@@ -222,7 +222,7 @@ void tquic_receive_ts_set_local_params(struct tquic_receive_ts_state *state,
 	if (!state)
 		return;
 
-	spin_lock(&state->lock);
+	spin_lock_bh(&state->lock);
 
 	/* Clamp values to valid ranges */
 	if (max_timestamps > TQUIC_MAX_RECEIVE_TIMESTAMPS)
@@ -234,7 +234,7 @@ void tquic_receive_ts_set_local_params(struct tquic_receive_ts_state *state,
 	state->params.max_receive_timestamps_per_ack = max_timestamps;
 	state->params.receive_timestamps_exponent = exponent;
 
-	spin_unlock(&state->lock);
+	spin_unlock_bh(&state->lock);
 
 	pr_debug("tquic: local receive ts params: max=%u exp=%u\n",
 		 max_timestamps, exponent);
@@ -250,7 +250,7 @@ void tquic_receive_ts_set_peer_params(struct tquic_receive_ts_state *state,
 	if (!state)
 		return;
 
-	spin_lock(&state->lock);
+	spin_lock_bh(&state->lock);
 
 	/*
 	 * Store peer's parameters. The peer's max_timestamps tells us
@@ -267,7 +267,7 @@ void tquic_receive_ts_set_peer_params(struct tquic_receive_ts_state *state,
 	state->max_timestamps = (u32)max_timestamps;
 	state->exponent = exponent;
 
-	spin_unlock(&state->lock);
+	spin_unlock_bh(&state->lock);
 
 	pr_debug("tquic: peer receive ts params: max=%llu exp=%u\n",
 		 max_timestamps, exponent);
@@ -282,7 +282,7 @@ bool tquic_receive_ts_negotiate(struct tquic_receive_ts_state *state)
 	if (!state)
 		return false;
 
-	spin_lock(&state->lock);
+	spin_lock_bh(&state->lock);
 
 	/*
 	 * Extension is enabled if both sides advertised support.
@@ -299,7 +299,7 @@ bool tquic_receive_ts_negotiate(struct tquic_receive_ts_state *state)
 		pr_debug("tquic: receive timestamps extension not negotiated\n");
 	}
 
-	spin_unlock(&state->lock);
+	spin_unlock_bh(&state->lock);
 
 	return state->params.enabled;
 }
@@ -315,9 +315,9 @@ bool tquic_receive_ts_is_enabled(struct tquic_receive_ts_state *state)
 	if (!state)
 		return false;
 
-	spin_lock(&state->lock);
+	spin_lock_bh(&state->lock);
 	enabled = state->params.enabled;
-	spin_unlock(&state->lock);
+	spin_unlock_bh(&state->lock);
 
 	return enabled;
 }
@@ -341,7 +341,7 @@ int tquic_receive_ts_record(struct tquic_receive_ts_state *state,
 	if (!state || !state->ring_buffer)
 		return -EINVAL;
 
-	spin_lock(&state->lock);
+	spin_lock_bh(&state->lock);
 
 	/* Set timestamp basis on first packet if not set */
 	if (!state->timestamp_basis_set) {
@@ -367,7 +367,7 @@ int tquic_receive_ts_record(struct tquic_receive_ts_state *state,
 	if (state->ring_count < TQUIC_RECEIVE_TS_RINGBUF_SIZE)
 		state->ring_count++;
 
-	spin_unlock(&state->lock);
+	spin_unlock_bh(&state->lock);
 
 	return 0;
 }
@@ -385,7 +385,7 @@ int tquic_receive_ts_lookup(struct tquic_receive_ts_state *state,
 	if (!state || !state->ring_buffer || !recv_time_us)
 		return -EINVAL;
 
-	spin_lock(&state->lock);
+	spin_lock_bh(&state->lock);
 
 	/* Search backwards from head (most recent first) */
 	for (i = 0; i < state->ring_count; i++) {
@@ -399,7 +399,7 @@ int tquic_receive_ts_lookup(struct tquic_receive_ts_state *state,
 		}
 	}
 
-	spin_unlock(&state->lock);
+	spin_unlock_bh(&state->lock);
 	return ret;
 }
 EXPORT_SYMBOL_GPL(tquic_receive_ts_lookup);
@@ -577,10 +577,10 @@ ssize_t tquic_receive_ts_encode(struct tquic_receive_ts_state *state,
 	if (!state->params.enabled)
 		return 0;
 
-	spin_lock(&state->lock);
+	spin_lock_bh(&state->lock);
 
 	if (!state->timestamp_basis_set) {
-		spin_unlock(&state->lock);
+		spin_unlock_bh(&state->lock);
 		return 0;  /* No basis set yet */
 	}
 
@@ -588,7 +588,7 @@ ssize_t tquic_receive_ts_encode(struct tquic_receive_ts_state *state,
 				      largest_acked, buf, buf_len,
 				      &timestamps_encoded);
 
-	spin_unlock(&state->lock);
+	spin_unlock_bh(&state->lock);
 
 	pr_debug("tquic: encoded %u receive timestamps (%zd bytes)\n",
 		 timestamps_encoded, ret > 0 ? ret : 0);
@@ -716,9 +716,9 @@ ssize_t tquic_receive_ts_decode(struct tquic_receive_ts_state *state,
 		}
 	}
 
-	spin_lock(&state->lock);
+	spin_lock_bh(&state->lock);
 	state->timestamps_received += range_count;
-	spin_unlock(&state->lock);
+	spin_unlock_bh(&state->lock);
 
 	return offset;
 
@@ -760,10 +760,10 @@ s64 tquic_receive_ts_get_owd(struct tquic_receive_ts_state *state,
 	if (!state)
 		return -EINVAL;
 
-	spin_lock(&state->lock);
+	spin_lock_bh(&state->lock);
 
 	if (!state->timestamp_basis_set) {
-		spin_unlock(&state->lock);
+		spin_unlock_bh(&state->lock);
 		return -ENODATA;
 	}
 
@@ -776,7 +776,7 @@ s64 tquic_receive_ts_get_owd(struct tquic_receive_ts_state *state,
 	 */
 	sent_us = ktime_to_us_relative(sent_time, state->timestamp_basis);
 
-	spin_unlock(&state->lock);
+	spin_unlock_bh(&state->lock);
 
 	/* This is signed because clocks may be unsynchronized */
 	return (s64)peer_recv_timestamp - (s64)sent_us;
@@ -798,14 +798,14 @@ void tquic_receive_ts_set_basis(struct tquic_receive_ts_state *state,
 	if (!state)
 		return;
 
-	spin_lock(&state->lock);
+	spin_lock_bh(&state->lock);
 
 	state->timestamp_basis = basis_time;
 	state->timestamp_basis_us = 0;
 	state->timestamp_basis_pn = basis_pn;
 	state->timestamp_basis_set = true;
 
-	spin_unlock(&state->lock);
+	spin_unlock_bh(&state->lock);
 
 	pr_debug("tquic: timestamp basis set: pn=%llu\n", basis_pn);
 }
@@ -822,7 +822,7 @@ bool tquic_receive_ts_get_basis(struct tquic_receive_ts_state *state,
 	if (!state)
 		return false;
 
-	spin_lock(&state->lock);
+	spin_lock_bh(&state->lock);
 
 	is_set = state->timestamp_basis_set;
 	if (is_set) {
@@ -832,7 +832,7 @@ bool tquic_receive_ts_get_basis(struct tquic_receive_ts_state *state,
 			*basis_pn = state->timestamp_basis_pn;
 	}
 
-	spin_unlock(&state->lock);
+	spin_unlock_bh(&state->lock);
 
 	return is_set;
 }
@@ -855,7 +855,7 @@ void tquic_receive_ts_get_stats(struct tquic_receive_ts_state *state,
 	if (!state)
 		return;
 
-	spin_lock(&state->lock);
+	spin_lock_bh(&state->lock);
 
 	if (timestamps_sent)
 		*timestamps_sent = state->timestamps_sent;
@@ -866,7 +866,7 @@ void tquic_receive_ts_get_stats(struct tquic_receive_ts_state *state,
 				    TQUIC_RECEIVE_TS_RINGBUF_SIZE;
 	}
 
-	spin_unlock(&state->lock);
+	spin_unlock_bh(&state->lock);
 }
 EXPORT_SYMBOL_GPL(tquic_receive_ts_get_stats);
 

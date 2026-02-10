@@ -96,7 +96,7 @@ static int rx_buf_write(struct quic_tcp_rx_buffer *buf,
 {
 	size_t free_space;
 
-	spin_lock(&buf->lock);
+	spin_lock_bh(&buf->lock);
 
 	/* Compact buffer if needed */
 	if (buf->head > 0 && buf->tail + len > buf->size) {
@@ -108,14 +108,14 @@ static int rx_buf_write(struct quic_tcp_rx_buffer *buf,
 
 	free_space = rx_buf_free_space(buf);
 	if (len > free_space) {
-		spin_unlock(&buf->lock);
+		spin_unlock_bh(&buf->lock);
 		return -ENOSPC;
 	}
 
 	memcpy(buf->data + buf->tail, data, len);
 	buf->tail += len;
 
-	spin_unlock(&buf->lock);
+	spin_unlock_bh(&buf->lock);
 	return len;
 }
 
@@ -124,7 +124,7 @@ static int rx_buf_read(struct quic_tcp_rx_buffer *buf,
 {
 	size_t avail;
 
-	spin_lock(&buf->lock);
+	spin_lock_bh(&buf->lock);
 
 	avail = rx_buf_used(buf);
 	if (len > avail)
@@ -135,7 +135,7 @@ static int rx_buf_read(struct quic_tcp_rx_buffer *buf,
 		buf->head += len;
 	}
 
-	spin_unlock(&buf->lock);
+	spin_unlock_bh(&buf->lock);
 	return len;
 }
 
@@ -144,7 +144,7 @@ static int rx_buf_peek(struct quic_tcp_rx_buffer *buf,
 {
 	size_t avail;
 
-	spin_lock(&buf->lock);
+	spin_lock_bh(&buf->lock);
 
 	avail = rx_buf_used(buf);
 	if (len > avail)
@@ -153,15 +153,15 @@ static int rx_buf_peek(struct quic_tcp_rx_buffer *buf,
 	if (len > 0)
 		memcpy(data, buf->data + buf->head, len);
 
-	spin_unlock(&buf->lock);
+	spin_unlock_bh(&buf->lock);
 	return len;
 }
 
 static void rx_buf_consume(struct quic_tcp_rx_buffer *buf, size_t len)
 {
-	spin_lock(&buf->lock);
+	spin_lock_bh(&buf->lock);
 	buf->head += min(len, rx_buf_used(buf));
-	spin_unlock(&buf->lock);
+	spin_unlock_bh(&buf->lock);
 }
 
 /* TX buffer functions */
@@ -216,11 +216,11 @@ void quic_tcp_update_recv_window(struct quic_tcp_connection *conn)
 	if (!conn)
 		return;
 
-	spin_lock(&conn->rx_buf.lock);
+	spin_lock_bh(&conn->rx_buf.lock);
 	buf_used = rx_buf_used(&conn->rx_buf);
-	spin_unlock(&conn->rx_buf.lock);
+	spin_unlock_bh(&conn->rx_buf.lock);
 
-	spin_lock(&fc->lock);
+	spin_lock_bh(&fc->lock);
 
 	was_blocked = fc->recv_blocked;
 	fc->recv_window = QUIC_TCP_RX_BUF_SIZE - buf_used;
@@ -239,7 +239,7 @@ void quic_tcp_update_recv_window(struct quic_tcp_connection *conn)
 	now_blocked = fc->recv_blocked;
 	fc->last_window_update = ktime_get();
 
-	spin_unlock(&fc->lock);
+	spin_unlock_bh(&fc->lock);
 
 	/* Notify on state transition */
 	if (was_blocked != now_blocked)
@@ -263,7 +263,7 @@ u64 quic_tcp_get_send_credit(struct quic_tcp_connection *conn)
 
 	fc = &conn->flow_ctrl;
 
-	spin_lock(&fc->lock);
+	spin_lock_bh(&fc->lock);
 	if (fc->send_blocked) {
 		credit = 0;
 	} else {
@@ -273,7 +273,7 @@ u64 quic_tcp_get_send_credit(struct quic_tcp_connection *conn)
 		else
 			credit = 0;
 	}
-	spin_unlock(&fc->lock);
+	spin_unlock_bh(&fc->lock);
 
 	return credit;
 }
@@ -366,14 +366,14 @@ static void cc_state_update_from_tcp(struct quic_tcp_connection *conn)
 	if (!tp)
 		return;
 
-	spin_lock(&conn->cc_state.lock);
+	spin_lock_bh(&conn->cc_state.lock);
 
 	conn->cc_state.tcp_cwnd = tp->snd_cwnd * tp->mss_cache;
 	conn->cc_state.tcp_rtt = tp->srtt_us >> 3;  /* Convert from shifted value */
 	conn->cc_state.tcp_rtt_var = tp->mdev_us >> 2;  /* RTT variance */
 	conn->cc_state.last_update = ktime_get();
 
-	spin_unlock(&conn->cc_state.lock);
+	spin_unlock_bh(&conn->cc_state.lock);
 }
 
 int quic_tcp_get_cc_info(struct quic_tcp_connection *conn,
@@ -385,7 +385,7 @@ int quic_tcp_get_cc_info(struct quic_tcp_connection *conn,
 	/* Refresh CC state from TCP */
 	cc_state_update_from_tcp(conn);
 
-	spin_lock(&conn->cc_state.lock);
+	spin_lock_bh(&conn->cc_state.lock);
 
 	if (cwnd)
 		*cwnd = conn->cc_state.tcp_cwnd;
@@ -394,7 +394,7 @@ int quic_tcp_get_cc_info(struct quic_tcp_connection *conn,
 	if (rtt_var)
 		*rtt_var = conn->cc_state.tcp_rtt_var;
 
-	spin_unlock(&conn->cc_state.lock);
+	spin_unlock_bh(&conn->cc_state.lock);
 
 	return 0;
 }
@@ -408,9 +408,9 @@ int quic_tcp_set_cc_mode(struct quic_tcp_connection *conn, int mode)
 	if (mode < QUIC_TCP_CC_DISABLED || mode > QUIC_TCP_CC_ADAPTIVE)
 		return -EINVAL;
 
-	spin_lock(&conn->cc_state.lock);
+	spin_lock_bh(&conn->cc_state.lock);
 	conn->cc_state.mode = mode;
-	spin_unlock(&conn->cc_state.lock);
+	spin_unlock_bh(&conn->cc_state.lock);
 
 	pr_debug("quic_tcp: CC mode set to %d\n", mode);
 	return 0;
@@ -422,7 +422,7 @@ void quic_tcp_on_loss_event(struct quic_tcp_connection *conn)
 	if (!conn)
 		return;
 
-	spin_lock(&conn->cc_state.lock);
+	spin_lock_bh(&conn->cc_state.lock);
 	conn->cc_state.loss_events++;
 
 	/*
@@ -436,7 +436,7 @@ void quic_tcp_on_loss_event(struct quic_tcp_connection *conn)
 			 conn->cc_state.loss_events);
 	}
 
-	spin_unlock(&conn->cc_state.lock);
+	spin_unlock_bh(&conn->cc_state.lock);
 }
 EXPORT_SYMBOL_GPL(quic_tcp_on_loss_event);
 
@@ -708,10 +708,10 @@ static void quic_tcp_write_space(struct sock *sk)
 		bool was_blocked;
 
 		/* Update flow control state */
-		spin_lock(&conn->flow_ctrl.lock);
+		spin_lock_bh(&conn->flow_ctrl.lock);
 		was_blocked = conn->flow_ctrl.send_blocked;
 		conn->flow_ctrl.send_blocked = false;
-		spin_unlock(&conn->flow_ctrl.lock);
+		spin_unlock_bh(&conn->flow_ctrl.lock);
 
 		/* Notify if we transitioned from blocked to unblocked */
 		if (was_blocked)
@@ -938,14 +938,14 @@ int quic_tcp_send(struct quic_tcp_connection *conn,
 		return -EAGAIN;
 	}
 
-	spin_lock(&tx->lock);
+	spin_lock_bh(&tx->lock);
 
 	/* Check if we should flush first */
 	if (tx->len + sizeof(len_be) + len > tx->size ||
 	    tx->packets >= QUIC_TCP_MAX_COALESCE) {
-		spin_unlock(&tx->lock);
+		spin_unlock_bh(&tx->lock);
 		quic_tcp_flush(conn);
-		spin_lock(&tx->lock);
+		spin_lock_bh(&tx->lock);
 	}
 
 	/* Record first packet time for coalesce timeout */
@@ -964,7 +964,7 @@ int quic_tcp_send(struct quic_tcp_connection *conn,
 	atomic64_add(len, &conn->stats.bytes_tx);
 	atomic64_inc(&quic_tcp_global_stats.total_packets_tx);
 
-	spin_unlock(&tx->lock);
+	spin_unlock_bh(&tx->lock);
 
 	/* Mark activity for keepalive */
 	quic_tcp_activity(conn);
@@ -989,7 +989,7 @@ int quic_tcp_flush(struct quic_tcp_connection *conn)
 	if (!conn || conn->state != QUIC_TCP_STATE_CONNECTED)
 		return -ENOTCONN;
 
-	spin_lock(&tx->lock);
+	spin_lock_bh(&tx->lock);
 
 	if (tx->len > 0) {
 		ret = do_tcp_send(conn, tx->data, tx->len);
@@ -997,12 +997,12 @@ int quic_tcp_flush(struct quic_tcp_connection *conn)
 		if (ret < 0) {
 			/* Send failed, check if blocked */
 			if (ret == -EAGAIN || ret == -EWOULDBLOCK) {
-				spin_lock(&conn->flow_ctrl.lock);
+				spin_lock_bh(&conn->flow_ctrl.lock);
 				if (!conn->flow_ctrl.send_blocked) {
 					conn->flow_ctrl.send_blocked = true;
 					notify_blocked = true;
 				}
-				spin_unlock(&conn->flow_ctrl.lock);
+				spin_unlock_bh(&conn->flow_ctrl.lock);
 			}
 		} else {
 			if (tx->packets > 1)
@@ -1013,7 +1013,7 @@ int quic_tcp_flush(struct quic_tcp_connection *conn)
 		}
 	}
 
-	spin_unlock(&tx->lock);
+	spin_unlock_bh(&tx->lock);
 
 	/* Notify outside of locks to avoid potential deadlocks */
 	if (notify_blocked)

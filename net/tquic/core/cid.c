@@ -579,7 +579,7 @@ void tquic_cid_manager_destroy(struct tquic_cid_manager *mgr)
 	/* Cancel rotation timer */
 	del_timer_sync(&mgr->rotation_timer);
 
-	spin_lock(&mgr->lock);
+	spin_lock_bh(&mgr->lock);
 
 	/* Free all local CIDs */
 	list_for_each_entry_safe(entry, tmp, &mgr->local_cids, list) {
@@ -594,7 +594,7 @@ void tquic_cid_manager_destroy(struct tquic_cid_manager *mgr)
 		tquic_cid_entry_put(entry);
 	}
 
-	spin_unlock(&mgr->lock);
+	spin_unlock_bh(&mgr->lock);
 
 	kfree(mgr);
 }
@@ -613,25 +613,25 @@ int tquic_cid_pool_replenish(struct tquic_cid_manager *mgr)
 	struct tquic_cid_entry *entry;
 	int added = 0;
 
-	spin_lock(&mgr->lock);
+	spin_lock_bh(&mgr->lock);
 
 	while (mgr->local_cid_count < TQUIC_CID_POOL_MIN &&
 	       mgr->local_cid_count < TQUIC_CID_POOL_MAX) {
-		spin_unlock(&mgr->lock);
+		spin_unlock_bh(&mgr->lock);
 
 		entry = tquic_cid_create_local(mgr);
 		if (!entry) {
-			spin_lock(&mgr->lock);
+			spin_lock_bh(&mgr->lock);
 			break;
 		}
 
-		spin_lock(&mgr->lock);
+		spin_lock_bh(&mgr->lock);
 		list_add_tail(&entry->list, &mgr->local_cids);
 		mgr->local_cid_count++;
 		added++;
 	}
 
-	spin_unlock(&mgr->lock);
+	spin_unlock_bh(&mgr->lock);
 
 	if (added > 0)
 		pr_debug("tquic_cid: replenished pool with %d CIDs\n", added);
@@ -652,30 +652,30 @@ struct tquic_cid_entry *tquic_cid_get_unused_local(struct tquic_cid_manager *mgr
 {
 	struct tquic_cid_entry *entry;
 
-	spin_lock(&mgr->lock);
+	spin_lock_bh(&mgr->lock);
 
 	list_for_each_entry(entry, &mgr->local_cids, list) {
 		if (entry->state == TQUIC_CID_STATE_ACTIVE && !entry->path) {
 			tquic_cid_entry_get(entry);
-			spin_unlock(&mgr->lock);
+			spin_unlock_bh(&mgr->lock);
 			return entry;
 		}
 	}
 
-	spin_unlock(&mgr->lock);
+	spin_unlock_bh(&mgr->lock);
 
 	/* Try to replenish pool */
 	tquic_cid_pool_replenish(mgr);
 
-	spin_lock(&mgr->lock);
+	spin_lock_bh(&mgr->lock);
 	list_for_each_entry(entry, &mgr->local_cids, list) {
 		if (entry->state == TQUIC_CID_STATE_ACTIVE && !entry->path) {
 			tquic_cid_entry_get(entry);
-			spin_unlock(&mgr->lock);
+			spin_unlock_bh(&mgr->lock);
 			return entry;
 		}
 	}
-	spin_unlock(&mgr->lock);
+	spin_unlock_bh(&mgr->lock);
 
 	return NULL;
 }
@@ -709,7 +709,7 @@ int tquic_cid_build_new_cid_frame(struct tquic_cid_manager *mgr,
 {
 	struct tquic_cid_entry *entry;
 
-	spin_lock(&mgr->lock);
+	spin_lock_bh(&mgr->lock);
 
 	/* Find an issued CID that hasn't been sent yet, or create new */
 	list_for_each_entry(entry, &mgr->local_cids, list) {
@@ -719,12 +719,12 @@ int tquic_cid_build_new_cid_frame(struct tquic_cid_manager *mgr,
 	}
 
 	/* Need to create a new CID */
-	spin_unlock(&mgr->lock);
+	spin_unlock_bh(&mgr->lock);
 	entry = tquic_cid_create_local(mgr);
 	if (!entry)
 		return -ENOMEM;
 
-	spin_lock(&mgr->lock);
+	spin_lock_bh(&mgr->lock);
 	list_add_tail(&entry->list, &mgr->local_cids);
 	mgr->local_cid_count++;
 	entry->state = TQUIC_CID_STATE_ISSUED;
@@ -735,7 +735,7 @@ found:
 	memcpy(&frame->cid, &entry->cid, sizeof(frame->cid));
 	memcpy(frame->reset_token, entry->reset_token, TQUIC_RESET_TOKEN_LEN);
 
-	spin_unlock(&mgr->lock);
+	spin_unlock_bh(&mgr->lock);
 
 	pr_debug("tquic_cid: built NEW_CONNECTION_ID frame seq=%llu\n",
 		 frame->seq_num);
@@ -770,7 +770,7 @@ int tquic_cid_handle_new_cid(struct tquic_cid_manager *mgr,
 		return -EINVAL;
 	}
 
-	spin_lock(&mgr->lock);
+	spin_lock_bh(&mgr->lock);
 
 	/* Check for duplicate */
 	list_for_each_entry(entry, &mgr->remote_cids, list) {
@@ -794,7 +794,7 @@ int tquic_cid_handle_new_cid(struct tquic_cid_manager *mgr,
 	}
 
 	/* Create new entry */
-	spin_unlock(&mgr->lock);
+	spin_unlock_bh(&mgr->lock);
 	entry = tquic_cid_entry_alloc(GFP_KERNEL);
 	if (!entry)
 		return -ENOMEM;
@@ -807,7 +807,7 @@ int tquic_cid_handle_new_cid(struct tquic_cid_manager *mgr,
 	entry->conn = mgr->conn;
 	entry->is_local = false;
 
-	spin_lock(&mgr->lock);
+	spin_lock_bh(&mgr->lock);
 
 	/* Insert in sequence order */
 	list_for_each_entry(tmp, &mgr->remote_cids, list) {
@@ -846,7 +846,7 @@ added:
 	}
 
 out:
-	spin_unlock(&mgr->lock);
+	spin_unlock_bh(&mgr->lock);
 	return ret;
 }
 EXPORT_SYMBOL_GPL(tquic_cid_handle_new_cid);
@@ -873,12 +873,12 @@ int tquic_cid_build_retire_frame(struct tquic_cid_manager *mgr,
 {
 	struct tquic_cid_entry *entry;
 
-	spin_lock(&mgr->lock);
+	spin_lock_bh(&mgr->lock);
 
 	list_for_each_entry(entry, &mgr->remote_cids, list) {
 		if (entry->state == TQUIC_CID_STATE_PENDING_RETIRE) {
 			frame->seq_num = entry->seq_num;
-			spin_unlock(&mgr->lock);
+			spin_unlock_bh(&mgr->lock);
 
 			pr_debug("tquic_cid: built RETIRE_CONNECTION_ID seq=%llu\n",
 				 frame->seq_num);
@@ -886,7 +886,7 @@ int tquic_cid_build_retire_frame(struct tquic_cid_manager *mgr,
 		}
 	}
 
-	spin_unlock(&mgr->lock);
+	spin_unlock_bh(&mgr->lock);
 	return -ENOENT;
 }
 EXPORT_SYMBOL_GPL(tquic_cid_build_retire_frame);
@@ -905,11 +905,11 @@ int tquic_cid_handle_retire(struct tquic_cid_manager *mgr, u64 seq_num)
 	struct tquic_cid_entry *entry, *tmp;
 	bool found = false;
 
-	spin_lock(&mgr->lock);
+	spin_lock_bh(&mgr->lock);
 
 	/* Cannot retire CID that hasn't been issued */
 	if (seq_num >= mgr->next_local_seq) {
-		spin_unlock(&mgr->lock);
+		spin_unlock_bh(&mgr->lock);
 		pr_warn("tquic_cid: retire request for unissued seq=%llu\n",
 			seq_num);
 		return -EINVAL;
@@ -923,7 +923,7 @@ int tquic_cid_handle_retire(struct tquic_cid_manager *mgr, u64 seq_num)
 			/* Don't retire if it's the only active CID */
 			if (entry == mgr->active_local_cid &&
 			    mgr->local_cid_count <= 1) {
-				spin_unlock(&mgr->lock);
+				spin_unlock_bh(&mgr->lock);
 				pr_warn("tquic_cid: cannot retire last CID\n");
 				return -EINVAL;
 			}
@@ -960,7 +960,7 @@ int tquic_cid_handle_retire(struct tquic_cid_manager *mgr, u64 seq_num)
 		}
 	}
 
-	spin_unlock(&mgr->lock);
+	spin_unlock_bh(&mgr->lock);
 
 	if (!found) {
 		pr_debug("tquic_cid: retire request for unknown seq=%llu\n",
@@ -988,7 +988,7 @@ void tquic_cid_complete_retire(struct tquic_cid_manager *mgr, u64 seq_num)
 {
 	struct tquic_cid_entry *entry, *tmp;
 
-	spin_lock(&mgr->lock);
+	spin_lock_bh(&mgr->lock);
 
 	list_for_each_entry_safe(entry, tmp, &mgr->remote_cids, list) {
 		if (entry->seq_num == seq_num &&
@@ -1004,7 +1004,7 @@ void tquic_cid_complete_retire(struct tquic_cid_manager *mgr, u64 seq_num)
 		}
 	}
 
-	spin_unlock(&mgr->lock);
+	spin_unlock_bh(&mgr->lock);
 }
 EXPORT_SYMBOL_GPL(tquic_cid_complete_retire);
 
@@ -1028,10 +1028,10 @@ static void tquic_cid_rotation_work(struct work_struct *work)
 						     rotation_work);
 	struct tquic_cid_entry *old_cid, *new_cid;
 
-	spin_lock(&mgr->lock);
+	spin_lock_bh(&mgr->lock);
 
 	if (!mgr->rotation_enabled) {
-		spin_unlock(&mgr->lock);
+		spin_unlock_bh(&mgr->lock);
 		return;
 	}
 
@@ -1080,7 +1080,7 @@ static void tquic_cid_rotation_work(struct work_struct *work)
 			 old_cid ? old_cid->seq_num : 0, new_cid->seq_num);
 	}
 
-	spin_unlock(&mgr->lock);
+	spin_unlock_bh(&mgr->lock);
 
 	/* Replenish pool */
 	tquic_cid_pool_replenish(mgr);
@@ -1098,10 +1098,10 @@ static void tquic_cid_rotation_work(struct work_struct *work)
  */
 void tquic_cid_enable_rotation(struct tquic_cid_manager *mgr)
 {
-	spin_lock(&mgr->lock);
+	spin_lock_bh(&mgr->lock);
 
 	if (mgr->rotation_enabled) {
-		spin_unlock(&mgr->lock);
+		spin_unlock_bh(&mgr->lock);
 		return;
 	}
 
@@ -1109,7 +1109,7 @@ void tquic_cid_enable_rotation(struct tquic_cid_manager *mgr)
 	INIT_WORK(&mgr->rotation_work, tquic_cid_rotation_work);
 	timer_setup(&mgr->rotation_timer, tquic_cid_rotation_timer, 0);
 
-	spin_unlock(&mgr->lock);
+	spin_unlock_bh(&mgr->lock);
 
 	mod_timer(&mgr->rotation_timer,
 		  jiffies + msecs_to_jiffies(TQUIC_CID_ROTATION_INTERVAL_MS));
@@ -1124,9 +1124,9 @@ EXPORT_SYMBOL_GPL(tquic_cid_enable_rotation);
  */
 void tquic_cid_disable_rotation(struct tquic_cid_manager *mgr)
 {
-	spin_lock(&mgr->lock);
+	spin_lock_bh(&mgr->lock);
 	mgr->rotation_enabled = false;
-	spin_unlock(&mgr->lock);
+	spin_unlock_bh(&mgr->lock);
 
 	del_timer_sync(&mgr->rotation_timer);
 	cancel_work_sync(&mgr->rotation_work);
@@ -1186,7 +1186,7 @@ int tquic_cid_rotate_on_migration(struct tquic_cid_manager *mgr,
 	pr_debug("tquic_cid: rotating CIDs for migration (old_path=%p, new_path=%u)\n",
 		 old_path, new_path->path_id);
 
-	spin_lock(&mgr->lock);
+	spin_lock_bh(&mgr->lock);
 
 	/*
 	 * Step 1: Get the old path's CID (if any) for retirement
@@ -1210,7 +1210,7 @@ int tquic_cid_rotate_on_migration(struct tquic_cid_manager *mgr,
 		}
 	}
 
-	spin_unlock(&mgr->lock);
+	spin_unlock_bh(&mgr->lock);
 
 	/*
 	 * Step 3: If no unused CID available, create a new one
@@ -1219,7 +1219,7 @@ int tquic_cid_rotate_on_migration(struct tquic_cid_manager *mgr,
 	if (!new_local_cid) {
 		tquic_cid_pool_replenish(mgr);
 
-		spin_lock(&mgr->lock);
+		spin_lock_bh(&mgr->lock);
 		list_for_each_entry(entry, &mgr->local_cids, list) {
 			if (entry->state == TQUIC_CID_STATE_ACTIVE &&
 			    !entry->path &&
@@ -1230,14 +1230,14 @@ int tquic_cid_rotate_on_migration(struct tquic_cid_manager *mgr,
 		}
 
 		if (!new_local_cid) {
-			spin_unlock(&mgr->lock);
+			spin_unlock_bh(&mgr->lock);
 			pr_warn("tquic_cid: no CID available for migration\n");
 			return -ENOSPC;
 		}
-		spin_unlock(&mgr->lock);
+		spin_unlock_bh(&mgr->lock);
 	}
 
-	spin_lock(&mgr->lock);
+	spin_lock_bh(&mgr->lock);
 
 	/*
 	 * Step 4: Assign new CID to the new path
@@ -1272,7 +1272,7 @@ int tquic_cid_rotate_on_migration(struct tquic_cid_manager *mgr,
 			 old_local_cid->seq_num);
 	}
 
-	spin_unlock(&mgr->lock);
+	spin_unlock_bh(&mgr->lock);
 
 	pr_debug("tquic_cid: migration CID rotation complete (new seq=%llu)\n",
 		 new_local_cid->seq_num);
@@ -1289,7 +1289,7 @@ EXPORT_SYMBOL_GPL(tquic_cid_rotate_on_migration);
  */
 void tquic_cid_on_packet_sent(struct tquic_cid_manager *mgr)
 {
-	spin_lock(&mgr->lock);
+	spin_lock_bh(&mgr->lock);
 
 	mgr->packets_since_rotation++;
 
@@ -1299,12 +1299,12 @@ void tquic_cid_on_packet_sent(struct tquic_cid_manager *mgr)
 	/* Check if packet-based rotation threshold reached */
 	if (mgr->rotation_enabled &&
 	    mgr->packets_since_rotation >= TQUIC_CID_ROTATION_PACKETS) {
-		spin_unlock(&mgr->lock);
+		spin_unlock_bh(&mgr->lock);
 		schedule_work(&mgr->rotation_work);
 		return;
 	}
 
-	spin_unlock(&mgr->lock);
+	spin_unlock_bh(&mgr->lock);
 }
 EXPORT_SYMBOL_GPL(tquic_cid_on_packet_sent);
 
@@ -1327,7 +1327,7 @@ int tquic_cidmgr_assign_to_path(struct tquic_cid_manager *mgr,
 	if (path->path_id >= TQUIC_MAX_PATHS)
 		return -EINVAL;
 
-	spin_lock(&mgr->lock);
+	spin_lock_bh(&mgr->lock);
 
 	/* Find unused local CID */
 	list_for_each_entry(entry, &mgr->local_cids, list) {
@@ -1346,12 +1346,12 @@ int tquic_cidmgr_assign_to_path(struct tquic_cid_manager *mgr,
 	}
 
 	if (!local_entry) {
-		spin_unlock(&mgr->lock);
+		spin_unlock_bh(&mgr->lock);
 
 		/* Try to get more local CIDs */
 		tquic_cid_pool_replenish(mgr);
 
-		spin_lock(&mgr->lock);
+		spin_lock_bh(&mgr->lock);
 		list_for_each_entry(entry, &mgr->local_cids, list) {
 			if (entry->state == TQUIC_CID_STATE_ACTIVE && !entry->path) {
 				local_entry = entry;
@@ -1360,7 +1360,7 @@ int tquic_cidmgr_assign_to_path(struct tquic_cid_manager *mgr,
 		}
 
 		if (!local_entry) {
-			spin_unlock(&mgr->lock);
+			spin_unlock_bh(&mgr->lock);
 			pr_warn("tquic_cid: no local CID available for path %u\n",
 				path->path_id);
 			return -ENOSPC;
@@ -1379,7 +1379,7 @@ int tquic_cidmgr_assign_to_path(struct tquic_cid_manager *mgr,
 		       sizeof(path->remote_cid));
 	}
 
-	spin_unlock(&mgr->lock);
+	spin_unlock_bh(&mgr->lock);
 
 	pr_debug("tquic_cid: assigned CIDs to path %u (local seq=%llu)\n",
 		 path->path_id, local_entry->seq_num);
@@ -1401,7 +1401,7 @@ void tquic_cidmgr_release_from_path(struct tquic_cid_manager *mgr,
 	if (path->path_id >= TQUIC_MAX_PATHS)
 		return;
 
-	spin_lock(&mgr->lock);
+	spin_lock_bh(&mgr->lock);
 
 	entry = mgr->path_local_cids[path->path_id];
 	if (entry) {
@@ -1415,7 +1415,7 @@ void tquic_cidmgr_release_from_path(struct tquic_cid_manager *mgr,
 		mgr->path_remote_cids[path->path_id] = NULL;
 	}
 
-	spin_unlock(&mgr->lock);
+	spin_unlock_bh(&mgr->lock);
 
 	pr_debug("tquic_cid: released CIDs from path %u\n", path->path_id);
 }
@@ -1437,11 +1437,11 @@ const struct tquic_cid *tquic_cid_get_for_path(struct tquic_cid_manager *mgr,
 	if (path_id >= TQUIC_MAX_PATHS)
 		return NULL;
 
-	spin_lock(&mgr->lock);
+	spin_lock_bh(&mgr->lock);
 	entry = mgr->path_local_cids[path_id];
 	if (entry)
 		cid = &entry->cid;
-	spin_unlock(&mgr->lock);
+	spin_unlock_bh(&mgr->lock);
 
 	return cid;
 }
@@ -1493,7 +1493,7 @@ int tquic_cid_set_preferred_addr(struct tquic_cid_manager *mgr,
 		return ret;
 	}
 
-	spin_lock(&mgr->lock);
+	spin_lock_bh(&mgr->lock);
 
 	/* Free old preferred address CID if any */
 	if (mgr->preferred_addr_cid) {
@@ -1505,7 +1505,7 @@ int tquic_cid_set_preferred_addr(struct tquic_cid_manager *mgr,
 	list_add_tail(&entry->list, &mgr->local_cids);
 	mgr->local_cid_count++;
 
-	spin_unlock(&mgr->lock);
+	spin_unlock_bh(&mgr->lock);
 
 	pr_debug("tquic_cid: set preferred address CID seq=%llu\n",
 		 entry->seq_num);
@@ -1558,11 +1558,11 @@ int tquic_cid_handle_additional_addr(struct tquic_cid_manager *mgr,
 	 * Additional addresses CIDs start at sequence 2 (after preferred_address).
 	 * Use next expected sequence number.
 	 */
-	spin_lock(&mgr->lock);
+	spin_lock_bh(&mgr->lock);
 	seq_num = mgr->next_remote_seq;
 	if (seq_num < 2)
 		seq_num = 2;  /* Reserve 0 for initial, 1 for preferred_address */
-	spin_unlock(&mgr->lock);
+	spin_unlock_bh(&mgr->lock);
 
 	return tquic_cid_handle_new_cid(mgr, seq_num, 0, cid, reset_token);
 }
@@ -1632,23 +1632,23 @@ int tquic_cid_register_local(struct tquic_cid_manager *mgr,
 	tquic_cid_generate_reset_token(cid, entry->reset_token);
 
 	/* Atomically assign sequence, add to list, and register */
-	spin_lock(&mgr->lock);
+	spin_lock_bh(&mgr->lock);
 	seq_num = mgr->next_local_seq++;
 	entry->seq_num = seq_num;
 	entry->cid.seq_num = seq_num;
 	list_add_tail(&entry->list, &mgr->local_cids);
 	mgr->local_cid_count++;
-	spin_unlock(&mgr->lock);
+	spin_unlock_bh(&mgr->lock);
 
 	/* Register in global lookup table */
 	ret = rhashtable_insert_fast(&tquic_cid_table, &entry->node,
 				     tquic_cid_table.p);
 	if (ret) {
-		spin_lock(&mgr->lock);
+		spin_lock_bh(&mgr->lock);
 		list_del(&entry->list);
 		mgr->local_cid_count--;
 		mgr->next_local_seq--;
-		spin_unlock(&mgr->lock);
+		spin_unlock_bh(&mgr->lock);
 		kmem_cache_free(tquic_cid_cache, entry);
 		return ret;
 	}
@@ -1670,10 +1670,10 @@ const struct tquic_cid *tquic_cid_get_active_local(struct tquic_cid_manager *mgr
 {
 	const struct tquic_cid *cid = NULL;
 
-	spin_lock(&mgr->lock);
+	spin_lock_bh(&mgr->lock);
 	if (mgr->active_local_cid)
 		cid = &mgr->active_local_cid->cid;
-	spin_unlock(&mgr->lock);
+	spin_unlock_bh(&mgr->lock);
 
 	return cid;
 }
@@ -1689,10 +1689,10 @@ const struct tquic_cid *tquic_cid_get_active_remote(struct tquic_cid_manager *mg
 {
 	const struct tquic_cid *cid = NULL;
 
-	spin_lock(&mgr->lock);
+	spin_lock_bh(&mgr->lock);
 	if (mgr->active_remote_cid)
 		cid = &mgr->active_remote_cid->cid;
-	spin_unlock(&mgr->lock);
+	spin_unlock_bh(&mgr->lock);
 
 	return cid;
 }
@@ -1711,7 +1711,7 @@ int tquic_cid_set_active_remote(struct tquic_cid_manager *mgr,
 	struct tquic_cid_entry *entry;
 	int ret = -ENOENT;
 
-	spin_lock(&mgr->lock);
+	spin_lock_bh(&mgr->lock);
 
 	list_for_each_entry(entry, &mgr->remote_cids, list) {
 		if (entry->cid.len == cid->len &&
@@ -1724,7 +1724,7 @@ int tquic_cid_set_active_remote(struct tquic_cid_manager *mgr,
 		}
 	}
 
-	spin_unlock(&mgr->lock);
+	spin_unlock_bh(&mgr->lock);
 	return ret;
 }
 EXPORT_SYMBOL_GPL(tquic_cid_set_active_remote);
@@ -1744,7 +1744,7 @@ int tquic_cid_get_reset_token(struct tquic_cid_manager *mgr,
 	struct tquic_cid_entry *entry;
 	int ret = -ENOENT;
 
-	spin_lock(&mgr->lock);
+	spin_lock_bh(&mgr->lock);
 
 	list_for_each_entry(entry, &mgr->local_cids, list) {
 		if (entry->cid.len == cid->len &&
@@ -1755,7 +1755,7 @@ int tquic_cid_get_reset_token(struct tquic_cid_manager *mgr,
 		}
 	}
 
-	spin_unlock(&mgr->lock);
+	spin_unlock_bh(&mgr->lock);
 	return ret;
 }
 EXPORT_SYMBOL_GPL(tquic_cid_get_reset_token);
@@ -1773,7 +1773,7 @@ bool tquic_cid_check_stateless_reset(struct tquic_cid_manager *mgr,
 	struct tquic_cid_entry *entry;
 	bool found = false;
 
-	spin_lock(&mgr->lock);
+	spin_lock_bh(&mgr->lock);
 
 	list_for_each_entry(entry, &mgr->remote_cids, list) {
 		if (crypto_memneq(token, entry->reset_token,
@@ -1783,7 +1783,7 @@ bool tquic_cid_check_stateless_reset(struct tquic_cid_manager *mgr,
 		}
 	}
 
-	spin_unlock(&mgr->lock);
+	spin_unlock_bh(&mgr->lock);
 
 	if (found)
 		pr_debug("tquic_cid: detected stateless reset\n");
@@ -1803,7 +1803,7 @@ void tquic_cid_get_stats(struct tquic_cid_manager *mgr,
 			 u32 *local_count, u32 *remote_count,
 			 u64 *local_seq)
 {
-	spin_lock(&mgr->lock);
+	spin_lock_bh(&mgr->lock);
 
 	if (local_count)
 		*local_count = mgr->local_cid_count;
@@ -1812,7 +1812,7 @@ void tquic_cid_get_stats(struct tquic_cid_manager *mgr,
 	if (local_seq)
 		*local_seq = mgr->next_local_seq;
 
-	spin_unlock(&mgr->lock);
+	spin_unlock_bh(&mgr->lock);
 }
 EXPORT_SYMBOL_GPL(tquic_cid_get_stats);
 

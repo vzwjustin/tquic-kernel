@@ -91,6 +91,7 @@ struct tquic_stream_ext {
 	struct list_head gaps;
 	u32 num_gaps;
 	struct rb_root recv_chunks;
+	u32 recv_chunks_count;
 	u64 recv_next;
 	u64 recv_max;
 	s64 final_size;

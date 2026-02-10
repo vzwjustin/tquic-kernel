@@ -226,6 +226,15 @@ static int minrtt_get_path(struct tquic_connection *conn,
 	}
 	spin_unlock_irqrestore(&sd->lock, irqflags);
 
+	/*
+	 * Take a reference on the selected path before leaving the RCU
+	 * read section. Callers must call tquic_path_put() when done.
+	 */
+	if (!tquic_path_get(best)) {
+		rcu_read_unlock();
+		return -ENOENT;
+	}
+
 	result->primary = best;
 	result->backup = NULL;	/* MinRTT doesn't use backup path */
 	result->flags = 0;
@@ -449,6 +458,12 @@ static int rr_get_path(struct tquic_connection *conn,
 			continue;
 
 		if (current_index == target_index) {
+			/*
+			 * Take a reference before leaving RCU section.
+			 * Callers must call tquic_path_put() when done.
+			 */
+			if (!tquic_path_get(path))
+				break;
 			result->primary = path;
 			result->backup = NULL;
 			result->flags = 0;

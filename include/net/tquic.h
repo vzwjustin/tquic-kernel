@@ -383,9 +383,14 @@ struct tquic_path {
 	 */
 	struct tquic_ecn_state ecn;
 
-	/* Previous ECN-CE count from peer's ACK_ECN frame, used to
-	 * compute deltas per RFC 9002 Section 7.1.
+	/*
+	 * Previous ECN counts from peer's ACK_ECN frames, used to
+	 * compute deltas per RFC 9000 Section 13.4.2.1.
+	 * Cumulative counters must only increase; a decrease is a
+	 * PROTOCOL_VIOLATION.  MIB stats use only the delta.
 	 */
+	u64 ecn_ect0_count_prev;
+	u64 ecn_ect1_count_prev;
 	u64 ecn_ce_count_prev;
 
 	void *cong;  /* Congestion control state */
@@ -1441,7 +1446,7 @@ struct tquic_sock {
 	struct list_head accept_queue;	/* Listener: queue of pending children */
 	struct list_head accept_list;	/* Child: linkage in listener's queue */
 	struct hlist_node listener_node; /* Listener hash table linkage */
-	u32 accept_queue_len;
+	atomic_t accept_queue_len;
 	u32 max_accept_queue;
 
 	struct tquic_stream *default_stream;

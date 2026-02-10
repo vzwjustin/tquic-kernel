@@ -155,6 +155,18 @@ static int weighted_get_path(struct tquic_connection *conn,
 
 out:
 	spin_unlock_bh(&sd->lock);
+
+	/*
+	 * Take a reference on the selected path before leaving the RCU
+	 * read section. Callers must call tquic_path_put() when done.
+	 */
+	if (ret == 0 && result->primary) {
+		if (!tquic_path_get(result->primary)) {
+			result->primary = NULL;
+			ret = -ENOENT;
+		}
+	}
+
 	rcu_read_unlock();
 	return ret;
 }

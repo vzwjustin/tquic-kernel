@@ -234,8 +234,19 @@ static int aggregate_get_path(struct tquic_connection *conn,
 		return -ENOENT;
 	}
 
+	/*
+	 * Take references on path pointers before leaving RCU section.
+	 * Callers must call tquic_path_put() when done with the result.
+	 */
+	if (!tquic_path_get(best)) {
+		rcu_read_unlock();
+		return -ENOENT;
+	}
+	if (backup && !tquic_path_get(backup))
+		backup = NULL;
+
 	result->primary = best;
-	result->backup = backup;  /* For failover per CONTEXT.md */
+	result->backup = backup;
 	result->flags = 0;
 
 	rcu_read_unlock();

@@ -922,7 +922,7 @@ static int tquic_v6_init_sock(struct sock *sk)
 	inet_sk_set_state(sk, TCP_CLOSE);
 
 	INIT_LIST_HEAD(&tsk->accept_queue);
-	tsk->accept_queue_len = 0;
+	atomic_set(&tsk->accept_queue_len, 0);
 	tsk->max_accept_queue = 128;
 
 	/* Create connection structure */

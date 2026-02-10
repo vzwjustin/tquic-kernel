@@ -283,9 +283,8 @@ static int proc_tquic_scheduler(TQUIC_CTL_TABLE *table, int write,
 			current_name = tquic_pernet(net)->default_scheduler->name;
 		else
 			current_name = "aggregate";
-		rcu_read_unlock();
-
 		strscpy(name, current_name, sizeof(name));
+		rcu_read_unlock();
 
 		/* Use temporary table pointing to our local buffer */
 		memset(&tmp_table, 0, sizeof(tmp_table));

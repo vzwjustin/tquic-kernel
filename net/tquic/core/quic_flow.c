@@ -1379,7 +1379,14 @@ static int tquic_flow_control_check_recv_limit_internal(struct tquic_connection 
 
 	spin_lock_bh(&conn->lock);
 
-	if (conn->data_received + len > conn->max_data_local) {
+	/*
+	 * Check for u64 overflow before comparing against max_data_local.
+	 * Without this, a crafted len could wrap data_received + len past
+	 * zero, bypassing the flow control limit entirely.
+	 */
+	if (len > U64_MAX - conn->data_received) {
+		ret = -EDQUOT;
+	} else if (conn->data_received + len > conn->max_data_local) {
 		ret = -EDQUOT;
 	}
 

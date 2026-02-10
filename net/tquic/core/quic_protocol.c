@@ -612,7 +612,7 @@ static int tquic_proto_init_sock(struct sock *sk)
 
 	INIT_LIST_HEAD(&tsk->accept_queue);
 	INIT_LIST_HEAD(&tsk->accept_list);
-	tsk->accept_queue_len = 0;
+	atomic_set(&tsk->accept_queue_len, 0);
 	tsk->max_accept_queue = 0;
 
 	tsk->default_stream = NULL;

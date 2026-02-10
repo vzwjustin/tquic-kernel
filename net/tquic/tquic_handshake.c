@@ -1693,7 +1693,7 @@ static void tquic_server_handshake_done(void *data, int status,
 			spin_lock_bh(&listener_sk->sk_lock.slock);
 			list_add_tail(&child_tsk->accept_list,
 				      &listen_tsk->accept_queue);
-			listen_tsk->accept_queue_len++;
+			atomic_inc(&listen_tsk->accept_queue_len);
 			spin_unlock_bh(&listener_sk->sk_lock.slock);
 
 			/* Wake up accept() waiters */
@@ -1745,7 +1745,7 @@ int tquic_server_handshake(struct sock *listener_sk,
 	int ret;
 
 	/* Check accept queue space */
-	if (listen_tsk->accept_queue_len >= listen_tsk->max_accept_queue) {
+	if (atomic_read(&listen_tsk->accept_queue_len) >= listen_tsk->max_accept_queue) {
 		tquic_dbg("accept queue full, refusing connection\n");
 		return -ECONNREFUSED;
 	}
@@ -1764,7 +1764,7 @@ int tquic_server_handshake(struct sock *listener_sk,
 	/* Initialize accept list node */
 	INIT_LIST_HEAD(&child_tsk->accept_list);
 	INIT_LIST_HEAD(&child_tsk->accept_queue);
-	child_tsk->accept_queue_len = 0;
+	atomic_set(&child_tsk->accept_queue_len, 0);
 	child_tsk->max_accept_queue = 0;
 
 	/* Create connection for child (server-side) */

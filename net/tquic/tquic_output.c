@@ -664,6 +664,17 @@ static int tquic_coalesce_frames(struct tquic_connection *conn,
 			/* Not enough space, stop coalescing */
 			if (ret == -ENOSPC)
 				break;
+
+			/*
+			 * Fatal error: free all remaining frames on the
+			 * pending list to prevent a memory leak.
+			 */
+			list_for_each_entry_safe(frame, tmp,
+						 pending_frames, list) {
+				list_del(&frame->list);
+				kfree(frame->data);
+				kmem_cache_free(tquic_frame_cache, frame);
+			}
 			return ret;
 		}
 

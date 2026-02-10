@@ -750,21 +750,44 @@ static int tquic_process_ack_frame(struct tquic_rx_ctx *ctx)
 	if (first_ack_range > largest_ack)
 		return -EINVAL;
 
-	/* Process additional ACK ranges */
-	for (i = 0; i < ack_range_count; i++) {
-		u64 gap, range;
+	/*
+	 * Process additional ACK ranges.
+	 *
+	 * Track smallest_acked to validate that gap and range values
+	 * do not underflow the running packet number. Per RFC 9000
+	 * Section 19.3.1, each gap skips gap+2 packet numbers, and
+	 * each range covers range+1 packet numbers.
+	 */
+	{
+		u64 smallest_acked = largest_ack - first_ack_range;
 
-		ret = tquic_decode_varint(ctx->data + ctx->offset,
-					  ctx->len - ctx->offset, &gap);
-		if (ret < 0)
-			return ret;
-		ctx->offset += ret;
+		for (i = 0; i < ack_range_count; i++) {
+			u64 gap, range;
 
-		ret = tquic_decode_varint(ctx->data + ctx->offset,
-					  ctx->len - ctx->offset, &range);
-		if (ret < 0)
-			return ret;
-		ctx->offset += ret;
+			ret = tquic_decode_varint(ctx->data + ctx->offset,
+						  ctx->len - ctx->offset,
+						  &gap);
+			if (ret < 0)
+				return ret;
+			ctx->offset += ret;
+
+			ret = tquic_decode_varint(ctx->data + ctx->offset,
+						  ctx->len - ctx->offset,
+						  &range);
+			if (ret < 0)
+				return ret;
+			ctx->offset += ret;
+
+			/* Validate gap does not underflow */
+			if (gap + 2 > smallest_acked)
+				return -EPROTO;
+			smallest_acked -= gap + 2;
+
+			/* Validate range does not underflow */
+			if (range > smallest_acked)
+				return -EPROTO;
+			smallest_acked -= range;
+		}
 	}
 
 	/*
@@ -802,17 +825,54 @@ static int tquic_process_ack_frame(struct tquic_rx_ctx *ctx)
 			return ret;
 		ctx->offset += ret;
 
-		/* Update MIB counters for ECN frames received */
-		if (ctx->conn && ctx->conn->sk) {
+		/*
+		 * Update MIB counters for ECN frames received.
+		 *
+		 * RFC 9000 Section 13.4.2.1: ECN counts are cumulative.
+		 * They MUST NOT decrease; a decrease indicates a peer
+		 * bug or attack and is treated as PROTOCOL_VIOLATION.
+		 * Only the delta since the last ACK_ECN is added to MIB
+		 * counters to avoid double-counting.
+		 */
+		if (ctx->conn && ctx->conn->sk && ctx->path) {
 			struct net *net = sock_net(ctx->conn->sk);
+			struct tquic_path *p = ctx->path;
+
+			if (ecn_ect0 < p->ecn_ect0_count_prev ||
+			    ecn_ect1 < p->ecn_ect1_count_prev ||
+			    ecn_ce < p->ecn_ce_count_prev) {
+				tquic_dbg("ECN counts decreased: ect0 %llu->%llu ect1 %llu->%llu ce %llu->%llu\n",
+					 p->ecn_ect0_count_prev, ecn_ect0,
+					 p->ecn_ect1_count_prev, ecn_ect1,
+					 p->ecn_ce_count_prev, ecn_ce);
+				return -EPROTO;
+			}
 
 			TQUIC_INC_STATS(net, TQUIC_MIB_ECNACKSRX);
-			if (ecn_ect0 > 0)
-				TQUIC_ADD_STATS(net, TQUIC_MIB_ECNECT0RX, ecn_ect0);
-			if (ecn_ect1 > 0)
-				TQUIC_ADD_STATS(net, TQUIC_MIB_ECNECT1RX, ecn_ect1);
-			if (ecn_ce > 0)
-				TQUIC_ADD_STATS(net, TQUIC_MIB_ECNCEMARKSRX, ecn_ce);
+			if (ecn_ect0 > p->ecn_ect0_count_prev)
+				TQUIC_ADD_STATS(net, TQUIC_MIB_ECNECT0RX,
+						ecn_ect0 - p->ecn_ect0_count_prev);
+			if (ecn_ect1 > p->ecn_ect1_count_prev)
+				TQUIC_ADD_STATS(net, TQUIC_MIB_ECNECT1RX,
+						ecn_ect1 - p->ecn_ect1_count_prev);
+			if (ecn_ce > p->ecn_ce_count_prev) {
+				u64 ce_delta = ecn_ce - p->ecn_ce_count_prev;
+
+				TQUIC_ADD_STATS(net, TQUIC_MIB_ECNCEMARKSRX,
+						ce_delta);
+				/*
+				 * RFC 9002 Section 7.1: notify congestion
+				 * control of the CE increase on this path.
+				 */
+				tquic_cong_on_ecn(p, ce_delta);
+			}
+
+			tquic_dbg("ECN on path %u: ect0=%llu ect1=%llu ce=%llu\n",
+				 p->path_id, ecn_ect0, ecn_ect1, ecn_ce);
+
+			p->ecn_ect0_count_prev = ecn_ect0;
+			p->ecn_ect1_count_prev = ecn_ect1;
+			p->ecn_ce_count_prev = ecn_ce;
 		}
 	}
 
@@ -824,12 +884,19 @@ static int tquic_process_ack_frame(struct tquic_rx_ctx *ctx)
 			ctx->conn->remote_params.ack_delay_exponent : 3;
 		u64 ack_delay_us;
 
-		/* Clamp ade to RFC 9000 maximum of 20 */
+		/*
+		 * Clamp ade to RFC 9000 maximum of 20, then check for
+		 * overflow before shifting.  When ack_delay is large
+		 * (e.g. > 2^44) and ade is 20, the shift wraps u64 to
+		 * a small value that would bypass the 16-second cap.
+		 * Pre-check: if ack_delay already exceeds the cap at
+		 * the given exponent, saturate directly.
+		 */
 		ade = min_t(u8, ade, 20);
-		ack_delay_us = ack_delay << ade;
-		/* Cap to 16 seconds to prevent absurd values */
-		if (ack_delay_us > 16000000ULL)
+		if (ack_delay > (16000000ULL >> ade))
 			ack_delay_us = 16000000ULL;
+		else
+			ack_delay_us = ack_delay << ade;
 		u64 rtt_us;
 
 		/*
@@ -875,34 +942,9 @@ static int tquic_process_ack_frame(struct tquic_rx_ctx *ctx)
 		}
 
 		/*
-		 * ECN CE handling
-		 *
-		 * Per RFC 9002 Section 7.1: "An increase in ECN-CE counters
-		 * is a signal of congestion. The sender SHOULD reduce the
-		 * congestion window using the approach described in..."
-		 *
-		 * Per CONTEXT.md: "Loss on one path reduces only that path's CWND"
-		 * This applies to ECN as well - ECN on one path affects only
-		 * that path.
+		 * ECN CE congestion response already dispatched in the
+		 * MIB delta section above via tquic_cong_on_ecn().
 		 */
-		if (has_ecn && ecn_ce > 0) {
-			/*
-			 * RFC 9002 Section 7.1: respond only to *increases*
-			 * in the peer's reported CE count, not the absolute
-			 * value.  The peer sends cumulative counters in each
-			 * ACK_ECN frame.
-			 */
-			u64 prev_ce = ctx->path->ecn_ce_count_prev;
-			u64 delta = (ecn_ce > prev_ce) ? ecn_ce - prev_ce : 0;
-
-			if (delta > 0) {
-				tquic_cong_on_ecn(ctx->path, delta);
-				ctx->path->ecn_ce_count_prev = ecn_ce;
-			}
-
-			tquic_dbg("ECN-CE on path %u: ce=%llu (delta=%llu) ect0=%llu ect1=%llu\n",
-				 ctx->path->path_id, ecn_ce, delta, ecn_ect0, ecn_ect1);
-		}
 	}
 
 	/* Mark acknowledged packets - processed by CC above */
@@ -1594,6 +1636,18 @@ static int tquic_process_new_token(struct tquic_rx_ctx *ctx)
 	if (ret < 0)
 		return ret;
 	ctx->offset += ret;
+
+	/* RFC 9000 Section 19.7: Token MUST NOT be empty */
+	if (token_len == 0)
+		return -EINVAL;
+
+	/*
+	 * RFC 9000 Section 19.7: "A client MUST NOT send a NEW_TOKEN
+	 * frame." If we are a server receiving this, the peer (client)
+	 * sent it -- that is a protocol violation.
+	 */
+	if (ctx->conn && ctx->conn->is_server)
+		return -EPROTO;
 
 	/* Validate token length */
 	if (token_len > TQUIC_TOKEN_MAX_LEN) {
@@ -2301,8 +2355,30 @@ static int tquic_process_frames(struct tquic_connection *conn,
 			}
 			ret = tquic_process_datagram_frame(&ctx);
 		} else if (frame_type == TQUIC_FRAME_ACK_FREQUENCY) {
+			/*
+			 * ACK_FREQUENCY is only valid in 1-RTT packets
+			 * per draft-ietf-quic-ack-frequency Section 3.
+			 */
+			if (!is_1rtt) {
+				conn->error_code = EQUIC_FRAME_ENCODING;
+				tquic_conn_close_with_error(conn,
+					EQUIC_FRAME_ENCODING,
+					"ACK_FREQUENCY not in 1-RTT");
+				return -EPROTO;
+			}
 			ret = tquic_process_ack_frequency_frame(&ctx);
 		} else if (frame_type == TQUIC_FRAME_IMMEDIATE_ACK) {
+			/*
+			 * IMMEDIATE_ACK is only valid in 1-RTT packets
+			 * per draft-ietf-quic-ack-frequency Section 4.
+			 */
+			if (!is_1rtt) {
+				conn->error_code = EQUIC_FRAME_ENCODING;
+				tquic_conn_close_with_error(conn,
+					EQUIC_FRAME_ENCODING,
+					"IMMEDIATE_ACK not in 1-RTT");
+				return -EPROTO;
+			}
 			ret = tquic_process_immediate_ack_frame(&ctx);
 #ifdef CONFIG_TQUIC_MULTIPATH
 		} else if (frame_type == 0x40) {
@@ -2399,8 +2475,13 @@ static int tquic_parse_long_header_internal(struct tquic_rx_ctx *ctx,
 
 	first_byte = *p++;
 
-	/* Version */
-	*version = (p[0] << 24) | (p[1] << 16) | (p[2] << 8) | p[3];
+	/*
+	 * Version - cast each byte to u32 before shifting to avoid
+	 * signed integer overflow UB when p[0] >= 0x80 (u8 promotes
+	 * to int, and int << 24 overflows for values >= 128).
+	 */
+	*version = ((u32)p[0] << 24) | ((u32)p[1] << 16) |
+		   ((u32)p[2] << 8) | (u32)p[3];
 	p += 4;
 
 	/* DCID Length + DCID */

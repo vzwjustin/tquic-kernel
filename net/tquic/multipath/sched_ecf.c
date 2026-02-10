@@ -298,8 +298,19 @@ static int ecf_get_path(struct tquic_connection *conn,
 
 	spin_unlock_bh(&sd->lock);
 
+	/*
+	 * Take references on path pointers before leaving RCU section.
+	 * Callers must call tquic_path_put() when done with the result.
+	 */
+	if (!tquic_path_get(best)) {
+		rcu_read_unlock();
+		return -ENOENT;
+	}
+	if (second_best && !tquic_path_get(second_best))
+		second_best = NULL;
+
 	result->primary = best;
-	result->backup = second_best;  /* Second-best for failover */
+	result->backup = second_best;
 	result->flags = 0;
 
 	rcu_read_unlock();

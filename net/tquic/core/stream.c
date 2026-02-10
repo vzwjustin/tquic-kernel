@@ -1081,6 +1081,14 @@ static int tquic_stream_recv_chunk_insert(struct tquic_stream_manager *mgr,
 	/* Get extended state from stream's ext field */
 	ext = stream->ext;
 
+	/*
+	 * Limit reassembly chunks to prevent memory exhaustion from
+	 * an attacker sending many small out-of-order STREAM frames.
+	 */
+#define TQUIC_MAX_RECV_CHUNKS	512
+	if (ext && ext->recv_chunks_count >= TQUIC_MAX_RECV_CHUNKS)
+		return -ENOSPC;
+
 	/* Allocate chunk */
 	chunk = kmem_cache_zalloc(mgr->chunk_cache, GFP_ATOMIC);
 	if (!chunk)
@@ -1123,6 +1131,7 @@ static int tquic_stream_recv_chunk_insert(struct tquic_stream_manager *mgr,
 
 		rb_link_node(&chunk->node, parent, link);
 		rb_insert_color(&chunk->node, &ext->recv_chunks);
+		ext->recv_chunks_count++;
 
 		/* Update receive tracking */
 		if (offset > ext->recv_max)
@@ -1135,6 +1144,7 @@ static int tquic_stream_recv_chunk_insert(struct tquic_stream_manager *mgr,
 				break;
 
 			rb_erase(&chunk->node, &ext->recv_chunks);
+			ext->recv_chunks_count--;
 			if (chunk->skb) {
 				*(u64 *)chunk->skb->cb = chunk->offset;
 				skb_queue_tail(&stream->recv_buf, chunk->skb);

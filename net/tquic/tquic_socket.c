@@ -116,7 +116,7 @@ int tquic_init_sock(struct sock *sk)
 	INIT_LIST_HEAD(&tsk->accept_queue);
 	INIT_LIST_HEAD(&tsk->accept_list);
 	INIT_HLIST_NODE(&tsk->listener_node);
-	tsk->accept_queue_len = 0;
+	atomic_set(&tsk->accept_queue_len, 0);
 	tsk->max_accept_queue = 128;
 	tsk->flags = 0;
 	init_waitqueue_head(&tsk->event_wait);
@@ -406,7 +406,7 @@ int tquic_sock_listen(struct socket *sock, int backlog)
 	/* Initialize accept queue if not already done */
 	if (list_empty(&tsk->accept_queue))
 		INIT_LIST_HEAD(&tsk->accept_queue);
-	tsk->accept_queue_len = 0;
+	atomic_set(&tsk->accept_queue_len, 0);
 
 	/* Register with UDP demux to receive incoming packets */
 	ret = tquic_register_listener(sk);
@@ -512,7 +512,7 @@ int tquic_accept(struct sock *sk, struct sock **newsk, int flags, bool kern)
 						     struct tquic_sock,
 						     accept_list);
 			list_del_init(&child_tsk->accept_list);
-			tsk->accept_queue_len--;
+			atomic_dec(&tsk->accept_queue_len);
 
 			/* Return the child socket */
 			*newsk = (struct sock *)child_tsk;
@@ -571,6 +571,8 @@ int tquic_sock_getname(struct socket *sock, struct sockaddr *addr, int peer)
 	struct sockaddr_storage *saddr;
 	int len;
 
+	lock_sock(sk);
+
 	if (peer)
 		saddr = &tsk->connect_addr;
 	else
@@ -581,6 +583,9 @@ int tquic_sock_getname(struct socket *sock, struct sockaddr *addr, int peer)
 		len = sizeof(struct sockaddr_in6);
 
 	memcpy(addr, saddr, len);
+
+	release_sock(sk);
+
 	return len;
 }
 
@@ -603,15 +608,12 @@ __poll_t tquic_poll(struct file *file, struct socket *sock, poll_table *wait)
 
 	sock_poll_wait(file, sock, wait);
 
+	lock_sock(sk);
+
 	if (sk->sk_state == TCP_LISTEN) {
-		if (tsk->accept_queue_len > 0)
+		if (atomic_read(&tsk->accept_queue_len) > 0)
 			mask |= EPOLLIN | EPOLLRDNORM;
 	} else if (sk->sk_state == TCP_ESTABLISHED) {
-		/*
-		 * Use READ_ONCE() to prevent the compiler from caching
-		 * stale pointer values.  The teardown path must use
-		 * WRITE_ONCE() when setting these to NULL before freeing.
-		 */
 		conn = READ_ONCE(tsk->conn);
 		stream = READ_ONCE(tsk->default_stream);
 
@@ -642,6 +644,8 @@ __poll_t tquic_poll(struct file *file, struct socket *sock, poll_table *wait)
 
 	if (sk->sk_shutdown & RCV_SHUTDOWN)
 		mask |= EPOLLRDHUP | EPOLLIN | EPOLLRDNORM;
+
+	release_sock(sk);
 
 	return mask;
 }
@@ -872,8 +876,10 @@ int tquic_sock_setsockopt(struct socket *sock, int level, int optname,
 		 */
 		if (val > 600000)
 			return -ERANGE;
+		lock_sock(sk);
 		if (tsk->conn)
-			tsk->conn->idle_timeout = val;
+			WRITE_ONCE(tsk->conn->idle_timeout, val);
+		release_sock(sk);
 		break;
 
 	case TQUIC_BOND_MODE:
@@ -1493,42 +1499,56 @@ int tquic_sock_getsockopt(struct socket *sock, int level, int optname,
 		return -EINVAL;
 
 	switch (optname) {
-	case TQUIC_INFO:
+	case TQUIC_INFO: {
+		struct tquic_connection *conn;
+		struct tquic_info info = {0};
+
 		if (len < sizeof(struct tquic_info))
 			return -EINVAL;
-		if (tsk->conn) {
-			struct tquic_info info = {0};
-			info.state = READ_ONCE(tsk->conn->state);
-			info.version = tsk->conn->version;
-			info.paths_active = tsk->conn->num_paths;
-			info.bytes_sent = tsk->conn->stats.tx_bytes;
-			info.bytes_received = tsk->conn->stats.rx_bytes;
-			if (copy_to_user(optval, &info, sizeof(info)))
-				return -EFAULT;
-			if (put_user(sizeof(info), optlen))
-				return -EFAULT;
+
+		lock_sock(sk);
+		conn = READ_ONCE(tsk->conn);
+		if (conn) {
+			info.state = READ_ONCE(conn->state);
+			info.version = conn->version;
+			info.paths_active = conn->num_paths;
+			info.bytes_sent = conn->stats.tx_bytes;
+			info.bytes_received = conn->stats.rx_bytes;
 		}
+		release_sock(sk);
+
+		if (copy_to_user(optval, &info, sizeof(info)))
+			return -EFAULT;
+		if (put_user(sizeof(info), optlen))
+			return -EFAULT;
 		return 0;
+	}
 
 	case TQUIC_IDLE_TIMEOUT:
+		lock_sock(sk);
 		val = tsk->conn ? tsk->conn->idle_timeout : 0;
+		release_sock(sk);
 		break;
 
 	case TQUIC_BOND_MODE:
+		lock_sock(sk);
 		if (tsk->conn && tsk->conn->scheduler) {
 			struct tquic_bond_state *bond = tsk->conn->scheduler;
 			val = bond->mode;
 		} else {
 			val = 0;
 		}
+		release_sock(sk);
 		break;
 
 	case TQUIC_PATH_STATUS:
+		lock_sock(sk);
 		if (tsk->conn) {
 			val = tsk->conn->num_paths;
 		} else {
 			val = 0;
 		}
+		release_sock(sk);
 		break;
 
 	case TQUIC_MIGRATE_STATUS: {
@@ -1537,10 +1557,12 @@ int tquic_sock_getsockopt(struct socket *sock, int level, int optname,
 		if (len < sizeof(info))
 			return -EINVAL;
 
+		lock_sock(sk);
 		if (tsk->conn)
 			tquic_migration_get_status(tsk->conn, &info);
 		else
 			memset(&info, 0, sizeof(info));
+		release_sock(sk);
 
 		if (copy_to_user(optval, &info, sizeof(info)))
 			return -EFAULT;
@@ -2353,7 +2375,8 @@ int tquic_recvmsg(struct sock *sk, struct msghdr *msg, size_t len, int flags,
 
 		if (copy_to_iter(skb->data, chunk, &msg->msg_iter) != chunk) {
 			skb_queue_head(&stream->recv_buf, skb);
-			return copied > 0 ? copied : -EFAULT;
+			copied = copied > 0 ? copied : -EFAULT;
+			goto out_release;
 		}
 
 		copied += chunk;
@@ -2369,6 +2392,7 @@ int tquic_recvmsg(struct sock *sk, struct msghdr *msg, size_t len, int flags,
 		conn->stats.rx_bytes += chunk;
 	}
 
+out_release:
 	release_sock(sk);
 
 	return copied;

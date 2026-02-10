@@ -303,6 +303,10 @@ EXPORT_SYMBOL_GPL(tquic_cc_on_packet_sent);
 static void reno_on_ack(struct tquic_cc_state *cc, u64 acked_bytes,
 			struct tquic_rtt *rtt)
 {
+	/* RFC 9002 Section 7.3.2: Do not increase cwnd during recovery */
+	if (cc->in_recovery)
+		return;
+
 	if (cc->in_slow_start) {
 		/* Slow start: exponential growth */
 		cc->cwnd += acked_bytes;
@@ -333,6 +337,10 @@ static void cubic_on_ack(struct tquic_cc_state *cc, u64 acked_bytes,
 	u64 offs;
 	u64 delta;
 	ktime_t now = ktime_get();
+
+	/* RFC 9002 Section 7.3.2: Do not increase cwnd during recovery */
+	if (cc->in_recovery)
+		return;
 
 	if (cc->in_slow_start) {
 		/* Slow start: exponential growth */
@@ -375,6 +383,14 @@ static void cubic_on_ack(struct tquic_cc_state *cc, u64 acked_bytes,
 		offs = cc->cubic_k - t;
 	else
 		offs = t - cc->cubic_k;
+
+	/*
+	 * Cap offs to prevent u64 overflow in offs^3 calculation.
+	 * 2097151 = floor(cbrt(U64_MAX / (CUBIC_C * TQUIC_MAX_PACKET_SIZE)))
+	 * For CUBIC_C=4, MSS=1500: cbrt(2^64 / 6000) ~ 2097151.
+	 */
+	if (offs > 2097151ULL)
+		offs = 2097151ULL;
 
 	/* Calculate delta = C * offs^3 (in packets, then convert to bytes) */
 	delta = offs * offs * offs;

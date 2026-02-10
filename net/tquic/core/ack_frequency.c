@@ -73,14 +73,14 @@ static void tquic_ack_freq_timer_callback(struct timer_list *t)
 	struct tquic_ack_frequency_state *state =
 		from_timer(state, t, ack_timer);
 
-	spin_lock(&state->lock);
+	spin_lock_bh(&state->lock);
 	state->ack_timer_armed = false;
 	/*
 	 * Timer expired - the connection should send an ACK now.
 	 * Signal this by setting immediate_ack_pending.
 	 */
 	state->immediate_ack_pending = true;
-	spin_unlock(&state->lock);
+	spin_unlock_bh(&state->lock);
 
 	pr_debug("tquic: ACK delay timer expired, immediate ACK needed\n");
 }
@@ -610,7 +610,7 @@ int tquic_handle_ack_frequency_frame(struct tquic_ack_frequency_state *state,
 	if (!state || !frame)
 		return -EINVAL;
 
-	spin_lock(&state->lock);
+	spin_lock_bh(&state->lock);
 
 	/* Only process if sequence number is larger than previously seen */
 	if (frame->sequence_number <= state->last_recv_seq &&
@@ -618,7 +618,7 @@ int tquic_handle_ack_frequency_frame(struct tquic_ack_frequency_state *state,
 		pr_debug("tquic: ignoring ACK_FREQUENCY with old seq %llu "
 			 "(last=%llu)\n", frame->sequence_number,
 			 state->last_recv_seq);
-		spin_unlock(&state->lock);
+		spin_unlock_bh(&state->lock);
 		return 0;
 	}
 
@@ -659,7 +659,7 @@ int tquic_handle_ack_frequency_frame(struct tquic_ack_frequency_state *state,
 
 	state->frames_received++;
 
-	spin_unlock(&state->lock);
+	spin_unlock_bh(&state->lock);
 
 	pr_debug("tquic: applied ACK_FREQUENCY: threshold=%llu max_delay=%llu "
 		 "reorder=%llu ignore_order=%d\n",
@@ -685,10 +685,10 @@ int tquic_handle_immediate_ack_frame(struct tquic_ack_frequency_state *state)
 	if (!state)
 		return -EINVAL;
 
-	spin_lock(&state->lock);
+	spin_lock_bh(&state->lock);
 	state->immediate_ack_pending = true;
 	state->immediate_ack_received++;
-	spin_unlock(&state->lock);
+	spin_unlock_bh(&state->lock);
 
 	pr_debug("tquic: IMMEDIATE_ACK received, will ACK next packet\n");
 
@@ -813,19 +813,19 @@ EXPORT_SYMBOL_GPL(tquic_ack_freq_on_ack_sent);
  *
  * Returns maximum ACK delay in microseconds.
  */
-u64 tquic_ack_freq_get_max_delay(const struct tquic_ack_frequency_state *state)
+u64 tquic_ack_freq_get_max_delay(struct tquic_ack_frequency_state *state)
 {
 	u64 delay;
 
 	if (!state)
 		return TQUIC_ACK_FREQ_DEFAULT_MAX_DELAY_US;
 
-	spin_lock((spinlock_t *)&state->lock);
+	spin_lock_bh(&state->lock);
 	if (state->in_congestion)
 		delay = state->dynamic_params.congestion_max_delay_us;
 	else
 		delay = state->current_max_delay_us;
-	spin_unlock((spinlock_t *)&state->lock);
+	spin_unlock_bh(&state->lock);
 
 	return delay;
 }
@@ -837,7 +837,7 @@ EXPORT_SYMBOL_GPL(tquic_ack_freq_get_max_delay);
  *
  * Returns delay in nanoseconds until ACK timer should fire.
  */
-u64 tquic_ack_freq_get_delay_timer(const struct tquic_ack_frequency_state *state)
+u64 tquic_ack_freq_get_delay_timer(struct tquic_ack_frequency_state *state)
 {
 	u64 max_delay_ns;
 	ktime_t now;
@@ -847,12 +847,12 @@ u64 tquic_ack_freq_get_delay_timer(const struct tquic_ack_frequency_state *state
 	if (!state)
 		return TQUIC_ACK_FREQ_DEFAULT_MAX_DELAY_US * 1000ULL;
 
-	spin_lock((spinlock_t *)&state->lock);
+	spin_lock_bh(&state->lock);
 	max_delay_ns = state->current_max_delay_us * 1000ULL;
 	now = ktime_get();
 	elapsed = ktime_sub(now, state->last_ack_sent_time);
 	remaining_ns = max_delay_ns - ktime_to_ns(elapsed);
-	spin_unlock((spinlock_t *)&state->lock);
+	spin_unlock_bh(&state->lock);
 
 	if (remaining_ns < 0)
 		return 0;
@@ -1002,16 +1002,16 @@ EXPORT_SYMBOL_GPL(tquic_ack_freq_generate_pending);
  *
  * Returns true if ACK_FREQUENCY or IMMEDIATE_ACK frames are pending.
  */
-bool tquic_ack_freq_has_pending(const struct tquic_ack_frequency_state *state)
+bool tquic_ack_freq_has_pending(struct tquic_ack_frequency_state *state)
 {
 	bool pending;
 
 	if (!state)
 		return false;
 
-	spin_lock((spinlock_t *)&state->lock);
+	spin_lock_bh(&state->lock);
 	pending = state->ack_frequency_pending || state->immediate_ack_request;
-	spin_unlock((spinlock_t *)&state->lock);
+	spin_unlock_bh(&state->lock);
 
 	return pending;
 }
@@ -1273,7 +1273,7 @@ EXPORT_SYMBOL_GPL(tquic_ack_freq_set_application_hint);
  * @state: ACK frequency state
  */
 void tquic_ack_freq_update_loss_state(struct tquic_loss_state *loss,
-				      const struct tquic_ack_frequency_state *state)
+				      struct tquic_ack_frequency_state *state)
 {
 	u64 max_delay;
 
@@ -1286,9 +1286,9 @@ void tquic_ack_freq_update_loss_state(struct tquic_loss_state *loss,
 	 * could deadlock with tquic_loss_state_set_ack_freq() that
 	 * acquires loss->lock then calls into ACK freq under state->lock.
 	 */
-	spin_lock((spinlock_t *)&state->lock);
+	spin_lock_bh(&state->lock);
 	max_delay = state->current_max_delay_us;
-	spin_unlock((spinlock_t *)&state->lock);
+	spin_unlock_bh(&state->lock);
 
 	spin_lock_bh(&loss->lock);
 	loss->ack_delay_us = (u32)min_t(u64, max_delay, U32_MAX);
@@ -1416,7 +1416,7 @@ EXPORT_SYMBOL_GPL(tquic_ack_freq_tp_size);
  * @state: ACK frequency state
  * @stats: Output statistics structure
  */
-void tquic_ack_freq_get_stats(const struct tquic_ack_frequency_state *state,
+void tquic_ack_freq_get_stats(struct tquic_ack_frequency_state *state,
 			      struct tquic_ack_freq_stats *stats)
 {
 	if (!state || !stats) {
@@ -1425,14 +1425,14 @@ void tquic_ack_freq_get_stats(const struct tquic_ack_frequency_state *state,
 		return;
 	}
 
-	spin_lock((spinlock_t *)&state->lock);
+	spin_lock_bh(&state->lock);
 	stats->frames_sent = state->frames_sent;
 	stats->frames_received = state->frames_received;
 	stats->immediate_ack_sent = state->immediate_ack_sent;
 	stats->immediate_ack_received = state->immediate_ack_received;
 	stats->adjustments_made = state->adjustments_made;
 	stats->last_reason = state->last_adjustment_reason;
-	spin_unlock((spinlock_t *)&state->lock);
+	spin_unlock_bh(&state->lock);
 }
 EXPORT_SYMBOL_GPL(tquic_ack_freq_get_stats);
 
