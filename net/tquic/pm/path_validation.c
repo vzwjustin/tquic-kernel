@@ -218,8 +218,8 @@ int tquic_path_start_validation(struct tquic_connection *conn,
 	 * amount of data it sends to the unvalidated address to three
 	 * times the amount of data received from that address.
 	 */
-	path->anti_amplification.bytes_received = 0;
-	path->anti_amplification.bytes_sent = 0;
+	atomic64_set(&path->anti_amplification.bytes_received, 0);
+	atomic64_set(&path->anti_amplification.bytes_sent, 0);
 	path->anti_amplification.active = true;
 
 	/* Send initial PATH_CHALLENGE */
