@@ -639,6 +639,21 @@ int tquic_handle_key_phase_change(struct tquic_connection *conn, u8 received_pha
 		/* Re-acquire lock and commit the staged keys */
 		spin_lock_irqsave(&state->lock, flags);
 
+		/*
+		 * Re-check after reacquiring lock - another handler may
+		 * have already rotated the keys while we were deriving.
+		 * If the phase already matches received_phase, a
+		 * concurrent handler won the race; discard our keys.
+		 */
+		if (state->current_phase == received_phase) {
+			spin_unlock_irqrestore(&state->lock, flags);
+			memzero_explicit(&staged_read,
+					 sizeof(staged_read));
+			memzero_explicit(&staged_write,
+					 sizeof(staged_write));
+			return 0;
+		}
+
 		/* Save old read keys for packets in flight */
 		state->old_read = state->current_read;
 		state->old_keys_valid = true;

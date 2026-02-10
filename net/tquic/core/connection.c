@@ -227,6 +227,11 @@ static struct crypto_aead *tquic_retry_aead;
 static DEFINE_SPINLOCK(tquic_retry_aead_lock);
 static bool tquic_retry_aead_initialized;
 
+/* Retry Integrity Tag AEAD - cached per RFC 9001 Section 5.8 */
+static struct crypto_aead *tquic_retry_integrity_aead_v1;
+static struct crypto_aead *tquic_retry_integrity_aead_v2;
+static DEFINE_SPINLOCK(tquic_retry_integrity_lock);
+
 /* Forward declarations */
 static void tquic_conn_enter_closing(struct tquic_connection *conn,
 				     u64 error_code, const char *reason);
@@ -1184,19 +1189,13 @@ int tquic_generate_retry_token(struct tquic_connection *conn,
 	/* Output format: nonce || ciphertext || auth_tag */
 	memcpy(token, nonce, TQUIC_RETRY_TOKEN_IV_LEN);
 
-	/* Allocate AEAD request */
-	req = aead_request_alloc(tquic_retry_aead, GFP_ATOMIC);
-	if (!req)
-		return -ENOMEM;
-
 	spin_lock_bh(&tquic_retry_aead_lock);
 
-	ret = crypto_aead_setkey(tquic_retry_aead, tquic_retry_token_key,
-				 TQUIC_RETRY_TOKEN_KEY_LEN);
-	if (ret) {
+	/* Allocate AEAD request under lock to protect tquic_retry_aead */
+	req = aead_request_alloc(tquic_retry_aead, GFP_ATOMIC);
+	if (!req) {
 		spin_unlock_bh(&tquic_retry_aead_lock);
-		aead_request_free(req);
-		return ret;
+		return -ENOMEM;
 	}
 
 	/* Copy plaintext to output buffer after nonce for in-place encryption */
@@ -1211,8 +1210,8 @@ int tquic_generate_retry_token(struct tquic_connection *conn,
 
 	ret = crypto_aead_encrypt(req);
 
-	spin_unlock_bh(&tquic_retry_aead_lock);
 	aead_request_free(req);
+	spin_unlock_bh(&tquic_retry_aead_lock);
 
 	if (ret)
 		return ret;
@@ -1281,19 +1280,13 @@ int tquic_validate_retry_token(struct tquic_connection *conn,
 		return -EINVAL;
 	}
 
-	/* Allocate AEAD request */
-	req = aead_request_alloc(tquic_retry_aead, GFP_ATOMIC);
-	if (!req)
-		return -ENOMEM;
-
 	spin_lock_bh(&tquic_retry_aead_lock);
 
-	ret = crypto_aead_setkey(tquic_retry_aead, tquic_retry_token_key,
-				 TQUIC_RETRY_TOKEN_KEY_LEN);
-	if (ret) {
+	/* Allocate AEAD request under lock to protect tquic_retry_aead */
+	req = aead_request_alloc(tquic_retry_aead, GFP_ATOMIC);
+	if (!req) {
 		spin_unlock_bh(&tquic_retry_aead_lock);
-		aead_request_free(req);
-		return ret;
+		return -ENOMEM;
 	}
 
 	/* Copy ciphertext to plaintext buffer for in-place decryption */
@@ -1307,8 +1300,8 @@ int tquic_validate_retry_token(struct tquic_connection *conn,
 
 	ret = crypto_aead_decrypt(req);
 
-	spin_unlock_bh(&tquic_retry_aead_lock);
 	aead_request_free(req);
+	spin_unlock_bh(&tquic_retry_aead_lock);
 
 	if (ret) {
 		tquic_conn_dbg(conn, "retry token decryption failed\n");
@@ -1470,42 +1463,42 @@ int tquic_send_retry(struct tquic_connection *conn,
 	 * v2 (RFC 9369 Section 5.8) retry integrity keys.
 	 */
 	{
-		static const u8 retry_key_v1[16] = {
-			0xbe, 0x0c, 0x69, 0x0b, 0x9f, 0x66, 0x57, 0x5a,
-			0x1d, 0x76, 0x6b, 0x54, 0xe3, 0x68, 0xc8, 0x4e
-		};
 		static const u8 retry_nonce_v1[12] = {
 			0x46, 0x15, 0x99, 0xd3, 0x5d, 0x63, 0x2b, 0xf2,
 			0x23, 0x98, 0x25, 0xbb
-		};
-		static const u8 retry_key_v2[16] = {
-			0x8f, 0xb4, 0xb0, 0x1b, 0x56, 0xac, 0x48, 0xe2,
-			0x60, 0xfb, 0xcb, 0xce, 0xad, 0x7c, 0xcc, 0x92
 		};
 		static const u8 retry_nonce_v2[12] = {
 			0xd8, 0x69, 0x69, 0xbc, 0x2d, 0x7c, 0x6d, 0x99,
 			0x90, 0xef, 0xb0, 0x4a
 		};
-		const u8 *retry_key;
 		const u8 *retry_nonce;
+		struct crypto_aead *integrity_aead;
 		u8 *pseudo_packet;
 		u8 *pp;
-		u8 tag[16];
-		struct crypto_aead *aead;
 		struct aead_request *req;
-		struct scatterlist sg_in, sg_out;
+		struct scatterlist sg;
 		size_t pseudo_len, pkt_len;
 		int tag_ret;
 
 		if (conn->version == TQUIC_VERSION_2) {
-			retry_key = retry_key_v2;
 			retry_nonce = retry_nonce_v2;
+			integrity_aead = tquic_retry_integrity_aead_v2;
 		} else {
-			retry_key = retry_key_v1;
 			retry_nonce = retry_nonce_v1;
+			integrity_aead = tquic_retry_integrity_aead_v1;
 		}
 
-		pseudo_packet = kmalloc(TQUIC_RETRY_PSEUDO_BUF_SIZE,
+		if (!integrity_aead)
+			goto skip_tag;
+
+		/*
+		 * Allocate pseudo-packet buffer with 16 extra bytes for
+		 * the integrity tag.  The AEAD output scatterlist must
+		 * cover AAD + ciphertext + tag when doing in-place
+		 * encryption, so we use a single buffer for both input
+		 * and output.
+		 */
+		pseudo_packet = kmalloc(TQUIC_RETRY_PSEUDO_BUF_SIZE + 16,
 					GFP_ATOMIC);
 		if (!pseudo_packet)
 			goto skip_tag;
@@ -1515,7 +1508,7 @@ int tquic_send_retry(struct tquic_connection *conn,
 		/* Build pseudo-retry packet: Original DCID + Retry packet */
 		pkt_len = p - packet;
 
-		/* Validate pseudo-packet fits in buffer */
+		/* Validate pseudo-packet fits in buffer (excl. tag space) */
 		if (1 + original_dcid->len + pkt_len >
 		    TQUIC_RETRY_PSEUDO_BUF_SIZE) {
 			kfree(pseudo_packet);
@@ -1530,31 +1523,34 @@ int tquic_send_retry(struct tquic_connection *conn,
 		pp += pkt_len;
 		pseudo_len = pp - pseudo_packet;
 
-		/* Compute tag using AES-128-GCM */
-		aead = crypto_alloc_aead("gcm(aes)", 0, 0);
-		if (!IS_ERR(aead)) {
-			crypto_aead_setkey(aead, retry_key, 16);
-			crypto_aead_setauthsize(aead, 16);
+		/*
+		 * Compute Retry Integrity Tag using cached AEAD.
+		 * Use in-place encryption: the scatterlist covers the
+		 * AAD (pseudo-packet) plus 16 bytes for the output tag.
+		 * With plaintext_len=0, the AEAD produces only the tag
+		 * at offset pseudo_len in the buffer.
+		 */
+		spin_lock_bh(&tquic_retry_integrity_lock);
 
-			req = aead_request_alloc(aead, GFP_ATOMIC);
-			if (req) {
-				sg_init_one(&sg_in, pseudo_packet, pseudo_len);
-				sg_init_one(&sg_out, tag, sizeof(tag));
+		req = aead_request_alloc(integrity_aead, GFP_ATOMIC);
+		if (req) {
+			sg_init_one(&sg, pseudo_packet,
+				    pseudo_len + 16);
 
-				aead_request_set_crypt(req, &sg_in, &sg_out,
-						       0, (u8 *)retry_nonce);
-				aead_request_set_ad(req, pseudo_len);
+			aead_request_set_crypt(req, &sg, &sg,
+					       0, (u8 *)retry_nonce);
+			aead_request_set_ad(req, pseudo_len);
 
-				tag_ret = crypto_aead_encrypt(req);
-				if (tag_ret == 0) {
-					/* Append tag to packet */
-					memcpy(p, tag, 16);
-					p += 16;
-				}
-				aead_request_free(req);
+			tag_ret = crypto_aead_encrypt(req);
+			if (tag_ret == 0) {
+				/* Tag is at pseudo_packet + pseudo_len */
+				memcpy(p, pseudo_packet + pseudo_len, 16);
+				p += 16;
 			}
-			crypto_free_aead(aead);
+			aead_request_free(req);
 		}
+
+		spin_unlock_bh(&tquic_retry_integrity_lock);
 		kfree(pseudo_packet);
 	}
 
@@ -3046,14 +3042,98 @@ int __init tquic_connection_init(void)
 
 	/* Generate random key for retry token encryption */
 	get_random_bytes(tquic_retry_token_key, TQUIC_RETRY_TOKEN_KEY_LEN);
+
+	/* Set the token key once at init - no need to set per-request */
+	ret = crypto_aead_setkey(tquic_retry_aead, tquic_retry_token_key,
+				 TQUIC_RETRY_TOKEN_KEY_LEN);
+	if (ret) {
+		tquic_err("failed to set retry token AEAD key\n");
+		crypto_free_aead(tquic_retry_aead);
+		tquic_retry_aead = NULL;
+		rhashtable_destroy(&cid_lookup_table);
+		return ret;
+	}
+
 	tquic_retry_aead_initialized = true;
+
+	/*
+	 * Initialize cached AEAD transforms for Retry Integrity Tag
+	 * computation.  Keys and nonces are fixed per RFC 9001 Section 5.8
+	 * (v1) and RFC 9369 Section 5.8 (v2), so we set them once here.
+	 */
+	{
+		static const u8 retry_key_v1[16] = {
+			0xbe, 0x0c, 0x69, 0x0b, 0x9f, 0x66, 0x57, 0x5a,
+			0x1d, 0x76, 0x6b, 0x54, 0xe3, 0x68, 0xc8, 0x4e
+		};
+		static const u8 retry_key_v2[16] = {
+			0x8f, 0xb4, 0xb0, 0x1b, 0x56, 0xac, 0x48, 0xe2,
+			0x60, 0xfb, 0xcb, 0xce, 0xad, 0x7c, 0xcc, 0x92
+		};
+
+		tquic_retry_integrity_aead_v1 =
+			crypto_alloc_aead("gcm(aes)", 0, 0);
+		if (IS_ERR(tquic_retry_integrity_aead_v1)) {
+			tquic_err("failed to allocate retry integrity AEAD v1\n");
+			ret = PTR_ERR(tquic_retry_integrity_aead_v1);
+			tquic_retry_integrity_aead_v1 = NULL;
+			goto err_integrity_v1;
+		}
+		crypto_aead_setauthsize(tquic_retry_integrity_aead_v1, 16);
+		ret = crypto_aead_setkey(tquic_retry_integrity_aead_v1,
+					 retry_key_v1, 16);
+		if (ret) {
+			crypto_free_aead(tquic_retry_integrity_aead_v1);
+			tquic_retry_integrity_aead_v1 = NULL;
+			goto err_integrity_v1;
+		}
+
+		tquic_retry_integrity_aead_v2 =
+			crypto_alloc_aead("gcm(aes)", 0, 0);
+		if (IS_ERR(tquic_retry_integrity_aead_v2)) {
+			tquic_err("failed to allocate retry integrity AEAD v2\n");
+			ret = PTR_ERR(tquic_retry_integrity_aead_v2);
+			tquic_retry_integrity_aead_v2 = NULL;
+			goto err_integrity_v2;
+		}
+		crypto_aead_setauthsize(tquic_retry_integrity_aead_v2, 16);
+		ret = crypto_aead_setkey(tquic_retry_integrity_aead_v2,
+					 retry_key_v2, 16);
+		if (ret) {
+			crypto_free_aead(tquic_retry_integrity_aead_v2);
+			tquic_retry_integrity_aead_v2 = NULL;
+			goto err_integrity_v2;
+		}
+	}
 
 	tquic_info("connection state machine initialized\n");
 	return 0;
+
+err_integrity_v2:
+	if (tquic_retry_integrity_aead_v1) {
+		crypto_free_aead(tquic_retry_integrity_aead_v1);
+		tquic_retry_integrity_aead_v1 = NULL;
+	}
+err_integrity_v1:
+	tquic_retry_aead_initialized = false;
+	crypto_free_aead(tquic_retry_aead);
+	tquic_retry_aead = NULL;
+	rhashtable_destroy(&cid_lookup_table);
+	return ret;
 }
 
 void __exit tquic_connection_exit(void)
 {
+	/* Cleanup retry integrity AEADs */
+	if (tquic_retry_integrity_aead_v1) {
+		crypto_free_aead(tquic_retry_integrity_aead_v1);
+		tquic_retry_integrity_aead_v1 = NULL;
+	}
+	if (tquic_retry_integrity_aead_v2) {
+		crypto_free_aead(tquic_retry_integrity_aead_v2);
+		tquic_retry_integrity_aead_v2 = NULL;
+	}
+
 	/* Cleanup retry token AEAD */
 	if (tquic_retry_aead) {
 		tquic_retry_aead_initialized = false;
