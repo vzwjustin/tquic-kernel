@@ -881,26 +881,38 @@ EXPORT_SYMBOL_GPL(h3_connection_create);
 void h3_connection_destroy(struct h3_connection *h3conn)
 {
 	struct rb_node *node;
+	struct h3_stream *h3s;
+	LIST_HEAD(close_list);
 
 	if (!h3conn)
 		return;
 
+	/*
+	 * Collect stream pointers under the spinlock, then close
+	 * them after releasing the lock.  tquic_stream_close() may
+	 * sleep (e.g., for crypto teardown), so it must not be
+	 * called with a spinlock held.
+	 */
 	spin_lock(&h3conn->lock);
 
-	/* Close all streams */
 	while ((node = rb_first(&h3conn->streams))) {
-		struct h3_stream *h3s;
-
 		h3s = rb_entry(node, struct h3_stream, node);
 		rb_erase(node, &h3conn->streams);
 		h3conn->stream_count--;
+		list_add(&h3s->list, &close_list);
+	}
+
+	spin_unlock(&h3conn->lock);
+
+	/* Now close streams without holding the spinlock */
+	while (!list_empty(&close_list)) {
+		h3s = list_first_entry(&close_list, struct h3_stream, list);
+		list_del(&h3s->list);
 
 		if (h3s->base)
 			tquic_stream_close(h3s->base);
 		h3_stream_free(h3s);
 	}
-
-	spin_unlock(&h3conn->lock);
 
 	kmem_cache_free(h3_connection_cache, h3conn);
 

@@ -1463,7 +1463,9 @@ int tquic_hs_process_server_hello(struct tquic_handshake *hs,
 	}
 	p += session_id_len;
 
-	/* Cipher suite */
+	/* Cipher suite -- need 2 bytes */
+	if (p + 2 > end)
+		return -EINVAL;
 	cipher_suite = (p[0] << 8) | p[1];
 	p += 2;
 
@@ -1482,7 +1484,9 @@ int tquic_hs_process_server_hello(struct tquic_handshake *hs,
 	else
 		hs->hash_len = 32;
 
-	/* Compression (must be null) */
+	/* Compression (must be null) -- need 1 byte */
+	if (p >= end)
+		return -EINVAL;
 	compression = *p++;
 	if (compression != 0) {
 		pr_warn("tquic_hs: non-null compression\n");
