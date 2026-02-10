@@ -63,14 +63,14 @@ Parked. Only revisit if new evidence surfaces.
   - Verify: `rg -n "free" "net/tquic/http3/http3_stream.c"`
   - Fix: Add `refcount_inc(&stream->refcount)` in `h3_stream_lookup()` and require all callers to call a corresponding `h3_stream_put()` when done. Risk: Fixes
 
-- [ ] **CF-009** -- QPACK Dynamic Table Duplicate: Use-After-Free via Lock Drop
+- [x] **CF-009** -- QPACK Dynamic Table Duplicate: Use-After-Free via Lock Drop
   - Severity: S0 | Sources: A,B,C | Priority: 10.0
   - Evidence: file:1, sym:5
   - Missing: Exact line range(s) where the fault manifests; Code snippet proving the vulnerable pattern
   - Verify: `rg -n "either" "net/tquic/http3/qpack_dynamic.c"`
   - Fix: Either (a) increment the entry's refcount before dropping the lock, or (b) copy the name/value data into a local buffer before dropping the lock, or (
 
-- [ ] **CF-011** -- Stack Buffer Overflow in HKDF-Expand-Label
+- [x] **CF-011** -- Stack Buffer Overflow in HKDF-Expand-Label
   - Severity: S0 | Sources: A,B,C | Priority: 10.0
   - Evidence: file:1, sym:3, lines:1
   - Missing: Code snippet proving the vulnerable pattern; Kernel log / stack trace / error output demonstrating the issue
@@ -112,14 +112,14 @@ Parked. Only revisit if new evidence surfaces.
   - Verify: `rg -n "tquic_cid" "net/tquic/core/connection.c"`
   - Fix: Add bounds validation: ```c if (offset >= len) goto err_free; dcid_len = data[offset++]; if (dcid_len > TQUIC_MAX_CID_LEN) goto err_free; if (offset +
 
-- [ ] **CF-058** -- Stack buffer overflow in `tquic_hs_hkdf_expand_label` -- unbounded label/context write to 512-byte s
+- [x] **CF-058** -- Stack buffer overflow in `tquic_hs_hkdf_expand_label` -- unbounded label/context write to 512-byte s
   - Severity: S0 | Sources: B,C | Priority: 10.0
   - Evidence: file:1, sym:8, lines:1, snippet:5
   - Missing: Kernel log / stack trace / error output demonstrating the issue
   - Verify: `rg -n "tquic_handshake" "net/tquic/crypto/handshake.c"`
   - Fix: Add bounds checking throughout `tquic_hs_build_ch_extensions`. Every write to `p` must verify `p + N <= buf + buf_len` before writing. Use a macro sim
 
-- [ ] **CF-068** -- Use-After-Free in Path Lookup
+- [x] **CF-068** -- Use-After-Free in Path Lookup
   - Severity: S0 | Sources: A,B | Priority: 10.0
   - Evidence: file:2, sym:8, lines:4, snippet:1
   - Missing: Kernel log / stack trace / error output demonstrating the issue
@@ -128,35 +128,35 @@ Parked. Only revisit if new evidence surfaces.
 
 #### Security (6)
 
-- [ ] **CF-003** -- Client Certificate Verification Uses Server Logic
+- [x] **CF-003** -- Client Certificate Verification Uses Server Logic
   - Severity: S0 | Sources: A,B,C | Priority: 10.0
   - Evidence: file:1, sym:5, lines:2, snippet:2
   - Missing: Kernel log / stack trace / error output demonstrating the issue
   - Verify: `rg -n "tquic_hs_verify_client_cert" "net/tquic/crypto/cert_verify.c"`
   - Fix: Add a `bool is_server` parameter to the internal `verify_chain()` call path, or refactor so that client cert verification passes `is_server=false`. Ri
 
-- [ ] **CF-005** -- Fragile Hardcoded Offset for Key Update State Access
+- [x] **CF-005** -- Fragile Hardcoded Offset for Key Update State Access
   - Severity: S0 | Sources: A,B,C | Priority: 10.0
   - Evidence: file:1, sym:9, snippet:4
   - Missing: Exact line range(s) where the fault manifests; Kernel log / stack trace / error output demonstrating the issue
   - Verify: `rg -n "change" "net/tquic/crypto/key_update.c"`
   - Fix: Use a proper typed structure with a named field, or use `container_of()` macro. Never use raw byte offsets to access structure members. Define a prope
 
-- [ ] **CF-007** -- OCSP Stapling Response Accepted Without Any Verification
+- [x] **CF-007** -- OCSP Stapling Response Accepted Without Any Verification
   - Severity: S0 | Sources: A,B,C | Priority: 10.0
   - Evidence: file:1, sym:6, snippet:2
   - Missing: Exact line range(s) where the fault manifests; Kernel log / stack trace / error output demonstrating the issue
   - Verify: `rg -n "pr_debug" "net/tquic/crypto/cert_verify.c"`
   - Fix: Either implement OCSP response verification or remove the early return so that the "no OCSP available" path is taken, which at least logs warnings in 
 
-- [ ] **CF-008** -- Path Metrics Netlink: Unbounded Allocation from Attacker-Influenced Value
+- [x] **CF-008** -- Path Metrics Netlink: Unbounded Allocation from Attacker-Influenced Value
   - Severity: S0 | Sources: A,B,C | Priority: 10.0
   - Evidence: file:1, sym:6
   - Missing: Exact line range(s) where the fault manifests; Code snippet proving the vulnerable pattern
   - Verify: `rg -n "allocation" "net/tquic/diag/path_metrics.c"`
   - Fix: Cap the allocation at a fixed reasonable maximum (e.g., `min(conn->num_paths, TQUIC_MAX_PATHS) * NLMSG_DEFAULT_SIZE`), and add the CAP_NET_ADMIN check
 
-- [ ] **CF-010** -- Self-Signed Certificate Comparison Uses Non-Constant-Time memcmp in One Path
+- [x] **CF-010** -- Self-Signed Certificate Comparison Uses Non-Constant-Time memcmp in One Path
   - Severity: S0 | Sources: A,B,C | Priority: 10.0
   - Evidence: file:1, sym:7, lines:4, snippet:2
   - Missing: Kernel log / stack trace / error output demonstrating the issue
@@ -172,7 +172,7 @@ Parked. Only revisit if new evidence surfaces.
 
 #### Concurrency (12)
 
-- [ ] **CF-004** -- Connection Destroy Calls Sleeping Function Under Spinlock
+- [x] **CF-004** -- Connection Destroy Calls Sleeping Function Under Spinlock
   - Severity: S0 | Sources: A,B,C | Priority: 10.0
   - Evidence: file:1, sym:3
   - Missing: Exact line range(s) where the fault manifests; Code snippet proving the vulnerable pattern
@@ -258,7 +258,7 @@ Parked. Only revisit if new evidence surfaces.
 
 #### Correctness (12)
 
-- [ ] **CF-001** -- Adaptive Scheduler cwnd_avail Underflow
+- [x] **CF-001** -- Adaptive Scheduler cwnd_avail Underflow
   - Severity: S0 | Sources: A,B,C | Priority: 10.0
   - Evidence: file:1, sym:4, snippet:5
   - Missing: Exact line range(s) where the fault manifests; Kernel log / stack trace / error output demonstrating the issue
@@ -272,7 +272,7 @@ Parked. Only revisit if new evidence surfaces.
   - Verify: `rg -n "dispatcher" "net/tquic/tquic_input.c"`
   - Fix: Add a flag to `tquic_rx_ctx` that records when a length-less STREAM frame is processed, and assert in the dispatcher that no further frames follow. Ri
 
-- [ ] **CF-014** -- `tquic_hs_process_certificate` -- integer underflow in `certs_len` tracking
+- [x] **CF-014** -- `tquic_hs_process_certificate` -- integer underflow in `certs_len` tracking
   - Severity: S0 | Sources: B,C | Priority: 10.0
   - Evidence: file:1, sym:1, lines:3, snippet:1
   - Missing: Kernel log / stack trace / error output demonstrating the issue
@@ -307,7 +307,7 @@ Parked. Only revisit if new evidence surfaces.
   - Verify: `rg -n "tquic_output" "net/quic/tquic/tquic_output.c"`
   - Fix: Add `BUILD_BUG_ON(TQUIC_MAX_HEADER_SIZE > 64)` or use `min(header_len, 64)` as a defense.  --- Risk: Protocol correctness fixes can shift timing/state
 
-- [ ] **CF-044** -- PADDING Frame Infinite Skip Without Bound on Encrypted Payload
+- [x] **CF-044** -- PADDING Frame Infinite Skip Without Bound on Encrypted Payload
   - Severity: S0 | Sources: B,C | Priority: 10.0
   - Evidence: file:1, sym:3, lines:5, snippet:3
   - Missing: Kernel log / stack trace / error output demonstrating the issue
@@ -321,14 +321,14 @@ Parked. Only revisit if new evidence surfaces.
   - Verify: `sed -n '633,633p' net/quic/tquic/core/priority.c`
   - Fix: Implement proper Structured Field Dictionary parsing per RFC 8941. Validate the priority field value format strictly. Risk: Protocol correctness fixes
 
-- [ ] **CF-050** -- quic_packet.c Stream Frame - Uncapped Stream Creation
+- [x] **CF-050** -- quic_packet.c Stream Frame - Uncapped Stream Creation
   - Severity: S0 | Sources: B,C | Priority: 10.0
   - Evidence: file:1, sym:3, lines:3, snippet:3
   - Missing: Kernel log / stack trace / error output demonstrating the issue
   - Verify: `rg -n "quic_packet" "net/quic/tquic/core/quic_packet.c"`
   - Fix: Replace `tquic_stream_create_internal` with `tquic_stream_open_incoming` which validates peer's MAX_STREAMS limit.  --- Risk: Protocol correctness fix
 
-- [ ] **CF-065** -- Transcript Buffer Reallocation Doubling Overflow
+- [x] **CF-065** -- Transcript Buffer Reallocation Doubling Overflow
   - Severity: S0 | Sources: B,C | Priority: 10.0
   - Evidence: file:1, lines:3, snippet:2
   - Missing: Function/struct symbol name at the fault site; Kernel log / stack trace / error output demonstrating the issue
@@ -756,7 +756,7 @@ Parked. Only revisit if new evidence surfaces.
   - Verify: `rg -n "enabled" "net/tquic/crypto/handshake.c"`
   - Fix: Add a running `offset` tracker and validate `offset + needed_bytes <= buf_len` before every write operation. Return `-ENOSPC` if insufficient space. R
 
-- [ ] **CF-016** -- `tquic_hs_process_server_hello` -- missing bounds check before compression byte read
+- [x] **CF-016** -- `tquic_hs_process_server_hello` -- missing bounds check before compression byte read
   - Severity: S0 | Sources: B,C | Priority: 10.0
   - Evidence: file:1, sym:1, snippet:1
   - Missing: Exact line range(s) where the fault manifests; Kernel log / stack trace / error output demonstrating the issue
@@ -947,7 +947,7 @@ Parked. Only revisit if new evidence surfaces.
   - Verify: `rg -n "tquic_nf" "net/tquic/tquic_nf.c"`
   - Fix: Register hooks via `pernet_operations` so each namespace gets its own hooks, or verify this is intentionally init_net-only and document the limitation
 
-- [ ] **CF-041** -- No Privilege Check for TQUIC Socket Creation
+- [x] **CF-041** -- No Privilege Check for TQUIC Socket Creation
   - Severity: S0 | Sources: B,C | Priority: 10.0
   - Evidence: file:1, sym:1
   - Missing: Exact line range(s) where the fault manifests; Code snippet proving the vulnerable pattern
@@ -1054,7 +1054,7 @@ Parked. Only revisit if new evidence surfaces.
   - Verify: `rg -n "tquic_shutdown" "net/tquic/tquic_socket.c"`
   - Fix: Establish one synchronization model for this code path and make all state transitions/lookup paths follow it consistently. Risk: Locking/ordering chan
 
-- [ ] **CF-022** -- BLEST Inconsistent Locking -- 3 of 6 Callbacks Lack Lock
+- [x] **CF-022** -- BLEST Inconsistent Locking -- 3 of 6 Callbacks Lack Lock
   - Severity: S0 | Sources: B,C | Priority: 10.0
   - Evidence: file:1, sym:5, snippet:1
   - Missing: Exact line range(s) where the fault manifests; Kernel log / stack trace / error output demonstrating the issue
@@ -1126,7 +1126,7 @@ Parked. Only revisit if new evidence surfaces.
   - Verify: `rg -n "tquic_varint_len" "net/tquic/tquic_output.c"`
   - Fix: Add explicit check: `if (len == 0) return -EOVERFLOW;` Risk: Protocol correctness fixes can shift timing/state-machine behavior; verify against intero
 
-- [ ] **CF-027** -- ECN CE Count Processing Does Not Track Deltas
+- [x] **CF-027** -- ECN CE Count Processing Does Not Track Deltas
   - Severity: S0 | Sources: B,C | Priority: 10.0
   - Evidence: file:1, sym:3, snippet:1
   - Missing: Exact line range(s) where the fault manifests; Kernel log / stack trace / error output demonstrating the issue
@@ -2853,7 +2853,7 @@ Parked. Only revisit if new evidence surfaces.
 
 #### Concurrency (26)
 
-- [ ] **CF-043** -- No security_socket_* Hook Invocations
+- [x] **CF-043** -- No security_socket_* Hook Invocations
   - S0 | B,C | Evidence: sym:10
 
 - [ ] **CF-091** -- Attacker-Controlled Allocation Sizes
