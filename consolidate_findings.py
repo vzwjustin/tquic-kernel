@@ -236,6 +236,8 @@ def extract_paths_from_text(text: str) -> list[str]:
 	paths = []
 	for m in re.finditer(r"(?:/[^ \t\n`'\"]+)?(net/(?:tquic|quic)/[^\s`'\":)]+)", text):
 		path = normalize_path(m.group(1))
+		if re.search(r":\d+(?:-\d+)?$", path):
+			path = path.split(":", 1)[0]
 		if path:
 			paths.append(path)
 	return dedupe_list(paths)
@@ -508,6 +510,8 @@ def should_merge(a: Finding, b: Finding) -> bool:
 	a_tokens = set(a.title_tokens)
 	b_tokens = set(b.title_tokens)
 	title_sim = jaccard(a_tokens, b_tokens)
+	a_sig = title_signature(a.title_tokens)
+	b_sig = title_signature(b.title_tokens)
 	same_file = a.primary_file == b.primary_file and a.primary_file != "unknown_file"
 	same_category = a.category == b.category
 	symbol_known = (
@@ -516,6 +520,14 @@ def should_merge(a: Finding, b: Finding) -> bool:
 	)
 	symbol_match = symbol_known and a.primary_symbol == b.primary_symbol
 	range_overlap = ranges_overlap(a, b)
+	one_unknown_file = (
+		(a.primary_file == "unknown_file" and b.primary_file != "unknown_file")
+		or (b.primary_file == "unknown_file" and a.primary_file != "unknown_file")
+	)
+
+	# Title-signature equality is strong for normalized findings.
+	if a_sig == b_sig and same_category and (same_file or one_unknown_file):
+		return True
 
 	if same_file:
 		if range_overlap and title_sim >= 0.20:
@@ -528,6 +540,9 @@ def should_merge(a: Finding, b: Finding) -> bool:
 			return True
 
 	if symbol_match and title_sim >= 0.65 and (same_category or same_file):
+		return True
+
+	if one_unknown_file and same_category and title_sim >= 0.90:
 		return True
 
 	if (
