@@ -393,11 +393,18 @@ ssize_t tquic_forward_splice(struct tquic_tunnel *tunnel, int direction)
 				}
 			}
 
-			/* Enqueue to QUIC stream send buffer */
+			/* Enqueue to QUIC stream send buffer (initialize skb->cb offset). */
+			if (stream->conn)
+				spin_lock_bh(&stream->conn->lock);
 			spin_lock_bh(&stream->send_buf.lock);
+			*(u64 *)skb->cb = stream->send_offset;
 			__skb_queue_tail(&stream->send_buf, skb);
 			stream->send_offset += err;
+			if (stream->conn)
+				stream->conn->fc_data_reserved += err;
 			spin_unlock_bh(&stream->send_buf.lock);
+			if (stream->conn)
+				spin_unlock_bh(&stream->conn->lock);
 			total += err;
 
 			/* Limit to splice buffer size per call */
@@ -757,27 +764,37 @@ ssize_t tquic_forward_hairpin(struct tquic_tunnel *tunnel,
 		return 0;
 	}
 
-	/* Enqueue to destination stream with memory accounting */
-	spin_lock_bh(&dst_stream->send_buf.lock);
-	skb_queue_walk_safe(&tx_queue, skb, skb_next) {
-		__skb_unlink(skb, &tx_queue);
+		/* Enqueue to destination stream with memory accounting */
+		if (dst_stream->conn)
+			spin_lock_bh(&dst_stream->conn->lock);
+		spin_lock_bh(&dst_stream->send_buf.lock);
+		skb_queue_walk_safe(&tx_queue, skb, skb_next) {
+			u32 skb_len;
 
-		/* Charge memory to destination connection socket */
-		if (dst_stream->conn && dst_stream->conn->sk) {
+			__skb_unlink(skb, &tx_queue);
+
+			/* Charge memory to destination connection socket */
+			if (dst_stream->conn && dst_stream->conn->sk) {
 			struct sock *dst_sk = dst_stream->conn->sk;
 
 			/*
 			 * Use skb_set_owner_w which handles both memory
 			 * accounting and refcount properly for all kernel versions.
-			 */
-			skb_set_owner_w(skb, dst_sk);
-		}
+				 */
+				skb_set_owner_w(skb, dst_sk);
+			}
 
-		__skb_queue_tail(&dst_stream->send_buf, skb);
-	}
-	/* Update stream send offset while still holding the lock */
-	dst_stream->send_offset += total_bytes;
-	spin_unlock_bh(&dst_stream->send_buf.lock);
+			skb_len = skb->len;
+			*(u64 *)skb->cb = dst_stream->send_offset;
+			dst_stream->send_offset += skb_len;
+			if (dst_stream->conn)
+				dst_stream->conn->fc_data_reserved += skb_len;
+
+			__skb_queue_tail(&dst_stream->send_buf, skb);
+		}
+		spin_unlock_bh(&dst_stream->send_buf.lock);
+		if (dst_stream->conn)
+			spin_unlock_bh(&dst_stream->conn->lock);
 
 	/*
 	 * Wake up peer connection to trigger transmission.
@@ -1306,10 +1323,17 @@ int tquic_forward_signal_mtu(struct tquic_tunnel *tunnel, u32 new_mtu)
 	 * The frame will be sent with the next outgoing packet.
 	 * MTU signals are high priority to prevent further oversized sends.
 	 */
+	if (stream->conn)
+		spin_lock_bh(&stream->conn->lock);
 	spin_lock_bh(&stream->send_buf.lock);
+	*(u64 *)skb->cb = stream->send_offset;
 	__skb_queue_head(&stream->send_buf, skb);  /* High priority - head of queue */
 	stream->send_offset += sizeof(frame);
+	if (stream->conn)
+		stream->conn->fc_data_reserved += sizeof(frame);
 	spin_unlock_bh(&stream->send_buf.lock);
+	if (stream->conn)
+		spin_unlock_bh(&stream->conn->lock);
 
 	/* Wake stream to trigger transmission */
 	tquic_stream_wake(stream);

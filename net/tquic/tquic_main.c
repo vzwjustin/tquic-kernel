@@ -175,11 +175,26 @@ void tquic_conn_destroy(struct tquic_connection *conn)
 	while ((node = rb_first(&conn->streams))) {
 		struct tquic_stream *stream = rb_entry(node, struct tquic_stream, node);
 		struct sk_buff *skb;
+		unsigned int skb_len;
 
 		rb_erase(node, &conn->streams);
 
 		/* Uncharge memory when purging buffers */
 		while ((skb = skb_dequeue(&stream->send_buf)) != NULL) {
+			/*
+			 * If we're dropping queued send data, release its
+			 * connection-level flow control reservation so
+			 * other streams on this connection aren't blocked.
+			 */
+			skb_len = skb->len;
+			if (skb_len) {
+				spin_lock_bh(&conn->lock);
+				if (conn->fc_data_reserved >= skb_len)
+					conn->fc_data_reserved -= skb_len;
+				else
+					conn->fc_data_reserved = 0;
+				spin_unlock_bh(&conn->lock);
+			}
 			if (conn->sk) {
 				sk_mem_uncharge(conn->sk, skb->truesize);
 				/* sk_wmem_alloc handled by skb destructor */
@@ -715,6 +730,7 @@ void tquic_stream_close(struct tquic_stream *stream)
 {
 	struct tquic_connection *conn = stream->conn;
 	struct sk_buff *skb;
+	unsigned int skb_len;
 
 	spin_lock_bh(&conn->lock);
 	rb_erase(&stream->node, &conn->streams);
@@ -723,6 +739,19 @@ void tquic_stream_close(struct tquic_stream *stream)
 
 	/* Purge with proper memory accounting */
 	while ((skb = skb_dequeue(&stream->send_buf)) != NULL) {
+		/*
+		 * This stream is being closed while the connection may live on;
+		 * release queued send-data reservation as we drop skbs.
+		 */
+		skb_len = skb->len;
+		if (skb_len) {
+			spin_lock_bh(&conn->lock);
+			if (conn->fc_data_reserved >= skb_len)
+				conn->fc_data_reserved -= skb_len;
+			else
+				conn->fc_data_reserved = 0;
+			spin_unlock_bh(&conn->lock);
+		}
 		if (conn->sk) {
 			sk_mem_uncharge(conn->sk, skb->truesize);
 			/* sk_wmem_alloc handled by skb destructor */

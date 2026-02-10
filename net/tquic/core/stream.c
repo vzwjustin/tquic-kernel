@@ -909,11 +909,15 @@ ssize_t tquic_stream_write(struct tquic_stream_manager *mgr,
 	if (!tquic_stream_can_send(mgr, stream))
 		return -EINVAL;
 
+	/*
+	 * IMPORTANT: copy_from_iter() can fault/sleep. Only hold mgr->lock for
+	 * short reservations and queue operations; do not hold it across the copy.
+	 */
 	spin_lock_bh(&mgr->lock);
-
 	while (copied < len) {
 		struct sk_buff *skb;
 		size_t chunk;
+		u64 offset;
 
 		allowed = tquic_stream_send_allowed(mgr, stream, len - copied);
 		if (allowed == 0) {
@@ -927,32 +931,44 @@ ssize_t tquic_stream_write(struct tquic_stream_manager *mgr,
 		/* Limit chunk size for reasonable SKB sizes */
 		chunk = min_t(size_t, allowed, 16384);
 
-		skb = alloc_skb(chunk, GFP_ATOMIC);
+		/* Reserve stream + connection manager accounting under the lock. */
+		offset = stream->send_offset;
+		stream->send_offset += chunk;
+		mgr->data_sent += chunk;
+
+		spin_unlock_bh(&mgr->lock);
+
+		skb = alloc_skb(chunk, GFP_KERNEL);
 		if (!skb) {
-			if (copied == 0) {
-				spin_unlock_bh(&mgr->lock);
+			spin_lock_bh(&mgr->lock);
+			stream->send_offset -= chunk;
+			mgr->data_sent -= chunk;
+			spin_unlock_bh(&mgr->lock);
+
+			if (copied == 0)
 				return -ENOMEM;
-			}
 			break;
 		}
 
 		err = copy_from_iter(skb_put(skb, chunk), chunk, from);
 		if (err != chunk) {
 			kfree_skb(skb);
-			if (copied == 0) {
-				spin_unlock_bh(&mgr->lock);
+
+			spin_lock_bh(&mgr->lock);
+			stream->send_offset -= chunk;
+			mgr->data_sent -= chunk;
+			spin_unlock_bh(&mgr->lock);
+
+			if (copied == 0)
 				return -EFAULT;
-			}
 			break;
 		}
 
-		/* Store stream offset in skb->cb */
-		*(u64 *)skb->cb = stream->send_offset;
+		/* Store reserved stream offset in skb->cb */
+		*(u64 *)skb->cb = offset;
 
+		spin_lock_bh(&mgr->lock);
 		skb_queue_tail(&stream->send_buf, skb);
-
-		stream->send_offset += chunk;
-		mgr->data_sent += chunk;
 		copied += chunk;
 	}
 

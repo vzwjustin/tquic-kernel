@@ -408,6 +408,8 @@ static void tquic_stream_remove_from_conn(struct tquic_connection *conn,
 static void tquic_stream_free(struct tquic_stream *stream)
 {
 	struct sock *sk;
+	u64 queued = 0;
+	struct sk_buff *skb_iter;
 
 	if (!stream)
 		return;
@@ -423,6 +425,27 @@ static void tquic_stream_free(struct tquic_stream *stream)
 	 * to simple purge without memory accounting.
 	 */
 	sk = (stream->conn) ? stream->conn->sk : NULL;
+
+	/*
+	 * If we're dropping queued send data, release its connection-level flow
+	 * control reservation so future sends on the same connection aren't
+	 * artificially blocked.
+	 */
+	if (stream->conn) {
+		spin_lock_bh(&stream->conn->lock);
+		spin_lock_bh(&stream->send_buf.lock);
+		skb_queue_walk(&stream->send_buf, skb_iter)
+			queued += skb_iter->len;
+		spin_unlock_bh(&stream->send_buf.lock);
+
+		if (queued) {
+			if (stream->conn->fc_data_reserved >= queued)
+				stream->conn->fc_data_reserved -= queued;
+			else
+				stream->conn->fc_data_reserved = 0;
+		}
+		spin_unlock_bh(&stream->conn->lock);
+	}
 
 	/* Purge any remaining buffers with proper memory accounting */
 	if (sk) {
@@ -719,12 +742,12 @@ static size_t tquic_stream_check_flow_control(struct tquic_connection *conn,
 		allowed = stream_limit;
 
 	/* Check connection-level flow control */
-	if (conn->data_sent >= conn->max_data_remote) {
+	if (conn->data_sent + conn->fc_data_reserved >= conn->max_data_remote) {
 		spin_unlock_bh(&conn->lock);
 		return 0;
 	}
 
-	conn_limit = conn->max_data_remote - conn->data_sent;
+	conn_limit = conn->max_data_remote - (conn->data_sent + conn->fc_data_reserved);
 	if (allowed > conn_limit)
 		allowed = conn_limit;
 
@@ -761,7 +784,6 @@ static void tquic_stream_trigger_output(struct tquic_connection *conn,
 	struct net *net = NULL;
 	u64 inflight;
 	bool can_send;
-	bool nodelay = false;
 	bool pacing_enabled = true;
 
 	if (!conn || READ_ONCE(conn->state) != TQUIC_CONN_CONNECTED)
@@ -770,7 +792,6 @@ static void tquic_stream_trigger_output(struct tquic_connection *conn,
 	/* Get socket options if available */
 	if (sk) {
 		tsk = tquic_sk(sk);
-		nodelay = tsk->nodelay;
 		net = sock_net(sk);
 		if (net) {
 			struct tquic_net *tn = tquic_pernet(net);
@@ -836,53 +857,12 @@ static void tquic_stream_trigger_output(struct tquic_connection *conn,
 	 * - Apply pacing if enabled
 	 * - Track packets for loss detection/retransmission
 	 */
-	if (nodelay) {
-		/*
-		 * Direct transmission for low-latency applications.
-		 * Dequeue one chunk from send_buf and transmit it.
-		 */
-		struct sk_buff *skb = skb_peek(&stream->send_buf);
-
-		if (skb) {
-			int ret;
-
-			/*
-			 * Use tquic_xmit to send the data. Note: tquic_xmit
-			 * expects raw data, but we have it in an skb. For
-			 * proper integration, we pass the skb data directly.
-			 *
-			 * FIN handling: Check if this is the last data and
-			 * stream should be closed.
-			 */
-			ret = tquic_xmit(conn, stream, skb->data, skb->len,
-					 stream->fin_sent);
-			if (ret >= 0) {
-				/*
-				 * Data was accepted for transmission.
-				 * The send_buf will be drained by the frame
-				 * generation code in tquic_output.c.
-				 */
-				tquic_dbg("stream %llu nodelay xmit %d bytes\n",
-					 stream->id, ret);
-			} else if (ret == -EAGAIN) {
-				/*
-				 * Congestion/pacing blocked. The pacing timer
-				 * or ACK processing will retry later.
-				 */
-				tquic_dbg("stream %llu xmit blocked\n",
-					 stream->id);
-			} else {
-				tquic_warn("stream %llu xmit error %d\n",
-					stream->id, ret);
-			}
-		}
-	} else {
-		/*
-		 * Normal mode: Let tquic_output_flush() handle transmission.
-		 * This allows frame coalescing and respects pacing.
-		 */
-		tquic_output_flush(conn);
-	}
+	/*
+	 * Always use output_flush for draining stream->send_buf. The previous
+	 * "NODELAY direct tquic_xmit(skb->data)" path could duplicate queued data
+	 * and race with the flush path.
+	 */
+	tquic_output_flush(conn);
 
 	/*
 	 * Schedule retransmission timer if not already running.
@@ -999,42 +979,12 @@ static int tquic_stream_sendmsg(struct socket *sock, struct msghdr *msg,
 	if (len > allowed)
 		len = allowed;
 
-	/*
-	 * Atomically reserve connection-level flow control credit for
-	 * the entire send under conn->lock.  This prevents the TOCTOU
-	 * race where two concurrent sendmsg() calls both pass the
-	 * check and together exceed MAX_DATA.
-	 */
-	spin_lock_bh(&conn->lock);
-	if (conn->data_sent + len > conn->max_data_remote) {
-		if (conn->data_sent >= conn->max_data_remote) {
-			spin_unlock_bh(&conn->lock);
-			if (nonblock) {
-				copied = -EAGAIN;
-				goto out_put;
-			}
-			copied = -EAGAIN;
-			goto out_put;
-		}
-		len = conn->max_data_remote - conn->data_sent;
-	}
-	conn->data_sent += len;
-	spin_unlock_bh(&conn->lock);
-
 	/* Copy data to stream send buffer in chunks */
 	while (copied < len) {
 		size_t chunk = min_t(size_t, len - copied, 1200);
 
 		skb = alloc_skb(chunk, GFP_KERNEL);
 		if (!skb) {
-			u64 unreserve = len - copied;
-
-			spin_lock_bh(&conn->lock);
-			if (conn->data_sent >= unreserve)
-				conn->data_sent -= unreserve;
-			else
-				conn->data_sent = 0;
-			spin_unlock_bh(&conn->lock);
 			if (copied == 0)
 				copied = -ENOMEM;
 			goto out_put;
@@ -1042,15 +992,7 @@ static int tquic_stream_sendmsg(struct socket *sock, struct msghdr *msg,
 
 		if (copy_from_iter(skb_put(skb, chunk), chunk,
 				   &msg->msg_iter) != chunk) {
-			u64 unreserve = len - copied;
-
 			kfree_skb(skb);
-			spin_lock_bh(&conn->lock);
-			if (conn->data_sent >= unreserve)
-				conn->data_sent -= unreserve;
-			else
-				conn->data_sent = 0;
-			spin_unlock_bh(&conn->lock);
 			if (copied == 0)
 				copied = -EFAULT;
 			goto out_put;
@@ -1058,25 +1000,23 @@ static int tquic_stream_sendmsg(struct socket *sock, struct msghdr *msg,
 
 		/* Charge socket memory for this buffer */
 		if (tquic_stream_wmem_charge(ss->parent_sk, skb)) {
-			u64 unreserve = len - copied;
-
 			kfree_skb(skb);
-			spin_lock_bh(&conn->lock);
-			if (conn->data_sent >= unreserve)
-				conn->data_sent -= unreserve;
-			else
-				conn->data_sent = 0;
-			spin_unlock_bh(&conn->lock);
 			if (copied == 0)
 				copied = -ENOBUFS;
 			goto out_put;
 		}
 
-		/* Store stream offset in skb->cb for frame generation */
+		/*
+		 * Store stream offset in skb->cb for frame generation and reserve
+		 * connection-level flow control for queued data (not yet sent).
+		 */
+		spin_lock_bh(&conn->lock);
 		*(u64 *)skb->cb = stream->send_offset;
+		stream->send_offset += chunk;
+		conn->fc_data_reserved += chunk;
+		spin_unlock_bh(&conn->lock);
 
 		skb_queue_tail(&stream->send_buf, skb);
-		stream->send_offset += chunk;
 		copied += chunk;
 	}
 

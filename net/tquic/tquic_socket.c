@@ -2064,11 +2064,9 @@ static bool tquic_check_datagram_cmsg(struct msghdr *msg)
  *
  * Return: Number of bytes sent, or negative error code
  */
-static int tquic_sendmsg_datagram(struct sock *sk, struct msghdr *msg,
-				  size_t len)
+static int tquic_sendmsg_datagram(struct tquic_connection *conn,
+				  struct msghdr *msg, size_t len)
 {
-	struct tquic_sock *tsk = tquic_sk(sk);
-	struct tquic_connection *conn = tsk->conn;
 	void *buf;
 	int ret;
 
@@ -2108,6 +2106,38 @@ static int tquic_sendmsg_datagram(struct sock *sk, struct msghdr *msg,
 	return len;
 }
 
+static size_t tquic_sendmsg_check_flow_control(struct tquic_connection *conn,
+					       struct tquic_stream *stream,
+					       size_t len)
+{
+	size_t allowed = len;
+	u64 stream_limit, conn_limit;
+
+	spin_lock_bh(&conn->lock);
+
+	/* Stream-level flow control */
+	if (stream->send_offset >= stream->max_send_data) {
+		stream->blocked = true;
+		spin_unlock_bh(&conn->lock);
+		return 0;
+	}
+	stream_limit = stream->max_send_data - stream->send_offset;
+	if (allowed > stream_limit)
+		allowed = stream_limit;
+
+	/* Connection-level flow control (sent + reserved queued data) */
+	if (conn->data_sent + conn->fc_data_reserved >= conn->max_data_remote) {
+		spin_unlock_bh(&conn->lock);
+		return 0;
+	}
+	conn_limit = conn->max_data_remote - (conn->data_sent + conn->fc_data_reserved);
+	if (allowed > conn_limit)
+		allowed = conn_limit;
+
+	spin_unlock_bh(&conn->lock);
+	return allowed;
+}
+
 int tquic_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 {
 	struct tquic_sock *tsk = tquic_sk(sk);
@@ -2117,9 +2147,24 @@ int tquic_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 	struct sk_buff *skb;
 	int copied = 0;
 	int flags = msg->msg_flags;
+	bool nonblock;
+	size_t allowed;
 
-	if (!conn || READ_ONCE(conn->state) != TQUIC_CONN_CONNECTED)
+	if (!conn)
 		return -ENOTCONN;
+
+	/* Hold a ref so conn cannot be freed while we enqueue skbs. */
+	if (!tquic_conn_get(conn))
+		return -ENOTCONN;
+
+	if (READ_ONCE(conn->state) != TQUIC_CONN_CONNECTED) {
+		tquic_conn_put(conn);
+		return -ENOTCONN;
+	}
+
+	nonblock = (flags & MSG_DONTWAIT) ||
+		   (sk->sk_socket && sk->sk_socket->file &&
+		    (sk->sk_socket->file->f_flags & O_NONBLOCK));
 
 	/*
 	 * Check if caller wants datagram send (RFC 9221)
@@ -2129,16 +2174,61 @@ int tquic_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 	 * unreliable datagram.
 	 */
 	if (tquic_check_datagram_cmsg(msg))
-		return tquic_sendmsg_datagram(sk, msg, len);
+		goto out_datagram;
 
 	/* Use or create default stream */
 	stream = tsk->default_stream;
 	if (!stream) {
 		stream = tquic_stream_open(conn, true);
-		if (!stream)
-			return -ENOMEM;
+		if (!stream) {
+			copied = -ENOMEM;
+			goto out_put;
+		}
 		tsk->default_stream = stream;
 	}
+
+	if (len == 0)
+		goto out_put;
+
+	/* Check flow control before copying/mapping data (shared by copy + zerocopy). */
+	allowed = tquic_sendmsg_check_flow_control(conn, stream, len);
+	if (allowed == 0) {
+		if (nonblock) {
+			copied = -EAGAIN;
+			goto out_put;
+		}
+
+		/*
+		 * Block waiting for flow control credit.
+		 * MAX_STREAM_DATA or MAX_DATA from peer will wake us.
+		 */
+		if (wait_event_interruptible(stream->wait,
+				tquic_sendmsg_check_flow_control(conn, stream, len) > 0 ||
+				stream->state == TQUIC_STREAM_CLOSED ||
+				READ_ONCE(conn->state) != TQUIC_CONN_CONNECTED)) {
+			copied = -EINTR;
+			goto out_put;
+		}
+
+		/* Re-check state after waking */
+		if (stream->state == TQUIC_STREAM_CLOSED) {
+			copied = -EPIPE;
+			goto out_put;
+		}
+		if (READ_ONCE(conn->state) != TQUIC_CONN_CONNECTED) {
+			copied = -ENOTCONN;
+			goto out_put;
+		}
+
+		allowed = tquic_sendmsg_check_flow_control(conn, stream, len);
+		if (allowed == 0) {
+			copied = -EAGAIN;
+			goto out_put;
+		}
+	}
+
+	if (len > allowed)
+		len = allowed;
 
 	/*
 	 * Zero-copy path: Handle MSG_ZEROCOPY flag
@@ -2153,15 +2243,18 @@ int tquic_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 
 		if (ret == 0) {
 			/* Zerocopy is available - use zero-copy path */
-			return tquic_sendmsg_zerocopy(sk, msg, len, stream);
+			copied = tquic_sendmsg_zerocopy(sk, msg, len, stream);
+			goto out_put;
 		}
 		/*
 		 * If zerocopy not available, fall through to regular copy.
 		 * This handles the case where MSG_ZEROCOPY is set but
 		 * SO_ZEROCOPY socket option is not enabled.
 		 */
-		if (ret != -EOPNOTSUPP)
-			return ret;
+		if (ret != -EOPNOTSUPP) {
+			copied = ret;
+			goto out_put;
+		}
 	}
 
 	/* Regular copy path */
@@ -2169,12 +2262,17 @@ int tquic_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 		size_t chunk = min_t(size_t, len - copied, 1200);
 
 		skb = alloc_skb(chunk, GFP_KERNEL);
-		if (!skb)
-			return copied > 0 ? copied : -ENOMEM;
+		if (!skb) {
+			if (copied == 0)
+				copied = -ENOMEM;
+			goto out_put;
+		}
 
 		if (copy_from_iter(skb_put(skb, chunk), chunk, &msg->msg_iter) != chunk) {
 			kfree_skb(skb);
-			return copied > 0 ? copied : -EFAULT;
+			if (copied == 0)
+				copied = -EFAULT;
+			goto out_put;
 		}
 
 		/* Charge socket memory for this buffer */
@@ -2182,8 +2280,17 @@ int tquic_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 			skb_set_owner_w(skb, sk);
 		} else {
 			kfree_skb(skb);
-			return copied > 0 ? copied : -ENOBUFS;
+			if (copied == 0)
+				copied = -ENOBUFS;
+			goto out_put;
 		}
+
+		/* Initialize skb->cb stream offset for output_flush and reserve FC. */
+		spin_lock_bh(&conn->lock);
+		*(u64 *)skb->cb = stream->send_offset;
+		stream->send_offset += chunk;
+		conn->fc_data_reserved += chunk;
+		spin_unlock_bh(&conn->lock);
 
 		skb_queue_tail(&stream->send_buf, skb);
 		copied += chunk;
@@ -2201,7 +2308,13 @@ int tquic_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 		tquic_output_flush(conn);
 	}
 
+out_put:
+	tquic_conn_put(conn);
 	return copied;
+
+out_datagram:
+	copied = tquic_sendmsg_datagram(conn, msg, len);
+	goto out_put;
 }
 EXPORT_SYMBOL_GPL(tquic_sendmsg);
 

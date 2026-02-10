@@ -991,6 +991,17 @@ struct tquic_connection {
 	u64 max_data_remote;
 	u64 data_sent;
 	u64 data_received;
+	/*
+	 * Connection-level flow control reservation for queued (not yet sent)
+	 * STREAM data. This is used to provide backpressure in send paths without
+	 * abusing conn->data_sent (which is incremented on actual send).
+	 *
+	 * Protected by conn->lock.
+	 */
+	u64 fc_data_reserved;
+
+	/* Serialize tquic_output_flush() instances (bit 0). */
+	unsigned long output_flush_flags;
 
 	/*
 	 * Packet number tracking for application packet space.
