@@ -576,7 +576,7 @@ static struct tquic_migration_state *tquic_migration_state_alloc(
 {
 	struct tquic_migration_state *ms;
 
-	ms = kzalloc(sizeof(*ms), GFP_KERNEL);
+	ms = kzalloc(sizeof(*ms), GFP_ATOMIC);
 	if (!ms)
 		return NULL;
 

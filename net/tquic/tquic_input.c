@@ -150,6 +150,7 @@ struct tquic_rx_ctx {
 	bool is_long_header;
 	bool ack_eliciting;
 	bool immediate_ack_seen;  /* Only process first IMMEDIATE_ACK per pkt */
+	bool saw_stream_no_length; /* A STREAM frame without Length was seen */
 	u8 key_phase_bit;  /* Key phase from short header (RFC 9001 Section 6) */
 };
 
@@ -239,8 +240,8 @@ static struct tquic_connection *tquic_lookup_by_dcid(const u8 *dcid, u8 dcid_len
  * Find path by source address
  *
  * Caller must NOT hold paths_lock. This function acquires it internally.
- * The returned path pointer is safe to use only while the caller ensures
- * the connection remains valid (e.g., holding a connection reference).
+ * Caller must hold rcu_read_lock() to prevent the returned path from being
+ * freed via kfree_rcu() after we release the spinlock.
  */
 /*
  * Compare two socket addresses by family, address, and port only.
@@ -278,6 +279,16 @@ static struct tquic_path *tquic_find_path_by_addr(struct tquic_connection *conn,
 {
 	struct tquic_path *path;
 	struct tquic_path *found = NULL;
+
+	/*
+	 * CF-179: Fast-path -- check the connection's active_path first
+	 * without taking the lock.  Most packets arrive on the active
+	 * path, so this avoids the spinlock overhead on the hot path.
+	 * READ_ONCE prevents the compiler from re-reading the pointer.
+	 */
+	path = READ_ONCE(conn->active_path);
+	if (path && tquic_sockaddr_equal(&path->remote_addr, addr))
+		return path;
 
 	spin_lock_bh(&conn->paths_lock);
 	list_for_each_entry(path, &conn->paths, list) {
@@ -421,21 +432,15 @@ static bool tquic_is_stateless_reset_internal(struct tquic_connection *conn,
  */
 static void tquic_handle_stateless_reset(struct tquic_connection *conn)
 {
-	struct sock *sk;
-
 	tquic_info("received stateless reset for connection\n");
 
-	spin_lock_bh(&conn->lock);
-	conn->state = TQUIC_CONN_CLOSED;
-	conn->error_code = EQUIC_NO_ERROR;
-
-	/* Read sk under lock to prevent use-after-free */
-	sk = READ_ONCE(conn->sk);
-	spin_unlock_bh(&conn->lock);
-
-	/* Notify upper layer */
-	if (sk)
-		sk->sk_state_change(sk);
+	/*
+	 * Use the proper state machine transition instead of directly
+	 * setting conn->state.  tquic_conn_close_with_error() validates
+	 * the transition, stores the error code, and notifies upper
+	 * layers through the standard close path.
+	 */
+	tquic_conn_close_with_error(conn, EQUIC_NO_ERROR, "stateless reset");
 }
 
 /*
@@ -957,6 +962,13 @@ static int tquic_process_stream_frame(struct tquic_rx_ctx *ctx)
 	} else {
 		/* Length extends to end of packet */
 		length = ctx->len - ctx->offset;
+		/*
+		 * RFC 9000 Section 19.8: A STREAM frame with no Length field
+		 * consumes all remaining bytes in the packet. No further
+		 * frames can follow -- record this so the frame loop can
+		 * reject any trailing data.
+		 */
+		ctx->saw_stream_no_length = true;
 	}
 
 	if (length > 65535)
@@ -993,6 +1005,33 @@ static int tquic_process_stream_frame(struct tquic_rx_ctx *ctx)
 			return -ENOMEM;
 	}
 
+	/*
+	 * CF-231: Check receive buffer memory BEFORE allocating the skb.
+	 * The `length` field comes from the peer (attacker-controlled)
+	 * and drives the alloc_skb() size below.  By checking sk_rmem_alloc
+	 * first we avoid a potentially large allocation that would
+	 * immediately be freed when the buffer is already full.
+	 *
+	 * Also cap the allocation at the socket receive buffer size so
+	 * a single frame cannot trigger an unreasonably large kmalloc.
+	 */
+	if (ctx->conn->sk) {
+		struct sock *sk = ctx->conn->sk;
+
+		if (sk_rmem_alloc_get(sk) >= sk->sk_rcvbuf) {
+			/* Buffer full - don't allocate, peer will retransmit */
+			ctx->offset += length;
+			ctx->ack_eliciting = true;
+			return 0;
+		}
+		/* Cap allocation to remaining buffer capacity */
+		if (length > (u64)sk->sk_rcvbuf) {
+			ctx->offset += length;
+			ctx->ack_eliciting = true;
+			return 0;
+		}
+	}
+
 	/* Copy data to stream receive buffer */
 	data_skb = alloc_skb(length, GFP_ATOMIC);
 	if (!data_skb)
@@ -1005,21 +1044,11 @@ static int tquic_process_stream_frame(struct tquic_rx_ctx *ctx)
 
 	/*
 	 * Charge receive buffer memory against the connection socket.
-	 * If receive buffer is full, drop the skb and apply backpressure.
-	 * Use sk_rmem_alloc_get() and skb_set_owner_r() for compatibility
-	 * with kernels where sk_rmem_alloc changed from atomic_t to refcount_t.
+	 * Use skb_set_owner_r() for compatibility with kernels where
+	 * sk_rmem_alloc changed from atomic_t to refcount_t.
 	 */
-	if (ctx->conn->sk) {
-		struct sock *sk = ctx->conn->sk;
-		int amt = data_skb->truesize;
-
-		if (sk_rmem_alloc_get(sk) + amt > sk->sk_rcvbuf) {
-			kfree_skb(data_skb);
-			/* Don't treat as fatal - peer will retransmit */
-			return 0;
-		}
-		skb_set_owner_r(data_skb, sk);
-	}
+	if (ctx->conn->sk)
+		skb_set_owner_r(data_skb, ctx->conn->sk);
 
 	skb_queue_tail(&stream->recv_buf, data_skb);
 
@@ -1920,9 +1949,23 @@ static int tquic_process_frames(struct tquic_connection *conn,
 	ctx.enc_level = enc_level;
 	ctx.ack_eliciting = false;
 	ctx.immediate_ack_seen = false;
+	ctx.saw_stream_no_length = false;
 
 	while (ctx.offset < ctx.len) {
 		prev_offset = ctx.offset;
+
+		/*
+		 * CF-012: A STREAM frame without a Length field consumes
+		 * all remaining bytes in the packet (RFC 9000 Section
+		 * 19.8).  Any trailing bytes after such a frame are
+		 * malformed -- reject the packet to prevent data being
+		 * silently queued from an invalid frame sequence.
+		 */
+		if (ctx.saw_stream_no_length) {
+			tquic_dbg("trailing data after length-less STREAM frame\n");
+			return -EPROTO;
+		}
+
 		frame_type = ctx.data[ctx.offset];
 
 		/*
@@ -2287,8 +2330,12 @@ EXPORT_SYMBOL_GPL(tquic_gro_cleanup);
 
 /*
  * Check if packets can be coalesced
+ *
+ * @dcid_len: Actual DCID length from the connection state.  Must not
+ *            exceed TQUIC_MAX_CID_LEN (20).
  */
-static bool tquic_gro_can_coalesce(struct sk_buff *skb1, struct sk_buff *skb2)
+static bool tquic_gro_can_coalesce(struct sk_buff *skb1, struct sk_buff *skb2,
+				    u8 dcid_len)
 {
 	/* For QUIC, we can coalesce packets from same connection */
 	/* Check DCID matches */
@@ -2299,10 +2346,18 @@ static bool tquic_gro_can_coalesce(struct sk_buff *skb1, struct sk_buff *skb2)
 	if ((h1[0] & TQUIC_HEADER_FORM_LONG) != (h2[0] & TQUIC_HEADER_FORM_LONG))
 		return false;
 
-	/* For short headers, compare DCID */
+	/* For short headers, compare DCID using actual CID length */
 	if (!(h1[0] & TQUIC_HEADER_FORM_LONG)) {
-		/* Assume 8-byte CID for now */
-		return memcmp(h1 + 1, h2 + 1, 8) == 0;
+		/*
+		 * CF-191: Use the actual DCID length from connection
+		 * state instead of a hardcoded 8-byte comparison.
+		 * Validate both skbs are long enough for the comparison.
+		 */
+		if (dcid_len > TQUIC_MAX_CID_LEN)
+			return false;
+		if (skb1->len < 1 + dcid_len || skb2->len < 1 + dcid_len)
+			return false;
+		return memcmp(h1 + 1, h2 + 1, dcid_len) == 0;
 	}
 
 	return false;
@@ -2310,9 +2365,13 @@ static bool tquic_gro_can_coalesce(struct sk_buff *skb1, struct sk_buff *skb2)
 
 /*
  * Attempt to merge packets for GRO
+ *
+ * @dcid_len: Actual DCID length from the connection state so that
+ *            coalesce comparisons use the correct CID size.
  */
 static struct sk_buff __maybe_unused *tquic_gro_receive_internal(struct tquic_gro_state *gro,
-								struct sk_buff *skb)
+								struct sk_buff *skb,
+								u8 dcid_len)
 {
 	struct sk_buff *held;
 
@@ -2320,7 +2379,7 @@ static struct sk_buff __maybe_unused *tquic_gro_receive_internal(struct tquic_gr
 
 	/* Check if we can coalesce with held packets */
 	skb_queue_walk(&gro->hold_queue, held) {
-		if (tquic_gro_can_coalesce(held, skb)) {
+		if (tquic_gro_can_coalesce(held, skb, dcid_len)) {
 			/* Coalesce into held packet */
 			/* For QUIC, this is complex due to packet structure */
 			/* Simple implementation just holds multiple packets */
@@ -2362,7 +2421,14 @@ int tquic_gro_flush(struct tquic_gro_state *gro,
 		spin_lock(&gro->lock);
 	}
 
-	gro->held_count = 0;
+	/*
+	 * CF-192: Re-validate held_count from the actual queue length
+	 * after the unlock-relock loop.  While we dropped the lock to
+	 * call deliver(), new skbs may have been enqueued by another
+	 * CPU.  Using the true queue length keeps held_count consistent
+	 * instead of blindly setting it to 0.
+	 */
+	gro->held_count = skb_queue_len(&gro->hold_queue);
 
 	spin_unlock(&gro->lock);
 
@@ -2610,7 +2676,16 @@ static int tquic_process_packet(struct tquic_connection *conn,
 		ctx.key_phase_bit = key_phase ? 1 : 0;
 	}
 
-	/* Find path if not provided */
+	/*
+	 * Find path if not provided.
+	 *
+	 * CF-045: Hold rcu_read_lock() across path lookup and the
+	 * subsequent use of the path pointer.  Paths are freed via
+	 * kfree_rcu(), so the RCU read-side critical section prevents
+	 * use-after-free if another CPU removes this path while we
+	 * are processing the packet.
+	 */
+	rcu_read_lock();
 	if (!path && conn)
 		path = tquic_find_path_by_addr(conn, src_addr);
 
@@ -2619,8 +2694,10 @@ static int tquic_process_packet(struct tquic_connection *conn,
 					     data + ctx.offset,
 					     len - ctx.offset,
 					     ctx.is_long_header);
-	if (unlikely(ret < 0))
+	if (unlikely(ret < 0)) {
+		rcu_read_unlock();
 		return ret;
+	}
 
 	/* Decode packet number */
 	pkt_num = tquic_decode_pkt_num(data + ctx.offset, pkt_num_len, 0);
@@ -2631,18 +2708,29 @@ static int tquic_process_packet(struct tquic_connection *conn,
 	payload_len = len - ctx.offset;
 
 	/*
-	 * Use the dedicated slab cache for decryption buffers when the
-	 * payload fits (common case: all standard MTU packets).  Fall
+	 * CF-055: Use the dedicated slab cache for decryption buffers when
+	 * the payload fits (common case: all standard MTU packets).  Fall
 	 * back to kmalloc for the rare jumbo/GSO case.
+	 *
+	 * The slab objects are exactly TQUIC_RX_BUF_SIZE bytes.  Validate
+	 * that payload_len (which comes from the network and is therefore
+	 * untrusted) does not exceed the slab object size before we hand
+	 * the buffer to the decryption routine.  For oversized payloads
+	 * use kmalloc so the buffer is always large enough.
 	 */
-	if (likely(payload_len <= TQUIC_RX_BUF_SIZE)) {
+	if (likely(payload_len > 0 && payload_len <= TQUIC_RX_BUF_SIZE)) {
 		decrypted = kmem_cache_alloc(tquic_rx_buf_cache, GFP_ATOMIC);
 		decrypted_from_slab = true;
-	} else {
+	} else if (payload_len > 0) {
 		decrypted = kmalloc(payload_len, GFP_ATOMIC);
+	} else {
+		rcu_read_unlock();
+		return -EINVAL;
 	}
-	if (unlikely(!decrypted))
+	if (unlikely(!decrypted)) {
+		rcu_read_unlock();
 		return -ENOMEM;
+	}
 
 	/*
 	 * Decrypt payload using appropriate keys:
@@ -2661,6 +2749,7 @@ static int tquic_process_packet(struct tquic_connection *conn,
 				kfree(decrypted);
 			if (ret == -ENOKEY)
 				tquic_dbg("0-RTT decryption failed, no keys\n");
+			rcu_read_unlock();
 			return ret;
 		}
 		/* Update 0-RTT stats */
@@ -2693,8 +2782,30 @@ static int tquic_process_packet(struct tquic_connection *conn,
 							decrypted);
 				else
 					kfree(decrypted);
+				rcu_read_unlock();
 				return ret;
 			}
+		}
+	}
+
+	/*
+	 * CF-055: Post-decrypt safety check.  Ensure the decryption
+	 * routine did not produce more output than the buffer can hold.
+	 * For the slab path the ceiling is TQUIC_RX_BUF_SIZE; for the
+	 * kmalloc path it is the original payload_len.
+	 */
+	{
+		size_t buf_cap = decrypted_from_slab ?
+				 TQUIC_RX_BUF_SIZE : payload_len;
+		if (unlikely(decrypted_len > buf_cap)) {
+			tquic_warn("decrypted_len %zu exceeds buffer %zu\n",
+				   decrypted_len, buf_cap);
+			if (decrypted_from_slab)
+				kmem_cache_free(tquic_rx_buf_cache, decrypted);
+			else
+				kfree(decrypted);
+			rcu_read_unlock();
+			return -EOVERFLOW;
 		}
 	}
 
@@ -2755,6 +2866,7 @@ static int tquic_process_packet(struct tquic_connection *conn,
 			tquic_timer_reset_idle(conn->timer_state);
 	}
 
+	rcu_read_unlock();
 	return ret;
 }
 

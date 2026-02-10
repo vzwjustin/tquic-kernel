@@ -284,6 +284,32 @@ int tquic_eku_init(struct tquic_connection *conn, u32 max_outstanding)
 			tquic_crypto_get_key_update_state(conn->crypto_state);
 	}
 
+	/*
+	 * Allocate a separate hash transform for EKU so that key
+	 * derivation does not need to hold the KU lock (CF-184).
+	 */
+	if (state->key_update_state) {
+		const char *hash_name;
+
+		switch (state->key_update_state->cipher_suite) {
+		case 0x1302: /* TLS_AES_256_GCM_SHA384 */
+			hash_name = "hmac(sha384)";
+			break;
+		case 0x1301: /* TLS_AES_128_GCM_SHA256 */
+		case 0x1303: /* TLS_CHACHA20_POLY1305_SHA256 */
+		default:
+			hash_name = "hmac(sha256)";
+			break;
+		}
+
+		state->hash_tfm = crypto_alloc_shash(hash_name, 0, 0);
+		if (IS_ERR(state->hash_tfm)) {
+			pr_err("tquic_eku: failed to allocate hash %s\n",
+			       hash_name);
+			state->hash_tfm = NULL;
+		}
+	}
+
 	conn->eku_state = state;
 
 	pr_debug("tquic_eku: initialized with max_outstanding=%u\n",
@@ -325,6 +351,10 @@ void tquic_eku_free(struct tquic_connection *conn)
 	}
 
 	spin_unlock_irqrestore(&state->lock, flags);
+
+	/* Free EKU's own hash transform */
+	if (state->hash_tfm && !IS_ERR(state->hash_tfm))
+		crypto_free_shash(state->hash_tfm);
 
 	/* Securely wipe PSK material */
 	memzero_explicit(state->injected_psk, sizeof(state->injected_psk));
@@ -825,9 +855,10 @@ int tquic_eku_derive_keys(struct tquic_connection *conn, bool include_psk)
 		 * mixed_secret = HKDF-Extract(current_secret, psk)
 		 *
 		 * This provides additional entropy from the external PSK.
+		 * Use EKU's own hash_tfm to avoid needing the KU lock (CF-184).
 		 */
-		if (ku_state->hash_tfm) {
-			ret = eku_hkdf_extract(ku_state->hash_tfm,
+		if (state->hash_tfm) {
+			ret = eku_hkdf_extract(state->hash_tfm,
 					       current_secret, secret_len,
 					       state->injected_psk,
 					       state->injected_psk_len,

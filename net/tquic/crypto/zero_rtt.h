@@ -56,7 +56,7 @@ struct crypto_aead;
 #define TQUIC_ZERO_RTT_DEFAULT_ENABLED		1
 
 /* Anti-replay bloom filter parameters */
-#define TQUIC_REPLAY_BLOOM_BITS			(1 << 16)	/* 64K bits */
+#define TQUIC_REPLAY_BLOOM_BITS			(1 << 20)	/* 1M bits */
 #define TQUIC_REPLAY_BLOOM_HASHES		4		/* 4 hash functions */
 #define TQUIC_REPLAY_TTL_SECONDS		3600		/* 1 hour */
 
@@ -236,6 +236,9 @@ struct tquic_zero_rtt_state_s {
 	u64 early_data_sent;
 	u64 early_data_received;
 	u16 cipher_suite;
+
+	/* Pre-allocated AEAD transform for encrypt/decrypt */
+	struct crypto_aead *aead;
 
 	/*
 	 * Packet number tracking for cryptographic security.

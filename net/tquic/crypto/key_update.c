@@ -384,6 +384,11 @@ int tquic_initiate_key_update(struct tquic_connection *conn)
 		goto out_unlock;
 	}
 
+	if (state->keys_installing) {
+		ret = -EBUSY;
+		goto out_unlock;
+	}
+
 	/* Pre-compute next generation write keys if not already done */
 	if (!state->next_write.valid) {
 		struct tquic_key_generation staged_next;
@@ -432,7 +437,7 @@ int tquic_initiate_key_update(struct tquic_connection *conn)
 						   3 * conn->idle_timeout);
 
 	state->current_write = state->next_write;
-	memset(&state->next_write, 0, sizeof(state->next_write));
+	memzero_explicit(&state->next_write, sizeof(state->next_write));
 
 	/* Toggle key phase for sending */
 	state->current_phase ^= 1;
@@ -513,6 +518,11 @@ int tquic_handle_key_phase_change(struct tquic_connection *conn, u8 received_pha
 	/* Handshake must be complete for key updates */
 	if (!state->handshake_confirmed) {
 		ret = -EPROTO;
+		goto out_unlock;
+	}
+
+	if (state->keys_installing) {
+		ret = -EBUSY;
 		goto out_unlock;
 	}
 
@@ -624,8 +634,8 @@ int tquic_handle_key_phase_change(struct tquic_connection *conn, u8 received_pha
 
 		state->current_read = staged_read;
 		state->current_write = staged_write;
-		memset(&state->next_read, 0, sizeof(state->next_read));
-		memset(&state->next_write, 0, sizeof(state->next_write));
+		memzero_explicit(&state->next_read, sizeof(state->next_read));
+		memzero_explicit(&state->next_write, sizeof(state->next_write));
 
 		/* Toggle our key phase to match peer */
 		state->current_phase = received_phase;
@@ -856,6 +866,8 @@ int tquic_key_update_install_secrets(struct tquic_key_update_state *state,
 				     const u8 *write_secret,
 				     size_t secret_len)
 {
+	struct tquic_key_generation staged_read, staged_write;
+	struct tquic_key_generation staged_next_read, staged_next_write;
 	unsigned long flags;
 	int ret;
 
@@ -867,45 +879,84 @@ int tquic_key_update_install_secrets(struct tquic_key_update_state *state,
 
 	spin_lock_irqsave(&state->lock, flags);
 
-	/* Install read secret */
-	memcpy(state->current_read.secret, read_secret, secret_len);
-	state->current_read.secret_len = secret_len;
+	/* Prevent concurrent installation (CF-149) */
+	if (state->keys_installing) {
+		spin_unlock_irqrestore(&state->lock, flags);
+		return -EBUSY;
+	}
+	state->keys_installing = true;
 
-	/* Install write secret */
-	memcpy(state->current_write.secret, write_secret, secret_len);
-	state->current_write.secret_len = secret_len;
+	/*
+	 * Set up staged copies under lock so derivation can proceed
+	 * without holding the spinlock (CF-033).
+	 */
+	memzero_explicit(&staged_read, sizeof(staged_read));
+	memcpy(staged_read.secret, read_secret, secret_len);
+	staged_read.secret_len = secret_len;
+	staged_read.key_len = state->current_read.key_len;
+	staged_read.iv_len = state->current_read.iv_len;
+
+	memzero_explicit(&staged_write, sizeof(staged_write));
+	memcpy(staged_write.secret, write_secret, secret_len);
+	staged_write.secret_len = secret_len;
+	staged_write.key_len = state->current_write.key_len;
+	staged_write.iv_len = state->current_write.iv_len;
+
+	memzero_explicit(&staged_next_read, sizeof(staged_next_read));
+	memzero_explicit(&staged_next_write, sizeof(staged_next_write));
 
 	spin_unlock_irqrestore(&state->lock, flags);
 
-	/* Derive keys from secrets */
-	ret = tquic_ku_derive_keys(state, &state->current_read);
+	/* Derive keys from staged local copies */
+	ret = tquic_ku_derive_keys(state, &staged_read);
 	if (ret)
-		return ret;
+		goto out_clear;
 
-	ret = tquic_ku_derive_keys(state, &state->current_write);
+	ret = tquic_ku_derive_keys(state, &staged_write);
 	if (ret)
-		return ret;
+		goto out_clear;
 
-	/* Pre-compute next generation keys */
-	ret = tquic_ku_derive_next_generation(state, &state->current_read,
-					      &state->next_read);
-	if (ret)
+	/* Pre-compute next generation keys (best effort) */
+	if (tquic_ku_derive_next_generation(state, &staged_read,
+					    &staged_next_read))
 		pr_warn("tquic_key_update: failed to pre-compute next read keys\n");
 
-	ret = tquic_ku_derive_next_generation(state, &state->current_write,
-					      &state->next_write);
-	if (ret)
+	if (tquic_ku_derive_next_generation(state, &staged_write,
+					    &staged_next_write))
 		pr_warn("tquic_key_update: failed to pre-compute next write keys\n");
 
+	/* Commit all derived keys atomically under lock */
 	spin_lock_irqsave(&state->lock, flags);
+	state->current_read = staged_read;
+	state->current_write = staged_write;
+	if (staged_next_read.valid)
+		state->next_read = staged_next_read;
+	if (staged_next_write.valid)
+		state->next_write = staged_next_write;
 	state->handshake_confirmed = true;
 	state->current_phase = 0;
 	state->last_key_update = ktime_get();
+	state->keys_installing = false;
 	spin_unlock_irqrestore(&state->lock, flags);
+
+	memzero_explicit(&staged_read, sizeof(staged_read));
+	memzero_explicit(&staged_write, sizeof(staged_write));
+	memzero_explicit(&staged_next_read, sizeof(staged_next_read));
+	memzero_explicit(&staged_next_write, sizeof(staged_next_write));
 
 	pr_debug("tquic_key_update: installed initial application secrets\n");
 
 	return 0;
+
+out_clear:
+	spin_lock_irqsave(&state->lock, flags);
+	state->keys_installing = false;
+	spin_unlock_irqrestore(&state->lock, flags);
+	memzero_explicit(&staged_read, sizeof(staged_read));
+	memzero_explicit(&staged_write, sizeof(staged_write));
+	memzero_explicit(&staged_next_read, sizeof(staged_next_read));
+	memzero_explicit(&staged_next_write, sizeof(staged_next_write));
+	return ret;
 }
 EXPORT_SYMBOL_GPL(tquic_key_update_install_secrets);
 
@@ -1202,6 +1253,10 @@ int tquic_key_update_with_psk(struct tquic_connection *conn,
 	struct tquic_key_update_state *state;
 	u8 mixed_read_secret[TQUIC_SECRET_MAX_LEN];
 	u8 mixed_write_secret[TQUIC_SECRET_MAX_LEN];
+	u8 local_read_secret[TQUIC_SECRET_MAX_LEN];
+	u8 local_write_secret[TQUIC_SECRET_MAX_LEN];
+	size_t local_read_secret_len;
+	size_t local_write_secret_len;
 	unsigned long flags;
 	int ret;
 
@@ -1227,6 +1282,17 @@ int tquic_key_update_with_psk(struct tquic_connection *conn,
 		return -EINVAL;
 	}
 
+	/*
+	 * Copy secrets into local variables while holding the lock
+	 * to avoid racing with concurrent key updates (CF-033).
+	 */
+	memcpy(local_read_secret, state->current_read.secret,
+	       state->current_read.secret_len);
+	local_read_secret_len = state->current_read.secret_len;
+	memcpy(local_write_secret, state->current_write.secret,
+	       state->current_write.secret_len);
+	local_write_secret_len = state->current_write.secret_len;
+
 	spin_unlock_irqrestore(&state->lock, flags);
 
 	/*
@@ -1237,8 +1303,8 @@ int tquic_key_update_with_psk(struct tquic_connection *conn,
 	 * while maintaining forward secrecy properties.
 	 */
 	ret = crypto_shash_setkey(state->hash_tfm,
-				  state->current_read.secret,
-				  state->current_read.secret_len);
+				  local_read_secret,
+				  local_read_secret_len);
 	if (ret)
 		goto cleanup;
 
@@ -1262,8 +1328,8 @@ int tquic_key_update_with_psk(struct tquic_connection *conn,
 
 	/* For write direction */
 	ret = crypto_shash_setkey(state->hash_tfm,
-				  state->current_write.secret,
-				  state->current_write.secret_len);
+				  local_write_secret,
+				  local_write_secret_len);
 	if (ret)
 		goto cleanup;
 
@@ -1307,6 +1373,8 @@ int tquic_key_update_with_psk(struct tquic_connection *conn,
 cleanup:
 	memzero_explicit(mixed_read_secret, sizeof(mixed_read_secret));
 	memzero_explicit(mixed_write_secret, sizeof(mixed_write_secret));
+	memzero_explicit(local_read_secret, sizeof(local_read_secret));
+	memzero_explicit(local_write_secret, sizeof(local_write_secret));
 
 	return ret;
 }

@@ -289,6 +289,9 @@ int tquic_sendmsg_zerocopy(struct sock *sk, struct msghdr *msg, size_t len,
 	}
 
 	/* Process data in chunks, mapping pages directly */
+	{
+	int zc_retries = 0;
+
 	while (copied < len) {
 		size_t chunk = min_t(size_t, len - copied, 1200);
 		struct sk_buff *new_skb;
@@ -313,11 +316,19 @@ int tquic_sendmsg_zerocopy(struct sock *sk, struct msghdr *msg, size_t len,
 			if (err < 0) {
 				kfree_skb(new_skb);
 				if (err == -EMSGSIZE || err == -EEXIST) {
-					/* Try with a new skb */
+					/*
+					 * Bound retries to avoid an infinite
+					 * loop when the error persists.
+					 */
+					if (++zc_retries > 3)
+						goto out_err;
 					continue;
 				}
 				goto out_err;
 			}
+
+			/* Reset retry counter on success */
+			zc_retries = 0;
 
 			/* Mark skb for zerocopy notification */
 			skb_shinfo(new_skb)->flags |= SKBFL_ZEROCOPY_FRAG;
@@ -355,6 +366,7 @@ int tquic_sendmsg_zerocopy(struct sock *sk, struct msghdr *msg, size_t len,
 		copied += chunk;
 		conn->stats.tx_bytes += chunk;
 	}
+	}
 
 	/* Trigger transmission */
 	if (tsk->nodelay || stream->send_offset == 0)
@@ -363,6 +375,14 @@ int tquic_sendmsg_zerocopy(struct sock *sk, struct msghdr *msg, size_t len,
 	return copied;
 
 out_err:
+	/*
+	 * If data was already queued (partial send), the queued skbs
+	 * hold references to uarg.  Dropping uarg here would cause a
+	 * use-after-free when those skbs are eventually freed.  Return
+	 * the partial byte count instead so callers know data was sent.
+	 */
+	if (copied > 0)
+		return copied;
 	if (uarg && !msg->msg_ubuf)
 		net_zcopy_put(uarg);
 	return err;

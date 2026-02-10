@@ -502,6 +502,10 @@ struct tquic_tunnel *tquic_tunnel_create(struct tquic_client *client,
 	int err;
 	int consumed;
 
+	/* CF-143: Require CAP_NET_ADMIN to create tunnels */
+	if (!capable(CAP_NET_ADMIN))
+		return ERR_PTR(-EPERM);
+
 	if (!client || !stream || !header_data)
 		return ERR_PTR(-EINVAL);
 
@@ -566,6 +570,10 @@ struct tquic_tunnel *tquic_tunnel_create_tproxy(struct tquic_client *client,
 	struct tquic_tunnel *tunnel;
 	int err;
 	int consumed;
+
+	/* CF-143: Require CAP_NET_ADMIN to create tunnels */
+	if (!capable(CAP_NET_ADMIN))
+		return ERR_PTR(-EPERM);
 
 	if (!client || !stream || !header_data)
 		return ERR_PTR(-EINVAL);

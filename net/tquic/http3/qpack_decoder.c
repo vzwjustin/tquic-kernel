@@ -29,6 +29,13 @@
 /* Maximum encoded integer size */
 #define MAX_ENCODED_INT_SIZE	10
 
+/*
+ * Maximum total memory for blocked stream data buffers per connection.
+ * This prevents a malicious peer from causing unbounded memory growth
+ * by sending many header blocks that reference future dynamic table entries.
+ */
+#define QPACK_MAX_BLOCKED_MEMORY	(1024 * 1024)	/* 1 MB */
+
 /**
  * qpack_decoder_init - Initialize QPACK decoder
  * @dec: Decoder to initialize
@@ -78,8 +85,11 @@ void qpack_decoder_destroy(struct qpack_decoder *dec)
 	spin_lock_irqsave(&dec->lock, flags);
 	list_for_each_entry_safe(blocked, tmp, &dec->blocked_streams, list) {
 		list_del(&blocked->list);
+		dec->blocked_stream_bytes -= blocked->data_len;
+		kfree(blocked->data);
 		kfree(blocked);
 	}
+	dec->blocked_stream_count = 0;
 	spin_unlock_irqrestore(&dec->lock, flags);
 
 	qpack_dynamic_table_destroy(&dec->dynamic_table);
@@ -308,25 +318,50 @@ int qpack_decode_headers(struct qpack_decoder *dec,
 			return -ENOBUFS;
 		}
 
+		/*
+		 * Enforce a per-connection memory limit on buffered blocked
+		 * stream data to prevent unbounded memory exhaustion from a
+		 * malicious peer sending many large header blocks that
+		 * reference future dynamic table entries.
+		 */
+		if (dec->blocked_stream_bytes + len > QPACK_MAX_BLOCKED_MEMORY) {
+			spin_unlock_irqrestore(&dec->lock, flags);
+			pr_warn("qpack: blocked stream memory limit exceeded (%zu + %zu > %u)\n",
+				dec->blocked_stream_bytes, len,
+				QPACK_MAX_BLOCKED_MEMORY);
+			return -ENOBUFS;
+		}
+
+		spin_unlock_irqrestore(&dec->lock, flags);
+
 		/* Add stream to blocked list */
 		blocked = kzalloc(sizeof(*blocked), GFP_ATOMIC);
-		if (!blocked) {
-			spin_unlock_irqrestore(&dec->lock, flags);
+		if (!blocked)
 			return -ENOMEM;
-		}
 
 		blocked->stream_id = stream_id;
 		blocked->required_insert_count = required_insert_count;
 		blocked->data = kmemdup(data, len, GFP_ATOMIC);
 		if (!blocked->data) {
-			spin_unlock_irqrestore(&dec->lock, flags);
 			kfree(blocked);
 			return -ENOMEM;
 		}
 		blocked->data_len = len;
 
+		spin_lock_irqsave(&dec->lock, flags);
+
+		/* Re-check limits under lock after allocation */
+		if (dec->blocked_stream_count >= dec->max_blocked_streams ||
+		    dec->blocked_stream_bytes + len > QPACK_MAX_BLOCKED_MEMORY) {
+			spin_unlock_irqrestore(&dec->lock, flags);
+			kfree(blocked->data);
+			kfree(blocked);
+			return -ENOBUFS;
+		}
+
 		list_add_tail(&blocked->list, &dec->blocked_streams);
 		dec->blocked_stream_count++;
+		dec->blocked_stream_bytes += len;
 
 		spin_unlock_irqrestore(&dec->lock, flags);
 
@@ -717,6 +752,7 @@ int qpack_decoder_process_blocked_streams(struct qpack_decoder *dec)
 			list_del(&blocked->list);
 			list_add_tail(&blocked->list, &ready_list);
 			dec->blocked_stream_count--;
+			dec->blocked_stream_bytes -= blocked->data_len;
 		}
 	}
 

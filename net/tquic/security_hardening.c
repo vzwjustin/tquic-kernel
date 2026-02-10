@@ -276,8 +276,14 @@ int tquic_pre_hs_alloc(const struct sockaddr_storage *addr, size_t size)
 			return -ENOMEM;
 		}
 
-		/* Check connection count per IP */
-		if (atomic_read(&entry->conn_count) >= TQUIC_PRE_HS_MAX_CONNS_PER_IP) {
+		/*
+		 * CF-225: Use atomic_inc_return() instead of separate
+		 * read + increment to eliminate TOCTOU race where two
+		 * CPUs could both pass the check before either increments.
+		 */
+		if (atomic_inc_return(&entry->conn_count) >
+		    TQUIC_PRE_HS_MAX_CONNS_PER_IP) {
+			atomic_dec(&entry->conn_count);
 			atomic64_sub(size, &entry->memory_used);
 			atomic64_sub(size, &pre_hs_state.total_memory);
 			tquic_dbg("pre-handshake connection limit per IP\n");
@@ -285,8 +291,6 @@ int tquic_pre_hs_alloc(const struct sockaddr_storage *addr, size_t size)
 					     addr, "per-IP connection limit");
 			return -ENOMEM;
 		}
-
-		atomic_inc(&entry->conn_count);
 	}
 
 	return 0;

@@ -1324,15 +1324,38 @@ int tquic_send_retry(struct tquic_connection *conn,
 		     const struct sockaddr *client_addr)
 {
 	struct tquic_conn_state_machine *cs = conn->state_machine;
-	u8 packet[512];
-	u8 *p = packet;
-	u8 token[TQUIC_RETRY_TOKEN_MAX_LEN];
+	/*
+	 * SECURITY FIX (CF-220): Allocate large buffers on the heap
+	 * instead of the stack to prevent stack buffer overflow.
+	 * Combined stack usage of packet[512] + token[256] +
+	 * pseudo_packet[512] = 1280 bytes exceeds safe stack limits
+	 * for kernel code paths.
+	 */
+#define TQUIC_RETRY_PKT_BUF_SIZE	512
+#define TQUIC_RETRY_PSEUDO_BUF_SIZE	512
+	u8 *packet = NULL;
+	u8 *p;
+	u8 *token = NULL;
 	u32 token_len;
 	struct tquic_cid new_scid;
+	size_t needed;
 	int ret;
 
 	if (!cs)
 		return -EINVAL;
+
+	/* Allocate buffers on the heap */
+	packet = kmalloc(TQUIC_RETRY_PKT_BUF_SIZE, GFP_ATOMIC);
+	if (!packet)
+		return -ENOMEM;
+
+	token = kmalloc(TQUIC_RETRY_TOKEN_MAX_LEN, GFP_ATOMIC);
+	if (!token) {
+		kfree(packet);
+		return -ENOMEM;
+	}
+
+	p = packet;
 
 	/* Generate new server CID for this retry */
 	tquic_cid_gen_random(&new_scid, TQUIC_DEFAULT_CID_LEN);
@@ -1341,7 +1364,19 @@ int tquic_send_retry(struct tquic_connection *conn,
 	ret = tquic_generate_retry_token(conn, original_dcid, client_addr,
 					 token, &token_len);
 	if (ret < 0)
-		return ret;
+		goto out_free;
+
+	/*
+	 * Validate that the packet contents will fit in the buffer.
+	 * Layout: first_byte(1) + version(4) + dcid_len(1) + dcid +
+	 *         scid_len(1) + scid + token + integrity_tag(16)
+	 */
+	needed = 1 + 4 + 1 + conn->scid.len + 1 + new_scid.len +
+		 token_len + 16;
+	if (needed > TQUIC_RETRY_PKT_BUF_SIZE) {
+		ret = -ENOSPC;
+		goto out_free;
+	}
 
 	/* Build Retry packet */
 	*p++ = 0xf0;  /* Long header, Retry type */
@@ -1380,21 +1415,36 @@ int tquic_send_retry(struct tquic_connection *conn,
 			0x46, 0x15, 0x99, 0xd3, 0x5d, 0x63, 0x2b, 0xf2,
 			0x23, 0x98, 0x25, 0xbb
 		};
-		u8 pseudo_packet[512];
-		u8 *pp = pseudo_packet;
+		u8 *pseudo_packet;
+		u8 *pp;
 		u8 tag[16];
 		struct crypto_aead *aead;
 		struct aead_request *req;
 		struct scatterlist sg_in, sg_out;
 		size_t pseudo_len, pkt_len;
-		int ret;
+		int tag_ret;
+
+		pseudo_packet = kmalloc(TQUIC_RETRY_PSEUDO_BUF_SIZE,
+					GFP_ATOMIC);
+		if (!pseudo_packet)
+			goto skip_tag;
+
+		pp = pseudo_packet;
 
 		/* Build pseudo-retry packet: Original DCID + Retry packet */
+		pkt_len = p - packet;
+
+		/* Validate pseudo-packet fits in buffer */
+		if (1 + original_dcid->len + pkt_len >
+		    TQUIC_RETRY_PSEUDO_BUF_SIZE) {
+			kfree(pseudo_packet);
+			goto skip_tag;
+		}
+
 		*pp++ = original_dcid->len;
 		memcpy(pp, original_dcid->id, original_dcid->len);
 		pp += original_dcid->len;
 
-		pkt_len = p - packet;
 		memcpy(pp, packet, pkt_len);
 		pp += pkt_len;
 		pseudo_len = pp - pseudo_packet;
@@ -1414,8 +1464,8 @@ int tquic_send_retry(struct tquic_connection *conn,
 						       0, (u8 *)retry_nonce);
 				aead_request_set_ad(req, pseudo_len);
 
-				ret = crypto_aead_encrypt(req);
-				if (ret == 0) {
+				tag_ret = crypto_aead_encrypt(req);
+				if (tag_ret == 0) {
 					/* Append tag to packet */
 					memcpy(p, tag, 16);
 					p += 16;
@@ -1424,8 +1474,10 @@ int tquic_send_retry(struct tquic_connection *conn,
 			}
 			crypto_free_aead(aead);
 		}
+		kfree(pseudo_packet);
 	}
 
+skip_tag:
 	tquic_conn_dbg(conn, "sent Retry packet\n");
 
 	/* Transmit the Retry packet via active path */
@@ -1441,7 +1493,14 @@ int tquic_send_retry(struct tquic_connection *conn,
 		}
 	}
 
-	return 0;
+	ret = 0;
+
+out_free:
+	kfree(token);
+	kfree(packet);
+	return ret;
+#undef TQUIC_RETRY_PKT_BUF_SIZE
+#undef TQUIC_RETRY_PSEUDO_BUF_SIZE
 }
 EXPORT_SYMBOL_GPL(tquic_send_retry);
 
@@ -2530,8 +2589,10 @@ int tquic_conn_server_accept(struct tquic_connection *conn,
 
 	/* Parse connection IDs from Initial packet */
 	offset = 5;
+	if (offset >= len)
+		goto err_free;
 	dcid_len = data[offset++];
-	if (offset + dcid_len > len)
+	if (dcid_len > TQUIC_MAX_CID_LEN || offset + dcid_len > len)
 		goto err_free;
 
 	/* Client's DCID becomes server's original DCID (for Retry) */
@@ -2539,8 +2600,10 @@ int tquic_conn_server_accept(struct tquic_connection *conn,
 	conn->dcid.len = dcid_len;
 	offset += dcid_len;
 
+	if (offset >= len)
+		goto err_free;
 	scid_len = data[offset++];
-	if (offset + scid_len > len)
+	if (scid_len > TQUIC_MAX_CID_LEN || offset + scid_len > len)
 		goto err_free;
 
 	/* Client's SCID - store for response */

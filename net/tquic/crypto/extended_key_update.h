@@ -191,6 +191,7 @@ struct tquic_extended_key_update_state {
 
 	/* Integration */
 	struct tquic_key_update_state *key_update_state;
+	struct crypto_shash *hash_tfm;	/* Own hash_tfm to avoid KU lock */
 	struct tquic_connection *conn;
 
 	/* Synchronization */

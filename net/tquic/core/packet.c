@@ -615,7 +615,15 @@ int tquic_parse_long_header(const u8 *data, size_t len,
 	offset += hdr->pn_len;
 
 	hdr->header_len = offset;
-	/* Adjust payload_len to not include packet number */
+	/*
+	 * SECURITY FIX (CF-211): Validate payload_len >= pn_len before
+	 * subtraction to prevent unsigned integer underflow.
+	 * The payload_len field from the wire includes the packet number
+	 * bytes; if a malicious packet specifies a payload_len smaller
+	 * than pn_len, the subtraction would wrap to a huge value.
+	 */
+	if (hdr->payload_len < hdr->pn_len)
+		return -EPROTO;
 	hdr->payload_len -= hdr->pn_len;
 
 	return offset;

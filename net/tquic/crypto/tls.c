@@ -217,8 +217,9 @@ struct tquic_crypto_state {
 	bool key_update_pending;
 	struct tquic_key_update_state *key_update;	/* Full key update state */
 
-	/* Crypto handles */
-	struct crypto_aead *aead;
+	/* Crypto handles -- separate TX/RX AEADs to avoid race (CF-047) */
+	struct crypto_aead *aead_tx;
+	struct crypto_aead *aead_rx;
 	struct crypto_skcipher *hp_cipher;
 	struct crypto_shash *hash;
 
@@ -612,16 +613,10 @@ int tquic_encrypt_packet(struct tquic_crypto_state *crypto,
 
 	tquic_create_nonce(keys->iv, pkt_num, nonce);
 
-	req = aead_request_alloc(crypto->aead, GFP_ATOMIC);
+	/* Key is set once at installation time (CF-145), use TX handle */
+	req = aead_request_alloc(crypto->aead_tx, GFP_ATOMIC);
 	if (!req) {
 		ret = -ENOMEM;
-		goto out_zeroize;
-	}
-
-	/* Set up AEAD request */
-	ret = crypto_aead_setkey(crypto->aead, keys->key, keys->key_len);
-	if (ret) {
-		aead_request_free(req);
 		goto out_zeroize;
 	}
 
@@ -670,15 +665,10 @@ int tquic_decrypt_packet(struct tquic_crypto_state *crypto,
 
 	tquic_create_nonce(keys->iv, pkt_num, nonce);
 
-	req = aead_request_alloc(crypto->aead, GFP_ATOMIC);
+	/* Key is set once at installation time (CF-145), use RX handle */
+	req = aead_request_alloc(crypto->aead_rx, GFP_ATOMIC);
 	if (!req) {
 		ret = -ENOMEM;
-		goto out_zeroize;
-	}
-
-	ret = crypto_aead_setkey(crypto->aead, keys->key, keys->key_len);
-	if (ret) {
-		aead_request_free(req);
 		goto out_zeroize;
 	}
 
@@ -729,15 +719,10 @@ int tquic_encrypt_packet_multipath(struct tquic_crypto_state *crypto,
 	/* Use multipath nonce with path_id */
 	tquic_create_nonce_multipath(keys->iv, pkt_num, path_id, nonce);
 
-	req = aead_request_alloc(crypto->aead, GFP_ATOMIC);
+	/* Key is set once at installation time (CF-145), use TX handle */
+	req = aead_request_alloc(crypto->aead_tx, GFP_ATOMIC);
 	if (!req) {
 		ret = -ENOMEM;
-		goto out_zeroize;
-	}
-
-	ret = crypto_aead_setkey(crypto->aead, keys->key, keys->key_len);
-	if (ret) {
-		aead_request_free(req);
 		goto out_zeroize;
 	}
 
@@ -791,15 +776,10 @@ int tquic_decrypt_packet_multipath(struct tquic_crypto_state *crypto,
 	/* Use multipath nonce with path_id */
 	tquic_create_nonce_multipath(keys->iv, pkt_num, path_id, nonce);
 
-	req = aead_request_alloc(crypto->aead, GFP_ATOMIC);
+	/* Key is set once at installation time (CF-145), use RX handle */
+	req = aead_request_alloc(crypto->aead_rx, GFP_ATOMIC);
 	if (!req) {
 		ret = -ENOMEM;
-		goto out_zeroize;
-	}
-
-	ret = crypto_aead_setkey(crypto->aead, keys->key, keys->key_len);
-	if (ret) {
-		aead_request_free(req);
 		goto out_zeroize;
 	}
 
@@ -851,10 +831,18 @@ struct tquic_crypto_state *tquic_crypto_init_versioned(const struct tquic_cid *d
 	crypto->cipher_suite = TLS_AES_128_GCM_SHA256;
 	crypto->version = version;
 
-	/* Allocate crypto transforms */
-	crypto->aead = crypto_alloc_aead("gcm(aes)", 0, 0);
-	if (IS_ERR(crypto->aead)) {
-		tquic_err("failed to allocate AEAD\n");
+	/* Allocate separate TX/RX AEAD handles to avoid race (CF-047) */
+	crypto->aead_tx = crypto_alloc_aead("gcm(aes)", 0, 0);
+	if (IS_ERR(crypto->aead_tx)) {
+		tquic_err("failed to allocate TX AEAD\n");
+		kfree(crypto);
+		return NULL;
+	}
+
+	crypto->aead_rx = crypto_alloc_aead("gcm(aes)", 0, 0);
+	if (IS_ERR(crypto->aead_rx)) {
+		tquic_err("failed to allocate RX AEAD\n");
+		crypto_free_aead(crypto->aead_tx);
 		kfree(crypto);
 		return NULL;
 	}
@@ -862,7 +850,8 @@ struct tquic_crypto_state *tquic_crypto_init_versioned(const struct tquic_cid *d
 	crypto->hash = crypto_alloc_shash("hmac(sha256)", 0, 0);
 	if (IS_ERR(crypto->hash)) {
 		tquic_err("failed to allocate HMAC\n");
-		crypto_free_aead(crypto->aead);
+		crypto_free_aead(crypto->aead_rx);
+		crypto_free_aead(crypto->aead_tx);
 		kfree(crypto);
 		return NULL;
 	}
@@ -871,7 +860,8 @@ struct tquic_crypto_state *tquic_crypto_init_versioned(const struct tquic_cid *d
 	if (IS_ERR(crypto->hp_cipher)) {
 		tquic_err("failed to allocate HP cipher\n");
 		crypto_free_shash(crypto->hash);
-		crypto_free_aead(crypto->aead);
+		crypto_free_aead(crypto->aead_rx);
+		crypto_free_aead(crypto->aead_tx);
 		kfree(crypto);
 		return NULL;
 	}
@@ -882,15 +872,23 @@ struct tquic_crypto_state *tquic_crypto_init_versioned(const struct tquic_cid *d
 		tquic_err("failed to allocate HP context\n");
 		crypto_free_skcipher(crypto->hp_cipher);
 		crypto_free_shash(crypto->hash);
-		crypto_free_aead(crypto->aead);
+		crypto_free_aead(crypto->aead_rx);
+		crypto_free_aead(crypto->aead_tx);
 		kfree(crypto);
 		return NULL;
 	}
 
-	/* Set AEAD auth tag length */
-	ret = crypto_aead_setauthsize(crypto->aead, 16);
+	/* Set AEAD auth tag length on both handles */
+	ret = crypto_aead_setauthsize(crypto->aead_tx, 16);
 	if (ret) {
-		tquic_err("failed to set auth tag size: %d\n", ret);
+		tquic_err("failed to set TX auth tag size: %d\n", ret);
+		tquic_crypto_cleanup(crypto);
+		return NULL;
+	}
+
+	ret = crypto_aead_setauthsize(crypto->aead_rx, 16);
+	if (ret) {
+		tquic_err("failed to set RX auth tag size: %d\n", ret);
 		tquic_crypto_cleanup(crypto);
 		return NULL;
 	}
@@ -908,6 +906,25 @@ struct tquic_crypto_state *tquic_crypto_init_versioned(const struct tquic_cid *d
 	ret = tquic_setup_hp_keys(crypto, TQUIC_ENC_INITIAL);
 	if (ret) {
 		tquic_err("failed to set up initial HP keys\n");
+		tquic_crypto_cleanup(crypto);
+		return NULL;
+	}
+
+	/* Install AEAD keys at init time so per-packet setkey is unnecessary */
+	ret = crypto_aead_setkey(crypto->aead_rx,
+				 crypto->read_keys[TQUIC_ENC_INITIAL].key,
+				 crypto->read_keys[TQUIC_ENC_INITIAL].key_len);
+	if (ret) {
+		tquic_err("failed to set initial RX AEAD key\n");
+		tquic_crypto_cleanup(crypto);
+		return NULL;
+	}
+
+	ret = crypto_aead_setkey(crypto->aead_tx,
+				 crypto->write_keys[TQUIC_ENC_INITIAL].key,
+				 crypto->write_keys[TQUIC_ENC_INITIAL].key_len);
+	if (ret) {
+		tquic_err("failed to set initial TX AEAD key\n");
 		tquic_crypto_cleanup(crypto);
 		return NULL;
 	}
@@ -952,8 +969,11 @@ void tquic_crypto_cleanup(struct tquic_crypto_state *crypto)
 	if (crypto->hp_ctx)
 		tquic_hp_ctx_free(crypto->hp_ctx);
 
-	if (crypto->aead && !IS_ERR(crypto->aead))
-		crypto_free_aead(crypto->aead);
+	if (crypto->aead_tx && !IS_ERR(crypto->aead_tx))
+		crypto_free_aead(crypto->aead_tx);
+
+	if (crypto->aead_rx && !IS_ERR(crypto->aead_rx))
+		crypto_free_aead(crypto->aead_rx);
 
 	if (crypto->hash && !IS_ERR(crypto->hash))
 		crypto_free_shash(crypto->hash);
@@ -1042,6 +1062,17 @@ void tquic_crypto_set_level(struct tquic_crypto_state *crypto,
 	crypto->read_level = read_level;
 	crypto->write_level = write_level;
 
+	/* Re-install AEAD keys for the new active levels (CF-145) */
+	if (crypto->read_keys[read_level].valid && crypto->aead_rx)
+		crypto_aead_setkey(crypto->aead_rx,
+				   crypto->read_keys[read_level].key,
+				   crypto->read_keys[read_level].key_len);
+
+	if (crypto->write_keys[write_level].valid && crypto->aead_tx)
+		crypto_aead_setkey(crypto->aead_tx,
+				   crypto->write_keys[write_level].key,
+				   crypto->write_keys[write_level].key_len);
+
 	/* Sync HP context levels */
 	if (crypto->hp_ctx)
 		tquic_hp_set_level(crypto->hp_ctx, read_level, write_level);
@@ -1109,6 +1140,15 @@ int tquic_crypto_install_keys(struct tquic_crypto_state *crypto,
 		ret = tquic_derive_keys_versioned(crypto, read_keys, version);
 		if (ret)
 			return ret;
+
+		/* Install AEAD key if this is the active read level */
+		if (level == crypto->read_level) {
+			ret = crypto_aead_setkey(crypto->aead_rx,
+						 read_keys->key,
+						 read_keys->key_len);
+			if (ret)
+				return ret;
+		}
 	}
 
 	/* Set up write keys */
@@ -1139,6 +1179,15 @@ int tquic_crypto_install_keys(struct tquic_crypto_state *crypto,
 		ret = tquic_derive_keys_versioned(crypto, write_keys, version);
 		if (ret)
 			return ret;
+
+		/* Install AEAD key if this is the active write level */
+		if (level == crypto->write_level) {
+			ret = crypto_aead_setkey(crypto->aead_tx,
+						 write_keys->key,
+						 write_keys->key_len);
+			if (ret)
+				return ret;
+		}
 	}
 
 	/* Set up HP keys for this level */

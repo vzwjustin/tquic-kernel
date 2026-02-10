@@ -20,6 +20,8 @@
 
 #include <linux/module.h>
 #include <linux/kernel.h>
+#include <linux/capability.h>
+#include <linux/overflow.h>
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/ctype.h>
@@ -144,24 +146,41 @@ static int asn1_get_length(const u8 *data, u32 data_len, u32 *len, u32 *hdr_len)
 	if (data[0] < 0x80) {
 		*len = data[0];
 		*hdr_len = 1;
+	} else if (data[0] == 0x80) {
+		/* Indefinite length encoding not supported in DER */
+		return -EINVAL;
 	} else if (data[0] == 0x81) {
 		if (data_len < 2)
 			return -EINVAL;
 		*len = data[1];
+		/* DER: long form must not be used for lengths < 128 */
+		if (*len < 0x80)
+			return -EINVAL;
 		*hdr_len = 2;
 	} else if (data[0] == 0x82) {
 		if (data_len < 3)
 			return -EINVAL;
 		*len = (data[1] << 8) | data[2];
+		/* DER: must use minimal length encoding */
+		if (*len < 0x100)
+			return -EINVAL;
 		*hdr_len = 3;
 	} else if (data[0] == 0x83) {
 		if (data_len < 4)
 			return -EINVAL;
 		*len = (data[1] << 16) | (data[2] << 8) | data[3];
+		/* DER: must use minimal length encoding */
+		if (*len < 0x10000)
+			return -EINVAL;
 		*hdr_len = 4;
 	} else {
+		/* Reject 4+ byte length encodings (> 16MB not expected) */
 		return -EINVAL;
 	}
+
+	/* Sanity check: content length must not exceed remaining data */
+	if (*len > data_len - *hdr_len)
+		return -EINVAL;
 
 	return 0;
 }
@@ -183,7 +202,10 @@ static int asn1_get_tag_length(const u8 *data, u32 data_len, u8 expected_tag,
 		return ret;
 
 	*content_len = len;
-	*total_len = 1 + hdr_len + len;
+
+	/* Check for overflow in total_len computation */
+	if (check_add_overflow(1u + hdr_len, len, total_len))
+		return -EOVERFLOW;
 
 	if (*total_len > data_len)
 		return -EINVAL;
@@ -227,7 +249,14 @@ static void identify_sig_algo(const u8 *oid, u32 oid_len,
 		*pubkey_algo = TQUIC_PUBKEY_ALGO_ECDSA_P521;
 	} else if (oid_len == sizeof(oid_rsa_pss) &&
 		   memcmp(oid, oid_rsa_pss, oid_len) == 0) {
-		/* RSA-PSS: hash algo determined from parameters */
+		/*
+		 * RSA-PSS: hash algorithm should be extracted from the
+		 * AlgorithmIdentifier parameters. Currently only SHA-256
+		 * is supported. Callers must verify the actual hash
+		 * algorithm matches before using this result.
+		 * TODO: Parse RSA-PSS AlgorithmIdentifier parameters
+		 * to extract the actual hash algorithm.
+		 */
 		*hash_algo = TQUIC_HASH_SHA256;
 		*pubkey_algo = TQUIC_PUBKEY_ALGO_RSA;
 	} else if (oid_len == sizeof(oid_ed25519) &&
@@ -1954,6 +1983,18 @@ int tquic_x509_verify_signature(const struct tquic_x509_cert *cert,
 	/* Select algorithm name based on signature algorithm type */
 	switch (cert->signature.pubkey_algo) {
 	case TQUIC_PUBKEY_ALGO_RSA:
+		/*
+		 * Currently only SHA-256 is supported for RSA/RSA-PSS
+		 * certificate signatures. Reject other hash algorithms
+		 * until full RSA-PSS AlgorithmIdentifier parameter
+		 * parsing is implemented.
+		 */
+		if (cert->signature.hash_algo != TQUIC_HASH_SHA256) {
+			pr_debug("tquic_cert: RSA-PSS with non-SHA-256 hash "
+				 "not yet supported (hash_algo=%d)\n",
+				 cert->signature.hash_algo);
+			return -EOPNOTSUPP;
+		}
 		alg_name = "pkcs1pad(rsa,sha256)";
 		break;
 	case TQUIC_PUBKEY_ALGO_ECDSA_P256:
@@ -2873,6 +2914,10 @@ static ssize_t tquic_proc_trusted_cas_write(struct file *file,
 {
 	char *kbuf;
 	int ret;
+
+	/* Require CAP_NET_ADMIN to modify trusted CAs */
+	if (!capable(CAP_NET_ADMIN))
+		return -EPERM;
 
 	if (count > TQUIC_MAX_CERT_SIZE)
 		return -EINVAL;

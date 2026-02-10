@@ -750,6 +750,13 @@ static int tquic_hs_hkdf_expand_label(struct tquic_handshake *hs,
 	hash_len = crypto_shash_digestsize(hs->hmac);
 
 	/*
+	 * context_len is written as a single byte in the HkdfLabel structure.
+	 * Reject values that would be truncated when cast to u8.
+	 */
+	if (context_len > 255)
+		return -EINVAL;
+
+	/*
 	 * Bounds check: the HkdfLabel structure occupies
 	 * 2 (length) + 1 (label length prefix) + total_label_len +
 	 * 1 (context length prefix) + context_len bytes.
@@ -921,12 +928,12 @@ static int __maybe_unused tquic_hs_derive_early_secrets(struct tquic_handshake *
 	ret = tquic_hkdf_extract(hs->hmac, zero_salt, hash_len,
 				 psk, psk_len, hs->early_secret, hash_len);
 	if (ret)
-		return ret;
+		goto out_zeroize;
 
 	/* Get transcript hash up to ClientHello */
 	ret = tquic_hs_transcript_hash(hs, transcript_hash, &hash_len);
 	if (ret)
-		return ret;
+		goto out_zeroize;
 
 	/* Derive binder key if using PSK */
 	if (psk && psk_len > 0) {
@@ -938,10 +945,15 @@ static int __maybe_unused tquic_hs_derive_early_secrets(struct tquic_handshake *
 					     binder_key, hash_len);
 		memzero_explicit(binder_key, sizeof(binder_key));
 		if (ret)
-			return ret;
+			goto out_zeroize;
 	}
 
-	return 0;
+	ret = 0;
+
+out_zeroize:
+	memzero_explicit(zero_salt, sizeof(zero_salt));
+	memzero_explicit(transcript_hash, sizeof(transcript_hash));
+	return ret;
 }
 
 /*
@@ -960,48 +972,53 @@ static int tquic_hs_derive_handshake_secrets(struct tquic_handshake *hs)
 	ret = tquic_hs_derive_secret(hs, hs->early_secret, "derived",
 				     NULL, 0, derived, hash_len);
 	if (ret)
-		return ret;
+		goto out_zeroize;
 
 	/* Handshake Secret = HKDF-Extract(derived, shared_secret) */
 	ret = tquic_hkdf_extract(hs->hmac, derived, hash_len,
 				 hs->shared_secret, hs->shared_secret_len,
 				 hs->handshake_secret, hash_len);
 	if (ret)
-		return ret;
+		goto out_zeroize;
 
 	/* Get transcript hash */
 	ret = tquic_hs_transcript_hash(hs, transcript_hash, &hash_len);
 	if (ret)
-		return ret;
+		goto out_zeroize;
 
 	/* client_handshake_traffic_secret */
 	ret = tquic_hs_derive_secret(hs, hs->handshake_secret,
 				     "c hs traffic", transcript_hash, hash_len,
 				     hs->client_handshake_secret, hash_len);
 	if (ret)
-		return ret;
+		goto out_zeroize;
 
 	/* server_handshake_traffic_secret */
 	ret = tquic_hs_derive_secret(hs, hs->handshake_secret,
 				     "s hs traffic", transcript_hash, hash_len,
 				     hs->server_handshake_secret, hash_len);
 	if (ret)
-		return ret;
+		goto out_zeroize;
 
 	/* Derive finished keys */
 	ret = tquic_hs_hkdf_expand_label(hs, hs->client_handshake_secret, hash_len,
 					 "finished", NULL, 0,
 					 hs->client_finished_key, hash_len);
 	if (ret)
-		return ret;
+		goto out_zeroize;
 
 	ret = tquic_hs_hkdf_expand_label(hs, hs->server_handshake_secret, hash_len,
 					 "finished", NULL, 0,
 					 hs->server_finished_key, hash_len);
 	if (ret)
-		return ret;
+		goto out_zeroize;
 
-	return 0;
+	ret = 0;
+
+out_zeroize:
+	memzero_explicit(derived, sizeof(derived));
+	memzero_explicit(transcript_hash, sizeof(transcript_hash));
+	return ret;
 }
 
 /*
@@ -1021,42 +1038,48 @@ static int tquic_hs_derive_app_secrets(struct tquic_handshake *hs)
 	ret = tquic_hs_derive_secret(hs, hs->handshake_secret, "derived",
 				     NULL, 0, derived, hash_len);
 	if (ret)
-		return ret;
+		goto out_zeroize;
 
 	/* Master Secret = HKDF-Extract(derived, 0) */
 	ret = tquic_hkdf_extract(hs->hmac, derived, hash_len,
 				 zero_ikm, hash_len,
 				 hs->master_secret, hash_len);
 	if (ret)
-		return ret;
+		goto out_zeroize;
 
 	/* Get transcript hash */
 	ret = tquic_hs_transcript_hash(hs, transcript_hash, &hash_len);
 	if (ret)
-		return ret;
+		goto out_zeroize;
 
 	/* client_application_traffic_secret_0 */
 	ret = tquic_hs_derive_secret(hs, hs->master_secret,
 				     "c ap traffic", transcript_hash, hash_len,
 				     hs->client_app_secret, hash_len);
 	if (ret)
-		return ret;
+		goto out_zeroize;
 
 	/* server_application_traffic_secret_0 */
 	ret = tquic_hs_derive_secret(hs, hs->master_secret,
 				     "s ap traffic", transcript_hash, hash_len,
 				     hs->server_app_secret, hash_len);
 	if (ret)
-		return ret;
+		goto out_zeroize;
 
 	/* exporter_master_secret */
 	ret = tquic_hs_derive_secret(hs, hs->master_secret,
 				     "exp master", transcript_hash, hash_len,
 				     hs->exporter_secret, hash_len);
 	if (ret)
-		return ret;
+		goto out_zeroize;
 
-	return 0;
+	ret = 0;
+
+out_zeroize:
+	memzero_explicit(derived, sizeof(derived));
+	memzero_explicit(transcript_hash, sizeof(transcript_hash));
+	memzero_explicit(zero_ikm, sizeof(zero_ikm));
+	return ret;
 }
 
 /*
@@ -1073,16 +1096,20 @@ static int tquic_hs_derive_resumption_secret(struct tquic_handshake *hs)
 	/* Get transcript hash after client Finished */
 	ret = tquic_hs_transcript_hash(hs, transcript_hash, &hash_len);
 	if (ret)
-		return ret;
+		goto out_zeroize;
 
 	/* resumption_master_secret */
 	ret = tquic_hs_derive_secret(hs, hs->master_secret,
 				     "res master", transcript_hash, hash_len,
 				     hs->resumption_secret, hash_len);
 	if (ret)
-		return ret;
+		goto out_zeroize;
 
-	return 0;
+	ret = 0;
+
+out_zeroize:
+	memzero_explicit(transcript_hash, sizeof(transcript_hash));
+	return ret;
 }
 
 /*
@@ -1162,6 +1189,10 @@ static int tquic_hs_build_ch_extensions(struct tquic_handshake *hs,
 
 		for (i = 0; i < hs->alpn_count; i++)
 			alpn_total_len += 1 + strlen(hs->alpn_list[i]);
+
+		/* ALPN extension length fields are u16; validate total fits */
+		if (alpn_total_len + 2 > 0xFFFF)
+			return -EOVERFLOW;
 
 		*p++ = (TLS_EXT_ALPN >> 8) & 0xff;
 		*p++ = TLS_EXT_ALPN & 0xff;
@@ -1306,7 +1337,7 @@ int tquic_hs_generate_client_hello(struct tquic_handshake *hs,
 		hs->key_share.private_key = NULL;
 		kfree(hs->key_share.public_key);
 		hs->key_share.public_key = NULL;
-		kfree(extensions);
+		kfree_sensitive(extensions);
 		return -ENOMEM;
 	}
 
@@ -1330,14 +1361,14 @@ int tquic_hs_generate_client_hello(struct tquic_handshake *hs,
 		hs->key_share.private_key = NULL;
 		kfree(hs->key_share.public_key);
 		hs->key_share.public_key = NULL;
-		kfree(extensions);
+		kfree_sensitive(extensions);
 		return -EINVAL;
 	}
 
 	/* Build extensions */
 	ret = tquic_hs_build_ch_extensions(hs, extensions, 2048, &ext_len);
 	if (ret < 0) {
-		kfree(extensions);
+		kfree_sensitive(extensions);
 		return ret;
 	}
 
@@ -1381,8 +1412,8 @@ int tquic_hs_generate_client_hello(struct tquic_handshake *hs,
 	memcpy(p, extensions, ext_len);
 	p += ext_len;
 
-	/* Free extensions buffer - no longer needed after memcpy */
-	kfree(extensions);
+	/* Free extensions buffer - may contain key material (PSK binders) */
+	kfree_sensitive(extensions);
 
 	/* Fill in message length */
 	msg_len_ptr[0] = ((p - msg_len_ptr - 3) >> 16) & 0xff;
@@ -1466,6 +1497,8 @@ int tquic_hs_process_server_hello(struct tquic_handshake *hs,
 	}
 
 	/* Session ID */
+	if (p >= end)
+		return -EINVAL;
 	session_id_len = *p++;
 	if (session_id_len > TLS_SESSION_ID_MAX_LEN)
 		return -EINVAL;
@@ -2611,7 +2644,15 @@ int tquic_hs_process_new_session_ticket(struct tquic_handshake *hs,
 	p += 4;
 
 	/* Ticket nonce */
+	if (p >= end)
+		return -EINVAL;
 	nonce_len = *p++;
+	if (nonce_len > sizeof(((struct tquic_session_ticket *)0)->nonce)) {
+		pr_warn("tquic_hs: nonce_len %u exceeds buffer size %zu\n",
+			nonce_len,
+			sizeof(((struct tquic_session_ticket *)0)->nonce));
+		return -EINVAL;
+	}
 	if (p + nonce_len > end)
 		return -EINVAL;
 
@@ -2620,6 +2661,12 @@ int tquic_hs_process_new_session_ticket(struct tquic_handshake *hs,
 		hs->session_ticket = kzalloc(sizeof(*hs->session_ticket), GFP_KERNEL);
 		if (!hs->session_ticket)
 			return -ENOMEM;
+	} else {
+		/* Re-entry: free old ticket data and zeroize secrets */
+		kfree(hs->session_ticket->ticket);
+		hs->session_ticket->ticket = NULL;
+		memzero_explicit(hs->session_ticket->resumption_secret,
+				 sizeof(hs->session_ticket->resumption_secret));
 	}
 
 	hs->session_ticket->lifetime = lifetime;
@@ -2662,10 +2709,13 @@ int tquic_hs_process_new_session_ticket(struct tquic_handshake *hs,
 					 hs->session_ticket->nonce,
 					 hs->session_ticket->nonce_len,
 					 psk, hs->hash_len);
-	if (ret < 0)
+	if (ret < 0) {
+		memzero_explicit(psk, sizeof(psk));
 		return ret;
+	}
 
 	memcpy(hs->session_ticket->resumption_secret, psk, hs->hash_len);
+	memzero_explicit(psk, sizeof(psk));
 	hs->session_ticket->resumption_secret_len = hs->hash_len;
 	hs->session_ticket->cipher_suite = hs->cipher_suite;
 	hs->session_ticket->creation_time = ktime_get_real_seconds();

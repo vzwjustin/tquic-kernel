@@ -16,6 +16,7 @@
 
 #include <linux/kernel.h>
 #include <linux/module.h>
+#include <linux/overflow.h>
 #include <linux/skbuff.h>
 #include <linux/ip.h>
 #include <linux/ipv6.h>
@@ -159,9 +160,30 @@ int tquic_ecn_validate_ack(struct tquic_path *path, struct tquic_ack_frame *ack)
 	 * The total increase in ECN-CE, ECT(0), and ECT(1) counts MUST
 	 * be at least the number of newly acknowledged packets that were
 	 * originally sent with an ECT codepoint.
+	 *
+	 * Guard against overflow: peer-supplied counters are varint-
+	 * encoded (up to 62 bits).  A malicious peer could send values
+	 * that overflow a u64 when summed.
 	 */
-	total_ect_sent = path->ecn.ect0_sent + path->ecn.ect1_sent;
-	total_ect_acked = ack->ecn.ect0 + ack->ecn.ect1 + ack->ecn.ce;
+	if (check_add_overflow(path->ecn.ect0_sent, path->ecn.ect1_sent,
+			       &total_ect_sent)) {
+		tquic_warn("ECN validation failed: sent counter overflow\n");
+		path->ecn.ecn_failed = 1;
+		path->ecn.ecn_testing = 0;
+		path->ecn.ecn_capable = 0;
+		return -EINVAL;
+	}
+
+	if (check_add_overflow(ack->ecn.ect0, ack->ecn.ect1,
+			       &total_ect_acked) ||
+	    check_add_overflow(total_ect_acked, ack->ecn.ce,
+			       &total_ect_acked)) {
+		tquic_warn("ECN validation failed: acked counter overflow\n");
+		path->ecn.ecn_failed = 1;
+		path->ecn.ecn_testing = 0;
+		path->ecn.ecn_capable = 0;
+		return -EINVAL;
+	}
 
 	/*
 	 * Allow some tolerance for reordering - the acked count should

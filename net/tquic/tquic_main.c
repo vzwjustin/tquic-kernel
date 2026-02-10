@@ -86,6 +86,10 @@ static struct kmem_cache *tquic_path_cache;
 struct kmem_cache *tquic_rx_buf_cache;
 EXPORT_SYMBOL_GPL(tquic_rx_buf_cache);
 
+/* TX pending frame slab cache init/exit (tquic_output.c) */
+extern int __init tquic_output_tx_init(void);
+extern void __exit tquic_output_tx_exit(void);
+
 /* Connection hashtable params */
 static const struct rhashtable_params tquic_conn_params = {
 	.key_len = sizeof(struct tquic_cid),
@@ -792,6 +796,11 @@ int __init tquic_init(void)
 		goto err_rx_buf_cache;
 	}
 
+	/* Create TX pending frame slab cache */
+	err = tquic_output_tx_init();
+	if (err)
+		goto err_frame_cache;
+
 	/* Initialize connection hashtable */
 	err = rhashtable_init(&tquic_conn_table, &tquic_conn_params);
 	if (err)
@@ -1184,6 +1193,8 @@ err_cid_table:
 err_cid_hash:
 	rhashtable_destroy(&tquic_conn_table);
 err_hashtable:
+	tquic_output_tx_exit();
+err_frame_cache:
 	kmem_cache_destroy(tquic_rx_buf_cache);
 err_rx_buf_cache:
 	kmem_cache_destroy(tquic_path_cache);
@@ -1279,6 +1290,7 @@ void __exit tquic_exit(void)
 
 	/* Cleanup global data structures */
 	rhashtable_destroy(&tquic_conn_table);
+	tquic_output_tx_exit();
 	kmem_cache_destroy(tquic_rx_buf_cache);
 	kmem_cache_destroy(tquic_path_cache);
 	kmem_cache_destroy(tquic_stream_cache);

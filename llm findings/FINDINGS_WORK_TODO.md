@@ -21,6 +21,8 @@
 | SPECULATIVE | 23 | 22 | 28 | 43 | **116** |
 | REJECTED | 0 | 1 | 0 | 9 | **10** |
 
+**Progress: 113 / 645 findings fixed.**
+
 ---
 
 ## Phase Plan
@@ -56,7 +58,7 @@ Parked. Only revisit if new evidence surfaces.
 
 #### Memory (10)
 
-- [ ] **CF-006** -- HTTP/3 Stream Lookup: Use-After-Free
+- [x] **CF-006** -- HTTP/3 Stream Lookup: Use-After-Free
   - Severity: S0 | Sources: A,B,C | Priority: 10.0
   - Evidence: file:1, sym:5
   - Missing: Exact line range(s) where the fault manifests; Code snippet proving the vulnerable pattern
@@ -77,21 +79,21 @@ Parked. Only revisit if new evidence surfaces.
   - Verify: `rg -n "label" "net/tquic/crypto/handshake.c"`
   - Fix: Add explicit bounds check: `if (label_len + context_len + 10 > sizeof(hkdf_label)) return -EINVAL;` before any writes to the buffer. Note: the zero_rt
 
-- [ ] **CF-015** -- `tquic_hs_process_new_session_ticket` -- nonce overflow into session ticket
+- [x] **CF-015** -- `tquic_hs_process_new_session_ticket` -- nonce overflow into session ticket
   - Severity: S0 | Sources: B,C | Priority: 10.0
   - Evidence: file:1, sym:3, lines:1, snippet:3
   - Missing: Kernel log / stack trace / error output demonstrating the issue
   - Verify: `rg -n "tquic_session_ticket" "net/tquic/crypto/handshake.c"`
   - Fix: Add strict validation and bounds checks at parse boundaries, enforce lifetime/ownership rules, and fail closed on malformed input. Risk: Fixes in pars
 
-- [ ] **CF-030** -- Handshake Packet Parsing with Unvalidated Offsets
+- [x] **CF-030** -- Handshake Packet Parsing with Unvalidated Offsets
   - Severity: S0 | Sources: B,C | Priority: 10.0
   - Evidence: file:1, sym:1, lines:5, snippet:1
   - Missing: Kernel log / stack trace / error output demonstrating the issue
   - Verify: `rg -n "tquic_parse_long_header" "net/tquic/core/connection.c"`
   - Fix: Replace the ad-hoc parsing with calls to the existing safe header parser `tquic_parse_long_header()`, or add proper bounds checks before every `data[h
 
-- [ ] **CF-046** -- Per-frame kzalloc + kmalloc in TX path
+- [x] **CF-046** -- Per-frame kzalloc + kmalloc in TX path
   - Severity: S0 | Sources: A,B | Priority: 10.0
   - Evidence: file:5, sym:18, lines:5, snippet:4
   - Missing: Kernel log / stack trace / error output demonstrating the issue
@@ -179,7 +181,7 @@ Parked. Only revisit if new evidence surfaces.
   - Verify: `rg -n "h3_connection_destroy" "net/tquic/http3/http3_stream.c"`
   - Fix: Collect stream pointers into a local list under the spinlock, release the spinlock, then close each stream outside the lock. Risk: Locking/ordering ch
 
-- [ ] **CF-023** -- Busy-poll per-packet lock/unlock
+- [x] **CF-023** -- Busy-poll per-packet lock/unlock
   - Severity: S0 | Sources: A,B | Priority: 10.0
   - Evidence: file:2, sym:8, lines:3, snippet:1
   - Missing: Kernel log / stack trace / error output demonstrating the issue
@@ -193,56 +195,56 @@ Parked. Only revisit if new evidence surfaces.
   - Verify: `rg -n "tquic_output" "net/quic/tquic/tquic_output.c"`
   - Fix: Use `check_mul_overflow` and `check_add_overflow`: ```c size_t alloc_size; if (check_mul_overflow((size_t)gso->gso_size, (size_t)max_segs, &alloc_size
 
-- [ ] **CF-033** -- Install Secrets Accesses State Without Lock After Unlock
+- [x] **CF-033** -- Install Secrets Accesses State Without Lock After Unlock
   - Severity: S0 | Sources: B,C | Priority: 10.0
   - Evidence: file:1, sym:2, lines:5, snippet:1
   - Missing: Kernel log / stack trace / error output demonstrating the issue
   - Verify: `rg -n "tquic_ku_derive_keys" "net/tquic/crypto/key_update.c"`
   - Fix: Copy the secrets into local variables under the lock, then derive from the local copies (the pattern already used correctly in `tquic_initiate_key_upd
 
-- [ ] **CF-038** -- Nested Lock Hierarchy Violation in Timer Code
+- [x] **CF-038** -- Nested Lock Hierarchy Violation in Timer Code
   - Severity: S0 | Sources: B,C | Priority: 10.0
   - Evidence: file:1, sym:4, lines:5, snippet:5
   - Missing: Kernel log / stack trace / error output demonstrating the issue
   - Verify: `rg -n "tquic_timer_update_pto" "net/quic/tquic/tquic_timer.c"`
   - Fix: Standardize ALL uses of `rs->lock` and `pns->lock` to use `spin_lock_bh` Risk: Locking/ordering changes can cause deadlocks or throughput regressions 
 
-- [ ] **CF-045** -- Path Pointer Use After Lock Release
+- [x] **CF-045** -- Path Pointer Use After Lock Release
   - Severity: S0 | Sources: B,C | Priority: 10.0
   - Evidence: file:1, sym:6, lines:2, snippet:1
   - Missing: Kernel log / stack trace / error output demonstrating the issue
   - Verify: `rg -n "sockaddr_storage" "net/quic/tquic/tquic_input.c"`
   - Fix: Take a reference on the path before releasing the lock: `tquic_path_get(found)` and require callers to call `tquic_path_put()`. Risk: Locking/ordering
 
-- [ ] **CF-047** -- Per-Packet crypto_aead_setkey on Shared AEAD Handle -- Race Condition
+- [x] **CF-047** -- Per-Packet crypto_aead_setkey on Shared AEAD Handle -- Race Condition
   - Severity: S0 | Sources: B,C | Priority: 10.0
   - Evidence: file:1, sym:4, lines:2, snippet:1
   - Missing: Kernel log / stack trace / error output demonstrating the issue
   - Verify: `rg -n "tquic_decrypt_packet" "net/tquic/crypto/tls.c"`
   - Fix: Use separate AEAD transform handles for TX and RX, each with the key set once during key installation (not per-packet). The `quic_crypto.c` file alrea
 
-- [ ] **CF-051** -- Race Condition Between `tquic_destroy_sock()` and Poll/Sendmsg/Recvmsg
+- [x] **CF-051** -- Race Condition Between `tquic_destroy_sock()` and Poll/Sendmsg/Recvmsg
   - Severity: S0 | Sources: B,C | Priority: 10.0
   - Evidence: file:1, sym:9, lines:1, snippet:3
   - Missing: Kernel log / stack trace / error output demonstrating the issue
   - Verify: `rg -n "read_once" "net/tquic/tquic_socket.c"`
   - Fix: This is acceptable for poll() semantics (spurious wakeups are allowed), but document the intentional lockless access. Risk: Locking/ordering changes c
 
-- [ ] **CF-055** -- Slab Cache Decryption Buffer May Be Too Small for Payload
+- [x] **CF-055** -- Slab Cache Decryption Buffer May Be Too Small for Payload
   - Severity: S0 | Sources: B,C | Priority: 10.0
   - Evidence: file:1, sym:5, lines:10, snippet:2
   - Missing: Kernel log / stack trace / error output demonstrating the issue
   - Verify: `rg -n "tquic_process_stream_frame" "net/quic/tquic/tquic_input.c"`
   - Fix: Add a comment explaining why `_bh` is not needed in the receive path. Risk: Locking/ordering changes can cause deadlocks or throughput regressions if 
 
-- [ ] **CF-056** -- Sleep-in-Atomic Context
+- [x] **CF-056** -- Sleep-in-Atomic Context
   - Severity: S0 | Sources: B,C | Priority: 10.0
   - Evidence: file:1, sym:7, lines:2, snippet:4
   - Missing: Kernel log / stack trace / error output demonstrating the issue
   - Verify: `rg -n "tquic_path" "net/tquic/tquic_migration.c"`
   - Fix: Establish one synchronization model for this code path and make all state transitions/lookup paths follow it consistently. Risk: Locking/ordering chan
 
-- [ ] **CF-059** -- Stateless Reset Bypasses State Machine
+- [x] **CF-059** -- Stateless Reset Bypasses State Machine
   - Severity: S0 | Sources: B,C | Priority: 10.0
   - Evidence: file:1, sym:7, lines:1, snippet:3
   - Missing: Kernel log / stack trace / error output demonstrating the issue
@@ -265,7 +267,7 @@ Parked. Only revisit if new evidence surfaces.
   - Verify: `rg -n "tquic_scheduler" "net/tquic/multipath/tquic_scheduler.c"`
   - Fix: Add an explicit check: `cwnd_avail = (path->cc.cwnd > path->cc.bytes_in_flight) ? path->cc.cwnd - path->cc.bytes_in_flight : 0;` Risk: Protocol correc
 
-- [ ] **CF-012** -- Stream Data Queued Before Validation Check
+- [x] **CF-012** -- Stream Data Queued Before Validation Check
   - Severity: S0 | Sources: A,B,C | Priority: 10.0
   - Evidence: file:4, sym:20, lines:8, snippet:12
   - Missing: Kernel log / stack trace / error output demonstrating the issue
@@ -286,7 +288,7 @@ Parked. Only revisit if new evidence surfaces.
   - Verify: `sed -n '850,850p' net/quic/tquic/masque/capsule.c`
   - Fix: Add overflow check: ```c if (cap->length > SIZE_MAX - CAPSULE_MAX_HEADER_SIZE)     return -EOVERFLOW; ```  --- Risk: Protocol correctness fixes can sh
 
-- [ ] **CF-028** -- GSO Segment Accumulation Can Overflow SKB Tailroom
+- [x] **CF-028** -- GSO Segment Accumulation Can Overflow SKB Tailroom
   - Severity: S0 | Sources: B,C | Priority: 10.0
   - Evidence: file:1, sym:2, lines:1, snippet:1
   - Missing: Kernel log / stack trace / error output demonstrating the issue
@@ -300,7 +302,7 @@ Parked. Only revisit if new evidence surfaces.
   - Verify: `rg -n "tquic_hs_build_ch_extensions" "net/tquic/crypto/handshake.c"`
   - Fix: Check for u32 overflow in the accumulation loop. Validate that the total extension length fits in a u16.  --- Risk: Protocol correctness fixes can shi
 
-- [ ] **CF-037** -- Missing SKB Tailroom Check in Coalesced Packet Output
+- [x] **CF-037** -- Missing SKB Tailroom Check in Coalesced Packet Output
   - Severity: S0 | Sources: B,C | Priority: 10.0
   - Evidence: file:1, sym:1, lines:2, snippet:4
   - Missing: Kernel log / stack trace / error output demonstrating the issue
@@ -314,7 +316,7 @@ Parked. Only revisit if new evidence surfaces.
   - Verify: `rg -n "tquic_rx_ctx" "net/tquic/tquic_input.c"`
   - Fix: Add a bounds check before decoding the packet number: ```c if (ctx.offset + pkt_num_len > len)     return -EINVAL; ``` Risk: Protocol correctness fixe
 
-- [ ] **CF-048** -- Priority PRIORITY_UPDATE Parsing Off-by-Two in Loop Bound
+- [x] **CF-048** -- Priority PRIORITY_UPDATE Parsing Off-by-Two in Loop Bound
   - Severity: S0 | Sources: B,C | Priority: 10.0
   - Evidence: file:1, lines:2, snippet:1
   - Missing: Function/struct symbol name at the fault site; Kernel log / stack trace / error output demonstrating the issue
@@ -348,56 +350,56 @@ Parked. Only revisit if new evidence surfaces.
 
 #### Memory (8)
 
-- [ ] **CF-137** -- Constant-Time CID Validation Has Branching on Lengths
+- [x] **CF-137** -- Constant-Time CID Validation Has Branching on Lengths
   - Severity: S1 | Sources: A,B,C | Priority: 7.0
   - Evidence: file:1, sym:4, lines:1, snippet:4
   - Missing: Kernel log / stack trace / error output demonstrating the issue
   - Verify: `rg -n "tquic_ct_memcmp" "net/tquic/security/quic_exfil.c"`
   - Fix: Missing fix suggestion in source text. Risk: Fixes in parser/crypto/lifetime code may alter packet acceptance logic. Watch for interoperability regres
 
-- [ ] **CF-148** -- QPACK Encoder: Insert Count Increment Overflow
+- [x] **CF-148** -- QPACK Encoder: Insert Count Increment Overflow
   - Severity: S1 | Sources: A,B,C | Priority: 7.0
   - Evidence: file:1, sym:1
   - Missing: Exact line range(s) where the fault manifests; Code snippet proving the vulnerable pattern
   - Verify: `rg -n "qpack_encoder" "net/tquic/http3/qpack_encoder.c"`
   - Fix: Validate that `known_received_count + value <= insert_count` (the total entries ever inserted) and that the addition does not overflow. Risk: Fixes in
 
-- [ ] **CF-155** -- WebTransport Context Destroy: Lock Drop During Iteration
+- [x] **CF-155** -- WebTransport Context Destroy: Lock Drop During Iteration
   - Severity: S1 | Sources: A,B,C | Priority: 7.0
   - Evidence: file:1, sym:1
   - Missing: Exact line range(s) where the fault manifests; Code snippet proving the vulnerable pattern
   - Verify: `rg -n "context_destroy" "net/tquic/http3/webtransport.c"`
   - Fix: Use a safe iteration pattern: move items to a local list under the lock, release the lock, then process the local list. Risk: Fixes in parser/crypto/l
 
-- [ ] **CF-179** -- conn->paths_lock in RX path for every packet
+- [x] **CF-179** -- conn->paths_lock in RX path for every packet
   - Severity: S1 | Sources: A,B | Priority: 7.0
   - Evidence: file:2, sym:7, lines:1, snippet:1
   - Missing: Kernel log / stack trace / error output demonstrating the issue
   - Verify: `rg -n "first" "net/tquic/tquic_input.c"`
   - Fix: Use a hash table (rhashtable) for path-by-address lookup. For single-path connections, cache the last-used path and check it first (fast-path optimiza
 
-- [ ] **CF-220** -- Retry Packet Stack Buffer Overflow
+- [x] **CF-220** -- Retry Packet Stack Buffer Overflow
   - Severity: S1 | Sources: B,C | Priority: 7.0
   - Evidence: file:1, lines:2, snippet:2
   - Missing: Function/struct symbol name at the fault site; Kernel log / stack trace / error output demonstrating the issue
   - Verify: `sed -n '1379,1379p' net/tquic/core/connection.c`
   - Fix: Allocate `packet`, `token`, and `pseudo_packet` on the heap using `kmalloc`.  --- Risk: Fixes in parser/crypto/lifetime code may alter packet acceptan
 
-- [ ] **CF-226** -- Session Ticket Decode Missing Bounds Check on PSK Copy
+- [x] **CF-226** -- Session Ticket Decode Missing Bounds Check on PSK Copy
   - Severity: S1 | Sources: B,C | Priority: 7.0
   - Evidence: file:1, lines:3, snippet:2
   - Missing: Function/struct symbol name at the fault site; Kernel log / stack trace / error output demonstrating the issue
   - Verify: `sed -n '1160,1160p' net/tquic/crypto/zero_rtt.c`
   - Fix: Add strict validation and bounds checks at parse boundaries, enforce lifetime/ownership rules, and fail closed on malformed input. Risk: Fixes in pars
 
-- [ ] **CF-236** -- tquic_stream_socket_create Double-Free on fd Failure
+- [x] **CF-236** -- tquic_stream_socket_create Double-Free on fd Failure
   - Severity: S1 | Sources: B,C | Priority: 7.0
   - Evidence: file:1, sym:4, lines:4, snippet:1
   - Missing: Kernel log / stack trace / error output demonstrating the issue
   - Verify: `rg -n "tquic_stream_socket_create" "net/quic/tquic/tquic_stream.c"`
   - Fix: Set `sk_user_data` to NULL before calling `tquic_sock_map_fd`, or set it only after successful fd allocation. Fix the `sock_alloc_file` failure path t
 
-- [ ] **CF-240** -- Zero-RTT Session Ticket Deserialization Trusts Length Fields
+- [x] **CF-240** -- Zero-RTT Session Ticket Deserialization Trusts Length Fields
   - Severity: S1 | Sources: B,C | Priority: 7.0
   - Evidence: file:1, lines:1, snippet:1
   - Missing: Function/struct symbol name at the fault site; Kernel log / stack trace / error output demonstrating the issue
@@ -406,140 +408,140 @@ Parked. Only revisit if new evidence surfaces.
 
 #### Security (20)
 
-- [ ] **CF-138** -- Custom ASN.1 Parser - High Attack Surface
+- [x] **CF-138** -- Custom ASN.1 Parser - High Attack Surface
   - Severity: S1 | Sources: A,B,C | Priority: 7.0
   - Evidence: file:1, sym:4
   - Missing: Exact line range(s) where the fault manifests; Code snippet proving the vulnerable pattern
   - Verify: `rg -n "decoder" "net/tquic/crypto/cert_verify.c"`
   - Fix: Consider using the kernel's built-in ASN.1 decoder (`lib/asn1_decoder.c`) and the x509 certificate parser (`crypto/asymmetric_keys/x509_cert_parser.c`
 
-- [ ] **CF-139** -- Function Pointer Stored in skb->cb Without Validation
+- [x] **CF-139** -- Function Pointer Stored in skb->cb Without Validation
   - Severity: S1 | Sources: A,B,C | Priority: 7.0
   - Evidence: file:1, sym:5, lines:2, snippet:3
   - Missing: Kernel log / stack trace / error output demonstrating the issue
   - Verify: `rg -n "corrupted" "net/tquic/security/quic_exfil.c"`
   - Fix: Missing fix suggestion in source text. Risk: Fixes in parser/crypto/lifetime code may alter packet acceptance logic. Watch for interoperability regres
 
-- [ ] **CF-141** -- HTTP/3 Settings Frame Length Truncation
+- [x] **CF-141** -- HTTP/3 Settings Frame Length Truncation
   - Severity: S1 | Sources: A,B,C | Priority: 7.0
   - Evidence: file:1, sym:1
   - Missing: Exact line range(s) where the fault manifests; Code snippet proving the vulnerable pattern
   - Verify: `rg -n "h3_connection_send_settings" "net/tquic/http3/http3_stream.c"`
   - Fix: Use proper QUIC variable-length integer encoding for the frame length, or validate that `settings_len <= 255` before the cast and return an error if e
 
-- [ ] **CF-142** -- Load Balancer Encryption Key Not Zeroized on Destroy
+- [x] **CF-142** -- Load Balancer Encryption Key Not Zeroized on Destroy
   - Severity: S1 | Sources: A,B,C | Priority: 7.0
   - Evidence: file:1, sym:5, snippet:1
   - Missing: Exact line range(s) where the fault manifests; Kernel log / stack trace / error output demonstrating the issue
   - Verify: `rg -n "crypto_free_sync_skcipher" "net/tquic/lb/quic_lb.c"`
   - Fix: Missing fix suggestion in source text. Risk: Fixes in parser/crypto/lifetime code may alter packet acceptance logic. Watch for interoperability regres
 
-- [ ] **CF-143** -- No CAP_NET_ADMIN Check for Tunnel Creation
+- [x] **CF-143** -- No CAP_NET_ADMIN Check for Tunnel Creation
   - Severity: S1 | Sources: A,B,C | Priority: 7.0
   - Evidence: file:1, sym:8, snippet:1
   - Missing: Exact line range(s) where the fault manifests; Kernel log / stack trace / error output demonstrating the issue
   - Verify: `rg -n "capable" "net/tquic/tquic_tunnel.c"`
   - Fix: Missing fix suggestion in source text. Risk: Fixes in parser/crypto/lifetime code may alter packet acceptance logic. Watch for interoperability regres
 
-- [ ] **CF-144** -- Path Metrics Netlink: Missing CAP_NET_ADMIN Permission Check
+- [x] **CF-144** -- Path Metrics Netlink: Missing CAP_NET_ADMIN Permission Check
   - Severity: S1 | Sources: A,B,C | Priority: 7.0
   - Evidence: file:1, sym:5
   - Missing: Exact line range(s) where the fault manifests; Code snippet proving the vulnerable pattern
   - Verify: `rg -n "export" "net/tquic/diag/path_metrics.c"`
   - Fix: Add `.policy` with `GENL_ADMIN_PERM` flag or explicit `CAP_NET_ADMIN` check in each handler. Risk: Fixes in parser/crypto/lifetime code may alter pack
 
-- [ ] **CF-145** -- Per-Call crypto_aead_setkey in Encrypt/Decrypt Hot Path
+- [x] **CF-145** -- Per-Call crypto_aead_setkey in Encrypt/Decrypt Hot Path
   - Severity: S1 | Sources: A,B,C | Priority: 7.0
   - Evidence: file:1, sym:4
   - Missing: Exact line range(s) where the fault manifests; Code snippet proving the vulnerable pattern
   - Verify: `rg -n "changes" "net/tquic/crypto/tls.c"`
   - Fix: Set the key once when it changes (at key installation time), not on every packet. Store the AEAD transform with the key pre-set in `tquic_key_generati
 
-- [ ] **CF-146** -- Per-Call crypto_alloc_aead in 0-RTT Encrypt/Decrypt
+- [x] **CF-146** -- Per-Call crypto_alloc_aead in 0-RTT Encrypt/Decrypt
   - Severity: S1 | Sources: A,B,C | Priority: 7.0
   - Evidence: file:1, sym:6
   - Missing: Exact line range(s) where the fault manifests; Code snippet proving the vulnerable pattern
   - Verify: `rg -n "crypto_alloc_aead" "net/tquic/crypto/zero_rtt.c"`
   - Fix: Pre-allocate the AEAD transform during `tquic_zero_rtt_init()` or `tquic_zero_rtt_attempt()` and reuse it for the lifetime of the 0-RTT state. Risk: F
 
-- [ ] **CF-150** -- RSA-PSS Hash Algorithm Hardcoded to SHA-256
+- [x] **CF-150** -- RSA-PSS Hash Algorithm Hardcoded to SHA-256
   - Severity: S1 | Sources: A,B,C | Priority: 7.0
   - Evidence: file:1, sym:1, snippet:1
   - Missing: Exact line range(s) where the fault manifests; Kernel log / stack trace / error output demonstrating the issue
   - Verify: `rg -n "verification" "net/tquic/crypto/cert_verify.c"`
   - Fix: Parse the RSA-PSS AlgorithmIdentifier parameters to extract the actual hash algorithm. Risk: Fixes in parser/crypto/lifetime code may alter packet acc
 
-- [ ] **CF-151** -- Secrets not zeroized on error paths in key derivation functions
+- [x] **CF-151** -- Secrets not zeroized on error paths in key derivation functions
   - Severity: S1 | Sources: A,B,C | Priority: 7.0
   - Evidence: file:1, sym:4, lines:5, snippet:2
   - Missing: Kernel log / stack trace / error output demonstrating the issue
   - Verify: `rg -n "consumed" "net/tquic/crypto/handshake.c"`
   - Fix: Zeroize these secrets using `memzero_explicit()` as soon as they have been consumed (after key derivation and ticket issuance). Risk: Fixes in parser/
 
-- [ ] **CF-154** -- Unbounded Connection Creation via Netlink
+- [x] **CF-154** -- Unbounded Connection Creation via Netlink
   - Severity: S1 | Sources: A,B,C | Priority: 7.0
   - Evidence: file:1, sym:5, snippet:1
   - Missing: Exact line range(s) where the fault manifests; Kernel log / stack trace / error output demonstrating the issue
   - Verify: `rg -n "connections" "net/tquic/tquic_netlink.c"`
   - Fix: Missing fix suggestion in source text. Risk: Fixes in parser/crypto/lifetime code may alter packet acceptance logic. Watch for interoperability regres
 
-- [ ] **CF-156** -- WebTransport: Unbounded Capsule Buffer Growth
+- [x] **CF-156** -- WebTransport: Unbounded Capsule Buffer Growth
   - Severity: S1 | Sources: A,B,C | Priority: 7.0
   - Evidence: file:1, sym:2
   - Missing: Exact line range(s) where the fault manifests; Code snippet proving the vulnerable pattern
   - Verify: `rg -n "capsule" "net/tquic/http3/webtransport.c"`
   - Fix: Enforce a maximum capsule buffer size (e.g., 64KB or configurable via socket option) and reject connections that exceed it with `H3_EXCESSIVE_LOAD`. R
 
-- [ ] **CF-160** -- `tquic_hs_build_ch_extensions` -- ALPN extension length written as 2-byte but can overflow u16
+- [x] **CF-160** -- `tquic_hs_build_ch_extensions` -- ALPN extension length written as 2-byte but can overflow u16
   - Severity: S1 | Sources: B,C | Priority: 7.0
   - Evidence: file:1, sym:2, lines:1, snippet:2
   - Missing: Kernel log / stack trace / error output demonstrating the issue
   - Verify: `rg -n "tquic_hs_set_alpn" "net/tquic/crypto/handshake.c"`
   - Fix: Validate ALPN total length fits in u16 in `tquic_hs_set_alpn()`. Add a reasonable cap on `alpn_count`.  --- Risk: Fixes in parser/crypto/lifetime code
 
-- [ ] **CF-163** -- `tquic_hs_hkdf_expand_label` -- `context_len` truncated to u8
+- [x] **CF-163** -- `tquic_hs_hkdf_expand_label` -- `context_len` truncated to u8
   - Severity: S1 | Sources: B,C | Priority: 7.0
   - Evidence: file:1, sym:1, lines:1, snippet:2
   - Missing: Kernel log / stack trace / error output demonstrating the issue
   - Verify: `rg -n "tquic_hs_hkdf_expand_label" "net/tquic/crypto/handshake.c"`
   - Fix: ```c if (context_len > 255)     return -EINVAL; ```  --- Risk: Fixes in parser/crypto/lifetime code may alter packet acceptance logic. Watch for inter
 
-- [ ] **CF-165** -- `tquic_hs_process_new_session_ticket` -- memory leak of old ticket data on re-entry
+- [x] **CF-165** -- `tquic_hs_process_new_session_ticket` -- memory leak of old ticket data on re-entry
   - Severity: S1 | Sources: B,C | Priority: 7.0
   - Evidence: file:1, sym:3, lines:2, snippet:2
   - Missing: Kernel log / stack trace / error output demonstrating the issue
   - Verify: `rg -n "tquic_hs_process_new_session_ticket" "net/tquic/crypto/handshake.c"`
   - Fix: Track whether `hs->session_ticket` is owned or borrowed. Only free owned tickets. Risk: Fixes in parser/crypto/lifetime code may alter packet acceptan
 
-- [ ] **CF-166** -- `tquic_hs_process_server_hello` -- session ID comparison not fully bounds-safe
+- [x] **CF-166** -- `tquic_hs_process_server_hello` -- session ID comparison not fully bounds-safe
   - Severity: S1 | Sources: B,C | Priority: 7.0
   - Evidence: file:1, sym:1, lines:4, snippet:2
   - Missing: Kernel log / stack trace / error output demonstrating the issue
   - Verify: `rg -n "tquic_hs_process_server_hello" "net/tquic/crypto/handshake.c"`
   - Fix: Add `if (p >= end) return -EINVAL;` before `session_id_len = *p++;`.  --- Risk: Fixes in parser/crypto/lifetime code may alter packet acceptance logic
 
-- [ ] **CF-173** -- Bloom Filter Has High False Positive Rate at Scale
+- [x] **CF-173** -- Bloom Filter Has High False Positive Rate at Scale
   - Severity: S1 | Sources: B,C | Priority: 7.0
   - Evidence: file:1, lines:1, snippet:1
   - Missing: Function/struct symbol name at the fault site; Kernel log / stack trace / error output demonstrating the issue
   - Verify: `sed -n '913,916p' net/tquic/crypto/zero_rtt.h`
   - Fix: Increase `TQUIC_REPLAY_BLOOM_BITS` to at least `(1 << 20)` (1M bits = 128KB) for production use, or make it configurable via sysctl.  --- Risk: Fixes 
 
-- [ ] **CF-205** -- memset Instead of memzero_explicit for Old Key Material
+- [x] **CF-205** -- memset Instead of memzero_explicit for Old Key Material
   - Severity: S1 | Sources: B,C | Priority: 7.0
   - Evidence: file:1, sym:1, lines:3, snippet:1
   - Missing: Kernel log / stack trace / error output demonstrating the issue
   - Verify: `rg -n "memzero_explicit" "net/tquic/crypto/key_update.c"`
   - Fix: Replace all `memset(..., 0, ...)` clearing key material with `memzero_explicit()`. Risk: Fixes in parser/crypto/lifetime code may alter packet accepta
 
-- [ ] **CF-206** -- Missing kfree_sensitive for key material in crypto/handshake.c extensions buffer
+- [x] **CF-206** -- Missing kfree_sensitive for key material in crypto/handshake.c extensions buffer
   - Severity: S1 | Sources: B,C | Priority: 7.0
   - Evidence: file:1, sym:1, lines:2, snippet:1
   - Missing: Kernel log / stack trace / error output demonstrating the issue
   - Verify: `rg -n "kfree_sensitive" "net/quic/tquic/crypto/handshake.c"`
   - Fix: Add strict validation and bounds checks at parse boundaries, enforce lifetime/ownership rules, and fail closed on malformed input. Risk: Fixes in pars
 
-- [ ] **CF-213** -- Procfs trusted_cas Writable Without Privilege Check
+- [x] **CF-213** -- Procfs trusted_cas Writable Without Privilege Check
   - Severity: S1 | Sources: B,C | Priority: 7.0
   - Evidence: file:1, sym:1, lines:2, snippet:1
   - Missing: Kernel log / stack trace / error output demonstrating the issue
@@ -548,105 +550,105 @@ Parked. Only revisit if new evidence surfaces.
 
 #### Concurrency (15)
 
-- [ ] **CF-140** -- HTTP/3 Request: TOCTOU Between State Check and Send
+- [x] **CF-140** -- HTTP/3 Request: TOCTOU Between State Check and Send
   - Severity: S1 | Sources: A,B,C | Priority: 7.0
   - Evidence: file:1, sym:2
   - Missing: Exact line range(s) where the fault manifests; Code snippet proving the vulnerable pattern
   - Verify: `rg -n "h3_request_send_headers" "net/tquic/http3/http3_request.c"`
   - Fix: Either hold the lock during the entire send operation, or re-validate state after acquiring any needed resources. Risk: Locking/ordering changes can c
 
-- [ ] **CF-147** -- QPACK Decoder: Unbounded Blocked Stream Memory Exhaustion
+- [x] **CF-147** -- QPACK Decoder: Unbounded Blocked Stream Memory Exhaustion
   - Severity: S1 | Sources: A,B,C | Priority: 7.0
   - Evidence: file:1, sym:5
   - Missing: Exact line range(s) where the fault manifests; Code snippet proving the vulnerable pattern
   - Verify: `rg -n "blocks" "net/tquic/http3/qpack_decoder.c"`
   - Fix: Track total blocked stream memory and enforce a per-connection limit (e.g., 1MB total blocked stream data). Risk: Locking/ordering changes can cause d
 
-- [ ] **CF-149** -- Race Condition in Key Update Secret Installation
+- [x] **CF-149** -- Race Condition in Key Update Secret Installation
   - Severity: S1 | Sources: A,B,C | Priority: 7.0
   - Evidence: file:1, sym:4
   - Missing: Exact line range(s) where the fault manifests; Code snippet proving the vulnerable pattern
   - Verify: `rg -n "derivation" "net/tquic/crypto/key_update.c"`
   - Fix: Use a state flag (e.g., `keys_installing`) that prevents concurrent use during the derivation window. Set the flag under the first lock acquisition, d
 
-- [ ] **CF-153** -- Timing Normalization Can Block in Packet Processing Path
+- [x] **CF-153** -- Timing Normalization Can Block in Packet Processing Path
   - Severity: S1 | Sources: A,B,C | Priority: 7.0
   - Evidence: file:1, sym:9, snippet:1
   - Missing: Exact line range(s) where the fault manifests; Kernel log / stack trace / error output demonstrating the issue
   - Verify: `rg -n "context" "net/tquic/security/quic_exfil.c"`
   - Fix: Missing fix suggestion in source text. Risk: Locking/ordering changes can cause deadlocks or throughput regressions if not validated under stress and 
 
-- [ ] **CF-169** -- accept() Uses spin_lock_bh on sk_lock.slock While lock_sock() Is Held
+- [x] **CF-169** -- accept() Uses spin_lock_bh on sk_lock.slock While lock_sock() Is Held
   - Severity: S1 | Sources: B,C | Priority: 7.0
   - Evidence: file:2, sym:5, lines:4, snippet:3
   - Missing: Kernel log / stack trace / error output demonstrating the issue
   - Verify: `rg -n "lock_sock" "net/quic/tquic/tquic_socket.c"`
   - Fix: Remove the inner `spin_lock_bh(&sk->sk_lock.slock)` calls in `tquic_accept()`. The `lock_sock()` already provides sufficient serialization. If the acc
 
-- [ ] **CF-174** -- Bonding State Machine Drop-Relock Without Re-validation
+- [x] **CF-174** -- Bonding State Machine Drop-Relock Without Re-validation
   - Severity: S1 | Sources: B,C | Priority: 7.0
   - Evidence: file:1, sym:3, lines:1, snippet:2
   - Missing: Kernel log / stack trace / error output demonstrating the issue
   - Verify: `rg -n "tquic_bonding_destroy" "net/quic/tquic/bond/tquic_bonding.c"`
   - Fix: Add a "destroying" flag to `bc` checked after relock, or use refcounting on `bc`. Risk: Locking/ordering changes can cause deadlocks or throughput reg
 
-- [ ] **CF-177** -- conn->lock held during path selection on every TX packet
+- [x] **CF-177** -- conn->lock held during path selection on every TX packet
   - Severity: S1 | Sources: A,B | Priority: 7.0
   - Evidence: file:2, sym:8, lines:1, snippet:1
   - Missing: Kernel log / stack trace / error output demonstrating the issue
   - Verify: `rg -n "read_once" "net/tquic/tquic_output.c"`
   - Fix: For the single-path fast path, use `READ_ONCE(conn->active_path)` without the lock. Only take the lock when a scheduler is configured. Consider RCU pr
 
-- [ ] **CF-178** -- conn->lock released and reacquired during output flush stream iteration
+- [x] **CF-178** -- conn->lock released and reacquired during output flush stream iteration
   - Severity: S1 | Sources: A,B | Priority: 7.0
   - Evidence: file:2, sym:7, lines:1, snippet:2
   - Missing: Kernel log / stack trace / error output demonstrating the issue
   - Verify: `rg -n "operations" "net/tquic/tquic_output.c"`
   - Fix: Merge the two critical sections into one: check flow control credit and begin stream iteration under the same `conn->lock` hold. Risk: Locking/orderin
 
-- [ ] **CF-184** -- EKU Derives Keys Using KU hash_tfm Without KU Lock
+- [x] **CF-184** -- EKU Derives Keys Using KU hash_tfm Without KU Lock
   - Severity: S1 | Sources: B,C | Priority: 7.0
   - Evidence: file:1, sym:1, lines:3, snippet:2
   - Missing: Kernel log / stack trace / error output demonstrating the issue
   - Verify: `rg -n "eku_hkdf_extract" "net/tquic/crypto/extended_key_update.c"`
   - Fix: Either (a) hold the KU lock around `hash_tfm` access, or (b) copy `hash_tfm` under the KU lock and use the copy (though crypto transforms are not refe
 
-- [ ] **CF-192** -- GRO Flush Unlock-Relock Loop Without Re-validation
+- [x] **CF-192** -- GRO Flush Unlock-Relock Loop Without Re-validation
   - Severity: S1 | Sources: B,C | Priority: 7.0
   - Evidence: file:1, sym:2, lines:2, snippet:2
   - Missing: Kernel log / stack trace / error output demonstrating the issue
   - Verify: `rg -n "tquic_gro_receive_internal" "net/quic/tquic/tquic_input.c"`
   - Fix: After the loop, set `gro->held_count = skb_queue_len(&gro->hold_queue)` instead of hard-coding 0. Risk: Locking/ordering changes can cause deadlocks o
 
-- [ ] **CF-200** -- Infinite retry loop on EMSGSIZE/EEXIST
+- [x] **CF-200** -- Infinite retry loop on EMSGSIZE/EEXIST
   - Severity: S1 | Sources: A,B | Priority: 7.0
   - Evidence: file:2, sym:4, lines:1, snippet:1
   - Missing: Kernel log / stack trace / error output demonstrating the issue
   - Verify: `rg -n "tquic_skb_zerocopy_iter_stream" "net/tquic/tquic_zerocopy.c"`
   - Fix: Add a retry counter (e.g., max 3 retries) and return an error after exhausting retries. Alternatively, adjust the chunk size downward on EMSGSIZE befo
 
-- [ ] **CF-202** -- io_uring buffer ring spinlock per get/put operation
+- [x] **CF-202** -- io_uring buffer ring spinlock per get/put operation
   - Severity: S1 | Sources: A,B | Priority: 7.0
   - Evidence: file:3, sym:8, lines:2, snippet:1
   - Missing: Kernel log / stack trace / error output demonstrating the issue
   - Verify: `rg -n "acquisitions" "net/tquic/io_uring.c"`
   - Fix: If get/put are guaranteed to be called from different contexts (producer vs consumer), replace the spinlock with a lockless SPSC ring using `smp_store
 
-- [ ] **CF-218** -- reed_solomon.c -- four-allocation group without individual NULL checks
+- [x] **CF-218** -- reed_solomon.c -- four-allocation group without individual NULL checks
   - Severity: S1 | Sources: B,C | Priority: 7.0
   - Evidence: file:1, lines:1, snippet:3
   - Missing: Function/struct symbol name at the fault site; Kernel log / stack trace / error output demonstrating the issue
   - Verify: `sed -n '590,590p' net/quic/tquic/fec/reed_solomon.c`
   - Fix: Establish one synchronization model for this code path and make all state transitions/lookup paths follow it consistently. Risk: Locking/ordering chan
 
-- [ ] **CF-225** -- Security Hardening Pre-HS Atomic TOCTOU
+- [x] **CF-225** -- Security Hardening Pre-HS Atomic TOCTOU
   - Severity: S1 | Sources: B,C | Priority: 7.0
   - Evidence: file:1, sym:1, lines:2, snippet:1
   - Missing: Kernel log / stack trace / error output demonstrating the issue
   - Verify: `rg -n "atomic_inc_return" "net/quic/tquic/security_hardening.c"`
   - Fix: Use `atomic_inc_return()` and check the result instead of separate read + increment. Risk: Locking/ordering changes can cause deadlocks or throughput 
 
-- [ ] **CF-231** -- tquic_process_stream_frame Allocates skb Based on Attacker-Controlled length
+- [x] **CF-231** -- tquic_process_stream_frame Allocates skb Based on Attacker-Controlled length
   - Severity: S1 | Sources: B,C | Priority: 7.0
   - Evidence: file:1, sym:4, lines:4, snippet:1
   - Missing: Kernel log / stack trace / error output demonstrating the issue
@@ -655,70 +657,70 @@ Parked. Only revisit if new evidence surfaces.
 
 #### Correctness (10)
 
-- [ ] **CF-136** -- `ext->final_size = -1` Uses Signed Overflow
+- [x] **CF-136** -- `ext->final_size = -1` Uses Signed Overflow
   - Severity: S1 | Sources: A,B,C | Priority: 7.0
   - Evidence: file:1, snippet:1
   - Missing: Exact line range(s) where the fault manifests; Function/struct symbol name at the fault site
   - Verify: `make M=net/tquic W=1`
   - Fix: Define `#define TQUIC_STREAM_SIZE_UNKNOWN U64_MAX` and use it consistently. Risk: Protocol correctness fixes can shift timing/state-machine behavior; 
 
-- [ ] **CF-152** -- Stream State Machine Allows Unexpected Transitions from OPEN
+- [x] **CF-152** -- Stream State Machine Allows Unexpected Transitions from OPEN
   - Severity: S1 | Sources: A,B,C | Priority: 7.0
   - Evidence: file:1, sym:6, snippet:2
   - Missing: Exact line range(s) where the fault manifests; Kernel log / stack trace / error output demonstrating the issue
   - Verify: `rg -n "data_sent" "net/tquic/core/stream.c"`
   - Fix: Add TQUIC_STREAM_SEND and TQUIC_STREAM_RECV as valid transitions from OPEN. Risk: Protocol correctness fixes can shift timing/state-machine behavior; 
 
-- [ ] **CF-157** -- `quic_offload.c` Version Field Shift Without Cast
+- [x] **CF-157** -- `quic_offload.c` Version Field Shift Without Cast
   - Severity: S1 | Sources: B,C | Priority: 7.0
   - Evidence: file:2, sym:1, lines:2, snippet:2
   - Missing: Kernel log / stack trace / error output demonstrating the issue
   - Verify: `rg -n "quic_offload" "net/quic/tquic/quic_offload.c"`
   - Fix: Cast to `u32` before shift: ```c version = ((u32)data[1] << 24) | ((u32)data[2] << 16) |           ((u32)data[3] << 8) | data[4]; ``` Risk: Protocol c
 
-- [ ] **CF-183** -- ECN Counter Values Passed Directly to TQUIC_ADD_STATS Without Overflow Check
+- [x] **CF-183** -- ECN Counter Values Passed Directly to TQUIC_ADD_STATS Without Overflow Check
   - Severity: S1 | Sources: B,C | Priority: 7.0
   - Evidence: file:1, sym:1, lines:3, snippet:1
   - Missing: Kernel log / stack trace / error output demonstrating the issue
   - Verify: `rg -n "tquic_input" "net/tquic/tquic_input.c"`
   - Fix: Validate that ECN counts are monotonically increasing from previous values. Store previous ECN counts per-path and only react to the *increase*, not t
 
-- [ ] **CF-190** -- getsockopt PSK Identity - Missing Length Validation
+- [x] **CF-190** -- getsockopt PSK Identity - Missing Length Validation
   - Severity: S1 | Sources: B,C | Priority: 7.0
   - Evidence: file:1, sym:1, lines:2, snippet:3
   - Missing: Kernel log / stack trace / error output demonstrating the issue
   - Verify: `rg -n "tquic_socket" "net/quic/tquic/tquic_socket.c"`
   - Fix: Add `if (identity_len > len) return -EINVAL;` before the copy_to_user call.  --- Risk: Protocol correctness fixes can shift timing/state-machine behav
 
-- [ ] **CF-191** -- GRO Coalesce Uses Hardcoded 8-byte CID Comparison
+- [x] **CF-191** -- GRO Coalesce Uses Hardcoded 8-byte CID Comparison
   - Severity: S1 | Sources: B,C | Priority: 7.0
   - Evidence: file:1, sym:1, lines:1, snippet:2
   - Missing: Kernel log / stack trace / error output demonstrating the issue
   - Verify: `rg -n "tquic_input" "net/tquic/tquic_input.c"`
   - Fix: The GRO coalesce function needs to know the actual CID length. Pass it via skb metadata or look it up from connection state. Also add length checks: `
 
-- [ ] **CF-195** -- HIGH: GRO stats use global atomic64 on every packet
+- [x] **CF-195** -- HIGH: GRO stats use global atomic64 on every packet
   - Severity: S1 | Sources: A,B | Priority: 7.0
   - Evidence: file:4, sym:8, lines:3, snippet:3
   - Missing: Kernel log / stack trace / error output demonstrating the issue
   - Verify: `rg -n "atomic64_inc" "net/tquic/tquic_offload.c"`
   - Fix: Use per-CPU counters for GRO statistics, aggregate on read. Risk: Protocol correctness fixes can shift timing/state-machine behavior; verify against i
 
-- [ ] **CF-211** -- payload_len Subtraction Underflow in Long Header Parsing
+- [x] **CF-211** -- payload_len Subtraction Underflow in Long Header Parsing
   - Severity: S1 | Sources: B,C | Priority: 7.0
   - Evidence: file:1, lines:2, snippet:1
   - Missing: Function/struct symbol name at the fault site; Kernel log / stack trace / error output demonstrating the issue
   - Verify: `sed -n '590,601p' net/tquic/core/packet.c`
   - Fix: Add `if (hdr->payload_len < hdr->pn_len) return -EPROTO;` before the subtraction. Risk: Protocol correctness fixes can shift timing/state-machine beha
 
-- [ ] **CF-233** -- tquic_stream_recv_data Potential Integer Overflow in Flow Control Check
+- [x] **CF-233** -- tquic_stream_recv_data Potential Integer Overflow in Flow Control Check
   - Severity: S1 | Sources: B,C | Priority: 7.0
   - Evidence: file:1, sym:1, lines:1, snippet:1
   - Missing: Kernel log / stack trace / error output demonstrating the issue
   - Verify: `rg -n "tquic_stream_recv_data" "net/quic/tquic/core/stream.c"`
   - Fix: Add overflow check before the addition: `if (skb->len > U64_MAX - offset) return -EOVERFLOW;`  --- Risk: Protocol correctness fixes can shift timing/s
 
-- [ ] **CF-237** -- tquic_zerocopy_sendmsg -- uarg leak on partial send
+- [x] **CF-237** -- tquic_zerocopy_sendmsg -- uarg leak on partial send
   - Severity: S1 | Sources: B,C | Priority: 7.0
   - Evidence: file:1, sym:2, lines:1, snippet:2
   - Missing: Kernel log / stack trace / error output demonstrating the issue
@@ -727,7 +729,7 @@ Parked. Only revisit if new evidence surfaces.
 
 #### Api (1)
 
-- [ ] **CF-217** -- Redundant triple-counting of statistics
+- [x] **CF-217** -- Redundant triple-counting of statistics
   - Severity: S1 | Sources: A,B | Priority: 7.0
   - Evidence: file:4, sym:11, lines:7, snippet:4
   - Missing: Kernel log / stack trace / error output demonstrating the issue
@@ -736,7 +738,7 @@ Parked. Only revisit if new evidence surfaces.
 
 #### Perf (1)
 
-- [ ] **CF-180** -- CONNECTION_CLOSE uses kmalloc for small buffer
+- [x] **CF-180** -- CONNECTION_CLOSE uses kmalloc for small buffer
   - Severity: S1 | Sources: A,B | Priority: 7.0
   - Evidence: file:2, sym:3, lines:2, snippet:1
   - Missing: Kernel log / stack trace / error output demonstrating the issue

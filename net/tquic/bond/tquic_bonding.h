@@ -130,6 +130,7 @@ struct coupled_cc_ctx;
 struct tquic_bonding_ctx {
 	enum tquic_bonding_state state;
 	spinlock_t state_lock;
+	bool destroying;		/* Set during tquic_bonding_destroy() */
 	u32 flags;			/* TQUIC_BOND_F_* capability flags */
 
 	/* Path tracking */

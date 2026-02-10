@@ -112,6 +112,13 @@ void tquic_lb_config_destroy(struct tquic_lb_config *cfg)
 	if (cfg->aes_tfm)
 		crypto_free_sync_skcipher(cfg->aes_tfm);
 
+	/*
+	 * CF-142: Zeroize key material and server ID before freeing
+	 * to prevent key recovery from freed memory.
+	 */
+	memzero_explicit(cfg->encryption_key, sizeof(cfg->encryption_key));
+	memzero_explicit(cfg->server_id, sizeof(cfg->server_id));
+
 	kmem_cache_free(lb_config_cache, cfg);
 }
 EXPORT_SYMBOL_GPL(tquic_lb_config_destroy);

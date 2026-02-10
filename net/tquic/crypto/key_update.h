@@ -111,6 +111,7 @@ struct tquic_key_update_state {
 	bool peer_update_received;
 	bool handshake_confirmed;
 	bool old_keys_valid;
+	bool keys_installing;		/* Derivation in progress */
 
 	/* Cipher configuration */
 	u16 cipher_suite;

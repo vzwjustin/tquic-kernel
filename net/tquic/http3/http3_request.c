@@ -32,6 +32,7 @@
 #include <linux/module.h>
 #include <linux/slab.h>
 #include <linux/uio.h>
+#include <linux/refcount.h>
 #include <net/tquic.h>
 
 #include "http3_stream.h"
@@ -147,12 +148,20 @@ int h3_request_send_headers(struct h3_stream *h3s, const void *headers,
 	u8 frame_hdr[16];
 	int hdr_len;
 	int ret;
+	bool was_headers_sent;
 
 	if (!h3s->is_request_stream) {
 		pr_err("h3: not a request stream\n");
 		return -EINVAL;
 	}
 
+	/*
+	 * Validate state and atomically mark the send as in-progress
+	 * to close the TOCTOU window between the state check and the
+	 * actual send.  We set headers_sent under the lock before the
+	 * I/O so that concurrent callers will see the updated state.
+	 * On send failure we roll back.
+	 */
 	spin_lock(&h3s->lock);
 
 	if (h3s->headers_sent) {
@@ -170,26 +179,30 @@ int h3_request_send_headers(struct h3_stream *h3s, const void *headers,
 		}
 	}
 
+	was_headers_sent = h3s->headers_sent;
+	h3s->headers_sent = true;
+
 	spin_unlock(&h3s->lock);
 
 	/* Build HEADERS frame header */
 	hdr_len = h3_build_frame_header(H3_FRAME_HEADERS, len,
 					frame_hdr, sizeof(frame_hdr));
-	if (hdr_len < 0)
-		return hdr_len;
+	if (hdr_len < 0) {
+		ret = hdr_len;
+		goto rollback;
+	}
 
 	/* Send frame header */
 	ret = tquic_stream_send(h3s->base, frame_hdr, hdr_len, false);
 	if (ret < 0)
-		return ret;
+		goto rollback;
 
 	/* Send header block */
 	ret = tquic_stream_send(h3s->base, headers, len, false);
 	if (ret < 0)
-		return ret;
+		goto rollback;
 
 	spin_lock(&h3s->lock);
-	h3s->headers_sent = true;
 	h3s->bytes_sent += hdr_len + len;
 	spin_unlock(&h3s->lock);
 
@@ -197,6 +210,12 @@ int h3_request_send_headers(struct h3_stream *h3s, const void *headers,
 		 len, h3s->base->id);
 
 	return 0;
+
+rollback:
+	spin_lock(&h3s->lock);
+	h3s->headers_sent = was_headers_sent;
+	spin_unlock(&h3s->lock);
+	return ret;
 }
 EXPORT_SYMBOL_GPL(h3_request_send_headers);
 
@@ -231,40 +250,56 @@ int h3_request_send_data(struct h3_stream *h3s, const void *data, size_t len)
 		return -H3_FRAME_UNEXPECTED;
 	}
 
-	/* Cannot send DATA after trailers */
-	if (h3s->trailers_received) {
+	/* Cannot send DATA after trailers or FIN */
+	if (h3s->trailers_received || h3s->fin_sent) {
 		spin_unlock(&h3s->lock);
-		pr_err("h3: cannot send DATA after trailers\n");
+		pr_err("h3: cannot send DATA after trailers or FIN\n");
 		return -H3_FRAME_UNEXPECTED;
 	}
+
+	/*
+	 * Mark that a data send is in flight to prevent concurrent
+	 * state-changing operations (e.g. trailers or FIN) from
+	 * racing with this send.
+	 */
+	h3s->data_sending = true;
 
 	spin_unlock(&h3s->lock);
 
 	/* Build DATA frame header */
 	hdr_len = h3_build_frame_header(H3_FRAME_DATA, len,
 					frame_hdr, sizeof(frame_hdr));
-	if (hdr_len < 0)
-		return hdr_len;
+	if (hdr_len < 0) {
+		ret = hdr_len;
+		goto out;
+	}
 
 	/* Send frame header */
 	ret = tquic_stream_send(h3s->base, frame_hdr, hdr_len, false);
 	if (ret < 0)
-		return ret;
+		goto out;
 
 	/* Send data */
 	ret = tquic_stream_send(h3s->base, data, len, false);
 	if (ret < 0)
-		return ret;
+		goto out;
 
 	spin_lock(&h3s->lock);
 	h3s->data_offset += len;
 	h3s->bytes_sent += hdr_len + len;
+	h3s->data_sending = false;
 	spin_unlock(&h3s->lock);
 
 	pr_debug("h3: sent DATA frame (%zu bytes) on stream %llu\n",
 		 len, h3s->base->id);
 
 	return 0;
+
+out:
+	spin_lock(&h3s->lock);
+	h3s->data_sending = false;
+	spin_unlock(&h3s->lock);
+	return ret;
 }
 EXPORT_SYMBOL_GPL(h3_request_send_data);
 
@@ -290,26 +325,31 @@ int h3_request_send_trailers(struct h3_stream *h3s, const void *trailers,
 
 	spin_lock(&h3s->lock);
 
-	if (!h3s->headers_sent) {
+	if (!h3s->headers_sent || h3s->fin_sent || h3s->data_sending) {
 		spin_unlock(&h3s->lock);
 		return -H3_FRAME_UNEXPECTED;
 	}
+
+	/* Prevent concurrent sends while trailers are in-flight */
+	h3s->trailers_received = true;
 
 	spin_unlock(&h3s->lock);
 
 	/* Trailing HEADERS is just another HEADERS frame */
 	hdr_len = h3_build_frame_header(H3_FRAME_HEADERS, len,
 					frame_hdr, sizeof(frame_hdr));
-	if (hdr_len < 0)
-		return hdr_len;
+	if (hdr_len < 0) {
+		ret = hdr_len;
+		goto rollback;
+	}
 
 	ret = tquic_stream_send(h3s->base, frame_hdr, hdr_len, false);
 	if (ret < 0)
-		return ret;
+		goto rollback;
 
 	ret = tquic_stream_send(h3s->base, trailers, len, false);
 	if (ret < 0)
-		return ret;
+		goto rollback;
 
 	spin_lock(&h3s->lock);
 	h3s->bytes_sent += hdr_len + len;
@@ -319,6 +359,12 @@ int h3_request_send_trailers(struct h3_stream *h3s, const void *trailers,
 		 len, h3s->base->id);
 
 	return 0;
+
+rollback:
+	spin_lock(&h3s->lock);
+	h3s->trailers_received = false;
+	spin_unlock(&h3s->lock);
+	return ret;
 }
 EXPORT_SYMBOL_GPL(h3_request_send_trailers);
 
@@ -344,20 +390,27 @@ int h3_request_finish(struct h3_stream *h3s)
 		return 0;
 	}
 
-	if (!h3s->headers_sent) {
+	if (!h3s->headers_sent || h3s->data_sending) {
 		spin_unlock(&h3s->lock);
 		return -H3_REQUEST_INCOMPLETE;
 	}
+
+	/* Mark FIN as sent under the lock to prevent TOCTOU races */
+	h3s->fin_sent = true;
 
 	spin_unlock(&h3s->lock);
 
 	/* Send empty data with FIN flag */
 	ret = tquic_stream_send(h3s->base, NULL, 0, true);
-	if (ret < 0)
+	if (ret < 0) {
+		/* Roll back on failure */
+		spin_lock(&h3s->lock);
+		h3s->fin_sent = false;
+		spin_unlock(&h3s->lock);
 		return ret;
+	}
 
 	spin_lock(&h3s->lock);
-	h3s->fin_sent = true;
 	h3s->request_state = H3_REQUEST_COMPLETE;
 	spin_unlock(&h3s->lock);
 
@@ -866,7 +919,10 @@ EXPORT_SYMBOL_GPL(h3_control_recv_frame);
  * @h3conn: HTTP/3 connection
  * @push_id: Push ID to search for
  *
- * Return: Stream or NULL if not found
+ * On success the returned stream has an elevated reference count.
+ * The caller must call h3_stream_put() when done.
+ *
+ * Return: Stream (with incremented refcount) or NULL if not found
  */
 struct h3_stream *h3_stream_lookup_by_push_id(struct h3_connection *h3conn,
 					      u64 push_id)
@@ -881,6 +937,7 @@ struct h3_stream *h3_stream_lookup_by_push_id(struct h3_connection *h3conn,
 
 		if (h3s->type == H3_STREAM_TYPE_PUSH &&
 		    h3s->push_id == push_id) {
+			refcount_inc(&h3s->refcnt);
 			spin_unlock(&h3conn->lock);
 			return h3s;
 		}

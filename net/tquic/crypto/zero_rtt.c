@@ -1142,47 +1142,64 @@ int tquic_session_ticket_decode(const u8 *ticket, u32 ticket_len,
 
 	payload_len -= TQUIC_SESSION_TICKET_TAG_LEN;
 
-	/* Parse payload */
+	/* Parse payload - validate all length fields against remaining buffer */
 	memset(out, 0, sizeof(*out));
 	p = payload;
+	const u8 *payload_end = payload + payload_len;
 
 	/* PSK length (1 byte) + PSK */
-	if (payload_len < 1) {
+	if (p + 1 > payload_end) {
 		ret = -EINVAL;
 		goto out_free;
 	}
 	out->psk_len = *p++;
+
+	/* Validate PSK length against destination buffer and remaining data */
 	if (out->psk_len == 0 ||
-	    out->psk_len > TQUIC_ZERO_RTT_SECRET_MAX_LEN) {
-		ret = -EINVAL;
-		goto out_free;
-	}
-	if (payload_len < 1 + out->psk_len + 4 + 8 + 2 + 1) {
+	    out->psk_len > sizeof(out->psk) ||
+	    out->psk_len > TQUIC_ZERO_RTT_SECRET_MAX_LEN ||
+	    p + out->psk_len > payload_end) {
 		ret = -EINVAL;
 		goto out_free;
 	}
 	memcpy(out->psk, p, out->psk_len);
 	p += out->psk_len;
 
-	/* Max age */
+	/* Max age (4 bytes) */
+	if (p + 4 > payload_end) {
+		ret = -EINVAL;
+		goto out_free;
+	}
 	out->max_age = (p[0] << 24) | (p[1] << 16) | (p[2] << 8) | p[3];
 	p += 4;
 
-	/* Creation time */
+	/* Creation time (8 bytes) */
+	if (p + 8 > payload_end) {
+		ret = -EINVAL;
+		goto out_free;
+	}
 	out->creation_time = ((u64)p[0] << 56) | ((u64)p[1] << 48) |
 			     ((u64)p[2] << 40) | ((u64)p[3] << 32) |
 			     ((u64)p[4] << 24) | ((u64)p[5] << 16) |
 			     ((u64)p[6] << 8) | (u64)p[7];
 	p += 8;
 
-	/* Cipher suite */
+	/* Cipher suite (2 bytes) */
+	if (p + 2 > payload_end) {
+		ret = -EINVAL;
+		goto out_free;
+	}
 	out->cipher_suite = (p[0] << 8) | p[1];
 	p += 2;
 
-	/* ALPN */
+	/* ALPN length (1 byte) + ALPN data */
+	if (p + 1 > payload_end) {
+		ret = -EINVAL;
+		goto out_free;
+	}
 	out->alpn_len = *p++;
 	if (out->alpn_len > TQUIC_ALPN_MAX_LEN ||
-	    p + out->alpn_len > payload + payload_len) {
+	    p + out->alpn_len > payload_end) {
 		ret = -EINVAL;
 		goto out_free;
 	}
@@ -1190,8 +1207,8 @@ int tquic_session_ticket_decode(const u8 *ticket, u32 ticket_len,
 	out->alpn[out->alpn_len] = '\0';
 	p += out->alpn_len;
 
-	/* Transport parameters */
-	if (p + 4 > payload + payload_len) {
+	/* Transport parameters length (4 bytes) + data */
+	if (p + 4 > payload_end) {
 		ret = -EINVAL;
 		goto out_free;
 	}
@@ -1200,7 +1217,7 @@ int tquic_session_ticket_decode(const u8 *ticket, u32 ticket_len,
 	p += 4;
 
 	if (out->transport_params_len > sizeof(out->transport_params) ||
-	    p + out->transport_params_len > payload + payload_len) {
+	    p + out->transport_params_len > payload_end) {
 		ret = -EINVAL;
 		goto out_free;
 	}
@@ -1262,6 +1279,10 @@ void tquic_zero_rtt_cleanup(struct tquic_connection *conn)
 
 	state = conn->zero_rtt_state;
 
+	/* Free pre-allocated AEAD transform */
+	if (state->aead)
+		crypto_free_aead(state->aead);
+
 	/*
 	 * Securely wipe all cryptographic material:
 	 * - AEAD keys and IVs
@@ -1321,6 +1342,39 @@ int tquic_zero_rtt_attempt(struct tquic_connection *conn,
 	state->early_data_max = 16384;	/* Default 16KB */
 	state->early_data_sent = 0;
 
+	/* Pre-allocate AEAD transform for encrypt/decrypt */
+	state->aead = crypto_alloc_aead(
+		tquic_cipher_to_aead_name(state->cipher_suite), 0, 0);
+	if (IS_ERR(state->aead)) {
+		ret = PTR_ERR(state->aead);
+		state->aead = NULL;
+		tquic_zero_rtt_put_ticket(ticket);
+		state->ticket = NULL;
+		memzero_explicit(&state->keys, sizeof(state->keys));
+		return ret;
+	}
+
+	ret = crypto_aead_setkey(state->aead, state->keys.key,
+				 state->keys.key_len);
+	if (ret) {
+		crypto_free_aead(state->aead);
+		state->aead = NULL;
+		tquic_zero_rtt_put_ticket(ticket);
+		state->ticket = NULL;
+		memzero_explicit(&state->keys, sizeof(state->keys));
+		return ret;
+	}
+
+	ret = crypto_aead_setauthsize(state->aead, 16);
+	if (ret) {
+		crypto_free_aead(state->aead);
+		state->aead = NULL;
+		tquic_zero_rtt_put_ticket(ticket);
+		state->ticket = NULL;
+		memzero_explicit(&state->keys, sizeof(state->keys));
+		return ret;
+	}
+
 	pr_debug("tquic: attempting 0-RTT for %.*s\n",
 		 server_name_len, server_name);
 
@@ -1379,7 +1433,11 @@ void tquic_zero_rtt_reject(struct tquic_connection *conn)
 	state = conn->zero_rtt_state;
 	state->state = TQUIC_0RTT_REJECTED;
 
-	/* Wipe keys since they won't be used */
+	/* Free AEAD and wipe keys since they won't be used */
+	if (state->aead) {
+		crypto_free_aead(state->aead);
+		state->aead = NULL;
+	}
 	memzero_explicit(&state->keys, sizeof(state->keys));
 
 	tquic_info("0-RTT rejected\n");
@@ -1454,7 +1512,6 @@ int tquic_zero_rtt_encrypt(struct tquic_connection *conn,
 			   u64 pkt_num, u8 *out, size_t *out_len)
 {
 	struct tquic_zero_rtt_state_s *state;
-	struct crypto_aead *aead;
 	struct aead_request *req;
 	struct scatterlist sg[2];
 	u8 nonce[12];
@@ -1519,28 +1576,13 @@ int tquic_zero_rtt_encrypt(struct tquic_connection *conn,
 
 	spin_unlock_irqrestore(&state->pn_lock, flags);
 
-	/* Allocate AEAD */
-	aead = crypto_alloc_aead(tquic_cipher_to_aead_name(state->cipher_suite), 0, 0);
-	if (IS_ERR(aead))
-		return PTR_ERR(aead);
+	/* Use pre-allocated AEAD transform */
+	if (!state->aead)
+		return -ENOKEY;
 
-	ret = crypto_aead_setkey(aead, state->keys.key, state->keys.key_len);
-	if (ret) {
-		crypto_free_aead(aead);
-		return ret;
-	}
-
-	if (crypto_aead_setauthsize(aead, 16)) {
-		pr_err("tquic_zero_rtt: failed to set auth tag size for encryption\n");
-		crypto_free_aead(aead);
-		return -EINVAL;
-	}
-
-	req = aead_request_alloc(aead, GFP_ATOMIC);
-	if (!req) {
-		crypto_free_aead(aead);
+	req = aead_request_alloc(state->aead, GFP_ATOMIC);
+	if (!req)
 		return -ENOMEM;
-	}
 
 	/* Construct nonce: IV XOR packet_number (RFC 9001 Section 5.3) */
 	tquic_create_nonce(state->keys.iv, pkt_num, nonce);
@@ -1561,7 +1603,6 @@ int tquic_zero_rtt_encrypt(struct tquic_connection *conn,
 	memzero_explicit(nonce, sizeof(nonce));
 
 	aead_request_free(req);
-	crypto_free_aead(aead);
 
 	if (ret == 0) {
 		*out_len = payload_len + 16;
@@ -1689,7 +1730,6 @@ int tquic_zero_rtt_decrypt(struct tquic_connection *conn,
 			   u64 pkt_num, u8 *out, size_t *out_len)
 {
 	struct tquic_zero_rtt_state_s *state;
-	struct crypto_aead *aead;
 	struct aead_request *req;
 	struct scatterlist sg[2];
 	u8 nonce[12];
@@ -1749,28 +1789,13 @@ int tquic_zero_rtt_decrypt(struct tquic_connection *conn,
 
 	spin_unlock_irqrestore(&state->pn_lock, flags);
 
-	/* Allocate AEAD */
-	aead = crypto_alloc_aead(tquic_cipher_to_aead_name(state->cipher_suite), 0, 0);
-	if (IS_ERR(aead))
-		return PTR_ERR(aead);
+	/* Use pre-allocated AEAD transform */
+	if (!state->aead)
+		return -ENOKEY;
 
-	ret = crypto_aead_setkey(aead, state->keys.key, state->keys.key_len);
-	if (ret) {
-		crypto_free_aead(aead);
-		return ret;
-	}
-
-	if (crypto_aead_setauthsize(aead, 16)) {
-		pr_err("tquic_zero_rtt: failed to set auth tag size for decryption\n");
-		crypto_free_aead(aead);
-		return -EINVAL;
-	}
-
-	req = aead_request_alloc(aead, GFP_ATOMIC);
-	if (!req) {
-		crypto_free_aead(aead);
+	req = aead_request_alloc(state->aead, GFP_ATOMIC);
+	if (!req)
 		return -ENOMEM;
-	}
 
 	/* Construct nonce: IV XOR packet_number (RFC 9001 Section 5.3) */
 	tquic_create_nonce(state->keys.iv, pkt_num, nonce);
@@ -1788,7 +1813,6 @@ int tquic_zero_rtt_decrypt(struct tquic_connection *conn,
 	memzero_explicit(nonce, sizeof(nonce));
 
 	aead_request_free(req);
-	crypto_free_aead(aead);
 
 	if (ret == 0) {
 		*out_len = payload_len - 16;
