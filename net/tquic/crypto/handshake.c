@@ -749,6 +749,15 @@ static int tquic_hs_hkdf_expand_label(struct tquic_handshake *hs,
 
 	hash_len = crypto_shash_digestsize(hs->hmac);
 
+	/*
+	 * Bounds check: the HkdfLabel structure occupies
+	 * 2 (length) + 1 (label length prefix) + total_label_len +
+	 * 1 (context length prefix) + context_len bytes.
+	 * Reject if this exceeds the stack buffer.
+	 */
+	if (2 + 1 + total_label_len + 1 + context_len > sizeof(hkdf_label))
+		return -EINVAL;
+
 	/* HkdfLabel structure */
 	*p++ = (out_len >> 8) & 0xff;
 	*p++ = out_len & 0xff;
@@ -1765,19 +1774,21 @@ int tquic_hs_process_certificate(struct tquic_handshake *hs,
 	if (p + certs_len > end)
 		return -EINVAL;
 
-	/* Parse certificate entries */
+	/* Parse certificate entries -- guard each subtraction against
+	 * u32 underflow by checking remaining length first.
+	 */
 	while (p < data + 4 + msg_len && certs_len > 0) {
 		u32 cert_len;
 		u16 ext_len;
 
-		if (p + 3 > end)
+		if (certs_len < 3 || p + 3 > end)
 			break;
 
 		cert_len = (p[0] << 16) | (p[1] << 8) | p[2];
 		p += 3;
 		certs_len -= 3;
 
-		if (p + cert_len > end || cert_len > certs_len)
+		if (cert_len > certs_len || p + cert_len > end)
 			return -EINVAL;
 
 		/* Store first certificate (end-entity) */
@@ -1793,7 +1804,7 @@ int tquic_hs_process_certificate(struct tquic_handshake *hs,
 		certs_len -= cert_len;
 
 		/* Certificate extensions */
-		if (p + 2 > end)
+		if (certs_len < 2 || p + 2 > end)
 			break;
 		ext_len = (p[0] << 8) | p[1];
 		p += 2;
