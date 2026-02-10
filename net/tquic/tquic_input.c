@@ -107,6 +107,13 @@ extern struct kmem_cache *tquic_rx_buf_cache;
 #define TQUIC_COALESCED_MAX_TOKEN_LEN	512
 
 /*
+ * CF-075: Maximum number of QUIC packets in a single UDP datagram.
+ * RFC 9000 Section 12.2 allows coalescing, but a practical upper bound
+ * prevents CPU exhaustion from malicious datagrams with many tiny packets.
+ */
+#define TQUIC_MAX_COALESCED_PACKETS	16
+
+/*
  * Forward declarations for header protection (crypto/header_protection.c).
  * These are EXPORT_SYMBOL_GPL but lack a shared header file.
  */
@@ -344,7 +351,9 @@ static struct tquic_path __maybe_unused *tquic_find_path_by_cid(struct tquic_con
 static int tquic_remove_header_protection(struct tquic_connection *conn,
 					  u8 *header, int header_len,
 					  u8 *payload, int payload_len,
-					  bool is_long_header)
+					  bool is_long_header,
+					  u8 *out_pn_len,
+					  u8 *out_key_phase)
 {
 	struct tquic_hp_ctx *hp;
 	u8 pn_len = 0;
@@ -372,6 +381,16 @@ static int tquic_remove_header_protection(struct tquic_connection *conn,
 		tquic_dbg("header protection removal failed: %d\n", ret);
 		return ret;
 	}
+
+	/*
+	 * CF-099: Return the pn_len and key_phase recovered by
+	 * tquic_hp_unprotect() so the caller uses values from
+	 * the unprotected header rather than the protected one.
+	 */
+	if (out_pn_len)
+		*out_pn_len = pn_len;
+	if (out_key_phase)
+		*out_key_phase = key_phase;
 
 	return 0;
 }
@@ -784,9 +803,21 @@ static int tquic_process_ack_frame(struct tquic_rx_ctx *ctx)
 		 * Calculate bytes acknowledged from first_ack_range.
 		 * Simplified: use first_ack_range * 1200 (MTU) as estimate.
 		 * Full implementation would use packet tracking.
+		 *
+		 * CF-073: Use safe arithmetic to prevent overflow.
+		 * first_ack_range is a u64 from varint decode (up to
+		 * 2^62-1), so adding 1 or multiplying by 1200 can
+		 * overflow.
 		 */
 		{
-			u64 bytes_acked = (first_ack_range + 1) * 1200;
+			u64 acked_pkts, bytes_acked;
+
+			if (check_add_overflow(first_ack_range, (u64)1,
+					       &acked_pkts))
+				acked_pkts = U64_MAX / 1200;
+			if (check_mul_overflow(acked_pkts, (u64)1200,
+					       &bytes_acked))
+				bytes_acked = U64_MAX;
 
 			/* Dispatch ACK event to congestion control */
 			tquic_cong_on_ack(ctx->path, bytes_acked, rtt_us);
@@ -1382,13 +1413,26 @@ static int tquic_process_handshake_done_frame(struct tquic_rx_ctx *ctx)
 		ctx->conn->handshake_confirmed = true;
 
 	/*
-	 * Transition to CONNECTED via the proper close handler
-	 * rather than directly assigning state.
+	 * CF-096: Transition to CONNECTED atomically.
+	 *
+	 * Use WRITE_ONCE() for the state assignment and validate
+	 * the transition under the lock.  Only CONNECTING ->
+	 * CONNECTED is valid here (RFC 9000 Section 19.20).
+	 * Reject the transition if the connection has already
+	 * moved to a later state (e.g. CLOSING due to a
+	 * concurrent error), which would be an invalid backward
+	 * transition.
+	 *
+	 * Also notify the socket layer so poll/epoll waiters see
+	 * the new state promptly.
 	 */
 	spin_lock(&ctx->conn->lock);
 	if (ctx->conn->state == TQUIC_CONN_CONNECTING) {
-		ctx->conn->state = TQUIC_CONN_CONNECTED;
+		WRITE_ONCE(ctx->conn->state, TQUIC_CONN_CONNECTED);
 		ctx->conn->handshake_complete = true;
+		ctx->conn->stats.established_time = ktime_get();
+		if (ctx->conn->sk)
+			ctx->conn->sk->sk_state_change(ctx->conn->sk);
 	}
 	spin_unlock(&ctx->conn->lock);
 
@@ -2455,7 +2499,7 @@ static int tquic_process_packet(struct tquic_connection *conn,
 	u8 dcid_len, scid_len;
 	u32 version;
 	int pkt_type;
-	int pkt_num_len;
+	int pkt_num_len = 0;
 	u64 pkt_num;
 	u8 *payload;
 	size_t payload_len, decrypted_len = 0;
@@ -2644,36 +2688,36 @@ static int tquic_process_packet(struct tquic_connection *conn,
 			ctx.offset += ret;
 		}
 
-		/* Packet number length from first byte */
-		pkt_num_len = (data[0] & 0x03) + 1;
+		/*
+		 * CF-076: Do NOT extract pkt_num_len here -- the low
+		 * 2 bits of the first byte are still masked by header
+		 * protection.  Extraction is deferred until after
+		 * tquic_remove_header_protection().
+		 */
 
 	} else {
 		/* Short header */
-		bool key_phase, spin_bit;
+		bool key_phase_tmp, spin_bit;
 
 		/* Need connection to know DCID length */
 		if (!conn)
 			return -ENOENT;
 
 		ret = tquic_parse_short_header_internal(&ctx, conn->scid.len,
-					       dcid, &key_phase, &spin_bit);
+					       dcid, &key_phase_tmp,
+					       &spin_bit);
 		if (ret < 0)
 			return ret;
 
 		pkt_type = -1;  /* Short header / 1-RTT */
-		pkt_num_len = (data[0] & 0x03) + 1;
 
 		/*
-		 * Key phase handling (RFC 9001 Section 6)
-		 *
-		 * The key phase bit in short header packets indicates which
-		 * key generation was used to encrypt the packet. A change
-		 * indicates a key update by the peer.
-		 *
-		 * We handle this after header unprotection reveals the true
-		 * key phase bit, and before decryption to use correct keys.
+		 * CF-076/CF-099: Do NOT extract pkt_num_len or
+		 * key_phase from the protected header.  Both the
+		 * low 2 bits (PN length) and bit 0x04 (key phase)
+		 * are masked by header protection.  Correct values
+		 * are obtained after tquic_remove_header_protection().
 		 */
-		ctx.key_phase_bit = key_phase ? 1 : 0;
 	}
 
 	/*
@@ -2690,17 +2734,93 @@ static int tquic_process_packet(struct tquic_connection *conn,
 		path = tquic_find_path_by_addr(conn, src_addr);
 
 	/* Remove header protection */
-	ret = tquic_remove_header_protection(conn, data, ctx.offset,
-					     data + ctx.offset,
-					     len - ctx.offset,
-					     ctx.is_long_header);
-	if (unlikely(ret < 0)) {
-		rcu_read_unlock();
-		return ret;
+	{
+		u8 hp_pn_len = 0, hp_key_phase = 0;
+
+		ret = tquic_remove_header_protection(conn, data, ctx.offset,
+						     data + ctx.offset,
+						     len - ctx.offset,
+						     ctx.is_long_header,
+						     &hp_pn_len,
+						     &hp_key_phase);
+		if (unlikely(ret < 0)) {
+			rcu_read_unlock();
+			return ret;
+		}
+
+		/*
+		 * CF-076: Extract pkt_num_len from the NOW-unprotected
+		 * first byte.  Header protection has been removed, so
+		 * the low 2 bits of data[0] reflect the true PN length.
+		 */
+		if (hp_pn_len > 0) {
+			/* Prefer the value returned by HP removal */
+			pkt_num_len = hp_pn_len;
+		} else {
+			/*
+			 * HP context was not available (e.g. Initial
+			 * before key derivation).  First byte is already
+			 * in the clear; read the PN length directly.
+			 */
+			pkt_num_len = (data[0] & 0x03) + 1;
+		}
+
+		/*
+		 * CF-099: Re-read key_phase from the unprotected
+		 * header for short-header (1-RTT) packets.
+		 */
+		if (!ctx.is_long_header) {
+			if (hp_pn_len > 0)
+				ctx.key_phase_bit = hp_key_phase;
+			else
+				ctx.key_phase_bit =
+					(data[0] & TQUIC_HEADER_KEY_PHASE) ?
+					1 : 0;
+		}
 	}
 
-	/* Decode packet number */
-	pkt_num = tquic_decode_pkt_num(data + ctx.offset, pkt_num_len, 0);
+	/* Validate pkt_num_len is within protocol bounds (1..4) */
+	if (pkt_num_len < 1 || pkt_num_len > 4) {
+		rcu_read_unlock();
+		return -EINVAL;
+	}
+
+	if (ctx.offset + pkt_num_len > len) {
+		rcu_read_unlock();
+		return -EINVAL;
+	}
+
+	/*
+	 * CF-110: Decode packet number using the largest received PN
+	 * for this PN space, not 0.  The reconstruction algorithm
+	 * (RFC 9000 Appendix A) requires the largest successfully
+	 * processed PN to correctly unwrap truncated packet numbers.
+	 */
+	{
+		int pn_space_idx;
+		u64 largest_pn = 0;
+
+		if (pkt_type == TQUIC_PKT_INITIAL)
+			pn_space_idx = TQUIC_PN_SPACE_INITIAL;
+		else if (pkt_type == TQUIC_PKT_HANDSHAKE)
+			pn_space_idx = TQUIC_PN_SPACE_HANDSHAKE;
+		else
+			pn_space_idx = TQUIC_PN_SPACE_APPLICATION;
+
+		if (conn && conn->pn_spaces)
+			largest_pn = READ_ONCE(
+				conn->pn_spaces[pn_space_idx].largest_recv_pn);
+
+		pkt_num = tquic_decode_pkt_num(data + ctx.offset,
+					       pkt_num_len, largest_pn);
+
+		/* Update largest received PN for this space */
+		if (conn && conn->pn_spaces &&
+		    pkt_num > largest_pn)
+			WRITE_ONCE(
+				conn->pn_spaces[pn_space_idx].largest_recv_pn,
+				pkt_num);
+	}
 	ctx.offset += pkt_num_len;
 
 	/* Decrypt payload */
@@ -3244,6 +3364,16 @@ int tquic_process_coalesced(struct tquic_connection *conn,
 	while (offset < total_len) {
 		size_t pkt_len;
 		u8 first_byte = data[offset];
+
+		/*
+		 * CF-075: Limit coalesced packets per UDP datagram
+		 * to prevent CPU exhaustion from crafted datagrams.
+		 */
+		if (packets >= TQUIC_MAX_COALESCED_PACKETS) {
+			tquic_dbg("coalesced packet limit reached (%d)\n",
+				  TQUIC_MAX_COALESCED_PACKETS);
+			break;
+		}
 
 		if (first_byte & TQUIC_HEADER_FORM_LONG) {
 			/* Long header - need to parse length field */

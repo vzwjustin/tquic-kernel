@@ -453,15 +453,20 @@ static int create_udp_socket(struct tquic_connect_udp_tunnel *tunnel,
 			     sa_family_t family)
 {
 	struct socket *sock;
+	struct net *net;
 	int val;
 	int ret;
 
 	/*
 	 * Use the connection's network namespace rather than init_net
-	 * to prevent namespace escape.  tunnel->conn->sk->sk_net
-	 * provides the correct namespace context.
+	 * to prevent namespace escape.  Validate the pointer chain
+	 * before dereferencing to avoid a NULL-pointer oops.
 	 */
-	ret = sock_create_kern(sock_net(tunnel->conn->sk), family,
+	if (!tunnel->conn || !tunnel->conn->sk)
+		return -EINVAL;
+	net = sock_net(tunnel->conn->sk);
+
+	ret = sock_create_kern(net, family,
 			       SOCK_DGRAM, IPPROTO_UDP, &sock);
 	if (ret < 0)
 		return ret;

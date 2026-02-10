@@ -21,7 +21,7 @@
 | SPECULATIVE | 23 | 22 | 28 | 43 | **116** |
 | REJECTED | 0 | 1 | 0 | 9 | **10** |
 
-**Progress: 113 / 645 findings fixed.**
+**Progress: 167 / 645 findings fixed.**
 
 ---
 
@@ -751,7 +751,7 @@ Parked. Only revisit if new evidence surfaces.
 
 #### Memory (23)
 
-- [ ] **CF-002** -- Buffer Overflow in ClientHello Extension Building
+- [x] **CF-002** -- Buffer Overflow in ClientHello Extension Building
   - Severity: S0 | Sources: A,B,C | Priority: 10.0
   - Evidence: file:1, sym:3
   - Missing: Exact line range(s) where the fault manifests; Code snippet proving the vulnerable pattern
@@ -765,21 +765,21 @@ Parked. Only revisit if new evidence surfaces.
   - Verify: `rg -n "tquic_hs_process_server_hello" "net/tquic/crypto/handshake.c"`
   - Fix: Add `if (p >= end) return -EINVAL;` before reading compression. Risk: Fixes in parser/crypto/lifetime code may alter packet acceptance logic. Watch fo
 
-- [ ] **CF-019** -- Adaptive Feedback Uses Path After list_for_each_entry Exit
+- [x] **CF-019** -- Adaptive Feedback Uses Path After list_for_each_entry Exit
   - Severity: S0 | Sources: B,C | Priority: 10.0
   - Evidence: file:1, sym:7, snippet:1
   - Missing: Exact line range(s) where the fault manifests; Kernel log / stack trace / error output demonstrating the issue
   - Verify: `rg -n "tquic_path" "net/tquic/multipath/tquic_scheduler.c"`
   - Fix: Use a separate flag variable to track whether the path was found, or use `list_for_each_entry_rcu()` with a found flag check. Risk: Fixes in parser/cr
 
-- [ ] **CF-035** -- Load Balancer Plaintext Mode Exposes Server ID
+- [x] **CF-035** -- Load Balancer Plaintext Mode Exposes Server ID
   - Severity: S0 | Sources: B,C | Priority: 10.0
   - Evidence: file:1, sym:1, snippet:1
   - Missing: Exact line range(s) where the fault manifests; Kernel log / stack trace / error output demonstrating the issue
   - Verify: `rg -n "pr_warn_once" "net/tquic/lb/quic_lb.c"`
   - Fix: Log a `pr_warn_once()` when plaintext mode is selected. Consider requiring `CAP_NET_ADMIN` to create plaintext configs, or removing plaintext mode ent
 
-- [ ] **CF-049** -- QPACK Decoder Stack Buffer Overflow via Large Headers
+- [x] **CF-049** -- QPACK Decoder Stack Buffer Overflow via Large Headers
   - Severity: S0 | Sources: B,C | Priority: 10.0
   - Evidence: file:1, sym:3, snippet:1
   - Missing: Exact line range(s) where the fault manifests; Kernel log / stack trace / error output demonstrating the issue
@@ -793,119 +793,119 @@ Parked. Only revisit if new evidence surfaces.
   - Verify: `rg -n "crypto_memneq" "net/tquic/core/connection.c"`
   - Fix: Use `crypto_memneq()` for the hash comparison, or accept the current design as adequate given AEAD authentication. Risk: Fixes in parser/crypto/lifeti
 
-- [ ] **CF-064** -- tquic_stream_sendmsg Writes to Stream Without Connection Refcount on Stream
+- [x] **CF-064** -- tquic_stream_sendmsg Writes to Stream Without Connection Refcount on Stream
   - Severity: S0 | Sources: B,C | Priority: 10.0
   - Evidence: file:1, sym:3
   - Missing: Exact line range(s) where the fault manifests; Code snippet proving the vulnerable pattern
   - Verify: `rg -n "tquic_stream_sendmsg" "net/quic/tquic/tquic_stream.c"`
   - Fix: Stream objects need reference counting. The stream_sock should hold a reference to the stream. Only when both the tree reference and the socket refere
 
-- [ ] **CF-070** -- WebTransport Close Capsule Large Stack Allocation
+- [x] **CF-070** -- WebTransport Close Capsule Large Stack Allocation
   - Severity: S0 | Sources: B,C | Priority: 10.0
   - Evidence: file:1, snippet:1
   - Missing: Exact line range(s) where the fault manifests; Function/struct symbol name at the fault site
   - Verify: `rg -n "kmalloc\|kzalloc\|alloc_skb\|memcpy" "net/quic/tquic/http3/webtransport.c"`
   - Fix: Use heap allocation (kmalloc/kzalloc) for this buffer.  --- Risk: Fixes in parser/crypto/lifetime code may alter packet acceptance logic. Watch for in
 
-- [ ] **CF-072** -- conn->sk Accessed Without Lock After Stateless Reset
+- [x] **CF-072** -- conn->sk Accessed Without Lock After Stateless Reset
   - Severity: S0 | Sources: B | Priority: 10.0
   - Evidence: file:1, sym:4, lines:1, snippet:1
   - Missing: Kernel log / stack trace / error output demonstrating the issue; Independent confirmation from a second audit source
   - Verify: `rg -n "tquic_connection" "net/tquic/tquic_input.c"`
   - Fix: Hold a reference to the socket (`sock_hold(sk)`) under the lock, then call `sk_state_change`, then release the reference (`sock_put(sk)`). Risk: Fixes
 
-- [ ] **CF-074** -- Missing Lock in `tquic_sock_bind()` -- Race with `tquic_connect()`
+- [x] **CF-074** -- Missing Lock in `tquic_sock_bind()` -- Race with `tquic_connect()`
   - Severity: S0 | Sources: B | Priority: 10.0
   - Evidence: file:1, sym:11, lines:1, snippet:1
   - Missing: Kernel log / stack trace / error output demonstrating the issue; Independent confirmation from a second audit source
   - Verify: `rg -n "copies" "net/tquic/tquic_socket.c"`
   - Fix: Add strict validation and bounds checks at parse boundaries, enforce lifetime/ownership rules, and fail closed on malformed input. Risk: Fixes in pars
 
-- [ ] **CF-078** -- Refcount Underflow in Netlink Path Creation
+- [x] **CF-078** -- Refcount Underflow in Netlink Path Creation
   - Severity: S0 | Sources: B | Priority: 10.0
   - Evidence: file:1, sym:1, lines:5, snippet:1
   - Missing: Kernel log / stack trace / error output demonstrating the issue; Independent confirmation from a second audit source
   - Verify: `rg -n "tquic_netlink" "net/tquic/tquic_netlink.c"`
   - Fix: Add strict validation and bounds checks at parse boundaries, enforce lifetime/ownership rules, and fail closed on malformed input. Risk: Fixes in pars
 
-- [ ] **CF-081** -- Stream Lookup Returns Pointer Without Refcount -- Use-After-Free
+- [x] **CF-081** -- Stream Lookup Returns Pointer Without Refcount -- Use-After-Free
   - Severity: S0 | Sources: B | Priority: 10.0
   - Evidence: file:4, sym:4, lines:4, snippet:1
   - Missing: Kernel log / stack trace / error output demonstrating the issue; Independent confirmation from a second audit source
   - Verify: `rg -n "tquic_stream" "net/quic/tquic/core/priority.c"`
   - Fix: Add strict validation and bounds checks at parse boundaries, enforce lifetime/ownership rules, and fail closed on malformed input. Risk: Fixes in pars
 
-- [ ] **CF-083** -- TQUIC_NEW_STREAM Missing Reserved Field Zeroing Check
+- [x] **CF-083** -- TQUIC_NEW_STREAM Missing Reserved Field Zeroing Check
   - Severity: S0 | Sources: B | Priority: 10.0
   - Evidence: file:1, sym:1, lines:1, snippet:1
   - Missing: Kernel log / stack trace / error output demonstrating the issue; Independent confirmation from a second audit source
   - Verify: `rg -n "tquic_conn_get" "net/quic/tquic/tquic_stream.c"`
   - Fix: Add strict validation and bounds checks at parse boundaries, enforce lifetime/ownership rules, and fail closed on malformed input. Risk: Fixes in pars
 
-- [ ] **CF-084** -- UAF-P1-01: - SmartNIC tquic_nic_find() returns pointer without reference
+- [x] **CF-084** -- UAF-P1-01: - SmartNIC tquic_nic_find() returns pointer without reference
   - Severity: S0 | Sources: B | Priority: 10.0
   - Evidence: file:1, sym:7, lines:2, snippet:1
   - Missing: Kernel log / stack trace / error output demonstrating the issue; Independent confirmation from a second audit source
   - Verify: `rg -n "tquic_offload_key_install" "net/tquic/offload/smartnic.c"`
   - Fix: Add strict validation and bounds checks at parse boundaries, enforce lifetime/ownership rules, and fail closed on malformed input. Risk: Fixes in pars
 
-- [ ] **CF-085** -- Use-After-Free in Connect
+- [x] **CF-085** -- Use-After-Free in Connect
   - Severity: S0 | Sources: B | Priority: 10.0
   - Evidence: file:1, sym:3, lines:5, snippet:2
   - Missing: Kernel log / stack trace / error output demonstrating the issue; Independent confirmation from a second audit source
   - Verify: `rg -n "sock" "net/tquic/tquic_socket.c"`
   - Fix: Add strict validation and bounds checks at parse boundaries, enforce lifetime/ownership rules, and fail closed on malformed input. Risk: Fixes in pars
 
-- [ ] **CF-119** -- Reference counting/RCU lifetime is not actually enforced; direct `tquic_conn_destroy()` calls can fr
+- [x] **CF-119** -- Reference counting/RCU lifetime is not actually enforced; direct `tquic_conn_destroy()` calls can fr
   - Severity: S0 | Sources: A | Priority: 7.0
   - Evidence: file:4, sym:10, lines:4
   - Missing: Code snippet proving the vulnerable pattern; Kernel log / stack trace / error output demonstrating the issue
   - Verify: `rg -n "assertions" "Users/justinadams/Downloads/tquic-kernel/include/net/tquic.h"`
   - Fix: - Make `tquic_conn_destroy()` private/internal (not a general-purpose public API). Enforce that all external callers use `tquic_conn_put()` and that t
 
-- [ ] **CF-120** -- rhashtable/RCU lifetime issues (use-after-free risk) in CID tables
+- [x] **CF-120** -- rhashtable/RCU lifetime issues (use-after-free risk) in CID tables
   - Severity: S0 | Sources: A | Priority: 7.0
   - Evidence: file:2, sym:6, lines:2
   - Missing: Code snippet proving the vulnerable pattern; Kernel log / stack trace / error output demonstrating the issue
   - Verify: `rg -n "call_rcu" "net/tquic/core/quic_connection.c"`
   - Fix: - Decide on a correct concurrency model:   - Option A: Use rhashtable in the intended RCU mode.     - Lookups under `rcu_read_lock()`.     - Deletions
 
-- [ ] **CF-127** -- UAF-P2-01: - SKB accessed after udp_tunnel_xmit_skb
+- [x] **CF-127** -- UAF-P2-01: - SKB accessed after udp_tunnel_xmit_skb
   - Severity: S0 | Sources: B | Priority: 7.0
   - Evidence: file:1, sym:2, snippet:2
   - Missing: Exact line range(s) where the fault manifests; Kernel log / stack trace / error output demonstrating the issue
   - Verify: `rg -n "udp_tunnel_xmit_skb" "net/tquic/tquic_udp.c"`
   - Fix: Add strict validation and bounds checks at parse boundaries, enforce lifetime/ownership rules, and fail closed on malformed input. Risk: Fixes in pars
 
-- [ ] **CF-128** -- UAF-P3-01: - retransmit_work_fn accesses ts->conn without connection reference
+- [x] **CF-128** -- UAF-P3-01: - retransmit_work_fn accesses ts->conn without connection reference
   - Severity: S0 | Sources: B | Priority: 7.0
   - Evidence: file:1, sym:8, lines:2
   - Missing: Code snippet proving the vulnerable pattern; Kernel log / stack trace / error output demonstrating the issue
   - Verify: `rg -n "cancel_work_sync" "net/tquic/tquic_timer.c"`
   - Fix: Add strict validation and bounds checks at parse boundaries, enforce lifetime/ownership rules, and fail closed on malformed input. Risk: Fixes in pars
 
-- [ ] **CF-129** -- UAF-P3-02: - path_work_fn accesses ts->conn without reference
+- [x] **CF-129** -- UAF-P3-02: - path_work_fn accesses ts->conn without reference
   - Severity: S0 | Sources: B | Priority: 7.0
   - Evidence: file:1, sym:3, snippet:1
   - Missing: Exact line range(s) where the fault manifests; Kernel log / stack trace / error output demonstrating the issue
   - Verify: `rg -n "tquic_timer_state" "net/tquic/tquic_timer.c"`
   - Fix: Add strict validation and bounds checks at parse boundaries, enforce lifetime/ownership rules, and fail closed on malformed input. Risk: Fixes in pars
 
-- [ ] **CF-131** -- Use-After-Free in `tquic_migrate_explicit()` -- Path Used Without Reference
+- [x] **CF-131** -- Use-After-Free in `tquic_migrate_explicit()` -- Path Used Without Reference
   - Severity: S0 | Sources: B | Priority: 7.0
   - Evidence: file:1, sym:5, snippet:1
   - Missing: Exact line range(s) where the fault manifests; Kernel log / stack trace / error output demonstrating the issue
   - Verify: `rg -n "tquic_path_find_by_addr" "net/tquic/tquic_migration.c"`
   - Fix: Add strict validation and bounds checks at parse boundaries, enforce lifetime/ownership rules, and fail closed on malformed input. Risk: Fixes in pars
 
-- [ ] **CF-132** -- Use-After-Free in Algorithm Name Return
+- [x] **CF-132** -- Use-After-Free in Algorithm Name Return
   - Severity: S0 | Sources: B | Priority: 7.0
   - Evidence: file:1, sym:4, snippet:1
   - Missing: Exact line range(s) where the fault manifests; Kernel log / stack trace / error output demonstrating the issue
   - Verify: `rg -n "tquic_cong_get_default_name" "net/tquic/cong/tquic_cong.c"`
   - Fix: Add strict validation and bounds checks at parse boundaries, enforce lifetime/ownership rules, and fail closed on malformed input. Risk: Fixes in pars
 
-- [ ] **CF-134** -- Widespread allocator mismatches (kmem_cache vs kzalloc/kfree) for core objects (conn/path/stream)
+- [x] **CF-134** -- Widespread allocator mismatches (kmem_cache vs kzalloc/kfree) for core objects (conn/path/stream)
   - Severity: S0 | Sources: A | Priority: 7.0
   - Evidence: file:6, sym:18, lines:9
   - Missing: Code snippet proving the vulnerable pattern; Kernel log / stack trace / error output demonstrating the issue
@@ -914,14 +914,14 @@ Parked. Only revisit if new evidence surfaces.
 
 #### Security (18)
 
-- [ ] **CF-020** -- ASN.1 Time Parsing Does Not Validate Character Ranges
+- [x] **CF-020** -- ASN.1 Time Parsing Does Not Validate Character Ranges
   - Severity: S0 | Sources: B,C | Priority: 10.0
   - Evidence: file:1, snippet:1
   - Missing: Exact line range(s) where the fault manifests; Function/struct symbol name at the fault site
   - Verify: `make M=net/tquic W=1`
   - Fix: Validate each character is an ASCII digit before arithmetic. Validate month (1-12), day (1-31), hour (0-23), minute (0-59), second (0-59). Risk: Fixes
 
-- [ ] **CF-021** -- Authentication Bypass in QUIC-Aware Proxy
+- [x] **CF-021** -- Authentication Bypass in QUIC-Aware Proxy
   - Severity: S0 | Sources: B,C | Priority: 10.0
   - Evidence: file:1, sym:2, snippet:1
   - Missing: Exact line range(s) where the fault manifests; Kernel log / stack trace / error output demonstrating the issue
@@ -935,7 +935,7 @@ Parked. Only revisit if new evidence surfaces.
   - Verify: `rg -n "resolve_target" "net/tquic/masque/connect_udp.c"`
   - Fix: Add address validation after `in4_pton`/`in6_pton` succeeds. Block at minimum: `ipv4_is_loopback()`, `ipv4_is_multicast()`, `ipv4_is_lbcast()`, `ipv4_
 
-- [ ] **CF-031** -- Hard-Fail Revocation Mode Does Not Actually Fail
+- [x] **CF-031** -- Hard-Fail Revocation Mode Does Not Actually Fail
   - Severity: S0 | Sources: B,C | Priority: 10.0
   - Evidence: file:1, snippet:2
   - Missing: Exact line range(s) where the fault manifests; Function/struct symbol name at the fault site
@@ -956,7 +956,7 @@ Parked. Only revisit if new evidence surfaces.
   - Verify: `rg -n "tquic_proto" "net/tquic/tquic_proto.c"`
   - Fix: Consider requiring `CAP_NET_ADMIN` for bonding/multipath features, or at minimum for creating tunnels and MASQUE proxies.  --- Risk: Fixes in parser/c
 
-- [ ] **CF-042** -- No Privilege Checks for Security-Sensitive Socket Options
+- [x] **CF-042** -- No Privilege Checks for Security-Sensitive Socket Options
   - Severity: S0 | Sources: B,C | Priority: 10.0
   - Evidence: file:1, sym:2, lines:5
   - Missing: Code snippet proving the vulnerable pattern; Kernel log / stack trace / error output demonstrating the issue
@@ -977,21 +977,21 @@ Parked. Only revisit if new evidence surfaces.
   - Verify: `make M=net/tquic W=1`
   - Fix: Use the network namespace from the QUIC connection's socket (`sock_net(conn->sk)`) instead of `&init_net`. Pass the correct `struct net *` through the
 
-- [ ] **CF-071** -- AF_XDP Socket and Device Lookup Use init_net
+- [x] **CF-071** -- AF_XDP Socket and Device Lookup Use init_net
   - Severity: S0 | Sources: B | Priority: 10.0
   - Evidence: file:1, sym:1, lines:3, snippet:1
   - Missing: Kernel log / stack trace / error output demonstrating the issue; Independent confirmation from a second audit source
   - Verify: `rg -n "tquic_xsk_create" "net/tquic/af_xdp.c"`
   - Fix: Add strict validation and bounds checks at parse boundaries, enforce lifetime/ownership rules, and fail closed on malformed input. Risk: Fixes in pars
 
-- [ ] **CF-077** -- QUIC-over-TCP Client and Server Sockets Use init_net
+- [x] **CF-077** -- QUIC-over-TCP Client and Server Sockets Use init_net
   - Severity: S0 | Sources: B | Priority: 10.0
   - Evidence: file:1, sym:1, lines:2, snippet:1
   - Missing: Kernel log / stack trace / error output demonstrating the issue; Independent confirmation from a second audit source
   - Verify: `rg -n "quic_over_tcp" "net/tquic/transport/quic_over_tcp.c"`
   - Fix: Add strict validation and bounds checks at parse boundaries, enforce lifetime/ownership rules, and fail closed on malformed input. Risk: Fixes in pars
 
-- [ ] **CF-086** -- Wrong Network Namespace in ip_local_out
+- [x] **CF-086** -- Wrong Network Namespace in ip_local_out
   - Severity: S0 | Sources: B | Priority: 10.0
   - Evidence: file:1, lines:2, snippet:2
   - Missing: Function/struct symbol name at the fault site; Kernel log / stack trace / error output demonstrating the issue
@@ -1005,35 +1005,35 @@ Parked. Only revisit if new evidence surfaces.
   - Verify: `rg -n "tquic_cid_hash_add" "net/tquic/core/connection.c"`
   - Fix: - Pick exactly one authoritative CID demux table for RX and ensure connection creation inserts the SCID/DCIDs into it. - Delete or hard-disable the un
 
-- [ ] **CF-099** -- Header protection outputs are ignored; packet-number length + key phase are derived from protected h
+- [x] **CF-099** -- Header protection outputs are ignored; packet-number length + key phase are derived from protected h
   - Severity: S0 | Sources: A | Priority: 7.0
   - Evidence: file:1, sym:2, lines:3
   - Missing: Code snippet proving the vulnerable pattern; Kernel log / stack trace / error output demonstrating the issue
   - Verify: `rg -n "tquic_hp_unprotect" "net/tquic/tquic_input.c"`
   - Fix: - Treat `tquic_hp_unprotect()` as authoritative for `pn_len` and (short header) `key_phase`. - After HP removal, recompute any fields derived from the
 
-- [ ] **CF-100** -- Huffman Decoder O(n*256) Algorithmic Complexity DoS
+- [x] **CF-100** -- Huffman Decoder O(n*256) Algorithmic Complexity DoS
   - Severity: S0 | Sources: B | Priority: 7.0
   - Evidence: file:1, snippet:1
   - Missing: Exact line range(s) where the fault manifests; Function/struct symbol name at the fault site
   - Verify: `make M=net/tquic W=1`
   - Fix: Add strict validation and bounds checks at parse boundaries, enforce lifetime/ownership rules, and fail closed on malformed input. Risk: Fixes in pars
 
-- [ ] **CF-102** -- IPv4/IPv6 Address Discovery Enumerates Host Interfaces
+- [x] **CF-102** -- IPv4/IPv6 Address Discovery Enumerates Host Interfaces
   - Severity: S0 | Sources: B | Priority: 7.0
   - Evidence: file:2, snippet:2
   - Missing: Exact line range(s) where the fault manifests; Function/struct symbol name at the fault site
   - Verify: `make M=net/tquic W=1`
   - Fix: Add strict validation and bounds checks at parse boundaries, enforce lifetime/ownership rules, and fail closed on malformed input. Risk: Fixes in pars
 
-- [ ] **CF-106** -- MASQUE CONNECT-UDP Proxy Creates Sockets in init_net
+- [x] **CF-106** -- MASQUE CONNECT-UDP Proxy Creates Sockets in init_net
   - Severity: S0 | Sources: B | Priority: 7.0
   - Evidence: file:1, snippet:1
   - Missing: Exact line range(s) where the fault manifests; Function/struct symbol name at the fault site
   - Verify: `make M=net/tquic W=1`
   - Fix: Add strict validation and bounds checks at parse boundaries, enforce lifetime/ownership rules, and fail closed on malformed input. Risk: Fixes in pars
 
-- [ ] **CF-125** -- Tunnel Socket Creation Uses init_net
+- [x] **CF-125** -- Tunnel Socket Creation Uses init_net
   - Severity: S0 | Sources: B | Priority: 7.0
   - Evidence: file:1, sym:3, snippet:1
   - Missing: Exact line range(s) where the fault manifests; Kernel log / stack trace / error output demonstrating the issue
@@ -1077,42 +1077,42 @@ Parked. Only revisit if new evidence surfaces.
   - Verify: `rg -n "ipv4_is_linklocal_169" "net/tquic/tquic_tunnel.c"`
   - Fix: Add checks for `ipv4_is_private_10()`, `ipv4_is_private_172()`, `ipv4_is_private_192()`, `ipv4_is_linklocal_169()`, and other reserved ranges per RFC 
 
-- [ ] **CF-082** -- TOCTOU Race in Failover Hysteresis
+- [x] **CF-082** -- TOCTOU Race in Failover Hysteresis
   - Severity: S0 | Sources: B | Priority: 10.0
   - Evidence: file:1, sym:3, lines:4, snippet:3
   - Missing: Kernel log / stack trace / error output demonstrating the issue; Independent confirmation from a second audit source
   - Verify: `rg -n "atomic_set" "net/quic/tquic/bond/tquic_failover.c"`
   - Fix: Either protect these operations with a per-path spinlock, or use `atomic_inc_return()` Risk: Locking/ordering changes can cause deadlocks or throughpu
 
-- [ ] **CF-095** -- Connection State Transition Not Fully Atomic
+- [x] **CF-095** -- Connection State Transition Not Fully Atomic
   - Severity: S0 | Sources: B | Priority: 7.0
   - Evidence: file:2, sym:5, snippet:1
   - Missing: Exact line range(s) where the fault manifests; Kernel log / stack trace / error output demonstrating the issue
   - Verify: `rg -n "tquic_conn_set_state" "net/tquic/core/connection.c"`
   - Fix: Establish one synchronization model for this code path and make all state transitions/lookup paths follow it consistently. Risk: Locking/ordering chan
 
-- [ ] **CF-104** -- List Iterator Invalidation in BPM Netdev Notifier
+- [x] **CF-104** -- List Iterator Invalidation in BPM Netdev Notifier
   - Severity: S0 | Sources: B | Priority: 7.0
   - Evidence: file:1, sym:5, lines:1
   - Missing: Code snippet proving the vulnerable pattern; Kernel log / stack trace / error output demonstrating the issue
   - Verify: `rg -n "rcu_read_unlock" "net/quic/tquic/bond/tquic_bpm.c"`
   - Fix: Use `list_for_each_entry_safe()` is NOT sufficient here since the iteration continues after relock. Instead, collect paths to process into a separate 
 
-- [ ] **CF-112** -- QPACK Dynamic Table Duplicate TOCTOU Race
+- [x] **CF-112** -- QPACK Dynamic Table Duplicate TOCTOU Race
   - Severity: S0 | Sources: B | Priority: 7.0
   - Evidence: file:1, sym:2, snippet:1
   - Missing: Exact line range(s) where the fault manifests; Kernel log / stack trace / error output demonstrating the issue
   - Verify: `rg -n "qpack_dynamic" "net/quic/tquic/http3/qpack_dynamic.c"`
   - Fix: Establish one synchronization model for this code path and make all state transitions/lookup paths follow it consistently. Risk: Locking/ordering chan
 
-- [ ] **CF-113** -- QUIC-Exfil mitigation code uses `skb->cb` as a function-pointer slot and gates on `skb->cb[0]`
+- [x] **CF-113** -- QUIC-Exfil mitigation code uses `skb->cb` as a function-pointer slot and gates on `skb->cb[0]`
   - Severity: S0 | Sources: A | Priority: 7.0
   - Evidence: file:1, lines:2
   - Missing: Code snippet proving the vulnerable pattern; Function/struct symbol name at the fault site
   - Verify: `sed -n '1090,1090p' net/tquic/security/quic_exfil.c`
   - Fix: - Never store function pointers in `skb->cb`. - Use a wrapper object (`struct { struct sk_buff *skb; void (*send_fn)(...); }`) in a dedicated queue, o
 
-- [ ] **CF-115** -- Rate Calculation Integer Overflow
+- [x] **CF-115** -- Rate Calculation Integer Overflow
   - Severity: S0 | Sources: B | Priority: 7.0
   - Evidence: file:2, snippet:2
   - Missing: Exact line range(s) where the fault manifests; Function/struct symbol name at the fault site
@@ -1142,7 +1142,7 @@ Parked. Only revisit if new evidence surfaces.
   - Verify: `rg -n "tquic_tunnel" "net/tquic/masque/connect_udp.c"`
   - Fix: Store a reference to the correct network namespace (`struct net *`) at connection establishment time (via `sock_net(sk)` from the original QUIC socket
 
-- [ ] **CF-040** -- No Address Validation in CONNECT-IP Packet Injection
+- [x] **CF-040** -- No Address Validation in CONNECT-IP Packet Injection
   - Severity: S0 | Sources: B,C | Priority: 10.0
   - Evidence: file:1, sym:5, snippet:2
   - Missing: Exact line range(s) where the fault manifests; Kernel log / stack trace / error output demonstrating the issue
@@ -1156,91 +1156,91 @@ Parked. Only revisit if new evidence surfaces.
   - Verify: `rg -n "tquic_conn_server_accept" "net/quic/tquic/core/connection.c"`
   - Fix: Change to `return ret;` Risk: Protocol correctness fixes can shift timing/state-machine behavior; verify against interop traces and existing retransmi
 
-- [ ] **CF-073** -- Integer Overflow in bytes_acked Calculation
+- [x] **CF-073** -- Integer Overflow in bytes_acked Calculation
   - Severity: S0 | Sources: B | Priority: 10.0
   - Evidence: file:1, sym:3, lines:1, snippet:2
   - Missing: Kernel log / stack trace / error output demonstrating the issue; Independent confirmation from a second audit source
   - Verify: `rg -n "tquic_cong_on_ack" "net/quic/tquic/tquic_input.c"`
   - Fix: Fix the protocol logic per the relevant RFC section; add an interop regression test covering the corrected state transition.
 
-- [ ] **CF-075** -- Missing Upper Bound on Coalesced Packet Count
+- [x] **CF-075** -- Missing Upper Bound on Coalesced Packet Count
   - Severity: S0 | Sources: B | Priority: 10.0
   - Evidence: file:1, sym:7, lines:6, snippet:2
   - Missing: Kernel log / stack trace / error output demonstrating the issue; Independent confirmation from a second audit source
   - Verify: `rg -n "tquic_udp_recv" "net/quic/tquic/tquic_input.c"`
   - Fix: Fix the protocol logic per the relevant RFC section; add an interop regression test covering the corrected state transition.
 
-- [ ] **CF-076** -- Packet Number Length Extracted Before Header Unprotection
+- [x] **CF-076** -- Packet Number Length Extracted Before Header Unprotection
   - Severity: S0 | Sources: B | Priority: 10.0
   - Evidence: file:1, sym:1, lines:3, snippet:2
   - Missing: Kernel log / stack trace / error output demonstrating the issue; Independent confirmation from a second audit source
   - Verify: `rg -n "tquic_remove_header_protection" "net/tquic/tquic_input.c"`
   - Fix: Move the `pkt_num_len` extraction to AFTER `tquic_remove_header_protection()`: ```c ret = tquic_remove_header_protection(conn, data, ctx.offset, ...);
 
-- [ ] **CF-079** -- Stale skb->len Read After ip_local_out
+- [x] **CF-079** -- Stale skb->len Read After ip_local_out
   - Severity: S0 | Sources: B | Priority: 10.0
   - Evidence: file:1, sym:2, lines:1, snippet:2
   - Missing: Kernel log / stack trace / error output demonstrating the issue; Independent confirmation from a second audit source
   - Verify: `rg -n "ip_local_out" "net/tquic/tquic_output.c"`
   - Fix: Save `skb->len` in a local variable before calling `ip_local_out()`: ```c u32 pkt_len = skb->len; ret = ip_local_out(&init_net, NULL, skb); if (ret >=
 
-- [ ] **CF-080** -- State Machine Type Confusion via `conn->state_machine` Void Pointer
+- [x] **CF-080** -- State Machine Type Confusion via `conn->state_machine` Void Pointer
   - Severity: S0 | Sources: B | Priority: 10.0
   - Evidence: file:1, sym:11, lines:1, snippet:1
   - Missing: Kernel log / stack trace / error output demonstrating the issue; Independent confirmation from a second audit source
   - Verify: `rg -n "could" "net/tquic/tquic_migration.c"`
   - Fix: Fix the protocol logic per the relevant RFC section; add an interop regression test covering the corrected state transition.
 
-- [ ] **CF-089** -- ACK Range Failover Can Iterate Over Unbounded Packet Number Range
+- [x] **CF-089** -- ACK Range Failover Can Iterate Over Unbounded Packet Number Range
   - Severity: S0 | Sources: B | Priority: 7.0
   - Evidence: file:1, sym:4, snippet:1
   - Missing: Exact line range(s) where the fault manifests; Kernel log / stack trace / error output demonstrating the issue
   - Verify: `rg -n "tquic_failover_ctx" "net/tquic/bond/tquic_failover.c"`
   - Fix: Fix the protocol logic per the relevant RFC section; add an interop regression test covering the corrected state transition.
 
-- [ ] **CF-096** -- Connection State Transition Not Fully Atomic
+- [x] **CF-096** -- Connection State Transition Not Fully Atomic
   - Severity: S0 | Sources: C | Priority: 7.0
   - Evidence: file:1, sym:3, snippet:1
   - Missing: Exact line range(s) where the fault manifests; Kernel log / stack trace / error output demonstrating the issue
   - Verify: `rg -n "tquic_conn_set_state" "net/tquic/tquic_input.c"`
   - Fix: All state transitions MUST go through `tquic_conn_set_state()`, and the function should assert/acquire `conn->lock` internally. Fix `tquic_handle_stat
 
-- [ ] **CF-097** -- Excessive Stack Usage in RS Recovery
+- [x] **CF-097** -- Excessive Stack Usage in RS Recovery
   - Severity: S0 | Sources: B | Priority: 7.0
   - Evidence: file:1, sym:2, snippet:2
   - Missing: Exact line range(s) where the fault manifests; Kernel log / stack trace / error output demonstrating the issue
   - Verify: `rg -n "attempt_rs_recovery" "net/tquic/fec/fec_decoder.c"`
   - Fix: Fix the protocol logic per the relevant RFC section; add an interop regression test covering the corrected state transition.
 
-- [ ] **CF-098** -- Global connection hashtable (`tquic_conn_table`) is initialized and removed-from, but never inserted
+- [x] **CF-098** -- Global connection hashtable (`tquic_conn_table`) is initialized and removed-from, but never inserted
   - Severity: S0 | Sources: A | Priority: 7.0
   - Evidence: file:1, sym:4, lines:2
   - Missing: Code snippet proving the vulnerable pattern; Kernel log / stack trace / error output demonstrating the issue
   - Verify: `rg -n "hashtable" "net/tquic/tquic_main.c"`
   - Fix: - Either wire up insertion consistently at connection establishment, or delete `tquic_conn_table` and all iteration users in favor of the per-netns li
 
-- [ ] **CF-101** -- Integer Overflow in Coupled CC Increase Calculation
+- [x] **CF-101** -- Integer Overflow in Coupled CC Increase Calculation
   - Severity: S0 | Sources: B | Priority: 7.0
   - Evidence: file:1, sym:1, snippet:1
   - Missing: Exact line range(s) where the fault manifests; Kernel log / stack trace / error output demonstrating the issue
   - Verify: `rg -n "coupled_cc_increase" "net/tquic/bond/cong_coupled.c"`
   - Fix: Fix the protocol logic per the relevant RFC section; add an interop regression test covering the corrected state transition.
 
-- [ ] **CF-110** -- Packet number reconstruction always uses `largest_pn = 0`
+- [x] **CF-110** -- Packet number reconstruction always uses `largest_pn = 0`
   - Severity: S0 | Sources: A | Priority: 7.0
   - Evidence: file:1, sym:1, lines:1
   - Missing: Code snippet proving the vulnerable pattern; Kernel log / stack trace / error output demonstrating the issue
   - Verify: `rg -n "tquic_decode_pkt_num" "net/tquic/tquic_input.c"`
   - Fix: - Track `largest_pn` per PN space (Initial/Handshake/Application) and pass it into `tquic_decode_pkt_num()`. Risk: Protocol correctness fixes can shif
 
-- [ ] **CF-118** -- Redundant Scheduler Deduplication Uses Only 8-bit Sequence Hash -- Trivial Collision
+- [x] **CF-118** -- Redundant Scheduler Deduplication Uses Only 8-bit Sequence Hash -- Trivial Collision
   - Severity: S0 | Sources: B | Priority: 7.0
   - Evidence: file:1, sym:3, snippet:2
   - Missing: Exact line range(s) where the fault manifests; Kernel log / stack trace / error output demonstrating the issue
   - Verify: `rg -n "tquic_connection" "net/tquic/multipath/tquic_scheduler.c"`
   - Fix: Fix the protocol logic per the relevant RFC section; add an interop regression test covering the corrected state transition.
 
-- [ ] **CF-122** -- Same Overflow in OLIA Increase Path
+- [x] **CF-122** -- Same Overflow in OLIA Increase Path
   - Severity: S0 | Sources: B | Priority: 7.0
   - Evidence: file:1, sym:1, snippet:1
   - Missing: Exact line range(s) where the fault manifests; Kernel log / stack trace / error output demonstrating the issue
@@ -1249,7 +1249,7 @@ Parked. Only revisit if new evidence surfaces.
 
 #### Perf (1)
 
-- [ ] **CF-067** -- Unbounded Memory Allocation from Attacker-Controlled Capsule Length
+- [x] **CF-067** -- Unbounded Memory Allocation from Attacker-Controlled Capsule Length
   - Severity: S0 | Sources: B,C | Priority: 10.0
   - Evidence: file:1, sym:2, snippet:3
   - Missing: Exact line range(s) where the fault manifests; Kernel log / stack trace / error output demonstrating the issue

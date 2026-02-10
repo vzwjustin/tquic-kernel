@@ -1221,8 +1221,12 @@ struct quic_tcp_connection *quic_tcp_connect(struct sockaddr *addr,
 	if (ret)
 		goto err_free_rx;
 
-	/* Create TCP socket */
-	ret = sock_create_kern(&init_net,
+	/*
+	 * SECURITY FIX (CF-077): Use the QUIC connection's network
+	 * namespace instead of init_net to support containers/namespaces.
+	 */
+	ret = sock_create_kern(quic_conn && quic_conn->sk ?
+			       sock_net(quic_conn->sk) : &init_net,
 			       addr->sa_family,
 			       SOCK_STREAM,
 			       IPPROTO_TCP,
@@ -1442,9 +1446,13 @@ struct quic_tcp_listener *quic_tcp_listen(u16 port)
 	if (!listener)
 		return ERR_PTR(-ENOMEM);
 
-	/* Create listening socket */
-	ret = sock_create_kern(&init_net, AF_INET6, SOCK_STREAM,
-			       IPPROTO_TCP, &listener->tcp_sk);
+	/*
+	 * SECURITY FIX (CF-077): Use the caller's network namespace
+	 * instead of init_net to support containers/namespaces.
+	 */
+	ret = sock_create_kern(current->nsproxy->net_ns, AF_INET6,
+			       SOCK_STREAM, IPPROTO_TCP,
+			       &listener->tcp_sk);
 	if (ret)
 		goto err_free;
 

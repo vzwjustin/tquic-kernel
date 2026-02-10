@@ -328,9 +328,15 @@ static int tquic_tunnel_create_tcp_socket(struct tquic_tunnel *tunnel,
 
 	family = tunnel->dest_addr.ss_family;
 
-	/* Create kernel TCP socket */
-	err = sock_create_kern(&init_net, family, SOCK_STREAM, IPPROTO_TCP,
-			       &sock);
+	/*
+	 * SECURITY FIX (CF-125): Use the connection's network namespace
+	 * instead of init_net to support containers/namespaces.
+	 */
+	err = sock_create_kern(tunnel->client->conn &&
+			       tunnel->client->conn->sk ?
+			       sock_net(tunnel->client->conn->sk) :
+			       current->nsproxy->net_ns,
+			       family, SOCK_STREAM, IPPROTO_TCP, &sock);
 	if (err < 0)
 		return err;
 

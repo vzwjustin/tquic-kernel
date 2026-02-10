@@ -13,6 +13,7 @@
 #include <linux/slab.h>
 #include <linux/random.h>
 #include <linux/scatterlist.h>
+#include <linux/capability.h>
 #include <crypto/aes.h>
 #include <crypto/skcipher.h>
 #include <linux/unaligned.h>
@@ -86,6 +87,16 @@ struct tquic_lb_config *tquic_lb_config_create(u8 config_rotation,
 		else
 			cfg->mode = TQUIC_LB_MODE_FOUR_PASS;
 	} else {
+		/*
+		 * CF-035: Plaintext mode exposes server ID directly in
+		 * connection IDs, allowing passive observers to track
+		 * server identity. Require CAP_NET_ADMIN and warn.
+		 */
+		pr_warn_once("tquic_lb: plaintext mode exposes server ID in connection IDs; use encrypted mode in production\n");
+		if (!capable(CAP_NET_ADMIN)) {
+			kmem_cache_free(lb_config_cache, cfg);
+			return NULL;
+		}
 		cfg->mode = TQUIC_LB_MODE_PLAINTEXT;
 		cfg->aes_tfm = NULL;
 	}

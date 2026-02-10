@@ -1326,6 +1326,7 @@ static int tquic_udp_xmit_skb4(struct tquic_udp_sock *us, struct sk_buff *skb)
 	struct rtable *rt;
 	struct flowi4 fl4;
 	__be32 saddr, daddr;
+	unsigned int skb_len;
 	int err;
 
 	/* Get addresses */
@@ -1352,6 +1353,9 @@ static int tquic_udp_xmit_skb4(struct tquic_udp_sock *us, struct sk_buff *skb)
 		dst_cache_set_ip4(&us->dst_cache, &rt->dst, saddr);
 	}
 
+	/* Save skb->len before xmit which consumes the SKB */
+	skb_len = skb->len;
+
 	/* Use udp_tunnel_xmit_skb for proper encapsulation */
 	TQUIC_UDP_TUNNEL_XMIT_SKB(rt, sk, skb,
 				  saddr, daddr,
@@ -1363,8 +1367,9 @@ static int tquic_udp_xmit_skb4(struct tquic_udp_sock *us, struct sk_buff *skb)
 				  false,		/* xnet */
 				  !us->csum_offload);	/* nocheck */
 
+	/* SKB is consumed after xmit -- do not access it */
 	us->stats.tx_packets++;
-	us->stats.tx_bytes += skb->len;
+	us->stats.tx_bytes += skb_len;
 
 	return 0;
 
@@ -1388,6 +1393,7 @@ static int tquic_udp_xmit_skb6(struct tquic_udp_sock *us, struct sk_buff *skb)
 	struct net *net = sock_net(sk);
 	struct dst_entry *dst;
 	struct flowi6 fl6;
+	unsigned int skb_len;
 	int err;
 
 	/* Try dst cache first */
@@ -1409,6 +1415,9 @@ static int tquic_udp_xmit_skb6(struct tquic_udp_sock *us, struct sk_buff *skb)
 		dst_cache_set_ip6(&us->dst_cache, dst, &fl6.saddr);
 	}
 
+	/* Save skb->len before xmit which consumes the SKB */
+	skb_len = skb->len;
+
 	TQUIC_UDP_TUNNEL6_XMIT_SKB(dst, sk, skb,
 				  NULL,		/* dev */
 				  &us->local_addr.sin6.sin6_addr,
@@ -1420,8 +1429,9 @@ static int tquic_udp_xmit_skb6(struct tquic_udp_sock *us, struct sk_buff *skb)
 				  us->remote_port,
 				  !us->csum_offload);	/* nocheck */
 
+	/* SKB is consumed after xmit -- do not access it */
 	us->stats.tx_packets++;
-	us->stats.tx_bytes += skb->len;
+	us->stats.tx_bytes += skb_len;
 
 	return 0;
 

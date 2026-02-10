@@ -1656,6 +1656,7 @@ int tquic_output_packet(struct tquic_connection *conn,
 	struct rtable *rt;
 	struct sockaddr_in *local, *remote;
 	struct net *net = NULL;
+	unsigned int skb_len;
 	int ret;
 
 	if (unlikely(!path || !skb))
@@ -1752,19 +1753,22 @@ int tquic_output_packet(struct tquic_connection *conn,
 		}
 	}
 
-	/* Send via IP */
-	ret = ip_local_out(&init_net, NULL, skb);
+	/* Save skb->len before ip_local_out() which may consume the SKB */
+	skb_len = skb->len;
 
-	/* Update path statistics */
+	/* Send via IP */
+	ret = ip_local_out(net ?: &init_net, NULL, skb);
+
+	/* Update path statistics -- SKB must not be touched after this point */
 	if (ret >= 0) {
 		path->stats.tx_packets++;
-		path->stats.tx_bytes += skb->len;
+		path->stats.tx_bytes += skb_len;
 		path->last_activity = ktime_get();
 
 		/* Update MIB counters for packet transmission */
 		if (conn && conn->sk) {
 			TQUIC_INC_STATS(sock_net(conn->sk), TQUIC_MIB_PACKETSTX);
-			TQUIC_ADD_STATS(sock_net(conn->sk), TQUIC_MIB_BYTESTX, skb->len);
+			TQUIC_ADD_STATS(sock_net(conn->sk), TQUIC_MIB_BYTESTX, skb_len);
 		}
 
 		/*

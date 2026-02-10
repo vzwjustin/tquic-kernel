@@ -2044,6 +2044,57 @@ EXPORT_SYMBOL_GPL(tquic_connect_ip_enable_forwarding);
  *
  * Returns: 0 on success, negative errno on failure.
  */
+/**
+ * connect_ip_validate_v4_addr - Check if an IPv4 address is safe to inject
+ * @addr: IPv4 address in network byte order
+ *
+ * Returns: true if the address is safe, false if it must be blocked.
+ */
+static bool connect_ip_validate_v4_addr(__be32 addr)
+{
+	if (ipv4_is_loopback(addr) || ipv4_is_multicast(addr) ||
+	    ipv4_is_lbcast(addr) || ipv4_is_zeronet(addr))
+		return false;
+
+	/* RFC 1918 private ranges */
+	if (ipv4_is_private_10(addr) || ipv4_is_private_172(addr) ||
+	    ipv4_is_private_192(addr))
+		return false;
+
+	/* Link-local 169.254.0.0/16 */
+	if (ipv4_is_linklocal_169(addr))
+		return false;
+
+	return true;
+}
+
+#if IS_ENABLED(CONFIG_IPV6)
+/**
+ * connect_ip_validate_v6_addr - Check if an IPv6 address is safe to inject
+ * @addr: IPv6 address
+ *
+ * Returns: true if the address is safe, false if it must be blocked.
+ */
+static bool connect_ip_validate_v6_addr(const struct in6_addr *addr)
+{
+	if (ipv6_addr_loopback(addr) || ipv6_addr_is_multicast(addr))
+		return false;
+
+	if (__ipv6_addr_type(addr) & IPV6_ADDR_LINKLOCAL)
+		return false;
+
+	/* Block IPv4-mapped IPv6 addresses pointing to unsafe ranges */
+	if (ipv6_addr_v4mapped(addr)) {
+		__be32 v4 = addr->s6_addr32[3];
+
+		if (!connect_ip_validate_v4_addr(v4))
+			return false;
+	}
+
+	return true;
+}
+#endif
+
 int tquic_connect_ip_inject_packet(struct tquic_connect_ip_tunnel *tunnel,
 				   struct sk_buff *skb)
 {
@@ -2066,11 +2117,39 @@ int tquic_connect_ip_inject_packet(struct tquic_connect_ip_tunnel *tunnel,
 	skb_reset_network_header(skb);
 
 	if (ip_version == 4) {
+		struct iphdr *iph;
+
+		if (skb->len < sizeof(struct iphdr))
+			return -EINVAL;
+
+		iph = (struct iphdr *)data;
+
+		/* Validate source and destination addresses */
+		if (!connect_ip_validate_v4_addr(iph->saddr) ||
+		    !connect_ip_validate_v4_addr(iph->daddr)) {
+			pr_debug("connect-ip: blocked packet with unsafe IPv4 addr\n");
+			return -EACCES;
+		}
+
 		skb->protocol = htons(ETH_P_IP);
 		ret = netif_rx(skb);
 	}
 #if IS_ENABLED(CONFIG_IPV6)
 	else if (ip_version == 6) {
+		struct ipv6hdr *ip6h;
+
+		if (skb->len < sizeof(struct ipv6hdr))
+			return -EINVAL;
+
+		ip6h = (struct ipv6hdr *)data;
+
+		/* Validate source and destination addresses */
+		if (!connect_ip_validate_v6_addr(&ip6h->saddr) ||
+		    !connect_ip_validate_v6_addr(&ip6h->daddr)) {
+			pr_debug("connect-ip: blocked packet with unsafe IPv6 addr\n");
+			return -EACCES;
+		}
+
 		skb->protocol = htons(ETH_P_IPV6);
 		ret = netif_rx(skb);
 	}

@@ -363,8 +363,11 @@ int tquic_xsk_create(struct tquic_xsk **xsk_out, const char *ifname,
 		goto err_free_buffer;
 	}
 
-	/* Create AF_XDP socket */
-	err = sock_create_kern(&init_net, AF_XDP, SOCK_RAW, 0, &xsk->sock);
+	/*
+	 * SECURITY FIX (CF-071): Use the device's network namespace
+	 * instead of init_net to support containerized environments.
+	 */
+	err = sock_create_kern(dev_net(dev), AF_XDP, SOCK_RAW, 0, &xsk->sock);
 	if (err) {
 		tquic_err("xdp: failed tocreate AF_XDP socket: %d\n", err);
 		goto err_free_pool;
@@ -1093,7 +1096,8 @@ bool tquic_xsk_supported(const char *ifname)
 	if (!ifname)
 		return false;
 
-	dev = dev_get_by_name(&init_net, ifname);
+	/* SECURITY FIX (CF-071): Use caller's network namespace */
+	dev = dev_get_by_name(current->nsproxy->net_ns, ifname);
 	if (!dev)
 		return false;
 
@@ -1114,7 +1118,8 @@ bool tquic_xsk_zerocopy_supported(const char *ifname)
 	if (!ifname)
 		return false;
 
-	dev = dev_get_by_name(&init_net, ifname);
+	/* SECURITY FIX (CF-071): Use caller's network namespace */
+	dev = dev_get_by_name(current->nsproxy->net_ns, ifname);
 	if (!dev)
 		return false;
 

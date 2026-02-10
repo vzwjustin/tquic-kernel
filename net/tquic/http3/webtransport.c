@@ -488,7 +488,8 @@ static int encode_close_capsule(u8 *buf, size_t len,
 int webtransport_session_close(struct webtransport_session *session,
 			       u32 code, const char *msg, size_t msg_len)
 {
-	u8 buf[128 + WEBTRANSPORT_MAX_URL_LEN];
+	size_t buf_size = 128 + WEBTRANSPORT_MAX_URL_LEN;
+	u8 *buf;
 	int capsule_len;
 	int ret;
 	unsigned long flags;
@@ -513,16 +514,29 @@ int webtransport_session_close(struct webtransport_session *session,
 
 	spin_unlock_irqrestore(&session->lock, flags);
 
+	/*
+	 * Heap-allocate the capsule encode buffer to avoid placing
+	 * 8320 bytes (128 + WEBTRANSPORT_MAX_URL_LEN) on the kernel stack.
+	 */
+	buf = kmalloc(buf_size, GFP_KERNEL);
+	if (!buf)
+		return -ENOMEM;
+
 	/* Encode and send CLOSE capsule */
-	capsule_len = encode_close_capsule(buf, sizeof(buf), code, msg, msg_len);
-	if (capsule_len < 0)
+	capsule_len = encode_close_capsule(buf, buf_size, code, msg, msg_len);
+	if (capsule_len < 0) {
+		kfree(buf);
 		return capsule_len;
+	}
 
 	if (session->session_stream) {
 		ret = tquic_stream_send(session->session_stream,
 					buf, capsule_len, true);
+		kfree(buf);
 		if (ret < 0)
 			return ret;
+	} else {
+		kfree(buf);
 	}
 
 	pr_debug("webtransport: session %llu closing with code %u\n",

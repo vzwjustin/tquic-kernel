@@ -195,10 +195,18 @@ int tquic_sock_bind(struct socket *sock, TQUIC_SOCKADDR *uaddr, int addr_len)
 	if (addr_len < sizeof(struct sockaddr_in))
 		return -EINVAL;
 
+	/*
+	 * CF-074: Hold socket lock to prevent races with concurrent
+	 * tquic_connect() which reads bind_addr under lock_sock().
+	 */
+	lock_sock(sk);
+
 	memcpy(&tsk->bind_addr, addr, min_t(size_t, addr_len,
 					    sizeof(struct sockaddr_storage)));
 
 	inet_sk_set_state(sk, TCP_CLOSE);
+
+	release_sock(sk);
 
 	return 0;
 }
@@ -234,16 +242,28 @@ int tquic_connect(struct sock *sk, TQUIC_SOCKADDR *uaddr, int addr_len)
 {
 	struct sockaddr *addr = (struct sockaddr *)uaddr;
 	struct tquic_sock *tsk = tquic_sk(sk);
-	struct tquic_connection *conn = tsk->conn;
+	struct tquic_connection *conn;
 	int ret;
-
-	if (!conn)
-		return -EINVAL;
 
 	if (addr_len < sizeof(struct sockaddr_in))
 		return -EINVAL;
 
 	lock_sock(sk);
+
+	/*
+	 * CF-085: Read conn under lock_sock and take a reference to
+	 * prevent use-after-free during the handshake wait window
+	 * where release_sock() is called temporarily.
+	 */
+	conn = tsk->conn;
+	if (!conn) {
+		release_sock(sk);
+		return -EINVAL;
+	}
+	if (!tquic_conn_get(conn)) {
+		release_sock(sk);
+		return -EINVAL;
+	}
 
 	/* Store peer address */
 	memcpy(&tsk->connect_addr, addr,
@@ -328,6 +348,9 @@ int tquic_connect(struct sock *sk, TQUIC_SOCKADDR *uaddr, int addr_len)
 
 	release_sock(sk);
 
+	/* CF-085: Drop the connection reference taken at function entry */
+	tquic_conn_put(conn);
+
 	tquic_dbg("client connection established\n");
 	return 0;
 
@@ -336,6 +359,8 @@ out_close:
 	sk->sk_err = -ret;  /* Store error for getsockopt */
 out_unlock:
 	release_sock(sk);
+	/* CF-085: Drop the connection reference taken at function entry */
+	tquic_conn_put(conn);
 	return ret;
 }
 EXPORT_SYMBOL_GPL(tquic_connect);
@@ -692,8 +717,16 @@ int tquic_sock_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 		if (copy_from_user(&args, uarg, sizeof(args)))
 			return -EFAULT;
 
-		/* Validate flags */
-		if (args.flags > TQUIC_STREAM_UNIDI || args.reserved != 0)
+		/*
+		 * CF-083: Validate reserved field is zeroed and flags
+		 * contain no unknown bits.  Reject any request that
+		 * sets reserved fields -- this ensures forward
+		 * compatibility when new fields are added.
+		 */
+		if (args.reserved != 0)
+			return -EINVAL;
+
+		if (args.flags & ~((__u32)TQUIC_STREAM_UNIDI))
 			return -EINVAL;
 
 		is_bidi = !(args.flags & TQUIC_STREAM_UNIDI);
@@ -712,8 +745,12 @@ int tquic_sock_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 		if (ret < 0)
 			return ret;
 
-		/* Copy stream ID back to userspace */
+		/*
+		 * CF-083: Zero reserved field before copying back to
+		 * userspace to prevent any kernel info leak.
+		 */
 		args.stream_id = stream_id;
+		args.reserved = 0;
 		if (copy_to_user(uarg, &args, sizeof(args))) {
 			/*
 			 * We created the fd but can't return the stream_id.
@@ -952,8 +989,14 @@ int tquic_sock_setsockopt(struct socket *sock, int level, int optname,
 		 * For server sockets: Store identity for later use
 		 *
 		 * Must be set before connect().
+		 *
+		 * CF-042: Requires CAP_NET_ADMIN - key material is
+		 * security-sensitive.
 		 */
 		char identity[64];
+
+		if (!ns_capable(sock_net(sk)->user_ns, CAP_NET_ADMIN))
+			return -EPERM;
 
 		if (optlen < 1 || optlen > 64)
 			return -EINVAL;
@@ -1169,7 +1212,12 @@ int tquic_sock_setsockopt(struct socket *sock, int level, int optname,
 		 *
 		 * WARNING: Using NONE leaves connections vulnerable to MITM attacks.
 		 * Must be set before connect().
+		 *
+		 * CF-042: Requires CAP_NET_ADMIN - controls TLS verification.
 		 */
+		if (!ns_capable(sock_net(sk)->user_ns, CAP_NET_ADMIN))
+			return -EPERM;
+
 		if (val < TQUIC_VERIFY_NONE || val > TQUIC_VERIFY_REQUIRED)
 			return -EINVAL;
 
@@ -1195,8 +1243,13 @@ int tquic_sock_setsockopt(struct socket *sock, int level, int optname,
 		 * certificate, or when using a different name than the SNI.
 		 *
 		 * Must be set before connect().
+		 *
+		 * CF-042: Requires CAP_NET_ADMIN - controls TLS verification.
 		 */
 		char hostname[TQUIC_MAX_HOSTNAME_LEN + 1];
+
+		if (!ns_capable(sock_net(sk)->user_ns, CAP_NET_ADMIN))
+			return -EPERM;
 
 		if (optlen <= 0 || optlen > TQUIC_MAX_HOSTNAME_LEN)
 			return -EINVAL;
@@ -1228,7 +1281,12 @@ int tquic_sock_setsockopt(struct socket *sock, int level, int optname,
 		 * no authentication and are vulnerable to MITM attacks.
 		 *
 		 * Must be set before connect().
+		 *
+		 * CF-042: Requires CAP_NET_ADMIN - weakens TLS security.
 		 */
+		if (!ns_capable(sock_net(sk)->user_ns, CAP_NET_ADMIN))
+			return -EPERM;
+
 		lock_sock(sk);
 		if (tsk->conn && tsk->conn->state != TQUIC_CONN_IDLE) {
 			release_sock(sk);
@@ -1250,8 +1308,14 @@ int tquic_sock_setsockopt(struct socket *sock, int level, int optname,
 		 * detailed configuration options.
 		 *
 		 * Must be called after connect() (connection must exist).
+		 *
+		 * CF-042: Requires CAP_NET_ADMIN - exposes connection
+		 * internals and can affect performance.
 		 */
 		struct tquic_qlog_args args;
+
+		if (!ns_capable(sock_net(sk)->user_ns, CAP_NET_ADMIN))
+			return -EPERM;
 		struct tquic_qlog *qlog;
 
 		if (optlen < sizeof(args))
@@ -1290,8 +1354,14 @@ int tquic_sock_setsockopt(struct socket *sock, int level, int optname,
 		 * Dynamically update the event filter mask for an active
 		 * qlog session. This allows enabling/disabling specific
 		 * event categories at runtime.
+		 *
+		 * CF-042: Requires CAP_NET_ADMIN - controls diagnostic
+		 * tracing.
 		 */
 		u64 mask;
+
+		if (!ns_capable(sock_net(sk)->user_ns, CAP_NET_ADMIN))
+			return -EPERM;
 
 		if (optlen < sizeof(mask))
 			return -EINVAL;

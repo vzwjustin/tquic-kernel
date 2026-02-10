@@ -210,6 +210,7 @@ struct tquic_nic_device *tquic_nic_register(struct net_device *netdev,
 	dev->caps = caps;
 	dev->priv = priv;
 	spin_lock_init(&dev->lock);
+	refcount_set(&dev->refcnt, 1);
 
 	/* Set defaults */
 	dev->ciphers = TQUIC_NIC_CIPHER_AES_128_GCM |
@@ -278,6 +279,13 @@ struct tquic_nic_device *tquic_nic_find(struct net_device *netdev)
 	spin_lock(&tquic_nic_lock);
 	list_for_each_entry(dev, &tquic_nic_devices, list) {
 		if (dev->netdev == netdev) {
+			/*
+			 * SECURITY FIX (CF-084): Take a reference before
+			 * returning the pointer so the device cannot be
+			 * freed while the caller is using it.
+			 * Caller must call tquic_nic_put() when done.
+			 */
+			refcount_inc(&dev->refcnt);
 			spin_unlock(&tquic_nic_lock);
 			return dev;
 		}
@@ -287,6 +295,19 @@ struct tquic_nic_device *tquic_nic_find(struct net_device *netdev)
 	return NULL;
 }
 EXPORT_SYMBOL_GPL(tquic_nic_find);
+
+/**
+ * tquic_nic_put - Release reference to SmartNIC device
+ * @dev: The device to release (may be NULL)
+ *
+ * Callers of tquic_nic_find() must call this when done with the device.
+ */
+void tquic_nic_put(struct tquic_nic_device *dev)
+{
+	if (dev)
+		refcount_dec(&dev->refcnt);
+}
+EXPORT_SYMBOL_GPL(tquic_nic_put);
 
 /*
  * =============================================================================

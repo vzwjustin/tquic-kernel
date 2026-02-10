@@ -338,12 +338,16 @@ int qpack_dynamic_table_duplicate(struct qpack_dynamic_table *table,
 	struct qpack_dynamic_entry *source, *entry;
 	unsigned long flags;
 	int ret;
-	u8 *saved_name = NULL, *saved_value = NULL;
-	u32 saved_name_len, saved_value_len;
 
 	if (!table)
 		return -EINVAL;
 
+	/*
+	 * Hold the lock across the entire lookup-allocate-evict-insert
+	 * sequence to prevent a TOCTOU race where another thread modifies
+	 * the table between lookup and insertion.  All allocations use
+	 * GFP_ATOMIC since we are under a spinlock.
+	 */
 	spin_lock_irqsave(&table->lock, flags);
 
 	/* Find source entry */
@@ -353,40 +357,38 @@ int qpack_dynamic_table_duplicate(struct qpack_dynamic_table *table,
 		return -ENOENT;
 	}
 
-	/*
-	 * Copy name/value data while holding the lock so the source
-	 * entry cannot be freed (evicted) between lookup and copy.
-	 * Then release the lock for the allocation.
-	 */
-	saved_name_len = source->name_len;
-	saved_value_len = source->value_len;
-	saved_name = kmalloc(saved_name_len, GFP_ATOMIC);
-	saved_value = kmalloc(saved_value_len, GFP_ATOMIC);
-	if (!saved_name || !saved_value) {
+	/* Allocate the duplicate entry under the lock (GFP_ATOMIC) */
+	entry = kzalloc(sizeof(*entry), GFP_ATOMIC);
+	if (!entry) {
 		spin_unlock_irqrestore(&table->lock, flags);
-		kfree(saved_name);
-		kfree(saved_value);
 		return -ENOMEM;
 	}
-	memcpy(saved_name, source->name, saved_name_len);
-	memcpy(saved_value, source->value, saved_value_len);
 
-	spin_unlock_irqrestore(&table->lock, flags);
-
-	entry = qpack_dynamic_entry_alloc(saved_name, saved_name_len,
-					  saved_value, saved_value_len);
-	kfree(saved_name);
-	kfree(saved_value);
-	if (!entry)
+	entry->name = kmalloc(source->name_len, GFP_ATOMIC);
+	entry->value = kmalloc(source->value_len, GFP_ATOMIC);
+	if (!entry->name || !entry->value) {
+		spin_unlock_irqrestore(&table->lock, flags);
+		kfree(entry->name);
+		kfree(entry->value);
+		kfree(entry);
 		return -ENOMEM;
+	}
 
-	spin_lock_irqsave(&table->lock, flags);
+	memcpy(entry->name, source->name, source->name_len);
+	entry->name_len = source->name_len;
+	memcpy(entry->value, source->value, source->value_len);
+	entry->value_len = source->value_len;
+	entry->size = source->size;
+	refcount_set(&entry->refcnt, 1);
+	INIT_LIST_HEAD(&entry->list);
 
 	/* Evict entries if needed */
 	ret = evict_entries(table, entry->size);
 	if (ret) {
 		spin_unlock_irqrestore(&table->lock, flags);
-		qpack_dynamic_entry_free(entry);
+		kfree(entry->name);
+		kfree(entry->value);
+		kfree(entry);
 		return ret;
 	}
 

@@ -1188,7 +1188,12 @@ struct tquic_redundant_data {
 	u8	redundancy_level;	/* Number of paths to use */
 	bool	all_paths;		/* Use all available paths */
 	u64	last_seq_sent;
-	u8	dedup_window[256];	/* Received sequence dedup */
+	/*
+	 * CF-118: Use full 64-bit packet numbers for deduplication
+	 * instead of 8-bit truncated hash to avoid collisions.
+	 * Initialized to U64_MAX sentinels (invalid QUIC pkt number).
+	 */
+	u64	dedup_window[256];	/* Full packet number dedup */
 	u16	dedup_head;
 };
 
@@ -1203,6 +1208,8 @@ static int tquic_redundant_init(struct tquic_connection *conn)
 	rd->redundancy_level = 2;  /* Default: send on 2 paths */
 	rd->all_paths = false;
 	rd->dedup_head = 0;
+	/* CF-118: Initialize dedup window with U64_MAX sentinels */
+	memset(rd->dedup_window, 0xFF, sizeof(rd->dedup_window));
 
 	conn->sched_priv = rd;
 	return 0;
@@ -1308,24 +1315,24 @@ EXPORT_SYMBOL_GPL(tquic_redundant_set_level);
 bool tquic_redundant_is_duplicate(struct tquic_connection *conn, u64 seq)
 {
 	struct tquic_redundant_data *rd;
-	u8 seq_byte;
 	int i;
 
 	rd = conn->sched_priv;
 	if (!rd)
 		return false;
 
-	seq_byte = (u8)(seq & 0xFF);
-
-	/* Check recent sequence numbers */
+	/*
+	 * CF-118: Use full 64-bit packet number for deduplication.
+	 * The previous 8-bit truncation (seq & 0xFF) caused collisions
+	 * every 256 packets, making dedup unreliable.
+	 */
 	for (i = 0; i < 256; i++) {
-		if (rd->dedup_window[i] == seq_byte) {
+		if (rd->dedup_window[i] == seq)
 			return true;  /* Duplicate found */
-		}
 	}
 
 	/* Not a duplicate, record it */
-	rd->dedup_window[rd->dedup_head] = seq_byte;
+	rd->dedup_window[rd->dedup_head] = seq;
 	rd->dedup_head = (rd->dedup_head + 1) & 0xFF;
 
 	return false;
@@ -1616,7 +1623,7 @@ static void tquic_adaptive_feedback(struct tquic_connection *conn,
 				    const struct tquic_sched_feedback *fb)
 {
 	struct tquic_adaptive_data *ad = conn->sched_priv;
-	struct tquic_path *path;
+	struct tquic_path *path, *found = NULL;
 	int path_idx = 0;
 
 	if (!ad)
@@ -1624,17 +1631,26 @@ static void tquic_adaptive_feedback(struct tquic_connection *conn,
 
 	rcu_read_lock();
 
-	/* Find path and its state */
+	/*
+	 * CF-019: Use a separate 'found' pointer to track whether a
+	 * matching path was located. After list_for_each_entry_rcu()
+	 * exits without break, the iterator points to the list head
+	 * container, not a valid entry.
+	 */
 	list_for_each_entry_rcu(path, &conn->paths, list) {
-		if (path->path_id == fb->path_id)
+		if (path->path_id == fb->path_id) {
+			found = path;
 			break;
+		}
 		path_idx++;
 	}
 
-	if (path->path_id != fb->path_id) {
+	if (!found) {
 		rcu_read_unlock();
 		return;
 	}
+
+	path = found;
 
 	if (fb->is_ack) {
 		struct tquic_adaptive_path_state *ps;

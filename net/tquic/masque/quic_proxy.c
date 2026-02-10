@@ -521,7 +521,7 @@ struct tquic_quic_proxy_state *tquic_quic_proxy_init(
 		proxy->config.idle_timeout_ms = QUIC_PROXY_DEFAULT_IDLE_TIMEOUT_MS;
 		proxy->config.stats_interval_ms = 0;
 		proxy->config.allowed_versions = 0xFFFFFFFF;
-		proxy->config.require_auth = false;
+		proxy->config.require_auth = true;
 	}
 
 	/* Initialize connection management */
@@ -653,6 +653,12 @@ struct tquic_proxied_quic_conn *tquic_quic_proxy_register_conn(
 
 	if (!proxy || !target_host || dcid_len > QUIC_PROXY_MAX_CID_LEN)
 		return ERR_PTR(-EINVAL);
+
+	/* Mandatory authentication check -- reject unauthenticated clients */
+	if (proxy->config.require_auth && !proxy->authenticated) {
+		pr_warn("quic-proxy: rejecting unauthenticated connection registration\n");
+		return ERR_PTR(-EACCES);
+	}
 
 	spin_lock_bh(&proxy->lock);
 

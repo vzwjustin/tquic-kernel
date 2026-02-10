@@ -28,6 +28,7 @@
 #include <linux/module.h>
 #include <linux/types.h>
 #include <linux/math64.h>
+#include <linux/overflow.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
 #include <net/tquic.h>
@@ -473,10 +474,30 @@ u64 coupled_cc_increase(struct coupled_cc_ctx *ctx, u8 path_id,
 	 * LIA increase: delta = (alpha * bytes_acked * MSS) / total_cwnd
 	 *
 	 * alpha is scaled by COUPLED_ALPHA_SCALE, so we divide by that.
+	 *
+	 * CF-101: Guard against integer overflow in the numerator
+	 * (alpha * acked_bytes * mss) and denominator
+	 * (total_cwnd * COUPLED_ALPHA_SCALE) multiplications.
 	 */
-	increase = div64_u64((u64)ctx->alpha * acked_bytes * mss,
-			     ctx->total_cwnd * COUPLED_ALPHA_SCALE);
+	{
+		u64 num, denom, tmp;
 
+		if (check_mul_overflow((u64)ctx->alpha, acked_bytes, &tmp) ||
+		    check_mul_overflow(tmp, (u64)mss, &num)) {
+			/* Numerator overflow: cap increase at 1 MSS */
+			increase = mss;
+			goto increase_done;
+		}
+		if (check_mul_overflow(ctx->total_cwnd,
+				       (u64)COUPLED_ALPHA_SCALE, &denom) ||
+		    denom == 0) {
+			increase = mss;
+			goto increase_done;
+		}
+		increase = div64_u64(num, denom);
+	}
+
+increase_done:
 	/* Ensure minimum increase of 1 byte per ACK */
 	if (increase == 0 && acked_bytes > 0)
 		increase = 1;
@@ -937,10 +958,38 @@ u64 olia_cc_increase(struct coupled_cc_ctx *ctx, u8 path_id,
 
 	/*
 	 * OLIA increase: delta = (alpha/total_cwnd + epsilon) * acked * MSS
+	 *
+	 * CF-122: Guard against integer overflow in both terms.
 	 */
-	increase = div64_u64(ctx->alpha * acked_bytes * mss,
-			     ctx->total_cwnd * COUPLED_ALPHA_SCALE);
-	increase += div64_u64(epsilon * acked_bytes * mss, COUPLED_ALPHA_SCALE);
+	{
+		u64 num1, denom1, tmp1;
+		u64 num2, tmp2;
+		u64 inc1 = 0, inc2 = 0;
+
+		/* First term: (alpha * acked_bytes * mss) / (total_cwnd * SCALE) */
+		if (check_mul_overflow((u64)ctx->alpha, acked_bytes, &tmp1) ||
+		    check_mul_overflow(tmp1, (u64)mss, &num1)) {
+			inc1 = mss;
+		} else if (!check_mul_overflow(ctx->total_cwnd,
+					       (u64)COUPLED_ALPHA_SCALE,
+					       &denom1) && denom1 > 0) {
+			inc1 = div64_u64(num1, denom1);
+		} else {
+			inc1 = mss;
+		}
+
+		/* Second term: (epsilon * acked_bytes * mss) / SCALE */
+		if (check_mul_overflow(epsilon, acked_bytes, &tmp2) ||
+		    check_mul_overflow(tmp2, (u64)mss, &num2)) {
+			inc2 = mss;
+		} else {
+			inc2 = div64_u64(num2, (u64)COUPLED_ALPHA_SCALE);
+		}
+
+		increase = inc1;
+		if (check_add_overflow(increase, inc2, &increase))
+			increase = mss;
+	}
 
 	if (increase == 0 && acked_bytes > 0)
 		increase = 1;

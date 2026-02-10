@@ -1474,12 +1474,25 @@ static void tquic_retransmit_work_fn(struct work_struct *work)
 {
 	struct tquic_timer_state *ts = container_of(work, struct tquic_timer_state,
 						    retransmit_work);
+	struct tquic_connection *conn;
 	struct tquic_recovery_state *rs;
 	unsigned long pending;
 	int i, lost;
 
 	spin_lock_bh(&ts->lock);
 	if (!ts->active || ts->shutting_down) {
+		spin_unlock_bh(&ts->lock);
+		return;
+	}
+
+	conn = ts->conn;
+
+	/*
+	 * Take a reference on the connection while we hold ts->lock
+	 * to ensure conn remains valid after we drop the lock below.
+	 * Loss detection and PTO handling access conn->active_path.
+	 */
+	if (!tquic_conn_get(conn)) {
 		spin_unlock_bh(&ts->lock);
 		return;
 	}
@@ -1496,7 +1509,7 @@ static void tquic_retransmit_work_fn(struct work_struct *work)
 				tquic_dbg("timer:detected %d lost packets in space %d\n",
 					 lost, i);
 				/* Would trigger retransmission */
-				/* tquic_retransmit_lost(ts->conn, i); */
+				/* tquic_retransmit_lost(conn, i); */
 			}
 		}
 
@@ -1510,11 +1523,13 @@ static void tquic_retransmit_work_fn(struct work_struct *work)
 		 * PTO requires sending 1-2 ack-eliciting packets.
 		 * Prefer retransmitting lost/unacked data, but send PING if none.
 		 */
-		/* tquic_send_pto_probe(ts->conn); */
+		/* tquic_send_pto_probe(conn); */
 
 		/* Update PTO timer */
 		tquic_timer_update_pto(ts);
 	}
+
+	tquic_conn_put(conn);
 }
 
 /**
@@ -1525,15 +1540,30 @@ static void tquic_path_work_fn(struct work_struct *work)
 {
 	struct tquic_timer_state *ts = container_of(work, struct tquic_timer_state,
 						    path_work);
+	struct tquic_connection *conn;
 
 	spin_lock_bh(&ts->lock);
 	if (!ts->active || ts->shutting_down) {
 		spin_unlock_bh(&ts->lock);
 		return;
 	}
+
+	conn = ts->conn;
+
+	/*
+	 * Take a reference on the connection while we hold ts->lock
+	 * to ensure conn remains valid after we drop the lock below.
+	 * Path work handlers access conn for validation and failover.
+	 */
+	if (!tquic_conn_get(conn)) {
+		spin_unlock_bh(&ts->lock);
+		return;
+	}
 	spin_unlock_bh(&ts->lock);
 
 	/* Handle path-related work like validation retries, failover, etc. */
+
+	tquic_conn_put(conn);
 }
 
 /*

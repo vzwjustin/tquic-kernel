@@ -1081,6 +1081,7 @@ static int tquic_stream_recvmsg(struct socket *sock, struct msghdr *msg,
 				size_t len, int flags)
 {
 	struct tquic_stream_sock *ss;
+	struct tquic_connection *conn;
 	struct tquic_stream *stream;
 	struct sk_buff *skb;
 	size_t copied = 0;
@@ -1090,30 +1091,48 @@ static int tquic_stream_recvmsg(struct socket *sock, struct msghdr *msg,
 		return -ENOTCONN;
 
 	ss = sock->sk->sk_user_data;
-	if (!ss || !ss->stream)
+	if (!ss || !ss->stream || !ss->conn)
 		return -ENOTCONN;
 
 	stream = ss->stream;
+	conn = ss->conn;
+
+	/*
+	 * CF-064: Take a connection refcount so the connection (and
+	 * thereby the stream) cannot be destroyed while we are
+	 * receiving.  If the refcount is already zero the connection
+	 * is being torn down.
+	 */
+	if (!tquic_conn_get(conn))
+		return -ENOTCONN;
 
 	/* Wait for data if blocking */
 	while (skb_queue_empty(&stream->recv_buf)) {
-		if (stream->fin_received)
-			return 0;  /* EOF */
+		if (stream->fin_received) {
+			copied = 0;  /* EOF */
+			goto out_put;
+		}
 
 		if (stream->state == TQUIC_STREAM_CLOSED ||
-		    stream->state == TQUIC_STREAM_RESET_RECVD)
-			return -ECONNRESET;
+		    stream->state == TQUIC_STREAM_RESET_RECVD) {
+			copied = -ECONNRESET;
+			goto out_put;
+		}
 
-		if (flags & MSG_DONTWAIT)
-			return -EAGAIN;
+		if (flags & MSG_DONTWAIT) {
+			copied = -EAGAIN;
+			goto out_put;
+		}
 
 		err = wait_event_interruptible(ss->wait,
 				!skb_queue_empty(&stream->recv_buf) ||
 				stream->fin_received ||
 				stream->state == TQUIC_STREAM_CLOSED ||
 				stream->state == TQUIC_STREAM_RESET_RECVD);
-		if (err)
-			return -EINTR;
+		if (err) {
+			copied = -EINTR;
+			goto out_put;
+		}
 	}
 
 	/* Copy data from receive buffer */
@@ -1129,7 +1148,9 @@ static int tquic_stream_recvmsg(struct socket *sock, struct msghdr *msg,
 		if (copy_to_iter(skb->data, chunk, &msg->msg_iter) != chunk) {
 			/* Put skb back at head on error */
 			skb_queue_head(&stream->recv_buf, skb);
-			return copied > 0 ? copied : -EFAULT;
+			if (copied == 0)
+				copied = -EFAULT;
+			goto out_put;
 		}
 
 		copied += chunk;
@@ -1146,6 +1167,8 @@ static int tquic_stream_recvmsg(struct socket *sock, struct msghdr *msg,
 		}
 	}
 
+out_put:
+	tquic_conn_put(conn);
 	return copied;
 }
 

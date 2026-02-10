@@ -135,6 +135,14 @@ void tquic_conn_destroy(struct tquic_connection *conn)
 	if (!conn)
 		return;
 
+	/*
+	 * SECURITY FIX (CF-119): Only proceed with destruction if this
+	 * is the last reference. If other code paths still hold a
+	 * reference (e.g., from tquic_conn_lookup()), defer destruction.
+	 */
+	if (!refcount_dec_and_test(&conn->refcnt))
+		return;
+
 	/* Unbind from server client tracking before teardown */
 	tquic_server_unbind_client(conn);
 
@@ -213,7 +221,13 @@ void tquic_conn_destroy(struct tquic_connection *conn)
 		kfree(sched);
 	}
 
-	kmem_cache_free(tquic_conn_cache, conn);
+	/*
+	 * SECURITY FIX (CF-134): Use kfree() since tquic_conn_create()
+	 * allocates with kzalloc(), not kmem_cache_alloc(). Using
+	 * kmem_cache_free() on kzalloc'd memory causes allocator
+	 * mismatch corruption.
+	 */
+	kfree(conn);
 }
 EXPORT_SYMBOL_GPL(tquic_conn_destroy);
 

@@ -883,7 +883,6 @@ const char *tquic_cong_get_default_name(struct net *net)
 {
 	struct tquic_cong_ops *ca;
 	struct tquic_net *tn;
-	const char *name;
 
 	if (!net)
 		return TQUIC_DEFAULT_CC_NAME;
@@ -892,17 +891,31 @@ const char *tquic_cong_get_default_name(struct net *net)
 	if (!tn)
 		return TQUIC_DEFAULT_CC_NAME;
 
+	/*
+	 * CF-132: Return the per-netns cc_name buffer which is always
+	 * valid for the lifetime of the netns. The previous code
+	 * returned ca->name from an RCU-protected algorithm struct,
+	 * which could be freed after rcu_read_unlock() if the CC
+	 * module was unloaded.
+	 *
+	 * tquic_cong_set_default() always populates tn->cc_name
+	 * before setting tn->default_cong, so cc_name is authoritative.
+	 * As a safety fallback, if cc_name is empty but an algorithm
+	 * is registered, copy its name to the stable buffer.
+	 */
+	if (tn->cc_name[0])
+		return tn->cc_name;
+
 	rcu_read_lock();
 	ca = rcu_dereference(tn->default_cong);
-	if (ca)
-		name = ca->name;
-	else if (tn->cc_name[0])
-		name = tn->cc_name;
-	else
-		name = TQUIC_DEFAULT_CC_NAME;
+	if (ca && ca->name) {
+		strscpy(tn->cc_name, ca->name, TQUIC_NET_CC_NAME_MAX);
+		rcu_read_unlock();
+		return tn->cc_name;
+	}
 	rcu_read_unlock();
 
-	return name;
+	return TQUIC_DEFAULT_CC_NAME;
 }
 EXPORT_SYMBOL_GPL(tquic_cong_get_default_name);
 

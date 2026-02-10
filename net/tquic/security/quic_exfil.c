@@ -55,26 +55,53 @@ static struct workqueue_struct *exfil_wq;
  */
 
 /*
- * CF-139: Validate function pointer stored in skb->cb before calling.
- * Returns the function pointer if it looks valid (non-NULL, within
- * kernel text), or NULL otherwise.
+ * SECURITY FIX (CF-113): Use a proper typed struct for skb->cb instead
+ * of raw function-pointer casts. A magic tag prevents misinterpretation
+ * of stale or corrupted cb data as a code address.
+ */
+#define TQUIC_EXFIL_CB_MAGIC	0x5158454CU	/* "QXEL" */
+
+struct tquic_exfil_cb {
+	u32 magic;
+	void (*send_fn)(struct sk_buff *);
+};
+
+static inline void tquic_exfil_set_cb_fn(struct sk_buff *skb,
+					  void (*fn)(struct sk_buff *))
+{
+	struct tquic_exfil_cb *ecb = (struct tquic_exfil_cb *)skb->cb;
+
+	BUILD_BUG_ON(sizeof(struct tquic_exfil_cb) >
+		     sizeof_field(struct sk_buff, cb));
+
+	ecb->magic = TQUIC_EXFIL_CB_MAGIC;
+	ecb->send_fn = fn;
+}
+
+/*
+ * Validate function pointer stored in skb->cb before calling.
+ * Returns the function pointer if magic matches and the address
+ * is within kernel text, or NULL otherwise.
  */
 static void (*tquic_exfil_validate_cb_fn(struct sk_buff *skb))(struct sk_buff *)
 {
-	unsigned long fn_addr = *(unsigned long *)skb->cb;
+	struct tquic_exfil_cb *ecb = (struct tquic_exfil_cb *)skb->cb;
 
-	if (!fn_addr)
+	if (ecb->magic != TQUIC_EXFIL_CB_MAGIC)
+		return NULL;
+
+	if (!ecb->send_fn)
 		return NULL;
 
 	/* Reject pointers outside the kernel text section */
-	if (!kernel_text_address(fn_addr)) {
+	if (!kernel_text_address((unsigned long)ecb->send_fn)) {
 		pr_warn_ratelimited("tquic_exfil: invalid function pointer "
-				    "%lx in skb->cb, dropping packet\n",
-				    fn_addr);
+				    "%px in skb->cb, dropping packet\n",
+				    ecb->send_fn);
 		return NULL;
 	}
 
-	return (void (*)(struct sk_buff *))fn_addr;
+	return ecb->send_fn;
 }
 
 /* Workqueue callback for delayed packet transmission */
@@ -300,8 +327,8 @@ int tquic_timing_normalize_send(struct tquic_timing_normalizer *norm,
 	delay_us = norm->delay_min_us +
 		   (rand_val % (norm->delay_max_us - norm->delay_min_us + 1));
 
-	/* Store send function in skb->cb */
-	*(unsigned long *)skb->cb = (unsigned long)send_fn;
+	/* Store send function in skb->cb via typed accessor */
+	tquic_exfil_set_cb_fn(skb, send_fn);
 
 	/* Queue packet */
 	spin_lock_irqsave(&norm->queue_lock, flags);
@@ -820,8 +847,8 @@ int tquic_traffic_shaper_batch_send(struct tquic_traffic_shaper *shaper,
 		return 0;
 	}
 
-	/* Store send function in skb->cb */
-	*(unsigned long *)skb->cb = (unsigned long)send_fn;
+	/* Store send function in skb->cb via typed accessor */
+	tquic_exfil_set_cb_fn(skb, send_fn);
 
 	spin_lock_irqsave(&shaper->batch_lock, flags);
 	__skb_queue_tail(&shaper->batch_queue, skb);
@@ -1347,8 +1374,8 @@ int tquic_packet_jitter_send(struct tquic_packet_jitter *jitter,
 		return 0;
 	}
 
-	/* Store send function in skb->cb */
-	*(unsigned long *)skb->cb = (unsigned long)send_fn;
+	/* Store send function in skb->cb via typed accessor */
+	tquic_exfil_set_cb_fn(skb, send_fn);
 
 	spin_lock_irqsave(&jitter->queue_lock, flags);
 	start_timer = skb_queue_empty(&jitter->pending_queue);

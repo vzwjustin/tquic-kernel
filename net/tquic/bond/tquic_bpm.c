@@ -1826,6 +1826,7 @@ static int tquic_bpm_netdev_event(struct notifier_block *nb, unsigned long event
 	struct tquic_bpm_path_manager *pm;
 	struct tquic_bpm_path *path;
 	bool found;
+	int i;
 
 	switch (event) {
 	case NETDEV_UP:
@@ -1844,21 +1845,37 @@ static int tquic_bpm_netdev_event(struct notifier_block *nb, unsigned long event
 
 	case NETDEV_DOWN:
 		pr_debug("netdev DOWN: %s\n", dev->name);
-		/* Mark paths on this interface as failed */
+		/*
+		 * SECURITY FIX (CF-104): Mark paths on this interface as
+		 * failed. Collect matching paths into a temporary list
+		 * under pm->lock, then call tquic_bpm_path_set_state()
+		 * outside the lock. The original code dropped and
+		 * re-acquired pm->lock mid-iteration, which could corrupt
+		 * the list or skip entries if the list was modified
+		 * concurrently.
+		 */
 		rcu_read_lock();
 		list_for_each_entry_rcu(pm, &tquic_bpm_list, path_list) {
+			struct tquic_bpm_path *affected[TQUIC_MAX_PATHS];
+			int n_affected = 0;
+
 			spin_lock_bh(&pm->lock);
 			list_for_each_entry(path, &pm->path_list, list) {
 				if (path->ifindex == dev->ifindex &&
-				    path->state != TQUIC_BPM_PATH_FAILED) {
-					spin_unlock_bh(&pm->lock);
-					tquic_bpm_path_set_state(path,
-							     TQUIC_BPM_PATH_FAILED);
-					spin_lock_bh(&pm->lock);
-					pm->paths_failed++;
+				    path->state != TQUIC_BPM_PATH_FAILED &&
+				    n_affected < TQUIC_MAX_PATHS) {
+					affected[n_affected++] = path;
 				}
 			}
 			spin_unlock_bh(&pm->lock);
+
+			for (i = 0; i < n_affected; i++) {
+				tquic_bpm_path_set_state(affected[i],
+							 TQUIC_BPM_PATH_FAILED);
+				spin_lock_bh(&pm->lock);
+				pm->paths_failed++;
+				spin_unlock_bh(&pm->lock);
+			}
 
 			if (pm->auto_failover)
 				queue_work(tquic_bpm_wq, &pm->failover_work);
@@ -1870,32 +1887,44 @@ static int tquic_bpm_netdev_event(struct notifier_block *nb, unsigned long event
 		pr_debug("netdev CHANGE: %s carrier=%d\n", dev->name,
 			 netif_carrier_ok(dev));
 
+		/*
+		 * SECURITY FIX (CF-104): Same collect-then-act pattern
+		 * as NETDEV_DOWN to avoid list iterator invalidation.
+		 */
 		rcu_read_lock();
 		list_for_each_entry_rcu(pm, &tquic_bpm_list, path_list) {
+			struct tquic_bpm_path *fail_paths[TQUIC_MAX_PATHS];
+			struct tquic_bpm_path *validate_paths[TQUIC_MAX_PATHS];
+			int n_fail = 0, n_validate = 0;
+
 			found = false;
 			spin_lock_bh(&pm->lock);
 			list_for_each_entry(path, &pm->path_list, list) {
 				if (path->ifindex == dev->ifindex) {
 					found = true;
 					if (!netif_carrier_ok(dev) &&
-					    path->state != TQUIC_BPM_PATH_FAILED) {
-						spin_unlock_bh(&pm->lock);
-						tquic_bpm_path_set_state(
-							path,
-							TQUIC_BPM_PATH_FAILED);
-						spin_lock_bh(&pm->lock);
-						pm->paths_failed++;
+					    path->state != TQUIC_BPM_PATH_FAILED &&
+					    n_fail < TQUIC_MAX_PATHS) {
+						fail_paths[n_fail++] = path;
 					} else if (netif_carrier_ok(dev) &&
 						   path->state ==
-							   TQUIC_BPM_PATH_FAILED) {
-						/* Carrier restored, revalidate */
-						spin_unlock_bh(&pm->lock);
-						tquic_bpm_path_validate(path);
-						spin_lock_bh(&pm->lock);
+							TQUIC_BPM_PATH_FAILED &&
+						   n_validate < TQUIC_MAX_PATHS) {
+						validate_paths[n_validate++] = path;
 					}
 				}
 			}
 			spin_unlock_bh(&pm->lock);
+
+			for (i = 0; i < n_fail; i++) {
+				tquic_bpm_path_set_state(fail_paths[i],
+							 TQUIC_BPM_PATH_FAILED);
+				spin_lock_bh(&pm->lock);
+				pm->paths_failed++;
+				spin_unlock_bh(&pm->lock);
+			}
+			for (i = 0; i < n_validate; i++)
+				tquic_bpm_path_validate(validate_paths[i]);
 
 			if (found && pm->auto_failover)
 				queue_work(tquic_bpm_wq, &pm->failover_work);

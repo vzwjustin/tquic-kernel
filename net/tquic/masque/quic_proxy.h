@@ -477,6 +477,7 @@ struct tquic_quic_proxy_state {
 	/* State */
 	bool active;
 	bool is_server;
+	bool authenticated;	/* Set by auth handler before registering conns */
 };
 
 /*

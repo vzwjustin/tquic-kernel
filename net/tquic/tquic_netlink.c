@@ -465,7 +465,15 @@ static struct tquic_nl_path_info *tquic_nl_path_create(struct tquic_nl_conn_info
 	if (!path)
 		return NULL;
 
-	refcount_set(&path->refcnt, 1);
+	/*
+	 * CF-078: Initialize refcount to 2: one reference for the
+	 * conn->paths list entry and one for the caller's returned
+	 * pointer.  Previously set to 1, which caused refcount
+	 * underflow when tquic_path_remove_and_free() dropped both
+	 * the list and caller references via two tquic_nl_path_put()
+	 * calls.
+	 */
+	refcount_set(&path->refcnt, 2);
 	path->state = TQUIC_NL_PATH_STATE_UNKNOWN;
 	path->weight = 1;
 

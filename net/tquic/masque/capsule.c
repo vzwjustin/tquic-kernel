@@ -423,6 +423,20 @@ int capsule_parser_feed(struct capsule_parser *parser,
 							    parser->buf_len,
 							    &parser->header);
 				if (ret >= 0) {
+					/*
+					 * Reject capsules whose payload length
+					 * exceeds the protocol maximum.  The
+					 * length field is attacker-controlled
+					 * (a QUIC varint up to 2^62) so we
+					 * must cap it before allocating.
+					 */
+					if (parser->header.length >
+					    CAPSULE_MAX_PAYLOAD_SIZE) {
+						parser->state = CAPSULE_PARSE_ERROR;
+						spin_unlock_bh(&parser->lock);
+						return -EMSGSIZE;
+					}
+
 					/* Header complete, allocate capsule */
 					parser->cur_capsule = capsule_alloc(
 						parser->header.type,

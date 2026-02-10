@@ -1124,10 +1124,15 @@ static int tquic_hs_build_ch_extensions(struct tquic_handshake *hs,
 	u32 tp_len;
 	int ret;
 
+	/* Extension length placeholder (2 bytes) */
+	if (p + 2 > buf + buf_len)
+		return -ENOSPC;
 	ext_len_ptr = p;
-	p += 2;  /* Extension length placeholder */
+	p += 2;
 
-	/* Supported Versions extension */
+	/* Supported Versions extension (7 bytes) */
+	if (p + 7 > buf + buf_len)
+		return -ENOSPC;
 	*p++ = (TLS_EXT_SUPPORTED_VERSIONS >> 8) & 0xff;
 	*p++ = TLS_EXT_SUPPORTED_VERSIONS & 0xff;
 	*p++ = 0;
@@ -1136,7 +1141,9 @@ static int tquic_hs_build_ch_extensions(struct tquic_handshake *hs,
 	*p++ = (TLS_VERSION_13 >> 8) & 0xff;
 	*p++ = TLS_VERSION_13 & 0xff;
 
-	/* Supported Groups extension */
+	/* Supported Groups extension (8 bytes) */
+	if (p + 8 > buf + buf_len)
+		return -ENOSPC;
 	*p++ = (TLS_EXT_SUPPORTED_GROUPS >> 8) & 0xff;
 	*p++ = TLS_EXT_SUPPORTED_GROUPS & 0xff;
 	*p++ = 0;
@@ -1146,7 +1153,9 @@ static int tquic_hs_build_ch_extensions(struct tquic_handshake *hs,
 	*p++ = (TLS_GROUP_X25519 >> 8) & 0xff;
 	*p++ = TLS_GROUP_X25519 & 0xff;
 
-	/* Signature Algorithms extension */
+	/* Signature Algorithms extension (12 bytes) */
+	if (p + 12 > buf + buf_len)
+		return -ENOSPC;
 	*p++ = (TLS_EXT_SIGNATURE_ALGORITHMS >> 8) & 0xff;
 	*p++ = TLS_EXT_SIGNATURE_ALGORITHMS & 0xff;
 	*p++ = 0;
@@ -1160,7 +1169,9 @@ static int tquic_hs_build_ch_extensions(struct tquic_handshake *hs,
 	*p++ = (TLS_SIG_RSA_PKCS1_SHA256 >> 8) & 0xff;
 	*p++ = TLS_SIG_RSA_PKCS1_SHA256 & 0xff;
 
-	/* Key Share extension */
+	/* Key Share extension (40 bytes: 8 header + 32 key) */
+	if (p + 40 > buf + buf_len)
+		return -ENOSPC;
 	*p++ = (TLS_EXT_KEY_SHARE >> 8) & 0xff;
 	*p++ = TLS_EXT_KEY_SHARE & 0xff;
 	*p++ = 0;
@@ -1174,7 +1185,9 @@ static int tquic_hs_build_ch_extensions(struct tquic_handshake *hs,
 	memcpy(p, hs->key_share.public_key, 32);
 	p += 32;
 
-	/* PSK Key Exchange Modes extension */
+	/* PSK Key Exchange Modes extension (6 bytes) */
+	if (p + 6 > buf + buf_len)
+		return -ENOSPC;
 	*p++ = (TLS_EXT_PSK_KEY_EXCHANGE_MODES >> 8) & 0xff;
 	*p++ = TLS_EXT_PSK_KEY_EXCHANGE_MODES & 0xff;
 	*p++ = 0;
@@ -1194,6 +1207,10 @@ static int tquic_hs_build_ch_extensions(struct tquic_handshake *hs,
 		if (alpn_total_len + 2 > 0xFFFF)
 			return -EOVERFLOW;
 
+		/* ALPN extension (6 + alpn_total_len bytes) */
+		if (p + 6 + alpn_total_len > buf + buf_len)
+			return -ENOSPC;
+
 		*p++ = (TLS_EXT_ALPN >> 8) & 0xff;
 		*p++ = TLS_EXT_ALPN & 0xff;
 		*p++ = ((alpn_total_len + 2) >> 8) & 0xff;
@@ -1211,6 +1228,9 @@ static int tquic_hs_build_ch_extensions(struct tquic_handshake *hs,
 
 	/* SNI extension */
 	if (hs->sni && hs->sni_len > 0) {
+		/* SNI extension (9 + sni_len bytes) */
+		if (p + 9 + hs->sni_len > buf + buf_len)
+			return -ENOSPC;
 		*p++ = (TLS_EXT_SERVER_NAME >> 8) & 0xff;
 		*p++ = TLS_EXT_SERVER_NAME & 0xff;
 		*p++ = ((hs->sni_len + 5) >> 8) & 0xff;
@@ -1232,6 +1252,10 @@ static int tquic_hs_build_ch_extensions(struct tquic_handshake *hs,
 	if (ret < 0)
 		return ret;
 
+	/* QUIC Transport Parameters extension (4 + tp_len bytes) */
+	if (p + 4 + tp_len > buf + buf_len)
+		return -ENOSPC;
+
 	*p++ = (TLS_EXT_QUIC_TRANSPORT_PARAMS >> 8) & 0xff;
 	*p++ = TLS_EXT_QUIC_TRANSPORT_PARAMS & 0xff;
 	*p++ = (tp_len >> 8) & 0xff;
@@ -1241,6 +1265,9 @@ static int tquic_hs_build_ch_extensions(struct tquic_handshake *hs,
 
 	/* Early Data indication (if we have PSK) */
 	if (hs->session_ticket && hs->early_data_offered) {
+		/* Early Data extension (4 bytes) */
+		if (p + 4 > buf + buf_len)
+			return -ENOSPC;
 		*p++ = (TLS_EXT_EARLY_DATA >> 8) & 0xff;
 		*p++ = TLS_EXT_EARLY_DATA & 0xff;
 		*p++ = 0;

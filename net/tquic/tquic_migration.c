@@ -856,6 +856,16 @@ int tquic_migrate_auto(struct tquic_connection *conn,
 
 	/* Allocate or get migration state */
 	if (!ms) {
+		/*
+		 * Validate state_machine is not holding a different type
+		 * (e.g. session state) to prevent type confusion on the
+		 * void pointer.
+		 */
+		if (conn->state_machine) {
+			tquic_warn("auto-migration: state_machine "
+				   "type conflict\n");
+			return -EBUSY;
+		}
 		ms = tquic_migration_state_alloc(conn);
 		if (!ms)
 			return -ENOMEM;
@@ -964,12 +974,56 @@ int tquic_migrate_explicit(struct tquic_connection *conn,
 		return -EALREADY;
 	}
 
-	/* Check if we already have a path with this local address */
-	rcu_read_lock();
+	/*
+	 * Check if we already have a path with this local address.
+	 * Hold paths_lock (not just RCU) so the found path cannot be
+	 * freed by a concurrent tquic_path_free() before we store it
+	 * in the migration state.
+	 */
+	spin_lock_bh(&conn->paths_lock);
 	new_path = tquic_path_find_by_addr(conn, new_local);
-	rcu_read_unlock();
 
-	if (!new_path) {
+	if (new_path) {
+		/*
+		 * Existing path found. Allocate migration state and
+		 * store the path pointer while paths_lock is held to
+		 * prevent use-after-free.  tquic_path_free() acquires
+		 * paths_lock before removing a path, so the path is
+		 * guaranteed valid until we release the lock.
+		 */
+		if (!ms) {
+			/*
+			 * Validate state_machine is not holding a
+			 * different type (e.g. session state) to
+			 * prevent type confusion on the void pointer.
+			 */
+			if (conn->state_machine) {
+				spin_unlock_bh(&conn->paths_lock);
+				tquic_warn("migration: state_machine "
+					   "type conflict\n");
+				return -EBUSY;
+			}
+			ms = tquic_migration_state_alloc(conn);
+			if (!ms) {
+				spin_unlock_bh(&conn->paths_lock);
+				return -ENOMEM;
+			}
+			conn->state_machine = ms;
+		}
+
+		spin_lock(&ms->lock);
+		ms->status = TQUIC_MIGRATE_PROBING;
+		ms->old_path = conn->active_path;
+		ms->new_path = new_path;
+		ms->retries = 0;
+		ms->flags = flags;
+		ms->error_code = 0;
+		spin_unlock(&ms->lock);
+
+		spin_unlock_bh(&conn->paths_lock);
+	} else {
+		spin_unlock_bh(&conn->paths_lock);
+
 		/* Create new path with the specified local address */
 		if (!conn->active_path) {
 			tquic_warn("no active path to get remote address\n");
@@ -980,34 +1034,37 @@ int tquic_migrate_explicit(struct tquic_connection *conn,
 					     &conn->active_path->remote_addr);
 		if (!new_path)
 			return -ENOMEM;
-	}
 
-	/* Allocate or get migration state */
-	if (!ms) {
-		ms = tquic_migration_state_alloc(conn);
+		/* Allocate or get migration state */
 		if (!ms) {
-			tquic_path_free(new_path);
-			return -ENOMEM;
+			/*
+			 * Validate state_machine is not holding a
+			 * different type to prevent type confusion.
+			 */
+			if (conn->state_machine) {
+				tquic_path_free(new_path);
+				tquic_warn("migration: state_machine "
+					   "type conflict\n");
+				return -EBUSY;
+			}
+			ms = tquic_migration_state_alloc(conn);
+			if (!ms) {
+				tquic_path_free(new_path);
+				return -ENOMEM;
+			}
+			conn->state_machine = ms;
 		}
-		conn->state_machine = ms;
+
+		/* Set up migration state */
+		spin_lock_bh(&ms->lock);
+		ms->status = TQUIC_MIGRATE_PROBING;
+		ms->old_path = conn->active_path;
+		ms->new_path = new_path;
+		ms->retries = 0;
+		ms->flags = flags;
+		ms->error_code = 0;
+		spin_unlock_bh(&ms->lock);
 	}
-
-	/*
-	 * INIT_WORK was already called in tquic_migration_state_alloc().
-	 * No need to re-initialize the work struct here.
-	 */
-
-	/* Set up migration state */
-	spin_lock_bh(&ms->lock);
-
-	ms->status = TQUIC_MIGRATE_PROBING;
-	ms->old_path = conn->active_path;
-	ms->new_path = new_path;
-	ms->retries = 0;
-	ms->flags = flags;
-	ms->error_code = 0;
-
-	spin_unlock_bh(&ms->lock);
 
 	/* Get fresh CID for new path */
 	ret = tquic_cid_get_for_migration(conn, &ms->new_cid);
@@ -1824,12 +1881,22 @@ int tquic_migrate_to_additional_address(struct tquic_connection *conn,
 
 	/* Allocate or get migration state */
 	if (!ms) {
+		/*
+		 * Validate state_machine is not holding a different type
+		 * (e.g. session state) to prevent type confusion on the
+		 * void pointer.
+		 */
+		if (conn->state_machine) {
+			tquic_path_free(new_path);
+			tquic_warn("additional addr migration: state_machine "
+				   "type conflict\n");
+			return -EBUSY;
+		}
 		ms = tquic_migration_state_alloc(conn);
 		if (!ms) {
 			tquic_path_free(new_path);
 			return -ENOMEM;
 		}
-		INIT_WORK(&ms->work, tquic_migration_work_handler);
 		conn->state_machine = ms;
 	}
 

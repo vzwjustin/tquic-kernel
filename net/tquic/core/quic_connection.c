@@ -19,6 +19,19 @@
 #include "../diag/trace.h"
 #include "../tquic_compat.h"
 
+/*
+ * SECURITY FIX (CF-098): The global connection hash table is defined
+ * in tquic_main.c and exported. We declare it here so that
+ * tquic_conn_create() can insert new connections.
+ */
+extern struct rhashtable tquic_conn_table;
+static const struct rhashtable_params tquic_conn_table_params = {
+	.key_len = sizeof(struct tquic_cid),
+	.key_offset = offsetof(struct tquic_connection, scid),
+	.head_offset = offsetof(struct tquic_connection, node),
+	.automatic_shrinking = true,
+};
+
 /* Forward declarations for functions defined in other compilation units */
 void tquic_loss_detection_on_timeout(struct tquic_connection *conn);
 void tquic_timer_update(struct tquic_connection *conn);
@@ -125,6 +138,11 @@ static void tquic_cid_hash_del(struct tquic_cid_entry *entry)
 
 static struct tquic_cid_entry *tquic_cid_hash_lookup(struct tquic_cid *cid)
 {
+	/*
+	 * SECURITY FIX (CF-120): rhashtable_lookup_fast() requires
+	 * the caller to hold rcu_read_lock(). The RCU read-side lock
+	 * ensures the hash bucket chain is not freed mid-traversal.
+	 */
 	return rhashtable_lookup_fast(&tquic_cid_rht, cid,
 				      tquic_cid_rht_params);
 }
@@ -132,12 +150,24 @@ static struct tquic_cid_entry *tquic_cid_hash_lookup(struct tquic_cid *cid)
 static struct tquic_connection *tquic_conn_lookup(struct tquic_cid *cid)
 {
 	struct tquic_cid_entry *entry;
+	struct tquic_connection *conn = NULL;
 
+	/*
+	 * SECURITY FIX (CF-120): Hold rcu_read_lock() across the
+	 * lookup and take a reference on the connection before
+	 * returning, preventing use-after-free if the connection
+	 * is destroyed concurrently.
+	 */
+	rcu_read_lock();
 	entry = tquic_cid_hash_lookup(cid);
-	if (entry)
-		return entry->conn;
+	if (entry) {
+		conn = entry->conn;
+		if (conn && !refcount_inc_not_zero(&conn->refcnt))
+			conn = NULL;
+	}
+	rcu_read_unlock();
 
-	return NULL;
+	return conn;
 }
 
 static void tquic_conn_generate_cid(struct tquic_cid *cid, u8 len)
@@ -537,6 +567,18 @@ struct tquic_connection *tquic_conn_create(struct tquic_sock *tsk, bool is_serve
 
 	refcount_set(&conn->refcnt, 1);
 
+	/*
+	 * SECURITY FIX (CF-098): Insert into the global connection
+	 * hash table so that diagnostics, proc, and debug interfaces
+	 * can find the connection. Without this, rhashtable_remove_fast()
+	 * in tquic_conn_destroy() operates on an un-inserted element.
+	 */
+	if (rhashtable_insert_fast(&tquic_conn_table, &conn->node,
+				   tquic_conn_table_params)) {
+		pr_warn("tquic: failed to insert conn into global table\n");
+		/* Non-fatal: diagnostics will miss this connection */
+	}
+
 	trace_quic_conn_create(tquic_trace_conn_id(&conn->scid), is_server);
 
 	return conn;
@@ -561,6 +603,14 @@ void tquic_conn_destroy(struct tquic_connection *conn)
 	int i;
 
 	if (!conn)
+		return;
+
+	/*
+	 * SECURITY FIX (CF-119): Only proceed with destruction if this
+	 * is the last reference. If other code paths still hold a
+	 * reference (e.g., from tquic_conn_lookup()), defer destruction.
+	 */
+	if (!refcount_dec_and_test(&conn->refcnt))
 		return;
 
 	trace_quic_conn_destroy(tquic_trace_conn_id(&conn->scid),

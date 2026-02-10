@@ -268,8 +268,19 @@ static int tquic_conn_set_state(struct tquic_connection *conn,
 				enum tquic_state_reason reason)
 {
 	struct tquic_conn_state_machine *cs = conn->state_machine;
-	enum tquic_conn_state old_state = conn->state;
+	enum tquic_conn_state old_state;
 	bool valid = false;
+
+	/*
+	 * SECURITY FIX (CF-095): Hold conn->lock across the read of
+	 * old_state and the write of new_state to make the transition
+	 * atomic with respect to concurrent callers. The lock is
+	 * released before performing side-effect actions (work
+	 * scheduling, timer cancellation) that must not run under
+	 * spinlock.
+	 */
+	spin_lock_bh(&conn->lock);
+	old_state = conn->state;
 
 	/* Validate state transition */
 	switch (old_state) {
@@ -310,17 +321,19 @@ static int tquic_conn_set_state(struct tquic_connection *conn,
 	}
 
 	if (!valid) {
+		spin_unlock_bh(&conn->lock);
 		tquic_conn_warn(conn, "invalid state transition %s -> %s\n",
 				tquic_state_name(old_state),
 				tquic_state_name(new_state));
 		return -EINVAL;
 	}
 
+	conn->state = new_state;
+	spin_unlock_bh(&conn->lock);
+
 	tquic_conn_info(conn, "state %s -> %s reason=%d\n",
 			tquic_state_name(old_state),
 			tquic_state_name(new_state), reason);
-
-	conn->state = new_state;
 
 	/* Perform state-specific entry actions */
 	switch (new_state) {
