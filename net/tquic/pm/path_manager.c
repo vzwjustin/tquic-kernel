@@ -18,6 +18,7 @@
 #include <crypto/utils.h>
 #include <linux/netdevice.h>
 #include <linux/inetdevice.h>
+#include <linux/rcupdate.h>
 #include <linux/rtnetlink.h>
 #include <net/sock.h>
 #include <net/route.h>
@@ -63,6 +64,19 @@ extern const char *tquic_path_state_names[];
 /* Forward declarations */
 int tquic_pm_discover_addresses(struct tquic_connection *conn,
 				struct sockaddr_storage *addrs, int max_addrs);
+
+static struct tquic_path *tquic_pm_active_path_get(struct tquic_connection *conn)
+{
+	struct tquic_path *path;
+
+	rcu_read_lock();
+	path = rcu_dereference(conn->active_path);
+	if (path && !tquic_path_get(path))
+		path = NULL;
+	rcu_read_unlock();
+
+	return path;
+}
 
 /*
  * Calculate smoothed RTT using RFC 6298 algorithm
@@ -504,6 +518,8 @@ EXPORT_SYMBOL_GPL(tquic_pm_discover_addresses);
 
 /*
  * Select best path for a new subflow
+ *
+ * Returns a referenced path on success; caller must call tquic_path_put().
  */
 struct tquic_path *tquic_pm_select_path(struct tquic_connection *conn)
 {
@@ -533,9 +549,11 @@ struct tquic_path *tquic_pm_select_path(struct tquic_connection *conn)
 			best = path;
 		}
 	}
+	if (best && !tquic_path_get(best))
+		best = NULL;
 	rcu_read_unlock();
 
-	return best ?: conn->active_path;
+	return best ?: tquic_pm_active_path_get(conn);
 }
 EXPORT_SYMBOL_GPL(tquic_pm_select_path);
 
@@ -664,11 +682,12 @@ void tquic_path_validate(struct tquic_connection *conn, struct tquic_path *path)
 		path->state = TQUIC_PATH_ACTIVE;
 		path->probe_count = 0;
 
-		/* Inform bonding layer */
-		if (conn->scheduler) {
-			struct tquic_bond_state *bond = conn->scheduler;
-			bond->stats.active_paths++;
-		}
+			/* Inform bonding layer */
+			if (conn->scheduler &&
+			    test_bit(TQUIC_F_BONDING_ENABLED, &conn->flags)) {
+				struct tquic_bond_state *bond = conn->scheduler;
+				bond->stats.active_paths++;
+			}
 
 		pr_info("tquic_pm: path %u validated\n", path->path_id);
 	}

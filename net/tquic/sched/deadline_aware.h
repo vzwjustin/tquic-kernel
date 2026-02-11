@@ -380,7 +380,8 @@ int tquic_deadline_cancel_stream_deadline(struct tquic_connection *conn,
  *   - Current congestion state
  *   - Other pending deadlines
  *
- * Returns: Selected path, or NULL if no path can meet deadline
+ * Returns: Selected path (referenced; caller must call tquic_path_put()),
+ *          or NULL if no path can meet deadline
  */
 struct tquic_path *tquic_deadline_select_path(
 	struct tquic_deadline_sched_state *state,
@@ -396,7 +397,8 @@ struct tquic_path *tquic_deadline_select_path(
  * Main entry point for deadline-aware packet scheduling. Determines
  * the best path and priority for the packet based on active deadlines.
  *
- * Returns: Selected path, or NULL if scheduling failed
+ * Returns: Selected path (referenced; caller must call tquic_path_put()),
+ *          or NULL if scheduling failed
  */
 struct tquic_path *tquic_deadline_schedule_packet(
 	struct tquic_deadline_sched_state *state,

@@ -23,6 +23,7 @@
 #include <linux/timer.h>
 #include <linux/workqueue.h>
 #include <linux/math64.h>
+#include <linux/rcupdate.h>
 #include <net/tquic.h>
 
 #include "../tquic_compat.h"
@@ -37,6 +38,19 @@ static struct kmem_cache *path_caps_cache;
 
 /* Workqueue for deferred deadline processing */
 static struct workqueue_struct *deadline_wq;
+
+static struct tquic_path *tquic_deadline_active_path_get(struct tquic_connection *conn)
+{
+	struct tquic_path *path;
+
+	rcu_read_lock();
+	path = rcu_dereference(conn->active_path);
+	if (path && !tquic_path_get(path))
+		path = NULL;
+	rcu_read_unlock();
+
+	return path;
+}
 
 /*
  * =============================================================================
@@ -359,6 +373,8 @@ EXPORT_SYMBOL_GPL(tquic_deadline_check_feasibility);
 
 /**
  * tquic_deadline_select_path - Select best path to meet deadline
+ *
+ * Returns a referenced path on success; caller must call tquic_path_put().
  */
 struct tquic_path *tquic_deadline_select_path(
 	struct tquic_deadline_sched_state *state,
@@ -431,6 +447,9 @@ struct tquic_path *tquic_deadline_select_path(
 			best_path = path;
 		}
 	}
+
+	if (best_path && !tquic_path_get(best_path))
+		best_path = NULL;
 
 	if (best_path)
 		state->stats.packets_scheduled++;
@@ -568,12 +587,11 @@ int tquic_deadline_sched_init(struct tquic_connection *conn,
 	state->integration.ecf_fallback = true;
 	state->integration.blest_aware = true;
 
-	/*
-	 * Store state in connection's scheduler field.
-	 * This uses the generic scheduler pointer since the deadline
-	 * scheduler is the primary scheduler for deadline-aware connections.
-	 */
-	conn->scheduler = state;
+		/*
+		 * Store state in sched_priv to avoid clobbering the
+		 * connection's bonding scheduler pointer.
+		 */
+		conn->sched_priv = state;
 
 	tquic_info("Deadline scheduler initialized for connection "
 		   "(granularity=%u us, max_streams=%u)\n",
@@ -745,6 +763,8 @@ EXPORT_SYMBOL_GPL(tquic_deadline_cancel_stream_deadline);
 
 /**
  * tquic_deadline_schedule_packet - Schedule packet with deadline awareness
+ *
+ * Returns a referenced path on success; caller must call tquic_path_put().
  */
 struct tquic_path *tquic_deadline_schedule_packet(
 	struct tquic_deadline_sched_state *state,
@@ -790,8 +810,7 @@ struct tquic_path *tquic_deadline_schedule_packet(
 	/* Fall back to ECF scheduler if no deadline path selected */
 	if (!selected_path && state->integration.ecf_fallback) {
 		/* Use ECF fallback - would integrate with actual ECF here */
-		if (state->conn->active_path)
-			selected_path = state->conn->active_path;
+		selected_path = tquic_deadline_active_path_get(state->conn);
 	}
 
 	return selected_path;
@@ -1333,7 +1352,7 @@ EXPORT_SYMBOL_GPL(tquic_deadline_write_miss_frame);
  * @conn: QUIC connection
  *
  * Retrieves the deadline scheduler state from the connection's
- * scheduler field. Returns NULL if the connection doesn't have
+ * sched_priv field. Returns NULL if the connection doesn't have
  * deadline scheduling enabled.
  */
 struct tquic_deadline_sched_state *tquic_deadline_get_state(
@@ -1341,14 +1360,11 @@ struct tquic_deadline_sched_state *tquic_deadline_get_state(
 {
 	struct tquic_deadline_sched_state *state;
 
-	if (!conn || !conn->scheduler)
+	if (!conn || !conn->sched_priv)
 		return NULL;
 
-	/*
-	 * Retrieve state from connection's scheduler field.
-	 * The state is stored there by tquic_deadline_sched_init().
-	 */
-	state = (struct tquic_deadline_sched_state *)conn->scheduler;
+	/* Retrieve state from connection's sched_priv field. */
+	state = (struct tquic_deadline_sched_state *)conn->sched_priv;
 
 	/* Verify this is actually a deadline scheduler state by checking conn backref */
 	if (state->conn != conn)
