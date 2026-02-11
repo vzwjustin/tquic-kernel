@@ -35,6 +35,7 @@
 #include <linux/timer.h>
 #include <linux/workqueue.h>
 #include <linux/atomic.h>
+#include <linux/rcupdate.h>
 #include <linux/sysctl.h>
 #include <linux/proc_fs.h>
 #include <net/sock.h>
@@ -393,16 +394,19 @@ static void fallback_do_fallback(struct work_struct *work)
 	spin_unlock_bh(&ctx->lock);
 
 	/* Get remote address from active (primary) path */
-	spin_lock_bh(&ctx->conn->paths_lock);
-	path = ctx->conn->active_path;
+	rcu_read_lock();
+	path = rcu_dereference(ctx->conn->active_path);
+	if (path && !tquic_path_get(path))
+		path = NULL;
 	if (!path) {
-		spin_unlock_bh(&ctx->conn->paths_lock);
+		rcu_read_unlock();
 		pr_warn("tquic_fallback: no active path for fallback\n");
 		return;
 	}
-	/* Copy address while holding lock */
+	/* Copy address while holding path reference */
 	memcpy(&addr, &path->remote_addr, sizeof(addr));
-	spin_unlock_bh(&ctx->conn->paths_lock);
+	rcu_read_unlock();
+	tquic_path_put(path);
 
 	addrlen = (addr.ss_family == AF_INET6) ? sizeof(struct sockaddr_in6) :
 						 sizeof(struct sockaddr_in);

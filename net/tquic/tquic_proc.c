@@ -217,6 +217,9 @@ void tquic_log_error(struct net *net, struct tquic_connection *conn,
 
 		memcpy(entry->scid, conn->scid.id, len);
 		entry->scid_len = len;
+		memset(&entry->local_addr, 0, sizeof(entry->local_addr));
+		memset(&entry->remote_addr, 0, sizeof(entry->remote_addr));
+		entry->path_id = 0;
 
 		rcu_read_lock();
 		apath = rcu_dereference(conn->active_path);
@@ -231,13 +234,9 @@ void tquic_log_error(struct net *net, struct tquic_connection *conn,
 			tquic_path_put(apath);
 		}
 		rcu_read_unlock();
-		} else {
-			memset(&entry->local_addr, 0, sizeof(entry->local_addr));
-			memset(&entry->remote_addr, 0, sizeof(entry->remote_addr));
-			entry->path_id = 0;
-		}
 	} else {
 		entry->scid_len = 0;
+		memset(entry->scid, 0, sizeof(entry->scid));
 		memset(&entry->local_addr, 0, sizeof(entry->local_addr));
 		memset(&entry->remote_addr, 0, sizeof(entry->remote_addr));
 		entry->path_id = 0;
@@ -388,6 +387,7 @@ static void tquic_conn_seq_stop(struct seq_file *seq, void *v)
 static int tquic_conn_seq_show(struct seq_file *seq, void *v)
 {
 	struct tquic_connection *conn;
+	struct tquic_path *apath;
 	u64 tx_bytes, rx_bytes;
 	u64 streams_opened, streams_closed;
 	int num_paths, num_streams;
@@ -419,16 +419,17 @@ static int tquic_conn_seq_show(struct seq_file *seq, void *v)
 		snprintf(&scid_hex[i * 2], sizeof(scid_hex) - i * 2,
 			 "%02x", conn->scid.id[i]);
 	scid_hex[scid_len * 2] = '\0';
-	if (conn->active_path) {
-		memcpy(&local_addr, &conn->active_path->local_addr,
-		       sizeof(local_addr));
-		memcpy(&remote_addr, &conn->active_path->remote_addr,
-		       sizeof(remote_addr));
-	} else {
-		memset(&local_addr, 0, sizeof(local_addr));
-		memset(&remote_addr, 0, sizeof(remote_addr));
-	}
 	spin_unlock_bh(&conn->lock);
+
+	memset(&local_addr, 0, sizeof(local_addr));
+	memset(&remote_addr, 0, sizeof(remote_addr));
+	rcu_read_lock();
+	apath = rcu_dereference(conn->active_path);
+	if (apath) {
+		memcpy(&local_addr, &apath->local_addr, sizeof(local_addr));
+		memcpy(&remote_addr, &apath->remote_addr, sizeof(remote_addr));
+	}
+	rcu_read_unlock();
 
 	num_streams = (int)(streams_opened - streams_closed);
 	if (num_streams < 0)

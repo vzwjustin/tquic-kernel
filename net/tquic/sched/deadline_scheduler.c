@@ -22,6 +22,8 @@
 #include <linux/slab.h>
 #include <linux/rbtree.h>
 #include <linux/math64.h>
+#include <linux/rculist.h>
+#include <linux/rcupdate.h>
 #include <linux/sort.h>
 #include <net/tquic.h>
 
@@ -269,7 +271,11 @@ static u64 edf_estimate_path_delivery(struct tquic_path *path, size_t data_len)
 	tx_delay_us = div64_u64(data_len * 1000000ULL, bandwidth);
 
 	/* Queuing delay (bytes in flight) */
-	in_flight = path->stats.tx_bytes - path->stats.acked_bytes;
+	if (path->stats.tx_bytes > path->stats.acked_bytes)
+		in_flight = path->stats.tx_bytes - path->stats.acked_bytes;
+	else
+		in_flight = 0;
+
 	if (in_flight > path->stats.cwnd)
 		in_flight = path->stats.cwnd;
 	queue_delay_us = div64_u64(in_flight * 1000000ULL, bandwidth);
@@ -823,6 +829,19 @@ struct edf_sched_priv {
 	struct tquic_edf_scheduler *sched;
 };
 
+static struct tquic_path *edf_sched_active_path_get(struct tquic_connection *conn)
+{
+	struct tquic_path *path;
+
+	rcu_read_lock();
+	path = rcu_dereference(conn->active_path);
+	if (path && !tquic_path_get(path))
+		path = NULL;
+	rcu_read_unlock();
+
+	return path;
+}
+
 static void *edf_sched_init(struct tquic_connection *conn)
 {
 	struct edf_sched_priv *priv;
@@ -865,10 +884,11 @@ static struct tquic_path *edf_sched_select(void *state,
 		struct tquic_path *best = NULL;
 		u64 min_completion = ULLONG_MAX;
 
-		list_for_each_entry(path, &conn->paths, list) {
+		rcu_read_lock();
+		list_for_each_entry_rcu(path, &conn->paths, list) {
 			u64 completion;
 
-			if (path->state != TQUIC_PATH_ACTIVE)
+			if (READ_ONCE(path->state) != TQUIC_PATH_ACTIVE)
 				continue;
 
 			completion = edf_estimate_path_delivery(path, skb->len);
@@ -877,11 +897,14 @@ static struct tquic_path *edf_sched_select(void *state,
 				best = path;
 			}
 		}
+		if (best && !tquic_path_get(best))
+			best = NULL;
+		rcu_read_unlock();
 
-		return best ?: conn->active_path;
+		return best ?: edf_sched_active_path_get(conn);
 	}
 
-	return conn->active_path;
+	return edf_sched_active_path_get(conn);
 }
 
 static struct tquic_sched_ops tquic_sched_edf = {

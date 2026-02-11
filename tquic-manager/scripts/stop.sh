@@ -2,7 +2,21 @@
 
 # TQUIC Manager Stop Script
 
-PID_FILE="/tmp/tquic-manager.pid"
+RUNTIME_DIR="/run/tquic-manager"
+PID_FILE="$RUNTIME_DIR/tquic-manager.pid"
+if [ ! -f "$PID_FILE" ]; then
+    FALLBACK_RUNTIME_DIR="/tmp/tquic-manager-$UID"
+    FALLBACK_PID_FILE="$FALLBACK_RUNTIME_DIR/tquic-manager.pid"
+    if [ -f "$FALLBACK_PID_FILE" ]; then
+        RUNTIME_DIR="$FALLBACK_RUNTIME_DIR"
+        PID_FILE="$FALLBACK_PID_FILE"
+    fi
+fi
+
+if [ -L "$PID_FILE" ]; then
+    echo "⚠️  Refusing to use symlinked PID file: $PID_FILE"
+    exit 1
+fi
 
 echo "🛑 Stopping TQUIC Manager..."
 
@@ -24,6 +38,11 @@ fi
 
 # Read PID
 PID=$(cat "$PID_FILE")
+if ! [[ "$PID" =~ ^[0-9]+$ ]]; then
+    echo "⚠️  Invalid PID file content, removing stale PID file"
+    rm -f "$PID_FILE"
+    exit 0
+fi
 
 # Check if process is running
 if ! ps -p $PID > /dev/null 2>&1; then

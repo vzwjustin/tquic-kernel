@@ -200,28 +200,6 @@ bool tquic_path_can_send_on(struct tquic_connection *conn)
 }
 EXPORT_SYMBOL_GPL(tquic_path_can_send_on);
 
-/* Forward declaration for tquic_client */
-struct tquic_client {
-	char psk_identity[64];
-	u8 psk_identity_len;
-	u8 psk[32];
-	u16 port_range_start;
-	u16 port_range_end;
-	u64 bandwidth_limit;
-	atomic_t connection_count;
-	atomic64_t tx_bytes;
-	atomic64_t rx_bytes;
-	atomic_t active_paths;
-	u8 traffic_class_weights[4];
-	u32 conn_rate_limit;
-	atomic_t rate_tokens;
-	ktime_t rate_last_refill;
-	spinlock_t rate_lock;
-	u32 session_ttl;
-	struct rhash_head node;
-	struct rcu_head rcu_head;
-};
-
 /**
  * struct tquic_migration_state - Migration state machine
  * @magic: Type discriminator, must be TQUIC_SM_MAGIC_MIGRATION
@@ -434,6 +412,25 @@ struct tquic_path *tquic_path_find_by_addr(struct tquic_connection *conn,
 }
 EXPORT_SYMBOL_GPL(tquic_path_find_by_addr);
 
+static int tquic_migration_alloc_path_id_locked(struct tquic_connection *conn)
+{
+	bool used[TQUIC_MAX_PATHS] = { 0 };
+	struct tquic_path *path;
+	u32 id;
+
+	list_for_each_entry(path, &conn->paths, list) {
+		if (path->path_id < TQUIC_MAX_PATHS)
+			used[path->path_id] = true;
+	}
+
+	for (id = 0; id < TQUIC_MAX_PATHS; id++) {
+		if (!used[id])
+			return id;
+	}
+
+	return -ENOSPC;
+}
+
 /**
  * tquic_path_create - Create new path for migration
  * @conn: Connection to add path to
@@ -450,6 +447,7 @@ struct tquic_path *tquic_path_create(struct tquic_connection *conn,
 				     const struct sockaddr_storage *remote)
 {
 	struct tquic_path *path;
+	int path_id;
 
 	if (!conn || !local || !remote)
 		return NULL;
@@ -465,7 +463,7 @@ struct tquic_path *tquic_path_create(struct tquic_connection *conn,
 	/* Initialize path -- use per-connection counter, not global static */
 	refcount_set(&path->refcnt, 1);
 	path->conn = conn;
-	path->path_id = conn->num_paths;
+	path->path_id = 0;
 	path->state = TQUIC_PATH_PENDING;
 	path->saved_state = TQUIC_PATH_UNUSED;
 
@@ -524,6 +522,19 @@ struct tquic_path *tquic_path_create(struct tquic_connection *conn,
 
 	/* Add to connection's path list */
 	spin_lock_bh(&conn->paths_lock);
+	if (conn->num_paths >= conn->max_paths) {
+		spin_unlock_bh(&conn->paths_lock);
+		tquic_path_put(path);
+		return NULL;
+	}
+
+	path_id = tquic_migration_alloc_path_id_locked(conn);
+	if (path_id < 0) {
+		spin_unlock_bh(&conn->paths_lock);
+		tquic_path_put(path);
+		return NULL;
+	}
+	path->path_id = path_id;
 	list_add_tail_rcu(&path->list, &conn->paths);
 	conn->num_paths++;
 	spin_unlock_bh(&conn->paths_lock);
@@ -575,7 +586,6 @@ void tquic_path_free(struct tquic_path *path)
 		spin_lock_bh(&conn->paths_lock);
 		if (!list_empty(&path->list)) {
 			list_del_rcu(&path->list);
-			INIT_LIST_HEAD(&path->list);
 			if (conn->num_paths > 0)
 				conn->num_paths--;
 			linked = true;
@@ -1615,18 +1625,13 @@ static void tquic_session_ttl_expired(struct timer_list *t)
 int tquic_server_start_session_ttl(struct tquic_connection *conn)
 {
 	struct tquic_session_state *state;
-	struct tquic_client *client;
 	u32 ttl_ms;
 
 	if (!conn)
 		return -EINVAL;
 
-	/* Get TTL from client config if server-side, else use default */
-	client = conn->client;
-	if (client)
-		ttl_ms = client->session_ttl;
-	else
-		ttl_ms = 120000; /* Default 120s */
+	/* Snapshot server client TTL with lifetime-safe ref handling. */
+	ttl_ms = tquic_server_conn_session_ttl(conn, 120000);
 
 	/* Check if we already have session state */
 	if (conn->state_machine) {

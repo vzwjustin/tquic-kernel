@@ -341,7 +341,7 @@ static int tquic_debug_path_show(struct seq_file *seq, void *v)
 
 	spin_lock_bh(&conn->lock);
 	list_for_each_entry(path, &conn->paths, list) {
-		bool is_primary = (path == conn->active_path);
+		bool is_primary = (path == READ_ONCE(conn->active_path));
 
 		seq_printf(seq, "%-8u %-4u %-10s %-22pISpc %-22pISpc %8u %8u %8llu %8llu %4u%% %c\n",
 			   conn->token,

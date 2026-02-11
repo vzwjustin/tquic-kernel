@@ -836,6 +836,7 @@ static int tquic_detect_lost_packets(struct tquic_timer_state *ts, int pn_space)
 {
 	struct tquic_recovery_state *rs = ts->recovery;
 	struct tquic_pn_space *pns = &rs->pn_spaces[pn_space];
+	struct tquic_path *path;
 	struct tquic_sent_packet *pkt, *tmp;
 	u64 loss_delay;
 	ktime_t now, lost_send_time;
@@ -889,13 +890,18 @@ static int tquic_detect_lost_packets(struct tquic_timer_state *ts, int pn_space)
 				}
 				pkt->in_flight = false;
 			}
-			spin_unlock_bh(&rs->lock);
+				spin_unlock_bh(&rs->lock);
 
-			/* Notify congestion controller of loss */
-			if (ts->conn->active_path) {
-				tquic_cong_on_loss(ts->conn->active_path,
-						   pkt->sent_bytes);
-			}
+				/* Notify congestion controller of loss */
+				rcu_read_lock();
+				path = rcu_dereference(ts->conn->active_path);
+				if (path && !tquic_path_get(path))
+					path = NULL;
+				rcu_read_unlock();
+				if (path) {
+					tquic_cong_on_loss(path, pkt->sent_bytes);
+					tquic_path_put(path);
+				}
 
 			tquic_dbg("timer:packet %llu declared lost\n",
 				  pkt->pkt_num);

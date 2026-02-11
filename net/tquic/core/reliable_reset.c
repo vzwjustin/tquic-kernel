@@ -900,7 +900,7 @@ static int tquic_queue_control_frame(struct tquic_connection *conn,
 	spin_unlock_bh(&conn->lock);
 
 	/* Schedule transmission */
-	if (conn->active_path)
+	if (READ_ONCE(conn->active_path))
 		tquic_schedule_transmit(conn);
 
 	return 0;

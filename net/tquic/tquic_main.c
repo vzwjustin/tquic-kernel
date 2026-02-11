@@ -151,12 +151,12 @@ void tquic_conn_destroy(struct tquic_connection *conn)
 	/* Free all paths */
 	list_for_each_entry_safe(path, tmp_path, &conn->paths, list) {
 		list_del_rcu(&path->list);
-		INIT_LIST_HEAD(&path->list);
 		timer_delete_sync(&path->validation_timer);
 		timer_delete_sync(&path->validation.timer);
 		skb_queue_purge(&path->response.queue);
 		/* Wait for any RCU readers before dropping ownership. */
 		synchronize_rcu();
+		INIT_LIST_HEAD(&path->list);
 		tquic_path_put(path);
 	}
 
@@ -246,10 +246,30 @@ EXPORT_SYMBOL_GPL(tquic_conn_destroy);
  * Path Management for WAN Bonding
  */
 
+static int tquic_conn_alloc_path_id_locked(struct tquic_connection *conn)
+{
+	bool used[TQUIC_MAX_PATHS] = { 0 };
+	struct tquic_path *path;
+	u32 id;
+
+	list_for_each_entry(path, &conn->paths, list) {
+		if (path->path_id < TQUIC_MAX_PATHS)
+			used[path->path_id] = true;
+	}
+
+	for (id = 0; id < TQUIC_MAX_PATHS; id++) {
+		if (!used[id])
+			return id;
+	}
+
+	return -ENOSPC;
+}
+
 int tquic_conn_add_path(struct tquic_connection *conn,
 			struct sockaddr *local, struct sockaddr *remote)
 {
 	struct tquic_path *path;
+	int path_id;
 
 	if (conn->num_paths >= TQUIC_MAX_PATHS)
 		return -ENOSPC;
@@ -262,7 +282,7 @@ int tquic_conn_add_path(struct tquic_connection *conn,
 	refcount_set(&path->refcnt, 1);
 	path->conn = conn;
 	path->state = TQUIC_PATH_PENDING;
-	path->path_id = conn->num_paths;
+	path->path_id = 0;
 	path->mtu = 1200;  /* Initial conservative MTU */
 	path->priority = 128;  /* Default middle priority */
 	path->weight = 1;
@@ -293,7 +313,7 @@ int tquic_conn_add_path(struct tquic_connection *conn,
 	/* Generate path-specific connection ID */
 	get_random_bytes(path->local_cid.id, TQUIC_DEFAULT_CID_LEN);
 	path->local_cid.len = TQUIC_DEFAULT_CID_LEN;
-	path->local_cid.seq_num = conn->num_paths;
+	path->local_cid.seq_num = 0;
 
 	/* Setup validation timers */
 	timer_setup(&path->validation.timer, tquic_path_validation_timeout, 0);
@@ -317,11 +337,26 @@ int tquic_conn_add_path(struct tquic_connection *conn,
 	get_random_bytes(path->challenge_data, sizeof(path->challenge_data));
 
 	spin_lock_bh(&conn->paths_lock);
+	if (conn->num_paths >= TQUIC_MAX_PATHS) {
+		spin_unlock_bh(&conn->paths_lock);
+		tquic_path_put(path);
+		return -ENOSPC;
+	}
+
+	path_id = tquic_conn_alloc_path_id_locked(conn);
+	if (path_id < 0) {
+		spin_unlock_bh(&conn->paths_lock);
+		tquic_path_put(path);
+		return path_id;
+	}
+	path->path_id = path_id;
+	path->local_cid.seq_num = path_id;
+
 	list_add_tail_rcu(&path->list, &conn->paths);
 	conn->num_paths++;
 
 	/* First path becomes active */
-	if (!conn->active_path)
+	if (!rcu_access_pointer(conn->active_path))
 		rcu_assign_pointer(conn->active_path, path);
 	spin_unlock_bh(&conn->paths_lock);
 
@@ -350,12 +385,11 @@ int tquic_conn_remove_path(struct tquic_connection *conn, u32 path_id)
 				return -EINVAL;
 			}
 
-			list_del_rcu(&path->list);
-			INIT_LIST_HEAD(&path->list);
-			conn->num_paths--;
+				list_del_rcu(&path->list);
+				conn->num_paths--;
 
 			/* Update active path if needed */
-			if (conn->active_path == path) {
+			if (rcu_access_pointer(conn->active_path) == path) {
 				struct tquic_path *new_active;
 
 				new_active =
@@ -384,6 +418,7 @@ int tquic_conn_remove_path(struct tquic_connection *conn, u32 path_id)
 
 	/* Wait for RCU readers before dropping list ownership reference. */
 	synchronize_rcu();
+	INIT_LIST_HEAD(&path->list);
 	tquic_path_put(path);
 
 	tquic_conn_dbg(conn, "removed path %u\n", path_id);

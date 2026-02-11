@@ -1038,6 +1038,7 @@ ssize_t tquic_cong_data_handle_frame(struct tquic_connection *conn,
 				     const u8 *buf, size_t buflen)
 {
 	struct tquic_cong_data data;
+	struct tquic_path *path;
 	ssize_t consumed;
 	int ret;
 
@@ -1049,7 +1050,15 @@ ssize_t tquic_cong_data_handle_frame(struct tquic_connection *conn,
 		return consumed;
 
 	/* Apply the received data */
-	ret = tquic_cong_data_apply(conn, conn->active_path, &data);
+	rcu_read_lock();
+	path = rcu_dereference(conn->active_path);
+	if (path && !tquic_path_get(path))
+		path = NULL;
+	rcu_read_unlock();
+
+	ret = tquic_cong_data_apply(conn, path, &data);
+	if (path)
+		tquic_path_put(path);
 	if (ret < 0 && ret != -EALREADY) {
 		tquic_dbg("cong_data: failed to apply CONGESTION_DATA: %d\n", ret);
 		/* Don't return error - frame was parsed successfully */

@@ -23,6 +23,7 @@
 #include <linux/string.h>
 #include <linux/rhashtable.h>
 #include <linux/atomic.h>
+#include <linux/refcount.h>
 #include <linux/workqueue.h>
 #include <linux/timer.h>
 #include <linux/ratelimit.h>
@@ -71,6 +72,7 @@
  * @rate_tokens: Current token bucket level
  * @rate_last_refill: Last token refill time
  * @session_ttl: Session state TTL in ms (default 120s)
+ * @refcnt: Object lifetime reference count
  * @node: RHT node for hashtable linkage
  * @rcu_head: RCU callback for deferred freeing
  */
@@ -103,6 +105,9 @@ struct tquic_client {
 
 	/* Session TTL for router reconnects */
 	u32 session_ttl;
+
+	/* Lifetime management: table ref + active connection refs */
+	refcount_t refcnt;
 
 	/* RHT linkage */
 	struct rhash_head node;
@@ -241,6 +246,7 @@ static struct tquic_client *tquic_client_alloc(const char *identity,
 
 	/* Initialize session TTL */
 	client->session_ttl = TQUIC_DEFAULT_SESSION_TTL_MS;
+	refcount_set(&client->refcnt, 1); /* Hashtable ownership */
 
 	/* Initialize counters */
 	atomic_set(&client->connection_count, 0);
@@ -271,6 +277,12 @@ static void tquic_client_free_rcu(struct rcu_head *head)
 	kfree_sensitive(client);
 }
 
+static inline void tquic_client_put(struct tquic_client *client)
+{
+	if (client && refcount_dec_and_test(&client->refcnt))
+		call_rcu(&client->rcu_head, tquic_client_free_rcu);
+}
+
 /**
  * tquic_client_lookup_by_psk - Look up client by PSK identity
  * @identity: PSK identity string
@@ -297,7 +309,7 @@ struct tquic_client *tquic_client_lookup_by_psk(const char *identity,
 	    identity_len > TQUIC_MAX_PSK_IDENTITY_LEN)
 		return NULL;
 
-	if (!tquic_client_table_initialized)
+	if (!READ_ONCE(tquic_client_table_initialized))
 		return NULL;
 
 	/* Prepare padded key for lookup */
@@ -398,8 +410,11 @@ int tquic_client_unregister(const char *identity, size_t identity_len)
 	mutex_unlock(&tquic_client_mutex);
 
 	if (ret == 0) {
-		/* Defer freeing until RCU grace period */
-		call_rcu(&client->rcu_head, tquic_client_free_rcu);
+		/*
+		 * Drop hashtable ownership. If active connections still hold
+		 * references, free is deferred until the last unbind.
+		 */
+		tquic_client_put(client);
 		tquic_dbg("unregistered client '%.*s'\n",
 			 (int)identity_len, identity);
 	}
@@ -419,16 +434,27 @@ EXPORT_SYMBOL_GPL(tquic_client_unregister);
  * Returns: 0 on success
  */
 int tquic_server_bind_client(struct tquic_connection *conn,
-			     struct tquic_client *client)
+				 struct tquic_client *client)
 {
 	if (!conn || !client)
 		return -EINVAL;
 
-	/* Store client pointer in connection */
-	conn->client = client;
+	/*
+	 * Take a persistent ref for connection lifetime. This prevents
+	 * unregister from freeing the client while conn->client points to it.
+	 */
+	if (!refcount_inc_not_zero(&client->refcnt))
+		return -ENOENT;
 
-	/* Increment connection count */
+	/* Increment before publishing pointer to pair with unbind decrement. */
 	atomic_inc(&client->connection_count);
+
+	/* Bind once per connection to prevent ref leaks/double counting */
+	if (cmpxchg(&conn->client, NULL, client) != NULL) {
+		atomic_dec(&client->connection_count);
+		tquic_client_put(client);
+		return -EALREADY;
+	}
 
 	tquic_dbg("bound connection to client (id_len=%d, count=%d)\n",
 		 client->psk_identity_len,
@@ -451,7 +477,8 @@ void tquic_server_unbind_client(struct tquic_connection *conn)
 	if (!conn)
 		return;
 
-	client = conn->client;
+	/* Clear pointer before dropping the last ref to avoid stale reads. */
+	client = xchg(&conn->client, NULL);
 	if (!client)
 		return;
 
@@ -462,9 +489,34 @@ void tquic_server_unbind_client(struct tquic_connection *conn)
 		 client->psk_identity_len,
 		 atomic_read(&client->connection_count));
 
-	conn->client = NULL;
+	tquic_client_put(client);
 }
 EXPORT_SYMBOL_GPL(tquic_server_unbind_client);
+
+u32 tquic_server_conn_session_ttl(struct tquic_connection *conn,
+				  u32 default_ttl_ms)
+{
+	struct tquic_client *client;
+	u32 ttl_ms;
+
+	if (!conn)
+		return default_ttl_ms;
+
+	client = READ_ONCE(conn->client);
+	if (!client)
+		return default_ttl_ms;
+
+	if (!refcount_inc_not_zero(&client->refcnt))
+		return default_ttl_ms;
+
+	ttl_ms = READ_ONCE(client->session_ttl);
+	if (!ttl_ms)
+		ttl_ms = default_ttl_ms;
+
+	tquic_client_put(client);
+	return ttl_ms;
+}
+EXPORT_SYMBOL_GPL(tquic_server_conn_session_ttl);
 
 /**
  * tquic_server_get_client_psk - Get PSK for client during handshake
@@ -738,7 +790,7 @@ int __init tquic_server_init(void)
 	mutex_lock(&tquic_client_mutex);
 	ret = rhashtable_init(&tquic_client_table, &tquic_client_params);
 	if (ret == 0)
-		tquic_client_table_initialized = true;
+		WRITE_ONCE(tquic_client_table_initialized, true);
 	mutex_unlock(&tquic_client_mutex);
 
 	if (ret) {
@@ -762,7 +814,14 @@ void __exit tquic_server_exit(void)
 	struct tquic_client *client;
 
 	mutex_lock(&tquic_client_mutex);
-	if (tquic_client_table_initialized) {
+	if (READ_ONCE(tquic_client_table_initialized)) {
+		/*
+		 * Block new lookups before teardown, then wait for in-flight
+		 * RCU readers to drain.
+		 */
+		WRITE_ONCE(tquic_client_table_initialized, false);
+		synchronize_rcu();
+
 		/* Walk the table and scrub all client entries */
 		rhashtable_walk_enter(&tquic_client_table, &iter);
 		rhashtable_walk_start(&iter);
@@ -774,15 +833,14 @@ void __exit tquic_server_exit(void)
 			rhashtable_remove_fast(&tquic_client_table,
 					       &client->node,
 					       tquic_client_params);
-			/* Clear entire struct including PSK material */
-			kfree_sensitive(client);
+			/* Drop table ref; connection refs keep object alive. */
+			tquic_client_put(client);
 		}
 
 		rhashtable_walk_stop(&iter);
 		rhashtable_walk_exit(&iter);
 
 		rhashtable_destroy(&tquic_client_table);
-		tquic_client_table_initialized = false;
 	}
 	mutex_unlock(&tquic_client_mutex);
 

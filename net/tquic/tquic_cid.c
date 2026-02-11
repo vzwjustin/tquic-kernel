@@ -802,6 +802,7 @@ void tquic_send_new_connection_id(struct tquic_connection *conn,
 				  const u8 *reset_token)
 {
 	struct tquic_cid_pool *pool = conn->cid_pool;
+	bool has_active_path;
 	struct sk_buff *skb;
 	u8 *frame_buf;
 	int frame_len;
@@ -810,7 +811,10 @@ void tquic_send_new_connection_id(struct tquic_connection *conn,
 	if (!conn || !cid || !reset_token || !pool)
 		return;
 
-	if (!conn->active_path) {
+	rcu_read_lock();
+	has_active_path = rcu_dereference(conn->active_path) != NULL;
+	rcu_read_unlock();
+	if (!has_active_path) {
 		tquic_dbg("NEW_CONNECTION_ID: no active path\n");
 		return;
 	}
@@ -959,20 +963,21 @@ void tquic_send_retire_connection_id(struct tquic_connection *conn, u64 seq_num)
 		}
 	}
 
-	path = conn->active_path;
+	rcu_read_lock();
+	path = rcu_dereference(conn->active_path);
+	if (path && !tquic_path_get(path))
+		path = NULL;
+	rcu_read_unlock();
+
 	if (!path) {
 		tquic_dbg("RETIRE_CONNECTION_ID: no active path\n");
-		if (pool)
-			tquic_cid_security_dequeue_retire(&pool->security);
-		return;
+		goto out_dequeue_retire;
 	}
 
 	/* Allocate frame buffer */
 	frame_buf = kmalloc(16, GFP_ATOMIC);
 	if (!frame_buf) {
-		if (pool)
-			tquic_cid_security_dequeue_retire(&pool->security);
-		return;
+		goto out_put_path;
 	}
 
 	/* Build frame */
@@ -980,16 +985,14 @@ void tquic_send_retire_connection_id(struct tquic_connection *conn, u64 seq_num)
 	if (frame_len < 0) {
 		tquic_dbg("RETIRE_CONNECTION_ID: frame build failed (%d)\n",
 			 frame_len);
-		kfree(frame_buf);
-		return;
+		goto out_free_frame;
 	}
 
 	/* Build packet */
 	pkt_len = 64 + frame_len;
 	skb = alloc_skb(pkt_len + 128, GFP_ATOMIC);
 	if (!skb) {
-		kfree(frame_buf);
-		return;
+		goto out_free_frame;
 	}
 
 	skb_reserve(skb, 128);
@@ -1013,7 +1016,6 @@ void tquic_send_retire_connection_id(struct tquic_connection *conn, u64 seq_num)
 
 	/* Append frame payload */
 	skb_put_data(skb, frame_buf, frame_len);
-	kfree(frame_buf);
 
 	if (conn->sk && path->dev) {
 		skb->dev = path->dev;
@@ -1024,6 +1026,14 @@ void tquic_send_retire_connection_id(struct tquic_connection *conn, u64 seq_num)
 
 	/* In production, hand off to output path */
 	kfree_skb(skb);
+
+out_free_frame:
+	kfree(frame_buf);
+out_put_path:
+	tquic_path_put(path);
+out_dequeue_retire:
+	if (pool)
+		tquic_cid_security_dequeue_retire(&pool->security);
 }
 
 /*

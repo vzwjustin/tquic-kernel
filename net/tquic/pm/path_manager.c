@@ -348,6 +348,9 @@ static int tquic_pm_netdev_event(struct notifier_block *nb, unsigned long event,
 		/* Discover paths through this interface */
 		if (pm->conn) {
 			struct sockaddr_storage *addrs;
+			struct sockaddr_storage remote_addr;
+			struct tquic_path *apath;
+			bool have_remote = false;
 			int num_addrs, i;
 
 			addrs = kmalloc_array(TQUIC_MAX_PATHS,
@@ -355,17 +358,24 @@ static int tquic_pm_netdev_event(struct notifier_block *nb, unsigned long event,
 			if (!addrs)
 				break;
 
+			rcu_read_lock();
+			apath = rcu_dereference(pm->conn->active_path);
+			if (apath) {
+				memcpy(&remote_addr, &apath->remote_addr,
+				       sizeof(remote_addr));
+				have_remote = true;
+			}
+			rcu_read_unlock();
+
 			num_addrs = tquic_pm_discover_addresses(
 				pm->conn, addrs, TQUIC_MAX_PATHS);
 			for (i = 0; i < num_addrs; i++) {
 				/* Try to add path if remote addr is known */
-				if (pm->conn->active_path) {
+				if (have_remote) {
 					tquic_conn_add_path(
 						pm->conn,
 						(struct sockaddr *)&addrs[i],
-						(struct sockaddr *)&pm->conn
-							->active_path
-							->remote_addr);
+						(struct sockaddr *)&remote_addr);
 				}
 			}
 			kfree(addrs);
@@ -864,7 +874,7 @@ static struct tquic_path *tquic_path_alloc(struct tquic_connection *conn,
 
 	/* CF-477: Use per-connection counter instead of global static */
 	path->conn = conn;
-	path->path_id = conn->num_paths;
+	path->path_id = 0;
 	path->state = TQUIC_PATH_UNUSED;
 	path->saved_state = TQUIC_PATH_UNUSED;
 
@@ -912,6 +922,7 @@ static struct tquic_path *tquic_path_alloc(struct tquic_connection *conn,
 	}
 
 	/* Initialize validation timer */
+	timer_setup(&path->validation_timer, tquic_path_validation_expired, 0);
 	timer_setup(&path->validation.timer, tquic_path_validation_timeout, 0);
 
 	/* Initialize response queue */
@@ -940,6 +951,25 @@ static struct tquic_path *tquic_path_alloc(struct tquic_connection *conn,
 	return path;
 }
 
+static int tquic_conn_alloc_path_id_locked(struct tquic_connection *conn)
+{
+	bool used[TQUIC_MAX_PATHS] = { 0 };
+	struct tquic_path *path;
+	u32 id;
+
+	list_for_each_entry(path, &conn->paths, list) {
+		if (path->path_id < TQUIC_MAX_PATHS)
+			used[path->path_id] = true;
+	}
+
+	for (id = 0; id < TQUIC_MAX_PATHS; id++) {
+		if (!used[id])
+			return id;
+	}
+
+	return -ENOSPC;
+}
+
 /*
  * Initialize validation state for a path
  */
@@ -958,6 +988,7 @@ int tquic_conn_add_path_safe(struct tquic_connection *conn,
 			     struct sockaddr *local, struct sockaddr *remote)
 {
 	struct tquic_path *path;
+	int path_id;
 	int ret;
 
 	if (!conn || !local || !remote)
@@ -1026,6 +1057,55 @@ int tquic_conn_add_path_safe(struct tquic_connection *conn,
 
 	/* Add to connection's path list with RCU */
 	spin_lock_bh(&conn->paths_lock);
+	if (conn->num_paths >= conn->max_paths) {
+		spin_unlock_bh(&conn->paths_lock);
+		del_timer_sync(&path->validation.timer);
+		skb_queue_purge(&path->response.queue);
+		tquic_nat_lifecycle_cleanup(path);
+		tquic_nat_keepalive_cleanup(path);
+		tquic_pmtud_release_path(path);
+		tquic_cong_release_path(path);
+#ifdef CONFIG_TQUIC_MULTIPATH
+		{
+			extern void tquic_mp_ack_state_destroy(void *);
+			extern void tquic_mp_abandon_state_destroy(void *);
+			if (path->mp_ack_state)
+				tquic_mp_ack_state_destroy(path->mp_ack_state);
+			if (path->abandon_state)
+				tquic_mp_abandon_state_destroy(path->abandon_state);
+		}
+#endif
+		if (path->dev)
+			dev_put(path->dev);
+		kfree(path);
+		return -ENOSPC;
+	}
+
+	path_id = tquic_conn_alloc_path_id_locked(conn);
+	if (path_id < 0) {
+		spin_unlock_bh(&conn->paths_lock);
+		del_timer_sync(&path->validation.timer);
+		skb_queue_purge(&path->response.queue);
+		tquic_nat_lifecycle_cleanup(path);
+		tquic_nat_keepalive_cleanup(path);
+		tquic_pmtud_release_path(path);
+		tquic_cong_release_path(path);
+#ifdef CONFIG_TQUIC_MULTIPATH
+		{
+			extern void tquic_mp_ack_state_destroy(void *);
+			extern void tquic_mp_abandon_state_destroy(void *);
+			if (path->mp_ack_state)
+				tquic_mp_ack_state_destroy(path->mp_ack_state);
+			if (path->abandon_state)
+				tquic_mp_abandon_state_destroy(path->abandon_state);
+		}
+#endif
+		if (path->dev)
+			dev_put(path->dev);
+		kfree(path);
+		return path_id;
+	}
+	path->path_id = path_id;
 	list_add_tail_rcu(&path->list, &conn->paths);
 	conn->num_paths++;
 	spin_unlock_bh(&conn->paths_lock);
@@ -1065,25 +1145,35 @@ int tquic_conn_remove_path_safe(struct tquic_connection *conn, u32 path_id)
 	}
 
 	/* Don't remove the active path */
-	if (path == conn->active_path) {
+	if (path == rcu_access_pointer(conn->active_path)) {
 		spin_unlock_bh(&conn->paths_lock);
 		return -EBUSY;
 	}
 
-	/* Mark as closing to stop new data */
+	/* Mark as closing and detach from the path list atomically. */
 	path->state = TQUIC_PATH_CLOSED;
+	list_del_rcu(&path->list);
+	if (conn->num_paths > 0)
+		conn->num_paths--;
 	spin_unlock_bh(&conn->paths_lock);
+
+	/* Stop validation timers before waiting for drain completion. */
+	del_timer_sync(&path->validation_timer);
+	del_timer_sync(&path->validation.timer);
 
 	/* Drain in-flight data (wait for ACKs or timeout) */
 	tquic_path_drain_data(conn, path);
+
+	/*
+	 * Wait for pre-existing RCU readers that may still hold @path from
+	 * the connection path list before tearing down subordinate state.
+	 */
+	synchronize_rcu();
 
 	/* Emit removal event via PM netlink */
 	if (conn && conn->sk)
 		tquic_pm_nl_send_event(sock_net(conn->sk), conn, path,
 				       TQUIC_PM_EVENT_REMOVED);
-
-	/* Cancel validation timer */
-	del_timer_sync(&path->validation.timer);
 
 	/* Purge response queue */
 	skb_queue_purge(&path->response.queue);
@@ -1115,12 +1205,6 @@ int tquic_conn_remove_path_safe(struct tquic_connection *conn, u32 path_id)
 	/* Release device reference */
 	if (path->dev)
 		dev_put(path->dev);
-
-	/* Remove from list with RCU grace period */
-	spin_lock_bh(&conn->paths_lock);
-	list_del_rcu(&path->list);
-	conn->num_paths--;
-	spin_unlock_bh(&conn->paths_lock);
 
 	/* Free after RCU grace period */
 	kfree_rcu(path, rcu_head);
@@ -1204,29 +1288,48 @@ EXPORT_SYMBOL_GPL(tquic_conn_lookup_by_token);
 void tquic_conn_flush_paths(struct tquic_connection *conn)
 {
 	struct tquic_path *path, *tmp;
-	LIST_HEAD(remove_list);
+	struct tquic_path *removed[TQUIC_MAX_PATHS];
+	int nremoved = 0;
+	int i;
 
 	spin_lock_bh(&conn->paths_lock);
 	list_for_each_entry_safe(path, tmp, &conn->paths, list) {
 		/* Don't remove active path */
-		if (path == conn->active_path)
+		if (path == rcu_access_pointer(conn->active_path))
 			continue;
 
 		list_del_rcu(&path->list);
-		conn->num_paths--;
-		list_add(&path->list, &remove_list);
+		if (conn->num_paths > 0)
+			conn->num_paths--;
+		if (nremoved < ARRAY_SIZE(removed))
+			removed[nremoved++] = path;
 	}
 	spin_unlock_bh(&conn->paths_lock);
 
 	/* Free paths after RCU grace period */
 	synchronize_rcu();
-	list_for_each_entry_safe(path, tmp, &remove_list, list) {
-		list_del(&path->list);
+	for (i = 0; i < nremoved; i++) {
+		path = removed[i];
+		del_timer_sync(&path->validation_timer);
 		del_timer_sync(&path->validation.timer);
 		skb_queue_purge(&path->response.queue);
+		tquic_cong_release_path(path);
+		tquic_pmtud_release_path(path);
+		tquic_nat_lifecycle_cleanup(path);
+		tquic_nat_keepalive_cleanup(path);
+#ifdef CONFIG_TQUIC_MULTIPATH
+		{
+			extern void tquic_mp_ack_state_destroy(void *);
+			extern void tquic_mp_abandon_state_destroy(void *);
+			if (path->mp_ack_state)
+				tquic_mp_ack_state_destroy(path->mp_ack_state);
+			if (path->abandon_state)
+				tquic_mp_abandon_state_destroy(path->abandon_state);
+		}
+#endif
 		if (path->dev)
 			dev_put(path->dev);
-		kfree(path);
+		kfree_rcu(path, rcu_head);
 	}
 }
 EXPORT_SYMBOL_GPL(tquic_conn_flush_paths);
@@ -1581,6 +1684,7 @@ tquic_pm_create_path_to_additional(struct tquic_connection *conn,
 				   struct tquic_additional_address *addr_entry)
 {
 	struct tquic_path *path;
+	struct tquic_path *active_path;
 	struct sockaddr_storage local_addr;
 
 	if (!conn || !addr_entry)
@@ -1593,14 +1697,17 @@ tquic_pm_create_path_to_additional(struct tquic_connection *conn,
 	}
 
 	/* Get local address */
-	if (conn->active_path) {
-		memcpy(&local_addr, &conn->active_path->local_addr,
+	rcu_read_lock();
+	active_path = rcu_dereference(conn->active_path);
+	if (active_path) {
+		memcpy(&local_addr, &active_path->local_addr,
 		       sizeof(local_addr));
 	} else {
 		/* Use any local address of matching family */
 		memset(&local_addr, 0, sizeof(local_addr));
 		local_addr.ss_family = addr_entry->addr.ss_family;
 	}
+	rcu_read_unlock();
 
 	/* Create path */
 	path = tquic_path_create(conn, &local_addr, &addr_entry->addr);
@@ -1681,6 +1788,7 @@ tquic_pm_get_best_additional_address(struct tquic_connection *conn,
 				     enum tquic_addr_select_policy policy)
 {
 	struct tquic_additional_addresses *remote_addrs;
+	struct tquic_path *active_path;
 	struct tquic_additional_address *best;
 	sa_family_t current_family = AF_UNSPEC;
 
@@ -1691,8 +1799,12 @@ tquic_pm_get_best_additional_address(struct tquic_connection *conn,
 	if (!remote_addrs || remote_addrs->count == 0)
 		return NULL;
 
-	if (conn->active_path)
-		current_family = conn->active_path->remote_addr.ss_family;
+	rcu_read_lock();
+	active_path = rcu_dereference(conn->active_path);
+	if (active_path) {
+		current_family = active_path->remote_addr.ss_family;
+	}
+	rcu_read_unlock();
 
 	spin_lock_bh(&remote_addrs->lock);
 	best = tquic_additional_addr_select(remote_addrs, policy,
@@ -1849,6 +1961,7 @@ int tquic_pm_get_active_paths(struct tquic_pm_state *pm,
 	if (!conn)
 		return 0;
 
+	/* Caller must hold rcu_read_lock() while consuming returned pointers. */
 	spin_lock_bh(&conn->paths_lock);
 	list_for_each_entry(path, &conn->paths, list) {
 		if (path->state == TQUIC_PATH_ACTIVE ||

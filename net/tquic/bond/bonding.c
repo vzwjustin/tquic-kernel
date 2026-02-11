@@ -261,9 +261,7 @@ static struct tquic_path *tquic_select_weighted(struct tquic_bond_state *bond,
 			total_weight += min_t(u32, path->weight, 1000);
 	}
 
-	if (total_weight == 0)
-		struct tquic_path *path;
-
+	if (total_weight == 0) {
 		/* Return referenced path per API contract */
 		rcu_read_lock();
 		path = rcu_dereference(conn->active_path);
@@ -272,6 +270,7 @@ static struct tquic_path *tquic_select_weighted(struct tquic_bond_state *bond,
 		rcu_read_unlock();
 
 		return path;
+	}
 
 	/* Select based on weight */
 	target = (u32)atomic_inc_return(&bond->rr_counter) % total_weight;
@@ -592,14 +591,17 @@ struct tquic_path *tquic_bond_select_path(struct tquic_connection *conn,
 	case TQUIC_BOND_MODE_FAILOVER:
 		/* Use primary unless it's down */
 		primary = tquic_bond_primary_path_locked(conn, bond);
-		if (primary && READ_ONCE(primary->state) == TQUIC_PATH_ACTIVE)
+		if (primary && READ_ONCE(primary->state) == TQUIC_PATH_ACTIVE) {
 			selected = primary;
-		else
+			if (!tquic_path_get(selected))
+				selected = NULL;
+		} else {
 			rcu_read_lock();
 			selected = rcu_dereference(conn->active_path);
 			if (selected && !tquic_path_get(selected))
 				selected = NULL;
 			rcu_read_unlock();
+		}
 		break;
 
 	case TQUIC_BOND_MODE_ROUNDROBIN:
@@ -650,23 +652,35 @@ struct tquic_path *tquic_bond_select_path(struct tquic_connection *conn,
 	 */
 	if (selected && selected->anti_amplification.active &&
 	    !tquic_path_anti_amplification_check(selected, skb->len)) {
+		struct tquic_path *candidate = NULL;
+
 		fallback = NULL;
 		list_for_each_entry(fallback, &conn->paths, list) {
 			if (fallback == selected)
 				continue;
 			if (READ_ONCE(fallback->state) != TQUIC_PATH_ACTIVE)
 				continue;
-			if (!fallback->anti_amplification.active ||
-			    tquic_path_anti_amplification_check(fallback,
-								skb->len))
-				break;
+
+			if (!tquic_path_get(fallback))
+				continue;
+
+			if (fallback->anti_amplification.active &&
+			    !tquic_path_anti_amplification_check(fallback,
+								 skb->len)) {
+				tquic_path_put(fallback);
+				continue;
+			}
+
+			candidate = fallback;
+			break;
 		}
+
 		/*
-		 * list_for_each_entry sets fallback to the list head sentinel
-		 * when no suitable path is found; check for that case.
+		 * Release blocked path ref. If no alternate path is available,
+		 * return NULL so callers defer transmission.
 		 */
-		if (&fallback->list != &conn->paths)
-			selected = fallback;
+		tquic_path_put(selected);
+		selected = candidate;
 	}
 
 	return selected;
@@ -702,7 +716,9 @@ void tquic_bond_path_failed(struct tquic_connection *conn,
 			}
 		}
 
-		/* Try standby paths */
+		/*
+		 * Try standby paths if no other active path exists.
+		 */
 		if (!new_active) {
 			list_for_each_entry(p, &conn->paths, list) {
 				if (p != path && p->state == TQUIC_PATH_STANDBY) {
@@ -713,13 +729,13 @@ void tquic_bond_path_failed(struct tquic_connection *conn,
 			}
 		}
 
-			if (new_active) {
-				rcu_assign_pointer(conn->active_path, new_active);
-				bond->stats.failovers++;
-				tquic_info("failed over to path %u\n",
-					   new_active->path_id);
-				tquic_trace_failover(conn, path->path_id,
-						     new_active->path_id, 0, 0);
+		if (new_active) {
+			rcu_assign_pointer(conn->active_path, new_active);
+			bond->stats.failovers++;
+			tquic_info("failed over to path %u\n",
+				   new_active->path_id);
+			tquic_trace_failover(conn, path->path_id,
+					     new_active->path_id, 0, 0);
 		} else {
 			tquic_warn("no paths available for failover\n");
 		}

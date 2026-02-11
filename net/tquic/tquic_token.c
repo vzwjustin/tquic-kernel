@@ -683,6 +683,7 @@ EXPORT_SYMBOL_GPL(tquic_gen_new_token_frame);
 int tquic_send_new_token(struct tquic_connection *conn)
 {
 	struct tquic_path *path;
+	struct sockaddr_storage remote_addr;
 	struct sk_buff *skb;
 	u8 frame_buf[TQUIC_TOKEN_MAX_LEN + 16];
 	int frame_len;
@@ -695,7 +696,12 @@ int tquic_send_new_token(struct tquic_connection *conn)
 	if (conn->role != TQUIC_ROLE_SERVER)
 		return -EINVAL;
 
-	path = conn->active_path;
+	rcu_read_lock();
+	path = rcu_dereference(conn->active_path);
+	if (path)
+		memcpy(&remote_addr, &path->remote_addr, sizeof(remote_addr));
+	rcu_read_unlock();
+
 	if (!path)
 		return -ENETUNREACH;
 
@@ -708,7 +714,7 @@ int tquic_send_new_token(struct tquic_connection *conn)
 
 	/* Generate NEW_TOKEN frame */
 	frame_len = tquic_gen_new_token_frame(&tquic_server_token_key,
-					      &path->remote_addr,
+					      &remote_addr,
 					      frame_buf, sizeof(frame_buf));
 	if (frame_len < 0)
 		return frame_len;
@@ -750,9 +756,12 @@ EXPORT_SYMBOL_GPL(tquic_send_new_token);
 int tquic_process_new_token_frame(struct tquic_connection *conn,
 				  const u8 *data, size_t len)
 {
+	struct tquic_path *apath;
+	struct sockaddr_storage server_addr;
 	u64 token_len;
 	int varint_len;
 	const u8 *p = data;
+	bool have_server_addr = false;
 
 	if (!conn || !data || len < 1)
 		return -EINVAL;
@@ -780,9 +789,20 @@ int tquic_process_new_token_frame(struct tquic_connection *conn,
 	 * Store the token for future connection attempts to this server.
 	 * The token is bound to the server address from the active path.
 	 */
-	if (conn->active_path && conn->token_state) {
+	if (conn->token_state) {
+		rcu_read_lock();
+		apath = rcu_dereference(conn->active_path);
+		if (apath) {
+			memcpy(&server_addr, &apath->remote_addr,
+			       sizeof(server_addr));
+			have_server_addr = true;
+		}
+		rcu_read_unlock();
+	}
+
+	if (have_server_addr) {
 		tquic_token_store(conn->token_state, p, (u16)token_len,
-				  &conn->active_path->remote_addr);
+				  &server_addr);
 	}
 
 	tquic_dbg("received NEW_TOKEN, len=%llu\n", token_len);

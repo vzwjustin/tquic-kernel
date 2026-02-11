@@ -110,14 +110,14 @@ tquic_bonding_count_paths(struct tquic_bonding_ctx *bc, int *active,
 		return;
 	}
 
+	rcu_read_lock();
 	count = tquic_pm_get_active_paths(bc->pm, paths, TQUIC_MAX_PATHS);
 
 	for (i = 0; i < count; i++) {
-		/* Access path state - this is safe under RCU */
 		/* We use a simplified state check here */
 		a++; /* Count all returned paths as active for now */
-		/* Path reference released by caller convention */
 	}
+	rcu_read_unlock();
 
 	/*
 	 * For proper counting, we'd iterate all paths (not just active).
@@ -598,6 +598,7 @@ EXPORT_SYMBOL_GPL(tquic_bonding_get_state);
 void tquic_bonding_derive_weights(struct tquic_bonding_ctx *bc)
 {
 	struct tquic_path *paths[TQUIC_MAX_PATHS];
+	bool active_ids[TQUIC_MAX_PATHS] = { 0 };
 	u64 capacity[TQUIC_MAX_PATHS];
 	u64 total_capacity = 0;
 	u32 total_weight = 0;
@@ -607,9 +608,12 @@ void tquic_bonding_derive_weights(struct tquic_bonding_ctx *bc)
 		return;
 
 	/* Get active paths */
+	rcu_read_lock();
 	count = tquic_pm_get_active_paths(bc->pm, paths, TQUIC_MAX_PATHS);
-	if (count <= 0)
+	if (count <= 0) {
+		rcu_read_unlock();
 		return;
+	}
 
 	spin_lock_bh(&bc->state_lock);
 
@@ -620,8 +624,13 @@ void tquic_bonding_derive_weights(struct tquic_bonding_ctx *bc)
 	 * This provides throughput-proportional scheduling across paths.
 	 */
 	for (i = 0; i < count && i < TQUIC_MAX_PATHS; i++) {
+		u32 path_id = paths[i]->path_id;
 		u64 cwnd = paths[i]->cc.cwnd;
 		u64 rtt = paths[i]->cc.smoothed_rtt_us;
+
+		if (path_id >= TQUIC_MAX_PATHS)
+			continue;
+		active_ids[path_id] = true;
 
 		/*
 		 * Calculate path capacity in bytes per second.
@@ -638,6 +647,7 @@ void tquic_bonding_derive_weights(struct tquic_bonding_ctx *bc)
 
 	if (total_capacity == 0) {
 		spin_unlock_bh(&bc->state_lock);
+		rcu_read_unlock();
 		return;
 	}
 
@@ -647,8 +657,11 @@ void tquic_bonding_derive_weights(struct tquic_bonding_ctx *bc)
 	 * Weight = (capacity / total_capacity) * WEIGHT_SCALE
 	 */
 	for (i = 0; i < count && i < TQUIC_MAX_PATHS; i++) {
-		u8 path_id = i; /* Simplified: index = path_id */
+		u32 path_id = paths[i]->path_id;
 		u32 weight;
+
+		if (path_id >= TQUIC_MAX_PATHS)
+			continue;
 
 		/* Skip user-overridden weights */
 		if (bc->weights.user_override[path_id])
@@ -674,7 +687,7 @@ void tquic_bonding_derive_weights(struct tquic_bonding_ctx *bc)
 	 */
 	total_weight = 0;
 	for (i = 0; i < TQUIC_MAX_PATHS; i++) {
-		if (i < count || bc->weights.user_override[i])
+		if (active_ids[i] || bc->weights.user_override[i])
 			total_weight += bc->weights.path_weights[i];
 	}
 	bc->weights.total_weight = total_weight;
@@ -682,6 +695,7 @@ void tquic_bonding_derive_weights(struct tquic_bonding_ctx *bc)
 	atomic64_inc(&bc->stats.weight_updates);
 
 	spin_unlock_bh(&bc->state_lock);
+	rcu_read_unlock();
 
 	pr_debug("weights derived: total=%u (paths=%d)\n", total_weight, count);
 }

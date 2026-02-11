@@ -528,6 +528,8 @@ int tquic_client_unregister(const char *identity, size_t identity_len);
 int tquic_server_bind_client(struct tquic_connection *conn,
 			     struct tquic_client *client);
 void tquic_server_unbind_client(struct tquic_connection *conn);
+u32 tquic_server_conn_session_ttl(struct tquic_connection *conn,
+				  u32 default_ttl_ms);
 
 /* PSK retrieval (tquic_server.c) */
 int tquic_server_get_client_psk(const char *identity, size_t identity_len,

@@ -116,3 +116,70 @@ dmesg | grep -i quic
 - `/rfc-lookup` - Quick RFC section references
 - `/patch-prep` - Prepare patches for submission
 - `/quic-protocol-check` - Protocol compliance (auto-invoked)
+
+## Multi-AI Workflows (Claude Octopus)
+
+When using `/octo:debate`, `/octo:multi`, or `/octo:review` commands, Claude should invoke external AI providers for true multi-perspective analysis.
+
+### Provider Setup Status
+- **Codex** (OpenAI): ✅ Installed at `/opt/homebrew/bin/codex` (v0.98.0) - WORKING
+- **Gemini** (Google): ✅ Installed at `/opt/homebrew/bin/gemini` (v0.25.2) - Auth needs fix
+
+### Correct CLI Invocation Patterns
+
+**Codex** (for code analysis, technical depth):
+```bash
+echo "context..." | codex exec "Your question here" --full-auto
+```
+
+**Gemini** (for ecosystem breadth, alternatives):
+```bash
+gemini -p "Your question here"  # -p flag for non-interactive mode
+```
+
+### MANDATORY: Visual Indicator Banner
+
+BEFORE starting any multi-AI analysis, ALWAYS display:
+```
+🐙 **CLAUDE OCTOPUS ACTIVATED** - [Workflow Name]
+🐙 Task: [Description of what's being analyzed]
+
+Provider Availability:
+🔴 Codex CLI: Available ✓
+🟡 Gemini CLI: Auth needs fix ✗
+🔵 Claude: Available ✓ (Moderator and participant)
+```
+
+### Example Multi-AI Bug Verification
+
+```bash
+# 1. Check provider availability
+codex_available=$(command -v codex && echo "✓" || echo "✗")
+gemini_available=$(command -v gemini && echo "✓" || echo "✗")
+
+# 2. Display banner (MANDATORY)
+echo "🐙 **CLAUDE OCTOPUS ACTIVATED** - Bug Verification"
+echo "Provider Status: Codex ✓, Gemini ✗, Claude ✓"
+
+# 3. Get Codex perspective
+echo "Analyzing commits for bugs..." | codex exec "Review commits 033c3048 and 7f9dabe7 for security vulnerabilities, use-after-free bugs, and race conditions in the TQUIC kernel module" --full-auto
+
+# 4. Get Gemini perspective (when auth fixed)
+gemini -p "Review commits 033c3048 and 7f9dabe7 for security vulnerabilities..."
+
+# 5. Provide Claude's (my) independent analysis
+
+# 6. Synthesize all perspectives
+```
+
+### Important Notes
+
+1. **Actually invoke CLIs** - Don't just simulate multi-AI by taking different analytical perspectives. Use the actual external tools.
+
+2. **Display banner first** - Users need to see which providers are active and understand they're being charged for external API calls.
+
+3. **Verify provider status** - Check availability before attempting to use them.
+
+4. **Cost awareness** - Codex uses OpenAI API credits (~$0.01-0.05 per query).
+
+5. **Participate as Claude** - You're not just orchestrating - contribute your own independent analysis alongside Codex and Gemini perspectives.

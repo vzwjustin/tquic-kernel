@@ -1501,18 +1501,20 @@ skip_ack:
 	 * Add pending control frames from the connection's control_frames queue.
 	 * These are pre-built frames waiting to be sent.
 	 */
-	while (!skb_queue_empty(&conn->control_frames) && remaining > 0) {
+	while (remaining > 0) {
 		struct sk_buff *frame_skb;
 
-		frame_skb = skb_peek(&conn->control_frames);
+		frame_skb = skb_dequeue(&conn->control_frames);
 		if (!frame_skb)
 			break;
 
-		if (frame_skb->len > remaining)
+		if (frame_skb->len > remaining) {
+			/* Preserve queue ordering when frame does not fit. */
+			skb_queue_head(&conn->control_frames, frame_skb);
 			break;
+		}
 
-		/* Dequeue and copy frame data to payload */
-		frame_skb = skb_dequeue(&conn->control_frames);
+		/* Copy frame data to payload */
 		memcpy(payload + payload_len, frame_skb->data, frame_skb->len);
 		payload_len += frame_skb->len;
 		remaining -= frame_skb->len;
@@ -1550,12 +1552,21 @@ skip_ack:
 	if (is_long_header) {
 		/* Length = PN length + payload length + AEAD tag (16 bytes) */
 		u64 length = pn_len + payload_len + 16;
-		int len_bytes;
+
+		/*
+		 * We reserve a 2-byte varint length field in this builder.
+		 * Reject oversized packets instead of silently truncating.
+		 */
+		if (length > TQUIC_VARINT_2BYTE_MAX) {
+			kfree(header);
+			kfree(payload);
+			tquic_path_put(path);
+			return NULL;
+		}
 
 		/* Encode length using 2-byte varint (0x40 prefix) */
 		header[pn_offset - 2] = 0x40 | ((length >> 8) & 0x3f);
 		header[pn_offset - 1] = length & 0xff;
-		len_bytes = 2;
 
 		header_len = pn_offset;
 	} else {
@@ -1740,6 +1751,9 @@ int tquic_frame_process_new_cid(struct tquic_connection *conn,
 	struct tquic_cid cid;
 	u8 reset_token[16];
 	int varint_len;
+
+	if (!conn || !data || len <= 1)
+		return -EINVAL;
 
 	/* Sequence Number */
 	varint_len = tquic_varint_decode(data + offset, len - offset, &seq);

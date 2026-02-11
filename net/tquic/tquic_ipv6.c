@@ -439,11 +439,20 @@ static int tquic_v6_connect(struct sock *sk, struct sockaddr_unsized *addr, int 
 		goto failure;
 
 	/* Set path MTU from route */
-	if (conn->active_path) {
-		u32 mtu = dst_mtu(dst) - sizeof(struct ipv6hdr) - sizeof(struct udphdr);
-		if (mtu < 1200)
-			mtu = 1200;
-		conn->active_path->mtu = mtu;
+	{
+		struct tquic_path *path;
+		u32 mtu;
+
+		rcu_read_lock();
+		path = rcu_dereference(conn->active_path);
+		if (path) {
+			mtu = dst_mtu(dst) - sizeof(struct ipv6hdr) -
+			      sizeof(struct udphdr);
+			if (mtu < 1200)
+				mtu = 1200;
+			path->mtu = mtu;
+		}
+		rcu_read_unlock();
 	}
 
 	/*

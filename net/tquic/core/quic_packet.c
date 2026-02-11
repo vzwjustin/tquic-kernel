@@ -1417,6 +1417,9 @@ static int tquic_frame_process_new_cid(struct tquic_connection *conn,
 	u8 reset_token[16];
 	int varint_len;
 
+	if (!conn || !data || len <= 1)
+		return -EINVAL;
+
 	/* Sequence Number */
 	varint_len = tquic_varint_decode(data + offset, len - offset, &seq);
 	if (varint_len < 0)

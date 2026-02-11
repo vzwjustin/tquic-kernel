@@ -245,7 +245,7 @@ static struct sk_buff *tquic_gro_receive_segment(struct list_head *head,
 
 		/* Parse held packet header */
 		ret = tquic_gro_parse_header(p->data + skb_gro_offset(p),
-					     p->len, &held_hdr);
+					     skb_gro_len(p), &held_hdr);
 		if (ret < 0) {
 			NAPI_GRO_CB(p)->same_flow = 0;
 			continue;

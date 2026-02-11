@@ -1485,6 +1485,7 @@ static int tquic_conn_server_accept_init(struct tquic_connection *conn,
 	 */
 	if (token_len > 0) {
 		const u8 *token_data = data + offset;
+		struct tquic_path *apath;
 		struct sockaddr_storage client_addr;
 		struct tquic_cid original_dcid;
 		int token_ret;
@@ -1493,10 +1494,13 @@ static int tquic_conn_server_accept_init(struct tquic_connection *conn,
 
 		/* Get client address from path or connection */
 		memset(&client_addr, 0, sizeof(client_addr));
-		if (conn->active_path) {
-			memcpy(&client_addr, &conn->active_path->remote_addr,
+		rcu_read_lock();
+		apath = rcu_dereference(conn->active_path);
+		if (apath) {
+			memcpy(&client_addr, &apath->remote_addr,
 			       sizeof(client_addr));
 		}
+		rcu_read_unlock();
 
 		/*
 		 * Attempt to validate the token. We try both retry token
@@ -1524,8 +1528,12 @@ static int tquic_conn_server_accept_init(struct tquic_connection *conn,
 			 */
 			tquic_dbg("Valid retry token, address validated\n");
 			/* Mark address as validated - skip amplification limit */
-			if (conn->active_path)
-				conn->active_path->state = TQUIC_PATH_VALIDATED;
+			rcu_read_lock();
+			apath = rcu_dereference(conn->active_path);
+			if (apath)
+				WRITE_ONCE(apath->state,
+					   TQUIC_PATH_VALIDATED);
+			rcu_read_unlock();
 		} else {
 			/*
 			 * Try NEW_TOKEN validation (longer lifetime)
@@ -1539,8 +1547,12 @@ static int tquic_conn_server_accept_init(struct tquic_connection *conn,
 
 			if (token_ret == 0) {
 				tquic_dbg("Valid NEW_TOKEN, address validated\n");
-				if (conn->active_path)
-					conn->active_path->state = TQUIC_PATH_VALIDATED;
+				rcu_read_lock();
+				apath = rcu_dereference(conn->active_path);
+				if (apath)
+					WRITE_ONCE(apath->state,
+						   TQUIC_PATH_VALIDATED);
+				rcu_read_unlock();
 			} else {
 				/*
 				 * Token invalid - not fatal. The server will
@@ -1909,7 +1921,6 @@ int tquic_server_psk_callback(struct sock *sk, const char *identity,
 	struct tquic_sock *tsk = tquic_sk(sk);
 	struct tquic_connection *conn = tsk->conn;
 	struct tquic_client *client;
-	int ret;
 
 	if (!identity || identity_len == 0 || !psk)
 		return -EINVAL;
@@ -1934,27 +1945,19 @@ int tquic_server_psk_callback(struct sock *sk, const char *identity,
 		return -EQUIC_CONNECTION_REFUSED;
 	}
 
-	/*
-	 * Release RCU before calling tquic_server_get_client_psk which
-	 * acquires its own RCU read lock internally.
-	 */
-	rcu_read_unlock();
-
-	/* Get PSK for this client */
-	ret = tquic_server_get_client_psk(identity, identity_len, psk);
-	if (ret < 0) {
-		tquic_dbg("failed to get PSK: %d\n", ret);
-		return ret;
-	}
+	/* Copy PSK while client pointer is protected by RCU read lock. */
+	memcpy(psk, client->psk, 32);
 
 	/* Bind client to connection for resource tracking */
 	if (conn) {
-		ret = tquic_server_bind_client(conn, client);
+		int ret = tquic_server_bind_client(conn, client);
 		if (ret < 0) {
 			tquic_warn("failed to bind client: %d\n", ret);
 			/* Continue anyway - binding is for stats */
 		}
 	}
+
+	rcu_read_unlock();
 
 	tquic_dbg("PSK authentication successful\n");
 	return 0;

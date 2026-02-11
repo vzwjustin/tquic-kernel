@@ -459,14 +459,23 @@ int tquic_initiate_key_update(struct tquic_connection *conn)
 	 * 3 * PTO, the timer callback will revert the update so
 	 * the connection does not get permanently stuck.
 	 */
-	if (conn->active_path) {
-		u32 pto_ms = tquic_rtt_pto(&conn->active_path->rtt);
+	{
+		struct tquic_path *path;
+		u32 pto_ms = 0;
 		ktime_t deadline;
 
-		deadline = ktime_add_ms(ktime_get(),
-					TQUIC_KEY_UPDATE_TIMEOUT_PTO_MULT *
-					pto_ms);
-		tquic_timer_set(conn, TQUIC_TIMER_KEY_UPDATE, deadline);
+		rcu_read_lock();
+		path = rcu_dereference(conn->active_path);
+		if (path)
+			pto_ms = tquic_rtt_pto(&path->rtt);
+		rcu_read_unlock();
+
+		if (pto_ms > 0) {
+			deadline = ktime_add_ms(ktime_get(),
+						TQUIC_KEY_UPDATE_TIMEOUT_PTO_MULT *
+						pto_ms);
+			tquic_timer_set(conn, TQUIC_TIMER_KEY_UPDATE, deadline);
+		}
 	}
 
 out_unlock:

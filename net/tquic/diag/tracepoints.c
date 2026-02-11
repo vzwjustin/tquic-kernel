@@ -130,8 +130,20 @@ void tquic_trace_packet_sent(struct tquic_connection *conn,
 			     u64 pkt_num, u32 pkt_type, u32 size,
 			     u32 path_id)
 {
+	struct tquic_path *path;
+	u64 bytes_in_flight = 0;
+	u64 cwnd = 0;
+
 	if (!conn)
 		return;
+
+	rcu_read_lock();
+	path = rcu_dereference(conn->active_path);
+	if (path) {
+		bytes_in_flight = path->cc.bytes_in_flight;
+		cwnd = path->cc.cwnd;
+	}
+	rcu_read_unlock();
 
 	trace_tquic_packet_sent(
 		quic_trace_conn_id(&conn->scid),
@@ -139,8 +151,8 @@ void tquic_trace_packet_sent(struct tquic_connection *conn,
 		pkt_type,
 		size,
 		path_id,
-		conn->active_path ? conn->active_path->cc.bytes_in_flight : 0,
-		conn->active_path ? conn->active_path->cc.cwnd : 0
+		bytes_in_flight,
+		cwnd
 	);
 }
 EXPORT_SYMBOL_GPL(tquic_trace_packet_sent);

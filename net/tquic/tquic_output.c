@@ -1186,8 +1186,6 @@ struct tquic_path *tquic_select_path(struct tquic_connection *conn,
 	 */
 	spin_lock_bh(&conn->paths_lock);
 	selected = tquic_bond_select_path(conn, skb);
-	if (selected && !tquic_path_get(selected))
-		selected = NULL;
 	spin_unlock_bh(&conn->paths_lock);
 
 	return selected;
@@ -2715,7 +2713,13 @@ int tquic_send_datagram(struct tquic_connection *conn,
 
 	/* Check congestion window */
 	if (path->stats.cwnd > 0) {
-		u64 inflight = path->stats.tx_bytes - path->stats.acked_bytes;
+		u64 inflight;
+
+		if (path->stats.tx_bytes > path->stats.acked_bytes)
+			inflight = path->stats.tx_bytes - path->stats.acked_bytes;
+		else
+			inflight = 0;
+
 		if (inflight + len > path->stats.cwnd) {
 			tquic_path_put(path);
 			return -EAGAIN;

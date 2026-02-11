@@ -401,7 +401,7 @@ static void tquic_proto_close(struct sock *sk, long timeout)
 		WRITE_ONCE(conn->state, TQUIC_CONN_CLOSING);
 		spin_unlock_bh(&conn->lock);
 		/* Set timer for draining period */
-		if (conn->active_path && conn->timer_state) {
+		if (READ_ONCE(conn->active_path) && conn->timer_state) {
 			/* 3 * smoothed_rtt draining period per RFC 9000 */
 		}
 	}

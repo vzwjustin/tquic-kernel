@@ -825,6 +825,7 @@ static int tquic_weighted_select_path(struct tquic_connection *conn,
 	struct tquic_weighted_data *wd = conn->sched_priv;
 	struct tquic_path *path;
 	struct tquic_path *selected = NULL;
+	u8 num_paths;
 	int path_idx, start_idx;
 	int rounds = 0;
 	u32 max_deficit = 0;
@@ -832,12 +833,13 @@ static int tquic_weighted_select_path(struct tquic_connection *conn,
 	sel->num_paths = 0;
 	sel->duplicate = false;
 
-	if (!wd || conn->num_paths == 0)
+	num_paths = READ_ONCE(conn->num_paths);
+	if (!wd || !num_paths)
 		return -ENOENT;
 
 	rcu_read_lock();
 
-	start_idx = wd->current_path_idx % min_t(int, conn->num_paths,
+	start_idx = wd->current_path_idx % min_t(int, num_paths,
 					       TQUIC_MAX_PATHS);
 	path_idx = start_idx;
 
@@ -873,10 +875,10 @@ static int tquic_weighted_select_path(struct tquic_connection *conn,
 			idx++;
 		}
 
-		path_idx = (path_idx + 1) % conn->num_paths;
+		path_idx = (path_idx + 1) % num_paths;
 		rounds++;
 
-	} while (path_idx != start_idx && rounds < conn->num_paths * 2);
+	} while (path_idx != start_idx && rounds < num_paths * 2);
 
 	if (selected) {
 		struct tquic_weighted_path_data *pd;
@@ -893,7 +895,7 @@ static int tquic_weighted_select_path(struct tquic_connection *conn,
 		sel->num_paths = 1;
 
 		/* Move to next path for fairness */
-		wd->current_path_idx = (wd->current_path_idx + 1) % conn->num_paths;
+		wd->current_path_idx = (wd->current_path_idx + 1) % num_paths;
 
 		atomic64_inc(&conn->stats.sched_decisions);
 	}
