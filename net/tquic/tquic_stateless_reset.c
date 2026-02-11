@@ -665,6 +665,8 @@ EXPORT_SYMBOL_GPL(tquic_stateless_reset_remove_peer_token);
 
 int tquic_stateless_reset_ctx_init(struct tquic_stateless_reset_ctx *ctx)
 {
+	int ret;
+
 	if (!ctx)
 		return -EINVAL;
 
