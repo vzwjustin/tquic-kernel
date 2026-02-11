@@ -249,6 +249,17 @@ static void tquic_pm_probe_work(struct work_struct *work)
 	ktime_t now = ktime_get();
 	int i;
 
+	/*
+	 * SAFETY: Verify connection is still valid before accessing.
+	 * The cleanup function calls cancel_delayed_work_sync() which
+	 * ensures this work completes before pm is freed, but add
+	 * defensive check.
+	 */
+	if (!conn) {
+		pr_warn("tquic_pm: probe work called with NULL connection\n");
+		return;
+	}
+
 	spin_lock_bh(&conn->paths_lock);
 	list_for_each_entry(path, &conn->paths, list) {
 		s64 idle_ms;

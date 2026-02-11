@@ -1073,17 +1073,27 @@ static int tquic_udp_encap_recv(struct sock *sk, struct sk_buff *skb)
 	conn = us->conn;
 	path = us->path;
 
-	/* Skip UDP header - already pulled by UDP layer */
+	/*
+	 * SECURITY: Validate and skip UDP header.
+	 *
+	 * In UDP encap_rcv callback, the skb points to the UDP header.
+	 * We must:
+	 * 1. Ensure UDP header is in linear data (pskb_may_pull)
+	 * 2. Validate remaining length >= UDP header size
+	 * 3. Pull the UDP header to expose QUIC payload
+	 * 4. Reset transport header to point to QUIC data
+	 */
 	if (!pskb_may_pull(skb, sizeof(struct udphdr)))
 		goto drop;
 
-	uh = udp_hdr(skb);
-
-	/* Validate packet length */
+	/* Validate we have at least a UDP header */
 	if (skb->len < sizeof(struct udphdr))
 		goto drop;
 
-	/* Pull UDP header */
+	/* Access UDP header before pulling */
+	uh = udp_hdr(skb);
+
+	/* Pull UDP header to expose QUIC payload */
 	__skb_pull(skb, sizeof(struct udphdr));
 	skb_reset_transport_header(skb);
 

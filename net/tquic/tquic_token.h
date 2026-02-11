@@ -144,6 +144,15 @@ int tquic_token_set_key(struct tquic_token_key *key, const u8 *key_data);
 int tquic_token_rotate_key(struct tquic_token_key *old_key,
 			   struct tquic_token_key *new_key);
 
+/**
+ * tquic_token_cleanup_key - Clean up and zeroize token encryption key
+ * @key: Token key to clean up
+ *
+ * Zeroizes the key material to prevent it from lingering in memory.
+ * Should be called when shutting down or before freeing key structure.
+ */
+void tquic_token_cleanup_key(struct tquic_token_key *key);
+
 /*
  * =============================================================================
  * Token Generation (Server-side)

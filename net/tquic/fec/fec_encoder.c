@@ -432,12 +432,30 @@ static int generate_rs_repair(struct tquic_fec_source_block *block,
 	for (i = 0; i < num_repair; i++) {
 		repair_sym = kzalloc(sizeof(*repair_sym), GFP_ATOMIC);
 		if (!repair_sym) {
-			/* Free this and all remaining repair buffers */
+			/*
+			 * MEMORY LEAK FIX: On allocation failure, we must:
+			 * 1. Free all remaining unattached repair_bufs
+			 * 2. Remove and free already-created repair_sym structs
+			 * 3. Return error (not partial success)
+			 */
+			struct tquic_fec_symbol *tmp;
 			int j;
 
+			/* Free remaining unattached repair buffers */
 			for (j = i; j < num_repair; j++)
 				kfree(repair_bufs[j]);
-			break;
+
+			/* Remove and free already-added repair symbols */
+			list_for_each_entry_safe(repair_sym, tmp,
+						 &block->repair_symbols,
+						 list) {
+				list_del(&repair_sym->list);
+				kfree(repair_sym->data);
+				kfree(repair_sym);
+			}
+			block->num_repair = 0;
+
+			return -ENOMEM;
 		}
 
 		repair_sym->data = repair_bufs[i];

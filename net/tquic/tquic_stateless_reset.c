@@ -668,7 +668,15 @@ int tquic_stateless_reset_ctx_init(struct tquic_stateless_reset_ctx *ctx)
 	if (!ctx)
 		return -EINVAL;
 
-	/* Generate random static key */
+	/*
+	 * SECURITY: Generate random static key for stateless reset tokens.
+	 * Wait for RNG to be fully initialized since this is a long-term key.
+	 */
+	ret = wait_for_random_bytes();
+	if (ret != 0) {
+		pr_warn("tquic_reset: RNG not ready, reset key may be weak\n");
+		/* Continue - better to have weak key than no reset capability */
+	}
 	get_random_bytes(ctx->static_key, TQUIC_STATELESS_RESET_SECRET_LEN);
 
 	ctx->enabled = true;
