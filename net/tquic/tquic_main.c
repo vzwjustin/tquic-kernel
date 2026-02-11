@@ -151,12 +151,14 @@ void tquic_conn_destroy(struct tquic_connection *conn)
 
 	/* Free all paths */
 	list_for_each_entry_safe(path, tmp_path, &conn->paths, list) {
-		list_del(&path->list);
+		list_del_rcu(&path->list);
 		timer_delete_sync(&path->validation_timer);
 		timer_delete_sync(&path->validation.timer);
 		skb_queue_purge(&path->response.queue);
 		kmem_cache_free(tquic_path_cache, path);
 	}
+	/* Wait for any concurrent RCU readers before destroying connection */
+	synchronize_rcu();
 
 	/* Free all streams with proper memory accounting */
 	while ((node = rb_first(&conn->streams))) {
@@ -307,12 +309,12 @@ int tquic_conn_add_path(struct tquic_connection *conn,
 	get_random_bytes(path->challenge_data, sizeof(path->challenge_data));
 
 	spin_lock_bh(&conn->lock);
-	list_add_tail(&path->list, &conn->paths);
+	list_add_tail_rcu(&path->list, &conn->paths);
 	conn->num_paths++;
 
 	/* First path becomes active */
 	if (!conn->active_path)
-		conn->active_path = path;
+		rcu_assign_pointer(conn->active_path, path);
 	spin_unlock_bh(&conn->lock);
 
 	tquic_conn_dbg(conn, "added path %u\n", path->path_id);
@@ -340,15 +342,15 @@ int tquic_conn_remove_path(struct tquic_connection *conn, u32 path_id)
 				return -EINVAL;
 			}
 
-			list_del(&path->list);
+			list_del_rcu(&path->list);
 			conn->num_paths--;
 
 			/* Update active path if needed */
 			if (conn->active_path == path) {
-				conn->active_path =
+				rcu_assign_pointer(conn->active_path,
 					list_first_entry_or_null(&conn->paths,
 								 struct tquic_path,
-								 list);
+								 list));
 			}
 
 			found = true;
@@ -368,6 +370,8 @@ int tquic_conn_remove_path(struct tquic_connection *conn, u32 path_id)
 	skb_queue_purge(&path->response.queue);
 	atomic_set(&path->response.count, 0);
 
+	/* Wait for RCU grace period before freeing (used by readers) */
+	synchronize_rcu();
 	kmem_cache_free(tquic_path_cache, path);
 
 	tquic_conn_dbg(conn, "removed path %u\n", path_id);
@@ -667,6 +671,7 @@ tquic_stream_create_locked(struct tquic_connection *conn, u64 stream_id)
 	stream->id = stream_id;
 	stream->state = TQUIC_STREAM_OPEN;
 	stream->conn = conn;
+	refcount_set(&stream->refcount, 1);
 
 	skb_queue_head_init(&stream->send_buf);
 	skb_queue_head_init(&stream->recv_buf);
@@ -693,8 +698,14 @@ tquic_stream_create_locked(struct tquic_connection *conn, u64 stream_id)
 		} else if (stream->id > entry->id) {
 			link = &parent->rb_right;
 		} else {
-			/* Stream already exists - race with another packet */
+			/*
+			 * Stream already exists - race with another packet.
+			 * Free our allocation and return the existing stream,
+			 * but take a reference since caller expects to own one.
+			 */
 			kmem_cache_free(tquic_stream_cache, stream);
+			if (!tquic_stream_get(entry))
+				return NULL;  /* Stream being freed, caller retries */
 			return entry;
 		}
 	}
