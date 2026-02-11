@@ -8,7 +8,7 @@ TQUIC is an **experimental** kernel module implementing the QUIC protocol (RFC 9
 
 > **⚠️ NOT PRODUCTION READY**: This project is under active development. APIs may change, and there may be undiscovered bugs. Use at your own risk in non-production environments.
 
-**260,766 lines of C code** (38,410 in net/quic + 214,594 in net/tquic + 7,762 headers) implementing the full QUIC/HTTP3 stack with advanced multipath, security, and performance features.
+**265,255 lines of C code** (61,030 core + 202,502 subsystems in net/tquic + 1,678 headers + 45 init) implementing the full QUIC/HTTP3 stack with advanced multipath, security, and performance features.
 
 ## Initialization (dmesg)
 
@@ -93,16 +93,19 @@ All stub implementations and placeholders have been replaced with production cod
 
 **Status:** Experimental - security audit completed but not production ready.
 
-### Latest Release (Commit 26224b56 - February 2026)
-**Changes:** 24 files modified, +1,298 insertions, -379 deletions
+### Latest Release (Commit b974b2ae - February 2026)
+**Changes (Rounds 5-11):** 97 files modified, +3,023 insertions, -1,500 deletions
 
-**Critical fixes implemented:**
-- ✅ **Build System Fixes** - Resolved all linker errors and visibility mismatches
-- ✅ **RFC 9000 §12.2 Packet Coalescing** - Full support for coalesced QUIC packets
-- ✅ **PREFERRED_ADDRESS Migration** - Client-side preferred address implementation
-- ✅ **Multipath State Management** - Complete PATH_ABANDON/STANDBY/AVAILABLE handling
-- ✅ **Key Update Atomicity** - Fixed asymmetric key state with rollback mechanism
-- ✅ **Comprehensive Error Handling** - Added logging and validation across 15+ failure points
+**Critical fixes implemented across 7 audit rounds:**
+- ✅ **Retry AEAD Stack Overflow** - Replaced on-stack crypto allocation with heap (Round 5)
+- ✅ **Spinlock Deadlocks** - Fixed spin_lock vs spin_lock_bh inconsistencies (Round 6)
+- ✅ **Timer Deadlocks** - Eliminated recursive locking in timer callbacks (Round 7)
+- ✅ **Secret Leaks** - Secured key material cleanup with kfree_sensitive (Round 8)
+- ✅ **20+ P0/Critical Findings** - Fixed across 6 audit workstreams (Round 9)
+- ✅ **Socket UAFs** - Fixed use-after-free in locking discipline (Round 10)
+- ✅ **Send Buffer & Flow Control** - Fixed offset init, FC reservation, output flush races (Round 11)
+- ✅ **Tracepoint & PN Skip Bugs** - Fixed tracepoint registration and packet number handling (Round 11)
+- ✅ **KUnit Tests Enabled** - Full test suite operational
 
 The comprehensive audit addressed vulnerabilities across:
 - 🔐 **Security**: 13 critical/high severity issues
