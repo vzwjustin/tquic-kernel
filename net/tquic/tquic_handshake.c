@@ -1675,7 +1675,7 @@ static void tquic_server_handshake_done(void *data, int status,
 
 	if (status == 0) {
 		/* Handshake successful */
-		struct tquic_transport_params negotiated_params;
+		struct tquic_negotiated_params negotiated_params;
 		int ret;
 
 		tquic_install_crypto_state(child_sk);
@@ -1826,21 +1826,7 @@ int tquic_server_handshake(struct sock *listener_sk,
 		listen_tsk->requested_scheduler,
 		sizeof(child_tsk->requested_scheduler));
 
-	/* Initialize scheduler for child connection */
-	{
-		struct tquic_sched_ops *sched_ops = NULL;
-
-		if (child_tsk->requested_scheduler[0])
-			sched_ops = tquic_sched_find(child_tsk->requested_scheduler);
-
-		conn->scheduler = tquic_sched_init_conn(conn, sched_ops);
-		if (!conn->scheduler) {
-			tquic_warn("scheduler init failed for child, using default\n");
-			conn->scheduler = tquic_sched_init_conn(conn, NULL);
-			if (!conn->scheduler)
-				tquic_dbg("default scheduler init failed\n");
-		}
-	}
+	/* Child connections use the default path selection until bonded. */
 
 	/* Process Initial packet to extract CIDs */
 	ret = tquic_conn_server_accept_init(conn, initial_pkt);
