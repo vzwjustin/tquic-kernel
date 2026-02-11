@@ -84,7 +84,7 @@ EXPORT_SYMBOL_GPL(tquic_path_state_names);
 static const u32 tquic_mtu_probes[] = { 1280, 1400, 1450, 1480, 1492,
 					1500, 2048, 4096, 8192, 9000 };
 
-static struct kmem_cache *tquic_path_cache __read_mostly;
+struct kmem_cache *tquic_path_cache __read_mostly;
 
 /*
  * Initialize path management subsystem
@@ -546,7 +546,7 @@ int tquic_path_migrate(struct tquic_connection *conn, struct tquic_path *path)
 
 	/* Perform migration */
 	path->state = TQUIC_PATH_ACTIVE;
-	conn->active_path = path;
+	rcu_assign_pointer(conn->active_path, path);
 
 	if (old_path) {
 		old_path->state = TQUIC_PATH_STANDBY;
@@ -1000,7 +1000,7 @@ void tquic_path_set_state(struct tquic_connection *conn, u8 path_id,
 	if (path) {
 		WRITE_ONCE(path->state, state);
 		if (state == TQUIC_PATH_ACTIVE && !conn->active_path)
-			conn->active_path = path;
+			rcu_assign_pointer(conn->active_path, path);
 	}
 	spin_unlock_bh(&conn->lock);
 }
