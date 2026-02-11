@@ -340,6 +340,11 @@ int tquic_fc_stream_data_received(struct tquic_fc_stream_state *stream,
 void tquic_fc_stream_data_consumed(struct tquic_fc_stream_state *stream,
 				   u64 bytes);
 
+/* Called when application consumes stream data - updates stream and conn level */
+void tquic_fc_on_stream_consumed(struct tquic_fc_state *fc,
+				 struct tquic_fc_stream_state *stream_fc,
+				 u64 bytes);
+
 /* Handle received MAX_STREAM_DATA frame */
 int tquic_fc_handle_max_stream_data(struct tquic_fc_stream_state *stream,
 				    u64 max_data);
