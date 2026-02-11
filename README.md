@@ -126,7 +126,7 @@ Supported kernels: **Linux 6.x** (tested on 6.12). See [Quick Start Guide](docs/
 78 KUnit test suites across 35 test files in `net/tquic/test/`, plus an interoperability test framework for validation against quiche, msquic, ngtcp2, and picoquic.
 
 ```bash
-./tools/testing/kunit/kunit.py run --kunitconfig=net/quic/tests/.kunitconfig
+./tools/testing/kunit/kunit.py run --kunitconfig=net/tquic/test/.kunitconfig
 ```
 
 ## Author

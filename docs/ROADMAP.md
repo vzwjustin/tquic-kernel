@@ -1,30 +1,30 @@
-# Roadmap / Porting Gaps
+# Roadmap
 
-This extends `TQUIC_PORTING_GAPS.md` with a short roadmap of remaining work
-for Debian 6.12 / DietPi builds.
+## Completed
 
-## Short‑Term (Porting)
+- Full QUIC v1/v2 protocol implementation (RFC 9000, 9001, 9002, 9369)
+- HTTP/3 + QPACK (RFC 9114, 9204)
+- Multipath QUIC with 7 schedulers and 10 congestion control algorithms
+- DATAGRAM extension (RFC 9221), WebTransport, MASQUE
+- QUIC-LB load balancing, FEC, GREASE
+- 11 rounds of security audit fixes (deadlocks, UAFs, races, overflows, DoS)
+- 78 KUnit test suites across 35 test files
+- GRO/GSO, zero-copy, AF_XDP, io_uring performance paths
 
-- **IO_URING**
-  - Port `net/tquic/io_uring.c` to 6.12 io_uring API
-  - Enable `CONFIG_TQUIC_IO_URING`
+## Short-Term
 
-- **NAPI**
-  - Adapt NAPI usage to 6.12 headers and callbacks
-  - Enable `CONFIG_TQUIC_NAPI`
+- **Kernel version porting** - Validate and fix API compatibility across 6.x kernels
+- **Out-of-tree build hardening** - Streamline module build for non-development kernels
+- **Test coverage** - Expand KUnit tests for edge cases and error paths
 
-- **AF_XDP**
-  - Validate deps, wire XDP fast‑path
-  - Enable `CONFIG_TQUIC_AF_XDP`
+## Medium-Term
 
-## Medium‑Term (Quality & UX)
+- **Userspace CLI** for netlink configuration and diagnostics
+- **Sample path manager** and example bonding profiles
+- **Interop validation** against quiche, msquic, ngtcp2, picoquic
 
-- Add a minimal **userspace CLI** for netlink configuration
-- Provide a **sample path manager** and example bonding profiles
-- Improve **on‑device diagnostics** (counters, tracepoints)
-
-## Long‑Term (Upstreaming)
+## Long-Term
 
 - Split patches by subsystem for upstream review
-- Align APIs with in‑tree QUIC changes
+- Align APIs with in-tree QUIC changes (if any)
 - Reduce delta against mainline
