@@ -3,6 +3,7 @@
  * TQUIC QUIC-Exfil Mitigation KUnit Tests
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Tests for QUIC-Exfil mitigation features:
  * - Timing normalization

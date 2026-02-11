@@ -3,6 +3,7 @@
  * TQUIC: Address Validation Token Support (RFC 9000 Section 8.1.3-8.1.4)
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Implements address validation token generation, encryption, and validation
  * for TQUIC connections. Tokens allow servers to skip address validation on

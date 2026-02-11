@@ -3,6 +3,7 @@
  * TQUIC: Congestion Control Data Exchange (draft-yuan-quic-congestion-data-00)
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * This header implements the Congestion Control Data exchange extension
  * for QUIC, enabling endpoints to share congestion control state information.

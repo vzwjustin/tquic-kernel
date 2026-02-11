@@ -8,6 +8,9 @@
  * Target metrics:
  *   - Connection setup: <1 RTT (0-RTT support)
  *   - Memory: <64KB per connection
+ *
+ * Copyright (c) 2024-2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  */
 
 #include "bench_common.h"

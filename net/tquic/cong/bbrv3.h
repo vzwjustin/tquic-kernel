@@ -3,6 +3,7 @@
  * TQUIC BBRv3 Congestion Control Header
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * BBRv3 brings significant improvements over BBRv2:
  * - More responsive ECN handling with probabilistic marking

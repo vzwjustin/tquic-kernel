@@ -3,6 +3,7 @@
  * TQUIC NAT Lifecycle Management Header
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Advanced NAT lifecycle management for QUIC connections including:
  * - NAT binding timeout detection and prediction

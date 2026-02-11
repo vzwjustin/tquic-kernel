@@ -5,6 +5,7 @@
  * Based on RFC 6356 (Coupled Congestion Control for MPTCP)
  *
  * Copyright (c) 2024-2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  */
 
 #ifndef _NET_QUIC_CONG_COUPLED_H

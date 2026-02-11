@@ -3,6 +3,7 @@
  * KUnit tests for TQUIC security regression
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * This test suite covers P0/P1 security issues including:
  * - Frame parsing overflow/underflow

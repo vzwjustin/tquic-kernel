@@ -3,6 +3,7 @@
  * TQUIC FEC Core - State Management and Module Init
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Core FEC functionality including state management, negotiation,
  * and module initialization/cleanup.

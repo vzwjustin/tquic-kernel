@@ -3,6 +3,7 @@
  * TQUIC Crypto/Handshake Unit Tests
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Comprehensive KUnit test suite for TQUIC crypto subsystem covering:
  * - TLS 1.3 key derivation (HKDF)

@@ -3,6 +3,7 @@
  * TQUIC: GREASE (RFC 9287) Unit Tests
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * KUnit tests for GREASE (Generate Random Extensions And Sustain Extensibility)
  * functionality including transport parameter encoding, version generation,

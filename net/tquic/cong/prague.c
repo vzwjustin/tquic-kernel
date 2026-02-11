@@ -3,6 +3,7 @@
  * TQUIC: Prague Congestion Control
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Prague congestion control designed for L4S networks. Provides:
  * - Scalable ECN response (cwnd *= 1 - alpha/2)

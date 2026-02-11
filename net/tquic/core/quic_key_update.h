@@ -9,6 +9,7 @@
  * - Key discard timing
  *
  * Copyright (c) 2024 Linux QUIC Authors
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  */
 
 #ifndef _NET_TQUIC_KEY_UPDATE_H

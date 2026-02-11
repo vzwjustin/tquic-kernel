@@ -3,6 +3,7 @@
  * TQUIC: Extended Key Update Extension (draft-ietf-quic-extended-key-update-01)
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * This header provides the API for Extended Key Update in QUIC:
  * - KEY_UPDATE_REQUEST and KEY_UPDATE_RESPONSE frame handling

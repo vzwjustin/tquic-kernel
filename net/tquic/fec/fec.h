@@ -3,6 +3,7 @@
  * TQUIC Forward Error Correction (FEC) Header
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Implementation of QUIC FEC extension based on draft-zheng-quic-fec-extension-01.
  * Forward Error Correction allows recovery of lost packets without retransmission,

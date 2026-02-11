@@ -3,6 +3,7 @@
  * TQUIC Tracepoint Definitions
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Defines all tracepoints for TQUIC eBPF observability.
  * These tracepoints can be consumed by:

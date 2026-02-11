@@ -3,6 +3,7 @@
  * TQUIC XOR FEC Scheme
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Simple XOR-based Forward Error Correction for QUIC.
  * Can recover exactly one lost packet per source block.

@@ -3,6 +3,7 @@
  * TQUIC: BDP Frame Extension Implementation
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Implementation of BDP Frame extension per draft-kuhn-quic-bdpframe-extension-05.
  * This enables safe restoration of congestion control state across

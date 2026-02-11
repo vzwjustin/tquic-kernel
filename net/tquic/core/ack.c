@@ -3,6 +3,7 @@
  * TQUIC: ACK Processing and Loss Detection
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Implements QUIC loss detection and congestion control as specified
  * in RFC 9002. This module handles:

@@ -3,6 +3,7 @@
  * TQUIC: Netfilter Integration for Stateful Firewall Support
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * This module provides Netfilter/conntrack integration for TQUIC connections,
  * enabling stateful firewall support, NAT traversal, and connection tracking

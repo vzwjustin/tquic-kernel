@@ -3,6 +3,9 @@
  * TQUIC Benchmark Common Utilities
  *
  * Implementation of shared utilities for TQUIC benchmark tools.
+ *
+ * Copyright (c) 2024-2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  */
 
 #include "bench_common.h"

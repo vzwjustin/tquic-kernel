@@ -3,6 +3,7 @@
  * TQUIC: Reliable Stream Reset - KUnit Tests
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Tests for RESET_STREAM_AT frame encoding/decoding and handling
  * as defined in draft-ietf-quic-reliable-stream-reset-07.

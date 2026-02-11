@@ -3,6 +3,7 @@
  * TQUIC: Connection Migration Implementation
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Implements RFC 9000 Section 9 Connection Migration for TQUIC WAN bonding.
  * Supports:

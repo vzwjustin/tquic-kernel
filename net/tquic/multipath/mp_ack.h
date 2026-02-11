@@ -3,6 +3,7 @@
  * TQUIC: Multipath ACK Processing Header
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * API definitions for per-path ACK processing for QUIC Multipath
  * Extension (RFC 9369).

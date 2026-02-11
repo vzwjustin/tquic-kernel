@@ -3,6 +3,7 @@
  * TQUIC AF_XDP Integration
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * This header provides AF_XDP (XDP sockets) integration for TQUIC,
  * enabling kernel-bypass packet processing for 10x+ packet rates.

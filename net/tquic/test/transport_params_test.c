@@ -3,6 +3,7 @@
  * TQUIC: WAN Bonding over QUIC - Transport Parameters KUnit Tests
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  */
 
 #include <kunit/test.h>

@@ -3,6 +3,7 @@
  * TQUIC: QUIC Address Discovery Extension
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Implementation of draft-ietf-quic-address-discovery which enables endpoints
  * to learn their external address as observed by the peer. This is useful for

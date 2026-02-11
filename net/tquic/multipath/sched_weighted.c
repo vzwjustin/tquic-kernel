@@ -15,6 +15,7 @@
  * - Ensures long-term traffic matches configured weight ratios
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  */
 
 #include <linux/module.h>

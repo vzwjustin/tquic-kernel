@@ -5,6 +5,7 @@
  * Declarations for QUIC packet protection as specified in RFC 9001.
  *
  * Copyright (c) 2024-2026 Linux TQUIC Implementation Authors
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  */
 
 #ifndef _NET_TQUIC_QUIC_CRYPTO_H

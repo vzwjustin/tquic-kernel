@@ -3,6 +3,7 @@
  * TQUIC MASQUE CONNECT-IP Implementation
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Implementation of CONNECT-IP for MASQUE (Multiplexed Application Substrate
  * over QUIC Encryption) per RFC 9484.

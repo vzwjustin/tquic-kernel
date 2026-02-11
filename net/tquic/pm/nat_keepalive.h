@@ -3,6 +3,7 @@
  * TQUIC NAT Keepalive Header
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * NAT Keepalive implementation per RFC 9308 Section 3.5.
  *

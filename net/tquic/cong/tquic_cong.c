@@ -3,6 +3,7 @@
  * TQUIC: Congestion Control Framework
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Central CC registry and path lifecycle integration for TQUIC.
  *

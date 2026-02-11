@@ -3,6 +3,7 @@
  * TQUIC Variable-Length Integer Encoding
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * This header provides QUIC variable-length integer encoding and decoding
  * utilities as specified in RFC 9000 Section 16.

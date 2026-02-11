@@ -2,6 +2,7 @@
 /* TQUIC Packet Scheduler for WAN Bonding
  *
  * Copyright (c) 2024-2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * This implements packet scheduling algorithms for distributing QUIC
  * packets across multiple WAN paths in a bonded configuration.

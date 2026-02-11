@@ -3,6 +3,7 @@
  * TQUIC: QUIC over TCP Transport Implementation
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Implements QUIC packet transport over TCP for environments where
  * UDP is unavailable or unreliable. Based on draft-ietf-quic-over-tcp.

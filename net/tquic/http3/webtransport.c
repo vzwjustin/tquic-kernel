@@ -3,6 +3,7 @@
  * TQUIC WebTransport Implementation (RFC 9220)
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * WebTransport enables bidirectional stream-based communication over HTTP/3.
  * It uses Extended CONNECT (RFC 9220) with :protocol = "webtransport".

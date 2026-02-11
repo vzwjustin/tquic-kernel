@@ -3,6 +3,7 @@
  * TQUIC MASQUE: HTTP Datagrams (RFC 9297)
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * HTTP Datagrams provide a mechanism for transmitting unreliable data
  * between HTTP endpoints. They are transmitted using QUIC DATAGRAM frames

@@ -3,6 +3,7 @@
  * QPACK Header Compression for HTTP/3
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * QPACK is a header compression format for HTTP/3 as defined in RFC 9204.
  * It is designed to work with QUIC's independent stream processing while

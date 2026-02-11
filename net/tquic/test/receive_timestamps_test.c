@@ -3,6 +3,7 @@
  * TQUIC: Receive Timestamps Extension KUnit Tests
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Tests for the QUIC Receive Timestamps extension implementation
  * (draft-smith-quic-receive-ts-03).

@@ -3,6 +3,7 @@
  * TQUIC: QUIC Multipath Frame Definitions
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Frame definitions and APIs for QUIC Multipath Extension (RFC 9369).
  * This header defines the multipath-specific frame types:

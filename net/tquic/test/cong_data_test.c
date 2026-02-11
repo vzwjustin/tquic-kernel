@@ -3,6 +3,7 @@
  * TQUIC: Congestion Control Data Exchange KUnit Tests
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Tests for the Congestion Control Data exchange extension
  * (draft-yuan-quic-congestion-data-00).

@@ -3,6 +3,7 @@
  * TQUIC: QUIC Flow Control Implementation
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * This module implements QUIC flow control as specified in RFC 9000 Section 4.
  * It provides:

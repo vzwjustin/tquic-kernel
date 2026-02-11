@@ -3,6 +3,7 @@
  * TQUIC Path-Specific Metrics Export
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * This file implements path-specific metrics export for TQUIC connections:
  *   - Per-path metrics structure with RTT, bandwidth, congestion, and loss data

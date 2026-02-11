@@ -3,6 +3,7 @@
  * TQUIC: ACK Processing and Loss Detection Header
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * API definitions for QUIC loss detection and congestion control
  * as specified in RFC 9002.

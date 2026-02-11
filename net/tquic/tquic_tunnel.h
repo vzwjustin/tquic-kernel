@@ -3,6 +3,7 @@
  * TQUIC: Tunnel and Client Structure Definitions
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Shared header for tunnel management structures used by both
  * tquic_tunnel.c and tquic_forward.c.

@@ -3,6 +3,7 @@
  * TQUIC: Path MTU Discovery (DPLPMTUD)
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Implements Datagram Packetization Layer Path MTU Discovery (DPLPMTUD)
  * per RFC 8899 and QUIC-specific guidance from RFC 9000.

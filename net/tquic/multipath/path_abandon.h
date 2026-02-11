@@ -3,6 +3,7 @@
  * TQUIC: Path Abandonment Header for QUIC Multipath
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * API definitions for path abandonment in QUIC Multipath Extension (RFC 9369).
  */

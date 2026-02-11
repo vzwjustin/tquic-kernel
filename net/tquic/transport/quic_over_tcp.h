@@ -3,6 +3,7 @@
  * TQUIC: QUIC over TCP Transport
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * This module implements QUIC tunneled over TCP for environments where
  * UDP is blocked or unreliable. Based on draft-ietf-quic-over-tcp.

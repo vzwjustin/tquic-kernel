@@ -3,6 +3,7 @@
  * TQUIC: TLS 1.3 Handshake for QUIC - Header
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  */
 
 #ifndef _NET_TQUIC_HANDSHAKE_H

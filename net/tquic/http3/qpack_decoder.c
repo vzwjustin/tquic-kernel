@@ -3,6 +3,7 @@
  * QPACK Decoder - RFC 9204
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * The QPACK decoder decompresses HTTP header fields for HTTP/3.
  * It maintains a dynamic table synchronized with the encoder and

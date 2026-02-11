@@ -12,6 +12,7 @@
  * 4. Sender uses feedback to reduce sending rate
  *
  * Copyright (c) 2024-2026 Linux QUIC Authors
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  */
 
 #include <linux/kernel.h>

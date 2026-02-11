@@ -3,6 +3,7 @@
  * TQUIC: Deadline-Aware Multipath Scheduling - Core Implementation
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Implements deadline-aware packet scheduling for QUIC multipath,
  * based on draft-tjohn-quic-multipath-dmtp-01.

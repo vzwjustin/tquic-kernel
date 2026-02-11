@@ -5,6 +5,7 @@
  * Linux kernel QUIC implementation based on RFC 9000, RFC 9001, RFC 9002
  *
  * Copyright (c) 2024 Linux QUIC Authors
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  */
 
 #ifndef _NET_QUIC_H

@@ -3,6 +3,7 @@
  * TQUIC: Coupled Multipath Congestion Control
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * This module implements coupled congestion control algorithms for
  * multipath WAN bonding, ensuring fairness and efficiency across paths.

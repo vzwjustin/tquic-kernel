@@ -3,6 +3,7 @@
  * TQUIC: Connection ID Management
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Implements CID pool management per RFC 9000 Section 5.1.
  * Supports CID rotation, retirement, and lookup for packet demuxing.

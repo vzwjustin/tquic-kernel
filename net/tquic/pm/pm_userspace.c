@@ -3,6 +3,7 @@
  * TQUIC Userspace Path Manager
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Implements a userspace-controlled path manager where all path management
  * decisions are delegated to a userspace daemon via netlink. All path events

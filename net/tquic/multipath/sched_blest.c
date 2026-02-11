@@ -15,6 +15,7 @@
  * heterogeneous networks" (IFIP Networking 2016)
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  */
 
 #define pr_fmt(fmt) "TQUIC: " fmt

@@ -3,6 +3,7 @@
  * TQUIC: TLS 1.3 Key Update Mechanism (RFC 9001 Section 6)
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Implements the TLS 1.3 key update mechanism for QUIC connections:
  * - Key phase tracking (0 or 1)

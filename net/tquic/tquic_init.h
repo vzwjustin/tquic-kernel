@@ -3,6 +3,7 @@
  * TQUIC: Module Initialization Function Declarations
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * This header contains initialization and cleanup function declarations
  * for TQUIC subsystems. These functions are called during module load/unload.

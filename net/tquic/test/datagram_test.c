@@ -3,6 +3,7 @@
  * TQUIC: QUIC Datagram Extension KUnit Tests (RFC 9221)
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Comprehensive tests for QUIC Datagram extension:
  *   - DATAGRAM frame encoding/decoding

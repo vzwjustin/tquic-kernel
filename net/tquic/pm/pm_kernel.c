@@ -3,6 +3,7 @@
  * TQUIC Kernel Automatic Path Manager
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Implements automatic path discovery for WAN bonding. This PM type
  * discovers paths when network interfaces with default routes come up,

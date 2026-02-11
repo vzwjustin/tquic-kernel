@@ -3,6 +3,7 @@
  * TQUIC Generic Receive Offload (GRO) Support
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Implements GRO for TQUIC to aggregate multiple incoming packets into
  * larger buffers for efficient processing. This is the receive-side

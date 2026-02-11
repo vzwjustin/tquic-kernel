@@ -3,6 +3,7 @@
  * TQUIC HTTP/3 - Public API
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * This header provides the public HTTP/3 API for kernel consumers,
  * implementing RFC 9114 HTTP/3 over QUIC transport.

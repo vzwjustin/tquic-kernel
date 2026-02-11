@@ -3,6 +3,7 @@
  * TQUIC: 0-RTT Early Data Support (RFC 9001 Sections 4.6-4.7)
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Implements TLS 1.3 0-RTT early data for QUIC connections:
  * - Session ticket storage after successful handshake

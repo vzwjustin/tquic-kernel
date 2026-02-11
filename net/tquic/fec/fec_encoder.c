@@ -3,6 +3,7 @@
  * TQUIC FEC Encoder
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Implementation of FEC encoding for QUIC based on draft-zheng-quic-fec-extension-01.
  * Supports XOR and Reed-Solomon coding schemes.

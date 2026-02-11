@@ -3,6 +3,7 @@
  * TQUIC: One-Way Delay Measurement Extension Header
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Implementation of draft-huitema-quic-1wd (One-Way Delay Measurement)
  * for QUIC. This extension enables accurate measurement of one-way delays

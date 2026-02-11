@@ -3,6 +3,7 @@
  * TQUIC Qlog v2 Implementation
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Updated implementation conforming to:
  *   - draft-ietf-quic-qlog-main-schema-08 (main schema)

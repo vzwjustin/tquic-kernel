@@ -6,6 +6,9 @@
  * called from the main module initialization. Since all these components
  * are compiled into a single quic.o module, only one module_init can be
  * used, and that main init must call all subsystem init functions.
+ *
+ * Copyright (c) 2024-2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  */
 
 #ifndef _QUIC_INIT_H

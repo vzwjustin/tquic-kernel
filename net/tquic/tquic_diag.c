@@ -3,6 +3,7 @@
  * TQUIC socket monitoring support for ss tool
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * This file implements the inet_diag handler for TQUIC connections,
  * enabling visibility of TQUIC connections in the ss utility.

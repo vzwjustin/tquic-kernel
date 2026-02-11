@@ -3,6 +3,7 @@
  * TQUIC BPF struct_ops support for pluggable path schedulers
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * This module enables BPF programs to implement custom TQUIC path
  * schedulers, similar to how TCP allows BPF congestion control.

@@ -3,6 +3,7 @@
  * TQUIC: Zero-Copy Splice Forwarding with Hairpin Detection
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * This file implements zero-copy data forwarding between QUIC streams
  * and TCP sockets using kernel splice, plus hairpin traffic detection

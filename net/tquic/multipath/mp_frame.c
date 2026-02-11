@@ -3,6 +3,7 @@
  * TQUIC: QUIC Multipath Frame Parsing and Generation
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Implementation of frame parsing and generation for QUIC Multipath
  * Extension (RFC 9369). This module handles:

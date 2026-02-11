@@ -3,6 +3,7 @@
  * KUnit tests for TQUIC flow control
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * QUIC uses credit-based flow control at both connection and stream levels.
  * Tests cover MAX_DATA, MAX_STREAM_DATA, and blocked states.

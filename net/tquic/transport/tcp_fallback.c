@@ -3,6 +3,7 @@
  * TQUIC: UDP to TCP Fallback Mechanism
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Implements automatic fallback from UDP to TCP transport when UDP
  * is blocked or unreliable. This is useful in enterprise networks,

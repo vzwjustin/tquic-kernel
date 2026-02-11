@@ -3,6 +3,7 @@
  * KUnit tests for TQUIC congestion control algorithms
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Tests the various congestion control algorithms:
  * - BBR (Bottleneck Bandwidth and RTT)

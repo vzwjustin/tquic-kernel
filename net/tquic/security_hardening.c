@@ -3,6 +3,7 @@
  * TQUIC: Security Hardening Implementation
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Implements defenses against known QUIC vulnerabilities:
  * - CVE-2025-54939 (QUIC-LEAK): Pre-handshake memory exhaustion

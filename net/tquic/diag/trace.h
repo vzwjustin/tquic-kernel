@@ -15,6 +15,7 @@
  *   cat /sys/kernel/debug/tracing/trace_pipe
  *
  * Copyright (c) 2024 Linux QUIC Authors
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  */
 
 #ifndef _QUIC_TRACE_H

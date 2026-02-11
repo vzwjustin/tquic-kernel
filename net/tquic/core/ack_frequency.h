@@ -3,6 +3,7 @@
  * TQUIC: ACK Frequency Extension Header (RFC 9002 Appendix A.7)
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Complete ACK Frequency negotiation implementation including:
  *   - Transport parameter: min_ack_delay (0xff04de1a)

@@ -3,6 +3,7 @@
  * TQUIC MIB Statistics Counters
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * This header defines MIB (Management Information Base) counters
  * for TQUIC protocol statistics. Follows the MPTCP MIB pattern

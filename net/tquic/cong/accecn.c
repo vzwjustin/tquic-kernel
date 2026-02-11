@@ -3,6 +3,7 @@
  * TQUIC: Accurate ECN (AccECN) Feedback
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Processes QUIC's ECN feedback to provide accurate congestion signals.
  * QUIC ACK frames include cumulative ECN counts (ECT(0), ECT(1), CE),

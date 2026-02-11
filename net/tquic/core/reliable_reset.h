@@ -3,6 +3,7 @@
  * TQUIC: Reliable Stream Reset - RESET_STREAM_AT Frame
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Implementation of RESET_STREAM_AT frame as defined in
  * draft-ietf-quic-reliable-stream-reset-07.

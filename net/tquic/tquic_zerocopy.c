@@ -3,6 +3,7 @@
  * TQUIC: Zero-Copy I/O Support
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Implements high-performance zero-copy I/O paths for TQUIC:
  *   - sendfile/splice support via page references

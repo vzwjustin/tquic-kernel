@@ -3,6 +3,7 @@
  * TQUIC Qlog Internal Definitions
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Internal structures and functions for qlog tracing support.
  * Implements draft-ietf-quic-qlog-quic-events-12 event logging.

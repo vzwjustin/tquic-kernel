@@ -3,6 +3,7 @@
  * TQUIC: UDP Tunnel Integration for WAN Bonding
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * This module provides UDP tunnel infrastructure for TQUIC connections,
  * enabling multi-path WAN bonding with per-path UDP socket management,

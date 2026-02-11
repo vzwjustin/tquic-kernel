@@ -20,6 +20,7 @@
  *   - draft-ietf-quic-multipath: Multipath Extension for QUIC
  *
  * Copyright (c) 2024-2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  */
 
 #define pr_fmt(fmt) "TQUIC-CC: " fmt

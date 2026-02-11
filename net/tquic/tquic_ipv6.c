@@ -3,6 +3,7 @@
  * TQUIC: IPv6 Support for WAN Bonding over QUIC
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * This module provides IPv6 support for TQUIC including:
  * - IPv6 socket operations with inet6_connection_sock

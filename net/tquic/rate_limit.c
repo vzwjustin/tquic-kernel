@@ -3,6 +3,7 @@
  * TQUIC: Connection Rate Limiting for DoS Protection
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Implements connection rate limiting using a token bucket algorithm with
  * per-IP tracking for DoS protection on QUIC servers. Uses RCU for lock-free

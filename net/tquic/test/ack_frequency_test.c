@@ -3,6 +3,7 @@
  * TQUIC: ACK Frequency Extension KUnit Tests
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Comprehensive tests for ACK frequency extension (draft-ietf-quic-ack-frequency):
  *   - Transport parameter encoding/decoding

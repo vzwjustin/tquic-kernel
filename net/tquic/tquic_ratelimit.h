@@ -3,6 +3,7 @@
  * TQUIC: Connection Rate Limiting for DDoS Protection
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * This header provides connection rate limiting using a token bucket
  * algorithm with per-IP tracking for DDoS protection on QUIC servers.

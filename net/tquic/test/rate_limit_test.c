@@ -3,6 +3,7 @@
  * TQUIC: Rate Limiting KUnit Tests
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Comprehensive KUnit tests for the TQUIC connection rate limiting
  * subsystem (rate_limit.h/rate_limit.c). Tests cover:

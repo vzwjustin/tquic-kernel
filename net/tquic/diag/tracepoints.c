@@ -3,6 +3,7 @@
  * TQUIC Tracepoints for eBPF Observability
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Provides comprehensive tracepoints for observing QUIC protocol behavior
  * via eBPF programs. These tracepoints enable:

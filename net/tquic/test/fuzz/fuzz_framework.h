@@ -3,6 +3,7 @@
  * TQUIC Fuzzing Framework
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * This framework provides systematic fuzzing infrastructure for discovering
  * vulnerabilities in the TQUIC implementation. It supports:

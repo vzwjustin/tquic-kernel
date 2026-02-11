@@ -3,6 +3,7 @@
  * TQUIC SmartNIC/FPGA Offload Implementation
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Provides hardware offload support for QUIC packet processing on SmartNICs
  * and FPGAs. This reduces CPU overhead and latency by moving packet

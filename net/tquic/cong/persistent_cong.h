@@ -3,6 +3,7 @@
  * TQUIC: Persistent Congestion Detection (RFC 9002 Section 7.6)
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Persistent congestion detection for QUIC loss recovery.
  * When packets spanning the persistent congestion period are all lost,

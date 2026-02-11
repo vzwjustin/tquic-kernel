@@ -3,6 +3,7 @@
  * KUnit tests for TQUIC Deadline-Aware Multipath Scheduling
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Tests for the deadline-aware multipath scheduling implementation
  * based on draft-tjohn-quic-multipath-dmtp-01.

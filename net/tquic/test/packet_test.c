@@ -3,6 +3,7 @@
  * KUnit tests for TQUIC packet parsing
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  */
 
 #include <kunit/test.h>

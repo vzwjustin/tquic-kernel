@@ -3,6 +3,7 @@
  * TQUIC: QUIC-Exfil Mitigation Implementation
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Implements defense mechanisms against timing side-channel information
  * leakage attacks on QUIC connections as described in draft-iab-quic-exfil.

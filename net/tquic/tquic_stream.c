@@ -3,6 +3,7 @@
  * TQUIC: Stream Socket Implementation
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Provides first-class stream file descriptors for QUIC stream multiplexing.
  * Each stream is a separate socket that can be used with poll/epoll/select.

@@ -3,6 +3,7 @@
  * TQUIC HTTP/3 Connection Management
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Implementation of HTTP/3 connection state management per RFC 9114.
  *

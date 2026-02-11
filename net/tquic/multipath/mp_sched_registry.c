@@ -5,6 +5,9 @@
  * This replaces the dependency on multipath/tquic_scheduler.c, which relies
  * on in-kernel netns fields not available in the DietPi kernel. We keep the
  * multipath scheduler registration API functional and safe.
+ *
+ * Copyright (c) 2024-2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  */
 
 #include <linux/list.h>

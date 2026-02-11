@@ -2,6 +2,7 @@
 /* TQUIC Multi-Path Management for WAN Bonding
  *
  * Copyright (c) 2024-2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * This implements multi-path management for TQUIC connections,
  * enabling WAN bonding with multiple simultaneous network interfaces.

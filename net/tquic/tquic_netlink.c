@@ -4,6 +4,7 @@
  * TQUIC Netlink interface for userspace control
  *
  * Copyright (c) 2024 Linux Kernel Authors
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  */
 
 #define pr_fmt(fmt) "TQUIC: " fmt

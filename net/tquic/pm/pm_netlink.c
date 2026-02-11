@@ -3,6 +3,7 @@
  * TQUIC Path Manager Netlink Interface
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Implements the PM-specific genetlink family with multicast event
  * notifications, following the MPTCP pm_netlink.c pattern.
