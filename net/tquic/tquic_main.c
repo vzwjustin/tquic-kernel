@@ -61,8 +61,7 @@ struct kmem_cache *tquic_conn_cache;
 EXPORT_SYMBOL_GPL(tquic_conn_cache);
 struct kmem_cache *tquic_stream_cache;
 EXPORT_SYMBOL_GPL(tquic_stream_cache);
-struct kmem_cache *tquic_path_cache;
-EXPORT_SYMBOL_GPL(tquic_path_cache);
+extern struct kmem_cache *tquic_path_cache;
 
 /*
  * Slab cache for per-packet RX decryption buffers.
@@ -836,13 +835,7 @@ int __init tquic_init(void)
 		goto err_stream_cache;
 	}
 
-	tquic_path_cache = kmem_cache_create("tquic_path",
-					     sizeof(struct tquic_path),
-					     0, SLAB_HWCACHE_ALIGN, NULL);
-	if (!tquic_path_cache) {
-		err = -ENOMEM;
-		goto err_path_cache;
-	}
+	/* tquic_path_cache created by tquic_path_init_module() */
 
 	tquic_rx_buf_cache = kmem_cache_create("tquic_rx_buf",
 					       TQUIC_RX_BUF_SIZE,
@@ -1253,8 +1246,7 @@ err_hashtable:
 err_frame_cache:
 	kmem_cache_destroy(tquic_rx_buf_cache);
 err_rx_buf_cache:
-	kmem_cache_destroy(tquic_path_cache);
-err_path_cache:
+	/* tquic_path_cache destroyed by tquic_path_exit_module() */
 	kmem_cache_destroy(tquic_stream_cache);
 err_stream_cache:
 	kmem_cache_destroy(tquic_conn_cache);
@@ -1348,7 +1340,7 @@ void __exit tquic_exit(void)
 	rhashtable_destroy(&tquic_conn_table);
 	tquic_output_tx_exit();
 	kmem_cache_destroy(tquic_rx_buf_cache);
-	kmem_cache_destroy(tquic_path_cache);
+	/* tquic_path_cache destroyed by tquic_path_exit_module() at line 1297 */
 	kmem_cache_destroy(tquic_stream_cache);
 	kmem_cache_destroy(tquic_conn_cache);
 
