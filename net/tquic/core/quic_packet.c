@@ -873,17 +873,23 @@ int tquic_frame_process_one(struct tquic_connection *conn, const u8 *data,
 	case TQUIC_FRAME_RESET_STREAM:
 		/* Stream ID */
 		varint_len = tquic_varint_decode(data + offset, len - offset, &val1);
-		if (varint_len < 0) return varint_len;
+		if (varint_len < 0)
+
+			return varint_len;
 		offset += varint_len;
 
 		/* Application Protocol Error Code */
 		varint_len = tquic_varint_decode(data + offset, len - offset, &val2);
-		if (varint_len < 0) return varint_len;
+		if (varint_len < 0)
+
+			return varint_len;
 		offset += varint_len;
 
 		/* Final Size */
 		varint_len = tquic_varint_decode(data + offset, len - offset, &val3);
-		if (varint_len < 0) return varint_len;
+		if (varint_len < 0)
+
+			return varint_len;
 		offset += varint_len;
 
 		{
@@ -897,12 +903,16 @@ int tquic_frame_process_one(struct tquic_connection *conn, const u8 *data,
 	case TQUIC_FRAME_STOP_SENDING:
 		/* Stream ID */
 		varint_len = tquic_varint_decode(data + offset, len - offset, &val1);
-		if (varint_len < 0) return varint_len;
+		if (varint_len < 0)
+
+			return varint_len;
 		offset += varint_len;
 
 		/* Application Protocol Error Code */
 		varint_len = tquic_varint_decode(data + offset, len - offset, &val2);
-		if (varint_len < 0) return varint_len;
+		if (varint_len < 0)
+
+			return varint_len;
 		offset += varint_len;
 
 		{
@@ -919,7 +929,9 @@ int tquic_frame_process_one(struct tquic_connection *conn, const u8 *data,
 	case TQUIC_FRAME_NEW_TOKEN:
 		/* Length */
 		varint_len = tquic_varint_decode(data + offset, len - offset, &val1);
-		if (varint_len < 0) return varint_len;
+		if (varint_len < 0)
+
+			return varint_len;
 		offset += varint_len;
 
 		/* SECURITY: Use subtraction to avoid int + u64 overflow */
@@ -935,7 +947,9 @@ int tquic_frame_process_one(struct tquic_connection *conn, const u8 *data,
 
 	case TQUIC_FRAME_MAX_DATA:
 		varint_len = tquic_varint_decode(data + offset, len - offset, &val1);
-		if (varint_len < 0) return varint_len;
+		if (varint_len < 0)
+
+			return varint_len;
 		offset += varint_len;
 
 		if (val1 > conn->max_data_remote)
@@ -945,12 +959,16 @@ int tquic_frame_process_one(struct tquic_connection *conn, const u8 *data,
 	case TQUIC_FRAME_MAX_STREAM_DATA:
 		/* Stream ID */
 		varint_len = tquic_varint_decode(data + offset, len - offset, &val1);
-		if (varint_len < 0) return varint_len;
+		if (varint_len < 0)
+
+			return varint_len;
 		offset += varint_len;
 
 		/* Maximum Stream Data */
 		varint_len = tquic_varint_decode(data + offset, len - offset, &val2);
-		if (varint_len < 0) return varint_len;
+		if (varint_len < 0)
+
+			return varint_len;
 		offset += varint_len;
 
 		{
@@ -964,7 +982,9 @@ int tquic_frame_process_one(struct tquic_connection *conn, const u8 *data,
 
 	case TQUIC_FRAME_MAX_STREAMS_BIDI:
 		varint_len = tquic_varint_decode(data + offset, len - offset, &val1);
-		if (varint_len < 0) return varint_len;
+		if (varint_len < 0)
+
+			return varint_len;
 		offset += varint_len;
 
 		if (val1 > conn->max_streams_bidi)
@@ -973,7 +993,9 @@ int tquic_frame_process_one(struct tquic_connection *conn, const u8 *data,
 
 	case TQUIC_FRAME_MAX_STREAMS_UNI:
 		varint_len = tquic_varint_decode(data + offset, len - offset, &val1);
-		if (varint_len < 0) return varint_len;
+		if (varint_len < 0)
+
+			return varint_len;
 		offset += varint_len;
 
 		if (val1 > conn->max_streams_uni)
@@ -986,12 +1008,16 @@ int tquic_frame_process_one(struct tquic_connection *conn, const u8 *data,
 	case TQUIC_FRAME_STREAMS_BLOCKED_UNI:
 		/* These are informational, just parse and skip */
 		varint_len = tquic_varint_decode(data + offset, len - offset, &val1);
-		if (varint_len < 0) return varint_len;
+		if (varint_len < 0)
+
+			return varint_len;
 		offset += varint_len;
 
 		if (frame_type == TQUIC_FRAME_STREAM_DATA_BLOCKED) {
 			varint_len = tquic_varint_decode(data + offset, len - offset, &val2);
-			if (varint_len < 0) return varint_len;
+			if (varint_len < 0)
+
+				return varint_len;
 			offset += varint_len;
 		}
 		return offset;
@@ -1001,7 +1027,9 @@ int tquic_frame_process_one(struct tquic_connection *conn, const u8 *data,
 
 	case TQUIC_FRAME_RETIRE_CONNECTION_ID:
 		varint_len = tquic_varint_decode(data + offset, len - offset, &val1);
-		if (varint_len < 0) return varint_len;
+		if (varint_len < 0)
+
+			return varint_len;
 		offset += varint_len;
 
 		tquic_conn_retire_cid_internal(conn, val1);

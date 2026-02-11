@@ -163,7 +163,7 @@ extern int tquic_hkdf_expand_label(struct hkdf_ctx *ctx, const u8 *prk,
  */
 static int tquic_key_update_tx(struct tquic_connection *conn)
 {
-	struct tquic_crypto_ctx *ctx = 
+	struct tquic_crypto_ctx *ctx =
 		(struct tquic_crypto_ctx *)conn->crypto[TQUIC_CRYPTO_APPLICATION];
 	struct hkdf_ctx hkdf;
 	u8 new_secret[64];
@@ -219,7 +219,7 @@ out:
  */
 static int tquic_key_update_rx(struct tquic_connection *conn)
 {
-	struct tquic_crypto_ctx *ctx = 
+	struct tquic_crypto_ctx *ctx =
 		(struct tquic_crypto_ctx *)conn->crypto[TQUIC_CRYPTO_APPLICATION];
 	struct hkdf_ctx hkdf;
 	u8 new_secret[64];
@@ -332,7 +332,7 @@ out:
  */
 int tquic_crypto_initiate_key_update(struct tquic_connection *conn)
 {
-	struct tquic_crypto_ctx *ctx = 
+	struct tquic_crypto_ctx *ctx =
 		(struct tquic_crypto_ctx *)conn->crypto[TQUIC_CRYPTO_APPLICATION];
 	struct tquic_pn_space *pn_space = &conn->pn_spaces[TQUIC_PN_SPACE_APPLICATION];
 	int err;
@@ -393,7 +393,7 @@ EXPORT_SYMBOL_GPL(tquic_crypto_initiate_key_update);
  */
 int tquic_crypto_on_key_phase_change(struct tquic_connection *conn, u8 rx_key_phase)
 {
-	struct tquic_crypto_ctx *ctx = 
+	struct tquic_crypto_ctx *ctx =
 		(struct tquic_crypto_ctx *)conn->crypto[TQUIC_CRYPTO_APPLICATION];
 	ktime_t discard_time;
 	int err;
@@ -585,7 +585,7 @@ EXPORT_SYMBOL_GPL(tquic_crypto_on_key_phase_change);
  */
 void tquic_crypto_discard_old_keys(struct tquic_connection *conn)
 {
-	struct tquic_crypto_ctx *ctx = 
+	struct tquic_crypto_ctx *ctx =
 		(struct tquic_crypto_ctx *)conn->crypto[TQUIC_CRYPTO_APPLICATION];
 
 	if (!ctx)
