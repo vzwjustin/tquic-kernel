@@ -10,6 +10,7 @@
 
 #include <linux/slab.h>
 #include <linux/random.h>
+#include <linux/rcupdate.h>
 #include <net/tquic.h>
 
 /* QUIC constants (originally from uapi/linux/quic.h, now defined locally) */
@@ -26,6 +27,34 @@ static const struct rhashtable_params tquic_conn_table_params = {
 	.head_offset = offsetof(struct tquic_connection, node),
 	.automatic_shrinking = true,
 };
+
+static struct tquic_path *tquic_conn_active_path_get(struct tquic_connection *conn)
+{
+	struct tquic_path *path;
+
+	rcu_read_lock();
+	path = rcu_dereference(conn->active_path);
+	if (path && !tquic_path_get(path))
+		path = NULL;
+	rcu_read_unlock();
+
+	return path;
+}
+
+static u32 tquic_conn_draining_timeout_ms(struct tquic_connection *conn)
+{
+	struct tquic_path *path;
+	u32 timeout_ms;
+
+	path = tquic_conn_active_path_get(conn);
+	if (!path)
+		return 3000;
+
+	timeout_ms = 3 * tquic_rtt_pto(&path->rtt);
+	tquic_path_put(path);
+
+	return timeout_ms;
+}
 
 /* Forward declarations for functions defined in other compilation units */
 void tquic_loss_detection_on_timeout(struct tquic_connection *conn);
@@ -436,10 +465,15 @@ static void tquic_conn_tx_work(struct work_struct *work)
 
 		skb = tquic_packet_build(conn, i);
 		if (skb) {
-			int err = tquic_udp_send(conn->tsk, skb,
-						 conn->active_path);
-			if (err < 0)
-				kfree_skb(skb);
+			struct tquic_path *path = tquic_conn_active_path_get(conn);
+			int ret = tquic_udp_send(conn->tsk, skb, path);
+
+			if (ret < 0)
+				tquic_conn_err(conn, "tx_work: send failed on path %u: %d\n",
+					       path ? path->path_id : 0, ret);
+
+			if (path)
+				tquic_path_put(path);
 		}
 	}
 }
@@ -495,7 +529,7 @@ struct tquic_connection *tquic_conn_create(struct tquic_sock *tsk, bool is_serve
 	/* Initialize path list/limits; actual path(s) are created on connect/accept. */
 	INIT_LIST_HEAD(&conn->paths);
 	spin_lock_init(&conn->paths_lock);
-	conn->active_path = NULL;
+	RCU_INIT_POINTER(conn->active_path, NULL);
 	conn->num_paths = 0;
 	conn->max_paths = TQUIC_MAX_PATHS;
 
@@ -694,7 +728,7 @@ static int tquic_conn_connect(struct tquic_connection *conn,
 			      struct sockaddr *addr, int addr_len)
 {
 	struct tquic_sock *tsk = conn->tsk;
-	struct tquic_path *path = conn->active_path;
+	struct tquic_path *path;
 	int err;
 
 	spin_lock_bh(&conn->lock);
@@ -704,8 +738,19 @@ static int tquic_conn_connect(struct tquic_connection *conn,
 	}
 	spin_unlock_bh(&conn->lock);
 
+	path = tquic_conn_active_path_get(conn);
+	if (!path)
+		return -ENETUNREACH;
+
+	if (addr_len <= 0 || addr_len > sizeof(path->remote_addr)) {
+		tquic_path_put(path);
+		return -EINVAL;
+	}
+
 	/* Set remote address */
+	memset(&path->remote_addr, 0, sizeof(path->remote_addr));
 	memcpy(&path->remote_addr, addr, addr_len);
+	tquic_path_put(path);
 
 	/* Create UDP socket for encapsulation if not exists */
 	if (!tsk->udp_sock) {
@@ -780,7 +825,7 @@ static int tquic_conn_close(struct tquic_connection *conn, u64 error_code,
 	/* Start draining timer (3 * PTO) */
 	tquic_timer_set(conn, TQUIC_TIMER_IDLE,
 			ktime_add_ms(ktime_get(),
-				     3 * tquic_rtt_pto(&conn->active_path->rtt)));
+				     tquic_conn_draining_timeout_ms(conn)));
 
 	return 0;
 }
@@ -821,7 +866,7 @@ static void tquic_conn_set_state(struct tquic_connection *conn, enum tquic_conn_
 		/* Schedule close after draining period */
 		tquic_timer_set(conn, TQUIC_TIMER_IDLE,
 				ktime_add_ms(ktime_get(),
-					     3 * tquic_rtt_pto(&conn->active_path->rtt)));
+					     tquic_conn_draining_timeout_ms(conn)));
 		goto out;
 
 	case TQUIC_CONN_CLOSED:
@@ -958,7 +1003,9 @@ static int tquic_conn_rotate_dcid(struct tquic_connection *conn)
 static int tquic_conn_migrate_to_preferred_address(struct tquic_connection *conn)
 {
 	struct tquic_preferred_address *pa;
+	struct tquic_path *active_path;
 	struct tquic_path *new_path = NULL;
+	struct sockaddr_storage local_addr;
 	struct sockaddr_storage remote_addr;
 	struct sockaddr_in *sin;
 	struct sockaddr_in6 *sin6;
@@ -1003,11 +1050,15 @@ static int tquic_conn_migrate_to_preferred_address(struct tquic_connection *conn
 	 * Create new path to preferred address.
 	 * The path uses the local address from the active path.
 	 */
-	if (!conn->active_path)
+	active_path = tquic_conn_active_path_get(conn);
+	if (!active_path)
 		return -EINVAL;
 
+	memcpy(&local_addr, &active_path->local_addr, sizeof(local_addr));
+	tquic_path_put(active_path);
+
 	new_path = tquic_path_create(conn,
-				     &conn->active_path->local_addr,
+				     &local_addr,
 				     &remote_addr);
 	if (!new_path) {
 		pr_err("TQUIC: Failed to create path to preferred address\n");
@@ -1462,11 +1513,16 @@ int tquic_transport_param_apply(struct tquic_connection *conn)
 	}
 
 	/* Apply path MTU limit */
-	if (conn->active_path) {
+	{
+		struct tquic_path *active_path;
 		u32 max_payload = params->max_udp_payload_size;
 
-		if (max_payload < conn->active_path->mtu)
-			conn->active_path->mtu = max_payload;
+		active_path = tquic_conn_active_path_get(conn);
+		if (active_path) {
+			if (max_payload < active_path->mtu)
+				active_path->mtu = max_payload;
+			tquic_path_put(active_path);
+		}
 	}
 
 	conn->migration_disabled = params->disable_active_migration;

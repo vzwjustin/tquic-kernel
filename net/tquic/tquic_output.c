@@ -20,6 +20,7 @@
 #include <linux/random.h>
 #include <linux/hrtimer.h>
 #include <linux/workqueue.h>
+#include <linux/rcupdate.h>
 #include <net/sock.h>
 #include <net/udp.h>
 #include <net/udp_tunnel.h>
@@ -1153,8 +1154,10 @@ err_free_skb:
  */
 
 /*
- * Select path using the connection's scheduler
- * Caller must NOT hold conn->lock; this function acquires it.
+ * Select path using the connection's scheduler.
+ *
+ * Returns a referenced path on success; caller must call tquic_path_put().
+ * Caller must NOT hold conn->paths_lock; this function acquires it as needed.
  */
 struct tquic_path *tquic_select_path(struct tquic_connection *conn,
 				     struct sk_buff *skb)
@@ -1167,18 +1170,25 @@ struct tquic_path *tquic_select_path(struct tquic_connection *conn,
 	 * is updated with WRITE_ONCE on the control path, so a single
 	 * READ_ONCE is sufficient for the common single-path case.
 	 */
-	if (!conn->scheduler) {
-		selected = READ_ONCE(conn->active_path);
+	if (!conn->scheduler ||
+	    !test_bit(TQUIC_F_BONDING_ENABLED, &conn->flags)) {
+		rcu_read_lock();
+		selected = rcu_dereference(conn->active_path);
+		if (selected && !tquic_path_get(selected))
+			selected = NULL;
+		rcu_read_unlock();
 		return selected;
 	}
 
 	/*
-	 * Slow path: multipath scheduler needs conn->lock to protect
+	 * Slow path: multipath scheduler needs conn->paths_lock to protect
 	 * path list iteration (paths can be added/removed concurrently).
 	 */
-	spin_lock_bh(&conn->lock);
+	spin_lock_bh(&conn->paths_lock);
 	selected = tquic_bond_select_path(conn, skb);
-	spin_unlock_bh(&conn->lock);
+	if (selected && !tquic_path_get(selected))
+		selected = NULL;
+	spin_unlock_bh(&conn->paths_lock);
 
 	return selected;
 }
@@ -1186,7 +1196,7 @@ EXPORT_SYMBOL_GPL(tquic_select_path);
 
 /*
  * Select path with load balancing
- * Caller must hold conn->lock to protect path list iteration.
+ * Caller must hold conn->paths_lock to protect path list iteration.
  */
 static struct tquic_path __maybe_unused *tquic_select_path_lb(struct tquic_connection *conn,
 							      struct sk_buff *skb, u32 flags)
@@ -1194,7 +1204,7 @@ static struct tquic_path __maybe_unused *tquic_select_path_lb(struct tquic_conne
 	struct tquic_path *path, *best = NULL;
 	u32 best_score = 0;
 
-	lockdep_assert_held(&conn->lock);
+	lockdep_assert_held(&conn->paths_lock);
 
 	/* Iterate through active paths */
 	list_for_each_entry(path, &conn->paths, list) {
@@ -1220,7 +1230,17 @@ static struct tquic_path __maybe_unused *tquic_select_path_lb(struct tquic_conne
 		}
 	}
 
-	return best ?: conn->active_path;
+	/* Return a referenced path per API contract */
+	if (best && tquic_path_get(best))
+		return best;
+
+	rcu_read_lock();
+	best = rcu_dereference(conn->active_path);
+	if (best && !tquic_path_get(best))
+		best = NULL;
+	rcu_read_unlock();
+
+	return best;
 }
 
 /*
@@ -1903,6 +1923,7 @@ int tquic_xmit(struct tquic_connection *conn, struct tquic_stream *stream,
 		/* Create pending frame */
 		frame = kmem_cache_zalloc(tquic_frame_cache, GFP_ATOMIC);
 		if (unlikely(!frame)) {
+			tquic_path_put(path);
 			ret = -ENOMEM;
 			break;
 		}
@@ -1942,12 +1963,14 @@ int tquic_xmit(struct tquic_connection *conn, struct tquic_stream *stream,
 					kfree(f->data);
 				kmem_cache_free(tquic_frame_cache, f);
 			}
+			tquic_path_put(path);
 			ret = -ENOMEM;
 			break;
 		}
 
 		/* Send packet */
 		ret = tquic_output_packet(conn, path, skb);
+		tquic_path_put(path);
 		if (ret < 0)
 			break;
 
@@ -2059,7 +2082,12 @@ int tquic_send_connection_close(struct tquic_connection *conn,
 	int ret;
 	u64 pkt_num;
 
-	path = conn->active_path;
+	rcu_read_lock();
+	path = rcu_dereference(conn->active_path);
+	if (path && !tquic_path_get(path))
+		path = NULL;
+	rcu_read_unlock();
+
 	if (!path)
 		return -EINVAL;
 
@@ -2073,7 +2101,7 @@ int tquic_send_connection_close(struct tquic_connection *conn,
 	ret = tquic_gen_connection_close_frame(&ctx, error_code,
 					       reason, reason ? strlen(reason) : 0);
 	if (ret < 0)
-		return ret;
+		goto out_put_path;
 
 	pkt_num = atomic64_inc_return(&conn->pkt_num_tx) - 1;
 
@@ -2081,8 +2109,10 @@ int tquic_send_connection_close(struct tquic_connection *conn,
 	BUILD_BUG_ON(TQUIC_MAX_SHORT_HEADER_SIZE > 64);
 	skb = alloc_skb(ctx.offset + TQUIC_MAX_SHORT_HEADER_SIZE + MAX_HEADER,
 			GFP_ATOMIC);
-	if (!skb)
-		return -ENOMEM;
+	if (!skb) {
+		ret = -ENOMEM;
+		goto out_put_path;
+	}
 
 	skb_reserve(skb, MAX_HEADER);
 
@@ -2090,29 +2120,36 @@ int tquic_send_connection_close(struct tquic_connection *conn,
 	{
 		u8 header[TQUIC_MAX_SHORT_HEADER_SIZE];
 		int header_len = tquic_build_short_header_internal(
-					conn, path, header,
-					TQUIC_MAX_SHORT_HEADER_SIZE,
-					pkt_num, 0, false, false,
-					conn->grease_state);
+				conn, path, header,
+				TQUIC_MAX_SHORT_HEADER_SIZE,
+				pkt_num, 0, false, false,
+				conn->grease_state);
 		if (header_len <= 0) {
 			/* Header build failed -- do not send unframed data */
 			kfree_skb(skb);
-			return header_len ? header_len : -EINVAL;
+			ret = header_len ? header_len : -EINVAL;
+			goto out_put_path;
 		}
 		if (skb_tailroom(skb) < header_len) {
 			kfree_skb(skb);
-			return -ENOSPC;
+			ret = -ENOSPC;
+			goto out_put_path;
 		}
 		skb_put_data(skb, header, header_len);
 	}
 
 	if (skb_tailroom(skb) < ctx.offset) {
 		kfree_skb(skb);
-		return -ENOSPC;
+		ret = -ENOSPC;
+		goto out_put_path;
 	}
 	skb_put_data(skb, buf_stack, ctx.offset);
 
-	return tquic_output_packet(conn, path, skb);
+	ret = tquic_output_packet(conn, path, skb);
+
+out_put_path:
+	tquic_path_put(path);
+	return ret;
 }
 EXPORT_SYMBOL_GPL(tquic_send_connection_close);
 
@@ -2134,7 +2171,7 @@ EXPORT_SYMBOL_GPL(tquic_send_connection_close);
  */
 int tquic_output_flush(struct tquic_connection *conn)
 {
-	struct tquic_path *path;
+	struct tquic_path *path = NULL;
 	struct tquic_pending_frame *frame;
 	struct sk_buff *skb, *send_skb;
 	struct rb_node *node;
@@ -2372,6 +2409,8 @@ int tquic_output_flush(struct tquic_connection *conn)
 
 	ret = packets_sent > 0 ? packets_sent : ret;
 out_clear_flush:
+	if (path)
+		tquic_path_put(path);
 	clear_bit(flush_bit, &conn->output_flush_flags);
 	return ret;
 }
@@ -2405,7 +2444,12 @@ int tquic_output_flush_crypto(struct tquic_connection *conn)
 	if (!conn)
 		return -EINVAL;
 
-	path = conn->active_path;
+	rcu_read_lock();
+	path = rcu_dereference(conn->active_path);
+	if (path && !tquic_path_get(path))
+		path = NULL;
+	rcu_read_unlock();
+
 	if (!path)
 		return -ENOENT;
 
@@ -2431,7 +2475,7 @@ int tquic_output_flush_crypto(struct tquic_connection *conn)
 						  TQUIC_FRAME_CRYPTO);
 			if (ret < 0) {
 				kfree_skb(crypto_skb);
-				return ret;
+				goto out_put_path;
 			}
 			hdr_len += ret;
 
@@ -2441,7 +2485,7 @@ int tquic_output_flush_crypto(struct tquic_connection *conn)
 						  crypto_offset);
 			if (ret < 0) {
 				kfree_skb(crypto_skb);
-				return ret;
+				goto out_put_path;
 			}
 			hdr_len += ret;
 
@@ -2451,16 +2495,16 @@ int tquic_output_flush_crypto(struct tquic_connection *conn)
 						  data_len);
 			if (ret < 0) {
 				kfree_skb(crypto_skb);
-				return ret;
+				goto out_put_path;
 			}
 			hdr_len += ret;
 
 			/* Allocate send skb with header + data */
-			send_skb = alloc_skb(hdr_len + data_len + 128,
-					     GFP_ATOMIC);
+			send_skb = alloc_skb(hdr_len + data_len + 128, GFP_ATOMIC);
 			if (!send_skb) {
 				kfree_skb(crypto_skb);
-				return -ENOMEM;
+				ret = -ENOMEM;
+				goto out_put_path;
 			}
 
 			/* Reserve headroom for QUIC packet header */
@@ -2470,7 +2514,8 @@ int tquic_output_flush_crypto(struct tquic_connection *conn)
 			if (skb_tailroom(send_skb) < hdr_len + data_len) {
 				kfree_skb(send_skb);
 				kfree_skb(crypto_skb);
-				return -ENOSPC;
+				ret = -ENOSPC;
+				goto out_put_path;
 			}
 
 			/* Copy frame header */
@@ -2485,16 +2530,19 @@ int tquic_output_flush_crypto(struct tquic_connection *conn)
 			/* Send the CRYPTO frame */
 			ret = tquic_output_packet(conn, path, send_skb);
 			if (ret < 0) {
-				tquic_dbg("failed to send CRYPTO frame: %d\n",
-					 ret);
-				return ret;
+				tquic_dbg("failed to send CRYPTO frame: %d\n", ret);
+				goto out_put_path;
 			}
 
 			frames_sent++;
 		}
 	}
 
-	return frames_sent;
+	ret = frames_sent;
+
+out_put_path:
+	tquic_path_put(path);
+	return ret;
 }
 EXPORT_SYMBOL_GPL(tquic_output_flush_crypto);
 
@@ -2574,6 +2622,7 @@ EXPORT_SYMBOL_GPL(tquic_datagram_cleanup);
  */
 u64 tquic_datagram_max_size(struct tquic_connection *conn)
 {
+	struct tquic_path *path;
 	u64 max_size;
 	u64 overhead;
 
@@ -2593,8 +2642,16 @@ u64 tquic_datagram_max_size(struct tquic_connection *conn)
 	 */
 	overhead = 40;
 
-	if (conn->active_path && conn->active_path->mtu > overhead)
-		max_size = conn->active_path->mtu - overhead;
+	rcu_read_lock();
+	path = rcu_dereference(conn->active_path);
+	if (path)
+		max_size = path->mtu;
+	else
+		max_size = 0;
+	rcu_read_unlock();
+
+	if (max_size > overhead)
+		max_size -= overhead;
 	else
 		max_size = 1200 - overhead;  /* Minimum QUIC MTU */
 
@@ -2659,16 +2716,22 @@ int tquic_send_datagram(struct tquic_connection *conn,
 	/* Check congestion window */
 	if (path->stats.cwnd > 0) {
 		u64 inflight = path->stats.tx_bytes - path->stats.acked_bytes;
-		if (inflight + len > path->stats.cwnd)
+		if (inflight + len > path->stats.cwnd) {
+			tquic_path_put(path);
 			return -EAGAIN;
+		}
 	}
 
 	/* Validate MTU and allocate buffer for frame generation */
-	if (path->mtu == 0 || path->mtu > 65535)
+	if (path->mtu == 0 || path->mtu > 65535) {
+		tquic_path_put(path);
 		return -EINVAL;
+	}
 	buf = kmalloc(path->mtu, GFP_ATOMIC);
-	if (!buf)
+	if (!buf) {
+		tquic_path_put(path);
 		return -ENOMEM;
+	}
 
 	/* Initialize frame context */
 	ctx.conn = conn;
@@ -2682,6 +2745,7 @@ int tquic_send_datagram(struct tquic_connection *conn,
 	ret = tquic_gen_datagram_frame(&ctx, data, len, true);
 	if (ret < 0) {
 		kfree(buf);
+		tquic_path_put(path);
 		return ret;
 	}
 
@@ -2693,6 +2757,7 @@ int tquic_send_datagram(struct tquic_connection *conn,
 			GFP_ATOMIC);
 	if (!skb) {
 		kfree(buf);
+		tquic_path_put(path);
 		return -ENOMEM;
 	}
 
@@ -2706,23 +2771,26 @@ int tquic_send_datagram(struct tquic_connection *conn,
 				conn, path, header,
 				TQUIC_MAX_SHORT_HEADER_SIZE,
 				pkt_num, 0, false, false, NULL);
-		if (header_len < 0) {
-			kfree_skb(skb);
-			kfree(buf);
-			return header_len;
-		}
-		if (skb_tailroom(skb) < header_len) {
-			kfree_skb(skb);
-			kfree(buf);
-			return -ENOSPC;
-		}
-		skb_put_data(skb, header, header_len);
+			if (header_len < 0) {
+				kfree_skb(skb);
+				kfree(buf);
+				tquic_path_put(path);
+				return header_len;
+			}
+			if (skb_tailroom(skb) < header_len) {
+				kfree_skb(skb);
+				kfree(buf);
+				tquic_path_put(path);
+				return -ENOSPC;
+			}
+			skb_put_data(skb, header, header_len);
 	}
 
 	/* Add frame payload */
 	if (skb_tailroom(skb) < ctx.offset) {
 		kfree_skb(skb);
 		kfree(buf);
+		tquic_path_put(path);
 		return -ENOSPC;
 	}
 	skb_put_data(skb, buf, ctx.offset);
@@ -2735,12 +2803,14 @@ int tquic_send_datagram(struct tquic_connection *conn,
 					    ctx.offset, pkt_num, 3);
 		if (ret < 0) {
 			kfree_skb(skb);
+			tquic_path_put(path);
 			return ret;
 		}
 	}
 
 	/* Send packet */
 	ret = tquic_output_packet(conn, path, skb);
+	tquic_path_put(path);
 	if (ret >= 0) {
 		/* Update statistics (use _bh for softirq safety) */
 		spin_lock_bh(&conn->datagram.lock);
@@ -2748,9 +2818,8 @@ int tquic_send_datagram(struct tquic_connection *conn,
 		spin_unlock_bh(&conn->datagram.lock);
 
 		/* Update MIB counters */
-		if (conn->sk) {
+		if (conn->sk)
 			TQUIC_INC_STATS(sock_net(conn->sk), TQUIC_MIB_DATAGRAMSTX);
-		}
 
 		return len;
 	}

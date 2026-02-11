@@ -22,6 +22,7 @@
 #include <linux/spinlock.h>
 #include <linux/atomic.h>
 #include <linux/rhashtable.h>
+#include <linux/rcupdate.h>
 #include <net/net_namespace.h>
 #include <net/sock.h>
 #include <net/tquic.h>

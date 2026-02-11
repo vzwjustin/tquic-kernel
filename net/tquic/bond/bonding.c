@@ -19,6 +19,7 @@
 #include <linux/timer.h>
 #include <linux/random.h>
 #include <linux/unaligned.h>
+#include <linux/rcupdate.h>
 #include <net/sock.h>
 #include <net/tquic.h>
 
@@ -164,7 +165,17 @@ static struct tquic_path *tquic_select_minrtt(struct tquic_bond_state *bond,
 		}
 	}
 
-	return best ?: READ_ONCE(conn->active_path);
+	/* Return referenced path per API contract */
+	if (best && tquic_path_get(best))
+		return best;
+
+	rcu_read_lock();
+	best = rcu_dereference(conn->active_path);
+	if (best && !tquic_path_get(best))
+		best = NULL;
+	rcu_read_unlock();
+
+	return best;
 }
 
 /*
@@ -206,7 +217,17 @@ static struct tquic_path *tquic_select_roundrobin(struct tquic_bond_state *bond,
 			selected = path;
 	}
 
-	return selected ?: READ_ONCE(conn->active_path);
+	/* Return referenced path per API contract */
+	if (selected && tquic_path_get(selected))
+		return selected;
+
+	rcu_read_lock();
+	selected = rcu_dereference(conn->active_path);
+	if (selected && !tquic_path_get(selected))
+		selected = NULL;
+	rcu_read_unlock();
+
+	return selected;
 }
 
 /*
@@ -233,7 +254,16 @@ static struct tquic_path *tquic_select_weighted(struct tquic_bond_state *bond,
 	}
 
 	if (total_weight == 0)
-		return READ_ONCE(conn->active_path);
+		struct tquic_path *path;
+
+		/* Return referenced path per API contract */
+		rcu_read_lock();
+		path = rcu_dereference(conn->active_path);
+		if (path && !tquic_path_get(path))
+			path = NULL;
+		rcu_read_unlock();
+
+		return path;
 
 	/* Select based on weight */
 	target = (u32)atomic_inc_return(&bond->rr_counter) % total_weight;
@@ -249,7 +279,17 @@ static struct tquic_path *tquic_select_weighted(struct tquic_bond_state *bond,
 		}
 	}
 
-	return selected ?: READ_ONCE(conn->active_path);
+	/* Return referenced path per API contract */
+	if (selected && tquic_path_get(selected))
+		return selected;
+
+	rcu_read_lock();
+	selected = rcu_dereference(conn->active_path);
+	if (selected && !tquic_path_get(selected))
+		selected = NULL;
+	rcu_read_unlock();
+
+	return selected;
 }
 
 /*
@@ -294,7 +334,17 @@ static struct tquic_path *tquic_select_aggregate(struct tquic_bond_state *bond,
 		}
 	}
 
-	return best ?: READ_ONCE(conn->active_path);
+	/* Return referenced path per API contract */
+	if (best && tquic_path_get(best))
+		return best;
+
+	rcu_read_lock();
+	best = rcu_dereference(conn->active_path);
+	if (best && !tquic_path_get(best))
+		best = NULL;
+	rcu_read_unlock();
+
+	return best;
 }
 
 /*
@@ -337,7 +387,17 @@ static struct tquic_path *tquic_select_blest(struct tquic_bond_state *bond,
 		}
 	}
 
-	return best ?: READ_ONCE(conn->active_path);
+	/* Return referenced path per API contract */
+	if (best && tquic_path_get(best))
+		return best;
+
+	rcu_read_lock();
+	best = rcu_dereference(conn->active_path);
+	if (best && !tquic_path_get(best))
+		best = NULL;
+	rcu_read_unlock();
+
+	return best;
 }
 
 /*
@@ -450,7 +510,17 @@ static struct tquic_path *tquic_select_ecf(struct tquic_bond_state *bond,
 		}
 	}
 
-	return best ?: READ_ONCE(conn->active_path);
+	/* Return referenced path per API contract */
+	if (best && tquic_path_get(best))
+		return best;
+
+	rcu_read_lock();
+	best = rcu_dereference(conn->active_path);
+	if (best && !tquic_path_get(best))
+		best = NULL;
+	rcu_read_unlock();
+
+	return best;
 }
 
 /*
@@ -498,7 +568,16 @@ struct tquic_path *tquic_bond_select_path(struct tquic_connection *conn,
 
 	/* conn->paths_lock must be held by caller (tquic_select_path) */
 	if (!bond)
-		return READ_ONCE(conn->active_path);
+		struct tquic_path *path;
+
+		/* Return referenced path per API contract */
+		rcu_read_lock();
+		path = rcu_dereference(conn->active_path);
+		if (path && !tquic_path_get(path))
+			path = NULL;
+		rcu_read_unlock();
+
+		return path;
 
 	switch (bond->mode) {
 	case TQUIC_BOND_MODE_FAILOVER:
@@ -507,7 +586,11 @@ struct tquic_path *tquic_bond_select_path(struct tquic_connection *conn,
 		if (primary && READ_ONCE(primary->state) == TQUIC_PATH_ACTIVE)
 			selected = primary;
 		else
-			selected = READ_ONCE(conn->active_path);
+			rcu_read_lock();
+			selected = rcu_dereference(conn->active_path);
+			if (selected && !tquic_path_get(selected))
+				selected = NULL;
+			rcu_read_unlock();
 		break;
 
 	case TQUIC_BOND_MODE_ROUNDROBIN:
@@ -536,11 +619,19 @@ struct tquic_path *tquic_bond_select_path(struct tquic_connection *conn,
 
 	case TQUIC_BOND_MODE_REDUNDANT:
 		/* Redundant sends on all paths */
-		selected = READ_ONCE(conn->active_path);
+		rcu_read_lock();
+		selected = rcu_dereference(conn->active_path);
+		if (selected && !tquic_path_get(selected))
+			selected = NULL;
+		rcu_read_unlock();
 		break;
 
 	default:
-		selected = READ_ONCE(conn->active_path);
+		rcu_read_lock();
+		selected = rcu_dereference(conn->active_path);
+		if (selected && !tquic_path_get(selected))
+			selected = NULL;
+		rcu_read_unlock();
 	}
 
 	/*
