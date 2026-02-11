@@ -3,6 +3,7 @@
  * TQUIC: Connection State Machine
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * This module implements the QUIC connection state machine as specified
  * in RFC 9000, with extensions for WAN bonding and multi-path support.

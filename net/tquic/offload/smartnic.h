@@ -3,6 +3,7 @@
  * TQUIC SmartNIC/FPGA Offload Interface
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * This header defines the interface for offloading QUIC packet processing
  * to SmartNICs and FPGAs. Supported operations include:

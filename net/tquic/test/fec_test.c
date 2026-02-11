@@ -3,6 +3,7 @@
  * TQUIC FEC Test Suite
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Comprehensive tests for Forward Error Correction functionality
  * including XOR FEC, Reed-Solomon FEC, encoder, decoder, and scheduler.

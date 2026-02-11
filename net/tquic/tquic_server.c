@@ -3,6 +3,7 @@
  * TQUIC: Multi-tenant Server Connection Handling
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Implements server-side TQUIC multi-tenant connection acceptance with PSK
  * authentication and rate limiting. This enables a single VPS to accept

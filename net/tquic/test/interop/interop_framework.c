@@ -3,6 +3,7 @@
  * TQUIC Interoperability Testing Framework Implementation
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Provides a comprehensive testing framework for QUIC protocol compliance
  * and interoperability verification.

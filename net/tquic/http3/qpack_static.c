@@ -3,6 +3,7 @@
  * QPACK Static Table - RFC 9204 Appendix A
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * The QPACK static table contains 99 predefined header field entries.
  * These entries are commonly used in HTTP/3 and provide efficient

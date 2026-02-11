@@ -3,6 +3,7 @@
  * TQUIC: Multipath Deadline Integration
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Integrates deadline-aware scheduling with QUIC multipath extension.
  * Provides per-path deadline capability tracking and cross-path

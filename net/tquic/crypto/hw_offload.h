@@ -3,6 +3,7 @@
  * TQUIC Hardware Crypto Offload Detection
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Header for CPU feature detection and algorithm selection for
  * hardware-accelerated cryptographic operations in TQUIC.

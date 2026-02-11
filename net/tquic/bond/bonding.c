@@ -3,6 +3,7 @@
  * TQUIC: WAN Bonding Core
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * This module implements the core WAN bonding functionality for TQUIC,
  * enabling true bandwidth aggregation across multiple network paths.

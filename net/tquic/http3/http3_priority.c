@@ -3,6 +3,7 @@
  * TQUIC HTTP/3 Extensible Priorities (RFC 9218)
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * This file implements HTTP/3 Extensible Priorities as defined in RFC 9218.
  * The priority scheme provides:

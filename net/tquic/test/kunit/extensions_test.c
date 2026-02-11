@@ -3,6 +3,7 @@
  * TQUIC KUnit Tests for Protocol Extensions
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Comprehensive KUnit tests for TQUIC protocol extensions:
  * - Receive timestamps

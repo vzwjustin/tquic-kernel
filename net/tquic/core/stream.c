@@ -3,6 +3,7 @@
  * TQUIC: Stream Layer Implementation
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * This file implements the QUIC stream layer including:
  * - Stream ID allocation (client/server, bidi/uni)

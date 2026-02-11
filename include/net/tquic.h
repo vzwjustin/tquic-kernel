@@ -3,6 +3,7 @@
  * TQUIC: WAN Bonding over QUIC
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * This header provides the main TQUIC API for kernel consumers
  * and socket interface definitions.

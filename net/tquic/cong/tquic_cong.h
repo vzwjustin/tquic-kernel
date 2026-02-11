@@ -3,6 +3,7 @@
  * TQUIC: Congestion Control Framework
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Central CC framework for TQUIC multipath WAN bonding.
  * Provides algorithm registration, per-path lifecycle management,

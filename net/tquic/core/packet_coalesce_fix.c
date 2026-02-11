@@ -13,6 +13,7 @@
  * - Receiver must be able to separate coalesced packets
  *
  * Copyright (c) 2024-2026 Linux TQUIC Authors
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  */
 
 #include <linux/kernel.h>

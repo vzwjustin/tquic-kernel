@@ -3,6 +3,7 @@
  * TQUIC: QUIC-Aware Proxy KUnit Tests (draft-ietf-masque-quic-proxy)
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Comprehensive tests for the QUIC-Aware Proxy protocol extension:
  *   - Capsule encoding/decoding

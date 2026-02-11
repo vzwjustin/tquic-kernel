@@ -3,6 +3,7 @@
  * TQUIC: QUIC Receive Timestamps Extension Implementation
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Implements the QUIC Receive Timestamps extension as specified in
  * draft-smith-quic-receive-ts-03. This extension enables endpoints to

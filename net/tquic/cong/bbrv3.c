@@ -3,6 +3,7 @@
  * TQUIC BBRv3 Congestion Control
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * BBRv3 implementation for QUIC. This is the latest iteration of BBR
  * with improved ECN handling, better fairness, and enhanced stability.

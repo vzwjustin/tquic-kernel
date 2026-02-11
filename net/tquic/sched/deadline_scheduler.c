@@ -3,6 +3,7 @@
  * TQUIC: Earliest Deadline First (EDF) Scheduler
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Implements the Earliest Deadline First scheduling algorithm for
  * deadline-aware multipath QUIC. This is the core scheduling engine

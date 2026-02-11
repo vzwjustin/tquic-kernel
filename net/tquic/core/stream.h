@@ -3,6 +3,7 @@
  * TQUIC: Stream Layer Internal Definitions
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  */
 
 #ifndef _TQUIC_CORE_STREAM_H

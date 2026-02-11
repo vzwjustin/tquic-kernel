@@ -3,6 +3,7 @@
  * TQUIC: ACK Frequency Extension (RFC 9002 Appendix A.7)
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Connection-level wrappers for ACK Frequency extension.
  *

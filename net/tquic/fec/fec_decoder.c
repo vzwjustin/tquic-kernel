@@ -3,6 +3,7 @@
  * TQUIC FEC Decoder
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Implementation of FEC decoding for QUIC based on draft-zheng-quic-fec-extension-01.
  * Handles receipt of source and repair symbols and packet recovery.

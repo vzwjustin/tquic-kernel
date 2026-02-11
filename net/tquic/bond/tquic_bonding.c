@@ -3,6 +3,7 @@
  * TQUIC Multi-Path Bonding State Machine
  *
  * Copyright (c) 2024-2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * This implements the bonding state machine for WAN bandwidth aggregation.
  * The state machine coordinates multi-path aggregation lifecycle:

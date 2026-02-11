@@ -3,6 +3,7 @@
  * TQUIC: Additional Addresses Transport Parameter Extension - KUnit Tests
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Unit tests for the additional_addresses transport parameter extension
  * (draft-piraux-quic-additional-addresses).

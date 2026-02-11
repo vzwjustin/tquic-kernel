@@ -3,6 +3,7 @@
  * TQUIC Internal Definitions
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * This header provides internal socket structure definitions and
  * locking documentation for the TQUIC subsystem. It follows the

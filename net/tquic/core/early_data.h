@@ -5,6 +5,7 @@
  * 0-RTT Early Data Support Header (RFC 9001 Section 4.6)
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  */
 
 #ifndef _NET_TQUIC_EARLY_DATA_H

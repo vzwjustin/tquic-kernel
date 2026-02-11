@@ -3,6 +3,7 @@
  * QUIC Interop Runner Compatibility Layer
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Implements compatibility with the QUIC Interop Runner test harness
  * (https://github.com/quic-interop/quic-interop-runner) for automated

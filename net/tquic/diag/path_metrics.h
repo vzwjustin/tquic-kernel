@@ -3,6 +3,7 @@
  * TQUIC Path-Specific Metrics Export - Header
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * This header provides the API for path-specific metrics export.
  */

@@ -3,6 +3,7 @@
  * TQUIC: Retry Packet Mechanism
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Implements Retry packet generation and validation per RFC 9000 Section 8.1.
  * The Retry mechanism allows servers to validate client addresses before

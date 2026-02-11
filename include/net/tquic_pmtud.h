@@ -3,6 +3,7 @@
  * TQUIC: Path MTU Discovery (DPLPMTUD) Header
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Definitions and API for DPLPMTUD (RFC 8899) implementation
  * with QUIC-specific adaptations (RFC 9000).

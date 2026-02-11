@@ -13,6 +13,7 @@
  * - Primary + backup path for failover
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  */
 
 #include <linux/module.h>

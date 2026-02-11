@@ -3,6 +3,7 @@
  * TQUIC MinRTT Scheduler
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Selects the path with minimum smoothed RTT for each packet.
  * Uses a tolerance band to prevent path flapping when RTTs are similar.

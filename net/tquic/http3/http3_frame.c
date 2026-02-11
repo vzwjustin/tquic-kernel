@@ -3,6 +3,7 @@
  * TQUIC HTTP/3 Frame Layer
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Implementation of HTTP/3 frame parsing and construction per RFC 9114.
  *

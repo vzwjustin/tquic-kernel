@@ -3,6 +3,7 @@
  * TQUIC Connection ID Management - Internal Header
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * This header defines structures for CID management that need to be
  * shared between tquic_cid.c and other modules (e.g., stateless reset).

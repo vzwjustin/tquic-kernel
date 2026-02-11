@@ -3,6 +3,7 @@
  * TQUIC: Packet Reception Path
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Implements the QUIC packet reception path with multipath WAN bonding
  * support including UDP receive callbacks, header unprotection,

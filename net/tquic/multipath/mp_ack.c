@@ -3,6 +3,7 @@
  * TQUIC: Multipath ACK Processing
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Implementation of per-path ACK processing for QUIC Multipath Extension
  * (RFC 9369). This module handles:

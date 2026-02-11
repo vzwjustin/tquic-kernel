@@ -3,6 +3,7 @@
  * TQUIC Hardware Crypto Offload Detection
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Provides CPU feature detection and algorithm selection for hardware-
  * accelerated cryptographic operations. Supports AES-NI, AVX2, AVX-512,

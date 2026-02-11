@@ -3,6 +3,7 @@
  * TQUIC Performance Benchmarking Infrastructure
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Provides comprehensive benchmarking tools for measuring QUIC performance
  * in the kernel. Benchmarks can be triggered via procfs/sysfs and results

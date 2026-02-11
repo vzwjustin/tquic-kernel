@@ -3,6 +3,7 @@
  * TQUIC: TLS 1.3 Handshake for QUIC
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Implements the full TLS 1.3 handshake protocol for QUIC connections,
  * including key schedule, transport parameters, ALPN, and PSK support.

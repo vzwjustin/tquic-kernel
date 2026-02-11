@@ -3,6 +3,7 @@
  * TQUIC: Protocol Handler Registration
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * This file implements the protocol handler registration for TQUIC,
  * including inet_protosw registration, network namespace support,

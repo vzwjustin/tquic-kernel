@@ -3,6 +3,7 @@
  * TQUIC Path Manager Type Registration and Per-Netns Infrastructure
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * This file implements the PM type selection framework following MPTCP's
  * pattern. It provides per-netns sysctl configuration and PM type dispatch.

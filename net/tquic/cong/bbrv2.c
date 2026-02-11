@@ -3,6 +3,7 @@
  * TQUIC: BBRv2 Congestion Control
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * BBRv2 implementation for QUIC. BBR (Bottleneck Bandwidth and RTT)
  * uses bandwidth and RTT estimates to control sending rate, aiming

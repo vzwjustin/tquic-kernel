@@ -3,6 +3,7 @@
  * TQUIC Security Hardening Tests
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Tests for security hardening features:
  * - CVE-2025-54939 (QUIC-LEAK): Pre-handshake memory exhaustion defense

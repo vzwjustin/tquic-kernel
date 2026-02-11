@@ -3,6 +3,9 @@
  * TQUIC: Crypto Module Initialization
  *
  * Wires up crypto subcomponents for the TQUIC crypto module.
+ *
+ * Copyright (c) 2024-2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  */
 
 #include <linux/module.h>

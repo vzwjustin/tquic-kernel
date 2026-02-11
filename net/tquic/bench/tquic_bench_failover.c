@@ -9,6 +9,9 @@
  *   - Failover time: <100ms
  *   - Minimal packet loss during failover
  *   - Fast bandwidth recovery
+ *
+ * Copyright (c) 2024-2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  */
 
 #include "bench_common.h"

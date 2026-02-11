@@ -3,6 +3,7 @@
  * TQUIC Multipath Packet Scheduler API
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * This header provides local scheduler API extensions for the multipath
  * scheduler implementations. The main API types (struct tquic_mp_sched_ops,

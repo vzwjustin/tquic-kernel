@@ -3,6 +3,7 @@
  * TQUIC: Extended Key Update KUnit Tests
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Tests for the Extended Key Update extension (draft-ietf-quic-extended-key-update-01):
  * - Frame encoding/decoding

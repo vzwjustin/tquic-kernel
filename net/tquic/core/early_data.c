@@ -17,6 +17,7 @@
  * - Anti-replay protection (timestamps, nonces)
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  */
 
 #include <linux/slab.h>

@@ -3,6 +3,7 @@
  * TQUIC: Additional Addresses Transport Parameter Extension
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Implements draft-piraux-quic-additional-addresses extension
  *

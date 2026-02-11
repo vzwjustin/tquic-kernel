@@ -3,6 +3,7 @@
  * TQUIC: TLS 1.3 Handshake Integration
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Implements TLS 1.3 handshake delegation via net/handshake infrastructure.
  * The handshake is performed by the tlshd userspace daemon, following the

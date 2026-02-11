@@ -3,6 +3,7 @@
  * TQUIC: QUIC Load Balancing Support
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Implementation of QUIC-LB (draft-ietf-quic-load-balancers) for
  * server ID encoding in connection IDs to enable stateless load balancing.

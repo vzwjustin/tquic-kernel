@@ -3,6 +3,7 @@
  * TQUIC: BBRv2 Congestion Control
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Implementation of BBRv2 (Bottleneck Bandwidth and Round-trip propagation time)
  * congestion control algorithm version 2 for QUIC.

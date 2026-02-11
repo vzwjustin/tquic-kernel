@@ -3,6 +3,7 @@
  * TQUIC: One-Way Delay Measurement Extension KUnit Tests
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Comprehensive tests for One-Way Delay measurement extension (draft-huitema-quic-1wd):
  *   - Transport parameter encoding/decoding

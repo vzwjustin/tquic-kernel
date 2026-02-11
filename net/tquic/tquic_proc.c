@@ -3,6 +3,7 @@
  * TQUIC Proc Interface
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Implements /proc/net/tquic, /proc/net/tquic_stat, and /proc/net/tquic_errors
  * for monitoring TQUIC connections and debugging.

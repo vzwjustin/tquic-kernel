@@ -3,6 +3,7 @@
  * TQUIC: Path Manager for WAN Bonding
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Manages discovery, validation, and quality monitoring of network paths
  * for multi-path WAN bonding.

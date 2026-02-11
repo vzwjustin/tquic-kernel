@@ -3,6 +3,7 @@
  * TQUIC: WAN Bonding over QUIC - Transport Parameters
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Implementation of QUIC transport parameters encoding, decoding,
  * validation, and negotiation as defined in RFC 9000 Section 18.

@@ -3,6 +3,7 @@
  * TQUIC: GREASE Support (RFC 9287)
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Implementation of Generate Random Extensions And Sustain Extensibility
  * (GREASE) for QUIC protocol forward compatibility testing.

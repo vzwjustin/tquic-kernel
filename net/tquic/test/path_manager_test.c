@@ -3,6 +3,7 @@
  * TQUIC Path Manager Unit Tests
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Comprehensive KUnit test suite for TQUIC path management covering:
  * - Path validation (PATH_CHALLENGE/PATH_RESPONSE)

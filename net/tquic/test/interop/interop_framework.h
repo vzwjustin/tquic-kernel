@@ -3,6 +3,7 @@
  * TQUIC Interoperability Testing Framework
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * This framework provides comprehensive interoperability testing capabilities
  * for the TQUIC implementation. It enables testing against RFC 9000/9001/9002

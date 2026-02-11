@@ -3,6 +3,7 @@
  * TQUIC Adaptive Reorder Buffer for WAN Bonding
  *
  * Copyright (c) 2024-2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Provides RB-tree based out-of-order packet buffering for multi-path
  * bandwidth aggregation with heterogeneous latencies (fiber + satellite).

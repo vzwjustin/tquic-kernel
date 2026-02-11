@@ -3,6 +3,7 @@
  * TQUIC: L4S (Low Latency Low Loss Scalable) Support
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Implementation of L4S ECN marking and detection per RFC 9330/9331.
  * Provides automatic detection of L4S-capable paths and appropriate

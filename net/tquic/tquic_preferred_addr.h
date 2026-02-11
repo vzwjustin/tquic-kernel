@@ -3,6 +3,7 @@
  * TQUIC: Preferred Address Transport Parameter and Migration
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Implements RFC 9000 Section 9.6: Server's Preferred Address
  *

@@ -3,6 +3,7 @@
  * TQUIC NAPI Polling Support
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * This header provides NAPI (New API) polling mode support for TQUIC.
  * NAPI reduces interrupt overhead by polling for packets in softirq

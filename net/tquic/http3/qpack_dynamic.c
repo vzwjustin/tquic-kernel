@@ -3,6 +3,7 @@
  * QPACK Dynamic Table Management - RFC 9204
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * The dynamic table is a FIFO table that maintains recently used
  * header field entries. It supports insertion, duplication, and

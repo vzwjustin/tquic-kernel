@@ -3,6 +3,7 @@
  * TQUIC: Careful Resume Implementation
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Implementation of the Careful Resume algorithm for safe restoration
  * of congestion control state, as specified in the BDP Frame extension

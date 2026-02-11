@@ -3,6 +3,7 @@
  * TQUIC Qlog Tracing Support
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Implements qlog event logging for QUIC connections per:
  *   draft-ietf-quic-qlog-main-schema

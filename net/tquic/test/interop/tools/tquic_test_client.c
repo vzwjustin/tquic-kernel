@@ -7,6 +7,9 @@
  * the TQUIC socket API.
  *
  * Usage: tquic_test_client --addr <ip> --port <port> [options]
+ *
+ * Copyright (c) 2024-2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  */
 
 #include <stdio.h>

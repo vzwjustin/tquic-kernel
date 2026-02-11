@@ -3,6 +3,7 @@
  * TQUIC Reed-Solomon FEC Scheme
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Reed-Solomon Forward Error Correction for QUIC.
  * Supports GF(2^8) and GF(2^16) Galois fields.

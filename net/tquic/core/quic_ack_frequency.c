@@ -11,6 +11,7 @@
  * - Adapting to network conditions
  *
  * Copyright (c) 2024 Linux QUIC Authors
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  */
 
 #include <linux/slab.h>

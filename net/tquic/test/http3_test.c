@@ -3,6 +3,7 @@
  * TQUIC HTTP/3 Unit Tests
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Comprehensive KUnit test suite for HTTP/3 (RFC 9114), QPACK (RFC 9204),
  * and Extensible Priorities (RFC 9218).

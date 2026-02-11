@@ -3,6 +3,7 @@
  * TQUIC: TCP-over-QUIC Tunnel Termination
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * This file implements TCP-over-QUIC tunnel termination for VPS endpoints.
  * The VPS receives encapsulated TCP connections from routers over QUIC streams

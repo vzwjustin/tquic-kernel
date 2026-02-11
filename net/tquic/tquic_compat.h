@@ -3,6 +3,7 @@
  * TQUIC: Kernel API Compatibility Layer
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Provides compatibility macros and wrappers for kernel APIs that changed
  * between kernel versions. Include this header in any TQUIC source file

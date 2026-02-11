@@ -3,6 +3,7 @@
  * TQUIC io_uring Integration
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Provides high-performance async I/O for TQUIC using io_uring.
  * This implementation follows the patterns established in io_uring/net.c

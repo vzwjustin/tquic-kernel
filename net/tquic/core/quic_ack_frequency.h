@@ -5,6 +5,7 @@
  * Implementation of draft-ietf-quic-ack-frequency
  *
  * Copyright (c) 2024-2026 Linux TQUIC Authors
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  */
 
 #ifndef _TQUIC_CORE_ACK_FREQUENCY_H

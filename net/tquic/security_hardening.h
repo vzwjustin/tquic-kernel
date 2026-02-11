@@ -3,6 +3,7 @@
  * TQUIC: Security Hardening Definitions
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * This header provides security hardening definitions for protecting
  * against known QUIC vulnerabilities and attacks:

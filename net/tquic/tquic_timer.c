@@ -3,6 +3,7 @@
  * TQUIC: Timer and Recovery System
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Implements comprehensive timer management for QUIC protocol operations
  * including loss detection, retransmission, pacing, and connection lifecycle.

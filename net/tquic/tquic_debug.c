@@ -3,6 +3,7 @@
  * TQUIC Debug Infrastructure
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Implements debugfs interface for TQUIC runtime inspection and debugging.
  *

@@ -3,6 +3,7 @@
  * TQUIC: QUIC Flow Control
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Flow control implementation as per RFC 9000 Section 4.
  * Handles connection-level and stream-level flow control,

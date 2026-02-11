@@ -12,6 +12,9 @@
  *   - Redundant: Send on all paths (for reliability)
  *   - BLEST: Blocking Estimation based scheduler
  *   - ECF: Earliest Completion First
+ *
+ * Copyright (c) 2024-2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  */
 
 #include "bench_common.h"

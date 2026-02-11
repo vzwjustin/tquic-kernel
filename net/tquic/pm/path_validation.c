@@ -3,6 +3,7 @@
  * TQUIC: Path Validation (PATH_CHALLENGE/PATH_RESPONSE)
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Implements RFC 9000 Section 8.2 Path Validation with adaptive timeouts
  * based on smoothed RTT. Ensures paths are validated before data transmission

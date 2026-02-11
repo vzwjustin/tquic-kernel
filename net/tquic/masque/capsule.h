@@ -3,6 +3,7 @@
  * TQUIC MASQUE: Capsule Protocol (RFC 9297)
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * The Capsule Protocol provides a mechanism for sending discrete messages
  * over an HTTP connection. Capsules are used by CONNECT-UDP, CONNECT-IP,

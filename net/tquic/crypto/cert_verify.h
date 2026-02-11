@@ -3,6 +3,7 @@
  * TQUIC: Certificate Chain Validation
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Provides X.509 certificate chain validation for TQUIC TLS 1.3
  * connections using the kernel's keyring infrastructure.

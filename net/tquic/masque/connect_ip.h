@@ -3,6 +3,7 @@
  * TQUIC MASQUE CONNECT-IP Header
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * API definitions for CONNECT-IP (RFC 9484) implementation.
  * CONNECT-IP provides IP proxying over HTTP, enabling IP tunnel

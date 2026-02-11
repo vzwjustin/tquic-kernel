@@ -3,6 +3,7 @@
  * TQUIC MASQUE: QUIC-Aware Proxy Protocol (draft-ietf-masque-quic-proxy)
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * This header defines the QUIC-Aware Proxy extension for MASQUE, enabling
  * optimized proxying of QUIC connections through HTTP/3 proxies. Unlike

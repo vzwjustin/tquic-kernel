@@ -3,6 +3,7 @@
  * TQUIC Seamless Failover for WAN Bonding
  *
  * Copyright (c) 2024-2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Implements seamless failover with zero application-visible packet loss
  * when a path fails. All unacknowledged packets on the failed path are

@@ -3,6 +3,7 @@
  * TQUIC: WAN Bonding over QUIC - Packet Parsing and Construction
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * This file implements QUIC packet parsing and construction including:
  * - Long header packets (Initial, 0-RTT, Handshake, Retry)

@@ -5,6 +5,7 @@
  * Connection management implementation
  *
  * Copyright (c) 2024 Linux TQUIC Authors
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  */
 
 #include <linux/slab.h>

@@ -5,6 +5,7 @@
  * Path management implementation per RFC 9000 Section 9
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  */
 
 #include <linux/slab.h>

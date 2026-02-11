@@ -3,6 +3,7 @@
  * TQUIC: Socket Interface
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Provides BSD socket interface for TQUIC connections with WAN bonding.
  */

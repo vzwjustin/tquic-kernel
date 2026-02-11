@@ -3,6 +3,7 @@
  * TQUIC HTTP/3: Stream Type Management
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Implements HTTP/3 stream type mapping per RFC 9114 Section 6.
  *

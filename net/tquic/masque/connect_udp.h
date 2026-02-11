@@ -3,6 +3,7 @@
  * TQUIC MASQUE: CONNECT-UDP Protocol Header
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * This header provides CONNECT-UDP support for MASQUE (Multiplexed Application
  * Substrate over QUIC Encryption) as specified in RFC 9298.

@@ -3,6 +3,7 @@
  * TQUIC: Path Abandonment Logic for QUIC Multipath
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Implementation of path abandonment for QUIC Multipath Extension (RFC 9369).
  * This module handles:

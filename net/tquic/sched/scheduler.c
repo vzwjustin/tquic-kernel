@@ -3,6 +3,7 @@
  * TQUIC: Multipath Packet Scheduler Framework
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Provides a pluggable scheduler framework for distributing packets
  * across multiple WAN paths for true bandwidth aggregation.

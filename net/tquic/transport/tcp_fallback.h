@@ -3,6 +3,7 @@
  * TQUIC: UDP to TCP Fallback Mechanism
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Public API for the automatic UDP-to-TCP fallback mechanism.
  */

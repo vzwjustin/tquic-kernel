@@ -3,6 +3,7 @@
  * TQUIC: BDP Frame Extension KUnit Tests
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * KUnit tests for the BDP Frame extension (draft-kuhn-quic-bdpframe-extension-05)
  * including encoding/decoding, HMAC authentication, validation, and Careful Resume.

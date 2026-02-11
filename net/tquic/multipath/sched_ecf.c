@@ -15,6 +15,7 @@
  * (ACM SIGMETRICS 2017)
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  */
 
 #define pr_fmt(fmt) "TQUIC: " fmt

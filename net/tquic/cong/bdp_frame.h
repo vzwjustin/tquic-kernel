@@ -3,6 +3,7 @@
  * TQUIC: BDP Frame Extension (draft-kuhn-quic-bdpframe-extension-05)
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * This header implements the BDP (Bandwidth-Delay Product) Frame extension
  * for QUIC, enabling endpoints to exchange network path characteristics

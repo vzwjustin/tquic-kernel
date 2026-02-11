@@ -3,6 +3,7 @@
  * TQUIC Path Manager Internal Header
  *
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Internal structures and functions for the TQUIC path manager subsystem.
  * This header is for kernel-internal use only.

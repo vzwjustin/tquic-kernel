@@ -6,6 +6,7 @@
  *
  * Copyright (c) 2024 Linux QUIC Implementation Authors
  * Copyright (c) 2026 Linux Foundation
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
  */
 
 #ifndef _NET_TQUIC_CRYPTO_H
