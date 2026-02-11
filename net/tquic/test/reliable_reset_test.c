@@ -2,7 +2,7 @@
 /*
  * TQUIC: Reliable Stream Reset - KUnit Tests
  *
- * Copyright (c) 2026 Linux Foundation
+ * Copyright (c) 2026 Justin Adams <spotty118@gmail.com>
  * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Tests for RESET_STREAM_AT frame encoding/decoding and handling

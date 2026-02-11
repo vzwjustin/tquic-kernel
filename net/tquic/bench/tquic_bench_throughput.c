@@ -8,7 +8,7 @@
  *   - Single-path: >9 Gbps @ 10G NIC
  *   - Multipath: >95% of sum(path BWs)
  *
- * Copyright (c) 2024-2026 Linux Foundation
+ * Copyright (c) 2026 Justin Adams <spotty118@gmail.com>
  * Kernel implementation by Justin Adams <spotty118@gmail.com>
  */
 

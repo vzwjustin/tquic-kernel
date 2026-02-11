@@ -2,7 +2,7 @@
 /*
  * TQUIC: Packet Transmission Path
  *
- * Copyright (c) 2026 Linux Foundation
+ * Copyright (c) 2026 Justin Adams <spotty118@gmail.com>
  * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Implements the QUIC packet transmission path with multipath WAN bonding

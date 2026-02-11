@@ -2,7 +2,7 @@
 /*
  * TQUIC: Security Hardening Implementation
  *
- * Copyright (c) 2026 Linux Foundation
+ * Copyright (c) 2026 Justin Adams <spotty118@gmail.com>
  * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Implements defenses against known QUIC vulnerabilities:

@@ -2,7 +2,7 @@
 /*
  * TQUIC NAT Lifecycle Management Implementation
  *
- * Copyright (c) 2026 Linux Foundation
+ * Copyright (c) 2026 Justin Adams <spotty118@gmail.com>
  * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Implements advanced NAT lifecycle management for QUIC connections:

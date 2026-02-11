@@ -6,7 +6,7 @@
  *
  * Implementation follows RFC 9000 Section 13.2 for generating acknowledgments.
  *
- * Copyright (c) 2024-2026 Linux TQUIC Authors
+ * Copyright (c) 2026 Justin Adams <spotty118@gmail.com>
  * Kernel implementation by Justin Adams <spotty118@gmail.com>
  */
 

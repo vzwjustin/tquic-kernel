@@ -2,7 +2,7 @@
 /*
  * TQUIC MASQUE: CONNECT-UDP Protocol Implementation
  *
- * Copyright (c) 2026 Linux Foundation
+ * Copyright (c) 2026 Justin Adams <spotty118@gmail.com>
  * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Implementation of CONNECT-UDP for MASQUE as specified in RFC 9298.

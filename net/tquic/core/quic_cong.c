@@ -11,7 +11,7 @@
  *   - BBR (Bottleneck Bandwidth and RTT) congestion control
  *   - BBRv2 congestion control
  *
- * Copyright (c) 2024 Linux QUIC Authors
+ * Copyright (c) 2026 Justin Adams <spotty118@gmail.com>
  * Kernel implementation by Justin Adams <spotty118@gmail.com>
  */
 

@@ -9,7 +9,7 @@
  *   - Connection setup: <1 RTT (0-RTT support)
  *   - Memory: <64KB per connection
  *
- * Copyright (c) 2024-2026 Linux Foundation
+ * Copyright (c) 2026 Justin Adams <spotty118@gmail.com>
  * Kernel implementation by Justin Adams <spotty118@gmail.com>
  */
 

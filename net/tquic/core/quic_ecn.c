@@ -11,7 +11,7 @@
  * 3. Receiver reports ECN counts in ACK_ECN frames (frame type 0x03)
  * 4. Sender uses feedback to reduce sending rate
  *
- * Copyright (c) 2024-2026 Linux QUIC Authors
+ * Copyright (c) 2026 Justin Adams <spotty118@gmail.com>
  * Kernel implementation by Justin Adams <spotty118@gmail.com>
  */
 

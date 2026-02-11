@@ -6,7 +6,7 @@
  * It must define TRACE_INCLUDE_PATH and CREATE_TRACE_POINTS before
  * including the tracepoint header.
  *
- * Copyright (c) 2024 Linux QUIC Authors
+ * Copyright (c) 2026 Justin Adams <spotty118@gmail.com>
  * Kernel implementation by Justin Adams <spotty118@gmail.com>
  */
 

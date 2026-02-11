@@ -2,7 +2,7 @@
 /*
  * TQUIC MASQUE: QUIC-Aware Proxy Implementation (draft-ietf-masque-quic-proxy)
  *
- * Copyright (c) 2026 Linux Foundation
+ * Copyright (c) 2026 Justin Adams <spotty118@gmail.com>
  * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Implementation of the QUIC-Aware Proxy extension for MASQUE. This enables

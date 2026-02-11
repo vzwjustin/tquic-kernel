@@ -4,8 +4,7 @@
  *
  * Loss detection and recovery implementation based on RFC 9002
  *
- * Copyright (c) 2024 Linux QUIC Authors
- * Copyright (c) 2026 Linux Foundation
+ * Copyright (c) 2026 Justin Adams <spotty118@gmail.com>
  * Kernel implementation by Justin Adams <spotty118@gmail.com>
  */
 

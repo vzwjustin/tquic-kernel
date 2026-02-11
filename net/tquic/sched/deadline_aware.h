@@ -2,7 +2,7 @@
 /*
  * TQUIC: Deadline-Aware Multipath Scheduling
  *
- * Copyright (c) 2026 Linux Foundation
+ * Copyright (c) 2026 Justin Adams <spotty118@gmail.com>
  * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Implementation of Deadline-Aware Multipath Transport Protocol (DMTP)

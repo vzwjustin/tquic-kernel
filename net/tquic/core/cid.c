@@ -2,7 +2,7 @@
 /*
  * TQUIC: Connection ID Management
  *
- * Copyright (c) 2026 Linux Foundation
+ * Copyright (c) 2026 Justin Adams <spotty118@gmail.com>
  * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Connection ID management is critical for QUIC connection migration and

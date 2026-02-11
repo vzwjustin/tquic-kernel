@@ -2,7 +2,7 @@
 /*
  * TQUIC: QUIC Multipath Frame Parsing and Generation
  *
- * Copyright (c) 2026 Linux Foundation
+ * Copyright (c) 2026 Justin Adams <spotty118@gmail.com>
  * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Implementation of frame parsing and generation for QUIC Multipath

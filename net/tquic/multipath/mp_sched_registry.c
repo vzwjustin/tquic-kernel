@@ -6,7 +6,7 @@
  * on in-kernel netns fields not available in the DietPi kernel. We keep the
  * multipath scheduler registration API functional and safe.
  *
- * Copyright (c) 2024-2026 Linux Foundation
+ * Copyright (c) 2026 Justin Adams <spotty118@gmail.com>
  * Kernel implementation by Justin Adams <spotty118@gmail.com>
  */
 

@@ -7,7 +7,7 @@
  * are compiled into a single quic.o module, only one module_init can be
  * used, and that main init must call all subsystem init functions.
  *
- * Copyright (c) 2024-2026 Linux Foundation
+ * Copyright (c) 2026 Justin Adams <spotty118@gmail.com>
  * Kernel implementation by Justin Adams <spotty118@gmail.com>
  */
 

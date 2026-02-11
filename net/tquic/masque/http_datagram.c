@@ -2,7 +2,7 @@
 /*
  * TQUIC MASQUE: HTTP Datagrams Implementation (RFC 9297)
  *
- * Copyright (c) 2026 Linux Foundation
+ * Copyright (c) 2026 Justin Adams <spotty118@gmail.com>
  * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * This module implements HTTP Datagrams as specified in RFC 9297. HTTP

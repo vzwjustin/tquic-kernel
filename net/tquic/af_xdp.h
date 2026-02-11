@@ -2,7 +2,7 @@
 /*
  * TQUIC AF_XDP Integration
  *
- * Copyright (c) 2026 Linux Foundation
+ * Copyright (c) 2026 Justin Adams <spotty118@gmail.com>
  * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * This header provides AF_XDP (XDP sockets) integration for TQUIC,

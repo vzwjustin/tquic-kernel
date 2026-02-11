@@ -2,7 +2,7 @@
 /*
  * KUnit tests for TQUIC packet reorder buffer (WAN bonding)
  *
- * Copyright (c) 2026 Linux Foundation
+ * Copyright (c) 2026 Justin Adams <spotty118@gmail.com>
  * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Tests the reorder buffer used to reassemble packets that arrive

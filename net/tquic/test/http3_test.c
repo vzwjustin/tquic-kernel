@@ -2,7 +2,7 @@
 /*
  * TQUIC HTTP/3 Unit Tests
  *
- * Copyright (c) 2026 Linux Foundation
+ * Copyright (c) 2026 Justin Adams <spotty118@gmail.com>
  * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Comprehensive KUnit test suite for HTTP/3 (RFC 9114), QPACK (RFC 9204),

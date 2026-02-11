@@ -2,7 +2,7 @@
 /*
  * TQUIC: WAN Bonding over QUIC - Frame Definitions
  *
- * Copyright (c) 2026 Linux Foundation
+ * Copyright (c) 2026 Justin Adams <spotty118@gmail.com>
  * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * This header provides QUIC frame parsing, construction, and utility

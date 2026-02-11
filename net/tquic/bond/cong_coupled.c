@@ -19,7 +19,7 @@
  *   - "Improving Multipath TCP" (SIGCOMM 2011) - Raiciu et al.
  *   - draft-ietf-quic-multipath: Multipath Extension for QUIC
  *
- * Copyright (c) 2024-2026 Linux Foundation
+ * Copyright (c) 2026 Justin Adams <spotty118@gmail.com>
  * Kernel implementation by Justin Adams <spotty118@gmail.com>
  */
 

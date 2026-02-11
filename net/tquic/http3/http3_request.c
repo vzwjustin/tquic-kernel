@@ -2,7 +2,7 @@
 /*
  * TQUIC HTTP/3: Request/Response Handling
  *
- * Copyright (c) 2026 Linux Foundation
+ * Copyright (c) 2026 Justin Adams <spotty118@gmail.com>
  * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Implements HTTP/3 request/response handling per RFC 9114 Section 4.

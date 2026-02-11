@@ -2,7 +2,7 @@
 /*
  * TQUIC HTTP/3 Settings Handling
  *
- * Copyright (c) 2026 Linux Foundation
+ * Copyright (c) 2026 Justin Adams <spotty118@gmail.com>
  * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Implementation of HTTP/3 settings management per RFC 9114 Section 7.2.4.

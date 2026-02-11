@@ -4,7 +4,7 @@
  *
  * 0-RTT Early Data Support Header (RFC 9001 Section 4.6)
  *
- * Copyright (c) 2026 Linux Foundation
+ * Copyright (c) 2026 Justin Adams <spotty118@gmail.com>
  * Kernel implementation by Justin Adams <spotty118@gmail.com>
  */
 

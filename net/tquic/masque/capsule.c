@@ -2,7 +2,7 @@
 /*
  * TQUIC MASQUE: Capsule Protocol Implementation (RFC 9297)
  *
- * Copyright (c) 2026 Linux Foundation
+ * Copyright (c) 2026 Justin Adams <spotty118@gmail.com>
  * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * The Capsule Protocol provides a framing mechanism for sending discrete

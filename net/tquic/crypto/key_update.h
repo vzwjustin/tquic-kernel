@@ -2,7 +2,7 @@
 /*
  * TQUIC: TLS 1.3 Key Update Mechanism Header (RFC 9001 Section 6)
  *
- * Copyright (c) 2026 Linux Foundation
+ * Copyright (c) 2026 Justin Adams <spotty118@gmail.com>
  * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * This header provides the API for TLS 1.3 key updates in QUIC:

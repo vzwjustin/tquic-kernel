@@ -2,7 +2,7 @@
 /*
  * TQUIC: Persistent Congestion Detection (RFC 9002 Section 7.6)
  *
- * Copyright (c) 2026 Linux Foundation
+ * Copyright (c) 2026 Justin Adams <spotty118@gmail.com>
  * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * This module implements persistent congestion detection for QUIC loss

@@ -2,7 +2,7 @@
 /*
  * KUnit tests for TQUIC variable-length integer encoding/decoding
  *
- * Copyright (c) 2026 Linux Foundation
+ * Copyright (c) 2026 Justin Adams <spotty118@gmail.com>
  * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * QUIC uses a variable-length integer encoding (RFC 9000 Section 16):

@@ -11,7 +11,7 @@
  * - Old keys retained briefly for handling reordered packets
  * - Keys discarded after a timeout (3x PTO recommended)
  *
- * Copyright (c) 2024 Linux QUIC Authors
+ * Copyright (c) 2026 Justin Adams <spotty118@gmail.com>
  * Kernel implementation by Justin Adams <spotty118@gmail.com>
  */
 
