@@ -319,10 +319,15 @@ static void tquic_diag_get_info(struct sock *sk, struct inet_diag_msg *r,
 
 	/* RTT from active path if available */
 	{
-		struct tquic_path *apath = READ_ONCE(conn->active_path);
+		struct tquic_path *apath;
 
-		if (apath)
+		rcu_read_lock();
+		apath = rcu_dereference(conn->active_path);
+		if (apath && tquic_path_get(apath)) {
 			info->rtt = apath->stats.rtt_smoothed;
+			tquic_path_put(apath);
+		}
+		rcu_read_unlock();
 	}
 
 	/* Aggregate statistics */

@@ -55,12 +55,20 @@ static void tquic_calc_path_quality(struct tquic_path *path,
 	}
 
 	/* Base score from RTT (lower is better) */
-	if (READ_ONCE(stats->rtt_smoothed) > 0)
-		score = 1000000000ULL / READ_ONCE(stats->rtt_smoothed);
+	{
+		u32 rtt = READ_ONCE(stats->rtt_smoothed);
+
+		if (rtt > 0)
+			score = 1000000000ULL / rtt;
+	}
 
 	/* Adjust for bandwidth */
-	if (READ_ONCE(stats->bandwidth) > 0)
-		score = (score * READ_ONCE(stats->bandwidth)) >> 20;
+	{
+		u64 bw = READ_ONCE(stats->bandwidth);
+
+		if (bw > 0)
+			score = (score * bw) >> 20;
+	}
 
 	/* Penalize for loss */
 	if (READ_ONCE(stats->tx_packets) > 0) {
@@ -567,7 +575,7 @@ struct tquic_path *tquic_bond_select_path(struct tquic_connection *conn,
 	struct tquic_path *primary;
 
 	/* conn->paths_lock must be held by caller (tquic_select_path) */
-	if (!bond)
+	if (!bond) {
 		struct tquic_path *path;
 
 		/* Return referenced path per API contract */
@@ -578,6 +586,7 @@ struct tquic_path *tquic_bond_select_path(struct tquic_connection *conn,
 		rcu_read_unlock();
 
 		return path;
+	}
 
 	switch (bond->mode) {
 	case TQUIC_BOND_MODE_FAILOVER:

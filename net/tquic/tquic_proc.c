@@ -218,8 +218,9 @@ void tquic_log_error(struct net *net, struct tquic_connection *conn,
 		memcpy(entry->scid, conn->scid.id, len);
 		entry->scid_len = len;
 
-		apath = READ_ONCE(conn->active_path);
-		if (apath) {
+		rcu_read_lock();
+		apath = rcu_dereference(conn->active_path);
+		if (apath && tquic_path_get(apath)) {
 			memcpy(&entry->local_addr,
 			       &apath->local_addr,
 			       sizeof(entry->local_addr));
@@ -227,6 +228,9 @@ void tquic_log_error(struct net *net, struct tquic_connection *conn,
 			       &apath->remote_addr,
 			       sizeof(entry->remote_addr));
 			entry->path_id = apath->path_id;
+			tquic_path_put(apath);
+		}
+		rcu_read_unlock();
 		} else {
 			memset(&entry->local_addr, 0, sizeof(entry->local_addr));
 			memset(&entry->remote_addr, 0, sizeof(entry->remote_addr));

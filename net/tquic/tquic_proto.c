@@ -152,10 +152,19 @@ static int tquic_v4_rcv(struct sk_buff *skb)
 
 		conn = tquic_conn_lookup_by_cid(&dcid);
 		if (conn) {
-			struct tquic_path *apath = READ_ONCE(conn->active_path);
+			struct tquic_path *apath;
 
-			/* Deliver to connection's active path */
-			tquic_udp_deliver_to_conn(conn, apath, skb);
+			/* Get referenced path for safe delivery */
+			rcu_read_lock();
+			apath = rcu_dereference(conn->active_path);
+			if (apath && tquic_path_get(apath)) {
+				rcu_read_unlock();
+				tquic_udp_deliver_to_conn(conn, apath, skb);
+				tquic_path_put(apath);
+			} else {
+				rcu_read_unlock();
+				kfree_skb(skb);
+			}
 			return 0;
 		}
 	} else {
@@ -174,9 +183,19 @@ static int tquic_v4_rcv(struct sk_buff *skb)
 
 		conn = tquic_conn_lookup_by_cid(&dcid);
 		if (conn) {
-			struct tquic_path *apath = READ_ONCE(conn->active_path);
+			struct tquic_path *apath;
 
-			tquic_udp_deliver_to_conn(conn, apath, skb);
+			/* Get referenced path for safe delivery */
+			rcu_read_lock();
+			apath = rcu_dereference(conn->active_path);
+			if (apath && tquic_path_get(apath)) {
+				rcu_read_unlock();
+				tquic_udp_deliver_to_conn(conn, apath, skb);
+				tquic_path_put(apath);
+			} else {
+				rcu_read_unlock();
+				kfree_skb(skb);
+			}
 			return 0;
 		}
 	}
@@ -251,11 +270,15 @@ static int tquic_v4_err(struct sk_buff *skb, u32 info)
 						conn = tquic_conn_lookup_by_cid(
 								&dcid);
 						if (conn) {
-							apath = READ_ONCE(conn->active_path);
-							if (apath)
+							rcu_read_lock();
+							apath = rcu_dereference(conn->active_path);
+							if (apath && tquic_path_get(apath)) {
 								tquic_pmtud_on_icmp_mtu_update(
 									apath,
 									quic_mtu);
+								tquic_path_put(apath);
+							}
+							rcu_read_unlock();
 						}
 					}
 				}
@@ -331,9 +354,19 @@ static int tquic_v6_rcv(struct sk_buff *skb)
 
 		conn = tquic_conn_lookup_by_cid(&dcid);
 		if (conn) {
-			struct tquic_path *apath = READ_ONCE(conn->active_path);
+			struct tquic_path *apath;
 
-			tquic_udp_deliver_to_conn(conn, apath, skb);
+			/* Get referenced path for safe delivery */
+			rcu_read_lock();
+			apath = rcu_dereference(conn->active_path);
+			if (apath && tquic_path_get(apath)) {
+				rcu_read_unlock();
+				tquic_udp_deliver_to_conn(conn, apath, skb);
+				tquic_path_put(apath);
+			} else {
+				rcu_read_unlock();
+				kfree_skb(skb);
+			}
 			return 0;
 		}
 	} else {
@@ -351,9 +384,19 @@ static int tquic_v6_rcv(struct sk_buff *skb)
 
 		conn = tquic_conn_lookup_by_cid(&dcid);
 		if (conn) {
-			struct tquic_path *apath = READ_ONCE(conn->active_path);
+			struct tquic_path *apath;
 
-			tquic_udp_deliver_to_conn(conn, apath, skb);
+			/* Get referenced path for safe delivery */
+			rcu_read_lock();
+			apath = rcu_dereference(conn->active_path);
+			if (apath && tquic_path_get(apath)) {
+				rcu_read_unlock();
+				tquic_udp_deliver_to_conn(conn, apath, skb);
+				tquic_path_put(apath);
+			} else {
+				rcu_read_unlock();
+				kfree_skb(skb);
+			}
 			return 0;
 		}
 	}
@@ -428,11 +471,15 @@ static int tquic_v6_err(struct sk_buff *skb, struct inet6_skb_parm *opt,
 					       dcid.len);
 					conn = tquic_conn_lookup_by_cid(&dcid);
 					if (conn) {
-						apath = READ_ONCE(conn->active_path);
-						if (apath)
+						rcu_read_lock();
+						apath = rcu_dereference(conn->active_path);
+						if (apath && tquic_path_get(apath)) {
 							tquic_pmtud_on_icmp_mtu_update(
 								apath,
 								quic_mtu);
+							tquic_path_put(apath);
+						}
+						rcu_read_unlock();
 					}
 				}
 			}

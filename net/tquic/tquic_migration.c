@@ -181,16 +181,21 @@ EXPORT_SYMBOL_GPL(tquic_path_anti_amplification_received);
 bool tquic_path_can_send_on(struct tquic_connection *conn)
 {
 	struct tquic_path *path;
+	bool can_send = false;
 
 	if (!conn)
 		return false;
 
-	path = READ_ONCE(conn->active_path);
-	if (!path)
-		return false;
+	rcu_read_lock();
+	path = rcu_dereference(conn->active_path);
+	if (path && tquic_path_get(path)) {
+		can_send = path->state == TQUIC_PATH_ACTIVE ||
+			   path->state == TQUIC_PATH_VALIDATED;
+		tquic_path_put(path);
+	}
+	rcu_read_unlock();
 
-	return path->state == TQUIC_PATH_ACTIVE ||
-	       path->state == TQUIC_PATH_VALIDATED;
+	return can_send;
 }
 EXPORT_SYMBOL_GPL(tquic_path_can_send_on);
 
