@@ -1399,7 +1399,7 @@ int tquic_hs_generate_client_hello(struct tquic_handshake *hs,
 	 * unlikely with a properly seeded CSPRNG, an all-zero random would
 	 * be a catastrophic protocol failure.
 	 */
-	if (mem_is_zero(hs->client_random, TLS_RANDOM_LEN)) {
+	if (!memchr_inv(hs->client_random, 0, TLS_RANDOM_LEN)) {
 		kfree_sensitive(extensions);
 		return -EIO;
 	}
