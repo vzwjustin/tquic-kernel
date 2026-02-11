@@ -417,8 +417,11 @@ void coupled_cc_update_path(struct coupled_cc_ctx *ctx, u8 path_id,
 	if (path->rtt_us > 0)
 		path->capacity = div64_u64(cwnd * USEC_PER_SEC, path->rtt_us);
 
-	/* Update total cwnd */
-	ctx->total_cwnd = ctx->total_cwnd - old_cwnd + cwnd;
+	/* Update total cwnd with saturating arithmetic */
+	if (old_cwnd > ctx->total_cwnd)
+		ctx->total_cwnd = cwnd;
+	else
+		ctx->total_cwnd = ctx->total_cwnd - old_cwnd + cwnd;
 
 	/* Update RTT bounds */
 	ctx->min_rtt_us = U64_MAX;

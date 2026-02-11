@@ -876,69 +876,101 @@ static int tquic_process_ack_frame(struct tquic_rx_ctx *ctx)
 		}
 	}
 
-	/* Update RTT estimate and notify congestion control */
-	if (ctx->path) {
+	/*
+	 * Update RTT estimate and notify congestion control.
+	 *
+	 * RFC 9002 Section 5.1: An RTT sample is generated using only
+	 * the largest acknowledged packet in the received ACK frame.
+	 * The RTT is measured from when the packet was sent (sent_time)
+	 * to now, minus the peer's reported ack_delay.
+	 */
+	if (ctx->path && ctx->conn && ctx->conn->pn_spaces) {
 		ktime_t now = ktime_get();
+		ktime_t sent_time;
+		unsigned long pn_flags;
+		int pn_space_idx;
+		int lookup_ret;
 		/* C-5: use negotiated ack_delay_exponent per RFC 9000 Section 19.3 */
-		u8 ade = (ctx->conn) ?
-			ctx->conn->remote_params.ack_delay_exponent : 3;
+		u8 ade = ctx->conn->remote_params.ack_delay_exponent;
 		u64 ack_delay_us;
-
-		/*
-		 * Clamp ade to RFC 9000 maximum of 20, then check for
-		 * overflow before shifting.  When ack_delay is large
-		 * (e.g. > 2^44) and ade is 20, the shift wraps u64 to
-		 * a small value that would bypass the 16-second cap.
-		 * Pre-check: if ack_delay already exceeds the cap at
-		 * the given exponent, saturate directly.
-		 */
-		ade = min_t(u8, ade, 20);
-		if (ack_delay > (16000000ULL >> ade))
-			ack_delay_us = 16000000ULL;
-		else
-			ack_delay_us = ack_delay << ade;
 		u64 rtt_us;
+		struct tquic_pn_space *pns;
 
 		/*
-		 * RTT sample calculation (simplified).
-		 * Full implementation would track sent_time per packet.
-		 * Use path's last_activity as approximation for now.
+		 * Map encryption level to packet number space.
+		 * Initial -> 0, Handshake -> 1, 0-RTT/1-RTT -> 2
 		 */
-		rtt_us = ktime_us_delta(now,
-				READ_ONCE(ctx->path->last_activity));
-		if (rtt_us > ack_delay_us)
-			rtt_us -= ack_delay_us;
+		switch (ctx->enc_level) {
+		case TQUIC_PKT_INITIAL:
+			pn_space_idx = TQUIC_PN_SPACE_INITIAL;
+			break;
+		case TQUIC_PKT_HANDSHAKE:
+			pn_space_idx = TQUIC_PN_SPACE_HANDSHAKE;
+			break;
+		default:
+			pn_space_idx = TQUIC_PN_SPACE_APPLICATION;
+			break;
+		}
 
-		/* Update MIB counter for RTT sample */
-		if (ctx->conn && ctx->conn->sk)
-			TQUIC_INC_STATS(sock_net(ctx->conn->sk), TQUIC_MIB_RTTSAMPLES);
+		pns = &ctx->conn->pn_spaces[pn_space_idx];
 
 		/*
-		 * Calculate bytes acknowledged from first_ack_range.
-		 *
-		 * H-1: use actual path MTU instead of hardcoded 1200.
-		 * CF-073: Use safe arithmetic to prevent overflow.
-		 * first_ack_range is a u64 from varint decode (up to
-		 * 2^62-1), so adding 1 or multiplying by mtu can
-		 * overflow.
+		 * Look up the sent_time of the largest acked packet.
+		 * If we cannot find it (already removed or never
+		 * tracked), skip the RTT sample entirely rather than
+		 * feeding garbage into the estimator.
 		 */
-		{
-			u64 acked_pkts, bytes_acked;
-			u64 mtu = (ctx->path->mtu > 0) ?
-				ctx->path->mtu : 1200;
+		spin_lock_irqsave(&pns->lock, pn_flags);
+		lookup_ret = tquic_pn_space_get_sent_time(pns, largest_ack,
+							  &sent_time);
+		spin_unlock_irqrestore(&pns->lock, pn_flags);
 
-			if (check_add_overflow(first_ack_range, (u64)1,
-					       &acked_pkts))
-				acked_pkts = U64_MAX / mtu;
-			if (check_mul_overflow(acked_pkts, mtu,
-					       &bytes_acked))
-				bytes_acked = U64_MAX;
+		if (lookup_ret == 0) {
+			rtt_us = ktime_us_delta(now, sent_time);
 
-			/* Dispatch ACK event to congestion control */
-			tquic_cong_on_ack(ctx->path, bytes_acked, rtt_us);
+			/*
+			 * Clamp ade to RFC 9000 maximum of 20, then
+			 * check for overflow before shifting.
+			 */
+			ade = min_t(u8, ade, 20);
+			if (ack_delay > (16000000ULL >> ade))
+				ack_delay_us = 16000000ULL;
+			else
+				ack_delay_us = ack_delay << ade;
 
-			/* Update RTT in CC algorithm */
-			tquic_cong_on_rtt(ctx->path, rtt_us);
+			if (rtt_us > ack_delay_us)
+				rtt_us -= ack_delay_us;
+
+			/* Update MIB counter for RTT sample */
+			if (ctx->conn->sk)
+				TQUIC_INC_STATS(sock_net(ctx->conn->sk),
+						TQUIC_MIB_RTTSAMPLES);
+
+			/*
+			 * Calculate bytes acknowledged from first_ack_range.
+			 *
+			 * H-1: use actual path MTU instead of hardcoded 1200.
+			 * CF-073: Use safe arithmetic to prevent overflow.
+			 */
+			{
+				u64 acked_pkts, bytes_acked;
+				u64 mtu = (ctx->path->mtu > 0) ?
+					ctx->path->mtu : 1200;
+
+				if (check_add_overflow(first_ack_range,
+						       (u64)1, &acked_pkts))
+					acked_pkts = U64_MAX / mtu;
+				if (check_mul_overflow(acked_pkts, mtu,
+						       &bytes_acked))
+					bytes_acked = U64_MAX;
+
+				/* Dispatch ACK event to congestion control */
+				tquic_cong_on_ack(ctx->path, bytes_acked,
+						  rtt_us);
+
+				/* Update RTT in CC algorithm */
+				tquic_cong_on_rtt(ctx->path, rtt_us);
+			}
 		}
 
 		/*
@@ -2755,6 +2787,8 @@ static int tquic_process_packet(struct tquic_connection *conn,
 	size_t payload_len, decrypted_len = 0;
 	u8 *decrypted;
 	bool decrypted_from_slab = false;
+	int pn_space_idx = TQUIC_PN_SPACE_APPLICATION;
+	u64 largest_pn = 0;
 	int ret;
 
 	ctx.data = data;
@@ -2921,6 +2955,9 @@ static int tquic_process_packet(struct tquic_connection *conn,
 				return ret;
 			ctx.offset += ret;
 
+			if (token_len > TQUIC_MAX_TOKEN_LEN)
+				return -EINVAL;
+
 			remaining_len = len - ctx.offset;
 			if (token_len > remaining_len)
 				return -EINVAL;
@@ -3046,31 +3083,19 @@ static int tquic_process_packet(struct tquic_connection *conn,
 	 * (RFC 9000 Appendix A) requires the largest successfully
 	 * processed PN to correctly unwrap truncated packet numbers.
 	 */
-	{
-		int pn_space_idx;
-		u64 largest_pn = 0;
+	if (pkt_type == TQUIC_PKT_INITIAL)
+		pn_space_idx = TQUIC_PN_SPACE_INITIAL;
+	else if (pkt_type == TQUIC_PKT_HANDSHAKE)
+		pn_space_idx = TQUIC_PN_SPACE_HANDSHAKE;
+	else
+		pn_space_idx = TQUIC_PN_SPACE_APPLICATION;
 
-		if (pkt_type == TQUIC_PKT_INITIAL)
-			pn_space_idx = TQUIC_PN_SPACE_INITIAL;
-		else if (pkt_type == TQUIC_PKT_HANDSHAKE)
-			pn_space_idx = TQUIC_PN_SPACE_HANDSHAKE;
-		else
-			pn_space_idx = TQUIC_PN_SPACE_APPLICATION;
+	if (conn && conn->pn_spaces)
+		largest_pn = READ_ONCE(
+			conn->pn_spaces[pn_space_idx].largest_recv_pn);
 
-		if (conn && conn->pn_spaces)
-			largest_pn = READ_ONCE(
-				conn->pn_spaces[pn_space_idx].largest_recv_pn);
-
-		pkt_num = tquic_decode_pkt_num(data + ctx.offset,
-					       pkt_num_len, largest_pn);
-
-		/* Update largest received PN for this space */
-		if (conn && conn->pn_spaces &&
-		    pkt_num > largest_pn)
-			WRITE_ONCE(
-				conn->pn_spaces[pn_space_idx].largest_recv_pn,
-				pkt_num);
-	}
+	pkt_num = tquic_decode_pkt_num(data + ctx.offset,
+				       pkt_num_len, largest_pn);
 	ctx.offset += pkt_num_len;
 
 	/* Decrypt payload */
@@ -3178,6 +3203,16 @@ static int tquic_process_packet(struct tquic_connection *conn,
 			return -EOVERFLOW;
 		}
 	}
+
+	/*
+	 * Decryption succeeded -- now safe to update the largest received
+	 * packet number for this PN space. This must happen after decryption
+	 * to prevent attackers from corrupting the reconstruction window
+	 * with forged packets (RFC 9000 Appendix A).
+	 */
+	if (conn && conn->pn_spaces && pkt_num > largest_pn)
+		WRITE_ONCE(conn->pn_spaces[pn_space_idx].largest_recv_pn,
+			   pkt_num);
 
 	/*
 	 * Key Update Detection (RFC 9001 Section 6)

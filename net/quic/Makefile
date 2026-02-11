@@ -82,10 +82,10 @@ quic-y := \
 	tquic/core/quic_flow.o \
 	tquic/core/quic_loss.o \
 	tquic/core/quic_path.o \
-	tquic/core/ack.o \
 	tquic/core/quic_ack.o \
 	tquic/core/quic_ack_frequency.o \
 	tquic/core/quic_key_update.o \
+	tquic/core/mp_frame.o \
 	tquic/core/packet_coalesce_fix.o \
 	tquic/core/early_data.o \
 	tquic/core/priority.o \
@@ -93,7 +93,6 @@ quic-y := \
 	tquic/bond/tquic_bonding.o \
 	tquic/bond/tquic_failover.o \
 	tquic/bond/tquic_reorder.o \
-	tquic/bond/tquic_bpm.o \
 	tquic/bond/cong_coupled.o \
 	tquic/pm/pm_types.o \
 	tquic/pm/pm_kernel.o \
@@ -130,7 +129,8 @@ quic-y := \
 	tquic/crypto/hw_offload.o \
 	tquic/tquic_debug.o
 
-# Diagnostics (tracepoints.o excluded pending struct field fixes)
+# Diagnostics
+quic-$(CONFIG_TQUIC_DIAG) += tquic/diag/tracepoints.o
 quic-$(CONFIG_TQUIC_DIAG) += tquic/diag/path_metrics.o
 quic-$(CONFIG_TQUIC_QLOG) += tquic/diag/qlog.o tquic/diag/qlog_v2.o
 
@@ -145,3 +145,15 @@ quic-$(CONFIG_TQUIC_NAPI) += tquic/napi.o
 
 # io_uring support for high-performance async I/O
 quic-$(CONFIG_TQUIC_IO_URING) += tquic/io_uring.o
+
+# KUnit tests
+quic-$(CONFIG_TQUIC_KUNIT_TEST) += \
+	tquic/test/varint_test.o \
+	tquic/test/packet_test.o \
+	tquic/test/frame_test.o \
+	tquic/test/flow_control_test.o \
+	tquic/test/transport_params_test.o \
+	tquic/test/grease_test.o \
+	tquic/test/security_test.o \
+	tquic/test/security_hardening_test.o \
+	tquic/test/reorder_test.o \

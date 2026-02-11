@@ -209,6 +209,8 @@ struct bbrv3 {
 
 	/* Delivery rate sampling */
 	u64 bytes_delivered;         /* Total bytes delivered */
+	u64 prior_delivered;         /* delivered at start of interval */
+	u64 prior_delivered_time_ns; /* timestamp at start of interval */
 	u64 bytes_lost;              /* Total bytes lost */
 	u64 delivered_ce;            /* Delivered with CE marking */
 	ktime_t first_sent_time;     /* Time of first packet in flight */

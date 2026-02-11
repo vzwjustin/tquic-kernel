@@ -98,9 +98,9 @@ struct tquic_local_pn_space {
  * The actual tquic_connection structure is defined in tquic.h.
  */
 struct tquic_ack_conn_ctx {
-	struct tquic_local_pn_space pn_spaces[TQUIC_PN_SPACE_COUNT];
-	struct tquic_transport_params local_params;
-	struct tquic_transport_params remote_params;
+	struct tquic_local_pn_space *pn_spaces;
+	struct tquic_transport_params *local_params;
+	struct tquic_transport_params *remote_params;
 	u64 ack_freq_threshold;
 	u64 ack_freq_reorder_threshold;
 	u64 ack_freq_max_delay_us;
@@ -108,16 +108,23 @@ struct tquic_ack_conn_ctx {
 };
 
 /*
- * Helper to get ACK context from connection (cast helper)
+ * Helper to get ACK context from connection
+ *
+ * Builds a lightweight wrapper that points directly into the connection
+ * struct fields, avoiding the broken type-punning cast that assumed
+ * tquic_connection had compatible layout with tquic_ack_conn_ctx.
  */
 static inline struct tquic_ack_conn_ctx *tquic_ack_ctx(struct tquic_connection *conn)
 {
-	/*
-	 * The ACK module operates on extended connection state.
-	 * This cast assumes the connection has compatible layout.
-	 * In production, this would access conn->timer_state or similar.
-	 */
-	return (struct tquic_ack_conn_ctx *)conn;
+	static DEFINE_PER_CPU(struct tquic_ack_conn_ctx, ack_ctx_percpu);
+	struct tquic_ack_conn_ctx *ctx;
+
+	ctx = this_cpu_ptr(&ack_ctx_percpu);
+	ctx->pn_spaces = (struct tquic_local_pn_space *)conn->pn_spaces;
+	ctx->local_params = &conn->local_params;
+	ctx->remote_params = &conn->remote_params;
+
+	return ctx;
 }
 
 /*
@@ -146,7 +153,7 @@ static u64 tquic_ack_compute_delay(struct tquic_connection *conn, u8 pn_space)
 	u32 ack_delay_exponent;
 
 	/* Use remote's ack_delay_exponent, default to 3 */
-	ack_delay_exponent = ctx->remote_params.ack_delay_exponent;
+	ack_delay_exponent = ctx->remote_params->ack_delay_exponent;
 	if (ack_delay_exponent == 0)
 		ack_delay_exponent = TQUIC_DEFAULT_ACK_DELAY_EXP;
 
@@ -170,8 +177,8 @@ static u64 tquic_ack_compute_delay(struct tquic_connection *conn, u8 pn_space)
 	 * Cap to max_ack_delay if configured. The receiver should not
 	 * indicate a delay greater than max_ack_delay.
 	 */
-	if (ctx->local_params.max_ack_delay > 0) {
-		u64 max_delay = ctx->local_params.max_ack_delay * 1000;
+	if (ctx->local_params->max_ack_delay > 0) {
+		u64 max_delay = ctx->local_params->max_ack_delay * 1000;
 		max_delay >>= ack_delay_exponent;
 		if (delay_encoded > max_delay)
 			delay_encoded = max_delay;
@@ -194,7 +201,7 @@ static u64 tquic_ack_decode_delay(struct tquic_connection *conn, u64 encoded_del
 	u64 decoded;
 
 	/* Use peer's ack_delay_exponent */
-	ack_delay_exponent = ctx->remote_params.ack_delay_exponent;
+	ack_delay_exponent = ctx->remote_params->ack_delay_exponent;
 	if (ack_delay_exponent == 0)
 		ack_delay_exponent = TQUIC_DEFAULT_ACK_DELAY_EXP;
 
@@ -210,8 +217,8 @@ static u64 tquic_ack_decode_delay(struct tquic_connection *conn, u64 encoded_del
 	decoded = encoded_delay << ack_delay_exponent;
 
 	/* Cap to peer's max_ack_delay or a sane upper bound */
-	if (ctx->remote_params.max_ack_delay > 0) {
-		u64 max_us = ctx->remote_params.max_ack_delay * 1000;
+	if (ctx->remote_params->max_ack_delay > 0) {
+		u64 max_us = ctx->remote_params->max_ack_delay * 1000;
 
 		if (decoded > max_us)
 			decoded = max_us;
@@ -339,8 +346,15 @@ static void tquic_ack_update_recv_ranges(struct tquic_connection *conn,
 			for (i = 1; i < ack_info->ack_range_count && i < TQUIC_ACK_MAX_RANGES; i++) {
 				u64 gap = ack_info->ranges[i].gap;
 				u64 range_size = ack_info->ranges[i].ack_range_len;
-				u64 range_end = prev_end - gap - 2;
-				u64 range_start = range_end - range_size;
+				u64 range_end, range_start;
+
+				/* Guard against underflow from malformed ACK ranges */
+				if (gap + 2 > prev_end)
+					break;
+				range_end = prev_end - gap - 2;
+				if (range_size > range_end)
+					break;
+				range_start = range_end - range_size;
 
 				if (pn >= range_start && pn <= range_end) {
 					/* Already in this range */
@@ -390,7 +404,14 @@ static void tquic_ack_update_recv_ranges(struct tquic_connection *conn,
 					if (i < ack_info->ack_range_count) {
 						u64 gap = ack_info->ranges[i].gap;
 						u64 range_size = ack_info->ranges[i].ack_range_len;
-						u64 range_end = prev_end - gap - 2;
+						u64 range_end;
+
+						/* Guard against underflow */
+						if (gap + 2 > prev_end)
+							break;
+						range_end = prev_end - gap - 2;
+						if (range_size > range_end)
+							break;
 						next_range_start = range_end - range_size;
 
 						if (pn > next_range_start) {
@@ -673,7 +694,7 @@ bool tquic_ack_should_send(struct tquic_connection *conn, u8 pn_space)
 		 */
 		max_delay_us = ctx->ack_freq_max_delay_us;
 		if (max_delay_us == 0) {
-			u64 max_delay_ms = ctx->local_params.max_ack_delay;
+			u64 max_delay_ms = ctx->local_params->max_ack_delay;
 			if (max_delay_ms == 0)
 				max_delay_ms = 25; /* Default 25ms per RFC 9000 */
 			max_delay_us = max_delay_ms * 1000;

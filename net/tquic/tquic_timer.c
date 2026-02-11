@@ -152,6 +152,7 @@ struct tquic_recovery_state {
 	u64 latest_rtt;
 	ktime_t first_rtt_sample;
 	u64 max_ack_delay;
+	bool has_rtt_sample;	/* True after first real RTT sample */
 
 	/* PTO state */
 	u32 pto_count;
@@ -163,6 +164,10 @@ struct tquic_recovery_state {
 	ktime_t congestion_recovery_start;
 	ktime_t persistent_congestion_start;
 	bool in_persistent_congestion;
+
+	/* Persistent congestion duration tracking (RFC 9002 Section 7.6.2) */
+	ktime_t first_lost_time;	/* Send time of earliest lost pkt */
+	ktime_t last_lost_time;		/* Send time of latest lost pkt */
 
 	spinlock_t lock;
 };
@@ -270,7 +275,7 @@ static enum hrtimer_restart tquic_timer_pacing_expired(struct hrtimer *t);
 static void tquic_timer_work_fn(struct work_struct *work);
 static void tquic_retransmit_work_fn(struct work_struct *work);
 static void tquic_path_work_fn(struct work_struct *work);
-static void tquic_path_validation_expired(struct timer_list *t);
+void tquic_path_validation_expired(struct timer_list *t);
 
 /*
  * ============================================================================
@@ -292,12 +297,13 @@ static void tquic_update_rtt(struct tquic_recovery_state *recovery,
 	if (rtt_sample < recovery->min_rtt)
 		recovery->min_rtt = rtt_sample;
 
-	/* First RTT sample */
-	if (recovery->smoothed_rtt == 0) {
+	/* First RTT sample: use directly instead of EWMA */
+	if (!recovery->has_rtt_sample) {
 		recovery->smoothed_rtt = rtt_sample;
 		recovery->rtt_variance = rtt_sample / 2;
 		recovery->first_rtt_sample = ktime_get();
 		recovery->latest_rtt = rtt_sample;
+		recovery->has_rtt_sample = true;
 		return;
 	}
 
@@ -604,6 +610,21 @@ void tquic_timer_state_free(struct tquic_timer_state *ts)
 	del_timer_sync(&ts->keepalive_timer);
 	hrtimer_cancel(&ts->pacing_timer);
 
+	/*
+	 * Cancel path validation timers for all paths.
+	 * Use del_timer (not del_timer_sync) under spinlock to avoid
+	 * deadlock, then synchronize after releasing the lock.
+	 */
+	if (ts->conn) {
+		struct tquic_path *path;
+
+		spin_lock_bh(&ts->conn->paths_lock);
+		list_for_each_entry(path, &ts->conn->paths, list) {
+			del_timer(&path->validation_timer);
+		}
+		spin_unlock_bh(&ts->conn->paths_lock);
+	}
+
 	/* Flush workqueue items */
 	if (ts->wq) {
 		cancel_work_sync(&ts->timer_work);
@@ -843,12 +864,19 @@ static int tquic_detect_lost_packets(struct tquic_timer_state *ts, int pn_space)
 			pkt->state = TQUIC_PKT_LOST;
 			lost_count++;
 
-			/* Update bytes in flight */
-			if (pkt->in_flight) {
-				spin_lock_bh(&rs->lock);
+			/*
+			 * Track lost packet time span for persistent
+			 * congestion detection (RFC 9002 Section 7.6.2).
+			 */
+			spin_lock(&rs->lock);
+			if (rs->first_lost_time == 0)
+				rs->first_lost_time = pkt->sent_time;
+			rs->last_lost_time = pkt->sent_time;
+
+			/* Update bytes in flight (BH already disabled by outer lock) */
+			if (pkt->in_flight)
 				rs->bytes_in_flight -= pkt->sent_bytes;
-				spin_unlock_bh(&rs->lock);
-			}
+			spin_unlock(&rs->lock);
 
 			/* Notify congestion controller of loss */
 			if (ts->conn->active_path) {
@@ -948,13 +976,31 @@ static void tquic_timer_pto_expired(struct timer_list *t)
 	spin_lock(&rs->lock);
 	rs->pto_count++;
 
-	/* Check for persistent congestion */
-	if (rs->pto_count >= TQUIC_PERSISTENT_CONGESTION_THRESHOLD &&
-	    !rs->in_persistent_congestion) {
-		rs->in_persistent_congestion = true;
-		rs->congestion_window = 2 * 1200; /* Minimum window */
-		rs->ssthresh = rs->congestion_window;
-		tquic_dbg("timer:entering persistent congestion\n");
+	/*
+	 * RFC 9002 Section 7.6.2: Persistent congestion is declared
+	 * when lost packets span a duration exceeding:
+	 *   3 * (smoothed_rtt + max(4*rtt_var, granularity) + max_ack_delay)
+	 */
+	if (!rs->in_persistent_congestion &&
+	    rs->first_lost_time != 0 && rs->last_lost_time != 0) {
+		u64 pc_duration;
+		s64 lost_span;
+
+		pc_duration = 3 * (rs->smoothed_rtt +
+				   max(4 * rs->rtt_variance,
+				       (u64)TQUIC_TIMER_GRANULARITY_US) +
+				   rs->max_ack_delay);
+		lost_span = ktime_us_delta(rs->last_lost_time,
+					   rs->first_lost_time);
+
+		if (lost_span > 0 && (u64)lost_span > pc_duration) {
+			rs->in_persistent_congestion = true;
+			rs->congestion_window = 2 * 1200; /* Minimum window */
+			rs->ssthresh = rs->congestion_window;
+			tquic_dbg("timer:entering persistent congestion "
+				  "(span=%lld us > threshold=%llu us)\n",
+				  lost_span, pc_duration);
+		}
 	}
 	spin_unlock(&rs->lock);
 
@@ -1109,6 +1155,16 @@ void tquic_timer_start_drain(struct tquic_timer_state *ts)
 	spin_unlock_irqrestore(&ts->lock, flags);
 	hrtimer_cancel(&ts->pacing_timer);
 	spin_lock_irqsave(&ts->lock, flags);
+
+	/*
+	 * Re-check state after re-acquiring the lock: another thread
+	 * may have deactivated or begun shutting down while we dropped
+	 * the lock for hrtimer_cancel.
+	 */
+	if (!ts->active || ts->shutting_down) {
+		spin_unlock_irqrestore(&ts->lock, flags);
+		return;
+	}
 
 	/* Set drain timeout to 3 * PTO */
 	spin_lock(&rs->lock);
@@ -1333,7 +1389,7 @@ EXPORT_SYMBOL_GPL(tquic_timer_can_send_paced);
  * Called when path validation times out. Retries the PATH_CHALLENGE
  * or marks the path as failed after maximum retries.
  */
-static void tquic_path_validation_expired(struct timer_list *t)
+void tquic_path_validation_expired(struct timer_list *t)
 {
 	struct tquic_path *path = from_timer(path, t, validation_timer);
 	struct tquic_connection *conn;
@@ -1396,8 +1452,7 @@ void tquic_timer_start_path_validation(struct tquic_connection *conn,
 	/* Generate new challenge data */
 	get_random_bytes(path->challenge_data, sizeof(path->challenge_data));
 
-	/* Setup validation timer */
-	timer_setup(&path->validation_timer, tquic_path_validation_expired, 0);
+	/* Start validation timer (timer_setup done during path allocation) */
 	expires = jiffies + msecs_to_jiffies(TQUIC_PATH_CHALLENGE_TIMEOUT_MS);
 	mod_timer(&path->validation_timer, expires);
 
@@ -1724,6 +1779,8 @@ int tquic_timer_on_ack_received(struct tquic_timer_state *ts, int pn_space,
 			tquic_update_rtt(rs, ack_delay_us, rtt_sample, is_handshake);
 			rs->pto_count = 0;
 			rs->in_persistent_congestion = false;
+			rs->first_lost_time = 0;
+			rs->last_lost_time = 0;
 			spin_unlock_bh(&rs->lock);
 		}
 	}

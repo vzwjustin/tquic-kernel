@@ -715,6 +715,7 @@ int tquic_sock_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 	struct tquic_sock *tsk;
 	struct tquic_connection *conn;
 	void __user *uarg = (void __user *)arg;
+	int ret = 0;
 
 	lock_sock(sk);
 	tsk = tquic_sk(sk);
@@ -846,7 +847,7 @@ int tquic_sock_setsockopt(struct socket *sock, int level, int optname,
 
 	switch (optname) {
 	case TQUIC_NODELAY:
-		tsk->nodelay = !!val;
+		WRITE_ONCE(tsk->nodelay, !!val);
 		break;
 
 	case TQUIC_PACING:
@@ -882,10 +883,15 @@ int tquic_sock_setsockopt(struct socket *sock, int level, int optname,
 		release_sock(sk);
 		break;
 
-	case TQUIC_BOND_MODE:
+	case TQUIC_BOND_MODE: {
+		int ret = -ENOTCONN;
+
+		lock_sock(sk);
 		if (tsk->conn)
-			return tquic_bond_set_mode(tsk->conn, val);
-		break;
+			ret = tquic_bond_set_mode(tsk->conn, val);
+		release_sock(sk);
+		return ret;
+	}
 
 	case TQUIC_BOND_PATH_PRIO:
 		/* Requires additional path info */
@@ -893,6 +899,7 @@ int tquic_sock_setsockopt(struct socket *sock, int level, int optname,
 
 	case TQUIC_BOND_PATH_WEIGHT: {
 		struct tquic_path_weight_args args;
+		int ret;
 
 		if (optlen < sizeof(args))
 			return -EINVAL;
@@ -903,11 +910,16 @@ int tquic_sock_setsockopt(struct socket *sock, int level, int optname,
 		if (args.reserved[0] || args.reserved[1] || args.reserved[2])
 			return -EINVAL;
 
-		if (!tsk->conn || !tsk->conn->pm)
+		lock_sock(sk);
+		if (!tsk->conn || !tsk->conn->pm) {
+			release_sock(sk);
 			return -ENOTCONN;
+		}
 
 		/* Bonding context accessed via path manager */
-		return tquic_bond_set_path_weight(tsk->conn, args.path_id, args.weight);
+		ret = tquic_bond_set_path_weight(tsk->conn, args.path_id, args.weight);
+		release_sock(sk);
+		return ret;
 	}
 
 	case TQUIC_MULTIPATH:
@@ -917,6 +929,7 @@ int tquic_sock_setsockopt(struct socket *sock, int level, int optname,
 	case TQUIC_MIGRATE: {
 		struct tquic_migrate_args args;
 		sa_family_t family;
+		int ret;
 
 		if (optlen < sizeof(args))
 			return -EINVAL;
@@ -954,19 +967,25 @@ int tquic_sock_setsockopt(struct socket *sock, int level, int optname,
 				   TQUIC_MIGRATE_FLAG_FORCE))
 			return -EINVAL;
 
-		if (tsk->conn)
-			return tquic_migrate_explicit(tsk->conn,
-						      &args.local_addr,
-						      args.flags);
-
-		return -ENOTCONN;
+		lock_sock(sk);
+		if (tsk->conn) {
+			ret = tquic_migrate_explicit(tsk->conn,
+						     &args.local_addr,
+						     args.flags);
+		} else {
+			ret = -ENOTCONN;
+		}
+		release_sock(sk);
+		return ret;
 	}
 
 	case TQUIC_MIGRATION_ENABLED:
+		lock_sock(sk);
 		if (val)
 			tsk->flags |= TQUIC_F_MIGRATION_ENABLED;
 		else
 			tsk->flags &= ~TQUIC_F_MIGRATION_ENABLED;
+		release_sock(sk);
 		break;
 
 	case TQUIC_SCHEDULER: {
@@ -1007,11 +1026,16 @@ int tquic_sock_setsockopt(struct socket *sock, int level, int optname,
 
 			rcu_read_lock();
 			sched_ops = tquic_sched_find(name);
+			if (sched_ops &&
+			    !try_module_get(sched_ops->owner)) {
+				sched_ops = NULL;
+			}
 			rcu_read_unlock();
 			if (sched_ops) {
 				tsk->conn->scheduler = tquic_sched_init_conn(tsk->conn, sched_ops);
 				if (!tsk->conn->scheduler)
 					ret = -ENOMEM;
+				module_put(sched_ops->owner);
 			} else {
 				ret = -ENOENT;
 			}
@@ -2343,7 +2367,7 @@ static int tquic_recvmsg_datagram(struct sock *sk, struct msghdr *msg,
 				  size_t len, int flags)
 {
 	struct tquic_sock *tsk = tquic_sk(sk);
-	struct tquic_connection *conn = tsk->conn;
+	struct tquic_connection *conn = READ_ONCE(tsk->conn);
 	struct tquic_datagram_info dgram_info;
 	struct sk_buff *skb;
 	unsigned long irqflags;
@@ -2459,8 +2483,17 @@ int tquic_recvmsg(struct sock *sk, struct msghdr *msg, size_t len, int flags,
 	struct sk_buff *skb;
 	int copied = 0;
 
-	if (!conn || READ_ONCE(conn->state) != TQUIC_CONN_CONNECTED)
+	if (!conn)
 		return -ENOTCONN;
+
+	/* Hold a ref so conn cannot be freed during recvmsg. */
+	if (!tquic_conn_get(conn))
+		return -ENOTCONN;
+
+	if (READ_ONCE(conn->state) != TQUIC_CONN_CONNECTED) {
+		tquic_conn_put(conn);
+		return -ENOTCONN;
+	}
 
 	/*
 	 * Check if caller wants datagram read (RFC 9221)
@@ -2468,12 +2501,17 @@ int tquic_recvmsg(struct sock *sk, struct msghdr *msg, size_t len, int flags,
 	 * If ancillary data contains TQUIC_CMSG_DATAGRAM, this is a
 	 * datagram read request. Otherwise, read from the default stream.
 	 */
-	if (tquic_check_datagram_cmsg(msg))
-		return tquic_recvmsg_datagram(sk, msg, len, flags);
+	if (tquic_check_datagram_cmsg(msg)) {
+		copied = tquic_recvmsg_datagram(sk, msg, len, flags);
+		tquic_conn_put(conn);
+		return copied;
+	}
 
-	stream = tsk->default_stream;
-	if (!stream)
+	stream = READ_ONCE(tsk->default_stream);
+	if (!stream) {
+		tquic_conn_put(conn);
 		return 0;
+	}
 
 	lock_sock(sk);
 
@@ -2507,6 +2545,7 @@ int tquic_recvmsg(struct sock *sk, struct msghdr *msg, size_t len, int flags,
 
 out_release:
 	release_sock(sk);
+	tquic_conn_put(conn);
 
 	return copied;
 }

@@ -359,18 +359,18 @@ int tquic_sendmsg_zerocopy(struct sock *sk, struct msghdr *msg, size_t len,
 			kfree_skb(new_skb);
 			err = -ENOBUFS;
 			goto out_err;
-			}
-
-			/* Queue the skb to stream send buffer */
-			spin_lock_bh(&conn->lock);
-			*(u64 *)new_skb->cb = stream->send_offset;
-			stream->send_offset += chunk;
-			conn->fc_data_reserved += chunk;
-			spin_unlock_bh(&conn->lock);
-			skb_queue_tail(&stream->send_buf, new_skb);
-			copied += chunk;
-			conn->stats.tx_bytes += chunk;
 		}
+
+		/* Queue the skb to stream send buffer */
+		spin_lock_bh(&conn->lock);
+		*(u64 *)new_skb->cb = stream->send_offset;
+		stream->send_offset += chunk;
+		conn->fc_data_reserved += chunk;
+		conn->stats.tx_bytes += chunk;
+		spin_unlock_bh(&conn->lock);
+		skb_queue_tail(&stream->send_buf, new_skb);
+		copied += chunk;
+	}
 	}
 
 	/* Trigger transmission */

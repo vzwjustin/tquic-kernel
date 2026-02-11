@@ -787,7 +787,7 @@ void tquic_token_state_cleanup(struct tquic_token_state *state)
 		return;
 
 	spin_lock_irqsave(&state->lock, flags);
-	memset(state->stored_token, 0, sizeof(state->stored_token));
+	memzero_explicit(state->stored_token, sizeof(state->stored_token));
 	state->stored_token_len = 0;
 	state->token_valid = false;
 	spin_unlock_irqrestore(&state->lock, flags);
@@ -858,7 +858,7 @@ void tquic_token_clear(struct tquic_token_state *state)
 
 	spin_lock_irqsave(&state->lock, flags);
 	state->token_valid = false;
-	memset(state->stored_token, 0, sizeof(state->stored_token));
+	memzero_explicit(state->stored_token, sizeof(state->stored_token));
 	state->stored_token_len = 0;
 	spin_unlock_irqrestore(&state->lock, flags);
 }

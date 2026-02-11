@@ -154,11 +154,10 @@ static int weighted_get_path(struct tquic_connection *conn,
 	}
 
 out:
-	spin_unlock_bh(&sd->lock);
-
 	/*
-	 * Take a reference on the selected path before leaving the RCU
-	 * read section. Callers must call tquic_path_put() when done.
+	 * Take a reference on the selected path while the spinlock is
+	 * still held to prevent the path from being freed between
+	 * unlock and the tquic_path_get() call.
 	 */
 	if (ret == 0 && result->primary) {
 		if (!tquic_path_get(result->primary)) {
@@ -167,6 +166,7 @@ out:
 		}
 	}
 
+	spin_unlock_bh(&sd->lock);
 	rcu_read_unlock();
 	return ret;
 }
@@ -174,14 +174,14 @@ out:
 /*
  * Initialize weighted scheduler for a connection
  */
-static void weighted_init(struct tquic_connection *conn)
+static int weighted_init(struct tquic_connection *conn)
 {
 	struct weighted_sched_data *sd;
 	int i;
 
 	sd = kzalloc(sizeof(*sd), GFP_ATOMIC);
 	if (!sd)
-		return;
+		return -ENOMEM;
 
 	spin_lock_init(&sd->lock);
 	for (i = 0; i < TQUIC_MAX_PATHS; i++) {
@@ -190,6 +190,7 @@ static void weighted_init(struct tquic_connection *conn)
 	}
 
 	conn->sched_priv = sd;
+	return 0;
 }
 
 /*

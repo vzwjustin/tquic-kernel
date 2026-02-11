@@ -568,7 +568,7 @@ void tquic_reorder_adapt_size(struct tquic_reorder_buffer *rb,
 
 	/* Calculate: spread_ms * bandwidth_bytes_per_ms * 2 */
 	spread_ms = rb->rtt_spread / 1000;
-	new_size = (spread_ms * (aggregate_bandwidth / 1000)) * 2;
+	new_size = ((u64)spread_ms * (aggregate_bandwidth / 1000)) * 2;
 
 	/* Clamp to limits */
 	new_size = clamp(new_size, (size_t)TQUIC_REORDER_MIN_BUFFER,

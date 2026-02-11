@@ -205,19 +205,38 @@ static void bbrv3_update_bw(struct bbrv3 *bbr, u64 acked, u64 rtt_us)
 {
 	u64 now = ktime_get_ns();
 	u64 bw_sample;
+	u64 interval_ns, delivered_delta, interval_us;
 
-	if (rtt_us == 0 || acked == 0)
+	if (acked == 0)
 		return;
 
-	/* Compute delivery rate sample */
-	bw_sample = (acked * USEC_PER_SEC) / rtt_us;
+	/*
+	 * Compute delivery rate as bytes_delivered / delivery_interval.
+	 * Note: bytes_delivered is already updated by the caller.
+	 * This replaces the incorrect bytes_acked/rtt calculation which
+	 * overestimates BW when ACKs are coalesced.
+	 */
+	interval_ns = now - bbr->prior_delivered_time_ns;
+	delivered_delta = bbr->bytes_delivered - bbr->prior_delivered;
 
-	/* Update max bandwidth filter */
-	bbr->bw = bbrv3_minmax_running_max(&bbr->bw_filter, now, bw_sample);
+	if (interval_ns > 0 && delivered_delta > 0) {
+		interval_us = interval_ns / 1000;
+		if (interval_us > 0) {
+			bw_sample = delivered_delta * USEC_PER_SEC /
+				    interval_us;
 
-	/* Track max observed */
-	if (bw_sample > bbr->max_bw)
-		bbr->max_bw = bw_sample;
+			/* Update max bandwidth filter */
+			bbr->bw = bbrv3_minmax_running_max(&bbr->bw_filter,
+							   now, bw_sample);
+
+			/* Track max observed */
+			if (bw_sample > bbr->max_bw)
+				bbr->max_bw = bw_sample;
+		}
+	}
+
+	bbr->prior_delivered = bbr->bytes_delivered;
+	bbr->prior_delivered_time_ns = now;
 }
 
 static void bbrv3_update_rtt(struct bbrv3 *bbr, u64 rtt_us)

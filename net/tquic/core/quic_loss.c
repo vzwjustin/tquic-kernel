@@ -1687,3 +1687,30 @@ EXPORT_SYMBOL_GPL(tquic_loss_check_persistent_congestion);
 EXPORT_SYMBOL_GPL(tquic_loss_cleanup_space);
 EXPORT_SYMBOL_GPL(tquic_loss_cleanup);
 EXPORT_SYMBOL_GPL(tquic_loss_detection_cleanup);
+
+/**
+ * tquic_pn_space_get_sent_time - Look up sent_time for a packet number
+ * @pn_space: Packet number space to search
+ * @pkt_num: Packet number to find
+ * @sent_time: Output parameter for the packet's sent time
+ *
+ * Searches the sent_list for the packet matching @pkt_num and returns
+ * its sent_time via @sent_time.  The caller must hold pn_space->lock.
+ *
+ * Returns 0 on success, -ENOENT if packet not found.
+ */
+int tquic_pn_space_get_sent_time(struct tquic_pn_space *pn_space,
+				 u64 pkt_num, ktime_t *sent_time)
+{
+	struct tquic_sent_packet *pkt;
+
+	list_for_each_entry(pkt, &pn_space->sent_list, list) {
+		if (pkt->pn == pkt_num) {
+			*sent_time = pkt->sent_time;
+			return 0;
+		}
+	}
+
+	return -ENOENT;
+}
+EXPORT_SYMBOL_GPL(tquic_pn_space_get_sent_time);

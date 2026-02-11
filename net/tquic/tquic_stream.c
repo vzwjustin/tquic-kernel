@@ -322,6 +322,7 @@ static struct tquic_stream *tquic_stream_alloc(struct tquic_connection *conn,
 
 	stream->conn = conn;
 	stream->state = TQUIC_STREAM_OPEN;
+	refcount_set(&stream->refcount, 1);
 
 	/* Initialize buffers */
 	skb_queue_head_init(&stream->send_buf);
@@ -515,15 +516,40 @@ int tquic_stream_send_fin(struct tquic_connection *conn,
 EXPORT_SYMBOL_GPL(tquic_stream_send_fin);
 
 /**
+ * tquic_stream_get - Take a reference on a stream
+ * @stream: Stream to reference
+ *
+ * Returns: true if reference was taken, false if stream is being freed
+ */
+bool tquic_stream_get(struct tquic_stream *stream)
+{
+	return refcount_inc_not_zero(&stream->refcount);
+}
+EXPORT_SYMBOL_GPL(tquic_stream_get);
+
+/**
+ * tquic_stream_put - Release a stream reference
+ * @stream: Stream to release
+ *
+ * When the last reference is dropped, the stream is freed.
+ */
+void tquic_stream_put(struct tquic_stream *stream)
+{
+	if (refcount_dec_and_test(&stream->refcount))
+		tquic_stream_free(stream);
+}
+EXPORT_SYMBOL_GPL(tquic_stream_put);
+
+/**
  * tquic_conn_stream_lookup - Find a stream by ID in a connection
  * @conn: Connection to search
  * @stream_id: Stream ID to find
  *
  * This version searches directly via the connection's rb-tree.
- * For operations through the stream_manager abstraction, use
- * tquic_stream_lookup() from core/stream.c.
+ * Takes a reference on the returned stream; caller must call
+ * tquic_stream_put() when done.
  *
- * Returns: Stream pointer on success, NULL if not found
+ * Returns: Stream pointer on success (with ref taken), NULL if not found
  */
 struct tquic_stream *tquic_conn_stream_lookup(struct tquic_connection *conn,
 					      u64 stream_id)
@@ -545,6 +571,8 @@ struct tquic_stream *tquic_conn_stream_lookup(struct tquic_connection *conn,
 		else if (stream_id > stream->id)
 			node = node->rb_right;
 		else {
+			if (!tquic_stream_get(stream))
+				stream = NULL;
 			spin_unlock_bh(&conn->lock);
 			return stream;
 		}

@@ -81,6 +81,7 @@ struct tquic_session_ticket {
 	u32 resumption_secret_len;
 	u16 cipher_suite;
 	u64 creation_time;
+	u32 max_early_data;		/* Max 0-RTT data (early_data ext) */
 	struct tquic_hs_transport_params params;
 };
 

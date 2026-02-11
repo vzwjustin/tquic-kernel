@@ -24,6 +24,7 @@
 #include <crypto/aead.h>
 #include <crypto/hash.h>
 #include <crypto/skcipher.h>
+#include <crypto/utils.h>
 #include <crypto/aes.h>
 #include <net/tquic.h>
 #include "../tquic_compat.h"

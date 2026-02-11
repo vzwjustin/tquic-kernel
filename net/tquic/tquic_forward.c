@@ -775,11 +775,12 @@ ssize_t tquic_forward_hairpin(struct tquic_tunnel *tunnel,
 
 			/* Charge memory to destination connection socket */
 			if (dst_stream->conn && dst_stream->conn->sk) {
-			struct sock *dst_sk = dst_stream->conn->sk;
+				struct sock *dst_sk = dst_stream->conn->sk;
 
-			/*
-			 * Use skb_set_owner_w which handles both memory
-			 * accounting and refcount properly for all kernel versions.
+				/*
+				 * Use skb_set_owner_w which handles both
+				 * memory accounting and refcount properly
+				 * for all kernel versions.
 				 */
 				skb_set_owner_w(skb, dst_sk);
 			}

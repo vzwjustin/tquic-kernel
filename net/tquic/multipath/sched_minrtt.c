@@ -94,13 +94,13 @@ struct minrtt_sched_data {
  *
  * Allocates and initializes the per-connection scheduler state.
  */
-static void minrtt_init(struct tquic_connection *conn)
+static int minrtt_init(struct tquic_connection *conn)
 {
 	struct minrtt_sched_data *sd;
 
 	sd = kzalloc(sizeof(*sd), GFP_ATOMIC);
 	if (!sd)
-		return;
+		return -ENOMEM;
 
 	spin_lock_init(&sd->lock);
 	sd->current_path_id = TQUIC_INVALID_PATH_ID;
@@ -109,6 +109,7 @@ static void minrtt_init(struct tquic_connection *conn)
 	sd->switch_count = 0;
 
 	conn->sched_priv = sd;
+	return 0;
 }
 
 /**
@@ -380,17 +381,18 @@ struct rr_sched_data {
  * rr_init - Initialize round-robin scheduler for a connection
  * @conn: Connection to initialize
  */
-static void rr_init(struct tquic_connection *conn)
+static int rr_init(struct tquic_connection *conn)
 {
 	struct rr_sched_data *rd;
 
 	rd = kzalloc(sizeof(*rd), GFP_ATOMIC);
 	if (!rd)
-		return;
+		return -ENOMEM;
 
 	spin_lock_init(&rd->lock);
 	rd->next_index = 0;
 	conn->sched_priv = rd;
+	return 0;
 }
 
 /**

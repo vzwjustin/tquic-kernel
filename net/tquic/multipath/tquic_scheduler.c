@@ -2248,7 +2248,8 @@ void tquic_path_packet_sent(struct tquic_connection *conn, u8 path_id,
 		 * casts that bypass type checking. The types are the
 		 * same (struct tquic_connection *, struct tquic_path *).
 		 */
-		tquic_mp_sched_notify_sent(conn, path, bytes);
+		tquic_mp_sched_notify_sent((void *)conn,
+						  (void *)path, bytes);
 	}
 
 	atomic64_inc(&conn->stats.total_packets);

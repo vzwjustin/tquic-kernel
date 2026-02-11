@@ -338,10 +338,29 @@ static void bbr_update_model(struct bbrv2 *bbr, u64 acked, u64 rtt_us)
 	bbr->bytes_delivered += acked;
 	bbr_update_round(bbr, bbr->bytes_delivered);
 
-	/* Update bandwidth estimate */
-	if (rtt_us > 0 && acked > 0) {
-		bw_sample = (acked * USEC_PER_SEC) / rtt_us;
-		bbr->bw = bbr_minmax_running_max(&bbr->bw_filter, now, bw_sample);
+	/*
+	 * Compute delivery rate as bytes_delivered / delivery_interval.
+	 * This replaces the incorrect bytes_acked/rtt calculation which
+	 * overestimates BW when ACKs are coalesced.
+	 */
+	{
+		u64 interval_ns = now - bbr->prior_delivered_time_ns;
+		u64 delivered_delta = bbr->bytes_delivered -
+				      bbr->prior_delivered;
+
+		if (interval_ns > 0 && delivered_delta > 0) {
+			/* Convert ns interval to us for bytes/sec result */
+			u64 interval_us = interval_ns / 1000;
+
+			if (interval_us > 0) {
+				bw_sample = delivered_delta * USEC_PER_SEC /
+					    interval_us;
+				bbr->bw = bbr_minmax_running_max(
+					&bbr->bw_filter, now, bw_sample);
+			}
+		}
+		bbr->prior_delivered = bbr->bytes_delivered;
+		bbr->prior_delivered_time_ns = now;
 	}
 
 	/* Update RTT estimate */

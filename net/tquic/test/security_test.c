@@ -260,11 +260,11 @@ static bool tquic_test_replay_check(struct tquic_test_replay_filter *filter,
 
 	/* First packet initializes the filter */
 	if (!filter->initialized) {
-		filter->window_base = pn;
+		filter->window_base = 0;
 		filter->max_seen = pn;
 		filter->initialized = true;
 		memset(filter->window, 0, sizeof(filter->window));
-		set_bit(0, filter->window);
+		set_bit(pn, filter->window);
 		return true;
 	}
 
@@ -783,10 +783,11 @@ static void test_max_limits_enforcement(struct kunit *test)
 	u64 max_streams;
 	u8 cid_len;
 
-	/* Stream ID limits */
+	/* Stream ID limits: default cap must be within RFC 9000 range */
 	stream_id = TQUIC_MAX_STREAM_COUNT_BIDI;
-	max_streams = (1ULL << 60);
-	KUNIT_EXPECT_EQ(test, stream_id, max_streams);
+	max_streams = (1ULL << 60);  /* RFC 9000 Section 4.6 protocol max */
+	KUNIT_EXPECT_GT(test, stream_id, 0ULL);
+	KUNIT_EXPECT_LE(test, stream_id, max_streams);
 
 	/* CID length limit */
 	cid_len = TQUIC_MAX_CID_LEN;

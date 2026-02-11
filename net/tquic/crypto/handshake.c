@@ -640,6 +640,9 @@ static int tquic_decode_transport_params(const u8 *buf, u32 buf_len,
 			ret = hs_varint_decode(p, param_len, &val, &vlen);
 			if (ret < 0)
 				return ret;
+			/* RFC 9000 Section 4.6: MUST NOT exceed 2^60 */
+			if (val > (1ULL << 60))
+				return -EINVAL;
 			params->initial_max_streams_bidi = val;
 			break;
 
@@ -647,6 +650,9 @@ static int tquic_decode_transport_params(const u8 *buf, u32 buf_len,
 			ret = hs_varint_decode(p, param_len, &val, &vlen);
 			if (ret < 0)
 				return ret;
+			/* RFC 9000 Section 4.6: MUST NOT exceed 2^60 */
+			if (val > (1ULL << 60))
+				return -EINVAL;
 			params->initial_max_streams_uni = val;
 			break;
 
@@ -676,6 +682,9 @@ static int tquic_decode_transport_params(const u8 *buf, u32 buf_len,
 			if (ret < 0)
 				return ret;
 			if (val < 2)
+				return -EINVAL;
+			/* Cap to reasonable maximum to limit resource usage */
+			if (val > 8)
 				return -EINVAL;
 			params->active_conn_id_limit = val;
 			break;
@@ -3569,7 +3578,7 @@ void tquic_hs_cleanup(struct tquic_handshake *hs)
 	if (hs->aead && !IS_ERR(hs->aead))
 		crypto_free_aead(hs->aead);
 
-	/* Clear sensitive data */
+	/* Clear sensitive data - zeroize all secrets before freeing */
 	memzero_explicit(hs->early_secret, sizeof(hs->early_secret));
 	memzero_explicit(hs->handshake_secret, sizeof(hs->handshake_secret));
 	memzero_explicit(hs->master_secret, sizeof(hs->master_secret));
@@ -3583,6 +3592,10 @@ void tquic_hs_cleanup(struct tquic_handshake *hs)
 	/* CF-521: Also zeroize exporter and resumption secrets */
 	memzero_explicit(hs->exporter_secret, sizeof(hs->exporter_secret));
 	memzero_explicit(hs->resumption_secret, sizeof(hs->resumption_secret));
+	/* Zeroize random values and session ID */
+	memzero_explicit(hs->client_random, sizeof(hs->client_random));
+	memzero_explicit(hs->server_random, sizeof(hs->server_random));
+	memzero_explicit(hs->session_id, sizeof(hs->session_id));
 
 	/* CF-429: Use kfree_sensitive for struct with crypto secrets */
 	kfree_sensitive(hs);

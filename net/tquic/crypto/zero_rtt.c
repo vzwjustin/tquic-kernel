@@ -498,7 +498,7 @@ int tquic_zero_rtt_store_ticket(const char *server_name, u8 server_name_len,
 				       server_name, server_name_len);
 	if (old) {
 		ticket_store_remove_locked(&global_ticket_store, old);
-		ticket_free(old);
+		tquic_zero_rtt_put_ticket(old);
 	}
 
 	/* Evict if at capacity */
@@ -2024,7 +2024,7 @@ void __exit tquic_zero_rtt_module_exit(void)
 	spin_lock_bh(&global_ticket_store.lock);
 	list_for_each_entry_safe(ticket, tmp, &global_ticket_store.lru_list, list) {
 		ticket_store_remove_locked(&global_ticket_store, ticket);
-		ticket_free(ticket);
+		tquic_zero_rtt_put_ticket(ticket);
 	}
 	spin_unlock_bh(&global_ticket_store.lock);
 

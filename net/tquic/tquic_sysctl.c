@@ -186,8 +186,8 @@ static int tquic_cert_time_tolerance = 300;		/* 5 minutes clock skew tolerance *
  */
 
 /* Pre-handshake memory limit (CVE-2025-54939 defense) - in bytes */
-static u64 tquic_pre_handshake_memory_limit = (64 * 1024 * 1024);  /* 64 MB */
-static u64 tquic_pre_handshake_per_ip_budget = (1 * 1024 * 1024);  /* 1 MB */
+static unsigned long tquic_pre_handshake_memory_limit = (64 * 1024 * 1024);  /* 64 MB */
+static unsigned long tquic_pre_handshake_per_ip_budget = (1 * 1024 * 1024);  /* 1 MB */
 
 /* Packet number skip rate for optimistic ACK defense (1 in N packets) */
 static int tquic_pn_skip_rate = 128;  /* Default: 1 in 128 packets (~0.78%) */
@@ -1451,7 +1451,7 @@ static struct ctl_table tquic_sysctl_table[] = {
 	{
 		.procname	= "pre_handshake_memory_limit",
 		.data		= &tquic_pre_handshake_memory_limit,
-		.maxlen		= sizeof(u64),
+		.maxlen		= sizeof(unsigned long),
 		.mode		= 0644,
 		.proc_handler	= proc_doulongvec_minmax,
 		.extra1		= &min_pre_hs_memory,
@@ -1469,7 +1469,7 @@ static struct ctl_table tquic_sysctl_table[] = {
 	{
 		.procname	= "pre_handshake_per_ip_budget",
 		.data		= &tquic_pre_handshake_per_ip_budget,
-		.maxlen		= sizeof(u64),
+		.maxlen		= sizeof(unsigned long),
 		.mode		= 0644,
 		.proc_handler	= proc_doulongvec_minmax,
 		.extra1		= &min_pre_hs_per_ip,
@@ -1974,7 +1974,7 @@ EXPORT_SYMBOL_GPL(tquic_sysctl_per_ip_rate_limit);
  *
  * This limit defends against CVE-2025-54939 (QUIC-LEAK attack).
  */
-u64 tquic_sysctl_get_pre_handshake_memory_limit(void)
+unsigned long tquic_sysctl_get_pre_handshake_memory_limit(void)
 {
 	return tquic_pre_handshake_memory_limit;
 }
@@ -1985,7 +1985,7 @@ EXPORT_SYMBOL_GPL(tquic_sysctl_get_pre_handshake_memory_limit);
  *
  * Returns: Maximum bytes per source IP for pre-handshake state
  */
-u64 tquic_sysctl_get_pre_handshake_per_ip_budget(void)
+unsigned long tquic_sysctl_get_pre_handshake_per_ip_budget(void)
 {
 	return tquic_pre_handshake_per_ip_budget;
 }

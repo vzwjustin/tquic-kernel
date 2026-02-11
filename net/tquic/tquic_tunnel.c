@@ -219,7 +219,8 @@ static int tquic_tunnel_parse_header(const u8 *data, size_t len,
 		 * These bypass the basic IPv6 checks above.
 		 */
 		if (ipv6_addr_v4mapped(&addr6) ||
-		    ipv6_addr_v4compat(&addr6)) {
+		    (!addr6.s6_addr32[0] && !addr6.s6_addr32[1] &&
+		     !addr6.s6_addr32[2] && addr6.s6_addr32[3])) {
 			__be32 v4 = addr6.s6_addr32[3];
 
 			if (ipv4_is_loopback(v4) ||
@@ -653,6 +654,7 @@ struct tquic_tunnel *tquic_tunnel_create_tproxy(struct tquic_client *client,
 
 	/* Initialize work items */
 	INIT_WORK(&tunnel->connect_work, tquic_tunnel_connect_work);
+	INIT_WORK(&tunnel->forward_work, tquic_tunnel_forward_work);
 
 	/* Add to client's tunnel list */
 	spin_lock_bh(&client->tunnels_lock);

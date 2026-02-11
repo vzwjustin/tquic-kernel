@@ -321,13 +321,13 @@ static int ecf_get_path(struct tquic_connection *conn,
  * ecf_init - Initialize ECF scheduler for a connection
  * @conn: Connection to initialize
  */
-static void ecf_init(struct tquic_connection *conn)
+static int ecf_init(struct tquic_connection *conn)
 {
 	struct ecf_sched_data *sd;
 
 	sd = kzalloc(sizeof(*sd), GFP_ATOMIC);
 	if (!sd)
-		return;
+		return -ENOMEM;
 
 	spin_lock_init(&sd->lock);
 	sd->segment_size = ECF_DEFAULT_SEGMENT_SIZE;
@@ -335,6 +335,7 @@ static void ecf_init(struct tquic_connection *conn)
 	sd->path_switches = 0;
 
 	conn->sched_priv = sd;
+	return 0;
 }
 
 /**

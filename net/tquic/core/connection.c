@@ -27,7 +27,7 @@
 #include <crypto/hash.h>
 #include <linux/workqueue.h>
 #include <linux/random.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 #include <linux/jhash.h>
 #include <linux/rhashtable.h>
 #include <crypto/aead.h>
@@ -2844,7 +2844,7 @@ err_free:
 
 	/* Free crypto state if we allocated it */
 	if (conn->crypto_state) {
-		tquic_crypto_free(conn->crypto_state);
+		tquic_crypto_destroy(conn->crypto_state);
 		conn->crypto_state = NULL;
 	}
 

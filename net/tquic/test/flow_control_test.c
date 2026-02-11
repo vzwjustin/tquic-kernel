@@ -321,7 +321,7 @@ static void tquic_fc_test_data_blocked(struct kunit *test)
 static void tquic_fc_test_large_values(struct kunit *test)
 {
 	struct flow_control_test_ctx ctx = {
-		.max_data = TQUIC_MAX_STREAM_COUNT_BIDI,  /* Very large value */
+		.max_data = (1ULL << 62),  /* Very large value */
 		.data_sent = 0,
 		.blocked = false,
 	};
@@ -452,9 +452,12 @@ static void tquic_fc_test_max_streams(struct kunit *test)
 	KUNIT_EXPECT_GT(test, max_streams_bidi, 0ULL);
 	KUNIT_EXPECT_GT(test, max_streams_uni, 0ULL);
 
-	/* Should be able to represent many streams */
-	KUNIT_EXPECT_GE(test, max_streams_bidi, (1ULL << 60));
-	KUNIT_EXPECT_GE(test, max_streams_uni, (1ULL << 60));
+	/* These are default stream limits */
+	KUNIT_EXPECT_GE(test, max_streams_bidi, 1ULL);
+	KUNIT_EXPECT_GE(test, max_streams_uni, 1ULL);
+	/* Stream IDs use varint encoding, so max is 2^62-1 */
+	KUNIT_EXPECT_LE(test, max_streams_bidi, (1ULL << 62));
+	KUNIT_EXPECT_LE(test, max_streams_uni, (1ULL << 62));
 }
 
 /* Test: Partial send when near limit */
