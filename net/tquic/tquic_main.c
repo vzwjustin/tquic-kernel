@@ -441,15 +441,16 @@ EXPORT_SYMBOL_GPL(tquic_conn_migrate);
  */
 int tquic_pm_conn_init(struct tquic_connection *conn)
 {
-	struct net *net = sock_net(conn->sk);
+	struct net *net;
 	struct tquic_pm_pernet *pernet;
 	struct tquic_pm_ops *ops;
 	struct tquic_pm_state *pm_state;
 	struct tquic_net *tn;
-	int ret;
 
 	if (!conn || !conn->sk)
 		return -EINVAL;
+
+	net = sock_net(conn->sk);
 
 	pernet = tquic_pm_get_pernet(net);
 	if (!pernet)
@@ -491,21 +492,12 @@ int tquic_pm_conn_init(struct tquic_connection *conn)
 	atomic_inc(&tn->conn_count);
 	spin_unlock_bh(&tn->conn_lock);
 
-	/* Call PM-specific init if available */
-	if (ops->init) {
-		ret = ops->init(net);
-		if (ret < 0) {
-			tquic_err("PM init failed: %d\n", ret);
-			/* Remove from connection list on failure */
-			spin_lock_bh(&tn->conn_lock);
-			list_del_rcu(&conn->pm_node);
-			atomic_dec(&tn->conn_count);
-			spin_unlock_bh(&tn->conn_lock);
-			kfree(pm_state);
-			conn->pm = NULL;
-			return ret;
-		}
-	}
+	/*
+	 * Note: PM-type per-namespace init (ops->init) is called once per
+	 * namespace in tquic_pm_net_init(), not per connection. Calling it
+	 * here caused duplicate notifier registration failures in non-init
+	 * namespaces (the "known issue" from Round 11).
+	 */
 
 	/* For kernel PM with auto_discover, trigger initial discovery
 	 * This discovers paths for already-up interfaces with default routes
