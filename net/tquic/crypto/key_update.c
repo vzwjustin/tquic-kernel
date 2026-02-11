@@ -61,10 +61,6 @@
  * are defined in key_update.h to allow sharing with extended_key_update.c
  */
 
-/* Forward declaration for crypto state */
-struct tquic_crypto_state;
-extern struct tquic_hp_ctx *tquic_crypto_get_hp_ctx(struct tquic_crypto_state *crypto);
-
 /* Forward declaration - defined at end of this file */
 struct tquic_key_update_state *tquic_crypto_get_key_update_state(void *crypto_state);
 

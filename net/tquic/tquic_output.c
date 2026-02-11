@@ -47,10 +47,6 @@
 struct kmem_cache *tquic_frame_cache;
 EXPORT_SYMBOL_GPL(tquic_frame_cache);
 
-/* Forward declaration for crypto state */
-struct tquic_crypto_state;
-extern struct tquic_hp_ctx *tquic_crypto_get_hp_ctx(struct tquic_crypto_state *crypto);
-
 /* QUIC frame types */
 #define TQUIC_FRAME_PADDING		0x00
 #define TQUIC_FRAME_PING		0x01

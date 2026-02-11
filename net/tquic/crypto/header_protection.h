@@ -135,4 +135,14 @@ u8 tquic_hp_encode_pn_length(u64 pn, u64 largest_acked);
 u64 tquic_hp_read_pn(const u8 *packet, u8 pn_len);
 void tquic_hp_write_pn(u8 *packet, u64 pn, u8 pn_len);
 
+/*
+ * Crypto state integration
+ */
+
+/* Forward declaration */
+struct tquic_crypto_state;
+
+/* Get HP context from crypto state (defined in crypto/tls.c) */
+struct tquic_hp_ctx *tquic_crypto_get_hp_ctx(struct tquic_crypto_state *crypto);
+
 #endif /* _TQUIC_HEADER_PROTECTION_H */

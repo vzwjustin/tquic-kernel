@@ -128,10 +128,6 @@ extern struct kmem_cache *tquic_rx_buf_cache;
  */
 #define TQUIC_MAX_COALESCED_PACKETS	16
 
-/* Forward declaration for crypto state */
-struct tquic_crypto_state;
-extern struct tquic_hp_ctx *tquic_crypto_get_hp_ctx(struct tquic_crypto_state *crypto);
-
 /* Forward declarations */
 static int tquic_process_frames(struct tquic_connection *conn,
 				struct tquic_path *path,
