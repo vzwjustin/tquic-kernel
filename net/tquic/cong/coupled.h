@@ -49,11 +49,11 @@ void tquic_coupled_detach_path(struct tquic_coupled_state *state,
 /* Handle ACK received on a path */
 void tquic_coupled_on_ack_ext(struct tquic_coupled_state *state,
 			      struct tquic_path *path,
-			      u32 acked_bytes, u32 rtt_us);
+			      u64 bytes_acked, u64 rtt_us);
 
 /* Handle packet loss on a path */
 void tquic_coupled_on_loss_ext(struct tquic_coupled_state *state,
 			       struct tquic_path *path,
-			       u32 lost_bytes);
+			       u64 bytes_lost);
 
 #endif /* _TQUIC_CONG_COUPLED_H */
