@@ -30,8 +30,9 @@
 #include "../tquic_compat.h"
 #include "../tquic_debug.h"
 #include "persistent_cong.h"
+#include "coupled.h"
 
-/* Algorithm selection */
+/* Algorithm selection (internal enum maps to public enum in coupled.h) */
 enum coupled_algo {
 	COUPLED_ALGO_LIA = 0,
 	COUPLED_ALGO_OLIA,
