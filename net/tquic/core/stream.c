@@ -33,6 +33,7 @@
 #include "../tquic_compat.h"
 #include "../tquic_debug.h"
 #include "stream.h"
+#include "flow_control.h"
 
 /* Stream ID bit layout per QUIC spec:
  * Bit 0: Initiator (0 = client, 1 = server)
@@ -1322,6 +1323,16 @@ ssize_t tquic_stream_read(struct tquic_stream_manager *mgr,
 	}
 
 	spin_unlock_bh(&mgr->lock);
+
+	/*
+	 * Track consumption for flow control (RFC 9000 Section 4.1/4.2).
+	 * Window updates should be based on consumed (application-read) data,
+	 * not just received data. Update both stream and connection level.
+	 */
+	if (copied > 0 && stream->conn && stream->conn->fc && stream->fc) {
+		tquic_fc_on_stream_consumed(stream->conn->fc, stream->fc,
+					    copied);
+	}
 
 	return copied;
 }

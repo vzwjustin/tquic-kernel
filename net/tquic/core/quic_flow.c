@@ -251,17 +251,25 @@ void tquic_flow_control_on_data_recvd(struct tquic_connection *conn, u64 bytes)
 	 * portion of the initial window.
 	 *
 	 * We use a threshold of 1/2 of the window to trigger updates.
+	 *
+	 * Per RFC 9000 Section 4.2, window should reopen based on consumed
+	 * (application-read) data, not received data. We use the flow control
+	 * subsystem's data_consumed tracking when available, or fall back to
+	 * data_received as a conservative approximation for simple mode.
 	 */
-	/*
-	 * TODO: RFC 9000 Section 4.2 says window should reopen based on
-	 * consumed (application-read) data, not received data. Currently
-	 * tquic_connection lacks a data_consumed field; using data_received
-	 * as a conservative approximation. The proper flow control state
-	 * in flow_control.c (fc->conn.data_consumed) should be used when
-	 * this code path is unified with the tquic_fc_* subsystem.
-	 */
-	consumed = conn->data_received;
-	threshold = conn->max_data_local / TQUIC_FC_WINDOW_UPDATE_THRESHOLD;
+	if (conn->fc) {
+		/* Use proper flow control subsystem tracking */
+		spin_lock_bh(&conn->fc->conn.lock);
+		consumed = conn->fc->conn.data_consumed;
+		threshold = conn->fc->conn.max_data_local /
+			    TQUIC_FC_WINDOW_UPDATE_THRESHOLD;
+		spin_unlock_bh(&conn->fc->conn.lock);
+	} else {
+		/* Fallback for simple mode (conservative: use received) */
+		consumed = conn->data_received;
+		threshold = conn->max_data_local /
+			    TQUIC_FC_WINDOW_UPDATE_THRESHOLD;
+	}
 
 	if (consumed >= threshold) {
 		should_update = true;
@@ -560,9 +568,21 @@ void tquic_stream_flow_control_on_data_recvd(struct tquic_stream *stream,
 	/*
 	 * Check if we should send MAX_STREAM_DATA. We update when
 	 * we've consumed a significant portion of the window.
+	 * Per RFC 9000 Section 4.1, use consumed (application-read) data.
 	 */
-	consumed = stream->recv_offset;  /* Amount delivered to application */
-	threshold = stream->max_recv_data / TQUIC_FC_WINDOW_UPDATE_THRESHOLD;
+	if (stream->fc) {
+		/* Use proper flow control subsystem tracking */
+		spin_lock_bh(&stream->fc->lock);
+		consumed = stream->fc->data_consumed;
+		threshold = stream->fc->max_data_local /
+			    TQUIC_FC_WINDOW_UPDATE_THRESHOLD;
+		spin_unlock_bh(&stream->fc->lock);
+	} else {
+		/* Fallback: use recv_offset as conservative approximation */
+		consumed = stream->recv_offset;
+		threshold = stream->max_recv_data /
+			    TQUIC_FC_WINDOW_UPDATE_THRESHOLD;
+	}
 
 	if (consumed >= threshold)
 		should_update = true;
