@@ -32,6 +32,7 @@
 #include "tquic_debug.h"
 #include "tquic_mib.h"
 #include "tquic_retry.h"
+#include "tquic_sysctl.h"
 
 /*
  * Maximum PSK identity length (RFC 8446 Section 4.2.11)
@@ -588,9 +589,6 @@ EXPORT_SYMBOL_GPL(tquic_client_get_stats);
  * SERVER ACCEPT PATH
  * =============================================================================
  */
-
-/* Forward declaration of sysctl accessor */
-extern int tquic_sysctl_get_retry_required(void);
 
 /**
  * tquic_server_check_retry_required - Check if Retry packet should be sent

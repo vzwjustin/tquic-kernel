@@ -38,6 +38,7 @@
 #include "cong/tquic_cong.h"
 #include "crypto/key_update.h"
 #include "crypto/zero_rtt.h"
+#include "crypto/header_protection.h"
 #include "tquic_stateless_reset.h"
 #include "tquic_token.h"
 #include "tquic_retry.h"
@@ -127,16 +128,9 @@ extern struct kmem_cache *tquic_rx_buf_cache;
  */
 #define TQUIC_MAX_COALESCED_PACKETS	16
 
-/*
- * Forward declarations for header protection (crypto/header_protection.c).
- * These are EXPORT_SYMBOL_GPL but lack a shared header file.
- */
-struct tquic_hp_ctx;
+/* Forward declaration for crypto state */
 struct tquic_crypto_state;
-int tquic_hp_unprotect(struct tquic_hp_ctx *ctx, u8 *packet,
-		       size_t packet_len, size_t pn_offset,
-		       u8 *pn_len, u8 *key_phase);
-struct tquic_hp_ctx *tquic_crypto_get_hp_ctx(struct tquic_crypto_state *crypto);
+extern struct tquic_hp_ctx *tquic_crypto_get_hp_ctx(struct tquic_crypto_state *crypto);
 
 /* Forward declarations */
 static int tquic_process_frames(struct tquic_connection *conn,

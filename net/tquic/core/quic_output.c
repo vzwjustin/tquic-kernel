@@ -34,6 +34,7 @@
 #include <net/tquic_frame.h>
 #include "../tquic_compat.h"
 #include "../tquic_debug.h"
+#include "../tquic_sysctl.h"
 
 /* Output path configuration */
 #define TQUIC_OUTPUT_BATCH_SIZE		16
@@ -104,10 +105,6 @@ struct tquic_output_state {
 };
 
 static DEFINE_PER_CPU(struct tquic_output_state, tquic_output_state);
-
-/* Sysctl memory limits - extern declarations */
-extern int sysctl_tquic_wmem[3];
-extern int sysctl_tquic_rmem[3];
 
 /*
  * External function declarations for packet building.

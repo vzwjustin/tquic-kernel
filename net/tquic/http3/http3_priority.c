@@ -33,6 +33,7 @@
 #include "http3_priority.h"
 #include "http3_stream.h"
 #include "../core/varint.h"
+#include "../tquic_sysctl.h"
 
 /* Global statistics */
 static struct {
@@ -45,9 +46,6 @@ static struct {
 
 /* SLAB cache for priority stream entries */
 static struct kmem_cache *http3_priority_stream_cache;
-
-/* External sysctl accessor from tquic_sysctl.c */
-extern int tquic_sysctl_get_http3_priorities_enabled(void);
 
 /**
  * http3_priorities_enabled - Check if HTTP/3 priorities are enabled

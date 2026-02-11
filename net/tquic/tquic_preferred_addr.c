@@ -40,18 +40,8 @@
 #include "tquic_preferred_addr.h"
 #include "tquic_debug.h"
 #include "tquic_stateless_reset.h"
+#include "tquic_sysctl.h"
 #include "core/transport_params.h"
-
-/*
- * =============================================================================
- * SYSCTL ACCESSOR DECLARATIONS
- * =============================================================================
- *
- * The actual sysctl variables are defined in tquic_sysctl.c. We use the
- * accessor functions to get global defaults when per-netns values aren't set.
- */
-extern int tquic_sysctl_get_preferred_address_enabled(void);
-extern int tquic_sysctl_get_prefer_preferred_address(void);
 
 /*
  * =============================================================================

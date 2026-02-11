@@ -26,6 +26,7 @@
 
 #include "key_update.h"
 #include "extended_key_update.h"
+#include "header_protection.h"
 #include "../tquic_debug.h"
 
 /* Key update HKDF label per RFC 9001 Section 6.1 */
@@ -59,16 +60,6 @@
  * Note: struct tquic_key_generation and struct tquic_key_update_state
  * are defined in key_update.h to allow sharing with extended_key_update.c
  */
-
-/* Forward declarations for HP context functions */
-struct tquic_hp_ctx;
-extern int tquic_hp_set_key(struct tquic_hp_ctx *ctx, int level,
-			    int direction, const u8 *key, size_t key_len, u16 cipher);
-extern void tquic_hp_set_key_phase(struct tquic_hp_ctx *ctx, u8 phase);
-extern u8 tquic_hp_get_key_phase(struct tquic_hp_ctx *ctx);
-extern int tquic_hp_set_next_key(struct tquic_hp_ctx *ctx, int direction,
-				 const u8 *key, size_t key_len, u16 cipher);
-extern void tquic_hp_rotate_keys(struct tquic_hp_ctx *ctx);
 
 /* Forward declaration for crypto state */
 struct tquic_crypto_state;

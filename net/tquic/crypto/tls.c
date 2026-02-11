@@ -19,6 +19,7 @@
 #include <net/tquic.h>
 
 #include "../tquic_debug.h"
+#include "header_protection.h"
 
 /* TLS 1.3 constants */
 #define TLS_HANDSHAKE_TYPE_CLIENT_HELLO	1
@@ -181,21 +182,6 @@ struct tquic_keys {
 	u32 iv_len;
 	bool valid;
 };
-
-/* Forward declaration for header protection context */
-struct tquic_hp_ctx;
-
-/* Header protection context allocation/free (from header_protection.c) */
-extern struct tquic_hp_ctx *tquic_hp_ctx_alloc(void);
-extern void tquic_hp_ctx_free(struct tquic_hp_ctx *ctx);
-extern int tquic_hp_set_key(struct tquic_hp_ctx *ctx, int level,
-			    int direction, const u8 *key, size_t key_len, u16 cipher);
-extern void tquic_hp_set_level(struct tquic_hp_ctx *ctx, int read_level, int write_level);
-extern int tquic_hp_protect(struct tquic_hp_ctx *ctx, u8 *packet,
-			    size_t packet_len, size_t pn_offset);
-extern int tquic_hp_unprotect(struct tquic_hp_ctx *ctx, u8 *packet,
-			      size_t packet_len, size_t pn_offset,
-			      u8 *pn_len, u8 *key_phase);
 
 /* Crypto state per connection */
 struct tquic_crypto_state {

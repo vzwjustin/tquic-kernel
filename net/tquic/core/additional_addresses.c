@@ -29,14 +29,7 @@
 #include "../protocol.h"
 #include "../tquic_stateless_reset.h"
 #include "../tquic_cid.h"
-
-/*
- * =============================================================================
- * SYSCTL ACCESSOR DECLARATIONS
- * =============================================================================
- */
-extern int tquic_sysctl_get_additional_addresses_enabled(void);
-extern int tquic_sysctl_get_additional_addresses_max(void);
+#include "../tquic_sysctl.h"
 
 /*
  * =============================================================================
