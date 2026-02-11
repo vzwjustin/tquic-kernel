@@ -66,8 +66,6 @@ struct tquic_diag_ctx {
 /*
  * External reference to global connection table from tquic_main.c
  */
-extern struct rhashtable tquic_conn_table;
-extern const struct rhashtable_params tquic_conn_params;
 
 /*
  * Helper to count streams in the connection's rb-tree.

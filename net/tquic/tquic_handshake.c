@@ -1675,8 +1675,39 @@ static void tquic_server_handshake_done(void *data, int status,
 
 	if (status == 0) {
 		/* Handshake successful */
+		struct tquic_transport_params negotiated_params;
+		int ret;
+
 		tquic_install_crypto_state(child_sk);
 		child_tsk->flags |= TQUIC_F_HANDSHAKE_DONE;
+
+		/*
+		 * Negotiate transport parameters (RFC 9000 Section 7.4).
+		 * Server must set its local params to server defaults,
+		 * then negotiate with client's received params.
+		 */
+		tquic_tp_set_defaults_server(&conn->local_params);
+
+		/*
+		 * Negotiate parameters between server's local and client's remote.
+		 * This ensures both endpoints agree on connection limits.
+		 */
+		ret = tquic_tp_negotiate(&conn->local_params,
+					 &conn->remote_params,
+					 &negotiated_params);
+		if (ret < 0) {
+			tquic_warn("transport parameter negotiation failed: %d\n", ret);
+			/* Continue with local defaults - best effort */
+		} else {
+			/*
+			 * Apply negotiated parameters to the connection.
+			 * This sets flow control limits, idle timeout, etc.
+			 */
+			ret = tquic_tp_apply(conn, &negotiated_params);
+			if (ret < 0)
+				tquic_warn("failed to apply negotiated params: %d\n", ret);
+		}
+
 		inet_sk_set_state(child_sk, TCP_ESTABLISHED);
 		spin_lock_bh(&conn->lock);
 		WRITE_ONCE(conn->state, TQUIC_CONN_CONNECTED);

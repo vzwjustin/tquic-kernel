@@ -527,16 +527,67 @@ static void tquic_tunnel_connect_work(struct work_struct *work)
 }
 
 /**
- * tquic_tunnel_forward_work - Placeholder for data forwarding work
+ * tquic_tunnel_forward_work - Bidirectional data forwarding work handler
  * @work: Work structure embedded in tunnel
  *
- * Actual forwarding logic is in tquic_forward.c; this prevents a NULL
- * function pointer dereference if forward_work is queued before the
- * forwarding subsystem sets it up.
+ * Performs bidirectional data transfer between QUIC stream and TCP socket.
+ * Handles both TX (QUIC→TCP) and RX (TCP→QUIC) directions, as well as
+ * hairpin routing for client-to-client traffic.
  */
 static void tquic_tunnel_forward_work(struct work_struct *work)
 {
-	/* Forward work is handled by tquic_forward.c when connected */
+	struct tquic_tunnel *tunnel;
+	struct tquic_client *hairpin_peer;
+	enum tquic_tunnel_state state;
+	ssize_t tx_bytes, rx_bytes;
+
+	tunnel = container_of(work, struct tquic_tunnel, forward_work);
+
+	/* Check tunnel state - only forward if established */
+	spin_lock_bh(&tunnel->lock);
+	state = tunnel->state;
+	spin_unlock_bh(&tunnel->lock);
+
+	if (state != TQUIC_TUNNEL_ESTABLISHED) {
+		tquic_tunnel_put(tunnel);
+		return;
+	}
+
+	/* Check for hairpin traffic (client-to-client routing) */
+	hairpin_peer = tquic_forward_check_hairpin(tunnel);
+	if (hairpin_peer) {
+		/* Route directly between clients without TCP */
+		tquic_forward_hairpin(tunnel, hairpin_peer);
+		tquic_tunnel_put(tunnel);
+		return;
+	}
+
+	/*
+	 * Perform bidirectional forwarding:
+	 * TX: QUIC stream → TCP socket (router to internet)
+	 * RX: TCP socket → QUIC stream (internet to router)
+	 *
+	 * Try both directions to ensure data flows in both ways.
+	 * Positive return values indicate bytes transferred.
+	 */
+	tx_bytes = tquic_forward_splice(tunnel, 0); /* TQUIC_FORWARD_TX */
+	rx_bytes = tquic_forward_splice(tunnel, 1); /* TQUIC_FORWARD_RX */
+
+	/*
+	 * If data was transferred in either direction, re-queue to continue
+	 * forwarding. This ensures continuous data flow without blocking.
+	 */
+	if ((tx_bytes > 0 || rx_bytes > 0) && tquic_tunnel_wq) {
+		spin_lock_bh(&tunnel->lock);
+		if (tunnel->state == TQUIC_TUNNEL_ESTABLISHED) {
+			tquic_tunnel_get(tunnel); /* Take ref for next iteration */
+			queue_work(tquic_tunnel_wq, &tunnel->forward_work);
+		}
+		spin_unlock_bh(&tunnel->lock);
+	}
+
+	/* Balance the reference taken when this work was queued */
+	tquic_tunnel_put(tunnel);
 }
 
 /**

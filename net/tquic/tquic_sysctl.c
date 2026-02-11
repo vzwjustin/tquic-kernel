@@ -25,6 +25,7 @@
 #include "tquic_ack_frequency.h"
 #include "tquic_debug.h"
 #include "tquic_token.h"
+#include "tquic_sysctl.h"
 #include "security_hardening.h"
 
 /* Global tunables */
@@ -220,43 +221,6 @@ struct tquic_cong_ops;
 struct tquic_cong_ops *tquic_cong_find(const char *name);
 int tquic_cong_set_default(struct net *net, const char *name);
 const char *tquic_cong_get_default_name(struct net *net);
-
-/* Forward declarations for sysctl accessor functions */
-int tquic_sysctl_get_bond_mode(void);
-int tquic_sysctl_get_max_paths(void);
-int tquic_sysctl_get_reorder_window(void);
-int tquic_sysctl_get_probe_interval(void);
-int tquic_sysctl_get_failover_timeout(void);
-int tquic_sysctl_get_idle_timeout(void);
-int tquic_sysctl_get_initial_rtt(void);
-int tquic_sysctl_get_initial_cwnd(void);
-int tquic_sysctl_get_debug_level(void);
-const char *tquic_sysctl_get_scheduler(void);
-const char *tquic_sysctl_get_congestion(void);
-const char *tquic_net_get_cc_algorithm(struct net *net);
-u32 tquic_net_get_bbr_rtt_threshold(struct net *net);
-bool tquic_net_get_cc_coupled(struct net *net);
-bool tquic_net_get_ecn_enabled(struct net *net);
-u32 tquic_net_get_ecn_beta(struct net *net);
-bool tquic_net_get_pacing_enabled(struct net *net);
-int tquic_net_get_path_degrade_threshold(struct net *net);
-unsigned long tquic_sysctl_get_key_update_interval_packets(void);
-int tquic_sysctl_get_key_update_interval_seconds(void);
-int tquic_sysctl_get_pmtud_enabled(void);
-int tquic_sysctl_get_pmtud_probe_interval(void);
-int tquic_sysctl_get_retry_required(void);
-int tquic_sysctl_get_retry_token_lifetime(void);
-int tquic_sysctl_get_http3_priorities_enabled(void);
-int tquic_sysctl_get_preferred_address_enabled(void);
-int tquic_sysctl_get_prefer_preferred_address(void);
-int tquic_sysctl_get_additional_addresses_enabled(void);
-int tquic_sysctl_get_additional_addresses_max(void);
-int tquic_sysctl_get_qpack_max_table_capacity(void);
-u8 tquic_sysctl_get_spin_bit_disable_rate(void);
-int tquic_sysctl_rate_limit_enabled(void);
-int tquic_sysctl_max_connections_per_second(void);
-int tquic_sysctl_max_connections_burst(void);
-int tquic_sysctl_per_ip_rate_limit(void);
 
 /*
  * Per-netns scheduler sysctl handler

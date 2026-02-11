@@ -23,15 +23,13 @@
 #include <net/tquic.h>
 
 #include "qpack.h"
+#include "../tquic_sysctl.h"
 
 /*
  * =============================================================================
  * Sysctl Configuration (via main tquic_sysctl.c)
  * =============================================================================
  */
-
-/* External accessor from tquic_sysctl.c */
-extern int tquic_sysctl_get_qpack_max_table_capacity(void);
 
 /**
  * qpack_sysctl_max_table_capacity - Get configured max table capacity

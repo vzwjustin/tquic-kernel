@@ -48,16 +48,6 @@
 #include "tquic_init.h"
 #include "tquic_debug.h"
 
-/* Forward declarations for ACK frequency module (in tquic_ack_frequency.c) */
-extern int tquic_ack_freq_module_init(void);
-extern void tquic_ack_freq_module_exit(void);
-
-#ifdef TQUIC_OUT_OF_TREE
-/* Forward declarations for sched framework (in sched/scheduler.c) */
-extern int tquic_sched_framework_init(void);
-extern void tquic_sched_framework_exit(void);
-#endif
-
 /* Module info */
 MODULE_AUTHOR("Linux Foundation");
 MODULE_DESCRIPTION("TQUIC: WAN Bonding over QUIC");
@@ -89,10 +79,6 @@ EXPORT_SYMBOL_GPL(tquic_path_cache);
 #define TQUIC_RX_BUF_SIZE	2048
 struct kmem_cache *tquic_rx_buf_cache;
 EXPORT_SYMBOL_GPL(tquic_rx_buf_cache);
-
-/* TX pending frame slab cache init/exit (tquic_output.c) */
-extern int __init tquic_output_tx_init(void);
-extern void __exit tquic_output_tx_exit(void);
 
 /* Connection hashtable params */
 static const struct rhashtable_params tquic_conn_params = {

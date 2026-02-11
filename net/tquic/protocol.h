@@ -411,6 +411,19 @@ extern struct lock_class_key tquic_path_lock_key;
 extern struct lock_class_key tquic_stream_lock_key;
 
 /*
+ * Global connection table and memory caches (tquic_main.c)
+ *
+ * Connection hashtable for fast lookup by CID or 4-tuple.
+ * SLAB caches for frequently allocated objects.
+ */
+extern struct rhashtable tquic_conn_table;
+extern const struct rhashtable_params tquic_conn_params;
+extern struct kmem_cache *tquic_conn_cache;
+extern struct kmem_cache *tquic_stream_cache;
+extern struct kmem_cache *tquic_path_cache;
+extern struct kmem_cache *tquic_rx_buf_cache;
+
+/*
  * Handshake functions (tquic_handshake.c)
  *
  * These functions implement TLS 1.3 handshake via net/handshake

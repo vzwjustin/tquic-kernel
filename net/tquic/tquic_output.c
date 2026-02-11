@@ -39,19 +39,13 @@
 #include "cong/tquic_cong.h"
 #include "grease.h"
 #include "crypto/key_update.h"
+#include "crypto/header_protection.h"
 #include "tquic_token.h"
 #include "core/mp_frame.h"
 
 /* Slab cache for tquic_pending_frame (CF-046: avoid per-frame kzalloc) */
 struct kmem_cache *tquic_frame_cache;
 EXPORT_SYMBOL_GPL(tquic_frame_cache);
-
-/* Forward declarations for header protection (crypto/tls.c, header_protection.c) */
-struct tquic_crypto_state;
-struct tquic_hp_ctx;
-extern struct tquic_hp_ctx *tquic_crypto_get_hp_ctx(struct tquic_crypto_state *crypto);
-extern int tquic_hp_protect(struct tquic_hp_ctx *ctx, u8 *packet,
-			    size_t packet_len, size_t pn_offset);
 
 /* QUIC frame types */
 #define TQUIC_FRAME_PADDING		0x00

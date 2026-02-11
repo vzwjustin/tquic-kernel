@@ -29,6 +29,7 @@
 #include "../protocol.h"
 #include "../tquic_debug.h"
 #include "tquic_cong.h"
+#include "coupled.h"
 
 /* Forward declaration for pacing update (defined in tquic_output.c) */
 extern void tquic_update_pacing(struct sock *sk, struct tquic_path *path);
@@ -1015,25 +1016,6 @@ EXPORT_SYMBOL_GPL(tquic_cong_select_for_rtt);
  * Per CONTEXT.md: "Loss on one path affects only that path's CWND"
  * Per RESEARCH.md: "OLIA as default" coupled algorithm
  */
-
-/*
- * Forward declarations for coupled.c functions.
- * These are implemented in net/tquic/cong/coupled.c and provide
- * connection-level coupled CC state management.
- */
-extern struct tquic_coupled_state *tquic_coupled_create(
-	struct tquic_connection *conn, enum tquic_coupled_algo algo);
-extern void tquic_coupled_destroy(struct tquic_coupled_state *state);
-extern int tquic_coupled_attach_path(struct tquic_coupled_state *state,
-				     struct tquic_path *path);
-extern void tquic_coupled_detach_path(struct tquic_coupled_state *state,
-				      struct tquic_path *path);
-extern void tquic_coupled_on_ack_ext(struct tquic_coupled_state *state,
-				     struct tquic_path *path,
-				     u64 bytes_acked, u64 rtt_us);
-extern void tquic_coupled_on_loss_ext(struct tquic_coupled_state *state,
-				      struct tquic_path *path,
-				      u64 bytes_lost);
 
 /*
  * tquic_cong_enable_coupling - Enable coupled CC for a connection

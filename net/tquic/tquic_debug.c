@@ -47,7 +47,6 @@ EXPORT_SYMBOL_GPL(tquic_debug_level);
 static struct dentry *tquic_debugfs_root;
 
 /* External reference to global connection table */
-extern struct rhashtable tquic_conn_table;
 
 /*
  * =============================================================================

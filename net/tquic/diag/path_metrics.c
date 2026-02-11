@@ -36,6 +36,7 @@
 #endif
 #include <net/tquic.h>
 #include "../tquic_compat.h"
+#include "../protocol.h"
 #include <uapi/linux/tquic.h>
 #include <uapi/linux/tquic_diag.h>
 
@@ -201,9 +202,6 @@ enum tquic_metrics_nl_attrs {
 enum tquic_metrics_nl_groups {
 	TQUIC_NL_GRP_METRICS = 10,	/* Path metrics updates */
 };
-
-/* External declarations */
-extern struct rhashtable tquic_conn_table;
 
 /* Forward declarations */
 static struct genl_family tquic_metrics_family;

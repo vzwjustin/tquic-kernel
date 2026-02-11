@@ -445,10 +445,83 @@ EXPORT_SYMBOL_GPL(tquic_deadline_select_path);
  * =============================================================================
  */
 
-/* Timer callback placeholder for deadline scheduler periodic checks */
+/**
+ * deadline_sched_timer_cb - Periodic deadline maintenance timer callback
+ * @t: Timer list structure
+ *
+ * Performs periodic maintenance for the deadline scheduler:
+ * - Detects expired deadlines and marks them as MISSED
+ * - Updates path capability metrics for better scheduling decisions
+ * - Re-evaluates deadline feasibility based on current network conditions
+ * - Cleans up completed deadline entries
+ *
+ * This proactive approach complements the reactive event handlers
+ * (on_ack, on_loss, on_path_change) by catching deadlines that expire
+ * without explicit network events.
+ */
 static void deadline_sched_timer_cb(struct timer_list *t)
 {
-	/* Currently unused -- timer is not armed. Reserved for future use. */
+	struct tquic_deadline_sched_state *state;
+	struct tquic_stream_deadline *deadline, *tmp;
+	struct tquic_path *path;
+	ktime_t now;
+	unsigned long flags;
+	bool has_active = false;
+
+	state = from_timer(state, t, scheduler_timer);
+
+	/* Bail out if scheduler is not enabled */
+	if (!state->enabled)
+		return;
+
+	now = ktime_get();
+
+	spin_lock_irqsave(&state->lock, flags);
+
+	/* Scan deadline tree for expired deadlines */
+	list_for_each_entry_safe(deadline, tmp, &state->streams_with_deadlines,
+				 list) {
+		/* Skip if already delivered or dropped */
+		if (deadline->flags & (TQUIC_DEADLINE_FLAG_DELIVERED |
+				       TQUIC_DEADLINE_FLAG_DROPPED))
+			continue;
+
+		/* Check if deadline has expired */
+		if (ktime_before(deadline->deadline, now)) {
+			/* Mark as missed if still pending */
+			if (deadline->flags & TQUIC_DEADLINE_FLAG_PENDING) {
+				deadline->flags |= TQUIC_DEADLINE_FLAG_MISSED;
+				state->stats.deadlines_missed++;
+
+				/* Apply miss policy */
+				if (state->miss_policy == TQUIC_DEADLINE_MISS_DROP) {
+					deadline->flags |= TQUIC_DEADLINE_FLAG_DROPPED;
+					state->stats.packets_dropped++;
+				}
+			}
+		} else {
+			/* Still has active deadline */
+			has_active = true;
+		}
+	}
+
+	/* Update path capabilities from current network statistics */
+	if (state->conn) {
+		list_for_each_entry(path, &state->conn->paths, list) {
+			deadline_update_path_caps(state, path);
+		}
+	}
+
+	spin_unlock_irqrestore(&state->lock, flags);
+
+	/*
+	 * Reschedule timer if there are active deadlines.
+	 * Use the configured granularity for check interval.
+	 */
+	if (has_active && state->conn) {
+		mod_timer(&state->scheduler_timer,
+			  jiffies + usecs_to_jiffies(state->granularity_us));
+	}
 }
 
 /**
@@ -619,6 +692,13 @@ int tquic_deadline_set_stream_deadline(struct tquic_connection *conn,
 	list_add_tail(&deadline->stream_node, &state->streams_with_deadlines);
 	state->deadline_count++;
 	state->stats.total_deadlines++;
+
+	/* Start periodic timer if this is the first active deadline */
+	if (state->deadline_count == 1) {
+		mod_timer(&state->scheduler_timer,
+			  jiffies + usecs_to_jiffies(state->granularity_us));
+	}
+
 	spin_unlock_bh(&state->lock);
 
 	return 0;

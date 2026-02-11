@@ -967,7 +967,6 @@ err_sysctl:
 }
 
 /* External declarations for connection management */
-extern struct rhashtable tquic_conn_table;
 
 /*
  * Close a single connection during namespace shutdown.

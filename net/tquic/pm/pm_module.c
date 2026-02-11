@@ -11,11 +11,9 @@
 
 #include <net/tquic_pm.h>
 #include "../tquic_debug.h"
+#include "../tquic_init.h"
 
 #include "nat_keepalive.h"
-
-extern int __init tquic_pm_kernel_module_init(void);
-extern void __exit tquic_pm_kernel_module_exit(void);
 
 static int __init __maybe_unused tquic_pm_module_init(void)
 {
