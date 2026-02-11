@@ -34,6 +34,7 @@
 #include "tquic_compat.h"
 #include "tquic_debug.h"
 #include "tquic_mib.h"
+#include "protocol.h"
 #include "cong/tquic_cong.h"
 #include "crypto/key_update.h"
 #include "crypto/zero_rtt.h"
@@ -3628,6 +3629,48 @@ not_reset:
 
 		kfree_skb(skb);
 		return ret;
+	}
+
+	/*
+	 * Handle Initial packets for new connections on listening sockets.
+	 *
+	 * Per RFC 9000 Section 7.2, servers must accept Initial packets
+	 * even when no connection exists. Check if this is an Initial packet
+	 * for a new connection and route to server accept path.
+	 */
+	if (!conn && (data[0] & TQUIC_HEADER_FORM_LONG)) {
+		/* Extract packet type from long header */
+		u8 pkt_type = (data[0] & 0x30) >> 4;
+
+		/* Initial packet type == 0 */
+		if (pkt_type == 0) {
+			struct sock *listener;
+
+			/* Lookup listener socket for this address/port */
+			listener = tquic_lookup_listener(&local_addr);
+			if (listener) {
+				/*
+				 * Found listening socket - route to server accept path.
+				 * tquic_server_accept() will create a new connection,
+				 * perform Retry validation if needed, and initiate
+				 * the handshake.
+				 */
+				ret = tquic_server_accept(listener, skb, &src_addr);
+
+				/*
+				 * Server accept consumes the skb on success or
+				 * failure, so we return here without freeing it.
+				 */
+				sock_put(listener);
+				return ret;
+			}
+
+			/*
+			 * No listener found for this port. Fall through to
+			 * normal processing which will return -ENOENT and
+			 * avoid sending stateless reset for long headers.
+			 */
+		}
 	}
 
 	/* Process the QUIC packet */
