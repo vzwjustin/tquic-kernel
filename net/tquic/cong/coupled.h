@@ -12,18 +12,12 @@
 #define _TQUIC_CONG_COUPLED_H
 
 #include <linux/types.h>
+#include <net/tquic.h>
 
 /* Forward declarations */
 struct tquic_connection;
 struct tquic_path;
 struct tquic_coupled_state;
-
-/* Coupled congestion control algorithms */
-enum tquic_coupled_algo {
-	TQUIC_COUPLED_ALGO_LIA = 0,	/* Linked Increases Algorithm */
-	TQUIC_COUPLED_ALGO_OLIA,	/* Opportunistic Linked Increases (RFC 6356) */
-	TQUIC_COUPLED_ALGO_BALIA,	/* Balanced Linked Adaptation */
-};
 
 /*
  * Coupled congestion control lifecycle
