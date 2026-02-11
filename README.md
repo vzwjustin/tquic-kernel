@@ -44,28 +44,42 @@ TQUIC is a Linux kernel module implementing the QUIC protocol (RFC 9000/9001/900
 
 ## Architecture
 
+Userspace QUIC implementations pay a heavy cost crossing the kernel boundary on every packet. TQUIC eliminates this entirely - crypto, congestion control, scheduling, and I/O all execute in kernel context with direct access to the networking stack.
+
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                         User Space                              │
-└───────┬────────────┬────────────┬──────────────┬────────────────┘
-┌───────▼────────────▼────────────▼──────────────▼────────────────┐
-│                      TQUIC Socket Layer                          │
-│  ┌────────────────────────────────────────────────────────────┐  │
-│  │          HTTP/3 + QPACK + WebTransport + MASQUE            │  │
-│  └────────────────────────────────────────────────────────────┘  │
-│  ┌────────────────────────────────────────────────────────────┐  │
-│  │     Connection Manager (Crypto, Streams, ACK, Flow Ctrl)   │  │
-│  └────────────────────────────────────────────────────────────┘  │
-│  ┌────────────────────────────────────────────────────────────┐  │
-│  │   Path Manager (Schedulers, Congestion Control, FEC)       │  │
-│  └────────────────────────────────────────────────────────────┘  │
-│  ┌────────────────────────────────────────────────────────────┐  │
-│  │   Performance (GRO/GSO, Zero-Copy, AF_XDP, io_uring)      │  │
-│  └────────────────────────────────────────────────────────────┘  │
-└──────────────────────────┬──────────────────────────────────────┘
-┌──────────────────────────▼──────────────────────────────────────┐
-│                   UDP → IP Layer (v4/v6)                         │
-└─────────────────────────────────────────────────────────────────┘
+  ┌─────────────────────────────────────────────────────────────────┐
+  │                        User Space                               │
+  │    Apps just open a socket - no QUIC library needed             │
+  └───────┬────────────┬────────────┬──────────────┬────────────────┘
+          │ socket()   │ send()     │ recv()       │ setsockopt()
+  ════════╪════════════╪════════════╪══════════════╪════════════════════
+          │     No userspace ↔ kernel copies per packet             │
+  ┌───────▼────────────▼────────────▼──────────────▼────────────────┐
+  │                    TQUIC (Kernel Space)                          │
+  │                                                                  │
+  │  ┌────────────────────────────────────────────────────────────┐  │
+  │  │  HTTP/3 + QPACK + WebTransport + MASQUE                   │  │
+  │  └────────────────────────────────────────────────────────────┘  │
+  │  ┌────────────────────────────────────────────────────────────┐  │
+  │  │  Connection Manager (Crypto, Streams, ACK, Flow Ctrl)      │  │
+  │  │  ← TLS 1.3 with AES-NI/VAES hardware acceleration         │  │
+  │  └────────────────────────────────────────────────────────────┘  │
+  │  ┌────────────────────────────────────────────────────────────┐  │
+  │  │  Path Manager & Multipath Scheduler                        │  │
+  │  │  ← Per-packet decisions at wire speed, no syscall overhead │  │
+  │  └────────────────────────────────────────────────────────────┘  │
+  │  ┌────────────────────────────────────────────────────────────┐  │
+  │  │  Performance (GRO/GSO, Zero-Copy, AF_XDP, io_uring)       │  │
+  │  │  ← Direct NIC access, no socket buffer copies              │  │
+  │  └────────────────────────────────────────────────────────────┘  │
+  │                                                                  │
+  │  Kernel advantages: NAPI polling, softirq scheduling,           │
+  │  netfilter integration, per-CPU data, RCU-protected paths       │
+  └──────────────────────────┬──────────────────────────────────────┘
+  ┌──────────────────────────▼──────────────────────────────────────┐
+  │                   UDP → IP Layer (v4/v6)                         │
+  │  ← Direct stack integration, no raw socket overhead              │
+  └─────────────────────────────────────────────────────────────────┘
 ```
 
 ## Quick Start
