@@ -2,7 +2,7 @@
 /*
  * TQUIC: QUIC Load Balancing Support
  *
- * Copyright (c) 2026 Linux Foundation
+ * Copyright (c) 2026 Justin Adams <spotty118@gmail.com>
  * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Implementation of QUIC-LB (draft-ietf-quic-load-balancers) for

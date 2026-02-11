@@ -2,7 +2,7 @@
 /*
  * QPACK Static Table - RFC 9204 Appendix A
  *
- * Copyright (c) 2026 Linux Foundation
+ * Copyright (c) 2026 Justin Adams <spotty118@gmail.com>
  * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * The QPACK static table contains 99 predefined header field entries.

@@ -2,7 +2,7 @@
 /*
  * TQUIC: Westwood+ Congestion Control
  *
- * Copyright (c) 2026 Linux Foundation
+ * Copyright (c) 2026 Justin Adams <spotty118@gmail.com>
  * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * TCP Westwood+ adapted for TQUIC multipath WAN bonding.

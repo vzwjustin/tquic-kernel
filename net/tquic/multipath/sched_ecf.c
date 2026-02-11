@@ -14,7 +14,7 @@
  * Reference: "ECF: An MPTCP Path Scheduler to Manage Heterogeneous Paths"
  * (ACM SIGMETRICS 2017)
  *
- * Copyright (c) 2026 Linux Foundation
+ * Copyright (c) 2026 Justin Adams <spotty118@gmail.com>
  * Kernel implementation by Justin Adams <spotty118@gmail.com>
  */
 

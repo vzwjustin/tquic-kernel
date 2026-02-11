@@ -5,7 +5,7 @@
  * Implementation of PATH_ABANDON, PATH_STATUS_BACKUP, and PATH_STATUS_AVAILABLE
  * frames per draft-ietf-quic-multipath-16.
  *
- * Copyright (c) 2024-2026 Linux QUIC Authors
+ * Copyright (c) 2026 Justin Adams <spotty118@gmail.com>
  * Kernel implementation by Justin Adams <spotty118@gmail.com>
  */
 

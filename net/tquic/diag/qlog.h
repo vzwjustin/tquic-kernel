@@ -2,7 +2,7 @@
 /*
  * TQUIC Qlog Internal Definitions
  *
- * Copyright (c) 2026 Linux Foundation
+ * Copyright (c) 2026 Justin Adams <spotty118@gmail.com>
  * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Internal structures and functions for qlog tracing support.

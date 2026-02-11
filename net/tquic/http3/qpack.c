@@ -2,7 +2,7 @@
 /*
  * QPACK Header Compression for HTTP/3 - RFC 9204
  *
- * Copyright (c) 2026 Linux Foundation
+ * Copyright (c) 2026 Justin Adams <spotty118@gmail.com>
  * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * This file provides:

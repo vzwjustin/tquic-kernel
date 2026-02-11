@@ -2,7 +2,7 @@
 /*
  * TQUIC: Connection State Machine
  *
- * Copyright (c) 2026 Linux Foundation
+ * Copyright (c) 2026 Justin Adams <spotty118@gmail.com>
  * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * This module implements the QUIC connection state machine as specified

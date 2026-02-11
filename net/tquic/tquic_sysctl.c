@@ -2,7 +2,7 @@
 /*
  * TQUIC: Sysctl Interface for Tuning
  *
- * Copyright (c) 2026 Linux Foundation
+ * Copyright (c) 2026 Justin Adams <spotty118@gmail.com>
  * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Provides sysctl parameters for tuning TQUIC WAN bonding behavior.

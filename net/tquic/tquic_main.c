@@ -2,7 +2,7 @@
 /*
  * TQUIC: WAN Bonding over QUIC - Main Module
  *
- * Copyright (c) 2026 Linux Foundation
+ * Copyright (c) 2026 Justin Adams <spotty118@gmail.com>
  * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * This is the main entry point for the TQUIC subsystem, providing

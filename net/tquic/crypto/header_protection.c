@@ -2,7 +2,7 @@
 /*
  * TQUIC: QUIC Header Protection (RFC 9001 Section 5.4)
  *
- * Copyright (c) 2026 Linux Foundation
+ * Copyright (c) 2026 Justin Adams <spotty118@gmail.com>
  * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Implements QUIC header protection using AES-ECB or ChaCha20 to generate

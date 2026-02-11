@@ -2,7 +2,7 @@
 /*
  * TQUIC Fuzzing Framework Implementation
  *
- * Copyright (c) 2026 Linux Foundation
+ * Copyright (c) 2026 Justin Adams <spotty118@gmail.com>
  * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Provides mutation-based fuzzing for QUIC packet processing.

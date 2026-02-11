@@ -2,7 +2,7 @@
 /*
  * TQUIC: QUIC over TCP Transport Implementation
  *
- * Copyright (c) 2026 Linux Foundation
+ * Copyright (c) 2026 Justin Adams <spotty118@gmail.com>
  * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Implements QUIC packet transport over TCP for environments where

@@ -2,7 +2,7 @@
 /*
  * KUnit tests for TQUIC NAT Keepalive (RFC 9308 Section 3.5)
  *
- * Copyright (c) 2026 Linux Foundation
+ * Copyright (c) 2026 Justin Adams <spotty118@gmail.com>
  * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * This test suite validates the NAT keepalive implementation:

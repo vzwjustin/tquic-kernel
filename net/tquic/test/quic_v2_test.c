@@ -2,7 +2,7 @@
 /*
  * TQUIC: QUIC Version 2 (RFC 9369) KUnit Tests
  *
- * Copyright (c) 2026 Linux Foundation
+ * Copyright (c) 2026 Justin Adams <spotty118@gmail.com>
  * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Comprehensive tests for QUIC v2 (RFC 9369):

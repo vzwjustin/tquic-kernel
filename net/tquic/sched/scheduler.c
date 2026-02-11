@@ -2,7 +2,7 @@
 /*
  * TQUIC: Multipath Packet Scheduler Framework
  *
- * Copyright (c) 2026 Linux Foundation
+ * Copyright (c) 2026 Justin Adams <spotty118@gmail.com>
  * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Provides a pluggable scheduler framework for distributing packets

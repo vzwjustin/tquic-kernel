@@ -2,7 +2,7 @@
 /*
  * TQUIC NAPI Polling Support
  *
- * Copyright (c) 2026 Linux Foundation
+ * Copyright (c) 2026 Justin Adams <spotty118@gmail.com>
  * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * This header provides NAPI (New API) polling mode support for TQUIC.

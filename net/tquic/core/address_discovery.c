@@ -2,7 +2,7 @@
 /*
  * TQUIC: QUIC Address Discovery Extension Implementation
  *
- * Copyright (c) 2026 Linux Foundation
+ * Copyright (c) 2026 Justin Adams <spotty118@gmail.com>
  * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Implementation of draft-ietf-quic-address-discovery.

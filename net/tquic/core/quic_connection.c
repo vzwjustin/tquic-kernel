@@ -4,7 +4,7 @@
  *
  * Connection management implementation
  *
- * Copyright (c) 2024 Linux TQUIC Authors
+ * Copyright (c) 2026 Justin Adams <spotty118@gmail.com>
  * Kernel implementation by Justin Adams <spotty118@gmail.com>
  */
 

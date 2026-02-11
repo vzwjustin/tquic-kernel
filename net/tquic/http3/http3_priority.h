@@ -2,7 +2,7 @@
 /*
  * TQUIC HTTP/3 Extensible Priorities (RFC 9218)
  *
- * Copyright (c) 2026 Linux Foundation
+ * Copyright (c) 2026 Justin Adams <spotty118@gmail.com>
  * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * This header provides HTTP/3 Extensible Priorities support per RFC 9218.

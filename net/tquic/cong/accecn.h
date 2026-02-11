@@ -2,7 +2,7 @@
 /*
  * TQUIC: Accurate ECN (AccECN) Feedback
  *
- * Copyright (c) 2026 Linux Foundation
+ * Copyright (c) 2026 Justin Adams <spotty118@gmail.com>
  * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Implementation of Accurate ECN feedback for QUIC per RFC 9000.

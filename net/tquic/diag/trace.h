@@ -14,7 +14,7 @@
  *   echo 1 > /sys/kernel/debug/tracing/events/quic/enable
  *   cat /sys/kernel/debug/tracing/trace_pipe
  *
- * Copyright (c) 2024 Linux QUIC Authors
+ * Copyright (c) 2026 Justin Adams <spotty118@gmail.com>
  * Kernel implementation by Justin Adams <spotty118@gmail.com>
  */
 

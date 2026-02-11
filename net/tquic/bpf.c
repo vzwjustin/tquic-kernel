@@ -2,7 +2,7 @@
 /*
  * TQUIC BPF struct_ops support for pluggable path schedulers
  *
- * Copyright (c) 2026 Linux Foundation
+ * Copyright (c) 2026 Justin Adams <spotty118@gmail.com>
  * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * This module enables BPF programs to implement custom TQUIC path

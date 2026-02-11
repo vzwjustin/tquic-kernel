@@ -14,7 +14,7 @@
  * - Path with positive deficit is selected and deficit decremented
  * - Ensures long-term traffic matches configured weight ratios
  *
- * Copyright (c) 2026 Linux Foundation
+ * Copyright (c) 2026 Justin Adams <spotty118@gmail.com>
  * Kernel implementation by Justin Adams <spotty118@gmail.com>
  */
 

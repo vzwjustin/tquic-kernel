@@ -2,7 +2,7 @@
 /*
  * TQUIC Per-Network Namespace State
  *
- * Copyright (c) 2026 Linux Foundation
+ * Copyright (c) 2026 Justin Adams <spotty118@gmail.com>
  * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * This header defines per-network-namespace state for the TQUIC subsystem.

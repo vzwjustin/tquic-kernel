@@ -2,7 +2,7 @@
 /*
  * TQUIC: MASQUE KUnit Tests (RFC 9297, RFC 9298, RFC 9484)
  *
- * Copyright (c) 2026 Linux Foundation
+ * Copyright (c) 2026 Justin Adams <spotty118@gmail.com>
  * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Comprehensive tests for MASQUE protocols:

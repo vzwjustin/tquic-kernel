@@ -12,7 +12,7 @@
  * - Length fields must accurately reflect packet boundaries
  * - Receiver must be able to separate coalesced packets
  *
- * Copyright (c) 2024-2026 Linux TQUIC Authors
+ * Copyright (c) 2026 Justin Adams <spotty118@gmail.com>
  * Kernel implementation by Justin Adams <spotty118@gmail.com>
  */
 

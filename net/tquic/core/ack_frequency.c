@@ -2,7 +2,7 @@
 /*
  * TQUIC: ACK Frequency Negotiation (RFC 9002 Appendix A.7)
  *
- * Copyright (c) 2026 Linux Foundation
+ * Copyright (c) 2026 Justin Adams <spotty118@gmail.com>
  * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Complete implementation of QUIC ACK Frequency extension including:

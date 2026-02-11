@@ -16,7 +16,7 @@
  * - 0-RTT rejection handling (re-send as 1-RTT)
  * - Anti-replay protection (timestamps, nonces)
  *
- * Copyright (c) 2026 Linux Foundation
+ * Copyright (c) 2026 Justin Adams <spotty118@gmail.com>
  * Kernel implementation by Justin Adams <spotty118@gmail.com>
  */
 

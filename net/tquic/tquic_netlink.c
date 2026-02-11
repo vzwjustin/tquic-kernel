@@ -3,7 +3,7 @@
  *
  * TQUIC Netlink interface for userspace control
  *
- * Copyright (c) 2024 Linux Kernel Authors
+ * Copyright (c) 2026 Justin Adams <spotty118@gmail.com>
  * Kernel implementation by Justin Adams <spotty118@gmail.com>
  */
 

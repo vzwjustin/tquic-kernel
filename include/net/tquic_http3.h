@@ -2,7 +2,7 @@
 /*
  * TQUIC HTTP/3 - Public API
  *
- * Copyright (c) 2026 Linux Foundation
+ * Copyright (c) 2026 Justin Adams <spotty118@gmail.com>
  * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * This header provides the public HTTP/3 API for kernel consumers,

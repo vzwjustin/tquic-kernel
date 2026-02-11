@@ -2,7 +2,7 @@
 /*
  * TQUIC: WebTransport KUnit Tests
  *
- * Copyright (c) 2026 Linux Foundation
+ * Copyright (c) 2026 Justin Adams <spotty118@gmail.com>
  * Kernel implementation by Justin Adams <spotty118@gmail.com>
  *
  * Comprehensive tests for WebTransport over HTTP/3:
