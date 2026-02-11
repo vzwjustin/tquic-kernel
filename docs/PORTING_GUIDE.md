@@ -113,9 +113,9 @@ static int tquic_v4_add_protocol(void)
 }
 ```
 
-## Disabled Features (Debian 6.12)
+## Optional Features (Kconfig)
 
-These features are disabled due to API mismatches or missing dependencies:
+These features are conditionally compiled and may require API porting for specific kernel versions:
 
 ### CONFIG_TQUIC_IO_URING
 - **Reason**: io_uring symbols/structs mismatch with Debian 6.12 headers
@@ -238,6 +238,4 @@ When fixing compatibility issues:
 ## References
 
 - [RFC 9000](https://www.rfc-editor.org/rfc/rfc9000) - QUIC Transport Protocol
-- [TQUIC_PORTING_GAPS.md](../TQUIC_PORTING_GAPS.md) - Feature gap tracking
-- [docs/ROADMAP.md](ROADMAP.md) - Development roadmap
-- [OUT_OF_TREE_TODO.md](../OUT_OF_TREE_TODO.md) - Out-of-tree build status
+- [ROADMAP.md](ROADMAP.md) - Development roadmap
