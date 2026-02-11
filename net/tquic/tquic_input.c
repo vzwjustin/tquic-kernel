@@ -588,7 +588,117 @@ static int tquic_process_version_negotiation(struct tquic_connection *conn,
 }
 
 /*
- * Send version negotiation response (server side)
+ * tquic_send_vn_from_listener - Send Version Negotiation from listening socket
+ * @listener: Listening socket
+ * @skb: Received Initial packet
+ * @client_addr: Client source address
+ * @local_addr: Local address packet was received on
+ *
+ * Sends a Version Negotiation packet in response to an Initial packet
+ * with an unsupported version (RFC 9000 Section 6).
+ *
+ * Returns: 0 on success, negative errno on failure
+ */
+static int tquic_send_vn_from_listener(struct sock *listener,
+				       struct sk_buff *skb,
+				       struct sockaddr_storage *client_addr,
+				       struct sockaddr_storage *local_addr)
+{
+	const u8 *data = skb->data;
+	size_t len = skb->len;
+	u8 dcid_len, scid_len;
+	const u8 *dcid, *scid;
+	struct sk_buff *vn_skb;
+	u8 *p;
+	static const u32 supported_versions[] = {
+		TQUIC_VERSION_1,
+		TQUIC_VERSION_2,
+	};
+	size_t vn_len;
+	int i, ret;
+
+	/* Extract connection IDs from Initial packet (RFC 9000 Section 17.2) */
+	if (len < 7) /* Min: 1 byte header + 4 bytes version + 1 dcid_len + 1 scid_len */
+		return -EINVAL;
+
+	dcid_len = data[5];
+	if (len < 6 + dcid_len + 1)
+		return -EINVAL;
+
+	dcid = &data[6];
+	scid_len = data[6 + dcid_len];
+
+	if (len < 7 + dcid_len + scid_len)
+		return -EINVAL;
+
+	scid = &data[7 + dcid_len];
+
+	/* Build Version Negotiation packet */
+	vn_len = 1 + 4 + 1 + scid_len + 1 + dcid_len + sizeof(supported_versions);
+	vn_skb = alloc_skb(vn_len + MAX_HEADER, GFP_ATOMIC);
+	if (!vn_skb)
+		return -ENOMEM;
+
+	skb_reserve(vn_skb, MAX_HEADER);
+	p = skb_put(vn_skb, vn_len);
+
+	/* First byte: long header form with random bits */
+	get_random_bytes(p, 1);
+	p[0] |= TQUIC_HEADER_FORM_LONG;
+	p++;
+
+	/* Version = 0 for Version Negotiation */
+	put_unaligned_be32(0, p);
+	p += 4;
+
+	/* DCID = client's SCID */
+	*p++ = scid_len;
+	memcpy(p, scid, scid_len);
+	p += scid_len;
+
+	/* SCID = client's DCID */
+	*p++ = dcid_len;
+	memcpy(p, dcid, dcid_len);
+	p += dcid_len;
+
+	/* Supported versions list */
+	for (i = 0; i < ARRAY_SIZE(supported_versions); i++) {
+		put_unaligned_be32(supported_versions[i], p);
+		p += 4;
+	}
+
+	/* Send VN packet to client using UDP */
+	{
+		struct msghdr msg = {};
+		struct kvec iov;
+
+		/* Set destination address */
+		msg.msg_name = client_addr;
+		msg.msg_namelen = (client_addr->ss_family == AF_INET) ?
+				  sizeof(struct sockaddr_in) :
+				  sizeof(struct sockaddr_in6);
+
+		/* Set data buffer */
+		iov.iov_base = vn_skb->data;
+		iov.iov_len = vn_skb->len;
+
+		/* Send through kernel UDP */
+		ret = kernel_sendmsg(listener->sk_socket, &msg, &iov, 1, vn_skb->len);
+		kfree_skb(vn_skb);
+
+		if (ret < 0) {
+			tquic_dbg("failed to send version negotiation: %d\n", ret);
+			return ret;
+		}
+
+		tquic_dbg("sent version negotiation (v1, v2) to client\n");
+	}
+
+	return 0;
+}
+
+/*
+ * Send version negotiation response (server side) - UNUSED
  */
 static int __maybe_unused tquic_send_version_negotiation_internal(struct sock *sk,
 					  const struct sockaddr *addr,
@@ -3634,12 +3744,47 @@ not_reset:
 		/* Initial packet type == 0 */
 		if (pkt_type == 0) {
 			struct sock *listener;
+			u32 pkt_version;
 
 			/* Lookup listener socket for this address/port */
 			listener = tquic_lookup_listener(&local_addr);
 			if (listener) {
 				/*
-				 * Found listening socket - route to server accept path.
+				 * Extract version from long header (bytes 1-4).
+				 * RFC 9000 Section 17.2: Long Header Packet Format
+				 */
+				if (len < 5) {
+					tquic_dbg("Initial packet too short for version\n");
+					sock_put(listener);
+					return -EINVAL;
+				}
+
+				pkt_version = get_unaligned_be32(data + 1);
+
+				/*
+				 * Check if version is supported (RFC 9000 Section 6).
+				 * Send Version Negotiation if client uses unsupported version.
+				 */
+				if (pkt_version != TQUIC_VERSION_1 &&
+				    pkt_version != TQUIC_VERSION_2 &&
+				    pkt_version != TQUIC_VERSION_NEGOTIATION) {
+					tquic_dbg("unsupported version 0x%08x, sending VN\n",
+						  pkt_version);
+
+					/*
+					 * Send Version Negotiation packet (RFC 9000 Section 6).
+					 * VN packet lists versions we support (v1 and v2).
+					 * This is sent from the listener socket context.
+					 */
+					ret = tquic_send_vn_from_listener(listener, skb,
+									  &src_addr,
+									  &local_addr);
+					sock_put(listener);
+					return ret;
+				}
+
+				/*
+				 * Version is supported - route to server accept path.
 				 * tquic_server_accept() will create a new connection,
 				 * perform Retry validation if needed, and initiate
 				 * the handshake.
