@@ -10,6 +10,7 @@
 
 #include <linux/slab.h>
 #include <linux/skbuff.h>
+#include <linux/rcupdate.h>
 #include <crypto/utils.h>
 #include <net/tquic.h>
 #include <net/tquic_frame.h>
@@ -58,6 +59,19 @@ static int tquic_frame_process_ack(struct tquic_connection *conn,
 				   const u8 *data, int len, u8 level);
 static int tquic_frame_process_new_cid(struct tquic_connection *conn,
 				       const u8 *data, int len);
+
+static struct tquic_path *tquic_packet_active_path_get(struct tquic_connection *conn)
+{
+	struct tquic_path *path;
+
+	rcu_read_lock();
+	path = rcu_dereference(conn->active_path);
+	if (path && !tquic_path_get(path))
+		path = NULL;
+	rcu_read_unlock();
+
+	return path;
+}
 static int tquic_frame_process_connection_close(struct tquic_connection *conn,
 						const u8 *data, int len);
 
@@ -745,9 +759,11 @@ int tquic_packet_process(struct tquic_connection *conn, struct sk_buff *skb)
 	/* Process frames */
 	tquic_frame_process_all(conn, skb, level);
 
-	/* Update statistics */
-	conn->stats.rx_packets++;
-	conn->stats.rx_bytes += skb->len;
+	/* Update statistics - use WRITE_ONCE to avoid KCSAN data races */
+	WRITE_ONCE(conn->stats.rx_packets,
+		   READ_ONCE(conn->stats.rx_packets) + 1);
+	WRITE_ONCE(conn->stats.rx_bytes,
+		   READ_ONCE(conn->stats.rx_bytes) + skb->len);
 
 	kfree_skb(skb);
 
@@ -952,8 +968,8 @@ int tquic_frame_process_one(struct tquic_connection *conn, const u8 *data,
 			return varint_len;
 		offset += varint_len;
 
-		if (val1 > conn->max_data_remote)
-			conn->max_data_remote = val1;
+		if (val1 > READ_ONCE(conn->max_data_remote))
+			WRITE_ONCE(conn->max_data_remote, val1);
 		return offset;
 
 	case TQUIC_FRAME_MAX_STREAM_DATA:
@@ -987,8 +1003,8 @@ int tquic_frame_process_one(struct tquic_connection *conn, const u8 *data,
 			return varint_len;
 		offset += varint_len;
 
-		if (val1 > conn->max_streams_bidi)
-			conn->max_streams_bidi = val1;
+		if (val1 > READ_ONCE(conn->max_streams_bidi))
+			WRITE_ONCE(conn->max_streams_bidi, val1);
 		return offset;
 
 	case TQUIC_FRAME_MAX_STREAMS_UNI:
@@ -998,8 +1014,8 @@ int tquic_frame_process_one(struct tquic_connection *conn, const u8 *data,
 			return varint_len;
 		offset += varint_len;
 
-		if (val1 > conn->max_streams_uni)
-			conn->max_streams_uni = val1;
+		if (val1 > READ_ONCE(conn->max_streams_uni))
+			WRITE_ONCE(conn->max_streams_uni, val1);
 		return offset;
 
 	case TQUIC_FRAME_DATA_BLOCKED:
@@ -1040,9 +1056,20 @@ int tquic_frame_process_one(struct tquic_connection *conn, const u8 *data,
 			return -EINVAL;
 		/* Echo back as PATH_RESPONSE per RFC 9000 Section 8.2.2 */
 		{
-			struct sk_buff *resp = alloc_skb(16, GFP_ATOMIC);
+			struct sk_buff *resp;
 			u8 *p;
 
+			/*
+			 * Rate-limit PATH_CHALLENGE responses to prevent
+			 * memory exhaustion from attacker-generated challenges.
+			 * Cap the control frame queue at 64 entries.
+			 */
+			if (skb_queue_len(&conn->control_frames) >= 64) {
+				net_warn_ratelimited("TQUIC: PATH_CHALLENGE rate limited\n");
+				return offset + 8;
+			}
+
+			resp = alloc_skb(16, GFP_ATOMIC);
 			if (!resp) {
 				net_warn_ratelimited("TQUIC: failed to allocate PATH_RESPONSE\n");
 				return -ENOMEM;
@@ -1058,11 +1085,18 @@ int tquic_frame_process_one(struct tquic_connection *conn, const u8 *data,
 		if (len < offset + 8)
 			return -EINVAL;
 		/* Validate path challenge response */
-		if (conn->active_path && conn->active_path->validation.challenge_pending) {
-			if (!crypto_memneq(data + offset, conn->active_path->validation.challenge_data, 8)) {
-				conn->active_path->state = TQUIC_PATH_VALIDATED;
-				conn->active_path->validation.challenge_pending = 0;
+		{
+			struct tquic_path *path = tquic_packet_active_path_get(conn);
+
+			if (path && READ_ONCE(path->validation.challenge_pending)) {
+				if (!crypto_memneq(data + offset,
+						   path->validation.challenge_data, 8)) {
+					WRITE_ONCE(path->state, TQUIC_PATH_VALIDATED);
+					WRITE_ONCE(path->validation.challenge_pending, 0);
+				}
 			}
+			if (path)
+				tquic_path_put(path);
 		}
 		return offset + 8;
 

@@ -337,19 +337,18 @@ slow_path:
 	 * and paths are freed via kfree_rcu(), so RCU protection ensures
 	 * safe access during traversal.
 	 */
-	rcu_read_lock();
+	/*
+	 * Slow path: walk the full paths list under the caller's
+	 * rcu_read_lock().  No additional rcu_read_lock/unlock needed
+	 * since the caller already holds it (see RCU_LOCKDEP_WARN above).
+	 */
 	list_for_each_entry_rcu(path, &conn->paths, list) {
 		if (tquic_sockaddr_equal(&path->remote_addr, addr)) {
-			/*
-			 * Take reference with refcount_inc_not_zero to prevent
-			 * use-after-free if path is being removed concurrently.
-			 */
 			if (tquic_path_get(path))
 				found = path;
 			break;
 		}
 	}
-	rcu_read_unlock();
 
 	return found;
 }

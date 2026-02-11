@@ -18,6 +18,7 @@
 #include <linux/slab.h>
 #include <linux/errno.h>
 #include <linux/string.h>
+#include <linux/rcupdate.h>
 #include <crypto/aead.h>
 #include <crypto/hash.h>
 #include <net/tquic.h>
@@ -34,6 +35,19 @@ enum tquic_cipher_type {
 	TQUIC_CIPHER_AES_256_GCM_SHA384 = 0x1302,
 	TQUIC_CIPHER_CHACHA20_POLY1305_SHA256 = 0x1303,
 };
+
+static struct tquic_path *tquic_key_update_active_path_get(struct tquic_connection *conn)
+{
+	struct tquic_path *path;
+
+	rcu_read_lock();
+	path = rcu_dereference(conn->active_path);
+	if (path && !tquic_path_get(path))
+		path = NULL;
+	rcu_read_unlock();
+
+	return path;
+}
 
 /*
  * Maximum key/IV/secret sizes
@@ -287,7 +301,7 @@ static int tquic_key_update_rx(struct tquic_connection *conn)
 				strlen(tquic_ku_label), NULL, 0,
 				new_secret, ctx->rx.secret_len);
 	if (err)
-		return err;
+		goto out;
 
 	/* Update RX secret */
 	memcpy(ctx->rx.secret, new_secret, ctx->rx.secret_len);
@@ -362,14 +376,19 @@ int tquic_crypto_initiate_key_update(struct tquic_connection *conn)
 	 * timer callback will revert the update so the connection does
 	 * not get permanently stuck in the update_pending state.
 	 */
-	if (conn->active_path) {
-		u32 pto_ms = tquic_rtt_pto(&conn->active_path->rtt);
+	{
+		struct tquic_path *path = tquic_key_update_active_path_get(conn);
+
+		if (path) {
+			u32 pto_ms = tquic_rtt_pto(&path->rtt);
 		ktime_t deadline;
 
-		deadline = ktime_add_ms(ktime_get(),
-					TQUIC_KEY_UPDATE_TIMEOUT_PTO_MULT *
-					pto_ms);
-		tquic_timer_set(conn, TQUIC_TIMER_KEY_UPDATE, deadline);
+			deadline = ktime_add_ms(ktime_get(),
+						TQUIC_KEY_UPDATE_TIMEOUT_PTO_MULT *
+						pto_ms);
+			tquic_timer_set(conn, TQUIC_TIMER_KEY_UPDATE, deadline);
+			tquic_path_put(path);
+		}
 	}
 
 	tquic_conn_info(conn, "key update initiated phase=%u first_pn=%llu\n",

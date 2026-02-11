@@ -28,6 +28,28 @@ static DEFINE_SPINLOCK(tquic_sched_lock);
 /* Default scheduler */
 static struct tquic_sched_ops *default_scheduler;
 
+static struct tquic_path *tquic_sched_active_path_get(struct tquic_connection *conn)
+{
+	struct tquic_path *path;
+
+	rcu_read_lock();
+	path = rcu_dereference(conn->active_path);
+	if (path && !tquic_path_get(path))
+		path = NULL;
+	rcu_read_unlock();
+
+	return path;
+}
+
+static struct tquic_path *tquic_sched_path_get_or_active(struct tquic_connection *conn,
+							 struct tquic_path *path)
+{
+	if (path && tquic_path_get(path))
+		return path;
+
+	return tquic_sched_active_path_get(conn);
+}
+
 /*
  * Internal scheduler registration (always available).
  * Adds a scheduler to the sched_list used by tquic_sched_default().
@@ -42,7 +64,7 @@ static int __tquic_sched_register(struct tquic_sched_ops *ops)
 
 	/* First registered becomes default */
 	if (!default_scheduler)
-		default_scheduler = ops;
+		rcu_assign_pointer(default_scheduler, ops);
 
 	spin_unlock_bh(&tquic_sched_lock);
 
@@ -57,8 +79,9 @@ static void __tquic_sched_unregister(struct tquic_sched_ops *ops)
 	list_del_rcu(&ops->list);
 
 	if (default_scheduler == ops) {
-		default_scheduler = list_first_entry_or_null(
-			&tquic_sched_list, struct tquic_sched_ops, list);
+		rcu_assign_pointer(default_scheduler,
+			list_first_entry_or_null(
+				&tquic_sched_list, struct tquic_sched_ops, list));
 	}
 
 	spin_unlock_bh(&tquic_sched_lock);
@@ -129,11 +152,33 @@ EXPORT_SYMBOL_GPL(tquic_sched_find);
  */
 const char *tquic_sched_get_default(struct net *net)
 {
+	const struct tquic_sched_ops *ops;
 	const char *name = "ecf";  /* Default scheduler name */
 
 	rcu_read_lock();
-	if (default_scheduler && default_scheduler->name)
-		name = default_scheduler->name;
+	ops = rcu_dereference(default_scheduler);
+	if (ops && ops->name) {
+		/*
+		 * Return a static default name rather than a pointer into
+		 * the scheduler struct, which could be freed after we drop
+		 * rcu_read_lock().  Callers needing the actual scheduler
+		 * should use tquic_sched_default() with try_module_get().
+		 */
+		if (strcmp(ops->name, "ecf") == 0)
+			name = "ecf";
+		else if (strcmp(ops->name, "minrtt") == 0)
+			name = "minrtt";
+		else if (strcmp(ops->name, "roundrobin") == 0)
+			name = "roundrobin";
+		else if (strcmp(ops->name, "weighted") == 0)
+			name = "weighted";
+		else if (strcmp(ops->name, "blest") == 0)
+			name = "blest";
+		else if (strcmp(ops->name, "aggregate") == 0)
+			name = "aggregate";
+		else
+			name = "unknown";
+	}
 	rcu_read_unlock();
 
 	return name;
@@ -271,7 +316,7 @@ static struct tquic_path *rr_select(void *state, struct tquic_connection *conn,
 	u32 target;
 
 	if (!data)
-		return conn->active_path;
+		return tquic_sched_active_path_get(conn);
 
 	target = atomic_inc_return(&data->counter) % conn->num_paths;
 
@@ -279,11 +324,11 @@ static struct tquic_path *rr_select(void *state, struct tquic_connection *conn,
 		if (path->state != TQUIC_PATH_ACTIVE)
 			continue;
 
-		if (idx++ == target)
-			return path;
+			if (idx++ == target)
+				return tquic_sched_path_get_or_active(conn, path);
 	}
 
-	return conn->active_path;
+	return tquic_sched_active_path_get(conn);
 }
 
 static struct tquic_sched_ops __maybe_unused tquic_sched_rr = {
@@ -312,7 +357,7 @@ static struct tquic_path *minrtt_select(void *state, struct tquic_connection *co
 		}
 	}
 
-	return best ?: conn->active_path;
+	return tquic_sched_path_get_or_active(conn, best);
 }
 
 static struct tquic_sched_ops __maybe_unused tquic_sched_minrtt = {
@@ -362,7 +407,7 @@ static struct tquic_path *wrr_select(void *state, struct tquic_connection *conn,
 	u32 tw;
 
 	if (!data)
-		return conn->active_path;
+		return tquic_sched_active_path_get(conn);
 
 	/*
 	 * Recompute total_weight from the current path list to avoid
@@ -376,7 +421,7 @@ static struct tquic_path *wrr_select(void *state, struct tquic_connection *conn,
 	data->total_weight = tw;
 
 	if (tw == 0)
-		return conn->active_path;
+		return tquic_sched_active_path_get(conn);
 
 	target = atomic_inc_return(&data->counter) % tw;
 
@@ -384,12 +429,12 @@ static struct tquic_path *wrr_select(void *state, struct tquic_connection *conn,
 		if (path->state != TQUIC_PATH_ACTIVE)
 			continue;
 
-		cumulative += path->weight;
-		if (target < cumulative)
-			return path;
+			cumulative += path->weight;
+			if (target < cumulative)
+				return tquic_sched_path_get_or_active(conn, path);
 	}
 
-	return conn->active_path;
+	return tquic_sched_active_path_get(conn);
 }
 
 static void wrr_feedback(void *state, struct tquic_path *path,
@@ -439,8 +484,11 @@ static void blest_release(void *state)
 static struct tquic_path *blest_select(void *state, struct tquic_connection *conn,
 				       struct sk_buff *skb)
 {
+	struct tquic_path *active_path;
 	struct tquic_path *path, *best = NULL;
 	u64 min_blocking = ULLONG_MAX;
+
+	active_path = tquic_sched_active_path_get(conn);
 
 	list_for_each_entry(path, &conn->paths, list) {
 		u64 blocking_time;
@@ -449,15 +497,15 @@ static struct tquic_path *blest_select(void *state, struct tquic_connection *con
 		if (path->state != TQUIC_PATH_ACTIVE)
 			continue;
 
-		/* Estimate blocking time */
-		/* OWD = RTT/2 (simplified) */
-		owd_diff = 0;
-		if (conn->active_path && path != conn->active_path) {
-			s64 diff = (s64)path->stats.rtt_smoothed -
-				   (s64)conn->active_path->stats.rtt_smoothed;
-			if (diff > 0)
-				owd_diff = diff / 2;
-		}
+			/* Estimate blocking time */
+			/* OWD = RTT/2 (simplified) */
+			owd_diff = 0;
+			if (active_path && path != active_path) {
+				s64 diff = (s64)path->stats.rtt_smoothed -
+					   (s64)active_path->stats.rtt_smoothed;
+				if (diff > 0)
+					owd_diff = diff / 2;
+			}
 
 		/* Calculate blocking estimate */
 		blocking_time = owd_diff;
@@ -473,10 +521,13 @@ static struct tquic_path *blest_select(void *state, struct tquic_connection *con
 		if (blocking_time < min_blocking) {
 			min_blocking = blocking_time;
 			best = path;
-		}
+			}
 	}
 
-	return best ?: conn->active_path;
+	if (active_path)
+		tquic_path_put(active_path);
+
+	return tquic_sched_path_get_or_active(conn, best);
 }
 
 static struct tquic_sched_ops __maybe_unused tquic_sched_blest = {
@@ -624,14 +675,16 @@ static struct tquic_path *ecf_select(void *state, struct tquic_connection *conn,
 			}
 		}
 
-		if (completion_time < min_completion) {
-			min_completion = completion_time;
-			best = path;
-		}
+			if (completion_time < min_completion) {
+				min_completion = completion_time;
+				best = path;
+			}
 	}
+	if (best && !tquic_path_get(best))
+		best = NULL;
 	rcu_read_unlock();
 
-	return best ?: conn->active_path;
+	return best ?: tquic_sched_active_path_get(conn);
 }
 
 static void ecf_feedback(void *state, struct tquic_path *path,
@@ -712,6 +765,7 @@ static struct tquic_path *owd_select(void *state, struct tquic_connection *conn,
 				     struct sk_buff *skb)
 {
 	struct owd_sched_data *data = state;
+	struct tquic_path *active_path;
 	struct tquic_path *path, *best = NULL;
 	struct tquic_owd_path_info info __maybe_unused;
 	s64 best_delay = S64_MAX;
@@ -719,7 +773,9 @@ static struct tquic_path *owd_select(void *state, struct tquic_connection *conn,
 	u64 time_since_switch_ms;
 
 	if (!data)
-		return conn->active_path;
+		return tquic_sched_active_path_get(conn);
+
+	active_path = tquic_sched_active_path_get(conn);
 
 	/* Check if enough time has passed since last path switch */
 	time_since_switch_ms = ktime_ms_delta(now,
@@ -748,10 +804,10 @@ static struct tquic_path *owd_select(void *state, struct tquic_connection *conn,
 		 * Apply hysteresis: if this is the current path, give it
 		 * a 10% advantage to avoid unnecessary switching.
 		 */
-		if (path == conn->active_path &&
-		    time_since_switch_ms < data->min_switch_interval_ms) {
-			effective_delay = effective_delay * 90 / 100;
-		}
+			if (path == active_path &&
+			    time_since_switch_ms < data->min_switch_interval_ms) {
+				effective_delay = effective_delay * 90 / 100;
+			}
 
 		/*
 		 * Factor in congestion window utilization.
@@ -769,18 +825,23 @@ static struct tquic_path *owd_select(void *state, struct tquic_connection *conn,
 				effective_delay = effective_delay * 85 / 100;
 		}
 
-		if (effective_delay < best_delay) {
-			best_delay = effective_delay;
-			best = path;
-		}
+			if (effective_delay < best_delay) {
+				best_delay = effective_delay;
+				best = path;
+			}
 	}
+	if (best && !tquic_path_get(best))
+		best = NULL;
 	rcu_read_unlock();
 
 	/* Update last switch time if we're changing paths */
-	if (best && best != conn->active_path)
+	if (best && best != active_path)
 		data->last_path_switch_time = ktime_to_ms(now);
 
-	return best ?: conn->active_path;
+	if (active_path)
+		tquic_path_put(active_path);
+
+	return best ?: tquic_sched_active_path_get(conn);
 }
 
 static void owd_feedback(void *state, struct tquic_path *path,
@@ -899,14 +960,16 @@ static struct tquic_path *owd_ecf_select(void *state __maybe_unused,
 				completion_time = completion_time * 100 / (100 - loss_rate_pct);
 		}
 
-		if (completion_time < min_completion) {
-			min_completion = completion_time;
-			best = path;
-		}
+			if (completion_time < min_completion) {
+				min_completion = completion_time;
+				best = path;
+			}
 	}
+	if (best && !tquic_path_get(best))
+		best = NULL;
 	rcu_read_unlock();
 
-	return best ?: conn->active_path;
+	return best ?: tquic_sched_active_path_get(conn);
 }
 
 static struct tquic_sched_ops __maybe_unused tquic_sched_owd_ecf = {
