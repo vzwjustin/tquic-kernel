@@ -8,7 +8,7 @@
 
 TQUIC is a Linux kernel module implementing the QUIC protocol (RFC 9000/9001/9002) with multipath support for WAN bonding. Unlike userspace QUIC implementations, TQUIC operates directly in the kernel for maximum performance and tight integration with the networking stack.
 
-**~265k lines of C** across `net/tquic/` implementing the full QUIC/HTTP3 stack with multipath, security, and performance features. Security audit completed February 2026 with all critical issues resolved (see [audit reports](AUDIT_CODEX.md)).
+**~265k lines of C** across `net/tquic/` implementing the full QUIC/HTTP3 stack with multipath, security, and performance features. Security audit completed February 2026 with all critical issues resolved across 11 rounds of fixes.
 
 ## Features
 
