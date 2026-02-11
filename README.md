@@ -117,6 +117,7 @@ Supported kernels: **Linux 6.x** (tested on 6.12). See [Quick Start Guide](docs/
 | [Configuration](docs/CONFIGURATION.md) | Sysctl tunables and netlink interface |
 | [Troubleshooting](docs/TROUBLESHOOTING.md) | Common issues and debugging |
 | [Roadmap](docs/ROADMAP.md) | Development plans |
+| [Kernel Boot Guide](docs/KERNEL_BOOT_GUIDE.md) | Installing and booting a custom kernel |
 | [Porting Guide](docs/PORTING_GUIDE.md) | Porting to different kernel versions |
 | [CLAUDE.md](CLAUDE.md) | Development workflow and coding standards |
 
