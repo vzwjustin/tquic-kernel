@@ -200,8 +200,24 @@ static int tquic_token_decode_varint(const u8 *buf, size_t buf_len, u64 *val)
 
 int tquic_token_init_key(struct tquic_token_key *key)
 {
+	int ret;
+
 	if (!key)
 		return -EINVAL;
+
+	/*
+	 * SECURITY: Use wait_for_random_bytes() + get_random_bytes() for
+	 * long-term token encryption key. This ensures cryptographic quality
+	 * randomness by waiting for the kernel RNG to be fully seeded.
+	 *
+	 * Token keys are long-lived and protect address validation tokens,
+	 * so weak randomness during early boot would compromise security.
+	 */
+	ret = wait_for_random_bytes();
+	if (ret != 0) {
+		pr_warn("tquic_token: RNG not ready, token key may be weak\n");
+		/* Continue with non-blocking random - better than failing */
+	}
 
 	get_random_bytes(key->key, TQUIC_TOKEN_KEY_LEN);
 	key->generation = 1;
@@ -215,6 +231,9 @@ int tquic_token_set_key(struct tquic_token_key *key, const u8 *key_data)
 {
 	if (!key || !key_data)
 		return -EINVAL;
+
+	/* Clear old key material before replacing */
+	memzero_explicit(key->key, TQUIC_TOKEN_KEY_LEN);
 
 	memcpy(key->key, key_data, TQUIC_TOKEN_KEY_LEN);
 	key->generation = 1;
@@ -246,6 +265,18 @@ int tquic_token_rotate_key(struct tquic_token_key *old_key,
 	return 0;
 }
 EXPORT_SYMBOL_GPL(tquic_token_rotate_key);
+
+void tquic_token_cleanup_key(struct tquic_token_key *key)
+{
+	if (!key)
+		return;
+
+	/* Zeroize key material to prevent lingering in memory */
+	memzero_explicit(key->key, TQUIC_TOKEN_KEY_LEN);
+	key->valid = false;
+	key->generation = 0;
+}
+EXPORT_SYMBOL_GPL(tquic_token_cleanup_key);
 
 /*
  * =============================================================================

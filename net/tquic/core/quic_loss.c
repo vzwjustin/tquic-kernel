@@ -287,9 +287,16 @@ static u32 tquic_rtt_pto_for_space(struct tquic_rtt_state *rtt,
 	 * RFC 9002 Section 6.2.1:
 	 * max_ack_delay is only added for Application Data packets
 	 * once the handshake is confirmed.
+	 *
+	 * SECURITY FIX: Use peer's actual max_ack_delay transport parameter
+	 * instead of hardcoded constant. This ensures accurate PTO calculation
+	 * and prevents premature timeouts or excessive delays.
+	 *
+	 * For Initial/Handshake spaces, max_ack_delay is NOT added since
+	 * peers are required to ACK these packets promptly without delay.
 	 */
 	if (pn_space == TQUIC_PN_SPACE_APPLICATION && handshake_confirmed)
-		pto_us += TQUIC_MAX_ACK_DELAY_US;
+		pto_us += rtt->max_ack_delay;
 
 	/* Convert to milliseconds, rounding up */
 	return (u32)((pto_us + 999) / 1000);
@@ -332,11 +339,30 @@ static u64 tquic_loss_time_threshold(struct tquic_rtt_state *rtt)
 	if (rtt->latest_rtt > max_rtt)
 		max_rtt = rtt->latest_rtt;
 
-	/* kTimeThreshold * max_rtt (9/8 factor) */
-	time_threshold = (max_rtt * TQUIC_TIME_THRESHOLD_NUMER) /
-			 TQUIC_TIME_THRESHOLD_DENOM;
+	/*
+	 * kTimeThreshold * max_rtt (9/8 factor)
+	 *
+	 * SECURITY FIX: Check for overflow before multiplication.
+	 * If max_rtt is extremely large, the multiplication could overflow.
+	 */
+	if (max_rtt > U64_MAX / TQUIC_TIME_THRESHOLD_NUMER)
+		time_threshold = U64_MAX;
+	else
+		time_threshold = (max_rtt * TQUIC_TIME_THRESHOLD_NUMER) /
+				 TQUIC_TIME_THRESHOLD_DENOM;
 
-	/* Ensure at least kGranularity */
+	/*
+	 * Ensure at least kGranularity.
+	 *
+	 * TIMER GRANULARITY FIX: The kernel timer granularity depends on HZ.
+	 * Using TQUIC_GRANULARITY_US (1ms) is appropriate for most systems,
+	 * but we ensure it's not less than what the kernel can actually
+	 * deliver. On most systems HZ=1000 gives 1ms granularity, but on
+	 * older systems with HZ=100, the granularity is 10ms.
+	 *
+	 * For now, we keep 1ms as it's a good balance between responsiveness
+	 * and timer overhead, and matches RFC 9002's kGranularity constant.
+	 */
 	if (time_threshold < TQUIC_GRANULARITY_US)
 		time_threshold = TQUIC_GRANULARITY_US;
 

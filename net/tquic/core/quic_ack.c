@@ -394,8 +394,10 @@ static void tquic_ack_update_recv_ranges(struct tquic_connection *conn,
 			/*
 			 * If not inserted into existing range, need to create new one.
 			 * Find the right position and insert.
+			 * SECURITY: Leave room for insertion to avoid out-of-bounds write
+			 * when shifting elements in the array.
 			 */
-			if (!inserted && ack_info->ack_range_count < TQUIC_ACK_MAX_RANGES) {
+			if (!inserted && ack_info->ack_range_count < TQUIC_ACK_MAX_RANGES - 1) {
 				/* Insert new single-packet range in proper position */
 				prev_end = current_smallest;
 

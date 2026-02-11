@@ -162,15 +162,28 @@ static int minrtt_get_path(struct tquic_connection *conn,
 
 	rcu_read_lock();
 
-	/* Find current path and best path by RTT */
+	/*
+	 * Find current path and best path by RTT.
+	 *
+	 * SECURITY: When checking current_path_id, we must verify that:
+	 * 1. The path_id matches
+	 * 2. The path is still ACTIVE (not removed/failed)
+	 *
+	 * This prevents use-after-free if path_id is reused after a path
+	 * is removed and a new path is added with the same ID.
+	 */
 	list_for_each_entry_rcu(path, &conn->paths, list) {
 		u64 rtt;
 
 		if (path->state != TQUIC_PATH_ACTIVE)
 			continue;
 
-		/* Track current path for tolerance comparison */
-		if (path->path_id == current_path_id)
+		/*
+		 * Track current path for tolerance comparison.
+		 * Only match if path_id is valid (not TQUIC_INVALID_PATH_ID).
+		 */
+		if (current_path_id != TQUIC_INVALID_PATH_ID &&
+		    path->path_id == current_path_id)
 			curr_path = path;
 
 		/* Get smoothed RTT, use default if no measurement yet */
@@ -199,8 +212,13 @@ static int minrtt_get_path(struct tquic_connection *conn,
 	 * Example with 10% tolerance:
 	 *   current_rtt = 50ms, threshold = 45ms
 	 *   Only switch if new path has RTT < 45ms
+	 *
+	 * SECURITY: Double-check that curr_path is still active before
+	 * using it. This prevents race conditions where path was removed
+	 * between our RCU list walk above and this check.
 	 */
-	if (curr_path && curr_path->state == TQUIC_PATH_ACTIVE) {
+	if (curr_path && curr_path->state == TQUIC_PATH_ACTIVE &&
+	    curr_path->path_id == current_path_id) {
 		unsigned int tolerance = minrtt_get_validated_tolerance();
 
 		tolerance_threshold = current_rtt_us *

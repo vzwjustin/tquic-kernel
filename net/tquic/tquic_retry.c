@@ -273,7 +273,12 @@ int tquic_retry_compute_integrity_tag(u32 version,
 	if (ret)
 		return ret;
 
-	if (retry_len > 65527)
+	/*
+	 * SECURITY: Limit retry packet size to prevent memory exhaustion DoS.
+	 * Use typical MTU (1500) minus IP/UDP headers (~60 bytes) as upper bound.
+	 * This prevents attackers from forcing large allocations via Initial packets.
+	 */
+	if (retry_len > 1440)
 		return -EINVAL;
 
 	/* Get or lazily allocate the cached AEAD cipher for this version */

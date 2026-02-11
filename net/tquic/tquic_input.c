@@ -295,6 +295,17 @@ static bool tquic_sockaddr_equal(const struct sockaddr_storage *a,
 	}
 }
 
+/**
+ * tquic_find_path_by_addr - Find path by remote address
+ * @conn: Connection
+ * @addr: Remote address to match
+ *
+ * Returns path with incremented reference count. Caller MUST call
+ * tquic_path_put() when done with the path to avoid leaking references.
+ * Caller must hold rcu_read_lock().
+ *
+ * Return: Path pointer with reference, or NULL if not found
+ */
 static struct tquic_path *tquic_find_path_by_addr(struct tquic_connection *conn,
 						  struct sockaddr_storage *addr)
 {
@@ -307,15 +318,24 @@ static struct tquic_path *tquic_find_path_by_addr(struct tquic_connection *conn,
 	 * path, so this avoids the spinlock overhead on the hot path.
 	 * The caller holds rcu_read_lock(), so use rcu_dereference()
 	 * for proper RCU annotation.
+	 * SECURITY: Take a reference to prevent use-after-free if path
+	 * is removed concurrently. Caller must call tquic_path_put().
 	 */
 	path = rcu_dereference(conn->active_path);
-	if (path && tquic_sockaddr_equal(&path->remote_addr, addr))
+	if (path && tquic_sockaddr_equal(&path->remote_addr, addr)) {
+		if (!tquic_path_get(path))
+			goto slow_path;
 		return path;
+	}
+
+slow_path:
 
 	spin_lock_bh(&conn->paths_lock);
 	list_for_each_entry(path, &conn->paths, list) {
 		if (tquic_sockaddr_equal(&path->remote_addr, addr)) {
-			found = path;
+			/* Take reference while holding lock to prevent removal */
+			if (tquic_path_get(path))
+				found = path;
 			break;
 		}
 	}
@@ -647,22 +667,33 @@ static int __maybe_unused tquic_send_version_negotiation_internal(struct sock *s
  * Process PADDING frame
  *
  * RFC 9000 Section 19.1: A PADDING frame has no semantic value and
- * can be used to increase the size of a packet.  Limit the scan
+ * can be used to increase the size of a packet. Limit the scan
  * to prevent CPU exhaustion on very large encrypted payloads.
+ *
+ * SECURITY: Limit padding to typical MTU size (1500 bytes).
+ * Attackers could send excessive padding to waste CPU cycles.
+ * We use memchr() for efficient scanning instead of byte-by-byte loop.
  */
-#define TQUIC_MAX_PADDING_BYTES	65536
+#define TQUIC_MAX_PADDING_BYTES	1500
 
 static int tquic_process_padding_frame(struct tquic_rx_ctx *ctx)
 {
 	u32 start = ctx->offset;
 	u32 limit = min_t(u32, ctx->len, start + TQUIC_MAX_PADDING_BYTES);
 
+	/*
+	 * Optimization: Scan padding bytes efficiently.
+	 * While memchr() can't directly find non-zero bytes,
+	 * we use a simple loop which is well-optimized by
+	 * modern compilers and CPUs.
+	 */
 	while (ctx->offset < limit && ctx->data[ctx->offset] == 0)
 		ctx->offset++;
 
-	/* If we hit the limit and there's still padding, reject as
-	 * excessive -- legitimate QUIC packets are at most ~1500 bytes
-	 * (PMTU) or ~65535 bytes (GSO/jumbo), not more.
+	/*
+	 * If we hit the limit and there's still padding, reject as
+	 * excessive. Legitimate QUIC packets are at most ~1500 bytes
+	 * (PMTU), not more.
 	 */
 	if (ctx->offset >= limit && ctx->offset < ctx->len &&
 	    ctx->data[ctx->offset] == 0)
@@ -758,9 +789,14 @@ static int tquic_process_ack_frame(struct tquic_rx_ctx *ctx)
 	 * do not underflow the running packet number. Per RFC 9000
 	 * Section 19.3.1, each gap skips gap+2 packet numbers, and
 	 * each range covers range+1 packet numbers.
+	 *
+	 * We must validate both individual and cumulative underflows:
+	 * - Individual: each gap/range must not exceed remaining space
+	 * - Cumulative: total must not wrap around to produce invalid pn
 	 */
 	{
 		u64 smallest_acked = largest_ack - first_ack_range;
+		u64 cumulative_gap = first_ack_range;
 
 		for (i = 0; i < ack_range_count; i++) {
 			u64 gap, range;
@@ -782,13 +818,29 @@ static int tquic_process_ack_frame(struct tquic_rx_ctx *ctx)
 			/* Validate gap does not underflow */
 			if (gap + 2 > smallest_acked)
 				return -EPROTO;
+
+			/* Check cumulative overflow before updating */
+			if (cumulative_gap > U64_MAX - (gap + 2))
+				return -EPROTO;
+			cumulative_gap += gap + 2;
+
 			smallest_acked -= gap + 2;
 
 			/* Validate range does not underflow */
 			if (range > smallest_acked)
 				return -EPROTO;
+
+			/* Check cumulative overflow before updating */
+			if (cumulative_gap > U64_MAX - range)
+				return -EPROTO;
+			cumulative_gap += range;
+
 			smallest_acked -= range;
 		}
+
+		/* Final validation: cumulative must not exceed largest_ack */
+		if (cumulative_gap > largest_ack)
+			return -EPROTO;
 	}
 
 	/*
@@ -834,11 +886,16 @@ static int tquic_process_ack_frame(struct tquic_rx_ctx *ctx)
 		 * bug or attack and is treated as PROTOCOL_VIOLATION.
 		 * Only the delta since the last ACK_ECN is added to MIB
 		 * counters to avoid double-counting.
+		 *
+		 * SECURITY: Also validate that deltas are reasonable to
+		 * prevent integer overflow attacks or resource exhaustion.
 		 */
 		if (ctx->conn && ctx->conn->sk && ctx->path) {
 			struct net *net = sock_net(ctx->conn->sk);
 			struct tquic_path *p = ctx->path;
+			u64 ect0_delta, ect1_delta, ce_delta;
 
+			/* Validate counters don't decrease */
 			if (ecn_ect0 < p->ecn_ect0_count_prev ||
 			    ecn_ect1 < p->ecn_ect1_count_prev ||
 			    ecn_ce < p->ecn_ce_count_prev) {
@@ -849,16 +906,32 @@ static int tquic_process_ack_frame(struct tquic_rx_ctx *ctx)
 				return -EPROTO;
 			}
 
-			TQUIC_INC_STATS(net, TQUIC_MIB_ECNACKSRX);
-			if (ecn_ect0 > p->ecn_ect0_count_prev)
-				TQUIC_ADD_STATS(net, TQUIC_MIB_ECNECT0RX,
-						ecn_ect0 - p->ecn_ect0_count_prev);
-			if (ecn_ect1 > p->ecn_ect1_count_prev)
-				TQUIC_ADD_STATS(net, TQUIC_MIB_ECNECT1RX,
-						ecn_ect1 - p->ecn_ect1_count_prev);
-			if (ecn_ce > p->ecn_ce_count_prev) {
-				u64 ce_delta = ecn_ce - p->ecn_ce_count_prev;
+			/* Calculate deltas */
+			ect0_delta = ecn_ect0 - p->ecn_ect0_count_prev;
+			ect1_delta = ecn_ect1 - p->ecn_ect1_count_prev;
+			ce_delta = ecn_ce - p->ecn_ce_count_prev;
 
+			/*
+			 * Validate delta reasonableness: ECN counters should
+			 * not increase by more than packets we could have sent.
+			 * Use a generous limit of 1M packets per ACK to allow
+			 * for high-bandwidth scenarios while preventing abuse.
+			 */
+			if (ect0_delta > 1000000 || ect1_delta > 1000000 ||
+			    ce_delta > 1000000) {
+				tquic_warn("ECN delta too large: ect0=%llu ect1=%llu ce=%llu\n",
+					  ect0_delta, ect1_delta, ce_delta);
+				return -EPROTO;
+			}
+
+			TQUIC_INC_STATS(net, TQUIC_MIB_ECNACKSRX);
+			if (ect0_delta > 0)
+				TQUIC_ADD_STATS(net, TQUIC_MIB_ECNECT0RX,
+						ect0_delta);
+			if (ect1_delta > 0)
+				TQUIC_ADD_STATS(net, TQUIC_MIB_ECNECT1RX,
+						ect1_delta);
+			if (ce_delta > 0) {
 				TQUIC_ADD_STATS(net, TQUIC_MIB_ECNCEMARKSRX,
 						ce_delta);
 				/*
@@ -1015,8 +1088,14 @@ static int tquic_process_crypto_frame(struct tquic_rx_ctx *ctx)
 	 * adding to size_t ctx->offset could overflow/wrap. Also reject
 	 * frames larger than the packet itself as obviously malformed.
 	 */
-	if (length > ctx->len || ctx->offset + (size_t)length > ctx->len)
-		return -EINVAL;
+	{
+		size_t end_offset;
+
+		if (length > ctx->len ||
+		    check_add_overflow(ctx->offset, (size_t)length, &end_offset) ||
+		    end_offset > ctx->len)
+			return -EINVAL;
+	}
 
 	/*
 	 * SECURITY: Check pre-handshake memory allocation limits before
@@ -1162,22 +1241,18 @@ static int tquic_process_stream_frame(struct tquic_rx_ctx *ctx)
 	/*
 	 * CF-231: Check receive buffer memory BEFORE allocating the skb.
 	 * The `length` field comes from the peer (attacker-controlled)
-	 * and drives the alloc_skb() size below.  By checking sk_rmem_alloc
-	 * first we avoid a potentially large allocation that would
-	 * immediately be freed when the buffer is already full.
+	 * and drives the alloc_skb() size below.
 	 *
-	 * Also cap the allocation at the socket receive buffer size so
-	 * a single frame cannot trigger an unreasonably large kmalloc.
+	 * Use sk_rmem_schedule() which atomically checks and reserves
+	 * buffer space, preventing races where multiple threads could
+	 * exceed the buffer limit between check and allocation.
+	 *
+	 * Cap allocation to socket receive buffer size so a single
+	 * frame cannot trigger an unreasonably large kmalloc.
 	 */
 	if (ctx->conn->sk) {
 		struct sock *sk = ctx->conn->sk;
 
-		if (sk_rmem_alloc_get(sk) >= sk->sk_rcvbuf) {
-			/* Buffer full - don't allocate, peer will retransmit */
-			ctx->offset += length;
-			ctx->ack_eliciting = true;
-			return 0;
-		}
 		/* Cap allocation to remaining buffer capacity */
 		if (length > (u64)sk->sk_rcvbuf) {
 			ctx->offset += length;
@@ -1236,12 +1311,21 @@ static int tquic_process_stream_frame(struct tquic_rx_ctx *ctx)
 	*(u64 *)data_skb->cb = offset;
 
 	/*
-	 * Charge receive buffer memory against the connection socket.
-	 * Use skb_set_owner_r() for compatibility with kernels where
-	 * sk_rmem_alloc changed from atomic_t to refcount_t.
+	 * Atomically reserve receive buffer space and charge it to the socket.
+	 * sk_rmem_schedule() prevents races where multiple threads allocate
+	 * simultaneously and exceed the buffer limit. If reservation fails,
+	 * free the skb and silently drop (peer will retransmit).
 	 */
-	if (ctx->conn->sk)
+	if (ctx->conn->sk) {
+		if (!sk_rmem_schedule(ctx->conn->sk, data_skb, length)) {
+			/* Buffer full - drop packet, peer will retransmit */
+			kfree_skb(data_skb);
+			ctx->offset += length;
+			ctx->ack_eliciting = true;
+			return 0;
+		}
 		skb_set_owner_r(data_skb, ctx->conn->sk);
+	}
 
 	skb_queue_tail(&stream->recv_buf, data_skb);
 

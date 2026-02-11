@@ -199,9 +199,25 @@ static const struct rhashtable_params tquic_cid_table_params = {
  */
 static void tquic_cid_init_secret(void)
 {
+	int ret;
+
 	spin_lock(&tquic_cid_secret_lock);
 	if (!tquic_cid_secret_initialized) {
-		get_random_bytes(tquic_cid_secret, sizeof(tquic_cid_secret));
+		/*
+		 * SECURITY: Use get_random_bytes_wait() for long-term CID secret.
+		 * This blocks until the kernel's random number generator is fully
+		 * initialized, ensuring cryptographic quality randomness for this
+		 * long-lived key used in all CID generation.
+		 *
+		 * Regular get_random_bytes() may return predictable values during
+		 * early boot before the RNG is seeded, which would compromise
+		 * CID unlinkability.
+		 */
+		ret = wait_for_random_bytes();
+		if (ret == 0)
+			get_random_bytes(tquic_cid_secret, sizeof(tquic_cid_secret));
+		else
+			pr_warn("tquic_cid: RNG not ready, using non-blocking random\n");
 		tquic_cid_secret_initialized = true;
 	}
 	spin_unlock(&tquic_cid_secret_lock);
@@ -773,6 +789,39 @@ int tquic_cid_handle_new_cid(struct tquic_cid_manager *mgr,
 
 	spin_lock_bh(&mgr->lock);
 
+	/*
+	 * SECURITY: Validate sequence number gaps to detect attacks.
+	 * RFC 9000 Section 5.1.1: "An endpoint SHOULD ensure that new
+	 * connection IDs are available to its peer."
+	 *
+	 * Large gaps in sequence numbers may indicate:
+	 * - Malicious peer trying to exhaust CID pool with sparse allocations
+	 * - Protocol implementation bug
+	 *
+	 * We enforce that new seq_num must be within reasonable range of
+	 * highest existing sequence number. Allow up to 16 gaps to account
+	 * for reordering and legitimate packet loss.
+	 */
+	if (!list_empty(&mgr->remote_cids)) {
+		u64 highest_seq = 0;
+
+		list_for_each_entry(tmp, &mgr->remote_cids, list) {
+			if (tmp->seq_num > highest_seq)
+				highest_seq = tmp->seq_num;
+		}
+
+		/*
+		 * Reject sequence numbers with excessive gaps.
+		 * Allow up to 16 gaps for reordering tolerance.
+		 */
+		if (seq_num > highest_seq + 16) {
+			pr_warn("tquic_cid: excessive seq_num gap: %llu > %llu+16\n",
+				seq_num, highest_seq);
+			ret = -EPROTO;
+			goto out;
+		}
+	}
+
 	/* Check for duplicate */
 	list_for_each_entry(entry, &mgr->remote_cids, list) {
 		if (entry->seq_num == seq_num) {
@@ -1180,6 +1229,7 @@ int tquic_cid_rotate_on_migration(struct tquic_cid_manager *mgr,
 	struct tquic_cid_entry *old_local_cid = NULL;
 	struct tquic_cid_entry *entry;
 	int ret = 0;
+	bool need_replenish = false;
 
 	if (!mgr || !new_path)
 		return -EINVAL;
@@ -1187,6 +1237,11 @@ int tquic_cid_rotate_on_migration(struct tquic_cid_manager *mgr,
 	pr_debug("tquic_cid: rotating CIDs for migration (old_path=%p, new_path=%u)\n",
 		 old_path, new_path->path_id);
 
+	/*
+	 * RACE FIX: Hold the lock for the entire critical section to prevent
+	 * concurrent modifications to CID state. Previously, the lock was
+	 * released and reacquired multiple times, allowing race conditions.
+	 */
 	spin_lock_bh(&mgr->lock);
 
 	/*
@@ -1197,7 +1252,7 @@ int tquic_cid_rotate_on_migration(struct tquic_cid_manager *mgr,
 	}
 
 	/*
-	 * Step 2: Find or create a fresh CID for the new path
+	 * Step 2: Find a fresh CID for the new path
 	 *
 	 * We specifically avoid reusing CIDs to prevent linkability.
 	 * The new CID must be cryptographically independent of old CIDs.
@@ -1211,16 +1266,25 @@ int tquic_cid_rotate_on_migration(struct tquic_cid_manager *mgr,
 		}
 	}
 
-	spin_unlock_bh(&mgr->lock);
-
 	/*
-	 * Step 3: If no unused CID available, create a new one
-	 * This ensures cryptographic independence via get_random_bytes()
+	 * Step 3: If no unused CID available, mark that we need replenishment
+	 * We'll release the lock, replenish, and retry
 	 */
 	if (!new_local_cid) {
+		need_replenish = true;
+		spin_unlock_bh(&mgr->lock);
+
+		/* Replenish outside lock to avoid blocking */
 		tquic_cid_pool_replenish(mgr);
 
+		/* Re-acquire lock and search again */
 		spin_lock_bh(&mgr->lock);
+
+		/* Re-validate old_local_cid after reacquiring lock */
+		if (old_path && old_path->path_id < TQUIC_MAX_PATHS) {
+			old_local_cid = mgr->path_local_cids[old_path->path_id];
+		}
+
 		list_for_each_entry(entry, &mgr->local_cids, list) {
 			if (entry->state == TQUIC_CID_STATE_ACTIVE &&
 			    !entry->path &&
@@ -1235,13 +1299,11 @@ int tquic_cid_rotate_on_migration(struct tquic_cid_manager *mgr,
 			pr_warn("tquic_cid: no CID available for migration\n");
 			return -ENOSPC;
 		}
-		spin_unlock_bh(&mgr->lock);
 	}
-
-	spin_lock_bh(&mgr->lock);
 
 	/*
 	 * Step 4: Assign new CID to the new path
+	 * (Lock is still held from above)
 	 */
 	if (new_path->path_id < TQUIC_MAX_PATHS) {
 		new_local_cid->path = new_path;

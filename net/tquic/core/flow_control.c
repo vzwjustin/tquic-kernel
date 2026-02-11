@@ -288,10 +288,28 @@ int tquic_fc_conn_data_sent(struct tquic_fc_state *fc, u64 bytes)
 
 	spin_lock_irqsave(&fc->conn.lock, flags);
 
-	/* Check if this would exceed the limit (subtraction avoids u64 overflow) */
-	if (fc->conn.max_data_remote < fc->conn.data_sent ||
-	    bytes > fc->conn.max_data_remote - fc->conn.data_sent) {
-		/* Record that we're blocked */
+	/*
+	 * SECURITY FIX: Prevent underflow and overflow in flow control math.
+	 *
+	 * Check sequence:
+	 * 1. Detect if data_sent has somehow exceeded max_data_remote (bug)
+	 * 2. Check if adding bytes would overflow u64
+	 * 3. Check if adding bytes would exceed max_data_remote (correct check)
+	 */
+	if (fc->conn.data_sent > fc->conn.max_data_remote) {
+		/* This should never happen - log and reject */
+		pr_warn("tquic_fc: data_sent (%llu) > max_data_remote (%llu)\n",
+			fc->conn.data_sent, fc->conn.max_data_remote);
+		fc->conn.blocked_at = fc->conn.max_data_remote;
+		fc->blocked_flags |= TQUIC_FC_BLOCKED_CONN_DATA;
+		ret = -ENOSPC;
+	} else if (bytes > U64_MAX - fc->conn.data_sent) {
+		/* Addition would overflow u64 */
+		fc->conn.blocked_at = fc->conn.max_data_remote;
+		fc->blocked_flags |= TQUIC_FC_BLOCKED_CONN_DATA;
+		ret = -ENOSPC;
+	} else if (bytes > fc->conn.max_data_remote - fc->conn.data_sent) {
+		/* Would exceed remote's limit */
 		fc->conn.blocked_at = fc->conn.max_data_remote;
 		fc->blocked_flags |= TQUIC_FC_BLOCKED_CONN_DATA;
 		ret = -ENOSPC;

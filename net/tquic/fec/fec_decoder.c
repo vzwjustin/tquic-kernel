@@ -551,12 +551,37 @@ static int attempt_rs_recovery(struct tquic_fec_source_block *block, int gf_bits
 	for (i = 0; i < num_erasures; i++) {
 		symbol = kzalloc(sizeof(*symbol), GFP_ATOMIC);
 		if (!symbol) {
-			/* Free this and all remaining recovery buffers */
+			/*
+			 * MEMORY LEAK FIX: On allocation failure, we must:
+			 * 1. Free all remaining unattached recovered buffers
+			 * 2. Remove and free already-created symbol structs
+			 * 3. Free work_buf
+			 * 4. Return error (not partial success)
+			 */
+			struct tquic_fec_symbol *tmp;
 			int j;
 
+			/* Free remaining unattached recovery buffers */
 			for (j = i; j < num_erasures; j++)
 				kfree(recovered[j]);
-			break;
+
+			/* Remove and free already-added recovered symbols */
+			list_for_each_entry_safe(symbol, tmp,
+						 &block->source_symbols,
+						 list) {
+				/* Only remove symbols we just added */
+				if (symbol->received && !symbol->is_repair &&
+				    recovered_count > 0) {
+					list_del(&symbol->list);
+					kfree(symbol->data);
+					kfree(symbol);
+					block->num_received--;
+					recovered_count--;
+				}
+			}
+
+			kfree(work_buf);
+			return -ENOMEM;
 		}
 
 		symbol->data = recovered[i];

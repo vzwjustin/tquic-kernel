@@ -205,19 +205,28 @@ static void tquic_rtt_update(struct tquic_rtt_state *rtt,
 
 	/*
 	 * RFC 9002 Section 5.3: Adjust RTT sample by ACK delay.
-	 * The ACK delay is capped to max_ack_delay, which MUST be
-	 * set from the peer's max_ack_delay transport parameter
-	 * (or overridden by ACK Frequency extension). If max_ack_delay
-	 * is still at its initial value of 25ms but ACK frequency
-	 * negotiated a larger delay, loss detection uses the wrong
-	 * ceiling. We cap to max_ack_delay here regardless.
+	 *
+	 * SECURITY: Only apply ACK delay adjustment after handshake confirmation
+	 * to prevent attackers from manipulating RTT during handshake.
+	 *
+	 * Per RFC 9002 Section 5.3:
+	 * "adjusted_rtt = rtt_sample - min(Ack Delay, max_ack_delay)"
+	 * "adjusted_rtt = max(adjusted_rtt, min_rtt)"
+	 *
+	 * The ACK delay is capped to max_ack_delay from the peer's transport
+	 * parameter. We must ensure the adjusted RTT doesn't drop below min_rtt,
+	 * as that would indicate peer is reporting excessive ACK delays.
 	 */
 	adjusted_rtt = rtt_sample;
-	if (is_handshake_confirmed) {
+	if (is_handshake_confirmed && ack_delay > 0) {
 		u64 capped_delay = min(ack_delay, rtt->max_ack_delay);
 
-		if (rtt_sample >= rtt->min_rtt + capped_delay)
+		if (capped_delay < rtt_sample) {
 			adjusted_rtt = rtt_sample - capped_delay;
+			/* Ensure adjusted_rtt doesn't drop below min_rtt */
+			if (adjusted_rtt < rtt->min_rtt)
+				adjusted_rtt = rtt->min_rtt;
+		}
 	}
 
 	/*
