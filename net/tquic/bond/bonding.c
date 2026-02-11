@@ -14,6 +14,7 @@
 #include <linux/slab.h>
 #include <linux/list.h>
 #include <linux/spinlock.h>
+#include <linux/lockdep.h>
 #include <linux/workqueue.h>
 #include <linux/timer.h>
 #include <linux/random.h>
@@ -114,8 +115,32 @@ static void tquic_calc_path_quality(struct tquic_path *path,
 }
 
 /*
+ * Resolve bond->primary_path under conn->paths_lock.
+ * If the cached pointer is no longer present in conn->paths, clear it.
+ */
+static struct tquic_path *tquic_bond_primary_path_locked(struct tquic_connection *conn,
+							 struct tquic_bond_state *bond)
+{
+	struct tquic_path *path;
+	struct tquic_path *primary = bond->primary_path;
+
+	lockdep_assert_held(&conn->paths_lock);
+
+	if (!primary)
+		return NULL;
+
+	list_for_each_entry(path, &conn->paths, list) {
+		if (path == primary)
+			return path;
+	}
+
+	bond->primary_path = NULL;
+	return NULL;
+}
+
+/*
  * Select best path based on minimum RTT
- * Caller must hold conn->lock to protect path list iteration.
+ * Caller must hold conn->paths_lock to protect path list iteration.
  */
 static struct tquic_path *tquic_select_minrtt(struct tquic_bond_state *bond,
 					      struct sk_buff *skb)
@@ -124,7 +149,8 @@ static struct tquic_path *tquic_select_minrtt(struct tquic_bond_state *bond,
 	struct tquic_path *path, *best = NULL;
 	u32 min_rtt = UINT_MAX;
 
-	/* conn->lock must be held by caller */
+	lockdep_assert_held(&conn->paths_lock);
+
 	list_for_each_entry(path, &conn->paths, list) {
 		u32 rtt;
 
@@ -143,7 +169,7 @@ static struct tquic_path *tquic_select_minrtt(struct tquic_bond_state *bond,
 
 /*
  * Select path using round-robin
- * Caller must hold conn->lock to protect path list iteration.
+ * Caller must hold conn->paths_lock to protect path list iteration.
  */
 static struct tquic_path *tquic_select_roundrobin(struct tquic_bond_state *bond,
 						  struct sk_buff *skb)
@@ -153,7 +179,8 @@ static struct tquic_path *tquic_select_roundrobin(struct tquic_bond_state *bond,
 	u32 counter;
 	u32 active_count = 0;
 
-	/* conn->lock must be held by caller */
+	lockdep_assert_held(&conn->paths_lock);
+
 	/*
 	 * Single-pass selection: count active paths and select the target
 	 * in one iteration to avoid TOCTOU race where paths change state
@@ -192,6 +219,8 @@ static struct tquic_path *tquic_select_weighted(struct tquic_bond_state *bond,
 	struct tquic_path *path, *selected = NULL;
 	u32 total_weight = 0;
 	u32 target, cumulative = 0;
+
+	lockdep_assert_held(&conn->paths_lock);
 
 	/*
 	 * CF-307: Calculate total weight of active paths with overflow
@@ -232,6 +261,8 @@ static struct tquic_path *tquic_select_aggregate(struct tquic_bond_state *bond,
 	struct tquic_connection *conn = bond->conn;
 	struct tquic_path *path, *best = NULL;
 	struct tquic_path_quality quality, best_quality = {0};
+
+	lockdep_assert_held(&conn->paths_lock);
 
 	list_for_each_entry(path, &conn->paths, list) {
 		if (READ_ONCE(path->state) != TQUIC_PATH_ACTIVE)
@@ -276,6 +307,8 @@ static struct tquic_path *tquic_select_blest(struct tquic_bond_state *bond,
 	struct tquic_connection *conn = bond->conn;
 	struct tquic_path *path, *best = NULL;
 	u64 min_completion = ULLONG_MAX;
+
+	lockdep_assert_held(&conn->paths_lock);
 
 	list_for_each_entry(path, &conn->paths, list) {
 		struct tquic_path_quality quality;
@@ -442,13 +475,7 @@ static int __maybe_unused tquic_send_redundant(struct tquic_bond_state *bond,
 
 		/* Transmit on this path */
 		if (tquic_udp_xmit_on_path(conn, path, clone) == 0) {
-			/* Update path statistics */
-			path->stats.tx_packets++;
-			path->stats.tx_bytes += clone->len;
-			path->last_activity = ktime_get();
 			sent++;
-		} else {
-			kfree_skb(clone);
 		}
 	}
 
@@ -458,7 +485,7 @@ static int __maybe_unused tquic_send_redundant(struct tquic_bond_state *bond,
 
 /*
  * Main path selection function
- * Caller must hold conn->lock to protect path list iteration.
+ * Caller must hold conn->paths_lock to protect path list iteration.
  * Called from tquic_select_path() which acquires the lock.
  */
 struct tquic_path *tquic_bond_select_path(struct tquic_connection *conn,
@@ -467,17 +494,18 @@ struct tquic_path *tquic_bond_select_path(struct tquic_connection *conn,
 	struct tquic_bond_state *bond = conn->scheduler;
 	struct tquic_path *selected;
 	struct tquic_path *fallback;
+	struct tquic_path *primary;
 
-	/* conn->lock must be held by caller (tquic_select_path) */
+	/* conn->paths_lock must be held by caller (tquic_select_path) */
 	if (!bond)
 		return READ_ONCE(conn->active_path);
 
 	switch (bond->mode) {
 	case TQUIC_BOND_MODE_FAILOVER:
 		/* Use primary unless it's down */
-		if (bond->primary_path &&
-		    READ_ONCE(bond->primary_path->state) == TQUIC_PATH_ACTIVE)
-			selected = bond->primary_path;
+		primary = tquic_bond_primary_path_locked(conn, bond);
+		if (primary && READ_ONCE(primary->state) == TQUIC_PATH_ACTIVE)
+			selected = primary;
 		else
 			selected = READ_ONCE(conn->active_path);
 		break;
@@ -561,12 +589,12 @@ void tquic_bond_path_failed(struct tquic_connection *conn,
 	tquic_warn("path %u failed, initiating failover\n", path->path_id);
 	tquic_trace_failover(conn, path->path_id, 0, 0, 0);
 
-	spin_lock_bh(&conn->lock);
+	spin_lock_bh(&conn->paths_lock);
 
 	WRITE_ONCE(path->state, TQUIC_PATH_FAILED);
 
 	/* Find new active path */
-	if (conn->active_path == path) {
+	if (READ_ONCE(conn->active_path) == path) {
 		list_for_each_entry(p, &conn->paths, list) {
 			if (p != path && p->state == TQUIC_PATH_ACTIVE) {
 				new_active = p;
@@ -585,13 +613,13 @@ void tquic_bond_path_failed(struct tquic_connection *conn,
 			}
 		}
 
-		if (new_active) {
-			WRITE_ONCE(conn->active_path, new_active);
-			bond->stats.failovers++;
-			tquic_info("failed over to path %u\n",
-				   new_active->path_id);
-			tquic_trace_failover(conn, path->path_id,
-					     new_active->path_id, 0, 0);
+			if (new_active) {
+				rcu_assign_pointer(conn->active_path, new_active);
+				bond->stats.failovers++;
+				tquic_info("failed over to path %u\n",
+					   new_active->path_id);
+				tquic_trace_failover(conn, path->path_id,
+						     new_active->path_id, 0, 0);
 		} else {
 			tquic_warn("no paths available for failover\n");
 		}
@@ -599,7 +627,7 @@ void tquic_bond_path_failed(struct tquic_connection *conn,
 
 	bond->stats.failed_paths++;
 
-	spin_unlock_bh(&conn->lock);
+	spin_unlock_bh(&conn->paths_lock);
 }
 EXPORT_SYMBOL_GPL(tquic_bond_path_failed);
 
@@ -614,7 +642,7 @@ void tquic_bond_path_recovered(struct tquic_connection *conn,
 	if (!bond)
 		return;
 
-	spin_lock_bh(&conn->lock);
+	spin_lock_bh(&conn->paths_lock);
 
 	if (path->state == TQUIC_PATH_FAILED) {
 		WRITE_ONCE(path->state, TQUIC_PATH_STANDBY);
@@ -624,13 +652,13 @@ void tquic_bond_path_recovered(struct tquic_connection *conn,
 		if (path == bond->primary_path) {
 			WRITE_ONCE(path->state, TQUIC_PATH_ACTIVE);
 			if (bond->mode == TQUIC_BOND_MODE_FAILOVER)
-				WRITE_ONCE(conn->active_path, path);
+				rcu_assign_pointer(conn->active_path, path);
 			tquic_info("primary path %u restored\n",
 				   path->path_id);
 		}
 	}
 
-	spin_unlock_bh(&conn->lock);
+	spin_unlock_bh(&conn->paths_lock);
 }
 EXPORT_SYMBOL_GPL(tquic_bond_path_recovered);
 
@@ -745,9 +773,11 @@ struct tquic_bond_state *tquic_bond_init(struct tquic_connection *conn)
 	spin_lock_init(&bond->reorder_lock);
 
 	/* Set primary as first path if available */
+	spin_lock_bh(&conn->paths_lock);
 	if (!list_empty(&conn->paths))
 		bond->primary_path = list_first_entry(&conn->paths,
 						      struct tquic_path, list);
+	spin_unlock_bh(&conn->paths_lock);
 
 	bond->stats.total_paths = conn->num_paths;
 	bond->stats.active_paths = conn->num_paths;
@@ -799,18 +829,25 @@ int tquic_bond_set_primary(struct tquic_connection *conn, u32 path_id)
 {
 	struct tquic_bond_state *bond = conn->scheduler;
 	struct tquic_path *path;
+	int ret = -ENOENT;
 
 	if (!bond)
 		return -EINVAL;
 
-	path = tquic_conn_get_path(conn, path_id);
-	if (!path)
-		return -ENOENT;
+	spin_lock_bh(&conn->paths_lock);
+	list_for_each_entry(path, &conn->paths, list) {
+		if (path->path_id == path_id) {
+			bond->primary_path = path;
+			ret = 0;
+			break;
+		}
+	}
+	spin_unlock_bh(&conn->paths_lock);
 
-	bond->primary_path = path;
-	tquic_info("set primary path to %u\n", path_id);
+	if (!ret)
+		tquic_info("set primary path to %u\n", path_id);
 
-	return 0;
+	return ret;
 }
 EXPORT_SYMBOL_GPL(tquic_bond_set_primary);
 
@@ -849,7 +886,7 @@ int tquic_bond_set_path_weight(struct tquic_connection *conn, u32 path_id, u32 w
 	if (!conn || weight > 100)
 		return -EINVAL;
 
-	spin_lock_bh(&conn->lock);
+	spin_lock_bh(&conn->paths_lock);
 	list_for_each_entry(path, &conn->paths, list) {
 		if (path->path_id == path_id) {
 			path->weight = weight;
@@ -859,7 +896,7 @@ int tquic_bond_set_path_weight(struct tquic_connection *conn, u32 path_id, u32 w
 			break;
 		}
 	}
-	spin_unlock_bh(&conn->lock);
+	spin_unlock_bh(&conn->paths_lock);
 
 	return ret;
 }
@@ -878,6 +915,8 @@ void tquic_bond_interface_down(struct tquic_connection *conn,
 {
 	struct tquic_bond_state *bond;
 	struct tquic_path *path;
+	struct tquic_path *primary;
+	u32 old_primary_id = 0;
 	int failed_count = 0;
 
 	if (!conn)
@@ -887,7 +926,7 @@ void tquic_bond_interface_down(struct tquic_connection *conn,
 	if (!bond)
 		return;
 
-	spin_lock_bh(&conn->lock);
+	spin_lock_bh(&conn->paths_lock);
 
 	/* Mark all paths using this interface as failed */
 	list_for_each_entry(path, &conn->paths, list) {
@@ -902,12 +941,14 @@ void tquic_bond_interface_down(struct tquic_connection *conn,
 	}
 
 	/* If primary path failed, trigger failover */
-	if (bond->primary_path && bond->primary_path->dev == dev) {
+	primary = tquic_bond_primary_path_locked(conn, bond);
+	if (primary && primary->dev == dev) {
 		struct tquic_path *new_primary = NULL;
+		old_primary_id = primary->path_id;
 
 		/* Find first active path as new primary */
 		list_for_each_entry(path, &conn->paths, list) {
-			if (path->state == TQUIC_PATH_ACTIVE && path != bond->primary_path) {
+			if (path->state == TQUIC_PATH_ACTIVE && path != primary) {
 				new_primary = path;
 				break;
 			}
@@ -915,13 +956,12 @@ void tquic_bond_interface_down(struct tquic_connection *conn,
 
 		if (new_primary) {
 			bond->primary_path = new_primary;
-			WRITE_ONCE(conn->active_path, new_primary);
+			rcu_assign_pointer(conn->active_path, new_primary);
 			bond->stats.failovers++;
 			tquic_warn("failover to path %u after interface %s down\n",
 				   new_primary->path_id, dev->name);
 			tquic_trace_failover(conn,
-					     bond->primary_path ?
-					     bond->primary_path->path_id : 0,
+					     old_primary_id,
 					     new_primary->path_id, 2, 0);
 		} else {
 			bond->primary_path = NULL;
@@ -930,7 +970,7 @@ void tquic_bond_interface_down(struct tquic_connection *conn,
 		}
 	}
 
-	spin_unlock_bh(&conn->lock);
+	spin_unlock_bh(&conn->paths_lock);
 }
 EXPORT_SYMBOL_GPL(tquic_bond_interface_down);
 

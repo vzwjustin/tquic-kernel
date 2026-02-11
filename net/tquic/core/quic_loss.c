@@ -905,38 +905,49 @@ void tquic_loss_detection_detect_lost(struct tquic_connection *conn, u8 pn_space
 	spin_unlock_irqrestore(&pn_space->lock, flags);
 
 	/* Process lost packets */
-		if (!list_empty(&lost_list)) {
+	if (!list_empty(&lost_list)) {
+		LIST_HEAD(to_free);
+
 		/* Update congestion control */
 		if (lost_bytes > 0) {
 			tquic_cong_on_loss(path, lost_bytes);
 			conn->stats.lost_packets++;
 		}
 
-		/* Move lost packets to lost_packets list for retransmission */
+		/*
+		 * Sort lost packets into retransmit vs free lists under
+		 * the lock, then free outside the lock to avoid the
+		 * unlock/relock pattern that creates a race window.
+		 */
 		spin_lock_irqsave(&pn_space->lock, flags);
 		list_for_each_entry_safe(pkt, tmp, &lost_list, list) {
 			list_del(&pkt->list);
 
 			/*
 			 * RFC 9002 Section 6.3:
-			 * Only retransmit if the packet contained retransmittable frames.
+			 * Only retransmit if the packet contained
+			 * retransmittable frames.
 			 */
 			if (pkt->ack_eliciting && !pkt->retransmitted) {
 				pkt->retransmitted = true;
-				list_add_tail(&pkt->list, &pn_space->lost_packets);
+				list_add_tail(&pkt->list,
+					      &pn_space->lost_packets);
 			} else {
-				/* Free packets that don't need retransmission */
-				spin_unlock_irqrestore(&pn_space->lock, flags);
-				tquic_sent_packet_free(pkt);
-				spin_lock_irqsave(&pn_space->lock, flags);
+				list_add_tail(&pkt->list, &to_free);
 			}
-			}
-			spin_unlock_irqrestore(&pn_space->lock, flags);
 		}
+		spin_unlock_irqrestore(&pn_space->lock, flags);
+
+		/* Free packets outside lock */
+		list_for_each_entry_safe(pkt, tmp, &to_free, list) {
+			list_del(&pkt->list);
+			tquic_sent_packet_free(pkt);
+		}
+	}
 
 out_put_path:
-		if (path)
-			tquic_path_put(path);
+	if (path)
+		tquic_path_put(path);
 }
 
 /**

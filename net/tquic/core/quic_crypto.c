@@ -798,11 +798,15 @@ int tquic_hkdf_expand_label(struct hkdf_ctx *ctx, const u8 *prk,
 	 * Also enforce TLS 1.3 limits: label < 246 (255 - 6 - "tls13 "),
 	 * context <= 255.
 	 */
-	if (label_len > 245 || context_len > 255)
-		return -EINVAL;
+	if (label_len > 245 || context_len > 255) {
+		err = -EINVAL;
+		goto out_zeroize;
+	}
 
-	if (10 + label_len + context_len > sizeof(info))
-		return -EOVERFLOW;
+	if (10 + label_len + context_len > sizeof(info)) {
+		err = -EOVERFLOW;
+		goto out_zeroize;
+	}
 
 	/* Build HKDF-Expand-Label info
 	 * struct {

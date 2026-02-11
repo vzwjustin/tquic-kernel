@@ -320,6 +320,8 @@ static struct tquic_path *tquic_find_path_by_addr(struct tquic_connection *conn,
 	 * C-001 FIX: Use refcount_inc_not_zero() directly to avoid
 	 * TOCTOU race between rcu_dereference() and reference acquisition.
 	 */
+	RCU_LOCKDEP_WARN(!rcu_read_lock_held(),
+			 "tquic_find_path_by_addr: caller must hold rcu_read_lock");
 	path = rcu_dereference(conn->active_path);
 	if (path && tquic_sockaddr_equal(&path->remote_addr, addr)) {
 		if (refcount_inc_not_zero(&path->refcnt))
@@ -1351,41 +1353,30 @@ static int tquic_process_stream_frame(struct tquic_rx_ctx *ctx)
 		return -EINVAL;
 
 	/*
-	 * P-003: Use RCU for lock-free stream lookup in RB-tree.
-	 *
-	 * The streams RB-tree is protected by RCU. Writers use conn->lock
-	 * and rcu_assign_pointer/synchronize_rcu when modifying the tree.
-	 * Readers can safely traverse the tree under rcu_read_lock().
-	 *
-	 * We take a reference with tquic_stream_get() to ensure the stream
-	 * remains valid after we release the RCU read lock. If the stream
-	 * is being freed concurrently, tquic_stream_get() returns false.
+	 * Lookup stream under streams_lock, then take a reference before
+	 * dropping the lock so the stream remains valid for processing.
 	 */
 	stream = NULL;
-	rcu_read_lock();
+	spin_lock_bh(&ctx->conn->streams_lock);
 	{
 		struct rb_node *node = ctx->conn->streams.rb_node;
 
 		while (node) {
 			struct tquic_stream *s = rb_entry(node,
-						struct tquic_stream, node);
-			if (stream_id < s->id)
+							  struct tquic_stream, node);
+
+			if (stream_id < s->id) {
 				node = node->rb_left;
-			else if (stream_id > s->id)
+			} else if (stream_id > s->id) {
 				node = node->rb_right;
-			else {
-				/*
-				 * Found the stream. Take a reference to prevent
-				 * it from being freed after we release RCU lock.
-				 * tquic_stream_get uses refcount_inc_not_zero.
-				 */
+			} else {
 				if (tquic_stream_get(s))
 					stream = s;
 				break;
 			}
 		}
 	}
-	rcu_read_unlock();
+	spin_unlock_bh(&ctx->conn->streams_lock);
 
 	if (!stream) {
 		/*
@@ -3874,6 +3865,7 @@ not_reset:
 				if (len < 5) {
 					tquic_dbg("Initial packet too short for version\n");
 					sock_put(listener);
+					kfree_skb(skb);
 					return -EINVAL;
 				}
 
@@ -3898,6 +3890,7 @@ not_reset:
 									  &src_addr,
 									  &local_addr);
 					sock_put(listener);
+					kfree_skb(skb);
 					return ret;
 				}
 

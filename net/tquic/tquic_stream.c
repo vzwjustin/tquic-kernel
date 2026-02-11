@@ -417,7 +417,8 @@ static void tquic_stream_free(struct tquic_stream *stream)
 
 	/* Decrement per-type stream counter */
 	if (stream->conn && h3_stream_id_is_uni(stream->id) &&
-	    stream->priority < TQUIC_H3_STREAM_TYPE_MAX)
+	    stream->priority < TQUIC_H3_STREAM_TYPE_MAX &&
+	    stream->conn->h3_uni_stream_count[stream->priority] > 0)
 		stream->conn->h3_uni_stream_count[stream->priority]--;
 
 	/*
@@ -453,8 +454,21 @@ static void tquic_stream_free(struct tquic_stream *stream)
 		tquic_stream_purge_wmem(sk, &stream->send_buf);
 		tquic_stream_purge_rmem(sk, &stream->recv_buf);
 	} else {
-		/* Fallback: no socket available, just purge */
+		/*
+		 * No socket available.  SKBs may still have skb->sk set
+		 * from skb_set_owner_w() during the charging path.  If
+		 * that socket has already been freed, kfree_skb() would
+		 * invoke sock_wfree() on stale memory.  Orphan every SKB
+		 * first to clear the destructor and skb->sk pointer.
+		 */
+		struct sk_buff *skb;
+
+		skb_queue_walk(&stream->send_buf, skb)
+			skb_orphan(skb);
 		skb_queue_purge(&stream->send_buf);
+
+		skb_queue_walk(&stream->recv_buf, skb)
+			skb_orphan(skb);
 		skb_queue_purge(&stream->recv_buf);
 	}
 
@@ -837,6 +851,8 @@ static void tquic_stream_trigger_output(struct tquic_connection *conn,
 		 */
 		tquic_dbg("no active path for stream %llu transmission\n",
 			 stream->id);
+		if (path)
+			tquic_path_put(path);
 		return;
 	}
 
@@ -857,6 +873,7 @@ static void tquic_stream_trigger_output(struct tquic_connection *conn,
 	if (!can_send) {
 		tquic_dbg("stream %llu blocked by cwnd (inflight=%llu, cwnd=%u)\n",
 			 stream->id, inflight, path->stats.cwnd);
+		tquic_path_put(path);
 		return;
 	}
 
@@ -891,6 +908,7 @@ static void tquic_stream_trigger_output(struct tquic_connection *conn,
 	 * and race with the flush path.
 	 */
 	tquic_output_flush(conn);
+	tquic_path_put(path);
 
 	/*
 	 * Schedule retransmission timer if not already running.
