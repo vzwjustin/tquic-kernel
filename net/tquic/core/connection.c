@@ -31,6 +31,7 @@
 #include <linux/unaligned.h>
 #include <linux/jhash.h>
 #include <linux/rhashtable.h>
+#include <linux/rcupdate.h>
 #include <crypto/aead.h>
 #include <crypto/gcm.h>
 #include <net/sock.h>
@@ -49,6 +50,19 @@ int tquic_write_path_response_frame(u8 *buf, size_t buf_len, const u8 *data);
 int tquic_write_connection_close_frame(u8 *buf, size_t buf_len, u64 error_code,
 				       u64 frame_type, const u8 *reason,
 				       u64 reason_len, bool app_close);
+
+static struct tquic_path *tquic_conn_active_path_get(struct tquic_connection *conn)
+{
+	struct tquic_path *path;
+
+	rcu_read_lock();
+	path = rcu_dereference(conn->active_path);
+	if (path && !tquic_path_get(path))
+		path = NULL;
+	rcu_read_unlock();
+
+	return path;
+}
 
 /* QUIC Error Codes (RFC 9000 Section 20) */
 #define TQUIC_NO_ERROR			0x00
@@ -846,25 +860,31 @@ int tquic_send_stateless_reset(struct tquic_connection *conn)
 	 * Stateless resets are sent without encryption since the connection
 	 * state may be corrupted or the keys may be unavailable.
 	 */
-	if (conn->active_path) {
+	{
 		struct sk_buff *skb;
+		struct tquic_path *path;
+
+		path = tquic_conn_active_path_get(conn);
+		if (!path)
+			goto out_no_path;
 
 		skb = alloc_skb(len + 64, GFP_ATOMIC);
 		if (skb) {
 			skb_reserve(skb, 64);  /* Reserve headroom for headers */
 			skb_put_data(skb, packet, len);
 
-			if (tquic_udp_xmit_on_path(conn, conn->active_path, skb) == 0) {
-				conn->active_path->stats.tx_packets++;
-				conn->active_path->stats.tx_bytes += len;
-				tquic_conn_dbg(conn,
-					       "sent stateless reset on path %u\n",
-					       conn->active_path->path_id);
+			if (tquic_udp_xmit_on_path(conn, path, skb) == 0) {
+				tquic_conn_dbg(conn, "sent stateless reset on path %u\n",
+					       path->path_id);
+				tquic_path_put(path);
 				return 0;
 			}
 			/* skb is freed by tquic_udp_xmit_on_path on error */
 		}
+
+		tquic_path_put(path);
 	}
+out_no_path:
 
 	tquic_conn_err(conn, "failed to send stateless reset\n");
 	return -EIO;
@@ -1039,24 +1059,31 @@ int tquic_send_version_negotiation(struct tquic_connection *conn,
 	 * VN packets are sent without encryption to allow version negotiation
 	 * before cryptographic handshake begins.
 	 */
-	if (conn->active_path) {
+	{
 		struct sk_buff *skb;
+		struct tquic_path *path;
 		int pkt_len = p - packet;
+
+		path = tquic_conn_active_path_get(conn);
+		if (!path)
+			goto out_vn_no_path;
 
 		skb = alloc_skb(pkt_len + 64, GFP_ATOMIC);
 		if (skb) {
 			skb_reserve(skb, 64);
 			skb_put_data(skb, packet, pkt_len);
 
-			if (tquic_udp_xmit_on_path(conn, conn->active_path, skb) == 0) {
-				conn->active_path->stats.tx_packets++;
-				conn->active_path->stats.tx_bytes += pkt_len;
+			if (tquic_udp_xmit_on_path(conn, path, skb) == 0) {
 				tquic_conn_dbg(conn, "sent version negotiation on path %u\n",
-					       conn->active_path->path_id);
+					       path->path_id);
+				tquic_path_put(path);
 				return 0;
 			}
 		}
+
+		tquic_path_put(path);
 	}
+out_vn_no_path:
 
 	tquic_conn_err(conn, "failed to send version negotiation\n");
 	return -EIO;
@@ -1559,22 +1586,29 @@ int tquic_send_retry(struct tquic_connection *conn,
 		kfree(pseudo_packet);
 	}
 
-skip_tag:
+	skip_tag:
 	tquic_conn_dbg(conn, "sent Retry packet\n");
 
 	/* Transmit the Retry packet via active path */
-	if (conn->active_path) {
+	{
 		struct sk_buff *skb;
+		struct tquic_path *path;
 		size_t pkt_len = p - packet;
+
+		path = tquic_conn_active_path_get(conn);
+		if (!path)
+			goto out_set_ret;
 
 		skb = alloc_skb(pkt_len + 64, GFP_ATOMIC);
 		if (skb) {
 			skb_reserve(skb, 64);
 			skb_put_data(skb, packet, pkt_len);
-			tquic_udp_xmit_on_path(conn, conn->active_path, skb);
+			tquic_udp_xmit_on_path(conn, path, skb);
 		}
+		tquic_path_put(path);
 	}
 
+out_set_ret:
 	ret = 0;
 
 out_free:
@@ -1878,7 +1912,7 @@ static void tquic_migration_work_handler(struct work_struct *work)
 
 	if (target->state == TQUIC_PATH_ACTIVE) {
 		/* Migration complete - switch active path */
-		conn->active_path = target;
+		rcu_assign_pointer(conn->active_path, target);
 		conn->stats.path_migrations++;
 		cs->migration_in_progress = false;
 		cs->migration_target = NULL;
@@ -2355,17 +2389,18 @@ EXPORT_SYMBOL_GPL(tquic_conn_handle_close);
 static void tquic_conn_enter_draining(struct tquic_connection *conn)
 {
 	struct tquic_conn_state_machine *cs = conn->state_machine;
+	struct tquic_path *path;
 
 	/*
 	 * Recompute drain timeout using current RTT measurements if
 	 * available, since RTT data may not have been present when
 	 * the state machine was first initialized.
 	 */
-	if (cs && conn->active_path &&
-	    conn->active_path->rtt.samples > 0) {
-		cs->drain_timeout_ms = 3 * tquic_rtt_pto(
-			&conn->active_path->rtt);
-	}
+	path = tquic_conn_active_path_get(conn);
+	if (cs && path && path->rtt.samples > 0)
+		cs->drain_timeout_ms = 3 * tquic_rtt_pto(&path->rtt);
+	if (path)
+		tquic_path_put(path);
 
 	tquic_conn_set_state(conn, TQUIC_CONN_DRAINING, TQUIC_REASON_PEER_CLOSE);
 }
@@ -2469,11 +2504,16 @@ int tquic_conn_client_connect(struct tquic_connection *conn,
 	 * otherwise fall back to static default per RFC 9000 Section 10.2.
 	 * PTO = smoothed_rtt + max(4 * rttvar, 1ms) + max_ack_delay
 	 */
-	if (conn->active_path && conn->active_path->rtt.samples > 0) {
-		cs->drain_timeout_ms = 3 * tquic_rtt_pto(
-			&conn->active_path->rtt);
-	} else {
-		cs->drain_timeout_ms = 3 * TQUIC_DEFAULT_RTT;
+	{
+		struct tquic_path *path = tquic_conn_active_path_get(conn);
+
+		if (path && path->rtt.samples > 0)
+			cs->drain_timeout_ms = 3 * tquic_rtt_pto(&path->rtt);
+		else
+			cs->drain_timeout_ms = 3 * TQUIC_DEFAULT_RTT;
+
+		if (path)
+			tquic_path_put(path);
 	}
 	cs->amplification_limit = 3;
 
@@ -2682,11 +2722,16 @@ int tquic_conn_server_accept(struct tquic_connection *conn,
 	 * Drain timeout: Use 3 * PTO if RTT measurements are available,
 	 * otherwise fall back to static default per RFC 9000 Section 10.2.
 	 */
-	if (conn->active_path && conn->active_path->rtt.samples > 0) {
-		cs->drain_timeout_ms = 3 * tquic_rtt_pto(
-			&conn->active_path->rtt);
-	} else {
-		cs->drain_timeout_ms = 3 * TQUIC_DEFAULT_RTT;
+	{
+		struct tquic_path *path = tquic_conn_active_path_get(conn);
+
+		if (path && path->rtt.samples > 0)
+			cs->drain_timeout_ms = 3 * tquic_rtt_pto(&path->rtt);
+		else
+			cs->drain_timeout_ms = 3 * TQUIC_DEFAULT_RTT;
+
+		if (path)
+			tquic_path_put(path);
 	}
 	cs->amplification_limit = 3;
 	cs->address_validated = false;

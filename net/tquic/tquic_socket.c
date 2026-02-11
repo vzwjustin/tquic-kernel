@@ -145,6 +145,8 @@ int tquic_init_sock(struct sock *sk)
 
 	/* Initialize bonding state */
 	tsk->conn->scheduler = tquic_bond_init(tsk->conn);
+	if (tsk->conn->scheduler)
+		set_bit(TQUIC_F_BONDING_ENABLED, &tsk->conn->flags);
 
 	tquic_dbg("socket initialized\n");
 	return 0;
@@ -167,10 +169,12 @@ void tquic_destroy_sock(struct sock *sk)
 	if (tsk->conn) {
 		struct tquic_connection *conn = tsk->conn;
 
-		if (conn->scheduler) {
-			tquic_bond_cleanup(conn->scheduler);
-			conn->scheduler = NULL;
-		}
+			if (conn->scheduler &&
+			    test_bit(TQUIC_F_BONDING_ENABLED, &conn->flags)) {
+				tquic_bond_cleanup(conn->scheduler);
+				conn->scheduler = NULL;
+				clear_bit(TQUIC_F_BONDING_ENABLED, &conn->flags);
+			}
 		/*
 		 * CF-051: Use WRITE_ONCE to publish NULL to concurrent
 		 * readers in poll/sendmsg/recvmsg that use READ_ONCE.
@@ -288,26 +292,7 @@ int tquic_connect(struct sock *sk, TQUIC_SOCKADDR *uaddr, int addr_len)
 	if (ret < 0)
 		goto out_unlock;
 
-	/*
-	 * Initialize scheduler - use requested or per-netns default.
-	 * Per CONTEXT.md: "Scheduler locked at connection establishment"
-	 */
-	{
-		struct tquic_sched_ops *sched_ops = NULL;
-
-		if (tsk->requested_scheduler[0])
-			sched_ops = tquic_sched_find(tsk->requested_scheduler);
-
-		conn->scheduler = tquic_sched_init_conn(conn, sched_ops);
-		if (!conn->scheduler) {
-			tquic_warn("scheduler init failed, using default\n");
-			conn->scheduler = tquic_sched_init_conn(conn, NULL);
-			if (!conn->scheduler) {
-				ret = -ENOMEM;
-				goto out_unlock;
-			}
-		}
-	}
+	/* Bonding scheduler is initialized at socket creation. */
 
 	/* Set state before handshake */
 	inet_sk_set_state(sk, TCP_SYN_SENT);
@@ -1021,29 +1006,18 @@ int tquic_sock_setsockopt(struct socket *sock, int level, int optname,
 		 */
 		if (tsk->conn && READ_ONCE(tsk->conn->state) != TQUIC_CONN_IDLE) {
 			ret = -EISCONN;
-		} else if (tsk->conn) {
-			/* Connection exists but idle, init scheduler now */
-			struct tquic_sched_ops *sched_ops;
-
-			rcu_read_lock();
-			sched_ops = tquic_sched_find(name);
-			if (sched_ops &&
-			    !try_module_get(sched_ops->owner)) {
-				sched_ops = NULL;
-			}
-			rcu_read_unlock();
-			if (sched_ops) {
-				tsk->conn->scheduler = tquic_sched_init_conn(tsk->conn, sched_ops);
-				if (!tsk->conn->scheduler)
-					ret = -ENOMEM;
-				module_put(sched_ops->owner);
+			} else if (tsk->conn) {
+				/*
+				 * Keep the requested scheduler name for future
+				 * integration, but preserve the active bonding
+				 * scheduler state stored in conn->scheduler.
+				 */
+				strscpy(tsk->requested_scheduler, name,
+					sizeof(tsk->requested_scheduler));
 			} else {
-				ret = -ENOENT;
-			}
-		} else {
-			/* No connection yet, store for later when connection is created */
-			strscpy(tsk->requested_scheduler, name,
-				sizeof(tsk->requested_scheduler));
+				/* No connection yet, store for later when connection is created */
+				strscpy(tsk->requested_scheduler, name,
+					sizeof(tsk->requested_scheduler));
 		}
 		release_sock(sk);
 		return ret;
@@ -1557,7 +1531,8 @@ int tquic_sock_getsockopt(struct socket *sock, int level, int optname,
 
 	case TQUIC_BOND_MODE:
 		lock_sock(sk);
-		if (tsk->conn && tsk->conn->scheduler) {
+		if (tsk->conn && tsk->conn->scheduler &&
+		    test_bit(TQUIC_F_BONDING_ENABLED, &tsk->conn->flags)) {
 			struct tquic_bond_state *bond = tsk->conn->scheduler;
 			val = bond->mode;
 		} else {

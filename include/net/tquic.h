@@ -1101,8 +1101,8 @@ struct tquic_connection {
 	struct tquic_sock *tsk;		/* Associated TQUIC socket */
 
 	/* Scheduler */
-	void *scheduler;		/* Scheduler operations pointer */
-	void *sched_priv;		/* Scheduler per-connection private data */
+	void *scheduler;		/* Bonding scheduler state (struct tquic_bond_state *) */
+	void *sched_priv;		/* Non-bond per-connection scheduler/congestion private data */
 
 	/* Connection state machine (extended state) */
 	void *state_machine;
@@ -2060,6 +2060,8 @@ struct tquic_stream *tquic_stream_open(struct tquic_connection *conn, bool bidi)
 struct tquic_stream *tquic_stream_open_incoming(struct tquic_connection *conn,
 						u64 stream_id);
 struct tquic_stream *tquic_conn_stream_lookup(struct tquic_connection *conn, u64 stream_id);
+bool tquic_stream_get(struct tquic_stream *stream);
+void tquic_stream_put(struct tquic_stream *stream);
 void tquic_stream_close(struct tquic_stream *stream);
 void tquic_stream_destroy(struct tquic_stream_manager *mgr, struct tquic_stream *stream);
 int tquic_stream_send(struct tquic_stream *stream, const void *data, size_t len, bool fin);
@@ -2104,6 +2106,7 @@ u32 tquic_bond_get_path_weight(struct tquic_connection *conn, u32 path_id);
 
 /* Packet transmission (tquic_output.c) */
 struct tquic_pacing_state;
+/* Returns a referenced path; caller must release with tquic_path_put(). */
 struct tquic_path *tquic_select_path(struct tquic_connection *conn,
 				     struct sk_buff *skb);
 

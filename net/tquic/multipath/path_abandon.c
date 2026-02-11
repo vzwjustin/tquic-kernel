@@ -21,6 +21,7 @@
 #include <linux/workqueue.h>
 #include <linux/timer.h>
 #include <linux/random.h>
+#include <linux/rcupdate.h>
 #include <net/tquic.h>
 
 #include "../tquic_compat.h"
@@ -192,6 +193,19 @@ static struct kmem_cache *mp_cid_state_cache;
  * Helper Functions
  * =============================================================================
  */
+
+static struct tquic_path *tquic_mp_active_path_get(struct tquic_connection *conn)
+{
+	struct tquic_path *path;
+
+	rcu_read_lock();
+	path = rcu_dereference(conn->active_path);
+	if (path && !tquic_path_get(path))
+		path = NULL;
+	rcu_read_unlock();
+
+	return path;
+}
 
 /**
  * tquic_mp_send_control_frame - Send a control frame on a path
@@ -427,7 +441,7 @@ int tquic_mp_handle_path_abandon(struct tquic_connection *conn,
 	tquic_mp_retire_path_cids(conn, path);
 
 	/* Check if this was the active path */
-	if (conn->active_path == path) {
+	if (READ_ONCE(conn->active_path) == path) {
 		/* Select a new active path */
 		tquic_mp_select_new_active_path(conn, path);
 	}
@@ -504,8 +518,14 @@ int tquic_mp_initiate_path_abandon(struct tquic_connection *conn,
 
 	/* Send PATH_ABANDON via active path (not the path being abandoned) */
 	{
-		int ret = tquic_mp_send_control_frame(conn, conn->active_path,
-						      buf, len);
+		struct tquic_path *active_path = tquic_mp_active_path_get(conn);
+		int ret;
+
+		if (!active_path)
+			return -ENETUNREACH;
+
+		ret = tquic_mp_send_control_frame(conn, active_path, buf, len);
+		tquic_path_put(active_path);
 		if (ret < 0) {
 			pr_warn("tquic_mp: failed to send PATH_ABANDON: %d\n",
 				ret);
@@ -520,7 +540,7 @@ int tquic_mp_initiate_path_abandon(struct tquic_connection *conn,
 	path->state = TQUIC_PATH_CLOSED;
 
 	/* Update connection stats */
-	if (conn->active_path == path) {
+	if (READ_ONCE(conn->active_path) == path) {
 		tquic_mp_select_new_active_path(conn, path);
 	}
 
@@ -567,7 +587,18 @@ int tquic_mp_retire_path_cids(struct tquic_connection *conn,
 		 frame.seq_num, frame.path_id);
 
 	/* Send MP_RETIRE_CONNECTION_ID via active path */
-	return tquic_mp_send_control_frame(conn, conn->active_path, buf, len);
+	{
+		struct tquic_path *active_path = tquic_mp_active_path_get(conn);
+		int ret;
+
+		if (!active_path)
+			return -ENETUNREACH;
+
+		ret = tquic_mp_send_control_frame(conn, active_path, buf, len);
+		tquic_path_put(active_path);
+
+		return ret;
+	}
 }
 EXPORT_SYMBOL_GPL(tquic_mp_retire_path_cids);
 
@@ -758,8 +789,14 @@ static int tquic_mp_send_retire_cid_frame(struct tquic_connection *conn,
 	struct tquic_mp_retire_connection_id frame;
 	u8 buf[32];
 	int len;
+	struct tquic_path *active_path;
+	int ret;
 
-	if (!conn || !conn->active_path)
+	if (!conn)
+		return -EINVAL;
+
+	active_path = tquic_mp_active_path_get(conn);
+	if (!active_path)
 		return -EINVAL;
 
 	/* Build MP_RETIRE_CONNECTION_ID frame */
@@ -769,14 +806,19 @@ static int tquic_mp_send_retire_cid_frame(struct tquic_connection *conn,
 
 	/* Encode frame */
 	len = tquic_mp_write_retire_connection_id(&frame, buf, sizeof(buf));
-	if (len < 0)
+	if (len < 0) {
+		tquic_path_put(active_path);
 		return len;
+	}
 
 	pr_debug("tquic_mp: sending RETIRE_CONNECTION_ID path=%llu seq=%llu\n",
 		 path_id, seq_num);
 
 	/* Send via active path */
-	return tquic_mp_send_control_frame(conn, conn->active_path, buf, len);
+	ret = tquic_mp_send_control_frame(conn, active_path, buf, len);
+	tquic_path_put(active_path);
+
+	return ret;
 }
 
 /**
@@ -1258,14 +1300,14 @@ int tquic_mp_select_new_active_path(struct tquic_connection *conn,
 	}
 
 	if (best_path) {
-		conn->active_path = best_path;
+		rcu_assign_pointer(conn->active_path, best_path);
 		if (best_path->state == TQUIC_PATH_STANDBY)
 			best_path->state = TQUIC_PATH_ACTIVE;
 
 		pr_info("tquic_mp: selected new active path %u\n",
 			best_path->path_id);
 	} else {
-		conn->active_path = NULL;
+		rcu_assign_pointer(conn->active_path, NULL);
 		pr_warn("tquic_mp: no available paths after abandonment\n");
 	}
 

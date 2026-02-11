@@ -52,6 +52,20 @@ tquic_conn_get_migration_state(struct tquic_connection *conn);
 static inline struct tquic_session_state *
 tquic_conn_get_session_state(struct tquic_connection *conn);
 
+static struct tquic_path *
+tquic_migration_get_active_path(struct tquic_connection *conn)
+{
+	struct tquic_path *path;
+
+	rcu_read_lock();
+	path = rcu_dereference(conn->active_path);
+	if (path && !tquic_path_get(path))
+		path = NULL;
+	rcu_read_unlock();
+
+	return path;
+}
+
 /* Migration constants */
 #define TQUIC_MIGRATION_PTO_MULTIPLIER	3	/* 3x PTO for validation timeout */
 #define TQUIC_MIGRATION_MAX_RETRIES	3	/* Max PATH_CHALLENGE retries */
@@ -521,6 +535,7 @@ EXPORT_SYMBOL_GPL(tquic_path_create);
 void tquic_path_free(struct tquic_path *path)
 {
 	struct tquic_connection *conn;
+	bool linked = false;
 
 	if (!path)
 		return;
@@ -528,6 +543,7 @@ void tquic_path_free(struct tquic_path *path)
 	conn = path->conn;
 
 	/* Cancel validation timer */
+	del_timer_sync(&path->validation_timer);
 	del_timer_sync(&path->validation.timer);
 
 	/* Purge response queue */
@@ -540,16 +556,29 @@ void tquic_path_free(struct tquic_path *path)
 	if (path->dev)
 		dev_put(path->dev);
 
-	/* Remove from connection's path list */
-	if (conn) {
+	/*
+	 * Remove from connection's path list if still linked.
+	 *
+	 * Some callers remove the list node and decrement num_paths before
+	 * dropping the final reference. In that case path->list is already
+	 * reinitialized and we must not remove/decrement again.
+	 */
+	if (conn && !list_empty(&path->list)) {
 		spin_lock_bh(&conn->paths_lock);
-		list_del_rcu(&path->list);
-		conn->num_paths--;
+		if (!list_empty(&path->list)) {
+			list_del_rcu(&path->list);
+			INIT_LIST_HEAD(&path->list);
+			if (conn->num_paths > 0)
+				conn->num_paths--;
+			linked = true;
+		}
 		spin_unlock_bh(&conn->paths_lock);
 
-		/* Wait for RCU readers */
-		synchronize_rcu();
+		/* Wait for RCU readers of the removed list node. */
 	}
+
+	if (linked)
+		synchronize_rcu();
 
 	kmem_cache_free(tquic_path_cache, path);
 }
@@ -726,7 +755,7 @@ static void tquic_migration_work_handler(struct work_struct *work)
 	/* Complete migration unless probe-only */
 	if (!(ms->flags & TQUIC_MIGRATE_FLAG_PROBE_ONLY)) {
 		spin_lock_bh(&conn->lock);
-		conn->active_path = new_path;
+		rcu_assign_pointer(conn->active_path, new_path);
 		conn->stats.path_migrations++;
 		spin_unlock_bh(&conn->lock);
 
@@ -956,9 +985,7 @@ int tquic_migrate_auto(struct tquic_connection *conn,
 	spin_lock_bh(&ms->lock);
 
 	ms->status = TQUIC_MIGRATE_PROBING;
-	if (conn->active_path)
-		tquic_path_get(conn->active_path);
-	ms->old_path = conn->active_path;
+	ms->old_path = tquic_migration_get_active_path(conn);
 	/* best_path ref already taken under paths_lock (CF-130) */
 	ms->new_path = best_path;
 	ms->retries = 0;
@@ -1024,6 +1051,7 @@ int tquic_migrate_explicit(struct tquic_connection *conn,
 {
 	struct tquic_migration_state *ms;
 	struct tquic_path *new_path;
+	struct tquic_path *old_path = NULL;
 	int ret;
 
 	if (!conn || !new_local)
@@ -1053,11 +1081,17 @@ int tquic_migrate_explicit(struct tquic_connection *conn,
 		return -EBUSY;
 
 	/* If not forcing, check if current path is OK */
-	if (!(flags & TQUIC_MIGRATE_FLAG_FORCE) &&
-	    conn->active_path &&
-	    !tquic_path_is_degraded(conn->active_path)) {
-		tquic_dbg("explicit migration rejected - current path OK\n");
-		return -EALREADY;
+	if (!(flags & TQUIC_MIGRATE_FLAG_FORCE)) {
+		struct tquic_path *apath;
+
+		apath = tquic_migration_get_active_path(conn);
+		if (apath && !tquic_path_is_degraded(apath)) {
+			tquic_path_put(apath);
+			tquic_dbg("explicit migration rejected - current path OK\n");
+			return -EALREADY;
+		}
+		if (apath)
+			tquic_path_put(apath);
 	}
 
 	/*
@@ -1099,9 +1133,7 @@ int tquic_migrate_explicit(struct tquic_connection *conn,
 
 		spin_lock_bh(&ms->lock);
 		ms->status = TQUIC_MIGRATE_PROBING;
-		if (conn->active_path)
-			tquic_path_get(conn->active_path);
-		ms->old_path = conn->active_path;
+		ms->old_path = tquic_migration_get_active_path(conn);
 		tquic_path_get(new_path);
 		ms->new_path = new_path;
 		ms->retries = 0;
@@ -1114,15 +1146,18 @@ int tquic_migrate_explicit(struct tquic_connection *conn,
 		spin_unlock_bh(&conn->paths_lock);
 
 		/* Create new path with the specified local address */
-		if (!conn->active_path) {
+		old_path = tquic_migration_get_active_path(conn);
+		if (!old_path) {
 			tquic_warn("no active path to get remote address\n");
 			return -EINVAL;
 		}
 
 		new_path = tquic_path_create(conn, new_local,
-					     &conn->active_path->remote_addr);
-		if (!new_path)
+					     &old_path->remote_addr);
+		if (!new_path) {
+			tquic_path_put(old_path);
 			return -ENOMEM;
+		}
 
 		/* Allocate or get migration state */
 		if (!ms) {
@@ -1131,6 +1166,7 @@ int tquic_migrate_explicit(struct tquic_connection *conn,
 			 * different type to prevent type confusion.
 			 */
 			if (conn->state_machine) {
+				tquic_path_put(old_path);
 				tquic_path_free(new_path);
 				tquic_warn("migration: state_machine "
 					   "type conflict\n");
@@ -1138,6 +1174,7 @@ int tquic_migrate_explicit(struct tquic_connection *conn,
 			}
 			ms = tquic_migration_state_alloc(conn);
 			if (!ms) {
+				tquic_path_put(old_path);
 				tquic_path_free(new_path);
 				return -ENOMEM;
 			}
@@ -1147,9 +1184,8 @@ int tquic_migrate_explicit(struct tquic_connection *conn,
 		/* Set up migration state */
 		spin_lock_bh(&ms->lock);
 		ms->status = TQUIC_MIGRATE_PROBING;
-		if (conn->active_path)
-			tquic_path_get(conn->active_path);
-		ms->old_path = conn->active_path;
+		ms->old_path = old_path;
+		old_path = NULL;
 		tquic_path_get(new_path);
 		ms->new_path = new_path;
 		ms->retries = 0;
@@ -1927,6 +1963,7 @@ int tquic_migrate_to_additional_address(struct tquic_connection *conn,
 {
 	struct tquic_migration_state *ms;
 	struct tquic_path *new_path;
+	struct tquic_path *old_path = NULL;
 	struct sockaddr_storage local_addr;
 	int ret;
 
@@ -1962,8 +1999,9 @@ int tquic_migrate_to_additional_address(struct tquic_connection *conn,
 	}
 
 	/* Get local address from current path */
-	if (conn->active_path) {
-		memcpy(&local_addr, &conn->active_path->local_addr,
+	old_path = tquic_migration_get_active_path(conn);
+	if (old_path) {
+		memcpy(&local_addr, &old_path->local_addr,
 		       sizeof(local_addr));
 	} else {
 		memset(&local_addr, 0, sizeof(local_addr));
@@ -1973,6 +2011,8 @@ int tquic_migrate_to_additional_address(struct tquic_connection *conn,
 	/* Create path to the additional address */
 	new_path = tquic_path_create(conn, &local_addr, &addr_entry->addr);
 	if (!new_path) {
+		if (old_path)
+			tquic_path_put(old_path);
 		tquic_err("failed to create path for additional address\n");
 		return -ENOMEM;
 	}
@@ -1996,6 +2036,8 @@ int tquic_migrate_to_additional_address(struct tquic_connection *conn,
 		 * void pointer.
 		 */
 		if (conn->state_machine) {
+			if (old_path)
+				tquic_path_put(old_path);
 			tquic_path_free(new_path);
 			tquic_warn("additional addr migration: state_machine "
 				   "type conflict\n");
@@ -2003,6 +2045,8 @@ int tquic_migrate_to_additional_address(struct tquic_connection *conn,
 		}
 		ms = tquic_migration_state_alloc(conn);
 		if (!ms) {
+			if (old_path)
+				tquic_path_put(old_path);
 			tquic_path_free(new_path);
 			return -ENOMEM;
 		}
@@ -2012,9 +2056,10 @@ int tquic_migrate_to_additional_address(struct tquic_connection *conn,
 	/* Set up migration state with proper path references */
 	spin_lock_bh(&ms->lock);
 	ms->status = TQUIC_MIGRATE_PROBING;
-	if (conn->active_path)
-		tquic_path_get(conn->active_path);
-	ms->old_path = conn->active_path;
+	if (!old_path)
+		old_path = tquic_migration_get_active_path(conn);
+	ms->old_path = old_path;
+	old_path = NULL;
 	tquic_path_get(new_path);
 	ms->new_path = new_path;
 	ms->retries = 0;
@@ -2069,6 +2114,7 @@ int tquic_migrate_select_additional_address(struct tquic_connection *conn,
 {
 	struct tquic_additional_addresses *remote_addrs;
 	struct tquic_additional_address *selected;
+	struct tquic_path *active_path;
 	sa_family_t current_family = AF_UNSPEC;
 
 	if (!conn)
@@ -2081,8 +2127,11 @@ int tquic_migrate_select_additional_address(struct tquic_connection *conn,
 	}
 
 	/* Get current address family */
-	if (conn->active_path)
-		current_family = conn->active_path->remote_addr.ss_family;
+	active_path = tquic_migration_get_active_path(conn);
+	if (active_path) {
+		current_family = active_path->remote_addr.ss_family;
+		tquic_path_put(active_path);
+	}
 
 	/* Select address */
 	spin_lock_bh(&remote_addrs->lock);
@@ -2194,6 +2243,7 @@ int tquic_migrate_validate_all_additional(struct tquic_connection *conn)
 	struct tquic_additional_addresses *remote_addrs;
 	struct tquic_additional_address *entry;
 	struct sockaddr_storage local_addr;
+	struct tquic_path *active_path;
 	struct tquic_path *probe_path;
 	int count = 0;
 	int ret;
@@ -2209,12 +2259,11 @@ int tquic_migrate_validate_all_additional(struct tquic_connection *conn)
 		return 0;
 
 	/* Get local address for probing */
-	if (conn->active_path) {
-		memcpy(&local_addr, &conn->active_path->local_addr,
-		       sizeof(local_addr));
-	} else {
+	active_path = tquic_migration_get_active_path(conn);
+	if (!active_path)
 		return -ENOENT;
-	}
+	memcpy(&local_addr, &active_path->local_addr, sizeof(local_addr));
+	tquic_path_put(active_path);
 
 	spin_lock_bh(&remote_addrs->lock);
 	list_for_each_entry(entry, &remote_addrs->addresses, list) {

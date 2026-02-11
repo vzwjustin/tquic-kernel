@@ -33,6 +33,7 @@
 #include <linux/in.h>
 #include <linux/in6.h>
 #include <linux/net.h>
+#include <linux/rcupdate.h>
 #include <net/sock.h>
 #include <net/tquic.h>
 
@@ -42,6 +43,19 @@
 #include "tquic_stateless_reset.h"
 #include "tquic_sysctl.h"
 #include "core/transport_params.h"
+
+static struct tquic_path *tquic_pref_addr_active_path_get(struct tquic_connection *conn)
+{
+	struct tquic_path *path;
+
+	rcu_read_lock();
+	path = rcu_dereference(conn->active_path);
+	if (path && !tquic_path_get(path))
+		path = NULL;
+	rcu_read_unlock();
+
+	return path;
+}
 
 /*
  * =============================================================================
@@ -644,7 +658,7 @@ int tquic_pref_addr_client_select_address(struct tquic_connection *conn,
 					  sa_family_t *family)
 {
 	struct tquic_pref_addr_migration *migration;
-	struct tquic_path *active;
+	struct tquic_path *active_path;
 	sa_family_t current_family;
 
 	if (!conn || !family)
@@ -655,11 +669,13 @@ int tquic_pref_addr_client_select_address(struct tquic_connection *conn,
 		return -ENOENT;
 
 	/* Get current path's address family */
-	active = conn->active_path;
-	if (active)
-		current_family = active->remote_addr.ss_family;
+	active_path = tquic_pref_addr_active_path_get(conn);
+	if (active_path)
+		current_family = active_path->remote_addr.ss_family;
 	else
 		current_family = AF_UNSPEC;
+	if (active_path)
+		tquic_path_put(active_path);
 
 	/*
 	 * Prefer the same address family as the current connection
@@ -709,15 +725,18 @@ struct tquic_path *tquic_pref_addr_create_path(struct tquic_connection *conn,
 					       const u8 *reset_token)
 {
 	struct tquic_path *path;
+	struct tquic_path *active_path;
 	struct sockaddr_storage local_addr;
 
 	if (!conn || !remote_addr || !cid)
 		return ERR_PTR(-EINVAL);
 
 	/* Get local address from active path */
-	if (conn->active_path) {
-		memcpy(&local_addr, &conn->active_path->local_addr,
+	active_path = tquic_pref_addr_active_path_get(conn);
+	if (active_path) {
+		memcpy(&local_addr, &active_path->local_addr,
 		       sizeof(local_addr));
+		tquic_path_put(active_path);
 	} else {
 		memset(&local_addr, 0, sizeof(local_addr));
 		local_addr.ss_family = remote_addr->ss_family;
@@ -863,12 +882,16 @@ int tquic_pref_addr_client_on_validated(struct tquic_connection *conn,
 	}
 
 	/* Switch to the new path */
-	spin_lock_bh(&conn->lock);
-	old_path = conn->active_path;
-	conn->active_path = path;
+	spin_lock_bh(&conn->paths_lock);
+	old_path = rcu_dereference_protected(conn->active_path,
+					     lockdep_is_held(&conn->paths_lock));
+	rcu_assign_pointer(conn->active_path, path);
 	path->state = TQUIC_PATH_ACTIVE;
 	if (old_path && old_path != path)
 		old_path->state = TQUIC_PATH_STANDBY;
+	spin_unlock_bh(&conn->paths_lock);
+
+	spin_lock_bh(&conn->lock);
 	conn->stats.path_migrations++;
 	spin_unlock_bh(&conn->lock);
 
@@ -894,6 +917,7 @@ EXPORT_SYMBOL_GPL(tquic_pref_addr_client_on_validated);
 void tquic_pref_addr_client_on_failed(struct tquic_connection *conn, int error)
 {
 	struct tquic_pref_addr_migration *migration;
+	struct tquic_path *active_path;
 
 	if (!conn)
 		return;
@@ -914,9 +938,11 @@ void tquic_pref_addr_client_on_failed(struct tquic_connection *conn, int error)
 	}
 
 	/* Notify via netlink */
-	if (conn->active_path)
-		tquic_nl_path_event(conn, conn->active_path,
-				    TQUIC_PATH_EVENT_FAILED);
+	active_path = tquic_pref_addr_active_path_get(conn);
+	if (active_path) {
+		tquic_nl_path_event(conn, active_path, TQUIC_PATH_EVENT_FAILED);
+		tquic_path_put(active_path);
+	}
 }
 EXPORT_SYMBOL_GPL(tquic_pref_addr_client_on_failed);
 

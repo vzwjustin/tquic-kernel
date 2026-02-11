@@ -105,7 +105,7 @@ void tquic_mp_sched_notify_sent(struct tquic_connection *conn,
 		return;
 
 	rcu_read_lock();
-	sched = conn->scheduler;
+	sched = READ_ONCE(conn->sched_priv);
 	if (sched) {
 		list_for_each_entry_rcu(iter, &tquic_mp_sched_list, list) {
 			if (iter == sched) {
@@ -130,7 +130,7 @@ void tquic_mp_sched_notify_ack(struct tquic_connection *conn,
 		return;
 
 	rcu_read_lock();
-	sched = conn->scheduler;
+	sched = READ_ONCE(conn->sched_priv);
 	if (sched) {
 		list_for_each_entry_rcu(iter, &tquic_mp_sched_list, list) {
 			if (iter == sched) {
@@ -154,7 +154,7 @@ void tquic_mp_sched_notify_loss(struct tquic_connection *conn,
 		return;
 
 	rcu_read_lock();
-	sched = conn->scheduler;
+	sched = READ_ONCE(conn->sched_priv);
 	if (sched) {
 		list_for_each_entry_rcu(iter, &tquic_mp_sched_list, list) {
 			if (iter == sched) {

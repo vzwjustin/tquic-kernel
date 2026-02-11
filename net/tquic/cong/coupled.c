@@ -905,7 +905,7 @@ static void *coupled_init(struct tquic_path *path)
 	conn = container_of(path->list.prev, struct tquic_connection, paths);
 
 	/* Check if coupled state already exists for this connection */
-	state = conn->scheduler;
+	state = conn->sched_priv;
 
 	if (!state) {
 		/* First path - create coupled state */
@@ -924,7 +924,7 @@ static void *coupled_init(struct tquic_path *path)
 
 		state->sbd.check_interval = 1000;  /* 1 second */
 
-		conn->scheduler = state;
+		conn->sched_priv = state;
 
 		tquic_info("coupled: initialized for connection (algo: OLIA)\n");
 	}
@@ -934,7 +934,7 @@ static void *coupled_init(struct tquic_path *path)
 	if (!sf) {
 		if (state->num_subflows == 0) {
 			kfree(state);
-			conn->scheduler = NULL;
+			conn->sched_priv = NULL;
 		}
 		return NULL;
 	}
@@ -959,7 +959,7 @@ static void coupled_release(void *cong_data)
 
 	/* Find the coupled state */
 	conn = container_of(sf->path->list.prev, struct tquic_connection, paths);
-	state = conn->scheduler;
+	state = conn->sched_priv;
 
 	if (!state)
 		return;
@@ -970,7 +970,7 @@ static void coupled_release(void *cong_data)
 	if (state->num_subflows == 0) {
 		kfree(state->sbd.corr_matrix);
 		kfree(state);
-		conn->scheduler = NULL;
+		conn->sched_priv = NULL;
 		tquic_info("coupled: released for connection\n");
 	} else {
 		/* Update alpha without this subflow */
@@ -1006,7 +1006,7 @@ static void coupled_on_ack(void *cong_data, u64 bytes_acked, u64 rtt_us)
 		return;
 
 	conn = container_of(sf->path->list.prev, struct tquic_connection, paths);
-	state = conn->scheduler;
+	state = conn->sched_priv;
 
 	if (!state)
 		return;
@@ -1112,7 +1112,7 @@ static void coupled_on_loss(void *cong_data, u64 bytes_lost)
 		return;
 
 	conn = container_of(sf->path->list.prev, struct tquic_connection, paths);
-	state = conn->scheduler;
+	state = conn->sched_priv;
 
 	if (!state)
 		return;
@@ -1239,7 +1239,7 @@ static void coupled_on_persistent_cong(void *cong_data,
 		return;
 
 	conn = container_of(sf->path->list.prev, struct tquic_connection, paths);
-	state = conn->scheduler;
+	state = conn->sched_priv;
 
 	tquic_warn("coupled: persistent congestion on path %u, cwnd %llu -> %llu\n",
 		sf->path_id, sf->cwnd, info->min_cwnd);

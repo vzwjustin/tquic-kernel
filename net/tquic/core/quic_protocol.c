@@ -17,6 +17,7 @@
 #include <linux/slab.h>
 #include <linux/random.h>
 #include <linux/version.h>
+#include <linux/rcupdate.h>
 #include <asm/ioctls.h>
 #include <net/sock.h>
 #include <net/inet_common.h>
@@ -31,6 +32,19 @@
 static struct kmem_cache __maybe_unused *tquic_sock_cachep __read_mostly;
 static struct kmem_cache __maybe_unused *tquic_conn_cachep __read_mostly;
 static struct kmem_cache __maybe_unused *tquic_stream_cachep __read_mostly;
+
+static struct tquic_path *tquic_proto_active_path_get(struct tquic_connection *conn)
+{
+	struct tquic_path *path;
+
+	rcu_read_lock();
+	path = rcu_dereference(conn->active_path);
+	if (path && !tquic_path_get(path))
+		path = NULL;
+	rcu_read_unlock();
+
+	return path;
+}
 
 /* Sysctl variables - sysctl_mem has been long[] since before 5.4 */
 long sysctl_tquic_mem[3] __read_mostly;
@@ -586,10 +600,18 @@ static int tquic_proto_ioctl(struct sock *sk, int cmd, int *karg)
 
 	switch (cmd) {
 	case SIOCOUTQ:
-		if (conn && conn->active_path)
-			*karg = conn->active_path->cc.bytes_in_flight;
-		else
+		if (conn) {
+			struct tquic_path *path = tquic_proto_active_path_get(conn);
+
+			if (path) {
+				*karg = path->cc.bytes_in_flight;
+				tquic_path_put(path);
+			} else {
+				*karg = 0;
+			}
+		} else {
 			*karg = 0;
+		}
 		return 0;
 
 	case SIOCINQ:
@@ -896,10 +918,15 @@ static int tquic_proto_getsockopt(struct sock *sk, int level, int optname,
 				.idle_timeout = tsk->conn->idle_timeout,
 			};
 
-			if (tsk->conn->active_path) {
-				info.rtt = tsk->conn->active_path->cc.smoothed_rtt_us;
-				info.rtt_var = tsk->conn->active_path->cc.rtt_var_us;
-				info.cwnd = tsk->conn->active_path->cc.cwnd;
+			{
+				struct tquic_path *path = tquic_proto_active_path_get(tsk->conn);
+
+				if (path) {
+					info.rtt = path->cc.smoothed_rtt_us;
+					info.rtt_var = path->cc.rtt_var_us;
+					info.cwnd = path->cc.cwnd;
+					tquic_path_put(path);
+				}
 			}
 
 			info.bytes_sent = tsk->conn->stats.tx_bytes;
@@ -1163,12 +1190,20 @@ static int tquic_stream_getname(struct socket *sock, struct sockaddr *addr,
 	if (!conn)
 		return -ENOTCONN;
 
-	if (peer)
-		saddr = &conn->active_path->remote_addr;
-	else
-		saddr = &conn->active_path->local_addr;
+	{
+		struct tquic_path *path = tquic_proto_active_path_get(conn);
 
-	memcpy(addr, saddr, sizeof(*saddr));
+		if (!path)
+			return -ENOTCONN;
+
+		if (peer)
+			saddr = &path->remote_addr;
+		else
+			saddr = &path->local_addr;
+
+		memcpy(addr, saddr, sizeof(*saddr));
+		tquic_path_put(path);
+	}
 
 	if (addr->sa_family == AF_INET)
 		return sizeof(struct sockaddr_in);

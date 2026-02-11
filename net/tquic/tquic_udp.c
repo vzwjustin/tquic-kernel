@@ -20,6 +20,7 @@
 #include <linux/in6.h>
 #include <linux/net.h>
 #include <linux/inetdevice.h>
+#include <linux/rcupdate.h>
 #include <linux/workqueue.h>
 #include <linux/hashtable.h>
 #include <net/sock.h>
@@ -78,6 +79,19 @@ static DEFINE_SPINLOCK(tquic_udp_hash_lock);
  * per-path UDP sockets. This tracks TQUIC listening sockets.
  */
 static DEFINE_SPINLOCK(tquic_listener_lock);
+
+static struct tquic_path *tquic_udp_active_path_get(struct tquic_connection *conn)
+{
+	struct tquic_path *path;
+
+	rcu_read_lock();
+	path = rcu_dereference(conn->active_path);
+	if (path && !tquic_path_get(path))
+		path = NULL;
+	rcu_read_unlock();
+
+	return path;
+}
 static struct hlist_head tquic_listeners[256];
 
 /**
@@ -1717,6 +1731,8 @@ EXPORT_SYMBOL_GPL(tquic_udp_destroy_path_socket);
  * @path: Path to transmit on
  * @skb: Packet to transmit
  *
+ * Consumes @skb in all cases (success or error).
+ *
  * Returns: 0 on success, negative error on failure
  */
 int tquic_udp_xmit_on_path(struct tquic_connection *conn,
@@ -1726,8 +1742,12 @@ int tquic_udp_xmit_on_path(struct tquic_connection *conn,
 	struct tquic_udp_sock *us;
 	int err;
 
-	if (!conn || !path || !skb)
+	if (!skb)
 		return -EINVAL;
+	if (!conn || !path) {
+		kfree_skb(skb);
+		return -EINVAL;
+	}
 
 	us = path->cong;
 	if (!us) {
@@ -1766,7 +1786,7 @@ int tquic_udp_encap_init(struct tquic_sock *tsk)
 	if (!conn)
 		return -EINVAL;
 
-	path = READ_ONCE(conn->active_path);
+	path = tquic_udp_active_path_get(conn);
 	if (!path)
 		return -EINVAL;
 
@@ -1783,8 +1803,10 @@ int tquic_udp_encap_init(struct tquic_sock *tsk)
 	/* Create per-path UDP socket if missing. */
 	if (!path->cong) {
 		err = tquic_udp_create_path_socket(conn, path);
-		if (err)
+		if (err) {
+			tquic_path_put(path);
 			return err;
+		}
 	}
 
 	/*
@@ -1794,6 +1816,7 @@ int tquic_udp_encap_init(struct tquic_sock *tsk)
 	if (!tsk->udp_sock && path->cong)
 		tsk->udp_sock = ((struct tquic_udp_sock *)path->cong)->sock;
 
+	tquic_path_put(path);
 	return 0;
 }
 EXPORT_SYMBOL_GPL(tquic_udp_encap_init);
@@ -1802,11 +1825,14 @@ int tquic_udp_send(struct tquic_sock *tsk, struct sk_buff *skb,
 		   struct tquic_path *path)
 {
 	struct tquic_connection *conn;
+	int ret;
 
 	if (!tsk || !skb) {
 		kfree_skb(skb);
 		return -EINVAL;
 	}
+
+	/* This API always consumes @skb (success or error). */
 
 	conn = tsk->conn;
 	if (!conn) {
@@ -1814,14 +1840,22 @@ int tquic_udp_send(struct tquic_sock *tsk, struct sk_buff *skb,
 		return -EINVAL;
 	}
 
-	if (!path)
-		path = READ_ONCE(conn->active_path);
+	if (path) {
+		if (!tquic_path_get(path))
+			path = NULL;
+	} else {
+		path = tquic_udp_active_path_get(conn);
+	}
+
 	if (!path) {
 		kfree_skb(skb);
 		return -EINVAL;
 	}
 
-	return tquic_udp_xmit_on_path(conn, path, skb);
+	ret = tquic_udp_xmit_on_path(conn, path, skb);
+	tquic_path_put(path);
+
+	return ret;
 }
 EXPORT_SYMBOL_GPL(tquic_udp_send);
 

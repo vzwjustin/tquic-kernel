@@ -23,6 +23,7 @@
 #include <linux/in6.h>
 #include <linux/uio.h>
 #include <linux/slab.h>
+#include <linux/rcupdate.h>
 #include <net/sock.h>
 #include <net/udp.h>
 #include <net/ip.h>
@@ -40,6 +41,19 @@
 #define TQUIC_OUTPUT_BATCH_SIZE		16
 #define TQUIC_OUTPUT_SKB_HEADROOM	128
 #define TQUIC_OUTPUT_MAX_COALESCE	3
+
+static struct tquic_path *tquic_output_active_path_get(struct tquic_connection *conn)
+{
+	struct tquic_path *path;
+
+	rcu_read_lock();
+	path = rcu_dereference(conn->active_path);
+	if (path && !tquic_path_get(path))
+		path = NULL;
+	rcu_read_unlock();
+
+	return path;
+}
 
 /*
  * Default TTL/hop limit - configurable via module parameter
@@ -378,10 +392,10 @@ void tquic_ecn_on_packet_sent(struct tquic_path *path, u8 ecn_marking)
 /* Build UDP header for TQUIC packet */
 static void tquic_build_udp_header(struct sk_buff *skb,
 				   struct tquic_connection *conn,
+				   const struct tquic_path *path,
 				   int payload_len)
 {
 	struct udphdr *uh;
-	struct tquic_path *path = conn->active_path;
 	__be16 sport, dport;
 
 	/* Get port numbers from path addresses */
@@ -409,9 +423,9 @@ static void tquic_build_udp_header(struct sk_buff *skb,
 
 /* Build IPv4 header for TQUIC packet */
 static int tquic_build_ipv4_header(struct sk_buff *skb,
-				   struct tquic_connection *conn)
+				   struct tquic_connection *conn,
+				   const struct tquic_path *path)
 {
-	struct tquic_path *path = conn->active_path;
 	struct sockaddr_in *saddr = (struct sockaddr_in *)&path->local_addr;
 	struct sockaddr_in *daddr = (struct sockaddr_in *)&path->remote_addr;
 	struct iphdr *iph;
@@ -463,9 +477,9 @@ static int tquic_build_ipv4_header(struct sk_buff *skb,
 #if IS_ENABLED(CONFIG_IPV6)
 /* Build IPv6 header for TQUIC packet */
 static int tquic_build_ipv6_header(struct sk_buff *skb,
-				   struct tquic_connection *conn)
+				   struct tquic_connection *conn,
+				   const struct tquic_path *path)
 {
-	struct tquic_path *path = conn->active_path;
 	struct sockaddr_in6 *saddr = (struct sockaddr_in6 *)&path->local_addr;
 	struct sockaddr_in6 *daddr = (struct sockaddr_in6 *)&path->remote_addr;
 	struct ipv6hdr *ip6h;
@@ -513,25 +527,28 @@ static int tquic_build_ipv6_header(struct sk_buff *skb,
 #endif /* CONFIG_IPV6 */
 
 /* Send skb directly to network device */
-static int tquic_xmit_skb(struct sk_buff *skb, struct tquic_connection *conn)
+static int tquic_xmit_skb(struct sk_buff *skb, struct tquic_connection *conn,
+			  sa_family_t family)
 {
 	struct net_device *dev;
 	int err;
 
-	if (!skb_dst(skb))
+	if (!skb_dst(skb)) {
+		kfree_skb(skb);
 		return -EHOSTUNREACH;
+	}
 
 	dev = skb_dst(skb)->dev;
 	skb->dev = dev;
 
 	/* Set protocol */
-	if (conn->active_path->local_addr.ss_family == AF_INET)
+	if (family == AF_INET)
 		skb->protocol = htons(ETH_P_IP);
 	else
 		skb->protocol = htons(ETH_P_IPV6);
 
 	/* Send via IP layer */
-	if (conn->active_path->local_addr.ss_family == AF_INET) {
+	if (family == AF_INET) {
 		err = ip_local_out(sock_net(conn->sk), conn->sk, skb);
 	} else {
 #if IS_ENABLED(CONFIG_IPV6)
@@ -670,17 +687,25 @@ static u64 tquic_cc_pacing_delay(struct tquic_path *path, u32 bytes)
 	return 0;  /* No delay by default */
 }
 
-/* Main output function - send single packet */
+/*
+ * Main output function - send single packet.
+ * Consumes @skb in all cases (success or error).
+ */
 int tquic_output(struct tquic_connection *conn, struct sk_buff *skb)
 {
-	struct tquic_path *path = conn->active_path;
+	struct tquic_path *path;
 	struct tquic_output_cb *cb;
 	int payload_len;
 	int err;
 	u8 ecn_marking;
 
-	if (!path || !conn->sk)
+	path = tquic_output_active_path_get(conn);
+	if (!path || !conn->sk) {
+		if (path)
+			tquic_path_put(path);
+		kfree_skb(skb);
 		return -ENOENT;
+	}
 
 	payload_len = skb->len;
 
@@ -692,39 +717,42 @@ int tquic_output(struct tquic_connection *conn, struct sk_buff *skb)
 	ecn_marking = tquic_ecn_get_marking(path);
 
 	/* Build headers */
-	tquic_build_udp_header(skb, conn, payload_len);
+	tquic_build_udp_header(skb, conn, path, payload_len);
 
 	/* Build IP header and send */
 	if (path->local_addr.ss_family == AF_INET) {
-		err = tquic_build_ipv4_header(skb, conn);
+		err = tquic_build_ipv4_header(skb, conn, path);
 		if (err) {
 			kfree_skb(skb);
+			tquic_path_put(path);
 			return err;
 		}
 	} else {
 #if IS_ENABLED(CONFIG_IPV6)
-		err = tquic_build_ipv6_header(skb, conn);
+		err = tquic_build_ipv6_header(skb, conn, path);
 		if (err) {
 			kfree_skb(skb);
+			tquic_path_put(path);
 			return err;
 		}
 #else
 		kfree_skb(skb);
+		tquic_path_put(path);
 		return -EAFNOSUPPORT;
 #endif
 	}
 
-	err = tquic_xmit_skb(skb, conn);
+	/* Fill metadata before handing ownership to the network stack. */
+	cb = TQUIC_OUTPUT_CB(skb);
+	cb->send_time = ktime_get();
+	cb->length = payload_len;
+	cb->in_flight = 1;
+
+	err = tquic_xmit_skb(skb, conn, path->local_addr.ss_family);
 
 	if (err >= 0) {
 		/* Track ECN-marked packet sent for validation */
 		tquic_ecn_on_packet_sent(path, ecn_marking);
-
-		/* Update output callback */
-		cb = TQUIC_OUTPUT_CB(skb);
-		cb->send_time = ktime_get();
-		cb->length = payload_len;
-		cb->in_flight = 1;
 
 		/* Update path statistics */
 		path->stats.tx_bytes += payload_len;
@@ -736,6 +764,7 @@ int tquic_output(struct tquic_connection *conn, struct sk_buff *skb)
 		err = 0;
 	}
 
+	tquic_path_put(path);
 	return err;
 }
 EXPORT_SYMBOL(tquic_output);
@@ -752,12 +781,8 @@ int tquic_output_batch(struct tquic_connection *conn,
 		__skb_unlink(skb, queue);
 
 		err = tquic_output(conn, skb);
-		if (err) {
-			kfree_skb(skb);
+		if (err)
 			break;
-		}
-
-		kfree_skb(skb);
 		sent++;
 	}
 
@@ -775,14 +800,16 @@ EXPORT_SYMBOL(tquic_output_batch);
 /* Calculate pacing delay for next packet */
 static ktime_t __maybe_unused tquic_pacing_delay(struct tquic_connection *conn, u32 bytes)
 {
-	struct tquic_path *path = conn->active_path;
+	struct tquic_path *path;
 	u64 delay_ns;
 
+	path = tquic_output_active_path_get(conn);
 	if (!path)
 		return ns_to_ktime(0);
 
 	/* Calculate delay: bytes / pacing_rate (in nanoseconds) */
 	delay_ns = tquic_cc_pacing_delay(path, bytes);
+	tquic_path_put(path);
 
 	return ns_to_ktime(delay_ns);
 }
@@ -827,11 +854,6 @@ static int tquic_pacing_queue_packet(struct tquic_connection *conn,
  */
 int tquic_output_paced(struct tquic_connection *conn, struct sk_buff *skb)
 {
-	struct tquic_path *path = conn->active_path;
-	u64 delay_ns;
-	ktime_t now;
-	int err;
-
 	/* Check pacing */
 	if (!tquic_pacing_allow(conn)) {
 		/* Queue for later transmission with timer */
@@ -839,15 +861,7 @@ int tquic_output_paced(struct tquic_connection *conn, struct sk_buff *skb)
 	}
 
 	/* Send now */
-	err = tquic_output(conn, skb);
-	if (!err && path) {
-		now = ktime_get();
-
-		/* Calculate next allowed send time based on packet size */
-		delay_ns = tquic_cc_pacing_delay(path, skb->len);
-	}
-
-	return err;
+	return tquic_output(conn, skb);
 }
 EXPORT_SYMBOL(tquic_output_paced);
 
@@ -872,6 +886,7 @@ static int tquic_setup_gso(struct sk_buff *skb, u16 gso_size, u16 segs)
 /* Send data using GSO if beneficial */
 int tquic_output_gso(struct tquic_connection *conn, struct sk_buff_head *queue)
 {
+	struct tquic_path *path;
 	struct sk_buff *skb, *gso_skb;
 	u32 total_len = 0;
 	u16 seg_count = 0;
@@ -879,7 +894,17 @@ int tquic_output_gso(struct tquic_connection *conn, struct sk_buff_head *queue)
 	int err;
 
 	/* Calculate MSS from path MTU */
-	mss = conn->active_path->mtu - 40;  /* Subtract IP + UDP headers */
+	path = tquic_output_active_path_get(conn);
+	if (!path)
+		return -ENETUNREACH;
+
+	if (path->mtu <= 40) {
+		tquic_path_put(path);
+		return -EINVAL;
+	}
+
+	mss = path->mtu - 40;  /* Subtract IP + UDP headers */
+	tquic_path_put(path);
 	if (mss > TQUIC_MAX_PACKET_SIZE)
 		mss = TQUIC_MAX_PACKET_SIZE;
 
@@ -919,8 +944,6 @@ int tquic_output_gso(struct tquic_connection *conn, struct sk_buff_head *queue)
 
 	/* Send GSO packet */
 	err = tquic_output(conn, gso_skb);
-	if (err)
-		kfree_skb(gso_skb);
 
 	return err;
 }
@@ -986,8 +1009,6 @@ int tquic_output_coalesced(struct tquic_connection *conn,
 	skb_set_owner_w(skb, conn->sk);
 
 	err = tquic_output(conn, skb);
-	if (err)
-		kfree_skb(skb);
 
 	return err;
 }
@@ -1018,8 +1039,6 @@ int tquic_retransmit(struct tquic_connection *conn, struct tquic_sent_packet *pk
 	pkt->retransmitted = 1;
 
 	err = tquic_output(conn, clone);
-	if (err)
-		kfree_skb(clone);
 
 	return err;
 }
@@ -1079,12 +1098,27 @@ int tquic_do_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 
 	/* Send data in MTU-sized chunks */
 	while (remaining > 0) {
+		struct tquic_path *path;
+		u32 mtu;
 		size_t chunk_size;
 		u8 *data;
 
 		/* Calculate chunk size based on MTU and flow control */
+		path = tquic_output_active_path_get(conn);
+		if (!path) {
+			err = sent > 0 ? (int)sent : -ENETUNREACH;
+			goto out_put_stream;
+		}
+
+		mtu = path->mtu;
+		tquic_path_put(path);
+		if (mtu <= 100) {
+			err = -EINVAL;
+			goto out_put_stream;
+		}
+
 		chunk_size = min_t(size_t, remaining,
-				   conn->active_path->mtu - 100);
+				   mtu - 100);
 
 		/* Allocate and build STREAM frame */
 		skb = tquic_alloc_tx_skb(conn, chunk_size + 32);
@@ -1231,14 +1265,16 @@ struct sk_buff *tquic_packet_build(struct tquic_connection *conn, int pn_space)
 		return NULL;
 
 	space = &conn->pn_spaces[pn_space];
-	path = conn->active_path;
+	path = tquic_output_active_path_get(conn);
 
 	if (!path)
 		return NULL;
 
 	/* Check if keys are available and not discarded */
-	if (!space->keys_available || space->keys_discarded)
+	if (!space->keys_available || space->keys_discarded) {
+		tquic_path_put(path);
 		return NULL;
+	}
 
 	/*
 	 * Allocate working buffers for header and payload construction.
@@ -1250,6 +1286,7 @@ struct sk_buff *tquic_packet_build(struct tquic_connection *conn, int pn_space)
 	if (!header || !payload) {
 		kfree(header);
 		kfree(payload);
+		tquic_path_put(path);
 		return NULL;
 	}
 
@@ -1398,6 +1435,7 @@ struct sk_buff *tquic_packet_build(struct tquic_connection *conn, int pn_space)
 	if (remaining <= 0) {
 		kfree(header);
 		kfree(payload);
+		tquic_path_put(path);
 		return NULL;
 	}
 
@@ -1502,6 +1540,7 @@ skip_ack:
 	if (payload_len == 0 && !need_ack) {
 		kfree(header);
 		kfree(payload);
+		tquic_path_put(path);
 		return NULL;
 	}
 
@@ -1553,6 +1592,7 @@ skip_ack:
 	if (!skb) {
 		kfree(header);
 		kfree(payload);
+		tquic_path_put(path);
 		return NULL;
 	}
 
@@ -1584,6 +1624,7 @@ skip_ack:
 			kfree_skb(skb);
 			kfree(header);
 			kfree(payload);
+			tquic_path_put(path);
 			return NULL;
 		}
 	}
@@ -1600,6 +1641,7 @@ skip_ack:
 			kfree_skb(skb);
 			kfree(header);
 			kfree(payload);
+			tquic_path_put(path);
 			return NULL;
 		}
 	}
@@ -1616,6 +1658,7 @@ skip_ack:
 
 	kfree(header);
 	kfree(payload);
+	tquic_path_put(path);
 
 	return skb;
 }
