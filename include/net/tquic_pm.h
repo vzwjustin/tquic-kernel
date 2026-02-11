@@ -108,6 +108,9 @@ struct tquic_pm_pernet {
 
 	/* Sysctl registration (per-netns) */
 	struct ctl_table_header *sysctl_header;
+
+	/* PM-type-specific per-namespace data (e.g., kernel PM kdata) */
+	void *pm_data;
 };
 
 /*

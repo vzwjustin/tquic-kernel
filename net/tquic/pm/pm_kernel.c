@@ -393,11 +393,22 @@ static void tquic_pm_kernel_path_event(struct tquic_connection *conn,
  * @net: Network namespace
  *
  * Registers netdevice notifier and sets up per-netns kernel PM data.
+ * Stores the kdata pointer in pernet->pm_data for later retrieval
+ * and cleanup. Guards against double-init (idempotent).
  */
 static int tquic_pm_kernel_init(struct net *net)
 {
+	struct tquic_pm_pernet *pernet;
 	struct tquic_pm_kernel_data *kdata;
 	int ret;
+
+	pernet = tquic_pm_get_pernet(net);
+	if (!pernet)
+		return -ENOENT;
+
+	/* Already initialized for this namespace - idempotent */
+	if (pernet->pm_data)
+		return 0;
 
 	kdata = kzalloc(sizeof(*kdata), GFP_KERNEL);
 	if (!kdata)
@@ -416,6 +427,9 @@ static int tquic_pm_kernel_init(struct net *net)
 		return ret;
 	}
 
+	/* Store in pernet for retrieval and cleanup */
+	pernet->pm_data = kdata;
+
 	pr_info("TQUIC PM kernel: Initialized for netns\n");
 	return 0;
 }
@@ -423,12 +437,27 @@ static int tquic_pm_kernel_init(struct net *net)
 /**
  * tquic_pm_kernel_release - Cleanup kernel PM for a netns
  * @net: Network namespace
+ *
+ * Unregisters the netdevice notifier and frees the per-namespace
+ * kernel PM data. Called during pernet exit or PM type switch.
  */
 static void tquic_pm_kernel_release(struct net *net)
 {
-	/* Note: Per-netns kernel data cleanup happens in pernet exit.
-	 * This is called when PM type switches away from kernel PM.
-	 */
+	struct tquic_pm_pernet *pernet;
+	struct tquic_pm_kernel_data *kdata;
+
+	pernet = tquic_pm_get_pernet(net);
+	if (!pernet || !pernet->pm_data)
+		return;
+
+	kdata = pernet->pm_data;
+
+	/* Unregister netdevice notifier */
+	tquic_unregister_netdevice_notifier_net(net, &kdata->netdev_notifier);
+
+	kfree(kdata);
+	pernet->pm_data = NULL;
+
 	pr_info("TQUIC PM kernel: Released for netns\n");
 }
 
