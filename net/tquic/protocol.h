@@ -424,6 +424,12 @@ extern struct kmem_cache *tquic_path_cache;
 extern struct kmem_cache *tquic_rx_buf_cache;
 
 /*
+ * Stream reference counting (tquic_stream.c)
+ */
+bool tquic_stream_get(struct tquic_stream *stream);
+void tquic_stream_put(struct tquic_stream *stream);
+
+/*
  * Handshake functions (tquic_handshake.c)
  *
  * These functions implement TLS 1.3 handshake via net/handshake

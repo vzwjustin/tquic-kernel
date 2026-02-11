@@ -81,7 +81,7 @@ struct kmem_cache *tquic_rx_buf_cache;
 EXPORT_SYMBOL_GPL(tquic_rx_buf_cache);
 
 /* Connection hashtable params */
-static const struct rhashtable_params tquic_conn_params = {
+const struct rhashtable_params tquic_conn_params = {
 	.key_len = sizeof(struct tquic_cid),
 	.key_offset = offsetof(struct tquic_connection, scid),
 	.head_offset = offsetof(struct tquic_connection, node),
@@ -152,13 +152,14 @@ void tquic_conn_destroy(struct tquic_connection *conn)
 	/* Free all paths */
 	list_for_each_entry_safe(path, tmp_path, &conn->paths, list) {
 		list_del_rcu(&path->list);
+		INIT_LIST_HEAD(&path->list);
 		timer_delete_sync(&path->validation_timer);
 		timer_delete_sync(&path->validation.timer);
 		skb_queue_purge(&path->response.queue);
-		kmem_cache_free(tquic_path_cache, path);
+		/* Wait for any RCU readers before dropping ownership. */
+		synchronize_rcu();
+		tquic_path_put(path);
 	}
-	/* Wait for any concurrent RCU readers before destroying connection */
-	synchronize_rcu();
 
 	/* Free all streams with proper memory accounting */
 	while ((node = rb_first(&conn->streams))) {
@@ -209,10 +210,10 @@ void tquic_conn_destroy(struct tquic_connection *conn)
 	 * dereference freed memory.  The actual kfree() is deferred until
 	 * after synchronize_rcu().
 	 */
-	{
-		void *sched = conn->scheduler;
+		{
+			void *sched = conn->scheduler;
 
-		conn->scheduler = NULL;
+			conn->scheduler = NULL;
 
 		/*
 		 * Ensure an RCU grace period has passed before freeing
@@ -222,10 +223,17 @@ void tquic_conn_destroy(struct tquic_connection *conn)
 		 * (tquic_conn_lookup_by_token) may still hold references
 		 * to this memory until the grace period completes.
 		 */
-		synchronize_rcu();
+			synchronize_rcu();
 
-		kfree(sched);
-	}
+			if (sched) {
+				if (test_bit(TQUIC_F_BONDING_ENABLED, &conn->flags)) {
+					tquic_bond_cleanup(sched);
+					clear_bit(TQUIC_F_BONDING_ENABLED, &conn->flags);
+				} else {
+					kfree(sched);
+				}
+			}
+		}
 
 	/*
 	 * SECURITY FIX (CF-134, updated): tquic_conn_create() now uses
@@ -252,6 +260,7 @@ int tquic_conn_add_path(struct tquic_connection *conn,
 		return -ENOMEM;
 
 	/* Set back-pointer to parent connection */
+	refcount_set(&path->refcnt, 1);
 	path->conn = conn;
 	path->state = TQUIC_PATH_PENDING;
 	path->path_id = conn->num_paths;
@@ -308,14 +317,14 @@ int tquic_conn_add_path(struct tquic_connection *conn,
 	/* Legacy challenge data - still used by some code */
 	get_random_bytes(path->challenge_data, sizeof(path->challenge_data));
 
-	spin_lock_bh(&conn->lock);
+	spin_lock_bh(&conn->paths_lock);
 	list_add_tail_rcu(&path->list, &conn->paths);
 	conn->num_paths++;
 
 	/* First path becomes active */
 	if (!conn->active_path)
 		rcu_assign_pointer(conn->active_path, path);
-	spin_unlock_bh(&conn->lock);
+	spin_unlock_bh(&conn->paths_lock);
 
 	tquic_conn_dbg(conn, "added path %u\n", path->path_id);
 
@@ -333,31 +342,35 @@ int tquic_conn_remove_path(struct tquic_connection *conn, u32 path_id)
 	struct tquic_path *path, *tmp;
 	bool found = false;
 
-	spin_lock_bh(&conn->lock);
+	spin_lock_bh(&conn->paths_lock);
 	list_for_each_entry_safe(path, tmp, &conn->paths, list) {
 		if (path->path_id == path_id) {
 			/* Don't remove last path */
 			if (conn->num_paths <= 1) {
-				spin_unlock_bh(&conn->lock);
+				spin_unlock_bh(&conn->paths_lock);
 				return -EINVAL;
 			}
 
 			list_del_rcu(&path->list);
+			INIT_LIST_HEAD(&path->list);
 			conn->num_paths--;
 
 			/* Update active path if needed */
 			if (conn->active_path == path) {
-				rcu_assign_pointer(conn->active_path,
+				struct tquic_path *new_active;
+
+				new_active =
 					list_first_entry_or_null(&conn->paths,
 								 struct tquic_path,
-								 list));
+								 list);
+				rcu_assign_pointer(conn->active_path, new_active);
 			}
 
 			found = true;
 			break;
 		}
 	}
-	spin_unlock_bh(&conn->lock);
+	spin_unlock_bh(&conn->paths_lock);
 
 	if (!found)
 		return -ENOENT;
@@ -370,9 +383,9 @@ int tquic_conn_remove_path(struct tquic_connection *conn, u32 path_id)
 	skb_queue_purge(&path->response.queue);
 	atomic_set(&path->response.count, 0);
 
-	/* Wait for RCU grace period before freeing (used by readers) */
+	/* Wait for RCU readers before dropping list ownership reference. */
 	synchronize_rcu();
-	kmem_cache_free(tquic_path_cache, path);
+	tquic_path_put(path);
 
 	tquic_conn_dbg(conn, "removed path %u\n", path_id);
 
@@ -384,16 +397,16 @@ struct tquic_path *tquic_conn_get_path(struct tquic_connection *conn, u32 path_i
 {
 	struct tquic_path *path;
 
-	spin_lock_bh(&conn->lock);
+	spin_lock_bh(&conn->paths_lock);
 	list_for_each_entry(path, &conn->paths, list) {
 		if (path->path_id == path_id) {
 			if (!tquic_path_get(path))
 				path = NULL;
-			spin_unlock_bh(&conn->lock);
+			spin_unlock_bh(&conn->paths_lock);
 			return path;
 		}
 	}
-	spin_unlock_bh(&conn->lock);
+	spin_unlock_bh(&conn->paths_lock);
 
 	return NULL;
 }
@@ -401,14 +414,22 @@ EXPORT_SYMBOL_GPL(tquic_conn_get_path);
 
 void tquic_conn_migrate(struct tquic_connection *conn, struct tquic_path *new_path)
 {
-	spin_lock_bh(&conn->lock);
+	bool migrated = false;
+
+	spin_lock_bh(&conn->paths_lock);
 	if (new_path->state == TQUIC_PATH_ACTIVE ||
 	    new_path->state == TQUIC_PATH_STANDBY) {
-		conn->active_path = new_path;
+		rcu_assign_pointer(conn->active_path, new_path);
+		migrated = true;
+	}
+	spin_unlock_bh(&conn->paths_lock);
+
+	if (migrated) {
+		spin_lock_bh(&conn->lock);
 		conn->stats.path_migrations++;
+		spin_unlock_bh(&conn->lock);
 		tquic_conn_info(conn, "migrated to path %u\n", new_path->path_id);
 	}
-	spin_unlock_bh(&conn->lock);
 }
 EXPORT_SYMBOL_GPL(tquic_conn_migrate);
 
@@ -596,6 +617,7 @@ struct tquic_stream *tquic_stream_open(struct tquic_connection *conn, bool bidi)
 	stream->id = stream_id;
 	stream->state = TQUIC_STREAM_OPEN;
 	stream->conn = conn;
+	refcount_set(&stream->refcount, 1);
 
 	skb_queue_head_init(&stream->send_buf);
 	skb_queue_head_init(&stream->recv_buf);
@@ -698,14 +720,8 @@ tquic_stream_create_locked(struct tquic_connection *conn, u64 stream_id)
 		} else if (stream->id > entry->id) {
 			link = &parent->rb_right;
 		} else {
-			/*
-			 * Stream already exists - race with another packet.
-			 * Free our allocation and return the existing stream,
-			 * but take a reference since caller expects to own one.
-			 */
+			/* Stream already exists - race with another packet. */
 			kmem_cache_free(tquic_stream_cache, stream);
-			if (!tquic_stream_get(entry))
-				return NULL;  /* Stream being freed, caller retries */
 			return entry;
 		}
 	}
@@ -726,6 +742,12 @@ struct tquic_stream *tquic_stream_open_incoming(struct tquic_connection *conn,
 
 	spin_lock_bh(&conn->streams_lock);
 	stream = tquic_stream_create_locked(conn, stream_id);
+	/*
+	 * Caller gets a transient reference; tree ownership remains as the
+	 * base reference.
+	 */
+	if (stream && !tquic_stream_get(stream))
+		stream = NULL;
 	spin_unlock_bh(&conn->streams_lock);
 
 	return stream;
@@ -735,48 +757,29 @@ EXPORT_SYMBOL_GPL(tquic_stream_open_incoming);
 void tquic_stream_close(struct tquic_stream *stream)
 {
 	struct tquic_connection *conn = stream->conn;
-	struct sk_buff *skb;
-	unsigned int skb_len;
+	bool removed = false;
 
 	/* H-001: Use streams_lock to match stream creation */
 	spin_lock_bh(&conn->streams_lock);
-	rb_erase(&stream->node, &conn->streams);
+	if (!RB_EMPTY_NODE(&stream->node)) {
+		rb_erase(&stream->node, &conn->streams);
+		RB_CLEAR_NODE(&stream->node);
+		removed = true;
+	}
 	spin_unlock_bh(&conn->streams_lock);
 
-	spin_lock_bh(&conn->lock);
-	conn->stats.streams_closed++;
-	spin_unlock_bh(&conn->lock);
-
-	/* Purge with proper memory accounting */
-	while ((skb = skb_dequeue(&stream->send_buf)) != NULL) {
-		/*
-		 * This stream is being closed while the connection may live on;
-		 * release queued send-data reservation as we drop skbs.
-		 */
-		skb_len = skb->len;
-		if (skb_len) {
-			spin_lock_bh(&conn->lock);
-			if (conn->fc_data_reserved >= skb_len)
-				conn->fc_data_reserved -= skb_len;
-			else
-				conn->fc_data_reserved = 0;
-			spin_unlock_bh(&conn->lock);
-		}
-		if (conn->sk) {
-			sk_mem_uncharge(conn->sk, skb->truesize);
-			/* sk_wmem_alloc handled by skb destructor */
-		}
-		kfree_skb(skb);
-	}
-	while ((skb = skb_dequeue(&stream->recv_buf)) != NULL) {
-		if (conn->sk) {
-			sk_mem_uncharge(conn->sk, skb->truesize);
-			/* sk_rmem_alloc handled by skb destructor */
-		}
-		kfree_skb(skb);
+	if (removed) {
+		spin_lock_bh(&conn->lock);
+		conn->stats.streams_closed++;
+		spin_unlock_bh(&conn->lock);
 	}
 
-	kmem_cache_free(tquic_stream_cache, stream);
+	/*
+	 * Drop tree ownership reference. Any in-flight users that acquired
+	 * their own refs can complete safely before final free.
+	 */
+	if (removed)
+		tquic_stream_put(stream);
 }
 EXPORT_SYMBOL_GPL(tquic_stream_close);
 
