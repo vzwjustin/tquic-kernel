@@ -19,14 +19,7 @@
 #include "../tquic_cid.h"
 #include "../diag/trace.h"
 #include "../tquic_compat.h"
-
-/*
- * SECURITY FIX (CF-098): The global connection hash table is defined
- * in tquic_main.c and exported. We declare it here so that
- * tquic_conn_create() can insert new connections.
- */
-extern struct rhashtable tquic_conn_table;
-extern struct kmem_cache *tquic_conn_cache;
+#include "../protocol.h"
 static const struct rhashtable_params tquic_conn_table_params = {
 	.key_len = sizeof(struct tquic_cid),
 	.key_offset = offsetof(struct tquic_connection, scid),

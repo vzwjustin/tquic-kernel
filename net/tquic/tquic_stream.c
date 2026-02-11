@@ -38,7 +38,6 @@
 extern void tquic_update_pacing(struct sock *sk, struct tquic_path *path);
 
 /* Slab cache for stream objects -- defined in tquic_main.c */
-extern struct kmem_cache *tquic_stream_cache;
 
 /*
  * =============================================================================

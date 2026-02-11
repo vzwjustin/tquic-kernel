@@ -39,7 +39,6 @@
 #include "tquic_compat.h"
 
 /* Slab cache for path objects -- defined in tquic_main.c */
-extern struct kmem_cache *tquic_path_cache;
 
 /* Sysctl accessor forward declaration */
 int tquic_sysctl_get_prefer_preferred_address(void);

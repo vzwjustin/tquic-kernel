@@ -34,7 +34,6 @@
 #include "tquic_ratelimit.h"
 
 /* External reference to global connection table from tquic_main.c */
-extern struct rhashtable tquic_conn_table;
 
 /*
  * =============================================================================

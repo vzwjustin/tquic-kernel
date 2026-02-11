@@ -51,7 +51,6 @@
 
 /* Per-packet RX decryption buffer slab cache (allocated in tquic_main.c) */
 #define TQUIC_RX_BUF_SIZE	2048
-extern struct kmem_cache *tquic_rx_buf_cache;
 
 /* Maximum ACK ranges to prevent resource exhaustion from malicious frames */
 #define TQUIC_MAX_ACK_RANGES		256
