@@ -67,9 +67,9 @@ tquic_migration_get_active_path(struct tquic_connection *conn)
 }
 
 /* Migration constants */
-#define TQUIC_MIGRATION_PTO_MULTIPLIER	3	/* 3x PTO for validation timeout */
-#define TQUIC_MIGRATION_MAX_RETRIES	3	/* Max PATH_CHALLENGE retries */
-#define TQUIC_MIGRATION_DEFAULT_TIMEOUT_MS 1000	/* Default 1s timeout */
+#define TQUIC_MIGRATION_PTO_MULTIPLIER 3 /* 3x PTO for validation timeout */
+#define TQUIC_MIGRATION_MAX_RETRIES 3 /* Max PATH_CHALLENGE retries */
+#define TQUIC_MIGRATION_DEFAULT_TIMEOUT_MS 1000 /* Default 1s timeout */
 
 /*
  * State machine magic numbers for type discrimination.
@@ -77,16 +77,16 @@ tquic_migration_get_active_path(struct tquic_connection *conn)
  * tquic_migration_state or a tquic_session_state.  The magic field
  * (first member of each struct) allows safe down-casting.
  */
-#define TQUIC_SM_MAGIC_MIGRATION	0x4D494752	/* "MIGR" */
-#define TQUIC_SM_MAGIC_SESSION		0x53455353	/* "SESS" */
+#define TQUIC_SM_MAGIC_MIGRATION 0x4D494752 /* "MIGR" */
+#define TQUIC_SM_MAGIC_SESSION 0x53455353 /* "SESS" */
 
 /* Path quality degradation thresholds */
-#define TQUIC_PATH_DEGRADED_RTT_MULT	3	/* RTT > 3x min_rtt = degraded */
-#define TQUIC_PATH_DEGRADED_LOSS_PCT	10	/* >10% loss = degraded */
-#define TQUIC_PATH_PROBE_TIMEOUT_MS	100	/* Probe interval when degraded */
+#define TQUIC_PATH_DEGRADED_RTT_MULT 3 /* RTT > 3x min_rtt = degraded */
+#define TQUIC_PATH_DEGRADED_LOSS_PCT 10 /* >10% loss = degraded */
+#define TQUIC_PATH_PROBE_TIMEOUT_MS 100 /* Probe interval when degraded */
 
 /* Anti-amplification limit per RFC 9000 Section 8 */
-#define TQUIC_ANTI_AMPLIFICATION_LIMIT	3	/* Max 3x amplification */
+#define TQUIC_ANTI_AMPLIFICATION_LIMIT 3 /* Max 3x amplification */
 
 /**
  * tquic_path_anti_amplification_check - Check if send is allowed
@@ -104,7 +104,7 @@ bool tquic_path_anti_amplification_check(struct tquic_path *path, u64 bytes)
 	u64 limit;
 	u64 sent, received, new_sent;
 
-	if (!path->anti_amplification.active)
+	if (!READ_ONCE(path->anti_amplification.active))
 		return true;
 
 	/*
@@ -112,7 +112,8 @@ bool tquic_path_anti_amplification_check(struct tquic_path *path, u64 bytes)
 	 * preventing TOCTOU race (CF-439, CF-461).
 	 */
 	do {
-		received = atomic64_read(&path->anti_amplification.bytes_received);
+		received =
+			atomic64_read(&path->anti_amplification.bytes_received);
 		sent = atomic64_read(&path->anti_amplification.bytes_sent);
 
 		/*
@@ -131,8 +132,8 @@ bool tquic_path_anti_amplification_check(struct tquic_path *path, u64 bytes)
 				 path->path_id, sent, received, limit);
 			return false;
 		}
-	} while (atomic64_cmpxchg(&path->anti_amplification.bytes_sent,
-				   sent, new_sent) != sent);
+	} while (atomic64_cmpxchg(&path->anti_amplification.bytes_sent, sent,
+				  new_sent) != sent);
 
 	return true;
 }
@@ -150,7 +151,7 @@ void tquic_path_anti_amplification_sent(struct tquic_path *path, u64 bytes)
 	 * bytes were already added atomically in the check. Only call this
 	 * for bytes sent without a prior check (e.g., mandatory frames).
 	 */
-	if (path->anti_amplification.active)
+	if (READ_ONCE(path->anti_amplification.active))
 		atomic64_add(bytes, &path->anti_amplification.bytes_sent);
 }
 EXPORT_SYMBOL_GPL(tquic_path_anti_amplification_sent);
@@ -162,7 +163,7 @@ EXPORT_SYMBOL_GPL(tquic_path_anti_amplification_sent);
  */
 void tquic_path_anti_amplification_received(struct tquic_path *path, u64 bytes)
 {
-	if (path->anti_amplification.active)
+	if (READ_ONCE(path->anti_amplification.active))
 		atomic64_add(bytes, &path->anti_amplification.bytes_received);
 }
 EXPORT_SYMBOL_GPL(tquic_path_anti_amplification_received);
@@ -307,13 +308,15 @@ static bool tquic_path_is_degraded(struct tquic_path *path)
 
 	/* Check RTT degradation */
 	if (stats->rtt_min > 0 && stats->rtt_smoothed > 0) {
-		if (stats->rtt_smoothed > stats->rtt_min * TQUIC_PATH_DEGRADED_RTT_MULT)
+		if (stats->rtt_smoothed >
+		    stats->rtt_min * TQUIC_PATH_DEGRADED_RTT_MULT)
 			return true;
 	}
 
 	/* Check packet loss -- use div64_u64 to avoid overflow */
 	if (stats->tx_packets > 100) {
-		loss_rate = div64_u64(stats->lost_packets * 100, stats->tx_packets);
+		loss_rate =
+			div64_u64(stats->lost_packets * 100, stats->tx_packets);
 		if (loss_rate > TQUIC_PATH_DEGRADED_LOSS_PCT)
 			return true;
 	}
@@ -330,7 +333,7 @@ static bool tquic_path_is_degraded(struct tquic_path *path)
 static u64 tquic_path_compute_score(struct tquic_path *path)
 {
 	struct tquic_path_stats *stats = &path->stats;
-	u64 score = 1000000;  /* Base score */
+	u64 score = 1000000; /* Base score */
 
 	/* Only consider validated or active paths */
 	if (path->state != TQUIC_PATH_ACTIVE &&
@@ -353,8 +356,8 @@ static u64 tquic_path_compute_score(struct tquic_path *path)
 
 	/* Penalize for loss */
 	if (stats->tx_packets > 0 && stats->lost_packets > 0) {
-		u64 loss_pct = div64_u64(stats->lost_packets * 100,
-					 stats->tx_packets);
+		u64 loss_pct =
+			div64_u64(stats->lost_packets * 100, stats->tx_packets);
 		score = div64_u64(score * (100 - min(loss_pct, 90ULL)), 100);
 	}
 
@@ -478,21 +481,21 @@ struct tquic_path *tquic_path_create(struct tquic_connection *conn,
 
 	/* Copy addresses */
 	memcpy(&path->local_addr, local,
-	       local->ss_family == AF_INET ?
-	       sizeof(struct sockaddr_in) : sizeof(struct sockaddr_in6));
+	       local->ss_family == AF_INET ? sizeof(struct sockaddr_in) :
+					     sizeof(struct sockaddr_in6));
 	memcpy(&path->remote_addr, remote,
-	       remote->ss_family == AF_INET ?
-	       sizeof(struct sockaddr_in) : sizeof(struct sockaddr_in6));
+	       remote->ss_family == AF_INET ? sizeof(struct sockaddr_in) :
+					      sizeof(struct sockaddr_in6));
 
 	/* Initialize with conservative estimates */
-	path->stats.rtt_smoothed = TQUIC_DEFAULT_RTT * 1000;  /* 100ms default */
+	path->stats.rtt_smoothed = TQUIC_DEFAULT_RTT * 1000; /* 100ms default */
 	path->stats.rtt_variance = path->stats.rtt_smoothed / 2;
-	path->stats.cwnd = 14720;  /* Initial cwnd */
+	path->stats.cwnd = 14720; /* Initial cwnd */
 
 	/* Default weight and priority */
 	path->weight = 1;
 	path->priority = 0;
-	path->mtu = 1200;  /* QUIC minimum */
+	path->mtu = 1200; /* QUIC minimum */
 
 	/* Initialize validation timers */
 	timer_setup(&path->validation_timer, tquic_path_validation_expired, 0);
@@ -517,7 +520,7 @@ struct tquic_path *tquic_path_create(struct tquic_connection *conn,
 	/* Initialize congestion control */
 	if (tquic_cong_init_path(path, NULL) < 0)
 		tquic_dbg("CC init failed for path %u (non-fatal)\n",
-			 path->path_id);
+			  path->path_id);
 
 	/* Add to connection's path list */
 	spin_lock_bh(&conn->paths_lock);
@@ -653,8 +656,8 @@ static void tquic_migration_work_handler(struct work_struct *work);
  *
  * Returns: New migration state or NULL on failure
  */
-static struct tquic_migration_state *tquic_migration_state_alloc(
-	struct tquic_connection *conn)
+static struct tquic_migration_state *
+tquic_migration_state_alloc(struct tquic_connection *conn)
 {
 	struct tquic_migration_state *ms;
 
@@ -699,7 +702,7 @@ static void tquic_migration_timeout(struct timer_list *t)
 	if (ms->retries >= TQUIC_MIGRATION_MAX_RETRIES) {
 		/* Migration failed */
 		tquic_warn("migration to path %u failed after %u retries\n",
-			path->path_id, ms->retries);
+			   path->path_id, ms->retries);
 
 		ms->status = TQUIC_MIGRATE_FAILED;
 		ms->error_code = EQUIC_NO_VIABLE_PATH;
@@ -716,13 +719,13 @@ static void tquic_migration_timeout(struct timer_list *t)
 
 	/* Retry PATH_CHALLENGE */
 	tquic_dbg("retrying PATH_CHALLENGE on path %u (attempt %u)\n",
-		 path->path_id, ms->retries + 1);
+		  path->path_id, ms->retries + 1);
 
 	tquic_migration_send_path_challenge(conn, path);
 
 	/* Reschedule timeout */
-	mod_timer(&ms->timer, jiffies +
-		  usecs_to_jiffies(tquic_migration_timeout_us(path)));
+	mod_timer(&ms->timer,
+		  jiffies + usecs_to_jiffies(tquic_migration_timeout_us(path)));
 }
 
 /**
@@ -765,7 +768,7 @@ static void tquic_migration_work_handler(struct work_struct *work)
 		spin_unlock_bh(&conn->lock);
 
 		tquic_info("migration complete to path %u (RTT: %u us)\n",
-			new_path->path_id, ms->probe_rtt);
+			   new_path->path_id, ms->probe_rtt);
 
 		/* Demote old path to standby */
 		if (old_path && old_path != new_path) {
@@ -824,8 +827,7 @@ static void tquic_migration_work_handler(struct work_struct *work)
  *
  * Returns: 0 on success, negative errno on failure
  */
-int tquic_migrate_auto(struct tquic_connection *conn,
-		       struct tquic_path *path,
+int tquic_migrate_auto(struct tquic_connection *conn, struct tquic_path *path,
 		       struct sockaddr_storage *new_addr)
 {
 	struct tquic_migration_state *ms;
@@ -893,7 +895,8 @@ int tquic_migrate_auto(struct tquic_connection *conn,
 			/* Validate the new address */
 			ret = tquic_path_start_validation(conn, path);
 			if (ret < 0) {
-				tquic_dbg("NAT rebind validation failed: %d\n", ret);
+				tquic_dbg("NAT rebind validation failed: %d\n",
+					  ret);
 				/* Restore previous state on failure */
 				spin_lock_bh(&conn->paths_lock);
 				if (path->saved_state != TQUIC_PATH_UNUSED) {
@@ -1021,8 +1024,9 @@ int tquic_migrate_auto(struct tquic_connection *conn,
 
 	/* Set up timeout timer */
 	ms->timer.function = tquic_migration_timeout;
-	mod_timer(&ms->timer, jiffies +
-		  usecs_to_jiffies(tquic_migration_timeout_us(best_path)));
+	mod_timer(&ms->timer,
+		  jiffies + usecs_to_jiffies(
+				    tquic_migration_timeout_us(best_path)));
 
 	tquic_info("auto-migration started to path %u\n", best_path->path_id);
 
@@ -1051,8 +1055,7 @@ EXPORT_SYMBOL_GPL(tquic_migrate_auto);
  * Returns: 0 on success (migration started), negative errno on failure
  */
 int tquic_migrate_explicit(struct tquic_connection *conn,
-			   struct sockaddr_storage *new_local,
-			   u32 flags)
+			   struct sockaddr_storage *new_local, u32 flags)
 {
 	struct tquic_migration_state *ms;
 	struct tquic_path *new_path;
@@ -1092,7 +1095,8 @@ int tquic_migrate_explicit(struct tquic_connection *conn,
 		apath = tquic_migration_get_active_path(conn);
 		if (apath && !tquic_path_is_degraded(apath)) {
 			tquic_path_put(apath);
-			tquic_dbg("explicit migration rejected - current path OK\n");
+			tquic_dbg(
+				"explicit migration rejected - current path OK\n");
 			return -EALREADY;
 		}
 		if (apath)
@@ -1219,11 +1223,12 @@ int tquic_migrate_explicit(struct tquic_connection *conn,
 
 	/* Set up timeout timer */
 	ms->timer.function = tquic_migration_timeout;
-	mod_timer(&ms->timer, jiffies +
-		  usecs_to_jiffies(tquic_migration_timeout_us(new_path)));
+	mod_timer(&ms->timer,
+		  jiffies + usecs_to_jiffies(
+				    tquic_migration_timeout_us(new_path)));
 
 	tquic_info("explicit migration started to path %u (flags=0x%x)\n",
-		new_path->path_id, flags);
+		   new_path->path_id, flags);
 
 	return 0;
 }
@@ -1415,7 +1420,7 @@ int tquic_migration_handle_path_response(struct tquic_connection *conn,
 	spin_unlock_bh(&ms->lock);
 
 	tquic_info("migration validated for path %u (RTT: %u us)\n",
-		path->path_id, ms->probe_rtt);
+		   path->path_id, ms->probe_rtt);
 
 	/* Schedule deferred migration completion */
 	schedule_work(&ms->work);
@@ -1457,12 +1462,12 @@ int tquic_server_handle_migration(struct tquic_connection *conn,
 	}
 
 	tquic_dbg("handling server-side migration for path %u\n",
-		 path->path_id);
+		  path->path_id);
 
 	/* Check if this is NAT rebinding (same CID, different address) */
 	if (!sockaddr_equal(&path->remote_addr, new_remote)) {
 		tquic_info("detected NAT rebinding on path %u\n",
-			path->path_id);
+			   path->path_id);
 
 		/*
 		 * Update path's remote address.
@@ -1591,7 +1596,7 @@ static void tquic_session_ttl_expired(struct timer_list *t)
 	conn = state->conn;
 
 	tquic_info("session TTL expired for connection token=%u\n",
-		conn->token);
+		   conn->token);
 
 	/* Close connection - all paths failed and TTL expired */
 	tquic_conn_close_with_error(conn, EQUIC_NO_VIABLE_PATH,
@@ -1621,7 +1626,7 @@ int tquic_server_start_session_ttl(struct tquic_connection *conn)
 	if (client)
 		ttl_ms = client->session_ttl;
 	else
-		ttl_ms = 120000;  /* Default 120s */
+		ttl_ms = 120000; /* Default 120s */
 
 	/* Check if we already have session state */
 	if (conn->state_machine) {
@@ -1637,7 +1642,7 @@ int tquic_server_start_session_ttl(struct tquic_connection *conn)
 	state->conn = conn;
 	state->start_time = ktime_get();
 	state->ttl_ms = ttl_ms;
-	state->queue_timeout_ms = 30000;  /* 30s per CONTEXT.md */
+	state->queue_timeout_ms = 30000; /* 30s per CONTEXT.md */
 	skb_queue_head_init(&state->packet_queue);
 
 	timer_setup(&state->timer, tquic_session_ttl_expired, 0);
@@ -1646,7 +1651,7 @@ int tquic_server_start_session_ttl(struct tquic_connection *conn)
 	conn->state_machine = state;
 
 	tquic_info("session TTL started for connection token=%u (ttl=%ums)\n",
-		conn->token, ttl_ms);
+		   conn->token, ttl_ms);
 
 	return 0;
 }
@@ -1665,8 +1670,7 @@ int tquic_server_session_resume(struct tquic_connection *conn,
 	if (!state)
 		return 0;
 
-	tquic_info("session resumed for connection token=%u\n",
-		conn->token);
+	tquic_info("session resumed for connection token=%u\n", conn->token);
 
 	/* Cancel TTL timer */
 	del_timer_sync(&state->timer);
@@ -1757,7 +1761,7 @@ restart:
 				tquic_path_start_validation(conn, path);
 
 				tquic_dbg("attempting path %u recovery\n",
-					 path->path_id);
+					  path->path_id);
 
 				tquic_path_put(path);
 				goto restart;
@@ -1823,7 +1827,8 @@ int tquic_migrate_to_preferred_address(struct tquic_connection *conn)
 	 * contains the server's preferred address(es), connection ID, and
 	 * stateless reset token. The client stores this for migration.
 	 */
-	pref_migration = (struct tquic_pref_addr_migration *)conn->preferred_addr;
+	pref_migration =
+		(struct tquic_pref_addr_migration *)conn->preferred_addr;
 
 	/*
 	 * Validate preferred address is available.
@@ -1837,7 +1842,7 @@ int tquic_migrate_to_preferred_address(struct tquic_connection *conn)
 
 	if (pref_migration->state != TQUIC_PREF_ADDR_AVAILABLE) {
 		tquic_dbg("preferred address not available (state=%d)\n",
-			 pref_migration->state);
+			  pref_migration->state);
 		return -ENOENT;
 	}
 
@@ -1854,7 +1859,8 @@ int tquic_migrate_to_preferred_address(struct tquic_connection *conn)
 	 */
 	ret = tquic_pref_addr_client_select_address(conn, &family);
 	if (ret < 0) {
-		tquic_dbg("failed to select preferred address family: %d\n", ret);
+		tquic_dbg("failed to select preferred address family: %d\n",
+			  ret);
 		return ret;
 	}
 
@@ -1862,14 +1868,16 @@ int tquic_migrate_to_preferred_address(struct tquic_connection *conn)
 	memset(&remote_addr, 0, sizeof(remote_addr));
 	if (family == AF_INET) {
 		struct sockaddr_in *sin = (struct sockaddr_in *)&remote_addr;
-		memcpy(sin, &pref_migration->server_addr.ipv4_addr, sizeof(*sin));
+		memcpy(sin, &pref_migration->server_addr.ipv4_addr,
+		       sizeof(*sin));
 		tquic_dbg("migrating to preferred IPv4 address %pI4:%u\n",
-			 &sin->sin_addr, ntohs(sin->sin_port));
+			  &sin->sin_addr, ntohs(sin->sin_port));
 	} else {
 		struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)&remote_addr;
-		memcpy(sin6, &pref_migration->server_addr.ipv6_addr, sizeof(*sin6));
+		memcpy(sin6, &pref_migration->server_addr.ipv6_addr,
+		       sizeof(*sin6));
 		tquic_dbg("migrating to preferred IPv6 address %pI6c:%u\n",
-			 &sin6->sin6_addr, ntohs(sin6->sin6_port));
+			  &sin6->sin6_addr, ntohs(sin6->sin6_port));
 	}
 
 	/*
@@ -1877,12 +1885,12 @@ int tquic_migrate_to_preferred_address(struct tquic_connection *conn)
 	 * Per RFC 9000 Section 9.6, use the CID provided in the preferred_address
 	 * transport parameter for the new path.
 	 */
-	new_path = tquic_pref_addr_create_path(conn, &remote_addr,
-					       &pref_migration->server_addr.cid,
-					       pref_migration->server_addr.reset_token);
+	new_path = tquic_pref_addr_create_path(
+		conn, &remote_addr, &pref_migration->server_addr.cid,
+		pref_migration->server_addr.reset_token);
 	if (IS_ERR(new_path)) {
 		tquic_err("failed to create path for preferred address: %ld\n",
-		       PTR_ERR(new_path));
+			  PTR_ERR(new_path));
 		return PTR_ERR(new_path);
 	}
 
@@ -1899,7 +1907,9 @@ int tquic_migrate_to_preferred_address(struct tquic_connection *conn)
 	 */
 	ret = tquic_pref_addr_validate_path(conn, new_path);
 	if (ret < 0) {
-		tquic_err("failed to start preferred address path validation: %d\n", ret);
+		tquic_err(
+			"failed to start preferred address path validation: %d\n",
+			ret);
 		pref_migration->state = TQUIC_PREF_ADDR_FAILED;
 		pref_migration->validation_failures++;
 		tquic_path_free(new_path);
@@ -1908,7 +1918,7 @@ int tquic_migrate_to_preferred_address(struct tquic_connection *conn)
 	}
 
 	tquic_info("started migration to preferred address (family=%s)\n",
-		family == AF_INET ? "IPv4" : "IPv6");
+		   family == AF_INET ? "IPv4" : "IPv6");
 
 	return 0;
 }
@@ -1963,8 +1973,9 @@ EXPORT_SYMBOL_GPL(tquic_migration_on_handshake_complete);
  *
  * Return: 0 on success, negative errno on failure
  */
-int tquic_migrate_to_additional_address(struct tquic_connection *conn,
-					struct tquic_additional_address *addr_entry)
+int tquic_migrate_to_additional_address(
+	struct tquic_connection *conn,
+	struct tquic_additional_address *addr_entry)
 {
 	struct tquic_migration_state *ms;
 	struct tquic_path *new_path;
@@ -1983,7 +1994,8 @@ int tquic_migrate_to_additional_address(struct tquic_connection *conn,
 	 * is subject to the disable_active_migration flag.
 	 */
 	if (conn->migration_disabled) {
-		tquic_dbg("additional address migration rejected - migration disabled\n");
+		tquic_dbg(
+			"additional address migration rejected - migration disabled\n");
 		return -EPERM;
 	}
 
@@ -2006,8 +2018,7 @@ int tquic_migrate_to_additional_address(struct tquic_connection *conn,
 	/* Get local address from current path */
 	old_path = tquic_migration_get_active_path(conn);
 	if (old_path) {
-		memcpy(&local_addr, &old_path->local_addr,
-		       sizeof(local_addr));
+		memcpy(&local_addr, &old_path->local_addr, sizeof(local_addr));
 	} else {
 		memset(&local_addr, 0, sizeof(local_addr));
 		local_addr.ss_family = addr_entry->addr.ss_family;
@@ -2091,14 +2102,15 @@ int tquic_migrate_to_additional_address(struct tquic_connection *conn,
 
 	/* Set up timeout timer */
 	ms->timer.function = tquic_migration_timeout;
-	mod_timer(&ms->timer, jiffies +
-		  usecs_to_jiffies(tquic_migration_timeout_us(new_path)));
+	mod_timer(&ms->timer,
+		  jiffies + usecs_to_jiffies(
+				    tquic_migration_timeout_us(new_path)));
 
 	/* Mark address as in use */
 	addr_entry->last_used = ktime_get();
 
 	tquic_info("started migration to additional address (IPv%u)\n",
-		addr_entry->ip_version);
+		   addr_entry->ip_version);
 
 	return 0;
 }
@@ -2114,8 +2126,8 @@ EXPORT_SYMBOL_GPL(tquic_migrate_to_additional_address);
  *
  * Return: 0 on success, negative errno on failure
  */
-int tquic_migrate_select_additional_address(struct tquic_connection *conn,
-					    enum tquic_addr_select_policy policy)
+int tquic_migrate_select_additional_address(
+	struct tquic_connection *conn, enum tquic_addr_select_policy policy)
 {
 	struct tquic_additional_addresses *remote_addrs;
 	struct tquic_additional_address *selected;
@@ -2179,7 +2191,8 @@ int tquic_migrate_additional_addr_on_validated(struct tquic_connection *conn,
 
 	/* Find the address entry for this path */
 	spin_lock_bh(&remote_addrs->lock);
-	addr_entry = tquic_additional_addr_find(remote_addrs, &path->remote_addr);
+	addr_entry =
+		tquic_additional_addr_find(remote_addrs, &path->remote_addr);
 	if (addr_entry) {
 		/* Mark as validated */
 		tquic_additional_addr_validate(addr_entry);
@@ -2190,7 +2203,7 @@ int tquic_migrate_additional_addr_on_validated(struct tquic_connection *conn,
 			tquic_additional_addr_update_rtt(addr_entry, rtt_us);
 
 		tquic_dbg("additional address validated (RTT: %u us)\n",
-			 rtt_us);
+			  rtt_us);
 	}
 	spin_unlock_bh(&remote_addrs->lock);
 
@@ -2208,8 +2221,7 @@ EXPORT_SYMBOL_GPL(tquic_migrate_additional_addr_on_validated);
  * Marks the address as invalid.
  */
 void tquic_migrate_additional_addr_on_failed(struct tquic_connection *conn,
-					     struct tquic_path *path,
-					     int error)
+					     struct tquic_path *path, int error)
 {
 	struct tquic_additional_addresses *remote_addrs;
 	struct tquic_additional_address *addr_entry;
@@ -2223,11 +2235,12 @@ void tquic_migrate_additional_addr_on_failed(struct tquic_connection *conn,
 
 	/* Find and invalidate the address entry */
 	spin_lock_bh(&remote_addrs->lock);
-	addr_entry = tquic_additional_addr_find(remote_addrs, &path->remote_addr);
+	addr_entry =
+		tquic_additional_addr_find(remote_addrs, &path->remote_addr);
 	if (addr_entry) {
 		tquic_additional_addr_invalidate(addr_entry);
 		tquic_warn("additional address validation failed (error: %d)\n",
-			error);
+			   error);
 	}
 	spin_unlock_bh(&remote_addrs->lock);
 }
@@ -2289,7 +2302,7 @@ int tquic_migrate_validate_all_additional(struct tquic_connection *conn)
 			if (ret == 0) {
 				count++;
 				tquic_dbg("probing additional address %d\n",
-					 count);
+					  count);
 			} else {
 				tquic_path_free(probe_path);
 			}
@@ -2300,7 +2313,7 @@ int tquic_migrate_validate_all_additional(struct tquic_connection *conn)
 	spin_unlock_bh(&remote_addrs->lock);
 
 	tquic_info("started validation probes to %d additional addresses\n",
-		count);
+		   count);
 
 	return count;
 }

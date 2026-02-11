@@ -97,8 +97,9 @@ static struct workqueue_struct *tquic_bond_wq;
  * Count paths by state from path manager
  * Must be called with bc->state_lock held or from callback context
  */
-static void __maybe_unused tquic_bonding_count_paths(struct tquic_bonding_ctx *bc, int *active,
-				      int *pending, int *failed, int *degraded)
+static void __maybe_unused
+tquic_bonding_count_paths(struct tquic_bonding_ctx *bc, int *active,
+			  int *pending, int *failed, int *degraded)
 {
 	struct tquic_path *paths[TQUIC_MAX_PATHS];
 	int count, i;
@@ -247,9 +248,8 @@ static void tquic_bonding_set_state(struct tquic_bonding_ctx *bc,
 
 	tquic_info("bond state: %s -> %s (active=%d pending=%d failed=%d)\n",
 		   tquic_bonding_state_names[old_state],
-		   tquic_bonding_state_names[new_state],
-		   bc->active_path_count, bc->pending_path_count,
-		   bc->failed_path_count);
+		   tquic_bonding_state_names[new_state], bc->active_path_count,
+		   bc->pending_path_count, bc->failed_path_count);
 }
 
 /*
@@ -269,9 +269,8 @@ static void tquic_bonding_weight_work_fn(struct work_struct *work)
  */
 static void tquic_bonding_schedule_weight_update(struct tquic_bonding_ctx *bc)
 {
-	if (tquic_bond_wq &&
-	    !test_and_set_bit(TQUIC_BOND_WEIGHT_UPDATE_PENDING,
-			      &bc->async_flags)) {
+	if (tquic_bond_wq && !test_and_set_bit(TQUIC_BOND_WEIGHT_UPDATE_PENDING,
+					       &bc->async_flags)) {
 		queue_work(tquic_bond_wq, &bc->weight_work);
 	}
 }
@@ -467,9 +466,22 @@ void tquic_bonding_update_state(struct tquic_bonding_ctx *bc)
 
 		/* Free reorder buffer when returning to SINGLE_PATH */
 		if (new_state == TQUIC_BOND_SINGLE_PATH && bc->reorder) {
-			/* Defer free to avoid holding lock */
+			struct tquic_reorder_buffer *old_reorder;
+
+			/*
+			 * Bug 4 fix: Capture and NULL the pointer under
+			 * state_lock BEFORE dropping it, so concurrent
+			 * readers (alloc_reorder's bc->reorder != NULL
+			 * check) see NULL immediately. This eliminates
+			 * the TOCTOU race window.
+			 */
+			old_reorder = bc->reorder;
+			bc->reorder = NULL;
+
+			/* Drop lock for synchronize_rcu + destroy */
 			spin_unlock_bh(&bc->state_lock);
-			tquic_bonding_free_reorder(bc);
+			synchronize_rcu();
+			tquic_reorder_destroy(old_reorder);
 			spin_lock_bh(&bc->state_lock);
 
 			/*
@@ -501,6 +513,24 @@ void tquic_bonding_update_state(struct tquic_bonding_ctx *bc)
 
 			if (bc->state == new_state)
 				goto out_unlock;
+
+			/*
+			 * Bug 16 fix: If re-eval moved us back to a
+			 * multi-path state, we need the reorder buffer
+			 * that we just freed. Re-allocate it.
+			 */
+			if ((new_state == TQUIC_BOND_ACTIVE ||
+			     new_state == TQUIC_BOND_DEGRADED) &&
+			    !bc->reorder) {
+				int ret = tquic_bonding_alloc_reorder(bc);
+
+				if (ret) {
+					pr_warn("bonding: failed to re-alloc reorder buffer (%d)\n",
+						ret);
+					bc->flags |=
+						TQUIC_BOND_F_REORDER_DISABLED;
+				}
+			}
 		}
 
 		tquic_bonding_set_state(bc, new_state);
@@ -598,7 +628,8 @@ void tquic_bonding_derive_weights(struct tquic_bonding_ctx *bc)
 		 * If RTT is zero (no measurements yet), use default weight.
 		 */
 		if (rtt > 0 && cwnd > 0)
-			capacity[i] = div64_u64(cwnd * USEC_PER_SEC, rtt);
+			capacity[i] =
+				mul_u64_u64_div_u64(cwnd, USEC_PER_SEC, rtt);
 		else
 			capacity[i] = TQUIC_DEFAULT_PATH_WEIGHT;
 
@@ -692,8 +723,7 @@ int tquic_bonding_set_path_weight(struct tquic_bonding_ctx *bc, u8 path_id,
 	bc->weights.total_weight = 0;
 	for (i = 0; i < TQUIC_MAX_PATHS; i++) {
 		if (i < bc->active_path_count || bc->weights.user_override[i])
-			bc->weights.total_weight +=
-				bc->weights.path_weights[i];
+			bc->weights.total_weight += bc->weights.path_weights[i];
 	}
 
 	spin_unlock_bh(&bc->state_lock);

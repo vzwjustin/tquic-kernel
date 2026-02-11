@@ -58,8 +58,8 @@ struct lock_class_key tquic_stream_lock_key;
  */
 static void tquic_set_lockdep_class(struct sock *sk, bool is_ipv6)
 {
-	sock_lock_init_class_and_name(sk,
-		is_ipv6 ? "slock-AF_INET6-TQUIC" : "slock-AF_INET-TQUIC",
+	sock_lock_init_class_and_name(
+		sk, is_ipv6 ? "slock-AF_INET6-TQUIC" : "slock-AF_INET-TQUIC",
 		&tquic_slock_keys[is_ipv6],
 		is_ipv6 ? "sk_lock-AF_INET6-TQUIC" : "sk_lock-AF_INET-TQUIC",
 		&tquic_lock_keys[is_ipv6]);
@@ -73,8 +73,8 @@ int tquic_connect_socket(struct socket *sock, TQUIC_SOCKADDR *uaddr,
 int tquic_accept_socket(struct socket *sock, struct socket *newsock,
 			struct proto_accept_arg *arg);
 #else
-int tquic_accept_socket(struct socket *sock, struct socket *newsock,
-			int flags, bool kern);
+int tquic_accept_socket(struct socket *sock, struct socket *newsock, int flags,
+			bool kern);
 #endif
 int tquic_sock_getname(struct socket *sock, struct sockaddr *addr, int peer);
 __poll_t tquic_poll_socket(struct file *file, struct socket *sock,
@@ -85,16 +85,15 @@ int tquic_sock_setsockopt(struct socket *sock, int level, int optname,
 			  sockptr_t optval, unsigned int optlen);
 int tquic_sock_getsockopt(struct socket *sock, int level, int optname,
 			  char __user *optval, int __user *optlen);
-int tquic_sendmsg_socket(struct socket *sock, struct msghdr *msg,
-			 size_t len);
-int tquic_recvmsg_socket(struct socket *sock, struct msghdr *msg,
-			 size_t len, int flags);
+int tquic_sendmsg_socket(struct socket *sock, struct msghdr *msg, size_t len);
+int tquic_recvmsg_socket(struct socket *sock, struct msghdr *msg, size_t len,
+			 int flags);
 int tquic_sock_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg);
 
 /* Zero-copy operations (exported) */
 ssize_t tquic_splice_read_socket(struct socket *sock, loff_t *ppos,
-				 struct pipe_inode_info *pipe,
-				 size_t len, unsigned int flags);
+				 struct pipe_inode_info *pipe, size_t len,
+				 unsigned int flags);
 
 /* Protocol operations */
 int tquic_init_sock(struct sock *sk);
@@ -169,12 +168,12 @@ void tquic_destroy_sock(struct sock *sk)
 	if (tsk->conn) {
 		struct tquic_connection *conn = tsk->conn;
 
-			if (conn->scheduler &&
-			    test_bit(TQUIC_F_BONDING_ENABLED, &conn->flags)) {
-				tquic_bond_cleanup(conn->scheduler);
-				conn->scheduler = NULL;
-				clear_bit(TQUIC_F_BONDING_ENABLED, &conn->flags);
-			}
+		if (conn->scheduler &&
+		    test_bit(TQUIC_F_BONDING_ENABLED, &conn->flags)) {
+			tquic_bond_cleanup(conn->scheduler);
+			conn->scheduler = NULL;
+			clear_bit(TQUIC_F_BONDING_ENABLED, &conn->flags);
+		}
 		/*
 		 * CF-051: Use WRITE_ONCE to publish NULL to concurrent
 		 * readers in poll/sendmsg/recvmsg that use READ_ONCE.
@@ -206,8 +205,8 @@ int tquic_sock_bind(struct socket *sock, TQUIC_SOCKADDR *uaddr, int addr_len)
 	 */
 	lock_sock(sk);
 
-	memcpy(&tsk->bind_addr, addr, min_t(size_t, addr_len,
-					    sizeof(struct sockaddr_storage)));
+	memcpy(&tsk->bind_addr, addr,
+	       min_t(size_t, addr_len, sizeof(struct sockaddr_storage)));
 
 	inet_sk_set_state(sk, TCP_CLOSE);
 
@@ -336,7 +335,7 @@ int tquic_connect(struct sock *sk, TQUIC_SOCKADDR *uaddr, int addr_len)
 		 * features will be unavailable for this connection.
 		 */
 		pr_notice("tquic: connection using single-path mode\n");
-		ret = 0;  /* Not fatal */
+		ret = 0; /* Not fatal */
 	}
 
 	release_sock(sk);
@@ -403,7 +402,7 @@ int tquic_sock_listen(struct socket *sock, int backlog)
 
 	/* Transition to listen state */
 	inet_sk_set_state(sk, TCP_LISTEN);
-	sock->state = SS_CONNECTED;  /* Mark as ready for accept */
+	sock->state = SS_CONNECTED; /* Mark as ready for accept */
 
 	tquic_dbg("listening on socket, backlog=%d\n", backlog);
 	ret = 0;
@@ -438,8 +437,8 @@ int tquic_accept_socket(struct socket *sock, struct socket *newsock,
 	return 0;
 }
 #else
-int tquic_accept_socket(struct socket *sock, struct socket *newsock,
-			int flags, bool kern)
+int tquic_accept_socket(struct socket *sock, struct socket *newsock, int flags,
+			bool kern)
 {
 	struct sock *sk = sock->sk;
 	struct sock *newsk;
@@ -579,7 +578,7 @@ int tquic_sock_getname(struct socket *sock, struct sockaddr *addr, int peer)
  * Poll for events
  */
 __poll_t tquic_poll_socket(struct file *file, struct socket *sock,
-			  poll_table *wait)
+			   poll_table *wait)
 {
 	return tquic_poll(file, sock, wait);
 }
@@ -779,7 +778,7 @@ int tquic_sock_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 		}
 
 		tquic_dbg("ioctl NEW_STREAM returned fd=%d stream_id=%llu\n",
-			 ret, stream_id);
+			  ret, stream_id);
 
 		/* Return the file descriptor */
 		goto out;
@@ -903,7 +902,8 @@ int tquic_sock_setsockopt(struct socket *sock, int level, int optname,
 		}
 
 		/* Bonding context accessed via path manager */
-		ret = tquic_bond_set_path_weight(tsk->conn, args.path_id, args.weight);
+		ret = tquic_bond_set_path_weight(tsk->conn, args.path_id,
+						 args.weight);
 		release_sock(sk);
 		return ret;
 	}
@@ -949,15 +949,14 @@ int tquic_sock_setsockopt(struct socket *sock, int level, int optname,
 		}
 
 		/* CF-208: Validate known flags only */
-		if (args.flags & ~(TQUIC_MIGRATE_FLAG_PROBE_ONLY |
-				   TQUIC_MIGRATE_FLAG_FORCE))
+		if (args.flags &
+		    ~(TQUIC_MIGRATE_FLAG_PROBE_ONLY | TQUIC_MIGRATE_FLAG_FORCE))
 			return -EINVAL;
 
 		lock_sock(sk);
 		if (tsk->conn) {
-			ret = tquic_migrate_explicit(tsk->conn,
-						     &args.local_addr,
-						     args.flags);
+			ret = tquic_migrate_explicit(
+				tsk->conn, &args.local_addr, args.flags);
 		} else {
 			ret = -ENOTCONN;
 		}
@@ -1004,20 +1003,18 @@ int tquic_sock_setsockopt(struct socket *sock, int level, int optname,
 		 * Must be called before connect/listen.
 		 * Check connection state if one exists.
 		 */
-		if (tsk->conn && READ_ONCE(tsk->conn->state) != TQUIC_CONN_IDLE) {
+		if (tsk->conn &&
+		    READ_ONCE(tsk->conn->state) != TQUIC_CONN_IDLE) {
 			ret = -EISCONN;
-			} else if (tsk->conn) {
-				/*
-				 * Keep the requested scheduler name for future
-				 * integration, but preserve the active bonding
-				 * scheduler state stored in conn->scheduler.
-				 */
-				strscpy(tsk->requested_scheduler, name,
-					sizeof(tsk->requested_scheduler));
-			} else {
-				/* No connection yet, store for later when connection is created */
-				strscpy(tsk->requested_scheduler, name,
-					sizeof(tsk->requested_scheduler));
+		} else {
+			/*
+			 * Store the requested scheduler name. If a connection
+			 * already exists (IDLE state), it will be applied when
+			 * the scheduler is next evaluated. Otherwise, it is
+			 * saved for when the connection is created.
+			 */
+			strscpy(tsk->requested_scheduler, name,
+				sizeof(tsk->requested_scheduler));
 		}
 		release_sock(sk);
 		return ret;
@@ -1128,7 +1125,8 @@ int tquic_sock_setsockopt(struct socket *sock, int level, int optname,
 		 * Must be set before connect().
 		 */
 		lock_sock(sk);
-		if (tsk->conn && READ_ONCE(tsk->conn->state) != TQUIC_CONN_IDLE) {
+		if (tsk->conn &&
+		    READ_ONCE(tsk->conn->state) != TQUIC_CONN_IDLE) {
 			release_sock(sk);
 			return -EISCONN;
 		}
@@ -1186,7 +1184,8 @@ int tquic_sock_setsockopt(struct socket *sock, int level, int optname,
 		 * Must be set before connect().
 		 */
 		lock_sock(sk);
-		if (tsk->conn && READ_ONCE(tsk->conn->state) != TQUIC_CONN_IDLE) {
+		if (tsk->conn &&
+		    READ_ONCE(tsk->conn->state) != TQUIC_CONN_IDLE) {
 			release_sock(sk);
 			return -EISCONN;
 		}
@@ -1267,25 +1266,31 @@ int tquic_sock_setsockopt(struct socket *sock, int level, int optname,
 			return -EFAULT;
 
 		/* Validate settings */
-		if (settings.max_table_capacity > TQUIC_HTTP3_MAX_TABLE_CAPACITY_MAX)
+		if (settings.max_table_capacity >
+		    TQUIC_HTTP3_MAX_TABLE_CAPACITY_MAX)
 			return -EINVAL;
-		if (settings.max_blocked_streams > TQUIC_HTTP3_MAX_BLOCKED_STREAMS_MAX)
+		if (settings.max_blocked_streams >
+		    TQUIC_HTTP3_MAX_BLOCKED_STREAMS_MAX)
 			return -EINVAL;
 
 		lock_sock(sk);
-		if (tsk->conn && READ_ONCE(tsk->conn->state) != TQUIC_CONN_IDLE) {
+		if (tsk->conn &&
+		    READ_ONCE(tsk->conn->state) != TQUIC_CONN_IDLE) {
 			release_sock(sk);
 			return -EISCONN;
 		}
-		tsk->http3_settings.max_table_capacity = settings.max_table_capacity;
-		tsk->http3_settings.max_field_section_size = settings.max_field_section_size;
-		tsk->http3_settings.max_blocked_streams = settings.max_blocked_streams;
+		tsk->http3_settings.max_table_capacity =
+			settings.max_table_capacity;
+		tsk->http3_settings.max_field_section_size =
+			settings.max_field_section_size;
+		tsk->http3_settings.max_blocked_streams =
+			settings.max_blocked_streams;
 		tsk->http3_settings.server_push_enabled = settings.enable_push;
 		release_sock(sk);
 		return 0;
 	}
 
-	/*
+		/*
 	 * Certificate Verification Socket Options
 	 *
 	 * These options control TLS certificate chain validation.
@@ -1313,13 +1318,15 @@ int tquic_sock_setsockopt(struct socket *sock, int level, int optname,
 			return -EINVAL;
 
 		lock_sock(sk);
-		if (tsk->conn && READ_ONCE(tsk->conn->state) != TQUIC_CONN_IDLE) {
+		if (tsk->conn &&
+		    READ_ONCE(tsk->conn->state) != TQUIC_CONN_IDLE) {
 			release_sock(sk);
 			return -EISCONN;
 		}
 		tsk->cert_verify.verify_mode = val;
 		if (val == TQUIC_VERIFY_NONE)
-			tquic_warn("Certificate verification disabled for socket - INSECURE\n");
+			tquic_warn(
+				"Certificate verification disabled for socket - INSECURE\n");
 		release_sock(sk);
 		return 0;
 
@@ -1350,7 +1357,8 @@ int tquic_sock_setsockopt(struct socket *sock, int level, int optname,
 		hostname[optlen] = '\0';
 
 		lock_sock(sk);
-		if (tsk->conn && READ_ONCE(tsk->conn->state) != TQUIC_CONN_IDLE) {
+		if (tsk->conn &&
+		    READ_ONCE(tsk->conn->state) != TQUIC_CONN_IDLE) {
 			release_sock(sk);
 			return -EISCONN;
 		}
@@ -1379,13 +1387,15 @@ int tquic_sock_setsockopt(struct socket *sock, int level, int optname,
 			return -EPERM;
 
 		lock_sock(sk);
-		if (tsk->conn && READ_ONCE(tsk->conn->state) != TQUIC_CONN_IDLE) {
+		if (tsk->conn &&
+		    READ_ONCE(tsk->conn->state) != TQUIC_CONN_IDLE) {
 			release_sock(sk);
 			return -EISCONN;
 		}
 		tsk->cert_verify.allow_self_signed = !!val;
 		if (val)
-			tquic_warn("Self-signed certificates allowed for socket - INSECURE\n");
+			tquic_warn(
+				"Self-signed certificates allowed for socket - INSECURE\n");
 		release_sock(sk);
 		return 0;
 
@@ -1500,7 +1510,7 @@ int tquic_sock_getsockopt(struct socket *sock, int level, int optname,
 	switch (optname) {
 	case TQUIC_INFO: {
 		struct tquic_connection *conn;
-		struct tquic_info info = {0};
+		struct tquic_info info = { 0 };
 
 		if (len < sizeof(struct tquic_info))
 			return -EINVAL;
@@ -1747,7 +1757,7 @@ int tquic_sock_getsockopt(struct socket *sock, int level, int optname,
 		 * Returns comprehensive datagram statistics including
 		 * sent/received/dropped counts and queue state.
 		 */
-		struct tquic_datagram_stats stats = {0};
+		struct tquic_datagram_stats stats = { 0 };
 
 		if (len < sizeof(stats))
 			return -EINVAL;
@@ -1755,11 +1765,16 @@ int tquic_sock_getsockopt(struct socket *sock, int level, int optname,
 		lock_sock(sk);
 		if (tsk->conn && tsk->conn->datagram.enabled) {
 			spin_lock_bh(&tsk->conn->datagram.lock);
-			stats.datagrams_sent = tsk->conn->datagram.datagrams_sent;
-			stats.datagrams_received = tsk->conn->datagram.datagrams_received;
-			stats.datagrams_dropped = tsk->conn->datagram.datagrams_dropped;
-			stats.recv_queue_len = tsk->conn->datagram.recv_queue_len;
-			stats.recv_queue_max = tsk->conn->datagram.recv_queue_max;
+			stats.datagrams_sent =
+				tsk->conn->datagram.datagrams_sent;
+			stats.datagrams_received =
+				tsk->conn->datagram.datagrams_received;
+			stats.datagrams_dropped =
+				tsk->conn->datagram.datagrams_dropped;
+			stats.recv_queue_len =
+				tsk->conn->datagram.recv_queue_len;
+			stats.recv_queue_max =
+				tsk->conn->datagram.recv_queue_max;
 			stats.max_send_size = tsk->conn->datagram.max_send_size;
 			stats.max_recv_size = tsk->conn->datagram.max_recv_size;
 			spin_unlock_bh(&tsk->conn->datagram.lock);
@@ -1845,9 +1860,12 @@ int tquic_sock_getsockopt(struct socket *sock, int level, int optname,
 			return -EINVAL;
 
 		lock_sock(sk);
-		settings.max_table_capacity = tsk->http3_settings.max_table_capacity;
-		settings.max_field_section_size = tsk->http3_settings.max_field_section_size;
-		settings.max_blocked_streams = tsk->http3_settings.max_blocked_streams;
+		settings.max_table_capacity =
+			tsk->http3_settings.max_table_capacity;
+		settings.max_field_section_size =
+			tsk->http3_settings.max_field_section_size;
+		settings.max_blocked_streams =
+			tsk->http3_settings.max_blocked_streams;
 		settings.enable_push = tsk->http3_settings.server_push_enabled;
 		settings.reserved = 0;
 		settings.reserved2 = 0;
@@ -1901,7 +1919,7 @@ int tquic_sock_getsockopt(struct socket *sock, int level, int optname,
 		return 0;
 	}
 
-	/*
+		/*
 	 * Certificate Verification Socket Options (getsockopt)
 	 */
 
@@ -1973,7 +1991,7 @@ int tquic_sock_getsockopt(struct socket *sock, int level, int optname,
 		 * Returns qlog event logging statistics including event
 		 * counts, drops, and relay status.
 		 */
-		struct tquic_qlog_stats stats = {0};
+		struct tquic_qlog_stats stats = { 0 };
 
 		if (len < sizeof(stats))
 			return -EINVAL;
@@ -2019,8 +2037,7 @@ int tquic_sock_getsockopt(struct socket *sock, int level, int optname,
 /*
  * Send message
  */
-int tquic_sendmsg_socket(struct socket *sock, struct msghdr *msg,
-			 size_t len)
+int tquic_sendmsg_socket(struct socket *sock, struct msghdr *msg, size_t len)
 {
 	return tquic_sendmsg(sock->sk, msg, len);
 }
@@ -2130,7 +2147,8 @@ static size_t tquic_sendmsg_check_flow_control(struct tquic_connection *conn,
 		spin_unlock_bh(&conn->lock);
 		return 0;
 	}
-	conn_limit = conn->max_data_remote - (conn->data_sent + conn->fc_data_reserved);
+	conn_limit = conn->max_data_remote -
+		     (conn->data_sent + conn->fc_data_reserved);
 	if (allowed > conn_limit)
 		allowed = conn_limit;
 
@@ -2202,10 +2220,13 @@ int tquic_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 		 * Block waiting for flow control credit.
 		 * MAX_STREAM_DATA or MAX_DATA from peer will wake us.
 		 */
-		if (wait_event_interruptible(stream->wait,
-				tquic_sendmsg_check_flow_control(conn, stream, len) > 0 ||
-				stream->state == TQUIC_STREAM_CLOSED ||
-				READ_ONCE(conn->state) != TQUIC_CONN_CONNECTED)) {
+		if (wait_event_interruptible(
+			    stream->wait,
+			    tquic_sendmsg_check_flow_control(conn, stream,
+							     len) > 0 ||
+				    stream->state == TQUIC_STREAM_CLOSED ||
+				    READ_ONCE(conn->state) !=
+					    TQUIC_CONN_CONNECTED)) {
 			copied = -EINTR;
 			goto out_put;
 		}
@@ -2268,7 +2289,8 @@ int tquic_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 			goto out_put;
 		}
 
-		if (copy_from_iter(skb_put(skb, chunk), chunk, &msg->msg_iter) != chunk) {
+		if (copy_from_iter(skb_put(skb, chunk), chunk,
+				   &msg->msg_iter) != chunk) {
 			kfree_skb(skb);
 			if (copied == 0)
 				copied = -EFAULT;
@@ -2321,8 +2343,8 @@ EXPORT_SYMBOL_GPL(tquic_sendmsg);
 /*
  * Receive message
  */
-int tquic_recvmsg_socket(struct socket *sock, struct msghdr *msg,
-			 size_t len, int flags)
+int tquic_recvmsg_socket(struct socket *sock, struct msghdr *msg, size_t len,
+			 int flags)
 {
 	return tquic_recvmsg(sock->sk, msg, len, flags, NULL);
 }
@@ -2384,9 +2406,9 @@ retry:
 		ret = wait_event_interruptible_timeout(
 			conn->datagram.wait,
 			!skb_queue_empty(&conn->datagram.recv_queue) ||
-			    sk->sk_err ||
-			    (sk->sk_shutdown & RCV_SHUTDOWN) ||
-			    READ_ONCE(conn->state) == TQUIC_CONN_CLOSED,
+				sk->sk_err ||
+				(sk->sk_shutdown & RCV_SHUTDOWN) ||
+				READ_ONCE(conn->state) == TQUIC_CONN_CLOSED,
 			timeo);
 
 		if (ret < 0)
@@ -2440,7 +2462,7 @@ retry:
 	 */
 	if (msg->msg_controllen >= CMSG_SPACE(sizeof(dgram_info))) {
 		memset(&dgram_info, 0, sizeof(dgram_info));
-		dgram_info.dgram_id = 0;  /* Could be enhanced with tracking */
+		dgram_info.dgram_id = 0; /* Could be enhanced with tracking */
 		dgram_info.flags = 0;
 		put_cmsg(msg, SOL_TQUIC, TQUIC_CMSG_DATAGRAM,
 			 sizeof(dgram_info), &dgram_info);
@@ -2547,8 +2569,8 @@ EXPORT_SYMBOL_GPL(tquic_recvmsg);
  * Returns: Number of bytes spliced on success, negative errno on failure
  */
 ssize_t tquic_splice_read_socket(struct socket *sock, loff_t *ppos,
-				 struct pipe_inode_info *pipe,
-				 size_t len, unsigned int flags)
+				 struct pipe_inode_info *pipe, size_t len,
+				 unsigned int flags)
 {
 	return tquic_splice_read(sock, ppos, pipe, len, flags);
 }
