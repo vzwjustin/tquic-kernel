@@ -118,6 +118,7 @@ struct tquic_stream_deadline {
 	u64 data_length;
 
 	struct rb_node node;		/* EDF ordering in scheduler */
+	struct list_head list;		/* Scheduler-level deadline list */
 	struct list_head stream_node;	/* Per-stream deadline list */
 
 	u32 flags;

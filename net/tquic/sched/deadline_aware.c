@@ -629,8 +629,8 @@ void tquic_deadline_sched_release(struct tquic_connection *conn)
 
 	/* Free stream deadline lists */
 	list_for_each_entry_safe(deadline, tmp_deadline,
-				 &state->streams_with_deadlines, stream_node) {
-		list_del(&deadline->stream_node);
+				 &state->streams_with_deadlines, list) {
+		list_del(&deadline->list);
 	}
 
 	/* Free path capabilities */
@@ -707,7 +707,7 @@ int tquic_deadline_set_stream_deadline(struct tquic_connection *conn,
 	/* Insert into EDF tree */
 	spin_lock_bh(&state->lock);
 	deadline_rb_insert(&state->deadline_tree, deadline);
-	list_add_tail(&deadline->stream_node, &state->streams_with_deadlines);
+	list_add_tail(&deadline->list, &state->streams_with_deadlines);
 	state->deadline_count++;
 	state->stats.total_deadlines++;
 
@@ -741,7 +741,7 @@ int tquic_deadline_cancel_stream_deadline(struct tquic_connection *conn,
 	spin_lock_bh(&state->lock);
 
 	list_for_each_entry_safe(deadline, tmp,
-				 &state->streams_with_deadlines, stream_node) {
+				 &state->streams_with_deadlines, list) {
 		if (deadline->stream_id != stream_id)
 			continue;
 
@@ -749,7 +749,7 @@ int tquic_deadline_cancel_stream_deadline(struct tquic_connection *conn,
 			continue;
 
 		rb_erase(&deadline->node, &state->deadline_tree);
-		list_del(&deadline->stream_node);
+		list_del(&deadline->list);
 		state->deadline_count--;
 		kmem_cache_free(deadline_cache, deadline);
 		cancelled++;
@@ -838,7 +838,7 @@ void tquic_deadline_on_ack(struct tquic_deadline_sched_state *state,
 	spin_lock_bh(&state->lock);
 
 	list_for_each_entry_safe(deadline, tmp,
-				 &state->streams_with_deadlines, stream_node) {
+				 &state->streams_with_deadlines, list) {
 		if (deadline->stream_id != stream_id)
 			continue;
 
@@ -870,7 +870,7 @@ void tquic_deadline_on_ack(struct tquic_deadline_sched_state *state,
 
 			/* Remove completed deadline */
 			rb_erase(&deadline->node, &state->deadline_tree);
-			list_del(&deadline->stream_node);
+			list_del(&deadline->list);
 			state->deadline_count--;
 			kmem_cache_free(deadline_cache, deadline);
 		}
