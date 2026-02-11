@@ -1239,6 +1239,30 @@ int tquic_split_coalesced(const u8 *data, size_t len,
 	u64 token_len;
 	size_t hdr_len;
 
+	/*
+	 * SECURITY FIX (C-003): Prevent CPU exhaustion attack.
+	 *
+	 * An attacker could craft a datagram claiming to contain an
+	 * excessive number of tiny packets, causing the loop to iterate
+	 * thousands of times. We check the theoretical maximum number of
+	 * packets based on the minimum viable QUIC packet size.
+	 *
+	 * TQUIC_MIN_COALESCED_PKT_SIZE = 21 bytes (minimum QUIC packet):
+	 *   - 1 byte first byte (flags)
+	 *   - 4 bytes version
+	 *   - 1 byte DCID length (0)
+	 *   - 1 byte SCID length (0)
+	 *   - 2 bytes length field (varint)
+	 *   - 12 bytes minimum payload (packet number + tag)
+	 *
+	 * We allow 2x max_packets as a safety margin for legitimate use,
+	 * but reject if the datagram is too small to plausibly contain
+	 * that many packets. This prevents unbounded iteration.
+	 */
+#define TQUIC_MIN_COALESCED_PKT_SIZE 21
+	if (len / TQUIC_MIN_COALESCED_PKT_SIZE > (size_t)max_packets * 2)
+		return -EPROTO;
+
 	while (offset < len && count < max_packets) {
 		packets[count] = &data[offset];
 

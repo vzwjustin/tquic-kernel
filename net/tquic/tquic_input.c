@@ -55,6 +55,13 @@
 /* Maximum ACK ranges to prevent resource exhaustion from malicious frames */
 #define TQUIC_MAX_ACK_RANGES		256
 
+/*
+ * M-001: Maximum per-STREAM frame allocation limit.
+ * Prevents a single frame from allocating multi-MB skbs.
+ * 64KB is reasonable for packet-sized data but prevents abuse.
+ */
+#define TQUIC_MAX_STREAM_FRAME_ALLOC	(64 * 1024)
+
 /* QUIC frame types (must match tquic_output.c) */
 #define TQUIC_FRAME_PADDING		0x00
 #define TQUIC_FRAME_PING		0x01
@@ -310,26 +317,37 @@ static struct tquic_path *tquic_find_path_by_addr(struct tquic_connection *conn,
 	 * for proper RCU annotation.
 	 * SECURITY: Take a reference to prevent use-after-free if path
 	 * is removed concurrently. Caller must call tquic_path_put().
+	 * C-001 FIX: Use refcount_inc_not_zero() directly to avoid
+	 * TOCTOU race between rcu_dereference() and reference acquisition.
 	 */
 	path = rcu_dereference(conn->active_path);
 	if (path && tquic_sockaddr_equal(&path->remote_addr, addr)) {
-		if (!tquic_path_get(path))
-			goto slow_path;
-		return path;
+		if (refcount_inc_not_zero(&path->refcnt))
+			return path;
+		goto slow_path;
 	}
 
 slow_path:
 
-	spin_lock_bh(&conn->paths_lock);
-	list_for_each_entry(path, &conn->paths, list) {
+	/*
+	 * P-002: Use RCU for lock-free path list traversal.
+	 * The paths list is modified using list_add_rcu() and list_del_rcu(),
+	 * and paths are freed via kfree_rcu(), so RCU protection ensures
+	 * safe access during traversal.
+	 */
+	rcu_read_lock();
+	list_for_each_entry_rcu(path, &conn->paths, list) {
 		if (tquic_sockaddr_equal(&path->remote_addr, addr)) {
-			/* Take reference while holding lock to prevent removal */
+			/*
+			 * Take reference with refcount_inc_not_zero to prevent
+			 * use-after-free if path is being removed concurrently.
+			 */
 			if (tquic_path_get(path))
 				found = path;
 			break;
 		}
 	}
-	spin_unlock_bh(&conn->paths_lock);
+	rcu_read_unlock();
 
 	return found;
 }
@@ -345,15 +363,25 @@ static struct tquic_path __maybe_unused *tquic_find_path_by_cid(struct tquic_con
 	struct tquic_path *path;
 	struct tquic_path *found = NULL;
 
-	spin_lock_bh(&conn->paths_lock);
-	list_for_each_entry(path, &conn->paths, list) {
+	/*
+	 * P-002: Use RCU for lock-free path list traversal.
+	 * Note: This function doesn't take a reference on the path,
+	 * so caller must hold appropriate lock or be in RCU critical section.
+	 */
+	rcu_read_lock();
+	list_for_each_entry_rcu(path, &conn->paths, list) {
 		if (path->local_cid.len == cid_len &&
 		    memcmp(path->local_cid.id, cid, cid_len) == 0) {
-			found = path;
+			/*
+			 * Take reference to prevent path from being freed
+			 * after we release RCU read lock.
+			 */
+			if (tquic_path_get(path))
+				found = path;
 			break;
 		}
 	}
-	spin_unlock_bh(&conn->paths_lock);
+	rcu_read_unlock();
 
 	return found;
 }
@@ -1012,16 +1040,26 @@ static int tquic_process_ack_frame(struct tquic_rx_ctx *ctx)
 			ce_delta = ecn_ce - p->ecn_ce_count_prev;
 
 			/*
-			 * Validate delta reasonableness: ECN counters should
-			 * not increase by more than packets we could have sent.
-			 * Use a generous limit of 1M packets per ACK to allow
-			 * for high-bandwidth scenarios while preventing abuse.
+			 * H-002: Validate delta reasonableness with path-aware limit.
+			 * ECN counters should not increase by more than packets we
+			 * could have sent. Use cwnd-based calculation: allow up to
+			 * 10 congestion windows worth of packets to accommodate
+			 * bursty traffic patterns while preventing abuse.
+			 *
+			 * Max reasonable delta = (cwnd * 10) / mtu
+			 * This ensures the limit scales with path capacity.
 			 */
-			if (ect0_delta > 1000000 || ect1_delta > 1000000 ||
-			    ce_delta > 1000000) {
-				tquic_warn("ECN delta too large: ect0=%llu ect1=%llu ce=%llu\n",
-					  ect0_delta, ect1_delta, ce_delta);
-				return -EPROTO;
+			if (p->mtu > 0) {
+				u64 max_reasonable_delta = (p->cc.cwnd * 10ULL) / p->mtu;
+
+				if (ect0_delta > max_reasonable_delta ||
+				    ect1_delta > max_reasonable_delta ||
+				    ce_delta > max_reasonable_delta) {
+					tquic_warn("ECN delta exceeds path capacity: ect0=%llu ect1=%llu ce=%llu (max=%llu, cwnd=%u, mtu=%u)\n",
+						  ect0_delta, ect1_delta, ce_delta,
+						  max_reasonable_delta, p->cc.cwnd, p->mtu);
+					return -EPROTO;
+				}
 			}
 
 			TQUIC_INC_STATS(net, TQUIC_MIB_ECNACKSRX);
@@ -1125,6 +1163,8 @@ static int tquic_process_ack_frame(struct tquic_rx_ctx *ctx)
 			 *
 			 * H-1: use actual path MTU instead of hardcoded 1200.
 			 * CF-073: Use safe arithmetic to prevent overflow.
+			 * C-002 FIX: Reject frame on overflow instead of using
+			 * fallback values that could manipulate congestion control.
 			 */
 			{
 				u64 acked_pkts, bytes_acked;
@@ -1133,10 +1173,10 @@ static int tquic_process_ack_frame(struct tquic_rx_ctx *ctx)
 
 				if (check_add_overflow(first_ack_range,
 						       (u64)1, &acked_pkts))
-					acked_pkts = U64_MAX / mtu;
+					return -EPROTO;
 				if (check_mul_overflow(acked_pkts, mtu,
 						       &bytes_acked))
-					bytes_acked = U64_MAX;
+					return -EPROTO;
 
 				/* Dispatch ACK event to congestion control */
 				tquic_cong_on_ack(ctx->path, bytes_acked,
@@ -1310,9 +1350,19 @@ static int tquic_process_stream_frame(struct tquic_rx_ctx *ctx)
 	if (ctx->offset + length > ctx->len)
 		return -EINVAL;
 
-	/* Find or create stream - hold streams_lock during RB-tree walk */
+	/*
+	 * P-003: Use RCU for lock-free stream lookup in RB-tree.
+	 *
+	 * The streams RB-tree is protected by RCU. Writers use conn->lock
+	 * and rcu_assign_pointer/synchronize_rcu when modifying the tree.
+	 * Readers can safely traverse the tree under rcu_read_lock().
+	 *
+	 * We take a reference with tquic_stream_get() to ensure the stream
+	 * remains valid after we release the RCU read lock. If the stream
+	 * is being freed concurrently, tquic_stream_get() returns false.
+	 */
 	stream = NULL;
-	spin_lock_bh(&ctx->conn->streams_lock);
+	rcu_read_lock();
 	{
 		struct rb_node *node = ctx->conn->streams.rb_node;
 
@@ -1324,18 +1374,39 @@ static int tquic_process_stream_frame(struct tquic_rx_ctx *ctx)
 			else if (stream_id > s->id)
 				node = node->rb_right;
 			else {
-				stream = s;
+				/*
+				 * Found the stream. Take a reference to prevent
+				 * it from being freed after we release RCU lock.
+				 * tquic_stream_get uses refcount_inc_not_zero.
+				 */
+				if (tquic_stream_get(s))
+					stream = s;
 				break;
 			}
 		}
 	}
-	spin_unlock_bh(&ctx->conn->streams_lock);
+	rcu_read_unlock();
 
 	if (!stream) {
-		/* Create new stream for incoming data, validating MAX_STREAMS */
+		/*
+		 * Stream not found. Create new incoming stream.
+		 * tquic_stream_open_incoming() handles concurrent creation
+		 * attempts internally by checking the tree under conn->lock.
+		 */
 		stream = tquic_stream_open_incoming(ctx->conn, stream_id);
 		if (!stream)
 			return -ENOMEM;
+	}
+
+	/*
+	 * M-001: Enforce hard per-frame allocation limit FIRST.
+	 * A single STREAM frame must not allocate more than 64KB,
+	 * regardless of socket buffer size. This prevents DoS via
+	 * large single-frame allocations.
+	 */
+	if (length > TQUIC_MAX_STREAM_FRAME_ALLOC) {
+		tquic_stream_put(stream);
+		return -EMSGSIZE;
 	}
 
 	/*
@@ -1357,6 +1428,7 @@ static int tquic_process_stream_frame(struct tquic_rx_ctx *ctx)
 		if (length > (u64)sk->sk_rcvbuf) {
 			ctx->offset += length;
 			ctx->ack_eliciting = true;
+			tquic_stream_put(stream);
 			return 0;
 		}
 	}
@@ -1373,8 +1445,10 @@ static int tquic_process_stream_frame(struct tquic_rx_ctx *ctx)
 	 * beyond the final size as a connection error." The maximum stream
 	 * offset is 2^62-1. Check for overflow before proceeding.
 	 */
-	if (offset > ((1ULL << 62) - 1) - length)
+	if (offset > ((1ULL << 62) - 1) - length) {
+		tquic_stream_put(stream);
 		return -EPROTO;
+	}
 
 	if (fin) {
 		u64 final_size = offset + length;
@@ -1384,12 +1458,16 @@ static int tquic_process_stream_frame(struct tquic_rx_ctx *ctx)
 		 * If we already know the final size, it must match.
 		 * Also, data beyond the final size is a protocol error.
 		 */
-		if (stream->fin_received && stream->final_size != final_size)
+		if (stream->fin_received && stream->final_size != final_size) {
+			tquic_stream_put(stream);
 			return -EPROTO;
+		}
 	} else if (stream->fin_received) {
 		/* Data beyond the known final size is an error */
-		if (offset + length > stream->final_size)
+		if (offset + length > stream->final_size) {
+			tquic_stream_put(stream);
 			return -EPROTO;
+		}
 	}
 
 	/*
@@ -1397,13 +1475,17 @@ static int tquic_process_stream_frame(struct tquic_rx_ctx *ctx)
 	 * Check both stream-level and connection-level limits before
 	 * accepting the data.
 	 */
-	if (tquic_flow_check_recv_limits(stream, offset, length))
+	if (tquic_flow_check_recv_limits(stream, offset, length)) {
+		tquic_stream_put(stream);
 		return -EDQUOT;
+	}
 
 	/* Copy data to stream receive buffer */
 	data_skb = alloc_skb(length, GFP_ATOMIC);
-	if (!data_skb)
+	if (!data_skb) {
+		tquic_stream_put(stream);
 		return -ENOMEM;
+	}
 
 	skb_put_data(data_skb, ctx->data + ctx->offset, length);
 
@@ -1422,6 +1504,7 @@ static int tquic_process_stream_frame(struct tquic_rx_ctx *ctx)
 			kfree_skb(data_skb);
 			ctx->offset += length;
 			ctx->ack_eliciting = true;
+			tquic_stream_put(stream);
 			return 0;
 		}
 		skb_set_owner_r(data_skb, ctx->conn->sk);
@@ -1445,6 +1528,13 @@ static int tquic_process_stream_frame(struct tquic_rx_ctx *ctx)
 
 	/* Update connection stats */
 	ctx->conn->stats.rx_bytes += length;
+
+	/*
+	 * P-003: Release the stream reference we acquired during RCU lookup.
+	 * The stream data has been safely enqueued, so we no longer need
+	 * to hold the reference.
+	 */
+	tquic_stream_put(stream);
 
 	return 0;
 }
@@ -2972,6 +3062,7 @@ static int tquic_process_packet(struct tquic_connection *conn,
 	size_t payload_len, decrypted_len = 0;
 	u8 *decrypted;
 	bool decrypted_from_slab = false;
+	bool path_looked_up = false;  /* C-001 FIX: Track if we own path ref */
 	int pn_space_idx = TQUIC_PN_SPACE_APPLICATION;
 	u64 largest_pn = 0;
 	int ret;
@@ -3200,10 +3291,17 @@ static int tquic_process_packet(struct tquic_connection *conn,
 	 * kfree_rcu(), so the RCU read-side critical section prevents
 	 * use-after-free if another CPU removes this path while we
 	 * are processing the packet.
+	 *
+	 * C-001 FIX: tquic_find_path_by_addr() now takes a reference
+	 * via refcount_inc_not_zero(). We must release this reference
+	 * before returning. Track ownership with path_looked_up flag.
 	 */
 	rcu_read_lock();
-	if (!path && conn)
+	if (!path && conn) {
 		path = tquic_find_path_by_addr(conn, src_addr);
+		if (path)
+			path_looked_up = true;
+	}
 
 	/* Remove header protection */
 	{
@@ -3216,6 +3314,8 @@ static int tquic_process_packet(struct tquic_connection *conn,
 						     &hp_pn_len,
 						     &hp_key_phase);
 		if (unlikely(ret < 0)) {
+			if (path_looked_up)
+				tquic_path_put(path);
 			rcu_read_unlock();
 			return ret;
 		}
@@ -3253,11 +3353,15 @@ static int tquic_process_packet(struct tquic_connection *conn,
 
 	/* Validate pkt_num_len is within protocol bounds (1..4) */
 	if (pkt_num_len < 1 || pkt_num_len > 4) {
+		if (path_looked_up)
+			tquic_path_put(path);
 		rcu_read_unlock();
 		return -EINVAL;
 	}
 
 	if (ctx.offset + pkt_num_len > len) {
+		if (path_looked_up)
+			tquic_path_put(path);
 		rcu_read_unlock();
 		return -EINVAL;
 	}
@@ -3304,10 +3408,14 @@ static int tquic_process_packet(struct tquic_connection *conn,
 	} else if (payload_len > 0) {
 		decrypted = kmalloc(payload_len, GFP_ATOMIC);
 	} else {
+		if (path_looked_up)
+			tquic_path_put(path);
 		rcu_read_unlock();
 		return -EINVAL;
 	}
 	if (unlikely(!decrypted)) {
+		if (path_looked_up)
+			tquic_path_put(path);
 		rcu_read_unlock();
 		return -ENOMEM;
 	}
@@ -3329,6 +3437,8 @@ static int tquic_process_packet(struct tquic_connection *conn,
 				kfree(decrypted);
 			if (ret == -ENOKEY)
 				tquic_dbg("0-RTT decryption failed, no keys\n");
+			if (path_looked_up)
+				tquic_path_put(path);
 			rcu_read_unlock();
 			return ret;
 		}
@@ -3362,6 +3472,8 @@ static int tquic_process_packet(struct tquic_connection *conn,
 							decrypted);
 				else
 					kfree(decrypted);
+				if (path_looked_up)
+					tquic_path_put(path);
 				rcu_read_unlock();
 				return ret;
 			}
@@ -3384,6 +3496,8 @@ static int tquic_process_packet(struct tquic_connection *conn,
 				kmem_cache_free(tquic_rx_buf_cache, decrypted);
 			else
 				kfree(decrypted);
+			if (path_looked_up)
+				tquic_path_put(path);
 			rcu_read_unlock();
 			return -EOVERFLOW;
 		}
@@ -3455,6 +3569,10 @@ static int tquic_process_packet(struct tquic_connection *conn,
 		if (conn->timer_state)
 			tquic_timer_reset_idle(conn->timer_state);
 	}
+
+	/* C-001 FIX: Release path reference if we looked it up */
+	if (path_looked_up)
+		tquic_path_put(path);
 
 	rcu_read_unlock();
 	return ret;

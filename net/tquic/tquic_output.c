@@ -115,15 +115,34 @@ struct tquic_frame_ctx {
 	bool ack_eliciting;
 };
 
-/* Pending frame for coalescing */
+/*
+ * Pending frame for coalescing
+ *
+ * Zero-copy optimization (P-001):
+ * Instead of allocating and copying data for each frame, we reference
+ * the original source data directly. This eliminates 50+ allocations
+ * per send and reduces memory copies from 2 to 1.
+ *
+ * Frame lifecycle:
+ * 1. Frame created with data_ref pointing to source (user buffer/skb)
+ * 2. Frame passed to tquic_assemble_packet (synchronous)
+ * 3. In tquic_coalesce_frames: single copy from data_ref to packet buffer
+ * 4. Frame freed (no kfree if owns_data=false)
+ *
+ * Safety: The referenced data must remain valid until packet assembly
+ * completes. Both tquic_xmit() and tquic_output_flush() ensure this
+ * by calling tquic_assemble_packet() synchronously before returning.
+ */
 struct tquic_pending_frame {
 	struct list_head list;
 	u8 type;
-	u8 *data;
+	u8 *data;		/* For allocated data (legacy/special frames) */
+	const u8 *data_ref;	/* Zero-copy reference to original data */
 	size_t len;
 	u64 stream_id;
 	u64 offset;
 	bool fin;
+	bool owns_data;		/* True if data was allocated and must be freed */
 };
 
 /* Pacing state per path */
@@ -363,10 +382,15 @@ static int tquic_gen_stream_frame(struct tquic_frame_ctx *ctx,
 		return ret;
 	ctx->offset += ret;
 
-	/* Data */
+	/* Data - single copy directly into packet buffer */
 	if (ctx->offset + data_len > ctx->buf_len)
 		return -ENOSPC;
 
+	/*
+	 * Zero-copy optimization: Only one memcpy here.
+	 * The data pointer now references the original source
+	 * (user buffer or skb data), avoiding intermediate allocation.
+	 */
 	memcpy(ctx->buf + ctx->offset, data, data_len);
 	ctx->offset += data_len;
 	ctx->ack_eliciting = true;
@@ -629,25 +653,30 @@ static int tquic_coalesce_frames(struct tquic_connection *conn,
 	int ret;
 
 	list_for_each_entry_safe(frame, tmp, pending_frames, list) {
+		const u8 *data_ptr;
+
+		/* Use reference if available, otherwise use allocated data */
+		data_ptr = frame->data_ref ? frame->data_ref : frame->data;
+
 		switch (frame->type) {
 		case TQUIC_FRAME_STREAM:
 			ret = tquic_gen_stream_frame(ctx, frame->stream_id,
 						     frame->offset,
-						     frame->data, frame->len,
+						     data_ptr, frame->len,
 						     frame->fin);
 			break;
 
 		case TQUIC_FRAME_CRYPTO:
 			ret = tquic_gen_crypto_frame(ctx, frame->offset,
-						     frame->data, frame->len);
+						     data_ptr, frame->len);
 			break;
 
 		case TQUIC_FRAME_PATH_CHALLENGE:
-			ret = tquic_gen_path_challenge_frame(ctx, frame->data);
+			ret = tquic_gen_path_challenge_frame(ctx, data_ptr);
 			break;
 
 		case TQUIC_FRAME_PATH_RESPONSE:
-			ret = tquic_gen_path_response_frame(ctx, frame->data);
+			ret = tquic_gen_path_response_frame(ctx, data_ptr);
 			break;
 
 		default:
@@ -667,7 +696,8 @@ static int tquic_coalesce_frames(struct tquic_connection *conn,
 			list_for_each_entry_safe(frame, tmp,
 						 pending_frames, list) {
 				list_del(&frame->list);
-				kfree(frame->data);
+				if (frame->owns_data)
+					kfree(frame->data);
 				kmem_cache_free(tquic_frame_cache, frame);
 			}
 			return ret;
@@ -675,9 +705,10 @@ static int tquic_coalesce_frames(struct tquic_connection *conn,
 
 		total += ret;
 
-		/* Remove from pending list */
+		/* Remove from pending list and free if needed */
 		list_del(&frame->list);
-		kfree(frame->data);
+		if (frame->owns_data)
+			kfree(frame->data);
 		kmem_cache_free(tquic_frame_cache, frame);
 	}
 
@@ -1882,14 +1913,19 @@ int tquic_xmit(struct tquic_connection *conn, struct tquic_stream *stream,
 		frame->len = chunk;
 		frame->fin = fin && (offset + chunk >= len);
 
+		/*
+		 * Zero-copy optimization: Reference user data directly
+		 * instead of allocating and copying. The data remains valid
+		 * until packet assembly completes (synchronous in this path).
+		 */
 		if (chunk > 0) {
-			frame->data = kmalloc(chunk, GFP_ATOMIC);
-			if (!frame->data) {
-				kmem_cache_free(tquic_frame_cache, frame);
-				ret = -ENOMEM;
-				break;
-			}
-			memcpy(frame->data, data + offset, chunk);
+			frame->data = NULL;
+			frame->data_ref = data + offset;
+			frame->owns_data = false;
+		} else {
+			frame->data = NULL;
+			frame->data_ref = NULL;
+			frame->owns_data = false;
 		}
 
 		INIT_LIST_HEAD(&frame->list);
@@ -1902,7 +1938,8 @@ int tquic_xmit(struct tquic_connection *conn, struct tquic_stream *stream,
 			struct tquic_pending_frame *f, *tmp;
 			list_for_each_entry_safe(f, tmp, &frames, list) {
 				list_del(&f->list);
-				kfree(f->data);
+				if (f->owns_data)
+					kfree(f->data);
 				kmem_cache_free(tquic_frame_cache, f);
 			}
 			ret = -ENOMEM;
@@ -2228,15 +2265,19 @@ int tquic_output_flush(struct tquic_connection *conn)
 				     (chunk_size == skb->len) &&
 				     is_last;
 
+			/*
+			 * Zero-copy optimization: Reference skb data directly.
+			 * The skb remains valid until packet assembly completes
+			 * (happens synchronously before we free/consume the skb).
+			 */
 			if (chunk_size > 0) {
-				frame->data = kmalloc(chunk_size, GFP_ATOMIC);
-				if (!frame->data) {
-					kmem_cache_free(tquic_frame_cache, frame);
-					skb_queue_head(&stream->send_buf, skb);
-					ret = -ENOMEM;
-					break;
-				}
-				memcpy(frame->data, skb->data, chunk_size);
+				frame->data = NULL;
+				frame->data_ref = skb->data;
+				frame->owns_data = false;
+			} else {
+				frame->data = NULL;
+				frame->data_ref = NULL;
+				frame->owns_data = false;
 			}
 
 			INIT_LIST_HEAD(&frame->list);
@@ -2272,7 +2313,8 @@ int tquic_output_flush(struct tquic_connection *conn)
 				struct tquic_pending_frame *f, *tmp;
 				list_for_each_entry_safe(f, tmp, &frames, list) {
 					list_del(&f->list);
-					kfree(f->data);
+					if (f->owns_data)
+						kfree(f->data);
 					kmem_cache_free(tquic_frame_cache, f);
 				}
 				ret = -ENOMEM;

@@ -214,6 +214,7 @@ struct tquic_nic_device *tquic_nic_register(struct net_device *netdev,
 	spin_lock_init(&dev->lock);
 	refcount_set(&dev->refcnt, 1);
 	dev->dead = false;
+	dev->registered = false;  /* Will be set to true after list add */
 	init_completion(&dev->unregister_done);
 
 	/* Set defaults */
@@ -236,6 +237,7 @@ struct tquic_nic_device *tquic_nic_register(struct net_device *netdev,
 	/* Add to device list */
 	spin_lock_bh(&tquic_nic_lock);
 	list_add_tail(&dev->list, &tquic_nic_devices);
+	dev->registered = true;  /* SECURITY FIX (C-004): mark as registered */
 	spin_unlock_bh(&tquic_nic_lock);
 
 	NIC_INFO("registered device %s (caps=0x%x)\n", netdev->name, caps);
@@ -260,6 +262,7 @@ void tquic_nic_unregister(struct tquic_nic_device *dev)
 	/* Remove from device list so no new references are taken */
 	spin_lock_bh(&tquic_nic_lock);
 	list_del(&dev->list);
+	dev->registered = false;  /* SECURITY FIX (C-004): mark as unregistered */
 	spin_unlock_bh(&tquic_nic_lock);
 
 	/*
@@ -884,13 +887,29 @@ void tquic_smartnic_exit(void)
 	/* Remove proc entry */
 	remove_proc_entry("tquic_smartnic", NULL);
 
-	/* Unregister all devices */
+	/*
+	 * SECURITY FIX (C-004): Prevent double-free on module exit.
+	 *
+	 * Devices may have already been unregistered via tquic_nic_unregister()
+	 * which handles cleanup and frees the device. We only cleanup devices
+	 * that are still registered (not yet unregistered).
+	 *
+	 * The registered flag prevents:
+	 * 1. Double cleanup if ops->cleanup was already called
+	 * 2. Double-free if device was already freed
+	 * 3. Use-after-free if device memory is already invalid
+	 */
 	spin_lock_bh(&tquic_nic_lock);
 	list_for_each_entry_safe(dev, tmp, &tquic_nic_devices, list) {
-		list_del(&dev->list);
-		if (dev->ops->cleanup)
-			dev->ops->cleanup(dev);
-		kfree(dev);
+		if (dev->registered) {
+			/* Device not yet unregistered, clean it up */
+			list_del(&dev->list);
+			dev->registered = false;
+			if (dev->ops->cleanup)
+				dev->ops->cleanup(dev);
+			kfree(dev);
+		}
+		/* If not registered, it was already freed by unregister */
 	}
 	spin_unlock_bh(&tquic_nic_lock);
 

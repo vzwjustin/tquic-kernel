@@ -165,6 +165,7 @@ struct tquic_nic_device {
 	spinlock_t lock;
 	refcount_t refcnt;	/* SECURITY FIX (CF-084): reference counting */
 	bool dead;		/* Set during unregister to prevent new ops */
+	bool registered;	/* SECURITY FIX (C-004): track registration */
 	struct completion unregister_done; /* Wait for refs to drain */
 	void *priv;
 };

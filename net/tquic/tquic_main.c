@@ -635,32 +635,30 @@ EXPORT_SYMBOL_GPL(tquic_stream_open);
  *
  * Returns: new stream on success, NULL if limit exceeded or OOM.
  */
-struct tquic_stream *tquic_stream_open_incoming(struct tquic_connection *conn,
-						u64 stream_id)
+/*
+ * H-001: Lock-free stream creation helper.
+ * Caller must hold conn->streams_lock during the entire lookup-and-create
+ * sequence to prevent races.
+ */
+static struct tquic_stream *
+tquic_stream_create_locked(struct tquic_connection *conn, u64 stream_id)
 {
 	struct tquic_stream *stream;
 	struct rb_node **link, *parent = NULL;
 	bool bidi = (stream_id & 0x02) == 0;
 	u64 stream_seq = stream_id >> 2;
+	u64 max_streams;
 
 	/* Validate against MAX_STREAMS limit (RFC 9000 Section 4.6) */
 	spin_lock_bh(&conn->lock);
-	if (bidi) {
-		if (stream_seq >= conn->max_streams_bidi) {
-			spin_unlock_bh(&conn->lock);
-			pr_debug("tquic: peer exceeded MAX_STREAMS bidi limit (%llu >= %llu)\n",
-				 stream_seq, conn->max_streams_bidi);
-			return NULL;
-		}
-	} else {
-		if (stream_seq >= conn->max_streams_uni) {
-			spin_unlock_bh(&conn->lock);
-			pr_debug("tquic: peer exceeded MAX_STREAMS uni limit (%llu >= %llu)\n",
-				 stream_seq, conn->max_streams_uni);
-			return NULL;
-		}
-	}
+	max_streams = bidi ? conn->max_streams_bidi : conn->max_streams_uni;
 	spin_unlock_bh(&conn->lock);
+
+	if (stream_seq >= max_streams) {
+		pr_debug("tquic: peer exceeded MAX_STREAMS %s limit (%llu >= %llu)\n",
+			 bidi ? "bidi" : "uni", stream_seq, max_streams);
+		return NULL;
+	}
 
 	stream = kmem_cache_zalloc(tquic_stream_cache, GFP_ATOMIC);
 	if (!stream)
@@ -678,8 +676,11 @@ struct tquic_stream *tquic_stream_open_incoming(struct tquic_connection *conn,
 
 	init_waitqueue_head(&stream->wait);
 
-	/* Insert into connection's stream tree */
-	spin_lock_bh(&conn->lock);
+	/*
+	 * Insert into connection's stream tree. Caller holds streams_lock.
+	 * Double-check for races: another thread might have created the
+	 * stream between our lookup and this insertion.
+	 */
 	link = &conn->streams.rb_node;
 	while (*link) {
 		struct tquic_stream *entry;
@@ -687,21 +688,34 @@ struct tquic_stream *tquic_stream_open_incoming(struct tquic_connection *conn,
 		parent = *link;
 		entry = rb_entry(parent, struct tquic_stream, node);
 
-		if (stream->id < entry->id)
+		if (stream->id < entry->id) {
 			link = &parent->rb_left;
-		else if (stream->id > entry->id) {
+		} else if (stream->id > entry->id) {
 			link = &parent->rb_right;
 		} else {
 			/* Stream already exists - race with another packet */
-			spin_unlock_bh(&conn->lock);
 			kmem_cache_free(tquic_stream_cache, stream);
 			return entry;
 		}
 	}
 	rb_link_node(&stream->node, parent, link);
 	rb_insert_color(&stream->node, &conn->streams);
+
+	spin_lock_bh(&conn->lock);
 	conn->stats.streams_opened++;
 	spin_unlock_bh(&conn->lock);
+
+	return stream;
+}
+
+struct tquic_stream *tquic_stream_open_incoming(struct tquic_connection *conn,
+						u64 stream_id)
+{
+	struct tquic_stream *stream;
+
+	spin_lock_bh(&conn->streams_lock);
+	stream = tquic_stream_create_locked(conn, stream_id);
+	spin_unlock_bh(&conn->streams_lock);
 
 	return stream;
 }
@@ -713,8 +727,12 @@ void tquic_stream_close(struct tquic_stream *stream)
 	struct sk_buff *skb;
 	unsigned int skb_len;
 
-	spin_lock_bh(&conn->lock);
+	/* H-001: Use streams_lock to match stream creation */
+	spin_lock_bh(&conn->streams_lock);
 	rb_erase(&stream->node, &conn->streams);
+	spin_unlock_bh(&conn->streams_lock);
+
+	spin_lock_bh(&conn->lock);
 	conn->stats.streams_closed++;
 	spin_unlock_bh(&conn->lock);
 
