@@ -251,6 +251,14 @@ void tquic_flow_control_on_data_recvd(struct tquic_connection *conn, u64 bytes)
 	 *
 	 * We use a threshold of 1/2 of the window to trigger updates.
 	 */
+	/*
+	 * TODO: RFC 9000 Section 4.2 says window should reopen based on
+	 * consumed (application-read) data, not received data. Currently
+	 * tquic_connection lacks a data_consumed field; using data_received
+	 * as a conservative approximation. The proper flow control state
+	 * in flow_control.c (fc->conn.data_consumed) should be used when
+	 * this code path is unified with the tquic_fc_* subsystem.
+	 */
 	consumed = conn->data_received;
 	threshold = conn->max_data_local / TQUIC_FC_WINDOW_UPDATE_THRESHOLD;
 
@@ -285,8 +293,7 @@ static void tquic_flow_control_update_max_data_internal(struct tquic_connection 
 	 * has been received to allow the peer to send more data.
 	 */
 	new_max_data = conn->data_received +
-		       (conn->max_data_local - (conn->max_data_local -
-		       (conn->max_data_local - conn->data_received)));
+		       2 * (conn->max_data_local - conn->data_received);
 
 	/* Apply auto-tuning: gradually increase window size */
 	if (new_max_data < TQUIC_FC_MAX_WINDOW) {

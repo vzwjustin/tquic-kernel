@@ -418,8 +418,14 @@ static bool tquic_rate_limit_check_per_ip(struct tquic_rate_limit_state *state,
 		}
 	}
 
-	/* Update last seen time */
-	entry->last_seen = ktime_get();
+	/*
+	 * Update last seen time.  Use WRITE_ONCE to prevent compiler
+	 * tearing.  Note: on 32-bit architectures ktime_t is 64 bits,
+	 * so a concurrent reader could still see a partially-updated
+	 * value; full atomicity would require the entry spinlock or
+	 * switching last_seen to atomic64_t.
+	 */
+	WRITE_ONCE(entry->last_seen, ktime_get());
 
 	/* Increment connection attempt count */
 	atomic64_inc(&entry->conn_count);

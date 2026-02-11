@@ -1628,12 +1628,12 @@ static const struct genl_ops tquic_genl_ops[] = {
 	{
 		.cmd = TQUIC_NL_CMD_PATH_GET,
 		.doit = tquic_nl_cmd_path_get,
-		/* Read-only: no GENL_ADMIN_PERM needed */
+		.flags = GENL_ADMIN_PERM,
 	},
 	{
 		.cmd = TQUIC_NL_CMD_PATH_LIST,
 		.dumpit = tquic_nl_cmd_path_dump,
-		/* Read-only: no GENL_ADMIN_PERM needed */
+		.flags = GENL_ADMIN_PERM,
 	},
 	{
 		.cmd = TQUIC_NL_CMD_SCHED_SET,
@@ -1648,12 +1648,12 @@ static const struct genl_ops tquic_genl_ops[] = {
 	{
 		.cmd = TQUIC_NL_CMD_STATS_GET,
 		.doit = tquic_nl_cmd_stats_get,
-		/* Read-only: no GENL_ADMIN_PERM needed */
+		.flags = GENL_ADMIN_PERM,
 	},
 	{
 		.cmd = TQUIC_NL_CMD_CONN_GET,
 		.doit = tquic_nl_cmd_conn_get,
-		/* Read-only: no GENL_ADMIN_PERM needed */
+		.flags = GENL_ADMIN_PERM,
 	},
 };
 

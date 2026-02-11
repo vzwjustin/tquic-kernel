@@ -331,7 +331,7 @@ struct tquic_failover_ctx *tquic_failover_init(struct tquic_bonding_ctx *bonding
 	fc->retx_queue.bytes = 0;
 
 	/* Initialize per-path timeout tracking with hysteresis */
-	for (i = 0; i < ARRAY_SIZE(fc->path_timeouts); i++) {
+	for (i = 0; i < TQUIC_MAX_PATHS; i++) {
 		struct tquic_path_timeout *pt = &fc->path_timeouts[i];
 		u64 now_us = tquic_get_time_us();
 
@@ -392,7 +392,7 @@ void tquic_failover_destroy(struct tquic_failover_ctx *fc)
 		return;
 
 	/* Cancel all path timeout work (safe to call even if never queued) */
-	for (i = 0; i < ARRAY_SIZE(fc->path_timeouts); i++)
+	for (i = 0; i < TQUIC_MAX_PATHS; i++)
 		cancel_delayed_work_sync(&fc->path_timeouts[i].timeout_work);
 
 	/* Free all packets in retransmit queue */
@@ -544,7 +544,10 @@ int tquic_failover_on_ack(struct tquic_failover_ctx *fc, u64 packet_number)
 	if (!list_empty(&sp->retx_list)) {
 		list_del_init(&sp->retx_list);
 		fc->retx_queue.count--;
-		fc->retx_queue.bytes -= sp->len;
+		if (fc->retx_queue.bytes >= sp->len)
+			fc->retx_queue.bytes -= sp->len;
+		else
+			fc->retx_queue.bytes = 0;
 	}
 	spin_unlock_bh(&fc->retx_queue.lock);
 
@@ -710,7 +713,7 @@ void tquic_failover_update_path_ack(struct tquic_failover_ctx *fc,
 	u32 timeout_ms;
 	u64 now_us;
 
-	if (!fc || path_id >= ARRAY_SIZE(fc->path_timeouts))
+	if (!fc || path_id >= TQUIC_MAX_PATHS)
 		return;
 
 	pt = &fc->path_timeouts[path_id];
@@ -818,7 +821,7 @@ void tquic_failover_arm_timeout(struct tquic_failover_ctx *fc, u8 path_id)
 {
 	struct tquic_path_timeout *pt;
 
-	if (!fc || !fc->wq || path_id >= ARRAY_SIZE(fc->path_timeouts))
+	if (!fc || !fc->wq || path_id >= TQUIC_MAX_PATHS)
 		return;
 
 	pt = &fc->path_timeouts[path_id];
@@ -836,7 +839,7 @@ EXPORT_SYMBOL_GPL(tquic_failover_arm_timeout);
 const char *tquic_failover_path_hyst_state(struct tquic_failover_ctx *fc,
 					   u8 path_id)
 {
-	if (!fc || path_id >= ARRAY_SIZE(fc->path_timeouts))
+	if (!fc || path_id >= TQUIC_MAX_PATHS)
 		return "UNKNOWN";
 
 	return tquic_hyst_state_name(READ_ONCE(fc->path_timeouts[path_id].hyst_state));
@@ -855,7 +858,7 @@ bool tquic_failover_is_path_usable(struct tquic_failover_ctx *fc,
 {
 	enum tquic_path_hyst_state state;
 
-	if (!fc || path_id >= ARRAY_SIZE(fc->path_timeouts))
+	if (!fc || path_id >= TQUIC_MAX_PATHS)
 		return false;
 
 	state = READ_ONCE(fc->path_timeouts[path_id].hyst_state);

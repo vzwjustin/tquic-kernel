@@ -113,28 +113,30 @@ void tquic_stateless_reset_generate_token(const struct tquic_cid *cid,
 		return;
 	}
 
-	/* Lazily allocate cached HMAC-SHA256 transform */
+	/*
+	 * Lazily allocate and hold the mutex for the entire setkey+digest
+	 * sequence to prevent concurrent callers from racing on the shared
+	 * transform (setkey on one CPU while digest runs on another).
+	 */
+	mutex_lock(&reset_token_tfm_lock);
+
 	if (unlikely(!reset_token_tfm)) {
-		mutex_lock(&reset_token_tfm_lock);
-		if (!reset_token_tfm) {
-			reset_token_tfm = crypto_alloc_shash("hmac(sha256)",
-							     0, 0);
-			if (IS_ERR(reset_token_tfm)) {
-				tquic_warn("failed to allocate HMAC-SHA256 for reset token\n");
-				reset_token_tfm = NULL;
-				mutex_unlock(&reset_token_tfm_lock);
-				get_random_bytes(token,
-						 TQUIC_STATELESS_RESET_TOKEN_LEN);
-				return;
-			}
+		reset_token_tfm = crypto_alloc_shash("hmac(sha256)", 0, 0);
+		if (IS_ERR(reset_token_tfm)) {
+			tquic_warn("failed to allocate HMAC-SHA256 for reset token\n");
+			reset_token_tfm = NULL;
+			mutex_unlock(&reset_token_tfm_lock);
+			get_random_bytes(token,
+					 TQUIC_STATELESS_RESET_TOKEN_LEN);
+			return;
 		}
-		mutex_unlock(&reset_token_tfm_lock);
 	}
 
 	/* Set the static key */
 	ret = crypto_shash_setkey(reset_token_tfm, static_key,
 				  TQUIC_STATELESS_RESET_SECRET_LEN);
 	if (ret) {
+		mutex_unlock(&reset_token_tfm_lock);
 		tquic_warn("HMAC setkey failed: %d\n", ret);
 		get_random_bytes(token, TQUIC_STATELESS_RESET_TOKEN_LEN);
 		return;
@@ -144,6 +146,7 @@ void tquic_stateless_reset_generate_token(const struct tquic_cid *cid,
 	desc = kzalloc(sizeof(*desc) + crypto_shash_descsize(reset_token_tfm),
 		       GFP_ATOMIC);
 	if (!desc) {
+		mutex_unlock(&reset_token_tfm_lock);
 		get_random_bytes(token, TQUIC_STATELESS_RESET_TOKEN_LEN);
 		return;
 	}
@@ -162,6 +165,7 @@ void tquic_stateless_reset_generate_token(const struct tquic_cid *cid,
 
 	/* Cleanup descriptor only (tfm is cached) */
 	kfree(desc);
+	mutex_unlock(&reset_token_tfm_lock);
 
 	/* Wipe intermediate result */
 	memzero_explicit(hmac_result, sizeof(hmac_result));

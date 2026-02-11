@@ -256,17 +256,18 @@ static int aggregate_get_path(struct tquic_connection *conn,
 /*
  * Initialize aggregate scheduler for a connection
  */
-static void aggregate_init(struct tquic_connection *conn)
+static int aggregate_init(struct tquic_connection *conn)
 {
 	struct aggregate_sched_data *sd;
 
 	sd = kzalloc(sizeof(*sd), GFP_ATOMIC);
 	if (!sd)
-		return;
+		return -ENOMEM;
 
 	spin_lock_init(&sd->lock);
 	sd->last_capacity_update = ktime_get();
 	conn->sched_priv = sd;
+	return 0;
 }
 
 /*

@@ -813,6 +813,11 @@ static int tquic_proto_setsockopt(struct sock *sk, int level, int optname,
 			err = -EINVAL;
 			break;
 		}
+		if (val == TQUIC_VERIFY_NONE &&
+		    !ns_capable(sock_net(sk)->user_ns, CAP_NET_ADMIN)) {
+			err = -EPERM;
+			break;
+		}
 		tsk->cert_verify.verify_mode = val;
 		break;
 

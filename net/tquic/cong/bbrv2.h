@@ -156,6 +156,8 @@ struct bbrv2 {
 	u64 round_count;
 	u64 next_round_delivered;
 	u64 bytes_delivered;		/* Total bytes delivered */
+	u64 prior_delivered;		/* delivered at start of interval */
+	u64 prior_delivered_time_ns;	/* timestamp at start of interval */
 	u32 cycle_idx;
 	u64 cycle_start;
 	u64 probe_rtt_start;

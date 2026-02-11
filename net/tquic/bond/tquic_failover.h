@@ -27,6 +27,10 @@
 #include <linux/skbuff.h>
 #include <linux/workqueue.h>
 
+#ifndef TQUIC_MAX_PATHS
+#define TQUIC_MAX_PATHS		16
+#endif
+
 /* Forward declarations */
 struct tquic_path;
 struct tquic_bonding_ctx;

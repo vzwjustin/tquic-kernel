@@ -16,7 +16,7 @@
 #include <linux/workqueue.h>
 #include <linux/timer.h>
 #include <linux/random.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 #include <net/sock.h>
 #include <net/tquic.h>
 
@@ -148,36 +148,37 @@ static struct tquic_path *tquic_select_roundrobin(struct tquic_bond_state *bond,
 						  struct sk_buff *skb)
 {
 	struct tquic_connection *conn = bond->conn;
-	struct tquic_path *path;
-	u32 idx = 0;
-	u32 target;
+	struct tquic_path *path, *selected = NULL;
+	u32 counter;
 	u32 active_count = 0;
 
 	/* conn->lock must be held by caller */
-	/* Count active paths first to avoid bias from inactive paths */
-	list_for_each_entry(path, &conn->paths, list) {
-		if (READ_ONCE(path->state) == TQUIC_PATH_ACTIVE)
-			active_count++;
-	}
+	/*
+	 * Single-pass selection: count active paths and select the target
+	 * in one iteration to avoid TOCTOU race where paths change state
+	 * between a counting pass and a selection pass.
+	 *
+	 * Get the counter value first, then iterate once. For each active
+	 * path, check if it is the (counter % active_count_so_far)'th one
+	 * using modular arithmetic updated as we go.
+	 */
+	counter = (u32)atomic_inc_return(&bond->rr_counter);
 
-	/* Guard against division by zero when no active paths exist */
-	if (unlikely(active_count == 0))
-		return READ_ONCE(conn->active_path);
-
-	target = (u32)atomic_inc_return(&bond->rr_counter) % active_count;
-
-	/* Select the target'th active path */
 	list_for_each_entry(path, &conn->paths, list) {
 		if (READ_ONCE(path->state) != TQUIC_PATH_ACTIVE)
 			continue;
 
-		if (idx == target)
-			return path;
-		idx++;
+		active_count++;
+		/*
+		 * Select this path if counter maps to this index.
+		 * As we discover more active paths, re-evaluate so the
+		 * final selection is counter % total_active_count.
+		 */
+		if (counter % active_count == 0)
+			selected = path;
 	}
 
-	/* Fallback should not be reached, but handle defensively */
-	return READ_ONCE(conn->active_path);
+	return selected ?: READ_ONCE(conn->active_path);
 }
 
 /*
@@ -211,7 +212,7 @@ static struct tquic_path *tquic_select_weighted(struct tquic_bond_state *bond,
 		if (READ_ONCE(path->state) != TQUIC_PATH_ACTIVE)
 			continue;
 
-		cumulative += path->weight;
+		cumulative += min_t(u32, path->weight, 1000);
 		if (target < cumulative) {
 			selected = path;
 			break;

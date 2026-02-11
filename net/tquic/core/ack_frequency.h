@@ -488,7 +488,7 @@ void tquic_ack_freq_on_ack_sent(struct tquic_ack_frequency_state *state);
  *
  * Returns maximum ACK delay in microseconds.
  */
-u64 tquic_ack_freq_get_max_delay(const struct tquic_ack_frequency_state *state);
+u64 tquic_ack_freq_get_max_delay(struct tquic_ack_frequency_state *state);
 
 /**
  * tquic_ack_freq_get_delay_timer - Get time until ACK should be sent
@@ -496,7 +496,7 @@ u64 tquic_ack_freq_get_max_delay(const struct tquic_ack_frequency_state *state);
  *
  * Returns delay in nanoseconds until ACK timer should fire.
  */
-u64 tquic_ack_freq_get_delay_timer(const struct tquic_ack_frequency_state *state);
+u64 tquic_ack_freq_get_delay_timer(struct tquic_ack_frequency_state *state);
 
 /*
  * =============================================================================
@@ -541,7 +541,7 @@ int tquic_ack_freq_generate_pending(struct tquic_ack_frequency_state *state,
  *
  * Returns true if ACK_FREQUENCY or IMMEDIATE_ACK frames are pending.
  */
-bool tquic_ack_freq_has_pending(const struct tquic_ack_frequency_state *state);
+bool tquic_ack_freq_has_pending(struct tquic_ack_frequency_state *state);
 
 /*
  * =============================================================================
@@ -625,7 +625,7 @@ void tquic_ack_freq_set_application_hint(struct tquic_ack_frequency_state *state
  * Updates loss detection's ACK delay based on negotiated parameters.
  */
 void tquic_ack_freq_update_loss_state(struct tquic_loss_state *loss,
-				      const struct tquic_ack_frequency_state *state);
+				      struct tquic_ack_frequency_state *state);
 
 /*
  * =============================================================================
@@ -691,7 +691,7 @@ struct tquic_ack_freq_stats {
  * @state: ACK frequency state
  * @stats: Output statistics structure
  */
-void tquic_ack_freq_get_stats(const struct tquic_ack_frequency_state *state,
+void tquic_ack_freq_get_stats(struct tquic_ack_frequency_state *state,
 			      struct tquic_ack_freq_stats *stats);
 
 /*

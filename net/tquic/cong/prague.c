@@ -296,8 +296,8 @@ static void prague_on_ecn(void *cong_data, u64 ecn_ce_count)
 	if (check_mul_overflow(ecn_ce_count, (u64)mss, &ce_bytes))
 		ce_bytes = U64_MAX;
 
-	/* Update alpha estimate */
-	prague_update_alpha(p, p->acked_bytes_ecn + ce_bytes, ce_bytes);
+	/* Update alpha estimate using total acked bytes as denominator */
+	prague_update_alpha(p, p->bytes_acked, ce_bytes);
 
 	/* Accumulate CE state for proportional response */
 	p->ce_state += ecn_ce_count;

@@ -47,20 +47,6 @@ bool tquic_path_needs_probe(struct tquic_path *path);
 void tquic_path_set_state(struct tquic_connection *conn, u8 path_id,
 			  enum tquic_path_state state);
 
-/*
- * Path validation trace hook. The full tracepoints module isn't built
- * out-of-tree, so provide a lightweight implementation here.
- */
-void tquic_trace_path_validated(struct tquic_connection *conn, u32 path_id,
-				u64 validation_time_us)
-{
-	if (!conn)
-		return;
-
-	tquic_conn_info(conn, "path %u validated in %llu us\n",
-			path_id, validation_time_us);
-}
-EXPORT_SYMBOL_GPL(tquic_trace_path_validated);
 
 /*
  * Human-readable path state names (exported for diagnostics).
@@ -270,6 +256,9 @@ tquic_path_create_internal(struct tquic_connection *conn,
 	path->validation.challenge_sent = 0;
 	path->validation.retries = 0;
 
+	/* Initialize path validation timer (called once during allocation) */
+	timer_setup(&path->validation_timer, tquic_path_validation_expired, 0);
+
 	/* Initialize response queue */
 	skb_queue_head_init(&path->response.queue);
 	atomic_set(&path->response.count, 0);
@@ -353,11 +342,7 @@ void tquic_path_destroy(struct tquic_path *path)
 	kmem_cache_free(tquic_path_cache, path);
 }
 
-void tquic_path_put(struct tquic_path *path)
-{
-	/* No refcounting yet; path lifetime is connection-managed. */
-}
-EXPORT_SYMBOL_GPL(tquic_path_put);
+/* tquic_path_put is now an inline in include/net/tquic.h with refcounting */
 
 /*
  * Generate cryptographically random challenge data

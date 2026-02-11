@@ -1209,7 +1209,8 @@ static enum hrtimer_restart tquic_pacing_timer(struct hrtimer *timer);
 /*
  * Initialize pacing state for a path
  */
-struct tquic_pacing_state *tquic_pacing_init(struct tquic_path *path)
+struct tquic_pacing_state *tquic_pacing_init(struct tquic_connection *conn,
+					     struct tquic_path *path)
 {
 	struct tquic_pacing_state *pacing;
 
@@ -1217,6 +1218,7 @@ struct tquic_pacing_state *tquic_pacing_init(struct tquic_path *path)
 	if (!pacing)
 		return NULL;
 
+	pacing->conn = conn;
 	pacing->path = path;
 	pacing->pacing_rate = 1250000;  /* Default 10 Mbps */
 	pacing->max_tokens = TQUIC_PACING_MAX_BURST;
@@ -2284,14 +2286,14 @@ int tquic_output_flush(struct tquic_connection *conn)
 			/* Re-acquire lock and update state */
 			spin_lock_bh(&conn->lock);
 
-				if (ret >= 0 && send_skb) {
-					/* Update flow control accounting */
-					conn->data_sent += chunk_size;
-					if (conn->fc_data_reserved >= chunk_size)
-						conn->fc_data_reserved -= chunk_size;
-					else
-						conn->fc_data_reserved = 0;
-					conn_credit -= chunk_size;
+			if (ret >= 0 && send_skb) {
+				/* Update flow control accounting */
+				conn->data_sent += chunk_size;
+				if (conn->fc_data_reserved >= chunk_size)
+					conn->fc_data_reserved -= chunk_size;
+				else
+					conn->fc_data_reserved = 0;
+				conn_credit -= chunk_size;
 
 				if (chunk_size == skb->len) {
 					/* Consumed entire skb - uncharge memory */

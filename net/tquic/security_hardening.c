@@ -489,13 +489,18 @@ int tquic_pn_skip_init(struct tquic_pn_skip_state *state, u32 skip_rate)
 	memset(state->skipped_pns, 0, sizeof(state->skipped_pns));
 	state->head = 0;
 	state->count = 0;
-	state->skip_rate = skip_rate ? skip_rate : TQUIC_PN_SKIP_RATE_DEFAULT;
+	state->skip_rate = skip_rate;
 	state->packets_since_skip = 0;
 	spin_lock_init(&state->lock);
 
 	/* Set initial threshold */
-	get_random_bytes(&state->next_skip_threshold, sizeof(u32));
-	state->next_skip_threshold %= state->skip_rate;
+	if (state->skip_rate > 0) {
+		get_random_bytes(&state->next_skip_threshold, sizeof(u32));
+		state->next_skip_threshold = (state->skip_rate / 2) +
+			(state->next_skip_threshold % (state->skip_rate / 2 + 1));
+	} else {
+		state->next_skip_threshold = 0;
+	}
 
 	return 0;
 }
@@ -537,9 +542,8 @@ int tquic_pn_should_skip(struct tquic_pn_skip_state *state, u8 pn_space)
 		/* Reset counter and set new threshold */
 		state->packets_since_skip = 0;
 		get_random_bytes(&state->next_skip_threshold, sizeof(u32));
-		state->next_skip_threshold %= state->skip_rate;
-		if (state->next_skip_threshold == 0)
-			state->next_skip_threshold = 1;
+		state->next_skip_threshold = (state->skip_rate / 2) +
+			(state->next_skip_threshold % (state->skip_rate / 2 + 1));
 	}
 
 	spin_unlock_bh(&state->lock);

@@ -586,6 +586,7 @@ struct tquic_stream {
 	u64 id;
 	enum tquic_stream_state state;
 	struct tquic_connection *conn;
+	refcount_t refcount;
 
 	struct sk_buff_head send_buf;
 	struct sk_buff_head recv_buf;
@@ -600,6 +601,7 @@ struct tquic_stream {
 	bool blocked;
 	bool fin_sent;
 	bool fin_received;
+	u64 final_size;		/* Final size from FIN (RFC 9000 §4.5) */
 
 	struct rb_node node;
 	wait_queue_head_t wait;
@@ -1638,7 +1640,7 @@ struct tquic_mp_sched_ops {
 			u32 flags);
 
 	/* Optional lifecycle hooks */
-	void (*init)(struct tquic_connection *conn);
+	int (*init)(struct tquic_connection *conn);
 	void (*release)(struct tquic_connection *conn);
 
 	/* Optional path events */
@@ -1882,6 +1884,7 @@ int tquic_path_handle_response(struct tquic_connection *conn,
 				struct tquic_path *path,
 				const u8 *data);
 void tquic_path_validation_timeout(struct timer_list *t);
+void tquic_path_validation_expired(struct timer_list *t);
 int tquic_path_send_challenge(struct tquic_connection *conn,
 			       struct tquic_path *path);
 
@@ -2223,7 +2226,8 @@ int tquic_output_packet(struct tquic_connection *conn,
 			struct tquic_path *path, struct sk_buff *skb);
 
 /* Pacing */
-struct tquic_pacing_state *tquic_pacing_init(struct tquic_path *path);
+struct tquic_pacing_state *tquic_pacing_init(struct tquic_connection *conn,
+					     struct tquic_path *path);
 void tquic_pacing_cleanup(struct tquic_pacing_state *pacing);
 void tquic_pacing_update_rate(struct tquic_pacing_state *pacing, u64 rate);
 int tquic_pacing_send(struct tquic_pacing_state *pacing, struct sk_buff *skb);
@@ -2353,7 +2357,7 @@ int __init tquic_netlink_init(void);
 void __exit tquic_netlink_exit(void);
 
 /* Sysctl interface */
-int __init tquic_sysctl_init(void);
+int __init tquic_sysctl_init(struct net *net);
 void __exit tquic_sysctl_exit(void);
 
 /* Protocol handler registration */
@@ -2851,6 +2855,8 @@ struct tquic_pn_space {
 
 /* RTT measurement and loss detection */
 u32 tquic_rtt_pto(struct tquic_rtt_state *rtt);
+int tquic_pn_space_get_sent_time(struct tquic_pn_space *pn_space,
+				 u64 pkt_num, ktime_t *sent_time);
 
 /* Crypto state management */
 void tquic_crypto_destroy(void *crypto);

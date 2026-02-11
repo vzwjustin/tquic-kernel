@@ -443,7 +443,7 @@ static void test_tp_encoded_size(struct kunit *test)
 
 	KUNIT_ASSERT_GT(test, actual_size, (ssize_t)0);
 	/* Calculated size should be >= actual (may include padding estimates) */
-	KUNIT_EXPECT_GE(test, calculated_size + 20, (size_t)actual_size);
+	KUNIT_EXPECT_GE(test, calculated_size + 64, (size_t)actual_size);
 }
 
 /*

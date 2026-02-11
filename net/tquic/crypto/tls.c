@@ -1069,15 +1069,23 @@ void tquic_crypto_set_level(struct tquic_crypto_state *crypto,
 	crypto->write_level = write_level;
 
 	/* Re-install AEAD keys for the new active levels (CF-145) */
-	if (crypto->read_keys[read_level].valid && crypto->aead_rx)
-		crypto_aead_setkey(crypto->aead_rx,
-				   crypto->read_keys[read_level].key,
-				   crypto->read_keys[read_level].key_len);
+	if (crypto->read_keys[read_level].valid && crypto->aead_rx) {
+		int ret;
 
-	if (crypto->write_keys[write_level].valid && crypto->aead_tx)
-		crypto_aead_setkey(crypto->aead_tx,
-				   crypto->write_keys[write_level].key,
-				   crypto->write_keys[write_level].key_len);
+		ret = crypto_aead_setkey(crypto->aead_rx,
+					crypto->read_keys[read_level].key,
+					crypto->read_keys[read_level].key_len);
+		WARN_ON_ONCE(ret);
+	}
+
+	if (crypto->write_keys[write_level].valid && crypto->aead_tx) {
+		int ret;
+
+		ret = crypto_aead_setkey(crypto->aead_tx,
+					crypto->write_keys[write_level].key,
+					crypto->write_keys[write_level].key_len);
+		WARN_ON_ONCE(ret);
+	}
 
 	/* Sync HP context levels */
 	if (crypto->hp_ctx)

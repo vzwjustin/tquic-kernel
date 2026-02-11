@@ -1203,8 +1203,8 @@ static int tquic_frame_process_stream(struct tquic_connection *conn,
 		bool is_peer = (stream_id & 0x1) != conn->is_server;
 
 		if (is_peer) {
-			u64 max = is_bidi ? conn->local_max_streams_bidi
-					  : conn->local_max_streams_uni;
+			u64 max = is_bidi ? conn->max_streams_bidi
+					  : conn->max_streams_uni;
 			u64 stream_num = stream_id >> 2;
 
 			if (stream_num >= max) {

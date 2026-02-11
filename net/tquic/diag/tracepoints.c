@@ -41,6 +41,8 @@
 #include <net/net_namespace.h>
 
 #include "path_metrics.h"
+#include "trace.h"
+#include "../tquic_debug.h"
 /*
  * =============================================================================
  * Tracepoint Implementations
@@ -58,7 +60,7 @@ void tquic_trace_connection_new(struct tquic_connection *conn, bool is_server)
 		return;
 
 	trace_tquic_connection_new(
-		conn->id,
+		quic_trace_conn_id(&conn->scid),
 		is_server,
 		conn->version,
 		conn->scid.id,
@@ -81,10 +83,10 @@ void tquic_trace_connection_established(struct tquic_connection *conn,
 		return;
 
 	trace_tquic_connection_established(
-		conn->id,
+		quic_trace_conn_id(&conn->scid),
 		handshake_time_us,
 		conn->version,
-		conn->cipher_suite,
+		0, /* cipher_suite not on conn */
 		conn->early_data_accepted
 	);
 }
@@ -105,12 +107,12 @@ void tquic_trace_connection_closed(struct tquic_connection *conn,
 		return;
 
 	trace_tquic_connection_closed(
-		conn->id,
+		quic_trace_conn_id(&conn->scid),
 		error_code,
 		reason ? reason : "",
 		is_app_error,
-		conn->stats.bytes_sent,
-		conn->stats.bytes_received
+		conn->stats.tx_bytes,
+		conn->stats.rx_bytes
 	);
 }
 EXPORT_SYMBOL_GPL(tquic_trace_connection_closed);
@@ -131,13 +133,13 @@ void tquic_trace_packet_sent(struct tquic_connection *conn,
 		return;
 
 	trace_tquic_packet_sent(
-		conn->id,
+		quic_trace_conn_id(&conn->scid),
 		pkt_num,
 		pkt_type,
 		size,
 		path_id,
-		conn->cc.bytes_in_flight,
-		conn->cc.cwnd
+		conn->active_path ? conn->active_path->cc.bytes_in_flight : 0,
+		conn->active_path ? conn->active_path->cc.cwnd : 0
 	);
 }
 EXPORT_SYMBOL_GPL(tquic_trace_packet_sent);
@@ -159,7 +161,7 @@ void tquic_trace_packet_received(struct tquic_connection *conn,
 		return;
 
 	trace_tquic_packet_received(
-		conn->id,
+		quic_trace_conn_id(&conn->scid),
 		pkt_num,
 		pkt_type,
 		size,
@@ -180,7 +182,7 @@ void tquic_trace_packet_dropped(struct tquic_connection *conn,
 				u32 pkt_type, u32 size, u32 reason)
 {
 	trace_tquic_packet_dropped(
-		conn ? conn->id : 0,
+		conn ? quic_trace_conn_id(&conn->scid) : 0,
 		pkt_type,
 		size,
 		reason
@@ -204,12 +206,12 @@ void tquic_trace_packet_lost(struct tquic_connection *conn,
 		return;
 
 	trace_tquic_packet_lost(
-		conn->id,
+		quic_trace_conn_id(&conn->scid),
 		pkt_num,
 		size,
 		trigger,
 		path_id,
-		conn->stats.packets_lost
+		conn->stats.lost_packets
 	);
 }
 EXPORT_SYMBOL_GPL(tquic_trace_packet_lost);
@@ -228,7 +230,7 @@ void tquic_trace_stream_opened(struct tquic_connection *conn,
 		return;
 
 	trace_tquic_stream_opened(
-		conn->id,
+		quic_trace_conn_id(&conn->scid),
 		stream_id,
 		is_bidi,
 		is_local
@@ -252,7 +254,7 @@ void tquic_trace_stream_closed(struct tquic_connection *conn,
 		return;
 
 	trace_tquic_stream_closed(
-		conn->id,
+		quic_trace_conn_id(&conn->scid),
 		stream_id,
 		error_code,
 		bytes_sent,
@@ -278,7 +280,7 @@ void tquic_trace_stream_data(struct tquic_connection *conn,
 		return;
 
 	trace_tquic_stream_data(
-		conn->id,
+		quic_trace_conn_id(&conn->scid),
 		stream_id,
 		offset,
 		length,
@@ -303,7 +305,7 @@ void tquic_trace_crypto_key_update(struct tquic_connection *conn,
 		return;
 
 	trace_tquic_crypto_key_update(
-		conn->id,
+		quic_trace_conn_id(&conn->scid),
 		key_type,
 		key_phase,
 		trigger
@@ -328,7 +330,7 @@ void tquic_trace_cc_state_changed(struct tquic_connection *conn,
 		return;
 
 	trace_tquic_cc_state_changed(
-		conn->id,
+		quic_trace_conn_id(&conn->scid),
 		old_state,
 		new_state,
 		cwnd,
@@ -357,7 +359,7 @@ void tquic_trace_cc_metrics_updated(struct tquic_connection *conn,
 		return;
 
 	trace_tquic_cc_metrics_updated(
-		conn->id,
+		quic_trace_conn_id(&conn->scid),
 		cwnd,
 		bytes_in_flight,
 		smoothed_rtt,
@@ -385,7 +387,7 @@ void tquic_trace_path_created(struct tquic_connection *conn,
 		return;
 
 	trace_tquic_path_created(
-		conn->id,
+		quic_trace_conn_id(&conn->scid),
 		path_id,
 		local_addr,
 		remote_addr,
@@ -408,7 +410,7 @@ void tquic_trace_path_validated(struct tquic_connection *conn,
 		return;
 
 	trace_tquic_path_validated(
-		conn->id,
+		quic_trace_conn_id(&conn->scid),
 		path_id,
 		validation_time_us
 	);
@@ -428,7 +430,7 @@ void tquic_trace_path_closed(struct tquic_connection *conn,
 		return;
 
 	trace_tquic_path_closed(
-		conn->id,
+		quic_trace_conn_id(&conn->scid),
 		path_id,
 		reason
 	);
@@ -448,7 +450,7 @@ void tquic_trace_timer_set(struct tquic_connection *conn,
 		return;
 
 	trace_tquic_timer_set(
-		conn->id,
+		quic_trace_conn_id(&conn->scid),
 		timer_type,
 		timeout_us
 	);
@@ -466,7 +468,7 @@ void tquic_trace_timer_expired(struct tquic_connection *conn, u32 timer_type)
 		return;
 
 	trace_tquic_timer_expired(
-		conn->id,
+		quic_trace_conn_id(&conn->scid),
 		timer_type
 	);
 }
@@ -483,7 +485,7 @@ void tquic_trace_error(struct tquic_connection *conn,
 		       u32 error_type, u64 error_code, const char *message)
 {
 	trace_tquic_error(
-		conn ? conn->id : 0,
+		conn ? quic_trace_conn_id(&conn->scid) : 0,
 		error_type,
 		error_code,
 		message ? message : ""
@@ -506,7 +508,7 @@ void tquic_trace_migration(struct tquic_connection *conn,
 		return;
 
 	trace_tquic_migration(
-		conn->id,
+		quic_trace_conn_id(&conn->scid),
 		old_path_id,
 		new_path_id,
 		migration_type
@@ -529,7 +531,7 @@ void tquic_trace_scheduler_decision(struct tquic_connection *conn,
 		return;
 
 	trace_tquic_scheduler_decision(
-		conn->id,
+		quic_trace_conn_id(&conn->scid),
 		selected_path,
 		reason,
 		candidate_count
@@ -552,7 +554,7 @@ void tquic_trace_handshake_start(struct tquic_connection *conn,
 		return;
 
 	trace_tquic_handshake_start(
-		conn->id,
+		quic_trace_conn_id(&conn->scid),
 		is_server,
 		has_session_ticket,
 		verify_mode
@@ -573,10 +575,10 @@ void tquic_trace_handshake_complete(struct tquic_connection *conn,
 		return;
 
 	trace_tquic_handshake_complete(
-		conn->id,
+		quic_trace_conn_id(&conn->scid),
 		status,
 		duration_us,
-		conn->cipher_suite,
+		0, /* cipher_suite not on conn */
 		conn->early_data_accepted
 	);
 }
@@ -598,7 +600,7 @@ void tquic_trace_failover(struct tquic_connection *conn,
 		return;
 
 	trace_tquic_failover(
-		conn->id,
+		quic_trace_conn_id(&conn->scid),
 		failed_path_id,
 		new_path_id,
 		reason,
@@ -622,7 +624,7 @@ void tquic_trace_bond_state(struct tquic_connection *conn,
 		return;
 
 	trace_tquic_bond_state(
-		conn->id,
+		quic_trace_conn_id(&conn->scid),
 		bond_mode,
 		active_paths,
 		total_bandwidth
@@ -643,7 +645,7 @@ void tquic_trace_frame_debug(struct tquic_connection *conn,
 			     u32 path_id, bool is_send)
 {
 	trace_tquic_frame_debug(
-		conn ? conn->id : 0,
+		conn ? quic_trace_conn_id(&conn->scid) : 0,
 		frame_type,
 		length,
 		path_id,
@@ -700,7 +702,7 @@ struct tquic_bpf_iter_path {
  * =============================================================================
  */
 
-static int __init tquic_tracepoints_init(void)
+int tquic_tracepoints_init(void)
 {
 	int ret;
 
@@ -712,15 +714,15 @@ static int __init tquic_tracepoints_init(void)
 	return 0;
 }
 
-static void __exit tquic_tracepoints_exit(void)
+void tquic_tracepoints_exit(void)
 {
 	pr_info("tquic: tracepoints module unloaded\n");
 	tquic_path_metrics_exit(&init_net);
 }
 
-module_init(tquic_tracepoints_init);
-module_exit(tquic_tracepoints_exit);
+/* init called from tquic_main */
+/* exit called from tquic_main */
 
-MODULE_LICENSE("GPL");
+/* MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Linux Foundation");
-MODULE_DESCRIPTION("TQUIC eBPF Tracepoints for Observability");
+MODULE_DESCRIPTION("TQUIC eBPF Tracepoints for Observability"); */

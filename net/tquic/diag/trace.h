@@ -19,6 +19,8 @@
 
 #ifndef _QUIC_TRACE_H
 #define _QUIC_TRACE_H
+#include <linux/types.h>
+#include <net/tquic.h>
 
 /*
  * Prefer real kernel trace events when the trace header is available.

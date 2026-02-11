@@ -396,6 +396,8 @@ struct tquic_path *tquic_conn_get_path(struct tquic_connection *conn, u32 path_i
 	spin_lock_bh(&conn->lock);
 	list_for_each_entry(path, &conn->paths, list) {
 		if (path->path_id == path_id) {
+			if (!tquic_path_get(path))
+				path = NULL;
 			spin_unlock_bh(&conn->lock);
 			return path;
 		}
@@ -1078,7 +1080,7 @@ int __init tquic_init(void)
 		goto err_netlink;
 
 	/* Initialize sysctl interface */
-	err = tquic_sysctl_init();
+	err = tquic_sysctl_init(&init_net);
 	if (err)
 		goto err_sysctl;
 

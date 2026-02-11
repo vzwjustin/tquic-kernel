@@ -390,13 +390,13 @@ static int blest_get_path(struct tquic_connection *conn,
  * blest_init - Initialize BLEST scheduler for a connection
  * @conn: Connection to initialize
  */
-static void blest_init(struct tquic_connection *conn)
+static int blest_init(struct tquic_connection *conn)
 {
 	struct blest_sched_data *sd;
 
 	sd = kzalloc(sizeof(*sd), GFP_ATOMIC);
 	if (!sd)
-		return;
+		return -ENOMEM;
 
 	spin_lock_init(&sd->lock);
 	sd->segment_size = BLEST_DEFAULT_SEGMENT_SIZE;
@@ -404,6 +404,7 @@ static void blest_init(struct tquic_connection *conn)
 	sd->blocking_threshold_us = blest_get_validated_threshold();
 
 	conn->sched_priv = sd;
+	return 0;
 }
 
 /**

@@ -340,7 +340,11 @@ static u64 tquic_path_compute_score(struct tquic_path *path)
 	}
 
 	/* Apply priority (lower priority value = preferred) */
-	score = div64_u64(score * (256 - path->priority), 256);
+	{
+		u32 prio = min_t(u32, path->priority, 255);
+
+		score = div64_u64(score * (256 - prio), 256);
+	}
 
 	/* Apply weight - cap to prevent overflow */
 	if (path->weight > 0 && score > div64_u64(U64_MAX, path->weight))
@@ -471,7 +475,8 @@ struct tquic_path *tquic_path_create(struct tquic_connection *conn,
 	path->priority = 0;
 	path->mtu = 1200;  /* QUIC minimum */
 
-	/* Initialize validation state */
+	/* Initialize validation timers */
+	timer_setup(&path->validation_timer, tquic_path_validation_expired, 0);
 	timer_setup(&path->validation.timer, tquic_path_validation_timeout, 0);
 	skb_queue_head_init(&path->response.queue);
 	atomic_set(&path->response.count, 0);
@@ -735,6 +740,15 @@ static void tquic_migration_work_handler(struct work_struct *work)
 	}
 
 	ms->status = TQUIC_MIGRATE_NONE;
+
+	/*
+	 * Take an extra reference on new_path for the event notification
+	 * before releasing the migration state references, to prevent
+	 * use-after-free if path_put drops the last reference.
+	 */
+	if (new_path)
+		tquic_path_get(new_path);
+
 	if (ms->old_path) {
 		tquic_path_put(ms->old_path);
 		ms->old_path = NULL;
@@ -747,7 +761,11 @@ static void tquic_migration_work_handler(struct work_struct *work)
 	spin_unlock_bh(&ms->lock);
 
 	/* Notify completion */
-	tquic_migration_path_event(conn, new_path, TQUIC_PATH_EVENT_ACTIVE);
+	if (new_path) {
+		tquic_migration_path_event(conn, new_path,
+					   TQUIC_PATH_EVENT_ACTIVE);
+		tquic_path_put(new_path);
+	}
 }
 
 /*
@@ -1688,11 +1706,11 @@ restart:
 					path->state = TQUIC_PATH_PENDING;
 
 				/*
-				 * Drop lock before calling into validation
-				 * (may sleep or acquire other locks), then
-				 * restart iteration since the list may have
-				 * changed while the lock was released.
+				 * Take a reference on the path before
+				 * dropping the lock, since path may be
+				 * freed once the lock is released.
 				 */
+				tquic_path_get(path);
 				spin_unlock_bh(&conn->paths_lock);
 
 				tquic_path_start_validation(conn, path);
@@ -1700,6 +1718,7 @@ restart:
 				tquic_dbg("attempting path %u recovery\n",
 					 path->path_id);
 
+				tquic_path_put(path);
 				goto restart;
 			}
 		}

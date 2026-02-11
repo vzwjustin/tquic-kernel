@@ -397,7 +397,7 @@ int tquic_retry_token_create(struct tquic_retry_state *state,
 	u8 *encrypted = NULL;
 	size_t pt_len, enc_len;
 	u8 nonce[12];
-	u8 local_key[32];
+	u8 local_key[16];
 	unsigned long flags;
 	int ret;
 
@@ -462,7 +462,12 @@ int tquic_retry_token_create(struct tquic_retry_state *state,
 	 * operations from different CPUs.
 	 */
 	{
-		u32 slot = raw_smp_processor_id() % state->pool_size;
+		int cpu;
+		u32 slot;
+
+		cpu = get_cpu();
+		slot = cpu % state->pool_size;
+		put_cpu();
 
 		mutex_lock(&state->pool_locks[slot]);
 
@@ -535,7 +540,7 @@ int tquic_retry_token_validate(struct tquic_retry_state *state,
 	struct scatterlist sg;
 	u8 *decrypted = NULL;
 	u8 nonce[12];
-	u8 local_key[32];
+	u8 local_key[16];
 	size_t enc_len, pt_len;
 	u64 now, age;
 	unsigned long flags;
@@ -570,7 +575,12 @@ int tquic_retry_token_validate(struct tquic_retry_state *state,
 	 * validation from different CPUs.
 	 */
 	{
-		u32 slot = raw_smp_processor_id() % state->pool_size;
+		int cpu;
+		u32 slot;
+
+		cpu = get_cpu();
+		slot = cpu % state->pool_size;
+		put_cpu();
 
 		mutex_lock(&state->pool_locks[slot]);
 
@@ -645,8 +655,10 @@ int tquic_retry_token_validate(struct tquic_retry_state *state,
 		const struct sockaddr_in *sin;
 
 		sin = (const struct sockaddr_in *)client_addr;
-		if (pt.client_addr.v4 != sin->sin_addr.s_addr ||
-		    pt.client_port != sin->sin_port) {
+		if (crypto_memneq(&pt.client_addr.v4, &sin->sin_addr.s_addr,
+				  sizeof(pt.client_addr.v4)) ||
+		    crypto_memneq(&pt.client_port, &sin->sin_port,
+				  sizeof(pt.client_port))) {
 			tquic_dbg("retry:IPv4 address mismatch\n");
 			return -EACCES;
 		}
@@ -654,9 +666,10 @@ int tquic_retry_token_validate(struct tquic_retry_state *state,
 		const struct sockaddr_in6 *sin6;
 
 		sin6 = (const struct sockaddr_in6 *)client_addr;
-		if (memcmp(&pt.client_addr.v6, &sin6->sin6_addr,
-			   sizeof(struct in6_addr)) != 0 ||
-		    pt.client_port != sin6->sin6_port) {
+		if (crypto_memneq(&pt.client_addr.v6, &sin6->sin6_addr,
+				  sizeof(struct in6_addr)) ||
+		    crypto_memneq(&pt.client_port, &sin6->sin6_port,
+				  sizeof(pt.client_port))) {
 			tquic_dbg("retry:IPv6 address mismatch\n");
 			return -EACCES;
 		}

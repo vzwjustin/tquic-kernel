@@ -363,6 +363,7 @@ static int tquic_pm_netdev_event(struct notifier_block *nb, unsigned long event,
 			struct tquic_path *path;
 			struct tquic_path *failed[TQUIC_MAX_PATHS];
 			int nfail = 0;
+			int i;
 
 			spin_lock_bh(&conn->paths_lock);
 			list_for_each_entry(path, &conn->paths, list) {
@@ -705,7 +706,8 @@ struct tquic_path *tquic_pm_get_path(struct tquic_pm_state *pm, u32 path_id)
 	spin_lock_bh(&pm->conn->paths_lock);
 	list_for_each_entry(path, &pm->conn->paths, list) {
 		if (path->path_id == path_id) {
-			found = path;
+			if (tquic_path_get(path))
+				found = path;
 			break;
 		}
 	}

@@ -247,8 +247,13 @@ static void tquic_rl_refill_tokens(struct tquic_rl_bucket *bucket)
 	tokens = atomic_read(&bucket->tokens);
 	max_tokens = tquic_rl_params.burst_limit * TOKEN_SCALE;
 
-	tokens = min(tokens + new_tokens, max_tokens);
-	atomic_set(&bucket->tokens, tokens);
+	/* Clamp tokens to max_tokens first to handle any prior overshoot */
+	if (tokens > max_tokens)
+		tokens = max_tokens;
+
+	/* Clamp new_tokens to prevent int overflow in addition */
+	new_tokens = min_t(int, new_tokens, max_tokens - tokens);
+	atomic_set(&bucket->tokens, tokens + new_tokens);
 	bucket->last_refill = now;
 }
 
@@ -568,9 +573,6 @@ enum tquic_rl_action tquic_ratelimit_check(struct net *net,
 
 	state = tquic_rl_pernet(net);
 	if (!state || !state->initialized || !state->enabled)
-		return TQUIC_RL_ACCEPT;
-
-	if (!tquic_rl_params.enabled)
 		return TQUIC_RL_ACCEPT;
 
 	atomic64_inc(&state->stats.total_checked);

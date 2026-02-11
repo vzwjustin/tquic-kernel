@@ -367,8 +367,8 @@ void tquic_spin_bit_update(struct tquic_spin_bit_state *state, u8 received_spin,
  */
 
 /* Sysctl accessors */
-u64 tquic_sysctl_get_pre_handshake_memory_limit(void);
-u64 tquic_sysctl_get_pre_handshake_per_ip_budget(void);
+unsigned long tquic_sysctl_get_pre_handshake_memory_limit(void);
+unsigned long tquic_sysctl_get_pre_handshake_per_ip_budget(void);
 u32 tquic_sysctl_get_pn_skip_rate(void);
 u8 tquic_sysctl_get_spin_bit_policy(void);
 

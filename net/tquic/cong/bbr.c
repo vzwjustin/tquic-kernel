@@ -34,6 +34,9 @@
 /* Min cwnd in packets */
 #define BBR_MIN_CWND_PKTS	4
 
+/* Initial RTT fallback for cycle duration (333ms, matching QUIC default) */
+#define TQUIC_INITIAL_RTT_MS	333
+
 /* BBR state machine */
 enum bbr_mode {
 	BBR_STARTUP,	/* Ramp up to fill pipe */
@@ -73,10 +76,12 @@ struct tquic_bbr {
 	/* RTT filter */
 	u32 min_rtt_stamp;	/* Timestamp of min RTT */
 
-	/* Round counting */
+	/* Round counting and delivery rate */
 	u64 delivered;		/* Total delivered bytes */
 	u64 round_start;	/* delivered at round start */
 	bool round_started;
+	u64 prior_delivered;	/* delivered at start of interval */
+	ktime_t prior_delivered_time; /* timestamp at start of interval */
 
 	/* Cycle state for PROBE_BW */
 	u32 cycle_idx;		/* Cycle index */
@@ -228,6 +233,7 @@ static void *tquic_bbr_init(struct tquic_path *path)
 	bbr->cwnd_gain = BBR_CWND_GAIN;
 	bbr->cwnd = 10 * 1200;
 	bbr->min_rtt_us = UINT_MAX;
+	bbr->prior_delivered_time = ktime_get();
 
 	tquic_dbg("bbr: initialized for path %u\n", path->path_id);
 
@@ -274,14 +280,30 @@ static void tquic_bbr_on_ack(void *state, u64 bytes_acked, u64 rtt_us)
 		bbr->min_rtt_stamp = now_ms;
 	}
 
-	/* Calculate bandwidth sample */
-	if (rtt_us > 0) {
-		bw_sample = bytes_acked * 1000000 / rtt_us;
-		bbr_update_bw(bbr, bw_sample);
-	}
-
 	/* Update round counting */
 	bbr->delivered += bytes_acked;
+
+	/*
+	 * Compute delivery rate as bytes_delivered / delivery_interval.
+	 * This is the correct BBR bandwidth estimation per the BBR paper,
+	 * not bytes_acked/rtt which overestimates BW on coalesced ACKs.
+	 */
+	{
+		ktime_t now = ktime_get();
+		s64 interval_us = ktime_us_delta(now,
+						 bbr->prior_delivered_time);
+		u64 delivered_delta = bbr->delivered - bbr->prior_delivered;
+
+		if (interval_us > 0 && delivered_delta > 0) {
+			bw_sample = delivered_delta * USEC_PER_SEC /
+				    (u64)interval_us;
+			bbr_update_bw(bbr, bw_sample);
+		}
+
+		/* Update delivery tracking for next interval */
+		bbr->prior_delivered = bbr->delivered;
+		bbr->prior_delivered_time = now;
+	}
 
 	/* State machine */
 	switch (bbr->mode) {
@@ -324,7 +346,17 @@ static void tquic_bbr_on_ack(void *state, u64 bytes_acked, u64 rtt_us)
 
 	case BBR_PROBE_BW:
 		/* Cycle through pacing gains */
-		if (now_ms - bbr->cycle_stamp >= bbr->min_rtt_us / 1000) {
+		if (bbr->min_rtt_us == UINT_MAX) {
+			/* No RTT sample yet; use initial RTT as cycle duration */
+			if (now_ms - bbr->cycle_stamp >=
+			    TQUIC_INITIAL_RTT_MS) {
+				bbr->cycle_idx = (bbr->cycle_idx + 1) %
+						 BBR_CYCLE_LEN;
+				bbr->pacing_gain =
+					bbr_pacing_cycle[bbr->cycle_idx];
+				bbr->cycle_stamp = now_ms;
+			}
+		} else if (now_ms - bbr->cycle_stamp >= bbr->min_rtt_us / 1000) {
 			bbr->cycle_idx = (bbr->cycle_idx + 1) % BBR_CYCLE_LEN;
 			bbr->pacing_gain = bbr_pacing_cycle[bbr->cycle_idx];
 			bbr->cycle_stamp = now_ms;
