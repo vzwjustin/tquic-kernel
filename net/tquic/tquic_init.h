@@ -27,6 +27,8 @@ void tquic_hw_offload_exit(void);
 /* Scheduler framework and schedulers */
 int tquic_scheduler_init(void);
 void tquic_scheduler_exit(void);
+int tquic_sched_framework_init(void);
+void tquic_sched_framework_exit(void);
 int tquic_sched_minrtt_init(void);
 void tquic_sched_minrtt_exit(void);
 int tquic_sched_aggregate_init(void);
@@ -83,6 +85,16 @@ void tquic_prague_exit(void);
 /* Netlink interface */
 int tquic_nl_init(void);
 void tquic_nl_exit(void);
+
+/* HTTP/3 subsystem */
+int tquic_http3_conn_init(void);
+void tquic_http3_conn_exit(void);
+int tquic_http3_streams_init(void);
+void tquic_http3_streams_exit(void);
+
+/* Output TX subsystem */
+int tquic_output_tx_init(void);
+void tquic_output_tx_exit(void);
 
 /* CID hash used by core/quic_connection.c */
 int tquic_cid_hash_init(void);

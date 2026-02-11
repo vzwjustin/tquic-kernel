@@ -13,10 +13,7 @@
 #include "mp_ack.h"
 #include "path_abandon.h"
 #include "../tquic_debug.h"
-
-/* mp_deadline.c does not expose a public header */
-extern int __init tquic_mp_deadline_init(void);
-extern void __exit tquic_mp_deadline_exit(void);
+#include "../tquic_init.h"
 
 static int __init __maybe_unused tquic_multipath_module_init(void)
 {

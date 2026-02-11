@@ -11,11 +11,7 @@
 
 #include "http3_priority.h"
 #include "qpack.h"
-
-extern int __init tquic_http3_conn_init(void);
-extern void __exit tquic_http3_conn_exit(void);
-extern int __init tquic_http3_streams_init(void);
-extern void __exit tquic_http3_streams_exit(void);
+#include "../tquic_init.h"
 
 int __init tquic_http3_init(void)
 {
