@@ -497,15 +497,17 @@ static struct tquic_cid_entry *tquic_cid_create_local(
 		return NULL;
 	}
 
+	spin_lock_bh(&mgr->lock);
 	entry->seq_num = mgr->next_local_seq++;
+	/* Keep sequence monotonic; rollback can race and reuse live seq numbers. */
 	entry->cid.seq_num = entry->seq_num;
+	spin_unlock_bh(&mgr->lock);
 	entry->conn = mgr->conn;
 	entry->is_local = true;
 
 	/* Generate stateless reset token */
 	ret = tquic_cid_generate_reset_token(&entry->cid, entry->reset_token);
 	if (ret) {
-		mgr->next_local_seq--;
 		tquic_cid_entry_free(entry);
 		return NULL;
 	}
@@ -513,7 +515,6 @@ static struct tquic_cid_entry *tquic_cid_create_local(
 	/* Register in global table */
 	ret = tquic_cid_register(entry);
 	if (ret) {
-		mgr->next_local_seq--;
 		tquic_cid_entry_free(entry);
 		return NULL;
 	}
@@ -1533,8 +1534,11 @@ int tquic_cid_set_preferred_addr(struct tquic_cid_manager *mgr,
 		return -ENOMEM;
 
 	memcpy(&entry->cid, cid, sizeof(entry->cid));
+	spin_lock_bh(&mgr->lock);
 	entry->seq_num = mgr->next_local_seq++;
+	/* Keep sequence monotonic; rollback can race and reuse live seq numbers. */
 	entry->cid.seq_num = entry->seq_num;
+	spin_unlock_bh(&mgr->lock);
 	entry->conn = mgr->conn;
 	entry->is_local = true;
 
@@ -1543,7 +1547,6 @@ int tquic_cid_set_preferred_addr(struct tquic_cid_manager *mgr,
 	} else {
 		ret = tquic_cid_generate_reset_token(cid, entry->reset_token);
 		if (ret) {
-			mgr->next_local_seq--;
 			tquic_cid_entry_free(entry);
 			return ret;
 		}
@@ -1551,7 +1554,6 @@ int tquic_cid_set_preferred_addr(struct tquic_cid_manager *mgr,
 
 	ret = tquic_cid_register(entry);
 	if (ret) {
-		mgr->next_local_seq--;
 		tquic_cid_entry_free(entry);
 		return ret;
 	}
@@ -1669,6 +1671,7 @@ int tquic_cid_register_local(struct tquic_cid_manager *mgr,
 			     const struct tquic_cid *cid)
 {
 	struct tquic_cid_entry *entry;
+	int ret;
 	u64 seq_num;
 
 	if (!mgr || !cid || cid->len == 0)
@@ -1697,6 +1700,7 @@ int tquic_cid_register_local(struct tquic_cid_manager *mgr,
 	/* Atomically assign sequence, add to list, and register */
 	spin_lock_bh(&mgr->lock);
 	seq_num = mgr->next_local_seq++;
+	/* Keep sequence monotonic; rollback can race and reuse live seq numbers. */
 	entry->seq_num = seq_num;
 	entry->cid.seq_num = seq_num;
 	list_add_tail(&entry->list, &mgr->local_cids);
@@ -1710,7 +1714,6 @@ int tquic_cid_register_local(struct tquic_cid_manager *mgr,
 		spin_lock_bh(&mgr->lock);
 		list_del(&entry->list);
 		mgr->local_cid_count--;
-		mgr->next_local_seq--;
 		spin_unlock_bh(&mgr->lock);
 		kmem_cache_free(tquic_cid_cache, entry);
 		return ret;

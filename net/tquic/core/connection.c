@@ -227,10 +227,44 @@ struct tquic_conn_state_machine {
 /* Global connection ID hash table for fast lookup */
 static struct rhashtable cid_lookup_table;
 
+static u32 tquic_state_cid_hashfn(const void *data, u32 len, u32 seed)
+{
+	const struct tquic_cid *cid = data;
+	u8 key_len = min_t(u8, cid->len, TQUIC_MAX_CID_LEN);
+
+	return jhash(cid->id, key_len, seed);
+}
+
+static u32 tquic_state_cid_obj_hashfn(const void *data, u32 len, u32 seed)
+{
+	const struct tquic_cid_entry *entry = data;
+	u8 key_len = min_t(u8, entry->cid.len, TQUIC_MAX_CID_LEN);
+
+	return jhash(entry->cid.id, key_len, seed);
+}
+
+static int tquic_state_cid_obj_cmpfn(struct rhashtable_compare_arg *arg,
+				     const void *obj)
+{
+	const struct tquic_cid *cid = arg->key;
+	const struct tquic_cid_entry *entry = obj;
+
+	if (cid->len > TQUIC_MAX_CID_LEN || entry->cid.len > TQUIC_MAX_CID_LEN)
+		return 1;
+
+	if (cid->len != entry->cid.len)
+		return 1;
+
+	return memcmp(cid->id, entry->cid.id, cid->len);
+}
+
 static const struct rhashtable_params cid_hash_params = {
 	.key_len = sizeof(struct tquic_cid),
 	.key_offset = offsetof(struct tquic_cid_entry, cid),
 	.head_offset = offsetof(struct tquic_cid_entry, hash_node),
+	.hashfn = tquic_state_cid_hashfn,
+	.obj_hashfn = tquic_state_cid_obj_hashfn,
+	.obj_cmpfn = tquic_state_cid_obj_cmpfn,
 	.automatic_shrinking = true,
 };
 

@@ -39,6 +39,7 @@
  * Maximum PSK identity length (RFC 8446 Section 4.2.11)
  */
 #define TQUIC_MAX_PSK_IDENTITY_LEN	64
+#define TQUIC_PSK_KEY_LEN		(TQUIC_MAX_PSK_IDENTITY_LEN + 1)
 
 /*
  * Default rate limit: 10 connections per second per client
@@ -118,7 +119,11 @@ struct tquic_client {
  * Client hashtable keyed by PSK identity string
  */
 static const struct rhashtable_params tquic_client_params = {
-	.key_len = TQUIC_MAX_PSK_IDENTITY_LEN,
+	/*
+	 * Include psk_identity_len in the key so binary identities that share
+	 * the same prefix but differ in trailing bytes/length do not alias.
+	 */
+	.key_len = TQUIC_PSK_KEY_LEN,
 	.key_offset = offsetof(struct tquic_client, psk_identity),
 	.head_offset = offsetof(struct tquic_client, node),
 	.automatic_shrinking = true,
@@ -303,7 +308,7 @@ struct tquic_client *tquic_client_lookup_by_psk(const char *identity,
 						size_t identity_len)
 {
 	struct tquic_client *client;
-	char lookup_key[TQUIC_MAX_PSK_IDENTITY_LEN] = {0};
+	u8 lookup_key[TQUIC_PSK_KEY_LEN] = { 0 };
 
 	if (!identity || identity_len == 0 ||
 	    identity_len > TQUIC_MAX_PSK_IDENTITY_LEN)
@@ -314,6 +319,7 @@ struct tquic_client *tquic_client_lookup_by_psk(const char *identity,
 
 	/* Prepare padded key for lookup */
 	memcpy(lookup_key, identity, identity_len);
+	lookup_key[TQUIC_MAX_PSK_IDENTITY_LEN] = (u8)identity_len;
 
 	rcu_read_lock();
 	client = rhashtable_lookup(&tquic_client_table, lookup_key,
@@ -383,7 +389,7 @@ EXPORT_SYMBOL_GPL(tquic_client_register);
 int tquic_client_unregister(const char *identity, size_t identity_len)
 {
 	struct tquic_client *client;
-	char lookup_key[TQUIC_MAX_PSK_IDENTITY_LEN] = {0};
+	u8 lookup_key[TQUIC_PSK_KEY_LEN] = { 0 };
 	int ret;
 
 	if (!identity || identity_len == 0 ||
@@ -391,6 +397,7 @@ int tquic_client_unregister(const char *identity, size_t identity_len)
 		return -EINVAL;
 
 	memcpy(lookup_key, identity, identity_len);
+	lookup_key[TQUIC_MAX_PSK_IDENTITY_LEN] = (u8)identity_len;
 
 	mutex_lock(&tquic_client_mutex);
 	if (!tquic_client_table_initialized) {

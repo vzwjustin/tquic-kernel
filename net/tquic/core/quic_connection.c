@@ -9,6 +9,7 @@
  */
 
 #include <linux/slab.h>
+#include <linux/jhash.h>
 #include <linux/random.h>
 #include <linux/rcupdate.h>
 #include <net/tquic.h>
@@ -111,11 +112,45 @@ static inline u64 tquic_trace_conn_id(const struct tquic_cid *cid)
 
 static struct kmem_cache *tquic_cid_cache __read_mostly;
 
+static u32 tquic_cid_rht_hashfn(const void *data, u32 len, u32 seed)
+{
+	const struct tquic_cid *cid = data;
+	u8 key_len = min_t(u8, cid->len, TQUIC_MAX_CID_LEN);
+
+	return jhash(cid->id, key_len, seed);
+}
+
+static u32 tquic_cid_rht_obj_hashfn(const void *data, u32 len, u32 seed)
+{
+	const struct tquic_cid_entry *entry = data;
+	u8 key_len = min_t(u8, entry->cid.len, TQUIC_MAX_CID_LEN);
+
+	return jhash(entry->cid.id, key_len, seed);
+}
+
+static int tquic_cid_rht_obj_cmpfn(struct rhashtable_compare_arg *arg,
+				   const void *obj)
+{
+	const struct tquic_cid *cid = arg->key;
+	const struct tquic_cid_entry *entry = obj;
+
+	if (cid->len > TQUIC_MAX_CID_LEN || entry->cid.len > TQUIC_MAX_CID_LEN)
+		return 1;
+
+	if (cid->len != entry->cid.len)
+		return 1;
+
+	return memcmp(cid->id, entry->cid.id, cid->len);
+}
+
 /* rhashtable parameters for connection ID lookup */
 static const struct rhashtable_params tquic_cid_rht_params = {
 	.key_len = sizeof(struct tquic_cid),
 	.key_offset = offsetof(struct tquic_cid_entry, cid),
 	.head_offset = offsetof(struct tquic_cid_entry, node),
+	.hashfn = tquic_cid_rht_hashfn,
+	.obj_hashfn = tquic_cid_rht_obj_hashfn,
+	.obj_cmpfn = tquic_cid_rht_obj_cmpfn,
 };
 
 static struct rhashtable tquic_cid_rht;
