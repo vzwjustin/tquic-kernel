@@ -1544,7 +1544,7 @@ int __init tquic_cid_table_init(void)
  *
  * Called during module exit.
  */
-void __exit tquic_cid_table_exit(void)
+void tquic_cid_table_exit(void)
 {
 	if (cid_table_initialized) {
 		rhashtable_destroy(&tquic_cid_table);

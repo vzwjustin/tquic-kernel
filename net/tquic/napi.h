@@ -450,7 +450,7 @@ int __init tquic_napi_subsys_init(void);
  *
  * Called during module exit to clean up global NAPI state.
  */
-void __exit tquic_napi_subsys_exit(void);
+void tquic_napi_subsys_exit(void);
 
 /*
  * =============================================================================

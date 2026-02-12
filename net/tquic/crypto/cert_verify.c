@@ -3459,7 +3459,7 @@ int __init tquic_cert_verify_init(void)
 	return 0;
 }
 
-void __exit tquic_cert_verify_exit(void)
+void tquic_cert_verify_exit(void)
 {
 	/* Remove procfs entries */
 	if (tquic_cert_proc_dir) {

@@ -3139,7 +3139,7 @@ err_pernet:
 	return ret;
 }
 
-void __exit tquic_scheduler_exit(void)
+void tquic_scheduler_exit(void)
 {
 	pr_info("Unloading TQUIC packet scheduler framework\n");
 

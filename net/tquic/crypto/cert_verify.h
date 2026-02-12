@@ -576,6 +576,6 @@ u32 tquic_sysctl_get_cert_time_tolerance(void);
  * Module initialization
  */
 int __init tquic_cert_verify_init(void);
-void __exit tquic_cert_verify_exit(void);
+void tquic_cert_verify_exit(void);
 
 #endif /* _TQUIC_CERT_VERIFY_H */

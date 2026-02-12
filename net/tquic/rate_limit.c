@@ -830,7 +830,7 @@ int __init tquic_rate_limit_module_init(void)
 	return 0;
 }
 
-void __exit tquic_rate_limit_module_exit(void)
+void tquic_rate_limit_module_exit(void)
 {
 	unregister_pernet_subsys(&tquic_rate_limit_net_ops);
 

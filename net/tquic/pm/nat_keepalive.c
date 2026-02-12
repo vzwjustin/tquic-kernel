@@ -1107,7 +1107,7 @@ int __init tquic_nat_keepalive_module_init(void)
 	return 0;
 }
 
-void __exit tquic_nat_keepalive_module_exit(void)
+void tquic_nat_keepalive_module_exit(void)
 {
 	/* Clean up lifecycle subsystem first */
 	tquic_nat_lifecycle_module_exit();

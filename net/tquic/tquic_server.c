@@ -822,7 +822,7 @@ int __init tquic_server_init(void)
  * Walks the rhashtable to clear sensitive material from all remaining
  * client entries before destroying the table.
  */
-void __exit tquic_server_exit(void)
+void tquic_server_exit(void)
 {
 	struct rhashtable_iter iter;
 	struct tquic_client *client;

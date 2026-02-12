@@ -333,7 +333,7 @@ int __init tquic_grease_init(void)
 /**
  * tquic_grease_exit - Cleanup GREASE subsystem
  */
-void __exit tquic_grease_exit(void)
+void tquic_grease_exit(void)
 {
 	tquic_dbg("GREASE support cleanup complete\n");
 }

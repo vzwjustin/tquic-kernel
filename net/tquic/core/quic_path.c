@@ -109,13 +109,11 @@ int __init tquic_path_init_module(void)
 {
 	return tquic_path_init();
 }
-EXPORT_SYMBOL_GPL(tquic_path_init_module);
 
-void __exit tquic_path_exit_module(void)
+void tquic_path_exit_module(void)
 {
 	tquic_path_exit();
 }
-EXPORT_SYMBOL_GPL(tquic_path_exit_module);
 
 /*
  * Initialize RTT measurements for a new path
@@ -955,7 +953,6 @@ bool tquic_path_needs_probe(struct tquic_path *path)
 	       path->state == TQUIC_PATH_PENDING;
 }
 
-EXPORT_SYMBOL_GPL(tquic_path_init);
 EXPORT_SYMBOL_GPL(tquic_path_exit);
 /* tquic_path_create exported from tquic_migration.c */
 EXPORT_SYMBOL_GPL(tquic_path_destroy);

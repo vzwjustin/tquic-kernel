@@ -1321,7 +1321,7 @@ int __init tquic_cong_data_module_init(void)
 	return 0;
 }
 
-void __exit tquic_cong_data_module_exit(void)
+void tquic_cong_data_module_exit(void)
 {
 	/* Clear any sensitive data in cache */
 	memset(cong_data_cache, 0, sizeof(cong_data_cache));

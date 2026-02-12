@@ -432,6 +432,6 @@ int __init tquic_nat_keepalive_module_init(void);
 /**
  * tquic_nat_keepalive_module_exit - Clean up NAT keepalive subsystem
  */
-void __exit tquic_nat_keepalive_module_exit(void);
+void tquic_nat_keepalive_module_exit(void);
 
 #endif /* _TQUIC_NAT_KEEPALIVE_H */

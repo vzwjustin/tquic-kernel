@@ -541,7 +541,7 @@ int __init tquic_sched_minrtt_init(void)
 	return 0;
 }
 
-void __exit tquic_sched_minrtt_exit(void)
+void tquic_sched_minrtt_exit(void)
 {
 	pr_info("Unloading TQUIC MinRTT and Round-Robin schedulers\n");
 

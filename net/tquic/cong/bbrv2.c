@@ -706,7 +706,7 @@ int __init tquic_bbrv2_init(void)
 	return tquic_register_cong(&bbrv2_cong_ops);
 }
 
-void __exit tquic_bbrv2_exit(void)
+void tquic_bbrv2_exit(void)
 {
 	tquic_unregister_cong(&bbrv2_cong_ops);
 }

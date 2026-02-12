@@ -1754,7 +1754,6 @@ void tquic_loss_detection_cleanup(struct tquic_connection *conn)
 /*
  * Module exports
  */
-EXPORT_SYMBOL_GPL(tquic_loss_cache_init);
 EXPORT_SYMBOL_GPL(tquic_loss_cache_destroy);
 EXPORT_SYMBOL_GPL(tquic_sent_packet_alloc);
 EXPORT_SYMBOL_GPL(tquic_sent_packet_free);

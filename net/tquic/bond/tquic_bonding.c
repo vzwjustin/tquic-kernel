@@ -1167,7 +1167,7 @@ int __init tquic_bonding_init_module(void)
 	return 0;
 }
 
-void __exit tquic_bonding_exit_module(void)
+void tquic_bonding_exit_module(void)
 {
 	if (tquic_reorder_wq)
 		destroy_workqueue(tquic_reorder_wq);

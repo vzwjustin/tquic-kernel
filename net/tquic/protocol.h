@@ -542,15 +542,15 @@ int tquic_server_accept(struct sock *sk, struct sk_buff *skb,
 
 /* Server subsystem init/exit (tquic_server.c) */
 int __init tquic_server_init(void);
-void __exit tquic_server_exit(void);
+void tquic_server_exit(void);
 
 /* Security hardening init/exit (security_hardening.c) */
 int __init tquic_security_hardening_init(void);
-void __exit tquic_security_hardening_exit(void);
+void tquic_security_hardening_exit(void);
 
 /* Persistent congestion sysctl init/exit (cong/persistent_cong.c) */
 int __init tquic_persistent_cong_module_init(void);
-void __exit tquic_persistent_cong_module_exit(void);
+void tquic_persistent_cong_module_exit(void);
 
 /*
  * =============================================================================
@@ -611,11 +611,11 @@ void tquic_cid_retire_remote(struct tquic_connection *conn, u64 seq_num);
 
 /* CID table init/exit */
 int __init tquic_cid_table_init(void);
-void __exit tquic_cid_table_exit(void);
+void tquic_cid_table_exit(void);
 
 /* Connection state machine init/exit (core/connection.c) */
 int __init tquic_connection_init(void);
-void __exit tquic_connection_exit(void);
+void tquic_connection_exit(void);
 
 /*
  * =============================================================================

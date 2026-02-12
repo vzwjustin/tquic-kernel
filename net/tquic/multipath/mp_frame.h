@@ -429,6 +429,6 @@ int __init tquic_mp_frame_init(void);
 /**
  * tquic_mp_frame_exit - Cleanup multipath frame module
  */
-void __exit tquic_mp_frame_exit(void);
+void tquic_mp_frame_exit(void);
 
 #endif /* _TQUIC_MULTIPATH_MP_FRAME_H */

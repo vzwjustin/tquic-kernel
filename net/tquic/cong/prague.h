@@ -103,6 +103,6 @@ extern struct tquic_cong_ops prague_cong_ops;
 
 /* Module init/exit */
 int __init tquic_prague_init(void);
-void __exit tquic_prague_exit(void);
+void tquic_prague_exit(void);
 
 #endif /* _TQUIC_PRAGUE_H */

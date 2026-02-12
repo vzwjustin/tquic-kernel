@@ -553,7 +553,7 @@ int __init tquic_sched_ecf_init(void)
 	return 0;
 }
 
-void __exit tquic_sched_ecf_exit(void)
+void tquic_sched_ecf_exit(void)
 {
 	pr_info("Unloading TQUIC ECF scheduler\n");
 	tquic_mp_unregister_scheduler(&tquic_mp_sched_ecf);

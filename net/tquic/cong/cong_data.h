@@ -674,6 +674,6 @@ int __init tquic_cong_data_module_init(void);
  *
  * Called during module unload.
  */
-void __exit tquic_cong_data_module_exit(void);
+void tquic_cong_data_module_exit(void);
 
 #endif /* _TQUIC_CONG_DATA_H */

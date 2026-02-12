@@ -600,7 +600,7 @@ int __init tquic_nat_lifecycle_module_init(void);
 /**
  * tquic_nat_lifecycle_module_exit - Clean up NAT lifecycle subsystem
  */
-void __exit tquic_nat_lifecycle_module_exit(void);
+void tquic_nat_lifecycle_module_exit(void);
 
 /*
  * =============================================================================

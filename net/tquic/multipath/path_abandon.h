@@ -172,6 +172,6 @@ int __init tquic_mp_abandon_init(void);
 /**
  * tquic_mp_abandon_exit - Cleanup path abandonment module
  */
-void __exit tquic_mp_abandon_exit(void);
+void tquic_mp_abandon_exit(void);
 
 #endif /* _TQUIC_PATH_ABANDON_H */

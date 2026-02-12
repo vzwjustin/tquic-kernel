@@ -422,7 +422,7 @@ int __init tquic_persistent_cong_module_init(void)
 	return 0;
 }
 
-void __exit tquic_persistent_cong_module_exit(void)
+void tquic_persistent_cong_module_exit(void)
 {
 	if (persistent_cong_sysctl_header)
 		unregister_net_sysctl_table(persistent_cong_sysctl_header);

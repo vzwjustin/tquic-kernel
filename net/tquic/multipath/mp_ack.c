@@ -1138,7 +1138,7 @@ err_ack_state:
 /**
  * tquic_mp_ack_exit - Cleanup multipath ACK module
  */
-void __exit tquic_mp_ack_exit(void)
+void tquic_mp_ack_exit(void)
 {
 	kmem_cache_destroy(mp_ack_range_cache);
 	kmem_cache_destroy(mp_sent_packet_cache);
