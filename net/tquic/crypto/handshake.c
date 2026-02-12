@@ -1920,7 +1920,6 @@ int tquic_hs_process_certificate(struct tquic_handshake *hs,
 		 * certificate length fields.  16 KiB is generous for
 		 * any reasonable X.509 certificate.
 		 */
-#define TLS_CERT_MAX_LEN	(16 * 1024)
 		if (cert_len > TLS_CERT_MAX_LEN)
 			return -EINVAL;
 
