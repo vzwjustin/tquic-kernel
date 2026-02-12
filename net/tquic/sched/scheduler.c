@@ -525,15 +525,15 @@ static struct tquic_path *blest_select(void *state, struct tquic_connection *con
 		if (READ_ONCE(path->state) != TQUIC_PATH_ACTIVE)
 			continue;
 
-			/* Estimate blocking time */
-			/* OWD = RTT/2 (simplified) */
-			owd_diff = 0;
-			if (active_path && path != active_path) {
-				s64 diff = (s64)path->stats.rtt_smoothed -
-					   (s64)active_path->stats.rtt_smoothed;
-				if (diff > 0)
-					owd_diff = diff / 2;
-			}
+		/* Estimate blocking time */
+		/* OWD = RTT/2 (simplified) */
+		owd_diff = 0;
+		if (active_path && path != active_path) {
+			s64 diff = (s64)path->stats.rtt_smoothed -
+				   (s64)active_path->stats.rtt_smoothed;
+			if (diff > 0)
+				owd_diff = diff / 2;
+		}
 
 		/* Calculate blocking estimate */
 		blocking_time = owd_diff;
