@@ -78,8 +78,7 @@ jobs:
             "include/uapi/linux/tquic.h" \
             "include/uapi/linux/tquic_pm.h" \
             "include/uapi/linux/tquic_diag.h" \
-            "include/uapi/linux/tquic_qlog.h" \
-            "include/crypto/"; do
+            "include/uapi/linux/tquic_qlog.h"; do
             if [ -e "${SRC}/${p}" ]; then
               if [ -d "${SRC}/${p}" ]; then
                 mkdir -p "${KDIR}/${p}"
