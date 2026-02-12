@@ -364,6 +364,7 @@ static struct tquic_path *tquic_select_blest(struct tquic_bond_state *bond,
 	struct tquic_connection *conn = bond->conn;
 	struct tquic_path *path, *best = NULL;
 	u64 min_completion = ULLONG_MAX;
+	u32 pkt_len = skb ? skb->len : 0;
 
 	lockdep_assert_held(&conn->paths_lock);
 
@@ -386,7 +387,7 @@ static struct tquic_path *tquic_select_blest(struct tquic_bond_state *bond,
 		/* Add queuing delay estimate */
 		bw = READ_ONCE(path->stats.bandwidth);
 		if (bw > 0)
-			completion_time += (skb->len * 1000000ULL) / bw;
+			completion_time += ((u64)pkt_len * 1000000ULL) / bw;
 
 		if (completion_time < min_completion) {
 			min_completion = completion_time;
@@ -432,7 +433,7 @@ static struct tquic_path *tquic_select_ecf(struct tquic_bond_state *bond,
 	struct tquic_connection *conn = bond->conn;
 	struct tquic_path *path, *best = NULL;
 	u64 min_completion = ULLONG_MAX;
-	u32 pkt_size = skb->len;
+	u32 pkt_size = skb ? skb->len : 0;
 
 	list_for_each_entry(path, &conn->paths, list) {
 		u64 completion_time;
@@ -651,7 +652,8 @@ struct tquic_path *tquic_bond_select_path(struct tquic_connection *conn,
 	 * find an alternate path that can send.
 	 */
 	if (selected && selected->anti_amplification.active &&
-	    !tquic_path_anti_amplification_check(selected, skb->len)) {
+	    !tquic_path_anti_amplification_check(selected,
+						 skb ? skb->len : 0)) {
 		struct tquic_path *candidate = NULL;
 
 		fallback = NULL;
@@ -666,7 +668,7 @@ struct tquic_path *tquic_bond_select_path(struct tquic_connection *conn,
 
 			if (fallback->anti_amplification.active &&
 			    !tquic_path_anti_amplification_check(fallback,
-								 skb->len)) {
+								 skb ? skb->len : 0)) {
 				tquic_path_put(fallback);
 				continue;
 			}
