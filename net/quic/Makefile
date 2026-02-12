@@ -5,6 +5,10 @@
 
 # Include paths for headers
 ccflags-y += -I$(src)/tquic/include -I$(src)/../../include -I$(src)/../.. -I$(src)/tquic/diag
+# Build net/quic as a consolidated module that pulls sources from net/tquic/.
+# This enables duplicate-symbol guards in shared sources (module init/exit,
+# ACK-frequency wrappers, scheduler shims, ECN helpers, etc.).
+ccflags-y += -DTQUIC_OUT_OF_TREE
 # Suppress noisy local warnings in TQUIC integration paths.
 # Keep both forms so builds stay stable with and without global -Werror.
 ccflags-y += -Wno-unused-function -Wno-unused-variable
