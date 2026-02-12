@@ -553,6 +553,16 @@ int tquic_server_get_client_psk(const char *identity, size_t identity_len,
 }
 EXPORT_SYMBOL_GPL(tquic_server_get_client_psk);
 
+int tquic_client_copy_psk(const struct tquic_client *client, u8 *psk)
+{
+	if (!client || !psk)
+		return -EINVAL;
+
+	memcpy(psk, client->psk, 32);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(tquic_client_copy_psk);
+
 /**
  * tquic_client_set_rate_limit - Set connection rate limit for client
  * @identity: PSK identity string

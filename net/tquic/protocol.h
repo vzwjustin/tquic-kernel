@@ -534,6 +534,7 @@ u32 tquic_server_conn_session_ttl(struct tquic_connection *conn,
 /* PSK retrieval (tquic_server.c) */
 int tquic_server_get_client_psk(const char *identity, size_t identity_len,
 				u8 *psk);
+int tquic_client_copy_psk(const struct tquic_client *client, u8 *psk);
 
 /* Server accept (tquic_server.c) */
 int tquic_server_accept(struct sock *sk, struct sk_buff *skb,

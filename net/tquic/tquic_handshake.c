@@ -50,6 +50,7 @@ int tquic_server_bind_client(struct tquic_connection *conn,
 			     struct tquic_client *client);
 int tquic_server_get_client_psk(const char *identity, size_t identity_len,
 				u8 *psk);
+int tquic_client_copy_psk(const struct tquic_client *client, u8 *psk);
 
 /*
  * Forward declarations for crypto/tls.c functions
@@ -1946,7 +1947,11 @@ int tquic_server_psk_callback(struct sock *sk, const char *identity,
 	}
 
 	/* Copy PSK while client pointer is protected by RCU read lock. */
-	memcpy(psk, client->psk, 32);
+	if (tquic_client_copy_psk(client, psk)) {
+		rcu_read_unlock();
+		TQUIC_INC_STATS(sock_net(sk), TQUIC_MIB_HANDSHAKESFAILED);
+		return -EINVAL;
+	}
 
 	/* Bind client to connection for resource tracking */
 	if (conn) {
