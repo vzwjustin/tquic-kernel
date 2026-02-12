@@ -520,6 +520,10 @@ int tquic_start_handshake(struct sock *sk)
 	 * real TLS handshake implementation.
 	 */
 	if (tsk->cert_verify.verify_mode == TQUIC_VERIFY_NONE) {
+		u64 bypass_max_data;
+		u64 bypass_max_streams_bidi;
+		u64 bypass_max_streams_uni;
+
 		tquic_warn("INSECURE bypass - skipping TLS handshake (verify_mode=NONE)\n");
 
 		hs = kzalloc(sizeof(*hs), GFP_KERNEL);
@@ -537,7 +541,41 @@ int tquic_start_handshake(struct sock *sk)
 		tsk->flags |= TQUIC_F_HANDSHAKE_DONE;
 
 		if (tsk->conn) {
+			/*
+			 * In bypass mode no peer transport parameters are exchanged.
+			 * Seed remote send limits from local defaults so test traffic
+			 * can flow while keeping bounded limits.
+			 */
+			bypass_max_data = tsk->conn->local_params.initial_max_data;
+			if (!bypass_max_data)
+				bypass_max_data = TQUIC_DEFAULT_MAX_DATA;
+
+			bypass_max_streams_bidi =
+				tsk->conn->local_params.initial_max_streams_bidi;
+			if (!bypass_max_streams_bidi)
+				bypass_max_streams_bidi = 100;
+
+			bypass_max_streams_uni =
+				tsk->conn->local_params.initial_max_streams_uni;
+			if (!bypass_max_streams_uni)
+				bypass_max_streams_uni = 100;
+
 			spin_lock_bh(&tsk->conn->lock);
+			WRITE_ONCE(tsk->conn->max_data_remote, bypass_max_data);
+			WRITE_ONCE(tsk->conn->max_streams_bidi,
+				   bypass_max_streams_bidi);
+			WRITE_ONCE(tsk->conn->max_streams_uni,
+				   bypass_max_streams_uni);
+			tsk->conn->remote_params.initial_max_data = bypass_max_data;
+			tsk->conn->remote_params.initial_max_streams_bidi =
+				bypass_max_streams_bidi;
+			tsk->conn->remote_params.initial_max_streams_uni =
+				bypass_max_streams_uni;
+			tsk->conn->remote_fc.max_data = bypass_max_data;
+			tsk->conn->remote_fc.max_streams_bidi =
+				bypass_max_streams_bidi;
+			tsk->conn->remote_fc.max_streams_uni =
+				bypass_max_streams_uni;
 			WRITE_ONCE(tsk->conn->state, TQUIC_CONN_CONNECTED);
 			spin_unlock_bh(&tsk->conn->lock);
 		}

@@ -2197,9 +2197,17 @@ int tquic_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 	/* Use or create default stream */
 	stream = tsk->default_stream;
 	if (!stream) {
+		bool no_stream_credit = false;
+
 		stream = tquic_stream_open(conn, true);
 		if (!stream) {
-			copied = -ENOMEM;
+			spin_lock_bh(&conn->lock);
+			no_stream_credit =
+				(conn->next_stream_id_bidi / 4 >=
+				 conn->max_streams_bidi);
+			spin_unlock_bh(&conn->lock);
+
+			copied = no_stream_credit ? -EAGAIN : -ENOMEM;
 			goto out_put;
 		}
 		tsk->default_stream = stream;
@@ -2321,14 +2329,14 @@ int tquic_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 	}
 
 	/*
-	 * Trigger actual transmission.
-	 * If nodelay is set, flush immediately. Otherwise, let the
-	 * output subsystem coalesce data based on congestion state.
+	 * Trigger actual transmission after queuing data.
+	 *
+	 * The previous check used stream->send_offset == 0, but send_offset is
+	 * incremented during queuing, so the flush path was never reached for
+	 * normal sends. Flush whenever bytes were queued to ensure progress.
 	 */
-	if (tsk->nodelay || stream->send_offset == 0) {
-		/* Flush stream data to the network */
+	if (copied > 0)
 		tquic_output_flush(conn);
-	}
 
 out_put:
 	tquic_conn_put(conn);
