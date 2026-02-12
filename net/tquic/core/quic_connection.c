@@ -19,6 +19,7 @@
 #define QUIC_ERROR_INTERNAL_ERROR	0x01
 #include "transport_params.h"
 #include "../tquic_cid.h"
+#include "../tquic_debug.h"
 #include "../diag/trace.h"
 #include "../tquic_compat.h"
 #include "../protocol.h"
