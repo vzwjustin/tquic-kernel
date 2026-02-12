@@ -411,7 +411,8 @@ static int tquic_setup_hp_keys(struct tquic_crypto_state *crypto,
 
 	/* Set read HP key */
 	if (read_keys->valid) {
-		ret = tquic_hp_set_key(crypto->hp_ctx, level, 0,
+		ret = tquic_hp_set_key(crypto->hp_ctx,
+				       (enum tquic_hp_enc_level)level, 0,
 				       read_keys->hp_key, read_keys->key_len,
 				       crypto->cipher_suite);
 		if (ret)
@@ -420,7 +421,8 @@ static int tquic_setup_hp_keys(struct tquic_crypto_state *crypto,
 
 	/* Set write HP key */
 	if (write_keys->valid) {
-		ret = tquic_hp_set_key(crypto->hp_ctx, level, 1,
+		ret = tquic_hp_set_key(crypto->hp_ctx,
+				       (enum tquic_hp_enc_level)level, 1,
 				       write_keys->hp_key, write_keys->key_len,
 				       crypto->cipher_suite);
 		if (ret)
@@ -926,7 +928,9 @@ struct tquic_crypto_state *tquic_crypto_init_versioned(const struct tquic_cid *d
 	crypto->write_level = TQUIC_ENC_INITIAL;
 
 	/* Sync HP context levels */
-	tquic_hp_set_level(crypto->hp_ctx, TQUIC_ENC_INITIAL, TQUIC_ENC_INITIAL);
+	tquic_hp_set_level(crypto->hp_ctx,
+			   (enum tquic_hp_enc_level)TQUIC_ENC_INITIAL,
+			   (enum tquic_hp_enc_level)TQUIC_ENC_INITIAL);
 
 	tquic_dbg("initialized crypto state for QUIC v%s\n",
 		  version == TQUIC_VERSION_2 ? "2" : "1");
@@ -1076,7 +1080,9 @@ void tquic_crypto_set_level(struct tquic_crypto_state *crypto,
 
 	/* Sync HP context levels */
 	if (crypto->hp_ctx)
-		tquic_hp_set_level(crypto->hp_ctx, read_level, write_level);
+		tquic_hp_set_level(crypto->hp_ctx,
+				   (enum tquic_hp_enc_level)read_level,
+				   (enum tquic_hp_enc_level)write_level);
 }
 EXPORT_SYMBOL_GPL(tquic_crypto_set_level);
 
