@@ -306,8 +306,8 @@ EXPORT_SYMBOL_GPL(tquic_check_persistent_cong);
  * congestion is detected. It invokes the CC algorithm's callback and
  * updates path state.
  */
-void tquic_on_persistent_congestion(struct tquic_path *path,
-				    struct tquic_persistent_cong_info *info)
+static void tquic_on_persistent_congestion(struct tquic_path *path,
+					   struct tquic_persistent_cong_info *info)
 {
 	struct tquic_cong_ops *ca;
 
@@ -336,7 +336,6 @@ void tquic_on_persistent_congestion(struct tquic_path *path,
 	 */
 	/* Note: bytes_in_flight tracking is handled by the CC algorithm */
 }
-EXPORT_SYMBOL_GPL(tquic_on_persistent_congestion);
 
 /*
  * =============================================================================

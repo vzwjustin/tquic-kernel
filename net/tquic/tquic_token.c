@@ -687,7 +687,6 @@ int tquic_send_new_token(struct tquic_connection *conn)
 	struct sk_buff *skb;
 	u8 frame_buf[TQUIC_TOKEN_MAX_LEN + 16];
 	int frame_len;
-	int ret;
 
 	if (!conn || READ_ONCE(conn->state) != TQUIC_CONN_CONNECTED)
 		return -EINVAL;

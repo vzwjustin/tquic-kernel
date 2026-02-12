@@ -1376,9 +1376,9 @@ void tquic_cid_handle_peer_retire_prior_to(struct tquic_connection *conn,
  *
  * Returns: 0 on success, -ENOENT if no CID available
  */
-int tquic_cid_assign_to_path(struct tquic_connection *conn,
-			     struct tquic_path *path,
-			     struct tquic_cid *cid)
+static int tquic_cid_assign_to_path(struct tquic_connection *conn,
+				    struct tquic_path *path,
+				    struct tquic_cid *cid)
 {
 	struct tquic_cid_pool *pool;
 	struct tquic_cid_entry *entry;
@@ -1417,8 +1417,8 @@ int tquic_cid_assign_to_path(struct tquic_connection *conn,
  *
  * Called when a path is being removed or migrated.
  */
-void tquic_cid_release_from_path(struct tquic_connection *conn,
-				 struct tquic_path *path)
+static void tquic_cid_release_from_path(struct tquic_connection *conn,
+					struct tquic_path *path)
 {
 	struct tquic_cid_pool *pool;
 	struct tquic_cid_entry *entry;

@@ -34,9 +34,6 @@
 #include "tquic_debug.h"
 #include "http3/http3_stream.h"
 
-/* Forward declaration for pacing integration (defined in tquic_output.c) */
-extern void tquic_update_pacing(struct sock *sk, struct tquic_path *path);
-
 /* Slab cache for stream objects -- defined in tquic_main.c */
 
 /*
@@ -490,8 +487,8 @@ static void tquic_stream_free(struct tquic_stream *stream)
  *
  * Returns: 0 on success, negative errno on failure
  */
-int tquic_stream_send_fin(struct tquic_connection *conn,
-			  struct tquic_stream *stream)
+static int tquic_stream_send_fin(struct tquic_connection *conn,
+				 struct tquic_stream *stream)
 {
 	int ret;
 
@@ -527,7 +524,7 @@ int tquic_stream_send_fin(struct tquic_connection *conn,
 
 	return 0;
 }
-EXPORT_SYMBOL_GPL(tquic_stream_send_fin);
+
 
 /**
  * tquic_stream_get - Take a reference on a stream
@@ -1342,7 +1339,7 @@ EXPORT_SYMBOL_GPL(tquic_wait_for_stream_credit);
  *
  * Return: true if this is a request stream
  */
-bool tquic_stream_is_http3_request(struct tquic_stream *stream)
+static bool tquic_stream_is_http3_request(struct tquic_stream *stream)
 {
 	if (!stream)
 		return false;
@@ -1350,7 +1347,7 @@ bool tquic_stream_is_http3_request(struct tquic_stream *stream)
 	/* Request streams are client-initiated bidirectional */
 	return h3_stream_id_is_request(stream->id);
 }
-EXPORT_SYMBOL_GPL(tquic_stream_is_http3_request);
+
 
 /**
  * tquic_stream_validate_http3_id - Validate stream ID for HTTP/3 semantics
@@ -1364,8 +1361,8 @@ EXPORT_SYMBOL_GPL(tquic_stream_is_http3_request);
  *
  * Return: 0 on success, -H3_STREAM_CREATION_ERROR on failure
  */
-int tquic_stream_validate_http3_id(struct tquic_connection *conn,
-				   u64 stream_id, bool is_local)
+static int tquic_stream_validate_http3_id(struct tquic_connection *conn,
+					  u64 stream_id, bool is_local)
 {
 	bool is_server = (conn->role == TQUIC_ROLE_SERVER);
 	bool is_bidi = h3_stream_id_is_bidi(stream_id);
@@ -1394,7 +1391,7 @@ int tquic_stream_validate_http3_id(struct tquic_connection *conn,
 
 	return 0;
 }
-EXPORT_SYMBOL_GPL(tquic_stream_validate_http3_id);
+
 
 /**
  * tquic_stream_get_http3_type - Get HTTP/3 type for unidirectional stream
@@ -1405,7 +1402,7 @@ EXPORT_SYMBOL_GPL(tquic_stream_validate_http3_id);
  *
  * Return: Stream type (0-3), or -1 if not yet known or not unidirectional
  */
-int tquic_stream_get_http3_type(struct tquic_stream *stream)
+static int tquic_stream_get_http3_type(struct tquic_stream *stream)
 {
 	if (!stream)
 		return -1;
@@ -1424,7 +1421,7 @@ int tquic_stream_get_http3_type(struct tquic_stream *stream)
 	/* Type is stored in lower bits of priority field (reused for HTTP/3) */
 	return stream->priority;
 }
-EXPORT_SYMBOL_GPL(tquic_stream_get_http3_type);
+
 
 /**
  * tquic_stream_set_http3_type - Set HTTP/3 type for unidirectional stream
@@ -1436,7 +1433,7 @@ EXPORT_SYMBOL_GPL(tquic_stream_get_http3_type);
  *
  * Return: 0 on success, negative error
  */
-int tquic_stream_set_http3_type(struct tquic_stream *stream, u8 type)
+static int tquic_stream_set_http3_type(struct tquic_stream *stream, u8 type)
 {
 	if (!stream)
 		return -EINVAL;
@@ -1463,7 +1460,7 @@ int tquic_stream_set_http3_type(struct tquic_stream *stream, u8 type)
 
 	return 0;
 }
-EXPORT_SYMBOL_GPL(tquic_stream_set_http3_type);
+
 
 /**
  * tquic_stream_is_http3_critical - Check if stream is HTTP/3 critical
@@ -1475,7 +1472,7 @@ EXPORT_SYMBOL_GPL(tquic_stream_set_http3_type);
  *
  * Return: true if stream is critical
  */
-bool tquic_stream_is_http3_critical(struct tquic_stream *stream)
+static bool tquic_stream_is_http3_critical(struct tquic_stream *stream)
 {
 	int type;
 
@@ -1491,7 +1488,7 @@ bool tquic_stream_is_http3_critical(struct tquic_stream *stream)
 
 	return h3_stream_type_is_critical(type);
 }
-EXPORT_SYMBOL_GPL(tquic_stream_is_http3_critical);
+
 
 /**
  * tquic_stream_lookup_by_id - Look up stream by ID in connection
@@ -1502,8 +1499,8 @@ EXPORT_SYMBOL_GPL(tquic_stream_is_http3_critical);
  *
  * Return: Stream if found, NULL otherwise
  */
-struct tquic_stream *tquic_stream_lookup_by_id(struct tquic_connection *conn,
-					       u64 stream_id)
+static struct tquic_stream *tquic_stream_lookup_by_id(
+	struct tquic_connection *conn, u64 stream_id)
 {
 	struct rb_node *node;
 
@@ -1531,7 +1528,7 @@ struct tquic_stream *tquic_stream_lookup_by_id(struct tquic_connection *conn,
 	spin_unlock_bh(&conn->lock);
 	return NULL;
 }
-EXPORT_SYMBOL_GPL(tquic_stream_lookup_by_id);
+
 
 /**
  * tquic_stream_count_by_type - Count streams of a given HTTP/3 type
@@ -1543,7 +1540,7 @@ EXPORT_SYMBOL_GPL(tquic_stream_lookup_by_id);
  *
  * Return: Number of streams matching the type
  */
-int tquic_stream_count_by_type(struct tquic_connection *conn, u8 type)
+static int tquic_stream_count_by_type(struct tquic_connection *conn, u8 type)
 {
 	if (!conn)
 		return 0;
@@ -1554,4 +1551,4 @@ int tquic_stream_count_by_type(struct tquic_connection *conn, u8 type)
 
 	return 0;
 }
-EXPORT_SYMBOL_GPL(tquic_stream_count_by_type);
+

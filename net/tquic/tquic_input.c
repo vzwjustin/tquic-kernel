@@ -140,9 +140,6 @@ static int tquic_process_frames(struct tquic_connection *conn,
 				u8 *payload, size_t len,
 				int enc_level, u64 pkt_num);
 
-/* From tquic_handshake.c - inline TLS handshake processing */
-int tquic_inline_hs_recv_crypto(struct sock *sk, const u8 *data, u32 len,
-				int enc_level);
 /*
  * Per-path ECN tracking state for detecting CE count increases
  * Per RFC 9002 Section 7.1: Only respond to *increases* in CE count

@@ -25,6 +25,7 @@
 #include <net/tquic.h>
 #include "cong/tquic_cong.h"
 
+#include "protocol.h"
 #include "tquic_compat.h"
 #include "tquic_debug.h"
 

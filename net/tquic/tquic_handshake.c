@@ -1035,7 +1035,7 @@ static void tquic_inline_hs_apply_transport_params(struct sock *sk)
  *
  * Returns: 0 on success, negative errno on error
  */
-int tquic_inline_hs_install_keys(struct sock *sk, int level)
+static int tquic_inline_hs_install_keys(struct sock *sk, int level)
 {
 	struct tquic_sock *tsk = tquic_sk(sk);
 	struct tquic_handshake *ihs = tsk->inline_hs;

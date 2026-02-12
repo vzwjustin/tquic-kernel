@@ -665,9 +665,9 @@ static bool tquic_crypto_offload_available(struct net_device *dev,
 }
 
 /* Prepare skb for hardware crypto offload (TX path) */
-int tquic_crypto_offload_encrypt(struct sk_buff *skb,
-				struct tquic_crypto_ctx *ctx,
-				u64 pn)
+static int tquic_crypto_offload_encrypt(struct sk_buff *skb,
+					struct tquic_crypto_ctx *ctx,
+					u64 pn)
 {
 	struct tquic_offload_cb *cb = TQUIC_OFFLOAD_CB(skb);
 	struct net_device *dev = skb->dev;
@@ -688,12 +688,11 @@ int tquic_crypto_offload_encrypt(struct sk_buff *skb,
 
 	return 0;
 }
-EXPORT_SYMBOL(tquic_crypto_offload_encrypt);
 
 /* Check and handle hardware crypto on RX path */
-int tquic_crypto_offload_decrypt(struct sk_buff *skb,
-				struct tquic_crypto_ctx *ctx,
-				u64 *pn)
+static int tquic_crypto_offload_decrypt(struct sk_buff *skb,
+					struct tquic_crypto_ctx *ctx,
+					u64 *pn)
 {
 	struct tquic_offload_cb *cb = TQUIC_OFFLOAD_CB(skb);
 
@@ -709,7 +708,6 @@ int tquic_crypto_offload_decrypt(struct sk_buff *skb,
 	cb->needs_decrypt = 1;
 	return -EOPNOTSUPP;
 }
-EXPORT_SYMBOL(tquic_crypto_offload_decrypt);
 
 /*
  * UDP Encapsulation Support

@@ -24,10 +24,7 @@
 #include <net/tquic.h>
 
 #include "../tquic_debug.h"
-
-/* Anti-amplification check from tquic_migration.c (RFC 9000 §8.1) */
-extern bool tquic_path_anti_amplification_check(struct tquic_path *path,
-						u64 bytes);
+#include "../protocol.h"
 
 /* Path quality metrics for scheduling decisions */
 struct tquic_path_quality {
