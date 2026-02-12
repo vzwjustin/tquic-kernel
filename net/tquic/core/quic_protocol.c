@@ -28,6 +28,7 @@
 #include <net/tquic/handshake.h>
 #include "../tquic_compat.h"
 #include "../tquic_debug.h"
+#include "../tquic_init.h"
 
 static struct kmem_cache __maybe_unused *tquic_sock_cachep __read_mostly;
 static struct kmem_cache __maybe_unused *tquic_conn_cachep __read_mostly;
@@ -1400,7 +1401,7 @@ static void __maybe_unused tquic_proto_unregister_all(void)
  * For out-of-tree builds, tquic_main.c handles module init/exit.
  */
 #ifndef TQUIC_OUT_OF_TREE
-static int __init tquic_init(void)
+int __init tquic_init(void)
 {
 	int err;
 
@@ -1522,8 +1523,8 @@ out_orphan_counter:
 		goto out_stream_cache;
 #if LINUX_VERSION_CODE < KERNEL_VERSION(6, 4, 0)
 	percpu_counter_destroy(&tquic_orphan_count_percpu);
-#endif
 out_sockets_counter:
+#endif
 	percpu_counter_destroy(&tquic_sockets_allocated);
 	tquic_percpu_initialized = false;
 out_stream_cache:
@@ -1535,7 +1536,7 @@ out_sock_cache:
 	return err;
 }
 
-static void __exit tquic_exit(void)
+void __exit tquic_exit(void)
 {
 	/* Cleanup TQUIC subsystems in reverse order */
 	coupled_cc_exit_module();
