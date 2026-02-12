@@ -103,24 +103,25 @@ jobs:
           # Disable Werror to avoid CI breakage from toolchain warnings
           scripts/config --disable CONFIG_WERROR
 
-          # Enable TQUIC (CONFIG_IP_QUIC is the master switch)
+          # Enable TQUIC as MODULE (CONFIG_IP_QUIC is the master switch)
+          # Building as module (=m) instead of built-in (=y) avoids section
+          # mismatch warnings and allows modular dependencies
           scripts/config --enable CONFIG_MODULES
-          scripts/config --enable CONFIG_IP_QUIC
-          scripts/config --enable CONFIG_TQUIC_CORE
-          scripts/config --enable CONFIG_TQUIC_WAN_BONDING
-          scripts/config --enable CONFIG_TQUIC_MULTIPATH
-          scripts/config --enable CONFIG_TQUIC_PATH_MANAGER
-          scripts/config --enable CONFIG_TQUIC_PM_NETLINK
-          scripts/config --enable CONFIG_TQUIC_SCHEDULER
-          scripts/config --enable CONFIG_TQUIC_CONG
-          scripts/config --enable CONFIG_TQUIC_CRYPTO
-          scripts/config --enable CONFIG_TQUIC_CERT_VERIFY
-          scripts/config --enable CONFIG_TQUIC_IPV6
+          scripts/config --module CONFIG_IP_QUIC
+          scripts/config --module CONFIG_TQUIC_CORE
+          scripts/config --module CONFIG_TQUIC_WAN_BONDING
+          scripts/config --module CONFIG_TQUIC_MULTIPATH
+          scripts/config --module CONFIG_TQUIC_PATH_MANAGER
+          scripts/config --module CONFIG_TQUIC_PM_NETLINK
+          scripts/config --module CONFIG_TQUIC_SCHEDULER
+          scripts/config --module CONFIG_TQUIC_CONG
+          scripts/config --module CONFIG_TQUIC_CRYPTO
+          scripts/config --module CONFIG_TQUIC_CERT_VERIFY
+          scripts/config --module CONFIG_TQUIC_IPV6
 
-          # Enable dependencies for TQUIC features
-          scripts/config --enable CONFIG_INET_DIAG
+          # Enable dependencies (can be modules when TQUIC is module)
           scripts/config --module CONFIG_INET_DIAG
-          scripts/config --enable CONFIG_CRYPTO_CURVE25519
+          scripts/config --module CONFIG_CRYPTO_CURVE25519
           scripts/config --enable CONFIG_TRACEPOINTS
 
           make olddefconfig

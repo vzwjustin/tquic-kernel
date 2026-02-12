@@ -154,23 +154,29 @@ jobs:
           # (Werror can be enabled indirectly via COMPILE_TEST.)
           scripts/config --disable CONFIG_WERROR
 
-          # Ensure module and TQUIC support are enabled in packaged kernel.
+          # Build TQUIC as MODULE to avoid section mismatch warnings and
+          # undefined reference errors with modular dependencies
           # CRITICAL: Enable CONFIG_IP_QUIC first - this is the main option
           # that gates all CONFIG_TQUIC_* sub-options in net/tquic/Kconfig
           scripts/config --enable CONFIG_MODULES
-          scripts/config --enable CONFIG_IP_QUIC
+          scripts/config --module CONFIG_IP_QUIC
 
-          # Enable TQUIC sub-features (only available after CONFIG_IP_QUIC=y)
-          scripts/config --enable CONFIG_TQUIC_CORE
-          scripts/config --enable CONFIG_TQUIC_WAN_BONDING
-          scripts/config --enable CONFIG_TQUIC_MULTIPATH
-          scripts/config --enable CONFIG_TQUIC_PATH_MANAGER
-          scripts/config --enable CONFIG_TQUIC_PM_NETLINK
-          scripts/config --enable CONFIG_TQUIC_SCHEDULER
-          scripts/config --enable CONFIG_TQUIC_CONG
-          scripts/config --enable CONFIG_TQUIC_CRYPTO
-          scripts/config --enable CONFIG_TQUIC_CERT_VERIFY
-          scripts/config --enable CONFIG_TQUIC_IPV6
+          # Enable TQUIC sub-features as modules
+          scripts/config --module CONFIG_TQUIC_CORE
+          scripts/config --module CONFIG_TQUIC_WAN_BONDING
+          scripts/config --module CONFIG_TQUIC_MULTIPATH
+          scripts/config --module CONFIG_TQUIC_PATH_MANAGER
+          scripts/config --module CONFIG_TQUIC_PM_NETLINK
+          scripts/config --module CONFIG_TQUIC_SCHEDULER
+          scripts/config --module CONFIG_TQUIC_CONG
+          scripts/config --module CONFIG_TQUIC_CRYPTO
+          scripts/config --module CONFIG_TQUIC_CERT_VERIFY
+          scripts/config --module CONFIG_TQUIC_IPV6
+
+          # Enable dependencies as modules
+          scripts/config --module CONFIG_INET_DIAG
+          scripts/config --module CONFIG_CRYPTO_CURVE25519
+          scripts/config --enable CONFIG_TRACEPOINTS
 
           # Apply dependencies and finalize config
           make olddefconfig
