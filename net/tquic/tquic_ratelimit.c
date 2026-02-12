@@ -1030,9 +1030,20 @@ EXPORT_SYMBOL_GPL(tquic_ratelimit_is_attack_mode);
 
 int tquic_ratelimit_proc_show(struct seq_file *seq, void *v)
 {
-	struct net *net = seq_file_net(seq);
-	struct tquic_rl_state *state = tquic_rl_pernet(net);
+	struct net *net;
+	struct tquic_rl_state *state;
 	struct tquic_rl_stats *stats;
+
+	/*
+	 * This proc entry is opened via single_open(..., pde_data(inode)),
+	 * so seq->private carries the netns pointer.
+	 */
+	net = seq ? seq->private : NULL;
+	if (!net) {
+		seq_puts(seq, "Rate limiter netns unavailable\n");
+		return 0;
+	}
+	state = tquic_rl_pernet(net);
 
 	if (!state || !state->initialized) {
 		seq_puts(seq, "Rate limiter not initialized\n");

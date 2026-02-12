@@ -2339,8 +2339,13 @@ EXPORT_SYMBOL_GPL(tquic_path_packet_lost);
 static int tquic_sched_stats_show(struct seq_file *m, void *v)
 {
 	struct tquic_sched_internal *sched;
-	struct net *net = seq_file_net(m);
+	struct net *net = m ? m->private : NULL;
 	const char *default_name;
+
+	if (!net) {
+		seq_puts(m, "netns unavailable\n");
+		return 0;
+	}
 
 	seq_puts(m, "TQUIC Packet Schedulers\n");
 	seq_puts(m, "========================\n\n");
