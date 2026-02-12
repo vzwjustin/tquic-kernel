@@ -1341,7 +1341,7 @@ int tquic_validate_retry_token(struct tquic_connection *conn,
 
 	/* Validate ciphertext fits in the decryption buffer */
 	if (ciphertext_len > sizeof(plaintext)) {
-		tquic_conn_dbg(conn, "retry token too large (%u > %zu)\n",
+		tquic_conn_dbg(conn, "retry token too large (%zu > %zu)\n",
 			       ciphertext_len, sizeof(plaintext));
 		return -EINVAL;
 	}
