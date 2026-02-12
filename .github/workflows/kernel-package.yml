@@ -23,14 +23,38 @@ on:
         description: "Artifact bundle name"
         required: true
         default: "tquic-kernel-debs"
+      upload_to_release:
+        description: "Upload to GitHub release (specify tag name, or leave empty to skip)"
+        required: false
+        default: ""
+  push:
+    tags:
+      - 'v*'
+      - 'Experimental*'
 
 jobs:
   build-kernel:
-    name: "Build kernel ${{ inputs.kernel_full }}"
+    name: "Build kernel ${{ inputs.kernel_full || '6.19-rc8' }}"
     runs-on: ubuntu-latest
     timeout-minutes: 180
 
     steps:
+      - name: Set build parameters
+        id: params
+        run: |
+          # Use inputs if workflow_dispatch, otherwise use defaults for tag push
+          KVER="${{ inputs.kernel_full || '6.19-rc8' }}"
+          MAJOR="${{ inputs.kernel_major || '6' }}"
+          TESTING="${{ inputs.kernel_testing || 'true' }}"
+          ARTIFACT="${{ inputs.artifact_name || 'tquic-kernel-debs' }}"
+
+          echo "kernel_full=${KVER}" >> $GITHUB_OUTPUT
+          echo "kernel_major=${MAJOR}" >> $GITHUB_OUTPUT
+          echo "kernel_testing=${TESTING}" >> $GITHUB_OUTPUT
+          echo "artifact_name=${ARTIFACT}" >> $GITHUB_OUTPUT
+
+          echo "Building kernel ${KVER} (major: ${MAJOR}, testing: ${TESTING})"
+
       - name: Checkout TQUIC source
         uses: actions/checkout@v4
 
@@ -46,10 +70,10 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p ~/kernel-src && cd ~/kernel-src
-          KVER="${{ inputs.kernel_full }}"
-          MAJOR="${{ inputs.kernel_major }}"
+          KVER="${{ steps.params.outputs.kernel_full }}"
+          MAJOR="${{ steps.params.outputs.kernel_major }}"
 
-          if [ "${{ inputs.kernel_testing }}" = "true" ]; then
+          if [ "${{ steps.params.outputs.kernel_testing }}" = "true" ]; then
             URL="https://git.kernel.org/torvalds/t/linux-${KVER}.tar.gz"
             ARCHIVE="linux-${KVER}.tar.gz"
           else
@@ -65,7 +89,7 @@ jobs:
       - name: Overlay TQUIC integration paths onto upstream kernel
         run: |
           set -euo pipefail
-          KDIR=~/kernel-src/linux-${{ inputs.kernel_full }}
+          KDIR=~/kernel-src/linux-${{ steps.params.outputs.kernel_full }}
           SRC="${GITHUB_WORKSPACE}"
 
           # Overlay only TQUIC-related paths so the result is a standard
@@ -98,13 +122,18 @@ jobs:
       - name: Configure kernel
         run: |
           set -euo pipefail
-          KDIR=~/kernel-src/linux-${{ inputs.kernel_full }}
+          KDIR=~/kernel-src/linux-${{ steps.params.outputs.kernel_full }}
           cd "${KDIR}"
 
           make defconfig
 
           # Ensure module and TQUIC support are enabled in packaged kernel.
+          # CRITICAL: Enable CONFIG_IP_QUIC first - this is the main option
+          # that gates all CONFIG_TQUIC_* sub-options in net/tquic/Kconfig
           scripts/config --enable CONFIG_MODULES
+          scripts/config --enable CONFIG_IP_QUIC
+
+          # Enable TQUIC sub-features (only available after CONFIG_IP_QUIC=y)
           scripts/config --enable CONFIG_TQUIC_CORE
           scripts/config --enable CONFIG_TQUIC_WAN_BONDING
           scripts/config --enable CONFIG_TQUIC_MULTIPATH
@@ -116,12 +145,13 @@ jobs:
           scripts/config --enable CONFIG_TQUIC_CERT_VERIFY
           scripts/config --enable CONFIG_TQUIC_IPV6
 
+          # Apply dependencies and finalize config
           make olddefconfig
 
       - name: Build Debian kernel packages
         run: |
           set -euo pipefail
-          KDIR=~/kernel-src/linux-${{ inputs.kernel_full }}
+          KDIR=~/kernel-src/linux-${{ steps.params.outputs.kernel_full }}
           cd "${KDIR}"
 
           SHORT_SHA="$(echo "${GITHUB_SHA}" | cut -c1-8)"
@@ -148,7 +178,51 @@ jobs:
       - name: Upload kernel packages
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ inputs.artifact_name }}-${{ inputs.kernel_full }}
+          name: ${{ steps.params.outputs.artifact_name }}-${{ steps.params.outputs.kernel_full }}
           path: ~/kernel-artifacts/*
           if-no-files-found: error
           retention-days: 14
+
+      - name: Determine release tag
+        id: release_tag
+        run: |
+          if [ "${{ github.event_name }}" = "push" ] && [ -n "${{ github.ref_name }}" ]; then
+            echo "tag=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+            echo "Auto-detected tag from push: ${{ github.ref_name }}"
+          elif [ -n "${{ inputs.upload_to_release }}" ]; then
+            echo "tag=${{ inputs.upload_to_release }}" >> $GITHUB_OUTPUT
+            echo "Using manual tag: ${{ inputs.upload_to_release }}"
+          else
+            echo "tag=" >> $GITHUB_OUTPUT
+            echo "No release tag specified, skipping upload"
+          fi
+
+      - name: Upload to GitHub Release
+        if: steps.release_tag.outputs.tag != ''
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.release_tag.outputs.tag }}
+          files: ~/kernel-artifacts/*
+          prerelease: true
+          fail_on_unmatched_files: false
+          body: |
+            ## TQUIC Kernel ${{ steps.params.outputs.kernel_full }}
+
+            Kernel image and headers with TQUIC/multipath QUIC integrated.
+
+            **Built from**: ${{ github.sha }}
+            **Build date**: ${{ github.run_id }}
+
+            ### Installation
+            ```bash
+            sudo dpkg -i linux-image-*.deb linux-headers-*.deb
+            sudo reboot
+            ```
+
+            ### Verify
+            ```bash
+            uname -r  # Should show -tquic- in version
+            modinfo tquic  # Check TQUIC module
+            ```
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
