@@ -2359,17 +2359,22 @@ static int tquic_process_mp_retire_connection_id_frame(struct tquic_rx_ctx *ctx)
  */
 static int tquic_process_mp_ack_frame(struct tquic_rx_ctx *ctx)
 {
-	struct tquic_mp_ack frame;
+	struct tquic_mp_ack *frame;
 	struct tquic_path *path;
 	struct tquic_mp_path_ack_state *ack_state;
 	u8 ack_delay_exponent = 3;  /* Default */
 	int ret;
 
+	/* Allocate frame on heap to avoid stack overflow (>4KB struct) */
+	frame = kmalloc(sizeof(*frame), GFP_ATOMIC);
+	if (!frame)
+		return -ENOMEM;
+
 	ret = tquic_mp_parse_ack(ctx->data + ctx->offset,
 				 ctx->len - ctx->offset,
-				 &frame, ack_delay_exponent);
+				 frame, ack_delay_exponent);
 	if (ret < 0)
-		return ret;
+		goto out_free;
 
 	ctx->offset += ret;
 	/* MP_ACK is NOT ack-eliciting (RFC 9000 Section 13.2) */
@@ -2382,19 +2387,20 @@ static int tquic_process_mp_ack_frame(struct tquic_rx_ctx *ctx)
 	 */
 	spin_lock_bh(&ctx->conn->paths_lock);
 	list_for_each_entry(path, &ctx->conn->paths, list) {
-		if (path->path_id == frame.path_id) {
+		if (path->path_id == frame->path_id) {
 			ack_state = path->mp_ack_state;
 			if (ack_state) {
 				ret = tquic_mp_on_ack_received(ack_state,
 					TQUIC_PN_SPACE_APPLICATION,
-					&frame, ctx->conn);
+					frame, ctx->conn);
 				spin_unlock_bh(&ctx->conn->paths_lock);
 				if (ret < 0) {
 					tquic_dbg("MP_ACK processing failed: %d\n", ret);
-					return ret;
+					goto out_free;
 				}
 				tquic_dbg("processed MP_ACK path=%llu largest=%llu\n",
-					 frame.path_id, frame.largest_ack);
+					 frame->path_id, frame->largest_ack);
+				kfree(frame);
 				return 0;
 			}
 			break;
@@ -2403,8 +2409,12 @@ static int tquic_process_mp_ack_frame(struct tquic_rx_ctx *ctx)
 	spin_unlock_bh(&ctx->conn->paths_lock);
 
 	tquic_dbg("MP_ACK for unknown/uninitialized path %llu\n",
-		 frame.path_id);
-	return 0;
+		 frame->path_id);
+	ret = 0;
+
+out_free:
+	kfree(frame);
+	return ret;
 }
 
 /**
