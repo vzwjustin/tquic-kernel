@@ -41,6 +41,69 @@ This is Linux kernel code. Follow kernel coding style:
 - Run `scripts/checkpatch.pl --strict -f <file>` before committing
 - Use kernel APIs (kmalloc, kfree, list_head, etc.)
 
+## AI Coding Assistant Guidelines
+
+Per [Documentation/process/coding-assistants.rst](https://github.com/torvalds/linux/blob/master/Documentation/process/coding-assistants.rst), this project follows official Linux kernel requirements for AI-assisted development:
+
+### Attribution Format
+
+All commits where AI assists development MUST include an `Assisted-by` trailer:
+
+```
+Assisted-by: Claude:claude-sonnet-4-5-20250929
+```
+
+**Format**: `Assisted-by: AGENT_NAME:MODEL_VERSION [TOOL1] [TOOL2]`
+
+- Include agent name and specific model version
+- Optionally list specialized analysis tools (checkpatch, sparse, smatch, coccinelle, clang-tidy)
+- Do NOT list basic tools (git, gcc, make, editors)
+
+### Developer Responsibility
+
+**CRITICAL**: The human developer (you) remains fully responsible for ALL contributions:
+
+- ✅ **You are the author** - Your name goes in `Author:` field
+- ✅ **You sign off** - You add `Signed-off-by:` certifying Developer Certificate of Origin
+- ✅ **You review thoroughly** - AI-generated code must be carefully reviewed before submission
+- ✅ **You accept accountability** - Full legal and technical responsibility for all code
+- ❌ **AI cannot sign off** - AI agents cannot add `Signed-off-by` tags
+
+### Licensing Compliance
+
+- All code must be GPL-2.0-only compatible
+- Apply appropriate SPDX license identifiers
+- Consult Documentation/process/license-rules.rst for details
+
+### Commit Message Template
+
+```
+<subject line>
+
+<detailed description>
+
+Assisted-by: Claude:claude-sonnet-4-5-20250929
+Signed-off-by: Your Name <your.email@example.com>
+```
+
+### Example Commit
+
+```bash
+git commit -m "$(cat <<'EOF'
+net/quic: Fix race condition in connection cleanup
+
+The connection cleanup path had a race between timer callbacks
+and connection teardown. Add proper locking around connection
+state transitions to prevent use-after-free.
+
+Assisted-by: Claude:claude-sonnet-4-5-20250929 checkpatch
+Signed-off-by: Justin Smith <justin@example.com>
+
+https://claude.ai/code/session_XXXXX
+EOF
+)"
+```
+
 ## RFC References
 
 The implementation follows these specifications:
