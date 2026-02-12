@@ -72,7 +72,7 @@ EXPORT_SYMBOL(tquic_ecn_init);
  * Returns the ECN codepoint to use for marking outgoing packets,
  * or TQUIC_ECN_NOT_ECT if ECN is disabled or failed validation.
  */
-u8 tquic_ecn_get_marking(struct tquic_path *path)
+u8 tquic_ecn_get_marking(const struct tquic_path *path)
 {
 	if (!path)
 		return TQUIC_ECN_NOT_ECT;

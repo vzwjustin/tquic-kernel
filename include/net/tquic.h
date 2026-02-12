@@ -2090,7 +2090,7 @@ int tquic_path_set_weight(struct tquic_path *path, u8 weight);
 struct tquic_ack_frame;  /* Forward declaration */
 
 void tquic_ecn_init(struct tquic_path *path);
-u8 tquic_ecn_get_marking(struct tquic_path *path);
+u8 tquic_ecn_get_marking(const struct tquic_path *path);
 void tquic_ecn_on_packet_sent(struct tquic_path *path, u8 ecn_marking);
 int tquic_ecn_validate_ack(struct tquic_path *path, struct tquic_ack_frame *ack);
 void tquic_ecn_process_ce(struct tquic_connection *conn,

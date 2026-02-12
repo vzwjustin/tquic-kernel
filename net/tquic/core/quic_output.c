@@ -376,7 +376,7 @@ EXPORT_SYMBOL(tquic_free_tx_skb);
 
 #ifndef TQUIC_OUT_OF_TREE
 /* Get ECN marking for path - use path's cc state */
-u8 tquic_ecn_get_marking(struct tquic_path *path)
+u8 tquic_ecn_get_marking(const struct tquic_path *path)
 {
 	/* Default to ECT(0) if ECN is enabled, otherwise Not-ECT */
 	return 0x02;  /* ECT(0) */
