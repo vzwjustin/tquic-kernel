@@ -1362,13 +1362,13 @@ EXPORT_SYMBOL_GPL(tquic_qlog_poll);
  * =============================================================================
  */
 
-int __init tquic_qlog_init(void)
+int tquic_qlog_init(void)
 {
 	pr_info("tquic: qlog tracing initialized (draft-ietf-quic-qlog-quic-events-12)\n");
 	return 0;
 }
 
-void __exit tquic_qlog_exit(void)
+void tquic_qlog_exit(void)
 {
 	pr_info("tquic: qlog tracing cleanup\n");
 }
