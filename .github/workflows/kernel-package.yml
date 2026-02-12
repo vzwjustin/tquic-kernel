@@ -107,6 +107,9 @@ jobs:
             "include/net/tquic_pm.h" \
             "include/net/tquic_pmtud.h" \
             "include/uapi/linux/tquic.h" \
+            "include/uapi/linux/tquic_pm.h" \
+            "include/uapi/linux/tquic_diag.h" \
+            "include/uapi/linux/tquic_qlog.h" \
             "include/crypto/"; do
             if [ -e "${SRC}/${p}" ]; then
               if [ -d "${SRC}/${p}" ]; then
