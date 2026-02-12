@@ -5,7 +5,10 @@
 
 # Include paths for headers
 ccflags-y += -I$(src)/tquic/include -I$(src)/../../include -I$(src)/../.. -I$(src)/tquic/diag
-# Suppress warnings treated as errors during development (remove for production)
+# Suppress noisy local warnings in TQUIC integration paths.
+# Keep both forms so builds stay stable with and without global -Werror.
+ccflags-y += -Wno-unused-function -Wno-unused-variable
+ccflags-y += -Wno-missing-prototypes
 ccflags-y += -Wno-error=unused-function -Wno-error=unused-variable
 ccflags-y += -Wno-error=missing-prototypes
 

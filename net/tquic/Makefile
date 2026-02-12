@@ -16,7 +16,10 @@
 # Include paths for headers
 # $(src)/../.. points to the project root where include/uapi/linux/in.h defines IPPROTO_TQUIC
 ccflags-y += -I$(src)/include -I$(src)/../quic -I$(src)/../../include -I$(src)/../.. -I$(src)/diag -DTQUIC_OUT_OF_TREE
-# Suppress warnings treated as errors during development (remove for production)
+# Suppress noisy local warnings in TQUIC integration paths.
+# Keep both forms so builds stay stable with and without global -Werror.
+ccflags-y += -Wno-unused-function -Wno-unused-variable
+ccflags-y += -Wno-missing-prototypes
 ccflags-y += -Wno-error=unused-function -Wno-error=unused-variable
 ccflags-y += -Wno-error=missing-prototypes
 

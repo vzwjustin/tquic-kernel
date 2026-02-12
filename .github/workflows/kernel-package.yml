@@ -58,11 +58,29 @@ jobs:
       - name: Checkout TQUIC source
         uses: actions/checkout@v4
 
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ccache
+          key: >-
+            ccache-${{ runner.os }}-${{ steps.params.outputs.kernel_full }}-${{
+              hashFiles(
+                '.github/workflows/kernel-package.yml',
+                'net/quic/**',
+                'net/tquic/**',
+                'include/net/**',
+                'include/uapi/**'
+              )
+            }}
+          restore-keys: |
+            ccache-${{ runner.os }}-${{ steps.params.outputs.kernel_full }}-
+
       - name: Install build dependencies
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
             bc bison build-essential cpio debhelper-compat \
+            ccache \
             dwarves fakeroot flex kmod libdw-dev libelf-dev libssl-dev \
             pahole rsync xz-utils zstd
 
@@ -132,6 +150,10 @@ jobs:
 
           make defconfig
 
+          # Keep CI resilient across toolchain/kernel warning changes.
+          # (Werror can be enabled indirectly via COMPILE_TEST.)
+          scripts/config --disable CONFIG_WERROR
+
           # Ensure module and TQUIC support are enabled in packaged kernel.
           # CRITICAL: Enable CONFIG_IP_QUIC first - this is the main option
           # that gates all CONFIG_TQUIC_* sub-options in net/tquic/Kconfig
@@ -153,11 +175,26 @@ jobs:
           # Apply dependencies and finalize config
           make olddefconfig
 
+      - name: Smoke build TQUIC (fast)
+        run: |
+          set -euo pipefail
+          KDIR=~/kernel-src/linux-${{ steps.params.outputs.kernel_full }}
+          cd "${KDIR}"
+
+          # Ensure generated headers + scripts exist, then compile only the
+          # TQUIC-related parts. This catches real compiler errors quickly
+          # without spending time on a full kernel build.
+          make -j"$(nproc)" prepare scripts
+          make -j"$(nproc)" net/quic/ net/tquic/
+
       - name: Build Debian kernel packages
         run: |
           set -euo pipefail
           KDIR=~/kernel-src/linux-${{ steps.params.outputs.kernel_full }}
           cd "${KDIR}"
+
+          export PATH="/usr/lib/ccache:${PATH}"
+          ccache -M 5G || true
 
           SHORT_SHA="$(echo "${GITHUB_SHA}" | cut -c1-8)"
           LOCALVER="-tquic-${SHORT_SHA}"

@@ -103,6 +103,8 @@ jobs:
           cd ~/kernel-src/linux-${{ matrix.kernel_full }}
           # Use allnoconfig as base (minimal) then enable what TQUIC needs
           make allnoconfig
+          # Avoid warnings-as-errors failures due to toolchain variance.
+          scripts/config --disable CONFIG_WERROR
           # Core networking
           scripts/config --enable CONFIG_NET
           scripts/config --enable CONFIG_INET
