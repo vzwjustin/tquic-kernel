@@ -1718,10 +1718,12 @@ int tquic_sock_getsockopt(struct socket *sock, int level, int optname,
 		 *
 		 * Returns 1 if DATAGRAM support is enabled/negotiated.
 		 */
+		lock_sock(sk);
 		if (tsk->conn)
 			val = tsk->conn->datagram.enabled ? 1 : 0;
 		else
 			val = tsk->datagram_enabled ? 1 : 0;
+		release_sock(sk);
 		break;
 
 	case TQUIC_SO_MAX_DATAGRAM_SIZE:
@@ -1732,10 +1734,12 @@ int tquic_sock_getsockopt(struct socket *sock, int level, int optname,
 		 * on this connection. Returns 0 if datagrams not supported.
 		 * Read-only option.
 		 */
+		lock_sock(sk);
 		if (tsk->conn)
 			val = tquic_datagram_max_size(tsk->conn);
 		else
 			val = 0;
+		release_sock(sk);
 		break;
 
 	case TQUIC_SO_DATAGRAM_QUEUE_LEN:
@@ -1744,10 +1748,12 @@ int tquic_sock_getsockopt(struct socket *sock, int level, int optname,
 		 *
 		 * Returns the maximum number of datagrams that can be queued.
 		 */
+		lock_sock(sk);
 		if (tsk->conn)
 			val = tsk->conn->datagram.recv_queue_max;
 		else
 			val = tsk->datagram_queue_max;
+		release_sock(sk);
 		break;
 
 	case TQUIC_SO_DATAGRAM_STATS: {
@@ -1796,10 +1802,12 @@ int tquic_sock_getsockopt(struct socket *sock, int level, int optname,
 		 * in the receive buffer. This is an alias for DATAGRAM_QUEUE_LEN
 		 * provided for API consistency with SO_RCVBUF semantics.
 		 */
+		lock_sock(sk);
 		if (tsk->conn)
 			val = tsk->conn->datagram.recv_queue_max;
 		else
 			val = tsk->datagram_queue_max;
+		release_sock(sk);
 		break;
 
 	case TQUIC_SO_HTTP3_ENABLE:
