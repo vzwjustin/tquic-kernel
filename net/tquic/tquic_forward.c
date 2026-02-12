@@ -1171,25 +1171,26 @@ u32 tquic_forward_get_mtu(struct tquic_tunnel *tunnel)
 	if (cached_pmtu > 0)
 		mtu = cached_pmtu;
 
-		/* Get QUIC path MTU */
-		if (tunnel->quic_stream && tunnel->quic_stream->conn) {
-			conn = tunnel->quic_stream->conn;
-			rcu_read_lock();
-			path = rcu_dereference(conn->active_path);
-			if (path && path->mtu > 0) {
-				quic_mtu = path->mtu;
-				/*
-				 * Subtract QUIC overhead: UDP header (8) + QUIC short header (~20)
-				 * + AEAD auth tag (16) = ~44 bytes
+	/* Get QUIC path MTU */
+	if (tunnel->quic_stream && tunnel->quic_stream->conn) {
+		conn = tunnel->quic_stream->conn;
+		rcu_read_lock();
+		path = rcu_dereference(conn->active_path);
+		if (path && path->mtu > 0) {
+			quic_mtu = path->mtu;
+			/*
+			 * Subtract QUIC overhead: UDP header (8) +
+			 * QUIC short header (~20) + AEAD auth tag
+			 * (16) = ~44 bytes
 			 */
 			overhead = 44;
 			if (quic_mtu > overhead)
 				quic_mtu -= overhead;
-				if (quic_mtu < mtu)
-					mtu = quic_mtu;
-			}
-			rcu_read_unlock();
+			if (quic_mtu < mtu)
+				mtu = quic_mtu;
 		}
+		rcu_read_unlock();
+	}
 
 	/* Get TCP socket destination MTU */
 	if (tunnel->tcp_sock && tunnel->tcp_sock->sk) {
