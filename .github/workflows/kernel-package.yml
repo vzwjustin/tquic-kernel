@@ -1,0 +1,154 @@
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# Build full bootable Linux kernel packages with TQUIC integrated.
+#
+name: Kernel Package Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_full:
+        description: "Kernel version to build (example: 6.19-rc8, 6.12.69)"
+        required: true
+        default: "6.19-rc8"
+      kernel_major:
+        description: "Kernel major series for stable releases (example: 6)"
+        required: true
+        default: "6"
+      kernel_testing:
+        description: "Use kernel.org testing tree (true for rc kernels)"
+        required: true
+        default: "true"
+      artifact_name:
+        description: "Artifact bundle name"
+        required: true
+        default: "tquic-kernel-debs"
+
+jobs:
+  build-kernel:
+    name: "Build kernel ${{ inputs.kernel_full }}"
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout TQUIC source
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            bc bison build-essential cpio debhelper-compat \
+            dwarves fakeroot flex kmod libelf-dev libssl-dev \
+            pahole rsync xz-utils zstd
+
+      - name: Download upstream kernel source
+        run: |
+          set -euo pipefail
+          mkdir -p ~/kernel-src && cd ~/kernel-src
+          KVER="${{ inputs.kernel_full }}"
+          MAJOR="${{ inputs.kernel_major }}"
+
+          if [ "${{ inputs.kernel_testing }}" = "true" ]; then
+            URL="https://git.kernel.org/torvalds/t/linux-${KVER}.tar.gz"
+            ARCHIVE="linux-${KVER}.tar.gz"
+          else
+            URL="https://cdn.kernel.org/pub/linux/kernel/v${MAJOR}.x/linux-${KVER}.tar.xz"
+            ARCHIVE="linux-${KVER}.tar.xz"
+          fi
+
+          echo "Downloading ${URL}"
+          curl -fSL --retry 3 --retry-delay 5 -o "${ARCHIVE}" "${URL}"
+          tar xf "${ARCHIVE}"
+          rm -f "${ARCHIVE}"
+
+      - name: Overlay TQUIC integration paths onto upstream kernel
+        run: |
+          set -euo pipefail
+          KDIR=~/kernel-src/linux-${{ inputs.kernel_full }}
+          SRC="${GITHUB_WORKSPACE}"
+
+          # Overlay only TQUIC-related paths so the result is a standard
+          # upstream kernel plus TQUIC integration.
+          for p in \
+            "net/tquic/" \
+            "net/quic/" \
+            "net/Kconfig" \
+            "net/Makefile" \
+            "include/net/tquic/" \
+            "include/net/quic/" \
+            "include/net/tquic.h" \
+            "include/net/tquic_frame.h" \
+            "include/net/tquic_http3.h" \
+            "include/net/tquic_pm.h" \
+            "include/net/tquic_pmtud.h" \
+            "include/uapi/linux/tquic.h" \
+            "include/crypto/"; do
+            if [ -e "${SRC}/${p}" ]; then
+              if [ -d "${SRC}/${p}" ]; then
+                mkdir -p "${KDIR}/${p}"
+                rsync -a --delete "${SRC}/${p}" "${KDIR}/${p}"
+              else
+                mkdir -p "$(dirname "${KDIR}/${p}")"
+                install -m 0644 "${SRC}/${p}" "${KDIR}/${p}"
+              fi
+            fi
+          done
+
+      - name: Configure kernel
+        run: |
+          set -euo pipefail
+          KDIR=~/kernel-src/linux-${{ inputs.kernel_full }}
+          cd "${KDIR}"
+
+          make defconfig
+
+          # Ensure module and TQUIC support are enabled in packaged kernel.
+          scripts/config --enable CONFIG_MODULES
+          scripts/config --enable CONFIG_TQUIC_CORE
+          scripts/config --enable CONFIG_TQUIC_WAN_BONDING
+          scripts/config --enable CONFIG_TQUIC_MULTIPATH
+          scripts/config --enable CONFIG_TQUIC_PATH_MANAGER
+          scripts/config --enable CONFIG_TQUIC_PM_NETLINK
+          scripts/config --enable CONFIG_TQUIC_SCHEDULER
+          scripts/config --enable CONFIG_TQUIC_CONG
+          scripts/config --enable CONFIG_TQUIC_CRYPTO
+          scripts/config --enable CONFIG_TQUIC_CERT_VERIFY
+          scripts/config --enable CONFIG_TQUIC_IPV6
+
+          make olddefconfig
+
+      - name: Build Debian kernel packages
+        run: |
+          set -euo pipefail
+          KDIR=~/kernel-src/linux-${{ inputs.kernel_full }}
+          cd "${KDIR}"
+
+          SHORT_SHA="$(echo "${GITHUB_SHA}" | cut -c1-8)"
+          LOCALVER="-tquic-${SHORT_SHA}"
+          PKGVER="1.${GITHUB_RUN_NUMBER}"
+
+          # Build image + headers + modules packages.
+          make -j"$(nproc)" \
+            LOCALVERSION="${LOCALVER}" \
+            KDEB_PKGVERSION="${PKGVER}" \
+            bindeb-pkg
+
+      - name: Collect package artifacts
+        run: |
+          set -euo pipefail
+          mkdir -p ~/kernel-artifacts
+          find ~/kernel-src -maxdepth 2 -type f \
+            \( -name "*.deb" -o -name "*.changes" -o -name "*.buildinfo" \) \
+            -exec cp -v {} ~/kernel-artifacts/ \;
+          cd ~/kernel-artifacts
+          sha256sum * > SHA256SUMS.txt
+          ls -lah
+
+      - name: Upload kernel packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.artifact_name }}-${{ inputs.kernel_full }}
+          path: ~/kernel-artifacts/*
+          if-no-files-found: error
+          retention-days: 14
