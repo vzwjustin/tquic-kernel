@@ -581,7 +581,7 @@ __poll_t tquic_qlog_poll(struct tquic_qlog *qlog);
  * =============================================================================
  */
 
-int __init tquic_qlog_init(void);
-void __exit tquic_qlog_exit(void);
+int tquic_qlog_init(void);
+void tquic_qlog_exit(void);
 
 #endif /* _NET_TQUIC_QLOG_H */

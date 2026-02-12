@@ -781,7 +781,7 @@ EXPORT_SYMBOL_GPL(qlog_v2_emit_frame);
  * =============================================================================
  */
 
-static int __init qlog_v2_init(void)
+int qlog_v2_init(void)
 {
 	int ret;
 
@@ -793,15 +793,12 @@ static int __init qlog_v2_init(void)
 	return 0;
 }
 
-static void __exit qlog_v2_exit(void)
+void qlog_v2_exit(void)
 {
 	pr_info("tquic: qlog v2 module unloaded\n");
 	tquic_qlog_exit();
 }
 
-module_init(qlog_v2_init);
-module_exit(qlog_v2_exit);
-
-MODULE_LICENSE("GPL");
-MODULE_AUTHOR("Linux Foundation");
-MODULE_DESCRIPTION("TQUIC Qlog v2 Implementation (draft-14)");
+/* Note: qlog_v2 is built into main quic.ko, not a separate module.
+ * Init/exit are called from tquic_main.c, not module_init/exit macros.
+ */
