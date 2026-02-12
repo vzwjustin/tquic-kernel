@@ -35,6 +35,7 @@
 #include "tquic_compat.h"
 #include "tquic_debug.h"
 #include "protocol.h"
+#include "tquic_init.h"
 
 #include "tquic_mib.h"
 #include "cong/tquic_cong.h"
@@ -1374,7 +1375,7 @@ EXPORT_SYMBOL_GPL(tquic_update_pacing);
  *
  * Return: true if packet can be sent, false if pacing should delay
  */
-bool tquic_pacing_allows_send(struct sock *sk, struct sk_buff *skb)
+static bool tquic_pacing_allows_send(struct sock *sk, struct sk_buff *skb)
 {
 	u64 len_ns;
 
@@ -1404,7 +1405,6 @@ bool tquic_pacing_allows_send(struct sock *sk, struct sk_buff *skb)
 
 	return true;  /* Allow send, FQ or internal timer handles pacing */
 }
-EXPORT_SYMBOL_GPL(tquic_pacing_allows_send);
 
 /*
  * Update pacing rate based on congestion control

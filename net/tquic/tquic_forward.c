@@ -1362,8 +1362,8 @@ EXPORT_SYMBOL_GPL(tquic_forward_signal_mtu);
  *
  * Returns: 0 on success, negative errno on failure
  */
-int tquic_forward_handle_icmp_toobig(struct tquic_tunnel *tunnel,
-				      struct sk_buff *skb, u32 mtu)
+static int tquic_forward_handle_icmp_toobig(struct tquic_tunnel *tunnel,
+					    struct sk_buff *skb, u32 mtu)
 {
 	int err;
 
@@ -1385,7 +1385,6 @@ int tquic_forward_handle_icmp_toobig(struct tquic_tunnel *tunnel,
 
 	return 0;
 }
-EXPORT_SYMBOL_GPL(tquic_forward_handle_icmp_toobig);
 
 /**
  * tquic_forward_check_df - Check if DF bit is set and packet fits MTU
@@ -1397,7 +1396,8 @@ EXPORT_SYMBOL_GPL(tquic_forward_handle_icmp_toobig);
  *
  * Returns: 0 if OK to send, -EMSGSIZE if packet too big with DF set
  */
-int tquic_forward_check_df(struct tquic_tunnel *tunnel, struct sk_buff *skb)
+static int tquic_forward_check_df(struct tquic_tunnel *tunnel,
+				  struct sk_buff *skb)
 {
 	struct iphdr *iph;
 	u32 mtu;
@@ -1436,7 +1436,6 @@ int tquic_forward_check_df(struct tquic_tunnel *tunnel, struct sk_buff *skb)
 
 	return 0;
 }
-EXPORT_SYMBOL_GPL(tquic_forward_check_df);
 
 /*
  * =============================================================================

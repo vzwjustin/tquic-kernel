@@ -317,7 +317,7 @@ static void bbrv3_enter_drain(struct bbrv3 *bbr)
 	bbr->mode = BBR3_DRAIN;
 	bbr->pacing_gain = BBR3_DRAIN_PACING_GAIN;
 	bbr->cwnd_gain = BBR3_STARTUP_CWND_GAIN;
-	tquic_dbg("bbrv3: state -> DRAIN, cwnd=%llu\n", bbr->cwnd);
+	tquic_dbg("bbrv3: state -> DRAIN, cwnd=%u\n", bbr->cwnd);
 }
 
 static void bbrv3_check_drain_done(struct bbrv3 *bbr)
@@ -346,7 +346,7 @@ static void bbrv3_enter_probe_bw(struct bbrv3 *bbr)
 
 	/* Random offset into cycle for fairness */
 	bbr->probe_up_rounds = get_random_u32() % 4;
-	tquic_dbg("bbrv3: state -> PROBE_BW, bw=%llu cwnd=%llu\n",
+	tquic_dbg("bbrv3: state -> PROBE_BW, bw=%llu cwnd=%u\n",
 		  bbr->bw, bbr->cwnd);
 }
 
@@ -503,7 +503,7 @@ static void bbrv3_handle_loss(struct bbrv3 *bbr, u64 bytes_lost)
 
 	bbr->in_loss_recovery = true;
 	bbr->prior_cwnd = bbr->cwnd;
-	tquic_warn("bbrv3: loss event, cwnd=%llu bytes_lost=%llu\n",
+	tquic_warn("bbrv3: loss event, cwnd=%u bytes_lost=%llu\n",
 		   bbr->cwnd, bytes_lost);
 
 	/* BBRv3: Apply beta multiplier on loss */
@@ -738,7 +738,7 @@ static void bbrv3_on_persistent_congestion(void *cong_data,
 	bbr->full_bw_count = 0;
 	bbrv3_enter_startup(bbr);
 
-	tquic_warn("bbrv3: persistent congestion, reset to startup, cwnd=%llu\n",
+	tquic_warn("bbrv3: persistent congestion, reset to startup, cwnd=%u\n",
 		   bbr->cwnd);
 }
 

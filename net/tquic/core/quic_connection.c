@@ -60,7 +60,6 @@ static u32 tquic_conn_draining_timeout_ms(struct tquic_connection *conn)
 
 /* Forward declarations for functions defined in other compilation units */
 void tquic_loss_detection_on_timeout(struct tquic_connection *conn);
-void tquic_timer_update(struct tquic_connection *conn);
 bool tquic_ack_should_send(struct tquic_connection *conn, u8 pn_space);
 int tquic_ack_create(struct tquic_connection *conn, u8 pn_space,
 		     struct sk_buff *skb);

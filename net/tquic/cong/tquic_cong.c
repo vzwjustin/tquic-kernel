@@ -31,9 +31,6 @@
 #include "tquic_cong.h"
 #include "coupled.h"
 
-/* Forward declaration for pacing update (defined in tquic_output.c) */
-extern void tquic_update_pacing(struct sock *sk, struct tquic_path *path);
-
 /*
  * Global CC algorithm registry
  * Protected by tquic_cong_list_lock for modifications,
@@ -813,8 +810,8 @@ EXPORT_SYMBOL_GPL(tquic_cong_get_pacing_rate);
  * @bytes: Number of bytes sent
  * @sent_time: Time the packet was sent
  */
-void tquic_cong_on_packet_sent(struct tquic_path *path, u64 bytes,
-			       ktime_t sent_time)
+static void tquic_cong_on_packet_sent(struct tquic_path *path, u64 bytes,
+				      ktime_t sent_time)
 {
 	struct tquic_cong_ops *ca;
 
@@ -825,7 +822,6 @@ void tquic_cong_on_packet_sent(struct tquic_path *path, u64 bytes,
 	if (ca && ca->on_packet_sent && path->cong)
 		ca->on_packet_sent(path->cong, bytes, sent_time);
 }
-EXPORT_SYMBOL_GPL(tquic_cong_on_packet_sent);
 
 /*
  * =============================================================================

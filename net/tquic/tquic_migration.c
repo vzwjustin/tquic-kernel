@@ -144,7 +144,7 @@ EXPORT_SYMBOL_GPL(tquic_path_anti_amplification_check);
  * @path: Path that sent data
  * @bytes: Number of bytes sent
  */
-void tquic_path_anti_amplification_sent(struct tquic_path *path, u64 bytes)
+static void tquic_path_anti_amplification_sent(struct tquic_path *path, u64 bytes)
 {
 	/*
 	 * Note: When tquic_path_anti_amplification_check() was called first,
@@ -154,19 +154,19 @@ void tquic_path_anti_amplification_sent(struct tquic_path *path, u64 bytes)
 	if (READ_ONCE(path->anti_amplification.active))
 		atomic64_add(bytes, &path->anti_amplification.bytes_sent);
 }
-EXPORT_SYMBOL_GPL(tquic_path_anti_amplification_sent);
+
 
 /**
  * tquic_path_anti_amplification_received - Record bytes received on unvalidated path
  * @path: Path that received data
  * @bytes: Number of bytes received
  */
-void tquic_path_anti_amplification_received(struct tquic_path *path, u64 bytes)
+static void tquic_path_anti_amplification_received(struct tquic_path *path, u64 bytes)
 {
 	if (READ_ONCE(path->anti_amplification.active))
 		atomic64_add(bytes, &path->anti_amplification.bytes_received);
 }
-EXPORT_SYMBOL_GPL(tquic_path_anti_amplification_received);
+
 
 /**
  * tquic_path_can_send_on - Check if active_path is in a sendable state
@@ -179,7 +179,7 @@ EXPORT_SYMBOL_GPL(tquic_path_anti_amplification_received);
  *
  * Returns: true if the active path is in a sendable state
  */
-bool tquic_path_can_send_on(struct tquic_connection *conn)
+static bool tquic_path_can_send_on(struct tquic_connection *conn)
 {
 	struct tquic_path *path;
 	bool can_send = false;
@@ -198,7 +198,7 @@ bool tquic_path_can_send_on(struct tquic_connection *conn)
 
 	return can_send;
 }
-EXPORT_SYMBOL_GPL(tquic_path_can_send_on);
+
 
 /**
  * struct tquic_migration_state - Migration state machine
@@ -1355,9 +1355,9 @@ EXPORT_SYMBOL_GPL(tquic_migration_cleanup);
  *
  * Returns: 0 on success, negative errno on failure
  */
-int tquic_migration_handle_path_challenge(struct tquic_connection *conn,
-					  struct tquic_path *path,
-					  const u8 *data)
+static int tquic_migration_handle_path_challenge(struct tquic_connection *conn,
+						 struct tquic_path *path,
+						 const u8 *data)
 {
 	if (!conn || !path || !data)
 		return -EINVAL;
@@ -1367,7 +1367,7 @@ int tquic_migration_handle_path_challenge(struct tquic_connection *conn,
 	/* Delegate to path validation module which handles rate limiting */
 	return tquic_path_handle_challenge(conn, path, data);
 }
-EXPORT_SYMBOL_GPL(tquic_migration_handle_path_challenge);
+
 
 /**
  * tquic_migration_handle_path_response - Handle received PATH_RESPONSE
@@ -1380,9 +1380,9 @@ EXPORT_SYMBOL_GPL(tquic_migration_handle_path_challenge);
  *
  * Returns: 0 on success, negative errno on failure
  */
-int tquic_migration_handle_path_response(struct tquic_connection *conn,
-					 struct tquic_path *path,
-					 const u8 *data)
+static int tquic_migration_handle_path_response(struct tquic_connection *conn,
+						struct tquic_path *path,
+						const u8 *data)
 {
 	struct tquic_migration_state *ms;
 	ktime_t now = ktime_get();
@@ -1437,7 +1437,7 @@ int tquic_migration_handle_path_response(struct tquic_connection *conn,
 
 	return 0;
 }
-EXPORT_SYMBOL_GPL(tquic_migration_handle_path_response);
+
 
 /*
  * =============================================================================
@@ -1798,7 +1798,7 @@ EXPORT_SYMBOL_GPL(tquic_server_check_path_recovery);
  *
  * Returns: 0 on success, negative errno on failure
  */
-int tquic_migrate_to_preferred_address(struct tquic_connection *conn)
+static int tquic_migrate_to_preferred_address(struct tquic_connection *conn)
 {
 	struct tquic_pref_addr_migration *pref_migration;
 	struct tquic_migration_state *ms;
@@ -1927,7 +1927,7 @@ int tquic_migrate_to_preferred_address(struct tquic_connection *conn)
 
 	return 0;
 }
-EXPORT_SYMBOL_GPL(tquic_migrate_to_preferred_address);
+
 
 /**
  * tquic_migration_on_handshake_complete - Handle post-handshake migration setup
@@ -1936,7 +1936,7 @@ EXPORT_SYMBOL_GPL(tquic_migrate_to_preferred_address);
  * Called when handshake completes. If a preferred address was received
  * and auto-migration is enabled, initiates migration.
  */
-void tquic_migration_on_handshake_complete(struct tquic_connection *conn)
+static void tquic_migration_on_handshake_complete(struct tquic_connection *conn)
 {
 	struct net *net;
 
@@ -1960,7 +1960,7 @@ void tquic_migration_on_handshake_complete(struct tquic_connection *conn)
 		tquic_dbg("auto-migrating to preferred address\n");
 	}
 }
-EXPORT_SYMBOL_GPL(tquic_migration_on_handshake_complete);
+
 
 /*
  * =============================================================================
@@ -2131,7 +2131,7 @@ EXPORT_SYMBOL_GPL(tquic_migrate_to_additional_address);
  *
  * Return: 0 on success, negative errno on failure
  */
-int tquic_migrate_select_additional_address(
+static int tquic_migrate_select_additional_address(
 	struct tquic_connection *conn, enum tquic_addr_select_policy policy)
 {
 	struct tquic_additional_addresses *remote_addrs;
@@ -2168,7 +2168,7 @@ int tquic_migrate_select_additional_address(
 
 	return tquic_migrate_to_additional_address(conn, selected);
 }
-EXPORT_SYMBOL_GPL(tquic_migrate_select_additional_address);
+
 
 /**
  * tquic_migrate_additional_addr_on_validated - Handle additional address path validation
@@ -2180,8 +2180,8 @@ EXPORT_SYMBOL_GPL(tquic_migrate_select_additional_address);
  *
  * Return: 0 on success, negative errno on failure
  */
-int tquic_migrate_additional_addr_on_validated(struct tquic_connection *conn,
-					       struct tquic_path *path)
+static int tquic_migrate_additional_addr_on_validated(struct tquic_connection *conn,
+						      struct tquic_path *path)
 {
 	struct tquic_additional_addresses *remote_addrs;
 	struct tquic_additional_address *addr_entry;
@@ -2214,7 +2214,7 @@ int tquic_migrate_additional_addr_on_validated(struct tquic_connection *conn,
 
 	return 0;
 }
-EXPORT_SYMBOL_GPL(tquic_migrate_additional_addr_on_validated);
+
 
 /**
  * tquic_migrate_additional_addr_on_failed - Handle additional address validation failure
@@ -2225,8 +2225,8 @@ EXPORT_SYMBOL_GPL(tquic_migrate_additional_addr_on_validated);
  * Called when path validation to an additional address fails.
  * Marks the address as invalid.
  */
-void tquic_migrate_additional_addr_on_failed(struct tquic_connection *conn,
-					     struct tquic_path *path, int error)
+static void tquic_migrate_additional_addr_on_failed(struct tquic_connection *conn,
+						    struct tquic_path *path, int error)
 {
 	struct tquic_additional_addresses *remote_addrs;
 	struct tquic_additional_address *addr_entry;
@@ -2249,7 +2249,7 @@ void tquic_migrate_additional_addr_on_failed(struct tquic_connection *conn,
 	}
 	spin_unlock_bh(&remote_addrs->lock);
 }
-EXPORT_SYMBOL_GPL(tquic_migrate_additional_addr_on_failed);
+
 
 /**
  * tquic_migrate_validate_all_additional - Validate all additional addresses
@@ -2261,7 +2261,7 @@ EXPORT_SYMBOL_GPL(tquic_migrate_additional_addr_on_failed);
  *
  * Return: Number of validation probes started, or negative errno on failure
  */
-int tquic_migrate_validate_all_additional(struct tquic_connection *conn)
+static int tquic_migrate_validate_all_additional(struct tquic_connection *conn)
 {
 	struct tquic_additional_addresses *remote_addrs;
 	struct tquic_additional_address *entry;
@@ -2322,7 +2322,7 @@ int tquic_migrate_validate_all_additional(struct tquic_connection *conn)
 
 	return count;
 }
-EXPORT_SYMBOL_GPL(tquic_migrate_validate_all_additional);
+
 
 /**
  * tquic_additional_addr_migration_cleanup - Clean up additional address migration state
@@ -2330,14 +2330,14 @@ EXPORT_SYMBOL_GPL(tquic_migrate_validate_all_additional);
  *
  * Cleans up additional addresses state during connection teardown.
  */
-void tquic_additional_addr_migration_cleanup(struct tquic_connection *conn)
+static void tquic_additional_addr_migration_cleanup(struct tquic_connection *conn)
 {
 	if (!conn)
 		return;
 
 	tquic_additional_addr_conn_cleanup(conn);
 }
-EXPORT_SYMBOL_GPL(tquic_additional_addr_migration_cleanup);
+
 
 MODULE_DESCRIPTION("TQUIC Connection Migration");
 MODULE_LICENSE("GPL");

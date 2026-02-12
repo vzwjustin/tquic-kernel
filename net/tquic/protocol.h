@@ -772,4 +772,32 @@ void tquic_stream_wake(struct tquic_stream *stream);
 int tquic_wait_for_stream_credit(struct tquic_connection *conn,
 				 bool is_bidi, bool nonblock);
 
+/*
+ * =============================================================================
+ * FUNCTIONS EXPORTED ACROSS TRANSLATION UNITS
+ * =============================================================================
+ *
+ * Prototypes for functions defined in one .c file but called from others.
+ */
+
+/* Forward declarations for types used below */
+struct tquic_additional_address;
+
+/* Anti-amplification check (tquic_migration.c) */
+bool tquic_path_anti_amplification_check(struct tquic_path *path, u64 bytes);
+
+/* Additional address migration (tquic_migration.c) */
+int tquic_migrate_to_additional_address(struct tquic_connection *conn,
+					struct tquic_additional_address *addr_entry);
+
+/* Inline handshake crypto processing (tquic_handshake.c) */
+int tquic_inline_hs_recv_crypto(struct sock *sk, const u8 *data, u32 len,
+				int enc_level);
+
+/* Pacing integration (tquic_output.c) */
+void tquic_update_pacing(struct sock *sk, struct tquic_path *path);
+
+/* Timer update (tquic_timer.c) */
+void tquic_timer_update(struct tquic_connection *conn);
+
 #endif /* _NET_TQUIC_PROTOCOL_H */

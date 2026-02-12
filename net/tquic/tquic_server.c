@@ -571,8 +571,8 @@ EXPORT_SYMBOL_GPL(tquic_client_copy_psk);
  *
  * Returns: 0 on success, negative errno on failure
  */
-int tquic_client_set_rate_limit(const char *identity, size_t identity_len,
-				u32 rate_limit)
+static int tquic_client_set_rate_limit(const char *identity,
+				       size_t identity_len, u32 rate_limit)
 {
 	struct tquic_client *client;
 	unsigned long flags;
@@ -594,7 +594,6 @@ int tquic_client_set_rate_limit(const char *identity, size_t identity_len,
 	rcu_read_unlock();
 	return 0;
 }
-EXPORT_SYMBOL_GPL(tquic_client_set_rate_limit);
 
 /**
  * tquic_client_set_session_ttl - Set session TTL for client
@@ -604,8 +603,8 @@ EXPORT_SYMBOL_GPL(tquic_client_set_rate_limit);
  *
  * Returns: 0 on success, negative errno on failure
  */
-int tquic_client_set_session_ttl(const char *identity, size_t identity_len,
-				 u32 ttl_ms)
+static int tquic_client_set_session_ttl(const char *identity,
+					size_t identity_len, u32 ttl_ms)
 {
 	struct tquic_client *client;
 
@@ -620,7 +619,6 @@ int tquic_client_set_session_ttl(const char *identity, size_t identity_len,
 	rcu_read_unlock();
 	return 0;
 }
-EXPORT_SYMBOL_GPL(tquic_client_set_session_ttl);
 
 /**
  * tquic_client_get_stats - Get statistics for a client
@@ -632,8 +630,9 @@ EXPORT_SYMBOL_GPL(tquic_client_set_session_ttl);
  *
  * Returns: 0 on success, negative errno on failure
  */
-int tquic_client_get_stats(const char *identity, size_t identity_len,
-			   int *conn_count, u64 *tx_bytes, u64 *rx_bytes)
+static int tquic_client_get_stats(const char *identity, size_t identity_len,
+				  int *conn_count, u64 *tx_bytes,
+				  u64 *rx_bytes)
 {
 	struct tquic_client *client;
 
@@ -651,7 +650,6 @@ int tquic_client_get_stats(const char *identity, size_t identity_len,
 	rcu_read_unlock();
 	return 0;
 }
-EXPORT_SYMBOL_GPL(tquic_client_get_stats);
 
 /*
  * =============================================================================
@@ -685,13 +683,13 @@ EXPORT_SYMBOL_GPL(tquic_client_get_stats);
  *   1: Retry packet sent, caller should drop the Initial packet
  *   negative errno on error
  */
-int tquic_server_check_retry_required(struct sock *sk,
-				      struct sk_buff *skb,
-				      struct sockaddr_storage *client_addr,
-				      u32 version,
-				      const u8 *dcid, u8 dcid_len,
-				      const u8 *scid, u8 scid_len,
-				      const u8 *token, size_t token_len)
+static int tquic_server_check_retry_required(struct sock *sk,
+					     struct sk_buff *skb,
+					     struct sockaddr_storage *client_addr,
+					     u32 version,
+					     const u8 *dcid, u8 dcid_len,
+					     const u8 *scid, u8 scid_len,
+					     const u8 *token, size_t token_len)
 {
 	struct net *net;
 	int ret;
@@ -768,7 +766,6 @@ int tquic_server_check_retry_required(struct sock *sk,
 
 	return 1;  /* Retry sent, drop the Initial packet */
 }
-EXPORT_SYMBOL_GPL(tquic_server_check_retry_required);
 
 /**
  * tquic_server_accept - Process incoming connection on server socket
