@@ -1569,7 +1569,7 @@ int __init tquic_forward_init(void)
  *
  * Cleans up hairpin hash table, PMTU cache, and stops GC timer.
  */
-void __exit tquic_forward_exit(void)
+void tquic_forward_exit(void)
 {
 	struct tquic_hairpin_entry *hairpin_entry;
 	struct tquic_pmtu_entry *pmtu_entry;

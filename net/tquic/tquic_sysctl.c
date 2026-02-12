@@ -2052,7 +2052,7 @@ int __init tquic_sysctl_init(struct net *net)
 	return 0;
 }
 
-void __exit tquic_sysctl_exit(void)
+void tquic_sysctl_exit(void)
 {
 	if (tquic_sysctl_header)
 		unregister_net_sysctl_table(tquic_sysctl_header);

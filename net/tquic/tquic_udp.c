@@ -1962,7 +1962,7 @@ int __init tquic_udp_init(void)
 /**
  * tquic_udp_exit - Cleanup UDP tunnel subsystem
  */
-void __exit tquic_udp_exit(void)
+void tquic_udp_exit(void)
 {
 	struct tquic_udp_sock *us;
 	struct hlist_node *tmp;

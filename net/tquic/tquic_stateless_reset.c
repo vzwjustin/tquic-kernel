@@ -783,7 +783,7 @@ int __init tquic_stateless_reset_init(void)
 	return 0;
 }
 
-void __exit tquic_stateless_reset_exit(void)
+void tquic_stateless_reset_exit(void)
 {
 	if (global_ctx_initialized) {
 		tquic_stateless_reset_ctx_destroy(&global_reset_ctx);

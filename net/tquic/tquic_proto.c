@@ -1422,7 +1422,7 @@ err_pernet:
 	return ret;
 }
 
-void __exit tquic_proto_exit(void)
+void tquic_proto_exit(void)
 {
 	tquic_info("protocol handler exiting\n");
 

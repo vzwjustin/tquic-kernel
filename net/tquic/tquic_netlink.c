@@ -1753,7 +1753,7 @@ int __init tquic_nl_init(void)
  *
  * Unregisters the generic netlink family and cleans up resources.
  */
-void __exit tquic_nl_exit(void)
+void tquic_nl_exit(void)
 {
 	genl_unregister_family(&tquic_genl_family);
 	unregister_pernet_subsys(&tquic_net_ops);

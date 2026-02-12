@@ -1269,7 +1269,7 @@ int __init tquic_retry_init(void)
 	return 0;
 }
 
-void __exit tquic_retry_exit(void)
+void tquic_retry_exit(void)
 {
 	mutex_lock(&tquic_retry_mutex);
 

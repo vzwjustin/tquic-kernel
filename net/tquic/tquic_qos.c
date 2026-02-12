@@ -370,7 +370,7 @@ int __init tquic_qos_init(void)
 /**
  * tquic_qos_exit - Cleanup QoS subsystem
  */
-void __exit tquic_qos_exit(void)
+void tquic_qos_exit(void)
 {
 	tquic_info("QoS classification cleaned up\n");
 }

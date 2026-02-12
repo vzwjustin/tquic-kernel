@@ -791,7 +791,7 @@ int __init tquic_offload_init(void)
  *
  * Unregisters GRO/GSO callbacks. Called during TQUIC module cleanup.
  */
-void __exit tquic_offload_exit(void)
+void tquic_offload_exit(void)
 {
 	tquic_info("removing GRO/GSO offload support\n");
 
