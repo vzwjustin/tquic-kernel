@@ -208,7 +208,7 @@ static void prague_ecn_reduce(struct prague *p)
 	p->prior_cwnd = p->cwnd;
 	p->cwnd = max(p->cwnd - reduction, PRAGUE_MIN_CWND * mss);
 	p->state = PRAGUE_ECN_REDUCED;
-	tquic_dbg("prague: ECN reduce, cwnd %llu -> %llu alpha=%u\n",
+	tquic_dbg("prague: ECN reduce, cwnd %u -> %u alpha=%u\n",
 		  p->prior_cwnd, p->cwnd, p->alpha);
 
 	/* Exit slow start on first ECN mark */
@@ -345,7 +345,7 @@ static void prague_on_loss(void *cong_data, u64 bytes_lost)
 	p->ssthresh = p->cwnd;
 	p->state = PRAGUE_RECOVERY;
 	p->in_slow_start = false;
-	tquic_warn("prague: loss, cwnd %llu -> %llu\n",
+	tquic_warn("prague: loss, cwnd %u -> %u\n",
 		   p->loss_cwnd, p->cwnd);
 }
 
@@ -371,7 +371,7 @@ static void prague_on_persistent_congestion(void *cong_data,
 	p->state = PRAGUE_OPEN;
 	p->in_slow_start = true;
 	p->alpha = prague_alpha_init;
-	tquic_warn("prague: persistent congestion, cwnd reset to %llu\n",
+	tquic_warn("prague: persistent congestion, cwnd reset to %u\n",
 		   p->cwnd);
 }
 
