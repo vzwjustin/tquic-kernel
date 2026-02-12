@@ -475,6 +475,6 @@ int __init tquic_ratelimit_module_init(void);
  *
  * Called during TQUIC module unload. Cleans up all resources.
  */
-void __exit tquic_ratelimit_module_exit(void);
+void tquic_ratelimit_module_exit(void);
 
 #endif /* _NET_TQUIC_RATELIMIT_H */

@@ -202,7 +202,7 @@ int __init tquic_pm_userspace_init_module(void)
 /*
  * Module cleanup
  */
-void __exit tquic_pm_userspace_exit_module(void)
+void tquic_pm_userspace_exit_module(void)
 {
 	tquic_pm_unregister(TQUIC_PM_TYPE_USERSPACE);
 	pr_info("TQUIC PM: Userspace path manager unregistered\n");

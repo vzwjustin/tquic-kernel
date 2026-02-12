@@ -1063,7 +1063,7 @@ int __init tquic_pref_addr_init(void)
 	return 0;
 }
 
-void __exit tquic_pref_addr_exit(void)
+void tquic_pref_addr_exit(void)
 {
 	tquic_info("preferred address support cleaned up\n");
 }

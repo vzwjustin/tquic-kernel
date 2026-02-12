@@ -372,6 +372,6 @@ int __init tquic_pref_addr_init(void);
 /**
  * tquic_pref_addr_exit - Clean up preferred address subsystem
  */
-void __exit tquic_pref_addr_exit(void);
+void tquic_pref_addr_exit(void);
 
 #endif /* _TQUIC_PREFERRED_ADDR_H */
