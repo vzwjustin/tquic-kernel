@@ -420,7 +420,6 @@ static int tquic_v6_connect(struct sock *sk, struct sockaddr_unsized *addr, int 
 	}
 
 	sk->sk_v6_rcv_saddr = *saddr;
-	sk->sk_gso_type = SKB_GSO_UDP_L4;
 
 	ip6_dst_store(sk, dst, false, false);
 
@@ -935,8 +934,6 @@ static int tquic_v6_init_sock(struct sock *sk)
 
 	/* Allow dual-stack by default */
 	sk->sk_ipv6only = 0;
-
-	sk->sk_gso_type = SKB_GSO_UDP_L4;
 
 	tquic_dbg("IPv6 socket initialized\n");
 	return 0;
