@@ -1413,7 +1413,7 @@ int __init tquic_ratelimit_module_init(void)
 	return 0;
 }
 
-void __exit tquic_ratelimit_module_exit(void)
+void tquic_ratelimit_module_exit(void)
 {
 	tquic_ratelimit_sysctl_exit();
 	unregister_pernet_subsys(&tquic_rl_net_ops);

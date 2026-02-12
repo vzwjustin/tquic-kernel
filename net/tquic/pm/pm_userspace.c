@@ -214,7 +214,7 @@ int __init tquic_pm_userspace_init(void)
 	return tquic_pm_userspace_init_module();
 }
 
-void __exit tquic_pm_userspace_exit(void)
+void tquic_pm_userspace_exit(void)
 {
 	tquic_pm_userspace_exit_module();
 }

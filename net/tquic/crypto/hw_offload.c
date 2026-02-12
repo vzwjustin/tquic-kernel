@@ -1189,7 +1189,7 @@ int __init tquic_hw_offload_init(void)
 /**
  * tquic_hw_offload_exit - Clean up hardware offload subsystem
  */
-void __exit tquic_hw_offload_exit(void)
+void tquic_hw_offload_exit(void)
 {
 	if (crypto_caps_entry) {
 		proc_remove(crypto_caps_entry);

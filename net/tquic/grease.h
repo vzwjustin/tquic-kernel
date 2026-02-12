@@ -263,6 +263,6 @@ int tquic_grease_add_versions(u32 *versions, int max_versions, int current_count
  * Module init/exit - implemented in grease.c
  */
 int __init tquic_grease_init(void);
-void __exit tquic_grease_exit(void);
+void tquic_grease_exit(void);
 
 #endif /* _TQUIC_GREASE_H */

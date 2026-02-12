@@ -173,10 +173,8 @@ int __init tquic_scheduler_init(void)
 	pr_info("Initializing TQUIC multipath scheduler registry\n");
 	return 0;
 }
-EXPORT_SYMBOL_GPL(tquic_scheduler_init);
 
-void __exit tquic_scheduler_exit(void)
+void tquic_scheduler_exit(void)
 {
 	pr_info("Unloading TQUIC multipath scheduler registry\n");
 }
-EXPORT_SYMBOL_GPL(tquic_scheduler_exit);

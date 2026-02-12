@@ -2017,7 +2017,7 @@ int __init tquic_zero_rtt_module_init(void)
 	return 0;
 }
 
-void __exit tquic_zero_rtt_module_exit(void)
+void tquic_zero_rtt_module_exit(void)
 {
 	struct tquic_zero_rtt_ticket *ticket, *tmp;
 

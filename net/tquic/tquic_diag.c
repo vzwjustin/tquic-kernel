@@ -543,7 +543,7 @@ int __init tquic_diag_init(void)
 	return inet_diag_register(&tquic_diag_handler);
 }
 
-void __exit tquic_diag_exit(void)
+void tquic_diag_exit(void)
 {
 	inet_diag_unregister(&tquic_diag_handler);
 }
@@ -571,7 +571,7 @@ int __init tquic_diag_init(void)
 	return 0;
 }
 
-void __exit tquic_diag_exit(void)
+void tquic_diag_exit(void)
 {
 }
 

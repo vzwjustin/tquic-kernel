@@ -422,6 +422,6 @@ int __init tquic_hw_offload_init(void);
  *
  * Removes proc entries and frees resources.
  */
-void __exit tquic_hw_offload_exit(void);
+void tquic_hw_offload_exit(void);
 
 #endif /* _TQUIC_HW_OFFLOAD_H */

@@ -955,7 +955,7 @@ int __init tquic_token_init(void)
 	return 0;
 }
 
-void __exit tquic_token_exit(void)
+void tquic_token_exit(void)
 {
 	/* Securely wipe the persistent server token key */
 	memzero_explicit(&tquic_server_token_key, sizeof(tquic_server_token_key));

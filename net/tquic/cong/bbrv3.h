@@ -238,7 +238,7 @@ struct bbrv3 {
 
 /* Module init/exit */
 int __init tquic_bbrv3_init(void);
-void __exit tquic_bbrv3_exit(void);
+void tquic_bbrv3_exit(void);
 
 /* Congestion control operations */
 extern struct tquic_cong_ops bbrv3_cong_ops;

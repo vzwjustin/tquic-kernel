@@ -916,7 +916,7 @@ int __init tquic_tunnel_init(void)
 /**
  * tquic_tunnel_exit - Cleanup tunnel subsystem
  */
-void __exit tquic_tunnel_exit(void)
+void tquic_tunnel_exit(void)
 {
 	if (tquic_tunnel_wq) {
 		flush_workqueue(tquic_tunnel_wq);

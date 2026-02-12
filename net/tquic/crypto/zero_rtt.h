@@ -637,7 +637,7 @@ int __init tquic_zero_rtt_module_init(void);
  *
  * Called during module unload.
  */
-void __exit tquic_zero_rtt_module_exit(void);
+void tquic_zero_rtt_module_exit(void);
 
 /*
  * =============================================================================

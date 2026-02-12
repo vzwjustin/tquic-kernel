@@ -3250,7 +3250,7 @@ err_integrity_v1:
 	return ret;
 }
 
-void __exit tquic_connection_exit(void)
+void tquic_connection_exit(void)
 {
 	/* Cleanup retry integrity AEADs */
 	if (tquic_retry_integrity_aead_v1) {

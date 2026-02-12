@@ -711,6 +711,6 @@ int __init tquic_ack_freq_init(void);
 /**
  * tquic_ack_freq_exit - Cleanup ACK frequency module
  */
-void __exit tquic_ack_freq_exit(void);
+void tquic_ack_freq_exit(void);
 
 #endif /* _TQUIC_CORE_ACK_FREQUENCY_H */

@@ -3063,17 +3063,15 @@ int __init tquic_output_tx_init(void)
 		return -ENOMEM;
 	return 0;
 }
-EXPORT_SYMBOL_GPL(tquic_output_tx_init);
 
 /**
  * tquic_output_tx_exit - Destroy TX-path slab caches
  */
-void __exit tquic_output_tx_exit(void)
+void tquic_output_tx_exit(void)
 {
 	kmem_cache_destroy(tquic_frame_cache);
 	tquic_frame_cache = NULL;
 }
-EXPORT_SYMBOL_GPL(tquic_output_tx_exit);
 
 MODULE_DESCRIPTION("TQUIC Packet Transmission Path");
 MODULE_LICENSE("GPL");

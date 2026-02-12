@@ -693,7 +693,7 @@ int __init tquic_pm_nl_init(void)
 	return 0;
 }
 
-void __exit tquic_pm_nl_exit(void)
+void tquic_pm_nl_exit(void)
 {
 	genl_unregister_family(&tquic_pm_genl_family);
 	pr_info("TQUIC PM: Netlink interface cleaned up\n");

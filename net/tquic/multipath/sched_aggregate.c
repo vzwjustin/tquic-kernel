@@ -378,7 +378,7 @@ int __init tquic_sched_aggregate_init(void)
 	return ret;
 }
 
-void __exit tquic_sched_aggregate_exit(void)
+void tquic_sched_aggregate_exit(void)
 {
 	tquic_mp_unregister_scheduler(&tquic_mp_sched_aggregate);
 }

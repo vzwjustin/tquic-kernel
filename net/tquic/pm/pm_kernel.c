@@ -493,7 +493,7 @@ int __init tquic_pm_kernel_module_init(void)
 /**
  * tquic_pm_kernel_module_exit - Unregister kernel PM type
  */
-void __exit tquic_pm_kernel_module_exit(void)
+void tquic_pm_kernel_module_exit(void)
 {
 	tquic_pm_unregister(TQUIC_PM_TYPE_KERNEL);
 	pr_info("TQUIC PM kernel: Unregistered\n");

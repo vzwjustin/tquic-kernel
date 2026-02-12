@@ -147,6 +147,6 @@ int __init tquic_mp_ack_init(void);
 /**
  * tquic_mp_ack_exit - Cleanup multipath ACK module
  */
-void __exit tquic_mp_ack_exit(void);
+void tquic_mp_ack_exit(void);
 
 #endif /* _TQUIC_MP_ACK_H */

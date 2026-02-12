@@ -412,7 +412,7 @@ int __init tquic_prague_init(void)
 	return tquic_register_cong(&prague_cong_ops);
 }
 
-void __exit tquic_prague_exit(void)
+void tquic_prague_exit(void)
 {
 	tquic_unregister_cong(&prague_cong_ops);
 }

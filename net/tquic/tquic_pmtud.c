@@ -1214,7 +1214,7 @@ int __init tquic_pmtud_init(void)
 /**
  * tquic_pmtud_exit - Cleanup PMTUD subsystem
  */
-void __exit tquic_pmtud_exit(void)
+void tquic_pmtud_exit(void)
 {
 	if (tquic_pmtud_wq) {
 		flush_workqueue(tquic_pmtud_wq);

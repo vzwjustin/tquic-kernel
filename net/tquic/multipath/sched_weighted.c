@@ -277,7 +277,7 @@ int __init tquic_sched_weighted_init(void)
 	return tquic_mp_register_scheduler(&tquic_mp_sched_weighted);
 }
 
-void __exit tquic_sched_weighted_exit(void)
+void tquic_sched_weighted_exit(void)
 {
 	tquic_mp_unregister_scheduler(&tquic_mp_sched_weighted);
 }

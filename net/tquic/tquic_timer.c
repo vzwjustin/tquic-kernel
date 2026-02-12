@@ -2095,7 +2095,7 @@ int __init tquic_timer_init(void)
 /**
  * tquic_timer_exit - Cleanup timer subsystem
  */
-void __exit tquic_timer_exit(void)
+void tquic_timer_exit(void)
 {
 	if (tquic_timer_wq) {
 		flush_workqueue(tquic_timer_wq);

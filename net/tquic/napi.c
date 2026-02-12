@@ -1087,7 +1087,7 @@ int __init tquic_napi_subsys_init(void)
 /**
  * tquic_napi_subsys_exit - Clean up NAPI subsystem
  */
-void __exit tquic_napi_subsys_exit(void)
+void tquic_napi_subsys_exit(void)
 {
 	/* Remove proc file only if it was created */
 	if (!tquic_napi_proc_disabled)

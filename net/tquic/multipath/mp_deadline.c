@@ -853,7 +853,7 @@ int __init tquic_mp_deadline_init(void)
 	return 0;
 }
 
-void __exit tquic_mp_deadline_exit(void)
+void tquic_mp_deadline_exit(void)
 {
 	if (mp_deadline_wq)
 		destroy_workqueue(mp_deadline_wq);

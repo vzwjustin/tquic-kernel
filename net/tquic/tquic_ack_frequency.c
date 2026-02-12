@@ -1213,7 +1213,7 @@ EXPORT_SYMBOL_GPL(tquic_ack_freq_conn_set_app_hint);
  *
  * Return: 0 on success, negative error on failure
  */
-int tquic_ack_freq_module_init(void)
+int __init tquic_ack_freq_module_init(void)
 {
 	int ret;
 
@@ -1228,7 +1228,6 @@ int tquic_ack_freq_module_init(void)
 	tquic_info("ACK frequency extension module initialized\n");
 	return 0;
 }
-EXPORT_SYMBOL_GPL(tquic_ack_freq_module_init);
 
 /**
  * tquic_ack_freq_module_exit - Clean up ACK frequency module
@@ -1242,7 +1241,6 @@ void tquic_ack_freq_module_exit(void)
 
 	tquic_info("ACK frequency extension module cleaned up\n");
 }
-EXPORT_SYMBOL_GPL(tquic_ack_freq_module_exit);
 
 /*
  * =============================================================================

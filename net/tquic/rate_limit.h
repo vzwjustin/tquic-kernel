@@ -401,6 +401,6 @@ int __init tquic_rate_limit_module_init(void);
  *
  * Called during TQUIC module unload.
  */
-void __exit tquic_rate_limit_module_exit(void);
+void tquic_rate_limit_module_exit(void);
 
 #endif /* _NET_TQUIC_RATE_LIMIT_H */

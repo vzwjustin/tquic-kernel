@@ -1247,7 +1247,7 @@ int __init tquic_io_uring_init(void)
 	return 0;
 }
 
-void __exit tquic_io_uring_exit(void)
+void tquic_io_uring_exit(void)
 {
 	tquic_info("io_uring support cleanup\n");
 }

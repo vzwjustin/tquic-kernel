@@ -180,6 +180,6 @@ extern struct tquic_cong_ops bbrv2_cong_ops;
 
 /* Module init/exit */
 int __init tquic_bbrv2_init(void);
-void __exit tquic_bbrv2_exit(void);
+void tquic_bbrv2_exit(void);
 
 #endif /* _TQUIC_BBRV2_H */

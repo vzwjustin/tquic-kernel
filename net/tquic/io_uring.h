@@ -576,7 +576,7 @@ int __init tquic_io_uring_init(void);
  *
  * Called during TQUIC module unload.
  */
-void __exit tquic_io_uring_exit(void);
+void tquic_io_uring_exit(void);
 
 #endif /* CONFIG_TQUIC_IO_URING */
 

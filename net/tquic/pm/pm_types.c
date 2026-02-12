@@ -357,7 +357,7 @@ int __init tquic_pm_types_init(void)
 /**
  * tquic_pm_types_exit - Cleanup PM type framework
  */
-void __exit tquic_pm_types_exit(void)
+void tquic_pm_types_exit(void)
 {
 	unregister_pernet_subsys(&tquic_pm_pernet_ops);
 	pr_info("TQUIC PM: Type framework cleaned up\n");

@@ -1384,7 +1384,7 @@ err_abandon_state:
 /**
  * tquic_mp_abandon_exit - Cleanup path abandonment module
  */
-void __exit tquic_mp_abandon_exit(void)
+void tquic_mp_abandon_exit(void)
 {
 	kmem_cache_destroy(mp_pending_retire_cache);
 	kmem_cache_destroy(mp_local_cid_cache);

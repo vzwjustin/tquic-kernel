@@ -1031,7 +1031,7 @@ int __init coupled_cc_init_module(void)
 	return 0;
 }
 
-void __exit coupled_cc_exit_module(void)
+void coupled_cc_exit_module(void)
 {
 	pr_info("TQUIC coupled congestion control unloaded\n");
 }

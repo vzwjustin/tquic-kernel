@@ -899,7 +899,7 @@ int __init tquic_security_hardening_init(void)
 /**
  * tquic_security_hardening_exit - Cleanup security hardening features
  */
-void __exit tquic_security_hardening_exit(void)
+void tquic_security_hardening_exit(void)
 {
 	tquic_pre_hs_exit();
 	tquic_info("security hardening shutdown\n");
@@ -934,8 +934,6 @@ EXPORT_SYMBOL_GPL(tquic_spin_bit_get);
 EXPORT_SYMBOL_GPL(tquic_spin_bit_update);
 
 EXPORT_SYMBOL_GPL(tquic_security_event);
-EXPORT_SYMBOL_GPL(tquic_security_hardening_init);
-EXPORT_SYMBOL_GPL(tquic_security_hardening_exit);
 
 MODULE_DESCRIPTION("TQUIC Security Hardening");
 MODULE_LICENSE("GPL");
