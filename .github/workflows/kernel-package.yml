@@ -99,6 +99,8 @@ jobs:
             "net/quic/" \
             "net/Kconfig" \
             "net/Makefile" \
+            "include/net/netns/tquic.h" \
+            "include/net/net_namespace.h" \
             "include/net/tquic/" \
             "include/net/quic/" \
             "include/net/tquic.h" \
