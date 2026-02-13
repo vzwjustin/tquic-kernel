@@ -21,7 +21,7 @@
 #include <linux/skbuff.h>
 #include <linux/errno.h>
 #include <net/tquic.h>
-#include "protocol.h"
+#include "../protocol.h"
 #include "varint.h"
 #include "../tquic_retry.h"
 
