@@ -12,6 +12,7 @@
 #define _TQUIC_PATH_METRICS_H
 
 #include <linux/types.h>
+#include <net/genetlink.h>
 #include <net/tquic.h>
 
 /**

@@ -33,6 +33,7 @@
 #include <linux/workqueue.h>
 
 #include <net/sock.h>
+#include <net/rps.h>
 #include <net/protocol.h>
 #include <net/inet_common.h>
 #include <net/inet6_hashtables.h>
