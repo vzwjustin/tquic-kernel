@@ -77,9 +77,25 @@ struct tquic_ack_frequency_frame;
 struct tquic_receive_ts_state;
 
 /*
- * Note: struct tquic_ack_range is defined in include/net/tquic_frame.h
- * for ACK frame wire format encoding/decoding (with gap and ack_range_len fields).
+ * Note: struct tquic_ack_range in include/net/tquic_frame.h is the wire-format
+ * ACK range (gap + ack_range_len). The internal range tracking struct below
+ * uses absolute packet numbers and a linked list for efficient range management.
  */
+
+/**
+ * struct tquic_pn_range - Internal packet number range for ACK tracking
+ * @start: Smallest packet number in this contiguous range
+ * @end: Largest packet number in this contiguous range
+ * @list: Linkage into tquic_loss_state.ack_ranges list (ordered by pn, descending)
+ *
+ * Tracks contiguous ranges of received packet numbers for ACK frame generation.
+ * Ranges are maintained in a linked list ordered by packet number (highest first).
+ */
+struct tquic_pn_range {
+	u64 start;
+	u64 end;
+	struct list_head list;
+};
 
 /**
  * struct tquic_ecn_counts - ECN counters
