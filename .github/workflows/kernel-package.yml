@@ -211,6 +211,7 @@ jobs:
           echo "kernel_major=${MAJOR}" >> $GITHUB_OUTPUT
           echo "kernel_testing=${TESTING}" >> $GITHUB_OUTPUT
           echo "artifact_name=${ARTIFACT}" >> $GITHUB_OUTPUT
+          echo "artifacts_dir=${HOME}/kernel-artifacts" >> $GITHUB_OUTPUT
 
           echo "Building kernel ${KVER} (major: ${MAJOR}, testing: ${TESTING})"
 
@@ -391,7 +392,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.params.outputs.artifact_name }}-${{ steps.params.outputs.kernel_full }}
-          path: ~/kernel-artifacts/*
+          path: ${{ steps.params.outputs.artifacts_dir }}/*
           if-no-files-found: error
           retention-days: 14
 
@@ -414,7 +415,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.release_tag.outputs.tag }}
-          files: ~/kernel-artifacts/*
+          files: ${{ steps.params.outputs.artifacts_dir }}/*
           prerelease: true
           fail_on_unmatched_files: false
           body: |
