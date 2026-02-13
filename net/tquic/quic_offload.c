@@ -576,6 +576,14 @@ static struct sk_buff *tquic_offload_gro_receive(struct list_head *head,
 			break;
 		}
 
+#ifdef TQUIC_OUT_OF_TREE
+		/*
+		 * skb_gro_receive may not be accessible to out-of-tree
+		 * modules depending on the kernel config.  Flush instead.
+		 */
+		pp = p;
+		break;
+#else
 		/* Merge the packets */
 		if (skb_gro_receive(p, skb)) {
 			pp = p;
@@ -584,6 +592,7 @@ static struct sk_buff *tquic_offload_gro_receive(struct list_head *head,
 
 		/* Mark that we successfully merged */
 		return pp;
+#endif
 	}
 
 out:

@@ -64,6 +64,55 @@ static int tquic_v6_init_sock(struct sock *sk);
 static void tquic_v6_destroy_sock(struct sock *sk);
 
 /*
+ * Out-of-tree compatibility wrappers.
+ *
+ * Several inet/inet6 helpers (inet_hash, inet_unhash, inet6_sendmsg,
+ * inet6_recvmsg, ipv6_flowlabel_opt) are either not exported to modules
+ * at all or only conditionally exported.  Provide minimal replacements so
+ * the module links without them.
+ */
+#ifdef TQUIC_OUT_OF_TREE
+static int tquic_v6_hash(struct sock *sk)
+{
+	/* TQUIC manages connections via connection IDs, not inet hash */
+	return 0;
+}
+
+static void tquic_v6_unhash(struct sock *sk)
+{
+}
+
+static int tquic_v6_sendmsg_op(struct socket *sock, struct msghdr *msg,
+				size_t size)
+{
+	struct sock *sk = sock->sk;
+	int ret;
+
+	ret = inet_send_prepare(sk);
+	if (ret)
+		return ret;
+
+	return sk->sk_prot->sendmsg(sk, msg, size);
+}
+
+static int tquic_v6_recvmsg_op(struct socket *sock, struct msghdr *msg,
+				size_t size, int flags)
+{
+	struct sock *sk = sock->sk;
+	int addr_len = 0;
+	int err;
+
+	if (likely(!(flags & MSG_ERRQUEUE)))
+		sock_rps_record_flow(sk);
+
+	err = sk->sk_prot->recvmsg(sk, msg, size, flags, &addr_len);
+	if (err >= 0)
+		msg->msg_namelen = addr_len;
+	return err;
+}
+#endif /* TQUIC_OUT_OF_TREE */
+
+/*
  * Helper to get ipv6_pinfo from tquic socket - alias for consistency
  * with existing code. Uses tquic6_inet6_sk() from include/net/tquic.h.
  */
@@ -576,8 +625,12 @@ static int tquic_v6_setsockopt(struct socket *sock, int level, int optname,
 			break;
 
 		case IPV6_FLOWLABEL_MGR:
-			/* Allow flow label management */
+#ifdef TQUIC_OUT_OF_TREE
+			/* ipv6_flowlabel_opt not exported to modules */
+			return -EOPNOTSUPP;
+#else
 			return ipv6_flowlabel_opt(sk, optval, optlen);
+#endif
 
 		case IPV6_FLOWINFO_SEND:
 			if (optlen < sizeof(int))
@@ -1004,8 +1057,13 @@ static struct proto tquic6_prot = {
 	.ipv6_pinfo_offset = offsetof(struct tquic6_sock, inet6),
 	.init		= tquic_v6_init_sock,
 	.destroy	= tquic_v6_destroy_sock,
+#ifdef TQUIC_OUT_OF_TREE
+	.hash		= tquic_v6_hash,
+	.unhash		= tquic_v6_unhash,
+#else
 	.hash		= inet_hash,
 	.unhash		= inet_unhash,
+#endif
 	.get_port	= inet_csk_get_port,
 	.close		= tquic_close,
 	.connect	= tquic_v6_connect,
@@ -1118,8 +1176,13 @@ static const struct proto_ops tquic6_proto_ops = {
 	.shutdown	= inet_shutdown,
 	.setsockopt	= tquic_v6_setsockopt,
 	.getsockopt	= tquic_v6_getsockopt,
+#ifdef TQUIC_OUT_OF_TREE
+	.sendmsg	= tquic_v6_sendmsg_op,
+	.recvmsg	= tquic_v6_recvmsg_op,
+#else
 	.sendmsg	= inet6_sendmsg,
 	.recvmsg	= inet6_recvmsg,
+#endif
 	.mmap		= sock_no_mmap,
 };
 

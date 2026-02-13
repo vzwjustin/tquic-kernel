@@ -13,6 +13,7 @@ menuconfig IP_QUIC
 	select CRYPTO_CHACHA20POLY1305
 	select CRYPTO_SHA256
 	select CRYPTO_SHA512
+	select CRYPTO_LIB_CURVE25519
 	select NET_UDP_TUNNEL
 	help
 	  TQUIC is a kernel-level QUIC implementation (RFC 9000/9001/9002)
