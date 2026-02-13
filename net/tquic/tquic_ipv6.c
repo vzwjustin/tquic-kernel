@@ -393,6 +393,7 @@ static int tquic_v6_connect(struct sock *sk, struct sockaddr_unsized *addr, int 
 
 	/* Set socket reference for PM and path management */
 	conn->sk = sk;
+	pr_warn("TQUIC IPv6 DEBUG: tquic_v6_connect started, set conn->sk=%p\n", sk);
 
 	memset(&fl6, 0, sizeof(fl6));
 
@@ -557,7 +558,9 @@ static int tquic_v6_connect(struct sock *sk, struct sockaddr_unsized *addr, int 
 	 * The timer system handles Initial packet retransmission during
 	 * handshake via the PTO timer mechanism.
 	 */
+	pr_warn("TQUIC IPv6 DEBUG: Waiting for handshake...\n");
 	err = tquic_wait_for_handshake(sk, TQUIC_HANDSHAKE_TIMEOUT_MS);
+	pr_warn("TQUIC IPv6 DEBUG: Handshake wait returned %d, flags=0x%lx\n", err, tsk->flags);
 	if (err < 0) {
 		tquic_err("IPv6 handshake failed: %d\n", err);
 		goto failure_close;
@@ -565,6 +568,7 @@ static int tquic_v6_connect(struct sock *sk, struct sockaddr_unsized *addr, int 
 
 	/* Verify handshake actually completed */
 	if (!(tsk->flags & TQUIC_F_HANDSHAKE_DONE)) {
+		pr_warn("TQUIC IPv6 DEBUG: Handshake NOT done, flags=0x%lx\n", tsk->flags);
 		err = -EQUIC_HANDSHAKE_FAILED;
 		goto failure_close;
 	}
@@ -576,7 +580,9 @@ static int tquic_v6_connect(struct sock *sk, struct sockaddr_unsized *addr, int 
 	inet_sk_set_state(sk, TCP_ESTABLISHED);
 
 	/* Initialize path manager after connection established */
+	pr_warn("TQUIC IPv6 DEBUG: About to call PM init (conn=%p, conn->sk=%p)\n", conn, conn->sk);
 	err = tquic_pm_conn_init(conn);
+	pr_warn("TQUIC IPv6 DEBUG: PM init returned %d\n", err);
 	if (err < 0) {
 		tquic_warn("IPv6 PM init failed: %d\n", err);
 		/* Continue anyway - PM is optional for basic operation */
@@ -949,6 +955,7 @@ int tquic_v6_add_path(struct tquic_connection *conn,
 
 			tquic_dbg("added IPv6 path %d: %pI6c -> %pI6c\n",
 				 err, &local->sin6_addr, &remote->sin6_addr);
+			tquic_path_put(path);
 		}
 	}
 
