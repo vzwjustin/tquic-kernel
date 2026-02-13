@@ -18,6 +18,7 @@
 #include <linux/atomic.h>
 #include <net/tquic.h>
 #include <net/tquic_frame.h>
+#include "ack.h"
 #include "ack_frequency.h"
 #include "varint.h"
 #include "../tquic_debug.h"
