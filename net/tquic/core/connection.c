@@ -2559,6 +2559,8 @@ int tquic_conn_client_connect(struct tquic_connection *conn,
 	INIT_WORK(&cs->close_work, tquic_close_work_handler);
 	INIT_WORK(&cs->migration_work, tquic_migration_work_handler);
 	INIT_DELAYED_WORK(&cs->drain_work, tquic_drain_timeout);
+	/* Initialize validation_work to prevent NULL pointer crash */
+	INIT_DELAYED_WORK(&cs->validation_work, NULL);
 
 	conn->state_machine = cs;
 
@@ -2778,6 +2780,8 @@ int tquic_conn_server_accept(struct tquic_connection *conn,
 	INIT_WORK(&cs->close_work, tquic_close_work_handler);
 	INIT_WORK(&cs->migration_work, tquic_migration_work_handler);
 	INIT_DELAYED_WORK(&cs->drain_work, tquic_drain_timeout);
+	/* Initialize validation_work to prevent NULL pointer crash */
+	INIT_DELAYED_WORK(&cs->validation_work, NULL);
 
 	conn->state_machine = cs;
 
