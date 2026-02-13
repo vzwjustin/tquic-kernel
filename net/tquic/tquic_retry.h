@@ -365,6 +365,6 @@ u32 tquic_retry_get_token_lifetime(struct net *net);
  */
 
 int __init tquic_retry_init(void);
-void __exit tquic_retry_exit(void);
+void tquic_retry_exit(void);
 
 #endif /* _NET_TQUIC_RETRY_H */

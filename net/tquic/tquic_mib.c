@@ -210,7 +210,7 @@ EXPORT_SYMBOL_GPL(tquic_mib_seq_show);
  *
  * Returns: 0 on success
  */
-int __init tquic_mib_init(struct net *net)
+int tquic_mib_init(struct net *net)
 {
 	/* Counters are allocated lazily via tquic_mib_alloc() */
 	return 0;
@@ -222,7 +222,7 @@ int __init tquic_mib_init(struct net *net)
  *
  * Called from pernet_operations exit to free any allocated counters.
  */
-void __exit tquic_mib_exit(struct net *net)
+void tquic_mib_exit(struct net *net)
 {
 	tquic_mib_free(net);
 }

@@ -191,7 +191,7 @@ jobs:
           scripts/config --enable CONFIG_TRACEPOINTS
           make olddefconfig
 
-      - name: Build TQUIC module (compile + MODPOST)
+      - name: Build TQUIC module (compile check)
         run: |
           set -euo pipefail
           KDIR=~/kernel-src/linux-${{ steps.params.outputs.kernel_full }}
@@ -200,10 +200,13 @@ jobs:
           export PATH="/usr/lib/ccache:${PATH}"
           ccache -M 5G || true
 
-          # Build prepare + scripts, then compile only the TQUIC module.
-          # This catches compile errors AND MODPOST (undefined symbol) errors.
+          # Build prepare + scripts, then compile only TQUIC objects in-tree.
+          # This catches all compilation errors (type mismatches, missing
+          # includes, undeclared functions, etc.) without needing a full
+          # kernel build. MODPOST is only meaningful with Module.symvers
+          # from a full build, so it runs in the build-kernel job instead.
           make -j"$(nproc)" prepare scripts
-          make -j"$(nproc)" M=net/quic modules
+          make -j"$(nproc)" net/quic/ net/tquic/
 
   # Full kernel package build — only for tags and manual workflow_dispatch
   build-kernel:
