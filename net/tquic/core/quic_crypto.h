@@ -439,9 +439,10 @@ int tquic_tls_validate_alpn(const u8 *offered_alpn, size_t offered_len,
  */
 
 /* HKDF and key derivation */
-int tquic_hkdf_expand_label(struct hkdf_ctx *ctx, const u8 *prk, u32 prk_len,
-			    const char *label, const u8 *context,
-			    u32 context_len, u8 *out, u32 out_len);
+int tquic_hkdf_expand_label(struct hkdf_ctx *ctx, const u8 *prk,
+			    const char *label, size_t label_len,
+			    const u8 *context, size_t context_len, u8 *out,
+			    size_t out_len);
 int tquic_crypto_derive_init_secrets(struct tquic_connection *conn,
-				     const u8 *dcid, u32 dcid_len);
+				     struct tquic_cid *cid);
 #endif /* _NET_TQUIC_QUIC_CRYPTO_H */

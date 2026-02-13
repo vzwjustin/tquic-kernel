@@ -583,10 +583,14 @@ void tquic_stream_flow_get_stats(struct tquic_stream *stream, u64 *send_offset,
 int __init tquic_flow_init(void);
 void tquic_flow_exit(void);
 
-/* Flow control stream checks (used by quic_output.c) */
-int tquic_fc_stream_check_recv(struct tquic_fc_state *fc, u64 data_len,
-			       u64 abs_offset);
-int tquic_fc_stream_check_send(struct tquic_fc_state *fc, u64 data_len);
-void tquic_fc_collect_frames(struct tquic_fc_state *fc,
-			     struct sk_buff_head *frames);
+/* Stream layer integration (used by quic_output.c) */
+int tquic_fc_stream_check_recv(struct tquic_fc_state *fc,
+			       struct tquic_fc_stream_state *stream_fc,
+			       u64 offset, u64 length, bool fin);
+int tquic_fc_stream_check_send(struct tquic_fc_state *fc,
+			       struct tquic_fc_stream_state *stream_fc,
+			       u64 length);
+void tquic_fc_collect_frames(struct tquic_fc_state *fc, u64 *max_data,
+			     u64 *data_blocked, u64 *max_streams_bidi,
+			     u64 *max_streams_uni);
 #endif /* _TQUIC_FLOW_CONTROL_H */
