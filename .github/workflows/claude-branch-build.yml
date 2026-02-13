@@ -82,7 +82,7 @@ jobs:
             if [ -e "${SRC}/${p}" ]; then
               if [ -d "${SRC}/${p}" ]; then
                 mkdir -p "${KDIR}/${p}"
-                rsync -a "${SRC}/${p}" "$(dirname "${KDIR}/${p}")/"
+                rsync -a --delete "${SRC}/${p}" "${KDIR}/${p}"
               else
                 mkdir -p "$(dirname "${KDIR}/${p}")"
                 install -m 0644 "${SRC}/${p}" "${KDIR}/${p}"
