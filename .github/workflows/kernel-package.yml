@@ -169,6 +169,20 @@ jobs:
           scripts/config --module CONFIG_INET_DIAG
           scripts/config --module CONFIG_CRYPTO_CURVE25519
           scripts/config --enable CONFIG_TRACEPOINTS
+
+          # USB network drivers for phone tethering and USB ethernet adapters
+          scripts/config --enable CONFIG_USB_NET_DRIVERS
+          scripts/config --module CONFIG_USB_IPHETH           # Apple iPhone USB tethering
+          scripts/config --module CONFIG_USB_NET_RNDIS_HOST   # Android/Windows phone tethering
+          scripts/config --module CONFIG_USB_NET_CDC_ETHER    # Generic USB CDC ethernet
+          scripts/config --module CONFIG_USB_NET_CDC_NCM      # Modern CDC NCM
+          scripts/config --module CONFIG_USB_NET_CDC_SUBSET   # CDC subset
+          scripts/config --module CONFIG_USB_NET_CDC_EEM      # CDC EEM
+          scripts/config --module CONFIG_USB_NET_AX8817X      # ASIX AX88xxx USB ethernet
+          scripts/config --module CONFIG_USB_NET_AX88179_178A # ASIX AX88179/178A USB 3.0
+          scripts/config --module CONFIG_USB_NET_RTL8150      # Realtek RTL8150
+          scripts/config --module CONFIG_USB_NET_RTL8152      # Realtek RTL8152/RTL8153
+
           make olddefconfig
 
       - name: Build TQUIC module (compile check)
@@ -342,6 +356,19 @@ jobs:
           scripts/config --module CONFIG_INET_DIAG
           scripts/config --module CONFIG_CRYPTO_CURVE25519
           scripts/config --enable CONFIG_TRACEPOINTS
+
+          # USB network drivers for phone tethering and USB ethernet adapters
+          scripts/config --enable CONFIG_USB_NET_DRIVERS
+          scripts/config --module CONFIG_USB_IPHETH           # Apple iPhone USB tethering
+          scripts/config --module CONFIG_USB_NET_RNDIS_HOST   # Android/Windows phone tethering
+          scripts/config --module CONFIG_USB_NET_CDC_ETHER    # Generic USB CDC ethernet
+          scripts/config --module CONFIG_USB_NET_CDC_NCM      # Modern CDC NCM
+          scripts/config --module CONFIG_USB_NET_CDC_SUBSET   # CDC subset
+          scripts/config --module CONFIG_USB_NET_CDC_EEM      # CDC EEM
+          scripts/config --module CONFIG_USB_NET_AX8817X      # ASIX AX88xxx USB ethernet
+          scripts/config --module CONFIG_USB_NET_AX88179_178A # ASIX AX88179/178A USB 3.0
+          scripts/config --module CONFIG_USB_NET_RTL8150      # Realtek RTL8150
+          scripts/config --module CONFIG_USB_NET_RTL8152      # Realtek RTL8152/RTL8153
 
           # Apply dependencies and finalize config
           make olddefconfig
