@@ -42,167 +42,11 @@
 #include "path_metrics.h"
 
 /*
- * =============================================================================
- * Per-Path Metrics Structure
- * =============================================================================
+ * Struct/enum types (tquic_path_metrics, tquic_diag_path_info,
+ * tquic_metrics_nl_commands, tquic_metrics_nl_attrs,
+ * tquic_metrics_nl_groups, tquic_path_comparison) are
+ * provided by path_metrics.h -- do not redefine here.
  */
-
-/**
- * struct tquic_path_metrics - Comprehensive per-path metrics
- * @path_id: Unique path identifier
- *
- * RTT metrics (all in microseconds):
- * @min_rtt: Minimum observed RTT
- * @smoothed_rtt: Exponentially smoothed RTT
- * @rtt_variance: RTT variance for RTO calculation
- * @latest_rtt: Most recent RTT sample
- *
- * Bandwidth metrics (bytes/sec):
- * @bandwidth_estimate: Current bandwidth estimate
- * @delivery_rate: Observed delivery rate (bytes/sec)
- *
- * Congestion metrics:
- * @cwnd: Current congestion window (bytes)
- * @bytes_in_flight: Bytes currently in flight
- * @ssthresh: Slow start threshold (bytes)
- *
- * Loss metrics:
- * @packets_sent: Total packets sent on this path
- * @packets_received: Total packets received
- * @packets_lost: Total packets lost
- * @bytes_sent: Total bytes sent on this path
- * @bytes_received: Total bytes received
- * @bytes_lost: Total bytes lost
- *
- * ECN metrics:
- * @ect0_received: ECT(0) marked packets received
- * @ect1_received: ECT(1) marked packets received
- * @ce_received: CE (Congestion Experienced) marked packets received
- *
- * Path state:
- * @state: Current path state (enum tquic_path_state)
- * @validation_state: Validation state (pending, validated, etc.)
- * @is_active: True if this is the currently active path
- *
- * Timestamps:
- * @last_activity_us: Timestamp of last activity (microseconds since epoch)
- * @creation_time_us: When this path was created
- */
-struct tquic_path_metrics {
-	u32 path_id;
-
-	/* RTT metrics (microseconds) */
-	u64 min_rtt;
-	u64 smoothed_rtt;
-	u64 rtt_variance;
-	u64 latest_rtt;
-
-	/* Bandwidth metrics (bytes/sec) */
-	u64 bandwidth_estimate;
-	u64 delivery_rate;
-
-	/* Congestion metrics */
-	u64 cwnd;
-	u64 bytes_in_flight;
-	u64 ssthresh;
-
-	/* Loss metrics */
-	u64 packets_sent;
-	u64 packets_received;
-	u64 packets_lost;
-	u64 bytes_sent;
-	u64 bytes_received;
-	u64 bytes_lost;
-
-	/* ECN metrics */
-	u64 ect0_received;
-	u64 ect1_received;
-	u64 ce_received;
-
-	/* Path state */
-	u8 state;
-	u8 validation_state;
-	bool is_active;
-
-	/* Timestamps */
-	u64 last_activity_us;
-	u64 creation_time_us;
-};
-
-/**
- * struct tquic_diag_path_info - Extended path info for sock_diag
- * @path_id: Path identifier
- * @state: Path state
- * @rtt_us: Smoothed RTT in microseconds
- * @cwnd: Congestion window in bytes
- * @bytes_sent: Total bytes sent
- * @bytes_recv: Total bytes received
- */
-struct tquic_diag_path_info {
-	u32 path_id;
-	u32 state;
-	u32 rtt_us;
-	u32 cwnd;
-	u64 bytes_sent;
-	u64 bytes_recv;
-};
-
-/*
- * =============================================================================
- * Netlink Interface for Path Metrics
- * =============================================================================
- */
-
-/* Netlink commands for path metrics */
-enum tquic_metrics_nl_commands {
-	TQUIC_NL_CMD_GET_CONN_INFO = 0x10,
-	TQUIC_NL_CMD_GET_PATH_METRICS,
-	TQUIC_NL_CMD_GET_ALL_PATHS,
-	TQUIC_NL_CMD_SUBSCRIBE_EVENTS,
-	TQUIC_NL_CMD_METRICS_EVENT,	/* Multicast event notification */
-	__TQUIC_NL_CMD_METRICS_MAX,
-};
-#define TQUIC_NL_CMD_METRICS_MAX (__TQUIC_NL_CMD_METRICS_MAX - 1)
-
-/* Netlink attributes for path metrics */
-enum tquic_metrics_nl_attrs {
-	TQUIC_METRICS_ATTR_UNSPEC,
-	TQUIC_METRICS_ATTR_CONN_ID,		/* Connection ID (binary) */
-	TQUIC_METRICS_ATTR_CONN_TOKEN,		/* Connection token (u32) */
-	TQUIC_METRICS_ATTR_PATH_ID,		/* Path ID (u32) */
-	TQUIC_METRICS_ATTR_MIN_RTT,		/* Minimum RTT (u64, us) */
-	TQUIC_METRICS_ATTR_SMOOTHED_RTT,	/* Smoothed RTT (u64, us) */
-	TQUIC_METRICS_ATTR_RTT_VARIANCE,	/* RTT variance (u64, us) */
-	TQUIC_METRICS_ATTR_LATEST_RTT,		/* Latest RTT (u64, us) */
-	TQUIC_METRICS_ATTR_BANDWIDTH,		/* Bandwidth estimate (u64) */
-	TQUIC_METRICS_ATTR_DELIVERY_RATE,	/* Delivery rate (u64) */
-	TQUIC_METRICS_ATTR_CWND,		/* Congestion window (u64) */
-	TQUIC_METRICS_ATTR_BYTES_IN_FLIGHT,	/* Bytes in flight (u64) */
-	TQUIC_METRICS_ATTR_SSTHRESH,		/* Slow start threshold (u64) */
-	TQUIC_METRICS_ATTR_PACKETS_SENT,	/* Packets sent (u64) */
-	TQUIC_METRICS_ATTR_PACKETS_RECEIVED,	/* Packets received (u64) */
-	TQUIC_METRICS_ATTR_PACKETS_LOST,	/* Packets lost (u64) */
-	TQUIC_METRICS_ATTR_BYTES_SENT,		/* Bytes sent (u64) */
-	TQUIC_METRICS_ATTR_BYTES_RECEIVED,	/* Bytes received (u64) */
-	TQUIC_METRICS_ATTR_BYTES_LOST,		/* Bytes lost (u64) */
-	TQUIC_METRICS_ATTR_ECT0_RECEIVED,	/* ECT(0) packets (u64) */
-	TQUIC_METRICS_ATTR_ECT1_RECEIVED,	/* ECT(1) packets (u64) */
-	TQUIC_METRICS_ATTR_CE_RECEIVED,		/* CE packets (u64) */
-	TQUIC_METRICS_ATTR_PATH_STATE,		/* Path state (u8) */
-	TQUIC_METRICS_ATTR_VALIDATION_STATE,	/* Validation state (u8) */
-	TQUIC_METRICS_ATTR_IS_ACTIVE,		/* Is active path (u8) */
-	TQUIC_METRICS_ATTR_LAST_ACTIVITY,	/* Last activity timestamp (u64) */
-	TQUIC_METRICS_ATTR_CREATION_TIME,	/* Creation timestamp (u64) */
-	TQUIC_METRICS_ATTR_SUBSCRIBE_INTERVAL,	/* Subscription interval (u32, ms) */
-	TQUIC_METRICS_ATTR_PAD,
-	__TQUIC_METRICS_ATTR_MAX,
-};
-#define TQUIC_METRICS_ATTR_MAX (__TQUIC_METRICS_ATTR_MAX - 1)
-
-/* Multicast group for metrics events */
-enum tquic_metrics_nl_groups {
-	TQUIC_NL_GRP_METRICS = 10,	/* Path metrics updates */
-};
 
 /* Forward declarations */
 static struct genl_family tquic_metrics_family;
@@ -1004,25 +848,7 @@ static const struct proc_ops tquic_paths_proc_ops = {
  * =============================================================================
  */
 
-/**
- * struct tquic_path_comparison - Comparison result for two paths
- * @path_a: First path ID
- * @path_b: Second path ID
- * @rtt_diff_us: RTT difference (positive = A slower)
- * @bw_ratio: Bandwidth ratio (A/B * 1000)
- * @loss_diff: Loss rate difference (A - B, scaled by 1000)
- * @better_path: ID of the better path (0 if equivalent)
- * @reason: Reason for preference
- */
-struct tquic_path_comparison {
-	u32 path_a;
-	u32 path_b;
-	s64 rtt_diff_us;
-	u32 bw_ratio;
-	s32 loss_diff;
-	u32 better_path;
-	const char *reason;
-};
+/* struct tquic_path_comparison provided by path_metrics.h */
 
 /* Thresholds for path comparison */
 #define PATH_CMP_RTT_THRESHOLD_US	5000	/* 5ms difference is significant */
