@@ -232,12 +232,14 @@ int tquic_hw_decrypt_packet(struct tquic_crypto_ctx *ctx,
 
 /**
  * struct tquic_hw_packet - Packet for batch crypto operations
- * @data:     Packet data (input/output)
- * @len:      Data length (updated after operation)
- * @pkt_num:  Packet number for nonce
- * @aad:      Additional authenticated data
- * @aad_len:  AAD length
- * @result:   Operation result (0 = success)
+ * @data:         Packet data (input/output)
+ * @len:          Data length (updated after operation)
+ * @data_buf_len: Total allocated size of data buffer. For encryption, must be
+ *                at least len + 16 to accommodate the AEAD authentication tag.
+ * @pkt_num:      Packet number for nonce
+ * @aad:          Additional authenticated data
+ * @aad_len:      AAD length
+ * @result:       Operation result (0 = success)
  *
  * Note: This is distinct from struct tquic_packet in net/tquic.h which
  * represents parsed QUIC packets. This struct is for batch crypto operations.
@@ -245,6 +247,7 @@ int tquic_hw_decrypt_packet(struct tquic_crypto_ctx *ctx,
 struct tquic_hw_packet {
 	u8 *data;
 	size_t len;
+	size_t data_buf_len;
 	u64 pkt_num;
 	u8 *aad;
 	size_t aad_len;
