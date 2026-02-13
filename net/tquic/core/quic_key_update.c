@@ -130,21 +130,7 @@ u32 tquic_rtt_pto(struct tquic_rtt_state *rtt);
  */
 #define TQUIC_KEY_UPDATE_TIMEOUT_PTO_MULT	3
 
-/*
- * TQUIC_SKB_CB - Get control block from skb
- */
-struct tquic_skb_cb {
-	u64 pn;
-	u32 header_len;
-	u8 pn_len;
-	u8 key_phase;
-	u8 dcid_len;
-	u8 scid_len;
-	u8 packet_type;
-	u8 crypto_level;
-};
-
-#define TQUIC_SKB_CB(skb) ((struct tquic_skb_cb *)&((skb)->cb[0]))
+/* struct tquic_skb_cb and TQUIC_SKB_CB provided by quic_key_update.h */
 
 /*
  * Key discard timeout per RFC 9001 Section 6.1:
