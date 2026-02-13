@@ -503,4 +503,12 @@ static inline bool tquic_bonding_coupled_cc_enabled(struct tquic_bonding_ctx *bc
 	return bc && (bc->flags & TQUIC_BOND_F_COUPLED_CC);
 }
 
+
+/* Reorder buffer operations */
+int tquic_bond_reorder_insert(struct tquic_bond_state *bond,
+ttt      struct sk_buff *skb, u64 pn);
+int tquic_bond_reorder_deliver(struct tquic_bond_state *bond);
+
+/* Primary path selection */
+int tquic_bond_set_primary(struct tquic_connection *conn, u32 path_id);
 #endif /* _NET_TQUIC_BONDING_H */

@@ -434,4 +434,12 @@ int tquic_tls_validate_alpn(const u8 *offered_alpn, size_t offered_len,
  * function call overhead for hot paths.
  */
 
+
+/* HKDF and key derivation */
+int tquic_hkdf_expand_label(struct hkdf_ctx *ctx, const u8 *prk,
+ttt    u32 prk_len, const char *label,
+ttt    const u8 *context, u32 context_len,
+ttt    u8 *out, u32 out_len);
+int tquic_crypto_derive_init_secrets(struct tquic_connection *conn,
+tttt     const u8 *dcid, u32 dcid_len);
 #endif /* _NET_TQUIC_QUIC_CRYPTO_H */

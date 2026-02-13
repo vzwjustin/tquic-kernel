@@ -36,6 +36,7 @@
 #include "../tquic_compat.h"
 #include "../tquic_debug.h"
 #include "../tquic_sysctl.h"
+#include "quic_output.h"
 
 /* Output path configuration */
 #define TQUIC_OUTPUT_BATCH_SIZE		16

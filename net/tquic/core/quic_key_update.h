@@ -125,4 +125,7 @@ struct tquic_skb_cb {
 
 #define TQUIC_SKB_CB(skb) ((struct tquic_skb_cb *)((skb)->cb))
 
+
+/* Key update reversal */
+void tquic_crypto_revert_key_update(struct tquic_connection *conn);
 #endif /* _NET_TQUIC_KEY_UPDATE_H */

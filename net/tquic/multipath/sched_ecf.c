@@ -30,14 +30,15 @@
 
 #include "tquic_sched.h"
 #include "../tquic_debug.h"
+#include "../tquic_init.h"
 
 /*
  * Default values for ECF calculations
  */
-#define ECF_DEFAULT_SEGMENT_SIZE	1200	/* Default segment size */
-#define ECF_DEFAULT_RTT_US		100000	/* 100ms default RTT */
-#define ECF_MIN_SEND_RATE		1000	/* Minimum 1KB/s to avoid div0 */
-#define ECF_RATE_UPDATE_INTERVAL_MS	10	/* Rate update interval */
+#define ECF_DEFAULT_SEGMENT_SIZE 1200 /* Default segment size */
+#define ECF_DEFAULT_RTT_US 100000 /* 100ms default RTT */
+#define ECF_MIN_SEND_RATE 1000 /* Minimum 1KB/s to avoid div0 */
+#define ECF_RATE_UPDATE_INTERVAL_MS 10 /* Rate update interval */
 
 /**
  * struct ecf_path_state - Per-path state for ECF scheduling
@@ -52,12 +53,12 @@
  * accurate completion time estimates.
  */
 struct ecf_path_state {
-	u64 inflight_bytes;		/* Bytes in flight on this path */
-	u64 send_rate;			/* Estimated send rate (bytes/s) */
-	u32 rtt_us;			/* Path RTT */
-	u8 path_id;			/* Path identifier */
-	bool valid;			/* Whether this state is valid */
-	ktime_t last_rate_update;	/* Last rate update time */
+	u64 inflight_bytes; /* Bytes in flight on this path */
+	u64 send_rate; /* Estimated send rate (bytes/s) */
+	u32 rtt_us; /* Path RTT */
+	u8 path_id; /* Path identifier */
+	bool valid; /* Whether this state is valid */
+	ktime_t last_rate_update; /* Last rate update time */
 };
 
 /**
@@ -73,11 +74,11 @@ struct ecf_path_state {
  * path_added(), and path_removed().
  */
 struct ecf_sched_data {
-	spinlock_t lock;		/* Protects scheduler state */
+	spinlock_t lock; /* Protects scheduler state */
 	struct ecf_path_state paths[TQUIC_MAX_PATHS];
-	u32 segment_size;		/* Default segment size for estimation */
-	u8 current_path_id;		/* Currently selected path */
-	u32 path_switches;		/* Path switch counter */
+	u32 segment_size; /* Default segment size for estimation */
+	u8 current_path_id; /* Currently selected path */
+	u32 path_switches; /* Path switch counter */
 };
 
 /**
@@ -146,7 +147,7 @@ static u64 ecf_completion_time(struct ecf_path_state *ps, u32 segment_size)
 	u64 propagation_time;
 
 	if (!ps || ps->send_rate == 0)
-		return U64_MAX;  /* Unknown rate, avoid this path */
+		return U64_MAX; /* Unknown rate, avoid this path */
 
 	/*
 	 * Queue time: time for inflight + new segment to be transmitted
@@ -211,8 +212,7 @@ static void ecf_update_rate_from_path(struct ecf_path_state *ps,
  * Returns 0 on success, -EINVAL if no state, -ENOENT if no paths.
  */
 static int ecf_get_path(struct tquic_connection *conn,
-			struct tquic_sched_path_result *result,
-			u32 flags)
+			struct tquic_sched_path_result *result, u32 flags)
 {
 	struct ecf_sched_data *sd = conn->sched_priv;
 	struct tquic_path *path, *best = NULL, *second_best = NULL;
@@ -290,9 +290,9 @@ static int ecf_get_path(struct tquic_connection *conn,
 
 	/* Track path switches for diagnostics */
 	if (sd->current_path_id != best->path_id) {
-		pr_debug("ecf: switching to path %u (completion=%llu us), was path %u\n",
-			 best->path_id, min_completion,
-			 sd->current_path_id);
+		pr_debug(
+			"ecf: switching to path %u (completion=%llu us), was path %u\n",
+			best->path_id, min_completion, sd->current_path_id);
 		sd->current_path_id = best->path_id;
 		sd->path_switches++;
 	}
@@ -422,8 +422,7 @@ static void ecf_path_removed(struct tquic_connection *conn,
  * accurately reflect the queue depth.
  */
 static void ecf_packet_sent(struct tquic_connection *conn,
-			    struct tquic_path *path,
-			    u32 sent_bytes)
+			    struct tquic_path *path, u32 sent_bytes)
 {
 	struct ecf_sched_data *sd = conn->sched_priv;
 	struct ecf_path_state *ps;
@@ -453,8 +452,7 @@ static void ecf_packet_sent(struct tquic_connection *conn,
  * Decrease inflight for this path and potentially update send rate.
  */
 static void ecf_ack_received(struct tquic_connection *conn,
-			     struct tquic_path *path,
-			     u64 acked_bytes)
+			     struct tquic_path *path, u64 acked_bytes)
 {
 	struct ecf_sched_data *sd = conn->sched_priv;
 	struct ecf_path_state *ps;
@@ -489,8 +487,7 @@ static void ecf_ack_received(struct tquic_connection *conn,
  * Decrease inflight for lost packets (they're no longer in flight).
  */
 static void ecf_loss_detected(struct tquic_connection *conn,
-			      struct tquic_path *path,
-			      u64 lost_bytes)
+			      struct tquic_path *path, u64 lost_bytes)
 {
 	struct ecf_sched_data *sd = conn->sched_priv;
 	struct ecf_path_state *ps;
@@ -520,16 +517,16 @@ static void ecf_loss_detected(struct tquic_connection *conn,
  * ECF scheduler operations structure
  */
 static struct tquic_mp_sched_ops tquic_mp_sched_ecf = {
-	.name		= "ecf",
-	.owner		= THIS_MODULE,
-	.get_path	= ecf_get_path,
-	.init		= ecf_init,
-	.release	= ecf_release,
-	.path_added	= ecf_path_added,
-	.path_removed	= ecf_path_removed,
-	.packet_sent	= ecf_packet_sent,
-	.ack_received	= ecf_ack_received,
-	.loss_detected	= ecf_loss_detected,
+	.name = "ecf",
+	.owner = THIS_MODULE,
+	.get_path = ecf_get_path,
+	.init = ecf_init,
+	.release = ecf_release,
+	.path_added = ecf_path_added,
+	.path_removed = ecf_path_removed,
+	.packet_sent = ecf_packet_sent,
+	.ack_received = ecf_ack_received,
+	.loss_detected = ecf_loss_detected,
 };
 
 /* =========================================================================

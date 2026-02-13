@@ -20,6 +20,7 @@
 
 #include "../core/one_way_delay.h"
 #include "../tquic_debug.h"
+#include "../tquic_init.h"
 
 /* Registered schedulers */
 static LIST_HEAD(tquic_sched_list);
@@ -28,7 +29,8 @@ static DEFINE_SPINLOCK(tquic_sched_lock);
 /* Default scheduler */
 static struct tquic_sched_ops *default_scheduler;
 
-static struct tquic_path *tquic_sched_active_path_get(struct tquic_connection *conn)
+static struct tquic_path *
+tquic_sched_active_path_get(struct tquic_connection *conn)
 {
 	struct tquic_path *path;
 
@@ -41,8 +43,9 @@ static struct tquic_path *tquic_sched_active_path_get(struct tquic_connection *c
 	return path;
 }
 
-static struct tquic_path *tquic_sched_path_get_or_active(struct tquic_connection *conn,
-							 struct tquic_path *path)
+static struct tquic_path *
+tquic_sched_path_get_or_active(struct tquic_connection *conn,
+			       struct tquic_path *path)
 {
 	if (path && tquic_path_get(path))
 		return path;
@@ -79,9 +82,10 @@ static void __tquic_sched_unregister(struct tquic_sched_ops *ops)
 	list_del_rcu(&ops->list);
 
 	if (default_scheduler == ops) {
-		rcu_assign_pointer(default_scheduler,
-			list_first_entry_or_null(
-				&tquic_sched_list, struct tquic_sched_ops, list));
+		rcu_assign_pointer(
+			default_scheduler,
+			list_first_entry_or_null(&tquic_sched_list,
+						 struct tquic_sched_ops, list));
 	}
 
 	spin_unlock_bh(&tquic_sched_lock);
@@ -153,7 +157,7 @@ EXPORT_SYMBOL_GPL(tquic_sched_find);
 const char *tquic_sched_get_default(struct net *net)
 {
 	const struct tquic_sched_ops *ops;
-	const char *name = "ecf";  /* Default scheduler name */
+	const char *name = "ecf"; /* Default scheduler name */
 
 	rcu_read_lock();
 	ops = rcu_dereference(default_scheduler);
@@ -195,8 +199,7 @@ struct tquic_sched_ops *tquic_sched_default(void)
 	rcu_read_lock();
 	ops = rcu_dereference(default_scheduler);
 	if (ops) {
-		pr_debug("tquic_sched: default_scheduler='%s'\n",
-			 ops->name);
+		pr_debug("tquic_sched: default_scheduler='%s'\n", ops->name);
 		if (!try_module_get(ops->owner)) {
 			pr_warn("tquic_sched: try_module_get FAILED\n");
 			ops = NULL;
@@ -261,7 +264,7 @@ void *tquic_sched_init_conn(struct tquic_connection *conn,
 	}
 
 	pr_debug("tquic_sched: no init callback\n");
-	return ops;  /* Return ops as state if no init needed */
+	return ops; /* Return ops as state if no init needed */
 }
 EXPORT_SYMBOL_GPL(tquic_sched_init_conn);
 
@@ -353,8 +356,8 @@ static struct tquic_sched_ops __maybe_unused tquic_sched_rr = {
 /*
  * Minimum RTT Scheduler
  */
-static struct tquic_path *minrtt_select(void *state, struct tquic_connection *conn,
-					struct sk_buff *skb)
+static struct tquic_path *
+minrtt_select(void *state, struct tquic_connection *conn, struct sk_buff *skb)
 {
 	struct tquic_path *path, *best = NULL;
 	u32 min_rtt = UINT_MAX;
@@ -489,7 +492,7 @@ static struct tquic_sched_ops __maybe_unused tquic_sched_wrr = {
  * Designed to minimize head-of-line blocking in multipath scenarios
  */
 struct blest_sched_data {
-	u64 lambda;  /* Smoothing factor */
+	u64 lambda; /* Smoothing factor */
 };
 
 static void *blest_init(struct tquic_connection *conn)
@@ -498,7 +501,7 @@ static void *blest_init(struct tquic_connection *conn)
 
 	data = kzalloc(sizeof(*data), GFP_KERNEL);
 	if (data)
-		data->lambda = 1000;  /* Default lambda value */
+		data->lambda = 1000; /* Default lambda value */
 
 	return data;
 }
@@ -508,8 +511,8 @@ static void blest_release(void *state)
 	kfree(state);
 }
 
-static struct tquic_path *blest_select(void *state, struct tquic_connection *conn,
-				       struct sk_buff *skb)
+static struct tquic_path *
+blest_select(void *state, struct tquic_connection *conn, struct sk_buff *skb)
 {
 	struct tquic_path *active_path;
 	struct tquic_path *path, *best = NULL;
@@ -541,8 +544,9 @@ static struct tquic_path *blest_select(void *state, struct tquic_connection *con
 		/* Add queuing delay estimate based on cwnd utilization */
 		if (path->stats.cwnd > 0) {
 			/* Simplified: assume some bytes in flight */
-			u64 queue_delay = (skb->len * path->stats.rtt_smoothed) /
-					  path->stats.cwnd;
+			u64 queue_delay =
+				(skb->len * path->stats.rtt_smoothed) /
+				path->stats.cwnd;
 			blocking_time += queue_delay;
 		}
 
@@ -650,7 +654,8 @@ static struct tquic_path *ecf_select(void *state, struct tquic_connection *conn,
 		 * This represents data that is "on the wire" or in network queues.
 		 */
 		if (path->stats.tx_bytes > path->stats.acked_bytes)
-			in_flight_bytes = path->stats.tx_bytes - path->stats.acked_bytes;
+			in_flight_bytes =
+				path->stats.tx_bytes - path->stats.acked_bytes;
 		else
 			in_flight_bytes = 0;
 
@@ -665,7 +670,7 @@ static struct tquic_path *ecf_select(void *state, struct tquic_connection *conn,
 		/* Get RTT in microseconds (full RTT, not half) */
 		rtt_us = path->stats.rtt_smoothed;
 		if (rtt_us == 0)
-			rtt_us = 100000;  /* 100ms default if no RTT samples */
+			rtt_us = 100000; /* 100ms default if no RTT samples */
 
 		/* Get bandwidth in bytes/second */
 		bandwidth = path->stats.bandwidth;
@@ -676,9 +681,10 @@ static struct tquic_path *ecf_select(void *state, struct tquic_connection *conn,
 			 * BW ≈ cwnd / RTT
 			 */
 			if (path->stats.cwnd > 0 && rtt_us > 0)
-				bandwidth = (u64)path->stats.cwnd * 1000000ULL / rtt_us;
+				bandwidth = (u64)path->stats.cwnd * 1000000ULL /
+					    rtt_us;
 			else
-				bandwidth = 125000;  /* 1 Mbps default */
+				bandwidth = 125000; /* 1 Mbps default */
 		}
 
 		/*
@@ -689,7 +695,8 @@ static struct tquic_path *ecf_select(void *state, struct tquic_connection *conn,
 		 * - RTT is already in microseconds
 		 * - (bytes / (bytes/sec)) = seconds, multiply by 1M for microseconds
 		 */
-		queue_drain_time = ((in_flight_bytes + pkt_size) * 1000000ULL) / bandwidth;
+		queue_drain_time =
+			((in_flight_bytes + pkt_size) * 1000000ULL) / bandwidth;
 		completion_time = rtt_us + queue_drain_time;
 
 		/*
@@ -702,14 +709,15 @@ static struct tquic_path *ecf_select(void *state, struct tquic_connection *conn,
 					    path->stats.tx_packets;
 			if (loss_rate_pct > 0 && loss_rate_pct < 50) {
 				/* Scale up completion time by 1/(1-loss_rate) */
-				completion_time = completion_time * 100 / (100 - loss_rate_pct);
+				completion_time = completion_time * 100 /
+						  (100 - loss_rate_pct);
 			}
 		}
 
-			if (completion_time < min_completion) {
-				min_completion = completion_time;
-				best = path;
-			}
+		if (completion_time < min_completion) {
+			min_completion = completion_time;
+			best = path;
+		}
 	}
 	if (best && !tquic_path_get(best))
 		best = NULL;
@@ -751,11 +759,11 @@ static struct tquic_sched_ops __maybe_unused tquic_sched_ecf = {
  * - Mixed wired/wireless paths in WAN bonding
  */
 struct owd_sched_data {
-	struct tquic_owd_state *owd_state;	/* Per-path OWD states */
-	bool prefer_forward;			/* Optimize for upload traffic */
-	u32 asymmetry_threshold_pct;		/* Threshold for asymmetry detection */
-	u64 last_path_switch_time;		/* To avoid path flapping */
-	u32 min_switch_interval_ms;		/* Minimum time between switches */
+	struct tquic_owd_state *owd_state; /* Per-path OWD states */
+	bool prefer_forward; /* Optimize for upload traffic */
+	u32 asymmetry_threshold_pct; /* Threshold for asymmetry detection */
+	u64 last_path_switch_time; /* To avoid path flapping */
+	u32 min_switch_interval_ms; /* Minimum time between switches */
 };
 
 static void *owd_init(struct tquic_connection *conn)
@@ -767,9 +775,10 @@ static void *owd_init(struct tquic_connection *conn)
 		return NULL;
 
 	/* Default settings */
-	data->prefer_forward = true;  /* Default to upload optimization */
-	data->asymmetry_threshold_pct = 20;  /* 20% difference triggers asymmetry */
-	data->min_switch_interval_ms = 100;  /* Avoid rapid path switching */
+	data->prefer_forward = true; /* Default to upload optimization */
+	data->asymmetry_threshold_pct =
+		20; /* 20% difference triggers asymmetry */
+	data->min_switch_interval_ms = 100; /* Avoid rapid path switching */
 
 	return data;
 }
@@ -809,8 +818,8 @@ static struct tquic_path *owd_select(void *state, struct tquic_connection *conn,
 	active_path = tquic_sched_active_path_get(conn);
 
 	/* Check if enough time has passed since last path switch */
-	time_since_switch_ms = ktime_ms_delta(now,
-					      ns_to_ktime(data->last_path_switch_time * NSEC_PER_MSEC));
+	time_since_switch_ms = ktime_ms_delta(
+		now, ns_to_ktime(data->last_path_switch_time * NSEC_PER_MSEC));
 
 	rcu_read_lock();
 	list_for_each_entry_rcu(path, &conn->paths, list) {
@@ -835,10 +844,10 @@ static struct tquic_path *owd_select(void *state, struct tquic_connection *conn,
 		 * Apply hysteresis: if this is the current path, give it
 		 * a 10% advantage to avoid unnecessary switching.
 		 */
-			if (path == active_path &&
-			    time_since_switch_ms < data->min_switch_interval_ms) {
-				effective_delay = effective_delay * 90 / 100;
-			}
+		if (path == active_path &&
+		    time_since_switch_ms < data->min_switch_interval_ms) {
+			effective_delay = effective_delay * 90 / 100;
+		}
 
 		/*
 		 * Factor in congestion window utilization.
@@ -849,17 +858,18 @@ static struct tquic_path *owd_select(void *state, struct tquic_connection *conn,
 			u64 in_flight = 0;
 
 			if (path->stats.tx_bytes > path->stats.acked_bytes)
-				in_flight = path->stats.tx_bytes - path->stats.acked_bytes;
+				in_flight = path->stats.tx_bytes -
+					    path->stats.acked_bytes;
 
 			/* If path has spare capacity, reduce effective delay */
 			if (in_flight < path->stats.cwnd / 2)
 				effective_delay = effective_delay * 85 / 100;
 		}
 
-			if (effective_delay < best_delay) {
-				best_delay = effective_delay;
-				best = path;
-			}
+		if (effective_delay < best_delay) {
+			best_delay = effective_delay;
+			best = path;
+		}
 	}
 	if (best && !tquic_path_get(best))
 		best = NULL;
@@ -952,7 +962,8 @@ static struct tquic_path *owd_ecf_select(void *state __maybe_unused,
 
 		/* Calculate in-flight bytes */
 		if (path->stats.tx_bytes > path->stats.acked_bytes)
-			in_flight_bytes = path->stats.tx_bytes - path->stats.acked_bytes;
+			in_flight_bytes =
+				path->stats.tx_bytes - path->stats.acked_bytes;
 		else
 			in_flight_bytes = 0;
 
@@ -967,20 +978,22 @@ static struct tquic_path *owd_ecf_select(void *state __maybe_unused,
 		delay_us = path->stats.rtt_smoothed / 2;
 
 		if (delay_us <= 0)
-			delay_us = 50000;  /* 50ms default */
+			delay_us = 50000; /* 50ms default */
 
 		/* Get bandwidth estimate */
 		bandwidth = path->stats.bandwidth;
 		if (bandwidth == 0) {
-			if (path->stats.cwnd > 0 && path->stats.rtt_smoothed > 0)
+			if (path->stats.cwnd > 0 &&
+			    path->stats.rtt_smoothed > 0)
 				bandwidth = (u64)path->stats.cwnd * 1000000ULL /
 					    path->stats.rtt_smoothed;
 			else
-				bandwidth = 125000;  /* 1 Mbps default */
+				bandwidth = 125000; /* 1 Mbps default */
 		}
 
 		/* Calculate completion time */
-		queue_drain_time = ((in_flight_bytes + pkt_size) * 1000000ULL) / bandwidth;
+		queue_drain_time =
+			((in_flight_bytes + pkt_size) * 1000000ULL) / bandwidth;
 		completion_time = (u64)delay_us + queue_drain_time;
 
 		/* Apply loss rate penalty */
@@ -988,13 +1001,14 @@ static struct tquic_path *owd_ecf_select(void *state __maybe_unused,
 			u64 loss_rate_pct = (path->stats.lost_packets * 100) /
 					    path->stats.tx_packets;
 			if (loss_rate_pct > 0 && loss_rate_pct < 50)
-				completion_time = completion_time * 100 / (100 - loss_rate_pct);
+				completion_time = completion_time * 100 /
+						  (100 - loss_rate_pct);
 		}
 
-			if (completion_time < min_completion) {
-				min_completion = completion_time;
-				best = path;
-			}
+		if (completion_time < min_completion) {
+			min_completion = completion_time;
+			best = path;
+		}
 	}
 	if (best && !tquic_path_get(best))
 		best = NULL;

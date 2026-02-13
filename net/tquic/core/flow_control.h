@@ -577,4 +577,12 @@ void tquic_stream_flow_get_stats(struct tquic_stream *stream,
 int __init tquic_flow_init(void);
 void tquic_flow_exit(void);
 
+
+/* Flow control stream checks (used by quic_output.c) */
+int tquic_fc_stream_check_recv(struct tquic_fc_state *fc,
+ttt       u64 data_len, u64 abs_offset);
+int tquic_fc_stream_check_send(struct tquic_fc_state *fc,
+ttt       u64 data_len);
+void tquic_fc_collect_frames(struct tquic_fc_state *fc,
+ttt     struct sk_buff_head *frames);
 #endif /* _TQUIC_FLOW_CONTROL_H */

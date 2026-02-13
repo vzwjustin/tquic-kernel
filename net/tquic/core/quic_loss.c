@@ -19,6 +19,8 @@
 #include "../cong/persistent_cong.h"
 #include "../diag/trace.h"
 #include "../tquic_debug.h"
+#include "quic_loss.h"
+#include "../tquic_init.h"
 
 /* Maximum PTO probes before declaring connection dead */
 #define TQUIC_MAX_PTO_COUNT		6

@@ -17,6 +17,7 @@
 #include <net/tquic.h>
 #include <net/tquic_pm.h>
 #include "../tquic_debug.h"
+#include "../tquic_init.h"
 #include <uapi/linux/tquic_pm.h>
 
 /*
@@ -185,7 +186,7 @@ struct tquic_pm_ops userspace_pm_ops = {
  *
  * Register userspace PM type with the PM framework.
  */
-int __init tquic_pm_userspace_init_module(void)
+static int __init tquic_pm_userspace_init_module(void)
 {
 	int ret;
 
@@ -202,7 +203,7 @@ int __init tquic_pm_userspace_init_module(void)
 /*
  * Module cleanup
  */
-void tquic_pm_userspace_exit_module(void)
+static void tquic_pm_userspace_exit_module(void)
 {
 	tquic_pm_unregister(TQUIC_PM_TYPE_USERSPACE);
 	pr_info("TQUIC PM: Userspace path manager unregistered\n");

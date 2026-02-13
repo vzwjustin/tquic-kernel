@@ -26,11 +26,12 @@
 #include "../tquic_compat.h"
 #include "../tquic_debug.h"
 #include <net/tquic_pm.h>
+#include "../tquic_init.h"
 
 /* Kernel PM private data per-namespace */
 struct tquic_pm_kernel_data {
 	struct notifier_block netdev_notifier;
-	struct list_head conn_list;	/* Connections in this netns */
+	struct list_head conn_list; /* Connections in this netns */
 	spinlock_t conn_lock;
 };
 
@@ -150,10 +151,12 @@ static void tquic_pm_kernel_mark_unavailable(struct tquic_connection *conn,
 			/* Emit event via PM netlink */
 			if (conn->sk)
 				tquic_pm_nl_send_event(sock_net(conn->sk), conn,
-						       path, TQUIC_PM_EVENT_DEGRADED);
+						       path,
+						       TQUIC_PM_EVENT_DEGRADED);
 
-			pr_debug("tquic: path %u marked unavailable (interface %s down)\n",
-				 path->path_id, dev->name);
+			pr_debug(
+				"tquic: path %u marked unavailable (interface %s down)\n",
+				path->path_id, dev->name);
 		}
 	}
 	rcu_read_unlock();
@@ -170,7 +173,7 @@ static void tquic_pm_kernel_mark_unavailable(struct tquic_connection *conn,
  * Revalidates paths that were marked UNAVAILABLE when this interface went down.
  */
 static void tquic_pm_kernel_try_recover(struct tquic_connection *conn,
-					 struct net_device *dev)
+					struct net_device *dev)
 {
 	struct tquic_path *path;
 	int recovered = 0;
@@ -182,8 +185,9 @@ static void tquic_pm_kernel_try_recover(struct tquic_connection *conn,
 
 		if (path->state == TQUIC_PATH_UNAVAILABLE) {
 			/* Interface back up - revalidate path */
-			pr_debug("tquic: path %u recovering (interface %s up)\n",
-				 path->path_id, dev->name);
+			pr_debug(
+				"tquic: path %u recovering (interface %s up)\n",
+				path->path_id, dev->name);
 
 			/* Start revalidation */
 			path->state = TQUIC_PATH_PENDING;
@@ -216,8 +220,8 @@ static int tquic_pm_kernel_try_add_path(struct tquic_connection *conn,
 {
 	struct in_device *in_dev;
 	struct in_ifaddr *ifa;
-	struct sockaddr_in local_addr = {0};
-	struct sockaddr_in remote_addr = {0};
+	struct sockaddr_in local_addr = { 0 };
+	struct sockaddr_in remote_addr = { 0 };
 	int ret;
 
 	ASSERT_RTNL();
@@ -266,8 +270,8 @@ static int tquic_pm_kernel_try_add_path(struct tquic_connection *conn,
 		return ret;
 	}
 
-	pr_info("TQUIC PM kernel: Added path for dev %s (%pI4)\n",
-		dev->name, &local_addr.sin_addr);
+	pr_info("TQUIC PM kernel: Added path for dev %s (%pI4)\n", dev->name,
+		&local_addr.sin_addr);
 
 	return 0;
 }
@@ -281,8 +285,7 @@ static int tquic_pm_kernel_try_add_path(struct tquic_connection *conn,
  * Handles interface up/down/change events for automatic path discovery.
  */
 static int tquic_pm_kernel_netdev_event(struct notifier_block *nb,
-					unsigned long event,
-					void *ptr)
+					unsigned long event, void *ptr)
 {
 	struct net_device *dev = netdev_notifier_info_to_dev(ptr);
 	struct tquic_pm_kernel_data *kdata;
@@ -302,9 +305,11 @@ static int tquic_pm_kernel_netdev_event(struct notifier_block *nb,
 			struct tquic_connection *conn, *tmp;
 
 			spin_lock_bh(&kdata->conn_lock);
-			list_for_each_entry_safe(conn, tmp, &kdata->conn_list, pm_node) {
+			list_for_each_entry_safe(conn, tmp, &kdata->conn_list,
+						 pm_node) {
 				/* Skip if connection not established yet */
-				if (READ_ONCE(conn->state) != TQUIC_CONN_CONNECTED)
+				if (READ_ONCE(conn->state) !=
+				    TQUIC_CONN_CONNECTED)
 					continue;
 
 				/* First: try to recover unavailable paths */
@@ -315,11 +320,14 @@ static int tquic_pm_kernel_netdev_event(struct notifier_block *nb,
 			/* Then: discover new paths through this interface */
 			if (tquic_pm_kernel_should_add_path(dev, pernet)) {
 				spin_lock_bh(&kdata->conn_lock);
-				list_for_each_entry_safe(conn, tmp, &kdata->conn_list, pm_node) {
-					if (READ_ONCE(conn->state) != TQUIC_CONN_CONNECTED)
+				list_for_each_entry_safe(
+					conn, tmp, &kdata->conn_list, pm_node) {
+					if (READ_ONCE(conn->state) !=
+					    TQUIC_CONN_CONNECTED)
 						continue;
 
-					tquic_pm_kernel_try_add_path(conn, dev, pernet);
+					tquic_pm_kernel_try_add_path(conn, dev,
+								     pernet);
 				}
 				spin_unlock_bh(&kdata->conn_lock);
 			}
@@ -332,7 +340,8 @@ static int tquic_pm_kernel_netdev_event(struct notifier_block *nb,
 			struct tquic_connection *conn, *tmp;
 
 			spin_lock_bh(&kdata->conn_lock);
-			list_for_each_entry_safe(conn, tmp, &kdata->conn_list, pm_node) {
+			list_for_each_entry_safe(conn, tmp, &kdata->conn_list,
+						 pm_node) {
 				tquic_pm_kernel_mark_unavailable(conn, dev);
 			}
 			spin_unlock_bh(&kdata->conn_lock);
@@ -346,8 +355,10 @@ static int tquic_pm_kernel_netdev_event(struct notifier_block *nb,
 			struct tquic_connection *conn, *tmp;
 
 			spin_lock_bh(&kdata->conn_lock);
-			list_for_each_entry_safe(conn, tmp, &kdata->conn_list, pm_node) {
-				if (READ_ONCE(conn->state) != TQUIC_CONN_CONNECTED)
+			list_for_each_entry_safe(conn, tmp, &kdata->conn_list,
+						 pm_node) {
+				if (READ_ONCE(conn->state) !=
+				    TQUIC_CONN_CONNECTED)
 					continue;
 
 				tquic_pm_kernel_try_recover(conn, dev);
@@ -358,7 +369,8 @@ static int tquic_pm_kernel_netdev_event(struct notifier_block *nb,
 			struct tquic_connection *conn, *tmp;
 
 			spin_lock_bh(&kdata->conn_lock);
-			list_for_each_entry_safe(conn, tmp, &kdata->conn_list, pm_node) {
+			list_for_each_entry_safe(conn, tmp, &kdata->conn_list,
+						 pm_node) {
 				tquic_pm_kernel_mark_unavailable(conn, dev);
 			}
 			spin_unlock_bh(&kdata->conn_lock);
@@ -378,8 +390,7 @@ static int tquic_pm_kernel_netdev_event(struct notifier_block *nb,
  * Internal tracking callback for path state changes.
  */
 static void tquic_pm_kernel_path_event(struct tquic_connection *conn,
-				       struct tquic_path *path,
-				       int event)
+				       struct tquic_path *path, int event)
 {
 	/* Kernel PM is mostly passive - path validation happens
 	 * automatically via PATH_CHALLENGE/PATH_RESPONSE.
@@ -419,7 +430,8 @@ static int tquic_pm_kernel_init(struct net *net)
 
 	/* Register netdevice notifier */
 	kdata->netdev_notifier.notifier_call = tquic_pm_kernel_netdev_event;
-	ret = tquic_register_netdevice_notifier_net(net, &kdata->netdev_notifier);
+	ret = tquic_register_netdevice_notifier_net(net,
+						    &kdata->netdev_notifier);
 	if (ret < 0) {
 		pr_err("TQUIC PM kernel: Failed to register netdev notifier: %d\n",
 		       ret);
@@ -466,8 +478,8 @@ static struct tquic_pm_ops kernel_pm_ops = {
 	.name = "kernel",
 	.init = tquic_pm_kernel_init,
 	.release = tquic_pm_kernel_release,
-	.add_path = NULL,	/* Auto-managed, not externally controlled */
-	.del_path = NULL,	/* Auto-managed */
+	.add_path = NULL, /* Auto-managed, not externally controlled */
+	.del_path = NULL, /* Auto-managed */
 	.path_event = tquic_pm_kernel_path_event,
 };
 

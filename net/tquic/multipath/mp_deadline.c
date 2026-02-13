@@ -33,6 +33,7 @@
 #include "mp_frame.h"
 #include "../sched/deadline_aware.h"
 #include "../tquic_debug.h"
+#include "../tquic_init.h"
 
 /*
  * =============================================================================
@@ -197,8 +198,7 @@ mp_deadline_find_path_info(struct tquic_mp_deadline_coordinator *coord,
  * current RTT, bandwidth, jitter, and loss statistics.
  */
 static void mp_deadline_update_path_capabilities(
-	struct tquic_mp_deadline_coordinator *coord,
-	struct tquic_path *path)
+	struct tquic_mp_deadline_coordinator *coord, struct tquic_path *path)
 {
 	struct tquic_mp_deadline_path_info *info;
 	u64 rtt_us, bandwidth, jitter_us;
@@ -224,11 +224,11 @@ static void mp_deadline_update_path_capabilities(
 	/* Get path metrics */
 	rtt_us = path->stats.rtt_smoothed;
 	if (rtt_us == 0)
-		rtt_us = 100000;  /* 100ms default */
+		rtt_us = 100000; /* 100ms default */
 
 	bandwidth = path->stats.bandwidth;
 	if (bandwidth == 0)
-		bandwidth = 125000;  /* 1 Mbps default */
+		bandwidth = 125000; /* 1 Mbps default */
 
 	jitter_us = path->stats.rtt_variance;
 	info->jitter_estimate_us = jitter_us;
@@ -292,10 +292,9 @@ static void mp_deadline_update_path_capabilities(
  *
  * Returns: Best path, or NULL if no path can meet deadline
  */
-struct tquic_path *mp_deadline_select_best_path(
-	struct tquic_mp_deadline_coordinator *coord,
-	u64 deadline_us,
-	size_t data_len)
+struct tquic_path *
+mp_deadline_select_best_path(struct tquic_mp_deadline_coordinator *coord,
+			     u64 deadline_us, size_t data_len)
 {
 	struct tquic_mp_deadline_path_info *info;
 	struct tquic_path *best_path = NULL;
@@ -327,7 +326,8 @@ struct tquic_path *mp_deadline_select_best_path(
 			bandwidth = 125000;
 
 		delivery_estimate = info->path->stats.rtt_smoothed;
-		delivery_estimate += div64_u64(data_len * 1000000ULL, bandwidth);
+		delivery_estimate +=
+			div64_u64(data_len * 1000000ULL, bandwidth);
 		delivery_estimate += info->jitter_estimate_us * 2;
 
 		if (delivery_estimate > deadline_us)
@@ -344,8 +344,8 @@ struct tquic_path *mp_deadline_select_best_path(
 
 		/* Load factor - penalize heavily loaded paths */
 		if (info->current_load > 0) {
-			u64 load_penalty = div64_u64(info->current_load * 100,
-						     bandwidth);
+			u64 load_penalty =
+				div64_u64(info->current_load * 100, bandwidth);
 			score += load_penalty;
 		}
 
@@ -355,8 +355,8 @@ struct tquic_path *mp_deadline_select_best_path(
 		/* Slack bonus */
 		if (deadline_us > delivery_estimate) {
 			u64 slack = deadline_us - delivery_estimate;
-			u64 slack_bonus = min_t(u64, slack / 2,
-						delivery_estimate / 2);
+			u64 slack_bonus =
+				min_t(u64, slack / 2, delivery_estimate / 2);
 			score -= slack_bonus;
 		}
 
@@ -390,8 +390,8 @@ EXPORT_SYMBOL_GPL(mp_deadline_select_best_path);
  *   3. Track load on each path
  *   4. Rebalance if load becomes uneven
  */
-static void mp_deadline_coordinate_deadlines(
-	struct tquic_mp_deadline_coordinator *coord)
+static void
+mp_deadline_coordinate_deadlines(struct tquic_mp_deadline_coordinator *coord)
 {
 	/* This would be called periodically or on deadline arrival
 	 * to optimize deadline distribution across paths.
@@ -421,8 +421,8 @@ static void mp_deadline_rebalance_work_fn(struct work_struct *work)
  *
  * Triggers rebalancing if load becomes too uneven across paths.
  */
-static void mp_deadline_check_rebalance(
-	struct tquic_mp_deadline_coordinator *coord)
+static void
+mp_deadline_check_rebalance(struct tquic_mp_deadline_coordinator *coord)
 {
 	struct tquic_mp_deadline_path_info *info;
 	u64 max_load = 0;
@@ -475,10 +475,10 @@ struct tquic_path_quality_sample {
  * @path: Path sampled
  * @sample: Quality sample
  */
-static void mp_deadline_record_quality_sample(
-	struct tquic_mp_deadline_coordinator *coord,
-	struct tquic_path *path,
-	struct tquic_path_quality_sample *sample)
+static void
+mp_deadline_record_quality_sample(struct tquic_mp_deadline_coordinator *coord,
+				  struct tquic_path *path,
+				  struct tquic_path_quality_sample *sample)
 {
 	struct tquic_mp_deadline_path_info *info;
 
@@ -495,7 +495,8 @@ static void mp_deadline_record_quality_sample(
 		} else {
 			info->jitter_estimate_us =
 				(info->jitter_estimate_us * 7 +
-				 sample->jitter_us) / 8;
+				 sample->jitter_us) /
+				8;
 		}
 
 		/* Loss affects deadline capability */
@@ -504,8 +505,8 @@ static void mp_deadline_record_quality_sample(
 		}
 
 		/* Recalculate min feasible deadline */
-		info->min_feasible_deadline_us = sample->rtt_us +
-			3 * info->jitter_estimate_us;
+		info->min_feasible_deadline_us =
+			sample->rtt_us + 3 * info->jitter_estimate_us;
 	}
 
 	spin_unlock_bh(&coord->lock);
@@ -518,11 +519,9 @@ static void mp_deadline_record_quality_sample(
  * @deadline_met: Whether deadline was met
  * @delivery_time_us: Actual delivery time
  */
-void mp_deadline_record_delivery(
-	struct tquic_mp_deadline_coordinator *coord,
-	struct tquic_path *path,
-	bool deadline_met,
-	u64 delivery_time_us)
+void mp_deadline_record_delivery(struct tquic_mp_deadline_coordinator *coord,
+				 struct tquic_path *path, bool deadline_met,
+				 u64 delivery_time_us)
 {
 	struct tquic_mp_deadline_path_info *info;
 
@@ -547,7 +546,8 @@ void mp_deadline_record_delivery(
 		} else {
 			info->stats.avg_delivery_us =
 				(info->stats.avg_delivery_us * 7 +
-				 delivery_time_us) / 8;
+				 delivery_time_us) /
+				8;
 		}
 
 		/* Update miss rate */
@@ -591,7 +591,7 @@ tquic_mp_deadline_coordinator_create(struct tquic_connection *conn)
 	INIT_LIST_HEAD(&coord->path_infos);
 	spin_lock_init(&coord->lock);
 	INIT_WORK(&coord->rebalance_work, mp_deadline_rebalance_work_fn);
-	coord->rebalance_threshold = 1024 * 1024;  /* 1 MB */
+	coord->rebalance_threshold = 1024 * 1024; /* 1 MB */
 	coord->enabled = true;
 
 	/* Initialize path infos for existing paths */
@@ -631,8 +631,7 @@ void tquic_mp_deadline_coordinator_destroy(
 
 	pr_info("tquic_mp_deadline: Coordinator stats - "
 		"assignments=%llu rebalances=%llu switches=%llu\n",
-		coord->stats.assignments,
-		coord->stats.rebalances,
+		coord->stats.assignments, coord->stats.rebalances,
 		coord->stats.cross_path_switches);
 
 	kfree(coord);
@@ -644,9 +643,8 @@ EXPORT_SYMBOL_GPL(tquic_mp_deadline_coordinator_destroy);
  * @coord: Coordinator
  * @path: New path
  */
-void tquic_mp_deadline_path_added(
-	struct tquic_mp_deadline_coordinator *coord,
-	struct tquic_path *path)
+void tquic_mp_deadline_path_added(struct tquic_mp_deadline_coordinator *coord,
+				  struct tquic_path *path)
 {
 	if (!coord || !path)
 		return;
@@ -660,9 +658,8 @@ EXPORT_SYMBOL_GPL(tquic_mp_deadline_path_added);
  * @coord: Coordinator
  * @path: Removed path
  */
-void tquic_mp_deadline_path_removed(
-	struct tquic_mp_deadline_coordinator *coord,
-	struct tquic_path *path)
+void tquic_mp_deadline_path_removed(struct tquic_mp_deadline_coordinator *coord,
+				    struct tquic_path *path)
 {
 	struct tquic_mp_deadline_path_info *info;
 
@@ -689,8 +686,7 @@ EXPORT_SYMBOL_GPL(tquic_mp_deadline_path_removed);
  * @new_state: New state
  */
 void tquic_mp_deadline_path_state_changed(
-	struct tquic_mp_deadline_coordinator *coord,
-	struct tquic_path *path,
+	struct tquic_mp_deadline_coordinator *coord, struct tquic_path *path,
 	enum tquic_path_state new_state)
 {
 	if (!coord || !path)
@@ -713,10 +709,8 @@ EXPORT_SYMBOL_GPL(tquic_mp_deadline_path_state_changed);
  * @path: Target path
  * @bytes: Bytes to add
  */
-void tquic_mp_deadline_assign_load(
-	struct tquic_mp_deadline_coordinator *coord,
-	struct tquic_path *path,
-	u64 bytes)
+void tquic_mp_deadline_assign_load(struct tquic_mp_deadline_coordinator *coord,
+				   struct tquic_path *path, u64 bytes)
 {
 	struct tquic_mp_deadline_path_info *info;
 
@@ -745,10 +739,8 @@ EXPORT_SYMBOL_GPL(tquic_mp_deadline_assign_load);
  * @path: Target path
  * @bytes: Bytes completed
  */
-void tquic_mp_deadline_complete_load(
-	struct tquic_mp_deadline_coordinator *coord,
-	struct tquic_path *path,
-	u64 bytes)
+void tquic_mp_deadline_complete_load(struct tquic_mp_deadline_coordinator *coord,
+				     struct tquic_path *path, u64 bytes)
 {
 	struct tquic_mp_deadline_path_info *info;
 
@@ -800,9 +792,8 @@ struct tquic_mp_deadline_stats {
  * @coord: Coordinator
  * @stats: Output statistics
  */
-void tquic_mp_deadline_get_stats(
-	struct tquic_mp_deadline_coordinator *coord,
-	struct tquic_mp_deadline_stats *stats)
+void tquic_mp_deadline_get_stats(struct tquic_mp_deadline_coordinator *coord,
+				 struct tquic_mp_deadline_stats *stats)
 {
 	struct tquic_mp_deadline_path_info *info;
 
@@ -836,10 +827,10 @@ EXPORT_SYMBOL_GPL(tquic_mp_deadline_get_stats);
 
 int __init tquic_mp_deadline_init(void)
 {
-	mp_deadline_info_cache = kmem_cache_create(
-		"tquic_mp_deadline_info",
-		sizeof(struct tquic_mp_deadline_path_info),
-		0, SLAB_HWCACHE_ALIGN, NULL);
+	mp_deadline_info_cache =
+		kmem_cache_create("tquic_mp_deadline_info",
+				  sizeof(struct tquic_mp_deadline_path_info), 0,
+				  SLAB_HWCACHE_ALIGN, NULL);
 	if (!mp_deadline_info_cache)
 		return -ENOMEM;
 

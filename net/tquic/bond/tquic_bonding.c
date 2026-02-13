@@ -36,6 +36,7 @@
 #include "../multipath/tquic_sched.h"
 #include "cong_coupled.h"
 #include "../tquic_debug.h"
+#include "../tquic_init.h"
 
 /*
  * State name strings for debugging/logging

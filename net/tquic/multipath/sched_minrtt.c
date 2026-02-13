@@ -27,11 +27,12 @@
 
 #include "tquic_sched.h"
 #include "../tquic_debug.h"
+#include "../tquic_init.h"
 
 /*
  * Default RTT value when no measurements available (100ms in microseconds)
  */
-#define TQUIC_DEFAULT_RTT_US	100000
+#define TQUIC_DEFAULT_RTT_US 100000
 
 /*
  * Module parameter for RTT tolerance percentage.
@@ -40,12 +41,13 @@
  *
  * Valid range: 0-100 (percentage)
  */
-#define MINRTT_TOLERANCE_PCT_MAX	100
-#define MINRTT_TOLERANCE_PCT_DEFAULT	10
+#define MINRTT_TOLERANCE_PCT_MAX 100
+#define MINRTT_TOLERANCE_PCT_DEFAULT 10
 
 static unsigned int minrtt_tolerance_pct = MINRTT_TOLERANCE_PCT_DEFAULT;
 module_param_named(tolerance_pct, minrtt_tolerance_pct, uint, 0644);
-MODULE_PARM_DESC(tolerance_pct,
+MODULE_PARM_DESC(
+	tolerance_pct,
 	"RTT tolerance percentage for path switching, 0-100 (default 10)");
 
 static inline unsigned int minrtt_get_validated_tolerance(void)
@@ -53,9 +55,10 @@ static inline unsigned int minrtt_get_validated_tolerance(void)
 	unsigned int val = READ_ONCE(minrtt_tolerance_pct);
 
 	if (val > MINRTT_TOLERANCE_PCT_MAX) {
-		pr_warn_once("minrtt: tolerance_pct %u exceeds max %u, using %u\n",
-			     val, MINRTT_TOLERANCE_PCT_MAX,
-			     MINRTT_TOLERANCE_PCT_DEFAULT);
+		pr_warn_once(
+			"minrtt: tolerance_pct %u exceeds max %u, using %u\n",
+			val, MINRTT_TOLERANCE_PCT_MAX,
+			MINRTT_TOLERANCE_PCT_DEFAULT);
 		return MINRTT_TOLERANCE_PCT_DEFAULT;
 	}
 	return val;
@@ -82,11 +85,11 @@ static inline unsigned int minrtt_get_validated_tolerance(void)
  * list traversal is held separately.
  */
 struct minrtt_sched_data {
-	spinlock_t lock;	/* Protects scheduler state */
-	u8 current_path_id;	/* Currently selected path */
-	u64 current_rtt_us;	/* RTT of current path */
-	ktime_t last_switch;	/* Time of last path switch */
-	u32 switch_count;	/* Number of path switches */
+	spinlock_t lock; /* Protects scheduler state */
+	u8 current_path_id; /* Currently selected path */
+	u64 current_rtt_us; /* RTT of current path */
+	ktime_t last_switch; /* Time of last path switch */
+	u32 switch_count; /* Number of path switches */
 };
 
 /**
@@ -140,8 +143,7 @@ static void minrtt_release(struct tquic_connection *conn)
  * Returns 0 on success, -EINVAL if no state, -ENOENT if no paths.
  */
 static int minrtt_get_path(struct tquic_connection *conn,
-			   struct tquic_mp_sched_path_result *result,
-			   u32 flags)
+			   struct tquic_mp_sched_path_result *result, u32 flags)
 {
 	struct minrtt_sched_data *sd = conn->sched_priv;
 	struct tquic_path *path, *best = NULL, *curr_path = NULL;
@@ -221,8 +223,7 @@ static int minrtt_get_path(struct tquic_connection *conn,
 	    curr_path->path_id == current_path_id) {
 		unsigned int tolerance = minrtt_get_validated_tolerance();
 
-		tolerance_threshold = current_rtt_us *
-				      (100 - tolerance) / 100;
+		tolerance_threshold = current_rtt_us * (100 - tolerance) / 100;
 
 		if (min_rtt >= tolerance_threshold) {
 			/* Stay with current path - RTT difference not significant */
@@ -233,9 +234,10 @@ static int minrtt_get_path(struct tquic_connection *conn,
 	/* Update state if switching paths - under lock */
 	spin_lock_irqsave(&sd->lock, irqflags);
 	if (best->path_id != sd->current_path_id) {
-		pr_debug("minrtt: switching from path %u (rtt=%llu) to path %u (rtt=%llu)\n",
-			 sd->current_path_id, sd->current_rtt_us,
-			 best->path_id, best->cc.smoothed_rtt_us);
+		pr_debug(
+			"minrtt: switching from path %u (rtt=%llu) to path %u (rtt=%llu)\n",
+			sd->current_path_id, sd->current_rtt_us, best->path_id,
+			best->cc.smoothed_rtt_us);
 
 		sd->current_path_id = best->path_id;
 		sd->current_rtt_us = best->cc.smoothed_rtt_us;
@@ -256,7 +258,7 @@ static int minrtt_get_path(struct tquic_connection *conn,
 	}
 
 	result->primary = best;
-	result->backup = NULL;	/* MinRTT doesn't use backup path */
+	result->backup = NULL; /* MinRTT doesn't use backup path */
 	result->flags = 0;
 
 	rcu_read_unlock();
@@ -273,8 +275,8 @@ static int minrtt_get_path(struct tquic_connection *conn,
 static void minrtt_path_added(struct tquic_connection *conn,
 			      struct tquic_path *path)
 {
-	pr_debug("minrtt: path %u added (ifindex=%d)\n",
-		 path->path_id, path->ifindex);
+	pr_debug("minrtt: path %u added (ifindex=%d)\n", path->path_id,
+		 path->ifindex);
 }
 
 /**
@@ -313,8 +315,7 @@ static void minrtt_path_removed(struct tquic_connection *conn,
  * Update our cached RTT for the current path when ACKs arrive.
  */
 static void minrtt_ack_received(struct tquic_connection *conn,
-				struct tquic_path *path,
-				u64 acked_bytes)
+				struct tquic_path *path, u64 acked_bytes)
 {
 	struct minrtt_sched_data *sd = conn->sched_priv;
 	unsigned long irqflags;
@@ -343,8 +344,7 @@ static void minrtt_ack_received(struct tquic_connection *conn,
  * selection to trigger a fresh path evaluation on the next get_path().
  */
 static void minrtt_loss_detected(struct tquic_connection *conn,
-				 struct tquic_path *path,
-				 u64 lost_bytes)
+				 struct tquic_path *path, u64 lost_bytes)
 {
 	struct minrtt_sched_data *sd = conn->sched_priv;
 
@@ -366,15 +366,15 @@ static void minrtt_loss_detected(struct tquic_connection *conn,
  * MinRTT scheduler operations structure
  */
 static struct tquic_mp_sched_ops tquic_sched_minrtt = {
-	.name		= "minrtt",
-	.owner		= THIS_MODULE,
-	.get_path	= minrtt_get_path,
-	.init		= minrtt_init,
-	.release	= minrtt_release,
-	.path_added	= minrtt_path_added,
-	.path_removed	= minrtt_path_removed,
-	.ack_received	= minrtt_ack_received,
-	.loss_detected	= minrtt_loss_detected,
+	.name = "minrtt",
+	.owner = THIS_MODULE,
+	.get_path = minrtt_get_path,
+	.init = minrtt_init,
+	.release = minrtt_release,
+	.path_added = minrtt_path_added,
+	.path_removed = minrtt_path_removed,
+	.ack_received = minrtt_ack_received,
+	.loss_detected = minrtt_loss_detected,
 };
 
 /* =========================================================================
@@ -392,8 +392,8 @@ static struct tquic_mp_sched_ops tquic_sched_minrtt = {
  * in get_path() calls from multiple contexts.
  */
 struct rr_sched_data {
-	spinlock_t lock;	/* Protects next_index */
-	u32 next_index;		/* Next path index to use */
+	spinlock_t lock; /* Protects next_index */
+	u32 next_index; /* Next path index to use */
 };
 
 /**
@@ -437,8 +437,7 @@ static void rr_release(struct tquic_connection *conn)
  * Returns 0 on success, -EINVAL if no state, -ENOENT if no active paths.
  */
 static int rr_get_path(struct tquic_connection *conn,
-		       struct tquic_mp_sched_path_result *result,
-		       u32 flags)
+		       struct tquic_mp_sched_path_result *result, u32 flags)
 {
 	struct rr_sched_data *rd = conn->sched_priv;
 	struct tquic_path *path;
@@ -502,11 +501,11 @@ static int rr_get_path(struct tquic_connection *conn,
  * Round-robin scheduler operations structure
  */
 static struct tquic_mp_sched_ops tquic_sched_rr = {
-	.name		= "rr",
-	.owner		= THIS_MODULE,
-	.get_path	= rr_get_path,
-	.init		= rr_init,
-	.release	= rr_release,
+	.name = "rr",
+	.owner = THIS_MODULE,
+	.get_path = rr_get_path,
+	.init = rr_init,
+	.release = rr_release,
 };
 
 /* =========================================================================

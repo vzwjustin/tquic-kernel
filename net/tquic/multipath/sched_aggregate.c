@@ -29,15 +29,16 @@
 #include "tquic_sched.h"
 #include "../bond/tquic_bonding.h"
 #include "../tquic_debug.h"
+#include "../tquic_init.h"
 
 /*
  * Capacity calculation constants
  */
-#define TQUIC_MIN_WEIGHT_FLOOR      50      /* 5% of 1000 scale */
-#define TQUIC_WEIGHT_SCALE          1000
-#define TQUIC_DEFAULT_RTT_US        100000  /* 100ms default RTT */
-#define TQUIC_CAPACITY_UPDATE_MS    10      /* Update interval */
-#define TQUIC_INITIAL_CWND          12000   /* 10 * 1200 MSS */
+#define TQUIC_MIN_WEIGHT_FLOOR 50 /* 5% of 1000 scale */
+#define TQUIC_WEIGHT_SCALE 1000
+#define TQUIC_DEFAULT_RTT_US 100000 /* 100ms default RTT */
+#define TQUIC_CAPACITY_UPDATE_MS 10 /* Update interval */
+#define TQUIC_INITIAL_CWND 12000 /* 10 * 1200 MSS */
 
 /*
  * Aggregate scheduler private state
@@ -51,10 +52,10 @@
  * (connection management and feedback paths).
  */
 struct aggregate_sched_data {
-	spinlock_t lock;			 /* Protects scheduler state */
-	u32 path_capacities[TQUIC_MAX_PATHS];    /* Cached cwnd/RTT */
-	u32 total_capacity;                      /* Sum for proportional selection */
-	ktime_t last_capacity_update;            /* Avoid recalc every packet */
+	spinlock_t lock; /* Protects scheduler state */
+	u32 path_capacities[TQUIC_MAX_PATHS]; /* Cached cwnd/RTT */
+	u32 total_capacity; /* Sum for proportional selection */
+	ktime_t last_capacity_update; /* Avoid recalc every packet */
 };
 
 /*
@@ -74,7 +75,7 @@ static u32 calc_path_capacity(struct tquic_path *path)
 
 	/* Use default values if metrics not yet available */
 	if (cwnd == 0)
-		cwnd = TQUIC_INITIAL_CWND;  /* Initial window: 10 * MSS */
+		cwnd = TQUIC_INITIAL_CWND; /* Initial window: 10 * MSS */
 
 	if (rtt_us == 0)
 		rtt_us = TQUIC_DEFAULT_RTT_US;
@@ -133,10 +134,12 @@ static void update_capacities_locked(struct tquic_connection *conn,
 			break;
 
 		if (path->state == TQUIC_PATH_ACTIVE) {
-			u32 min_weight = (total * TQUIC_MIN_WEIGHT_FLOOR) / TQUIC_WEIGHT_SCALE;
+			u32 min_weight = (total * TQUIC_MIN_WEIGHT_FLOOR) /
+					 TQUIC_WEIGHT_SCALE;
 			if (sd->path_capacities[idx] < min_weight) {
 				/* Boost to minimum floor */
-				total += (min_weight - sd->path_capacities[idx]);
+				total +=
+					(min_weight - sd->path_capacities[idx]);
 				sd->path_capacities[idx] = min_weight;
 			}
 		}
@@ -157,8 +160,7 @@ static void update_capacities_locked(struct tquic_connection *conn,
  * to avoid sending on blocked paths.
  */
 static int aggregate_get_path(struct tquic_connection *conn,
-			      struct tquic_sched_path_result *result,
-			      u32 flags)
+			      struct tquic_sched_path_result *result, u32 flags)
 {
 	struct aggregate_sched_data *sd = conn->sched_priv;
 	struct tquic_path *path, *best = NULL, *backup = NULL;
@@ -208,7 +210,7 @@ static int aggregate_get_path(struct tquic_connection *conn,
 			if (in_flight < cwnd)
 				available = capacity;
 			else
-				available = 0;  /* Congestion limited */
+				available = 0; /* Congestion limited */
 		} else {
 			available = capacity;
 		}
@@ -293,7 +295,7 @@ static void aggregate_path_added(struct tquic_connection *conn,
 		return;
 
 	spin_lock_irqsave(&sd->lock, irqflags);
-	sd->last_capacity_update = 0;  /* Force recalc */
+	sd->last_capacity_update = 0; /* Force recalc */
 	spin_unlock_irqrestore(&sd->lock, irqflags);
 }
 
@@ -310,7 +312,7 @@ static void aggregate_path_removed(struct tquic_connection *conn,
 		return;
 
 	spin_lock_irqsave(&sd->lock, irqflags);
-	sd->last_capacity_update = 0;  /* Force recalc */
+	sd->last_capacity_update = 0; /* Force recalc */
 	spin_unlock_irqrestore(&sd->lock, irqflags);
 }
 
@@ -321,8 +323,7 @@ static void aggregate_path_removed(struct tquic_connection *conn,
  * at the next periodic capacity update.
  */
 static void aggregate_ack_received(struct tquic_connection *conn,
-				   struct tquic_path *path,
-				   u64 acked_bytes)
+				   struct tquic_path *path, u64 acked_bytes)
 {
 	/* RTT/cwnd updated externally, will be picked up next capacity update */
 }
@@ -335,8 +336,7 @@ static void aggregate_ack_received(struct tquic_connection *conn,
  * so loss-induced cwnd reductions should trigger recalculation.
  */
 static void aggregate_loss_detected(struct tquic_connection *conn,
-				    struct tquic_path *path,
-				    u64 lost_bytes)
+				    struct tquic_path *path, u64 lost_bytes)
 {
 	struct aggregate_sched_data *sd = conn->sched_priv;
 	unsigned long irqflags;
@@ -356,15 +356,15 @@ static void aggregate_loss_detected(struct tquic_connection *conn,
  * Exported as the default scheduler for TQUIC WAN bonding.
  */
 struct tquic_mp_sched_ops tquic_mp_sched_aggregate = {
-	.name           = "aggregate",
-	.owner          = THIS_MODULE,
-	.get_path       = aggregate_get_path,
-	.init           = aggregate_init,
-	.release        = aggregate_release,
-	.path_added     = aggregate_path_added,
-	.path_removed   = aggregate_path_removed,
-	.ack_received   = aggregate_ack_received,
-	.loss_detected  = aggregate_loss_detected,
+	.name = "aggregate",
+	.owner = THIS_MODULE,
+	.get_path = aggregate_get_path,
+	.init = aggregate_init,
+	.release = aggregate_release,
+	.path_added = aggregate_path_added,
+	.path_removed = aggregate_path_removed,
+	.ack_received = aggregate_ack_received,
+	.loss_detected = aggregate_loss_detected,
 };
 EXPORT_SYMBOL_GPL(tquic_mp_sched_aggregate);
 

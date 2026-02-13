@@ -30,13 +30,14 @@
 
 #include "tquic_sched.h"
 #include "../tquic_debug.h"
+#include "../tquic_init.h"
 
 /*
  * Default values for BLEST calculations
  */
-#define BLEST_DEFAULT_SEGMENT_SIZE	1200	/* Default segment size */
-#define BLEST_DEFAULT_RTT_US		100000	/* 100ms default RTT */
-#define BLEST_MIN_SEND_RATE		1000	/* Minimum 1KB/s to avoid div0 */
+#define BLEST_DEFAULT_SEGMENT_SIZE 1200 /* Default segment size */
+#define BLEST_DEFAULT_RTT_US 100000 /* 100ms default RTT */
+#define BLEST_MIN_SEND_RATE 1000 /* Minimum 1KB/s to avoid div0 */
 
 /**
  * struct blest_path_state - Per-path state for BLEST scheduling
@@ -50,12 +51,12 @@
  * for the receiver to be ready for new data on this path.
  */
 struct blest_path_state {
-	u64 inflight_bytes;		/* Bytes in flight on this path */
-	u64 last_send_time_us;		/* Timestamp of last send */
-	u64 send_rate;			/* Estimated send rate (bytes/s) */
-	u32 rtt_us;			/* Path RTT */
-	u8 path_id;			/* Path identifier */
-	bool valid;			/* Whether this state is valid */
+	u64 inflight_bytes; /* Bytes in flight on this path */
+	u64 last_send_time_us; /* Timestamp of last send */
+	u64 send_rate; /* Estimated send rate (bytes/s) */
+	u32 rtt_us; /* Path RTT */
+	u8 path_id; /* Path identifier */
+	bool valid; /* Whether this state is valid */
 };
 
 /**
@@ -74,11 +75,11 @@ struct blest_path_state {
  * path_added(), and path_removed().
  */
 struct blest_sched_data {
-	spinlock_t lock;		/* Protects scheduler state */
+	spinlock_t lock; /* Protects scheduler state */
 	struct blest_path_state paths[TQUIC_MAX_PATHS];
-	u32 segment_size;		/* Default segment size for estimation */
-	u8 current_path_id;		/* Currently selected path */
-	u64 blocking_threshold_us;	/* Minimum blocking to trigger wait */
+	u32 segment_size; /* Default segment size for estimation */
+	u8 current_path_id; /* Currently selected path */
+	u64 blocking_threshold_us; /* Minimum blocking to trigger wait */
 };
 
 /*
@@ -89,12 +90,13 @@ struct blest_sched_data {
  * - 0 means never wait (always use available capacity)
  * - Higher values mean more tolerance for head-of-line blocking
  */
-#define BLEST_THRESHOLD_MAX_US		10000000	/* 10 seconds */
-#define BLEST_THRESHOLD_DEFAULT_US	1000		/* 1 ms */
+#define BLEST_THRESHOLD_MAX_US 10000000 /* 10 seconds */
+#define BLEST_THRESHOLD_DEFAULT_US 1000 /* 1 ms */
 
 static unsigned int blest_blocking_threshold_us = BLEST_THRESHOLD_DEFAULT_US;
 module_param_named(blocking_threshold, blest_blocking_threshold_us, uint, 0644);
-MODULE_PARM_DESC(blocking_threshold,
+MODULE_PARM_DESC(
+	blocking_threshold,
 	"Minimum blocking time (us) to wait for fast path, 0-10000000 (default 1000)");
 
 /*
@@ -108,7 +110,8 @@ static inline u64 blest_get_validated_threshold(void)
 
 	if (val > BLEST_THRESHOLD_MAX_US) {
 		pr_warn_once("blest: blocking_threshold %u exceeds max %u, "
-			     "using max\n", val, BLEST_THRESHOLD_MAX_US);
+			     "using max\n",
+			     val, BLEST_THRESHOLD_MAX_US);
 		return BLEST_THRESHOLD_MAX_US;
 	}
 	return val;
@@ -121,8 +124,8 @@ static inline u64 blest_get_validated_threshold(void)
  *
  * Returns pointer to path state, or NULL if not found and no space.
  */
-static struct blest_path_state *blest_find_path_state(struct blest_sched_data *sd,
-						      u8 path_id)
+static struct blest_path_state *
+blest_find_path_state(struct blest_sched_data *sd, u8 path_id)
 {
 	int i;
 
@@ -140,8 +143,8 @@ static struct blest_path_state *blest_find_path_state(struct blest_sched_data *s
  *
  * Returns pointer to newly allocated path state, or NULL if no space.
  */
-static struct blest_path_state *blest_alloc_path_state(struct blest_sched_data *sd,
-						       u8 path_id)
+static struct blest_path_state *
+blest_alloc_path_state(struct blest_sched_data *sd, u8 path_id)
 {
 	int i;
 
@@ -207,8 +210,8 @@ static s64 blest_blocking_estimate(struct blest_sched_data *sd,
 	 * Simplified: we use full RTT as conservative estimate
 	 */
 	if (fast->inflight_bytes > 0 && fast->send_rate > 0) {
-		fast_completion_time = (fast->inflight_bytes * 1000000ULL) /
-				       fast->send_rate;
+		fast_completion_time =
+			(fast->inflight_bytes * 1000000ULL) / fast->send_rate;
 		/* Add RTT for propagation (data still needs to reach receiver) */
 		fast_completion_time += fast->rtt_us;
 	} else {
@@ -244,8 +247,7 @@ static s64 blest_blocking_estimate(struct blest_sched_data *sd,
  * Returns 0 on success, -EINVAL if no state, -ENOENT if no paths.
  */
 static int blest_get_path(struct tquic_connection *conn,
-			  struct tquic_sched_path_result *result,
-			  u32 flags)
+			  struct tquic_sched_path_result *result, u32 flags)
 {
 	struct blest_sched_data *sd = conn->sched_priv;
 	struct tquic_path *path, *best = NULL, *fast_path = NULL;
@@ -336,8 +338,9 @@ static int blest_get_path(struct tquic_connection *conn,
 						   sd->segment_size);
 
 		if (blocking > (s64)blest_get_validated_threshold()) {
-			pr_debug("blest: path %u would block for %lld us, skipping\n",
-				 path->path_id, blocking);
+			pr_debug(
+				"blest: path %u would block for %lld us, skipping\n",
+				path->path_id, blocking);
 			continue;
 		}
 
@@ -358,7 +361,7 @@ static int blest_get_path(struct tquic_connection *conn,
 	}
 
 	if (!best)
-		best = fast_path;  /* Default to fast path if all block */
+		best = fast_path; /* Default to fast path if all block */
 
 	/* Update current path tracking */
 	sd->current_path_id = best->path_id;
@@ -444,14 +447,15 @@ static void blest_path_added(struct tquic_connection *conn,
 
 		/* Estimate initial send rate from cwnd/RTT */
 		if (path->cc.cwnd > 0 && ps->rtt_us > 0) {
-			ps->send_rate = (u64)path->cc.cwnd * 1000000ULL /
-					ps->rtt_us;
+			ps->send_rate =
+				(u64)path->cc.cwnd * 1000000ULL / ps->rtt_us;
 		} else {
 			ps->send_rate = BLEST_MIN_SEND_RATE;
 		}
 
-		pr_debug("blest: path %u added (rtt=%u us, rate=%llu bytes/s)\n",
-			 path->path_id, ps->rtt_us, ps->send_rate);
+		pr_debug(
+			"blest: path %u added (rtt=%u us, rate=%llu bytes/s)\n",
+			path->path_id, ps->rtt_us, ps->send_rate);
 	}
 	spin_unlock_irqrestore(&sd->lock, irqflags);
 }
@@ -495,8 +499,7 @@ static void blest_path_removed(struct tquic_connection *conn,
  * Increase inflight for this path and update send timestamp.
  */
 static void blest_packet_sent(struct tquic_connection *conn,
-			      struct tquic_path *path,
-			      u32 sent_bytes)
+			      struct tquic_path *path, u32 sent_bytes)
 {
 	struct blest_sched_data *sd = conn->sched_priv;
 	struct blest_path_state *ps;
@@ -537,8 +540,7 @@ static void blest_packet_sent(struct tquic_connection *conn,
  * Decrease inflight for this path and update send rate estimate.
  */
 static void blest_ack_received(struct tquic_connection *conn,
-			       struct tquic_path *path,
-			       u64 acked_bytes)
+			       struct tquic_path *path, u64 acked_bytes)
 {
 	struct blest_sched_data *sd = conn->sched_priv;
 	struct blest_path_state *ps;
@@ -586,8 +588,7 @@ static void blest_ack_received(struct tquic_connection *conn,
  * Decrease inflight for lost packets (they're no longer in flight).
  */
 static void blest_loss_detected(struct tquic_connection *conn,
-				struct tquic_path *path,
-				u64 lost_bytes)
+				struct tquic_path *path, u64 lost_bytes)
 {
 	struct blest_sched_data *sd = conn->sched_priv;
 	struct blest_path_state *ps;
@@ -618,16 +619,16 @@ static void blest_loss_detected(struct tquic_connection *conn,
  * BLEST scheduler operations structure
  */
 static struct tquic_mp_sched_ops tquic_mp_sched_blest = {
-	.name		= "blest",
-	.owner		= THIS_MODULE,
-	.get_path	= blest_get_path,
-	.init		= blest_init,
-	.release	= blest_release,
-	.path_added	= blest_path_added,
-	.path_removed	= blest_path_removed,
-	.packet_sent	= blest_packet_sent,
-	.ack_received	= blest_ack_received,
-	.loss_detected	= blest_loss_detected,
+	.name = "blest",
+	.owner = THIS_MODULE,
+	.get_path = blest_get_path,
+	.init = blest_init,
+	.release = blest_release,
+	.path_added = blest_path_added,
+	.path_removed = blest_path_removed,
+	.packet_sent = blest_packet_sent,
+	.ack_received = blest_ack_received,
+	.loss_detected = blest_loss_detected,
 };
 
 /* =========================================================================

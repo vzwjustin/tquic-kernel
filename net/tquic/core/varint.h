@@ -152,4 +152,7 @@ int tquic_varint_write(u8 *buf, size_t buf_len, size_t *offset, u64 value);
  */
 int tquic_varint_encode_force(u64 value, u8 *buf, int length);
 
+
+/* Return the encoded byte length for a varint value */
+int tquic_varint_len(u64 value);
 #endif /* _TQUIC_VARINT_H */

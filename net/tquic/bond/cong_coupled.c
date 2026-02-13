@@ -38,34 +38,35 @@
 #include "tquic_bonding.h"
 #include "cong_coupled.h"
 #include "../tquic_debug.h"
+#include "../tquic_init.h"
 
 /*
  * Coupled congestion control constants
  */
 
 /* LIA alpha scaling factor (for fixed-point arithmetic) */
-#define COUPLED_ALPHA_SCALE		1024
-#define COUPLED_ALPHA_MAX		(COUPLED_ALPHA_SCALE * 4)
+#define COUPLED_ALPHA_SCALE 1024
+#define COUPLED_ALPHA_MAX (COUPLED_ALPHA_SCALE * 4)
 
 /* Maximum packet size for QUIC */
 #ifndef QUIC_MAX_PACKET_SIZE
-#define QUIC_MAX_PACKET_SIZE		1500
+#define QUIC_MAX_PACKET_SIZE 1500
 #endif
 
 /* Minimum cwnd to prevent starvation (RFC 6356 recommendation) */
-#define COUPLED_MIN_CWND		(2 * QUIC_MAX_PACKET_SIZE)
+#define COUPLED_MIN_CWND (2 * QUIC_MAX_PACKET_SIZE)
 
 /* Smoothing factor for alpha calculation (1/8 weight for new sample) */
-#define COUPLED_ALPHA_SMOOTHING		8
+#define COUPLED_ALPHA_SMOOTHING 8
 
 /* Default initial RTT in microseconds (333ms per RFC 9002) */
-#define QUIC_INITIAL_RTT_US		333000
+#define QUIC_INITIAL_RTT_US 333000
 
 /* Maximum paths for coupled CC */
-#define COUPLED_MAX_PATHS		8
+#define COUPLED_MAX_PATHS 8
 
 /* RTT scaling for fixed-point calculations (microseconds) */
-#define RTT_SCALE			1000000ULL
+#define RTT_SCALE 1000000ULL
 
 /*
  * Per-path coupled congestion control state
@@ -74,13 +75,13 @@
  * needed for coupled window increase calculations.
  */
 struct coupled_path_state {
-	u8		path_id;
-	u64		cwnd;		/* Current congestion window */
-	u64		rtt_us;		/* Smoothed RTT in microseconds */
-	u64		capacity;	/* cwnd / rtt (rate) */
-	u32		weight;		/* Derived weight (0-1000) */
-	bool		active;		/* Path is active for scheduling */
-	ktime_t		last_update;	/* Last state update time */
+	u8 path_id;
+	u64 cwnd; /* Current congestion window */
+	u64 rtt_us; /* Smoothed RTT in microseconds */
+	u64 capacity; /* cwnd / rtt (rate) */
+	u32 weight; /* Derived weight (0-1000) */
+	bool active; /* Path is active for scheduling */
+	ktime_t last_update; /* Last state update time */
 };
 
 /*
@@ -90,28 +91,28 @@ struct coupled_path_state {
  * It maintains aggregate state across all paths for alpha calculation.
  */
 struct coupled_cc_ctx {
-	spinlock_t		lock;
-	bool			enabled;
+	spinlock_t lock;
+	bool enabled;
 
 	/* Aggregate state across all paths */
-	u64			total_cwnd;		/* Sum of all path cwnds */
-	u64			alpha;			/* LIA alpha parameter (scaled) */
-	u64			alpha_smoothed;		/* EWMA of alpha */
+	u64 total_cwnd; /* Sum of all path cwnds */
+	u64 alpha; /* LIA alpha parameter (scaled) */
+	u64 alpha_smoothed; /* EWMA of alpha */
 
 	/* Per-path state */
-	int			num_paths;
+	int num_paths;
 	struct coupled_path_state paths[COUPLED_MAX_PATHS];
 
 	/* RTT statistics for alpha calculation */
-	u64			min_rtt_us;		/* Minimum RTT across paths */
-	u64			max_rtt_us;		/* Maximum RTT across paths */
+	u64 min_rtt_us; /* Minimum RTT across paths */
+	u64 max_rtt_us; /* Maximum RTT across paths */
 
 	/* Statistics */
-	u64			coupled_increases;	/* Count of coupled increases */
-	u64			alpha_updates;		/* Count of alpha recalculations */
+	u64 coupled_increases; /* Count of coupled increases */
+	u64 alpha_updates; /* Count of alpha recalculations */
 
 	/* Back pointer */
-	struct tquic_connection	*conn;
+	struct tquic_connection *conn;
 };
 
 /*
@@ -145,15 +146,15 @@ struct coupled_cc_ctx {
  */
 static void coupled_calc_alpha(struct coupled_cc_ctx *ctx)
 {
-	u64 max_cwnd_rtt2 = 0;	/* max(cwnd_i / rtt_i^2) */
-	u64 sum_cwnd_rtt = 0;	/* sum(cwnd_j / rtt_j) */
-	u64 sum_cwnd_rtt_sq;	/* (sum(cwnd_j / rtt_j))^2 */
+	u64 max_cwnd_rtt2 = 0; /* max(cwnd_i / rtt_i^2) */
+	u64 sum_cwnd_rtt = 0; /* sum(cwnd_j / rtt_j) */
+	u64 sum_cwnd_rtt_sq; /* (sum(cwnd_j / rtt_j))^2 */
 	u64 alpha_new;
 	int i;
 
 	/* Need at least 2 paths for coupling */
 	if (ctx->num_paths < 2 || ctx->total_cwnd == 0) {
-		ctx->alpha = COUPLED_ALPHA_SCALE;  /* Uncoupled: alpha = 1 */
+		ctx->alpha = COUPLED_ALPHA_SCALE; /* Uncoupled: alpha = 1 */
 		return;
 	}
 
@@ -177,10 +178,8 @@ static void coupled_calc_alpha(struct coupled_cc_ctx *ctx)
 		 * for cwnd > ~18KB. Split into two divisions:
 		 * cwnd_rtt2 = (cwnd * RTT_SCALE / rtt_i) * (RTT_SCALE / rtt_i)
 		 */
-		cwnd_rtt2 = div64_u64(path->cwnd * RTT_SCALE,
-				      path->rtt_us);
-		cwnd_rtt2 = div64_u64(cwnd_rtt2 * RTT_SCALE,
-				      path->rtt_us);
+		cwnd_rtt2 = div64_u64(path->cwnd * RTT_SCALE, path->rtt_us);
+		cwnd_rtt2 = div64_u64(cwnd_rtt2 * RTT_SCALE, path->rtt_us);
 		if (cwnd_rtt2 > max_cwnd_rtt2)
 			max_cwnd_rtt2 = cwnd_rtt2;
 	}
@@ -246,21 +245,23 @@ static void coupled_calc_alpha(struct coupled_cc_ctx *ctx)
 	if (alpha_new > COUPLED_ALPHA_MAX)
 		alpha_new = COUPLED_ALPHA_MAX;
 	if (alpha_new == 0)
-		alpha_new = 1;  /* Minimum alpha */
+		alpha_new = 1; /* Minimum alpha */
 
 	/* Smooth alpha using EWMA */
 	if (ctx->alpha_smoothed == 0)
 		ctx->alpha_smoothed = alpha_new;
 	else
-		ctx->alpha_smoothed = (ctx->alpha_smoothed *
-				       (COUPLED_ALPHA_SMOOTHING - 1) +
-				       alpha_new) / COUPLED_ALPHA_SMOOTHING;
+		ctx->alpha_smoothed =
+			(ctx->alpha_smoothed * (COUPLED_ALPHA_SMOOTHING - 1) +
+			 alpha_new) /
+			COUPLED_ALPHA_SMOOTHING;
 
 	ctx->alpha = ctx->alpha_smoothed;
 	ctx->alpha_updates++;
 
-	pr_debug("alpha updated: raw=%llu smoothed=%llu total_cwnd=%llu paths=%d\n",
-		 alpha_new, ctx->alpha, ctx->total_cwnd, ctx->num_paths);
+	pr_debug(
+		"alpha updated: raw=%llu smoothed=%llu total_cwnd=%llu paths=%d\n",
+		alpha_new, ctx->alpha, ctx->total_cwnd, ctx->num_paths);
 }
 
 /*
@@ -298,8 +299,8 @@ static struct coupled_path_state *coupled_find_path(struct coupled_cc_ctx *ctx,
  *
  * Returns 0 on success, negative error on failure.
  */
-int coupled_cc_add_path(struct coupled_cc_ctx *ctx, u8 path_id,
-			u64 cwnd, u64 rtt_us)
+int coupled_cc_add_path(struct coupled_cc_ctx *ctx, u8 path_id, u64 cwnd,
+			u64 rtt_us)
 {
 	struct coupled_path_state *path;
 
@@ -325,7 +326,8 @@ int coupled_cc_add_path(struct coupled_cc_ctx *ctx, u8 path_id,
 	path->rtt_us = rtt_us > 0 ? rtt_us : QUIC_INITIAL_RTT_US;
 	path->active = true;
 	path->last_update = ktime_get();
-	path->capacity = rtt_us > 0 ? div64_u64(cwnd * USEC_PER_SEC, rtt_us) : 0;
+	path->capacity = rtt_us > 0 ? div64_u64(cwnd * USEC_PER_SEC, rtt_us) :
+				      0;
 
 	ctx->num_paths++;
 	ctx->total_cwnd += cwnd;
@@ -393,8 +395,8 @@ EXPORT_SYMBOL_GPL(coupled_cc_remove_path);
  * @cwnd: New congestion window
  * @rtt_us: New RTT in microseconds
  */
-void coupled_cc_update_path(struct coupled_cc_ctx *ctx, u8 path_id,
-			    u64 cwnd, u64 rtt_us)
+void coupled_cc_update_path(struct coupled_cc_ctx *ctx, u8 path_id, u64 cwnd,
+			    u64 rtt_us)
 {
 	struct coupled_path_state *path;
 	u64 old_cwnd;
@@ -461,14 +463,14 @@ EXPORT_SYMBOL_GPL(coupled_cc_update_path);
  * This ensures the aggregate increase across all paths is at most
  * what a single TCP flow would achieve.
  */
-u64 coupled_cc_increase(struct coupled_cc_ctx *ctx, u8 path_id,
-			u64 acked_bytes, u32 mss)
+u64 coupled_cc_increase(struct coupled_cc_ctx *ctx, u8 path_id, u64 acked_bytes,
+			u32 mss)
 {
 	struct coupled_path_state *path;
 	u64 increase;
 
 	if (!ctx || !ctx->enabled)
-		return acked_bytes;  /* Uncoupled increase */
+		return acked_bytes; /* Uncoupled increase */
 
 	spin_lock_bh(&ctx->lock);
 
@@ -518,8 +520,9 @@ increase_done:
 
 	spin_unlock_bh(&ctx->lock);
 
-	pr_debug("path %u: coupled increase=%llu (alpha=%llu total_cwnd=%llu acked=%llu)\n",
-		 path_id, increase, ctx->alpha, ctx->total_cwnd, acked_bytes);
+	pr_debug(
+		"path %u: coupled increase=%llu (alpha=%llu total_cwnd=%llu acked=%llu)\n",
+		path_id, increase, ctx->alpha, ctx->total_cwnd, acked_bytes);
 
 	return increase;
 }
@@ -561,8 +564,8 @@ void coupled_cc_decrease(struct coupled_cc_ctx *ctx, u8 path_id)
 
 	spin_unlock_bh(&ctx->lock);
 
-	pr_debug("path %u: loss response cwnd %llu -> %llu\n",
-		 path_id, old_cwnd, new_cwnd);
+	pr_debug("path %u: loss response cwnd %llu -> %llu\n", path_id,
+		 old_cwnd, new_cwnd);
 }
 EXPORT_SYMBOL_GPL(coupled_cc_decrease);
 
@@ -616,7 +619,8 @@ EXPORT_SYMBOL_GPL(coupled_cc_update_rtt);
  *
  * Returns allocated context or NULL on failure.
  */
-struct coupled_cc_ctx *coupled_cc_alloc(struct tquic_connection *conn, gfp_t gfp)
+struct coupled_cc_ctx *coupled_cc_alloc(struct tquic_connection *conn,
+					gfp_t gfp)
 {
 	struct coupled_cc_ctx *ctx;
 
@@ -627,7 +631,7 @@ struct coupled_cc_ctx *coupled_cc_alloc(struct tquic_connection *conn, gfp_t gfp
 	spin_lock_init(&ctx->lock);
 	ctx->conn = conn;
 	ctx->enabled = false;
-	ctx->alpha = COUPLED_ALPHA_SCALE;  /* Start with alpha = 1 */
+	ctx->alpha = COUPLED_ALPHA_SCALE; /* Start with alpha = 1 */
 	ctx->alpha_smoothed = COUPLED_ALPHA_SCALE;
 	ctx->min_rtt_us = U64_MAX;
 
@@ -678,8 +682,8 @@ void coupled_cc_enable(struct coupled_cc_ctx *ctx)
 
 	spin_unlock_bh(&ctx->lock);
 
-	pr_info("coupled CC enabled: %d paths, alpha=%llu\n",
-		ctx->num_paths, ctx->alpha);
+	pr_info("coupled CC enabled: %d paths, alpha=%llu\n", ctx->num_paths,
+		ctx->alpha);
 }
 EXPORT_SYMBOL_GPL(coupled_cc_enable);
 
@@ -907,8 +911,8 @@ EXPORT_SYMBOL_GPL(coupled_cc_get_total_cwnd);
  *
  * Returns: Number of bytes to increase cwnd by
  */
-u64 olia_cc_increase(struct coupled_cc_ctx *ctx, u8 path_id,
-		     u64 acked_bytes, u32 mss)
+u64 olia_cc_increase(struct coupled_cc_ctx *ctx, u8 path_id, u64 acked_bytes,
+		     u32 mss)
 {
 	struct coupled_path_state *path;
 	u64 increase;
@@ -930,7 +934,8 @@ u64 olia_cc_increase(struct coupled_cc_ctx *ctx, u8 path_id,
 
 	/* Find path with best capacity (max cwnd/rtt) */
 	for (i = 0; i < ctx->num_paths; i++) {
-		if (ctx->paths[i].active && ctx->paths[i].capacity > best_capacity) {
+		if (ctx->paths[i].active &&
+		    ctx->paths[i].capacity > best_capacity) {
 			best_capacity = ctx->paths[i].capacity;
 			best_path_idx = i;
 		}
@@ -987,7 +992,8 @@ u64 olia_cc_increase(struct coupled_cc_ctx *ctx, u8 path_id,
 			inc1 = mss;
 		} else if (!check_mul_overflow(ctx->total_cwnd,
 					       (u64)COUPLED_ALPHA_SCALE,
-					       &denom1) && denom1 > 0) {
+					       &denom1) &&
+			   denom1 > 0) {
 			inc1 = div64_u64(num1, denom1);
 		} else {
 			inc1 = mss;

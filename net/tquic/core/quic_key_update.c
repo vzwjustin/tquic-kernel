@@ -24,6 +24,7 @@
 #include <net/tquic.h>
 #include <net/tquic_frame.h>
 #include "../tquic_debug.h"
+#include "quic_key_update.h"
 
 /* Key update header - internal definitions for crypto state */
 

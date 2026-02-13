@@ -1345,6 +1345,7 @@ EXPORT_SYMBOL_GPL(tquic_conn_flush_paths);
  */
 
 #include "../core/address_discovery.h"
+#include "path_manager.h"
 
 /**
  * tquic_pm_check_address_change - Check for address changes on packet receipt

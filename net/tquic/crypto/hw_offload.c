@@ -30,6 +30,7 @@
 #include <net/tquic.h>
 #include "../tquic_compat.h"
 #include "../tquic_debug.h"
+#include "../tquic_init.h"
 
 #ifdef CONFIG_X86
 #include <asm/cpufeature.h>
@@ -37,13 +38,13 @@
 #endif
 
 /* Cipher suite constants (TLS 1.3) */
-#define TLS_AES_128_GCM_SHA256		0x1301
-#define TLS_AES_256_GCM_SHA384		0x1302
-#define TLS_CHACHA20_POLY1305_SHA256	0x1303
+#define TLS_AES_128_GCM_SHA256 0x1301
+#define TLS_AES_256_GCM_SHA384 0x1302
+#define TLS_CHACHA20_POLY1305_SHA256 0x1303
 
 /* Batch processing constants */
-#define TQUIC_BATCH_MAX_PACKETS		16
-#define TQUIC_AVX512_LANES		8	/* 8 AES blocks in parallel */
+#define TQUIC_BATCH_MAX_PACKETS 16
+#define TQUIC_AVX512_LANES 8 /* 8 AES blocks in parallel */
 
 /**
  * struct tquic_crypto_caps - CPU cryptographic capabilities
@@ -418,8 +419,8 @@ EXPORT_SYMBOL_GPL(tquic_crypto_ctx_free);
  *
  * Return: 0 on success, negative errno on failure
  */
-int tquic_crypto_ctx_set_key(struct tquic_crypto_ctx *ctx,
-			     const u8 *key, size_t key_len)
+int tquic_crypto_ctx_set_key(struct tquic_crypto_ctx *ctx, const u8 *key,
+			     size_t key_len)
 {
 	int ret;
 
@@ -452,8 +453,8 @@ EXPORT_SYMBOL_GPL(tquic_crypto_ctx_set_key);
  *
  * Return: 0 on success, negative errno on failure
  */
-int tquic_crypto_ctx_set_iv(struct tquic_crypto_ctx *ctx,
-			    const u8 *iv, size_t iv_len)
+int tquic_crypto_ctx_set_iv(struct tquic_crypto_ctx *ctx, const u8 *iv,
+			    size_t iv_len)
 {
 	if (!ctx || !iv || iv_len != ctx->iv_len)
 		return -EINVAL;
@@ -499,11 +500,9 @@ static void tquic_hw_create_nonce(const u8 *iv, u64 pkt_num, u8 *nonce)
  *
  * Return: 0 on success, negative errno on failure
  */
-int tquic_hw_encrypt_packet(struct tquic_crypto_ctx *ctx,
-			    const u8 *aad, size_t aad_len,
-			    const u8 *plaintext, size_t pt_len,
-			    u64 pkt_num,
-			    u8 *ciphertext, size_t *ct_len)
+int tquic_hw_encrypt_packet(struct tquic_crypto_ctx *ctx, const u8 *aad,
+			    size_t aad_len, const u8 *plaintext, size_t pt_len,
+			    u64 pkt_num, u8 *ciphertext, size_t *ct_len)
 {
 	struct aead_request *req;
 	struct scatterlist sg_src[2], sg_dst[2];
@@ -577,11 +576,9 @@ EXPORT_SYMBOL_GPL(tquic_hw_encrypt_packet);
  *
  * Return: 0 on success, negative errno on failure (including auth failure)
  */
-int tquic_hw_decrypt_packet(struct tquic_crypto_ctx *ctx,
-			    const u8 *aad, size_t aad_len,
-			    const u8 *ciphertext, size_t ct_len,
-			    u64 pkt_num,
-			    u8 *plaintext, size_t *pt_len)
+int tquic_hw_decrypt_packet(struct tquic_crypto_ctx *ctx, const u8 *aad,
+			    size_t aad_len, const u8 *ciphertext, size_t ct_len,
+			    u64 pkt_num, u8 *plaintext, size_t *pt_len)
 {
 	struct aead_request *req;
 	struct scatterlist sg_src[2], sg_dst[2];
@@ -592,7 +589,7 @@ int tquic_hw_decrypt_packet(struct tquic_crypto_ctx *ctx,
 		return -EINVAL;
 
 	if (ct_len < 16)
-		return -EINVAL;  /* Too short for auth tag */
+		return -EINVAL; /* Too short for auth tag */
 
 	tquic_hw_create_nonce(ctx->iv, pkt_num, nonce);
 
@@ -725,11 +722,9 @@ int tquic_crypto_batch_encrypt(struct tquic_crypto_ctx *ctx,
 				continue;
 			}
 
-			pkt->result = tquic_hw_encrypt_packet(ctx,
-					pkt->aad, pkt->aad_len,
-					pkt->data, pkt->len,
-					pkt->pkt_num,
-					shared_buf, &ct_len);
+			pkt->result = tquic_hw_encrypt_packet(
+				ctx, pkt->aad, pkt->aad_len, pkt->data,
+				pkt->len, pkt->pkt_num, shared_buf, &ct_len);
 
 			if (pkt->result == 0) {
 				memcpy(pkt->data, shared_buf, ct_len);
@@ -799,11 +794,9 @@ int tquic_crypto_batch_decrypt(struct tquic_crypto_ctx *ctx,
 				continue;
 			}
 
-			pkt->result = tquic_hw_decrypt_packet(ctx,
-					pkt->aad, pkt->aad_len,
-					pkt->data, pkt->len,
-					pkt->pkt_num,
-					shared_buf, &pt_len);
+			pkt->result = tquic_hw_decrypt_packet(
+				ctx, pkt->aad, pkt->aad_len, pkt->data,
+				pkt->len, pkt->pkt_num, shared_buf, &pt_len);
 
 			if (pkt->result == 0) {
 				memcpy(pkt->data, shared_buf, pt_len);
@@ -837,7 +830,7 @@ struct tquic_qat_ctx {
 	struct crypto_aead *tfm;
 	bool qat_available;
 	u16 cipher_suite;
-	u8 cached_key[32];	/* Cache last-set key to avoid redundant setkey */
+	u8 cached_key[32]; /* Cache last-set key to avoid redundant setkey */
 	size_t cached_key_len;
 };
 
@@ -872,7 +865,7 @@ int tquic_qat_init(struct tquic_qat_ctx *ctx)
 		pr_debug("tquic_qat: QAT AEAD not available: %ld\n",
 			 PTR_ERR(tfm));
 		ctx->qat_available = false;
-		return 0;  /* Not an error - QAT is optional */
+		return 0; /* Not an error - QAT is optional */
 	}
 
 	ctx->tfm = tfm;
@@ -924,12 +917,10 @@ EXPORT_SYMBOL_GPL(tquic_qat_cleanup);
  *
  * Return: 0 on success, negative errno on failure
  */
-int tquic_qat_encrypt(struct tquic_qat_ctx *ctx,
-		      const u8 *key, size_t key_len,
-		      const u8 *iv, u64 pkt_num,
-		      const u8 *aad, size_t aad_len,
-		      const u8 *plaintext, size_t pt_len,
-		      u8 *ciphertext, size_t *ct_len)
+int tquic_qat_encrypt(struct tquic_qat_ctx *ctx, const u8 *key, size_t key_len,
+		      const u8 *iv, u64 pkt_num, const u8 *aad, size_t aad_len,
+		      const u8 *plaintext, size_t pt_len, u8 *ciphertext,
+		      size_t *ct_len)
 {
 	struct aead_request *req;
 	struct scatterlist sg_src[2], sg_dst[2];
@@ -950,7 +941,8 @@ int tquic_qat_encrypt(struct tquic_qat_ctx *ctx,
 			memzero_explicit(nonce, sizeof(nonce));
 			return ret;
 		}
-		memcpy(ctx->cached_key, key, min(key_len, sizeof(ctx->cached_key)));
+		memcpy(ctx->cached_key, key,
+		       min(key_len, sizeof(ctx->cached_key)));
 		ctx->cached_key_len = key_len;
 	}
 
@@ -1128,9 +1120,9 @@ static int tquic_crypto_caps_open(struct inode *inode, struct file *file)
 }
 
 static const struct proc_ops tquic_crypto_caps_ops = {
-	.proc_open    = tquic_crypto_caps_open,
-	.proc_read    = seq_read,
-	.proc_lseek   = seq_lseek,
+	.proc_open = tquic_crypto_caps_open,
+	.proc_read = seq_read,
+	.proc_lseek = seq_lseek,
 	.proc_release = single_release,
 };
 

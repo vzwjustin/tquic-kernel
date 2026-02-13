@@ -800,4 +800,16 @@ void tquic_update_pacing(struct sock *sk, struct tquic_path *path);
 /* Timer update (tquic_timer.c) */
 void tquic_timer_update(struct tquic_connection *conn);
 
+
+/* Transport parameter helpers (core/quic_connection.c) */
+int tquic_transport_param_parse(struct tquic_connection *conn,
+ttttconst u8 *data, u32 len);
+int tquic_transport_param_apply(struct tquic_connection *conn);
+int tquic_transport_param_encode(struct tquic_connection *conn,
+tttt u8 *buf, u32 buf_len, u32 *written);
+int tquic_transport_param_validate(struct tquic_connection *conn);
+
+/* Coalesced packet processing (core/packet_coalesce_fix.c) */
+void tquic_packet_process_coalesced(struct tquic_connection *conn,
+tttt    struct sk_buff *skb);
 #endif /* _NET_TQUIC_PROTOCOL_H */

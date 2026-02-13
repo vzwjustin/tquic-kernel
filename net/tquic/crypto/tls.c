@@ -20,6 +20,7 @@
 
 #include "../tquic_debug.h"
 #include "header_protection.h"
+#include "tls.h"
 
 /* TLS 1.3 constants */
 #define TLS_HANDSHAKE_TYPE_CLIENT_HELLO	1

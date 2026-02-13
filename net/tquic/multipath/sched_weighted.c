@@ -28,19 +28,20 @@
 #include "tquic_sched.h"
 #include "../bond/tquic_bonding.h"
 #include "../tquic_debug.h"
+#include "../tquic_init.h"
 
 /*
  * Deficit Round-Robin constants
  */
-#define TQUIC_DRR_QUANTUM       1500    /* ~1 MTU per quantum */
-#define TQUIC_DEFAULT_WEIGHT    100     /* Default weight if not configured */
+#define TQUIC_DRR_QUANTUM 1500 /* ~1 MTU per quantum */
+#define TQUIC_DEFAULT_WEIGHT 100 /* Default weight if not configured */
 
 /*
  * Per-path state for weighted scheduling
  */
 struct weighted_path_state {
-	u32 weight;             /* User-configured weight (1-1000) */
-	s32 deficit;            /* Deficit counter (can go negative) */
+	u32 weight; /* User-configured weight (1-1000) */
+	s32 deficit; /* Deficit counter (can go negative) */
 };
 
 /*
@@ -50,9 +51,9 @@ struct weighted_path_state {
  * in the round-robin cycle.
  */
 struct weighted_sched_data {
-	spinlock_t lock;	/* Protects paths[], current_path_idx */
+	spinlock_t lock; /* Protects paths[], current_path_idx */
 	struct weighted_path_state paths[TQUIC_MAX_PATHS];
-	u8 current_path_idx;    /* Current position in RR cycle */
+	u8 current_path_idx; /* Current position in RR cycle */
 };
 
 /*
@@ -65,8 +66,7 @@ struct weighted_sched_data {
  * Returns 0 on success with result filled in, -ENOENT if no active paths.
  */
 static int weighted_get_path(struct tquic_connection *conn,
-			     struct tquic_sched_path_result *result,
-			     u32 flags)
+			     struct tquic_sched_path_result *result, u32 flags)
 {
 	struct weighted_sched_data *sd = conn->sched_priv;
 	struct tquic_path *path;
@@ -125,7 +125,8 @@ static int weighted_get_path(struct tquic_connection *conn,
 			if (ps->deficit > 0) {
 				/* This path can send */
 				ps->deficit -= TQUIC_DRR_QUANTUM;
-				sd->current_path_idx = (idx + 1) % TQUIC_MAX_PATHS;
+				sd->current_path_idx =
+					(idx + 1) % TQUIC_MAX_PATHS;
 
 				result->primary = candidate;
 				result->backup = NULL;
@@ -237,8 +238,7 @@ static void weighted_path_removed(struct tquic_connection *conn,
  * provided for completeness but performs no action.
  */
 static void weighted_ack_received(struct tquic_connection *conn,
-				  struct tquic_path *path,
-				  u64 acked_bytes)
+				  struct tquic_path *path, u64 acked_bytes)
 {
 	/* Weighted scheduler uses static weights - no feedback needed */
 }
@@ -251,8 +251,7 @@ static void weighted_ack_received(struct tquic_connection *conn,
  * provided for completeness but performs no action.
  */
 static void weighted_loss_detected(struct tquic_connection *conn,
-				   struct tquic_path *path,
-				   u64 lost_bytes)
+				   struct tquic_path *path, u64 lost_bytes)
 {
 	/* Weighted scheduler uses static weights - no feedback needed */
 }
@@ -261,15 +260,15 @@ static void weighted_loss_detected(struct tquic_connection *conn,
  * Weighted scheduler operations structure
  */
 static struct tquic_mp_sched_ops tquic_mp_sched_weighted = {
-	.name           = "weighted",
-	.owner          = THIS_MODULE,
-	.get_path       = weighted_get_path,
-	.init           = weighted_init,
-	.release        = weighted_release,
-	.path_added     = weighted_path_added,
-	.path_removed   = weighted_path_removed,
-	.ack_received   = weighted_ack_received,
-	.loss_detected  = weighted_loss_detected,
+	.name = "weighted",
+	.owner = THIS_MODULE,
+	.get_path = weighted_get_path,
+	.init = weighted_init,
+	.release = weighted_release,
+	.path_added = weighted_path_added,
+	.path_removed = weighted_path_removed,
+	.ack_received = weighted_ack_received,
+	.loss_detected = weighted_loss_detected,
 };
 
 int __init tquic_sched_weighted_init(void)

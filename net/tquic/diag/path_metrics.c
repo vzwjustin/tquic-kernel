@@ -39,6 +39,7 @@
 #include "../protocol.h"
 #include <uapi/linux/tquic.h>
 #include <uapi/linux/tquic_diag.h>
+#include "path_metrics.h"
 
 /*
  * =============================================================================

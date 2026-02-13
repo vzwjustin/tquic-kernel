@@ -44,6 +44,8 @@
 #include "path_metrics.h"
 #include "trace.h"
 #include "../tquic_debug.h"
+#include "../tquic_init.h"
+#include "trace_wrappers.h"
 /*
  * =============================================================================
  * Tracepoint Implementations

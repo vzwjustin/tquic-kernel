@@ -126,6 +126,15 @@ struct tquic_rtt_state {
 	ktime_t first_rtt_sample;
 	u32 samples;
 };
+
+/* ACK processing functions */
+void tquic_ack_on_packet_received(struct tquic_connection *conn, u64 pn,
+tttt  u8 pn_space, bool ack_eliciting);
+bool tquic_ack_should_send(struct tquic_connection *conn, u8 pn_space);
+int tquic_ack_create(struct tquic_connection *conn, u8 pn_space,
+tt     u8 *buf, u32 buf_len, u32 *written);
+int __init tquic_ack_init(void);
+void __exit tquic_ack_exit(void);
 #endif
 
 /**
@@ -473,4 +482,13 @@ int __init tquic_ack_init(void);
  */
 void __exit tquic_ack_exit(void);
 
+
+/* ACK processing functions */
+void tquic_ack_on_packet_received(struct tquic_connection *conn, u64 pn,
+tttt  u8 pn_space, bool ack_eliciting);
+bool tquic_ack_should_send(struct tquic_connection *conn, u8 pn_space);
+int tquic_ack_create(struct tquic_connection *conn, u8 pn_space,
+tt     u8 *buf, u32 buf_len, u32 *written);
+int __init tquic_ack_init(void);
+void __exit tquic_ack_exit(void);
 #endif /* _TQUIC_ACK_H */

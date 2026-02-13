@@ -15,6 +15,7 @@
 #include <crypto/gcm.h>
 #include <net/tquic.h>
 #include "tquic_crypto.h"
+#include "quic_crypto.h"
 
 /* TQUIC v1 initial salt (RFC 9001 Section 5.2) */
 static const u8 tquic_v1_initial_salt[20] = {
