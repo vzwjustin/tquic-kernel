@@ -586,6 +586,22 @@ struct tquic_path *tquic_bond_select_path(struct tquic_connection *conn,
 		return path;
 	}
 
+	/*
+	 * Safety: If PM init failed and no paths were added, fall back to
+	 * active_path. This prevents NULL deref when iterating empty list.
+	 */
+	if (list_empty(&conn->paths)) {
+		struct tquic_path *path;
+
+		rcu_read_lock();
+		path = rcu_dereference(conn->active_path);
+		if (path && !tquic_path_get(path))
+			path = NULL;
+		rcu_read_unlock();
+
+		return path;
+	}
+
 	switch (bond->mode) {
 	case TQUIC_BOND_MODE_FAILOVER:
 		/* Use primary unless it's down */
@@ -653,6 +669,12 @@ struct tquic_path *tquic_bond_select_path(struct tquic_connection *conn,
 	    !tquic_path_anti_amplification_check(selected,
 						 skb ? skb->len : 0)) {
 		struct tquic_path *candidate = NULL;
+
+		/* Safety check: don't iterate empty list (PM init failed case) */
+		if (list_empty(&conn->paths)) {
+			tquic_path_put(selected);
+			return NULL;
+		}
 
 		fallback = NULL;
 		list_for_each_entry(fallback, &conn->paths, list) {
