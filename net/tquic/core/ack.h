@@ -456,6 +456,39 @@ bool tquic_should_send_ack(struct tquic_loss_state *loss, u64 pn,
 u64 tquic_get_ack_delay(struct tquic_loss_state *loss);
 
 /*
+ * ACK Processing Functions
+ */
+
+/**
+ * tquic_ack_on_packet_received - Record packet reception for ACK processing
+ * @conn: Connection
+ * @pn: Packet number received
+ * @pn_space: Packet number space
+ */
+void tquic_ack_on_packet_received(struct tquic_connection *conn, u64 pn,
+				  u8 pn_space);
+
+/**
+ * tquic_ack_should_send - Check if ACK frame should be sent
+ * @conn: Connection
+ * @pn_space: Packet number space
+ *
+ * Returns true if an ACK should be sent for the given packet number space.
+ */
+bool tquic_ack_should_send(struct tquic_connection *conn, u8 pn_space);
+
+/**
+ * tquic_ack_create - Create an ACK frame
+ * @conn: Connection
+ * @pn_space: Packet number space
+ * @skb: Socket buffer to write ACK frame into
+ *
+ * Returns number of bytes written or negative error.
+ */
+int tquic_ack_create(struct tquic_connection *conn, u8 pn_space,
+		     struct sk_buff *skb);
+
+/*
  * Module Initialization
  */
 
@@ -467,6 +500,6 @@ int __init tquic_ack_init(void);
 /**
  * tquic_ack_exit - Cleanup ACK/loss detection module
  */
-void __exit tquic_ack_exit(void);
+void tquic_ack_exit(void);
 
 #endif /* _TQUIC_ACK_H */

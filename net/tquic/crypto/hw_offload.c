@@ -31,6 +31,7 @@
 #include "../tquic_compat.h"
 #include "../tquic_debug.h"
 #include "../tquic_init.h"
+#include "hw_offload.h"
 
 #ifdef CONFIG_X86
 #include <asm/cpufeature.h>

@@ -34,6 +34,7 @@
 #include "../core/additional_addresses.h"
 #include "nat_keepalive.h"
 #include "nat_lifecycle.h"
+#include "path_manager.h"
 #include "../tquic_preferred_addr.h"
 
 /* Path probe configuration */

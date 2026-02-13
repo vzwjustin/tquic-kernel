@@ -25,6 +25,7 @@
 
 #include "../tquic_debug.h"
 #include "../protocol.h"
+#include "tquic_bonding.h"
 
 /* Path quality metrics for scheduling decisions */
 struct tquic_path_quality {
