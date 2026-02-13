@@ -92,8 +92,6 @@ jobs:
           KVER="${{ steps.params.outputs.kernel_full }}"
           MAJOR="${{ steps.params.outputs.kernel_major }}"
 
-          download_ok=false
-
           if [ "${{ steps.params.outputs.kernel_testing }}" = "true" ]; then
             URL="https://git.kernel.org/torvalds/t/linux-${KVER}.tar.gz"
             ARCHIVE="linux-${KVER}.tar.gz"
@@ -102,34 +100,16 @@ jobs:
             ARCHIVE="linux-${KVER}.tar.xz"
           fi
 
-          echo "Attempting tarball download: ${URL}"
-          if curl -fSL \
-               --connect-timeout 30 \
-               --max-time 600 \
-               --retry 5 \
-               --retry-delay 10 \
-               --retry-max-time 300 \
-               -o "${ARCHIVE}" "${URL}"; then
-            tar xf "${ARCHIVE}"
-            rm -f "${ARCHIVE}"
-            download_ok=true
-          else
-            echo "::warning::Tarball download failed, falling back to git clone"
-          fi
-
-          if [ "${download_ok}" != "true" ]; then
-            echo "Cloning kernel tree (shallow) for v${KVER}..."
-            TAG="v${KVER}"
-            git clone --depth 1 --branch "${TAG}" \
-              https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git \
-              "linux-${KVER}" \
-            || git clone --depth 1 --branch "${TAG}" \
-              https://github.com/torvalds/linux.git \
-              "linux-${KVER}"
-            download_ok=true
-          fi
-
-          [ -d "linux-${KVER}" ] || { echo "::error::Failed to obtain kernel source"; exit 1; }
+          echo "Downloading: ${URL}"
+          curl -fSL \
+            --connect-timeout 30 \
+            --max-time 600 \
+            --retry 5 \
+            --retry-delay 10 \
+            --retry-max-time 300 \
+            -o "${ARCHIVE}" "${URL}"
+          tar xf "${ARCHIVE}"
+          rm -f "${ARCHIVE}"
 
       - name: Overlay TQUIC integration paths onto upstream kernel
         run: |
@@ -268,9 +248,6 @@ jobs:
           KVER="${{ steps.params.outputs.kernel_full }}"
           MAJOR="${{ steps.params.outputs.kernel_major }}"
 
-          download_ok=false
-
-          # --- Attempt 1: tarball download with generous timeouts ---
           if [ "${{ steps.params.outputs.kernel_testing }}" = "true" ]; then
             URL="https://git.kernel.org/torvalds/t/linux-${KVER}.tar.gz"
             ARCHIVE="linux-${KVER}.tar.gz"
@@ -279,35 +256,16 @@ jobs:
             ARCHIVE="linux-${KVER}.tar.xz"
           fi
 
-          echo "Attempting tarball download: ${URL}"
-          if curl -fSL \
-               --connect-timeout 30 \
-               --max-time 600 \
-               --retry 5 \
-               --retry-delay 10 \
-               --retry-max-time 300 \
-               -o "${ARCHIVE}" "${URL}"; then
-            tar xf "${ARCHIVE}"
-            rm -f "${ARCHIVE}"
-            download_ok=true
-          else
-            echo "::warning::Tarball download failed, falling back to git clone"
-          fi
-
-          # --- Attempt 2: shallow git clone + checkout tag ---
-          if [ "${download_ok}" != "true" ]; then
-            echo "Cloning kernel tree (shallow) for v${KVER}..."
-            TAG="v${KVER}"
-            git clone --depth 1 --branch "${TAG}" \
-              https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git \
-              "linux-${KVER}" \
-            || git clone --depth 1 --branch "${TAG}" \
-              https://github.com/torvalds/linux.git \
-              "linux-${KVER}"
-            download_ok=true
-          fi
-
-          [ -d "linux-${KVER}" ] || { echo "::error::Failed to obtain kernel source"; exit 1; }
+          echo "Downloading: ${URL}"
+          curl -fSL \
+            --connect-timeout 30 \
+            --max-time 600 \
+            --retry 5 \
+            --retry-delay 10 \
+            --retry-max-time 300 \
+            -o "${ARCHIVE}" "${URL}"
+          tar xf "${ARCHIVE}"
+          rm -f "${ARCHIVE}"
 
       - name: Overlay TQUIC integration paths onto upstream kernel
         run: |
