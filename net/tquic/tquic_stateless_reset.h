@@ -303,7 +303,7 @@ int __init tquic_stateless_reset_init(void);
  * Releases resources used by stateless reset subsystem.
  * Called during module exit.
  */
-void __exit tquic_stateless_reset_exit(void);
+void tquic_stateless_reset_exit(void);
 
 /*
  * =============================================================================

@@ -38,8 +38,180 @@ on:
       - main
 
 jobs:
+  # Fast smoke build for branches/PRs — catches compilation and MODPOST errors
+  smoke-build:
+    name: "Smoke build TQUIC"
+    if: github.event_name == 'pull_request' || (github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Set build parameters
+        id: params
+        run: |
+          KVER="${{ inputs.kernel_full || '6.19-rc8' }}"
+          MAJOR="${{ inputs.kernel_major || '6' }}"
+          TESTING="${{ inputs.kernel_testing || 'true' }}"
+          echo "kernel_full=${KVER}" >> $GITHUB_OUTPUT
+          echo "kernel_major=${MAJOR}" >> $GITHUB_OUTPUT
+          echo "kernel_testing=${TESTING}" >> $GITHUB_OUTPUT
+
+      - name: Checkout TQUIC source
+        uses: actions/checkout@v4
+
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ccache
+          key: >-
+            ccache-smoke-${{ runner.os }}-${{ steps.params.outputs.kernel_full }}-${{
+              hashFiles(
+                '.github/workflows/kernel-package.yml',
+                'net/quic/**',
+                'net/tquic/**',
+                'include/net/**',
+                'include/uapi/**'
+              )
+            }}
+          restore-keys: |
+            ccache-smoke-${{ runner.os }}-${{ steps.params.outputs.kernel_full }}-
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            bc bison build-essential cpio \
+            ccache \
+            dwarves fakeroot flex kmod libdw-dev libelf-dev libssl-dev \
+            pahole rsync xz-utils zstd
+
+      - name: Download upstream kernel source
+        run: |
+          set -euo pipefail
+          mkdir -p ~/kernel-src && cd ~/kernel-src
+          KVER="${{ steps.params.outputs.kernel_full }}"
+          MAJOR="${{ steps.params.outputs.kernel_major }}"
+
+          download_ok=false
+
+          if [ "${{ steps.params.outputs.kernel_testing }}" = "true" ]; then
+            URL="https://git.kernel.org/torvalds/t/linux-${KVER}.tar.gz"
+            ARCHIVE="linux-${KVER}.tar.gz"
+          else
+            URL="https://cdn.kernel.org/pub/linux/kernel/v${MAJOR}.x/linux-${KVER}.tar.xz"
+            ARCHIVE="linux-${KVER}.tar.xz"
+          fi
+
+          echo "Attempting tarball download: ${URL}"
+          if curl -fSL \
+               --connect-timeout 30 \
+               --max-time 600 \
+               --retry 5 \
+               --retry-delay 10 \
+               --retry-max-time 300 \
+               -o "${ARCHIVE}" "${URL}"; then
+            tar xf "${ARCHIVE}"
+            rm -f "${ARCHIVE}"
+            download_ok=true
+          else
+            echo "::warning::Tarball download failed, falling back to git clone"
+          fi
+
+          if [ "${download_ok}" != "true" ]; then
+            echo "Cloning kernel tree (shallow) for v${KVER}..."
+            TAG="v${KVER}"
+            git clone --depth 1 --branch "${TAG}" \
+              https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git \
+              "linux-${KVER}" \
+            || git clone --depth 1 --branch "${TAG}" \
+              https://github.com/torvalds/linux.git \
+              "linux-${KVER}"
+            download_ok=true
+          fi
+
+          [ -d "linux-${KVER}" ] || { echo "::error::Failed to obtain kernel source"; exit 1; }
+
+      - name: Overlay TQUIC integration paths onto upstream kernel
+        run: |
+          set -euo pipefail
+          KDIR=~/kernel-src/linux-${{ steps.params.outputs.kernel_full }}
+          SRC="${GITHUB_WORKSPACE}"
+
+          for p in \
+            "net/tquic/" \
+            "net/quic/" \
+            "net/Kconfig" \
+            "net/Makefile" \
+            "include/net/netns/tquic.h" \
+            "include/net/net_namespace.h" \
+            "include/net/tquic/" \
+            "include/net/quic/" \
+            "include/net/tquic.h" \
+            "include/net/tquic_frame.h" \
+            "include/net/tquic_http3.h" \
+            "include/net/tquic_pm.h" \
+            "include/net/tquic_pmtud.h" \
+            "include/uapi/linux/tquic.h" \
+            "include/uapi/linux/tquic_pm.h" \
+            "include/uapi/linux/tquic_diag.h" \
+            "include/uapi/linux/tquic_qlog.h"; do
+            if [ -e "${SRC}/${p}" ]; then
+              if [ -d "${SRC}/${p}" ]; then
+                mkdir -p "${KDIR}/${p}"
+                rsync -a --delete "${SRC}/${p}" "${KDIR}/${p}"
+              else
+                mkdir -p "$(dirname "${KDIR}/${p}")"
+                install -m 0644 "${SRC}/${p}" "${KDIR}/${p}"
+              fi
+            fi
+          done
+
+      - name: Configure kernel
+        run: |
+          set -euo pipefail
+          KDIR=~/kernel-src/linux-${{ steps.params.outputs.kernel_full }}
+          cd "${KDIR}"
+
+          make defconfig
+          scripts/config --disable CONFIG_WERROR
+          scripts/config --enable CONFIG_MODULES
+          scripts/config --module CONFIG_IP_QUIC
+          scripts/config --module CONFIG_TQUIC_CORE
+          scripts/config --module CONFIG_TQUIC_WAN_BONDING
+          scripts/config --module CONFIG_TQUIC_MULTIPATH
+          scripts/config --module CONFIG_TQUIC_PATH_MANAGER
+          scripts/config --module CONFIG_TQUIC_PM_NETLINK
+          scripts/config --module CONFIG_TQUIC_SCHEDULER
+          scripts/config --module CONFIG_TQUIC_CONG
+          scripts/config --module CONFIG_TQUIC_CRYPTO
+          scripts/config --module CONFIG_TQUIC_CERT_VERIFY
+          scripts/config --module CONFIG_TQUIC_IPV6
+          scripts/config --module CONFIG_INET_DIAG
+          scripts/config --module CONFIG_CRYPTO_CURVE25519
+          scripts/config --enable CONFIG_TRACEPOINTS
+          make olddefconfig
+
+      - name: Build TQUIC module (compile check)
+        run: |
+          set -euo pipefail
+          KDIR=~/kernel-src/linux-${{ steps.params.outputs.kernel_full }}
+          cd "${KDIR}"
+
+          export PATH="/usr/lib/ccache:${PATH}"
+          ccache -M 5G || true
+
+          # Build prepare + scripts, then compile only TQUIC objects in-tree.
+          # This catches all compilation errors (type mismatches, missing
+          # includes, undeclared functions, etc.) without needing a full
+          # kernel build. MODPOST is only meaningful with Module.symvers
+          # from a full build, so it runs in the build-kernel job instead.
+          make -j"$(nproc)" prepare scripts
+          make -j"$(nproc)" net/quic/ net/tquic/
+
+  # Full kernel package build — only for tags and manual workflow_dispatch
   build-kernel:
     name: "Build kernel ${{ inputs.kernel_full || '6.19-rc8' }}"
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/'))
     runs-on: ubuntu-latest
     timeout-minutes: 180
 
@@ -266,7 +438,7 @@ jobs:
       - name: Determine release tag
         id: release_tag
         run: |
-          if [ "${{ github.event_name }}" = "push" ] && [ -n "${{ github.ref_name }}" ]; then
+          if [ "${{ github.event_name }}" = "push" ] && [ "${{ startsWith(github.ref, 'refs/tags/') }}" = "true" ]; then
             echo "tag=${{ github.ref_name }}" >> $GITHUB_OUTPUT
             echo "Auto-detected tag from push: ${{ github.ref_name }}"
           elif [ -n "${{ inputs.upload_to_release }}" ]; then

@@ -399,7 +399,7 @@ int __init tquic_token_init(void);
  *
  * Called during module unload.
  */
-void __exit tquic_token_exit(void);
+void tquic_token_exit(void);
 
 /*
  * =============================================================================
