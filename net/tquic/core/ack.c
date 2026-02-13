@@ -149,8 +149,8 @@ struct tquic_ack_frame;
 void tquic_process_ecn(struct tquic_loss_state *loss,
 		       const struct tquic_ack_frame *frame,
 		       struct tquic_path *path);
-void tquic_set_loss_detection_timer(struct tquic_loss_state *loss,
-				    struct tquic_connection *conn);
+static void tquic_ack_set_loss_detection_timer(struct tquic_loss_state *loss,
+					       struct tquic_connection *conn);
 
 /*
  * =============================================================================
@@ -1558,7 +1558,7 @@ int tquic_on_ack_received(struct tquic_loss_state *loss, int pn_space,
 	/*
 	 * Step 12: Set loss detection timer
 	 */
-	tquic_set_loss_detection_timer(loss, conn);
+	tquic_ack_set_loss_detection_timer(loss, conn);
 
 	return ret;
 }
@@ -1713,7 +1713,7 @@ static void tquic_loss_detection_timeout(struct timer_list *t)
 		}
 	}
 
-	tquic_set_loss_detection_timer(loss, conn);
+	tquic_ack_set_loss_detection_timer(loss, conn);
 	return;
 
 handle_lost:
@@ -1740,7 +1740,7 @@ handle_lost:
 		}
 	}
 
-	tquic_set_loss_detection_timer(loss, conn);
+	tquic_ack_set_loss_detection_timer(loss, conn);
 }
 
 /**
@@ -1752,8 +1752,8 @@ handle_lost:
  * 1. Time threshold loss detection (if loss_time is set)
  * 2. PTO expiration (if ACK-eliciting packets are in flight)
  */
-void tquic_set_loss_detection_timer(struct tquic_loss_state *loss,
-				    struct tquic_connection *conn)
+static void tquic_ack_set_loss_detection_timer(struct tquic_loss_state *loss,
+					       struct tquic_connection *conn)
 {
 	ktime_t earliest_loss_time = 0;
 	ktime_t pto_time = 0;

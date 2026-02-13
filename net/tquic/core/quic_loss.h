@@ -41,7 +41,7 @@ void tquic_loss_detection_on_timeout(struct tquic_connection *conn);
 void tquic_loss_on_packet_number_space_discarded(struct tquic_connection *conn,
 						 u8 pn_space_idx);
 void tquic_loss_mark_packet_lost(struct tquic_connection *conn,
-				 struct tquic_sent_packet *pkt);
+				 u8 pn_space_idx, u64 pn);
 
 /* Statistics and queries */
 u64 tquic_loss_get_bytes_in_flight(struct tquic_connection *conn);

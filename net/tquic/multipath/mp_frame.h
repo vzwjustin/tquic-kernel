@@ -433,12 +433,15 @@ void tquic_mp_frame_exit(void);
 
 
 /* Deadline-aware path selection (mp_deadline.c) */
-struct tquic_path *mp_deadline_select_best_path(
-tstruct tquic_connection *conn, u32 size);
-void mp_deadline_record_delivery(
-tstruct tquic_connection *conn, struct tquic_path *path, u32 size);
-struct tquic_mp_deadline_coordinator *tquic_mp_deadline_coordinator_create(
-tstruct tquic_connection *conn);
+struct tquic_mp_deadline_coordinator;
+struct tquic_path *
+mp_deadline_select_best_path(struct tquic_mp_deadline_coordinator *coord,
+			     u64 deadline_us, size_t data_len);
+void mp_deadline_record_delivery(struct tquic_mp_deadline_coordinator *coord,
+				 struct tquic_path *path, bool deadline_met,
+				 u64 delivery_time_us);
+struct tquic_mp_deadline_coordinator *
+tquic_mp_deadline_coordinator_create(struct tquic_connection *conn);
 void tquic_mp_deadline_coordinator_destroy(
-tstruct tquic_mp_deadline_coordinator *coord);
+	struct tquic_mp_deadline_coordinator *coord);
 #endif /* _TQUIC_MULTIPATH_MP_FRAME_H */
