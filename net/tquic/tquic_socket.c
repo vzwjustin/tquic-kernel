@@ -276,6 +276,9 @@ int tquic_connect(struct sock *sk, TQUIC_SOCKADDR *uaddr, int addr_len)
 		return -EINVAL;
 	}
 
+	/* Set socket reference for PM and path management */
+	conn->sk = sk;
+
 	/* Store peer address */
 	memcpy(&tsk->connect_addr, addr,
 	       min_t(size_t, addr_len, sizeof(struct sockaddr_storage)));

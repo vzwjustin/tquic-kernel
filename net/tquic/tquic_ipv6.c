@@ -391,6 +391,9 @@ static int tquic_v6_connect(struct sock *sk, struct sockaddr_unsized *addr, int 
 	if (!conn)
 		return -EINVAL;
 
+	/* Set socket reference for PM and path management */
+	conn->sk = sk;
+
 	memset(&fl6, 0, sizeof(fl6));
 
 	/* Handle flow label from sockaddr */
