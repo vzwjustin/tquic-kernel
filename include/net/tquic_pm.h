@@ -171,17 +171,17 @@ void tquic_pm_free_path_id(struct net *net, u32 path_id);
 
 /* Module initialization */
 int __init tquic_pm_types_init(void);
-void __exit tquic_pm_types_exit(void);
+void tquic_pm_types_exit(void);
 
 /* Netlink interface */
 int __init tquic_pm_nl_init(void);
-void __exit tquic_pm_nl_exit(void);
+void tquic_pm_nl_exit(void);
 int tquic_pm_nl_send_event(struct net *net, struct tquic_connection *conn,
 			   struct tquic_path *path, int event_type);
 
 /* Userspace PM */
 int __init tquic_pm_userspace_init(void);
-void __exit tquic_pm_userspace_exit(void);
+void tquic_pm_userspace_exit(void);
 extern struct tquic_pm_ops userspace_pm_ops;
 
 /* Internal PM functions */

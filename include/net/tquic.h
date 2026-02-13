@@ -2138,7 +2138,7 @@ void tquic_gro_get_stats(u64 *coalesced, u64 *flushes, u64 *avg_aggregation);
 
 /* Offload initialization */
 int __init tquic_offload_init(void);
-void __exit tquic_offload_exit(void);
+void tquic_offload_exit(void);
 
 /*
  * DATAGRAM Frame Support (RFC 9221)
@@ -2333,7 +2333,7 @@ bool tquic_hs_is_psk_mode(struct tquic_handshake *hs);
 
 /* Module init/exit */
 int __init tquic_cert_verify_init(void);
-void __exit tquic_cert_verify_exit(void);
+void tquic_cert_verify_exit(void);
 
 #endif /* CONFIG_TQUIC_CERT_VERIFY */
 
@@ -2362,11 +2362,11 @@ void __exit tquic_netlink_exit(void);
 
 /* Sysctl interface */
 int __init tquic_sysctl_init(struct net *net);
-void __exit tquic_sysctl_exit(void);
+void tquic_sysctl_exit(void);
 
 /* Protocol handler registration */
 int __init tquic_proto_init(void);
-void __exit tquic_proto_exit(void);
+void tquic_proto_exit(void);
 
 /* Socket operations (tquic_socket.c) */
 int tquic_init_sock(struct sock *sk);
@@ -2408,7 +2408,7 @@ ssize_t tquic_splice_read_socket(struct socket *sock, loff_t *ppos,
 
 /* Diagnostics (ss tool integration) */
 int __init tquic_diag_init(void);
-void __exit tquic_diag_exit(void);
+void tquic_diag_exit(void);
 
 /* MIB statistics (net/tquic/tquic_mib.c) */
 struct seq_file;
@@ -2809,7 +2809,7 @@ int tquic_udp_icsk_bind(struct sock *sk, struct sockaddr *uaddr, int addr_len);
 
 /* Module initialization */
 int __init tquic_udp_init(void);
-void __exit tquic_udp_exit(void);
+void tquic_udp_exit(void);
 
 /*
  * Timer and Recovery System
@@ -2929,7 +2929,7 @@ void tquic_timer_get_recovery_stats(struct tquic_timer_state *ts,
 
 /* Timer subsystem initialization */
 int __init tquic_timer_init(void);
-void __exit tquic_timer_exit(void);
+void tquic_timer_exit(void);
 
 /*
  * =============================================================================
@@ -2971,7 +2971,7 @@ int tquic_pmtud_sysctl_probe_interval(void);
 
 /* PMTUD subsystem initialization */
 int __init tquic_pmtud_init(void);
-void __exit tquic_pmtud_exit(void);
+void tquic_pmtud_exit(void);
 
 /*
  * =============================================================================
@@ -3318,7 +3318,7 @@ bool tquic_tunnel_is_tproxy(struct tquic_tunnel *tunnel);
 
 /* Tunnel subsystem init/exit */
 int __init tquic_tunnel_init(void);
-void __exit tquic_tunnel_exit(void);
+void tquic_tunnel_exit(void);
 
 /*
  * =============================================================================
@@ -3346,7 +3346,7 @@ void tquic_qos_get_stats(u8 traffic_class, u64 *packets, u64 *bytes, u64 *drops)
 
 /* QoS subsystem init/exit */
 int __init tquic_qos_init(void);
-void __exit tquic_qos_exit(void);
+void tquic_qos_exit(void);
 
 /*
  * =============================================================================
@@ -3388,7 +3388,7 @@ int tquic_forward_check_gro_gso(struct net_device *dev);
 
 /* Forwarding subsystem init/exit */
 int __init tquic_forward_init(void);
-void __exit tquic_forward_exit(void);
+void tquic_forward_exit(void);
 
 /*
  * =============================================================================
