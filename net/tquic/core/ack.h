@@ -76,21 +76,10 @@ struct tquic_ack_frequency_state;
 struct tquic_ack_frequency_frame;
 struct tquic_receive_ts_state;
 
-/**
- * struct tquic_ack_range - A range of acknowledged packet numbers
- * @start: First packet number in range (inclusive)
- * @end: Last packet number in range (inclusive)
- * @list: List linkage
- *
- * This is the internal ACK range tracking struct used for loss detection.
- * Not to be confused with tquic_ack_range in tquic_frame.h which is for
- * encoding/decoding ACK frames on the wire.
+/*
+ * Note: struct tquic_ack_range is defined in include/net/tquic_frame.h
+ * for ACK frame wire format encoding/decoding (with gap and ack_range_len fields).
  */
-struct tquic_ack_range {
-	u64 start;
-	u64 end;
-	struct list_head list;
-};
 
 /**
  * struct tquic_ecn_counts - ECN counters
