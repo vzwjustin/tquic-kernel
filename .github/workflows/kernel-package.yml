@@ -8,9 +8,9 @@ on:
   workflow_dispatch:
     inputs:
       kernel_full:
-        description: "Kernel version to build (example: 6.19-rc8, 6.12.69)"
+        description: "Kernel version to build (example: 6.19, 6.12.69)"
         required: true
-        default: "6.19-rc8"
+        default: "6.19"
       kernel_major:
         description: "Kernel major series for stable releases (example: 6)"
         required: true
@@ -18,7 +18,7 @@ on:
       kernel_testing:
         description: "Use kernel.org testing tree (true for rc kernels)"
         required: true
-        default: "true"
+        default: "false"
       artifact_name:
         description: "Artifact bundle name"
         required: true
@@ -49,9 +49,9 @@ jobs:
       - name: Set build parameters
         id: params
         run: |
-          KVER="${{ inputs.kernel_full || '6.19-rc8' }}"
+          KVER="${{ inputs.kernel_full || '6.19' }}"
           MAJOR="${{ inputs.kernel_major || '6' }}"
-          TESTING="${{ inputs.kernel_testing || 'true' }}"
+          TESTING="${{ inputs.kernel_testing || 'false' }}"
           echo "kernel_full=${KVER}" >> $GITHUB_OUTPUT
           echo "kernel_major=${MAJOR}" >> $GITHUB_OUTPUT
           echo "kernel_testing=${TESTING}" >> $GITHUB_OUTPUT
@@ -92,8 +92,6 @@ jobs:
           KVER="${{ steps.params.outputs.kernel_full }}"
           MAJOR="${{ steps.params.outputs.kernel_major }}"
 
-          download_ok=false
-
           if [ "${{ steps.params.outputs.kernel_testing }}" = "true" ]; then
             URL="https://git.kernel.org/torvalds/t/linux-${KVER}.tar.gz"
             ARCHIVE="linux-${KVER}.tar.gz"
@@ -102,34 +100,16 @@ jobs:
             ARCHIVE="linux-${KVER}.tar.xz"
           fi
 
-          echo "Attempting tarball download: ${URL}"
-          if curl -fSL \
-               --connect-timeout 30 \
-               --max-time 600 \
-               --retry 5 \
-               --retry-delay 10 \
-               --retry-max-time 300 \
-               -o "${ARCHIVE}" "${URL}"; then
-            tar xf "${ARCHIVE}"
-            rm -f "${ARCHIVE}"
-            download_ok=true
-          else
-            echo "::warning::Tarball download failed, falling back to git clone"
-          fi
-
-          if [ "${download_ok}" != "true" ]; then
-            echo "Cloning kernel tree (shallow) for v${KVER}..."
-            TAG="v${KVER}"
-            git clone --depth 1 --branch "${TAG}" \
-              https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git \
-              "linux-${KVER}" \
-            || git clone --depth 1 --branch "${TAG}" \
-              https://github.com/torvalds/linux.git \
-              "linux-${KVER}"
-            download_ok=true
-          fi
-
-          [ -d "linux-${KVER}" ] || { echo "::error::Failed to obtain kernel source"; exit 1; }
+          echo "Downloading: ${URL}"
+          curl -fSL \
+            --connect-timeout 30 \
+            --max-time 600 \
+            --retry 5 \
+            --retry-delay 10 \
+            --retry-max-time 300 \
+            -o "${ARCHIVE}" "${URL}"
+          tar xf "${ARCHIVE}"
+          rm -f "${ARCHIVE}"
 
       - name: Overlay TQUIC integration paths onto upstream kernel
         run: |
@@ -210,7 +190,7 @@ jobs:
 
   # Full kernel package build — only for tags and manual workflow_dispatch
   build-kernel:
-    name: "Build kernel ${{ inputs.kernel_full || '6.19-rc8' }}"
+    name: "Build kernel ${{ inputs.kernel_full || '6.19' }}"
     if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/'))
     runs-on: ubuntu-latest
     timeout-minutes: 180
@@ -220,9 +200,9 @@ jobs:
         id: params
         run: |
           # Use inputs if workflow_dispatch, otherwise use defaults for tag push
-          KVER="${{ inputs.kernel_full || '6.19-rc8' }}"
+          KVER="${{ inputs.kernel_full || '6.19' }}"
           MAJOR="${{ inputs.kernel_major || '6' }}"
-          TESTING="${{ inputs.kernel_testing || 'true' }}"
+          TESTING="${{ inputs.kernel_testing || 'false' }}"
           ARTIFACT="${{ inputs.artifact_name || 'tquic-kernel-debs' }}"
 
           echo "kernel_full=${KVER}" >> $GITHUB_OUTPUT
@@ -268,9 +248,6 @@ jobs:
           KVER="${{ steps.params.outputs.kernel_full }}"
           MAJOR="${{ steps.params.outputs.kernel_major }}"
 
-          download_ok=false
-
-          # --- Attempt 1: tarball download with generous timeouts ---
           if [ "${{ steps.params.outputs.kernel_testing }}" = "true" ]; then
             URL="https://git.kernel.org/torvalds/t/linux-${KVER}.tar.gz"
             ARCHIVE="linux-${KVER}.tar.gz"
@@ -279,35 +256,16 @@ jobs:
             ARCHIVE="linux-${KVER}.tar.xz"
           fi
 
-          echo "Attempting tarball download: ${URL}"
-          if curl -fSL \
-               --connect-timeout 30 \
-               --max-time 600 \
-               --retry 5 \
-               --retry-delay 10 \
-               --retry-max-time 300 \
-               -o "${ARCHIVE}" "${URL}"; then
-            tar xf "${ARCHIVE}"
-            rm -f "${ARCHIVE}"
-            download_ok=true
-          else
-            echo "::warning::Tarball download failed, falling back to git clone"
-          fi
-
-          # --- Attempt 2: shallow git clone + checkout tag ---
-          if [ "${download_ok}" != "true" ]; then
-            echo "Cloning kernel tree (shallow) for v${KVER}..."
-            TAG="v${KVER}"
-            git clone --depth 1 --branch "${TAG}" \
-              https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git \
-              "linux-${KVER}" \
-            || git clone --depth 1 --branch "${TAG}" \
-              https://github.com/torvalds/linux.git \
-              "linux-${KVER}"
-            download_ok=true
-          fi
-
-          [ -d "linux-${KVER}" ] || { echo "::error::Failed to obtain kernel source"; exit 1; }
+          echo "Downloading: ${URL}"
+          curl -fSL \
+            --connect-timeout 30 \
+            --max-time 600 \
+            --retry 5 \
+            --retry-delay 10 \
+            --retry-max-time 300 \
+            -o "${ARCHIVE}" "${URL}"
+          tar xf "${ARCHIVE}"
+          rm -f "${ARCHIVE}"
 
       - name: Overlay TQUIC integration paths onto upstream kernel
         run: |
