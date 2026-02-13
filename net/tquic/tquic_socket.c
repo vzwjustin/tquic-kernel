@@ -325,8 +325,11 @@ int tquic_connect(struct sock *sk, TQUIC_SOCKADDR *uaddr, int addr_len)
 	inet_sk_set_state(sk, TCP_ESTABLISHED);
 
 	/* Initialize path manager after connection established */
+	pr_info("TQUIC PM DEBUG: calling tquic_pm_conn_init from socket.c (conn=%p)\n", conn);
 	ret = tquic_pm_conn_init(conn);
+	pr_info("TQUIC PM DEBUG: tquic_pm_conn_init returned %d\n", ret);
 	if (ret < 0) {
+		pr_err("TQUIC PM DEBUG: PM init failed with error %d\n", ret);
 		tquic_warn("PM init failed (%d), multipath disabled\n", ret);
 		tsk->flags |= TQUIC_F_PM_DISABLED;
 		tsk->flags &= ~TQUIC_F_MULTIPATH_ENABLED;

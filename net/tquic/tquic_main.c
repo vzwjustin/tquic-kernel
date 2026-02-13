@@ -492,36 +492,55 @@ int tquic_pm_conn_init(struct tquic_connection *conn)
 	struct tquic_pm_state *pm_state;
 	struct tquic_net *tn;
 
-	if (!conn || !conn->sk)
+	pr_info("TQUIC PM DEBUG: tquic_pm_conn_init entry\n");
+
+	if (!conn || !conn->sk) {
+		pr_err("TQUIC PM DEBUG: conn or sk is NULL (conn=%p, sk=%p)\n",
+		       conn, conn ? conn->sk : NULL);
 		return -EINVAL;
+	}
 
 	net = sock_net(conn->sk);
+	pr_info("TQUIC PM DEBUG: got net=%p\n", net);
 
 	pernet = tquic_pm_get_pernet(net);
-	if (!pernet)
+	if (!pernet) {
+		pr_err("TQUIC PM DEBUG: pernet is NULL\n");
 		return -ENOENT;
+	}
+	pr_info("TQUIC PM DEBUG: pernet=%p, pm_type=%u\n", pernet, pernet->pm_type);
 
 	tn = tquic_pernet(net);
-	if (!tn)
+	if (!tn) {
+		pr_err("TQUIC PM DEBUG: tn is NULL\n");
 		return -ENOENT;
+	}
+	pr_info("TQUIC PM DEBUG: tn=%p\n", tn);
 
 	/* Get PM ops for current type */
 	ops = tquic_pm_get_type(net);
 	if (!ops) {
+		pr_err("TQUIC PM DEBUG: no PM ops registered for type %u\n",
+		       pernet->pm_type);
 		tquic_warn("no PM ops registered for type %u\n",
 			   pernet->pm_type);
 		return -ENOENT;
 	}
+	pr_info("TQUIC PM DEBUG: ops=%p, name=%s\n", ops, ops->name);
 
 	/* Allocate PM state */
 	pm_state = kzalloc(sizeof(*pm_state), GFP_KERNEL);
-	if (!pm_state)
+	if (!pm_state) {
+		pr_err("TQUIC PM DEBUG: kzalloc failed for pm_state\n");
 		return -ENOMEM;
+	}
+	pr_info("TQUIC PM DEBUG: pm_state allocated at %p\n", pm_state);
 
 	pm_state->ops = ops;
 	pm_state->priv = NULL;
 
 	conn->pm = pm_state;
+	pr_info("TQUIC PM DEBUG: conn->pm set\n");
 
 	/* Generate unique connection token for netlink identification */
 	conn->token = get_random_u32();
@@ -531,11 +550,15 @@ int tquic_pm_conn_init(struct tquic_connection *conn)
 	 * This enables lookup by token via tquic_conn_lookup_by_token().
 	 * Use RCU-safe list operations for concurrent read access.
 	 */
+	pr_info("TQUIC PM DEBUG: initializing pm_node\n");
 	INIT_LIST_HEAD(&conn->pm_node);
+	pr_info("TQUIC PM DEBUG: adding to connection list\n");
 	spin_lock_bh(&tn->conn_lock);
 	list_add_tail_rcu(&conn->pm_node, &tn->connections);
 	atomic_inc(&tn->conn_count);
 	spin_unlock_bh(&tn->conn_lock);
+	pr_info("TQUIC PM DEBUG: added to list, conn_count=%d\n",
+		atomic_read(&tn->conn_count));
 
 	/*
 	 * Note: PM-type per-namespace init (ops->init) is called once per
@@ -553,9 +576,11 @@ int tquic_pm_conn_init(struct tquic_connection *conn)
 		 * when interfaces are already up. The notifier was
 		 * registered in tquic_pm_kernel_init().
 		 */
+		pr_info("TQUIC PM DEBUG: kernel PM with auto_discover\n");
 		tquic_dbg("kernel PM initialized with auto_discover\n");
 	}
 
+	pr_info("TQUIC PM DEBUG: tquic_pm_conn_init SUCCESS, returning 0\n");
 	return 0;
 }
 EXPORT_SYMBOL_GPL(tquic_pm_conn_init);
