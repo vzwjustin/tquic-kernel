@@ -1076,7 +1076,7 @@ static struct proc_dir_entry *tquic_proc_dir;
  *
  * Returns: 0 on success, negative errno on failure
  */
-int __init tquic_path_metrics_init(struct net *net)
+int tquic_path_metrics_init(struct net *net)
 {
 	int ret;
 
@@ -1115,7 +1115,7 @@ int __init tquic_path_metrics_init(struct net *net)
  * tquic_path_metrics_exit - Cleanup path metrics subsystem
  * @net: Network namespace
  */
-void __exit tquic_path_metrics_exit(struct net *net)
+void tquic_path_metrics_exit(struct net *net)
 {
 	struct tquic_metrics_subscription *sub, *tmp;
 

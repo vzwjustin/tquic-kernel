@@ -204,12 +204,12 @@ int tquic_diag_get_path_info(struct tquic_connection *conn,
  *
  * Returns: 0 on success, negative errno on failure
  */
-int __init tquic_path_metrics_init(struct net *net);
+int tquic_path_metrics_init(struct net *net);
 
 /**
  * tquic_path_metrics_exit - Cleanup path metrics subsystem
  * @net: Network namespace
  */
-void __exit tquic_path_metrics_exit(struct net *net);
+void tquic_path_metrics_exit(struct net *net);
 
 #endif /* _TQUIC_PATH_METRICS_H */
