@@ -38,72 +38,8 @@
 #include <asm/fpu/api.h>
 #endif
 
-/* Cipher suite constants (TLS 1.3) */
-#define TLS_AES_128_GCM_SHA256 0x1301
-#define TLS_AES_256_GCM_SHA384 0x1302
-#define TLS_CHACHA20_POLY1305_SHA256 0x1303
-
-/* Batch processing constants */
-#define TQUIC_BATCH_MAX_PACKETS 16
+/* AVX-512 batch processing lanes */
 #define TQUIC_AVX512_LANES 8 /* 8 AES blocks in parallel */
-
-/**
- * struct tquic_crypto_caps - CPU cryptographic capabilities
- * @aes_ni:        AES-NI instruction support
- * @avx2:          AVX2 support (for ChaCha20 acceleration)
- * @avx512:        AVX-512 support (for batch processing)
- * @vaes:          Vector AES support (AVX-512 AES)
- * @vpclmulqdq:    Vector PCLMULQDQ for parallel GCM
- * @pclmulqdq:     Standard PCLMULQDQ support
- * @sha_ni:        SHA-NI instructions
- * @detected:      True if detection has been performed
- */
-struct tquic_crypto_caps {
-	bool aes_ni;
-	bool avx2;
-	bool avx512;
-	bool vaes;
-	bool vpclmulqdq;
-	bool pclmulqdq;
-	bool sha_ni;
-	bool detected;
-};
-
-/**
- * enum tquic_crypto_impl - Crypto implementation selection
- * @TQUIC_CRYPTO_GENERIC:   Software fallback implementation
- * @TQUIC_CRYPTO_AESNI:     AES-NI accelerated (single block)
- * @TQUIC_CRYPTO_AVX2:      AVX2 accelerated (ChaCha20, parallel ops)
- * @TQUIC_CRYPTO_AVX512:    AVX-512 accelerated (batch processing)
- */
-enum tquic_crypto_impl {
-	TQUIC_CRYPTO_GENERIC = 0,
-	TQUIC_CRYPTO_AESNI,
-	TQUIC_CRYPTO_AVX2,
-	TQUIC_CRYPTO_AVX512,
-};
-
-/**
- * struct tquic_crypto_stats - Per-CPU crypto operation statistics
- * @aesni_ops:     Operations using AES-NI
- * @avx2_ops:      Operations using AVX2
- * @avx512_ops:    Operations using AVX-512
- * @generic_ops:   Operations using generic fallback
- * @qat_ops:       Operations using Intel QAT
- * @total_bytes:   Total bytes encrypted/decrypted
- * @batch_ops:     Batch encryption operations
- * @batch_packets: Total packets in batch operations
- */
-struct tquic_crypto_stats {
-	u64 aesni_ops;
-	u64 avx2_ops;
-	u64 avx512_ops;
-	u64 generic_ops;
-	u64 qat_ops;
-	u64 total_bytes;
-	u64 batch_ops;
-	u64 batch_packets;
-};
 
 /**
  * struct tquic_crypto_ctx - Crypto context for TQUIC connection
@@ -123,30 +59,6 @@ struct tquic_crypto_ctx {
 	u8 key_len;
 	u8 iv[12];
 	u8 iv_len;
-};
-
-/**
- * struct tquic_hw_packet - Packet structure for batch crypto operations
- * @data:          Packet data pointer
- * @len:           Packet data length (plaintext for encrypt, ciphertext for decrypt)
- * @data_buf_len:  Total allocated size of data buffer. For encryption, must be
- *                 at least len + 16 to accommodate the AEAD authentication tag.
- * @pkt_num:       Packet number for nonce construction
- * @aad:           Additional authenticated data
- * @aad_len:       AAD length
- * @result:        Encryption/decryption result
- *
- * Note: Named tquic_hw_packet to avoid conflict with struct tquic_packet
- * defined in net/tquic.h for general packet handling.
- */
-struct tquic_hw_packet {
-	u8 *data;
-	size_t len;
-	size_t data_buf_len;
-	u64 pkt_num;
-	u8 *aad;
-	size_t aad_len;
-	int result;
 };
 
 /* Global capabilities (detected once at init) */
