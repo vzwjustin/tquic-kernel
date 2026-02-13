@@ -160,12 +160,12 @@ jobs:
           scripts/config --module CONFIG_TQUIC_WAN_BONDING
           scripts/config --module CONFIG_TQUIC_MULTIPATH
           scripts/config --module CONFIG_TQUIC_PATH_MANAGER
-          scripts/config --module CONFIG_TQUIC_PM_NETLINK
+          scripts/config --enable CONFIG_TQUIC_PM_NETLINK      # bool, not tristate
           scripts/config --module CONFIG_TQUIC_SCHEDULER
-          scripts/config --module CONFIG_TQUIC_CONG
+          scripts/config --enable CONFIG_TQUIC_CONG            # bool, not tristate
           scripts/config --module CONFIG_TQUIC_CRYPTO
-          scripts/config --module CONFIG_TQUIC_CERT_VERIFY
-          scripts/config --module CONFIG_TQUIC_IPV6
+          scripts/config --enable CONFIG_TQUIC_CERT_VERIFY     # bool, not tristate
+          scripts/config --enable CONFIG_TQUIC_IPV6            # bool, not tristate
           scripts/config --module CONFIG_INET_DIAG
           scripts/config --module CONFIG_CRYPTO_CURVE25519
           scripts/config --enable CONFIG_TRACEPOINTS
@@ -347,12 +347,12 @@ jobs:
           scripts/config --module CONFIG_TQUIC_WAN_BONDING
           scripts/config --module CONFIG_TQUIC_MULTIPATH
           scripts/config --module CONFIG_TQUIC_PATH_MANAGER
-          scripts/config --module CONFIG_TQUIC_PM_NETLINK
+          scripts/config --enable CONFIG_TQUIC_PM_NETLINK      # bool, not tristate
           scripts/config --module CONFIG_TQUIC_SCHEDULER
-          scripts/config --module CONFIG_TQUIC_CONG
+          scripts/config --enable CONFIG_TQUIC_CONG            # bool, not tristate
           scripts/config --module CONFIG_TQUIC_CRYPTO
-          scripts/config --module CONFIG_TQUIC_CERT_VERIFY
-          scripts/config --module CONFIG_TQUIC_IPV6
+          scripts/config --enable CONFIG_TQUIC_CERT_VERIFY     # bool, not tristate
+          scripts/config --enable CONFIG_TQUIC_IPV6            # bool, not tristate
 
           # Enable dependencies as modules
           scripts/config --module CONFIG_INET_DIAG
