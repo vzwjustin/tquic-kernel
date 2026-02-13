@@ -542,7 +542,7 @@ int tquic_owd_generate_ack_1wd(struct tquic_owd_state *owd,
 	u64 first_range;
 	u64 prev_smallest;
 	u32 range_count;
-	struct tquic_ack_range *range;
+	struct tquic_pn_range *range;
 
 	if (!owd || !loss || !buf)
 		return -EINVAL;
@@ -563,7 +563,7 @@ int tquic_owd_generate_ack_1wd(struct tquic_owd_state *owd,
 
 	/* Get largest acknowledged from first range */
 	range = list_first_entry(&loss->ack_ranges[pn_space],
-				 struct tquic_ack_range, list);
+				 struct tquic_pn_range, list);
 	largest_acked = range->end;
 	first_range = range->end - range->start;
 

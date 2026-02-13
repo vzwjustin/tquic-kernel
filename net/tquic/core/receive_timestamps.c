@@ -446,7 +446,7 @@ static ssize_t encode_timestamp_ranges(struct tquic_receive_ts_state *state,
 	u32 ts_count = 0;
 	u32 range_count = 0;
 	size_t range_count_offset;
-	struct tquic_ack_range *range;
+	struct tquic_pn_range *range;
 	int ret;
 
 	*timestamps_encoded = 0;

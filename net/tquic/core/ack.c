@@ -130,7 +130,7 @@ struct tquic_stream_data_range {
 };
 
 /*
- * struct tquic_ack_range is defined in ack.h
+ * struct tquic_pn_range is defined in ack.h (internal packet number range)
  *
  * The following structs are defined in ack.h:
  *   - struct tquic_ecn_counts
@@ -140,7 +140,7 @@ struct tquic_stream_data_range {
 
 /* Memory cache for sent packets */
 static struct kmem_cache *tquic_sent_packet_cache;
-static struct kmem_cache *tquic_ack_range_cache;
+static struct kmem_cache *tquic_pn_range_cache;
 static struct kmem_cache *tquic_stream_range_cache;
 static struct kmem_cache *tquic_loss_state_cache;
 
@@ -400,14 +400,14 @@ static struct tquic_sent_packet *tquic_sent_packet_find(
  */
 
 /**
- * tquic_ack_range_alloc - Allocate an ACK range
+ * tquic_pn_range_alloc - Allocate an ACK range
  * @gfp: GFP flags
  */
-static struct tquic_ack_range *tquic_ack_range_alloc(gfp_t gfp)
+static struct tquic_pn_range *tquic_pn_range_alloc(gfp_t gfp)
 {
-	struct tquic_ack_range *range;
+	struct tquic_pn_range *range;
 
-	range = kmem_cache_zalloc(tquic_ack_range_cache, gfp);
+	range = kmem_cache_zalloc(tquic_pn_range_cache, gfp);
 	if (range)
 		INIT_LIST_HEAD(&range->list);
 
@@ -415,13 +415,13 @@ static struct tquic_ack_range *tquic_ack_range_alloc(gfp_t gfp)
 }
 
 /**
- * tquic_ack_range_free - Free an ACK range
+ * tquic_pn_range_free - Free an ACK range
  * @range: Range to free
  */
-static void tquic_ack_range_free(struct tquic_ack_range *range)
+static void tquic_pn_range_free(struct tquic_pn_range *range)
 {
 	if (range)
-		kmem_cache_free(tquic_ack_range_cache, range);
+		kmem_cache_free(tquic_pn_range_cache, range);
 }
 
 /**
@@ -437,8 +437,8 @@ int tquic_record_received_packet(struct tquic_loss_state *loss,
 				 int pn_space, u64 pn,
 				 bool is_ack_eliciting)
 {
-	struct tquic_ack_range *range, *prev_range = NULL;
-	struct tquic_ack_range *new_range;
+	struct tquic_pn_range *range, *prev_range = NULL;
+	struct tquic_pn_range *new_range;
 	ktime_t now = ktime_get();
 	bool merged = false;
 
@@ -467,7 +467,7 @@ int tquic_record_received_packet(struct tquic_loss_state *loss,
 			if (prev_range && range->end + 1 >= prev_range->start) {
 				prev_range->start = range->start;
 				list_del(&range->list);
-				tquic_ack_range_free(range);
+				tquic_pn_range_free(range);
 				loss->num_ack_ranges[pn_space]--;
 			}
 			break;
@@ -475,7 +475,7 @@ int tquic_record_received_packet(struct tquic_loss_state *loss,
 
 		/* Insert point found (ranges are descending) */
 		if (pn > range->end + 1) {
-			new_range = tquic_ack_range_alloc(GFP_ATOMIC);
+			new_range = tquic_pn_range_alloc(GFP_ATOMIC);
 			if (!new_range) {
 				spin_unlock_bh(&loss->lock);
 				return -ENOMEM;
@@ -494,7 +494,7 @@ int tquic_record_received_packet(struct tquic_loss_state *loss,
 
 	/* Add at end if not merged */
 	if (!merged) {
-		new_range = tquic_ack_range_alloc(GFP_ATOMIC);
+		new_range = tquic_pn_range_alloc(GFP_ATOMIC);
 		if (!new_range) {
 			spin_unlock_bh(&loss->lock);
 			return -ENOMEM;
@@ -509,9 +509,9 @@ int tquic_record_received_packet(struct tquic_loss_state *loss,
 	/* Limit number of ranges */
 	while (loss->num_ack_ranges[pn_space] > TQUIC_MAX_ACK_RANGES) {
 		range = list_last_entry(&loss->ack_ranges[pn_space],
-					struct tquic_ack_range, list);
+					struct tquic_pn_range, list);
 		list_del(&range->list);
-		tquic_ack_range_free(range);
+		tquic_pn_range_free(range);
 		loss->num_ack_ranges[pn_space]--;
 	}
 
@@ -548,7 +548,7 @@ EXPORT_SYMBOL_GPL(tquic_record_received_packet);
 int tquic_generate_ack_frame(struct tquic_loss_state *loss, int pn_space,
 			     u8 *buf, size_t buf_len, bool include_ecn)
 {
-	struct tquic_ack_range *range;
+	struct tquic_pn_range *range;
 	size_t offset = 0;
 	u64 largest_acked;
 	u64 ack_delay;
@@ -567,7 +567,7 @@ int tquic_generate_ack_frame(struct tquic_loss_state *loss, int pn_space,
 
 	/* Get largest acknowledged from first range */
 	range = list_first_entry(&loss->ack_ranges[pn_space],
-				 struct tquic_ack_range, list);
+				 struct tquic_pn_range, list);
 	largest_acked = range->end;
 	first_range = range->end - range->start;
 
@@ -680,7 +680,7 @@ int tquic_generate_ack_frame_with_timestamps(struct tquic_loss_state *loss,
 					     size_t buf_len, bool include_ecn,
 					     struct tquic_receive_ts_state *ts_state)
 {
-	struct tquic_ack_range *range;
+	struct tquic_pn_range *range;
 	size_t offset = 0;
 	u64 largest_acked;
 	u64 ack_delay;
@@ -704,7 +704,7 @@ int tquic_generate_ack_frame_with_timestamps(struct tquic_loss_state *loss,
 
 	/* Get largest acknowledged from first range */
 	range = list_first_entry(&loss->ack_ranges[pn_space],
-				 struct tquic_ack_range, list);
+				 struct tquic_pn_range, list);
 	largest_acked = range->end;
 	first_range = range->end - range->start;
 
@@ -856,7 +856,7 @@ int tquic_generate_ack_1wd_frame(struct tquic_loss_state *loss, int pn_space,
 				 struct tquic_owd_state *owd_state,
 				 ktime_t recv_time)
 {
-	struct tquic_ack_range *range;
+	struct tquic_pn_range *range;
 	size_t offset = 0;
 	u64 largest_acked;
 	u64 ack_delay;
@@ -883,7 +883,7 @@ int tquic_generate_ack_1wd_frame(struct tquic_loss_state *loss, int pn_space,
 
 	/* Get largest acknowledged from first range */
 	range = list_first_entry(&loss->ack_ranges[pn_space],
-				 struct tquic_ack_range, list);
+				 struct tquic_pn_range, list);
 	largest_acked = range->end;
 	first_range = range->end - range->start;
 
@@ -1988,7 +1988,7 @@ EXPORT_SYMBOL_GPL(tquic_loss_state_create);
 void tquic_loss_state_destroy(struct tquic_loss_state *loss)
 {
 	struct tquic_sent_packet *pkt, *pkt_tmp;
-	struct tquic_ack_range *range, *range_tmp;
+	struct tquic_pn_range *range, *range_tmp;
 	int i;
 
 	if (!loss)
@@ -2010,7 +2010,7 @@ void tquic_loss_state_destroy(struct tquic_loss_state *loss)
 		list_for_each_entry_safe(range, range_tmp,
 					 &loss->ack_ranges[i], list) {
 			list_del(&range->list);
-			tquic_ack_range_free(range);
+			tquic_pn_range_free(range);
 		}
 	}
 
@@ -2241,9 +2241,9 @@ int __init tquic_ack_init(void)
 	if (!tquic_sent_packet_cache)
 		goto err_sent_packet;
 
-	tquic_ack_range_cache = kmem_cache_create("tquic_ack_range",
-		sizeof(struct tquic_ack_range), 0, SLAB_HWCACHE_ALIGN, NULL);
-	if (!tquic_ack_range_cache)
+	tquic_pn_range_cache = kmem_cache_create("tquic_pn_range",
+		sizeof(struct tquic_pn_range), 0, SLAB_HWCACHE_ALIGN, NULL);
+	if (!tquic_pn_range_cache)
 		goto err_ack_range;
 
 	tquic_stream_range_cache = kmem_cache_create("tquic_stream_range",
@@ -2262,7 +2262,7 @@ int __init tquic_ack_init(void)
 err_loss_state:
 	kmem_cache_destroy(tquic_stream_range_cache);
 err_stream_range:
-	kmem_cache_destroy(tquic_ack_range_cache);
+	kmem_cache_destroy(tquic_pn_range_cache);
 err_ack_range:
 	kmem_cache_destroy(tquic_sent_packet_cache);
 err_sent_packet:
@@ -2276,7 +2276,7 @@ void __exit tquic_ack_exit(void)
 {
 	kmem_cache_destroy(tquic_loss_state_cache);
 	kmem_cache_destroy(tquic_stream_range_cache);
-	kmem_cache_destroy(tquic_ack_range_cache);
+	kmem_cache_destroy(tquic_pn_range_cache);
 	kmem_cache_destroy(tquic_sent_packet_cache);
 
 	tquic_info("ACK processing and loss detection cleaned up\n");

@@ -10,10 +10,10 @@
 #define _TQUIC_MP_DEADLINE_H
 
 #include <linux/types.h>
+#include <net/tquic.h>
 
 /* Forward declarations */
 struct tquic_mp_deadline_coordinator;
-struct tquic_path;
 struct tquic_mp_deadline_stats;
 
 /**
@@ -27,10 +27,10 @@ void tquic_mp_deadline_path_added(struct tquic_mp_deadline_coordinator *coord,
 /**
  * tquic_mp_deadline_path_removed - Notify coordinator of removed path
  * @coord: Coordinator
- * @path_id: Removed path ID
+ * @path: Removed path
  */
 void tquic_mp_deadline_path_removed(struct tquic_mp_deadline_coordinator *coord,
-				    u32 path_id);
+				    struct tquic_path *path);
 
 /**
  * tquic_mp_deadline_path_state_changed - Notify of path state change
@@ -40,27 +40,25 @@ void tquic_mp_deadline_path_removed(struct tquic_mp_deadline_coordinator *coord,
  */
 void tquic_mp_deadline_path_state_changed(
 	struct tquic_mp_deadline_coordinator *coord,
-	struct tquic_path *path, int new_state);
+	struct tquic_path *path, enum tquic_path_state new_state);
 
 /**
  * tquic_mp_deadline_assign_load - Assign load with deadline to path
  * @coord: Coordinator
+ * @path: Target path
  * @bytes: Load size in bytes
- * @deadline_us: Deadline in microseconds
- *
- * Returns path ID to use, or negative error code.
  */
 void tquic_mp_deadline_assign_load(struct tquic_mp_deadline_coordinator *coord,
-				   u64 bytes, u64 deadline_us);
+				   struct tquic_path *path, u64 bytes);
 
 /**
  * tquic_mp_deadline_complete_load - Mark load as completed on path
  * @coord: Coordinator
- * @path_id: Path the load completed on
+ * @path: Path the load completed on
  * @bytes: Bytes that were sent
  */
 void tquic_mp_deadline_complete_load(struct tquic_mp_deadline_coordinator *coord,
-				     u32 path_id, u64 bytes);
+				     struct tquic_path *path, u64 bytes);
 
 /**
  * tquic_mp_deadline_get_stats - Get deadline scheduler statistics
