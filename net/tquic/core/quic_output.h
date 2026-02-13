@@ -44,6 +44,6 @@ void tquic_stream_handle_stop_sending(struct tquic_stream *stream,
 
 /* Frame processing */
 int tquic_frame_process_new_cid(struct tquic_connection *conn,
-				const u8 *data, u32 len);
+				const u8 *data, int len);
 
 #endif /* _TQUIC_QUIC_OUTPUT_H */

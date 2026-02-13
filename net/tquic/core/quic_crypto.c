@@ -997,7 +997,7 @@ void tquic_crypto_destroy(void *crypto)
 EXPORT_SYMBOL_GPL(tquic_crypto_destroy);
 
 int tquic_crypto_derive_init_secrets(struct tquic_connection *conn,
-				     struct tquic_cid *cid)
+				     const struct tquic_cid *cid)
 {
 	struct tquic_crypto_wrapper *wrapper = tquic_crypto_wrapper_get(conn);
 	struct tquic_crypto_ctx *ctx;

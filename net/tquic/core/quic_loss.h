@@ -13,6 +13,7 @@
 
 struct tquic_connection;
 struct tquic_sent_packet;
+struct tquic_ack_frame;
 struct tquic_rtt_state;
 
 /* Cache management */
@@ -22,7 +23,8 @@ void tquic_loss_cache_destroy(void);
 /* Sent packet management */
 struct tquic_sent_packet *tquic_sent_packet_alloc(gfp_t gfp);
 void tquic_sent_packet_init(struct tquic_sent_packet *pkt,
-			    u64 pn, u32 size, bool ack_eliciting);
+			    u64 pn, u32 bytes, u8 pn_space,
+			    bool ack_eliciting, bool in_flight);
 void tquic_sent_packet_free(struct tquic_sent_packet *pkt);
 
 /* RTT tracking */
@@ -33,6 +35,7 @@ void tquic_rtt_update(struct tquic_rtt_state *rtt, u64 latest_rtt,
 void tquic_loss_detection_on_packet_sent(struct tquic_connection *conn,
 					 struct tquic_sent_packet *pkt);
 void tquic_loss_detection_on_ack_received(struct tquic_connection *conn,
+					  struct tquic_ack_frame *ack,
 					  u8 pn_space_idx);
 void tquic_loss_detection_on_timeout(struct tquic_connection *conn);
 void tquic_loss_on_packet_number_space_discarded(struct tquic_connection *conn,
