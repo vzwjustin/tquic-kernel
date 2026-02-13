@@ -10,6 +10,14 @@
 
 struct tquic_crypto_state;
 
+/* Encryption levels */
+enum tquic_enc_level {
+	TQUIC_ENC_INITIAL,
+	TQUIC_ENC_HANDSHAKE,
+	TQUIC_ENC_APPLICATION,
+	TQUIC_ENC_LEVEL_COUNT,
+};
+
 /* Packet encryption/decryption */
 int tquic_encrypt_packet(struct tquic_crypto_state *crypto,
 			 u8 *header, size_t header_len,
@@ -47,9 +55,10 @@ int tquic_crypto_unprotect_header(struct tquic_crypto_state *crypto,
 
 /* Encryption level management */
 void tquic_crypto_set_level(struct tquic_crypto_state *crypto,
-			    int read_level, int write_level);
+			    enum tquic_enc_level read_level,
+			    enum tquic_enc_level write_level);
 int tquic_crypto_install_keys(struct tquic_crypto_state *crypto,
-			      int level,
+			      enum tquic_enc_level level,
 			      const u8 *read_secret, size_t read_secret_len,
 			      const u8 *write_secret, size_t write_secret_len);
 

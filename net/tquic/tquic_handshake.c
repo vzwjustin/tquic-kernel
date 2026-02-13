@@ -55,13 +55,9 @@ int tquic_client_copy_psk(const struct tquic_client *client, u8 *psk);
 /*
  * Forward declarations for crypto/tls.c functions
  */
-struct tquic_crypto_state;
+#include "crypto/tls.h"
 struct tquic_crypto_state *tquic_crypto_init_versioned(
 	const struct tquic_cid *scid, bool is_server, u32 version);
-int tquic_crypto_install_keys(struct tquic_crypto_state *crypto,
-			      int level,
-			      const u8 *read_secret, size_t read_secret_len,
-			      const u8 *write_secret, size_t write_secret_len);
 
 /*
  * Rate limit state for PSK rejection logging
