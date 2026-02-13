@@ -19,40 +19,41 @@
 /*
  * TLS 1.3 Cipher Suite Identifiers
  */
-#define TQUIC_CIPHER_AES_128_GCM_SHA256		0x1301
-#define TQUIC_CIPHER_AES_256_GCM_SHA384		0x1302
-#define TQUIC_CIPHER_CHACHA20_POLY1305_SHA256	0x1303
+#define TQUIC_CIPHER_AES_128_GCM_SHA256 0x1301
+#define TQUIC_CIPHER_AES_256_GCM_SHA384 0x1302
+#define TQUIC_CIPHER_CHACHA20_POLY1305_SHA256 0x1303
 
 /* Legacy aliases */
-#define QUIC_CIPHER_AES_128_GCM_SHA256		TQUIC_CIPHER_AES_128_GCM_SHA256
-#define QUIC_CIPHER_AES_256_GCM_SHA384		TQUIC_CIPHER_AES_256_GCM_SHA384
-#define QUIC_CIPHER_CHACHA20_POLY1305_SHA256	TQUIC_CIPHER_CHACHA20_POLY1305_SHA256
+#define QUIC_CIPHER_AES_128_GCM_SHA256 TQUIC_CIPHER_AES_128_GCM_SHA256
+#define QUIC_CIPHER_AES_256_GCM_SHA384 TQUIC_CIPHER_AES_256_GCM_SHA384
+#define QUIC_CIPHER_CHACHA20_POLY1305_SHA256 \
+	TQUIC_CIPHER_CHACHA20_POLY1305_SHA256
 
 /*
  * Cryptographic Size Constants
  */
-#define TQUIC_TAG_SIZE		16
-#define TQUIC_IV_SIZE		12
-#define TQUIC_SAMPLE_SIZE	16
-#define TQUIC_HP_MASK_SIZE	5
+#define TQUIC_TAG_SIZE 16
+#define TQUIC_IV_SIZE 12
+#define TQUIC_SAMPLE_SIZE 16
+#define TQUIC_HP_MASK_SIZE 5
 
 /* Legacy aliases */
-#define QUIC_TAG_SIZE		TQUIC_TAG_SIZE
-#define QUIC_IV_SIZE		TQUIC_IV_SIZE
-#define QUIC_SAMPLE_SIZE	TQUIC_SAMPLE_SIZE
-#define QUIC_HP_MASK_SIZE	TQUIC_HP_MASK_SIZE
+#define QUIC_TAG_SIZE TQUIC_TAG_SIZE
+#define QUIC_IV_SIZE TQUIC_IV_SIZE
+#define QUIC_SAMPLE_SIZE TQUIC_SAMPLE_SIZE
+#define QUIC_HP_MASK_SIZE TQUIC_HP_MASK_SIZE
 
 /*
  * Maximum key sizes
  */
-#define TQUIC_MAX_KEY_SIZE	32
-#define TQUIC_MAX_IV_SIZE	12
-#define TQUIC_MAX_HASH_SIZE	48
+#define TQUIC_MAX_KEY_SIZE 32
+#define TQUIC_MAX_IV_SIZE 12
+#define TQUIC_MAX_HASH_SIZE 48
 
 /* Legacy aliases */
-#define QUIC_MAX_KEY_SIZE	TQUIC_MAX_KEY_SIZE
-#define QUIC_MAX_IV_SIZE	TQUIC_MAX_IV_SIZE
-#define QUIC_MAX_HASH_SIZE	TQUIC_MAX_HASH_SIZE
+#define QUIC_MAX_KEY_SIZE TQUIC_MAX_KEY_SIZE
+#define QUIC_MAX_IV_SIZE TQUIC_MAX_IV_SIZE
+#define QUIC_MAX_HASH_SIZE TQUIC_MAX_HASH_SIZE
 
 /*
  * Crypto context management
@@ -81,8 +82,8 @@ int tquic_crypto_init(struct tquic_crypto_ctx *ctx, u16 cipher_type);
 void tquic_crypto_destroy(void *crypto);
 
 /* Legacy aliases */
-#define quic_crypto_init	tquic_crypto_init
-#define quic_crypto_destroy	tquic_crypto_destroy
+#define quic_crypto_init tquic_crypto_init
+#define quic_crypto_destroy tquic_crypto_destroy
 
 /*
  * Key Derivation Functions (RFC 9001)
@@ -116,12 +117,12 @@ int tquic_crypto_derive_initial_secrets(struct tquic_connection *conn,
  *
  * Return: 0 on success, negative error code on failure
  */
-int tquic_crypto_derive_secrets(struct tquic_crypto_ctx *ctx,
-				const u8 *secret, u32 secret_len);
+int tquic_crypto_derive_secrets(struct tquic_crypto_ctx *ctx, const u8 *secret,
+				u32 secret_len);
 
 /* Legacy aliases */
-#define quic_crypto_derive_initial_secrets	tquic_crypto_derive_initial_secrets
-#define quic_crypto_derive_secrets		tquic_crypto_derive_secrets
+#define quic_crypto_derive_initial_secrets tquic_crypto_derive_initial_secrets
+#define quic_crypto_derive_secrets tquic_crypto_derive_secrets
 
 /*
  * Header Protection (RFC 9001 Section 5.4)
@@ -153,8 +154,8 @@ int tquic_crypto_hp_mask(struct tquic_crypto_ctx *ctx, const u8 *sample,
  *
  * Return: 0 on success, negative error code on failure
  */
-int tquic_crypto_protect_header(struct tquic_crypto_ctx *ctx, struct sk_buff *skb,
-				u8 pn_offset, u8 pn_len);
+int tquic_crypto_protect_header(struct tquic_crypto_ctx *ctx,
+				struct sk_buff *skb, u8 pn_offset, u8 pn_len);
 
 /**
  * tquic_crypto_unprotect_header - Remove header protection
@@ -168,13 +169,14 @@ int tquic_crypto_protect_header(struct tquic_crypto_ctx *ctx, struct sk_buff *sk
  *
  * Return: 0 on success, negative error code on failure
  */
-int tquic_crypto_unprotect_header(struct tquic_crypto_ctx *ctx, struct sk_buff *skb,
-				  u8 *pn_offset, u8 *pn_len);
+int tquic_crypto_unprotect_header(struct tquic_crypto_ctx *ctx,
+				  struct sk_buff *skb, u8 *pn_offset,
+				  u8 *pn_len);
 
 /* Legacy aliases */
-#define quic_crypto_hp_mask		tquic_crypto_hp_mask
-#define quic_crypto_protect_header	tquic_crypto_protect_header
-#define quic_crypto_unprotect_header	tquic_crypto_unprotect_header
+#define quic_crypto_hp_mask tquic_crypto_hp_mask
+#define quic_crypto_protect_header tquic_crypto_protect_header
+#define quic_crypto_unprotect_header tquic_crypto_unprotect_header
 
 /*
  * Packet Protection (AEAD - RFC 9001 Section 5.3)
@@ -212,8 +214,8 @@ int tquic_crypto_decrypt(struct tquic_crypto_ctx *ctx, struct sk_buff *skb,
 			 u64 pn);
 
 /* Legacy aliases */
-#define quic_crypto_encrypt	tquic_crypto_encrypt
-#define quic_crypto_decrypt	tquic_crypto_decrypt
+#define quic_crypto_encrypt tquic_crypto_encrypt
+#define quic_crypto_decrypt tquic_crypto_decrypt
 
 /*
  * Key Update (RFC 9001 Section 6)
@@ -253,7 +255,8 @@ int tquic_crypto_initiate_key_update(struct tquic_connection *conn);
  *
  * Return: 0 on success, negative error code on failure
  */
-int tquic_crypto_on_key_phase_change(struct tquic_connection *conn, u8 rx_key_phase);
+int tquic_crypto_on_key_phase_change(struct tquic_connection *conn,
+				     u8 rx_key_phase);
 
 /**
  * tquic_crypto_decrypt_with_phase - Decrypt considering key phase
@@ -287,12 +290,12 @@ void tquic_crypto_discard_old_keys(struct tquic_connection *conn);
 u8 tquic_crypto_get_key_phase(struct tquic_crypto_ctx *ctx);
 
 /* Legacy aliases */
-#define quic_crypto_update_keys		tquic_crypto_update_keys
-#define quic_crypto_initiate_key_update	tquic_crypto_initiate_key_update
-#define quic_crypto_on_key_phase_change	tquic_crypto_on_key_phase_change
-#define quic_crypto_decrypt_with_phase	tquic_crypto_decrypt_with_phase
-#define quic_crypto_discard_old_keys	tquic_crypto_discard_old_keys
-#define quic_crypto_get_key_phase	tquic_crypto_get_key_phase
+#define quic_crypto_update_keys tquic_crypto_update_keys
+#define quic_crypto_initiate_key_update tquic_crypto_initiate_key_update
+#define quic_crypto_on_key_phase_change tquic_crypto_on_key_phase_change
+#define quic_crypto_decrypt_with_phase tquic_crypto_decrypt_with_phase
+#define quic_crypto_discard_old_keys tquic_crypto_discard_old_keys
+#define quic_crypto_get_key_phase tquic_crypto_get_key_phase
 
 /*
  * Retry Token Handling (RFC 9001 Section 5.8)
@@ -306,18 +309,18 @@ u8 tquic_crypto_get_key_phase(struct tquic_crypto_ctx *ctx);
 /*
  * TLS 1.3 Extension Types (RFC 8446, RFC 7301, RFC 6066)
  */
-#define TQUIC_TLS_EXT_SERVER_NAME		0	/* RFC 6066 - SNI */
-#define TQUIC_TLS_EXT_ALPN			16	/* RFC 7301 - ALPN */
-#define TQUIC_TLS_EXT_SUPPORTED_VERSIONS	43	/* RFC 8446 */
-#define TQUIC_TLS_EXT_KEY_SHARE			51	/* RFC 8446 */
-#define TQUIC_TLS_EXT_QUIC_TRANSPORT_PARAMS	0x39	/* RFC 9001 */
+#define TQUIC_TLS_EXT_SERVER_NAME 0 /* RFC 6066 - SNI */
+#define TQUIC_TLS_EXT_ALPN 16 /* RFC 7301 - ALPN */
+#define TQUIC_TLS_EXT_SUPPORTED_VERSIONS 43 /* RFC 8446 */
+#define TQUIC_TLS_EXT_KEY_SHARE 51 /* RFC 8446 */
+#define TQUIC_TLS_EXT_QUIC_TRANSPORT_PARAMS 0x39 /* RFC 9001 */
 
 /* Legacy aliases */
-#define TLS_EXT_SERVER_NAME		TQUIC_TLS_EXT_SERVER_NAME
-#define TLS_EXT_ALPN			TQUIC_TLS_EXT_ALPN
-#define TLS_EXT_SUPPORTED_VERSIONS	TQUIC_TLS_EXT_SUPPORTED_VERSIONS
-#define TLS_EXT_KEY_SHARE		TQUIC_TLS_EXT_KEY_SHARE
-#define TLS_EXT_QUIC_TRANSPORT_PARAMS	TQUIC_TLS_EXT_QUIC_TRANSPORT_PARAMS
+#define TLS_EXT_SERVER_NAME TQUIC_TLS_EXT_SERVER_NAME
+#define TLS_EXT_ALPN TQUIC_TLS_EXT_ALPN
+#define TLS_EXT_SUPPORTED_VERSIONS TQUIC_TLS_EXT_SUPPORTED_VERSIONS
+#define TLS_EXT_KEY_SHARE TQUIC_TLS_EXT_KEY_SHARE
+#define TLS_EXT_QUIC_TRANSPORT_PARAMS TQUIC_TLS_EXT_QUIC_TRANSPORT_PARAMS
 
 /*
  * TLS Extension Building
@@ -333,7 +336,8 @@ u8 tquic_crypto_get_key_phase(struct tquic_crypto_ctx *ctx);
  *
  * Return: Number of bytes written on success, negative error code on failure
  */
-int tquic_tls_build_sni_extension(const char *hostname, u8 *buf, size_t buf_len);
+int tquic_tls_build_sni_extension(const char *hostname, u8 *buf,
+				  size_t buf_len);
 
 /**
  * tquic_tls_build_alpn_extension - Build ALPN extension
@@ -417,12 +421,12 @@ int tquic_tls_validate_alpn(const u8 *offered_alpn, size_t offered_len,
 			    const u8 *selected, size_t selected_len);
 
 /* Legacy aliases for TLS functions */
-#define quic_tls_build_sni_extension	tquic_tls_build_sni_extension
-#define quic_tls_build_alpn_extension	tquic_tls_build_alpn_extension
-#define quic_tls_parse_sni_extension	tquic_tls_parse_sni_extension
-#define quic_tls_parse_alpn_extension	tquic_tls_parse_alpn_extension
-#define quic_tls_select_alpn		tquic_tls_select_alpn
-#define quic_tls_validate_alpn		tquic_tls_validate_alpn
+#define quic_tls_build_sni_extension tquic_tls_build_sni_extension
+#define quic_tls_build_alpn_extension tquic_tls_build_alpn_extension
+#define quic_tls_parse_sni_extension tquic_tls_parse_sni_extension
+#define quic_tls_parse_alpn_extension tquic_tls_parse_alpn_extension
+#define quic_tls_select_alpn tquic_tls_select_alpn
+#define quic_tls_validate_alpn tquic_tls_validate_alpn
 
 /*
  * Crypto Context Access
@@ -434,12 +438,10 @@ int tquic_tls_validate_alpn(const u8 *offered_alpn, size_t offered_len,
  * function call overhead for hot paths.
  */
 
-
 /* HKDF and key derivation */
-int tquic_hkdf_expand_label(struct hkdf_ctx *ctx, const u8 *prk,
-ttt    u32 prk_len, const char *label,
-ttt    const u8 *context, u32 context_len,
-ttt    u8 *out, u32 out_len);
+int tquic_hkdf_expand_label(struct hkdf_ctx *ctx, const u8 *prk, u32 prk_len,
+			    const char *label, const u8 *context,
+			    u32 context_len, u8 *out, u32 out_len);
 int tquic_crypto_derive_init_secrets(struct tquic_connection *conn,
-tttt     const u8 *dcid, u32 dcid_len);
+				     const u8 *dcid, u32 dcid_len);
 #endif /* _NET_TQUIC_QUIC_CRYPTO_H */

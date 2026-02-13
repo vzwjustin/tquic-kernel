@@ -80,8 +80,8 @@ struct tquic_error_ring;
  * modify struct net or struct netns_mib for out-of-tree modules.
  */
 /* Scheduler/CC name limits for per-netns storage */
-#define TQUIC_NET_SCHED_NAME_MAX	16
-#define TQUIC_NET_CC_NAME_MAX		16
+#define TQUIC_NET_SCHED_NAME_MAX 16
+#define TQUIC_NET_CC_NAME_MAX 16
 
 struct tquic_net {
 	/* Sysctl parameters */
@@ -112,10 +112,10 @@ struct tquic_net {
 	bool pacing_enabled;
 	int path_degrade_threshold;
 	bool grease_enabled;
-	int preferred_address_enabled;	/* -1 = use global, 0/1 = disabled/enabled */
-	int prefer_preferred_address;	/* -1 = use global, 0/1 = disabled/enabled */
+	int preferred_address_enabled; /* -1 = use global, 0/1 = disabled/enabled */
+	int prefer_preferred_address; /* -1 = use global, 0/1 = disabled/enabled */
 	int additional_addresses_enabled; /* -1 = use global, 0/1 = disabled/enabled */
-	int additional_addresses_max;	/* Max addresses (0 = use global) */
+	int additional_addresses_max; /* Max addresses (0 = use global) */
 
 	/* Per-netns MIB statistics (out-of-tree replacement for net->mib) */
 	struct tquic_mib __percpu *mib;
@@ -218,16 +218,17 @@ static inline struct ipv6_pinfo *tquic_inet6_sk(const struct sock *sk)
 /*
  * Socket flags
  */
-#define TQUIC_F_MULTIPATH_ENABLED	BIT(0)
-#define TQUIC_F_BONDING_ENABLED		BIT(1)
-#define TQUIC_F_SERVER_MODE		BIT(2)
-#define TQUIC_F_HANDSHAKE_DONE		BIT(3)
-#define TQUIC_F_CLOSING			BIT(4)
-#define TQUIC_F_ZERO_RTT_ENABLED	BIT(7)	/* 0-RTT early data enabled */
-#define TQUIC_F_ZERO_RTT_ACCEPTED	BIT(8)	/* 0-RTT accepted by server */
-#define TQUIC_F_HAS_SESSION_TICKET	BIT(9)	/* Valid session ticket for 0-RTT */
-#define TQUIC_F_SERVER_HANDSHAKE_STARTED BIT(10) /* Server handshake initiated */
-#define TQUIC_F_PM_DISABLED		BIT(11)	/* Path manager init failed */
+#define TQUIC_F_MULTIPATH_ENABLED BIT(0)
+#define TQUIC_F_BONDING_ENABLED BIT(1)
+#define TQUIC_F_SERVER_MODE BIT(2)
+#define TQUIC_F_HANDSHAKE_DONE BIT(3)
+#define TQUIC_F_CLOSING BIT(4)
+#define TQUIC_F_ZERO_RTT_ENABLED BIT(7) /* 0-RTT early data enabled */
+#define TQUIC_F_ZERO_RTT_ACCEPTED BIT(8) /* 0-RTT accepted by server */
+#define TQUIC_F_HAS_SESSION_TICKET BIT(9) /* Valid session ticket for 0-RTT */
+#define TQUIC_F_SERVER_HANDSHAKE_STARTED \
+	BIT(10) /* Server handshake initiated */
+#define TQUIC_F_PM_DISABLED BIT(11) /* Path manager init failed */
 
 /*
  * =============================================================================
@@ -387,7 +388,9 @@ static inline void tquic_sk_owned_by_me(const struct tquic_sock *tsk)
 	sock_owned_by_me((const struct sock *)tsk);
 }
 #else
-static inline void tquic_sk_owned_by_me(const struct tquic_sock *tsk) {}
+static inline void tquic_sk_owned_by_me(const struct tquic_sock *tsk)
+{
+}
 #endif
 
 /*
@@ -471,11 +474,12 @@ void tquic_unregister_listener(struct sock *sk);
 
 /* Listener lookup (tquic_udp.c) */
 struct sock *tquic_lookup_listener(const struct sockaddr_storage *local_addr);
-struct sock *tquic_lookup_listener_net(struct net *net,
-				       const struct sockaddr_storage *local_addr);
+struct sock *
+tquic_lookup_listener_net(struct net *net,
+			  const struct sockaddr_storage *local_addr);
 
 /* Listener flag for tquic_sock.flags */
-#define TQUIC_F_LISTENER_REGISTERED	BIT(5)
+#define TQUIC_F_LISTENER_REGISTERED BIT(5)
 
 /*
  * =============================================================================
@@ -565,7 +569,7 @@ void tquic_persistent_cong_module_exit(void);
 struct tquic_cid_pool;
 
 /* CID constants */
-#define TQUIC_DEFAULT_CID_LEN           8
+#define TQUIC_DEFAULT_CID_LEN 8
 #define TQUIC_STATELESS_RESET_TOKEN_LEN 16
 
 /* CID pool functions (tquic_cid.c) */
@@ -577,20 +581,21 @@ struct tquic_connection *tquic_cid_lookup(const struct tquic_cid *cid);
 int tquic_cid_get_for_migration(struct tquic_connection *conn,
 				struct tquic_cid *cid);
 int tquic_cid_add_remote(struct tquic_connection *conn,
-			 const struct tquic_cid *cid,
-			 u64 seq_num, u64 retire_prior_to,
-			 const u8 *reset_token);
+			 const struct tquic_cid *cid, u64 seq_num,
+			 u64 retire_prior_to, const u8 *reset_token);
 
 /* CID frame transmission (tquic_cid.c) */
 void tquic_send_new_connection_id(struct tquic_connection *conn,
 				  const struct tquic_cid *cid,
 				  const u8 *reset_token);
-void tquic_send_retire_connection_id(struct tquic_connection *conn, u64 seq_num);
+void tquic_send_retire_connection_id(struct tquic_connection *conn,
+				     u64 seq_num);
 
 /* CID rotation (tquic_cid.c) */
 bool tquic_cid_check_rotation(struct tquic_connection *conn);
 int tquic_cid_rotate(struct tquic_connection *conn);
-void tquic_cid_set_rotation_enabled(struct tquic_connection *conn, bool enabled);
+void tquic_cid_set_rotation_enabled(struct tquic_connection *conn,
+				    bool enabled);
 void tquic_cid_update_active_limit(struct tquic_connection *conn, u8 limit);
 
 /* CID sequence number tracking (tquic_cid.c) */
@@ -605,8 +610,7 @@ int tquic_cidmgr_assign_to_path(struct tquic_cid_manager *mgr,
 void tquic_cidmgr_release_from_path(struct tquic_cid_manager *mgr,
 				    struct tquic_path *path);
 int tquic_cid_get_path_cid(struct tquic_connection *conn,
-			   struct tquic_path *path,
-			   struct tquic_cid *cid);
+			   struct tquic_path *path, struct tquic_cid *cid);
 void tquic_cid_retire_remote(struct tquic_connection *conn, u64 seq_num);
 
 /* CID table init/exit */
@@ -627,15 +631,13 @@ void tquic_connection_exit(void);
  */
 
 /* Migration flag for tquic_sock.flags */
-#define TQUIC_F_MIGRATION_ENABLED	BIT(6)
+#define TQUIC_F_MIGRATION_ENABLED BIT(6)
 
 /* Migration functions (tquic_migration.c) */
-int tquic_migrate_auto(struct tquic_connection *conn,
-		       struct tquic_path *path,
+int tquic_migrate_auto(struct tquic_connection *conn, struct tquic_path *path,
 		       struct sockaddr_storage *new_addr);
 int tquic_migrate_explicit(struct tquic_connection *conn,
-			   struct sockaddr_storage *new_local,
-			   u32 flags);
+			   struct sockaddr_storage *new_local, u32 flags);
 int tquic_migration_get_status(struct tquic_connection *conn,
 			       struct tquic_migrate_info *info);
 void tquic_migration_cleanup(struct tquic_connection *conn);
@@ -653,9 +655,9 @@ void tquic_migration_path_event(struct tquic_connection *conn,
 				struct tquic_path *path, int event);
 
 /* Path event types for migration */
-#define TQUIC_PATH_EVENT_MIGRATE_START	1
-#define TQUIC_PATH_EVENT_MIGRATE_FAILED	2
-#define TQUIC_PATH_EVENT_MIGRATE_STANDBY	3
+#define TQUIC_PATH_EVENT_MIGRATE_START 1
+#define TQUIC_PATH_EVENT_MIGRATE_FAILED 2
+#define TQUIC_PATH_EVENT_MIGRATE_STANDBY 3
 
 /*
  * =============================================================================
@@ -742,8 +744,8 @@ struct tquic_stream_sock {
  *   -ENOMEM: Memory allocation failed
  */
 int tquic_stream_socket_create(struct tquic_connection *conn,
-			       struct sock *parent_sk,
-			       u32 flags, u64 *stream_id);
+			       struct sock *parent_sk, u32 flags,
+			       u64 *stream_id);
 
 /**
  * tquic_stream_wake - Wake up waiters on stream socket
@@ -769,8 +771,8 @@ void tquic_stream_wake(struct tquic_stream *stream);
  *   -EINTR: Interrupted by signal
  *   -ENOTCONN: Connection closed while waiting
  */
-int tquic_wait_for_stream_credit(struct tquic_connection *conn,
-				 bool is_bidi, bool nonblock);
+int tquic_wait_for_stream_credit(struct tquic_connection *conn, bool is_bidi,
+				 bool nonblock);
 
 /*
  * =============================================================================
@@ -787,8 +789,9 @@ struct tquic_additional_address;
 bool tquic_path_anti_amplification_check(struct tquic_path *path, u64 bytes);
 
 /* Additional address migration (tquic_migration.c) */
-int tquic_migrate_to_additional_address(struct tquic_connection *conn,
-					struct tquic_additional_address *addr_entry);
+int tquic_migrate_to_additional_address(
+	struct tquic_connection *conn,
+	struct tquic_additional_address *addr_entry);
 
 /* Inline handshake crypto processing (tquic_handshake.c) */
 int tquic_inline_hs_recv_crypto(struct sock *sk, const u8 *data, u32 len,
@@ -800,16 +803,15 @@ void tquic_update_pacing(struct sock *sk, struct tquic_path *path);
 /* Timer update (tquic_timer.c) */
 void tquic_timer_update(struct tquic_connection *conn);
 
-
 /* Transport parameter helpers (core/quic_connection.c) */
-int tquic_transport_param_parse(struct tquic_connection *conn,
-ttttconst u8 *data, u32 len);
+int tquic_transport_param_parse(struct tquic_connection *conn, const u8 *data,
+				u32 len);
 int tquic_transport_param_apply(struct tquic_connection *conn);
-int tquic_transport_param_encode(struct tquic_connection *conn,
-tttt u8 *buf, u32 buf_len, u32 *written);
+int tquic_transport_param_encode(struct tquic_connection *conn, u8 *buf,
+				 u32 buf_len, u32 *written);
 int tquic_transport_param_validate(struct tquic_connection *conn);
 
 /* Coalesced packet processing (core/packet_coalesce_fix.c) */
 void tquic_packet_process_coalesced(struct tquic_connection *conn,
-tttt    struct sk_buff *skb);
+				    struct sk_buff *skb);
 #endif /* _NET_TQUIC_PROTOCOL_H */

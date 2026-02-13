@@ -25,48 +25,48 @@
  */
 
 /* kPacketThreshold: Maximum reordering in packets before considering lost */
-#define TQUIC_PACKET_THRESHOLD		3
+#define TQUIC_PACKET_THRESHOLD 3
 
 /* kTimeThreshold: Maximum reordering in time as factor of RTT (9/8) */
-#define TQUIC_TIME_THRESHOLD_NUM	9
-#define TQUIC_TIME_THRESHOLD_DEN	8
+#define TQUIC_TIME_THRESHOLD_NUM 9
+#define TQUIC_TIME_THRESHOLD_DEN 8
 
 /* kGranularity: Timer granularity in microseconds */
-#define TQUIC_TIMER_GRANULARITY_US	1000
+#define TQUIC_TIMER_GRANULARITY_US 1000
 
 /* kInitialRtt: Default initial RTT in microseconds */
-#define TQUIC_INITIAL_RTT_US		333000	/* 333 ms */
+#define TQUIC_INITIAL_RTT_US 333000 /* 333 ms */
 
 /* kMaxAckDelay: Maximum ACK delay in microseconds */
-#define TQUIC_MAX_ACK_DELAY_US		25000	/* 25 ms */
+#define TQUIC_MAX_ACK_DELAY_US 25000 /* 25 ms */
 
 /* Persistent congestion threshold as multiple of PTO */
-#define TQUIC_PERSISTENT_CONG_THRESHOLD	3
+#define TQUIC_PERSISTENT_CONG_THRESHOLD 3
 
 /* Maximum number of ACK ranges to track */
-#define TQUIC_MAX_ACK_RANGES		256
+#define TQUIC_MAX_ACK_RANGES 256
 
 /*
  * ACK Frame type codes (RFC 9000 Section 19.3)
  */
-#define TQUIC_FRAME_ACK			0x02
-#define TQUIC_FRAME_ACK_ECN		0x03
+#define TQUIC_FRAME_ACK 0x02
+#define TQUIC_FRAME_ACK_ECN 0x03
 
 /* ACK frame types with Receive Timestamps (draft-smith-quic-receive-ts-03) */
-#define TQUIC_FRAME_ACK_RECEIVE_TS		0xffa0
-#define TQUIC_FRAME_ACK_ECN_RECEIVE_TS		0xffa1
+#define TQUIC_FRAME_ACK_RECEIVE_TS 0xffa0
+#define TQUIC_FRAME_ACK_ECN_RECEIVE_TS 0xffa1
 
 /*
  * Packet metadata flags
  */
-#define TQUIC_PKT_FLAG_ACK_ELICITING	BIT(0)
-#define TQUIC_PKT_FLAG_IN_FLIGHT	BIT(1)
-#define TQUIC_PKT_FLAG_HAS_CRYPTO	BIT(2)
-#define TQUIC_PKT_FLAG_RETRANSMITTABLE	BIT(3)
-#define TQUIC_PKT_FLAG_PATH_CHALLENGE	BIT(4)
-#define TQUIC_PKT_FLAG_PATH_RESPONSE	BIT(5)
-#define TQUIC_PKT_FLAG_MTU_PROBE	BIT(6)
-#define TQUIC_PKT_FLAG_ECN_CE		BIT(7)
+#define TQUIC_PKT_FLAG_ACK_ELICITING BIT(0)
+#define TQUIC_PKT_FLAG_IN_FLIGHT BIT(1)
+#define TQUIC_PKT_FLAG_HAS_CRYPTO BIT(2)
+#define TQUIC_PKT_FLAG_RETRANSMITTABLE BIT(3)
+#define TQUIC_PKT_FLAG_PATH_CHALLENGE BIT(4)
+#define TQUIC_PKT_FLAG_PATH_RESPONSE BIT(5)
+#define TQUIC_PKT_FLAG_MTU_PROBE BIT(6)
+#define TQUIC_PKT_FLAG_ECN_CE BIT(7)
 
 /* Forward declarations */
 struct tquic_loss_state;
@@ -126,15 +126,6 @@ struct tquic_rtt_state {
 	ktime_t first_rtt_sample;
 	u32 samples;
 };
-
-/* ACK processing functions */
-void tquic_ack_on_packet_received(struct tquic_connection *conn, u64 pn,
-tttt  u8 pn_space, bool ack_eliciting);
-bool tquic_ack_should_send(struct tquic_connection *conn, u8 pn_space);
-int tquic_ack_create(struct tquic_connection *conn, u8 pn_space,
-tt     u8 *buf, u32 buf_len, u32 *written);
-int __init tquic_ack_init(void);
-void __exit tquic_ack_exit(void);
 #endif
 
 /**
@@ -283,9 +274,8 @@ void tquic_loss_state_reset(struct tquic_loss_state *loss);
  *
  * Returns 0 on success or negative error.
  */
-int tquic_record_received_packet(struct tquic_loss_state *loss,
-				 int pn_space, u64 pn,
-				 bool is_ack_eliciting);
+int tquic_record_received_packet(struct tquic_loss_state *loss, int pn_space,
+				 u64 pn, bool is_ack_eliciting);
 
 /**
  * tquic_generate_ack_frame - Generate an ACK frame
@@ -315,10 +305,9 @@ int tquic_generate_ack_frame(struct tquic_loss_state *loss, int pn_space,
  *
  * Returns number of bytes written or negative error.
  */
-int tquic_generate_ack_frame_with_timestamps(struct tquic_loss_state *loss,
-					     int pn_space, u8 *buf,
-					     size_t buf_len, bool include_ecn,
-					     struct tquic_receive_ts_state *ts_state);
+int tquic_generate_ack_frame_with_timestamps(
+	struct tquic_loss_state *loss, int pn_space, u8 *buf, size_t buf_len,
+	bool include_ecn, struct tquic_receive_ts_state *ts_state);
 
 /*
  * ACK Frame Processing
@@ -334,8 +323,7 @@ int tquic_generate_ack_frame_with_timestamps(struct tquic_loss_state *loss,
  * Returns number of bytes consumed or negative error.
  */
 int tquic_parse_ack_frame(const u8 *buf, size_t len,
-			  struct tquic_ack_frame *frame,
-			  u8 ack_delay_exponent);
+			  struct tquic_ack_frame *frame, u8 ack_delay_exponent);
 
 /**
  * tquic_on_ack_received - Process a received ACK frame
@@ -369,9 +357,9 @@ int tquic_on_ack_received(struct tquic_loss_state *loss, int pn_space,
  *
  * Returns 0 on success or negative error.
  */
-int tquic_on_packet_sent(struct tquic_loss_state *loss, int pn_space,
-			 u64 pn, u32 sent_bytes, bool is_ack_eliciting,
-			 bool in_flight, u32 path_id, u32 frames);
+int tquic_on_packet_sent(struct tquic_loss_state *loss, int pn_space, u64 pn,
+			 u32 sent_bytes, bool is_ack_eliciting, bool in_flight,
+			 u32 path_id, u32 frames);
 
 /*
  * Timer Management
@@ -416,9 +404,8 @@ void tquic_ecn_mark_sent(struct tquic_loss_state *loss, u8 ecn_codepoint);
  * @variance: Output for RTT variance (us)
  * @min_rtt: Output for minimum RTT (us)
  */
-void tquic_loss_get_rtt_stats(struct tquic_loss_state *loss,
-			      u64 *latest, u64 *smoothed,
-			      u64 *variance, u64 *min_rtt);
+void tquic_loss_get_rtt_stats(struct tquic_loss_state *loss, u64 *latest,
+			      u64 *smoothed, u64 *variance, u64 *min_rtt);
 
 /**
  * tquic_loss_get_in_flight - Get bytes and packets in flight
@@ -426,8 +413,8 @@ void tquic_loss_get_rtt_stats(struct tquic_loss_state *loss,
  * @bytes: Output for bytes in flight
  * @packets: Output for packets in flight
  */
-void tquic_loss_get_in_flight(struct tquic_loss_state *loss,
-			      u64 *bytes, u32 *packets);
+void tquic_loss_get_in_flight(struct tquic_loss_state *loss, u64 *bytes,
+			      u32 *packets);
 
 /*
  * ACK Frequency Integration
@@ -456,8 +443,8 @@ void tquic_loss_state_set_ack_freq(struct tquic_loss_state *loss,
  *
  * Returns true if an ACK should be sent immediately.
  */
-bool tquic_should_send_ack(struct tquic_loss_state *loss,
-			   u64 pn, bool ack_eliciting);
+bool tquic_should_send_ack(struct tquic_loss_state *loss, u64 pn,
+			   bool ack_eliciting);
 
 /**
  * tquic_get_ack_delay - Get current ACK delay for timer
@@ -482,13 +469,4 @@ int __init tquic_ack_init(void);
  */
 void __exit tquic_ack_exit(void);
 
-
-/* ACK processing functions */
-void tquic_ack_on_packet_received(struct tquic_connection *conn, u64 pn,
-tttt  u8 pn_space, bool ack_eliciting);
-bool tquic_ack_should_send(struct tquic_connection *conn, u8 pn_space);
-int tquic_ack_create(struct tquic_connection *conn, u8 pn_space,
-tt     u8 *buf, u32 buf_len, u32 *written);
-int __init tquic_ack_init(void);
-void __exit tquic_ack_exit(void);
 #endif /* _TQUIC_ACK_H */

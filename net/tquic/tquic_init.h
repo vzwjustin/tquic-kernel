@@ -108,8 +108,11 @@ void tquic_debug_exit(void);
 u32 tquic_sysctl_get_preferred_version(void);
 bool tquic_sysctl_prefer_v2(void);
 
-
 /* Tracepoint infrastructure (diag/tracepoints.c) */
 int tquic_tracepoints_init(void);
 void tquic_tracepoints_exit(void);
+
+/* io_uring integration (io_uring.c) */
+int tquic_io_uring_init(void);
+void tquic_io_uring_exit(void);
 #endif /* _TQUIC_INIT_H */
