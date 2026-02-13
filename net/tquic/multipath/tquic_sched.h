@@ -66,15 +66,17 @@ int tquic_mp_sched_get_path(struct tquic_connection *conn,
  * tquic_int_path). Use these when working within the internal scheduler
  * implementation where compatibility macros redefine types.
  */
+struct tquic_int_connection;
 struct tquic_path_selection;
-int tquic_int_mp_sched_init_conn(struct tquic_connection *conn, const char *name);
-void tquic_int_mp_sched_release_conn(struct tquic_connection *conn);
-int tquic_int_mp_sched_get_path(struct tquic_connection *conn,
+int tquic_int_mp_sched_init_conn(struct tquic_int_connection *conn,
+				 const char *name);
+void tquic_int_mp_sched_release_conn(struct tquic_int_connection *conn);
+int tquic_int_mp_sched_get_path(struct tquic_int_connection *conn,
 				struct tquic_sched_path_result *result,
 				u32 flags);
-int tquic_int_select_path(struct tquic_connection *conn,
+int tquic_int_select_path(struct tquic_int_connection *conn,
 			  struct tquic_path_selection *sel);
-void tquic_int_path_validate(struct tquic_connection *conn, u8 path_id);
+void tquic_int_path_validate(struct tquic_int_connection *conn, u8 path_id);
 
 /*
  * Per-Netns Default Scheduler

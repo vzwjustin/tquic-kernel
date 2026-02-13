@@ -164,13 +164,7 @@ static const char *tquic_get_hkdf_label(u32 version, int label_type,
 	}
 }
 
-/* Encryption level */
-enum tquic_enc_level {
-	TQUIC_ENC_INITIAL,
-	TQUIC_ENC_HANDSHAKE,
-	TQUIC_ENC_APPLICATION,
-	TQUIC_ENC_LEVEL_COUNT,
-};
+/* enum tquic_enc_level provided by tls.h */
 
 /* Keys for one direction */
 struct tquic_keys {
