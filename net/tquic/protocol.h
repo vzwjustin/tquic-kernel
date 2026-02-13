@@ -805,10 +805,10 @@ void tquic_timer_update(struct tquic_connection *conn);
 
 /* Transport parameter helpers (core/quic_connection.c) */
 int tquic_transport_param_parse(struct tquic_connection *conn, const u8 *data,
-				u32 len);
+				size_t len);
 int tquic_transport_param_apply(struct tquic_connection *conn);
 int tquic_transport_param_encode(struct tquic_connection *conn, u8 *buf,
-				 u32 buf_len, u32 *written);
+				 size_t buf_len, size_t *written);
 int tquic_transport_param_validate(struct tquic_connection *conn);
 
 /* Coalesced packet processing (core/packet_coalesce_fix.c) */

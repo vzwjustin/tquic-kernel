@@ -60,7 +60,7 @@
  */
 
 /**
- * tquic_crypto_init - Initialize a TQUIC crypto context
+ * tquic_crypto_ctx_init - Initialize a TQUIC crypto context
  * @ctx: Context to initialize
  * @cipher_type: TLS cipher suite identifier (e.g., TQUIC_CIPHER_AES_128_GCM_SHA256)
  *
@@ -69,7 +69,7 @@
  *
  * Return: 0 on success, negative error code on failure
  */
-int tquic_crypto_init(struct tquic_crypto_ctx *ctx, u16 cipher_type);
+int tquic_crypto_ctx_init(struct tquic_crypto_ctx *ctx, u16 cipher_type);
 
 /**
  * tquic_crypto_destroy - Free resources in a TQUIC crypto context
@@ -82,7 +82,7 @@ int tquic_crypto_init(struct tquic_crypto_ctx *ctx, u16 cipher_type);
 void tquic_crypto_destroy(void *crypto);
 
 /* Legacy aliases */
-#define quic_crypto_init tquic_crypto_init
+#define quic_crypto_init tquic_crypto_ctx_init
 #define quic_crypto_destroy tquic_crypto_destroy
 
 /*
@@ -104,7 +104,7 @@ void tquic_crypto_destroy(void *crypto);
  * Return: 0 on success, negative error code on failure
  */
 int tquic_crypto_derive_initial_secrets(struct tquic_connection *conn,
-					struct tquic_cid *cid);
+					const struct tquic_cid *cid);
 
 /**
  * tquic_crypto_derive_secrets - Derive traffic secrets and keys
@@ -315,12 +315,22 @@ u8 tquic_crypto_get_key_phase(struct tquic_crypto_ctx *ctx);
 #define TQUIC_TLS_EXT_KEY_SHARE 51 /* RFC 8446 */
 #define TQUIC_TLS_EXT_QUIC_TRANSPORT_PARAMS 0x39 /* RFC 9001 */
 
-/* Legacy aliases */
+/* Legacy aliases - guarded to avoid redefinition when tquic_crypto.h included */
+#ifndef TLS_EXT_SERVER_NAME
 #define TLS_EXT_SERVER_NAME TQUIC_TLS_EXT_SERVER_NAME
+#endif
+#ifndef TLS_EXT_ALPN
 #define TLS_EXT_ALPN TQUIC_TLS_EXT_ALPN
+#endif
+#ifndef TLS_EXT_SUPPORTED_VERSIONS
 #define TLS_EXT_SUPPORTED_VERSIONS TQUIC_TLS_EXT_SUPPORTED_VERSIONS
+#endif
+#ifndef TLS_EXT_KEY_SHARE
 #define TLS_EXT_KEY_SHARE TQUIC_TLS_EXT_KEY_SHARE
+#endif
+#ifndef TLS_EXT_QUIC_TRANSPORT_PARAMS
 #define TLS_EXT_QUIC_TRANSPORT_PARAMS TQUIC_TLS_EXT_QUIC_TRANSPORT_PARAMS
+#endif
 
 /*
  * TLS Extension Building
@@ -439,6 +449,7 @@ int tquic_tls_validate_alpn(const u8 *offered_alpn, size_t offered_len,
  */
 
 /* HKDF and key derivation */
+struct hkdf_ctx;
 int tquic_hkdf_expand_label(struct hkdf_ctx *ctx, const u8 *prk,
 			    const char *label, size_t label_len,
 			    const u8 *context, size_t context_len, u8 *out,
