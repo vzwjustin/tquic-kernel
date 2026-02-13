@@ -171,6 +171,8 @@ jobs:
           scripts/config --enable CONFIG_TRACEPOINTS
 
           # USB network drivers for phone tethering and USB ethernet adapters
+          scripts/config --enable CONFIG_MII                  # MII library (required by USB_USBNET)
+          scripts/config --module CONFIG_USB_USBNET           # USB networking framework (required base)
           scripts/config --enable CONFIG_USB_NET_DRIVERS
           scripts/config --module CONFIG_USB_IPHETH           # Apple iPhone USB tethering
           scripts/config --module CONFIG_USB_NET_RNDIS_HOST   # Android/Windows phone tethering
@@ -358,6 +360,8 @@ jobs:
           scripts/config --enable CONFIG_TRACEPOINTS
 
           # USB network drivers for phone tethering and USB ethernet adapters
+          scripts/config --enable CONFIG_MII                  # MII library (required by USB_USBNET)
+          scripts/config --module CONFIG_USB_USBNET           # USB networking framework (required base)
           scripts/config --enable CONFIG_USB_NET_DRIVERS
           scripts/config --module CONFIG_USB_IPHETH           # Apple iPhone USB tethering
           scripts/config --module CONFIG_USB_NET_RNDIS_HOST   # Android/Windows phone tethering
