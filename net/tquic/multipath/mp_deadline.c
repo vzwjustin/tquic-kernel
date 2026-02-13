@@ -31,6 +31,7 @@
 #include <net/tquic.h>
 
 #include "mp_frame.h"
+#include "mp_deadline.h"
 #include "../sched/deadline_aware.h"
 #include "../tquic_debug.h"
 #include "../tquic_init.h"
