@@ -29,8 +29,8 @@
 
 /* Forward declarations for path management */
 extern const char *tquic_path_state_names[];
-extern int tquic_path_set_state(struct tquic_path *path,
-				enum tquic_path_state new_state);
+extern void tquic_path_set_state(struct tquic_connection *conn, u8 path_id,
+				 enum tquic_path_state state);
 extern struct tquic_path *tquic_pm_get_path(struct tquic_pm_state *pm,
 					    u32 path_id);
 extern void tquic_path_put(struct tquic_path *path);
@@ -144,11 +144,7 @@ int tquic_frame_process_path_abandon(struct tquic_connection *conn,
 		}
 
 		/* Transition to CLOSED state (terminal state for abandoned paths) */
-		if (tquic_path_set_state(path, TQUIC_PATH_CLOSED) < 0) {
-			tquic_conn_warn(conn,
-					"invalid transition to CLOSED path %u\n",
-					path->path_id);
-		}
+		tquic_path_set_state(conn, path->path_id, TQUIC_PATH_CLOSED);
 
 		/*
 		 * Notify bonding context that path is being abandoned.
@@ -530,12 +526,7 @@ int tquic_send_path_abandon(struct tquic_connection *conn, struct tquic_path *pa
 		return -EINVAL;
 
 	/* Transition path to CLOSED state */
-	ret = tquic_path_set_state(path, TQUIC_PATH_CLOSED);
-	if (ret < 0) {
-		tquic_conn_warn(conn, "path %u transition to CLOSED failed: %d\n",
-			path->path_id, ret);
-		/* Continue anyway - still send the frame to peer */
-	}
+	tquic_path_set_state(conn, path->path_id, TQUIC_PATH_CLOSED);
 
 	skb = tquic_frame_create_path_abandon(path->path_id, error_code, NULL, 0);
 	if (!skb)

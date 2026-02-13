@@ -9,21 +9,31 @@
 #define _TQUIC_QLOG_V2_H
 
 struct tquic_qlog;
-struct tquic_sent_packet;
-struct tquic_cc_state;
+struct qlog_v2_packet_header;
+struct qlog_v2_metrics;
+struct qlog_v2_path_info;
 
 int qlog_v2_emit_packet_sent(struct tquic_qlog *qlog,
-			     struct tquic_sent_packet *pkt);
+			     const struct qlog_v2_packet_header *hdr,
+			     u32 path_id, bool is_coalesced,
+			     const void *frames, u32 frame_count,
+			     char *buf, size_t size);
 int qlog_v2_emit_packet_received(struct tquic_qlog *qlog,
-				 const u8 *data, u32 len, u64 pn);
+				 const struct qlog_v2_packet_header *hdr,
+				 u32 path_id, u8 ecn,
+				 char *buf, size_t size);
 int qlog_v2_emit_metrics_updated(struct tquic_qlog *qlog,
-				 struct tquic_cc_state *cc);
+				 const struct qlog_v2_metrics *m,
+				 char *buf, size_t size);
 int qlog_v2_emit_bbr_state(struct tquic_qlog *qlog,
-			   struct tquic_cc_state *cc);
+			   const struct qlog_v2_metrics *m,
+			   char *buf, size_t size);
 int qlog_v2_emit_path_assigned(struct tquic_qlog *qlog,
-			       u64 stream_id, u32 path_id);
+			       const struct qlog_v2_path_info *path,
+			       char *buf, size_t size);
 int qlog_v2_emit_path_updated(struct tquic_qlog *qlog,
-			      u32 path_id, const char *event);
+			      u32 path_id, u32 old_state, u32 new_state,
+			      char *buf, size_t size);
 int qlog_v2_emit_frame(u64 frame_type, const void *data, size_t data_len,
 		       char *buf, size_t buf_len);
 int qlog_v2_init(void);

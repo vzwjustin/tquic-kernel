@@ -13,9 +13,10 @@ struct tquic_path;
 
 /* Path manager response handling */
 int tquic_pm_send_response(struct tquic_connection *conn,
-			   const u8 *data, u32 len);
+			   struct tquic_path *path,
+			   const u8 *challenge_data);
 int tquic_pm_handle_response(struct tquic_connection *conn,
-			     const u8 *data, u32 len);
+			     struct tquic_path *path, const u8 *data);
 
 /* Path selection */
 struct tquic_path *tquic_pm_select_path(struct tquic_connection *conn);
