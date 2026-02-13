@@ -455,5 +455,5 @@ int tquic_hkdf_expand_label(struct hkdf_ctx *ctx, const u8 *prk,
 			    const u8 *context, size_t context_len, u8 *out,
 			    size_t out_len);
 int tquic_crypto_derive_init_secrets(struct tquic_connection *conn,
-				     struct tquic_cid *cid);
+				     const struct tquic_cid *cid);
 #endif /* _NET_TQUIC_QUIC_CRYPTO_H */

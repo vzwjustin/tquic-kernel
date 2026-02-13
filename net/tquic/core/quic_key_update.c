@@ -134,11 +134,14 @@ u32 tquic_rtt_pto(struct tquic_rtt_state *rtt);
  * TQUIC_SKB_CB - Get control block from skb
  */
 struct tquic_skb_cb {
-	u32 header_len;
-	u32 payload_len;
 	u64 pn;
-	u8 pn_space;
+	u32 header_len;
+	u8 pn_len;
 	u8 key_phase;
+	u8 dcid_len;
+	u8 scid_len;
+	u8 packet_type;
+	u8 crypto_level;
 };
 
 #define TQUIC_SKB_CB(skb) ((struct tquic_skb_cb *)&((skb)->cb[0]))

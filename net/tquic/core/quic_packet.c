@@ -85,8 +85,11 @@ int tquic_varint_len(u64 value);
 void tquic_ack_on_packet_received(struct tquic_connection *conn, u64 pn, u8 level);
 int tquic_ack_frequency_process(struct tquic_connection *conn, const u8 *data, int len);
 int tquic_immediate_ack_process(struct tquic_connection *conn);
-void tquic_loss_detection_on_packet_sent(struct tquic_connection *conn, void *sent);
-void tquic_loss_detection_on_ack_received(struct tquic_connection *conn, void *ack_info, u8 level);
+void tquic_loss_detection_on_packet_sent(struct tquic_connection *conn,
+					 struct tquic_sent_packet *pkt);
+void tquic_loss_detection_on_ack_received(struct tquic_connection *conn,
+					  struct tquic_ack_frame *ack,
+					  u8 pn_space_idx);
 /* tquic_crypto_* functions declared in tquic_crypto.h */
 int tquic_flow_check_recv_limits(struct tquic_stream *stream, u64 offset, u64 len);
 void tquic_stream_handle_reset(struct tquic_stream *stream, u64 error_code, u64 final_size);

@@ -110,17 +110,21 @@ u8 tquic_crypto_get_key_phase(struct tquic_crypto_ctx *ctx);
  *   u64 pn;           - Full packet number
  *   u32 header_len;   - Length of QUIC header
  *   u8  pn_len;       - Encoded packet number length
- *   u8  packet_type;  - Packet type
+ *   u8  key_phase;    - Key phase bit
  *   u8  dcid_len;     - DCID length
  *   u8  scid_len;     - SCID length (long header only)
+ *   u8  packet_type;  - Packet type
+ *   u8  crypto_level; - Encryption level
  */
 struct tquic_skb_cb {
 	u64	pn;
 	u32	header_len;
 	u8	pn_len;
-	u8	packet_type;
+	u8	key_phase;
 	u8	dcid_len;
 	u8	scid_len;
+	u8	packet_type;
+	u8	crypto_level;
 };
 
 #define TQUIC_SKB_CB(skb) ((struct tquic_skb_cb *)((skb)->cb))
