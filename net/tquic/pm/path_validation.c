@@ -323,11 +323,13 @@ int tquic_path_handle_challenge(struct tquic_connection *conn,
 	 * scheduling the connection's transmit tasklet.
 	 */
 	if (conn && conn->sk) {
+		struct sock *sk = conn->sk;
+
 		/* Mark socket as having urgent data to send */
 		set_bit(TQUIC_PATH_RESPONSE_PENDING, &conn->flags);
 
 		/* Wake up any waiting writers and trigger immediate output */
-		conn->sk->sk_data_ready(conn->sk);
+		sk->sk_data_ready(sk);
 
 		/* Schedule immediate transmission via tasklet */
 		if (test_bit(TQUIC_CONN_FLAG_TASKLET_SCHED, &conn->flags))

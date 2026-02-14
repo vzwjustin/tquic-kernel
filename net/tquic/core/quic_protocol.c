@@ -398,9 +398,10 @@ static void tquic_proto_close(struct sock *sk, long timeout)
 
 	if (conn && READ_ONCE(conn->state) != TQUIC_CONN_CLOSED) {
 		tquic_conn_close_with_error(conn, EQUIC_NO_ERROR, NULL);
-		spin_lock_bh(&conn->lock);
-		WRITE_ONCE(conn->state, TQUIC_CONN_CLOSING);
-		spin_unlock_bh(&conn->lock);
+		if (READ_ONCE(conn->state) == TQUIC_CONN_CONNECTED ||
+		    READ_ONCE(conn->state) == TQUIC_CONN_CONNECTING)
+			tquic_conn_set_state(conn, TQUIC_CONN_CLOSING,
+					     TQUIC_REASON_APPLICATION);
 		/* Set timer for draining period */
 		if (READ_ONCE(conn->active_path) && conn->timer_state) {
 			/* 3 * smoothed_rtt draining period per RFC 9000 */
@@ -1121,11 +1122,13 @@ static int tquic_stream_connect(struct socket *sock, TQUIC_SOCKADDR *addr,
 		struct tquic_sock *tsk = tquic_sk(sk);
 		DEFINE_WAIT(wait);
 
+		lock_sock(sk);
 		while (tsk->conn && READ_ONCE(tsk->conn->state) == TQUIC_CONN_CONNECTING) {
 			prepare_to_wait(sk_sleep(sk), &wait, TASK_INTERRUPTIBLE);
 
 			if (signal_pending(current)) {
 				finish_wait(sk_sleep(sk), &wait);
+				release_sock(sk);
 				return -ERESTARTSYS;
 			}
 
@@ -1135,8 +1138,11 @@ static int tquic_stream_connect(struct socket *sock, TQUIC_SOCKADDR *addr,
 			finish_wait(sk_sleep(sk), &wait);
 		}
 
-		if (!tsk->conn || READ_ONCE(tsk->conn->state) != TQUIC_CONN_CONNECTED)
+		if (!tsk->conn || READ_ONCE(tsk->conn->state) != TQUIC_CONN_CONNECTED) {
+			release_sock(sk);
 			return -ECONNREFUSED;
+		}
+		release_sock(sk);
 	}
 
 	return 0;

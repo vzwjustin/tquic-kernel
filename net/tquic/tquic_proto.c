@@ -1027,7 +1027,8 @@ err_sysctl:
  * might also acquire, as destroy may sleep (cancel_work_sync, etc).
  */
 static void tquic_net_close_connection(struct tquic_connection *conn,
-				       struct tquic_net *tn)
+				       struct tquic_net *tn,
+				       bool dec_conn_count)
 {
 	struct sock *sk;
 
@@ -1060,13 +1061,15 @@ static void tquic_net_close_connection(struct tquic_connection *conn,
 					    "namespace shutdown");
 		spin_lock_bh(&conn->lock);
 	}
+	spin_unlock_bh(&conn->lock);
 
 	/*
 	 * Mark connection as closed immediately to prevent any further
 	 * packet processing or state machine activity.
 	 */
-	WRITE_ONCE(conn->state, TQUIC_CONN_CLOSED);
-	spin_unlock_bh(&conn->lock);
+	if (READ_ONCE(conn->state) != TQUIC_CONN_CLOSED)
+		tquic_conn_set_state(conn, TQUIC_CONN_CLOSED,
+				     TQUIC_REASON_APPLICATION);
 
 	/*
 	 * Unlink socket from connection before destroying.
@@ -1078,13 +1081,22 @@ static void tquic_net_close_connection(struct tquic_connection *conn,
 	if (sk) {
 		struct tquic_sock *tsk = tquic_sk(sk);
 
-		if (tsk)
+		/*
+		 * Only clear the socket's back-pointer if it actually
+		 * refers to THIS connection.  For server-side connections
+		 * that have not yet been accept()'d, conn->sk temporarily
+		 * points to the *listener* socket (set in
+		 * tquic_server_handshake).  Blindly nulling tsk->conn
+		 * would corrupt the listener's state.
+		 */
+		if (tsk && tsk->conn == conn)
 			WRITE_ONCE(tsk->conn, NULL);
 		conn->sk = NULL;
 	}
 
-	/* Decrement namespace connection count before freeing */
-	atomic_dec(&tn->conn_count);
+	/* Decrement namespace connection count before freeing if requested */
+	if (dec_conn_count)
+		atomic_dec(&tn->conn_count);
 
 	/*
 	 * Do NOT call tquic_conn_destroy() here.  The caller holds a
@@ -1101,6 +1113,81 @@ static void tquic_net_close_connection(struct tquic_connection *conn,
 	 */
 }
 
+struct tquic_close_entry {
+	struct list_head list;
+	struct tquic_connection *conn;
+	bool dec_conn_count;
+};
+
+static struct tquic_close_entry *
+tquic_close_list_find(struct list_head *close_list,
+			      struct tquic_connection *conn)
+{
+	struct tquic_close_entry *entry;
+
+	list_for_each_entry(entry, close_list, list) {
+		if (entry->conn == conn)
+			return entry;
+	}
+
+	return NULL;
+}
+
+static bool tquic_close_list_add(struct list_head *close_list,
+				 struct tquic_connection *conn,
+				 bool dec_conn_count,
+				 gfp_t gfp)
+{
+	struct tquic_close_entry *entry;
+
+	entry = kmalloc(sizeof(*entry), gfp);
+	if (!entry)
+		return false;
+
+	entry->conn = conn;
+	entry->dec_conn_count = dec_conn_count;
+	list_add_tail(&entry->list, close_list);
+	return true;
+}
+
+static void tquic_net_close_hash_residual(struct net *net,
+					  struct tquic_net *tn)
+{
+	struct tquic_connection *conn;
+	struct rhashtable_iter iter;
+	bool found;
+
+	do {
+		found = false;
+		conn = NULL;
+
+		rhashtable_walk_enter(&tquic_conn_table, &iter);
+		rhashtable_walk_start(&iter);
+
+		while ((conn = rhashtable_walk_next(&iter)) != NULL) {
+			if (IS_ERR(conn))
+				continue;
+
+			if (!conn->sk || !net_eq(sock_net(conn->sk), net))
+				continue;
+
+			if (!refcount_inc_not_zero(&conn->refcnt))
+				continue;
+
+			found = true;
+			break;
+		}
+
+		rhashtable_walk_stop(&iter);
+		rhashtable_walk_exit(&iter);
+
+		if (found) {
+			tquic_net_close_connection(conn, tn, false);
+			tquic_conn_put(conn);
+		}
+	} while (found);
+}
+
 /*
  * Iterate through all connections in the namespace and close them.
  *
@@ -1115,6 +1202,8 @@ static void tquic_net_close_all_connections(struct net *net)
 	struct tquic_net *tn = tquic_pernet(net);
 	struct tquic_connection *conn;
 	struct rhashtable_iter iter;
+	struct tquic_close_entry *entry;
+	bool hash_collect_oom = false;
 	LIST_HEAD(close_list);
 
 	/*
@@ -1144,12 +1233,14 @@ static void tquic_net_close_all_connections(struct net *net)
 			 * We still take references to be safe.
 			 */
 			if (refcount_inc_not_zero(&conn->refcnt)) {
-				/*
-				 * Use pm_node for temporary list linkage.
-				 * This is safe because we're shutting down
-				 * and pm_node won't be used for anything else.
-				 */
-				list_add(&conn->pm_node, &close_list);
+				if (tquic_close_list_find(&close_list, conn))
+					tquic_conn_put(conn);
+				else if (!tquic_close_list_add(&close_list, conn,
+							   false,
+							   GFP_KERNEL)) {
+					hash_collect_oom = true;
+					tquic_conn_put(conn);
+				}
 			}
 		}
 	}
@@ -1165,7 +1256,9 @@ static void tquic_net_close_all_connections(struct net *net)
 	spin_lock_bh(&tn->conn_lock);
 	while (!list_empty(&tn->connections)) {
 		struct tquic_connection *c;
-		bool found = false;
+		struct tquic_close_entry *found_entry;
+		bool found;
+		bool got_ref = false;
 
 		c = list_first_entry(&tn->connections,
 				     struct tquic_connection, pm_node);
@@ -1175,21 +1268,43 @@ static void tquic_net_close_all_connections(struct net *net)
 		 * This can happen if connection is in both the global
 		 * table and the netns list.
 		 */
-		list_for_each_entry(conn, &close_list, pm_node) {
-			if (conn == c) {
-				found = true;
-				break;
-			}
-		}
-
-		/* Remove from netns list regardless */
-		list_del_init(&c->pm_node);
+		found_entry = tquic_close_list_find(&close_list, c);
+		found = found_entry != NULL;
+		if (found)
+			found_entry->dec_conn_count = true;
 
 		if (!found) {
-			if (refcount_inc_not_zero(&c->refcnt)) {
-				list_add(&c->pm_node, &close_list);
+			got_ref = refcount_inc_not_zero(&c->refcnt);
+			if (got_ref) {
+				if (!tquic_close_list_add(&close_list, c,
+							   true,
+							   GFP_ATOMIC)) {
+					/*
+					 * OOM fallback: close this connection immediately.
+					 * We already hold a reference from refcount_inc_not_zero().
+					 */
+					list_del_init(&c->pm_node);
+					spin_unlock_bh(&tn->conn_lock);
+
+					tquic_net_close_connection(c, tn, true);
+					tquic_conn_put(c);
+
+					spin_lock_bh(&tn->conn_lock);
+					continue;
+				}
 			}
 		}
+
+		/* Remove from netns list after successful enqueue/dedupe. */
+		list_del_init(&c->pm_node);
+
+		/*
+		 * If the connection is already at refcount 0, teardown is in-flight
+		 * and tquic_pm_conn_release() may skip conn_count decrement because we
+		 * already unlinked pm_node here. Account for it now.
+		 */
+		if (!found && !got_ref)
+			atomic_dec(&tn->conn_count);
 	}
 	spin_unlock_bh(&tn->conn_lock);
 
@@ -1200,9 +1315,14 @@ static void tquic_net_close_all_connections(struct net *net)
 	 * hold any spinlocks here.
 	 */
 	while (!list_empty(&close_list)) {
-		conn = list_first_entry(&close_list,
-					struct tquic_connection, pm_node);
-		list_del_init(&conn->pm_node);
+		bool dec_conn_count;
+
+		entry = list_first_entry(&close_list,
+					 struct tquic_close_entry, list);
+		list_del_init(&entry->list);
+		conn = entry->conn;
+		dec_conn_count = entry->dec_conn_count;
+		kfree(entry);
 
 		tquic_dbg("closing connection %p during netns exit\n", conn);
 
@@ -1213,7 +1333,7 @@ static void tquic_net_close_all_connections(struct net *net)
 		 * any more -- destruction is handled by tquic_conn_put()
 		 * when the refcount reaches zero.
 		 */
-		tquic_net_close_connection(conn, tn);
+		tquic_net_close_connection(conn, tn, dec_conn_count);
 
 		/*
 		 * Drop the reference we took during collection.
@@ -1223,6 +1343,13 @@ static void tquic_net_close_all_connections(struct net *net)
 		 */
 		tquic_conn_put(conn);
 	}
+
+	/*
+	 * If hash-table collection ran OOM, do a no-allocation residual pass
+	 * to close any namespace connections that were not queued above.
+	 */
+	if (hash_collect_oom)
+		tquic_net_close_hash_residual(net, tn);
 
 	/*
 	 * If there are still connections in the namespace (conn_count > 0),
@@ -1306,7 +1433,7 @@ static int tquic_v4_add_protocol(void)
 	/*
 	 * TQUIC uses UDP encapsulation (like standard QUIC per RFC 9000).
 	 * Raw IP protocol handlers are only for protocols < 256.
-	 * IPPROTO_TQUIC (263) is used for socket creation identification
+	 * IPPROTO_TQUIC is used for socket creation identification
 	 * but packets are received via UDP, not raw IP.
 	 *
 	 * Skip raw protocol registration - UDP encap is handled in tquic_udp.c

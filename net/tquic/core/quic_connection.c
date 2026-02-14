@@ -267,7 +267,7 @@ static void tquic_cid_entry_rcu_free(struct rcu_head *head)
 
 static void tquic_cid_entry_destroy(struct tquic_cid_entry *entry)
 {
-	list_del(&entry->list);
+	list_del_init(&entry->list);
 	tquic_cid_hash_del(entry);
 	/*
 	 * Defer freeing until an RCU grace period has elapsed so that
@@ -304,14 +304,14 @@ tquic_pn_space_destroy(struct tquic_pn_space *pn_space)
 	struct tquic_sent_packet *pkt, *tmp;
 
 	list_for_each_entry_safe(pkt, tmp, &pn_space->sent_list, list) {
-		list_del(&pkt->list);
+		list_del_init(&pkt->list);
 		if (pkt->skb)
 			kfree_skb(pkt->skb);
 		kfree(pkt);
 	}
 
 	list_for_each_entry_safe(pkt, tmp, &pn_space->lost_packets, list) {
-		list_del(&pkt->list);
+		list_del_init(&pkt->list);
 		if (pkt->skb)
 			kfree_skb(pkt->skb);
 		kfree(pkt);
@@ -723,6 +723,20 @@ void tquic_conn_destroy(struct tquic_connection *conn)
 	 */
 	WARN_ON_ONCE(refcount_read(&conn->refcnt) != 0);
 
+	/* Unbind from server client tracking before teardown */
+	tquic_server_unbind_client(conn);
+
+	/* Release path manager state if still attached */
+	tquic_pm_conn_release(conn);
+
+	/* Clean up state machine (CIDs, work items, challenges) */
+	if (conn->state_machine)
+		tquic_conn_state_cleanup(conn);
+
+	/* Remove from global connection hash table */
+	rhashtable_remove_fast(&tquic_conn_table, &conn->node,
+			       tquic_conn_table_params);
+
 	trace_quic_conn_destroy(tquic_trace_conn_id(&conn->scid),
 				conn->error_code);
 
@@ -824,8 +838,12 @@ static int tquic_conn_connect(struct tquic_connection *conn,
 
 	spin_lock_bh(&conn->lock);
 	conn->pn_spaces[TQUIC_PN_SPACE_INITIAL].keys_available = 1;
-	WRITE_ONCE(conn->state, TQUIC_CONN_CONNECTING);
 	spin_unlock_bh(&conn->lock);
+
+	err = tquic_conn_set_state(conn, TQUIC_CONN_CONNECTING,
+				   TQUIC_REASON_NORMAL);
+	if (err)
+		return err;
 
 	/* Start handshake timer */
 	tquic_timer_set(conn, TQUIC_TIMER_HANDSHAKE,
@@ -840,26 +858,22 @@ static int tquic_conn_connect(struct tquic_connection *conn,
 
 static int tquic_conn_accept(struct tquic_connection *conn)
 {
-	spin_lock_bh(&conn->lock);
-	if (conn->state != TQUIC_CONN_IDLE) {
-		spin_unlock_bh(&conn->lock);
-		return -EINVAL;
-	}
-
-	WRITE_ONCE(conn->state, TQUIC_CONN_CONNECTING);
-	spin_unlock_bh(&conn->lock);
-	return 0;
+	return tquic_conn_set_state(conn, TQUIC_CONN_CONNECTING,
+				    TQUIC_REASON_NORMAL);
 }
 
 static int tquic_conn_close(struct tquic_connection *conn, u64 error_code,
 			    const char *reason, u32 reason_len, bool app_error)
 {
+	bool already_closing;
+
 	spin_lock_bh(&conn->lock);
 	if (conn->state == TQUIC_CONN_CLOSED ||
 	    conn->state == TQUIC_CONN_DRAINING) {
 		spin_unlock_bh(&conn->lock);
 		return -EINVAL;
 	}
+	already_closing = (conn->state == TQUIC_CONN_CLOSING);
 
 	conn->error_code = error_code;
 	conn->app_error = app_error ? 1 : 0;
@@ -875,8 +889,12 @@ static int tquic_conn_close(struct tquic_connection *conn, u64 error_code,
 		/* On allocation failure, proceed without reason phrase */
 	}
 
-	WRITE_ONCE(conn->state, TQUIC_CONN_CLOSING);
 	spin_unlock_bh(&conn->lock);
+
+	if (!already_closing)
+		tquic_conn_set_state(conn, TQUIC_CONN_CLOSING,
+				     app_error ? TQUIC_REASON_APPLICATION :
+				     TQUIC_REASON_NORMAL);
 
 	/* Send CONNECTION_CLOSE frame */
 	schedule_work(&conn->tx_work);
@@ -889,68 +907,10 @@ static int tquic_conn_close(struct tquic_connection *conn, u64 error_code,
 	return 0;
 }
 
-static void tquic_conn_set_state(struct tquic_connection *conn,
-				 enum tquic_conn_state state)
+static void tquic_conn_set_state_local(struct tquic_connection *conn,
+			      enum tquic_conn_state state)
 {
-	enum tquic_conn_state old_state;
-
-	spin_lock_bh(&conn->lock);
-	old_state = conn->state;
-	WRITE_ONCE(conn->state, state);
-
-	trace_quic_conn_state_change(tquic_trace_conn_id(&conn->scid),
-				     old_state, state);
-
-	switch (state) {
-	case TQUIC_CONN_CONNECTED:
-		conn->handshake_complete = 1;
-		conn->pn_spaces[TQUIC_PN_SPACE_INITIAL].keys_discarded = 1;
-		conn->pn_spaces[TQUIC_PN_SPACE_HANDSHAKE].keys_discarded = 1;
-		atomic64_set(&conn->stats.handshake_time_us,
-			     ktime_to_us(ktime_get()));
-		spin_unlock_bh(&conn->lock);
-
-		trace_quic_handshake_complete(
-			tquic_trace_conn_id(&conn->scid),
-			atomic64_read(&conn->stats.handshake_time_us));
-
-		tquic_timer_cancel(conn, TQUIC_TIMER_HANDSHAKE);
-		tquic_crypto_destroy(conn->crypto[TQUIC_CRYPTO_INITIAL]);
-		tquic_crypto_destroy(conn->crypto[TQUIC_CRYPTO_HANDSHAKE]);
-
-		if (conn->tsk)
-			wake_up(&conn->tsk->event_wait);
-		goto out;
-
-	case TQUIC_CONN_DRAINING:
-		conn->draining = 1;
-		spin_unlock_bh(&conn->lock);
-		/* Schedule close after draining period */
-		tquic_timer_set(
-			conn, TQUIC_TIMER_IDLE,
-			ktime_add_ms(ktime_get(),
-				     tquic_conn_draining_timeout_ms(conn)));
-		goto out;
-
-	case TQUIC_CONN_CLOSED:
-		spin_unlock_bh(&conn->lock);
-		/* Cancel all timers except idle */
-		tquic_timer_cancel(conn, TQUIC_TIMER_LOSS);
-		tquic_timer_cancel(conn, TQUIC_TIMER_ACK);
-		tquic_timer_cancel(conn, TQUIC_TIMER_HANDSHAKE);
-		tquic_timer_cancel(conn, TQUIC_TIMER_PATH_PROBE);
-		tquic_timer_cancel(conn, TQUIC_TIMER_KEY_UPDATE);
-
-		if (conn->tsk)
-			wake_up(&conn->tsk->event_wait);
-		goto out;
-
-	default:
-		break;
-	}
-	spin_unlock_bh(&conn->lock);
-out:
-	return;
+	tquic_conn_set_state(conn, state, TQUIC_REASON_NORMAL);
 }
 
 /* Generate new connection ID */
@@ -1004,7 +964,7 @@ static int tquic_conn_add_peer_cid(struct tquic_connection *conn,
 	/* Retire CIDs with sequence < retire_prior_to */
 	list_for_each_entry_safe(entry, tmp, &conn->dcid_list, list) {
 		if (entry->seq_num < retire_prior_to) {
-			list_del(&entry->list);
+			list_del_init(&entry->list);
 			kmem_cache_free(tquic_cid_cache, entry);
 		}
 	}

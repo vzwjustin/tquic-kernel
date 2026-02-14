@@ -1110,9 +1110,9 @@ int tquic_frame_process_one(struct tquic_connection *conn, const u8 *data,
 	case TQUIC_FRAME_HANDSHAKE_DONE:
 		if (conn->role == TQUIC_ROLE_CLIENT) {
 			set_bit(TQUIC_CONN_FLAG_HANDSHAKE_DONE, &conn->flags);
-			spin_lock_bh(&conn->lock);
-			WRITE_ONCE(conn->state, TQUIC_CONN_CONNECTED);
-			spin_unlock_bh(&conn->lock);
+			if (READ_ONCE(conn->state) == TQUIC_CONN_CONNECTING)
+				tquic_conn_set_state(conn, TQUIC_CONN_CONNECTED,
+						     TQUIC_REASON_NORMAL);
 		}
 		return 1;
 
@@ -1498,9 +1498,10 @@ static int tquic_frame_process_connection_close(struct tquic_connection *conn,
 	offset += reason_len;
 
 	/* Enter draining state */
-	spin_lock_bh(&conn->lock);
-	WRITE_ONCE(conn->state, TQUIC_CONN_DRAINING);
-	spin_unlock_bh(&conn->lock);
+	if (READ_ONCE(conn->state) != TQUIC_CONN_DRAINING &&
+	    READ_ONCE(conn->state) != TQUIC_CONN_CLOSED)
+		tquic_conn_set_state(conn, TQUIC_CONN_DRAINING,
+				     TQUIC_REASON_PEER_CLOSE);
 	set_bit(TQUIC_CONN_FLAG_DRAINING, &conn->flags);
 
 	return offset;

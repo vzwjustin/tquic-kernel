@@ -87,15 +87,6 @@ static struct tquic_path *tquic_conn_active_path_get(struct tquic_connection *co
 /* Crypto error range: 0x100-0x1ff */
 #define TQUIC_CRYPTO_ERROR_BASE		0x100
 
-/* Connection state change reasons */
-enum tquic_state_reason {
-	TQUIC_REASON_NORMAL,
-	TQUIC_REASON_TIMEOUT,
-	TQUIC_REASON_ERROR,
-	TQUIC_REASON_PEER_CLOSE,
-	TQUIC_REASON_APPLICATION,
-};
-
 /* Handshake sub-states for internal state machine tracking */
 enum tquic_hs_substate {
 	TQUIC_HS_INITIAL,
@@ -141,7 +132,18 @@ struct tquic_close_frame {
 };
 
 /* Extended connection structure for internal state machine */
+#define TQUIC_SM_MAGIC_CONN_STATE 0x434F4E53 /* "CONS" */
+
 struct tquic_conn_state_machine {
+	/*
+	 * Type discriminator -- MUST be the first field.
+	 * conn->state_machine is a void pointer shared by multiple
+	 * subsystems (connection state, migration, session).  Each
+	 * subsystem tags its struct with a unique magic so that
+	 * type-safe accessors can reject mismatched casts.
+	 */
+	u32 magic;
+
 	/* Handshake sub-state */
 	enum tquic_hs_substate hs_state;
 	bool is_server;
@@ -283,6 +285,26 @@ static struct crypto_aead *tquic_retry_integrity_aead_v1;
 static struct crypto_aead *tquic_retry_integrity_aead_v2;
 static DEFINE_SPINLOCK(tquic_retry_integrity_lock);
 
+/*
+ * Type-safe accessor for conn->state_machine -> tquic_conn_state_machine.
+ * Returns NULL if state_machine is NULL or holds a different type
+ * (e.g. tquic_migration_state from tquic_migration.c).
+ */
+static inline struct tquic_conn_state_machine *
+tquic_conn_get_cs(struct tquic_connection *conn)
+{
+	struct tquic_conn_state_machine *cs;
+
+	if (!conn->state_machine)
+		return NULL;
+
+	cs = conn->state_machine;
+	if (cs->magic != TQUIC_SM_MAGIC_CONN_STATE)
+		return NULL;
+
+	return cs;
+}
+
 /* Forward declarations */
 static void tquic_conn_enter_closing(struct tquic_connection *conn,
 				     u64 error_code, const char *reason);
@@ -320,11 +342,11 @@ static const char *tquic_state_name(enum tquic_conn_state state)
  * Handles all state transition logic and triggers appropriate actions.
  * Returns 0 on success, negative error if transition is invalid.
  */
-static int tquic_conn_set_state(struct tquic_connection *conn,
-				enum tquic_conn_state new_state,
-				enum tquic_state_reason reason)
+int tquic_conn_set_state(struct tquic_connection *conn,
+			 enum tquic_conn_state new_state,
+			 enum tquic_state_reason reason)
 {
-	struct tquic_conn_state_machine *cs = conn->state_machine;
+	struct tquic_conn_state_machine *cs = tquic_conn_get_cs(conn);
 	enum tquic_conn_state old_state;
 	bool valid = false;
 
@@ -392,41 +414,43 @@ static int tquic_conn_set_state(struct tquic_connection *conn,
 			tquic_state_name(old_state),
 			tquic_state_name(new_state), reason);
 
-	/* Perform state-specific entry actions */
+	/*
+	 * Perform state-specific entry actions.
+	 *
+	 * cs may be NULL if conn->state_machine holds a different type
+	 * (e.g. tquic_migration_state for server connections via
+	 * tquic_server_handshake).  In that case, skip the
+	 * tquic_conn_state_machine-specific side-effects but still
+	 * update the connection state and wake waiters.
+	 */
 	switch (new_state) {
 	case TQUIC_CONN_CONNECTING:
-		cs->hs_state = TQUIC_HS_INITIAL;
-		/* established_time is set on CONNECTED, not here */
+		if (cs)
+			cs->hs_state = TQUIC_HS_INITIAL;
 		break;
 
 	case TQUIC_CONN_CONNECTED:
-		cs->handshake_confirmed = true;
+		if (cs)
+			cs->handshake_confirmed = true;
 		conn->stats.established_time = ktime_get();
-		/* Notify bonding layer of connection establishment */
 		if (conn->scheduler)
 			tquic_conn_info(conn, "established, bonding active\n");
 		break;
 
 	case TQUIC_CONN_CLOSING:
-		cs->closing_start = ktime_get();
-		/* Schedule close frame retransmission */
-		schedule_work(&cs->close_work);
-		/*
-		 * Wake up datagram waiters so they can detect
-		 * the connection is closing and return appropriately.
-		 */
+		if (cs) {
+			cs->closing_start = ktime_get();
+			schedule_work(&cs->close_work);
+		}
 		wake_up_interruptible(&conn->datagram.wait);
 		break;
 
 	case TQUIC_CONN_DRAINING:
-		cs->draining_start = ktime_get();
-		/* Schedule drain timeout */
-		schedule_delayed_work(&cs->drain_work,
-				      msecs_to_jiffies(cs->drain_timeout_ms));
-		/*
-		 * Wake up datagram waiters - connection is draining,
-		 * no more data will be delivered.
-		 */
+		if (cs) {
+			cs->draining_start = ktime_get();
+			schedule_delayed_work(&cs->drain_work,
+					      msecs_to_jiffies(cs->drain_timeout_ms));
+		}
 		wake_up_interruptible(&conn->datagram.wait);
 		break;
 
@@ -448,34 +472,23 @@ static int tquic_conn_set_state(struct tquic_connection *conn,
 		 * executed on this CPU's workqueue, or NULL if not in a
 		 * work context.
 		 */
-		if (current_work() == &cs->close_work ||
-		    current_work() == &cs->migration_work ||
-		    current_work() == &cs->drain_work.work ||
-		    current_work() == &cs->validation_work.work) {
-			/*
-			 * In work context: use non-sync cancel.
-			 * The currently executing work is the caller,
-			 * other works check conn->state before acting.
-			 */
-			cancel_work(&cs->close_work);
-			cancel_work(&cs->migration_work);
-			cancel_delayed_work(&cs->drain_work);
-			cancel_delayed_work(&cs->validation_work);
-		} else {
-			/*
-			 * Not in work context: safe to use sync variants
-			 * which guarantee all work has completed on return.
-			 */
-			cancel_work_sync(&cs->close_work);
-			cancel_work_sync(&cs->migration_work);
-			cancel_delayed_work_sync(&cs->drain_work);
-			cancel_delayed_work_sync(&cs->validation_work);
+		if (cs) {
+			if (current_work() == &cs->close_work ||
+			    current_work() == &cs->migration_work ||
+			    current_work() == &cs->drain_work.work ||
+			    current_work() == &cs->validation_work.work) {
+				cancel_work(&cs->close_work);
+				cancel_work(&cs->migration_work);
+				cancel_delayed_work(&cs->drain_work);
+				cancel_delayed_work(&cs->validation_work);
+			} else {
+				cancel_work_sync(&cs->close_work);
+				cancel_work_sync(&cs->migration_work);
+				cancel_delayed_work_sync(&cs->drain_work);
+				cancel_delayed_work_sync(&cs->validation_work);
+			}
 		}
 
-		/*
-		 * Wake up all waiters - connection is fully closed,
-		 * both socket state change and datagram waiters.
-		 */
 		wake_up_interruptible(&conn->datagram.wait);
 		if (conn->sk && conn->sk->sk_state_change)
 			conn->sk->sk_state_change(conn->sk);
@@ -487,6 +500,7 @@ static int tquic_conn_set_state(struct tquic_connection *conn,
 
 	return 0;
 }
+EXPORT_SYMBOL_GPL(tquic_conn_set_state);
 
 /*
  * Connection ID Management
@@ -559,7 +573,7 @@ static struct tquic_cid_entry *tquic_cid_entry_create(const struct tquic_cid *ci
  */
 struct tquic_cid_entry *tquic_conn_add_local_cid(struct tquic_connection *conn)
 {
-	struct tquic_conn_state_machine *cs = conn->state_machine;
+	struct tquic_conn_state_machine *cs = tquic_conn_get_cs(conn);
 	struct tquic_cid_entry *entry;
 	struct tquic_cid new_cid;
 
@@ -605,7 +619,7 @@ struct tquic_cid_entry *tquic_conn_add_local_cid(struct tquic_connection *conn)
 					     &entry->hash_node,
 					     cid_hash_params);
 		if (err) {
-			list_del(&entry->list);
+			list_del_init(&entry->list);
 			cs->next_local_cid_seq--;
 			spin_unlock_bh(&conn->lock);
 			kfree(entry);
@@ -634,7 +648,7 @@ int tquic_conn_add_remote_cid(struct tquic_connection *conn,
 			      const struct tquic_cid *cid, u64 seq,
 			      const u8 *reset_token)
 {
-	struct tquic_conn_state_machine *cs = conn->state_machine;
+	struct tquic_conn_state_machine *cs = tquic_conn_get_cs(conn);
 	struct tquic_cid_entry *entry;
 
 	if (!cs)
@@ -672,7 +686,7 @@ EXPORT_SYMBOL_GPL(tquic_conn_add_remote_cid);
  */
 int tquic_conn_retire_cid(struct tquic_connection *conn, u64 seq, bool is_local)
 {
-	struct tquic_conn_state_machine *cs = conn->state_machine;
+	struct tquic_conn_state_machine *cs = tquic_conn_get_cs(conn);
 	struct tquic_cid_entry *entry;
 	struct list_head *cid_list;
 	bool found = false;
@@ -722,7 +736,7 @@ EXPORT_SYMBOL_GPL(tquic_conn_retire_cid);
  */
 struct tquic_cid *tquic_conn_get_active_cid(struct tquic_connection *conn)
 {
-	struct tquic_conn_state_machine *cs = conn->state_machine;
+	struct tquic_conn_state_machine *cs = tquic_conn_get_cs(conn);
 	struct tquic_cid_entry *entry;
 
 	if (!cs)
@@ -834,7 +848,7 @@ EXPORT_SYMBOL_GPL(tquic_generate_stateless_reset_token);
 bool tquic_verify_stateless_reset(struct tquic_connection *conn,
 				  const u8 *data, size_t len)
 {
-	struct tquic_conn_state_machine *cs = conn->state_machine;
+	struct tquic_conn_state_machine *cs = tquic_conn_get_cs(conn);
 	struct tquic_cid_entry *entry;
 	const u8 *token;
 	bool found = false;
@@ -873,7 +887,7 @@ EXPORT_SYMBOL_GPL(tquic_verify_stateless_reset);
  */
 int tquic_send_stateless_reset(struct tquic_connection *conn)
 {
-	struct tquic_conn_state_machine *cs = conn->state_machine;
+	struct tquic_conn_state_machine *cs = tquic_conn_get_cs(conn);
 	u8 packet[64];
 	int len;
 
@@ -1135,7 +1149,7 @@ EXPORT_SYMBOL_GPL(tquic_send_version_negotiation);
 int tquic_handle_version_negotiation(struct tquic_connection *conn,
 				     const u32 *versions, int num_versions)
 {
-	struct tquic_conn_state_machine *cs = conn->state_machine;
+	struct tquic_conn_state_machine *cs = tquic_conn_get_cs(conn);
 	u32 new_version;
 	int i;
 
@@ -1306,7 +1320,7 @@ int tquic_validate_retry_token(struct tquic_connection *conn,
 			       const struct sockaddr *client_addr,
 			       struct tquic_cid *original_dcid)
 {
-	struct tquic_conn_state_machine *cs = conn->state_machine;
+	struct tquic_conn_state_machine *cs = tquic_conn_get_cs(conn);
 	u8 plaintext[128];
 	u8 nonce[TQUIC_RETRY_TOKEN_IV_LEN];
 	struct aead_request *req;
@@ -1439,7 +1453,7 @@ int tquic_send_retry(struct tquic_connection *conn,
 		     const struct tquic_cid *original_dcid,
 		     const struct sockaddr *client_addr)
 {
-	struct tquic_conn_state_machine *cs = conn->state_machine;
+	struct tquic_conn_state_machine *cs = tquic_conn_get_cs(conn);
 	/*
 	 * SECURITY FIX (CF-220): Allocate large buffers on the heap
 	 * instead of the stack to prevent stack buffer overflow.
@@ -1668,7 +1682,7 @@ EXPORT_SYMBOL_GPL(tquic_send_retry);
 int tquic_send_path_challenge(struct tquic_connection *conn,
 			      struct tquic_path *path)
 {
-	struct tquic_conn_state_machine *cs = conn->state_machine;
+	struct tquic_conn_state_machine *cs = tquic_conn_get_cs(conn);
 	struct tquic_path_challenge *challenge;
 
 	if (!cs)
@@ -1794,7 +1808,7 @@ int tquic_handle_path_response(struct tquic_connection *conn,
 			       struct tquic_path *path,
 			       const u8 *data)
 {
-	struct tquic_conn_state_machine *cs = conn->state_machine;
+	struct tquic_conn_state_machine *cs = tquic_conn_get_cs(conn);
 	struct tquic_path_challenge *challenge, *tmp;
 	bool found = false;
 
@@ -1805,7 +1819,7 @@ int tquic_handle_path_response(struct tquic_connection *conn,
 	list_for_each_entry_safe(challenge, tmp, &cs->pending_challenges, list) {
 		if (challenge->path == path &&
 		    crypto_memneq(challenge->data, data, 8) == 0) {
-			list_del(&challenge->list);
+			list_del_init(&challenge->list);
 			kfree(challenge);
 			found = true;
 			break;
@@ -1847,7 +1861,7 @@ EXPORT_SYMBOL_GPL(tquic_handle_path_response);
 int tquic_conn_migrate_to_path(struct tquic_connection *conn,
 			       struct tquic_path *new_path)
 {
-	struct tquic_conn_state_machine *cs = conn->state_machine;
+	struct tquic_conn_state_machine *cs = tquic_conn_get_cs(conn);
 
 	if (!cs)
 		return -EINVAL;
@@ -1906,7 +1920,7 @@ int tquic_conn_handle_migration(struct tquic_connection *conn,
 				struct tquic_path *path,
 				const struct sockaddr *remote_addr)
 {
-	struct tquic_conn_state_machine *cs = conn->state_machine;
+	struct tquic_conn_state_machine *cs = tquic_conn_get_cs(conn);
 
 	if (!cs)
 		return -EINVAL;
@@ -1968,7 +1982,7 @@ static void tquic_migration_work_handler(struct work_struct *work)
  */
 int tquic_conn_enable_0rtt(struct tquic_connection *conn)
 {
-	struct tquic_conn_state_machine *cs = conn->state_machine;
+	struct tquic_conn_state_machine *cs = tquic_conn_get_cs(conn);
 
 	if (!cs)
 		return -EINVAL;
@@ -2016,7 +2030,7 @@ EXPORT_SYMBOL_GPL(tquic_conn_enable_0rtt);
 int tquic_conn_send_0rtt(struct tquic_connection *conn,
 			 const void *data, size_t len)
 {
-	struct tquic_conn_state_machine *cs = conn->state_machine;
+	struct tquic_conn_state_machine *cs = tquic_conn_get_cs(conn);
 	struct sk_buff *skb;
 
 	if (!cs || !cs->zero_rtt_enabled)
@@ -2046,7 +2060,7 @@ EXPORT_SYMBOL_GPL(tquic_conn_send_0rtt);
  */
 void tquic_conn_0rtt_accepted(struct tquic_connection *conn)
 {
-	struct tquic_conn_state_machine *cs = conn->state_machine;
+	struct tquic_conn_state_machine *cs = tquic_conn_get_cs(conn);
 
 	if (!cs)
 		return;
@@ -2064,7 +2078,7 @@ EXPORT_SYMBOL_GPL(tquic_conn_0rtt_accepted);
  */
 void tquic_conn_0rtt_rejected(struct tquic_connection *conn)
 {
-	struct tquic_conn_state_machine *cs = conn->state_machine;
+	struct tquic_conn_state_machine *cs = tquic_conn_get_cs(conn);
 	struct sk_buff *skb;
 
 	if (!cs)
@@ -2117,7 +2131,7 @@ EXPORT_SYMBOL_GPL(tquic_conn_0rtt_rejected);
 int tquic_conn_process_handshake(struct tquic_connection *conn,
 				 struct sk_buff *skb)
 {
-	struct tquic_conn_state_machine *cs = conn->state_machine;
+	struct tquic_conn_state_machine *cs = tquic_conn_get_cs(conn);
 	u8 *data = skb->data;
 	size_t len = skb->len;
 	u8 first_byte;
@@ -2280,7 +2294,7 @@ EXPORT_SYMBOL_GPL(tquic_conn_process_handshake);
 int tquic_conn_close_with_error(struct tquic_connection *conn,
 				u64 error_code, const char *reason)
 {
-	struct tquic_conn_state_machine *cs = conn->state_machine;
+	struct tquic_conn_state_machine *cs = tquic_conn_get_cs(conn);
 
 	if (!cs)
 		return -EINVAL;
@@ -2315,7 +2329,7 @@ EXPORT_SYMBOL_GPL(tquic_conn_close_with_error);
 int tquic_conn_close_app(struct tquic_connection *conn,
 			 u64 error_code, const char *reason)
 {
-	struct tquic_conn_state_machine *cs = conn->state_machine;
+	struct tquic_conn_state_machine *cs = tquic_conn_get_cs(conn);
 
 	if (!cs)
 		return -EINVAL;
@@ -2328,7 +2342,7 @@ EXPORT_SYMBOL_GPL(tquic_conn_close_app);
 static void tquic_conn_enter_closing(struct tquic_connection *conn,
 				     u64 error_code, const char *reason)
 {
-	struct tquic_conn_state_machine *cs = conn->state_machine;
+	struct tquic_conn_state_machine *cs = tquic_conn_get_cs(conn);
 
 	if (!cs)
 		return;
@@ -2345,7 +2359,7 @@ static void tquic_conn_enter_closing(struct tquic_connection *conn,
 
 static int tquic_send_close_frame(struct tquic_connection *conn)
 {
-	struct tquic_conn_state_machine *cs = conn->state_machine;
+	struct tquic_conn_state_machine *cs = tquic_conn_get_cs(conn);
 
 	if (!cs)
 		return -EINVAL;
@@ -2390,7 +2404,7 @@ int tquic_conn_handle_close(struct tquic_connection *conn,
 			    u64 error_code, u64 frame_type,
 			    const char *reason, bool is_app)
 {
-	struct tquic_conn_state_machine *cs = conn->state_machine;
+	struct tquic_conn_state_machine *cs = tquic_conn_get_cs(conn);
 
 	if (!cs)
 		return -EINVAL;
@@ -2422,7 +2436,7 @@ EXPORT_SYMBOL_GPL(tquic_conn_handle_close);
 
 static void tquic_conn_enter_draining(struct tquic_connection *conn)
 {
-	struct tquic_conn_state_machine *cs = conn->state_machine;
+	struct tquic_conn_state_machine *cs = tquic_conn_get_cs(conn);
 	struct tquic_path *path;
 
 	/*
@@ -2528,6 +2542,7 @@ int tquic_conn_client_connect(struct tquic_connection *conn,
 	if (!cs)
 		return -ENOMEM;
 
+	cs->magic = TQUIC_SM_MAGIC_CONN_STATE;
 	cs->conn = conn;
 	cs->is_server = false;
 	cs->hs_state = TQUIC_HS_INITIAL;
@@ -2618,7 +2633,7 @@ EXPORT_SYMBOL_GPL(tquic_conn_client_connect);
  */
 int tquic_conn_client_restart(struct tquic_connection *conn)
 {
-	struct tquic_conn_state_machine *cs = conn->state_machine;
+	struct tquic_conn_state_machine *cs = tquic_conn_get_cs(conn);
 
 	if (!cs)
 		return -EINVAL;
@@ -2749,6 +2764,7 @@ int tquic_conn_server_accept(struct tquic_connection *conn,
 	if (!cs)
 		return -ENOMEM;
 
+	cs->magic = TQUIC_SM_MAGIC_CONN_STATE;
 	cs->conn = conn;
 	cs->is_server = true;
 	cs->hs_state = TQUIC_HS_INITIAL;
@@ -2909,13 +2925,13 @@ err_free:
 			rhashtable_remove_fast(&cid_lookup_table,
 					       &entry->hash_node,
 					       cid_hash_params);
-			list_del(&entry->list);
+			list_del_init(&entry->list);
 			kfree_rcu(entry, rcu);
 		}
 
 		/* Free remote CIDs */
 		list_for_each_entry_safe(entry, tmp, &cs->remote_cids, list) {
-			list_del(&entry->list);
+			list_del_init(&entry->list);
 			kfree(entry);
 		}
 	}
@@ -2954,7 +2970,7 @@ EXPORT_SYMBOL_GPL(tquic_conn_server_accept);
  */
 bool tquic_conn_can_send(struct tquic_connection *conn, size_t bytes)
 {
-	struct tquic_conn_state_machine *cs = conn->state_machine;
+	struct tquic_conn_state_machine *cs = tquic_conn_get_cs(conn);
 
 	if (!cs)
 		return true;
@@ -2983,7 +2999,7 @@ EXPORT_SYMBOL_GPL(tquic_conn_can_send);
  */
 void tquic_conn_on_packet_sent(struct tquic_connection *conn, size_t bytes)
 {
-	struct tquic_conn_state_machine *cs = conn->state_machine;
+	struct tquic_conn_state_machine *cs = tquic_conn_get_cs(conn);
 
 	if (cs && !cs->address_validated)
 		cs->bytes_sent_unvalidated += bytes;
@@ -2997,7 +3013,7 @@ EXPORT_SYMBOL_GPL(tquic_conn_on_packet_sent);
  */
 void tquic_conn_on_packet_received(struct tquic_connection *conn, size_t bytes)
 {
-	struct tquic_conn_state_machine *cs = conn->state_machine;
+	struct tquic_conn_state_machine *cs = tquic_conn_get_cs(conn);
 
 	if (cs && !cs->address_validated) {
 		cs->bytes_received_unvalidated += bytes;
@@ -3081,7 +3097,7 @@ EXPORT_SYMBOL_GPL(tquic_conn_lookup_by_cid);
  */
 void tquic_conn_state_cleanup(struct tquic_connection *conn)
 {
-	struct tquic_conn_state_machine *cs = conn->state_machine;
+	struct tquic_conn_state_machine *cs = tquic_conn_get_cs(conn);
 	struct tquic_cid_entry *entry, *tmp;
 	struct tquic_path_challenge *challenge, *ctmp;
 
@@ -3103,19 +3119,19 @@ void tquic_conn_state_cleanup(struct tquic_connection *conn)
 	list_for_each_entry_safe(entry, tmp, &cs->local_cids, list) {
 		rhashtable_remove_fast(&cid_lookup_table, &entry->hash_node,
 				       cid_hash_params);
-		list_del(&entry->list);
+		list_del_init(&entry->list);
 		kfree_rcu(entry, rcu);
 	}
 
 	/* Free remote CIDs (not in hash table, safe to kfree directly) */
 	list_for_each_entry_safe(entry, tmp, &cs->remote_cids, list) {
-		list_del(&entry->list);
+		list_del_init(&entry->list);
 		kfree(entry);
 	}
 
 	/* Free pending challenges */
 	list_for_each_entry_safe(challenge, ctmp, &cs->pending_challenges, list) {
-		list_del(&challenge->list);
+		list_del_init(&challenge->list);
 		kfree(challenge);
 	}
 

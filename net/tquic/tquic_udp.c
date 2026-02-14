@@ -1188,11 +1188,16 @@ int tquic_udp_deliver_to_conn(struct tquic_connection *conn,
 			      struct sk_buff *skb)
 {
 	struct tquic_sock *tsk;
+	struct sock *sk;
 
-	if (!conn || !conn->sk)
+	if (!conn)
 		return -ENOTCONN;
 
-	tsk = tquic_sk(conn->sk);
+	sk = READ_ONCE(conn->sk);
+	if (!sk)
+		return -ENOTCONN;
+
+	tsk = tquic_sk(sk);
 
 	/* Update connection statistics */
 	conn->stats.rx_packets++;
@@ -1245,7 +1250,7 @@ int tquic_udp_deliver_to_conn(struct tquic_connection *conn,
 	if (tsk->default_stream) {
 		memset(skb->cb, 0, sizeof(skb->cb));
 		skb_queue_tail(&tsk->default_stream->recv_buf, skb);
-		conn->sk->sk_data_ready(conn->sk);
+		sk->sk_data_ready(sk);
 		return 0;
 	}
 
