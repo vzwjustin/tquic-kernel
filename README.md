@@ -8,7 +8,18 @@
 
 TQUIC is a Linux kernel module implementing the QUIC protocol (RFC 9000/9001/9002) with multipath support for WAN bonding. Unlike userspace QUIC implementations, TQUIC operates directly in the kernel for maximum performance and tight integration with the networking stack.
 
-**~265k lines of C** across `net/tquic/` implementing the full QUIC/HTTP3 stack with multipath, security, and performance features. Security audit completed February 2026 with all critical issues resolved across 11 rounds of fixes.
+**~642k lines of C** across `net/tquic/` implementing the full QUIC/HTTP3 stack with multipath, security, and performance features. Security audit completed February 2026 with all critical issues resolved across 11 rounds of fixes.
+
+### Project Structure
+
+The implementation is in `net/tquic/` with key subdirectories:
+- `core/` - Protocol state machine, connections, streams
+- `crypto/` - TLS 1.3 integration and cryptographic operations
+- `http3/` - HTTP/3 and QPACK implementation
+- `multipath/` - Path management and schedulers
+- `cong/` - Congestion control algorithms
+- `transport/` - Packet I/O, ACK processing, loss detection
+- `test/` - KUnit test suites
 
 ## Features
 
@@ -22,7 +33,7 @@ TQUIC is a Linux kernel module implementing the QUIC protocol (RFC 9000/9001/900
 
 **Multipath & Bonding**
 - True per-packet scheduling across multiple WAN paths (not flow-pinning)
-- 7 schedulers: Round-Robin, MinRTT, Weighted, BLEST, ECF, Deadline-Aware, BPF struct_ops
+- 7 schedulers: Aggregate, MinRTT, Weighted, BLEST, ECF, Deadline-Aware, BPF struct_ops
 - 10 congestion control algorithms: CUBIC, BBRv1/v2/v3, Copa, Westwood+, Prague, OLIA, LIA, BALIA
 - Dynamic path management with failover, PATH_ABANDON/STANDBY/AVAILABLE
 - Forward Error Correction (Reed-Solomon, XOR)
@@ -86,10 +97,13 @@ Userspace QUIC implementations pay a heavy cost crossing the kernel boundary on 
 
 ```bash
 git clone https://github.com/vzwjustin/tquic-kernel.git
-cd tquic-kernel/net/tquic
+cd tquic-kernel
 
-make -j$(nproc)
-sudo insmod tquic.ko
+# Build the TQUIC module
+make -C net/tquic -j$(nproc)
+
+# Load the module
+sudo insmod net/tquic/tquic.ko
 
 # Verify
 lsmod | grep tquic
@@ -123,7 +137,7 @@ Supported kernels: **Linux 6.x** (tested on 6.12). See [Quick Start Guide](docs/
 
 ## Testing
 
-78 KUnit test suites across 35 test files in `net/tquic/test/`, plus an interoperability test framework for validation against quiche, msquic, ngtcp2, and picoquic.
+78 KUnit test suites across 42 test files in `net/tquic/test/`, plus an interoperability test framework for validation against quiche, msquic, ngtcp2, and picoquic.
 
 ```bash
 ./tools/testing/kunit/kunit.py run --kunitconfig=net/tquic/test/.kunitconfig
