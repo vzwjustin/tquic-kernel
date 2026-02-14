@@ -697,7 +697,7 @@ static int tquic_coalesce_frames(struct tquic_connection *conn,
 			 */
 			list_for_each_entry_safe(frame, tmp,
 						 pending_frames, list) {
-				list_del(&frame->list);
+				list_del_init(&frame->list);
 				if (frame->owns_data)
 					kfree(frame->data);
 				kmem_cache_free(tquic_frame_cache, frame);
@@ -708,7 +708,7 @@ static int tquic_coalesce_frames(struct tquic_connection *conn,
 		total += ret;
 
 		/* Remove from pending list and free if needed */
-		list_del(&frame->list);
+		list_del_init(&frame->list);
 		if (frame->owns_data)
 			kfree(frame->data);
 		kmem_cache_free(tquic_frame_cache, frame);
@@ -1956,7 +1956,7 @@ int tquic_xmit(struct tquic_connection *conn, struct tquic_stream *stream,
 			/* Cleanup remaining frames */
 			struct tquic_pending_frame *f, *tmp;
 			list_for_each_entry_safe(f, tmp, &frames, list) {
-				list_del(&f->list);
+				list_del_init(&f->list);
 				if (f->owns_data)
 					kfree(f->data);
 				kmem_cache_free(tquic_frame_cache, f);
@@ -2347,7 +2347,7 @@ int tquic_output_flush(struct tquic_connection *conn)
 				/* CF-615: Cleanup frame on assembly failure */
 				struct tquic_pending_frame *f, *tmp;
 				list_for_each_entry_safe(f, tmp, &frames, list) {
-					list_del(&f->list);
+					list_del_init(&f->list);
 					if (f->owns_data)
 						kfree(f->data);
 					kmem_cache_free(tquic_frame_cache, f);

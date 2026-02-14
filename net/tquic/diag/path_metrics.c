@@ -254,6 +254,7 @@ int tquic_nl_get_path_metrics(struct sk_buff *skb, struct genl_info *info)
 	/* Allocate response message */
 	msg = nlmsg_new(NLMSG_DEFAULT_SIZE, GFP_KERNEL);
 	if (!msg) {
+		tquic_path_put(path);
 		tquic_conn_put(conn);
 		return -ENOMEM;
 	}
@@ -262,6 +263,7 @@ int tquic_nl_get_path_metrics(struct sk_buff *skb, struct genl_info *info)
 			  &tquic_metrics_family, 0, TQUIC_NL_CMD_GET_PATH_METRICS);
 	if (!hdr) {
 		nlmsg_free(msg);
+		tquic_path_put(path);
 		tquic_conn_put(conn);
 		return -EMSGSIZE;
 	}
@@ -275,11 +277,13 @@ int tquic_nl_get_path_metrics(struct sk_buff *skb, struct genl_info *info)
 	if (tquic_nl_put_path_metrics(msg, &metrics)) {
 		genlmsg_cancel(msg, hdr);
 		nlmsg_free(msg);
+		tquic_path_put(path);
 		tquic_conn_put(conn);
 		return -EMSGSIZE;
 	}
 
 	genlmsg_end(msg, hdr);
+	tquic_path_put(path);
 	tquic_conn_put(conn);
 	return genlmsg_reply(msg, info);
 }
@@ -562,7 +566,7 @@ void tquic_metrics_unsubscribe_conn(struct tquic_connection *conn)
 	spin_unlock_bh(&subscriptions_lock);
 
 	list_for_each_entry_safe(sub, tmp, &to_free, list) {
-		list_del(&sub->list);
+		list_del_init(&sub->list);
 		del_timer_sync(&sub->timer);
 		cancel_work_sync(&sub->work);
 		tquic_conn_put(sub->conn);
@@ -1128,7 +1132,7 @@ void tquic_path_metrics_exit(struct net *net)
 		spin_unlock_bh(&subscriptions_lock);
 
 		list_for_each_entry_safe(sub, tmp, &to_free, list) {
-			list_del(&sub->list);
+			list_del_init(&sub->list);
 			del_timer_sync(&sub->timer);
 			cancel_work_sync(&sub->work);
 			tquic_conn_put(sub->conn);

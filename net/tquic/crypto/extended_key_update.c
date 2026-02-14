@@ -172,7 +172,7 @@ static void eku_free_request(struct tquic_eku_request *req)
 
 	/* Securely wipe PSK material */
 	memzero_explicit(req->psk, sizeof(req->psk));
-	kfree(req);
+	kfree_sensitive(req);
 }
 
 /**
@@ -224,7 +224,7 @@ static void eku_timeout_work_handler(struct work_struct *work)
 	list_for_each_entry_safe(req, tmp, &expired, list) {
 		pr_warn("tquic_eku: request %llu timed out\n", req->request_id);
 
-		list_del(&req->list);
+		list_del_init(&req->list);
 		eku_free_request(req);
 
 		/* Update statistics (need lock for this) */
@@ -341,13 +341,13 @@ void tquic_eku_free(struct tquic_connection *conn)
 
 	/* Free pending requests */
 	list_for_each_entry_safe(req, tmp, &state->pending_requests, list) {
-		list_del(&req->list);
+		list_del_init(&req->list);
 		eku_free_request(req);
 	}
 
 	/* Free received requests */
 	list_for_each_entry_safe(req, tmp, &state->received_requests, list) {
-		list_del(&req->list);
+		list_del_init(&req->list);
 		eku_free_request(req);
 	}
 
@@ -360,7 +360,7 @@ void tquic_eku_free(struct tquic_connection *conn)
 	/* Securely wipe PSK material */
 	memzero_explicit(state->injected_psk, sizeof(state->injected_psk));
 
-	kfree(state);
+	kfree_sensitive(state);
 	conn->eku_state = NULL;
 
 	pr_debug("tquic_eku: freed state\n");
@@ -568,7 +568,7 @@ int tquic_eku_handle_request(struct tquic_connection *conn,
 		pr_err("tquic_eku: key derivation failed: %d\n", ret);
 		/* Remove the request on failure */
 		spin_lock_irqsave(&state->lock, flags);
-		list_del(&req->list);
+		list_del_init(&req->list);
 		state->received_count--;
 		state->state = TQUIC_EKU_STATE_ERROR;
 		spin_unlock_irqrestore(&state->lock, flags);
@@ -584,7 +584,7 @@ int tquic_eku_handle_request(struct tquic_connection *conn,
 	state->last_update_time = ktime_get();
 
 	/* Remove processed request */
-	list_del(&req->list);
+	list_del_init(&req->list);
 	state->received_count--;
 
 	spin_unlock_irqrestore(&state->lock, flags);
@@ -627,7 +627,7 @@ int tquic_eku_handle_response(struct tquic_connection *conn,
 	}
 
 	/* Remove from pending list */
-	list_del(&req->list);
+	list_del_init(&req->list);
 	state->pending_count--;
 
 	/* Check response status */

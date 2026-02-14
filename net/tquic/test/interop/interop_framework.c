@@ -75,7 +75,7 @@ void tquic_test_unregister(struct tquic_test_case *test)
 		return;
 
 	spin_lock(&test_lock);
-	list_del(&test->list);
+	list_del_init(&test->list);
 	spin_unlock(&test_lock);
 
 	pr_debug("tquic_test: unregistered test '%s'\n", test->name);

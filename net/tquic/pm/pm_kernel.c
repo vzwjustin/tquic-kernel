@@ -27,12 +27,16 @@
 #include "../tquic_debug.h"
 #include <net/tquic_pm.h>
 #include "../tquic_init.h"
+#include "../protocol.h"
 
 /* Kernel PM private data per-namespace */
 struct tquic_pm_kernel_data {
 	struct notifier_block netdev_notifier;
-	struct list_head conn_list; /* Connections in this netns */
-	spinlock_t conn_lock;
+};
+
+struct tquic_pm_kernel_conn_ref {
+	struct list_head list;
+	struct tquic_connection *conn;
 };
 
 /**
@@ -276,6 +280,46 @@ static int tquic_pm_kernel_try_add_path(struct tquic_connection *conn,
 	return 0;
 }
 
+static void tquic_pm_kernel_collect_conn_refs(struct tquic_net *tn,
+					      struct list_head *conn_refs,
+					      bool connected_only)
+{
+	struct tquic_connection *conn;
+
+	spin_lock_bh(&tn->conn_lock);
+	list_for_each_entry(conn, &tn->connections, pm_node) {
+		struct tquic_pm_kernel_conn_ref *ref;
+
+		if (connected_only &&
+		    READ_ONCE(conn->state) != TQUIC_CONN_CONNECTED)
+			continue;
+
+		if (!refcount_inc_not_zero(&conn->refcnt))
+			continue;
+
+		ref = kmalloc(sizeof(*ref), GFP_ATOMIC);
+		if (!ref) {
+			tquic_conn_put(conn);
+			continue;
+		}
+
+		ref->conn = conn;
+		list_add_tail(&ref->list, conn_refs);
+	}
+	spin_unlock_bh(&tn->conn_lock);
+}
+
+static void tquic_pm_kernel_release_conn_refs(struct list_head *conn_refs)
+{
+	struct tquic_pm_kernel_conn_ref *ref, *tmp;
+
+	list_for_each_entry_safe(ref, tmp, conn_refs, list) {
+		list_del_init(&ref->list);
+		tquic_conn_put(ref->conn);
+		kfree(ref);
+	}
+}
+
 /**
  * tquic_pm_kernel_netdev_event - Netdevice notifier callback
  * @nb: Notifier block
@@ -288,63 +332,52 @@ static int tquic_pm_kernel_netdev_event(struct notifier_block *nb,
 					unsigned long event, void *ptr)
 {
 	struct net_device *dev = netdev_notifier_info_to_dev(ptr);
-	struct tquic_pm_kernel_data *kdata;
 	struct tquic_pm_pernet *pernet;
 	struct net *net = dev_net(dev);
+	struct tquic_net *tn;
 
-	kdata = container_of(nb, struct tquic_pm_kernel_data, netdev_notifier);
+	(void)nb;
 	pernet = tquic_pm_get_pernet(net);
+	tn = tquic_pernet(net);
 
-	if (!pernet || !pernet->auto_discover)
+	if (!pernet || !tn || !pernet->auto_discover)
 		return NOTIFY_DONE;
 
 	switch (event) {
 	case NETDEV_UP:
 		/* Interface came up - first try to recover, then discover new */
 		{
-			struct tquic_connection *conn, *tmp;
+			LIST_HEAD(conn_refs);
+			struct tquic_pm_kernel_conn_ref *ref;
 
-			spin_lock_bh(&kdata->conn_lock);
-			list_for_each_entry_safe(conn, tmp, &kdata->conn_list,
-						 pm_node) {
-				/* Skip if connection not established yet */
-				if (READ_ONCE(conn->state) !=
-				    TQUIC_CONN_CONNECTED)
-					continue;
+			tquic_pm_kernel_collect_conn_refs(tn, &conn_refs, true);
 
-				/* First: try to recover unavailable paths */
-				tquic_pm_kernel_try_recover(conn, dev);
-			}
-			spin_unlock_bh(&kdata->conn_lock);
+			list_for_each_entry(ref, &conn_refs, list)
+				tquic_pm_kernel_try_recover(ref->conn, dev);
 
 			/* Then: discover new paths through this interface */
 			if (tquic_pm_kernel_should_add_path(dev, pernet)) {
-				spin_lock_bh(&kdata->conn_lock);
-				list_for_each_entry_safe(
-					conn, tmp, &kdata->conn_list, pm_node) {
-					if (READ_ONCE(conn->state) !=
-					    TQUIC_CONN_CONNECTED)
-						continue;
-
-					tquic_pm_kernel_try_add_path(conn, dev,
-								     pernet);
-				}
-				spin_unlock_bh(&kdata->conn_lock);
+				list_for_each_entry(ref, &conn_refs, list)
+					tquic_pm_kernel_try_add_path(ref->conn, dev,
+							     pernet);
 			}
+
+			tquic_pm_kernel_release_conn_refs(&conn_refs);
 		}
 		break;
 
 	case NETDEV_DOWN:
 		/* Interface went down - mark paths unavailable */
 		{
-			struct tquic_connection *conn, *tmp;
+			LIST_HEAD(conn_refs);
+			struct tquic_pm_kernel_conn_ref *ref;
 
-			spin_lock_bh(&kdata->conn_lock);
-			list_for_each_entry_safe(conn, tmp, &kdata->conn_list,
-						 pm_node) {
-				tquic_pm_kernel_mark_unavailable(conn, dev);
-			}
-			spin_unlock_bh(&kdata->conn_lock);
+			tquic_pm_kernel_collect_conn_refs(tn, &conn_refs, false);
+
+			list_for_each_entry(ref, &conn_refs, list)
+				tquic_pm_kernel_mark_unavailable(ref->conn, dev);
+
+			tquic_pm_kernel_release_conn_refs(&conn_refs);
 		}
 		break;
 
@@ -352,28 +385,26 @@ static int tquic_pm_kernel_netdev_event(struct notifier_block *nb,
 		/* Carrier state changed - handle same as up/down */
 		if (netif_carrier_ok(dev)) {
 			/* Carrier up - same as NETDEV_UP for recovery */
-			struct tquic_connection *conn, *tmp;
+			LIST_HEAD(conn_refs);
+			struct tquic_pm_kernel_conn_ref *ref;
 
-			spin_lock_bh(&kdata->conn_lock);
-			list_for_each_entry_safe(conn, tmp, &kdata->conn_list,
-						 pm_node) {
-				if (READ_ONCE(conn->state) !=
-				    TQUIC_CONN_CONNECTED)
-					continue;
+			tquic_pm_kernel_collect_conn_refs(tn, &conn_refs, true);
 
-				tquic_pm_kernel_try_recover(conn, dev);
-			}
-			spin_unlock_bh(&kdata->conn_lock);
+			list_for_each_entry(ref, &conn_refs, list)
+				tquic_pm_kernel_try_recover(ref->conn, dev);
+
+			tquic_pm_kernel_release_conn_refs(&conn_refs);
 		} else {
 			/* Carrier down - same as NETDEV_DOWN */
-			struct tquic_connection *conn, *tmp;
+			LIST_HEAD(conn_refs);
+			struct tquic_pm_kernel_conn_ref *ref;
 
-			spin_lock_bh(&kdata->conn_lock);
-			list_for_each_entry_safe(conn, tmp, &kdata->conn_list,
-						 pm_node) {
-				tquic_pm_kernel_mark_unavailable(conn, dev);
-			}
-			spin_unlock_bh(&kdata->conn_lock);
+			tquic_pm_kernel_collect_conn_refs(tn, &conn_refs, false);
+
+			list_for_each_entry(ref, &conn_refs, list)
+				tquic_pm_kernel_mark_unavailable(ref->conn, dev);
+
+			tquic_pm_kernel_release_conn_refs(&conn_refs);
 		}
 		break;
 	}
@@ -424,9 +455,6 @@ static int tquic_pm_kernel_init(struct net *net)
 	kdata = kzalloc(sizeof(*kdata), GFP_KERNEL);
 	if (!kdata)
 		return -ENOMEM;
-
-	spin_lock_init(&kdata->conn_lock);
-	INIT_LIST_HEAD(&kdata->conn_list);
 
 	/* Register netdevice notifier */
 	kdata->netdev_notifier.notifier_call = tquic_pm_kernel_netdev_event;

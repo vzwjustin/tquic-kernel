@@ -217,7 +217,7 @@ deadline_alloc_path_caps(struct tquic_path *path)
 static void deadline_free_path_caps(struct tquic_path_deadline_caps *caps)
 {
 	if (caps) {
-		list_del(&caps->list);
+		list_del_init(&caps->list);
 		kmem_cache_free(path_caps_cache, caps);
 	}
 }
@@ -630,7 +630,7 @@ void tquic_deadline_sched_release(struct tquic_connection *conn)
 	/* Free stream deadline lists */
 	list_for_each_entry_safe(deadline, tmp_deadline,
 				 &state->streams_with_deadlines, list) {
-		list_del(&deadline->list);
+		list_del_init(&deadline->list);
 	}
 
 	/* Free path capabilities */
@@ -749,7 +749,7 @@ int tquic_deadline_cancel_stream_deadline(struct tquic_connection *conn,
 			continue;
 
 		rb_erase(&deadline->node, &state->deadline_tree);
-		list_del(&deadline->list);
+		list_del_init(&deadline->list);
 		state->deadline_count--;
 		kmem_cache_free(deadline_cache, deadline);
 		cancelled++;
@@ -870,7 +870,7 @@ void tquic_deadline_on_ack(struct tquic_deadline_sched_state *state,
 
 			/* Remove completed deadline */
 			rb_erase(&deadline->node, &state->deadline_tree);
-			list_del(&deadline->list);
+			list_del_init(&deadline->list);
 			state->deadline_count--;
 			kmem_cache_free(deadline_cache, deadline);
 		}

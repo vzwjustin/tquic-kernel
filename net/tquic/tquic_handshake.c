@@ -416,9 +416,8 @@ void tquic_handshake_done(void *data, int status, key_serial_t peerid)
 		tsk->flags |= TQUIC_F_HANDSHAKE_DONE;
 
 		if (tsk->conn) {
-			spin_lock_bh(&tsk->conn->lock);
-			WRITE_ONCE(tsk->conn->state, TQUIC_CONN_CONNECTED);
-			spin_unlock_bh(&tsk->conn->lock);
+			tquic_conn_set_state(tsk->conn, TQUIC_CONN_CONNECTED,
+					     TQUIC_REASON_NORMAL);
 		}
 
 		/* Update MIB counters for successful handshake */
@@ -573,8 +572,10 @@ int tquic_start_handshake(struct sock *sk)
 				bypass_max_streams_bidi;
 			tsk->conn->remote_fc.max_streams_uni =
 				bypass_max_streams_uni;
-			WRITE_ONCE(tsk->conn->state, TQUIC_CONN_CONNECTED);
 			spin_unlock_bh(&tsk->conn->lock);
+
+			tquic_conn_set_state(tsk->conn, TQUIC_CONN_CONNECTED,
+					     TQUIC_REASON_NORMAL);
 		}
 
 		complete(&hs->done);
@@ -1212,9 +1213,8 @@ int tquic_inline_hs_recv_crypto(struct sock *sk, const u8 *data, u32 len,
 		/* Mark handshake complete */
 		conn->handshake_complete = true;
 		conn->crypto_level = TQUIC_CRYPTO_APPLICATION;
-		spin_lock_bh(&conn->lock);
-		WRITE_ONCE(conn->state, TQUIC_CONN_CONNECTED);
-		spin_unlock_bh(&conn->lock);
+		tquic_conn_set_state(conn, TQUIC_CONN_CONNECTED,
+				     TQUIC_REASON_NORMAL);
 		tsk->flags |= TQUIC_F_HANDSHAKE_DONE;
 
 		TQUIC_INC_STATS(sock_net(sk), TQUIC_MIB_HANDSHAKESCOMPLETE);
@@ -1656,9 +1656,8 @@ static int tquic_conn_server_accept_init(struct tquic_connection *conn,
 	conn->role = TQUIC_ROLE_SERVER;
 
 	/* Mark as server-side connection in handshake phase */
-	spin_lock_bh(&conn->lock);
-	WRITE_ONCE(conn->state, TQUIC_CONN_CONNECTING);
-	spin_unlock_bh(&conn->lock);
+	tquic_conn_set_state(conn, TQUIC_CONN_CONNECTING,
+			     TQUIC_REASON_NORMAL);
 
 	tquic_dbg("Parsed Initial packet: version=0x%08x, "
 		 "dcid_len=%u, scid_len=%u, token_len=%llu\n",
@@ -1757,9 +1756,8 @@ static void tquic_server_handshake_done(void *data, int status,
 		}
 
 		inet_sk_set_state(child_sk, TCP_ESTABLISHED);
-		spin_lock_bh(&conn->lock);
-		WRITE_ONCE(conn->state, TQUIC_CONN_CONNECTED);
-		spin_unlock_bh(&conn->lock);
+		tquic_conn_set_state(conn, TQUIC_CONN_CONNECTED,
+				     TQUIC_REASON_NORMAL);
 
 		/* Initialize path manager for server-side connection */
 		tquic_pm_conn_init(conn);
@@ -1788,6 +1786,14 @@ static void tquic_server_handshake_done(void *data, int status,
 		tquic_dbg("server handshake failed: %d\n", status);
 		inet_sk_set_state(child_sk, TCP_CLOSE);
 		if (conn) {
+			/*
+			 * Release the listener reference that was taken in
+			 * tquic_server_handshake() before dropping the conn.
+			 */
+			if (conn->sk) {
+				sock_put(conn->sk);
+				conn->sk = NULL;
+			}
 			tquic_conn_put(conn);
 			child_tsk->conn = NULL;
 		}
@@ -1856,8 +1862,13 @@ int tquic_server_handshake(struct sock *listener_sk,
 	}
 	child_tsk->conn = conn;
 
-	/* Store parent socket reference for accept queue callback */
-	/* We temporarily store listener in conn->sk, will be updated on accept */
+	/*
+	 * Store parent socket reference for accept queue callback.
+	 * We temporarily store listener in conn->sk, will be updated on
+	 * accept.  Take a reference so the listener cannot be freed while
+	 * the async handshake callback still needs it.
+	 */
+	sock_hold(listener_sk);
 	conn->sk = listener_sk;
 
 	/* Store addresses */
@@ -1880,6 +1891,8 @@ int tquic_server_handshake(struct sock *listener_sk,
 	ret = tquic_conn_server_accept_init(conn, initial_pkt);
 	if (ret < 0) {
 		tquic_dbg("failed to process Initial packet: %d\n", ret);
+		sock_put(listener_sk);
+		conn->sk = NULL;
 		tquic_conn_put(conn);
 		child_tsk->conn = NULL;
 		sk_free(child_sk);
@@ -1889,6 +1902,8 @@ int tquic_server_handshake(struct sock *listener_sk,
 	/* Allocate handshake state */
 	hs = kzalloc(sizeof(*hs), GFP_ATOMIC);
 	if (!hs) {
+		sock_put(listener_sk);
+		conn->sk = NULL;
 		tquic_conn_put(conn);
 		child_tsk->conn = NULL;
 		sk_free(child_sk);
@@ -1915,6 +1930,9 @@ int tquic_server_handshake(struct sock *listener_sk,
 		sock_put(child_sk);
 		child_tsk->handshake_state = NULL;
 		kfree_sensitive(hs);
+		/* Release listener ref taken above before dropping conn */
+		sock_put(listener_sk);
+		conn->sk = NULL;
 		tquic_conn_put(conn);
 		child_tsk->conn = NULL;
 		sk_free(child_sk);

@@ -133,13 +133,13 @@ void tquic_zc_state_free(struct tquic_connection *conn)
 
 	/* Free all pending entries */
 	list_for_each_entry_safe(entry, tmp, &zc->pending, list) {
-		list_del(&entry->list);
+		list_del_init(&entry->list);
 		tquic_zc_entry_free(entry);
 	}
 
 	/* Free all completed entries */
 	list_for_each_entry_safe(entry, tmp, &zc->completed, list) {
-		list_del(&entry->list);
+		list_del_init(&entry->list);
 		tquic_zc_entry_free(entry);
 	}
 

@@ -179,17 +179,17 @@ static void cid_coop_cleanup(struct quic_proxy_cid_cooperation *coop)
 	spin_lock_bh(&coop->lock);
 
 	list_for_each_entry_safe(c, tmp, &coop->client_cids, list_node) {
-		list_del(&c->list_node);
+		list_del_init(&c->list_node);
 		cid_put(c);
 	}
 
 	list_for_each_entry_safe(c, tmp, &coop->target_cids, list_node) {
-		list_del(&c->list_node);
+		list_del_init(&c->list_node);
 		cid_put(c);
 	}
 
 	list_for_each_entry_safe(c, tmp, &coop->proxy_cids, list_node) {
-		list_del(&c->list_node);
+		list_del_init(&c->list_node);
 		cid_put(c);
 	}
 
@@ -425,7 +425,7 @@ static void idle_timer_callback(struct timer_list *t)
 
 	/* Process removals outside lock */
 	list_for_each_entry_safe(pconn, tmp, &to_remove, list) {
-		list_del(&pconn->list);
+		list_del_init(&pconn->list);
 		tquic_quic_proxy_deregister_conn(pconn, QUIC_PROXY_DEREG_TIMEOUT, 0);
 		/* Drop the extra reference taken above */
 		proxied_conn_put(pconn);
@@ -595,7 +595,7 @@ void tquic_quic_proxy_destroy(struct tquic_quic_proxy_state *proxy)
 	/* Close all proxied connections */
 	spin_lock_bh(&proxy->lock);
 	list_for_each_entry_safe(pconn, tmp, &proxy->connections, list) {
-		list_del(&pconn->list);
+		list_del_init(&pconn->list);
 		hash_del(&pconn->dcid_hash_node);
 		pconn->state = QUIC_PROXY_CONN_CLOSED;
 		proxied_conn_put(pconn);
@@ -808,7 +808,7 @@ int tquic_quic_proxy_deregister_conn(
 		/* Immediate close */
 		pconn->state = QUIC_PROXY_CONN_CLOSED;
 
-		list_del(&pconn->list);
+		list_del_init(&pconn->list);
 		hash_del(&pconn->dcid_hash_node);
 		proxy->num_connections--;
 		proxy->stats.active_connections--;
@@ -1168,7 +1168,7 @@ int tquic_quic_proxy_add_cid(
 
 		list_for_each_entry_safe(c, tmp, target_list, list_node) {
 			if (c->seq_num < retire_prior_to) {
-				list_del(&c->list_node);
+				list_del_init(&c->list_node);
 				cid_put(c);
 			}
 		}
@@ -1227,7 +1227,7 @@ int tquic_quic_proxy_retire_cid(
 
 	list_for_each_entry_safe(c, tmp, target_list, list_node) {
 		if (c->seq_num == seq_num) {
-			list_del(&c->list_node);
+			list_del_init(&c->list_node);
 			cid_put(c);
 			found = true;
 			break;

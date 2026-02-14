@@ -227,7 +227,7 @@ static void test_state_destroy(struct test_rate_limit_state *state)
 
 	for (i = 0; i < TEST_HASH_SIZE; i++) {
 		list_for_each_entry_safe(entry, tmp, &state->per_ip_buckets[i], list) {
-			list_del(&entry->list);
+			list_del_init(&entry->list);
 			kfree(entry);
 		}
 	}
@@ -364,7 +364,7 @@ static int test_cleanup_expired(struct test_rate_limit_state *state,
 	for (i = 0; i < TEST_HASH_SIZE; i++) {
 		list_for_each_entry_safe(entry, tmp, &state->per_ip_buckets[i], list) {
 			if (now_ms - entry->last_seen > timeout_ms) {
-				list_del(&entry->list);
+				list_del_init(&entry->list);
 				kfree(entry);
 				removed++;
 			}

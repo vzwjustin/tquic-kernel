@@ -509,12 +509,23 @@ u32 tquic_server_conn_session_ttl(struct tquic_connection *conn,
 	if (!conn)
 		return default_ttl_ms;
 
+	/*
+	 * Hold RCU read lock around the pointer dereference so that
+	 * a concurrent tquic_server_unbind_client + call_rcu cannot
+	 * free the client before we take a persistent reference.
+	 */
+	rcu_read_lock();
 	client = READ_ONCE(conn->client);
-	if (!client)
+	if (!client) {
+		rcu_read_unlock();
 		return default_ttl_ms;
+	}
 
-	if (!refcount_inc_not_zero(&client->refcnt))
+	if (!refcount_inc_not_zero(&client->refcnt)) {
+		rcu_read_unlock();
 		return default_ttl_ms;
+	}
+	rcu_read_unlock();
 
 	ttl_ms = READ_ONCE(client->session_ttl);
 	if (!ttl_ms)

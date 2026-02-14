@@ -541,7 +541,7 @@ void tquic_edf_scheduler_destroy(struct tquic_edf_scheduler *sched)
 	/* Free stream queues */
 	list_for_each_entry_safe(queue, tmp_queue, &sched->stream_queues,
 				 list_node) {
-		list_del(&queue->list_node);
+		list_del_init(&queue->list_node);
 		kmem_cache_free(edf_stream_queue_cache, queue);
 	}
 

@@ -189,7 +189,7 @@ void tquic_napi_cleanup(struct tquic_sock *sk)
 
 	/* Remove from global list */
 	spin_lock(&tquic_napi_list_lock);
-	list_del(&tn->list);
+	list_del_init(&tn->list);
 	spin_unlock(&tquic_napi_list_lock);
 
 	/* Disable and delete NAPI */

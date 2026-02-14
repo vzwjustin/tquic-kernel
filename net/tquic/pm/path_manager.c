@@ -1226,13 +1226,13 @@ EXPORT_SYMBOL_GPL(tquic_conn_remove_path_safe);
  * generated using get_random_u32() when the connection's path manager is
  * initialized and serves as a stable identifier for external interfaces.
  *
- * The function iterates through the per-netns connection list under RCU
- * read-side protection. If a matching connection is found, its reference
- * count is incremented before returning to ensure the connection remains
- * valid while the caller uses it.
+ * The function iterates through the per-netns connection list under
+ * tn->conn_lock. If a matching connection is found, its reference count is
+ * incremented before returning to ensure the connection remains valid while
+ * the caller uses it.
  *
  * Context: Can be called from process context or soft-IRQ context.
- *          Uses RCU read-side locking internally.
+ *          Uses spin_lock_bh() internally.
  *
  * Return: Pointer to the connection with a reference held, or NULL if not found.
  *         Caller must call tquic_conn_put() when done with the connection.
@@ -1250,30 +1250,22 @@ struct tquic_connection *tquic_conn_lookup_by_token(struct net *net, u32 token)
 		return NULL;
 
 	/*
-	 * Use RCU read-side locking to safely iterate the connection list.
-	 * The connection list is protected by RCU for read access and
-	 * tn->conn_lock for writes.
+	 * Iterate under the per-netns connection lock.
+	 * refcount_inc_not_zero() avoids handing out dying connections.
 	 */
-	rcu_read_lock();
-	list_for_each_entry_rcu(conn, &tn->connections, pm_node) {
-		if (conn->token == token) {
-			/*
-			 * Found a match - try to get a reference.
-			 * Use refcount_inc_not_zero() to handle the case where
-			 * the connection is being destroyed concurrently.
-			 */
-			if (refcount_inc_not_zero(&conn->refcnt)) {
-				rcu_read_unlock();
-				return conn;
-			}
-			/*
-			 * Connection is being destroyed, continue searching
-			 * in case of token collision (extremely unlikely but
-			 * theoretically possible with 32-bit random tokens).
-			 */
+	spin_lock_bh(&tn->conn_lock);
+	list_for_each_entry(conn, &tn->connections, pm_node) {
+		if (conn->token != token)
+			continue;
+
+		if (refcount_inc_not_zero(&conn->refcnt)) {
+			spin_unlock_bh(&tn->conn_lock);
+			return conn;
 		}
+
+		/* Token collision path: keep searching. */
 	}
-	rcu_read_unlock();
+	spin_unlock_bh(&tn->conn_lock);
 
 	return NULL;
 }

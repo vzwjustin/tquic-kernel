@@ -119,7 +119,6 @@ tquic-y := \
 	multipath/mp_ack.o \
 	multipath/mp_deadline.o \
 	multipath/path_abandon.o \
-	multipath/mp_sched_registry.o \
 	multipath/multipath_module.o \
 	multipath/sched_minrtt.o \
 	multipath/sched_ecf.o \

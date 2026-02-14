@@ -551,7 +551,7 @@ static void h3_push_entry_remove(struct h3_push_entry *entry)
 	if (!entry)
 		return;
 
-	list_del(&entry->node);
+	list_del_init(&entry->node);
 	kfree(entry);
 }
 
@@ -1524,7 +1524,7 @@ static void h3_cleanup_push_entries(struct tquic_http3_conn *h3conn)
 	head = (struct list_head *)h3conn->push_entries;
 
 	list_for_each_entry_safe(entry, tmp, head, node) {
-		list_del(&entry->node);
+		list_del_init(&entry->node);
 		kfree(entry);
 	}
 

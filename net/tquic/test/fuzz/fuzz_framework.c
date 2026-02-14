@@ -564,7 +564,7 @@ void tquic_fuzz_corpus_clear(struct tquic_fuzz_state *state)
 
 	spin_lock(&state->corpus_lock);
 	list_for_each_entry_safe(input, tmp, &state->corpus, list) {
-		list_del(&input->list);
+		list_del_init(&input->list);
 		kfree(input->data);
 		kfree(input);
 	}

@@ -58,6 +58,17 @@
  * Use tquic6_inet6_sk() from that header to access ipv6_pinfo.
  */
 
+/* Forward declarations from tquic_socket.c (same module) */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 7, 0)
+int tquic_accept_socket(struct socket *sock, struct socket *newsock,
+			struct proto_accept_arg *arg);
+#else
+int tquic_accept_socket(struct socket *sock, struct socket *newsock, int flags,
+			bool kern);
+#endif
+int tquic_sock_listen(struct socket *sock, int backlog);
+int tquic_sock_shutdown(struct socket *sock, int how);
+
 /* Forward declarations */
 static int tquic_v6_connect(struct sock *sk, struct sockaddr_unsized *addr, int addr_len);
 static void tquic_v6_mtu_reduced(struct sock *sk);
@@ -371,7 +382,7 @@ static int tquic_v6_connect(struct sock *sk, struct sockaddr_unsized *addr, int 
 {
 	struct sockaddr_in6 *usin;
 	struct tquic_sock *tsk = tquic_sk(sk);
-	struct tquic_connection *conn = tsk->conn;
+	struct tquic_connection *conn;
 	struct ipv6_pinfo *np = tquic_inet6_sk(sk);
 	struct in6_addr *saddr = NULL;
 	struct dst_entry *dst;
@@ -388,12 +399,25 @@ static int tquic_v6_connect(struct sock *sk, struct sockaddr_unsized *addr, int 
 	if (usin->sin6_family != AF_INET6)
 		return -EAFNOSUPPORT;
 
-	if (!conn)
+	lock_sock(sk);
+
+	/*
+	 * Read conn under lock_sock and take a reference to
+	 * prevent use-after-free during the handshake wait window
+	 * where release_sock() is called temporarily.
+	 */
+	conn = tsk->conn;
+	if (!conn) {
+		release_sock(sk);
 		return -EINVAL;
+	}
+	if (!tquic_conn_get(conn)) {
+		release_sock(sk);
+		return -EINVAL;
+	}
 
 	/* Set socket reference for PM and path management */
 	conn->sk = sk;
-	pr_warn("TQUIC IPv6 DEBUG: tquic_v6_connect started, set conn->sk=%p\n", sk);
 
 	memset(&fl6, 0, sizeof(fl6));
 
@@ -403,8 +427,10 @@ static int tquic_v6_connect(struct sock *sk, struct sockaddr_unsized *addr, int 
 		if (fl6.flowlabel & IPV6_FLOWLABEL_MASK) {
 			struct ip6_flowlabel *flowlabel;
 			flowlabel = fl6_sock_lookup(sk, fl6.flowlabel);
-			if (IS_ERR(flowlabel))
-				return -EINVAL;
+			if (IS_ERR(flowlabel)) {
+				err = -EINVAL;
+				goto failure;
+			}
 			fl6_sock_release(flowlabel);
 		}
 	}
@@ -421,25 +447,34 @@ static int tquic_v6_connect(struct sock *sk, struct sockaddr_unsized *addr, int 
 	addr_type = ipv6_addr_type(&usin->sin6_addr);
 
 	/* Reject multicast */
-	if (addr_type & IPV6_ADDR_MULTICAST)
-		return -ENETUNREACH;
+	if (addr_type & IPV6_ADDR_MULTICAST) {
+		err = -ENETUNREACH;
+		goto failure;
+	}
 
 	/* Handle link-local addresses */
 	if (addr_type & IPV6_ADDR_LINKLOCAL) {
 		if (addr_len >= sizeof(struct sockaddr_in6) &&
 		    usin->sin6_scope_id) {
-			if (!sk_dev_equal_l3scope(sk, usin->sin6_scope_id))
-				return -EINVAL;
+			if (!sk_dev_equal_l3scope(sk, usin->sin6_scope_id)) {
+				err = -EINVAL;
+				goto failure;
+			}
 			sk->sk_bound_dev_if = usin->sin6_scope_id;
 		}
 
-		if (!sk->sk_bound_dev_if)
-			return -EINVAL;
+		if (!sk->sk_bound_dev_if) {
+			err = -EINVAL;
+			goto failure;
+		}
 	}
 
 	/* Handle IPv4-mapped addresses (dual-stack) */
-	if (addr_type & IPV6_ADDR_MAPPED)
+	if (addr_type & IPV6_ADDR_MAPPED) {
+		release_sock(sk);
+		tquic_conn_put(conn);
 		return tquic_v6_connect_mapped(sk, usin);
+	}
 
 	/* Store destination address */
 	sk->sk_v6_daddr = usin->sin6_addr;
@@ -558,9 +593,16 @@ static int tquic_v6_connect(struct sock *sk, struct sockaddr_unsized *addr, int 
 	 * The timer system handles Initial packet retransmission during
 	 * handshake via the PTO timer mechanism.
 	 */
-	pr_warn("TQUIC IPv6 DEBUG: Waiting for handshake...\n");
+	release_sock(sk);
+
+	/*
+	 * Block until handshake completes (per CONTEXT.md).
+	 * Socket lock is released so the handshake callback can
+	 * deliver completion; re-acquire after the wait.
+	 */
 	err = tquic_wait_for_handshake(sk, TQUIC_HANDSHAKE_TIMEOUT_MS);
-	pr_warn("TQUIC IPv6 DEBUG: Handshake wait returned %d, flags=0x%lx\n", err, tsk->flags);
+
+	lock_sock(sk);
 	if (err < 0) {
 		tquic_err("IPv6 handshake failed: %d\n", err);
 		goto failure_close;
@@ -568,21 +610,19 @@ static int tquic_v6_connect(struct sock *sk, struct sockaddr_unsized *addr, int 
 
 	/* Verify handshake actually completed */
 	if (!(tsk->flags & TQUIC_F_HANDSHAKE_DONE)) {
-		pr_warn("TQUIC IPv6 DEBUG: Handshake NOT done, flags=0x%lx\n", tsk->flags);
 		err = -EQUIC_HANDSHAKE_FAILED;
 		goto failure_close;
 	}
 
-	/* Handshake succeeded - mark connection as established */
-	spin_lock_bh(&conn->lock);
-	WRITE_ONCE(conn->state, TQUIC_CONN_CONNECTED);
-	spin_unlock_bh(&conn->lock);
+	/*
+	 * Handshake succeeded.
+	 * conn->state is set to TQUIC_CONN_CONNECTED by the
+	 * handshake callback via tquic_conn_set_state, same as IPv4.
+	 */
 	inet_sk_set_state(sk, TCP_ESTABLISHED);
 
 	/* Initialize path manager after connection established */
-	pr_warn("TQUIC IPv6 DEBUG: About to call PM init (conn=%p, conn->sk=%p)\n", conn, conn->sk);
 	err = tquic_pm_conn_init(conn);
-	pr_warn("TQUIC IPv6 DEBUG: PM init returned %d\n", err);
 	if (err < 0) {
 		tquic_warn("IPv6 PM init failed: %d\n", err);
 		/* Continue anyway - PM is optional for basic operation */
@@ -595,6 +635,8 @@ static int tquic_v6_connect(struct sock *sk, struct sockaddr_unsized *addr, int 
 	tquic_dbg("IPv6 connected to %pI6c:%u\n",
 		 &usin->sin6_addr, ntohs(usin->sin6_port));
 
+	release_sock(sk);
+	tquic_conn_put(conn);
 	return 0;
 
 failure_close:
@@ -605,6 +647,8 @@ failure_close:
 	WRITE_ONCE(sk->sk_err, -err);
 failure:
 	sk->sk_route_caps = 0;
+	release_sock(sk);
+	tquic_conn_put(conn);
 	return err;
 }
 
@@ -1179,12 +1223,12 @@ static const struct proto_ops tquic6_proto_ops = {
 	.bind		= tquic_v6_bind,
 	.connect	= tquic_v6_connect_socket,
 	.socketpair	= sock_no_socketpair,
-	.accept		= inet_accept,
+	.accept		= tquic_accept_socket,
 	.getname	= tquic_v6_getname,
 	.poll		= tquic_poll,
 	.ioctl		= inet6_ioctl,
-	.listen		= inet_listen,
-	.shutdown	= inet_shutdown,
+	.listen		= tquic_sock_listen,
+	.shutdown	= tquic_sock_shutdown,
 	.setsockopt	= tquic_v6_setsockopt,
 	.getsockopt	= tquic_v6_getsockopt,
 #ifdef TQUIC_OUT_OF_TREE

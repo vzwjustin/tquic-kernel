@@ -375,7 +375,7 @@ void capsule_parser_cleanup(struct capsule_parser *parser)
 
 	/* Free pending capsules */
 	list_for_each_entry_safe(cap, tmp, &parser->pending, list) {
-		list_del(&cap->list);
+		list_del_init(&cap->list);
 		capsule_free(cap);
 	}
 
@@ -527,7 +527,7 @@ struct capsule *capsule_parser_next(struct capsule_parser *parser)
 
 	if (!list_empty(&parser->pending)) {
 		cap = list_first_entry(&parser->pending, struct capsule, list);
-		list_del(&cap->list);
+		list_del_init(&cap->list);
 	}
 
 	spin_unlock_bh(&parser->lock);
@@ -592,7 +592,7 @@ void capsule_registry_cleanup(struct capsule_registry *registry)
 	spin_lock_bh(&registry->lock);
 
 	list_for_each_entry_safe(handler, tmp, &registry->handlers, list) {
-		list_del(&handler->list);
+		list_del_init(&handler->list);
 		kfree(handler);
 	}
 
@@ -671,7 +671,7 @@ void capsule_unregister_handler(struct capsule_registry *registry, u64 type)
 
 	list_for_each_entry_safe(handler, tmp, &registry->handlers, list) {
 		if (handler->type == type) {
-			list_del(&handler->list);
+			list_del_init(&handler->list);
 			kfree(handler);
 			break;
 		}

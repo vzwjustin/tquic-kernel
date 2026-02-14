@@ -80,12 +80,12 @@ static void decoder_free_block(struct tquic_fec_source_block *block)
 		return;
 
 	list_for_each_entry_safe(symbol, tmp, &block->source_symbols, list) {
-		list_del(&symbol->list);
+		list_del_init(&symbol->list);
 		decoder_free_symbol(symbol);
 	}
 
 	list_for_each_entry_safe(symbol, tmp, &block->repair_symbols, list) {
-		list_del(&symbol->list);
+		list_del_init(&symbol->list);
 		decoder_free_symbol(symbol);
 	}
 
@@ -189,7 +189,7 @@ void tquic_fec_decoder_destroy(struct tquic_fec_state *state)
 	spin_lock_bh(&dec->lock);
 
 	list_for_each_entry_safe(block, tmp, &dec->active_blocks, list) {
-		list_del(&block->list);
+		list_del_init(&block->list);
 		decoder_free_block(block);
 	}
 
@@ -572,7 +572,7 @@ static int attempt_rs_recovery(struct tquic_fec_source_block *block, int gf_bits
 				/* Only remove symbols we just added */
 				if (symbol->received && !symbol->is_repair &&
 				    recovered_count > 0) {
-					list_del(&symbol->list);
+					list_del_init(&symbol->list);
 					kfree(symbol->data);
 					kfree(symbol);
 					block->num_received--;
@@ -946,7 +946,7 @@ void tquic_fec_cleanup_old_blocks(struct tquic_fec_state *state, u32 max_age_ms)
 
 	list_for_each_entry_safe(block, tmp, &dec->active_blocks, list) {
 		if (ktime_sub(now, block->created) > max_age) {
-			list_del(&block->list);
+			list_del_init(&block->list);
 			dec->num_active_blocks--;
 			decoder_free_block(block);
 		}

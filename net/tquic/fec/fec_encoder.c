@@ -98,13 +98,13 @@ static void free_source_block(struct tquic_fec_source_block *block)
 
 	/* Free source symbols */
 	list_for_each_entry_safe(symbol, tmp, &block->source_symbols, list) {
-		list_del(&symbol->list);
+		list_del_init(&symbol->list);
 		free_symbol(symbol);
 	}
 
 	/* Free repair symbols */
 	list_for_each_entry_safe(symbol, tmp, &block->repair_symbols, list) {
-		list_del(&symbol->list);
+		list_del_init(&symbol->list);
 		free_symbol(symbol);
 	}
 
@@ -230,7 +230,7 @@ void tquic_fec_encoder_destroy(struct tquic_fec_state *state)
 
 	/* Free pending blocks */
 	list_for_each_entry_safe(block, tmp, &enc->pending_blocks, list) {
-		list_del(&block->list);
+		list_del_init(&block->list);
 		free_source_block(block);
 	}
 
@@ -449,7 +449,7 @@ static int generate_rs_repair(struct tquic_fec_source_block *block,
 			list_for_each_entry_safe(repair_sym, tmp,
 						 &block->repair_symbols,
 						 list) {
-				list_del(&repair_sym->list);
+				list_del_init(&repair_sym->list);
 				kfree(repair_sym->data);
 				kfree(repair_sym);
 			}

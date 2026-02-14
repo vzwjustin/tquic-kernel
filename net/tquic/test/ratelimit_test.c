@@ -249,7 +249,7 @@ static void test_rl_state_destroy(struct test_rl_state *state)
 
 	for (i = 0; i < RL_HASH_SIZE; i++) {
 		list_for_each_entry_safe(entry, tmp, &state->buckets[i], list) {
-			list_del(&entry->list);
+			list_del_init(&entry->list);
 			kfree(entry);
 		}
 	}

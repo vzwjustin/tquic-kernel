@@ -328,11 +328,8 @@ int tquic_connect(struct sock *sk, TQUIC_SOCKADDR *uaddr, int addr_len)
 	inet_sk_set_state(sk, TCP_ESTABLISHED);
 
 	/* Initialize path manager after connection established */
-	pr_info("TQUIC PM DEBUG: calling tquic_pm_conn_init from socket.c (conn=%p)\n", conn);
 	ret = tquic_pm_conn_init(conn);
-	pr_info("TQUIC PM DEBUG: tquic_pm_conn_init returned %d\n", ret);
 	if (ret < 0) {
-		pr_err("TQUIC PM DEBUG: PM init failed with error %d\n", ret);
 		tquic_warn("PM init failed (%d), multipath disabled\n", ret);
 		tsk->flags |= TQUIC_F_PM_DISABLED;
 		tsk->flags &= ~TQUIC_F_MULTIPATH_ENABLED;
@@ -508,9 +505,20 @@ int tquic_accept(struct sock *sk, struct sock **newsk, int flags, bool kern)
 			/* Return the child socket */
 			*newsk = (struct sock *)child_tsk;
 
-			/* Update connection's socket pointer */
-			if (child_tsk->conn)
+			/*
+			 * Update connection's socket pointer.
+			 * For server-side connections, conn->sk still points
+			 * to the listener (with a sock_hold taken in
+			 * tquic_server_handshake).  Release that reference
+			 * before switching to the child socket.
+			 */
+			if (child_tsk->conn) {
+				struct sock *old_sk = child_tsk->conn->sk;
+
 				child_tsk->conn->sk = (struct sock *)child_tsk;
+				if (old_sk && old_sk != (struct sock *)child_tsk)
+					sock_put(old_sk);
+			}
 
 			tquic_dbg("accept returned connection\n");
 			goto out_unlock;

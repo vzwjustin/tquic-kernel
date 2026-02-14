@@ -398,7 +398,7 @@ void tquic_failover_destroy(struct tquic_failover_ctx *fc)
 	/* Free all packets in retransmit queue */
 	spin_lock_bh(&fc->retx_queue.lock);
 	list_for_each_entry_safe(sp, tmp, &fc->retx_queue.queue, retx_list) {
-		list_del(&sp->retx_list);
+		list_del_init(&sp->retx_list);
 		tquic_sent_packet_free(sp);
 	}
 	spin_unlock_bh(&fc->retx_queue.lock);

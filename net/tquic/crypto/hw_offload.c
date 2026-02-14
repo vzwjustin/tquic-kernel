@@ -276,7 +276,7 @@ struct tquic_crypto_ctx *tquic_crypto_ctx_alloc(u16 cipher_suite, gfp_t gfp)
 	default:
 		pr_err("tquic_hw_offload: unsupported cipher suite 0x%04x\n",
 		       cipher_suite);
-		kfree(ctx);
+		kfree_sensitive(ctx);
 		return NULL;
 	}
 
@@ -285,7 +285,7 @@ struct tquic_crypto_ctx *tquic_crypto_ctx_alloc(u16 cipher_suite, gfp_t gfp)
 	if (IS_ERR(ctx->aead)) {
 		pr_err("tquic_hw_offload: failed to allocate AEAD %s: %ld\n",
 		       alg_name, PTR_ERR(ctx->aead));
-		kfree(ctx);
+		kfree_sensitive(ctx);
 		return NULL;
 	}
 
@@ -293,7 +293,7 @@ struct tquic_crypto_ctx *tquic_crypto_ctx_alloc(u16 cipher_suite, gfp_t gfp)
 	if (crypto_aead_setauthsize(ctx->aead, 16)) {
 		pr_err("tquic_hw_offload: failed to set auth tag size\n");
 		crypto_free_aead(ctx->aead);
-		kfree(ctx);
+		kfree_sensitive(ctx);
 		return NULL;
 	}
 
@@ -320,7 +320,7 @@ void tquic_crypto_ctx_free(struct tquic_crypto_ctx *ctx)
 	memzero_explicit(ctx->key, sizeof(ctx->key));
 	memzero_explicit(ctx->iv, sizeof(ctx->iv));
 
-	kfree(ctx);
+	kfree_sensitive(ctx);
 }
 EXPORT_SYMBOL_GPL(tquic_crypto_ctx_free);
 
@@ -646,7 +646,7 @@ int tquic_crypto_batch_encrypt(struct tquic_crypto_ctx *ctx,
 			}
 		}
 
-		kfree(shared_buf);
+		kfree_sensitive(shared_buf);
 	}
 
 	return success;
@@ -718,7 +718,7 @@ int tquic_crypto_batch_decrypt(struct tquic_crypto_ctx *ctx,
 			}
 		}
 
-		kfree(shared_buf);
+		kfree_sensitive(shared_buf);
 	}
 
 	return success;

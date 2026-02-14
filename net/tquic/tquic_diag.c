@@ -522,7 +522,7 @@ path_error:
 /*
  * TQUIC inet_diag handler
  *
- * Registered with inet_diag_register() for IPPROTO_TQUIC (263).
+ * Registered with inet_diag_register() for IPPROTO_TQUIC (253).
  *
  * .owner field: added in 5.11, removed in 6.5
  */
@@ -553,9 +553,9 @@ MODULE_DESCRIPTION("TQUIC socket monitoring via SOCK_DIAG");
 /*
  * Per RESEARCH.md pitfall #4: MODULE_ALIAS enables auto-loading
  * when ss queries IPPROTO_TQUIC.
- * Format: AF_INET (2) - IPPROTO_TQUIC (263)
+ * Format: AF_INET (2) - IPPROTO_TQUIC (253)
  */
-MODULE_ALIAS_NET_PF_PROTO_TYPE(PF_NETLINK, NETLINK_SOCK_DIAG, 2-263);
+MODULE_ALIAS_NET_PF_PROTO_TYPE(PF_NETLINK, NETLINK_SOCK_DIAG, 2-253);
 
 #else /* LINUX_VERSION_CODE < 5.7.0 */
 

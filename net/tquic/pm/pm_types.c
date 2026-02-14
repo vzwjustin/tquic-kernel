@@ -321,7 +321,7 @@ static void __net_exit tquic_pm_net_exit(struct net *net)
 	/* Clean up endpoints */
 	spin_lock_bh(&pernet->lock);
 	list_for_each_entry_safe(ep, tmp, &pernet->endpoint_list, list) {
-		list_del(&ep->list);
+		list_del_init(&ep->list);
 		kfree(ep);
 	}
 	spin_unlock_bh(&pernet->lock);

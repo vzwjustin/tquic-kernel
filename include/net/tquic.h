@@ -176,6 +176,22 @@ enum tquic_conn_state {
 };
 
 /**
+ * enum tquic_state_reason - Connection state transition reasons
+ * @TQUIC_REASON_NORMAL: Normal state progression
+ * @TQUIC_REASON_TIMEOUT: Timer-driven transition
+ * @TQUIC_REASON_ERROR: Internal/protocol error transition
+ * @TQUIC_REASON_PEER_CLOSE: Peer initiated close/drain
+ * @TQUIC_REASON_APPLICATION: Application initiated transition
+ */
+enum tquic_state_reason {
+	TQUIC_REASON_NORMAL,
+	TQUIC_REASON_TIMEOUT,
+	TQUIC_REASON_ERROR,
+	TQUIC_REASON_PEER_CLOSE,
+	TQUIC_REASON_APPLICATION,
+};
+
+/**
  * enum tquic_conn_role - Connection role (client vs server)
  * @TQUIC_ROLE_CLIENT: Client-initiated connection
  * @TQUIC_ROLE_SERVER: Server-side accepted connection
@@ -1969,6 +1985,9 @@ int tquic_conn_process_handshake(struct tquic_connection *conn,
 				 struct sk_buff *skb);
 
 /* Connection close */
+int tquic_conn_set_state(struct tquic_connection *conn,
+			 enum tquic_conn_state new_state,
+			 enum tquic_state_reason reason);
 int tquic_conn_close_with_error(struct tquic_connection *conn,
 				u64 error_code, const char *reason);
 int tquic_conn_close_app(struct tquic_connection *conn,

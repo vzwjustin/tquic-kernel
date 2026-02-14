@@ -301,7 +301,7 @@ static void tquic_sent_packet_free(struct tquic_sent_packet *pkt)
 
 	/* Free stream data ranges */
 	list_for_each_entry_safe(range, tmp, &pkt->stream_data, list) {
-		list_del(&range->list);
+		list_del_init(&range->list);
 		kmem_cache_free(tquic_stream_range_cache, range);
 	}
 
@@ -466,7 +466,7 @@ int tquic_record_received_packet(struct tquic_loss_state *loss,
 			/* Try to merge with previous range */
 			if (prev_range && range->end + 1 >= prev_range->start) {
 				prev_range->start = range->start;
-				list_del(&range->list);
+				list_del_init(&range->list);
 				tquic_pn_range_free(range);
 				loss->num_ack_ranges[pn_space]--;
 			}
@@ -510,7 +510,7 @@ int tquic_record_received_packet(struct tquic_loss_state *loss,
 	while (loss->num_ack_ranges[pn_space] > TQUIC_MAX_ACK_RANGES) {
 		range = list_last_entry(&loss->ack_ranges[pn_space],
 					struct tquic_pn_range, list);
-		list_del(&range->list);
+		list_del_init(&range->list);
 		tquic_pn_range_free(range);
 		loss->num_ack_ranges[pn_space]--;
 	}
@@ -1517,7 +1517,7 @@ int tquic_on_ack_received(struct tquic_loss_state *loss, int pn_space,
 	 * Step 10: Free acknowledged packets
 	 */
 	list_for_each_entry_safe(pkt, tmp, &newly_acked, list) {
-		list_del(&pkt->list);
+		list_del_init(&pkt->list);
 		tquic_sent_packet_free(pkt);
 	}
 
@@ -1526,7 +1526,7 @@ int tquic_on_ack_received(struct tquic_loss_state *loss, int pn_space,
 	 * In a full implementation, we would queue retransmissions here
 	 */
 	list_for_each_entry_safe(pkt, tmp, &lost_packets, list) {
-		list_del(&pkt->list);
+		list_del_init(&pkt->list);
 
 		/*
 		 * Queue stream data for retransmission.
@@ -1735,7 +1735,7 @@ handle_lost:
 
 		/* Free lost packets */
 		list_for_each_entry_safe(pkt, tmp, &lost_packets, list) {
-			list_del(&pkt->list);
+			list_del_init(&pkt->list);
 			tquic_sent_packet_free(pkt);
 		}
 	}
@@ -2002,14 +2002,14 @@ void tquic_loss_state_destroy(struct tquic_loss_state *loss)
 	for (i = 0; i < TQUIC_PN_SPACE_COUNT; i++) {
 		list_for_each_entry_safe(pkt, pkt_tmp,
 					 &loss->sent_packets_list[i], list) {
-			list_del(&pkt->list);
+			list_del_init(&pkt->list);
 			tquic_sent_packet_free(pkt);
 		}
 
 		/* Free ACK ranges */
 		list_for_each_entry_safe(range, range_tmp,
 					 &loss->ack_ranges[i], list) {
-			list_del(&range->list);
+			list_del_init(&range->list);
 			tquic_pn_range_free(range);
 		}
 	}

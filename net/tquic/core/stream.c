@@ -221,7 +221,7 @@ static void tquic_stream_ext_free(struct tquic_stream_manager *mgr,
 
 	/* Free gaps */
 	list_for_each_entry_safe(gap, tmp_gap, &ext->gaps, list) {
-		list_del(&gap->list);
+		list_del_init(&gap->list);
 		kmem_cache_free(mgr->gap_cache, gap);
 	}
 

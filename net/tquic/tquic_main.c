@@ -47,6 +47,9 @@
 #include "tquic_compat.h"
 #include "tquic_init.h"
 #include "tquic_debug.h"
+#if IS_REACHABLE(CONFIG_TQUIC_DIAG)
+#include "diag/path_metrics.h"
+#endif
 
 /* Module info */
 MODULE_AUTHOR("Linux Foundation");
@@ -134,6 +137,11 @@ void tquic_conn_destroy(struct tquic_connection *conn)
 	/* Unbind from server client tracking before teardown */
 	tquic_server_unbind_client(conn);
 
+#if IS_REACHABLE(CONFIG_TQUIC_DIAG)
+	/* Drop any outstanding per-connection metrics subscriptions. */
+	tquic_metrics_unsubscribe_conn(conn);
+#endif
+
 	/* Release path manager state if still attached */
 	tquic_pm_conn_release(conn);
 
@@ -216,11 +224,10 @@ void tquic_conn_destroy(struct tquic_connection *conn)
 
 		/*
 		 * Ensure an RCU grace period has passed before freeing
-		 * the connection.  tquic_pm_conn_release() uses
-		 * list_del_rcu() to remove the connection from the
-		 * per-netns list, and concurrent RCU readers
-		 * (tquic_conn_lookup_by_token) may still hold references
-		 * to this memory until the grace period completes.
+		 * the connection. Some readers may still hold transient
+		 * references to connection-owned state across list unlink/
+		 * pointer publication boundaries until the grace period
+		 * completes.
 		 */
 			synchronize_rcu();
 
@@ -492,55 +499,36 @@ int tquic_pm_conn_init(struct tquic_connection *conn)
 	struct tquic_pm_state *pm_state;
 	struct tquic_net *tn;
 
-	pr_info("TQUIC PM DEBUG: tquic_pm_conn_init entry\n");
-
-	if (!conn || !conn->sk) {
-		pr_err("TQUIC PM DEBUG: conn or sk is NULL (conn=%p, sk=%p)\n",
-		       conn, conn ? conn->sk : NULL);
+	if (!conn || !conn->sk)
 		return -EINVAL;
-	}
 
 	net = sock_net(conn->sk);
-	pr_info("TQUIC PM DEBUG: got net=%p\n", net);
 
 	pernet = tquic_pm_get_pernet(net);
-	if (!pernet) {
-		pr_err("TQUIC PM DEBUG: pernet is NULL\n");
+	if (!pernet)
 		return -ENOENT;
-	}
-	pr_info("TQUIC PM DEBUG: pernet=%p, pm_type=%u\n", pernet, pernet->pm_type);
 
 	tn = tquic_pernet(net);
-	if (!tn) {
-		pr_err("TQUIC PM DEBUG: tn is NULL\n");
+	if (!tn)
 		return -ENOENT;
-	}
-	pr_info("TQUIC PM DEBUG: tn=%p\n", tn);
 
 	/* Get PM ops for current type */
 	ops = tquic_pm_get_type(net);
 	if (!ops) {
-		pr_err("TQUIC PM DEBUG: no PM ops registered for type %u\n",
-		       pernet->pm_type);
 		tquic_warn("no PM ops registered for type %u\n",
 			   pernet->pm_type);
 		return -ENOENT;
 	}
-	pr_info("TQUIC PM DEBUG: ops=%p, name=%s\n", ops, ops->name);
 
 	/* Allocate PM state */
 	pm_state = kzalloc(sizeof(*pm_state), GFP_KERNEL);
-	if (!pm_state) {
-		pr_err("TQUIC PM DEBUG: kzalloc failed for pm_state\n");
+	if (!pm_state)
 		return -ENOMEM;
-	}
-	pr_info("TQUIC PM DEBUG: pm_state allocated at %p\n", pm_state);
 
 	pm_state->ops = ops;
 	pm_state->priv = NULL;
 
 	conn->pm = pm_state;
-	pr_info("TQUIC PM DEBUG: conn->pm set\n");
 
 	/* Generate unique connection token for netlink identification */
 	conn->token = get_random_u32();
@@ -548,17 +536,13 @@ int tquic_pm_conn_init(struct tquic_connection *conn)
 	/*
 	 * Initialize pm_node list head and add to per-netns connection list.
 	 * This enables lookup by token via tquic_conn_lookup_by_token().
-	 * Use RCU-safe list operations for concurrent read access.
+	 * List access is serialized by tn->conn_lock.
 	 */
-	pr_info("TQUIC PM DEBUG: initializing pm_node\n");
 	INIT_LIST_HEAD(&conn->pm_node);
-	pr_info("TQUIC PM DEBUG: adding to connection list\n");
 	spin_lock_bh(&tn->conn_lock);
-	list_add_tail_rcu(&conn->pm_node, &tn->connections);
+	list_add_tail(&conn->pm_node, &tn->connections);
 	atomic_inc(&tn->conn_count);
 	spin_unlock_bh(&tn->conn_lock);
-	pr_info("TQUIC PM DEBUG: added to list, conn_count=%d\n",
-		atomic_read(&tn->conn_count));
 
 	/*
 	 * Note: PM-type per-namespace init (ops->init) is called once per
@@ -576,11 +560,9 @@ int tquic_pm_conn_init(struct tquic_connection *conn)
 		 * when interfaces are already up. The notifier was
 		 * registered in tquic_pm_kernel_init().
 		 */
-		pr_info("TQUIC PM DEBUG: kernel PM with auto_discover\n");
 		tquic_dbg("kernel PM initialized with auto_discover\n");
 	}
 
-	pr_info("TQUIC PM DEBUG: tquic_pm_conn_init SUCCESS, returning 0\n");
 	return 0;
 }
 EXPORT_SYMBOL_GPL(tquic_pm_conn_init);
@@ -603,11 +585,11 @@ void tquic_pm_conn_release(struct tquic_connection *conn)
 
 	pm_state = conn->pm;
 
-	/* Call PM-specific release if available */
-	if (pm_state->ops && pm_state->ops->release && conn->sk) {
-		net = sock_net(conn->sk);
-		pm_state->ops->release(net);
-	}
+	/*
+	 * PM type .release() is a per-netns lifecycle callback.
+	 * It is invoked from PM per-netns exit/type switch paths,
+	 * not during per-connection teardown.
+	 */
 
 	/*
 	 * Remove from per-netns connection list.
@@ -617,10 +599,12 @@ void tquic_pm_conn_release(struct tquic_connection *conn)
 	if (conn->sk) {
 		net = sock_net(conn->sk);
 		tn = tquic_pernet(net);
-		if (tn && !list_empty(&conn->pm_node)) {
+		if (tn) {
 			spin_lock_bh(&tn->conn_lock);
-			list_del_rcu(&conn->pm_node);
-			atomic_dec(&tn->conn_count);
+			if (!list_empty(&conn->pm_node)) {
+				list_del_init(&conn->pm_node);
+				atomic_dec(&tn->conn_count);
+			}
 			spin_unlock_bh(&tn->conn_lock);
 
 			/*

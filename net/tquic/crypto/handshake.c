@@ -1411,7 +1411,7 @@ int tquic_hs_generate_client_hello(struct tquic_handshake *hs,
 	if (!hs->key_share.public_key || !hs->key_share.private_key) {
 		kfree_sensitive(hs->key_share.private_key);
 		hs->key_share.private_key = NULL;
-		kfree(hs->key_share.public_key);
+		kfree_sensitive(hs->key_share.public_key);
 		hs->key_share.public_key = NULL;
 		kfree_sensitive(extensions);
 		return -ENOMEM;
@@ -1435,7 +1435,7 @@ int tquic_hs_generate_client_hello(struct tquic_handshake *hs,
 		pr_warn("tquic_hs: X25519 public key generation failed\n");
 		kfree_sensitive(hs->key_share.private_key);
 		hs->key_share.private_key = NULL;
-		kfree(hs->key_share.public_key);
+		kfree_sensitive(hs->key_share.public_key);
 		hs->key_share.public_key = NULL;
 		kfree_sensitive(extensions);
 		return -EINVAL;
@@ -1806,7 +1806,7 @@ int tquic_hs_process_encrypted_extensions(struct tquic_handshake *hs,
 				if (list_len >= proto_len + 1 &&
 				    proto_len > 0 &&
 				    3 + proto_len <= ext_data_len) {
-					kfree(hs->alpn_selected);
+					kfree_sensitive(hs->alpn_selected);
 					hs->alpn_selected = kmalloc(proto_len + 1, GFP_KERNEL);
 					if (hs->alpn_selected) {
 						memcpy(hs->alpn_selected, p + 3, proto_len);
@@ -2168,9 +2168,9 @@ static int tquic_emsa_pss_verify(const char *hash_alg, u32 hash_len,
 out:
 	if (hash_tfm)
 		crypto_free_shash(hash_tfm);
-	kfree(m_prime);
-	kfree(db);
-	kfree(db_mask);
+	kfree_sensitive(m_prime);
+	kfree_sensitive(db);
+	kfree_sensitive(db_mask);
 	return err;
 }
 
@@ -2259,7 +2259,7 @@ static int tquic_verify_rsa_pss(const u8 *pubkey_data, u32 pubkey_len,
 out_free_req:
 	akcipher_request_free(req);
 out_free_em:
-	kfree(em);
+	kfree_sensitive(em);
 out_free_tfm:
 	crypto_free_akcipher(tfm);
 	return err;
@@ -2778,7 +2778,7 @@ int tquic_hs_process_new_session_ticket(struct tquic_handshake *hs,
 			return -ENOMEM;
 	} else {
 		/* Re-entry: free old ticket data and zeroize secrets */
-		kfree(hs->session_ticket->ticket);
+		kfree_sensitive(hs->session_ticket->ticket);
 		hs->session_ticket->ticket = NULL;
 		memzero_explicit(hs->session_ticket->resumption_secret,
 				 sizeof(hs->session_ticket->resumption_secret));
@@ -2799,7 +2799,7 @@ int tquic_hs_process_new_session_ticket(struct tquic_handshake *hs,
 	if (p + ticket_len > end)
 		return -EINVAL;
 
-	kfree(hs->session_ticket->ticket);
+	kfree_sensitive(hs->session_ticket->ticket);
 	hs->session_ticket->ticket = kmalloc(ticket_len, GFP_KERNEL);
 	if (!hs->session_ticket->ticket)
 		return -ENOMEM;
@@ -2909,7 +2909,7 @@ int tquic_hs_setup_psk(struct tquic_handshake *hs,
 
 	psk->identity = kmalloc(ticket->ticket_len, GFP_KERNEL);
 	if (!psk->identity) {
-		kfree(hs->psk_identities);
+		kfree_sensitive(hs->psk_identities);
 		hs->psk_identities = NULL;
 		return -ENOMEM;
 	}
@@ -2937,13 +2937,13 @@ int tquic_hs_setup_psk(struct tquic_handshake *hs,
 
 	/* Copy session ticket for early data (caller retains ownership) */
 	if (hs->session_ticket) {
-		kfree(hs->session_ticket->ticket);
-		kfree(hs->session_ticket);
+		kfree_sensitive(hs->session_ticket->ticket);
+		kfree_sensitive(hs->session_ticket);
 	}
 	hs->session_ticket = kzalloc(sizeof(*hs->session_ticket), GFP_KERNEL);
 	if (!hs->session_ticket) {
-		kfree(psk->identity);
-		kfree(hs->psk_identities);
+		kfree_sensitive(psk->identity);
+		kfree_sensitive(hs->psk_identities);
 		hs->psk_identities = NULL;
 		hs->psk_count = 0;
 		return -ENOMEM;
@@ -2953,10 +2953,10 @@ int tquic_hs_setup_psk(struct tquic_handshake *hs,
 		hs->session_ticket->ticket = kmalloc(ticket->ticket_len,
 						     GFP_KERNEL);
 		if (!hs->session_ticket->ticket) {
-			kfree(hs->session_ticket);
+			kfree_sensitive(hs->session_ticket);
 			hs->session_ticket = NULL;
-			kfree(psk->identity);
-			kfree(hs->psk_identities);
+			kfree_sensitive(psk->identity);
+			kfree_sensitive(hs->psk_identities);
 			hs->psk_identities = NULL;
 			hs->psk_count = 0;
 			return -ENOMEM;
@@ -3208,7 +3208,7 @@ err_hash:
 err_transcript:
 	kfree_sensitive(hs->transcript);
 err_free:
-	kfree(hs);
+	kfree_sensitive(hs);
 	return NULL;
 }
 EXPORT_SYMBOL_GPL(tquic_hs_init);
@@ -3223,8 +3223,8 @@ int tquic_hs_set_alpn(struct tquic_handshake *hs,
 
 	if (hs->alpn_list) {
 		for (i = 0; i < hs->alpn_count; i++)
-			kfree(hs->alpn_list[i]);
-		kfree(hs->alpn_list);
+			kfree_sensitive(hs->alpn_list[i]);
+		kfree_sensitive(hs->alpn_list);
 	}
 
 	hs->alpn_list = kcalloc(count, sizeof(char *), GFP_KERNEL);
@@ -3235,8 +3235,8 @@ int tquic_hs_set_alpn(struct tquic_handshake *hs,
 		hs->alpn_list[i] = kstrdup(protos[i], GFP_KERNEL);
 		if (!hs->alpn_list[i]) {
 			while (i > 0)
-				kfree(hs->alpn_list[--i]);
-			kfree(hs->alpn_list);
+				kfree_sensitive(hs->alpn_list[--i]);
+			kfree_sensitive(hs->alpn_list);
 			hs->alpn_list = NULL;
 			return -ENOMEM;
 		}
@@ -3252,7 +3252,7 @@ EXPORT_SYMBOL_GPL(tquic_hs_set_alpn);
  */
 int tquic_hs_set_sni(struct tquic_handshake *hs, const char *hostname)
 {
-	kfree(hs->sni);
+	kfree_sensitive(hs->sni);
 
 	if (!hostname) {
 		hs->sni = NULL;
@@ -3533,7 +3533,7 @@ void tquic_hs_cleanup(struct tquic_handshake *hs)
 		return;
 
 	/* Free key share */
-	kfree(hs->key_share.public_key);
+	kfree_sensitive(hs->key_share.public_key);
 	kfree_sensitive(hs->key_share.private_key);
 
 	/* Free transcript - contains handshake data, must zeroize */
@@ -3542,30 +3542,30 @@ void tquic_hs_cleanup(struct tquic_handshake *hs)
 	/* Free ALPN */
 	if (hs->alpn_list) {
 		for (i = 0; i < hs->alpn_count; i++)
-			kfree(hs->alpn_list[i]);
-		kfree(hs->alpn_list);
+			kfree_sensitive(hs->alpn_list[i]);
+		kfree_sensitive(hs->alpn_list);
 	}
-	kfree(hs->alpn_selected);
+	kfree_sensitive(hs->alpn_selected);
 
 	/* Free SNI */
-	kfree(hs->sni);
+	kfree_sensitive(hs->sni);
 
 	/* Free PSK identities */
 	if (hs->psk_identities) {
 		for (i = 0; i < hs->psk_count; i++)
-			kfree(hs->psk_identities[i].identity);
-		kfree(hs->psk_identities);
+			kfree_sensitive(hs->psk_identities[i].identity);
+		kfree_sensitive(hs->psk_identities);
 	}
 
 	/* Free session ticket */
 	if (hs->session_ticket) {
-		kfree(hs->session_ticket->ticket);
-		kfree(hs->session_ticket);
+		kfree_sensitive(hs->session_ticket->ticket);
+		kfree_sensitive(hs->session_ticket);
 	}
 
 	/* Free certificates */
-	kfree(hs->peer_cert);
-	kfree(hs->local_cert);
+	kfree_sensitive(hs->peer_cert);
+	kfree_sensitive(hs->local_cert);
 	kfree_sensitive(hs->local_key);
 
 	/* Free crypto transforms */

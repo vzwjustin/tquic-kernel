@@ -388,7 +388,7 @@ void tquic_owd_state_destroy(struct tquic_owd_state *owd)
 
 	/* Free all timestamp records */
 	list_for_each_entry_safe(rec, tmp, &owd->ts_records_list, list) {
-		list_del(&rec->list);
+		list_del_init(&rec->list);
 		ts_record_free(rec);
 	}
 

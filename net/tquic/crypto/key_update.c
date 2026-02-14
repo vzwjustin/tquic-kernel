@@ -814,7 +814,7 @@ struct tquic_key_update_state *tquic_key_update_state_alloc(u16 cipher_suite)
 		state->confidentiality_limit = TQUIC_CHACHA20_CONFIDENTIALITY_LIMIT;
 		break;
 	default:
-		kfree(state);
+		kfree_sensitive(state);
 		return NULL;
 	}
 
@@ -831,7 +831,7 @@ struct tquic_key_update_state *tquic_key_update_state_alloc(u16 cipher_suite)
 	state->hash_tfm = crypto_alloc_shash(hash_name, 0, 0);
 	if (IS_ERR(state->hash_tfm)) {
 		pr_err("tquic_key_update: failed to allocate hash %s\n", hash_name);
-		kfree(state);
+		kfree_sensitive(state);
 		return NULL;
 	}
 

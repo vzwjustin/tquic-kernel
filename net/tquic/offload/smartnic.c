@@ -261,7 +261,7 @@ void tquic_nic_unregister(struct tquic_nic_device *dev)
 
 	/* Remove from device list so no new references are taken */
 	spin_lock_bh(&tquic_nic_lock);
-	list_del(&dev->list);
+	list_del_init(&dev->list);
 	dev->registered = false;  /* SECURITY FIX (C-004): mark as unregistered */
 	spin_unlock_bh(&tquic_nic_lock);
 
@@ -903,7 +903,7 @@ void tquic_smartnic_exit(void)
 	list_for_each_entry_safe(dev, tmp, &tquic_nic_devices, list) {
 		if (dev->registered) {
 			/* Device not yet unregistered, clean it up */
-			list_del(&dev->list);
+			list_del_init(&dev->list);
 			dev->registered = false;
 			if (dev->ops->cleanup)
 				dev->ops->cleanup(dev);

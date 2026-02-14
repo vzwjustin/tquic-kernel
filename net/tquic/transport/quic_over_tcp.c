@@ -1536,7 +1536,7 @@ void quic_tcp_stop_listen(struct quic_tcp_listener *listener)
 	/* Close all accepted connections */
 	spin_lock(&listener->conn_lock);
 	list_for_each_entry_safe(conn, tmp, &listener->connections, list) {
-		list_del(&conn->list);
+		list_del_init(&conn->list);
 		spin_unlock(&listener->conn_lock);
 		quic_tcp_close(conn);
 		spin_lock(&listener->conn_lock);
@@ -1565,7 +1565,7 @@ struct quic_tcp_connection *quic_tcp_accept(struct quic_tcp_listener *listener)
 	if (!list_empty(&listener->connections)) {
 		conn = list_first_entry(&listener->connections,
 					struct quic_tcp_connection, list);
-		list_del(&conn->list);
+		list_del_init(&conn->list);
 	}
 	spin_unlock(&listener->conn_lock);
 

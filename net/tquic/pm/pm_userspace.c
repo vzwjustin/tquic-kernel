@@ -114,6 +114,7 @@ static int tquic_pm_userspace_del_path(struct tquic_connection *conn,
 	if (path) {
 		/* Emit REMOVED event before deletion */
 		tquic_pm_nl_send_event(net, conn, path, TQUIC_PM_EVENT_REMOVED);
+		tquic_path_put(path);
 	}
 
 	/* Call core path removal */

@@ -85,7 +85,7 @@ void qpack_decoder_destroy(struct qpack_decoder *dec)
 
 	spin_lock_irqsave(&dec->lock, flags);
 	list_for_each_entry_safe(blocked, tmp, &dec->blocked_streams, list) {
-		list_del(&blocked->list);
+		list_del_init(&blocked->list);
 		dec->blocked_stream_bytes -= blocked->data_len;
 		kfree(blocked->data);
 		kfree(blocked);
@@ -823,7 +823,7 @@ int qpack_decoder_process_blocked_streams(struct qpack_decoder *dec)
 	/* Find streams that can now be decoded */
 	list_for_each_entry_safe(blocked, tmp, &dec->blocked_streams, list) {
 		if (blocked->required_insert_count <= dec->dynamic_table.insert_count) {
-			list_del(&blocked->list);
+			list_del_init(&blocked->list);
 			list_add_tail(&blocked->list, &ready_list);
 			dec->blocked_stream_count--;
 			dec->blocked_stream_bytes -= blocked->data_len;
@@ -860,7 +860,7 @@ int qpack_decoder_process_blocked_streams(struct qpack_decoder *dec)
 		}
 		/* If ret == -EAGAIN, stream is re-blocked (needs more inserts) */
 
-		list_del(&blocked->list);
+		list_del_init(&blocked->list);
 		kfree(blocked->data);
 		kfree(blocked);
 	}

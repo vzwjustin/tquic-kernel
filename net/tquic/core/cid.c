@@ -601,14 +601,14 @@ void tquic_cid_manager_destroy(struct tquic_cid_manager *mgr)
 
 	/* Free all local CIDs */
 	list_for_each_entry_safe(entry, tmp, &mgr->local_cids, list) {
-		list_del(&entry->list);
+		list_del_init(&entry->list);
 		tquic_cid_unregister(entry);
 		tquic_cid_entry_put(entry);
 	}
 
 	/* Free all remote CIDs */
 	list_for_each_entry_safe(entry, tmp, &mgr->remote_cids, list) {
-		list_del(&entry->list);
+		list_del_init(&entry->list);
 		tquic_cid_entry_put(entry);
 	}
 
@@ -1002,7 +1002,7 @@ int tquic_cid_handle_retire(struct tquic_cid_manager *mgr, u64 seq_num)
 			}
 
 			/* Remove from table and free */
-			list_del(&entry->list);
+			list_del_init(&entry->list);
 			mgr->local_cid_count--;
 			tquic_cid_unregister(entry);
 			tquic_cid_entry_put(entry);
@@ -1045,7 +1045,7 @@ void tquic_cid_complete_retire(struct tquic_cid_manager *mgr, u64 seq_num)
 		if (entry->seq_num == seq_num &&
 		    entry->state == TQUIC_CID_STATE_PENDING_RETIRE) {
 			entry->state = TQUIC_CID_STATE_RETIRED;
-			list_del(&entry->list);
+			list_del_init(&entry->list);
 			mgr->remote_cid_count--;
 			tquic_cid_entry_put(entry);
 
@@ -1712,7 +1712,7 @@ int tquic_cid_register_local(struct tquic_cid_manager *mgr,
 				     tquic_cid_table.p);
 	if (ret) {
 		spin_lock_bh(&mgr->lock);
-		list_del(&entry->list);
+		list_del_init(&entry->list);
 		mgr->local_cid_count--;
 		spin_unlock_bh(&mgr->lock);
 		kmem_cache_free(tquic_cid_cache, entry);

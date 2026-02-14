@@ -720,7 +720,7 @@ void tquic_loss_detection_on_ack_received(struct tquic_connection *conn,
 		}
 
 		/* Remove from sent list and prepare for cleanup */
-		list_del(&pkt->list);
+		list_del_init(&pkt->list);
 		pkt->list.next = (struct list_head *)newly_acked;
 		newly_acked = pkt;
 	}
@@ -889,7 +889,7 @@ void tquic_loss_detection_detect_lost(struct tquic_connection *conn, u8 pn_space
 				lost_bytes += pkt->size;
 
 			/* Move to lost list */
-			list_del(&pkt->list);
+			list_del_init(&pkt->list);
 			list_add_tail(&pkt->list, &lost_list);
 		} else {
 			/*
@@ -923,7 +923,7 @@ void tquic_loss_detection_detect_lost(struct tquic_connection *conn, u8 pn_space
 		 */
 		spin_lock_irqsave(&pn_space->lock, flags);
 		list_for_each_entry_safe(pkt, tmp, &lost_list, list) {
-			list_del(&pkt->list);
+			list_del_init(&pkt->list);
 
 			/*
 			 * RFC 9002 Section 6.3:
@@ -942,7 +942,7 @@ void tquic_loss_detection_detect_lost(struct tquic_connection *conn, u8 pn_space
 
 		/* Free packets outside lock */
 		list_for_each_entry_safe(pkt, tmp, &to_free, list) {
-			list_del(&pkt->list);
+			list_del_init(&pkt->list);
 			tquic_sent_packet_free(pkt);
 		}
 	}
@@ -1352,7 +1352,7 @@ void tquic_loss_on_packet_number_space_discarded(struct tquic_connection *conn,
 		if (pkt->in_flight)
 			removed_bytes += pkt->size;
 
-		list_del(&pkt->list);
+		list_del_init(&pkt->list);
 		spin_unlock_irqrestore(&pn_space->lock, flags);
 		tquic_sent_packet_free(pkt);
 		spin_lock_irqsave(&pn_space->lock, flags);
@@ -1360,7 +1360,7 @@ void tquic_loss_on_packet_number_space_discarded(struct tquic_connection *conn,
 
 	/* Remove all lost packets from this space */
 	list_for_each_entry_safe(pkt, tmp, &pn_space->lost_packets, list) {
-		list_del(&pkt->list);
+		list_del_init(&pkt->list);
 		spin_unlock_irqrestore(&pn_space->lock, flags);
 		tquic_sent_packet_free(pkt);
 		spin_lock_irqsave(&pn_space->lock, flags);
@@ -1427,7 +1427,7 @@ void tquic_loss_mark_packet_lost(struct tquic_connection *conn,
 			tquic_cong_on_loss(path, pkt->size);
 
 		/* Move to lost list for retransmission */
-		list_del(&pkt->list);
+		list_del_init(&pkt->list);
 			if (pkt->ack_eliciting && !pkt->retransmitted) {
 				pkt->retransmitted = true;
 				list_add_tail(&pkt->list, &pn_space->lost_packets);
@@ -1700,14 +1700,14 @@ void tquic_loss_cleanup_space(struct tquic_connection *conn, u8 pn_space_idx)
 	spin_lock_irqsave(&pn_space->lock, flags);
 
 	list_for_each_entry_safe(pkt, tmp, &pn_space->sent_list, list) {
-		list_del(&pkt->list);
+		list_del_init(&pkt->list);
 		spin_unlock_irqrestore(&pn_space->lock, flags);
 		tquic_sent_packet_free(pkt);
 		spin_lock_irqsave(&pn_space->lock, flags);
 	}
 
 	list_for_each_entry_safe(pkt, tmp, &pn_space->lost_packets, list) {
-		list_del(&pkt->list);
+		list_del_init(&pkt->list);
 		spin_unlock_irqrestore(&pn_space->lock, flags);
 		tquic_sent_packet_free(pkt);
 		spin_lock_irqsave(&pn_space->lock, flags);

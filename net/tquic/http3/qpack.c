@@ -831,7 +831,7 @@ void qpack_header_list_destroy(struct qpack_header_list *list)
 		return;
 
 	list_for_each_entry_safe(hdr, tmp, &list->headers, list) {
-		list_del(&hdr->list);
+		list_del_init(&hdr->list);
 		kfree(hdr->name);
 		kfree(hdr->value);
 		kfree(hdr);

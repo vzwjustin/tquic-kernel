@@ -400,7 +400,7 @@ static int test_datagram_queue_pop(struct test_datagram_queue *queue,
 	memcpy(buf, dg->data, len);
 
 	/* Remove from queue */
-	list_del(&dg->list);
+	list_del_init(&dg->list);
 	queue->count--;
 	queue->total_bytes -= len;
 
@@ -434,7 +434,7 @@ static void test_datagram_queue_destroy(struct test_datagram_queue *queue)
 	struct test_datagram *dg, *tmp;
 
 	list_for_each_entry_safe(dg, tmp, &queue->head, list) {
-		list_del(&dg->list);
+		list_del_init(&dg->list);
 		kfree(dg->data);
 		kfree(dg);
 	}

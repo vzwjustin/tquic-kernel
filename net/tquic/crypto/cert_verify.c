@@ -534,14 +534,14 @@ static int parse_san_extension(const u8 *data, u32 len,
 
 	ips = kcalloc(ip_capacity, sizeof(u8 *), GFP_KERNEL);
 	if (!ips) {
-		kfree(names);
+		kfree_sensitive(names);
 		return -ENOMEM;
 	}
 
 	ip_lengths = kcalloc(ip_capacity, sizeof(u32), GFP_KERNEL);
 	if (!ip_lengths) {
-		kfree(names);
-		kfree(ips);
+		kfree_sensitive(names);
+		kfree_sensitive(ips);
 		return -ENOMEM;
 	}
 
@@ -648,13 +648,13 @@ err_free:
 		u32 j;
 
 		for (j = 0; j < name_count; j++)
-			kfree(names[j]);
-		kfree(names);
+			kfree_sensitive(names[j]);
+		kfree_sensitive(names);
 		for (j = 0; j < addr_count; j++)
-			kfree(ips[j]);
+			kfree_sensitive(ips[j]);
 	}
-	kfree(ips);
-	kfree(ip_lengths);
+	kfree_sensitive(ips);
+	kfree_sensitive(ip_lengths);
 	return -ENOMEM;
 }
 
@@ -957,11 +957,11 @@ err_free:
 		u32 i;
 
 		for (i = 0; i < nc->nr_permitted; i++)
-			kfree(nc->permitted[i].name);
+			kfree_sensitive(nc->permitted[i].name);
 		for (i = 0; i < nc->nr_excluded; i++)
-			kfree(nc->excluded[i].name);
+			kfree_sensitive(nc->excluded[i].name);
 	}
-	kfree(nc);
+	kfree_sensitive(nc);
 	return ret;
 }
 
@@ -976,10 +976,10 @@ static void free_name_constraints(struct tquic_name_constraints *nc)
 		return;
 
 	for (i = 0; i < nc->nr_permitted; i++)
-		kfree(nc->permitted[i].name);
+		kfree_sensitive(nc->permitted[i].name);
 	for (i = 0; i < nc->nr_excluded; i++)
-		kfree(nc->excluded[i].name);
-	kfree(nc);
+		kfree_sensitive(nc->excluded[i].name);
+	kfree_sensitive(nc);
 }
 
 /*
@@ -1801,7 +1801,7 @@ struct tquic_x509_cert *tquic_x509_cert_parse(const u8 *data, u32 len, gfp_t gfp
 	/* Store raw certificate */
 	cert->raw = kmalloc(len, gfp);
 	if (!cert->raw) {
-		kfree(cert);
+		kfree_sensitive(cert);
 		return NULL;
 	}
 	memcpy(cert->raw, data, len);
@@ -1859,39 +1859,39 @@ void tquic_x509_cert_free(struct tquic_x509_cert *cert)
 	if (!cert)
 		return;
 
-	kfree(cert->raw);
-	kfree(cert->subject);
-	kfree(cert->issuer);
-	kfree(cert->subject_raw);
-	kfree(cert->issuer_raw);
-	kfree(cert->serial);
-	kfree(cert->pubkey.key_data);
-	kfree(cert->signature.signature);
-	kfree(cert->akid);
-	kfree(cert->skid);
-	kfree(cert->ocsp_url);
+	kfree_sensitive(cert->raw);
+	kfree_sensitive(cert->subject);
+	kfree_sensitive(cert->issuer);
+	kfree_sensitive(cert->subject_raw);
+	kfree_sensitive(cert->issuer_raw);
+	kfree_sensitive(cert->serial);
+	kfree_sensitive(cert->pubkey.key_data);
+	kfree_sensitive(cert->signature.signature);
+	kfree_sensitive(cert->akid);
+	kfree_sensitive(cert->skid);
+	kfree_sensitive(cert->ocsp_url);
 	free_name_constraints(cert->name_constraints);
 
 	if (cert->san_dns) {
 		for (i = 0; i < cert->san_dns_count; i++)
-			kfree(cert->san_dns[i]);
-		kfree(cert->san_dns);
+			kfree_sensitive(cert->san_dns[i]);
+		kfree_sensitive(cert->san_dns);
 	}
 
 	if (cert->san_ip) {
 		for (i = 0; i < cert->san_ip_count; i++)
-			kfree(cert->san_ip[i]);
-		kfree(cert->san_ip);
-		kfree(cert->san_ip_len);
+			kfree_sensitive(cert->san_ip[i]);
+		kfree_sensitive(cert->san_ip);
+		kfree_sensitive(cert->san_ip_len);
 	}
 
 	if (cert->crl_dp) {
 		for (i = 0; i < cert->crl_dp_count; i++)
-			kfree(cert->crl_dp[i]);
-		kfree(cert->crl_dp);
+			kfree_sensitive(cert->crl_dp[i]);
+		kfree_sensitive(cert->crl_dp);
 	}
 
-	kfree(cert);
+	kfree_sensitive(cert);
 }
 EXPORT_SYMBOL_GPL(tquic_x509_cert_free);
 
@@ -1946,14 +1946,14 @@ void tquic_cert_verify_ctx_free(struct tquic_cert_verify_ctx *ctx)
 	if (!ctx)
 		return;
 
-	kfree(ctx->expected_hostname);
-	kfree(ctx->ocsp_stapling);
+	kfree_sensitive(ctx->expected_hostname);
+	kfree_sensitive(ctx->ocsp_stapling);
 	tquic_x509_chain_free(ctx->chain);
 
 	if (ctx->trusted_keyring && ctx->trusted_keyring != VERIFY_USE_SECONDARY_KEYRING)
 		key_put(ctx->trusted_keyring);
 
-	kfree(ctx);
+	kfree_sensitive(ctx);
 }
 EXPORT_SYMBOL_GPL(tquic_cert_verify_ctx_free);
 
@@ -1966,7 +1966,7 @@ int tquic_cert_verify_set_hostname(struct tquic_cert_verify_ctx *ctx,
 	if (len > TQUIC_MAX_HOSTNAME_LEN)
 		return -EINVAL;
 
-	kfree(ctx->expected_hostname);
+	kfree_sensitive(ctx->expected_hostname);
 
 	if (!hostname || len == 0) {
 		ctx->expected_hostname = NULL;
@@ -2635,7 +2635,7 @@ static int find_trust_anchor(struct tquic_cert_verify_ctx *ctx,
 	 * For root certificates, we look up by issuer (which equals subject)
 	 */
 	key = find_asymmetric_key(keyring, kid, NULL, NULL, false);
-	kfree(kid);
+	kfree_sensitive(kid);
 
 	if (IS_ERR(key)) {
 		/* Try custom TQUIC keyring */
@@ -2646,7 +2646,7 @@ static int find_trust_anchor(struct tquic_cert_verify_ctx *ctx,
 			if (!IS_ERR(kid)) {
 				key = find_asymmetric_key(tquic_trusted_keyring,
 							  kid, NULL, NULL, false);
-				kfree(kid);
+				kfree_sensitive(kid);
 			}
 		}
 		mutex_unlock(&keyring_mutex);
@@ -3373,7 +3373,7 @@ static ssize_t tquic_proc_trusted_cas_write(struct file *file,
 		return -ENOMEM;
 
 	if (copy_from_user(kbuf, buffer, count)) {
-		kfree(kbuf);
+		kfree_sensitive(kbuf);
 		return -EFAULT;
 	}
 	kbuf[count] = '\0';
@@ -3392,7 +3392,7 @@ static ssize_t tquic_proc_trusted_cas_write(struct file *file,
 		ret = -EINVAL;  /* Would need base64 decoding */
 	}
 
-	kfree(kbuf);
+	kfree_sensitive(kbuf);
 	return ret;
 }
 

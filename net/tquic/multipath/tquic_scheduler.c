@@ -2017,7 +2017,7 @@ void tquic_connection_free(struct tquic_connection *conn)
 
 	/* Free all paths */
 	list_for_each_entry_safe(path, tmp, &conn->paths, list) {
-		list_del(&path->list);
+		list_del_init(&path->list);
 		kfree(path->sched_data);
 		kfree(path);
 	}

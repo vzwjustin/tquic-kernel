@@ -825,7 +825,7 @@ struct tquic_crypto_state *tquic_crypto_init_versioned(const struct tquic_cid *d
 	crypto->aead_tx = crypto_alloc_aead("gcm(aes)", 0, 0);
 	if (IS_ERR(crypto->aead_tx)) {
 		tquic_err("failed to allocate TX AEAD\n");
-		kfree(crypto);
+		kfree_sensitive(crypto);
 		return NULL;
 	}
 
@@ -833,7 +833,7 @@ struct tquic_crypto_state *tquic_crypto_init_versioned(const struct tquic_cid *d
 	if (IS_ERR(crypto->aead_rx)) {
 		tquic_err("failed to allocate RX AEAD\n");
 		crypto_free_aead(crypto->aead_tx);
-		kfree(crypto);
+		kfree_sensitive(crypto);
 		return NULL;
 	}
 
@@ -842,7 +842,7 @@ struct tquic_crypto_state *tquic_crypto_init_versioned(const struct tquic_cid *d
 		tquic_err("failed to allocate HMAC\n");
 		crypto_free_aead(crypto->aead_rx);
 		crypto_free_aead(crypto->aead_tx);
-		kfree(crypto);
+		kfree_sensitive(crypto);
 		return NULL;
 	}
 
@@ -852,7 +852,7 @@ struct tquic_crypto_state *tquic_crypto_init_versioned(const struct tquic_cid *d
 		crypto_free_shash(crypto->hash);
 		crypto_free_aead(crypto->aead_rx);
 		crypto_free_aead(crypto->aead_tx);
-		kfree(crypto);
+		kfree_sensitive(crypto);
 		return NULL;
 	}
 
@@ -864,7 +864,7 @@ struct tquic_crypto_state *tquic_crypto_init_versioned(const struct tquic_cid *d
 		crypto_free_shash(crypto->hash);
 		crypto_free_aead(crypto->aead_rx);
 		crypto_free_aead(crypto->aead_tx);
-		kfree(crypto);
+		kfree_sensitive(crypto);
 		return NULL;
 	}
 
@@ -984,10 +984,10 @@ void tquic_crypto_cleanup(struct tquic_crypto_state *crypto)
 	/* Zeroize transcript (may contain sensitive handshake data) */
 	if (crypto->transcript) {
 		memzero_explicit(crypto->transcript, crypto->transcript_alloc);
-		kfree(crypto->transcript);
+		kfree_sensitive(crypto->transcript);
 	}
 
-	kfree(crypto);
+	kfree_sensitive(crypto);
 }
 EXPORT_SYMBOL_GPL(tquic_crypto_cleanup);
 

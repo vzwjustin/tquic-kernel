@@ -151,7 +151,7 @@ static int evict_entries(struct qpack_dynamic_table *table, u64 required_space)
 
 		table->size -= entry->size;
 		table->num_entries--;
-		list_del(&entry->list);
+		list_del_init(&entry->list);
 		qpack_dynamic_entry_put(entry);
 
 		available = table->capacity - table->size;
@@ -202,7 +202,7 @@ void qpack_dynamic_table_destroy(struct qpack_dynamic_table *table)
 
 	spin_lock_irqsave(&table->lock, flags);
 	list_for_each_entry_safe(entry, tmp, &table->entries, list) {
-		list_del(&entry->list);
+		list_del_init(&entry->list);
 		qpack_dynamic_entry_put(entry);
 	}
 	table->size = 0;
@@ -253,7 +253,7 @@ int qpack_dynamic_table_set_capacity(struct qpack_dynamic_table *table,
 
 			table->size -= entry->size;
 			table->num_entries--;
-			list_del(&entry->list);
+			list_del_init(&entry->list);
 			qpack_dynamic_entry_put(entry);
 		}
 	}

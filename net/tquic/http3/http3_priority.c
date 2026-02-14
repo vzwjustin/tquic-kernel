@@ -216,7 +216,7 @@ static void priority_stream_remove(struct http3_priority_state *state,
 				   struct http3_priority_stream *ps)
 {
 	/* Remove from urgency bucket */
-	list_del(&ps->bucket_node);
+	list_del_init(&ps->bucket_node);
 
 	/* Remove from lookup tree */
 	rb_erase(&ps->tree_node, &state->streams);
@@ -291,7 +291,7 @@ void http3_priority_state_destroy(struct tquic_connection *conn)
 
 		ps = rb_entry(node, struct http3_priority_stream, tree_node);
 		rb_erase(node, &state->streams);
-		list_del(&ps->bucket_node);
+		list_del_init(&ps->bucket_node);
 		kmem_cache_free(state->cache, ps);
 	}
 
@@ -478,7 +478,7 @@ int http3_priority_stream_set(struct tquic_connection *conn,
 
 	/* Move to new bucket if urgency changed */
 	if (old_urgency != new_urgency) {
-		list_del(&ps->bucket_node);
+		list_del_init(&ps->bucket_node);
 		list_add_tail(&ps->bucket_node, &state->buckets[new_urgency]);
 	}
 
@@ -639,7 +639,7 @@ int http3_priority_push_set(struct tquic_connection *conn,
 
 	/* Move to new bucket if urgency changed */
 	if (old_urgency != new_urgency) {
-		list_del(&pp->bucket_node);
+		list_del_init(&pp->bucket_node);
 		list_add_tail(&pp->bucket_node, &state->push_buckets[new_urgency]);
 	}
 
@@ -1545,7 +1545,7 @@ void tquic_h3_priority_tree_destroy(struct tquic_h3_priority_tree *tree)
 
 		ptn = rb_entry(node, struct priority_tree_node, tree_node);
 		rb_erase(node, &tree->stream_tree);
-		list_del(&ptn->bucket_node);
+		list_del_init(&ptn->bucket_node);
 		kfree(ptn);
 	}
 
@@ -1668,7 +1668,7 @@ void tquic_h3_priority_tree_remove(struct tquic_h3_priority_tree *tree,
 				tree->rr_cursor[urgency] = NULL;
 		}
 
-		list_del(&ptn->bucket_node);
+		list_del_init(&ptn->bucket_node);
 		rb_erase(&ptn->tree_node, &tree->stream_tree);
 		tree->stream_count--;
 
@@ -1723,7 +1723,7 @@ int tquic_h3_priority_tree_update(struct tquic_h3_priority_tree *tree,
 				tree->rr_cursor[old_urgency] = NULL;
 		}
 
-		list_del(&ptn->bucket_node);
+		list_del_init(&ptn->bucket_node);
 		list_add_tail(&ptn->bucket_node, &tree->buckets[new_urgency]);
 	}
 

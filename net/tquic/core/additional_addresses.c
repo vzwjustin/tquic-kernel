@@ -111,7 +111,7 @@ void tquic_additional_addr_cleanup(struct tquic_additional_addresses *addrs)
 
 	spin_lock_bh(&addrs->lock);
 	list_for_each_entry_safe(entry, tmp, &addrs->addresses, list) {
-		list_del(&entry->list);
+		list_del_init(&entry->list);
 		kfree(entry);
 	}
 	addrs->count = 0;
@@ -281,7 +281,7 @@ int tquic_additional_addr_remove(struct tquic_additional_addresses *addrs,
 	spin_lock_bh(&addrs->lock);
 	list_for_each_entry_safe(entry, tmp, &addrs->addresses, list) {
 		if (sockaddr_storage_equal(&entry->addr, addr)) {
-			list_del(&entry->list);
+			list_del_init(&entry->list);
 			addrs->count--;
 			found = true;
 			break;
@@ -315,7 +315,7 @@ int tquic_additional_addr_remove_by_cid(struct tquic_additional_addresses *addrs
 	spin_lock_bh(&addrs->lock);
 	list_for_each_entry_safe(entry, tmp, &addrs->addresses, list) {
 		if (cid_equal(&entry->cid, cid)) {
-			list_del(&entry->list);
+			list_del_init(&entry->list);
 			addrs->count--;
 			found = true;
 			break;

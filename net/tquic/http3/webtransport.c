@@ -118,7 +118,7 @@ void webtransport_context_destroy(struct webtransport_context *ctx)
 	spin_lock_irqsave(&ctx->lock, flags);
 
 	list_for_each_entry_safe(session, tmp, &ctx->session_list, list) {
-		list_del(&session->list);
+		list_del_init(&session->list);
 		rb_erase(&session->tree_node, &ctx->sessions);
 		ctx->session_count--;
 		list_add(&session->list, &close_list);
@@ -128,7 +128,7 @@ void webtransport_context_destroy(struct webtransport_context *ctx)
 
 	/* Now close sessions without holding the spinlock */
 	list_for_each_entry_safe(session, tmp, &close_list, list) {
-		list_del(&session->list);
+		list_del_init(&session->list);
 		webtransport_session_put(session);
 	}
 
@@ -851,7 +851,7 @@ void wt_datagram_queue_destroy(struct webtransport_datagram_queue *queue)
 
 	spin_lock_irqsave(&queue->lock, flags);
 	list_for_each_entry_safe(dgram, tmp, &queue->datagrams, list) {
-		list_del(&dgram->list);
+		list_del_init(&dgram->list);
 		kfree(dgram->data);
 		kfree(dgram);
 	}
@@ -945,7 +945,7 @@ ssize_t wt_datagram_queue_pop(struct webtransport_datagram_queue *queue,
 
 	dgram = list_first_entry(&queue->datagrams,
 				 struct webtransport_datagram, list);
-	list_del(&dgram->list);
+	list_del_init(&dgram->list);
 	queue->count--;
 	queue->total_bytes -= dgram->len;
 

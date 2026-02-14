@@ -372,13 +372,13 @@ void tquic_cid_pool_destroy(struct tquic_connection *conn)
 		if (cid_table_initialized && entry->state == CID_STATE_ACTIVE)
 			rhashtable_remove_fast(&tquic_cid_table, &entry->node,
 					       cid_rht_params);
-		list_del(&entry->list);
+		list_del_init(&entry->list);
 		kfree_rcu(entry, rcu);
 	}
 
 	/* Free remote CIDs (not in global hash, safe to kfree directly) */
 	list_for_each_entry_safe(entry, tmp, &pool->remote_cids, list) {
-		list_del(&entry->list);
+		list_del_init(&entry->list);
 		kfree(entry);
 	}
 

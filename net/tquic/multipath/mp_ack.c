@@ -491,14 +491,14 @@ void tquic_mp_ack_state_destroy(struct tquic_mp_path_ack_state *state)
 	for (i = 0; i < TQUIC_PN_SPACE_COUNT; i++) {
 		list_for_each_entry_safe(pkt, pkt_tmp,
 					 &state->sent_packets_list[i], list) {
-			list_del(&pkt->list);
+			list_del_init(&pkt->list);
 			mp_sent_packet_free(pkt);
 		}
 
 		/* Free ACK ranges */
 		list_for_each_entry_safe(range, range_tmp,
 					 &state->ack_ranges[i], list) {
-			list_del(&range->list);
+			list_del_init(&range->list);
 			mp_ack_range_free(range);
 		}
 	}
@@ -556,7 +556,7 @@ int tquic_mp_record_received(struct tquic_mp_path_ack_state *state,
 			/* Try to merge with previous range */
 			if (prev_range && range->end + 1 >= prev_range->start) {
 				prev_range->start = range->start;
-				list_del(&range->list);
+				list_del_init(&range->list);
 				mp_ack_range_free(range);
 				state->num_ack_ranges[pn_space]--;
 			}
@@ -600,7 +600,7 @@ int tquic_mp_record_received(struct tquic_mp_path_ack_state *state,
 	while (state->num_ack_ranges[pn_space] > TQUIC_MP_MAX_ACK_RANGES) {
 		range = list_last_entry(&state->ack_ranges[pn_space],
 					struct tquic_mp_ack_range_entry, list);
-		list_del(&range->list);
+		list_del_init(&range->list);
 		mp_ack_range_free(range);
 		state->num_ack_ranges[pn_space]--;
 	}
@@ -962,13 +962,13 @@ int tquic_mp_on_ack_received(struct tquic_mp_path_ack_state *state,
 
 	/* Free acknowledged packets */
 	list_for_each_entry_safe(pkt, tmp, &newly_acked, list) {
-		list_del(&pkt->list);
+		list_del_init(&pkt->list);
 		mp_sent_packet_free(pkt);
 	}
 
 	/* Free lost packets */
 	list_for_each_entry_safe(pkt, tmp, &lost_packets, list) {
-		list_del(&pkt->list);
+		list_del_init(&pkt->list);
 		mp_sent_packet_free(pkt);
 	}
 

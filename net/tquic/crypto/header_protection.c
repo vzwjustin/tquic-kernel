@@ -1023,7 +1023,7 @@ void tquic_hp_ctx_free(struct tquic_hp_ctx *ctx)
 	tquic_hp_free_key(&ctx->next_read_key);
 	tquic_hp_free_key(&ctx->next_write_key);
 
-	kfree(ctx);
+	kfree_sensitive(ctx);
 }
 EXPORT_SYMBOL_GPL(tquic_hp_ctx_free);
 

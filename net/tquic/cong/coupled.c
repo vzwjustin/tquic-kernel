@@ -873,7 +873,7 @@ static void coupled_remove_subflow(struct coupled_state *state,
 				   struct coupled_subflow *sf)
 {
 	spin_lock(&state->lock);
-	list_del(&sf->list);
+	list_del_init(&sf->list);
 	state->num_subflows--;
 	spin_unlock(&state->lock);
 
@@ -1474,7 +1474,7 @@ void tquic_coupled_destroy(struct tquic_coupled_state *cstate)
 	/* Remove any remaining subflows */
 	spin_lock(&state->lock);
 	list_for_each_entry_safe(sf, tmp, &state->subflows, list) {
-		list_del(&sf->list);
+		list_del_init(&sf->list);
 		kfree(sf);
 	}
 	spin_unlock(&state->lock);

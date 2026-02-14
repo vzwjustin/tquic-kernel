@@ -400,7 +400,7 @@ static void ticket_store_remove_locked(struct tquic_ticket_store *store,
 				       struct tquic_zero_rtt_ticket *ticket)
 {
 	rb_erase(&ticket->node, &store->tickets);
-	list_del(&ticket->list);
+	list_del_init(&ticket->list);
 	store->count--;
 }
 
@@ -412,9 +412,9 @@ static void ticket_free(struct tquic_zero_rtt_ticket *ticket)
 	if (!ticket)
 		return;
 
-	kfree(ticket->ticket);
+	kfree_sensitive(ticket->ticket);
 	memzero_explicit(&ticket->plaintext, sizeof(ticket->plaintext));
-	kfree(ticket);
+	kfree_sensitive(ticket);
 }
 
 /*
@@ -478,7 +478,7 @@ int tquic_zero_rtt_store_ticket(const char *server_name, u8 server_name_len,
 
 	ticket->ticket = kmalloc(ticket_len, GFP_KERNEL);
 	if (!ticket->ticket) {
-		kfree(ticket);
+		kfree_sensitive(ticket);
 		return -ENOMEM;
 	}
 
@@ -511,8 +511,8 @@ int tquic_zero_rtt_store_ticket(const char *server_name, u8 server_name_len,
 	spin_unlock_bh(&global_ticket_store.lock);
 
 	if (ret < 0) {
-		kfree(ticket->ticket);
-		kfree(ticket);
+		kfree_sensitive(ticket->ticket);
+		kfree_sensitive(ticket);
 		return ret;
 	}
 
@@ -545,7 +545,7 @@ struct tquic_zero_rtt_ticket *tquic_zero_rtt_lookup_ticket(
 		}
 
 		/* Move to front of LRU */
-		list_del(&ticket->list);
+		list_del_init(&ticket->list);
 		list_add(&ticket->list, &global_ticket_store.lru_list);
 
 		/* Take reference */
@@ -1067,7 +1067,7 @@ int tquic_session_ticket_encode(const struct tquic_session_ticket_plaintext *pla
 
 	ret = crypto_aead_encrypt(req);
 	if (ret) {
-		kfree(payload);
+		kfree_sensitive(payload);
 		aead_request_free(req);
 		crypto_free_aead(aead);
 		return ret;
@@ -1077,7 +1077,7 @@ int tquic_session_ticket_encode(const struct tquic_session_ticket_plaintext *pla
 	memcpy(out + header_len, payload, payload_len + TQUIC_SESSION_TICKET_TAG_LEN);
 	*out_len = header_len + payload_len + TQUIC_SESSION_TICKET_TAG_LEN;
 
-	kfree(payload);
+	kfree_sensitive(payload);
 	aead_request_free(req);
 	crypto_free_aead(aead);
 
@@ -1154,7 +1154,7 @@ int tquic_session_ticket_decode(const u8 *ticket, u32 ticket_len,
 
 	ret = crypto_aead_decrypt(req);
 	if (ret) {
-		kfree(payload);
+		kfree_sensitive(payload);
 		aead_request_free(req);
 		crypto_free_aead(aead);
 		return ret;
@@ -1249,7 +1249,7 @@ int tquic_session_ticket_decode(const u8 *ticket, u32 ticket_len,
 	ret = 0;
 
 out_free:
-	kfree(payload);
+	kfree_sensitive(payload);
 	aead_request_free(req);
 	crypto_free_aead(aead);
 	return ret;
@@ -1321,7 +1321,7 @@ void tquic_zero_rtt_cleanup(struct tquic_connection *conn)
 	if (state->ticket)
 		tquic_zero_rtt_put_ticket(state->ticket);
 
-	kfree(state);
+	kfree_sensitive(state);
 	conn->zero_rtt_state = NULL;
 }
 EXPORT_SYMBOL_GPL(tquic_zero_rtt_cleanup);

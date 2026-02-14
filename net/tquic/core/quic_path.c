@@ -315,10 +315,10 @@ void tquic_path_destroy(struct tquic_path *path)
 
 	/* Remove from list if linked */
 	if (!list_empty(&path->list))
-		list_del(&path->list);
+		list_del_init(&path->list);
 
 	if (!list_empty(&path->pm_list))
-		list_del(&path->pm_list);
+		list_del_init(&path->pm_list);
 
 	/* Release PMTUD state if allocated */
 	if (path->pmtud_state)

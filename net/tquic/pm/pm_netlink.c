@@ -431,6 +431,7 @@ static int tquic_pm_nl_get_path(struct sk_buff *skb, struct genl_info *info)
 	/* Build response */
 	msg = nlmsg_new(NLMSG_DEFAULT_SIZE, GFP_KERNEL);
 	if (!msg) {
+		tquic_path_put(path);
 		tquic_conn_put(conn);
 		return -ENOMEM;
 	}
@@ -455,6 +456,7 @@ static int tquic_pm_nl_get_path(struct sk_buff *skb, struct genl_info *info)
 	}
 
 	genlmsg_end(msg, hdr);
+	tquic_path_put(path);
 	tquic_conn_put(conn);
 	return genlmsg_reply(msg, info);
 
@@ -462,6 +464,7 @@ cancel_msg:
 	genlmsg_cancel(msg, hdr);
 free_msg:
 	nlmsg_free(msg);
+	tquic_path_put(path);
 	tquic_conn_put(conn);
 	return err;
 }
@@ -519,6 +522,7 @@ static int tquic_pm_nl_set_flags(struct sk_buff *skb, struct genl_info *info)
 		WRITE_ONCE(path->priority,
 			   nla_get_u8(info->attrs[TQUIC_PM_ATTR_PRIORITY]));
 
+	tquic_path_put(path);
 	tquic_conn_put(conn);
 	return 0;
 }

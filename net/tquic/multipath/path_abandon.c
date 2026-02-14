@@ -348,7 +348,7 @@ void tquic_mp_abandon_state_destroy(struct tquic_mp_path_abandon_state *state)
 
 	/* Free CID retire entries */
 	list_for_each_entry_safe(entry, tmp, &state->cids_to_retire, list) {
-		list_del(&entry->list);
+		list_del_init(&entry->list);
 		kmem_cache_free(mp_cid_retire_cache, entry);
 	}
 
@@ -726,21 +726,21 @@ tquic_mp_cid_state_destroy(struct tquic_mp_cid_state *state)
 
 	/* Free all remote CIDs */
 	list_for_each_entry_safe(rcid, rtmp, &state->remote_cids, list) {
-		list_del(&rcid->list);
+		list_del_init(&rcid->list);
 		if (mp_remote_cid_cache)
 			kmem_cache_free(mp_remote_cid_cache, rcid);
 	}
 
 	/* Free all local CIDs */
 	list_for_each_entry_safe(lcid, ltmp, &state->local_cids, list) {
-		list_del(&lcid->list);
+		list_del_init(&lcid->list);
 		if (mp_local_cid_cache)
 			kmem_cache_free(mp_local_cid_cache, lcid);
 	}
 
 	/* Free all pending retirements */
 	list_for_each_entry_safe(pret, ptmp, &state->pending_retirements, list) {
-		list_del(&pret->list);
+		list_del_init(&pret->list);
 		if (mp_pending_retire_cache)
 			kmem_cache_free(mp_pending_retire_cache, pret);
 	}

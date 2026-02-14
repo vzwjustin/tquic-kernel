@@ -840,7 +840,7 @@ void h3_connection_destroy(struct h3_connection *h3conn)
 	/* Now close streams without holding the spinlock */
 	while (!list_empty(&close_list)) {
 		h3s = list_first_entry(&close_list, struct h3_stream, list);
-		list_del(&h3s->list);
+		list_del_init(&h3s->list);
 
 		if (h3s->base)
 			tquic_stream_close(h3s->base);

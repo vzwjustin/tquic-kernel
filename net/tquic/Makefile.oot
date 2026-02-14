@@ -88,7 +88,8 @@ tquic_pm-y := \
 # Packet Scheduler
 tquic_sched-y := \
 	sched/scheduler.o \
-	sched/reorder.o
+	sched/deadline_scheduler.o \
+	sched/deadline_aware.o
 
 # Congestion Control algorithms
 tquic_cubic-y := cong/cubic.o

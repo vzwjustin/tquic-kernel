@@ -436,7 +436,7 @@ int tquic_stream_set_extensible_priority(struct tquic_stream *stream,
 	 * No need to move if only incremental flag changed.
 	 */
 	if (was_scheduled && old_urgency != urgency) {
-		list_del(&ext->sched_node);
+		list_del_init(&ext->sched_node);
 		list_add_tail(&ext->sched_node, &state->queues[urgency]);
 	}
 

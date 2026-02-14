@@ -391,19 +391,19 @@ static void tquic_connect_ip_tunnel_free(struct tquic_connect_ip_tunnel *tunnel)
 
 	/* Free local addresses */
 	list_for_each_entry_safe(addr, addr_tmp, &tunnel->local_addrs, list) {
-		list_del(&addr->list);
+		list_del_init(&addr->list);
 		kfree(addr);
 	}
 
 	/* Free remote addresses */
 	list_for_each_entry_safe(addr, addr_tmp, &tunnel->remote_addrs, list) {
-		list_del(&addr->list);
+		list_del_init(&addr->list);
 		kfree(addr);
 	}
 
 	/* Free routes */
 	list_for_each_entry_safe(route, route_tmp, &tunnel->routes, list) {
-		list_del(&route->list);
+		list_del_init(&route->list);
 		kfree(route);
 	}
 
@@ -1681,7 +1681,7 @@ void tquic_connect_ip_destroy_iface(struct tquic_connect_ip_iface *iface)
 
 	/* Free route entries */
 	list_for_each_entry_safe(route, tmp, &iface->routes, list) {
-		list_del(&route->list);
+		list_del_init(&route->list);
 		kfree(route);
 	}
 
@@ -1866,7 +1866,7 @@ int tquic_connect_ip_del_route(struct tquic_connect_ip_iface *iface,
 			}
 
 			if (match) {
-				list_del(&tracked->list);
+				list_del_init(&tracked->list);
 				kfree(tracked);
 				iface->num_routes--;
 				break;

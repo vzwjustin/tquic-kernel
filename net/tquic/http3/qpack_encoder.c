@@ -91,13 +91,13 @@ void qpack_encoder_destroy(struct qpack_encoder *enc)
 
 	/* Free blocked streams */
 	list_for_each_entry_safe(blocked, tmp, &enc->blocked_streams, list) {
-		list_del(&blocked->list);
+		list_del_init(&blocked->list);
 		kfree(blocked);
 	}
 
 	/* Free stream state tracking entries */
 	list_for_each_entry_safe(state, state_tmp, &enc->stream_states, list) {
-		list_del(&state->list);
+		list_del_init(&state->list);
 		kfree(state);
 	}
 
@@ -586,7 +586,7 @@ static u64 qpack_encoder_remove_stream_state(struct qpack_encoder *enc,
 	state = qpack_encoder_find_stream_state(enc, stream_id);
 	if (state) {
 		required_insert_count = state->required_insert_count;
-		list_del(&state->list);
+		list_del_init(&state->list);
 		kfree(state);
 	}
 	return required_insert_count;
@@ -675,7 +675,7 @@ int qpack_encoder_process_decoder_stream(struct qpack_encoder *enc,
 			list_for_each_entry_safe(blocked, tmp,
 						 &enc->blocked_streams, list) {
 				if (blocked->stream_id == value) {
-					list_del(&blocked->list);
+					list_del_init(&blocked->list);
 					kfree(blocked->data);
 					kfree(blocked);
 					enc->num_blocked--;

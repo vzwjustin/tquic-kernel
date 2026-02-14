@@ -151,7 +151,7 @@ void tquic_addr_discovery_cleanup(struct tquic_addr_discovery_state *state)
 
 	/* Free pending observations */
 	list_for_each_entry_safe(obs, tmp, &state->pending_observations, list) {
-		list_del(&obs->list);
+		list_del_init(&obs->list);
 		kfree(obs);
 	}
 	state->pending_count = 0;
