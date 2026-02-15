@@ -129,12 +129,15 @@ jobs:
           find net/quic/ -name '*.o' | head -20
           echo "..."
           echo "Total TQUIC objects: $(find net/quic/ -name '*.o' | wc -l)"
-          # Verify the main module object exists
-          if [ ! -f net/quic/quic.o ]; then
-            echo "ERROR: quic.o not found!"
+          # CONFIG_IP_QUIC=y (built-in) produces built-in.a, not quic.o.
+          # CONFIG_IP_QUIC=m (module) produces quic.o / quic.ko.
+          # Check for either to support both configurations.
+          if [ -f net/quic/quic.o ] || [ -f net/quic/built-in.a ]; then
+            echo "TQUIC module built successfully."
+          else
+            echo "ERROR: Neither quic.o nor built-in.a found!"
             exit 1
           fi
-          echo "TQUIC module built successfully."
 
       - name: Build .deb packages
         if: inputs.build_debs != 'false'
