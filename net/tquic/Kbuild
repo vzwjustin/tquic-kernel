@@ -1,0 +1,170 @@
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# Kbuild for TQUIC WAN Bonding subsystem (out-of-tree build)
+#
+# When building out-of-tree, CONFIG_TQUIC* variables are not set,
+# so we unconditionally build all modules.
+#
+# Note: Out-of-tree builds consolidate tightly-coupled modules into
+# tquic.ko to avoid circular symbol dependencies. Files with
+# module_init/exit are wrapped with #ifndef TQUIC_OUT_OF_TREE.
+#
+
+ifneq ($(KBUILD_EXTMOD),)
+  # External module build: kbuild prefers `Kbuild` over `Makefile`, so keep
+  # a dedicated external-module recipe behind the `KBUILD_EXTMOD` guard.
+
+  # Include paths for headers:
+  #   $(src)/compat        - compat shim headers (searched AFTER kernel's LINUXINCLUDE
+  #                          but BEFORE the project include/ tree; provides fallback
+  #                          headers for APIs that moved between kernel versions)
+  #   $(src)               - local headers (protocol.h, napi.h, etc.)
+  #   $(src)/../../include - project include/ tree (net/tquic.h, uapi/linux/tquic.h)
+  #   $(src)/../..         - project root (resolves <net/tquic/crypto/...> from source tree)
+  #   $(src)/diag          - diagnostic/tracing headers
+  ccflags-y += -I$(src)/compat -I$(src) -I$(src)/../../include -I$(src)/../.. -I$(src)/diag
+  ccflags-y += -DTQUIC_OUT_OF_TREE
+  # Suppress warnings that are expected for out-of-tree consolidated modules:
+  #   -Wno-missing-prototypes : many internal functions lack header prototypes
+  #                             (safe; these are internal to the module)
+  #   -Wno-unused-function    : some functions are only used on newer kernels
+  #   -Wno-unused-variable    : similarly, some variables are version-dependent
+  #   -Wframe-larger-than=2048: consolidated module has a few large stack frames
+  #                             (connection setup, crypto) that exceed the 1024 default
+  ccflags-y += -Wno-missing-prototypes -Wno-missing-declarations
+  ccflags-y += -Wno-unused-function -Wno-unused-variable
+  ccflags-y += -Wframe-larger-than=2048
+
+  # For out-of-tree builds, build one main module plus CC algorithms
+  obj-m += tquic.o
+
+# Main TQUIC module - consolidated for out-of-tree build
+tquic-y := \
+	tquic_main.o \
+	tquic_proto.o \
+	tquic_socket.o \
+	tquic_stream.o \
+	tquic_handshake.o \
+	tquic_netlink.o \
+	tquic_sysctl.o \
+	tquic_udp.o \
+	tquic_output.o \
+	tquic_input.o \
+	tquic_offload.o \
+	quic_offload.o \
+	tquic_timer.o \
+	tquic_cid.o \
+	tquic_migration.o \
+	tquic_pmtud.o \
+	tquic_diag.o \
+	tquic_mib.o \
+	tquic_proc.o \
+	tquic_server.o \
+	tquic_zerocopy.o \
+	tquic_retry.o \
+	tquic_token.o \
+	tquic_stateless_reset.o \
+	tquic_forward.o \
+	tquic_preferred_addr.o \
+	tquic_qos.o \
+	tquic_tunnel.o \
+	tquic_ratelimit.o \
+	rate_limit.o \
+	grease.o \
+	tquic_ack_frequency.o \
+	security_hardening.o \
+	napi.o \
+	cong/tquic_cong.o \
+	cong/cong_data.o \
+	cong/persistent_cong.o \
+	cong/coupled.o \
+	cong/bbrv2.o \
+	cong/bbrv3.o \
+	cong/prague.o \
+	cong/cubic.o \
+	cong/bbr.o \
+	cong/copa.o \
+	cong/westwood.o \
+	cong/l4s.o \
+	cong/accecn.o \
+	core/varint.o \
+	core/connection.o \
+	core/stream.o \
+	core/frame.o \
+	core/packet.o \
+	core/ack_frequency.o \
+	core/flow_control.o \
+	core/transport_params.o \
+	core/address_discovery.o \
+	core/receive_timestamps.o \
+	core/reliable_reset.o \
+	core/one_way_delay.o \
+	core/additional_addresses.o \
+	core/quic_protocol.o \
+	core/quic_connection.o \
+	core/quic_crypto.o \
+	core/quic_packet.o \
+	core/quic_output.o \
+	core/quic_cong.o \
+	core/quic_ecn.o \
+	core/quic_flow.o \
+	core/quic_loss.o \
+	core/quic_path.o \
+	core/quic_ack.o \
+	core/quic_ack_frequency.o \
+	core/quic_key_update.o \
+	core/mp_frame.o \
+	core/packet_coalesce_fix.o \
+	core/early_data.o \
+	core/priority.o \
+	bond/bonding.o \
+	bond/tquic_bonding.o \
+	bond/tquic_failover.o \
+	bond/tquic_reorder.o \
+	bond/cong_coupled.o \
+	pm/pm_types.o \
+	pm/pm_kernel.o \
+	pm/pm_netlink.o \
+	pm/path_manager.o \
+	pm/path_validation.o \
+	pm/nat_keepalive.o \
+	pm/nat_lifecycle.o \
+	pm/pm_userspace.o \
+	pm/pm_module.o \
+	sched/scheduler.o \
+	sched/deadline_scheduler.o \
+	sched/deadline_aware.o \
+	multipath/mp_frame.o \
+	multipath/mp_ack.o \
+	multipath/mp_deadline.o \
+	multipath/path_abandon.o \
+	multipath/mp_sched_registry.o \
+	multipath/multipath_module.o \
+	multipath/sched_minrtt.o \
+	multipath/sched_ecf.o \
+	multipath/sched_blest.o \
+	multipath/sched_weighted.o \
+	multipath/sched_aggregate.o \
+	multipath/tquic_scheduler.o \
+	crypto/cert_verify.o \
+	crypto/tls.o \
+	crypto/header_protection.o \
+	crypto/key_update.o \
+	crypto/extended_key_update.o \
+	crypto/zero_rtt.o \
+	crypto/handshake.o \
+	crypto/crypto_module.o \
+	crypto/hw_offload.o \
+	tquic_debug.o
+
+  # io_uring integration requires kernel-internal io_uring headers;
+  # only available when building against a kernel with CONFIG_TQUIC_IO_URING.
+  ifdef CONFIG_TQUIC_IO_URING
+    tquic-y += io_uring.o
+  endif
+
+else
+  # In-tree kernel build: net/quic/Makefile already builds quic.ko
+  # which includes all tquic source files via the net/quic/tquic symlink.
+  # Nothing to build here to avoid duplicate symbol exports.
+endif

@@ -1,0 +1,132 @@
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# Out-of-tree Makefile for TQUIC WAN Bonding module
+#
+# Usage:
+#   make -f Makefile.oot        # Build the module
+#   make -f Makefile.oot clean  # Clean build artifacts
+#
+
+KVERSION ?= $(shell uname -r)
+KDIR ?= /lib/modules/$(KVERSION)/build
+
+# All modules to build
+obj-m += tquic.o
+obj-m += tquic_core.o
+obj-m += tquic_bond.o
+obj-m += tquic_pm.o
+obj-m += tquic_sched.o
+obj-m += tquic_cubic.o
+obj-m += tquic_bbr.o
+obj-m += tquic_copa.o
+obj-m += tquic_westwood.o
+obj-m += tquic_coupled.o
+obj-m += tquic_bbrv2.o
+obj-m += tquic_prague.o
+obj-m += tquic_l4s.o
+obj-m += tquic_accecn.o
+obj-m += tquic_multipath.o
+obj-m += tquic_crypto.o
+
+# Main TQUIC module
+tquic-y := \
+	tquic_main.o \
+	tquic_proto.o \
+	tquic_socket.o \
+	tquic_stream.o \
+	tquic_handshake.o \
+	tquic_netlink.o \
+	tquic_sysctl.o \
+	tquic_udp.o \
+	tquic_output.o \
+	tquic_input.o \
+	tquic_offload.o \
+	tquic_timer.o \
+	tquic_cid.o \
+	tquic_migration.o \
+	tquic_pmtud.o \
+	tquic_diag.o \
+	tquic_mib.o \
+	tquic_proc.o \
+	tquic_server.o \
+	tquic_zerocopy.o \
+	tquic_retry.o \
+	tquic_token.o \
+	tquic_stateless_reset.o \
+	tquic_forward.o \
+	tquic_preferred_addr.o \
+	tquic_qos.o \
+	tquic_tunnel.o \
+	grease.o \
+	tquic_ack_frequency.o \
+	cong/tquic_cong.o \
+	cong/persistent_cong.o
+
+# Core protocol components
+tquic_core-y := \
+	core/varint.o \
+	core/connection.o \
+	core/stream.o \
+	core/frame.o \
+	core/packet.o \
+	core/ack.o \
+	core/ack_frequency.o \
+	core/flow_control.o \
+	core/transport_params.o \
+	core/cid.o
+
+# WAN Bonding components
+tquic_bond-y := \
+	bond/bonding.o
+
+# Path Manager
+tquic_pm-y := \
+	pm/pm_types.o \
+	pm/pm_kernel.o \
+	pm/path_manager.o
+
+# Packet Scheduler
+tquic_sched-y := \
+	sched/scheduler.o \
+	sched/deadline_scheduler.o \
+	sched/deadline_aware.o
+
+# Congestion Control algorithms
+tquic_cubic-y := cong/cubic.o
+tquic_bbr-y := cong/bbr.o
+tquic_copa-y := cong/copa.o
+tquic_westwood-y := cong/westwood.o
+tquic_coupled-y := cong/coupled.o
+tquic_bbrv2-y := cong/bbrv2.o
+tquic_prague-y := cong/prague.o
+tquic_l4s-y := cong/l4s.o
+tquic_accecn-y := cong/accecn.o
+
+# Multipath extension (RFC 9369)
+tquic_multipath-y := \
+	multipath/mp_frame.o \
+	multipath/mp_ack.o \
+	multipath/path_abandon.o
+
+# Crypto support
+tquic_crypto-y := \
+	crypto/tls.o \
+	crypto/header_protection.o \
+	crypto/key_update.o \
+	crypto/zero_rtt.o
+
+# Extra CFLAGS for out-of-tree build
+ccflags-y += -I$(src) -I$(src)/include -DTQUIC_OUT_OF_TREE
+
+PWD := $(shell pwd)
+
+all:
+	$(MAKE) -C $(KDIR) M=$(PWD) modules
+
+clean:
+	$(MAKE) -C $(KDIR) M=$(PWD) clean
+
+install:
+	$(MAKE) -C $(KDIR) M=$(PWD) modules_install
+
+.PHONY: all clean install

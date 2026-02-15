@@ -1,0 +1,1329 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/*
+ * TQUIC: Zero-Copy I/O Support
+ *
+ * Copyright (c) 2026 Justin Adams <spotty118@gmail.com>
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
+ *
+ * Implements high-performance zero-copy I/O paths for TQUIC:
+ *   - sendfile/splice support via page references
+ *   - MSG_ZEROCOPY for sendmsg with completion notification
+ *   - Receive-side direct page placement
+ *   - Integration with QUIC stream framing
+ *
+ * Reference: TCP zerocopy implementation (net/ipv4/tcp.c)
+ */
+
+#include <linux/version.h>
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 7, 0)
+
+#include <linux/module.h>
+#include <linux/kernel.h>
+#include <linux/slab.h>
+#include <linux/skbuff.h>
+#include <linux/socket.h>
+#include <linux/file.h>
+#include <linux/splice.h>
+#include <linux/pipe_fs_i.h>
+#include <linux/highmem.h>
+#include <linux/pagemap.h>
+#include <linux/uio.h>
+#include <linux/errqueue.h>
+#include <net/sock.h>
+#include <net/tquic.h>
+
+#include "tquic_compat.h"
+#include "tquic_debug.h"
+#include "protocol.h"
+
+/*
+ * =============================================================================
+ * Zero-Copy Tracking State
+ * =============================================================================
+ */
+
+/* Maximum outstanding zerocopy buffers per connection */
+#define TQUIC_ZC_MAX_OUTSTANDING	256
+
+/* Zerocopy buffer tracking entry */
+struct tquic_zc_entry {
+	struct list_head	list;
+	u32			id;		/* Notification ID */
+	struct ubuf_info	*uarg;		/* User buffer info */
+	struct page		**pages;	/* Page references */
+	unsigned int		nr_pages;	/* Number of pages */
+	u64			stream_id;	/* Associated stream */
+	u64			offset;		/* Stream offset */
+	size_t			len;		/* Data length */
+	refcount_t		refcnt;		/* Reference count */
+	bool			completed;	/* Transmission complete */
+};
+
+/* Zerocopy state for connection */
+struct tquic_zc_state {
+	spinlock_t		lock;
+	struct list_head	pending;	/* Pending zerocopy entries */
+	struct list_head	completed;	/* Completed entries awaiting notification */
+	u32			next_id;	/* Next notification ID */
+	u32			outstanding;	/* Outstanding zerocopy count */
+	wait_queue_head_t	wait;		/* Wait for completion */
+	bool			enabled;	/* Zerocopy enabled */
+};
+
+/* Forward declaration */
+static void tquic_zc_entry_free(struct tquic_zc_entry *entry);
+
+/*
+ * =============================================================================
+ * Zerocopy State Management
+ * =============================================================================
+ */
+
+/**
+ * tquic_zc_state_alloc - Allocate zerocopy state for connection
+ * @conn: Connection to add zerocopy state to
+ *
+ * Returns: 0 on success, negative errno on failure
+ */
+int tquic_zc_state_alloc(struct tquic_connection *conn)
+{
+	struct tquic_zc_state *zc;
+
+	if (!conn)
+		return -EINVAL;
+
+	zc = kzalloc(sizeof(*zc), GFP_KERNEL);
+	if (!zc)
+		return -ENOMEM;
+
+	spin_lock_init(&zc->lock);
+	INIT_LIST_HEAD(&zc->pending);
+	INIT_LIST_HEAD(&zc->completed);
+	init_waitqueue_head(&zc->wait);
+	zc->next_id = 0;
+	zc->outstanding = 0;
+	zc->enabled = false;
+
+	/* Store state in connection's dedicated field */
+	conn->zc_state = zc;
+
+	tquic_dbg("zero-copy state allocated\n");
+	return 0;
+}
+EXPORT_SYMBOL_GPL(tquic_zc_state_alloc);
+
+/**
+ * tquic_zc_state_free - Free zerocopy state
+ * @conn: Connection
+ */
+void tquic_zc_state_free(struct tquic_connection *conn)
+{
+	struct tquic_zc_state *zc;
+	struct tquic_zc_entry *entry, *tmp;
+
+	if (!conn)
+		return;
+
+	zc = conn->zc_state;
+	if (!zc)
+		return;
+
+	spin_lock_bh(&zc->lock);
+
+	/* Free all pending entries */
+	list_for_each_entry_safe(entry, tmp, &zc->pending, list) {
+		list_del_init(&entry->list);
+		tquic_zc_entry_free(entry);
+	}
+
+	/* Free all completed entries */
+	list_for_each_entry_safe(entry, tmp, &zc->completed, list) {
+		list_del_init(&entry->list);
+		tquic_zc_entry_free(entry);
+	}
+
+	spin_unlock_bh(&zc->lock);
+
+	kfree(zc);
+	conn->zc_state = NULL;
+
+	tquic_dbg("zero-copy state freed\n");
+}
+EXPORT_SYMBOL_GPL(tquic_zc_state_free);
+
+/*
+ * =============================================================================
+ * Zero-Copy Entry Management
+ * =============================================================================
+ */
+
+static struct tquic_zc_entry __maybe_unused *tquic_zc_entry_alloc(gfp_t gfp)
+{
+	struct tquic_zc_entry *entry;
+
+	entry = kzalloc(sizeof(*entry), gfp);
+	if (!entry)
+		return NULL;
+
+	INIT_LIST_HEAD(&entry->list);
+	refcount_set(&entry->refcnt, 1);
+	entry->completed = false;
+
+	return entry;
+}
+
+static void tquic_zc_entry_free(struct tquic_zc_entry *entry)
+{
+	unsigned int i;
+
+	if (!entry)
+		return;
+
+	/* Release page references */
+	if (entry->pages) {
+		for (i = 0; i < entry->nr_pages; i++) {
+			if (entry->pages[i])
+				put_page(entry->pages[i]);
+		}
+		kfree(entry->pages);
+	}
+
+	/* Release user buffer info */
+	if (entry->uarg)
+		net_zcopy_put(entry->uarg);
+
+	kfree(entry);
+}
+
+static void __maybe_unused tquic_zc_entry_get(struct tquic_zc_entry *entry)
+{
+	refcount_inc(&entry->refcnt);
+}
+
+static void __maybe_unused tquic_zc_entry_put(struct tquic_zc_entry *entry)
+{
+	if (refcount_dec_and_test(&entry->refcnt))
+		tquic_zc_entry_free(entry);
+}
+
+/*
+ * =============================================================================
+ * MSG_ZEROCOPY Support for sendmsg
+ * =============================================================================
+ */
+
+/**
+ * tquic_zerocopy_complete - Zerocopy completion callback
+ * @skb: Socket buffer being completed
+ * @uarg: Zerocopy buffer info
+ * @success: True if zero-copy was successful
+ *
+ * Called when zerocopy transmission completes. Uses the standard
+ * msg_zerocopy_ubuf_ops for completion notification.
+ */
+static void __maybe_unused tquic_zerocopy_complete(struct sk_buff *skb,
+						   struct ubuf_info *uarg,
+						   bool success)
+{
+	/* Use the standard zerocopy ops for completion */
+	if (uarg && uarg->ops && uarg->ops->complete)
+		uarg->ops->complete(skb, uarg, success);
+}
+
+/**
+ * tquic_sendmsg_zerocopy - Handle MSG_ZEROCOPY flag in sendmsg
+ * @sk: Socket
+ * @msg: Message header
+ * @len: Data length
+ * @stream: Target stream
+ *
+ * Uses skb_zerocopy_iter_stream() to map user pages directly into
+ * skbs without copying. Completion notification via error queue.
+ *
+ * Returns: Number of bytes queued on success, negative errno on failure
+ */
+int tquic_sendmsg_zerocopy(struct sock *sk, struct msghdr *msg, size_t len,
+			   struct tquic_stream *stream)
+{
+	struct tquic_sock *tsk = tquic_sk(sk);
+	struct tquic_connection *conn;
+	struct ubuf_info *uarg = NULL;
+	struct sk_buff *skb = NULL;
+	size_t copied = 0;
+	int err;
+
+	conn = tquic_sock_conn_get(tsk);
+	if (!conn)
+		return -ENOTCONN;
+	if (READ_ONCE(conn->state) != TQUIC_CONN_CONNECTED) {
+		tquic_conn_put(conn);
+		return -ENOTCONN;
+	}
+
+	if (!stream) {
+		tquic_conn_put(conn);
+		return -EINVAL;
+	}
+
+	/* Check if zerocopy is enabled on socket */
+	if (!sock_flag(sk, SOCK_ZEROCOPY)) {
+		tquic_conn_put(conn);
+		return -EOPNOTSUPP;
+	}
+
+	/*
+	 * Enforce maximum outstanding zerocopy buffers to prevent
+	 * unbounded page pinning which could exhaust system memory.
+	 */
+	if (conn->zc_state) {
+		struct tquic_zc_state *zc = conn->zc_state;
+
+		if (zc->outstanding >= TQUIC_ZC_MAX_OUTSTANDING) {
+			tquic_conn_put(conn);
+			return -ENOBUFS;
+		}
+	}
+
+	/* Get or allocate user buffer info for zerocopy tracking */
+	if (msg->msg_ubuf) {
+		/* Reuse existing ubuf from message */
+		uarg = msg->msg_ubuf;
+	} else {
+		/* Allocate new zerocopy tracking structure */
+		spin_lock_bh(&stream->send_buf.lock);
+		skb = skb_peek_tail(&stream->send_buf);
+		if (skb)
+			skb_get(skb);
+		spin_unlock_bh(&stream->send_buf.lock);
+
+		uarg = TQUIC_MSG_ZEROCOPY_REALLOC(sk, len,
+						  skb ? skb_zcopy(skb) : NULL);
+
+		if (skb)
+			kfree_skb(skb);
+
+		if (!uarg) {
+			err = -ENOBUFS;
+			goto out_err;
+		}
+	}
+
+	/* Process data in chunks, mapping pages directly */
+	{
+	int zc_retries = 0;
+
+	while (copied < len) {
+		size_t chunk = min_t(size_t, len - copied, 1200);
+		size_t allowed = chunk;
+		struct sk_buff *new_skb;
+
+		/* Respect stream + connection flow control before consuming iov_iter. */
+		spin_lock_bh(&conn->lock);
+		if (stream->send_offset >= stream->max_send_data ||
+		    conn->data_sent + conn->fc_data_reserved >= conn->max_data_remote) {
+			spin_unlock_bh(&conn->lock);
+			err = -EAGAIN;
+			goto out_err;
+		} else {
+			u64 stream_limit = stream->max_send_data - stream->send_offset;
+			u64 conn_limit = conn->max_data_remote -
+					 (conn->data_sent + conn->fc_data_reserved);
+
+			if (allowed > stream_limit)
+				allowed = stream_limit;
+			if (allowed > conn_limit)
+				allowed = conn_limit;
+			if (allowed == 0) {
+				spin_unlock_bh(&conn->lock);
+				err = -EAGAIN;
+				goto out_err;
+			}
+		}
+		spin_unlock_bh(&conn->lock);
+		chunk = allowed;
+
+		/* Allocate skb for this chunk */
+		new_skb = alloc_skb(chunk, GFP_KERNEL);
+		if (!new_skb) {
+			err = -ENOMEM;
+			goto out_err;
+		}
+
+		new_skb->sk = sk;
+
+		/* Check if scatter-gather is supported */
+		if (sk->sk_route_caps & NETIF_F_SG) {
+			/*
+			 * Use zerocopy path - map user pages directly
+			 * into skb frags without copying data.
+			 */
+			err = TQUIC_SKB_ZEROCOPY_ITER_STREAM(sk, new_skb, msg,
+							     chunk, uarg);
+			if (err < 0) {
+				kfree_skb(new_skb);
+				if (err == -EMSGSIZE || err == -EEXIST) {
+					/*
+					 * Bound retries to avoid an infinite
+					 * loop when the error persists.
+					 */
+					if (++zc_retries > 3)
+						goto out_err;
+					continue;
+				}
+				goto out_err;
+			}
+
+			/* Reset retry counter on success */
+			zc_retries = 0;
+
+			/* Mark skb for zerocopy notification */
+			skb_shinfo(new_skb)->flags |= SKBFL_ZEROCOPY_FRAG;
+		} else {
+			/*
+			 * Fallback to copy path if SG not supported.
+			 * Mark as zerocopy but actually copy data.
+			 */
+			u8 *data = skb_put(new_skb, chunk);
+
+			if (copy_from_iter(data, chunk, &msg->msg_iter) != chunk) {
+				kfree_skb(new_skb);
+				err = -EFAULT;
+				goto out_err;
+			}
+
+			/* Still notify completion even though we copied */
+			if (uarg) {
+				skb_zcopy_set(new_skb, uarg, NULL);
+				uarg_to_msgzc(uarg)->zerocopy = 0;
+			}
+		}
+
+		/* Charge socket memory for this buffer */
+		if (sk_wmem_schedule(sk, new_skb->truesize)) {
+			skb_set_owner_w(new_skb, sk);
+		} else {
+			kfree_skb(new_skb);
+			err = -ENOBUFS;
+			goto out_err;
+		}
+
+		/* Queue the skb to stream send buffer */
+			spin_lock_bh(&conn->lock);
+			tquic_stream_skb_cb(new_skb)->stream_offset = stream->send_offset;
+			tquic_stream_skb_cb(new_skb)->data_off = 0;
+			stream->send_offset += chunk;
+			conn->fc_data_reserved += chunk;
+			conn->stats.tx_bytes += chunk;
+
+		/*
+		 * CF-179: Queue under lock to prevent reordering.
+		 * If we unlocked before queuing, another thread could grab the next
+		 * offset and queue its packet first, violating stream order.
+		 */
+		skb_queue_tail(&stream->send_buf, new_skb);
+		spin_unlock_bh(&conn->lock);
+
+		copied += chunk;
+	}
+	}
+
+	/* Trigger actual transmission after queuing data to ensure progress. */
+	if (copied > 0)
+		tquic_output_flush(conn);
+
+	tquic_conn_put(conn);
+	return copied;
+
+out_err:
+	/*
+	 * If data was already queued (partial send), the queued skbs
+	 * hold references to uarg.  Dropping uarg here would cause a
+	 * use-after-free when those skbs are eventually freed.  Return
+	 * the partial byte count instead so callers know data was sent.
+	 */
+	if (copied > 0) {
+		tquic_conn_put(conn);
+		return copied;
+	}
+	if (uarg && !msg->msg_ubuf)
+		net_zcopy_put(uarg);
+	tquic_conn_put(conn);
+	return err;
+}
+EXPORT_SYMBOL_GPL(tquic_sendmsg_zerocopy);
+
+/**
+ * tquic_check_zerocopy_flag - Check and validate MSG_ZEROCOPY flag
+ * @sk: Socket
+ * @msg: Message header
+ * @flags: Message flags
+ *
+ * Validates zerocopy requirements and socket state.
+ *
+ * Returns: 0 if zerocopy can proceed, negative errno otherwise
+ */
+int tquic_check_zerocopy_flag(struct sock *sk, struct msghdr *msg, int flags)
+{
+	if (!(flags & MSG_ZEROCOPY))
+		return -EOPNOTSUPP;
+
+	/* Check SO_ZEROCOPY is enabled */
+	if (!sock_flag(sk, SOCK_ZEROCOPY))
+		return -EOPNOTSUPP;
+
+	/* Check for scatter-gather support (preferred but not required) */
+	if (!(sk->sk_route_caps & NETIF_F_SG)) {
+		/* Will fallback to copy with notification */
+		tquic_dbg("zerocopy fallback to copy (no SG support)\n");
+	}
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(tquic_check_zerocopy_flag);
+
+/*
+ * =============================================================================
+ * sendpage/sendfile Support
+ * =============================================================================
+ */
+
+/**
+ * tquic_sendpage - sendfile() support for TQUIC sockets
+ * @sock: Socket
+ * @page: Page to send
+ * @offset: Offset within page
+ * @size: Number of bytes to send
+ * @flags: Send flags
+ *
+ * Implements .sendpage for sendfile() support. Uses page references
+ * instead of copying data, integrating with QUIC stream framing.
+ *
+ * Returns: Number of bytes sent on success, negative errno on failure
+ */
+ssize_t tquic_sendpage(struct socket *sock, struct page *page,
+		       int offset, size_t size, int flags)
+{
+	struct sock *sk = sock->sk;
+	struct tquic_sock *tsk;
+	struct tquic_connection *conn;
+	struct tquic_stream *stream;
+	struct sk_buff *skb;
+	bool nonblock;
+	size_t allowed;
+	size_t send_size;
+	ssize_t ret = 0;
+
+	if (!sk)
+		return -ENOTCONN;
+
+	tsk = tquic_sk(sk);
+	conn = tquic_sock_conn_get(tsk);
+	if (!conn)
+		return -ENOTCONN;
+	if (READ_ONCE(conn->state) != TQUIC_CONN_CONNECTED) {
+		tquic_conn_put(conn);
+		return -ENOTCONN;
+	}
+
+	nonblock = (flags & MSG_DONTWAIT) ||
+		   (sock->file && (sock->file->f_flags & O_NONBLOCK));
+
+	/* Use default stream */
+	stream = tquic_sock_default_stream_get_or_open(tsk, conn);
+	if (!stream) {
+		bool no_stream_credit;
+
+		spin_lock_bh(&conn->lock);
+		no_stream_credit =
+			(conn->next_stream_id_bidi / 4 >= conn->max_streams_bidi);
+		spin_unlock_bh(&conn->lock);
+		ret = no_stream_credit ? -EAGAIN : -ENOMEM;
+		goto out_put;
+	}
+
+	if (size == 0)
+		goto out_put;
+
+	/* Respect stream + connection flow control before building the skb. */
+	allowed = size;
+	spin_lock_bh(&conn->lock);
+	if (stream->send_offset >= stream->max_send_data ||
+	    conn->data_sent + conn->fc_data_reserved >= conn->max_data_remote) {
+		allowed = 0;
+	} else {
+		u64 stream_limit = stream->max_send_data - stream->send_offset;
+		u64 conn_limit = conn->max_data_remote - (conn->data_sent + conn->fc_data_reserved);
+
+		if (allowed > stream_limit)
+			allowed = stream_limit;
+		if (allowed > conn_limit)
+			allowed = conn_limit;
+	}
+	spin_unlock_bh(&conn->lock);
+
+	if (allowed == 0) {
+		if (nonblock) {
+			ret = -EAGAIN;
+			goto out_put;
+		}
+
+			ret = wait_event_interruptible(stream->wait,
+					({
+						bool ok;
+						spin_lock_bh(&conn->lock);
+						ok = (stream->send_offset < stream->max_send_data) &&
+						     (conn->data_sent + conn->fc_data_reserved < conn->max_data_remote);
+						spin_unlock_bh(&conn->lock);
+						ok;
+					}) ||
+					stream->state == TQUIC_STREAM_CLOSED ||
+					READ_ONCE(conn->state) != TQUIC_CONN_CONNECTED);
+			if (ret) {
+				ret = -EINTR;
+				goto out_put;
+			}
+
+		if (stream->state == TQUIC_STREAM_CLOSED) {
+			ret = -EPIPE;
+			goto out_put;
+		}
+		if (READ_ONCE(conn->state) != TQUIC_CONN_CONNECTED) {
+			ret = -ENOTCONN;
+			goto out_put;
+		}
+
+		/* Recompute after waking. */
+		allowed = size;
+		spin_lock_bh(&conn->lock);
+		if (stream->send_offset >= stream->max_send_data ||
+		    conn->data_sent + conn->fc_data_reserved >= conn->max_data_remote) {
+			allowed = 0;
+		} else {
+			u64 stream_limit = stream->max_send_data - stream->send_offset;
+			u64 conn_limit = conn->max_data_remote - (conn->data_sent + conn->fc_data_reserved);
+
+			if (allowed > stream_limit)
+				allowed = stream_limit;
+			if (allowed > conn_limit)
+				allowed = conn_limit;
+		}
+		spin_unlock_bh(&conn->lock);
+
+		if (allowed == 0) {
+			ret = -EAGAIN;
+			goto out_put;
+		}
+	}
+
+	send_size = min_t(size_t, size, allowed);
+
+	/* Validate size and offset */
+	if (offset < 0 || send_size > PAGE_SIZE - offset)
+		goto out_err_inval;
+
+	/* Allocate skb without data buffer - we'll use page frags */
+	skb = alloc_skb(0, GFP_KERNEL);
+	if (!skb)
+		goto out_err_nomem;
+
+	skb->sk = sk;
+
+	/* Check for scatter-gather support */
+	if (sk->sk_route_caps & NETIF_F_SG) {
+		/*
+		 * Zero-copy path: add page as fragment.
+		 * Use skb_fill_page_desc to add page reference.
+		 */
+		get_page(page);
+		skb_fill_page_desc(skb, 0, page, offset, send_size);
+		skb->len += send_size;
+		skb->data_len += send_size;
+		skb->truesize += send_size;
+
+		/* Mark for zerocopy completion */
+		skb_shinfo(skb)->flags |= SKBFL_ZEROCOPY_FRAG;
+	} else {
+		/*
+		 * Copy path: map page and copy data.
+		 * Required when hardware doesn't support SG.
+		 */
+		u8 *data;
+		void *vaddr;
+
+		/* Need to allocate actual data space */
+		kfree_skb(skb);
+		skb = alloc_skb(send_size, GFP_KERNEL);
+		if (!skb)
+			goto out_err_nomem;
+
+		skb->sk = sk;
+		data = skb_put(skb, send_size);
+
+		/* Map page and copy */
+		vaddr = kmap_local_page(page);
+		memcpy(data, vaddr + offset, send_size);
+		kunmap_local(vaddr);
+	}
+
+	/* Charge socket memory for this buffer */
+	if (sk_wmem_schedule(sk, skb->truesize)) {
+		skb_set_owner_w(skb, sk);
+	} else {
+		kfree_skb(skb);
+		ret = -ENOBUFS;
+		goto out_put;
+	}
+
+	/* Queue to stream send buffer */
+	spin_lock_bh(&conn->lock);
+	tquic_stream_skb_cb(skb)->stream_offset = stream->send_offset;
+	tquic_stream_skb_cb(skb)->data_off = 0;
+	stream->send_offset += send_size;
+	conn->fc_data_reserved += send_size;
+	conn->stats.tx_bytes += send_size;
+
+	/*
+	 * CF-179: Queue under lock to prevent reordering.
+	 * If we unlocked before queuing, another thread could grab the next
+	 * offset and queue its packet first, violating stream order.
+	 */
+	skb_queue_tail(&stream->send_buf, skb);
+	spin_unlock_bh(&conn->lock);
+
+	/* Trigger transmission */
+	if (send_size)
+		tquic_output_flush(conn);
+
+	ret = send_size;
+out_put:
+	if (stream)
+		tquic_stream_put(stream);
+	tquic_conn_put(conn);
+	return ret;
+
+out_err_inval:
+	ret = -EINVAL;
+	goto out_put;
+
+out_err_nomem:
+	ret = -ENOMEM;
+	goto out_put;
+}
+EXPORT_SYMBOL_GPL(tquic_sendpage);
+
+/*
+ * =============================================================================
+ * Splice Support
+ * =============================================================================
+ */
+
+/* Splice state for TQUIC */
+struct tquic_splice_state {
+	struct tquic_connection	*conn;
+	struct tquic_stream	*stream;
+	struct pipe_inode_info	*pipe;
+	size_t			len;
+	unsigned int		flags;
+};
+
+/**
+ * __tquic_splice_read - Internal splice read helper
+ * @sk: Socket
+ * @tss: Splice state
+ *
+ * Returns: Number of bytes spliced or negative errno
+ */
+static int __tquic_splice_read(struct sock *sk, struct tquic_splice_state *tss)
+{
+	struct tquic_stream *stream = tss->stream;
+	struct sk_buff *skb;
+	size_t spliced = 0;
+	unsigned int remaining = tss->len;
+	int ret = 0;
+
+	/* Process available skbs in receive buffer */
+	while (remaining && (skb = skb_dequeue(&stream->recv_buf)) != NULL) {
+		unsigned int chunk = min_t(unsigned int, skb->len, remaining);
+		int used;
+
+		used = skb_splice_bits(skb, sk, 0, tss->pipe, chunk, tss->flags);
+		if (used <= 0) {
+			/* Put skb back on "no room" or error. */
+			skb_queue_head(&stream->recv_buf, skb);
+			if (used < 0)
+				ret = used;
+			break;
+		}
+
+		spliced += used;
+		remaining -= used;
+
+		if (used < skb->len) {
+			/*
+			 * Most receive-buffer skbs are linear (alloc_skb +
+			 * skb_put_data). Keep the remainder in place.
+			 */
+			skb_pull(skb, used);
+			skb_queue_head(&stream->recv_buf, skb);
+			break;
+		}
+
+		sk_mem_uncharge(sk, skb->truesize);
+		kfree_skb(skb);
+	}
+
+	return spliced > 0 ? spliced : ret;
+}
+
+/**
+ * tquic_splice_read - splice data from TQUIC stream to pipe
+ * @sock: Socket
+ * @ppos: Position (not used, must be NULL)
+ * @pipe: Pipe to splice to
+ * @len: Number of bytes to splice
+ * @flags: Splice flags
+ *
+ * Implements .splice_read in proto_ops for zero-copy data transfer
+ * from QUIC stream receive buffer to a pipe (for use with sendfile/splice).
+ *
+ * Returns: Number of bytes spliced on success, negative errno on failure
+ */
+ssize_t tquic_splice_read(struct socket *sock, loff_t *ppos,
+			  struct pipe_inode_info *pipe, size_t len,
+			  unsigned int flags)
+{
+	struct sock *sk = sock->sk;
+	struct tquic_sock *tsk;
+	struct tquic_connection *conn;
+	struct tquic_stream *stream;
+	struct tquic_splice_state tss;
+	long timeo;
+	ssize_t spliced = 0;
+	int ret;
+
+	if (!sk)
+		return -ENOTCONN;
+
+	tsk = tquic_sk(sk);
+	conn = tquic_sock_conn_get(tsk);
+	if (!conn)
+		return -ENOTCONN;
+	if (READ_ONCE(conn->state) != TQUIC_CONN_CONNECTED) {
+		tquic_conn_put(conn);
+		return -ENOTCONN;
+	}
+
+	/* Use default stream for simple API */
+	stream = tquic_sock_default_stream_get(tsk);
+	if (!stream) {
+		tquic_conn_put(conn);
+		return 0;  /* No data available */
+	}
+
+	/* Initialize splice state */
+	tss.conn = conn;
+	tss.stream = stream;
+	tss.pipe = pipe;
+	tss.len = len;
+	tss.flags = flags;
+
+	lock_sock(sk);
+
+	/* Get receive timeout */
+	timeo = sock_rcvtimeo(sk, sock->file->f_flags & O_NONBLOCK);
+
+	while (tss.len) {
+		ret = __tquic_splice_read(sk, &tss);
+		if (ret < 0)
+			break;
+		else if (!ret) {
+			/* No data spliced */
+			if (spliced)
+				break;
+
+			/* Check for EOF/stream closed */
+			if (stream->fin_received)
+				break;
+			if (stream->state == TQUIC_STREAM_CLOSED ||
+			    stream->state == TQUIC_STREAM_RESET_RECVD) {
+				ret = -ECONNRESET;
+				break;
+			}
+
+			/* Non-blocking mode */
+			if (flags & SPLICE_F_NONBLOCK) {
+				ret = -EAGAIN;
+				break;
+			}
+
+			/* Wait for data with timeout */
+			if (!timeo) {
+				ret = -EAGAIN;
+				break;
+			}
+
+			/* Check for pending signal */
+			if (signal_pending(current)) {
+				ret = sock_intr_errno(timeo);
+				break;
+			}
+
+			/* Wait for more data */
+			release_sock(sk);
+
+			ret = wait_event_interruptible_timeout(
+				stream->wait,
+				!skb_queue_empty(&stream->recv_buf) ||
+				stream->fin_received ||
+				stream->state == TQUIC_STREAM_CLOSED,
+				timeo);
+
+			lock_sock(sk);
+
+			if (ret < 0) {
+				ret = sock_intr_errno(timeo);
+				break;
+			}
+			if (ret == 0) {
+				ret = -EAGAIN;
+				break;
+			}
+			continue;
+		}
+
+		/* Data spliced successfully */
+		tss.len -= ret;
+		spliced += ret;
+	}
+
+	release_sock(sk);
+
+	tquic_stream_put(stream);
+	tquic_conn_put(conn);
+	if (spliced > 0)
+		return spliced;
+	return ret;
+}
+EXPORT_SYMBOL_GPL(tquic_splice_read);
+
+/*
+ * =============================================================================
+ * Receive-Side Zero-Copy Optimization
+ * =============================================================================
+ */
+
+/**
+ * tquic_recvmsg_peek_size - Peek at available data size (MSG_TRUNC)
+ * @sk: Socket
+ * @stream: Stream to check
+ *
+ * Used with MSG_TRUNC to efficiently check how much data is available
+ * without copying. Helps userspace allocate optimal buffer sizes.
+ *
+ * Returns: Number of bytes available in receive buffer
+ */
+size_t tquic_recvmsg_peek_size(struct sock *sk, struct tquic_stream *stream)
+{
+	struct sk_buff *skb;
+	size_t total = 0;
+
+	if (!stream)
+		return 0;
+
+	skb_queue_walk(&stream->recv_buf, skb) {
+		total += skb->len;
+	}
+
+	return total;
+}
+EXPORT_SYMBOL_GPL(tquic_recvmsg_peek_size);
+
+/**
+ * tquic_rx_page_pool_alloc - Allocate page for direct receive placement
+ * @conn: Connection
+ *
+ * Allocates a page from the receive page pool for direct DMA placement.
+ * This avoids an extra copy when receiving data.
+ *
+ * Returns: Allocated page or NULL
+ */
+struct page *tquic_rx_page_pool_alloc(struct tquic_connection *conn)
+{
+	struct page *page;
+
+	/*
+	 * For high-performance receive, we would use a page pool here.
+	 * For now, just allocate a regular page.
+	 */
+	page = alloc_page(GFP_ATOMIC | __GFP_COMP);
+	if (!page)
+		return NULL;
+
+	return page;
+}
+EXPORT_SYMBOL_GPL(tquic_rx_page_pool_alloc);
+
+/**
+ * tquic_rx_build_skb_from_page - Build skb using pre-allocated page
+ * @conn: Connection
+ * @page: Pre-allocated page with data
+ * @offset: Data offset in page
+ * @len: Data length
+ *
+ * Creates an skb referencing the page directly (zero-copy).
+ *
+ * Returns: SKB on success, NULL on failure
+ */
+struct sk_buff *tquic_rx_build_skb_from_page(struct tquic_connection *conn,
+					     struct page *page,
+					     unsigned int offset,
+					     unsigned int len)
+{
+	struct sk_buff *skb;
+
+	if (!page || offset + len > PAGE_SIZE)
+		return NULL;
+
+	/* Allocate skb header only */
+	skb = alloc_skb(0, GFP_ATOMIC);
+	if (!skb)
+		return NULL;
+
+	/* Add page as fragment - zero copy */
+	skb_fill_page_desc(skb, 0, page, offset, len);
+	skb->len = len;
+	skb->data_len = len;
+	skb->truesize += len;
+
+	/* Keep page reference (already held) */
+
+	return skb;
+}
+EXPORT_SYMBOL_GPL(tquic_rx_build_skb_from_page);
+
+/*
+ * =============================================================================
+ * Socket Option Support
+ * =============================================================================
+ */
+
+/**
+ * tquic_set_zerocopy - Handle SO_ZEROCOPY socket option
+ * @sk: Socket
+ * @val: Option value (0 = disable, 1 = enable)
+ *
+ * Returns: 0 on success, negative errno on failure
+ */
+int tquic_set_zerocopy(struct sock *sk, int val)
+{
+	if (val < 0 || val > 1)
+		return -EINVAL;
+
+	if (val) {
+		/*
+		 * Enable zerocopy. Check if the socket supports it.
+		 * Scatter-gather is preferred but not strictly required
+		 * (we can fallback to copy with notification).
+		 */
+		sock_set_flag(sk, SOCK_ZEROCOPY);
+		tquic_dbg("zerocopy enabled on socket\n");
+	} else {
+		sock_reset_flag(sk, SOCK_ZEROCOPY);
+		tquic_dbg("zerocopy disabled on socket\n");
+	}
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(tquic_set_zerocopy);
+
+/**
+ * tquic_get_zerocopy - Get SO_ZEROCOPY socket option value
+ * @sk: Socket
+ *
+ * Returns: 1 if zerocopy enabled, 0 otherwise
+ */
+int tquic_get_zerocopy(struct sock *sk)
+{
+	return sock_flag(sk, SOCK_ZEROCOPY) ? 1 : 0;
+}
+EXPORT_SYMBOL_GPL(tquic_get_zerocopy);
+
+/*
+ * =============================================================================
+ * Zerocopy Completion Notification
+ * =============================================================================
+ */
+
+/**
+ * tquic_zc_complete - Mark zerocopy buffer transmission as complete
+ * @sk: Socket
+ * @id: Notification ID
+ *
+ * Called when all packets containing zerocopy data have been transmitted.
+ * Triggers notification to userspace via error queue.
+ */
+void tquic_zc_complete(struct sock *sk, u32 id)
+{
+	struct sk_buff *skb;
+	struct sock_exterr_skb *serr;
+	unsigned long flags;
+	struct sk_buff_head *q;
+
+	/* Build error queue notification skb */
+	skb = alloc_skb(0, GFP_ATOMIC);
+	if (!skb)
+		return;
+
+	skb->sk = sk;
+
+	serr = SKB_EXT_ERR(skb);
+	memset(serr, 0, sizeof(*serr));
+	serr->ee.ee_errno = 0;
+	serr->ee.ee_origin = SO_EE_ORIGIN_ZEROCOPY;
+	serr->ee.ee_data = id;  /* High watermark */
+	serr->ee.ee_info = id;  /* Low watermark */
+	/* ee_code = 0 means zerocopy succeeded (no copy fallback) */
+
+	/* Queue to socket error queue */
+	q = &sk->sk_error_queue;
+	spin_lock_irqsave(&q->lock, flags);
+	__skb_queue_tail(q, skb);
+	spin_unlock_irqrestore(&q->lock, flags);
+
+	/* Wake up waiters on error queue */
+	sk_error_report(sk);
+}
+EXPORT_SYMBOL_GPL(tquic_zc_complete);
+
+/**
+ * tquic_zc_abort - Abort zerocopy due to error
+ * @sk: Socket
+ * @id: Notification ID
+ * @err: Error code
+ *
+ * Called when zerocopy transmission fails. Notifies userspace.
+ */
+void tquic_zc_abort(struct sock *sk, u32 id, int err)
+{
+	struct sk_buff *skb;
+	struct sock_exterr_skb *serr;
+	unsigned long flags;
+	struct sk_buff_head *q;
+
+	skb = alloc_skb(0, GFP_ATOMIC);
+	if (!skb)
+		return;
+
+	skb->sk = sk;
+
+	serr = SKB_EXT_ERR(skb);
+	memset(serr, 0, sizeof(*serr));
+	serr->ee.ee_errno = err;
+	serr->ee.ee_origin = SO_EE_ORIGIN_ZEROCOPY;
+	serr->ee.ee_data = id;
+	serr->ee.ee_info = id;
+	serr->ee.ee_code |= SO_EE_CODE_ZEROCOPY_COPIED;
+
+	q = &sk->sk_error_queue;
+	spin_lock_irqsave(&q->lock, flags);
+	__skb_queue_tail(q, skb);
+	spin_unlock_irqrestore(&q->lock, flags);
+
+	sk_error_report(sk);
+}
+EXPORT_SYMBOL_GPL(tquic_zc_abort);
+
+/*
+ * =============================================================================
+ * SKB Zerocopy Fragment Handling
+ * =============================================================================
+ */
+
+/**
+ * tquic_skb_zerocopy_setup - Setup skb for zerocopy transmission
+ * @skb: SKB to configure
+ * @page: Page to reference
+ * @offset: Offset in page
+ * @len: Length of data
+ *
+ * Configures an skb for zerocopy by adding page as fragment and
+ * setting appropriate flags for completion notification.
+ *
+ * Returns: 0 on success, negative errno on failure
+ */
+int tquic_skb_zerocopy_setup(struct sk_buff *skb, struct page *page,
+			     unsigned int offset, unsigned int len)
+{
+	int i;
+
+	if (!skb || !page)
+		return -EINVAL;
+
+	if (offset + len > PAGE_SIZE)
+		return -EINVAL;
+
+	/* Check if we can add more frags */
+	i = skb_shinfo(skb)->nr_frags;
+	if (i >= MAX_SKB_FRAGS)
+		return -EMSGSIZE;
+
+	/* Add page as fragment */
+	get_page(page);
+	skb_fill_page_desc(skb, i, page, offset, len);
+
+	skb->len += len;
+	skb->data_len += len;
+	skb->truesize += PAGE_SIZE;
+
+	/* Set zerocopy flag for completion callback */
+	skb_shinfo(skb)->flags |= SKBFL_ZEROCOPY_FRAG;
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(tquic_skb_zerocopy_setup);
+
+/**
+ * tquic_skb_orphan_frags_rx - Handle page reference for received zerocopy skb
+ * @skb: SKB to process
+ * @gfp: Allocation flags
+ *
+ * Ensures page references are properly handled for received zerocopy skbs.
+ * May need to copy data if pages cannot be safely shared.
+ *
+ * Returns: 0 on success, negative errno on failure
+ */
+int tquic_skb_orphan_frags_rx(struct sk_buff *skb, gfp_t gfp)
+{
+	/*
+	 * For received skbs with zerocopy pages, we may need to
+	 * handle orphaning to avoid page lifetime issues.
+	 *
+	 * The kernel's skb_orphan_frags_rx() handles this.
+	 */
+	return skb_orphan_frags_rx(skb, gfp);
+}
+EXPORT_SYMBOL_GPL(tquic_skb_orphan_frags_rx);
+
+#else /* LINUX_VERSION_CODE < KERNEL_VERSION(6, 7, 0) */
+
+/*
+ * Zerocopy is not supported on kernels older than 6.7 due to
+ * incompatible ubuf_info, msg_zerocopy, and skb zerocopy APIs.
+ * Provide correct fallback implementations that return appropriate
+ * error codes or no-ops.
+ */
+
+#include <linux/module.h>
+#include <linux/errno.h>
+#include <linux/skbuff.h>
+#include <net/sock.h>
+#include <net/tquic.h>
+
+#include "protocol.h"
+
+int tquic_zc_state_alloc(struct tquic_connection *conn)
+{
+	return 0;
+}
+EXPORT_SYMBOL_GPL(tquic_zc_state_alloc);
+
+void tquic_zc_state_free(struct tquic_connection *conn)
+{
+}
+EXPORT_SYMBOL_GPL(tquic_zc_state_free);
+
+int tquic_sendmsg_zerocopy(struct sock *sk, struct msghdr *msg, size_t len,
+			   struct tquic_stream *stream)
+{
+	return -EOPNOTSUPP;
+}
+EXPORT_SYMBOL_GPL(tquic_sendmsg_zerocopy);
+
+int tquic_check_zerocopy_flag(struct sock *sk, struct msghdr *msg, int flags)
+{
+	return -EOPNOTSUPP;
+}
+EXPORT_SYMBOL_GPL(tquic_check_zerocopy_flag);
+
+ssize_t tquic_sendpage(struct socket *sock, struct page *page,
+		       int offset, size_t size, int flags)
+{
+	return -EOPNOTSUPP;
+}
+EXPORT_SYMBOL_GPL(tquic_sendpage);
+
+ssize_t tquic_splice_read(struct socket *sock, loff_t *ppos,
+			  struct pipe_inode_info *pipe, size_t len,
+			  unsigned int flags)
+{
+	return -EOPNOTSUPP;
+}
+EXPORT_SYMBOL_GPL(tquic_splice_read);
+
+size_t tquic_recvmsg_peek_size(struct sock *sk, struct tquic_stream *stream)
+{
+	return 0;
+}
+EXPORT_SYMBOL_GPL(tquic_recvmsg_peek_size);
+
+struct page *tquic_rx_page_pool_alloc(struct tquic_connection *conn)
+{
+	return NULL;
+}
+EXPORT_SYMBOL_GPL(tquic_rx_page_pool_alloc);
+
+struct sk_buff *tquic_rx_build_skb_from_page(struct tquic_connection *conn,
+					     struct page *page,
+					     unsigned int offset,
+					     unsigned int len)
+{
+	return NULL;
+}
+EXPORT_SYMBOL_GPL(tquic_rx_build_skb_from_page);
+
+int tquic_set_zerocopy(struct sock *sk, int val)
+{
+	return -EOPNOTSUPP;
+}
+EXPORT_SYMBOL_GPL(tquic_set_zerocopy);
+
+int tquic_get_zerocopy(struct sock *sk)
+{
+	return 0;
+}
+EXPORT_SYMBOL_GPL(tquic_get_zerocopy);
+
+void tquic_zc_complete(struct sock *sk, u32 id)
+{
+}
+EXPORT_SYMBOL_GPL(tquic_zc_complete);
+
+void tquic_zc_abort(struct sock *sk, u32 id, int err)
+{
+}
+EXPORT_SYMBOL_GPL(tquic_zc_abort);
+
+int tquic_skb_zerocopy_setup(struct sk_buff *skb, struct page *page,
+			     unsigned int offset, unsigned int len)
+{
+	return -EOPNOTSUPP;
+}
+EXPORT_SYMBOL_GPL(tquic_skb_zerocopy_setup);
+
+int tquic_skb_orphan_frags_rx(struct sk_buff *skb, gfp_t gfp)
+{
+	return skb_orphan_frags_rx(skb, gfp);
+}
+EXPORT_SYMBOL_GPL(tquic_skb_orphan_frags_rx);
+
+#endif /* LINUX_VERSION_CODE >= KERNEL_VERSION(6, 7, 0) */
+
+/*
+ * =============================================================================
+ * Module Information
+ * =============================================================================
+ */
+
+MODULE_DESCRIPTION("TQUIC Zero-Copy I/O Support");
+MODULE_LICENSE("GPL");

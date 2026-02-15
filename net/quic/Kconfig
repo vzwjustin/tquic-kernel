@@ -1,0 +1,46 @@
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# QUIC configuration
+#
+
+menuconfig IP_QUIC
+	tristate "TQUIC: WAN Bonding over QUIC"
+	depends on INET
+	depends on CRYPTO
+	select CRYPTO_AEAD
+	select CRYPTO_AES
+	select CRYPTO_GCM
+	select CRYPTO_CHACHA20POLY1305
+	select CRYPTO_SHA256
+	select CRYPTO_SHA512
+	select CRYPTO_LIB_CURVE25519
+	select NET_UDP_TUNNEL
+	help
+	  TQUIC is a kernel-level QUIC implementation (RFC 9000/9001/9002)
+	  with multipath WAN bonding capabilities. It can aggregate multiple
+	  network paths (e.g. LTE/5G/WiFi/wired) into a single logical
+	  connection with failover and bandwidth aggregation.
+
+	  To compile this as a module, choose M here: the module will be
+	  called quic.
+
+	  If unsure, say N.
+
+if IP_QUIC
+
+config QUIC_DEBUG
+	bool "QUIC debugging messages"
+	help
+	  Enable debug output for the QUIC protocol implementation. This
+	  option adds verbose logging of protocol state transitions, packet
+	  processing, and internal events to the kernel log.
+
+	  This is useful for developers working on the QUIC implementation
+	  or for diagnosing protocol-level issues, but adds overhead and
+	  should not be enabled in production systems.
+
+	  If unsure, say N.
+
+source "net/tquic/Kconfig"
+
+endif # IP_QUIC

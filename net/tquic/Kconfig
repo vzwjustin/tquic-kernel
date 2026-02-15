@@ -1,0 +1,1210 @@
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# TQUIC configuration (sub-options for CONFIG_IP_QUIC)
+#
+# This file is sourced from `net/quic/Kconfig` under `if IP_QUIC`.
+
+config TQUIC_CORE
+	tristate "TQUIC Core Protocol"
+	default y
+	help
+	  This provides the core TQUIC protocol implementation including
+	  connection management, stream multiplexing, and the QUIC state
+	  machine. This is required for all TQUIC functionality.
+
+	  To compile this as a module, choose M here: the module will
+	  be called tquic_core.
+
+	  If unsure, say Y.
+
+config TQUIC_WAN_BONDING
+	tristate "TQUIC WAN Bonding Support"
+	depends on TQUIC_CORE
+	select DST_CACHE
+	default y
+	help
+	  Enable WAN bonding support in TQUIC. This allows aggregating
+	  multiple network paths into a single logical connection with
+	  automatic failover and load balancing capabilities.
+
+	  Features include:
+	    - Multi-path aggregation across heterogeneous links
+	    - Seamless connection migration between paths
+	    - Intelligent path selection based on latency and bandwidth
+	    - Automatic failover with sub-second recovery
+
+	  To compile this as a module, choose M here: the module will
+	  be called tquic_bond.
+
+	  If unsure, say Y.
+
+config TQUIC_PATH_MANAGER
+	tristate "TQUIC Path Manager"
+	depends on TQUIC_WAN_BONDING
+	default y
+	help
+	  The TQUIC Path Manager handles discovery, monitoring, and
+	  selection of network paths for WAN bonding. It provides
+	  APIs for path probing, quality estimation, and dynamic
+	  path management.
+
+	  To compile this as a module, choose M here: the module will
+	  be called tquic_pm.
+
+	  If unsure, say Y.
+
+config TQUIC_PM_NETLINK
+	bool "TQUIC Path Manager Netlink Interface"
+	depends on TQUIC_PATH_MANAGER
+	default y
+	help
+	  Enable netlink interface for TQUIC Path Manager. This allows
+	  userspace tools to configure and monitor path status via
+	  netlink sockets.
+
+	  The netlink interface provides:
+	    - Path creation and removal
+	    - Path priority and weight configuration
+	    - Path status notifications
+	    - Integration with network management daemons
+
+	  If unsure, say Y.
+
+config TQUIC_PM_USERSPACE
+	bool "TQUIC Userspace Path Manager"
+	depends on TQUIC_PATH_MANAGER
+	depends on TQUIC_PM_NETLINK
+	default n
+	help
+	  Enable userspace path manager mode where path decisions
+	  are delegated to a userspace daemon via netlink. This is
+	  useful for advanced path management scenarios.
+
+	  When enabled, the kernel path manager becomes passive and
+	  userspace controls all path operations.
+
+	  If unsure, say N.
+
+config TQUIC_SCHEDULER
+	tristate "TQUIC Packet Scheduler"
+	depends on TQUIC_WAN_BONDING
+	default y
+	help
+	  The TQUIC Packet Scheduler determines how packets are
+	  distributed across available paths. It supports multiple
+	  scheduling algorithms selectable at runtime.
+
+	  To compile this as a module, choose M here: the module will
+	  be called tquic_sched.
+
+	  If unsure, say Y.
+
+config TQUIC_CONG
+	bool "TQUIC Congestion Control Framework"
+	depends on TQUIC_CORE
+	default y
+	help
+	  Congestion control framework for TQUIC multipath connections.
+	  Provides central CC algorithm registration, per-path CC state
+	  lifecycle management, and callback dispatch for ACK/loss/RTT
+	  events.
+
+	  Supports Cubic, BBR, COPA, Westwood, and coupled (OLIA/BALIA)
+	  congestion control algorithms.
+
+	  This option enables the CC framework core. Individual CC
+	  algorithms can be selected separately.
+
+	  If unsure, say Y.
+
+menuconfig TQUIC_CONG_ADVANCED
+	bool "TQUIC: advanced congestion control"
+	depends on TQUIC_CORE
+	help
+	  Support for selection of various TQUIC congestion control
+	  modules optimized for multipath WAN scenarios.
+
+	  The default congestion control algorithm is CUBIC, which
+	  works well for most scenarios. Advanced users may want to
+	  experiment with other algorithms for specific use cases.
+
+	  If unsure, say N.
+
+if TQUIC_CONG_ADVANCED
+
+config TQUIC_CONG_CUBIC
+	tristate "TQUIC CUBIC"
+	default y
+	help
+	  CUBIC congestion control adapted for TQUIC multipath
+	  environments. CUBIC uses a cubic function for window
+	  growth which provides good performance across a wide
+	  range of network conditions.
+
+	  This is the default congestion control algorithm.
+
+config TQUIC_CONG_BBR
+	tristate "TQUIC BBR (Bottleneck Bandwidth and RTT)"
+	default m
+	help
+	  BBR (Bottleneck Bandwidth and RTT) congestion control
+	  adapted for TQUIC multipath environments. BBR attempts
+	  to achieve high throughput while maintaining low latency
+	  by estimating the available bandwidth and minimum RTT.
+
+	  BBR works well on paths with varying characteristics
+	  and is recommended for heterogeneous WAN bonding scenarios.
+
+config TQUIC_CONG_COPA
+	tristate "TQUIC Copa"
+	default m
+	help
+	  Copa (Competitive Pacing Algorithm) is a delay-based
+	  congestion control algorithm designed to achieve both
+	  high throughput and low queuing delay. It is particularly
+	  well-suited for real-time applications over bonded links.
+
+config TQUIC_CONG_WESTWOOD
+	tristate "TQUIC Westwood+"
+	default m
+	help
+	  Westwood+ congestion control adapted for TQUIC. Westwood+
+	  uses bandwidth estimation to improve performance over
+	  wireless links where packet loss may not indicate congestion.
+
+	  Recommended when bonding includes wireless/mobile paths.
+
+config TQUIC_CONG_COUPLED
+	tristate "TQUIC Coupled Multipath (OLIA/LIA/BALIA)"
+	default y
+	help
+	  Coupled multipath congestion control algorithms designed
+	  specifically for WAN bonding scenarios. These algorithms
+	  ensure fairness and efficiency when aggregating bandwidth
+	  across multiple paths.
+
+	  Includes:
+	    - LIA (Linked Increases Algorithm)
+	    - OLIA (Opportunistic Linked Increases) - RFC 6356
+	    - BALIA (Balanced Linked Adaptation)
+
+	  Features:
+	    - Shared bottleneck detection
+	    - Per-path subflow management
+	    - Fair resource pooling across paths
+	    - Integration with CUBIC/BBR per-path algorithms
+
+	  OLIA is recommended for most multipath scenarios as it
+	  provides good TCP-friendliness while allowing opportunistic
+	  use of uncongested paths.
+
+	  This is CRITICAL for true WAN bonding to ensure fairness
+	  with other flows sharing network bottlenecks.
+
+	  If using TQUIC for multipath WAN bonding, say Y.
+
+config TQUIC_CONG_BBRV2
+	tristate "TQUIC BBRv2 Congestion Control"
+	default m
+	help
+	  BBRv2 congestion control adapted for TQUIC multipath
+	  environments. BBRv2 improves upon BBR with better fairness
+	  and coexistence with loss-based congestion control algorithms.
+
+	  Key improvements over BBRv1:
+	    - Better fairness with CUBIC/Reno flows
+	    - Improved reaction to ECN marking
+	    - Reduced bufferbloat
+	    - More accurate bandwidth estimation
+
+	  Recommended for paths where BBRv1's fairness issues are
+	  a concern.
+
+	  To compile this as a module, choose M here: the module will
+	  be called tquic_bbrv2.
+
+	  If unsure, say M.
+
+config TQUIC_CONG_BBRV3
+	tristate "TQUIC BBRv3 Congestion Control"
+	default m
+	help
+	  BBRv3 congestion control for TQUIC. This is the latest
+	  iteration of BBR with improved ECN handling, better fairness,
+	  and enhanced stability over BBRv2.
+
+	  Key improvements over BBRv2:
+	    - More responsive to ECN signals (L4S compatible)
+	    - Improved Startup exit for better competing flow fairness
+	    - Refined bandwidth probing with variable duration
+	    - Better handling of aggregation and ACK delays
+	    - Enhanced RTT probing with less queue drain
+
+	  Recommended for modern networks with ECN support and
+	  where L4S compatibility is desired.
+
+	  To compile this as a module, choose M here: the module will
+	  be called tquic_bbrv3.
+
+	  If unsure, say M.
+
+config TQUIC_CONG_PRAGUE
+	tristate "TQUIC Prague Congestion Control (L4S)"
+	depends on TQUIC_L4S
+	default m
+	help
+	  Prague congestion control for Low Latency Low Loss Scalable
+	  Throughput (L4S) networks. Prague is designed to achieve
+	  ultra-low latency while maintaining high throughput.
+
+	  Features:
+	    - Scalable congestion signals (AccECN)
+	    - Immediate response to ECN CE marks
+	    - Designed for L4S-enabled networks
+	    - Compatible with classic traffic via DualQ Coupled AQM
+
+	  Prague is the recommended CC for L4S deployments and
+	  provides sub-millisecond latency when network supports it.
+
+	  To compile this as a module, choose M here: the module will
+	  be called tquic_prague.
+
+	  If unsure, say M.
+
+config TQUIC_L4S
+	tristate "TQUIC L4S (Low Latency Low Loss Scalable Throughput)"
+	depends on TQUIC_CORE
+	depends on TQUIC_CONG
+	default m
+	help
+	  Enable L4S (Low Latency Low Loss Scalable Throughput) support
+	  for TQUIC. L4S enables ultra-low queuing latency (<1ms) while
+	  achieving high throughput.
+
+	  L4S requires:
+	    - ECN-capable network path
+	    - L4S-enabled Active Queue Management (DualQ, PI2, etc.)
+	    - Scalable congestion control (Prague, etc.)
+
+	  Features:
+	    - ECT(1) marking for L4S traffic identification
+	    - Accurate ECN feedback via AccECN extension
+	    - Immediate congestion response for ultra-low latency
+	    - Coexistence with classic traffic
+
+	  Use cases:
+	    - Real-time gaming
+	    - Video conferencing
+	    - VoIP
+	    - AR/VR applications
+
+	  To compile this as a module, choose M here: the module will
+	  be called tquic_l4s.
+
+	  If unsure, say M.
+
+config TQUIC_ACCECN
+	tristate "TQUIC Accurate ECN Feedback (AccECN)"
+	depends on TQUIC_CORE
+	depends on TQUIC_CONG
+	default m
+	help
+	  Enable Accurate ECN (AccECN) feedback for TQUIC. AccECN provides
+	  accurate per-packet ECN feedback, enabling scalable congestion
+	  control algorithms like Prague.
+
+	  Standard ECN only reports whether CE marks were seen.
+	  AccECN reports:
+	    - Exact count of CE marks received
+	    - Per-packet ECN codepoint information
+	    - Byte-accurate ECN counters
+
+	  AccECN is required for:
+	    - L4S deployments
+	    - Prague congestion control
+	    - Accurate congestion measurement
+
+	  Transport parameter:
+	    - accurate_ecn (0xff04de1b): Negotiate AccECN support
+
+	  To compile this as a module, choose M here: the module will
+	  be called tquic_accecn.
+
+	  If unsure, say M.
+
+endif # TQUIC_CONG_ADVANCED
+
+choice
+	prompt "Default TQUIC congestion control"
+	default DEFAULT_TQUIC_CUBIC
+	help
+	  Select the default congestion control algorithm for TQUIC
+	  connections. This can be overridden at runtime via sysctl
+	  or socket options.
+
+	config DEFAULT_TQUIC_CUBIC
+		bool "CUBIC" if TQUIC_CONG_CUBIC=y || !TQUIC_CONG_ADVANCED
+
+	config DEFAULT_TQUIC_BBR
+		bool "BBR" if TQUIC_CONG_BBR=y
+
+	config DEFAULT_TQUIC_BBRV2
+		bool "BBRv2" if TQUIC_CONG_BBRV2=y
+
+	config DEFAULT_TQUIC_COPA
+		bool "Copa" if TQUIC_CONG_COPA=y
+
+	config DEFAULT_TQUIC_WESTWOOD
+		bool "Westwood+" if TQUIC_CONG_WESTWOOD=y
+
+	config DEFAULT_TQUIC_PRAGUE
+		bool "Prague (L4S)" if TQUIC_CONG_PRAGUE=y
+
+	config DEFAULT_TQUIC_OLIA
+		bool "OLIA (Coupled Multipath)" if TQUIC_CONG_COUPLED=y
+
+	config DEFAULT_TQUIC_LIA
+		bool "LIA (Coupled Multipath)" if TQUIC_CONG_COUPLED=y
+
+	config DEFAULT_TQUIC_BALIA
+		bool "BALIA (Coupled Multipath)" if TQUIC_CONG_COUPLED=y
+
+endchoice
+
+config DEFAULT_TQUIC_CONG
+	string
+	default "cubic" if DEFAULT_TQUIC_CUBIC
+	default "bbr" if DEFAULT_TQUIC_BBR
+	default "bbrv2" if DEFAULT_TQUIC_BBRV2
+	default "copa" if DEFAULT_TQUIC_COPA
+	default "westwood" if DEFAULT_TQUIC_WESTWOOD
+	default "prague" if DEFAULT_TQUIC_PRAGUE
+	default "olia" if DEFAULT_TQUIC_OLIA
+	default "lia" if DEFAULT_TQUIC_LIA
+	default "balia" if DEFAULT_TQUIC_BALIA
+	default "cubic"
+
+config TQUIC_CRYPTO
+	tristate "TQUIC Cryptographic Support"
+	depends on TQUIC_CORE
+	select CRYPTO_LIB_CHACHA20POLY1305
+	select CRYPTO_LIB_AES
+	default y
+	help
+	  Cryptographic support for TQUIC including TLS 1.3 handshake
+	  and packet protection. This is required for secure TQUIC
+	  connections.
+
+	  To compile this as a module, choose M here: the module will
+	  be called tquic_crypto.
+
+	  If unsure, say Y.
+
+config TQUIC_CERT_VERIFY
+	bool "TQUIC Certificate Chain Validation"
+	depends on TQUIC_CRYPTO
+	depends on KEYS
+	depends on ASYMMETRIC_KEY_TYPE
+	select ASYMMETRIC_PUBLIC_KEY_SUBTYPE
+	select X509_CERTIFICATE_PARSER
+	default y
+	help
+	  Enable X.509 certificate chain validation for TQUIC TLS 1.3
+	  connections. This is CRITICAL for security as it prevents
+	  man-in-the-middle (MITM) attacks.
+
+	  When enabled, TQUIC will:
+	    - Parse and validate X.509 certificate chains
+	    - Verify certificate signatures using kernel crypto
+	    - Check certificate validity periods
+	    - Verify hostname/SNI matching (RFC 6125)
+	    - Look up trust anchors in the kernel system keyring
+	    - Support Subject Alternative Names (SAN)
+	    - Enforce CA basic constraints
+
+	  Certificate verification modes (configurable per-socket):
+	    - NONE: No verification (INSECURE, testing only)
+	    - OPTIONAL: Verify if cert present, allow missing
+	    - REQUIRED: Full verification required (default)
+
+	  Trusted root certificates are looked up in:
+	    - System trusted keyring (.builtin_trusted_keys)
+	    - Secondary trusted keyring (.secondary_trusted_keys)
+	    - Platform keyring (.platform)
+
+	  Socket options for configuration:
+	    - TQUIC_CERT_VERIFY_MODE: Set verification mode
+	    - TQUIC_EXPECTED_HOSTNAME: Override SNI for hostname check
+
+	  WARNING: Disabling this option or setting verify mode to NONE
+	  leaves connections vulnerable to MITM attacks. Only disable
+	  for testing in controlled environments.
+
+	  If unsure, say Y.
+
+config TQUIC_CRYPTO_HW_OFFLOAD
+	bool "TQUIC Hardware Crypto Offload Detection"
+	depends on TQUIC_CRYPTO
+	depends on X86
+	default y
+	help
+	  Enable hardware crypto offload detection and algorithm selection
+	  for TQUIC packet encryption/decryption. This provides automatic
+	  selection of the most efficient implementation based on detected
+	  CPU capabilities.
+
+	  Detected CPU features:
+	    - AES-NI:      Hardware AES acceleration
+	    - PCLMULQDQ:   Carry-less multiplication for GCM
+	    - AVX2:        Advanced Vector Extensions 2
+	    - AVX-512:     512-bit SIMD for batch processing
+	    - VAES:        Vector AES (AVX-512 accelerated)
+	    - VPCLMULQDQ:  Vector PCLMULQDQ for parallel GCM
+	    - SHA-NI:      Hardware SHA acceleration
+
+	  Implementation selection:
+	    - AES-GCM: Prefers AVX-512+VAES+VPCLMULQDQ, falls back to
+	      AES-NI+PCLMULQDQ, then generic software
+	    - ChaCha20-Poly1305: Prefers AVX-512, then AVX2, then generic
+
+	  Additional features:
+	    - Batch encryption for AVX-512 (up to 16 packets in parallel)
+	    - Per-CPU statistics tracking
+	    - /proc/net/tquic/crypto_caps for capability inspection
+	    - Intel QAT hardware offload support (if CONFIG_CRYPTO_DEV_QAT)
+
+	  Statistics exposed via proc:
+	    - Operations per implementation type
+	    - Total bytes encrypted/decrypted
+	    - Batch operation counts
+
+	  This option adds minimal overhead and is recommended for best
+	  cryptographic performance on x86 systems.
+
+	  If unsure, say Y.
+
+config TQUIC_IPV6
+	bool "TQUIC IPv6 support"
+	depends on TQUIC_CORE
+	depends on IPV6=y
+	default y
+	help
+	  Enable IPv6 support for TQUIC connections. This allows
+	  TQUIC to use IPv6 paths for WAN bonding alongside IPv4.
+
+	  Features include:
+	    - Full IPv6 socket operations with inet6_connection_sock
+	    - IPv6 address handling in paths with dual-stack support
+	    - IPv6 UDP tunnel integration
+	    - IPv6 flow label handling for consistent routing
+	    - IPv6 extension headers consideration
+	    - Path MTU Discovery for IPv6 (RFC 8201)
+	    - IPv6-specific setsockopt/getsockopt options
+	    - Happy Eyeballs support (RFC 8305) for preferring IPv6
+	      with fast IPv4 fallback when IPv6 is unavailable
+
+	  Happy Eyeballs (RFC 8305) enables TQUIC to prefer IPv6
+	  connections while quickly falling back to IPv4 if IPv6
+	  connectivity is broken or too slow, improving connection
+	  setup time in dual-stack environments.
+
+	  If unsure, say Y.
+
+config TQUIC_DIAG
+	tristate "TQUIC connection diagnostics"
+	depends on TQUIC_CORE
+	depends on INET_DIAG
+	def_tristate INET_DIAG
+	help
+	  Support for TQUIC socket diagnostics via the sock_diag
+	  netlink interface. This enables tools like ss to display
+	  TQUIC connection information.
+
+config TQUIC_QLOG
+	tristate "TQUIC Qlog Tracing (draft-ietf-quic-qlog)"
+	depends on TQUIC_CORE
+	default y
+	help
+	  Enable qlog tracing for QUIC connections per the IETF qlog
+	  specification (draft-ietf-quic-qlog-main-schema and
+	  draft-ietf-quic-qlog-quic-events).
+
+	  Qlog provides structured event logging for:
+	    - Connectivity: Connection start/close, state transitions
+	    - Transport: Packet sent/received/dropped, frame processing
+	    - Recovery: CC metrics, congestion state, loss detection
+	    - Security: Key updates and retirements
+
+	  Output modes:
+	    - Ring buffer: Store events in memory for later retrieval
+	    - Netlink: Real-time streaming to userspace applications
+
+	  Events are logged in JSON-SEQ format compatible with qlog
+	  analysis tools like qvis (https://qvis.quictools.info/).
+
+	  Configuration via socket options:
+	    - TQUIC_QLOG_ENABLE: Enable with mode and event mask
+	    - TQUIC_QLOG_FILTER: Update event filter dynamically
+	    - TQUIC_QLOG_STATS: Get logging statistics
+
+	  To compile this as a module, choose M here: the module will
+	  be called tquic_qlog.
+
+	  If unsure, say Y.
+
+config TQUIC_NETFILTER
+	tristate "TQUIC Netfilter integration"
+	depends on TQUIC_CORE
+	depends on NETFILTER
+	default y
+	help
+	  Enable Netfilter integration for TQUIC. This provides:
+	    - QUIC connection tracking for stateful firewalls
+	    - Support for QUIC-aware NAT traversal
+	    - Connection state inspection via /proc/net/tquic_conntrack
+	    - Integration with existing netfilter rules
+
+	  This is important for TQUIC WAN bonding scenarios where
+	  firewalls or NAT devices are present in the network path.
+
+	  To compile this as a module, choose M here: the module will
+	  be called tquic_nf.
+
+	  If unsure, say Y.
+
+config TQUIC_BPF
+	bool "TQUIC BPF struct_ops for pluggable schedulers"
+	depends on TQUIC_SCHEDULER
+	depends on BPF_SYSCALL
+	depends on BPF_JIT
+	default y
+	help
+	  Enable BPF struct_ops support for TQUIC path schedulers.
+	  This allows writing custom path scheduling algorithms in BPF C
+	  and loading them at runtime, similar to TCP's BPF congestion
+	  control support.
+
+	  With this enabled, you can implement custom scheduling policies
+	  that consider factors like:
+	    - Path RTT and bandwidth estimates
+	    - Loss rates and congestion state
+	    - Application-specific priorities
+	    - Custom load balancing algorithms
+
+	  BPF schedulers are safer than kernel modules as they run in
+	  the BPF sandbox with verified safety guarantees.
+
+	  If unsure, say Y.
+
+config TQUIC_DEBUGFS
+	bool "TQUIC debugfs interface"
+	depends on TQUIC_CORE
+	depends on DEBUG_FS
+	help
+	  Export TQUIC debugging information via debugfs. This
+	  includes per-connection statistics, path information,
+	  and internal state for debugging purposes.
+
+	  If unsure, say N.
+
+config TQUIC_NAPI
+	bool "TQUIC NAPI polling support"
+	depends on TQUIC_CORE
+	default y
+	help
+	  Enable NAPI (New API) polling mode for TQUIC. NAPI reduces
+	  interrupt overhead by polling for packets in softirq context,
+	  providing better performance at high packet rates.
+
+	  Features include:
+	    - Per-socket NAPI polling for receive path
+	    - Busy polling support (sk_busy_loop) for ultra-low latency
+	    - SO_BUSY_POLL socket option integration
+	    - Per-CPU NAPI instances for multi-queue NICs
+	    - Adaptive interrupt coalescing
+	    - Statistics via /proc/net/tquic_napi
+
+	  When enabled, TQUIC will use NAPI for packet reception which
+	  can significantly reduce CPU overhead at high packet rates
+	  and improve latency consistency.
+
+	  Busy polling allows applications to poll for data without
+	  sleeping, reducing latency for latency-sensitive workloads
+	  at the cost of increased CPU usage.
+
+	  If unsure, say Y.
+
+config TQUIC_KUNIT_TEST
+	tristate "TQUIC KUnit tests" if !KUNIT_ALL_TESTS
+	depends on TQUIC_CORE
+	depends on KUNIT
+	default KUNIT_ALL_TESTS
+	help
+	  KUnit tests for the TQUIC subsystem covering core protocol
+	  functionality, path management, and congestion control.
+
+	  Only useful for kernel developers running KUnit test harness
+	  and not for inclusion into a production build.
+
+	  For more information on KUnit and unit tests in general,
+	  refer to the KUnit documentation in Documentation/dev-tools/kunit/.
+
+	  If unsure, say N.
+
+config TQUIC_MULTIPATH
+	tristate "TQUIC Multipath Extension (RFC 9369)"
+	depends on TQUIC_WAN_BONDING
+	default y
+	help
+	  Enable the QUIC Multipath Extension as specified in RFC 9369.
+	  This provides standardized multipath support with:
+
+	    - PATH_ABANDON frame (0x17): Graceful path closure
+	    - MP_NEW_CONNECTION_ID (0x40): Path-specific CID issuance
+	    - MP_RETIRE_CONNECTION_ID (0x41): Path-specific CID retirement
+	    - MP_ACK (0x42/0x43): Per-path acknowledgments
+	    - PATH_STATUS (0x44): Path availability signaling
+
+	  Transport parameters:
+	    - enable_multipath (0x0f00): Negotiate multipath capability
+	    - initial_max_paths (0x0f01): Maximum concurrent paths
+
+	  This extension allows interoperability with other RFC 9369
+	  compliant QUIC implementations and provides standardized
+	  multipath semantics for WAN bonding.
+
+	  To compile this as a module, choose M here: the module will
+	  be called tquic_multipath.
+
+	  If using TQUIC for multipath WAN bonding, say Y.
+
+config TQUIC_BDP_FRAME
+	tristate "TQUIC BDP Frame Extension (draft-kuhn-quic-bdpframe-extension-05)"
+	depends on TQUIC_CORE
+	depends on TQUIC_CONG
+	select CRYPTO_HASH
+	select CRYPTO_HMAC
+	select CRYPTO_SHA256
+	default m
+	help
+	  Enable the BDP (Bandwidth-Delay Product) Frame extension for QUIC.
+	  This extension allows endpoints to exchange path characteristics
+	  observed during previous connections, enabling "Careful Resume" of
+	  congestion control state.
+
+	  Features:
+	    - BDP Frame (0x1f): Carries BDP, cwnd, RTT, and lifetime
+	    - HMAC-SHA256 authentication for security
+	    - Careful Resume algorithm for safe CC state restoration
+	    - Endpoint token for server identification
+	    - Gradual cwnd increase with path validation
+
+	  Transport parameter:
+	    - enable_bdp_frame (provisional): Negotiate BDP frame support
+
+	  Careful Resume phases:
+	    - Reconnection: Initial path validation
+	    - Unvalidated: Gradual cwnd increase toward saved value
+	    - Safe Retreat: Fallback if path changed significantly
+	    - Normal: Validation complete, normal CC operation
+
+	  This is useful for:
+	    - Faster connection startup after resumption
+	    - Reduced slow-start overhead on known paths
+	    - Better performance for mobile/roaming scenarios
+
+	  To compile this as a module, choose M here: the module will
+	  be called tquic_bdp_frame.
+
+	  If unsure, say M.
+
+config TQUIC_CONG_DATA
+	tristate "TQUIC Congestion Control Data Exchange (draft-yuan-quic-congestion-data-00)"
+	depends on TQUIC_CORE
+	depends on TQUIC_CONG
+	select CRYPTO_HASH
+	select CRYPTO_HMAC
+	select CRYPTO_SHA256
+	default m
+	help
+	  Enable the Congestion Control Data exchange extension for QUIC.
+	  This extension allows endpoints to exchange congestion control state
+	  information for connection resumption optimization.
+
+	  Features:
+	    - CONGESTION_DATA Frame (provisional): Carries BWE, RTT, loss rate,
+	      cwnd, ssthresh, pacing rate, and delivery rate
+	    - HMAC-SHA256 authentication for security
+	    - Careful Resume algorithm for safe CC state restoration
+	    - Sequence number tracking for ordering/deduplication
+	    - Privacy controls (full, partial, minimal, disabled)
+	    - 0-RTT integration for connection resumption
+
+	  Transport parameter:
+	    - enable_cong_data (0xff0cd002): Negotiate cong data support
+
+	  Careful Resume phases:
+	    - Validating: Verify RTT matches saved data
+	    - Ramping: Gradual cwnd increase toward target
+	    - Complete: Validation successful, normal CC operation
+	    - Retreated: Safe fallback if path changed significantly
+
+	  This is useful for:
+	    - Faster connection startup after resumption
+	    - Reduced slow-start overhead on known paths
+	    - Better performance for mobile/roaming scenarios
+	    - Cross-connection CC state sharing (server-to-client hints)
+
+	  Unlike BDP Frame Extension, this extension:
+	    - Uses different frame format with more metrics
+	    - Supports per-frame privacy controls
+	    - Provides explicit sequence numbers for ordering
+
+	  To compile this as a module, choose M here: the module will
+	  be called tquic_cong_data.
+
+	  If unsure, say M.
+
+config TQUIC_SECURITY
+	tristate "TQUIC Security Components - QUIC-Exfil Mitigation (draft-iab-quic-exfil)"
+	depends on TQUIC_CORE
+	default y
+	help
+	  Enable advanced security components for TQUIC including defense
+	  mechanisms against timing side-channel information leakage attacks
+	  as described in draft-iab-quic-exfil.
+
+	  Components included:
+
+	    - Timing Normalization: Adds controlled random delays to packet
+	      processing to prevent timing-based information leakage. Delays
+	      are configurable per protection level.
+
+	    - Constant-Time Operations: Provides constant-time implementations
+	      of security-critical operations (CID validation, packet number
+	      decoding, memory comparison) to prevent timing side-channel attacks.
+
+	    - Traffic Analysis Protection: Implements padding and traffic shaping
+	      to prevent flow analysis and fingerprinting:
+	        * Random padding up to MTU
+	        * Block-size padding (128, 256, 512, 1024 bytes)
+	        * Decoy traffic generation
+	        * Packet batching
+
+	    - Spin Bit Randomization: Random spin bit values to prevent RTT
+	      inference by network observers:
+	        * Probabilistic randomization
+	        * Spin bit freezing
+	        * Full randomization (paranoid mode)
+
+	    - Packet Timing Jitter: Adds configurable random jitter to outgoing
+	      packets to mask traffic patterns:
+	        * Uniform distribution
+	        * Gaussian distribution
+	        * Exponential distribution
+	        * Adaptive jitter based on traffic
+
+	  Protection levels (configurable via sysctl):
+	    - NONE: Disabled (maximum performance)
+	    - LOW: Minimal protection (low overhead)
+	    - MEDIUM: Balanced protection (default)
+	    - HIGH: Maximum protection (moderate overhead)
+	    - PARANOID: Defense-in-depth (significant overhead)
+
+	  Sysctl parameters under /proc/sys/net/tquic/security/:
+	    - exfil_level: Global protection level (0-4)
+	    - exfil_timing_delay_us: Maximum timing delay (microseconds)
+	    - exfil_padding_strategy: Padding strategy (0-3)
+	    - exfil_pad_probability: Padding probability (0-100%)
+	    - exfil_spin_mode: Spin bit randomization mode (0-3)
+	    - exfil_jitter_min_us: Minimum jitter (microseconds)
+	    - exfil_jitter_max_us: Maximum jitter (microseconds)
+
+	  Reference: draft-iab-quic-exfil-01
+	  https://datatracker.ietf.org/doc/draft-iab-quic-exfil/
+
+	  To compile this as a module, choose M here: the module will
+	  be called tquic_security.
+
+	  If security against traffic analysis is important, say Y.
+	  If unsure, say Y.
+
+config TQUIC_FEC
+	tristate "TQUIC Forward Error Correction (draft-zheng-quic-fec-extension-01)"
+	depends on TQUIC_CORE
+	default m
+	help
+	  Enable Forward Error Correction (FEC) for QUIC. FEC allows
+	  recovery of lost packets without waiting for retransmission,
+	  reducing latency in lossy network conditions.
+
+	  This module implements the QUIC FEC extension as specified in
+	  draft-zheng-quic-fec-extension-01.
+
+	  FEC Schemes supported:
+	    - XOR: Simple single-packet recovery, low overhead
+	    - Reed-Solomon GF(2^8): Multi-packet recovery, moderate overhead
+	    - Reed-Solomon GF(2^16): High recovery capability, higher overhead
+
+	  Frame types:
+	    - FEC_REPAIR (0xfc00): Contains repair symbols
+	    - FEC_SOURCE_INFO (0xfc01): Identifies source packets
+
+	  Transport parameters:
+	    - enable_fec (0xff0f000): Enable FEC support
+	    - fec_scheme (0xff0f001): Preferred FEC scheme
+	    - max_source_symbols (0xff0f002): Max symbols per block
+
+	  Features:
+	    - Adaptive FEC rate based on observed loss
+	    - Configurable source block sizes (2-255 symbols)
+	    - Reed-Solomon with Galois field arithmetic
+	    - Berlekamp-Massey decoding for erasure recovery
+	    - Integration with loss detection and scheduling
+
+	  This is particularly useful for:
+	    - Real-time communication (VoIP, video conferencing)
+	    - Satellite and long-distance links with high latency
+	    - Mobile networks with burst losses
+	    - Gaming and other latency-sensitive applications
+
+	  To compile this as a module, choose M here: the module will
+	  be called tquic_fec.
+
+	  If unsure, say M.
+
+config TQUIC_HTTP3
+	tristate "TQUIC HTTP/3 support (RFC 9114)"
+	depends on TQUIC_CORE
+	default m
+	help
+	  Enable HTTP/3 protocol support for TQUIC. HTTP/3 is the
+	  HTTP mapping over QUIC as specified in RFC 9114.
+
+	  This module provides:
+	    - HTTP/3 frame parsing and generation
+	    - SETTINGS negotiation
+	    - Control stream management
+	    - Server push support (PUSH_PROMISE, CANCEL_PUSH)
+	    - Graceful shutdown (GOAWAY)
+
+	  HTTP/3 Frame Types supported:
+	    - DATA (0x00): Payload data
+	    - HEADERS (0x01): QPACK-compressed headers
+	    - CANCEL_PUSH (0x03): Cancel server push
+	    - SETTINGS (0x04): Configuration parameters
+	    - PUSH_PROMISE (0x05): Server push announcement
+	    - GOAWAY (0x07): Graceful shutdown
+	    - MAX_PUSH_ID (0x0d): Push flow control
+
+	  SETTINGS parameters:
+	    - QPACK_MAX_TABLE_CAPACITY (0x01)
+	    - MAX_FIELD_SECTION_SIZE (0x06)
+	    - QPACK_BLOCKED_STREAMS (0x07)
+
+	  Note: Full QPACK (RFC 9204) support requires CONFIG_TQUIC_HTTP3_QPACK.
+
+	  To compile this as a module, choose M here: the module will
+	  be called tquic_http3.
+
+	  If unsure, say M.
+
+config TQUIC_HTTP3_QPACK
+	bool "TQUIC QPACK header compression (RFC 9204)"
+	depends on TQUIC_HTTP3
+	default y
+	help
+	  Enable QPACK header compression for HTTP/3. QPACK provides
+	  efficient encoding of HTTP header fields using static and
+	  dynamic tables.
+
+	  Features:
+	    - Static table with 99 predefined header fields
+	    - Dynamic table for connection-specific entries
+	    - Huffman encoding for string literals
+	    - Encoder/decoder stream management
+
+	  QPACK is required for efficient HTTP/3 header transmission.
+	  Disabling this limits HTTP/3 to literal header encoding only.
+
+	  If unsure, say Y.
+
+config TQUIC_WEBTRANSPORT
+	bool "TQUIC WebTransport support (draft-ietf-webtrans-http3)"
+	depends on TQUIC_HTTP3
+	default y
+	help
+	  Enable WebTransport support over HTTP/3. WebTransport provides
+	  bidirectional client-server communication using QUIC streams
+	  and datagrams, initiated via an HTTP/3 CONNECT request.
+
+	  Features:
+	    - WebTransport session establishment via HTTP/3 CONNECT
+	    - Bidirectional streams for reliable data transfer
+	    - Unidirectional streams for server/client push
+	    - Datagrams for unreliable real-time data
+	    - Session capsules (CLOSE_WEBTRANSPORT_SESSION, DRAIN)
+
+	  Use cases:
+	    - Real-time gaming with mixed reliability requirements
+	    - Live streaming with low-latency feedback
+	    - IoT applications requiring bidirectional communication
+	    - WebRTC alternative for browser-to-server communication
+
+	  If using HTTP/3 for WebTransport applications, say Y.
+	  If unsure, say Y.
+
+config TQUIC_IO_URING
+	bool "TQUIC io_uring support"
+	depends on TQUIC_CORE
+	depends on IO_URING
+	default y
+	help
+	  Enable io_uring integration for TQUIC sockets. This provides
+	  high-performance async I/O with minimal syscall overhead.
+
+	  Features include:
+	    - TQUIC-specific send/recv operations with stream awareness
+	    - Multishot receive for continuous packet reception
+	    - Registered buffers for zero-copy I/O
+	    - SQPOLL integration for kernel-side polling
+	    - Completion batching to reduce overhead
+
+	  When enabled, TQUIC sockets can be used with io_uring for
+	  significantly improved performance in high-throughput scenarios.
+	  The SQPOLL mode eliminates syscall overhead by having a kernel
+	  thread poll the submission queue.
+
+	  Socket options:
+	    - TQUIC_URING_SQPOLL: Enable/disable SQPOLL mode
+	    - TQUIC_URING_CQE_BATCH: Set completion batching threshold
+	    - TQUIC_URING_BUF_RING: Configure buffer rings for zero-copy
+
+	  Performance benefits:
+	    - Reduced syscall overhead via batched submission
+	    - Zero-copy I/O with registered buffers
+	    - Multishot receive eliminates per-packet re-arming
+	    - SQPOLL provides sub-microsecond latency
+
+	  If you plan to use io_uring with TQUIC, say Y.
+	  If unsure, say Y.
+
+config TQUIC_MASQUE
+	tristate "TQUIC MASQUE support (RFC 9484 CONNECT-IP)"
+	depends on TQUIC_CORE
+	depends on TQUIC_HTTP3
+	default m
+	help
+	  Enable MASQUE (Multiplexed Application Substrate over QUIC Encryption)
+	  support for TQUIC, specifically CONNECT-IP per RFC 9484.
+
+	  CONNECT-IP provides IP proxying over HTTP/3, enabling:
+	    - IP tunnel establishment through QUIC connections
+	    - Address assignment (ADDRESS_ASSIGN/ADDRESS_REQUEST capsules)
+	    - Route advertisement (ROUTE_ADVERTISEMENT capsule)
+	    - IP packet forwarding via HTTP Datagrams (context ID 0)
+	    - Protocol filtering (ICMP, TCP, UDP, or any)
+	    - Minimum MTU enforcement (1280 for IPv6)
+
+	  Capsule Types (RFC 9484 Section 4):
+	    - ADDRESS_ASSIGN (0x01): Server assigns IP addresses to client
+	    - ADDRESS_REQUEST (0x02): Client requests IP address
+	    - ROUTE_ADVERTISEMENT (0x03): Server advertises reachable routes
+
+	  This is useful for:
+	    - VPN-like tunneling over QUIC
+	    - Corporate network access via proxies
+	    - Privacy-preserving IP proxying
+	    - Network access in restricted environments
+
+	  To compile this as a module, choose M here: the module will
+	  be called tquic_masque.
+
+	  If unsure, say M.
+
+config TQUIC_QUIC_LB
+	tristate "TQUIC QUIC-LB Load Balancer Support (draft-ietf-quic-load-balancers)"
+	depends on TQUIC_CORE
+	default m
+	help
+	  Enable QUIC-LB (Load Balancers) support for TQUIC as specified in
+	  draft-ietf-quic-load-balancers. QUIC-LB enables efficient load
+	  balancing of QUIC connections without terminating the encryption.
+
+	  Features:
+	    - Server ID encoding in Connection IDs
+	    - Config rotation for rolling deployments
+	    - Retry Service for address validation offload
+	    - Plaintext and encrypted CID modes
+
+	  CID encoding modes:
+	    - Plaintext: Server ID visible in CID (simplest)
+	    - Obfuscated: Server ID XORed with key
+	    - Stream Cipher: AES-CTR encrypted Server ID
+	    - Block Cipher: AES-ECB encrypted Server ID
+
+	  Server configuration:
+	    - Server ID length and value
+	    - Encryption keys and algorithms
+	    - Config ID for version management
+
+	  This is useful for:
+	    - Large-scale QUIC deployments with multiple servers
+	    - Hardware/software load balancers (F5, HAProxy, etc.)
+	    - CDN edge node routing
+	    - Anycast deployments
+
+	  To compile this as a module, choose M here: the module will
+	  be called tquic_quic_lb.
+
+	  If unsure, say M.
+
+config TQUIC_AF_XDP
+	tristate "TQUIC AF_XDP high-performance packet I/O"
+	depends on TQUIC_CORE
+	depends on XDP_SOCKETS
+	depends on BPF_SYSCALL
+	default n
+	help
+	  Enable AF_XDP (XDP sockets) integration for TQUIC to achieve
+	  kernel-bypass packet processing with 10x+ packet rate improvements.
+
+	  AF_XDP allows TQUIC to send and receive QUIC packets directly
+	  from userspace memory regions (UMEM), bypassing the normal
+	  kernel networking stack for maximum performance.
+
+	  Features:
+	    - Zero-copy packet reception via XDP redirect
+	    - Zero-copy packet transmission via XSK TX ring
+	    - UMEM management with reference counting
+	    - Copy mode fallback for driver compatibility
+	    - Automatic fallback to regular sockets if XDP not supported
+	    - XDP program for QUIC packet steering (ports 443, 4433, 8443)
+	    - Per-path XSK configuration for multipath bonding
+
+	  Operating modes (configurable via TQUIC_XDP_MODE socket option):
+	    - TQUIC_XDP_OFF: XDP disabled, use regular UDP socket
+	    - TQUIC_XDP_COPY: XDP copy mode (driver compatibility)
+	    - TQUIC_XDP_ZEROCOPY: XDP zero-copy (best performance)
+
+	  Requirements:
+	    - Network interface with XDP support (most modern NICs)
+	    - For zero-copy: NIC driver with AF_XDP zero-copy support
+	    - BPF_SYSCALL for XDP program loading
+
+	  Performance benefits:
+	    - 10-20x higher packet rates compared to regular sockets
+	    - Sub-microsecond latency for packet processing
+	    - Efficient batched I/O via ring buffers
+	    - CPU cache-friendly memory layout
+
+	  Use cases:
+	    - High-frequency trading over QUIC
+	    - High-throughput WAN bonding servers
+	    - Low-latency real-time applications
+	    - Network function virtualization (NFV)
+
+	  To compile this as a module, choose M here: the module will
+	    be called tquic_af_xdp.
+
+	  If unsure, say N.
+
+config TQUIC_OVER_TCP
+	tristate "TQUIC over TCP transport"
+	depends on TQUIC_CORE
+	default n
+	help
+	  Enable QUIC-over-TCP transport for TQUIC. This allows QUIC
+	  connections to run over TCP as a fallback when UDP is blocked
+	  or unreliable.
+
+	  This is useful for:
+	    - Networks that block UDP traffic
+	    - Debugging QUIC without UDP firewall issues
+	    - Environments requiring TCP-only transport
+
+	  Note: This adds latency compared to native UDP transport due
+	  to TCP's head-of-line blocking. Use only when UDP is unavailable.
+
+	  To compile this as a module, choose M here: the module will
+	  be called tquic_tcp.
+
+	  If unsure, say N.
+
+config TQUIC_OFFLOAD
+	tristate "TQUIC SmartNIC offload support"
+	depends on TQUIC_CORE
+	default n
+	help
+	  Enable SmartNIC hardware offload support for TQUIC. This allows
+	  QUIC packet processing to be offloaded to capable network
+	  interface cards for improved performance.
+
+	  Features:
+	    - Crypto offload (AES-GCM encryption/decryption)
+	    - Packet reassembly offload
+	    - Connection tracking offload
+
+	  Requires a SmartNIC with QUIC offload capabilities.
+
+	  If unsure, say N.
+
+config TQUIC_BENCH
+	tristate "TQUIC benchmark suite"
+	depends on TQUIC_CORE
+	depends on TQUIC_KUNIT_TEST
+	default n
+	help
+	  Enable the TQUIC benchmark suite for performance testing.
+	  This provides tools for measuring throughput, latency, and
+	  connection establishment rates.
+
+	  Only useful for kernel developers benchmarking TQUIC performance.
+
+	  If unsure, say N.
+
+config TQUIC_INTEROP_TEST
+	tristate "TQUIC interoperability testing framework"
+	depends on TQUIC_CORE
+	depends on TQUIC_KUNIT_TEST
+	default n
+	help
+	  Enable the TQUIC interoperability testing framework. This
+	  provides infrastructure for running QUIC interop tests
+	  against other implementations per the quic-interop-runner
+	  test suite.
+
+	  Test categories include:
+	    - RFC 9000 compliance tests
+	    - Connection establishment/migration
+	    - Stream operations and flow control
+	    - Multipath functionality
+
+	  Only useful for kernel developers testing QUIC interoperability.
+
+	  To compile this as a module, choose M here: the module will
+	  be called tquic_interop.
+
+	  If unsure, say N.
+
+config TQUIC_FUZZ
+	tristate "TQUIC fuzzing test framework"
+	depends on TQUIC_CORE
+	depends on TQUIC_KUNIT_TEST
+	default n
+	help
+	  Enable the TQUIC fuzzing framework for security testing.
+	  This provides infrastructure for fuzz testing QUIC packet
+	  parsing and protocol state machines.
+
+	  Features:
+	    - Packet mutation fuzzing
+	    - Protocol state fuzzing
+	    - Coverage-guided fuzzing support
+
+	  Only useful for kernel developers performing security testing.
+
+	  To compile this as a module, choose M here: the module will
+	  be called tquic_fuzz.
+
+	  If unsure, say N.

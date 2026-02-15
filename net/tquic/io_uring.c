@@ -1,0 +1,1407 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/*
+ * TQUIC io_uring Integration
+ *
+ * Copyright (c) 2026 Justin Adams <spotty118@gmail.com>
+ * Kernel implementation by Justin Adams <spotty118@gmail.com>
+ *
+ * Provides high-performance async I/O for TQUIC using io_uring.
+ * This implementation follows the patterns established in io_uring/net.c
+ * while providing TQUIC-specific optimizations.
+ *
+ * Features:
+ *   - TQUIC-specific send/recv operations with stream awareness
+ *   - Multishot receive for continuous packet reception
+ *   - Registered buffers for zero-copy I/O
+ *   - SQPOLL integration for lowest latency
+ *   - Completion batching to reduce overhead
+ */
+
+#include <linux/module.h>
+#include <linux/kernel.h>
+#include <linux/slab.h>
+#include <linux/net.h>
+#include <linux/socket.h>
+#include <linux/file.h>
+#include <linux/uio.h>
+#include <linux/vmalloc.h>
+#include <linux/overflow.h>
+#include <linux/io_uring.h>
+#include <linux/io_uring_types.h>
+#include <net/sock.h>
+#include <net/tquic.h>
+
+#include <io_uring/io_uring.h>
+
+#include "tquic_debug.h"
+#include "protocol.h"
+#include "io_uring.h"
+
+/*
+ * =============================================================================
+ * Constants and Limits
+ * =============================================================================
+ */
+
+/* Maximum number of multishot receive retries before yielding */
+#define TQUIC_MSHOT_MAX_RETRY		32
+
+/* Default buffer size for buffer rings */
+#define TQUIC_URING_DEFAULT_BUF_SIZE	4096
+
+/* Maximum buffer rings per connection */
+#define TQUIC_URING_MAX_BUF_RINGS	16
+
+/* Default CQE batch size (0 = no batching) */
+#define TQUIC_URING_DEFAULT_BATCH_SIZE	0
+
+/*
+ * =============================================================================
+ * Internal Async Data Structures
+ * =============================================================================
+ */
+
+/**
+ * struct io_tquic_async_data - Async operation data
+ * @iov: I/O vectors
+ * @fast_iov: Fast path single iovec
+ * @nr_segs: Number of iovec segments
+ * @msg: Message header for sendmsg/recvmsg
+ * @addr: Address storage
+ *
+ * Cached async data to avoid repeated allocations.
+ */
+struct io_tquic_async_data {
+	struct iovec		*iov;
+	struct iovec		fast_iov;
+	unsigned int		nr_segs;
+	struct msghdr		msg;
+	struct sockaddr_storage	addr;
+};
+
+/*
+ * =============================================================================
+ * Helper Functions
+ * =============================================================================
+ */
+
+/**
+ * io_tquic_get_socket - Get TQUIC socket from io_kiocb
+ * @req: io_uring request
+ *
+ * Return: TQUIC socket, or ERR_PTR on error
+ */
+static struct tquic_sock *io_tquic_get_socket(struct io_kiocb *req)
+{
+	struct socket *sock;
+	struct sock *sk;
+
+	sock = sock_from_file(req->file);
+	if (!sock)
+		return ERR_PTR(-ENOTSOCK);
+
+	sk = sock->sk;
+	if (!sk || sk->sk_protocol != IPPROTO_TQUIC)
+		return ERR_PTR(-ENOTSOCK);
+
+	return tquic_sk(sk);
+}
+
+/*
+ * io_tquic_get_connected_conn - Get a connected conn with ref held
+ *
+ * io_uring ops can race with socket teardown (tquic_destroy_sock) which
+ * WRITE_ONCE()'s tsk->conn to NULL. Always READ_ONCE() the pointer and
+ * take a ref before dereferencing conn fields.
+ */
+static struct tquic_connection *io_tquic_get_connected_conn(struct tquic_sock *tsk)
+{
+	struct sock *sk = (struct sock *)tsk;
+	struct tquic_connection *conn;
+
+	if (sk->sk_state != TCP_ESTABLISHED)
+		return ERR_PTR(-ENOTCONN);
+
+	conn = tquic_sock_conn_get(tsk);
+	if (!conn)
+		return ERR_PTR(-ENOTCONN);
+
+	if (READ_ONCE(conn->state) != TQUIC_CONN_CONNECTED) {
+		tquic_conn_put(conn);
+		return ERR_PTR(-ENOTCONN);
+	}
+
+	return conn;
+}
+
+/**
+ * io_tquic_alloc_async_data - Allocate async data for request
+ * @req: io_uring request
+ *
+ * Return: Allocated async data, or NULL on failure
+ */
+static struct io_tquic_async_data *io_tquic_alloc_async_data(
+	struct io_kiocb *req)
+{
+	struct io_tquic_async_data *data;
+
+	data = kzalloc(sizeof(*data), GFP_KERNEL);
+	if (!data)
+		return NULL;
+
+	req->async_data = data;
+	req->flags |= REQ_F_ASYNC_DATA;
+
+	return data;
+}
+
+/**
+ * io_tquic_free_async_data - Free async data
+ * @req: io_uring request
+ */
+static void io_tquic_free_async_data(struct io_kiocb *req)
+{
+	struct io_tquic_async_data *data = req->async_data;
+
+	if (!data)
+		return;
+
+	if (data->iov && data->iov != &data->fast_iov)
+		kfree(data->iov);
+
+	kfree(data);
+	req->async_data = NULL;
+	req->flags &= ~REQ_F_ASYNC_DATA;
+}
+
+/*
+ * =============================================================================
+ * Send Operation Implementation
+ * =============================================================================
+ */
+
+/**
+ * io_tquic_send_prep - Prepare TQUIC send operation
+ */
+int io_tquic_send_prep(struct io_kiocb *req, const struct io_uring_sqe *sqe)
+{
+	struct io_tquic_send *sr;
+	struct tquic_sock *tsk;
+
+	/* Validate unused fields */
+	if (sqe->buf_index || sqe->splice_fd_in)
+		return -EINVAL;
+
+	/* Get socket and validate */
+	tsk = io_tquic_get_socket(req);
+	if (IS_ERR(tsk))
+		return PTR_ERR(tsk);
+
+	/* Allocate command data in req */
+	sr = io_kiocb_to_cmd(req, struct io_tquic_send);
+	sr->sk = tsk;
+	sr->flags = READ_ONCE(sqe->msg_flags);
+	sr->stream_id = READ_ONCE(sqe->off);  /* Use offset field for stream ID */
+	sr->done_io = 0;
+	sr->zc.enabled = false;
+
+	/* Cache buffer address and length from SQE */
+	sr->iov = (struct iovec *)(unsigned long)READ_ONCE(sqe->addr);
+	sr->iovcnt = READ_ONCE(sqe->len);
+
+	/* Mark as needing async execution if non-blocking would fail */
+	if (!(sr->flags & MSG_DONTWAIT))
+		req->flags |= REQ_F_FORCE_ASYNC;
+
+	return 0;
+}
+
+/**
+ * io_tquic_send - Execute TQUIC send operation
+ */
+int io_tquic_send(struct io_kiocb *req, unsigned int issue_flags)
+{
+	struct io_tquic_send *sr = io_kiocb_to_cmd(req, struct io_tquic_send);
+	struct tquic_sock *tsk = sr->sk;
+	struct sock *sk = (struct sock *)tsk;
+	struct tquic_connection *conn = NULL;
+	struct tquic_stream *stream;
+	struct tquic_uring_ctx *uctx;
+	struct msghdr msg = {};
+	struct iovec iov;
+	bool stream_ref_held = false;
+	int ret;
+
+	/* Verify still connected */
+	conn = io_tquic_get_connected_conn(tsk);
+	if (IS_ERR(conn)) {
+		ret = PTR_ERR(conn);
+		conn = NULL;
+		goto done;
+	}
+
+	/* Get target stream */
+	if (sr->stream_id == 0) {
+		stream = tquic_sock_default_stream_get_or_open(tsk, conn);
+		if (!stream) {
+			bool no_stream_credit;
+
+			spin_lock_bh(&conn->lock);
+			no_stream_credit =
+				(conn->next_stream_id_bidi / 4 >= conn->max_streams_bidi);
+			spin_unlock_bh(&conn->lock);
+			ret = no_stream_credit ? -EAGAIN : -ENOMEM;
+			goto done;
+		}
+		stream_ref_held = true;
+	} else {
+		/* Look up specific stream by ID in connection's stream tree */
+		stream = tquic_conn_stream_lookup(conn, sr->stream_id);
+		if (!stream) {
+			/* Stream doesn't exist - check if auto-create is allowed */
+			if (sr->flags & MSG_MORE) {
+				/* Create new stream on demand */
+				bool is_bidi = !(sr->stream_id & 0x02);
+				stream = tquic_stream_open(conn, is_bidi);
+				if (!stream) {
+					ret = -ENOMEM;
+					goto done;
+				}
+				if (!tquic_stream_get(stream)) {
+					ret = -ENOTCONN;
+					goto done;
+				}
+				stream_ref_held = true;
+			} else {
+				ret = -ENOENT;
+				goto done;
+			}
+		} else {
+			stream_ref_held = true;
+		}
+	}
+
+	/* Set up message from prep-phase cached values */
+	iov.iov_base = (void __user *)(unsigned long)sr->iov;
+	iov.iov_len = sr->iovcnt;
+
+	iov_iter_init(&msg.msg_iter, ITER_SOURCE, &iov, 1, iov.iov_len);
+	msg.msg_flags = sr->flags;
+
+	if (issue_flags & IO_URING_F_NONBLOCK)
+		msg.msg_flags |= MSG_DONTWAIT;
+
+	/* Perform send */
+	ret = tquic_sendmsg(sk, &msg, iov.iov_len);
+
+	if (ret == -EAGAIN && !(issue_flags & IO_URING_F_NONBLOCK)) {
+		/* Need to retry in blocking context */
+		if (stream_ref_held)
+			tquic_stream_put(stream);
+		tquic_conn_put(conn);
+		return IOU_RETRY;
+	}
+
+	/* Update statistics */
+	uctx = READ_ONCE(conn->uring_ctx);
+	if (uctx && ret > 0) {
+		uctx->stats.sends++;
+	}
+
+done:
+	if (stream_ref_held)
+		tquic_stream_put(stream);
+	if (conn)
+		tquic_conn_put(conn);
+	io_req_set_res(req, ret, 0);
+	return IOU_COMPLETE;
+}
+
+/*
+ * =============================================================================
+ * Receive Operation Implementation
+ * =============================================================================
+ */
+
+/**
+ * io_tquic_recv_prep - Prepare TQUIC receive operation
+ */
+int io_tquic_recv_prep(struct io_kiocb *req, const struct io_uring_sqe *sqe)
+{
+	struct io_tquic_recv *sr;
+	struct tquic_sock *tsk;
+	u16 ioprio;
+
+	tsk = io_tquic_get_socket(req);
+	if (IS_ERR(tsk))
+		return PTR_ERR(tsk);
+
+	sr = io_kiocb_to_cmd(req, struct io_tquic_recv);
+	sr->sk = tsk;
+	sr->flags = READ_ONCE(sqe->msg_flags);
+	sr->stream_id = READ_ONCE(sqe->off);
+	sr->done_io = 0;
+	sr->addr = NULL;
+	sr->retry_count = 0;
+
+	/* Cache buffer address and length from SQE during prep phase.
+	 * Repurpose iov/iovcnt fields (unused in recv path) to avoid
+	 * exceeding io_cmd_data size limit.
+	 */
+	sr->iov = (struct iovec *)(unsigned long)READ_ONCE(sqe->addr);
+	sr->iovcnt = READ_ONCE(sqe->len);
+
+	/* Check for multishot mode */
+	ioprio = READ_ONCE(sqe->ioprio);
+	sr->multishot = !!(ioprio & IORING_RECV_MULTISHOT);
+
+	/* Multishot requires buffer selection */
+	if (sr->multishot && !(req->flags & REQ_F_BUFFER_SELECT)) {
+		sr->multishot = false;
+	}
+
+	if (!(sr->flags & MSG_DONTWAIT))
+		req->flags |= REQ_F_FORCE_ASYNC;
+
+	return 0;
+}
+
+/**
+ * io_tquic_recv - Execute TQUIC receive operation
+ */
+int io_tquic_recv(struct io_kiocb *req, unsigned int issue_flags)
+{
+	struct io_tquic_recv *sr = io_kiocb_to_cmd(req, struct io_tquic_recv);
+	struct tquic_sock *tsk = sr->sk;
+	struct sock *sk = (struct sock *)tsk;
+	struct tquic_connection *conn = NULL;
+	struct tquic_stream *stream;
+	struct tquic_uring_ctx *uctx;
+	struct msghdr msg = {};
+	struct iovec iov;
+	bool stream_ref_held = false;
+	int ret;
+
+	/* Verify still connected */
+	conn = io_tquic_get_connected_conn(tsk);
+	if (IS_ERR(conn)) {
+		ret = PTR_ERR(conn);
+		conn = NULL;
+		goto done;
+	}
+
+	/* Get source stream */
+	if (sr->stream_id == 0) {
+		stream = tquic_sock_default_stream_get(tsk);
+		if (stream)
+			stream_ref_held = true;
+	} else {
+		/* Look up specific stream by ID */
+		stream = tquic_conn_stream_lookup(conn, sr->stream_id);
+		if (stream)
+			stream_ref_held = true;
+	}
+
+	if (!stream) {
+		ret = 0;  /* No data available */
+		if (!(issue_flags & IO_URING_F_NONBLOCK)) {
+			tquic_conn_put(conn);
+			return IOU_RETRY;
+		}
+		goto done;
+	}
+
+	/* Set up receive buffer from prep-phase cached values */
+	iov.iov_base = (void __user *)(unsigned long)sr->iov;
+	iov.iov_len = sr->iovcnt;
+
+	iov_iter_init(&msg.msg_iter, ITER_DEST, &iov, 1, iov.iov_len);
+	msg.msg_flags = sr->flags;
+
+	if (issue_flags & IO_URING_F_NONBLOCK)
+		msg.msg_flags |= MSG_DONTWAIT;
+
+	/* Perform receive */
+	ret = tquic_recvmsg(sk, &msg, iov.iov_len, msg.msg_flags, NULL);
+
+	if (ret == -EAGAIN) {
+		if (!(issue_flags & IO_URING_F_NONBLOCK)) {
+			if (stream_ref_held)
+				tquic_stream_put(stream);
+			tquic_conn_put(conn);
+			return IOU_RETRY;
+		}
+	}
+
+	/* Update statistics */
+	uctx = READ_ONCE(conn->uring_ctx);
+	if (uctx && ret > 0) {
+		uctx->stats.recvs++;
+	}
+
+done:
+	if (stream_ref_held)
+		tquic_stream_put(stream);
+	if (conn)
+		tquic_conn_put(conn);
+	io_req_set_res(req, ret, 0);
+	return IOU_COMPLETE;
+}
+
+/**
+ * io_tquic_recv_multishot - Multishot receive operation
+ *
+ * Continues receiving data without re-arming until cancelled.
+ * Each received packet generates a CQE.
+ */
+int io_tquic_recv_multishot(struct io_kiocb *req, unsigned int issue_flags)
+{
+	struct io_tquic_recv *sr = io_kiocb_to_cmd(req, struct io_tquic_recv);
+	struct tquic_sock *tsk = sr->sk;
+	struct sock *sk = (struct sock *)tsk;
+	struct tquic_connection *conn;
+	struct tquic_stream *stream;
+	struct tquic_uring_ctx *uctx;
+	struct msghdr msg = {};
+	struct iovec iov;
+	int ret;
+	unsigned int cflags = 0;
+	bool stream_ref_held = false;
+
+	/* Verify still connected */
+	conn = io_tquic_get_connected_conn(tsk);
+	if (IS_ERR(conn)) {
+		ret = PTR_ERR(conn);
+		goto done_final;
+	}
+
+	/* Check retry limit */
+	if (sr->retry_count >= TQUIC_MSHOT_MAX_RETRY) {
+		/* Yield to other requests */
+		sr->retry_count = 0;
+		tquic_conn_put(conn);
+		return IOU_REQUEUE;
+	}
+
+	/* Get source stream */
+	stream = (sr->stream_id == 0) ? tquic_sock_default_stream_get(tsk) : NULL;
+	if (stream)
+		stream_ref_held = true;
+
+	if (!stream || skb_queue_empty(&stream->recv_buf)) {
+		if (!(issue_flags & IO_URING_F_NONBLOCK)) {
+			sr->retry_count = 0;
+			if (stream_ref_held)
+				tquic_stream_put(stream);
+			tquic_conn_put(conn);
+			return IOU_RETRY;
+		}
+		ret = -EAGAIN;
+		goto done_continue;
+	}
+
+	/* Set up receive buffer from prep-phase cached values */
+	iov.iov_base = (void __user *)(unsigned long)sr->iov;
+	iov.iov_len = sr->iovcnt;
+
+	iov_iter_init(&msg.msg_iter, ITER_DEST, &iov, 1, iov.iov_len);
+	msg.msg_flags = sr->flags | MSG_DONTWAIT;
+
+	/* Perform receive */
+	ret = tquic_recvmsg(sk, &msg, iov.iov_len, msg.msg_flags, NULL);
+
+	/* Update statistics */
+	uctx = READ_ONCE(conn->uring_ctx);
+	if (uctx) {
+		if (ret > 0) {
+			uctx->stats.recvs++;
+			uctx->stats.multishot_recvs++;
+		}
+	}
+
+	if (ret > 0) {
+		sr->retry_count++;
+
+		/* Post CQE with IORING_CQE_F_MORE to indicate more coming */
+		cflags |= IORING_CQE_F_MORE;
+		io_req_set_res(req, ret, cflags);
+
+		/* Continue multishot */
+		if (stream_ref_held)
+			tquic_stream_put(stream);
+		tquic_conn_put(conn);
+		return IOU_ISSUE_SKIP_COMPLETE;
+	}
+
+done_continue:
+	if (stream_ref_held)
+		tquic_stream_put(stream);
+	tquic_conn_put(conn);
+	if (ret == -EAGAIN || ret == 0) {
+		/* No more data available, wait */
+		sr->retry_count = 0;
+		return IOU_RETRY;
+	}
+
+done_final:
+	/* Error or connection closed - complete without MORE flag */
+	io_req_set_res(req, ret, 0);
+	return IOU_COMPLETE;
+}
+
+/*
+ * =============================================================================
+ * Sendmsg/Recvmsg Operations
+ * =============================================================================
+ */
+
+int io_tquic_sendmsg_prep(struct io_kiocb *req, const struct io_uring_sqe *sqe)
+{
+	struct io_tquic_sendmsg *sr;
+	struct tquic_sock *tsk;
+
+	tsk = io_tquic_get_socket(req);
+	if (IS_ERR(tsk))
+		return PTR_ERR(tsk);
+
+	sr = io_kiocb_to_cmd(req, struct io_tquic_sendmsg);
+	sr->sk = tsk;
+	sr->flags = READ_ONCE(sqe->msg_flags);
+	sr->stream_id = READ_ONCE(sqe->off);
+	sr->msg = NULL;
+
+	if (!(sr->flags & MSG_DONTWAIT))
+		req->flags |= REQ_F_FORCE_ASYNC;
+
+	return 0;
+}
+
+int io_tquic_sendmsg(struct io_kiocb *req, unsigned int issue_flags)
+{
+	struct io_tquic_sendmsg *sr = io_kiocb_to_cmd(req, struct io_tquic_sendmsg);
+	struct tquic_sock *tsk = sr->sk;
+	struct sock *sk = (struct sock *)tsk;
+	struct tquic_connection *conn = NULL;
+	struct io_tquic_async_data *data;
+	struct msghdr *msg;
+	int ret;
+
+	conn = io_tquic_get_connected_conn(tsk);
+	if (IS_ERR(conn)) {
+		ret = PTR_ERR(conn);
+		conn = NULL;
+		goto done;
+	}
+
+	/* Get or allocate async data */
+	data = req->async_data;
+	if (!data) {
+		data = io_tquic_alloc_async_data(req);
+		if (!data) {
+			ret = -ENOMEM;
+			goto done;
+		}
+	}
+
+	msg = &data->msg;
+	msg->msg_flags = sr->flags;
+
+	if (issue_flags & IO_URING_F_NONBLOCK)
+		msg->msg_flags |= MSG_DONTWAIT;
+
+	ret = tquic_sendmsg(sk, msg, msg->msg_iter.count);
+
+	if (ret == -EAGAIN && !(issue_flags & IO_URING_F_NONBLOCK)) {
+		tquic_conn_put(conn);
+		return IOU_RETRY;
+	}
+
+	done:
+	if (conn)
+		tquic_conn_put(conn);
+	io_tquic_free_async_data(req);
+	io_req_set_res(req, ret, 0);
+	return IOU_COMPLETE;
+}
+
+int io_tquic_recvmsg_prep(struct io_kiocb *req, const struct io_uring_sqe *sqe)
+{
+	struct io_tquic_recvmsg *sr;
+	struct tquic_sock *tsk;
+	u16 ioprio;
+
+	tsk = io_tquic_get_socket(req);
+	if (IS_ERR(tsk))
+		return PTR_ERR(tsk);
+
+	sr = io_kiocb_to_cmd(req, struct io_tquic_recvmsg);
+	sr->sk = tsk;
+	sr->flags = READ_ONCE(sqe->msg_flags);
+	sr->stream_id = READ_ONCE(sqe->off);
+	sr->msg = NULL;
+
+	ioprio = READ_ONCE(sqe->ioprio);
+	sr->multishot = !!(ioprio & IORING_RECV_MULTISHOT);
+
+	if (!(sr->flags & MSG_DONTWAIT))
+		req->flags |= REQ_F_FORCE_ASYNC;
+
+	return 0;
+}
+
+int io_tquic_recvmsg(struct io_kiocb *req, unsigned int issue_flags)
+{
+	struct io_tquic_recvmsg *sr = io_kiocb_to_cmd(req, struct io_tquic_recvmsg);
+	struct tquic_sock *tsk = sr->sk;
+	struct sock *sk = (struct sock *)tsk;
+	struct tquic_connection *conn = NULL;
+	struct io_tquic_async_data *data;
+	struct msghdr *msg;
+	int ret;
+
+	conn = io_tquic_get_connected_conn(tsk);
+	if (IS_ERR(conn)) {
+		ret = PTR_ERR(conn);
+		conn = NULL;
+		goto done;
+	}
+
+	/* Get or allocate async data */
+	data = req->async_data;
+	if (!data) {
+		data = io_tquic_alloc_async_data(req);
+		if (!data) {
+			ret = -ENOMEM;
+			goto done;
+		}
+	}
+
+	msg = &data->msg;
+	msg->msg_flags = sr->flags;
+
+	if (issue_flags & IO_URING_F_NONBLOCK)
+		msg->msg_flags |= MSG_DONTWAIT;
+
+	ret = tquic_recvmsg(sk, msg, msg->msg_iter.count, msg->msg_flags, NULL);
+
+	if (ret == -EAGAIN && !(issue_flags & IO_URING_F_NONBLOCK)) {
+		tquic_conn_put(conn);
+		return IOU_RETRY;
+	}
+
+	done:
+	if (conn)
+		tquic_conn_put(conn);
+	io_tquic_free_async_data(req);
+	io_req_set_res(req, ret, 0);
+	return IOU_COMPLETE;
+}
+
+/*
+ * =============================================================================
+ * Zero-Copy Send Operations
+ * =============================================================================
+ */
+
+int io_tquic_send_zc_prep(struct io_kiocb *req, const struct io_uring_sqe *sqe)
+{
+	struct io_tquic_send *sr;
+	struct tquic_sock *tsk;
+
+	tsk = io_tquic_get_socket(req);
+	if (IS_ERR(tsk))
+		return PTR_ERR(tsk);
+
+	sr = io_kiocb_to_cmd(req, struct io_tquic_send);
+	sr->sk = tsk;
+	sr->flags = READ_ONCE(sqe->msg_flags) | MSG_ZEROCOPY;
+	sr->stream_id = READ_ONCE(sqe->off);
+	sr->done_io = 0;
+	sr->zc.enabled = true;
+	sr->zc.notif_seq = 0;
+
+	/* Cache buffer address and length from SQE */
+	sr->iov = (struct iovec *)(unsigned long)READ_ONCE(sqe->addr);
+	sr->iovcnt = READ_ONCE(sqe->len);
+
+	req->flags |= REQ_F_FORCE_ASYNC;
+
+	return 0;
+}
+
+int io_tquic_send_zc(struct io_kiocb *req, unsigned int issue_flags)
+{
+	struct io_tquic_send *sr = io_kiocb_to_cmd(req, struct io_tquic_send);
+	struct tquic_sock *tsk = sr->sk;
+	struct sock *sk = (struct sock *)tsk;
+	struct tquic_connection *conn = NULL;
+	struct tquic_stream *stream;
+	struct tquic_uring_ctx *uctx;
+	struct msghdr msg = {};
+	struct iovec iov;
+	bool stream_ref_held = false;
+	int ret;
+
+	conn = io_tquic_get_connected_conn(tsk);
+	if (IS_ERR(conn)) {
+		ret = PTR_ERR(conn);
+		conn = NULL;
+		goto done;
+	}
+
+	/* Get target stream */
+	if (sr->stream_id == 0) {
+		stream = tquic_sock_default_stream_get_or_open(tsk, conn);
+		if (!stream) {
+			bool no_stream_credit;
+
+			spin_lock_bh(&conn->lock);
+			no_stream_credit =
+				(conn->next_stream_id_bidi / 4 >= conn->max_streams_bidi);
+			spin_unlock_bh(&conn->lock);
+			ret = no_stream_credit ? -EAGAIN : -ENOMEM;
+			goto done;
+		}
+		stream_ref_held = true;
+	} else {
+		/* Look up specific stream by ID in connection's stream tree */
+		stream = tquic_conn_stream_lookup(conn, sr->stream_id);
+		if (!stream) {
+			/* Stream doesn't exist - check if auto-create is allowed */
+			if (sr->flags & MSG_MORE) {
+				bool is_bidi = !(sr->stream_id & 0x02);
+
+					stream = tquic_stream_open(conn, is_bidi);
+					if (!stream) {
+						ret = -ENOMEM;
+						goto done;
+					}
+					if (!tquic_stream_get(stream)) {
+						ret = -ENOTCONN;
+						goto done;
+					}
+					stream_ref_held = true;
+				} else {
+					ret = -ENOENT;
+					goto done;
+				}
+			} else {
+				stream_ref_held = true;
+			}
+	}
+
+	/* Set up message with MSG_ZEROCOPY from prep-phase cached values */
+	iov.iov_base = (void __user *)(unsigned long)sr->iov;
+	iov.iov_len = sr->iovcnt;
+
+	iov_iter_init(&msg.msg_iter, ITER_SOURCE, &iov, 1, iov.iov_len);
+	msg.msg_flags = sr->flags;
+
+	/* Use TQUIC zero-copy sendmsg */
+	ret = tquic_sendmsg_zerocopy(sk, &msg, iov.iov_len, stream);
+
+	if (ret == -EAGAIN) {
+		if (stream_ref_held)
+			tquic_stream_put(stream);
+		tquic_conn_put(conn);
+		return IOU_RETRY;
+	}
+
+	/* Update statistics */
+	uctx = READ_ONCE(conn->uring_ctx);
+	if (uctx && ret > 0) {
+		uctx->stats.sends++;
+		uctx->stats.zc_sends++;
+	}
+
+done:
+	if (stream_ref_held)
+		tquic_stream_put(stream);
+	if (conn)
+		tquic_conn_put(conn);
+	io_req_set_res(req, ret, 0);
+	return IOU_COMPLETE;
+}
+
+void io_tquic_send_zc_cleanup(struct io_kiocb *req)
+{
+	/* Cleanup zero-copy resources if operation cancelled */
+	io_tquic_free_async_data(req);
+}
+
+/*
+ * =============================================================================
+ * Registered Buffer Ring Management
+ * =============================================================================
+ */
+
+struct tquic_io_buf_ring *tquic_io_buf_ring_create(
+	struct tquic_connection *conn,
+	size_t buf_size,
+	int buf_count,
+	int bgid)
+{
+	struct tquic_io_buf_ring *br;
+	size_t ring_size;
+	size_t br_alloc_sz, buf_alloc_sz;
+	int i;
+
+	if (buf_count <= 0 || buf_count > 32768)
+		return ERR_PTR(-EINVAL);
+
+	if (buf_size < 64 || buf_size > (1 << 20))
+		return ERR_PTR(-EINVAL);
+
+	br = kzalloc(sizeof(*br), GFP_KERNEL);
+	if (!br)
+		return ERR_PTR(-ENOMEM);
+
+	/* Calculate ring size (power of 2) */
+	ring_size = roundup_pow_of_two(buf_count);
+	br->mask = ring_size - 1;
+
+	/* Check for overflow in allocation sizes */
+	if (check_mul_overflow(sizeof(*br->br), ring_size, &br_alloc_sz) ||
+	    check_mul_overflow(buf_size, ring_size, &buf_alloc_sz)) {
+		kfree(br);
+		return ERR_PTR(-EOVERFLOW);
+	}
+
+	/* Allocate buffer ring structure */
+	br->br = kzalloc(br_alloc_sz, GFP_KERNEL);
+	if (!br->br) {
+		kfree(br);
+		return ERR_PTR(-ENOMEM);
+	}
+
+	/* Allocate buffer memory */
+	br->buf_base = vmalloc(buf_alloc_sz);
+	if (!br->buf_base) {
+		kfree(br->br);
+		kfree(br);
+		return ERR_PTR(-ENOMEM);
+	}
+
+	br->buf_size = buf_size;
+	br->buf_count = ring_size;
+	br->bgid = bgid;
+	br->head = 0;
+	br->tail = ring_size;  /* All buffers initially available */
+	spin_lock_init(&br->lock);
+
+	/* Initialize buffer entries with IDs only (no kernel addresses) */
+	for (i = 0; i < ring_size; i++) {
+		br->br->bufs[i].addr = 0;
+		br->br->bufs[i].len = buf_size;
+		br->br->bufs[i].bid = i;
+	}
+
+	tquic_dbg("created buffer ring bgid=%d count=%zu size=%zu\n",
+		 bgid, ring_size, buf_size);
+
+	return br;
+}
+EXPORT_SYMBOL_GPL(tquic_io_buf_ring_create);
+
+void tquic_io_buf_ring_destroy(struct tquic_io_buf_ring *br)
+{
+	if (!br)
+		return;
+
+	vfree(br->buf_base);
+	kfree(br->br);
+	kfree(br);
+}
+EXPORT_SYMBOL_GPL(tquic_io_buf_ring_destroy);
+
+/*
+ * Lockless SPSC ring operations.
+ *
+ * The buffer ring is used in a single-producer / single-consumer pattern:
+ * - Consumer (io_uring kernel side) calls get/advance
+ * - Producer (completion path) calls put
+ *
+ * Use smp_load_acquire / smp_store_release on head and tail to ensure
+ * correct ordering without a spinlock on every get/put.
+ */
+void *tquic_io_buf_ring_get(struct tquic_io_buf_ring *br, u16 *bid)
+{
+	void *buf;
+	u32 head, tail;
+
+	head = br->head;
+	tail = smp_load_acquire(&br->tail);
+
+	if (head == tail)
+		return NULL;
+
+	head &= br->mask;
+	*bid = br->br->bufs[head].bid;
+	/* Compute address from base + bid instead of storing kernel addr */
+	buf = br->buf_base + (size_t)*bid * br->buf_size;
+
+	smp_store_release(&br->head, br->head + 1);
+
+	return buf;
+}
+EXPORT_SYMBOL_GPL(tquic_io_buf_ring_get);
+
+void tquic_io_buf_ring_put(struct tquic_io_buf_ring *br, u16 bid)
+{
+	u32 tail;
+
+	if (!br || bid >= br->buf_count)
+		return;
+
+	tail = br->tail & br->mask;
+	br->br->bufs[tail].bid = bid;
+	br->br->bufs[tail].addr = 0;	/* Address computed from bid at get time */
+	br->br->bufs[tail].len = br->buf_size;
+
+	smp_store_release(&br->tail, br->tail + 1);
+}
+EXPORT_SYMBOL_GPL(tquic_io_buf_ring_put);
+
+void tquic_io_buf_ring_advance(struct tquic_io_buf_ring *br, unsigned int count)
+{
+	smp_store_release(&br->head, br->head + count);
+}
+EXPORT_SYMBOL_GPL(tquic_io_buf_ring_advance);
+
+/*
+ * =============================================================================
+ * SQPOLL Integration
+ * =============================================================================
+ */
+
+int tquic_uring_enable_sqpoll(struct tquic_connection *conn)
+{
+	struct tquic_uring_ctx *uctx;
+
+	if (!conn)
+		return -EINVAL;
+
+	uctx = conn->uring_ctx;
+	if (!uctx)
+		return -EINVAL;
+
+	if (uctx->sqpoll_enabled)
+		return 0;
+
+	/*
+	 * SQPOLL mode requires the io_uring instance to be set up with
+	 * IORING_SETUP_SQPOLL. This is done at ring creation time.
+	 * Here we just track that the connection wants SQPOLL semantics.
+	 */
+	uctx->sqpoll_enabled = true;
+
+	tquic_dbg("enabled SQPOLL mode for connection\n");
+	return 0;
+}
+EXPORT_SYMBOL_GPL(tquic_uring_enable_sqpoll);
+
+void tquic_uring_disable_sqpoll(struct tquic_connection *conn)
+{
+	struct tquic_uring_ctx *uctx;
+
+	if (!conn)
+		return;
+
+	uctx = conn->uring_ctx;
+	if (!uctx)
+		return;
+
+	uctx->sqpoll_enabled = false;
+	tquic_dbg("disabled SQPOLL mode for connection\n");
+}
+EXPORT_SYMBOL_GPL(tquic_uring_disable_sqpoll);
+
+bool tquic_uring_sqpoll_enabled(struct tquic_connection *conn)
+{
+	struct tquic_uring_ctx *uctx;
+
+	if (!conn)
+		return false;
+
+	uctx = conn->uring_ctx;
+	return uctx && uctx->sqpoll_enabled;
+}
+EXPORT_SYMBOL_GPL(tquic_uring_sqpoll_enabled);
+
+/*
+ * =============================================================================
+ * Completion Batching
+ * =============================================================================
+ */
+
+int tquic_uring_set_cqe_batch_size(struct tquic_connection *conn,
+				   unsigned int batch_size)
+{
+	struct tquic_uring_ctx *uctx;
+
+	if (!conn)
+		return -EINVAL;
+
+	uctx = conn->uring_ctx;
+	if (!uctx)
+		return -EINVAL;
+
+	/* Limit batch size to reasonable value */
+	if (batch_size > 256)
+		batch_size = 256;
+
+	uctx->cqe_batch_size = batch_size;
+
+	tquic_dbg("set CQE batch size to %u\n", batch_size);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(tquic_uring_set_cqe_batch_size);
+
+void tquic_uring_flush_cqes(struct tquic_connection *conn)
+{
+	struct tquic_uring_ctx *uctx;
+
+	if (!conn)
+		return;
+
+	uctx = conn->uring_ctx;
+	if (!uctx)
+		return;
+
+	/*
+	 * In actual implementation, this would flush any pending
+	 * batched CQEs to the completion ring.
+	 */
+	atomic_set(&uctx->pending_cqes, 0);
+}
+EXPORT_SYMBOL_GPL(tquic_uring_flush_cqes);
+
+int tquic_uring_handle_overflow(struct tquic_connection *conn)
+{
+	struct tquic_uring_ctx *uctx;
+	int overflow;
+
+	if (!conn)
+		return 0;
+
+	uctx = conn->uring_ctx;
+	if (!uctx)
+		return 0;
+
+	overflow = atomic_xchg(&uctx->cqe_overflow, 0);
+	if (overflow > 0) {
+		tquic_warn("%d CQE overflows detected\n", overflow);
+	}
+
+	return overflow;
+}
+EXPORT_SYMBOL_GPL(tquic_uring_handle_overflow);
+
+/*
+ * =============================================================================
+ * Connection Context Management
+ * =============================================================================
+ */
+
+int tquic_uring_ctx_alloc(struct tquic_connection *conn)
+{
+	struct tquic_uring_ctx *uctx;
+
+	if (!conn)
+		return -EINVAL;
+
+	uctx = kzalloc(sizeof(*uctx), GFP_KERNEL);
+	if (!uctx)
+		return -ENOMEM;
+
+	uctx->buf_rings = kzalloc(sizeof(*uctx->buf_rings) *
+				  TQUIC_URING_MAX_BUF_RINGS, GFP_KERNEL);
+	if (!uctx->buf_rings) {
+		kfree(uctx);
+		return -ENOMEM;
+	}
+
+	uctx->nr_buf_rings = 0;
+	uctx->sqpoll_enabled = false;
+	uctx->cqe_batch_size = TQUIC_URING_DEFAULT_BATCH_SIZE;
+	atomic_set(&uctx->pending_cqes, 0);
+	atomic_set(&uctx->cqe_overflow, 0);
+
+	/* Store context in connection's dedicated field */
+	conn->uring_ctx = uctx;
+
+	tquic_dbg("allocated io_uring context for connection\n");
+	return 0;
+}
+EXPORT_SYMBOL_GPL(tquic_uring_ctx_alloc);
+
+void tquic_uring_ctx_free(struct tquic_connection *conn)
+{
+	struct tquic_uring_ctx *uctx;
+	int i;
+
+	if (!conn)
+		return;
+
+	uctx = conn->uring_ctx;
+	if (!uctx)
+		return;
+
+	/* Free all buffer rings */
+	if (uctx->buf_rings) {
+		for (i = 0; i < uctx->nr_buf_rings; i++) {
+			tquic_io_buf_ring_destroy(uctx->buf_rings[i]);
+		}
+		kfree(uctx->buf_rings);
+	}
+
+	kfree(uctx);
+	conn->uring_ctx = NULL;
+	tquic_dbg("freed io_uring context\n");
+}
+EXPORT_SYMBOL_GPL(tquic_uring_ctx_free);
+
+/*
+ * =============================================================================
+ * Statistics
+ * =============================================================================
+ */
+
+int tquic_uring_get_stats(struct tquic_connection *conn,
+			  struct tquic_uring_stats *stats)
+{
+	struct tquic_uring_ctx *uctx;
+
+	if (!conn || !stats)
+		return -EINVAL;
+
+	uctx = conn->uring_ctx;
+	if (!uctx)
+		return -EINVAL;
+
+	stats->sends = uctx->stats.sends;
+	stats->recvs = uctx->stats.recvs;
+	stats->completions = uctx->stats.completions;
+	stats->multishot_recvs = uctx->stats.multishot_recvs;
+	stats->zc_sends = uctx->stats.zc_sends;
+	stats->retries = uctx->stats.retries;
+	stats->overflow_events = atomic_read(&uctx->cqe_overflow);
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(tquic_uring_get_stats);
+
+/*
+ * =============================================================================
+ * Socket Option Handlers
+ * =============================================================================
+ */
+
+/**
+ * tquic_uring_setsockopt - Handle io_uring socket options
+ * @sk: Socket
+ * @optname: Option name
+ * @optval: Option value
+ * @optlen: Option length
+ *
+ * Return: 0 on success, negative errno on error
+ */
+int tquic_uring_setsockopt(struct sock *sk, int optname,
+			   sockptr_t optval, unsigned int optlen)
+{
+	struct tquic_sock *tsk = tquic_sk(sk);
+	struct tquic_connection *conn;
+	int val;
+	int ret = 0;
+
+	conn = io_tquic_get_connected_conn(tsk);
+	if (IS_ERR(conn))
+		return PTR_ERR(conn);
+
+	switch (optname) {
+	case TQUIC_URING_SQPOLL:
+		if (optlen < sizeof(int)) {
+			ret = -EINVAL;
+			goto out_put;
+		}
+		if (copy_from_sockptr(&val, optval, sizeof(val))) {
+			ret = -EFAULT;
+			goto out_put;
+		}
+
+		if (val) {
+			ret = tquic_uring_enable_sqpoll(conn);
+		} else {
+			tquic_uring_disable_sqpoll(conn);
+			ret = 0;
+		}
+		goto out_put;
+
+	case TQUIC_URING_CQE_BATCH:
+		if (optlen < sizeof(int)) {
+			ret = -EINVAL;
+			goto out_put;
+		}
+		if (copy_from_sockptr(&val, optval, sizeof(val))) {
+			ret = -EFAULT;
+			goto out_put;
+		}
+
+		ret = tquic_uring_set_cqe_batch_size(conn, val);
+		goto out_put;
+
+	case TQUIC_URING_BUF_RING: {
+		struct tquic_uring_buf_ring_args args;
+		struct tquic_io_buf_ring *br;
+		struct tquic_uring_ctx *uctx;
+
+		if (optlen < sizeof(args)) {
+			ret = -EINVAL;
+			goto out_put;
+		}
+		if (copy_from_sockptr(&args, optval, sizeof(args))) {
+			ret = -EFAULT;
+			goto out_put;
+		}
+
+		uctx = READ_ONCE(conn->uring_ctx);
+		if (!uctx) {
+			ret = -EINVAL;
+			goto out_put;
+		}
+
+		if (args.flags & TQUIC_URING_BUF_RING_CREATE) {
+			if (uctx->nr_buf_rings >= TQUIC_URING_MAX_BUF_RINGS) {
+				ret = -ENOSPC;
+				goto out_put;
+			}
+
+			br = tquic_io_buf_ring_create(conn, args.buf_size,
+						      args.buf_count, args.bgid);
+			if (IS_ERR(br)) {
+				ret = PTR_ERR(br);
+				goto out_put;
+			}
+
+			uctx->buf_rings[uctx->nr_buf_rings++] = br;
+			ret = 0;
+			goto out_put;
+		}
+
+		if (args.flags & TQUIC_URING_BUF_RING_DESTROY) {
+			int i;
+
+			for (i = 0; i < uctx->nr_buf_rings; i++) {
+				if (uctx->buf_rings[i]->bgid == args.bgid) {
+					tquic_io_buf_ring_destroy(uctx->buf_rings[i]);
+					uctx->buf_rings[i] = uctx->buf_rings[--uctx->nr_buf_rings];
+					ret = 0;
+					goto out_put;
+				}
+			}
+			ret = -ENOENT;
+			goto out_put;
+		}
+
+		ret = -EINVAL;
+		goto out_put;
+	}
+
+	default:
+		ret = -ENOPROTOOPT;
+		goto out_put;
+	}
+
+out_put:
+	tquic_conn_put(conn);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(tquic_uring_setsockopt);
+
+/**
+ * tquic_uring_getsockopt - Get io_uring socket options
+ * @sk: Socket
+ * @optname: Option name
+ * @optval: Output buffer
+ * @optlen: Buffer length
+ *
+ * Return: 0 on success, negative errno on error
+ */
+int tquic_uring_getsockopt(struct sock *sk, int optname,
+			   char __user *optval, int __user *optlen)
+{
+	struct tquic_sock *tsk = tquic_sk(sk);
+	struct tquic_connection *conn;
+	struct tquic_uring_ctx *uctx;
+	int len, val;
+	int ret = 0;
+
+	conn = io_tquic_get_connected_conn(tsk);
+	if (IS_ERR(conn))
+		return PTR_ERR(conn);
+
+	uctx = READ_ONCE(conn->uring_ctx);
+	if (!uctx) {
+		ret = -EINVAL;
+		goto out_put;
+	}
+
+	if (get_user(len, optlen))
+		goto out_fault;
+
+	/* CF-543: Reject zero-length reads; sizeof(int) minimum for int opts */
+	if (len < (int)sizeof(int)) {
+		ret = -EINVAL;
+		goto out_put;
+	}
+
+	switch (optname) {
+	case TQUIC_URING_SQPOLL:
+		val = tquic_uring_sqpoll_enabled(conn) ? 1 : 0;
+		break;
+
+	case TQUIC_URING_CQE_BATCH:
+		val = uctx->cqe_batch_size;
+		break;
+
+	default:
+		ret = -ENOPROTOOPT;
+		goto out_put;
+	}
+
+	len = min_t(unsigned int, len, sizeof(int));
+	if (put_user(len, optlen))
+		goto out_fault;
+	if (copy_to_user(optval, &val, len))
+		goto out_fault;
+
+	ret = 0;
+	out_put:
+		tquic_conn_put(conn);
+		return ret;
+
+out_fault:
+	ret = -EFAULT;
+	goto out_put;
+}
+EXPORT_SYMBOL_GPL(tquic_uring_getsockopt);
+
+/*
+ * =============================================================================
+ * Module Initialization
+ * =============================================================================
+ */
+
+int __init tquic_io_uring_init(void)
+{
+	tquic_info("io_uring support initialized\n");
+	return 0;
+}
+
+void tquic_io_uring_exit(void)
+{
+	tquic_info("io_uring support cleanup\n");
+}
+
+MODULE_DESCRIPTION("TQUIC io_uring Integration");
+MODULE_LICENSE("GPL");
