@@ -2516,7 +2516,7 @@ int tquic_register_cong(struct tquic_cong_ops *ops);
 void tquic_unregister_cong(struct tquic_cong_ops *ops);
 
 /* Module initialization */
-int __init tquic_init(void);
+int __ref tquic_init(void);
 void __exit tquic_exit(void);
 
 /* Netlink interface */
