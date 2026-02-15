@@ -1,0 +1,226 @@
+name: Build Linux 7.0 + TQUIC Kernel
+
+on:
+  push:
+    branches:
+      - 'claude/linux-7.0-tquic-*'
+  pull_request:
+    branches:
+      - 'claude/linux-7.0-tquic-*'
+  workflow_dispatch:
+    inputs:
+      build_debs:
+        description: 'Build .deb packages for installation'
+        required: false
+        default: 'true'
+        type: boolean
+      extra_config:
+        description: 'Extra config options (e.g. CONFIG_DEBUG_INFO=n)'
+        required: false
+        default: ''
+        type: string
+
+env:
+  KERNEL_VERSION: '7.0.0-tquic'
+  JOBS: 4
+
+jobs:
+  build-kernel:
+    name: Build Kernel (${{ matrix.arch }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential bc bison flex libelf-dev libssl-dev \
+            libncurses-dev dwarves cpio kmod rsync \
+            debhelper-compat lz4 zstd
+
+      - name: Configure kernel
+        run: |
+          # Start with distribution-friendly defaults
+          make defconfig
+
+          # Enable TQUIC and all submodules
+          scripts/config --enable  CONFIG_IP_QUIC
+          scripts/config --enable  CONFIG_TQUIC_CORE
+          scripts/config --enable  CONFIG_TQUIC_WAN_BONDING
+          scripts/config --enable  CONFIG_TQUIC_PATH_MANAGER
+          scripts/config --enable  CONFIG_TQUIC_PM_NETLINK
+          scripts/config --enable  CONFIG_TQUIC_SCHEDULER
+          scripts/config --enable  CONFIG_TQUIC_CONG
+          scripts/config --enable  CONFIG_TQUIC_CRYPTO
+          scripts/config --enable  CONFIG_TQUIC_CERT_VERIFY
+          scripts/config --enable  CONFIG_TQUIC_CRYPTO_HW_OFFLOAD
+          scripts/config --enable  CONFIG_TQUIC_IPV6
+          scripts/config --enable  CONFIG_TQUIC_MULTIPATH
+          scripts/config --enable  CONFIG_TQUIC_NAPI
+          scripts/config --enable  CONFIG_TQUIC_IO_URING
+          scripts/config --enable  CONFIG_TQUIC_SECURITY
+          scripts/config --enable  CONFIG_TQUIC_QLOG
+
+          # Crypto dependencies
+          scripts/config --enable  CONFIG_CRYPTO
+          scripts/config --enable  CONFIG_CRYPTO_AEAD
+          scripts/config --enable  CONFIG_CRYPTO_GCM
+          scripts/config --enable  CONFIG_CRYPTO_CHACHA20POLY1305
+          scripts/config --enable  CONFIG_CRYPTO_AES
+          scripts/config --enable  CONFIG_CRYPTO_SHA256
+          scripts/config --enable  CONFIG_CRYPTO_SHA512
+
+          # Networking dependencies
+          scripts/config --enable  CONFIG_NET
+          scripts/config --enable  CONFIG_INET
+          scripts/config --enable  CONFIG_IPV6
+
+          # Reduce build time - disable debug info unless needed
+          scripts/config --disable CONFIG_DEBUG_INFO_DWARF5
+          scripts/config --disable CONFIG_DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT
+          scripts/config --enable  CONFIG_DEBUG_INFO_NONE
+
+          # Set local version
+          scripts/config --set-str CONFIG_LOCALVERSION "-tquic"
+
+          # Apply any extra config from workflow input
+          if [ -n "${{ inputs.extra_config }}" ]; then
+            for opt in ${{ inputs.extra_config }}; do
+              key="${opt%%=*}"
+              val="${opt#*=}"
+              scripts/config --set-val "$key" "$val"
+            done
+          fi
+
+          # Resolve dependencies
+          make olddefconfig
+
+      - name: Verify TQUIC is enabled
+        run: |
+          echo "=== TQUIC Configuration ==="
+          grep -E "CONFIG_IP_QUIC|CONFIG_TQUIC" .config | grep -v "^#" || true
+          echo ""
+          if ! grep -q "CONFIG_IP_QUIC=y" .config; then
+            echo "ERROR: CONFIG_IP_QUIC not enabled!"
+            exit 1
+          fi
+          echo "TQUIC enabled successfully."
+
+      - name: Build kernel
+        run: |
+          make -j${{ env.JOBS }} 2>&1 | tail -50
+          echo ""
+          echo "=== Kernel build complete ==="
+
+      - name: Build modules
+        run: |
+          make -j${{ env.JOBS }} modules 2>&1 | tail -20
+
+      - name: Verify TQUIC module built
+        run: |
+          echo "=== TQUIC objects ==="
+          find net/quic/ -name '*.o' | head -20
+          echo "..."
+          echo "Total TQUIC objects: $(find net/quic/ -name '*.o' | wc -l)"
+          # Verify the main module object exists
+          if [ ! -f net/quic/quic.o ]; then
+            echo "ERROR: quic.o not found!"
+            exit 1
+          fi
+          echo "TQUIC module built successfully."
+
+      - name: Build .deb packages
+        if: inputs.build_debs != 'false'
+        run: |
+          make -j${{ env.JOBS }} bindeb-pkg \
+            LOCALVERSION=-tquic \
+            KDEB_PKGVERSION=7.0.0-1 2>&1 | tail -30
+
+      - name: Upload kernel image
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-7.0-tquic-bzImage
+          path: arch/x86/boot/bzImage
+          retention-days: 30
+
+      - name: Upload .deb packages
+        if: inputs.build_debs != 'false'
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-7.0-tquic-debs
+          path: |
+            ../linux-image-*.deb
+            ../linux-headers-*.deb
+          retention-days: 30
+
+      - name: Build summary
+        run: |
+          echo "## Linux 7.0 + TQUIC Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Item | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Kernel | $(make kernelrelease) |" >> $GITHUB_STEP_SUMMARY
+          echo "| Arch | ${{ matrix.arch }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| bzImage | $(du -h arch/x86/boot/bzImage | cut -f1) |" >> $GITHUB_STEP_SUMMARY
+          echo "| TQUIC objects | $(find net/quic/ -name '*.o' | wc -l) |" >> $GITHUB_STEP_SUMMARY
+          echo "| Config | CONFIG_IP_QUIC=y |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Install" >> $GITHUB_STEP_SUMMARY
+          echo '```bash' >> $GITHUB_STEP_SUMMARY
+          echo "sudo dpkg -i linux-image-*.deb linux-headers-*.deb" >> $GITHUB_STEP_SUMMARY
+          echo "sudo update-grub && sudo reboot" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+  compile-check:
+    name: TQUIC Module Compile Check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential bc bison flex libelf-dev libssl-dev \
+            libncurses-dev dwarves sparse
+
+      - name: Configure
+        run: |
+          make defconfig
+          scripts/config --enable CONFIG_IP_QUIC
+          scripts/config --disable CONFIG_DEBUG_INFO_DWARF5
+          scripts/config --disable CONFIG_DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT
+          scripts/config --enable  CONFIG_DEBUG_INFO_NONE
+          make olddefconfig
+
+      - name: Prepare build
+        run: make modules_prepare -j4
+
+      - name: Compile TQUIC module
+        run: |
+          make net/quic/ -j4 2>&1
+          echo "TQUIC compiled successfully against Linux 7.0"
+
+      - name: Compile with warnings
+        run: |
+          make net/quic/ -j4 W=1 2>&1 | tee build-warnings.log
+          WARNS=$(grep -c "warning:" build-warnings.log || true)
+          echo "Total warnings: $WARNS"
+          echo "## Compile Check" >> $GITHUB_STEP_SUMMARY
+          echo "Warnings: $WARNS" >> $GITHUB_STEP_SUMMARY
+
+      - name: Sparse analysis
+        continue-on-error: true
+        run: |
+          make net/quic/ -j4 C=1 2>&1 | tee sparse.log
+          SPARSE_WARNS=$(grep -c "warning:" sparse.log || true)
+          echo "Sparse warnings: $SPARSE_WARNS"
