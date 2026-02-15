@@ -933,7 +933,18 @@ int tquic_output_gso(struct tquic_connection *conn, struct sk_buff_head *queue)
 	/* Copy all packets into GSO skb */
 	while ((skb = __skb_dequeue(queue)) != NULL) {
 		u8 *p = skb_put(gso_skb, skb->len);
-		skb_copy_bits(skb, 0, p, skb->len);
+		int ret = skb_copy_bits(skb, 0, p, skb->len);
+		if (ret < 0) {
+			/*
+			 * BUG FIX: Check skb_copy_bits() return value.
+			 * Unlikely to fail when copying skb->len bytes,
+			 * but if it does, abort GSO to prevent sending
+			 * uninitialized memory.
+			 */
+			kfree_skb(skb);
+			kfree_skb(gso_skb);
+			return ret;
+		}
 		kfree_skb(skb);
 	}
 
@@ -986,8 +997,19 @@ struct sk_buff *tquic_coalesce_skbs(struct sk_buff_head *packets)
 
 	/* Copy all packets */
 	while ((skb = __skb_dequeue(packets)) != NULL) {
+		int ret;
+
 		p = skb_put(coalesced, skb->len);
-		skb_copy_bits(skb, 0, p, skb->len);
+		ret = skb_copy_bits(skb, 0, p, skb->len);
+		if (ret < 0) {
+			/*
+			 * BUG FIX: Check skb_copy_bits() return value.
+			 * If copy fails, free coalesced buffer and return error.
+			 */
+			kfree_skb(skb);
+			kfree_skb(coalesced);
+			return NULL;
+		}
 		kfree_skb(skb);
 	}
 

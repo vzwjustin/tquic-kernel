@@ -1173,7 +1173,16 @@ int tquic_connect_ip_send(struct tquic_connect_ip_tunnel *tunnel,
 	}
 
 	/* Copy IP packet payload */
-	skb_copy_bits(skb, 0, datagram_buf + context_id_size, skb->len);
+	ret = skb_copy_bits(skb, 0, datagram_buf + context_id_size, skb->len);
+	if (ret < 0) {
+		/*
+		 * BUG FIX: Check skb_copy_bits() return value to prevent
+		 * kernel memory disclosure. If copy fails, datagram_buf
+		 * contains uninitialized heap data which would be transmitted.
+		 */
+		kfree(datagram_buf);
+		return ret;
+	}
 
 	/* Send as DATAGRAM frame */
 	ret = tquic_send_datagram(conn, datagram_buf, datagram_len);

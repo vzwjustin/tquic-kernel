@@ -709,13 +709,15 @@ ssize_t tquic_forward_hairpin(struct tquic_tunnel *tunnel,
 		struct tquic_hairpin_header *hdr;
 		unsigned int payload_offset = 0;
 
-		/* Uncharge memory from source connection socket */
-		if (src_stream->conn && src_stream->conn->sk) {
-			struct sock *src_sk = src_stream->conn->sk;
-
-			sk_mem_uncharge(src_sk, skb->truesize);
-			atomic_sub(skb->truesize, &src_sk->sk_rmem_alloc);
-		}
+		/*
+		 * Detach skb from source socket to prepare for ownership transfer.
+		 * skb_orphan() calls the destructor which handles proper memory
+		 * accounting (sk_mem_uncharge + sk_rmem_alloc adjustment).
+		 * BUG FIX: Previously did manual double-uncharge (sk_mem_uncharge
+		 * + atomic_sub on sk_rmem_alloc), causing memory accounting
+		 * corruption and potential refcount_t misuse on modern kernels.
+		 */
+		skb_orphan(skb);
 
 		/*
 		 * Process hairpin header if present, strip it for forwarding.

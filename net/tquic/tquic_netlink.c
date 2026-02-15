@@ -466,10 +466,6 @@ static struct tquic_nl_path_info *tquic_nl_path_create(struct tquic_nl_conn_info
 {
 	struct tquic_nl_path_info *path;
 
-	/* Prevent DoS via unbounded path creation */
-	if (conn->path_count >= TQUIC_MAX_PATHS_PER_CONN)
-		return NULL;
-
 	path = kzalloc(sizeof(*path), GFP_KERNEL);
 	if (!path)
 		return NULL;
@@ -487,6 +483,19 @@ static struct tquic_nl_path_info *tquic_nl_path_create(struct tquic_nl_conn_info
 	path->weight = 1;
 
 	spin_lock_bh(&conn->lock);
+
+	/*
+	 * BUG FIX: Check path limit inside lock to prevent TOCTOU race.
+	 * Previously checked outside lock, allowing concurrent netlink
+	 * requests to bypass TQUIC_MAX_PATHS_PER_CONN limit and cause
+	 * resource exhaustion.
+	 */
+	if (conn->path_count >= TQUIC_MAX_PATHS_PER_CONN) {
+		spin_unlock_bh(&conn->lock);
+		kfree(path);
+		return NULL;
+	}
+
 	path->path_id = conn->next_path_id++;
 	list_add_tail_rcu(&path->list, &conn->paths);
 	conn->path_count++;
