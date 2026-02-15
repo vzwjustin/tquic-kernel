@@ -20,6 +20,7 @@
 
 #include "../tquic_init.h"
 #include "../tquic_debug.h"
+#include "tquic_sched.h"
 
 static DEFINE_SPINLOCK(tquic_mp_sched_list_lock);
 static LIST_HEAD(tquic_mp_sched_list);
