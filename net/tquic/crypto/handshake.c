@@ -3430,7 +3430,6 @@ int tquic_hs_process_record(struct tquic_handshake *hs,
 {
 	u8 msg_type;
 	u32 msg_len;
-	const u8 *msg_data;
 	int ret;
 
 	if (!hs || !data || len < 4)
@@ -3447,8 +3446,6 @@ int tquic_hs_process_record(struct tquic_handshake *hs,
 
 	if (4 + msg_len > len)
 		return -EINVAL;
-
-	msg_data = data + 4;
 
 	switch (msg_type) {
 	case TLS_HS_SERVER_HELLO:

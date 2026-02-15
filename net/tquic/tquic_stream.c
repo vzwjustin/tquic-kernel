@@ -844,7 +844,6 @@ static void tquic_stream_trigger_output(struct tquic_connection *conn,
 					struct sock *sk)
 {
 	struct tquic_path *path;
-	struct tquic_sock *tsk;
 	struct net *net = NULL;
 	u64 inflight;
 	bool can_send;
@@ -855,7 +854,6 @@ static void tquic_stream_trigger_output(struct tquic_connection *conn,
 
 	/* Get socket options if available */
 	if (sk) {
-		tsk = tquic_sk(sk);
 		net = sock_net(sk);
 		if (net) {
 			struct tquic_net *tn = tquic_pernet(net);

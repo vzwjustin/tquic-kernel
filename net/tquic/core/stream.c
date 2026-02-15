@@ -1779,7 +1779,7 @@ ssize_t tquic_stream_splice_read(struct tquic_stream_manager *mgr,
 	return -EOPNOTSUPP;
 #else
 	size_t spliced = 0;
-	unsigned int head, tail, mask;
+	unsigned int head, tail;
 
 	if (!tquic_stream_can_recv(mgr, stream))
 		return -EINVAL;
@@ -1800,7 +1800,6 @@ ssize_t tquic_stream_splice_read(struct tquic_stream_manager *mgr,
 		/* Check if pipe has space */
 		head = pipe->head;
 		tail = pipe->tail;
-		mask = pipe->ring_size - 1;
 		if (pipe_full(head, tail, pipe->max_usage))
 			break;
 

@@ -2369,7 +2369,7 @@ static int tquic_sched_stats_open(struct inode *inode, struct file *file)
 			   pde_data(inode));
 }
 
-static const struct proc_ops tquic_sched_stats_ops = {
+static const struct proc_ops __maybe_unused tquic_sched_stats_ops = {
 	.proc_open	= tquic_sched_stats_open,
 	.proc_read	= seq_read,
 	.proc_lseek	= seq_lseek,

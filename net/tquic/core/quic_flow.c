@@ -825,20 +825,10 @@ void tquic_streams_on_peer_stream_opened(struct tquic_connection *conn,
  */
 static void tquic_streams_check_update(struct tquic_connection *conn, bool unidirectional)
 {
-	u64 max_streams;
-	u64 threshold;
 	bool should_update = false;
 
 	spin_lock_bh(&conn->lock);
 
-	if (unidirectional) {
-		max_streams = conn->max_streams_uni;
-	} else {
-		max_streams = conn->max_streams_bidi;
-	}
-
-	/* Update when peer has used half of the available streams */
-	threshold = max_streams / 2;
 	/* Simplified check - in real implementation track peer's highest stream */
 	should_update = false;
 

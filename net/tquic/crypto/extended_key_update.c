@@ -1100,22 +1100,11 @@ EXPORT_SYMBOL_GPL(tquic_eku_use_rfc9001_fallback);
  */
 int tquic_eku_trigger_rfc9001_update(struct tquic_connection *conn)
 {
-	struct tquic_extended_key_update_state *state;
-	int ret;
-
 	if (!conn)
 		return -EINVAL;
 
 	/* Use the base key update mechanism */
-	ret = tquic_initiate_key_update(conn);
-
-	/* Track statistics if EKU state exists */
-	if (conn->eku_state) {
-		state = conn->eku_state;
-		/* Could add rfc9001_fallbacks counter increment here */
-	}
-
-	return ret;
+	return tquic_initiate_key_update(conn);
 }
 EXPORT_SYMBOL_GPL(tquic_eku_trigger_rfc9001_update);
 

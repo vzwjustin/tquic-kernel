@@ -285,7 +285,6 @@ static int tquic_packet_parse_long(struct sk_buff *skb, u8 first_byte)
 	struct tquic_skb_cb *cb = TQUIC_SKB_CB(skb);
 	u8 *data = skb->data;
 	int offset = 1;
-	u32 version;
 	u8 dcid_len, scid_len;
 	u64 token_len = 0;
 	u64 payload_len;
@@ -293,9 +292,7 @@ static int tquic_packet_parse_long(struct sk_buff *skb, u8 first_byte)
 	if (skb->len < 7)
 		return -EINVAL;
 
-	/* Version (4 bytes) */
-	version = ((u32)data[1] << 24) | ((u32)data[2] << 16) |
-		  ((u32)data[3] << 8) | data[4];
+	/* Skip version field (4 bytes) */
 	offset = 5;
 
 	/* Destination Connection ID Length (1 byte) */

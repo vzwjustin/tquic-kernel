@@ -1628,17 +1628,15 @@ EXPORT_SYMBOL_GPL(tquic_fc_commit_credit);
  */
 bool tquic_fc_should_update_conn_window(struct tquic_fc_state *fc)
 {
-	u64 available_window;
 	u64 consumed_since_update;
 	u64 update_threshold;
 
 	if (!fc)
 		return false;
 
-	/* Calculate how much window is still available */
+	/* Verify window hasn't been exceeded */
 	if (fc->conn.max_data_local < fc->conn.data_received)
 		return false;
-	available_window = fc->conn.max_data_local - fc->conn.data_received;
 
 	/* Calculate how much was consumed since last update (guard underflow) */
 	if (fc->conn.last_max_data_sent < fc->conn.max_data_local)

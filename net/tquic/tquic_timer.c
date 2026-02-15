@@ -675,7 +675,6 @@ EXPORT_SYMBOL_GPL(tquic_timer_state_free);
 static void tquic_timer_idle_expired(struct timer_list *t)
 {
 	struct tquic_timer_state *ts = from_timer(ts, t, idle_timer);
-	struct tquic_connection *conn;
 	unsigned long flags;
 
 	spin_lock_irqsave(&ts->lock, flags);
@@ -684,7 +683,6 @@ static void tquic_timer_idle_expired(struct timer_list *t)
 		return;
 	}
 
-	conn = ts->conn;
 	set_bit(TQUIC_TIMER_IDLE_BIT, &ts->pending_timer_mask);
 	spin_unlock_irqrestore(&ts->lock, flags);
 
@@ -1598,7 +1596,6 @@ static void tquic_retransmit_work_fn(struct work_struct *work)
 	struct tquic_timer_state *ts =
 		container_of(work, struct tquic_timer_state, retransmit_work);
 	struct tquic_connection *conn;
-	struct tquic_recovery_state *rs;
 	unsigned long pending, flags;
 	int i, lost;
 
@@ -1620,7 +1617,6 @@ static void tquic_retransmit_work_fn(struct work_struct *work)
 		return;
 	}
 
-	rs = ts->recovery;
 	pending = ts->pending_timer_mask;
 	spin_unlock_irqrestore(&ts->lock, flags);
 

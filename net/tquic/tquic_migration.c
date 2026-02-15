@@ -1970,15 +1970,11 @@ static int tquic_migrate_to_preferred_address(struct tquic_connection *conn)
  */
 static void tquic_migration_on_handshake_complete(struct tquic_connection *conn)
 {
-	struct net *net;
-
 	if (!conn || !conn->sk)
 		return;
 
 	if (conn->role != TQUIC_ROLE_CLIENT)
 		return;
-
-	net = sock_net(conn->sk);
 
 	/* Check if auto-migration to preferred address is enabled */
 	if (!tquic_sysctl_get_prefer_preferred_address())
