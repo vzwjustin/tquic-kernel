@@ -28,7 +28,7 @@
 #include <linux/pipe_fs_i.h>
 #include <linux/highmem.h>
 #include <linux/mm.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 #include <net/sock.h>
 #include <net/tquic.h>
 #include "../tquic_compat.h"

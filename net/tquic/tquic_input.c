@@ -21,7 +21,7 @@
 #include <linux/random.h>
 #include <linux/hrtimer.h>
 #include <linux/overflow.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 #include <net/sock.h>
 #include <net/udp.h>
 #include <net/udp_tunnel.h>
