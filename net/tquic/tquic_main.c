@@ -910,7 +910,7 @@ EXPORT_SYMBOL_GPL(tquic_stream_close);
  * Module Initialization
  */
 
-int __init tquic_init(void)
+int __ref tquic_init(void)
 {
 	int err;
 
