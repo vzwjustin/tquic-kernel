@@ -38,25 +38,24 @@ func (h *DashboardHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.serveDashboard(w, r)
 	case r.URL.Path == "/api/stats":
 		h.serveStats(w, r)
-	case r.URL.Path == "/api/connections/recent":
-		h.serveRecentConnections(w, r)
+	case r.URL.Path == "/api/paths":
+		h.servePaths(w, r)
+	case r.URL.Path == "/api/events/recent":
+		h.serveRecentEvents(w, r)
 	default:
 		http.NotFound(w, r)
 	}
 }
 
-// serveDashboard serves the main dashboard HTML page.
 func (h *DashboardHandler) serveDashboard(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Write([]byte(dashboardHTML))
 }
 
-// serveStats serves the /api/stats JSON endpoint.
 func (h *DashboardHandler) serveStats(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
-	// Get path stats from kernel
-	pathStats, err := h.nlClient.GetPathStats("")
+	stats, err := h.nlClient.GetStats()
 	if err != nil {
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"error": err.Error(),
@@ -64,143 +63,143 @@ func (h *DashboardHandler) serveStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get client stats
-	clientStats, err := h.nlClient.GetClientStats()
-	if err != nil {
-		clientStats = nil // Non-fatal
-	}
-
-	// Get config for client info
-	cfg := h.configLoader.Config()
-
-	// Build response
 	resp := StatsResponse{
 		Timestamp: time.Now().UTC(),
-		Paths:     make([]PathStatsJSON, 0, len(pathStats)),
-		Clients:   make([]ClientStatsJSON, 0, len(clientStats)),
+		Paths:     make([]PathStatsJSON, 0, len(stats)),
 	}
 
-	for _, ps := range pathStats {
-		health := "healthy"
-		if ps.LossRatio() > 0.05 {
-			health = "degraded"
-		}
-		if ps.LossRatio() > 0.20 || ps.RttAvgSeconds() > 1.0 {
-			health = "failed"
-		}
-
+	for _, ps := range stats {
 		resp.Paths = append(resp.Paths, PathStatsJSON{
-			ClientName: ps.ClientName,
 			PathID:     ps.PathID,
 			TxBytes:    ps.TxBytes,
 			RxBytes:    ps.RxBytes,
-			RttMinMs:   float64(ps.RttMin) / 1000.0,
-			RttAvgMs:   float64(ps.RttAvg) / 1000.0,
-			RttMaxMs:   float64(ps.RttMax) / 1000.0,
-			LossPercent: ps.LossRatio() * 100,
-			JitterMs:   float64(ps.Jitter) / 1000.0,
-			Health:     health,
-		})
-	}
-
-	for _, cs := range clientStats {
-		var bandwidthLimit string
-		if clientCfg, ok := cfg.Clients[cs.ClientName]; ok {
-			bandwidthLimit = clientCfg.BandwidthLimit
-		}
-
-		resp.Clients = append(resp.Clients, ClientStatsJSON{
-			Name:            cs.ClientName,
-			ConnectionCount: cs.ConnectionCount,
-			TotalBytes:      cs.TotalBytes,
-			PathCount:       cs.PathCount,
-			BandwidthLimit:  bandwidthLimit,
+			TxPackets:  ps.TxPackets,
+			RxPackets:  ps.RxPackets,
+			Retrans:    ps.Retrans,
+			SRTTMs:     float64(ps.SRTT) / 1000.0,
+			RTTVarMs:   float64(ps.RTTVar) / 1000.0,
+			Cwnd:       ps.Cwnd,
 		})
 	}
 
 	json.NewEncoder(w).Encode(resp)
 }
 
-// serveRecentConnections serves the /api/connections/recent endpoint.
-func (h *DashboardHandler) serveRecentConnections(w http.ResponseWriter, r *http.Request) {
+func (h *DashboardHandler) servePaths(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	paths, err := h.nlClient.ListPaths()
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": err.Error(),
+		})
+		return
+	}
+
+	resp := PathsResponse{
+		Timestamp: time.Now().UTC(),
+		Paths:     make([]PathInfoJSON, 0, len(paths)),
+	}
+
+	for _, pi := range paths {
+		var localIP, remoteIP string
+		if pi.LocalIP != nil {
+			localIP = pi.LocalIP.String()
+		}
+		if pi.RemoteIP != nil {
+			remoteIP = pi.RemoteIP.String()
+		}
+
+		resp.Paths = append(resp.Paths, PathInfoJSON{
+			PathID:     pi.PathID,
+			State:      pi.StateName(),
+			Ifindex:    pi.Ifindex,
+			LocalIP:    localIP,
+			RemoteIP:   remoteIP,
+			LocalPort:  pi.LocalPort,
+			RemotePort: pi.RemotePort,
+			RTTMs:      float64(pi.RTT) / 1000.0,
+			Bandwidth:  pi.Bandwidth,
+			LossRate:   pi.LossRatio() * 100,
+			Weight:     pi.Weight,
+			Priority:   pi.Priority,
+		})
+	}
+
+	json.NewEncoder(w).Encode(resp)
+}
+
+func (h *DashboardHandler) serveRecentEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
 	recent := h.connLogger.GetRecent(100)
 
-	resp := RecentConnectionsResponse{
-		Connections: make([]ConnectionJSON, 0, len(recent)),
+	resp := RecentEventsResponse{
+		Events: make([]EventJSON, 0, len(recent)),
 	}
 
 	for _, entry := range recent {
-		resp.Connections = append(resp.Connections, ConnectionJSON{
-			Timestamp:    entry.Timestamp.UTC(),
-			ClientID:     entry.ClientID,
-			SourceIP:     entry.SourceIP,
-			SourcePort:   entry.SourcePort,
-			DestIP:       entry.DestIP,
-			DestPort:     entry.DestPort,
-			BytesTx:      entry.BytesTx,
-			BytesRx:      entry.BytesRx,
-			DurationMs:   entry.DurationMs,
-			TrafficClass: entry.TrafficClass,
-			Action:       entry.Action,
+		resp.Events = append(resp.Events, EventJSON{
+			Timestamp: entry.Timestamp.UTC(),
+			EventType: entry.EventType,
+			PathID:    entry.PathID,
+			Reason:    entry.Reason,
 		})
 	}
 
 	json.NewEncoder(w).Encode(resp)
 }
 
-// StatsResponse is the JSON response for /api/stats.
+// JSON response types
+
 type StatsResponse struct {
-	Timestamp time.Time         `json:"timestamp"`
-	Paths     []PathStatsJSON   `json:"paths"`
-	Clients   []ClientStatsJSON `json:"clients"`
+	Timestamp time.Time       `json:"timestamp"`
+	Paths     []PathStatsJSON `json:"paths"`
 }
 
-// PathStatsJSON is the JSON representation of path statistics.
 type PathStatsJSON struct {
-	ClientName  string  `json:"client_name"`
-	PathID      uint32  `json:"path_id"`
-	TxBytes     uint64  `json:"tx_bytes"`
-	RxBytes     uint64  `json:"rx_bytes"`
-	RttMinMs    float64 `json:"rtt_min_ms"`
-	RttAvgMs    float64 `json:"rtt_avg_ms"`
-	RttMaxMs    float64 `json:"rtt_max_ms"`
-	LossPercent float64 `json:"loss_percent"`
-	JitterMs    float64 `json:"jitter_ms"`
-	Health      string  `json:"health"` // "healthy", "degraded", "failed"
+	PathID    uint32  `json:"path_id"`
+	TxBytes   uint64  `json:"tx_bytes"`
+	RxBytes   uint64  `json:"rx_bytes"`
+	TxPackets uint64  `json:"tx_packets"`
+	RxPackets uint64  `json:"rx_packets"`
+	Retrans   uint64  `json:"retransmissions"`
+	SRTTMs    float64 `json:"srtt_ms"`
+	RTTVarMs  float64 `json:"rttvar_ms"`
+	Cwnd      uint32  `json:"cwnd"`
 }
 
-// ClientStatsJSON is the JSON representation of client statistics.
-type ClientStatsJSON struct {
-	Name            string `json:"name"`
-	ConnectionCount uint32 `json:"connection_count"`
-	TotalBytes      uint64 `json:"total_bytes"`
-	PathCount       uint32 `json:"path_count"`
-	BandwidthLimit  string `json:"bandwidth_limit,omitempty"`
+type PathsResponse struct {
+	Timestamp time.Time      `json:"timestamp"`
+	Paths     []PathInfoJSON `json:"paths"`
 }
 
-// RecentConnectionsResponse is the JSON response for /api/connections/recent.
-type RecentConnectionsResponse struct {
-	Connections []ConnectionJSON `json:"connections"`
+type PathInfoJSON struct {
+	PathID     uint32  `json:"path_id"`
+	State      string  `json:"state"`
+	Ifindex    int32   `json:"ifindex"`
+	LocalIP    string  `json:"local_ip,omitempty"`
+	RemoteIP   string  `json:"remote_ip,omitempty"`
+	LocalPort  uint16  `json:"local_port,omitempty"`
+	RemotePort uint16  `json:"remote_port,omitempty"`
+	RTTMs      float64 `json:"rtt_ms"`
+	Bandwidth  uint64  `json:"bandwidth_bps"`
+	LossRate   float64 `json:"loss_percent"`
+	Weight     uint32  `json:"weight"`
+	Priority   uint8   `json:"priority"`
 }
 
-// ConnectionJSON is the JSON representation of a connection event.
-type ConnectionJSON struct {
-	Timestamp    time.Time `json:"timestamp"`
-	ClientID     string    `json:"client_id"`
-	SourceIP     string    `json:"source_ip"`
-	SourcePort   uint16    `json:"source_port"`
-	DestIP       string    `json:"dest_ip"`
-	DestPort     uint16    `json:"dest_port"`
-	BytesTx      uint64    `json:"bytes_tx"`
-	BytesRx      uint64    `json:"bytes_rx"`
-	DurationMs   uint64    `json:"duration_ms"`
-	TrafficClass string    `json:"traffic_class"`
-	Action       string    `json:"action"`
+type RecentEventsResponse struct {
+	Events []EventJSON `json:"events"`
 }
 
-// dashboardHTML is the complete dashboard HTML with inline CSS and JS.
+type EventJSON struct {
+	Timestamp time.Time `json:"timestamp"`
+	EventType string    `json:"event_type"`
+	PathID    uint32    `json:"path_id"`
+	Reason    uint32    `json:"reason,omitempty"`
+}
+
 const dashboardHTML = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -232,69 +231,41 @@ const dashboardHTML = `<!DOCTYPE html>
             align-items: center;
             gap: 8px;
         }
-        .status {
-            width: 10px;
-            height: 10px;
-            border-radius: 50%;
-            display: inline-block;
-        }
-        .status.healthy { background: #3fb950; }
-        .status.degraded { background: #d29922; }
-        .status.failed { background: #f85149; }
+        .status { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+        .status.active, .status.validated { background: #3fb950; }
+        .status.validating, .status.standby { background: #d29922; }
+        .status.degraded, .status.failed { background: #f85149; }
+        .status.unknown { background: #8b949e; }
         .metric { display: flex; justify-content: space-between; padding: 4px 0; }
         .metric-label { color: #8b949e; }
         .metric-value { font-family: monospace; color: #c9d1d9; }
-        .connections-table {
-            width: 100%;
-            border-collapse: collapse;
-            font-size: 12px;
-        }
-        .connections-table th, .connections-table td {
-            padding: 8px;
-            text-align: left;
-            border-bottom: 1px solid #30363d;
-        }
-        .connections-table th { color: #8b949e; font-weight: 500; }
-        .action-open { color: #3fb950; }
-        .action-close { color: #8b949e; }
-        .action-migrate { color: #58a6ff; }
         .timestamp { color: #8b949e; font-size: 12px; }
         .refresh-info { color: #8b949e; font-size: 12px; margin-top: 10px; }
         .error { color: #f85149; padding: 20px; text-align: center; }
+        table { width: 100%; border-collapse: collapse; font-size: 12px; }
+        th, td { padding: 8px; text-align: left; border-bottom: 1px solid #30363d; }
+        th { color: #8b949e; font-weight: 500; }
     </style>
 </head>
 <body>
     <h1>TQUIC Dashboard</h1>
     <p class="timestamp" id="last-update"></p>
 
-    <h2>Path Statistics</h2>
+    <h2>Paths</h2>
     <div class="grid" id="paths-grid">
         <div class="card"><p>Loading...</p></div>
     </div>
 
-    <h2>Client Statistics</h2>
-    <div class="grid" id="clients-grid">
+    <h2>Path Statistics</h2>
+    <div class="grid" id="stats-grid">
         <div class="card"><p>Loading...</p></div>
     </div>
 
-    <h2>Recent Connections</h2>
+    <h2>Recent Events</h2>
     <div class="card">
-        <table class="connections-table" id="connections-table">
-            <thead>
-                <tr>
-                    <th>Time</th>
-                    <th>Client</th>
-                    <th>Source</th>
-                    <th>Destination</th>
-                    <th>Tx/Rx</th>
-                    <th>Duration</th>
-                    <th>Class</th>
-                    <th>Action</th>
-                </tr>
-            </thead>
-            <tbody id="connections-body">
-                <tr><td colspan="8">Loading...</td></tr>
-            </tbody>
+        <table id="events-table">
+            <thead><tr><th>Time</th><th>Event</th><th>Path</th><th>Reason</th></tr></thead>
+            <tbody id="events-body"><tr><td colspan="4">Loading...</td></tr></tbody>
         </table>
     </div>
 
@@ -308,145 +279,67 @@ const dashboardHTML = `<!DOCTYPE html>
             return bytes + ' B';
         }
 
-        function formatDuration(ms) {
-            if (ms >= 60000) return (ms / 60000).toFixed(1) + 'm';
-            if (ms >= 1000) return (ms / 1000).toFixed(1) + 's';
-            return ms + 'ms';
+        function renderPath(p) {
+            return '<div class="card"><div class="card-title"><span class="status ' + p.state + '"></span>Path ' + p.path_id + ' (' + p.state + ')</div>' +
+                '<div class="metric"><span class="metric-label">Interface</span><span class="metric-value">ifindex ' + p.ifindex + '</span></div>' +
+                (p.local_ip ? '<div class="metric"><span class="metric-label">Local</span><span class="metric-value">' + p.local_ip + '</span></div>' : '') +
+                (p.remote_ip ? '<div class="metric"><span class="metric-label">Remote</span><span class="metric-value">' + p.remote_ip + '</span></div>' : '') +
+                '<div class="metric"><span class="metric-label">RTT</span><span class="metric-value">' + p.rtt_ms.toFixed(1) + ' ms</span></div>' +
+                '<div class="metric"><span class="metric-label">Loss</span><span class="metric-value">' + p.loss_percent.toFixed(2) + '%</span></div>' +
+                '<div class="metric"><span class="metric-label">Weight</span><span class="metric-value">' + p.weight + '</span></div>' +
+                '</div>';
         }
 
-        function formatTime(ts) {
-            return new Date(ts).toLocaleTimeString();
-        }
-
-        function renderPath(path) {
-            return ` + "`" + `
-                <div class="card">
-                    <div class="card-title">
-                        <span class="status ${path.health}"></span>
-                        ${path.client_name} - Path ${path.path_id}
-                    </div>
-                    <div class="metric">
-                        <span class="metric-label">Tx</span>
-                        <span class="metric-value">${formatBytes(path.tx_bytes)}</span>
-                    </div>
-                    <div class="metric">
-                        <span class="metric-label">Rx</span>
-                        <span class="metric-value">${formatBytes(path.rx_bytes)}</span>
-                    </div>
-                    <div class="metric">
-                        <span class="metric-label">RTT (min/avg/max)</span>
-                        <span class="metric-value">${path.rtt_min_ms.toFixed(1)} / ${path.rtt_avg_ms.toFixed(1)} / ${path.rtt_max_ms.toFixed(1)} ms</span>
-                    </div>
-                    <div class="metric">
-                        <span class="metric-label">Loss</span>
-                        <span class="metric-value">${path.loss_percent.toFixed(2)}%</span>
-                    </div>
-                    <div class="metric">
-                        <span class="metric-label">Jitter</span>
-                        <span class="metric-value">${path.jitter_ms.toFixed(2)} ms</span>
-                    </div>
-                </div>
-            ` + "`" + `;
-        }
-
-        function renderClient(client) {
-            return ` + "`" + `
-                <div class="card">
-                    <div class="card-title">${client.name}</div>
-                    <div class="metric">
-                        <span class="metric-label">Connections</span>
-                        <span class="metric-value">${client.connection_count}</span>
-                    </div>
-                    <div class="metric">
-                        <span class="metric-label">Total Traffic</span>
-                        <span class="metric-value">${formatBytes(client.total_bytes)}</span>
-                    </div>
-                    <div class="metric">
-                        <span class="metric-label">Paths</span>
-                        <span class="metric-value">${client.path_count}</span>
-                    </div>
-                    ${client.bandwidth_limit ? ` + "`" + `
-                    <div class="metric">
-                        <span class="metric-label">Bandwidth Limit</span>
-                        <span class="metric-value">${client.bandwidth_limit}</span>
-                    </div>
-                    ` + "`" + ` : ''}
-                </div>
-            ` + "`" + `;
-        }
-
-        function renderConnection(conn) {
-            return ` + "`" + `
-                <tr>
-                    <td>${formatTime(conn.timestamp)}</td>
-                    <td>${conn.client_id}</td>
-                    <td>${conn.source_ip}:${conn.source_port}</td>
-                    <td>${conn.dest_ip}:${conn.dest_port}</td>
-                    <td>${formatBytes(conn.bytes_tx)} / ${formatBytes(conn.bytes_rx)}</td>
-                    <td>${formatDuration(conn.duration_ms)}</td>
-                    <td>${conn.traffic_class}</td>
-                    <td class="action-${conn.action}">${conn.action}</td>
-                </tr>
-            ` + "`" + `;
+        function renderStats(s) {
+            return '<div class="card"><div class="card-title">Path ' + s.path_id + '</div>' +
+                '<div class="metric"><span class="metric-label">Tx</span><span class="metric-value">' + formatBytes(s.tx_bytes) + ' (' + s.tx_packets + ' pkts)</span></div>' +
+                '<div class="metric"><span class="metric-label">Rx</span><span class="metric-value">' + formatBytes(s.rx_bytes) + ' (' + s.rx_packets + ' pkts)</span></div>' +
+                '<div class="metric"><span class="metric-label">SRTT</span><span class="metric-value">' + s.srtt_ms.toFixed(1) + ' ms</span></div>' +
+                '<div class="metric"><span class="metric-label">Retrans</span><span class="metric-value">' + s.retransmissions + '</span></div>' +
+                '<div class="metric"><span class="metric-label">CWND</span><span class="metric-value">' + s.cwnd + '</span></div>' +
+                '</div>';
         }
 
         async function refresh() {
             try {
-                // Fetch stats
-                const statsResp = await fetch('/api/stats');
+                const [pathsResp, statsResp, eventsResp] = await Promise.all([
+                    fetch('/api/paths'), fetch('/api/stats'), fetch('/api/events/recent')
+                ]);
+                const paths = await pathsResp.json();
                 const stats = await statsResp.json();
+                const events = await eventsResp.json();
 
-                if (stats.error) {
-                    document.getElementById('paths-grid').innerHTML =
-                        '<div class="card error">' + stats.error + '</div>';
+                document.getElementById('last-update').textContent = 'Last update: ' + new Date().toLocaleString();
+
+                if (paths.paths && paths.paths.length > 0) {
+                    document.getElementById('paths-grid').innerHTML = paths.paths.map(renderPath).join('');
                 } else {
-                    document.getElementById('last-update').textContent =
-                        'Last update: ' + new Date(stats.timestamp).toLocaleString();
-
-                    if (stats.paths && stats.paths.length > 0) {
-                        document.getElementById('paths-grid').innerHTML =
-                            stats.paths.map(renderPath).join('');
-                    } else {
-                        document.getElementById('paths-grid').innerHTML =
-                            '<div class="card">No paths connected</div>';
-                    }
-
-                    if (stats.clients && stats.clients.length > 0) {
-                        document.getElementById('clients-grid').innerHTML =
-                            stats.clients.map(renderClient).join('');
-                    } else {
-                        document.getElementById('clients-grid').innerHTML =
-                            '<div class="card">No clients connected</div>';
-                    }
+                    document.getElementById('paths-grid').innerHTML = '<div class="card">No paths</div>';
                 }
 
-                // Fetch recent connections
-                const connResp = await fetch('/api/connections/recent');
-                const connData = await connResp.json();
-
-                if (connData.connections && connData.connections.length > 0) {
-                    document.getElementById('connections-body').innerHTML =
-                        connData.connections.slice(0, 20).map(renderConnection).join('');
+                if (stats.paths && stats.paths.length > 0) {
+                    document.getElementById('stats-grid').innerHTML = stats.paths.map(renderStats).join('');
                 } else {
-                    document.getElementById('connections-body').innerHTML =
-                        '<tr><td colspan="8">No recent connections</td></tr>';
+                    document.getElementById('stats-grid').innerHTML = '<div class="card">No stats</div>';
                 }
-            } catch (err) {
-                console.error('Refresh error:', err);
-            }
+
+                if (events.events && events.events.length > 0) {
+                    document.getElementById('events-body').innerHTML = events.events.slice(0, 20).map(e =>
+                        '<tr><td>' + new Date(e.timestamp).toLocaleTimeString() + '</td><td>' + e.event_type + '</td><td>' + e.path_id + '</td><td>' + (e.reason || '-') + '</td></tr>'
+                    ).join('');
+                } else {
+                    document.getElementById('events-body').innerHTML = '<tr><td colspan="4">No events</td></tr>';
+                }
+            } catch (err) { console.error('Refresh error:', err); }
         }
 
-        // Initial load
         refresh();
-
-        // Auto-refresh every 5 seconds
         setInterval(refresh, 5000);
     </script>
 </body>
 </html>
 `
 
-// formatBytes formats bytes for human readability (Go version).
 func formatBytes(b uint64) string {
 	const unit = 1024
 	if b < unit {
@@ -460,8 +353,6 @@ func formatBytes(b uint64) string {
 	return fmt.Sprintf("%.2f %cB", float64(b)/float64(div), "KMGTPE"[exp])
 }
 
-// init registers handler functions
 func init() {
-	// Remove unused import warning
 	_ = strings.TrimSpace
 }

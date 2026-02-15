@@ -3772,7 +3772,11 @@ int tquic_udp_recv(struct sock *sk, struct sk_buff *skb)
 					if (dcid_len > 0 && offset > 6 + dcid_len) {
 						u8 cookie[64];
 						size_t cookie_len = sizeof(cookie);
+						u32 pkt_version;
 						int ret;
+
+						/* Preserve the client's QUIC version from Initial. */
+						pkt_version = get_unaligned_be32(data + 1);
 
 						ret = tquic_ratelimit_generate_cookie(
 							sock_net(sk), &src_addr,
@@ -3780,11 +3784,13 @@ int tquic_udp_recv(struct sock *sk, struct sk_buff *skb)
 							cookie, &cookie_len);
 						if (ret == 0) {
 							/* Send Retry packet with cookie as token */
-							tquic_retry_send(sk, &src_addr,
-									 TQUIC_VERSION_1,
-									 data + 6, dcid_len,
-									 data + 7 + dcid_len,
-									 scid_len);
+							tquic_retry_send_with_token(sk, &src_addr,
+										    pkt_version,
+										    data + 6, dcid_len,
+										    data + 7 + dcid_len,
+										    scid_len,
+										    cookie,
+										    cookie_len);
 						}
 					}
 					kfree_skb(skb);

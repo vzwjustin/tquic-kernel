@@ -36,6 +36,16 @@ struct tquic_path_quality {
 	bool can_send;       /* Can accept more data */
 };
 
+static inline bool tquic_path_state_usable(int state)
+{
+	return state == TQUIC_PATH_ACTIVE || state == TQUIC_PATH_VALIDATED;
+}
+
+static inline bool tquic_path_usable(const struct tquic_path *path)
+{
+	return tquic_path_state_usable(READ_ONCE(path->state));
+}
+
 /*
  * Calculate path quality score for scheduling decisions
  * Higher score = better path
@@ -46,7 +56,7 @@ static void tquic_calc_path_quality(struct tquic_path *path,
 	struct tquic_path_stats *stats = &path->stats;
 	u64 score = 0;
 
-	if (READ_ONCE(path->state) != TQUIC_PATH_ACTIVE) {
+	if (!tquic_path_usable(path)) {
 		quality->score = 0;
 		quality->can_send = false;
 		return;
@@ -161,7 +171,7 @@ static struct tquic_path *tquic_select_minrtt(struct tquic_bond_state *bond,
 	list_for_each_entry(path, &conn->paths, list) {
 		u32 rtt;
 
-		if (READ_ONCE(path->state) != TQUIC_PATH_ACTIVE)
+		if (!tquic_path_usable(path))
 			continue;
 
 		rtt = READ_ONCE(path->stats.rtt_smoothed);
@@ -194,39 +204,46 @@ static struct tquic_path *tquic_select_roundrobin(struct tquic_bond_state *bond,
 	struct tquic_connection *conn = bond->conn;
 	struct tquic_path *path, *selected = NULL;
 	u32 counter;
-	u32 active_count = 0;
+	u32 usable_count = 0;
+	u32 idx = 0;
+	u32 target;
 
 	lockdep_assert_held(&conn->paths_lock);
 
 	/*
-	 * Single-pass selection: count active paths and select the target
-	 * in one iteration to avoid TOCTOU race where paths change state
-	 * between a counting pass and a selection pass.
-	 *
-	 * Get the counter value first, then iterate once. For each active
-	 * path, check if it is the (counter % active_count_so_far)'th one
-	 * using modular arithmetic updated as we go.
+	 * Two-pass selection under conn->paths_lock:
+	 * 1) count usable paths,
+	 * 2) pick (counter % usable_count)-th usable path.
 	 */
 	counter = (u32)atomic_inc_return(&bond->rr_counter);
 
 	list_for_each_entry(path, &conn->paths, list) {
-		if (READ_ONCE(path->state) != TQUIC_PATH_ACTIVE)
+		if (!tquic_path_usable(path))
 			continue;
 
-		active_count++;
-		/*
-		 * Select this path if counter maps to this index.
-		 * As we discover more active paths, re-evaluate so the
-		 * final selection is counter % total_active_count.
-		 */
-		if (counter % active_count == 0)
+		usable_count++;
+	}
+
+	if (!usable_count)
+		goto fallback;
+
+	target = counter % usable_count;
+
+	list_for_each_entry(path, &conn->paths, list) {
+		if (!tquic_path_usable(path))
+			continue;
+
+		if (idx++ == target) {
 			selected = path;
+			break;
+		}
 	}
 
 	/* Return referenced path per API contract */
 	if (selected && tquic_path_get(selected))
 		return selected;
 
+	fallback:
 	rcu_read_lock();
 	selected = rcu_dereference(conn->active_path);
 	if (selected && !tquic_path_get(selected))
@@ -255,7 +272,7 @@ static struct tquic_path *tquic_select_weighted(struct tquic_bond_state *bond,
 	 * causing wraparound.
 	 */
 	list_for_each_entry(path, &conn->paths, list) {
-		if (READ_ONCE(path->state) == TQUIC_PATH_ACTIVE)
+		if (tquic_path_usable(path))
 			total_weight += min_t(u32, path->weight, 1000);
 	}
 
@@ -274,7 +291,7 @@ static struct tquic_path *tquic_select_weighted(struct tquic_bond_state *bond,
 	target = (u32)atomic_inc_return(&bond->rr_counter) % total_weight;
 
 	list_for_each_entry(path, &conn->paths, list) {
-		if (READ_ONCE(path->state) != TQUIC_PATH_ACTIVE)
+		if (!tquic_path_usable(path))
 			continue;
 
 		cumulative += min_t(u32, path->weight, 1000);
@@ -310,7 +327,7 @@ static struct tquic_path *tquic_select_aggregate(struct tquic_bond_state *bond,
 	lockdep_assert_held(&conn->paths_lock);
 
 	list_for_each_entry(path, &conn->paths, list) {
-		if (READ_ONCE(path->state) != TQUIC_PATH_ACTIVE)
+		if (!tquic_path_usable(path))
 			continue;
 
 		tquic_calc_path_quality(path, &quality);
@@ -331,7 +348,7 @@ static struct tquic_path *tquic_select_aggregate(struct tquic_bond_state *bond,
 		list_for_each_entry(path, &conn->paths, list) {
 			u32 pcwnd = READ_ONCE(path->stats.cwnd);
 
-			if (READ_ONCE(path->state) == TQUIC_PATH_ACTIVE &&
+			if (tquic_path_usable(path) &&
 			    pcwnd > max_cwnd) {
 				max_cwnd = pcwnd;
 				best = path;
@@ -371,7 +388,7 @@ static struct tquic_path *tquic_select_blest(struct tquic_bond_state *bond,
 		u64 completion_time;
 		u64 bw;
 
-		if (READ_ONCE(path->state) != TQUIC_PATH_ACTIVE)
+		if (!tquic_path_usable(path))
 			continue;
 
 		tquic_calc_path_quality(path, &quality);
@@ -442,7 +459,7 @@ static struct tquic_path *tquic_select_ecf(struct tquic_bond_state *bond,
 		u64 tx_bytes, acked_bytes;
 		u32 cwnd;
 
-		if (READ_ONCE(path->state) != TQUIC_PATH_ACTIVE)
+		if (!tquic_path_usable(path))
 			continue;
 
 		/*
@@ -542,7 +559,7 @@ static int __maybe_unused tquic_send_redundant(struct tquic_bond_state *bond,
 	list_for_each_entry(path, &conn->paths, list) {
 		struct sk_buff *clone;
 
-		if (READ_ONCE(path->state) != TQUIC_PATH_ACTIVE)
+		if (!tquic_path_usable(path))
 			continue;
 
 		clone = skb_clone(skb, GFP_ATOMIC);
@@ -606,7 +623,7 @@ struct tquic_path *tquic_bond_select_path(struct tquic_connection *conn,
 	case TQUIC_BOND_MODE_FAILOVER:
 		/* Use primary unless it's down */
 		primary = tquic_bond_primary_path_locked(conn, bond);
-		if (primary && READ_ONCE(primary->state) == TQUIC_PATH_ACTIVE) {
+		if (primary && tquic_path_usable(primary)) {
 			selected = primary;
 			if (!tquic_path_get(selected))
 				selected = NULL;
@@ -680,7 +697,7 @@ struct tquic_path *tquic_bond_select_path(struct tquic_connection *conn,
 		list_for_each_entry(fallback, &conn->paths, list) {
 			if (fallback == selected)
 				continue;
-			if (READ_ONCE(fallback->state) != TQUIC_PATH_ACTIVE)
+			if (!tquic_path_usable(fallback))
 				continue;
 
 			if (!tquic_path_get(fallback))
@@ -732,10 +749,14 @@ void tquic_bond_path_failed(struct tquic_connection *conn,
 	/* Find new active path */
 	if (READ_ONCE(conn->active_path) == path) {
 		list_for_each_entry(p, &conn->paths, list) {
-			if (p != path && p->state == TQUIC_PATH_ACTIVE) {
-				new_active = p;
-				break;
-			}
+			if (p == path || !tquic_path_usable(p))
+				continue;
+
+			if (READ_ONCE(p->state) == TQUIC_PATH_VALIDATED)
+				WRITE_ONCE(p->state, TQUIC_PATH_ACTIVE);
+
+			new_active = p;
+			break;
 		}
 
 		/*
@@ -1072,7 +1093,7 @@ void tquic_bond_interface_down(struct tquic_connection *conn,
 
 	/* Mark all paths using this interface as failed */
 	list_for_each_entry(path, &conn->paths, list) {
-		if (path->dev == dev && path->state == TQUIC_PATH_ACTIVE) {
+		if (path->dev == dev && tquic_path_usable(path)) {
 			WRITE_ONCE(path->state, TQUIC_PATH_FAILED);
 			failed_count++;
 			bond->stats.failed_paths++;
@@ -1088,12 +1109,16 @@ void tquic_bond_interface_down(struct tquic_connection *conn,
 		struct tquic_path *new_primary = NULL;
 		old_primary_id = primary->path_id;
 
-		/* Find first active path as new primary */
+		/* Find first usable path as new primary */
 		list_for_each_entry(path, &conn->paths, list) {
-			if (path->state == TQUIC_PATH_ACTIVE && path != primary) {
-				new_primary = path;
-				break;
-			}
+			if (path == primary || !tquic_path_usable(path))
+				continue;
+
+			if (READ_ONCE(path->state) == TQUIC_PATH_VALIDATED)
+				WRITE_ONCE(path->state, TQUIC_PATH_ACTIVE);
+
+			new_primary = path;
+			break;
 		}
 
 		if (new_primary) {

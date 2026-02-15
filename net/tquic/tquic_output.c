@@ -1264,6 +1264,13 @@ struct tquic_path *tquic_select_path(struct tquic_connection *conn,
 }
 EXPORT_SYMBOL_GPL(tquic_select_path);
 
+static inline bool tquic_output_path_usable(const struct tquic_path *path)
+{
+	return path &&
+	       (READ_ONCE(path->state) == TQUIC_PATH_ACTIVE ||
+		READ_ONCE(path->state) == TQUIC_PATH_VALIDATED);
+}
+
 /*
  * Select path with load balancing
  * Caller must hold conn->paths_lock to protect path list iteration.
@@ -1281,7 +1288,7 @@ static struct tquic_path __maybe_unused *tquic_select_path_lb(struct tquic_conne
 		u32 score;
 		u64 inflight;
 
-		if (path->state != TQUIC_PATH_ACTIVE)
+		if (!tquic_output_path_usable(path))
 			continue;
 
 		/* Score based on available capacity and RTT */
@@ -2265,7 +2272,7 @@ int tquic_output_flush(struct tquic_connection *conn)
 
 	/* Select path for transmission */
 	path = tquic_select_path(conn, NULL);
-	if (!path || path->state != TQUIC_PATH_ACTIVE) {
+	if (!tquic_output_path_usable(path)) {
 		tquic_dbg("output_flush no active path\n");
 		ret = 0;
 		goto out_clear_flush;

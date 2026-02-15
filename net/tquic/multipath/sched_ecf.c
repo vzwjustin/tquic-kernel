@@ -81,6 +81,12 @@ struct ecf_sched_data {
 	u32 path_switches; /* Path switch counter */
 };
 
+static inline bool ecf_path_usable(const struct tquic_path *path)
+{
+	return path->state == TQUIC_PATH_ACTIVE ||
+	       path->state == TQUIC_PATH_VALIDATED;
+}
+
 /**
  * ecf_find_path_state - Find path state for a given path ID
  * @sd: ECF scheduler data
@@ -241,7 +247,7 @@ static int ecf_get_path(struct tquic_connection *conn,
 		struct ecf_path_state *ps;
 		u64 completion;
 
-		if (path->state != TQUIC_PATH_ACTIVE)
+		if (!ecf_path_usable(path))
 			continue;
 
 		active_count++;

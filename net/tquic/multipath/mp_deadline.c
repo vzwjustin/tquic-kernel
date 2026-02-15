@@ -115,6 +115,13 @@ static struct kmem_cache *mp_deadline_info_cache;
 /* Workqueue for coordination */
 static struct workqueue_struct *mp_deadline_wq;
 
+static inline bool mp_deadline_path_usable(const struct tquic_path *path)
+{
+	return path &&
+	       (path->state == TQUIC_PATH_ACTIVE ||
+		path->state == TQUIC_PATH_VALIDATED);
+}
+
 /*
  * =============================================================================
  * Path Info Management
@@ -248,7 +255,7 @@ static void mp_deadline_update_path_capabilities(
 	info->min_feasible_deadline_us = min_deadline_us;
 
 	/* Assess deadline capability */
-	if (path->state != TQUIC_PATH_ACTIVE) {
+	if (!mp_deadline_path_usable(path)) {
 		info->deadline_capable = false;
 	} else if (jitter_us > rtt_us) {
 		/* High jitter relative to RTT - unreliable for deadlines */
@@ -314,7 +321,7 @@ mp_deadline_select_best_path(struct tquic_mp_deadline_coordinator *coord,
 		if (!info->deadline_capable)
 			continue;
 
-		if (info->path->state != TQUIC_PATH_ACTIVE)
+		if (!mp_deadline_path_usable(info->path))
 			continue;
 
 		/* Check if path can meet deadline */

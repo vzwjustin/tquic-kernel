@@ -82,6 +82,12 @@ struct blest_sched_data {
 	u64 blocking_threshold_us; /* Minimum blocking to trigger wait */
 };
 
+static inline bool blest_path_usable(const struct tquic_path *path)
+{
+	return path->state == TQUIC_PATH_ACTIVE ||
+	       path->state == TQUIC_PATH_VALIDATED;
+}
+
 /*
  * Module parameter for blocking threshold (microseconds).
  * Only wait for fast path if blocking would exceed this threshold.
@@ -270,7 +276,7 @@ static int blest_get_path(struct tquic_connection *conn,
 	list_for_each_entry_rcu(path, &conn->paths, list) {
 		u32 rtt;
 
-		if (path->state != TQUIC_PATH_ACTIVE)
+		if (!blest_path_usable(path))
 			continue;
 
 		active_count++;
@@ -318,7 +324,7 @@ static int blest_get_path(struct tquic_connection *conn,
 		s64 blocking;
 		u32 cwnd_avail;
 
-		if (path->state != TQUIC_PATH_ACTIVE)
+		if (!blest_path_usable(path))
 			continue;
 
 		ps = blest_find_path_state(sd, path->path_id);

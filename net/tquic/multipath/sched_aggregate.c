@@ -58,6 +58,12 @@ struct aggregate_sched_data {
 	ktime_t last_capacity_update; /* Avoid recalc every packet */
 };
 
+static inline bool aggregate_path_usable(const struct tquic_path *path)
+{
+	return path->state == TQUIC_PATH_ACTIVE ||
+	       path->state == TQUIC_PATH_VALIDATED;
+}
+
 /*
  * Calculate path capacity as cwnd/RTT
  *
@@ -113,7 +119,7 @@ static void update_capacities_locked(struct tquic_connection *conn,
 		if (idx >= TQUIC_MAX_PATHS)
 			break;
 
-		if (path->state == TQUIC_PATH_ACTIVE) {
+		if (aggregate_path_usable(path)) {
 			sd->path_capacities[idx] = calc_path_capacity(path);
 			total += sd->path_capacities[idx];
 		} else {
@@ -133,7 +139,7 @@ static void update_capacities_locked(struct tquic_connection *conn,
 		if (idx >= TQUIC_MAX_PATHS)
 			break;
 
-		if (path->state == TQUIC_PATH_ACTIVE) {
+		if (aggregate_path_usable(path)) {
 			u32 min_weight = (total * TQUIC_MIN_WEIGHT_FLOOR) /
 					 TQUIC_WEIGHT_SCALE;
 			if (sd->path_capacities[idx] < min_weight) {
@@ -195,7 +201,7 @@ static int aggregate_get_path(struct tquic_connection *conn,
 		if (idx >= TQUIC_MAX_PATHS)
 			break;
 
-		if (path->state != TQUIC_PATH_ACTIVE) {
+		if (!aggregate_path_usable(path)) {
 			idx++;
 			continue;
 		}

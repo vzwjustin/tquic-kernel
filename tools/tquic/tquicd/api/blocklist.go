@@ -9,20 +9,20 @@ import (
 	"net/http"
 
 	"github.com/linux/tquicd/config"
-	"github.com/linux/tquicd/netlink"
 )
+
+// Note: Blocklist is managed locally by tquicd. The kernel TQUIC module
+// does not have a netlink command for blocklist management.
 
 // BlocklistHandler handles blocklist API requests.
 type BlocklistHandler struct {
 	configLoader *config.Loader
-	nlClient     *netlink.Client
 }
 
 // NewBlocklistHandler creates a new blocklist handler.
-func NewBlocklistHandler(configLoader *config.Loader, nlClient *netlink.Client) *BlocklistHandler {
+func NewBlocklistHandler(configLoader *config.Loader) *BlocklistHandler {
 	return &BlocklistHandler{
 		configLoader: configLoader,
-		nlClient:     nlClient,
 	}
 }
 
@@ -102,12 +102,6 @@ func (h *BlocklistHandler) handlePost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Notify kernel
-	ips, cidrs := h.configLoader.GetBlocklist()
-	if err := h.nlClient.SetBlocklist(ips, cidrs); err != nil {
-		// Log but don't fail - kernel might not be ready
-	}
-
 	json.NewEncoder(w).Encode(SuccessResponse{
 		Success: true,
 		Message: "added to blocklist: " + entry,
@@ -144,12 +138,6 @@ func (h *BlocklistHandler) handleDelete(w http.ResponseWriter, r *http.Request) 
 	if err := h.configLoader.SaveBlocklist(); err != nil {
 		json.NewEncoder(w).Encode(ErrorResponse{Error: "failed to persist: " + err.Error()})
 		return
-	}
-
-	// Notify kernel
-	ips, cidrs := h.configLoader.GetBlocklist()
-	if err := h.nlClient.SetBlocklist(ips, cidrs); err != nil {
-		// Log but don't fail
 	}
 
 	json.NewEncoder(w).Encode(SuccessResponse{

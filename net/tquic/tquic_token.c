@@ -302,7 +302,13 @@ int tquic_token_generate(const struct tquic_token_key *key,
 	u8 *p;
 	struct crypto_aead *aead;
 
-	if (!key || !key->valid || !client_addr || !token || !token_len)
+	if (!client_addr || !token || !token_len)
+		return -EINVAL;
+
+	if (!key)
+		key = &tquic_server_token_key;
+
+	if (!key->valid)
 		return -EINVAL;
 
 	/* Build plaintext structure */
@@ -464,7 +470,13 @@ int tquic_token_validate(const struct tquic_token_key *key,
 	time64_t now;
 	struct crypto_aead *aead;
 
-	if (!key || !key->valid || !client_addr || !token)
+	if (!client_addr || !token)
+		return -EINVAL;
+
+	if (!key)
+		key = &tquic_server_token_key;
+
+	if (!key->valid)
 		return -EINVAL;
 
 	/* Minimum token length: version + IV + at least 1 byte plaintext + tag */

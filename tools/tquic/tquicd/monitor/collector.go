@@ -18,26 +18,22 @@ import (
 type Collector struct {
 	nlClient *netlink.Client
 
-	// Connection metrics
-	connectionsTotal *prometheus.CounterVec
-	connectionsActive *prometheus.GaugeVec
-
 	// Path metrics
-	pathBytesTotal   *prometheus.CounterVec
-	pathRttSeconds   *prometheus.GaugeVec
-	pathLossRatio    *prometheus.GaugeVec
-	pathJitterSeconds *prometheus.GaugeVec
-	pathBandwidthBytes *prometheus.GaugeVec
+	pathTxBytes    *prometheus.CounterVec
+	pathRxBytes    *prometheus.CounterVec
+	pathTxPackets  *prometheus.CounterVec
+	pathRxPackets  *prometheus.CounterVec
+	pathRetrans    *prometheus.CounterVec
+	pathSRTT       *prometheus.GaugeVec
+	pathRTTVar     *prometheus.GaugeVec
+	pathCwnd       *prometheus.GaugeVec
+	pathState      *prometheus.GaugeVec
 
-	// Client metrics
-	clientConnectionCount *prometheus.GaugeVec
-	clientBytesTotal      *prometheus.CounterVec
-
-	// Alert metrics
-	pathDegradedTotal *prometheus.CounterVec
+	// Event metrics
+	pathEventsTotal *prometheus.CounterVec
 
 	// Internal state
-	lastPathStats map[string]netlink.PathStats
+	lastPathStats map[uint32]netlink.PathStats
 	mu            sync.Mutex
 }
 
@@ -45,110 +41,109 @@ type Collector struct {
 func NewCollector(nlClient *netlink.Client) *Collector {
 	c := &Collector{
 		nlClient:      nlClient,
-		lastPathStats: make(map[string]netlink.PathStats),
+		lastPathStats: make(map[uint32]netlink.PathStats),
 
-		connectionsTotal: prometheus.NewCounterVec(
+		pathTxBytes: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
 				Namespace: "tquic",
-				Name:      "connections_total",
-				Help:      "Total number of TQUIC connections",
+				Name:      "path_tx_bytes_total",
+				Help:      "Total bytes transmitted per path",
 			},
-			[]string{"client", "traffic_class"},
+			[]string{"path_id"},
 		),
 
-		connectionsActive: prometheus.NewGaugeVec(
-			prometheus.GaugeOpts{
-				Namespace: "tquic",
-				Name:      "connections_active",
-				Help:      "Number of active TQUIC connections",
-			},
-			[]string{"client"},
-		),
-
-		pathBytesTotal: prometheus.NewCounterVec(
+		pathRxBytes: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
 				Namespace: "tquic",
-				Name:      "path_bytes_total",
-				Help:      "Total bytes transferred per path",
+				Name:      "path_rx_bytes_total",
+				Help:      "Total bytes received per path",
 			},
-			[]string{"client", "path_id", "direction"},
+			[]string{"path_id"},
 		),
 
-		pathRttSeconds: prometheus.NewGaugeVec(
-			prometheus.GaugeOpts{
-				Namespace: "tquic",
-				Name:      "path_rtt_seconds",
-				Help:      "Round-trip time per path in seconds",
-			},
-			[]string{"client", "path_id", "stat"}, // stat: min, avg, max
-		),
-
-		pathLossRatio: prometheus.NewGaugeVec(
-			prometheus.GaugeOpts{
-				Namespace: "tquic",
-				Name:      "path_loss_ratio",
-				Help:      "Packet loss ratio per path (0.0-1.0)",
-			},
-			[]string{"client", "path_id"},
-		),
-
-		pathJitterSeconds: prometheus.NewGaugeVec(
-			prometheus.GaugeOpts{
-				Namespace: "tquic",
-				Name:      "path_jitter_seconds",
-				Help:      "RTT jitter per path in seconds",
-			},
-			[]string{"client", "path_id"},
-		),
-
-		pathBandwidthBytes: prometheus.NewGaugeVec(
-			prometheus.GaugeOpts{
-				Namespace: "tquic",
-				Name:      "path_bandwidth_bytes",
-				Help:      "Estimated bandwidth per path in bytes per second",
-			},
-			[]string{"client", "path_id"},
-		),
-
-		clientConnectionCount: prometheus.NewGaugeVec(
-			prometheus.GaugeOpts{
-				Namespace: "tquic",
-				Name:      "client_connection_count",
-				Help:      "Number of connections per client",
-			},
-			[]string{"client"},
-		),
-
-		clientBytesTotal: prometheus.NewCounterVec(
+		pathTxPackets: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
 				Namespace: "tquic",
-				Name:      "client_bytes_total",
-				Help:      "Total bytes transferred per client",
+				Name:      "path_tx_packets_total",
+				Help:      "Total packets transmitted per path",
 			},
-			[]string{"client"},
+			[]string{"path_id"},
 		),
 
-		pathDegradedTotal: prometheus.NewCounterVec(
+		pathRxPackets: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
 				Namespace: "tquic",
-				Name:      "path_degraded_total",
-				Help:      "Total number of path degradation events",
+				Name:      "path_rx_packets_total",
+				Help:      "Total packets received per path",
 			},
-			[]string{"client", "path_id", "reason"},
+			[]string{"path_id"},
+		),
+
+		pathRetrans: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Namespace: "tquic",
+				Name:      "path_retransmissions_total",
+				Help:      "Total retransmissions per path",
+			},
+			[]string{"path_id"},
+		),
+
+		pathSRTT: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Namespace: "tquic",
+				Name:      "path_srtt_seconds",
+				Help:      "Smoothed round-trip time per path in seconds",
+			},
+			[]string{"path_id"},
+		),
+
+		pathRTTVar: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Namespace: "tquic",
+				Name:      "path_rttvar_seconds",
+				Help:      "RTT variance per path in seconds",
+			},
+			[]string{"path_id"},
+		),
+
+		pathCwnd: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Namespace: "tquic",
+				Name:      "path_cwnd",
+				Help:      "Congestion window per path",
+			},
+			[]string{"path_id"},
+		),
+
+		pathState: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Namespace: "tquic",
+				Name:      "path_state",
+				Help:      "Path state (0=unknown, 1=validating, 2=validated, 3=active, 4=standby, 5=degraded, 6=failed)",
+			},
+			[]string{"path_id"},
+		),
+
+		pathEventsTotal: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Namespace: "tquic",
+				Name:      "path_events_total",
+				Help:      "Total path events by type",
+			},
+			[]string{"event_type"},
 		),
 	}
 
-	// Register all metrics
-	prometheus.MustRegister(c.connectionsTotal)
-	prometheus.MustRegister(c.connectionsActive)
-	prometheus.MustRegister(c.pathBytesTotal)
-	prometheus.MustRegister(c.pathRttSeconds)
-	prometheus.MustRegister(c.pathLossRatio)
-	prometheus.MustRegister(c.pathJitterSeconds)
-	prometheus.MustRegister(c.pathBandwidthBytes)
-	prometheus.MustRegister(c.clientConnectionCount)
-	prometheus.MustRegister(c.clientBytesTotal)
-	prometheus.MustRegister(c.pathDegradedTotal)
+	prometheus.MustRegister(c.pathTxBytes)
+	prometheus.MustRegister(c.pathRxBytes)
+	prometheus.MustRegister(c.pathTxPackets)
+	prometheus.MustRegister(c.pathRxPackets)
+	prometheus.MustRegister(c.pathRetrans)
+	prometheus.MustRegister(c.pathSRTT)
+	prometheus.MustRegister(c.pathRTTVar)
+	prometheus.MustRegister(c.pathCwnd)
+	prometheus.MustRegister(c.pathState)
+	prometheus.MustRegister(c.pathEventsTotal)
 
 	return c
 }
@@ -161,80 +156,48 @@ func (c *Collector) UpdatePathStats(stats []netlink.PathStats) {
 	for _, ps := range stats {
 		pathID := formatPathID(ps.PathID)
 
-		// Update byte counters
-		c.pathBytesTotal.WithLabelValues(ps.ClientName, pathID, "tx").Add(
-			float64(ps.TxBytes) - c.getLastTxBytes(ps.ClientName, ps.PathID),
-		)
-		c.pathBytesTotal.WithLabelValues(ps.ClientName, pathID, "rx").Add(
-			float64(ps.RxBytes) - c.getLastRxBytes(ps.ClientName, ps.PathID),
-		)
-
-		// Update RTT gauges
-		c.pathRttSeconds.WithLabelValues(ps.ClientName, pathID, "min").Set(ps.RttMinSeconds())
-		c.pathRttSeconds.WithLabelValues(ps.ClientName, pathID, "avg").Set(ps.RttAvgSeconds())
-		c.pathRttSeconds.WithLabelValues(ps.ClientName, pathID, "max").Set(ps.RttMaxSeconds())
-
-		// Update loss and jitter
-		c.pathLossRatio.WithLabelValues(ps.ClientName, pathID).Set(ps.LossRatio())
-		c.pathJitterSeconds.WithLabelValues(ps.ClientName, pathID).Set(ps.JitterSeconds())
-
-		// Calculate and update bandwidth estimate
-		// bandwidth = (tx_bytes + rx_bytes) / rtt_avg
-		if ps.RttAvg > 0 {
-			totalBytes := float64(ps.TxBytes + ps.RxBytes)
-			rttSec := float64(ps.RttAvg) / 1e6
-			bandwidth := totalBytes / rttSec
-			c.pathBandwidthBytes.WithLabelValues(ps.ClientName, pathID).Set(bandwidth)
+		// Update counters (delta from last)
+		if last, ok := c.lastPathStats[ps.PathID]; ok {
+			if ps.TxBytes > last.TxBytes {
+				c.pathTxBytes.WithLabelValues(pathID).Add(float64(ps.TxBytes - last.TxBytes))
+			}
+			if ps.RxBytes > last.RxBytes {
+				c.pathRxBytes.WithLabelValues(pathID).Add(float64(ps.RxBytes - last.RxBytes))
+			}
+			if ps.TxPackets > last.TxPackets {
+				c.pathTxPackets.WithLabelValues(pathID).Add(float64(ps.TxPackets - last.TxPackets))
+			}
+			if ps.RxPackets > last.RxPackets {
+				c.pathRxPackets.WithLabelValues(pathID).Add(float64(ps.RxPackets - last.RxPackets))
+			}
+			if ps.Retrans > last.Retrans {
+				c.pathRetrans.WithLabelValues(pathID).Add(float64(ps.Retrans - last.Retrans))
+			}
 		}
 
-		// Store for delta calculation
-		c.lastPathStats[formatPathKey(ps.ClientName, ps.PathID)] = ps
+		// Update gauges
+		c.pathSRTT.WithLabelValues(pathID).Set(ps.SRTTSeconds())
+		c.pathRTTVar.WithLabelValues(pathID).Set(float64(ps.RTTVar) / 1e6)
+		c.pathCwnd.WithLabelValues(pathID).Set(float64(ps.Cwnd))
+
+		c.lastPathStats[ps.PathID] = ps
 	}
 }
 
-// UpdateClientStats updates Prometheus metrics with client statistics.
-func (c *Collector) UpdateClientStats(stats []netlink.ClientStats) {
-	for _, cs := range stats {
-		c.clientConnectionCount.WithLabelValues(cs.ClientName).Set(float64(cs.ConnectionCount))
-		c.connectionsActive.WithLabelValues(cs.ClientName).Set(float64(cs.ConnectionCount))
+// UpdatePathInfo updates path state metrics from PathInfo.
+func (c *Collector) UpdatePathInfo(paths []netlink.PathInfo) {
+	for _, pi := range paths {
+		pathID := formatPathID(pi.PathID)
+		c.pathState.WithLabelValues(pathID).Set(float64(pi.State))
 	}
 }
 
-// RecordConnection records a new connection event.
-func (c *Collector) RecordConnection(event netlink.ConnectionEvent) {
-	trafficClass := event.TrafficClassName()
-	c.connectionsTotal.WithLabelValues(event.ClientID, trafficClass).Inc()
-}
-
-// RecordPathDegraded records a path degradation event.
-func (c *Collector) RecordPathDegraded(clientName string, pathID uint32, reason string) {
-	c.pathDegradedTotal.WithLabelValues(clientName, formatPathID(pathID), reason).Inc()
-}
-
-// getLastTxBytes returns the last known TxBytes for a path.
-func (c *Collector) getLastTxBytes(client string, pathID uint32) float64 {
-	key := formatPathKey(client, pathID)
-	if ps, ok := c.lastPathStats[key]; ok {
-		return float64(ps.TxBytes)
-	}
-	return 0
-}
-
-// getLastRxBytes returns the last known RxBytes for a path.
-func (c *Collector) getLastRxBytes(client string, pathID uint32) float64 {
-	key := formatPathKey(client, pathID)
-	if ps, ok := c.lastPathStats[key]; ok {
-		return float64(ps.RxBytes)
-	}
-	return 0
+// RecordPathEvent records a path event.
+func (c *Collector) RecordPathEvent(event netlink.PathEvent) {
+	c.pathEventsTotal.WithLabelValues(event.TypeName()).Inc()
 }
 
 // formatPathID converts a path ID to a string for labels.
 func formatPathID(id uint32) string {
 	return fmt.Sprintf("%d", id)
-}
-
-// formatPathKey creates a unique key for a client+path combination.
-func formatPathKey(client string, pathID uint32) string {
-	return fmt.Sprintf("%s:%d", client, pathID)
 }

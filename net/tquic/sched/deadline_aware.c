@@ -52,6 +52,13 @@ static struct tquic_path *tquic_deadline_active_path_get(struct tquic_connection
 	return path;
 }
 
+static inline bool deadline_path_usable(const struct tquic_path *path)
+{
+	return path &&
+	       (path->state == TQUIC_PATH_ACTIVE ||
+		path->state == TQUIC_PATH_VALIDATED);
+}
+
 /*
  * =============================================================================
  * Variable-length Integer Helpers
@@ -343,7 +350,7 @@ bool tquic_deadline_check_feasibility(struct tquic_deadline_sched_state *state,
 
 	if (path) {
 		/* Check specific path */
-		if (path->state != TQUIC_PATH_ACTIVE)
+		if (!deadline_path_usable(path))
 			return false;
 
 		delivery_time = deadline_estimate_delivery_time(path, data_len);
@@ -352,7 +359,7 @@ bool tquic_deadline_check_feasibility(struct tquic_deadline_sched_state *state,
 
 	/* Check all paths */
 	list_for_each_entry(check_path, &state->conn->paths, list) {
-		if (check_path->state != TQUIC_PATH_ACTIVE)
+		if (!deadline_path_usable(check_path))
 			continue;
 
 		delivery_time = deadline_estimate_delivery_time(check_path,
@@ -411,7 +418,7 @@ struct tquic_path *tquic_deadline_select_path(
 
 	/* Evaluate all active paths */
 	list_for_each_entry(path, &state->conn->paths, list) {
-		if (path->state != TQUIC_PATH_ACTIVE)
+		if (!deadline_path_usable(path))
 			continue;
 
 		delivery_time = deadline_estimate_delivery_time(path, data_len);

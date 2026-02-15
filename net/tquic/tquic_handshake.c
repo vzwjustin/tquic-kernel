@@ -34,6 +34,7 @@
 #include "tquic_debug.h"
 #include "tquic_mib.h"
 #include "tquic_token.h"
+#include "tquic_retry.h"
 #include "crypto/zero_rtt.h"
 #include "core/early_data.h"
 #include "core/transport_params.h"
@@ -1605,22 +1606,20 @@ static int tquic_conn_server_accept_init(struct tquic_connection *conn,
 		rcu_read_unlock();
 
 		/*
-		 * Attempt to validate the token. We try both retry token
-		 * validation (short lifetime) and regular token validation
-		 * (long lifetime).
+		 * Attempt to validate the token. We try both Retry token
+		 * validation (short lifetime, retry subsystem format) and
+		 * regular NEW_TOKEN validation (long lifetime).
 		 *
-		 * Note: tquic_token_validate_retry expects retry tokens,
-		 * while tquic_token_validate handles NEW_TOKEN tokens.
-		 * Try retry first since it's more common during connection
-		 * establishment after a Retry.
+		 * Retry and NEW_TOKEN tokens use different formats, so Retry
+		 * validation is delegated to tquic_retry_token_validate_global().
+		 * Try Retry first since it is common immediately after a Retry.
 		 */
 		memset(&original_dcid, 0, sizeof(original_dcid));
 
-		token_ret = tquic_token_validate_retry(
-			NULL,  /* Use global server key */
+		token_ret = tquic_retry_token_validate_global(
+			token_data, (size_t)token_len,
 			&client_addr,
-			token_data, (u32)token_len,
-			&original_dcid);
+			original_dcid.id, &original_dcid.len);
 
 		if (token_ret == 0) {
 			/*

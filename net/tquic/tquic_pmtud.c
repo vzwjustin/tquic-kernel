@@ -907,6 +907,8 @@ static void tquic_pmtud_work_fn(struct work_struct *work)
  */
 int tquic_pmtud_start(struct tquic_path *path)
 {
+	struct tquic_pmtud_state_info *pmtud;
+	bool start_search = false;
 	int ret;
 
 	if (!path)
@@ -922,8 +924,19 @@ int tquic_pmtud_start(struct tquic_path *path)
 			return ret;
 	}
 
-	/* In production, pmtud would be retrieved from path structure */
-	/* For now, we'd need to track it separately or store in path->ext */
+	pmtud = path->pmtud_state;
+	if (!pmtud)
+		return -EINVAL;
+
+	/* Kick off SEARCHING from BASE when there is headroom to probe. */
+	spin_lock_bh(&pmtud->lock);
+	if (pmtud->state == TQUIC_PMTUD_BASE &&
+	    pmtud->max_plpmtu > pmtud->plpmtu + TQUIC_PMTU_SEARCH_THRESHOLD)
+		start_search = true;
+	spin_unlock_bh(&pmtud->lock);
+
+	if (start_search)
+		tquic_pmtud_enter_searching(pmtud);
 
 	tquic_dbg("pmtud:started for path %u\n", path->path_id);
 

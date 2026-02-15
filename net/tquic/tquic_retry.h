@@ -143,6 +143,31 @@ int tquic_retry_send(struct sock *sk,
 		     const u8 *scid, u8 scid_len);
 
 /**
+ * tquic_retry_send_with_token - Send a Retry packet with explicit token
+ * @sk: Server socket
+ * @src_addr: Client source address
+ * @version: QUIC version from client Initial
+ * @dcid: Destination CID from client Initial (will become ODCID)
+ * @dcid_len: Length of DCID
+ * @scid: Source CID from client Initial
+ * @scid_len: Length of SCID
+ * @token: Token to embed in Retry packet
+ * @token_len: Token length
+ *
+ * Sends a Retry packet using the caller-supplied token bytes.
+ * This is used by cookie-based rate limiting so the Retry carries
+ * a ratelimit cookie instead of the default retry token format.
+ *
+ * Returns: 0 on success, negative errno on failure
+ */
+int tquic_retry_send_with_token(struct sock *sk,
+				const struct sockaddr_storage *src_addr,
+				u32 version,
+				const u8 *dcid, u8 dcid_len,
+				const u8 *scid, u8 scid_len,
+				const u8 *token, size_t token_len);
+
+/**
  * tquic_retry_build_packet - Build a Retry packet
  * @buf: Output buffer
  * @buf_len: Buffer size
@@ -215,6 +240,23 @@ int tquic_retry_token_validate(struct tquic_retry_state *state,
 			       const u8 *token, size_t token_len,
 			       const struct sockaddr_storage *client_addr,
 			       u8 *odcid, u8 *odcid_len);
+
+/**
+ * tquic_retry_token_validate_global - Validate token with global Retry state
+ * @token: Token from client's Initial packet
+ * @token_len: Token length
+ * @client_addr: Client address (must match encoded address)
+ * @odcid: Output: Original DCID encoded in token
+ * @odcid_len: Output: ODCID length
+ *
+ * Convenience wrapper around tquic_retry_token_validate() that uses
+ * the module-global Retry state allocated during tquic_retry_init().
+ *
+ * Returns: 0 on success, negative errno on failure
+ */
+int tquic_retry_token_validate_global(const u8 *token, size_t token_len,
+				      const struct sockaddr_storage *client_addr,
+				      u8 *odcid, u8 *odcid_len);
 
 /*
  * =============================================================================

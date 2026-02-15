@@ -14,44 +14,31 @@ import (
 	"github.com/linux/tquicd/netlink"
 )
 
-// ConnectionLogEntry represents a single connection event in the log.
-type ConnectionLogEntry struct {
-	Timestamp    time.Time `json:"timestamp"`
-	ClientID     string    `json:"client_id"`
-	SourceIP     string    `json:"source_ip"`
-	SourcePort   uint16    `json:"source_port"`
-	DestIP       string    `json:"dest_ip"`
-	DestPort     uint16    `json:"dest_port"`
-	BytesTx      uint64    `json:"bytes_tx"`
-	BytesRx      uint64    `json:"bytes_rx"`
-	DurationMs   uint64    `json:"duration_ms"`
-	TrafficClass string    `json:"traffic_class"`
-	Action       string    `json:"action"`
+// PathEventLogEntry represents a single path event in the log.
+type PathEventLogEntry struct {
+	Timestamp time.Time `json:"timestamp"`
+	EventType string    `json:"event_type"`
+	PathID    uint32    `json:"path_id"`
+	Reason    uint32    `json:"reason,omitempty"`
+	OldPathID uint32    `json:"old_path_id,omitempty"`
+	NewPathID uint32    `json:"new_path_id,omitempty"`
 }
 
-// TrafficClassNames maps numeric traffic classes to names.
-var TrafficClassNames = map[uint8]string{
-	0: "realtime",
-	1: "interactive",
-	2: "bulk",
-	3: "background",
-}
-
-// EventTypeNames maps event types to action names.
+// EventActionNames maps event types to action names.
 var EventActionNames = map[int]string{
-	netlink.EventConnOpen:    "open",
-	netlink.EventConnClose:   "close",
-	netlink.EventConnMigrate: "migrate",
+	netlink.EventPathUp:    "path_up",
+	netlink.EventPathDown:  "path_down",
+	netlink.EventPathChange: "path_change",
+	netlink.EventMigration: "migration",
 }
 
-// ConnectionLogger logs connection events to both syslog and a JSON file.
+// ConnectionLogger logs path events to both syslog and a JSON file.
 type ConnectionLogger struct {
 	syslog *syslog.Writer
 	file   *os.File
 	mu     sync.Mutex
 
-	// Ring buffer for recent connections
-	recent   []ConnectionLogEntry
+	recent   []PathEventLogEntry
 	recentMu sync.RWMutex
 	maxRecent int
 }
@@ -71,57 +58,43 @@ func NewConnectionLogger(syslogWriter *syslog.Writer, filePath string) (*Connect
 	return &ConnectionLogger{
 		syslog:    syslogWriter,
 		file:      file,
-		recent:    make([]ConnectionLogEntry, 0, 100),
+		recent:    make([]PathEventLogEntry, 0, 100),
 		maxRecent: 100,
 	}, nil
 }
 
-// LogConnection logs a connection event.
-func (l *ConnectionLogger) LogConnection(event netlink.ConnectionEvent) {
-	entry := ConnectionLogEntry{
-		Timestamp:    event.Timestamp,
-		ClientID:     event.ClientID,
-		SourceIP:     event.SourceIP.String(),
-		SourcePort:   event.SourcePort,
-		DestIP:       event.DestIP.String(),
-		DestPort:     event.DestPort,
-		BytesTx:      event.BytesTx,
-		BytesRx:      event.BytesRx,
-		DurationMs:   event.DurationMs,
-		TrafficClass: getTrafficClassName(event.TrafficClass),
-		Action:       getActionName(event.Type),
+// LogPathEvent logs a path event.
+func (l *ConnectionLogger) LogPathEvent(event netlink.PathEvent) {
+	entry := PathEventLogEntry{
+		Timestamp: event.Timestamp,
+		EventType: event.TypeName(),
+		PathID:    event.PathID,
+		Reason:    event.Reason,
+		OldPathID: event.OldPathID,
+		NewPathID: event.NewPathID,
 	}
 
-	// Log to syslog with structured message
 	l.logToSyslog(entry)
-
-	// Log to JSON file
 	l.logToFile(entry)
-
-	// Add to recent buffer
 	l.addToRecent(entry)
 }
 
-// logToSyslog writes a structured log entry to syslog.
-func (l *ConnectionLogger) logToSyslog(entry ConnectionLogEntry) {
+func (l *ConnectionLogger) logToSyslog(entry PathEventLogEntry) {
 	if l.syslog == nil {
 		return
 	}
 
-	msg := fmt.Sprintf("TQUIC %s: client=%s src=%s:%d dst=%s:%d tx=%d rx=%d dur=%dms class=%s",
-		entry.Action,
-		entry.ClientID,
-		entry.SourceIP, entry.SourcePort,
-		entry.DestIP, entry.DestPort,
-		entry.BytesTx, entry.BytesRx,
-		entry.DurationMs,
-		entry.TrafficClass)
+	msg := fmt.Sprintf("TQUIC %s: path=%d reason=%d",
+		entry.EventType, entry.PathID, entry.Reason)
+
+	if entry.OldPathID != 0 || entry.NewPathID != 0 {
+		msg += fmt.Sprintf(" old_path=%d new_path=%d", entry.OldPathID, entry.NewPathID)
+	}
 
 	l.syslog.Info(msg)
 }
 
-// logToFile writes a JSON log entry to the log file.
-func (l *ConnectionLogger) logToFile(entry ConnectionLogEntry) {
+func (l *ConnectionLogger) logToFile(entry PathEventLogEntry) {
 	if l.file == nil {
 		return
 	}
@@ -129,24 +102,21 @@ func (l *ConnectionLogger) logToFile(entry ConnectionLogEntry) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	encoder := json.NewEncoder(l.file)
-	encoder.Encode(entry)
+	json.NewEncoder(l.file).Encode(entry)
 }
 
-// addToRecent adds an entry to the recent buffer (ring buffer).
-func (l *ConnectionLogger) addToRecent(entry ConnectionLogEntry) {
+func (l *ConnectionLogger) addToRecent(entry PathEventLogEntry) {
 	l.recentMu.Lock()
 	defer l.recentMu.Unlock()
 
 	if len(l.recent) >= l.maxRecent {
-		// Remove oldest entry
 		l.recent = l.recent[1:]
 	}
 	l.recent = append(l.recent, entry)
 }
 
-// GetRecent returns the n most recent connection events.
-func (l *ConnectionLogger) GetRecent(n int) []ConnectionLogEntry {
+// GetRecent returns the n most recent events.
+func (l *ConnectionLogger) GetRecent(n int) []PathEventLogEntry {
 	l.recentMu.RLock()
 	defer l.recentMu.RUnlock()
 
@@ -154,70 +124,37 @@ func (l *ConnectionLogger) GetRecent(n int) []ConnectionLogEntry {
 		n = len(l.recent)
 	}
 
-	// Return newest first
-	result := make([]ConnectionLogEntry, n)
+	result := make([]PathEventLogEntry, n)
 	for i := 0; i < n; i++ {
 		result[i] = l.recent[len(l.recent)-1-i]
 	}
 	return result
 }
 
-// GetRecentByClient returns recent events for a specific client.
-func (l *ConnectionLogger) GetRecentByClient(clientID string, n int) []ConnectionLogEntry {
+// GetStats returns statistics about logged events.
+func (l *ConnectionLogger) GetStats() EventLogStats {
 	l.recentMu.RLock()
 	defer l.recentMu.RUnlock()
 
-	result := make([]ConnectionLogEntry, 0, n)
-	for i := len(l.recent) - 1; i >= 0 && len(result) < n; i-- {
-		if l.recent[i].ClientID == clientID {
-			result = append(result, l.recent[i])
-		}
+	stats := EventLogStats{
+		TotalLogged: len(l.recent),
+		ByEventType: make(map[string]int),
 	}
-	return result
-}
-
-// GetStats returns statistics about logged connections.
-func (l *ConnectionLogger) GetStats() ConnectionLogStats {
-	l.recentMu.RLock()
-	defer l.recentMu.RUnlock()
-
-	stats := ConnectionLogStats{
-		TotalLogged:    len(l.recent),
-		ByAction:       make(map[string]int),
-		ByTrafficClass: make(map[string]int),
-		ByClient:       make(map[string]int),
-	}
-
-	var totalBytes uint64
-	var totalDuration uint64
 
 	for _, entry := range l.recent {
-		stats.ByAction[entry.Action]++
-		stats.ByTrafficClass[entry.TrafficClass]++
-		stats.ByClient[entry.ClientID]++
-		totalBytes += entry.BytesTx + entry.BytesRx
-		totalDuration += entry.DurationMs
-	}
-
-	if len(l.recent) > 0 {
-		stats.AvgBytesPerConn = totalBytes / uint64(len(l.recent))
-		stats.AvgDurationMs = totalDuration / uint64(len(l.recent))
+		stats.ByEventType[entry.EventType]++
 	}
 
 	return stats
 }
 
-// ConnectionLogStats contains statistics about logged connections.
-type ConnectionLogStats struct {
-	TotalLogged     int
-	ByAction        map[string]int
-	ByTrafficClass  map[string]int
-	ByClient        map[string]int
-	AvgBytesPerConn uint64
-	AvgDurationMs   uint64
+// EventLogStats contains statistics about logged events.
+type EventLogStats struct {
+	TotalLogged int
+	ByEventType map[string]int
 }
 
-// Close closes the logger and flushes any buffered data.
+// Close closes the logger.
 func (l *ConnectionLogger) Close() error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -237,20 +174,4 @@ func (l *ConnectionLogger) Flush() error {
 		return l.file.Sync()
 	}
 	return nil
-}
-
-// getTrafficClassName returns the name for a traffic class.
-func getTrafficClassName(class uint8) string {
-	if name, ok := TrafficClassNames[class]; ok {
-		return name
-	}
-	return fmt.Sprintf("unknown(%d)", class)
-}
-
-// getActionName returns the name for an event type.
-func getActionName(eventType int) string {
-	if name, ok := EventActionNames[eventType]; ok {
-		return name
-	}
-	return fmt.Sprintf("unknown(%d)", eventType)
 }

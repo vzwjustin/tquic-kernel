@@ -8,9 +8,9 @@ import (
 	"fmt"
 	"net"
 	"sync"
+	"syscall"
 	"time"
 
-	"github.com/linux/tquicd/config"
 	"github.com/mdlayher/genetlink"
 	"github.com/mdlayher/netlink"
 )
@@ -21,7 +21,7 @@ type Client struct {
 	family   genetlink.Family
 	mu       sync.Mutex
 	closed   bool
-	eventsCh chan ConnectionEvent
+	eventsCh chan PathEvent
 }
 
 // NewClient creates a new netlink client connected to the TQUIC family.
@@ -38,14 +38,14 @@ func NewClient() (*Client, error) {
 		// when kernel module isn't loaded
 		return &Client{
 			conn:     nil,
-			eventsCh: make(chan ConnectionEvent, 100),
+			eventsCh: make(chan PathEvent, 100),
 		}, nil
 	}
 
 	return &Client{
 		conn:     conn,
 		family:   family,
-		eventsCh: make(chan ConnectionEvent, 100),
+		eventsCh: make(chan PathEvent, 100),
 	}, nil
 }
 
@@ -63,8 +63,8 @@ func (c *Client) Close() error {
 	return nil
 }
 
-// RegisterClient registers a client configuration with the kernel.
-func (c *Client) RegisterClient(cfg *config.ClientConfig) error {
+// AddPath adds a new path to the kernel for multipath bonding.
+func (c *Client) AddPath(connID uint64, ifindex int32, localIP, remoteIP net.IP, family uint16) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -72,20 +72,18 @@ func (c *Client) RegisterClient(cfg *config.ClientConfig) error {
 		return fmt.Errorf("kernel module not loaded")
 	}
 
-	// Build netlink message
 	ae := netlink.NewAttributeEncoder()
-	ae.String(AttrClientName, cfg.Name)
-	ae.Bytes(AttrClientPSK, cfg.PSK)
-	ae.Uint16(AttrPortRangeStart, cfg.PortRangeStart)
-	ae.Uint16(AttrPortRangeEnd, cfg.PortRangeEnd)
+	ae.Uint64(AttrConnID, connID)
+	ae.Int32(AttrPathIfindex, ifindex)
+	ae.Uint16(AttrFamily, family)
 
-	if cfg.BandwidthLimit != "" {
-		if bps, err := config.ParseBandwidth(cfg.BandwidthLimit); err == nil {
-			ae.Uint64(AttrBandwidthLimit, bps)
-		}
+	if family == syscall.AF_INET {
+		ae.Bytes(AttrLocalAddr4, localIP.To4())
+		ae.Bytes(AttrRemoteAddr4, remoteIP.To4())
+	} else {
+		ae.Bytes(AttrLocalAddr6, localIP.To16())
+		ae.Bytes(AttrRemoteAddr6, remoteIP.To16())
 	}
-
-	ae.Uint32(AttrConnRateLimit, uint32(cfg.ConnRateLimit))
 
 	attrs, err := ae.Encode()
 	if err != nil {
@@ -94,29 +92,22 @@ func (c *Client) RegisterClient(cfg *config.ClientConfig) error {
 
 	msg := genetlink.Message{
 		Header: genetlink.Header{
-			Command: CmdRegisterClient,
+			Command: CmdPathAdd,
 			Version: 1,
 		},
 		Data: attrs,
 	}
 
-	// Send and receive response
-	msgs, err := c.conn.Execute(msg, c.family.ID, netlink.Request|netlink.Acknowledge)
+	_, err = c.conn.Execute(msg, c.family.ID, netlink.Request|netlink.Acknowledge)
 	if err != nil {
-		return fmt.Errorf("execute register: %w", err)
-	}
-
-	// Check for errors in response
-	if len(msgs) > 0 {
-		// Success - kernel acknowledged
-		return nil
+		return fmt.Errorf("execute path add: %w", err)
 	}
 
 	return nil
 }
 
-// UnregisterClient removes a client registration from the kernel.
-func (c *Client) UnregisterClient(name string) error {
+// RemovePath removes a path from the kernel.
+func (c *Client) RemovePath(pathID uint32) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -125,7 +116,7 @@ func (c *Client) UnregisterClient(name string) error {
 	}
 
 	ae := netlink.NewAttributeEncoder()
-	ae.String(AttrClientName, name)
+	ae.Uint32(AttrPathID, pathID)
 
 	attrs, err := ae.Encode()
 	if err != nil {
@@ -134,7 +125,7 @@ func (c *Client) UnregisterClient(name string) error {
 
 	msg := genetlink.Message{
 		Header: genetlink.Header{
-			Command: CmdUnregisterClient,
+			Command: CmdPathRemove,
 			Version: 1,
 		},
 		Data: attrs,
@@ -144,9 +135,38 @@ func (c *Client) UnregisterClient(name string) error {
 	return err
 }
 
-// GetPathStats retrieves per-path statistics from the kernel.
-// If clientName is empty, returns stats for all clients.
-func (c *Client) GetPathStats(clientName string) ([]PathStats, error) {
+// SetPathWeight updates a path's scheduling weight.
+func (c *Client) SetPathWeight(pathID, weight uint32) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.conn == nil {
+		return fmt.Errorf("kernel module not loaded")
+	}
+
+	ae := netlink.NewAttributeEncoder()
+	ae.Uint32(AttrPathID, pathID)
+	ae.Uint32(AttrPathWeight, weight)
+
+	attrs, err := ae.Encode()
+	if err != nil {
+		return fmt.Errorf("encode attributes: %w", err)
+	}
+
+	msg := genetlink.Message{
+		Header: genetlink.Header{
+			Command: CmdPathSet,
+			Version: 1,
+		},
+		Data: attrs,
+	}
+
+	_, err = c.conn.Execute(msg, c.family.ID, netlink.Request|netlink.Acknowledge)
+	return err
+}
+
+// GetPath retrieves information about a specific path.
+func (c *Client) GetPath(pathID uint32) (*PathInfo, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -155,9 +175,7 @@ func (c *Client) GetPathStats(clientName string) ([]PathStats, error) {
 	}
 
 	ae := netlink.NewAttributeEncoder()
-	if clientName != "" {
-		ae.String(AttrClientName, clientName)
-	}
+	ae.Uint32(AttrPathID, pathID)
 
 	attrs, err := ae.Encode()
 	if err != nil {
@@ -166,7 +184,49 @@ func (c *Client) GetPathStats(clientName string) ([]PathStats, error) {
 
 	msg := genetlink.Message{
 		Header: genetlink.Header{
-			Command: CmdGetPathStats,
+			Command: CmdPathGet,
+			Version: 1,
+		},
+		Data: attrs,
+	}
+
+	msgs, err := c.conn.Execute(msg, c.family.ID, netlink.Request)
+	if err != nil {
+		return nil, fmt.Errorf("execute path get: %w", err)
+	}
+
+	if len(msgs) == 0 {
+		return nil, fmt.Errorf("no response for path %d", pathID)
+	}
+
+	return parsePathInfo(msgs[0].Data)
+}
+
+// ListPaths retrieves all paths for a connection from the kernel.
+func (c *Client) ListPaths() ([]PathInfo, error) {
+	return c.ListPathsForConn(0)
+}
+
+// ListPathsForConn retrieves paths for a specific connection.
+func (c *Client) ListPathsForConn(connID uint64) ([]PathInfo, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.conn == nil {
+		return nil, fmt.Errorf("kernel module not loaded")
+	}
+
+	ae := netlink.NewAttributeEncoder()
+	ae.Uint64(AttrConnID, connID)
+
+	attrs, err := ae.Encode()
+	if err != nil {
+		return nil, fmt.Errorf("encode attributes: %w", err)
+	}
+
+	msg := genetlink.Message{
+		Header: genetlink.Header{
+			Command: CmdPathList,
 			Version: 1,
 		},
 		Data: attrs,
@@ -174,7 +234,132 @@ func (c *Client) GetPathStats(clientName string) ([]PathStats, error) {
 
 	msgs, err := c.conn.Execute(msg, c.family.ID, netlink.Request|netlink.Dump)
 	if err != nil {
-		return nil, fmt.Errorf("execute get path stats: %w", err)
+		return nil, fmt.Errorf("execute path list: %w", err)
+	}
+
+	var paths []PathInfo
+	for _, m := range msgs {
+		pi, err := parsePathInfo(m.Data)
+		if err != nil {
+			continue
+		}
+		paths = append(paths, *pi)
+	}
+
+	return paths, nil
+}
+
+// SetScheduler sets the multipath scheduler for a connection.
+func (c *Client) SetScheduler(connID uint64, name string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.conn == nil {
+		return fmt.Errorf("kernel module not loaded")
+	}
+
+	ae := netlink.NewAttributeEncoder()
+	ae.Uint64(AttrConnID, connID)
+	ae.String(AttrSchedName, name)
+
+	attrs, err := ae.Encode()
+	if err != nil {
+		return fmt.Errorf("encode attributes: %w", err)
+	}
+
+	msg := genetlink.Message{
+		Header: genetlink.Header{
+			Command: CmdSchedSet,
+			Version: 1,
+		},
+		Data: attrs,
+	}
+
+	_, err = c.conn.Execute(msg, c.family.ID, netlink.Request|netlink.Acknowledge)
+	return err
+}
+
+// GetScheduler returns the current scheduler name for a connection.
+func (c *Client) GetScheduler(connID uint64) (string, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.conn == nil {
+		return "", fmt.Errorf("kernel module not loaded")
+	}
+
+	ae := netlink.NewAttributeEncoder()
+	ae.Uint64(AttrConnID, connID)
+
+	attrs, err := ae.Encode()
+	if err != nil {
+		return "", fmt.Errorf("encode attributes: %w", err)
+	}
+
+	msg := genetlink.Message{
+		Header: genetlink.Header{
+			Command: CmdSchedGet,
+			Version: 1,
+		},
+		Data: attrs,
+	}
+
+	msgs, err := c.conn.Execute(msg, c.family.ID, netlink.Request)
+	if err != nil {
+		return "", fmt.Errorf("execute sched get: %w", err)
+	}
+
+	if len(msgs) == 0 {
+		return "", fmt.Errorf("no response")
+	}
+
+	ad, err := netlink.NewAttributeDecoder(msgs[0].Data)
+	if err != nil {
+		return "", err
+	}
+
+	for ad.Next() {
+		if ad.Type() == AttrSchedName {
+			return ad.String(), nil
+		}
+	}
+
+	return "", fmt.Errorf("scheduler name not found in response")
+}
+
+// GetStats retrieves statistics for a connection from the kernel.
+func (c *Client) GetStats() ([]PathStats, error) {
+	return c.GetStatsForConn(0)
+}
+
+// GetStatsForConn retrieves stats for a specific connection.
+func (c *Client) GetStatsForConn(connID uint64) ([]PathStats, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.conn == nil {
+		return nil, fmt.Errorf("kernel module not loaded")
+	}
+
+	ae := netlink.NewAttributeEncoder()
+	ae.Uint64(AttrConnID, connID)
+
+	attrs, err := ae.Encode()
+	if err != nil {
+		return nil, fmt.Errorf("encode attributes: %w", err)
+	}
+
+	msg := genetlink.Message{
+		Header: genetlink.Header{
+			Command: CmdStatsGet,
+			Version: 1,
+		},
+		Data: attrs,
+	}
+
+	msgs, err := c.conn.Execute(msg, c.family.ID, netlink.Request)
+	if err != nil {
+		return nil, fmt.Errorf("execute stats get: %w", err)
 	}
 
 	var stats []PathStats
@@ -189,86 +374,17 @@ func (c *Client) GetPathStats(clientName string) ([]PathStats, error) {
 	return stats, nil
 }
 
-// GetClientStats retrieves per-client statistics from the kernel.
-func (c *Client) GetClientStats() ([]ClientStats, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if c.conn == nil {
-		return nil, fmt.Errorf("kernel module not loaded")
-	}
-
-	msg := genetlink.Message{
-		Header: genetlink.Header{
-			Command: CmdGetClientStats,
-			Version: 1,
-		},
-	}
-
-	msgs, err := c.conn.Execute(msg, c.family.ID, netlink.Request|netlink.Dump)
-	if err != nil {
-		return nil, fmt.Errorf("execute get client stats: %w", err)
-	}
-
-	var stats []ClientStats
-	for _, m := range msgs {
-		cs, err := parseClientStats(m.Data)
-		if err != nil {
-			continue
-		}
-		stats = append(stats, cs)
-	}
-
-	return stats, nil
+// GetPathStats is an alias for GetStats for backward compatibility with the collector.
+func (c *Client) GetPathStats(_ string) ([]PathStats, error) {
+	return c.GetStats()
 }
 
-// SetBlocklist updates the kernel blocklist.
-func (c *Client) SetBlocklist(ips []string, cidrs []string) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
+// SubscribePathEvents subscribes to kernel path events via multicast.
+func (c *Client) SubscribePathEvents(handler func(PathEvent)) error {
 	if c.conn == nil {
 		return fmt.Errorf("kernel module not loaded")
 	}
 
-	ae := netlink.NewAttributeEncoder()
-
-	// Add individual IPs
-	for _, ip := range ips {
-		ae.String(AttrBlocklistIP, ip)
-	}
-
-	// Add CIDR ranges
-	for _, cidr := range cidrs {
-		ae.String(AttrBlocklistCIDR, cidr)
-	}
-
-	attrs, err := ae.Encode()
-	if err != nil {
-		return fmt.Errorf("encode attributes: %w", err)
-	}
-
-	msg := genetlink.Message{
-		Header: genetlink.Header{
-			Command: CmdSetBlocklist,
-			Version: 1,
-		},
-		Data: attrs,
-	}
-
-	_, err = c.conn.Execute(msg, c.family.ID, netlink.Request|netlink.Acknowledge)
-	return err
-}
-
-// SubscribeConnectionEvents subscribes to kernel connection events via multicast.
-// The handler is called for each event. This function blocks until context is cancelled
-// or an error occurs.
-func (c *Client) SubscribeConnectionEvents(handler func(ConnectionEvent)) error {
-	if c.conn == nil {
-		return fmt.Errorf("kernel module not loaded")
-	}
-
-	// Find the multicast group
 	var mcGroup uint32
 	for _, g := range c.family.Groups {
 		if g.Name == McgrpEvents {
@@ -281,19 +397,16 @@ func (c *Client) SubscribeConnectionEvents(handler func(ConnectionEvent)) error 
 		return fmt.Errorf("events multicast group not found")
 	}
 
-	// Create a new connection for multicast
 	conn, err := genetlink.Dial(nil)
 	if err != nil {
 		return fmt.Errorf("dial for multicast: %w", err)
 	}
 	defer conn.Close()
 
-	// Join the multicast group
 	if err := conn.JoinGroup(mcGroup); err != nil {
 		return fmt.Errorf("join multicast group: %w", err)
 	}
 
-	// Receive events
 	for {
 		msgs, _, err := conn.Receive()
 		if err != nil {
@@ -301,26 +414,21 @@ func (c *Client) SubscribeConnectionEvents(handler func(ConnectionEvent)) error 
 		}
 
 		for _, msg := range msgs {
-			if msg.Header.Command != CmdConnectionEvent {
-				continue
-			}
-
-			event, err := parseConnectionEvent(msg.Data)
+			event, err := parsePathEvent(msg.Data)
 			if err != nil {
 				continue
 			}
-
 			handler(event)
 		}
 	}
 }
 
-// SubscribeConnectionEventsContext subscribes with context for cancellation.
-func (c *Client) SubscribeConnectionEventsContext(ctx context.Context, handler func(ConnectionEvent)) error {
+// SubscribePathEventsContext subscribes with context for cancellation.
+func (c *Client) SubscribePathEventsContext(ctx context.Context, handler func(PathEvent)) error {
 	errCh := make(chan error, 1)
 
 	go func() {
-		errCh <- c.SubscribeConnectionEvents(handler)
+		errCh <- c.SubscribePathEvents(handler)
 	}()
 
 	select {
@@ -329,6 +437,80 @@ func (c *Client) SubscribeConnectionEventsContext(ctx context.Context, handler f
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+// decodePathAttrs fills a PathInfo from a netlink attribute decoder.
+func decodePathAttrs(ad *netlink.AttributeDecoder, pi *PathInfo) {
+	for ad.Next() {
+		switch ad.Type() {
+		case AttrPathID:
+			pi.PathID = ad.Uint32()
+		case AttrPathState:
+			pi.State = ad.Uint8()
+		case AttrPathPriority:
+			pi.Priority = ad.Uint8()
+		case AttrFamily:
+			pi.Family = ad.Uint16()
+		case AttrPathIfindex:
+			pi.Ifindex = ad.Int32()
+		case AttrPathFlags:
+			pi.Flags = ad.Uint32()
+		case AttrPathWeight:
+			pi.Weight = ad.Uint32()
+		case AttrPathRTT:
+			pi.RTT = ad.Uint32()
+		case AttrPathBandwidth:
+			pi.Bandwidth = ad.Uint64()
+		case AttrPathLossRate:
+			pi.LossRate = ad.Uint32()
+		case AttrLocalAddr4:
+			pi.LocalIP = net.IP(ad.Bytes())
+		case AttrRemoteAddr4:
+			pi.RemoteIP = net.IP(ad.Bytes())
+		case AttrLocalAddr6:
+			pi.LocalIP = net.IP(ad.Bytes())
+		case AttrRemoteAddr6:
+			pi.RemoteIP = net.IP(ad.Bytes())
+		case AttrLocalPort:
+			pi.LocalPort = ad.Uint16()
+		case AttrRemotePort:
+			pi.RemotePort = ad.Uint16()
+		}
+	}
+}
+
+// parsePathInfo parses netlink attributes into PathInfo.
+// Handles both flat attributes and nested PATH_ENTRY from dump responses.
+func parsePathInfo(data []byte) (*PathInfo, error) {
+	ad, err := netlink.NewAttributeDecoder(data)
+	if err != nil {
+		return nil, err
+	}
+
+	var pi PathInfo
+	for ad.Next() {
+		if ad.Type() == AttrPathEntry {
+			// Nested path entry from dump handler
+			ad.Nested(func(nad *netlink.AttributeDecoder) error {
+				decodePathAttrs(nad, &pi)
+				return nad.Err()
+			})
+		}
+	}
+
+	// If no nested entry was found, try flat parsing (e.g., from GetPath)
+	if pi.PathID == 0 && pi.Ifindex == 0 && pi.State == 0 {
+		ad2, err := netlink.NewAttributeDecoder(data)
+		if err != nil {
+			return nil, err
+		}
+		decodePathAttrs(ad2, &pi)
+		if err := ad2.Err(); err != nil {
+			return nil, err
+		}
+	}
+
+	return &pi, ad.Err()
 }
 
 // parsePathStats parses netlink attributes into PathStats.
@@ -341,88 +523,54 @@ func parsePathStats(data []byte) (PathStats, error) {
 	var ps PathStats
 	for ad.Next() {
 		switch ad.Type() {
-		case AttrClientName:
-			ps.ClientName = ad.String()
 		case AttrPathID:
 			ps.PathID = ad.Uint32()
-		case AttrTxBytes:
+		case AttrStatsTxPackets:
+			ps.TxPackets = ad.Uint64()
+		case AttrStatsRxPackets:
+			ps.RxPackets = ad.Uint64()
+		case AttrStatsTxBytes:
 			ps.TxBytes = ad.Uint64()
-		case AttrRxBytes:
+		case AttrStatsRxBytes:
 			ps.RxBytes = ad.Uint64()
-		case AttrRttMin:
-			ps.RttMin = ad.Uint32()
-		case AttrRttAvg:
-			ps.RttAvg = ad.Uint32()
-		case AttrRttMax:
-			ps.RttMax = ad.Uint32()
-		case AttrLossRate:
-			ps.LossRate = ad.Uint32()
-		case AttrJitter:
-			ps.Jitter = ad.Uint32()
+		case AttrStatsRetrans:
+			ps.Retrans = ad.Uint64()
+		case AttrStatsSpurious:
+			ps.Spurious = ad.Uint64()
+		case AttrStatsCwnd:
+			ps.Cwnd = ad.Uint32()
+		case AttrStatsSRTT:
+			ps.SRTT = ad.Uint32()
+		case AttrStatsRTTVar:
+			ps.RTTVar = ad.Uint32()
 		}
 	}
 
 	return ps, ad.Err()
 }
 
-// parseClientStats parses netlink attributes into ClientStats.
-func parseClientStats(data []byte) (ClientStats, error) {
+// parsePathEvent parses netlink attributes into PathEvent.
+func parsePathEvent(data []byte) (PathEvent, error) {
 	ad, err := netlink.NewAttributeDecoder(data)
 	if err != nil {
-		return ClientStats{}, err
+		return PathEvent{}, err
 	}
 
-	var cs ClientStats
-	for ad.Next() {
-		switch ad.Type() {
-		case AttrClientName:
-			cs.ClientName = ad.String()
-		case AttrConnCount:
-			cs.ConnectionCount = ad.Uint32()
-		case AttrTotalBytes:
-			cs.TotalBytes = ad.Uint64()
-		}
-	}
-
-	return cs, ad.Err()
-}
-
-// parseConnectionEvent parses netlink attributes into ConnectionEvent.
-func parseConnectionEvent(data []byte) (ConnectionEvent, error) {
-	ad, err := netlink.NewAttributeDecoder(data)
-	if err != nil {
-		return ConnectionEvent{}, err
-	}
-
-	var event ConnectionEvent
-	event.Timestamp = time.Now() // Default if not provided
+	var event PathEvent
+	event.Timestamp = time.Now()
 
 	for ad.Next() {
 		switch ad.Type() {
 		case AttrEventType:
-			event.Type = int(ad.Uint32())
-		case AttrClientName:
-			event.ClientID = ad.String()
-		case AttrSourceIP:
-			event.SourceIP = net.IP(ad.Bytes())
-		case AttrSourcePort:
-			event.SourcePort = ad.Uint16()
-		case AttrDestIP:
-			event.DestIP = net.IP(ad.Bytes())
-		case AttrDestPort:
-			event.DestPort = ad.Uint16()
-		case AttrTxBytes:
-			event.BytesTx = ad.Uint64()
-		case AttrRxBytes:
-			event.BytesRx = ad.Uint64()
-		case AttrDurationMs:
-			event.DurationMs = ad.Uint64()
-		case AttrTrafficClass:
-			event.TrafficClass = ad.Uint8()
-		case AttrTimestamp:
-			// Unix timestamp in seconds
-			ts := ad.Uint64()
-			event.Timestamp = time.Unix(int64(ts), 0)
+			event.Type = int(ad.Uint8())
+		case AttrEventReason:
+			event.Reason = ad.Uint32()
+		case AttrPathID:
+			event.PathID = ad.Uint32()
+		case AttrOldPathID:
+			event.OldPathID = ad.Uint32()
+		case AttrNewPathID:
+			event.NewPathID = ad.Uint32()
 		}
 	}
 

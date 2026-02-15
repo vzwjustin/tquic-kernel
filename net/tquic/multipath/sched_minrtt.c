@@ -64,6 +64,12 @@ static inline unsigned int minrtt_get_validated_tolerance(void)
 	return val;
 }
 
+static inline bool minrtt_path_usable(const struct tquic_path *path)
+{
+	return path->state == TQUIC_PATH_ACTIVE ||
+	       path->state == TQUIC_PATH_VALIDATED;
+}
+
 /* =========================================================================
  * MinRTT Scheduler Implementation
  * ========================================================================= */
@@ -177,7 +183,7 @@ static int minrtt_get_path(struct tquic_connection *conn,
 	list_for_each_entry_rcu(path, &conn->paths, list) {
 		u64 rtt;
 
-		if (path->state != TQUIC_PATH_ACTIVE)
+		if (!minrtt_path_usable(path))
 			continue;
 
 		/*
@@ -219,7 +225,7 @@ static int minrtt_get_path(struct tquic_connection *conn,
 	 * using it. This prevents race conditions where path was removed
 	 * between our RCU list walk above and this check.
 	 */
-	if (curr_path && curr_path->state == TQUIC_PATH_ACTIVE &&
+	if (curr_path && minrtt_path_usable(curr_path) &&
 	    curr_path->path_id == current_path_id) {
 		unsigned int tolerance = minrtt_get_validated_tolerance();
 
@@ -454,7 +460,7 @@ static int rr_get_path(struct tquic_connection *conn,
 
 	/* Count active paths */
 	list_for_each_entry_rcu(path, &conn->paths, list) {
-		if (path->state == TQUIC_PATH_ACTIVE)
+		if (minrtt_path_usable(path))
 			active_count++;
 	}
 
@@ -474,7 +480,7 @@ static int rr_get_path(struct tquic_connection *conn,
 
 	/* Find the target path */
 	list_for_each_entry_rcu(path, &conn->paths, list) {
-		if (path->state != TQUIC_PATH_ACTIVE)
+		if (!minrtt_path_usable(path))
 			continue;
 
 		if (current_index == target_index) {

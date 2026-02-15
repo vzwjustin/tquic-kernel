@@ -43,6 +43,13 @@ tquic_sched_active_path_get(struct tquic_connection *conn)
 	return path;
 }
 
+static inline bool tquic_sched_path_usable(const struct tquic_path *path)
+{
+	int state = READ_ONCE(path->state);
+
+	return state == TQUIC_PATH_ACTIVE || state == TQUIC_PATH_VALIDATED;
+}
+
 static struct tquic_path *
 tquic_sched_path_get_or_active(struct tquic_connection *conn,
 			       struct tquic_path *path)
@@ -330,22 +337,30 @@ static struct tquic_path *rr_select(void *state, struct tquic_connection *conn,
 {
 	struct rr_sched_data *data = state;
 	struct tquic_path *path;
-	u8 num_paths;
+	u32 usable_paths = 0;
 	u32 idx = 0;
 	u32 target;
 
 	if (!data)
 		return tquic_sched_active_path_get(conn);
 
-	num_paths = READ_ONCE(conn->num_paths);
-	if (!num_paths)
-		return tquic_sched_active_path_get(conn);
-
-	target = atomic_inc_return(&data->counter) % num_paths;
-
 	rcu_read_lock();
 	list_for_each_entry_rcu(path, &conn->paths, list) {
-		if (READ_ONCE(path->state) != TQUIC_PATH_ACTIVE)
+		if (!tquic_sched_path_usable(path))
+			continue;
+
+		usable_paths++;
+	}
+
+	if (!usable_paths) {
+		rcu_read_unlock();
+		return tquic_sched_active_path_get(conn);
+	}
+
+	target = atomic_inc_return(&data->counter) % usable_paths;
+
+	list_for_each_entry_rcu(path, &conn->paths, list) {
+		if (!tquic_sched_path_usable(path))
 			continue;
 
 		if (idx++ == target) {
@@ -379,7 +394,7 @@ minrtt_select(void *state, struct tquic_connection *conn, struct sk_buff *skb)
 
 	rcu_read_lock();
 	list_for_each_entry_rcu(path, &conn->paths, list) {
-		if (READ_ONCE(path->state) != TQUIC_PATH_ACTIVE)
+		if (!tquic_sched_path_usable(path))
 			continue;
 
 		if (READ_ONCE(path->stats.rtt_smoothed) < min_rtt) {
@@ -421,7 +436,7 @@ static void *wrr_init(struct tquic_connection *conn)
 	/* Calculate total weight */
 	rcu_read_lock();
 	list_for_each_entry_rcu(path, &conn->paths, list) {
-		if (READ_ONCE(path->state) == TQUIC_PATH_ACTIVE)
+		if (tquic_sched_path_usable(path))
 			data->total_weight += READ_ONCE(path->weight);
 	}
 	rcu_read_unlock();
@@ -452,7 +467,7 @@ static struct tquic_path *wrr_select(void *state, struct tquic_connection *conn,
 	tw = 0;
 	rcu_read_lock();
 	list_for_each_entry_rcu(path, &conn->paths, list) {
-		if (READ_ONCE(path->state) == TQUIC_PATH_ACTIVE)
+		if (tquic_sched_path_usable(path))
 			tw += READ_ONCE(path->weight);
 	}
 	data->total_weight = tw;
@@ -465,7 +480,7 @@ static struct tquic_path *wrr_select(void *state, struct tquic_connection *conn,
 	target = atomic_inc_return(&data->counter) % tw;
 
 	list_for_each_entry_rcu(path, &conn->paths, list) {
-		if (READ_ONCE(path->state) != TQUIC_PATH_ACTIVE)
+		if (!tquic_sched_path_usable(path))
 			continue;
 
 		cumulative += READ_ONCE(path->weight);
@@ -540,7 +555,7 @@ blest_select(void *state, struct tquic_connection *conn, struct sk_buff *skb)
 		u64 blocking_time;
 		u64 owd_diff;
 
-		if (READ_ONCE(path->state) != TQUIC_PATH_ACTIVE)
+		if (!tquic_sched_path_usable(path))
 			continue;
 
 		/* Estimate blocking time */
@@ -660,7 +675,7 @@ static struct tquic_path *ecf_select(void *state, struct tquic_connection *conn,
 		u64 rtt_us;
 		u64 bandwidth;
 
-		if (path->state != TQUIC_PATH_ACTIVE)
+		if (!tquic_sched_path_usable(path))
 			continue;
 
 		/*
@@ -841,7 +856,7 @@ static struct tquic_path *owd_select(void *state, struct tquic_connection *conn,
 		s64 effective_delay;
 		int ret __maybe_unused;
 
-		if (path->state != TQUIC_PATH_ACTIVE)
+		if (!tquic_sched_path_usable(path))
 			continue;
 
 		/*
@@ -972,7 +987,7 @@ static struct tquic_path *owd_ecf_select(void *state __maybe_unused,
 		s64 delay_us;
 		u64 bandwidth;
 
-		if (path->state != TQUIC_PATH_ACTIVE)
+		if (!tquic_sched_path_usable(path))
 			continue;
 
 		/* Calculate in-flight bytes */

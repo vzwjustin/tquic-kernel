@@ -56,6 +56,12 @@ struct weighted_sched_data {
 	u8 current_path_idx; /* Current position in RR cycle */
 };
 
+static inline bool weighted_path_usable(const struct tquic_path *path)
+{
+	return path->state == TQUIC_PATH_ACTIVE ||
+	       path->state == TQUIC_PATH_VALIDATED;
+}
+
 /*
  * Select path using Deficit Round-Robin algorithm
  *
@@ -86,7 +92,7 @@ static int weighted_get_path(struct tquic_connection *conn,
 		if (idx >= TQUIC_MAX_PATHS)
 			break;
 
-		if (path->state == TQUIC_PATH_ACTIVE) {
+		if (weighted_path_usable(path)) {
 			active_count++;
 			/* Sync weight from path structure (set via PM netlink) */
 			if (path->weight > 0 && path->weight <= 1000)
@@ -118,7 +124,7 @@ static int weighted_get_path(struct tquic_connection *conn,
 			path_idx++;
 		}
 
-		if (candidate && candidate->state == TQUIC_PATH_ACTIVE) {
+		if (candidate && weighted_path_usable(candidate)) {
 			/* Add quantum weighted by path weight */
 			ps->deficit += (TQUIC_DRR_QUANTUM * ps->weight) / 100;
 
@@ -146,7 +152,7 @@ static int weighted_get_path(struct tquic_connection *conn,
 
 	/* Find any active path as fallback */
 	list_for_each_entry_rcu(path, &conn->paths, list) {
-		if (path->state == TQUIC_PATH_ACTIVE) {
+		if (weighted_path_usable(path)) {
 			result->primary = path;
 			result->backup = NULL;
 			result->flags = 0;

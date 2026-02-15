@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Copyright (c) 2026 Linux TQUIC Authors
 
-// tquicd is the userspace control daemon for TQUIC VPS endpoints.
-// It manages configuration, exposes Prometheus metrics, provides a web dashboard,
-// and logs detailed connection information.
+// tquicd is the userspace control daemon for TQUIC multipath WAN bonding.
+// It manages path configuration, exposes Prometheus metrics, provides a web
+// dashboard, and logs path events.
 //
 // Usage:
 //
@@ -37,11 +37,8 @@ import (
 )
 
 const (
-	// DefaultConfigDir is the default configuration directory
 	DefaultConfigDir = "/etc/tquic.d"
-
-	// Version is the daemon version
-	Version = "1.0.0"
+	Version          = "1.1.0"
 )
 
 var (
@@ -76,7 +73,6 @@ func main() {
 		os.Exit(0)
 	}
 
-	// Initialize syslog
 	syslogWriter, err := syslog.New(syslog.LOG_INFO|syslog.LOG_DAEMON, "tquicd")
 	if err != nil {
 		log.Fatalf("Failed to connect to syslog: %v", err)
@@ -85,12 +81,10 @@ func main() {
 
 	syslogWriter.Info("Starting tquicd daemon")
 
-	// Create daemon instance
 	d := &Daemon{
 		syslogWriter: syslogWriter,
 	}
 
-	// Run daemon
 	if err := d.Run(); err != nil {
 		syslogWriter.Err(fmt.Sprintf("Daemon error: %v", err))
 		log.Fatalf("Daemon error: %v", err)
@@ -111,7 +105,6 @@ func (d *Daemon) Run() error {
 	cfg := d.configLoader.Config()
 	d.logInfo("Configuration loaded from %s", *configDir)
 
-	// Ensure log directories exist
 	if err := ensureLogDir(cfg.Global.LogFile); err != nil {
 		return fmt.Errorf("create log directory: %w", err)
 	}
@@ -127,29 +120,26 @@ func (d *Daemon) Run() error {
 	d.nlClient = nlClient
 	d.logInfo("Netlink client connected to TQUIC kernel module")
 
-	// Register clients with kernel
-	for name, clientCfg := range cfg.Clients {
-		if !clientCfg.Enabled {
-			continue
-		}
-		if err := d.nlClient.RegisterClient(clientCfg); err != nil {
-			d.logWarning("Failed to register client %s: %v", name, err)
-			// Continue - kernel module might not be loaded yet
-		} else {
-			d.logInfo("Registered client: %s (ports %d-%d)",
-				name, clientCfg.PortRangeStart, clientCfg.PortRangeEnd)
+	// List existing paths
+	paths, err := d.nlClient.ListPaths()
+	if err != nil {
+		d.logWarning("Failed to list paths: %v", err)
+	} else {
+		d.logInfo("Found %d existing paths in kernel", len(paths))
+		for _, p := range paths {
+			d.logInfo("  Path %d: state=%s ifindex=%d", p.PathID, p.StateName(), p.Ifindex)
 		}
 	}
 
-	// Initialize connection logger
+	// Initialize event logger
 	d.connLogger, err = monitor.NewConnectionLogger(
 		d.syslogWriter,
 		cfg.Global.ConnLogFile,
 	)
 	if err != nil {
-		return fmt.Errorf("create connection logger: %w", err)
+		return fmt.Errorf("create event logger: %w", err)
 	}
-	d.logInfo("Connection logging to %s", cfg.Global.ConnLogFile)
+	d.logInfo("Event logging to %s", cfg.Global.ConnLogFile)
 
 	// Initialize Prometheus collector
 	d.collector = monitor.NewCollector(d.nlClient)
@@ -159,11 +149,11 @@ func (d *Daemon) Run() error {
 	d.alerter = monitor.NewAlerter(d.syslogWriter)
 	d.logInfo("Path alerter initialized")
 
-	// Subscribe to connection events for logging
+	// Subscribe to path events
 	d.wg.Add(1)
 	go func() {
 		defer d.wg.Done()
-		d.runConnectionEventHandler()
+		d.runPathEventHandler()
 	}()
 
 	// Start metrics collection loop
@@ -185,12 +175,12 @@ func (d *Daemon) Run() error {
 		return fmt.Errorf("start HTTP servers: %w", err)
 	}
 
-	// Watch for config changes (hot reload)
+	// Watch for config changes
 	if err := d.configLoader.WatchForChanges(d.onConfigChange); err != nil {
 		d.logWarning("Failed to setup config watch: %v", err)
 	}
 
-	// Notify systemd that we're ready
+	// Notify systemd
 	if ok, err := daemon.SdNotify(false, daemon.SdNotifyReady); err != nil {
 		d.logWarning("Failed to notify systemd: %v", err)
 	} else if ok {
@@ -201,13 +191,10 @@ func (d *Daemon) Run() error {
 	d.syslogWriter.Info(fmt.Sprintf("tquicd started, listening on ports metrics=%d dashboard=%d",
 		cfg.Global.MetricsPort, cfg.Global.DashboardPort))
 
-	// Handle signals
 	return d.handleSignals()
 }
 
-// startHTTPServers starts the Prometheus metrics and dashboard servers.
 func (d *Daemon) startHTTPServers(cfg *config.Config) error {
-	// Prometheus metrics server
 	metricsHandler := api.NewPrometheusHandler(d.collector)
 	d.metricsServer = &http.Server{
 		Addr:    fmt.Sprintf(":%d", cfg.Global.MetricsPort),
@@ -223,14 +210,14 @@ func (d *Daemon) startHTTPServers(cfg *config.Config) error {
 		}
 	}()
 
-	// Dashboard server (localhost only)
 	dashboardHandler := api.NewDashboardHandler(d.nlClient, d.configLoader, d.connLogger)
-	blocklistHandler := api.NewBlocklistHandler(d.configLoader, d.nlClient)
+	blocklistHandler := api.NewBlocklistHandler(d.configLoader)
 
 	mux := http.NewServeMux()
 	mux.Handle("/", dashboardHandler)
 	mux.Handle("/api/stats", dashboardHandler)
-	mux.Handle("/api/connections/recent", dashboardHandler)
+	mux.Handle("/api/paths", dashboardHandler)
+	mux.Handle("/api/events/recent", dashboardHandler)
 	mux.Handle("/api/blocklist", blocklistHandler)
 
 	d.dashboardServer = &http.Server{
@@ -250,7 +237,6 @@ func (d *Daemon) startHTTPServers(cfg *config.Config) error {
 	return nil
 }
 
-// handleSignals handles OS signals for reload and shutdown.
 func (d *Daemon) handleSignals() error {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGHUP, syscall.SIGTERM, syscall.SIGINT)
@@ -281,19 +267,8 @@ func (d *Daemon) handleSignals() error {
 	}
 }
 
-// onConfigChange handles configuration changes (hot reload).
 func (d *Daemon) onConfigChange(cfg *config.Config) {
 	d.logInfo("Applying configuration changes")
-
-	// Update registered clients
-	for name, clientCfg := range cfg.Clients {
-		if !clientCfg.Enabled {
-			continue
-		}
-		if err := d.nlClient.RegisterClient(clientCfg); err != nil {
-			d.logWarning("Failed to update client %s: %v", name, err)
-		}
-	}
 
 	// Update QoS
 	if err := qos.SetupHTB(cfg.Global.Interface, &cfg.Global); err != nil {
@@ -310,7 +285,7 @@ func (d *Daemon) onConfigChange(cfg *config.Config) {
 	}
 }
 
-// runMetricsCollector runs the metrics collection loop (every 5 seconds).
+// runMetricsCollector runs the metrics collection loop.
 func (d *Daemon) runMetricsCollector() {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
@@ -318,16 +293,15 @@ func (d *Daemon) runMetricsCollector() {
 	for {
 		select {
 		case <-ticker.C:
-			// Collect path stats from kernel
-			stats, err := d.nlClient.GetPathStats("")
+			// Collect stats from kernel
+			stats, err := d.nlClient.GetStats()
 			if err != nil {
 				if *verbose {
-					d.logWarning("Failed to collect path stats: %v", err)
+					d.logWarning("Failed to collect stats: %v", err)
 				}
 				continue
 			}
 
-			// Update Prometheus metrics
 			d.collector.UpdatePathStats(stats)
 
 			// Check for path degradation
@@ -336,14 +310,20 @@ func (d *Daemon) runMetricsCollector() {
 				d.logWarning("Path alert: %s", alert)
 			}
 
+			// Also collect path info for state tracking
+			paths, err := d.nlClient.ListPaths()
+			if err == nil {
+				d.collector.UpdatePathInfo(paths)
+			}
+
 		case <-d.ctx.Done():
 			return
 		}
 	}
 }
 
-// runConnectionEventHandler subscribes to kernel connection events.
-func (d *Daemon) runConnectionEventHandler() {
+// runPathEventHandler subscribes to kernel path events.
+func (d *Daemon) runPathEventHandler() {
 	for {
 		select {
 		case <-d.ctx.Done():
@@ -351,20 +331,18 @@ func (d *Daemon) runConnectionEventHandler() {
 		default:
 		}
 
-		err := d.nlClient.SubscribeConnectionEvents(func(event netlink.ConnectionEvent) {
-			// Log the connection event
-			d.connLogger.LogConnection(event)
+		err := d.nlClient.SubscribePathEvents(func(event netlink.PathEvent) {
+			d.connLogger.LogPathEvent(event)
+			d.collector.RecordPathEvent(event)
 
 			if *verbose {
-				d.logInfo("Connection %s: %s -> %s:%d (%d bytes)",
-					event.TypeName(), event.ClientID,
-					event.DestIP, event.DestPort, event.BytesTx+event.BytesRx)
+				d.logInfo("Path event: %s path=%d reason=%d",
+					event.TypeName(), event.PathID, event.Reason)
 			}
 		})
 
 		if err != nil {
-			d.logWarning("Connection event subscription failed: %v", err)
-			// Retry after delay
+			d.logWarning("Path event subscription failed: %v", err)
 			select {
 			case <-time.After(5 * time.Second):
 			case <-d.ctx.Done():
@@ -374,15 +352,10 @@ func (d *Daemon) runConnectionEventHandler() {
 	}
 }
 
-// shutdown performs graceful shutdown.
 func (d *Daemon) shutdown() error {
-	// Notify systemd that we're stopping
 	daemon.SdNotify(false, daemon.SdNotifyStopping)
-
-	// Cancel context to stop goroutines
 	d.cancel()
 
-	// Shutdown HTTP servers with timeout
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -402,20 +375,16 @@ func (d *Daemon) shutdown() error {
 		}
 	}
 
-	// Stop config watcher
 	d.configLoader.Stop()
 
-	// Close netlink client
 	if d.nlClient != nil {
 		d.nlClient.Close()
 	}
 
-	// Close connection logger
 	if d.connLogger != nil {
 		d.connLogger.Close()
 	}
 
-	// Wait for goroutines
 	done := make(chan struct{})
 	go func() {
 		d.wg.Wait()
@@ -431,8 +400,6 @@ func (d *Daemon) shutdown() error {
 
 	return shutdownErr
 }
-
-// Logging helpers
 
 func (d *Daemon) logInfo(format string, args ...interface{}) {
 	msg := fmt.Sprintf(format, args...)
@@ -458,13 +425,11 @@ func (d *Daemon) logError(format string, args ...interface{}) {
 	}
 }
 
-// ensureLogDir creates the parent directory for a log file if it doesn't exist.
 func ensureLogDir(path string) error {
 	dir := filepath.Dir(path)
 	return os.MkdirAll(dir, 0755)
 }
 
-// isLocalAddr returns true if the address is localhost.
 func isLocalAddr(addr string) bool {
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil {

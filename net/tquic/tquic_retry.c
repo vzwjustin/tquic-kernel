@@ -44,6 +44,7 @@
 #include "tquic_retry.h"
 #include "tquic_mib.h"
 #include "tquic_debug.h"
+#include "tquic_sysctl.h"
 
 /*
  * =============================================================================
@@ -105,10 +106,6 @@ static DEFINE_MUTEX(tquic_retry_mutex);
 static DEFINE_MUTEX(integrity_aead_lock);
 static struct crypto_aead *integrity_aead_v1;
 static struct crypto_aead *integrity_aead_v2;
-
-/* Sysctl-controlled values */
-static int tquic_retry_required;	/* 0 = disabled, 1 = enabled */
-static int tquic_retry_token_lifetime = TQUIC_RETRY_TOKEN_LIFETIME_DEFAULT;
 
 /*
  * Rate limiting for Retry packet generation.
@@ -548,7 +545,9 @@ int tquic_retry_token_validate(struct tquic_retry_state *state,
 	u8 nonce[12];
 	u8 local_key[16];
 	size_t enc_len, pt_len;
-	u64 now, age;
+	u32 token_lifetime;
+	time64_t now;
+	time64_t age;
 	unsigned long flags;
 	int ret;
 
@@ -690,9 +689,10 @@ int tquic_retry_token_validate(struct tquic_retry_state *state,
 
 	if (pt.timestamp <= now) {
 		age = now - pt.timestamp;
-		if (age > state->token_lifetime) {
+		token_lifetime = tquic_retry_get_token_lifetime(NULL);
+		if (age > token_lifetime) {
 			tquic_dbg("retry:token expired (age=%llu, max=%u)\n",
-				 age, state->token_lifetime);
+				 age, token_lifetime);
 			return -ETIMEDOUT;
 		}
 	}
@@ -705,6 +705,31 @@ int tquic_retry_token_validate(struct tquic_retry_state *state,
 	return 0;
 }
 EXPORT_SYMBOL_GPL(tquic_retry_token_validate);
+
+int tquic_retry_token_validate_global(const u8 *token, size_t token_len,
+				      const struct sockaddr_storage *client_addr,
+				      u8 *odcid, u8 *odcid_len)
+{
+	struct tquic_retry_state *state;
+	int ret;
+
+	if (!token || !client_addr || !odcid || !odcid_len)
+		return -EINVAL;
+
+	mutex_lock(&tquic_retry_mutex);
+	state = tquic_global_retry_state;
+	if (!state) {
+		mutex_unlock(&tquic_retry_mutex);
+		return -ENODEV;
+	}
+
+	ret = tquic_retry_token_validate(state, token, token_len,
+					 client_addr, odcid, odcid_len);
+	mutex_unlock(&tquic_retry_mutex);
+
+	return ret;
+}
+EXPORT_SYMBOL_GPL(tquic_retry_token_validate_global);
 
 /*
  * =============================================================================
@@ -879,16 +904,18 @@ EXPORT_SYMBOL_GPL(tquic_retry_parse);
 /**
  * tquic_retry_send - Send a Retry packet to client
  */
-int tquic_retry_send(struct sock *sk,
-		     const struct sockaddr_storage *src_addr,
-		     u32 version,
-		     const u8 *dcid, u8 dcid_len,
-		     const u8 *scid, u8 scid_len)
+static int tquic_retry_send_internal(struct sock *sk,
+				     const struct sockaddr_storage *src_addr,
+				     u32 version,
+				     const u8 *dcid, u8 dcid_len,
+				     const u8 *scid, u8 scid_len,
+				     const u8 *token, size_t token_len)
 {
 	struct sk_buff *skb;
 	u8 *pkt_buf;
-	u8 token[TQUIC_RETRY_TOKEN_MAX_LEN];
-	size_t token_len = sizeof(token);
+	u8 generated_token[TQUIC_RETRY_TOKEN_MAX_LEN];
+	const u8 *retry_token = token;
+	size_t retry_token_len = token_len;
 	u8 new_scid[TQUIC_MAX_CID_LEN];
 	u8 new_scid_len = 8;  /* Default CID length */
 	int pkt_len;
@@ -896,9 +923,6 @@ int tquic_retry_send(struct sock *sk,
 
 	if (!sk || !src_addr || !dcid || !scid)
 		return -EINVAL;
-
-	if (!tquic_global_retry_state)
-		return -ENODEV;
 
 	/* Rate limit Retry generation to prevent CPU exhaustion */
 	if (!tquic_retry_rate_limit()) {
@@ -909,14 +933,24 @@ int tquic_retry_send(struct sock *sk,
 	/* Generate new server CID for the Retry */
 	get_random_bytes(new_scid, new_scid_len);
 
-	/* Create token encoding ODCID (= client's DCID) and client address */
-	ret = tquic_retry_token_create(tquic_global_retry_state,
-				       dcid, dcid_len,  /* ODCID */
-				       src_addr,
-				       token, &token_len);
-	if (ret) {
-		tquic_dbg("retry:failed to create token: %d\n", ret);
-		return ret;
+	/* Use caller-provided token or generate a standard Retry token. */
+	if (!retry_token || retry_token_len == 0) {
+		if (!tquic_global_retry_state)
+			return -ENODEV;
+
+		retry_token_len = sizeof(generated_token);
+		ret = tquic_retry_token_create(tquic_global_retry_state,
+					       dcid, dcid_len,  /* ODCID */
+					       src_addr,
+					       generated_token, &retry_token_len);
+		if (ret) {
+			tquic_dbg("retry:failed to create token: %d\n", ret);
+			return ret;
+		}
+
+		retry_token = generated_token;
+	} else if (retry_token_len > TQUIC_RETRY_TOKEN_MAX_LEN) {
+		return -EINVAL;
 	}
 
 	/* Allocate packet buffer */
@@ -935,7 +969,7 @@ int tquic_retry_send(struct sock *sk,
 					   scid, scid_len,     /* Our DCID = their SCID */
 					   new_scid, new_scid_len,  /* Our new SCID */
 					   dcid, dcid_len,     /* ODCID = their DCID */
-					   token, token_len);
+					   retry_token, retry_token_len);
 	if (pkt_len < 0) {
 		kfree(pkt_buf);
 		return pkt_len;
@@ -994,12 +1028,41 @@ int tquic_retry_send(struct sock *sk,
 		if (sk)
 			TQUIC_INC_STATS(sock_net(sk), TQUIC_MIB_RETRYPACKETSTX);
 		tquic_dbg("retry:sent Retry packet, token_len=%zu\n",
-			 token_len);
+			 retry_token_len);
 	}
 
 	return ret;
 }
+
+int tquic_retry_send(struct sock *sk,
+		     const struct sockaddr_storage *src_addr,
+		     u32 version,
+		     const u8 *dcid, u8 dcid_len,
+		     const u8 *scid, u8 scid_len)
+{
+	return tquic_retry_send_internal(sk, src_addr, version,
+					dcid, dcid_len,
+					scid, scid_len,
+					NULL, 0);
+}
 EXPORT_SYMBOL_GPL(tquic_retry_send);
+
+int tquic_retry_send_with_token(struct sock *sk,
+				const struct sockaddr_storage *src_addr,
+				u32 version,
+				const u8 *dcid, u8 dcid_len,
+				const u8 *scid, u8 scid_len,
+				const u8 *token, size_t token_len)
+{
+	if (!token || token_len == 0)
+		return -EINVAL;
+
+	return tquic_retry_send_internal(sk, src_addr, version,
+					dcid, dcid_len,
+					scid, scid_len,
+					token, token_len);
+}
+EXPORT_SYMBOL_GPL(tquic_retry_send_with_token);
 
 /*
  * =============================================================================
@@ -1128,7 +1191,7 @@ struct tquic_retry_state *tquic_retry_state_alloc(void)
 
 	spin_lock_init(&state->lock);
 	state->pool_size = TQUIC_RETRY_AEAD_POOL_SIZE;
-	state->token_lifetime = tquic_retry_token_lifetime;
+	state->token_lifetime = tquic_retry_get_token_lifetime(NULL);
 
 	/* Generate random token encryption key */
 	get_random_bytes(state->token_key, sizeof(state->token_key));
@@ -1227,9 +1290,10 @@ EXPORT_SYMBOL_GPL(tquic_retry_rotate_key);
  */
 bool tquic_retry_is_required(struct net *net)
 {
-	/* For now, use global setting */
-	/* Future: per-netns via net->tquic.retry_required */
-	return tquic_retry_required != 0;
+	/* Future: per-netns override may use @net. */
+	(void)net;
+
+	return tquic_sysctl_get_retry_required() != 0;
 }
 EXPORT_SYMBOL_GPL(tquic_retry_is_required);
 
@@ -1238,8 +1302,16 @@ EXPORT_SYMBOL_GPL(tquic_retry_is_required);
  */
 u32 tquic_retry_get_token_lifetime(struct net *net)
 {
-	/* For now, use global setting */
-	return tquic_retry_token_lifetime;
+	int lifetime;
+
+	/* Future: per-netns override may use @net. */
+	(void)net;
+
+	lifetime = tquic_sysctl_get_retry_token_lifetime();
+	if (lifetime <= 0)
+		return TQUIC_RETRY_TOKEN_LIFETIME_DEFAULT;
+
+	return (u32)lifetime;
 }
 EXPORT_SYMBOL_GPL(tquic_retry_get_token_lifetime);
 

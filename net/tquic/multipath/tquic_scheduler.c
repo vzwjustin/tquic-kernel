@@ -728,6 +728,8 @@ static int tquic_rr_select_path(struct tquic_connection *conn,
 	}
 
 	if (selected) {
+		u8 prev_path_id = rr->last_path_id;
+
 		sel->paths[0] = selected;
 		sel->num_paths = 1;
 
@@ -740,7 +742,7 @@ static int tquic_rr_select_path(struct tquic_connection *conn,
 			rr->next_path_id = list_next_entry(selected, list)->path_id;
 
 		atomic64_inc(&conn->stats.sched_decisions);
-		if (selected->path_id != rr->last_path_id)
+		if (selected->path_id != prev_path_id)
 			atomic64_inc(&conn->stats.path_switches);
 	}
 

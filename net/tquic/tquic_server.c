@@ -27,13 +27,14 @@
 #include <linux/workqueue.h>
 #include <linux/timer.h>
 #include <linux/ratelimit.h>
+#include <linux/unaligned.h>
 #include <net/tquic.h>
 
 #include "protocol.h"
 #include "tquic_debug.h"
 #include "tquic_mib.h"
 #include "tquic_retry.h"
-#include "tquic_sysctl.h"
+#include "core/varint.h"
 
 /*
  * Maximum PSK identity length (RFC 8446 Section 4.2.11)
@@ -669,9 +670,92 @@ static int tquic_client_get_stats(const char *identity, size_t identity_len,
  */
 
 /**
+ * tquic_server_parse_initial_retry_fields - Parse Initial fields needed by Retry
+ * @skb: Incoming Initial packet
+ * @version: Output QUIC version
+ * @dcid: Output pointer to DCID bytes in packet
+ * @dcid_len: Output DCID length
+ * @scid: Output pointer to SCID bytes in packet
+ * @scid_len: Output SCID length
+ * @token: Output pointer to token bytes (NULL if no token)
+ * @token_len: Output token length
+ *
+ * Parses only the long-header fields needed for Retry policy decisions.
+ * Returns 0 on success, negative errno on parse/validation failure.
+ */
+static int tquic_server_parse_initial_retry_fields(struct sk_buff *skb,
+						   u32 *version,
+						   const u8 **dcid, u8 *dcid_len,
+						   const u8 **scid, u8 *scid_len,
+						   const u8 **token,
+						   size_t *token_len)
+{
+	const u8 *data;
+	size_t len;
+	size_t offset;
+	u64 parsed_token_len;
+	u8 first_byte;
+	u8 pkt_type;
+	int ret;
+
+	if (!skb || !version || !dcid || !dcid_len || !scid || !scid_len ||
+	    !token || !token_len)
+		return -EINVAL;
+
+	data = skb->data;
+	len = skb->len;
+
+	/* Minimum: first byte + version + dcid_len + scid_len */
+	if (len < 7)
+		return -EINVAL;
+
+	first_byte = data[0];
+	if (!(first_byte & 0x80))
+		return -EINVAL;
+
+	pkt_type = (first_byte & 0x30) >> 4;
+	if (pkt_type != 0)
+		return -EINVAL;
+
+	offset = 1;
+	*version = get_unaligned_be32(data + offset);
+	offset += 4;
+
+	*dcid_len = data[offset++];
+	if (*dcid_len > TQUIC_MAX_CID_LEN || offset + *dcid_len > len)
+		return -EINVAL;
+	*dcid = data + offset;
+	offset += *dcid_len;
+
+	if (offset >= len)
+		return -EINVAL;
+
+	*scid_len = data[offset++];
+	if (*scid_len > TQUIC_MAX_CID_LEN || offset + *scid_len > len)
+		return -EINVAL;
+	*scid = data + offset;
+	offset += *scid_len;
+
+	ret = tquic_varint_read(data, len, &offset, &parsed_token_len);
+	if (ret < 0)
+		return -EINVAL;
+
+	if (parsed_token_len > len - offset)
+		return -EINVAL;
+
+	if (parsed_token_len > 0)
+		*token = data + offset;
+	else
+		*token = NULL;
+
+	*token_len = (size_t)parsed_token_len;
+
+	return 0;
+}
+
+/**
  * tquic_server_check_retry_required - Check if Retry packet should be sent
  * @sk: Server socket
- * @skb: Initial packet
  * @client_addr: Client source address
  * @version: QUIC version from packet
  * @dcid: Destination CID from packet
@@ -695,7 +779,6 @@ static int tquic_client_get_stats(const char *identity, size_t identity_len,
  *   negative errno on error
  */
 static int tquic_server_check_retry_required(struct sock *sk,
-					     struct sk_buff *skb,
 					     struct sockaddr_storage *client_addr,
 					     u32 version,
 					     const u8 *dcid, u8 dcid_len,
@@ -729,10 +812,9 @@ static int tquic_server_check_retry_required(struct sock *sk,
 		 * - Client IP matches encoded IP (proves address ownership)
 		 * - Timestamp is within validity window (prevents replay)
 		 */
-		ret = tquic_retry_token_validate(NULL, /* use global state */
-						 token, token_len,
-						 client_addr,
-						 odcid, &odcid_len);
+		ret = tquic_retry_token_validate_global(token, token_len,
+							client_addr,
+							odcid, &odcid_len);
 		if (ret == 0) {
 			/* Valid token - continue with handshake */
 			tquic_dbg("valid Retry token, proceeding with handshake\n");
@@ -770,9 +852,6 @@ static int tquic_server_check_retry_required(struct sock *sk,
 		return ret;
 	}
 
-	/* Update statistics */
-	TQUIC_INC_STATS(net, TQUIC_MIB_RETRYPACKETSTX);
-
 	tquic_dbg("sent Retry packet to client\n");
 
 	return 1;  /* Retry sent, drop the Initial packet */
@@ -792,7 +871,40 @@ static int tquic_server_check_retry_required(struct sock *sk,
 int tquic_server_accept(struct sock *sk, struct sk_buff *skb,
 			struct sockaddr_storage *client_addr)
 {
-	/* Delegate to tquic_server_handshake which handles the full flow */
+	const u8 *dcid, *scid, *token;
+	u8 dcid_len, scid_len;
+	u32 version;
+	size_t token_len;
+	int ret;
+
+	if (!sk || !skb || !client_addr) {
+		if (skb)
+			kfree_skb(skb);
+		return -EINVAL;
+	}
+
+	ret = tquic_server_parse_initial_retry_fields(skb, &version,
+						      &dcid, &dcid_len,
+						      &scid, &scid_len,
+						      &token, &token_len);
+	if (ret) {
+		kfree_skb(skb);
+		return ret;
+	}
+
+	ret = tquic_server_check_retry_required(sk, client_addr,
+						version,
+						dcid, dcid_len,
+						scid, scid_len,
+						token, token_len);
+	if (ret != 0) {
+		kfree_skb(skb);
+		if (ret > 0)
+			return 0;
+		return ret;
+	}
+
+	/* Retry not required (or valid token) - continue full handshake flow. */
 	return tquic_server_handshake(sk, skb, client_addr);
 }
 EXPORT_SYMBOL_GPL(tquic_server_accept);

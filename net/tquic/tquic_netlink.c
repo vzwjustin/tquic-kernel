@@ -379,14 +379,12 @@ static void tquic_nl_conn_put(struct tquic_nl_conn_info *conn)
 {
 	if (refcount_dec_and_test(&conn->refcnt)) {
 		struct tquic_nl_path_info *path, *tmp;
-		struct tquic_net *tnet = tquic_get_net(conn->net);
 
-		/* CF-154: Decrement connection count on final release */
-		spin_lock_bh(&tnet->conn_lock);
-		if (tnet->conn_count > 0)
-			tnet->conn_count--;
-		spin_unlock_bh(&tnet->conn_lock);
-
+		/*
+		 * The caller (tquic_net_exit) is responsible for removing
+		 * the connection from the hash table and connection list
+		 * before dropping the final reference.  We only free here.
+		 */
 		list_for_each_entry_safe(path, tmp, &conn->paths, list) {
 			list_del_rcu(&path->list);
 			kfree_rcu(path, rcu);
@@ -418,7 +416,8 @@ static struct tquic_nl_conn_info *tquic_conn_info_create(struct net *net,
 
 	conn->conn_id = conn_id;
 	conn->net = net;
-	refcount_set(&conn->refcnt, 1);
+	/* Start at 2: one for the hash table, one for the caller */
+	refcount_set(&conn->refcnt, 2);
 	spin_lock_init(&conn->lock);
 	INIT_LIST_HEAD(&conn->paths);
 	strscpy(conn->scheduler, "default", sizeof(conn->scheduler));

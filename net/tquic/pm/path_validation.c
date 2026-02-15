@@ -276,73 +276,28 @@ int tquic_path_start_validation(struct tquic_connection *conn,
 EXPORT_SYMBOL_GPL(tquic_path_start_validation);
 
 /*
- * Handle received PATH_CHALLENGE - queue PATH_RESPONSE
+ * Handle received PATH_CHALLENGE - send PATH_RESPONSE immediately
  */
 int tquic_path_handle_challenge(struct tquic_connection *conn,
 				 struct tquic_path *path,
 				 const u8 *data)
 {
-	struct sk_buff *skb;
+	int ret;
+
+	if (!conn || !path || !data)
+		return -EINVAL;
 
 	pr_debug("tquic_pm: received PATH_CHALLENGE on path %u\n", path->path_id);
 
-	/* Check response queue depth to prevent memory exhaustion
-	 * RFC 9000 Section 8.2.1: Limit outstanding responses */
-	/* CF-556: Use skb_queue_len as single source of truth for count */
-	if (skb_queue_len(&path->response.queue) >= TQUIC_MAX_PENDING_RESPONSES) {
-		pr_warn("tquic_pm: path %u response queue full (%d), dropping challenge\n",
-			path->path_id, TQUIC_MAX_PENDING_RESPONSES);
-		return -ENOBUFS;
-	}
-
-	/* Allocate skb to hold challenge data for response
-	 * We'll send this in the output path */
-	skb = alloc_skb(8, GFP_ATOMIC);
-	if (!skb) {
-		pr_err("tquic_pm: failed to allocate response skb\n");
-		return -ENOMEM;
-	}
-
-	/* Copy challenge data to skb */
-	skb_put_data(skb, data, 8);
-
-	/* Queue response */
-	skb_queue_tail(&path->response.queue, skb);
-	atomic_inc(&path->response.count);
-
-	pr_debug("tquic_pm: queued PATH_RESPONSE on path %u (%d in queue)\n",
-		 path->path_id, atomic_read(&path->response.count));
-
 	/*
-	 * SECURITY: Trigger immediate transmission of PATH_RESPONSE.
-	 *
-	 * RFC 9000 Section 8.2.2 requires PATH_RESPONSE to be sent promptly:
-	 * "An endpoint MUST send each PATH_RESPONSE frame on the network path
-	 * where the corresponding PATH_CHALLENGE was received."
-	 *
-	 * Delaying PATH_RESPONSE could:
-	 * 1. Allow amplification attacks by accumulating challenge/response pairs
-	 * 2. Cause path validation timeouts for legitimate peers
-	 * 3. Create timing vulnerabilities in migration scenarios
-	 *
-	 * We trigger immediate output by marking the socket writable and
-	 * scheduling the connection's transmit tasklet.
+	 * RFC 9000 Section 8.2.2: PATH_RESPONSE MUST be sent on the same path
+	 * and promptly. Send immediately to avoid stalling on deferred queues.
 	 */
-	if (conn && conn->sk) {
-		struct sock *sk = conn->sk;
-
-		/* Mark socket as having urgent data to send */
-		set_bit(TQUIC_PATH_RESPONSE_PENDING, &conn->flags);
-
-		/* Wake up any waiting writers and trigger immediate output */
-		sk->sk_data_ready(sk);
-
-		/* Schedule immediate transmission via tasklet */
-		if (test_bit(TQUIC_CONN_FLAG_TASKLET_SCHED, &conn->flags))
-			tasklet_hi_schedule(&conn->tx_tasklet);
-
-		pr_debug("tquic_pm: triggered immediate PATH_RESPONSE transmission on path %u\n",
-			 path->path_id);
+	ret = tquic_send_path_response(conn, path, data);
+	if (ret < 0) {
+		pr_warn("tquic_pm: failed to send PATH_RESPONSE on path %u: %d\n",
+			path->path_id, ret);
+		return ret;
 	}
 
 	return 0;

@@ -110,6 +110,13 @@ struct tquic_edf_scheduler {
 	} stats;
 };
 
+static inline bool edf_path_usable(const struct tquic_path *path)
+{
+	return path &&
+	       (path->state == TQUIC_PATH_ACTIVE ||
+		path->state == TQUIC_PATH_VALIDATED);
+}
+
 /**
  * struct tquic_stream_edf_queue - Per-stream EDF queue
  * @stream_id: Stream identifier
@@ -248,7 +255,7 @@ static u64 edf_estimate_path_delivery(struct tquic_path *path, size_t data_len)
 	u64 bandwidth;
 	u64 in_flight;
 
-	if (!path || path->state != TQUIC_PATH_ACTIVE)
+	if (!edf_path_usable(path))
 		return ULLONG_MAX;
 
 	/* Base RTT */
@@ -314,7 +321,7 @@ static void edf_score_path(struct tquic_path *path, ktime_t deadline,
 	memset(score, 0, sizeof(*score));
 	score->path = path;
 
-	if (!path || path->state != TQUIC_PATH_ACTIVE) {
+	if (!edf_path_usable(path)) {
 		score->score = ULLONG_MAX;
 		return;
 	}
@@ -386,7 +393,7 @@ static struct tquic_path *edf_select_path(struct tquic_edf_scheduler *sched,
 		return NULL;
 
 	list_for_each_entry(path, &sched->conn->paths, list) {
-		if (path->state != TQUIC_PATH_ACTIVE)
+		if (!edf_path_usable(path))
 			continue;
 
 		edf_score_path(path, entry->deadline, entry->data_len,
@@ -461,7 +468,7 @@ static bool edf_check_admission(struct tquic_edf_scheduler *sched,
 	list_for_each_entry(path, &sched->conn->paths, list) {
 		struct path_score score;
 
-		if (path->state != TQUIC_PATH_ACTIVE)
+		if (!edf_path_usable(path))
 			continue;
 
 		edf_score_path(path, deadline, data_len, &score);
@@ -888,7 +895,7 @@ static struct tquic_path *edf_sched_select(void *state,
 		list_for_each_entry_rcu(path, &conn->paths, list) {
 			u64 completion;
 
-			if (READ_ONCE(path->state) != TQUIC_PATH_ACTIVE)
+			if (!edf_path_usable(path))
 				continue;
 
 			completion = edf_estimate_path_delivery(path, skb->len);
