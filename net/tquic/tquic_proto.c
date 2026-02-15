@@ -301,7 +301,7 @@ static int tquic_v4_err(struct sk_buff *skb, u32 info)
 }
 
 /* IPv4 net_protocol definition */
-static const struct net_protocol tquic_protocol = {
+static const struct net_protocol __maybe_unused tquic_protocol = {
 	.handler	= tquic_v4_rcv,
 	.err_handler	= tquic_v4_err,
 	.no_policy	= 1,
@@ -502,7 +502,7 @@ static int tquic_v6_err(struct sk_buff *skb, struct inet6_skb_parm *opt,
 }
 
 /* IPv6 net_protocol definition */
-static const struct inet6_protocol tquicv6_protocol = {
+static const struct inet6_protocol __maybe_unused tquicv6_protocol = {
 	.handler	= tquic_v6_rcv,
 	.err_handler	= tquic_v6_err,
 	.flags		= INET6_PROTO_NOPOLICY | INET6_PROTO_FINAL,
@@ -788,7 +788,7 @@ static struct inet_protosw tquicv6_dgram_protosw = {
 /*
  * Net Protocol Family
  */
-static const struct net_proto_family tquic_family_ops = {
+static const struct net_proto_family __maybe_unused tquic_family_ops = {
 	.family		= PF_INET,
 	.create		= tquic_create_socket,
 	.owner		= THIS_MODULE,

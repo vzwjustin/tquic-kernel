@@ -42,7 +42,7 @@ extern struct genl_family tquic_genl_family;
 /*
  * Multicast group for qlog events
  */
-static const struct genl_multicast_group tquic_qlog_mcgrps[] = {
+static const struct genl_multicast_group __maybe_unused tquic_qlog_mcgrps[] = {
 	[0] = { .name = "qlog", },
 };
 

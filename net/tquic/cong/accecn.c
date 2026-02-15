@@ -149,7 +149,6 @@ int accecn_on_ack_received(struct accecn_ctx *ctx,
 			   u64 acked_packets,
 			   struct accecn_deltas *deltas)
 {
-	u64 total_delta;
 	u64 reported_total;
 
 	if (!ctx || !deltas)
@@ -195,7 +194,6 @@ int accecn_on_ack_received(struct accecn_ctx *ctx,
 	}
 
 	/* Validate ECN counts */
-	total_delta = deltas->delta_ect0 + deltas->delta_ect1 + deltas->delta_ce;
 	reported_total = ect0_count + ect1_count + ce_count;
 
 	/* Check for bleaching (ECN stripped by middlebox) */

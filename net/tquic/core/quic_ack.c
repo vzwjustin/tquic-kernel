@@ -470,7 +470,6 @@ void tquic_ack_on_packet_received(struct tquic_connection *conn, u64 pn,
 {
 	struct tquic_ack_conn_ctx *ctx;
 	struct tquic_local_pn_space *space;
-	struct tquic_ack_info *ack_info;
 	unsigned long flags;
 
 	if (!conn || pn_space >= TQUIC_PN_SPACE_COUNT)
@@ -478,7 +477,6 @@ void tquic_ack_on_packet_received(struct tquic_connection *conn, u64 pn,
 
 	ctx = tquic_ack_ctx(conn);
 	space = &ctx->pn_spaces[pn_space];
-	ack_info = &space->recv_ack_info;
 
 	spin_lock_irqsave(&space->lock, flags);
 

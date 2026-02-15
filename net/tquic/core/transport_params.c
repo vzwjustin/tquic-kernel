@@ -534,7 +534,6 @@ static ssize_t encode_preferred_address(u8 *buf, size_t buflen,
 	ssize_t ret;
 	size_t offset = 0;
 	size_t value_len;
-	size_t value_offset;
 
 	/* Calculate total length */
 	value_len = 4 + 2 +	/* IPv4 address + port */
@@ -558,8 +557,6 @@ static ssize_t encode_preferred_address(u8 *buf, size_t buflen,
 
 	if (buflen - offset < value_len)
 		return -ENOSPC;
-
-	value_offset = offset;
 
 	/* IPv4 address (4 bytes) */
 	memcpy(buf + offset, pref->ipv4_addr, 4);

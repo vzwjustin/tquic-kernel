@@ -1391,14 +1391,12 @@ EXPORT_SYMBOL_GPL(tquic_pacing_cleanup);
  */
 void tquic_update_pacing(struct sock *sk, struct tquic_path *path)
 {
-	struct tquic_sock *tsk;
 	struct net *net;
 	u64 pacing_rate;
 
 	if (!sk || !path)
 		return;
 
-	tsk = tquic_sk(sk);
 	net = sock_net(sk);
 
 	/* Check if pacing is enabled at netns level */

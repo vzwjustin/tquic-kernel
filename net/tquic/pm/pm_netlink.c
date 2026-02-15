@@ -229,7 +229,6 @@ static int tquic_pm_nl_add_path(struct sk_buff *skb, struct genl_info *info)
 	struct sockaddr_storage local_addr, remote_addr;
 	struct tquic_connection *conn;
 	u32 token;
-	int if_idx = 0;
 	int err;
 
 	if (!info->attrs[TQUIC_PM_ATTR_TOKEN]) {
@@ -317,9 +316,6 @@ static int tquic_pm_nl_add_path(struct sk_buff *skb, struct genl_info *info)
 				sin6->sin6_port = htons(nla_get_u16(info->attrs[TQUIC_PM_ATTR_DPORT]));
 		}
 	}
-
-	if (info->attrs[TQUIC_PM_ATTR_IF_IDX])
-		if_idx = nla_get_s32(info->attrs[TQUIC_PM_ATTR_IF_IDX]);
 
 	/* Find connection by token */
 	conn = tquic_conn_lookup_by_token(genl_info_net(info), token);

@@ -878,12 +878,9 @@ static void tquic_he_fallback_work(struct work_struct *work)
 						       struct tquic_happy_eyeballs,
 						       work);
 	struct tquic_connection *conn = he->conn;
-	struct sock *sk;
 
 	if (!conn || !conn->sk)
 		return;
-
-	sk = conn->sk;
 
 	/* If IPv6 succeeded, cancel IPv4 attempt */
 	if (he->ipv6_connected) {
@@ -1085,7 +1082,7 @@ static void tquic_v6_destroy_sock(struct sock *sk)
  * IPv6 connection sock AF operations
  */
 
-static const struct inet_connection_sock_af_ops tquic_v6_af_ops = {
+static const struct inet_connection_sock_af_ops __maybe_unused tquic_v6_af_ops = {
 	.queue_xmit	= inet6_csk_xmit,
 	.send_check	= NULL,  /* QUIC handles its own checksums */
 	.rebuild_header	= inet6_sk_rebuild_header,
@@ -1099,7 +1096,7 @@ static const struct inet_connection_sock_af_ops tquic_v6_af_ops = {
 };
 
 /* IPv4-mapped address operations for dual-stack */
-static const struct inet_connection_sock_af_ops tquic_v6_mapped_ops = {
+static const struct inet_connection_sock_af_ops __maybe_unused tquic_v6_mapped_ops = {
 	.queue_xmit	= ip_queue_xmit,
 	.send_check	= NULL,
 	.rebuild_header	= inet_sk_rebuild_header,

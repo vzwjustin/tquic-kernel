@@ -333,7 +333,7 @@ static const struct nla_policy tquic_nl_policy[TQUIC_NL_ATTR_MAX + 1] = {
 /*
  * Nested policy for path entry
  */
-static const struct nla_policy tquic_path_entry_policy[TQUIC_NL_ATTR_MAX + 1] = {
+static const struct nla_policy __maybe_unused tquic_path_entry_policy[TQUIC_NL_ATTR_MAX + 1] = {
 	[TQUIC_NL_ATTR_PATH_ID] = { .type = NLA_U32 },
 	[TQUIC_NL_ATTR_PATH_STATE] = { .type = NLA_U8 },
 	[TQUIC_NL_ATTR_PATH_IFINDEX] = { .type = NLA_S32 },

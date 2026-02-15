@@ -1111,7 +1111,6 @@ static int tquic_udp_encap_recv(struct sock *sk, struct sk_buff *skb)
 	struct tquic_udp_sock *us;
 	struct tquic_connection *conn = NULL;
 	struct tquic_path *path = NULL;
-	struct udphdr *uh;
 	int ret;
 
 	rcu_read_lock();
@@ -1141,9 +1140,6 @@ static int tquic_udp_encap_recv(struct sock *sk, struct sk_buff *skb)
 	/* Validate we have at least a UDP header */
 	if (skb->len < sizeof(struct udphdr))
 		goto drop;
-
-	/* Access UDP header before pulling */
-	uh = udp_hdr(skb);
 
 	/* Pull UDP header to expose QUIC payload */
 	__skb_pull(skb, sizeof(struct udphdr));
@@ -1396,7 +1392,6 @@ static struct sk_buff *tquic_udp_gro_receive(struct sock *sk,
 					     struct sk_buff *skb)
 {
 	struct tquic_udp_sock *us;
-	struct udphdr *uh;
 
 	rcu_read_lock();
 	us = rcu_dereference_sk_user_data(sk);
@@ -1408,9 +1403,6 @@ static struct sk_buff *tquic_udp_gro_receive(struct sock *sk,
 
 	/* Update socket-level GRO statistics */
 	us->stats.gro_packets++;
-
-	/* Get UDP header for the TQUIC GRO receive */
-	uh = udp_hdr(skb);
 
 	/* Use TQUIC-specific GRO receive for packet aggregation */
 	rcu_read_unlock();
@@ -1651,15 +1643,11 @@ EXPORT_SYMBOL_GPL(tquic_udp_xmit);
 int tquic_udp_xmit_gso(struct tquic_udp_sock *us, struct sk_buff *skb,
 		       unsigned int gso_size)
 {
-	struct sock *sk;
-
 	if (!us || !us->sock || !skb)
 		return -EINVAL;
 
 	if (!us->gso_enabled || skb->len <= gso_size)
 		return tquic_udp_xmit(us, skb);
-
-	sk = us->sock->sk;
 
 	/* Set up GSO */
 	skb_shinfo(skb)->gso_size = gso_size;

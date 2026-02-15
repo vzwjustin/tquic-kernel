@@ -41,9 +41,9 @@
 
 /* HKDF labels for 0-RTT key derivation (RFC 9001 Section 5.1) */
 static const char tquic_early_traffic_label[] = "c e traffic";
-static const char tquic_key_label[] = "quic key";
-static const char tquic_iv_label[] = "quic iv";
-static const char tquic_hp_label[] = "quic hp";
+static const char __maybe_unused tquic_key_label[] = "quic key";
+static const char __maybe_unused tquic_iv_label[] = "quic iv";
+static const char __maybe_unused tquic_hp_label[] = "quic hp";
 
 /* 0-RTT packet type in long header (RFC 9000 Section 17.2.3) */
 #define TQUIC_LONG_TYPE_0RTT 0x01

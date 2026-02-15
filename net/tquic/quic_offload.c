@@ -144,7 +144,6 @@ static int tquic_parse_header(struct sk_buff *skb, struct tquic_offload_cb *cb)
 	u8 *data = skb->data;
 	u8 first_byte;
 	int offset = 0;
-	u32 version;
 
 	if (skb->len < 1)
 		return -EINVAL;
@@ -164,12 +163,7 @@ static int tquic_parse_header(struct sk_buff *skb, struct tquic_offload_cb *cb)
 		if (skb->len < 6)
 			return -EINVAL;
 
-		/* Version field - cast to u32 before shifting to avoid
-		 * undefined behavior when u8 is promoted to int and
-		 * shifted left by 24 (sign bit overflow).
-		 */
-		version = ((u32)data[1] << 24) | ((u32)data[2] << 16) |
-			  ((u32)data[3] << 8) | (u32)data[4];
+		/* Skip version field (4 bytes) */
 		offset = 5;
 
 		/* DCID length */
@@ -299,7 +293,6 @@ static struct sk_buff *tquic_gso_inner_segment(struct sk_buff *skb,
 	struct sk_buff *segs, *seg;
 	struct udphdr *uh;
 	unsigned int header_len;
-	unsigned int payload_offset;
 	unsigned int sum_truesize = 0;
 	struct sock *sk = skb->sk;
 	bool copy_dtor;
@@ -317,7 +310,6 @@ static struct sk_buff *tquic_gso_inner_segment(struct sk_buff *skb,
 		return ERR_PTR(err);
 
 	header_len = sizeof(struct udphdr) + cb->header_len;
-	payload_offset = header_len;
 
 	/* Validate checksum setup */
 	if (unlikely(skb_checksum_start(skb) != skb_transport_header(skb)))
@@ -449,7 +441,6 @@ static struct sk_buff *tquic_gso_segment(struct sk_buff *skb,
 					netdev_features_t features)
 {
 	struct sk_buff *segs = ERR_PTR(-EINVAL);
-	struct udphdr *uh;
 	bool is_ipv6 = false;
 
 	/* Check protocol type */
@@ -465,8 +456,6 @@ static struct sk_buff *tquic_gso_segment(struct sk_buff *skb,
 	/* Pull UDP header */
 	if (!pskb_may_pull(skb, sizeof(struct udphdr)))
 		goto out;
-
-	uh = udp_hdr(skb);
 
 	/* Verify this looks like a QUIC packet */
 	if (skb->len < sizeof(struct udphdr) + 1)
