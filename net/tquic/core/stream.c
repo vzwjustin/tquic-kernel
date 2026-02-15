@@ -28,11 +28,12 @@
 #include <linux/pipe_fs_i.h>
 #include <linux/highmem.h>
 #include <linux/mm.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 #include <net/sock.h>
 #include <net/tquic.h>
 #include "../tquic_compat.h"
 #include "../tquic_debug.h"
+#include "../protocol.h"
 #include "stream.h"
 #include "flow_control.h"
 
@@ -1159,12 +1160,12 @@ static int tquic_stream_recv_chunk_insert(struct tquic_stream_manager *mgr,
 			if (chunk->offset != ext->recv_next)
 				break;
 
-				rb_erase(&chunk->node, &ext->recv_chunks);
-				ext->recv_chunks_count--;
-				if (chunk->skb) {
-					put_unaligned(chunk->offset, (u64 *)chunk->skb->cb);
-					skb_queue_tail(&stream->recv_buf, chunk->skb);
-				}
+			rb_erase(&chunk->node, &ext->recv_chunks);
+			ext->recv_chunks_count--;
+			if (chunk->skb) {
+				put_unaligned(chunk->offset, (u64 *)chunk->skb->cb);
+				skb_queue_tail(&stream->recv_buf, chunk->skb);
+			}
 			ext->recv_next += chunk->length;
 			ext->rcvbuf_used += chunk->length;
 			kmem_cache_free(mgr->chunk_cache, chunk);

@@ -149,7 +149,8 @@ struct tquic_pending_frame {
 	bool owns_data;		/* True if data was allocated and must be freed */
 };
 
-BUILD_BUG_ON(sizeof(struct tquic_stream_skb_cb) > sizeof(((struct sk_buff *)0)->cb));
+static_assert(sizeof(struct tquic_stream_skb_cb) <= sizeof(((struct sk_buff *)0)->cb),
+	      "tquic_stream_skb_cb must fit in skb->cb");
 
 /* Pacing state per path */
 struct tquic_pacing_state {
