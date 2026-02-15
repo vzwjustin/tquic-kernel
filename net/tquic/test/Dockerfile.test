@@ -1,0 +1,38 @@
+# TQUIC Testing Environment
+# Provides Linux environment for running TQUIC kernel module tests on macOS
+FROM ubuntu:22.04
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    linux-headers-generic \
+    kmod \
+    iproute2 \
+    iptables \
+    tcpdump \
+    net-tools \
+    bc \
+    curl \
+    git \
+    libssl-dev \
+    pkg-config \
+    conntrack \
+    ifstat \
+    gnuplot \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create working directory
+WORKDIR /tquic
+
+# Copy source code
+COPY . /tquic/
+
+# Build TQUIC module (will fail in container, but prepares environment)
+# Note: Kernel modules require matching kernel version,
+# so this is mainly for userspace test tools
+
+# Build test tools
+RUN cd /tquic/net/tquic/test/interop/tools && make || true
+
+# Set entrypoint
+CMD ["/bin/bash"]
