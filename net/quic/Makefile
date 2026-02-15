@@ -4,7 +4,7 @@
 #
 
 # Include paths for headers
-ccflags-y += -I$(src)/tquic/include -I$(src)/../../include -I$(src)/../.. -I$(src)/tquic/diag
+ccflags-y += -I$(src)/../../include -I$(src)/../.. -I$(src)/tquic/diag
 # Build net/quic as a consolidated module that pulls sources from net/tquic/.
 # This enables duplicate-symbol guards in shared sources (module init/exit,
 # ACK-frequency wrappers, scheduler shims, ECN helpers, etc.).
@@ -15,6 +15,9 @@ ccflags-y += -Wno-unused-function -Wno-unused-variable
 ccflags-y += -Wno-missing-prototypes
 ccflags-y += -Wno-error=unused-function -Wno-error=unused-variable
 ccflags-y += -Wno-error=missing-prototypes
+ccflags-y += -Wno-error=unused-but-set-variable
+ccflags-y += -Wno-error=unused-const-variable
+ccflags-y += -Wno-error=missing-include-dirs
 
 obj-$(CONFIG_IP_QUIC) += quic.o
 
