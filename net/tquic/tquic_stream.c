@@ -763,7 +763,6 @@ static int tquic_stream_release(struct socket *sock)
 		tquic_conn_put(conn);
 	}
 
-out:
 	sock->sk->sk_user_data = NULL;
 	kfree(ss);
 

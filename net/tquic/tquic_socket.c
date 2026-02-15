@@ -1426,9 +1426,9 @@ int tquic_sock_setsockopt(struct socket *sock, int level, int optname,
 				return -EISCONN;
 			}
 			tsk->cert_verify.verify_mode = val;
-		if (val == TQUIC_VERIFY_NONE)
-			tquic_warn(
-				"Certificate verification disabled for socket - INSECURE\n");
+			if (val == TQUIC_VERIFY_NONE)
+				tquic_warn(
+					"Certificate verification disabled for socket - INSECURE\n");
 			release_sock(sk);
 			if (conn)
 				tquic_conn_put(conn);

@@ -277,6 +277,10 @@ void tquic_handle_zero_rtt_response(struct sock *sk, bool accepted)
 		 */
 		tquic_early_data_reject(conn);
 	}
+
+out_put:
+	if (conn)
+		tquic_conn_put(conn);
 }
 EXPORT_SYMBOL_GPL(tquic_handle_zero_rtt_response);
 
@@ -1659,13 +1663,9 @@ static int tquic_conn_server_accept_init(struct tquic_connection *conn,
 				 */
 				tquic_dbg("Token validation failed: %d\n",
 					 token_ret);
+			}
 		}
 	}
-
-out_put:
-	if (conn)
-		tquic_conn_put(conn);
-}
 	offset += token_len;
 
 	/*
