@@ -201,11 +201,17 @@ EXPORT_SYMBOL_GPL(tquic_path_validation_timeout);
 int tquic_path_send_challenge(struct tquic_connection *conn,
 			       struct tquic_path *path)
 {
-	/* Generate new challenge data if not retrying */
-	if (path->validation.retries == 0) {
-		get_random_bytes(path->validation.challenge_data,
-				 sizeof(path->validation.challenge_data));
-	}
+	/*
+	 * BUG FIX: Do NOT generate challenge data here.
+	 * tquic_send_path_challenge() will generate it and store in
+	 * path->challenge_data. We must use that same data for validation.
+	 *
+	 * Previous bug: Generated random bytes in path->validation.challenge_data
+	 * here, then tquic_send_path_challenge() generated DIFFERENT random bytes
+	 * in path->challenge_data and sent those on the wire. PATH_RESPONSE
+	 * validation compared against path->validation.challenge_data, causing
+	 * 100% validation failure even when peer responded correctly.
+	 */
 
 	/* Record when challenge was sent */
 	path->validation.challenge_sent = ktime_get();
@@ -370,6 +376,10 @@ int tquic_path_handle_response(struct tquic_connection *conn,
 	}
 
 	/*
+	 * BUG FIX: Check against path->challenge_data (set by connection.c)
+	 * instead of path->validation.challenge_data (which is no longer used).
+	 * This matches the actual challenge bytes sent on the wire.
+	 *
 	 * SECURITY: Match response data against sent challenge using
 	 * constant-time comparison to prevent timing side-channel attacks.
 	 *
@@ -378,7 +388,7 @@ int tquic_path_handle_response(struct tquic_connection *conn,
 	 * early on mismatch. crypto_memneq() compares all 8 bytes regardless
 	 * of where mismatches occur.
 	 */
-	if (crypto_memneq(data, path->validation.challenge_data, 8) != 0) {
+	if (crypto_memneq(data, path->challenge_data, 8) != 0) {
 		spin_unlock_bh(&conn->paths_lock);
 		tquic_warn("PATH_RESPONSE mismatch on path %u\n",
 			   path->path_id);

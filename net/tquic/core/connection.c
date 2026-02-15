@@ -1722,17 +1722,29 @@ int tquic_send_path_challenge(struct tquic_connection *conn,
 
 	tquic_conn_dbg(conn, "sent PATH_CHALLENGE on path %u\n", path->path_id);
 
-	/* Build and transmit PATH_CHALLENGE frame */
+	/*
+	 * BUG FIX: Build SKB and transmit via tquic_udp_xmit_on_path()
+	 * instead of tquic_xmit(). Previous code passed NULL for path,
+	 * causing all PATH_CHALLENGE frames to go out the default/active path
+	 * instead of the specific path being validated, breaking multipath.
+	 */
 	{
 		u8 frame_buf[16];
 		int frame_len;
+		struct sk_buff *skb;
 
 		frame_len = tquic_write_path_challenge_frame(frame_buf,
 							     sizeof(frame_buf),
 							     challenge->data);
 		if (frame_len > 0) {
-			/* Transmit via the specific path */
-			tquic_xmit(conn, NULL, frame_buf, frame_len, false);
+			/* Allocate SKB with headroom */
+			skb = alloc_skb(frame_len + 64, GFP_ATOMIC);
+			if (skb) {
+				skb_reserve(skb, 64);
+				skb_put_data(skb, frame_buf, frame_len);
+				/* Transmit via the specific path */
+				tquic_udp_xmit_on_path(conn, path, skb);
+			}
 		}
 	}
 
@@ -1754,17 +1766,29 @@ int tquic_send_path_response(struct tquic_connection *conn,
 {
 	tquic_conn_dbg(conn, "sent PATH_RESPONSE on path %u\n", path->path_id);
 
-	/* Build and transmit PATH_RESPONSE frame */
+	/*
+	 * BUG FIX: Build SKB and transmit via tquic_udp_xmit_on_path()
+	 * instead of tquic_xmit(). Previous code passed NULL for path,
+	 * causing PATH_RESPONSE to go out the default path instead of
+	 * the same path the PATH_CHALLENGE arrived on.
+	 */
 	{
 		u8 frame_buf[16];
 		int frame_len;
+		struct sk_buff *skb;
 
 		frame_len = tquic_write_path_response_frame(frame_buf,
 							    sizeof(frame_buf),
 							    data);
 		if (frame_len > 0) {
-			/* Transmit via the same path the challenge arrived on */
-			tquic_xmit(conn, NULL, frame_buf, frame_len, false);
+			/* Allocate SKB with headroom */
+			skb = alloc_skb(frame_len + 64, GFP_ATOMIC);
+			if (skb) {
+				skb_reserve(skb, 64);
+				skb_put_data(skb, frame_buf, frame_len);
+				/* Transmit via the same path the challenge arrived on */
+				tquic_udp_xmit_on_path(conn, path, skb);
+			}
 		}
 	}
 
