@@ -118,6 +118,7 @@ struct tquic_udp_sock {
 	struct socket *sock;
 	struct tquic_path *path;
 	struct tquic_connection *conn;
+	bool conn_ref_held;
 
 	sa_family_t family;
 	union {
@@ -672,9 +673,8 @@ static bool tquic_lookup_listener_in_bucket(struct hlist_head *bucket,
  *   - Listener on 0.0.0.0:443 gets packets for any other IP on port 443
  *   - If both exist, specific IP listener wins
  *
- * Thread safety: Caller must hold RCU read lock.
- *
- * Returns: Matching listener socket, or NULL if not found
+ * Returns: Referenced listener socket, or NULL if not found
+ *          (caller must sock_put())
  */
 struct sock *tquic_lookup_listener(const struct sockaddr_storage *local_addr)
 {
@@ -690,6 +690,8 @@ struct sock *tquic_lookup_listener(const struct sockaddr_storage *local_addr)
 	 */
 	hash = tquic_listener_hash(local_addr);
 
+	rcu_read_lock();
+
 	/*
 	 * Search the bucket for the best matching listener.
 	 * Unlike TCP which does separate lookups for specific address and
@@ -698,6 +700,11 @@ struct sock *tquic_lookup_listener(const struct sockaddr_storage *local_addr)
 	 */
 	tquic_lookup_listener_in_bucket(&tquic_listeners[hash], local_addr,
 					NULL, &best_sk, &best_score);
+
+	if (best_sk && !refcount_inc_not_zero(&best_sk->sk_refcnt))
+		best_sk = NULL;
+
+	rcu_read_unlock();
 
 	return best_sk;
 }
@@ -711,7 +718,8 @@ EXPORT_SYMBOL_GPL(tquic_lookup_listener);
  * Like tquic_lookup_listener() but also matches network namespace.
  * Use this when you have the network namespace from the incoming socket.
  *
- * Returns: Matching listener socket, or NULL if not found
+ * Returns: Referenced listener socket, or NULL if not found
+ *          (caller must sock_put())
  */
 struct sock *tquic_lookup_listener_net(struct net *net,
 				       const struct sockaddr_storage *local_addr)
@@ -725,8 +733,15 @@ struct sock *tquic_lookup_listener_net(struct net *net,
 
 	hash = tquic_listener_hash(local_addr);
 
+	rcu_read_lock();
+
 	tquic_lookup_listener_in_bucket(&tquic_listeners[hash], local_addr,
 					net, &best_sk, &best_score);
+
+	if (best_sk && !refcount_inc_not_zero(&best_sk->sk_refcnt))
+		best_sk = NULL;
+
+	rcu_read_unlock();
 
 	return best_sk;
 }
@@ -833,6 +848,15 @@ static int tquic_udp_sock_create4(struct net *net,
 	/* Configure for tunnel operation */
 	setup_udp_tunnel_sock(net, us->sock, &tunnel_cfg);
 
+	/*
+	 * Bind socket to device if path has specific interface.
+	 * This ensures packets egress on the correct WAN interface
+	 * for multi-WAN bonding, even with policy routing or VPNs.
+	 */
+	if (us->path && us->path->ifindex > 0) {
+		us->sock->sk->sk_bound_dev_if = us->path->ifindex;
+	}
+
 	us->family = AF_INET;
 	us->local_port = local_port;
 	us->local_addr.sin.sin_family = AF_INET;
@@ -910,6 +934,15 @@ static int tquic_udp_sock_create6(struct net *net,
 	/* Configure for tunnel operation */
 	setup_udp_tunnel_sock(net, us->sock, &tunnel_cfg);
 
+	/*
+	 * Bind socket to device if path has specific interface.
+	 * This ensures packets egress on the correct WAN interface
+	 * for multi-WAN bonding, even with policy routing or VPNs.
+	 */
+	if (us->path && us->path->ifindex > 0) {
+		us->sock->sk->sk_bound_dev_if = us->path->ifindex;
+	}
+
 	us->family = AF_INET6;
 	us->local_port = local_port;
 	us->local_addr.sin6.sin6_family = AF_INET6;
@@ -948,6 +981,7 @@ static struct tquic_udp_sock *tquic_udp_sock_alloc(void)
 		return NULL;
 
 	refcount_set(&us->refcnt, 1);
+	us->conn_ref_held = false;
 	INIT_HLIST_NODE(&us->hash_node);
 	INIT_WORK(&us->cleanup_work, tquic_udp_sock_cleanup_work);
 
@@ -967,6 +1001,9 @@ static void tquic_udp_sock_cleanup_work(struct work_struct *work)
 		dst_cache_destroy(&us->dst_cache);
 		udp_tunnel_sock_release(us->sock);
 	}
+
+	if (us->conn_ref_held && us->conn)
+		tquic_conn_put(us->conn);
 
 	tquic_udp_free_port(us->local_port);
 	kfree(us);
@@ -1072,20 +1109,21 @@ EXPORT_SYMBOL_GPL(tquic_udp_connect);
 static int tquic_udp_encap_recv(struct sock *sk, struct sk_buff *skb)
 {
 	struct tquic_udp_sock *us;
-	struct tquic_connection *conn;
-	struct tquic_path *path;
+	struct tquic_connection *conn = NULL;
+	struct tquic_path *path = NULL;
 	struct udphdr *uh;
 	int ret;
 
+	rcu_read_lock();
 	/* Get our socket context */
 	us = rcu_dereference_sk_user_data(sk);
 	if (!us) {
+		rcu_read_unlock();
 		tquic_dbg("udp:no socket context\n");
 		goto drop;
 	}
-
-	conn = us->conn;
-	path = us->path;
+	tquic_udp_sock_hold(us);
+	rcu_read_unlock();
 
 	/*
 	 * SECURITY: Validate and skip UDP header.
@@ -1111,6 +1149,95 @@ static int tquic_udp_encap_recv(struct sock *sk, struct sk_buff *skb)
 	__skb_pull(skb, sizeof(struct udphdr));
 	skb_reset_transport_header(skb);
 
+	/*
+	 * Lookup connection by DCID. tquic_conn_lookup_by_cid() returns
+	 * a connection with an elevated refcount; always tquic_conn_put()
+	 * it once delivery completes.
+	 */
+	if (skb->len >= 1) {
+		struct tquic_cid dcid;
+
+		if (skb->data[0] & 0x80) {
+			/* Long header: version(4) + dcid_len(1) + dcid */
+			if (skb->len >= 6) {
+				u8 dcid_len = skb->data[5];
+
+				if (dcid_len <= TQUIC_MAX_CID_LEN &&
+				    skb->len >= 6 + dcid_len) {
+					dcid.len = dcid_len;
+					memcpy(dcid.id, skb->data + 6, dcid_len);
+					conn = tquic_conn_lookup_by_cid(&dcid);
+				}
+			}
+		} else {
+			/* Short header: dcid at byte 1 */
+			if (skb->len >= 1 + TQUIC_DEFAULT_CID_LEN) {
+				dcid.len = TQUIC_DEFAULT_CID_LEN;
+				memcpy(dcid.id, skb->data + 1,
+				       TQUIC_DEFAULT_CID_LEN);
+				conn = tquic_conn_lookup_by_cid(&dcid);
+			}
+		}
+	}
+
+	if (!conn)
+		goto drop;
+
+	/*
+	 * Best-effort match the receiving path by socket endpoints so the
+	 * upper layers can attribute stats and handle multipath correctly.
+	 */
+	rcu_read_lock();
+	{
+		struct tquic_path *p;
+
+		list_for_each_entry_rcu(p, &conn->paths, list) {
+			bool match = false;
+
+			if (us->family == AF_INET) {
+				const struct sockaddr_in *pl =
+					(const struct sockaddr_in *)&p->local_addr;
+				const struct sockaddr_in *pr =
+					(const struct sockaddr_in *)&p->remote_addr;
+
+				if (pl->sin_family == AF_INET &&
+				    pr->sin_family == AF_INET &&
+				    pl->sin_port == us->local_port &&
+				    pr->sin_port == us->remote_port &&
+				    pl->sin_addr.s_addr ==
+					    us->local_addr.sin.sin_addr.s_addr &&
+				    pr->sin_addr.s_addr ==
+					    us->remote_addr.sin.sin_addr.s_addr)
+					match = true;
+			}
+#if IS_ENABLED(CONFIG_IPV6)
+			else if (us->family == AF_INET6) {
+				const struct sockaddr_in6 *pl =
+					(const struct sockaddr_in6 *)&p->local_addr;
+				const struct sockaddr_in6 *pr =
+					(const struct sockaddr_in6 *)&p->remote_addr;
+
+				if (pl->sin6_family == AF_INET6 &&
+				    pr->sin6_family == AF_INET6 &&
+				    pl->sin6_port == us->local_port &&
+				    pr->sin6_port == us->remote_port &&
+				    ipv6_addr_equal(&pl->sin6_addr,
+						    &us->local_addr.sin6.sin6_addr) &&
+				    ipv6_addr_equal(&pr->sin6_addr,
+						    &us->remote_addr.sin6.sin6_addr))
+					match = true;
+			}
+#endif
+			if (!match)
+				continue;
+
+			if (tquic_path_get(p))
+				path = p;
+			break;
+		}
+	}
+	rcu_read_unlock();
+
 	/* Update statistics */
 	us->stats.rx_packets++;
 	us->stats.rx_bytes += skb->len;
@@ -1122,56 +1249,22 @@ static int tquic_udp_encap_recv(struct sock *sk, struct sk_buff *skb)
 		path->last_activity = ktime_get();
 	}
 
-	/* If this is a listening socket, find/create connection */
-	if (test_bit(TQUIC_UDSOCK_F_LISTENING, &us->flags)) {
-		/*
-		 * Lookup connection by QUIC connection ID.
-		 * Extract DCID from packet header and lookup in CID table.
-		 */
-		struct tquic_cid dcid;
-		struct tquic_connection *lookup_conn;
-
-		if (skb->len >= 1) {
-			if (skb->data[0] & 0x80) {
-				/* Long header: version(4) + dcid_len(1) + dcid */
-				if (skb->len >= 6) {
-					u8 dcid_len = skb->data[5];
-					if (dcid_len <= TQUIC_MAX_CID_LEN &&
-					    skb->len >= 6 + dcid_len) {
-						dcid.len = dcid_len;
-						memcpy(dcid.id, skb->data + 6,
-						       dcid_len);
-						lookup_conn = tquic_conn_lookup_by_cid(&dcid);
-						if (lookup_conn)
-							conn = lookup_conn;
-					}
-				}
-			} else {
-				/* Short header: dcid at byte 1 */
-				if (skb->len >= 1 + TQUIC_DEFAULT_CID_LEN) {
-					dcid.len = TQUIC_DEFAULT_CID_LEN;
-					memcpy(dcid.id, skb->data + 1,
-					       TQUIC_DEFAULT_CID_LEN);
-					lookup_conn = tquic_conn_lookup_by_cid(&dcid);
-					if (lookup_conn)
-						conn = lookup_conn;
-				}
-			}
-		}
-	}
-
 	/* Deliver to connection */
-	if (conn) {
-		ret = tquic_udp_deliver_to_conn(conn, path, skb);
-		if (ret == 0)
-			return 0;
-	}
+	ret = tquic_udp_deliver_to_conn(conn, path, skb);
+	if (path)
+		tquic_path_put(path);
+	tquic_conn_put(conn);
+	if (ret == 0)
+		goto out_put;
 
 	/* Fall through to drop if delivery failed */
 drop:
 	if (us)
 		us->stats.rx_errors++;
 	kfree_skb(skb);
+out_put:
+	if (us)
+		tquic_udp_sock_put(us);
 	return 0;
 }
 
@@ -1247,11 +1340,17 @@ int tquic_udp_deliver_to_conn(struct tquic_connection *conn,
 	}
 
 	/* Fallback: queue to default stream for basic functionality */
-	if (tsk->default_stream) {
-		memset(skb->cb, 0, sizeof(skb->cb));
-		skb_queue_tail(&tsk->default_stream->recv_buf, skb);
-		sk->sk_data_ready(sk);
-		return 0;
+	{
+		struct tquic_stream *stream;
+
+		stream = tquic_sock_default_stream_get(tsk);
+		if (stream) {
+			memset(skb->cb, 0, sizeof(skb->cb));
+			skb_queue_tail(&stream->recv_buf, skb);
+			sk->sk_data_ready(sk);
+			tquic_stream_put(stream);
+			return 0;
+		}
 	}
 
 	kfree_skb(skb);
@@ -1373,7 +1472,13 @@ static int tquic_udp_xmit_skb4(struct tquic_udp_sock *us, struct sk_buff *skb)
 	rt = dst_cache_get_ip4(&us->dst_cache, &saddr);
 	if (!rt) {
 		memset(&fl4, 0, sizeof(fl4));
-		fl4.flowi4_oif = 0;
+		/*
+		 * CRITICAL FIX: Use path's interface for routing.
+		 * This ensures packets egress on the correct WAN interface
+		 * for multi-WAN bonding, not just routed by source IP.
+		 */
+		fl4.flowi4_oif = (us->path && us->path->ifindex > 0) ?
+				 us->path->ifindex : 0;
 		fl4.flowi4_proto = IPPROTO_UDP;
 		fl4.daddr = daddr;
 		fl4.saddr = saddr;
@@ -1436,6 +1541,9 @@ static int tquic_udp_xmit_skb6(struct tquic_udp_sock *us, struct sk_buff *skb)
 	dst = dst_cache_get_ip6(&us->dst_cache, &us->local_addr.sin6.sin6_addr);
 	if (!dst) {
 		memset(&fl6, 0, sizeof(fl6));
+		/* Use path's interface for routing */
+		fl6.flowi6_oif = (us->path && us->path->ifindex > 0) ?
+				 us->path->ifindex : 0;
 		fl6.flowi6_proto = IPPROTO_UDP;
 		fl6.daddr = us->remote_addr.sin6.sin6_addr;
 		fl6.saddr = us->local_addr.sin6.sin6_addr;
@@ -1698,11 +1806,28 @@ int tquic_udp_create_path_socket(struct tquic_connection *conn,
 	/* Add to hash table */
 	tquic_udp_sock_hash_add(us);
 
-	/* Store in path structure
-	 * Note: The path->cong field is used here; ideally we'd add
-	 * a dedicated udp_sock field to tquic_path structure
+	/* Store in path structure */
+	path->udp_sock = us;
+
+	/*
+	 * CRITICAL FIX: Write allocated port back to path->local_addr
+	 *
+	 * When path->local_addr has port 0, tquic_udp_sock_create4/6()
+	 * allocates an ephemeral port and stores it in us->local_port.
+	 * We must write this back to path->local_addr so that RX path
+	 * attribution in tquic_udp_encap_recv() can correctly match
+	 * incoming packets to their path structure.
 	 */
-	path->cong = us;
+	if (path->local_addr.ss_family == AF_INET) {
+		struct sockaddr_in *sin = (struct sockaddr_in *)&path->local_addr;
+		sin->sin_port = us->local_port;
+	}
+#if IS_ENABLED(CONFIG_IPV6)
+	else if (path->local_addr.ss_family == AF_INET6) {
+		struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)&path->local_addr;
+		sin6->sin6_port = us->local_port;
+	}
+#endif
 
 	tquic_dbg("udp:created socket for path %u (port %u)\n",
 		 path->path_id, ntohs(us->local_port));
@@ -1722,9 +1847,9 @@ void tquic_udp_destroy_path_socket(struct tquic_path *path)
 	if (!path)
 		return;
 
-	us = path->cong;
+	us = path->udp_sock;
 	if (us) {
-		path->cong = NULL;
+		path->udp_sock = NULL;
 		tquic_udp_sock_put(us);
 	}
 }
@@ -1754,7 +1879,7 @@ int tquic_udp_xmit_on_path(struct tquic_connection *conn,
 		return -EINVAL;
 	}
 
-	us = path->cong;
+	us = path->udp_sock;
 	if (!us) {
 		/* Create socket on demand */
 		err = tquic_udp_create_path_socket(conn, path);
@@ -1762,7 +1887,7 @@ int tquic_udp_xmit_on_path(struct tquic_connection *conn,
 			kfree_skb(skb);
 			return err;
 		}
-		us = path->cong;
+		us = path->udp_sock;
 	}
 
 	/* Update path statistics */
@@ -1787,13 +1912,13 @@ int tquic_udp_encap_init(struct tquic_sock *tsk)
 	if (!tsk)
 		return -EINVAL;
 
-	conn = tsk->conn;
+	conn = tquic_sock_conn_get(tsk);
 	if (!conn)
 		return -EINVAL;
 
 	path = tquic_udp_active_path_get(conn);
 	if (!path)
-		return -EINVAL;
+		goto out_put;
 
 	/* Seed local address from bound socket if path hasn't been set yet. */
 	if (path->local_addr.ss_family == 0 &&
@@ -1806,11 +1931,11 @@ int tquic_udp_encap_init(struct tquic_sock *tsk)
 		path->remote_addr = tsk->connect_addr;
 
 	/* Create per-path UDP socket if missing. */
-	if (!path->cong) {
+	if (!path->udp_sock) {
 		err = tquic_udp_create_path_socket(conn, path);
 		if (err) {
 			tquic_path_put(path);
-			return err;
+			goto out_put;
 		}
 	}
 
@@ -1818,11 +1943,14 @@ int tquic_udp_encap_init(struct tquic_sock *tsk)
 	 * Expose the underlying socket for legacy paths that expect
 	 * tsk->udp_sock to be populated.
 	 */
-	if (!tsk->udp_sock && path->cong)
-		tsk->udp_sock = ((struct tquic_udp_sock *)path->cong)->sock;
+	if (!tsk->udp_sock && path->udp_sock)
+		tsk->udp_sock = path->udp_sock->sock;
 
 	tquic_path_put(path);
-	return 0;
+	err = 0;
+out_put:
+	tquic_conn_put(conn);
+	return err;
 }
 EXPORT_SYMBOL_GPL(tquic_udp_encap_init);
 
@@ -1839,7 +1967,7 @@ int tquic_udp_send(struct tquic_sock *tsk, struct sk_buff *skb,
 
 	/* This API always consumes @skb (success or error). */
 
-	conn = tsk->conn;
+	conn = tquic_sock_conn_get(tsk);
 	if (!conn) {
 		kfree_skb(skb);
 		return -EINVAL;
@@ -1859,6 +1987,7 @@ int tquic_udp_send(struct tquic_sock *tsk, struct sk_buff *skb,
 
 	ret = tquic_udp_xmit_on_path(conn, path, skb);
 	tquic_path_put(path);
+	tquic_conn_put(conn);
 
 	return ret;
 }
@@ -1881,6 +2010,7 @@ int tquic_udp_icsk_bind(struct sock *sk, struct sockaddr *uaddr, int addr_len)
 	struct tquic_sock *tsk = tquic_sk(sk);
 	struct tquic_udp_sock *us;
 	struct net *net = sock_net(sk);
+	struct tquic_connection *conn;
 	int err;
 
 	if (addr_len < sizeof(struct sockaddr_in))
@@ -1890,7 +2020,13 @@ int tquic_udp_icsk_bind(struct sock *sk, struct sockaddr *uaddr, int addr_len)
 	if (!us)
 		return -ENOMEM;
 
-	us->conn = tsk->conn;
+	conn = tquic_sock_conn_get(tsk);
+	if (!conn) {
+		kfree(us);
+		return -ENOTCONN;
+	}
+	us->conn = conn;
+	us->conn_ref_held = true;
 
 	if (uaddr->sa_family == AF_INET) {
 		struct sockaddr_in *sin = (struct sockaddr_in *)uaddr;
@@ -1898,6 +2034,7 @@ int tquic_udp_icsk_bind(struct sock *sk, struct sockaddr *uaddr, int addr_len)
 		err = tquic_udp_sock_create4(net, &sin->sin_addr,
 					     sin->sin_port, us);
 		if (err) {
+			tquic_conn_put(conn);
 			kfree(us);
 			return err;
 		}
@@ -1913,6 +2050,7 @@ int tquic_udp_icsk_bind(struct sock *sk, struct sockaddr *uaddr, int addr_len)
 		err = tquic_udp_sock_create6(net, &sin6->sin6_addr,
 					     sin6->sin6_port, us);
 		if (err) {
+			tquic_conn_put(conn);
 			kfree(us);
 			return err;
 		}
@@ -1922,6 +2060,7 @@ int tquic_udp_icsk_bind(struct sock *sk, struct sockaddr *uaddr, int addr_len)
 	}
 #endif
 	else {
+		tquic_conn_put(conn);
 		kfree(us);
 		return -EAFNOSUPPORT;
 	}
