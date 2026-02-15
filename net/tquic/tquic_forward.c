@@ -313,8 +313,10 @@ ssize_t tquic_forward_splice(struct tquic_tunnel *tunnel, int direction)
 				break;
 			}
 
-			total += sent;
-			consume_skb(skb);
+				total += sent;
+				if (stream->conn && stream->conn->sk)
+					sk_mem_uncharge(stream->conn->sk, skb->truesize);
+				consume_skb(skb);
 
 			/* Check for TCP socket congestion */
 			if (sk_stream_wspace(sk) < sk->sk_sndbuf / 4)
@@ -398,11 +400,14 @@ ssize_t tquic_forward_splice(struct tquic_tunnel *tunnel, int direction)
 			if (stream->conn)
 				spin_lock_bh(&stream->conn->lock);
 			spin_lock_bh(&stream->send_buf.lock);
-			*(u64 *)skb->cb = stream->send_offset;
+			tquic_stream_skb_cb(skb)->stream_offset = stream->send_offset;
+			tquic_stream_skb_cb(skb)->data_off = 0;
 			__skb_queue_tail(&stream->send_buf, skb);
 			stream->send_offset += err;
 			if (stream->conn)
 				stream->conn->fc_data_reserved += err;
+			if (stream->conn)
+				stream->conn->stats.tx_bytes += err;
 			spin_unlock_bh(&stream->send_buf.lock);
 			if (stream->conn)
 				spin_unlock_bh(&stream->conn->lock);
@@ -629,7 +634,6 @@ ssize_t tquic_forward_hairpin(struct tquic_tunnel *tunnel,
 	struct sk_buff_head tx_queue;
 	ssize_t total_bytes = 0;
 	u8 hop_count = 0;
-	int err;
 
 	if (!tunnel || !peer)
 		return -EINVAL;
@@ -676,26 +680,15 @@ ssize_t tquic_forward_hairpin(struct tquic_tunnel *tunnel,
 	 * For hairpin, we create a server-initiated bidirectional stream
 	 * on the peer connection. The stream ID encodes this per RFC 9000.
 	 */
-	spin_lock_bh(&peer_conn->lock);
-
-	/* Try to find existing stream for this tunnel's destination */
-	dst_stream = NULL;
-
-	/*
-	 * Create new bidirectional stream for reverse direction.
-	 * Stream ID is server-initiated (odd) bidirectional.
-	 */
-	if (!dst_stream) {
+		/*
+		 * Create a new bidirectional stream for the reverse direction.
+		 * tquic_stream_open() handles its own internal locking.
+		 */
 		dst_stream = tquic_stream_open(peer_conn, true);
-		if (IS_ERR(dst_stream)) {
-			spin_unlock_bh(&peer_conn->lock);
-			err = PTR_ERR(dst_stream);
-			tquic_dbg("hairpin stream creation failed: %d\n", err);
-			return err;
+		if (!dst_stream) {
+			tquic_dbg("hairpin stream creation failed\n");
+			return -ENOMEM;
 		}
-	}
-
-	spin_unlock_bh(&peer_conn->lock);
 
 	/*
 	 * Move data from source stream to destination stream.
@@ -770,27 +763,33 @@ ssize_t tquic_forward_hairpin(struct tquic_tunnel *tunnel,
 			spin_lock_bh(&dst_stream->conn->lock);
 		spin_lock_bh(&dst_stream->send_buf.lock);
 		skb_queue_walk_safe(&tx_queue, skb, skb_next) {
-			u32 skb_len;
+			u32 skb_len = skb->len;
+			struct sock *dst_sk = NULL;
 
 			__skb_unlink(skb, &tx_queue);
 
-			/* Charge memory to destination connection socket */
-			if (dst_stream->conn && dst_stream->conn->sk) {
-				struct sock *dst_sk = dst_stream->conn->sk;
+			if (dst_stream->conn)
+				dst_sk = dst_stream->conn->sk;
 
-				/*
-				 * Use skb_set_owner_w which handles both
-				 * memory accounting and refcount properly
-				 * for all kernel versions.
-				 */
-				skb_set_owner_w(skb, dst_sk);
+			/* Charge memory to destination connection socket */
+			if (dst_sk) {
+				if (sk_wmem_schedule(dst_sk, skb->truesize)) {
+					skb_set_owner_w(skb, dst_sk);
+				} else {
+					kfree_skb(skb);
+					continue;
+				}
 			}
 
-			skb_len = skb->len;
-			*(u64 *)skb->cb = dst_stream->send_offset;
+			/* Initialize stream send bookkeeping for output_flush(). */
+			tquic_stream_skb_cb(skb)->stream_offset = dst_stream->send_offset;
+			tquic_stream_skb_cb(skb)->data_off = 0;
 			dst_stream->send_offset += skb_len;
-			if (dst_stream->conn)
+
+			if (dst_stream->conn) {
 				dst_stream->conn->fc_data_reserved += skb_len;
+				dst_stream->conn->stats.tx_bytes += skb_len;
+			}
 
 			__skb_queue_tail(&dst_stream->send_buf, skb);
 		}
@@ -1277,6 +1276,7 @@ int tquic_forward_signal_mtu(struct tquic_tunnel *tunnel, u32 new_mtu)
 {
 	struct tquic_mtu_signal_frame frame;
 	struct tquic_stream *stream;
+	struct tquic_connection *conn;
 	struct sk_buff *skb;
 	int err;
 
@@ -1296,12 +1296,18 @@ int tquic_forward_signal_mtu(struct tquic_tunnel *tunnel, u32 new_mtu)
 
 	/* Get QUIC stream for signaling */
 	stream = tunnel->quic_stream;
-	if (!stream || !stream->conn)
+	if (!stream)
 		return -ENOTCONN;
 
 	/* Check connection state */
-	if (READ_ONCE(stream->conn->state) != TQUIC_CONN_CONNECTED)
+	conn = READ_ONCE(stream->conn);
+	if (!conn || !tquic_conn_get(conn))
 		return -ENOTCONN;
+
+	if (READ_ONCE(conn->state) != TQUIC_CONN_CONNECTED) {
+		tquic_conn_put(conn);
+		return -ENOTCONN;
+	}
 
 	/*
 	 * Build MTU signal frame.
@@ -1316,8 +1322,10 @@ int tquic_forward_signal_mtu(struct tquic_tunnel *tunnel, u32 new_mtu)
 
 	/* Allocate skb for the frame */
 	skb = alloc_skb(sizeof(frame) + 64, GFP_ATOMIC);
-	if (!skb)
+	if (!skb) {
+		tquic_conn_put(conn);
 		return -ENOMEM;
+	}
 
 	skb_reserve(skb, 32);  /* Room for headers */
 	skb_put_data(skb, &frame, sizeof(frame));
@@ -1328,17 +1336,16 @@ int tquic_forward_signal_mtu(struct tquic_tunnel *tunnel, u32 new_mtu)
 	 * The frame will be sent with the next outgoing packet.
 	 * MTU signals are high priority to prevent further oversized sends.
 	 */
-	if (stream->conn)
-		spin_lock_bh(&stream->conn->lock);
+	spin_lock_bh(&conn->lock);
 	spin_lock_bh(&stream->send_buf.lock);
-	*(u64 *)skb->cb = stream->send_offset;
+	tquic_stream_skb_cb(skb)->stream_offset = stream->send_offset;
+	tquic_stream_skb_cb(skb)->data_off = 0;
 	__skb_queue_head(&stream->send_buf, skb);  /* High priority - head of queue */
 	stream->send_offset += sizeof(frame);
-	if (stream->conn)
-		stream->conn->fc_data_reserved += sizeof(frame);
+	conn->fc_data_reserved += sizeof(frame);
 	spin_unlock_bh(&stream->send_buf.lock);
-	if (stream->conn)
-		spin_unlock_bh(&stream->conn->lock);
+	spin_unlock_bh(&conn->lock);
+	tquic_conn_put(conn);
 
 	/* Wake stream to trigger transmission */
 	tquic_stream_wake(stream);

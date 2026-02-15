@@ -213,6 +213,7 @@ tquic_path_create_internal(struct tquic_connection *conn,
 	path = kmem_cache_zalloc(tquic_path_cache, GFP_KERNEL);
 	if (!path)
 		return NULL;
+	spin_lock_init(&path->loss_tracker.lock);
 
 	/* RFC 9000 §8.1: New paths are unvalidated, enforce anti-amplification */
 	path->anti_amplification.active = true;
@@ -333,6 +334,10 @@ void tquic_path_destroy(struct tquic_path *path)
 
 	/* Flush response queue */
 	skb_queue_purge(&path->response.queue);
+
+	/* Release per-path UDP socket if still attached. */
+	if (path->udp_sock)
+		tquic_udp_destroy_path_socket(path);
 
 	/* Release congestion control state */
 	if (path->cong && path->cong_ops && path->cong_ops->release)

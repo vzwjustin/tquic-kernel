@@ -1055,7 +1055,7 @@ EXPORT_SYMBOL(tquic_retransmit);
 int tquic_do_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 {
 	struct tquic_sock *tsk = tquic_sk(sk);
-	struct tquic_connection *conn = tsk->conn;
+	struct tquic_connection *conn;
 	struct tquic_stream *stream = NULL;
 	struct tquic_stream_info sinfo;
 	struct cmsghdr *cmsg;
@@ -1066,20 +1066,24 @@ int tquic_do_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 	size_t sent = 0;
 	int err;
 
-	if (!conn || READ_ONCE(conn->state) != TQUIC_STATE_CONNECTED)
+	conn = tquic_sock_conn_get(tsk);
+	if (!conn || READ_ONCE(conn->state) != TQUIC_STATE_CONNECTED) {
+		if (conn)
+			tquic_conn_put(conn);
 		return -ENOTCONN;
+	}
 
 	/* Parse control message for stream info */
 	for_each_cmsghdr(cmsg, msg) {
 		if (!CMSG_OK(msg, cmsg))
-			return -EINVAL;
+			goto out_put_conn_einval;
 
 		if (cmsg->cmsg_level != SOL_TQUIC)
 			continue;
 
 		if (cmsg->cmsg_type == TQUIC_STREAM_ID) {
 			if (cmsg->cmsg_len < CMSG_LEN(sizeof(sinfo)))
-				return -EINVAL;
+				goto out_put_conn_einval;
 			memcpy(&sinfo, CMSG_DATA(cmsg), sizeof(sinfo));
 			stream_id = sinfo.stream_id;
 			flags = sinfo.stream_flags;
@@ -1089,12 +1093,15 @@ int tquic_do_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 	/* Find or create stream */
 	if (flags & TQUIC_CMSG_FLAG_NEW) {
 		stream = tquic_stream_open(conn, !(flags & TQUIC_CMSG_FLAG_UNI));
-		if (!stream)
-			return -ENOMEM;
+		if (!stream) {
+			err = -ENOMEM;
+			goto out_put_conn;
+		}
 		stream_id = stream->id;
 	} else {
 		/* Look up existing stream - simplified for this conversion */
-		return -ENOENT;
+		err = -ENOENT;
+		goto out_put_conn;
 	}
 
 	/* Send data in MTU-sized chunks */
@@ -1122,12 +1129,13 @@ int tquic_do_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 				   mtu - 100);
 
 		/* Allocate and build STREAM frame */
-		skb = tquic_alloc_tx_skb(conn, chunk_size + 32);
-		if (!skb) {
-			if (sent > 0)
-				break;
-			return -ENOMEM;
-		}
+			skb = tquic_alloc_tx_skb(conn, chunk_size + 32);
+			if (!skb) {
+				if (sent > 0)
+					break;
+				err = -ENOMEM;
+				goto out_put_conn;
+			}
 
 		/* Build STREAM frame header */
 		data = skb_put(skb, 1);
@@ -1199,6 +1207,13 @@ int tquic_do_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 	err = sent;
 
 out_put_stream:
+	tquic_conn_put(conn);
+	return err;
+
+out_put_conn_einval:
+	err = -EINVAL;
+out_put_conn:
+	tquic_conn_put(conn);
 	return err;
 }
 EXPORT_SYMBOL(tquic_do_sendmsg);

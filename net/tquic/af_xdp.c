@@ -842,26 +842,31 @@ EXPORT_SYMBOL_GPL(tquic_xdp_get_stats);
 int tquic_xsk_attach(struct sock *sk, struct tquic_xsk *xsk)
 {
 	struct tquic_sock *tsk;
+	struct tquic_connection *conn;
 
 	if (!sk || !xsk)
 		return -EINVAL;
 
 	tsk = tquic_sk(sk);
-	if (!tsk->conn)
-		return -ENOTCONN;
-
 	lock_sock(sk);
 
+	conn = tquic_sock_conn_get(tsk);
+	if (!conn) {
+		release_sock(sk);
+		return -ENOTCONN;
+	}
+
 	/* Release any previously attached XSK */
-	if (tsk->conn->xsk)
-		tquic_xsk_put(tsk->conn->xsk);
+	if (conn->xsk)
+		tquic_xsk_put(conn->xsk);
 
 	/* Store XSK reference in connection */
 	tquic_xsk_get(xsk);
-	xsk->conn = tsk->conn;
-	tsk->conn->xsk = xsk;
+	xsk->conn = conn;
+	conn->xsk = xsk;
 
 	release_sock(sk);
+	tquic_conn_put(conn);
 
 	tquic_dbg("xdp: attached XSK to TQUIC socket\n");
 
@@ -872,30 +877,35 @@ EXPORT_SYMBOL_GPL(tquic_xsk_attach);
 void tquic_xsk_detach(struct sock *sk)
 {
 	struct tquic_sock *tsk;
+	struct tquic_connection *conn;
 	struct tquic_xsk *xsk;
 
 	if (!sk)
 		return;
 
 	tsk = tquic_sk(sk);
-	if (!tsk->conn)
-		return;
-
 	lock_sock(sk);
+
+	conn = tquic_sock_conn_get(tsk);
+	if (!conn) {
+		release_sock(sk);
+		return;
+	}
 
 	/*
 	 * Retrieve and release XSK reference from connection.
 	 * The XSK stores a back-pointer to conn; use it to find
 	 * and release the matching XSK.
 	 */
-	xsk = tsk->conn->xsk;
+	xsk = conn->xsk;
 	if (xsk) {
 		xsk->conn = NULL;
-		tsk->conn->xsk = NULL;
+		conn->xsk = NULL;
 		tquic_xsk_put(xsk);
 	}
 
 	release_sock(sk);
+	tquic_conn_put(conn);
 
 	tquic_dbg("xdp: detached XSK from TQUIC socket\n");
 }

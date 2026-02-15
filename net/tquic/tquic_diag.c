@@ -69,7 +69,7 @@ struct tquic_diag_ctx {
 
 /*
  * Helper to count streams in the connection's rb-tree.
- * Caller must hold conn->streams_lock.
+ * Caller must hold conn->lock (stream tree lock per protocol.h).
  */
 static u32 tquic_count_streams_locked(struct tquic_connection *conn)
 {
@@ -86,8 +86,7 @@ static u32 tquic_count_streams_locked(struct tquic_connection *conn)
 }
 
 /*
- * Wrapper that acquires streams_lock before counting streams.
- * The streams rb-tree is protected by conn->streams_lock, not conn->lock.
+ * Wrapper that acquires conn->lock before counting streams.
  */
 static u32 tquic_count_streams(struct tquic_connection *conn)
 {
@@ -96,9 +95,9 @@ static u32 tquic_count_streams(struct tquic_connection *conn)
 	if (!conn)
 		return 0;
 
-	spin_lock_bh(&conn->streams_lock);
+	spin_lock_bh(&conn->lock);
 	count = tquic_count_streams_locked(conn);
-	spin_unlock_bh(&conn->streams_lock);
+	spin_unlock_bh(&conn->lock);
 
 	return count;
 }
@@ -309,7 +308,7 @@ static void tquic_diag_get_info(struct sock *sk, struct inet_diag_msg *r,
 
 	memset(info, 0, sizeof(*info));
 
-	conn = tsk->conn;
+	conn = tquic_sock_conn_get(tsk);
 	if (!conn)
 		return;
 
@@ -334,6 +333,8 @@ static void tquic_diag_get_info(struct sock *sk, struct inet_diag_msg *r,
 	info->bytes_sent = conn->stats.tx_bytes;
 	info->bytes_received = conn->stats.rx_bytes;
 	info->packets_lost = conn->stats.retransmissions;
+
+	tquic_conn_put(conn);
 }
 
 /*
@@ -345,7 +346,7 @@ static void tquic_diag_get_info(struct sock *sk, struct inet_diag_msg *r,
 static size_t __maybe_unused tquic_diag_get_aux_size(struct sock *sk, bool net_admin)
 {
 	struct tquic_sock *tsk = tquic_sk(sk);
-	struct tquic_connection *conn = tsk->conn;
+	struct tquic_connection *conn = tquic_sock_conn_get(tsk);
 	size_t size = 0;
 	u32 num_paths;
 
@@ -388,6 +389,7 @@ static size_t __maybe_unused tquic_diag_get_aux_size(struct sock *sk, bool net_a
 		);
 	}
 
+	tquic_conn_put(conn);
 	return size;
 }
 
@@ -407,7 +409,7 @@ static int tquic_diag_get_aux(struct sock *sk, bool net_admin,
 			      struct sk_buff *skb)
 {
 	struct tquic_sock *tsk = tquic_sk(sk);
-	struct tquic_connection *conn = tsk->conn;
+	struct tquic_connection *conn = tquic_sock_conn_get(tsk);
 	struct tquic_path *path;
 	struct nlattr *paths_nest;
 	u32 stream_count;
@@ -428,11 +430,13 @@ static int tquic_diag_get_aux(struct sock *sk, bool net_admin,
 	/* QUIC version */
 	if (nla_put_u32(skb, TQUIC_DIAG_ATTR_VERSION, conn->version)) {
 		spin_unlock_bh(&conn->lock);
+		tquic_conn_put(conn);
 		return -EMSGSIZE;
 	}
 
 	if (nla_put_u32(skb, TQUIC_DIAG_ATTR_STREAMS, stream_count)) {
 		spin_unlock_bh(&conn->lock);
+		tquic_conn_put(conn);
 		return -EMSGSIZE;
 	}
 
@@ -447,6 +451,7 @@ static int tquic_diag_get_aux(struct sock *sk, bool net_admin,
 			if (nla_put(skb, TQUIC_DIAG_ATTR_SCID,
 				    conn->scid.len, conn->scid.id)) {
 				spin_unlock_bh(&conn->lock);
+				tquic_conn_put(conn);
 				return -EMSGSIZE;
 			}
 		}
@@ -456,6 +461,7 @@ static int tquic_diag_get_aux(struct sock *sk, bool net_admin,
 			if (nla_put(skb, TQUIC_DIAG_ATTR_DCID,
 				    conn->dcid.len, conn->dcid.id)) {
 				spin_unlock_bh(&conn->lock);
+				tquic_conn_put(conn);
 				return -EMSGSIZE;
 			}
 		}
@@ -466,6 +472,7 @@ static int tquic_diag_get_aux(struct sock *sk, bool net_admin,
 		paths_nest = nla_nest_start(skb, TQUIC_DIAG_ATTR_PATHS);
 		if (!paths_nest) {
 			spin_unlock_bh(&conn->lock);
+			tquic_conn_put(conn);
 			return -EMSGSIZE;
 		}
 
@@ -476,6 +483,7 @@ static int tquic_diag_get_aux(struct sock *sk, bool net_admin,
 			if (!path_nest) {
 				nla_nest_cancel(skb, paths_nest);
 				spin_unlock_bh(&conn->lock);
+				tquic_conn_put(conn);
 				return -EMSGSIZE;
 			}
 
@@ -509,12 +517,14 @@ path_error:
 			nla_nest_cancel(skb, path_nest);
 			nla_nest_cancel(skb, paths_nest);
 			spin_unlock_bh(&conn->lock);
+			tquic_conn_put(conn);
 			return -EMSGSIZE;
 		}
 
 		nla_nest_end(skb, paths_nest);
 	}
 	spin_unlock_bh(&conn->lock);
+	tquic_conn_put(conn);
 
 	return 0;
 }

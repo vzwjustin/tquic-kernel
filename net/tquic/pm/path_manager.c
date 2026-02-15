@@ -63,6 +63,9 @@ struct tquic_path_probe {
 extern const char *tquic_path_state_names[];
 
 /* Forward declarations */
+static int __tquic_pm_discover_addresses_locked(struct tquic_connection *conn,
+						struct sockaddr_storage *addrs,
+						int max_addrs);
 int tquic_pm_discover_addresses(struct tquic_connection *conn,
 				struct sockaddr_storage *addrs, int max_addrs);
 
@@ -368,7 +371,7 @@ static int tquic_pm_netdev_event(struct notifier_block *nb, unsigned long event,
 			}
 			rcu_read_unlock();
 
-			num_addrs = tquic_pm_discover_addresses(
+			num_addrs = __tquic_pm_discover_addresses_locked(
 				pm->conn, addrs, TQUIC_MAX_PATHS);
 			for (i = 0; i < num_addrs; i++) {
 				/* Try to add path if remote addr is known */
@@ -446,10 +449,12 @@ static int tquic_pm_netdev_event(struct notifier_block *nb, unsigned long event,
 }
 
 /*
- * Discover available local addresses for path creation
+ * Discover available local addresses for path creation (locked version)
+ * Caller must hold RTNL lock.
  */
-int tquic_pm_discover_addresses(struct tquic_connection *conn,
-				struct sockaddr_storage *addrs, int max_addrs)
+static int __tquic_pm_discover_addresses_locked(struct tquic_connection *conn,
+						struct sockaddr_storage *addrs,
+						int max_addrs)
 {
 	struct net_device *dev;
 	struct in_device *in_dev;
@@ -457,10 +462,10 @@ int tquic_pm_discover_addresses(struct tquic_connection *conn,
 	struct net *net;
 	int count = 0;
 
+	ASSERT_RTNL();
+
 	/* CF-103: Use connection's namespace instead of init_net */
 	net = (conn && conn->sk) ? sock_net(conn->sk) : current->nsproxy->net_ns;
-
-	rtnl_lock();
 
 	for_each_netdev(net, dev) {
 		/* Skip loopback and down interfaces */
@@ -520,10 +525,23 @@ int tquic_pm_discover_addresses(struct tquic_connection *conn,
 #endif
 	}
 
-	rtnl_unlock();
-
 	pr_debug("tquic_pm: discovered %d local addresses\n", count);
 	return count;
+}
+
+/*
+ * Discover available local addresses for path creation
+ */
+int tquic_pm_discover_addresses(struct tquic_connection *conn,
+				struct sockaddr_storage *addrs, int max_addrs)
+{
+	int ret;
+
+	rtnl_lock();
+	ret = __tquic_pm_discover_addresses_locked(conn, addrs, max_addrs);
+	rtnl_unlock();
+
+	return ret;
 }
 EXPORT_SYMBOL_GPL(tquic_pm_discover_addresses);
 
@@ -869,11 +887,12 @@ static struct tquic_path *tquic_path_alloc(struct tquic_connection *conn,
 {
 	struct tquic_path *path;
 
-	path = kzalloc(sizeof(*path), GFP_KERNEL);
+	path = kmem_cache_zalloc(tquic_path_cache, GFP_KERNEL);
 	if (!path)
 		return NULL;
 
 	/* CF-477: Use per-connection counter instead of global static */
+	refcount_set(&path->refcnt, 1);
 	path->conn = conn;
 	path->path_id = 0;
 	path->state = TQUIC_PATH_UNUSED;
@@ -1078,7 +1097,7 @@ int tquic_conn_add_path_safe(struct tquic_connection *conn,
 #endif
 		if (path->dev)
 			dev_put(path->dev);
-		kfree(path);
+		kmem_cache_free(tquic_path_cache, path);
 		return -ENOSPC;
 	}
 
@@ -1103,7 +1122,7 @@ int tquic_conn_add_path_safe(struct tquic_connection *conn,
 #endif
 		if (path->dev)
 			dev_put(path->dev);
-		kfree(path);
+		kmem_cache_free(tquic_path_cache, path);
 		return path_id;
 	}
 	path->path_id = path_id;

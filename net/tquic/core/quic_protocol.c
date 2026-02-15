@@ -197,10 +197,10 @@ static bool __maybe_unused tquic_percpu_initialized __read_mostly;
 
 /* Forward declarations for proto_ops callbacks */
 static int tquic_stream_release(struct socket *sock);
-static int tquic_stream_bind(struct socket *sock, TQUIC_SOCKADDR *addr,
-			     int addr_len);
-static int tquic_stream_connect(struct socket *sock, TQUIC_SOCKADDR *addr,
-				int addr_len, int flags);
+static int tquic_stream_bind(struct socket *sock, tquic_sockaddr_t *addr,
+				     int addr_len);
+static int tquic_stream_connect(struct socket *sock, tquic_sockaddr_t *addr,
+					int addr_len, int flags);
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 7, 0)
 static int tquic_stream_accept(struct socket *sock, struct socket *newsock,
 			       struct proto_accept_arg *arg);
@@ -227,10 +227,10 @@ static int tquic_stream_recvmsg(struct socket *sock, struct msghdr *msg,
 
 /* Forward declarations for proto callbacks */
 static void tquic_proto_close(struct sock *sk, long timeout);
-static int tquic_proto_pre_connect(struct sock *sk, TQUIC_SOCKADDR *addr,
-				   int addr_len);
-static int tquic_proto_connect(struct sock *sk, TQUIC_SOCKADDR *addr,
-			       int addr_len);
+static int tquic_proto_pre_connect(struct sock *sk, tquic_sockaddr_t *addr,
+					   int addr_len);
+static int tquic_proto_connect(struct sock *sk, tquic_sockaddr_t *addr,
+				       int addr_len);
 static int tquic_proto_disconnect(struct sock *sk, int flags);
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 7, 0)
 static struct sock *tquic_proto_accept(struct sock *sk,
@@ -250,8 +250,8 @@ static int tquic_proto_getsockopt(struct sock *sk, int level, int optname,
 static int tquic_proto_sendmsg(struct sock *sk, struct msghdr *msg, size_t len);
 static int tquic_proto_recvmsg(struct sock *sk, struct msghdr *msg, size_t len,
 			       int flags, int *addr_len);
-static int tquic_proto_bind(struct sock *sk, TQUIC_SOCKADDR *addr,
-			    int addr_len);
+static int tquic_proto_bind(struct sock *sk, tquic_sockaddr_t *addr,
+				    int addr_len);
 static int tquic_proto_backlog_rcv(struct sock *sk, struct sk_buff *skb);
 static void tquic_proto_release_cb(struct sock *sk);
 static int tquic_proto_hash(struct sock *sk);
@@ -392,10 +392,11 @@ static struct proto tquicv6_prot = {
 static void tquic_proto_close(struct sock *sk, long timeout)
 {
 	struct tquic_sock *tsk = tquic_sk(sk);
-	struct tquic_connection *conn = tsk->conn;
+	struct tquic_connection *conn;
 
 	lock_sock(sk);
 
+	conn = tquic_sock_conn_get(tsk);
 	if (conn && READ_ONCE(conn->state) != TQUIC_CONN_CLOSED) {
 		tquic_conn_close_with_error(conn, EQUIC_NO_ERROR, NULL);
 		if (READ_ONCE(conn->state) == TQUIC_CONN_CONNECTED ||
@@ -407,14 +408,16 @@ static void tquic_proto_close(struct sock *sk, long timeout)
 			/* 3 * smoothed_rtt draining period per RFC 9000 */
 		}
 	}
+	if (conn)
+		tquic_conn_put(conn);
 
 	sk->sk_shutdown = SHUTDOWN_MASK;
 	sk_common_release(sk);
 	release_sock(sk);
 }
 
-static int tquic_proto_pre_connect(struct sock *sk, TQUIC_SOCKADDR *uaddr,
-				   int addr_len)
+static int tquic_proto_pre_connect(struct sock *sk, tquic_sockaddr_t *uaddr,
+					   int addr_len)
 {
 	struct sockaddr *addr = (struct sockaddr *)uaddr;
 	if (addr->sa_family != AF_INET && addr->sa_family != AF_INET6)
@@ -423,8 +426,8 @@ static int tquic_proto_pre_connect(struct sock *sk, TQUIC_SOCKADDR *uaddr,
 	return 0;
 }
 
-static int tquic_proto_connect(struct sock *sk, TQUIC_SOCKADDR *uaddr,
-			       int addr_len)
+static int tquic_proto_connect(struct sock *sk, tquic_sockaddr_t *uaddr,
+				       int addr_len)
 {
 	struct sockaddr *addr = (struct sockaddr *)uaddr;
 	struct tquic_sock *tsk = tquic_sk(sk);
@@ -433,10 +436,13 @@ static int tquic_proto_connect(struct sock *sk, TQUIC_SOCKADDR *uaddr,
 
 	lock_sock(sk);
 
+	read_lock_bh(&sk->sk_callback_lock);
 	if (tsk->conn) {
+		read_unlock_bh(&sk->sk_callback_lock);
 		err = -EISCONN;
 		goto out;
 	}
+	read_unlock_bh(&sk->sk_callback_lock);
 
 	conn = tquic_conn_create(tsk, false);
 	if (!conn) {
@@ -447,11 +453,12 @@ static int tquic_proto_connect(struct sock *sk, TQUIC_SOCKADDR *uaddr,
 	err = tquic_conn_client_connect(conn, addr);
 	if (err) {
 		tquic_conn_put(conn);
-		tsk->conn = NULL;
 		goto out;
 	}
 
+	write_lock_bh(&sk->sk_callback_lock);
 	tsk->conn = conn;
+	write_unlock_bh(&sk->sk_callback_lock);
 	sk->sk_state = TCP_SYN_SENT;
 	err = 0;
 
@@ -463,13 +470,22 @@ out:
 static int tquic_proto_disconnect(struct sock *sk, int flags)
 {
 	struct tquic_sock *tsk = tquic_sk(sk);
-	struct tquic_connection *conn = tsk->conn;
+	struct tquic_connection *conn;
+	struct tquic_stream *dstream;
 
-	if (conn) {
+	write_lock_bh(&sk->sk_callback_lock);
+	conn = tsk->conn;
+	dstream = tsk->default_stream;
+	tsk->conn = NULL;
+	tsk->default_stream = NULL;
+	write_unlock_bh(&sk->sk_callback_lock);
+
+	if (dstream)
+		tquic_stream_put(dstream);
+	if (conn)
 		tquic_conn_close_with_error(conn, EQUIC_NO_ERROR, NULL);
+	if (conn)
 		tquic_conn_put(conn);
-		tsk->conn = NULL;
-	}
 
 	sk->sk_state = TCP_CLOSE;
 	return 0;
@@ -598,8 +614,10 @@ static struct sock *tquic_proto_accept(struct sock *sk,
 static int tquic_proto_ioctl(struct sock *sk, int cmd, int *karg)
 {
 	struct tquic_sock *tsk = tquic_sk(sk);
-	struct tquic_connection *conn = tsk->conn;
+	struct tquic_connection *conn;
+	int ret = 0;
 
+	conn = tquic_sock_conn_get(tsk);
 	switch (cmd) {
 	case SIOCOUTQ:
 		if (conn) {
@@ -614,22 +632,31 @@ static int tquic_proto_ioctl(struct sock *sk, int cmd, int *karg)
 		} else {
 			*karg = 0;
 		}
-		return 0;
+		ret = 0;
+		break;
 
 	case SIOCINQ:
 		*karg = sk_rmem_alloc_get(sk);
-		return 0;
+		ret = 0;
+		break;
 
 	default:
-		return -ENOIOCTLCMD;
+		ret = -ENOIOCTLCMD;
+		break;
 	}
+
+	if (conn)
+		tquic_conn_put(conn);
+	return ret;
 }
 
 static int tquic_proto_init_sock(struct sock *sk)
 {
 	struct tquic_sock *tsk = tquic_sk(sk);
 
+	write_lock_bh(&sk->sk_callback_lock);
 	tsk->conn = NULL;
+	write_unlock_bh(&sk->sk_callback_lock);
 
 	/* Initialize default socket state */
 	memset(&tsk->bind_addr, 0, sizeof(tsk->bind_addr));
@@ -686,11 +713,20 @@ static int tquic_proto_init_sock(struct sock *sk)
 static void tquic_proto_destroy_sock(struct sock *sk)
 {
 	struct tquic_sock *tsk = tquic_sk(sk);
+	struct tquic_connection *conn;
+	struct tquic_stream *dstream;
 
-	if (tsk->conn) {
-		tquic_conn_put(tsk->conn);
-		tsk->conn = NULL;
-	}
+	write_lock_bh(&sk->sk_callback_lock);
+	conn = tsk->conn;
+	dstream = tsk->default_stream;
+	tsk->conn = NULL;
+	tsk->default_stream = NULL;
+	write_unlock_bh(&sk->sk_callback_lock);
+
+	if (dstream)
+		tquic_stream_put(dstream);
+	if (conn)
+		tquic_conn_put(conn);
 
 	/* Clean up any remaining accept queue entries */
 	/* (would need to close child connections) */
@@ -699,26 +735,31 @@ static void tquic_proto_destroy_sock(struct sock *sk)
 static void tquic_proto_shutdown(struct sock *sk, int how)
 {
 	struct tquic_sock *tsk = tquic_sk(sk);
-	struct tquic_connection *conn = tsk->conn;
+	struct tquic_connection *conn;
 
+	conn = tquic_sock_conn_get(tsk);
 	if (!conn)
 		return;
 
 	if ((how & SEND_SHUTDOWN) && READ_ONCE(conn->state) == TQUIC_CONN_CONNECTED) {
 		tquic_conn_close_with_error(conn, EQUIC_NO_ERROR, NULL);
 	}
+
+	tquic_conn_put(conn);
 }
 
 static int tquic_proto_setsockopt(struct sock *sk, int level, int optname,
 				  sockptr_t optval, unsigned int optlen)
 {
 	struct tquic_sock *tsk = tquic_sk(sk);
+	struct tquic_connection *conn;
 	int val, err = 0;
 
 	if (level != SOL_TQUIC)
 		return -ENOPROTOOPT;
 
 	lock_sock(sk);
+	conn = tquic_sock_conn_get(tsk);
 
 	switch (optname) {
 	case TQUIC_NODELAY:
@@ -738,7 +779,7 @@ static int tquic_proto_setsockopt(struct sock *sk, int level, int optname,
 			err = -EINVAL;
 			break;
 		}
-		if (tsk->conn) {
+		if (conn) {
 			/* Cannot change CC after connection established */
 			err = -EISCONN;
 			break;
@@ -755,7 +796,7 @@ static int tquic_proto_setsockopt(struct sock *sk, int level, int optname,
 			err = -EINVAL;
 			break;
 		}
-		if (tsk->conn) {
+		if (conn) {
 			/* Cannot change scheduler after connection established */
 			err = -EISCONN;
 			break;
@@ -788,8 +829,8 @@ static int tquic_proto_setsockopt(struct sock *sk, int level, int optname,
 			err = -EFAULT;
 			break;
 		}
-		if (tsk->conn)
-			tsk->conn->idle_timeout = val;
+		if (conn)
+			WRITE_ONCE(conn->idle_timeout, val);
 		break;
 
 	case TQUIC_SO_DATAGRAM:
@@ -813,7 +854,7 @@ static int tquic_proto_setsockopt(struct sock *sk, int level, int optname,
 			err = -EFAULT;
 			break;
 		}
-		if (tsk->conn) {
+		if (conn) {
 			/* Cannot enable HTTP/3 after connection established */
 			err = -EISCONN;
 			break;
@@ -826,7 +867,7 @@ static int tquic_proto_setsockopt(struct sock *sk, int level, int optname,
 			err = -EINVAL;
 			break;
 		}
-		if (tsk->conn) {
+		if (conn) {
 			err = -EISCONN;
 			break;
 		}
@@ -851,7 +892,7 @@ static int tquic_proto_setsockopt(struct sock *sk, int level, int optname,
 			err = -EINVAL;
 			break;
 		}
-		if (tsk->conn) {
+		if (conn) {
 			err = -EISCONN;
 			break;
 		}
@@ -879,6 +920,8 @@ static int tquic_proto_setsockopt(struct sock *sk, int level, int optname,
 	}
 
 	release_sock(sk);
+	if (conn)
+		tquic_conn_put(conn);
 	return err;
 }
 
@@ -886,6 +929,7 @@ static int tquic_proto_getsockopt(struct sock *sk, int level, int optname,
 				  char __user *optval, int __user *optlen)
 {
 	struct tquic_sock *tsk = tquic_sk(sk);
+	struct tquic_connection *conn = NULL;
 	int len, val, err = 0;
 
 	if (level != SOL_TQUIC)
@@ -912,16 +956,17 @@ static int tquic_proto_getsockopt(struct sock *sk, int level, int optname,
 			err = -EINVAL;
 			break;
 		}
-		if (tsk->conn) {
+		conn = tquic_sock_conn_get(tsk);
+		if (conn) {
 			struct tquic_info info = {
-				.state = READ_ONCE(tsk->conn->state),
-				.paths_active = tsk->conn->num_paths,
-				.version = tsk->conn->version,
-				.idle_timeout = tsk->conn->idle_timeout,
+				.state = READ_ONCE(conn->state),
+				.paths_active = conn->num_paths,
+				.version = conn->version,
+				.idle_timeout = conn->idle_timeout,
 			};
 
 			{
-				struct tquic_path *path = tquic_proto_active_path_get(tsk->conn);
+				struct tquic_path *path = tquic_proto_active_path_get(conn);
 
 				if (path) {
 					info.rtt = path->cc.smoothed_rtt_us;
@@ -931,11 +976,11 @@ static int tquic_proto_getsockopt(struct sock *sk, int level, int optname,
 				}
 			}
 
-			info.bytes_sent = tsk->conn->stats.tx_bytes;
-			info.bytes_received = tsk->conn->stats.rx_bytes;
-			info.packets_sent = tsk->conn->stats.tx_packets;
-			info.packets_received = tsk->conn->stats.rx_packets;
-			info.packets_lost = tsk->conn->stats.lost_packets;
+			info.bytes_sent = conn->stats.tx_bytes;
+			info.bytes_received = conn->stats.rx_bytes;
+			info.packets_sent = conn->stats.tx_packets;
+			info.packets_received = conn->stats.rx_packets;
+			info.packets_lost = conn->stats.lost_packets;
 
 			if (copy_to_user(optval, &info, sizeof(info))) {
 				err = -EFAULT;
@@ -948,6 +993,8 @@ static int tquic_proto_getsockopt(struct sock *sk, int level, int optname,
 		} else {
 			err = -ENOTCONN;
 		}
+		if (conn)
+			tquic_conn_put(conn);
 		break;
 
 	case TQUIC_PACING:
@@ -971,29 +1018,38 @@ static int tquic_proto_getsockopt(struct sock *sk, int level, int optname,
 static int tquic_proto_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 {
 	struct tquic_sock *tsk = tquic_sk(sk);
-	struct tquic_connection *conn = tsk->conn;
+	struct tquic_connection *conn;
+	int ret;
 
+	conn = tquic_sock_conn_get(tsk);
 	if (!conn || READ_ONCE(conn->state) != TQUIC_CONN_CONNECTED)
-		return -ENOTCONN;
+		ret = -ENOTCONN;
+	else
+		ret = tquic_sendmsg(sk, msg, len);
 
-	/* Use tquic_sendmsg from tquic.h */
-	return tquic_sendmsg(sk, msg, len);
+	if (conn)
+		tquic_conn_put(conn);
+	return ret;
 }
 
 static int tquic_proto_recvmsg(struct sock *sk, struct msghdr *msg, size_t len,
 			       int flags, int *addr_len)
 {
 	struct tquic_sock *tsk = tquic_sk(sk);
-	struct tquic_connection *conn = tsk->conn;
+	struct tquic_connection *conn;
+	int ret;
 
+	conn = tquic_sock_conn_get(tsk);
 	if (!conn)
 		return -ENOTCONN;
 
 	/* Use tquic_recvmsg from tquic.h */
-	return tquic_recvmsg(sk, msg, len, flags, addr_len);
+	ret = tquic_recvmsg(sk, msg, len, flags, addr_len);
+	tquic_conn_put(conn);
+	return ret;
 }
 
-static int tquic_proto_bind(struct sock *sk, TQUIC_SOCKADDR *uaddr,
+static int tquic_proto_bind(struct sock *sk, tquic_sockaddr_t *uaddr,
 			    int addr_len)
 {
 	struct sockaddr *addr = (struct sockaddr *)uaddr;
@@ -1012,11 +1068,17 @@ static int tquic_proto_bind(struct sock *sk, TQUIC_SOCKADDR *uaddr,
 static int tquic_proto_backlog_rcv(struct sock *sk, struct sk_buff *skb)
 {
 	struct tquic_sock *tsk = tquic_sk(sk);
+	struct tquic_connection *conn;
 
-	if (tsk->conn)
+	conn = tquic_sock_conn_get(tsk);
+	if (conn) {
+		tquic_conn_put(conn);
 		return tquic_udp_recv(sk, skb);
-	else
+	}
+
+	{
 		kfree_skb(skb);
+	}
 
 	return 0;
 }
@@ -1024,11 +1086,14 @@ static int tquic_proto_backlog_rcv(struct sock *sk, struct sk_buff *skb)
 static void tquic_proto_release_cb(struct sock *sk)
 {
 	struct tquic_sock *tsk = tquic_sk(sk);
-	struct tquic_connection *conn = tsk->conn;
+	struct tquic_connection *conn;
 
+	conn = tquic_sock_conn_get(tsk);
 	if (conn && conn->timer_state) {
 		/* Update timers after socket unlock */
 	}
+	if (conn)
+		tquic_conn_put(conn);
 }
 
 static int tquic_proto_hash(struct sock *sk)
@@ -1040,11 +1105,14 @@ static int tquic_proto_hash(struct sock *sk)
 static void tquic_proto_unhash(struct sock *sk)
 {
 	struct tquic_sock *tsk = tquic_sk(sk);
-	struct tquic_connection *conn = tsk->conn;
+	struct tquic_connection *conn;
 
+	conn = tquic_sock_conn_get(tsk);
 	if (conn) {
 		/* Remove connection from CID hash table */
 	}
+	if (conn)
+		tquic_conn_put(conn);
 }
 
 static int tquic_proto_get_port(struct sock *sk, unsigned short snum)
@@ -1100,15 +1168,15 @@ static int tquic_stream_release(struct socket *sock)
 	return 0;
 }
 
-static int tquic_stream_bind(struct socket *sock, TQUIC_SOCKADDR *addr,
-			     int addr_len)
+static int tquic_stream_bind(struct socket *sock, tquic_sockaddr_t *addr,
+				     int addr_len)
 {
 	struct sock *sk = sock->sk;
 	return tquic_proto_bind(sk, addr, addr_len);
 }
 
-static int tquic_stream_connect(struct socket *sock, TQUIC_SOCKADDR *addr,
-				int addr_len, int flags)
+static int tquic_stream_connect(struct socket *sock, tquic_sockaddr_t *addr,
+					int addr_len, int flags)
 {
 	struct sock *sk = sock->sk;
 	int err;
@@ -1120,10 +1188,22 @@ static int tquic_stream_connect(struct socket *sock, TQUIC_SOCKADDR *addr,
 	/* Wait for handshake to complete if blocking */
 	if (!(flags & O_NONBLOCK)) {
 		struct tquic_sock *tsk = tquic_sk(sk);
+		struct tquic_connection *conn;
 		DEFINE_WAIT(wait);
 
 		lock_sock(sk);
-		while (tsk->conn && READ_ONCE(tsk->conn->state) == TQUIC_CONN_CONNECTING) {
+
+		for (;;) {
+			conn = tquic_sock_conn_get(tsk);
+			if (!conn)
+				break;
+			if (READ_ONCE(conn->state) != TQUIC_CONN_CONNECTING) {
+				tquic_conn_put(conn);
+				conn = NULL;
+				break;
+			}
+			tquic_conn_put(conn);
+
 			prepare_to_wait(sk_sleep(sk), &wait, TASK_INTERRUPTIBLE);
 
 			if (signal_pending(current)) {
@@ -1138,10 +1218,14 @@ static int tquic_stream_connect(struct socket *sock, TQUIC_SOCKADDR *addr,
 			finish_wait(sk_sleep(sk), &wait);
 		}
 
-		if (!tsk->conn || READ_ONCE(tsk->conn->state) != TQUIC_CONN_CONNECTED) {
+		conn = tquic_sock_conn_get(tsk);
+		if (!conn || READ_ONCE(conn->state) != TQUIC_CONN_CONNECTED) {
+			if (conn)
+				tquic_conn_put(conn);
 			release_sock(sk);
 			return -ECONNREFUSED;
 		}
+		tquic_conn_put(conn);
 		release_sock(sk);
 	}
 
@@ -1191,17 +1275,21 @@ static int tquic_stream_getname(struct socket *sock, struct sockaddr *addr,
 {
 	struct sock *sk = sock->sk;
 	struct tquic_sock *tsk = tquic_sk(sk);
-	struct tquic_connection *conn = tsk->conn;
+	struct tquic_connection *conn;
 	struct sockaddr_storage *saddr;
+	int ret;
 
+	conn = tquic_sock_conn_get(tsk);
 	if (!conn)
 		return -ENOTCONN;
 
 	{
 		struct tquic_path *path = tquic_proto_active_path_get(conn);
 
-		if (!path)
-			return -ENOTCONN;
+		if (!path) {
+			ret = -ENOTCONN;
+			goto out_put;
+		}
 
 		if (peer)
 			saddr = &path->remote_addr;
@@ -1213,9 +1301,13 @@ static int tquic_stream_getname(struct socket *sock, struct sockaddr *addr,
 	}
 
 	if (addr->sa_family == AF_INET)
-		return sizeof(struct sockaddr_in);
+		ret = sizeof(struct sockaddr_in);
 	else
-		return sizeof(struct sockaddr_in6);
+		ret = sizeof(struct sockaddr_in6);
+
+out_put:
+	tquic_conn_put(conn);
+	return ret;
 }
 
 static __poll_t tquic_stream_poll(struct file *file, struct socket *sock,
@@ -1223,7 +1315,7 @@ static __poll_t tquic_stream_poll(struct file *file, struct socket *sock,
 {
 	struct sock *sk = sock->sk;
 	struct tquic_sock *tsk = tquic_sk(sk);
-	struct tquic_connection *conn = tsk->conn;
+	struct tquic_connection *conn;
 	__poll_t mask = 0;
 
 	sock_poll_wait(file, sock, wait);
@@ -1234,6 +1326,7 @@ static __poll_t tquic_stream_poll(struct file *file, struct socket *sock,
 	if (sk->sk_err)
 		mask |= EPOLLERR;
 
+	conn = tquic_sock_conn_get(tsk);
 	if (sk->sk_shutdown == SHUTDOWN_MASK || !conn)
 		mask |= EPOLLHUP;
 
@@ -1251,6 +1344,8 @@ static __poll_t tquic_stream_poll(struct file *file, struct socket *sock,
 		}
 	}
 
+	if (conn)
+		tquic_conn_put(conn);
 	return mask;
 }
 

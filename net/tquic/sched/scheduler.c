@@ -59,10 +59,20 @@ tquic_sched_path_get_or_active(struct tquic_connection *conn,
  */
 static int __tquic_sched_register(struct tquic_sched_ops *ops)
 {
+	struct tquic_sched_ops *existing;
+
 	if (!ops || !ops->name || !ops->select)
 		return -EINVAL;
 
 	spin_lock_bh(&tquic_sched_lock);
+
+	list_for_each_entry(existing, &tquic_sched_list, list) {
+		if (existing == ops || !strcmp(existing->name, ops->name)) {
+			spin_unlock_bh(&tquic_sched_lock);
+			return -EEXIST;
+		}
+	}
+
 	list_add_tail_rcu(&ops->list, &tquic_sched_list);
 
 	/* First registered becomes default */
@@ -106,24 +116,29 @@ int tquic_register_scheduler(struct tquic_sched_ops *ops)
 }
 EXPORT_SYMBOL_GPL(tquic_register_scheduler);
 
-int tquic_sched_register(struct tquic_sched_ops *ops)
-{
-	return __tquic_sched_register(ops);
-}
-EXPORT_SYMBOL_GPL(tquic_sched_register);
-
 void tquic_unregister_scheduler(struct tquic_sched_ops *ops)
 {
 	__tquic_sched_unregister(ops);
 }
 EXPORT_SYMBOL_GPL(tquic_unregister_scheduler);
 
+#endif /* !TQUIC_OUT_OF_TREE */
+
+/*
+ * Stable registration aliases used by consolidated out-of-tree builds.
+ * These always target the core scheduler list used by tquic_sched_find().
+ */
+int tquic_sched_register(struct tquic_sched_ops *ops)
+{
+	return __tquic_sched_register(ops);
+}
+EXPORT_SYMBOL_GPL(tquic_sched_register);
+
 void tquic_sched_unregister(struct tquic_sched_ops *ops)
 {
 	__tquic_sched_unregister(ops);
 }
 EXPORT_SYMBOL_GPL(tquic_sched_unregister);
-#endif /* !TQUIC_OUT_OF_TREE */
 
 /*
  * Find scheduler by name
@@ -225,7 +240,7 @@ int tquic_sched_set_default(const char *name)
 		return -ENOENT;
 
 	spin_lock_bh(&tquic_sched_lock);
-	default_scheduler = ops;
+	rcu_assign_pointer(default_scheduler, ops);
 	spin_unlock_bh(&tquic_sched_lock);
 
 	module_put(ops->owner);

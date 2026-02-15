@@ -362,12 +362,16 @@ static struct tquic_nl_conn_info *tquic_conn_lookup(struct net *net, u64 conn_id
 	struct tquic_net *tnet = tquic_get_net(net);
 	struct tquic_nl_conn_info *conn;
 
+	rcu_read_lock();
 	hash_for_each_possible_rcu(tnet->conn_hash, conn, hash_node, conn_id) {
 		if (conn->conn_id == conn_id) {
-			if (refcount_inc_not_zero(&conn->refcnt))
+			if (refcount_inc_not_zero(&conn->refcnt)) {
+				rcu_read_unlock();
 				return conn;
+			}
 		}
 	}
+	rcu_read_unlock();
 	return NULL;
 }
 
@@ -439,12 +443,16 @@ static struct tquic_nl_path_info *tquic_nl_path_lookup(struct tquic_nl_conn_info
 {
 	struct tquic_nl_path_info *path;
 
+	rcu_read_lock();
 	list_for_each_entry_rcu(path, &conn->paths, list) {
 		if (path->path_id == path_id) {
-			if (refcount_inc_not_zero(&path->refcnt))
+			if (refcount_inc_not_zero(&path->refcnt)) {
+				rcu_read_unlock();
 				return path;
+			}
 		}
 	}
+	rcu_read_unlock();
 	return NULL;
 }
 
@@ -1693,15 +1701,24 @@ static int __net_init tquic_net_init(struct net *net)
 static void __net_exit tquic_net_exit(struct net *net)
 {
 	struct tquic_net *tnet = tquic_get_net(net);
-	struct tquic_nl_conn_info *conn, *tmp;
+	struct tquic_nl_conn_info *conn;
 
-	spin_lock_bh(&tnet->conn_lock);
-	list_for_each_entry_safe(conn, tmp, &tnet->connections, list) {
+	for (;;) {
+		spin_lock_bh(&tnet->conn_lock);
+		if (list_empty(&tnet->connections)) {
+			spin_unlock_bh(&tnet->conn_lock);
+			break;
+		}
+
+		conn = list_first_entry(&tnet->connections,
+					       struct tquic_nl_conn_info, list);
 		hash_del_rcu(&conn->hash_node);
 		list_del_rcu(&conn->list);
+		spin_unlock_bh(&tnet->conn_lock);
+
+		/* Drops list ownership reference without holding conn_lock. */
 		tquic_nl_conn_put(conn);
 	}
-	spin_unlock_bh(&tnet->conn_lock);
 
 	/* Ensure all RCU callbacks complete */
 	synchronize_rcu();

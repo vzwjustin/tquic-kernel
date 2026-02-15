@@ -140,12 +140,16 @@ struct tquic_pending_frame {
 	u8 type;
 	u8 *data;		/* For allocated data (legacy/special frames) */
 	const u8 *data_ref;	/* Zero-copy reference to original data */
+	struct sk_buff *skb;	/* Optional: payload sourced from skb (may be non-linear) */
+	u32 skb_off;		/* Byte offset into skb for payload start */
 	size_t len;
 	u64 stream_id;
 	u64 offset;
 	bool fin;
 	bool owns_data;		/* True if data was allocated and must be freed */
 };
+
+BUILD_BUG_ON(sizeof(struct tquic_stream_skb_cb) > sizeof(((struct sk_buff *)0)->cb));
 
 /* Pacing state per path */
 struct tquic_pacing_state {
@@ -394,6 +398,65 @@ static int tquic_gen_stream_frame(struct tquic_frame_ctx *ctx,
 	 * (user buffer or skb data), avoiding intermediate allocation.
 	 */
 	memcpy(ctx->buf + ctx->offset, data, data_len);
+	ctx->offset += data_len;
+	ctx->ack_eliciting = true;
+
+	return ctx->buf + ctx->offset - start;
+}
+
+static int tquic_gen_stream_frame_skb(struct tquic_frame_ctx *ctx,
+				      u64 stream_id, u64 offset,
+				      struct sk_buff *skb, u32 skb_off,
+				      size_t data_len, bool fin)
+{
+	u8 *start = ctx->buf + ctx->offset;
+	u8 frame_type = TQUIC_FRAME_STREAM;
+	int ret;
+
+	if (unlikely(!skb))
+		return -EINVAL;
+
+	/* Build frame type with flags */
+	if (offset > 0)
+		frame_type |= 0x04;  /* OFF bit */
+	frame_type |= 0x02;  /* LEN bit (always include length) */
+	if (fin)
+		frame_type |= 0x01;  /* FIN bit */
+
+	if (ctx->offset + 1 > ctx->buf_len)
+		return -ENOSPC;
+
+	ctx->buf[ctx->offset++] = frame_type;
+
+	/* Stream ID */
+	ret = tquic_encode_varint(ctx->buf + ctx->offset,
+				  ctx->buf_len - ctx->offset, stream_id);
+	if (ret < 0)
+		return ret;
+	ctx->offset += ret;
+
+	/* Offset (if present) */
+	if (offset > 0) {
+		ret = tquic_encode_varint(ctx->buf + ctx->offset,
+					  ctx->buf_len - ctx->offset, offset);
+		if (ret < 0)
+			return ret;
+		ctx->offset += ret;
+	}
+
+	/* Length */
+	ret = tquic_encode_varint(ctx->buf + ctx->offset,
+				  ctx->buf_len - ctx->offset, data_len);
+	if (ret < 0)
+		return ret;
+	ctx->offset += ret;
+
+	if (ctx->offset + data_len > ctx->buf_len)
+		return -ENOSPC;
+
+	if (skb_copy_bits(skb, skb_off, ctx->buf + ctx->offset, data_len))
+		return -EFAULT;
+
 	ctx->offset += data_len;
 	ctx->ack_eliciting = true;
 
@@ -662,10 +725,17 @@ static int tquic_coalesce_frames(struct tquic_connection *conn,
 
 		switch (frame->type) {
 		case TQUIC_FRAME_STREAM:
-			ret = tquic_gen_stream_frame(ctx, frame->stream_id,
-						     frame->offset,
-						     data_ptr, frame->len,
-						     frame->fin);
+			if (frame->skb) {
+				ret = tquic_gen_stream_frame_skb(ctx, frame->stream_id,
+								 frame->offset,
+								 frame->skb, frame->skb_off,
+								 frame->len, frame->fin);
+			} else {
+				ret = tquic_gen_stream_frame(ctx, frame->stream_id,
+							     frame->offset,
+							     data_ptr, frame->len,
+							     frame->fin);
+			}
 			break;
 
 		case TQUIC_FRAME_CRYPTO:
@@ -2255,7 +2325,10 @@ int tquic_output_flush(struct tquic_connection *conn)
 		while (!skb_queue_empty(&stream->send_buf) &&
 		       conn_credit > 0 &&
 		       packets_sent < 16) {
+			struct tquic_stream_skb_cb *cb;
 			u64 stream_offset;
+			u32 data_off;
+			u32 remaining;
 			u64 stream_credit;
 			bool is_last;
 
@@ -2263,8 +2336,16 @@ int tquic_output_flush(struct tquic_connection *conn)
 			if (!skb)
 				break;
 
-			/* Snapshot offset before dropping conn->lock. */
-			stream_offset = *(u64 *)skb->cb;
+			cb = tquic_stream_skb_cb(skb);
+			stream_offset = cb->stream_offset;
+			data_off = cb->data_off;
+			if (unlikely(data_off > skb->len)) {
+				/* Corrupted bookkeeping: drop skb to avoid looping. */
+				kfree_skb(skb);
+				ret = -EINVAL;
+				break;
+			}
+			remaining = skb->len - data_off;
 			if (unlikely(stream_offset >= stream->max_send_data)) {
 				stream->blocked = true;
 				skb_queue_head(&stream->send_buf, skb);
@@ -2273,7 +2354,7 @@ int tquic_output_flush(struct tquic_connection *conn)
 			stream_credit = stream->max_send_data - stream_offset;
 
 			/* Determine chunk size respecting flow control */
-			chunk_size = skb->len;
+			chunk_size = remaining;
 			if (chunk_size > conn_credit)
 				chunk_size = conn_credit;
 			if (chunk_size > stream_credit)
@@ -2297,7 +2378,7 @@ int tquic_output_flush(struct tquic_connection *conn)
 			frame->offset = stream_offset;
 			frame->len = chunk_size;
 			frame->fin = stream->fin_sent &&
-				     (chunk_size == skb->len) &&
+				     (chunk_size == remaining) &&
 				     is_last;
 
 			/*
@@ -2305,15 +2386,11 @@ int tquic_output_flush(struct tquic_connection *conn)
 			 * The skb remains valid until packet assembly completes
 			 * (happens synchronously before we free/consume the skb).
 			 */
-			if (chunk_size > 0) {
-				frame->data = NULL;
-				frame->data_ref = skb->data;
-				frame->owns_data = false;
-			} else {
-				frame->data = NULL;
-				frame->data_ref = NULL;
-				frame->owns_data = false;
-			}
+			frame->data = NULL;
+			frame->data_ref = NULL;
+			frame->skb = skb;
+			frame->skb_off = data_off;
+			frame->owns_data = false;
 
 			INIT_LIST_HEAD(&frame->list);
 			list_add_tail(&frame->list, &frames);
@@ -2367,7 +2444,7 @@ int tquic_output_flush(struct tquic_connection *conn)
 					conn->fc_data_reserved = 0;
 				conn_credit -= chunk_size;
 
-				if (chunk_size == skb->len) {
+				if (chunk_size == remaining) {
 					/* Consumed entire skb - uncharge memory */
 					if (conn->sk) {
 						sk_mem_uncharge(conn->sk, skb->truesize);
@@ -2377,9 +2454,9 @@ int tquic_output_flush(struct tquic_connection *conn)
 					}
 					kfree_skb(skb);
 				} else {
-					/* Partial consumption - adjust skb */
-					skb_pull(skb, chunk_size);
-					*(u64 *)skb->cb = stream_offset + chunk_size;
+					/* Partial consumption - advance cb offsets (works for non-linear). */
+					cb->stream_offset = stream_offset + chunk_size;
+					cb->data_off = data_off + chunk_size;
 					skb_queue_head(&stream->send_buf, skb);
 				}
 			} else {

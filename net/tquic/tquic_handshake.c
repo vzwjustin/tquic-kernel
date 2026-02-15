@@ -96,23 +96,27 @@ int tquic_attempt_zero_rtt(struct sock *sk, const char *server_name,
 			   u8 server_name_len)
 {
 	struct tquic_sock *tsk = tquic_sk(sk);
-	struct tquic_connection *conn = tsk->conn;
+	struct tquic_connection *conn;
 	int ret;
 
+	conn = tquic_sock_conn_get(tsk);
 	if (!conn)
 		return -EINVAL;
 
 	/* Check if 0-RTT is enabled */
 	if (!tquic_sysctl_get_zero_rtt_enabled()) {
 		tquic_dbg("0-RTT disabled via sysctl\n");
+		tquic_conn_put(conn);
 		return -ENOENT;
 	}
 
 	/* Initialize 0-RTT state if not already done */
 	if (!conn->zero_rtt_state) {
 		ret = tquic_zero_rtt_init(conn);
-		if (ret)
+		if (ret) {
+			tquic_conn_put(conn);
 			return ret;
+		}
 	}
 
 	/* Attempt 0-RTT with cached ticket */
@@ -124,6 +128,7 @@ int tquic_attempt_zero_rtt(struct sock *sk, const char *server_name,
 			 server_name_len, server_name);
 	}
 
+	tquic_conn_put(conn);
 	return ret;
 }
 EXPORT_SYMBOL_GPL(tquic_attempt_zero_rtt);
@@ -226,11 +231,12 @@ static bool tquic_validate_zero_rtt_transport_params(
 void tquic_handle_zero_rtt_response(struct sock *sk, bool accepted)
 {
 	struct tquic_sock *tsk = tquic_sk(sk);
-	struct tquic_connection *conn = tsk->conn;
+	struct tquic_connection *conn;
 	struct tquic_zero_rtt_state_s *state;
 
+	conn = tquic_sock_conn_get(tsk);
 	if (!conn || !conn->zero_rtt_state)
-		return;
+		goto out_put;
 
 	state = conn->zero_rtt_state;
 
@@ -260,12 +266,12 @@ void tquic_handle_zero_rtt_response(struct sock *sk, bool accepted)
 			tquic_zero_rtt_remove_ticket(state->ticket->server_name,
 						     state->ticket->server_name_len);
 		}
-		tquic_zero_rtt_reject(conn);
-		TQUIC_INC_STATS(sock_net(sk), TQUIC_MIB_0RTTREJECTED);
-		tquic_dbg("0-RTT rejected by server\n");
+			tquic_zero_rtt_reject(conn);
+			TQUIC_INC_STATS(sock_net(sk), TQUIC_MIB_0RTTREJECTED);
+			tquic_dbg("0-RTT rejected by server\n");
 
-		/*
-		 * Trigger retransmission of 0-RTT data as 1-RTT.
+			/*
+			 * Trigger retransmission of 0-RTT data as 1-RTT.
 		 * This calls tquic_zero_rtt_reject() and moves buffered
 		 * 0-RTT packets to the 1-RTT retransmit queue.
 		 */
@@ -327,7 +333,7 @@ int tquic_store_session_ticket(struct sock *sk, const char *server_name,
 	plaintext.alpn_len = 0;
 	{
 		struct tquic_sock *tsk = tquic_sk(sk);
-		struct tquic_connection *conn = tsk ? tsk->conn : NULL;
+		struct tquic_connection *conn = tsk ? tquic_sock_conn_get(tsk) : NULL;
 
 		if (conn) {
 			ssize_t tp_len;
@@ -339,6 +345,7 @@ int tquic_store_session_ticket(struct sock *sk, const char *server_name,
 				plaintext.transport_params_len = tp_len;
 			else
 				plaintext.transport_params_len = 0;
+			tquic_conn_put(conn);
 		} else {
 			plaintext.transport_params_len = 0;
 		}
@@ -394,6 +401,7 @@ void tquic_handshake_done(void *data, int status, key_serial_t peerid)
 	struct tquic_handshake_state *hs = data;
 	struct sock *sk = hs->sk;
 	struct tquic_sock *tsk = tquic_sk(sk);
+	struct tquic_connection *conn;
 
 	tquic_dbg("handshake completed, status=%d peerid=%d\n",
 		 status, peerid);
@@ -401,10 +409,11 @@ void tquic_handshake_done(void *data, int status, key_serial_t peerid)
 	hs->status = status;
 	hs->peerid = peerid;
 
-	if (tsk->conn) {
+	conn = tquic_sock_conn_get(tsk);
+	if (conn) {
 		u64 duration_us = jiffies_to_usecs(jiffies - hs->start_time);
 
-		tquic_trace_handshake_complete(tsk->conn, status, duration_us);
+		tquic_trace_handshake_complete(conn, status, duration_us);
 	}
 
 	if (status == 0) {
@@ -413,12 +422,11 @@ void tquic_handshake_done(void *data, int status, key_serial_t peerid)
 		 * completed handshake. The crypto state will be
 		 * installed by the tlshd daemon via kTLS.
 		 */
-		tsk->flags |= TQUIC_F_HANDSHAKE_DONE;
+	tsk->flags |= TQUIC_F_HANDSHAKE_DONE;
 
-		if (tsk->conn) {
-			tquic_conn_set_state(tsk->conn, TQUIC_CONN_CONNECTED,
+		if (conn)
+			tquic_conn_set_state(conn, TQUIC_CONN_CONNECTED,
 					     TQUIC_REASON_NORMAL);
-		}
 
 		/* Update MIB counters for successful handshake */
 		TQUIC_INC_STATS(sock_net(sk), TQUIC_MIB_HANDSHAKESCOMPLETE);
@@ -436,6 +444,8 @@ void tquic_handshake_done(void *data, int status, key_serial_t peerid)
 
 	/* Wake up any thread waiting in tquic_wait_for_handshake() */
 	complete(&hs->done);
+	if (conn)
+		tquic_conn_put(conn);
 }
 EXPORT_SYMBOL_GPL(tquic_handshake_done);
 
@@ -486,28 +496,22 @@ static int tquic_map_handshake_error(int status)
 int tquic_start_handshake(struct sock *sk)
 {
 	struct tquic_sock *tsk = tquic_sk(sk);
+	struct tquic_connection *conn;
 	struct tquic_handshake_state *hs;
 	struct tls_handshake_args args;
 	struct socket *sock;
 	int ret;
 	int zero_rtt_ret;
 
-	if (!sk || !tsk->conn)
+	if (!sk)
 		return -EINVAL;
 
-	tquic_trace_handshake_start(tsk->conn, tsk->conn->is_server,
+	conn = tquic_sock_conn_get(tsk);
+	if (!conn)
+		return -EINVAL;
+
+	tquic_trace_handshake_start(conn, conn->is_server,
 				    false, tsk->cert_verify.verify_mode);
-
-	/* Check if handshake already in progress or completed */
-	if (tsk->handshake_state) {
-		tquic_dbg("handshake already in progress\n");
-		return -EALREADY;
-	}
-
-	if (tsk->flags & TQUIC_F_HANDSHAKE_DONE) {
-		tquic_dbg("handshake already completed\n");
-		return -EISCONN;
-	}
 
 	/*
 	 * Test bypass: when TQUIC_VERIFY_NONE is set, skip the TLS
@@ -520,11 +524,29 @@ int tquic_start_handshake(struct sock *sk)
 		u64 bypass_max_streams_bidi;
 		u64 bypass_max_streams_uni;
 
+		/*
+		 * In bypass mode, repeated calls should be idempotent once
+		 * handshake completion is already published.
+		 */
+		if (tsk->flags & TQUIC_F_HANDSHAKE_DONE) {
+			tquic_dbg("handshake already completed (VERIFY_NONE bypass)\n");
+			tquic_conn_put(conn);
+			return 0;
+		}
+
+		if (tsk->handshake_state) {
+			tquic_dbg("handshake bypass already in progress\n");
+			tquic_conn_put(conn);
+			return -EALREADY;
+		}
+
 		tquic_warn("INSECURE bypass - skipping TLS handshake (verify_mode=NONE)\n");
 
 		hs = kzalloc(sizeof(*hs), GFP_KERNEL);
-		if (!hs)
+		if (!hs) {
+			tquic_conn_put(conn);
 			return -ENOMEM;
+		}
 
 		hs->sk = sk;
 		init_completion(&hs->done);
@@ -536,52 +558,60 @@ int tquic_start_handshake(struct sock *sk)
 		tsk->handshake_state = hs;
 		tsk->flags |= TQUIC_F_HANDSHAKE_DONE;
 
-		if (tsk->conn) {
-			/*
-			 * In bypass mode no peer transport parameters are exchanged.
-			 * Seed remote send limits from local defaults so test traffic
-			 * can flow while keeping bounded limits.
-			 */
-			bypass_max_data = tsk->conn->local_params.initial_max_data;
-			if (!bypass_max_data)
-				bypass_max_data = TQUIC_DEFAULT_MAX_DATA;
+		/*
+		 * In bypass mode no peer transport parameters are exchanged.
+		 * Seed remote send limits from local defaults so test traffic
+		 * can flow while keeping bounded limits.
+		 */
+		bypass_max_data = conn->local_params.initial_max_data;
+		if (!bypass_max_data)
+			bypass_max_data = TQUIC_DEFAULT_MAX_DATA;
 
-			bypass_max_streams_bidi =
-				tsk->conn->local_params.initial_max_streams_bidi;
-			if (!bypass_max_streams_bidi)
-				bypass_max_streams_bidi = 100;
+		bypass_max_streams_bidi =
+			conn->local_params.initial_max_streams_bidi;
+		if (!bypass_max_streams_bidi)
+			bypass_max_streams_bidi = 100;
 
-			bypass_max_streams_uni =
-				tsk->conn->local_params.initial_max_streams_uni;
-			if (!bypass_max_streams_uni)
-				bypass_max_streams_uni = 100;
+		bypass_max_streams_uni =
+			conn->local_params.initial_max_streams_uni;
+		if (!bypass_max_streams_uni)
+			bypass_max_streams_uni = 100;
 
-			spin_lock_bh(&tsk->conn->lock);
-			WRITE_ONCE(tsk->conn->max_data_remote, bypass_max_data);
-			WRITE_ONCE(tsk->conn->max_streams_bidi,
-				   bypass_max_streams_bidi);
-			WRITE_ONCE(tsk->conn->max_streams_uni,
-				   bypass_max_streams_uni);
-			tsk->conn->remote_params.initial_max_data = bypass_max_data;
-			tsk->conn->remote_params.initial_max_streams_bidi =
-				bypass_max_streams_bidi;
-			tsk->conn->remote_params.initial_max_streams_uni =
-				bypass_max_streams_uni;
-			tsk->conn->remote_fc.max_data = bypass_max_data;
-			tsk->conn->remote_fc.max_streams_bidi =
-				bypass_max_streams_bidi;
-			tsk->conn->remote_fc.max_streams_uni =
-				bypass_max_streams_uni;
-			spin_unlock_bh(&tsk->conn->lock);
+		spin_lock_bh(&conn->lock);
+		WRITE_ONCE(conn->max_data_remote, bypass_max_data);
+		WRITE_ONCE(conn->max_streams_bidi, bypass_max_streams_bidi);
+		WRITE_ONCE(conn->max_streams_uni, bypass_max_streams_uni);
+		conn->remote_params.initial_max_data = bypass_max_data;
+		conn->remote_params.initial_max_streams_bidi =
+			bypass_max_streams_bidi;
+		conn->remote_params.initial_max_streams_uni =
+			bypass_max_streams_uni;
+		conn->remote_fc.max_data = bypass_max_data;
+		conn->remote_fc.max_streams_bidi = bypass_max_streams_bidi;
+		conn->remote_fc.max_streams_uni = bypass_max_streams_uni;
+		spin_unlock_bh(&conn->lock);
 
-			tquic_conn_set_state(tsk->conn, TQUIC_CONN_CONNECTED,
-					     TQUIC_REASON_NORMAL);
-		}
+		tquic_conn_set_state(conn, TQUIC_CONN_CONNECTED,
+				     TQUIC_REASON_NORMAL);
 
 		complete(&hs->done);
 
 		tquic_warn("handshake bypassed, connection marked ready\n");
+		tquic_conn_put(conn);
 		return 0;
+	}
+
+	/* Check if handshake already in progress or completed */
+	if (tsk->handshake_state) {
+		tquic_dbg("handshake already in progress\n");
+		tquic_conn_put(conn);
+		return -EALREADY;
+	}
+
+	if (tsk->flags & TQUIC_F_HANDSHAKE_DONE) {
+		tquic_dbg("handshake already completed\n");
+		tquic_conn_put(conn);
+		return -EISCONN;
 	}
 
 	/*
@@ -634,27 +664,26 @@ int tquic_start_handshake(struct sock *sk)
 
 		/* Configure local transport parameters from connection */
 		memset(&tp, 0, sizeof(tp));
-		tp.max_idle_timeout = tsk->conn->idle_timeout;
+		tp.max_idle_timeout = conn->idle_timeout;
 		tp.max_udp_payload_size = 65527;
-		tp.initial_max_data = tsk->conn->max_data_local;
+		tp.initial_max_data = conn->max_data_local;
 		tp.initial_max_stream_data_bidi_local =
-			tsk->conn->local_params.initial_max_stream_data_bidi_local;
+			conn->local_params.initial_max_stream_data_bidi_local;
 		tp.initial_max_stream_data_bidi_remote =
-			tsk->conn->local_params.initial_max_stream_data_bidi_remote;
+			conn->local_params.initial_max_stream_data_bidi_remote;
 		tp.initial_max_stream_data_uni =
-			tsk->conn->local_params.initial_max_stream_data_uni;
-		tp.initial_max_streams_bidi = tsk->conn->max_streams_bidi;
-		tp.initial_max_streams_uni = tsk->conn->max_streams_uni;
+			conn->local_params.initial_max_stream_data_uni;
+		tp.initial_max_streams_bidi = conn->max_streams_bidi;
+		tp.initial_max_streams_uni = conn->max_streams_uni;
 		tp.ack_delay_exponent = 3;
 		tp.max_ack_delay = 25;
 		tp.active_conn_id_limit = 8;
-		tp.disable_active_migration = tsk->conn->migration_disabled;
+		tp.disable_active_migration = conn->migration_disabled;
 
 		/* Set initial SCID */
-		tp.initial_scid_len = tsk->conn->scid.len;
-		if (tsk->conn->scid.len > 0)
-			memcpy(tp.initial_scid, tsk->conn->scid.id,
-			       tsk->conn->scid.len);
+		tp.initial_scid_len = conn->scid.len;
+		if (conn->scid.len > 0)
+			memcpy(tp.initial_scid, conn->scid.id, conn->scid.len);
 
 		ret = tquic_hs_set_transport_params(ihs, &tp);
 		if (ret < 0) {
@@ -682,12 +711,13 @@ int tquic_start_handshake(struct sock *sk)
 		 * SKB.  If this allocation fails we can return cleanly
 		 * without having queued an SKB that nobody will free.
 		 */
-		hs = kzalloc(sizeof(*hs), GFP_KERNEL);
-		if (!hs) {
-			kfree(ch_buf);
-			tquic_hs_cleanup(ihs);
-			return -ENOMEM;
-		}
+			hs = kzalloc(sizeof(*hs), GFP_KERNEL);
+			if (!hs) {
+				kfree(ch_buf);
+				tquic_hs_cleanup(ihs);
+				tquic_conn_put(conn);
+				return -ENOMEM;
+			}
 
 		/* Defensive cap: ch_len must fit within the 4096-byte buffer */
 		if (ch_len == 0 || ch_len > 4096) {
@@ -708,7 +738,7 @@ int tquic_start_handshake(struct sock *sk)
 		skb_put_data(ch_skb, ch_buf, ch_len);
 		kfree(ch_buf);
 
-		skb_queue_tail(&tsk->conn->crypto_buffer[TQUIC_PN_SPACE_INITIAL],
+		skb_queue_tail(&conn->crypto_buffer[TQUIC_PN_SPACE_INITIAL],
 			       ch_skb);
 
 		hs->sk = sk;
@@ -723,6 +753,7 @@ int tquic_start_handshake(struct sock *sk)
 
 		tquic_dbg("inline TLS handshake initiated, ClientHello queued (%u bytes)\n",
 			 ch_len);
+		tquic_conn_put(conn);
 		return 0;
 	}
 
@@ -749,8 +780,10 @@ tlshd_fallback:
 
 	/* Allocate handshake state */
 	hs = kzalloc(sizeof(*hs), GFP_KERNEL);
-	if (!hs)
+	if (!hs) {
+		tquic_conn_put(conn);
 		return -ENOMEM;
+	}
 
 	hs->sk = sk;
 	init_completion(&hs->done);
@@ -794,12 +827,14 @@ tlshd_fallback:
 	}
 
 	tquic_dbg("TLS handshake initiated\n");
+	tquic_conn_put(conn);
 	return 0;
 
 err_free:
 	tsk->handshake_state = NULL;
 	/* CF-429: Use kfree_sensitive for key-material structs */
 	kfree_sensitive(hs);
+	tquic_conn_put(conn);
 	return ret;
 }
 EXPORT_SYMBOL_GPL(tquic_start_handshake);
@@ -983,14 +1018,18 @@ static void tquic_inline_hs_apply_transport_params(struct sock *sk)
 {
 	struct tquic_sock *tsk = tquic_sk(sk);
 	struct tquic_handshake *ihs = tsk->inline_hs;
-	struct tquic_connection *conn = tsk->conn;
+	struct tquic_connection *conn;
 	struct tquic_hs_transport_params peer_tp;
 
-	if (!ihs || !conn)
+	if (!ihs)
+		return;
+
+	conn = tquic_sock_conn_get(tsk);
+	if (!conn)
 		return;
 
 	if (tquic_hs_get_transport_params(ihs, &peer_tp) < 0)
-		return;
+		goto out_put;
 
 	/* Apply peer transport parameters to connection */
 	conn->remote_params.max_idle_timeout = peer_tp.max_idle_timeout;
@@ -1021,6 +1060,9 @@ static void tquic_inline_hs_apply_transport_params(struct sock *sk)
 
 	tquic_dbg("applied peer transport params: max_data=%llu, max_streams_bidi=%llu\n",
 		 peer_tp.initial_max_data, peer_tp.initial_max_streams_bidi);
+
+out_put:
+	tquic_conn_put(conn);
 }
 
 /**
@@ -1037,7 +1079,7 @@ static int tquic_inline_hs_install_keys(struct sock *sk, int level)
 {
 	struct tquic_sock *tsk = tquic_sk(sk);
 	struct tquic_handshake *ihs = tsk->inline_hs;
-	struct tquic_connection *conn = tsk->conn;
+	struct tquic_connection *conn;
 	struct tquic_crypto_state *crypto;
 	u8 client_key[TLS_KEY_MAX_LEN], server_key[TLS_KEY_MAX_LEN];
 	u8 client_iv[TLS_IV_MAX_LEN], server_iv[TLS_IV_MAX_LEN];
@@ -1051,7 +1093,11 @@ static int tquic_inline_hs_install_keys(struct sock *sk, int level)
 	int hs_level;
 	int ret;
 
-	if (!ihs || !conn)
+	if (!ihs)
+		return -EINVAL;
+
+	conn = tquic_sock_conn_get(tsk);
+	if (!conn)
 		return -EINVAL;
 
 	/* Map TQUIC_CRYPTO_* to tquic_hs_get_quic_keys level param */
@@ -1063,7 +1109,8 @@ static int tquic_inline_hs_install_keys(struct sock *sk, int level)
 		hs_level = 2;
 		break;
 	default:
-		return -EINVAL;
+		ret = -EINVAL;
+		goto out_zero;
 	}
 
 	/* Derive QUIC keys from the handshake secrets */
@@ -1077,7 +1124,7 @@ static int tquic_inline_hs_install_keys(struct sock *sk, int level)
 	if (ret < 0) {
 		tquic_dbg("failed to derive keys for level %d: %d\n",
 			 level, ret);
-		return ret;
+		goto out_zero;
 	}
 
 	/* Get secrets for crypto state installation */
@@ -1131,6 +1178,7 @@ out_zero:
 	memzero_explicit(client_secret, sizeof(client_secret));
 	memzero_explicit(server_secret, sizeof(server_secret));
 
+	tquic_conn_put(conn);
 	return ret;
 }
 
@@ -1152,7 +1200,7 @@ int tquic_inline_hs_recv_crypto(struct sock *sk, const u8 *data, u32 len,
 {
 	struct tquic_sock *tsk = tquic_sk(sk);
 	struct tquic_handshake *ihs = tsk->inline_hs;
-	struct tquic_connection *conn = tsk->conn;
+	struct tquic_connection *conn;
 	enum tquic_hs_state prev_state;
 	u8 *resp_buf = NULL;
 	u32 resp_len = 0;
@@ -1160,15 +1208,21 @@ int tquic_inline_hs_recv_crypto(struct sock *sk, const u8 *data, u32 len,
 	int pn_space;
 	int ret;
 
-	if (!ihs || !conn)
+	if (!ihs)
+		return -EINVAL;
+
+	conn = tquic_sock_conn_get(tsk);
+	if (!conn)
 		return -EINVAL;
 
 	prev_state = tquic_hs_get_state(ihs);
 
 	/* Allocate buffer for response messages */
 	resp_buf = kmalloc(4096, GFP_ATOMIC);
-	if (!resp_buf)
+	if (!resp_buf) {
+		tquic_conn_put(conn);
 		return -ENOMEM;
+	}
 
 	/* Process the TLS record through the state machine */
 	ret = tquic_hs_process_record(ihs, data, len,
@@ -1177,6 +1231,7 @@ int tquic_inline_hs_recv_crypto(struct sock *sk, const u8 *data, u32 len,
 		tquic_dbg("inline hs process_record failed: %d\n", ret);
 		kfree(resp_buf);
 		tquic_inline_hs_abort(sk, ret);
+		tquic_conn_put(conn);
 		return ret;
 	}
 
@@ -1193,6 +1248,7 @@ int tquic_inline_hs_recv_crypto(struct sock *sk, const u8 *data, u32 len,
 		if (ret < 0) {
 			kfree(resp_buf);
 			tquic_inline_hs_abort(sk, ret);
+			tquic_conn_put(conn);
 			return ret;
 		}
 		conn->crypto_level = TQUIC_CRYPTO_HANDSHAKE;
@@ -1204,6 +1260,7 @@ int tquic_inline_hs_recv_crypto(struct sock *sk, const u8 *data, u32 len,
 		if (ret < 0) {
 			kfree(resp_buf);
 			tquic_inline_hs_abort(sk, ret);
+			tquic_conn_put(conn);
 			return ret;
 		}
 
@@ -1228,17 +1285,19 @@ int tquic_inline_hs_recv_crypto(struct sock *sk, const u8 *data, u32 len,
 	}
 
 	/* Queue any response messages */
-	if (resp_len > 0) {
+		if (resp_len > 0) {
 		/* Defensive cap: resp_len must fit within the 4096-byte buffer */
-		if (resp_len > 4096) {
-			kfree(resp_buf);
-			return -EINVAL;
-		}
-		resp_skb = alloc_skb(resp_len, GFP_ATOMIC);
-		if (!resp_skb) {
-			kfree(resp_buf);
-			return -ENOMEM;
-		}
+			if (resp_len > 4096) {
+				kfree(resp_buf);
+				tquic_conn_put(conn);
+				return -EINVAL;
+			}
+			resp_skb = alloc_skb(resp_len, GFP_ATOMIC);
+			if (!resp_skb) {
+				kfree(resp_buf);
+				tquic_conn_put(conn);
+				return -ENOMEM;
+			}
 		skb_put_data(resp_skb, resp_buf, resp_len);
 
 		/*
@@ -1255,6 +1314,7 @@ int tquic_inline_hs_recv_crypto(struct sock *sk, const u8 *data, u32 len,
 	}
 
 	kfree(resp_buf);
+	tquic_conn_put(conn);
 	return 0;
 }
 EXPORT_SYMBOL_GPL(tquic_inline_hs_recv_crypto);
@@ -1294,8 +1354,9 @@ static void tquic_server_handshake_done(void *data, int status,
 void tquic_install_crypto_state(struct sock *sk)
 {
 	struct tquic_sock *tsk = tquic_sk(sk);
-	struct tquic_connection *conn = tsk->conn;
+	struct tquic_connection *conn;
 
+	conn = tquic_sock_conn_get(tsk);
 	if (!conn)
 		return;
 
@@ -1304,6 +1365,7 @@ void tquic_install_crypto_state(struct sock *sk)
 	tsk->flags |= TQUIC_F_HANDSHAKE_DONE;
 
 	tquic_dbg("crypto state installed\n");
+	tquic_conn_put(conn);
 }
 EXPORT_SYMBOL_GPL(tquic_install_crypto_state);
 
@@ -1597,9 +1659,13 @@ static int tquic_conn_server_accept_init(struct tquic_connection *conn,
 				 */
 				tquic_dbg("Token validation failed: %d\n",
 					 token_ret);
-			}
 		}
 	}
+
+out_put:
+	if (conn)
+		tquic_conn_put(conn);
+}
 	offset += token_len;
 
 	/*
@@ -1781,24 +1847,33 @@ static void tquic_server_handshake_done(void *data, int status,
 		} else {
 			tquic_warn("server handshake done but no valid listener\n");
 		}
-	} else {
-		/* Handshake failed - clean up child */
-		tquic_dbg("server handshake failed: %d\n", status);
-		inet_sk_set_state(child_sk, TCP_CLOSE);
-		if (conn) {
-			/*
-			 * Release the listener reference that was taken in
-			 * tquic_server_handshake() before dropping the conn.
-			 */
-			if (conn->sk) {
-				sock_put(conn->sk);
-				conn->sk = NULL;
+		} else {
+			/* Handshake failed - clean up child */
+			tquic_dbg("server handshake failed: %d\n", status);
+			inet_sk_set_state(child_sk, TCP_CLOSE);
+			if (conn) {
+				struct tquic_stream *dstream = NULL;
+				/*
+				 * Release the listener reference that was taken in
+				 * tquic_server_handshake() before dropping the conn.
+				 */
+				if (conn->sk) {
+					sock_put(conn->sk);
+					conn->sk = NULL;
+				}
+				write_lock_bh(&child_sk->sk_callback_lock);
+				if (child_tsk->conn == conn) {
+					dstream = child_tsk->default_stream;
+					child_tsk->default_stream = NULL;
+					child_tsk->conn = NULL;
+				}
+				write_unlock_bh(&child_sk->sk_callback_lock);
+				if (dstream)
+					tquic_stream_put(dstream);
+				tquic_conn_put(conn);
 			}
-			tquic_conn_put(conn);
-			child_tsk->conn = NULL;
+			sock_put(child_sk);  /* Release reference */
 		}
-		sock_put(child_sk);  /* Release reference */
-	}
 
 	/* Complete the handshake wait (if anyone is waiting) */
 	if (hs)
@@ -1852,15 +1927,18 @@ int tquic_server_handshake(struct sock *listener_sk,
 	INIT_LIST_HEAD(&child_tsk->accept_queue);
 	atomic_set(&child_tsk->accept_queue_len, 0);
 	child_tsk->max_accept_queue = 0;
+	child_tsk->default_stream = NULL;
 
 	/* Create connection for child (server-side) */
 	conn = tquic_conn_create(child_tsk, true);
-	if (!conn) {
-		tquic_dbg("failed to create connection for child\n");
-		sk_free(child_sk);
-		return -ENOMEM;
-	}
-	child_tsk->conn = conn;
+		if (!conn) {
+			tquic_dbg("failed to create connection for child\n");
+			sk_free(child_sk);
+			return -ENOMEM;
+		}
+		write_lock_bh(&child_sk->sk_callback_lock);
+		child_tsk->conn = conn;
+		write_unlock_bh(&child_sk->sk_callback_lock);
 
 	/*
 	 * Store parent socket reference for accept queue callback.
@@ -1889,26 +1967,46 @@ int tquic_server_handshake(struct sock *listener_sk,
 
 	/* Process Initial packet to extract CIDs */
 	ret = tquic_conn_server_accept_init(conn, initial_pkt);
-	if (ret < 0) {
-		tquic_dbg("failed to process Initial packet: %d\n", ret);
-		sock_put(listener_sk);
-		conn->sk = NULL;
-		tquic_conn_put(conn);
-		child_tsk->conn = NULL;
-		sk_free(child_sk);
-		return ret;
-	}
+		if (ret < 0) {
+			struct tquic_stream *dstream = NULL;
+
+			tquic_dbg("failed to process Initial packet: %d\n", ret);
+			sock_put(listener_sk);
+			conn->sk = NULL;
+			write_lock_bh(&child_sk->sk_callback_lock);
+			if (child_tsk->conn == conn) {
+				dstream = child_tsk->default_stream;
+				child_tsk->default_stream = NULL;
+				child_tsk->conn = NULL;
+			}
+			write_unlock_bh(&child_sk->sk_callback_lock);
+			if (dstream)
+				tquic_stream_put(dstream);
+			tquic_conn_put(conn);
+			sk_free(child_sk);
+			return ret;
+		}
 
 	/* Allocate handshake state */
-	hs = kzalloc(sizeof(*hs), GFP_ATOMIC);
-	if (!hs) {
-		sock_put(listener_sk);
-		conn->sk = NULL;
-		tquic_conn_put(conn);
-		child_tsk->conn = NULL;
-		sk_free(child_sk);
-		return -ENOMEM;
-	}
+		hs = kzalloc(sizeof(*hs), GFP_ATOMIC);
+		if (!hs) {
+			struct tquic_stream *dstream = NULL;
+
+			sock_put(listener_sk);
+			conn->sk = NULL;
+			write_lock_bh(&child_sk->sk_callback_lock);
+			if (child_tsk->conn == conn) {
+				dstream = child_tsk->default_stream;
+				child_tsk->default_stream = NULL;
+				child_tsk->conn = NULL;
+			}
+			write_unlock_bh(&child_sk->sk_callback_lock);
+			if (dstream)
+				tquic_stream_put(dstream);
+			tquic_conn_put(conn);
+			sk_free(child_sk);
+			return -ENOMEM;
+		}
 
 	hs->sk = child_sk;
 	hs->timeout_ms = TQUIC_HANDSHAKE_TIMEOUT_MS;
@@ -1924,20 +2022,30 @@ int tquic_server_handshake(struct sock *listener_sk,
 	sock_hold(child_sk);
 
 	/* Initiate server TLS handshake */
-	ret = tquic_start_server_handshake(child_sk, hs);
-	if (ret < 0) {
-		tquic_dbg("failed to start server handshake: %d\n", ret);
-		sock_put(child_sk);
-		child_tsk->handshake_state = NULL;
-		kfree_sensitive(hs);
-		/* Release listener ref taken above before dropping conn */
-		sock_put(listener_sk);
-		conn->sk = NULL;
-		tquic_conn_put(conn);
-		child_tsk->conn = NULL;
-		sk_free(child_sk);
-		return ret;
-	}
+		ret = tquic_start_server_handshake(child_sk, hs);
+		if (ret < 0) {
+			struct tquic_stream *dstream = NULL;
+
+			tquic_dbg("failed to start server handshake: %d\n", ret);
+			sock_put(child_sk);
+			child_tsk->handshake_state = NULL;
+			kfree_sensitive(hs);
+			/* Release listener ref taken above before dropping conn */
+			sock_put(listener_sk);
+			conn->sk = NULL;
+			write_lock_bh(&child_sk->sk_callback_lock);
+			if (child_tsk->conn == conn) {
+				dstream = child_tsk->default_stream;
+				child_tsk->default_stream = NULL;
+				child_tsk->conn = NULL;
+			}
+			write_unlock_bh(&child_sk->sk_callback_lock);
+			if (dstream)
+				tquic_stream_put(dstream);
+			tquic_conn_put(conn);
+			sk_free(child_sk);
+			return ret;
+		}
 
 	/* Handshake proceeds async; child added to accept queue on completion */
 	tquic_dbg("server handshake initiated for incoming connection\n");
@@ -1973,7 +2081,7 @@ int tquic_server_psk_callback(struct sock *sk, const char *identity,
 			      size_t identity_len, u8 *psk)
 {
 	struct tquic_sock *tsk = tquic_sk(sk);
-	struct tquic_connection *conn = tsk->conn;
+	struct tquic_connection *conn = NULL;
 	struct tquic_client *client;
 
 	if (!identity || identity_len == 0 || !psk)
@@ -2007,12 +2115,14 @@ int tquic_server_psk_callback(struct sock *sk, const char *identity,
 	}
 
 	/* Bind client to connection for resource tracking */
+	conn = tquic_sock_conn_get(tsk);
 	if (conn) {
 		int ret = tquic_server_bind_client(conn, client);
 		if (ret < 0) {
 			tquic_warn("failed to bind client: %d\n", ret);
 			/* Continue anyway - binding is for stats */
 		}
+		tquic_conn_put(conn);
 	}
 
 	rcu_read_unlock();

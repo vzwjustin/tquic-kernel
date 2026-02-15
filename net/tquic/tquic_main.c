@@ -146,8 +146,26 @@ void tquic_conn_destroy(struct tquic_connection *conn)
 	tquic_pm_conn_release(conn);
 
 	/* Clean up state machine first */
-	if (conn->state_machine)
-		tquic_conn_state_cleanup(conn);
+	if (conn->state_machine) {
+		u32 magic = *(u32 *)conn->state_machine;
+
+		switch (magic) {
+		case TQUIC_SM_MAGIC_CONN_STATE:
+			tquic_conn_state_cleanup(conn);
+			break;
+		case TQUIC_SM_MAGIC_MIGRATION:
+			tquic_migration_cleanup(conn);
+			break;
+		case TQUIC_SM_MAGIC_SESSION:
+			tquic_session_cleanup(conn);
+			break;
+		default:
+			WARN_ON_ONCE(1);
+			kfree(conn->state_machine);
+			conn->state_machine = NULL;
+			break;
+		}
+	}
 
 	/* Remove from global table */
 	rhashtable_remove_fast(&tquic_conn_table, &conn->node, tquic_conn_params);
@@ -168,48 +186,73 @@ void tquic_conn_destroy(struct tquic_connection *conn)
 		tquic_path_put(path);
 	}
 
-	/* Free all streams with proper memory accounting */
+	/*
+	 * Free all streams with proper accounting and refcount safety.
+	 *
+	 * Historically we freed streams directly here. That is unsafe if any
+	 * concurrent code still holds a transient tquic_stream_get() reference
+	 * (e.g. softirq delivery paths) while the socket drops its last conn ref.
+	 *
+	 * Tear-down strategy:
+	 * - Remove from rb-tree under conn->lock so new lookups can't find it.
+	 * - Purge/uncharge buffers while conn + sk are still valid.
+	 * - Detach stream->conn so a delayed final tquic_stream_put() won't
+	 *   dereference freed connection memory in tquic_stream_free().
+	 * - Drop the tree ownership reference via tquic_stream_put().
+	 */
+	spin_lock_bh(&conn->lock);
 	while ((node = rb_first(&conn->streams))) {
 		struct tquic_stream *stream = rb_entry(node, struct tquic_stream, node);
 		struct sk_buff *skb;
-		unsigned int skb_len;
+		u64 queued = 0;
 
 		rb_erase(node, &conn->streams);
+		RB_CLEAR_NODE(&stream->node);
+		spin_unlock_bh(&conn->lock);
 
-		/* Uncharge memory when purging buffers */
+		/* Purge send buffer and accumulate queued bytes for FC reservation. */
 		while ((skb = skb_dequeue(&stream->send_buf)) != NULL) {
-			/*
-			 * If we're dropping queued send data, release its
-			 * connection-level flow control reservation so
-			 * other streams on this connection aren't blocked.
-			 */
-			skb_len = skb->len;
-			if (skb_len) {
-				spin_lock_bh(&conn->lock);
-				if (conn->fc_data_reserved >= skb_len)
-					conn->fc_data_reserved -= skb_len;
-				else
-					conn->fc_data_reserved = 0;
-				spin_unlock_bh(&conn->lock);
-			}
-			if (conn->sk) {
+			queued += skb->len;
+			if (conn->sk)
 				sk_mem_uncharge(conn->sk, skb->truesize);
-				/* sk_wmem_alloc handled by skb destructor */
-			}
 			kfree_skb(skb);
 		}
+
+		if (queued) {
+			spin_lock_bh(&conn->lock);
+			if (conn->fc_data_reserved >= queued)
+				conn->fc_data_reserved -= queued;
+			else
+				conn->fc_data_reserved = 0;
+			spin_unlock_bh(&conn->lock);
+		}
+
+		/* Purge receive buffer. */
 		while ((skb = skb_dequeue(&stream->recv_buf)) != NULL) {
-			if (conn->sk) {
+			if (conn->sk)
 				sk_mem_uncharge(conn->sk, skb->truesize);
-				/* sk_rmem_alloc handled by skb destructor */
-			}
 			kfree_skb(skb);
 		}
-		kmem_cache_free(tquic_stream_cache, stream);
+
+		/*
+		 * Prevent late stream_free from touching a freed connection if
+		 * some ref holder races with teardown.
+		 */
+		WRITE_ONCE(stream->conn, NULL);
+
+		/* Drop tree ownership reference. */
+		tquic_stream_put(stream);
+
+		spin_lock_bh(&conn->lock);
 	}
+	spin_unlock_bh(&conn->lock);
 
 	/* Free crypto state if allocated */
 	tquic_crypto_cleanup(conn->crypto_state);
+
+	/* Free zerocopy state if allocated */
+	if (conn->zc_state)
+		tquic_zc_state_free(conn);
 
 	/*
 	 * NULL the scheduler pointer before the RCU grace period so that
@@ -284,6 +327,7 @@ int tquic_conn_add_path(struct tquic_connection *conn,
 	path = kmem_cache_zalloc(tquic_path_cache, GFP_KERNEL);
 	if (!path)
 		return -ENOMEM;
+	spin_lock_init(&path->loss_tracker.lock);
 
 	/* Set back-pointer to parent connection */
 	refcount_set(&path->refcnt, 1);
@@ -636,6 +680,8 @@ struct tquic_stream *tquic_stream_open(struct tquic_connection *conn, bool bidi)
 	if (!stream)
 		return NULL;
 
+	RB_CLEAR_NODE(&stream->node);
+
 	/* Allocate stream ID, enforcing MAX_STREAMS per RFC 9000 Section 4.6 */
 	spin_lock_bh(&conn->lock);
 	if (bidi) {
@@ -706,9 +752,9 @@ EXPORT_SYMBOL_GPL(tquic_stream_open);
  */
 /*
  * H-001: Lock-free stream creation helper.
- * Caller must hold conn->streams_lock during the entire lookup-and-create
- * sequence to prevent races.
- */
+	 * Caller must hold conn->lock during the entire lookup-and-create
+	 * sequence to prevent races.
+	 */
 static struct tquic_stream *
 tquic_stream_create_locked(struct tquic_connection *conn, u64 stream_id)
 {
@@ -733,6 +779,8 @@ tquic_stream_create_locked(struct tquic_connection *conn, u64 stream_id)
 	if (!stream)
 		return NULL;
 
+	RB_CLEAR_NODE(&stream->node);
+
 	stream->id = stream_id;
 	stream->state = TQUIC_STREAM_OPEN;
 	stream->conn = conn;
@@ -747,7 +795,7 @@ tquic_stream_create_locked(struct tquic_connection *conn, u64 stream_id)
 	init_waitqueue_head(&stream->wait);
 
 	/*
-	 * Insert into connection's stream tree. Caller holds streams_lock.
+	 * Insert into connection's stream tree. Caller holds conn->lock.
 	 * Double-check for races: another thread might have created the
 	 * stream between our lookup and this insertion.
 	 */
@@ -783,7 +831,7 @@ struct tquic_stream *tquic_stream_open_incoming(struct tquic_connection *conn,
 {
 	struct tquic_stream *stream;
 
-	spin_lock_bh(&conn->streams_lock);
+	spin_lock_bh(&conn->lock);
 	stream = tquic_stream_create_locked(conn, stream_id);
 	/*
 	 * Caller gets a transient reference; tree ownership remains as the
@@ -791,7 +839,7 @@ struct tquic_stream *tquic_stream_open_incoming(struct tquic_connection *conn,
 	 */
 	if (stream && !tquic_stream_get(stream))
 		stream = NULL;
-	spin_unlock_bh(&conn->streams_lock);
+	spin_unlock_bh(&conn->lock);
 
 	return stream;
 }
@@ -799,17 +847,24 @@ EXPORT_SYMBOL_GPL(tquic_stream_open_incoming);
 
 void tquic_stream_close(struct tquic_stream *stream)
 {
-	struct tquic_connection *conn = stream->conn;
+	struct tquic_connection *conn;
 	bool removed = false;
 
-	/* H-001: Use streams_lock to match stream creation */
-	spin_lock_bh(&conn->streams_lock);
+	if (!stream)
+		return;
+
+	conn = READ_ONCE(stream->conn);
+	if (!conn)
+		return;
+
+	/* Stream tree modifications are protected by conn->lock (protocol.h). */
+	spin_lock_bh(&conn->lock);
 	if (!RB_EMPTY_NODE(&stream->node)) {
 		rb_erase(&stream->node, &conn->streams);
 		RB_CLEAR_NODE(&stream->node);
 		removed = true;
 	}
-	spin_unlock_bh(&conn->streams_lock);
+	spin_unlock_bh(&conn->lock);
 
 	if (removed) {
 		spin_lock_bh(&conn->lock);

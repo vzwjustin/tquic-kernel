@@ -107,23 +107,31 @@ static struct tquic_sock *io_tquic_get_socket(struct io_kiocb *req)
 	return tquic_sk(sk);
 }
 
-/**
- * io_tquic_check_connected - Verify connection is established
- * @tsk: TQUIC socket
+/*
+ * io_tquic_get_connected_conn - Get a connected conn with ref held
  *
- * Return: 0 if connected, -ENOTCONN otherwise
+ * io_uring ops can race with socket teardown (tquic_destroy_sock) which
+ * WRITE_ONCE()'s tsk->conn to NULL. Always READ_ONCE() the pointer and
+ * take a ref before dereferencing conn fields.
  */
-static int io_tquic_check_connected(struct tquic_sock *tsk)
+static struct tquic_connection *io_tquic_get_connected_conn(struct tquic_sock *tsk)
 {
 	struct sock *sk = (struct sock *)tsk;
+	struct tquic_connection *conn;
 
 	if (sk->sk_state != TCP_ESTABLISHED)
-		return -ENOTCONN;
+		return ERR_PTR(-ENOTCONN);
 
-	if (!tsk->conn || READ_ONCE(tsk->conn->state) != TQUIC_CONN_CONNECTED)
-		return -ENOTCONN;
+	conn = tquic_sock_conn_get(tsk);
+	if (!conn)
+		return ERR_PTR(-ENOTCONN);
 
-	return 0;
+	if (READ_ONCE(conn->state) != TQUIC_CONN_CONNECTED) {
+		tquic_conn_put(conn);
+		return ERR_PTR(-ENOTCONN);
+	}
+
+	return conn;
 }
 
 /**
@@ -216,31 +224,36 @@ int io_tquic_send(struct io_kiocb *req, unsigned int issue_flags)
 	struct io_tquic_send *sr = io_kiocb_to_cmd(req, struct io_tquic_send);
 	struct tquic_sock *tsk = sr->sk;
 	struct sock *sk = (struct sock *)tsk;
-	struct tquic_connection *conn;
+	struct tquic_connection *conn = NULL;
 	struct tquic_stream *stream;
 	struct tquic_uring_ctx *uctx;
 	struct msghdr msg = {};
 	struct iovec iov;
+	bool stream_ref_held = false;
 	int ret;
 
 	/* Verify still connected */
-	ret = io_tquic_check_connected(tsk);
-	if (ret)
+	conn = io_tquic_get_connected_conn(tsk);
+	if (IS_ERR(conn)) {
+		ret = PTR_ERR(conn);
+		conn = NULL;
 		goto done;
-
-	conn = tsk->conn;
+	}
 
 	/* Get target stream */
 	if (sr->stream_id == 0) {
-		stream = tsk->default_stream;
+		stream = tquic_sock_default_stream_get_or_open(tsk, conn);
 		if (!stream) {
-			stream = tquic_stream_open(conn, true);
-			if (!stream) {
-				ret = -ENOMEM;
-				goto done;
-			}
-			tsk->default_stream = stream;
+			bool no_stream_credit;
+
+			spin_lock_bh(&conn->lock);
+			no_stream_credit =
+				(conn->next_stream_id_bidi / 4 >= conn->max_streams_bidi);
+			spin_unlock_bh(&conn->lock);
+			ret = no_stream_credit ? -EAGAIN : -ENOMEM;
+			goto done;
 		}
+		stream_ref_held = true;
 	} else {
 		/* Look up specific stream by ID in connection's stream tree */
 		stream = tquic_conn_stream_lookup(conn, sr->stream_id);
@@ -254,10 +267,17 @@ int io_tquic_send(struct io_kiocb *req, unsigned int issue_flags)
 					ret = -ENOMEM;
 					goto done;
 				}
+				if (!tquic_stream_get(stream)) {
+					ret = -ENOTCONN;
+					goto done;
+				}
+				stream_ref_held = true;
 			} else {
 				ret = -ENOENT;
 				goto done;
 			}
+		} else {
+			stream_ref_held = true;
 		}
 	}
 
@@ -276,16 +296,23 @@ int io_tquic_send(struct io_kiocb *req, unsigned int issue_flags)
 
 	if (ret == -EAGAIN && !(issue_flags & IO_URING_F_NONBLOCK)) {
 		/* Need to retry in blocking context */
+		if (stream_ref_held)
+			tquic_stream_put(stream);
+		tquic_conn_put(conn);
 		return IOU_RETRY;
 	}
 
 	/* Update statistics */
-	uctx = tquic_uring_ctx_get(sk);
+	uctx = READ_ONCE(conn->uring_ctx);
 	if (uctx && ret > 0) {
 		uctx->stats.sends++;
 	}
 
 done:
+	if (stream_ref_held)
+		tquic_stream_put(stream);
+	if (conn)
+		tquic_conn_put(conn);
 	io_req_set_res(req, ret, 0);
 	return IOU_COMPLETE;
 }
@@ -347,29 +374,40 @@ int io_tquic_recv(struct io_kiocb *req, unsigned int issue_flags)
 	struct io_tquic_recv *sr = io_kiocb_to_cmd(req, struct io_tquic_recv);
 	struct tquic_sock *tsk = sr->sk;
 	struct sock *sk = (struct sock *)tsk;
+	struct tquic_connection *conn = NULL;
 	struct tquic_stream *stream;
 	struct tquic_uring_ctx *uctx;
 	struct msghdr msg = {};
 	struct iovec iov;
+	bool stream_ref_held = false;
 	int ret;
 
 	/* Verify still connected */
-	ret = io_tquic_check_connected(tsk);
-	if (ret)
+	conn = io_tquic_get_connected_conn(tsk);
+	if (IS_ERR(conn)) {
+		ret = PTR_ERR(conn);
+		conn = NULL;
 		goto done;
+	}
 
 	/* Get source stream */
 	if (sr->stream_id == 0) {
-		stream = tsk->default_stream;
+		stream = tquic_sock_default_stream_get(tsk);
+		if (stream)
+			stream_ref_held = true;
 	} else {
 		/* Look up specific stream by ID */
-		stream = tquic_conn_stream_lookup(tsk->conn, sr->stream_id);
+		stream = tquic_conn_stream_lookup(conn, sr->stream_id);
+		if (stream)
+			stream_ref_held = true;
 	}
 
 	if (!stream) {
 		ret = 0;  /* No data available */
-		if (!(issue_flags & IO_URING_F_NONBLOCK))
+		if (!(issue_flags & IO_URING_F_NONBLOCK)) {
+			tquic_conn_put(conn);
 			return IOU_RETRY;
+		}
 		goto done;
 	}
 
@@ -387,17 +425,25 @@ int io_tquic_recv(struct io_kiocb *req, unsigned int issue_flags)
 	ret = tquic_recvmsg(sk, &msg, iov.iov_len, msg.msg_flags, NULL);
 
 	if (ret == -EAGAIN) {
-		if (!(issue_flags & IO_URING_F_NONBLOCK))
+		if (!(issue_flags & IO_URING_F_NONBLOCK)) {
+			if (stream_ref_held)
+				tquic_stream_put(stream);
+			tquic_conn_put(conn);
 			return IOU_RETRY;
+		}
 	}
 
 	/* Update statistics */
-	uctx = tquic_uring_ctx_get(sk);
+	uctx = READ_ONCE(conn->uring_ctx);
 	if (uctx && ret > 0) {
 		uctx->stats.recvs++;
 	}
 
 done:
+	if (stream_ref_held)
+		tquic_stream_put(stream);
+	if (conn)
+		tquic_conn_put(conn);
 	io_req_set_res(req, ret, 0);
 	return IOU_COMPLETE;
 }
@@ -413,31 +459,41 @@ int io_tquic_recv_multishot(struct io_kiocb *req, unsigned int issue_flags)
 	struct io_tquic_recv *sr = io_kiocb_to_cmd(req, struct io_tquic_recv);
 	struct tquic_sock *tsk = sr->sk;
 	struct sock *sk = (struct sock *)tsk;
+	struct tquic_connection *conn;
 	struct tquic_stream *stream;
 	struct tquic_uring_ctx *uctx;
 	struct msghdr msg = {};
 	struct iovec iov;
 	int ret;
 	unsigned int cflags = 0;
+	bool stream_ref_held = false;
 
 	/* Verify still connected */
-	ret = io_tquic_check_connected(tsk);
-	if (ret)
+	conn = io_tquic_get_connected_conn(tsk);
+	if (IS_ERR(conn)) {
+		ret = PTR_ERR(conn);
 		goto done_final;
+	}
 
 	/* Check retry limit */
 	if (sr->retry_count >= TQUIC_MSHOT_MAX_RETRY) {
 		/* Yield to other requests */
 		sr->retry_count = 0;
+		tquic_conn_put(conn);
 		return IOU_REQUEUE;
 	}
 
 	/* Get source stream */
-	stream = (sr->stream_id == 0) ? tsk->default_stream : NULL;
+	stream = (sr->stream_id == 0) ? tquic_sock_default_stream_get(tsk) : NULL;
+	if (stream)
+		stream_ref_held = true;
 
 	if (!stream || skb_queue_empty(&stream->recv_buf)) {
 		if (!(issue_flags & IO_URING_F_NONBLOCK)) {
 			sr->retry_count = 0;
+			if (stream_ref_held)
+				tquic_stream_put(stream);
+			tquic_conn_put(conn);
 			return IOU_RETRY;
 		}
 		ret = -EAGAIN;
@@ -455,7 +511,7 @@ int io_tquic_recv_multishot(struct io_kiocb *req, unsigned int issue_flags)
 	ret = tquic_recvmsg(sk, &msg, iov.iov_len, msg.msg_flags, NULL);
 
 	/* Update statistics */
-	uctx = tquic_uring_ctx_get(sk);
+	uctx = READ_ONCE(conn->uring_ctx);
 	if (uctx) {
 		if (ret > 0) {
 			uctx->stats.recvs++;
@@ -471,10 +527,16 @@ int io_tquic_recv_multishot(struct io_kiocb *req, unsigned int issue_flags)
 		io_req_set_res(req, ret, cflags);
 
 		/* Continue multishot */
+		if (stream_ref_held)
+			tquic_stream_put(stream);
+		tquic_conn_put(conn);
 		return IOU_ISSUE_SKIP_COMPLETE;
 	}
 
 done_continue:
+	if (stream_ref_held)
+		tquic_stream_put(stream);
+	tquic_conn_put(conn);
 	if (ret == -EAGAIN || ret == 0) {
 		/* No more data available, wait */
 		sr->retry_count = 0;
@@ -519,13 +581,17 @@ int io_tquic_sendmsg(struct io_kiocb *req, unsigned int issue_flags)
 	struct io_tquic_sendmsg *sr = io_kiocb_to_cmd(req, struct io_tquic_sendmsg);
 	struct tquic_sock *tsk = sr->sk;
 	struct sock *sk = (struct sock *)tsk;
+	struct tquic_connection *conn = NULL;
 	struct io_tquic_async_data *data;
 	struct msghdr *msg;
 	int ret;
 
-	ret = io_tquic_check_connected(tsk);
-	if (ret)
+	conn = io_tquic_get_connected_conn(tsk);
+	if (IS_ERR(conn)) {
+		ret = PTR_ERR(conn);
+		conn = NULL;
 		goto done;
+	}
 
 	/* Get or allocate async data */
 	data = req->async_data;
@@ -545,10 +611,14 @@ int io_tquic_sendmsg(struct io_kiocb *req, unsigned int issue_flags)
 
 	ret = tquic_sendmsg(sk, msg, msg->msg_iter.count);
 
-	if (ret == -EAGAIN && !(issue_flags & IO_URING_F_NONBLOCK))
+	if (ret == -EAGAIN && !(issue_flags & IO_URING_F_NONBLOCK)) {
+		tquic_conn_put(conn);
 		return IOU_RETRY;
+	}
 
-done:
+	done:
+	if (conn)
+		tquic_conn_put(conn);
 	io_tquic_free_async_data(req);
 	io_req_set_res(req, ret, 0);
 	return IOU_COMPLETE;
@@ -584,13 +654,17 @@ int io_tquic_recvmsg(struct io_kiocb *req, unsigned int issue_flags)
 	struct io_tquic_recvmsg *sr = io_kiocb_to_cmd(req, struct io_tquic_recvmsg);
 	struct tquic_sock *tsk = sr->sk;
 	struct sock *sk = (struct sock *)tsk;
+	struct tquic_connection *conn = NULL;
 	struct io_tquic_async_data *data;
 	struct msghdr *msg;
 	int ret;
 
-	ret = io_tquic_check_connected(tsk);
-	if (ret)
+	conn = io_tquic_get_connected_conn(tsk);
+	if (IS_ERR(conn)) {
+		ret = PTR_ERR(conn);
+		conn = NULL;
 		goto done;
+	}
 
 	/* Get or allocate async data */
 	data = req->async_data;
@@ -610,10 +684,14 @@ int io_tquic_recvmsg(struct io_kiocb *req, unsigned int issue_flags)
 
 	ret = tquic_recvmsg(sk, msg, msg->msg_iter.count, msg->msg_flags, NULL);
 
-	if (ret == -EAGAIN && !(issue_flags & IO_URING_F_NONBLOCK))
+	if (ret == -EAGAIN && !(issue_flags & IO_URING_F_NONBLOCK)) {
+		tquic_conn_put(conn);
 		return IOU_RETRY;
+	}
 
-done:
+	done:
+	if (conn)
+		tquic_conn_put(conn);
 	io_tquic_free_async_data(req);
 	io_req_set_res(req, ret, 0);
 	return IOU_COMPLETE;
@@ -656,29 +734,60 @@ int io_tquic_send_zc(struct io_kiocb *req, unsigned int issue_flags)
 	struct io_tquic_send *sr = io_kiocb_to_cmd(req, struct io_tquic_send);
 	struct tquic_sock *tsk = sr->sk;
 	struct sock *sk = (struct sock *)tsk;
-	struct tquic_connection *conn;
+	struct tquic_connection *conn = NULL;
 	struct tquic_stream *stream;
 	struct tquic_uring_ctx *uctx;
 	struct msghdr msg = {};
 	struct iovec iov;
+	bool stream_ref_held = false;
 	int ret;
 
-	ret = io_tquic_check_connected(tsk);
-	if (ret)
+	conn = io_tquic_get_connected_conn(tsk);
+	if (IS_ERR(conn)) {
+		ret = PTR_ERR(conn);
+		conn = NULL;
 		goto done;
-
-	conn = tsk->conn;
+	}
 
 	/* Get target stream */
-	stream = (sr->stream_id == 0) ? tsk->default_stream : NULL;
-	if (!stream) {
-		stream = tquic_stream_open(conn, true);
+	if (sr->stream_id == 0) {
+		stream = tquic_sock_default_stream_get_or_open(tsk, conn);
 		if (!stream) {
-			ret = -ENOMEM;
+			bool no_stream_credit;
+
+			spin_lock_bh(&conn->lock);
+			no_stream_credit =
+				(conn->next_stream_id_bidi / 4 >= conn->max_streams_bidi);
+			spin_unlock_bh(&conn->lock);
+			ret = no_stream_credit ? -EAGAIN : -ENOMEM;
 			goto done;
 		}
-		if (sr->stream_id == 0)
-			tsk->default_stream = stream;
+		stream_ref_held = true;
+	} else {
+		/* Look up specific stream by ID in connection's stream tree */
+		stream = tquic_conn_stream_lookup(conn, sr->stream_id);
+		if (!stream) {
+			/* Stream doesn't exist - check if auto-create is allowed */
+			if (sr->flags & MSG_MORE) {
+				bool is_bidi = !(sr->stream_id & 0x02);
+
+					stream = tquic_stream_open(conn, is_bidi);
+					if (!stream) {
+						ret = -ENOMEM;
+						goto done;
+					}
+					if (!tquic_stream_get(stream)) {
+						ret = -ENOTCONN;
+						goto done;
+					}
+					stream_ref_held = true;
+				} else {
+					ret = -ENOENT;
+					goto done;
+				}
+			} else {
+				stream_ref_held = true;
+			}
 	}
 
 	/* Set up message with MSG_ZEROCOPY from prep-phase cached values */
@@ -691,17 +800,25 @@ int io_tquic_send_zc(struct io_kiocb *req, unsigned int issue_flags)
 	/* Use TQUIC zero-copy sendmsg */
 	ret = tquic_sendmsg_zerocopy(sk, &msg, iov.iov_len, stream);
 
-	if (ret == -EAGAIN)
+	if (ret == -EAGAIN) {
+		if (stream_ref_held)
+			tquic_stream_put(stream);
+		tquic_conn_put(conn);
 		return IOU_RETRY;
+	}
 
 	/* Update statistics */
-	uctx = tquic_uring_ctx_get(sk);
+	uctx = READ_ONCE(conn->uring_ctx);
 	if (uctx && ret > 0) {
 		uctx->stats.sends++;
 		uctx->stats.zc_sends++;
 	}
 
 done:
+	if (stream_ref_held)
+		tquic_stream_put(stream);
+	if (conn)
+		tquic_conn_put(conn);
 	io_req_set_res(req, ret, 0);
 	return IOU_COMPLETE;
 }
@@ -1044,24 +1161,6 @@ void tquic_uring_ctx_free(struct tquic_connection *conn)
 }
 EXPORT_SYMBOL_GPL(tquic_uring_ctx_free);
 
-struct tquic_uring_ctx *tquic_uring_ctx_get(struct sock *sk)
-{
-	struct tquic_sock *tsk;
-	struct tquic_connection *conn;
-
-	if (!sk || sk->sk_protocol != IPPROTO_TQUIC)
-		return NULL;
-
-	tsk = tquic_sk(sk);
-	conn = tsk->conn;
-	if (!conn)
-		return NULL;
-
-	/* Return the uring context stored in dedicated field */
-	return conn->uring_ctx;
-}
-EXPORT_SYMBOL_GPL(tquic_uring_ctx_get);
-
 /*
  * =============================================================================
  * Statistics
@@ -1111,55 +1210,82 @@ int tquic_uring_setsockopt(struct sock *sk, int optname,
 			   sockptr_t optval, unsigned int optlen)
 {
 	struct tquic_sock *tsk = tquic_sk(sk);
-	struct tquic_connection *conn = tsk->conn;
+	struct tquic_connection *conn;
 	int val;
+	int ret = 0;
+
+	conn = io_tquic_get_connected_conn(tsk);
+	if (IS_ERR(conn))
+		return PTR_ERR(conn);
 
 	switch (optname) {
 	case TQUIC_URING_SQPOLL:
-		if (optlen < sizeof(int))
-			return -EINVAL;
-		if (copy_from_sockptr(&val, optval, sizeof(val)))
-			return -EFAULT;
+		if (optlen < sizeof(int)) {
+			ret = -EINVAL;
+			goto out_put;
+		}
+		if (copy_from_sockptr(&val, optval, sizeof(val))) {
+			ret = -EFAULT;
+			goto out_put;
+		}
 
-		if (val)
-			return tquic_uring_enable_sqpoll(conn);
-		else
+		if (val) {
+			ret = tquic_uring_enable_sqpoll(conn);
+		} else {
 			tquic_uring_disable_sqpoll(conn);
-		return 0;
+			ret = 0;
+		}
+		goto out_put;
 
 	case TQUIC_URING_CQE_BATCH:
-		if (optlen < sizeof(int))
-			return -EINVAL;
-		if (copy_from_sockptr(&val, optval, sizeof(val)))
-			return -EFAULT;
+		if (optlen < sizeof(int)) {
+			ret = -EINVAL;
+			goto out_put;
+		}
+		if (copy_from_sockptr(&val, optval, sizeof(val))) {
+			ret = -EFAULT;
+			goto out_put;
+		}
 
-		return tquic_uring_set_cqe_batch_size(conn, val);
+		ret = tquic_uring_set_cqe_batch_size(conn, val);
+		goto out_put;
 
 	case TQUIC_URING_BUF_RING: {
 		struct tquic_uring_buf_ring_args args;
 		struct tquic_io_buf_ring *br;
 		struct tquic_uring_ctx *uctx;
 
-		if (optlen < sizeof(args))
-			return -EINVAL;
-		if (copy_from_sockptr(&args, optval, sizeof(args)))
-			return -EFAULT;
+		if (optlen < sizeof(args)) {
+			ret = -EINVAL;
+			goto out_put;
+		}
+		if (copy_from_sockptr(&args, optval, sizeof(args))) {
+			ret = -EFAULT;
+			goto out_put;
+		}
 
-		uctx = tquic_uring_ctx_get(sk);
-		if (!uctx)
-			return -EINVAL;
+		uctx = READ_ONCE(conn->uring_ctx);
+		if (!uctx) {
+			ret = -EINVAL;
+			goto out_put;
+		}
 
 		if (args.flags & TQUIC_URING_BUF_RING_CREATE) {
-			if (uctx->nr_buf_rings >= TQUIC_URING_MAX_BUF_RINGS)
-				return -ENOSPC;
+			if (uctx->nr_buf_rings >= TQUIC_URING_MAX_BUF_RINGS) {
+				ret = -ENOSPC;
+				goto out_put;
+			}
 
 			br = tquic_io_buf_ring_create(conn, args.buf_size,
 						      args.buf_count, args.bgid);
-			if (IS_ERR(br))
-				return PTR_ERR(br);
+			if (IS_ERR(br)) {
+				ret = PTR_ERR(br);
+				goto out_put;
+			}
 
 			uctx->buf_rings[uctx->nr_buf_rings++] = br;
-			return 0;
+			ret = 0;
+			goto out_put;
 		}
 
 		if (args.flags & TQUIC_URING_BUF_RING_DESTROY) {
@@ -1169,18 +1295,26 @@ int tquic_uring_setsockopt(struct sock *sk, int optname,
 				if (uctx->buf_rings[i]->bgid == args.bgid) {
 					tquic_io_buf_ring_destroy(uctx->buf_rings[i]);
 					uctx->buf_rings[i] = uctx->buf_rings[--uctx->nr_buf_rings];
-					return 0;
+					ret = 0;
+					goto out_put;
 				}
 			}
-			return -ENOENT;
+			ret = -ENOENT;
+			goto out_put;
 		}
 
-		return -EINVAL;
+		ret = -EINVAL;
+		goto out_put;
 	}
 
 	default:
-		return -ENOPROTOOPT;
+		ret = -ENOPROTOOPT;
+		goto out_put;
 	}
+
+out_put:
+	tquic_conn_put(conn);
+	return ret;
 }
 EXPORT_SYMBOL_GPL(tquic_uring_setsockopt);
 
@@ -1197,20 +1331,29 @@ int tquic_uring_getsockopt(struct sock *sk, int optname,
 			   char __user *optval, int __user *optlen)
 {
 	struct tquic_sock *tsk = tquic_sk(sk);
-	struct tquic_connection *conn = tsk->conn;
+	struct tquic_connection *conn;
 	struct tquic_uring_ctx *uctx;
 	int len, val;
+	int ret = 0;
 
-	uctx = tquic_uring_ctx_get(sk);
-	if (!uctx)
-		return -EINVAL;
+	conn = io_tquic_get_connected_conn(tsk);
+	if (IS_ERR(conn))
+		return PTR_ERR(conn);
+
+	uctx = READ_ONCE(conn->uring_ctx);
+	if (!uctx) {
+		ret = -EINVAL;
+		goto out_put;
+	}
 
 	if (get_user(len, optlen))
-		return -EFAULT;
+		goto out_fault;
 
 	/* CF-543: Reject zero-length reads; sizeof(int) minimum for int opts */
-	if (len < (int)sizeof(int))
-		return -EINVAL;
+	if (len < (int)sizeof(int)) {
+		ret = -EINVAL;
+		goto out_put;
+	}
 
 	switch (optname) {
 	case TQUIC_URING_SQPOLL:
@@ -1222,16 +1365,24 @@ int tquic_uring_getsockopt(struct sock *sk, int optname,
 		break;
 
 	default:
-		return -ENOPROTOOPT;
+		ret = -ENOPROTOOPT;
+		goto out_put;
 	}
 
 	len = min_t(unsigned int, len, sizeof(int));
 	if (put_user(len, optlen))
-		return -EFAULT;
+		goto out_fault;
 	if (copy_to_user(optval, &val, len))
-		return -EFAULT;
+		goto out_fault;
 
-	return 0;
+	ret = 0;
+	out_put:
+		tquic_conn_put(conn);
+		return ret;
+
+out_fault:
+	ret = -EFAULT;
+	goto out_put;
 }
 EXPORT_SYMBOL_GPL(tquic_uring_getsockopt);
 

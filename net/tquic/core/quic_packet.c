@@ -154,7 +154,7 @@ static struct tquic_stream *tquic_stream_lookup_internal(struct tquic_connection
 {
 	struct rb_node *node;
 
-	spin_lock_bh(&conn->streams_lock);
+	spin_lock_bh(&conn->lock);
 	node = conn->streams.rb_node;
 	while (node) {
 		struct tquic_stream *stream = rb_entry(node, struct tquic_stream, node);
@@ -164,11 +164,11 @@ static struct tquic_stream *tquic_stream_lookup_internal(struct tquic_connection
 		else if (stream_id > stream->id)
 			node = node->rb_right;
 		else {
-			spin_unlock_bh(&conn->streams_lock);
+			spin_unlock_bh(&conn->lock);
 			return stream;
 		}
 	}
-	spin_unlock_bh(&conn->streams_lock);
+	spin_unlock_bh(&conn->lock);
 	return NULL;
 }
 
@@ -190,7 +190,7 @@ static struct tquic_stream *tquic_stream_create_internal(struct tquic_connection
 	init_waitqueue_head(&stream->wait);
 
 	/* Insert into rb_tree */
-	spin_lock_bh(&conn->streams_lock);
+	spin_lock_bh(&conn->lock);
 	link = &conn->streams.rb_node;
 	while (*link) {
 		struct tquic_stream *s = rb_entry(*link, struct tquic_stream, node);
@@ -202,7 +202,7 @@ static struct tquic_stream *tquic_stream_create_internal(struct tquic_connection
 	}
 	rb_link_node(&stream->node, parent, link);
 	rb_insert_color(&stream->node, &conn->streams);
-	spin_unlock_bh(&conn->streams_lock);
+	spin_unlock_bh(&conn->lock);
 
 	return stream;
 }

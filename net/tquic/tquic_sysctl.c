@@ -235,21 +235,26 @@ static int proc_tquic_scheduler(TQUIC_CTL_TABLE *table, int write,
 				void *buffer, size_t *lenp, loff_t *ppos)
 {
 	struct net *net = current->nsproxy->net_ns;
+	struct tquic_net *tn = tquic_pernet(net);
+	struct tquic_sched_ops *sched_ops;
 	char name[TQUIC_NET_SCHED_NAME_MAX];
 	struct ctl_table tmp_table;
 	int ret;
+
+	if (!tn)
+		return -EINVAL;
 
 	if (!write) {
 		/* Read current default scheduler for this netns */
 		const char *current_name;
 
-		rcu_read_lock();
-		if (tquic_pernet(net)->default_scheduler)
-			current_name = tquic_pernet(net)->default_scheduler->name;
+		if (tn->sched_name[0])
+			current_name = tn->sched_name;
 		else
+			current_name = tquic_sched_get_default(net);
+		if (!current_name)
 			current_name = "aggregate";
 		strscpy(name, current_name, sizeof(name));
-		rcu_read_unlock();
 
 		/* Use temporary table pointing to our local buffer */
 		memset(&tmp_table, 0, sizeof(tmp_table));
@@ -262,7 +267,7 @@ static int proc_tquic_scheduler(TQUIC_CTL_TABLE *table, int write,
 	}
 
 	/* Write: get new scheduler name from user */
-	strscpy(name, tquic_pernet(net)->sched_name, sizeof(name));
+	strscpy(name, tn->sched_name, sizeof(name));
 
 	memset(&tmp_table, 0, sizeof(tmp_table));
 	tmp_table.procname = table->procname;
@@ -274,17 +279,23 @@ static int proc_tquic_scheduler(TQUIC_CTL_TABLE *table, int write,
 	if (ret)
 		return ret;
 
-	/* Validate scheduler exists */
-	rcu_read_lock();
-	if (!tquic_sched_find(name)) {
-		rcu_read_unlock();
+	/* Validate scheduler exists and drop temporary module ref */
+	sched_ops = tquic_sched_find(name);
+	if (!sched_ops) {
 		tquic_warn("unknown scheduler '%s'\n", name);
 		return -ENOENT;
 	}
-	rcu_read_unlock();
+	module_put(sched_ops->owner);
 
-	/* Set default scheduler (global for out-of-tree build, void return) */
-	tquic_sched_set_default(name);
+	/* Persist netns preference for readback/future consumers. */
+	strscpy(tn->sched_name, name, sizeof(tn->sched_name));
+
+	/* Keep existing global scheduler behavior for current data path. */
+	ret = tquic_sched_set_default(name);
+	if (ret) {
+		tquic_warn("failed to set scheduler '%s': %d\n", name, ret);
+		return ret;
+	}
 
 	tquic_dbg("netns scheduler set to '%s'\n", name);
 	return 0;
@@ -303,6 +314,7 @@ static int proc_tquic_cc_algorithm(TQUIC_CTL_TABLE *table, int write,
 				   void *buffer, size_t *lenp, loff_t *ppos)
 {
 	struct net *net = current->nsproxy->net_ns;
+	struct tquic_cong_ops *ca;
 	char name[TQUIC_NET_CC_NAME_MAX];
 	struct ctl_table tmp_table;
 	int ret;
@@ -337,11 +349,14 @@ static int proc_tquic_cc_algorithm(TQUIC_CTL_TABLE *table, int write,
 	if (ret)
 		return ret;
 
-	/* Validate CC algorithm exists */
-	if (!tquic_cong_find(name)) {
+	/* Validate CC algorithm exists and drop temporary module ref */
+	ca = tquic_cong_find(name);
+	if (!ca) {
 		tquic_warn("unknown CC algorithm '%s'\n", name);
 		return -ENOENT;
 	}
+	if (ca->owner)
+		module_put(ca->owner);
 
 	/* Set per-netns default CC algorithm */
 	ret = tquic_cong_set_default(net, name);
@@ -492,6 +507,7 @@ static int proc_tquic_ecn_beta(TQUIC_CTL_TABLE *table, int write,
 static int __maybe_unused tquic_sysctl_scheduler(TQUIC_CTL_TABLE *table, int write,
 						  void *buffer, size_t *lenp, loff_t *ppos)
 {
+	struct tquic_sched_ops *sched_ops;
 	int ret;
 
 	ret = proc_dostring(table, write, buffer, lenp, ppos);
@@ -499,13 +515,12 @@ static int __maybe_unused tquic_sysctl_scheduler(TQUIC_CTL_TABLE *table, int wri
 		return ret;
 
 	/* Validate and set global scheduler (legacy) */
-	rcu_read_lock();
-	if (!tquic_sched_find(tquic_scheduler)) {
-		rcu_read_unlock();
+	sched_ops = tquic_sched_find(tquic_scheduler);
+	if (!sched_ops) {
 		tquic_warn("unknown scheduler '%s'\n", tquic_scheduler);
 		return -ENOENT;
 	}
-	rcu_read_unlock();
+	module_put(sched_ops->owner);
 
 	/* Set global default scheduler (void return in current API) */
 	tquic_sched_set_default(tquic_scheduler);

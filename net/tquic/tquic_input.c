@@ -21,6 +21,7 @@
 #include <linux/random.h>
 #include <linux/hrtimer.h>
 #include <linux/overflow.h>
+#include <asm/unaligned.h>
 #include <net/sock.h>
 #include <net/udp.h>
 #include <net/udp_tunnel.h>
@@ -1349,11 +1350,12 @@ static int tquic_process_stream_frame(struct tquic_rx_ctx *ctx)
 		return -EINVAL;
 
 	/*
-	 * Lookup stream under streams_lock, then take a reference before
-	 * dropping the lock so the stream remains valid for processing.
+	 * Lookup stream under conn->lock (stream tree lock per protocol.h),
+	 * then take a reference before dropping the lock so the stream remains
+	 * valid for processing.
 	 */
 	stream = NULL;
-	spin_lock_bh(&ctx->conn->streams_lock);
+	spin_lock_bh(&ctx->conn->lock);
 	{
 		struct rb_node *node = ctx->conn->streams.rb_node;
 
@@ -1372,7 +1374,7 @@ static int tquic_process_stream_frame(struct tquic_rx_ctx *ctx)
 			}
 		}
 	}
-	spin_unlock_bh(&ctx->conn->streams_lock);
+	spin_unlock_bh(&ctx->conn->lock);
 
 	if (!stream) {
 		/*
@@ -1477,7 +1479,7 @@ static int tquic_process_stream_frame(struct tquic_rx_ctx *ctx)
 	skb_put_data(data_skb, ctx->data + ctx->offset, length);
 
 	/* Store offset in skb->cb for reordering */
-	*(u64 *)data_skb->cb = offset;
+	put_unaligned(offset, (u64 *)data_skb->cb);
 
 	/*
 	 * Atomically reserve receive buffer space and charge it to the socket.
@@ -3861,8 +3863,9 @@ not_reset:
 			struct sock *listener;
 			u32 pkt_version;
 
-			/* Lookup listener socket for this address/port */
-			listener = tquic_lookup_listener(&local_addr);
+			/* Lookup listener socket for this address/port in this netns */
+			listener = tquic_lookup_listener_net(sock_net(sk),
+							     &local_addr);
 			if (listener) {
 				/*
 				 * Extract version from long header (bytes 1-4).

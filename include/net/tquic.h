@@ -127,6 +127,7 @@ struct tquic_path;
 struct tquic_frame;
 struct tquic_packet;
 struct tquic_xsk;
+struct tquic_udp_sock;
 
 /**
  * struct tquic_rtt_state - RTT measurement state (RFC 9002 Section 5)
@@ -156,6 +157,12 @@ struct tquic_grease_state;
 struct tquic_addr_discovery_state;
 struct tquic_negotiated_params;
 struct tquic_cid_manager;
+struct tquic_mp_sched_ops;
+
+/* State machine magic numbers for type discrimination */
+#define TQUIC_SM_MAGIC_CONN_STATE	0x434F4E53 /* "CONS" */
+#define TQUIC_SM_MAGIC_MIGRATION	0x4D494752 /* "MIGR" */
+#define TQUIC_SM_MAGIC_SESSION		0x53455353 /* "SESS" */
 
 /**
  * enum tquic_conn_state - Connection state machine states
@@ -413,6 +420,9 @@ struct tquic_path {
 	void *cong;  /* Congestion control state */
 	struct tquic_cong_ops *cong_ops;  /* Current CC algorithm ops */
 
+	/* Per-path UDP encapsulation socket (owned by the path). */
+	struct tquic_udp_sock *udp_sock;
+
 	/* RTT measurement state (for loss detection) - embedded struct */
 	struct tquic_rtt_state rtt;
 
@@ -463,6 +473,14 @@ struct tquic_path {
 		/* PTO state (RFC 9002 Section 6.2) */
 		u32 pto_count;		/* PTO backoff counter */
 	} cc;
+
+	/* Path degradation tracking (consecutive losses in a round) */
+	struct {
+		spinlock_t lock;
+		u32 consecutive_losses;
+		u64 round_start_tx;
+		u64 last_loss_tx;
+	} loss_tracker;
 
 	u32 mtu;
 	u32 flags;			/* Path flags (TQUIC_PATH_FLAG_*) */
@@ -625,6 +643,23 @@ struct tquic_stream {
 
 	void *ext;  /* Extended stream state for reassembly and priority */
 };
+
+/*
+ * skb->cb layout for skbs enqueued on stream->send_buf.
+ *
+ * The send path may partially consume an SKB while leaving it queued; for
+ * non-linear (zerocopy) SKBs we cannot use skb_pull() reliably. Track the
+ * byte offset within the SKB separately.
+ */
+struct tquic_stream_skb_cb {
+	u64 stream_offset;	/* Stream offset for skb data[0] */
+	u32 data_off;		/* Bytes already consumed from this skb */
+};
+
+static inline struct tquic_stream_skb_cb *tquic_stream_skb_cb(struct sk_buff *skb)
+{
+	return (struct tquic_stream_skb_cb *)skb->cb;
+}
 
 /**
  * struct tquic_conn_stats - Connection-level statistics
@@ -968,7 +1003,9 @@ struct tquic_connection {
 	spinlock_t paths_lock;		/* Protects paths list */
 	struct tquic_path *active_path;
 	u8 num_paths;
+	u8 active_paths;		/* Number of active/usable paths */
 	u8 max_paths;			/* Maximum paths allowed */
+	u64 aggregate_cwnd;		/* Sum of cwnd across all paths */
 
 	/*
 	 * Migration control (RFC 9000 Section 9)
@@ -1119,6 +1156,7 @@ struct tquic_connection {
 	/* Scheduler */
 	void *scheduler;		/* Bonding scheduler state (struct tquic_bond_state *) */
 	void *sched_priv;		/* Non-bond per-connection scheduler/congestion private data */
+	struct tquic_mp_sched_ops __rcu *mp_sched_ops; /* Multipath scheduler ops */
 
 	/* Connection state machine (extended state) */
 	void *state_machine;
@@ -1479,6 +1517,15 @@ struct tquic_sock {
 	atomic_t accept_queue_len;
 	u32 max_accept_queue;
 
+	/*
+	 * Socket-owned reference to the default stream.
+	 *
+	 * This pointer may be accessed concurrently (e.g. data delivery from
+	 * softirq context). Always use tquic_sock_default_stream_get() (or
+	 * tquic_sock_default_stream_get_or_open()) to acquire a transient ref
+	 * before dereferencing. The socket holds its own ref while the pointer
+	 * is installed, so it cannot dangle.
+	 */
 	struct tquic_stream *default_stream;
 
 	/* Handshake state (NULL when not in handshake) */
@@ -1845,13 +1892,13 @@ struct tquic_cong_ops {
 
 /* Socket address type compatibility */
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 19, 0)
-#define TQUIC_SOCKADDR struct sockaddr_unsized
+typedef struct sockaddr_unsized tquic_sockaddr_t;
 #else
-#define TQUIC_SOCKADDR struct sockaddr
+typedef struct sockaddr tquic_sockaddr_t;
 #endif
 
 /* Core API functions */
-int tquic_connect(struct sock *sk, TQUIC_SOCKADDR *addr, int addr_len);
+int tquic_connect(struct sock *sk, tquic_sockaddr_t *addr, int addr_len);
 int tquic_accept(struct sock *sk, struct sock **newsk, int flags, bool kern);
 int tquic_sendmsg(struct sock *sk, struct msghdr *msg, size_t len);
 int tquic_recvmsg(struct sock *sk, struct msghdr *msg, size_t len, int flags,
@@ -2028,6 +2075,25 @@ static inline bool tquic_conn_get(struct tquic_connection *conn)
 	return refcount_inc_not_zero(&conn->refcnt);
 }
 
+static inline struct tquic_connection *tquic_sock_conn_get(struct tquic_sock *tsk)
+{
+	struct sock *sk = (struct sock *)tsk;
+	struct tquic_connection *conn;
+
+	/*
+	 * tsk->conn can be cleared concurrently during teardown. Protect the
+	 * pointer + ref acquisition with sk_callback_lock so readers can safely
+	 * take a reference without racing a final tquic_conn_put().
+	 */
+	read_lock_bh(&sk->sk_callback_lock);
+	conn = tsk->conn;
+	if (conn && !tquic_conn_get(conn))
+		conn = NULL;
+	read_unlock_bh(&sk->sk_callback_lock);
+
+	return conn;
+}
+
 /**
  * tquic_conn_put - Release a reference on a connection
  * @conn: Connection to release
@@ -2086,6 +2152,82 @@ void tquic_stream_destroy(struct tquic_stream_manager *mgr, struct tquic_stream 
 int tquic_stream_send(struct tquic_stream *stream, const void *data, size_t len, bool fin);
 int tquic_stream_recv(struct tquic_stream *stream, void *data, size_t len);
 void tquic_stream_reset(struct tquic_stream *stream, u64 error_code);
+
+static inline struct tquic_stream *tquic_sock_default_stream_get(struct tquic_sock *tsk)
+{
+	struct sock *sk = (struct sock *)tsk;
+	struct tquic_stream *stream;
+
+	read_lock_bh(&sk->sk_callback_lock);
+	stream = tsk->default_stream;
+	if (stream && !tquic_stream_get(stream))
+		stream = NULL;
+	read_unlock_bh(&sk->sk_callback_lock);
+
+	return stream;
+}
+
+static inline struct tquic_stream *
+tquic_sock_default_stream_get_or_open(struct tquic_sock *tsk,
+				      struct tquic_connection *conn)
+{
+	struct sock *sk = (struct sock *)tsk;
+	struct tquic_stream *stream, *new_stream;
+	bool installed = false;
+
+	stream = tquic_sock_default_stream_get(tsk);
+	if (stream)
+		return stream;
+
+	new_stream = tquic_stream_open(conn, true);
+	if (!new_stream)
+		return NULL;
+
+	write_lock_bh(&sk->sk_callback_lock);
+	if (!tsk->default_stream) {
+		/*
+		 * Take the socket-owned reference before publishing the
+		 * pointer, so any reader that sees it can always get a ref.
+		 */
+		if (!tquic_stream_get(new_stream)) {
+			write_unlock_bh(&sk->sk_callback_lock);
+			tquic_stream_close(new_stream);
+			return NULL;
+		}
+		tsk->default_stream = new_stream;
+		installed = true;
+
+		/* Return a transient reference to the caller. */
+		stream = new_stream;
+		if (!tquic_stream_get(stream))
+			stream = NULL;
+	} else {
+		stream = tsk->default_stream;
+		if (stream && !tquic_stream_get(stream))
+			stream = NULL;
+	}
+	write_unlock_bh(&sk->sk_callback_lock);
+
+	/* Lost the race: close the extra stream we created. */
+	if (!installed)
+		tquic_stream_close(new_stream);
+
+	return stream;
+}
+
+static inline void tquic_sock_default_stream_clear(struct tquic_sock *tsk)
+{
+	struct sock *sk = (struct sock *)tsk;
+	struct tquic_stream *old;
+
+	write_lock_bh(&sk->sk_callback_lock);
+	old = tsk->default_stream;
+	tsk->default_stream = NULL;
+	write_unlock_bh(&sk->sk_callback_lock);
+
+	if (old)
+		tquic_stream_put(old);
+}
 
 /* Path management for WAN bonding */
 struct tquic_path *tquic_path_create(struct tquic_connection *conn,
@@ -2359,6 +2501,8 @@ void tquic_cert_verify_exit(void);
 /* Scheduler registration and operations */
 int tquic_register_scheduler(struct tquic_sched_ops *ops);
 void tquic_unregister_scheduler(struct tquic_sched_ops *ops);
+int tquic_sched_register(struct tquic_sched_ops *ops);
+void tquic_sched_unregister(struct tquic_sched_ops *ops);
 struct tquic_sched_ops *tquic_sched_find(const char *name);
 int tquic_sched_set_default(const char *name);
 void *tquic_sched_init_conn(struct tquic_connection *conn,
@@ -2402,8 +2546,8 @@ int tquic_sock_setsockopt(struct socket *sock, int level, int optname,
 #endif
 int tquic_sock_getsockopt(struct socket *sock, int level, int optname,
 			  char __user *optval, int __user *optlen);
-int tquic_sock_bind(struct socket *sock, TQUIC_SOCKADDR *uaddr, int addr_len);
-int tquic_connect_socket(struct socket *sock, TQUIC_SOCKADDR *uaddr,
+int tquic_sock_bind(struct socket *sock, tquic_sockaddr_t *uaddr, int addr_len);
+int tquic_connect_socket(struct socket *sock, tquic_sockaddr_t *uaddr,
 			 int addr_len, int flags);
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 7, 0)
 int tquic_accept_socket(struct socket *sock, struct socket *newsock,
@@ -2784,9 +2928,6 @@ int tquic_bond_get_stats(struct tquic_connection *conn,
  * UDP Tunnel Integration for WAN Bonding
  */
 
-/* Forward declaration for UDP socket state */
-struct tquic_udp_sock;
-
 /* Listener registration and lookup */
 int tquic_register_listener(struct sock *sk);
 void tquic_unregister_listener(struct sock *sk);
@@ -2923,6 +3064,12 @@ void tquic_timer_start_path_validation(struct tquic_connection *conn,
 				       struct tquic_path *path);
 void tquic_timer_path_validated(struct tquic_connection *conn,
 				struct tquic_path *path);
+
+/* Migration/session helpers (tquic_migration.c) */
+int tquic_migration_get_status(struct tquic_connection *conn,
+			      struct tquic_migrate_info *info);
+void tquic_migration_cleanup(struct tquic_connection *conn);
+void tquic_session_cleanup(struct tquic_connection *conn);
 
 /* Packet tracking for recovery */
 int tquic_timer_on_packet_sent(struct tquic_timer_state *ts, int pn_space,

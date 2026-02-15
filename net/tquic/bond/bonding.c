@@ -873,10 +873,13 @@ int tquic_bond_reorder_deliver(struct tquic_bond_state *bond)
 		if (bond->conn && bond->conn->sk) {
 			struct sock *sk = bond->conn->sk;
 			struct tquic_sock *tsk = tquic_sk(sk);
+			struct tquic_stream *stream;
 
-			if (tsk->default_stream) {
-				skb_queue_tail(&tsk->default_stream->recv_buf, skb);
+			stream = tquic_sock_default_stream_get(tsk);
+			if (stream) {
+				skb_queue_tail(&stream->recv_buf, skb);
 				sk->sk_data_ready(sk);
+				tquic_stream_put(stream);
 			} else {
 				kfree_skb(skb);
 			}

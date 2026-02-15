@@ -28,6 +28,7 @@
 #include <linux/pipe_fs_i.h>
 #include <linux/highmem.h>
 #include <linux/mm.h>
+#include <asm/unaligned.h>
 #include <net/sock.h>
 #include <net/tquic.h>
 #include "../tquic_compat.h"
@@ -652,7 +653,7 @@ static struct tquic_stream *tquic_stream_create_internal(
 	struct tquic_stream_ext *ext;
 	bool is_bidi = tquic_stream_id_is_bidi(stream_id);
 
-	stream = kzalloc(sizeof(*stream), GFP_ATOMIC);
+	stream = kmem_cache_zalloc(tquic_stream_cache, GFP_ATOMIC);
 	if (!stream)
 		return NULL;
 
@@ -840,7 +841,7 @@ void tquic_stream_destroy(struct tquic_stream_manager *mgr,
 
 	tquic_dbg("destroyed stream %llu\n", stream->id);
 
-	kfree(stream);
+	kmem_cache_free(tquic_stream_cache, stream);
 }
 EXPORT_SYMBOL_GPL(tquic_stream_destroy);
 
@@ -933,20 +934,11 @@ ssize_t tquic_stream_write(struct tquic_stream_manager *mgr,
 		/* Limit chunk size for reasonable SKB sizes */
 		chunk = min_t(size_t, allowed, 16384);
 
-		/* Reserve stream + connection manager accounting under the lock. */
-		offset = stream->send_offset;
-		stream->send_offset += chunk;
-		mgr->data_sent += chunk;
-
 		spin_unlock_bh(&mgr->lock);
 
 		skb = alloc_skb(chunk, GFP_KERNEL);
 		if (!skb) {
 			spin_lock_bh(&mgr->lock);
-			stream->send_offset -= chunk;
-			mgr->data_sent -= chunk;
-			spin_unlock_bh(&mgr->lock);
-
 			if (copied == 0)
 				return -ENOMEM;
 			break;
@@ -957,19 +949,23 @@ ssize_t tquic_stream_write(struct tquic_stream_manager *mgr,
 			kfree_skb(skb);
 
 			spin_lock_bh(&mgr->lock);
-			stream->send_offset -= chunk;
-			mgr->data_sent -= chunk;
-			spin_unlock_bh(&mgr->lock);
-
 			if (copied == 0)
 				return -EFAULT;
 			break;
 		}
 
-		/* Store reserved stream offset in skb->cb */
-		*(u64 *)skb->cb = offset;
-
 		spin_lock_bh(&mgr->lock);
+
+		/* Reserve stream + connection manager accounting under the lock. */
+		offset = stream->send_offset;
+		stream->send_offset += chunk;
+		mgr->data_sent += chunk;
+		mgr->conn->stats.tx_bytes += chunk;
+
+		/* Store reserved stream offset in skb->cb */
+		tquic_stream_skb_cb(skb)->stream_offset = offset;
+		tquic_stream_skb_cb(skb)->data_off = 0;
+
 		skb_queue_tail(&stream->send_buf, skb);
 		copied += chunk;
 	}
@@ -1050,11 +1046,13 @@ ssize_t tquic_stream_write_zerocopy(struct tquic_stream_manager *mgr,
 		skb->truesize += page_len;
 
 		/* Store stream offset */
-		*(u64 *)skb->cb = stream->send_offset;
+		tquic_stream_skb_cb(skb)->stream_offset = stream->send_offset;
+		tquic_stream_skb_cb(skb)->data_off = 0;
 
 		skb_queue_tail(&stream->send_buf, skb);
 
 		stream->send_offset += page_len;
+		mgr->conn->stats.tx_bytes += page_len;
 		mgr->data_sent += page_len;
 		copied += page_len;
 		page_offset = 0;  /* Subsequent pages start at offset 0 */
@@ -1161,12 +1159,12 @@ static int tquic_stream_recv_chunk_insert(struct tquic_stream_manager *mgr,
 			if (chunk->offset != ext->recv_next)
 				break;
 
-			rb_erase(&chunk->node, &ext->recv_chunks);
-			ext->recv_chunks_count--;
-			if (chunk->skb) {
-				*(u64 *)chunk->skb->cb = chunk->offset;
-				skb_queue_tail(&stream->recv_buf, chunk->skb);
-			}
+				rb_erase(&chunk->node, &ext->recv_chunks);
+				ext->recv_chunks_count--;
+				if (chunk->skb) {
+					put_unaligned(chunk->offset, (u64 *)chunk->skb->cb);
+					skb_queue_tail(&stream->recv_buf, chunk->skb);
+				}
 			ext->recv_next += chunk->length;
 			ext->rcvbuf_used += chunk->length;
 			kmem_cache_free(mgr->chunk_cache, chunk);
@@ -1177,7 +1175,8 @@ static int tquic_stream_recv_chunk_insert(struct tquic_stream_manager *mgr,
 
 	/* Fallback: use simpler linear approach via recv_buf */
 	if (skb) {
-		*(u64 *)skb->cb = offset;
+		tquic_stream_skb_cb(skb)->stream_offset = offset;
+		tquic_stream_skb_cb(skb)->data_off = 0;
 		skb_queue_tail(&stream->recv_buf, skb);
 	}
 	kmem_cache_free(mgr->chunk_cache, chunk);
@@ -1309,12 +1308,14 @@ ssize_t tquic_stream_read(struct tquic_stream_manager *mgr,
 		if (chunk < skb->len) {
 			/* Partial read */
 			skb_pull(skb, chunk);
-		} else {
-			/* Fully consumed */
-			skb_unlink(skb, &stream->recv_buf);
-			kfree_skb(skb);
+			} else {
+				/* Fully consumed */
+				skb_unlink(skb, &stream->recv_buf);
+				if (stream->conn && stream->conn->sk)
+					sk_mem_uncharge(stream->conn->sk, skb->truesize);
+				kfree_skb(skb);
+			}
 		}
-	}
 
 	/* Check for end of stream */
 	if (stream->fin_received && skb_queue_empty(&stream->recv_buf)) {
@@ -1839,11 +1840,13 @@ ssize_t tquic_stream_splice_read(struct tquic_stream_manager *mgr,
 
 		if (chunk < skb->len) {
 			skb_pull(skb, chunk);
-		} else {
-			skb_unlink(skb, &stream->recv_buf);
-			kfree_skb(skb);
+			} else {
+				skb_unlink(skb, &stream->recv_buf);
+				if (stream->conn && stream->conn->sk)
+					sk_mem_uncharge(stream->conn->sk, skb->truesize);
+				kfree_skb(skb);
+			}
 		}
-	}
 
 	spin_unlock_bh(&mgr->lock);
 

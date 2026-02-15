@@ -165,6 +165,7 @@ static int tquic_v4_rcv(struct sk_buff *skb)
 				rcu_read_unlock();
 				kfree_skb(skb);
 			}
+			tquic_conn_put(conn);
 			return 0;
 		}
 	} else {
@@ -196,6 +197,7 @@ static int tquic_v4_rcv(struct sk_buff *skb)
 				rcu_read_unlock();
 				kfree_skb(skb);
 			}
+			tquic_conn_put(conn);
 			return 0;
 		}
 	}
@@ -279,6 +281,7 @@ static int tquic_v4_err(struct sk_buff *skb, u32 info)
 								tquic_path_put(apath);
 							}
 							rcu_read_unlock();
+							tquic_conn_put(conn);
 						}
 					}
 				}
@@ -367,6 +370,7 @@ static int tquic_v6_rcv(struct sk_buff *skb)
 				rcu_read_unlock();
 				kfree_skb(skb);
 			}
+			tquic_conn_put(conn);
 			return 0;
 		}
 	} else {
@@ -397,6 +401,7 @@ static int tquic_v6_rcv(struct sk_buff *skb)
 				rcu_read_unlock();
 				kfree_skb(skb);
 			}
+			tquic_conn_put(conn);
 			return 0;
 		}
 	}
@@ -480,6 +485,7 @@ static int tquic_v6_err(struct sk_buff *skb, struct inet6_skb_parm *opt,
 							tquic_path_put(apath);
 						}
 						rcu_read_unlock();
+						tquic_conn_put(conn);
 					}
 				}
 			}
@@ -973,6 +979,25 @@ static int __net_init tquic_net_init(struct net *net)
 	tn->initial_cwnd = 10;
 	tn->debug_level = 0;
 
+	/* Initialize per-netns scheduler/CC defaults */
+	RCU_INIT_POINTER(tn->default_scheduler, NULL);
+	strscpy(tn->sched_name, "aggregate", sizeof(tn->sched_name));
+	RCU_INIT_POINTER(tn->default_cong, NULL);
+	strscpy(tn->cc_name, "cubic", sizeof(tn->cc_name));
+
+	/* Initialize per-netns feature defaults */
+	tn->bbr_rtt_threshold_ms = 100;
+	tn->coupled_enabled = false;
+	tn->ecn_enabled = false;
+	tn->ecn_beta = 800;
+	tn->pacing_enabled = true;
+	tn->path_degrade_threshold = 5;
+	tn->grease_enabled = true;
+	tn->preferred_address_enabled = -1;
+	tn->prefer_preferred_address = -1;
+	tn->additional_addresses_enabled = -1;
+	tn->additional_addresses_max = 0;
+
 	/* Allocate per-CPU MIB statistics */
 	tn->mib = alloc_percpu(struct tquic_mib);
 	if (!tn->mib)
@@ -1078,8 +1103,9 @@ static void tquic_net_close_connection(struct tquic_connection *conn,
 	 *
 	 * The socket layer will handle its own cleanup independently.
 	 */
-	if (sk) {
-		struct tquic_sock *tsk = tquic_sk(sk);
+		if (sk) {
+			struct tquic_sock *tsk = tquic_sk(sk);
+			struct tquic_stream *dstream = NULL;
 
 		/*
 		 * Only clear the socket's back-pointer if it actually
@@ -1089,10 +1115,19 @@ static void tquic_net_close_connection(struct tquic_connection *conn,
 		 * tquic_server_handshake).  Blindly nulling tsk->conn
 		 * would corrupt the listener's state.
 		 */
-		if (tsk && tsk->conn == conn)
-			WRITE_ONCE(tsk->conn, NULL);
-		conn->sk = NULL;
-	}
+			if (tsk) {
+				write_lock_bh(&sk->sk_callback_lock);
+				if (tsk->conn == conn) {
+					dstream = tsk->default_stream;
+					tsk->default_stream = NULL;
+					tsk->conn = NULL;
+				}
+				write_unlock_bh(&sk->sk_callback_lock);
+			}
+			if (dstream)
+				tquic_stream_put(dstream);
+			conn->sk = NULL;
+		}
 
 	/* Decrement namespace connection count before freeing if requested */
 	if (dec_conn_count)
@@ -1366,6 +1401,7 @@ static void tquic_net_close_all_connections(struct net *net)
 static void __net_exit tquic_net_exit(struct net *net)
 {
 	struct tquic_net *tn = tquic_pernet(net);
+	struct tquic_cong_ops *ca;
 
 	/*
 	 * Close all connections in this namespace.
@@ -1378,6 +1414,15 @@ static void __net_exit tquic_net_exit(struct net *net)
 	 * CONNECTION_CLOSE frames are sent where possible for graceful shutdown.
 	 */
 	tquic_net_close_all_connections(net);
+
+	/* Drop per-netns default CC module reference, if set. */
+	ca = rcu_dereference_protected(tn->default_cong, 1);
+	rcu_assign_pointer(tn->default_cong, NULL);
+	if (ca) {
+		synchronize_rcu();
+		if (ca->owner)
+			module_put(ca->owner);
+	}
 
 #ifdef CONFIG_PROC_FS
 	tquic_proc_exit(net);

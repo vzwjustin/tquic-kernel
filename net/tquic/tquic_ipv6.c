@@ -292,22 +292,24 @@ static unsigned int tquic_v6_ext_hdr_len(struct sock *sk)
 static void tquic_v6_mtu_reduced(struct sock *sk)
 {
 	struct tquic_sock *tsk = tquic_sk(sk);
-	struct tquic_connection *conn = tsk->conn;
+	struct tquic_connection *conn;
 	struct tquic_path *path;
 	struct dst_entry *dst;
 	u32 mtu;
 
+	conn = tquic_sock_conn_get(tsk);
 	if (!conn)
 		return;
 
 	/* Get the new MTU from socket */
 	dst = __sk_dst_get(sk);
 	if (!dst)
-		return;
+		goto out_put;
 
 	mtu = dst_mtu(dst);
 
 	/* Update all IPv6 paths with new MTU */
+	spin_lock_bh(&conn->paths_lock);
 	list_for_each_entry(path, &conn->paths, list) {
 		if (tquic_path_get_family(path) == AF_INET6) {
 			u32 path_mtu;
@@ -326,6 +328,9 @@ static void tquic_v6_mtu_reduced(struct sock *sk)
 			}
 		}
 	}
+	spin_unlock_bh(&conn->paths_lock);
+out_put:
+	tquic_conn_put(conn);
 }
 
 /* Update path MTU from ICMPv6 too big message */
@@ -399,22 +404,11 @@ static int tquic_v6_connect(struct sock *sk, struct sockaddr_unsized *addr, int 
 	if (usin->sin6_family != AF_INET6)
 		return -EAFNOSUPPORT;
 
-	lock_sock(sk);
+	conn = tquic_sock_conn_get(tsk);
+	if (!conn)
+		return -EINVAL;
 
-	/*
-	 * Read conn under lock_sock and take a reference to
-	 * prevent use-after-free during the handshake wait window
-	 * where release_sock() is called temporarily.
-	 */
-	conn = tsk->conn;
-	if (!conn) {
-		release_sock(sk);
-		return -EINVAL;
-	}
-	if (!tquic_conn_get(conn)) {
-		release_sock(sk);
-		return -EINVAL;
-	}
+	lock_sock(sk);
 
 	/* Set socket reference for PM and path management */
 	conn->sk = sk;
@@ -580,7 +574,7 @@ static int tquic_v6_connect(struct sock *sk, struct sockaddr_unsized *addr, int 
 	 * in a CRYPTO frame. The packet is padded to 1200 bytes minimum.
 	 */
 	err = tquic_start_handshake(sk);
-	if (err < 0 && err != -EALREADY) {
+	if (err < 0 && err != -EALREADY && err != -EISCONN) {
 		tquic_err("IPv6 handshake start failed: %d\n", err);
 		goto failure_close;
 	}
@@ -1015,6 +1009,7 @@ static int tquic_v6_init_sock(struct sock *sk)
 {
 	struct tquic_sock *tsk = tquic_sk(sk);
 	struct ipv6_pinfo *np = tquic_inet6_sk(sk);
+	struct tquic_connection *conn;
 
 	/* Initialize base TQUIC socket */
 	inet_sk_set_state(sk, TCP_CLOSE);
@@ -1022,16 +1017,22 @@ static int tquic_v6_init_sock(struct sock *sk)
 	INIT_LIST_HEAD(&tsk->accept_queue);
 	atomic_set(&tsk->accept_queue_len, 0);
 	tsk->max_accept_queue = 128;
+	tsk->default_stream = NULL;
 
 	/* Create connection structure */
-	tsk->conn = tquic_conn_create(tsk, false);
-	if (!tsk->conn)
+	conn = tquic_conn_create(tsk, false);
+	if (!conn)
 		return -ENOMEM;
 
 	/* Initialize bonding state */
-	tsk->conn->scheduler = tquic_bond_init(tsk->conn);
-	if (tsk->conn->scheduler)
-		set_bit(TQUIC_F_BONDING_ENABLED, &tsk->conn->flags);
+	conn->scheduler = tquic_bond_init(conn);
+	if (conn->scheduler)
+		set_bit(TQUIC_F_BONDING_ENABLED, &conn->flags);
+
+	/* Publish connection pointer for concurrent readers. */
+	write_lock_bh(&sk->sk_callback_lock);
+	tsk->conn = conn;
+	write_unlock_bh(&sk->sk_callback_lock);
 
 	/* Initialize IPv6-specific state */
 	inet_set_bit(MC6_LOOP, sk);
@@ -1050,20 +1051,30 @@ static int tquic_v6_init_sock(struct sock *sk)
 static void tquic_v6_destroy_sock(struct sock *sk)
 {
 	struct tquic_sock *tsk = tquic_sk(sk);
+	struct tquic_connection *conn;
+	struct tquic_stream *dstream;
 
 	/* IPv6-specific cleanup */
 	/* Flow label cleanup handled by inet6_destroy_sock */
 
 	/* Base TQUIC cleanup */
-	if (tsk->conn) {
-		if (tsk->conn->scheduler &&
-		    test_bit(TQUIC_F_BONDING_ENABLED, &tsk->conn->flags)) {
-			tquic_bond_cleanup(tsk->conn->scheduler);
-			tsk->conn->scheduler = NULL;
-			clear_bit(TQUIC_F_BONDING_ENABLED, &tsk->conn->flags);
+	write_lock_bh(&sk->sk_callback_lock);
+	conn = tsk->conn;
+	dstream = tsk->default_stream;
+	tsk->conn = NULL;
+	tsk->default_stream = NULL;
+	write_unlock_bh(&sk->sk_callback_lock);
+
+	if (dstream)
+		tquic_stream_put(dstream);
+	if (conn) {
+		if (conn->scheduler &&
+		    test_bit(TQUIC_F_BONDING_ENABLED, &conn->flags)) {
+			tquic_bond_cleanup(conn->scheduler);
+			conn->scheduler = NULL;
+			clear_bit(TQUIC_F_BONDING_ENABLED, &conn->flags);
 		}
-		tquic_conn_put(tsk->conn);
-		tsk->conn = NULL;
+		tquic_conn_put(conn);
 	}
 
 

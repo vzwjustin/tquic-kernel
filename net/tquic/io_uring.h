@@ -148,7 +148,6 @@ void tquic_io_buf_ring_advance(struct tquic_io_buf_ring *br,
 /* Connection context management */
 int tquic_uring_ctx_alloc(struct tquic_connection *conn);
 void tquic_uring_ctx_free(struct tquic_connection *conn);
-struct tquic_uring_ctx *tquic_uring_ctx_get(struct sock *sk);
 
 /* SQ poll mode */
 int tquic_uring_enable_sqpoll(struct tquic_connection *conn);

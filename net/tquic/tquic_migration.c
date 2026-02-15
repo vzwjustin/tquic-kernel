@@ -77,8 +77,6 @@ tquic_migration_get_active_path(struct tquic_connection *conn)
  * tquic_migration_state or a tquic_session_state.  The magic field
  * (first member of each struct) allows safe down-casting.
  */
-#define TQUIC_SM_MAGIC_MIGRATION 0x4D494752 /* "MIGR" */
-#define TQUIC_SM_MAGIC_SESSION 0x53455353 /* "SESS" */
 
 /* Path quality degradation thresholds */
 #define TQUIC_PATH_DEGRADED_RTT_MULT 3 /* RTT > 3x min_rtt = degraded */
@@ -459,6 +457,7 @@ struct tquic_path *tquic_path_create(struct tquic_connection *conn,
 	path = kmem_cache_zalloc(tquic_path_cache, GFP_KERNEL);
 	if (!path)
 		return NULL;
+	spin_lock_init(&path->loss_tracker.lock);
 
 	/* Initialize path -- use per-connection counter, not global static */
 	refcount_set(&path->refcnt, 1);
@@ -567,6 +566,10 @@ void tquic_path_free(struct tquic_path *path)
 
 	/* Purge response queue */
 	skb_queue_purge(&path->response.queue);
+
+	/* Release per-path UDP socket if still attached. */
+	if (path->udp_sock)
+		tquic_udp_destroy_path_socket(path);
 
 	/* Release congestion control state */
 	tquic_cong_release_path(path);
@@ -1596,6 +1599,35 @@ tquic_conn_get_session_state(struct tquic_connection *conn)
 
 	return ss;
 }
+
+/**
+ * tquic_session_cleanup - Clean up session state
+ * @conn: Connection
+ */
+void tquic_session_cleanup(struct tquic_connection *conn)
+{
+	struct tquic_session_state *ss;
+	struct sk_buff *skb;
+
+	if (!conn)
+		return;
+
+	ss = tquic_conn_get_session_state(conn);
+	if (!ss)
+		return;
+
+	/* Cancel TTL timer */
+	del_timer_sync(&ss->timer);
+
+	/* Drain queued packets */
+	while ((skb = skb_dequeue(&ss->packet_queue)) != NULL)
+		kfree_skb(skb);
+
+	/* Clear state */
+	conn->state_machine = NULL;
+	kfree(ss);
+}
+EXPORT_SYMBOL_GPL(tquic_session_cleanup);
 
 static void tquic_session_ttl_expired(struct timer_list *t)
 {

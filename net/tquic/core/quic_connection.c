@@ -730,8 +730,26 @@ void tquic_conn_destroy(struct tquic_connection *conn)
 	tquic_pm_conn_release(conn);
 
 	/* Clean up state machine (CIDs, work items, challenges) */
-	if (conn->state_machine)
-		tquic_conn_state_cleanup(conn);
+	if (conn->state_machine) {
+		u32 magic = *(u32 *)conn->state_machine;
+
+		switch (magic) {
+		case TQUIC_SM_MAGIC_CONN_STATE:
+			tquic_conn_state_cleanup(conn);
+			break;
+		case TQUIC_SM_MAGIC_MIGRATION:
+			tquic_migration_cleanup(conn);
+			break;
+		case TQUIC_SM_MAGIC_SESSION:
+			tquic_session_cleanup(conn);
+			break;
+		default:
+			WARN_ON_ONCE(1);
+			kfree(conn->state_machine);
+			conn->state_machine = NULL;
+			break;
+		}
+	}
 
 	/* Remove from global connection hash table */
 	rhashtable_remove_fast(&tquic_conn_table, &conn->node,
@@ -749,16 +767,51 @@ void tquic_conn_destroy(struct tquic_connection *conn)
 	cancel_work_sync(&conn->rx_work);
 	cancel_work_sync(&conn->close_work);
 
-	/* Destroy streams */
-	spin_lock_bh(&conn->streams_lock);
-	node = rb_first(&conn->streams);
-	while (node) {
+	/*
+	 * Destroy streams with refcount safety.
+	 *
+	 * Removing from the rb-tree prevents new lookups. Purge buffers while
+	 * conn/sk are still valid, then detach stream->conn so a delayed final
+	 * tquic_stream_put() can't touch freed connection memory.
+	 */
+	spin_lock_bh(&conn->lock);
+	while ((node = rb_first(&conn->streams))) {
+		struct sk_buff *skb;
+		u64 queued = 0;
+
 		stream = rb_entry(node, struct tquic_stream, node);
-		node = rb_next(node);
-		rb_erase(&stream->node, &conn->streams);
-		tquic_stream_destroy(NULL, stream);
+		rb_erase(node, &conn->streams);
+		RB_CLEAR_NODE(&stream->node);
+		spin_unlock_bh(&conn->lock);
+
+		while ((skb = skb_dequeue(&stream->send_buf)) != NULL) {
+			queued += skb->len;
+			if (conn->sk)
+				sk_mem_uncharge(conn->sk, skb->truesize);
+			kfree_skb(skb);
+		}
+
+		if (queued) {
+			spin_lock_bh(&conn->lock);
+			if (conn->fc_data_reserved >= queued)
+				conn->fc_data_reserved -= queued;
+			else
+				conn->fc_data_reserved = 0;
+			spin_unlock_bh(&conn->lock);
+		}
+
+		while ((skb = skb_dequeue(&stream->recv_buf)) != NULL) {
+			if (conn->sk)
+				sk_mem_uncharge(conn->sk, skb->truesize);
+			kfree_skb(skb);
+		}
+
+		WRITE_ONCE(stream->conn, NULL);
+		tquic_stream_put(stream);
+
+		spin_lock_bh(&conn->lock);
 	}
-	spin_unlock_bh(&conn->streams_lock);
+	spin_unlock_bh(&conn->lock);
 
 	/* Destroy paths */
 	list_for_each_entry_safe(path, tmp_path, &conn->paths, list) {
@@ -783,6 +836,10 @@ void tquic_conn_destroy(struct tquic_connection *conn)
 	/* Destroy crypto contexts */
 	for (i = 0; i < TQUIC_CRYPTO_MAX; i++)
 		tquic_crypto_destroy(conn->crypto[i]);
+
+	/* Free zerocopy state if allocated */
+	if (conn->zc_state)
+		tquic_zc_state_free(conn);
 
 	/* Free pending frames, pacing queue, and early data buffer */
 	skb_queue_purge(&conn->pending_frames);

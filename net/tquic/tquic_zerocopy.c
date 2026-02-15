@@ -247,21 +247,30 @@ int tquic_sendmsg_zerocopy(struct sock *sk, struct msghdr *msg, size_t len,
 			   struct tquic_stream *stream)
 {
 	struct tquic_sock *tsk = tquic_sk(sk);
-	struct tquic_connection *conn = tsk->conn;
+	struct tquic_connection *conn;
 	struct ubuf_info *uarg = NULL;
 	struct sk_buff *skb = NULL;
 	size_t copied = 0;
 	int err;
 
-	if (!conn || READ_ONCE(conn->state) != TQUIC_CONN_CONNECTED)
+	conn = tquic_sock_conn_get(tsk);
+	if (!conn)
 		return -ENOTCONN;
+	if (READ_ONCE(conn->state) != TQUIC_CONN_CONNECTED) {
+		tquic_conn_put(conn);
+		return -ENOTCONN;
+	}
 
-	if (!stream)
+	if (!stream) {
+		tquic_conn_put(conn);
 		return -EINVAL;
+	}
 
 	/* Check if zerocopy is enabled on socket */
-	if (!sock_flag(sk, SOCK_ZEROCOPY))
+	if (!sock_flag(sk, SOCK_ZEROCOPY)) {
+		tquic_conn_put(conn);
 		return -EOPNOTSUPP;
+	}
 
 	/*
 	 * Enforce maximum outstanding zerocopy buffers to prevent
@@ -270,8 +279,10 @@ int tquic_sendmsg_zerocopy(struct sock *sk, struct msghdr *msg, size_t len,
 	if (conn->zc_state) {
 		struct tquic_zc_state *zc = conn->zc_state;
 
-		if (zc->outstanding >= TQUIC_ZC_MAX_OUTSTANDING)
+		if (zc->outstanding >= TQUIC_ZC_MAX_OUTSTANDING) {
+			tquic_conn_put(conn);
 			return -ENOBUFS;
+		}
 	}
 
 	/* Get or allocate user buffer info for zerocopy tracking */
@@ -280,9 +291,18 @@ int tquic_sendmsg_zerocopy(struct sock *sk, struct msghdr *msg, size_t len,
 		uarg = msg->msg_ubuf;
 	} else {
 		/* Allocate new zerocopy tracking structure */
+		spin_lock_bh(&stream->send_buf.lock);
 		skb = skb_peek_tail(&stream->send_buf);
+		if (skb)
+			skb_get(skb);
+		spin_unlock_bh(&stream->send_buf.lock);
+
 		uarg = TQUIC_MSG_ZEROCOPY_REALLOC(sk, len,
 						  skb ? skb_zcopy(skb) : NULL);
+
+		if (skb)
+			kfree_skb(skb);
+
 		if (!uarg) {
 			err = -ENOBUFS;
 			goto out_err;
@@ -295,10 +315,36 @@ int tquic_sendmsg_zerocopy(struct sock *sk, struct msghdr *msg, size_t len,
 
 	while (copied < len) {
 		size_t chunk = min_t(size_t, len - copied, 1200);
+		size_t allowed = chunk;
 		struct sk_buff *new_skb;
 
+		/* Respect stream + connection flow control before consuming iov_iter. */
+		spin_lock_bh(&conn->lock);
+		if (stream->send_offset >= stream->max_send_data ||
+		    conn->data_sent + conn->fc_data_reserved >= conn->max_data_remote) {
+			spin_unlock_bh(&conn->lock);
+			err = -EAGAIN;
+			goto out_err;
+		} else {
+			u64 stream_limit = stream->max_send_data - stream->send_offset;
+			u64 conn_limit = conn->max_data_remote -
+					 (conn->data_sent + conn->fc_data_reserved);
+
+			if (allowed > stream_limit)
+				allowed = stream_limit;
+			if (allowed > conn_limit)
+				allowed = conn_limit;
+			if (allowed == 0) {
+				spin_unlock_bh(&conn->lock);
+				err = -EAGAIN;
+				goto out_err;
+			}
+		}
+		spin_unlock_bh(&conn->lock);
+		chunk = allowed;
+
 		/* Allocate skb for this chunk */
-		new_skb = alloc_skb(0, GFP_KERNEL);
+		new_skb = alloc_skb(chunk, GFP_KERNEL);
 		if (!new_skb) {
 			err = -ENOMEM;
 			goto out_err;
@@ -363,21 +409,30 @@ int tquic_sendmsg_zerocopy(struct sock *sk, struct msghdr *msg, size_t len,
 		}
 
 		/* Queue the skb to stream send buffer */
-		spin_lock_bh(&conn->lock);
-		*(u64 *)new_skb->cb = stream->send_offset;
-		stream->send_offset += chunk;
-		conn->fc_data_reserved += chunk;
-		conn->stats.tx_bytes += chunk;
-		spin_unlock_bh(&conn->lock);
+			spin_lock_bh(&conn->lock);
+			tquic_stream_skb_cb(new_skb)->stream_offset = stream->send_offset;
+			tquic_stream_skb_cb(new_skb)->data_off = 0;
+			stream->send_offset += chunk;
+			conn->fc_data_reserved += chunk;
+			conn->stats.tx_bytes += chunk;
+
+		/*
+		 * CF-179: Queue under lock to prevent reordering.
+		 * If we unlocked before queuing, another thread could grab the next
+		 * offset and queue its packet first, violating stream order.
+		 */
 		skb_queue_tail(&stream->send_buf, new_skb);
+		spin_unlock_bh(&conn->lock);
+
 		copied += chunk;
 	}
 	}
 
-	/* Trigger transmission */
-	if (tsk->nodelay || stream->send_offset == 0)
+	/* Trigger actual transmission after queuing data to ensure progress. */
+	if (copied > 0)
 		tquic_output_flush(conn);
 
+	tquic_conn_put(conn);
 	return copied;
 
 out_err:
@@ -387,10 +442,13 @@ out_err:
 	 * use-after-free when those skbs are eventually freed.  Return
 	 * the partial byte count instead so callers know data was sent.
 	 */
-	if (copied > 0)
+	if (copied > 0) {
+		tquic_conn_put(conn);
 		return copied;
+	}
 	if (uarg && !msg->msg_ubuf)
 		net_zcopy_put(uarg);
+	tquic_conn_put(conn);
 	return err;
 }
 EXPORT_SYMBOL_GPL(tquic_sendmsg_zerocopy);
@@ -460,27 +518,28 @@ ssize_t tquic_sendpage(struct socket *sock, struct page *page,
 		return -ENOTCONN;
 
 	tsk = tquic_sk(sk);
-	conn = READ_ONCE(tsk->conn);
-
-	if (!conn || READ_ONCE(conn->state) != TQUIC_CONN_CONNECTED)
+	conn = tquic_sock_conn_get(tsk);
+	if (!conn)
 		return -ENOTCONN;
-
-	/* Hold a ref so conn cannot be freed while we enqueue skbs. */
-	if (!tquic_conn_get(conn))
+	if (READ_ONCE(conn->state) != TQUIC_CONN_CONNECTED) {
+		tquic_conn_put(conn);
 		return -ENOTCONN;
+	}
 
 	nonblock = (flags & MSG_DONTWAIT) ||
 		   (sock->file && (sock->file->f_flags & O_NONBLOCK));
 
 	/* Use default stream */
-	stream = tsk->default_stream;
+	stream = tquic_sock_default_stream_get_or_open(tsk, conn);
 	if (!stream) {
-		stream = tquic_stream_open(conn, true);
-		if (!stream) {
-			ret = -ENOMEM;
-			goto out_put;
-		}
-		tsk->default_stream = stream;
+		bool no_stream_credit;
+
+		spin_lock_bh(&conn->lock);
+		no_stream_credit =
+			(conn->next_stream_id_bidi / 4 >= conn->max_streams_bidi);
+		spin_unlock_bh(&conn->lock);
+		ret = no_stream_credit ? -EAGAIN : -ENOMEM;
+		goto out_put;
 	}
 
 	if (size == 0)
@@ -509,20 +568,21 @@ ssize_t tquic_sendpage(struct socket *sock, struct page *page,
 			goto out_put;
 		}
 
-		if (wait_event_interruptible(stream->wait,
-				({
-					bool ok;
-					spin_lock_bh(&conn->lock);
-					ok = (stream->send_offset < stream->max_send_data) &&
-					     (conn->data_sent + conn->fc_data_reserved < conn->max_data_remote);
-					spin_unlock_bh(&conn->lock);
-					ok;
-				}) ||
-				stream->state == TQUIC_STREAM_CLOSED ||
-				READ_ONCE(conn->state) != TQUIC_CONN_CONNECTED)) {
-			ret = -EINTR;
-			goto out_put;
-		}
+			ret = wait_event_interruptible(stream->wait,
+					({
+						bool ok;
+						spin_lock_bh(&conn->lock);
+						ok = (stream->send_offset < stream->max_send_data) &&
+						     (conn->data_sent + conn->fc_data_reserved < conn->max_data_remote);
+						spin_unlock_bh(&conn->lock);
+						ok;
+					}) ||
+					stream->state == TQUIC_STREAM_CLOSED ||
+					READ_ONCE(conn->state) != TQUIC_CONN_CONNECTED);
+			if (ret) {
+				ret = -EINTR;
+				goto out_put;
+			}
 
 		if (stream->state == TQUIC_STREAM_CLOSED) {
 			ret = -EPIPE;
@@ -617,19 +677,28 @@ ssize_t tquic_sendpage(struct socket *sock, struct page *page,
 
 	/* Queue to stream send buffer */
 	spin_lock_bh(&conn->lock);
-	*(u64 *)skb->cb = stream->send_offset;
+	tquic_stream_skb_cb(skb)->stream_offset = stream->send_offset;
+	tquic_stream_skb_cb(skb)->data_off = 0;
 	stream->send_offset += send_size;
 	conn->fc_data_reserved += send_size;
-	spin_unlock_bh(&conn->lock);
-	skb_queue_tail(&stream->send_buf, skb);
 	conn->stats.tx_bytes += send_size;
 
+	/*
+	 * CF-179: Queue under lock to prevent reordering.
+	 * If we unlocked before queuing, another thread could grab the next
+	 * offset and queue its packet first, violating stream order.
+	 */
+	skb_queue_tail(&stream->send_buf, skb);
+	spin_unlock_bh(&conn->lock);
+
 	/* Trigger transmission */
-	if (tsk->nodelay)
+	if (send_size)
 		tquic_output_flush(conn);
 
 	ret = send_size;
 out_put:
+	if (stream)
+		tquic_stream_put(stream);
 	tquic_conn_put(conn);
 	return ret;
 
@@ -659,106 +728,6 @@ struct tquic_splice_state {
 };
 
 /**
- * tquic_splice_data_recv - Callback for splice data reception
- * @desc: Read descriptor containing splice state
- * @skb: SKB containing data
- * @offset: Offset into skb data
- * @len: Length of data available
- *
- * Called during splice_read to transfer data from stream to pipe.
- */
-static int tquic_splice_data_recv(read_descriptor_t *desc,
-				  struct sk_buff *skb,
-				  unsigned int offset,
-				  size_t len)
-{
-	struct tquic_splice_state *tss = desc->arg.data;
-	struct splice_pipe_desc spd = {
-		.pages = NULL,
-		.partial = NULL,
-		.nr_pages_max = MAX_SKB_FRAGS,
-		.ops = &nosteal_pipe_buf_ops,
-		.spd_release = NULL,
-	};
-	struct page *pages[MAX_SKB_FRAGS];
-	struct partial_page partial[MAX_SKB_FRAGS];
-	int nr_pages = 0;
-	size_t splice_len;
-	int ret;
-
-	/* Limit to requested length */
-	splice_len = min(len, desc->count);
-	if (splice_len == 0)
-		return 0;
-
-	spd.pages = pages;
-	spd.partial = partial;
-
-	/*
-	 * For linear data in skb head, we need to find/allocate a page.
-	 * For paged data (frags), we can reference pages directly.
-	 */
-	if (skb_headlen(skb) > offset) {
-		/* Data in linear region */
-		size_t head_len = min(splice_len, skb_headlen(skb) - offset);
-		struct page *page;
-		unsigned int pg_off;
-
-		page = virt_to_page(skb->data + offset);
-		pg_off = ((unsigned long)(skb->data + offset)) & ~PAGE_MASK;
-
-		pages[nr_pages] = page;
-		partial[nr_pages].offset = pg_off;
-		partial[nr_pages].len = head_len;
-		partial[nr_pages].private = 0;
-
-		get_page(page);
-		nr_pages++;
-		splice_len = head_len;  /* May be less than requested */
-	} else {
-		/* Data in page frags */
-		int frag_idx;
-		size_t frag_offset;
-		skb_frag_t *frag;
-
-		/* Find the right frag */
-		frag_offset = offset - skb_headlen(skb);
-		for (frag_idx = 0; frag_idx < skb_shinfo(skb)->nr_frags; frag_idx++) {
-			frag = &skb_shinfo(skb)->frags[frag_idx];
-			if (frag_offset < skb_frag_size(frag))
-				break;
-			frag_offset -= skb_frag_size(frag);
-		}
-
-		if (frag_idx < skb_shinfo(skb)->nr_frags) {
-			frag = &skb_shinfo(skb)->frags[frag_idx];
-			splice_len = min(splice_len,
-					 (size_t)(skb_frag_size(frag) - frag_offset));
-
-			pages[nr_pages] = skb_frag_page(frag);
-			partial[nr_pages].offset = skb_frag_off(frag) + frag_offset;
-			partial[nr_pages].len = splice_len;
-			partial[nr_pages].private = 0;
-
-			get_page(pages[nr_pages]);
-			nr_pages++;
-		}
-	}
-
-	if (nr_pages == 0)
-		return 0;
-
-	spd.nr_pages = nr_pages;
-
-	/* Splice pages into pipe */
-	ret = splice_to_pipe(tss->pipe, &spd);
-	if (ret > 0)
-		desc->count -= ret;
-
-	return ret;
-}
-
-/**
  * __tquic_splice_read - Internal splice read helper
  * @sk: Socket
  * @tss: Splice state
@@ -768,35 +737,40 @@ static int tquic_splice_data_recv(read_descriptor_t *desc,
 static int __tquic_splice_read(struct sock *sk, struct tquic_splice_state *tss)
 {
 	struct tquic_stream *stream = tss->stream;
-	read_descriptor_t rd_desc = {
-		.arg.data = tss,
-		.count = tss->len,
-	};
 	struct sk_buff *skb;
-	int ret = 0;
 	size_t spliced = 0;
+	unsigned int remaining = tss->len;
+	int ret = 0;
 
 	/* Process available skbs in receive buffer */
-	while ((skb = skb_peek(&stream->recv_buf)) != NULL && rd_desc.count > 0) {
+	while (remaining && (skb = skb_dequeue(&stream->recv_buf)) != NULL) {
+		unsigned int chunk = min_t(unsigned int, skb->len, remaining);
 		int used;
 
-		used = tquic_splice_data_recv(&rd_desc, skb, 0, skb->len);
+		used = skb_splice_bits(skb, sk, 0, tss->pipe, chunk, tss->flags);
 		if (used <= 0) {
+			/* Put skb back on "no room" or error. */
+			skb_queue_head(&stream->recv_buf, skb);
 			if (used < 0)
 				ret = used;
 			break;
 		}
 
 		spliced += used;
+		remaining -= used;
 
-		/* Consume from skb */
-		if (used >= skb->len) {
-			skb_unlink(skb, &stream->recv_buf);
-			kfree_skb(skb);
-		} else {
-			/* Partial read - pull data */
+		if (used < skb->len) {
+			/*
+			 * Most receive-buffer skbs are linear (alloc_skb +
+			 * skb_put_data). Keep the remainder in place.
+			 */
 			skb_pull(skb, used);
+			skb_queue_head(&stream->recv_buf, skb);
+			break;
 		}
+
+		sk_mem_uncharge(sk, skb->truesize);
+		kfree_skb(skb);
 	}
 
 	return spliced > 0 ? spliced : ret;
@@ -832,15 +806,20 @@ ssize_t tquic_splice_read(struct socket *sock, loff_t *ppos,
 		return -ENOTCONN;
 
 	tsk = tquic_sk(sk);
-	conn = tsk->conn;
-
-	if (!conn || READ_ONCE(conn->state) != TQUIC_CONN_CONNECTED)
+	conn = tquic_sock_conn_get(tsk);
+	if (!conn)
 		return -ENOTCONN;
+	if (READ_ONCE(conn->state) != TQUIC_CONN_CONNECTED) {
+		tquic_conn_put(conn);
+		return -ENOTCONN;
+	}
 
 	/* Use default stream for simple API */
-	stream = tsk->default_stream;
-	if (!stream)
+	stream = tquic_sock_default_stream_get(tsk);
+	if (!stream) {
+		tquic_conn_put(conn);
 		return 0;  /* No data available */
+	}
 
 	/* Initialize splice state */
 	tss.conn = conn;
@@ -920,6 +899,8 @@ ssize_t tquic_splice_read(struct socket *sock, loff_t *ppos,
 
 	release_sock(sk);
 
+	tquic_stream_put(stream);
+	tquic_conn_put(conn);
 	if (spliced > 0)
 		return spliced;
 	return ret;
@@ -1261,7 +1242,7 @@ EXPORT_SYMBOL_GPL(tquic_sendmsg_zerocopy);
 
 int tquic_check_zerocopy_flag(struct sock *sk, struct msghdr *msg, int flags)
 {
-	return 0;
+	return -EOPNOTSUPP;
 }
 EXPORT_SYMBOL_GPL(tquic_check_zerocopy_flag);
 

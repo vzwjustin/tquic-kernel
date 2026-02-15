@@ -300,6 +300,8 @@ static struct tquic_stream *tquic_stream_alloc(struct tquic_connection *conn,
 	if (!stream)
 		return NULL;
 
+	RB_CLEAR_NODE(&stream->node);
+
 	/*
 	 * Assign stream ID based on initiator role and direction.
 	 * Stream IDs increment by 4 (to encode type in low 2 bits).
@@ -387,6 +389,8 @@ static void tquic_stream_add_to_conn(struct tquic_connection *conn,
 static void tquic_stream_remove_from_conn(struct tquic_connection *conn,
 					  struct tquic_stream *stream)
 {
+	bool removed = false;
+
 	if (!conn || RB_EMPTY_NODE(&stream->node))
 		return;
 
@@ -394,6 +398,15 @@ static void tquic_stream_remove_from_conn(struct tquic_connection *conn,
 	rb_erase(&stream->node, &conn->streams);
 	RB_CLEAR_NODE(&stream->node);
 	spin_unlock_bh(&conn->lock);
+
+	removed = true;
+
+	/*
+	 * Drop the rb-tree ownership reference. Any other transient users that
+	 * acquired refs via tquic_stream_get() can finish before final free.
+	 */
+	if (removed)
+		tquic_stream_put(stream);
 }
 
 /**
@@ -654,6 +667,12 @@ int tquic_stream_socket_create(struct tquic_connection *conn,
 	/* Link stream to socket state */
 	ss->stream = stream;
 	ss->conn = conn;
+	if (!tquic_conn_get(conn)) {
+		kfree(ss);
+		sock_release(sock);
+		tquic_stream_free(stream);
+		return -ENOTCONN;
+	}
 	ss->parent_sk = parent_sk;
 	init_waitqueue_head(&ss->wait);
 
@@ -668,6 +687,7 @@ int tquic_stream_socket_create(struct tquic_connection *conn,
 	fd = tquic_sock_map_fd(sock, O_CLOEXEC);
 	if (fd < 0) {
 		/* sock was released by tquic_sock_map_fd on failure */
+		tquic_conn_put(conn);
 		kfree(ss);
 		tquic_stream_free(stream);
 		return fd;
@@ -675,6 +695,19 @@ int tquic_stream_socket_create(struct tquic_connection *conn,
 
 	/* Socket has a valid fd now -- safe to link everything */
 	sock->sk->sk_user_data = ss;
+
+	/*
+	 * Take an rb-tree ownership reference now that we're about to publish
+	 * the stream in conn->streams. The original allocation reference is
+	 * owned by the stream socket (ss->stream) and will be dropped at
+	 * socket release time.
+	 */
+		/*
+		 * stream->refcount is 1 here (socket-owned). Take a second reference
+		 * for rb-tree ownership. This cannot fail.
+		 */
+		refcount_inc(&stream->refcount);
+
 	tquic_stream_add_to_conn(conn, stream);
 
 	*stream_id = stream->id;
@@ -711,17 +744,9 @@ static int tquic_stream_release(struct socket *sock)
 
 	if (stream && conn) {
 		/*
-		 * Take a connection refcount to ensure the connection
-		 * stays alive while we clean up the stream.
+		 * We hold a reference to the connection (taken at socket creation),
+		 * so it is guaranteed to be alive.
 		 */
-		if (!tquic_conn_get(conn)) {
-			/*
-			 * CF-635: Connection is being destroyed.
-			 * Still free the stream to avoid a leak.
-			 */
-			tquic_stream_free(stream);
-			goto out;
-		}
 
 		/* Send FIN if not already sent and stream is still writable */
 		if (!stream->fin_sent &&
@@ -733,7 +758,8 @@ static int tquic_stream_release(struct socket *sock)
 		/* Remove from connection's stream tree */
 		tquic_stream_remove_from_conn(conn, stream);
 
-		tquic_stream_free(stream);
+		/* Drop the stream-socket's owning reference. */
+		tquic_stream_put(stream);
 		tquic_conn_put(conn);
 	}
 
@@ -1053,13 +1079,19 @@ static int tquic_stream_sendmsg(struct socket *sock, struct msghdr *msg,
 		 * Store stream offset in skb->cb for frame generation and reserve
 		 * connection-level flow control for queued data (not yet sent).
 		 */
-		spin_lock_bh(&conn->lock);
-		*(u64 *)skb->cb = stream->send_offset;
-		stream->send_offset += chunk;
-		conn->fc_data_reserved += chunk;
+			spin_lock_bh(&conn->lock);
+			tquic_stream_skb_cb(skb)->stream_offset = stream->send_offset;
+			tquic_stream_skb_cb(skb)->data_off = 0;
+			stream->send_offset += chunk;
+			conn->fc_data_reserved += chunk;
+			conn->stats.tx_bytes += chunk;
+
+		/*
+		 * CF-179: Queue under lock to prevent reordering.
+		 */
+		skb_queue_tail(&stream->send_buf, skb);
 		spin_unlock_bh(&conn->lock);
 
-		skb_queue_tail(&stream->send_buf, skb);
 		copied += chunk;
 	}
 
@@ -1551,4 +1583,3 @@ static int tquic_stream_count_by_type(struct tquic_connection *conn, u8 type)
 
 	return 0;
 }
-

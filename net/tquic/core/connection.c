@@ -132,8 +132,6 @@ struct tquic_close_frame {
 };
 
 /* Extended connection structure for internal state machine */
-#define TQUIC_SM_MAGIC_CONN_STATE 0x434F4E53 /* "CONS" */
-
 struct tquic_conn_state_machine {
 	/*
 	 * Type discriminator -- MUST be the first field.
@@ -172,7 +170,6 @@ struct tquic_conn_state_machine {
 	/* Address validation */
 	struct list_head pending_challenges;
 	bool address_validated;
-	u32 validation_timeout_ms;
 	u32 amplification_limit;
 	u64 bytes_sent_unvalidated;
 	u64 bytes_received_unvalidated;
@@ -220,7 +217,6 @@ struct tquic_conn_state_machine {
 	struct work_struct close_work;
 	struct work_struct migration_work;
 	struct delayed_work drain_work;
-	struct delayed_work validation_work;
 
 	/* Parent connection */
 	struct tquic_connection *conn;
@@ -475,17 +471,14 @@ int tquic_conn_set_state(struct tquic_connection *conn,
 		if (cs) {
 			if (current_work() == &cs->close_work ||
 			    current_work() == &cs->migration_work ||
-			    current_work() == &cs->drain_work.work ||
-			    current_work() == &cs->validation_work.work) {
+			    current_work() == &cs->drain_work.work) {
 				cancel_work(&cs->close_work);
 				cancel_work(&cs->migration_work);
 				cancel_delayed_work(&cs->drain_work);
-				cancel_delayed_work(&cs->validation_work);
 			} else {
 				cancel_work_sync(&cs->close_work);
 				cancel_work_sync(&cs->migration_work);
 				cancel_delayed_work_sync(&cs->drain_work);
-				cancel_delayed_work_sync(&cs->validation_work);
 			}
 		}
 
@@ -1722,9 +1715,10 @@ int tquic_send_path_challenge(struct tquic_connection *conn,
 	list_add_tail(&challenge->list, &cs->pending_challenges);
 	spin_unlock_bh(&conn->lock);
 
-	/* Schedule validation timeout */
-	schedule_delayed_work(&cs->validation_work,
-			      msecs_to_jiffies(cs->validation_timeout_ms));
+	/*
+	 * Path validation timeout is handled by per-path timers
+	 * (path->validation.timer) set up in PM code.
+	 */
 
 	tquic_conn_dbg(conn, "sent PATH_CHALLENGE on path %u\n", path->path_id);
 
@@ -2547,7 +2541,6 @@ int tquic_conn_client_connect(struct tquic_connection *conn,
 	cs->is_server = false;
 	cs->hs_state = TQUIC_HS_INITIAL;
 	cs->active_cid_limit = 2;
-	cs->validation_timeout_ms = 3000;
 	/*
 	 * Drain timeout: Use 3 * PTO if RTT measurements are available,
 	 * otherwise fall back to static default per RFC 9000 Section 10.2.
@@ -2574,8 +2567,6 @@ int tquic_conn_client_connect(struct tquic_connection *conn,
 	INIT_WORK(&cs->close_work, tquic_close_work_handler);
 	INIT_WORK(&cs->migration_work, tquic_migration_work_handler);
 	INIT_DELAYED_WORK(&cs->drain_work, tquic_drain_timeout);
-	/* Initialize validation_work to prevent NULL pointer crash */
-	INIT_DELAYED_WORK(&cs->validation_work, NULL);
 
 	conn->state_machine = cs;
 
@@ -2769,7 +2760,6 @@ int tquic_conn_server_accept(struct tquic_connection *conn,
 	cs->is_server = true;
 	cs->hs_state = TQUIC_HS_INITIAL;
 	cs->active_cid_limit = 2;
-	cs->validation_timeout_ms = 3000;
 	/*
 	 * Drain timeout: Use 3 * PTO if RTT measurements are available,
 	 * otherwise fall back to static default per RFC 9000 Section 10.2.
@@ -2796,8 +2786,6 @@ int tquic_conn_server_accept(struct tquic_connection *conn,
 	INIT_WORK(&cs->close_work, tquic_close_work_handler);
 	INIT_WORK(&cs->migration_work, tquic_migration_work_handler);
 	INIT_DELAYED_WORK(&cs->drain_work, tquic_drain_timeout);
-	/* Initialize validation_work to prevent NULL pointer crash */
-	INIT_DELAYED_WORK(&cs->validation_work, NULL);
 
 	conn->state_machine = cs;
 
@@ -3108,7 +3096,6 @@ void tquic_conn_state_cleanup(struct tquic_connection *conn)
 	cancel_work_sync(&cs->close_work);
 	cancel_work_sync(&cs->migration_work);
 	cancel_delayed_work_sync(&cs->drain_work);
-	cancel_delayed_work_sync(&cs->validation_work);
 
 	/*
 	 * Free local CIDs.

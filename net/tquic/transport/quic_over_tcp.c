@@ -1298,6 +1298,7 @@ void quic_tcp_close(struct quic_tcp_connection *conn)
 	cancel_work_sync(&conn->rx_work);
 	cancel_work_sync(&conn->tx_work);
 	cancel_work_sync(&conn->keepalive_work);
+	cancel_work_sync(&conn->close_work);
 
 	/* Flush pending data */
 	quic_tcp_flush(conn);
