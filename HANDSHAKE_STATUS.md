@@ -4,6 +4,8 @@
 
 Full end-to-end data flow verified: 10KB file download completes successfully
 with the userspace test client/server over the kernel QUIC transport.
+100KB partial transfer also works (38KB received before flow control window
+exhaustion — MAX_DATA updates not yet generated).
 
 ### What's Working
 
@@ -112,10 +114,10 @@ between test iterations that need module reload.
 
 ## Next Steps
 
-1. **Connection close handling**: Proper CONNECTION_CLOSE frame and wakeup
-   of blocked stream waiters
+1. **Flow control window updates**: Generate MAX_DATA/MAX_STREAM_DATA frames
+   as application reads data — needed for transfers larger than initial window
 2. **FIN handling**: Stream FIN for clean data transfer completion
-3. **ACK generation**: Send ACKs for received packets
-4. **Larger file transfers**: Test with multi-MB files
-5. **Real TLS handshake**: Replace cert_verify bypass with full TLS 1.3 via tlshd
-6. **Module refcount cleanup**: Fix orphaned socket handling
+3. **ACK generation**: Send ACKs for received packets to advance loss detection
+4. **Connection close wakeup**: Wake blocked stream waiters on connection close
+5. **Larger file transfers**: Test with multi-MB files after flow control updates
+6. **Module refcount cleanup**: Fix orphaned socket handling preventing rmmod
