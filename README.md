@@ -8,7 +8,7 @@
 
 TQUIC is a Linux kernel module implementing the QUIC protocol (RFC 9000/9001/9002) with multipath support for WAN bonding. Unlike userspace QUIC implementations, TQUIC operates directly in the kernel for maximum performance and tight integration with the networking stack.
 
-**~642k lines of C** across `net/tquic/` implementing the full QUIC/HTTP3 stack with multipath, security, and performance features. Security audit completed February 2026 with all critical issues resolved across 11 rounds of fixes. **TLS 1.3 handshake verified end-to-end** (client and server both reach COMPLETE state) as of February 2026.
+**~642k lines of C** across `net/tquic/` implementing the full QUIC/HTTP3 stack with multipath, security, and performance features. Security audit completed February 2026 with all critical issues resolved across 11 rounds of fixes. **End-to-end data exchange verified**: TLS 1.3 handshake, bidirectional STREAM data, ACK generation, flow control (MAX_DATA/MAX_STREAM_DATA), and clean CONNECTION_CLOSE teardown — 10KB file download in 11ms (7.45 Mbps) over loopback.
 
 ### Project Structure
 
@@ -24,14 +24,15 @@ The implementation is in `net/tquic/` with key subdirectories:
 ## Features
 
 **Protocol**
-- Full QUIC v1 & v2 (RFC 9000, 9369) - all 28+ frame types, connection lifecycle, packet coalescing
+- QUIC v1 (RFC 9000) - all frame types 0x00-0x1e handled, connection lifecycle, packet coalescing
 - TLS 1.3 inline handshake (no userspace TLS daemon) with X.509 certificate verification and RSA-PSS signatures
 - AES-128-GCM encryption at Initial, Handshake, and Application levels with per-level AEAD key selection
-- 0-RTT early data, key update with rollback, ChaCha20-Poly1305 support
-- Loss detection & recovery (RFC 9002) - PTO, persistent congestion, PRR
+- Bidirectional STREAM data exchange with ACK generation and flow control
+- Connection-level (MAX_DATA) and stream-level (MAX_STREAM_DATA) flow control
+- Clean CONNECTION_CLOSE exchange with graceful connection teardown
 - HTTP/3 (RFC 9114) + QPACK header compression (RFC 9204)
-- DATAGRAM extension (RFC 9221), WebTransport, MASQUE (CONNECT-UDP/IP)
-- QUIC-LB load balancing, GREASE, ACK_FREQUENCY, Reliable RESET
+- DATAGRAM extension (RFC 9221), GREASE, ACK_FREQUENCY
+- Loss detection & recovery (RFC 9002) framework - PTO, persistent congestion, PRR
 
 **Multipath & Bonding**
 - True per-packet scheduling across multiple WAN paths (not flow-pinning)
@@ -112,7 +113,15 @@ Userspace QUIC implementations pay a heavy cost crossing the kernel boundary on 
 | Server accept queue (inline handshake path) | Done |
 | PATH_CHALLENGE/RESPONSE validation | Done |
 | HANDSHAKE_DONE frame (RFC 9000 Section 19.20) | Done |
-| Application data exchange | In Progress |
+| Bidirectional STREAM data exchange | Done |
+| ACK generation for 1-RTT packets | Done |
+| Flow control (MAX_DATA / MAX_STREAM_DATA) | Done |
+| Stream FIN on connection close | Done |
+| CONNECTION_CLOSE exchange & clean teardown | Done |
+| All RFC 9000 frame types (0x00-0x1e) | Done |
+| Large file transfers (>10KB) | In Progress |
+| Loss detection & retransmission (RFC 9002) | Planned |
+| Delayed ACK timer (RFC 9000 Section 13.2.1) | Planned |
 | Interop testing (quiche, msquic, ngtcp2) | Planned |
 
 ## Quick Start

@@ -122,10 +122,11 @@ between test iterations that need module reload.
 
 ## Next Steps
 
-1. **Stream FIN handling**: Proper STREAM frame FIN bit for clean data transfer completion
-2. **MAX_STREAM_DATA frames**: Per-stream flow control window updates
-3. **Delayed ACK timer**: RFC 9000 Section 13.2.1 (currently sending immediate ACKs)
-4. **Larger file transfers**: Test with multi-MB files to verify flow control updates
-5. **Retransmission / loss recovery**: RFC 9002 loss detection and retransmission
-6. **Module refcount cleanup**: Fix orphaned socket handling preventing rmmod
-7. **Client-initiated streams**: Outgoing stream creation from kernel side
+1. ~~**Stream FIN handling**~~: Done - FIN sent on close via tquic_close()
+2. ~~**MAX_STREAM_DATA frames**~~: Done - Per-stream flow control send + receive
+3. ~~**All RFC 9000 frame types**~~: Done - Handlers for 0x04-0x17 (RESET_STREAM, STOP_SENDING, MAX_STREAMS, DATA_BLOCKED, STREAM_DATA_BLOCKED, STREAMS_BLOCKED)
+4. **Large file transfer debugging**: 100KB transfer caps at 38400 bytes; send-side is NOT blocked (cwnd/FC diagnostics don't fire); bottleneck appears to be on receive side
+5. **Delayed ACK timer**: RFC 9000 Section 13.2.1 (currently sending immediate ACKs)
+6. **Retransmission / loss recovery**: RFC 9002 loss detection and retransmission
+7. **Module refcount cleanup**: Fix orphaned socket handling preventing rmmod
+8. **Client-initiated streams**: Outgoing stream creation from kernel side
