@@ -202,6 +202,8 @@ void tquic_sent_packet_free(struct tquic_sent_packet *pkt)
  */
 static void tquic_rtt_init(struct tquic_rtt_state *rtt)
 {
+	tquic_dbg("tquic_rtt_init: setting initial srtt=%u us\n",
+		  TQUIC_INITIAL_RTT_US);
 	rtt->min_rtt = U64_MAX;
 	rtt->smoothed_rtt = TQUIC_INITIAL_RTT_US;
 	rtt->rtt_var = TQUIC_INITIAL_RTT_US / 2;
@@ -446,6 +448,8 @@ int tquic_loss_detection_init(struct tquic_connection *conn)
 	if (!conn)
 		return -EINVAL;
 
+	tquic_dbg("tquic_loss_detection_init: initializing loss detection\n");
+
 	/* Initialize RTT on the active path */
 	{
 		struct tquic_path *path = tquic_loss_active_path_get(conn);
@@ -503,6 +507,9 @@ void tquic_loss_detection_on_packet_sent(struct tquic_connection *conn,
 
 	if (!conn || !pkt)
 		return;
+
+	tquic_dbg("tquic_loss_detection_on_packet_sent: pn=%llu space=%u bytes=%u\n",
+		  pkt->pn, pkt->pn_space, pkt->sent_bytes);
 
 	if (!conn->pn_spaces || pkt->pn_space >= TQUIC_PN_SPACE_COUNT)
 		return;
@@ -654,6 +661,9 @@ void tquic_loss_detection_on_ack_received(struct tquic_connection *conn,
 
 	if (!conn || !ack)
 		return;
+
+	tquic_dbg("tquic_loss_detection_on_ack_received: largest=%llu space=%u\n",
+		  ack->largest_acked, pn_space_idx);
 
 	if (pn_space_idx >= TQUIC_PN_SPACE_COUNT)
 		return;
@@ -1082,6 +1092,8 @@ void tquic_set_loss_detection_timer(struct tquic_connection *conn)
 	if (!conn)
 		return;
 
+	tquic_dbg("tquic_set_loss_detection_timer: updating timer\n");
+
 	path = tquic_loss_active_path_get(conn);
 	if (!path)
 		return;
@@ -1246,6 +1258,9 @@ void tquic_loss_detection_on_timeout(struct tquic_connection *conn)
 
 	if (!conn || !conn->pn_spaces)
 		return;
+
+	tquic_dbg("tquic_loss_detection_on_timeout: pto_count=%u\n",
+		  conn->pto_count);
 
 	/*
 	 * RFC 9002 Section 6.2.1:

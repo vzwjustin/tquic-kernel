@@ -216,6 +216,7 @@ static int __maybe_unused tquic_create_udp_socket(struct tquic_sock *tsk, int fa
 	struct udp_sock *up;
 	int err;
 
+	tquic_dbg("tquic_create_udp_socket: family=%d\n", family);
 	if (!tsk)
 		return -EINVAL;
 
