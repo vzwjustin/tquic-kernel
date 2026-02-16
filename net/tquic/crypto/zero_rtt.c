@@ -831,6 +831,9 @@ static void replay_filter_rotate(struct tquic_replay_filter *filter)
 	u32 half = TQUIC_REPLAY_BLOOM_BITS / 2;
 	u32 old_bucket;
 
+	tquic_dbg("replay_filter_rotate: current_bucket=%u\n",
+		  filter->current_bucket);
+
 	elapsed = ktime_to_ms(ktime_sub(now, filter->last_rotation));
 
 	/* Rotate every TTL/2 to maintain coverage */
@@ -1294,6 +1297,8 @@ int tquic_zero_rtt_init(struct tquic_connection *conn)
 	if (!conn)
 		return -EINVAL;
 
+	tquic_dbg("tquic_zero_rtt_init: initializing 0-RTT state\n");
+
 	state = kzalloc(sizeof(*state), GFP_KERNEL);
 	if (!state)
 		return -ENOMEM;
@@ -1314,6 +1319,7 @@ int tquic_zero_rtt_init(struct tquic_connection *conn)
 
 	conn->zero_rtt_state = state;
 
+	tquic_dbg("tquic_zero_rtt_init: ret=0\n");
 	return 0;
 }
 EXPORT_SYMBOL_GPL(tquic_zero_rtt_init);
@@ -1326,6 +1332,9 @@ void tquic_zero_rtt_cleanup(struct tquic_connection *conn)
 		return;
 
 	state = conn->zero_rtt_state;
+
+	tquic_dbg("tquic_zero_rtt_cleanup: state=%d early_data_sent=%u\n",
+		  state->state, state->early_data_sent);
 
 	/* Free pre-allocated AEAD transform */
 	if (state->aead)
@@ -1346,6 +1355,7 @@ void tquic_zero_rtt_cleanup(struct tquic_connection *conn)
 	if (state->ticket)
 		tquic_zero_rtt_put_ticket(state->ticket);
 
+	tquic_dbg("tquic_zero_rtt_cleanup: done\n");
 	kfree_sensitive(state);
 	conn->zero_rtt_state = NULL;
 }
@@ -1591,6 +1601,9 @@ bool tquic_zero_rtt_can_send(struct tquic_connection *conn)
 
 	state = conn->zero_rtt_state;
 
+	tquic_dbg("tquic_zero_rtt_can_send: state=%d early_data_sent=%u max=%u\n",
+		  state->state, state->early_data_sent, state->early_data_max);
+
 	if (state->state != TQUIC_0RTT_ATTEMPTING &&
 	    state->state != TQUIC_0RTT_ACCEPTED)
 		return false;
@@ -1616,6 +1629,8 @@ EXPORT_SYMBOL_GPL(tquic_zero_rtt_can_send);
 static void tquic_create_nonce(const u8 *iv, u64 pkt_num, u8 *nonce)
 {
 	int i;
+
+	tquic_dbg("tquic_create_nonce(0rtt): pkt_num=%llu\n", pkt_num);
 
 	memcpy(nonce, iv, 12);
 	for (i = 0; i < 8; i++)
@@ -1965,6 +1980,7 @@ enum tquic_zero_rtt_state tquic_zero_rtt_get_state(struct tquic_connection *conn
 		return TQUIC_0RTT_NONE;
 
 	state = conn->zero_rtt_state;
+	tquic_dbg("tquic_zero_rtt_get_state: state=%d\n", state->state);
 	return state->state;
 }
 EXPORT_SYMBOL_GPL(tquic_zero_rtt_get_state);

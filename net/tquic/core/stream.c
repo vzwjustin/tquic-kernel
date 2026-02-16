@@ -1201,6 +1201,8 @@ int tquic_stream_recv_data(struct tquic_stream_manager *mgr,
 {
 	int ret;
 
+	tquic_dbg("tquic_stream_recv_data: stream=%llu offset=%llu fin=%d\n",
+		  stream->id, offset, fin);
 	if (!tquic_stream_can_recv(mgr, stream))
 		return -EINVAL;
 
@@ -1279,6 +1281,8 @@ ssize_t tquic_stream_read(struct tquic_stream_manager *mgr,
 {
 	size_t copied = 0;
 
+	tquic_dbg("tquic_stream_read: stream=%llu len=%zu\n",
+		  stream->id, len);
 	if (!tquic_stream_can_recv(mgr, stream))
 		return -EINVAL;
 

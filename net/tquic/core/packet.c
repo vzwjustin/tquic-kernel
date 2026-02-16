@@ -426,6 +426,8 @@ int tquic_parse_long_header(const u8 *data, size_t len,
 	u64 pn_tmp;
 	int ret;
 
+	tquic_dbg("tquic_parse_long_header: len=%zu largest_pn=%llu\n",
+		  len, largest_pn);
 	if (len < 7)  /* Minimum: 1 + 4 + 1 + 0 + 1 + 0 */
 		return -EINVAL;
 
@@ -669,6 +671,8 @@ int tquic_parse_short_header(const u8 *data, size_t len,
 	u8 first_byte;
 	u64 pn_tmp;
 
+	tquic_dbg("tquic_parse_short_header: len=%zu dcid_len=%u\n",
+		  len, dcid_len);
 	if (len < 1 + dcid_len + 1)  /* First byte + DCID + min PN */
 		return -EINVAL;
 
@@ -896,6 +900,7 @@ int tquic_build_stateless_reset(const u8 *token, u8 *buf, size_t buflen)
 {
 	size_t random_len;
 
+	tquic_dbg("tquic_build_stateless_reset: buflen=%zu\n", buflen);
 	if (buflen < QUIC_MIN_STATELESS_RESET_LEN)
 		return -ENOSPC;
 
@@ -1068,6 +1073,8 @@ int tquic_build_long_header(enum tquic_packet_type type, u32 version,
 	int len_field_len;
 	u64 length;
 
+	tquic_dbg("tquic_build_long_header: type=%d version=0x%08x pn=%llu\n",
+		  type, version, pn);
 	if (pn_len < 1 || pn_len > 4)
 		return -EINVAL;
 
@@ -1233,6 +1240,8 @@ int tquic_split_coalesced(const u8 *data, size_t len,
 {
 	size_t offset = 0;
 	int count = 0;
+	tquic_dbg("tquic_split_coalesced: len=%zu max_packets=%d\n",
+		  len, max_packets);
 	u64 pkt_len;
 	int ret;
 	u8 dcid_len, scid_len;
@@ -1495,6 +1504,8 @@ int tquic_validate_initial_packet(const u8 *data, size_t len, bool is_client)
 	struct tquic_packet_header hdr;
 	int ret;
 
+	tquic_dbg("tquic_validate_initial_packet: len=%zu is_client=%d\n",
+		  len, is_client);
 	/* Initial packets must be at least 1200 bytes when sent by client */
 	if (is_client && len < TQUIC_MIN_INITIAL_PACKET_SIZE)
 		return -EINVAL;

@@ -141,6 +141,8 @@ static struct proc_dir_entry *tquic_cert_proc_dir;
 
 static int asn1_get_length(const u8 *data, u32 data_len, u32 *len, u32 *hdr_len)
 {
+	tquic_dbg("asn1_get_length: data_len=%u\n", data_len);
+
 	if (data_len < 1)
 		return -EINVAL;
 
@@ -412,6 +414,8 @@ static const char *get_hash_algo_name(enum tquic_hash_algo algo)
  */
 static u32 __maybe_unused get_hash_digest_size(enum tquic_hash_algo algo)
 {
+	tquic_dbg("get_hash_digest_size: algo=%d\n", algo);
+
 	switch (algo) {
 	case TQUIC_HASH_SHA256:
 		return 32;
@@ -431,6 +435,8 @@ static int parse_dn_extract_cn(const u8 *data, u32 len, char **cn, u32 *cn_len)
 {
 	const u8 *p = data;
 	const u8 *end = data + len;
+
+	tquic_dbg("parse_dn_extract_cn: dn_len=%u\n", len);
 
 	while (p < end) {
 		u32 set_content_len, set_total_len;
@@ -666,6 +672,8 @@ static int parse_key_usage(const u8 *data, u32 len, u16 *key_usage)
 	u32 content_len, total_len;
 	int ret;
 
+	tquic_dbg("parse_key_usage: data_len=%u\n", len);
+
 	ret = asn1_get_tag_length(data, len, ASN1_BIT_STRING,
 				  &content_len, &total_len);
 	if (ret < 0)
@@ -697,6 +705,8 @@ static int parse_ext_key_usage(const u8 *data, u32 len, u32 *ext_key_usage)
 	const u8 *end = data + len;
 	u32 content_len, total_len;
 	int ret;
+
+	tquic_dbg("parse_ext_key_usage: data_len=%u\n", len);
 
 	/* SEQUENCE of OIDs */
 	ret = asn1_get_tag_length(p, end - p, ASN1_SEQUENCE,

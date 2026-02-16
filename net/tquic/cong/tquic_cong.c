@@ -64,6 +64,9 @@ static int tquic_get_path_degrade_threshold(struct tquic_path *path)
 {
 	struct net *net = NULL;
 
+	tquic_dbg("cc: get_path_degrade_threshold path_id=%u\n",
+		  path ? path->path_id : 0);
+
 	if (path && path->conn) {
 		struct sock *sk = READ_ONCE(path->conn->sk);
 
@@ -157,6 +160,8 @@ struct tquic_cong_ops *tquic_cong_find(const char *name)
 {
 	struct tquic_cong_ops *ca;
 
+	tquic_dbg("cc: find algorithm name='%s'\n", name ? name : "(null)");
+
 	if (!name || strlen(name) == 0)
 		return NULL;
 
@@ -189,6 +194,8 @@ EXPORT_SYMBOL_GPL(tquic_cong_find);
 static struct tquic_cong_ops __maybe_unused *tquic_cong_find_key(u32 key)
 {
 	struct tquic_cong_ops *ca;
+
+	tquic_dbg("cc: find_key key=0x%08x\n", key);
 
 	rcu_read_lock();
 	list_for_each_entry_rcu(ca, &tquic_cong_list, list) {
@@ -693,6 +700,8 @@ void tquic_cong_on_rtt(struct tquic_path *path, u64 rtt_us)
 	if (!path)
 		return;
 
+	tquic_dbg("cc: on_rtt path=%u rtt_us=%llu\n", path->path_id, rtt_us);
+
 	ca = path->cong_ops;
 	if (ca && ca->on_rtt_update && path->cong)
 		ca->on_rtt_update(path->cong, rtt_us);
@@ -708,15 +717,19 @@ EXPORT_SYMBOL_GPL(tquic_cong_on_rtt);
 u64 tquic_cong_get_cwnd(struct tquic_path *path)
 {
 	struct tquic_cong_ops *ca;
+	u64 cwnd;
 
 	if (!path)
 		return TQUIC_DEFAULT_CWND;
 
 	ca = path->cong_ops;
 	if (ca && ca->get_cwnd && path->cong)
-		return ca->get_cwnd(path->cong);
+		cwnd = ca->get_cwnd(path->cong);
+	else
+		cwnd = path->stats.cwnd ?: TQUIC_DEFAULT_CWND;
 
-	return path->stats.cwnd ?: TQUIC_DEFAULT_CWND;
+	tquic_dbg("cc: get_cwnd path=%u cwnd=%llu\n", path->path_id, cwnd);
+	return cwnd;
 }
 EXPORT_SYMBOL_GPL(tquic_cong_get_cwnd);
 
@@ -742,6 +755,9 @@ u64 tquic_cong_get_pacing_rate(struct tquic_path *path)
 
 	if (!path)
 		return TQUIC_MIN_PACING_RATE;
+
+	tquic_dbg("cc: get_pacing_rate path=%u rtt=%llu cwnd=%u\n",
+		  path->path_id, path->stats.rtt_smoothed, path->stats.cwnd);
 
 	/* First try CC-provided pacing rate (bandwidth-based) */
 	ca = path->cong_ops;
@@ -783,6 +799,9 @@ static void tquic_cong_on_packet_sent(struct tquic_path *path, u64 bytes,
 
 	if (!path)
 		return;
+
+	tquic_dbg("cc: on_packet_sent path=%u bytes=%llu\n",
+		  path->path_id, bytes);
 
 	ca = path->cong_ops;
 	if (ca && ca->on_packet_sent && path->cong)
