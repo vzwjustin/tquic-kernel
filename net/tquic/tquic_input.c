@@ -1262,6 +1262,12 @@ static int tquic_process_crypto_frame(struct tquic_rx_ctx *ctx)
 	if (ctx->conn && ctx->conn->tsk && ctx->conn->tsk->inline_hs) {
 		struct sock *sk = (struct sock *)ctx->conn->tsk;
 
+		pr_warn("crypto_frame: offset=%llu length=%llu enc_level=%d "
+			"data[0..3]=%*phN\n",
+			offset, length, ctx->enc_level,
+			min_t(int, (int)length, 4),
+			ctx->data + ctx->offset);
+
 		/*
 		 * SECURITY: Validate length fits in u32 before cast.
 		 * CRYPTO frames carrying TLS messages should never exceed
@@ -1273,6 +1279,7 @@ static int tquic_process_crypto_frame(struct tquic_rx_ctx *ctx)
 						  ctx->data + ctx->offset,
 						  (u32)length,
 						  ctx->enc_level);
+		pr_warn("crypto_frame: inline_hs_recv_crypto ret=%d\n", ret);
 		if (ret < 0) {
 			tquic_dbg("CRYPTO frame processing failed: %d\n",
 				 ret);
@@ -1280,7 +1287,9 @@ static int tquic_process_crypto_frame(struct tquic_rx_ctx *ctx)
 			return ret;
 		}
 	} else {
-		tquic_dbg("CRYPTO frame received but no inline handshake active\n");
+		pr_warn("crypto_frame: no inline_hs! conn=%p tsk=%p\n",
+			ctx->conn,
+			ctx->conn ? ctx->conn->tsk : NULL);
 	}
 
 	ctx->offset += length;
@@ -2489,6 +2498,11 @@ static int tquic_process_frames(struct tquic_connection *conn,
 	while (ctx.offset < ctx.len) {
 		prev_offset = ctx.offset;
 
+		if (is_initial)
+			pr_warn("process_frames: offset=%zu/%zu frame_type=0x%02x\n",
+				ctx.offset, ctx.len,
+				ctx.data[ctx.offset]);
+
 		/* CF-610: Enforce per-packet frame processing budget */
 		if (--frame_budget <= 0) {
 			tquic_dbg("frame budget exhausted\n");
@@ -2742,12 +2756,22 @@ static int tquic_process_frames(struct tquic_connection *conn,
 			return -EPROTO;
 		}
 
-		if (ret < 0)
+		if (ret < 0) {
+			if (is_initial)
+				pr_warn("process_frames: handler ret=%d "
+					"for frame 0x%02x at offset=%zu\n",
+					ret, frame_type, prev_offset);
 			break;
+		}
 
 		/* Detect stuck parsing (no progress made) */
-		if (ctx.offset == prev_offset)
+		if (ctx.offset == prev_offset) {
+			if (is_initial)
+				pr_warn("process_frames: stuck at offset=%zu "
+					"frame=0x%02x\n",
+					ctx.offset, frame_type);
 			return -EPROTO;
+		}
 	}
 
 	/* Send ACK if packet was ack-eliciting */
@@ -3306,6 +3330,12 @@ static int tquic_process_packet(struct tquic_connection *conn,
 	{
 		u8 hp_pn_len = 0, hp_key_phase = 0;
 
+		if (pkt_type == TQUIC_PKT_INITIAL)
+			pr_warn("process_pkt: HP removal: hdr_len=%d "
+				"payload_len=%lu data[0]=0x%02x long=%d\n",
+				ctx.offset, (unsigned long)(len - ctx.offset),
+				data[0], ctx.is_long_header);
+
 		ret = tquic_remove_header_protection(conn, data, ctx.offset,
 						     data + ctx.offset,
 						     len - ctx.offset,
@@ -3313,11 +3343,17 @@ static int tquic_process_packet(struct tquic_connection *conn,
 						     &hp_pn_len,
 						     &hp_key_phase);
 		if (unlikely(ret < 0)) {
+			pr_warn("process_pkt: HP removal failed: %d\n", ret);
 			if (path_looked_up)
 				tquic_path_put(path);
 			rcu_read_unlock();
 			return ret;
 		}
+
+		if (pkt_type == TQUIC_PKT_INITIAL)
+			pr_warn("process_pkt: HP done: pn_len=%u "
+				"data[0]=0x%02x\n",
+				hp_pn_len, data[0]);
 
 		/*
 		 * CF-076: Extract pkt_num_len from the NOW-unprotected
@@ -3386,6 +3422,12 @@ static int tquic_process_packet(struct tquic_connection *conn,
 				       pkt_num_len, largest_pn);
 	ctx.offset += pkt_num_len;
 
+	if (pkt_type == TQUIC_PKT_INITIAL)
+		pr_warn("process_pkt: PN decode: pkt_num=%llu pn_len=%d "
+			"hdr_offset=%d total_len=%lu\n",
+			pkt_num, pkt_num_len, ctx.offset,
+			(unsigned long)len);
+
 	/* Decrypt payload */
 	payload = data + ctx.offset;
 	payload_len = len - ctx.offset;
@@ -3446,11 +3488,23 @@ static int tquic_process_packet(struct tquic_connection *conn,
 			TQUIC_ADD_STATS(sock_net(conn->sk), TQUIC_MIB_0RTTBYTESRX,
 					decrypted_len);
 	} else {
+		if (pkt_type == TQUIC_PKT_INITIAL)
+			pr_warn("process_pkt: decrypt: hdr_len=%d "
+				"payload_len=%zu pkt_num=%llu\n",
+				ctx.offset, (unsigned long)payload_len,
+				pkt_num);
+
 		ret = tquic_decrypt_payload(conn, data, ctx.offset,
 					    payload, payload_len,
 					    pkt_num,
 					    pkt_type >= 0 ? pkt_type : 3,
 					    decrypted, &decrypted_len);
+
+		if (pkt_type == TQUIC_PKT_INITIAL)
+			pr_warn("process_pkt: decrypt ret=%d "
+				"decrypted_len=%lu\n",
+				ret, (unsigned long)decrypted_len);
+
 		if (unlikely(ret < 0)) {
 			/*
 			 * Key Update: Decryption failure for short headers might be
@@ -3576,6 +3630,61 @@ static int tquic_process_packet(struct tquic_connection *conn,
 	rcu_read_unlock();
 	return ret;
 }
+
+/**
+ * tquic_process_initial_for_server - Process Initial packet for new server connection
+ * @conn: Server connection with CIDs parsed and crypto_state initialized
+ * @skb: The Initial packet SKB (data points to QUIC packet, past UDP header)
+ * @src_addr: Client source address
+ *
+ * Called from tquic_server_handshake() after the inline TLS context and
+ * Initial crypto keys have been set up. Decrypts the Initial packet,
+ * removes header protection, and processes frames — feeding the ClientHello
+ * into the inline TLS state machine via the CRYPTO frame handler.
+ *
+ * Returns: 0 on success, negative errno on error
+ */
+int tquic_process_initial_for_server(struct tquic_connection *conn,
+				     struct sk_buff *skb,
+				     struct sockaddr_storage *src_addr)
+{
+	int ret;
+
+	if (!conn || !skb)
+		return -EINVAL;
+
+	/* Ensure packet data is writable for header protection removal */
+	if (skb_ensure_writable(skb, skb->len))
+		return -ENOMEM;
+
+	pr_warn("process_initial_for_server: len=%u data[0]=0x%02x "
+		"scid_len=%u dcid_len=%u version=0x%08x crypto=%p hp=%p\n",
+		skb->len, skb->data[0],
+		conn->scid.len, conn->dcid.len, conn->version,
+		conn->crypto_state,
+		conn->crypto_state ?
+			tquic_crypto_get_hp_ctx(conn->crypto_state) : NULL);
+
+	if (skb->len >= 22) {
+		pr_warn("process_initial_for_server: pkt bytes: "
+			"%02x %02x%02x%02x%02x %02x "
+			"%*phN %02x %*phN\n",
+			skb->data[0],
+			skb->data[1], skb->data[2],
+			skb->data[3], skb->data[4],
+			skb->data[5],
+			min_t(int, skb->data[5], 8), &skb->data[6],
+			skb->data[6 + skb->data[5]],
+			min_t(int, skb->data[6 + skb->data[5]], 8),
+			&skb->data[7 + skb->data[5]]);
+	}
+
+	ret = tquic_process_packet(conn, NULL, skb->data, skb->len, src_addr);
+
+	pr_warn("process_initial_for_server: process_packet ret=%d\n", ret);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(tquic_process_initial_for_server);
 
 /*
  * UDP receive callback - main entry point for received packets
