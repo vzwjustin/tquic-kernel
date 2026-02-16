@@ -758,6 +758,12 @@ int tquic_start_handshake(struct sock *sk)
 
 		tquic_dbg("inline TLS handshake initiated, ClientHello queued (%u bytes)\n",
 			 ch_len);
+
+		/* Flush the queued ClientHello as a CRYPTO frame in an Initial packet */
+		ret = tquic_output_flush_crypto(conn);
+		if (ret < 0)
+			tquic_warn("failed to flush ClientHello: %d\n", ret);
+
 		tquic_conn_put(conn);
 		return 0;
 	}

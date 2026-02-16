@@ -48,13 +48,47 @@ static struct tquic_path *tquic_loss_active_path_get(struct tquic_connection *co
 {
 	struct tquic_path *path;
 
+	if (!conn)
+		return NULL;
+
 	rcu_read_lock();
 	path = rcu_dereference(conn->active_path);
-	if (path && !tquic_path_get(path))
-		path = NULL;
+	if (path && refcount_inc_not_zero(&path->refcnt)) {
+		rcu_read_unlock();
+		return path;
+	}
 	rcu_read_unlock();
 
-	return path;
+	return NULL;
+}
+
+/**
+ * tquic_loss_find_path_by_id - Find path by path_id for loss attribution
+ * @conn: TQUIC connection
+ * @path_id: Path ID to find
+ *
+ * Looks up a path by path_id for multipath loss detection and congestion
+ * attribution. Must be called with RCU read lock held.
+ *
+ * Returns path with reference held, or NULL if not found.
+ */
+static struct tquic_path *tquic_loss_find_path_by_id(struct tquic_connection *conn,
+						     u32 path_id)
+{
+	struct tquic_path *path;
+
+	if (!conn)
+		return NULL;
+
+	list_for_each_entry_rcu(path, &conn->paths, list) {
+		if (path->path_id == path_id) {
+			if (refcount_inc_not_zero(&path->refcnt))
+				return path;
+			break;
+		}
+	}
+
+	return NULL;
 }
 
 /*
@@ -498,7 +532,7 @@ void tquic_loss_detection_on_packet_sent(struct tquic_connection *conn,
 					struct tquic_sent_packet *pkt)
 {
 	struct tquic_pn_space *pn_space;
-	struct tquic_path *path;
+	struct tquic_path *path = NULL;
 	unsigned long flags;
 
 	if (!conn || !pkt)
@@ -507,7 +541,15 @@ void tquic_loss_detection_on_packet_sent(struct tquic_connection *conn,
 	if (!conn->pn_spaces || pkt->pn_space >= TQUIC_PN_SPACE_COUNT)
 		return;
 
-	path = tquic_loss_active_path_get(conn);
+	/*
+	 * Multipath fix: Look up path by path_id from packet instead of
+	 * always using active_path. This ensures loss detection and congestion
+	 * control correctly attribute packets to the path they were sent on.
+	 */
+	rcu_read_lock();
+	path = tquic_loss_find_path_by_id(conn, pkt->path_id);
+	rcu_read_unlock();
+
 	pn_space = &conn->pn_spaces[pkt->pn_space];
 
 	spin_lock_irqsave(&pn_space->lock, flags);
@@ -523,7 +565,7 @@ void tquic_loss_detection_on_packet_sent(struct tquic_connection *conn,
 
 	spin_unlock_irqrestore(&pn_space->lock, flags);
 
-	/* Update congestion control - use path-level CC */
+	/* Update congestion control - use path-level CC on correct path */
 	if (pkt->in_flight && path) {
 		tquic_cong_on_ack(path, 0, 0); /* Signal packet sent */
 		/* Update path CC bytes_in_flight */

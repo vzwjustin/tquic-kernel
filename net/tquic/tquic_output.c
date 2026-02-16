@@ -28,6 +28,7 @@
 #include <net/ipv6.h>
 #include <net/route.h>
 #include <net/inet_common.h>
+#include <net/inet_sock.h>
 #include <crypto/aead.h>
 #include <crypto/skcipher.h>
 #include <net/tquic.h>
@@ -1870,78 +1871,108 @@ int tquic_output_packet(struct tquic_connection *conn,
 		return PTR_ERR(rt);
 	}
 
-	/* Setup SKB */
-	skb->protocol = htons(ETH_P_IP);
-	skb_dst_set(skb, &rt->dst);
-
-	/* Add UDP header */
+	/* Determine TOS for ECN marking and send */
 	{
-		struct udphdr *uh;
-		int udp_len = skb->len + sizeof(struct udphdr);
+		u8 tos = 0;
+		__be32 saddr = fl4.saddr;
+		__be16 sport = local->sin_port;
 
-		uh = skb_push(skb, sizeof(struct udphdr));
-		uh->source = local->sin_port;
-		uh->dest = remote->sin_port;
-		uh->len = htons(udp_len);
-		uh->check = 0;
-
-		/* Calculate UDP checksum */
-		skb->ip_summed = CHECKSUM_PARTIAL;
-		skb->csum_start = skb_transport_header(skb) - skb->head;
-		skb->csum_offset = offsetof(struct udphdr, check);
-	}
-
-	/*
-	 * Set ECN marking on outgoing packet if ECN is enabled.
-	 * Per RFC 9000 Section 13.4.1: "An endpoint that supports ECN
-	 * marks all IP packets that it sends with the ECT(0) codepoint."
-	 */
-	if (conn) {
-		net = path->conn->sk ? sock_net(path->conn->sk) : NULL;
-		if (net && tquic_pernet(net)->ecn_enabled) {
-			/*
-			 * Set TOS field with ECT(0) for ECN-enabled packets.
-			 * This is done before ip_local_out which will copy
-			 * TOS to the IP header.
-			 *
-			 * Note: The actual IP header marking happens when
-			 * ip_local_out builds the header. We can set it via
-			 * fl4.flowi4_tos for route-based marking.
-			 */
-			/* ECN marking will be applied by IP layer via TOS */
-		}
-	}
-
-	/* Save skb->len before ip_local_out() which may consume the SKB */
-	skb_len = skb->len;
-
-	/* Send via IP */
-	ret = ip_local_out(net, NULL, skb);
-
-	/* Update path statistics -- SKB must not be touched after this point */
-	if (ret >= 0) {
-		path->stats.tx_packets++;
-		path->stats.tx_bytes += skb_len;
-		WRITE_ONCE(path->last_activity, ktime_get());
-
-		/* Update MIB counters for packet transmission */
-		if (conn && conn->sk) {
-			TQUIC_INC_STATS(sock_net(conn->sk), TQUIC_MIB_PACKETSTX);
-			TQUIC_ADD_STATS(sock_net(conn->sk), TQUIC_MIB_BYTESTX, skb_len);
-		}
+		if (net && tquic_pernet(net)->ecn_enabled)
+			tos = TQUIC_IP_ECN_ECT0;
 
 		/*
-		 * Key Update: Track packets sent for automatic key update
-		 * (RFC 9001 Section 6). May trigger key update if thresholds
-		 * are reached (packet count or time-based).
+		 * If the path has no local port assigned (unbound socket),
+		 * use the socket's automatically assigned source port.
+		 * If the socket has no port either, pick an ephemeral one.
 		 */
-		if (conn && conn->crypto_state) {
-			struct tquic_key_update_state *ku_state;
-			ku_state = tquic_crypto_get_key_update_state(conn->crypto_state);
-			if (ku_state) {
-				tquic_key_update_on_packet_sent(ku_state);
-				/* Check if automatic key update should be triggered */
-				tquic_key_update_check_threshold(conn);
+		if (!sport && conn->sk)
+			sport = inet_sk(conn->sk)->inet_sport;
+		if (!sport)
+			sport = htons(get_random_u32_below(16384) + 49152);
+
+		/* Update path with resolved addresses for future use */
+		if (!local->sin_addr.s_addr && saddr) {
+			local->sin_addr.s_addr = saddr;
+			local->sin_port = sport;
+		}
+
+		/* Extract packet metadata before sending */
+		{
+			struct tquic_skb_cb *cb = TQUIC_SKB_CB(skb);
+			u64 pkt_num = cb->pn;
+			u8 pn_space = cb->packet_type == TQUIC_PACKET_TYPE_INITIAL ?
+				      TQUIC_PN_SPACE_INITIAL :
+				      (cb->packet_type == TQUIC_PACKET_TYPE_HANDSHAKE ?
+				       TQUIC_PN_SPACE_HANDSHAKE : TQUIC_PN_SPACE_APPLICATION);
+			u32 path_id = path->path_id;
+
+			/* Save skb->len before xmit which consumes the SKB */
+			skb_len = skb->len;
+
+			/*
+			 * Use udp_tunnel_xmit_skb for proper UDP encapsulation.
+			 * This builds the UDP header, IP header, and transmits
+			 * the packet correctly through the network stack.
+			 */
+			TQUIC_UDP_TUNNEL_XMIT_SKB(rt, conn->sk, skb,
+						   saddr,
+						   remote->sin_addr.s_addr,
+						   tos,
+						   ip4_dst_hoplimit(&rt->dst),
+						   0,		/* DF */
+						   sport,
+						   remote->sin_port,
+						   false,	/* xnet */
+						   true);	/* nocheck */
+			ret = 0;
+
+			/* Update path statistics */
+			path->stats.tx_packets++;
+			path->stats.tx_bytes += skb_len;
+			WRITE_ONCE(path->last_activity, ktime_get());
+
+			if (conn && conn->sk) {
+				TQUIC_INC_STATS(sock_net(conn->sk),
+						TQUIC_MIB_PACKETSTX);
+				TQUIC_ADD_STATS(sock_net(conn->sk),
+						TQUIC_MIB_BYTESTX, skb_len);
+			}
+
+			/* Key Update tracking (RFC 9001 Section 6) */
+			if (conn && conn->crypto_state) {
+				struct tquic_key_update_state *ku_state;
+
+				ku_state = tquic_crypto_get_key_update_state(
+						conn->crypto_state);
+				if (ku_state) {
+					tquic_key_update_on_packet_sent(ku_state);
+					tquic_key_update_check_threshold(conn);
+				}
+			}
+
+			/* Loss Detection (RFC 9002) */
+			if (conn && conn->timer_state) {
+				tquic_timer_on_packet_sent(
+					conn->timer_state, pn_space,
+					pkt_num, skb_len,
+					true, true, 0);
+			}
+
+			if (conn) {
+				struct tquic_sent_packet *pkt;
+
+				pkt = tquic_sent_packet_alloc(GFP_ATOMIC);
+				if (pkt) {
+					tquic_sent_packet_init(pkt, pkt_num,
+							       skb_len,
+							       pn_space,
+							       true, true);
+					pkt->path_id = path_id;
+					pkt->frames = 0;
+					pkt->skb = NULL;
+					tquic_loss_detection_on_packet_sent(
+						conn, pkt);
+				}
 			}
 		}
 	}

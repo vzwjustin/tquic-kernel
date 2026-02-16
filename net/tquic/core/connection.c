@@ -1720,32 +1720,64 @@ int tquic_send_path_challenge(struct tquic_connection *conn,
 	 * (path->validation.timer) set up in PM code.
 	 */
 
-	tquic_conn_dbg(conn, "sent PATH_CHALLENGE on path %u\n", path->path_id);
-
 	/*
-	 * BUG FIX: Build SKB and transmit via tquic_udp_xmit_on_path()
-	 * instead of tquic_xmit(). Previous code passed NULL for path,
-	 * causing all PATH_CHALLENGE frames to go out the default/active path
-	 * instead of the specific path being validated, breaking multipath.
+	 * Use proper QUIC packetization for PATH_CHALLENGE instead of raw UDP.
+	 * Build a complete QUIC packet with header and send via tquic_output_packet
+	 * to ensure loss detection, recovery tracking, and proper path routing.
 	 */
 	{
 		u8 frame_buf[16];
+		u8 header[64];
 		int frame_len;
+		int header_len;
 		struct sk_buff *skb;
+		u64 pkt_num;
+		bool key_phase = false;
 
 		frame_len = tquic_write_path_challenge_frame(frame_buf,
 							     sizeof(frame_buf),
 							     challenge->data);
-		if (frame_len > 0) {
-			/* Allocate SKB with headroom */
-			skb = alloc_skb(frame_len + 64, GFP_ATOMIC);
-			if (skb) {
-				skb_reserve(skb, 64);
-				skb_put_data(skb, frame_buf, frame_len);
-				/* Transmit via the specific path */
-				tquic_udp_xmit_on_path(conn, path, skb);
-			}
+		if (frame_len <= 0)
+			return -EINVAL;
+
+		pkt_num = atomic64_inc_return(&conn->pkt_num_tx) - 1;
+
+		/* Get current key phase for header */
+		if (conn->crypto_state) {
+			struct tquic_key_update_state *ku_state;
+			ku_state = tquic_crypto_get_key_update_state(conn->crypto_state);
+			if (ku_state)
+				key_phase = tquic_key_update_get_phase(ku_state) != 0;
 		}
+
+		/* Build short header packet */
+		header_len = tquic_build_short_header_internal(
+				conn, path, header, sizeof(header),
+				pkt_num, 0, key_phase, false, NULL);
+		if (header_len <= 0)
+			return -EINVAL;
+
+		/* Allocate SKB and build packet */
+		skb = alloc_skb(header_len + frame_len + 128, GFP_ATOMIC);
+		if (!skb)
+			return -ENOMEM;
+
+		skb_reserve(skb, 64);
+		skb_put_data(skb, header, header_len);
+		skb_put_data(skb, frame_buf, frame_len);
+
+		/* Store packet metadata in SKB control block */
+		{
+			struct tquic_skb_cb *cb = TQUIC_SKB_CB(skb);
+			cb->pn = pkt_num;
+			cb->header_len = header_len;
+			cb->packet_type = TQUIC_PACKET_TYPE_1RTT;
+			cb->key_phase = key_phase ? 1 : 0;
+		}
+
+		/* Send via proper QUIC output path */
+		tquic_output_packet(conn, path, skb);
+		tquic_conn_dbg(conn, "sent PATH_CHALLENGE on path %u\n", path->path_id);
 	}
 
 	return 0;
@@ -1764,32 +1796,64 @@ int tquic_send_path_response(struct tquic_connection *conn,
 			     struct tquic_path *path,
 			     const u8 *data)
 {
-	tquic_conn_dbg(conn, "sent PATH_RESPONSE on path %u\n", path->path_id);
-
 	/*
-	 * BUG FIX: Build SKB and transmit via tquic_udp_xmit_on_path()
-	 * instead of tquic_xmit(). Previous code passed NULL for path,
-	 * causing PATH_RESPONSE to go out the default path instead of
-	 * the same path the PATH_CHALLENGE arrived on.
+	 * Use proper QUIC packetization for PATH_RESPONSE instead of raw UDP.
+	 * Build a complete QUIC packet with header and send via tquic_output_packet
+	 * to ensure loss detection, recovery tracking, and proper path routing.
 	 */
 	{
 		u8 frame_buf[16];
+		u8 header[64];
 		int frame_len;
+		int header_len;
 		struct sk_buff *skb;
+		u64 pkt_num;
+		bool key_phase = false;
 
 		frame_len = tquic_write_path_response_frame(frame_buf,
 							    sizeof(frame_buf),
 							    data);
-		if (frame_len > 0) {
-			/* Allocate SKB with headroom */
-			skb = alloc_skb(frame_len + 64, GFP_ATOMIC);
-			if (skb) {
-				skb_reserve(skb, 64);
-				skb_put_data(skb, frame_buf, frame_len);
-				/* Transmit via the same path the challenge arrived on */
-				tquic_udp_xmit_on_path(conn, path, skb);
-			}
+		if (frame_len <= 0)
+			return -EINVAL;
+
+		pkt_num = atomic64_inc_return(&conn->pkt_num_tx) - 1;
+
+		/* Get current key phase for header */
+		if (conn->crypto_state) {
+			struct tquic_key_update_state *ku_state;
+			ku_state = tquic_crypto_get_key_update_state(conn->crypto_state);
+			if (ku_state)
+				key_phase = tquic_key_update_get_phase(ku_state) != 0;
 		}
+
+		/* Build short header packet */
+		header_len = tquic_build_short_header_internal(
+				conn, path, header, sizeof(header),
+				pkt_num, 0, key_phase, false, NULL);
+		if (header_len <= 0)
+			return -EINVAL;
+
+		/* Allocate SKB and build packet */
+		skb = alloc_skb(header_len + frame_len + 128, GFP_ATOMIC);
+		if (!skb)
+			return -ENOMEM;
+
+		skb_reserve(skb, 64);
+		skb_put_data(skb, header, header_len);
+		skb_put_data(skb, frame_buf, frame_len);
+
+		/* Store packet metadata in SKB control block */
+		{
+			struct tquic_skb_cb *cb = TQUIC_SKB_CB(skb);
+			cb->pn = pkt_num;
+			cb->header_len = header_len;
+			cb->packet_type = TQUIC_PACKET_TYPE_1RTT;
+			cb->key_phase = key_phase ? 1 : 0;
+		}
+
+		/* Send via proper QUIC output path */
+		tquic_output_packet(conn, path, skb);
+		tquic_conn_dbg(conn, "sent PATH_RESPONSE on path %u\n", path->path_id);
 	}
 
 	return 0;

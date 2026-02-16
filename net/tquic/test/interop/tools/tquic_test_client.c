@@ -177,11 +177,10 @@ static int create_quic_connection(struct client_config *config)
     setsockopt(sock, IPPROTO_IPV6, IPV6_V6ONLY, &opt, sizeof(opt));
 
     /* Set TQUIC-specific options */
-    /* For testing: disable certificate verification */
-    opt = TQUIC_VERIFY_NONE;
+    /* Allow self-signed certificates but perform real TLS handshake */
+    opt = TQUIC_VERIFY_OPTIONAL;
     setsockopt(sock, SOL_TQUIC, TQUIC_CERT_VERIFY_MODE, &opt, sizeof(opt));
 
-    /* Allow self-signed certificates */
     opt = 1;
     setsockopt(sock, SOL_TQUIC, TQUIC_ALLOW_SELF_SIGNED, &opt, sizeof(opt));
 

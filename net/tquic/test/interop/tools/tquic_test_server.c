@@ -118,40 +118,99 @@ static void signal_handler(int signum)
 }
 
 /*
+ * Detect if an address string is IPv4 (dotted decimal or "0.0.0.0")
+ */
+static int is_ipv4_addr(const char *addr)
+{
+    struct in_addr tmp;
+
+    if (!addr)
+        return 0;
+    return inet_pton(AF_INET, addr, &tmp) == 1;
+}
+
+/*
  * Create and configure QUIC listener socket
+ *
+ * Uses AF_INET when binding to an IPv4 address or 0.0.0.0,
+ * AF_INET6 when binding to :: or an IPv6 address.
  */
 static int create_quic_socket(struct server_config *config)
 {
     int sock;
-    struct sockaddr_in6 addr;
     int opt = 1;
+    int use_ipv4;
+    struct sockaddr_storage bind_addr;
+    socklen_t bind_len;
 
-    /* Create QUIC socket */
-    sock = socket(AF_INET6, SOCK_STREAM, IPPROTO_QUIC);
-    if (sock < 0) {
-        /* Fall back to UDP socket for testing without kernel module */
-        LOG_DEBUG("QUIC socket not available, falling back to UDP");
-        sock = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
+    /*
+     * Determine address family from the bind address.
+     * Default (no addr or "::") uses IPv4 for maximum compatibility
+     * with current TQUIC kernel module testing.
+     */
+    use_ipv4 = (!config->addr || strcmp(config->addr, "0.0.0.0") == 0 ||
+                is_ipv4_addr(config->addr));
+
+    if (use_ipv4) {
+        sock = socket(AF_INET, SOCK_STREAM, IPPROTO_QUIC);
         if (sock < 0) {
-            LOG_ERROR("Failed to create socket: %s", strerror(errno));
-            return -1;
+            LOG_DEBUG("QUIC socket not available, falling back to UDP");
+            sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+            if (sock < 0) {
+                LOG_ERROR("Failed to create socket: %s", strerror(errno));
+                return -1;
+            }
         }
+
+        /* Build IPv4 bind address */
+        struct sockaddr_in *sin = (struct sockaddr_in *)&bind_addr;
+
+        memset(sin, 0, sizeof(*sin));
+        sin->sin_family = AF_INET;
+        sin->sin_port = htons(config->port);
+        if (config->addr && strcmp(config->addr, "0.0.0.0") != 0)
+            inet_pton(AF_INET, config->addr, &sin->sin_addr);
+        else
+            sin->sin_addr.s_addr = htonl(INADDR_ANY);
+        bind_len = sizeof(*sin);
+    } else {
+        sock = socket(AF_INET6, SOCK_STREAM, IPPROTO_QUIC);
+        if (sock < 0) {
+            LOG_DEBUG("QUIC socket not available, falling back to UDP");
+            sock = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
+            if (sock < 0) {
+                LOG_ERROR("Failed to create socket: %s", strerror(errno));
+                return -1;
+            }
+        }
+
+        /* Enable IPv4-mapped addresses for dual-stack */
+        opt = 0;
+        setsockopt(sock, IPPROTO_IPV6, IPV6_V6ONLY, &opt, sizeof(opt));
+
+        /* Build IPv6 bind address */
+        struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)&bind_addr;
+
+        memset(sin6, 0, sizeof(*sin6));
+        sin6->sin6_family = AF_INET6;
+        sin6->sin6_port = htons(config->port);
+        if (config->addr && strcmp(config->addr, "::") != 0)
+            inet_pton(AF_INET6, config->addr, &sin6->sin6_addr);
+        else
+            sin6->sin6_addr = in6addr_any;
+        bind_len = sizeof(*sin6);
     }
 
     /* Set socket options */
+    opt = 1;
     if (setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
         LOG_ERROR("Failed to set SO_REUSEADDR: %s", strerror(errno));
         close(sock);
         return -1;
     }
 
-    /* Enable IPv4-mapped addresses */
-    opt = 0;
-    setsockopt(sock, IPPROTO_IPV6, IPV6_V6ONLY, &opt, sizeof(opt));
-
     /* Set TQUIC-specific options */
-    /* For testing: disable certificate verification */
-    opt = TQUIC_VERIFY_NONE;
+    opt = TQUIC_VERIFY_OPTIONAL;
     setsockopt(sock, SOL_TQUIC, TQUIC_CERT_VERIFY_MODE, &opt, sizeof(opt));
 
     opt = 1;
@@ -170,28 +229,8 @@ static int create_quic_socket(struct server_config *config)
     opt = config->idle_timeout;
     setsockopt(sock, SOL_TQUIC, TQUIC_IDLE_TIMEOUT, &opt, sizeof(opt));
 
-    /* Bind to address */
-    memset(&addr, 0, sizeof(addr));
-    addr.sin6_family = AF_INET6;
-    addr.sin6_port = htons(config->port);
-
-    if (config->addr && strcmp(config->addr, "::") != 0) {
-        if (inet_pton(AF_INET6, config->addr, &addr.sin6_addr) != 1) {
-            /* Try IPv4 */
-            struct sockaddr_in *addr4 = (struct sockaddr_in *)&addr;
-            addr4->sin_family = AF_INET;
-            addr4->sin_port = htons(config->port);
-            if (inet_pton(AF_INET, config->addr, &addr4->sin_addr) != 1) {
-                LOG_ERROR("Invalid address: %s", config->addr);
-                close(sock);
-                return -1;
-            }
-        }
-    } else {
-        addr.sin6_addr = in6addr_any;
-    }
-
-    if (bind(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+    /* Bind */
+    if (bind(sock, (struct sockaddr *)&bind_addr, bind_len) < 0) {
         LOG_ERROR("Failed to bind: %s", strerror(errno));
         close(sock);
         return -1;
@@ -199,11 +238,12 @@ static int create_quic_socket(struct server_config *config)
 
     /* Listen for connections */
     if (listen(sock, SOMAXCONN) < 0) {
-        /* UDP sockets don't need listen, ignore error */
         LOG_DEBUG("listen() not applicable for this socket type");
     }
 
-    LOG_INFO("Server listening on %s:%d", config->addr ? config->addr : "::", config->port);
+    LOG_INFO("Server listening on %s:%d (%s)",
+             config->addr ? config->addr : "0.0.0.0",
+             config->port, use_ipv4 ? "IPv4" : "IPv6");
 
     return sock;
 }

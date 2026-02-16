@@ -16,11 +16,15 @@
 #include <linux/poll.h>
 #include <linux/splice.h>
 #include <linux/pipe_fs_i.h>
+#include <linux/workqueue.h>
 #include <net/sock.h>
 #include <net/inet_common.h>
 #include <net/inet_connection_sock.h>
 #include <net/protocol.h>
 #include <net/net_namespace.h>
+#include <net/ip.h>
+#include <net/udp.h>
+#include <net/udp_tunnel.h>
 #include <net/tquic.h>
 
 #include "protocol.h"
@@ -170,6 +174,14 @@ void tquic_destroy_sock(struct sock *sk)
 	/* Ensure any listen-table registration is removed before final free. */
 	if (tsk->flags & TQUIC_F_LISTENER_REGISTERED)
 		tquic_unregister_listener(sk);
+
+	/* Release the listener UDP tunnel socket and drain packet queue */
+	if (tsk->udp_sock) {
+		cancel_work_sync(&tsk->listener_work);
+		skb_queue_purge(&tsk->listener_queue);
+		udp_tunnel_sock_release(tsk->udp_sock);
+		tsk->udp_sock = NULL;
+	}
 
 	/* Clean up any in-progress handshake */
 	tquic_handshake_cleanup(sk);
@@ -381,10 +393,90 @@ out_unlock:
 EXPORT_SYMBOL_GPL(tquic_connect);
 
 /*
+ * Listener deferred packet processing
+ *
+ * The UDP encap_rcv callback runs in softirq (NET_RX) context where
+ * GFP_KERNEL allocations are forbidden. Since tquic_server_handshake()
+ * creates connections with GFP_KERNEL, we must defer Initial packet
+ * processing to a workqueue running in process context.
+ */
+static void tquic_listener_work_handler(struct work_struct *work)
+{
+	struct tquic_sock *tsk = container_of(work, struct tquic_sock,
+					      listener_work);
+	struct sock *sk = (struct sock *)tsk;
+	struct sk_buff *skb;
+
+	while ((skb = skb_dequeue(&tsk->listener_queue)) != NULL) {
+		/*
+		 * Process the packet in process context where GFP_KERNEL
+		 * allocations are safe. tquic_udp_recv() handles Initial
+		 * packet routing to tquic_server_accept().
+		 */
+		tquic_udp_recv(sk, skb);
+	}
+}
+
+/*
+ * Listener encap_rcv - receives UDP packets in softirq and defers processing
+ *
+ * This is registered as the encap_rcv callback on the listener's UDP tunnel
+ * socket. It queues received packets and schedules the work handler.
+ */
+static int tquic_listener_encap_recv(struct sock *sk, struct sk_buff *skb)
+{
+	struct tquic_sock *tsk;
+	struct sock *listener_sk;
+	struct sockaddr_storage local_addr;
+
+	/*
+	 * Look up the TQUIC listener socket for this local address.
+	 * The sk parameter here is the UDP tunnel socket, not the TQUIC socket.
+	 */
+	memset(&local_addr, 0, sizeof(local_addr));
+	if (skb->protocol == htons(ETH_P_IP)) {
+		struct sockaddr_in *sin = (struct sockaddr_in *)&local_addr;
+
+		sin->sin_family = AF_INET;
+		sin->sin_addr.s_addr = ip_hdr(skb)->daddr;
+		sin->sin_port = udp_hdr(skb)->dest;
+	}
+#if IS_ENABLED(CONFIG_IPV6)
+	else if (skb->protocol == htons(ETH_P_IPV6)) {
+		struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)&local_addr;
+
+		sin6->sin6_family = AF_INET6;
+		sin6->sin6_addr = ipv6_hdr(skb)->daddr;
+		sin6->sin6_port = udp_hdr(skb)->dest;
+	}
+#endif
+	else {
+		kfree_skb(skb);
+		return 0;
+	}
+
+	listener_sk = tquic_lookup_listener_net(sock_net(sk), &local_addr);
+	if (!listener_sk) {
+		kfree_skb(skb);
+		return 0;
+	}
+
+	tsk = tquic_sk(listener_sk);
+
+	/* Queue the packet for deferred processing in process context */
+	skb_queue_tail(&tsk->listener_queue, skb);
+	schedule_work(&tsk->listener_work);
+
+	sock_put(listener_sk);
+	return 0;
+}
+
+/*
  * Listen for incoming connections
  *
  * Sets up the socket to receive incoming QUIC connections.
- * Registers with the UDP demux layer and transitions to TCP_LISTEN state.
+ * Creates a UDP tunnel socket, registers with the UDP demux layer,
+ * and transitions to TCP_LISTEN state.
  */
 int tquic_sock_listen(struct socket *sock, int backlog)
 {
@@ -412,11 +504,75 @@ int tquic_sock_listen(struct socket *sock, int backlog)
 		INIT_LIST_HEAD(&tsk->accept_queue);
 	atomic_set(&tsk->accept_queue_len, 0);
 
+	/* Initialize deferred packet processing */
+	skb_queue_head_init(&tsk->listener_queue);
+	INIT_WORK(&tsk->listener_work, tquic_listener_work_handler);
+
 	/* Register with UDP demux to receive incoming packets */
 	ret = tquic_register_listener(sk);
 	if (ret < 0) {
 		tquic_err("failed to register listener: %d\n", ret);
 		goto out;
+	}
+
+	/*
+	 * Create a UDP tunnel socket on the bind address/port.
+	 *
+	 * QUIC runs over UDP, so we need an actual kernel UDP socket
+	 * listening on the bound port to receive incoming UDP packets.
+	 * The encap_rcv callback queues packets for deferred processing
+	 * in process context, where tquic_server_handshake() can safely
+	 * allocate memory with GFP_KERNEL.
+	 */
+	if (!tsk->udp_sock) {
+		struct socket *usock;
+
+		if (tsk->bind_addr.ss_family == AF_INET) {
+			struct sockaddr_in *sin =
+				(struct sockaddr_in *)&tsk->bind_addr;
+			struct udp_port_cfg cfg = {
+				.family = AF_INET,
+				.local_ip = sin->sin_addr,
+				.local_udp_port = sin->sin_port,
+			};
+
+			ret = udp_sock_create4(sock_net(sk), &cfg, &usock);
+		}
+#if IS_ENABLED(CONFIG_IPV6)
+		else if (tsk->bind_addr.ss_family == AF_INET6) {
+			struct sockaddr_in6 *sin6 =
+				(struct sockaddr_in6 *)&tsk->bind_addr;
+			struct udp_port_cfg cfg = {
+				.family = AF_INET6,
+				.local_ip6 = sin6->sin6_addr,
+				.local_udp_port = sin6->sin6_port,
+			};
+
+			ret = udp_sock_create6(sock_net(sk), &cfg, &usock);
+		}
+#endif
+		else {
+			ret = -EAFNOSUPPORT;
+		}
+
+		if (ret < 0) {
+			tquic_err("failed to create listener UDP socket: %d\n",
+				  ret);
+			tquic_unregister_listener(sk);
+			goto out;
+		}
+
+		/*
+		 * Register the listener-specific encap_rcv handler that
+		 * defers processing to a workqueue for process context.
+		 */
+		udp_sk(usock->sk)->encap_type = 1;
+		udp_sk(usock->sk)->encap_rcv = tquic_listener_encap_recv;
+		udp_encap_enable();
+		tsk->udp_sock = usock;
+
+		pr_warn("tquic: listener UDP socket created on port %u\n",
+			ntohs(((struct sockaddr_in *)&tsk->bind_addr)->sin_port));
 	}
 
 	/* Transition to listen state */

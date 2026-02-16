@@ -1517,6 +1517,10 @@ struct tquic_sock {
 	atomic_t accept_queue_len;
 	u32 max_accept_queue;
 
+	/* Listener: deferred packet processing (encap_rcv runs in softirq) */
+	struct sk_buff_head listener_queue;
+	struct work_struct listener_work;
+
 	/*
 	 * Socket-owned reference to the default stream.
 	 *

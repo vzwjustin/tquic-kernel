@@ -3648,6 +3648,9 @@ int tquic_udp_recv(struct sock *sk, struct sk_buff *skb)
 	data = skb->data;
 	len = skb->len;
 
+	pr_warn("tquic_udp_recv: proto=0x%04x len=%zu data[0]=0x%02x sk=%p\n",
+		ntohs(skb->protocol), len, len > 0 ? data[0] : 0, sk);
+
 	if (unlikely(len < 1)) {
 		kfree_skb(skb);
 		return -EINVAL;
@@ -3864,6 +3867,9 @@ not_reset:
 		/* Extract packet type from long header */
 		u8 pkt_type = (data[0] & 0x30) >> 4;
 
+		pr_warn("tquic_udp_recv: long header, pkt_type=%u, data[0]=0x%02x\n",
+			pkt_type, data[0]);
+
 		/* Initial packet type == 0 */
 		if (pkt_type == 0) {
 			struct sock *listener;
@@ -3872,6 +3878,9 @@ not_reset:
 			/* Lookup listener socket for this address/port in this netns */
 			listener = tquic_lookup_listener_net(sock_net(sk),
 							     &local_addr);
+			pr_warn("tquic_udp_recv: Initial pkt, listener lookup: %s (local_addr family=%d)\n",
+				listener ? "FOUND" : "NOT FOUND",
+				local_addr.ss_family);
 			if (listener) {
 				/*
 				 * Extract version from long header (bytes 1-4).
@@ -3934,6 +3943,8 @@ not_reset:
 	}
 
 	/* Process the QUIC packet */
+	pr_warn("tquic_udp_recv: no Initial match, calling process_packet (conn=%p data[0]=0x%02x len=%zu)\n",
+		conn, data[0], len);
 	ret = tquic_process_packet(conn, path, data, len, &src_addr);
 
 	/*
@@ -3949,6 +3960,11 @@ not_reset:
 	 * - Packets too small to trigger without amplification
 	 */
 	if (ret == -ENOENT && !(data[0] & TQUIC_HEADER_FORM_LONG) &&
+	    len > TQUIC_STATELESS_RESET_MIN_LEN + TQUIC_DEFAULT_CID_LEN) {
+		pr_warn("tquic_udp_recv: would send stateless reset (data[0]=0x%02x len=%zu ret=%d)\n",
+			data[0], len, ret);
+	}
+	if (0 && ret == -ENOENT && !(data[0] & TQUIC_HEADER_FORM_LONG) &&
 	    /*
 	     * CF-299: Do NOT send stateless resets during handshake
 	     * (before authentication). A stateless reset is only valid
