@@ -1771,11 +1771,15 @@ static int tquic_start_server_handshake(struct sock *sk,
 	struct tquic_hs_transport_params tp;
 	int ret;
 
+	pr_warn("tquic_start_server_hs: ENTERED fn=%ps\n",
+		tquic_start_server_handshake);
 	conn = tsk->conn;
 	pr_warn("tquic_start_server_hs: tsk=%p tsk->conn=%p sk=%p\n",
 		tsk, conn, sk);
-	if (!conn)
+	if (!conn) {
+		pr_warn("tquic_start_server_hs: conn is NULL, returning -EINVAL\n");
 		return -EINVAL;
+	}
 
 	pr_warn("tquic_start_server_hs: using inline TLS path (server)\n");
 
@@ -2168,6 +2172,7 @@ int tquic_server_handshake(struct sock *listener_sk,
 			return -ENOMEM;
 		}
 
+	pr_warn("tquic_server_handshake: STEP1 hs_alloc ok\n");
 	hs->sk = child_sk;
 	hs->timeout_ms = TQUIC_HANDSHAKE_TIMEOUT_MS;
 	hs->start_time = jiffies;
@@ -2177,10 +2182,12 @@ int tquic_server_handshake(struct sock *listener_sk,
 	/* Set child socket state */
 	inet_sk_set_state(child_sk, TCP_SYN_RECV);
 	child_tsk->flags |= TQUIC_F_SERVER_MODE;
+	pr_warn("tquic_server_handshake: STEP2 state set\n");
 
 	/* Take reference for handshake callback */
 	sock_hold(child_sk);
 
+	pr_warn("tquic_server_handshake: STEP3 about to call start_server_hs\n");
 	/* Initiate server TLS handshake */
 		pr_warn("tquic_server_handshake: before start_server_hs: "
 			"child_tsk=%p child_tsk->conn=%p child_sk=%p\n",
