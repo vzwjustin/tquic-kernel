@@ -1162,6 +1162,8 @@ static void tquic_proto_unhash(struct sock *sk)
 	struct tquic_sock *tsk = tquic_sk(sk);
 	struct tquic_connection *conn;
 
+	tquic_dbg("tquic_proto_unhash: sk=%p\n", sk);
+
 	conn = tquic_sock_conn_get(tsk);
 	if (conn) {
 		/* Remove connection from CID hash table */
@@ -1235,6 +1237,8 @@ static int tquic_stream_connect(struct socket *sock, tquic_sockaddr_t *addr,
 {
 	struct sock *sk = sock->sk;
 	int err;
+
+	tquic_dbg("tquic_stream_connect: sk=%p flags=0x%x\n", sk, flags);
 
 	err = tquic_connect(sk, addr, addr_len);
 	if (err)
@@ -1334,6 +1338,8 @@ static int tquic_stream_getname(struct socket *sock, struct sockaddr *addr,
 	struct sockaddr_storage *saddr;
 	int ret;
 
+	tquic_dbg("tquic_stream_getname: sk=%p peer=%d\n", sk, peer);
+
 	conn = tquic_sock_conn_get(tsk);
 	if (!conn)
 		return -ENOTCONN;
@@ -1372,6 +1378,8 @@ static __poll_t tquic_stream_poll(struct file *file, struct socket *sock,
 	struct tquic_sock *tsk = tquic_sk(sk);
 	struct tquic_connection *conn;
 	__poll_t mask = 0;
+
+	tquic_dbg("tquic_stream_poll: sk=%p sk_state=%u\n", sk, sk->sk_state);
 
 	sock_poll_wait(file, sock, wait);
 
@@ -1423,6 +1431,8 @@ static int tquic_stream_listen(struct socket *sock, int backlog)
 	struct sock *sk = sock->sk;
 	struct tquic_sock *tsk = tquic_sk(sk);
 	int err;
+
+	tquic_dbg("tquic_stream_listen: sk=%p backlog=%d\n", sk, backlog);
 
 	lock_sock(sk);
 
@@ -1486,6 +1496,9 @@ static int tquic_create(struct net *net, struct socket *sock, int protocol,
 {
 	struct sock *sk;
 	int err;
+
+	tquic_dbg("tquic_create: type=%d protocol=%d kern=%d\n",
+		  sock->type, protocol, kern);
 
 	if (sock->type != SOCK_STREAM && sock->type != SOCK_DGRAM)
 		return -ESOCKTNOSUPPORT;

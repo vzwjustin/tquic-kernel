@@ -450,6 +450,9 @@ static void ecf_packet_sent(struct tquic_connection *conn,
 	if (!sd)
 		return;
 
+	tquic_dbg("sched_ecf: packet_sent path=%u bytes=%u\n",
+		  path->path_id, sent_bytes);
+
 	spin_lock_bh(&sd->lock);
 	ps = ecf_find_path_state(sd, path->path_id);
 	if (!ps) {
@@ -479,6 +482,9 @@ static void ecf_ack_received(struct tquic_connection *conn,
 
 	if (!sd)
 		return;
+
+	tquic_dbg("sched_ecf: ack_received path=%u bytes=%llu\n",
+		  path->path_id, acked_bytes);
 
 	spin_lock_bh(&sd->lock);
 	ps = ecf_find_path_state(sd, path->path_id);
@@ -514,6 +520,9 @@ static void ecf_loss_detected(struct tquic_connection *conn,
 
 	if (!sd)
 		return;
+
+	tquic_dbg("sched_ecf: loss_detected path=%u lost=%llu\n",
+		  path->path_id, lost_bytes);
 
 	spin_lock_bh(&sd->lock);
 	ps = ecf_find_path_state(sd, path->path_id);
