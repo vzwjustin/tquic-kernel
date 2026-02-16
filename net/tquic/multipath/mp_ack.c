@@ -546,6 +546,9 @@ int tquic_mp_record_received(struct tquic_mp_path_ack_state *state,
 	ktime_t now = ktime_get();
 	bool merged = false;
 
+	tquic_dbg("mp_ack: record_received pn=%llu space=%d ack_elicit=%d\n",
+		  pn, pn_space, is_ack_eliciting);
+
 	if (!state)
 		return -EINVAL;
 
@@ -650,6 +653,9 @@ int tquic_mp_generate_ack(struct tquic_mp_path_ack_state *state,
 	u64 prev_smallest;
 	u32 range_idx = 0;
 	int ret;
+
+	tquic_dbg("mp_ack: generate_ack path=%llu space=%d ecn=%d\n",
+		  state ? state->path_id : 0, pn_space, include_ecn);
 
 	if (!state || !buf)
 		return -EINVAL;
@@ -762,6 +768,9 @@ static int mp_detect_lost_packets(struct tquic_mp_path_ack_state *state,
 	u64 largest_acked = state->largest_acked[pn_space];
 	ktime_t now = ktime_get();
 	u64 time_threshold;
+
+	tquic_dbg("mp_ack: detect_lost space=%d largest_acked=%llu\n",
+		  pn_space, largest_acked);
 	ktime_t loss_delay;
 	struct tquic_mp_sent_packet *pkt, *tmp;
 	int lost_count = 0;
@@ -839,6 +848,10 @@ int tquic_mp_on_ack_received(struct tquic_mp_path_ack_state *state,
 	u64 acked_bytes = 0;
 	bool includes_ack_eliciting = false;
 	int lost_count;
+
+	tquic_dbg("mp_ack: on_ack_received path=%llu space=%d largest=%llu\n",
+		  frame ? frame->path_id : 0, pn_space,
+		  frame ? frame->largest_ack : 0);
 
 	if (!state || !frame)
 		return -EINVAL;
@@ -1013,6 +1026,9 @@ int tquic_mp_on_packet_sent(struct tquic_mp_path_ack_state *state,
 {
 	struct tquic_mp_sent_packet *pkt;
 	ktime_t now = ktime_get();
+
+	tquic_dbg("mp_ack: on_packet_sent pn=%llu space=%d bytes=%u in_flight=%d\n",
+		  pn, pn_space, sent_bytes, in_flight);
 
 	if (!state)
 		return -EINVAL;
