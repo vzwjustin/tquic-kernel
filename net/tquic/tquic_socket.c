@@ -143,6 +143,21 @@ int tquic_init_sock(struct sock *sk)
 	tsk->cert_verify.expected_hostname[0] = '\0';
 	tsk->cert_verify.expected_hostname_len = 0;
 
+	/* Default QUIC version and transport parameters (RFC 9000) */
+	tsk->config.version = TQUIC_VERSION_1;
+	tsk->config.max_idle_timeout_ms = 30000;
+	tsk->config.handshake_timeout_ms = 10000;
+	tsk->config.initial_max_data = 1048576;
+	tsk->config.initial_max_stream_data_bidi_local = 262144;
+	tsk->config.initial_max_stream_data_bidi_remote = 262144;
+	tsk->config.initial_max_stream_data_uni = 262144;
+	tsk->config.initial_max_streams_bidi = 100;
+	tsk->config.initial_max_streams_uni = 100;
+	tsk->config.ack_delay_exponent = 3;
+	tsk->config.max_ack_delay_ms = 25;
+	tsk->config.max_connection_ids = 8;
+	tsk->config.max_datagram_size = 1200;
+
 	/* Create connection structure */
 	conn = tquic_conn_create(tsk, false);
 	if (!conn)
@@ -185,6 +200,14 @@ void tquic_destroy_sock(struct sock *sk)
 
 	/* Clean up any in-progress handshake */
 	tquic_handshake_cleanup(sk);
+
+	/* Free server certificate and key material */
+	kfree(tsk->cert_der);
+	tsk->cert_der = NULL;
+	tsk->cert_der_len = 0;
+	kfree_sensitive(tsk->key_der);
+	tsk->key_der = NULL;
+	tsk->key_der_len = 0;
 
 	/* Detach conn pointer under sk_callback_lock to synchronize with readers. */
 	write_lock_bh(&sk->sk_callback_lock);
@@ -538,44 +561,83 @@ int tquic_sock_listen(struct socket *sock, int backlog)
 	 * The encap_rcv callback queues packets for deferred processing
 	 * in process context, where tquic_server_handshake() can safely
 	 * allocate memory with GFP_KERNEL.
+	 *
+	 * We create the socket manually (instead of udp_sock_create4)
+	 * so we can set SO_REUSEADDR before binding - this prevents
+	 * EADDRINUSE from orphaned sockets left by crashed connections.
 	 */
 	if (!tsk->udp_sock) {
 		struct socket *usock;
 
 		if (tsk->bind_addr.ss_family == AF_INET) {
+			struct sockaddr_in udp_addr;
 			struct sockaddr_in *sin =
 				(struct sockaddr_in *)&tsk->bind_addr;
-			struct udp_port_cfg cfg = {
-				.family = AF_INET,
-				.local_ip = sin->sin_addr,
-				.local_udp_port = sin->sin_port,
-			};
 
-			ret = udp_sock_create4(sock_net(sk), &cfg, &usock);
+			ret = sock_create_kern(sock_net(sk), AF_INET,
+					       SOCK_DGRAM, IPPROTO_UDP,
+					       &usock);
+			if (ret < 0)
+				goto listen_sock_err;
+
+			sock_set_reuseaddr(usock->sk);
+			sock_set_reuseport(usock->sk);
+
+			udp_addr.sin_family = AF_INET;
+			udp_addr.sin_addr = sin->sin_addr;
+			udp_addr.sin_port = sin->sin_port;
+			ret = kernel_bind(usock,
+					  (struct sockaddr_unsized *)&udp_addr,
+					  sizeof(udp_addr));
+			if (ret < 0) {
+				kernel_sock_shutdown(usock, SHUT_RDWR);
+				sock_release(usock);
+				goto listen_sock_err;
+			}
 		}
 #if IS_ENABLED(CONFIG_IPV6)
 		else if (tsk->bind_addr.ss_family == AF_INET6) {
+			struct sockaddr_in6 udp_addr6;
 			struct sockaddr_in6 *sin6 =
 				(struct sockaddr_in6 *)&tsk->bind_addr;
-			struct udp_port_cfg cfg = {
-				.family = AF_INET6,
-				.local_ip6 = sin6->sin6_addr,
-				.local_udp_port = sin6->sin6_port,
-			};
 
-			ret = udp_sock_create6(sock_net(sk), &cfg, &usock);
+			ret = sock_create_kern(sock_net(sk), AF_INET6,
+					       SOCK_DGRAM, IPPROTO_UDP,
+					       &usock);
+			if (ret < 0)
+				goto listen_sock_err;
+
+			sock_set_reuseaddr(usock->sk);
+			sock_set_reuseport(usock->sk);
+
+			memset(&udp_addr6, 0, sizeof(udp_addr6));
+			udp_addr6.sin6_family = AF_INET6;
+			udp_addr6.sin6_addr = sin6->sin6_addr;
+			udp_addr6.sin6_port = sin6->sin6_port;
+			ret = kernel_bind(usock,
+					  (struct sockaddr_unsized *)&udp_addr6,
+					  sizeof(udp_addr6));
+			if (ret < 0) {
+				kernel_sock_shutdown(usock, SHUT_RDWR);
+				sock_release(usock);
+				goto listen_sock_err;
+			}
 		}
 #endif
 		else {
 			ret = -EAFNOSUPPORT;
+			goto listen_sock_err;
 		}
 
-		if (ret < 0) {
-			tquic_err("failed to create listener UDP socket: %d\n",
-				  ret);
-			tquic_unregister_listener(sk);
-			goto out;
-		}
+		goto listen_sock_ok;
+
+listen_sock_err:
+		tquic_err("failed to create listener UDP socket: %d\n",
+			  ret);
+		tquic_unregister_listener(sk);
+		goto out;
+
+listen_sock_ok:
 
 		/*
 		 * Register the listener-specific encap_rcv handler that
@@ -1029,7 +1091,10 @@ int tquic_sock_setsockopt(struct socket *sock, int level, int optname,
 	 */
 	switch (optname) {
 	case TQUIC_PSK_IDENTITY:
-		/* Variable-length, validated in its case block */
+	case TQUIC_EXPECTED_HOSTNAME:
+	case TQUIC_CERT_DATA:
+	case TQUIC_KEY_DATA:
+		/* Variable-length, validated in their case blocks */
 		break;
 	default:
 		if (optlen != sizeof(int))
@@ -1690,6 +1755,71 @@ int tquic_sock_setsockopt(struct socket *sock, int level, int optname,
 				tquic_conn_put(conn);
 		}
 		return 0;
+
+	case TQUIC_CERT_DATA: {
+		/*
+		 * SO_TQUIC_CERT_DATA: Set DER-encoded X.509 certificate
+		 *
+		 * Server sockets must set this before listen()/accept().
+		 * The certificate is passed to the TLS handshake context
+		 * for sending in the Certificate message.
+		 */
+		u8 *cert;
+
+		if (optlen <= 0 || optlen > TQUIC_MAX_CERT_DER_SIZE)
+			return -EINVAL;
+
+		cert = kmalloc(optlen, GFP_KERNEL);
+		if (!cert)
+			return -ENOMEM;
+
+		if (copy_from_sockptr(cert, optval, optlen)) {
+			kfree(cert);
+			return -EFAULT;
+		}
+
+		lock_sock(sk);
+		kfree(tsk->cert_der);
+		tsk->cert_der = cert;
+		tsk->cert_der_len = optlen;
+		/* Also install into handshake context if it exists */
+		if (tsk->inline_hs)
+			tquic_hs_set_certificate(tsk->inline_hs, cert, optlen);
+		release_sock(sk);
+		return 0;
+	}
+
+	case TQUIC_KEY_DATA: {
+		/*
+		 * SO_TQUIC_KEY_DATA: Set DER-encoded private key (PKCS#8)
+		 *
+		 * Server sockets must set this before listen()/accept().
+		 * The key is used for signing the CertificateVerify message.
+		 */
+		u8 *key;
+
+		if (optlen <= 0 || optlen > TQUIC_MAX_KEY_DER_SIZE)
+			return -EINVAL;
+
+		key = kmalloc(optlen, GFP_KERNEL);
+		if (!key)
+			return -ENOMEM;
+
+		if (copy_from_sockptr(key, optval, optlen)) {
+			kfree_sensitive(key);
+			return -EFAULT;
+		}
+
+		lock_sock(sk);
+		kfree_sensitive(tsk->key_der);
+		tsk->key_der = key;
+		tsk->key_der_len = optlen;
+		/* Also install into handshake context if it exists */
+		if (tsk->inline_hs)
+			tquic_hs_set_private_key(tsk->inline_hs, key, optlen);
+		release_sock(sk);
+		return 0;
+	}
 
 #ifdef CONFIG_TQUIC_QLOG
 	case TQUIC_QLOG_ENABLE: {
