@@ -2512,6 +2512,13 @@ static int tquic_sign_rsa_pss(const u8 *privkey_data, u32 privkey_len,
 	/* Unwrap PKCS#8 to PKCS#1 if needed (zero-copy) */
 	tquic_pkcs8_unwrap(privkey_data, privkey_len, &rsa_key, &rsa_key_len);
 
+	pr_warn("tquic_pss: key_len=%u rsa_key_len=%u first4=%02x%02x%02x%02x\n",
+		privkey_len, rsa_key_len,
+		rsa_key_len > 0 ? rsa_key[0] : 0,
+		rsa_key_len > 1 ? rsa_key[1] : 0,
+		rsa_key_len > 2 ? rsa_key[2] : 0,
+		rsa_key_len > 3 ? rsa_key[3] : 0);
+
 	/* Allocate raw RSA cipher */
 	tfm = crypto_alloc_akcipher("rsa", 0, 0);
 	if (IS_ERR(tfm)) {

@@ -26,6 +26,8 @@
 #include <net/inet_common.h>
 #include <net/udp.h>
 #include <net/udp_tunnel.h>
+#include <net/route.h>
+#include <net/dst.h>
 #include <net/tquic.h>
 #include <net/tquic_pm.h>
 #include "protocol.h"
@@ -334,7 +336,37 @@ int tquic_conn_add_path(struct tquic_connection *conn,
 	path->conn = conn;
 	path->state = TQUIC_PATH_PENDING;
 	path->path_id = 0;
-	path->mtu = 1200;  /* Initial conservative MTU */
+	/*
+	 * Probe the actual interface MTU via a route lookup.
+	 * The QUIC max datagram size is the interface MTU minus
+	 * IP (20 or 40) and UDP (8) header overhead.
+	 * Fall back to 1200 (RFC 9000 minimum) if lookup fails.
+	 */
+	{
+		u32 pmtu = 1200;
+
+		if (remote->sa_family == AF_INET) {
+			struct sockaddr_in *sin = (struct sockaddr_in *)remote;
+			struct flowi4 fl4 = {};
+			struct rtable *rt;
+
+			fl4.daddr = sin->sin_addr.s_addr;
+			fl4.flowi4_proto = IPPROTO_UDP;
+			rt = ip_route_output_key(conn->sk ?
+					sock_net(conn->sk) : &init_net, &fl4);
+			if (!IS_ERR(rt)) {
+				pmtu = dst_mtu(&rt->dst);
+				ip_rt_put(rt);
+				/* Subtract IP + UDP headers */
+				if (pmtu > 28)
+					pmtu -= 28;
+			}
+		}
+		/* Enforce QUIC minimum of 1200 */
+		if (pmtu < 1200)
+			pmtu = 1200;
+		path->mtu = pmtu;
+	}
 	path->priority = 128;  /* Default middle priority */
 	path->weight = 1;
 

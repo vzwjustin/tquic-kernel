@@ -286,6 +286,42 @@ int tquic_connect_socket(struct socket *sock, tquic_sockaddr_t *uaddr,
 	return tquic_connect(sk, uaddr, addr_len);
 }
 
+/* Forward declaration: work handler defined below (shared for listen/connect) */
+static void tquic_listener_work_handler(struct work_struct *work);
+
+/*
+ * Client-side encap_rcv - receives server responses in softirq
+ * and defers processing to a workqueue for process context.
+ *
+ * The QUIC socket pointer is stored in sk->sk_user_data of the
+ * UDP tunnel socket at connect() time.
+ */
+static int tquic_client_encap_recv(struct sock *sk, struct sk_buff *skb)
+{
+	struct sock *quic_sk;
+	struct tquic_sock *tsk;
+
+	quic_sk = READ_ONCE(sk->sk_user_data);
+	if (!quic_sk) {
+		kfree_skb(skb);
+		return 0;
+	}
+	tsk = tquic_sk(quic_sk);
+
+	/* Strip UDP header to expose QUIC payload */
+	if (!pskb_may_pull(skb, sizeof(struct udphdr))) {
+		kfree_skb(skb);
+		return 0;
+	}
+	__skb_pull(skb, sizeof(struct udphdr));
+
+	/* Queue for deferred processing in process context */
+	skb_queue_tail(&tsk->listener_queue, skb);
+	schedule_work(&tsk->listener_work);
+
+	return 0;
+}
+
 /*
  * Connect implementation
  *
@@ -334,6 +370,56 @@ int tquic_connect(struct sock *sk, tquic_sockaddr_t *uaddr, int addr_len)
 	/* Store peer address */
 	memcpy(&tsk->connect_addr, addr,
 	       min_t(size_t, addr_len, sizeof(struct sockaddr_storage)));
+
+	/*
+	 * Create a client-side UDP socket for receiving server responses.
+	 * The server sends packets to our source port, which needs a real
+	 * UDP socket with an encap_rcv handler to receive them.
+	 */
+	if (!tsk->udp_sock && addr->sa_family == AF_INET) {
+		struct socket *usock;
+		struct sockaddr_in udp_addr;
+		struct sockaddr_in bound;
+
+		ret = sock_create_kern(sock_net(sk), AF_INET,
+				       SOCK_DGRAM, IPPROTO_UDP, &usock);
+		if (ret < 0)
+			goto out_unlock;
+
+		/* Bind to ephemeral port on INADDR_ANY */
+		memset(&udp_addr, 0, sizeof(udp_addr));
+		udp_addr.sin_family = AF_INET;
+		ret = kernel_bind(usock,
+				  (struct sockaddr_unsized *)&udp_addr,
+				  sizeof(udp_addr));
+		if (ret < 0) {
+			sock_release(usock);
+			goto out_unlock;
+		}
+
+		/* Get assigned ephemeral port */
+		kernel_getsockname(usock,
+				   (struct sockaddr *)&bound);
+
+		/* Update bind address so the path gets the correct port */
+		((struct sockaddr_in *)&tsk->bind_addr)->sin_family = AF_INET;
+		((struct sockaddr_in *)&tsk->bind_addr)->sin_port =
+			bound.sin_port;
+
+		/* Initialize deferred packet processing */
+		skb_queue_head_init(&tsk->listener_queue);
+		INIT_WORK(&tsk->listener_work, tquic_listener_work_handler);
+
+		/* Register encap_rcv handler */
+		WRITE_ONCE(usock->sk->sk_user_data, sk);
+		udp_sk(usock->sk)->encap_type = 1;
+		udp_sk(usock->sk)->encap_rcv = tquic_client_encap_recv;
+		udp_encap_enable();
+		tsk->udp_sock = usock;
+
+		pr_warn("tquic: client UDP socket on port %u\n",
+			ntohs(bound.sin_port));
+	}
 
 	/* Add initial path */
 	ret = tquic_conn_add_path(conn, (struct sockaddr *)&tsk->bind_addr,
