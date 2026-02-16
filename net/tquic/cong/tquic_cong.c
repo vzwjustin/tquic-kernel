@@ -756,7 +756,7 @@ u64 tquic_cong_get_pacing_rate(struct tquic_path *path)
 	if (!path)
 		return TQUIC_MIN_PACING_RATE;
 
-	tquic_dbg("cc: get_pacing_rate path=%u rtt=%llu cwnd=%u\n",
+	tquic_dbg("cc: get_pacing_rate path=%u rtt=%u cwnd=%u\n",
 		  path->path_id, path->stats.rtt_smoothed, path->stats.cwnd);
 
 	/* First try CC-provided pacing rate (bandwidth-based) */

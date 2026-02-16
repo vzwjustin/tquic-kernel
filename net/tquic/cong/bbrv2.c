@@ -190,7 +190,7 @@ static u32 bbr_inflight(struct bbrv2 *bbr, u32 gain)
 	u64 inflight;
 	u32 mss = bbr_get_mss(bbr);
 
-	tquic_dbg("bbrv2: inflight bw=%llu min_rtt=%llu gain=%u\n",
+	tquic_dbg("bbrv2: inflight bw=%llu min_rtt=%u gain=%u\n",
 		  bbr->bw, bbr->min_rtt_us, gain);
 
 	inflight = bbr_bdp(bbr);
@@ -211,7 +211,7 @@ static u32 bbr_inflight(struct bbrv2 *bbr, u32 gain)
  */
 static void bbr_update_round(struct bbrv2 *bbr, u64 delivered)
 {
-	tquic_dbg("bbrv2: update_round delivered=%llu next=%llu round=%u\n",
+	tquic_dbg("bbrv2: update_round delivered=%llu next=%llu round=%llu\n",
 		  delivered, bbr->next_round_delivered, bbr->round_count);
 
 	if (delivered >= bbr->next_round_delivered) {

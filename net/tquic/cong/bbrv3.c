@@ -194,7 +194,7 @@ static u64 bbrv3_pacing_rate(struct bbrv3 *bbr)
 
 static void bbrv3_update_round(struct bbrv3 *bbr, u64 delivered)
 {
-	tquic_dbg("bbrv3: update_round delivered=%llu next=%llu round=%u\n",
+	tquic_dbg("bbrv3: update_round delivered=%llu next=%llu round=%llu\n",
 		  delivered, bbr->next_round_delivered, bbr->round_count);
 
 	if (delivered >= bbr->next_round_delivered) {

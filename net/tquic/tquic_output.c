@@ -1166,7 +1166,7 @@ static struct sk_buff *tquic_assemble_packet(struct tquic_connection *conn,
 	ctx.pkt_num = pkt_num;
 	ctx.ack_eliciting = false;
 
-	pr_warn("tquic_assemble: pkt_type=%d mtu=%d max_payload=%d buf_len=%d\n",
+	pr_warn("tquic_assemble: pkt_type=%d mtu=%d max_payload=%d buf_len=%zu\n",
 		pkt_type, READ_ONCE(path->mtu), max_payload, ctx.buf_len);
 
 	/* Coalesce frames into payload */
