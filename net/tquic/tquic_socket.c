@@ -463,6 +463,21 @@ static int tquic_listener_encap_recv(struct sock *sk, struct sk_buff *skb)
 
 	tsk = tquic_sk(listener_sk);
 
+	/*
+	 * Pull past the UDP header to expose the QUIC payload.
+	 * The encap_rcv callback receives the SKB with skb->data
+	 * still at the UDP header.  Downstream tquic_udp_recv()
+	 * expects skb->data at the start of the QUIC packet.
+	 * ip_hdr()/udp_hdr() still work after pull since they
+	 * use the network_header/transport_header offsets.
+	 */
+	if (!pskb_may_pull(skb, sizeof(struct udphdr))) {
+		kfree_skb(skb);
+		sock_put(listener_sk);
+		return 0;
+	}
+	__skb_pull(skb, sizeof(struct udphdr));
+
 	/* Queue the packet for deferred processing in process context */
 	skb_queue_tail(&tsk->listener_queue, skb);
 	schedule_work(&tsk->listener_work);
