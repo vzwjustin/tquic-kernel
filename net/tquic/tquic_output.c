@@ -45,6 +45,8 @@
 #include "crypto/header_protection.h"
 #include "tquic_token.h"
 #include "core/mp_frame.h"
+#include "core/quic_loss.h"
+#include "bond/tquic_failover.h"
 
 /* Slab cache for tquic_pending_frame (CF-046: avoid per-frame kzalloc) */
 struct kmem_cache *tquic_frame_cache;
