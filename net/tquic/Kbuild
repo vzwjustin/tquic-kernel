@@ -155,6 +155,8 @@ tquic-y := \
 	crypto/handshake.o \
 	crypto/crypto_module.o \
 	crypto/hw_offload.o \
+	diag/path_metrics.o \
+	diag/tracepoints.o \
 	tquic_debug.o
 
   # io_uring integration requires kernel-internal io_uring headers;
