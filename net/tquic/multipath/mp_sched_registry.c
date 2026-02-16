@@ -30,6 +30,8 @@ static struct tquic_mp_sched_ops *tquic_mp_sched_get(const char *name)
 	struct tquic_mp_sched_ops *sched = NULL;
 	struct tquic_mp_sched_ops *iter;
 
+	tquic_dbg("sched_reg: get name=%s\n", name ? name : "(null)");
+
 	spin_lock(&tquic_mp_sched_list_lock);
 
 	if (name && name[0]) {
@@ -125,6 +127,8 @@ struct tquic_mp_sched_ops *tquic_mp_sched_find(const char *name)
 {
 	struct tquic_mp_sched_ops *sched, *ret = NULL;
 
+	tquic_dbg("sched_reg: find name=%s\n", name ? name : "(null)");
+
 	if (!name || !name[0])
 		return NULL;
 
@@ -145,6 +149,8 @@ int tquic_mp_sched_init_conn(struct tquic_connection *conn, const char *name)
 	struct tquic_mp_sched_ops *sched;
 	struct tquic_mp_sched_ops *old;
 	int ret = 0;
+
+	tquic_dbg("sched_reg: init_conn name=%s\n", name ? name : "(default)");
 
 	if (!conn)
 		return -EINVAL;
@@ -186,6 +192,8 @@ EXPORT_SYMBOL_GPL(tquic_mp_sched_init_conn);
 void tquic_mp_sched_release_conn(struct tquic_connection *conn)
 {
 	struct tquic_mp_sched_ops *sched;
+
+	tquic_dbg("sched_reg: release_conn\n");
 
 	if (!conn)
 		return;
