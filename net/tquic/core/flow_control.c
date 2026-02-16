@@ -1072,7 +1072,7 @@ int tquic_fc_bidi_stream_opened(struct tquic_fc_state *fc)
 	if (!fc)
 		return -EINVAL;
 
-	tquic_dbg("tquic_fc_bidi_stream_opened: opened=%u max=%llu\n",
+	tquic_dbg("tquic_fc_bidi_stream_opened: opened=%llu max=%llu\n",
 		  fc->streams.streams_bidi_opened,
 		  fc->streams.max_streams_bidi_remote);
 	spin_lock_irqsave(&fc->streams.lock, flags);
@@ -1112,7 +1112,7 @@ int tquic_fc_uni_stream_opened(struct tquic_fc_state *fc)
 	if (!fc)
 		return -EINVAL;
 
-	tquic_dbg("tquic_fc_uni_stream_opened: opened=%u max=%llu\n",
+	tquic_dbg("tquic_fc_uni_stream_opened: opened=%llu max=%llu\n",
 		  fc->streams.streams_uni_opened,
 		  fc->streams.max_streams_uni_remote);
 	spin_lock_irqsave(&fc->streams.lock, flags);

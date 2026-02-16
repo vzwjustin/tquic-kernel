@@ -3158,7 +3158,7 @@ static int tquic_process_packet(struct tquic_connection *conn,
 		}
 
 		pr_warn("process_pkt: long hdr OK ver=0x%08x pkt_type=%d "
-			"dcid=%*phN scid=%*phN offset=%d\n",
+			"dcid=%*phN scid=%*phN offset=%zu\n",
 			version, pkt_type,
 			min_t(int, dcid_len, 8), dcid,
 			min_t(int, scid_len, 8), scid,
@@ -3335,7 +3335,7 @@ static int tquic_process_packet(struct tquic_connection *conn,
 				return ret;
 			}
 			ctx.offset += ret;
-			pr_warn("process_pkt: parsed hdr: pkt_len=%llu offset=%d\n",
+			pr_warn("process_pkt: parsed hdr: pkt_len=%llu offset=%zu\n",
 				pkt_len, ctx.offset);
 		}
 
@@ -3395,7 +3395,7 @@ static int tquic_process_packet(struct tquic_connection *conn,
 	{
 		u8 hp_pn_len = 0, hp_key_phase = 0;
 
-		pr_warn("process_pkt: HP removal: pkt_type=%d hdr_len=%d "
+		pr_warn("process_pkt: HP removal: pkt_type=%d hdr_len=%zu "
 			"payload_len=%lu data[0]=0x%02x long=%d\n",
 			pkt_type, ctx.offset,
 			(unsigned long)(len - ctx.offset),
@@ -3479,7 +3479,7 @@ static int tquic_process_packet(struct tquic_connection *conn,
 		pn_space_idx = TQUIC_PN_SPACE_APPLICATION;
 
 	pr_warn("process_pkt: PN decode: pkt_type=%d pkt_num=%llu "
-		"pn_len=%d hdr_offset=%d total_len=%lu\n",
+		"pn_len=%d hdr_offset=%zu total_len=%lu\n",
 		pkt_type, pkt_num, pkt_num_len, ctx.offset,
 		(unsigned long)len);
 
@@ -3551,9 +3551,9 @@ static int tquic_process_packet(struct tquic_connection *conn,
 			TQUIC_ADD_STATS(sock_net(conn->sk), TQUIC_MIB_0RTTBYTESRX,
 					decrypted_len);
 	} else {
-		pr_warn("process_pkt: decrypt: pkt_type=%d hdr_len=%d "
+		pr_warn("process_pkt: decrypt: pkt_type=%d hdr_len=%zu "
 			"payload_len=%zu pkt_num=%llu\n",
-			pkt_type, ctx.offset, (unsigned long)payload_len,
+			pkt_type, ctx.offset, payload_len,
 			pkt_num);
 
 		ret = tquic_decrypt_payload(conn, data, ctx.offset,

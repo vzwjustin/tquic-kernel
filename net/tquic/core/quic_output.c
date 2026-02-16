@@ -1052,7 +1052,7 @@ int tquic_retransmit(struct tquic_connection *conn, struct tquic_sent_packet *pk
 	int err;
 
 	tquic_dbg("tquic_retransmit: pn=%llu bytes=%u\n",
-		  pkt->pn, pkt->sent_bytes);
+		  pkt->pn, pkt->size);
 	if (!pkt->skb)
 		return -EINVAL;
 
