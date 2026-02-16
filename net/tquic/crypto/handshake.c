@@ -4063,21 +4063,34 @@ static int tquic_hs_process_client_hello(struct tquic_handshake *hs,
 	const u8 *peer_pubkey = NULL;
 	u16 peer_pubkey_len = 0;
 
-	if (!hs->is_server || hs->state != TQUIC_HS_START)
+	if (!hs->is_server || hs->state != TQUIC_HS_START) {
+		pr_warn("tquic_hs: process_ch: bad state is_server=%d state=%d\n",
+			hs->is_server, hs->state);
 		return -EINVAL;
+	}
 
 	/* Parse handshake header */
-	if (len < 4)
+	if (len < 4) {
+		pr_warn("tquic_hs: process_ch: len=%u < 4\n", len);
 		return -EINVAL;
+	}
 
 	msg_type = *p++;
-	if (msg_type != TLS_HS_CLIENT_HELLO)
+	if (msg_type != TLS_HS_CLIENT_HELLO) {
+		pr_warn("tquic_hs: process_ch: msg_type=%u != CH\n", msg_type);
 		return -EINVAL;
+	}
 
 	msg_len = ((u32)p[0] << 16) | ((u32)p[1] << 8) | p[2];
 	p += 3;
-	if (p + msg_len > end)
+	if (p + msg_len > end) {
+		pr_warn("tquic_hs: process_ch: msg_len=%u overflow (len=%u)\n",
+			msg_len, len);
 		return -EINVAL;
+	}
+
+	pr_warn("tquic_hs: process_ch: parsing CH len=%u msg_len=%u\n",
+		len, msg_len);
 
 	/* Legacy version (0x0303 = TLS 1.2) */
 	if (p + 2 > end)
@@ -4303,6 +4316,10 @@ alpn_done:
 			p += ext_data_len;
 		}
 	}
+
+	pr_warn("tquic_hs: process_ch: ext done sv=%d ks=%d pk=%p cipher=0x%04x\n",
+		found_supported_versions, found_key_share,
+		peer_pubkey, hs->cipher_suite);
 
 	if (!found_supported_versions) {
 		pr_warn("tquic_hs: client missing supported_versions ext\n");
@@ -4539,11 +4556,14 @@ int tquic_hs_process_record(struct tquic_handshake *hs,
 		 * tquic_hs_generate_server_flight() for the rest.
 		 */
 		ret = tquic_hs_process_client_hello(hs, data, 4 + msg_len);
+		pr_warn("tquic_hs: process_record: process_ch ret=%d\n", ret);
 		if (ret < 0)
 			break;
 		ret = tquic_hs_generate_server_hello(hs, data, 4 + msg_len,
 						     out_buf, out_buf_len,
 						     out_len);
+		pr_warn("tquic_hs: process_record: gen_sh ret=%d out_len=%u\n",
+			ret, *out_len);
 		break;
 
 	case TLS_HS_SERVER_HELLO:
