@@ -1115,6 +1115,9 @@ int tquic_bond_set_path_weight(struct tquic_connection *conn, u32 path_id,
 {
 	struct tquic_bonding_ctx *bc;
 
+	tquic_dbg("bond_set_path_weight: path_id=%u weight=%u\n",
+		  path_id, weight);
+
 	if (!conn)
 		return -EINVAL;
 

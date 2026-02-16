@@ -89,6 +89,9 @@ static void tquic_pm_update_rtt(struct tquic_path *path, u32 rtt_sample_us)
 {
 	struct tquic_path_stats *stats = &path->stats;
 
+	tquic_dbg("tquic_pm_update_rtt: path_id=%u sample=%u us old_srtt=%u\n",
+		  path->path_id, rtt_sample_us, stats->rtt_smoothed);
+
 	if (stats->rtt_smoothed == 0) {
 		/* First measurement */
 		stats->rtt_smoothed = rtt_sample_us;
@@ -111,6 +114,10 @@ static void tquic_pm_update_rtt(struct tquic_path *path, u32 rtt_sample_us)
 	/* Update minimum RTT */
 	if (stats->rtt_min == 0 || rtt_sample_us < stats->rtt_min)
 		stats->rtt_min = rtt_sample_us;
+
+	tquic_dbg("tquic_pm_update_rtt: path_id=%u new_srtt=%u rttvar=%u min=%u\n",
+		  path->path_id, stats->rtt_smoothed, stats->rtt_variance,
+		  stats->rtt_min);
 }
 
 /*
@@ -614,6 +621,9 @@ EXPORT_SYMBOL_GPL(tquic_path_update_stats);
  */
 int tquic_path_set_weight(struct tquic_path *path, u8 weight)
 {
+	tquic_dbg("tquic_path_set_weight: path_id=%u weight=%u\n",
+		  path->path_id, weight);
+
 	if (weight == 0)
 		return -EINVAL;
 
@@ -681,10 +691,15 @@ void tquic_pm_cleanup(struct tquic_pm_state *pm)
 	if (!pm)
 		return;
 
+	tquic_dbg("tquic_pm_cleanup: monitoring=%d auto_discover=%d\n",
+		  pm->monitoring, pm->auto_discover);
+
 	cancel_delayed_work_sync(&pm->probe_work);
 
 	if (pm->monitoring)
 		unregister_netdevice_notifier(&pm->netdev_notifier);
+
+	tquic_dbg("tquic_pm_cleanup: path manager released\n");
 
 	kfree(pm);
 }
@@ -695,6 +710,9 @@ EXPORT_SYMBOL_GPL(tquic_pm_cleanup);
  */
 int tquic_path_probe(struct tquic_connection *conn, struct tquic_path *path)
 {
+	tquic_dbg("tquic_path_probe: initiating probe on path_id=%u\n",
+		  path->path_id);
+
 	path->state = TQUIC_PATH_PENDING;
 	path->probe_count = 0;
 
@@ -792,10 +810,17 @@ static u64 tquic_path_inflight_bytes(struct tquic_path *path)
 {
 	u64 tx = path->stats.tx_bytes;
 	u64 acked = path->stats.acked_bytes;
+	u64 inflight;
 
 	if (tx > acked)
-		return tx - acked;
-	return 0;
+		inflight = tx - acked;
+	else
+		inflight = 0;
+
+	tquic_dbg("tquic_path_inflight_bytes: path_id=%u tx=%llu acked=%llu inflight=%llu\n",
+		  path->path_id, tx, acked, inflight);
+
+	return inflight;
 }
 
 /*
@@ -803,9 +828,14 @@ static u64 tquic_path_inflight_bytes(struct tquic_path *path)
  */
 static bool tquic_path_has_inflight(struct tquic_path *path)
 {
-	return tquic_path_inflight_bytes(path) > 0 ||
-	       path->stats.tx_packets >
-		       (path->stats.rx_packets + path->stats.lost_packets);
+	bool has = tquic_path_inflight_bytes(path) > 0 ||
+		   path->stats.tx_packets >
+			   (path->stats.rx_packets + path->stats.lost_packets);
+
+	tquic_dbg("tquic_path_has_inflight: path_id=%u has_inflight=%d\n",
+		  path->path_id, has);
+
+	return has;
 }
 
 /*
@@ -976,6 +1006,10 @@ static int tquic_conn_alloc_path_id_locked(struct tquic_connection *conn)
 	bool used[TQUIC_MAX_PATHS] = { 0 };
 	struct tquic_path *path;
 	u32 id;
+	int ret;
+
+	tquic_dbg("tquic_conn_alloc_path_id_locked: num_paths=%u\n",
+		  conn->num_paths);
 
 	list_for_each_entry(path, &conn->paths, list) {
 		if (path->path_id < TQUIC_MAX_PATHS)
@@ -983,11 +1017,18 @@ static int tquic_conn_alloc_path_id_locked(struct tquic_connection *conn)
 	}
 
 	for (id = 0; id < TQUIC_MAX_PATHS; id++) {
-		if (!used[id])
+		if (!used[id]) {
+			tquic_dbg("tquic_conn_alloc_path_id_locked: allocated id=%u\n",
+				  id);
 			return id;
+		}
 	}
 
-	return -ENOSPC;
+	ret = -ENOSPC;
+	tquic_dbg("tquic_conn_alloc_path_id_locked: no free id, ret=%d\n",
+		  ret);
+
+	return ret;
 }
 
 /*
@@ -995,6 +1036,9 @@ static int tquic_conn_alloc_path_id_locked(struct tquic_connection *conn)
  */
 static void tquic_path_init_validation(struct tquic_path *path)
 {
+	tquic_dbg("tquic_path_init_validation: path_id=%u\n",
+		  path->path_id);
+
 	path->validation.challenge_pending = false;
 	path->validation.retries = 0;
 	memset(path->validation.challenge_data, 0,
@@ -1304,6 +1348,9 @@ void tquic_conn_flush_paths(struct tquic_connection *conn)
 	int nremoved = 0;
 	int i;
 
+	tquic_dbg("tquic_conn_flush_paths: flushing non-active paths, num_paths=%u\n",
+		  conn->num_paths);
+
 	spin_lock_bh(&conn->paths_lock);
 	list_for_each_entry_safe(path, tmp, &conn->paths, list) {
 		/* Don't remove active path */
@@ -1343,6 +1390,8 @@ void tquic_conn_flush_paths(struct tquic_connection *conn)
 			dev_put(path->dev);
 		kfree_rcu(path, rcu_head);
 	}
+
+	tquic_dbg("tquic_conn_flush_paths: flushed %d paths\n", nremoved);
 }
 EXPORT_SYMBOL_GPL(tquic_conn_flush_paths);
 
@@ -1535,6 +1584,8 @@ void tquic_pm_cleanup_address_discovery(struct tquic_connection *conn)
 	if (!state)
 		return;
 
+	tquic_dbg("tquic_pm_cleanup_address_discovery: releasing address discovery state\n");
+
 	tquic_addr_discovery_cleanup(state);
 	kfree(state);
 	conn->addr_discovery_state = NULL;
@@ -1587,6 +1638,8 @@ void tquic_pm_cleanup_additional_addresses(struct tquic_connection *conn)
 {
 	if (!conn)
 		return;
+
+	tquic_dbg("tquic_pm_cleanup_additional_addresses: releasing additional addresses state\n");
 
 	tquic_additional_addr_conn_cleanup(conn);
 }

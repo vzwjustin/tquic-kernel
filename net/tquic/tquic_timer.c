@@ -1410,6 +1410,8 @@ void tquic_timer_set_pacing_rate(struct tquic_timer_state *ts, u64 rate)
 {
 	unsigned long flags;
 
+	tquic_dbg("timer:set_pacing_rate: rate=%llu bytes/s\n", rate);
+
 	spin_lock_irqsave(&ts->lock, flags);
 	ts->pacing_rate = rate;
 	spin_unlock_irqrestore(&ts->lock, flags);
@@ -1431,6 +1433,7 @@ bool tquic_timer_can_send_paced(struct tquic_timer_state *ts)
 	spin_lock_irqsave(&ts->lock, flags);
 	if (!ts->active || ts->pacing_rate == 0) {
 		spin_unlock_irqrestore(&ts->lock, flags);
+		tquic_dbg("timer:can_send_paced: pacing inactive, allowing send\n");
 		return true;
 	}
 
@@ -1438,6 +1441,7 @@ bool tquic_timer_can_send_paced(struct tquic_timer_state *ts)
 	can_send = !ktime_after(ts->next_pacing_time, now);
 	spin_unlock_irqrestore(&ts->lock, flags);
 
+	tquic_dbg("timer:can_send_paced: result=%d\n", can_send);
 	return can_send;
 }
 EXPORT_SYMBOL_GPL(tquic_timer_can_send_paced);
@@ -1570,6 +1574,8 @@ static void tquic_timer_work_fn(struct work_struct *work)
 	struct tquic_connection *conn;
 	unsigned long pending, flags;
 
+	tquic_dbg("timer:work_fn: processing pending timers\n");
+
 	spin_lock_irqsave(&ts->lock, flags);
 	if (!ts->active || ts->shutting_down) {
 		spin_unlock_irqrestore(&ts->lock, flags);
@@ -1625,6 +1631,7 @@ static void tquic_timer_work_fn(struct work_struct *work)
 		/* tquic_transmit_pending(conn); */
 	}
 
+	tquic_dbg("timer:work_fn: completed, pending_mask=0x%lx\n", pending);
 	tquic_conn_put(conn);
 }
 
@@ -1706,6 +1713,8 @@ static void tquic_path_work_fn(struct work_struct *work)
 	struct tquic_connection *conn;
 	unsigned long flags;
 
+	tquic_dbg("timer:path_work_fn: processing path management work\n");
+
 	spin_lock_irqsave(&ts->lock, flags);
 	if (!ts->active || ts->shutting_down) {
 		spin_unlock_irqrestore(&ts->lock, flags);
@@ -1727,6 +1736,7 @@ static void tquic_path_work_fn(struct work_struct *work)
 
 	/* Handle path-related work like validation retries, failover, etc. */
 
+	tquic_dbg("timer:path_work_fn: completed\n");
 	tquic_conn_put(conn);
 }
 
@@ -2055,6 +2065,9 @@ static unsigned long tquic_timer_deadline_to_jiffies(ktime_t when)
 {
 	s64 delta_ns = ktime_to_ns(ktime_sub(when, ktime_get()));
 	unsigned long delta_jiffies;
+	unsigned long result;
+
+	tquic_dbg("timer:deadline_to_jiffies: delta_ns=%lld\n", delta_ns);
 
 	if (delta_ns <= 0)
 		return jiffies;
@@ -2063,11 +2076,16 @@ static unsigned long tquic_timer_deadline_to_jiffies(ktime_t when)
 	if (delta_jiffies == 0)
 		delta_jiffies = 1;
 
-	return jiffies + delta_jiffies;
+	result = jiffies + delta_jiffies;
+	tquic_dbg("timer:deadline_to_jiffies: result=%lu delta_jiffies=%lu\n",
+		  result, delta_jiffies);
+	return result;
 }
 
 void tquic_timer_set(struct tquic_connection *conn, u8 timer_type, ktime_t when)
 {
+	tquic_dbg("timer:set: type=%u\n", timer_type);
+
 	if (!conn)
 		return;
 
@@ -2076,10 +2094,14 @@ void tquic_timer_set(struct tquic_connection *conn, u8 timer_type, ktime_t when)
 
 	mod_timer(&conn->timers[timer_type],
 		  tquic_timer_deadline_to_jiffies(when));
+
+	tquic_dbg("timer:set: type=%u armed\n", timer_type);
 }
 
 void tquic_timer_cancel(struct tquic_connection *conn, u8 timer_type)
 {
+	tquic_dbg("timer:cancel: type=%u\n", timer_type);
+
 	if (!conn)
 		return;
 
@@ -2087,15 +2109,21 @@ void tquic_timer_cancel(struct tquic_connection *conn, u8 timer_type)
 		return;
 
 	del_timer(&conn->timers[timer_type]);
+
+	tquic_dbg("timer:cancel: type=%u cancelled\n", timer_type);
 }
 
 void tquic_timer_update(struct tquic_connection *conn)
 {
+	tquic_dbg("timer:update: refreshing loss detection timer\n");
+
 	if (!conn)
 		return;
 
 	/* Loss timer is managed by tquic_set_loss_detection_timer() */
 	tquic_set_loss_detection_timer(conn);
+
+	tquic_dbg("timer:update: loss detection timer updated\n");
 }
 
 /*

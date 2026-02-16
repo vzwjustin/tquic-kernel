@@ -158,8 +158,12 @@ static bool cid_table_initialized;
 static u32 tquic_cid_hash(const void *data, u32 len, u32 seed)
 {
 	const struct tquic_cid *cid = data;
+	u32 hash;
 
-	return jhash(cid->id, cid->len, seed);
+	hash = jhash(cid->id, cid->len, seed);
+	tquic_dbg("cid:hash: cid_len=%u seed=%u hash=%u\n",
+		  cid->len, seed, hash);
+	return hash;
 }
 
 /*
@@ -197,6 +201,8 @@ static const struct rhashtable_params cid_rht_params = {
 static int tquic_encode_varint(u8 *buf, size_t buf_len, u64 val)
 {
 	int len = tquic_varint_len(val);
+
+	tquic_dbg("cid:encode_varint: val=%llu encoding_len=%d\n", val, len);
 
 	if ((size_t)len > buf_len)
 		return -ENOSPC;
@@ -1093,8 +1099,11 @@ bool tquic_cid_check_rotation(struct tquic_connection *conn)
 
 	spin_unlock_bh(&pool->lock);
 
-	if (need_rotation)
+	if (need_rotation) {
+		tquic_dbg("cid:check_rotation: rotation needed, pkts=%llu elapsed_ms=%lld\n",
+			  pool->packets_since_rotation, elapsed_ms);
 		schedule_work(&pool->rotation_work);
+	}
 
 	return need_rotation;
 }
@@ -1170,8 +1179,12 @@ static void tquic_cid_rotation_work(struct work_struct *work)
 	struct tquic_cid_pool *pool = container_of(work, struct tquic_cid_pool,
 						   rotation_work);
 
+	tquic_dbg("cid:rotation_work: executing CID rotation work\n");
+
 	if (pool && pool->conn)
 		tquic_cid_rotate(pool->conn);
+
+	tquic_dbg("cid:rotation_work: completed\n");
 }
 
 /**

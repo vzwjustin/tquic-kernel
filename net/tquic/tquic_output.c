@@ -195,6 +195,8 @@ static inline int tquic_encode_varint(u8 *buf, size_t buf_len, u64 val)
 {
 	int len = tquic_varint_len(val);
 
+	tquic_dbg("encode_varint: val=%llu buf_len=%zu\n", val, buf_len);
+
 	if (len == 0)
 		return -EOVERFLOW;  /* Value exceeds QUIC varint range */
 	if (len > buf_len)
@@ -226,6 +228,7 @@ static inline int tquic_encode_varint(u8 *buf, size_t buf_len, u64 val)
 		break;
 	}
 
+	tquic_dbg("encode_varint: encoded len=%d\n", len);
 	return len;
 }
 
@@ -240,6 +243,8 @@ static inline int tquic_encode_varint(u8 *buf, size_t buf_len, u64 val)
  */
 static int tquic_gen_padding_frame(struct tquic_frame_ctx *ctx, size_t len)
 {
+	tquic_dbg("gen_padding: len=%zu offset=%zu\n", len, ctx->offset);
+
 	if (ctx->offset + len > ctx->buf_len)
 		return -ENOSPC;
 
@@ -254,6 +259,8 @@ static int tquic_gen_padding_frame(struct tquic_frame_ctx *ctx, size_t len)
  */
 static int __maybe_unused tquic_gen_ping_frame(struct tquic_frame_ctx *ctx)
 {
+	tquic_dbg("gen_ping: offset=%zu\n", ctx->offset);
+
 	if (ctx->offset + 1 > ctx->buf_len)
 		return -ENOSPC;
 
@@ -472,6 +479,8 @@ static int __maybe_unused tquic_gen_max_data_frame(struct tquic_frame_ctx *ctx, 
 {
 	u8 *start = ctx->buf + ctx->offset;
 	int ret;
+
+	tquic_dbg("gen_max_data: max_data=%llu\n", max_data);
 
 	if (ctx->offset + 1 > ctx->buf_len)
 		return -ENOSPC;
@@ -803,6 +812,9 @@ static int tquic_encode_pkt_num(u8 *buf, u64 pkt_num, u64 largest_acked)
 	u64 diff = pkt_num - largest_acked;
 	int len;
 
+	tquic_dbg("encode_pkt_num: pkt=%llu largest_acked=%llu\n",
+		  pkt_num, largest_acked);
+
 	if (diff < 128) {
 		len = 1;
 		buf[0] = (u8)pkt_num;
@@ -823,6 +835,7 @@ static int tquic_encode_pkt_num(u8 *buf, u64 pkt_num, u64 largest_acked)
 		buf[3] = (pkt_num & 0xff);
 	}
 
+	tquic_dbg("encode_pkt_num: encoded len=%d\n", len);
 	return len;
 }
 
@@ -1307,6 +1320,9 @@ EXPORT_SYMBOL_GPL(tquic_select_path);
 
 static inline bool tquic_output_path_usable(const struct tquic_path *path)
 {
+	tquic_dbg("output_path_usable: path=%p state=%d\n",
+		  path, path ? READ_ONCE(path->state) : -1);
+
 	return path &&
 	       (READ_ONCE(path->state) == TQUIC_PATH_ACTIVE ||
 		READ_ONCE(path->state) == TQUIC_PATH_VALIDATED);
@@ -1405,6 +1421,8 @@ EXPORT_SYMBOL_GPL(tquic_pacing_init);
  */
 void tquic_pacing_cleanup(struct tquic_pacing_state *pacing)
 {
+	tquic_dbg("pacing_cleanup: pacing=%p\n", pacing);
+
 	if (!pacing)
 		return;
 
@@ -1498,6 +1516,9 @@ static bool tquic_pacing_allows_send(struct sock *sk, struct sk_buff *skb)
 {
 	u64 len_ns;
 
+	tquic_dbg("pacing_allows_send: sk=%p skb_len=%u\n",
+		  sk, skb ? skb->len : 0);
+
 	if (!sk || !skb)
 		return true;
 
@@ -1530,6 +1551,8 @@ static bool tquic_pacing_allows_send(struct sock *sk, struct sk_buff *skb)
  */
 void tquic_pacing_update_rate(struct tquic_pacing_state *pacing, u64 rate)
 {
+	tquic_dbg("pacing_update_rate: rate=%llu\n", rate);
+
 	spin_lock_bh(&pacing->lock);
 	pacing->pacing_rate = rate;
 	spin_unlock_bh(&pacing->lock);

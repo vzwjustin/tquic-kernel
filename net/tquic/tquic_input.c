@@ -2946,6 +2946,7 @@ static u64 tquic_decode_pkt_num(u8 *buf, int pkt_num_len, u64 largest_pn)
 		 candidate_pn >= pn_win)
 		candidate_pn -= pn_win;
 
+	tquic_dbg("decode_pkt_num: result=%llu\n", candidate_pn);
 	return candidate_pn;
 }
 
@@ -2989,6 +2990,8 @@ EXPORT_SYMBOL_GPL(tquic_gro_init);
  */
 void tquic_gro_cleanup(struct tquic_gro_state *gro)
 {
+	tquic_dbg("gro_cleanup: gro=%p\n", gro);
+
 	if (!gro)
 		return;
 
@@ -4256,6 +4259,9 @@ EXPORT_SYMBOL_GPL(tquic_udp_recv);
  */
 static int tquic_encap_recv(struct sock *sk, struct sk_buff *skb)
 {
+	tquic_dbg("encap_recv: sk=%p skb_len=%u\n", sk,
+		  skb ? skb->len : 0);
+
 	/*
 	 * CF-625: The UDP layer already pulled past the UDP header before
 	 * calling encap_rcv, so skb->data already points at the QUIC
@@ -4269,6 +4275,8 @@ static int tquic_encap_recv(struct sock *sk, struct sk_buff *skb)
  */
 int tquic_setup_udp_encap(struct sock *sk)
 {
+	tquic_dbg("setup_udp_encap: sk=%p\n", sk);
+
 	/* Set encapsulation callback */
 	udp_sk(sk)->encap_type = 1;  /* Custom encapsulation */
 	udp_sk(sk)->encap_rcv = tquic_encap_recv;

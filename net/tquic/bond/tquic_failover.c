@@ -39,9 +39,13 @@
 static u32 tquic_sent_packet_hash(const void *data, u32 len, u32 seed)
 {
 	const struct tquic_sent_packet *sp = data;
+	u32 hash;
 
-	return jhash_2words((u32)sp->packet_number,
+	hash = jhash_2words((u32)sp->packet_number,
 			    (u32)(sp->packet_number >> 32), seed);
+	tquic_dbg("sent_packet_hash: pkt=%llu hash=%u\n",
+		  sp->packet_number, hash);
+	return hash;
 }
 
 static u32 tquic_sent_packet_obj_hash(const void *data, u32 len, u32 seed)
@@ -85,6 +89,8 @@ static void tquic_sent_packet_free_rcu(struct rcu_head *rcu)
 	struct tquic_sent_packet *sp =
 		container_of(rcu, struct tquic_sent_packet, rcu);
 
+	tquic_dbg("sent_packet_free_rcu: pkt=%llu path=%u\n",
+		  sp->packet_number, sp->path_id);
 	if (sp->skb)
 		kfree_skb(sp->skb);
 	kfree(sp);
@@ -92,6 +98,8 @@ static void tquic_sent_packet_free_rcu(struct rcu_head *rcu)
 
 static void tquic_sent_packet_free(struct tquic_sent_packet *sp)
 {
+	tquic_dbg("sent_packet_free: pkt=%llu path=%u\n",
+		  sp->packet_number, sp->path_id);
 	if (sp->skb)
 		kfree_skb(sp->skb);
 	kfree(sp);
@@ -148,7 +156,10 @@ static u64 tquic_hyst_stable_time_us(struct tquic_path_timeout *pt)
 	rtt_based_us = pt->srtt_us * TQUIC_HYST_RTT_STABLE_MULT;
 
 	result = max(min_us, rtt_based_us);
-	return min(result, (u64)TQUIC_HYST_MAX_STABLE_MS * 1000);
+	result = min(result, (u64)TQUIC_HYST_MAX_STABLE_MS * 1000);
+	tquic_dbg("hyst_stable_time_us: path=%u srtt=%llu result=%llu us\n",
+		  pt->path_id, pt->srtt_us, result);
+	return result;
 }
 
 /**
@@ -848,6 +859,8 @@ void tquic_failover_arm_timeout(struct tquic_failover_ctx *fc, u8 path_id)
 
 	pt = &fc->path_timeouts[path_id];
 
+	tquic_dbg("failover_arm_timeout: path=%u timeout=%u ms\n",
+		  path_id, pt->timeout_ms);
 	if (!xchg(&pt->timeout_armed, true)) {
 		queue_delayed_work(fc->wq, &pt->timeout_work,
 				   msecs_to_jiffies(pt->timeout_ms));
@@ -879,14 +892,18 @@ EXPORT_SYMBOL_GPL(tquic_failover_path_hyst_state);
 bool tquic_failover_is_path_usable(struct tquic_failover_ctx *fc, u8 path_id)
 {
 	enum tquic_path_hyst_state state;
+	bool usable;
 
 	if (!fc || path_id >= TQUIC_MAX_PATHS)
 		return false;
 
 	state = READ_ONCE(fc->path_timeouts[path_id].hyst_state);
 
-	return state == TQUIC_PATH_HYST_HEALTHY ||
-	       state == TQUIC_PATH_HYST_DEGRADED;
+	usable = state == TQUIC_PATH_HYST_HEALTHY ||
+		 state == TQUIC_PATH_HYST_DEGRADED;
+	tquic_dbg("failover_is_path_usable: path=%u hyst_state=%s usable=%d\n",
+		  path_id, tquic_hyst_state_name(state), usable);
+	return usable;
 }
 EXPORT_SYMBOL_GPL(tquic_failover_is_path_usable);
 
@@ -904,6 +921,9 @@ int tquic_failover_requeue(struct tquic_failover_ctx *fc,
 {
 	if (!fc || !sp)
 		return -EINVAL;
+
+	tquic_dbg("failover_requeue: pkt=%llu path=%u len=%u\n",
+		  sp->packet_number, sp->path_id, sp->len);
 
 	spin_lock_bh(&fc->retx_queue.lock);
 
@@ -937,10 +957,15 @@ EXPORT_SYMBOL_GPL(tquic_failover_requeue);
  */
 bool tquic_failover_has_pending(struct tquic_failover_ctx *fc)
 {
+	bool pending;
+
 	if (!fc)
 		return false;
 
-	return READ_ONCE(fc->retx_queue.count) > 0;
+	pending = READ_ONCE(fc->retx_queue.count) > 0;
+	tquic_dbg("failover_has_pending: retx_count=%u pending=%d\n",
+		  READ_ONCE(fc->retx_queue.count), pending);
+	return pending;
 }
 EXPORT_SYMBOL_GPL(tquic_failover_has_pending);
 
@@ -1007,6 +1032,9 @@ bool tquic_failover_dedup_check(struct tquic_failover_ctx *fc,
 
 	if (!fc)
 		return false;
+
+	tquic_dbg("failover_dedup_check: pkt=%llu window_base=%llu\n",
+		  packet_number, fc->dedup.window_base);
 
 	spin_lock_bh(&fc->dedup.lock);
 
@@ -1107,6 +1135,8 @@ EXPORT_SYMBOL_GPL(tquic_failover_dedup_advance);
 void tquic_failover_get_stats(struct tquic_failover_ctx *fc,
 			      struct tquic_failover_stats *stats)
 {
+	tquic_dbg("failover_get_stats: retrieving failover statistics\n");
+
 	if (!fc || !stats) {
 		if (stats)
 			memset(stats, 0, sizeof(*stats));

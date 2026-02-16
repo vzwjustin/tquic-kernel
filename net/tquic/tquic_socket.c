@@ -2751,6 +2751,8 @@ int tquic_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 	bool nonblock;
 	size_t allowed;
 
+	tquic_dbg("tquic_sendmsg: sk=%p len=%zu flags=0x%x\n", sk, len, flags);
+
 	conn = tquic_sock_conn_get(tsk);
 	if (!conn)
 		return -ENOTCONN;
@@ -2924,6 +2926,7 @@ out_put:
 	if (stream)
 		tquic_stream_put(stream);
 	tquic_conn_put(conn);
+	tquic_dbg("tquic_sendmsg: ret=%d\n", copied);
 	return copied;
 
 out_datagram:

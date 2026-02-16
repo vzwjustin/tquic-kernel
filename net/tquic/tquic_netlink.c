@@ -377,6 +377,9 @@ static struct tquic_nl_conn_info *tquic_conn_lookup(struct net *net, u64 conn_id
 
 static void tquic_nl_conn_put(struct tquic_nl_conn_info *conn)
 {
+	tquic_dbg("tquic_nl_conn_put: conn_id=%llu refcnt=%u\n",
+		  conn->conn_id, refcount_read(&conn->refcnt));
+
 	if (refcount_dec_and_test(&conn->refcnt)) {
 		struct tquic_nl_path_info *path, *tmp;
 
