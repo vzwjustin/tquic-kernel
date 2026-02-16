@@ -244,6 +244,9 @@ static void prague_on_ack(void *cong_data, u64 bytes_acked, u64 rtt_us)
 	if (!p)
 		return;
 
+	tquic_dbg("prague: on_ack bytes=%llu rtt=%llu cwnd=%u state=%d\n",
+		  bytes_acked, rtt_us, p->cwnd, p->state);
+
 	mss = prague_get_mss(p);
 
 	/* Update RTT estimates */
@@ -295,6 +298,9 @@ static void prague_on_ecn(void *cong_data, u64 ecn_ce_count)
 
 	if (!p || ecn_ce_count == 0)
 		return;
+
+	tquic_dbg("prague: on_ecn ce_count=%llu alpha=%u cwnd=%u\n",
+		  ecn_ce_count, p->alpha, p->cwnd);
 
 	mss = prague_get_mss(p);
 

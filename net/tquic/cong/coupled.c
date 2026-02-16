@@ -235,6 +235,8 @@ static u64 coupled_sum_cwnd(struct coupled_state *state)
 	struct coupled_subflow *sf;
 	u64 sum = 0;
 
+	tquic_dbg("coupled: sum_cwnd num_subflows=%u\n", state->num_subflows);
+
 	list_for_each_entry(sf, &state->subflows, list) {
 		if (sf->path && sf->path->state == TQUIC_PATH_ACTIVE)
 			sum += sf->cwnd;
@@ -326,6 +328,8 @@ static u64 lia_calc_alpha(struct coupled_state *state)
 	struct coupled_subflow *sf;
 	u64 alpha;
 
+	tquic_dbg("coupled: lia_calc_alpha\n");
+
 	total_cwnd = coupled_sum_cwnd(state);
 	sum_cwnd_rtt = coupled_sum_cwnd_rtt(state);
 
@@ -410,6 +414,8 @@ static u64 olia_calc_alpha(struct coupled_state *state)
 	u64 alpha;
 	u64 rtt_sq;
 	u64 denominator;
+
+	tquic_dbg("coupled: olia_calc_alpha\n");
 
 	total_cwnd = coupled_sum_cwnd(state);
 	sum_cwnd_rtt = coupled_sum_cwnd_rtt(state);
@@ -584,6 +590,8 @@ static s32 sbd_calc_correlation(u32 *rtt1, u32 *rtt2, u32 len)
 	s64 mean_x, mean_y;
 	s64 numerator, denominator;
 	u32 i;
+
+	tquic_dbg("coupled: sbd_calc_correlation len=%u\n", len);
 
 	if (len < 4)
 		return 0;
