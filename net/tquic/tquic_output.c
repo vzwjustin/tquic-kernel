@@ -2487,24 +2487,28 @@ EXPORT_SYMBOL_GPL(tquic_output_flush);
  * @conn: Connection with pending crypto data
  *
  * Drains the per-PN-space crypto_buffer queues and sends CRYPTO frames
- * containing TLS handshake messages. Called after the inline TLS state
- * machine generates response messages (e.g., ClientHello, Finished).
+ * inside properly formed QUIC packets (Initial or Handshake).
  *
- * CRYPTO frames use the following format (RFC 9000 Section 19.6):
- *   Type (0x06) + Offset (varint) + Length (varint) + Data
+ * The packet assembly pipeline handles:
+ *   1. CRYPTO frame generation (type 0x06 + offset + length + data)
+ *   2. QUIC long header construction (version, CIDs, token, length)
+ *   3. AEAD encryption (packet protection)
+ *   4. Header protection (first byte + packet number masking)
+ *   5. Padding to 1200 bytes for Initial packets (RFC 9000 Section 14.1)
  *
- * Returns: Number of CRYPTO frames sent, or negative errno on error
+ * Returns: Number of packets sent, or negative errno on error
  */
 int tquic_output_flush_crypto(struct tquic_connection *conn)
 {
 	struct tquic_path *path;
 	struct sk_buff *crypto_skb;
 	struct sk_buff *send_skb;
-	u8 frame_hdr[32];
-	int hdr_len;
-	int frames_sent = 0;
+	struct tquic_pending_frame *frame;
+	int packets_sent = 0;
 	int space;
 	u64 crypto_offset;
+	int pkt_type;
+	u64 pkt_num;
 	int ret;
 
 	if (!conn)
@@ -2526,85 +2530,74 @@ int tquic_output_flush_crypto(struct tquic_connection *conn)
 	for (space = 0; space < TQUIC_PN_SPACE_COUNT; space++) {
 		crypto_offset = 0;
 
+		/* Map PN space to QUIC long header packet type */
+		switch (space) {
+		case TQUIC_PN_SPACE_INITIAL:
+			pkt_type = TQUIC_PKT_INITIAL;
+			break;
+		case TQUIC_PN_SPACE_HANDSHAKE:
+			pkt_type = TQUIC_PKT_HANDSHAKE;
+			break;
+		default:
+			/* Application space doesn't use CRYPTO frames */
+			continue;
+		}
+
 		while ((crypto_skb = skb_dequeue(&conn->crypto_buffer[space]))) {
-			u32 data_len = crypto_skb->len;
+			LIST_HEAD(frames);
 
-			/*
-			 * Build CRYPTO frame header:
-			 *   Type (varint) + Offset (varint) + Length (varint)
-			 */
-			hdr_len = 0;
-
-			/* Frame type: CRYPTO (0x06) */
-			ret = tquic_encode_varint(frame_hdr + hdr_len,
-						  sizeof(frame_hdr) - hdr_len,
-						  TQUIC_FRAME_CRYPTO);
-			if (ret < 0) {
-				kfree_skb(crypto_skb);
-				goto out_put_path;
-			}
-			hdr_len += ret;
-
-			/* Offset */
-			ret = tquic_encode_varint(frame_hdr + hdr_len,
-						  sizeof(frame_hdr) - hdr_len,
-						  crypto_offset);
-			if (ret < 0) {
-				kfree_skb(crypto_skb);
-				goto out_put_path;
-			}
-			hdr_len += ret;
-
-			/* Length */
-			ret = tquic_encode_varint(frame_hdr + hdr_len,
-						  sizeof(frame_hdr) - hdr_len,
-						  data_len);
-			if (ret < 0) {
-				kfree_skb(crypto_skb);
-				goto out_put_path;
-			}
-			hdr_len += ret;
-
-			/* Allocate send skb with header + data */
-			send_skb = alloc_skb(hdr_len + data_len + 128, GFP_ATOMIC);
-			if (!send_skb) {
+			/* Create a pending CRYPTO frame for assembly */
+			frame = kmem_cache_zalloc(tquic_frame_cache, GFP_ATOMIC);
+			if (!frame) {
 				kfree_skb(crypto_skb);
 				ret = -ENOMEM;
 				goto out_put_path;
 			}
 
-			/* Reserve headroom for QUIC packet header */
-			skb_reserve(send_skb, 64);
+			INIT_LIST_HEAD(&frame->list);
+			frame->type = TQUIC_FRAME_CRYPTO;
+			frame->data_ref = crypto_skb->data;
+			frame->len = crypto_skb->len;
+			frame->offset = crypto_offset;
+			frame->owns_data = false;
 
-			/* Validate tailroom before writing */
-			if (skb_tailroom(send_skb) < hdr_len + data_len) {
-				kfree_skb(send_skb);
-				kfree_skb(crypto_skb);
-				ret = -ENOSPC;
-				goto out_put_path;
-			}
+			list_add_tail(&frame->list, &frames);
 
-			/* Copy frame header */
-			skb_put_data(send_skb, frame_hdr, hdr_len);
+			/* Allocate packet number */
+			pkt_num = atomic64_inc_return(&conn->pkt_num_tx) - 1;
 
-			/* Copy crypto data */
-			skb_put_data(send_skb, crypto_skb->data, data_len);
+			/*
+			 * Assemble a proper QUIC packet with:
+			 *   - Long header (version, CIDs, etc.)
+			 *   - CRYPTO frame payload
+			 *   - AEAD encryption
+			 *   - Header protection
+			 *   - Padding (Initial packets padded to 1200 bytes)
+			 */
+			send_skb = tquic_assemble_packet(conn, path, pkt_type,
+							 pkt_num, &frames);
 
-			crypto_offset += data_len;
+			crypto_offset += crypto_skb->len;
 			kfree_skb(crypto_skb);
 
-			/* Send the CRYPTO frame */
-			ret = tquic_output_packet(conn, path, send_skb);
-			if (ret < 0) {
-				tquic_dbg("failed to send CRYPTO frame: %d\n", ret);
+			if (!send_skb) {
+				ret = -ENOMEM;
 				goto out_put_path;
 			}
 
-			frames_sent++;
+			/* Send the assembled QUIC packet via UDP tunnel */
+			ret = tquic_output_packet(conn, path, send_skb);
+			if (ret < 0) {
+				tquic_dbg("failed to send crypto packet: %d\n",
+					  ret);
+				goto out_put_path;
+			}
+
+			packets_sent++;
 		}
 	}
 
-	ret = frames_sent;
+	ret = packets_sent;
 
 out_put_path:
 	tquic_path_put(path);
