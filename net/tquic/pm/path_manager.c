@@ -1966,7 +1966,6 @@ int tquic_pm_coordinate_preferred_and_additional(struct tquic_connection *conn)
 	struct tquic_pref_addr_migration *pref_migration;
 	struct tquic_additional_addresses *remote_addrs;
 	enum tquic_pref_addr_state pref_state;
-	int ret;
 
 	if (!conn)
 		return 0;

@@ -529,6 +529,8 @@ static u32 tquic_cc_available_cwnd(struct tquic_bpm_path *path)
 		available = 0;
 	spin_unlock_bh(&path->cc_lock);
 
+	tquic_dbg("cc_available_cwnd: path=%u available=%u cwnd=%u inflight=%u\n",
+		  path->path_id, available, cc->cwnd, cc->bytes_in_flight);
 	return available;
 }
 
@@ -543,6 +545,7 @@ static u32 tquic_cc_available_cwnd(struct tquic_bpm_path *path)
 
 static void tquic_metrics_init(struct tquic_bpm_path_metrics *m)
 {
+	tquic_dbg("metrics_init: initial_rtt=%u us\n", TQUIC_INITIAL_RTT_US);
 	m->srtt = TQUIC_INITIAL_RTT_US;
 	m->rttvar = TQUIC_INITIAL_RTT_US / 2;
 	m->min_rtt = UINT_MAX;
@@ -675,6 +678,9 @@ u32 tquic_bpm_path_get_score(struct tquic_bpm_path *path)
 {
 	struct tquic_bpm_path_metrics *m = &path->metrics;
 	u32 score = TQUIC_BPM_PATH_SCORE_MAX;
+
+	tquic_dbg("path_get_score: path=%u rtt=%u loss=%u bw=%llu\n",
+		  path->path_id, m->srtt, m->loss_rate, m->bandwidth);
 	u32 rtt_score, loss_score, bw_score;
 	u32 rtt_range = TQUIC_BPM_PATH_RTT_POOR - TQUIC_BPM_PATH_RTT_IDEAL;
 
@@ -773,6 +779,8 @@ enum tquic_wan_type tquic_wan_detect(struct net_device *dev)
 	if (!dev)
 		return TQUIC_WAN_UNKNOWN;
 
+	tquic_dbg("wan_detect: dev=%s type=%u\n", dev->name, dev->type);
+
 	/* Check device type and flags */
 	switch (dev->type) {
 	case ARPHRD_ETHER:
@@ -836,6 +844,9 @@ s8 tquic_wan_get_signal_strength(struct net_device *dev)
 {
 	if (!dev)
 		return -128;
+
+	tquic_dbg("wan_get_signal_strength: dev=%s type=%u\n",
+		  dev->name, dev->type);
 
 	/*
 	 * Wired interfaces (Ethernet, loopback) don't have signal strength.
@@ -1351,6 +1362,8 @@ bool tquic_bpm_path_validation_complete(struct tquic_bpm_path *path)
 		    path->state == TQUIC_BPM_PATH_STANDBY);
 	spin_unlock_bh(&path->state_lock);
 
+	tquic_dbg("path_validation_complete: path=%u complete=%d state=%d\n",
+		  path->path_id, complete, path->state);
 	return complete;
 }
 EXPORT_SYMBOL_GPL(tquic_bpm_path_validation_complete);
@@ -1653,6 +1666,8 @@ struct tquic_bpm_path *tquic_bpm_get_path(struct tquic_bpm_path_manager *pm, u32
 {
 	struct tquic_bpm_path *path;
 
+	tquic_dbg("bpm_get_path: looking up path_id=%u\n", path_id);
+
 	if (!pm)
 		return NULL;
 
@@ -1685,6 +1700,8 @@ int tquic_bpm_get_active_paths(struct tquic_bpm_path_manager *pm,
 	struct tquic_bpm_path *path;
 	int count = 0;
 
+	tquic_dbg("bpm_get_active_paths: max_paths=%d\n", max_paths);
+
 	if (!pm || !paths || max_paths <= 0)
 		return 0;
 
@@ -1713,6 +1730,9 @@ EXPORT_SYMBOL_GPL(tquic_bpm_get_active_paths);
 
 static bool tquic_is_wan_interface(struct net_device *dev)
 {
+	tquic_dbg("is_wan_interface: checking dev=%s type=%u\n",
+		  dev->name, dev->type);
+
 	/* Exclude loopback */
 	if (dev->flags & IFF_LOOPBACK)
 		return false;
@@ -2067,6 +2087,8 @@ int tquic_handle_migration(struct tquic_bpm_path_manager *pm,
 	struct tquic_addr_info remote_info;
 	bool found = false;
 
+	tquic_dbg("handle_migration: peer-initiated migration\n");
+
 	if (!pm || !new_remote)
 		return -EINVAL;
 
@@ -2140,6 +2162,8 @@ struct tquic_bpm_path *tquic_bpm_select_path(struct tquic_bpm_path_manager *pm)
 	struct tquic_bpm_path *path, *best = NULL;
 	u32 best_score = 0;
 	u32 available_cwnd;
+
+	tquic_dbg("bpm_select_path: selecting best path for sending\n");
 
 	if (!pm)
 		return NULL;

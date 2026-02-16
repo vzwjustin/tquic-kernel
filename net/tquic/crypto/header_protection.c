@@ -527,6 +527,8 @@ void tquic_hp_set_key_phase(struct tquic_hp_ctx *ctx, u8 phase)
 	if (!ctx)
 		return;
 
+	tquic_dbg("tquic_hp_set_key_phase: phase=%u\n", phase & 1);
+
 	spin_lock_irqsave(&ctx->lock, flags);
 	ctx->key_phase = phase & 1;
 	spin_unlock_irqrestore(&ctx->lock, flags);
@@ -543,6 +545,9 @@ static int tquic_hp_setup_cipher(struct tquic_hp_key *hp_key)
 {
 	const char *alg_name;
 	int ret;
+
+	tquic_dbg("tquic_hp_setup_cipher: cipher_type=%u key_len=%u\n",
+		  hp_key->cipher_type, hp_key->key_len);
 
 	/* Free any existing transform to prevent leaks on overwrite */
 	if (hp_key->req) {
@@ -588,6 +593,7 @@ static int tquic_hp_setup_cipher(struct tquic_hp_key *hp_key)
 		return -ENOMEM;
 	}
 
+	tquic_dbg("tquic_hp_setup_cipher: ret=0\n");
 	return 0;
 }
 
@@ -822,6 +828,8 @@ void tquic_hp_rotate_keys(struct tquic_hp_ctx *ctx)
 
 	if (!ctx)
 		return;
+
+	tquic_dbg("tquic_hp_rotate_keys: current_phase=%u\n", ctx->key_phase);
 
 	spin_lock_irqsave(&ctx->lock, flags);
 

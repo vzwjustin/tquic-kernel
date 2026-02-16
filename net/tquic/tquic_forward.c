@@ -153,6 +153,9 @@ static u32 tquic_forward_hash_addr(const struct sockaddr_storage *addr)
 {
 	u32 hash = 0;
 
+	tquic_dbg("tquic_forward_hash_addr: hashing addr family=%u\n",
+		  addr->ss_family);
+
 	if (addr->ss_family == AF_INET) {
 		const struct sockaddr_in *sin = (const struct sockaddr_in *)addr;
 		hash = jhash(&sin->sin_addr, sizeof(sin->sin_addr), 0);
@@ -216,6 +219,8 @@ static struct tquic_splice_state __maybe_unused *tquic_splice_state_alloc(void)
  */
 static void __maybe_unused tquic_splice_state_free(struct tquic_splice_state *state)
 {
+	tquic_dbg("tquic_splice_state_free: freeing splice state\n");
+
 	if (!state)
 		return;
 
@@ -257,6 +262,9 @@ ssize_t tquic_forward_splice(struct tquic_tunnel *tunnel, int direction)
 	struct msghdr msg;
 	struct kvec iov;
 	int err;
+
+	tquic_dbg("tquic_forward_splice: direction=%s\n",
+		  direction == TQUIC_FORWARD_TX ? "QUIC->TCP" : "TCP->QUIC");
 
 	if (!tunnel)
 		return -EINVAL;
@@ -429,6 +437,7 @@ ssize_t tquic_forward_splice(struct tquic_tunnel *tunnel, int direction)
 			tquic_stream_wake(stream);
 	}
 
+	tquic_dbg("tquic_forward_splice: forwarded %zd bytes\n", total);
 	return total;
 }
 EXPORT_SYMBOL_GPL(tquic_forward_splice);
@@ -853,6 +862,8 @@ void tquic_forward_unregister_client(struct tquic_client *client)
 	struct hlist_node *tmp;
 	int bkt;
 
+	tquic_dbg("tquic_forward_unregister_client: unregistering tunnel client\n");
+
 	if (!client)
 		return;
 
@@ -971,6 +982,9 @@ static atomic_t tquic_pmtu_entry_count = ATOMIC_INIT(0);
  */
 static u32 tquic_pmtu_hash_addr(const struct sockaddr_storage *addr)
 {
+	tquic_dbg("tquic_pmtu_hash_addr: hashing PMTU addr family=%u\n",
+		  addr->ss_family);
+
 	if (addr->ss_family == AF_INET) {
 		const struct sockaddr_in *sin = (const struct sockaddr_in *)addr;
 		return jhash(&sin->sin_addr, sizeof(sin->sin_addr), 0);
@@ -1017,6 +1031,8 @@ static u32 tquic_fwd_pmtu_lookup(const struct sockaddr_storage *dest)
 	struct tquic_pmtu_entry *entry;
 	u32 hash, pmtu = 0;
 
+	tquic_dbg("tquic_fwd_pmtu_lookup: looking up cached PMTU\n");
+
 	hash = tquic_pmtu_hash_addr(dest);
 
 	rcu_read_lock();
@@ -1029,6 +1045,7 @@ static u32 tquic_fwd_pmtu_lookup(const struct sockaddr_storage *dest)
 	}
 	rcu_read_unlock();
 
+	tquic_dbg("tquic_fwd_pmtu_lookup: cached pmtu=%u\n", pmtu);
 	return pmtu;
 }
 
@@ -1109,6 +1126,8 @@ static void tquic_pmtu_gc_callback(struct timer_list *t)
 	struct hlist_node *tmp;
 	int bkt;
 
+	tquic_dbg("tquic_pmtu_gc_callback: running PMTU cache garbage collection\n");
+
 	spin_lock_bh(&tquic_pmtu_lock);
 	hash_for_each_safe(tquic_pmtu_cache, bkt, tmp, entry, node) {
 		if (time_after(jiffies, entry->expires)) {
@@ -1163,6 +1182,8 @@ u32 tquic_forward_get_mtu(struct tquic_tunnel *tunnel)
 	u32 quic_mtu;
 	u32 tcp_mtu;
 	u32 overhead;
+
+	tquic_dbg("tquic_forward_get_mtu: calculating effective MTU\n");
 
 	if (!tunnel)
 		return mtu;

@@ -1093,6 +1093,9 @@ int tquic_pmtud_set_max_mtu(struct tquic_path *path, u32 max_mtu)
 	if (!path)
 		return -EINVAL;
 
+	tquic_dbg("tquic_pmtud_set_max_mtu: path_id=%u max_mtu=%u\n",
+		  path->path_id, max_mtu);
+
 	if (max_mtu < TQUIC_BASE_PLPMTU)
 		return -EINVAL;
 
@@ -1104,6 +1107,9 @@ int tquic_pmtud_set_max_mtu(struct tquic_path *path, u32 max_mtu)
 	pmtud->max_plpmtu = min(max_mtu, TQUIC_MAX_PLPMTU_ABSOLUTE);
 	pmtud->search_high = pmtud->max_plpmtu;
 	spin_unlock_bh(&pmtud->lock);
+
+	tquic_dbg("tquic_pmtud_set_max_mtu: path_id=%u effective_max=%u\n",
+		  path->path_id, pmtud->max_plpmtu);
 
 	return 0;
 }

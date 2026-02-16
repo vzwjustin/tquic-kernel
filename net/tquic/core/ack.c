@@ -2007,6 +2007,9 @@ void tquic_loss_state_destroy(struct tquic_loss_state *loss)
 	if (!loss)
 		return;
 
+	tquic_dbg("tquic_loss_state_destroy: freeing loss state pkts_in_flight=%u\n",
+		  loss->packets_in_flight);
+
 	del_timer_sync(&loss->loss_detection_timer);
 
 	spin_lock_bh(&loss->lock);
@@ -2042,6 +2045,7 @@ void tquic_loss_state_reset(struct tquic_loss_state *loss)
 	if (!loss)
 		return;
 
+	tquic_dbg("tquic_loss_state_reset: resetting RTT and congestion state\n");
 	spin_lock_bh(&loss->lock);
 
 	/* Reset RTT to initial values */
@@ -2219,6 +2223,7 @@ u64 tquic_get_ack_delay(struct tquic_loss_state *loss)
 	if (!loss)
 		return TQUIC_MAX_ACK_DELAY_US;
 
+	tquic_dbg("tquic_get_ack_delay: querying ACK delay\n");
 	spin_lock_bh(&loss->lock);
 
 	/*
