@@ -45,8 +45,6 @@
 #include "crypto/header_protection.h"
 #include "tquic_token.h"
 #include "core/mp_frame.h"
-#include "core/quic_loss.h"
-#include "bond/tquic_failover.h"
 
 /* Slab cache for tquic_pending_frame (CF-046: avoid per-frame kzalloc) */
 struct kmem_cache *tquic_frame_cache;
@@ -1898,83 +1896,36 @@ int tquic_output_packet(struct tquic_connection *conn,
 			local->sin_port = sport;
 		}
 
-		/* Extract packet metadata before sending */
-		{
-			struct tquic_skb_cb *cb = TQUIC_SKB_CB(skb);
-			u64 pkt_num = cb->pn;
-			u8 pn_space = cb->packet_type == TQUIC_PKT_INITIAL ?
-				      TQUIC_PN_SPACE_INITIAL :
-				      (cb->packet_type == TQUIC_PKT_HANDSHAKE ?
-				       TQUIC_PN_SPACE_HANDSHAKE : TQUIC_PN_SPACE_APPLICATION);
-			u32 path_id = path->path_id;
+		/* Save skb->len before xmit which consumes the SKB */
+		skb_len = skb->len;
 
-			/* Save skb->len before xmit which consumes the SKB */
-			skb_len = skb->len;
+		/*
+		 * Use udp_tunnel_xmit_skb for proper UDP encapsulation.
+		 * This builds the UDP header, IP header, and transmits
+		 * the packet correctly through the network stack.
+		 */
+		TQUIC_UDP_TUNNEL_XMIT_SKB(rt, conn->sk, skb,
+					   saddr,
+					   remote->sin_addr.s_addr,
+					   tos,
+					   ip4_dst_hoplimit(&rt->dst),
+					   0,		/* DF */
+					   sport,
+					   remote->sin_port,
+					   false,	/* xnet */
+					   true);	/* nocheck */
+		ret = 0;
 
-			/*
-			 * Use udp_tunnel_xmit_skb for proper UDP encapsulation.
-			 * This builds the UDP header, IP header, and transmits
-			 * the packet correctly through the network stack.
-			 */
-			TQUIC_UDP_TUNNEL_XMIT_SKB(rt, conn->sk, skb,
-						   saddr,
-						   remote->sin_addr.s_addr,
-						   tos,
-						   ip4_dst_hoplimit(&rt->dst),
-						   0,		/* DF */
-						   sport,
-						   remote->sin_port,
-						   false,	/* xnet */
-						   true);	/* nocheck */
-			ret = 0;
+		/* Update path statistics */
+		path->stats.tx_packets++;
+		path->stats.tx_bytes += skb_len;
+		WRITE_ONCE(path->last_activity, ktime_get());
 
-			/* Update path statistics */
-			path->stats.tx_packets++;
-			path->stats.tx_bytes += skb_len;
-			WRITE_ONCE(path->last_activity, ktime_get());
-
-			if (conn && conn->sk) {
-				TQUIC_INC_STATS(sock_net(conn->sk),
-						TQUIC_MIB_PACKETSTX);
-				TQUIC_ADD_STATS(sock_net(conn->sk),
-						TQUIC_MIB_BYTESTX, skb_len);
-			}
-
-			/* Key Update tracking (RFC 9001 Section 6) */
-			if (conn && conn->crypto_state) {
-				struct tquic_key_update_state *ku_state;
-
-				ku_state = tquic_crypto_get_key_update_state(
-						conn->crypto_state);
-				if (ku_state) {
-					tquic_key_update_on_packet_sent(ku_state);
-					tquic_key_update_check_threshold(conn);
-				}
-			}
-
-			/* Loss Detection (RFC 9002) */
-			if (conn && conn->timer_state) {
-				tquic_timer_on_packet_sent(
-					conn->timer_state, pn_space,
-					pkt_num, skb_len,
-					true, true, 0);
-			}
-
-			if (conn) {
-				struct tquic_sent_packet *pkt;
-
-				pkt = tquic_sent_packet_alloc(GFP_ATOMIC);
-				if (pkt) {
-					tquic_sent_packet_init(pkt, pkt_num,
-							       skb_len,
-							       pn_space,
-							       true, true);
-					pkt->path_id = path_id;
-					pkt->skb = NULL;
-					tquic_loss_detection_on_packet_sent(
-						conn, pkt);
-				}
-			}
+		if (conn && conn->sk) {
+			TQUIC_INC_STATS(sock_net(conn->sk),
+					TQUIC_MIB_PACKETSTX);
+			TQUIC_ADD_STATS(sock_net(conn->sk),
+					TQUIC_MIB_BYTESTX, skb_len);
 		}
 	}
 
