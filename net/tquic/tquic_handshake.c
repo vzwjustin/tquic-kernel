@@ -759,6 +759,22 @@ int tquic_start_handshake(struct sock *sk)
 		tquic_dbg("inline TLS handshake initiated, ClientHello queued (%u bytes)\n",
 			 ch_len);
 
+		/*
+		 * Initialize Initial-level crypto state (RFC 9001 Section 5.2).
+		 * Initial keys are derived from the server's DCID using a
+		 * publicly known salt so both endpoints can decrypt Initials.
+		 */
+		if (!conn->crypto_state) {
+			conn->crypto_state = tquic_crypto_init_versioned(
+				&conn->dcid, false, conn->version);
+			if (!conn->crypto_state)
+				tquic_warn("failed to init Initial crypto state\n");
+		}
+
+		/* Mark Initial PN space keys as available for packet building */
+		if (conn->pn_spaces)
+			conn->pn_spaces[TQUIC_PN_SPACE_INITIAL].keys_available = true;
+
 		/* Flush the queued ClientHello as a CRYPTO frame in an Initial packet */
 		ret = tquic_output_flush_crypto(conn);
 		if (ret < 0)
