@@ -907,8 +907,18 @@ static int tquic_build_long_header_internal(struct tquic_connection *conn,
 		p += len_bytes;
 	}
 
-	/* Packet Number (will be encrypted by header protection) */
-	tquic_encode_pkt_num(p, pkt_num, 0);
+	/*
+	 * Packet Number (will be encrypted by header protection).
+	 *
+	 * Long headers always use 4-byte PN encoding regardless of what
+	 * the minimal encoding would be.  Write all 4 bytes explicitly
+	 * to avoid leaving uninitialized stack bytes that would corrupt
+	 * the AEAD nonce on the receiver side.
+	 */
+	p[0] = (pkt_num >> 24) & 0xff;
+	p[1] = (pkt_num >> 16) & 0xff;
+	p[2] = (pkt_num >> 8) & 0xff;
+	p[3] = pkt_num & 0xff;
 	p += pkt_num_len;
 
 	return p - buf;
@@ -1080,7 +1090,7 @@ static struct sk_buff *tquic_assemble_packet(struct tquic_connection *conn,
 {
 	struct sk_buff *skb;
 	struct tquic_frame_ctx ctx;
-	u8 header_buf[128];		/* stack -- max QUIC header */
+	u8 header_buf[128] = {};	/* stack -- max QUIC header */
 	u8 *payload_buf;
 	int header_len;
 	int payload_len;
