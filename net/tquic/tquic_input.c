@@ -190,6 +190,8 @@ static inline int tquic_decode_varint(const u8 *buf, size_t buf_len, u64 *val)
 	u8 prefix;
 	int len;
 
+	tquic_dbg("decode_varint: buf_len=%zu\n", buf_len);
+
 	if (buf_len < 1)
 		return -EINVAL;
 
@@ -224,6 +226,7 @@ static inline int tquic_decode_varint(const u8 *buf, size_t buf_len, u64 *val)
 		break;
 	}
 
+	tquic_dbg("decode_varint: val=%llu len=%d\n", *val, len);
 	return len;
 }
 
@@ -531,6 +534,8 @@ static bool tquic_is_version_negotiation(const u8 *data, size_t len)
 {
 	u32 version;
 
+	tquic_dbg("is_version_negotiation: len=%zu\n", len);
+
 	if (len < 7)  /* Minimum long header */
 		return false;
 
@@ -812,6 +817,9 @@ static int tquic_process_padding_frame(struct tquic_rx_ctx *ctx)
 	u32 start = ctx->offset;
 	u32 limit = min_t(u32, ctx->len, start + TQUIC_MAX_PADDING_BYTES);
 
+	tquic_dbg("process_padding: offset=%u remaining=%zu\n",
+		  start, ctx->len - start);
+
 	/*
 	 * Optimization: Scan padding bytes efficiently.
 	 * While memchr() can't directly find non-zero bytes,
@@ -838,6 +846,8 @@ static int tquic_process_padding_frame(struct tquic_rx_ctx *ctx)
  */
 static int tquic_process_ping_frame(struct tquic_rx_ctx *ctx)
 {
+	tquic_dbg("process_ping: pkt_num=%llu\n", ctx->pkt_num);
+
 	ctx->offset++;  /* Skip frame type */
 	ctx->ack_eliciting = true;
 
@@ -1337,6 +1347,9 @@ static int tquic_process_stream_frame(struct tquic_rx_ctx *ctx)
 		ctx->offset += ret;
 	}
 
+	tquic_dbg("process_stream: id=%llu offset=%llu fin=%d\n",
+		  stream_id, offset, fin);
+
 	/* Length (optional) */
 	if (has_length) {
 		ret = tquic_decode_varint(ctx->data + ctx->offset,
@@ -1549,6 +1562,8 @@ static int tquic_process_max_data_frame(struct tquic_rx_ctx *ctx)
 	u64 max_data;
 	int ret;
 
+	tquic_dbg("process_max_data: pkt_num=%llu\n", ctx->pkt_num);
+
 	ctx->offset++;  /* Skip frame type */
 
 	ret = tquic_decode_varint(ctx->data + ctx->offset,
@@ -1556,6 +1571,8 @@ static int tquic_process_max_data_frame(struct tquic_rx_ctx *ctx)
 	if (ret < 0)
 		return ret;
 	ctx->offset += ret;
+
+	tquic_dbg("process_max_data: new limit=%llu\n", max_data);
 
 	/* Update remote's max data limit */
 	spin_lock_bh(&ctx->conn->lock);
@@ -1575,6 +1592,9 @@ static int tquic_process_max_stream_data_frame(struct tquic_rx_ctx *ctx)
 	u64 stream_id, max_data;
 	int ret;
 
+	tquic_dbg("process_max_stream_data: pkt_num=%llu\n",
+		  ctx->pkt_num);
+
 	ctx->offset++;  /* Skip frame type */
 
 	/* Stream ID */
@@ -1590,6 +1610,9 @@ static int tquic_process_max_stream_data_frame(struct tquic_rx_ctx *ctx)
 	if (ret < 0)
 		return ret;
 	ctx->offset += ret;
+
+	tquic_dbg("process_max_stream_data: stream=%llu limit=%llu\n",
+		  stream_id, max_data);
 
 	/* Find stream and update limit */
 	/* Simplified: lookup omitted */
@@ -1634,6 +1657,9 @@ static int tquic_process_path_response_frame(struct tquic_rx_ctx *ctx)
 {
 	u8 data[8];
 	int ret;
+
+	tquic_dbg("process_path_response: pkt_num=%llu\n",
+		  ctx->pkt_num);
 
 	ctx->offset++;  /* Skip frame type */
 
@@ -1771,6 +1797,9 @@ static int tquic_process_retire_connection_id_frame(struct tquic_rx_ctx *ctx)
 	u64 seq_num;
 	int ret;
 
+	tquic_dbg("process_retire_cid: pkt_num=%llu\n",
+		  ctx->pkt_num);
+
 	ctx->offset++;  /* Skip frame type */
 
 	ret = tquic_decode_varint(ctx->data + ctx->offset,
@@ -1778,6 +1807,8 @@ static int tquic_process_retire_connection_id_frame(struct tquic_rx_ctx *ctx)
 	if (ret < 0)
 		return ret;
 	ctx->offset += ret;
+
+	tquic_dbg("process_retire_cid: seq_num=%llu\n", seq_num);
 
 	/* Remove CID from active set */
 	/* This would update the CID pool */
@@ -2132,6 +2163,9 @@ static int tquic_process_ack_frequency_frame(struct tquic_rx_ctx *ctx)
 	int ret;
 	u64 frame_type;
 
+	tquic_dbg("process_ack_frequency: pkt_num=%llu\n",
+		  ctx->pkt_num);
+
 	/* Parse frame type */
 	ret = tquic_decode_varint(ctx->data + ctx->offset,
 				  ctx->len - ctx->offset, &frame_type);
@@ -2149,8 +2183,11 @@ static int tquic_process_ack_frequency_frame(struct tquic_rx_ctx *ctx)
 
 	/* Handle the frame */
 	ret = tquic_conn_handle_ack_frequency_frame(ctx->conn, &frame);
-	if (ret < 0)
+	if (ret < 0) {
+		tquic_dbg("process_ack_frequency: handle failed=%d\n",
+			  ret);
 		return ret;
+	}
 
 	ctx->ack_eliciting = true;
 
@@ -2233,6 +2270,8 @@ static bool tquic_is_mp_extended_frame(struct tquic_rx_ctx *ctx)
 				  ctx->len - ctx->offset, &frame_type);
 	if (ret < 0)
 		return false;
+
+	tquic_dbg("is_mp_extended_frame: type=0x%llx\n", frame_type);
 
 	/*
 	 * Check for extended multipath frame types.
@@ -2884,6 +2923,9 @@ static u64 tquic_decode_pkt_num(u8 *buf, int pkt_num_len, u64 largest_pn)
 	u64 expected_pn, pn_win, pn_hwin, pn_mask;
 	u64 candidate_pn;
 	int i;
+
+	tquic_dbg("decode_pkt_num: pn_len=%d largest=%llu\n",
+		  pkt_num_len, largest_pn);
 
 	/* Read truncated packet number */
 	for (i = 0; i < pkt_num_len; i++)

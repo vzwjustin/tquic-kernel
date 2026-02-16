@@ -261,8 +261,10 @@ static void tquic_bonding_weight_work_fn(struct work_struct *work)
 	struct tquic_bonding_ctx *bc =
 		container_of(work, struct tquic_bonding_ctx, weight_work);
 
+	tquic_dbg("bonding_weight_work_fn: deriving weights\n");
 	tquic_bonding_derive_weights(bc);
 	clear_bit(TQUIC_BOND_WEIGHT_UPDATE_PENDING, &bc->async_flags);
+	tquic_dbg("bonding_weight_work_fn: weight update complete\n");
 }
 
 /*
@@ -270,6 +272,7 @@ static void tquic_bonding_weight_work_fn(struct work_struct *work)
  */
 static void tquic_bonding_schedule_weight_update(struct tquic_bonding_ctx *bc)
 {
+	tquic_dbg("schedule_weight_update: scheduling async weight recalc\n");
 	if (tquic_bond_wq && !test_and_set_bit(TQUIC_BOND_WEIGHT_UPDATE_PENDING,
 					       &bc->async_flags)) {
 		queue_work(tquic_bond_wq, &bc->weight_work);
@@ -571,11 +574,16 @@ EXPORT_SYMBOL_GPL(tquic_bonding_update_state);
  */
 enum tquic_bonding_state tquic_bonding_get_state(struct tquic_bonding_ctx *bc)
 {
+	enum tquic_bonding_state state;
+
 	if (!bc)
 		return TQUIC_BOND_SINGLE_PATH;
 
 	/* Read is atomic for enum, no lock needed */
-	return READ_ONCE(bc->state);
+	state = READ_ONCE(bc->state);
+	tquic_dbg("bonding_get_state: state=%s\n",
+		  tquic_bonding_state_names[state]);
+	return state;
 }
 EXPORT_SYMBOL_GPL(tquic_bonding_get_state);
 
@@ -763,6 +771,8 @@ u32 tquic_bonding_get_path_weight(struct tquic_bonding_ctx *bc, u8 path_id)
 	weight = bc->weights.path_weights[path_id];
 	spin_unlock_bh(&bc->state_lock);
 
+	tquic_dbg("bonding_get_path_weight: path_id=%u weight=%u\n",
+		  path_id, weight);
 	return weight;
 }
 EXPORT_SYMBOL_GPL(tquic_bonding_get_path_weight);
@@ -958,6 +968,9 @@ void tquic_bonding_on_ack_received(struct tquic_connection *conn,
 	if (!bc || !path)
 		return;
 
+	tquic_dbg("bonding_on_ack_received: path_id=%u acked_bytes=%llu\n",
+		  path->path_id, acked_bytes);
+
 	/*
 	 * Only forward to scheduler when bonding is active.
 	 * In SINGLE_PATH mode, there's no scheduling decision to inform.
@@ -990,6 +1003,9 @@ void tquic_bonding_on_loss_detected(struct tquic_connection *conn,
 {
 	if (!bc || !path)
 		return;
+
+	tquic_dbg("bonding_on_loss_detected: path_id=%u lost_bytes=%llu\n",
+		  path->path_id, lost_bytes);
 
 	/*
 	 * Only forward to scheduler when bonding is active.
@@ -1032,6 +1048,8 @@ void tquic_bonding_get_info(struct tquic_bonding_ctx *bc,
 			    struct tquic_bonding_info *info)
 {
 	int i;
+
+	tquic_dbg("bonding_get_info: retrieving bonding state snapshot\n");
 
 	if (!bc || !info) {
 		if (info)
@@ -1127,6 +1145,8 @@ u32 tquic_bond_get_path_weight(struct tquic_connection *conn, u32 path_id)
 {
 	struct tquic_bonding_ctx *bc;
 
+	tquic_dbg("bond_get_path_weight: path_id=%u\n", path_id);
+
 	if (!conn)
 		return 0;
 
@@ -1195,10 +1215,14 @@ void tquic_bonding_exit_module(void)
  */
 bool tquic_bonding_has_pending_retx(struct tquic_bonding_ctx *bc)
 {
+	bool pending;
+
 	if (!bc || !bc->failover)
 		return false;
 
-	return tquic_failover_has_pending(bc->failover);
+	pending = tquic_failover_has_pending(bc->failover);
+	tquic_dbg("bonding_has_pending_retx: pending=%d\n", pending);
+	return pending;
 }
 EXPORT_SYMBOL_GPL(tquic_bonding_has_pending_retx);
 

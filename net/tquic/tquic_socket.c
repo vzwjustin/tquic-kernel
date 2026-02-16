@@ -63,6 +63,7 @@ struct lock_class_key tquic_stream_lock_key;
  */
 static void tquic_set_lockdep_class(struct sock *sk, bool is_ipv6)
 {
+	tquic_dbg("tquic_set_lockdep_class: sk=%p is_ipv6=%d\n", sk, is_ipv6);
 	sock_lock_init_class_and_name(
 		sk, is_ipv6 ? "slock-AF_INET6-TQUIC" : "slock-AF_INET-TQUIC",
 		&tquic_slock_keys[is_ipv6],
@@ -243,6 +244,9 @@ int tquic_sock_bind(struct socket *sock, tquic_sockaddr_t *uaddr, int addr_len)
 	struct sock *sk = sock->sk;
 	struct tquic_sock *tsk = tquic_sk(sk);
 
+	tquic_dbg("tquic_sock_bind: family=%d addr_len=%d\n",
+		  addr->sa_family, addr_len);
+
 	if (addr->sa_family == AF_INET) {
 		if (addr_len < sizeof(struct sockaddr_in))
 			return -EINVAL;
@@ -271,6 +275,7 @@ int tquic_sock_bind(struct socket *sock, tquic_sockaddr_t *uaddr, int addr_len)
 
 	release_sock(sk);
 
+	tquic_dbg("tquic_sock_bind: ret=0\n");
 	return 0;
 }
 
@@ -300,6 +305,8 @@ static int tquic_client_encap_recv(struct sock *sk, struct sk_buff *skb)
 {
 	struct sock *quic_sk;
 	struct tquic_sock *tsk;
+
+	tquic_dbg("tquic_client_encap_recv: sk=%p skb_len=%u\n", sk, skb->len);
 
 	quic_sk = READ_ONCE(sk->sk_user_data);
 	if (!quic_sk) {
@@ -517,6 +524,8 @@ static void tquic_listener_work_handler(struct work_struct *work)
 	struct sock *sk = (struct sock *)tsk;
 	struct sk_buff *skb;
 
+	tquic_dbg("tquic_listener_work_handler: processing queued packets\n");
+
 	while ((skb = skb_dequeue(&tsk->listener_queue)) != NULL) {
 		/*
 		 * Process the packet in process context where GFP_KERNEL
@@ -538,6 +547,9 @@ static int tquic_listener_encap_recv(struct sock *sk, struct sk_buff *skb)
 	struct tquic_sock *tsk;
 	struct sock *listener_sk;
 	struct sockaddr_storage local_addr;
+
+	tquic_dbg("tquic_listener_encap_recv: sk=%p skb_len=%u\n",
+		  sk, skb->len);
 
 	/*
 	 * Look up the TQUIC listener socket for this local address.
@@ -906,6 +918,8 @@ int tquic_sock_getname(struct socket *sock, struct sockaddr *addr, int peer)
 	struct sockaddr_storage *saddr;
 	int len;
 
+	tquic_dbg("tquic_sock_getname: peer=%d\n", peer);
+
 	lock_sock(sk);
 
 	if (peer)
@@ -921,6 +935,7 @@ int tquic_sock_getname(struct socket *sock, struct sockaddr *addr, int peer)
 
 	release_sock(sk);
 
+	tquic_dbg("tquic_sock_getname: ret=%d\n", len);
 	return len;
 }
 
@@ -940,6 +955,8 @@ __poll_t tquic_poll(struct file *file, struct socket *sock, poll_table *wait)
 	struct tquic_connection *conn = NULL;
 	struct tquic_stream *stream;
 	__poll_t mask = 0;
+
+	tquic_dbg("tquic_poll: sk_state=%d\n", sk->sk_state);
 
 	sock_poll_wait(file, sock, wait);
 	stream = NULL;
@@ -1001,6 +1018,8 @@ int tquic_sock_shutdown(struct socket *sock, int how)
 	struct tquic_connection *conn = NULL;
 	int ret = 0;
 
+	tquic_dbg("tquic_sock_shutdown: how=%d\n", how);
+
 	lock_sock(sk);
 
 	conn = tquic_sock_conn_get(tsk);
@@ -1015,6 +1034,7 @@ int tquic_sock_shutdown(struct socket *sock, int how)
 	release_sock(sk);
 	if (conn)
 		tquic_conn_put(conn);
+	tquic_dbg("tquic_sock_shutdown: ret=%d\n", ret);
 	return ret;
 }
 
@@ -1025,6 +1045,8 @@ void tquic_close(struct sock *sk, long timeout)
 {
 	struct tquic_sock *tsk = tquic_sk(sk);
 	struct tquic_connection *conn;
+
+	tquic_dbg("tquic_close: sk=%p timeout=%ld\n", sk, timeout);
 
 	lock_sock(sk);
 
@@ -2613,6 +2635,9 @@ int tquic_sendmsg_socket(struct socket *sock, struct msghdr *msg, size_t len)
 static bool tquic_check_datagram_cmsg(struct msghdr *msg)
 {
 	struct cmsghdr *cmsg;
+
+	tquic_dbg("tquic_check_datagram_cmsg: controllen=%zu\n",
+		  msg->msg_controllen);
 
 	if (!msg->msg_control || msg->msg_controllen == 0)
 		return false;

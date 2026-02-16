@@ -465,18 +465,24 @@ EXPORT_SYMBOL_GPL(tquic_handshake_done);
  */
 static int tquic_map_handshake_error(int status)
 {
+	tquic_dbg("tquic_map_handshake_error: status=%d\n", status);
+
 	if (status >= 0)
 		return 0;
 
 	switch (status) {
 	case -ETIMEDOUT:
+		tquic_dbg("tquic_map_handshake_error: mapped to HANDSHAKE_TIMEOUT\n");
 		return -EQUIC_HANDSHAKE_TIMEOUT;
 	case -EACCES:
 	case -EPERM:
+		tquic_dbg("tquic_map_handshake_error: mapped to HANDSHAKE_FAILED (auth)\n");
 		return -EQUIC_HANDSHAKE_FAILED;
 	case -ECONNREFUSED:
+		tquic_dbg("tquic_map_handshake_error: mapped to CONNECTION_REFUSED\n");
 		return -EQUIC_CONNECTION_REFUSED;
 	default:
+		tquic_dbg("tquic_map_handshake_error: mapped to HANDSHAKE_FAILED (default)\n");
 		return -EQUIC_HANDSHAKE_FAILED;
 	}
 }
@@ -989,13 +995,19 @@ EXPORT_SYMBOL_GPL(tquic_handshake_cleanup);
 bool tquic_handshake_in_progress(struct sock *sk)
 {
 	struct tquic_sock *tsk;
+	bool in_progress;
+
+	tquic_dbg("tquic_handshake_in_progress: sk=%p\n", sk);
 
 	if (!sk)
 		return false;
 
 	tsk = tquic_sk(sk);
-	return tsk->handshake_state != NULL &&
-	       !(tsk->flags & TQUIC_F_HANDSHAKE_DONE);
+	in_progress = tsk->handshake_state != NULL &&
+		      !(tsk->flags & TQUIC_F_HANDSHAKE_DONE);
+	tquic_dbg("tquic_handshake_in_progress: result=%d flags=0x%x\n",
+		  in_progress, tsk->flags);
+	return in_progress;
 }
 EXPORT_SYMBOL_GPL(tquic_handshake_in_progress);
 

@@ -203,6 +203,8 @@ static __be16 tquic_udp_alloc_port(struct net *net)
 	u16 port;
 	int attempts = TQUIC_PORT_MAX - TQUIC_PORT_MIN + 1;
 
+	tquic_dbg("tquic_udp_alloc_port: allocating ephemeral port\n");
+
 	spin_lock_bh(&port_alloc.lock);
 
 	while (attempts--) {
@@ -215,11 +217,13 @@ static __be16 tquic_udp_alloc_port(struct net *net)
 		/* Check if already in use */
 		if (!test_and_set_bit(port - TQUIC_PORT_MIN, port_alloc.bitmap)) {
 			spin_unlock_bh(&port_alloc.lock);
+			tquic_dbg("tquic_udp_alloc_port: allocated port=%u\n", port);
 			return htons(port);
 		}
 	}
 
 	spin_unlock_bh(&port_alloc.lock);
+	tquic_dbg("tquic_udp_alloc_port: no ports available\n");
 	return 0;
 }
 
@@ -230,6 +234,8 @@ static __be16 tquic_udp_alloc_port(struct net *net)
 static void tquic_udp_free_port(__be16 port)
 {
 	u16 p = ntohs(port);
+
+	tquic_dbg("tquic_udp_free_port: releasing port=%u\n", p);
 
 	if (p < TQUIC_PORT_MIN || p > TQUIC_PORT_MAX)
 		return;
@@ -250,6 +256,8 @@ static int tquic_udp_reserve_port(__be16 port)
 	u16 p = ntohs(port);
 	int ret = 0;
 
+	tquic_dbg("tquic_udp_reserve_port: reserving port=%u\n", p);
+
 	if (p < TQUIC_PORT_MIN || p > TQUIC_PORT_MAX)
 		return -EINVAL;
 
@@ -258,6 +266,7 @@ static int tquic_udp_reserve_port(__be16 port)
 		ret = -EADDRINUSE;
 	spin_unlock_bh(&port_alloc.lock);
 
+	tquic_dbg("tquic_udp_reserve_port: port=%u ret=%d\n", p, ret);
 	return ret;
 }
 
@@ -297,6 +306,7 @@ static inline u32 tquic_listener_hash_port(__be16 port)
 static inline u32 tquic_listener_hash(const struct sockaddr_storage *addr)
 {
 	__be16 port = 0;
+	u32 hash;
 
 	if (addr->ss_family == AF_INET) {
 		const struct sockaddr_in *sin = (const struct sockaddr_in *)addr;
@@ -306,7 +316,10 @@ static inline u32 tquic_listener_hash(const struct sockaddr_storage *addr)
 		port = sin6->sin6_port;
 	}
 
-	return tquic_listener_hash_port(port);
+	hash = tquic_listener_hash_port(port);
+	tquic_dbg("tquic_listener_hash: family=%u port=%u hash=%u\n",
+		  addr->ss_family, ntohs(port), hash);
+	return hash;
 }
 
 /**
@@ -760,6 +773,9 @@ static void tquic_udp_sock_hash_add(struct tquic_udp_sock *us)
 {
 	u32 key = tquic_udp_sock_hash_key(us->local_port);
 
+	tquic_dbg("tquic_udp_sock_hash_add: port=%u key=%u\n",
+		  ntohs(us->local_port), key);
+
 	spin_lock_bh(&tquic_udp_hash_lock);
 	hash_add(tquic_udp_sock_hash, &us->hash_node, key);
 	spin_unlock_bh(&tquic_udp_hash_lock);
@@ -767,6 +783,9 @@ static void tquic_udp_sock_hash_add(struct tquic_udp_sock *us)
 
 static void tquic_udp_sock_hash_remove(struct tquic_udp_sock *us)
 {
+	tquic_dbg("tquic_udp_sock_hash_remove: port=%u\n",
+		  ntohs(us->local_port));
+
 	spin_lock_bh(&tquic_udp_hash_lock);
 	hash_del(&us->hash_node);
 	spin_unlock_bh(&tquic_udp_hash_lock);

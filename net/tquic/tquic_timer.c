@@ -366,9 +366,16 @@ static u64 tquic_get_pto_duration(struct tquic_recovery_state *recovery,
 static u64 tquic_get_loss_time_threshold(struct tquic_recovery_state *recovery)
 {
 	u64 rtt = max(recovery->latest_rtt, recovery->smoothed_rtt);
+	u64 threshold;
+
+	tquic_dbg("timer:get_loss_time_threshold: latest_rtt=%llu smoothed_rtt=%llu\n",
+		  recovery->latest_rtt, recovery->smoothed_rtt);
 
 	/* 9/8 * max(latest_rtt, smoothed_rtt) */
-	return rtt + rtt / TQUIC_TIME_THRESHOLD_DIVISOR;
+	threshold = rtt + rtt / TQUIC_TIME_THRESHOLD_DIVISOR;
+
+	tquic_dbg("timer:get_loss_time_threshold: result=%llu us\n", threshold);
+	return threshold;
 }
 
 /*
@@ -702,6 +709,8 @@ void tquic_timer_set_idle(struct tquic_timer_state *ts)
 {
 	unsigned long expires, flags;
 
+	tquic_dbg("timer:set_idle: timeout_us=%llu\n", ts->idle_timeout_us);
+
 	spin_lock_irqsave(&ts->lock, flags);
 	if (!ts->active) {
 		spin_unlock_irqrestore(&ts->lock, flags);
@@ -711,6 +720,8 @@ void tquic_timer_set_idle(struct tquic_timer_state *ts)
 	expires = jiffies + usecs_to_jiffies(ts->idle_timeout_us);
 	mod_timer(&ts->idle_timer, expires);
 	spin_unlock_irqrestore(&ts->lock, flags);
+
+	tquic_dbg("timer:set_idle: timer armed, expires=%lu\n", expires);
 }
 EXPORT_SYMBOL_GPL(tquic_timer_set_idle);
 
@@ -765,6 +776,8 @@ void tquic_timer_set_ack_delay(struct tquic_timer_state *ts)
 {
 	unsigned long expires, flags;
 
+	tquic_dbg("timer:set_ack_delay: delay_us=%llu\n", ts->ack_delay_us);
+
 	spin_lock_irqsave(&ts->lock, flags);
 	if (!ts->active) {
 		spin_unlock_irqrestore(&ts->lock, flags);
@@ -775,6 +788,7 @@ void tquic_timer_set_ack_delay(struct tquic_timer_state *ts)
 	if (!timer_pending(&ts->ack_delay_timer)) {
 		expires = jiffies + usecs_to_jiffies(ts->ack_delay_us);
 		mod_timer(&ts->ack_delay_timer, expires);
+		tquic_dbg("timer:set_ack_delay: timer armed\n");
 	}
 	spin_unlock_irqrestore(&ts->lock, flags);
 }
@@ -789,6 +803,8 @@ EXPORT_SYMBOL_GPL(tquic_timer_set_ack_delay);
 void tquic_timer_cancel_ack_delay(struct tquic_timer_state *ts)
 {
 	unsigned long flags;
+
+	tquic_dbg("timer:cancel_ack_delay: cancelling delayed ACK timer\n");
 
 	spin_lock_irqsave(&ts->lock, flags);
 	del_timer(&ts->ack_delay_timer);
@@ -937,6 +953,8 @@ void tquic_timer_update_loss_timer(struct tquic_timer_state *ts)
 	unsigned long expires, flags;
 	int i;
 
+	tquic_dbg("timer:update_loss_timer: scanning pn spaces for loss time\n");
+
 	spin_lock_irqsave(&ts->lock, flags);
 	if (!ts->active) {
 		spin_unlock_irqrestore(&ts->lock, flags);
@@ -955,6 +973,7 @@ void tquic_timer_update_loss_timer(struct tquic_timer_state *ts)
 
 	if (earliest_loss == KTIME_MAX) {
 		del_timer(&ts->loss_timer);
+		tquic_dbg("timer:update_loss_timer: no pending loss, timer cancelled\n");
 	} else {
 		s64 delay_us = ktime_us_delta(earliest_loss, ktime_get());
 
@@ -963,6 +982,8 @@ void tquic_timer_update_loss_timer(struct tquic_timer_state *ts)
 
 		expires = jiffies + usecs_to_jiffies(delay_us);
 		mod_timer(&ts->loss_timer, expires);
+		tquic_dbg("timer:update_loss_timer: armed, delay_us=%lld\n",
+			  delay_us);
 	}
 
 	spin_unlock_irqrestore(&ts->lock, flags);
@@ -1045,6 +1066,8 @@ void tquic_timer_update_pto(struct tquic_timer_state *ts)
 	u64 pto_duration;
 	int i;
 
+	tquic_dbg("timer:update_pto: recalculating PTO timer\n");
+
 	spin_lock_irqsave(&ts->lock, flags);
 	if (!ts->active) {
 		spin_unlock_irqrestore(&ts->lock, flags);
@@ -1104,6 +1127,7 @@ void tquic_timer_update_pto(struct tquic_timer_state *ts)
 	if (earliest_timeout == KTIME_MAX) {
 		/* No ack-eliciting packets in flight */
 		del_timer(&ts->pto_timer);
+		tquic_dbg("timer:update_pto: no ack-eliciting in flight, timer cancelled\n");
 	} else {
 		s64 delay_us = ktime_us_delta(earliest_timeout, now);
 
@@ -1112,6 +1136,8 @@ void tquic_timer_update_pto(struct tquic_timer_state *ts)
 
 		expires = jiffies + usecs_to_jiffies(delay_us);
 		mod_timer(&ts->pto_timer, expires);
+		tquic_dbg("timer:update_pto: armed, delay_us=%lld\n",
+			  delay_us);
 	}
 
 	spin_unlock_irqrestore(&ts->lock, flags);
@@ -1247,6 +1273,8 @@ void tquic_timer_set_keepalive(struct tquic_timer_state *ts, u32 interval_ms)
 {
 	unsigned long expires, flags;
 
+	tquic_dbg("timer:set_keepalive: interval_ms=%u\n", interval_ms);
+
 	spin_lock_irqsave(&ts->lock, flags);
 	if (!ts->active) {
 		spin_unlock_irqrestore(&ts->lock, flags);
@@ -1256,10 +1284,13 @@ void tquic_timer_set_keepalive(struct tquic_timer_state *ts, u32 interval_ms)
 	if (interval_ms == 0) {
 		del_timer(&ts->keepalive_timer);
 		ts->keepalive_interval_us = 0;
+		tquic_dbg("timer:set_keepalive: disabled\n");
 	} else {
 		ts->keepalive_interval_us = (u64)interval_ms * 1000;
 		expires = jiffies + msecs_to_jiffies(interval_ms);
 		mod_timer(&ts->keepalive_timer, expires);
+		tquic_dbg("timer:set_keepalive: armed, interval_us=%llu\n",
+			  ts->keepalive_interval_us);
 	}
 
 	spin_unlock_irqrestore(&ts->lock, flags);
@@ -1274,6 +1305,8 @@ void tquic_timer_reset_keepalive(struct tquic_timer_state *ts)
 {
 	unsigned long expires, flags;
 
+	tquic_dbg("timer:reset_keepalive: resetting on activity\n");
+
 	spin_lock_irqsave(&ts->lock, flags);
 	if (!ts->active || ts->keepalive_interval_us == 0) {
 		spin_unlock_irqrestore(&ts->lock, flags);
@@ -1284,6 +1317,9 @@ void tquic_timer_reset_keepalive(struct tquic_timer_state *ts)
 	mod_timer(&ts->keepalive_timer, expires);
 
 	spin_unlock_irqrestore(&ts->lock, flags);
+
+	tquic_dbg("timer:reset_keepalive: rearmed, interval_us=%llu\n",
+		  ts->keepalive_interval_us);
 }
 EXPORT_SYMBOL_GPL(tquic_timer_reset_keepalive);
 
@@ -1304,6 +1340,8 @@ static enum hrtimer_restart tquic_timer_pacing_expired(struct hrtimer *t)
 	struct tquic_timer_state *ts =
 		container_of(t, struct tquic_timer_state, pacing_timer);
 
+	tquic_dbg("timer:pacing_expired: hrtimer fired\n");
+
 	spin_lock(&ts->lock);
 	if (!ts->active || ts->shutting_down) {
 		spin_unlock(&ts->lock);
@@ -1317,6 +1355,7 @@ static enum hrtimer_restart tquic_timer_pacing_expired(struct hrtimer *t)
 	/* Schedule packet transmission from workqueue context */
 	queue_work(ts->wq, &ts->timer_work);
 
+	tquic_dbg("timer:pacing_expired: queued tx work\n");
 	return HRTIMER_NORESTART;
 }
 
