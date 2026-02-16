@@ -222,6 +222,8 @@ int tquic_mp_sched_get_path(struct tquic_connection *conn,
 	struct tquic_mp_sched_ops *sched;
 	int ret;
 
+	tquic_dbg("sched_reg: get_path flags=0x%x\n", flags);
+
 	if (!conn || !result)
 		return -EINVAL;
 
@@ -246,6 +248,9 @@ void tquic_mp_sched_notify_sent(struct tquic_connection *conn,
 {
 	struct tquic_mp_sched_ops *sched;
 
+	tquic_dbg("sched_reg: notify_sent path=%u bytes=%u\n",
+		  path ? path->path_id : 0, sent_bytes);
+
 	if (!conn || !path)
 		return;
 
@@ -262,6 +267,9 @@ void tquic_mp_sched_notify_ack(struct tquic_connection *conn,
 {
 	struct tquic_mp_sched_ops *sched;
 
+	tquic_dbg("sched_reg: notify_ack path=%u acked=%llu\n",
+		  path ? path->path_id : 0, acked_bytes);
+
 	if (!conn || !path)
 		return;
 
@@ -277,6 +285,9 @@ void tquic_mp_sched_notify_loss(struct tquic_connection *conn,
 				struct tquic_path *path, u64 lost_bytes)
 {
 	struct tquic_mp_sched_ops *sched;
+
+	tquic_dbg("sched_reg: notify_loss path=%u lost=%llu\n",
+		  path ? path->path_id : 0, lost_bytes);
 
 	if (!conn || !path)
 		return;
