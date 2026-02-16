@@ -8,7 +8,7 @@
 
 TQUIC is a Linux kernel module implementing the QUIC protocol (RFC 9000/9001/9002) with multipath support for WAN bonding. Unlike userspace QUIC implementations, TQUIC operates directly in the kernel for maximum performance and tight integration with the networking stack.
 
-**~642k lines of C** across `net/tquic/` implementing the full QUIC/HTTP3 stack with multipath, security, and performance features. Security audit completed February 2026 with all critical issues resolved across 11 rounds of fixes.
+**~642k lines of C** across `net/tquic/` implementing the full QUIC/HTTP3 stack with multipath, security, and performance features. Security audit completed February 2026 with all critical issues resolved across 11 rounds of fixes. **TLS 1.3 handshake verified end-to-end** (client and server both reach COMPLETE state) as of February 2026.
 
 ### Project Structure
 
@@ -25,7 +25,9 @@ The implementation is in `net/tquic/` with key subdirectories:
 
 **Protocol**
 - Full QUIC v1 & v2 (RFC 9000, 9369) - all 28+ frame types, connection lifecycle, packet coalescing
-- TLS 1.3 with AES-GCM, ChaCha20-Poly1305, 0-RTT, key update with rollback
+- TLS 1.3 inline handshake (no userspace TLS daemon) with X.509 certificate verification and RSA-PSS signatures
+- AES-128-GCM encryption at Initial, Handshake, and Application levels with per-level AEAD key selection
+- 0-RTT early data, key update with rollback, ChaCha20-Poly1305 support
 - Loss detection & recovery (RFC 9002) - PTO, persistent congestion, PRR
 - HTTP/3 (RFC 9114) + QPACK header compression (RFC 9204)
 - DATAGRAM extension (RFC 9221), WebTransport, MASQUE (CONNECT-UDP/IP)
@@ -92,6 +94,24 @@ Userspace QUIC implementations pay a heavy cost crossing the kernel boundary on 
   │  ← Direct stack integration, no raw socket overhead              │
   └─────────────────────────────────────────────────────────────────┘
 ```
+
+## Development Status
+
+| Milestone | Status |
+|-----------|--------|
+| Core QUIC framing & packet I/O | Done |
+| Connection & stream management | Done |
+| Inline TLS 1.3 handshake (client + server) | Done |
+| X.509 certificate parsing & RSA-PSS verification | Done |
+| Per-level AEAD encryption (Initial/Handshake/Application) | Done |
+| Multi-record TLS processing in CRYPTO frames | Done |
+| DCID negotiation (RFC 9000 Section 7.2) | Done |
+| Multipath schedulers & congestion control | Done |
+| Security audit (11 rounds) | Done |
+| Post-handshake connection state transition | In Progress |
+| PATH_CHALLENGE/RESPONSE validation | In Progress |
+| Application data exchange | Planned |
+| Interop testing (quiche, msquic, ngtcp2) | Planned |
 
 ## Quick Start
 
