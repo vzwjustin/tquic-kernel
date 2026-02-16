@@ -1927,8 +1927,11 @@ int tquic_server_handshake(struct sock *listener_sk,
 	int ret;
 
 	/* Check accept queue space */
+	pr_warn("tquic_server_handshake: accept_queue_len=%d max=%u\n",
+		atomic_read(&listen_tsk->accept_queue_len),
+		listen_tsk->max_accept_queue);
 	if (atomic_read(&listen_tsk->accept_queue_len) >= listen_tsk->max_accept_queue) {
-		tquic_dbg("accept queue full, refusing connection\n");
+		pr_warn("tquic_server_handshake: accept queue full!\n");
 		return -ECONNREFUSED;
 	}
 
@@ -1988,6 +1991,7 @@ int tquic_server_handshake(struct sock *listener_sk,
 
 	/* Process Initial packet to extract CIDs */
 	ret = tquic_conn_server_accept_init(conn, initial_pkt);
+	pr_warn("tquic_server_handshake: accept_init ret=%d\n", ret);
 		if (ret < 0) {
 			struct tquic_stream *dstream = NULL;
 
@@ -2044,6 +2048,7 @@ int tquic_server_handshake(struct sock *listener_sk,
 
 	/* Initiate server TLS handshake */
 		ret = tquic_start_server_handshake(child_sk, hs);
+		pr_warn("tquic_server_handshake: start_server_handshake ret=%d\n", ret);
 		if (ret < 0) {
 			struct tquic_stream *dstream = NULL;
 

@@ -883,14 +883,18 @@ int tquic_server_accept(struct sock *sk, struct sk_buff *skb,
 		return -EINVAL;
 	}
 
+	pr_warn("tquic_server_accept: parsing Initial fields\n");
 	ret = tquic_server_parse_initial_retry_fields(skb, &version,
 						      &dcid, &dcid_len,
 						      &scid, &scid_len,
 						      &token, &token_len);
 	if (ret) {
+		pr_warn("tquic_server_accept: parse failed: %d\n", ret);
 		kfree_skb(skb);
 		return ret;
 	}
+	pr_warn("tquic_server_accept: parsed ver=0x%08x dcid_len=%u scid_len=%u token_len=%zu\n",
+		version, dcid_len, scid_len, token_len);
 
 	ret = tquic_server_check_retry_required(sk, client_addr,
 						version,
@@ -898,14 +902,18 @@ int tquic_server_accept(struct sock *sk, struct sk_buff *skb,
 						scid, scid_len,
 						token, token_len);
 	if (ret != 0) {
+		pr_warn("tquic_server_accept: retry check returned %d\n", ret);
 		kfree_skb(skb);
 		if (ret > 0)
 			return 0;
 		return ret;
 	}
 
+	pr_warn("tquic_server_accept: proceeding to handshake\n");
 	/* Retry not required (or valid token) - continue full handshake flow. */
-	return tquic_server_handshake(sk, skb, client_addr);
+	ret = tquic_server_handshake(sk, skb, client_addr);
+	pr_warn("tquic_server_accept: handshake returned %d\n", ret);
+	return ret;
 }
 EXPORT_SYMBOL_GPL(tquic_server_accept);
 
