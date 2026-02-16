@@ -2597,7 +2597,44 @@ int tquic_conn_client_connect(struct tquic_connection *conn,
 	/* Generate initial source CID */
 	tquic_cid_gen_random(&conn->scid, TQUIC_DEFAULT_CID_LEN);
 
-	/* Add initial CID to our list */
+	/*
+	 * Register the initial SCID in the global CID lookup table so
+	 * incoming packets (where DCID = our SCID) can find this connection.
+	 * tquic_conn_add_local_cid() generates a NEW CID for NEW_CONNECTION_ID
+	 * frames, which is separate from the initial SCID used in handshake.
+	 */
+	{
+		struct tquic_cid_entry *scid_entry;
+
+		spin_lock_bh(&conn->lock);
+		scid_entry = tquic_cid_entry_create(&conn->scid, 0);
+		if (!scid_entry) {
+			spin_unlock_bh(&conn->lock);
+			kfree(cs);
+			conn->state_machine = NULL;
+			return -ENOMEM;
+		}
+		scid_entry->conn = conn;
+		list_add_tail(&scid_entry->list, &cs->local_cids);
+		ret = rhashtable_insert_fast(&cid_lookup_table,
+					     &scid_entry->hash_node,
+					     cid_hash_params);
+		if (ret) {
+			list_del_init(&scid_entry->list);
+			spin_unlock_bh(&conn->lock);
+			kfree(scid_entry);
+			kfree(cs);
+			conn->state_machine = NULL;
+			return ret;
+		}
+		cs->next_local_cid_seq = 1; /* Next seq after SCID (seq 0) */
+		spin_unlock_bh(&conn->lock);
+		pr_warn("tquic: registered client SCID len=%u id=%*phN\n",
+			conn->scid.len,
+			min_t(int, conn->scid.len, 8), conn->scid.id);
+	}
+
+	/* Add additional CID for migration/rotation */
 	ret = tquic_conn_add_local_cid(conn) ? 0 : -ENOMEM;
 	if (ret < 0) {
 		kfree(cs);
@@ -3061,9 +3098,13 @@ struct tquic_connection *tquic_state_cid_lookup(const struct tquic_cid *cid)
 	if (!cid || cid->len == 0)
 		return NULL;
 
+	pr_warn("tquic_state_cid_lookup: searching len=%u id=%*phN\n",
+		cid->len, min_t(int, cid->len, 8), cid->id);
+
 	rcu_read_lock();
 	entry = rhashtable_lookup_fast(&cid_lookup_table, cid,
 				       cid_hash_params);
+	pr_warn("tquic_state_cid_lookup: entry=%p\n", entry);
 	if (entry && !entry->retired && entry->conn) {
 		if (refcount_inc_not_zero(&entry->conn->refcnt))
 			conn = entry->conn;

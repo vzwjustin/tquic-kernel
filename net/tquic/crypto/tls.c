@@ -379,6 +379,10 @@ static int tquic_derive_keys_versioned(struct tquic_crypto_state *crypto,
 		return ret;
 
 	keys->valid = true;
+	pr_warn("derive_keys: key=%*phN iv=%*phN hp=%*phN\n",
+		min_t(int, keys->key_len, 8), keys->key,
+		min_t(int, keys->iv_len, 8), keys->iv,
+		min_t(int, keys->key_len, 8), keys->hp_key);
 	return 0;
 }
 
@@ -619,11 +623,13 @@ int tquic_encrypt_packet(struct tquic_crypto_state *crypto,
 	if (!keys->valid)
 		return -EINVAL;
 
-	pr_debug("tquic_encrypt: level=%d pkt_num=%llu hdr_len=%zu pay_len=%zu key=%*phN iv=%*phN\n",
-		 crypto->write_level, pkt_num, header_len, payload_len,
-		 4, keys->key, 4, keys->iv);
+	pr_warn("tquic_encrypt: level=%d pkt_num=%llu hdr_len=%zu "
+		"pay_len=%zu key=%*phN iv=%*phN\n",
+		crypto->write_level, pkt_num, header_len, payload_len,
+		min_t(int, keys->key_len, 8), keys->key,
+		min_t(int, keys->iv_len, 8), keys->iv);
 	if (header_len >= 6)
-		pr_debug("tquic_encrypt: hdr[0..5]=%*phN\n",
+		pr_warn("tquic_encrypt: hdr[0..5]=%*phN\n",
 			min_t(int, header_len, 6), header);
 
 	tquic_create_nonce(keys->iv, pkt_num, nonce);
@@ -678,11 +684,13 @@ int tquic_decrypt_packet(struct tquic_crypto_state *crypto,
 	if (payload_len < 16)
 		return -EINVAL;  /* Too short for auth tag */
 
-	pr_debug("tquic_decrypt: level=%d pkt_num=%llu hdr_len=%zu pay_len=%zu key=%*phN iv=%*phN\n",
+	pr_warn("tquic_decrypt: level=%d pkt_num=%llu hdr_len=%zu "
+		"pay_len=%zu key=%*phN iv=%*phN\n",
 		crypto->read_level, pkt_num, header_len, payload_len,
-		4, keys->key, 4, keys->iv);
+		min_t(int, keys->key_len, 8), keys->key,
+		min_t(int, keys->iv_len, 8), keys->iv);
 	if (header_len >= 6)
-		pr_debug("tquic_decrypt: hdr[0..5]=%*phN\n",
+		pr_warn("tquic_decrypt: hdr[0..5]=%*phN\n",
 			min_t(int, header_len, 6), header);
 
 	tquic_create_nonce(keys->iv, pkt_num, nonce);
@@ -1091,6 +1099,13 @@ void tquic_crypto_set_level(struct tquic_crypto_state *crypto,
 	if (!crypto)
 		return;
 
+	pr_warn("crypto_set_level: read=%d->%d write=%d->%d "
+		"read_valid=%d write_valid=%d aead_rx=%p aead_tx=%p\n",
+		crypto->read_level, read_level,
+		crypto->write_level, write_level,
+		crypto->read_keys[read_level].valid,
+		crypto->write_keys[write_level].valid,
+		crypto->aead_rx, crypto->aead_tx);
 	crypto->read_level = read_level;
 	crypto->write_level = write_level;
 

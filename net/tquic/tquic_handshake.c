@@ -1173,7 +1173,11 @@ static int tquic_inline_hs_install_keys(struct sock *sk, int level)
 
 	/*
 	 * Install keys into the connection's crypto state.
-	 * For client: write_secret = client_secret, read_secret = server_secret
+	 * read_secret  = peer's TX secret (what we decrypt)
+	 * write_secret = our TX secret (what we encrypt)
+	 *
+	 * Client: read=server_secret, write=client_secret
+	 * Server: read=client_secret, write=server_secret
 	 */
 	crypto = conn->crypto_state;
 	if (!crypto) {
@@ -1188,13 +1192,26 @@ static int tquic_inline_hs_install_keys(struct sock *sk, int level)
 		conn->crypto_state = crypto;
 	}
 
-	ret = tquic_crypto_install_keys(crypto, level,
-					server_secret, ss_len,
-					client_secret, cs_len);
+	pr_warn("install_keys: level=%d is_server=%d cs_len=%u ss_len=%u\n",
+		level, conn->is_server, cs_len, ss_len);
+	pr_warn("install_keys: client_secret=%*phN\n",
+		min_t(int, cs_len, 16), client_secret);
+	pr_warn("install_keys: server_secret=%*phN\n",
+		min_t(int, ss_len, 16), server_secret);
+
+	if (conn->is_server)
+		ret = tquic_crypto_install_keys(crypto, level,
+						client_secret, cs_len,
+						server_secret, ss_len);
+	else
+		ret = tquic_crypto_install_keys(crypto, level,
+						server_secret, ss_len,
+						client_secret, cs_len);
 	if (ret < 0) {
 		tquic_dbg("failed to install keys for level %d: %d\n",
 			 level, ret);
 	}
+	pr_warn("install_keys: ret=%d\n", ret);
 
 out_zero:
 	memzero_explicit(client_key, sizeof(client_key));
@@ -1302,6 +1319,11 @@ int tquic_inline_hs_recv_crypto(struct sock *sk, const u8 *data, u32 len,
 		}
 		conn->crypto_level = TQUIC_CRYPTO_HANDSHAKE;
 
+		/* Activate Handshake AEAD/HP keys */
+		tquic_crypto_set_level(conn->crypto_state,
+				       TQUIC_ENC_HANDSHAKE,
+				       TQUIC_ENC_HANDSHAKE);
+
 		/* 3. Generate server flight at Handshake level */
 		{
 			u8 *flight_buf;
@@ -1376,10 +1398,14 @@ int tquic_inline_hs_recv_crypto(struct sock *sk, const u8 *data, u32 len,
 	 * After ServerHello: handshake-level keys become available
 	 * After server Finished: application-level keys become available
 	 */
+	pr_warn("inline_hs_recv: state prev=%d new=%d is_server=%d\n",
+		prev_state, new_state, conn->is_server);
 	if (prev_state == TQUIC_HS_WAIT_SH &&
 	    new_state >= TQUIC_HS_WAIT_EE) {
 		/* Install handshake-level keys */
+		pr_warn("inline_hs_recv: CLIENT installing handshake keys\n");
 		ret = tquic_inline_hs_install_keys(sk, TQUIC_CRYPTO_HANDSHAKE);
+		pr_warn("inline_hs_recv: install_keys ret=%d\n", ret);
 		if (ret < 0) {
 			kfree(resp_buf);
 			tquic_inline_hs_abort(sk, ret);
@@ -1387,6 +1413,18 @@ int tquic_inline_hs_recv_crypto(struct sock *sk, const u8 *data, u32 len,
 			return ret;
 		}
 		conn->crypto_level = TQUIC_CRYPTO_HANDSHAKE;
+
+		/*
+		 * Activate the Handshake-level AEAD and HP keys.
+		 * tquic_crypto_install_keys() stores keys at the given level
+		 * but only activates them if level == current read/write level.
+		 * We must call tquic_crypto_set_level() to switch the active
+		 * level, which re-installs AEAD keys and syncs HP context.
+		 */
+		tquic_crypto_set_level(conn->crypto_state,
+				       TQUIC_ENC_HANDSHAKE,
+				       TQUIC_ENC_HANDSHAKE);
+		pr_warn("inline_hs_recv: CLIENT handshake keys activated\n");
 	}
 
 	/* Both client and server: mark complete after all Finished processed */
@@ -1406,6 +1444,11 @@ int tquic_inline_hs_recv_crypto(struct sock *sk, const u8 *data, u32 len,
 
 		/* Apply peer transport parameters */
 		tquic_inline_hs_apply_transport_params(sk);
+
+		/* Activate Application-level AEAD/HP keys */
+		tquic_crypto_set_level(conn->crypto_state,
+				       TQUIC_ENC_APPLICATION,
+				       TQUIC_ENC_APPLICATION);
 
 		/* Mark handshake complete */
 		conn->handshake_complete = true;

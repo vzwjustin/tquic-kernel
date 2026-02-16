@@ -1124,14 +1124,37 @@ static struct sk_buff *tquic_assemble_packet(struct tquic_connection *conn,
 	 */
 	payload_buf = skb_put(skb, max_payload + 16);
 
+	/*
+	 * Determine header type early so we can budget payload size.
+	 * pkt_type -1 means short header (1-RTT); anything else is long.
+	 */
+	is_long_header = (pkt_type != -1);
+
 	/* Initialize frame context */
 	ctx.conn = conn;
 	ctx.path = path;
 	ctx.buf = payload_buf;
-	ctx.buf_len = max_payload;		/* full MTU for frame data */
+	/*
+	 * Limit frame budget so the final packet (header + payload +
+	 * 16-byte AEAD tag) fits within the path MTU.  Initial packets
+	 * are exempt: they have separate padding logic that expands the
+	 * packet to exactly the QUIC minimum of 1200 bytes.
+	 */
+	if (pkt_type == TQUIC_PKT_INITIAL) {
+		ctx.buf_len = max_payload;
+	} else {
+		int hdr_est = is_long_header ? 64 : 32;
+
+		ctx.buf_len = max_payload - hdr_est - 16;
+		if (unlikely(ctx.buf_len < 64))
+			ctx.buf_len = 64;
+	}
 	ctx.offset = 0;
 	ctx.pkt_num = pkt_num;
 	ctx.ack_eliciting = false;
+
+	pr_warn("tquic_assemble: pkt_type=%d mtu=%d max_payload=%d buf_len=%d\n",
+		pkt_type, READ_ONCE(path->mtu), max_payload, ctx.buf_len);
 
 	/* Coalesce frames into payload */
 	ret = tquic_coalesce_frames(conn, &ctx, frames);
@@ -1156,8 +1179,7 @@ static struct sk_buff *tquic_assemble_packet(struct tquic_connection *conn,
 		payload_len = ctx.offset;
 	}
 
-	/* Build header into stack buffer */
-	is_long_header = (pkt_type != -1);	/* -1 means short header */
+	/* Build header into stack buffer (is_long_header set above) */
 
 	/*
 	 * GREASE state: Pass the connection's GREASE state for RFC 9287
@@ -1851,8 +1873,8 @@ int tquic_output_packet(struct tquic_connection *conn,
 		u32 current_mtu = READ_ONCE(path->mtu);
 
 		if (unlikely(skb->len > current_mtu && current_mtu > 0)) {
-			tquic_dbg("output:dropping oversized pkt (%u > MTU %u) on path %u\n",
-				  skb->len, current_mtu, path->path_id);
+			pr_warn("tquic_output: EMSGSIZE pkt=%u mtu=%u path=%u\n",
+				skb->len, current_mtu, path->path_id);
 			kfree_skb(skb);
 			return -EMSGSIZE;
 		}
@@ -2572,58 +2594,75 @@ int tquic_output_flush_crypto(struct tquic_connection *conn)
 		}
 
 		while ((crypto_skb = skb_dequeue(&conn->crypto_buffer[space]))) {
-			LIST_HEAD(frames);
-
-			/* Create a pending CRYPTO frame for assembly */
-			frame = kmem_cache_zalloc(tquic_frame_cache, GFP_ATOMIC);
-			if (!frame) {
-				kfree_skb(crypto_skb);
-				ret = -ENOMEM;
-				goto out_put_path;
-			}
-
-			INIT_LIST_HEAD(&frame->list);
-			frame->type = TQUIC_FRAME_CRYPTO;
-			frame->data_ref = crypto_skb->data;
-			frame->len = crypto_skb->len;
-			frame->offset = crypto_offset;
-			frame->owns_data = false;
-
-			list_add_tail(&frame->list, &frames);
-
-			/* Allocate packet number */
-			pkt_num = atomic64_inc_return(&conn->pkt_num_tx) - 1;
+			u8 *chunk_data = crypto_skb->data;
+			u32 remaining = crypto_skb->len;
+			u32 path_mtu = READ_ONCE(path->mtu);
+			u32 max_chunk;
 
 			/*
-			 * Assemble a proper QUIC packet with:
-			 *   - Long header (version, CIDs, etc.)
-			 *   - CRYPTO frame payload
-			 *   - AEAD encryption
-			 *   - Header protection
-			 *   - Padding (Initial packets padded to 1200 bytes)
+			 * Split large crypto data across multiple QUIC
+			 * packets so each fits within the path MTU.
+			 *
+			 * Per-packet overhead (conservative):
+			 *   Long header:         64 bytes max
+			 *   CRYPTO frame header: 16 bytes max
+			 *   AEAD tag:            16 bytes
+			 *   Total:               96 bytes
 			 */
-			send_skb = tquic_assemble_packet(conn, path, pkt_type,
-							 pkt_num, &frames);
+			if (unlikely(path_mtu < 1200))
+				path_mtu = 1200;
+			max_chunk = path_mtu - 96;
 
-			crypto_offset += crypto_skb->len;
+			while (remaining > 0) {
+				u32 chunk = min_t(u32, remaining, max_chunk);
+				LIST_HEAD(frames);
+
+				frame = kmem_cache_zalloc(tquic_frame_cache,
+							  GFP_ATOMIC);
+				if (!frame) {
+					kfree_skb(crypto_skb);
+					ret = -ENOMEM;
+					goto out_put_path;
+				}
+
+				INIT_LIST_HEAD(&frame->list);
+				frame->type = TQUIC_FRAME_CRYPTO;
+				frame->data_ref = chunk_data;
+				frame->len = chunk;
+				frame->offset = crypto_offset;
+				frame->owns_data = false;
+
+				list_add_tail(&frame->list, &frames);
+
+				pkt_num = atomic64_inc_return(
+						&conn->pkt_num_tx) - 1;
+
+				send_skb = tquic_assemble_packet(
+						conn, path, pkt_type,
+						pkt_num, &frames);
+				if (!send_skb) {
+					kfree_skb(crypto_skb);
+					ret = -ENOMEM;
+					goto out_put_path;
+				}
+
+				ret = tquic_output_packet(conn, path,
+							  send_skb);
+				pr_warn("flush_crypto: chunk %u/%u off=%llu space=%d ret=%d\n",
+					chunk, crypto_skb->len,
+					crypto_offset, space, ret);
+				if (ret < 0) {
+					kfree_skb(crypto_skb);
+					goto out_put_path;
+				}
+
+				chunk_data += chunk;
+				crypto_offset += chunk;
+				remaining -= chunk;
+				packets_sent++;
+			}
+
 			kfree_skb(crypto_skb);
-
-			if (!send_skb) {
-				ret = -ENOMEM;
-				goto out_put_path;
-			}
-
-			/* Send the assembled QUIC packet via UDP tunnel */
-			ret = tquic_output_packet(conn, path, send_skb);
-			pr_warn("tquic_output_flush_crypto: output_packet ret=%d space=%d\n",
-				ret, space);
-			if (ret < 0) {
-				tquic_dbg("failed to send crypto packet: %d\n",
-					  ret);
-				goto out_put_path;
-			}
-
-			packets_sent++;
 		}
 	}
 

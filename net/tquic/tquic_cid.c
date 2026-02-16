@@ -550,11 +550,16 @@ struct tquic_connection *tquic_cid_lookup(const struct tquic_cid *cid)
 	struct tquic_cid_entry *entry;
 	struct tquic_connection *conn = NULL;
 
-	if (!cid_table_initialized || !cid || cid->len == 0)
+	if (!cid_table_initialized || !cid || cid->len == 0) {
+		pr_warn("tquic_cid_lookup: early return (init=%d cid=%p len=%u)\n",
+			cid_table_initialized, cid, cid ? cid->len : 0);
 		return NULL;
+	}
 
 	rcu_read_lock();
 	entry = rhashtable_lookup_fast(&tquic_cid_table, cid, cid_rht_params);
+	pr_warn("tquic_cid_lookup: searching len=%u id=%*phN entry=%p\n",
+		cid->len, min_t(int, cid->len, 8), cid->id, entry);
 	if (entry && entry->state == CID_STATE_ACTIVE) {
 		conn = entry->conn;
 		if (conn && !refcount_inc_not_zero(&conn->refcnt))

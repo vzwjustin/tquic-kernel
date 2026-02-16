@@ -593,6 +593,9 @@ struct tquic_connection *tquic_conn_create(struct tquic_sock *tsk,
 	list_add(&scid_entry->list, &conn->scid_list);
 	tquic_cid_hash_add(scid_entry);
 	conn->next_scid_seq = 1;
+	pr_warn("tquic_conn_create: SCID#1 (cid_table) len=%u id=%*phN is_server=%d\n",
+		conn->scid.len, min_t(int, conn->scid.len, 8),
+		conn->scid.id, is_server);
 
 	/* Allocate and initialize packet number spaces */
 	conn->pn_spaces = kcalloc(TQUIC_PN_SPACE_COUNT,
