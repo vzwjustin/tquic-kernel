@@ -1234,6 +1234,7 @@ u32 tquic_forward_get_mtu(struct tquic_tunnel *tunnel)
 	if (mtu < TQUIC_PMTU_MIN)
 		mtu = TQUIC_PMTU_MIN;
 
+	tquic_dbg("tquic_forward_get_mtu: effective mtu=%u\n", mtu);
 	return mtu;
 }
 EXPORT_SYMBOL_GPL(tquic_forward_get_mtu);
@@ -1486,6 +1487,8 @@ static void __maybe_unused tquic_forward_data_ready(struct sock *sk)
 {
 	struct tquic_tunnel *tunnel;
 
+	tquic_dbg("tquic_forward_data_ready: TCP socket data ready callback\n");
+
 	/*
 	 * Tunnel pointer stored in sk_user_data
 	 */
@@ -1511,6 +1514,8 @@ static void __maybe_unused tquic_forward_data_ready(struct sock *sk)
  */
 int tquic_forward_setup_tcp_callbacks(struct tquic_tunnel *tunnel)
 {
+	tquic_dbg("tquic_forward_setup_tcp_callbacks: installing TCP callbacks\n");
+
 	if (!tunnel)
 		return -EINVAL;
 

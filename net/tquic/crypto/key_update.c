@@ -309,6 +309,9 @@ static bool tquic_ku_should_update(struct tquic_key_update_state *state)
 	ktime_t now;
 	s64 elapsed_ms;
 
+	tquic_dbg("tquic_ku_should_update: packets_sent=%llu pending=%d\n",
+		  state->packets_sent, state->update_pending);
+
 	/* Don't update during handshake */
 	if (!state->handshake_confirmed)
 		return false;
@@ -856,6 +859,9 @@ void tquic_key_update_state_free(struct tquic_key_update_state *state)
 {
 	if (!state)
 		return;
+
+	tquic_dbg("tquic_key_update_state_free: cipher=0x%04x total_updates=%llu\n",
+		  state->cipher_suite, state->total_key_updates);
 
 	if (state->hash_tfm && !IS_ERR(state->hash_tfm))
 		crypto_free_shash(state->hash_tfm);

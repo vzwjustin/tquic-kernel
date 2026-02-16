@@ -232,6 +232,7 @@ bool tquic_fc_conn_can_send(struct tquic_fc_state *fc, u64 bytes)
 	if (unlikely(!fc))
 		return false;
 
+	tquic_dbg("tquic_fc_conn_can_send: bytes=%llu\n", bytes);
 	spin_lock_irqsave(&fc->conn.lock, flags);
 	if (fc->conn.max_data_remote >= fc->conn.data_sent)
 		can_send = bytes <= (fc->conn.max_data_remote - fc->conn.data_sent);
@@ -286,6 +287,7 @@ int tquic_fc_conn_data_sent(struct tquic_fc_state *fc, u64 bytes)
 	if (unlikely(!fc))
 		return -EINVAL;
 
+	tquic_dbg("tquic_fc_conn_data_sent: bytes=%llu\n", bytes);
 	spin_lock_irqsave(&fc->conn.lock, flags);
 
 	/*
@@ -380,6 +382,7 @@ void tquic_fc_conn_data_consumed(struct tquic_fc_state *fc, u64 bytes)
 	if (!fc)
 		return;
 
+	tquic_dbg("tquic_fc_conn_data_consumed: bytes=%llu\n", bytes);
 	spin_lock_irqsave(&fc->conn.lock, flags);
 
 	fc->conn.data_consumed += bytes;
@@ -627,6 +630,8 @@ bool tquic_fc_stream_can_send(struct tquic_fc_stream_state *stream, u64 bytes)
 	if (unlikely(!stream))
 		return false;
 
+	tquic_dbg("tquic_fc_stream_can_send: stream=%llu bytes=%llu\n",
+		  stream->stream_id, bytes);
 	spin_lock_irqsave(&stream->lock, flags);
 	/* Guard against u64 overflow in addition */
 	if (unlikely(check_add_overflow(stream->data_sent, bytes, &sum)))
@@ -679,6 +684,8 @@ int tquic_fc_stream_data_sent(struct tquic_fc_stream_state *stream, u64 bytes)
 	if (!stream)
 		return -EINVAL;
 
+	tquic_dbg("tquic_fc_stream_data_sent: stream=%llu bytes=%llu\n",
+		  stream->stream_id, bytes);
 	spin_lock_irqsave(&stream->lock, flags);
 
 	{
@@ -1065,6 +1072,9 @@ int tquic_fc_bidi_stream_opened(struct tquic_fc_state *fc)
 	if (!fc)
 		return -EINVAL;
 
+	tquic_dbg("tquic_fc_bidi_stream_opened: opened=%u max=%llu\n",
+		  fc->streams.streams_bidi_opened,
+		  fc->streams.max_streams_bidi_remote);
 	spin_lock_irqsave(&fc->streams.lock, flags);
 
 	if (fc->streams.streams_bidi_opened >= fc->streams.max_streams_bidi_remote) {
@@ -1102,6 +1112,9 @@ int tquic_fc_uni_stream_opened(struct tquic_fc_state *fc)
 	if (!fc)
 		return -EINVAL;
 
+	tquic_dbg("tquic_fc_uni_stream_opened: opened=%u max=%llu\n",
+		  fc->streams.streams_uni_opened,
+		  fc->streams.max_streams_uni_remote);
 	spin_lock_irqsave(&fc->streams.lock, flags);
 
 	if (fc->streams.streams_uni_opened >= fc->streams.max_streams_uni_remote) {

@@ -3073,6 +3073,7 @@ void tquic_conn_on_packet_received(struct tquic_connection *conn, size_t bytes)
 {
 	struct tquic_conn_state_machine *cs = tquic_conn_get_cs(conn);
 
+	tquic_conn_dbg(conn, "tquic_conn_on_packet_received: bytes=%zu\n", bytes);
 	if (cs && !cs->address_validated) {
 		cs->bytes_received_unvalidated += bytes;
 		/* Unblock if we were blocked */

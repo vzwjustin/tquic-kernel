@@ -56,6 +56,9 @@ static void tquic_calc_path_quality(struct tquic_path *path,
 	struct tquic_path_stats *stats = &path->stats;
 	u64 score = 0;
 
+	tquic_dbg("calc_path_quality: path=%u state=%d\n",
+		  path->path_id, READ_ONCE(path->state));
+
 	if (!tquic_path_usable(path)) {
 		quality->score = 0;
 		quality->can_send = false;
@@ -143,6 +146,8 @@ static struct tquic_path *tquic_bond_primary_path_locked(struct tquic_connection
 
 	lockdep_assert_held(&conn->paths_lock);
 
+	tquic_dbg("bond_primary_path_locked: resolving primary=%p\n", primary);
+
 	if (!primary)
 		return NULL;
 
@@ -167,6 +172,8 @@ static struct tquic_path *tquic_select_minrtt(struct tquic_bond_state *bond,
 	u32 min_rtt = UINT_MAX;
 
 	lockdep_assert_held(&conn->paths_lock);
+
+	tquic_dbg("select_minrtt: selecting path with minimum RTT\n");
 
 	list_for_each_entry(path, &conn->paths, list) {
 		u32 rtt;
@@ -209,6 +216,8 @@ static struct tquic_path *tquic_select_roundrobin(struct tquic_bond_state *bond,
 	u32 target;
 
 	lockdep_assert_held(&conn->paths_lock);
+
+	tquic_dbg("select_roundrobin: selecting path via round-robin\n");
 
 	/*
 	 * Two-pass selection under conn->paths_lock:
@@ -265,6 +274,8 @@ static struct tquic_path *tquic_select_weighted(struct tquic_bond_state *bond,
 	u32 target, cumulative = 0;
 
 	lockdep_assert_held(&conn->paths_lock);
+
+	tquic_dbg("select_weighted: selecting path via weighted round-robin\n");
 
 	/*
 	 * CF-307: Calculate total weight of active paths with overflow
@@ -326,6 +337,8 @@ static struct tquic_path *tquic_select_aggregate(struct tquic_bond_state *bond,
 
 	lockdep_assert_held(&conn->paths_lock);
 
+	tquic_dbg("select_aggregate: selecting path via capacity aggregation\n");
+
 	list_for_each_entry(path, &conn->paths, list) {
 		if (!tquic_path_usable(path))
 			continue;
@@ -382,6 +395,9 @@ static struct tquic_path *tquic_select_blest(struct tquic_bond_state *bond,
 	u32 pkt_len = skb ? skb->len : 0;
 
 	lockdep_assert_held(&conn->paths_lock);
+
+	tquic_dbg("select_blest: selecting path via BLEST scheduler pkt_len=%u\n",
+		  pkt_len);
 
 	list_for_each_entry(path, &conn->paths, list) {
 		struct tquic_path_quality quality;
@@ -449,6 +465,9 @@ static struct tquic_path *tquic_select_ecf(struct tquic_bond_state *bond,
 	struct tquic_path *path, *best = NULL;
 	u64 min_completion = ULLONG_MAX;
 	u32 pkt_size = skb ? skb->len : 0;
+
+	tquic_dbg("select_ecf: selecting path via ECF scheduler pkt_size=%u\n",
+		  pkt_size);
 
 	list_for_each_entry(path, &conn->paths, list) {
 		u64 completion_time;
@@ -556,6 +575,9 @@ static int __maybe_unused tquic_send_redundant(struct tquic_bond_state *bond,
 	struct tquic_path *path;
 	int sent = 0;
 
+	tquic_dbg("send_redundant: sending on all paths skb_len=%u\n",
+		  skb ? skb->len : 0);
+
 	list_for_each_entry(path, &conn->paths, list) {
 		struct sk_buff *clone;
 
@@ -588,6 +610,9 @@ struct tquic_path *tquic_bond_select_path(struct tquic_connection *conn,
 	struct tquic_path *selected;
 	struct tquic_path *fallback;
 	struct tquic_path *primary;
+
+	tquic_dbg("bond_select_path: mode=%u\n",
+		  bond ? bond->mode : 0);
 
 	/* conn->paths_lock must be held by caller (tquic_select_path) */
 	if (!bond) {
@@ -829,6 +854,9 @@ int tquic_bond_reorder_insert(struct tquic_bond_state *bond,
 {
 	struct sk_buff *pos;
 
+	tquic_dbg("bond_reorder_insert: seq=%llu next_expected=%llu\n",
+		  seq, bond->reorder_next_seq);
+
 	/* Store sequence number in skb cb using put_unaligned for safety */
 	BUILD_BUG_ON(sizeof(u64) > sizeof(skb->cb));
 	put_unaligned(seq, (u64 *)skb->cb);
@@ -874,6 +902,9 @@ int tquic_bond_reorder_deliver(struct tquic_bond_state *bond)
 {
 	struct sk_buff *skb;
 	int delivered = 0;
+
+	tquic_dbg("bond_reorder_deliver: next_seq=%llu\n",
+		  bond->reorder_next_seq);
 
 	spin_lock(&bond->reorder_lock);
 
