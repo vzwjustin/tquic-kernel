@@ -1333,7 +1333,7 @@ void tquic_zero_rtt_cleanup(struct tquic_connection *conn)
 
 	state = conn->zero_rtt_state;
 
-	tquic_dbg("tquic_zero_rtt_cleanup: state=%d early_data_sent=%u\n",
+	tquic_dbg("tquic_zero_rtt_cleanup: state=%d early_data_sent=%llu\n",
 		  state->state, state->early_data_sent);
 
 	/* Free pre-allocated AEAD transform */
@@ -1601,7 +1601,7 @@ bool tquic_zero_rtt_can_send(struct tquic_connection *conn)
 
 	state = conn->zero_rtt_state;
 
-	tquic_dbg("tquic_zero_rtt_can_send: state=%d early_data_sent=%u max=%u\n",
+	tquic_dbg("tquic_zero_rtt_can_send: state=%d early_data_sent=%llu max=%llu\n",
 		  state->state, state->early_data_sent, state->early_data_max);
 
 	if (state->state != TQUIC_0RTT_ATTEMPTING &&
