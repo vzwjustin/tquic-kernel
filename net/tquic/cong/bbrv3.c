@@ -59,6 +59,9 @@ static u64 bbrv3_minmax_running_max(struct bbrv3_minmax *f, u64 now, u64 value)
 	struct bbrv3_minmax_sample *s = f->samples;
 	u64 dt = now - s[0].time;
 
+	tquic_dbg("bbrv3: minmax_max value=%llu cur_max=%llu\n",
+		  value, s[0].value);
+
 	if (value >= s[0].value || dt > f->window_len) {
 		s[0].time = now;
 		s[0].value = value;
@@ -91,6 +94,9 @@ static u64 bbrv3_minmax_running_min(struct bbrv3_minmax *f, u64 now, u64 value)
 {
 	struct bbrv3_minmax_sample *s = f->samples;
 	u64 dt = now - s[0].time;
+
+	tquic_dbg("bbrv3: minmax_min value=%llu cur_min=%llu\n",
+		  value, s[0].value);
 
 	if (value <= s[0].value || dt > f->window_len) {
 		s[0].time = now;
@@ -144,6 +150,9 @@ static u64 bbrv3_inflight(struct bbrv3 *bbr, u32 gain)
 {
 	u64 inflight = bbrv3_bdp(bbr);
 	u32 mss = bbrv3_get_mss(bbr);
+
+	tquic_dbg("bbrv3: inflight bw=%llu min_rtt=%llu gain=%u\n",
+		  bbr->bw, bbr->min_rtt_us, gain);
 
 	inflight = (inflight * gain) >> BBR3_SCALE;
 

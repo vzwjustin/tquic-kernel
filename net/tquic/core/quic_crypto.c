@@ -1259,6 +1259,7 @@ int tquic_crypto_decrypt(struct tquic_crypto_ctx *ctx, struct sk_buff *skb,
 	u32 header_len;
 	int err;
 
+	tquic_dbg("tquic_crypto_decrypt: pn=%llu len=%u\n", pn, skb->len);
 	if (!ctx->rx_aead || !ctx->keys_available)
 		return -EINVAL;
 
