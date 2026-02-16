@@ -4093,33 +4093,49 @@ static int tquic_hs_process_client_hello(struct tquic_handshake *hs,
 		len, msg_len);
 
 	/* Legacy version (0x0303 = TLS 1.2) */
-	if (p + 2 > end)
+	if (p + 2 > end) {
+		pr_warn("tquic_hs: ch: ver overflow\n");
 		return -EINVAL;
+	}
 	p += 2; /* Skip - we check supported_versions ext */
 
 	/* Client random */
-	if (p + TLS_RANDOM_LEN > end)
+	if (p + TLS_RANDOM_LEN > end) {
+		pr_warn("tquic_hs: ch: random overflow\n");
 		return -EINVAL;
+	}
 	memcpy(hs->client_random, p, TLS_RANDOM_LEN);
 	p += TLS_RANDOM_LEN;
 
 	/* Legacy session ID */
-	if (p >= end)
+	if (p >= end) {
+		pr_warn("tquic_hs: ch: no sid byte\n");
 		return -EINVAL;
+	}
 	session_id_len = *p++;
-	if (session_id_len > TLS_SESSION_ID_MAX_LEN || p + session_id_len > end)
+	if (session_id_len > TLS_SESSION_ID_MAX_LEN || p + session_id_len > end) {
+		pr_warn("tquic_hs: ch: sid_len=%u overflow\n", session_id_len);
 		return -EINVAL;
+	}
 	hs->session_id_len = session_id_len;
 	memcpy(hs->session_id, p, session_id_len);
 	p += session_id_len;
 
 	/* Cipher suites */
-	if (p + 2 > end)
+	if (p + 2 > end) {
+		pr_warn("tquic_hs: ch: no cs_len\n");
 		return -EINVAL;
+	}
 	cipher_suites_len = ((u16)p[0] << 8) | p[1];
 	p += 2;
-	if (p + cipher_suites_len > end)
+	if (p + cipher_suites_len > end) {
+		pr_warn("tquic_hs: ch: cs_len=%u overflow\n", cipher_suites_len);
 		return -EINVAL;
+	}
+
+	pr_warn("tquic_hs: ch: sid=%u cs_len=%u offset=%u\n",
+		session_id_len, cipher_suites_len,
+		(u32)(p - data));
 
 	/* Select first supported cipher suite */
 	{
@@ -4154,20 +4170,34 @@ static int tquic_hs_process_client_hello(struct tquic_handshake *hs,
 		hs->hash_len = 32;
 
 	/* Legacy compression methods */
-	if (p >= end)
+	if (p >= end) {
+		pr_warn("tquic_hs: ch: no comp byte\n");
 		return -EINVAL;
+	}
 	comp_len = *p++;
-	if (p + comp_len > end)
+	if (p + comp_len > end) {
+		pr_warn("tquic_hs: ch: comp_len=%u overflow\n", comp_len);
 		return -EINVAL;
+	}
 	p += comp_len;
 
+	pr_warn("tquic_hs: ch: past comp, offset=%u remaining=%u\n",
+		(u32)(p - data), (u32)(end - p));
+
 	/* Extensions length */
-	if (p + 2 > end)
+	if (p + 2 > end) {
+		pr_warn("tquic_hs: ch: no ext_len\n");
 		return -EINVAL;
+	}
 	ext_len = ((u16)p[0] << 8) | p[1];
 	p += 2;
-	if (p + ext_len > end)
+	if (p + ext_len > end) {
+		pr_warn("tquic_hs: ch: ext_len=%u overflow (remaining=%u)\n",
+			ext_len, (u32)(end - p));
 		return -EINVAL;
+	}
+
+	pr_warn("tquic_hs: ch: ext_len=%u, parsing extensions\n", ext_len);
 
 	/* Parse extensions */
 	{
