@@ -3683,6 +3683,9 @@ int tquic_udp_recv(struct sock *sk, struct sk_buff *skb)
 			size_t token_len = 0;
 			size_t offset;
 
+			pr_warn("tquic_udp_recv: Initial pkt detected, len=%zu\n",
+				len);
+
 			/* Parse enough header to extract DCID */
 			if (len >= 6) {
 				dcid_len = data[5];
@@ -3696,6 +3699,8 @@ int tquic_udp_recv(struct sock *sk, struct sk_buff *skb)
 				 */
 				if (dcid_len > TQUIC_MAX_CID_LEN ||
 				    6 + (size_t)dcid_len > len) {
+					pr_warn("tquic_udp_recv: DCID len invalid (%u)\n",
+						dcid_len);
 					kfree_skb(skb);
 					return -EINVAL;
 				}
@@ -3710,6 +3715,7 @@ int tquic_udp_recv(struct sock *sk, struct sk_buff *skb)
 								    data + 6,
 								    dcid_len)) {
 					/* Rate limited - silently drop */
+					pr_warn("tquic_udp_recv: rate limited (token bucket)\n");
 					kfree_skb(skb);
 					return -EBUSY;
 				}
@@ -3753,6 +3759,9 @@ int tquic_udp_recv(struct sock *sk, struct sk_buff *skb)
 					sock_net(sk), &src_addr,
 					data + 6, dcid_len,
 					token, token_len);
+
+				pr_warn("tquic_udp_recv: ratelimit action=%d\n",
+					action);
 
 				switch (action) {
 				case TQUIC_RL_ACCEPT:
