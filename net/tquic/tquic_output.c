@@ -1118,7 +1118,7 @@ static struct sk_buff *tquic_assemble_packet(struct tquic_connection *conn,
 	ctx.conn = conn;
 	ctx.path = path;
 	ctx.buf = payload_buf;
-	ctx.buf_len = max_payload - 128 - 16;	/* room for header + tag */
+	ctx.buf_len = max_payload;		/* full MTU for frame data */
 	ctx.offset = 0;
 	ctx.pkt_num = pkt_num;
 	ctx.ack_eliciting = false;
@@ -1130,9 +1130,17 @@ static struct sk_buff *tquic_assemble_packet(struct tquic_connection *conn,
 
 	payload_len = ctx.offset;
 
-	/* Add padding if needed (minimum packet size) */
-	if (pkt_type == TQUIC_PKT_INITIAL && payload_len < 1200 - 128) {
-		int padding = 1200 - 128 - payload_len;
+	/*
+	 * RFC 9000 Section 14.1: "A client MUST expand the payload of all
+	 * UDP datagrams carrying Initial packets to at least the smallest
+	 * maximum datagram size of 1200 bytes."
+	 *
+	 * Total on-wire: header_len + payload_len + 16 (AEAD tag) >= 1200.
+	 * We don't know header_len yet, so use a conservative 48-byte
+	 * estimate (max Initial header ~52 bytes).
+	 */
+	if (pkt_type == TQUIC_PKT_INITIAL && payload_len < 1200 - 48 - 16) {
+		int padding = 1200 - 48 - 16 - payload_len;
 
 		tquic_gen_padding_frame(&ctx, padding);
 		payload_len = ctx.offset;
@@ -1817,6 +1825,9 @@ int tquic_output_packet(struct tquic_connection *conn,
 
 	if (unlikely(!path || !skb))
 		return -EINVAL;
+
+	pr_warn("tquic_output_packet: path=%p skb_len=%u local=%pISpc remote=%pISpc sk=%p\n",
+		path, skb->len, &path->local_addr, &path->remote_addr, conn ? conn->sk : NULL);
 
 	/*
 	 * Enforce path MTU. If the packet (QUIC payload before UDP/IP headers)
@@ -2508,6 +2519,8 @@ int tquic_output_flush_crypto(struct tquic_connection *conn)
 	int space;
 	u64 crypto_offset;
 	int pkt_type;
+
+	pr_warn("tquic_output_flush_crypto: conn=%p\n", conn);
 	u64 pkt_num;
 	int ret;
 
@@ -2520,8 +2533,13 @@ int tquic_output_flush_crypto(struct tquic_connection *conn)
 		path = NULL;
 	rcu_read_unlock();
 
-	if (!path)
+	if (!path) {
+		pr_warn("tquic_output_flush_crypto: no active path\n");
 		return -ENOENT;
+	}
+
+	pr_warn("tquic_output_flush_crypto: path=%p local=%pISpc remote=%pISpc\n",
+		path, &path->local_addr, &path->remote_addr);
 
 	/*
 	 * Process each PN space's crypto buffer.
@@ -2587,6 +2605,8 @@ int tquic_output_flush_crypto(struct tquic_connection *conn)
 
 			/* Send the assembled QUIC packet via UDP tunnel */
 			ret = tquic_output_packet(conn, path, send_skb);
+			pr_warn("tquic_output_flush_crypto: output_packet ret=%d space=%d\n",
+				ret, space);
 			if (ret < 0) {
 				tquic_dbg("failed to send crypto packet: %d\n",
 					  ret);
