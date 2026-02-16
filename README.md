@@ -110,8 +110,9 @@ Userspace QUIC implementations pay a heavy cost crossing the kernel boundary on 
 | Security audit (11 rounds) | Done |
 | Post-handshake connection state transition | Done |
 | Server accept queue (inline handshake path) | Done |
-| PATH_CHALLENGE/RESPONSE validation | In Progress |
-| Application data exchange | Planned |
+| PATH_CHALLENGE/RESPONSE validation | Done |
+| HANDSHAKE_DONE frame (RFC 9000 Section 19.20) | Done |
+| Application data exchange | In Progress |
 | Interop testing (quiche, msquic, ngtcp2) | Planned |
 
 ## Quick Start

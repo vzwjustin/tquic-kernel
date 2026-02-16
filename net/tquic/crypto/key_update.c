@@ -1255,7 +1255,7 @@ tquic_crypto_get_key_update_state(void *crypto_state)
 	 * Keep this in sync with struct tquic_crypto_state in tls.c.
 	 */
 #define TQUIC_ENC_LEVEL_COUNT	4
-#define TQUIC_SECRET_MAX_LEN_	64
+#define TQUIC_SECRET_MAX_LEN_	48  /* Must match tls.c: SHA-384 */
 #define TQUIC_KEY_MAX_LEN_	32
 #define TQUIC_IV_MAX_LEN_	12
 #define TQUIC_HP_KEY_MAX_LEN_	32

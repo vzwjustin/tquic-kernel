@@ -454,10 +454,22 @@ int tquic_conn_add_path(struct tquic_connection *conn,
 
 	tquic_conn_dbg(conn, "added path %u\n", path->path_id);
 
-	/* Start validation immediately for non-backup paths */
-	if (tquic_path_start_validation(conn, path) < 0)
-		tquic_conn_warn(conn, "failed to start validation for path %u\n",
-				path->path_id);
+	/*
+	 * Start validation for additional paths only.  The initial path
+	 * (path_id == 0) is validated by the TLS handshake itself
+	 * (RFC 9000 Section 8.1): "A server considers a client address
+	 * validated if a Handshake packet is successfully processed."
+	 * Sending PATH_CHALLENGE before Application keys are available
+	 * would fail anyway since it must be in a 1-RTT packet.
+	 */
+	if (path->path_id != 0) {
+		if (tquic_path_start_validation(conn, path) < 0)
+			tquic_conn_warn(conn,
+					"failed to start validation for path %u\n",
+					path->path_id);
+	} else {
+		path->state = TQUIC_PATH_ACTIVE;
+	}
 
 	return path->path_id;
 }

@@ -2408,6 +2408,7 @@ int tquic_send_connection_close(struct tquic_connection *conn,
 				u64 error_code, const char *reason);
 int tquic_output_flush(struct tquic_connection *conn);
 int tquic_output_flush_crypto(struct tquic_connection *conn);
+int tquic_send_handshake_done(struct tquic_connection *conn);
 int tquic_output_packet(struct tquic_connection *conn,
 			struct tquic_path *path, struct sk_buff *skb);
 

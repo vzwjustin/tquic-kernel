@@ -1541,12 +1541,37 @@ int tquic_inline_hs_recv_crypto(struct sock *sk, const u8 *data, u32 len,
 		 * Server post-handshake: transition socket, add to accept
 		 * queue, and mark handshake confirmed (RFC 9001 Section 4.1.2).
 		 */
+		/*
+		 * Propagate the connection-level remote CID (conn->dcid)
+		 * to the active path so that 1-RTT short headers include
+		 * the correct Destination Connection ID.
+		 */
+		{
+			struct tquic_path *act;
+
+			rcu_read_lock();
+			act = rcu_dereference(conn->active_path);
+			if (act && conn->dcid.len > 0) {
+				act->remote_cid.len = conn->dcid.len;
+				memcpy(act->remote_cid.id, conn->dcid.id,
+				       conn->dcid.len);
+			}
+			rcu_read_unlock();
+		}
+
 		if (conn->is_server) {
 			struct sock *listener_sk;
 			struct tquic_sock *listen_tsk;
 
 			inet_sk_set_state(sk, TCP_ESTABLISHED);
 			conn->handshake_confirmed = true;
+
+			/*
+			 * RFC 9000 Section 19.20: Server MUST send
+			 * HANDSHAKE_DONE in a 1-RTT packet to signal
+			 * handshake completion to the client.
+			 */
+			tquic_send_handshake_done(conn);
 
 			/*
 			 * Add child socket to listener's accept queue so

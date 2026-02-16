@@ -564,6 +564,20 @@ static int tquic_gen_path_response_frame(struct tquic_frame_ctx *ctx,
 }
 
 /*
+ * Generate HANDSHAKE_DONE frame (1 byte: type 0x1e)
+ */
+static int tquic_gen_handshake_done_frame(struct tquic_frame_ctx *ctx)
+{
+	if (ctx->offset + 1 > ctx->buf_len)
+		return -ENOSPC;
+
+	ctx->buf[ctx->offset++] = TQUIC_FRAME_HANDSHAKE_DONE;
+	ctx->ack_eliciting = true;
+
+	return 1;
+}
+
+/*
  * Generate NEW_CONNECTION_ID frame
  */
 static int __maybe_unused tquic_gen_new_connection_id_frame(struct tquic_frame_ctx *ctx,
@@ -760,6 +774,10 @@ static int tquic_coalesce_frames(struct tquic_connection *conn,
 
 		case TQUIC_FRAME_PATH_RESPONSE:
 			ret = tquic_gen_path_response_frame(ctx, data_ptr);
+			break;
+
+		case TQUIC_FRAME_HANDSHAKE_DONE:
+			ret = tquic_gen_handshake_done_frame(ctx);
 			break;
 
 		default:
@@ -2575,6 +2593,63 @@ out_clear_flush:
 	return ret;
 }
 EXPORT_SYMBOL_GPL(tquic_output_flush);
+
+/**
+ * tquic_send_handshake_done - Send HANDSHAKE_DONE frame (server only)
+ * @conn: Connection that completed handshake
+ *
+ * RFC 9000 Section 19.20: The server sends HANDSHAKE_DONE in a 1-RTT
+ * packet to signal handshake completion.  Must be called after the
+ * server's TLS handshake reaches COMPLETE state and Application keys
+ * are installed.
+ */
+int tquic_send_handshake_done(struct tquic_connection *conn)
+{
+	struct tquic_pending_frame *frame;
+	struct tquic_path *path;
+	struct sk_buff *skb;
+	LIST_HEAD(frames);
+	u64 pkt_num;
+	int ret;
+
+	if (!conn->is_server)
+		return -EINVAL;
+
+	path = rcu_dereference(conn->active_path);
+	if (!path)
+		return -ENOENT;
+
+	frame = kmem_cache_zalloc(tquic_frame_cache, GFP_ATOMIC);
+	if (!frame)
+		return -ENOMEM;
+
+	frame->type = TQUIC_FRAME_HANDSHAKE_DONE;
+	frame->len = 0;
+	frame->owns_data = false;
+	list_add_tail(&frame->list, &frames);
+
+	pkt_num = atomic64_inc_return(&conn->pkt_num_tx) - 1;
+
+	/* pkt_type -1 = short header (1-RTT) */
+	skb = tquic_assemble_packet(conn, path, -1, pkt_num, &frames);
+	if (!skb) {
+		/* Cleanup on failure */
+		struct tquic_pending_frame *f, *tmp;
+
+		list_for_each_entry_safe(f, tmp, &frames, list) {
+			list_del_init(&f->list);
+			kmem_cache_free(tquic_frame_cache, f);
+		}
+		return -ENOMEM;
+	}
+
+	ret = tquic_output_packet(conn, path, skb);
+	pr_warn("tquic: sent HANDSHAKE_DONE frame (pkt_num=%llu ret=%d)\n",
+		pkt_num, ret);
+
+	return ret;
+}
+EXPORT_SYMBOL_GPL(tquic_send_handshake_done);
 
 /*
  * tquic_output_flush_crypto - Flush pending CRYPTO frame data
