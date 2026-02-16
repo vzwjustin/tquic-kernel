@@ -4164,6 +4164,9 @@ static int tquic_hs_process_client_hello(struct tquic_handshake *hs,
 	p += cipher_suites_len;
 
 	/* Set hash length based on selected cipher suite */
+	pr_warn("tquic_hs: CH: cipher=0x%04x sid_len=%u cs_len=%u offset=%td\n",
+		hs->cipher_suite, session_id_len, cipher_suites_len,
+		p - data);
 	if (hs->cipher_suite == TLS_AES_256_GCM_SHA384)
 		hs->hash_len = 48;
 	else
