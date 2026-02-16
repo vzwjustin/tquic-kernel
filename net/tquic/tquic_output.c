@@ -780,6 +780,13 @@ static int tquic_coalesce_frames(struct tquic_connection *conn,
 			ret = tquic_gen_handshake_done_frame(ctx);
 			break;
 
+		case TQUIC_FRAME_CONNECTION_CLOSE:
+		case TQUIC_FRAME_CONNECTION_CLOSE_APP:
+			/* error_code stored in frame->offset */
+			ret = tquic_gen_connection_close_frame(
+				ctx, frame->offset, NULL, 0);
+			break;
+
 		default:
 			ret = -EINVAL;
 			break;
@@ -2239,6 +2246,83 @@ int tquic_send_ack(struct tquic_connection *conn, struct tquic_path *path,
 }
 EXPORT_SYMBOL_GPL(tquic_send_ack);
 
+/**
+ * tquic_flow_send_max_data - Send MAX_DATA frame to update flow control window
+ * @conn: QUIC connection
+ * @path: Network path to send on
+ * @max_data: New maximum data value to advertise
+ *
+ * Builds a minimal 1-RTT packet containing a MAX_DATA frame and sends it.
+ * Called when the application has consumed enough data to warrant opening
+ * the peer's send window (RFC 9000 Section 4.1).
+ */
+int tquic_flow_send_max_data(struct tquic_connection *conn,
+			     struct tquic_path *path, u64 max_data)
+{
+	struct tquic_frame_ctx ctx;
+	struct sk_buff *skb;
+	u8 buf_stack[128];
+	int ret;
+	u64 pkt_num;
+
+	ctx.conn = conn;
+	ctx.path = path;
+	ctx.buf = buf_stack;
+	ctx.buf_len = sizeof(buf_stack);
+	ctx.offset = 0;
+	ctx.ack_eliciting = true;
+
+	ret = tquic_gen_max_data_frame(&ctx, max_data);
+	if (ret < 0)
+		return ret;
+
+	pkt_num = atomic64_inc_return(&conn->pkt_num_tx) - 1;
+
+	skb = alloc_skb(ctx.offset + TQUIC_MAX_SHORT_HEADER_SIZE + MAX_HEADER,
+			GFP_ATOMIC);
+	if (!skb)
+		return -ENOMEM;
+
+	skb_reserve(skb, MAX_HEADER);
+
+	{
+		u8 header[TQUIC_MAX_SHORT_HEADER_SIZE];
+		bool key_phase = false;
+		int header_len;
+
+		if (conn->crypto_state) {
+			struct tquic_key_update_state *ku_state;
+
+			ku_state = tquic_crypto_get_key_update_state(
+					conn->crypto_state);
+			if (ku_state)
+				key_phase = tquic_key_update_get_phase(
+						ku_state) != 0;
+		}
+
+		header_len = tquic_build_short_header_internal(
+				conn, path, header,
+				TQUIC_MAX_SHORT_HEADER_SIZE,
+				pkt_num, 0, key_phase, false, NULL);
+		if (header_len > 0) {
+			if (skb_tailroom(skb) < header_len) {
+				kfree_skb(skb);
+				return -ENOSPC;
+			}
+			skb_put_data(skb, header, header_len);
+		}
+	}
+
+	if (skb_tailroom(skb) < ctx.offset) {
+		kfree_skb(skb);
+		return -ENOSPC;
+	}
+	skb_put_data(skb, buf_stack, ctx.offset);
+
+	return tquic_output_packet(conn, path, skb);
+}
+EXPORT_SYMBOL_GPL(tquic_flow_send_max_data);
+
 /*
  * tquic_send_path_challenge and tquic_send_path_response are defined
  * in core/connection.c
@@ -2654,6 +2738,72 @@ int tquic_send_handshake_done(struct tquic_connection *conn)
 	return ret;
 }
 EXPORT_SYMBOL_GPL(tquic_send_handshake_done);
+
+/**
+ * tquic_xmit_close - Send a CONNECTION_CLOSE frame
+ * @conn: Connection to close
+ * @error_code: QUIC error code
+ * @is_app: True for application-level close (0x1d), false for transport (0x1c)
+ *
+ * Sends a CONNECTION_CLOSE frame on the active path. Unlike tquic_xmit(),
+ * this function works without a stream and in CLOSING state (RFC 9000
+ * Section 10.2.1 permits sending CONNECTION_CLOSE in closing state).
+ */
+int tquic_xmit_close(struct tquic_connection *conn, u64 error_code,
+		      bool is_app)
+{
+	struct tquic_pending_frame *frame;
+	struct tquic_path *path;
+	struct sk_buff *skb;
+	LIST_HEAD(frames);
+	u64 pkt_num;
+	int ret;
+
+	rcu_read_lock();
+	path = rcu_dereference(conn->active_path);
+	if (!path || !tquic_path_get(path)) {
+		rcu_read_unlock();
+		return -ENOENT;
+	}
+	rcu_read_unlock();
+
+	frame = kmem_cache_zalloc(tquic_frame_cache, GFP_ATOMIC);
+	if (!frame) {
+		tquic_path_put(path);
+		return -ENOMEM;
+	}
+
+	frame->type = is_app ? TQUIC_FRAME_CONNECTION_CLOSE_APP
+			     : TQUIC_FRAME_CONNECTION_CLOSE;
+	frame->offset = error_code; /* Repurpose offset for error code */
+	frame->len = 0;
+	frame->owns_data = false;
+	list_add_tail(&frame->list, &frames);
+
+	pkt_num = atomic64_inc_return(&conn->pkt_num_tx) - 1;
+
+	/* pkt_type -1 = short header (1-RTT) */
+	skb = tquic_assemble_packet(conn, path, -1, pkt_num, &frames);
+	if (!skb) {
+		struct tquic_pending_frame *f, *tmp;
+
+		list_for_each_entry_safe(f, tmp, &frames, list) {
+			list_del_init(&f->list);
+			kmem_cache_free(tquic_frame_cache, f);
+		}
+		tquic_path_put(path);
+		return -ENOMEM;
+	}
+
+	ret = tquic_output_packet(conn, path, skb);
+	tquic_path_put(path);
+
+	pr_debug("tquic: sent CONNECTION_CLOSE (error=%llu ret=%d)\n",
+		 error_code, ret);
+
+	return ret;
+}
+EXPORT_SYMBOL_GPL(tquic_xmit_close);
 
 /*
  * tquic_output_flush_crypto - Flush pending CRYPTO frame data

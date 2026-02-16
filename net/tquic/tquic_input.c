@@ -37,6 +37,7 @@
 #include "tquic_mib.h"
 #include "protocol.h"
 #include "cong/tquic_cong.h"
+#include "crypto/tls.h"
 #include "crypto/key_update.h"
 #include "crypto/zero_rtt.h"
 #include "crypto/header_protection.h"
@@ -2856,10 +2857,20 @@ static int tquic_process_frames(struct tquic_connection *conn,
 		}
 	}
 
-	/* Send ACK if packet was ack-eliciting */
-	if (ctx.ack_eliciting && ret >= 0) {
-		/* Queue ACK to be sent */
-		/* This would be handled by the ACK manager */
+	/*
+	 * RFC 9000 Section 13.2: Send ACK for ack-eliciting packets.
+	 * For now, send ACK immediately for 1-RTT packets.
+	 * TODO: implement delayed ACK timer per RFC 9000 Section 13.2.1.
+	 */
+	if (ctx.ack_eliciting && ret >= 0 &&
+	    enc_level == TQUIC_ENC_APPLICATION) {
+		struct tquic_path *ack_path;
+
+		rcu_read_lock();
+		ack_path = rcu_dereference(conn->active_path);
+		if (ack_path)
+			tquic_send_ack(conn, ack_path, pkt_num, 0, 0);
+		rcu_read_unlock();
 	}
 
 	return ret;

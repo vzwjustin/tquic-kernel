@@ -3243,6 +3243,38 @@ int tquic_recvmsg(struct sock *sk, struct msghdr *msg, size_t len, int flags,
 		conn->stats.rx_bytes += chunk;
 	}
 
+	/*
+	 * Update flow control after application consumes data.
+	 * Send MAX_DATA when half the window has been consumed,
+	 * allowing the peer to send more data (RFC 9000 Section 4.1).
+	 */
+	if (copied > 0) {
+		u64 consumed, threshold, new_max;
+
+		spin_lock_bh(&conn->lock);
+		conn->data_received += copied;
+		consumed = conn->data_received;
+		threshold = conn->max_data_local / 2;
+		spin_unlock_bh(&conn->lock);
+
+		if (consumed > threshold && conn->max_data_local > 0) {
+			struct tquic_path *upd_path;
+
+			new_max = consumed + conn->max_data_local;
+			spin_lock_bh(&conn->lock);
+			conn->max_data_local = new_max;
+			spin_unlock_bh(&conn->lock);
+
+			rcu_read_lock();
+			upd_path = rcu_dereference(conn->active_path);
+			if (upd_path) {
+				tquic_flow_send_max_data(conn, upd_path,
+							 new_max);
+			}
+			rcu_read_unlock();
+		}
+	}
+
 out_release:
 	release_sock(sk);
 	tquic_stream_put(stream);

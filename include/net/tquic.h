@@ -2402,8 +2402,12 @@ u32 tquic_datagram_queue_len(struct tquic_connection *conn);
 
 int tquic_xmit(struct tquic_connection *conn, struct tquic_stream *stream,
 	       const u8 *data, size_t len, bool fin);
+int tquic_xmit_close(struct tquic_connection *conn, u64 error_code,
+		      bool is_app);
 int tquic_send_ack(struct tquic_connection *conn, struct tquic_path *path,
 		   u64 largest_ack, u64 ack_delay, u64 ack_range);
+int tquic_flow_send_max_data(struct tquic_connection *conn,
+			     struct tquic_path *path, u64 max_data);
 int tquic_send_connection_close(struct tquic_connection *conn,
 				u64 error_code, const char *reason);
 int tquic_output_flush(struct tquic_connection *conn);

@@ -2408,23 +2408,9 @@ static void tquic_conn_enter_closing(struct tquic_connection *conn,
 	 */
 	tquic_conn_set_state(conn, TQUIC_CONN_CLOSING, TQUIC_REASON_NORMAL);
 
-	/* Send CONNECTION_CLOSE frame */
-	if (cs) {
-		tquic_send_close_frame(conn);
-	} else {
-		/*
-		 * Server connection without state machine: build and
-		 * send a minimal CONNECTION_CLOSE frame directly.
-		 */
-		u8 frame_buf[64];
-		int frame_len;
-
-		frame_len = tquic_write_connection_close_frame(
-			frame_buf, sizeof(frame_buf),
-			error_code, 0, NULL, 0, false);
-		if (frame_len > 0)
-			tquic_xmit(conn, NULL, frame_buf, frame_len, false);
-	}
+	/* Send CONNECTION_CLOSE frame via dedicated close path */
+	tquic_xmit_close(conn, error_code,
+			 cs ? cs->local_close.is_application : false);
 }
 
 static int tquic_send_close_frame(struct tquic_connection *conn)
