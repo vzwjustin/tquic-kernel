@@ -50,6 +50,7 @@ static u32 tquic_conn_draining_timeout_ms(struct tquic_connection *conn)
 	struct tquic_path *path;
 	u32 timeout_ms;
 
+	tquic_dbg("tquic_conn_draining_timeout_ms: computing drain timeout\n");
 	path = tquic_conn_active_path_get(conn);
 	if (!path)
 		return 3000;
@@ -163,6 +164,7 @@ int tquic_cid_hash_init(void)
 {
 	int err;
 
+	tquic_dbg("tquic_cid_hash_init: initializing CID hash table\n");
 	err = rhashtable_init(&tquic_cid_rht, &tquic_cid_rht_params);
 	if (err)
 		return err;
@@ -267,6 +269,7 @@ static void tquic_cid_entry_rcu_free(struct rcu_head *head)
 
 static void tquic_cid_entry_destroy(struct tquic_cid_entry *entry)
 {
+	tquic_dbg("tquic_cid_entry_destroy: seq=%llu\n", entry->seq_num);
 	list_del_init(&entry->list);
 	tquic_cid_hash_del(entry);
 	/*
@@ -279,6 +282,7 @@ static void tquic_cid_entry_destroy(struct tquic_cid_entry *entry)
 
 static void tquic_pn_space_init(struct tquic_pn_space *pn_space)
 {
+	tquic_dbg("tquic_pn_space_init: initializing packet number space\n");
 	spin_lock_init(&pn_space->lock);
 	pn_space->next_pn = 0;
 	pn_space->largest_acked = 0;

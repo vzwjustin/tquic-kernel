@@ -123,6 +123,9 @@ static void bbr_update_bw(struct tquic_bbr *bbr, u64 bw_sample)
 	u64 max_bw = 0;
 	int i;
 
+	tquic_dbg("bbr: update_bw sample=%llu prev_max=%llu\n",
+		  bw_sample, bbr->bw);
+
 	/* Add to ring buffer */
 	f->bw_filter.bw[f->bw_filter.head] = bw_sample;
 	f->bw_filter.head = (f->bw_filter.head + 1) % 10;

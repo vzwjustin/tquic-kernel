@@ -1003,6 +1003,8 @@ ssize_t tquic_stream_write_zerocopy(struct tquic_stream_manager *mgr,
 				    size_t offset, size_t len, bool fin)
 {
 	size_t copied = 0;
+	tquic_dbg("tquic_stream_write_zerocopy: stream=%llu nr_pages=%d len=%zu\n",
+		  stream->id, nr_pages, len);
 	size_t allowed;
 	int i;
 	size_t page_offset = offset;
@@ -2125,6 +2127,9 @@ void tquic_stream_manager_destroy(struct tquic_stream_manager *mgr)
 
 	if (!mgr)
 		return;
+
+	tquic_dbg("tquic_stream_manager_destroy: stream_count=%u\n",
+		  mgr->stream_count);
 
 	sk = (mgr->conn) ? mgr->conn->sk : NULL;
 

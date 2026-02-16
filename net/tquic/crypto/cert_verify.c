@@ -985,6 +985,9 @@ static void free_name_constraints(struct tquic_name_constraints *nc)
 	if (!nc)
 		return;
 
+	tquic_dbg("free_name_constraints: permitted=%u excluded=%u\n",
+		  nc->nr_permitted, nc->nr_excluded);
+
 	for (i = 0; i < nc->nr_permitted; i++)
 		kfree_sensitive(nc->permitted[i].name);
 	for (i = 0; i < nc->nr_excluded; i++)
@@ -1368,6 +1371,8 @@ static int parse_extensions(struct tquic_x509_cert *cert,
  */
 static int parse_2digit(const char *s, int min_val, int max_val, int *out)
 {
+	tquic_dbg("parse_2digit: min=%d max=%d\n", min_val, max_val);
+
 	if (s[0] < '0' || s[0] > '9' || s[1] < '0' || s[1] > '9')
 		return -EINVAL;
 	*out = (s[0] - '0') * 10 + (s[1] - '0');
@@ -1380,6 +1385,8 @@ static int parse_time(const u8 *data, u32 len, s64 *time_out)
 {
 	int year, month, day, hour, min, sec;
 	int yy;
+
+	tquic_dbg("parse_time: tag=0x%02x len=%u\n", data[0], len);
 
 	if (len < 13)
 		return -EINVAL;
@@ -1869,6 +1876,9 @@ void tquic_x509_cert_free(struct tquic_x509_cert *cert)
 	if (!cert)
 		return;
 
+	tquic_dbg("tquic_x509_cert_free: subject=%s is_ca=%d\n",
+		  cert->subject ? cert->subject : "(null)", cert->is_ca);
+
 	kfree_sensitive(cert->raw);
 	kfree_sensitive(cert->subject);
 	kfree_sensitive(cert->issuer);
@@ -1909,6 +1919,8 @@ void tquic_x509_chain_free(struct tquic_x509_cert *chain)
 {
 	struct tquic_x509_cert *cert = chain;
 
+	tquic_dbg("tquic_x509_chain_free: chain=%p\n", chain);
+
 	while (cert) {
 		struct tquic_x509_cert *next = cert->next;
 		tquic_x509_cert_free(cert);
@@ -1921,6 +1933,9 @@ int tquic_x509_cert_is_valid_time(const struct tquic_x509_cert *cert, u32 tolera
 {
 	ktime_t now = ktime_get_real();
 	s64 now_sec = ktime_to_ns(now) / NSEC_PER_SEC;
+
+	tquic_dbg("tquic_x509_cert_is_valid_time: valid_from=%lld valid_to=%lld tolerance=%u\n",
+		  cert->valid_from, cert->valid_to, tolerance);
 
 	if (now_sec < cert->valid_from - tolerance)
 		return -EKEYREJECTED;
@@ -1955,6 +1970,9 @@ void tquic_cert_verify_ctx_free(struct tquic_cert_verify_ctx *ctx)
 {
 	if (!ctx)
 		return;
+
+	tquic_dbg("tquic_cert_verify_ctx_free: verify_mode=%d\n",
+		  ctx->verify_mode);
 
 	kfree_sensitive(ctx->expected_hostname);
 	kfree_sensitive(ctx->ocsp_stapling);
@@ -2363,6 +2381,8 @@ static int parse_ocsp_cert_status(const u8 *data, u32 len)
 	u32 content_len, total_len, hdr_len;
 	u32 skip;
 	int ret;
+
+	tquic_dbg("parse_ocsp_cert_status: data_len=%u\n", len);
 
 	/* Outer SEQUENCE (OCSPResponse) */
 	ret = asn1_get_tag_length(p, remaining, ASN1_SEQUENCE,

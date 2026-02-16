@@ -878,6 +878,7 @@ EXPORT_SYMBOL_GPL(tquic_cong_set_default);
 struct tquic_cong_ops *tquic_cong_get_default(struct net *net)
 {
 	struct tquic_net *tn;
+	struct tquic_cong_ops *ca;
 
 	if (!net)
 		return NULL;
@@ -886,7 +887,9 @@ struct tquic_cong_ops *tquic_cong_get_default(struct net *net)
 	if (!tn)
 		return NULL;
 
-	return rcu_dereference(tn->default_cong);
+	ca = rcu_dereference(tn->default_cong);
+	tquic_dbg("cc: get_default algo='%s'\n", ca ? ca->name : "(none)");
+	return ca;
 }
 EXPORT_SYMBOL_GPL(tquic_cong_get_default);
 
@@ -900,6 +903,8 @@ const char *tquic_cong_get_default_name(struct net *net)
 {
 	struct tquic_cong_ops *ca;
 	struct tquic_net *tn;
+
+	tquic_dbg("cc: get_default_name\n");
 
 	if (!net)
 		return TQUIC_DEFAULT_CC_NAME;
@@ -947,6 +952,7 @@ bool tquic_cong_is_bbr_preferred(struct net *net, u64 rtt_us)
 {
 	struct tquic_net *tn;
 	u32 threshold_us;
+	bool preferred;
 
 	if (!net)
 		return false;
@@ -959,7 +965,10 @@ bool tquic_cong_is_bbr_preferred(struct net *net, u64 rtt_us)
 	threshold_us = tn->bbr_rtt_threshold_ms * 1000;
 
 	/* BBR is preferred for high-RTT paths */
-	return rtt_us >= threshold_us;
+	preferred = rtt_us >= threshold_us;
+	tquic_dbg("cc: is_bbr_preferred rtt_us=%llu threshold_us=%u preferred=%d\n",
+		  rtt_us, threshold_us, preferred);
+	return preferred;
 }
 EXPORT_SYMBOL_GPL(tquic_cong_is_bbr_preferred);
 
@@ -973,6 +982,8 @@ EXPORT_SYMBOL_GPL(tquic_cong_is_bbr_preferred);
 const char *tquic_cong_select_for_rtt(struct net *net, u64 rtt_us)
 {
 	struct tquic_net *tn;
+
+	tquic_dbg("cc: select_for_rtt rtt_us=%llu\n", rtt_us);
 
 	/* If BBR is preferred for high RTT and threshold is set */
 	if (net) {
