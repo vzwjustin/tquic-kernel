@@ -309,6 +309,9 @@ static bool tquic_ku_should_update(struct tquic_key_update_state *state)
 	ktime_t now;
 	s64 elapsed_ms;
 
+	tquic_dbg("tquic_ku_should_update: packets_sent=%llu pending=%d\n",
+		  state->packets_sent, state->update_pending);
+
 	/* Don't update during handshake */
 	if (!state->handshake_confirmed)
 		return false;
@@ -857,6 +860,9 @@ void tquic_key_update_state_free(struct tquic_key_update_state *state)
 	if (!state)
 		return;
 
+	tquic_dbg("tquic_key_update_state_free: cipher=0x%04x total_updates=%llu\n",
+		  state->cipher_suite, state->total_key_updates);
+
 	if (state->hash_tfm && !IS_ERR(state->hash_tfm))
 		crypto_free_shash(state->hash_tfm);
 
@@ -1038,6 +1044,8 @@ void tquic_key_update_on_packet_received(struct tquic_key_update_state *state)
 
 	spin_lock_irqsave(&state->lock, flags);
 	state->packets_received++;
+	tquic_dbg("tquic_key_update_on_packet_received: packets_received=%llu\n",
+		  state->packets_received);
 	spin_unlock_irqrestore(&state->lock, flags);
 }
 EXPORT_SYMBOL_GPL(tquic_key_update_on_packet_received);
@@ -1192,6 +1200,7 @@ u8 tquic_key_update_get_phase(struct tquic_key_update_state *state)
 	phase = state->current_phase;
 	spin_unlock_irqrestore(&state->lock, flags);
 
+	tquic_dbg("tquic_key_update_get_phase: phase=%u\n", phase);
 	return phase;
 }
 EXPORT_SYMBOL_GPL(tquic_key_update_get_phase);

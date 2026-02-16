@@ -34,6 +34,7 @@
 #include "one_way_delay.h"
 #include "ack.h"
 #include "../tquic_compat.h"
+#include "../tquic_debug.h"
 
 /*
  * RFC 9002 Constants
@@ -164,6 +165,8 @@ static void tquic_ack_set_loss_detection_timer(struct tquic_loss_state *loss,
  */
 static void tquic_rtt_init(struct tquic_rtt_state *rtt)
 {
+	tquic_dbg("tquic_rtt_init: initializing RTT state srtt=%u\n",
+		  TQUIC_INITIAL_RTT_US);
 	rtt->latest_rtt = 0;
 	rtt->smoothed_rtt = TQUIC_INITIAL_RTT_US;
 	rtt->rtt_var = TQUIC_INITIAL_RTT_US / 2;
@@ -251,6 +254,8 @@ static void tquic_rtt_update(struct tquic_rtt_state *rtt,
 static u64 tquic_get_pto(struct tquic_loss_state *loss, int pn_space)
 {
 	struct tquic_rtt_state *rtt = &loss->rtt;
+	tquic_dbg("tquic_get_pto: pn_space=%d srtt=%llu rttvar=%llu\n",
+		  pn_space, rtt->smoothed_rtt, rtt->rtt_var);
 	u64 pto;
 	u64 rtt_var_component;
 
@@ -298,6 +303,9 @@ static void tquic_sent_packet_free(struct tquic_sent_packet *pkt)
 
 	if (!pkt)
 		return;
+
+	tquic_dbg("tquic_sent_packet_free: pn=%llu space=%u bytes=%u\n",
+		  pkt->pn, pkt->pn_space, pkt->sent_bytes);
 
 	/* Free stream data ranges */
 	list_for_each_entry_safe(range, tmp, &pkt->stream_data, list) {
@@ -1129,6 +1137,8 @@ EXPORT_SYMBOL_GPL(tquic_parse_ack_frame);
 static bool tquic_ack_range_contains(const struct tquic_ack_frame *frame, u64 pn)
 {
 	u64 range_start, range_end;
+	tquic_dbg("tquic_ack_range_contains: checking pn=%llu largest=%llu ranges=%u\n",
+		  pn, frame->largest_acked, frame->range_count);
 	u32 i;
 
 	/* Check first range -- validate no underflow */
@@ -1181,6 +1191,8 @@ static bool tquic_ack_range_contains(const struct tquic_ack_frame *frame, u64 pn
 static u64 tquic_get_loss_time_threshold(struct tquic_loss_state *loss)
 {
 	struct tquic_rtt_state *rtt = &loss->rtt;
+	tquic_dbg("tquic_get_loss_time_threshold: srtt=%llu latest=%llu\n",
+		  rtt->smoothed_rtt, rtt->latest_rtt);
 	u64 max_rtt;
 	u64 threshold;
 
@@ -1913,6 +1925,7 @@ void tquic_process_ecn(struct tquic_loss_state *loss,
  */
 void tquic_ecn_mark_sent(struct tquic_loss_state *loss, u8 ecn_codepoint)
 {
+	tquic_dbg("tquic_ecn_mark_sent: codepoint=%u\n", ecn_codepoint);
 	spin_lock_bh(&loss->lock);
 
 	switch (ecn_codepoint) {
@@ -1994,6 +2007,9 @@ void tquic_loss_state_destroy(struct tquic_loss_state *loss)
 	if (!loss)
 		return;
 
+	tquic_dbg("tquic_loss_state_destroy: freeing loss state pkts_in_flight=%u\n",
+		  loss->packets_in_flight);
+
 	del_timer_sync(&loss->loss_detection_timer);
 
 	spin_lock_bh(&loss->lock);
@@ -2029,6 +2045,7 @@ void tquic_loss_state_reset(struct tquic_loss_state *loss)
 	if (!loss)
 		return;
 
+	tquic_dbg("tquic_loss_state_reset: resetting RTT and congestion state\n");
 	spin_lock_bh(&loss->lock);
 
 	/* Reset RTT to initial values */
@@ -2206,6 +2223,7 @@ u64 tquic_get_ack_delay(struct tquic_loss_state *loss)
 	if (!loss)
 		return TQUIC_MAX_ACK_DELAY_US;
 
+	tquic_dbg("tquic_get_ack_delay: querying ACK delay\n");
 	spin_lock_bh(&loss->lock);
 
 	/*

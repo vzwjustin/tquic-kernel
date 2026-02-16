@@ -178,6 +178,8 @@ int tquic_mp_parse_path_abandon(const u8 *buf, size_t len,
 	size_t consumed;
 	int ret;
 
+	tquic_dbg("mp_frame: parse_path_abandon len=%zu\n", len);
+
 	if (!buf || !frame || len < 1)
 		return -EINVAL;
 
@@ -242,6 +244,9 @@ int tquic_mp_write_path_abandon(const struct tquic_mp_path_abandon *frame,
 {
 	size_t offset = 0;
 	int ret;
+
+	tquic_dbg("mp_frame: write_path_abandon path=%llu err=%llu\n",
+		  frame ? frame->path_id : 0, frame ? frame->error_code : 0);
 
 	if (!frame || !buf)
 		return -EINVAL;
@@ -338,6 +343,8 @@ int tquic_mp_parse_new_connection_id(const u8 *buf, size_t len,
 	u64 frame_type;
 	int ret;
 
+	tquic_dbg("mp_frame: parse_new_cid len=%zu\n", len);
+
 	if (!buf || !frame || len < 1)
 		return -EINVAL;
 
@@ -416,6 +423,10 @@ int tquic_mp_write_new_connection_id(const struct tquic_mp_new_connection_id *fr
 {
 	size_t offset = 0;
 	int ret;
+
+	tquic_dbg("mp_frame: write_new_cid path=%llu seq=%llu cid_len=%u\n",
+		  frame ? frame->path_id : 0, frame ? frame->seq_num : 0,
+		  frame ? frame->cid_len : 0);
 
 	if (!frame || !buf)
 		return -EINVAL;
@@ -521,6 +532,8 @@ int tquic_mp_parse_retire_connection_id(const u8 *buf, size_t len,
 	u64 frame_type;
 	int ret;
 
+	tquic_dbg("mp_frame: parse_retire_cid len=%zu\n", len);
+
 	if (!buf || !frame || len < 1)
 		return -EINVAL;
 
@@ -565,6 +578,9 @@ int tquic_mp_write_retire_connection_id(const struct tquic_mp_retire_connection_
 {
 	size_t offset = 0;
 	int ret;
+
+	tquic_dbg("mp_frame: write_retire_cid path=%llu seq=%llu\n",
+		  frame ? frame->path_id : 0, frame ? frame->seq_num : 0);
 
 	if (!frame || !buf)
 		return -EINVAL;
@@ -648,6 +664,9 @@ int tquic_mp_parse_ack(const u8 *buf, size_t len,
 	u64 i;
 	u64 ack_delay_raw;
 	int ret;
+
+	tquic_dbg("mp_frame: parse_ack len=%zu delay_exp=%u\n",
+		  len, ack_delay_exponent);
 
 	if (!buf || !frame || len < 1)
 		return -EINVAL;
@@ -774,6 +793,11 @@ int tquic_mp_write_ack(const struct tquic_mp_ack *frame,
 	u64 ack_delay_encoded;
 	u64 i;
 	int ret;
+
+	tquic_dbg("mp_frame: write_ack path=%llu largest=%llu ranges=%llu ecn=%d\n",
+		  frame ? frame->path_id : 0, frame ? frame->largest_ack : 0,
+		  frame ? frame->ack_range_count : 0,
+		  frame ? frame->has_ecn : 0);
 
 	if (!frame || !buf)
 		return -EINVAL;
@@ -930,6 +954,8 @@ int tquic_mp_parse_path_status(const u8 *buf, size_t len,
 	u64 frame_type;
 	int ret;
 
+	tquic_dbg("mp_frame: parse_path_status len=%zu\n", len);
+
 	if (!buf || !frame || len < 1)
 		return -EINVAL;
 
@@ -988,6 +1014,10 @@ int tquic_mp_write_path_status(const struct tquic_mp_path_status *frame,
 {
 	size_t offset = 0;
 	int ret;
+
+	tquic_dbg("mp_frame: write_path_status path=%llu status=%llu pri=%llu\n",
+		  frame ? frame->path_id : 0, frame ? frame->status : 0,
+		  frame ? frame->priority : 0);
 
 	if (!frame || !buf)
 		return -EINVAL;

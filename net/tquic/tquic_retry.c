@@ -125,6 +125,8 @@ static bool tquic_retry_rate_limit(void)
 	s64 elapsed_ms;
 	u32 refill;
 
+	tquic_dbg("retry:rate_limit: checking token bucket\n");
+
 	spin_lock(&tquic_retry_rate_lock);
 
 	now = ktime_get();
@@ -141,11 +143,14 @@ static bool tquic_retry_rate_limit(void)
 
 	if (tquic_retry_rate_tokens == 0) {
 		spin_unlock(&tquic_retry_rate_lock);
+		tquic_dbg("retry:rate_limit: exhausted, rejecting\n");
 		return false;
 	}
 
 	tquic_retry_rate_tokens--;
 	spin_unlock(&tquic_retry_rate_lock);
+	tquic_dbg("retry:rate_limit: allowed, tokens_remaining=%u\n",
+		  tquic_retry_rate_tokens);
 	return true;
 }
 
@@ -1238,6 +1243,8 @@ void tquic_retry_state_free(struct tquic_retry_state *state)
 {
 	int i;
 
+	tquic_dbg("retry:state_free: releasing retry state\n");
+
 	if (!state)
 		return;
 
@@ -1250,6 +1257,8 @@ void tquic_retry_state_free(struct tquic_retry_state *state)
 	memzero_explicit(state->token_key, sizeof(state->token_key));
 
 	kfree(state);
+
+	tquic_dbg("retry:state_free: retry state freed, pool_size=%u\n", i);
 }
 EXPORT_SYMBOL_GPL(tquic_retry_state_free);
 
@@ -1290,10 +1299,14 @@ EXPORT_SYMBOL_GPL(tquic_retry_rotate_key);
  */
 bool tquic_retry_is_required(struct net *net)
 {
+	bool required;
+
 	/* Future: per-netns override may use @net. */
 	(void)net;
 
-	return tquic_sysctl_get_retry_required() != 0;
+	required = tquic_sysctl_get_retry_required() != 0;
+	tquic_dbg("retry:is_required: result=%d\n", required);
+	return required;
 }
 EXPORT_SYMBOL_GPL(tquic_retry_is_required);
 
@@ -1303,15 +1316,19 @@ EXPORT_SYMBOL_GPL(tquic_retry_is_required);
 u32 tquic_retry_get_token_lifetime(struct net *net)
 {
 	int lifetime;
+	u32 result;
 
 	/* Future: per-netns override may use @net. */
 	(void)net;
 
 	lifetime = tquic_sysctl_get_retry_token_lifetime();
 	if (lifetime <= 0)
-		return TQUIC_RETRY_TOKEN_LIFETIME_DEFAULT;
+		result = TQUIC_RETRY_TOKEN_LIFETIME_DEFAULT;
+	else
+		result = (u32)lifetime;
 
-	return (u32)lifetime;
+	tquic_dbg("retry:get_token_lifetime: lifetime=%u seconds\n", result);
+	return result;
 }
 EXPORT_SYMBOL_GPL(tquic_retry_get_token_lifetime);
 

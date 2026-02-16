@@ -113,6 +113,8 @@ static bool tquic_addr_match(const struct sockaddr_storage *addr,
  */
 static int tquic_token_encode_varint(u8 *buf, size_t buf_len, u64 val)
 {
+	tquic_dbg("token:encode_varint: val=%llu buf_len=%zu\n", val, buf_len);
+
 	if (val <= 63) {
 		if (buf_len < 1)
 			return -ENOSPC;
@@ -155,6 +157,8 @@ static int tquic_token_decode_varint(const u8 *buf, size_t buf_len, u64 *val)
 	u8 prefix;
 	int len;
 
+	tquic_dbg("token:decode_varint: buf_len=%zu\n", buf_len);
+
 	if (buf_len < 1)
 		return -EINVAL;
 
@@ -189,6 +193,7 @@ static int tquic_token_decode_varint(const u8 *buf, size_t buf_len, u64 *val)
 		break;
 	}
 
+	tquic_dbg("token:decode_varint: decoded val=%llu len=%d\n", *val, len);
 	return len;
 }
 
@@ -229,6 +234,8 @@ EXPORT_SYMBOL_GPL(tquic_token_init_key);
 
 int tquic_token_set_key(struct tquic_token_key *key, const u8 *key_data)
 {
+	tquic_dbg("token:set_key: setting new token key\n");
+
 	if (!key || !key_data)
 		return -EINVAL;
 
@@ -239,6 +246,7 @@ int tquic_token_set_key(struct tquic_token_key *key, const u8 *key_data)
 	key->generation = 1;
 	key->valid = true;
 
+	tquic_dbg("token:set_key: key set, generation=%u\n", key->generation);
 	return 0;
 }
 EXPORT_SYMBOL_GPL(tquic_token_set_key);
@@ -268,6 +276,8 @@ EXPORT_SYMBOL_GPL(tquic_token_rotate_key);
 
 void tquic_token_cleanup_key(struct tquic_token_key *key)
 {
+	tquic_dbg("token:cleanup_key: wiping token key material\n");
+
 	if (!key)
 		return;
 
@@ -275,6 +285,8 @@ void tquic_token_cleanup_key(struct tquic_token_key *key)
 	memzero_explicit(key->key, TQUIC_TOKEN_KEY_LEN);
 	key->valid = false;
 	key->generation = 0;
+
+	tquic_dbg("token:cleanup_key: key zeroed and invalidated\n");
 }
 EXPORT_SYMBOL_GPL(tquic_token_cleanup_key);
 
@@ -834,17 +846,23 @@ EXPORT_SYMBOL_GPL(tquic_process_new_token_frame);
 
 void tquic_token_state_init(struct tquic_token_state *state)
 {
+	tquic_dbg("token:state_init: initializing token state\n");
+
 	if (!state)
 		return;
 
 	memset(state, 0, sizeof(*state));
 	spin_lock_init(&state->lock);
+
+	tquic_dbg("token:state_init: token state initialized\n");
 }
 EXPORT_SYMBOL_GPL(tquic_token_state_init);
 
 void tquic_token_state_cleanup(struct tquic_token_state *state)
 {
 	unsigned long flags;
+
+	tquic_dbg("token:state_cleanup: cleaning up token state\n");
 
 	if (!state)
 		return;
@@ -854,6 +872,8 @@ void tquic_token_state_cleanup(struct tquic_token_state *state)
 	state->stored_token_len = 0;
 	state->token_valid = false;
 	spin_unlock_irqrestore(&state->lock, flags);
+
+	tquic_dbg("token:state_cleanup: token state wiped\n");
 }
 EXPORT_SYMBOL_GPL(tquic_token_state_cleanup);
 
@@ -916,6 +936,8 @@ void tquic_token_clear(struct tquic_token_state *state)
 {
 	unsigned long flags;
 
+	tquic_dbg("token:clear: clearing stored token\n");
+
 	if (!state)
 		return;
 
@@ -924,6 +946,8 @@ void tquic_token_clear(struct tquic_token_state *state)
 	memzero_explicit(state->stored_token, sizeof(state->stored_token));
 	state->stored_token_len = 0;
 	spin_unlock_irqrestore(&state->lock, flags);
+
+	tquic_dbg("token:clear: stored token cleared\n");
 }
 EXPORT_SYMBOL_GPL(tquic_token_clear);
 

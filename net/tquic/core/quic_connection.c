@@ -50,6 +50,7 @@ static u32 tquic_conn_draining_timeout_ms(struct tquic_connection *conn)
 	struct tquic_path *path;
 	u32 timeout_ms;
 
+	tquic_dbg("tquic_conn_draining_timeout_ms: computing drain timeout\n");
 	path = tquic_conn_active_path_get(conn);
 	if (!path)
 		return 3000;
@@ -163,6 +164,7 @@ int tquic_cid_hash_init(void)
 {
 	int err;
 
+	tquic_dbg("tquic_cid_hash_init: initializing CID hash table\n");
 	err = rhashtable_init(&tquic_cid_rht, &tquic_cid_rht_params);
 	if (err)
 		return err;
@@ -267,6 +269,7 @@ static void tquic_cid_entry_rcu_free(struct rcu_head *head)
 
 static void tquic_cid_entry_destroy(struct tquic_cid_entry *entry)
 {
+	tquic_dbg("tquic_cid_entry_destroy: seq=%llu\n", entry->seq_num);
 	list_del_init(&entry->list);
 	tquic_cid_hash_del(entry);
 	/*
@@ -279,6 +282,7 @@ static void tquic_cid_entry_destroy(struct tquic_cid_entry *entry)
 
 static void tquic_pn_space_init(struct tquic_pn_space *pn_space)
 {
+	tquic_dbg("tquic_pn_space_init: initializing packet number space\n");
 	spin_lock_init(&pn_space->lock);
 	pn_space->next_pn = 0;
 	pn_space->largest_acked = 0;
@@ -348,6 +352,8 @@ static void tquic_conn_init_flow_control(struct tquic_connection *conn)
 {
 	struct tquic_flow_control *local = &conn->local_fc;
 	struct tquic_flow_control *remote = &conn->remote_fc;
+	tquic_dbg("tquic_conn_init_flow_control: max_data=%llu\n",
+		  conn->local_params.initial_max_data);
 
 	/* Local flow control limits (what we advertise to peer) */
 	local->max_data = conn->local_params.initial_max_data;
@@ -530,6 +536,7 @@ static void tquic_conn_rx_work(struct work_struct *work)
 	struct tquic_connection *conn =
 		container_of(work, struct tquic_connection, rx_work);
 	struct sk_buff *skb;
+	tquic_dbg("tquic_conn_rx_work: processing pending frames\n");
 
 	while ((skb = skb_dequeue(&conn->pending_frames)) != NULL) {
 		tquic_packet_process(conn, skb);
@@ -542,6 +549,7 @@ static void tquic_conn_close_work(struct work_struct *work)
 	struct tquic_connection *conn =
 		container_of(work, struct tquic_connection, close_work);
 	unsigned long flags;
+	tquic_dbg("tquic_conn_close_work: processing connection close\n");
 
 	spin_lock_irqsave(&conn->lock, flags);
 	if (conn->state == TQUIC_CONN_DRAINING) {
@@ -719,6 +727,8 @@ void tquic_conn_destroy(struct tquic_connection *conn)
 
 	if (!conn)
 		return;
+
+	tquic_conn_dbg(conn, "tquic_conn_destroy: tearing down connection\n");
 
 	/*
 	 * SECURITY FIX (CF-119): This function must only be called from
@@ -1001,6 +1011,9 @@ int tquic_conn_retire_cid(struct tquic_connection *conn, u64 seq, bool is_local)
 	struct tquic_cid_entry *entry, *tmp;
 	struct list_head *list;
 
+	tquic_conn_dbg(conn, "tquic_conn_retire_cid: seq=%llu local=%d\n",
+		       seq, is_local);
+
 	/* Select list based on whether it's a local or remote CID */
 	list = is_local ? &conn->scid_list : &conn->dcid_list;
 
@@ -1057,6 +1070,7 @@ static struct tquic_cid *tquic_conn_get_dcid(struct tquic_connection *conn)
 static int tquic_conn_rotate_dcid(struct tquic_connection *conn)
 {
 	struct tquic_cid_entry *entry;
+	tquic_conn_dbg(conn, "tquic_conn_rotate_dcid: rotating destination CID\n");
 
 	list_for_each_entry(entry, &conn->dcid_list, list) {
 		if (entry->state == CID_STATE_ACTIVE) {
@@ -1781,6 +1795,7 @@ EXPORT_SYMBOL(tquic_transport_param_encode);
 int tquic_transport_param_validate(struct tquic_connection *conn)
 {
 	struct tquic_transport_params *params = &conn->remote_params;
+	tquic_conn_dbg(conn, "tquic_transport_param_validate: validating remote params\n");
 
 	/* Validate original_destination_connection_id matches */
 	if (!conn->is_server && params->original_dcid_present) {

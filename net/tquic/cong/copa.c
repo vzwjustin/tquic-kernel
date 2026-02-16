@@ -109,6 +109,9 @@ static void copa_update_standing_rtt(struct tquic_copa *copa, u32 rtt_us,
 	u32 min_rtt = rtt_us;
 	int i, valid_samples = 0;
 
+	tquic_dbg("copa: update_standing_rtt rtt=%u cur_standing=%u\n",
+		  rtt_us, copa->rtt_standing_us);
+
 	/* Add new sample */
 	copa->rtt_samples[copa->rtt_sample_head].rtt_us = rtt_us;
 	copa->rtt_samples[copa->rtt_sample_head].time = now;
@@ -141,6 +144,9 @@ static void copa_update_standing_rtt(struct tquic_copa *copa, u32 rtt_us,
  */
 static void copa_update_min_rtt(struct tquic_copa *copa, u32 rtt_us, ktime_t now)
 {
+	tquic_dbg("copa: update_min_rtt rtt=%u cur_min=%u\n",
+		  rtt_us, copa->rtt_min_us);
+
 	/* Check if min RTT has expired */
 	if (copa->rtt_min_us == 0 ||
 	    ktime_us_delta(now, copa->rtt_min_time) > COPA_RTT_WINDOW_US) {
@@ -162,6 +168,9 @@ static u64 copa_target_cwnd(struct tquic_copa *copa)
 {
 	u64 target;
 	u32 queuing_delay;
+
+	tquic_dbg("copa: target_cwnd rtt_min=%u standing=%u delta=%u cwnd=%llu\n",
+		  copa->rtt_min_us, copa->rtt_standing_us, copa->delta, copa->cwnd);
 
 	if (copa->rtt_min_us == 0 || copa->rtt_standing_us == 0)
 		return copa->cwnd;
@@ -211,6 +220,9 @@ static u64 copa_target_cwnd(struct tquic_copa *copa)
  */
 static void copa_update_velocity(struct tquic_copa *copa, enum copa_direction dir)
 {
+	tquic_dbg("copa: update_velocity dir=%d prev_dir=%d vel=%u count=%u\n",
+		  dir, copa->direction, copa->velocity, copa->direction_count);
+
 	if (dir == copa->direction) {
 		copa->direction_count++;
 		if (copa->direction_count >= 3) {
@@ -426,6 +438,9 @@ static void tquic_copa_on_rtt(void *state, u64 rtt_us)
 
 	if (!copa || rtt_us == 0)
 		return;
+
+	tquic_dbg("copa: on_rtt rtt_us=%llu min=%u standing=%u\n",
+		  rtt_us, copa->rtt_min_us, copa->rtt_standing_us);
 
 	now = ktime_get();
 	copa_update_min_rtt(copa, rtt_us, now);

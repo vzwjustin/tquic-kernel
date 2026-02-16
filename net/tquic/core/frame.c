@@ -1375,6 +1375,8 @@ int tquic_parse_frame(const u8 *buf, size_t buf_len, struct tquic_frame *frame,
 		return -EINVAL;
 
 	type = buf[0];
+	tquic_dbg("tquic_parse_frame: type=0x%02x buf_len=%zu\n",
+		  type, buf_len);
 
 	/* Handle STREAM frames (0x08-0x0f) */
 	if (type >= TQUIC_FRAME_STREAM_BASE && type <= TQUIC_FRAME_STREAM_MAX)
@@ -2032,6 +2034,8 @@ int tquic_write_crypto_frame(u8 *buf, size_t buf_len, u64 offset,
 	size_t remaining = buf_len;
 	int ret;
 
+	tquic_dbg("tquic_write_crypto_frame: offset=%llu len=%llu\n",
+		  offset, data_len);
 	if (remaining < 1)
 		return -ENOSPC;
 	*p++ = TQUIC_FRAME_CRYPTO;
@@ -2120,6 +2124,8 @@ int tquic_write_stream_frame(u8 *buf, size_t buf_len, u64 stream_id,
 			     bool has_offset, bool has_length, bool fin)
 {
 	u8 *p = buf;
+	tquic_dbg("tquic_write_stream_frame: stream=%llu offset=%llu len=%llu fin=%d\n",
+		  stream_id, offset, data_len, fin);
 	size_t remaining = buf_len;
 	u8 type;
 	int ret;
@@ -2536,6 +2542,8 @@ int tquic_write_connection_close_frame(u8 *buf, size_t buf_len, u64 error_code,
 	size_t remaining = buf_len;
 	int ret;
 
+	tquic_dbg("tquic_write_connection_close_frame: error=%llu app=%d\n",
+		  error_code, app_close);
 	if (remaining < 1)
 		return -ENOSPC;
 	*p++ = app_close ? TQUIC_FRAME_CONNECTION_CLOSE_APP :

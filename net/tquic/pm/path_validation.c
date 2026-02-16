@@ -76,6 +76,10 @@ static u32 tquic_validation_timeout_us(struct tquic_path *path)
 {
 	u32 timeout_us;
 
+	tquic_dbg("tquic_validation_timeout_us: path_id=%u srtt=%u rttvar=%u\n",
+		  path->path_id, path->stats.rtt_smoothed,
+		  path->stats.rtt_variance);
+
 	if (path->stats.rtt_smoothed == 0) {
 		/* No RTT measurement yet - use default */
 		timeout_us = TQUIC_VALIDATION_DEFAULT_TIMEOUT_US;
@@ -93,6 +97,9 @@ static u32 tquic_validation_timeout_us(struct tquic_path *path)
 	timeout_us = clamp(timeout_us,
 			   TQUIC_VALIDATION_MIN_TIMEOUT_US,
 			   TQUIC_VALIDATION_MAX_TIMEOUT_US);
+
+	tquic_dbg("tquic_validation_timeout_us: path_id=%u timeout=%u us\n",
+		  path->path_id, timeout_us);
 
 	return timeout_us;
 }

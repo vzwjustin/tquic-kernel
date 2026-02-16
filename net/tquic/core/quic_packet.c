@@ -285,6 +285,8 @@ static int tquic_packet_parse_long(struct sk_buff *skb, u8 first_byte)
 	struct tquic_skb_cb *cb = TQUIC_SKB_CB(skb);
 	u8 *data = skb->data;
 	int offset = 1;
+	tquic_dbg("tquic_packet_parse_long: skb_len=%u first=0x%02x\n",
+		  skb->len, first_byte);
 	u32 version;
 	u8 dcid_len, scid_len;
 	u64 token_len = 0;
@@ -432,6 +434,7 @@ static int tquic_packet_get_length(const u8 *data, int len, int *packet_len)
 {
 	int offset = 1;
 	u8 first_byte;
+	tquic_dbg("tquic_packet_get_length: len=%d\n", len);
 	u8 dcid_len, scid_len;
 	u8 packet_type;
 	u64 token_len = 0;
@@ -547,6 +550,7 @@ int tquic_packet_parse(struct sk_buff *skb, struct tquic_packet *pkt)
 	u8 first_byte;
 	int err;
 
+	tquic_dbg("tquic_packet_parse: skb_len=%u\n", skb->len);
 	if (skb->len < 1)
 		return -EINVAL;
 
@@ -624,6 +628,7 @@ int tquic_packet_process(struct tquic_connection *conn, struct sk_buff *skb)
 	int err;
 	int packet_len;
 	struct sk_buff *next_skb;
+	tquic_dbg("tquic_packet_process: skb_len=%u\n", skb->len);
 	/*
 	 * Max coalesced packet depth: one per encryption level
 	 * (Initial, 0-RTT, Handshake, Application = 4).

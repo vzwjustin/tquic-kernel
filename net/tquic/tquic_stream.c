@@ -68,6 +68,8 @@ static int tquic_stream_wmem_charge(struct sock *sk, struct sk_buff *skb)
 {
 	int amt = skb->truesize;
 
+	tquic_dbg("tquic_stream_wmem_charge: sk=%p amt=%d\n", sk, amt);
+
 	if (!sk)
 		return 0;
 
@@ -98,6 +100,8 @@ static void tquic_stream_wmem_uncharge(struct sock *sk, struct sk_buff *skb)
 {
 	int amt = skb->truesize;
 
+	tquic_dbg("tquic_stream_wmem_uncharge: sk=%p amt=%d\n", sk, amt);
+
 	if (!sk)
 		return;
 
@@ -127,6 +131,8 @@ static void tquic_stream_wmem_uncharge(struct sock *sk, struct sk_buff *skb)
 static int __maybe_unused tquic_stream_rmem_charge(struct sock *sk, struct sk_buff *skb)
 {
 	int amt = skb->truesize;
+
+	tquic_dbg("tquic_stream_rmem_charge: sk=%p amt=%d\n", sk, amt);
 
 	if (!sk)
 		return 0;
@@ -159,6 +165,8 @@ static void tquic_stream_rmem_uncharge(struct sock *sk, struct sk_buff *skb)
 {
 	int amt = skb->truesize;
 
+	tquic_dbg("tquic_stream_rmem_uncharge: sk=%p amt=%d\n", sk, amt);
+
 	if (!sk)
 		return;
 
@@ -183,6 +191,8 @@ static void tquic_stream_purge_wmem(struct sock *sk, struct sk_buff_head *queue)
 {
 	struct sk_buff *skb;
 
+	tquic_dbg("tquic_stream_purge_wmem: sk=%p\n", sk);
+
 	while ((skb = skb_dequeue(queue)) != NULL) {
 		tquic_stream_wmem_uncharge(sk, skb);
 		kfree_skb(skb);
@@ -200,6 +210,8 @@ static void tquic_stream_purge_rmem(struct sock *sk, struct sk_buff_head *queue)
 {
 	struct sk_buff *skb;
 
+	tquic_dbg("tquic_stream_purge_rmem: sk=%p\n", sk);
+
 	while ((skb = skb_dequeue(queue)) != NULL) {
 		tquic_stream_rmem_uncharge(sk, skb);
 		kfree_skb(skb);
@@ -215,6 +227,8 @@ static int tquic_sock_map_fd(struct socket *sock, int flags)
 	struct file *newfile;
 	int fd = get_unused_fd_flags(flags);
 
+	tquic_dbg("tquic_sock_map_fd: flags=0x%x\n", flags);
+
 	if (unlikely(fd < 0)) {
 		sock_release(sock);
 		return fd;
@@ -227,6 +241,7 @@ static int tquic_sock_map_fd(struct socket *sock, int flags)
 	}
 
 	fd_install(fd, newfile);
+	tquic_dbg("tquic_sock_map_fd: ret=%d\n", fd);
 	return fd;
 }
 
@@ -731,6 +746,8 @@ static int tquic_stream_release(struct socket *sock)
 	struct tquic_stream_sock *ss;
 	struct tquic_stream *stream;
 	struct tquic_connection *conn;
+
+	tquic_dbg("tquic_stream_release: sock=%p\n", sock);
 
 	if (!sock->sk)
 		return 0;
@@ -1269,6 +1286,8 @@ static __poll_t tquic_stream_poll(struct file *file, struct socket *sock,
  */
 void tquic_stream_wake(struct tquic_stream *stream)
 {
+	tquic_dbg("tquic_stream_wake: stream=%p id=%llu\n",
+		  stream, stream ? stream->id : 0);
 	/*
 	 * The wait queue is in the tquic_stream_sock associated with
 	 * the stream. Since we don't have a direct link from stream
@@ -1372,6 +1391,9 @@ EXPORT_SYMBOL_GPL(tquic_wait_for_stream_credit);
  */
 static bool tquic_stream_is_http3_request(struct tquic_stream *stream)
 {
+	tquic_dbg("tquic_stream_is_http3_request: id=%llu\n",
+		  stream ? stream->id : 0);
+
 	if (!stream)
 		return false;
 
@@ -1435,6 +1457,9 @@ static int tquic_stream_validate_http3_id(struct tquic_connection *conn,
  */
 static int tquic_stream_get_http3_type(struct tquic_stream *stream)
 {
+	tquic_dbg("tquic_stream_get_http3_type: id=%llu\n",
+		  stream ? stream->id : 0);
+
 	if (!stream)
 		return -1;
 
@@ -1507,6 +1532,9 @@ static bool tquic_stream_is_http3_critical(struct tquic_stream *stream)
 {
 	int type;
 
+	tquic_dbg("tquic_stream_is_http3_critical: id=%llu\n",
+		  stream ? stream->id : 0);
+
 	if (!stream)
 		return false;
 
@@ -1573,12 +1601,19 @@ static struct tquic_stream *tquic_stream_lookup_by_id(
  */
 static int tquic_stream_count_by_type(struct tquic_connection *conn, u8 type)
 {
+	int count;
+
+	tquic_dbg("tquic_stream_count_by_type: type=%u\n", type);
+
 	if (!conn)
 		return 0;
 
 	/* Use O(1) per-type counters for known HTTP/3 stream types */
-	if (type < TQUIC_H3_STREAM_TYPE_MAX)
-		return conn->h3_uni_stream_count[type];
+	if (type < TQUIC_H3_STREAM_TYPE_MAX) {
+		count = conn->h3_uni_stream_count[type];
+		tquic_dbg("tquic_stream_count_by_type: ret=%d\n", count);
+		return count;
+	}
 
 	return 0;
 }

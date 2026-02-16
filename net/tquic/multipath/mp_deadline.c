@@ -212,6 +212,9 @@ static void mp_deadline_update_path_capabilities(
 	u64 rtt_us, bandwidth, jitter_us;
 	u64 min_deadline_us;
 
+	tquic_dbg("mp_deadline: update_capabilities path=%u\n",
+		  path ? path->path_id : 0);
+
 	if (!coord || !path)
 		return;
 
@@ -307,6 +310,9 @@ mp_deadline_select_best_path(struct tquic_mp_deadline_coordinator *coord,
 	struct tquic_mp_deadline_path_info *info;
 	struct tquic_path *best_path = NULL;
 	u64 best_score = ULLONG_MAX;
+
+	tquic_dbg("mp_deadline: select_best deadline=%llu data_len=%zu\n",
+		  deadline_us, data_len);
 
 	if (!coord || !coord->enabled)
 		return NULL;
@@ -490,6 +496,11 @@ mp_deadline_record_quality_sample(struct tquic_mp_deadline_coordinator *coord,
 {
 	struct tquic_mp_deadline_path_info *info;
 
+	tquic_dbg("mp_deadline: quality_sample path=%u rtt=%llu jitter=%llu\n",
+		  path ? path->path_id : 0,
+		  sample ? sample->rtt_us : 0,
+		  sample ? sample->jitter_us : 0);
+
 	if (!coord || !path || !sample)
 		return;
 
@@ -532,6 +543,9 @@ void mp_deadline_record_delivery(struct tquic_mp_deadline_coordinator *coord,
 				 u64 delivery_time_us)
 {
 	struct tquic_mp_deadline_path_info *info;
+
+	tquic_dbg("mp_deadline: record_delivery path=%u met=%d time=%llu\n",
+		  path ? path->path_id : 0, deadline_met, delivery_time_us);
 
 	if (!coord || !path)
 		return;
@@ -588,6 +602,8 @@ tquic_mp_deadline_coordinator_create(struct tquic_connection *conn)
 	struct tquic_mp_deadline_coordinator *coord;
 	struct tquic_path *path;
 
+	tquic_dbg("mp_deadline: coordinator_create\n");
+
 	if (!conn)
 		return NULL;
 
@@ -619,6 +635,9 @@ void tquic_mp_deadline_coordinator_destroy(
 	struct tquic_mp_deadline_coordinator *coord)
 {
 	struct tquic_mp_deadline_path_info *info, *tmp;
+
+	tquic_dbg("mp_deadline: coordinator_destroy num_paths=%u\n",
+		  coord ? coord->num_paths : 0);
 
 	if (!coord)
 		return;
@@ -671,6 +690,9 @@ void tquic_mp_deadline_path_removed(struct tquic_mp_deadline_coordinator *coord,
 {
 	struct tquic_mp_deadline_path_info *info;
 
+	tquic_dbg("mp_deadline: path_removed path=%u\n",
+		  path ? path->path_id : 0);
+
 	if (!coord || !path)
 		return;
 
@@ -697,6 +719,9 @@ void tquic_mp_deadline_path_state_changed(
 	struct tquic_mp_deadline_coordinator *coord, struct tquic_path *path,
 	enum tquic_path_state new_state)
 {
+	tquic_dbg("mp_deadline: path_state_changed path=%u state=%d\n",
+		  path ? path->path_id : 0, new_state);
+
 	if (!coord || !path)
 		return;
 

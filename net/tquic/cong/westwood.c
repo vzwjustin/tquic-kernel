@@ -97,6 +97,9 @@ static u64 westwood_filter_bw(struct tquic_westwood *ww, u64 bw_sample)
 {
 	u64 filtered;
 
+	tquic_dbg("westwood: filter_bw sample=%llu cur_est=%llu count=%u\n",
+		  bw_sample, ww->bw_est, ww->bw_sample_count);
+
 	if (ww->bw_sample_count == 0) {
 		/* First sample */
 		ww->bw_est = bw_sample;
@@ -131,6 +134,9 @@ static void westwood_update_bw(struct tquic_westwood *ww, u64 bytes_acked,
 {
 	s64 delta_us;
 	u64 bw_sample;
+
+	tquic_dbg("westwood: update_bw bytes=%llu bw_est=%llu\n",
+		  bytes_acked, ww->bw_est);
 
 	if (ww->bw_sample_start == 0) {
 		/* First ACK - initialize */
@@ -167,6 +173,9 @@ static void westwood_update_bw(struct tquic_westwood *ww, u64 bytes_acked,
 static u64 westwood_bdp(struct tquic_westwood *ww)
 {
 	u64 bdp;
+
+	tquic_dbg("westwood: bdp bw_est=%llu rtt_min=%u\n",
+		  ww->bw_est, ww->rtt_min_us);
 
 	if (ww->bw_est == 0 || ww->rtt_min_us == 0)
 		return ww->cwnd;
@@ -335,6 +344,9 @@ static void tquic_westwood_on_rtt(void *state, u64 rtt_us)
 	if (!ww || rtt_us == 0)
 		return;
 
+	tquic_dbg("westwood: on_rtt rtt_us=%llu min=%u\n",
+		  rtt_us, ww->rtt_min_us);
+
 	ww->rtt_current_us = rtt_us;
 
 	/* Update minimum RTT */
@@ -443,6 +455,9 @@ static u64 tquic_westwood_get_pacing_rate(void *state)
 
 	if (!ww || ww->rtt_min_us == 0)
 		return 0;
+
+	tquic_dbg("westwood: get_pacing_rate cwnd=%llu rtt_min=%u\n",
+		  ww->cwnd, ww->rtt_min_us);
 
 	/*
 	 * Pacing rate based on cwnd / RTT

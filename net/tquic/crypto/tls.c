@@ -560,6 +560,8 @@ static void tquic_create_nonce(const u8 *iv, u64 pkt_num, u8 *nonce)
 {
 	int i;
 
+	tquic_dbg("tquic_create_nonce: pkt_num=%llu\n", pkt_num);
+
 	memcpy(nonce, iv, 12);
 
 	/* XOR packet number into nonce */
@@ -1005,6 +1007,9 @@ void tquic_crypto_cleanup(struct tquic_crypto_state *crypto)
 	if (!crypto)
 		return;
 
+	tquic_dbg("tquic_crypto_cleanup: cipher_suite=0x%04x\n",
+		  crypto->cipher_suite);
+
 	/* Free header protection context */
 	if (crypto->hp_ctx)
 		tquic_hp_ctx_free(crypto->hp_ctx);
@@ -1035,6 +1040,7 @@ void tquic_crypto_cleanup(struct tquic_crypto_state *crypto)
 		kfree_sensitive(crypto->transcript);
 	}
 
+	tquic_dbg("tquic_crypto_cleanup: done\n");
 	kfree_sensitive(crypto);
 }
 EXPORT_SYMBOL_GPL(tquic_crypto_cleanup);

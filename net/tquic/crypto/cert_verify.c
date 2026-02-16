@@ -141,6 +141,8 @@ static struct proc_dir_entry *tquic_cert_proc_dir;
 
 static int asn1_get_length(const u8 *data, u32 data_len, u32 *len, u32 *hdr_len)
 {
+	tquic_dbg("asn1_get_length: data_len=%u\n", data_len);
+
 	if (data_len < 1)
 		return -EINVAL;
 
@@ -412,6 +414,8 @@ static const char *get_hash_algo_name(enum tquic_hash_algo algo)
  */
 static u32 __maybe_unused get_hash_digest_size(enum tquic_hash_algo algo)
 {
+	tquic_dbg("get_hash_digest_size: algo=%d\n", algo);
+
 	switch (algo) {
 	case TQUIC_HASH_SHA256:
 		return 32;
@@ -431,6 +435,8 @@ static int parse_dn_extract_cn(const u8 *data, u32 len, char **cn, u32 *cn_len)
 {
 	const u8 *p = data;
 	const u8 *end = data + len;
+
+	tquic_dbg("parse_dn_extract_cn: dn_len=%u\n", len);
 
 	while (p < end) {
 		u32 set_content_len, set_total_len;
@@ -666,6 +672,8 @@ static int parse_key_usage(const u8 *data, u32 len, u16 *key_usage)
 	u32 content_len, total_len;
 	int ret;
 
+	tquic_dbg("parse_key_usage: data_len=%u\n", len);
+
 	ret = asn1_get_tag_length(data, len, ASN1_BIT_STRING,
 				  &content_len, &total_len);
 	if (ret < 0)
@@ -697,6 +705,8 @@ static int parse_ext_key_usage(const u8 *data, u32 len, u32 *ext_key_usage)
 	const u8 *end = data + len;
 	u32 content_len, total_len;
 	int ret;
+
+	tquic_dbg("parse_ext_key_usage: data_len=%u\n", len);
 
 	/* SEQUENCE of OIDs */
 	ret = asn1_get_tag_length(p, end - p, ASN1_SEQUENCE,
@@ -974,6 +984,9 @@ static void free_name_constraints(struct tquic_name_constraints *nc)
 
 	if (!nc)
 		return;
+
+	tquic_dbg("free_name_constraints: permitted=%u excluded=%u\n",
+		  nc->nr_permitted, nc->nr_excluded);
 
 	for (i = 0; i < nc->nr_permitted; i++)
 		kfree_sensitive(nc->permitted[i].name);
@@ -1358,6 +1371,8 @@ static int parse_extensions(struct tquic_x509_cert *cert,
  */
 static int parse_2digit(const char *s, int min_val, int max_val, int *out)
 {
+	tquic_dbg("parse_2digit: min=%d max=%d\n", min_val, max_val);
+
 	if (s[0] < '0' || s[0] > '9' || s[1] < '0' || s[1] > '9')
 		return -EINVAL;
 	*out = (s[0] - '0') * 10 + (s[1] - '0');
@@ -1370,6 +1385,8 @@ static int parse_time(const u8 *data, u32 len, s64 *time_out)
 {
 	int year, month, day, hour, min, sec;
 	int yy;
+
+	tquic_dbg("parse_time: tag=0x%02x len=%u\n", data[0], len);
 
 	if (len < 13)
 		return -EINVAL;
@@ -1859,6 +1876,9 @@ void tquic_x509_cert_free(struct tquic_x509_cert *cert)
 	if (!cert)
 		return;
 
+	tquic_dbg("tquic_x509_cert_free: subject=%s is_ca=%d\n",
+		  cert->subject ? cert->subject : "(null)", cert->is_ca);
+
 	kfree_sensitive(cert->raw);
 	kfree_sensitive(cert->subject);
 	kfree_sensitive(cert->issuer);
@@ -1899,6 +1919,8 @@ void tquic_x509_chain_free(struct tquic_x509_cert *chain)
 {
 	struct tquic_x509_cert *cert = chain;
 
+	tquic_dbg("tquic_x509_chain_free: chain=%p\n", chain);
+
 	while (cert) {
 		struct tquic_x509_cert *next = cert->next;
 		tquic_x509_cert_free(cert);
@@ -1911,6 +1933,9 @@ int tquic_x509_cert_is_valid_time(const struct tquic_x509_cert *cert, u32 tolera
 {
 	ktime_t now = ktime_get_real();
 	s64 now_sec = ktime_to_ns(now) / NSEC_PER_SEC;
+
+	tquic_dbg("tquic_x509_cert_is_valid_time: valid_from=%lld valid_to=%lld tolerance=%u\n",
+		  cert->valid_from, cert->valid_to, tolerance);
 
 	if (now_sec < cert->valid_from - tolerance)
 		return -EKEYREJECTED;
@@ -1945,6 +1970,9 @@ void tquic_cert_verify_ctx_free(struct tquic_cert_verify_ctx *ctx)
 {
 	if (!ctx)
 		return;
+
+	tquic_dbg("tquic_cert_verify_ctx_free: verify_mode=%d\n",
+		  ctx->verify_mode);
 
 	kfree_sensitive(ctx->expected_hostname);
 	kfree_sensitive(ctx->ocsp_stapling);
@@ -2353,6 +2381,8 @@ static int parse_ocsp_cert_status(const u8 *data, u32 len)
 	u32 content_len, total_len, hdr_len;
 	u32 skip;
 	int ret;
+
+	tquic_dbg("parse_ocsp_cert_status: data_len=%u\n", len);
 
 	/* Outer SEQUENCE (OCSPResponse) */
 	ret = asn1_get_tag_length(p, remaining, ASN1_SEQUENCE,
@@ -3330,6 +3360,8 @@ EXPORT_SYMBOL_GPL(tquic_sysctl_get_cert_time_tolerance);
 
 static int tquic_proc_trusted_cas_show(struct seq_file *m, void *v)
 {
+	tquic_dbg("tquic_proc_trusted_cas_show: reading procfs\n");
+
 #ifdef CONFIG_SYSTEM_DATA_VERIFICATION
 	mutex_lock(&keyring_mutex);
 
@@ -3408,6 +3440,9 @@ static int tquic_proc_verify_config_show(struct seq_file *m, void *v)
 {
 	static const char *mode_names[] = { "none", "optional", "required" };
 	static const char *revoke_names[] = { "none", "soft_fail", "hard_fail" };
+
+	tquic_dbg("tquic_proc_verify_config_show: mode=%d hostname_check=%d\n",
+		  tquic_cert_verify_mode, tquic_cert_verify_hostname_enabled);
 
 	seq_printf(m, "verify_mode: %s\n",
 		   mode_names[tquic_cert_verify_mode]);

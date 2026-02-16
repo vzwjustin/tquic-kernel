@@ -59,6 +59,8 @@ static void *prague_init(struct tquic_path *path)
 	struct prague *p;
 	u32 initial_cwnd;
 
+	tquic_dbg("prague: init path=%u\n", path->path_id);
+
 	p = kzalloc(sizeof(*p), GFP_KERNEL);
 	if (!p)
 		return NULL;
@@ -142,6 +144,9 @@ static u32 prague_rtt_scale(struct prague *p, u32 value)
 	u32 rtt_us;
 	u32 scaled;
 
+	tquic_dbg("prague: rtt_scale value=%u rtt=%u target=%u\n",
+		  value, p->rtt_us, p->params.rtt_target_us);
+
 	if (!p->params.rtt_scaling || p->rtt_us == 0)
 		return value;
 
@@ -171,6 +176,9 @@ static void prague_update_alpha(struct prague *p, u64 acked_bytes, u64 ce_bytes)
 {
 	u32 ce_ratio;
 	u32 new_alpha;
+
+	tquic_dbg("prague: update_alpha acked=%llu ce=%llu cur_alpha=%u\n",
+		  acked_bytes, ce_bytes, p->alpha);
 
 	if (acked_bytes == 0)
 		return;
@@ -236,6 +244,9 @@ static void prague_on_ack(void *cong_data, u64 bytes_acked, u64 rtt_us)
 	if (!p)
 		return;
 
+	tquic_dbg("prague: on_ack bytes=%llu rtt=%llu cwnd=%u state=%d\n",
+		  bytes_acked, rtt_us, p->cwnd, p->state);
+
 	mss = prague_get_mss(p);
 
 	/* Update RTT estimates */
@@ -287,6 +298,9 @@ static void prague_on_ecn(void *cong_data, u64 ecn_ce_count)
 
 	if (!p || ecn_ce_count == 0)
 		return;
+
+	tquic_dbg("prague: on_ecn ce_count=%llu alpha=%u cwnd=%u\n",
+		  ecn_ce_count, p->alpha, p->cwnd);
 
 	mss = prague_get_mss(p);
 

@@ -224,6 +224,9 @@ static void mp_rtt_update(struct tquic_mp_rtt_state *rtt,
 {
 	u64 adjusted_rtt;
 
+	tquic_dbg("mp_ack: rtt_update sample=%llu ack_delay=%llu srtt=%llu\n",
+		  rtt_sample, ack_delay, rtt->smoothed_rtt);
+
 	/* Update minimum RTT */
 	if (rtt_sample < rtt->min_rtt)
 		rtt->min_rtt = rtt_sample;
@@ -320,6 +323,9 @@ static void mp_sent_packet_insert(struct tquic_mp_path_ack_state *state,
 {
 	int space = pkt->pn_space;
 	struct rb_node **link = &state->sent_packets[space].rb_node;
+
+	tquic_dbg("mp_ack: sent_insert pn=%llu space=%d bytes=%u\n",
+		  pkt->pn, space, pkt->sent_bytes);
 	struct rb_node *parent = NULL;
 	struct tquic_mp_sent_packet *entry;
 
@@ -353,6 +359,8 @@ static void mp_sent_packet_remove(struct tquic_mp_path_ack_state *state,
 				  struct tquic_mp_sent_packet *pkt)
 {
 	int space = pkt->pn_space;
+
+	tquic_dbg("mp_ack: sent_remove pn=%llu space=%d\n", pkt->pn, space);
 
 	if (!RB_EMPTY_NODE(&pkt->node)) {
 		rb_erase(&pkt->node, &state->sent_packets[space]);
@@ -442,6 +450,9 @@ struct tquic_mp_path_ack_state *tquic_mp_ack_state_create(struct tquic_path *pat
 	struct tquic_mp_path_ack_state *state;
 	int i;
 
+	tquic_dbg("mp_ack: ack_state_create path=%u\n",
+		  path ? path->path_id : 0);
+
 	state = kmem_cache_zalloc(mp_ack_state_cache, GFP_KERNEL);
 	if (!state)
 		return NULL;
@@ -481,6 +492,9 @@ void tquic_mp_ack_state_destroy(struct tquic_mp_path_ack_state *state)
 	struct tquic_mp_sent_packet *pkt, *pkt_tmp;
 	struct tquic_mp_ack_range_entry *range, *range_tmp;
 	int i;
+
+	tquic_dbg("mp_ack: ack_state_destroy path=%llu\n",
+		  state ? state->path_id : 0);
 
 	if (!state)
 		return;
@@ -531,6 +545,9 @@ int tquic_mp_record_received(struct tquic_mp_path_ack_state *state,
 	struct tquic_mp_ack_range_entry *new_range;
 	ktime_t now = ktime_get();
 	bool merged = false;
+
+	tquic_dbg("mp_ack: record_received pn=%llu space=%d ack_elicit=%d\n",
+		  pn, pn_space, is_ack_eliciting);
 
 	if (!state)
 		return -EINVAL;
@@ -636,6 +653,9 @@ int tquic_mp_generate_ack(struct tquic_mp_path_ack_state *state,
 	u64 prev_smallest;
 	u32 range_idx = 0;
 	int ret;
+
+	tquic_dbg("mp_ack: generate_ack path=%llu space=%d ecn=%d\n",
+		  state ? state->path_id : 0, pn_space, include_ecn);
 
 	if (!state || !buf)
 		return -EINVAL;
@@ -748,6 +768,9 @@ static int mp_detect_lost_packets(struct tquic_mp_path_ack_state *state,
 	u64 largest_acked = state->largest_acked[pn_space];
 	ktime_t now = ktime_get();
 	u64 time_threshold;
+
+	tquic_dbg("mp_ack: detect_lost space=%d largest_acked=%llu\n",
+		  pn_space, largest_acked);
 	ktime_t loss_delay;
 	struct tquic_mp_sent_packet *pkt, *tmp;
 	int lost_count = 0;
@@ -825,6 +848,10 @@ int tquic_mp_on_ack_received(struct tquic_mp_path_ack_state *state,
 	u64 acked_bytes = 0;
 	bool includes_ack_eliciting = false;
 	int lost_count;
+
+	tquic_dbg("mp_ack: on_ack_received path=%llu space=%d largest=%llu\n",
+		  frame ? frame->path_id : 0, pn_space,
+		  frame ? frame->largest_ack : 0);
 
 	if (!state || !frame)
 		return -EINVAL;
@@ -999,6 +1026,9 @@ int tquic_mp_on_packet_sent(struct tquic_mp_path_ack_state *state,
 {
 	struct tquic_mp_sent_packet *pkt;
 	ktime_t now = ktime_get();
+
+	tquic_dbg("mp_ack: on_packet_sent pn=%llu space=%d bytes=%u in_flight=%d\n",
+		  pn, pn_space, sent_bytes, in_flight);
 
 	if (!state)
 		return -EINVAL;

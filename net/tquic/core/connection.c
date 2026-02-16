@@ -508,6 +508,7 @@ EXPORT_SYMBOL_GPL(tquic_conn_set_state);
  */
 static void tquic_cid_gen_random(struct tquic_cid *cid, u8 len)
 {
+	tquic_dbg("tquic_cid_gen_random: generating CID len=%u\n", len);
 	if (len > TQUIC_MAX_CID_LEN)
 		len = TQUIC_MAX_CID_LEN;
 
@@ -527,6 +528,7 @@ static void tquic_cid_gen_random(struct tquic_cid *cid, u8 len)
  */
 static int tquic_cid_compare(const struct tquic_cid *a, const struct tquic_cid *b)
 {
+	tquic_dbg("tquic_cid_compare: a_len=%u b_len=%u\n", a->len, b->len);
 	if (a->len != b->len)
 		return a->len - b->len;
 	return memcmp(a->id, b->id, a->len);
@@ -960,6 +962,7 @@ bool tquic_version_is_supported(u32 version)
 {
 	int i;
 
+	tquic_dbg("tquic_version_is_supported: checking version=0x%08x\n", version);
 	for (i = 0; tquic_supported_versions[i] != 0; i++) {
 		if (tquic_supported_versions[i] == version)
 			return true;
@@ -1007,6 +1010,7 @@ EXPORT_SYMBOL_GPL(tquic_get_preferred_versions);
 u32 tquic_version_select(const u32 *offered, int num_offered)
 {
 	u32 preferred[TQUIC_NUM_SUPPORTED_VERSIONS];
+	tquic_dbg("tquic_version_select: num_offered=%d\n", num_offered);
 	int num_preferred;
 	int i, j;
 
@@ -2455,6 +2459,7 @@ EXPORT_SYMBOL_GPL(tquic_conn_handle_close);
 static void tquic_conn_enter_draining(struct tquic_connection *conn)
 {
 	struct tquic_conn_state_machine *cs = tquic_conn_get_cs(conn);
+	tquic_conn_dbg(conn, "entering draining state\n");
 	struct tquic_path *path;
 
 	/*
@@ -2505,6 +2510,7 @@ static void tquic_close_work_handler(struct work_struct *work)
 						   close_work);
 	struct tquic_connection *conn = cs->conn;
 
+	tquic_conn_dbg(conn, "close_work_handler: retries=%u\n", cs->close_retries);
 	if (READ_ONCE(conn->state) != TQUIC_CONN_CLOSING)
 		return;
 
@@ -2532,6 +2538,7 @@ static void tquic_close_work_handler(struct work_struct *work)
  */
 int tquic_conn_shutdown(struct tquic_connection *conn)
 {
+	tquic_conn_dbg(conn, "tquic_conn_shutdown: initiating graceful shutdown\n");
 	/* Close all streams gracefully */
 	/* Then close connection with NO_ERROR */
 	return tquic_conn_close_with_error(conn, TQUIC_NO_ERROR, NULL);
@@ -3021,6 +3028,7 @@ bool tquic_conn_can_send(struct tquic_connection *conn, size_t bytes)
 {
 	struct tquic_conn_state_machine *cs = tquic_conn_get_cs(conn);
 
+	tquic_conn_dbg(conn, "tquic_conn_can_send: bytes=%zu\n", bytes);
 	if (!cs)
 		return true;
 
@@ -3050,6 +3058,7 @@ void tquic_conn_on_packet_sent(struct tquic_connection *conn, size_t bytes)
 {
 	struct tquic_conn_state_machine *cs = tquic_conn_get_cs(conn);
 
+	tquic_conn_dbg(conn, "tquic_conn_on_packet_sent: bytes=%zu\n", bytes);
 	if (cs && !cs->address_validated)
 		cs->bytes_sent_unvalidated += bytes;
 }
@@ -3064,6 +3073,7 @@ void tquic_conn_on_packet_received(struct tquic_connection *conn, size_t bytes)
 {
 	struct tquic_conn_state_machine *cs = tquic_conn_get_cs(conn);
 
+	tquic_conn_dbg(conn, "tquic_conn_on_packet_received: bytes=%zu\n", bytes);
 	if (cs && !cs->address_validated) {
 		cs->bytes_received_unvalidated += bytes;
 		/* Unblock if we were blocked */

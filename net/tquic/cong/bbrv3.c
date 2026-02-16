@@ -59,6 +59,9 @@ static u64 bbrv3_minmax_running_max(struct bbrv3_minmax *f, u64 now, u64 value)
 	struct bbrv3_minmax_sample *s = f->samples;
 	u64 dt = now - s[0].time;
 
+	tquic_dbg("bbrv3: minmax_max value=%llu cur_max=%llu\n",
+		  value, s[0].value);
+
 	if (value >= s[0].value || dt > f->window_len) {
 		s[0].time = now;
 		s[0].value = value;
@@ -91,6 +94,9 @@ static u64 bbrv3_minmax_running_min(struct bbrv3_minmax *f, u64 now, u64 value)
 {
 	struct bbrv3_minmax_sample *s = f->samples;
 	u64 dt = now - s[0].time;
+
+	tquic_dbg("bbrv3: minmax_min value=%llu cur_min=%llu\n",
+		  value, s[0].value);
 
 	if (value <= s[0].value || dt > f->window_len) {
 		s[0].time = now;
@@ -145,6 +151,9 @@ static u64 bbrv3_inflight(struct bbrv3 *bbr, u32 gain)
 	u64 inflight = bbrv3_bdp(bbr);
 	u32 mss = bbrv3_get_mss(bbr);
 
+	tquic_dbg("bbrv3: inflight bw=%llu min_rtt=%llu gain=%u\n",
+		  bbr->bw, bbr->min_rtt_us, gain);
+
 	inflight = (inflight * gain) >> BBR3_SCALE;
 
 	/* Add extra acked estimate if enabled */
@@ -159,6 +168,9 @@ static u64 bbrv3_inflight(struct bbrv3 *bbr, u32 gain)
 static u64 bbrv3_pacing_rate(struct bbrv3 *bbr)
 {
 	u64 rate;
+
+	tquic_dbg("bbrv3: pacing_rate bw=%llu gain=%u\n",
+		  bbr->bw, bbr->pacing_gain);
 
 	if (bbr->bw == 0)
 		return 0;
@@ -182,6 +194,9 @@ static u64 bbrv3_pacing_rate(struct bbrv3 *bbr)
 
 static void bbrv3_update_round(struct bbrv3 *bbr, u64 delivered)
 {
+	tquic_dbg("bbrv3: update_round delivered=%llu next=%llu round=%u\n",
+		  delivered, bbr->next_round_delivered, bbr->round_count);
+
 	if (delivered >= bbr->next_round_delivered) {
 		bbr->round_start = true;
 		bbr->round_count++;
@@ -210,6 +225,9 @@ static void bbrv3_update_bw(struct bbrv3 *bbr, u64 acked, u64 rtt_us)
 
 	if (acked == 0)
 		return;
+
+	tquic_dbg("bbrv3: update_bw acked=%llu rtt=%llu cur_bw=%llu\n",
+		  acked, rtt_us, bbr->bw);
 
 	/*
 	 * Compute delivery rate as bytes_delivered / delivery_interval.
@@ -247,6 +265,9 @@ static void bbrv3_update_rtt(struct bbrv3 *bbr, u64 rtt_us)
 	if (rtt_us == 0)
 		return;
 
+	tquic_dbg("bbrv3: update_rtt rtt_us=%llu min_rtt=%llu\n",
+		  rtt_us, bbr->min_rtt_us);
+
 	bbr->rtt_us = rtt_us;
 	bbr->min_rtt_us = bbrv3_minmax_running_min(&bbr->rtt_filter, now, rtt_us);
 	bbr->min_rtt_stamp = ktime_get();
@@ -270,6 +291,9 @@ static void bbrv3_check_startup_done(struct bbrv3 *bbr)
 {
 	u64 bw_thresh;
 
+	tquic_dbg("bbrv3: check_startup_done bw=%llu full_bw=%llu count=%u\n",
+		  bbr->bw, bbr->full_bw, bbr->full_bw_count);
+
 	if (bbr->full_bw_reached || !bbr->round_start)
 		return;
 
@@ -292,6 +316,9 @@ static void bbrv3_check_startup_done(struct bbrv3 *bbr)
 static void bbrv3_check_startup_high_loss(struct bbrv3 *bbr)
 {
 	u64 loss_percent;
+
+	tquic_dbg("bbrv3: check_startup_high_loss loss_in_round=%llu\n",
+		  bbr->loss_in_round);
 
 	if (!bbr->round_start || bbr->bytes_delivered == 0)
 		return;
@@ -355,6 +382,9 @@ static void bbrv3_advance_probe_bw_cycle(struct bbrv3 *bbr)
 	u64 now_ns = ktime_get_ns();
 	u64 cycle_ns = bbr->min_rtt_us * 1000;  /* One RTT per phase minimum */
 
+	tquic_dbg("bbrv3: advance_probe_bw phase=%d cycle_count=%u\n",
+		  bbr->probe_bw_phase, bbr->cycle_count);
+
 	if (now_ns - ktime_to_ns(bbr->cycle_start) < cycle_ns)
 		return;
 
@@ -417,6 +447,8 @@ static void bbrv3_check_probe_rtt(struct bbrv3 *bbr)
 {
 	ktime_t now = ktime_get();
 
+	tquic_dbg("bbrv3: check_probe_rtt mode=%d\n", bbr->mode);
+
 	if (bbr->mode == BBR3_PROBE_RTT) {
 		/* Check if ProbeRTT duration complete */
 		if (ktime_ms_delta(now, bbr->probe_rtt_start) >=
@@ -451,6 +483,9 @@ static void bbrv3_handle_ecn(struct bbrv3 *bbr, u64 ce_count)
 
 	if (!bbr->params.ecn_aware || ce_count == 0)
 		return;
+
+	tquic_dbg("bbrv3: handle_ecn ce_count=%llu alpha=%llu cwnd=%u\n",
+		  ce_count, bbr->ecn_alpha, bbr->cwnd);
 
 	bbr->ecn_in_round += ce_count;
 
@@ -533,6 +568,9 @@ static void bbrv3_set_cwnd(struct bbrv3 *bbr)
 {
 	u64 target;
 	u32 mss = bbrv3_get_mss(bbr);
+
+	tquic_dbg("bbrv3: set_cwnd cur=%u inflight_lo=%u inflight_hi=%u\n",
+		  bbr->cwnd, bbr->inflight_lo, bbr->inflight_hi);
 
 	/* Compute target based on BDP and gain */
 	target = bbrv3_inflight(bbr, bbr->cwnd_gain);
@@ -644,6 +682,9 @@ static void bbrv3_on_ack(void *cong_data, u64 bytes_acked, u64 rtt_us)
 
 	if (!bbr)
 		return;
+
+	tquic_dbg("bbrv3: on_ack bytes=%llu rtt=%llu mode=%d cwnd=%u\n",
+		  bytes_acked, rtt_us, bbr->mode, bbr->cwnd);
 
 	/* Update delivery tracking */
 	bbr->bytes_delivered += bytes_acked;

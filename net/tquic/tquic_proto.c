@@ -587,6 +587,8 @@ static int tquic_create_socket(struct net *net, struct socket *sock,
 /* Socket release helpers */
 static int tquic_inet_release(struct socket *sock)
 {
+	tquic_dbg("tquic_inet_release: sock=%p sk=%p\n", sock, sock->sk);
+
 	if (!sock->sk)
 		return 0;
 
@@ -596,6 +598,8 @@ static int tquic_inet_release(struct socket *sock)
 #if IS_ENABLED(CONFIG_IPV6)
 static int tquic_inet6_release(struct socket *sock)
 {
+	tquic_dbg("tquic_inet6_release: sock=%p sk=%p\n", sock, sock->sk);
+
 	if (!sock->sk)
 		return 0;
 
@@ -900,6 +904,8 @@ static int tquic_net_sysctl_register(struct net *net)
 	struct ctl_table *table;
 	int i;
 
+	tquic_dbg("tquic_net_sysctl_register: net=%p\n", net);
+
 	/*
 	 * Avoid duplicate sysctl registration in init_net since the global
 	 * sysctl table is already registered via tquic_sysctl.c.
@@ -932,6 +938,7 @@ static int tquic_net_sysctl_register(struct net *net)
 		return -ENOMEM;
 	}
 
+	tquic_dbg("tquic_net_sysctl_register: ret=0\n");
 	return 0;
 }
 
@@ -939,6 +946,8 @@ static void tquic_net_sysctl_unregister(struct net *net)
 {
 	struct tquic_net *tn = tquic_pernet(net);
 	TQUIC_CTL_TABLE *table;
+
+	tquic_dbg("tquic_net_sysctl_unregister: net=%p\n", net);
 
 	if (tn->sysctl_header) {
 		table = tn->sysctl_header->ctl_table_arg;
@@ -1468,6 +1477,7 @@ static int tquic_v4_protosw_init(void)
 
 static void tquic_v4_protosw_exit(void)
 {
+	tquic_dbg("tquic_v4_protosw_exit: unregistering IPv4 protosw\n");
 	inet_unregister_protosw(&tquic_dgram_protosw);
 	inet_unregister_protosw(&tquic_stream_protosw);
 	proto_unregister(&tquic_prot);
@@ -1515,6 +1525,7 @@ static int tquic_v6_protosw_init(void)
 
 static void tquic_v6_protosw_exit(void)
 {
+	tquic_dbg("tquic_v6_protosw_exit: unregistering IPv6 protosw\n");
 	inet6_unregister_protosw(&tquicv6_dgram_protosw);
 	inet6_unregister_protosw(&tquicv6_stream_protosw);
 	proto_unregister(&tquicv6_prot);

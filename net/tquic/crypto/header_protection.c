@@ -527,6 +527,8 @@ void tquic_hp_set_key_phase(struct tquic_hp_ctx *ctx, u8 phase)
 	if (!ctx)
 		return;
 
+	tquic_dbg("tquic_hp_set_key_phase: phase=%u\n", phase & 1);
+
 	spin_lock_irqsave(&ctx->lock, flags);
 	ctx->key_phase = phase & 1;
 	spin_unlock_irqrestore(&ctx->lock, flags);
@@ -543,6 +545,9 @@ static int tquic_hp_setup_cipher(struct tquic_hp_key *hp_key)
 {
 	const char *alg_name;
 	int ret;
+
+	tquic_dbg("tquic_hp_setup_cipher: cipher_type=%u key_len=%u\n",
+		  hp_key->cipher_type, hp_key->key_len);
 
 	/* Free any existing transform to prevent leaks on overwrite */
 	if (hp_key->req) {
@@ -588,6 +593,7 @@ static int tquic_hp_setup_cipher(struct tquic_hp_key *hp_key)
 		return -ENOMEM;
 	}
 
+	tquic_dbg("tquic_hp_setup_cipher: ret=0\n");
 	return 0;
 }
 
@@ -823,6 +829,8 @@ void tquic_hp_rotate_keys(struct tquic_hp_ctx *ctx)
 	if (!ctx)
 		return;
 
+	tquic_dbg("tquic_hp_rotate_keys: current_phase=%u\n", ctx->key_phase);
+
 	spin_lock_irqsave(&ctx->lock, flags);
 
 	if (!ctx->key_update_pending)
@@ -843,6 +851,7 @@ void tquic_hp_rotate_keys(struct tquic_hp_ctx *ctx)
 	/* Toggle key phase */
 	ctx->key_phase ^= 1;
 	ctx->key_update_pending = false;
+	tquic_dbg("tquic_hp_rotate_keys: new_phase=%u\n", ctx->key_phase);
 
 out:
 	spin_unlock_irqrestore(&ctx->lock, flags);
@@ -866,6 +875,9 @@ u64 tquic_hp_decode_pn(u64 truncated_pn, u8 pn_len, u64 largest_pn)
 	u64 pn_hwin = pn_win / 2;
 	u64 pn_mask = pn_win - 1;
 	u64 candidate_pn;
+
+	tquic_dbg("tquic_hp_decode_pn: truncated_pn=%llu pn_len=%u largest_pn=%llu\n",
+		  truncated_pn, pn_len, largest_pn);
 
 	/* Compute candidate based on expected and truncated */
 	candidate_pn = (expected_pn & ~pn_mask) | truncated_pn;
@@ -897,6 +909,9 @@ u8 tquic_hp_encode_pn_length(u64 pn, u64 largest_acked)
 {
 	u64 num_unacked = pn - largest_acked;
 
+	tquic_dbg("tquic_hp_encode_pn_length: pn=%llu largest_acked=%llu\n",
+		  pn, largest_acked);
+
 	/*
 	 * Encode with enough bits so the gap to the largest acked
 	 * is less than half the encoding space.
@@ -923,9 +938,12 @@ u64 tquic_hp_read_pn(const u8 *packet, u8 pn_len)
 	u64 pn = 0;
 	int i;
 
+	tquic_dbg("tquic_hp_read_pn: pn_len=%u\n", pn_len);
+
 	for (i = 0; i < pn_len; i++)
 		pn = (pn << 8) | packet[i];
 
+	tquic_dbg("tquic_hp_read_pn: decoded pn=%llu\n", pn);
 	return pn;
 }
 EXPORT_SYMBOL_GPL(tquic_hp_read_pn);
@@ -939,6 +957,8 @@ EXPORT_SYMBOL_GPL(tquic_hp_read_pn);
 void tquic_hp_write_pn(u8 *packet, u64 pn, u8 pn_len)
 {
 	int i;
+
+	tquic_dbg("tquic_hp_write_pn: pn=%llu pn_len=%u\n", pn, pn_len);
 
 	for (i = pn_len - 1; i >= 0; i--) {
 		packet[i] = pn & 0xff;
@@ -998,6 +1018,9 @@ EXPORT_SYMBOL_GPL(tquic_hp_ctx_alloc);
  */
 static void tquic_hp_free_key(struct tquic_hp_key *hp_key)
 {
+	tquic_dbg("tquic_hp_free_key: cipher_type=%u valid=%d\n",
+		  hp_key->cipher_type, hp_key->valid);
+
 	if (hp_key->req) {
 		skcipher_request_free(hp_key->req);
 		hp_key->req = NULL;
@@ -1021,6 +1044,8 @@ void tquic_hp_ctx_free(struct tquic_hp_ctx *ctx)
 	if (!ctx)
 		return;
 
+	tquic_dbg("tquic_hp_ctx_free: key_phase=%u\n", ctx->key_phase);
+
 	/* Free all keys */
 	for (i = 0; i < TQUIC_HP_LEVEL_COUNT; i++) {
 		tquic_hp_free_key(&ctx->read_keys[i]);
@@ -1030,6 +1055,7 @@ void tquic_hp_ctx_free(struct tquic_hp_ctx *ctx)
 	tquic_hp_free_key(&ctx->next_read_key);
 	tquic_hp_free_key(&ctx->next_write_key);
 
+	tquic_dbg("tquic_hp_ctx_free: done\n");
 	kfree_sensitive(ctx);
 }
 EXPORT_SYMBOL_GPL(tquic_hp_ctx_free);

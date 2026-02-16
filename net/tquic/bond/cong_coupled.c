@@ -283,6 +283,8 @@ static struct coupled_path_state *coupled_find_path(struct coupled_cc_ctx *ctx,
 {
 	int i;
 
+	tquic_dbg("coupled_find_path: path_id=%u num_paths=%d\n",
+		  path_id, ctx->num_paths);
 	for (i = 0; i < ctx->num_paths; i++) {
 		if (ctx->paths[i].path_id == path_id)
 			return &ctx->paths[i];
@@ -401,6 +403,9 @@ void coupled_cc_update_path(struct coupled_cc_ctx *ctx, u8 path_id, u64 cwnd,
 	struct coupled_path_state *path;
 	u64 old_cwnd;
 	int i;
+
+	tquic_dbg("coupled_cc_update_path: path=%u cwnd=%llu rtt=%llu us\n",
+		  path_id, cwnd, rtt_us);
 
 	spin_lock_bh(&ctx->lock);
 
@@ -584,6 +589,9 @@ void coupled_cc_update_rtt(struct coupled_cc_ctx *ctx, u8 path_id, u64 rtt_us)
 	if (!ctx || !ctx->enabled || rtt_us == 0)
 		return;
 
+	tquic_dbg("coupled_cc_update_rtt: path=%u rtt=%llu us\n",
+		  path_id, rtt_us);
+
 	spin_lock_bh(&ctx->lock);
 
 	path = coupled_find_path(ctx, path_id);
@@ -749,6 +757,9 @@ void coupled_cc_on_ack(struct coupled_cc_ctx *ctx, struct tquic_cc_state *cc,
 	if (!ctx || !ctx->enabled)
 		return;
 
+	tquic_dbg("coupled_cc_on_ack: path=%u acked=%llu\n",
+		  path_id, acked_bytes);
+
 	/* Update RTT in coupled state if we have a sample */
 	if (rtt && rtt->has_sample)
 		coupled_cc_update_rtt(ctx, path_id, rtt->smoothed_rtt);
@@ -806,6 +817,8 @@ void coupled_cc_on_loss(struct coupled_cc_ctx *ctx, struct tquic_cc_state *cc,
 	if (!ctx || !ctx->enabled)
 		return;
 
+	tquic_dbg("coupled_cc_on_loss: path=%u\n", path_id);
+
 	/* Update coupled state with new cwnd after loss */
 	coupled_cc_decrease(ctx, path_id);
 }
@@ -825,6 +838,8 @@ EXPORT_SYMBOL_GPL(coupled_cc_on_loss);
 void coupled_cc_get_stats(struct coupled_cc_ctx *ctx,
 			  struct coupled_cc_stats *stats)
 {
+	tquic_dbg("coupled_cc_get_stats: retrieving coupled CC statistics\n");
+
 	if (!ctx || !stats)
 		return;
 
@@ -862,6 +877,7 @@ u64 coupled_cc_get_alpha(struct coupled_cc_ctx *ctx)
 	alpha = ctx->alpha;
 	spin_unlock_bh(&ctx->lock);
 
+	tquic_dbg("coupled_cc_get_alpha: alpha=%llu\n", alpha);
 	return alpha;
 }
 EXPORT_SYMBOL_GPL(coupled_cc_get_alpha);
@@ -883,6 +899,7 @@ u64 coupled_cc_get_total_cwnd(struct coupled_cc_ctx *ctx)
 	total = ctx->total_cwnd;
 	spin_unlock_bh(&ctx->lock);
 
+	tquic_dbg("coupled_cc_get_total_cwnd: total=%llu\n", total);
 	return total;
 }
 EXPORT_SYMBOL_GPL(coupled_cc_get_total_cwnd);
@@ -923,6 +940,9 @@ u64 olia_cc_increase(struct coupled_cc_ctx *ctx, u8 path_id, u64 acked_bytes,
 
 	if (!ctx || !ctx->enabled)
 		return acked_bytes;
+
+	tquic_dbg("olia_cc_increase: path=%u acked=%llu mss=%u\n",
+		  path_id, acked_bytes, mss);
 
 	spin_lock_bh(&ctx->lock);
 

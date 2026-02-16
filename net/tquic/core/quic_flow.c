@@ -21,6 +21,7 @@
 #include <net/tquic.h>
 #include <net/tquic_frame.h>
 #include "flow_control.h"
+#include "../tquic_debug.h"
 
 /*
  * RFC 9000 Section 4 - Flow Control
@@ -95,9 +96,6 @@ static void tquic_streams_update_max_streams(struct tquic_connection *conn, bool
 static int tquic_flow_control_check_recv_limit_internal(struct tquic_connection *conn,
 							u64 len);
 
-/* Debug logging macro */
-#define tquic_dbg(fmt, ...) pr_debug("TQUIC: " fmt, ##__VA_ARGS__)
-
 /*
  * Helper to queue a frame on the connection's control frame queue
  * Returns 0 on success, non-zero on failure
@@ -157,6 +155,8 @@ static struct tquic_stream *tquic_stream_lookup(struct tquic_connection *conn,
  */
 void tquic_flow_control_init(struct tquic_connection *conn)
 {
+	tquic_dbg("tquic_flow_control_init: max_data=%u max_streams=%u\n",
+		  TQUIC_DEFAULT_MAX_DATA, TQUIC_DEFAULT_MAX_STREAMS);
 	/* Initialize local flow control (what we advertise to peer) */
 	conn->max_data_local = TQUIC_DEFAULT_MAX_DATA;
 	conn->max_streams_bidi = TQUIC_DEFAULT_MAX_STREAMS;
@@ -183,6 +183,7 @@ bool tquic_flow_control_can_send(struct tquic_connection *conn, u64 bytes)
 	u64 available;
 	bool can_send;
 
+	tquic_dbg("tquic_flow_control_can_send: bytes=%llu\n", bytes);
 	if (bytes == 0)
 		return true;
 
@@ -236,6 +237,7 @@ void tquic_flow_control_on_data_recvd(struct tquic_connection *conn, u64 bytes)
 	u64 threshold;
 	bool should_update = false;
 
+	tquic_dbg("tquic_flow_control_on_data_recvd: bytes=%llu\n", bytes);
 	if (bytes == 0)
 		return;
 

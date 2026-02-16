@@ -54,6 +54,8 @@ void tquic_ecn_init(struct tquic_path *path)
 	if (!path)
 		return;
 
+	tquic_dbg("tquic_ecn_init: path=%u initializing ECN state\n",
+		  path->path_id);
 	memset(&path->ecn, 0, sizeof(path->ecn));
 
 	/*
@@ -137,6 +139,9 @@ int tquic_ecn_validate_ack(struct tquic_path *path, struct tquic_ack_frame *ack)
 
 	if (!path || !ack)
 		return -EINVAL;
+
+	tquic_dbg("tquic_ecn_validate_ack: path=%u ect0=%llu ect1=%llu ce=%llu\n",
+		  path->path_id, ack->ecn.ect0, ack->ecn.ect1, ack->ecn.ce);
 
 	/* ECN already failed, nothing to validate */
 	if (path->ecn.ecn_failed)
@@ -277,6 +282,8 @@ int tquic_ecn_mark_packet(struct sk_buff *skb, u8 ecn_marking)
 
 	if (!skb)
 		return -EINVAL;
+
+	tquic_dbg("tquic_ecn_mark_packet: marking=%u\n", ecn_marking);
 
 	/* Only mark with ECT codepoints, not CE */
 	if (ecn_marking != TQUIC_ECN_ECT_0 && ecn_marking != TQUIC_ECN_ECT_1)

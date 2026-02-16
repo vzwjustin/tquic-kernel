@@ -300,6 +300,8 @@ static int tquic_hs_transcript_hash(struct tquic_handshake *hs,
  */
 static int hs_varint_encode(u64 val, u8 *buf, u32 buf_size, u32 *len)
 {
+	tquic_dbg("hs_varint_encode: val=%llu buf_size=%u\n", val, buf_size);
+
 	if (val < 0x40) {
 		if (buf_size < 1)
 			return -ENOSPC;
@@ -338,6 +340,8 @@ static int hs_varint_encode(u64 val, u8 *buf, u32 buf_size, u32 *len)
 static int hs_varint_decode(const u8 *buf, u32 buf_len, u64 *val, u32 *len)
 {
 	u8 prefix;
+
+	tquic_dbg("hs_varint_decode: buf_len=%u\n", buf_len);
 
 	if (buf_len < 1)
 		return -EINVAL;
@@ -996,6 +1000,9 @@ static int tquic_hs_derive_handshake_secrets(struct tquic_handshake *hs)
 	u32 hash_len;
 	int ret;
 
+	tquic_dbg("tquic_hs_derive_handshake_secrets: hash_len=%u\n",
+		  hs->hash_len);
+
 	hash_len = hs->hash_len;
 
 	/* Compute empty hash */
@@ -1048,6 +1055,7 @@ static int tquic_hs_derive_handshake_secrets(struct tquic_handshake *hs)
 out_zeroize:
 	memzero_explicit(derived, sizeof(derived));
 	memzero_explicit(transcript_hash, sizeof(transcript_hash));
+	tquic_dbg("tquic_hs_derive_handshake_secrets: ret=%d\n", ret);
 	return ret;
 }
 
@@ -1061,6 +1069,8 @@ static int tquic_hs_derive_app_secrets(struct tquic_handshake *hs)
 	u8 zero_ikm[TLS_SECRET_MAX_LEN] = {0};
 	u32 hash_len;
 	int ret;
+
+	tquic_dbg("tquic_hs_derive_app_secrets: hash_len=%u\n", hs->hash_len);
 
 	hash_len = hs->hash_len;
 
@@ -1109,6 +1119,7 @@ out_zeroize:
 	memzero_explicit(derived, sizeof(derived));
 	memzero_explicit(transcript_hash, sizeof(transcript_hash));
 	memzero_explicit(zero_ikm, sizeof(zero_ikm));
+	tquic_dbg("tquic_hs_derive_app_secrets: ret=%d\n", ret);
 	return ret;
 }
 
@@ -1120,6 +1131,9 @@ static int tquic_hs_derive_resumption_secret(struct tquic_handshake *hs)
 	u8 transcript_hash[TLS_SECRET_MAX_LEN];
 	u32 hash_len;
 	int ret;
+
+	tquic_dbg("tquic_hs_derive_resumption_secret: hash_len=%u\n",
+		  hs->hash_len);
 
 	hash_len = hs->hash_len;
 
@@ -1139,6 +1153,7 @@ static int tquic_hs_derive_resumption_secret(struct tquic_handshake *hs)
 
 out_zeroize:
 	memzero_explicit(transcript_hash, sizeof(transcript_hash));
+	tquic_dbg("tquic_hs_derive_resumption_secret: ret=%d\n", ret);
 	return ret;
 }
 
@@ -2397,6 +2412,8 @@ static int tquic_der_parse_len(const u8 **pp, const u8 *end, u32 *out_len)
 	u8 b, num_bytes;
 	u32 len;
 	int i;
+
+	tquic_dbg("tquic_der_parse_len: remaining=%ld\n", (long)(end - *pp));
 
 	if (p >= end)
 		return -1;
@@ -3975,6 +3992,8 @@ EXPORT_SYMBOL_GPL(tquic_hs_set_alpn);
  */
 int tquic_hs_set_sni(struct tquic_handshake *hs, const char *hostname)
 {
+	tquic_dbg("tquic_hs_set_sni: hostname=%s\n", hostname ? hostname : "(null)");
+
 	kfree_sensitive(hs->sni);
 
 	if (!hostname) {
@@ -4804,6 +4823,9 @@ void tquic_hs_cleanup(struct tquic_handshake *hs)
 	if (!hs)
 		return;
 
+	tquic_dbg("tquic_hs_cleanup: state=%d is_server=%d\n",
+		  hs->state, hs->is_server);
+
 	/* Free key share */
 	kfree_sensitive(hs->key_share.public_key);
 	kfree_sensitive(hs->key_share.private_key);
@@ -4869,6 +4891,7 @@ void tquic_hs_cleanup(struct tquic_handshake *hs)
 	memzero_explicit(hs->server_random, sizeof(hs->server_random));
 	memzero_explicit(hs->session_id, sizeof(hs->session_id));
 
+	tquic_dbg("tquic_hs_cleanup: done\n");
 	/* CF-429: Use kfree_sensitive for struct with crypto secrets */
 	kfree_sensitive(hs);
 }

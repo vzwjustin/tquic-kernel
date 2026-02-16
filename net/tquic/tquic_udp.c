@@ -203,6 +203,8 @@ static __be16 tquic_udp_alloc_port(struct net *net)
 	u16 port;
 	int attempts = TQUIC_PORT_MAX - TQUIC_PORT_MIN + 1;
 
+	tquic_dbg("tquic_udp_alloc_port: allocating ephemeral port\n");
+
 	spin_lock_bh(&port_alloc.lock);
 
 	while (attempts--) {
@@ -215,11 +217,13 @@ static __be16 tquic_udp_alloc_port(struct net *net)
 		/* Check if already in use */
 		if (!test_and_set_bit(port - TQUIC_PORT_MIN, port_alloc.bitmap)) {
 			spin_unlock_bh(&port_alloc.lock);
+			tquic_dbg("tquic_udp_alloc_port: allocated port=%u\n", port);
 			return htons(port);
 		}
 	}
 
 	spin_unlock_bh(&port_alloc.lock);
+	tquic_dbg("tquic_udp_alloc_port: no ports available\n");
 	return 0;
 }
 
@@ -230,6 +234,8 @@ static __be16 tquic_udp_alloc_port(struct net *net)
 static void tquic_udp_free_port(__be16 port)
 {
 	u16 p = ntohs(port);
+
+	tquic_dbg("tquic_udp_free_port: releasing port=%u\n", p);
 
 	if (p < TQUIC_PORT_MIN || p > TQUIC_PORT_MAX)
 		return;
@@ -250,6 +256,8 @@ static int tquic_udp_reserve_port(__be16 port)
 	u16 p = ntohs(port);
 	int ret = 0;
 
+	tquic_dbg("tquic_udp_reserve_port: reserving port=%u\n", p);
+
 	if (p < TQUIC_PORT_MIN || p > TQUIC_PORT_MAX)
 		return -EINVAL;
 
@@ -258,6 +266,7 @@ static int tquic_udp_reserve_port(__be16 port)
 		ret = -EADDRINUSE;
 	spin_unlock_bh(&port_alloc.lock);
 
+	tquic_dbg("tquic_udp_reserve_port: port=%u ret=%d\n", p, ret);
 	return ret;
 }
 
@@ -297,6 +306,7 @@ static inline u32 tquic_listener_hash_port(__be16 port)
 static inline u32 tquic_listener_hash(const struct sockaddr_storage *addr)
 {
 	__be16 port = 0;
+	u32 hash;
 
 	if (addr->ss_family == AF_INET) {
 		const struct sockaddr_in *sin = (const struct sockaddr_in *)addr;
@@ -306,7 +316,10 @@ static inline u32 tquic_listener_hash(const struct sockaddr_storage *addr)
 		port = sin6->sin6_port;
 	}
 
-	return tquic_listener_hash_port(port);
+	hash = tquic_listener_hash_port(port);
+	tquic_dbg("tquic_listener_hash: family=%u port=%u hash=%u\n",
+		  addr->ss_family, ntohs(port), hash);
+	return hash;
 }
 
 /**
@@ -760,6 +773,9 @@ static void tquic_udp_sock_hash_add(struct tquic_udp_sock *us)
 {
 	u32 key = tquic_udp_sock_hash_key(us->local_port);
 
+	tquic_dbg("tquic_udp_sock_hash_add: port=%u key=%u\n",
+		  ntohs(us->local_port), key);
+
 	spin_lock_bh(&tquic_udp_hash_lock);
 	hash_add(tquic_udp_sock_hash, &us->hash_node, key);
 	spin_unlock_bh(&tquic_udp_hash_lock);
@@ -767,6 +783,9 @@ static void tquic_udp_sock_hash_add(struct tquic_udp_sock *us)
 
 static void tquic_udp_sock_hash_remove(struct tquic_udp_sock *us)
 {
+	tquic_dbg("tquic_udp_sock_hash_remove: port=%u\n",
+		  ntohs(us->local_port));
+
 	spin_lock_bh(&tquic_udp_hash_lock);
 	hash_del(&us->hash_node);
 	spin_unlock_bh(&tquic_udp_hash_lock);
@@ -997,6 +1016,9 @@ static void tquic_udp_sock_cleanup_work(struct work_struct *work)
 	struct tquic_udp_sock *us = container_of(work, struct tquic_udp_sock,
 						 cleanup_work);
 
+	tquic_dbg("tquic_udp_sock_cleanup_work: port=%u cleaning up socket\n",
+		  ntohs(us->local_port));
+
 	if (us->sock) {
 		dst_cache_destroy(&us->dst_cache);
 		udp_tunnel_sock_release(us->sock);
@@ -1017,6 +1039,9 @@ void tquic_udp_sock_put(struct tquic_udp_sock *us)
 {
 	if (!us)
 		return;
+
+	tquic_dbg("tquic_udp_sock_put: port=%u refcnt=%u\n",
+		  ntohs(us->local_port), refcount_read(&us->refcnt));
 
 	if (refcount_dec_and_test(&us->refcnt)) {
 		tquic_udp_sock_hash_remove(us);
@@ -1366,6 +1391,8 @@ static void tquic_udp_encap_destroy(struct sock *sk)
 {
 	struct tquic_udp_sock *us;
 
+	tquic_dbg("tquic_udp_encap_destroy: encap socket destroyed\n");
+
 	rcu_read_lock();
 	us = rcu_dereference_sk_user_data(sk);
 	if (us) {
@@ -1464,6 +1491,9 @@ static int tquic_udp_xmit_skb4(struct tquic_udp_sock *us, struct sk_buff *skb)
 	unsigned int skb_len;
 	int err;
 
+	tquic_dbg("tquic_udp_xmit_skb4: transmitting IPv4 packet len=%u\n",
+		  skb->len);
+
 	/* Get addresses */
 	saddr = us->local_addr.sin.sin_addr.s_addr;
 	daddr = us->remote_addr.sin.sin_addr.s_addr;
@@ -1537,6 +1567,9 @@ static int tquic_udp_xmit_skb6(struct tquic_udp_sock *us, struct sk_buff *skb)
 	unsigned int skb_len;
 	int err;
 
+	tquic_dbg("tquic_udp_xmit_skb6: transmitting IPv6 packet len=%u\n",
+		  skb->len);
+
 	/* Try dst cache first */
 	dst = dst_cache_get_ip6(&us->dst_cache, &us->local_addr.sin6.sin6_addr);
 	if (!dst) {
@@ -1597,6 +1630,9 @@ int tquic_udp_xmit(struct tquic_udp_sock *us, struct sk_buff *skb)
 {
 	int headroom;
 	int ret;
+
+	tquic_dbg("tquic_udp_xmit: transmitting packet family=%u\n",
+		  us ? us->family : 0);
 
 	if (!us || !us->sock || !skb)
 		return -EINVAL;
@@ -1688,6 +1724,9 @@ int tquic_udp_sendmsg(struct tquic_udp_sock *us, const void *data, size_t len)
 	struct kvec iov;
 	int ret;
 
+	tquic_dbg("tquic_udp_sendmsg: sending %zu bytes via kernel_sendmsg\n",
+		  len);
+
 	if (!us || !us->sock)
 		return -EINVAL;
 
@@ -1705,6 +1744,7 @@ int tquic_udp_sendmsg(struct tquic_udp_sock *us, const void *data, size_t len)
 		us->stats.tx_errors++;
 	}
 
+	tquic_dbg("tquic_udp_sendmsg: sendmsg ret=%d\n", ret);
 	return ret;
 }
 EXPORT_SYMBOL_GPL(tquic_udp_sendmsg);
@@ -1723,6 +1763,8 @@ EXPORT_SYMBOL_GPL(tquic_udp_sendmsg);
 int tquic_udp_set_csum_offload(struct tquic_udp_sock *us, bool enable)
 {
 	struct sock *sk;
+
+	tquic_dbg("tquic_udp_set_csum_offload: enable=%d\n", enable);
 
 	if (!us || !us->sock)
 		return -EINVAL;
@@ -1844,6 +1886,8 @@ void tquic_udp_destroy_path_socket(struct tquic_path *path)
 {
 	struct tquic_udp_sock *us;
 
+	tquic_dbg("tquic_udp_destroy_path_socket: destroying path socket\n");
+
 	if (!path)
 		return;
 
@@ -1909,6 +1953,8 @@ int tquic_udp_encap_init(struct tquic_sock *tsk)
 	struct tquic_path *path;
 	int err;
 
+	tquic_dbg("tquic_udp_encap_init: initializing UDP encapsulation\n");
+
 	if (!tsk)
 		return -EINVAL;
 
@@ -1949,6 +1995,7 @@ int tquic_udp_encap_init(struct tquic_sock *tsk)
 	tquic_path_put(path);
 	err = 0;
 out_put:
+	tquic_dbg("tquic_udp_encap_init: completed ret=%d\n", err);
 	tquic_conn_put(conn);
 	return err;
 }

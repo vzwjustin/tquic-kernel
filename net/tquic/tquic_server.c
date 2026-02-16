@@ -155,6 +155,9 @@ static void tquic_client_rate_refill(struct tquic_client *client)
 	u64 tokens_to_add;
 	int current_tokens;
 
+	tquic_dbg("tquic_client_rate_refill: client=%p rate_limit=%u\n",
+		  client, client->conn_rate_limit);
+
 	elapsed_ns = ktime_to_ns(ktime_sub(now, client->rate_last_refill));
 	if (elapsed_ns <= 0)
 		return;
@@ -276,6 +279,8 @@ static struct tquic_client *tquic_client_alloc(const char *identity,
 static void tquic_client_free_rcu(struct rcu_head *head)
 {
 	struct tquic_client *client;
+
+	tquic_dbg("tquic_client_free_rcu: head=%p\n", head);
 
 	client = container_of(head, struct tquic_client, rcu_head);
 
@@ -567,10 +572,13 @@ EXPORT_SYMBOL_GPL(tquic_server_get_client_psk);
 
 int tquic_client_copy_psk(const struct tquic_client *client, u8 *psk)
 {
+	tquic_dbg("tquic_client_copy_psk: client=%p psk=%p\n", client, psk);
+
 	if (!client || !psk)
 		return -EINVAL;
 
 	memcpy(psk, client->psk, 32);
+	tquic_dbg("tquic_client_copy_psk: copied 32 bytes successfully\n");
 	return 0;
 }
 EXPORT_SYMBOL_GPL(tquic_client_copy_psk);

@@ -108,6 +108,8 @@ static int minrtt_init(struct tquic_connection *conn)
 {
 	struct minrtt_sched_data *sd;
 
+	tquic_dbg("sched_minrtt: init\n");
+
 	sd = kzalloc(sizeof(*sd), GFP_ATOMIC);
 	if (!sd)
 		return -ENOMEM;
@@ -161,6 +163,8 @@ static int minrtt_get_path(struct tquic_connection *conn,
 
 	if (!sd)
 		return -EINVAL;
+
+	tquic_dbg("sched_minrtt: get_path flags=0x%x\n", flags);
 
 	/* Read current state under lock */
 	spin_lock_irqsave(&sd->lock, irqflags);
@@ -302,6 +306,8 @@ static void minrtt_path_removed(struct tquic_connection *conn,
 	if (!sd)
 		return;
 
+	tquic_dbg("sched_minrtt: path_removed path=%u\n", path->path_id);
+
 	spin_lock_irqsave(&sd->lock, irqflags);
 	if (sd->current_path_id == path->path_id) {
 		sd->current_path_id = TQUIC_INVALID_PATH_ID;
@@ -328,6 +334,9 @@ static void minrtt_ack_received(struct tquic_connection *conn,
 
 	if (!sd)
 		return;
+
+	tquic_dbg("sched_minrtt: ack_received path=%u bytes=%llu\n",
+		  path->path_id, acked_bytes);
 
 	spin_lock_irqsave(&sd->lock, irqflags);
 	if (path->path_id == sd->current_path_id) {
@@ -356,6 +365,9 @@ static void minrtt_loss_detected(struct tquic_connection *conn,
 
 	if (!sd)
 		return;
+
+	tquic_dbg("sched_minrtt: loss_detected path=%u lost=%llu\n",
+		  path->path_id, lost_bytes);
 
 	/*
 	 * If loss occurs on current path, force path re-evaluation.
@@ -410,6 +422,8 @@ static int rr_init(struct tquic_connection *conn)
 {
 	struct rr_sched_data *rd;
 
+	tquic_dbg("sched_rr: init\n");
+
 	rd = kzalloc(sizeof(*rd), GFP_ATOMIC);
 	if (!rd)
 		return -ENOMEM;
@@ -455,6 +469,8 @@ static int rr_get_path(struct tquic_connection *conn,
 
 	if (!rd)
 		return -EINVAL;
+
+	tquic_dbg("sched_rr: get_path flags=0x%x\n", flags);
 
 	rcu_read_lock();
 

@@ -48,6 +48,8 @@ static void tquic_reorder_timeout_handler(struct work_struct *work)
 		container_of(work, struct tquic_reorder_buffer,
 			     timeout_work.work);
 
+	tquic_dbg("reorder_timeout_handler: gap_timeout=%ums buffered=%u\n",
+		  rb->gap_timeout_ms, rb->packet_count);
 	if (rb->deliver_fn)
 		tquic_reorder_flush_timeout(rb, rb->deliver_fn,
 					    rb->deliver_ctx);
@@ -70,6 +72,8 @@ struct tquic_reorder_buffer *tquic_reorder_alloc(gfp_t gfp)
 {
 	struct tquic_reorder_buffer *rb;
 
+	tquic_dbg("reorder_alloc: allocating reorder buffer\n");
+
 	rb = kzalloc(sizeof(*rb), gfp);
 	if (!rb)
 		return NULL;
@@ -77,6 +81,7 @@ struct tquic_reorder_buffer *tquic_reorder_alloc(gfp_t gfp)
 	rb->queue = RB_ROOT;
 	spin_lock_init(&rb->buffer_lock);
 
+	tquic_dbg("reorder_alloc: buffer allocated successfully\n");
 	return rb;
 }
 EXPORT_SYMBOL_GPL(tquic_reorder_alloc);
@@ -161,6 +166,9 @@ void tquic_reorder_destroy(struct tquic_reorder_buffer *rb)
 
 	if (!rb)
 		return;
+
+	tquic_dbg("reorder_destroy: freeing buffer (buffered=%u bytes=%zu)\n",
+		  rb->packet_count, rb->buffer_bytes);
 
 	/* Cancel pending timeout work */
 	if (rb->wq && rb->timeout_scheduled)
@@ -592,6 +600,8 @@ EXPORT_SYMBOL_GPL(tquic_reorder_adapt_size);
 void tquic_reorder_get_stats(struct tquic_reorder_buffer *rb,
 			     struct tquic_reorder_stats *stats)
 {
+	tquic_dbg("reorder_get_stats: retrieving reorder buffer stats\n");
+
 	if (!rb || !stats)
 		return;
 

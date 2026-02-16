@@ -93,6 +93,9 @@ static struct tquic_rl_state *tquic_rl_pernet(struct net *net)
 
 static u32 tquic_rl_addr_hash(const struct sockaddr_storage *addr)
 {
+	tquic_dbg("tquic_rl_addr_hash: hashing addr family=%u\n",
+		  addr->ss_family);
+
 	if (addr->ss_family == AF_INET) {
 		const struct sockaddr_in *sin = (const struct sockaddr_in *)addr;
 		return jhash_1word(sin->sin_addr.s_addr, 0);
@@ -214,6 +217,8 @@ static void tquic_rl_refill_tokens(struct tquic_rl_bucket *bucket)
 	unsigned long elapsed_ms;
 	int tokens, new_tokens, max_tokens;
 
+	tquic_dbg("tquic_rl_refill_tokens: refilling token bucket\n");
+
 	if (!time_after(now, bucket->last_refill))
 		return;
 
@@ -271,6 +276,8 @@ static bool tquic_rl_try_consume_token(struct tquic_rl_bucket *bucket)
 	unsigned long flags;
 	bool allowed;
 
+	tquic_dbg("tquic_rl_try_consume_token: attempting token consumption\n");
+
 	spin_lock_irqsave(&bucket->lock, flags);
 
 	/* Refill tokens first */
@@ -290,6 +297,7 @@ static bool tquic_rl_try_consume_token(struct tquic_rl_bucket *bucket)
 
 	spin_unlock_irqrestore(&bucket->lock, flags);
 
+	tquic_dbg("tquic_rl_try_consume_token: allowed=%d\n", allowed);
 	return allowed;
 }
 
@@ -356,6 +364,8 @@ static void tquic_rl_rotate_secret_internal(struct tquic_rl_state *state)
 int tquic_ratelimit_rotate_secret(struct net *net)
 {
 	struct tquic_rl_state *state = tquic_rl_pernet(net);
+
+	tquic_dbg("tquic_ratelimit_rotate_secret: rotating cookie secret\n");
 
 	if (!state || !state->initialized)
 		return -EINVAL;
@@ -947,6 +957,8 @@ static void tquic_rl_rate_calc_work_fn(struct work_struct *work)
 	unsigned long elapsed_ms;
 	int count, rate;
 
+	tquic_dbg("tquic_rl_rate_calc_work_fn: recalculating connection rate\n");
+
 	if (!state->initialized)
 		return;
 
@@ -1002,6 +1014,8 @@ void tquic_ratelimit_get_stats(struct net *net, struct tquic_rl_stats *stats)
 {
 	struct tquic_rl_state *state = tquic_rl_pernet(net);
 
+	tquic_dbg("tquic_ratelimit_get_stats: fetching rate limiter stats\n");
+
 	if (!state || !state->initialized) {
 		memset(stats, 0, sizeof(*stats));
 		return;
@@ -1014,11 +1028,16 @@ EXPORT_SYMBOL_GPL(tquic_ratelimit_get_stats);
 bool tquic_ratelimit_is_attack_mode(struct net *net)
 {
 	struct tquic_rl_state *state = tquic_rl_pernet(net);
+	bool attack;
+
+	tquic_dbg("tquic_ratelimit_is_attack_mode: checking attack mode\n");
 
 	if (!state || !state->initialized)
 		return false;
 
-	return READ_ONCE(state->attack_mode);
+	attack = READ_ONCE(state->attack_mode);
+	tquic_dbg("tquic_ratelimit_is_attack_mode: attack_mode=%d\n", attack);
+	return attack;
 }
 EXPORT_SYMBOL_GPL(tquic_ratelimit_is_attack_mode);
 
@@ -1033,6 +1052,8 @@ int tquic_ratelimit_proc_show(struct seq_file *seq, void *v)
 	struct net *net;
 	struct tquic_rl_state *state;
 	struct tquic_rl_stats *stats;
+
+	tquic_dbg("tquic_ratelimit_proc_show: rendering proc stats\n");
 
 	/*
 	 * This proc entry is opened via single_open(..., pde_data(inode)),

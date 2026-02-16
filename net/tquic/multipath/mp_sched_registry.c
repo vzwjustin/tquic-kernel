@@ -30,6 +30,8 @@ static struct tquic_mp_sched_ops *tquic_mp_sched_get(const char *name)
 	struct tquic_mp_sched_ops *sched = NULL;
 	struct tquic_mp_sched_ops *iter;
 
+	tquic_dbg("sched_reg: get name=%s\n", name ? name : "(null)");
+
 	spin_lock(&tquic_mp_sched_list_lock);
 
 	if (name && name[0]) {
@@ -125,6 +127,8 @@ struct tquic_mp_sched_ops *tquic_mp_sched_find(const char *name)
 {
 	struct tquic_mp_sched_ops *sched, *ret = NULL;
 
+	tquic_dbg("sched_reg: find name=%s\n", name ? name : "(null)");
+
 	if (!name || !name[0])
 		return NULL;
 
@@ -145,6 +149,8 @@ int tquic_mp_sched_init_conn(struct tquic_connection *conn, const char *name)
 	struct tquic_mp_sched_ops *sched;
 	struct tquic_mp_sched_ops *old;
 	int ret = 0;
+
+	tquic_dbg("sched_reg: init_conn name=%s\n", name ? name : "(default)");
 
 	if (!conn)
 		return -EINVAL;
@@ -187,6 +193,8 @@ void tquic_mp_sched_release_conn(struct tquic_connection *conn)
 {
 	struct tquic_mp_sched_ops *sched;
 
+	tquic_dbg("sched_reg: release_conn\n");
+
 	if (!conn)
 		return;
 
@@ -214,6 +222,8 @@ int tquic_mp_sched_get_path(struct tquic_connection *conn,
 	struct tquic_mp_sched_ops *sched;
 	int ret;
 
+	tquic_dbg("sched_reg: get_path flags=0x%x\n", flags);
+
 	if (!conn || !result)
 		return -EINVAL;
 
@@ -238,6 +248,9 @@ void tquic_mp_sched_notify_sent(struct tquic_connection *conn,
 {
 	struct tquic_mp_sched_ops *sched;
 
+	tquic_dbg("sched_reg: notify_sent path=%u bytes=%u\n",
+		  path ? path->path_id : 0, sent_bytes);
+
 	if (!conn || !path)
 		return;
 
@@ -254,6 +267,9 @@ void tquic_mp_sched_notify_ack(struct tquic_connection *conn,
 {
 	struct tquic_mp_sched_ops *sched;
 
+	tquic_dbg("sched_reg: notify_ack path=%u acked=%llu\n",
+		  path ? path->path_id : 0, acked_bytes);
+
 	if (!conn || !path)
 		return;
 
@@ -269,6 +285,9 @@ void tquic_mp_sched_notify_loss(struct tquic_connection *conn,
 				struct tquic_path *path, u64 lost_bytes)
 {
 	struct tquic_mp_sched_ops *sched;
+
+	tquic_dbg("sched_reg: notify_loss path=%u lost=%llu\n",
+		  path ? path->path_id : 0, lost_bytes);
 
 	if (!conn || !path)
 		return;

@@ -191,6 +191,8 @@ static s64 blest_blocking_estimate(struct blest_sched_data *sd,
 	u64 slow_arrival_time;
 	u64 fast_completion_time;
 
+	tquic_dbg("sched_blest: blocking_estimate seg=%u\n", segment_size);
+
 	if (!fast || !slow)
 		return 0;
 
@@ -265,6 +267,8 @@ static int blest_get_path(struct tquic_connection *conn,
 
 	if (!sd)
 		return -EINVAL;
+
+	tquic_dbg("sched_blest: get_path flags=0x%x\n", flags);
 
 	rcu_read_lock();
 	spin_lock_irqsave(&sd->lock, irqflags);
@@ -404,6 +408,8 @@ static int blest_init(struct tquic_connection *conn)
 {
 	struct blest_sched_data *sd;
 
+	tquic_dbg("sched_blest: init\n");
+
 	sd = kzalloc(sizeof(*sd), GFP_ATOMIC);
 	if (!sd)
 		return -ENOMEM;
@@ -444,6 +450,8 @@ static void blest_path_added(struct tquic_connection *conn,
 	if (!sd)
 		return;
 
+	tquic_dbg("sched_blest: path_added path=%u\n", path->path_id);
+
 	spin_lock_irqsave(&sd->lock, irqflags);
 	ps = blest_alloc_path_state(sd, path->path_id);
 	if (ps) {
@@ -483,6 +491,8 @@ static void blest_path_removed(struct tquic_connection *conn,
 	if (!sd)
 		return;
 
+	tquic_dbg("sched_blest: path_removed path=%u\n", path->path_id);
+
 	spin_lock_irqsave(&sd->lock, irqflags);
 	ps = blest_find_path_state(sd, path->path_id);
 	if (ps) {
@@ -513,6 +523,9 @@ static void blest_packet_sent(struct tquic_connection *conn,
 
 	if (!sd)
 		return;
+
+	tquic_dbg("sched_blest: packet_sent path=%u bytes=%u\n",
+		  path->path_id, sent_bytes);
 
 	spin_lock_irqsave(&sd->lock, irqflags);
 	ps = blest_find_path_state(sd, path->path_id);
@@ -554,6 +567,9 @@ static void blest_ack_received(struct tquic_connection *conn,
 
 	if (!sd)
 		return;
+
+	tquic_dbg("sched_blest: ack_received path=%u bytes=%llu\n",
+		  path->path_id, acked_bytes);
 
 	spin_lock_irqsave(&sd->lock, irqflags);
 	ps = blest_find_path_state(sd, path->path_id);
@@ -602,6 +618,9 @@ static void blest_loss_detected(struct tquic_connection *conn,
 
 	if (!sd)
 		return;
+
+	tquic_dbg("sched_blest: loss_detected path=%u lost=%llu\n",
+		  path->path_id, lost_bytes);
 
 	spin_lock_irqsave(&sd->lock, irqflags);
 	ps = blest_find_path_state(sd, path->path_id);

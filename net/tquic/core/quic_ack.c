@@ -476,6 +476,9 @@ void tquic_ack_on_packet_received(struct tquic_connection *conn, u64 pn,
 	if (!conn || pn_space >= TQUIC_PN_SPACE_COUNT)
 		return;
 
+	tquic_dbg("tquic_ack_on_packet_received: pn=%llu space=%u\n",
+		  pn, pn_space);
+
 	ctx = tquic_ack_ctx(conn);
 	space = &ctx->pn_spaces[pn_space];
 	ack_info = &space->recv_ack_info;
@@ -779,6 +782,7 @@ int tquic_ack_create(struct tquic_connection *conn, u8 pn_space,
 	unsigned long flags;
 	int i;
 
+	tquic_dbg("tquic_ack_create: pn_space=%u\n", pn_space);
 	if (!conn || !skb || pn_space >= TQUIC_PN_SPACE_COUNT)
 		return -EINVAL;
 
@@ -1113,6 +1117,8 @@ static void tquic_ack_reset(struct tquic_connection *conn, u8 pn_space)
 	if (!conn || pn_space >= TQUIC_PN_SPACE_COUNT)
 		return;
 
+	tquic_dbg("tquic_ack_reset: clearing space=%u\n", pn_space);
+
 	ctx = tquic_ack_ctx(conn);
 	space = &ctx->pn_spaces[pn_space];
 	ack_info = &space->recv_ack_info;
@@ -1142,6 +1148,8 @@ static void tquic_ack_space_init(struct tquic_connection *conn, u8 pn_space)
 
 	if (!conn || pn_space >= TQUIC_PN_SPACE_COUNT)
 		return;
+
+	tquic_dbg("tquic_ack_space_init: initializing space=%u\n", pn_space);
 
 	ctx = tquic_ack_ctx(conn);
 	space = &ctx->pn_spaces[pn_space];

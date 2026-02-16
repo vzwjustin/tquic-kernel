@@ -155,6 +155,9 @@ static u64 ecf_completion_time(struct ecf_path_state *ps, u32 segment_size)
 	if (!ps || ps->send_rate == 0)
 		return U64_MAX; /* Unknown rate, avoid this path */
 
+	tquic_dbg("sched_ecf: completion_time inflight=%llu rate=%llu rtt=%u\n",
+		  ps->inflight_bytes, ps->send_rate, ps->rtt_us);
+
 	/*
 	 * Queue time: time for inflight + new segment to be transmitted
 	 * = (inflight_bytes + segment_size) / send_rate
@@ -181,6 +184,9 @@ static u64 ecf_completion_time(struct ecf_path_state *ps, u32 segment_size)
 static void ecf_update_rate_from_path(struct ecf_path_state *ps,
 				      struct tquic_path *path)
 {
+	tquic_dbg("sched_ecf: update_rate path=%u cur_rate=%llu\n",
+		  path->path_id, ps->send_rate);
+
 	/* Prefer explicit bandwidth measurement */
 	if (path->cc.bandwidth > 0) {
 		ps->send_rate = path->cc.bandwidth;
@@ -228,6 +234,8 @@ static int ecf_get_path(struct tquic_connection *conn,
 
 	if (!sd)
 		return -EINVAL;
+
+	tquic_dbg("sched_ecf: get_path flags=0x%x\n", flags);
 
 	rcu_read_lock();
 
@@ -332,6 +340,8 @@ static int ecf_init(struct tquic_connection *conn)
 {
 	struct ecf_sched_data *sd;
 
+	tquic_dbg("sched_ecf: init\n");
+
 	sd = kzalloc(sizeof(*sd), GFP_ATOMIC);
 	if (!sd)
 		return -ENOMEM;
@@ -371,6 +381,8 @@ static void ecf_path_added(struct tquic_connection *conn,
 	if (!sd)
 		return;
 
+	tquic_dbg("sched_ecf: path_added path=%u\n", path->path_id);
+
 	/*
 	 * Hold sd->lock around the find-or-alloc to prevent a
 	 * concurrent ecf_get_path() from allocating a duplicate
@@ -405,6 +417,8 @@ static void ecf_path_removed(struct tquic_connection *conn,
 	if (!sd)
 		return;
 
+	tquic_dbg("sched_ecf: path_removed path=%u\n", path->path_id);
+
 	spin_lock_bh(&sd->lock);
 	ps = ecf_find_path_state(sd, path->path_id);
 	if (ps) {
@@ -436,6 +450,9 @@ static void ecf_packet_sent(struct tquic_connection *conn,
 	if (!sd)
 		return;
 
+	tquic_dbg("sched_ecf: packet_sent path=%u bytes=%u\n",
+		  path->path_id, sent_bytes);
+
 	spin_lock_bh(&sd->lock);
 	ps = ecf_find_path_state(sd, path->path_id);
 	if (!ps) {
@@ -465,6 +482,9 @@ static void ecf_ack_received(struct tquic_connection *conn,
 
 	if (!sd)
 		return;
+
+	tquic_dbg("sched_ecf: ack_received path=%u bytes=%llu\n",
+		  path->path_id, acked_bytes);
 
 	spin_lock_bh(&sd->lock);
 	ps = ecf_find_path_state(sd, path->path_id);
@@ -500,6 +520,9 @@ static void ecf_loss_detected(struct tquic_connection *conn,
 
 	if (!sd)
 		return;
+
+	tquic_dbg("sched_ecf: loss_detected path=%u lost=%llu\n",
+		  path->path_id, lost_bytes);
 
 	spin_lock_bh(&sd->lock);
 	ps = ecf_find_path_state(sd, path->path_id);

@@ -173,6 +173,7 @@ static int tquic_key_update_tx(struct tquic_connection *conn)
 	u8 new_secret[64];
 	int err;
 
+	tquic_dbg("tquic_key_update_tx: deriving new TX keys\n");
 	if (!ctx || !ctx->hash || !ctx->keys_available)
 		return -EINVAL;
 
@@ -230,6 +231,7 @@ static int tquic_key_update_rx(struct tquic_connection *conn)
 	const char *aead_name;
 	int err;
 
+	tquic_dbg("tquic_key_update_rx: deriving new RX keys\n");
 	if (!ctx || !ctx->hash || !ctx->keys_available)
 		return -EINVAL;
 

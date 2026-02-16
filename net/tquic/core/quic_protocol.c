@@ -394,6 +394,8 @@ static void tquic_proto_close(struct sock *sk, long timeout)
 	struct tquic_sock *tsk = tquic_sk(sk);
 	struct tquic_connection *conn;
 
+	tquic_dbg("tquic_proto_close: sk=%p timeout=%ld\n", sk, timeout);
+
 	lock_sock(sk);
 
 	conn = tquic_sock_conn_get(tsk);
@@ -434,6 +436,9 @@ static int tquic_proto_connect(struct sock *sk, tquic_sockaddr_t *uaddr,
 	struct tquic_connection *conn;
 	int err;
 
+	tquic_dbg("tquic_proto_connect: sk=%p family=%u addr_len=%d\n",
+		  sk, addr->sa_family, addr_len);
+
 	lock_sock(sk);
 
 	read_lock_bh(&sk->sk_callback_lock);
@@ -473,6 +478,8 @@ static int tquic_proto_disconnect(struct sock *sk, int flags)
 	struct tquic_connection *conn;
 	struct tquic_stream *dstream;
 
+	tquic_dbg("tquic_proto_disconnect: sk=%p flags=0x%x\n", sk, flags);
+
 	write_lock_bh(&sk->sk_callback_lock);
 	conn = tsk->conn;
 	dstream = tsk->default_stream;
@@ -499,6 +506,9 @@ static struct sock *tquic_proto_accept(struct sock *sk,
 	struct tquic_sock *newtsk;
 	struct sock *newsk;
 	DEFINE_WAIT(wait);
+
+	tquic_dbg("tquic_proto_accept: sk=%p sk_state=%u\n",
+		  sk, sk->sk_state);
 
 	lock_sock(sk);
 
@@ -559,6 +569,9 @@ static struct sock *tquic_proto_accept(struct sock *sk,
 	struct sock *newsk;
 	DEFINE_WAIT(wait);
 
+	tquic_dbg("tquic_proto_accept: sk=%p flags=0x%x sk_state=%u\n",
+		  sk, flags, sk->sk_state);
+
 	lock_sock(sk);
 
 	if (sk->sk_state != TCP_LISTEN) {
@@ -617,6 +630,8 @@ static int tquic_proto_ioctl(struct sock *sk, int cmd, int *karg)
 	struct tquic_connection *conn;
 	int ret = 0;
 
+	tquic_dbg("tquic_proto_ioctl: sk=%p cmd=0x%x\n", sk, cmd);
+
 	conn = tquic_sock_conn_get(tsk);
 	switch (cmd) {
 	case SIOCOUTQ:
@@ -653,6 +668,9 @@ static int tquic_proto_ioctl(struct sock *sk, int cmd, int *karg)
 static int tquic_proto_init_sock(struct sock *sk)
 {
 	struct tquic_sock *tsk = tquic_sk(sk);
+
+	tquic_dbg("tquic_proto_init_sock: sk=%p family=%u\n",
+		  sk, sk->sk_family);
 
 	write_lock_bh(&sk->sk_callback_lock);
 	tsk->conn = NULL;
@@ -733,6 +751,8 @@ static void tquic_proto_destroy_sock(struct sock *sk)
 	struct tquic_connection *conn;
 	struct tquic_stream *dstream;
 
+	tquic_dbg("tquic_proto_destroy_sock: sk=%p\n", sk);
+
 	write_lock_bh(&sk->sk_callback_lock);
 	conn = tsk->conn;
 	dstream = tsk->default_stream;
@@ -754,6 +774,8 @@ static void tquic_proto_shutdown(struct sock *sk, int how)
 	struct tquic_sock *tsk = tquic_sk(sk);
 	struct tquic_connection *conn;
 
+	tquic_dbg("tquic_proto_shutdown: sk=%p how=%d\n", sk, how);
+
 	conn = tquic_sock_conn_get(tsk);
 	if (!conn)
 		return;
@@ -774,6 +796,9 @@ static int tquic_proto_setsockopt(struct sock *sk, int level, int optname,
 
 	if (level != SOL_TQUIC)
 		return -ENOPROTOOPT;
+
+	tquic_dbg("tquic_proto_setsockopt: sk=%p optname=%d optlen=%u\n",
+		  sk, optname, optlen);
 
 	lock_sock(sk);
 	conn = tquic_sock_conn_get(tsk);
@@ -952,6 +977,8 @@ static int tquic_proto_getsockopt(struct sock *sk, int level, int optname,
 	if (level != SOL_TQUIC)
 		return -ENOPROTOOPT;
 
+	tquic_dbg("tquic_proto_getsockopt: sk=%p optname=%d\n", sk, optname);
+
 	if (get_user(len, optlen))
 		return -EFAULT;
 
@@ -1038,6 +1065,8 @@ static int tquic_proto_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 	struct tquic_connection *conn;
 	int ret;
 
+	tquic_dbg("tquic_proto_sendmsg: sk=%p len=%zu\n", sk, len);
+
 	conn = tquic_sock_conn_get(tsk);
 	if (!conn || READ_ONCE(conn->state) != TQUIC_CONN_CONNECTED)
 		ret = -ENOTCONN;
@@ -1056,6 +1085,9 @@ static int tquic_proto_recvmsg(struct sock *sk, struct msghdr *msg, size_t len,
 	struct tquic_connection *conn;
 	int ret;
 
+	tquic_dbg("tquic_proto_recvmsg: sk=%p len=%zu flags=0x%x\n",
+		  sk, len, flags);
+
 	conn = tquic_sock_conn_get(tsk);
 	if (!conn)
 		return -ENOTCONN;
@@ -1072,6 +1104,9 @@ static int tquic_proto_bind(struct sock *sk, tquic_sockaddr_t *uaddr,
 	struct sockaddr *addr = (struct sockaddr *)uaddr;
 	struct tquic_sock *tsk = tquic_sk(sk);
 
+	tquic_dbg("tquic_proto_bind: sk=%p family=%u addr_len=%d\n",
+		  sk, addr->sa_family, addr_len);
+
 	/* Store bind address */
 	if (addr_len > sizeof(tsk->bind_addr))
 		return -EINVAL;
@@ -1086,6 +1121,9 @@ static int tquic_proto_backlog_rcv(struct sock *sk, struct sk_buff *skb)
 {
 	struct tquic_sock *tsk = tquic_sk(sk);
 	struct tquic_connection *conn;
+
+	tquic_dbg("tquic_proto_backlog_rcv: sk=%p skb_len=%u\n",
+		  sk, skb->len);
 
 	conn = tquic_sock_conn_get(tsk);
 	if (conn) {
@@ -1123,6 +1161,8 @@ static void tquic_proto_unhash(struct sock *sk)
 {
 	struct tquic_sock *tsk = tquic_sk(sk);
 	struct tquic_connection *conn;
+
+	tquic_dbg("tquic_proto_unhash: sk=%p\n", sk);
 
 	conn = tquic_sock_conn_get(tsk);
 	if (conn) {
@@ -1197,6 +1237,8 @@ static int tquic_stream_connect(struct socket *sock, tquic_sockaddr_t *addr,
 {
 	struct sock *sk = sock->sk;
 	int err;
+
+	tquic_dbg("tquic_stream_connect: sk=%p flags=0x%x\n", sk, flags);
 
 	err = tquic_connect(sk, addr, addr_len);
 	if (err)
@@ -1296,6 +1338,8 @@ static int tquic_stream_getname(struct socket *sock, struct sockaddr *addr,
 	struct sockaddr_storage *saddr;
 	int ret;
 
+	tquic_dbg("tquic_stream_getname: sk=%p peer=%d\n", sk, peer);
+
 	conn = tquic_sock_conn_get(tsk);
 	if (!conn)
 		return -ENOTCONN;
@@ -1334,6 +1378,8 @@ static __poll_t tquic_stream_poll(struct file *file, struct socket *sock,
 	struct tquic_sock *tsk = tquic_sk(sk);
 	struct tquic_connection *conn;
 	__poll_t mask = 0;
+
+	tquic_dbg("tquic_stream_poll: sk=%p sk_state=%u\n", sk, sk->sk_state);
 
 	sock_poll_wait(file, sock, wait);
 
@@ -1385,6 +1431,8 @@ static int tquic_stream_listen(struct socket *sock, int backlog)
 	struct sock *sk = sock->sk;
 	struct tquic_sock *tsk = tquic_sk(sk);
 	int err;
+
+	tquic_dbg("tquic_stream_listen: sk=%p backlog=%d\n", sk, backlog);
 
 	lock_sock(sk);
 
@@ -1448,6 +1496,9 @@ static int tquic_create(struct net *net, struct socket *sock, int protocol,
 {
 	struct sock *sk;
 	int err;
+
+	tquic_dbg("tquic_create: type=%d protocol=%d kern=%d\n",
+		  sock->type, protocol, kern);
 
 	if (sock->type != SOCK_STREAM && sock->type != SOCK_DGRAM)
 		return -ESOCKTNOSUPPORT;

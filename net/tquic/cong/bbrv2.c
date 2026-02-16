@@ -73,6 +73,9 @@ static u64 bbr_minmax_running_max(struct bbr_minmax *filter, u64 now, u64 value)
 	struct bbr_minmax_sample *s = filter->samples;
 	u64 dt = now - s[0].time;
 
+	tquic_dbg("bbrv2: minmax_max value=%llu cur_max=%llu\n",
+		  value, s[0].value);
+
 	/* New maximum or window expired */
 	if (value >= s[0].value || dt > filter->window_len) {
 		s[0].time = now;
@@ -116,6 +119,9 @@ static u64 bbr_minmax_running_min(struct bbr_minmax *filter, u64 now, u64 value)
 {
 	struct bbr_minmax_sample *s = filter->samples;
 	u64 dt = now - s[0].time;
+
+	tquic_dbg("bbrv2: minmax_min value=%llu cur_min=%llu\n",
+		  value, s[0].value);
 
 	/* New minimum or window expired */
 	if (value <= s[0].value || dt > filter->window_len) {
@@ -184,6 +190,9 @@ static u32 bbr_inflight(struct bbrv2 *bbr, u32 gain)
 	u64 inflight;
 	u32 mss = bbr_get_mss(bbr);
 
+	tquic_dbg("bbrv2: inflight bw=%llu min_rtt=%llu gain=%u\n",
+		  bbr->bw, bbr->min_rtt_us, gain);
+
 	inflight = bbr_bdp(bbr);
 	inflight = (inflight * gain) >> BBR_SCALE;
 
@@ -202,6 +211,9 @@ static u32 bbr_inflight(struct bbrv2 *bbr, u32 gain)
  */
 static void bbr_update_round(struct bbrv2 *bbr, u64 delivered)
 {
+	tquic_dbg("bbrv2: update_round delivered=%llu next=%llu round=%u\n",
+		  delivered, bbr->next_round_delivered, bbr->round_count);
+
 	if (delivered >= bbr->next_round_delivered) {
 		bbr->round_start = true;
 		bbr->round_count++;
@@ -222,6 +234,9 @@ static void bbr_update_round(struct bbrv2 *bbr, u64 delivered)
 static void bbr_check_full_bw_reached(struct bbrv2 *bbr)
 {
 	u64 bw_thresh;
+
+	tquic_dbg("bbrv2: check_full_bw bw=%llu full_bw=%llu count=%u\n",
+		  bbr->bw, bbr->full_bw, bbr->full_bw_count);
 
 	if (bbr->full_bw_reached || !bbr->round_start)
 		return;
@@ -249,6 +264,9 @@ static void bbr_set_cwnd(struct bbrv2 *bbr)
 {
 	u32 target;
 	u32 mss = bbr_get_mss(bbr);
+
+	tquic_dbg("bbrv2: set_cwnd cur=%u inflight_lo=%u inflight_hi=%u\n",
+		  bbr->cwnd, bbr->inflight_lo, bbr->inflight_hi);
 
 	target = bbr_inflight(bbr, bbr->cwnd_gain);
 
@@ -335,6 +353,9 @@ static void bbr_update_model(struct bbrv2 *bbr, u64 acked, u64 rtt_us)
 	u64 now = ktime_get_ns();
 	u64 bw_sample;
 
+	tquic_dbg("bbrv2: update_model acked=%llu rtt=%llu bw=%llu\n",
+		  acked, rtt_us, bbr->bw);
+
 	/* Update round */
 	bbr->bytes_delivered += acked;
 	bbr_update_round(bbr, bbr->bytes_delivered);
@@ -380,6 +401,9 @@ static void bbr_update_gains_cycle(struct bbrv2 *bbr)
 	u64 now = ktime_get_ns();
 	u64 cycle_elapsed;
 
+	tquic_dbg("bbrv2: update_gains_cycle mode=%d idx=%u\n",
+		  bbr->mode, bbr->cycle_idx);
+
 	if (bbr->mode != BBR_PROBE_BW)
 		return;
 
@@ -401,6 +425,8 @@ static void bbr_update_gains_cycle(struct bbrv2 *bbr)
 static void bbr_check_probe_rtt(struct bbrv2 *bbr)
 {
 	u64 now = ktime_get_ns();
+
+	tquic_dbg("bbrv2: check_probe_rtt mode=%d\n", bbr->mode);
 
 	/* Periodically probe RTT to maintain accurate min_rtt */
 	if (bbr->mode != BBR_PROBE_RTT &&
@@ -504,6 +530,9 @@ static u64 bbrv2_get_pacing_rate(void *cong_data)
 	if (!bbr || bbr->bw == 0)
 		return 0;
 
+	tquic_dbg("bbrv2: get_pacing_rate bw=%llu gain=%u\n",
+		  bbr->bw, bbr->pacing_gain);
+
 	rate = (bbr->bw * bbr->pacing_gain) >> BBR_SCALE;
 
 	/* Apply headroom for BBRv2 */
@@ -525,6 +554,9 @@ static void bbrv2_on_ack(void *cong_data, u64 bytes_acked, u64 rtt_us)
 
 	if (!bbr)
 		return;
+
+	tquic_dbg("bbrv2: on_ack bytes=%llu rtt=%llu mode=%d cwnd=%u\n",
+		  bytes_acked, rtt_us, bbr->mode, bbr->cwnd);
 
 	mss = bbr_get_mss(bbr);
 
@@ -624,6 +656,9 @@ static void bbrv2_on_ecn(void *cong_data, u64 ecn_ce_count)
 
 	if (!bbr || !bbr->ecn_eligible || ecn_ce_count == 0)
 		return;
+
+	tquic_dbg("bbrv2: on_ecn ce_count=%llu in_round=%u thresh=%u\n",
+		  ecn_ce_count, bbr->ecn_in_round, bbr->params.ecn_factor);
 
 	mss = bbr_get_mss(bbr);
 	bbr->ecn_in_round += ecn_ce_count;

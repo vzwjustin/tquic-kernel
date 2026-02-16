@@ -194,6 +194,8 @@ static bool tquic_path_can_send_on(struct tquic_connection *conn)
 	}
 	rcu_read_unlock();
 
+	tquic_dbg("tquic_path_can_send_on: result=%d\n", can_send);
+
 	return can_send;
 }
 
@@ -279,6 +281,10 @@ static bool tquic_path_is_degraded(struct tquic_path *path)
 	struct tquic_path_stats *stats = &path->stats;
 	u64 loss_rate;
 
+	tquic_dbg("tquic_path_is_degraded: path_id=%u state=%d srtt=%u min_rtt=%u\n",
+		  path->path_id, path->state, stats->rtt_smoothed,
+		  stats->rtt_min);
+
 	if (path->state != TQUIC_PATH_ACTIVE)
 		return true;
 
@@ -310,6 +316,10 @@ static u64 tquic_path_compute_score(struct tquic_path *path)
 {
 	struct tquic_path_stats *stats = &path->stats;
 	u64 score = 1000000; /* Base score */
+
+	tquic_dbg("tquic_path_compute_score: path_id=%u state=%d srtt=%u bw=%llu\n",
+		  path->path_id, path->state, stats->rtt_smoothed,
+		  stats->bandwidth);
 
 	/* Only consider validated or active paths */
 	if (path->state != TQUIC_PATH_ACTIVE &&
@@ -350,6 +360,9 @@ static u64 tquic_path_compute_score(struct tquic_path *path)
 	else
 		score = score * path->weight;
 
+	tquic_dbg("tquic_path_compute_score: path_id=%u final_score=%llu\n",
+		  path->path_id, score);
+
 	return score;
 }
 
@@ -363,6 +376,10 @@ static u32 tquic_migration_timeout_us(struct tquic_path *path)
 {
 	u32 timeout_us;
 
+	tquic_dbg("tquic_migration_timeout_us: path_id=%u srtt=%u rttvar=%u\n",
+		  path->path_id, path->stats.rtt_smoothed,
+		  path->stats.rtt_variance);
+
 	if (path->stats.rtt_smoothed == 0) {
 		timeout_us = TQUIC_MIGRATION_DEFAULT_TIMEOUT_MS * 1000;
 	} else {
@@ -373,7 +390,12 @@ static u32 tquic_migration_timeout_us(struct tquic_path *path)
 	}
 
 	/* Clamp to reasonable bounds */
-	return clamp(timeout_us, 100000U, 10000000U);
+	timeout_us = clamp(timeout_us, 100000U, 10000000U);
+
+	tquic_dbg("tquic_migration_timeout_us: path_id=%u timeout=%u us\n",
+		  path->path_id, timeout_us);
+
+	return timeout_us;
 }
 
 /*
@@ -415,6 +437,10 @@ static int tquic_migration_alloc_path_id_locked(struct tquic_connection *conn)
 	bool used[TQUIC_MAX_PATHS] = { 0 };
 	struct tquic_path *path;
 	u32 id;
+	int ret;
+
+	tquic_dbg("tquic_migration_alloc_path_id_locked: num_paths=%u\n",
+		  conn->num_paths);
 
 	list_for_each_entry(path, &conn->paths, list) {
 		if (path->path_id < TQUIC_MAX_PATHS)
@@ -422,11 +448,18 @@ static int tquic_migration_alloc_path_id_locked(struct tquic_connection *conn)
 	}
 
 	for (id = 0; id < TQUIC_MAX_PATHS; id++) {
-		if (!used[id])
+		if (!used[id]) {
+			tquic_dbg("tquic_migration_alloc_path_id_locked: allocated id=%u\n",
+				  id);
 			return id;
+		}
 	}
 
-	return -ENOSPC;
+	ret = -ENOSPC;
+	tquic_dbg("tquic_migration_alloc_path_id_locked: no free id, ret=%d\n",
+		  ret);
+
+	return ret;
 }
 
 /**
@@ -558,6 +591,9 @@ void tquic_path_free(struct tquic_path *path)
 	if (!path)
 		return;
 
+	tquic_dbg("tquic_path_free: path_id=%u state=%d\n",
+		  path->path_id, path->state);
+
 	conn = path->conn;
 
 	/* Cancel validation timer */
@@ -600,6 +636,8 @@ void tquic_path_free(struct tquic_path *path)
 
 	if (linked)
 		synchronize_rcu();
+
+	tquic_dbg("tquic_path_free: path freed, was_linked=%d\n", linked);
 
 	kmem_cache_free(tquic_path_cache, path);
 }
@@ -1310,6 +1348,8 @@ void tquic_migration_cleanup(struct tquic_connection *conn)
 	if (!conn)
 		return;
 
+	tquic_dbg("tquic_migration_cleanup: cleaning up migration state\n");
+
 	/* Clean up general migration state */
 	ms = tquic_conn_get_migration_state(conn);
 	if (ms) {
@@ -1338,6 +1378,8 @@ void tquic_migration_cleanup(struct tquic_connection *conn)
 
 	/* Clean up preferred address migration state (RFC 9000 Section 9.6) */
 	tquic_pref_addr_client_cleanup(conn);
+
+	tquic_dbg("tquic_migration_cleanup: cleanup complete\n");
 }
 EXPORT_SYMBOL_GPL(tquic_migration_cleanup);
 
@@ -1616,6 +1658,9 @@ void tquic_session_cleanup(struct tquic_connection *conn)
 	if (!ss)
 		return;
 
+	tquic_dbg("tquic_session_cleanup: draining session state, ttl=%u ms\n",
+		  ss->ttl_ms);
+
 	/* Cancel TTL timer */
 	del_timer_sync(&ss->timer);
 
@@ -1626,6 +1671,8 @@ void tquic_session_cleanup(struct tquic_connection *conn)
 	/* Clear state */
 	conn->state_machine = NULL;
 	kfree(ss);
+
+	tquic_dbg("tquic_session_cleanup: session state freed\n");
 }
 EXPORT_SYMBOL_GPL(tquic_session_cleanup);
 

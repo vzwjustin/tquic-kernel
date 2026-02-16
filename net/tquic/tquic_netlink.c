@@ -377,6 +377,9 @@ static struct tquic_nl_conn_info *tquic_conn_lookup(struct net *net, u64 conn_id
 
 static void tquic_nl_conn_put(struct tquic_nl_conn_info *conn)
 {
+	tquic_dbg("tquic_nl_conn_put: conn_id=%llu refcnt=%u\n",
+		  conn->conn_id, refcount_read(&conn->refcnt));
+
 	if (refcount_dec_and_test(&conn->refcnt)) {
 		struct tquic_nl_path_info *path, *tmp;
 
@@ -714,6 +717,8 @@ static int tquic_nl_cmd_path_add(struct sk_buff *skb, struct genl_info *info)
 	u64 conn_id;
 	int ret;
 
+	tquic_dbg("tquic_nl_cmd_path_add: adding path via netlink\n");
+
 	if (GENL_REQ_ATTR_CHECK(info, TQUIC_NL_ATTR_CONN_ID))
 		return -EINVAL;
 
@@ -820,6 +825,8 @@ static int tquic_nl_cmd_path_remove(struct sk_buff *skb, struct genl_info *info)
 	u64 conn_id;
 	u32 path_id;
 
+	tquic_dbg("tquic_nl_cmd_path_remove: removing path via netlink\n");
+
 	if (GENL_REQ_ATTR_CHECK(info, TQUIC_NL_ATTR_CONN_ID) ||
 	    GENL_REQ_ATTR_CHECK(info, TQUIC_NL_ATTR_PATH_ID))
 		return -EINVAL;
@@ -870,6 +877,8 @@ static int tquic_nl_cmd_path_set(struct sk_buff *skb, struct genl_info *info)
 	struct tquic_nl_path_info *path;
 	u64 conn_id;
 	u32 path_id;
+
+	tquic_dbg("tquic_nl_cmd_path_set: modifying path settings\n");
 
 	if (GENL_REQ_ATTR_CHECK(info, TQUIC_NL_ATTR_CONN_ID) ||
 	    GENL_REQ_ATTR_CHECK(info, TQUIC_NL_ATTR_PATH_ID))
@@ -951,6 +960,8 @@ static int tquic_nl_cmd_path_get(struct sk_buff *skb, struct genl_info *info)
 	u64 conn_id;
 	u32 path_id;
 	int ret;
+
+	tquic_dbg("tquic_nl_cmd_path_get: querying path info\n");
 
 	if (GENL_REQ_ATTR_CHECK(info, TQUIC_NL_ATTR_CONN_ID) ||
 	    GENL_REQ_ATTR_CHECK(info, TQUIC_NL_ATTR_PATH_ID))
@@ -1132,6 +1143,8 @@ static int tquic_nl_cmd_sched_set(struct sk_buff *skb, struct genl_info *info)
 	const char *sched_name;
 	u64 conn_id;
 
+	tquic_dbg("tquic_nl_cmd_sched_set: setting scheduler via netlink\n");
+
 	if (GENL_REQ_ATTR_CHECK(info, TQUIC_NL_ATTR_CONN_ID) ||
 	    GENL_REQ_ATTR_CHECK(info, TQUIC_NL_ATTR_SCHED_NAME))
 		return -EINVAL;
@@ -1180,6 +1193,8 @@ static int tquic_nl_cmd_sched_get(struct sk_buff *skb, struct genl_info *info)
 	void *hdr;
 	u64 conn_id;
 	int ret;
+
+	tquic_dbg("tquic_nl_cmd_sched_get: querying scheduler\n");
 
 	if (GENL_REQ_ATTR_CHECK(info, TQUIC_NL_ATTR_CONN_ID))
 		return -EINVAL;
@@ -1255,6 +1270,8 @@ static int tquic_nl_cmd_stats_get(struct sk_buff *skb, struct genl_info *info)
 	u64 total_tx_bytes = 0, total_rx_bytes = 0;
 	u64 total_retrans = 0, total_spurious = 0;
 	int ret;
+
+	tquic_dbg("tquic_nl_cmd_stats_get: querying connection stats\n");
 
 	if (GENL_REQ_ATTR_CHECK(info, TQUIC_NL_ATTR_CONN_ID))
 		return -EINVAL;
@@ -1354,6 +1371,8 @@ static int tquic_nl_cmd_conn_get(struct sk_buff *skb, struct genl_info *info)
 	void *hdr;
 	u64 conn_id;
 	int ret;
+
+	tquic_dbg("tquic_nl_cmd_conn_get: querying connection info\n");
 
 	if (GENL_REQ_ATTR_CHECK(info, TQUIC_NL_ATTR_CONN_ID))
 		return -EINVAL;
@@ -1699,6 +1718,8 @@ static int __net_init tquic_net_init(struct net *net)
 {
 	struct tquic_net *tnet = tquic_get_net(net);
 
+	tquic_dbg("tquic_net_init: initializing per-netns state\n");
+
 	INIT_LIST_HEAD(&tnet->connections);
 	spin_lock_init(&tnet->conn_lock);
 	hash_init(tnet->conn_hash);
@@ -1710,6 +1731,8 @@ static void __net_exit tquic_net_exit(struct net *net)
 {
 	struct tquic_net *tnet = tquic_get_net(net);
 	struct tquic_nl_conn_info *conn;
+
+	tquic_dbg("tquic_net_exit: cleaning up per-netns state\n");
 
 	for (;;) {
 		spin_lock_bh(&tnet->conn_lock);
@@ -1966,6 +1989,9 @@ static void tquic_path_to_path_info(const struct tquic_path *path,
  */
 static enum tquic_event_type tquic_path_event_to_nl_event(int event)
 {
+	tquic_dbg("tquic_path_event_to_nl_event: converting event=%d\n",
+		  event);
+
 	/*
 	 * Handle tquic_path_event values (uapi/linux/tquic.h).
 	 * Note: TQUIC_PM_EVENT_* values (from uapi/linux/tquic_pm.h) have

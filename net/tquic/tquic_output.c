@@ -195,6 +195,8 @@ static inline int tquic_encode_varint(u8 *buf, size_t buf_len, u64 val)
 {
 	int len = tquic_varint_len(val);
 
+	tquic_dbg("encode_varint: val=%llu buf_len=%zu\n", val, buf_len);
+
 	if (len == 0)
 		return -EOVERFLOW;  /* Value exceeds QUIC varint range */
 	if (len > buf_len)
@@ -226,6 +228,7 @@ static inline int tquic_encode_varint(u8 *buf, size_t buf_len, u64 val)
 		break;
 	}
 
+	tquic_dbg("encode_varint: encoded len=%d\n", len);
 	return len;
 }
 
@@ -240,6 +243,8 @@ static inline int tquic_encode_varint(u8 *buf, size_t buf_len, u64 val)
  */
 static int tquic_gen_padding_frame(struct tquic_frame_ctx *ctx, size_t len)
 {
+	tquic_dbg("gen_padding: len=%zu offset=%zu\n", len, ctx->offset);
+
 	if (ctx->offset + len > ctx->buf_len)
 		return -ENOSPC;
 
@@ -254,6 +259,8 @@ static int tquic_gen_padding_frame(struct tquic_frame_ctx *ctx, size_t len)
  */
 static int __maybe_unused tquic_gen_ping_frame(struct tquic_frame_ctx *ctx)
 {
+	tquic_dbg("gen_ping: offset=%zu\n", ctx->offset);
+
 	if (ctx->offset + 1 > ctx->buf_len)
 		return -ENOSPC;
 
@@ -472,6 +479,8 @@ static int __maybe_unused tquic_gen_max_data_frame(struct tquic_frame_ctx *ctx, 
 {
 	u8 *start = ctx->buf + ctx->offset;
 	int ret;
+
+	tquic_dbg("gen_max_data: max_data=%llu\n", max_data);
 
 	if (ctx->offset + 1 > ctx->buf_len)
 		return -ENOSPC;
@@ -803,6 +812,9 @@ static int tquic_encode_pkt_num(u8 *buf, u64 pkt_num, u64 largest_acked)
 	u64 diff = pkt_num - largest_acked;
 	int len;
 
+	tquic_dbg("encode_pkt_num: pkt=%llu largest_acked=%llu\n",
+		  pkt_num, largest_acked);
+
 	if (diff < 128) {
 		len = 1;
 		buf[0] = (u8)pkt_num;
@@ -823,6 +835,7 @@ static int tquic_encode_pkt_num(u8 *buf, u64 pkt_num, u64 largest_acked)
 		buf[3] = (pkt_num & 0xff);
 	}
 
+	tquic_dbg("encode_pkt_num: encoded len=%d\n", len);
 	return len;
 }
 
@@ -1307,6 +1320,9 @@ EXPORT_SYMBOL_GPL(tquic_select_path);
 
 static inline bool tquic_output_path_usable(const struct tquic_path *path)
 {
+	tquic_dbg("output_path_usable: path=%p state=%d\n",
+		  path, path ? READ_ONCE(path->state) : -1);
+
 	return path &&
 	       (READ_ONCE(path->state) == TQUIC_PATH_ACTIVE ||
 		READ_ONCE(path->state) == TQUIC_PATH_VALIDATED);
@@ -1405,6 +1421,8 @@ EXPORT_SYMBOL_GPL(tquic_pacing_init);
  */
 void tquic_pacing_cleanup(struct tquic_pacing_state *pacing)
 {
+	tquic_dbg("pacing_cleanup: pacing=%p\n", pacing);
+
 	if (!pacing)
 		return;
 
@@ -1498,6 +1516,9 @@ static bool tquic_pacing_allows_send(struct sock *sk, struct sk_buff *skb)
 {
 	u64 len_ns;
 
+	tquic_dbg("pacing_allows_send: sk=%p skb_len=%u\n",
+		  sk, skb ? skb->len : 0);
+
 	if (!sk || !skb)
 		return true;
 
@@ -1530,6 +1551,8 @@ static bool tquic_pacing_allows_send(struct sock *sk, struct sk_buff *skb)
  */
 void tquic_pacing_update_rate(struct tquic_pacing_state *pacing, u64 rate)
 {
+	tquic_dbg("pacing_update_rate: rate=%llu\n", rate);
+
 	spin_lock_bh(&pacing->lock);
 	pacing->pacing_rate = rate;
 	spin_unlock_bh(&pacing->lock);
@@ -1565,6 +1588,8 @@ static enum hrtimer_restart tquic_pacing_timer(struct hrtimer *timer)
 							 struct tquic_pacing_state,
 							 timer);
 
+	tquic_dbg("pacing_timer: fired, scheduling work\n");
+
 	/* Schedule work to send packets */
 	schedule_work(&pacing->work);
 
@@ -1585,6 +1610,9 @@ static void tquic_pacing_work(struct work_struct *work)
 	ktime_t gap;
 	int sent = 0;
 	int batch_count = 0;
+
+	tquic_dbg("pacing_work: queue_len=%u rate=%llu\n",
+		  skb_queue_len(&pacing->queue), pacing->pacing_rate);
 
 	__skb_queue_head_init(&batch);
 
@@ -1653,6 +1681,9 @@ static void tquic_pacing_work(struct work_struct *work)
  */
 int tquic_pacing_send(struct tquic_pacing_state *pacing, struct sk_buff *skb)
 {
+	tquic_dbg("pacing_send: skb_len=%u timer_active=%d\n",
+		  skb ? skb->len : 0, pacing->timer_active);
+
 	spin_lock_bh(&pacing->lock);
 
 	/* Add to pacing queue */
@@ -2694,6 +2725,8 @@ EXPORT_SYMBOL_GPL(tquic_output_flush_crypto);
  */
 void tquic_datagram_init(struct tquic_connection *conn)
 {
+	tquic_dbg("datagram_init: conn=%p\n", conn);
+
 	if (!conn)
 		return;
 
@@ -2721,6 +2754,8 @@ EXPORT_SYMBOL_GPL(tquic_datagram_init);
 void tquic_datagram_cleanup(struct tquic_connection *conn)
 {
 	unsigned long flags;
+
+	tquic_dbg("datagram_cleanup: conn=%p\n", conn);
 
 	if (!conn)
 		return;
@@ -2753,6 +2788,9 @@ u64 tquic_datagram_max_size(struct tquic_connection *conn)
 	struct tquic_path *path;
 	u64 max_size;
 	u64 overhead;
+
+	tquic_dbg("datagram_max_size: conn=%p enabled=%d\n",
+		  conn, conn ? conn->datagram.enabled : 0);
 
 	if (!conn || !conn->datagram.enabled)
 		return 0;
@@ -2788,6 +2826,7 @@ u64 tquic_datagram_max_size(struct tquic_connection *conn)
 	    conn->datagram.max_send_size < max_size)
 		max_size = conn->datagram.max_send_size;
 
+	tquic_dbg("datagram_max_size: result=%llu\n", max_size);
 	return max_size;
 }
 EXPORT_SYMBOL_GPL(tquic_datagram_max_size);
@@ -2997,6 +3036,9 @@ static int tquic_datagram_wait_data(struct tquic_connection *conn, long *timeo)
 	struct sock *sk = conn->sk;
 	int ret;
 
+	tquic_dbg("datagram_wait_data: conn=%p timeo=%ld\n",
+		  conn, *timeo);
+
 	/*
 	 * Wait for one of:
 	 *   - Datagram available in receive queue
@@ -3046,6 +3088,7 @@ static int tquic_datagram_wait_data(struct tquic_connection *conn, long *timeo)
 		return -ENOTCONN;
 
 	/* Data should be available now */
+	tquic_dbg("datagram_wait_data: data available\n");
 	return 0;
 }
 
@@ -3168,6 +3211,7 @@ u32 tquic_datagram_queue_len(struct tquic_connection *conn)
 	len = conn->datagram.recv_queue_len;
 	spin_unlock_irqrestore(&conn->datagram.lock, flags);
 
+	tquic_dbg("datagram_queue_len: len=%u\n", len);
 	return len;
 }
 EXPORT_SYMBOL_GPL(tquic_datagram_queue_len);
@@ -3186,11 +3230,15 @@ EXPORT_SYMBOL_GPL(tquic_datagram_queue_len);
  */
 int __init tquic_output_tx_init(void)
 {
+	tquic_dbg("output_tx_init: creating frame slab cache\n");
+
 	tquic_frame_cache = kmem_cache_create("tquic_pending_frame",
 					      sizeof(struct tquic_pending_frame),
 					      0, SLAB_HWCACHE_ALIGN, NULL);
 	if (!tquic_frame_cache)
 		return -ENOMEM;
+
+	tquic_dbg("output_tx_init: frame cache created\n");
 	return 0;
 }
 

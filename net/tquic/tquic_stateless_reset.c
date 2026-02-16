@@ -293,6 +293,8 @@ static bool tquic_stateless_reset_rate_limit(struct tquic_stateless_reset_ctx *c
 	s64 elapsed_ms;
 	u32 refill;
 
+	tquic_dbg("tquic_stateless_reset_rate_limit: checking reset rate limit\n");
+
 	if (!ctx)
 		return false;
 
@@ -321,6 +323,8 @@ static bool tquic_stateless_reset_rate_limit(struct tquic_stateless_reset_ctx *c
 	ctx->rate_limit_tokens--;
 
 	spin_unlock_bh(&ctx->lock);
+	tquic_dbg("tquic_stateless_reset_rate_limit: allowed, tokens=%u\n",
+		  ctx->rate_limit_tokens);
 	return true;  /* Allowed */
 }
 
@@ -692,6 +696,8 @@ EXPORT_SYMBOL_GPL(tquic_stateless_reset_ctx_init);
 
 void tquic_stateless_reset_ctx_destroy(struct tquic_stateless_reset_ctx *ctx)
 {
+	tquic_dbg("tquic_stateless_reset_ctx_destroy: wiping reset context\n");
+
 	if (!ctx)
 		return;
 
@@ -717,6 +723,8 @@ bool tquic_stateless_reset_is_enabled(struct tquic_stateless_reset_ctx *ctx)
 {
 	bool enabled;
 
+	tquic_dbg("tquic_stateless_reset_is_enabled: checking reset enabled state\n");
+
 	if (!ctx)
 		return false;
 
@@ -724,6 +732,7 @@ bool tquic_stateless_reset_is_enabled(struct tquic_stateless_reset_ctx *ctx)
 	enabled = ctx->enabled;
 	spin_unlock_bh(&ctx->lock);
 
+	tquic_dbg("tquic_stateless_reset_is_enabled: enabled=%d\n", enabled);
 	return enabled;
 }
 EXPORT_SYMBOL_GPL(tquic_stateless_reset_is_enabled);

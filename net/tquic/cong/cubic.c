@@ -58,6 +58,8 @@ static u32 cubic_root(u64 a)
 {
 	u32 x, b, shift;
 
+	tquic_dbg("cubic: cubic_root a=%llu\n", a);
+
 	if (a == 0)
 		return 0;
 
@@ -80,6 +82,9 @@ static u32 cubic_root(u64 a)
 static u64 cubic_calc_w(struct tquic_cubic *cubic, u64 t)
 {
 	u64 offs, delta, bic_target;
+
+	tquic_dbg("cubic: calc_w t=%llu k=%llu origin=%llu\n",
+		  t, cubic->k, cubic->origin_point);
 
 	/*
 	 * W_cubic(t) = C(t-K)^3 + W_max
@@ -165,6 +170,9 @@ static void tquic_cubic_on_ack(void *state, u64 bytes_acked, u64 rtt_us)
 
 	if (!cubic)
 		return;
+
+	tquic_dbg("cubic: on_ack bytes=%llu rtt=%llu cwnd=%llu ss=%d\n",
+		  bytes_acked, rtt_us, cubic->cwnd, cubic->in_slow_start);
 
 	/*
 	 * New round detection: if an RTT has elapsed since the last
@@ -273,6 +281,9 @@ static void tquic_cubic_on_rtt(void *state, u64 rtt_us)
 	if (!cubic || rtt_us == 0)
 		return;
 
+	tquic_dbg("cubic: on_rtt rtt_us=%llu prev=%llu\n",
+		  rtt_us, cubic->rtt_us);
+
 	/* Store RTT for ECN round tracking */
 	cubic->rtt_us = rtt_us;
 }
@@ -373,6 +384,9 @@ static u64 tquic_cubic_get_pacing_rate(void *state)
 
 	if (!cubic)
 		return 0;
+
+	tquic_dbg("cubic: get_pacing_rate cwnd=%llu rtt=%llu\n",
+		  cubic->cwnd, cubic->rtt_us);
 
 	/*
 	 * Pacing rate = cwnd / RTT (in bytes per second).

@@ -141,6 +141,9 @@ static const char *tquic_cipher_to_hash_name(u16 cipher_suite)
  */
 static u32 tquic_cipher_to_hash_len(u16 cipher_suite)
 {
+	tquic_dbg("tquic_cipher_to_hash_len: cipher_suite=0x%04x\n",
+		  cipher_suite);
+
 	switch (cipher_suite) {
 	case TLS_AES_128_GCM_SHA256:
 	case TLS_CHACHA20_POLY1305_SHA256:
@@ -157,6 +160,9 @@ static u32 tquic_cipher_to_hash_len(u16 cipher_suite)
  */
 static u32 tquic_cipher_to_key_len(u16 cipher_suite)
 {
+	tquic_dbg("tquic_cipher_to_key_len: cipher_suite=0x%04x\n",
+		  cipher_suite);
+
 	switch (cipher_suite) {
 	case TLS_AES_128_GCM_SHA256:
 		return 16;
@@ -330,6 +336,8 @@ static int ticket_cmp(const char *a, u8 a_len, const char *b, u8 b_len)
 	int len = min(a_len, b_len);
 	int cmp = memcmp(a, b, len);
 
+	tquic_dbg("ticket_cmp: a_len=%u b_len=%u\n", a_len, b_len);
+
 	if (cmp != 0)
 		return cmp;
 	return (int)a_len - (int)b_len;
@@ -412,6 +420,9 @@ static void ticket_free(struct tquic_zero_rtt_ticket *ticket)
 	if (!ticket)
 		return;
 
+	tquic_dbg("ticket_free: server_name_len=%u ticket_len=%u\n",
+		  ticket->server_name_len, ticket->ticket_len);
+
 	kfree_sensitive(ticket->ticket);
 	memzero_explicit(&ticket->plaintext, sizeof(ticket->plaintext));
 	kfree_sensitive(ticket);
@@ -423,6 +434,8 @@ static void ticket_free(struct tquic_zero_rtt_ticket *ticket)
 static void ticket_store_evict_oldest_locked(struct tquic_ticket_store *store)
 {
 	struct tquic_zero_rtt_ticket *oldest;
+
+	tquic_dbg("ticket_store_evict_oldest_locked: count=%u\n", store->count);
 
 	if (list_empty(&store->lru_list))
 		return;
@@ -446,6 +459,8 @@ static bool ticket_is_expired(struct tquic_zero_rtt_ticket *ticket)
 		return true;
 
 	age = now - ticket->plaintext.creation_time;
+	tquic_dbg("ticket_is_expired: age=%llu max_age=%u\n",
+		  age, ticket->plaintext.max_age);
 	return age > ticket->plaintext.max_age;
 }
 
@@ -563,6 +578,9 @@ void tquic_zero_rtt_put_ticket(struct tquic_zero_rtt_ticket *ticket)
 	if (!ticket)
 		return;
 
+	tquic_dbg("tquic_zero_rtt_put_ticket: refcount=%u\n",
+		  refcount_read(&ticket->refcount));
+
 	if (refcount_dec_and_test(&ticket->refcount))
 		ticket_free(ticket);
 }
@@ -574,6 +592,9 @@ void tquic_zero_rtt_remove_ticket(const char *server_name, u8 server_name_len)
 
 	if (!server_name || server_name_len == 0)
 		return;
+
+	tquic_dbg("tquic_zero_rtt_remove_ticket: server_name_len=%u\n",
+		  server_name_len);
 
 	spin_lock_bh(&global_ticket_store.lock);
 
@@ -767,6 +788,8 @@ int tquic_replay_filter_init(struct tquic_replay_filter *filter, u32 ttl_seconds
 	if (!filter)
 		return -EINVAL;
 
+	tquic_dbg("tquic_replay_filter_init: ttl_seconds=%u\n", ttl_seconds);
+
 	spin_lock_init(&filter->lock);
 	bitmap_zero(filter->bits, TQUIC_REPLAY_BLOOM_BITS);
 	filter->current_bucket = 0;
@@ -781,6 +804,8 @@ void tquic_replay_filter_cleanup(struct tquic_replay_filter *filter)
 {
 	if (!filter)
 		return;
+
+	tquic_dbg("tquic_replay_filter_cleanup: clearing bloom filter\n");
 
 	spin_lock_bh(&filter->lock);
 	bitmap_zero(filter->bits, TQUIC_REPLAY_BLOOM_BITS);
@@ -805,6 +830,9 @@ static void replay_filter_rotate(struct tquic_replay_filter *filter)
 	s64 elapsed;
 	u32 half = TQUIC_REPLAY_BLOOM_BITS / 2;
 	u32 old_bucket;
+
+	tquic_dbg("replay_filter_rotate: current_bucket=%u\n",
+		  filter->current_bucket);
 
 	elapsed = ktime_to_ms(ktime_sub(now, filter->last_rotation));
 
@@ -1269,6 +1297,8 @@ int tquic_zero_rtt_init(struct tquic_connection *conn)
 	if (!conn)
 		return -EINVAL;
 
+	tquic_dbg("tquic_zero_rtt_init: initializing 0-RTT state\n");
+
 	state = kzalloc(sizeof(*state), GFP_KERNEL);
 	if (!state)
 		return -ENOMEM;
@@ -1289,6 +1319,7 @@ int tquic_zero_rtt_init(struct tquic_connection *conn)
 
 	conn->zero_rtt_state = state;
 
+	tquic_dbg("tquic_zero_rtt_init: ret=0\n");
 	return 0;
 }
 EXPORT_SYMBOL_GPL(tquic_zero_rtt_init);
@@ -1301,6 +1332,9 @@ void tquic_zero_rtt_cleanup(struct tquic_connection *conn)
 		return;
 
 	state = conn->zero_rtt_state;
+
+	tquic_dbg("tquic_zero_rtt_cleanup: state=%d early_data_sent=%u\n",
+		  state->state, state->early_data_sent);
 
 	/* Free pre-allocated AEAD transform */
 	if (state->aead)
@@ -1321,6 +1355,7 @@ void tquic_zero_rtt_cleanup(struct tquic_connection *conn)
 	if (state->ticket)
 		tquic_zero_rtt_put_ticket(state->ticket);
 
+	tquic_dbg("tquic_zero_rtt_cleanup: done\n");
 	kfree_sensitive(state);
 	conn->zero_rtt_state = NULL;
 }
@@ -1566,6 +1601,9 @@ bool tquic_zero_rtt_can_send(struct tquic_connection *conn)
 
 	state = conn->zero_rtt_state;
 
+	tquic_dbg("tquic_zero_rtt_can_send: state=%d early_data_sent=%u max=%u\n",
+		  state->state, state->early_data_sent, state->early_data_max);
+
 	if (state->state != TQUIC_0RTT_ATTEMPTING &&
 	    state->state != TQUIC_0RTT_ACCEPTED)
 		return false;
@@ -1591,6 +1629,8 @@ EXPORT_SYMBOL_GPL(tquic_zero_rtt_can_send);
 static void tquic_create_nonce(const u8 *iv, u64 pkt_num, u8 *nonce)
 {
 	int i;
+
+	tquic_dbg("tquic_create_nonce(0rtt): pkt_num=%llu\n", pkt_num);
 
 	memcpy(nonce, iv, 12);
 	for (i = 0; i < 8; i++)
@@ -1940,6 +1980,7 @@ enum tquic_zero_rtt_state tquic_zero_rtt_get_state(struct tquic_connection *conn
 		return TQUIC_0RTT_NONE;
 
 	state = conn->zero_rtt_state;
+	tquic_dbg("tquic_zero_rtt_get_state: state=%d\n", state->state);
 	return state->state;
 }
 EXPORT_SYMBOL_GPL(tquic_zero_rtt_get_state);
