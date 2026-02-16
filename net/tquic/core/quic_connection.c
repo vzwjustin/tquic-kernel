@@ -397,6 +397,16 @@ static void tquic_conn_init_flow_control(struct tquic_connection *conn)
 	remote->streams_opened_bidi = 0;
 	remote->streams_opened_uni = 0;
 	remote->blocked = 0;
+
+	/*
+	 * Initialize legacy flow control fields still used by
+	 * tquic_flow_control_check_recv_limit_internal() and
+	 * tquic_process_stream_frame().
+	 */
+	conn->max_data_local = conn->local_params.initial_max_data;
+	conn->max_data_remote = 0;
+	conn->data_sent = 0;
+	conn->data_received = 0;
 }
 
 static void tquic_timer_loss_cb(struct timer_list *t)

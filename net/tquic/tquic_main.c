@@ -819,16 +819,18 @@ tquic_stream_create_locked(struct tquic_connection *conn, u64 stream_id)
 	u64 stream_seq = stream_id >> 2;
 	u64 max_streams;
 
-	/* Validate against MAX_STREAMS limit (RFC 9000 Section 4.6) */
-	spin_lock_bh(&conn->lock);
-	max_streams = bidi ? conn->max_streams_bidi : conn->max_streams_uni;
-	spin_unlock_bh(&conn->lock);
+	/*
+	 * Validate against our local MAX_STREAMS limit (RFC 9000 Section 4.6).
+	 * This function is only called for peer-initiated (incoming) streams,
+	 * so the limit is what WE advertised to the peer in our transport
+	 * parameters, not what the peer advertised to us.
+	 * Caller already holds conn->lock — read directly.
+	 */
+	max_streams = bidi ? conn->local_params.initial_max_streams_bidi
+			   : conn->local_params.initial_max_streams_uni;
 
-	if (stream_seq >= max_streams) {
-		pr_debug("tquic: peer exceeded MAX_STREAMS %s limit (%llu >= %llu)\n",
-			 bidi ? "bidi" : "uni", stream_seq, max_streams);
+	if (stream_seq >= max_streams)
 		return NULL;
-	}
 
 	stream = kmem_cache_zalloc(tquic_stream_cache, GFP_ATOMIC);
 	if (!stream)
@@ -874,9 +876,8 @@ tquic_stream_create_locked(struct tquic_connection *conn, u64 stream_id)
 	rb_link_node(&stream->node, parent, link);
 	rb_insert_color(&stream->node, &conn->streams);
 
-	spin_lock_bh(&conn->lock);
+	/* Caller already holds conn->lock — update stats directly. */
 	conn->stats.streams_opened++;
-	spin_unlock_bh(&conn->lock);
 
 	return stream;
 }

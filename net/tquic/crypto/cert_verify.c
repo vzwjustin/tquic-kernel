@@ -1693,7 +1693,7 @@ static int parse_tbs_certificate(struct tquic_x509_cert *cert,
 	ret = asn1_get_tag_length(p, end - p, ASN1_SEQUENCE,
 				  &content_len, &total_len);
 	if (ret < 0) {
-		pr_warn("tquic_tbs: step1 TBS SEQUENCE failed ret=%d p[0]=%02x len=%u\n",
+		pr_debug("tquic_tbs: step1 TBS SEQUENCE failed ret=%d p[0]=%02x len=%u\n",
 			ret, p[0], (u32)(end - p));
 		return ret;
 	}
@@ -1710,7 +1710,7 @@ static int parse_tbs_certificate(struct tquic_x509_cert *cert,
 		ret = asn1_get_tag_length(p, end - p, ASN1_CONTEXT_0,
 					  &content_len, &total_len);
 		if (ret < 0) {
-			pr_warn("tquic_tbs: step2 Version failed ret=%d\n", ret);
+			pr_debug("tquic_tbs: step2 Version failed ret=%d\n", ret);
 			return ret;
 		}
 		p += total_len;
@@ -1720,7 +1720,7 @@ static int parse_tbs_certificate(struct tquic_x509_cert *cert,
 	ret = asn1_get_tag_length(p, end - p, ASN1_INTEGER,
 				  &content_len, &total_len);
 	if (ret < 0) {
-		pr_warn("tquic_tbs: step3 Serial failed ret=%d p[0]=%02x\n",
+		pr_debug("tquic_tbs: step3 Serial failed ret=%d p[0]=%02x\n",
 			ret, p[0]);
 		return ret;
 	}
@@ -1736,7 +1736,7 @@ static int parse_tbs_certificate(struct tquic_x509_cert *cert,
 	ret = asn1_get_tag_length(p, end - p, ASN1_SEQUENCE,
 				  &content_len, &total_len);
 	if (ret < 0) {
-		pr_warn("tquic_tbs: step4 SigAlg failed ret=%d p[0]=%02x\n",
+		pr_debug("tquic_tbs: step4 SigAlg failed ret=%d p[0]=%02x\n",
 			ret, p[0]);
 		return ret;
 	}
@@ -1746,7 +1746,7 @@ static int parse_tbs_certificate(struct tquic_x509_cert *cert,
 	ret = asn1_get_tag_length(p, end - p, ASN1_SEQUENCE,
 				  &content_len, &total_len);
 	if (ret < 0) {
-		pr_warn("tquic_tbs: step5 Issuer failed ret=%d p[0]=%02x\n",
+		pr_debug("tquic_tbs: step5 Issuer failed ret=%d p[0]=%02x\n",
 			ret, p[0]);
 		return ret;
 	}
@@ -1768,7 +1768,7 @@ static int parse_tbs_certificate(struct tquic_x509_cert *cert,
 	ret = asn1_get_tag_length(p, end - p, ASN1_SEQUENCE,
 				  &content_len, &total_len);
 	if (ret < 0) {
-		pr_warn("tquic_tbs: step6 Validity failed ret=%d p[0]=%02x\n",
+		pr_debug("tquic_tbs: step6 Validity failed ret=%d p[0]=%02x\n",
 			ret, p[0]);
 		return ret;
 	}
@@ -1778,7 +1778,7 @@ static int parse_tbs_certificate(struct tquic_x509_cert *cert,
 	/* notBefore */
 	ret = parse_time(validity, content_len, &cert->valid_from);
 	if (ret < 0) {
-		pr_warn("tquic_tbs: step6b notBefore failed ret=%d\n", ret);
+		pr_debug("tquic_tbs: step6b notBefore failed ret=%d\n", ret);
 		return ret;
 	}
 
@@ -1792,7 +1792,7 @@ static int parse_tbs_certificate(struct tquic_x509_cert *cert,
 	ret = parse_time(not_after, content_len - (not_after - validity),
 			 &cert->valid_to);
 	if (ret < 0) {
-		pr_warn("tquic_tbs: step7 notAfter failed ret=%d\n", ret);
+		pr_debug("tquic_tbs: step7 notAfter failed ret=%d\n", ret);
 		return ret;
 	}
 
@@ -1802,7 +1802,7 @@ static int parse_tbs_certificate(struct tquic_x509_cert *cert,
 	ret = asn1_get_tag_length(p, end - p, ASN1_SEQUENCE,
 				  &content_len, &total_len);
 	if (ret < 0) {
-		pr_warn("tquic_tbs: step8 Subject failed ret=%d p[0]=%02x\n",
+		pr_debug("tquic_tbs: step8 Subject failed ret=%d p[0]=%02x\n",
 			ret, p[0]);
 		return ret;
 	}
@@ -1824,14 +1824,14 @@ static int parse_tbs_certificate(struct tquic_x509_cert *cert,
 	ret = asn1_get_tag_length(p, end - p, ASN1_SEQUENCE,
 				  &content_len, &total_len);
 	if (ret < 0) {
-		pr_warn("tquic_tbs: step9 SPKI failed ret=%d p[0]=%02x\n",
+		pr_debug("tquic_tbs: step9 SPKI failed ret=%d p[0]=%02x\n",
 			ret, p[0]);
 		return ret;
 	}
 
 	ret = parse_public_key_info(cert, p, total_len);
 	if (ret < 0) {
-		pr_warn("tquic_tbs: step10 parse_pub_key failed ret=%d\n", ret);
+		pr_debug("tquic_tbs: step10 parse_pub_key failed ret=%d\n", ret);
 		return ret;
 	}
 
@@ -1892,7 +1892,7 @@ struct tquic_x509_cert *tquic_x509_cert_parse(const u8 *data, u32 len, gfp_t gfp
 	ret = asn1_get_tag_length(data, len, ASN1_SEQUENCE,
 				  &content_len, &total_len);
 	if (ret < 0) {
-		pr_warn("tquic_x509: SEQUENCE tag failed: ret=%d len=%u data[0..3]=%02x%02x%02x%02x\n",
+		pr_debug("tquic_x509: SEQUENCE tag failed: ret=%d len=%u data[0..3]=%02x%02x%02x%02x\n",
 			ret, len,
 			len > 0 ? data[0] : 0, len > 1 ? data[1] : 0,
 			len > 2 ? data[2] : 0, len > 3 ? data[3] : 0);
@@ -1900,7 +1900,7 @@ struct tquic_x509_cert *tquic_x509_cert_parse(const u8 *data, u32 len, gfp_t gfp
 		return NULL;
 	}
 
-	pr_warn("tquic_x509: SEQUENCE ok content_len=%u total_len=%u\n",
+	pr_debug("tquic_x509: SEQUENCE ok content_len=%u total_len=%u\n",
 		content_len, total_len);
 
 	p = data + (total_len - content_len);
@@ -1908,7 +1908,7 @@ struct tquic_x509_cert *tquic_x509_cert_parse(const u8 *data, u32 len, gfp_t gfp
 	/* Parse TBSCertificate */
 	ret = parse_tbs_certificate(cert, p, content_len);
 	if (ret < 0) {
-		pr_warn("tquic_x509: parse_tbs failed: ret=%d\n", ret);
+		pr_debug("tquic_x509: parse_tbs failed: ret=%d\n", ret);
 		tquic_x509_cert_free(cert);
 		return NULL;
 	}
@@ -1918,7 +1918,7 @@ struct tquic_x509_cert *tquic_x509_cert_parse(const u8 *data, u32 len, gfp_t gfp
 
 	/* Validate tbs pointer is within parsed data bounds */
 	if (after_tbs < cert->tbs || after_tbs > p + content_len) {
-		pr_warn("tquic_x509: tbs bounds check failed\n");
+		pr_debug("tquic_x509: tbs bounds check failed\n");
 		tquic_x509_cert_free(cert);
 		return NULL;
 	}
@@ -1927,7 +1927,7 @@ struct tquic_x509_cert *tquic_x509_cert_parse(const u8 *data, u32 len, gfp_t gfp
 
 	ret = parse_signature(cert, after_tbs, remaining);
 	if (ret < 0) {
-		pr_warn("tquic_x509: parse_signature failed: ret=%d\n", ret);
+		pr_debug("tquic_x509: parse_signature failed: ret=%d\n", ret);
 		tquic_x509_cert_free(cert);
 		return NULL;
 	}
@@ -2315,7 +2315,7 @@ int tquic_x509_verify_signature(const struct tquic_x509_cert *cert,
 		pr_debug("tquic_cert: Failed to allocate sig tfm for %s: %d\n",
 			 alg_name, ret);
 		if (cert->signature.pubkey_algo == TQUIC_PUBKEY_ALGO_ED25519) {
-			pr_warn("tquic_cert: Ed25519 not available in kernel, "
+			pr_debug("tquic_cert: Ed25519 not available in kernel, "
 				"certificate signature cannot be verified\n");
 			return -EOPNOTSUPP;
 		}
@@ -2647,7 +2647,7 @@ int tquic_check_revocation(struct tquic_cert_verify_ctx *ctx,
 		 */
 		if (ctx->ocsp_stapling_len < 10 ||
 		    ctx->ocsp_stapling[0] != 0x30) {
-			pr_warn("tquic_cert: OCSP stapling data malformed "
+			pr_debug("tquic_cert: OCSP stapling data malformed "
 				"(len=%u, tag=0x%02x)\n",
 				ctx->ocsp_stapling_len,
 				ctx->ocsp_stapling[0]);
@@ -2668,7 +2668,7 @@ int tquic_check_revocation(struct tquic_cert_verify_ctx *ctx,
 			 * falls through to the no-OCSP path which will
 			 * allow the connection with a warning.
 			 */
-			pr_warn("tquic_cert: OCSP status good (%u bytes)"
+			pr_debug("tquic_cert: OCSP status good (%u bytes)"
 				" -- signature NOT verified\n",
 				ctx->ocsp_stapling_len);
 			if (ctx->check_revocation == TQUIC_REVOKE_HARD_FAIL)
@@ -2677,7 +2677,7 @@ int tquic_check_revocation(struct tquic_cert_verify_ctx *ctx,
 		}
 
 		if (status == -EKEYREVOKED) {
-			pr_warn("tquic_cert: OCSP response indicates "
+			pr_debug("tquic_cert: OCSP response indicates "
 				"certificate is revoked\n");
 			return -EKEYREVOKED;
 		}
@@ -2687,7 +2687,7 @@ int tquic_check_revocation(struct tquic_cert_verify_ctx *ctx,
 		 * response (parse error, non-successful response, or
 		 * unknown cert status).
 		 */
-		pr_warn("tquic_cert: OCSP response present but certificate "
+		pr_debug("tquic_cert: OCSP response present but certificate "
 			"status could not be determined\n");
 		if (ctx->check_revocation == TQUIC_REVOKE_HARD_FAIL)
 			return -EKEYREVOKED;
@@ -2699,7 +2699,7 @@ no_ocsp:
 	 * checking from kernel context.  Hard-fail mode MUST reject.
 	 */
 	if (ctx->check_revocation == TQUIC_REVOKE_HARD_FAIL) {
-		pr_warn("tquic_cert: Revocation check required but no "
+		pr_debug("tquic_cert: Revocation check required but no "
 			"usable OCSP stapling available -- rejecting\n");
 		return -EKEYREVOKED;
 	}
@@ -2914,7 +2914,7 @@ static int verify_chain(struct tquic_cert_verify_ctx *ctx, bool is_server)
 		/* If not found and this is self-signed, check allow_self_signed */
 		if (cert->self_signed) {
 			if (ctx->allow_self_signed) {
-				pr_warn("tquic_cert: Allowing self-signed certificate (testing mode)\n");
+				pr_debug("tquic_cert: Allowing self-signed certificate (testing mode)\n");
 				return 0;
 			}
 			ctx->error_code = TQUIC_CERT_ERR_SELF_SIGNED;
@@ -2942,7 +2942,7 @@ int tquic_verify_cert_chain(struct tquic_cert_verify_ctx *ctx,
 
 	/* Check verification mode */
 	if (ctx->verify_mode == TQUIC_CERT_VERIFY_NONE) {
-		pr_warn("tquic_cert: Certificate verification disabled (INSECURE)\n");
+		pr_debug("tquic_cert: Certificate verification disabled (INSECURE)\n");
 		return 0;
 	}
 
@@ -3150,7 +3150,7 @@ int tquic_hs_verify_server_cert(struct tquic_handshake *hs,
 	if (ret < 0) {
 		int alert;
 
-		pr_warn("tquic_cert: Server certificate verification failed: %s (depth %u)\n",
+		pr_debug("tquic_cert: Server certificate verification failed: %s (depth %u)\n",
 			tquic_cert_verify_get_error(ctx), ctx->error_depth);
 
 		/* Map error code to TLS alert */
@@ -3244,7 +3244,7 @@ int tquic_hs_verify_client_cert(struct tquic_handshake *hs,
 	if (ret < 0) {
 		int alert;
 
-		pr_warn("tquic_cert: Client certificate verification failed: %s (depth %u)\n",
+		pr_debug("tquic_cert: Client certificate verification failed: %s (depth %u)\n",
 			tquic_cert_verify_get_error(ctx), ctx->error_depth);
 
 		switch (ctx->error_code) {

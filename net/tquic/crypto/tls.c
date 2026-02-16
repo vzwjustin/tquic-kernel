@@ -379,7 +379,7 @@ static int tquic_derive_keys_versioned(struct tquic_crypto_state *crypto,
 		return ret;
 
 	keys->valid = true;
-	pr_warn("derive_keys: key=%*phN iv=%*phN hp=%*phN\n",
+	pr_debug("derive_keys: key=%*phN iv=%*phN hp=%*phN\n",
 		min_t(int, keys->key_len, 8), keys->key,
 		min_t(int, keys->iv_len, 8), keys->iv,
 		min_t(int, keys->key_len, 8), keys->hp_key);
@@ -630,13 +630,13 @@ int tquic_encrypt_packet(struct tquic_crypto_state *crypto,
 	if (!keys->valid)
 		return -EINVAL;
 
-	pr_warn("tquic_encrypt: level=%d pkt_num=%llu hdr_len=%zu "
+	pr_debug("tquic_encrypt: level=%d pkt_num=%llu hdr_len=%zu "
 		"pay_len=%zu key=%*phN iv=%*phN\n",
 		enc_level, pkt_num, header_len, payload_len,
 		min_t(int, keys->key_len, 8), keys->key,
 		min_t(int, keys->iv_len, 8), keys->iv);
 	if (header_len >= 6)
-		pr_warn("tquic_encrypt: hdr[0..5]=%*phN\n",
+		pr_debug("tquic_encrypt: hdr[0..5]=%*phN\n",
 			min_t(int, header_len, 6), header);
 
 	/* Re-key AEAD TX for this level's key material */
@@ -700,13 +700,13 @@ int tquic_decrypt_packet(struct tquic_crypto_state *crypto,
 	if (payload_len < 16)
 		return -EINVAL;  /* Too short for auth tag */
 
-	pr_warn("tquic_decrypt: level=%d pkt_num=%llu hdr_len=%zu "
+	pr_debug("tquic_decrypt: level=%d pkt_num=%llu hdr_len=%zu "
 		"pay_len=%zu key=%*phN iv=%*phN\n",
 		enc_level, pkt_num, header_len, payload_len,
 		min_t(int, keys->key_len, 8), keys->key,
 		min_t(int, keys->iv_len, 8), keys->iv);
 	if (header_len >= 6)
-		pr_warn("tquic_decrypt: hdr[0..5]=%*phN\n",
+		pr_debug("tquic_decrypt: hdr[0..5]=%*phN\n",
 			min_t(int, header_len, 6), header);
 
 	/* Re-key AEAD RX for this level's key material */
@@ -1141,7 +1141,7 @@ void tquic_crypto_set_level(struct tquic_crypto_state *crypto,
 	if (!crypto)
 		return;
 
-	pr_warn("crypto_set_level: read=%d->%d write=%d->%d "
+	pr_debug("crypto_set_level: read=%d->%d write=%d->%d "
 		"read_valid=%d write_valid=%d aead_rx=%p aead_tx=%p\n",
 		crypto->read_level, read_level,
 		crypto->write_level, write_level,
@@ -1322,6 +1322,23 @@ void tquic_crypto_set_version(struct tquic_crypto_state *crypto, u32 version)
 		crypto->version = version;
 }
 EXPORT_SYMBOL_GPL(tquic_crypto_set_version);
+
+/*
+ * Get the key_update pointer from the crypto state.
+ *
+ * This is the authoritative accessor: it reads the field directly from
+ * struct tquic_crypto_state, so there is no risk of offset drift from
+ * mirror-struct mismatches.  All callers outside tls.c should use this
+ * instead of replicating the struct layout.
+ */
+struct tquic_key_update_state *
+tquic_crypto_get_key_update(struct tquic_crypto_state *crypto)
+{
+	if (!crypto)
+		return NULL;
+	return crypto->key_update;
+}
+EXPORT_SYMBOL_GPL(tquic_crypto_get_key_update);
 
 MODULE_DESCRIPTION("TQUIC TLS 1.3 Crypto Integration");
 MODULE_LICENSE("GPL");

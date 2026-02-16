@@ -70,4 +70,9 @@ int tquic_crypto_install_keys(struct tquic_crypto_state *crypto,
 u32 tquic_crypto_get_version(struct tquic_crypto_state *crypto);
 void tquic_crypto_set_version(struct tquic_crypto_state *crypto, u32 version);
 
+/* Key update accessor - returns crypto->key_update without mirror structs */
+struct tquic_key_update_state;
+struct tquic_key_update_state *
+tquic_crypto_get_key_update(struct tquic_crypto_state *crypto);
+
 #endif /* _TQUIC_CRYPTO_TLS_H */

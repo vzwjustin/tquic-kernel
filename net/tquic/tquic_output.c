@@ -975,10 +975,15 @@ static int tquic_build_short_header_internal(struct tquic_connection *conn,
 	int pkt_num_len;
 	u8 first_byte;
 	bool grease_fixed_bit;
-	u8 pn_scratch[4];  /* CF-624: stack scratch instead of buf+64 */
 
-	/* Calculate minimal packet number encoding */
-	pkt_num_len = tquic_encode_pkt_num(pn_scratch, pkt_num, largest_acked);
+	/*
+	 * Always use 4-byte packet number encoding for short headers.
+	 * This matches the long header behaviour and, critically,
+	 * ensures that pn_offset = header_len - 4 is correct for HP,
+	 * and that the packet is long enough for the HP sample
+	 * (RFC 9001 Section 5.4.2).
+	 */
+	pkt_num_len = 4;
 
 	/*
 	 * RFC 9287 Section 3: GREASE the Fixed Bit
@@ -997,7 +1002,7 @@ static int tquic_build_short_header_internal(struct tquic_connection *conn,
 		first_byte |= TQUIC_HEADER_SPIN_BIT;
 	if (key_phase)
 		first_byte |= TQUIC_HEADER_KEY_PHASE;
-	first_byte |= (pkt_num_len - 1);
+	first_byte |= (pkt_num_len - 1);  /* 0x03 = 4-byte PN */
 
 	/* Check buffer space */
 	if (buf_len < 1 + path->remote_cid.len + pkt_num_len)
@@ -1011,9 +1016,9 @@ static int tquic_build_short_header_internal(struct tquic_connection *conn,
 		p += path->remote_cid.len;
 	}
 
-	/* Packet Number */
-	tquic_encode_pkt_num(p, pkt_num, largest_acked);
-	p += pkt_num_len;
+	/* Packet Number (4 bytes, big-endian) */
+	put_unaligned_be32((u32)pkt_num, p);
+	p += 4;
 
 	return p - buf;
 }
@@ -1204,7 +1209,7 @@ static struct sk_buff *tquic_assemble_packet(struct tquic_connection *conn,
 	ctx.pkt_num = pkt_num;
 	ctx.ack_eliciting = false;
 
-	pr_warn("tquic_assemble: pkt_type=%d mtu=%d max_payload=%d buf_len=%zu\n",
+	pr_debug("tquic_assemble: pkt_type=%d mtu=%d max_payload=%d buf_len=%zu\n",
 		pkt_type, READ_ONCE(path->mtu), max_payload, ctx.buf_len);
 
 	/* Coalesce frames into payload */
@@ -1291,9 +1296,8 @@ static struct sk_buff *tquic_assemble_packet(struct tquic_connection *conn,
 	/*
 	 * Apply header protection over the contiguous packet in the skb.
 	 * The pn_offset is header_len minus the packet number length.
-	 * For both long and short headers, the packet number is at the
-	 * end of the header, so pn_offset = header_len - pn_len.
-	 * We encoded 4-byte packet numbers, so pn_offset = header_len - 4.
+	 * Both long and short headers use 4-byte packet numbers, so
+	 * pn_offset = header_len - 4.
 	 */
 	if (header_len < 5) {
 		ret = -EINVAL;
@@ -1927,7 +1931,7 @@ int tquic_output_packet(struct tquic_connection *conn,
 	if (unlikely(!path || !skb))
 		return -EINVAL;
 
-	pr_warn("tquic_output_packet: path=%p skb_len=%u local=%pISpc remote=%pISpc sk=%p\n",
+	pr_debug("tquic_output_packet: path=%p skb_len=%u local=%pISpc remote=%pISpc sk=%p\n",
 		path, skb->len, &path->local_addr, &path->remote_addr, conn ? conn->sk : NULL);
 
 	/*
@@ -1942,7 +1946,7 @@ int tquic_output_packet(struct tquic_connection *conn,
 		u32 current_mtu = READ_ONCE(path->mtu);
 
 		if (unlikely(skb->len > current_mtu && current_mtu > 0)) {
-			pr_warn("tquic_output: EMSGSIZE pkt=%u mtu=%u path=%u\n",
+			pr_debug("tquic_output: EMSGSIZE pkt=%u mtu=%u path=%u\n",
 				skb->len, current_mtu, path->path_id);
 			kfree_skb(skb);
 			return -EMSGSIZE;
@@ -2644,7 +2648,7 @@ int tquic_send_handshake_done(struct tquic_connection *conn)
 	}
 
 	ret = tquic_output_packet(conn, path, skb);
-	pr_warn("tquic: sent HANDSHAKE_DONE frame (pkt_num=%llu ret=%d)\n",
+	pr_debug("tquic: sent HANDSHAKE_DONE frame (pkt_num=%llu ret=%d)\n",
 		pkt_num, ret);
 
 	return ret;
@@ -2678,7 +2682,7 @@ int tquic_output_flush_crypto(struct tquic_connection *conn)
 	u64 crypto_offset;
 	int pkt_type;
 
-	pr_warn("tquic_output_flush_crypto: conn=%p\n", conn);
+	pr_debug("tquic_output_flush_crypto: conn=%p\n", conn);
 	u64 pkt_num;
 	int ret;
 
@@ -2692,11 +2696,11 @@ int tquic_output_flush_crypto(struct tquic_connection *conn)
 	rcu_read_unlock();
 
 	if (!path) {
-		pr_warn("tquic_output_flush_crypto: no active path\n");
+		pr_debug("tquic_output_flush_crypto: no active path\n");
 		return -ENOENT;
 	}
 
-	pr_warn("tquic_output_flush_crypto: path=%p local=%pISpc remote=%pISpc\n",
+	pr_debug("tquic_output_flush_crypto: path=%p local=%pISpc remote=%pISpc\n",
 		path, &path->local_addr, &path->remote_addr);
 
 	/*
@@ -2774,7 +2778,7 @@ int tquic_output_flush_crypto(struct tquic_connection *conn)
 
 				ret = tquic_output_packet(conn, path,
 							  send_skb);
-				pr_warn("flush_crypto: chunk %u/%u off=%llu space=%d ret=%d\n",
+				pr_debug("flush_crypto: chunk %u/%u off=%llu space=%d ret=%d\n",
 					chunk, crypto_skb->len,
 					crypto_offset, space, ret);
 				if (ret < 0) {

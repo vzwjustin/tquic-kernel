@@ -263,13 +263,13 @@ static int tquic_tls_validate_transition(struct tquic_tls_ctx *ctx,
 		if (msg_type == TLS_HS_NEW_SESSION_TICKET) {
 			/* NewSessionTicket is allowed after handshake */
 			if (level != TQUIC_CRYPTO_APPLICATION) {
-				pr_warn("TQUIC-TLS: NewSessionTicket at wrong level %u\n",
+				pr_debug("TQUIC-TLS: NewSessionTicket at wrong level %u\n",
 					level);
 				return -EPROTO;
 			}
 			return 0;
 		}
-		pr_warn("TQUIC-TLS: handshake message %u after 1-RTT established\n",
+		pr_debug("TQUIC-TLS: handshake message %u after 1-RTT established\n",
 			msg_type);
 		return -EPROTO;
 	}
@@ -293,14 +293,14 @@ static int tquic_tls_validate_transition(struct tquic_tls_ctx *ctx,
 			/* Server expects ClientHello at Initial level */
 			if (msg_type == TLS_HS_CLIENT_HELLO) {
 				if (level != TQUIC_CRYPTO_INITIAL) {
-					pr_warn("TQUIC-TLS: ClientHello at wrong level %u\n",
+					pr_debug("TQUIC-TLS: ClientHello at wrong level %u\n",
 						level);
 					err = -EPROTO;
 					break;
 				}
 				new_state = TQUIC_TLS_STATE_WAIT_FINISHED;
 			} else {
-				pr_warn("TQUIC-TLS: server expected ClientHello, got %u\n",
+				pr_debug("TQUIC-TLS: server expected ClientHello, got %u\n",
 					msg_type);
 				err = -EPROTO;
 			}
@@ -310,7 +310,7 @@ static int tquic_tls_validate_transition(struct tquic_tls_ctx *ctx,
 			/* Server expects Finished at Handshake level */
 			if (msg_type == TLS_HS_FINISHED) {
 				if (level != TQUIC_CRYPTO_HANDSHAKE) {
-					pr_warn("TQUIC-TLS: Finished at wrong level %u\n",
+					pr_debug("TQUIC-TLS: Finished at wrong level %u\n",
 						level);
 					err = -EPROTO;
 					break;
@@ -333,7 +333,7 @@ static int tquic_tls_validate_transition(struct tquic_tls_ctx *ctx,
 				/* Stay in WAIT_FINISHED */
 				return 0;
 			} else {
-				pr_warn("TQUIC-TLS: server expected Finished, got %u\n",
+				pr_debug("TQUIC-TLS: server expected Finished, got %u\n",
 					msg_type);
 				err = -EPROTO;
 			}
@@ -348,14 +348,14 @@ static int tquic_tls_validate_transition(struct tquic_tls_ctx *ctx,
 				}
 				new_state = TQUIC_TLS_STATE_WAIT_FINISHED;
 			} else {
-				pr_warn("TQUIC-TLS: expected CertificateVerify, got %u\n",
+				pr_debug("TQUIC-TLS: expected CertificateVerify, got %u\n",
 					msg_type);
 				err = -EPROTO;
 			}
 			break;
 
 		default:
-			pr_warn("TQUIC-TLS: server in unexpected state %u\n",
+			pr_debug("TQUIC-TLS: server in unexpected state %u\n",
 				ctx->state);
 			err = -EPROTO;
 			break;
@@ -366,7 +366,7 @@ static int tquic_tls_validate_transition(struct tquic_tls_ctx *ctx,
 		case TQUIC_TLS_STATE_INITIAL:
 		case TQUIC_TLS_STATE_START:
 			/* Client shouldn't receive messages in START state */
-			pr_warn("TQUIC-TLS: client received message %u in START\n",
+			pr_debug("TQUIC-TLS: client received message %u in START\n",
 				msg_type);
 			err = -EPROTO;
 			break;
@@ -375,14 +375,14 @@ static int tquic_tls_validate_transition(struct tquic_tls_ctx *ctx,
 			/* Client expects ServerHello at Initial level */
 			if (msg_type == TLS_HS_SERVER_HELLO) {
 				if (level != TQUIC_CRYPTO_INITIAL) {
-					pr_warn("TQUIC-TLS: ServerHello at wrong level %u\n",
+					pr_debug("TQUIC-TLS: ServerHello at wrong level %u\n",
 						level);
 					err = -EPROTO;
 					break;
 				}
 				new_state = TQUIC_TLS_STATE_WAIT_EE;
 			} else {
-				pr_warn("TQUIC-TLS: expected ServerHello, got %u\n",
+				pr_debug("TQUIC-TLS: expected ServerHello, got %u\n",
 					msg_type);
 				err = -EPROTO;
 			}
@@ -392,7 +392,7 @@ static int tquic_tls_validate_transition(struct tquic_tls_ctx *ctx,
 			/* Client expects EncryptedExtensions at Handshake level */
 			if (msg_type == TLS_HS_ENCRYPTED_EXTENSIONS) {
 				if (level != TQUIC_CRYPTO_HANDSHAKE) {
-					pr_warn("TQUIC-TLS: EE at wrong level %u\n",
+					pr_debug("TQUIC-TLS: EE at wrong level %u\n",
 						level);
 					err = -EPROTO;
 					break;
@@ -403,7 +403,7 @@ static int tquic_tls_validate_transition(struct tquic_tls_ctx *ctx,
 				else
 					new_state = TQUIC_TLS_STATE_WAIT_CERT_CR;
 			} else {
-				pr_warn("TQUIC-TLS: expected EncryptedExtensions, got %u\n",
+				pr_debug("TQUIC-TLS: expected EncryptedExtensions, got %u\n",
 					msg_type);
 				err = -EPROTO;
 			}
@@ -425,7 +425,7 @@ static int tquic_tls_validate_transition(struct tquic_tls_ctx *ctx,
 				}
 				new_state = TQUIC_TLS_STATE_WAIT_CV;
 			} else {
-				pr_warn("TQUIC-TLS: expected Cert or CertReq, got %u\n",
+				pr_debug("TQUIC-TLS: expected Cert or CertReq, got %u\n",
 					msg_type);
 				err = -EPROTO;
 			}
@@ -440,7 +440,7 @@ static int tquic_tls_validate_transition(struct tquic_tls_ctx *ctx,
 				}
 				new_state = TQUIC_TLS_STATE_WAIT_CV;
 			} else {
-				pr_warn("TQUIC-TLS: expected Certificate, got %u\n",
+				pr_debug("TQUIC-TLS: expected Certificate, got %u\n",
 					msg_type);
 				err = -EPROTO;
 			}
@@ -455,7 +455,7 @@ static int tquic_tls_validate_transition(struct tquic_tls_ctx *ctx,
 				}
 				new_state = TQUIC_TLS_STATE_WAIT_FINISHED;
 			} else {
-				pr_warn("TQUIC-TLS: expected CertificateVerify, got %u\n",
+				pr_debug("TQUIC-TLS: expected CertificateVerify, got %u\n",
 					msg_type);
 				err = -EPROTO;
 			}
@@ -465,7 +465,7 @@ static int tquic_tls_validate_transition(struct tquic_tls_ctx *ctx,
 			/* Client expects Finished */
 			if (msg_type == TLS_HS_FINISHED) {
 				if (level != TQUIC_CRYPTO_HANDSHAKE) {
-					pr_warn("TQUIC-TLS: Finished at wrong level %u\n",
+					pr_debug("TQUIC-TLS: Finished at wrong level %u\n",
 						level);
 					err = -EPROTO;
 					break;
@@ -473,14 +473,14 @@ static int tquic_tls_validate_transition(struct tquic_tls_ctx *ctx,
 				new_state = TQUIC_TLS_STATE_CONNECTED;
 				ctx->handshake_complete = 1;
 			} else {
-				pr_warn("TQUIC-TLS: expected Finished, got %u\n",
+				pr_debug("TQUIC-TLS: expected Finished, got %u\n",
 					msg_type);
 				err = -EPROTO;
 			}
 			break;
 
 		default:
-			pr_warn("TQUIC-TLS: client in unexpected state %u\n",
+			pr_debug("TQUIC-TLS: client in unexpected state %u\n",
 				ctx->state);
 			err = -EPROTO;
 			break;
@@ -522,7 +522,7 @@ static u64 tquic_tls_handle_alert(struct tquic_tls_ctx *ctx,
 	ctx->alert_code = alert_desc;
 	ctx->state = TQUIC_TLS_STATE_ERROR;
 
-	pr_warn("TQUIC-TLS: received alert level=%u desc=%u\n",
+	pr_debug("TQUIC-TLS: received alert level=%u desc=%u\n",
 		alert_level, alert_desc);
 
 	/*
@@ -568,7 +568,7 @@ void tquic_tls_start_handshake(struct tquic_connection *conn)
 		return;
 
 	if (ctx->state != TQUIC_TLS_STATE_INITIAL) {
-		pr_warn("TQUIC-TLS: start_handshake called in state %s\n",
+		pr_debug("TQUIC-TLS: start_handshake called in state %s\n",
 			tquic_tls_state_name(ctx->state));
 		return;
 	}
@@ -610,7 +610,7 @@ int tquic_tls_process_handshake_message(struct tquic_connection *conn,
 		return -EINVAL;
 
 	if (len < 4) {
-		pr_warn("TQUIC-TLS: message too short (%u bytes)\n", len);
+		pr_debug("TQUIC-TLS: message too short (%u bytes)\n", len);
 		return -EINVAL;
 	}
 
@@ -621,7 +621,7 @@ int tquic_tls_process_handshake_message(struct tquic_connection *conn,
 	msg_len = ((u32)data[1] << 16) | ((u32)data[2] << 8) | data[3];
 
 	if (msg_len > len - 4) {
-		pr_warn("TQUIC-TLS: message length %u exceeds data %u\n",
+		pr_debug("TQUIC-TLS: message length %u exceeds data %u\n",
 			msg_len, len - 4);
 		return -EINVAL;
 	}
@@ -629,7 +629,7 @@ int tquic_tls_process_handshake_message(struct tquic_connection *conn,
 	/* First validate the encryption level for this message type */
 	err = tquic_tls_validate_level(msg_type, level);
 	if (err) {
-		pr_warn("TQUIC-TLS: message type %u at wrong level %u\n",
+		pr_debug("TQUIC-TLS: message type %u at wrong level %u\n",
 			msg_type, level);
 		ctx->state = TQUIC_TLS_STATE_ERROR;
 		return err;
@@ -1340,7 +1340,7 @@ int tquic_crypto_update_keys(struct tquic_connection *conn)
 	if (ctx->last_key_update &&
 	    ktime_to_ns(ktime_sub(now, ctx->last_key_update)) <
 	    TQUIC_KEY_UPDATE_MIN_INTERVAL_NS) {
-		pr_warn("TQUIC: key update rate limited (too frequent)\n");
+		pr_debug("TQUIC: key update rate limited (too frequent)\n");
 		return -EAGAIN;
 	}
 
@@ -1829,7 +1829,7 @@ int tquic_tls_validate_alpn(const u8 *offered_alpn, size_t offered_len,
 	}
 
 	/* Server selected a protocol not offered by client */
-	pr_warn("TQUIC-TLS: server selected ALPN not in client's list\n");
+	pr_debug("TQUIC-TLS: server selected ALPN not in client's list\n");
 	return -EPROTO;
 }
 EXPORT_SYMBOL_GPL(tquic_tls_validate_alpn);

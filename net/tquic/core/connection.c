@@ -439,6 +439,20 @@ int tquic_conn_set_state(struct tquic_connection *conn,
 			schedule_work(&cs->close_work);
 		}
 		wake_up_interruptible(&conn->datagram.wait);
+		/* Wake all stream waiters so recv() can return 0 */
+		{
+			struct rb_node *node;
+
+			spin_lock_bh(&conn->lock);
+			for (node = rb_first(&conn->streams); node;
+			     node = rb_next(node)) {
+				struct tquic_stream *s;
+
+				s = rb_entry(node, struct tquic_stream, node);
+				wake_up_interruptible(&s->wait);
+			}
+			spin_unlock_bh(&conn->lock);
+		}
 		break;
 
 	case TQUIC_CONN_DRAINING:
@@ -448,6 +462,20 @@ int tquic_conn_set_state(struct tquic_connection *conn,
 					      msecs_to_jiffies(cs->drain_timeout_ms));
 		}
 		wake_up_interruptible(&conn->datagram.wait);
+		/* Wake all stream waiters so recv() can return 0 */
+		{
+			struct rb_node *node;
+
+			spin_lock_bh(&conn->lock);
+			for (node = rb_first(&conn->streams); node;
+			     node = rb_next(node)) {
+				struct tquic_stream *s;
+
+				s = rb_entry(node, struct tquic_stream, node);
+				wake_up_interruptible(&s->wait);
+			}
+			spin_unlock_bh(&conn->lock);
+		}
 		break;
 
 	case TQUIC_CONN_CLOSED:
@@ -2318,22 +2346,22 @@ int tquic_conn_close_with_error(struct tquic_connection *conn,
 {
 	struct tquic_conn_state_machine *cs = tquic_conn_get_cs(conn);
 
-	if (!cs)
-		return -EINVAL;
-
 	if (READ_ONCE(conn->state) == TQUIC_CONN_CLOSING ||
 	    READ_ONCE(conn->state) == TQUIC_CONN_DRAINING ||
 	    READ_ONCE(conn->state) == TQUIC_CONN_CLOSED) {
 		return 0;  /* Already closing */
 	}
 
-	/* Store close information */
-	cs->local_close.error_code = error_code;
-	cs->local_close.is_application = false;
-	if (reason) {
-		kfree(cs->local_close.reason_phrase);
-		cs->local_close.reason_len = strlen(reason);
-		cs->local_close.reason_phrase = kstrdup(reason, GFP_ATOMIC);
+	/* Store close information if state machine is available */
+	if (cs) {
+		cs->local_close.error_code = error_code;
+		cs->local_close.is_application = false;
+		if (reason) {
+			kfree(cs->local_close.reason_phrase);
+			cs->local_close.reason_len = strlen(reason);
+			cs->local_close.reason_phrase =
+				kstrdup(reason, GFP_ATOMIC);
+		}
 	}
 
 	tquic_conn_enter_closing(conn, error_code, reason);
@@ -2366,17 +2394,23 @@ static void tquic_conn_enter_closing(struct tquic_connection *conn,
 {
 	struct tquic_conn_state_machine *cs = tquic_conn_get_cs(conn);
 
-	if (!cs)
-		return;
+	if (cs) {
+		cs->local_close.error_code = error_code;
+		cs->close_sent = false;
+		cs->close_retries = 0;
+	}
 
-	cs->local_close.error_code = error_code;
-	cs->close_sent = false;
-	cs->close_retries = 0;
-
+	/*
+	 * Always transition state, even without a state machine.
+	 * Server connections (via tquic_server_handshake) may not have
+	 * a tquic_conn_state_machine, but still need the state change
+	 * so that stream waiters wake and recv() returns 0.
+	 */
 	tquic_conn_set_state(conn, TQUIC_CONN_CLOSING, TQUIC_REASON_NORMAL);
 
-	/* Send initial CONNECTION_CLOSE */
-	tquic_send_close_frame(conn);
+	/* Send initial CONNECTION_CLOSE if we have state machine */
+	if (cs)
+		tquic_send_close_frame(conn);
 }
 
 static int tquic_send_close_frame(struct tquic_connection *conn)

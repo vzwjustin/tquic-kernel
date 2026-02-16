@@ -574,7 +574,7 @@ static int tquic_decode_transport_params(const u8 *buf, u32 buf_len,
 	while (p < end) {
 		ret = hs_varint_decode(p, end - p, &param_id, &vlen);
 		if (ret < 0) {
-			pr_warn("tquic_tp: varint param_id fail at offset %u\n",
+			pr_debug("tquic_tp: varint param_id fail at offset %u\n",
 				(u32)(p - buf));
 			return ret;
 		}
@@ -582,20 +582,20 @@ static int tquic_decode_transport_params(const u8 *buf, u32 buf_len,
 
 		ret = hs_varint_decode(p, end - p, &param_len, &vlen);
 		if (ret < 0) {
-			pr_warn("tquic_tp: varint param_len fail at offset %u id=%llu\n",
+			pr_debug("tquic_tp: varint param_len fail at offset %u id=%llu\n",
 				(u32)(p - buf), param_id);
 			return ret;
 		}
 		p += vlen;
 
 		if (p + param_len > end) {
-			pr_warn("tquic_tp: param_id=%llu len=%llu exceeds buf (offset=%u end_off=%u)\n",
+			pr_debug("tquic_tp: param_id=%llu len=%llu exceeds buf (offset=%u end_off=%u)\n",
 				param_id, param_len,
 				(u32)(p - buf), (u32)(end - buf));
 			return -EINVAL;
 		}
 
-		pr_warn("tquic_tp: id=%llu len=%llu offset=%u\n",
+		pr_debug("tquic_tp: id=%llu len=%llu offset=%u\n",
 			param_id, param_len, (u32)(p - buf));
 
 		switch (param_id) {
@@ -900,7 +900,7 @@ static int tquic_hs_update_transcript(struct tquic_handshake *hs,
 
 	/* Check for overflow and enforce maximum transcript size */
 	if (new_len < hs->transcript_len || new_len > TQUIC_MAX_TRANSCRIPT_SIZE) {
-		pr_warn("tquic_hs: transcript size overflow (%u + %u)\n",
+		pr_debug("tquic_hs: transcript size overflow (%u + %u)\n",
 			hs->transcript_len, len);
 		return -EOVERFLOW;
 	}
@@ -1463,7 +1463,7 @@ int tquic_hs_generate_client_hello(struct tquic_handshake *hs,
 	 */
 	if (!curve25519_generate_public(hs->key_share.public_key,
 					hs->key_share.private_key)) {
-		pr_warn("tquic_hs: X25519 public key generation failed\n");
+		pr_debug("tquic_hs: X25519 public key generation failed\n");
 		kfree_sensitive(hs->key_share.private_key);
 		hs->key_share.private_key = NULL;
 		kfree_sensitive(hs->key_share.public_key);
@@ -1606,7 +1606,7 @@ int tquic_hs_process_server_hello(struct tquic_handshake *hs,
 	/* Verify session ID echoed back */
 	if (session_id_len != hs->session_id_len ||
 	    crypto_memneq(p, hs->session_id, session_id_len)) {
-		pr_warn("tquic_hs: session ID mismatch\n");
+		pr_debug("tquic_hs: session ID mismatch\n");
 		return -EINVAL;
 	}
 	p += session_id_len;
@@ -1621,7 +1621,7 @@ int tquic_hs_process_server_hello(struct tquic_handshake *hs,
 	if (cipher_suite != TLS_AES_128_GCM_SHA256 &&
 	    cipher_suite != TLS_AES_256_GCM_SHA384 &&
 	    cipher_suite != TLS_CHACHA20_POLY1305_SHA256) {
-		pr_warn("tquic_hs: unsupported cipher suite 0x%04x\n", cipher_suite);
+		pr_debug("tquic_hs: unsupported cipher suite 0x%04x\n", cipher_suite);
 		return -EINVAL;
 	}
 	hs->cipher_suite = cipher_suite;
@@ -1637,7 +1637,7 @@ int tquic_hs_process_server_hello(struct tquic_handshake *hs,
 		return -EINVAL;
 	compression = *p++;
 	if (compression != 0) {
-		pr_warn("tquic_hs: non-null compression\n");
+		pr_debug("tquic_hs: non-null compression\n");
 		return -EINVAL;
 	}
 
@@ -1671,7 +1671,7 @@ int tquic_hs_process_server_hello(struct tquic_handshake *hs,
 				return -EINVAL;
 			version = (p[0] << 8) | p[1];
 			if (version != TLS_VERSION_13) {
-				pr_warn("tquic_hs: unsupported version 0x%04x\n", version);
+				pr_debug("tquic_hs: unsupported version 0x%04x\n", version);
 				return -EINVAL;
 			}
 			found_supported_versions = true;
@@ -1685,7 +1685,7 @@ int tquic_hs_process_server_hello(struct tquic_handshake *hs,
 				u16 key_len = (p[2] << 8) | p[3];
 
 				if (group != hs->key_share.group) {
-					pr_warn("tquic_hs: key share group mismatch\n");
+					pr_debug("tquic_hs: key share group mismatch\n");
 					return -EINVAL;
 				}
 
@@ -1697,7 +1697,7 @@ int tquic_hs_process_server_hello(struct tquic_handshake *hs,
 				 * using X25519 (Curve25519) key exchange.
 				 */
 				if (key_len != CURVE25519_KEY_SIZE) {
-					pr_warn("tquic_hs: invalid X25519 key length\n");
+					pr_debug("tquic_hs: invalid X25519 key length\n");
 					return -EINVAL;
 				}
 
@@ -1705,7 +1705,7 @@ int tquic_hs_process_server_hello(struct tquic_handshake *hs,
 				if (!curve25519(hs->shared_secret,
 					       hs->key_share.private_key,
 					       p + 4)) {
-					pr_warn("tquic_hs: X25519 key exchange failed\n");
+					pr_debug("tquic_hs: X25519 key exchange failed\n");
 					return -EINVAL;
 				}
 				hs->shared_secret_len = CURVE25519_KEY_SIZE;
@@ -1743,15 +1743,15 @@ int tquic_hs_process_server_hello(struct tquic_handshake *hs,
 				   TLS_DOWNGRADE_SENTINEL_LEN) ||
 		    !crypto_memneq(tail, tls11_downgrade_sentinel,
 				   TLS_DOWNGRADE_SENTINEL_LEN)) {
-			pr_warn("tquic_hs: TLS 1.3 downgrade sentinel detected in ServerHello.random, aborting (illegal_parameter)\n");
+			pr_debug("tquic_hs: TLS 1.3 downgrade sentinel detected in ServerHello.random, aborting (illegal_parameter)\n");
 			return -EPROTO;
 		}
-		pr_warn("tquic_hs: missing supported_versions extension\n");
+		pr_debug("tquic_hs: missing supported_versions extension\n");
 		return -EINVAL;
 	}
 
 	if (!found_key_share && !hs->using_psk) {
-		pr_warn("tquic_hs: missing key_share extension\n");
+		pr_debug("tquic_hs: missing key_share extension\n");
 		return -EINVAL;
 	}
 
@@ -1870,14 +1870,14 @@ int tquic_hs_process_encrypted_extensions(struct tquic_handshake *hs,
 			break;
 
 		case TLS_EXT_QUIC_TRANSPORT_PARAMS:
-			pr_warn("tquic_hs: decoding TP ext_data_len=%u "
+			pr_debug("tquic_hs: decoding TP ext_data_len=%u "
 				"data[0..7]=%*phN\n",
 				ext_data_len,
 				min_t(int, ext_data_len, 8), p);
 			ret = tquic_decode_transport_params(p, ext_data_len,
 							    &hs->peer_params, true);
 			if (ret < 0) {
-				pr_warn("tquic_hs: failed to decode transport params ret=%d\n", ret);
+				pr_debug("tquic_hs: failed to decode transport params ret=%d\n", ret);
 				return ret;
 			}
 			hs->params_received = true;
@@ -1977,7 +1977,7 @@ int tquic_hs_process_certificate(struct tquic_handshake *hs,
 
 		/* Store first certificate (end-entity) */
 		if (!hs->peer_cert && cert_len > 0) {
-			pr_warn("tquic_hs: storing peer cert len=%u first4=%02x%02x%02x%02x\n",
+			pr_debug("tquic_hs: storing peer cert len=%u first4=%02x%02x%02x%02x\n",
 				cert_len,
 				cert_len > 0 ? p[0] : 0,
 				cert_len > 1 ? p[1] : 0,
@@ -2125,7 +2125,7 @@ static int tquic_emsa_pss_verify(const char *hash_alg, u32 hash_len,
 
 	/* Step 4: Check rightmost byte is 0xbc */
 	if (em[em_len - 1] != 0xbc) {
-		pr_warn("tquic_pss: step4 Invalid trailer byte 0x%02x (expected 0xbc)\n",
+		pr_debug("tquic_pss: step4 Invalid trailer byte 0x%02x (expected 0xbc)\n",
 			em[em_len - 1]);
 		return -EKEYREJECTED;
 	}
@@ -2169,7 +2169,7 @@ static int tquic_emsa_pss_verify(const char *hash_alg, u32 hash_len,
 	ps_len = db_len - salt_len - 1;
 	for (i = 0; i < ps_len; i++) {
 		if (db[i] != 0x00) {
-			pr_warn("tquic_pss: step11 Non-zero padding at pos %u: 0x%02x\n",
+			pr_debug("tquic_pss: step11 Non-zero padding at pos %u: 0x%02x\n",
 				i, db[i]);
 			err = -EKEYREJECTED;
 			goto out;
@@ -2177,7 +2177,7 @@ static int tquic_emsa_pss_verify(const char *hash_alg, u32 hash_len,
 	}
 
 	if (db[ps_len] != 0x01) {
-		pr_warn("tquic_pss: step11 Missing 0x01 separator at pos %u: 0x%02x\n",
+		pr_debug("tquic_pss: step11 Missing 0x01 separator at pos %u: 0x%02x\n",
 			ps_len, db[ps_len]);
 		err = -EKEYREJECTED;
 		goto out;
@@ -2214,9 +2214,9 @@ static int tquic_emsa_pss_verify(const char *hash_alg, u32 hash_len,
 
 	/* Step 15: Compare H and H' */
 	if (crypto_memneq(em + db_len, h_prime, hash_len)) {
-		pr_warn("tquic_pss: step15 H != H'\n");
-		pr_warn("tquic_pss: H  = %*phN\n", (int)hash_len, em + db_len);
-		pr_warn("tquic_pss: H' = %*phN\n", (int)hash_len, h_prime);
+		pr_debug("tquic_pss: step15 H != H'\n");
+		pr_debug("tquic_pss: H  = %*phN\n", (int)hash_len, em + db_len);
+		pr_debug("tquic_pss: H' = %*phN\n", (int)hash_len, h_prime);
 		err = -EKEYREJECTED;
 		goto out;
 	}
@@ -2263,21 +2263,21 @@ static int tquic_verify_rsa_pss(const u8 *pubkey_data, u32 pubkey_len,
 	tfm = crypto_alloc_akcipher("rsa", 0, 0);
 	if (IS_ERR(tfm)) {
 		err = PTR_ERR(tfm);
-		pr_warn("tquic_pss: Failed to allocate RSA: %d\n", err);
+		pr_debug("tquic_pss: Failed to allocate RSA: %d\n", err);
 		return err;
 	}
 
 	/* Set public key */
 	err = crypto_akcipher_set_pub_key(tfm, pubkey_data, pubkey_len);
 	if (err) {
-		pr_warn("tquic_pss: Failed to set public key: %d\n", err);
+		pr_debug("tquic_pss: Failed to set public key: %d\n", err);
 		goto out_free_tfm;
 	}
 
 	/* Get key size */
 	key_size = crypto_akcipher_maxsize(tfm);
 	if (key_size == 0 || sig_len != key_size) {
-		pr_warn("tquic_pss: Signature length %u != key size %u\n",
+		pr_debug("tquic_pss: Signature length %u != key size %u\n",
 			sig_len, key_size);
 		err = -EINVAL;
 		goto out_free_tfm;
@@ -2308,12 +2308,12 @@ static int tquic_verify_rsa_pss(const u8 *pubkey_data, u32 pubkey_len,
 	/* Perform RSA public key operation: em = signature^e mod n */
 	err = crypto_wait_req(crypto_akcipher_encrypt(req), &wait);
 	if (err) {
-		pr_warn("tquic_pss: RSA operation failed: %d\n", err);
+		pr_debug("tquic_pss: RSA operation failed: %d\n", err);
 		goto out_free_req;
 	}
 
 	/* Verify PSS padding */
-	pr_warn("tquic_pss: verify em_len=%u hash_len=%u em[last]=0x%02x\n",
+	pr_debug("tquic_pss: verify em_len=%u hash_len=%u em[last]=0x%02x\n",
 		key_size, hash_len, em[key_size - 1]);
 	err = tquic_emsa_pss_verify(hash_alg, hash_len, msg_hash, em, key_size);
 
@@ -2558,7 +2558,7 @@ static int tquic_sign_rsa_pss(const u8 *privkey_data, u32 privkey_len,
 	/* Unwrap PKCS#8 to PKCS#1 if needed (zero-copy) */
 	tquic_pkcs8_unwrap(privkey_data, privkey_len, &rsa_key, &rsa_key_len);
 
-	pr_warn("tquic_pss: key_len=%u rsa_key_len=%u first4=%02x%02x%02x%02x\n",
+	pr_debug("tquic_pss: key_len=%u rsa_key_len=%u first4=%02x%02x%02x%02x\n",
 		privkey_len, rsa_key_len,
 		rsa_key_len > 0 ? rsa_key[0] : 0,
 		rsa_key_len > 1 ? rsa_key[1] : 0,
@@ -2569,21 +2569,21 @@ static int tquic_sign_rsa_pss(const u8 *privkey_data, u32 privkey_len,
 	tfm = crypto_alloc_akcipher("rsa", 0, 0);
 	if (IS_ERR(tfm)) {
 		err = PTR_ERR(tfm);
-		pr_warn("tquic_pss: Failed to allocate RSA: %d\n", err);
+		pr_debug("tquic_pss: Failed to allocate RSA: %d\n", err);
 		return err;
 	}
 
 	/* Set private key (PKCS#1 RSAPrivateKey format) */
 	err = crypto_akcipher_set_priv_key(tfm, rsa_key, rsa_key_len);
 	if (err) {
-		pr_warn("tquic_pss: Failed to set private key: %d\n", err);
+		pr_debug("tquic_pss: Failed to set private key: %d\n", err);
 		goto out_free_tfm;
 	}
 
 	/* Get key size */
 	key_size = crypto_akcipher_maxsize(tfm);
 	if (key_size == 0 || key_size > *sig_len) {
-		pr_warn("tquic_pss: sig buffer %u < key size %u\n",
+		pr_debug("tquic_pss: sig buffer %u < key size %u\n",
 			*sig_len, key_size);
 		err = -ENOSPC;
 		goto out_free_tfm;
@@ -2599,7 +2599,7 @@ static int tquic_sign_rsa_pss(const u8 *privkey_data, u32 privkey_len,
 	err = tquic_emsa_pss_encode(hash_alg, hash_len, msg_hash,
 				    em, key_size);
 	if (err) {
-		pr_warn("tquic_pss: PSS encoding failed: %d\n", err);
+		pr_debug("tquic_pss: PSS encoding failed: %d\n", err);
 		goto out_free_em;
 	}
 
@@ -2620,7 +2620,7 @@ static int tquic_sign_rsa_pss(const u8 *privkey_data, u32 privkey_len,
 
 	err = crypto_wait_req(crypto_akcipher_decrypt(req), &wait);
 	if (err) {
-		pr_warn("tquic_pss: RSA sign operation failed: %d\n", err);
+		pr_debug("tquic_pss: RSA sign operation failed: %d\n", err);
 		goto out_free_req;
 	}
 
@@ -2708,7 +2708,7 @@ int tquic_hs_process_certificate_verify(struct tquic_handshake *hs,
 
 		/* Verify we have a peer certificate */
 		if (!hs->peer_cert || hs->peer_cert_len == 0) {
-			pr_warn("tquic_hs: CertificateVerify without peer certificate\n");
+			pr_debug("tquic_hs: CertificateVerify without peer certificate\n");
 			return -EINVAL;
 		}
 
@@ -2718,7 +2718,7 @@ int tquic_hs_process_certificate_verify(struct tquic_handshake *hs,
 			int ret = tquic_hs_transcript_hash(hs, transcript_hash,
 							   &hash_len_out);
 			if (ret < 0) {
-				pr_warn("tquic_hs: Failed to get transcript hash\n");
+				pr_debug("tquic_hs: Failed to get transcript hash\n");
 				return -EINVAL;
 			}
 			hash_len = hash_len_out;
@@ -2730,7 +2730,7 @@ int tquic_hs_process_certificate_verify(struct tquic_handshake *hs,
 		 * 1 NUL separator + hash_len = 98 + hash_len.
 		 */
 		if (hash_len > 64 || 98 + hash_len > sizeof(content)) {
-			pr_warn("tquic_hs: transcript hash too large (%d)\n",
+			pr_debug("tquic_hs: transcript hash too large (%d)\n",
 				hash_len);
 			return -EINVAL;
 		}
@@ -2767,7 +2767,7 @@ int tquic_hs_process_certificate_verify(struct tquic_handshake *hs,
 		content_len = cp - content;
 
 		/* Parse peer certificate to extract public key */
-		pr_warn("tquic_hs: CV: peer_cert=%px len=%u first4=%02x%02x%02x%02x\n",
+		pr_debug("tquic_hs: CV: peer_cert=%px len=%u first4=%02x%02x%02x%02x\n",
 			hs->peer_cert, hs->peer_cert_len,
 			hs->peer_cert_len > 0 ? hs->peer_cert[0] : 0,
 			hs->peer_cert_len > 1 ? hs->peer_cert[1] : 0,
@@ -2776,7 +2776,7 @@ int tquic_hs_process_certificate_verify(struct tquic_handshake *hs,
 		cert = tquic_x509_cert_parse(hs->peer_cert, hs->peer_cert_len,
 					     GFP_KERNEL);
 		if (!cert) {
-			pr_warn("tquic_hs: Failed to parse peer certificate\n");
+			pr_debug("tquic_hs: Failed to parse peer certificate\n");
 			return -EINVAL;
 		}
 
@@ -2820,7 +2820,7 @@ int tquic_hs_process_certificate_verify(struct tquic_handshake *hs,
 			content_hash_len = 64;
 			break;
 		default:
-			pr_warn("tquic_hs: unsupported signature algorithm 0x%04x\n",
+			pr_debug("tquic_hs: unsupported signature algorithm 0x%04x\n",
 				sig_alg);
 			tquic_x509_cert_free(cert);
 			return -EINVAL;
@@ -2830,7 +2830,7 @@ int tquic_hs_process_certificate_verify(struct tquic_handshake *hs,
 		hash_tfm = crypto_alloc_shash(hash_alg, 0, 0);
 		if (IS_ERR(hash_tfm)) {
 			err = PTR_ERR(hash_tfm);
-			pr_warn("tquic_hs: Failed to allocate hash %s: %d\n",
+			pr_debug("tquic_hs: Failed to allocate hash %s: %d\n",
 				hash_alg, err);
 			tquic_x509_cert_free(cert);
 			return err;
@@ -2847,7 +2847,7 @@ int tquic_hs_process_certificate_verify(struct tquic_handshake *hs,
 		crypto_free_shash(hash_tfm);
 
 		if (err) {
-			pr_warn("tquic_hs: Failed to hash content: %d\n", err);
+			pr_debug("tquic_hs: Failed to hash content: %d\n", err);
 			tquic_x509_cert_free(cert);
 			return err;
 		}
@@ -2866,7 +2866,7 @@ int tquic_hs_process_certificate_verify(struct tquic_handshake *hs,
 						   content_hash,
 						   p, sig_len);
 			if (err) {
-				pr_warn("tquic_hs: RSA-PSS signature verification FAILED: %d\n",
+				pr_debug("tquic_hs: RSA-PSS signature verification FAILED: %d\n",
 					err);
 				tquic_x509_cert_free(cert);
 				return err;
@@ -2877,7 +2877,7 @@ int tquic_hs_process_certificate_verify(struct tquic_handshake *hs,
 			sig_tfm = crypto_alloc_sig(sig_alg_name, 0, 0);
 			if (IS_ERR(sig_tfm)) {
 				err = PTR_ERR(sig_tfm);
-				pr_warn("tquic_hs: Failed to allocate sig %s: %d\n",
+				pr_debug("tquic_hs: Failed to allocate sig %s: %d\n",
 					sig_alg_name, err);
 				tquic_x509_cert_free(cert);
 				return err;
@@ -2887,7 +2887,7 @@ int tquic_hs_process_certificate_verify(struct tquic_handshake *hs,
 			err = crypto_sig_set_pubkey(sig_tfm, cert->pubkey.key_data,
 						    cert->pubkey.key_len);
 			if (err) {
-				pr_warn("tquic_hs: Failed to set public key: %d\n", err);
+				pr_debug("tquic_hs: Failed to set public key: %d\n", err);
 				crypto_free_sig(sig_tfm);
 				tquic_x509_cert_free(cert);
 				return err;
@@ -2898,7 +2898,7 @@ int tquic_hs_process_certificate_verify(struct tquic_handshake *hs,
 						content_hash, content_hash_len);
 			crypto_free_sig(sig_tfm);
 			if (err) {
-				pr_warn("tquic_hs: ECDSA signature verification FAILED: %d\n",
+				pr_debug("tquic_hs: ECDSA signature verification FAILED: %d\n",
 					err);
 				tquic_x509_cert_free(cert);
 				return err;
@@ -3000,7 +3000,7 @@ int tquic_hs_process_finished(struct tquic_handshake *hs,
 
 	/* Verify */
 	if (crypto_memneq(p, verify_data, hs->hash_len)) {
-		pr_warn("tquic_hs: Finished verification failed\n");
+		pr_debug("tquic_hs: Finished verification failed\n");
 		hs->alert = TLS_ALERT_DECRYPT_ERROR;
 		return -EINVAL;
 	}
@@ -3141,7 +3141,7 @@ int tquic_hs_generate_server_flight(struct tquic_handshake *hs,
 
 	if (!hs->local_cert || hs->local_cert_len == 0 ||
 	    !hs->local_key || hs->local_key_len == 0) {
-		pr_warn("tquic_hs: server flight requires cert and key\n");
+		pr_debug("tquic_hs: server flight requires cert and key\n");
 		return -EINVAL;
 	}
 
@@ -3348,7 +3348,7 @@ int tquic_hs_generate_server_flight(struct tquic_handshake *hs,
 						 content_hash,
 						 p, &sig_actual);
 			if (ret < 0) {
-				pr_warn("tquic_hs: RSA-PSS signing failed: %d\n",
+				pr_debug("tquic_hs: RSA-PSS signing failed: %d\n",
 					ret);
 				return ret;
 			}
@@ -3515,7 +3515,7 @@ int tquic_hs_process_new_session_ticket(struct tquic_handshake *hs,
 		return -EINVAL;
 	nonce_len = *p++;
 	if (nonce_len > sizeof(((struct tquic_session_ticket *)0)->nonce)) {
-		pr_warn("tquic_hs: nonce_len %u exceeds buffer size %zu\n",
+		pr_debug("tquic_hs: nonce_len %u exceeds buffer size %zu\n",
 			nonce_len,
 			sizeof(((struct tquic_session_ticket *)0)->nonce));
 		return -EINVAL;
@@ -4224,64 +4224,64 @@ static int tquic_hs_process_client_hello(struct tquic_handshake *hs,
 	u16 peer_pubkey_len = 0;
 
 	if (!hs->is_server || hs->state != TQUIC_HS_START) {
-		pr_warn("tquic_hs: process_ch: bad state is_server=%d state=%d\n",
+		pr_debug("tquic_hs: process_ch: bad state is_server=%d state=%d\n",
 			hs->is_server, hs->state);
 		return -EINVAL;
 	}
 
 	/* Parse handshake header */
 	if (len < 4) {
-		pr_warn("tquic_hs: process_ch: len=%u < 4\n", len);
+		pr_debug("tquic_hs: process_ch: len=%u < 4\n", len);
 		return -EINVAL;
 	}
 
 	msg_type = *p++;
 	if (msg_type != TLS_HS_CLIENT_HELLO) {
-		pr_warn("tquic_hs: process_ch: msg_type=%u != CH\n", msg_type);
+		pr_debug("tquic_hs: process_ch: msg_type=%u != CH\n", msg_type);
 		return -EINVAL;
 	}
 
 	msg_len = ((u32)p[0] << 16) | ((u32)p[1] << 8) | p[2];
 	p += 3;
 	if (p + msg_len > end) {
-		pr_warn("tquic_hs: process_ch: msg_len=%u overflow (len=%u)\n",
+		pr_debug("tquic_hs: process_ch: msg_len=%u overflow (len=%u)\n",
 			msg_len, len);
 		return -EINVAL;
 	}
 
-	pr_warn("tquic_hs: process_ch: parsing CH len=%u msg_len=%u\n",
+	pr_debug("tquic_hs: process_ch: parsing CH len=%u msg_len=%u\n",
 		len, msg_len);
-	pr_warn("tquic_hs: ch: hex[0..19]: %*ph\n",
+	pr_debug("tquic_hs: ch: hex[0..19]: %*ph\n",
 		min_t(u32, 20, len), data);
 
 	/* Legacy version (0x0303 = TLS 1.2) */
 	if (p + 2 > end) {
-		pr_warn("tquic_hs: ch: ver overflow p=%u end=%u\n",
+		pr_debug("tquic_hs: ch: ver overflow p=%u end=%u\n",
 			(u32)(p - data), (u32)(end - data));
 		return -EINVAL;
 	}
-	pr_warn("tquic_hs: ch: step1 ver=0x%02x%02x\n", p[0], p[1]);
+	pr_debug("tquic_hs: ch: step1 ver=0x%02x%02x\n", p[0], p[1]);
 	p += 2; /* Skip - we check supported_versions ext */
 
 	/* Client random */
 	if (p + TLS_RANDOM_LEN > end) {
-		pr_warn("tquic_hs: ch: random overflow\n");
+		pr_debug("tquic_hs: ch: random overflow\n");
 		return -EINVAL;
 	}
 	memcpy(hs->client_random, p, TLS_RANDOM_LEN);
 	p += TLS_RANDOM_LEN;
-	pr_warn("tquic_hs: ch: step2 past random p=%u\n",
+	pr_debug("tquic_hs: ch: step2 past random p=%u\n",
 		(u32)(p - data));
 
 	/* Legacy session ID */
 	if (p >= end) {
-		pr_warn("tquic_hs: ch: no sid byte\n");
+		pr_debug("tquic_hs: ch: no sid byte\n");
 		return -EINVAL;
 	}
 	session_id_len = *p++;
-	pr_warn("tquic_hs: ch: step3 sid_len=%u\n", session_id_len);
+	pr_debug("tquic_hs: ch: step3 sid_len=%u\n", session_id_len);
 	if (session_id_len > TLS_SESSION_ID_MAX_LEN || p + session_id_len > end) {
-		pr_warn("tquic_hs: ch: sid_len=%u overflow max=%u remain=%u\n",
+		pr_debug("tquic_hs: ch: sid_len=%u overflow max=%u remain=%u\n",
 			session_id_len, TLS_SESSION_ID_MAX_LEN,
 			(u32)(end - p));
 		return -EINVAL;
@@ -4292,17 +4292,17 @@ static int tquic_hs_process_client_hello(struct tquic_handshake *hs,
 
 	/* Cipher suites */
 	if (p + 2 > end) {
-		pr_warn("tquic_hs: ch: no cs_len\n");
+		pr_debug("tquic_hs: ch: no cs_len\n");
 		return -EINVAL;
 	}
 	cipher_suites_len = ((u16)p[0] << 8) | p[1];
 	p += 2;
 	if (p + cipher_suites_len > end) {
-		pr_warn("tquic_hs: ch: cs_len=%u overflow\n", cipher_suites_len);
+		pr_debug("tquic_hs: ch: cs_len=%u overflow\n", cipher_suites_len);
 		return -EINVAL;
 	}
 
-	pr_warn("tquic_hs: ch: sid=%u cs_len=%u offset=%u\n",
+	pr_debug("tquic_hs: ch: sid=%u cs_len=%u offset=%u\n",
 		session_id_len, cipher_suites_len,
 		(u32)(p - data));
 
@@ -4326,14 +4326,14 @@ static int tquic_hs_process_client_hello(struct tquic_handshake *hs,
 			cs += 2;
 		}
 		if (!found_cipher) {
-			pr_warn("tquic_hs: no supported cipher suite\n");
+			pr_debug("tquic_hs: no supported cipher suite\n");
 			return -EINVAL;
 		}
 	}
 	p += cipher_suites_len;
 
 	/* Set hash length based on selected cipher suite */
-	pr_warn("tquic_hs: CH: cipher=0x%04x sid_len=%u cs_len=%u offset=%td\n",
+	pr_debug("tquic_hs: CH: cipher=0x%04x sid_len=%u cs_len=%u offset=%td\n",
 		hs->cipher_suite, session_id_len, cipher_suites_len,
 		p - data);
 	if (hs->cipher_suite == TLS_AES_256_GCM_SHA384)
@@ -4343,33 +4343,33 @@ static int tquic_hs_process_client_hello(struct tquic_handshake *hs,
 
 	/* Legacy compression methods */
 	if (p >= end) {
-		pr_warn("tquic_hs: ch: no comp byte\n");
+		pr_debug("tquic_hs: ch: no comp byte\n");
 		return -EINVAL;
 	}
 	comp_len = *p++;
 	if (p + comp_len > end) {
-		pr_warn("tquic_hs: ch: comp_len=%u overflow\n", comp_len);
+		pr_debug("tquic_hs: ch: comp_len=%u overflow\n", comp_len);
 		return -EINVAL;
 	}
 	p += comp_len;
 
-	pr_warn("tquic_hs: ch: past comp, offset=%u remaining=%u\n",
+	pr_debug("tquic_hs: ch: past comp, offset=%u remaining=%u\n",
 		(u32)(p - data), (u32)(end - p));
 
 	/* Extensions length */
 	if (p + 2 > end) {
-		pr_warn("tquic_hs: ch: no ext_len\n");
+		pr_debug("tquic_hs: ch: no ext_len\n");
 		return -EINVAL;
 	}
 	ext_len = ((u16)p[0] << 8) | p[1];
 	p += 2;
 	if (p + ext_len > end) {
-		pr_warn("tquic_hs: ch: ext_len=%u overflow (remaining=%u)\n",
+		pr_debug("tquic_hs: ch: ext_len=%u overflow (remaining=%u)\n",
 			ext_len, (u32)(end - p));
 		return -EINVAL;
 	}
 
-	pr_warn("tquic_hs: ch: ext_len=%u, parsing extensions\n", ext_len);
+	pr_debug("tquic_hs: ch: ext_len=%u, parsing extensions\n", ext_len);
 
 	/* Parse extensions */
 	{
@@ -4380,10 +4380,10 @@ static int tquic_hs_process_client_hello(struct tquic_handshake *hs,
 			u16 ext_data_len = ((u16)p[2] << 8) | p[3];
 
 			p += 4;
-			pr_warn("tquic_hs: ch ext: type=0x%04x len=%u remaining=%td\n",
+			pr_debug("tquic_hs: ch ext: type=0x%04x len=%u remaining=%td\n",
 				ext_type, ext_data_len, ext_end - p);
 			if (p + ext_data_len > ext_end) {
-				pr_warn("tquic_hs: ch ext overflow: type=0x%04x len=%u > %td\n",
+				pr_debug("tquic_hs: ch ext overflow: type=0x%04x len=%u > %td\n",
 					ext_type, ext_data_len, ext_end - p);
 				return -EINVAL;
 			}
@@ -4524,17 +4524,17 @@ alpn_done:
 		}
 	}
 
-	pr_warn("tquic_hs: process_ch: ext done sv=%d ks=%d pk=%p cipher=0x%04x\n",
+	pr_debug("tquic_hs: process_ch: ext done sv=%d ks=%d pk=%p cipher=0x%04x\n",
 		found_supported_versions, found_key_share,
 		peer_pubkey, hs->cipher_suite);
 
 	if (!found_supported_versions) {
-		pr_warn("tquic_hs: client missing supported_versions ext\n");
+		pr_debug("tquic_hs: client missing supported_versions ext\n");
 		return -EINVAL;
 	}
 
 	if (!found_key_share || !peer_pubkey) {
-		pr_warn("tquic_hs: client missing X25519 key share\n");
+		pr_debug("tquic_hs: client missing X25519 key share\n");
 		return -EINVAL;
 	}
 
@@ -4564,14 +4564,14 @@ alpn_done:
 	/* Compute public key */
 	if (!curve25519_generate_public(hs->key_share.public_key,
 					hs->key_share.private_key)) {
-		pr_warn("tquic_hs: X25519 public key generation failed\n");
+		pr_debug("tquic_hs: X25519 public key generation failed\n");
 		return -EINVAL;
 	}
 
 	/* Compute shared secret */
 	if (!curve25519(hs->shared_secret, hs->key_share.private_key,
 		       peer_pubkey)) {
-		pr_warn("tquic_hs: X25519 key exchange failed\n");
+		pr_debug("tquic_hs: X25519 key exchange failed\n");
 		return -EINVAL;
 	}
 	hs->shared_secret_len = CURVE25519_KEY_SIZE;
@@ -4763,13 +4763,13 @@ int tquic_hs_process_record(struct tquic_handshake *hs,
 		 * tquic_hs_generate_server_flight() for the rest.
 		 */
 		ret = tquic_hs_process_client_hello(hs, data, 4 + msg_len);
-		pr_warn("tquic_hs: process_record: process_ch ret=%d\n", ret);
+		pr_debug("tquic_hs: process_record: process_ch ret=%d\n", ret);
 		if (ret < 0)
 			break;
 		ret = tquic_hs_generate_server_hello(hs, data, 4 + msg_len,
 						     out_buf, out_buf_len,
 						     out_len);
-		pr_warn("tquic_hs: process_record: gen_sh ret=%d out_len=%u\n",
+		pr_debug("tquic_hs: process_record: gen_sh ret=%d out_len=%u\n",
 			ret, *out_len);
 		break;
 

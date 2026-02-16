@@ -591,6 +591,7 @@ int tquic_start_handshake(struct sock *sk)
 
 		spin_lock_bh(&conn->lock);
 		WRITE_ONCE(conn->max_data_remote, bypass_max_data);
+		WRITE_ONCE(conn->max_data_local, bypass_max_data);
 		WRITE_ONCE(conn->max_streams_bidi, bypass_max_streams_bidi);
 		WRITE_ONCE(conn->max_streams_uni, bypass_max_streams_uni);
 		conn->remote_params.initial_max_data = bypass_max_data;
@@ -1093,13 +1094,51 @@ static void tquic_inline_hs_apply_transport_params(struct sock *sk)
 	conn->remote_params.active_connection_id_limit =
 		peer_tp.active_conn_id_limit;
 
-	/* Apply flow control limits */
+	/* Apply remote flow control limits (what peer allows us to send) */
 	conn->max_data_remote = peer_tp.initial_max_data;
 	conn->max_streams_bidi = peer_tp.initial_max_streams_bidi;
 	conn->max_streams_uni = peer_tp.initial_max_streams_uni;
 
-	tquic_dbg("applied peer transport params: max_data=%llu, max_streams_bidi=%llu\n",
-		 peer_tp.initial_max_data, peer_tp.initial_max_streams_bidi);
+	/*
+	 * Apply local flow control limits (what we advertised to the peer).
+	 * These come from the socket config which was used to build the
+	 * transport parameters sent in the TLS handshake.  Without this,
+	 * connection-level receive flow control (max_data_local) stays at
+	 * zero and all incoming STREAM data is rejected.
+	 */
+	conn->max_data_local = tsk->config.initial_max_data;
+	if (!conn->max_data_local)
+		conn->max_data_local = TQUIC_DEFAULT_MAX_DATA;
+
+	conn->local_params.initial_max_data = conn->max_data_local;
+	conn->local_params.initial_max_streams_bidi =
+		tsk->config.initial_max_streams_bidi;
+	if (!conn->local_params.initial_max_streams_bidi)
+		conn->local_params.initial_max_streams_bidi = 100;
+	conn->local_params.initial_max_streams_uni =
+		tsk->config.initial_max_streams_uni;
+	if (!conn->local_params.initial_max_streams_uni)
+		conn->local_params.initial_max_streams_uni = 100;
+	conn->local_params.initial_max_stream_data_bidi_local =
+		tsk->config.initial_max_stream_data_bidi_local;
+	if (!conn->local_params.initial_max_stream_data_bidi_local)
+		conn->local_params.initial_max_stream_data_bidi_local =
+			TQUIC_DEFAULT_MAX_STREAM_DATA;
+	conn->local_params.initial_max_stream_data_bidi_remote =
+		tsk->config.initial_max_stream_data_bidi_remote;
+	if (!conn->local_params.initial_max_stream_data_bidi_remote)
+		conn->local_params.initial_max_stream_data_bidi_remote =
+			TQUIC_DEFAULT_MAX_STREAM_DATA;
+	conn->local_params.initial_max_stream_data_uni =
+		tsk->config.initial_max_stream_data_uni;
+	if (!conn->local_params.initial_max_stream_data_uni)
+		conn->local_params.initial_max_stream_data_uni =
+			TQUIC_DEFAULT_MAX_STREAM_DATA;
+
+	tquic_dbg("applied transport params: remote_max_data=%llu, "
+		 "local_max_data=%llu, max_streams_bidi=%llu\n",
+		 peer_tp.initial_max_data, conn->max_data_local,
+		 peer_tp.initial_max_streams_bidi);
 
 out_put:
 	tquic_conn_put(conn);
@@ -1209,11 +1248,11 @@ static int tquic_inline_hs_install_keys(struct sock *sk, int level)
 		conn->crypto_state = crypto;
 	}
 
-	pr_warn("install_keys: level=%d is_server=%d cs_len=%u ss_len=%u\n",
+	pr_debug("install_keys: level=%d is_server=%d cs_len=%u ss_len=%u\n",
 		level, conn->is_server, cs_len, ss_len);
-	pr_warn("install_keys: client_secret=%*phN\n",
+	pr_debug("install_keys: client_secret=%*phN\n",
 		min_t(int, cs_len, 16), client_secret);
-	pr_warn("install_keys: server_secret=%*phN\n",
+	pr_debug("install_keys: server_secret=%*phN\n",
 		min_t(int, ss_len, 16), server_secret);
 
 	if (conn->is_server)
@@ -1228,7 +1267,7 @@ static int tquic_inline_hs_install_keys(struct sock *sk, int level)
 		tquic_dbg("failed to install keys for level %d: %d\n",
 			 level, ret);
 	}
-	pr_warn("install_keys: ret=%d\n", ret);
+	pr_debug("install_keys: ret=%d\n", ret);
 
 out_zero:
 	memzero_explicit(client_key, sizeof(client_key));
@@ -1302,7 +1341,7 @@ int tquic_inline_hs_recv_crypto(struct sock *sk, const u8 *data, u32 len,
 
 			/* Need at least 4 bytes for TLS header */
 			if (len - offset < 4) {
-				pr_warn("tquic_hs: trailing %u bytes after offset %u\n",
+				pr_debug("tquic_hs: trailing %u bytes after offset %u\n",
 					len - offset, offset);
 				break;
 			}
@@ -1314,7 +1353,7 @@ int tquic_inline_hs_recv_crypto(struct sock *sk, const u8 *data, u32 len,
 				 data[offset + 3]);
 
 			if (offset + record_len > len) {
-				pr_warn("tquic_hs: record at %u needs %u bytes, only %u left\n",
+				pr_debug("tquic_hs: record at %u needs %u bytes, only %u left\n",
 					offset, record_len, len - offset);
 				ret = -EINVAL;
 				kfree(resp_buf);
@@ -1323,7 +1362,7 @@ int tquic_inline_hs_recv_crypto(struct sock *sk, const u8 *data, u32 len,
 				return ret;
 			}
 
-			pr_warn("tquic_hs: processing record type=0x%02x len=%u at offset=%u/%u\n",
+			pr_debug("tquic_hs: processing record type=0x%02x len=%u at offset=%u/%u\n",
 				data[offset], record_len, offset, len);
 
 			ret = tquic_hs_process_record(ihs,
@@ -1465,14 +1504,14 @@ int tquic_inline_hs_recv_crypto(struct sock *sk, const u8 *data, u32 len,
 	 * After ServerHello: handshake-level keys become available
 	 * After server Finished: application-level keys become available
 	 */
-	pr_warn("inline_hs_recv: state prev=%d new=%d is_server=%d\n",
+	pr_debug("inline_hs_recv: state prev=%d new=%d is_server=%d\n",
 		prev_state, new_state, conn->is_server);
 	if (prev_state == TQUIC_HS_WAIT_SH &&
 	    new_state >= TQUIC_HS_WAIT_EE) {
 		/* Install handshake-level keys */
-		pr_warn("inline_hs_recv: CLIENT installing handshake keys\n");
+		pr_debug("inline_hs_recv: CLIENT installing handshake keys\n");
 		ret = tquic_inline_hs_install_keys(sk, TQUIC_CRYPTO_HANDSHAKE);
-		pr_warn("inline_hs_recv: install_keys ret=%d\n", ret);
+		pr_debug("inline_hs_recv: install_keys ret=%d\n", ret);
 		if (ret < 0) {
 			kfree(resp_buf);
 			tquic_inline_hs_abort(sk, ret);
@@ -1491,7 +1530,7 @@ int tquic_inline_hs_recv_crypto(struct sock *sk, const u8 *data, u32 len,
 		tquic_crypto_set_level(conn->crypto_state,
 				       TQUIC_ENC_HANDSHAKE,
 				       TQUIC_ENC_HANDSHAKE);
-		pr_warn("inline_hs_recv: CLIENT handshake keys activated\n");
+		pr_debug("inline_hs_recv: CLIENT handshake keys activated\n");
 	}
 
 	/* Both client and server: mark complete after all Finished processed */
@@ -1589,16 +1628,16 @@ int tquic_inline_hs_recv_crypto(struct sock *sk, const u8 *data, u32 len,
 				spin_unlock_bh(&listener_sk->sk_lock.slock);
 
 				listener_sk->sk_data_ready(listener_sk);
-				pr_warn("inline_hs: server child queued for accept\n");
+				pr_debug("inline_hs: server child queued for accept\n");
 			}
 		}
 
-		pr_warn("inline TLS handshake complete (is_server=%d)\n",
+		pr_debug("inline TLS handshake complete (is_server=%d)\n",
 			conn->is_server);
 	}
 
 	/* Queue any response messages (client Finished, etc.) */
-	pr_warn("inline_hs_recv: resp_len=%u crypto_level=%d complete=%d\n",
+	pr_debug("inline_hs_recv: resp_len=%u crypto_level=%d complete=%d\n",
 		resp_len, conn->crypto_level, conn->handshake_complete);
 	if (resp_len > 0 && resp_len <= 4096) {
 		resp_skb = alloc_skb(resp_len, GFP_ATOMIC);
@@ -1620,7 +1659,7 @@ int tquic_inline_hs_recv_crypto(struct sock *sk, const u8 *data, u32 len,
 			pn_space = TQUIC_PN_SPACE_INITIAL;
 
 		skb_queue_tail(&conn->crypto_buffer[pn_space], resp_skb);
-		pr_warn("inline_hs_recv: queued %u bytes at pn_space=%d\n",
+		pr_debug("inline_hs_recv: queued %u bytes at pn_space=%d\n",
 			resp_len, pn_space);
 	}
 
@@ -1835,9 +1874,9 @@ static int tquic_conn_server_accept_init(struct tquic_connection *conn,
 	conn->original_dcid.len = dcid_len;
 	if (dcid_len > 0)
 		memcpy(conn->original_dcid.id, data + offset, dcid_len);
-	pr_warn("accept_init: client original DCID=%*phN (for Initial keys)\n",
+	pr_debug("accept_init: client original DCID=%*phN (for Initial keys)\n",
 		min_t(int, dcid_len, 8), conn->original_dcid.id);
-	pr_warn("accept_init: server SCID=%*phN (kept from conn_create)\n",
+	pr_debug("accept_init: server SCID=%*phN (kept from conn_create)\n",
 		min_t(int, conn->scid.len, 8), conn->scid.id);
 	offset += dcid_len;
 
@@ -1869,7 +1908,7 @@ static int tquic_conn_server_accept_init(struct tquic_connection *conn,
 	conn->dcid.len = scid_len;
 	if (scid_len > 0)
 		memcpy(conn->dcid.id, data + offset, scid_len);
-	pr_warn("accept_init: client SCID -> server DCID=%*phN\n",
+	pr_debug("accept_init: client SCID -> server DCID=%*phN\n",
 		min_t(int, scid_len, 8), conn->dcid.id);
 	offset += scid_len;
 
@@ -2055,17 +2094,17 @@ static int tquic_start_server_handshake(struct sock *sk,
 	struct tquic_hs_transport_params tp;
 	int ret;
 
-	pr_warn("tquic_start_server_hs: ENTERED fn=%ps\n",
+	pr_debug("tquic_start_server_hs: ENTERED fn=%ps\n",
 		tquic_start_server_handshake);
 	conn = tsk->conn;
-	pr_warn("tquic_start_server_hs: tsk=%p tsk->conn=%p sk=%p\n",
+	pr_debug("tquic_start_server_hs: tsk=%p tsk->conn=%p sk=%p\n",
 		tsk, conn, sk);
 	if (!conn) {
-		pr_warn("tquic_start_server_hs: conn is NULL, returning -EINVAL\n");
+		pr_debug("tquic_start_server_hs: conn is NULL, returning -EINVAL\n");
 		return -EINVAL;
 	}
 
-	pr_warn("tquic_start_server_hs: using inline TLS path (server)\n");
+	pr_debug("tquic_start_server_hs: using inline TLS path (server)\n");
 
 	/*
 	 * Initialize inline TLS 1.3 handshake in server mode.
@@ -2075,7 +2114,7 @@ static int tquic_start_server_handshake(struct sock *sk,
 	 */
 	ihs = tquic_hs_init(true);
 	if (!ihs) {
-		pr_warn("tquic_start_server_hs: tquic_hs_init(server) failed\n");
+		pr_debug("tquic_start_server_hs: tquic_hs_init(server) failed\n");
 		return -ENOMEM;
 	}
 
@@ -2085,7 +2124,7 @@ static int tquic_start_server_handshake(struct sock *sk,
 
 		ret = tquic_hs_set_alpn(ihs, alpn_protos, 1);
 		if (ret < 0) {
-			pr_warn("tquic_start_server_hs: set_alpn failed: %d\n", ret);
+			pr_debug("tquic_start_server_hs: set_alpn failed: %d\n", ret);
 			tquic_hs_cleanup(ihs);
 			return ret;
 		}
@@ -2128,7 +2167,7 @@ static int tquic_start_server_handshake(struct sock *sk,
 
 	ret = tquic_hs_set_transport_params(ihs, &tp);
 	if (ret < 0) {
-		pr_warn("tquic_start_server_hs: set_tp failed: %d\n", ret);
+		pr_debug("tquic_start_server_hs: set_tp failed: %d\n", ret);
 		tquic_hs_cleanup(ihs);
 		return ret;
 	}
@@ -2138,7 +2177,7 @@ static int tquic_start_server_handshake(struct sock *sk,
 		ret = tquic_hs_set_certificate(ihs, tsk->cert_der,
 					       tsk->cert_der_len);
 		if (ret < 0) {
-			pr_warn("tquic: failed to set certificate: %d\n", ret);
+			pr_debug("tquic: failed to set certificate: %d\n", ret);
 			tquic_hs_cleanup(ihs);
 			return ret;
 		}
@@ -2148,7 +2187,7 @@ static int tquic_start_server_handshake(struct sock *sk,
 		ret = tquic_hs_set_private_key(ihs, tsk->key_der,
 					       tsk->key_der_len);
 		if (ret < 0) {
-			pr_warn("tquic: failed to set private key: %d\n", ret);
+			pr_debug("tquic: failed to set private key: %d\n", ret);
 			tquic_hs_cleanup(ihs);
 			return ret;
 		}
@@ -2162,7 +2201,7 @@ static int tquic_start_server_handshake(struct sock *sk,
 	 */
 	tsk->inline_hs = ihs;
 
-	pr_warn("tquic_start_server_hs: inline TLS server context initialized\n");
+	pr_debug("tquic_start_server_hs: inline TLS server context initialized\n");
 	return 0;
 }
 
@@ -2186,11 +2225,11 @@ static void tquic_server_handshake_done(void *data, int status,
 	struct sock *listener_sk;
 	struct tquic_sock *listen_tsk;
 
-	pr_warn("tquic_hs_done: status=%d peerid=0x%x child_sk=%p conn=%p\n",
+	pr_debug("tquic_hs_done: status=%d peerid=0x%x child_sk=%p conn=%p\n",
 		status, peerid, child_sk, conn);
 
 	if (!conn) {
-		pr_warn("tquic_hs_done: NULL conn!\n");
+		pr_debug("tquic_hs_done: NULL conn!\n");
 		return;
 	}
 
@@ -2210,6 +2249,22 @@ static void tquic_server_handshake_done(void *data, int status,
 		 * then negotiate with client's received params.
 		 */
 		tquic_tp_set_defaults_server(&conn->local_params);
+
+		/*
+		 * Seed the legacy connection flow control fields from our
+		 * local transport parameters BEFORE negotiation/apply.
+		 * tquic_tp_apply() will overwrite these with negotiated
+		 * values, but this ensures they are non-zero if a 1-RTT
+		 * packet is processed between key installation (above)
+		 * and tquic_tp_apply() completion (below).
+		 * Without this, conn->max_data_local starts at 0 and
+		 * tquic_flow_control_check_recv_limit_internal() rejects
+		 * all incoming data with -EDQUOT.
+		 */
+		spin_lock_bh(&conn->lock);
+		conn->max_data_local =
+			conn->local_params.initial_max_data;
+		spin_unlock_bh(&conn->lock);
 
 		/*
 		 * Negotiate parameters between server's local and client's remote.
@@ -2330,11 +2385,11 @@ int tquic_server_handshake(struct sock *listener_sk,
 	int ret;
 
 	/* Check accept queue space */
-	pr_warn("tquic_server_handshake: accept_queue_len=%d max=%u\n",
+	pr_debug("tquic_server_handshake: accept_queue_len=%d max=%u\n",
 		atomic_read(&listen_tsk->accept_queue_len),
 		listen_tsk->max_accept_queue);
 	if (atomic_read(&listen_tsk->accept_queue_len) >= listen_tsk->max_accept_queue) {
-		pr_warn("tquic_server_handshake: accept queue full!\n");
+		pr_debug("tquic_server_handshake: accept queue full!\n");
 		return -ECONNREFUSED;
 	}
 
@@ -2438,7 +2493,7 @@ int tquic_server_handshake(struct sock *listener_sk,
 
 	/* Process Initial packet to extract CIDs */
 	ret = tquic_conn_server_accept_init(conn, initial_pkt);
-	pr_warn("tquic_server_handshake: accept_init ret=%d\n", ret);
+	pr_debug("tquic_server_handshake: accept_init ret=%d\n", ret);
 		if (ret < 0) {
 			struct tquic_stream *dstream = NULL;
 
@@ -2486,7 +2541,7 @@ int tquic_server_handshake(struct sock *listener_sk,
 			return -ENOMEM;
 		}
 
-	pr_warn("tquic_server_handshake: STEP1 hs_alloc ok\n");
+	pr_debug("tquic_server_handshake: STEP1 hs_alloc ok\n");
 	hs->sk = child_sk;
 	hs->timeout_ms = TQUIC_HANDSHAKE_TIMEOUT_MS;
 	hs->start_time = jiffies;
@@ -2496,18 +2551,18 @@ int tquic_server_handshake(struct sock *listener_sk,
 	/* Set child socket state */
 	inet_sk_set_state(child_sk, TCP_SYN_RECV);
 	child_tsk->flags |= TQUIC_F_SERVER_MODE;
-	pr_warn("tquic_server_handshake: STEP2 state set\n");
+	pr_debug("tquic_server_handshake: STEP2 state set\n");
 
 	/* Take reference for handshake callback */
 	sock_hold(child_sk);
 
-	pr_warn("tquic_server_handshake: STEP3 about to call start_server_hs\n");
+	pr_debug("tquic_server_handshake: STEP3 about to call start_server_hs\n");
 	/* Initiate server TLS handshake */
-		pr_warn("tquic_server_handshake: before start_server_hs: "
+		pr_debug("tquic_server_handshake: before start_server_hs: "
 			"child_tsk=%p child_tsk->conn=%p child_sk=%p\n",
 			child_tsk, child_tsk->conn, child_sk);
 		ret = tquic_start_server_handshake(child_sk, hs);
-		pr_warn("tquic_server_handshake: start_server_handshake ret=%d\n", ret);
+		pr_debug("tquic_server_handshake: start_server_handshake ret=%d\n", ret);
 		if (ret < 0) {
 			struct tquic_stream *dstream = NULL;
 
@@ -2549,9 +2604,9 @@ int tquic_server_handshake(struct sock *listener_sk,
 	ret = tquic_conn_add_path(conn,
 				  (struct sockaddr *)&child_tsk->bind_addr,
 				  (struct sockaddr *)client_addr);
-	pr_warn("tquic_server_handshake: add_path ret=%d\n", ret);
+	pr_debug("tquic_server_handshake: add_path ret=%d\n", ret);
 	if (ret < 0) {
-		pr_warn("tquic_server_handshake: add_path failed, "
+		pr_debug("tquic_server_handshake: add_path failed, "
 			"handshake will stall\n");
 		goto done_free_skb;
 	}
@@ -2560,20 +2615,20 @@ int tquic_server_handshake(struct sock *listener_sk,
 	conn->crypto_state = tquic_crypto_init_versioned(&conn->original_dcid,
 							 true, conn->version);
 	if (!conn->crypto_state) {
-		pr_warn("tquic_server_handshake: crypto_init failed\n");
+		pr_debug("tquic_server_handshake: crypto_init failed\n");
 		goto done_free_skb;
 	}
-	pr_warn("tquic_server_handshake: Initial crypto keys derived\n");
+	pr_debug("tquic_server_handshake: Initial crypto keys derived\n");
 
 	/* Step 3: Decrypt Initial packet and feed ClientHello to TLS */
 	ret = tquic_process_initial_for_server(conn, initial_pkt, client_addr);
-	pr_warn("tquic_server_handshake: process_initial ret=%d\n", ret);
+	pr_debug("tquic_server_handshake: process_initial ret=%d\n", ret);
 
 	/* Step 4: Flush ServerHello response to client */
 	if (ret >= 0) {
 		int flush_ret = tquic_output_flush_crypto(conn);
 
-		pr_warn("tquic_server_handshake: flush_crypto ret=%d\n",
+		pr_debug("tquic_server_handshake: flush_crypto ret=%d\n",
 			flush_ret);
 	}
 

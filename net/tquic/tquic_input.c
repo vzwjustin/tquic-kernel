@@ -254,7 +254,7 @@ static struct tquic_connection *tquic_lookup_by_dcid(const u8 *dcid, u8 dcid_len
 
 	/* Use the exported lookup function from core/connection.c */
 	conn = tquic_conn_lookup_by_cid(&cid);
-	pr_warn("tquic_lookup_by_dcid: len=%u id=%*phN result=%p\n",
+	pr_debug("tquic_lookup_by_dcid: len=%u id=%*phN result=%p\n",
 		dcid_len, min_t(int, dcid_len, 8), dcid, conn);
 	return conn;
 }
@@ -1296,7 +1296,7 @@ static int tquic_process_crypto_frame(struct tquic_rx_ctx *ctx)
 	if (ctx->conn && ctx->conn->tsk && ctx->conn->tsk->inline_hs) {
 		struct sock *sk = (struct sock *)ctx->conn->tsk;
 
-		pr_warn("crypto_frame: offset=%llu length=%llu enc_level=%d "
+		pr_debug("crypto_frame: offset=%llu length=%llu enc_level=%d "
 			"data[0..3]=%*phN\n",
 			offset, length, ctx->enc_level,
 			min_t(int, (int)length, 4),
@@ -1313,7 +1313,7 @@ static int tquic_process_crypto_frame(struct tquic_rx_ctx *ctx)
 						  ctx->data + ctx->offset,
 						  (u32)length,
 						  ctx->enc_level);
-		pr_warn("crypto_frame: inline_hs_recv_crypto ret=%d\n", ret);
+		pr_debug("crypto_frame: inline_hs_recv_crypto ret=%d\n", ret);
 		if (ret < 0) {
 			tquic_dbg("CRYPTO frame processing failed: %d\n",
 				 ret);
@@ -1329,7 +1329,7 @@ static int tquic_process_crypto_frame(struct tquic_rx_ctx *ctx)
 		if (ctx->conn)
 			tquic_output_flush_crypto(ctx->conn);
 	} else {
-		pr_warn("crypto_frame: no inline_hs! conn=%p tsk=%p\n",
+		pr_debug("crypto_frame: no inline_hs! conn=%p tsk=%p\n",
 			ctx->conn,
 			ctx->conn ? ctx->conn->tsk : NULL);
 	}
@@ -1375,8 +1375,8 @@ static int tquic_process_stream_frame(struct tquic_rx_ctx *ctx)
 		ctx->offset += ret;
 	}
 
-	tquic_dbg("process_stream: id=%llu offset=%llu fin=%d\n",
-		  stream_id, offset, fin);
+	pr_debug("tquic: process_stream: id=%llu offset=%llu fin=%d\n",
+		 stream_id, offset, fin);
 
 	/* Length (optional) */
 	if (has_length) {
@@ -1448,6 +1448,7 @@ static int tquic_process_stream_frame(struct tquic_rx_ctx *ctx)
 	 * large single-frame allocations.
 	 */
 	if (length > TQUIC_MAX_STREAM_FRAME_ALLOC) {
+		pr_debug("tquic: stream %llu: dropped: EMSGSIZE\n", stream_id);
 		tquic_stream_put(stream);
 		return -EMSGSIZE;
 	}
@@ -1469,6 +1470,8 @@ static int tquic_process_stream_frame(struct tquic_rx_ctx *ctx)
 
 		/* Cap allocation to remaining buffer capacity */
 		if (length > (u64)sk->sk_rcvbuf) {
+			pr_debug("tquic: stream %llu: dropped: len %llu > rcvbuf %d\n",
+				 stream_id, length, sk->sk_rcvbuf);
 			ctx->offset += length;
 			ctx->ack_eliciting = true;
 			tquic_stream_put(stream);
@@ -1519,6 +1522,8 @@ static int tquic_process_stream_frame(struct tquic_rx_ctx *ctx)
 	 * accepting the data.
 	 */
 	if (tquic_flow_check_recv_limits(stream, offset, length)) {
+		pr_debug("tquic: stream %llu: flow control exceeded\n",
+			 stream_id);
 		tquic_stream_put(stream);
 		return -EDQUOT;
 	}
@@ -1543,7 +1548,8 @@ static int tquic_process_stream_frame(struct tquic_rx_ctx *ctx)
 	 */
 	if (ctx->conn->sk) {
 		if (!sk_rmem_schedule(ctx->conn->sk, data_skb, length)) {
-			/* Buffer full - drop packet, peer will retransmit */
+			pr_debug("tquic: stream %llu: rmem_schedule failed\n",
+				 stream_id);
 			kfree_skb(data_skb);
 			ctx->offset += length;
 			ctx->ack_eliciting = true;
@@ -1554,6 +1560,8 @@ static int tquic_process_stream_frame(struct tquic_rx_ctx *ctx)
 	}
 
 	skb_queue_tail(&stream->recv_buf, data_skb);
+	pr_debug("tquic: stream %llu: enqueued %llu bytes\n",
+		 stream_id, length);
 
 	/* Update recv_offset and final_size after successful enqueue */
 	stream->recv_offset = max(stream->recv_offset, offset + length);
@@ -1571,6 +1579,9 @@ static int tquic_process_stream_frame(struct tquic_rx_ctx *ctx)
 
 	/* Update connection stats */
 	ctx->conn->stats.rx_bytes += length;
+
+	/* Wake up any readers blocked in tquic_recvmsg() */
+	wake_up_interruptible(&stream->wait);
 
 	/*
 	 * P-003: Release the stream reference we acquired during RCU lookup.
@@ -2570,7 +2581,7 @@ static int tquic_process_frames(struct tquic_connection *conn,
 		prev_offset = ctx.offset;
 
 		if (is_initial)
-			pr_warn("process_frames: offset=%zu/%zu frame_type=0x%02x\n",
+			pr_debug("process_frames: offset=%zu/%zu frame_type=0x%02x\n",
 				ctx.offset, ctx.len,
 				ctx.data[ctx.offset]);
 
@@ -2829,7 +2840,7 @@ static int tquic_process_frames(struct tquic_connection *conn,
 
 		if (ret < 0) {
 			if (is_initial)
-				pr_warn("process_frames: handler ret=%d "
+				pr_debug("process_frames: handler ret=%d "
 					"for frame 0x%02x at offset=%zu\n",
 					ret, frame_type, prev_offset);
 			break;
@@ -2838,7 +2849,7 @@ static int tquic_process_frames(struct tquic_connection *conn,
 		/* Detect stuck parsing (no progress made) */
 		if (ctx.offset == prev_offset) {
 			if (is_initial)
-				pr_warn("process_frames: stuck at offset=%zu "
+				pr_debug("process_frames: stuck at offset=%zu "
 					"frame=0x%02x\n",
 					ctx.offset, frame_type);
 			return -EPROTO;
@@ -3171,7 +3182,7 @@ static int tquic_process_packet(struct tquic_connection *conn,
 	ctx.len = len;
 	ctx.offset = 0;
 
-	pr_warn("process_pkt: ENTER conn=%p data[0]=0x%02x len=%zu\n",
+	pr_debug("process_pkt: ENTER conn=%p data[0]=0x%02x len=%zu\n",
 		conn, data[0], len);
 
 	/* Check header form */
@@ -3181,11 +3192,11 @@ static int tquic_process_packet(struct tquic_connection *conn,
 					      scid, &scid_len,
 					      &version, &pkt_type);
 		if (unlikely(ret < 0)) {
-			pr_warn("process_pkt: long hdr parse failed: %d\n", ret);
+			pr_debug("process_pkt: long hdr parse failed: %d\n", ret);
 			return ret;
 		}
 
-		pr_warn("process_pkt: long hdr OK ver=0x%08x pkt_type=%d "
+		pr_debug("process_pkt: long hdr OK ver=0x%08x pkt_type=%d "
 			"dcid=%*phN scid=%*phN offset=%zu\n",
 			version, pkt_type,
 			min_t(int, dcid_len, 8), dcid,
@@ -3341,7 +3352,7 @@ static int tquic_process_packet(struct tquic_connection *conn,
 		 */
 		if (!conn->is_server && !conn->dcid_updated &&
 		    scid_len > 0 && scid_len <= TQUIC_MAX_CID_LEN) {
-			pr_warn("process_pkt: updating client DCID from %*phN to server SCID %*phN\n",
+			pr_debug("process_pkt: updating client DCID from %*phN to server SCID %*phN\n",
 				min_t(int, conn->dcid.len, 8), conn->dcid.id,
 				min_t(int, scid_len, 8), scid);
 			memcpy(conn->dcid.id, scid, scid_len);
@@ -3376,11 +3387,11 @@ static int tquic_process_packet(struct tquic_connection *conn,
 			ret = tquic_decode_varint(data + ctx.offset,
 						  len - ctx.offset, &pkt_len);
 			if (ret < 0) {
-				pr_warn("process_pkt: pkt_len parse failed: %d\n", ret);
+				pr_debug("process_pkt: pkt_len parse failed: %d\n", ret);
 				return ret;
 			}
 			ctx.offset += ret;
-			pr_warn("process_pkt: parsed hdr: pkt_len=%llu offset=%zu\n",
+			pr_debug("process_pkt: parsed hdr: pkt_len=%llu offset=%zu\n",
 				pkt_len, ctx.offset);
 		}
 
@@ -3440,7 +3451,7 @@ static int tquic_process_packet(struct tquic_connection *conn,
 	{
 		u8 hp_pn_len = 0, hp_key_phase = 0;
 
-		pr_warn("process_pkt: HP removal: pkt_type=%d hdr_len=%zu "
+		pr_debug("process_pkt: HP removal: pkt_type=%d hdr_len=%zu "
 			"payload_len=%lu data[0]=0x%02x long=%d\n",
 			pkt_type, ctx.offset,
 			(unsigned long)(len - ctx.offset),
@@ -3453,14 +3464,14 @@ static int tquic_process_packet(struct tquic_connection *conn,
 						     &hp_pn_len,
 						     &hp_key_phase);
 		if (unlikely(ret < 0)) {
-			pr_warn("process_pkt: HP removal failed: %d\n", ret);
+			pr_debug("process_pkt: HP removal failed: %d\n", ret);
 			if (path_looked_up)
 				tquic_path_put(path);
 			rcu_read_unlock();
 			return ret;
 		}
 
-		pr_warn("process_pkt: HP done: pkt_type=%d pn_len=%u "
+		pr_debug("process_pkt: HP done: pkt_type=%d pn_len=%u "
 			"data[0]=0x%02x\n",
 			pkt_type, hp_pn_len, data[0]);
 
@@ -3523,7 +3534,7 @@ static int tquic_process_packet(struct tquic_connection *conn,
 	else
 		pn_space_idx = TQUIC_PN_SPACE_APPLICATION;
 
-	pr_warn("process_pkt: PN decode: pkt_type=%d pkt_num=%llu "
+	pr_debug("process_pkt: PN decode: pkt_type=%d pkt_num=%llu "
 		"pn_len=%d hdr_offset=%zu total_len=%lu\n",
 		pkt_type, pkt_num, pkt_num_len, ctx.offset,
 		(unsigned long)len);
@@ -3596,7 +3607,7 @@ static int tquic_process_packet(struct tquic_connection *conn,
 			TQUIC_ADD_STATS(sock_net(conn->sk), TQUIC_MIB_0RTTBYTESRX,
 					decrypted_len);
 	} else {
-		pr_warn("process_pkt: decrypt: pkt_type=%d hdr_len=%zu "
+		pr_debug("process_pkt: decrypt: pkt_type=%d hdr_len=%zu "
 			"payload_len=%zu pkt_num=%llu\n",
 			pkt_type, ctx.offset, payload_len,
 			pkt_num);
@@ -3607,7 +3618,7 @@ static int tquic_process_packet(struct tquic_connection *conn,
 					    pkt_type >= 0 ? pkt_type : 3,
 					    decrypted, &decrypted_len);
 
-		pr_warn("process_pkt: decrypt ret=%d pkt_type=%d "
+		pr_debug("process_pkt: decrypt ret=%d pkt_type=%d "
 			"decrypted_len=%lu\n",
 			ret, pkt_type, (unsigned long)decrypted_len);
 
@@ -3697,6 +3708,8 @@ static int tquic_process_packet(struct tquic_connection *conn,
 	}
 
 	/* Process frames */
+	pr_debug("tquic: process_frames: type=%d pn=%llu len=%zu\n",
+		 pkt_type >= 0 ? pkt_type : 3, pkt_num, decrypted_len);
 	ret = tquic_process_frames(conn, path, decrypted, decrypted_len,
 				   pkt_type >= 0 ? pkt_type : 3, pkt_num);
 
@@ -3763,7 +3776,7 @@ int tquic_process_initial_for_server(struct tquic_connection *conn,
 	if (skb_ensure_writable(skb, skb->len))
 		return -ENOMEM;
 
-	pr_warn("process_initial_for_server: len=%u data[0]=0x%02x "
+	pr_debug("process_initial_for_server: len=%u data[0]=0x%02x "
 		"scid_len=%u dcid_len=%u version=0x%08x crypto=%p hp=%p\n",
 		skb->len, skb->data[0],
 		conn->scid.len, conn->dcid.len, conn->version,
@@ -3772,7 +3785,7 @@ int tquic_process_initial_for_server(struct tquic_connection *conn,
 			tquic_crypto_get_hp_ctx(conn->crypto_state) : NULL);
 
 	if (skb->len >= 22) {
-		pr_warn("process_initial_for_server: pkt bytes: "
+		pr_debug("process_initial_for_server: pkt bytes: "
 			"%02x %02x%02x%02x%02x %02x "
 			"%*phN %02x %*phN\n",
 			skb->data[0],
@@ -3787,7 +3800,7 @@ int tquic_process_initial_for_server(struct tquic_connection *conn,
 
 	ret = tquic_process_packet(conn, NULL, skb->data, skb->len, src_addr);
 
-	pr_warn("process_initial_for_server: process_packet ret=%d\n", ret);
+	pr_debug("process_initial_for_server: process_packet ret=%d\n", ret);
 	return ret;
 }
 EXPORT_SYMBOL_GPL(tquic_process_initial_for_server);
@@ -3863,7 +3876,7 @@ int tquic_udp_recv(struct sock *sk, struct sk_buff *skb)
 	data = skb->data;
 	len = skb->len;
 
-	pr_warn("tquic_udp_recv: proto=0x%04x len=%zu data[0]=0x%02x sk=%p\n",
+	pr_debug("tquic_udp_recv: proto=0x%04x len=%zu data[0]=0x%02x sk=%p\n",
 		ntohs(skb->protocol), len, len > 0 ? data[0] : 0, sk);
 
 	if (unlikely(len < 1)) {
@@ -3887,14 +3900,14 @@ int tquic_udp_recv(struct sock *sk, struct sk_buff *skb)
 	 * 2. Per-IP rate limit check (rate_limit.h)
 	 * 3. Advanced checks with cookie support (tquic_ratelimit.h)
 	 */
-	pr_warn("tquic_udp_recv: pre-ratelimit len=%zu data[0]=0x%02x longform=%d\n",
+	pr_debug("tquic_udp_recv: pre-ratelimit len=%zu data[0]=0x%02x longform=%d\n",
 		len, data[0], !!(data[0] & TQUIC_HEADER_FORM_LONG));
 
 	if (len >= 7 && (data[0] & TQUIC_HEADER_FORM_LONG)) {
 		/* Long header - check if this is an Initial packet */
 		int pkt_type = (data[0] & 0x30) >> 4;
 
-		pr_warn("tquic_udp_recv: long hdr pkt_type=%d (Initial=%d)\n",
+		pr_debug("tquic_udp_recv: long hdr pkt_type=%d (Initial=%d)\n",
 			pkt_type, TQUIC_PKT_INITIAL);
 
 		if (pkt_type == TQUIC_PKT_INITIAL) {
@@ -3904,7 +3917,7 @@ int tquic_udp_recv(struct sock *sk, struct sk_buff *skb)
 			size_t token_len = 0;
 			size_t offset;
 
-			pr_warn("tquic_udp_recv: Initial pkt detected, len=%zu\n",
+			pr_debug("tquic_udp_recv: Initial pkt detected, len=%zu\n",
 				len);
 
 			/* Parse enough header to extract DCID */
@@ -3920,7 +3933,7 @@ int tquic_udp_recv(struct sock *sk, struct sk_buff *skb)
 				 */
 				if (dcid_len > TQUIC_MAX_CID_LEN ||
 				    6 + (size_t)dcid_len > len) {
-					pr_warn("tquic_udp_recv: DCID len invalid (%u)\n",
+					pr_debug("tquic_udp_recv: DCID len invalid (%u)\n",
 						dcid_len);
 					kfree_skb(skb);
 					return -EINVAL;
@@ -3936,19 +3949,19 @@ int tquic_udp_recv(struct sock *sk, struct sk_buff *skb)
 								    data + 6,
 								    dcid_len)) {
 					/* Rate limited - silently drop */
-					pr_warn("tquic_udp_recv: rate limited (token bucket)\n");
+					pr_debug("tquic_udp_recv: rate limited (token bucket)\n");
 					kfree_skb(skb);
 					return -EBUSY;
 				}
 
-				pr_warn("tquic_udp_recv: dcid_len=%u offset=%zu, parsing SCID\n",
+				pr_debug("tquic_udp_recv: dcid_len=%u offset=%zu, parsing SCID\n",
 					dcid_len, offset);
 
 				if (offset < len) {
 					scid_len = data[offset];
 					if (scid_len > TQUIC_MAX_CID_LEN ||
 					    offset + 1 + scid_len > len) {
-						pr_warn("tquic_udp_recv: SCID len invalid (%u)\n",
+						pr_debug("tquic_udp_recv: SCID len invalid (%u)\n",
 							scid_len);
 						kfree_skb(skb);
 						return -EINVAL;
@@ -3986,7 +3999,7 @@ int tquic_udp_recv(struct sock *sk, struct sk_buff *skb)
 					data + 6, dcid_len,
 					token, token_len);
 
-				pr_warn("tquic_udp_recv: ratelimit action=%d\n",
+				pr_debug("tquic_udp_recv: ratelimit action=%d\n",
 					action);
 
 				switch (action) {
@@ -4058,17 +4071,21 @@ int tquic_udp_recv(struct sock *sk, struct sk_buff *skb)
 
 		if (dcid_len <= TQUIC_MAX_CID_LEN &&
 		    len > (size_t)6 + dcid_len) {
-			pr_warn("tquic_udp_recv: DCID lookup len=%u bytes=%*phN\n",
+			pr_debug("tquic_udp_recv: DCID lookup len=%u bytes=%*phN\n",
 				dcid_len, min_t(u8, dcid_len, 8),
 				data + 6);
 			conn = tquic_lookup_by_dcid(data + 6, dcid_len);
-			pr_warn("tquic_udp_recv: DCID lookup result conn=%p\n",
+			pr_debug("tquic_udp_recv: DCID lookup result conn=%p\n",
 				conn);
 		}
-	} else if (!conn && !(data[0] & TQUIC_HEADER_FORM_LONG) && len > 1) {
-		u8 dcid_len = min_t(size_t, len - 1, TQUIC_MAX_CID_LEN);
-
-		conn = tquic_lookup_by_dcid(data + 1, dcid_len);
+	} else if (!conn && !(data[0] & TQUIC_HEADER_FORM_LONG) &&
+		   len > 1 + TQUIC_DEFAULT_CID_LEN) {
+		/*
+		 * Short header: DCID length is not self-describing.
+		 * Use TQUIC_DEFAULT_CID_LEN (the length we generate
+		 * for our own CIDs) for the lookup.
+		 */
+		conn = tquic_lookup_by_dcid(data + 1, TQUIC_DEFAULT_CID_LEN);
 	}
 
 	/* Find the path for this connection based on source address */
@@ -4078,7 +4095,7 @@ int tquic_udp_recv(struct sock *sk, struct sk_buff *skb)
 		rcu_read_unlock();
 	}
 
-	pr_warn("tquic_udp_recv: past ratelimit block, conn=%p data[0]=0x%02x\n",
+	pr_debug("tquic_udp_recv: past ratelimit block, conn=%p data[0]=0x%02x\n",
 		conn, data[0]);
 
 	/* Check for stateless reset (received from peer) */
@@ -4089,9 +4106,8 @@ int tquic_udp_recv(struct sock *sk, struct sk_buff *skb)
 		goto not_reset;
 
 	/* Try to find connection for reset check (short header fallback) */
-	if (!conn && len > 1) {
-		u8 dcid_len = min_t(size_t, len - 1, TQUIC_MAX_CID_LEN);
-		conn = tquic_lookup_by_dcid(data + 1, dcid_len);
+	if (!conn && len > 1 + TQUIC_DEFAULT_CID_LEN) {
+		conn = tquic_lookup_by_dcid(data + 1, TQUIC_DEFAULT_CID_LEN);
 	}
 
 	if (conn && tquic_is_stateless_reset_internal(conn, data, len)) {
@@ -4101,13 +4117,13 @@ int tquic_udp_recv(struct sock *sk, struct sk_buff *skb)
 	}
 
 not_reset:
-	pr_warn("tquic_udp_recv: at not_reset, version bytes: %02x%02x%02x%02x\n",
+	pr_debug("tquic_udp_recv: at not_reset, version bytes: %02x%02x%02x%02x\n",
 		len > 1 ? data[1] : 0, len > 2 ? data[2] : 0,
 		len > 3 ? data[3] : 0, len > 4 ? data[4] : 0);
 
 	/* Check for version negotiation */
 	if (unlikely(tquic_is_version_negotiation(data, len))) {
-		pr_warn("tquic_udp_recv: version negotiation detected (version=0x%08x), conn=%p\n",
+		pr_debug("tquic_udp_recv: version negotiation detected (version=0x%08x), conn=%p\n",
 			len >= 5 ? get_unaligned_be32(data + 1) : 0, conn);
 		/* Need connection context */
 		if (len > 6) {
@@ -4146,7 +4162,7 @@ not_reset:
 		/* Extract packet type from long header */
 		u8 pkt_type = (data[0] & 0x30) >> 4;
 
-		pr_warn("tquic_udp_recv: long header, pkt_type=%u, data[0]=0x%02x\n",
+		pr_debug("tquic_udp_recv: long header, pkt_type=%u, data[0]=0x%02x\n",
 			pkt_type, data[0]);
 
 		/* Initial packet type == 0 */
@@ -4157,7 +4173,7 @@ not_reset:
 			/* Lookup listener socket for this address/port in this netns */
 			listener = tquic_lookup_listener_net(sock_net(sk),
 							     &local_addr);
-			pr_warn("tquic_udp_recv: Initial pkt, listener lookup: %s (local_addr family=%d)\n",
+			pr_debug("tquic_udp_recv: Initial pkt, listener lookup: %s (local_addr family=%d)\n",
 				listener ? "FOUND" : "NOT FOUND",
 				local_addr.ss_family);
 			if (listener) {
@@ -4222,7 +4238,7 @@ not_reset:
 	}
 
 	/* Process the QUIC packet */
-	pr_warn("tquic_udp_recv: no Initial match, calling process_packet (conn=%p data[0]=0x%02x len=%zu)\n",
+	pr_debug("tquic_udp_recv: no Initial match, calling process_packet (conn=%p data[0]=0x%02x len=%zu)\n",
 		conn, data[0], len);
 	ret = tquic_process_packet(conn, path, data, len, &src_addr);
 
@@ -4240,7 +4256,7 @@ not_reset:
 	 */
 	if (ret == -ENOENT && !(data[0] & TQUIC_HEADER_FORM_LONG) &&
 	    len > TQUIC_STATELESS_RESET_MIN_LEN + TQUIC_DEFAULT_CID_LEN) {
-		pr_warn("tquic_udp_recv: would send stateless reset (data[0]=0x%02x len=%zu ret=%d)\n",
+		pr_debug("tquic_udp_recv: would send stateless reset (data[0]=0x%02x len=%zu ret=%d)\n",
 			data[0], len, ret);
 	}
 	if (0 && ret == -ENOENT && !(data[0] & TQUIC_HEADER_FORM_LONG) &&

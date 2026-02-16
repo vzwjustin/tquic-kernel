@@ -27,6 +27,7 @@
 #include "key_update.h"
 #include "extended_key_update.h"
 #include "header_protection.h"
+#include "tls.h"
 #include "../tquic_debug.h"
 
 /* Key update HKDF label per RFC 9001 Section 6.1 */
@@ -61,7 +62,7 @@
  * are defined in key_update.h to allow sharing with extended_key_update.c
  */
 
-/* Forward declaration - defined at end of this file */
+/* Forward declaration - defined later, delegates to tls.c accessor */
 struct tquic_key_update_state *tquic_crypto_get_key_update_state(void *crypto_state);
 
 /* Sysctl parameters */
@@ -1237,65 +1238,18 @@ EXPORT_SYMBOL_GPL(tquic_key_update_set_intervals);
  * @crypto_state: Connection's crypto state (struct tquic_crypto_state *)
  *
  * Retrieves the key update state from the connection's crypto state.
- * The crypto_state parameter is the opaque pointer stored in
- * conn->crypto_state, which is actually a struct tquic_crypto_state.
+ * Delegates to tquic_crypto_get_key_update() in tls.c which has direct
+ * access to struct tquic_crypto_state, avoiding fragile mirror structs.
  *
  * Returns key update state or NULL if not available.
  */
 struct tquic_key_update_state *
 tquic_crypto_get_key_update_state(void *crypto_state)
 {
-	/*
-	 * Mirror the layout of struct tquic_crypto_state from tls.c so
-	 * that we can use offsetof() rather than a hardcoded byte offset.
-	 * This is still a layering violation -- ideally tls.c would export
-	 * a helper -- but it is at least resilient to field-size changes
-	 * because the compiler computes the offset.
-	 *
-	 * Keep this in sync with struct tquic_crypto_state in tls.c.
-	 */
-#define TQUIC_ENC_LEVEL_COUNT	4
-#define TQUIC_SECRET_MAX_LEN_	48  /* Must match tls.c: SHA-384 */
-#define TQUIC_KEY_MAX_LEN_	32
-#define TQUIC_IV_MAX_LEN_	12
-#define TQUIC_HP_KEY_MAX_LEN_	32
-	struct tquic_crypto_state_mirror {
-		u16 cipher_suite;
-		u32 version;
-		struct {
-			u8 secret[TQUIC_SECRET_MAX_LEN_];
-			u8 key[TQUIC_KEY_MAX_LEN_];
-			u8 iv[TQUIC_IV_MAX_LEN_];
-			u8 hp_key[TQUIC_HP_KEY_MAX_LEN_];
-			u32 secret_len;
-			u32 key_len;
-			u32 iv_len;
-			bool valid;
-		} read_keys[TQUIC_ENC_LEVEL_COUNT],
-		  write_keys[TQUIC_ENC_LEVEL_COUNT];
-		int read_level;   /* enum tquic_enc_level */
-		int write_level;
-		u32 key_phase;
-		bool key_update_pending;
-		struct tquic_key_update_state *key_update;
-		/* remaining fields omitted */
-	} *cs;
-#undef TQUIC_ENC_LEVEL_COUNT
-#undef TQUIC_SECRET_MAX_LEN_
-#undef TQUIC_KEY_MAX_LEN_
-#undef TQUIC_IV_MAX_LEN_
-#undef TQUIC_HP_KEY_MAX_LEN_
-
 	if (!crypto_state)
 		return NULL;
 
-	cs = crypto_state;
-
-	/* Sanity check: cipher_suite should be a known TLS 1.3 value */
-	if (cs->cipher_suite == 0)
-		return NULL;
-
-	return cs->key_update;
+	return tquic_crypto_get_key_update(crypto_state);
 }
 EXPORT_SYMBOL_GPL(tquic_crypto_get_key_update_state);
 

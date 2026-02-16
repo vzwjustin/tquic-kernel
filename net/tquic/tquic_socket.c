@@ -3103,6 +3103,7 @@ int tquic_recvmsg(struct sock *sk, struct msghdr *msg, size_t len, int flags,
 	struct tquic_stream *stream;
 	struct sk_buff *skb;
 	int copied = 0;
+	bool nonblock;
 
 	conn = tquic_sock_conn_get(tsk);
 	if (!conn)
@@ -3112,6 +3113,10 @@ int tquic_recvmsg(struct sock *sk, struct msghdr *msg, size_t len, int flags,
 		tquic_conn_put(conn);
 		return -ENOTCONN;
 	}
+
+	nonblock = (flags & MSG_DONTWAIT) ||
+		   (sk->sk_socket && sk->sk_socket->file &&
+		    (sk->sk_socket->file->f_flags & O_NONBLOCK));
 
 	/*
 	 * Check if caller wants datagram read (RFC 9221)
@@ -3127,11 +3132,87 @@ int tquic_recvmsg(struct sock *sk, struct msghdr *msg, size_t len, int flags,
 
 	stream = tquic_sock_default_stream_get(tsk);
 	if (!stream) {
+		/*
+		 * No default stream yet.  On the server side the first
+		 * peer-initiated bidirectional stream (created by
+		 * tquic_process_stream_frame) lives in the connection's
+		 * stream tree but was never installed as default_stream
+		 * because the STREAM frame may arrive before accept()
+		 * switches conn->sk to the child socket.
+		 *
+		 * Walk the tree and adopt the first bidirectional stream
+		 * as the default so that recv() works on accepted sockets.
+		 */
+		spin_lock_bh(&conn->lock);
+		{
+			struct rb_node *node;
+
+			for (node = rb_first(&conn->streams); node;
+			     node = rb_next(node)) {
+				struct tquic_stream *s;
+
+				s = rb_entry(node, struct tquic_stream, node);
+				if ((s->id & 0x02) == 0 &&
+				    tquic_stream_get(s)) {
+					stream = s;
+					break;
+				}
+			}
+		}
+		spin_unlock_bh(&conn->lock);
+
+		if (stream) {
+			/* Install as default_stream for future calls */
+			write_lock_bh(&sk->sk_callback_lock);
+			if (!tsk->default_stream) {
+				tquic_stream_get(stream);
+				tsk->default_stream = stream;
+			}
+			write_unlock_bh(&sk->sk_callback_lock);
+		}
+	}
+
+	if (!stream) {
 		tquic_conn_put(conn);
-		return 0;
+		return nonblock ? -EAGAIN : -ENOTCONN;
 	}
 
 	lock_sock(sk);
+
+	/*
+	 * Wait for data if the stream buffer is empty.
+	 *
+	 * For blocking sockets, sleep until data arrives, the stream
+	 * receives FIN, or the connection closes.  For non-blocking
+	 * sockets, return -EAGAIN immediately.
+	 */
+	while (skb_queue_empty(&stream->recv_buf)) {
+		if (stream->fin_received) {
+			/* Peer sent FIN — EOF */
+			copied = 0;
+			goto out_release;
+		}
+		if (READ_ONCE(conn->state) != TQUIC_CONN_CONNECTED) {
+			copied = 0;
+			goto out_release;
+		}
+		if (nonblock) {
+			copied = -EAGAIN;
+			goto out_release;
+		}
+
+		release_sock(sk);
+		if (wait_event_interruptible(stream->wait,
+				!skb_queue_empty(&stream->recv_buf) ||
+				stream->fin_received ||
+				READ_ONCE(conn->state) !=
+					TQUIC_CONN_CONNECTED)) {
+			lock_sock(sk);
+			copied = -EINTR;
+			goto out_release;
+		}
+		lock_sock(sk);
+	}
 
 	while (copied < len && !skb_queue_empty(&stream->recv_buf)) {
 		size_t chunk;
@@ -3150,14 +3231,14 @@ int tquic_recvmsg(struct sock *sk, struct msghdr *msg, size_t len, int flags,
 
 		copied += chunk;
 
-			if (chunk < skb->len) {
-				/* Partial read, requeue remainder */
-				skb_pull(skb, chunk);
-				skb_queue_head(&stream->recv_buf, skb);
-			} else {
-				sk_mem_uncharge(sk, skb->truesize);
-				kfree_skb(skb);
-			}
+		if (chunk < skb->len) {
+			/* Partial read, requeue remainder */
+			skb_pull(skb, chunk);
+			skb_queue_head(&stream->recv_buf, skb);
+		} else {
+			sk_mem_uncharge(sk, skb->truesize);
+			kfree_skb(skb);
+		}
 
 		conn->stats.rx_bytes += chunk;
 	}
