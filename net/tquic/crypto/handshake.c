@@ -4091,12 +4091,16 @@ static int tquic_hs_process_client_hello(struct tquic_handshake *hs,
 
 	pr_warn("tquic_hs: process_ch: parsing CH len=%u msg_len=%u\n",
 		len, msg_len);
+	pr_warn("tquic_hs: ch: hex[0..19]: %*ph\n",
+		min_t(u32, 20, len), data);
 
 	/* Legacy version (0x0303 = TLS 1.2) */
 	if (p + 2 > end) {
-		pr_warn("tquic_hs: ch: ver overflow\n");
+		pr_warn("tquic_hs: ch: ver overflow p=%u end=%u\n",
+			(u32)(p - data), (u32)(end - data));
 		return -EINVAL;
 	}
+	pr_warn("tquic_hs: ch: step1 ver=0x%02x%02x\n", p[0], p[1]);
 	p += 2; /* Skip - we check supported_versions ext */
 
 	/* Client random */
@@ -4106,6 +4110,8 @@ static int tquic_hs_process_client_hello(struct tquic_handshake *hs,
 	}
 	memcpy(hs->client_random, p, TLS_RANDOM_LEN);
 	p += TLS_RANDOM_LEN;
+	pr_warn("tquic_hs: ch: step2 past random p=%u\n",
+		(u32)(p - data));
 
 	/* Legacy session ID */
 	if (p >= end) {
@@ -4113,8 +4119,11 @@ static int tquic_hs_process_client_hello(struct tquic_handshake *hs,
 		return -EINVAL;
 	}
 	session_id_len = *p++;
+	pr_warn("tquic_hs: ch: step3 sid_len=%u\n", session_id_len);
 	if (session_id_len > TLS_SESSION_ID_MAX_LEN || p + session_id_len > end) {
-		pr_warn("tquic_hs: ch: sid_len=%u overflow\n", session_id_len);
+		pr_warn("tquic_hs: ch: sid_len=%u overflow max=%u remain=%u\n",
+			session_id_len, TLS_SESSION_ID_MAX_LEN,
+			(u32)(end - p));
 		return -EINVAL;
 	}
 	hs->session_id_len = session_id_len;
@@ -4211,8 +4220,13 @@ static int tquic_hs_process_client_hello(struct tquic_handshake *hs,
 			u16 ext_data_len = ((u16)p[2] << 8) | p[3];
 
 			p += 4;
-			if (p + ext_data_len > ext_end)
+			pr_warn("tquic_hs: ch ext: type=0x%04x len=%u remaining=%td\n",
+				ext_type, ext_data_len, ext_end - p);
+			if (p + ext_data_len > ext_end) {
+				pr_warn("tquic_hs: ch ext overflow: type=0x%04x len=%u > %td\n",
+					ext_type, ext_data_len, ext_end - p);
 				return -EINVAL;
+			}
 
 			switch (ext_type) {
 			case TLS_EXT_SUPPORTED_VERSIONS:
