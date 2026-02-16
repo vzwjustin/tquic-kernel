@@ -39,6 +39,7 @@ enum tquic_hs_state {
 	TQUIC_HS_WAIT_FINISHED,
 	TQUIC_HS_WAIT_EOED,
 	TQUIC_HS_WAIT_CERT_REQ,
+	TQUIC_HS_SERVER_SEND_FLIGHT,	/* Server: SH sent, need EE+Cert+CV+Fin */
 	TQUIC_HS_COMPLETE,
 	TQUIC_HS_ERROR,
 };
@@ -151,6 +152,14 @@ int tquic_hs_get_handshake_secrets(struct tquic_handshake *hs,
 int tquic_hs_get_app_secrets(struct tquic_handshake *hs,
 			     u8 *client_secret, u32 *client_len,
 			     u8 *server_secret, u32 *server_len);
+
+/* Server handshake */
+int tquic_hs_set_certificate(struct tquic_handshake *hs,
+			     const u8 *cert, u32 cert_len);
+int tquic_hs_set_private_key(struct tquic_handshake *hs,
+			     const u8 *key, u32 key_len);
+int tquic_hs_generate_server_flight(struct tquic_handshake *hs,
+				    u8 *buf, u32 buf_len, u32 *out_len);
 
 /* TLS record processing for inline handshake */
 int tquic_hs_process_record(struct tquic_handshake *hs,

@@ -1729,6 +1729,23 @@ int tquic_hs_process_server_hello(struct tquic_handshake *hs,
 	if (ret < 0)
 		return ret;
 
+	/*
+	 * Derive Early Secret for non-PSK case.
+	 * Early Secret = HKDF-Extract(salt=0, ikm=0) per RFC 8446 Section 7.1.
+	 */
+	if (!hs->using_psk) {
+		u8 zero_salt[TLS_SECRET_MAX_LEN] = {0};
+		u8 zero_ikm[TLS_SECRET_MAX_LEN] = {0};
+
+		ret = tquic_hkdf_extract(hs->hmac, zero_salt, hs->hash_len,
+					 zero_ikm, hs->hash_len,
+					 hs->early_secret, hs->hash_len);
+		memzero_explicit(zero_salt, sizeof(zero_salt));
+		memzero_explicit(zero_ikm, sizeof(zero_ikm));
+		if (ret < 0)
+			return ret;
+	}
+
 	/* Derive handshake secrets */
 	ret = tquic_hs_derive_handshake_secrets(hs);
 	if (ret < 0)
@@ -2266,6 +2283,209 @@ out_free_tfm:
 }
 
 /*
+ * EMSA-PSS-ENCODE - PSS padding generation (RFC 8017 Section 9.1.1)
+ * Used for RSASSA-PSS signature generation in TLS 1.3.
+ *
+ * @hash_alg: Hash algorithm name
+ * @hash_len: Hash output length in bytes
+ * @msg_hash: Hash of the message to sign
+ * @em: Output encoded message buffer (must be key_size bytes)
+ * @em_len: Length of output buffer (key size in bytes)
+ *
+ * TLS 1.3 uses salt length equal to hash length.
+ *
+ * Returns 0 on success, negative error on failure.
+ */
+static int tquic_emsa_pss_encode(const char *hash_alg, u32 hash_len,
+				 const u8 *msg_hash, u8 *em, u32 em_len)
+{
+	u8 *salt = NULL;
+	u8 *db = NULL;
+	u8 *db_mask = NULL;
+	u8 *m_prime = NULL;
+	u8 h[64]; /* Max hash size */
+	struct crypto_shash *hash_tfm = NULL;
+	u32 salt_len = hash_len; /* TLS 1.3: sLen = hLen */
+	u32 db_len;
+	u32 ps_len;
+	u32 i;
+	int err;
+
+	/* em_len must be at least hLen + sLen + 2 */
+	if (em_len < hash_len + salt_len + 2)
+		return -EINVAL;
+
+	db_len = em_len - hash_len - 1;
+	ps_len = db_len - salt_len - 1;
+
+	/* Allocate buffers */
+	salt = kmalloc(salt_len, GFP_KERNEL);
+	db = kzalloc(db_len, GFP_KERNEL);
+	db_mask = kmalloc(db_len, GFP_KERNEL);
+	m_prime = kmalloc(8 + hash_len + salt_len, GFP_KERNEL);
+	if (!salt || !db || !db_mask || !m_prime) {
+		err = -ENOMEM;
+		goto out;
+	}
+
+	/* Generate random salt */
+	get_random_bytes(salt, salt_len);
+
+	/* M' = 0x00 00 00 00 00 00 00 00 || mHash || salt */
+	memset(m_prime, 0, 8);
+	memcpy(m_prime + 8, msg_hash, hash_len);
+	memcpy(m_prime + 8 + hash_len, salt, salt_len);
+
+	/* H = Hash(M') */
+	hash_tfm = crypto_alloc_shash(hash_alg, 0, 0);
+	if (IS_ERR(hash_tfm)) {
+		err = PTR_ERR(hash_tfm);
+		hash_tfm = NULL;
+		goto out;
+	}
+
+	{
+		SHASH_DESC_ON_STACK(desc, hash_tfm);
+
+		desc->tfm = hash_tfm;
+		err = crypto_shash_digest(desc, m_prime,
+					  8 + hash_len + salt_len, h);
+		shash_desc_zero(desc);
+	}
+	if (err)
+		goto out;
+
+	/* DB = PS || 0x01 || salt */
+	/* PS is ps_len zero bytes (already zeroed by kzalloc) */
+	db[ps_len] = 0x01;
+	memcpy(db + ps_len + 1, salt, salt_len);
+
+	/* dbMask = MGF1(H, dbLen) */
+	err = tquic_mgf1(hash_alg, h, hash_len, db_mask, db_len);
+	if (err)
+		goto out;
+
+	/* maskedDB = DB XOR dbMask */
+	for (i = 0; i < db_len; i++)
+		em[i] = db[i] ^ db_mask[i];
+
+	/* Clear top bit of maskedDB */
+	em[0] &= 0x7f;
+
+	/* EM = maskedDB || H || 0xbc */
+	memcpy(em + db_len, h, hash_len);
+	em[em_len - 1] = 0xbc;
+	err = 0;
+
+out:
+	if (hash_tfm)
+		crypto_free_shash(hash_tfm);
+	kfree_sensitive(m_prime);
+	kfree_sensitive(db_mask);
+	kfree_sensitive(db);
+	kfree_sensitive(salt);
+	return err;
+}
+
+/*
+ * Sign with RSA-PSS (RSASSA-PSS per RFC 8017 Section 8.1.1)
+ *
+ * @privkey_data: DER-encoded private key (PKCS#8 or PKCS#1)
+ * @privkey_len: Length of private key
+ * @hash_alg: Hash algorithm name
+ * @hash_len: Hash output length
+ * @msg_hash: Hash of message to sign
+ * @signature: Output signature buffer
+ * @sig_len: In: buffer size, Out: actual signature length
+ *
+ * Returns 0 on success, negative error on failure.
+ */
+static int tquic_sign_rsa_pss(const u8 *privkey_data, u32 privkey_len,
+			      const char *hash_alg, u32 hash_len,
+			      const u8 *msg_hash,
+			      u8 *signature, u32 *sig_len)
+{
+	struct crypto_akcipher *tfm = NULL;
+	struct akcipher_request *req = NULL;
+	struct scatterlist sg_in, sg_out;
+	u8 *em = NULL;
+	u32 key_size;
+	int err;
+	DECLARE_CRYPTO_WAIT(wait);
+
+	/* Allocate raw RSA cipher */
+	tfm = crypto_alloc_akcipher("rsa", 0, 0);
+	if (IS_ERR(tfm)) {
+		err = PTR_ERR(tfm);
+		pr_warn("tquic_pss: Failed to allocate RSA: %d\n", err);
+		return err;
+	}
+
+	/* Set private key */
+	err = crypto_akcipher_set_priv_key(tfm, privkey_data, privkey_len);
+	if (err) {
+		pr_warn("tquic_pss: Failed to set private key: %d\n", err);
+		goto out_free_tfm;
+	}
+
+	/* Get key size */
+	key_size = crypto_akcipher_maxsize(tfm);
+	if (key_size == 0 || key_size > *sig_len) {
+		pr_warn("tquic_pss: sig buffer %u < key size %u\n",
+			*sig_len, key_size);
+		err = -ENOSPC;
+		goto out_free_tfm;
+	}
+
+	/* Generate PSS-padded encoded message */
+	em = kmalloc(key_size, GFP_KERNEL);
+	if (!em) {
+		err = -ENOMEM;
+		goto out_free_tfm;
+	}
+
+	err = tquic_emsa_pss_encode(hash_alg, hash_len, msg_hash,
+				    em, key_size);
+	if (err) {
+		pr_warn("tquic_pss: PSS encoding failed: %d\n", err);
+		goto out_free_em;
+	}
+
+	/* Allocate request */
+	req = akcipher_request_alloc(tfm, GFP_KERNEL);
+	if (!req) {
+		err = -ENOMEM;
+		goto out_free_em;
+	}
+
+	/* RSA private key operation: signature = em^d mod n */
+	sg_init_one(&sg_in, em, key_size);
+	sg_init_one(&sg_out, signature, key_size);
+
+	akcipher_request_set_crypt(req, &sg_in, &sg_out, key_size, key_size);
+	akcipher_request_set_callback(req, CRYPTO_TFM_REQ_MAY_BACKLOG,
+				      crypto_req_done, &wait);
+
+	err = crypto_wait_req(crypto_akcipher_decrypt(req), &wait);
+	if (err) {
+		pr_warn("tquic_pss: RSA sign operation failed: %d\n", err);
+		goto out_free_req;
+	}
+
+	*sig_len = key_size;
+	pr_debug("tquic_pss: RSA-PSS signature generated (%u bytes)\n",
+		 key_size);
+
+out_free_req:
+	akcipher_request_free(req);
+out_free_em:
+	kfree_sensitive(em);
+out_free_tfm:
+	crypto_free_akcipher(tfm);
+	return err;
+}
+
+/*
  * Process CertificateVerify message
  */
 int tquic_hs_process_certificate_verify(struct tquic_handshake *hs,
@@ -2589,12 +2809,24 @@ int tquic_hs_process_finished(struct tquic_handshake *hs,
 	if (ret < 0)
 		return ret;
 
-	/* verify_data = HMAC(finished_key, transcript_hash) */
-	desc->tfm = hs->hmac;
+	/*
+	 * verify_data = HMAC(finished_key, transcript_hash)
+	 *
+	 * Use the peer's finished key: if we're the client, verify
+	 * server's Finished with server_finished_key. If we're the
+	 * server, verify client's Finished with client_finished_key.
+	 */
+	{
+		const u8 *peer_finished_key = hs->is_server ?
+			hs->client_finished_key : hs->server_finished_key;
 
-	ret = crypto_shash_setkey(hs->hmac, hs->server_finished_key, hs->hash_len);
-	if (ret)
-		return ret;
+		desc->tfm = hs->hmac;
+
+		ret = crypto_shash_setkey(hs->hmac, peer_finished_key,
+					  hs->hash_len);
+		if (ret)
+			return ret;
+	}
 
 	ret = crypto_shash_init(desc);
 	if (ret)
@@ -2615,22 +2847,34 @@ int tquic_hs_process_finished(struct tquic_handshake *hs,
 		return -EINVAL;
 	}
 
-	/* Update transcript (before deriving app secrets) */
+	/* Update transcript (before deriving secrets) */
 	ret = tquic_hs_update_transcript(hs, data, len);
 	if (ret < 0)
 		return ret;
 
-	/* Derive application secrets */
-	ret = tquic_hs_derive_app_secrets(hs);
-	if (ret < 0)
-		return ret;
+	if (hs->is_server) {
+		/*
+		 * Server received client's Finished. Application secrets
+		 * were already derived when we sent our Finished in
+		 * generate_server_flight(). Now derive resumption secret.
+		 */
+		ret = tquic_hs_derive_resumption_secret(hs);
+		if (ret < 0)
+			return ret;
 
-	if (!hs->is_server) {
+		hs->state = TQUIC_HS_COMPLETE;
+	} else {
+		/* Client: derive application secrets after server Finished */
+		ret = tquic_hs_derive_app_secrets(hs);
+		if (ret < 0)
+			return ret;
+
 		/* Client needs to send its own Finished */
 		hs->state = TQUIC_HS_COMPLETE;
 	}
 
-	pr_debug("tquic_hs: processed server Finished\n");
+	pr_debug("tquic_hs: processed %s Finished\n",
+		 hs->is_server ? "client" : "server");
 
 	return 0;
 }
@@ -2709,6 +2953,356 @@ int tquic_hs_generate_finished(struct tquic_handshake *hs,
 	return 0;
 }
 EXPORT_SYMBOL_GPL(tquic_hs_generate_finished);
+
+/*
+ * Generate the server's handshake flight:
+ *   EncryptedExtensions + Certificate + CertificateVerify + Finished
+ *
+ * All these messages are sent at the Handshake encryption level.
+ * The caller must install handshake keys before calling this.
+ *
+ * After this function, the handshake transitions to WAIT_FINISHED
+ * (waiting for the client's Finished message).
+ *
+ * @hs: Handshake context in SERVER_SEND_FLIGHT state
+ * @buf: Output buffer for all flight messages
+ * @buf_len: Size of output buffer
+ * @out_len: Total bytes written
+ */
+int tquic_hs_generate_server_flight(struct tquic_handshake *hs,
+				    u8 *buf, u32 buf_len, u32 *out_len)
+{
+	u8 *p = buf;
+	u8 *msg_len_ptr;
+	u32 total = 0;
+	int ret;
+
+	if (!hs || !hs->is_server ||
+	    hs->state != TQUIC_HS_SERVER_SEND_FLIGHT)
+		return -EINVAL;
+
+	if (!hs->local_cert || hs->local_cert_len == 0 ||
+	    !hs->local_key || hs->local_key_len == 0) {
+		pr_warn("tquic_hs: server flight requires cert and key\n");
+		return -EINVAL;
+	}
+
+	/*
+	 * 1. EncryptedExtensions
+	 *
+	 * Contains ALPN + QUIC transport params.
+	 */
+	{
+		u8 *ee_start = p;
+		u8 *ext_len_ptr;
+		u8 tp_buf[1024];
+		u32 tp_len = 0;
+
+		*p++ = TLS_HS_ENCRYPTED_EXTENSIONS;
+		msg_len_ptr = p;
+		p += 3; /* length placeholder */
+
+		/* Extensions list */
+		ext_len_ptr = p;
+		p += 2; /* extensions length placeholder */
+
+		/* ALPN extension */
+		if (hs->alpn_selected && hs->alpn_len > 0) {
+			u16 alpn_ext_len = 2 + 1 + hs->alpn_len;
+
+			*p++ = (TLS_EXT_ALPN >> 8) & 0xff;
+			*p++ = TLS_EXT_ALPN & 0xff;
+			*p++ = (alpn_ext_len >> 8) & 0xff;
+			*p++ = alpn_ext_len & 0xff;
+			/* ALPN list */
+			*p++ = ((1 + hs->alpn_len) >> 8) & 0xff;
+			*p++ = (1 + hs->alpn_len) & 0xff;
+			*p++ = hs->alpn_len;
+			memcpy(p, hs->alpn_selected, hs->alpn_len);
+			p += hs->alpn_len;
+		}
+
+		/* QUIC transport params extension */
+		ret = tquic_encode_transport_params(&hs->local_params,
+						    tp_buf, sizeof(tp_buf),
+						    &tp_len, true);
+		if (ret < 0)
+			return ret;
+
+		*p++ = (TLS_EXT_QUIC_TRANSPORT_PARAMS >> 8) & 0xff;
+		*p++ = TLS_EXT_QUIC_TRANSPORT_PARAMS & 0xff;
+		*p++ = (tp_len >> 8) & 0xff;
+		*p++ = tp_len & 0xff;
+		memcpy(p, tp_buf, tp_len);
+		p += tp_len;
+
+		/* Fill extensions length */
+		{
+			u16 elen = p - ext_len_ptr - 2;
+
+			ext_len_ptr[0] = (elen >> 8) & 0xff;
+			ext_len_ptr[1] = elen & 0xff;
+		}
+
+		/* Fill EE message length */
+		{
+			u32 mlen = p - msg_len_ptr - 3;
+
+			msg_len_ptr[0] = (mlen >> 16) & 0xff;
+			msg_len_ptr[1] = (mlen >> 8) & 0xff;
+			msg_len_ptr[2] = mlen & 0xff;
+		}
+
+		/* Update transcript with EE */
+		ret = tquic_hs_update_transcript(hs, ee_start, p - ee_start);
+		if (ret < 0)
+			return ret;
+
+		pr_debug("tquic_hs: generated EncryptedExtensions (%td bytes)\n",
+			 p - ee_start);
+	}
+
+	/*
+	 * 2. Certificate
+	 *
+	 * Format: cert_request_context (empty) + cert list
+	 */
+	{
+		u8 *cert_start = p;
+		u32 cert_entry_len;
+
+		*p++ = TLS_HS_CERTIFICATE;
+		msg_len_ptr = p;
+		p += 3; /* length placeholder */
+
+		/* Certificate request context (empty for server) */
+		*p++ = 0;
+
+		/* Certificate list length (3 bytes) */
+		/* Each entry: 3-byte cert length + cert + 2-byte ext length */
+		cert_entry_len = 3 + hs->local_cert_len + 2;
+		*p++ = (cert_entry_len >> 16) & 0xff;
+		*p++ = (cert_entry_len >> 8) & 0xff;
+		*p++ = cert_entry_len & 0xff;
+
+		/* Certificate entry */
+		*p++ = (hs->local_cert_len >> 16) & 0xff;
+		*p++ = (hs->local_cert_len >> 8) & 0xff;
+		*p++ = hs->local_cert_len & 0xff;
+		memcpy(p, hs->local_cert, hs->local_cert_len);
+		p += hs->local_cert_len;
+
+		/* Certificate extensions (none) */
+		*p++ = 0;
+		*p++ = 0;
+
+		/* Fill Certificate message length */
+		{
+			u32 mlen = p - msg_len_ptr - 3;
+
+			msg_len_ptr[0] = (mlen >> 16) & 0xff;
+			msg_len_ptr[1] = (mlen >> 8) & 0xff;
+			msg_len_ptr[2] = mlen & 0xff;
+		}
+
+		/* Update transcript with Certificate */
+		ret = tquic_hs_update_transcript(hs, cert_start,
+						 p - cert_start);
+		if (ret < 0)
+			return ret;
+
+		pr_debug("tquic_hs: generated Certificate (%td bytes)\n",
+			 p - cert_start);
+	}
+
+	/*
+	 * 3. CertificateVerify
+	 *
+	 * Sign the transcript hash with RSA-PSS-RSAE-SHA256.
+	 */
+	{
+		u8 *cv_start = p;
+		u8 content[200];
+		u8 *cp = content;
+		u8 transcript_hash[64];
+		u8 content_hash[64];
+		u32 hash_len_out;
+		u32 sig_space;
+		u32 sig_actual;
+		const char *cv_label = "TLS 1.3, server CertificateVerify";
+		struct crypto_shash *hash_tfm;
+
+		/* Get transcript hash (CH..Certificate) */
+		ret = tquic_hs_transcript_hash(hs, transcript_hash,
+					       &hash_len_out);
+		if (ret < 0)
+			return ret;
+
+		/* Build signed content:
+		 * 64 spaces + label + 0x00 + transcript_hash
+		 */
+		memset(cp, 0x20, 64);
+		cp += 64;
+		memcpy(cp, cv_label, 33);
+		cp += 33;
+		*cp++ = 0x00;
+		memcpy(cp, transcript_hash, hash_len_out);
+		cp += hash_len_out;
+
+		/* Hash the content */
+		hash_tfm = crypto_alloc_shash("sha256", 0, 0);
+		if (IS_ERR(hash_tfm))
+			return PTR_ERR(hash_tfm);
+		{
+			SHASH_DESC_ON_STACK(desc, hash_tfm);
+
+			desc->tfm = hash_tfm;
+			ret = crypto_shash_digest(desc, content,
+						  cp - content,
+						  content_hash);
+			shash_desc_zero(desc);
+		}
+		crypto_free_shash(hash_tfm);
+		if (ret < 0)
+			return ret;
+
+		/* CertificateVerify header */
+		*p++ = TLS_HS_CERTIFICATE_VERIFY;
+		msg_len_ptr = p;
+		p += 3; /* length placeholder */
+
+		/* Signature algorithm: rsa_pss_rsae_sha256 (0x0804) */
+		*p++ = 0x08;
+		*p++ = 0x04;
+
+		/* Signature length placeholder */
+		{
+			u8 *sig_len_ptr = p;
+
+			p += 2;
+
+			/* Sign with RSA-PSS */
+			sig_space = buf_len - (p - buf);
+			sig_actual = sig_space;
+			ret = tquic_sign_rsa_pss(hs->local_key,
+						 hs->local_key_len,
+						 "sha256", 32,
+						 content_hash,
+						 p, &sig_actual);
+			if (ret < 0) {
+				pr_warn("tquic_hs: RSA-PSS signing failed: %d\n",
+					ret);
+				return ret;
+			}
+
+			/* Fill signature length */
+			sig_len_ptr[0] = (sig_actual >> 8) & 0xff;
+			sig_len_ptr[1] = sig_actual & 0xff;
+			p += sig_actual;
+		}
+
+		/* Fill CertificateVerify message length */
+		{
+			u32 mlen = p - msg_len_ptr - 3;
+
+			msg_len_ptr[0] = (mlen >> 16) & 0xff;
+			msg_len_ptr[1] = (mlen >> 8) & 0xff;
+			msg_len_ptr[2] = mlen & 0xff;
+		}
+
+		/* Update transcript with CertificateVerify */
+		ret = tquic_hs_update_transcript(hs, cv_start,
+						 p - cv_start);
+		if (ret < 0)
+			return ret;
+
+		pr_debug("tquic_hs: generated CertificateVerify (%td bytes)\n",
+			 p - cv_start);
+	}
+
+	/*
+	 * 4. Finished
+	 *
+	 * Uses the existing generate_finished() which handles
+	 * is_server correctly (uses server_finished_key).
+	 * generate_finished() adds the Finished message to the transcript.
+	 */
+	{
+		u32 fin_len = 0;
+
+		ret = tquic_hs_generate_finished(hs, p,
+						 buf_len - (p - buf),
+						 &fin_len);
+		if (ret < 0)
+			return ret;
+		p += fin_len;
+	}
+
+	/*
+	 * 5. Derive application secrets AFTER server Finished is in
+	 *    the transcript. Per RFC 8446 Section 7.1, the application
+	 *    traffic secrets use Transcript-Hash(CH..server Finished).
+	 */
+	ret = tquic_hs_derive_app_secrets(hs);
+	if (ret < 0)
+		return ret;
+
+	/* Now waiting for client's Finished */
+	hs->state = TQUIC_HS_WAIT_FINISHED;
+
+	*out_len = p - buf;
+	pr_debug("tquic_hs: generated server flight (%u bytes total)\n",
+		 *out_len);
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(tquic_hs_generate_server_flight);
+
+/*
+ * Set server certificate (DER-encoded X.509)
+ */
+int tquic_hs_set_certificate(struct tquic_handshake *hs,
+			     const u8 *cert, u32 cert_len)
+{
+	if (!hs || !cert || cert_len == 0 || cert_len > TLS_CERT_MAX_LEN)
+		return -EINVAL;
+
+	kfree_sensitive(hs->local_cert);
+
+	hs->local_cert = kmalloc(cert_len, GFP_KERNEL);
+	if (!hs->local_cert)
+		return -ENOMEM;
+
+	memcpy(hs->local_cert, cert, cert_len);
+	hs->local_cert_len = cert_len;
+
+	pr_debug("tquic_hs: set certificate (%u bytes)\n", cert_len);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(tquic_hs_set_certificate);
+
+/*
+ * Set server private key (DER-encoded PKCS#8 or PKCS#1)
+ */
+int tquic_hs_set_private_key(struct tquic_handshake *hs,
+			     const u8 *key, u32 key_len)
+{
+	if (!hs || !key || key_len == 0 || key_len > TLS_CERT_MAX_LEN)
+		return -EINVAL;
+
+	kfree_sensitive(hs->local_key);
+
+	hs->local_key = kmalloc(key_len, GFP_KERNEL);
+	if (!hs->local_key)
+		return -ENOMEM;
+
+	memcpy(hs->local_key, key, key_len);
+	hs->local_key_len = key_len;
+
+	pr_debug("tquic_hs: set private key (%u bytes)\n", key_len);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(tquic_hs_set_private_key);
 
 /*
  * Process NewSessionTicket message (for session resumption)
@@ -3199,10 +3793,33 @@ struct tquic_handshake *tquic_hs_init(bool is_server)
 		goto err_hash;
 	}
 
+	/*
+	 * Derive the Early Secret with zero PSK for the non-PSK path.
+	 * TLS 1.3 key schedule: Early Secret = HKDF-Extract(0, 0).
+	 * If PSK is later configured, this will be re-derived.
+	 */
+	{
+		u8 zero_salt[TLS_SECRET_MAX_LEN] = {0};
+		u8 zero_ikm[TLS_SECRET_MAX_LEN] = {0};
+		int ret;
+
+		ret = tquic_hkdf_extract(hs->hmac, zero_salt, hs->hash_len,
+					 zero_ikm, hs->hash_len,
+					 hs->early_secret, hs->hash_len);
+		memzero_explicit(zero_salt, sizeof(zero_salt));
+		memzero_explicit(zero_ikm, sizeof(zero_ikm));
+		if (ret) {
+			pr_err("tquic_hs: failed to derive early secret\n");
+			goto err_hmac;
+		}
+	}
+
 	pr_debug("tquic_hs: initialized handshake context (server=%d)\n", is_server);
 
 	return hs;
 
+err_hmac:
+	crypto_free_shash(hs->hmac);
 err_hash:
 	crypto_free_shash(hs->hash_tfm);
 err_transcript:
@@ -3391,8 +4008,13 @@ int tquic_hs_get_app_secrets(struct tquic_handshake *hs,
 	    !server_secret || !server_len)
 		return -EINVAL;
 
-	/* App secrets only available after handshake completion */
-	if (hs->state != TQUIC_HS_COMPLETE)
+	/*
+	 * App secrets are available after handshake completion (client)
+	 * or after server flight generation (server derives them in
+	 * generate_server_flight before sending Finished).
+	 */
+	if (hs->state != TQUIC_HS_COMPLETE &&
+	    hs->state != TQUIC_HS_WAIT_FINISHED)
 		return -EAGAIN;
 
 	/* CF-523: Validate output buffer sizes */
@@ -3418,6 +4040,461 @@ EXPORT_SYMBOL_GPL(tquic_hs_get_app_secrets);
  * @hs: Handshake context
  * @data: TLS record data (handshake message type + length + payload)
  * @len: Length of input data
+ * Process ClientHello message (server side)
+ *
+ * Parses the ClientHello, selects cipher suite and key share,
+ * computes the shared secret, and stores client parameters.
+ * Does NOT update the transcript - the caller must do so after
+ * generating ServerHello to include both CH and SH.
+ */
+static int tquic_hs_process_client_hello(struct tquic_handshake *hs,
+					 const u8 *data, u32 len)
+{
+	const u8 *p = data;
+	const u8 *end = data + len;
+	u8 msg_type;
+	u32 msg_len;
+	u8 session_id_len;
+	u16 cipher_suites_len;
+	u8 comp_len;
+	u16 ext_len;
+	bool found_supported_versions = false;
+	bool found_key_share = false;
+	const u8 *peer_pubkey = NULL;
+	u16 peer_pubkey_len = 0;
+
+	if (!hs->is_server || hs->state != TQUIC_HS_START)
+		return -EINVAL;
+
+	/* Parse handshake header */
+	if (len < 4)
+		return -EINVAL;
+
+	msg_type = *p++;
+	if (msg_type != TLS_HS_CLIENT_HELLO)
+		return -EINVAL;
+
+	msg_len = ((u32)p[0] << 16) | ((u32)p[1] << 8) | p[2];
+	p += 3;
+	if (p + msg_len > end)
+		return -EINVAL;
+
+	/* Legacy version (0x0303 = TLS 1.2) */
+	if (p + 2 > end)
+		return -EINVAL;
+	p += 2; /* Skip - we check supported_versions ext */
+
+	/* Client random */
+	if (p + TLS_RANDOM_LEN > end)
+		return -EINVAL;
+	memcpy(hs->client_random, p, TLS_RANDOM_LEN);
+	p += TLS_RANDOM_LEN;
+
+	/* Legacy session ID */
+	if (p >= end)
+		return -EINVAL;
+	session_id_len = *p++;
+	if (session_id_len > TLS_SESSION_ID_MAX_LEN || p + session_id_len > end)
+		return -EINVAL;
+	hs->session_id_len = session_id_len;
+	memcpy(hs->session_id, p, session_id_len);
+	p += session_id_len;
+
+	/* Cipher suites */
+	if (p + 2 > end)
+		return -EINVAL;
+	cipher_suites_len = ((u16)p[0] << 8) | p[1];
+	p += 2;
+	if (p + cipher_suites_len > end)
+		return -EINVAL;
+
+	/* Select first supported cipher suite */
+	{
+		const u8 *cs = p;
+		const u8 *cs_end = p + cipher_suites_len;
+		bool found_cipher = false;
+
+		while (cs + 2 <= cs_end) {
+			u16 cs_val = ((u16)cs[0] << 8) | cs[1];
+
+			if (cs_val == TLS_AES_128_GCM_SHA256 ||
+			    cs_val == TLS_AES_256_GCM_SHA384 ||
+			    cs_val == TLS_CHACHA20_POLY1305_SHA256) {
+				if (!found_cipher) {
+					hs->cipher_suite = cs_val;
+					found_cipher = true;
+				}
+			}
+			cs += 2;
+		}
+		if (!found_cipher) {
+			pr_warn("tquic_hs: no supported cipher suite\n");
+			return -EINVAL;
+		}
+	}
+	p += cipher_suites_len;
+
+	/* Set hash length based on selected cipher suite */
+	if (hs->cipher_suite == TLS_AES_256_GCM_SHA384)
+		hs->hash_len = 48;
+	else
+		hs->hash_len = 32;
+
+	/* Legacy compression methods */
+	if (p >= end)
+		return -EINVAL;
+	comp_len = *p++;
+	if (p + comp_len > end)
+		return -EINVAL;
+	p += comp_len;
+
+	/* Extensions length */
+	if (p + 2 > end)
+		return -EINVAL;
+	ext_len = ((u16)p[0] << 8) | p[1];
+	p += 2;
+	if (p + ext_len > end)
+		return -EINVAL;
+
+	/* Parse extensions */
+	{
+		const u8 *ext_end = p + ext_len;
+
+		while (p + 4 <= ext_end) {
+			u16 ext_type = ((u16)p[0] << 8) | p[1];
+			u16 ext_data_len = ((u16)p[2] << 8) | p[3];
+
+			p += 4;
+			if (p + ext_data_len > ext_end)
+				return -EINVAL;
+
+			switch (ext_type) {
+			case TLS_EXT_SUPPORTED_VERSIONS:
+				/*
+				 * Client sends a list of versions.
+				 * Format: 1-byte list length, then 2-byte versions.
+				 */
+				if (ext_data_len >= 3) {
+					u8 vlist_len = p[0];
+					const u8 *vp = p + 1;
+					const u8 *vend = p + 1 + vlist_len;
+
+					if (vend > p + ext_data_len)
+						vend = p + ext_data_len;
+
+					while (vp + 2 <= vend) {
+						u16 ver = ((u16)vp[0] << 8) | vp[1];
+
+						if (ver == TLS_VERSION_13) {
+							found_supported_versions = true;
+							break;
+						}
+						vp += 2;
+					}
+				}
+				break;
+
+			case TLS_EXT_KEY_SHARE:
+				/*
+				 * Client key share list.
+				 * Format: 2-byte list length, then entries.
+				 * Each entry: 2-byte group + 2-byte key_len + key
+				 */
+				if (ext_data_len >= 2) {
+					u16 ks_list_len = ((u16)p[0] << 8) | p[1];
+					const u8 *kp = p + 2;
+					const u8 *kend = p + 2 + ks_list_len;
+
+					if (kend > p + ext_data_len)
+						kend = p + ext_data_len;
+
+					while (kp + 4 <= kend) {
+						u16 group = ((u16)kp[0] << 8) | kp[1];
+						u16 klen = ((u16)kp[2] << 8) | kp[3];
+
+						kp += 4;
+						if (kp + klen > kend)
+							break;
+
+						if (group == TLS_GROUP_X25519 &&
+						    klen == CURVE25519_KEY_SIZE) {
+							peer_pubkey = kp;
+							peer_pubkey_len = klen;
+							found_key_share = true;
+						}
+						kp += klen;
+					}
+				}
+				break;
+
+			case TLS_EXT_ALPN:
+				/*
+				 * ALPN: select first matching protocol.
+				 * Format: 2-byte list len, then entries
+				 * (1-byte proto len + proto).
+				 */
+				if (ext_data_len >= 2 && hs->alpn_count > 0) {
+					u16 alist_len = ((u16)p[0] << 8) | p[1];
+					const u8 *ap = p + 2;
+					const u8 *aend = p + 2 + alist_len;
+					u32 i;
+
+					if (aend > p + ext_data_len)
+						aend = p + ext_data_len;
+
+					while (ap < aend) {
+						u8 plen = *ap++;
+
+						if (ap + plen > aend)
+							break;
+
+						for (i = 0; i < hs->alpn_count; i++) {
+							if (strlen(hs->alpn_list[i]) == plen &&
+							    !memcmp(hs->alpn_list[i], ap, plen)) {
+								kfree(hs->alpn_selected);
+								hs->alpn_selected = kmalloc(plen + 1, GFP_KERNEL);
+								if (hs->alpn_selected) {
+									memcpy(hs->alpn_selected, ap, plen);
+									hs->alpn_selected[plen] = '\0';
+									hs->alpn_len = plen;
+								}
+								goto alpn_done;
+							}
+						}
+						ap += plen;
+					}
+alpn_done:
+					;
+				}
+				break;
+
+			case TLS_EXT_SERVER_NAME:
+				/* SNI: extract hostname */
+				if (ext_data_len >= 5) {
+					/* 2-byte list len, 1-byte type, 2-byte name len */
+					u16 name_len = ((u16)p[3] << 8) | p[4];
+
+					if (p[2] == 0 && /* host_name type */
+					    5 + name_len <= ext_data_len &&
+					    name_len < TLS_MAX_SNI_LEN) {
+						kfree(hs->sni);
+						hs->sni = kmalloc(name_len + 1, GFP_KERNEL);
+						if (hs->sni) {
+							memcpy(hs->sni, p + 5, name_len);
+							hs->sni[name_len] = '\0';
+							hs->sni_len = name_len;
+						}
+					}
+				}
+				break;
+
+			case TLS_EXT_QUIC_TRANSPORT_PARAMS: {
+				int tp_ret;
+
+				tp_ret = tquic_decode_transport_params(
+					p, ext_data_len,
+					&hs->peer_params, false);
+				if (tp_ret == 0)
+					hs->params_received = true;
+				break;
+			}
+			}
+
+			p += ext_data_len;
+		}
+	}
+
+	if (!found_supported_versions) {
+		pr_warn("tquic_hs: client missing supported_versions ext\n");
+		return -EINVAL;
+	}
+
+	if (!found_key_share || !peer_pubkey) {
+		pr_warn("tquic_hs: client missing X25519 key share\n");
+		return -EINVAL;
+	}
+
+	/* Generate server X25519 keypair */
+	hs->key_share.group = TLS_GROUP_X25519;
+	kfree_sensitive(hs->key_share.public_key);
+	kfree_sensitive(hs->key_share.private_key);
+	hs->key_share.public_key = kzalloc(32, GFP_KERNEL);
+	hs->key_share.private_key = kzalloc(32, GFP_KERNEL);
+	if (!hs->key_share.public_key || !hs->key_share.private_key) {
+		kfree_sensitive(hs->key_share.public_key);
+		hs->key_share.public_key = NULL;
+		kfree_sensitive(hs->key_share.private_key);
+		hs->key_share.private_key = NULL;
+		return -ENOMEM;
+	}
+
+	get_random_bytes(hs->key_share.private_key, 32);
+	hs->key_share.private_key_len = 32;
+	hs->key_share.public_key_len = 32;
+
+	/* Clamp private key for X25519 */
+	hs->key_share.private_key[0] &= 248;
+	hs->key_share.private_key[31] &= 127;
+	hs->key_share.private_key[31] |= 64;
+
+	/* Compute public key */
+	if (!curve25519_generate_public(hs->key_share.public_key,
+					hs->key_share.private_key)) {
+		pr_warn("tquic_hs: X25519 public key generation failed\n");
+		return -EINVAL;
+	}
+
+	/* Compute shared secret */
+	if (!curve25519(hs->shared_secret, hs->key_share.private_key,
+		       peer_pubkey)) {
+		pr_warn("tquic_hs: X25519 key exchange failed\n");
+		return -EINVAL;
+	}
+	hs->shared_secret_len = CURVE25519_KEY_SIZE;
+
+	pr_debug("tquic_hs: processed ClientHello, cipher=0x%04x\n",
+		 hs->cipher_suite);
+
+	return 0;
+}
+
+/*
+ * Generate ServerHello message
+ *
+ * Builds the ServerHello and writes it to buf.
+ * Updates the transcript with both the ClientHello and ServerHello,
+ * then derives handshake secrets.
+ *
+ * @hs: Handshake context (must have processed ClientHello)
+ * @ch_data: Raw ClientHello message (for transcript)
+ * @ch_len: Length of ClientHello
+ * @buf: Output buffer for ServerHello
+ * @buf_len: Size of output buffer
+ * @out_len: Bytes written
+ */
+static int tquic_hs_generate_server_hello(struct tquic_handshake *hs,
+					  const u8 *ch_data, u32 ch_len,
+					  u8 *buf, u32 buf_len, u32 *out_len)
+{
+	u8 *p = buf;
+	u8 *msg_len_ptr;
+	int ret;
+
+	if (buf_len < 128)
+		return -EINVAL;
+
+	/* Generate server random */
+	get_random_bytes(hs->server_random, TLS_RANDOM_LEN);
+
+	/* Handshake header */
+	*p++ = TLS_HS_SERVER_HELLO;
+	msg_len_ptr = p;
+	p += 3; /* Length placeholder */
+
+	/* Legacy version (0x0303 = TLS 1.2 for compat) */
+	*p++ = (TLS_LEGACY_VERSION >> 8) & 0xff;
+	*p++ = TLS_LEGACY_VERSION & 0xff;
+
+	/* Server random */
+	memcpy(p, hs->server_random, TLS_RANDOM_LEN);
+	p += TLS_RANDOM_LEN;
+
+	/* Echo back session ID */
+	*p++ = hs->session_id_len;
+	if (hs->session_id_len > 0) {
+		memcpy(p, hs->session_id, hs->session_id_len);
+		p += hs->session_id_len;
+	}
+
+	/* Cipher suite */
+	*p++ = (hs->cipher_suite >> 8) & 0xff;
+	*p++ = hs->cipher_suite & 0xff;
+
+	/* Compression (null) */
+	*p++ = 0;
+
+	/* Extensions */
+	{
+		u8 *ext_len_ptr = p;
+
+		p += 2; /* Extension list length placeholder */
+
+		/* supported_versions extension (6 bytes) */
+		*p++ = (TLS_EXT_SUPPORTED_VERSIONS >> 8) & 0xff;
+		*p++ = TLS_EXT_SUPPORTED_VERSIONS & 0xff;
+		*p++ = 0;
+		*p++ = 2; /* ext data length */
+		*p++ = (TLS_VERSION_13 >> 8) & 0xff;
+		*p++ = TLS_VERSION_13 & 0xff;
+
+		/* key_share extension */
+		*p++ = (TLS_EXT_KEY_SHARE >> 8) & 0xff;
+		*p++ = TLS_EXT_KEY_SHARE & 0xff;
+		*p++ = 0;
+		*p++ = 36; /* ext data length: 2 (group) + 2 (key_len) + 32 (key) */
+		*p++ = (TLS_GROUP_X25519 >> 8) & 0xff;
+		*p++ = TLS_GROUP_X25519 & 0xff;
+		*p++ = 0;
+		*p++ = 32; /* key length */
+		memcpy(p, hs->key_share.public_key, 32);
+		p += 32;
+
+		/* Fill extension list length */
+		ext_len_ptr[0] = ((p - ext_len_ptr - 2) >> 8) & 0xff;
+		ext_len_ptr[1] = (p - ext_len_ptr - 2) & 0xff;
+	}
+
+	/* Fill message length */
+	{
+		u32 mlen = p - msg_len_ptr - 3;
+
+		msg_len_ptr[0] = (mlen >> 16) & 0xff;
+		msg_len_ptr[1] = (mlen >> 8) & 0xff;
+		msg_len_ptr[2] = mlen & 0xff;
+	}
+
+	*out_len = p - buf;
+
+	/* Update transcript: first CH, then SH */
+	ret = tquic_hs_update_transcript(hs, ch_data, ch_len);
+	if (ret < 0)
+		return ret;
+
+	ret = tquic_hs_update_transcript(hs, buf, *out_len);
+	if (ret < 0)
+		return ret;
+
+	/*
+	 * Derive Early Secret for non-PSK case.
+	 * Early Secret = HKDF-Extract(salt=0, ikm=0) per RFC 8446 Section 7.1.
+	 * This must be done before derive_handshake_secrets which uses it.
+	 */
+	{
+		u8 zero_salt[TLS_SECRET_MAX_LEN] = {0};
+		u8 zero_ikm[TLS_SECRET_MAX_LEN] = {0};
+
+		ret = tquic_hkdf_extract(hs->hmac, zero_salt, hs->hash_len,
+					 zero_ikm, hs->hash_len,
+					 hs->early_secret, hs->hash_len);
+		memzero_explicit(zero_salt, sizeof(zero_salt));
+		memzero_explicit(zero_ikm, sizeof(zero_ikm));
+		if (ret < 0)
+			return ret;
+	}
+
+	/* Derive handshake secrets (needs transcript of CH + SH) */
+	ret = tquic_hs_derive_handshake_secrets(hs);
+	if (ret < 0)
+		return ret;
+
+	hs->state = TQUIC_HS_SERVER_SEND_FLIGHT;
+
+	pr_debug("tquic_hs: generated ServerHello (%u bytes)\n", *out_len);
+
+	return 0;
+}
+
+/*
  * @out_buf: Buffer for response messages (ClientHello, Finished, etc.)
  * @out_buf_len: Size of output buffer
  * @out_len: Number of bytes written to out_buf
@@ -3451,6 +4528,24 @@ int tquic_hs_process_record(struct tquic_handshake *hs,
 	msg_data = data + 4;
 
 	switch (msg_type) {
+	case TLS_HS_CLIENT_HELLO:
+		if (!hs->is_server || hs->state != TQUIC_HS_START)
+			return -EPROTO;
+		/*
+		 * Server: parse ClientHello, generate ServerHello.
+		 * ServerHello goes in out_buf (sent at Initial level).
+		 * After this, state = SERVER_SEND_FLIGHT; the caller
+		 * installs handshake keys and then calls
+		 * tquic_hs_generate_server_flight() for the rest.
+		 */
+		ret = tquic_hs_process_client_hello(hs, data, 4 + msg_len);
+		if (ret < 0)
+			break;
+		ret = tquic_hs_generate_server_hello(hs, data, 4 + msg_len,
+						     out_buf, out_buf_len,
+						     out_len);
+		break;
+
 	case TLS_HS_SERVER_HELLO:
 		if (hs->state != TQUIC_HS_WAIT_SH)
 			return -EPROTO;
@@ -3498,12 +4593,16 @@ int tquic_hs_process_record(struct tquic_handshake *hs,
 		if (ret < 0)
 			break;
 
-		/*
-		 * After processing server Finished, generate client Finished.
-		 * This is the last client handshake message.
-		 */
-		ret = tquic_hs_generate_finished(hs, out_buf, out_buf_len,
-						 out_len);
+		if (!hs->is_server) {
+			/*
+			 * Client: after server Finished, generate client
+			 * Finished. This is the last client handshake message.
+			 */
+			ret = tquic_hs_generate_finished(hs, out_buf,
+							 out_buf_len,
+							 out_len);
+		}
+		/* Server: client Finished already handled in process_finished */
 		break;
 
 	case TLS_HS_NEW_SESSION_TICKET:

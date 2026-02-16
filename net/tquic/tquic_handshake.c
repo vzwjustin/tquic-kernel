@@ -1229,7 +1229,7 @@ int tquic_inline_hs_recv_crypto(struct sock *sk, const u8 *data, u32 len,
 	struct tquic_sock *tsk = tquic_sk(sk);
 	struct tquic_handshake *ihs = tsk->inline_hs;
 	struct tquic_connection *conn;
-	enum tquic_hs_state prev_state;
+	enum tquic_hs_state prev_state, new_state;
 	u8 *resp_buf = NULL;
 	u32 resp_len = 0;
 	struct sk_buff *resp_skb;
@@ -1263,14 +1263,121 @@ int tquic_inline_hs_recv_crypto(struct sock *sk, const u8 *data, u32 len,
 		return ret;
 	}
 
+	new_state = tquic_hs_get_state(ihs);
+
 	/*
-	 * Install keys when the state machine transitions to a new level.
+	 * SERVER PATH: After processing ClientHello, the state machine
+	 * transitions to SERVER_SEND_FLIGHT. ServerHello is in resp_buf
+	 * (to be sent at Initial level). We need to:
+	 * 1. Queue ServerHello at Initial level
+	 * 2. Install handshake keys
+	 * 3. Generate server flight (EE+Cert+CV+Fin) at Handshake level
+	 */
+	if (prev_state == TQUIC_HS_START &&
+	    new_state == TQUIC_HS_SERVER_SEND_FLIGHT) {
+		/* 1. Queue ServerHello at Initial level */
+		if (resp_len > 0 && resp_len <= 4096) {
+			resp_skb = alloc_skb(resp_len, GFP_ATOMIC);
+			if (!resp_skb) {
+				kfree(resp_buf);
+				tquic_conn_put(conn);
+				return -ENOMEM;
+			}
+			skb_put_data(resp_skb, resp_buf, resp_len);
+			skb_queue_tail(
+				&conn->crypto_buffer[TQUIC_PN_SPACE_INITIAL],
+				resp_skb);
+			tquic_dbg("queued ServerHello (%u bytes) at Initial\n",
+				  resp_len);
+		}
+
+		/* 2. Install handshake keys */
+		ret = tquic_inline_hs_install_keys(sk,
+						   TQUIC_CRYPTO_HANDSHAKE);
+		if (ret < 0) {
+			kfree(resp_buf);
+			tquic_inline_hs_abort(sk, ret);
+			tquic_conn_put(conn);
+			return ret;
+		}
+		conn->crypto_level = TQUIC_CRYPTO_HANDSHAKE;
+
+		/* 3. Generate server flight at Handshake level */
+		{
+			u8 *flight_buf;
+			u32 flight_len = 0;
+			/*
+			 * Flight can be large: EE (~200) + Cert (~2KB) +
+			 * CV (~300) + Fin (~36) = ~3KB typical.
+			 * Use 8KB to be safe with large certs.
+			 */
+			flight_buf = kmalloc(8192, GFP_ATOMIC);
+			if (!flight_buf) {
+				kfree(resp_buf);
+				tquic_conn_put(conn);
+				return -ENOMEM;
+			}
+
+			ret = tquic_hs_generate_server_flight(
+				ihs, flight_buf, 8192, &flight_len);
+			if (ret < 0) {
+				tquic_dbg("generate_server_flight failed: %d\n",
+					  ret);
+				kfree(flight_buf);
+				kfree(resp_buf);
+				tquic_inline_hs_abort(sk, ret);
+				tquic_conn_put(conn);
+				return ret;
+			}
+
+			/* Queue flight at Handshake level */
+			if (flight_len > 0) {
+				resp_skb = alloc_skb(flight_len, GFP_ATOMIC);
+				if (!resp_skb) {
+					kfree(flight_buf);
+					kfree(resp_buf);
+					tquic_conn_put(conn);
+					return -ENOMEM;
+				}
+				skb_put_data(resp_skb, flight_buf, flight_len);
+				skb_queue_tail(
+					&conn->crypto_buffer[TQUIC_PN_SPACE_HANDSHAKE],
+					resp_skb);
+				tquic_dbg("queued server flight (%u bytes) at Handshake\n",
+					  flight_len);
+			}
+
+			kfree(flight_buf);
+		}
+
+		/*
+		 * App keys are already derived inside generate_server_flight().
+		 * Install them now so we can process the client's Finished
+		 * (which arrives at Handshake level and after which we need
+		 * 1-RTT keys ready).
+		 */
+		ret = tquic_inline_hs_install_keys(sk,
+						   TQUIC_CRYPTO_APPLICATION);
+		if (ret < 0) {
+			kfree(resp_buf);
+			tquic_inline_hs_abort(sk, ret);
+			tquic_conn_put(conn);
+			return ret;
+		}
+
+		kfree(resp_buf);
+		tquic_conn_put(conn);
+		return 0;
+	}
+
+	/*
+	 * CLIENT PATH: Install keys when the state machine transitions.
 	 *
 	 * After ServerHello: handshake-level keys become available
 	 * After server Finished: application-level keys become available
 	 */
 	if (prev_state == TQUIC_HS_WAIT_SH &&
-	    tquic_hs_get_state(ihs) >= TQUIC_HS_WAIT_EE) {
+	    new_state >= TQUIC_HS_WAIT_EE) {
 		/* Install handshake-level keys */
 		ret = tquic_inline_hs_install_keys(sk, TQUIC_CRYPTO_HANDSHAKE);
 		if (ret < 0) {
@@ -1282,15 +1389,20 @@ int tquic_inline_hs_recv_crypto(struct sock *sk, const u8 *data, u32 len,
 		conn->crypto_level = TQUIC_CRYPTO_HANDSHAKE;
 	}
 
+	/* Both client and server: mark complete after all Finished processed */
 	if (tquic_hs_is_complete(ihs) && !conn->handshake_complete) {
-		/* Install application-level keys */
-		ret = tquic_inline_hs_install_keys(sk, TQUIC_CRYPTO_APPLICATION);
-		if (ret < 0) {
-			kfree(resp_buf);
-			tquic_inline_hs_abort(sk, ret);
-			tquic_conn_put(conn);
-			return ret;
+		if (!conn->is_server) {
+			/* Client: install app keys after server Finished */
+			ret = tquic_inline_hs_install_keys(sk,
+							   TQUIC_CRYPTO_APPLICATION);
+			if (ret < 0) {
+				kfree(resp_buf);
+				tquic_inline_hs_abort(sk, ret);
+				tquic_conn_put(conn);
+				return ret;
+			}
 		}
+		/* Server: app keys already installed above */
 
 		/* Apply peer transport parameters */
 		tquic_inline_hs_apply_transport_params(sk);
@@ -1312,20 +1424,14 @@ int tquic_inline_hs_recv_crypto(struct sock *sk, const u8 *data, u32 len,
 		tquic_dbg("inline TLS handshake complete\n");
 	}
 
-	/* Queue any response messages */
-		if (resp_len > 0) {
-		/* Defensive cap: resp_len must fit within the 4096-byte buffer */
-			if (resp_len > 4096) {
-				kfree(resp_buf);
-				tquic_conn_put(conn);
-				return -EINVAL;
-			}
-			resp_skb = alloc_skb(resp_len, GFP_ATOMIC);
-			if (!resp_skb) {
-				kfree(resp_buf);
-				tquic_conn_put(conn);
-				return -ENOMEM;
-			}
+	/* Queue any response messages (client Finished, etc.) */
+	if (resp_len > 0 && resp_len <= 4096) {
+		resp_skb = alloc_skb(resp_len, GFP_ATOMIC);
+		if (!resp_skb) {
+			kfree(resp_buf);
+			tquic_conn_put(conn);
+			return -ENOMEM;
+		}
 		skb_put_data(resp_skb, resp_buf, resp_len);
 
 		/*
@@ -1849,6 +1955,27 @@ static int tquic_start_server_handshake(struct sock *sk,
 		return ret;
 	}
 
+	/* Load certificate and private key from socket */
+	if (tsk->cert_der && tsk->cert_der_len > 0) {
+		ret = tquic_hs_set_certificate(ihs, tsk->cert_der,
+					       tsk->cert_der_len);
+		if (ret < 0) {
+			pr_warn("tquic: failed to set certificate: %d\n", ret);
+			tquic_hs_cleanup(ihs);
+			return ret;
+		}
+	}
+
+	if (tsk->key_der && tsk->key_der_len > 0) {
+		ret = tquic_hs_set_private_key(ihs, tsk->key_der,
+					       tsk->key_der_len);
+		if (ret < 0) {
+			pr_warn("tquic: failed to set private key: %d\n", ret);
+			tquic_hs_cleanup(ihs);
+			return ret;
+		}
+	}
+
 	/*
 	 * Store the inline handshake context on the socket.
 	 * The incoming ClientHello from the Initial packet will be
@@ -2082,6 +2209,15 @@ int tquic_server_handshake(struct sock *listener_sk,
 	/* Inherit QUIC config from listener (version, transport params) */
 	memcpy(&child_tsk->config, &listen_tsk->config,
 	       sizeof(child_tsk->config));
+
+	/*
+	 * Share cert/key pointers from listener (not copied; the listener
+	 * owns the buffers and outlives all children).
+	 */
+	child_tsk->cert_der = listen_tsk->cert_der;
+	child_tsk->cert_der_len = listen_tsk->cert_der_len;
+	child_tsk->key_der = listen_tsk->key_der;
+	child_tsk->key_der_len = listen_tsk->key_der_len;
 
 	/* Create connection for child (server-side) */
 	conn = tquic_conn_create(child_tsk, true);

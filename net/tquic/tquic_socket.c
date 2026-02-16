@@ -26,6 +26,7 @@
 #include <net/udp.h>
 #include <net/udp_tunnel.h>
 #include <net/tquic.h>
+#include <net/tquic/handshake.h>
 
 #include "protocol.h"
 #include "tquic_compat.h"

@@ -699,6 +699,23 @@ static int tquic_proto_init_sock(struct sock *sk)
 	tsk->http3_settings.server_push_enabled = false;
 	tsk->h3_conn = NULL;
 
+	/* Default QUIC version (RFC 9000) */
+	tsk->config.version = TQUIC_VERSION_1;
+
+	/* Default transport parameters (RFC 9000 Section 18.2) */
+	tsk->config.max_idle_timeout_ms = 30000;
+	tsk->config.handshake_timeout_ms = 10000;
+	tsk->config.initial_max_data = 1048576;
+	tsk->config.initial_max_stream_data_bidi_local = 262144;
+	tsk->config.initial_max_stream_data_bidi_remote = 262144;
+	tsk->config.initial_max_stream_data_uni = 262144;
+	tsk->config.initial_max_streams_bidi = 100;
+	tsk->config.initial_max_streams_uni = 100;
+	tsk->config.ack_delay_exponent = 3;
+	tsk->config.max_ack_delay_ms = 25;
+	tsk->config.max_connection_ids = 8;
+	tsk->config.max_datagram_size = 1200;
+
 	/* Certificate verification (strict by default) */
 	tsk->cert_verify.verify_mode = TQUIC_VERIFY_REQUIRED;
 	tsk->cert_verify.verify_hostname = true;

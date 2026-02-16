@@ -1625,6 +1625,17 @@ struct tquic_sock {
 		u8 expected_hostname_len;
 	} cert_verify;
 
+	/*
+	 * Server certificate and private key (DER-encoded)
+	 *
+	 * Set via SO_TQUIC_CERTIFICATE / SO_TQUIC_PRIVATE_KEY sockopts
+	 * before listen(). Inherited by child sockets on accept.
+	 */
+	u8 *cert_der;
+	u32 cert_der_len;
+	u8 *key_der;
+	u32 key_der_len;
+
 	/* Connection configuration (using full tquic_config struct) */
 	struct tquic_config config;
 

@@ -181,6 +181,19 @@ struct tquic_cert_verify_args {
 	__u8	reserved;
 };
 
+/*
+ * Server certificate and key (DER-encoded).
+ * Set before listen()/accept() on server sockets.
+ */
+#define TQUIC_CERT_DATA		33  /* DER-encoded X.509 certificate */
+#define SO_TQUIC_CERT_DATA	TQUIC_CERT_DATA
+#define TQUIC_KEY_DATA		34  /* DER-encoded private key (PKCS#8) */
+#define SO_TQUIC_KEY_DATA	TQUIC_KEY_DATA
+
+/* Maximum cert/key DER size */
+#define TQUIC_MAX_CERT_DER_SIZE		16384
+#define TQUIC_MAX_KEY_DER_SIZE		16384
+
 /* WAN Bonding specific socket options */
 #define TQUIC_BOND_MODE		50  /* Bonding mode */
 #define TQUIC_BOND_ADD_PATH	51  /* Add a path to bond */

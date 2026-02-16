@@ -46,6 +46,8 @@
 #define TQUIC_MULTIPATH          18  /* Enable multipath */
 #define TQUIC_CERT_VERIFY_MODE   30  /* Certificate verification mode */
 #define TQUIC_ALLOW_SELF_SIGNED  32  /* Allow self-signed certs */
+#define TQUIC_CERT_DATA          33  /* DER-encoded certificate */
+#define TQUIC_KEY_DATA           34  /* DER-encoded private key */
 
 #define TQUIC_VERIFY_NONE        0
 #define TQUIC_VERIFY_OPTIONAL    1
@@ -127,6 +129,175 @@ static int is_ipv4_addr(const char *addr)
     if (!addr)
         return 0;
     return inet_pton(AF_INET, addr, &tmp) == 1;
+}
+
+/*
+ * Base64 decode table: maps ASCII character to 6-bit value, -1 for invalid.
+ */
+static const int b64_table[256] = {
+    ['A'] = 0,  ['B'] = 1,  ['C'] = 2,  ['D'] = 3,
+    ['E'] = 4,  ['F'] = 5,  ['G'] = 6,  ['H'] = 7,
+    ['I'] = 8,  ['J'] = 9,  ['K'] = 10, ['L'] = 11,
+    ['M'] = 12, ['N'] = 13, ['O'] = 14, ['P'] = 15,
+    ['Q'] = 16, ['R'] = 17, ['S'] = 18, ['T'] = 19,
+    ['U'] = 20, ['V'] = 21, ['W'] = 22, ['X'] = 23,
+    ['Y'] = 24, ['Z'] = 25,
+    ['a'] = 26, ['b'] = 27, ['c'] = 28, ['d'] = 29,
+    ['e'] = 30, ['f'] = 31, ['g'] = 32, ['h'] = 33,
+    ['i'] = 34, ['j'] = 35, ['k'] = 36, ['l'] = 37,
+    ['m'] = 38, ['n'] = 39, ['o'] = 40, ['p'] = 41,
+    ['q'] = 42, ['r'] = 43, ['s'] = 44, ['t'] = 45,
+    ['u'] = 46, ['v'] = 47, ['w'] = 48, ['x'] = 49,
+    ['y'] = 50, ['z'] = 51,
+    ['0'] = 52, ['1'] = 53, ['2'] = 54, ['3'] = 55,
+    ['4'] = 56, ['5'] = 57, ['6'] = 58, ['7'] = 59,
+    ['8'] = 60, ['9'] = 61,
+    ['+'] = 62, ['/'] = 63,
+};
+
+/*
+ * Decode base64-encoded data to binary.
+ * Returns decoded length, or -1 on error.
+ */
+static int base64_decode(const unsigned char *src, int src_len,
+                         unsigned char *dst)
+{
+    int i, j = 0;
+    unsigned int accum = 0;
+    int bits = 0;
+
+    for (i = 0; i < src_len; i++) {
+        unsigned char c = src[i];
+
+        if (c == '=' || c == '\n' || c == '\r' || c == ' ')
+            continue;
+
+        int v = b64_table[c];
+        /* Verify this is a valid base64 char (A=0 is ambiguous with default 0) */
+        if (v == 0 && c != 'A')
+            return -1;
+
+        accum = (accum << 6) | v;
+        bits += 6;
+
+        if (bits >= 8) {
+            bits -= 8;
+            dst[j++] = (unsigned char)((accum >> bits) & 0xFF);
+        }
+    }
+
+    return j;
+}
+
+/*
+ * Load a PEM file (certificate or key) and convert to DER format.
+ * Strips PEM headers/footers and base64-decodes the body.
+ *
+ * Returns 0 on success, -1 on failure.
+ * On success, *out_der points to malloc'd buffer, *out_len is its size.
+ */
+static int load_pem_to_der(const char *path, unsigned char **out_der,
+                           int *out_len)
+{
+    FILE *f;
+    char line[256];
+    unsigned char pem_data[32768];
+    int pem_len = 0;
+    int in_body = 0;
+
+    f = fopen(path, "r");
+    if (!f) {
+        LOG_ERROR("Cannot open PEM file: %s: %s", path, strerror(errno));
+        return -1;
+    }
+
+    while (fgets(line, sizeof(line), f)) {
+        if (strncmp(line, "-----BEGIN ", 11) == 0) {
+            in_body = 1;
+            continue;
+        }
+        if (strncmp(line, "-----END ", 9) == 0) {
+            in_body = 0;
+            continue;
+        }
+        if (in_body) {
+            int line_len = strlen(line);
+
+            /* Strip trailing whitespace */
+            while (line_len > 0 &&
+                   (line[line_len - 1] == '\n' ||
+                    line[line_len - 1] == '\r' ||
+                    line[line_len - 1] == ' '))
+                line_len--;
+
+            if (line_len > 0 && pem_len + line_len < (int)sizeof(pem_data)) {
+                memcpy(pem_data + pem_len, line, line_len);
+                pem_len += line_len;
+            }
+        }
+    }
+    fclose(f);
+
+    if (pem_len == 0) {
+        LOG_ERROR("No PEM data found in %s", path);
+        return -1;
+    }
+
+    /* Allocate output buffer (DER is smaller than base64) */
+    *out_der = malloc(pem_len);
+    if (!*out_der) {
+        LOG_ERROR("malloc failed");
+        return -1;
+    }
+
+    *out_len = base64_decode(pem_data, pem_len, *out_der);
+    if (*out_len <= 0) {
+        LOG_ERROR("Base64 decode failed for %s", path);
+        free(*out_der);
+        *out_der = NULL;
+        return -1;
+    }
+
+    LOG_DEBUG("Loaded %s: %d bytes PEM -> %d bytes DER", path, pem_len, *out_len);
+    return 0;
+}
+
+/*
+ * Load cert and key from PEM files and pass to kernel via setsockopt.
+ * Returns 0 on success, -1 if any step fails.
+ */
+static int load_cert_key(int sock, struct server_config *config)
+{
+    unsigned char *der = NULL;
+    int der_len = 0;
+
+    if (config->cert_file) {
+        if (load_pem_to_der(config->cert_file, &der, &der_len) < 0)
+            return -1;
+        if (setsockopt(sock, SOL_TQUIC, TQUIC_CERT_DATA, der, der_len) < 0) {
+            LOG_ERROR("setsockopt TQUIC_CERT_DATA: %s", strerror(errno));
+            free(der);
+            return -1;
+        }
+        LOG_INFO("Certificate loaded: %s (%d bytes DER)", config->cert_file, der_len);
+        free(der);
+        der = NULL;
+    }
+
+    if (config->key_file) {
+        if (load_pem_to_der(config->key_file, &der, &der_len) < 0)
+            return -1;
+        if (setsockopt(sock, SOL_TQUIC, TQUIC_KEY_DATA, der, der_len) < 0) {
+            LOG_ERROR("setsockopt TQUIC_KEY_DATA: %s", strerror(errno));
+            free(der);
+            return -1;
+        }
+        LOG_INFO("Private key loaded: %s (%d bytes DER)", config->key_file, der_len);
+        free(der);
+        der = NULL;
+    }
+
+    return 0;
 }
 
 /*
@@ -228,6 +399,13 @@ static int create_quic_socket(struct server_config *config)
 
     opt = config->idle_timeout;
     setsockopt(sock, SOL_TQUIC, TQUIC_IDLE_TIMEOUT, &opt, sizeof(opt));
+
+    /* Load and pass certificate and key to kernel */
+    if (load_cert_key(sock, config) < 0) {
+        LOG_ERROR("Failed to load certificate/key");
+        close(sock);
+        return -1;
+    }
 
     /* Bind */
     if (bind(sock, (struct sockaddr *)&bind_addr, bind_len) < 0) {
