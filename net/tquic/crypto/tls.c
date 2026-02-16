@@ -457,6 +457,10 @@ static int tquic_derive_initial_keys_versioned(struct tquic_crypto_state *crypto
 		return -EINVAL;
 
 	/* Derive initial secret using version-specific salt */
+	pr_warn("tquic_derive_initial: is_server=%d version=0x%08x dcid_len=%u dcid=%*phN\n",
+		is_server, version, dcid->len,
+		min_t(int, dcid->len, 20), dcid->id);
+
 	ret = tquic_hkdf_extract(crypto->hash, salt, salt_len,
 				 dcid->id, dcid->len,
 				 initial_secret, sizeof(initial_secret));
@@ -475,6 +479,10 @@ static int tquic_derive_initial_keys_versioned(struct tquic_crypto_state *crypto
 				      server_secret, 32);
 	if (ret)
 		goto out_zeroize;
+
+	pr_warn("tquic_derive_initial: initial_secret=%*phN\n", 8, initial_secret);
+	pr_warn("tquic_derive_initial: client_secret=%*phN\n", 8, client_secret);
+	pr_warn("tquic_derive_initial: server_secret=%*phN\n", 8, server_secret);
 
 	/* Set up read/write keys based on role */
 	if (is_server) {
@@ -601,6 +609,13 @@ int tquic_encrypt_packet(struct tquic_crypto_state *crypto,
 	if (!keys->valid)
 		return -EINVAL;
 
+	pr_warn("tquic_encrypt: level=%d pkt_num=%llu hdr_len=%zu pay_len=%zu key=%*phN iv=%*phN\n",
+		crypto->write_level, pkt_num, header_len, payload_len,
+		4, keys->key, 4, keys->iv);
+	if (header_len >= 6)
+		pr_warn("tquic_encrypt: hdr[0..5]=%*phN\n",
+			min_t(int, header_len, 6), header);
+
 	tquic_create_nonce(keys->iv, pkt_num, nonce);
 
 	/* Key is set once at installation time (CF-145), use TX handle */
@@ -652,6 +667,13 @@ int tquic_decrypt_packet(struct tquic_crypto_state *crypto,
 
 	if (payload_len < 16)
 		return -EINVAL;  /* Too short for auth tag */
+
+	pr_warn("tquic_decrypt: level=%d pkt_num=%llu hdr_len=%zu pay_len=%zu key=%*phN iv=%*phN\n",
+		crypto->read_level, pkt_num, header_len, payload_len,
+		4, keys->key, 4, keys->iv);
+	if (header_len >= 6)
+		pr_warn("tquic_decrypt: hdr[0..5]=%*phN\n",
+			min_t(int, header_len, 6), header);
 
 	tquic_create_nonce(keys->iv, pkt_num, nonce);
 
