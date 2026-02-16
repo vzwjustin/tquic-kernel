@@ -344,34 +344,14 @@ int tquic_hp_protect_long(struct tquic_hp_ctx *ctx, u8 *packet,
 	if (ret)
 		return ret;
 
-	if (level == TQUIC_HP_LEVEL_INITIAL)
-		pr_warn("HP PROTECT: pn_offset=%lu key=%*phN sample=%*phN"
-			" pn_before=%02x%02x%02x%02x\n",
-			(unsigned long)pn_offset,
-			min_t(int, hp_key->key_len, 16), hp_key->key,
-			16, sample,
-			packet[pn_offset], packet[pn_offset + 1],
-			packet[pn_offset + 2], packet[pn_offset + 3]);
-
 	/* Generate mask */
 	ret = tquic_hp_generate_mask(hp_key, sample, mask);
 	if (ret)
 		return ret;
 
-	if (level == TQUIC_HP_LEVEL_INITIAL)
-		pr_warn("HP PROTECT: mask=%02x%02x%02x%02x%02x first=%02x\n",
-			mask[0], mask[1], mask[2], mask[3], mask[4],
-			packet[0]);
-
 	/* Apply protection */
 	ret = tquic_hp_process_long_header(packet, packet_len, pn_offset,
 					   mask, true);
-
-	if (level == TQUIC_HP_LEVEL_INITIAL)
-		pr_warn("HP PROTECT: after first=%02x pn=%02x%02x%02x%02x\n",
-			packet[0],
-			packet[pn_offset], packet[pn_offset + 1],
-			packet[pn_offset + 2], packet[pn_offset + 3]);
 
 	memzero_explicit(mask, sizeof(mask));
 	return ret;
@@ -410,38 +390,16 @@ int tquic_hp_unprotect_long(struct tquic_hp_ctx *ctx, u8 *packet,
 	if (ret)
 		return ret;
 
-	if (level == TQUIC_HP_LEVEL_INITIAL)
-		pr_warn("HP UNPROTECT: pn_offset=%lu key=%*phN sample=%*phN"
-			" pn_before=%02x%02x%02x%02x\n",
-			(unsigned long)pn_offset,
-			min_t(int, hp_key->key_len, 16), hp_key->key,
-			16, sample,
-			packet[pn_offset], packet[pn_offset + 1],
-			packet[pn_offset + 2], packet[pn_offset + 3]);
-
 	/* Generate mask */
 	ret = tquic_hp_generate_mask(hp_key, sample, mask);
 	if (ret)
 		return ret;
-
-	if (level == TQUIC_HP_LEVEL_INITIAL)
-		pr_warn("HP UNPROTECT: mask=%02x%02x%02x%02x%02x first=%02x\n",
-			mask[0], mask[1], mask[2], mask[3], mask[4],
-			packet[0]);
 
 	/* Remove protection */
 	ret = tquic_hp_process_long_header(packet, packet_len, pn_offset,
 					   mask, false);
 	if (ret == 0 && pn_len)
 		*pn_len = tquic_hp_detect_pn_length(packet[0]);
-
-	if (level == TQUIC_HP_LEVEL_INITIAL)
-		pr_warn("HP UNPROTECT: after first=%02x pn=%02x%02x%02x%02x"
-			" pn_len=%u\n",
-			packet[0],
-			packet[pn_offset], packet[pn_offset + 1],
-			packet[pn_offset + 2], packet[pn_offset + 3],
-			pn_len ? *pn_len : 0);
 
 	memzero_explicit(mask, sizeof(mask));
 	return ret;
