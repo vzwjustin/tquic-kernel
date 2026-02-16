@@ -475,7 +475,7 @@ static int tquic_gen_stream_frame_skb(struct tquic_frame_ctx *ctx,
 /*
  * Generate MAX_DATA frame
  */
-static int __maybe_unused tquic_gen_max_data_frame(struct tquic_frame_ctx *ctx, u64 max_data)
+static int tquic_gen_max_data_frame(struct tquic_frame_ctx *ctx, u64 max_data)
 {
 	u8 *start = ctx->buf + ctx->offset;
 	int ret;
@@ -501,8 +501,8 @@ static int __maybe_unused tquic_gen_max_data_frame(struct tquic_frame_ctx *ctx, 
 /*
  * Generate MAX_STREAM_DATA frame
  */
-static int __maybe_unused tquic_gen_max_stream_data_frame(struct tquic_frame_ctx *ctx,
-							  u64 stream_id, u64 max_data)
+static int tquic_gen_max_stream_data_frame(struct tquic_frame_ctx *ctx,
+					   u64 stream_id, u64 max_data)
 {
 	u8 *start = ctx->buf + ctx->offset;
 	int ret;
@@ -2322,6 +2322,85 @@ int tquic_flow_send_max_data(struct tquic_connection *conn,
 	return tquic_output_packet(conn, path, skb);
 }
 EXPORT_SYMBOL_GPL(tquic_flow_send_max_data);
+
+/**
+ * tquic_flow_send_max_stream_data - Send MAX_STREAM_DATA frame
+ * @conn: QUIC connection
+ * @path: Network path to send on
+ * @stream_id: Stream to update
+ * @max_data: New per-stream maximum data value to advertise
+ *
+ * Builds a minimal 1-RTT packet containing a MAX_STREAM_DATA frame.
+ * Called when the application has consumed enough stream data to warrant
+ * opening the peer's per-stream send window (RFC 9000 Section 4.2).
+ */
+int tquic_flow_send_max_stream_data(struct tquic_connection *conn,
+				    struct tquic_path *path,
+				    u64 stream_id, u64 max_data)
+{
+	struct tquic_frame_ctx ctx;
+	struct sk_buff *skb;
+	u8 buf_stack[128];
+	int ret;
+	u64 pkt_num;
+
+	ctx.conn = conn;
+	ctx.path = path;
+	ctx.buf = buf_stack;
+	ctx.buf_len = sizeof(buf_stack);
+	ctx.offset = 0;
+	ctx.ack_eliciting = true;
+
+	ret = tquic_gen_max_stream_data_frame(&ctx, stream_id, max_data);
+	if (ret < 0)
+		return ret;
+
+	pkt_num = atomic64_inc_return(&conn->pkt_num_tx) - 1;
+
+	skb = alloc_skb(ctx.offset + TQUIC_MAX_SHORT_HEADER_SIZE + MAX_HEADER,
+			GFP_ATOMIC);
+	if (!skb)
+		return -ENOMEM;
+
+	skb_reserve(skb, MAX_HEADER);
+
+	{
+		u8 header[TQUIC_MAX_SHORT_HEADER_SIZE];
+		bool key_phase = false;
+		int header_len;
+
+		if (conn->crypto_state) {
+			struct tquic_key_update_state *ku_state;
+
+			ku_state = tquic_crypto_get_key_update_state(
+					conn->crypto_state);
+			if (ku_state)
+				key_phase = tquic_key_update_get_phase(
+						ku_state) != 0;
+		}
+
+		header_len = tquic_build_short_header_internal(
+				conn, path, header,
+				TQUIC_MAX_SHORT_HEADER_SIZE,
+				pkt_num, 0, key_phase, false, NULL);
+		if (header_len > 0) {
+			if (skb_tailroom(skb) < header_len) {
+				kfree_skb(skb);
+				return -ENOSPC;
+			}
+			skb_put_data(skb, header, header_len);
+		}
+	}
+
+	if (skb_tailroom(skb) < ctx.offset) {
+		kfree_skb(skb);
+		return -ENOSPC;
+	}
+	skb_put_data(skb, buf_stack, ctx.offset);
+
+	return tquic_output_packet(conn, path, skb);
+}
+EXPORT_SYMBOL_GPL(tquic_flow_send_max_stream_data);
 
 /*
  * tquic_send_path_challenge and tquic_send_path_response are defined

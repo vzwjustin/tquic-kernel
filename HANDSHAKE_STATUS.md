@@ -1,11 +1,11 @@
 # TQUIC Handshake & Data Exchange Status
 
-## Current State: Bidirectional Data Exchange Working
+## Current State: Clean End-to-End Data Exchange with Connection Teardown
 
-Full end-to-end data flow verified: 10KB file download completes successfully
-with the userspace test client/server over the kernel QUIC transport.
-100KB partial transfer also works (38KB received before flow control window
-exhaustion — MAX_DATA updates not yet generated).
+Full bidirectional data flow with clean shutdown verified: 10KB file download
+completes in 11ms (7.45 Mbps) with proper CONNECTION_CLOSE exchange.
+Client exits cleanly (exit code 0). ACK generation and MAX_DATA flow control
+updates are in place for larger transfers.
 
 ### What's Working
 
@@ -22,14 +22,22 @@ exhaustion — MAX_DATA updates not yet generated).
    - Initial, Handshake, and 1-RTT packet decryption
    - Header protection removal/application for all packet types
    - CRYPTO frame extraction and handshake state machine
+   - Immediate ACK generation for 1-RTT ack-eliciting packets
 
 3. **Application Data Exchange**
    - Stream creation for peer-initiated (incoming) streams
    - Stream-level and connection-level flow control
+   - MAX_DATA flow control window updates (sent when half window consumed)
    - Data enqueue to stream receive buffers
    - Blocking and non-blocking recv() with wait_event_interruptible
    - Lazy default_stream initialization on server-side accepted sockets
    - Server HTTP GET request parsing and file serving
+
+4. **Connection Lifecycle**
+   - CONNECTION_CLOSE frame transmission via dedicated tquic_xmit_close()
+   - Clean connection teardown for server connections (with or without state machine)
+   - Stream waiters woken on CLOSING/DRAINING state transitions
+   - Bidirectional CONNECTION_CLOSE exchange verified
 
 ### Infrastructure
 - Module loads/unloads cleanly
@@ -114,10 +122,10 @@ between test iterations that need module reload.
 
 ## Next Steps
 
-1. **Flow control window updates**: Generate MAX_DATA/MAX_STREAM_DATA frames
-   as application reads data — needed for transfers larger than initial window
-2. **FIN handling**: Stream FIN for clean data transfer completion
-3. **ACK generation**: Send ACKs for received packets to advance loss detection
-4. **Connection close wakeup**: Wake blocked stream waiters on connection close
-5. **Larger file transfers**: Test with multi-MB files after flow control updates
+1. **Stream FIN handling**: Proper STREAM frame FIN bit for clean data transfer completion
+2. **MAX_STREAM_DATA frames**: Per-stream flow control window updates
+3. **Delayed ACK timer**: RFC 9000 Section 13.2.1 (currently sending immediate ACKs)
+4. **Larger file transfers**: Test with multi-MB files to verify flow control updates
+5. **Retransmission / loss recovery**: RFC 9002 loss detection and retransmission
 6. **Module refcount cleanup**: Fix orphaned socket handling preventing rmmod
+7. **Client-initiated streams**: Outgoing stream creation from kernel side

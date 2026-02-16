@@ -1057,10 +1057,25 @@ void tquic_close(struct sock *sk, long timeout)
 
 		/*
 		 * If we're still connected, initiate graceful close.
-		 * The connection close will proceed through CLOSING -> DRAINING -> CLOSED.
+		 *
+		 * First, flush any pending stream data and send FIN on the
+		 * default stream so the peer knows data transfer is complete.
+		 * Then send CONNECTION_CLOSE for the connection.
 		 */
 		if (READ_ONCE(conn->state) == TQUIC_CONN_CONNECTED ||
 		    READ_ONCE(conn->state) == TQUIC_CONN_CONNECTING) {
+			struct tquic_stream *stream;
+
+			stream = tquic_sock_default_stream_get(tsk);
+			if (stream) {
+				/* Flush pending send buffer data */
+				tquic_output_flush(conn);
+
+				/* Send FIN if not already sent */
+				if (!stream->fin_sent)
+					tquic_xmit(conn, stream, NULL, 0, true);
+				tquic_stream_put(stream);
+			}
 			tquic_conn_close_with_error(conn, 0x00, NULL);
 		}
 	}
@@ -3245,34 +3260,56 @@ int tquic_recvmsg(struct sock *sk, struct msghdr *msg, size_t len, int flags,
 
 	/*
 	 * Update flow control after application consumes data.
-	 * Send MAX_DATA when half the window has been consumed,
-	 * allowing the peer to send more data (RFC 9000 Section 4.1).
+	 *
+	 * RFC 9000 Section 4.1-4.2: Send MAX_DATA (connection-level) and
+	 * MAX_STREAM_DATA (stream-level) when the application has consumed
+	 * enough data to warrant opening the peer's send window.  We use
+	 * the half-window threshold: update when consumed > window / 2.
 	 */
 	if (copied > 0) {
+		struct tquic_path *upd_path;
 		u64 consumed, threshold, new_max;
+		bool send_conn_update = false;
+		bool send_stream_update = false;
+		u64 new_conn_max = 0;
+		u64 new_stream_max = 0;
 
 		spin_lock_bh(&conn->lock);
+
+		/* Connection-level MAX_DATA */
 		conn->data_received += copied;
 		consumed = conn->data_received;
 		threshold = conn->max_data_local / 2;
+		if (consumed > threshold && conn->max_data_local > 0) {
+			new_conn_max = consumed + conn->max_data_local;
+			conn->max_data_local = new_conn_max;
+			send_conn_update = true;
+		}
+
+		/* Stream-level MAX_STREAM_DATA */
+		stream->recv_consumed += copied;
+		consumed = stream->recv_consumed;
+		threshold = stream->max_recv_data / 2;
+		if (consumed > threshold && stream->max_recv_data > 0) {
+			new_stream_max = consumed + stream->max_recv_data;
+			stream->max_recv_data = new_stream_max;
+			send_stream_update = true;
+		}
+
 		spin_unlock_bh(&conn->lock);
 
-		if (consumed > threshold && conn->max_data_local > 0) {
-			struct tquic_path *upd_path;
-
-			new_max = consumed + conn->max_data_local;
-			spin_lock_bh(&conn->lock);
-			conn->max_data_local = new_max;
-			spin_unlock_bh(&conn->lock);
-
-			rcu_read_lock();
-			upd_path = rcu_dereference(conn->active_path);
-			if (upd_path) {
+		rcu_read_lock();
+		upd_path = rcu_dereference(conn->active_path);
+		if (upd_path) {
+			if (send_conn_update)
 				tquic_flow_send_max_data(conn, upd_path,
-							 new_max);
-			}
-			rcu_read_unlock();
+							 new_conn_max);
+			if (send_stream_update)
+				tquic_flow_send_max_stream_data(conn, upd_path,
+								stream->id,
+								new_stream_max);
 		}
+		rcu_read_unlock();
 	}
 
 out_release:

@@ -628,6 +628,7 @@ struct tquic_stream {
 
 	u64 send_offset;
 	u64 recv_offset;
+	u64 recv_consumed;	/* Bytes consumed by application (for FC) */
 	u64 max_send_data;
 	u64 max_recv_data;
 	struct tquic_fc_stream_state *fc;
@@ -2408,6 +2409,9 @@ int tquic_send_ack(struct tquic_connection *conn, struct tquic_path *path,
 		   u64 largest_ack, u64 ack_delay, u64 ack_range);
 int tquic_flow_send_max_data(struct tquic_connection *conn,
 			     struct tquic_path *path, u64 max_data);
+int tquic_flow_send_max_stream_data(struct tquic_connection *conn,
+				    struct tquic_path *path,
+				    u64 stream_id, u64 max_data);
 int tquic_send_connection_close(struct tquic_connection *conn,
 				u64 error_code, const char *reason);
 int tquic_output_flush(struct tquic_connection *conn);
