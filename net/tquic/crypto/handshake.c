@@ -1199,15 +1199,15 @@ static int tquic_hs_build_ch_extensions(struct tquic_handshake *hs,
 	*p++ = (TLS_SIG_RSA_PKCS1_SHA256 >> 8) & 0xff;
 	*p++ = TLS_SIG_RSA_PKCS1_SHA256 & 0xff;
 
-	/* Key Share extension (40 bytes: 8 header + 32 key) */
-	if (p + 40 > buf + buf_len)
+	/* Key Share extension (42 bytes: 4 hdr + 2 list_len + 2 group + 2 key_len + 32 key) */
+	if (p + 42 > buf + buf_len)
 		return -ENOSPC;
 	*p++ = (TLS_EXT_KEY_SHARE >> 8) & 0xff;
 	*p++ = TLS_EXT_KEY_SHARE & 0xff;
 	*p++ = 0;
-	*p++ = 36;  /* Extension data length for X25519 */
+	*p++ = 38;  /* Extension data length: 2 + 2 + 2 + 32 = 38 */
 	*p++ = 0;
-	*p++ = 34;  /* Key shares list length */
+	*p++ = 36;  /* Key shares list length: 2 + 2 + 32 = 36 */
 	*p++ = (TLS_GROUP_X25519 >> 8) & 0xff;
 	*p++ = TLS_GROUP_X25519 & 0xff;
 	*p++ = 0;
