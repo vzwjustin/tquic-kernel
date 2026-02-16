@@ -1614,10 +1614,17 @@ static int tquic_process_max_data_frame(struct tquic_rx_ctx *ctx)
 
 	tquic_dbg("process_max_data: new limit=%llu\n", max_data);
 
-	/* Update remote's max data limit */
+	/* Update remote's max data limit (only increase, per RFC 9000) */
 	spin_lock_bh(&ctx->conn->lock);
-	ctx->conn->max_data_remote = max(ctx->conn->max_data_remote, max_data);
-	spin_unlock_bh(&ctx->conn->lock);
+	if (max_data > ctx->conn->max_data_remote) {
+		ctx->conn->max_data_remote = max_data;
+
+		/* Try to flush any data blocked by connection flow control */
+		spin_unlock_bh(&ctx->conn->lock);
+		tquic_output_flush(ctx->conn);
+	} else {
+		spin_unlock_bh(&ctx->conn->lock);
+	}
 
 	ctx->ack_eliciting = true;
 
@@ -1654,8 +1661,32 @@ static int tquic_process_max_stream_data_frame(struct tquic_rx_ctx *ctx)
 	tquic_dbg("process_max_stream_data: stream=%llu limit=%llu\n",
 		  stream_id, max_data);
 
-	/* Find stream and update limit */
-	/* Simplified: lookup omitted */
+	/* Look up stream and update its send-side flow control limit */
+	spin_lock_bh(&ctx->conn->lock);
+	{
+		struct rb_node *node = ctx->conn->streams.rb_node;
+
+		while (node) {
+			struct tquic_stream *s = rb_entry(node,
+							  struct tquic_stream,
+							  node);
+
+			if (stream_id < s->id) {
+				node = node->rb_left;
+			} else if (stream_id > s->id) {
+				node = node->rb_right;
+			} else {
+				/* Only increase, never decrease (RFC 9000) */
+				if (max_data > s->max_send_data) {
+					s->max_send_data = max_data;
+					s->blocked = false;
+					wake_up_interruptible(&s->wait);
+				}
+				break;
+			}
+		}
+	}
+	spin_unlock_bh(&ctx->conn->lock);
 
 	ctx->ack_eliciting = true;
 
