@@ -514,6 +514,16 @@ static int tquic_derive_initial_keys_versioned(struct tquic_crypto_state *crypto
 	if (ret)
 		goto out_zeroize;
 
+	pr_warn("tquic_derive_initial: read_hp_key=%*phN write_hp_key=%*phN\n",
+		min_t(int, read_keys->key_len, 16), read_keys->hp_key,
+		min_t(int, write_keys->key_len, 16), write_keys->hp_key);
+	pr_warn("tquic_derive_initial: read_key=%*phN write_key=%*phN\n",
+		min_t(int, read_keys->key_len, 16), read_keys->key,
+		min_t(int, write_keys->key_len, 16), write_keys->key);
+	pr_warn("tquic_derive_initial: read_iv=%*phN write_iv=%*phN\n",
+		min_t(int, read_keys->iv_len, 12), read_keys->iv,
+		min_t(int, write_keys->iv_len, 12), write_keys->iv);
+
 	ret = 0;
 
 out_zeroize:
@@ -697,8 +707,16 @@ int tquic_decrypt_packet(struct tquic_crypto_state *crypto,
 
 	aead_request_free(req);
 
-	if (ret == 0)
+	if (ret == 0) {
 		*out_len = payload_len - 16;  /* Remove auth tag */
+		/*
+		 * AEAD decrypts in-place into the payload scatterlist.
+		 * Copy the plaintext to the caller's output buffer so
+		 * the original packet data is preserved and the caller
+		 * reads from the expected decrypted buffer.
+		 */
+		memcpy(out, payload, *out_len);
+	}
 
 out_zeroize:
 	memzero_explicit(nonce, sizeof(nonce));
