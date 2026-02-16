@@ -3672,9 +3672,15 @@ int tquic_udp_recv(struct sock *sk, struct sk_buff *skb)
 	 * 2. Per-IP rate limit check (rate_limit.h)
 	 * 3. Advanced checks with cookie support (tquic_ratelimit.h)
 	 */
+	pr_warn("tquic_udp_recv: pre-ratelimit len=%zu data[0]=0x%02x longform=%d\n",
+		len, data[0], !!(data[0] & TQUIC_HEADER_FORM_LONG));
+
 	if (len >= 7 && (data[0] & TQUIC_HEADER_FORM_LONG)) {
 		/* Long header - check if this is an Initial packet */
 		int pkt_type = (data[0] & 0x30) >> 4;
+
+		pr_warn("tquic_udp_recv: long hdr pkt_type=%d (Initial=%d)\n",
+			pkt_type, TQUIC_PKT_INITIAL);
 
 		if (pkt_type == TQUIC_PKT_INITIAL) {
 			enum tquic_rl_action action;
@@ -3720,10 +3726,15 @@ int tquic_udp_recv(struct sock *sk, struct sk_buff *skb)
 					return -EBUSY;
 				}
 
+				pr_warn("tquic_udp_recv: dcid_len=%u offset=%zu, parsing SCID\n",
+					dcid_len, offset);
+
 				if (offset < len) {
 					scid_len = data[offset];
 					if (scid_len > TQUIC_MAX_CID_LEN ||
 					    offset + 1 + scid_len > len) {
+						pr_warn("tquic_udp_recv: SCID len invalid (%u)\n",
+							scid_len);
 						kfree_skb(skb);
 						return -EINVAL;
 					}
@@ -3817,6 +3828,9 @@ int tquic_udp_recv(struct sock *sk, struct sk_buff *skb)
 		}
 	}
 
+	pr_warn("tquic_udp_recv: past ratelimit block, conn=%p data[0]=0x%02x\n",
+		conn, data[0]);
+
 	/* Check for stateless reset (received from peer) */
 	if (len < TQUIC_STATELESS_RESET_MIN_LEN)
 		goto not_reset;
@@ -3837,8 +3851,14 @@ int tquic_udp_recv(struct sock *sk, struct sk_buff *skb)
 	}
 
 not_reset:
+	pr_warn("tquic_udp_recv: at not_reset, version bytes: %02x%02x%02x%02x\n",
+		len > 1 ? data[1] : 0, len > 2 ? data[2] : 0,
+		len > 3 ? data[3] : 0, len > 4 ? data[4] : 0);
+
 	/* Check for version negotiation */
 	if (unlikely(tquic_is_version_negotiation(data, len))) {
+		pr_warn("tquic_udp_recv: version negotiation detected (version=0x%08x), conn=%p\n",
+			len >= 5 ? get_unaligned_be32(data + 1) : 0, conn);
 		/* Need connection context */
 		if (len > 6) {
 			u8 dcid_len = data[5];

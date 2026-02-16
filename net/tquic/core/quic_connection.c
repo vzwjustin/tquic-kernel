@@ -568,7 +568,8 @@ struct tquic_connection *tquic_conn_create(struct tquic_sock *tsk,
 	conn->tsk = tsk;
 	spin_lock_init(&conn->lock);
 	conn->state = TQUIC_CONN_IDLE;
-	conn->version = tsk->config.version;
+	conn->version = tsk->config.version ? tsk->config.version
+					     : TQUIC_VERSION_1;
 	conn->is_server = is_server;
 
 	/* Generate source connection ID */
