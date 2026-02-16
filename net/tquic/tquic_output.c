@@ -1588,6 +1588,8 @@ static enum hrtimer_restart tquic_pacing_timer(struct hrtimer *timer)
 							 struct tquic_pacing_state,
 							 timer);
 
+	tquic_dbg("pacing_timer: fired, scheduling work\n");
+
 	/* Schedule work to send packets */
 	schedule_work(&pacing->work);
 
@@ -1608,6 +1610,9 @@ static void tquic_pacing_work(struct work_struct *work)
 	ktime_t gap;
 	int sent = 0;
 	int batch_count = 0;
+
+	tquic_dbg("pacing_work: queue_len=%u rate=%llu\n",
+		  skb_queue_len(&pacing->queue), pacing->pacing_rate);
 
 	__skb_queue_head_init(&batch);
 
@@ -1676,6 +1681,9 @@ static void tquic_pacing_work(struct work_struct *work)
  */
 int tquic_pacing_send(struct tquic_pacing_state *pacing, struct sk_buff *skb)
 {
+	tquic_dbg("pacing_send: skb_len=%u timer_active=%d\n",
+		  skb ? skb->len : 0, pacing->timer_active);
+
 	spin_lock_bh(&pacing->lock);
 
 	/* Add to pacing queue */
@@ -2717,6 +2725,8 @@ EXPORT_SYMBOL_GPL(tquic_output_flush_crypto);
  */
 void tquic_datagram_init(struct tquic_connection *conn)
 {
+	tquic_dbg("datagram_init: conn=%p\n", conn);
+
 	if (!conn)
 		return;
 
@@ -2744,6 +2754,8 @@ EXPORT_SYMBOL_GPL(tquic_datagram_init);
 void tquic_datagram_cleanup(struct tquic_connection *conn)
 {
 	unsigned long flags;
+
+	tquic_dbg("datagram_cleanup: conn=%p\n", conn);
 
 	if (!conn)
 		return;
@@ -2776,6 +2788,9 @@ u64 tquic_datagram_max_size(struct tquic_connection *conn)
 	struct tquic_path *path;
 	u64 max_size;
 	u64 overhead;
+
+	tquic_dbg("datagram_max_size: conn=%p enabled=%d\n",
+		  conn, conn ? conn->datagram.enabled : 0);
 
 	if (!conn || !conn->datagram.enabled)
 		return 0;
@@ -2811,6 +2826,7 @@ u64 tquic_datagram_max_size(struct tquic_connection *conn)
 	    conn->datagram.max_send_size < max_size)
 		max_size = conn->datagram.max_send_size;
 
+	tquic_dbg("datagram_max_size: result=%llu\n", max_size);
 	return max_size;
 }
 EXPORT_SYMBOL_GPL(tquic_datagram_max_size);
@@ -3020,6 +3036,9 @@ static int tquic_datagram_wait_data(struct tquic_connection *conn, long *timeo)
 	struct sock *sk = conn->sk;
 	int ret;
 
+	tquic_dbg("datagram_wait_data: conn=%p timeo=%ld\n",
+		  conn, *timeo);
+
 	/*
 	 * Wait for one of:
 	 *   - Datagram available in receive queue
@@ -3069,6 +3088,7 @@ static int tquic_datagram_wait_data(struct tquic_connection *conn, long *timeo)
 		return -ENOTCONN;
 
 	/* Data should be available now */
+	tquic_dbg("datagram_wait_data: data available\n");
 	return 0;
 }
 
@@ -3191,6 +3211,7 @@ u32 tquic_datagram_queue_len(struct tquic_connection *conn)
 	len = conn->datagram.recv_queue_len;
 	spin_unlock_irqrestore(&conn->datagram.lock, flags);
 
+	tquic_dbg("datagram_queue_len: len=%u\n", len);
 	return len;
 }
 EXPORT_SYMBOL_GPL(tquic_datagram_queue_len);
@@ -3209,11 +3230,15 @@ EXPORT_SYMBOL_GPL(tquic_datagram_queue_len);
  */
 int __init tquic_output_tx_init(void)
 {
+	tquic_dbg("output_tx_init: creating frame slab cache\n");
+
 	tquic_frame_cache = kmem_cache_create("tquic_pending_frame",
 					      sizeof(struct tquic_pending_frame),
 					      0, SLAB_HWCACHE_ALIGN, NULL);
 	if (!tquic_frame_cache)
 		return -ENOMEM;
+
+	tquic_dbg("output_tx_init: frame cache created\n");
 	return 0;
 }
 

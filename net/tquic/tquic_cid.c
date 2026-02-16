@@ -1195,6 +1195,8 @@ static void tquic_cid_rotation_timer_cb(struct timer_list *t)
 {
 	struct tquic_cid_pool *pool = from_timer(pool, t, rotation_timer);
 
+	tquic_dbg("cid:rotation_timer_cb: timer-based rotation triggered\n");
+
 	if (pool && pool->rotation_enabled)
 		schedule_work(&pool->rotation_work);
 }
@@ -1207,6 +1209,8 @@ static void tquic_cid_rotation_timer_cb(struct timer_list *t)
 void tquic_cid_set_rotation_enabled(struct tquic_connection *conn, bool enabled)
 {
 	struct tquic_cid_pool *pool;
+
+	tquic_dbg("cid:set_rotation_enabled: enabled=%d\n", enabled);
 
 	if (!conn || !conn->cid_pool)
 		return;
@@ -1221,9 +1225,11 @@ void tquic_cid_set_rotation_enabled(struct tquic_connection *conn, bool enabled)
 		/* Start rotation timer */
 		mod_timer(&pool->rotation_timer,
 			  jiffies + msecs_to_jiffies(TQUIC_CID_ROTATION_MS));
+		tquic_dbg("cid:set_rotation_enabled: rotation timer started\n");
 	} else {
 		/* Stop rotation timer */
 		del_timer(&pool->rotation_timer);
+		tquic_dbg("cid:set_rotation_enabled: rotation timer stopped\n");
 	}
 }
 
@@ -1280,6 +1286,7 @@ u64 tquic_cid_get_next_seq(struct tquic_connection *conn)
 	seq = pool->next_seq++;
 	spin_unlock_bh(&pool->lock);
 
+	tquic_dbg("cid:get_next_seq: allocated seq=%llu\n", seq);
 	return seq;
 }
 
@@ -1303,6 +1310,7 @@ u64 tquic_cid_get_retire_prior_to(struct tquic_connection *conn)
 	retire_prior_to = pool->retire_prior_to;
 	spin_unlock_bh(&pool->lock);
 
+	tquic_dbg("cid:get_retire_prior_to: value=%llu\n", retire_prior_to);
 	return retire_prior_to;
 }
 

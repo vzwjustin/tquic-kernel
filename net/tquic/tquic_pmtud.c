@@ -176,6 +176,9 @@ static u32 tquic_pmtud_get_interface_mtu(struct tquic_path *path)
 	if (!path)
 		return mtu;
 
+	tquic_dbg("tquic_pmtud_get_interface_mtu: path_id=%u family=%u\n",
+		  path->path_id, path->remote_addr.ss_family);
+
 	/* Determine IP overhead based on address family */
 	if (path->remote_addr.ss_family == AF_INET6)
 		overhead = TQUIC_IPV6_UDP_OVERHEAD;
@@ -239,6 +242,9 @@ static u32 tquic_pmtud_get_interface_mtu(struct tquic_path *path)
 
 	/* Clamp to absolute limits */
 	mtu = clamp(mtu, TQUIC_BASE_PLPMTU, TQUIC_MAX_PLPMTU_ABSOLUTE);
+
+	tquic_dbg("tquic_pmtud_get_interface_mtu: path_id=%u resolved mtu=%u\n",
+		  path->path_id, mtu);
 
 	return mtu;
 }
@@ -366,6 +372,9 @@ static u32 tquic_pmtud_calc_next_probe_size(struct tquic_pmtud_state_info *pmtud
 {
 	u32 mid;
 
+	tquic_dbg("tquic_pmtud_calc_next_probe_size: low=%u high=%u\n",
+		  pmtud->search_low, pmtud->search_high);
+
 	/* Binary search: probe the midpoint (overflow-safe calculation) */
 	mid = pmtud->search_low + (pmtud->search_high - pmtud->search_low) / 2;
 
@@ -374,6 +383,8 @@ static u32 tquic_pmtud_calc_next_probe_size(struct tquic_pmtud_state_info *pmtud
 
 	/* Ensure within bounds */
 	mid = clamp(mid, pmtud->search_low + 1, pmtud->search_high);
+
+	tquic_dbg("tquic_pmtud_calc_next_probe_size: next_probe=%u\n", mid);
 
 	return mid;
 }
@@ -720,6 +731,9 @@ void tquic_pmtud_on_packet_loss(struct tquic_path *path, u32 pkt_size)
 	if (!pmtud)
 		return;
 
+	tquic_dbg("tquic_pmtud_on_packet_loss: path_id=%u pkt_size=%u black_hole_count=%u\n",
+		  path->path_id, pkt_size, pmtud->black_hole_count);
+
 	spin_lock_bh(&pmtud->lock);
 
 	pmtud->black_hole_count++;
@@ -770,6 +784,9 @@ void tquic_pmtud_on_ack(struct tquic_path *path, u32 pkt_size)
 	if (!pmtud)
 		return;
 
+	tquic_dbg("tquic_pmtud_on_ack: path_id=%u pkt_size=%u resetting black_hole_count\n",
+		  path->path_id, pkt_size);
+
 	spin_lock_bh(&pmtud->lock);
 	pmtud->black_hole_count = 0;
 	spin_unlock_bh(&pmtud->lock);
@@ -789,6 +806,9 @@ EXPORT_SYMBOL_GPL(tquic_pmtud_on_ack);
 static void tquic_pmtud_timer_expired(struct timer_list *t)
 {
 	struct tquic_pmtud_state_info *pmtud = from_timer(pmtud, t, timer);
+
+	tquic_dbg("tquic_pmtud_timer_expired: state=%d probe_pending=%d\n",
+		  pmtud->state, pmtud->probe_pending);
 
 	/* Schedule work to handle timeout in process context */
 	queue_work(tquic_pmtud_wq, &pmtud->work);
@@ -1013,15 +1033,21 @@ void tquic_pmtud_on_probe_lost(struct tquic_path *path, u64 pkt_num)
 	if (!pmtud)
 		return;
 
+	tquic_dbg("tquic_pmtud_on_probe_lost: path_id=%u pkt_num=%llu\n",
+		  path->path_id, pkt_num);
+
 	spin_lock_bh(&pmtud->lock);
 
 	/* Verify this is the probe we're waiting for */
 	if (!pmtud->probe_pending || pmtud->probe_pkt_num != pkt_num) {
 		spin_unlock_bh(&pmtud->lock);
+		tquic_dbg("tquic_pmtud_on_probe_lost: pkt_num mismatch or no probe pending\n");
 		return;
 	}
 
 	spin_unlock_bh(&pmtud->lock);
+
+	tquic_dbg("tquic_pmtud_on_probe_lost: probe lost, invoking failure handler\n");
 
 	/* Handle failed probe */
 	tquic_pmtud_probe_failed(pmtud);
@@ -1036,10 +1062,17 @@ EXPORT_SYMBOL_GPL(tquic_pmtud_on_probe_lost);
  */
 u32 tquic_pmtud_get_mtu(struct tquic_path *path)
 {
+	u32 mtu;
+
 	if (!path)
 		return TQUIC_BASE_PLPMTU;
 
-	return READ_ONCE(path->mtu);
+	mtu = READ_ONCE(path->mtu);
+
+	tquic_dbg("tquic_pmtud_get_mtu: path_id=%u mtu=%u\n",
+		  path->path_id, mtu);
+
+	return mtu;
 }
 EXPORT_SYMBOL_GPL(tquic_pmtud_get_mtu);
 

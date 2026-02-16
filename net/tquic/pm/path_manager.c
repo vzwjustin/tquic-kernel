@@ -1966,9 +1966,12 @@ int tquic_pm_coordinate_preferred_and_additional(struct tquic_connection *conn)
 	struct tquic_pref_addr_migration *pref_migration;
 	struct tquic_additional_addresses *remote_addrs;
 	enum tquic_pref_addr_state pref_state;
+	int ret;
 
 	if (!conn)
 		return 0;
+
+	tquic_dbg("tquic_pm_coordinate_preferred_and_additional: evaluating migration options\n");
 
 	/* Check preferred address state */
 	pref_migration = conn->preferred_addr;
@@ -1976,12 +1979,16 @@ int tquic_pm_coordinate_preferred_and_additional(struct tquic_connection *conn)
 		pref_state = pref_migration->state;
 
 		/* Prefer preferred_address if available and not yet tried */
-		if (pref_state == TQUIC_PREF_ADDR_AVAILABLE)
+		if (pref_state == TQUIC_PREF_ADDR_AVAILABLE) {
+			tquic_dbg("tquic_pm_coordinate_preferred_and_additional: using preferred address\n");
 			return 1; /* Use preferred address */
+		}
 
 		/* If preferred address is validating, wait for it */
-		if (pref_state == TQUIC_PREF_ADDR_VALIDATING)
+		if (pref_state == TQUIC_PREF_ADDR_VALIDATING) {
+			tquic_dbg("tquic_pm_coordinate_preferred_and_additional: preferred address validating\n");
 			return 1;
+		}
 
 		/* Preferred address already migrated or failed */
 	}
@@ -2002,9 +2009,13 @@ int tquic_pm_coordinate_preferred_and_additional(struct tquic_connection *conn)
 		}
 		spin_unlock_bh(&remote_addrs->lock);
 
-		if (has_validated || has_active)
+		if (has_validated || has_active) {
+			tquic_dbg("tquic_pm_coordinate_preferred_and_additional: using additional addresses\n");
 			return 2; /* Use additional addresses */
+		}
 	}
+
+	tquic_dbg("tquic_pm_coordinate_preferred_and_additional: no migration option available\n");
 
 	return 0; /* No migration option available */
 }

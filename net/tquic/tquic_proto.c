@@ -587,6 +587,8 @@ static int tquic_create_socket(struct net *net, struct socket *sock,
 /* Socket release helpers */
 static int tquic_inet_release(struct socket *sock)
 {
+	tquic_dbg("tquic_inet_release: sock=%p sk=%p\n", sock, sock->sk);
+
 	if (!sock->sk)
 		return 0;
 
@@ -596,6 +598,8 @@ static int tquic_inet_release(struct socket *sock)
 #if IS_ENABLED(CONFIG_IPV6)
 static int tquic_inet6_release(struct socket *sock)
 {
+	tquic_dbg("tquic_inet6_release: sock=%p sk=%p\n", sock, sock->sk);
+
 	if (!sock->sk)
 		return 0;
 
@@ -900,6 +904,8 @@ static int tquic_net_sysctl_register(struct net *net)
 	struct ctl_table *table;
 	int i;
 
+	tquic_dbg("tquic_net_sysctl_register: net=%p\n", net);
+
 	/*
 	 * Avoid duplicate sysctl registration in init_net since the global
 	 * sysctl table is already registered via tquic_sysctl.c.
@@ -932,6 +938,7 @@ static int tquic_net_sysctl_register(struct net *net)
 		return -ENOMEM;
 	}
 
+	tquic_dbg("tquic_net_sysctl_register: ret=0\n");
 	return 0;
 }
 

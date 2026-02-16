@@ -35,6 +35,7 @@
 #include <net/addrconf.h>
 
 #include "../tquic_compat.h"
+#include "../tquic_debug.h"
 
 #include "tquic_bonding.h"
 #include "tquic_bpm.h"
@@ -381,6 +382,7 @@ static inline bool tquic_addr_equal(const struct tquic_addr_info *a,
 static void tquic_addr_from_sockaddr(struct tquic_addr_info *info,
 				     const struct sockaddr *addr)
 {
+	tquic_dbg("addr_from_sockaddr: family=%u\n", addr->sa_family);
 	memset(info, 0, sizeof(*info));
 
 	if (addr->sa_family == AF_INET) {
@@ -401,6 +403,7 @@ static void tquic_addr_from_sockaddr(struct tquic_addr_info *info,
 static void __maybe_unused tquic_addr_to_sockaddr(
 	const struct tquic_addr_info *info, struct sockaddr_storage *addr)
 {
+	tquic_dbg("addr_to_sockaddr: family=%u\n", info->family);
 	memset(addr, 0, sizeof(*addr));
 
 	if (info->family == AF_INET) {
@@ -429,6 +432,8 @@ static void __maybe_unused tquic_addr_to_sockaddr(
 
 static void tquic_cc_init(struct tquic_bpm_path_cc *cc)
 {
+	tquic_dbg("cc_init: cwnd=%u ssthresh=%u\n",
+		  TQUIC_INITIAL_CWND, TQUIC_INITIAL_SSTHRESH);
 	cc->cwnd = TQUIC_INITIAL_CWND;
 	cc->ssthresh = TQUIC_INITIAL_SSTHRESH;
 	cc->bytes_in_flight = 0;
@@ -445,6 +450,9 @@ static void __maybe_unused tquic_cc_on_ack(struct tquic_bpm_path *path,
 					   u32 bytes_acked)
 {
 	struct tquic_bpm_path_cc *cc = &path->cc;
+
+	tquic_dbg("cc_on_ack: path=%u acked=%u cwnd=%u\n",
+		  path->path_id, bytes_acked, cc->cwnd);
 
 	spin_lock_bh(&path->cc_lock);
 
@@ -484,6 +492,9 @@ static void __maybe_unused tquic_cc_on_loss(struct tquic_bpm_path *path,
 					    u32 bytes_lost)
 {
 	struct tquic_bpm_path_cc *cc = &path->cc;
+
+	tquic_dbg("cc_on_loss: path=%u lost=%u cwnd=%u\n",
+		  path->path_id, bytes_lost, cc->cwnd);
 
 	spin_lock_bh(&path->cc_lock);
 

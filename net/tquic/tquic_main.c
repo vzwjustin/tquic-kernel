@@ -126,6 +126,8 @@ void tquic_conn_destroy(struct tquic_connection *conn)
 	struct tquic_path *path, *tmp_path;
 	struct rb_node *node;
 
+	tquic_dbg("tquic_conn_destroy: conn=%p\n", conn);
+
 	if (!conn)
 		return;
 
@@ -304,16 +306,23 @@ static int tquic_conn_alloc_path_id_locked(struct tquic_connection *conn)
 	struct tquic_path *path;
 	u32 id;
 
+	tquic_conn_dbg(conn, "alloc_path_id_locked: num_paths=%u\n",
+		       conn->num_paths);
+
 	list_for_each_entry(path, &conn->paths, list) {
 		if (path->path_id < TQUIC_MAX_PATHS)
 			used[path->path_id] = true;
 	}
 
 	for (id = 0; id < TQUIC_MAX_PATHS; id++) {
-		if (!used[id])
+		if (!used[id]) {
+			tquic_conn_dbg(conn, "alloc_path_id_locked: ret=%u\n",
+				       id);
 			return id;
+		}
 	}
 
+	tquic_conn_dbg(conn, "alloc_path_id_locked: ret=-ENOSPC\n");
 	return -ENOSPC;
 }
 
@@ -656,6 +665,8 @@ void tquic_pm_conn_release(struct tquic_connection *conn)
 	struct net *net;
 	struct tquic_net *tn;
 
+	tquic_dbg("tquic_pm_conn_release: conn=%p\n", conn);
+
 	if (!conn || !conn->pm)
 		return;
 
@@ -881,6 +892,9 @@ void tquic_stream_close(struct tquic_stream *stream)
 {
 	struct tquic_connection *conn;
 	bool removed = false;
+
+	tquic_dbg("tquic_stream_close: stream=%p id=%llu\n",
+		  stream, stream ? stream->id : 0);
 
 	if (!stream)
 		return;

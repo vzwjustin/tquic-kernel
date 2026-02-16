@@ -113,6 +113,8 @@ static bool tquic_addr_match(const struct sockaddr_storage *addr,
  */
 static int tquic_token_encode_varint(u8 *buf, size_t buf_len, u64 val)
 {
+	tquic_dbg("token:encode_varint: val=%llu buf_len=%zu\n", val, buf_len);
+
 	if (val <= 63) {
 		if (buf_len < 1)
 			return -ENOSPC;
@@ -154,6 +156,8 @@ static int tquic_token_decode_varint(const u8 *buf, size_t buf_len, u64 *val)
 {
 	u8 prefix;
 	int len;
+
+	tquic_dbg("token:decode_varint: buf_len=%zu\n", buf_len);
 
 	if (buf_len < 1)
 		return -EINVAL;

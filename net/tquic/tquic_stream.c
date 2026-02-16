@@ -1601,12 +1601,19 @@ static struct tquic_stream *tquic_stream_lookup_by_id(
  */
 static int tquic_stream_count_by_type(struct tquic_connection *conn, u8 type)
 {
+	int count;
+
+	tquic_dbg("tquic_stream_count_by_type: type=%u\n", type);
+
 	if (!conn)
 		return 0;
 
 	/* Use O(1) per-type counters for known HTTP/3 stream types */
-	if (type < TQUIC_H3_STREAM_TYPE_MAX)
-		return conn->h3_uni_stream_count[type];
+	if (type < TQUIC_H3_STREAM_TYPE_MAX) {
+		count = conn->h3_uni_stream_count[type];
+		tquic_dbg("tquic_stream_count_by_type: ret=%d\n", count);
+		return count;
+	}
 
 	return 0;
 }
