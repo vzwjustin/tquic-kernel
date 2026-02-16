@@ -991,6 +991,7 @@ void tquic_bond_cleanup(struct tquic_bond_state *bond)
 	if (!bond)
 		return;
 
+	tquic_dbg("bond_cleanup: freeing bonding state mode=%u\n", bond->mode);
 	skb_queue_purge(&bond->reorder_queue);
 	kfree(bond);
 }
@@ -1052,6 +1053,8 @@ int tquic_bond_get_stats(struct tquic_connection *conn,
 			 struct tquic_bond_stats *stats)
 {
 	struct tquic_bond_state *bond = conn->scheduler;
+
+	tquic_dbg("bond_get_stats: retrieving bonding statistics\n");
 
 	if (!bond || !stats)
 		return -EINVAL;

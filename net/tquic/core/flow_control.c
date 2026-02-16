@@ -1535,6 +1535,9 @@ int tquic_fc_reserve_credit(struct tquic_fc_state *fc,
 	if (!fc || !stream)
 		return -EINVAL;
 
+	tquic_dbg("tquic_fc_reserve_credit: stream=%llu bytes=%llu\n",
+		  stream->stream_id, bytes);
+
 	tquic_fc_get_credit(fc, stream, &credit);
 
 	if (bytes > credit.effective_credit)
@@ -1872,6 +1875,9 @@ void tquic_fc_autotune(struct tquic_fc_state *fc)
 
 	if (!fc || !fc->autotune.enabled)
 		return;
+
+	tquic_dbg("tquic_fc_autotune: growth_rate=%u\n",
+		  fc->autotune.growth_rate);
 
 	now = ktime_get();
 	elapsed_ms = ktime_ms_delta(now, fc->autotune.last_update);

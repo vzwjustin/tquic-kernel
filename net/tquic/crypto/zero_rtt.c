@@ -141,6 +141,9 @@ static const char *tquic_cipher_to_hash_name(u16 cipher_suite)
  */
 static u32 tquic_cipher_to_hash_len(u16 cipher_suite)
 {
+	tquic_dbg("tquic_cipher_to_hash_len: cipher_suite=0x%04x\n",
+		  cipher_suite);
+
 	switch (cipher_suite) {
 	case TLS_AES_128_GCM_SHA256:
 	case TLS_CHACHA20_POLY1305_SHA256:
@@ -157,6 +160,9 @@ static u32 tquic_cipher_to_hash_len(u16 cipher_suite)
  */
 static u32 tquic_cipher_to_key_len(u16 cipher_suite)
 {
+	tquic_dbg("tquic_cipher_to_key_len: cipher_suite=0x%04x\n",
+		  cipher_suite);
+
 	switch (cipher_suite) {
 	case TLS_AES_128_GCM_SHA256:
 		return 16;
@@ -330,6 +336,8 @@ static int ticket_cmp(const char *a, u8 a_len, const char *b, u8 b_len)
 	int len = min(a_len, b_len);
 	int cmp = memcmp(a, b, len);
 
+	tquic_dbg("ticket_cmp: a_len=%u b_len=%u\n", a_len, b_len);
+
 	if (cmp != 0)
 		return cmp;
 	return (int)a_len - (int)b_len;
@@ -412,6 +420,9 @@ static void ticket_free(struct tquic_zero_rtt_ticket *ticket)
 	if (!ticket)
 		return;
 
+	tquic_dbg("ticket_free: server_name_len=%u ticket_len=%u\n",
+		  ticket->server_name_len, ticket->ticket_len);
+
 	kfree_sensitive(ticket->ticket);
 	memzero_explicit(&ticket->plaintext, sizeof(ticket->plaintext));
 	kfree_sensitive(ticket);
@@ -423,6 +434,8 @@ static void ticket_free(struct tquic_zero_rtt_ticket *ticket)
 static void ticket_store_evict_oldest_locked(struct tquic_ticket_store *store)
 {
 	struct tquic_zero_rtt_ticket *oldest;
+
+	tquic_dbg("ticket_store_evict_oldest_locked: count=%u\n", store->count);
 
 	if (list_empty(&store->lru_list))
 		return;
@@ -446,6 +459,8 @@ static bool ticket_is_expired(struct tquic_zero_rtt_ticket *ticket)
 		return true;
 
 	age = now - ticket->plaintext.creation_time;
+	tquic_dbg("ticket_is_expired: age=%llu max_age=%u\n",
+		  age, ticket->plaintext.max_age);
 	return age > ticket->plaintext.max_age;
 }
 
@@ -563,6 +578,9 @@ void tquic_zero_rtt_put_ticket(struct tquic_zero_rtt_ticket *ticket)
 	if (!ticket)
 		return;
 
+	tquic_dbg("tquic_zero_rtt_put_ticket: refcount=%u\n",
+		  refcount_read(&ticket->refcount));
+
 	if (refcount_dec_and_test(&ticket->refcount))
 		ticket_free(ticket);
 }
@@ -574,6 +592,9 @@ void tquic_zero_rtt_remove_ticket(const char *server_name, u8 server_name_len)
 
 	if (!server_name || server_name_len == 0)
 		return;
+
+	tquic_dbg("tquic_zero_rtt_remove_ticket: server_name_len=%u\n",
+		  server_name_len);
 
 	spin_lock_bh(&global_ticket_store.lock);
 
@@ -767,6 +788,8 @@ int tquic_replay_filter_init(struct tquic_replay_filter *filter, u32 ttl_seconds
 	if (!filter)
 		return -EINVAL;
 
+	tquic_dbg("tquic_replay_filter_init: ttl_seconds=%u\n", ttl_seconds);
+
 	spin_lock_init(&filter->lock);
 	bitmap_zero(filter->bits, TQUIC_REPLAY_BLOOM_BITS);
 	filter->current_bucket = 0;
@@ -781,6 +804,8 @@ void tquic_replay_filter_cleanup(struct tquic_replay_filter *filter)
 {
 	if (!filter)
 		return;
+
+	tquic_dbg("tquic_replay_filter_cleanup: clearing bloom filter\n");
 
 	spin_lock_bh(&filter->lock);
 	bitmap_zero(filter->bits, TQUIC_REPLAY_BLOOM_BITS);

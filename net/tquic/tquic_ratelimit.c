@@ -1053,6 +1053,8 @@ int tquic_ratelimit_proc_show(struct seq_file *seq, void *v)
 	struct tquic_rl_state *state;
 	struct tquic_rl_stats *stats;
 
+	tquic_dbg("tquic_ratelimit_proc_show: rendering proc stats\n");
+
 	/*
 	 * This proc entry is opened via single_open(..., pde_data(inode)),
 	 * so seq->private carries the netns pointer.

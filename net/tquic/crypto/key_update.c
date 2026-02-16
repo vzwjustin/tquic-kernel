@@ -1044,6 +1044,8 @@ void tquic_key_update_on_packet_received(struct tquic_key_update_state *state)
 
 	spin_lock_irqsave(&state->lock, flags);
 	state->packets_received++;
+	tquic_dbg("tquic_key_update_on_packet_received: packets_received=%llu\n",
+		  state->packets_received);
 	spin_unlock_irqrestore(&state->lock, flags);
 }
 EXPORT_SYMBOL_GPL(tquic_key_update_on_packet_received);
@@ -1198,6 +1200,7 @@ u8 tquic_key_update_get_phase(struct tquic_key_update_state *state)
 	phase = state->current_phase;
 	spin_unlock_irqrestore(&state->lock, flags);
 
+	tquic_dbg("tquic_key_update_get_phase: phase=%u\n", phase);
 	return phase;
 }
 EXPORT_SYMBOL_GPL(tquic_key_update_get_phase);
