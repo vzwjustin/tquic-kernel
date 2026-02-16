@@ -1920,6 +1920,7 @@ int tquic_server_handshake(struct sock *listener_sk,
 			   struct sockaddr_storage *client_addr)
 {
 	struct tquic_sock *listen_tsk = tquic_sk(listener_sk);
+	struct socket *child_sock;
 	struct sock *child_sk;
 	struct tquic_sock *child_tsk;
 	struct tquic_connection *conn;
@@ -1935,15 +1936,28 @@ int tquic_server_handshake(struct sock *listener_sk,
 		return -ECONNREFUSED;
 	}
 
-	/* Create child socket for this connection */
+	/*
+	 * Create child socket for this connection.
+	 * sock_create_lite() provides the struct socket wrapper that
+	 * tls_server_hello_x509() requires via args.ta_sock.
+	 * We are in workqueue (process) context so GFP_KERNEL is safe.
+	 */
+	ret = sock_create_lite(listener_sk->sk_family, listener_sk->sk_type,
+			       listener_sk->sk_protocol, &child_sock);
+	if (ret) {
+		tquic_dbg("failed to create child socket wrapper\n");
+		return ret;
+	}
+
 	child_sk = sk_alloc(sock_net(listener_sk), listener_sk->sk_family,
 			    GFP_ATOMIC, listener_sk->sk_prot, true);
 	if (!child_sk) {
 		tquic_dbg("failed to allocate child socket\n");
+		sock_release(child_sock);
 		return -ENOMEM;
 	}
 
-	sock_init_data(NULL, child_sk);
+	sock_init_data(child_sock, child_sk);
 	child_tsk = tquic_sk(child_sk);
 
 	/* Initialize accept list node */
@@ -1957,7 +1971,10 @@ int tquic_server_handshake(struct sock *listener_sk,
 	conn = tquic_conn_create(child_tsk, true);
 		if (!conn) {
 			tquic_dbg("failed to create connection for child\n");
+			child_sk->sk_socket = NULL;
+			child_sock->sk = NULL;
 			sk_free(child_sk);
+			sock_release(child_sock);
 			return -ENOMEM;
 		}
 		write_lock_bh(&child_sk->sk_callback_lock);
@@ -2008,7 +2025,10 @@ int tquic_server_handshake(struct sock *listener_sk,
 			if (dstream)
 				tquic_stream_put(dstream);
 			tquic_conn_put(conn);
+			child_sk->sk_socket = NULL;
+			child_sock->sk = NULL;
 			sk_free(child_sk);
+			sock_release(child_sock);
 			return ret;
 		}
 
@@ -2029,7 +2049,10 @@ int tquic_server_handshake(struct sock *listener_sk,
 			if (dstream)
 				tquic_stream_put(dstream);
 			tquic_conn_put(conn);
+			child_sk->sk_socket = NULL;
+			child_sock->sk = NULL;
 			sk_free(child_sk);
+			sock_release(child_sock);
 			return -ENOMEM;
 		}
 
@@ -2069,7 +2092,10 @@ int tquic_server_handshake(struct sock *listener_sk,
 			if (dstream)
 				tquic_stream_put(dstream);
 			tquic_conn_put(conn);
+			child_sk->sk_socket = NULL;
+			child_sock->sk = NULL;
 			sk_free(child_sk);
+			sock_release(child_sock);
 			return ret;
 		}
 
