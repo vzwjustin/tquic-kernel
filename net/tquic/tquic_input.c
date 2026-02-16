@@ -3396,9 +3396,9 @@ static int tquic_process_packet(struct tquic_connection *conn,
 		u8 hp_pn_len = 0, hp_key_phase = 0;
 
 		pr_warn("process_pkt: HP removal: pkt_type=%d hdr_len=%zu "
-			"payload_len=%lu data[0]=0x%02x long=%d\n",
+			"payload_len=%zu data[0]=0x%02x long=%d\n",
 			pkt_type, ctx.offset,
-			(unsigned long)(len - ctx.offset),
+			len - ctx.offset,
 			data[0], ctx.is_long_header);
 
 		ret = tquic_remove_header_protection(conn, data, ctx.offset,
@@ -3479,9 +3479,9 @@ static int tquic_process_packet(struct tquic_connection *conn,
 		pn_space_idx = TQUIC_PN_SPACE_APPLICATION;
 
 	pr_warn("process_pkt: PN decode: pkt_type=%d pkt_num=%llu "
-		"pn_len=%d hdr_offset=%zu total_len=%lu\n",
+		"pn_len=%d hdr_offset=%zu total_len=%zu\n",
 		pkt_type, pkt_num, pkt_num_len, ctx.offset,
-		(unsigned long)len);
+		len);
 
 	if (conn && conn->pn_spaces)
 		largest_pn = READ_ONCE(
