@@ -24,6 +24,7 @@
 #include <linux/jiffies.h>
 #include <linux/ratelimit.h>
 #include <linux/unaligned.h>
+#include <linux/file.h>
 #include <net/sock.h>
 #include <net/handshake.h>
 #include <net/tquic.h>
@@ -1764,20 +1765,96 @@ static int tquic_conn_server_accept_init(struct tquic_connection *conn,
 static int tquic_start_server_handshake(struct sock *sk,
 					struct tquic_handshake_state *hs)
 {
-	struct socket *sock = sk->sk_socket;
-	struct tls_handshake_args args;
+	struct tquic_sock *tsk = tquic_sk(sk);
+	struct tquic_connection *conn;
+	struct tquic_handshake *ihs;
+	struct tquic_hs_transport_params tp;
+	int ret;
 
-	if (!sock)
-		return -ENOTCONN;
+	conn = tsk->conn;
+	pr_warn("tquic_start_server_hs: tsk=%p tsk->conn=%p sk=%p\n",
+		tsk, conn, sk);
+	if (!conn)
+		return -EINVAL;
 
-	memset(&args, 0, sizeof(args));
-	args.ta_sock = sock;
-	args.ta_done = tquic_server_handshake_done;
-	args.ta_data = sk;
-	args.ta_timeout_ms = hs->timeout_ms;
-	args.ta_keyring = TLS_NO_KEYRING;
+	pr_warn("tquic_start_server_hs: using inline TLS path (server)\n");
 
-	return tls_server_hello_x509(&args, GFP_ATOMIC);
+	/*
+	 * Initialize inline TLS 1.3 handshake in server mode.
+	 * QUIC embeds TLS messages in CRYPTO frames (RFC 9001),
+	 * so we cannot use the kernel tlshd framework which expects
+	 * TCP stream sockets.
+	 */
+	ihs = tquic_hs_init(true);
+	if (!ihs) {
+		pr_warn("tquic_start_server_hs: tquic_hs_init(server) failed\n");
+		return -ENOMEM;
+	}
+
+	/* Set ALPN - accept h3 for QUIC */
+	{
+		const char *alpn_protos[] = { "h3" };
+
+		ret = tquic_hs_set_alpn(ihs, alpn_protos, 1);
+		if (ret < 0) {
+			pr_warn("tquic_start_server_hs: set_alpn failed: %d\n", ret);
+			tquic_hs_cleanup(ihs);
+			return ret;
+		}
+	}
+
+	/* Configure server-side transport parameters */
+	memset(&tp, 0, sizeof(tp));
+	tp.max_idle_timeout = tsk->config.max_idle_timeout_ms;
+	tp.max_udp_payload_size = 65527;
+	tp.initial_max_data = tsk->config.initial_max_data;
+	tp.initial_max_stream_data_bidi_local =
+		tsk->config.initial_max_stream_data_bidi_local;
+	tp.initial_max_stream_data_bidi_remote =
+		tsk->config.initial_max_stream_data_bidi_remote;
+	tp.initial_max_stream_data_uni =
+		tsk->config.initial_max_stream_data_uni;
+	tp.initial_max_streams_bidi = tsk->config.initial_max_streams_bidi;
+	tp.initial_max_streams_uni = tsk->config.initial_max_streams_uni;
+	tp.ack_delay_exponent = tsk->config.ack_delay_exponent;
+	tp.max_ack_delay = tsk->config.max_ack_delay_ms;
+	tp.active_conn_id_limit = tsk->config.max_connection_ids;
+
+	/*
+	 * Set original DCID and server SCID for transport param encoding.
+	 *
+	 * Per RFC 9000 Section 18.2:
+	 * - original_destination_connection_id: The DCID from the client's
+	 *   first Initial packet. After tquic_conn_server_accept_init(),
+	 *   this is stored in conn->scid (client addressed us with it).
+	 * - initial_source_connection_id: The SCID the server uses in its
+	 *   first Initial packet. Currently this is also conn->scid since
+	 *   the server reuses the client's original DCID as its SCID.
+	 */
+	tp.original_dcid_len = conn->scid.len;
+	if (conn->scid.len > 0)
+		memcpy(tp.original_dcid, conn->scid.id, conn->scid.len);
+	tp.initial_scid_len = conn->scid.len;
+	if (conn->scid.len > 0)
+		memcpy(tp.initial_scid, conn->scid.id, conn->scid.len);
+
+	ret = tquic_hs_set_transport_params(ihs, &tp);
+	if (ret < 0) {
+		pr_warn("tquic_start_server_hs: set_tp failed: %d\n", ret);
+		tquic_hs_cleanup(ihs);
+		return ret;
+	}
+
+	/*
+	 * Store the inline handshake context on the socket.
+	 * The incoming ClientHello from the Initial packet will be
+	 * processed when tquic_inline_hs_recv_crypto() is called
+	 * from the CRYPTO frame handler in the input path.
+	 */
+	tsk->inline_hs = ihs;
+
+	pr_warn("tquic_start_server_hs: inline TLS server context initialized\n");
+	return 0;
 }
 
 /**
@@ -1800,8 +1877,11 @@ static void tquic_server_handshake_done(void *data, int status,
 	struct sock *listener_sk;
 	struct tquic_sock *listen_tsk;
 
+	pr_warn("tquic_hs_done: status=%d peerid=0x%x child_sk=%p conn=%p\n",
+		status, peerid, child_sk, conn);
+
 	if (!conn) {
-		tquic_dbg("server handshake callback with NULL conn\n");
+		pr_warn("tquic_hs_done: NULL conn!\n");
 		return;
 	}
 
@@ -1870,6 +1950,8 @@ static void tquic_server_handshake_done(void *data, int status,
 		}
 		} else {
 			/* Handshake failed - clean up child */
+			struct socket *csock;
+
 			tquic_dbg("server handshake failed: %d\n", status);
 			inet_sk_set_state(child_sk, TCP_CLOSE);
 			if (conn) {
@@ -1892,6 +1974,17 @@ static void tquic_server_handshake_done(void *data, int status,
 				if (dstream)
 					tquic_stream_put(dstream);
 				tquic_conn_put(conn);
+			}
+			/* Release the socket wrapper + file from sock_create_lite */
+			csock = child_sk->sk_socket;
+			if (csock && csock->file) {
+				child_sk->sk_socket = NULL;
+				csock->sk = NULL;
+				fput(csock->file);
+			} else if (csock) {
+				child_sk->sk_socket = NULL;
+				csock->sk = NULL;
+				sock_release(csock);
 			}
 			sock_put(child_sk);  /* Release reference */
 		}
@@ -1938,8 +2031,10 @@ int tquic_server_handshake(struct sock *listener_sk,
 
 	/*
 	 * Create child socket for this connection.
-	 * sock_create_lite() provides the struct socket wrapper that
-	 * tls_server_hello_x509() requires via args.ta_sock.
+	 * sock_create_lite() provides the struct socket wrapper and
+	 * sock_alloc_file() gives it a struct file backing - both are
+	 * required by the kernel TLS handshake framework
+	 * (handshake_req_submit checks sock->file != NULL).
 	 * We are in workqueue (process) context so GFP_KERNEL is safe.
 	 */
 	ret = sock_create_lite(listener_sk->sk_family, listener_sk->sk_type,
@@ -1949,11 +2044,24 @@ int tquic_server_handshake(struct sock *listener_sk,
 		return ret;
 	}
 
+	/*
+	 * Set ops from the listener so tlshd can call getsockname/getpeername.
+	 * Take a module reference since ops->owner == THIS_MODULE.
+	 */
+	child_sock->ops = listener_sk->sk_socket->ops;
+	__module_get(child_sock->ops->owner);
+
+	if (IS_ERR(sock_alloc_file(child_sock, O_NONBLOCK, NULL))) {
+		/* sock_alloc_file releases child_sock on failure */
+		tquic_dbg("failed to allocate file for child socket\n");
+		return -ENOMEM;
+	}
+
 	child_sk = sk_alloc(sock_net(listener_sk), listener_sk->sk_family,
 			    GFP_ATOMIC, listener_sk->sk_prot, true);
 	if (!child_sk) {
 		tquic_dbg("failed to allocate child socket\n");
-		sock_release(child_sock);
+		fput(child_sock->file);
 		return -ENOMEM;
 	}
 
@@ -1967,6 +2075,10 @@ int tquic_server_handshake(struct sock *listener_sk,
 	child_tsk->max_accept_queue = 0;
 	child_tsk->default_stream = NULL;
 
+	/* Inherit QUIC config from listener (version, transport params) */
+	memcpy(&child_tsk->config, &listen_tsk->config,
+	       sizeof(child_tsk->config));
+
 	/* Create connection for child (server-side) */
 	conn = tquic_conn_create(child_tsk, true);
 		if (!conn) {
@@ -1974,7 +2086,7 @@ int tquic_server_handshake(struct sock *listener_sk,
 			child_sk->sk_socket = NULL;
 			child_sock->sk = NULL;
 			sk_free(child_sk);
-			sock_release(child_sock);
+			fput(child_sock->file);
 			return -ENOMEM;
 		}
 		write_lock_bh(&child_sk->sk_callback_lock);
@@ -2028,7 +2140,7 @@ int tquic_server_handshake(struct sock *listener_sk,
 			child_sk->sk_socket = NULL;
 			child_sock->sk = NULL;
 			sk_free(child_sk);
-			sock_release(child_sock);
+			fput(child_sock->file);
 			return ret;
 		}
 
@@ -2052,7 +2164,7 @@ int tquic_server_handshake(struct sock *listener_sk,
 			child_sk->sk_socket = NULL;
 			child_sock->sk = NULL;
 			sk_free(child_sk);
-			sock_release(child_sock);
+			fput(child_sock->file);
 			return -ENOMEM;
 		}
 
@@ -2070,6 +2182,9 @@ int tquic_server_handshake(struct sock *listener_sk,
 	sock_hold(child_sk);
 
 	/* Initiate server TLS handshake */
+		pr_warn("tquic_server_handshake: before start_server_hs: "
+			"child_tsk=%p child_tsk->conn=%p child_sk=%p\n",
+			child_tsk, child_tsk->conn, child_sk);
 		ret = tquic_start_server_handshake(child_sk, hs);
 		pr_warn("tquic_server_handshake: start_server_handshake ret=%d\n", ret);
 		if (ret < 0) {
@@ -2095,11 +2210,56 @@ int tquic_server_handshake(struct sock *listener_sk,
 			child_sk->sk_socket = NULL;
 			child_sock->sk = NULL;
 			sk_free(child_sk);
-			sock_release(child_sock);
+			fput(child_sock->file);
 			return ret;
 		}
 
-	/* Handshake proceeds async; child added to accept queue on completion */
+	/*
+	 * === Initial packet processing ===
+	 *
+	 * Now that the inline TLS context is ready, we need to:
+	 * 1. Create a network path for sending the response
+	 * 2. Derive Initial crypto keys for decrypting the client packet
+	 * 3. Decrypt and process the Initial packet (extract ClientHello)
+	 * 4. Flush the crypto response (ServerHello) to the client
+	 */
+
+	/* Step 1: Create initial path for the child connection */
+	ret = tquic_conn_add_path(conn,
+				  (struct sockaddr *)&child_tsk->bind_addr,
+				  (struct sockaddr *)client_addr);
+	pr_warn("tquic_server_handshake: add_path ret=%d\n", ret);
+	if (ret < 0) {
+		pr_warn("tquic_server_handshake: add_path failed, "
+			"handshake will stall\n");
+		goto done_free_skb;
+	}
+
+	/* Step 2: Derive Initial crypto keys from client's original DCID */
+	conn->crypto_state = tquic_crypto_init_versioned(&conn->scid, true,
+							 conn->version);
+	if (!conn->crypto_state) {
+		pr_warn("tquic_server_handshake: crypto_init failed\n");
+		goto done_free_skb;
+	}
+	pr_warn("tquic_server_handshake: Initial crypto keys derived\n");
+
+	/* Step 3: Decrypt Initial packet and feed ClientHello to TLS */
+	ret = tquic_process_initial_for_server(conn, initial_pkt, client_addr);
+	pr_warn("tquic_server_handshake: process_initial ret=%d\n", ret);
+
+	/* Step 4: Flush ServerHello response to client */
+	if (ret >= 0) {
+		int flush_ret = tquic_output_flush_crypto(conn);
+
+		pr_warn("tquic_server_handshake: flush_crypto ret=%d\n",
+			flush_ret);
+	}
+
+done_free_skb:
+	/* Free the Initial packet SKB (fixes memory leak) */
+	kfree_skb(initial_pkt);
+
 	tquic_dbg("server handshake initiated for incoming connection\n");
 	return 0;
 }

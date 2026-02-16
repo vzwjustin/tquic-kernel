@@ -544,6 +544,11 @@ int tquic_client_copy_psk(const struct tquic_client *client, u8 *psk);
 int tquic_server_accept(struct sock *sk, struct sk_buff *skb,
 			struct sockaddr_storage *client_addr);
 
+/* Process Initial packet for new server connection (tquic_input.c) */
+int tquic_process_initial_for_server(struct tquic_connection *conn,
+				     struct sk_buff *skb,
+				     struct sockaddr_storage *src_addr);
+
 /* Server subsystem init/exit (tquic_server.c) */
 int __init tquic_server_init(void);
 void tquic_server_exit(void);
