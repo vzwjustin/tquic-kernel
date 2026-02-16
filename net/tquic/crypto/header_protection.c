@@ -257,14 +257,21 @@ static int tquic_hp_process_long_header(u8 *packet, size_t packet_len,
 	u8 pn_len;
 	int i;
 
-	/* Protect/unprotect first byte: XOR lower 4 bits with mask[0] */
-	packet[0] ^= (mask[0] & 0x0f);
-
-	/*
-	 * For protection: PN length was already encoded before HP
-	 * For unprotection: We can now read the PN length
-	 */
-	pn_len = tquic_hp_detect_pn_length(packet[0]);
+	if (protect) {
+		/*
+		 * Protection: read PN length from the clear first byte
+		 * BEFORE masking it, since masking changes the pn_len bits.
+		 */
+		pn_len = tquic_hp_detect_pn_length(packet[0]);
+		packet[0] ^= (mask[0] & 0x0f);
+	} else {
+		/*
+		 * Unprotection: unmask first byte FIRST so we can
+		 * read the true PN length from the recovered bits.
+		 */
+		packet[0] ^= (mask[0] & 0x0f);
+		pn_len = tquic_hp_detect_pn_length(packet[0]);
+	}
 
 	if (pn_offset + pn_len > packet_len)
 		return -EINVAL;
