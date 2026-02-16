@@ -1216,6 +1216,14 @@ static int tquic_process_ack_frame(struct tquic_rx_ctx *ctx)
 				tquic_cong_on_ack(ctx->path, bytes_acked,
 						  rtt_us);
 
+				/*
+				 * Update path stats so output_flush can
+				 * correctly compute in-flight bytes for
+				 * its cwnd check.
+				 */
+				ctx->path->stats.acked_bytes +=
+					bytes_acked;
+
 				/* Update RTT in CC algorithm */
 				tquic_cong_on_rtt(ctx->path, rtt_us);
 			}
@@ -1690,6 +1698,241 @@ static int tquic_process_max_stream_data_frame(struct tquic_rx_ctx *ctx)
 
 	ctx->ack_eliciting = true;
 
+	return 0;
+}
+
+/*
+ * Process RESET_STREAM frame (0x04)
+ *
+ * RFC 9000 Section 19.4: Peer abruptly terminates a stream.
+ * Fields: Stream ID, Application Protocol Error Code, Final Size.
+ */
+static int tquic_process_reset_stream_frame(struct tquic_rx_ctx *ctx)
+{
+	u64 stream_id, error_code, final_size;
+	int ret;
+
+	ctx->offset++;  /* Skip frame type */
+
+	ret = tquic_decode_varint(ctx->data + ctx->offset,
+				  ctx->len - ctx->offset, &stream_id);
+	if (ret < 0)
+		return ret;
+	ctx->offset += ret;
+
+	ret = tquic_decode_varint(ctx->data + ctx->offset,
+				  ctx->len - ctx->offset, &error_code);
+	if (ret < 0)
+		return ret;
+	ctx->offset += ret;
+
+	ret = tquic_decode_varint(ctx->data + ctx->offset,
+				  ctx->len - ctx->offset, &final_size);
+	if (ret < 0)
+		return ret;
+	ctx->offset += ret;
+
+	pr_debug("tquic: RESET_STREAM stream=%llu error=%llu final_size=%llu\n",
+		 stream_id, error_code, final_size);
+
+	/* Look up stream and mark as reset */
+	spin_lock_bh(&ctx->conn->lock);
+	{
+		struct rb_node *node = ctx->conn->streams.rb_node;
+
+		while (node) {
+			struct tquic_stream *s = rb_entry(node,
+							  struct tquic_stream,
+							  node);
+
+			if (stream_id < s->id) {
+				node = node->rb_left;
+			} else if (stream_id > s->id) {
+				node = node->rb_right;
+			} else {
+				s->fin_received = true;
+				s->final_size = final_size;
+				s->state = TQUIC_STREAM_CLOSED;
+				wake_up_interruptible(&s->wait);
+				break;
+			}
+		}
+	}
+	spin_unlock_bh(&ctx->conn->lock);
+
+	ctx->ack_eliciting = true;
+	return 0;
+}
+
+/*
+ * Process STOP_SENDING frame (0x05)
+ *
+ * RFC 9000 Section 19.5: Peer requests we stop sending on a stream.
+ * Fields: Stream ID, Application Protocol Error Code.
+ */
+static int tquic_process_stop_sending_frame(struct tquic_rx_ctx *ctx)
+{
+	u64 stream_id, error_code;
+	int ret;
+
+	ctx->offset++;  /* Skip frame type */
+
+	ret = tquic_decode_varint(ctx->data + ctx->offset,
+				  ctx->len - ctx->offset, &stream_id);
+	if (ret < 0)
+		return ret;
+	ctx->offset += ret;
+
+	ret = tquic_decode_varint(ctx->data + ctx->offset,
+				  ctx->len - ctx->offset, &error_code);
+	if (ret < 0)
+		return ret;
+	ctx->offset += ret;
+
+	pr_debug("tquic: STOP_SENDING stream=%llu error=%llu\n",
+		 stream_id, error_code);
+
+	/* Mark stream as send-closed */
+	spin_lock_bh(&ctx->conn->lock);
+	{
+		struct rb_node *node = ctx->conn->streams.rb_node;
+
+		while (node) {
+			struct tquic_stream *s = rb_entry(node,
+							  struct tquic_stream,
+							  node);
+
+			if (stream_id < s->id) {
+				node = node->rb_left;
+			} else if (stream_id > s->id) {
+				node = node->rb_right;
+			} else {
+				s->fin_sent = true;
+				wake_up_interruptible(&s->wait);
+				break;
+			}
+		}
+	}
+	spin_unlock_bh(&ctx->conn->lock);
+
+	ctx->ack_eliciting = true;
+	return 0;
+}
+
+/*
+ * Process MAX_STREAMS frame (0x12 bidi, 0x13 uni)
+ *
+ * RFC 9000 Section 19.11: Peer increases the maximum number of
+ * streams we're allowed to open.
+ */
+static int tquic_process_max_streams_frame(struct tquic_rx_ctx *ctx, bool bidi)
+{
+	u64 max_streams;
+	int ret;
+
+	ctx->offset++;  /* Skip frame type */
+
+	ret = tquic_decode_varint(ctx->data + ctx->offset,
+				  ctx->len - ctx->offset, &max_streams);
+	if (ret < 0)
+		return ret;
+	ctx->offset += ret;
+
+	tquic_dbg("process_max_streams: %s max=%llu\n",
+		  bidi ? "bidi" : "uni", max_streams);
+
+	/* Only increase, per RFC 9000 */
+	spin_lock_bh(&ctx->conn->lock);
+	if (bidi) {
+		if (max_streams > ctx->conn->max_streams_bidi)
+			ctx->conn->max_streams_bidi = max_streams;
+	} else {
+		if (max_streams > ctx->conn->max_streams_uni)
+			ctx->conn->max_streams_uni = max_streams;
+	}
+	spin_unlock_bh(&ctx->conn->lock);
+
+	ctx->ack_eliciting = true;
+	return 0;
+}
+
+/*
+ * Process DATA_BLOCKED frame (0x14)
+ *
+ * RFC 9000 Section 19.12: Peer is blocked by connection-level flow control.
+ * This is informational only.
+ */
+static int tquic_process_data_blocked_frame(struct tquic_rx_ctx *ctx)
+{
+	u64 limit;
+	int ret;
+
+	ctx->offset++;  /* Skip frame type */
+
+	ret = tquic_decode_varint(ctx->data + ctx->offset,
+				  ctx->len - ctx->offset, &limit);
+	if (ret < 0)
+		return ret;
+	ctx->offset += ret;
+
+	pr_debug("tquic: DATA_BLOCKED at limit=%llu\n", limit);
+
+	ctx->ack_eliciting = true;
+	return 0;
+}
+
+/*
+ * Process STREAM_DATA_BLOCKED frame (0x15)
+ *
+ * RFC 9000 Section 19.13: Peer is blocked by stream-level flow control.
+ */
+static int tquic_process_stream_data_blocked_frame(struct tquic_rx_ctx *ctx)
+{
+	u64 stream_id, limit;
+	int ret;
+
+	ctx->offset++;  /* Skip frame type */
+
+	ret = tquic_decode_varint(ctx->data + ctx->offset,
+				  ctx->len - ctx->offset, &stream_id);
+	if (ret < 0)
+		return ret;
+	ctx->offset += ret;
+
+	ret = tquic_decode_varint(ctx->data + ctx->offset,
+				  ctx->len - ctx->offset, &limit);
+	if (ret < 0)
+		return ret;
+	ctx->offset += ret;
+
+	pr_debug("tquic: STREAM_DATA_BLOCKED stream=%llu limit=%llu\n",
+		 stream_id, limit);
+
+	ctx->ack_eliciting = true;
+	return 0;
+}
+
+/*
+ * Process STREAMS_BLOCKED frame (0x16 bidi, 0x17 uni)
+ *
+ * RFC 9000 Section 19.14: Peer is blocked by MAX_STREAMS limit.
+ */
+static int tquic_process_streams_blocked_frame(struct tquic_rx_ctx *ctx)
+{
+	u64 limit;
+	int ret;
+
+	ctx->offset++;  /* Skip frame type */
+
+	ret = tquic_decode_varint(ctx->data + ctx->offset,
+				  ctx->len - ctx->offset, &limit);
+	if (ret < 0)
+		return ret;
+	ctx->offset += ret;
+
+	pr_debug("tquic: STREAMS_BLOCKED at limit=%llu\n", limit);
+
+	ctx->ack_eliciting = true;
 	return 0;
 }
 
@@ -2729,6 +2972,63 @@ static int tquic_process_frames(struct tquic_connection *conn,
 				return -EPROTO;
 			}
 			ret = tquic_process_max_stream_data_frame(&ctx);
+		} else if (frame_type == TQUIC_FRAME_RESET_STREAM) {
+			if (is_initial || is_handshake) {
+				conn->error_code = EQUIC_FRAME_ENCODING;
+				tquic_conn_close_with_error(conn,
+					EQUIC_FRAME_ENCODING,
+					"RESET_STREAM in Initial/HS");
+				return -EPROTO;
+			}
+			ret = tquic_process_reset_stream_frame(&ctx);
+		} else if (frame_type == TQUIC_FRAME_STOP_SENDING) {
+			if (is_initial || is_handshake) {
+				conn->error_code = EQUIC_FRAME_ENCODING;
+				tquic_conn_close_with_error(conn,
+					EQUIC_FRAME_ENCODING,
+					"STOP_SENDING in Initial/HS");
+				return -EPROTO;
+			}
+			ret = tquic_process_stop_sending_frame(&ctx);
+		} else if (frame_type == TQUIC_FRAME_MAX_STREAMS_BIDI ||
+			   frame_type == TQUIC_FRAME_MAX_STREAMS_UNI) {
+			if (is_initial || is_handshake) {
+				conn->error_code = EQUIC_FRAME_ENCODING;
+				tquic_conn_close_with_error(conn,
+					EQUIC_FRAME_ENCODING,
+					"MAX_STREAMS in Initial/HS");
+				return -EPROTO;
+			}
+			ret = tquic_process_max_streams_frame(&ctx,
+				frame_type == TQUIC_FRAME_MAX_STREAMS_BIDI);
+		} else if (frame_type == TQUIC_FRAME_DATA_BLOCKED) {
+			if (is_initial || is_handshake) {
+				conn->error_code = EQUIC_FRAME_ENCODING;
+				tquic_conn_close_with_error(conn,
+					EQUIC_FRAME_ENCODING,
+					"DATA_BLOCKED in Initial/HS");
+				return -EPROTO;
+			}
+			ret = tquic_process_data_blocked_frame(&ctx);
+		} else if (frame_type == TQUIC_FRAME_STREAM_DATA_BLOCKED) {
+			if (is_initial || is_handshake) {
+				conn->error_code = EQUIC_FRAME_ENCODING;
+				tquic_conn_close_with_error(conn,
+					EQUIC_FRAME_ENCODING,
+					"STREAM_DATA_BLOCKED in IH");
+				return -EPROTO;
+			}
+			ret = tquic_process_stream_data_blocked_frame(&ctx);
+		} else if (frame_type == TQUIC_FRAME_STREAMS_BLOCKED_BIDI ||
+			   frame_type == TQUIC_FRAME_STREAMS_BLOCKED_UNI) {
+			if (is_initial || is_handshake) {
+				conn->error_code = EQUIC_FRAME_ENCODING;
+				tquic_conn_close_with_error(conn,
+					EQUIC_FRAME_ENCODING,
+					"STREAMS_BLOCKED in I/HS");
+				return -EPROTO;
+			}
+			ret = tquic_process_streams_blocked_frame(&ctx);
 		} else if (frame_type == TQUIC_FRAME_PATH_CHALLENGE) {
 			if (is_initial || is_handshake) {
 				conn->error_code = EQUIC_FRAME_ENCODING;
