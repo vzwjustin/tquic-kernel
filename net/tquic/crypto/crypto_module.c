@@ -20,6 +20,8 @@ static int __init __maybe_unused tquic_crypto_module_init(void)
 {
 	int ret;
 
+	tquic_dbg("tquic_crypto_module_init: initializing crypto subsystem\n");
+
 #if IS_ENABLED(CONFIG_TQUIC_CRYPTO_HW_OFFLOAD)
 	ret = tquic_hw_offload_init();
 	if (ret)
@@ -52,6 +54,8 @@ err_cert_verify:
 
 static void __exit __maybe_unused tquic_crypto_module_exit(void)
 {
+	tquic_dbg("tquic_crypto_module_exit: cleaning up crypto subsystem\n");
+
 	tquic_zero_rtt_module_exit();
 #if IS_ENABLED(CONFIG_TQUIC_CERT_VERIFY)
 	tquic_cert_verify_exit();

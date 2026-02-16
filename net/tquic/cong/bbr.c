@@ -148,6 +148,9 @@ static void bbr_set_pacing_rate(struct tquic_bbr *bbr)
 {
 	u64 rate;
 
+	tquic_dbg("bbr: set_pacing_rate bw=%llu gain=%u\n",
+		  bbr->bw, bbr->pacing_gain);
+
 	rate = bbr->bw * bbr->pacing_gain / BBR_UNIT;
 
 	/* Ensure minimum rate */
@@ -163,6 +166,9 @@ static void bbr_set_pacing_rate(struct tquic_bbr *bbr)
 static void bbr_set_cwnd(struct tquic_bbr *bbr)
 {
 	u64 target_cwnd;
+
+	tquic_dbg("bbr: set_cwnd bw=%llu min_rtt=%u gain=%u\n",
+		  bbr->bw, bbr->min_rtt_us, bbr->cwnd_gain);
 
 	if (bbr->bw == 0 || bbr->min_rtt_us == 0) {
 		bbr->cwnd = 10 * 1200;  /* Initial cwnd */
@@ -186,6 +192,9 @@ static void bbr_set_cwnd(struct tquic_bbr *bbr)
  */
 static void bbr_check_probe_rtt(struct tquic_bbr *bbr, u32 now_ms)
 {
+	tquic_dbg("bbr: check_probe_rtt mode=%d min_rtt_stamp=%u now=%u\n",
+		  bbr->mode, bbr->min_rtt_stamp, now_ms);
+
 	if (bbr->mode == BBR_PROBE_RTT)
 		return;
 
@@ -204,6 +213,9 @@ static void bbr_check_probe_rtt(struct tquic_bbr *bbr, u32 now_ms)
  */
 static void bbr_handle_probe_rtt(struct tquic_bbr *bbr, u32 now_ms)
 {
+	tquic_dbg("bbr: handle_probe_rtt done=%d stamp=%u now=%u\n",
+		  bbr->probe_rtt_done, bbr->probe_rtt_stamp, now_ms);
+
 	/* Reduce cwnd to min */
 	bbr->cwnd = BBR_MIN_CWND_PKTS * 1200;
 
@@ -265,6 +277,9 @@ static void tquic_bbr_on_ack(void *state, u64 bytes_acked, u64 rtt_us)
 
 	if (!bbr)
 		return;
+
+	tquic_dbg("bbr: on_ack bytes=%llu rtt=%llu mode=%d cwnd=%llu bw=%llu\n",
+		  bytes_acked, rtt_us, bbr->mode, bbr->cwnd, bbr->bw);
 
 	/*
 	 * Reset ECN round flag if an RTT has elapsed since the last
@@ -517,6 +532,9 @@ static void tquic_bbr_on_rtt(void *state, u64 rtt_us)
 
 	if (!bbr)
 		return;
+
+	tquic_dbg("bbr: on_rtt rtt_us=%llu min_rtt=%u\n",
+		  rtt_us, bbr->min_rtt_us);
 
 	/* Update min RTT */
 	if (rtt_us < bbr->min_rtt_us) {

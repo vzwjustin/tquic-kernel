@@ -16,6 +16,7 @@
 #include <net/tquic.h>
 #include "tquic_crypto.h"
 #include "quic_crypto.h"
+#include "../tquic_debug.h"
 
 /* TQUIC v1 initial salt (RFC 9001 Section 5.2) */
 static const u8 tquic_v1_initial_salt[20] = {
@@ -542,6 +543,7 @@ void tquic_tls_init(struct tquic_connection *conn, bool is_server)
 {
 	struct tquic_tls_ctx *ctx = tquic_tls_ctx_get(conn);
 
+	tquic_dbg("tquic_tls_init: is_server=%d\n", is_server);
 	if (!ctx)
 		return;
 
@@ -873,6 +875,7 @@ int tquic_crypto_ctx_init(struct tquic_crypto_ctx *ctx, u16 cipher_type)
 	const char *hash_name;
 	int key_len;
 
+	tquic_dbg("tquic_crypto_ctx_init: cipher_type=%u\n", cipher_type);
 	switch (cipher_type) {
 	case TQUIC_CIPHER_AES_128_GCM_SHA256:
 		aead_name = "gcm(aes)";
@@ -970,6 +973,7 @@ int tquic_crypto_ctx_init(struct tquic_crypto_ctx *ctx, u16 cipher_type)
 
 void tquic_crypto_ctx_destroy(struct tquic_crypto_ctx *ctx)
 {
+	tquic_dbg("tquic_crypto_ctx_destroy: cleaning up crypto context\n");
 	if (ctx->hash)
 		crypto_free_shash(ctx->hash);
 	if (ctx->rx_hp)
@@ -1204,6 +1208,7 @@ int tquic_crypto_encrypt(struct tquic_crypto_ctx *ctx, struct sk_buff *skb,
 	u32 header_len;
 	int err;
 
+	tquic_dbg("tquic_crypto_encrypt: pn=%llu len=%u\n", pn, skb->len);
 	if (!ctx->tx_aead || !ctx->keys_available)
 		return -EINVAL;
 

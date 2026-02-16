@@ -3360,6 +3360,8 @@ EXPORT_SYMBOL_GPL(tquic_sysctl_get_cert_time_tolerance);
 
 static int tquic_proc_trusted_cas_show(struct seq_file *m, void *v)
 {
+	tquic_dbg("tquic_proc_trusted_cas_show: reading procfs\n");
+
 #ifdef CONFIG_SYSTEM_DATA_VERIFICATION
 	mutex_lock(&keyring_mutex);
 
@@ -3438,6 +3440,9 @@ static int tquic_proc_verify_config_show(struct seq_file *m, void *v)
 {
 	static const char *mode_names[] = { "none", "optional", "required" };
 	static const char *revoke_names[] = { "none", "soft_fail", "hard_fail" };
+
+	tquic_dbg("tquic_proc_verify_config_show: mode=%d hostname_check=%d\n",
+		  tquic_cert_verify_mode, tquic_cert_verify_hostname_enabled);
 
 	seq_printf(m, "verify_mode: %s\n",
 		   mode_names[tquic_cert_verify_mode]);

@@ -73,6 +73,9 @@ static u64 bbr_minmax_running_max(struct bbr_minmax *filter, u64 now, u64 value)
 	struct bbr_minmax_sample *s = filter->samples;
 	u64 dt = now - s[0].time;
 
+	tquic_dbg("bbrv2: minmax_max value=%llu cur_max=%llu\n",
+		  value, s[0].value);
+
 	/* New maximum or window expired */
 	if (value >= s[0].value || dt > filter->window_len) {
 		s[0].time = now;
@@ -116,6 +119,9 @@ static u64 bbr_minmax_running_min(struct bbr_minmax *filter, u64 now, u64 value)
 {
 	struct bbr_minmax_sample *s = filter->samples;
 	u64 dt = now - s[0].time;
+
+	tquic_dbg("bbrv2: minmax_min value=%llu cur_min=%llu\n",
+		  value, s[0].value);
 
 	/* New minimum or window expired */
 	if (value <= s[0].value || dt > filter->window_len) {
@@ -184,6 +190,9 @@ static u32 bbr_inflight(struct bbrv2 *bbr, u32 gain)
 	u64 inflight;
 	u32 mss = bbr_get_mss(bbr);
 
+	tquic_dbg("bbrv2: inflight bw=%llu min_rtt=%llu gain=%u\n",
+		  bbr->bw, bbr->min_rtt_us, gain);
+
 	inflight = bbr_bdp(bbr);
 	inflight = (inflight * gain) >> BBR_SCALE;
 
@@ -202,6 +211,9 @@ static u32 bbr_inflight(struct bbrv2 *bbr, u32 gain)
  */
 static void bbr_update_round(struct bbrv2 *bbr, u64 delivered)
 {
+	tquic_dbg("bbrv2: update_round delivered=%llu next=%llu round=%u\n",
+		  delivered, bbr->next_round_delivered, bbr->round_count);
+
 	if (delivered >= bbr->next_round_delivered) {
 		bbr->round_start = true;
 		bbr->round_count++;
