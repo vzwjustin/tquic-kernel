@@ -233,6 +233,8 @@ static void weighted_path_removed(struct tquic_connection *conn,
 {
 	struct weighted_sched_data *sd = conn->sched_priv;
 
+	tquic_dbg("sched_weighted: path_removed path=%u\n", path->path_id);
+
 	if (sd) {
 		spin_lock_bh(&sd->lock);
 		sd->current_path_idx = 0;
