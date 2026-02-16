@@ -318,6 +318,9 @@ void tquic_path_destroy(struct tquic_path *path)
 	if (!path)
 		return;
 
+	tquic_dbg("tquic_path_destroy: path=%u state=%d\n",
+		  path->path_id, path->state);
+
 	/* Remove from list if linked */
 	if (!list_empty(&path->list))
 		list_del_init(&path->list);
@@ -381,6 +384,9 @@ int tquic_path_challenge(struct tquic_path *path)
 	conn = path->conn;
 	if (!conn)
 		return -EINVAL;
+
+	tquic_conn_dbg(conn, "tquic_path_challenge: path=%u retries=%u\n",
+		       path->path_id, path->validation.retries);
 
 	/* Generate new challenge data */
 	tquic_path_generate_challenge(path->validation.challenge_data);
@@ -474,6 +480,8 @@ void tquic_path_on_validated(struct tquic_path *path)
 
 	conn = path->conn;
 
+	tquic_dbg("tquic_path_on_validated: path=%u\n", path->path_id);
+
 	/* Calculate validation time */
 	validation_time =
 		ktime_sub(ktime_get(), path->validation.challenge_sent);
@@ -515,6 +523,9 @@ bool tquic_path_verify_response(struct tquic_path *path, const u8 *data)
 	if (!path || !data)
 		return false;
 
+	tquic_dbg("tquic_path_verify_response: path=%u challenge_pending=%d\n",
+		  path->path_id, path->validation.challenge_pending);
+
 	if (!path->validation.challenge_pending)
 		return false;
 
@@ -536,6 +547,9 @@ int tquic_path_migrate(struct tquic_connection *conn, struct tquic_path *path)
 
 	if (!conn || !path)
 		return -EINVAL;
+
+	tquic_conn_dbg(conn, "tquic_path_migrate: path=%u state=%d\n",
+		       path->path_id, path->state);
 
 	/* Check if migration is allowed */
 	if (conn->migration_disabled)
@@ -617,6 +631,9 @@ void tquic_path_mtu_discovery_start(struct tquic_path *path)
 	    path->state != TQUIC_PATH_ACTIVE)
 		return;
 
+	tquic_dbg("tquic_path_mtu_discovery_start: path=%u current_mtu=%u\n",
+		  path->path_id, path->mtu);
+
 	/* Start with conservative MTU */
 	path->mtu = TQUIC_PATH_MTU_INITIAL;
 
@@ -643,6 +660,9 @@ int tquic_path_mtu_probe(struct tquic_path *path)
 	conn = path->conn;
 	if (!conn)
 		return -EINVAL;
+
+	tquic_conn_dbg(conn, "tquic_path_mtu_probe: path=%u current_mtu=%u\n",
+		       path->path_id, path->mtu);
 
 	/* Determine probe size */
 	probe_size = tquic_path_next_mtu_probe(path->mtu);
@@ -682,6 +702,9 @@ void tquic_path_mtu_probe_acked(struct tquic_path *path, u32 probe_size)
 {
 	if (!path)
 		return;
+
+	tquic_dbg("tquic_path_mtu_probe_acked: path=%u probe_size=%u old_mtu=%u\n",
+		  path->path_id, probe_size, path->mtu);
 
 	/* Successful probe - update MTU */
 	if (probe_size > path->mtu)
@@ -735,6 +758,9 @@ void tquic_path_rtt_update(struct tquic_path *path, u32 latest_rtt_us,
 	if (!path)
 		return;
 
+	tquic_dbg("tquic_path_rtt_update: path=%u latest_rtt=%u us ack_delay=%u us\n",
+		  path->path_id, latest_rtt_us, ack_delay_us);
+
 	/* Update minimum RTT (no ack delay adjustment) */
 	if (latest_rtt_us < path->cc.min_rtt_us)
 		path->cc.min_rtt_us = latest_rtt_us;
@@ -779,6 +805,10 @@ u32 tquic_path_pto(struct tquic_path *path)
 
 	if (!path)
 		return 1000000; /* Default 1 second */
+
+	tquic_dbg("tquic_path_pto: path=%u srtt=%llu rttvar=%llu\n",
+		  path->path_id, path->cc.smoothed_rtt_us,
+		  path->cc.rtt_var_us);
 
 	/* PTO = smoothed_rtt + max(4 * rttvar, kGranularity) + max_ack_delay */
 	pto = (u32)path->cc.smoothed_rtt_us +
@@ -828,6 +858,10 @@ bool tquic_path_can_send(struct tquic_path *path, u32 bytes)
 	if (!path)
 		return false;
 
+	tquic_dbg("tquic_path_can_send: path=%u bytes=%u state=%d tx=%llu rx=%llu\n",
+		  path->path_id, bytes, path->state,
+		  path->stats.tx_bytes, path->stats.rx_bytes);
+
 	/* Validated paths have no limit */
 	if (path->state == TQUIC_PATH_VALIDATED ||
 	    path->state == TQUIC_PATH_ACTIVE)
@@ -848,6 +882,9 @@ struct tquic_path *tquic_path_find(struct tquic_connection *conn,
 
 	if (!conn || !remote)
 		return NULL;
+
+	tquic_conn_dbg(conn, "tquic_path_find: family=%u\n",
+		       remote->sa_family);
 
 	if (tquic_path_copy_addr(&remote_storage, remote))
 		return NULL;
@@ -872,6 +909,9 @@ int tquic_path_get_info(struct tquic_path *path, struct tquic_path_info *info)
 {
 	if (!path || !info)
 		return -EINVAL;
+
+	tquic_dbg("tquic_path_get_info: path=%u state=%d\n",
+		  path->path_id, path->state);
 
 	memset(info, 0, sizeof(*info));
 
@@ -926,6 +966,9 @@ void tquic_path_on_probe_timeout(struct tquic_path *path)
 
 	if (!path || !path->validation.challenge_pending)
 		return;
+
+	tquic_dbg("tquic_path_on_probe_timeout: path=%u retries=%u\n",
+		  path->path_id, path->validation.retries);
 
 	elapsed = ktime_sub(ktime_get(), path->validation.challenge_sent);
 
@@ -992,6 +1035,9 @@ void tquic_path_set_state(struct tquic_connection *conn, u8 path_id,
 {
 	struct tquic_path *path = NULL;
 	struct tquic_path *p;
+
+	tquic_conn_dbg(conn, "tquic_path_set_state: path=%u new_state=%d\n",
+		       path_id, state);
 
 	spin_lock_bh(&conn->lock);
 	spin_lock_bh(&conn->paths_lock);

@@ -692,6 +692,9 @@ static void cubic_update(struct coupled_subflow *sf, u64 now_us)
 {
 	u64 t, offs, delta;
 
+	tquic_dbg("coupled: cubic_update path=%u cwnd=%llu w_max=%llu\n",
+		  sf->path_id, sf->cwnd, sf->cubic_w_max);
+
 	if (sf->cubic_epoch_start == 0) {
 		sf->cubic_epoch_start = now_us;
 
@@ -1013,6 +1016,9 @@ static void coupled_on_ack(void *cong_data, u64 bytes_acked, u64 rtt_us)
 	if (!sf || !sf->path)
 		return;
 
+	tquic_dbg("coupled: on_ack path=%u bytes=%llu rtt=%llu cwnd=%llu\n",
+		  sf->path_id, bytes_acked, rtt_us, sf->cwnd);
+
 	conn = container_of(sf->path->list.prev, struct tquic_connection, paths);
 	state = conn->sched_priv;
 
@@ -1160,6 +1166,9 @@ static void coupled_on_rtt(void *cong_data, u64 rtt_us)
 	if (!sf)
 		return;
 
+	tquic_dbg("coupled: on_rtt path=%u rtt=%llu min=%u\n",
+		  sf->path_id, rtt_us, sf->rtt_min);
+
 	/* Update minimum RTT */
 	if (sf->rtt_min == 0 || rtt_us < sf->rtt_min)
 		sf->rtt_min = rtt_us;
@@ -1201,6 +1210,9 @@ static u64 coupled_get_pacing_rate(void *cong_data)
 
 	if (!sf)
 		return 0;
+
+	tquic_dbg("coupled: get_pacing_rate path=%u cwnd=%llu rtt=%u\n",
+		  sf->path_id, sf->cwnd, sf->rtt_us);
 
 	/* Use BBR pacing rate if available */
 	if (sf->bbr_pacing_rate > 0)
@@ -1595,6 +1607,9 @@ void tquic_coupled_on_ack_ext(struct tquic_coupled_state *cstate,
 	if (!state || !path)
 		return;
 
+	tquic_dbg("coupled: on_ack_ext path=%u bytes=%llu rtt=%llu\n",
+		  path->path_id, bytes_acked, rtt_us);
+
 	sf = coupled_find_subflow(state, path->path_id);
 	if (!sf) {
 		tquic_dbg("coupled: ACK on unattached path %u\n",
@@ -1626,6 +1641,9 @@ void tquic_coupled_on_loss_ext(struct tquic_coupled_state *cstate,
 
 	if (!state || !path)
 		return;
+
+	tquic_dbg("coupled: on_loss_ext path=%u bytes_lost=%llu\n",
+		  path->path_id, bytes_lost);
 
 	sf = coupled_find_subflow(state, path->path_id);
 	if (!sf) {

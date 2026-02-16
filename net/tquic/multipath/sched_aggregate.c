@@ -79,6 +79,9 @@ static u32 calc_path_capacity(struct tquic_path *path)
 	u64 rtt_us = READ_ONCE(path->cc.smoothed_rtt_us);
 	u64 capacity;
 
+	tquic_dbg("sched_agg: calc_capacity path=%u cwnd=%llu rtt=%llu\n",
+		  path->path_id, cwnd, rtt_us);
+
 	/* Use default values if metrics not yet available */
 	if (cwnd == 0)
 		cwnd = TQUIC_INITIAL_CWND; /* Initial window: 10 * MSS */
@@ -113,6 +116,8 @@ static void update_capacities_locked(struct tquic_connection *conn,
 	struct tquic_path *path;
 	u32 total = 0;
 	int idx = 0;
+
+	tquic_dbg("sched_agg: update_capacities\n");
 
 	/* First pass: calculate raw capacities */
 	list_for_each_entry_rcu(path, &conn->paths, list) {
@@ -177,6 +182,9 @@ static int aggregate_get_path(struct tquic_connection *conn,
 
 	if (!sd)
 		return -EINVAL;
+
+	tquic_dbg("sched_agg: get_path total_capacity=%u flags=0x%x\n",
+		  sd->total_capacity, flags);
 
 	rcu_read_lock();
 	spin_lock_irqsave(&sd->lock, irqflags);
@@ -269,6 +277,8 @@ static int aggregate_init(struct tquic_connection *conn)
 {
 	struct aggregate_sched_data *sd;
 
+	tquic_dbg("sched_agg: init\n");
+
 	sd = kzalloc(sizeof(*sd), GFP_ATOMIC);
 	if (!sd)
 		return -ENOMEM;
@@ -300,6 +310,8 @@ static void aggregate_path_added(struct tquic_connection *conn,
 	if (!sd)
 		return;
 
+	tquic_dbg("sched_agg: path_added path=%u\n", path->path_id);
+
 	spin_lock_irqsave(&sd->lock, irqflags);
 	sd->last_capacity_update = 0; /* Force recalc */
 	spin_unlock_irqrestore(&sd->lock, irqflags);
@@ -316,6 +328,8 @@ static void aggregate_path_removed(struct tquic_connection *conn,
 
 	if (!sd)
 		return;
+
+	tquic_dbg("sched_agg: path_removed path=%u\n", path->path_id);
 
 	spin_lock_irqsave(&sd->lock, irqflags);
 	sd->last_capacity_update = 0; /* Force recalc */
@@ -349,6 +363,9 @@ static void aggregate_loss_detected(struct tquic_connection *conn,
 
 	if (!sd)
 		return;
+
+	tquic_dbg("sched_agg: loss_detected path=%u lost=%llu\n",
+		  path->path_id, lost_bytes);
 
 	/* Force capacity recalculation on loss (cwnd will have changed) */
 	spin_lock_irqsave(&sd->lock, irqflags);

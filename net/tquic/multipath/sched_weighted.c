@@ -83,6 +83,8 @@ static int weighted_get_path(struct tquic_connection *conn,
 	if (!sd)
 		return -EINVAL;
 
+	tquic_dbg("sched_weighted: get_path flags=0x%x\n", flags);
+
 	rcu_read_lock();
 	spin_lock_bh(&sd->lock);
 
@@ -186,6 +188,8 @@ static int weighted_init(struct tquic_connection *conn)
 {
 	struct weighted_sched_data *sd;
 	int i;
+
+	tquic_dbg("sched_weighted: init\n");
 
 	sd = kzalloc(sizeof(*sd), GFP_ATOMIC);
 	if (!sd)
