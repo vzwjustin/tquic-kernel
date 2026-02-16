@@ -1902,9 +1902,9 @@ int tquic_output_packet(struct tquic_connection *conn,
 		{
 			struct tquic_skb_cb *cb = TQUIC_SKB_CB(skb);
 			u64 pkt_num = cb->pn;
-			u8 pn_space = cb->packet_type == TQUIC_PACKET_TYPE_INITIAL ?
+			u8 pn_space = cb->packet_type == TQUIC_PKT_INITIAL ?
 				      TQUIC_PN_SPACE_INITIAL :
-				      (cb->packet_type == TQUIC_PACKET_TYPE_HANDSHAKE ?
+				      (cb->packet_type == TQUIC_PKT_HANDSHAKE ?
 				       TQUIC_PN_SPACE_HANDSHAKE : TQUIC_PN_SPACE_APPLICATION);
 			u32 path_id = path->path_id;
 
@@ -1970,7 +1970,6 @@ int tquic_output_packet(struct tquic_connection *conn,
 							       pn_space,
 							       true, true);
 					pkt->path_id = path_id;
-					pkt->frames = 0;
 					pkt->skb = NULL;
 					tquic_loss_detection_on_packet_sent(
 						conn, pkt);
