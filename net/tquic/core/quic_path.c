@@ -121,6 +121,8 @@ void tquic_path_exit_module(void)
  */
 static void tquic_path_rtt_init(struct tquic_path *path, u32 initial_rtt_ms)
 {
+	tquic_dbg("tquic_path_rtt_init: path=%u initial_rtt=%u ms\n",
+		  path->path_id, initial_rtt_ms);
 	/* Initialize the scheduler-accessible CC info */
 	path->cc.smoothed_rtt_us =
 		initial_rtt_ms * 1000; /* Convert to microseconds */
@@ -135,6 +137,8 @@ static void tquic_path_rtt_init(struct tquic_path *path, u32 initial_rtt_ms)
  */
 static void tquic_path_cc_init(struct tquic_path *path, u32 mtu)
 {
+	tquic_dbg("tquic_path_cc_init: path=%u mtu=%u\n",
+		  path->path_id, mtu);
 	/* Initial window is 10 packets or 14720 bytes, whichever is smaller */
 	u64 initial_window = min_t(u64, 10 * mtu, 14720);
 

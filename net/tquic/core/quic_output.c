@@ -701,6 +701,7 @@ int tquic_output(struct tquic_connection *conn, struct sk_buff *skb)
 	int err;
 	u8 ecn_marking;
 
+	tquic_dbg("tquic_output: skb_len=%u\n", skb->len);
 	path = tquic_output_active_path_get(conn);
 	if (!path || !conn->sk) {
 		if (path)
@@ -894,6 +895,8 @@ int tquic_output_gso(struct tquic_connection *conn, struct sk_buff_head *queue)
 	u16 seg_count = 0;
 	u16 mss;
 	int err;
+	tquic_dbg("tquic_output_gso: queue_len=%u\n",
+		  skb_queue_len(queue));
 
 	/* Calculate MSS from path MTU */
 	path = tquic_output_active_path_get(conn);
@@ -1048,6 +1051,8 @@ int tquic_retransmit(struct tquic_connection *conn, struct tquic_sent_packet *pk
 	struct sk_buff *clone;
 	int err;
 
+	tquic_dbg("tquic_retransmit: pn=%llu bytes=%u\n",
+		  pkt->pn, pkt->sent_bytes);
 	if (!pkt->skb)
 		return -EINVAL;
 
@@ -1089,6 +1094,7 @@ int tquic_do_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 	size_t sent = 0;
 	int err;
 
+	tquic_dbg("tquic_do_sendmsg: len=%zu\n", len);
 	conn = tquic_sock_conn_get(tsk);
 	if (!conn || READ_ONCE(conn->state) != TQUIC_STATE_CONNECTED) {
 		if (conn)
