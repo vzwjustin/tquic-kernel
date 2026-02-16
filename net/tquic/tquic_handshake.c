@@ -1527,11 +1527,49 @@ int tquic_inline_hs_recv_crypto(struct sock *sk, const u8 *data, u32 len,
 		TQUIC_INC_STATS(sock_net(sk), TQUIC_MIB_HANDSHAKESCOMPLETE);
 		TQUIC_INC_STATS(sock_net(sk), TQUIC_MIB_CURRESTAB);
 
-		/* Wake up waiters */
-		if (tsk->handshake_state)
+		/*
+		 * Wake up waiters.  Set status to 0 (success) BEFORE
+		 * calling complete() — otherwise the waiter sees the
+		 * default -ETIMEDOUT and maps it to EQUIC_HANDSHAKE_TIMEOUT.
+		 */
+		if (tsk->handshake_state) {
+			tsk->handshake_state->status = 0;
 			complete(&tsk->handshake_state->done);
+		}
 
-		tquic_dbg("inline TLS handshake complete\n");
+		/*
+		 * Server post-handshake: transition socket, add to accept
+		 * queue, and mark handshake confirmed (RFC 9001 Section 4.1.2).
+		 */
+		if (conn->is_server) {
+			struct sock *listener_sk;
+			struct tquic_sock *listen_tsk;
+
+			inet_sk_set_state(sk, TCP_ESTABLISHED);
+			conn->handshake_confirmed = true;
+
+			/*
+			 * Add child socket to listener's accept queue so
+			 * accept() can return it to userspace.
+			 */
+			listener_sk = conn->sk;
+			if (listener_sk && listener_sk != sk &&
+			    listener_sk->sk_state == TCP_LISTEN) {
+				listen_tsk = tquic_sk(listener_sk);
+
+				spin_lock_bh(&listener_sk->sk_lock.slock);
+				list_add_tail(&tsk->accept_list,
+					      &listen_tsk->accept_queue);
+				atomic_inc(&listen_tsk->accept_queue_len);
+				spin_unlock_bh(&listener_sk->sk_lock.slock);
+
+				listener_sk->sk_data_ready(listener_sk);
+				pr_warn("inline_hs: server child queued for accept\n");
+			}
+		}
+
+		pr_warn("inline TLS handshake complete (is_server=%d)\n",
+			conn->is_server);
 	}
 
 	/* Queue any response messages (client Finished, etc.) */

@@ -108,7 +108,8 @@ Userspace QUIC implementations pay a heavy cost crossing the kernel boundary on 
 | DCID negotiation (RFC 9000 Section 7.2) | Done |
 | Multipath schedulers & congestion control | Done |
 | Security audit (11 rounds) | Done |
-| Post-handshake connection state transition | In Progress |
+| Post-handshake connection state transition | Done |
+| Server accept queue (inline handshake path) | Done |
 | PATH_CHALLENGE/RESPONSE validation | In Progress |
 | Application data exchange | Planned |
 | Interop testing (quiche, msquic, ngtcp2) | Planned |
