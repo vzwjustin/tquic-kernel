@@ -2388,6 +2388,100 @@ out:
 }
 
 /*
+ * Parse a DER length field and advance the pointer.
+ * Returns the length value, or -1 on error.
+ */
+static int tquic_der_parse_len(const u8 **pp, const u8 *end, u32 *out_len)
+{
+	const u8 *p = *pp;
+	u8 b, num_bytes;
+	u32 len;
+	int i;
+
+	if (p >= end)
+		return -1;
+
+	b = *p++;
+	if (!(b & 0x80)) {
+		*out_len = b;
+		*pp = p;
+		return 0;
+	}
+
+	num_bytes = b & 0x7f;
+	if (num_bytes == 0 || num_bytes > 3 || p + num_bytes > end)
+		return -1;
+
+	len = 0;
+	for (i = 0; i < num_bytes; i++)
+		len = (len << 8) | *p++;
+
+	*out_len = len;
+	*pp = p;
+	return 0;
+}
+
+/*
+ * Unwrap PKCS#8 PrivateKeyInfo to extract inner PKCS#1 RSAPrivateKey.
+ * If the key is already PKCS#1 format, returns the original pointer unchanged.
+ * This is zero-copy: just pointer arithmetic on the existing buffer.
+ *
+ * PKCS#8 PrivateKeyInfo ::= SEQUENCE {
+ *   version INTEGER,
+ *   privateKeyAlgorithm AlgorithmIdentifier ::= SEQUENCE { OID, NULL },
+ *   privateKey OCTET STRING (contains PKCS#1 RSAPrivateKey)
+ * }
+ */
+static void tquic_pkcs8_unwrap(const u8 *key, u32 key_len,
+			       const u8 **inner, u32 *inner_len)
+{
+	const u8 *p = key;
+	const u8 *end = key + key_len;
+	u32 len;
+
+	/* Default: assume PKCS#1 already */
+	*inner = key;
+	*inner_len = key_len;
+
+	if (key_len < 26)
+		return;
+
+	/* Outer SEQUENCE */
+	if (*p++ != 0x30)
+		return;
+	if (tquic_der_parse_len(&p, end, &len) < 0)
+		return;
+
+	/* INTEGER version = 0 */
+	if (p + 3 > end || p[0] != 0x02 || p[1] != 0x01 || p[2] != 0x00)
+		return;
+	p += 3;
+
+	/* SEQUENCE (AlgorithmIdentifier) - skip over it */
+	if (p >= end || *p++ != 0x30)
+		return;
+	if (tquic_der_parse_len(&p, end, &len) < 0)
+		return;
+	p += len;
+
+	/* OCTET STRING containing the inner PKCS#1 key */
+	if (p >= end || *p++ != 0x04)
+		return;
+	if (tquic_der_parse_len(&p, end, &len) < 0)
+		return;
+	if (p + len > end)
+		return;
+
+	/* Verify inner content starts with SEQUENCE (RSAPrivateKey) */
+	if (*p != 0x30)
+		return;
+
+	*inner = p;
+	*inner_len = len;
+	pr_debug("tquic_pss: PKCS#8 unwrap: %u -> %u bytes\n", key_len, len);
+}
+
+/*
  * Sign with RSA-PSS (RSASSA-PSS per RFC 8017 Section 8.1.1)
  *
  * @privkey_data: DER-encoded private key (PKCS#8 or PKCS#1)
@@ -2408,10 +2502,15 @@ static int tquic_sign_rsa_pss(const u8 *privkey_data, u32 privkey_len,
 	struct crypto_akcipher *tfm = NULL;
 	struct akcipher_request *req = NULL;
 	struct scatterlist sg_in, sg_out;
+	const u8 *rsa_key;
+	u32 rsa_key_len;
 	u8 *em = NULL;
 	u32 key_size;
 	int err;
 	DECLARE_CRYPTO_WAIT(wait);
+
+	/* Unwrap PKCS#8 to PKCS#1 if needed (zero-copy) */
+	tquic_pkcs8_unwrap(privkey_data, privkey_len, &rsa_key, &rsa_key_len);
 
 	/* Allocate raw RSA cipher */
 	tfm = crypto_alloc_akcipher("rsa", 0, 0);
@@ -2421,8 +2520,8 @@ static int tquic_sign_rsa_pss(const u8 *privkey_data, u32 privkey_len,
 		return err;
 	}
 
-	/* Set private key */
-	err = crypto_akcipher_set_priv_key(tfm, privkey_data, privkey_len);
+	/* Set private key (PKCS#1 RSAPrivateKey format) */
+	err = crypto_akcipher_set_priv_key(tfm, rsa_key, rsa_key_len);
 	if (err) {
 		pr_warn("tquic_pss: Failed to set private key: %d\n", err);
 		goto out_free_tfm;
