@@ -425,49 +425,56 @@ static int tquic_encode_transport_params(struct tquic_hs_transport_params *param
 	*p++ = (b);				\
 } while (0)
 
+/*
+ * Macro to encode a varint transport parameter (id + length + value).
+ * Encodes value first to measure its actual varint length, then writes
+ * id, length, value.  Fixes bug where length was hardcoded to 8.
+ */
+#define TP_ENCODE_PARAM(param_id, value) do {			\
+	u8 _val_buf[8];						\
+	u32 _val_len;						\
+	hs_varint_encode((value), _val_buf,			\
+			 sizeof(_val_buf), &_val_len);		\
+	TP_ENCODE_VARINT(param_id);				\
+	TP_ENCODE_VARINT(_val_len);				\
+	TP_CHECK_SPACE(_val_len);				\
+	memcpy(p, _val_buf, _val_len);				\
+	p += _val_len;						\
+} while (0)
+
 	/* max_idle_timeout */
-	if (params->max_idle_timeout > 0) {
-		TP_ENCODE_VARINT(QUIC_TP_MAX_IDLE_TIMEOUT);
-		TP_ENCODE_VARINT(8);
-		TP_ENCODE_VARINT(params->max_idle_timeout);
-	}
+	if (params->max_idle_timeout > 0)
+		TP_ENCODE_PARAM(QUIC_TP_MAX_IDLE_TIMEOUT,
+				params->max_idle_timeout);
 
 	/* max_udp_payload_size */
-	if (params->max_udp_payload_size > 0) {
-		TP_ENCODE_VARINT(QUIC_TP_MAX_UDP_PAYLOAD_SIZE);
-		TP_ENCODE_VARINT(8);
-		TP_ENCODE_VARINT(params->max_udp_payload_size);
-	}
+	if (params->max_udp_payload_size > 0)
+		TP_ENCODE_PARAM(QUIC_TP_MAX_UDP_PAYLOAD_SIZE,
+				params->max_udp_payload_size);
 
 	/* initial_max_data */
-	TP_ENCODE_VARINT(QUIC_TP_INITIAL_MAX_DATA);
-	TP_ENCODE_VARINT(8);
-	TP_ENCODE_VARINT(params->initial_max_data);
+	TP_ENCODE_PARAM(QUIC_TP_INITIAL_MAX_DATA,
+			params->initial_max_data);
 
 	/* initial_max_stream_data_bidi_local */
-	TP_ENCODE_VARINT(QUIC_TP_INITIAL_MAX_STREAM_DATA_BIDI_LOCAL);
-	TP_ENCODE_VARINT(8);
-	TP_ENCODE_VARINT(params->initial_max_stream_data_bidi_local);
+	TP_ENCODE_PARAM(QUIC_TP_INITIAL_MAX_STREAM_DATA_BIDI_LOCAL,
+			params->initial_max_stream_data_bidi_local);
 
 	/* initial_max_stream_data_bidi_remote */
-	TP_ENCODE_VARINT(QUIC_TP_INITIAL_MAX_STREAM_DATA_BIDI_REMOTE);
-	TP_ENCODE_VARINT(8);
-	TP_ENCODE_VARINT(params->initial_max_stream_data_bidi_remote);
+	TP_ENCODE_PARAM(QUIC_TP_INITIAL_MAX_STREAM_DATA_BIDI_REMOTE,
+			params->initial_max_stream_data_bidi_remote);
 
 	/* initial_max_stream_data_uni */
-	TP_ENCODE_VARINT(QUIC_TP_INITIAL_MAX_STREAM_DATA_UNI);
-	TP_ENCODE_VARINT(8);
-	TP_ENCODE_VARINT(params->initial_max_stream_data_uni);
+	TP_ENCODE_PARAM(QUIC_TP_INITIAL_MAX_STREAM_DATA_UNI,
+			params->initial_max_stream_data_uni);
 
 	/* initial_max_streams_bidi */
-	TP_ENCODE_VARINT(QUIC_TP_INITIAL_MAX_STREAMS_BIDI);
-	TP_ENCODE_VARINT(8);
-	TP_ENCODE_VARINT(params->initial_max_streams_bidi);
+	TP_ENCODE_PARAM(QUIC_TP_INITIAL_MAX_STREAMS_BIDI,
+			params->initial_max_streams_bidi);
 
 	/* initial_max_streams_uni */
-	TP_ENCODE_VARINT(QUIC_TP_INITIAL_MAX_STREAMS_UNI);
-	TP_ENCODE_VARINT(8);
-	TP_ENCODE_VARINT(params->initial_max_streams_uni);
+	TP_ENCODE_PARAM(QUIC_TP_INITIAL_MAX_STREAMS_UNI,
+			params->initial_max_streams_uni);
 
 	/* ack_delay_exponent */
 	if (params->ack_delay_exponent != 3) {
@@ -477,11 +484,9 @@ static int tquic_encode_transport_params(struct tquic_hs_transport_params *param
 	}
 
 	/* max_ack_delay */
-	if (params->max_ack_delay != 25) {
-		TP_ENCODE_VARINT(QUIC_TP_MAX_ACK_DELAY);
-		TP_ENCODE_VARINT(8);
-		TP_ENCODE_VARINT(params->max_ack_delay);
-	}
+	if (params->max_ack_delay != 25)
+		TP_ENCODE_PARAM(QUIC_TP_MAX_ACK_DELAY,
+				params->max_ack_delay);
 
 	/* disable_active_migration */
 	if (params->disable_active_migration) {
@@ -490,9 +495,8 @@ static int tquic_encode_transport_params(struct tquic_hs_transport_params *param
 	}
 
 	/* active_connection_id_limit */
-	TP_ENCODE_VARINT(QUIC_TP_ACTIVE_CONN_ID_LIMIT);
-	TP_ENCODE_VARINT(8);
-	TP_ENCODE_VARINT(params->active_conn_id_limit);
+	TP_ENCODE_PARAM(QUIC_TP_ACTIVE_CONN_ID_LIMIT,
+			params->active_conn_id_limit);
 
 	/* initial_source_connection_id */
 	if (params->initial_scid_len > 0) {
@@ -526,11 +530,9 @@ static int tquic_encode_transport_params(struct tquic_hs_transport_params *param
 	}
 
 	/* max_datagram_frame_size (for DATAGRAM extension) */
-	if (params->max_datagram_frame_size > 0) {
-		TP_ENCODE_VARINT(QUIC_TP_MAX_DATAGRAM_FRAME_SIZE);
-		TP_ENCODE_VARINT(8);
-		TP_ENCODE_VARINT(params->max_datagram_frame_size);
-	}
+	if (params->max_datagram_frame_size > 0)
+		TP_ENCODE_PARAM(QUIC_TP_MAX_DATAGRAM_FRAME_SIZE,
+				params->max_datagram_frame_size);
 
 	/* grease_quic_bit (RFC 9287) - zero-length parameter */
 	if (params->grease_quic_bit) {
@@ -540,6 +542,7 @@ static int tquic_encode_transport_params(struct tquic_hs_transport_params *param
 
 #undef TP_CHECK_SPACE
 #undef TP_ENCODE_VARINT
+#undef TP_ENCODE_PARAM
 #undef TP_COPY
 #undef TP_WRITE_BYTE
 
@@ -570,17 +573,30 @@ static int tquic_decode_transport_params(const u8 *buf, u32 buf_len,
 
 	while (p < end) {
 		ret = hs_varint_decode(p, end - p, &param_id, &vlen);
-		if (ret < 0)
+		if (ret < 0) {
+			pr_warn("tquic_tp: varint param_id fail at offset %u\n",
+				(u32)(p - buf));
 			return ret;
+		}
 		p += vlen;
 
 		ret = hs_varint_decode(p, end - p, &param_len, &vlen);
-		if (ret < 0)
+		if (ret < 0) {
+			pr_warn("tquic_tp: varint param_len fail at offset %u id=%llu\n",
+				(u32)(p - buf), param_id);
 			return ret;
+		}
 		p += vlen;
 
-		if (p + param_len > end)
+		if (p + param_len > end) {
+			pr_warn("tquic_tp: param_id=%llu len=%llu exceeds buf (offset=%u end_off=%u)\n",
+				param_id, param_len,
+				(u32)(p - buf), (u32)(end - buf));
 			return -EINVAL;
+		}
+
+		pr_warn("tquic_tp: id=%llu len=%llu offset=%u\n",
+			param_id, param_len, (u32)(p - buf));
 
 		switch (param_id) {
 		case QUIC_TP_ORIGINAL_DCID:
@@ -1854,10 +1870,14 @@ int tquic_hs_process_encrypted_extensions(struct tquic_handshake *hs,
 			break;
 
 		case TLS_EXT_QUIC_TRANSPORT_PARAMS:
+			pr_warn("tquic_hs: decoding TP ext_data_len=%u "
+				"data[0..7]=%*phN\n",
+				ext_data_len,
+				min_t(int, ext_data_len, 8), p);
 			ret = tquic_decode_transport_params(p, ext_data_len,
 							    &hs->peer_params, true);
 			if (ret < 0) {
-				pr_warn("tquic_hs: failed to decode transport params\n");
+				pr_warn("tquic_hs: failed to decode transport params ret=%d\n", ret);
 				return ret;
 			}
 			hs->params_received = true;
@@ -1957,6 +1977,12 @@ int tquic_hs_process_certificate(struct tquic_handshake *hs,
 
 		/* Store first certificate (end-entity) */
 		if (!hs->peer_cert && cert_len > 0) {
+			pr_warn("tquic_hs: storing peer cert len=%u first4=%02x%02x%02x%02x\n",
+				cert_len,
+				cert_len > 0 ? p[0] : 0,
+				cert_len > 1 ? p[1] : 0,
+				cert_len > 2 ? p[2] : 0,
+				cert_len > 3 ? p[3] : 0);
 			hs->peer_cert = kmalloc(cert_len, GFP_KERNEL);
 			if (!hs->peer_cert)
 				return -ENOMEM;
@@ -2099,8 +2125,8 @@ static int tquic_emsa_pss_verify(const char *hash_alg, u32 hash_len,
 
 	/* Step 4: Check rightmost byte is 0xbc */
 	if (em[em_len - 1] != 0xbc) {
-		pr_debug("tquic_pss: Invalid trailer byte 0x%02x (expected 0xbc)\n",
-			 em[em_len - 1]);
+		pr_warn("tquic_pss: step4 Invalid trailer byte 0x%02x (expected 0xbc)\n",
+			em[em_len - 1]);
 		return -EKEYREJECTED;
 	}
 
@@ -2130,15 +2156,12 @@ static int tquic_emsa_pss_verify(const char *hash_alg, u32 hash_len,
 	for (i = 0; i < db_len; i++)
 		db[i] = em[i] ^ db_mask[i];
 
-	/* Step 10: Check leftmost 8*emLen - emBits bits are zero.
-	 * For RSA keys, emBits = 8*emLen - 1, so we check the top bit.
-	 * This MUST be a check, not a modification - reject invalid signatures.
+	/* Step 10: Clear leftmost 8*emLen - emBits bits.
+	 * For RSA keys, emBits = 8*emLen - 1, so clear the top bit.
+	 * RFC 8017 Section 9.1.2 Step 6 says to "set the leftmost
+	 * 8emLen - emBits bits of the leftmost octet in DB to zero".
 	 */
-	if (db[0] & 0x80) {
-		pr_debug("tquic_pss: Invalid DB leading bit (must be 0)\n");
-		err = -EKEYREJECTED;
-		goto out;
-	}
+	db[0] &= 0x7f;
 
 	/* Step 11: Check DB = PS || 0x01 || salt
 	 * PS is (emLen - hLen - sLen - 2) zero bytes
@@ -2146,14 +2169,16 @@ static int tquic_emsa_pss_verify(const char *hash_alg, u32 hash_len,
 	ps_len = db_len - salt_len - 1;
 	for (i = 0; i < ps_len; i++) {
 		if (db[i] != 0x00) {
-			pr_debug("tquic_pss: Non-zero padding at position %u\n", i);
+			pr_warn("tquic_pss: step11 Non-zero padding at pos %u: 0x%02x\n",
+				i, db[i]);
 			err = -EKEYREJECTED;
 			goto out;
 		}
 	}
 
 	if (db[ps_len] != 0x01) {
-		pr_debug("tquic_pss: Missing 0x01 separator at position %u\n", ps_len);
+		pr_warn("tquic_pss: step11 Missing 0x01 separator at pos %u: 0x%02x\n",
+			ps_len, db[ps_len]);
 		err = -EKEYREJECTED;
 		goto out;
 	}
@@ -2189,7 +2214,9 @@ static int tquic_emsa_pss_verify(const char *hash_alg, u32 hash_len,
 
 	/* Step 15: Compare H and H' */
 	if (crypto_memneq(em + db_len, h_prime, hash_len)) {
-		pr_debug("tquic_pss: H != H' - signature verification failed\n");
+		pr_warn("tquic_pss: step15 H != H'\n");
+		pr_warn("tquic_pss: H  = %*phN\n", (int)hash_len, em + db_len);
+		pr_warn("tquic_pss: H' = %*phN\n", (int)hash_len, h_prime);
 		err = -EKEYREJECTED;
 		goto out;
 	}
@@ -2286,6 +2313,8 @@ static int tquic_verify_rsa_pss(const u8 *pubkey_data, u32 pubkey_len,
 	}
 
 	/* Verify PSS padding */
+	pr_warn("tquic_pss: verify em_len=%u hash_len=%u em[last]=0x%02x\n",
+		key_size, hash_len, em[key_size - 1]);
 	err = tquic_emsa_pss_verify(hash_alg, hash_len, msg_hash, em, key_size);
 
 out_free_req:
@@ -2738,6 +2767,12 @@ int tquic_hs_process_certificate_verify(struct tquic_handshake *hs,
 		content_len = cp - content;
 
 		/* Parse peer certificate to extract public key */
+		pr_warn("tquic_hs: CV: peer_cert=%px len=%u first4=%02x%02x%02x%02x\n",
+			hs->peer_cert, hs->peer_cert_len,
+			hs->peer_cert_len > 0 ? hs->peer_cert[0] : 0,
+			hs->peer_cert_len > 1 ? hs->peer_cert[1] : 0,
+			hs->peer_cert_len > 2 ? hs->peer_cert[2] : 0,
+			hs->peer_cert_len > 3 ? hs->peer_cert[3] : 0);
 		cert = tquic_x509_cert_parse(hs->peer_cert, hs->peer_cert_len,
 					     GFP_KERNEL);
 		if (!cert) {

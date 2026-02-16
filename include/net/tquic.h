@@ -982,6 +982,12 @@ struct tquic_connection {
 	size_t retry_token_len;		/* Length of retry token */
 	bool retry_received;		/* True after Retry processing */
 
+	/*
+	 * RFC 9000 Section 7.2: Client updates DCID to server's SCID
+	 * from the first Initial packet received.  Set after update.
+	 */
+	bool dcid_updated;
+
 	/* Transport parameters (RFC 9000 Section 18) */
 	struct tquic_transport_params local_params;
 	struct tquic_transport_params remote_params;
@@ -2455,12 +2461,14 @@ int tquic_crypto_derive_initial_secrets(struct tquic_connection *conn,
 u32 tquic_crypto_get_version(struct tquic_crypto_state *crypto);
 void tquic_crypto_set_version(struct tquic_crypto_state *crypto, u32 version);
 
-/* Packet encryption/decryption */
+/* Packet encryption/decryption - enc_level selects which key set to use */
 int tquic_encrypt_packet(struct tquic_crypto_state *crypto,
+			 int enc_level,
 			 u8 *header, size_t header_len,
 			 u8 *payload, size_t payload_len,
 			 u64 pkt_num, u8 *out, size_t *out_len);
 int tquic_decrypt_packet(struct tquic_crypto_state *crypto,
+			 int enc_level,
 			 const u8 *header, size_t header_len,
 			 u8 *payload, size_t payload_len,
 			 u64 pkt_num, u8 *out, size_t *out_len);

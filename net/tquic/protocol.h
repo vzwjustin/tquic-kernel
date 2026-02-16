@@ -583,6 +583,7 @@ void tquic_cid_pool_destroy(struct tquic_connection *conn);
 int tquic_cid_issue(struct tquic_connection *conn, struct tquic_cid *cid);
 int tquic_cid_retire(struct tquic_connection *conn, u64 seq_num);
 struct tquic_connection *tquic_cid_lookup(const struct tquic_cid *cid);
+struct tquic_connection *tquic_cid_rht_lookup(const struct tquic_cid *cid);
 int tquic_cid_get_for_migration(struct tquic_connection *conn,
 				struct tquic_cid *cid);
 int tquic_cid_add_remote(struct tquic_connection *conn,

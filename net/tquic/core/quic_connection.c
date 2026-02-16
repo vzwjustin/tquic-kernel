@@ -232,6 +232,29 @@ static struct tquic_connection *tquic_conn_lookup(struct tquic_cid *cid)
 	return conn;
 }
 
+/**
+ * tquic_cid_rht_lookup - Look up connection by CID in the rhashtable
+ *
+ * Searches the CID rhashtable (populated by tquic_conn_create).
+ * Exported for use as a fallback in the global lookup chain.
+ */
+struct tquic_connection *tquic_cid_rht_lookup(const struct tquic_cid *cid)
+{
+	struct tquic_cid lookup_cid;
+	struct tquic_connection *conn;
+
+	if (!cid || cid->len == 0)
+		return NULL;
+
+	/* Copy to mutable struct for rhashtable API */
+	memcpy(&lookup_cid, cid, sizeof(lookup_cid));
+	conn = tquic_conn_lookup(&lookup_cid);
+	pr_warn("tquic_cid_rht_lookup: len=%u id=%*phN result=%p\n",
+		cid->len, min_t(int, cid->len, 8), cid->id, conn);
+	return conn;
+}
+EXPORT_SYMBOL_GPL(tquic_cid_rht_lookup);
+
 static void tquic_conn_generate_cid(struct tquic_cid *cid, u8 len)
 {
 	cid->len = len;

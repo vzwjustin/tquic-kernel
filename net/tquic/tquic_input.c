@@ -461,16 +461,36 @@ static int tquic_remove_header_protection(struct tquic_connection *conn,
  */
 
 /*
+ * Map QUIC packet type to encryption level.
+ * PKT_INITIAL(0)->ENC_INITIAL(0), PKT_0RTT(1)->ENC_APPLICATION(2),
+ * PKT_HANDSHAKE(2)->ENC_HANDSHAKE(1), short(3)->ENC_APPLICATION(2).
+ */
+static int tquic_pkt_type_to_enc_level(int pkt_type)
+{
+	switch (pkt_type) {
+	case TQUIC_PKT_INITIAL:
+		return 0;  /* TQUIC_ENC_INITIAL */
+	case TQUIC_PKT_HANDSHAKE:
+		return 1;  /* TQUIC_ENC_HANDSHAKE */
+	default:
+		return 2;  /* TQUIC_ENC_APPLICATION */
+	}
+}
+
+/*
  * Decrypt packet payload
  */
 static int tquic_decrypt_payload(struct tquic_connection *conn,
 				 u8 *header, int header_len,
 				 u8 *payload, int payload_len,
-				 u64 pkt_num, int enc_level,
+				 u64 pkt_num, int pkt_type,
 				 u8 *out, size_t *out_len)
 {
 	if (conn->crypto_state) {
+		int enc_level = tquic_pkt_type_to_enc_level(pkt_type);
+
 		return tquic_decrypt_packet(conn->crypto_state,
+					    enc_level,
 					    header, header_len,
 					    payload, payload_len,
 					    pkt_num, out, out_len);
@@ -1300,6 +1320,14 @@ static int tquic_process_crypto_frame(struct tquic_rx_ctx *ctx)
 			ctx->offset += length;
 			return ret;
 		}
+
+		/*
+		 * Flush any queued crypto response (e.g. client Finished)
+		 * immediately after the handshake state machine processes
+		 * incoming CRYPTO data.
+		 */
+		if (ctx->conn)
+			tquic_output_flush_crypto(ctx->conn);
 	} else {
 		pr_warn("crypto_frame: no inline_hs! conn=%p tsk=%p\n",
 			ctx->conn,
@@ -3302,6 +3330,23 @@ static int tquic_process_packet(struct tquic_connection *conn,
 			/* New connection - would handle Initial packet */
 			tquic_dbg("no connection found for DCID\n");
 			return -ENOENT;
+		}
+
+		/*
+		 * RFC 9000 Section 7.2: When a client receives a packet
+		 * from the server, the Destination Connection ID field
+		 * of subsequent packets sent by the client MUST use the
+		 * value of the Source Connection ID field from the
+		 * server's first Initial or Handshake packet.
+		 */
+		if (!conn->is_server && !conn->dcid_updated &&
+		    scid_len > 0 && scid_len <= TQUIC_MAX_CID_LEN) {
+			pr_warn("process_pkt: updating client DCID from %*phN to server SCID %*phN\n",
+				min_t(int, conn->dcid.len, 8), conn->dcid.id,
+				min_t(int, scid_len, 8), scid);
+			memcpy(conn->dcid.id, scid, scid_len);
+			conn->dcid.len = scid_len;
+			conn->dcid_updated = true;
 		}
 
 		/* Parse token for Initial packets */

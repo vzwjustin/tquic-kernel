@@ -18,23 +18,27 @@ enum tquic_enc_level {
 	TQUIC_ENC_LEVEL_COUNT,
 };
 
-/* Packet encryption/decryption */
+/* Packet encryption/decryption - enc_level selects which key set to use */
 int tquic_encrypt_packet(struct tquic_crypto_state *crypto,
+			 int enc_level,
 			 u8 *header, size_t header_len,
 			 u8 *payload, size_t payload_len,
 			 u64 pkt_num, u8 *out, size_t *out_len);
 int tquic_decrypt_packet(struct tquic_crypto_state *crypto,
+			 int enc_level,
 			 const u8 *header, size_t header_len,
 			 u8 *payload, size_t payload_len,
 			 u64 pkt_num, u8 *out, size_t *out_len);
 
 /* Multipath packet encryption/decryption */
 int tquic_encrypt_packet_multipath(struct tquic_crypto_state *crypto,
+				   int enc_level,
 				   u8 *header, size_t header_len,
 				   u8 *payload, size_t payload_len,
 				   u64 pkt_num, u32 path_id,
 				   u8 *out, size_t *out_len);
 int tquic_decrypt_packet_multipath(struct tquic_crypto_state *crypto,
+				   int enc_level,
 				   const u8 *header, size_t header_len,
 				   u8 *payload, size_t payload_len,
 				   u64 pkt_num, u32 path_id,

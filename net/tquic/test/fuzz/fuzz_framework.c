@@ -770,6 +770,7 @@ int tquic_fuzz_run_once(struct tquic_fuzz_state *state,
 				size_t decrypted_len;
 
 				ret = tquic_decrypt_packet(target->conn->crypto_state,
+							   0, /* TQUIC_ENC_INITIAL */
 							   packet_copy, 20,
 							   packet_copy + 20, len - 20,
 							   0, decrypted, &decrypted_len);

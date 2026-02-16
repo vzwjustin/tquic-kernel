@@ -611,32 +611,41 @@ static void tquic_create_nonce_multipath(const u8 *iv, u64 pkt_num,
  * Encrypt packet payload
  */
 int tquic_encrypt_packet(struct tquic_crypto_state *crypto,
+			 int enc_level,
 			 u8 *header, size_t header_len,
 			 u8 *payload, size_t payload_len,
 			 u64 pkt_num, u8 *out, size_t *out_len)
 {
-	struct tquic_keys *keys = &crypto->write_keys[crypto->write_level];
+	struct tquic_keys *keys;
 	DECLARE_CRYPTO_WAIT(wait);
 	u8 nonce[12];
 	struct aead_request *req;
 	struct scatterlist sg[2];
 	int ret;
 
+	if (enc_level < 0 || enc_level >= TQUIC_ENC_LEVEL_COUNT)
+		return -EINVAL;
+
+	keys = &crypto->write_keys[enc_level];
 	if (!keys->valid)
 		return -EINVAL;
 
 	pr_warn("tquic_encrypt: level=%d pkt_num=%llu hdr_len=%zu "
 		"pay_len=%zu key=%*phN iv=%*phN\n",
-		crypto->write_level, pkt_num, header_len, payload_len,
+		enc_level, pkt_num, header_len, payload_len,
 		min_t(int, keys->key_len, 8), keys->key,
 		min_t(int, keys->iv_len, 8), keys->iv);
 	if (header_len >= 6)
 		pr_warn("tquic_encrypt: hdr[0..5]=%*phN\n",
 			min_t(int, header_len, 6), header);
 
+	/* Re-key AEAD TX for this level's key material */
+	ret = crypto_aead_setkey(crypto->aead_tx, keys->key, keys->key_len);
+	if (ret)
+		return ret;
+
 	tquic_create_nonce(keys->iv, pkt_num, nonce);
 
-	/* Key is set once at installation time (CF-145), use TX handle */
 	req = aead_request_alloc(crypto->aead_tx, GFP_ATOMIC);
 	if (!req) {
 		ret = -ENOMEM;
@@ -669,17 +678,22 @@ EXPORT_SYMBOL_GPL(tquic_encrypt_packet);
  * Decrypt packet payload
  */
 int tquic_decrypt_packet(struct tquic_crypto_state *crypto,
+			 int enc_level,
 			 const u8 *header, size_t header_len,
 			 u8 *payload, size_t payload_len,
 			 u64 pkt_num, u8 *out, size_t *out_len)
 {
-	struct tquic_keys *keys = &crypto->read_keys[crypto->read_level];
+	struct tquic_keys *keys;
 	DECLARE_CRYPTO_WAIT(wait);
 	u8 nonce[12];
 	struct aead_request *req;
 	struct scatterlist sg[2];
 	int ret;
 
+	if (enc_level < 0 || enc_level >= TQUIC_ENC_LEVEL_COUNT)
+		return -EINVAL;
+
+	keys = &crypto->read_keys[enc_level];
 	if (!keys->valid)
 		return -EINVAL;
 
@@ -688,16 +702,20 @@ int tquic_decrypt_packet(struct tquic_crypto_state *crypto,
 
 	pr_warn("tquic_decrypt: level=%d pkt_num=%llu hdr_len=%zu "
 		"pay_len=%zu key=%*phN iv=%*phN\n",
-		crypto->read_level, pkt_num, header_len, payload_len,
+		enc_level, pkt_num, header_len, payload_len,
 		min_t(int, keys->key_len, 8), keys->key,
 		min_t(int, keys->iv_len, 8), keys->iv);
 	if (header_len >= 6)
 		pr_warn("tquic_decrypt: hdr[0..5]=%*phN\n",
 			min_t(int, header_len, 6), header);
 
+	/* Re-key AEAD RX for this level's key material */
+	ret = crypto_aead_setkey(crypto->aead_rx, keys->key, keys->key_len);
+	if (ret)
+		return ret;
+
 	tquic_create_nonce(keys->iv, pkt_num, nonce);
 
-	/* Key is set once at installation time (CF-145), use RX handle */
 	req = aead_request_alloc(crypto->aead_rx, GFP_ATOMIC);
 	if (!req) {
 		ret = -ENOMEM;
@@ -741,25 +759,34 @@ EXPORT_SYMBOL_GPL(tquic_decrypt_packet);
  * cryptographic separation between paths per draft-ietf-quic-multipath.
  */
 int tquic_encrypt_packet_multipath(struct tquic_crypto_state *crypto,
+				   int enc_level,
 				   u8 *header, size_t header_len,
 				   u8 *payload, size_t payload_len,
 				   u64 pkt_num, u32 path_id,
 				   u8 *out, size_t *out_len)
 {
-	struct tquic_keys *keys = &crypto->write_keys[crypto->write_level];
+	struct tquic_keys *keys;
 	DECLARE_CRYPTO_WAIT(wait);
 	u8 nonce[12];
 	struct aead_request *req;
 	struct scatterlist sg[2];
 	int ret;
 
+	if (enc_level < 0 || enc_level >= TQUIC_ENC_LEVEL_COUNT)
+		return -EINVAL;
+
+	keys = &crypto->write_keys[enc_level];
 	if (!keys->valid)
 		return -EINVAL;
+
+	/* Re-key AEAD TX for this level's key material */
+	ret = crypto_aead_setkey(crypto->aead_tx, keys->key, keys->key_len);
+	if (ret)
+		return ret;
 
 	/* Use multipath nonce with path_id */
 	tquic_create_nonce_multipath(keys->iv, pkt_num, path_id, nonce);
 
-	/* Key is set once at installation time (CF-145), use TX handle */
 	req = aead_request_alloc(crypto->aead_tx, GFP_ATOMIC);
 	if (!req) {
 		ret = -ENOMEM;
@@ -795,28 +822,37 @@ EXPORT_SYMBOL_GPL(tquic_encrypt_packet_multipath);
  * cryptographic separation between paths per draft-ietf-quic-multipath.
  */
 int tquic_decrypt_packet_multipath(struct tquic_crypto_state *crypto,
+				   int enc_level,
 				   const u8 *header, size_t header_len,
 				   u8 *payload, size_t payload_len,
 				   u64 pkt_num, u32 path_id,
 				   u8 *out, size_t *out_len)
 {
-	struct tquic_keys *keys = &crypto->read_keys[crypto->read_level];
+	struct tquic_keys *keys;
 	DECLARE_CRYPTO_WAIT(wait);
 	u8 nonce[12];
 	struct aead_request *req;
 	struct scatterlist sg[2];
 	int ret;
 
+	if (enc_level < 0 || enc_level >= TQUIC_ENC_LEVEL_COUNT)
+		return -EINVAL;
+
+	keys = &crypto->read_keys[enc_level];
 	if (!keys->valid)
 		return -EINVAL;
 
 	if (payload_len < 16)
 		return -EINVAL;
 
+	/* Re-key AEAD RX for this level's key material */
+	ret = crypto_aead_setkey(crypto->aead_rx, keys->key, keys->key_len);
+	if (ret)
+		return ret;
+
 	/* Use multipath nonce with path_id */
 	tquic_create_nonce_multipath(keys->iv, pkt_num, path_id, nonce);
 
-	/* Key is set once at installation time (CF-145), use RX handle */
 	req = aead_request_alloc(crypto->aead_rx, GFP_ATOMIC);
 	if (!req) {
 		ret = -ENOMEM;

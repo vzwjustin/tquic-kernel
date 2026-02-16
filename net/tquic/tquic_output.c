@@ -1060,17 +1060,37 @@ static int tquic_apply_header_protection(struct tquic_connection *conn,
  */
 
 /*
+ * Map QUIC packet type to encryption level.
+ * PKT_INITIAL(0)->ENC_INITIAL(0), PKT_0RTT(1)->ENC_APPLICATION(2),
+ * PKT_HANDSHAKE(2)->ENC_HANDSHAKE(1), short(3)->ENC_APPLICATION(2).
+ */
+static int tquic_pkt_type_to_enc_level(int pkt_type)
+{
+	switch (pkt_type) {
+	case TQUIC_PKT_INITIAL:
+		return 0;  /* TQUIC_ENC_INITIAL */
+	case TQUIC_PKT_HANDSHAKE:
+		return 1;  /* TQUIC_ENC_HANDSHAKE */
+	default:
+		return 2;  /* TQUIC_ENC_APPLICATION */
+	}
+}
+
+/*
  * Encrypt packet payload using AEAD
  */
 static int tquic_encrypt_payload(struct tquic_connection *conn,
 				 u8 *header, int header_len,
 				 u8 *payload, int payload_len,
-				 u64 pkt_num, int enc_level)
+				 u64 pkt_num, int pkt_type)
 {
 	/* Use the crypto module's encrypt function */
 	if (conn->crypto_state) {
 		size_t out_len;
+		int enc_level = tquic_pkt_type_to_enc_level(pkt_type);
+
 		return tquic_encrypt_packet(conn->crypto_state,
+					    enc_level,
 					    header, header_len,
 					    payload, payload_len,
 					    pkt_num, payload, &out_len);

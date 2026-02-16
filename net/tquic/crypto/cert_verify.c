@@ -1549,19 +1549,31 @@ static int parse_public_key_info(struct tquic_x509_cert *cert,
 {
 	const u8 *p = data;
 	u32 content_len, total_len;
+	u32 algo_content_len, algo_total_len;
 	int ret;
 
-	/* Algorithm SEQUENCE */
+	/* Outer SPKI SEQUENCE */
 	ret = asn1_get_tag_length(p, len, ASN1_SEQUENCE,
 				  &content_len, &total_len);
 	if (ret < 0)
 		return ret;
 
-	const u8 *algo_seq = p + (total_len - content_len);
+	const u8 *spki_content = p + (total_len - content_len);
+	u32 spki_remaining = content_len;
 
-	/* OID */
+	/* AlgorithmIdentifier SEQUENCE (inside SPKI) */
+	ret = asn1_get_tag_length(spki_content, spki_remaining,
+				  ASN1_SEQUENCE,
+				  &algo_content_len, &algo_total_len);
+	if (ret < 0)
+		return ret;
+
+	const u8 *algo_seq = spki_content +
+			     (algo_total_len - algo_content_len);
+
+	/* OID (inside AlgorithmIdentifier) */
 	u32 oid_content_len, oid_total_len;
-	ret = asn1_get_tag_length(algo_seq, content_len, ASN1_OID,
+	ret = asn1_get_tag_length(algo_seq, algo_content_len, ASN1_OID,
 				  &oid_content_len, &oid_total_len);
 	if (ret < 0)
 		return ret;
@@ -1573,7 +1585,7 @@ static int parse_public_key_info(struct tquic_x509_cert *cert,
 	const u8 *params = NULL;
 	u32 params_len = 0;
 	const u8 *after_oid = algo_seq + oid_total_len;
-	u32 remaining = content_len - oid_total_len;
+	u32 remaining = algo_content_len - oid_total_len;
 
 	if (remaining > 0 && after_oid[0] == ASN1_OID) {
 		u32 param_content, param_total;
@@ -1590,52 +1602,75 @@ static int parse_public_key_info(struct tquic_x509_cert *cert,
 			     &cert->pubkey.pubkey_algo,
 			     &cert->pubkey.key_bits);
 
-	p += total_len;
+	/* Public key BIT STRING (after AlgorithmIdentifier in SPKI) */
+	const u8 *bitstr_start = spki_content + algo_total_len;
+	u32 bitstr_avail = spki_remaining - algo_total_len;
 
-	/* Public key BIT STRING */
-	ret = asn1_get_tag_length(p, len - total_len, ASN1_BIT_STRING,
+	ret = asn1_get_tag_length(bitstr_start, bitstr_avail,
+				  ASN1_BIT_STRING,
 				  &content_len, &total_len);
 	if (ret < 0)
 		return ret;
 
-	/* Store raw SPKI for signature verification */
-	cert->pubkey.key_len = len;
-	cert->pubkey.key_data = kmalloc(len, GFP_KERNEL);
-	if (!cert->pubkey.key_data)
-		return -ENOMEM;
+	/* Update p to point to BIT STRING for RSA key size extraction */
+	p = bitstr_start;
 
-	memcpy(cert->pubkey.key_data, data, len);
+	/*
+	 * Store the raw public key from the BIT STRING content.
+	 * The BIT STRING has a leading "unused bits" byte (usually 0x00)
+	 * followed by the actual key data:
+	 *   - RSA: DER-encoded RSAPublicKey SEQUENCE
+	 *   - EC: uncompressed point (0x04 || x || y)
+	 *
+	 * The kernel's crypto_akcipher_set_pub_key("rsa") expects just
+	 * the RSAPublicKey DER, not the full SPKI.
+	 */
+	{
+		const u8 *key_bits = p + (total_len - content_len);
+
+		if (content_len < 2) {
+			/* BIT STRING too short */
+			return -EINVAL;
+		}
+
+		/* Skip unused bits byte */
+		cert->pubkey.key_len = content_len - 1;
+		cert->pubkey.key_data = kmalloc(cert->pubkey.key_len,
+						GFP_KERNEL);
+		if (!cert->pubkey.key_data)
+			return -ENOMEM;
+
+		memcpy(cert->pubkey.key_data, key_bits + 1,
+		       cert->pubkey.key_len);
+	}
 
 	/* For RSA, extract key size from modulus */
 	if (cert->pubkey.pubkey_algo == TQUIC_PUBKEY_ALGO_RSA) {
-		const u8 *key_bits = p + (total_len - content_len);
-		if (content_len > 1) {
-			/* Skip unused bits byte and outer SEQUENCE */
-			const u8 *rsa_key = key_bits + 1;
-			u32 rsa_remaining = content_len - 1;
+		const u8 *rsa_key = cert->pubkey.key_data;
+		u32 rsa_remaining = cert->pubkey.key_len;
 
-			u32 rsa_seq_content, rsa_seq_total;
-			ret = asn1_get_tag_length(rsa_key, rsa_remaining,
-						  ASN1_SEQUENCE,
-						  &rsa_seq_content,
-						  &rsa_seq_total);
+		u32 rsa_seq_content, rsa_seq_total;
+		ret = asn1_get_tag_length(rsa_key, rsa_remaining,
+					  ASN1_SEQUENCE,
+					  &rsa_seq_content,
+					  &rsa_seq_total);
+		if (ret == 0) {
+			/* First INTEGER is modulus */
+			const u8 *modulus_start = rsa_key +
+				(rsa_seq_total - rsa_seq_content);
+			u32 mod_content, mod_total;
+			ret = asn1_get_tag_length(modulus_start,
+						  rsa_seq_content,
+						  ASN1_INTEGER,
+						  &mod_content,
+						  &mod_total);
 			if (ret == 0) {
-				/* First INTEGER is modulus */
-				const u8 *modulus_start = rsa_key + (rsa_seq_total - rsa_seq_content);
-				u32 mod_content, mod_total;
-				ret = asn1_get_tag_length(modulus_start,
-							  rsa_seq_content,
-							  ASN1_INTEGER,
-							  &mod_content,
-							  &mod_total);
-				if (ret == 0) {
-					/* Skip leading zero if present */
-					const u8 *mod = modulus_start + (mod_total - mod_content);
-					if (mod_content > 0 && mod[0] == 0) {
-						mod_content--;
-					}
-					cert->pubkey.key_bits = mod_content * 8;
-				}
+				/* Skip leading zero if present */
+				const u8 *mod = modulus_start +
+					(mod_total - mod_content);
+				if (mod_content > 0 && mod[0] == 0)
+					mod_content--;
+				cert->pubkey.key_bits = mod_content * 8;
 			}
 		}
 	}
@@ -1657,8 +1692,11 @@ static int parse_tbs_certificate(struct tquic_x509_cert *cert,
 	/* TBSCertificate is a SEQUENCE */
 	ret = asn1_get_tag_length(p, end - p, ASN1_SEQUENCE,
 				  &content_len, &total_len);
-	if (ret < 0)
+	if (ret < 0) {
+		pr_warn("tquic_tbs: step1 TBS SEQUENCE failed ret=%d p[0]=%02x len=%u\n",
+			ret, p[0], (u32)(end - p));
 		return ret;
+	}
 
 	/* Store TBS for signature verification */
 	cert->tbs = p;
@@ -1671,16 +1709,21 @@ static int parse_tbs_certificate(struct tquic_x509_cert *cert,
 	if (p < end && p[0] == ASN1_CONTEXT_0) {
 		ret = asn1_get_tag_length(p, end - p, ASN1_CONTEXT_0,
 					  &content_len, &total_len);
-		if (ret < 0)
+		if (ret < 0) {
+			pr_warn("tquic_tbs: step2 Version failed ret=%d\n", ret);
 			return ret;
+		}
 		p += total_len;
 	}
 
 	/* Serial Number */
 	ret = asn1_get_tag_length(p, end - p, ASN1_INTEGER,
 				  &content_len, &total_len);
-	if (ret < 0)
+	if (ret < 0) {
+		pr_warn("tquic_tbs: step3 Serial failed ret=%d p[0]=%02x\n",
+			ret, p[0]);
 		return ret;
+	}
 
 	cert->serial = kmalloc(content_len, GFP_KERNEL);
 	if (!cert->serial)
@@ -1692,15 +1735,21 @@ static int parse_tbs_certificate(struct tquic_x509_cert *cert,
 	/* Signature Algorithm */
 	ret = asn1_get_tag_length(p, end - p, ASN1_SEQUENCE,
 				  &content_len, &total_len);
-	if (ret < 0)
+	if (ret < 0) {
+		pr_warn("tquic_tbs: step4 SigAlg failed ret=%d p[0]=%02x\n",
+			ret, p[0]);
 		return ret;
+	}
 	p += total_len;
 
 	/* Issuer */
 	ret = asn1_get_tag_length(p, end - p, ASN1_SEQUENCE,
 				  &content_len, &total_len);
-	if (ret < 0)
+	if (ret < 0) {
+		pr_warn("tquic_tbs: step5 Issuer failed ret=%d p[0]=%02x\n",
+			ret, p[0]);
 		return ret;
+	}
 
 	/* Store raw issuer DN */
 	cert->issuer_raw = kmalloc(total_len, GFP_KERNEL);
@@ -1718,15 +1767,20 @@ static int parse_tbs_certificate(struct tquic_x509_cert *cert,
 	/* Validity */
 	ret = asn1_get_tag_length(p, end - p, ASN1_SEQUENCE,
 				  &content_len, &total_len);
-	if (ret < 0)
+	if (ret < 0) {
+		pr_warn("tquic_tbs: step6 Validity failed ret=%d p[0]=%02x\n",
+			ret, p[0]);
 		return ret;
+	}
 
 	const u8 *validity = p + (total_len - content_len);
 
 	/* notBefore */
 	ret = parse_time(validity, content_len, &cert->valid_from);
-	if (ret < 0)
+	if (ret < 0) {
+		pr_warn("tquic_tbs: step6b notBefore failed ret=%d\n", ret);
 		return ret;
+	}
 
 	/* Skip notBefore to get notAfter */
 	u32 time_len, time_hdr;
@@ -1737,16 +1791,21 @@ static int parse_tbs_certificate(struct tquic_x509_cert *cert,
 	const u8 *not_after = validity + 1 + time_hdr + time_len;
 	ret = parse_time(not_after, content_len - (not_after - validity),
 			 &cert->valid_to);
-	if (ret < 0)
+	if (ret < 0) {
+		pr_warn("tquic_tbs: step7 notAfter failed ret=%d\n", ret);
 		return ret;
+	}
 
 	p += total_len;
 
 	/* Subject */
 	ret = asn1_get_tag_length(p, end - p, ASN1_SEQUENCE,
 				  &content_len, &total_len);
-	if (ret < 0)
+	if (ret < 0) {
+		pr_warn("tquic_tbs: step8 Subject failed ret=%d p[0]=%02x\n",
+			ret, p[0]);
 		return ret;
+	}
 
 	/* Store raw subject DN */
 	cert->subject_raw = kmalloc(total_len, GFP_KERNEL);
@@ -1764,12 +1823,17 @@ static int parse_tbs_certificate(struct tquic_x509_cert *cert,
 	/* SubjectPublicKeyInfo */
 	ret = asn1_get_tag_length(p, end - p, ASN1_SEQUENCE,
 				  &content_len, &total_len);
-	if (ret < 0)
+	if (ret < 0) {
+		pr_warn("tquic_tbs: step9 SPKI failed ret=%d p[0]=%02x\n",
+			ret, p[0]);
 		return ret;
+	}
 
 	ret = parse_public_key_info(cert, p, total_len);
-	if (ret < 0)
+	if (ret < 0) {
+		pr_warn("tquic_tbs: step10 parse_pub_key failed ret=%d\n", ret);
 		return ret;
+	}
 
 	p += total_len;
 
@@ -1828,15 +1892,23 @@ struct tquic_x509_cert *tquic_x509_cert_parse(const u8 *data, u32 len, gfp_t gfp
 	ret = asn1_get_tag_length(data, len, ASN1_SEQUENCE,
 				  &content_len, &total_len);
 	if (ret < 0) {
+		pr_warn("tquic_x509: SEQUENCE tag failed: ret=%d len=%u data[0..3]=%02x%02x%02x%02x\n",
+			ret, len,
+			len > 0 ? data[0] : 0, len > 1 ? data[1] : 0,
+			len > 2 ? data[2] : 0, len > 3 ? data[3] : 0);
 		tquic_x509_cert_free(cert);
 		return NULL;
 	}
+
+	pr_warn("tquic_x509: SEQUENCE ok content_len=%u total_len=%u\n",
+		content_len, total_len);
 
 	p = data + (total_len - content_len);
 
 	/* Parse TBSCertificate */
 	ret = parse_tbs_certificate(cert, p, content_len);
 	if (ret < 0) {
+		pr_warn("tquic_x509: parse_tbs failed: ret=%d\n", ret);
 		tquic_x509_cert_free(cert);
 		return NULL;
 	}
@@ -1846,6 +1918,7 @@ struct tquic_x509_cert *tquic_x509_cert_parse(const u8 *data, u32 len, gfp_t gfp
 
 	/* Validate tbs pointer is within parsed data bounds */
 	if (after_tbs < cert->tbs || after_tbs > p + content_len) {
+		pr_warn("tquic_x509: tbs bounds check failed\n");
 		tquic_x509_cert_free(cert);
 		return NULL;
 	}
@@ -1854,6 +1927,7 @@ struct tquic_x509_cert *tquic_x509_cert_parse(const u8 *data, u32 len, gfp_t gfp
 
 	ret = parse_signature(cert, after_tbs, remaining);
 	if (ret < 0) {
+		pr_warn("tquic_x509: parse_signature failed: ret=%d\n", ret);
 		tquic_x509_cert_free(cert);
 		return NULL;
 	}

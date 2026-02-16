@@ -3144,7 +3144,12 @@ struct tquic_connection *tquic_conn_lookup_by_cid(const struct tquic_cid *cid)
 		return conn;
 
 	/* Fall back to state machine CID table */
-	return tquic_state_cid_lookup(cid);
+	conn = tquic_state_cid_lookup(cid);
+	if (conn)
+		return conn;
+
+	/* Fall back to conn_create rhashtable (server-side connections) */
+	return tquic_cid_rht_lookup(cid);
 }
 EXPORT_SYMBOL_GPL(tquic_conn_lookup_by_cid);
 
