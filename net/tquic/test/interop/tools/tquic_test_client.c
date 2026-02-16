@@ -160,17 +160,18 @@ static int create_quic_connection(struct client_config *config)
     struct sockaddr_in6 addr;
     int opt;
 
-    /* Create QUIC socket */
-    sock = socket(AF_INET6, SOCK_STREAM, IPPROTO_QUIC);
+    /* Create QUIC socket - try AF_INET first for IPv4 targets */
+    sock = socket(AF_INET, SOCK_STREAM, IPPROTO_QUIC);
     if (sock < 0) {
-        /* Fall back to UDP for testing */
-        LOG_DEBUG("QUIC socket not available, using UDP");
-        sock = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
-        if (sock < 0) {
-            LOG_ERROR("Failed to create socket: %s", strerror(errno));
-            return -1;
-        }
+        LOG_DEBUG("QUIC AF_INET socket failed: %s, trying AF_INET6",
+                  strerror(errno));
+        sock = socket(AF_INET6, SOCK_STREAM, IPPROTO_QUIC);
     }
+    if (sock < 0) {
+        LOG_ERROR("QUIC socket not available: %s", strerror(errno));
+        return -1;
+    }
+    LOG_INFO("QUIC socket created (fd=%d)", sock);
 
     /* Allow IPv4 addresses */
     opt = 0;
