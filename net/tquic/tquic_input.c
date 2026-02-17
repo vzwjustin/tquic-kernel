@@ -1406,6 +1406,56 @@ static int tquic_process_crypto_frame(struct tquic_rx_ctx *ctx)
 }
 
 /*
+ * tquic_stream_recv_insert_sorted - Insert skb into recv_buf in offset order
+ * @stream: Target stream
+ * @new_skb: skb to insert (stream offset stored in cb[0..7])
+ *
+ * Maintains recv_buf sorted by stream offset so that recvmsg can
+ * deliver contiguous data even when STREAM frames arrive out of order.
+ * Walks backward from the tail, which is O(1) when frames arrive in
+ * order (the common case).
+ *
+ * Returns 0 on success, -EEXIST if the range overlaps an existing skb.
+ */
+static int tquic_stream_recv_insert_sorted(struct tquic_stream *stream,
+					   struct sk_buff *new_skb)
+{
+	u64 new_off = get_unaligned((u64 *)new_skb->cb);
+	u64 new_end = new_off + new_skb->len;
+	struct sk_buff *skb;
+	unsigned long flags;
+
+	spin_lock_irqsave(&stream->recv_buf.lock, flags);
+
+	/* Walk from tail — in-order arrival hits the first branch immediately */
+	skb_queue_reverse_walk(&stream->recv_buf, skb) {
+		u64 off = get_unaligned((u64 *)skb->cb);
+		u64 end = off + skb->len;
+
+		if (new_off >= end) {
+			/* new_skb belongs right after this one */
+			__skb_queue_after(&stream->recv_buf, skb, new_skb);
+			spin_unlock_irqrestore(&stream->recv_buf.lock,
+					       flags);
+			return 0;
+		}
+
+		if (new_end > off && new_off < end) {
+			/* Overlaps with existing data — duplicate */
+			spin_unlock_irqrestore(&stream->recv_buf.lock,
+					       flags);
+			return -EEXIST;
+		}
+		/* new_end <= off: new_skb is earlier, keep walking back */
+	}
+
+	/* Smallest offset seen so far — insert at head */
+	__skb_queue_head(&stream->recv_buf, new_skb);
+	spin_unlock_irqrestore(&stream->recv_buf.lock, flags);
+	return 0;
+}
+
+/*
  * Process STREAM frame
  */
 static int tquic_process_stream_frame(struct tquic_rx_ctx *ctx)
@@ -1597,38 +1647,45 @@ static int tquic_process_stream_frame(struct tquic_rx_ctx *ctx)
 	}
 
 	/*
-	 * Dedup check: skip data already received to prevent a malicious
-	 * peer from exhausting flow control by replaying STREAM frames.
-	 * recv_offset tracks the highest contiguous byte offset received.
+	 * Dedup check: skip data the application has already consumed.
+	 * recv_consumed tracks how many bytes the application has read
+	 * via recvmsg — anything below that is definitely duplicate.
+	 *
+	 * We do NOT use recv_offset (highest byte seen) here because
+	 * that would reject gap-filling retransmissions: if frames
+	 * arrive as [0,1000) then [2000,3000) then [1000,2000), the
+	 * third frame fills a gap and must not be discarded.
+	 *
+	 * Overlap with buffered-but-unconsumed data is caught later by
+	 * the sorted insertion helper.
 	 *
 	 * This MUST come after tquic_flow_check_recv_limits() so that
 	 * flow control *limit violations* are still detected on the
 	 * original offset+length, while flow control *accounting* below
 	 * only charges genuinely new bytes.
 	 */
-	if (length > 0 && offset + length <= stream->recv_offset) {
-		/* Fully duplicate -- ACK but do not charge FC or alloc */
-		pr_debug("tquic: stream %llu: dup data off=%llu len=%llu recv_offset=%llu\n",
-			 stream_id, offset, length, stream->recv_offset);
+	if (length > 0 && offset + length <= stream->recv_consumed) {
+		/* Fully consumed — ACK but do not charge FC or alloc */
+		pr_debug("tquic: stream %llu: dup data off=%llu len=%llu consumed=%llu\n",
+			 stream_id, offset, length, stream->recv_consumed);
 		ctx->offset += length;
 		ctx->ack_eliciting = true;
 		tquic_stream_put(stream);
 		return 0;
 	}
 
-	if (offset < stream->recv_offset) {
+	if (offset < stream->recv_consumed) {
 		/*
-		 * Partial overlap: trim the already-received prefix.
-		 * offset+length is preserved so recv_offset/final_size
-		 * updates downstream remain correct.
+		 * Partial overlap with consumed data: trim the prefix
+		 * that the application has already read.
 		 */
-		u64 trim = stream->recv_offset - offset;
+		u64 trim = stream->recv_consumed - offset;
 
 		pr_debug("tquic: stream %llu: partial dup trim %llu bytes (off %llu->%llu)\n",
-			 stream_id, trim, offset, stream->recv_offset);
+			 stream_id, trim, offset, stream->recv_consumed);
 		ctx->offset += trim;
 		length -= trim;
-		offset = stream->recv_offset;
+		offset = stream->recv_consumed;
 	}
 
 	/* Copy data to stream receive buffer */
@@ -1662,11 +1719,22 @@ static int tquic_process_stream_frame(struct tquic_rx_ctx *ctx)
 		skb_set_owner_r(data_skb, ctx->conn->sk);
 	}
 
-	skb_queue_tail(&stream->recv_buf, data_skb);
-	pr_info("tquic: stream %llu: enqueued %llu bytes at off=%llu conn=%px\n",
-		stream_id, length, offset, ctx->conn);
-	pr_debug("tquic: stream %llu: enqueued %llu bytes\n",
-		 stream_id, length);
+	/*
+	 * Insert in offset-sorted order so recvmsg can deliver
+	 * contiguous data even when frames arrive out of order.
+	 */
+	if (tquic_stream_recv_insert_sorted(stream, data_skb)) {
+		/* Overlaps with already-buffered data — drop duplicate */
+		if (ctx->conn->sk)
+			sk_mem_uncharge(ctx->conn->sk, data_skb->truesize);
+		kfree_skb(data_skb);
+		ctx->offset += length;
+		ctx->ack_eliciting = true;
+		tquic_stream_put(stream);
+		return 0;
+	}
+	pr_debug("tquic: stream %llu: enqueued %llu bytes at off=%llu\n",
+		 stream_id, length, offset);
 
 	/* Update recv_offset and final_size after successful enqueue */
 	stream->recv_offset = max(stream->recv_offset, offset + length);
@@ -1721,9 +1789,24 @@ static int tquic_process_max_data_frame(struct tquic_rx_ctx *ctx)
 	/* Update remote's max data limit (only increase, per RFC 9000) */
 	spin_lock_bh(&ctx->conn->lock);
 	if (max_data > ctx->conn->max_data_remote) {
+		struct rb_node *node;
+
 		ctx->conn->max_data_remote = max_data;
 
-		/* Try to flush any data blocked by connection flow control */
+		/*
+		 * Wake all streams that may be blocked in sendmsg
+		 * waiting for connection-level flow control credit.
+		 * sendmsg waits on stream->wait with a condition that
+		 * re-checks tquic_stream_check_flow_control(), which
+		 * includes connection-level limits.
+		 */
+		for (node = rb_first(&ctx->conn->streams);
+		     node; node = rb_next(node)) {
+			struct tquic_stream *s = rb_entry(node,
+					struct tquic_stream, node);
+			wake_up_interruptible(&s->wait);
+		}
+
 		spin_unlock_bh(&ctx->conn->lock);
 		tquic_output_flush(ctx->conn);
 	} else {

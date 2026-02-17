@@ -10,6 +10,7 @@
 
 #include <linux/slab.h>
 #include <linux/skbuff.h>
+#include <linux/unaligned.h>
 #include <linux/rcupdate.h>
 #include <crypto/utils.h>
 #include <net/tquic.h>
@@ -243,7 +244,8 @@ static inline void tquic_conn_retire_cid_internal(struct tquic_connection *conn,
 static void quic_packet_deliver_stream_data(struct tquic_stream *stream, u64 offset,
 					    const u8 *data, u64 len, bool fin)
 {
-	struct sk_buff *skb;
+	struct sk_buff *skb, *iter;
+	unsigned long flags;
 
 	if (!stream || !data || len == 0)
 		return;
@@ -261,6 +263,19 @@ static void quic_packet_deliver_stream_data(struct tquic_stream *stream, u64 off
 	if (len > 16384)
 		return;
 
+	/* Dedup: data already consumed by application is duplicate */
+	if (offset + len <= stream->recv_consumed)
+		return;
+
+	/* Trim consumed prefix */
+	if (offset < stream->recv_consumed) {
+		u64 trim = stream->recv_consumed - offset;
+
+		data += trim;
+		len -= trim;
+		offset = stream->recv_consumed;
+	}
+
 	/* Allocate an skb to hold the data */
 	skb = alloc_skb((unsigned int)len, GFP_ATOMIC);
 	if (!skb)
@@ -269,15 +284,49 @@ static void quic_packet_deliver_stream_data(struct tquic_stream *stream, u64 off
 	/* Copy data into the skb */
 	skb_put_data(skb, data, len);
 
-	/* Queue the skb for stream receive processing */
-	skb_queue_tail(&stream->recv_buf, skb);
+	/* Store offset for sorted insertion and contiguous delivery */
+	put_unaligned(offset, (u64 *)skb->cb);
+
+	/*
+	 * Insert in offset-sorted order.  Walk from tail for O(1)
+	 * in-order case.  Reject overlaps as duplicates.
+	 */
+	spin_lock_irqsave(&stream->recv_buf.lock, flags);
+
+	skb_queue_reverse_walk(&stream->recv_buf, iter) {
+		u64 iter_off = get_unaligned((u64 *)iter->cb);
+		u64 iter_end = iter_off + iter->len;
+
+		if (offset >= iter_end) {
+			__skb_queue_after(&stream->recv_buf, iter, skb);
+			goto inserted;
+		}
+		if (offset + len > iter_off && offset < iter_end) {
+			/* Overlap — duplicate */
+			spin_unlock_irqrestore(&stream->recv_buf.lock,
+					       flags);
+			kfree_skb(skb);
+			return;
+		}
+	}
+
+	__skb_queue_head(&stream->recv_buf, skb);
+
+inserted:
+	spin_unlock_irqrestore(&stream->recv_buf.lock, flags);
+
+	/* Track highest byte offset seen */
+	if (offset + len > stream->recv_offset)
+		stream->recv_offset = offset + len;
 
 	/* Update stream state */
-	if (fin)
+	if (fin) {
 		stream->fin_received = 1;
+		stream->final_size = offset + len;
+	}
 
 	/* Wake up any waiting readers */
-	wake_up(&stream->wait);
+	wake_up_interruptible(&stream->wait);
 }
 
 /* Parse long header packet */
@@ -973,12 +1022,14 @@ int tquic_frame_process_one(struct tquic_connection *conn, const u8 *data,
 	case TQUIC_FRAME_MAX_DATA:
 		varint_len = tquic_varint_decode(data + offset, len - offset, &val1);
 		if (varint_len < 0)
-
 			return varint_len;
 		offset += varint_len;
 
-		if (val1 > READ_ONCE(conn->max_data_remote))
+		if (val1 > READ_ONCE(conn->max_data_remote)) {
 			WRITE_ONCE(conn->max_data_remote, val1);
+			/* Trigger TX to send data blocked by connection FC */
+			schedule_work(&conn->tx_work);
+		}
 		return offset;
 
 	case TQUIC_FRAME_MAX_STREAM_DATA:
@@ -998,9 +1049,12 @@ int tquic_frame_process_one(struct tquic_connection *conn, const u8 *data,
 
 		{
 			struct tquic_stream *stream = tquic_stream_lookup_internal(conn, val1);
-			if (stream) {
-				if (val2 > stream->max_send_data)
-					stream->max_send_data = val2;
+
+			if (stream && val2 > stream->max_send_data) {
+				stream->max_send_data = val2;
+				stream->blocked = false;
+				wake_up_interruptible(&stream->wait);
+				schedule_work(&conn->tx_work);
 			}
 		}
 		return offset;

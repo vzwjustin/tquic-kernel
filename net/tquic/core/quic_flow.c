@@ -448,6 +448,7 @@ void tquic_stream_flow_control_init(struct tquic_stream *stream,
 	stream->max_send_data = max_stream_data_remote;
 	stream->send_offset = 0;
 	stream->recv_offset = 0;
+	stream->recv_consumed = 0;
 }
 
 /**
@@ -592,8 +593,8 @@ void tquic_stream_flow_control_on_data_recvd(struct tquic_stream *stream,
 			    TQUIC_FC_WINDOW_UPDATE_THRESHOLD;
 		spin_unlock_bh(&stream->fc->lock);
 	} else {
-		/* Fallback: use recv_offset as conservative approximation */
-		consumed = stream->recv_offset;
+		/* Use app-consumed bytes for FC window decisions (RFC 9000 S4.2) */
+		consumed = stream->recv_consumed;
 		threshold = stream->max_recv_data /
 			    TQUIC_FC_WINDOW_UPDATE_THRESHOLD;
 	}
@@ -618,7 +619,9 @@ static void tquic_stream_flow_control_update_max_stream_data(struct tquic_stream
 	u64 consumed;
 	u64 window;
 
-	consumed = stream->recv_offset;
+	consumed = stream->recv_consumed;
+	if (consumed >= stream->max_recv_data)
+		return;
 	window = stream->max_recv_data - consumed;
 
 	/*

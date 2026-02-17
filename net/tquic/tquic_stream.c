@@ -26,6 +26,7 @@
 #include <linux/poll.h>
 #include <linux/anon_inodes.h>
 #include <linux/slab.h>
+#include <linux/unaligned.h>
 #include <net/sock.h>
 #include <net/tquic.h>
 #include <uapi/linux/tquic.h>
@@ -354,6 +355,7 @@ static struct tquic_stream *tquic_stream_alloc(struct tquic_connection *conn,
 
 	stream->send_offset = 0;
 	stream->recv_offset = 0;
+	stream->recv_consumed = 0;
 	stream->fin_received = false;
 	stream->fin_sent = false;
 
@@ -1140,6 +1142,22 @@ out_put:
 	return copied;
 }
 
+/*
+ * tquic_stream_recv_contiguous - Check if contiguous data is ready
+ * @stream: Stream to check
+ *
+ * Returns true when the head of recv_buf starts at recv_consumed,
+ * meaning the next byte the application expects is available.
+ */
+static inline bool tquic_stream_recv_contiguous(struct tquic_stream *stream)
+{
+	struct sk_buff *head = skb_peek(&stream->recv_buf);
+
+	if (!head)
+		return false;
+	return get_unaligned((u64 *)head->cb) == stream->recv_consumed;
+}
+
 /**
  * tquic_stream_recvmsg - Receive data from stream socket
  * @sock: Stream socket
@@ -1181,10 +1199,17 @@ static int tquic_stream_recvmsg(struct socket *sock, struct msghdr *msg,
 	if (!tquic_conn_get(conn))
 		return -ENOTCONN;
 
-	/* Wait for data if blocking */
-	while (skb_queue_empty(&stream->recv_buf)) {
-		if (stream->fin_received) {
-			copied = 0;  /* EOF */
+	/*
+	 * Wait for contiguous data at recv_consumed.  The recv_buf is
+	 * sorted by offset, so we only deliver when the head matches
+	 * the next expected byte.  Out-of-order frames sit in the
+	 * buffer until the gap is filled by retransmission.
+	 */
+	while (!tquic_stream_recv_contiguous(stream)) {
+		/* True EOF: FIN received and all data consumed */
+		if (stream->fin_received &&
+		    stream->recv_consumed >= stream->final_size) {
+			copied = 0;
 			goto out_put;
 		}
 
@@ -1199,9 +1224,14 @@ static int tquic_stream_recvmsg(struct socket *sock, struct msghdr *msg,
 			goto out_put;
 		}
 
-		err = wait_event_interruptible(ss->wait,
-				!skb_queue_empty(&stream->recv_buf) ||
-				stream->fin_received ||
+		/*
+		 * Wait on stream->wait (not ss->wait).  The input
+		 * path wakes stream->wait when data arrives.
+		 */
+		err = wait_event_interruptible(stream->wait,
+				tquic_stream_recv_contiguous(stream) ||
+				(stream->fin_received &&
+				 stream->recv_consumed >= stream->final_size) ||
 				stream->state == TQUIC_STREAM_CLOSED ||
 				stream->state == TQUIC_STREAM_RESET_RECVD);
 		if (err) {
@@ -1210,9 +1240,24 @@ static int tquic_stream_recvmsg(struct socket *sock, struct msghdr *msg,
 		}
 	}
 
-	/* Copy data from receive buffer */
+	/*
+	 * Copy contiguous data from the offset-sorted receive buffer.
+	 * Only deliver from the head when its offset matches recv_consumed
+	 * so that gaps caused by out-of-order arrival are not exposed to
+	 * the application.
+	 */
 	while (copied < len && !skb_queue_empty(&stream->recv_buf)) {
+		u64 head_off;
 		size_t chunk;
+
+		skb = skb_peek(&stream->recv_buf);
+		if (!skb)
+			break;
+
+		/* Check contiguity: head offset must match next expected */
+		head_off = get_unaligned((u64 *)skb->cb);
+		if (head_off != stream->recv_consumed)
+			break;  /* Gap — wait for missing data */
 
 		skb = skb_dequeue(&stream->recv_buf);
 		if (!skb)
@@ -1229,11 +1274,12 @@ static int tquic_stream_recvmsg(struct socket *sock, struct msghdr *msg,
 		}
 
 		copied += chunk;
-		stream->recv_offset += chunk;
+		stream->recv_consumed += chunk;
 
 		if (chunk < skb->len) {
-			/* Partial read, put remainder back */
+			/* Partial read — update offset and put back */
 			skb_pull(skb, chunk);
+			put_unaligned(head_off + chunk, (u64 *)skb->cb);
 			skb_queue_head(&stream->recv_buf, skb);
 		} else {
 			/* Full skb consumed - uncharge memory and free */
@@ -1271,10 +1317,12 @@ static __poll_t tquic_stream_poll(struct file *file, struct socket *sock,
 
 	stream = ss->stream;
 
-	poll_wait(file, &ss->wait, wait);
+	poll_wait(file, &stream->wait, wait);
 
-	/* Check for readable data */
-	if (!skb_queue_empty(&stream->recv_buf) || stream->fin_received)
+	/* Check for readable data (contiguous from recv_consumed) or EOF */
+	if (tquic_stream_recv_contiguous(stream) ||
+	    (stream->fin_received &&
+	     stream->recv_consumed >= stream->final_size))
 		mask |= EPOLLIN | EPOLLRDNORM;
 
 	/* Check for writable (flow control permitting) */

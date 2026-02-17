@@ -782,6 +782,18 @@ void tquic_loss_detection_on_ack_received(struct tquic_connection *conn,
 
 		/* Update path stats for output_flush inflight calculation */
 		path->stats.acked_bytes += acked_bytes;
+
+		/*
+		 * RFC 9002 Section 7:
+		 * Remove acknowledged bytes from bytes_in_flight.
+		 * This is essential for correct congestion window
+		 * utilization — without it, bytes_in_flight grows
+		 * monotonically and the sender eventually stalls.
+		 */
+		if (path->cc.bytes_in_flight >= acked_bytes)
+			path->cc.bytes_in_flight -= acked_bytes;
+		else
+			path->cc.bytes_in_flight = 0;
 	}
 
 	/*
@@ -932,6 +944,18 @@ void tquic_loss_detection_detect_lost(struct tquic_connection *conn, u8 pn_space
 		if (lost_bytes > 0) {
 			tquic_cong_on_loss(path, lost_bytes);
 			conn->stats.lost_packets++;
+
+			/*
+			 * RFC 9002 Section 7:
+			 * Remove lost bytes from bytes_in_flight.
+			 * Lost packets are no longer considered in flight.
+			 */
+			if (path) {
+				if (path->cc.bytes_in_flight >= lost_bytes)
+					path->cc.bytes_in_flight -= lost_bytes;
+				else
+					path->cc.bytes_in_flight = 0;
+			}
 		}
 
 		/*
@@ -1152,9 +1176,9 @@ void tquic_set_loss_detection_timer(struct tquic_connection *conn)
 		u8 shift = min_t(u8, conn->pto_count, 30);
 
 		pto <<= shift;
-		/* Cap maximum PTO to 60 seconds */
-		if (pto > 60000000ULL)
-			pto = 60000000ULL;
+		/* Cap maximum PTO to 60 seconds (60000 ms) */
+		if (pto > 60000)
+			pto = 60000;
 	}
 
 	if (conn->time_of_last_ack_eliciting)
@@ -1358,6 +1382,7 @@ void tquic_loss_on_packet_number_space_discarded(struct tquic_connection *conn,
 	struct tquic_path *path;
 	u64 removed_bytes = 0;
 	unsigned long flags;
+	LIST_HEAD(to_free);
 
 	if (!conn || !conn->pn_spaces)
 		return;
@@ -1368,25 +1393,27 @@ void tquic_loss_on_packet_number_space_discarded(struct tquic_connection *conn,
 	path = tquic_loss_active_path_get(conn);
 	pn_space = &conn->pn_spaces[pn_space_idx];
 
+	/*
+	 * Collect all packets into a temporary list under the lock,
+	 * then free outside the lock. The previous unlock/relock
+	 * pattern caused use-after-free because list_for_each_entry_safe
+	 * only saves the next pointer once — if another CPU modifies
+	 * the list during the unlock window, the saved pointer is stale.
+	 */
 	spin_lock_irqsave(&pn_space->lock, flags);
 
-	/* Remove all sent packets from this space */
+	/* Collect all sent packets */
 	list_for_each_entry_safe(pkt, tmp, &pn_space->sent_list, list) {
 		if (pkt->in_flight)
 			removed_bytes += pkt->size;
-
 		list_del_init(&pkt->list);
-		spin_unlock_irqrestore(&pn_space->lock, flags);
-		tquic_sent_packet_free(pkt);
-		spin_lock_irqsave(&pn_space->lock, flags);
+		list_add_tail(&pkt->list, &to_free);
 	}
 
-	/* Remove all lost packets from this space */
+	/* Collect all lost packets */
 	list_for_each_entry_safe(pkt, tmp, &pn_space->lost_packets, list) {
 		list_del_init(&pkt->list);
-		spin_unlock_irqrestore(&pn_space->lock, flags);
-		tquic_sent_packet_free(pkt);
-		spin_lock_irqsave(&pn_space->lock, flags);
+		list_add_tail(&pkt->list, &to_free);
 	}
 
 	pn_space->ack_eliciting_in_flight = 0;
@@ -1394,6 +1421,12 @@ void tquic_loss_on_packet_number_space_discarded(struct tquic_connection *conn,
 	pn_space->keys_discarded = 1;
 
 	spin_unlock_irqrestore(&pn_space->lock, flags);
+
+	/* Free all collected packets outside the lock */
+	list_for_each_entry_safe(pkt, tmp, &to_free, list) {
+		list_del_init(&pkt->list);
+		tquic_sent_packet_free(pkt);
+	}
 
 	/* Update congestion control */
 	if (path && removed_bytes > 0) {
@@ -1550,11 +1583,21 @@ ktime_t tquic_loss_get_oldest_unacked_time(struct tquic_connection *conn)
  */
 void tquic_loss_retransmit_unacked(struct tquic_connection *conn)
 {
+	struct sk_buff_head clone_queue;
+	struct sk_buff *skb;
 	int i;
 
 	if (!conn || !conn->pn_spaces)
 		return;
 
+	skb_queue_head_init(&clone_queue);
+
+	/*
+	 * Collect clones under lock, send outside lock.
+	 * The previous unlock/relock pattern to call queue_frame
+	 * mid-iteration caused use-after-free because another CPU
+	 * could free the current list entry while the lock was dropped.
+	 */
 	for (i = 0; i < TQUIC_PN_SPACE_COUNT; i++) {
 		struct tquic_pn_space *pn_space = &conn->pn_spaces[i];
 		struct tquic_sent_packet *pkt;
@@ -1566,29 +1609,31 @@ void tquic_loss_retransmit_unacked(struct tquic_connection *conn)
 		spin_lock_irqsave(&pn_space->lock, flags);
 
 		list_for_each_entry(pkt, &pn_space->sent_list, list) {
-			if (pkt->ack_eliciting && !pkt->retransmitted && pkt->skb) {
-				struct sk_buff *skb = skb_clone(pkt->skb, GFP_ATOMIC);
+			if (pkt->ack_eliciting && !pkt->retransmitted &&
+			    pkt->skb) {
+				skb = skb_clone(pkt->skb, GFP_ATOMIC);
 				if (skb) {
 					pkt->retransmitted = true;
-					spin_unlock_irqrestore(&pn_space->lock, flags);
-					if (tquic_conn_queue_frame(conn, skb)) {
-						/* Queue full, stop retransmissions */
-						kfree_skb(skb);
-						return;
-					}
-					conn->stats.retransmissions++;
-					spin_lock_irqsave(&pn_space->lock, flags);
+					skb_queue_tail(&clone_queue, skb);
 				} else {
-					/* skb_clone failed - log error and continue */
 					tquic_conn_warn(conn,
 						"skb_clone failed retx pn=%llu\n",
 						pkt->pn);
-					/* Continue to next packet to maximize recovery */
 				}
 			}
 		}
 
 		spin_unlock_irqrestore(&pn_space->lock, flags);
+	}
+
+	/* Send all clones outside the lock */
+	while ((skb = skb_dequeue(&clone_queue)) != NULL) {
+		if (tquic_conn_queue_frame(conn, skb)) {
+			kfree_skb(skb);
+			skb_queue_purge(&clone_queue);
+			break;
+		}
+		conn->stats.retransmissions++;
 	}
 
 	/* Schedule TX work to send retransmissions */
@@ -1711,6 +1756,7 @@ void tquic_loss_cleanup_space(struct tquic_connection *conn, u8 pn_space_idx)
 	struct tquic_pn_space *pn_space;
 	struct tquic_sent_packet *pkt, *tmp;
 	unsigned long flags;
+	LIST_HEAD(to_free);
 
 	if (!conn || !conn->pn_spaces)
 		return;
@@ -1720,26 +1766,28 @@ void tquic_loss_cleanup_space(struct tquic_connection *conn, u8 pn_space_idx)
 
 	pn_space = &conn->pn_spaces[pn_space_idx];
 
+	/* Collect under lock, free outside — same pattern as discard */
 	spin_lock_irqsave(&pn_space->lock, flags);
 
 	list_for_each_entry_safe(pkt, tmp, &pn_space->sent_list, list) {
 		list_del_init(&pkt->list);
-		spin_unlock_irqrestore(&pn_space->lock, flags);
-		tquic_sent_packet_free(pkt);
-		spin_lock_irqsave(&pn_space->lock, flags);
+		list_add_tail(&pkt->list, &to_free);
 	}
 
 	list_for_each_entry_safe(pkt, tmp, &pn_space->lost_packets, list) {
 		list_del_init(&pkt->list);
-		spin_unlock_irqrestore(&pn_space->lock, flags);
-		tquic_sent_packet_free(pkt);
-		spin_lock_irqsave(&pn_space->lock, flags);
+		list_add_tail(&pkt->list, &to_free);
 	}
 
 	pn_space->ack_eliciting_in_flight = 0;
 	pn_space->loss_time = 0;
 
 	spin_unlock_irqrestore(&pn_space->lock, flags);
+
+	list_for_each_entry_safe(pkt, tmp, &to_free, list) {
+		list_del_init(&pkt->list);
+		tquic_sent_packet_free(pkt);
+	}
 }
 
 /**
