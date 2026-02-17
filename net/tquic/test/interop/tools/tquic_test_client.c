@@ -12,6 +12,7 @@
  * Kernel implementation by Justin Adams <spotty118@gmail.com>
  */
 
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -380,6 +381,7 @@ static int do_download(int sock, struct client_config *config)
     /* Receive response */
     int header_done = 0;
     char *body_start = NULL;
+    ssize_t content_length = -1;
 
     while (running && (bytes = recv(sock, buffer, sizeof(buffer), 0)) > 0) {
         if (!header_done) {
@@ -388,6 +390,16 @@ static int do_download(int sock, struct client_config *config)
             body_start = strstr(buffer, "\r\n\r\n");
             if (body_start) {
                 header_done = 1;
+
+                /* Parse Content-Length from headers */
+                char *cl = strcasestr(buffer, "Content-Length:");
+                if (cl) {
+                    cl += strlen("Content-Length:");
+                    while (*cl == ' ') cl++;
+                    content_length = atol(cl);
+                    LOG_DEBUG("Content-Length: %zd", content_length);
+                }
+
                 body_start += 4;
                 bytes -= (body_start - buffer);
                 if (bytes > 0) {
@@ -396,6 +408,11 @@ static int do_download(int sock, struct client_config *config)
                     }
                     total_bytes += bytes;
                 }
+
+                /* Check if we got all data in first recv */
+                if (content_length >= 0 &&
+                    (ssize_t)total_bytes >= content_length)
+                    break;
                 continue;
             }
         } else {
@@ -404,6 +421,10 @@ static int do_download(int sock, struct client_config *config)
             }
             total_bytes += bytes;
         }
+
+        /* Stop when Content-Length reached */
+        if (content_length >= 0 && (ssize_t)total_bytes >= content_length)
+            break;
 
         /* Migration after N bytes */
         if (!migrated && config->migrate_after_bytes > 0 &&
