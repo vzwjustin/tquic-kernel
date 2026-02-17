@@ -1973,6 +1973,17 @@ static int tquic_process_reset_stream_frame(struct tquic_rx_ctx *ctx)
 			} else if (stream_id > s->id) {
 				node = node->rb_right;
 			} else {
+				/*
+				 * RFC 9000 §4.5: final_size must be
+				 * consistent with data already received and
+				 * must not change once set.
+				 */
+				if (final_size < s->recv_offset ||
+				    (s->fin_received &&
+				     s->final_size != final_size)) {
+					spin_unlock_bh(&ctx->conn->lock);
+					return -EPROTO;
+				}
 				s->fin_received = true;
 				s->final_size = final_size;
 				s->state = TQUIC_STREAM_CLOSED;
@@ -4435,17 +4446,27 @@ int tquic_process_initial_for_server(struct tquic_connection *conn,
 			tquic_crypto_get_hp_ctx(conn->crypto_state) : NULL);
 
 	if (skb->len >= 22) {
-		pr_debug("process_initial_for_server: pkt bytes: "
-			"%02x %02x%02x%02x%02x %02x "
-			"%*phN %02x %*phN\n",
-			skb->data[0],
-			skb->data[1], skb->data[2],
-			skb->data[3], skb->data[4],
-			skb->data[5],
-			min_t(int, skb->data[5], 8), &skb->data[6],
-			skb->data[6 + skb->data[5]],
-			min_t(int, skb->data[6 + skb->data[5]], 8),
-			&skb->data[7 + skb->data[5]]);
+		/*
+		 * Safely log DCID and SCID bytes.  skb->data[5] is the
+		 * DCID length (attacker-controlled, 0–255); validate that
+		 * all accesses stay within skb->len before dereferencing.
+		 */
+		u8 dcid_len = skb->data[5];
+
+		if (skb->len >= (size_t)(7u + dcid_len + 1u)) {
+			u8 scid_len = skb->data[6 + dcid_len];
+
+			if (skb->len >= (size_t)(7u + dcid_len + 1u + scid_len))
+				pr_debug("process_initial_for_server: pkt bytes: %02x %02x%02x%02x%02x %02x %*phN %02x %*phN\n",
+					 skb->data[0],
+					 skb->data[1], skb->data[2],
+					 skb->data[3], skb->data[4],
+					 dcid_len,
+					 min_t(int, dcid_len, 8), &skb->data[6],
+					 scid_len,
+					 min_t(int, scid_len, 8),
+					 &skb->data[7 + dcid_len]);
+		}
 	}
 
 	ret = tquic_process_packet(conn, NULL, skb->data, skb->len, src_addr);

@@ -1679,7 +1679,12 @@ static const struct genl_ops tquic_genl_ops[] = {
 	{
 		.cmd = TQUIC_NL_CMD_SCHED_GET,
 		.doit = tquic_nl_cmd_sched_get,
-		/* Read-only: no GENL_ADMIN_PERM needed */
+		/*
+		 * Require CAP_NET_ADMIN: an unprivileged caller could use
+		 * this as a connection-ID existence oracle by supplying
+		 * arbitrary conn_ids and observing ENOENT vs success.
+		 */
+		.flags = GENL_ADMIN_PERM,
 	},
 	{
 		.cmd = TQUIC_NL_CMD_STATS_GET,

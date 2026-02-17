@@ -805,7 +805,8 @@ tlshd_fallback:
 	 */
 	if (tsk->server_name[0] != '\0') {
 		zero_rtt_ret = tquic_attempt_zero_rtt(sk, tsk->server_name,
-						      strlen(tsk->server_name));
+						      strnlen(tsk->server_name,
+							      sizeof(tsk->server_name) - 1));
 		if (zero_rtt_ret == 0) {
 			tquic_dbg("0-RTT enabled for handshake\n");
 			/* 0-RTT is possible - mark connection as able to send early data */
