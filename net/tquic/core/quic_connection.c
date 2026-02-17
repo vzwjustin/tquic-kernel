@@ -1032,6 +1032,11 @@ void tquic_conn_destroy(struct tquic_connection *conn)
 }
 #endif /* TQUIC_OUT_OF_TREE */
 
+/* Forward declarations for functions used before their definitions */
+static struct tquic_cid *tquic_conn_get_dcid(struct tquic_connection *conn);
+static void tquic_conn_set_state_local(struct tquic_connection *conn,
+				       enum tquic_conn_state state);
+
 static int tquic_conn_connect(struct tquic_connection *conn,
 			      struct sockaddr *addr, int addr_len)
 {
