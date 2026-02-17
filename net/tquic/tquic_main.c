@@ -1410,8 +1410,6 @@ err_cid_hash:
 err_hashtable:
 	tquic_output_tx_exit();
 err_frame_cache:
-	tquic_loss_cache_destroy();
-err_loss_cache:
 	kmem_cache_destroy(tquic_rx_buf_cache);
 err_rx_buf_cache:
 	/* tquic_path_cache destroyed by tquic_path_exit_module() */
@@ -1508,7 +1506,6 @@ void __exit tquic_exit(void)
 	/* Cleanup global data structures */
 	rhashtable_destroy(&tquic_conn_table);
 	tquic_output_tx_exit();
-	tquic_loss_cache_destroy();
 	kmem_cache_destroy(tquic_rx_buf_cache);
 	/* tquic_path_cache destroyed by tquic_path_exit_module() at line 1297 */
 	kmem_cache_destroy(tquic_stream_cache);
