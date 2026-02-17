@@ -198,6 +198,8 @@ struct tquic_dedup_state {
  *   sent_packets_lock protects rhashtable operations
  *   retx_queue.lock protects retransmit queue
  *   dedup.lock protects receiver bitmap
+ *   Lock order when both are needed:
+ *     sent_packets_lock -> retx_queue.lock
  */
 struct tquic_failover_ctx {
 	/* Sent packet tracking (for ACK lookup and failover requeue) */

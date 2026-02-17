@@ -648,9 +648,11 @@ EXPORT_SYMBOL_GPL(tquic_failover_on_ack_range);
 int tquic_failover_on_path_failed(struct tquic_failover_ctx *fc, u8 path_id)
 {
 	struct tquic_sent_packet *sp;
+	struct tquic_sent_packet *tracked;
 	struct rhashtable_iter iter;
 	int requeued = 0;
 	ktime_t start;
+	int ret;
 
 	if (!fc)
 		return 0;
@@ -660,14 +662,21 @@ int tquic_failover_on_path_failed(struct tquic_failover_ctx *fc, u8 path_id)
 	pr_info("path %u failed, requeuing unacked packets\n", path_id);
 
 	/*
-	 * Walk the rhashtable and directly add matching packets to the
-	 * retx_queue under its lock, one at a time. This eliminates the
-	 * local requeue_list that caused list corruption races (Bug 8).
+	 * Walk the rhashtable and atomically transfer matching packets from
+	 * sent_packets to retx_queue.
 	 *
-	 * Lock ordering: retx_queue.lock is taken per-packet during the
-	 * walk. The rhashtable walk holds an internal bucket lock (via
-	 * rcu_read_lock), but retx_queue.lock is never held by code that
-	 * takes a bucket lock, so no ABBA deadlock is possible.
+	 * SECURITY FIX (MEDIUM-4):
+	 *   Hold sent_packets_lock and retx_queue.lock together while:
+	 *   1) validating the walked object is still tracked
+	 *   2) removing it from rhashtable
+	 *   3) adding it to retx_queue
+	 *
+	 * This prevents an ACK thread from removing + call_rcu()'ing the same
+	 * object in between walk pointer acquisition and queue insertion.
+	 *
+	 * Lock order is fixed as:
+	 *   sent_packets_lock -> retx_queue.lock
+	 * matching tquic_failover_on_ack() and avoiding ABBA deadlocks.
 	 */
 	rhashtable_walk_enter(&fc->sent_packets, &iter);
 	rhashtable_walk_start(&iter);
@@ -698,18 +707,28 @@ int tquic_failover_on_path_failed(struct tquic_failover_ctx *fc, u8 path_id)
 			break;
 		}
 
-		/*
-		 * Take retx_queue.lock and re-check in_retx_queue.
-		 * Between our lockless read above and this locked check,
-		 * tquic_failover_requeue() or get_next() on another CPU
-		 * may have changed the state. The re-check under lock
-		 * is the authoritative decision.
-		 */
+		/* Transfer ownership from sent_packets -> retx_queue atomically. */
+		spin_lock_bh(&fc->sent_packets_lock);
 		spin_lock_bh(&fc->retx_queue.lock);
+
+		/*
+		 * Validate that this object is still tracked by packet number
+		 * and pointer identity. If ACK already removed/replaced it,
+		 * skip safely.
+		 */
+		tracked = rhashtable_lookup_fast(&fc->sent_packets,
+						 &sp->packet_number,
+						 tquic_sent_packet_params);
+		if (tracked != sp) {
+			spin_unlock_bh(&fc->retx_queue.lock);
+			spin_unlock_bh(&fc->sent_packets_lock);
+			continue;
+		}
 
 		if (sp->in_retx_queue) {
 			/* Already queued by concurrent requeue — skip */
 			spin_unlock_bh(&fc->retx_queue.lock);
+			spin_unlock_bh(&fc->sent_packets_lock);
 			continue;
 		}
 
@@ -717,11 +736,22 @@ int tquic_failover_on_path_failed(struct tquic_failover_ctx *fc, u8 path_id)
 		if (fc->retx_queue.count >= TQUIC_FAILOVER_MAX_QUEUED ||
 		    fc->retx_queue.bytes >= TQUIC_FAILOVER_MAX_QUEUE_BYTES) {
 			spin_unlock_bh(&fc->retx_queue.lock);
+			spin_unlock_bh(&fc->sent_packets_lock);
 			pr_warn_ratelimited(
 				"path %u: retx_queue full during failover\n",
 				path_id);
 			break;
 		}
+
+		ret = rhashtable_remove_fast(&fc->sent_packets, &sp->hash_node,
+					     tquic_sent_packet_params);
+		if (ret) {
+			spin_unlock_bh(&fc->retx_queue.lock);
+			spin_unlock_bh(&fc->sent_packets_lock);
+			continue;
+		}
+		if (fc->sent_count > 0)
+			fc->sent_count--;
 
 		list_add_tail(&sp->retx_list, &fc->retx_queue.queue);
 		sp->in_retx_queue = true;
@@ -730,6 +760,7 @@ int tquic_failover_on_path_failed(struct tquic_failover_ctx *fc, u8 path_id)
 		requeued++;
 
 		spin_unlock_bh(&fc->retx_queue.lock);
+		spin_unlock_bh(&fc->sent_packets_lock);
 	}
 
 	rhashtable_walk_stop(&iter);
@@ -1012,7 +1043,7 @@ struct tquic_sent_packet *tquic_failover_get_next(struct tquic_failover_ctx *fc)
 	sp = list_first_entry(&fc->retx_queue.queue, struct tquic_sent_packet,
 			      retx_list);
 
-	/* Remove from queue (but keep in rhashtable for ACK handling) */
+	/* Remove from queue (entry already removed from sent_packets on failover). */
 	list_del_init(&sp->retx_list);
 	sp->in_retx_queue = false;
 	if (likely(fc->retx_queue.count > 0))

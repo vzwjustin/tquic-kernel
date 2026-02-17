@@ -23,6 +23,7 @@
 #include <linux/completion.h>
 #include <linux/jiffies.h>
 #include <linux/ratelimit.h>
+#include <linux/refcount.h>
 #include <linux/unaligned.h>
 #include <linux/file.h>
 #include <net/sock.h>
@@ -383,7 +384,29 @@ struct tquic_handshake_state {
 	key_serial_t peerid;
 	unsigned long start_time;
 	u32 timeout_ms;
+	refcount_t refcnt;
+	bool tlshd_async;
 };
+
+static inline void tquic_hs_state_put(struct tquic_handshake_state *hs)
+{
+	if (hs && refcount_dec_and_test(&hs->refcnt))
+		kfree_sensitive(hs);
+}
+
+static struct tquic_handshake_state *tquic_hs_state_get_from_sock(struct sock *sk)
+{
+	struct tquic_sock *tsk = tquic_sk(sk);
+	struct tquic_handshake_state *hs;
+
+	read_lock_bh(&sk->sk_callback_lock);
+	hs = tsk->handshake_state;
+	if (hs && !refcount_inc_not_zero(&hs->refcnt))
+		hs = NULL;
+	read_unlock_bh(&sk->sk_callback_lock);
+
+	return hs;
+}
 
 /**
  * tquic_handshake_done - Callback invoked when tlshd completes handshake
@@ -450,9 +473,12 @@ void tquic_handshake_done(void *data, int status, key_serial_t peerid)
 	}
 
 	/* Wake up any thread waiting in tquic_wait_for_handshake() */
-	complete(&hs->done);
 	if (conn)
 		tquic_conn_put(conn);
+	complete(&hs->done);
+
+	if (hs->tlshd_async)
+		tquic_hs_state_put(hs);
 }
 EXPORT_SYMBOL_GPL(tquic_handshake_done);
 
@@ -563,13 +589,17 @@ int tquic_start_handshake(struct sock *sk)
 
 		hs->sk = sk;
 		init_completion(&hs->done);
-		hs->status = 0;
-		hs->peerid = TLS_NO_PEERID;
-		hs->start_time = jiffies;
-		hs->timeout_ms = TQUIC_HANDSHAKE_TIMEOUT_MS;
+			hs->status = 0;
+			hs->peerid = TLS_NO_PEERID;
+			hs->start_time = jiffies;
+			hs->timeout_ms = TQUIC_HANDSHAKE_TIMEOUT_MS;
+			refcount_set(&hs->refcnt, 1);
+			hs->tlshd_async = false;
 
-		tsk->handshake_state = hs;
-		tsk->flags |= TQUIC_F_HANDSHAKE_DONE;
+			write_lock_bh(&sk->sk_callback_lock);
+			tsk->handshake_state = hs;
+			write_unlock_bh(&sk->sk_callback_lock);
+			tsk->flags |= TQUIC_F_HANDSHAKE_DONE;
 
 		/*
 		 * In bypass mode no peer transport parameters are exchanged.
@@ -734,21 +764,21 @@ int tquic_start_handshake(struct sock *sk)
 			}
 
 		/* Defensive cap: ch_len must fit within the 4096-byte buffer */
-		if (ch_len == 0 || ch_len > 4096) {
-			kfree(ch_buf);
-			kfree_sensitive(hs);
-			tquic_hs_cleanup(ihs);
-			goto tlshd_fallback;
-		}
+			if (ch_len == 0 || ch_len > 4096) {
+				kfree(ch_buf);
+				tquic_hs_state_put(hs);
+				tquic_hs_cleanup(ihs);
+				goto tlshd_fallback;
+			}
 
 		/* Queue ClientHello in Initial crypto buffer */
 		ch_skb = alloc_skb(ch_len, GFP_KERNEL);
-		if (!ch_skb) {
-			kfree(ch_buf);
-			kfree_sensitive(hs);
-			tquic_hs_cleanup(ihs);
-			goto tlshd_fallback;
-		}
+			if (!ch_skb) {
+				kfree(ch_buf);
+				tquic_hs_state_put(hs);
+				tquic_hs_cleanup(ihs);
+				goto tlshd_fallback;
+			}
 		skb_put_data(ch_skb, ch_buf, ch_len);
 		kfree(ch_buf);
 
@@ -757,13 +787,17 @@ int tquic_start_handshake(struct sock *sk)
 
 		hs->sk = sk;
 		init_completion(&hs->done);
-		hs->status = -ETIMEDOUT;
-		hs->peerid = TLS_NO_PEERID;
-		hs->start_time = jiffies;
-		hs->timeout_ms = TQUIC_HANDSHAKE_TIMEOUT_MS;
+			hs->status = -ETIMEDOUT;
+			hs->peerid = TLS_NO_PEERID;
+			hs->start_time = jiffies;
+			hs->timeout_ms = TQUIC_HANDSHAKE_TIMEOUT_MS;
+			refcount_set(&hs->refcnt, 1);
+			hs->tlshd_async = false;
 
-		tsk->handshake_state = hs;
-		tsk->inline_hs = ihs;
+			write_lock_bh(&sk->sk_callback_lock);
+			tsk->handshake_state = hs;
+			write_unlock_bh(&sk->sk_callback_lock);
+			tsk->inline_hs = ihs;
 
 		tquic_dbg("inline TLS handshake initiated, ClientHello queued (%u bytes)\n",
 			 ch_len);
@@ -828,9 +862,13 @@ tlshd_fallback:
 	hs->peerid = TLS_NO_PEERID;
 	hs->start_time = jiffies;
 	hs->timeout_ms = TQUIC_HANDSHAKE_TIMEOUT_MS;
+	refcount_set(&hs->refcnt, 1);
+	hs->tlshd_async = false;
 
 	/* Store state in socket for later access */
+	write_lock_bh(&sk->sk_callback_lock);
 	tsk->handshake_state = hs;
+	write_unlock_bh(&sk->sk_callback_lock);
 
 	/*
 	 * Get the socket structure needed for net/handshake API.
@@ -853,12 +891,21 @@ tlshd_fallback:
 	args.ta_my_privkey = TLS_NO_PRIVKEY;
 
 	/*
+	 * Hold an explicit callback reference so cleanup can drop only the
+	 * socket-owned reference while callback data remains valid.
+	 */
+	hs->tlshd_async = true;
+	refcount_inc(&hs->refcnt);
+
+	/*
 	 * Initiate TLS client handshake via tlshd daemon.
 	 * This is asynchronous - tquic_handshake_done() will be called
 	 * when the handshake completes.
 	 */
 	ret = tls_client_hello_x509(&args, GFP_KERNEL);
 	if (ret) {
+		hs->tlshd_async = false;
+		tquic_hs_state_put(hs);
 		tquic_dbg("tls_client_hello_x509 failed: %d\n", ret);
 		goto err_free;
 	}
@@ -868,9 +915,11 @@ tlshd_fallback:
 	return 0;
 
 err_free:
-	tsk->handshake_state = NULL;
-	/* CF-429: Use kfree_sensitive for key-material structs */
-	kfree_sensitive(hs);
+	write_lock_bh(&sk->sk_callback_lock);
+	if (tsk->handshake_state == hs)
+		tsk->handshake_state = NULL;
+	write_unlock_bh(&sk->sk_callback_lock);
+	tquic_hs_state_put(hs);
 	tquic_conn_put(conn);
 	return ret;
 }
@@ -897,11 +946,12 @@ int tquic_wait_for_handshake(struct sock *sk, u32 timeout_ms)
 	struct tquic_handshake_state *hs;
 	unsigned long timeout_jiffies;
 	long ret;
+	int hs_status;
 
 	if (!sk)
 		return -EINVAL;
 
-	hs = tsk->handshake_state;
+	hs = tquic_hs_state_get_from_sock(sk);
 	if (!hs) {
 		/* No handshake in progress - check if already done */
 		if (tsk->flags & TQUIC_F_HANDSHAKE_DONE)
@@ -923,6 +973,7 @@ int tquic_wait_for_handshake(struct sock *sk, u32 timeout_ms)
 		/* Interrupted by signal */
 		tquic_dbg("handshake wait interrupted\n");
 		tls_handshake_cancel(sk);
+		tquic_hs_state_put(hs);
 		return -EINTR;
 	}
 
@@ -931,16 +982,20 @@ int tquic_wait_for_handshake(struct sock *sk, u32 timeout_ms)
 		tquic_dbg("handshake timed out after %u ms\n", timeout_ms);
 		tls_handshake_cancel(sk);
 		TQUIC_INC_STATS(sock_net(sk), TQUIC_MIB_HANDSHAKESTIMEOUT);
+		tquic_hs_state_put(hs);
 		return -EQUIC_HANDSHAKE_TIMEOUT;
 	}
 
 	/* Handshake completed - check status */
-	if (hs->status != 0) {
-		tquic_dbg("handshake completed with error %d\n", hs->status);
-		return tquic_map_handshake_error(hs->status);
+	hs_status = READ_ONCE(hs->status);
+	if (hs_status != 0) {
+		tquic_dbg("handshake completed with error %d\n", hs_status);
+		tquic_hs_state_put(hs);
+		return tquic_map_handshake_error(hs_status);
 	}
 
 	tquic_dbg("handshake completed successfully\n");
+	tquic_hs_state_put(hs);
 	return 0;
 }
 EXPORT_SYMBOL_GPL(tquic_wait_for_handshake);
@@ -958,32 +1013,37 @@ void tquic_handshake_cleanup(struct sock *sk)
 {
 	struct tquic_sock *tsk;
 	struct tquic_handshake_state *hs;
+	struct tquic_handshake *ihs;
 
 	if (!sk)
 		return;
 
 	tsk = tquic_sk(sk);
+	write_lock_bh(&sk->sk_callback_lock);
 	hs = tsk->handshake_state;
+	tsk->handshake_state = NULL;
+	ihs = tsk->inline_hs;
+	tsk->inline_hs = NULL;
+	write_unlock_bh(&sk->sk_callback_lock);
 
-	if (!hs)
+	if (!hs && !ihs)
 		return;
 
 	/*
-	 * Cancel any pending handshake. This is safe to call even if
-	 * the handshake has already completed.
+	 * Cancel any pending tlshd handshake. If cancellation succeeds,
+	 * completion callback will not run, so release callback reference here.
 	 */
-	tls_handshake_cancel(sk);
-
-	/* Clean up inline handshake if present */
-	if (tsk->inline_hs) {
-		tquic_hs_cleanup(tsk->inline_hs);
-		tsk->inline_hs = NULL;
+	if (hs && hs->tlshd_async && tls_handshake_cancel(sk)) {
+		hs->tlshd_async = false;
+		tquic_hs_state_put(hs);
 	}
 
-	tsk->handshake_state = NULL;
+	/* Clean up inline handshake if present */
+	if (ihs)
+		tquic_hs_cleanup(ihs);
 
-	/* CF-429: Use kfree_sensitive for key-material structs */
-	kfree_sensitive(hs);
+	if (hs)
+		tquic_hs_state_put(hs);
 
 	tquic_dbg("handshake state cleaned up\n");
 }
@@ -1034,6 +1094,7 @@ EXPORT_SYMBOL_GPL(tquic_handshake_in_progress);
 static void tquic_inline_hs_abort(struct sock *sk, int err)
 {
 	struct tquic_sock *tsk = tquic_sk(sk);
+	struct tquic_handshake_state *hs;
 
 	tquic_dbg("inline handshake aborted: %d\n", err);
 
@@ -1044,9 +1105,11 @@ static void tquic_inline_hs_abort(struct sock *sk, int err)
 
 	TQUIC_INC_STATS(sock_net(sk), TQUIC_MIB_HANDSHAKESFAILED);
 
-	if (tsk->handshake_state) {
-		tsk->handshake_state->status = err;
-		complete(&tsk->handshake_state->done);
+	hs = tquic_hs_state_get_from_sock(sk);
+	if (hs) {
+		hs->status = err;
+		complete(&hs->done);
+		tquic_hs_state_put(hs);
 	}
 }
 
@@ -1592,10 +1655,16 @@ int tquic_inline_hs_recv_crypto(struct sock *sk, const u8 *data, u32 len,
 		 * calling complete() — otherwise the waiter sees the
 		 * default -ETIMEDOUT and maps it to EQUIC_HANDSHAKE_TIMEOUT.
 		 */
-		if (tsk->handshake_state) {
-			tsk->handshake_state->status = 0;
-			complete(&tsk->handshake_state->done);
-		}
+			{
+				struct tquic_handshake_state *hs;
+
+				hs = tquic_hs_state_get_from_sock(sk);
+				if (hs) {
+					hs->status = 0;
+					complete(&hs->done);
+					tquic_hs_state_put(hs);
+				}
+			}
 
 		/*
 		 * Server post-handshake: transition socket, add to accept
@@ -2262,7 +2331,7 @@ static void tquic_server_handshake_done(void *data, int status,
 		return;
 	}
 
-	hs = child_tsk->handshake_state;
+	hs = tquic_hs_state_get_from_sock(child_sk);
 
 	if (status == 0) {
 		/* Handshake successful */
@@ -2383,8 +2452,10 @@ static void tquic_server_handshake_done(void *data, int status,
 		}
 
 	/* Complete the handshake wait (if anyone is waiting) */
-	if (hs)
+	if (hs) {
 		complete(&hs->done);
+		tquic_hs_state_put(hs);
+	}
 }
 
 /**
@@ -2575,7 +2646,11 @@ int tquic_server_handshake(struct sock *listener_sk,
 	hs->timeout_ms = TQUIC_HANDSHAKE_TIMEOUT_MS;
 	hs->start_time = jiffies;
 	init_completion(&hs->done);
+	refcount_set(&hs->refcnt, 1);
+	hs->tlshd_async = false;
+	write_lock_bh(&child_sk->sk_callback_lock);
 	child_tsk->handshake_state = hs;
+	write_unlock_bh(&child_sk->sk_callback_lock);
 
 	/* Set child socket state */
 	inet_sk_set_state(child_sk, TCP_SYN_RECV);
@@ -2595,10 +2670,13 @@ int tquic_server_handshake(struct sock *listener_sk,
 		if (ret < 0) {
 			struct tquic_stream *dstream = NULL;
 
-			tquic_dbg("failed to start server handshake: %d\n", ret);
-			sock_put(child_sk);
-			child_tsk->handshake_state = NULL;
-			kfree_sensitive(hs);
+				tquic_dbg("failed to start server handshake: %d\n", ret);
+				sock_put(child_sk);
+				write_lock_bh(&child_sk->sk_callback_lock);
+				if (child_tsk->handshake_state == hs)
+					child_tsk->handshake_state = NULL;
+				write_unlock_bh(&child_sk->sk_callback_lock);
+				tquic_hs_state_put(hs);
 			/* Release listener ref taken above before dropping conn */
 			sock_put(listener_sk);
 			conn->sk = NULL;
