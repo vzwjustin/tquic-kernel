@@ -426,18 +426,29 @@ static void tquic_timer_ack_cb(struct timer_list *t)
 {
 	struct tquic_connection *conn =
 		from_timer(conn, t, timers[TQUIC_TIMER_ACK]);
-	int i;
+	struct tquic_path *path;
 
 	if (READ_ONCE(conn->state) == TQUIC_CONN_CLOSED)
 		return;
 
-	for (i = 0; i < TQUIC_PN_SPACE_COUNT; i++) {
-		if (tquic_ack_should_send(conn, i)) {
-			struct sk_buff *skb = alloc_skb(256, GFP_ATOMIC);
-			if (skb)
-				tquic_ack_create(conn, i, skb);
-		}
+	/*
+	 * Send ACKs for the application PN space via the encrypted
+	 * output path.  The old code allocated skbs and called
+	 * tquic_ack_create() but never sent or freed them, leaking
+	 * memory.  Use tquic_send_ack() which handles encryption
+	 * and transmission in one shot.
+	 */
+	rcu_read_lock();
+	path = rcu_dereference(conn->active_path);
+	if (path && tquic_ack_should_send(conn, TQUIC_PN_SPACE_APPLICATION)) {
+		struct tquic_pn_space *pns =
+			&conn->pn_spaces[TQUIC_PN_SPACE_APPLICATION];
+
+		tquic_send_ack(conn, path,
+			       pns->recv_ack_info.largest_pn,
+			       0, pns->recv_ack_info.largest_pn);
 	}
+	rcu_read_unlock();
 }
 
 static void tquic_timer_idle_cb(struct timer_list *t)

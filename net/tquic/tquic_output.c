@@ -45,6 +45,7 @@
 #include "crypto/header_protection.h"
 #include "tquic_token.h"
 #include "core/mp_frame.h"
+#include "core/quic_loss.h"
 
 /* Slab cache for tquic_pending_frame (CF-046: avoid per-frame kzalloc) */
 struct kmem_cache *tquic_frame_cache;
@@ -2584,6 +2585,7 @@ EXPORT_SYMBOL_GPL(tquic_send_connection_close);
  */
 int tquic_output_flush(struct tquic_connection *conn)
 {
+	struct tquic_sent_packet *sent_pkt;
 	struct tquic_path *path = NULL;
 	struct tquic_pending_frame *frame;
 	struct sk_buff *skb, *send_skb;
@@ -2597,6 +2599,7 @@ int tquic_output_flush(struct tquic_connection *conn)
 	bool cwnd_limited;
 	bool any_pending;
 	int iter_sent;
+	u32 pkt_size;
 	const unsigned long flush_bit = 0;
 
 	if (!conn)
@@ -2792,6 +2795,8 @@ int tquic_output_flush(struct tquic_connection *conn)
 					 * Pacing is configured via sk->sk_pacing_rate
 					 * and handled by either FQ qdisc or EDT timestamps.
 					 */
+					/* Capture size before send consumes skb */
+					pkt_size = send_skb->len;
 					ret = tquic_output_packet(conn, path, send_skb);
 
 					if (ret >= 0) {
@@ -2799,6 +2804,17 @@ int tquic_output_flush(struct tquic_connection *conn)
 						iter_sent++;
 						tquic_dbg("output_flush sent pkt %llu stream %llu offset %llu len %zu\n",
 							 pkt_num, stream->id, stream_offset, chunk_size);
+
+						/* Track packet for loss detection (RFC 9002 A.5) */
+						sent_pkt = tquic_sent_packet_alloc(GFP_ATOMIC);
+						if (sent_pkt) {
+							tquic_sent_packet_init(sent_pkt,
+								pkt_num, pkt_size,
+								TQUIC_PN_SPACE_APPLICATION,
+								true, true);
+							tquic_loss_detection_on_packet_sent(
+								conn, sent_pkt);
+						}
 					}
 				} else {
 					/* CF-615: Cleanup frame on assembly failure */

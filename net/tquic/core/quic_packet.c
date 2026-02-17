@@ -17,6 +17,7 @@
 #include "../diag/trace.h"
 #include "../tquic_debug.h"
 #include "tquic_crypto.h"
+#include "ack.h"
 
 /* TQUIC packet header forms */
 #define TQUIC_HEADER_FORM_LONG	0x80
@@ -1318,23 +1319,25 @@ static int tquic_frame_process_stream(struct tquic_connection *conn,
 static int tquic_frame_process_ack(struct tquic_connection *conn,
 				   const u8 *data, int len, u8 level)
 {
+	struct tquic_ack_frame ack_frame;
 	int offset = 1;  /* Skip frame type */
-	u64 largest_acked;
-	u64 ack_delay;
 	u64 ack_range_count;
-	u64 first_ack_range;
 	int varint_len;
-	int i;
 	int estimated_min_bytes;
+	int i;
+
+	memset(&ack_frame, 0, sizeof(ack_frame));
 
 	/* Largest Acknowledged */
-	varint_len = tquic_varint_decode(data + offset, len - offset, &largest_acked);
+	varint_len = tquic_varint_decode(data + offset, len - offset,
+					 &ack_frame.largest_acked);
 	if (varint_len < 0)
 		return varint_len;
 	offset += varint_len;
 
 	/* ACK Delay */
-	varint_len = tquic_varint_decode(data + offset, len - offset, &ack_delay);
+	varint_len = tquic_varint_decode(data + offset, len - offset,
+					 &ack_frame.ack_delay);
 	if (varint_len < 0)
 		return varint_len;
 	offset += varint_len;
@@ -1346,44 +1349,50 @@ static int tquic_frame_process_ack(struct tquic_connection *conn,
 	 * 2. Buffer overruns if validation is skipped
 	 * 3. Excessive memory usage or CPU time
 	 *
-	 * RFC 9000 doesn't specify a maximum, but we limit to TQUIC_ACK_MAX_RANGES
-	 * which represents a reasonable upper bound for out-of-order packet tracking.
+	 * RFC 9000 doesn't specify a maximum, but we limit to
+	 * TQUIC_MAX_ACK_RANGES which represents a reasonable upper
+	 * bound for out-of-order packet tracking.
 	 */
-	varint_len = tquic_varint_decode(data + offset, len - offset, &ack_range_count);
+	varint_len = tquic_varint_decode(data + offset, len - offset,
+					 &ack_range_count);
 	if (varint_len < 0)
 		return varint_len;
 	offset += varint_len;
 
 	/*
 	 * SECURITY: Validate ack_range_count doesn't exceed array bounds.
-	 * Each range requires 2 varints (gap + ack_range), and varints can be
-	 * 1-8 bytes each. Maximum varint is 8 bytes, so worst case is 16 bytes
-	 * per range. Check that buffer has sufficient data.
+	 * Each range requires 2 varints (gap + ack_range), and varints can
+	 * be 1-8 bytes each. Maximum varint is 8 bytes, so worst case is
+	 * 16 bytes per range. Check that buffer has sufficient data.
 	 */
-	if (ack_range_count > 255)
+	if (ack_range_count > TQUIC_MAX_ACK_RANGES - 1)
 		return -EINVAL;
 
-	/* Estimate minimum buffer needed: 1st range (1 varint) + count*2 varints */
+	/* Estimate minimum buffer needed: 1st range + count*2 varints */
 	estimated_min_bytes = (1 + ack_range_count * 2);
 	if (len - offset < estimated_min_bytes)
 		return -EINVAL;
 
 	/* First ACK Range */
-	varint_len = tquic_varint_decode(data + offset, len - offset, &first_ack_range);
+	varint_len = tquic_varint_decode(data + offset, len - offset,
+					 &ack_frame.first_range);
 	if (varint_len < 0)
 		return varint_len;
 	offset += varint_len;
 
 	/* Additional ACK Ranges */
+	ack_frame.range_count = (u32)ack_range_count;
 	for (i = 0; i < ack_range_count; i++) {
-		u64 gap, ack_range;
-
-		varint_len = tquic_varint_decode(data + offset, len - offset, &gap);
+		varint_len = tquic_varint_decode(data + offset,
+						 len - offset,
+						 &ack_frame.ranges[i].gap);
 		if (varint_len < 0)
 			return varint_len;
 		offset += varint_len;
 
-		varint_len = tquic_varint_decode(data + offset, len - offset, &ack_range);
+		varint_len = tquic_varint_decode(data + offset,
+						 len - offset,
+						 &ack_frame.ranges[i].length);
 		if (varint_len < 0)
 			return varint_len;
 		offset += varint_len;
@@ -1391,26 +1400,32 @@ static int tquic_frame_process_ack(struct tquic_connection *conn,
 
 	/* ECN counts (if ACK_ECN frame) */
 	if (data[0] == TQUIC_FRAME_ACK_ECN) {
-		u64 ecn_ect0, ecn_ect1, ecn_ce;
+		ack_frame.has_ecn = true;
 
-		varint_len = tquic_varint_decode(data + offset, len - offset, &ecn_ect0);
+		varint_len = tquic_varint_decode(data + offset,
+						 len - offset,
+						 &ack_frame.ecn.ect0);
 		if (varint_len < 0)
 			return varint_len;
 		offset += varint_len;
 
-		varint_len = tquic_varint_decode(data + offset, len - offset, &ecn_ect1);
+		varint_len = tquic_varint_decode(data + offset,
+						 len - offset,
+						 &ack_frame.ecn.ect1);
 		if (varint_len < 0)
 			return varint_len;
 		offset += varint_len;
 
-		varint_len = tquic_varint_decode(data + offset, len - offset, &ecn_ce);
+		varint_len = tquic_varint_decode(data + offset,
+						 len - offset,
+						 &ack_frame.ecn.ce);
 		if (varint_len < 0)
 			return varint_len;
 		offset += varint_len;
 	}
 
-	/* Process ACK through timer/recovery system */
-	/* tquic_loss_detection_on_ack_received would be called here */
+	/* Process ACK through loss detection and recovery */
+	tquic_loss_detection_on_ack_received(conn, &ack_frame, level);
 
 	return offset;
 }

@@ -1605,10 +1605,20 @@ static void tquic_timer_work_fn(struct work_struct *work)
 		}
 	}
 
-	/* Handle ACK delay expiration */
+	/* Handle ACK delay expiration - send pending ACKs */
 	if (test_bit(TQUIC_TIMER_ACK_DELAY_BIT, &pending)) {
-		/* Would trigger sending pending ACKs */
-		/* tquic_send_pending_acks(conn); */
+		struct tquic_path *path;
+		struct tquic_pn_space *pns;
+
+		rcu_read_lock();
+		path = rcu_dereference(conn->active_path);
+		if (path) {
+			pns = &conn->pn_spaces[TQUIC_PN_SPACE_APPLICATION];
+			tquic_send_ack(conn, path,
+				       pns->recv_ack_info.largest_pn,
+				       0, pns->recv_ack_info.largest_pn);
+		}
+		rcu_read_unlock();
 	}
 
 	/* Handle drain completion */
@@ -1678,8 +1688,13 @@ static void tquic_retransmit_work_fn(struct work_struct *work)
 				tquic_dbg(
 					"timer:detected %d lost packets in space %d\n",
 					lost, i);
-				/* Would trigger retransmission */
-				/* tquic_retransmit_lost(conn, i); */
+				/*
+				 * Schedule TX work to retransmit data.
+				 * The tx_work handler picks up frames
+				 * queued for retransmission.
+				 */
+				if (!work_pending(&conn->tx_work))
+					schedule_work(&conn->tx_work);
 			}
 		}
 
@@ -1691,9 +1706,12 @@ static void tquic_retransmit_work_fn(struct work_struct *work)
 	if (test_bit(TQUIC_TIMER_PTO_BIT, &pending)) {
 		/*
 		 * PTO requires sending 1-2 ack-eliciting packets.
-		 * Prefer retransmitting lost/unacked data, but send PING if none.
+		 * Schedule TX work which will emit a PING frame if no
+		 * other ack-eliciting data is pending for retransmission.
 		 */
-		/* tquic_send_pto_probe(conn); */
+		tquic_dbg("timer:PTO fired, scheduling tx_work for probe\n");
+		if (!work_pending(&conn->tx_work))
+			schedule_work(&conn->tx_work);
 
 		/* Update PTO timer */
 		tquic_timer_update_pto(ts);

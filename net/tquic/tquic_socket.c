@@ -445,6 +445,18 @@ int tquic_connect(struct sock *sk, tquic_sockaddr_t *uaddr, int addr_len)
 	/* Set state before handshake */
 	inet_sk_set_state(sk, TCP_SYN_SENT);
 
+	/*
+	 * Allocate and set up the timer state for the connection.
+	 * This includes the PTO timer for Initial packet retransmission.
+	 */
+	if (!conn->timer_state) {
+		conn->timer_state = tquic_timer_state_alloc(conn);
+		if (!conn->timer_state) {
+			tquic_warn("IPv4 timer state alloc failed\n");
+			/* Continue without timer - basic operation still works */
+		}
+	}
+
 	/* Initiate TLS handshake (async via net/handshake) */
 	ret = tquic_start_handshake(sk);
 	if (ret < 0 && ret != -EALREADY && ret != -EISCONN)
