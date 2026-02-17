@@ -522,6 +522,10 @@ void tquic_loss_detection_on_packet_sent(struct tquic_connection *conn,
 	/* Add to sent packets list (time-ordered), ordered by packet number */
 	list_add_tail(&pkt->list, &pn_space->sent_list);
 
+	/* Track largest sent packet number for ACK validation */
+	if (pkt->pn > pn_space->largest_sent)
+		pn_space->largest_sent = pkt->pn;
+
 	/* Track ack-eliciting packets in flight */
 	if (pkt->ack_eliciting) {
 		pn_space->ack_eliciting_in_flight++;
