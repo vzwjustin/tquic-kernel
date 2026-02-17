@@ -255,7 +255,7 @@ static u32 tquic_pmtud_get_interface_mtu(struct tquic_path *path)
  *
  * Return: Human-readable state name
  */
-static const char __maybe_unused *tquic_pmtud_state_name(enum tquic_pmtud_state state)
+static const char *tquic_pmtud_state_name(enum tquic_pmtud_state state)
 {
 	switch (state) {
 	case TQUIC_PMTUD_DISABLED:

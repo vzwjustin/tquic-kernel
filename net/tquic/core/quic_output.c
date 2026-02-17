@@ -210,7 +210,7 @@ struct tquic_stream_recv_buf {
  *
  * Returns 0 on success, negative error code on failure.
  */
-static int __maybe_unused tquic_create_udp_socket(struct tquic_sock *tsk, int family)
+static int tquic_create_udp_socket(struct tquic_sock *tsk, int family)
 {
 	struct socket *sock;
 	struct sock *sk;
@@ -277,12 +277,13 @@ static int __maybe_unused tquic_create_udp_socket(struct tquic_sock *tsk, int fa
  *
  * Returns 0 on success, negative error code on failure.
  */
-static int __maybe_unused tquic_bind_udp_socket(struct tquic_sock *tsk,
+static int tquic_bind_udp_socket(struct tquic_sock *tsk,
 						struct sockaddr *addr, int addr_len)
 {
 	struct socket *sock;
 	int err;
 
+	tquic_dbg("tquic_bind_udp_socket: addr_len=%d\n", addr_len);
 	if (!tsk)
 		return -EINVAL;
 
@@ -314,12 +315,13 @@ static int __maybe_unused tquic_bind_udp_socket(struct tquic_sock *tsk,
  *
  * Returns 0 on success, negative error code on failure.
  */
-static int __maybe_unused tquic_connect_udp_socket(struct tquic_sock *tsk,
+static int tquic_connect_udp_socket(struct tquic_sock *tsk,
 						   struct sockaddr *addr, int addr_len)
 {
 	struct socket *sock;
 	int err;
 
+	tquic_dbg("tquic_connect_udp_socket: addr_len=%d\n", addr_len);
 	if (!tsk)
 		return -EINVAL;
 
@@ -579,7 +581,7 @@ static int tquic_xmit_skb(struct sk_buff *skb, struct tquic_connection *conn,
  *
  * Returns number of bytes sent on success, negative error code on failure.
  */
-static int __maybe_unused tquic_sendmsg_locked(struct tquic_sock *tsk, struct sk_buff *skb,
+static int tquic_sendmsg_locked(struct tquic_sock *tsk, struct sk_buff *skb,
 					       struct sockaddr *dest)
 {
 	struct socket *sock;
@@ -588,6 +590,7 @@ static int __maybe_unused tquic_sendmsg_locked(struct tquic_sock *tsk, struct sk
 	int addr_len;
 	int ret;
 
+	tquic_dbg("tquic_sendmsg_locked: skb_len=%u\n", skb ? skb->len : 0);
 	if (!tsk || !skb)
 		return -EINVAL;
 
@@ -646,10 +649,11 @@ static int __maybe_unused tquic_sendmsg_locked(struct tquic_sock *tsk, struct sk
  *   10 = ECT(0) - preferred for QUIC
  *   11 = CE (Congestion Experienced)
  */
-static void __maybe_unused tquic_output_set_ecn(struct socket *sock, struct tquic_path *path)
+static void tquic_output_set_ecn(struct socket *sock, struct tquic_path *path)
 {
 	u8 ecn_marking;
 
+	tquic_dbg("tquic_output_set_ecn: sock=%p path=%p\n", sock, path);
 	if (!sock || !sock->sk || !path)
 		return;
 

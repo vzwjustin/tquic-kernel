@@ -150,6 +150,9 @@ struct tquic_pending_frame {
 	size_t len;
 	u64 stream_id;
 	u64 offset;
+	u64 retire_prior_to;	/* For NEW_CONNECTION_ID frame */
+	const struct tquic_cid *new_cid;	/* CID for NEW_CONNECTION_ID */
+	const u8 *reset_token;	/* Reset token for NEW_CONNECTION_ID */
 	bool fin;
 	bool owns_data;		/* True if data was allocated and must be freed */
 };
@@ -584,7 +587,7 @@ static int tquic_gen_handshake_done_frame(struct tquic_frame_ctx *ctx)
 /*
  * Generate NEW_CONNECTION_ID frame
  */
-static int __maybe_unused tquic_gen_new_connection_id_frame(struct tquic_frame_ctx *ctx,
+static int tquic_gen_new_connection_id_frame(struct tquic_frame_ctx *ctx,
 							    u64 seq_num, u64 retire_prior_to,
 							    const struct tquic_cid *cid,
 							    const u8 stateless_reset_token[16])
@@ -791,6 +794,16 @@ static int tquic_coalesce_frames(struct tquic_connection *conn,
 				ctx, frame->offset, NULL, 0);
 			break;
 
+		case TQUIC_FRAME_PING:
+			ret = tquic_gen_ping_frame(ctx);
+			break;
+
+		case TQUIC_FRAME_NEW_CONNECTION_ID:
+			ret = tquic_gen_new_connection_id_frame(ctx,
+				frame->offset, frame->retire_prior_to,
+				frame->new_cid, frame->reset_token);
+			break;
+
 		default:
 			ret = -EINVAL;
 			break;
@@ -993,8 +1006,19 @@ static int tquic_build_short_header_internal(struct tquic_connection *conn,
 	 * ensures that pn_offset = header_len - 4 is correct for HP,
 	 * and that the packet is long enough for the HP sample
 	 * (RFC 9001 Section 5.4.2).
+	 *
+	 * tquic_encode_pkt_num() computes the minimal encoding;
+	 * log it for diagnostics but always send 4 bytes.
 	 */
 	pkt_num_len = 4;
+	if (largest_acked > 0) {
+		u8 tmp[4];
+		int optimal = tquic_encode_pkt_num(tmp, pkt_num,
+						   largest_acked);
+
+		tquic_dbg("short_hdr: pkt=%llu optimal_pn_len=%d using=4\n",
+			  pkt_num, optimal);
+	}
 
 	/*
 	 * RFC 9287 Section 3: GREASE the Fixed Bit
@@ -1365,6 +1389,15 @@ struct tquic_path *tquic_select_path(struct tquic_connection *conn,
 	 */
 	spin_lock_bh(&conn->paths_lock);
 	selected = tquic_bond_select_path(conn, skb);
+
+	/*
+	 * Fallback to load-balanced path selection if the bond
+	 * scheduler returns NULL (e.g. all paths temporarily blocked).
+	 */
+	if (!selected) {
+		tquic_dbg("select_path: bond returned NULL, trying lb\n");
+		selected = tquic_select_path_lb(conn, skb, 0);
+	}
 	spin_unlock_bh(&conn->paths_lock);
 
 	return selected;
@@ -1385,7 +1418,7 @@ static inline bool tquic_output_path_usable(const struct tquic_path *path)
  * Select path with load balancing
  * Caller must hold conn->paths_lock to protect path list iteration.
  */
-static struct tquic_path __maybe_unused *tquic_select_path_lb(struct tquic_connection *conn,
+static struct tquic_path *tquic_select_path_lb(struct tquic_connection *conn,
 							      struct sk_buff *skb, u32 flags)
 {
 	struct tquic_path *path, *best = NULL;
@@ -1857,6 +1890,58 @@ static struct sk_buff *tquic_gso_finalize(struct tquic_gso_ctx *gso)
 }
 
 /*
+ * Send multiple QUIC packets coalesced via GSO.
+ * Falls back to individual sends if GSO is not supported.
+ *
+ * @conn: Connection
+ * @path: Path for transmission
+ * @pkts: Array of assembled QUIC packet buffers
+ * @pkt_lens: Length of each packet
+ * @num_pkts: Number of packets to send
+ *
+ * Returns 0 on success, negative errno on failure.
+ */
+static int tquic_output_gso_send(struct tquic_connection *conn,
+				 struct tquic_path *path,
+				 const u8 **pkts, size_t *pkt_lens,
+				 int num_pkts)
+{
+	struct tquic_gso_ctx gso;
+	struct sk_buff *gso_skb;
+	int i, ret;
+
+	if (num_pkts <= 1 || !tquic_gso_supported(path)) {
+		tquic_dbg("gso_send: not using GSO (pkts=%d supported=%d)\n",
+			  num_pkts, tquic_gso_supported(path));
+		return -EOPNOTSUPP;
+	}
+
+	ret = tquic_gso_init(&gso, path, num_pkts);
+	if (ret < 0) {
+		tquic_dbg("gso_send: init failed %d\n", ret);
+		return ret;
+	}
+
+	for (i = 0; i < num_pkts; i++) {
+		ret = tquic_gso_add_segment(&gso, pkts[i], pkt_lens[i]);
+		if (ret < 0) {
+			tquic_dbg("gso_send: add_segment %d failed %d\n",
+				  i, ret);
+			kfree_skb(gso.gso_skb);
+			return ret;
+		}
+	}
+
+	gso_skb = tquic_gso_finalize(&gso);
+	if (!gso_skb)
+		return -ENOMEM;
+
+	tquic_dbg("gso_send: sending %d segs total_len=%u\n",
+		  num_pkts, gso_skb->len);
+	return tquic_output_packet(conn, path, gso_skb);
+}
+
+/*
  * =============================================================================
  * ECN Marking for Outgoing Packets
  * =============================================================================
@@ -2036,6 +2121,12 @@ int tquic_output_packet(struct tquic_connection *conn,
 			local->sin_addr.s_addr = saddr;
 			local->sin_port = sport;
 		}
+
+		/* Apply pacing EDT timestamp for FQ qdisc */
+		tquic_pacing_allows_send(conn->sk, skb);
+
+		/* Set ECN marking for IPv6 (IPv4 handled via flowi4) */
+		tquic_set_ecn_marking(skb, conn);
 
 		/* Save skb->len before xmit which consumes the SKB */
 		skb_len = skb->len;
@@ -2283,6 +2374,91 @@ int tquic_send_ack(struct tquic_connection *conn, struct tquic_path *path,
 	return tquic_output_packet(conn, path, skb);
 }
 EXPORT_SYMBOL_GPL(tquic_send_ack);
+
+/*
+ * Send PING-only packet for keepalive or path validation
+ */
+int tquic_send_ping(struct tquic_connection *conn, struct tquic_path *path)
+{
+	struct tquic_frame_ctx ctx;
+	struct sk_buff *skb;
+	u8 header_buf[128];
+	u8 *payload_buf;
+	int header_len, payload_len;
+	int ret;
+	u64 pkt_num;
+	bool key_phase = false;
+
+	tquic_dbg("send_ping: conn=%p path=%p\n", conn, path);
+
+	pkt_num = atomic64_inc_return(&conn->pkt_num_tx) - 1;
+
+	skb = alloc_skb(MAX_HEADER + 128 + 64 + 16, GFP_ATOMIC);
+	if (!skb)
+		return -ENOMEM;
+
+	skb_reserve(skb, MAX_HEADER + 128);
+
+	payload_buf = skb_put(skb, 64 + 16);
+
+	ctx.conn = conn;
+	ctx.path = path;
+	ctx.buf = payload_buf;
+	ctx.buf_len = 64;
+	ctx.offset = 0;
+	ctx.ack_eliciting = false;
+
+	ret = tquic_gen_ping_frame(&ctx);
+	if (ret < 0) {
+		kfree_skb(skb);
+		return ret;
+	}
+
+	payload_len = ctx.offset;
+
+	if (conn->crypto_state) {
+		struct tquic_key_update_state *ku_state;
+
+		ku_state = tquic_crypto_get_key_update_state(
+				conn->crypto_state);
+		if (ku_state)
+			key_phase =
+				tquic_key_update_get_phase(ku_state) != 0;
+	}
+
+	header_len = tquic_build_short_header_internal(
+			conn, path, header_buf, sizeof(header_buf),
+			pkt_num, 0, key_phase, false, conn->grease_state);
+	if (header_len < 0) {
+		kfree_skb(skb);
+		return header_len;
+	}
+
+	ret = tquic_encrypt_payload(conn, header_buf, header_len,
+				    payload_buf, payload_len, pkt_num,
+				    3);
+	if (ret < 0) {
+		kfree_skb(skb);
+		return ret;
+	}
+
+	skb_trim(skb, payload_len + 16);
+	memcpy(skb_push(skb, header_len), header_buf, header_len);
+
+	if (header_len >= 5) {
+		ret = tquic_apply_header_protection(conn, skb->data,
+						    skb->len,
+						    header_len - 4);
+		if (ret < 0) {
+			kfree_skb(skb);
+			return ret;
+		}
+	}
+
+	tquic_dbg("send_ping: sending pkt_num=%llu\n", pkt_num);
+	return tquic_output_packet(conn, path, skb);
+}
+EXPORT_SYMBOL_GPL(tquic_send_ping);
 
 /**
  * tquic_flow_send_max_data - Send MAX_DATA frame to update flow control window

@@ -791,7 +791,7 @@ static void tquic_udp_sock_hash_remove(struct tquic_udp_sock *us)
 	spin_unlock_bh(&tquic_udp_hash_lock);
 }
 
-static struct tquic_udp_sock __maybe_unused *tquic_udp_sock_lookup(__be16 port)
+static struct tquic_udp_sock *tquic_udp_sock_lookup(__be16 port)
 {
 	struct tquic_udp_sock *us;
 	u32 key = tquic_udp_sock_hash_key(port);

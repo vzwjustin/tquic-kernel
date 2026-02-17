@@ -109,6 +109,8 @@ static int tquic_gro_parse_header(const u8 *data, size_t len,
 {
 	u8 first_byte;
 
+	tquic_dbg("gro_parse_header: len=%zu\n", len);
+
 	if (len < 1)
 		return -EINVAL;
 
@@ -177,6 +179,8 @@ static int tquic_gro_parse_header(const u8 *data, size_t len,
 static bool tquic_gro_same_flow(const struct tquic_gro_header *hdr1,
 				const struct tquic_gro_header *hdr2)
 {
+	tquic_dbg("gro_same_flow: hdr1=%p hdr2=%p\n", hdr1, hdr2);
+
 	/* Must match header form */
 	if (hdr1->is_long_header != hdr2->is_long_header)
 		return false;
@@ -370,6 +374,8 @@ int tquic_gro_complete(struct sk_buff *skb, int nhoff)
 	struct udphdr *uh = (struct udphdr *)(skb->data + nhoff);
 	u16 aggregation_count;
 
+	tquic_dbg("tquic_gro_complete: skb=%p nhoff=%d\n", skb, nhoff);
+
 	/* Update UDP length for aggregated packet */
 	uh->len = htons(skb->len - nhoff);
 
@@ -448,6 +454,8 @@ static int tquic4_gro_complete(struct sk_buff *skb, int nhoff)
 	const struct iphdr *iph = (struct iphdr *)(skb->data + offset);
 	struct udphdr *uh = (struct udphdr *)(skb->data + nhoff);
 
+	tquic_dbg("tquic4_gro_complete: skb=%p nhoff=%d\n", skb, nhoff);
+
 	/* Update UDP checksum for aggregated length */
 	if (uh->check)
 		uh->check = ~udp_v4_check(skb->len - nhoff, iph->saddr,
@@ -510,6 +518,8 @@ static int tquic6_gro_complete(struct sk_buff *skb, int nhoff)
 	const struct ipv6hdr *ipv6h = (struct ipv6hdr *)(skb->data + offset);
 	struct udphdr *uh = (struct udphdr *)(skb->data + nhoff);
 
+	tquic_dbg("tquic6_gro_complete: skb=%p nhoff=%d\n", skb, nhoff);
+
 	if (uh->check)
 		uh->check = ~udp_v6_check(skb->len - nhoff, &ipv6h->saddr,
 					  &ipv6h->daddr, 0);
@@ -566,7 +576,7 @@ static struct sk_buff *tquic_gso_segment(struct sk_buff *skb,
  */
 
 /* IPv4 TQUIC offload structure */
-static struct net_offload __maybe_unused tquic4_offload = {
+static struct net_offload tquic4_offload = {
 	.callbacks = {
 		.gso_segment	= tquic_gso_segment,
 		.gro_receive	= tquic4_gro_receive,
@@ -576,7 +586,7 @@ static struct net_offload __maybe_unused tquic4_offload = {
 
 #if IS_ENABLED(CONFIG_IPV6)
 /* IPv6 TQUIC offload structure */
-static struct net_offload __maybe_unused tquic6_offload = {
+static struct net_offload tquic6_offload = {
 	.callbacks = {
 		.gso_segment	= tquic_gso_segment,
 		.gro_receive	= tquic6_gro_receive,
@@ -602,6 +612,8 @@ void tquic_gro_stats_show(struct seq_file *seq)
 	u64 coalesced = 0, flushes = 0, held = 0;
 	u64 total_agg = 0, samples = 0, avg_agg = 0;
 	int cpu;
+
+	tquic_dbg("gro_stats_show: seq=%p\n", seq);
 
 	for_each_possible_cpu(cpu) {
 		const struct tquic_gro_stats_cpu *s;
@@ -637,6 +649,8 @@ void tquic_gro_get_stats(u64 *coalesced, u64 *flushes, u64 *avg_aggregation)
 	u64 tot_coalesced = 0, tot_flushes = 0;
 	u64 total_agg = 0, samples = 0;
 	int cpu;
+
+	tquic_dbg("gro_get_stats\n");
 
 	for_each_possible_cpu(cpu) {
 		const struct tquic_gro_stats_cpu *s;
@@ -700,6 +714,7 @@ EXPORT_SYMBOL_GPL(tquic_gro_receive_udp);
  */
 int tquic_gro_complete_udp(struct sock *sk, struct sk_buff *skb, int nhoff)
 {
+	tquic_dbg("gro_complete_udp: sk=%p skb=%p nhoff=%d\n", sk, skb, nhoff);
 	return tquic_gro_complete(skb, nhoff);
 }
 EXPORT_SYMBOL_GPL(tquic_gro_complete_udp);
@@ -742,6 +757,8 @@ EXPORT_SYMBOL_GPL(tquic_setup_gro);
 void tquic_clear_gro(struct sock *sk)
 {
 	struct udp_sock *up;
+
+	tquic_dbg("tquic_clear_gro: sk=%p\n", sk);
 
 	if (!sk)
 		return;

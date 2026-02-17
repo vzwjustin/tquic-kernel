@@ -2409,6 +2409,7 @@ int tquic_xmit_close(struct tquic_connection *conn, u64 error_code,
 		      bool is_app);
 int tquic_send_ack(struct tquic_connection *conn, struct tquic_path *path,
 		   u64 largest_ack, u64 ack_delay, u64 ack_range);
+int tquic_send_ping(struct tquic_connection *conn, struct tquic_path *path);
 int tquic_flow_send_max_data(struct tquic_connection *conn,
 			     struct tquic_path *path, u64 max_data);
 int tquic_flow_send_max_stream_data(struct tquic_connection *conn,

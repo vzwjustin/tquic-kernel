@@ -15,7 +15,7 @@
 
 #include "nat_keepalive.h"
 
-static int __init __maybe_unused tquic_pm_module_init(void)
+static int __init tquic_pm_module_init(void)
 {
 	int ret;
 
@@ -61,7 +61,7 @@ err_kernel:
 	return ret;
 }
 
-static void __exit __maybe_unused tquic_pm_module_exit(void)
+static void __exit tquic_pm_module_exit(void)
 {
 	tquic_nat_keepalive_module_exit();
 #if IS_ENABLED(CONFIG_TQUIC_PM_USERSPACE)

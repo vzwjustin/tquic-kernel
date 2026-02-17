@@ -1627,19 +1627,20 @@ static void tquic_timer_work_fn(struct work_struct *work)
 		tquic_conn_enter_closed(conn);
 	}
 
-	/* Handle keep-alive - send PING to keep connection alive */
+	/* Handle keep-alive - send PING via proper packet assembly */
 	if (test_bit(TQUIC_TIMER_KEEPALIVE_BIT, &pending)) {
-		struct sk_buff *ping_skb;
+		struct tquic_path *ka_path;
 
-		ping_skb = alloc_skb(16, GFP_ATOMIC);
-		if (ping_skb) {
-			u8 *p = skb_put(ping_skb, 1);
-
-			*p = 0x01; /* PING frame type */
-			skb_queue_tail(&conn->pending_frames, ping_skb);
-			tquic_dbg("timer:keepalive: queued PING frame\n");
-			if (!work_pending(&conn->tx_work))
-				schedule_work(&conn->tx_work);
+		rcu_read_lock();
+		ka_path = rcu_dereference(conn->active_path);
+		if (ka_path && tquic_path_get(ka_path)) {
+			rcu_read_unlock();
+			tquic_dbg("timer:keepalive: sending PING\n");
+			tquic_send_ping(conn, ka_path);
+			tquic_path_put(ka_path);
+		} else {
+			rcu_read_unlock();
+			tquic_dbg("timer:keepalive: no active path\n");
 		}
 
 		/* Reschedule keep-alive timer */

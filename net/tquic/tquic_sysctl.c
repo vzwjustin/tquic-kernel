@@ -504,7 +504,7 @@ static int proc_tquic_ecn_beta(TQUIC_CTL_TABLE *table, int write,
 }
 
 /* Legacy global sysctl handler (for compatibility) */
-static int __maybe_unused tquic_sysctl_scheduler(TQUIC_CTL_TABLE *table, int write,
+static int tquic_sysctl_scheduler(TQUIC_CTL_TABLE *table, int write,
 						  void *buffer, size_t *lenp, loff_t *ppos)
 {
 	struct tquic_sched_ops *sched_ops;

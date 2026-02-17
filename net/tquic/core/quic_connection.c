@@ -159,7 +159,7 @@ static const struct rhashtable_params tquic_cid_rht_params = {
 };
 
 static struct rhashtable tquic_cid_rht;
-static spinlock_t __maybe_unused tquic_cid_rht_lock =
+static spinlock_t tquic_cid_rht_lock =
 	__SPIN_LOCK_UNLOCKED(tquic_cid_rht_lock);
 
 int tquic_cid_hash_init(void)
@@ -327,7 +327,7 @@ static void tquic_pn_space_init(struct tquic_pn_space *pn_space)
 	pn_space->keys_discarded = 0;
 }
 
-static void __maybe_unused
+static void
 tquic_pn_space_destroy(struct tquic_pn_space *pn_space)
 {
 	struct tquic_sent_packet *pkt, *tmp;
@@ -1068,7 +1068,7 @@ static int tquic_conn_connect(struct tquic_connection *conn,
 	}
 
 	/* Derive initial secrets from destination connection ID */
-	err = tquic_crypto_derive_initial_secrets(conn, &conn->dcid);
+	err = tquic_crypto_derive_initial_secrets(conn, tquic_conn_get_dcid(conn));
 	if (err)
 		return err;
 
@@ -1094,8 +1094,8 @@ static int tquic_conn_connect(struct tquic_connection *conn,
 
 static int tquic_conn_accept(struct tquic_connection *conn)
 {
-	return tquic_conn_set_state(conn, TQUIC_CONN_CONNECTING,
-				    TQUIC_REASON_NORMAL);
+	tquic_conn_set_state_local(conn, TQUIC_CONN_CONNECTING);
+	return 0;
 }
 
 static int tquic_conn_close(struct tquic_connection *conn, u64 error_code,
@@ -1146,6 +1146,7 @@ static int tquic_conn_close(struct tquic_connection *conn, u64 error_code,
 static void tquic_conn_set_state_local(struct tquic_connection *conn,
 			      enum tquic_conn_state state)
 {
+	tquic_dbg("tquic_conn_set_state_local: state=%d\n", state);
 	tquic_conn_set_state(conn, state, TQUIC_REASON_NORMAL);
 }
 
@@ -1228,6 +1229,7 @@ static int tquic_conn_add_peer_cid(struct tquic_connection *conn,
 /* Get active destination CID */
 static struct tquic_cid *tquic_conn_get_dcid(struct tquic_connection *conn)
 {
+	tquic_dbg("tquic_conn_get_dcid: dcid_len=%u\n", conn->dcid.len);
 	return &conn->dcid;
 }
 

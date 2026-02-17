@@ -613,7 +613,7 @@ static void tquic_bbr_on_persistent_cong(void *state,
 	bbr->ecn_ce_total = 0;
 }
 
-static struct tquic_cong_ops __maybe_unused tquic_bbr_ops = {
+static struct tquic_cong_ops tquic_bbr_ops = {
 	.name = "bbr",
 	.owner = THIS_MODULE,
 	.init = tquic_bbr_init,

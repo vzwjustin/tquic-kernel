@@ -158,9 +158,11 @@ EXPORT_SYMBOL_GPL(tquic_zc_state_free);
  * =============================================================================
  */
 
-static struct tquic_zc_entry __maybe_unused *tquic_zc_entry_alloc(gfp_t gfp)
+static struct tquic_zc_entry *tquic_zc_entry_alloc(gfp_t gfp)
 {
 	struct tquic_zc_entry *entry;
+
+	tquic_dbg("zc_entry_alloc: gfp=0x%x\n", gfp);
 
 	entry = kzalloc(sizeof(*entry), gfp);
 	if (!entry)
@@ -196,13 +198,15 @@ static void tquic_zc_entry_free(struct tquic_zc_entry *entry)
 	kfree(entry);
 }
 
-static void __maybe_unused tquic_zc_entry_get(struct tquic_zc_entry *entry)
+static void tquic_zc_entry_get(struct tquic_zc_entry *entry)
 {
+	tquic_dbg("zc_entry_get: entry=%p\n", entry);
 	refcount_inc(&entry->refcnt);
 }
 
-static void __maybe_unused tquic_zc_entry_put(struct tquic_zc_entry *entry)
+static void tquic_zc_entry_put(struct tquic_zc_entry *entry)
 {
+	tquic_dbg("zc_entry_put: entry=%p\n", entry);
 	if (refcount_dec_and_test(&entry->refcnt))
 		tquic_zc_entry_free(entry);
 }
@@ -222,10 +226,12 @@ static void __maybe_unused tquic_zc_entry_put(struct tquic_zc_entry *entry)
  * Called when zerocopy transmission completes. Uses the standard
  * msg_zerocopy_ubuf_ops for completion notification.
  */
-static void __maybe_unused tquic_zerocopy_complete(struct sk_buff *skb,
+static void tquic_zerocopy_complete(struct sk_buff *skb,
 						   struct ubuf_info *uarg,
 						   bool success)
 {
+	tquic_dbg("zerocopy_complete: skb=%p success=%d\n", skb, success);
+
 	/* Use the standard zerocopy ops for completion */
 	if (uarg && uarg->ops && uarg->ops->complete)
 		uarg->ops->complete(skb, uarg, success);

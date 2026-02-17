@@ -630,7 +630,7 @@ static void tquic_copa_on_persistent_cong(void *state,
 		copa->delta = max(copa->delta / 2, (u32)COPA_MIN_DELTA);
 }
 
-static struct tquic_cong_ops __maybe_unused tquic_copa_ops = {
+static struct tquic_cong_ops tquic_copa_ops = {
 	.name = "copa",
 	.owner = THIS_MODULE,
 	.init = tquic_copa_init,

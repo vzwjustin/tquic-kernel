@@ -568,7 +568,7 @@ static struct tquic_path *tquic_select_ecf(struct tquic_bond_state *bond,
 /*
  * Send packet on all paths (redundant mode)
  */
-static int __maybe_unused tquic_send_redundant(struct tquic_bond_state *bond,
+static int tquic_send_redundant(struct tquic_bond_state *bond,
 				struct sk_buff *skb)
 {
 	struct tquic_connection *conn = bond->conn;

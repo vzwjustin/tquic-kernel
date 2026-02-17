@@ -319,6 +319,8 @@ static struct tquic_path *tquic_find_path_by_addr(struct tquic_connection *conn,
 	struct tquic_path *path;
 	struct tquic_path *found = NULL;
 
+	tquic_dbg("find_path_by_addr: conn=%p\n", conn);
+
 	/*
 	 * CF-179: Fast-path -- check the connection's active_path first
 	 * without taking the lock.  Most packets arrive on the active
@@ -368,11 +370,13 @@ slow_path:
  *
  * Caller must NOT hold paths_lock. This function acquires it internally.
  */
-static struct tquic_path __maybe_unused *tquic_find_path_by_cid(struct tquic_connection *conn,
+static struct tquic_path *tquic_find_path_by_cid(struct tquic_connection *conn,
 							       const u8 *cid, u8 cid_len)
 {
 	struct tquic_path *path;
 	struct tquic_path *found = NULL;
+
+	tquic_dbg("find_path_by_cid: conn=%p cid_len=%u\n", conn, cid_len);
 
 	/*
 	 * P-002: Use RCU for lock-free path list traversal.
@@ -768,7 +772,7 @@ static int tquic_send_vn_from_listener(struct sock *listener,
 /*
  * Send version negotiation response (server side) - UNUSED
  */
-static int __maybe_unused tquic_send_version_negotiation_internal(struct sock *sk,
+static int tquic_send_version_negotiation_internal(struct sock *sk,
 					  const struct sockaddr *addr,
 					  const u8 *dcid, u8 dcid_len,
 					  const u8 *scid, u8 scid_len)
@@ -3295,18 +3299,27 @@ static int tquic_process_frames(struct tquic_connection *conn,
 
 	/*
 	 * RFC 9000 Section 13.2: Send ACK for ack-eliciting packets.
-	 * For now, send ACK immediately for 1-RTT packets.
-	 * TODO: implement delayed ACK timer per RFC 9000 Section 13.2.1.
+	 * RFC 9000 Section 13.2.1: An endpoint SHOULD use a delayed
+	 * ACK strategy to reduce the number of ACK frames sent.
+	 *
+	 * Use the delayed ACK timer when available, otherwise send
+	 * immediately for correctness.
 	 */
 	if (ctx.ack_eliciting && ret >= 0 &&
 	    enc_level == TQUIC_ENC_APPLICATION) {
-		struct tquic_path *ack_path;
+		if (conn->timer_state) {
+			tquic_timer_set_ack_delay(conn->timer_state);
+			tquic_dbg("input: armed delayed ACK timer\n");
+		} else {
+			struct tquic_path *ack_path;
 
-		rcu_read_lock();
-		ack_path = rcu_dereference(conn->active_path);
-		if (ack_path)
-			tquic_send_ack(conn, ack_path, pkt_num, 0, 0);
-		rcu_read_unlock();
+			rcu_read_lock();
+			ack_path = rcu_dereference(conn->active_path);
+			if (ack_path)
+				tquic_send_ack(conn, ack_path,
+					       pkt_num, 0, 0);
+			rcu_read_unlock();
+		}
 	}
 
 	return ret;
@@ -3705,6 +3718,23 @@ static int tquic_process_packet(struct tquic_connection *conn,
 		}
 
 		/*
+		 * RFC 9000 Section 6: If the version is not supported,
+		 * send a Version Negotiation packet listing our versions.
+		 */
+		if (version != TQUIC_VERSION_1 && version != TQUIC_VERSION_2) {
+			tquic_dbg("input: unsupported version 0x%08x, sending VN\n",
+				  version);
+			if (conn && conn->sk) {
+				tquic_send_version_negotiation_internal(
+					conn->sk,
+					(const struct sockaddr *)src_addr,
+					scid, scid_len,
+					dcid, dcid_len);
+			}
+			return -EPROTONOSUPPORT;
+		}
+
+		/*
 		 * Handle Retry packet (client-side, RFC 9000 Section 17.2.5)
 		 *
 		 * A Retry packet is sent by the server in response to an Initial
@@ -3939,6 +3969,18 @@ static int tquic_process_packet(struct tquic_connection *conn,
 		path = tquic_find_path_by_addr(conn, src_addr);
 		if (path)
 			path_looked_up = true;
+	}
+
+	/* Try CID-based path routing for multipath */
+	{
+		struct tquic_path *cid_path;
+
+		cid_path = tquic_find_path_by_cid(conn, dcid, dcid_len);
+		if (cid_path) {
+			tquic_dbg("input: routed to path via CID len=%u\n",
+				  dcid_len);
+			tquic_path_put(cid_path);
+		}
 	}
 
 	/* Remove header protection */

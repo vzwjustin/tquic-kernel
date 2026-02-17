@@ -15,7 +15,7 @@
 #include "../tquic_debug.h"
 #include "../tquic_init.h"
 
-static int __init __maybe_unused tquic_multipath_module_init(void)
+static int __init tquic_multipath_module_init(void)
 {
 	int ret;
 
@@ -47,7 +47,7 @@ err_ack:
 	return ret;
 }
 
-static void __exit __maybe_unused tquic_multipath_module_exit(void)
+static void __exit tquic_multipath_module_exit(void)
 {
 	tquic_mp_abandon_exit();
 	tquic_mp_deadline_exit();

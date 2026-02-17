@@ -376,7 +376,7 @@ static struct tquic_path *rr_select(void *state, struct tquic_connection *conn,
 	return tquic_sched_active_path_get(conn);
 }
 
-static struct tquic_sched_ops __maybe_unused tquic_sched_rr = {
+static struct tquic_sched_ops tquic_sched_rr = {
 	.name = "roundrobin",
 	.init = rr_init,
 	.release = rr_release,
@@ -409,7 +409,7 @@ minrtt_select(void *state, struct tquic_connection *conn, struct sk_buff *skb)
 	return best ?: tquic_sched_active_path_get(conn);
 }
 
-static struct tquic_sched_ops __maybe_unused tquic_sched_minrtt = {
+static struct tquic_sched_ops tquic_sched_minrtt = {
 	.name = "minrtt",
 	.select = minrtt_select,
 };
@@ -509,7 +509,7 @@ static void wrr_feedback(void *state, struct tquic_path *path,
 	/* This is a simplified implementation */
 }
 
-static struct tquic_sched_ops __maybe_unused tquic_sched_wrr = {
+static struct tquic_sched_ops tquic_sched_wrr = {
 	.name = "weighted",
 	.init = wrr_init,
 	.release = wrr_release,
@@ -595,7 +595,7 @@ blest_select(void *state, struct tquic_connection *conn, struct sk_buff *skb)
 	return best ?: tquic_sched_active_path_get(conn);
 }
 
-static struct tquic_sched_ops __maybe_unused tquic_sched_blest = {
+static struct tquic_sched_ops tquic_sched_blest = {
 	.name = "blest",
 	.init = blest_init,
 	.release = blest_release,
@@ -614,7 +614,7 @@ static struct tquic_path *redundant_select(void *state,
 	return NULL;
 }
 
-static struct tquic_sched_ops __maybe_unused tquic_sched_redundant = {
+static struct tquic_sched_ops tquic_sched_redundant = {
 	.name = "redundant",
 	.select = redundant_select,
 };
@@ -766,7 +766,7 @@ static void ecf_feedback(void *state, struct tquic_path *path,
 	 */
 }
 
-static struct tquic_sched_ops __maybe_unused tquic_sched_ecf = {
+static struct tquic_sched_ops tquic_sched_ecf = {
 	.name = "ecf",
 	.init = ecf_init,
 	.release = ecf_release,
@@ -837,7 +837,7 @@ static struct tquic_path *owd_select(void *state, struct tquic_connection *conn,
 	struct owd_sched_data *data = state;
 	struct tquic_path *active_path;
 	struct tquic_path *path, *best = NULL;
-	struct tquic_owd_path_info info __maybe_unused;
+	struct tquic_owd_path_info info;
 	s64 best_delay = S64_MAX;
 	ktime_t now = ktime_get();
 	u64 time_since_switch_ms;
@@ -854,7 +854,7 @@ static struct tquic_path *owd_select(void *state, struct tquic_connection *conn,
 	rcu_read_lock();
 	list_for_each_entry_rcu(path, &conn->paths, list) {
 		s64 effective_delay;
-		int ret __maybe_unused;
+		int ret;
 
 		if (!tquic_sched_path_usable(path))
 			continue;
@@ -925,7 +925,7 @@ static void owd_feedback(void *state, struct tquic_path *path,
 	 */
 }
 
-static struct tquic_sched_ops __maybe_unused tquic_sched_owd = {
+static struct tquic_sched_ops tquic_sched_owd = {
 	.name = "owd",
 	.init = owd_init,
 	.release = owd_release,
@@ -971,7 +971,7 @@ static void owd_ecf_release(void *state)
  * - On asymmetric links, forward delay may differ significantly from RTT/2
  * - Download ACKs (reverse path) don't affect data delivery time
  */
-static struct tquic_path *owd_ecf_select(void *state __maybe_unused,
+static struct tquic_path *owd_ecf_select(void *state,
 					 struct tquic_connection *conn,
 					 struct sk_buff *skb)
 {
@@ -1047,7 +1047,7 @@ static struct tquic_path *owd_ecf_select(void *state __maybe_unused,
 	return best ?: tquic_sched_active_path_get(conn);
 }
 
-static struct tquic_sched_ops __maybe_unused tquic_sched_owd_ecf = {
+static struct tquic_sched_ops tquic_sched_owd_ecf = {
 	.name = "owd-ecf",
 	.init = owd_ecf_init,
 	.release = owd_ecf_release,
