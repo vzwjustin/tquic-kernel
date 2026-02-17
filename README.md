@@ -8,7 +8,7 @@
 
 TQUIC is a Linux kernel module implementing the QUIC protocol (RFC 9000/9001/9002) with multipath support for WAN bonding. Unlike userspace QUIC implementations, TQUIC operates directly in the kernel for maximum performance and tight integration with the networking stack.
 
-**~642k lines of C** across `net/tquic/` implementing the full QUIC/HTTP3 stack with multipath, security, and performance features. Security audit completed February 2026 with all critical issues resolved across 11 rounds of fixes. **End-to-end data exchange verified**: TLS 1.3 handshake, bidirectional STREAM data, ACK generation, flow control (MAX_DATA/MAX_STREAM_DATA), and clean CONNECTION_CLOSE teardown — 10KB file download in 11ms (7.45 Mbps) over loopback.
+**~642k lines of C** across `net/tquic/` implementing the full QUIC/HTTP3 stack with multipath, security, and performance features. Security audit completed February 2026 with all critical issues resolved across 11 rounds of fixes. **End-to-end data exchange verified**: TLS 1.3 handshake, bidirectional STREAM data, ACK generation, flow control (MAX_DATA/MAX_STREAM_DATA), and clean CONNECTION_CLOSE teardown — 1MB file transfer with MD5 integrity verification over loopback.
 
 ### Project Structure
 
@@ -119,9 +119,10 @@ Userspace QUIC implementations pay a heavy cost crossing the kernel boundary on 
 | Stream FIN on connection close | Done |
 | CONNECTION_CLOSE exchange & clean teardown | Done |
 | All RFC 9000 frame types (0x00-0x1e) | Done |
-| Large file transfers (>10KB) | In Progress |
+| 1MB file transfer with integrity verification | Done |
 | Loss detection & retransmission (RFC 9002) | Planned |
 | Delayed ACK timer (RFC 9000 Section 13.2.1) | Planned |
+| Multi-megabyte transfers & throughput optimization | Planned |
 | Interop testing (quiche, msquic, ngtcp2) | Planned |
 
 ## Quick Start
