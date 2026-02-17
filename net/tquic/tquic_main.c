@@ -49,6 +49,7 @@
 #include "tquic_compat.h"
 #include "tquic_init.h"
 #include "tquic_debug.h"
+#include "core/quic_loss.h"
 #if IS_REACHABLE(CONFIG_TQUIC_DIAG)
 #include "diag/path_metrics.h"
 #endif
@@ -1033,6 +1034,11 @@ int __ref tquic_init(void)
 	if (err)
 		goto err_timer;
 
+	/* Initialize loss detection slab cache */
+	err = tquic_loss_cache_init();
+	if (err)
+		goto err_loss_cache;
+
 	/* Initialize UDP tunnel subsystem */
 	err = tquic_udp_init();
 	if (err)
@@ -1390,6 +1396,8 @@ err_stateless_reset:
 err_token:
 	tquic_udp_exit();
 err_udp:
+	tquic_loss_cache_destroy();
+err_loss_cache:
 	tquic_timer_exit();
 err_timer:
 	tquic_connection_exit();
@@ -1402,6 +1410,8 @@ err_cid_hash:
 err_hashtable:
 	tquic_output_tx_exit();
 err_frame_cache:
+	tquic_loss_cache_destroy();
+err_loss_cache:
 	kmem_cache_destroy(tquic_rx_buf_cache);
 err_rx_buf_cache:
 	/* tquic_path_cache destroyed by tquic_path_exit_module() */
@@ -1489,6 +1499,7 @@ void __exit tquic_exit(void)
 	tquic_stateless_reset_exit();
 	tquic_token_exit();
 	tquic_udp_exit();
+	tquic_loss_cache_destroy();
 	tquic_timer_exit();
 	tquic_connection_exit();
 	tquic_cid_table_exit();
@@ -1497,6 +1508,7 @@ void __exit tquic_exit(void)
 	/* Cleanup global data structures */
 	rhashtable_destroy(&tquic_conn_table);
 	tquic_output_tx_exit();
+	tquic_loss_cache_destroy();
 	kmem_cache_destroy(tquic_rx_buf_cache);
 	/* tquic_path_cache destroyed by tquic_path_exit_module() at line 1297 */
 	kmem_cache_destroy(tquic_stream_cache);

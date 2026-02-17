@@ -92,6 +92,10 @@ void tquic_http3_conn_exit(void);
 int tquic_http3_streams_init(void);
 void tquic_http3_streams_exit(void);
 
+/* Loss detection slab cache */
+int tquic_loss_cache_init(void);
+void tquic_loss_cache_destroy(void);
+
 /* Output TX subsystem */
 int tquic_output_tx_init(void);
 void tquic_output_tx_exit(void);
