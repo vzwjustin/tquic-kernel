@@ -777,8 +777,12 @@ void tquic_loss_detection_on_ack_received(struct tquic_connection *conn,
 	}
 
 	/* Update congestion control - use path-level CC API */
-	if (path && acked_bytes > 0)
+	if (path && acked_bytes > 0) {
 		tquic_cong_on_ack(path, acked_bytes, path->rtt.latest_rtt);
+
+		/* Update path stats for output_flush inflight calculation */
+		path->stats.acked_bytes += acked_bytes;
+	}
 
 	/*
 	 * Process ECN feedback (RFC 9000 Section 13.4)
