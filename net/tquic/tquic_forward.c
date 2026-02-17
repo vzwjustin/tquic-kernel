@@ -21,8 +21,6 @@
 #include <linux/net.h>
 #include <linux/socket.h>
 #include <linux/file.h>
-#include <linux/pipe_fs_i.h>
-#include <linux/splice.h>
 #include <linux/workqueue.h>
 #include <linux/timer.h>
 #include <linux/list.h>
@@ -85,35 +83,6 @@ extern void tquic_qos_update_stats(u8 traffic_class, u64 bytes);
 extern u8 tquic_tunnel_get_traffic_class(struct tquic_tunnel *tunnel);
 
 /*
- * Wrapper functions for pipe allocation in out-of-tree builds.
- * alloc_pipe_info() and free_pipe_info() are declared in pipe_fs_i.h
- * but not exported for modules. Use wrapper functions that return NULL
- * for out-of-tree builds, effectively disabling splice-based forwarding.
- */
-#ifdef TQUIC_OUT_OF_TREE
-static inline struct pipe_inode_info *tquic_alloc_pipe(void)
-{
-	/* Cannot use pipe splice in out-of-tree module - symbol not exported */
-	return NULL;
-}
-
-static inline void tquic_free_pipe(struct pipe_inode_info *pipe)
-{
-	/* No-op for out-of-tree */
-}
-#else
-static inline struct pipe_inode_info *tquic_alloc_pipe(void)
-{
-	return alloc_pipe_info();
-}
-
-static inline void tquic_free_pipe(struct pipe_inode_info *pipe)
-{
-	free_pipe_info(pipe);
-}
-#endif
-
-/*
  * =============================================================================
  * HAIRPIN DETECTION STATE
  * =============================================================================
@@ -122,11 +91,6 @@ static inline void tquic_free_pipe(struct pipe_inode_info *pipe)
  * connected to the same VPS. Instead of creating a TCP socket, we
  * forward directly to the peer client's QUIC stream.
  */
-
-/* Client list for hairpin detection */
-static LIST_HEAD(tquic_forward_client_list);
-static spinlock_t tquic_forward_client_lock =
-	__SPIN_LOCK_UNLOCKED(tquic_forward_client_lock);
 
 /**
  * struct tquic_hairpin_entry - Hairpin route entry
@@ -165,71 +129,6 @@ static u32 tquic_forward_hash_addr(const struct sockaddr_storage *addr)
 	}
 
 	return hash;
-}
-
-/*
- * =============================================================================
- * SPLICE-BASED FORWARDING
- * =============================================================================
- *
- * Zero-copy forwarding using kernel splice internals.
- *
- * Per CONTEXT.md: Zero-copy forwarding via splice/sendfile.
- */
-
-/**
- * struct tquic_splice_state - State for splice operation
- * @pipe: Pipe used as splice buffer
- * @bytes_pending: Bytes in pipe waiting to be written
- */
-struct tquic_splice_state {
-	struct pipe_inode_info *pipe;
-	size_t bytes_pending;
-};
-
-/**
- * tquic_splice_state_alloc - Allocate splice state
- *
- * Returns: Splice state or NULL on failure
- */
-static struct tquic_splice_state *tquic_splice_state_alloc(void)
-{
-	struct tquic_splice_state *state;
-
-	tquic_dbg("tquic_splice_state_alloc: allocating splice state\n");
-
-	state = kzalloc(sizeof(*state), GFP_KERNEL);
-	if (!state)
-		return NULL;
-
-	/*
-	 * Allocate pipe for splice buffer
-	 * Note: Uses wrapper for out-of-tree compatibility
-	 */
-	state->pipe = tquic_alloc_pipe();
-	if (!state->pipe) {
-		kfree(state);
-		return NULL;
-	}
-
-	return state;
-}
-
-/**
- * tquic_splice_state_free - Free splice state
- * @state: State to free
- */
-static void tquic_splice_state_free(struct tquic_splice_state *state)
-{
-	tquic_dbg("tquic_splice_state_free: freeing splice state\n");
-
-	if (!state)
-		return;
-
-	if (state->pipe)
-		tquic_free_pipe(state->pipe);
-
-	kfree(state);
 }
 
 /**
@@ -458,43 +357,6 @@ ssize_t tquic_forward_splice(struct tquic_tunnel *tunnel, int direction)
 }
 EXPORT_SYMBOL_GPL(tquic_forward_splice);
 
-/**
- * tquic_forward_skb_splice - Splice using skb move
- * @from_queue: Source sk_buff_head
- * @to_queue: Destination sk_buff_head
- * @max_bytes: Maximum bytes to move
- *
- * Moves skbs between queues without copying data, for zero-copy within
- * kernel buffers.
- *
- * Returns: Bytes moved
- */
-static size_t tquic_forward_skb_splice(struct sk_buff_head *from_queue,
-						      struct sk_buff_head *to_queue,
-						      size_t max_bytes)
-{
-	struct sk_buff *skb;
-	size_t moved = 0;
-
-	tquic_dbg("forward_skb_splice: max_bytes=%zu\n", max_bytes);
-
-	while (moved < max_bytes && !skb_queue_empty(from_queue)) {
-		skb = skb_dequeue(from_queue);
-		if (!skb)
-			break;
-
-		if (moved + skb->len > max_bytes) {
-			/* Partial move not supported, put back */
-			skb_queue_head(from_queue, skb);
-			break;
-		}
-
-		skb_queue_tail(to_queue, skb);
-		moved += skb->len;
-	}
-
-	return moved;
-}
 
 /*
  * =============================================================================
