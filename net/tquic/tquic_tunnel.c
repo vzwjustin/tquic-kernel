@@ -172,7 +172,9 @@ static int tquic_tunnel_parse_header(const u8 *data, size_t len,
 		    ipv4_is_private_10(addr4) ||
 		    ipv4_is_private_172(addr4) ||
 		    ipv4_is_private_192(addr4) ||
-		    ipv4_is_linklocal_169(addr4)) {
+		    ipv4_is_linklocal_169(addr4) ||
+		    /* H3: RFC 6598 shared address space (CGNAT 100.64/10) */
+		    (addr4 & htonl(0xFFC00000)) == htonl(0x64400000)) {
 			return -EACCES;
 		}
 
@@ -209,7 +211,9 @@ static int tquic_tunnel_parse_header(const u8 *data, size_t len,
 		 */
 		if (ipv6_addr_loopback(&addr6) ||
 		    ipv6_addr_is_multicast(&addr6) ||
-		    ipv6_addr_type(&addr6) & IPV6_ADDR_LINKLOCAL) {
+		    ipv6_addr_type(&addr6) & IPV6_ADDR_LINKLOCAL ||
+		    /* H3: RFC 4193 Unique Local Addresses (fc00::/7) */
+		    (addr6.s6_addr[0] & 0xfe) == 0xfc) {
 			return -EACCES;
 		}
 
@@ -305,6 +309,16 @@ static struct tquic_tunnel *tquic_tunnel_alloc(struct tquic_client *client,
 		return NULL;
 
 	tunnel->client = client;
+
+	/*
+	 * C2: Take a reference on the QUIC stream to prevent UAF if
+	 * stream teardown races with tunnel forwarding work.  Released
+	 * in tquic_tunnel_free().
+	 */
+	if (!tquic_stream_get(stream)) {
+		kfree(tunnel);
+		return NULL;
+	}
 	tunnel->quic_stream = stream;
 	tunnel->state = TQUIC_TUNNEL_IDLE;
 	tunnel->traffic_class = TQUIC_TC_BULK;  /* Default */
@@ -330,6 +344,12 @@ static void tquic_tunnel_free(struct tquic_tunnel *tunnel)
 
 	if (tunnel->client && tunnel->local_port)
 		tquic_port_free(tunnel->client, tunnel->local_port);
+
+	/* Release QUIC stream reference taken in tquic_tunnel_alloc(). */
+	if (tunnel->quic_stream) {
+		tquic_stream_put(tunnel->quic_stream);
+		tunnel->quic_stream = NULL;
+	}
 
 	kfree(tunnel);
 }

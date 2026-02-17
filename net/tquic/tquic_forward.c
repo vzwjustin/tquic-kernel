@@ -589,6 +589,20 @@ struct tquic_client *tquic_forward_check_hairpin(struct tquic_tunnel *tunnel)
 	hash_for_each_possible(tquic_hairpin_hash, entry, node, hash) {
 		if (memcmp(&entry->dest_addr, dest_addr,
 			   sizeof(struct sockaddr_storage)) == 0) {
+			/*
+			 * C1-FIXME: Must take a reference on peer_client
+			 * before releasing tquic_hairpin_lock to prevent UAF.
+			 * Requires tquic_client_get() exported from
+			 * tquic_server.c.  Safe to land once hairpin is
+			 * enabled (dest_addr is currently always NULL above).
+			 *
+			 *   if (!tquic_client_get(entry->peer_client)) {
+			 *       spin_unlock_bh(&tquic_hairpin_lock);
+			 *       return NULL;
+			 *   }
+			 *
+			 * Caller must then call tquic_client_put().
+			 */
 			spin_unlock_bh(&tquic_hairpin_lock);
 			return entry->peer_client;
 		}
@@ -685,7 +699,11 @@ ssize_t tquic_forward_hairpin(struct tquic_tunnel *tunnel,
 	 * Extract hop count from first skb if it contains hairpin header.
 	 * This prevents infinite loops in complex hairpin topologies where
 	 * client A -> VPS -> client B -> VPS -> client A could occur.
+	 *
+	 * C3: Hold recv_buf.lock while peeking to prevent UAF from a
+	 * concurrent skb_dequeue/kfree_skb on another CPU.
 	 */
+	spin_lock_bh(&src_stream->recv_buf.lock);
 	skb = skb_peek(&src_stream->recv_buf);
 	if (skb && skb->len >= sizeof(struct tquic_hairpin_header)) {
 		struct tquic_hairpin_header *hdr;
@@ -694,12 +712,14 @@ ssize_t tquic_forward_hairpin(struct tquic_tunnel *tunnel,
 		if (hdr->magic == TQUIC_HAIRPIN_MAGIC) {
 			hop_count = hdr->hop_count;
 			if (hop_count >= TQUIC_HAIRPIN_MAX_HOPS) {
+				spin_unlock_bh(&src_stream->recv_buf.lock);
 				pr_warn_ratelimited("tquic: hairpin loop detected, "
 						    "hop_count=%u\n", hop_count);
 				return -ELOOP;
 			}
 		}
 	}
+	spin_unlock_bh(&src_stream->recv_buf.lock);
 
 	/*
 	 * Find or create destination stream on peer connection.
@@ -1525,6 +1545,13 @@ static void tquic_forward_data_ready(struct sock *sk)
 	 * tquic_tunnel_wq.  The work handler releases the reference.
 	 */
 	tquic_tunnel_schedule_forward(tunnel);
+
+	/*
+	 * H4: Chain original callback so poll/select waiters on the TCP
+	 * socket are still woken up correctly (e.g. epoll consumers).
+	 */
+	if (tunnel->saved_data_ready)
+		tunnel->saved_data_ready(sk);
 }
 
 /**

@@ -178,42 +178,22 @@ EXPORT_SYMBOL_GPL(tquic_sched_find);
  */
 const char *tquic_sched_get_default(struct net *net)
 {
+	/*
+	 * M3: Use a static buffer to copy ops->name under rcu_read_lock so
+	 * we don't return a pointer into module .rodata that could be freed
+	 * after rcu_read_unlock().  This function is called from sysctl read
+	 * paths only, so non-reentrancy of the static buffer is acceptable.
+	 */
+	static char name_buf[64] = "ecf";
 	const struct tquic_sched_ops *ops;
-	const char *name = "ecf"; /* Default scheduler name */
 
 	rcu_read_lock();
 	ops = rcu_dereference(default_scheduler);
-	if (ops && ops->name) {
-		/*
-		 * Return a static default name rather than a pointer into
-		 * the scheduler struct, which could be freed after we drop
-		 * rcu_read_lock().  Callers needing the actual scheduler
-		 * should use tquic_sched_default() with try_module_get().
-		 */
-		if (strcmp(ops->name, "ecf") == 0)
-			name = "ecf";
-		else if (strcmp(ops->name, "minrtt") == 0)
-			name = "minrtt";
-		else if (strcmp(ops->name, "roundrobin") == 0)
-			name = "roundrobin";
-		else if (strcmp(ops->name, "weighted") == 0)
-			name = "weighted";
-		else if (strcmp(ops->name, "blest") == 0)
-			name = "blest";
-		else if (strcmp(ops->name, "aggregate") == 0)
-			name = "aggregate";
-		else if (strcmp(ops->name, "redundant") == 0)
-			name = "redundant";
-		else if (strcmp(ops->name, "owd") == 0)
-			name = "owd";
-		else if (strcmp(ops->name, "owd-ecf") == 0)
-			name = "owd-ecf";
-		else
-			name = "unknown";
-	}
+	if (ops && ops->name)
+		strscpy(name_buf, ops->name, sizeof(name_buf));
 	rcu_read_unlock();
 
-	return name;
+	return name_buf;
 }
 EXPORT_SYMBOL_GPL(tquic_sched_get_default);
 
@@ -476,7 +456,11 @@ static struct tquic_path *wrr_select(void *state, struct tquic_connection *conn,
 		if (tquic_sched_path_usable(path))
 			tw += READ_ONCE(path->weight);
 	}
-	data->total_weight = tw;
+	/*
+	 * M5: WRITE_ONCE prevents data-race if wrr_select() runs
+	 * concurrently on multiple CPUs for the same connection.
+	 */
+	WRITE_ONCE(data->total_weight, tw);
 
 	if (tw == 0) {
 		rcu_read_unlock();
