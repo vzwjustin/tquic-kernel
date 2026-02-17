@@ -120,8 +120,8 @@ Userspace QUIC implementations pay a heavy cost crossing the kernel boundary on 
 | CONNECTION_CLOSE exchange & clean teardown | Done |
 | All RFC 9000 frame types (0x00-0x1e) | Done |
 | 1MB file transfer with integrity verification | Done |
-| Loss detection & retransmission (RFC 9002) | Planned |
-| Delayed ACK timer (RFC 9000 Section 13.2.1) | Planned |
+| Loss detection & retransmission (RFC 9002) | Done |
+| Delayed ACK timer (RFC 9000 Section 13.2.1) | Done |
 | Multi-megabyte transfers & throughput optimization | Planned |
 | Interop testing (quiche, msquic, ngtcp2) | Planned |
 

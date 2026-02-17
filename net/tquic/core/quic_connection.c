@@ -545,48 +545,90 @@ static void tquic_timer_key_update_cb(struct timer_list *t)
 	tquic_key_update_timeout(conn);
 }
 
+/*
+ * Maximum packets per tx_work invocation.
+ *
+ * Limits CPU time spent in a single work callback to prevent softlockups
+ * while still allowing burst transmission to fill the congestion window.
+ * 64 packets * ~1500 bytes = ~96 KB per invocation, enough to fill a
+ * typical initial slow-start window in one pass.
+ */
+#define TQUIC_TX_WORK_BATCH_MAX		64
+
 static void tquic_conn_tx_work(struct work_struct *work)
 {
 	struct tquic_connection *conn =
 		container_of(work, struct tquic_connection, tx_work);
+	struct tquic_path *path;
 	struct sk_buff *skb;
+	int total_sent = 0;
 	int i;
-	int ctrl_pending = skb_queue_len(&conn->control_frames);
+	bool more_work;
 
-	if (ctrl_pending)
-		pr_info("tquic: tx_work: conn=%px is_server=%d ctrl_frames=%d\n",
-			conn, conn->is_server, ctrl_pending);
+	/*
+	 * Loop until we've drained all sendable packets or hit a limit.
+	 *
+	 * The old code built exactly ONE packet per PN space per invocation,
+	 * throttling throughput to ~1 packet per RTT when tx_work was the
+	 * only transmission trigger. Now we loop to fill the congestion
+	 * window, matching what tquic_output_flush() does for stream data.
+	 */
+	do {
+		more_work = false;
 
-	for (i = TQUIC_PN_SPACE_APPLICATION; i >= TQUIC_PN_SPACE_INITIAL; i--) {
-		struct tquic_pn_space *pn_space = &conn->pn_spaces[i];
+		for (i = TQUIC_PN_SPACE_APPLICATION;
+		     i >= TQUIC_PN_SPACE_INITIAL; i--) {
+			struct tquic_pn_space *pn_space = &conn->pn_spaces[i];
 
-		if (!pn_space->keys_available || pn_space->keys_discarded) {
-			if (ctrl_pending)
-				pr_info("tquic: tx_work: skip space %d keys_avail=%d keys_disc=%d\n",
-					i, pn_space->keys_available, pn_space->keys_discarded);
-			continue;
-		}
+			if (!pn_space->keys_available ||
+			    pn_space->keys_discarded)
+				continue;
 
-		skb = tquic_packet_build(conn, i);
-		if (skb) {
-			struct tquic_path *path =
-				tquic_conn_active_path_get(conn);
-			int ret = tquic_udp_send(conn->tsk, skb, path);
+			skb = tquic_packet_build(conn, i);
+			if (!skb)
+				continue;
 
-			if (ctrl_pending)
-				pr_info("tquic: tx_work: sent pkt space=%d len=%d ret=%d\n",
-					i, skb->len, ret);
+			path = tquic_conn_active_path_get(conn);
+			if (!path) {
+				kfree_skb(skb);
+				continue;
+			}
 
-			if (ret < 0)
-				tquic_conn_err(
-					conn,
-					"tx_work: send failed on path %u: %d\n",
-					path ? path->path_id : 0, ret);
-
-			if (path)
+			if (tquic_udp_send(conn->tsk, skb, path) < 0) {
+				tquic_conn_err(conn,
+					       "tx_work: send failed on path %u\n",
+					       path->path_id);
 				tquic_path_put(path);
+				continue;
+			}
+
+			total_sent++;
+			tquic_path_put(path);
 		}
-	}
+
+		/* Check if there are still frames waiting to be sent */
+		if (!skb_queue_empty(&conn->control_frames))
+			more_work = true;
+
+		/* Check congestion window on active path */
+		if (more_work) {
+			path = tquic_conn_active_path_get(conn);
+			if (path) {
+				if (path->cc.cwnd > 0 &&
+				    path->cc.bytes_in_flight >= path->cc.cwnd)
+					more_work = false;
+				tquic_path_put(path);
+			}
+		}
+
+	} while (more_work && total_sent < TQUIC_TX_WORK_BATCH_MAX);
+
+	/*
+	 * If we hit the batch limit but still have pending frames,
+	 * re-schedule to continue draining without hogging the CPU.
+	 */
+	if (more_work && total_sent >= TQUIC_TX_WORK_BATCH_MAX)
+		schedule_work(&conn->tx_work);
 }
 
 static void tquic_conn_rx_work(struct work_struct *work)

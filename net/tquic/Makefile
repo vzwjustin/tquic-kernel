@@ -300,7 +300,8 @@ tquic_test-y := \
 	test/fec_test.o \
 	test/nat_keepalive_test.o \
 	test/cong_data_test.o \
-	test/quic_exfil_test.o
+	test/quic_exfil_test.o \
+	test/tx_work_test.o
 
 # Interoperability testing framework
 obj-$(CONFIG_TQUIC_INTEROP_TEST) += test/interop/
