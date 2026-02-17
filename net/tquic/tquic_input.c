@@ -4040,6 +4040,16 @@ static int tquic_process_packet(struct tquic_connection *conn,
 			ctx.offset += ret;
 			pr_debug("process_pkt: parsed hdr: pkt_len=%llu offset=%zu\n",
 				pkt_len, ctx.offset);
+			/*
+			 * RFC 9000 §17.2: the Length field covers (packet
+			 * number + payload) bytes starting at ctx.offset.
+			 * Validate and cap len so that coalesced packets
+			 * (§12.2) beyond this boundary are not processed
+			 * as part of the current packet.
+			 */
+			if (pkt_len > (u64)(len - ctx.offset))
+				return -EINVAL;
+			len = ctx.offset + (size_t)pkt_len;
 		}
 
 		/*

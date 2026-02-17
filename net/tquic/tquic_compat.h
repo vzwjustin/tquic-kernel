@@ -396,6 +396,11 @@ struct proto_accept_arg {
 #ifdef GENL_MCAST_CAP_NET_ADMIN
 #define TQUIC_GENL_MCAST_FLAGS(val) .flags = (val),
 #else
+/* Kernels before ~6.10 lack genl_multicast_group.flags; the capability
+ * restriction on TQUIC_MCGRP_EVENTS is therefore not enforced and any
+ * process may subscribe to that multicast group.
+ */
+#warning "TQUIC: kernel < 6.10: TQUIC_MCGRP_EVENTS open to unprivileged subscribers"
 #define TQUIC_GENL_MCAST_FLAGS(val)
 #endif
 

@@ -233,6 +233,15 @@ struct tquic_failover_ctx {
 
 	/* Back pointer */
 	struct tquic_bonding_ctx *bonding;
+
+	/*
+	 * Destruction guard: set to 1 at the start of tquic_failover_destroy()
+	 * before cancelling delayed works.  Timeout work items that were
+	 * already running (and re-queued themselves) check this flag and
+	 * return immediately, preventing them from accessing the rhashtable
+	 * after rhashtable_destroy() has been called.
+	 */
+	atomic_t		destroyed;
 };
 
 /*

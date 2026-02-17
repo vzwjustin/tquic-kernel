@@ -204,6 +204,15 @@ static void tquic_failover_timeout_work(struct work_struct *work)
 	u64 now, elapsed_us;
 	u8 path_id = pt->path_id;
 
+	/*
+	 * Check the destruction guard before doing anything.  A work item
+	 * that re-queued itself (line below) before cancel_delayed_work_sync()
+	 * could cancel the requeued item may arrive here after the rhashtable
+	 * has been destroyed.  Exit immediately in that case.
+	 */
+	if (atomic_read(&fc->destroyed))
+		return;
+
 	now = tquic_get_time_us();
 	elapsed_us = now - pt->last_ack_time;
 
@@ -384,6 +393,9 @@ tquic_failover_init(struct tquic_bonding_ctx *bonding,
 	atomic64_set(&fc->stats.flaps_suppressed, 0);
 	atomic64_set(&fc->stats.path_recoveries, 0);
 
+	/* Destruction guard — cleared until tquic_failover_destroy() */
+	atomic_set(&fc->destroyed, 0);
+
 	pr_debug("failover context initialized\n");
 
 	return fc;
@@ -401,6 +413,17 @@ void tquic_failover_destroy(struct tquic_failover_ctx *fc)
 
 	if (!fc)
 		return;
+
+	/*
+	 * Signal that the context is being destroyed.  Timeout work items
+	 * that are already running check this flag at their entry point and
+	 * bail out early, preventing them from re-queuing themselves or
+	 * calling tquic_failover_on_path_failed() after the rhashtable is
+	 * torn down below.  Set before cancel_delayed_work_sync() so that
+	 * any concurrent work item that re-queued itself between the cancel
+	 * call and the sync will also see the flag and exit.
+	 */
+	atomic_set(&fc->destroyed, 1);
 
 	/* Cancel all path timeout work (safe to call even if never queued) */
 	for (i = 0; i < TQUIC_MAX_PATHS; i++)
