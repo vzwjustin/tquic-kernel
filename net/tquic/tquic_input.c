@@ -1557,6 +1557,15 @@ static int tquic_process_stream_frame(struct tquic_rx_ctx *ctx)
 		stream = tquic_stream_open_incoming(ctx->conn, stream_id);
 		if (!stream)
 			return -ENOMEM;
+
+		/*
+		 * Wake up any recvmsg() blocked waiting for a stream to
+		 * appear.  On the server side, accept() returns the child
+		 * socket before the client's first STREAM frame arrives,
+		 * so recvmsg() may be sleeping on sk_sleep(sk).
+		 */
+		if (ctx->conn->sk)
+			ctx->conn->sk->sk_data_ready(ctx->conn->sk);
 	}
 
 	/*

@@ -3229,6 +3229,60 @@ int tquic_recvmsg(struct sock *sk, struct msghdr *msg, size_t len, int flags,
 		}
 	}
 
+	if (!stream && !nonblock) {
+		/*
+		 * No stream exists yet.  On the server side this means the
+		 * client's first STREAM frame hasn't arrived.  Block until
+		 * tquic_process_stream_frame() creates one (and calls
+		 * sk->sk_data_ready), the connection closes, or SO_RCVTIMEO
+		 * expires.
+		 */
+		long timeo = sock_rcvtimeo(sk, 0);
+		DEFINE_WAIT_FUNC(wait, woken_wake_function);
+
+		add_wait_queue(sk_sleep(sk), &wait);
+		while (!stream) {
+			if (READ_ONCE(conn->state) != TQUIC_CONN_CONNECTED)
+				break;
+			if (signal_pending(current))
+				break;
+
+			timeo = wait_woken(&wait, TASK_INTERRUPTIBLE, timeo);
+			if (!timeo)
+				break;
+
+			/* Re-walk stream tree after wakeup */
+			spin_lock_bh(&conn->lock);
+			{
+				struct rb_node *node;
+
+				for (node = rb_first(&conn->streams); node;
+				     node = rb_next(node)) {
+					struct tquic_stream *s;
+
+					s = rb_entry(node, struct tquic_stream,
+						     node);
+					if ((s->id & 0x02) == 0 &&
+					    tquic_stream_get(s)) {
+						stream = s;
+						break;
+					}
+				}
+			}
+			spin_unlock_bh(&conn->lock);
+		}
+		remove_wait_queue(sk_sleep(sk), &wait);
+
+		if (stream) {
+			/* Install as default_stream for future calls */
+			write_lock_bh(&sk->sk_callback_lock);
+			if (!tsk->default_stream) {
+				tquic_stream_get(stream);
+				tsk->default_stream = stream;
+			}
+			write_unlock_bh(&sk->sk_callback_lock);
+		}
+	}
 	if (!stream) {
 		tquic_conn_put(conn);
 		return nonblock ? -EAGAIN : -ENOTCONN;
