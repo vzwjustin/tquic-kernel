@@ -389,9 +389,10 @@ static int tquic_derive_keys_versioned(struct tquic_crypto_state *crypto,
 /*
  * Derive keys from secret (legacy wrapper using v1 labels)
  */
-static int __maybe_unused tquic_derive_keys(struct tquic_crypto_state *crypto,
+static int tquic_derive_keys(struct tquic_crypto_state *crypto,
 					    struct tquic_keys *keys)
 {
+	tquic_dbg("derive_keys: crypto=%p keys=%p\n", crypto, keys);
 	return tquic_derive_keys_versioned(crypto, keys, TQUIC_VERSION_1);
 }
 
@@ -542,10 +543,12 @@ out_zeroize:
 /*
  * Derive initial keys from connection ID (legacy wrapper - uses v1)
  */
-static int __maybe_unused tquic_derive_initial_keys(struct tquic_crypto_state *crypto,
+static int tquic_derive_initial_keys(struct tquic_crypto_state *crypto,
 						    const struct tquic_cid *dcid,
 						    bool is_server)
 {
+	tquic_dbg("derive_initial_keys: crypto=%p is_server=%d\n",
+		  crypto, is_server);
 	return tquic_derive_initial_keys_versioned(crypto, dcid, is_server,
 						   TQUIC_VERSION_1);
 }

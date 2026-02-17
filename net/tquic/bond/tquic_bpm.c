@@ -49,7 +49,7 @@
  */
 /* enum tquic_bpm_path_state is defined in tquic_path.h */
 
-static const char __maybe_unused *tquic_bpm_path_state_names[] = {
+static const char *tquic_bpm_path_state_names[] = {
 	[TQUIC_BPM_PATH_CREATED] = "CREATED",
 	[TQUIC_BPM_PATH_VALIDATING] = "VALIDATING",
 	[TQUIC_BPM_PATH_VALIDATED] = "VALIDATED",
@@ -400,7 +400,7 @@ static void tquic_addr_from_sockaddr(struct tquic_addr_info *info,
 	}
 }
 
-static void __maybe_unused tquic_addr_to_sockaddr(
+static void tquic_addr_to_sockaddr(
 	const struct tquic_addr_info *info, struct sockaddr_storage *addr)
 {
 	tquic_dbg("addr_to_sockaddr: family=%u\n", info->family);
@@ -446,7 +446,7 @@ static void tquic_cc_init(struct tquic_bpm_path_cc *cc)
 	cc->congestion_start = 0;
 }
 
-static void __maybe_unused tquic_cc_on_ack(struct tquic_bpm_path *path,
+static void tquic_cc_on_ack(struct tquic_bpm_path *path,
 					   u32 bytes_acked)
 {
 	struct tquic_bpm_path_cc *cc = &path->cc;
@@ -488,7 +488,7 @@ static void __maybe_unused tquic_cc_on_ack(struct tquic_bpm_path *path,
 					      bytes_acked);
 }
 
-static void __maybe_unused tquic_cc_on_loss(struct tquic_bpm_path *path,
+static void tquic_cc_on_loss(struct tquic_bpm_path *path,
 					    u32 bytes_lost)
 {
 	struct tquic_bpm_path_cc *cc = &path->cc;

@@ -20,6 +20,8 @@
 #include "transport_params.h"
 #include "../tquic_cid.h"
 #include "../tquic_debug.h"
+#include "../cong/tquic_cong.h"
+#include "../tquic_sysctl.h"
 #include "../diag/trace.h"
 #include "../tquic_compat.h"
 #include "../protocol.h"
@@ -157,7 +159,7 @@ static const struct rhashtable_params tquic_cid_rht_params = {
 };
 
 static struct rhashtable tquic_cid_rht;
-static spinlock_t __maybe_unused tquic_cid_rht_lock =
+static spinlock_t tquic_cid_rht_lock =
 	__SPIN_LOCK_UNLOCKED(tquic_cid_rht_lock);
 
 int tquic_cid_hash_init(void)
@@ -325,7 +327,7 @@ static void tquic_pn_space_init(struct tquic_pn_space *pn_space)
 	pn_space->keys_discarded = 0;
 }
 
-static void __maybe_unused
+static void
 tquic_pn_space_destroy(struct tquic_pn_space *pn_space)
 {
 	struct tquic_sent_packet *pkt, *tmp;
@@ -564,6 +566,18 @@ static void tquic_conn_tx_work(struct work_struct *work)
 	int total_sent = 0;
 	int i;
 	bool more_work;
+	bool pacing_enabled;
+	bool pacing_blocked = false;
+
+	/*
+	 * Determine if pacing is active for this connection.
+	 * All three conditions must be true: timer infrastructure ready,
+	 * socket-level pacing flag set, and netns sysctl enabled.
+	 */
+	pacing_enabled = conn->timer_state &&
+			 conn->tsk && conn->tsk->pacing_enabled &&
+			 tquic_net_get_pacing_enabled(sock_net(conn->sk));
+	tquic_dbg("tx_work: pacing_enabled=%d\n", pacing_enabled);
 
 	/*
 	 * Loop until we've drained all sendable packets or hit a limit.
@@ -579,10 +593,24 @@ static void tquic_conn_tx_work(struct work_struct *work)
 		for (i = TQUIC_PN_SPACE_APPLICATION;
 		     i >= TQUIC_PN_SPACE_INITIAL; i--) {
 			struct tquic_pn_space *pn_space = &conn->pn_spaces[i];
+			u32 pkt_len;
 
 			if (!pn_space->keys_available ||
 			    pn_space->keys_discarded)
 				continue;
+
+			/*
+			 * Per RFC 9002 Section 7.7: Initial and Handshake
+			 * packets are never paced. Only pace Application
+			 * data packets.
+			 */
+			if (pacing_enabled &&
+			    i == TQUIC_PN_SPACE_APPLICATION &&
+			    !tquic_timer_can_send_paced(conn->timer_state)) {
+				tquic_dbg("tx_work: pacing gate closed, deferring app data\n");
+				pacing_blocked = true;
+				continue;
+			}
 
 			skb = tquic_packet_build(conn, i);
 			if (!skb)
@@ -594,6 +622,12 @@ static void tquic_conn_tx_work(struct work_struct *work)
 				continue;
 			}
 
+			/*
+			 * Capture length before send - tquic_udp_send()
+			 * consumes the skb.
+			 */
+			pkt_len = skb->len;
+
 			if (tquic_udp_send(conn->tsk, skb, path) < 0) {
 				tquic_conn_err(conn,
 					       "tx_work: send failed on path %u\n",
@@ -602,8 +636,37 @@ static void tquic_conn_tx_work(struct work_struct *work)
 				continue;
 			}
 
+			/*
+			 * After successful Application-level send, update
+			 * the pacing rate from CC and schedule the next
+			 * pacing interval.
+			 */
+			if (pacing_enabled &&
+			    i == TQUIC_PN_SPACE_APPLICATION) {
+				u64 rate = tquic_cong_get_pacing_rate(path);
+
+				tquic_dbg("tx_work: pacing send pkt_len=%u rate=%llu B/s\n",
+					  pkt_len, rate);
+				tquic_timer_set_pacing_rate(conn->timer_state,
+							    rate);
+				tquic_timer_schedule_pacing(conn->timer_state,
+							    pkt_len);
+			}
+
 			total_sent++;
 			tquic_path_put(path);
+		}
+
+		/*
+		 * If pacing blocked Application space, stop the outer
+		 * loop. The pacing hrtimer will re-trigger tx_work
+		 * when the send time arrives.
+		 */
+		if (pacing_blocked) {
+			tquic_dbg("tx_work: pacing blocked, sent=%d, waiting for hrtimer\n",
+				  total_sent);
+			more_work = false;
+			break;
 		}
 
 		/* Check if there are still frames waiting to be sent */
@@ -1005,7 +1068,7 @@ static int tquic_conn_connect(struct tquic_connection *conn,
 	}
 
 	/* Derive initial secrets from destination connection ID */
-	err = tquic_crypto_derive_initial_secrets(conn, &conn->dcid);
+	err = tquic_crypto_derive_initial_secrets(conn, tquic_conn_get_dcid(conn));
 	if (err)
 		return err;
 
@@ -1031,8 +1094,8 @@ static int tquic_conn_connect(struct tquic_connection *conn,
 
 static int tquic_conn_accept(struct tquic_connection *conn)
 {
-	return tquic_conn_set_state(conn, TQUIC_CONN_CONNECTING,
-				    TQUIC_REASON_NORMAL);
+	tquic_conn_set_state_local(conn, TQUIC_CONN_CONNECTING);
+	return 0;
 }
 
 static int tquic_conn_close(struct tquic_connection *conn, u64 error_code,
@@ -1083,6 +1146,7 @@ static int tquic_conn_close(struct tquic_connection *conn, u64 error_code,
 static void tquic_conn_set_state_local(struct tquic_connection *conn,
 			      enum tquic_conn_state state)
 {
+	tquic_dbg("tquic_conn_set_state_local: state=%d\n", state);
 	tquic_conn_set_state(conn, state, TQUIC_REASON_NORMAL);
 }
 
@@ -1165,6 +1229,7 @@ static int tquic_conn_add_peer_cid(struct tquic_connection *conn,
 /* Get active destination CID */
 static struct tquic_cid *tquic_conn_get_dcid(struct tquic_connection *conn)
 {
+	tquic_dbg("tquic_conn_get_dcid: dcid_len=%u\n", conn->dcid.len);
 	return &conn->dcid;
 }
 

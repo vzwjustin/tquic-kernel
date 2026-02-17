@@ -146,6 +146,8 @@ static int tquic_parse_header(struct sk_buff *skb, struct tquic_offload_cb *cb)
 	int offset = 0;
 	u32 version;
 
+	tquic_dbg("parse_header: skb=%p len=%u\n", skb, skb->len);
+
 	if (skb->len < 1)
 		return -EINVAL;
 
@@ -494,6 +496,8 @@ static bool tquic_gro_same_flow(struct sk_buff *skb1, struct sk_buff *skb2)
 	u8 *data1, *data2;
 	u8 cid_len;
 
+	tquic_dbg("gro_same_flow: skb1=%p skb2=%p\n", skb1, skb2);
+
 	if (tquic_parse_header(skb1, &cb1) || tquic_parse_header(skb2, &cb2))
 		return false;
 
@@ -606,6 +610,8 @@ static int tquic_offload_gro_complete(struct sk_buff *skb, int nhoff)
 	struct udphdr *uh = (struct udphdr *)(skb->data + nhoff);
 	__be16 newlen = htons(skb->len - nhoff);
 
+	tquic_dbg("offload_gro_complete: skb=%p nhoff=%d\n", skb, nhoff);
+
 	/* Update UDP length field */
 	uh->len = newlen;
 
@@ -652,6 +658,9 @@ static int tquic_offload_gro_complete(struct sk_buff *skb, int nhoff)
 static bool tquic_crypto_offload_available(struct net_device *dev,
 					  u8 crypto_level)
 {
+	tquic_dbg("crypto_offload_available: dev=%p level=%u\n",
+		  dev, crypto_level);
+
 	/* Check device capabilities */
 	if (!dev)
 		return false;
@@ -681,6 +690,8 @@ static int tquic_crypto_offload_encrypt(struct sk_buff *skb,
 	struct tquic_offload_cb *cb = TQUIC_OFFLOAD_CB(skb);
 	struct net_device *dev = skb->dev;
 
+	tquic_dbg("crypto_offload_encrypt: skb=%p pn=%llu\n", skb, pn);
+
 	if (!tquic_crypto_offload_available(dev, cb->crypto_level)) {
 		cb->hw_offload = 0;
 		cb->needs_encrypt = 1;
@@ -704,6 +715,8 @@ static int tquic_crypto_offload_decrypt(struct sk_buff *skb,
 					u64 *pn)
 {
 	struct tquic_offload_cb *cb = TQUIC_OFFLOAD_CB(skb);
+
+	tquic_dbg("crypto_offload_decrypt: skb=%p\n", skb);
 
 	/* Check if hardware already decrypted */
 	if (cb->hw_offload && !cb->needs_decrypt) {
@@ -788,6 +801,8 @@ static int quic4_gro_complete(struct sk_buff *skb, int nhoff)
 			TQUIC_GRO_NETWORK_OFFSET(skb));
 	struct udphdr *uh = (struct udphdr *)(skb->data + nhoff);
 
+	tquic_dbg("quic4_gro_complete: skb=%p nhoff=%d\n", skb, nhoff);
+
 	/* Update UDP checksum with final length */
 	if (uh->check)
 		uh->check = ~udp_v4_check(skb->len - nhoff, iph->saddr,
@@ -845,6 +860,8 @@ static int quic6_gro_complete(struct sk_buff *skb, int nhoff)
 			TQUIC_GRO_NETWORK_OFFSET(skb));
 	struct udphdr *uh = (struct udphdr *)(skb->data + nhoff);
 
+	tquic_dbg("quic6_gro_complete: skb=%p nhoff=%d\n", skb, nhoff);
+
 	/* Update UDP checksum with final length */
 	if (uh->check)
 		uh->check = ~udp_v6_check(skb->len - nhoff, &ipv6h->saddr,
@@ -871,7 +888,7 @@ static struct sk_buff *quic6_gso_segment(struct sk_buff *skb,
 #endif
 
 /* Net offload structure for QUIC over IPv4 */
-static struct net_offload __maybe_unused quic4_offload __read_mostly = {
+static struct net_offload quic4_offload __read_mostly = {
 	.callbacks = {
 		.gso_segment	= quic4_gso_segment,
 		.gro_receive	= quic4_gro_receive,
@@ -881,7 +898,7 @@ static struct net_offload __maybe_unused quic4_offload __read_mostly = {
 
 #if IS_ENABLED(CONFIG_IPV6)
 /* Net offload structure for QUIC over IPv6 */
-static struct net_offload __maybe_unused quic6_offload __read_mostly = {
+static struct net_offload quic6_offload __read_mostly = {
 	.callbacks = {
 		.gso_segment	= quic6_gso_segment,
 		.gro_receive	= quic6_gro_receive,

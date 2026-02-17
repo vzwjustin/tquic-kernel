@@ -263,11 +263,13 @@ static void mp_rtt_update(struct tquic_mp_rtt_state *rtt,
  *
  * Returns PTO in microseconds.
  */
-static u64 __maybe_unused mp_get_pto(struct tquic_mp_path_ack_state *state, int pn_space)
+static u64 mp_get_pto(struct tquic_mp_path_ack_state *state, int pn_space)
 {
 	struct tquic_mp_rtt_state *rtt = &state->rtt;
 	u64 pto;
 	u64 rtt_var_component;
+
+	tquic_dbg("mp_get_pto: state=%p pn_space=%d\n", state, pn_space);
 
 	rtt_var_component = max(4 * rtt->rtt_var,
 				(u64)TQUIC_MP_TIMER_GRANULARITY_US);
@@ -382,11 +384,14 @@ static void mp_sent_packet_remove(struct tquic_mp_path_ack_state *state,
  *
  * Returns the sent packet or NULL if not found.
  */
-static struct tquic_mp_sent_packet __maybe_unused *mp_sent_packet_find(
+static struct tquic_mp_sent_packet *mp_sent_packet_find(
 	struct tquic_mp_path_ack_state *state, int pn_space, u64 pn)
 {
 	struct rb_node *node = state->sent_packets[pn_space].rb_node;
 	struct tquic_mp_sent_packet *entry;
+
+	tquic_dbg("mp_sent_packet_find: state=%p pn_space=%d pn=%llu\n",
+		  state, pn_space, pn);
 
 	while (node) {
 		entry = rb_entry(node, struct tquic_mp_sent_packet, node);

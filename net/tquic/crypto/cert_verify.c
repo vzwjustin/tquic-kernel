@@ -412,7 +412,7 @@ static const char *get_hash_algo_name(enum tquic_hash_algo algo)
 /*
  * Get hash digest size
  */
-static u32 __maybe_unused get_hash_digest_size(enum tquic_hash_algo algo)
+static u32 get_hash_digest_size(enum tquic_hash_algo algo)
 {
 	tquic_dbg("get_hash_digest_size: algo=%d\n", algo);
 

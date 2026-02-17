@@ -371,7 +371,7 @@ static struct tquic_path *tquic_find_path(struct tquic_connection *conn, u8 path
  *
  * Must be called with rcu_read_lock() held.
  */
-static int __maybe_unused tquic_count_active_paths(struct tquic_connection *conn)
+static int tquic_count_active_paths(struct tquic_connection *conn)
 {
 	struct tquic_path *path;
 	int count = 0;
@@ -479,7 +479,7 @@ static struct tquic_sched_internal *tquic_int_sched_find(const char *name)
  * Note: This is for internal schedulers (tquic_sched_internal). The public
  * scheduler API uses tquic_sched_register() from sched/scheduler.c.
  */
-static int __maybe_unused tquic_int_sched_register(struct tquic_sched_internal *sched)
+static int tquic_int_sched_register(struct tquic_sched_internal *sched)
 {
 	int ret = 0;
 
@@ -511,7 +511,7 @@ static int __maybe_unused tquic_int_sched_register(struct tquic_sched_internal *
 /*
  * Unregister an internal scheduler
  */
-static void __maybe_unused tquic_int_sched_unregister(struct tquic_sched_internal *sched)
+static void tquic_int_sched_unregister(struct tquic_sched_internal *sched)
 {
 	if (!sched)
 		return;
@@ -768,7 +768,7 @@ static void tquic_rr_path_removed(struct tquic_connection *conn,
 	pr_debug("RR: path %u removed\n", path->path_id);
 }
 
-static struct tquic_sched_internal __maybe_unused tquic_sched_rr = {
+static struct tquic_sched_internal tquic_sched_rr = {
 	.name		= "round-robin",
 	.owner		= THIS_MODULE,
 	.init		= tquic_rr_init,
@@ -978,7 +978,7 @@ static void tquic_weighted_path_removed(struct tquic_connection *conn,
 		wd->current_path_idx = 0;
 }
 
-static struct tquic_sched_internal __maybe_unused tquic_sched_weighted = {
+static struct tquic_sched_internal tquic_sched_weighted = {
 	.name		= "weighted",
 	.owner		= THIS_MODULE,
 	.init		= tquic_weighted_init,
@@ -1199,7 +1199,7 @@ static void tquic_lowlat_path_removed(struct tquic_connection *conn,
 	}
 }
 
-static struct tquic_sched_internal __maybe_unused tquic_sched_lowlat = {
+static struct tquic_sched_internal tquic_sched_lowlat = {
 	.name		= "lowlat",
 	.owner		= THIS_MODULE,
 	.init		= tquic_lowlat_init,
@@ -1432,7 +1432,7 @@ static void tquic_redundant_path_removed(struct tquic_connection *conn,
 	pr_debug("Redundant: path %u removed\n", path->path_id);
 }
 
-static struct tquic_sched_internal __maybe_unused tquic_sched_redundant = {
+static struct tquic_sched_internal tquic_sched_redundant = {
 	.name		= "redundant",
 	.owner		= THIS_MODULE,
 	.init		= tquic_redundant_init,
@@ -1946,7 +1946,7 @@ static int tquic_adaptive_reinject(struct tquic_connection *conn,
 	return best->path_id;
 }
 
-static struct tquic_sched_internal __maybe_unused tquic_sched_adaptive = {
+static struct tquic_sched_internal tquic_sched_adaptive = {
 	.name		= "adaptive",
 	.owner		= THIS_MODULE,
 	.init		= tquic_adaptive_init,
@@ -1968,6 +1968,9 @@ static struct tquic_sched_internal __maybe_unused tquic_sched_adaptive = {
 static struct tquic_connection *tquic_connection_alloc(u64 conn_id, gfp_t gfp)
 {
 	struct tquic_connection *conn;
+
+	tquic_dbg("tquic_connection_alloc: conn_id=%llu gfp=%u\n",
+		  conn_id, gfp);
 
 	conn = kzalloc(sizeof(*conn), gfp);
 	if (!conn)
@@ -2005,6 +2008,8 @@ static struct tquic_connection *tquic_connection_alloc(u64 conn_id, gfp_t gfp)
 static void tquic_connection_free(struct tquic_connection *conn)
 {
 	struct tquic_path *path, *tmp;
+
+	tquic_dbg("tquic_connection_free: conn=%p\n", conn);
 
 	if (!conn)
 		return;
@@ -2087,6 +2092,8 @@ static void tquic_path_remove(struct tquic_connection *conn, u8 path_id)
 {
 	struct tquic_path *path;
 
+	tquic_dbg("tquic_path_remove: conn=%p path_id=%u\n", conn, path_id);
+
 	spin_lock_bh(&conn->lock);
 
 	path = tquic_find_path(conn, path_id);
@@ -2122,6 +2129,9 @@ static void tquic_path_remove(struct tquic_connection *conn, u8 path_id)
 static void tquic_int_path_validate(struct tquic_connection *conn, u8 path_id)
 {
 	struct tquic_path *path;
+
+	tquic_dbg("tquic_int_path_validate: conn=%p path_id=%u\n",
+		  conn, path_id);
 
 	spin_lock_bh(&conn->lock);
 
@@ -2612,6 +2622,8 @@ static void tquic_int_mp_sched_release_conn(struct tquic_connection *conn)
 {
 	struct tquic_sched_internal *sched;
 
+	tquic_dbg("tquic_int_mp_sched_release_conn: conn=%p\n", conn);
+
 	if (!conn)
 		return;
 
@@ -2763,7 +2775,7 @@ static void __net_exit tquic_sched_net_exit(struct net *net)
 	pr_debug("TQUIC scheduler exited for netns\n");
 }
 
-static struct pernet_operations __maybe_unused tquic_sched_net_ops = {
+static struct pernet_operations tquic_sched_net_ops = {
 	.init = tquic_sched_net_init,
 	.exit = tquic_sched_net_exit,
 };

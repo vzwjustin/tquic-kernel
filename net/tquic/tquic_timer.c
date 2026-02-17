@@ -25,6 +25,7 @@
 #include <net/tquic.h>
 #include "cong/tquic_cong.h"
 
+#include "core/quic_output.h"
 #include "protocol.h"
 #include "tquic_compat.h"
 #include "tquic_debug.h"
@@ -1626,19 +1627,50 @@ static void tquic_timer_work_fn(struct work_struct *work)
 		tquic_conn_enter_closed(conn);
 	}
 
-	/* Handle keep-alive */
+	/* Handle keep-alive - send PING via proper packet assembly */
 	if (test_bit(TQUIC_TIMER_KEEPALIVE_BIT, &pending)) {
-		/* Would send PING frame */
-		/* tquic_send_ping(conn); */
+		struct tquic_path *ka_path;
+
+		rcu_read_lock();
+		ka_path = rcu_dereference(conn->active_path);
+		if (ka_path && tquic_path_get(ka_path)) {
+			rcu_read_unlock();
+			tquic_dbg("timer:keepalive: sending PING\n");
+			tquic_send_ping(conn, ka_path);
+			tquic_path_put(ka_path);
+		} else {
+			rcu_read_unlock();
+			tquic_dbg("timer:keepalive: no active path\n");
+		}
 
 		/* Reschedule keep-alive timer */
 		tquic_timer_reset_keepalive(ts);
 	}
 
-	/* Handle pacing - allow next packet send */
+	/* Handle pacing - drain pacing queue and re-trigger tx_work */
 	if (test_bit(TQUIC_TIMER_PACING_BIT, &pending)) {
-		/* Would trigger packet transmission */
-		/* tquic_transmit_pending(conn); */
+		struct sk_buff *pacing_skb;
+		int drained = 0;
+
+		tquic_dbg("timer:pacing: fired, queue_depth=%d\n",
+			  skb_queue_len(&conn->pacing_queue));
+
+		/* Drain any packets queued by tquic_pacing_queue_packet() */
+		while ((pacing_skb = skb_dequeue(&conn->pacing_queue)) != NULL) {
+			tquic_output(conn, pacing_skb);
+			drained++;
+		}
+
+		tquic_dbg("timer:pacing: drained %d queued packets\n", drained);
+
+		/*
+		 * Re-schedule tx_work to build and send new packets.
+		 * The pacing gate is now open since the hrtimer just fired.
+		 */
+		if (!work_pending(&conn->tx_work)) {
+			tquic_dbg("timer:pacing: re-scheduling tx_work\n");
+			schedule_work(&conn->tx_work);
+		}
 	}
 
 	tquic_dbg("timer:work_fn: completed, pending_mask=0x%lx\n", pending);

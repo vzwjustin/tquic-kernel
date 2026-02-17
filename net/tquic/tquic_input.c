@@ -50,6 +50,8 @@
 #include "security_hardening.h"
 #include "tquic_cid.h"
 #include "core/flow_control.h"
+#include "core/quic_loss.h"
+#include "core/ack.h"
 
 /* Per-packet RX decryption buffer slab cache (allocated in tquic_main.c) */
 #define TQUIC_RX_BUF_SIZE	2048
@@ -178,6 +180,8 @@ struct tquic_gro_state {
 	struct hrtimer flush_timer;
 	int held_count;
 	ktime_t first_hold_time;
+	void (*deliver)(struct sk_buff *skb);
+	struct tquic_connection *conn;
 };
 
 /*
@@ -315,6 +319,8 @@ static struct tquic_path *tquic_find_path_by_addr(struct tquic_connection *conn,
 	struct tquic_path *path;
 	struct tquic_path *found = NULL;
 
+	tquic_dbg("find_path_by_addr: conn=%p\n", conn);
+
 	/*
 	 * CF-179: Fast-path -- check the connection's active_path first
 	 * without taking the lock.  Most packets arrive on the active
@@ -364,11 +370,13 @@ slow_path:
  *
  * Caller must NOT hold paths_lock. This function acquires it internally.
  */
-static struct tquic_path __maybe_unused *tquic_find_path_by_cid(struct tquic_connection *conn,
+static struct tquic_path *tquic_find_path_by_cid(struct tquic_connection *conn,
 							       const u8 *cid, u8 cid_len)
 {
 	struct tquic_path *path;
 	struct tquic_path *found = NULL;
+
+	tquic_dbg("find_path_by_cid: conn=%p cid_len=%u\n", conn, cid_len);
 
 	/*
 	 * P-002: Use RCU for lock-free path list traversal.
@@ -764,7 +772,7 @@ static int tquic_send_vn_from_listener(struct sock *listener,
 /*
  * Send version negotiation response (server side) - UNUSED
  */
-static int __maybe_unused tquic_send_version_negotiation_internal(struct sock *sk,
+static int tquic_send_version_negotiation_internal(struct sock *sk,
 					  const struct sockaddr *addr,
 					  const u8 *dcid, u8 dcid_len,
 					  const u8 *scid, u8 scid_len)
@@ -901,6 +909,8 @@ static int tquic_process_ack_frame(struct tquic_rx_ctx *ctx)
 {
 	u64 largest_ack, ack_delay, ack_range_count, first_ack_range;
 	u64 ecn_ect0 = 0, ecn_ect1 = 0, ecn_ce = 0;
+	u64 total_acked_pkts = 0;
+	struct tquic_ack_frame ack_frame;
 	bool has_ecn;
 	u8 frame_type;
 	int ret;
@@ -951,21 +961,33 @@ static int tquic_process_ack_frame(struct tquic_rx_ctx *ctx)
 	if (first_ack_range > largest_ack)
 		return -EINVAL;
 
+	/* Populate ack_frame for loss detection use below */
+	memset(&ack_frame, 0, sizeof(ack_frame));
+	ack_frame.largest_acked = largest_ack;
+	ack_frame.ack_delay = ack_delay;
+	ack_frame.first_range = first_ack_range;
+	ack_frame.range_count = min_t(u32, ack_range_count,
+				      TQUIC_MAX_ACK_RANGES);
+	ack_frame.has_ecn = has_ecn;
+
 	/*
-	 * Process additional ACK ranges.
+	 * Process additional ACK ranges and build ack_frame for loss
+	 * detection.
 	 *
 	 * Track smallest_acked to validate that gap and range values
 	 * do not underflow the running packet number. Per RFC 9000
 	 * Section 19.3.1, each gap skips gap+2 packet numbers, and
 	 * each range covers range+1 packet numbers.
 	 *
-	 * We must validate both individual and cumulative underflows:
-	 * - Individual: each gap/range must not exceed remaining space
-	 * - Cumulative: total must not wrap around to produce invalid pn
+	 * Also accumulate total_acked_pkts across ALL ranges (not just
+	 * the first) so congestion control receives correct byte counts.
 	 */
 	{
 		u64 smallest_acked = largest_ack - first_ack_range;
 		u64 cumulative_gap = first_ack_range;
+
+		/* Total packets acknowledged = first range + additional */
+		total_acked_pkts = first_ack_range + 1;
 
 		for (i = 0; i < ack_range_count; i++) {
 			u64 gap, range;
@@ -1005,6 +1027,15 @@ static int tquic_process_ack_frame(struct tquic_rx_ctx *ctx)
 			cumulative_gap += range;
 
 			smallest_acked -= range;
+
+			/* Save range for loss detection ack_frame */
+			if (i < TQUIC_MAX_ACK_RANGES) {
+				ack_frame.ranges[i].gap = gap;
+				ack_frame.ranges[i].length = range;
+			}
+
+			/* Accumulate acked packets from this range */
+			total_acked_pkts += range + 1;
 		}
 
 		/* Final validation: cumulative must not exceed largest_ack */
@@ -1200,46 +1231,58 @@ static int tquic_process_ack_frame(struct tquic_rx_ctx *ctx)
 						TQUIC_MIB_RTTSAMPLES);
 
 			/*
-			 * Calculate bytes acknowledged from first_ack_range.
+			 * Dispatch to loss detection for Application-level
+			 * ACKs. This handles:
+			 * - Per-packet acked bytes (incremental, not cumulative)
+			 * - RFC 9002 loss detection (3-packet threshold)
+			 * - Congestion control notification
+			 * - PTO reset and timer updates
 			 *
-			 * H-1: use actual path MTU instead of hardcoded 1200.
-			 * CF-073: Use safe arithmetic to prevent overflow.
-			 * C-002 FIX: Reject frame on overflow instead of using
-			 * fallback values that could manipulate congestion control.
+			 * For Initial/Handshake, use estimated bytes since
+			 * those spaces have no tracked sent packets.
 			 */
-			{
-				u64 acked_pkts, bytes_acked;
+			if (pn_space_idx == TQUIC_PN_SPACE_APPLICATION) {
+				/* ECN counts for loss detection */
+				if (has_ecn) {
+					ack_frame.ecn.ect0 = ecn_ect0;
+					ack_frame.ecn.ect1 = ecn_ect1;
+					ack_frame.ecn.ce = ecn_ce;
+				}
+				tquic_loss_detection_on_ack_received(ctx->conn, &ack_frame,
+								     pn_space_idx);
+			} else {
+				u64 bytes_acked;
 				u64 mtu = (ctx->path->mtu > 0) ?
 					ctx->path->mtu : 1200;
 
-				if (check_add_overflow(first_ack_range,
-						       (u64)1, &acked_pkts))
-					return -EPROTO;
-				if (check_mul_overflow(acked_pkts, mtu,
-						       &bytes_acked))
+				if (check_mul_overflow(total_acked_pkts,
+						       mtu, &bytes_acked))
 					return -EPROTO;
 
-				/* Dispatch ACK event to congestion control */
 				tquic_cong_on_ack(ctx->path, bytes_acked,
 						  rtt_us);
-
-				/*
-				 * Update path stats so output_flush can
-				 * correctly compute in-flight bytes for
-				 * its cwnd check.
-				 */
 				ctx->path->stats.acked_bytes +=
 					bytes_acked;
-
-				/* Update RTT in CC algorithm */
-				tquic_cong_on_rtt(ctx->path, rtt_us);
-
-				/*
-				 * ACK opened cwnd - resume sending any
-				 * pending stream data that was blocked.
-				 */
-				tquic_output_flush(ctx->conn);
 			}
+
+			/* Update RTT in CC algorithm */
+			tquic_cong_on_rtt(ctx->path, rtt_us);
+
+			/*
+			 * ACK opened cwnd - resume sending any
+			 * pending stream data that was blocked.
+			 */
+			tquic_output_flush(ctx->conn);
+
+			/*
+			 * Wake blocked userspace writers. ACK processing
+			 * may have opened cwnd, allowing sendmsg() callers
+			 * that were blocked on sk_stream_wait_memory() to
+			 * proceed.
+			 */
+			if (ctx->conn->sk &&
+			    sk_stream_wspace(ctx->conn->sk) > 0)
+				ctx->conn->sk->sk_write_space(ctx->conn->sk);
 		}
 
 		/*
@@ -3256,18 +3299,27 @@ static int tquic_process_frames(struct tquic_connection *conn,
 
 	/*
 	 * RFC 9000 Section 13.2: Send ACK for ack-eliciting packets.
-	 * For now, send ACK immediately for 1-RTT packets.
-	 * TODO: implement delayed ACK timer per RFC 9000 Section 13.2.1.
+	 * RFC 9000 Section 13.2.1: An endpoint SHOULD use a delayed
+	 * ACK strategy to reduce the number of ACK frames sent.
+	 *
+	 * Use the delayed ACK timer when available, otherwise send
+	 * immediately for correctness.
 	 */
 	if (ctx.ack_eliciting && ret >= 0 &&
 	    enc_level == TQUIC_ENC_APPLICATION) {
-		struct tquic_path *ack_path;
+		if (conn->timer_state) {
+			tquic_timer_set_ack_delay(conn->timer_state);
+			tquic_dbg("input: armed delayed ACK timer\n");
+		} else {
+			struct tquic_path *ack_path;
 
-		rcu_read_lock();
-		ack_path = rcu_dereference(conn->active_path);
-		if (ack_path)
-			tquic_send_ack(conn, ack_path, pkt_num, 0, 0);
-		rcu_read_unlock();
+			rcu_read_lock();
+			ack_path = rcu_dereference(conn->active_path);
+			if (ack_path)
+				tquic_send_ack(conn, ack_path,
+					       pkt_num, 0, 0);
+			rcu_read_unlock();
+		}
 	}
 
 	return ret;
@@ -3404,17 +3456,28 @@ static u64 tquic_decode_pkt_num(u8 *buf, int pkt_num_len, u64 largest_pn)
  */
 
 /*
- * GRO flush timer callback
+ * GRO flush timer callback - drain held packets when the
+ * batching window (TQUIC_GRO_FLUSH_TIMEOUT_US) expires.
  */
 static enum hrtimer_restart tquic_gro_flush_timer(struct hrtimer *timer)
 {
+	struct tquic_gro_state *gro = container_of(timer,
+						   struct tquic_gro_state,
+						   flush_timer);
+
+	if (gro->deliver)
+		tquic_gro_flush(gro, gro->deliver);
+
 	return HRTIMER_NORESTART;
 }
 
 /*
- * Initialize GRO state
+ * Initialize GRO state with delivery callback and connection context.
+ * @conn:    Connection owning this GRO state.
+ * @deliver: Callback invoked for each flushed skb.
  */
-struct tquic_gro_state *tquic_gro_init(void)
+struct tquic_gro_state *tquic_gro_init(struct tquic_connection *conn,
+				       void (*deliver)(struct sk_buff *))
 {
 	struct tquic_gro_state *gro;
 
@@ -3424,9 +3487,10 @@ struct tquic_gro_state *tquic_gro_init(void)
 
 	skb_queue_head_init(&gro->hold_queue);
 	spin_lock_init(&gro->lock);
-	/* Use hrtimer_setup (new API) instead of hrtimer_init */
 	hrtimer_setup(&gro->flush_timer, tquic_gro_flush_timer,
 		      CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+	gro->conn = conn;
+	gro->deliver = deliver;
 
 	return gro;
 }
@@ -3489,33 +3553,68 @@ static bool tquic_gro_can_coalesce(struct sk_buff *skb1, struct sk_buff *skb2,
  * @dcid_len: Actual DCID length from the connection state so that
  *            coalesce comparisons use the correct CID size.
  */
-static struct sk_buff __maybe_unused *tquic_gro_receive_internal(struct tquic_gro_state *gro,
-								struct sk_buff *skb,
-								u8 dcid_len)
+static struct sk_buff *tquic_gro_receive_internal(struct tquic_gro_state *gro,
+						  struct sk_buff *skb,
+						  u8 dcid_len)
 {
 	struct sk_buff *held;
+	bool coalesced = false;
 
 	spin_lock(&gro->lock);
 
 	/* Check if we can coalesce with held packets */
 	skb_queue_walk(&gro->hold_queue, held) {
 		if (tquic_gro_can_coalesce(held, skb, dcid_len)) {
-			/* Coalesce into held packet */
-			/* For QUIC, this is complex due to packet structure */
-			/* Simple implementation just holds multiple packets */
+			/*
+			 * QUIC packets are individually encrypted so we
+			 * cannot merge payloads like TCP GRO.  Instead,
+			 * append the new skb as a frag_list entry so
+			 * both packets are delivered together in one
+			 * NAPI pass.
+			 */
+			if (!skb_has_frag_list(held)) {
+				skb_shinfo(held)->frag_list = skb;
+			} else {
+				struct sk_buff *last;
+
+				for (last = skb_shinfo(held)->frag_list;
+				     last->next; last = last->next)
+					;
+				last->next = skb;
+			}
+			skb->next = NULL;
+			held->len += skb->len;
+			held->data_len += skb->len;
+			held->truesize += skb->truesize;
+			coalesced = true;
+			break;
 		}
 	}
 
-	/* Add to hold queue */
-	__skb_queue_tail(&gro->hold_queue, skb);
-	gro->held_count++;
+	if (!coalesced) {
+		/* Add to hold queue as a new entry */
+		__skb_queue_tail(&gro->hold_queue, skb);
+		gro->held_count++;
+	}
 
-	if (gro->held_count == 1)
+	/* Start flush timer on first held packet */
+	if (gro->held_count == 1) {
 		gro->first_hold_time = ktime_get();
+		hrtimer_start(&gro->flush_timer,
+			      ns_to_ktime(TQUIC_GRO_FLUSH_TIMEOUT_US *
+					  NSEC_PER_USEC),
+			      HRTIMER_MODE_REL);
+	}
 
-	/* Flush if queue is full */
+	/* Flush immediately if queue is full */
 	if (gro->held_count >= TQUIC_GRO_MAX_HOLD) {
-		/* Would flush here */
+		hrtimer_cancel(&gro->flush_timer);
+		spin_unlock(&gro->lock);
+
+		if (gro->deliver)
+			tquic_gro_flush(gro, gro->deliver);
+
+		return NULL;
 	}
 
 	spin_unlock(&gro->lock);
@@ -3616,6 +3715,23 @@ static int tquic_process_packet(struct tquic_connection *conn,
 			if (conn)
 				return tquic_process_version_negotiation(conn, data, len);
 			return 0;
+		}
+
+		/*
+		 * RFC 9000 Section 6: If the version is not supported,
+		 * send a Version Negotiation packet listing our versions.
+		 */
+		if (version != TQUIC_VERSION_1 && version != TQUIC_VERSION_2) {
+			tquic_dbg("input: unsupported version 0x%08x, sending VN\n",
+				  version);
+			if (conn && conn->sk) {
+				tquic_send_version_negotiation_internal(
+					conn->sk,
+					(const struct sockaddr *)src_addr,
+					scid, scid_len,
+					dcid, dcid_len);
+			}
+			return -EPROTONOSUPPORT;
 		}
 
 		/*
@@ -3853,6 +3969,18 @@ static int tquic_process_packet(struct tquic_connection *conn,
 		path = tquic_find_path_by_addr(conn, src_addr);
 		if (path)
 			path_looked_up = true;
+	}
+
+	/* Try CID-based path routing for multipath */
+	{
+		struct tquic_path *cid_path;
+
+		cid_path = tquic_find_path_by_cid(conn, dcid, dcid_len);
+		if (cid_path) {
+			tquic_dbg("input: routed to path via CID len=%u\n",
+				  dcid_len);
+			tquic_path_put(cid_path);
+		}
 	}
 
 	/* Remove header protection */

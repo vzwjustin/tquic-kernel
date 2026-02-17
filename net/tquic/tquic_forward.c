@@ -125,7 +125,7 @@ static inline void tquic_free_pipe(struct pipe_inode_info *pipe)
 
 /* Client list for hairpin detection */
 static LIST_HEAD(tquic_forward_client_list);
-static spinlock_t __maybe_unused tquic_forward_client_lock =
+static spinlock_t tquic_forward_client_lock =
 	__SPIN_LOCK_UNLOCKED(tquic_forward_client_lock);
 
 /**
@@ -192,9 +192,11 @@ struct tquic_splice_state {
  *
  * Returns: Splice state or NULL on failure
  */
-static struct tquic_splice_state __maybe_unused *tquic_splice_state_alloc(void)
+static struct tquic_splice_state *tquic_splice_state_alloc(void)
 {
 	struct tquic_splice_state *state;
+
+	tquic_dbg("tquic_splice_state_alloc: allocating splice state\n");
 
 	state = kzalloc(sizeof(*state), GFP_KERNEL);
 	if (!state)
@@ -217,7 +219,7 @@ static struct tquic_splice_state __maybe_unused *tquic_splice_state_alloc(void)
  * tquic_splice_state_free - Free splice state
  * @state: State to free
  */
-static void __maybe_unused tquic_splice_state_free(struct tquic_splice_state *state)
+static void tquic_splice_state_free(struct tquic_splice_state *state)
 {
 	tquic_dbg("tquic_splice_state_free: freeing splice state\n");
 
@@ -453,12 +455,14 @@ EXPORT_SYMBOL_GPL(tquic_forward_splice);
  *
  * Returns: Bytes moved
  */
-static size_t __maybe_unused tquic_forward_skb_splice(struct sk_buff_head *from_queue,
+static size_t tquic_forward_skb_splice(struct sk_buff_head *from_queue,
 						      struct sk_buff_head *to_queue,
 						      size_t max_bytes)
 {
 	struct sk_buff *skb;
 	size_t moved = 0;
+
+	tquic_dbg("forward_skb_splice: max_bytes=%zu\n", max_bytes);
 
 	while (moved < max_bytes && !skb_queue_empty(from_queue)) {
 		skb = skb_dequeue(from_queue);
@@ -506,7 +510,7 @@ static size_t __maybe_unused tquic_forward_skb_splice(struct sk_buff_head *from_
  *
  * Returns: true if client owns this address/port, false otherwise
  */
-static bool __maybe_unused tquic_forward_client_owns_address(struct tquic_client *client,
+static bool tquic_forward_client_owns_address(struct tquic_client *client,
 							     const struct sockaddr_storage *addr,
 							     __be16 port)
 {
@@ -1483,7 +1487,7 @@ static int tquic_forward_check_df(struct tquic_tunnel *tunnel,
  * Called when data arrives on the outbound TCP socket.
  * Triggers forwarding back to the QUIC stream.
  */
-static void __maybe_unused tquic_forward_data_ready(struct sock *sk)
+static void tquic_forward_data_ready(struct sock *sk)
 {
 	struct tquic_tunnel *tunnel;
 

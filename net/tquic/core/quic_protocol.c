@@ -30,9 +30,9 @@
 #include "../tquic_debug.h"
 #include "../tquic_init.h"
 
-static struct kmem_cache __maybe_unused *tquic_sock_cachep __read_mostly;
-static struct kmem_cache __maybe_unused *tquic_conn_cachep __read_mostly;
-static struct kmem_cache __maybe_unused *tquic_stream_cachep __read_mostly;
+static struct kmem_cache *tquic_sock_cachep __read_mostly;
+static struct kmem_cache *tquic_conn_cachep __read_mostly;
+static struct kmem_cache *tquic_stream_cachep __read_mostly;
 
 static struct tquic_path *tquic_proto_active_path_get(struct tquic_connection *conn)
 {
@@ -108,6 +108,7 @@ static inline unsigned int tquic_get_validated_idle_timeout(void)
 {
 	unsigned int val = READ_ONCE(tquic_default_idle_timeout_ms);
 
+	tquic_dbg("tquic_get_validated_idle_timeout: raw=%u\n", val);
 	if (val < TQUIC_IDLE_TIMEOUT_MIN_MS || val > TQUIC_IDLE_TIMEOUT_MAX_MS) {
 		tquic_warn("idle_timeout_ms %u out of range, using %u\n",
 			     val, TQUIC_IDLE_TIMEOUT_DEFAULT_MS);
@@ -120,6 +121,7 @@ static inline unsigned int tquic_get_validated_handshake_timeout(void)
 {
 	unsigned int val = READ_ONCE(tquic_default_handshake_timeout_ms);
 
+	tquic_dbg("tquic_get_validated_handshake_timeout: raw=%u\n", val);
 	if (val < TQUIC_HS_TIMEOUT_MIN_MS || val > TQUIC_HS_TIMEOUT_MAX_MS) {
 		tquic_warn("handshake_timeout_ms %u out of range, using %u\n",
 			     val, TQUIC_HS_TIMEOUT_DEFAULT_MS);
@@ -181,9 +183,9 @@ static struct percpu_counter tquic_sockets_allocated;
 static unsigned long tquic_memory_pressure_val;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
 /* Kernel 6.4+ uses percpu unsigned int for orphan_count */
-static DEFINE_PER_CPU(unsigned int, tquic_orphan_count_percpu) __maybe_unused;
+static DEFINE_PER_CPU(unsigned int, tquic_orphan_count_percpu);
 #else
-static struct percpu_counter __maybe_unused tquic_orphan_count_percpu;
+static struct percpu_counter tquic_orphan_count_percpu;
 #endif
 
 /*
@@ -193,7 +195,7 @@ static struct percpu_counter __maybe_unused tquic_orphan_count_percpu;
  * twice causes kernel warnings, double percpu_counter_init leaks memory).
  */
 static bool tquic_proto_registered __read_mostly;
-static bool __maybe_unused tquic_percpu_initialized __read_mostly;
+static bool tquic_percpu_initialized __read_mostly;
 
 /* Forward declarations for proto_ops callbacks */
 static int tquic_stream_release(struct socket *sock);
@@ -721,8 +723,8 @@ static int tquic_proto_init_sock(struct sock *sk)
 	tsk->config.version = TQUIC_VERSION_1;
 
 	/* Default transport parameters (RFC 9000 Section 18.2) */
-	tsk->config.max_idle_timeout_ms = 30000;
-	tsk->config.handshake_timeout_ms = 10000;
+	tsk->config.max_idle_timeout_ms = tquic_get_validated_idle_timeout();
+	tsk->config.handshake_timeout_ms = tquic_get_validated_handshake_timeout();
 	tsk->config.initial_max_data = 1048576;
 	tsk->config.initial_max_stream_data_bidi_local = 262144;
 	tsk->config.initial_max_stream_data_bidi_remote = 262144;
@@ -1527,7 +1529,7 @@ static const struct net_proto_family tquic_family_ops = {
 	.owner	= THIS_MODULE,
 };
 
-static int __init __maybe_unused tquic_proto_register_all(void)
+static int __init tquic_proto_register_all(void)
 {
 	int err;
 
@@ -1553,7 +1555,7 @@ static int __init __maybe_unused tquic_proto_register_all(void)
 	return 0;
 }
 
-static void __maybe_unused tquic_proto_unregister_all(void)
+static void tquic_proto_unregister_all(void)
 {
 	if (!tquic_proto_registered)
 		return;

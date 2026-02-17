@@ -98,7 +98,7 @@ static struct workqueue_struct *tquic_bond_wq;
  * Count paths by state from path manager
  * Must be called with bc->state_lock held or from callback context
  */
-static void __maybe_unused
+static void
 tquic_bonding_count_paths(struct tquic_bonding_ctx *bc, int *active,
 			  int *pending, int *failed, int *degraded)
 {

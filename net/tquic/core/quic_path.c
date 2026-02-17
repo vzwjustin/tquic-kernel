@@ -206,7 +206,7 @@ static bool tquic_path_addr_equal(const struct sockaddr_storage *a,
  *
  * Note: The exported tquic_path_create is in tquic_migration.c
  */
-static struct tquic_path * __maybe_unused
+static struct tquic_path *
 tquic_path_create_internal(struct tquic_connection *conn,
 			   struct sockaddr *local, struct sockaddr *remote)
 {
@@ -214,6 +214,8 @@ tquic_path_create_internal(struct tquic_connection *conn,
 	u32 initial_rtt_ms;
 	int err;
 
+	tquic_dbg("tquic_path_create_internal: conn=%p local=%p remote=%p\n",
+		  conn, local, remote);
 	path = kmem_cache_zalloc(tquic_path_cache, GFP_KERNEL);
 	if (!path)
 		return NULL;

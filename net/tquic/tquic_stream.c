@@ -128,7 +128,7 @@ static void tquic_stream_wmem_uncharge(struct sock *sk, struct sk_buff *skb)
  *
  * Returns: 0 on success, -ENOBUFS if memory limit exceeded
  */
-static int __maybe_unused tquic_stream_rmem_charge(struct sock *sk, struct sk_buff *skb)
+static int tquic_stream_rmem_charge(struct sock *sk, struct sk_buff *skb)
 {
 	int amt = skb->truesize;
 
@@ -255,6 +255,8 @@ static int tquic_stream_recvmsg(struct socket *sock, struct msghdr *msg,
 				size_t len, int flags);
 static __poll_t tquic_stream_poll(struct file *file, struct socket *sock,
 				  poll_table *wait);
+static int tquic_stream_validate_http3_id(struct tquic_connection *conn,
+					  u64 stream_id, bool is_local);
 
 /*
  * Stream socket proto_ops
@@ -659,6 +661,21 @@ int tquic_stream_socket_create(struct tquic_connection *conn,
 	stream = tquic_stream_alloc(conn, is_bidi);
 	if (!stream)
 		return -ENOMEM;
+
+	/*
+	 * When HTTP/3 is active on this connection, validate the new
+	 * stream ID against RFC 9114 rules before proceeding.
+	 */
+	if (conn->h3_uni_stream_count[0] > 0 ||
+	    conn->h3_uni_stream_count[1] > 0 ||
+	    conn->h3_uni_stream_count[2] > 0 ||
+	    conn->h3_uni_stream_count[3] > 0) {
+		err = tquic_stream_validate_http3_id(conn, stream->id, true);
+		if (err) {
+			tquic_stream_free(stream);
+			return err;
+		}
+	}
 
 	/* Create socket structure */
 	err = sock_create_kern(sock_net(parent_sk), parent_sk->sk_family,
@@ -1417,9 +1434,16 @@ static bool tquic_stream_is_http3_request(struct tquic_stream *stream)
 static int tquic_stream_validate_http3_id(struct tquic_connection *conn,
 					  u64 stream_id, bool is_local)
 {
-	bool is_server = (conn->role == TQUIC_ROLE_SERVER);
-	bool is_bidi = h3_stream_id_is_bidi(stream_id);
-	bool is_client_initiated = h3_stream_id_is_client_initiated(stream_id);
+	bool is_server;
+	bool is_bidi;
+	bool is_client_initiated;
+
+	tquic_dbg("validate_http3_id: stream_id=%llu is_local=%d\n",
+		  stream_id, is_local);
+
+	is_server = (conn->role == TQUIC_ROLE_SERVER);
+	is_bidi = h3_stream_id_is_bidi(stream_id);
+	is_client_initiated = h3_stream_id_is_client_initiated(stream_id);
 
 	/* Validate bidirectional stream ownership */
 	if (is_bidi) {
@@ -1491,6 +1515,8 @@ static int tquic_stream_get_http3_type(struct tquic_stream *stream)
  */
 static int tquic_stream_set_http3_type(struct tquic_stream *stream, u8 type)
 {
+	tquic_dbg("set_http3_type: stream=%p type=%u\n", stream, type);
+
 	if (!stream)
 		return -EINVAL;
 
@@ -1562,6 +1588,8 @@ static struct tquic_stream *tquic_stream_lookup_by_id(
 	struct tquic_connection *conn, u64 stream_id)
 {
 	struct rb_node *node;
+
+	tquic_dbg("lookup_by_id: conn=%p stream_id=%llu\n", conn, stream_id);
 
 	if (!conn)
 		return NULL;

@@ -682,10 +682,12 @@ static struct kmem_cache *mp_pending_retire_cache;
  * multiple CIDs may be tracked per path. Currently unused but reserved
  * for full RFC 9000 multi-CID pool support.
  */
-static struct tquic_mp_cid_state * __maybe_unused
+static struct tquic_mp_cid_state *
 tquic_mp_cid_state_create(struct tquic_path *path)
 {
 	struct tquic_mp_cid_state *state;
+
+	tquic_dbg("tquic_mp_cid_state_create: path=%p\n", path);
 
 	if (!mp_cid_state_cache)
 		return NULL;
@@ -712,12 +714,14 @@ tquic_mp_cid_state_create(struct tquic_path *path)
  * multiple CIDs may be tracked per path. Currently unused but reserved
  * for full RFC 9000 multi-CID pool support.
  */
-static void __maybe_unused
+static void
 tquic_mp_cid_state_destroy(struct tquic_mp_cid_state *state)
 {
 	struct tquic_mp_remote_cid *rcid, *rtmp;
 	struct tquic_mp_local_cid *lcid, *ltmp;
 	struct tquic_mp_pending_retire *pret, *ptmp;
+
+	tquic_dbg("tquic_mp_cid_state_destroy: state=%p\n", state);
 
 	if (!state)
 		return;
@@ -762,9 +766,11 @@ tquic_mp_cid_state_destroy(struct tquic_mp_cid_state *state)
  * use path->local_cid/remote_cid directly for the simplified single-CID
  * per path model.
  */
-static struct tquic_mp_cid_state * __maybe_unused
+static struct tquic_mp_cid_state *
 tquic_mp_get_or_create_cid_state(struct tquic_path *path)
 {
+	tquic_dbg("tquic_mp_get_or_create_cid_state: path=%p\n", path);
+
 	/* For now, we use the path's local/remote CID directly
 	 * In a full implementation, each path would have a dedicated
 	 * CID state structure. Here we'll allocate one lazily.

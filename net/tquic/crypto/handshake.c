@@ -958,13 +958,15 @@ static int tquic_hs_transcript_hash(struct tquic_handshake *hs,
 /*
  * TLS 1.3 Key Schedule - derive early secrets for 0-RTT
  */
-static int __maybe_unused tquic_hs_derive_early_secrets(struct tquic_handshake *hs,
+static int tquic_hs_derive_early_secrets(struct tquic_handshake *hs,
 							const u8 *psk, u32 psk_len)
 {
 	u8 zero_salt[TLS_SECRET_MAX_LEN] = {0};
 	u8 transcript_hash[TLS_SECRET_MAX_LEN];
 	u32 hash_len;
 	int ret;
+
+	tquic_dbg("hs_derive_early_secrets: hs=%p psk_len=%u\n", hs, psk_len);
 
 	hash_len = hs->hash_len;
 

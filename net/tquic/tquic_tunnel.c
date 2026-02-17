@@ -46,7 +46,7 @@
 
 /* Global client list */
 static LIST_HEAD(tquic_client_list);
-static spinlock_t __maybe_unused tquic_client_list_lock =
+static spinlock_t tquic_client_list_lock =
 	__SPIN_LOCK_UNLOCKED(tquic_client_list_lock);
 
 /* Forwarding workqueue */

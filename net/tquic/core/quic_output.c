@@ -36,6 +36,7 @@
 #include "../tquic_compat.h"
 #include "../tquic_debug.h"
 #include "../tquic_sysctl.h"
+#include "../cong/tquic_cong.h"
 #include "quic_output.h"
 
 /* Output path configuration */
@@ -209,7 +210,7 @@ struct tquic_stream_recv_buf {
  *
  * Returns 0 on success, negative error code on failure.
  */
-static int __maybe_unused tquic_create_udp_socket(struct tquic_sock *tsk, int family)
+static int tquic_create_udp_socket(struct tquic_sock *tsk, int family)
 {
 	struct socket *sock;
 	struct sock *sk;
@@ -276,12 +277,13 @@ static int __maybe_unused tquic_create_udp_socket(struct tquic_sock *tsk, int fa
  *
  * Returns 0 on success, negative error code on failure.
  */
-static int __maybe_unused tquic_bind_udp_socket(struct tquic_sock *tsk,
+static int tquic_bind_udp_socket(struct tquic_sock *tsk,
 						struct sockaddr *addr, int addr_len)
 {
 	struct socket *sock;
 	int err;
 
+	tquic_dbg("tquic_bind_udp_socket: addr_len=%d\n", addr_len);
 	if (!tsk)
 		return -EINVAL;
 
@@ -313,12 +315,13 @@ static int __maybe_unused tquic_bind_udp_socket(struct tquic_sock *tsk,
  *
  * Returns 0 on success, negative error code on failure.
  */
-static int __maybe_unused tquic_connect_udp_socket(struct tquic_sock *tsk,
+static int tquic_connect_udp_socket(struct tquic_sock *tsk,
 						   struct sockaddr *addr, int addr_len)
 {
 	struct socket *sock;
 	int err;
 
+	tquic_dbg("tquic_connect_udp_socket: addr_len=%d\n", addr_len);
 	if (!tsk)
 		return -EINVAL;
 
@@ -578,7 +581,7 @@ static int tquic_xmit_skb(struct sk_buff *skb, struct tquic_connection *conn,
  *
  * Returns number of bytes sent on success, negative error code on failure.
  */
-static int __maybe_unused tquic_sendmsg_locked(struct tquic_sock *tsk, struct sk_buff *skb,
+static int tquic_sendmsg_locked(struct tquic_sock *tsk, struct sk_buff *skb,
 					       struct sockaddr *dest)
 {
 	struct socket *sock;
@@ -587,6 +590,7 @@ static int __maybe_unused tquic_sendmsg_locked(struct tquic_sock *tsk, struct sk
 	int addr_len;
 	int ret;
 
+	tquic_dbg("tquic_sendmsg_locked: skb_len=%u\n", skb ? skb->len : 0);
 	if (!tsk || !skb)
 		return -EINVAL;
 
@@ -645,10 +649,11 @@ static int __maybe_unused tquic_sendmsg_locked(struct tquic_sock *tsk, struct sk
  *   10 = ECT(0) - preferred for QUIC
  *   11 = CE (Congestion Experienced)
  */
-static void __maybe_unused tquic_output_set_ecn(struct socket *sock, struct tquic_path *path)
+static void tquic_output_set_ecn(struct socket *sock, struct tquic_path *path)
 {
 	u8 ecn_marking;
 
+	tquic_dbg("tquic_output_set_ecn: sock=%p path=%p\n", sock, path);
 	if (!sock || !sock->sk || !path)
 		return;
 
@@ -685,8 +690,17 @@ static void tquic_cc_on_packet_sent(struct tquic_path *path, u32 bytes)
 /* Get pacing delay from congestion control */
 static u64 tquic_cc_pacing_delay(struct tquic_path *path, u32 bytes)
 {
-	/* Calculate delay based on pacing rate if available */
-	return 0;  /* No delay by default */
+	u64 rate = tquic_cong_get_pacing_rate(path);
+	u64 delay_ns;
+
+	if (rate == 0)
+		return 0;
+
+	/* delay_ns = bytes * NSEC_PER_SEC / pacing_rate */
+	delay_ns = div64_u64((u64)bytes * NSEC_PER_SEC, rate);
+	tquic_dbg("pacing: delay=%llu ns for %u bytes at rate %llu B/s\n",
+		  delay_ns, bytes, rate);
+	return delay_ns;
 }
 
 /*
@@ -801,7 +815,7 @@ EXPORT_SYMBOL(tquic_output_batch);
  */
 
 /* Calculate pacing delay for next packet */
-static ktime_t __maybe_unused tquic_pacing_delay(struct tquic_connection *conn, u32 bytes)
+static ktime_t tquic_pacing_delay(struct tquic_connection *conn, u32 bytes)
 {
 	struct tquic_path *path;
 	u64 delay_ns;
@@ -820,8 +834,20 @@ static ktime_t __maybe_unused tquic_pacing_delay(struct tquic_connection *conn, 
 /* Check if we should send now or wait for pacing */
 static bool tquic_pacing_allow(struct tquic_connection *conn)
 {
-	/* For now, always allow sending - pacing managed by timer_state */
-	return true;
+	bool allowed;
+
+	/* Pacing disabled at socket level - allow immediately */
+	if (!conn->tsk || !conn->tsk->pacing_enabled)
+		return true;
+
+	/* No timer state yet (early in connection) - allow */
+	if (!conn->timer_state)
+		return true;
+
+	/* Check the hrtimer-based pacing gate */
+	allowed = tquic_timer_can_send_paced(conn->timer_state);
+	tquic_dbg("pacing: allow=%d (hrtimer gate check)\n", allowed);
+	return allowed;
 }
 
 /*
@@ -834,13 +860,25 @@ static int tquic_pacing_queue_packet(struct tquic_connection *conn,
 				     struct sk_buff *skb)
 {
 	/* Limit pacing queue to prevent memory exhaustion */
-	if (skb_queue_len(&conn->control_frames) >= TQUIC_MAX_PENDING_FRAMES) {
+	if (skb_queue_len(&conn->pacing_queue) >= TQUIC_MAX_PENDING_FRAMES) {
+		tquic_dbg("pacing: queue full (%d), dropping skb len=%u\n",
+			  TQUIC_MAX_PENDING_FRAMES, skb->len);
 		kfree_skb(skb);
 		return -ENOBUFS;
 	}
 
-	/* Add to control frames queue for later transmission */
-	skb_queue_tail(&conn->control_frames, skb);
+	/* Queue for pacing-delayed transmission */
+	skb_queue_tail(&conn->pacing_queue, skb);
+	tquic_dbg("pacing: queued skb len=%u, queue_depth=%d\n",
+		  skb->len, skb_queue_len(&conn->pacing_queue));
+
+	/*
+	 * Schedule the pacing timer to drain this queue.
+	 * tquic_timer_schedule_pacing() calculates the appropriate
+	 * delay based on the current pacing rate and packet size.
+	 */
+	if (conn->timer_state)
+		tquic_timer_schedule_pacing(conn->timer_state, skb->len);
 
 	return 0;
 }

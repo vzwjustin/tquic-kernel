@@ -524,7 +524,7 @@ static void tquic_westwood_on_persistent_cong(void *state,
 	ww->ecn_in_round = false;
 }
 
-static struct tquic_cong_ops __maybe_unused tquic_westwood_ops = {
+static struct tquic_cong_ops tquic_westwood_ops = {
 	.name = "westwood",
 	.owner = THIS_MODULE,
 	.init = tquic_westwood_init,

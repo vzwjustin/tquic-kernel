@@ -118,7 +118,7 @@ static u64 cubic_calc_w(struct tquic_cubic *cubic, u64 t)
 /*
  * Calculate TCP-friendly window
  */
-static u64 __maybe_unused cubic_tcp_friendliness(struct tquic_cubic *cubic, u64 t)
+static u64 cubic_tcp_friendliness(struct tquic_cubic *cubic, u64 t)
 {
 	/* Simplified TCP-friendly calculation (guard w_max == 0) */
 	if (cubic->w_max == 0)
@@ -464,7 +464,7 @@ static void tquic_cubic_on_persistent_cong(void *state,
 	cubic->ecn_in_round = false;
 }
 
-static struct tquic_cong_ops __maybe_unused tquic_cubic_ops = {
+static struct tquic_cong_ops tquic_cubic_ops = {
 	.name = "cubic",
 	.owner = THIS_MODULE,
 	.init = tquic_cubic_init,
