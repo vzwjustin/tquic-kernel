@@ -295,6 +295,32 @@ static inline void tquic_client_put(struct tquic_client *client)
 }
 
 /**
+ * tquic_client_get - Acquire a reference on a client
+ * @client: Client to reference
+ *
+ * Returns: true if the reference was acquired, false if the client
+ * is already being freed (refcount is zero).  Callers must call
+ * tquic_client_put() when done with the pointer.
+ */
+bool tquic_client_get(struct tquic_client *client)
+{
+	if (!client)
+		return false;
+	return refcount_inc_not_zero(&client->refcnt);
+}
+EXPORT_SYMBOL_GPL(tquic_client_get);
+
+/**
+ * tquic_client_release - Drop a reference acquired via tquic_client_get()
+ * @client: Client to dereference
+ */
+void tquic_client_release(struct tquic_client *client)
+{
+	tquic_client_put(client);
+}
+EXPORT_SYMBOL_GPL(tquic_client_release);
+
+/**
  * tquic_client_lookup_by_psk - Look up client by PSK identity
  * @identity: PSK identity string
  * @identity_len: Length of identity

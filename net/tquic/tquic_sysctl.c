@@ -211,6 +211,11 @@ static int tquic_nat_keepalive_min_interval = 5000;	/* 5 seconds minimum */
 static int tquic_nat_keepalive_max_interval = 120000;	/* 2 minutes maximum */
 static int tquic_nat_keepalive_adaptive = 1;		/* Adaptive mode on */
 
+/* GRO flush timer (microseconds) */
+static int tquic_gro_flush_timeout_us = 1000;		/* 1 ms default */
+static int tquic_gro_flush_timeout_us_min = 100;	/* 0.1 ms floor */
+static int tquic_gro_flush_timeout_us_max = 10000;	/* 10 ms ceiling */
+
 /* Forward declarations for scheduler API */
 struct tquic_sched_ops;
 struct tquic_sched_ops *tquic_sched_find(const char *name);
@@ -1559,6 +1564,26 @@ static struct ctl_table tquic_sysctl_table[] = {
 		.extra1		= SYSCTL_ZERO,
 		.extra2		= SYSCTL_ONE,
 	},
+	/*
+	 * gro_flush_timeout_us: GRO hold timer duration in microseconds
+	 *
+	 * Controls how long the GRO engine holds packets before flushing the
+	 * coalesced batch downstream.  Lower values reduce latency at the
+	 * cost of smaller coalesced frames; higher values improve throughput
+	 * on bulk transfers by maximising coalescing opportunities.
+	 *
+	 * Default: 1000 (1 ms)
+	 * Range: 100 to 10000 (0.1 ms to 10 ms)
+	 */
+	{
+		.procname	= "gro_flush_timeout_us",
+		.data		= &tquic_gro_flush_timeout_us,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= &tquic_gro_flush_timeout_us_min,
+		.extra2		= &tquic_gro_flush_timeout_us_max,
+	},
 	{ }
 };
 
@@ -2044,6 +2069,17 @@ int tquic_sysctl_get_nat_keepalive_adaptive(void)
 	return tquic_nat_keepalive_adaptive;
 }
 EXPORT_SYMBOL_GPL(tquic_sysctl_get_nat_keepalive_adaptive);
+
+/**
+ * tquic_sysctl_get_gro_flush_timeout_us - Get GRO flush timer duration
+ *
+ * Returns: Flush timeout in microseconds (range 100–10000)
+ */
+int tquic_sysctl_get_gro_flush_timeout_us(void)
+{
+	return tquic_gro_flush_timeout_us;
+}
+EXPORT_SYMBOL_GPL(tquic_sysctl_get_gro_flush_timeout_us);
 
 /* Number of actual sysctl entries (excluding null terminator) */
 #define TQUIC_SYSCTL_TABLE_ENTRIES (ARRAY_SIZE(tquic_sysctl_table) - 1)

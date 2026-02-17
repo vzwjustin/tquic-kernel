@@ -590,19 +590,17 @@ struct tquic_client *tquic_forward_check_hairpin(struct tquic_tunnel *tunnel)
 		if (memcmp(&entry->dest_addr, dest_addr,
 			   sizeof(struct sockaddr_storage)) == 0) {
 			/*
-			 * C1-FIXME: Must take a reference on peer_client
-			 * before releasing tquic_hairpin_lock to prevent UAF.
-			 * Requires tquic_client_get() exported from
-			 * tquic_server.c.  Safe to land once hairpin is
-			 * enabled (dest_addr is currently always NULL above).
-			 *
-			 *   if (!tquic_client_get(entry->peer_client)) {
-			 *       spin_unlock_bh(&tquic_hairpin_lock);
-			 *       return NULL;
-			 *   }
-			 *
-			 * Caller must then call tquic_client_put().
+			 * Elevate refcount before dropping the spinlock so
+			 * the caller holds a stable reference.  If the client
+			 * is already being torn down refcount_inc_not_zero()
+			 * returns false and we treat it as a cache miss.
+			 * Caller must drop the reference via
+			 * tquic_client_release() when done.
 			 */
+			if (!tquic_client_get(entry->peer_client)) {
+				spin_unlock_bh(&tquic_hairpin_lock);
+				return NULL;
+			}
 			spin_unlock_bh(&tquic_hairpin_lock);
 			return entry->peer_client;
 		}

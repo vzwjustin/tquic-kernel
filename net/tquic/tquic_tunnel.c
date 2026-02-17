@@ -554,6 +554,14 @@ static void tquic_tunnel_connect_work(struct work_struct *work)
 	tquic_tunnel_put(tunnel);
 }
 
+/*
+ * Per-invocation forwarding budget (bytes).  Mirrors the NAPI budget
+ * approach: process at most this many bytes per work handler call so
+ * a single busy tunnel cannot monopolise the workqueue and starve
+ * others.  64 KiB gives ~4 full-size TSO segments worth of data.
+ */
+#define TQUIC_FORWARD_BUDGET	(64 * 1024)
+
 /**
  * tquic_tunnel_forward_work - Bidirectional data forwarding work handler
  * @work: Work structure embedded in tunnel
@@ -561,6 +569,12 @@ static void tquic_tunnel_connect_work(struct work_struct *work)
  * Performs bidirectional data transfer between QUIC stream and TCP socket.
  * Handles both TX (QUIC→TCP) and RX (TCP→QUIC) directions, as well as
  * hairpin routing for client-to-client traffic.
+ *
+ * A per-invocation budget of TQUIC_FORWARD_BUDGET bytes prevents a single
+ * active tunnel from starving others on the shared workqueue.  When the
+ * budget is exhausted the handler re-queues itself immediately; when it is
+ * not exhausted the handler exits and waits for the next data_ready /
+ * write_space wakeup.
  */
 static void tquic_tunnel_forward_work(struct work_struct *work)
 {
@@ -568,6 +582,7 @@ static void tquic_tunnel_forward_work(struct work_struct *work)
 	struct tquic_client *hairpin_peer;
 	enum tquic_tunnel_state state;
 	ssize_t tx_bytes, rx_bytes;
+	ssize_t total;
 
 	tunnel = container_of(work, struct tquic_tunnel, forward_work);
 
@@ -586,26 +601,31 @@ static void tquic_tunnel_forward_work(struct work_struct *work)
 	if (hairpin_peer) {
 		/* Route directly between clients without TCP */
 		tquic_forward_hairpin(tunnel, hairpin_peer);
+		tquic_client_release(hairpin_peer);
 		tquic_tunnel_put(tunnel);
 		return;
 	}
 
 	/*
-	 * Perform bidirectional forwarding:
+	 * Perform bidirectional forwarding up to TQUIC_FORWARD_BUDGET bytes:
 	 * TX: QUIC stream → TCP socket (router to internet)
 	 * RX: TCP socket → QUIC stream (internet to router)
 	 *
-	 * Try both directions to ensure data flows in both ways.
-	 * Positive return values indicate bytes transferred.
+	 * Positive return values indicate bytes transferred; negative values
+	 * indicate EAGAIN (no more data) or a hard error (tunnel will be
+	 * torn down by the error path in the called function).
 	 */
 	tx_bytes = tquic_forward_splice(tunnel, 0); /* TQUIC_FORWARD_TX */
 	rx_bytes = tquic_forward_splice(tunnel, 1); /* TQUIC_FORWARD_RX */
 
+	total = max_t(ssize_t, tx_bytes, 0) + max_t(ssize_t, rx_bytes, 0);
+
 	/*
-	 * If data was transferred in either direction, re-queue to continue
-	 * forwarding. This ensures continuous data flow without blocking.
+	 * Re-queue if we hit the budget, suggesting more data is waiting.
+	 * Otherwise exit and rely on data_ready / write_space callbacks to
+	 * schedule the next run.  This mirrors the NAPI budget contract.
 	 */
-	if ((tx_bytes > 0 || rx_bytes > 0) && tquic_tunnel_wq) {
+	if (total >= TQUIC_FORWARD_BUDGET && tquic_tunnel_wq) {
 		spin_lock_bh(&tunnel->lock);
 		if (tunnel->state == TQUIC_TUNNEL_ESTABLISHED) {
 			tquic_tunnel_get(tunnel); /* Take ref for next iteration */

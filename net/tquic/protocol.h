@@ -520,6 +520,10 @@ struct tquic_client;
 struct tquic_client *tquic_client_lookup_by_psk(const char *identity,
 						size_t identity_len);
 
+/* Reference counting (tquic_server.c) */
+bool tquic_client_get(struct tquic_client *client);
+void tquic_client_release(struct tquic_client *client);
+
 /* Rate limit check (tquic_server.c) */
 bool tquic_client_rate_limit_check(struct tquic_client *client);
 

@@ -78,6 +78,9 @@ int tquic_sysctl_max_connections_per_second(void);
 int tquic_sysctl_max_connections_burst(void);
 int tquic_sysctl_per_ip_rate_limit(void);
 
+/* GRO */
+int tquic_sysctl_get_gro_flush_timeout_us(void);
+
 /* Memory limits */
 extern int sysctl_tquic_wmem[3];
 extern int sysctl_tquic_rmem[3];

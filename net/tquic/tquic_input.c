@@ -46,6 +46,7 @@
 #include "tquic_retry.h"
 #include "tquic_ack_frequency.h"
 #include "tquic_ratelimit.h"
+#include "tquic_sysctl.h"
 #include "rate_limit.h"
 #include "security_hardening.h"
 #include "tquic_cid.h"
@@ -3712,7 +3713,7 @@ static struct sk_buff *tquic_gro_receive_internal(struct tquic_gro_state *gro,
 	if (gro->held_count == 1) {
 		gro->first_hold_time = ktime_get();
 		hrtimer_start(&gro->flush_timer,
-			      ns_to_ktime(TQUIC_GRO_FLUSH_TIMEOUT_US *
+			      ns_to_ktime((u64)tquic_sysctl_get_gro_flush_timeout_us() *
 					  NSEC_PER_USEC),
 			      HRTIMER_MODE_REL);
 	}
