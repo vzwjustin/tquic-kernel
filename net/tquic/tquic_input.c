@@ -180,6 +180,8 @@ struct tquic_gro_state {
 	struct hrtimer flush_timer;
 	int held_count;
 	ktime_t first_hold_time;
+	void (*deliver)(struct sk_buff *skb);
+	struct tquic_connection *conn;
 };
 
 /*
@@ -1267,6 +1269,16 @@ static int tquic_process_ack_frame(struct tquic_rx_ctx *ctx)
 			 * pending stream data that was blocked.
 			 */
 			tquic_output_flush(ctx->conn);
+
+			/*
+			 * Wake blocked userspace writers. ACK processing
+			 * may have opened cwnd, allowing sendmsg() callers
+			 * that were blocked on sk_stream_wait_memory() to
+			 * proceed.
+			 */
+			if (ctx->conn->sk &&
+			    sk_stream_wspace(ctx->conn->sk) > 0)
+				ctx->conn->sk->sk_write_space(ctx->conn->sk);
 		}
 
 		/*
@@ -3431,17 +3443,28 @@ static u64 tquic_decode_pkt_num(u8 *buf, int pkt_num_len, u64 largest_pn)
  */
 
 /*
- * GRO flush timer callback
+ * GRO flush timer callback - drain held packets when the
+ * batching window (TQUIC_GRO_FLUSH_TIMEOUT_US) expires.
  */
 static enum hrtimer_restart tquic_gro_flush_timer(struct hrtimer *timer)
 {
+	struct tquic_gro_state *gro = container_of(timer,
+						   struct tquic_gro_state,
+						   flush_timer);
+
+	if (gro->deliver)
+		tquic_gro_flush(gro, gro->deliver);
+
 	return HRTIMER_NORESTART;
 }
 
 /*
- * Initialize GRO state
+ * Initialize GRO state with delivery callback and connection context.
+ * @conn:    Connection owning this GRO state.
+ * @deliver: Callback invoked for each flushed skb.
  */
-struct tquic_gro_state *tquic_gro_init(void)
+struct tquic_gro_state *tquic_gro_init(struct tquic_connection *conn,
+				       void (*deliver)(struct sk_buff *))
 {
 	struct tquic_gro_state *gro;
 
@@ -3451,9 +3474,10 @@ struct tquic_gro_state *tquic_gro_init(void)
 
 	skb_queue_head_init(&gro->hold_queue);
 	spin_lock_init(&gro->lock);
-	/* Use hrtimer_setup (new API) instead of hrtimer_init */
 	hrtimer_setup(&gro->flush_timer, tquic_gro_flush_timer,
 		      CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+	gro->conn = conn;
+	gro->deliver = deliver;
 
 	return gro;
 }
@@ -3516,33 +3540,68 @@ static bool tquic_gro_can_coalesce(struct sk_buff *skb1, struct sk_buff *skb2,
  * @dcid_len: Actual DCID length from the connection state so that
  *            coalesce comparisons use the correct CID size.
  */
-static struct sk_buff __maybe_unused *tquic_gro_receive_internal(struct tquic_gro_state *gro,
-								struct sk_buff *skb,
-								u8 dcid_len)
+static struct sk_buff *tquic_gro_receive_internal(struct tquic_gro_state *gro,
+						  struct sk_buff *skb,
+						  u8 dcid_len)
 {
 	struct sk_buff *held;
+	bool coalesced = false;
 
 	spin_lock(&gro->lock);
 
 	/* Check if we can coalesce with held packets */
 	skb_queue_walk(&gro->hold_queue, held) {
 		if (tquic_gro_can_coalesce(held, skb, dcid_len)) {
-			/* Coalesce into held packet */
-			/* For QUIC, this is complex due to packet structure */
-			/* Simple implementation just holds multiple packets */
+			/*
+			 * QUIC packets are individually encrypted so we
+			 * cannot merge payloads like TCP GRO.  Instead,
+			 * append the new skb as a frag_list entry so
+			 * both packets are delivered together in one
+			 * NAPI pass.
+			 */
+			if (!skb_has_frag_list(held)) {
+				skb_shinfo(held)->frag_list = skb;
+			} else {
+				struct sk_buff *last;
+
+				for (last = skb_shinfo(held)->frag_list;
+				     last->next; last = last->next)
+					;
+				last->next = skb;
+			}
+			skb->next = NULL;
+			held->len += skb->len;
+			held->data_len += skb->len;
+			held->truesize += skb->truesize;
+			coalesced = true;
+			break;
 		}
 	}
 
-	/* Add to hold queue */
-	__skb_queue_tail(&gro->hold_queue, skb);
-	gro->held_count++;
+	if (!coalesced) {
+		/* Add to hold queue as a new entry */
+		__skb_queue_tail(&gro->hold_queue, skb);
+		gro->held_count++;
+	}
 
-	if (gro->held_count == 1)
+	/* Start flush timer on first held packet */
+	if (gro->held_count == 1) {
 		gro->first_hold_time = ktime_get();
+		hrtimer_start(&gro->flush_timer,
+			      ns_to_ktime(TQUIC_GRO_FLUSH_TIMEOUT_US *
+					  NSEC_PER_USEC),
+			      HRTIMER_MODE_REL);
+	}
 
-	/* Flush if queue is full */
+	/* Flush immediately if queue is full */
 	if (gro->held_count >= TQUIC_GRO_MAX_HOLD) {
-		/* Would flush here */
+		hrtimer_cancel(&gro->flush_timer);
+		spin_unlock(&gro->lock);
+
+		if (gro->deliver)
+			tquic_gro_flush(gro, gro->deliver);
+
+		return NULL;
 	}
 
 	spin_unlock(&gro->lock);

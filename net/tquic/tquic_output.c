@@ -47,6 +47,9 @@
 #include "core/mp_frame.h"
 #include "core/quic_loss.h"
 
+/* Maximum packets per output_flush iteration */
+#define TQUIC_TX_WORK_BATCH_MAX		64
+
 /* Slab cache for tquic_pending_frame (CF-046: avoid per-frame kzalloc) */
 struct kmem_cache *tquic_frame_cache;
 EXPORT_SYMBOL_GPL(tquic_frame_cache);
@@ -2611,9 +2614,16 @@ int tquic_output_flush(struct tquic_connection *conn)
 		return -ENOTCONN;
 	}
 
-	/* Avoid concurrent flushers racing conn_credit / conn->data_sent. */
-	if (test_and_set_bit(flush_bit, &conn->output_flush_flags))
+	/*
+	 * Avoid concurrent flushers racing conn_credit / conn->data_sent.
+	 * If another flusher is active, schedule tx_work as a fallback
+	 * so the send opportunity is not lost.
+	 */
+	if (test_and_set_bit(flush_bit, &conn->output_flush_flags)) {
+		if (!work_pending(&conn->tx_work))
+			schedule_work(&conn->tx_work);
 		return 0;
+	}
 
 	/* Select path for transmission */
 	path = tquic_select_path(conn, NULL);
@@ -2646,7 +2656,7 @@ int tquic_output_flush(struct tquic_connection *conn)
 	/*
 	 * Outer drain loop: keep sending until all stream send_bufs are
 	 * empty, or we're blocked by cwnd / connection flow control.
-	 * The inner loop sends up to 16 packets per iteration to avoid
+	 * The inner loop sends up to 64 packets per iteration to avoid
 	 * holding conn->lock for too long.
 	 */
 	do {
@@ -2688,7 +2698,7 @@ int tquic_output_flush(struct tquic_connection *conn)
 
 		/* Iterate over streams with pending data (lock held). */
 		for (node = rb_first(&conn->streams);
-		     node && iter_sent < 16;
+		     node && iter_sent < TQUIC_TX_WORK_BATCH_MAX;
 		     node = rb_next(node)) {
 			struct tquic_stream *stream;
 			size_t chunk_size;
@@ -2706,7 +2716,7 @@ int tquic_output_flush(struct tquic_connection *conn)
 			/* Process pending data from this stream's send buffer */
 			while (!skb_queue_empty(&stream->send_buf) &&
 			       conn_credit > 0 &&
-			       iter_sent < 16) {
+			       iter_sent < TQUIC_TX_WORK_BATCH_MAX) {
 				struct tquic_stream_skb_cb *cb;
 				u64 stream_offset;
 				u32 data_off;

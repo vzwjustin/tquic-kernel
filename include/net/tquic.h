@@ -2441,7 +2441,8 @@ int tquic_process_coalesced(struct tquic_connection *conn,
 			    struct sockaddr_storage *src_addr);
 
 /* GRO handling */
-struct tquic_gro_state *tquic_gro_init(void);
+struct tquic_gro_state *tquic_gro_init(struct tquic_connection *conn,
+				       void (*deliver)(struct sk_buff *));
 void tquic_gro_cleanup(struct tquic_gro_state *gro);
 int tquic_gro_flush(struct tquic_gro_state *gro,
 		    void (*deliver)(struct sk_buff *));
