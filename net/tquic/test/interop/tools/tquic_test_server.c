@@ -28,6 +28,7 @@
 #include <arpa/inet.h>
 #include <pthread.h>
 #include <time.h>
+#include <sys/time.h>
 
 /* TQUIC socket constants - must match include/uapi/linux/tquic.h */
 #ifndef IPPROTO_QUIC
@@ -438,110 +439,114 @@ static int handle_connection(int client_fd, struct server_config *config)
     printf("connection established\n");
     fflush(stdout);
 
-    /* Set non-blocking */
-    int flags = fcntl(client_fd, F_GETFL, 0);
-    fcntl(client_fd, F_SETFL, flags | O_NONBLOCK);
+    /*
+     * Use blocking I/O with timeouts for both recv and send.
+     * Non-blocking + usleep polling killed throughput.
+     */
+    struct timeval tv;
+    tv.tv_sec = 5;
+    tv.tv_usec = 0;
+    setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
-    while (running) {
-        bytes = recv(client_fd, buffer, sizeof(buffer) - 1, 0);
+    tv.tv_sec = 10;
+    tv.tv_usec = 0;
+    setsockopt(client_fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 
-        if (bytes > 0) {
-            buffer[bytes] = '\0';
-            LOG_DEBUG("Received %zd bytes: %s", bytes, buffer);
+    bytes = recv(client_fd, buffer, sizeof(buffer) - 1, 0);
+    if (bytes <= 0) {
+        LOG_ERROR("recv error: %s", bytes == 0 ? "closed" : strerror(errno));
+        goto close_conn;
+    }
 
-            /* Simple HTTP/0.9 style response */
-            if (strncmp(buffer, "GET ", 4) == 0) {
-                char *path = buffer + 4;
-                char *end = strchr(path, ' ');
-                if (end) *end = '\0';
-                end = strchr(path, '\r');
-                if (end) *end = '\0';
-                end = strchr(path, '\n');
-                if (end) *end = '\0';
+    buffer[bytes] = '\0';
+    LOG_DEBUG("Received %zd bytes: %s", bytes, buffer);
 
-                LOG_INFO("GET request for: %s", path);
+    if (strncmp(buffer, "GET ", 4) != 0) {
+        LOG_ERROR("Not a GET request");
+        goto close_conn;
+    }
 
-                /* Serve file if serve_dir is set */
-                if (config->serve_dir) {
-                    char filepath[512];
-                    snprintf(filepath, sizeof(filepath), "%s/%s",
-                             config->serve_dir, path);
+    {
+        char *path = buffer + 4;
+        char *end = strchr(path, ' ');
+        if (end) *end = '\0';
+        end = strchr(path, '\r');
+        if (end) *end = '\0';
+        end = strchr(path, '\n');
+        if (end) *end = '\0';
 
-                    int file_fd = open(filepath, O_RDONLY);
-                    if (file_fd >= 0) {
-                        struct stat st;
-                        fstat(file_fd, &st);
+        LOG_INFO("GET request for: %s", path);
 
-                        char header[256];
-                        int header_len = snprintf(header, sizeof(header),
-                            "HTTP/1.0 200 OK\r\n"
-                            "Content-Length: %ld\r\n"
-                            "Content-Type: application/octet-stream\r\n"
-                            "\r\n", (long)st.st_size);
+        if (config->serve_dir) {
+            char filepath[512];
+            snprintf(filepath, sizeof(filepath), "%s/%s",
+                     config->serve_dir, path);
 
-                        send(client_fd, header, header_len, 0);
+            int file_fd = open(filepath, O_RDONLY);
+            if (file_fd >= 0) {
+                struct stat st;
+                fstat(file_fd, &st);
+                LOG_INFO("Serving file: %s (%ld bytes)", filepath, (long)st.st_size);
 
-                        while ((bytes = read(file_fd, buffer, sizeof(buffer))) > 0) {
-                            ssize_t sent = 0;
-                            while (sent < bytes) {
-                                ssize_t n = send(client_fd,
-                                                 buffer + sent,
-                                                 bytes - sent, 0);
-                                if (n < 0) {
-                                    if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                                        usleep(1000);
-                                        continue;
-                                    }
-                                    LOG_ERROR("send error: %s", strerror(errno));
-                                    goto done_file;
-                                }
-                                sent += n;
-                            }
-                        }
-                        done_file:
-                        close(file_fd);
+                char header[256];
+                int header_len = snprintf(header, sizeof(header),
+                    "HTTP/1.0 200 OK\r\n"
+                    "Content-Length: %ld\r\n"
+                    "Content-Type: application/octet-stream\r\n"
+                    "\r\n", (long)st.st_size);
 
-                        /*
-                         * Allow kernel to drain the send buffer
-                         * via ACK-triggered output_flush before
-                         * closing the QUIC socket (which sends
-                         * CONNECTION_CLOSE and prevents further TX).
-                         *
-                         * On loopback, 500ms is sufficient for
-                         * several MB of data to drain.
-                         */
-                        usleep(500000);
-                    } else {
-                        const char *not_found =
-                            "HTTP/1.0 404 Not Found\r\n"
-                            "Content-Length: 9\r\n"
-                            "\r\n"
-                            "Not Found";
-                        send(client_fd, not_found, strlen(not_found), 0);
-                    }
-                } else {
-                    /* Default response */
-                    const char *response =
-                        "HTTP/1.0 200 OK\r\n"
-                        "Content-Length: 13\r\n"
-                        "Content-Type: text/plain\r\n"
-                        "\r\n"
-                        "Hello, QUIC!\n";
-                    send(client_fd, response, strlen(response), 0);
+                ssize_t n = send(client_fd, header, header_len, 0);
+                if (n < 0) {
+                    LOG_ERROR("send header error: %s", strerror(errno));
+                    close(file_fd);
+                    goto close_conn;
                 }
 
-                break;  /* Close after response */
-            }
-        } else if (bytes == 0) {
-            LOG_INFO("Connection closed by peer");
-            break;
-        } else if (errno != EAGAIN && errno != EWOULDBLOCK) {
-            LOG_ERROR("recv error: %s", strerror(errno));
-            break;
-        }
+                ssize_t total_sent = 0;
+                while ((bytes = read(file_fd, buffer, sizeof(buffer))) > 0) {
+                    ssize_t sent = 0;
+                    while (sent < bytes) {
+                        n = send(client_fd,
+                                 buffer + sent,
+                                 bytes - sent, 0);
+                        if (n < 0) {
+                            LOG_ERROR("send error at offset %zd: %s",
+                                      total_sent + sent, strerror(errno));
+                            close(file_fd);
+                            goto close_conn;
+                        }
+                        sent += n;
+                    }
+                    total_sent += sent;
+                }
+                close(file_fd);
+                LOG_INFO("File sent: %zd bytes", total_sent);
 
-        usleep(10000);  /* 10ms */
+                /*
+                 * Allow kernel to drain the send buffer before
+                 * closing (which sends CONNECTION_CLOSE).
+                 */
+                usleep(500000);
+            } else {
+                const char *not_found =
+                    "HTTP/1.0 404 Not Found\r\n"
+                    "Content-Length: 9\r\n"
+                    "\r\n"
+                    "Not Found";
+                send(client_fd, not_found, strlen(not_found), 0);
+            }
+        } else {
+            const char *response =
+                "HTTP/1.0 200 OK\r\n"
+                "Content-Length: 13\r\n"
+                "Content-Type: text/plain\r\n"
+                "\r\n"
+                "Hello, QUIC!\n";
+            send(client_fd, response, strlen(response), 0);
+        }
     }
+
+close_conn:
 
     printf("connection closed\n");
     fflush(stdout);
