@@ -202,6 +202,12 @@ const char *tquic_sched_get_default(struct net *net)
 			name = "blest";
 		else if (strcmp(ops->name, "aggregate") == 0)
 			name = "aggregate";
+		else if (strcmp(ops->name, "redundant") == 0)
+			name = "redundant";
+		else if (strcmp(ops->name, "owd") == 0)
+			name = "owd";
+		else if (strcmp(ops->name, "owd-ecf") == 0)
+			name = "owd-ecf";
 		else
 			name = "unknown";
 	}

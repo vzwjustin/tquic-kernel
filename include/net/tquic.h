@@ -3517,6 +3517,7 @@ int tquic_tunnel_get_stats(struct tquic_tunnel *tunnel,
 			   u64 *bytes_tx, u64 *bytes_rx,
 			   u64 *packets_tx, u64 *packets_rx);
 bool tquic_tunnel_is_tproxy(struct tquic_tunnel *tunnel);
+void tquic_tunnel_schedule_forward(struct tquic_tunnel *tunnel);
 
 /* Tunnel subsystem init/exit */
 int __init tquic_tunnel_init(void);
@@ -3584,6 +3585,7 @@ int tquic_forward_signal_mtu(struct tquic_tunnel *tunnel, u32 new_mtu);
 
 /* TCP callback setup */
 int tquic_forward_setup_tcp_callbacks(struct tquic_tunnel *tunnel);
+void tquic_forward_teardown_tcp_callbacks(struct tquic_tunnel *tunnel);
 
 /* GRO/GSO verification */
 int tquic_forward_check_gro_gso(struct net_device *dev);
