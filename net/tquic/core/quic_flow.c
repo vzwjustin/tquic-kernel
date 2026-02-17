@@ -295,7 +295,6 @@ EXPORT_SYMBOL_GPL(tquic_flow_control_on_data_recvd);
  */
 static void tquic_flow_control_update_max_data_internal(struct tquic_connection *conn)
 {
-	struct sk_buff *skb;
 	u64 new_max_data;
 	u64 consumed;
 
@@ -341,36 +340,32 @@ static void tquic_flow_control_update_max_data_internal(struct tquic_connection 
 
 	spin_unlock_bh(&conn->lock);
 
-	/* Create and queue MAX_DATA frame */
-	skb = tquic_flow_create_max_data_frame(conn, new_max_data);
-	if (!skb) {
-		pr_err("TQUIC: failed to allocate MAX_DATA frame\n");
-		return;
-	}
-
 	/*
-	 * Queue MAX_DATA frame for transmission.
-	 * CRITICAL: Failure to send MAX_DATA allows the peer to send more data
-	 * than we are willing to accept, which will eventually cause a
-	 * FLOW_CONTROL_ERROR. This is NOT an optional "best effort" operation.
+	 * Send MAX_DATA directly using tquic_flow_send_max_data which
+	 * encrypts via tquic_encrypt_payload (the correct crypto path).
 	 *
-	 * If queueing fails due to memory pressure, we MUST log it and
-	 * retry periodically via DATA_BLOCKED handling.
+	 * We bypass the control_frames queue + tx_work + tquic_packet_build
+	 * path because tquic_packet_build calls tquic_crypto_encrypt() which
+	 * expects struct tquic_crypto_ctx but receives conn->crypto_state
+	 * (struct tquic_crypto_state) through a void* cast, causing silent
+	 * encryption failure due to incompatible struct layouts.
 	 */
-	if (tquic_conn_queue_frame(conn, skb)) {
-		pr_warn("TQUIC: failed to queue MAX_DATA frame (queue full), will retry\n");
-		kfree_skb(skb);
-		/*
-		 * Note: The peer is now operating with stale flow control limits.
-		 * A DATA_BLOCKED frame from the peer will trigger a retry of
-		 * MAX_DATA update. If peer never sends DATA_BLOCKED, the idle
-		 * timeout will eventually close the connection.
-		 */
-		return;
-	}
+	{
+		struct tquic_path *path;
+		int ret;
 
-	/* Schedule transmission of the queued frame */
-	schedule_work(&conn->tx_work);
+		rcu_read_lock();
+		path = rcu_dereference(conn->active_path);
+		if (!path) {
+			rcu_read_unlock();
+			pr_warn("TQUIC: no active path for MAX_DATA\n");
+			return;
+		}
+		ret = tquic_flow_send_max_data(conn, path, new_max_data);
+		rcu_read_unlock();
+		if (ret < 0)
+			pr_warn("TQUIC: failed to send MAX_DATA: %d\n", ret);
+	}
 }
 
 /**
@@ -619,7 +614,6 @@ void tquic_stream_flow_control_on_data_recvd(struct tquic_stream *stream,
 static void tquic_stream_flow_control_update_max_stream_data(struct tquic_stream *stream)
 {
 	struct tquic_connection *conn = stream->conn;
-	struct sk_buff *skb;
 	u64 new_max_stream_data;
 	u64 consumed;
 	u64 window;
@@ -652,34 +646,36 @@ static void tquic_stream_flow_control_update_max_stream_data(struct tquic_stream
 		stream->conn);
 	stream->max_recv_data = new_max_stream_data;
 
-	/* Create and queue MAX_STREAM_DATA frame */
-	skb = tquic_flow_create_max_stream_data_frame(stream->id,
-						     new_max_stream_data);
-	if (!skb) {
-		pr_err("TQUIC: failed to allocate MAX_STREAM_DATA frame for stream %llu\n",
-		       stream->id);
-		return;
-	}
-
 	/*
-	 * Queue MAX_STREAM_DATA frame for transmission.
-	 * CRITICAL: Failure to send MAX_STREAM_DATA has the same implications as
-	 * MAX_DATA failure. The peer will be operating with stale flow control
-	 * limits, which will eventually cause a FLOW_CONTROL_ERROR when the
-	 * peer violates the advertised limit.
+	 * Send MAX_STREAM_DATA directly using tquic_flow_send_max_stream_data
+	 * which encrypts via tquic_encrypt_payload (the correct crypto path).
 	 *
-	 * If queueing fails, log it and rely on STREAM_DATA_BLOCKED from peer
-	 * to trigger a retry, or idle timeout to close connection.
+	 * We bypass the control_frames queue + tx_work + tquic_packet_build
+	 * path because tquic_packet_build calls tquic_crypto_encrypt() which
+	 * expects struct tquic_crypto_ctx but receives conn->crypto_state
+	 * (struct tquic_crypto_state) through a void* cast, causing silent
+	 * encryption failure due to incompatible struct layouts.
 	 */
-	if (tquic_conn_queue_frame(conn, skb)) {
-		pr_warn("TQUIC: failed to queue MAX_STREAM_DATA for stream %llu (queue full), will retry\n",
-			stream->id);
-		kfree_skb(skb);
-		return;
-	}
+	{
+		struct tquic_path *path;
+		int ret;
 
-	/* Schedule transmission of the queued frame */
-	schedule_work(&conn->tx_work);
+		rcu_read_lock();
+		path = rcu_dereference(conn->active_path);
+		if (!path) {
+			rcu_read_unlock();
+			pr_warn("TQUIC: no active path for MAX_STREAM_DATA stream %llu\n",
+				stream->id);
+			return;
+		}
+		ret = tquic_flow_send_max_stream_data(conn, path,
+						      stream->id,
+						      new_max_stream_data);
+		rcu_read_unlock();
+		if (ret < 0)
+			pr_warn("TQUIC: failed to send MAX_STREAM_DATA for stream %llu: %d\n",
+				stream->id, ret);
+	}
 }
 
 /**

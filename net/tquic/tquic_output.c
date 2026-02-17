@@ -2183,64 +2183,84 @@ int tquic_send_ack(struct tquic_connection *conn, struct tquic_path *path,
 {
 	struct tquic_frame_ctx ctx;
 	struct sk_buff *skb;
-	u8 buf_stack[128];
+	u8 header_buf[128];
+	u8 *payload_buf;
+	int header_len, payload_len;
 	int ret;
 	u64 pkt_num;
+	bool key_phase = false;
+
+	pkt_num = atomic64_inc_return(&conn->pkt_num_tx) - 1;
+
+	/* Allocate skb with room for header + payload + AEAD tag */
+	skb = alloc_skb(MAX_HEADER + 128 + 128 + 16, GFP_ATOMIC);
+	if (!skb)
+		return -ENOMEM;
+
+	skb_reserve(skb, MAX_HEADER + 128);
+
+	/* Write ACK frame directly into skb data area */
+	payload_buf = skb_put(skb, 128 + 16);
 
 	ctx.conn = conn;
 	ctx.path = path;
-	ctx.buf = buf_stack;
-	ctx.buf_len = sizeof(buf_stack);
+	ctx.buf = payload_buf;
+	ctx.buf_len = 128;
 	ctx.offset = 0;
 	ctx.ack_eliciting = false;
 
 	ret = tquic_gen_ack_frame(&ctx, largest_ack, ack_delay, 0, ack_range);
-	if (ret < 0)
-		return ret;
-
-	pkt_num = atomic64_inc_return(&conn->pkt_num_tx) - 1;
-
-	/* Build minimal packet with ACK */
-	BUILD_BUG_ON(TQUIC_MAX_SHORT_HEADER_SIZE > 64);
-	skb = alloc_skb(ctx.offset + TQUIC_MAX_SHORT_HEADER_SIZE + MAX_HEADER,
-			GFP_ATOMIC);
-	if (!skb)
-		return -ENOMEM;
-
-	skb_reserve(skb, MAX_HEADER);
-
-	/* Build short header with correct key phase from key update state */
-	{
-		u8 header[TQUIC_MAX_SHORT_HEADER_SIZE];
-		bool key_phase = false;
-		int header_len;
-
-		/* Get current key phase per RFC 9001 Section 6 */
-		if (conn->crypto_state) {
-			struct tquic_key_update_state *ku_state;
-			ku_state = tquic_crypto_get_key_update_state(conn->crypto_state);
-			if (ku_state)
-				key_phase = tquic_key_update_get_phase(ku_state) != 0;
-		}
-
-		header_len = tquic_build_short_header_internal(
-				conn, path, header,
-				TQUIC_MAX_SHORT_HEADER_SIZE,
-				pkt_num, 0, key_phase, false, NULL);
-		if (header_len > 0) {
-			if (skb_tailroom(skb) < header_len) {
-				kfree_skb(skb);
-				return -ENOSPC;
-			}
-			skb_put_data(skb, header, header_len);
-		}
-	}
-
-	if (skb_tailroom(skb) < ctx.offset) {
+	if (ret < 0) {
 		kfree_skb(skb);
-		return -ENOSPC;
+		return ret;
 	}
-	skb_put_data(skb, buf_stack, ctx.offset);
+
+	payload_len = ctx.offset;
+
+	/* Build short header (1-RTT) with correct key phase */
+	if (conn->crypto_state) {
+		struct tquic_key_update_state *ku_state;
+
+		ku_state = tquic_crypto_get_key_update_state(
+				conn->crypto_state);
+		if (ku_state)
+			key_phase = tquic_key_update_get_phase(
+					ku_state) != 0;
+	}
+
+	header_len = tquic_build_short_header_internal(
+			conn, path, header_buf, sizeof(header_buf),
+			pkt_num, 0, key_phase, false, conn->grease_state);
+	if (header_len < 0) {
+		kfree_skb(skb);
+		return header_len;
+	}
+
+	/* Encrypt payload in-place (header is AAD) */
+	ret = tquic_encrypt_payload(conn, header_buf, header_len,
+				    payload_buf, payload_len, pkt_num,
+				    3 /* short header = APPLICATION */);
+	if (ret < 0) {
+		kfree_skb(skb);
+		return ret;
+	}
+
+	/* Trim skb to actual encrypted size */
+	skb_trim(skb, payload_len + 16);
+
+	/* Push header in front of encrypted payload */
+	memcpy(skb_push(skb, header_len), header_buf, header_len);
+
+	/* Apply header protection (pn_offset = header_len - 4) */
+	if (header_len >= 5) {
+		ret = tquic_apply_header_protection(conn, skb->data,
+						    skb->len,
+						    header_len - 4);
+		if (ret < 0) {
+			kfree_skb(skb);
+			return ret;
+		}
+	}
 
 	return tquic_output_packet(conn, path, skb);
 }
@@ -2261,66 +2281,91 @@ int tquic_flow_send_max_data(struct tquic_connection *conn,
 {
 	struct tquic_frame_ctx ctx;
 	struct sk_buff *skb;
-	u8 buf_stack[128];
+	u8 header_buf[128];
+	u8 *payload_buf;
+	int header_len, payload_len;
 	int ret;
 	u64 pkt_num;
+	bool key_phase = false;
 
 	pr_info("tquic: flow_send_max_data: max=%llu conn=%px is_server=%d\n",
 		max_data, conn, conn->is_server);
 
+	pkt_num = atomic64_inc_return(&conn->pkt_num_tx) - 1;
+
+	/*
+	 * Allocate skb with room for header + payload + AEAD tag (16 bytes).
+	 * Follow the tquic_assemble_packet pattern: reserve space so we can
+	 * push the header in front of the payload after encryption.
+	 */
+	skb = alloc_skb(MAX_HEADER + 128 + 128 + 16, GFP_ATOMIC);
+	if (!skb)
+		return -ENOMEM;
+
+	skb_reserve(skb, MAX_HEADER + 128);
+
+	/* Write frame directly into skb data area */
+	payload_buf = skb_put(skb, 128 + 16);
+
 	ctx.conn = conn;
 	ctx.path = path;
-	ctx.buf = buf_stack;
-	ctx.buf_len = sizeof(buf_stack);
+	ctx.buf = payload_buf;
+	ctx.buf_len = 128;
 	ctx.offset = 0;
 	ctx.ack_eliciting = true;
 
 	ret = tquic_gen_max_data_frame(&ctx, max_data);
-	if (ret < 0)
-		return ret;
-
-	pkt_num = atomic64_inc_return(&conn->pkt_num_tx) - 1;
-
-	skb = alloc_skb(ctx.offset + TQUIC_MAX_SHORT_HEADER_SIZE + MAX_HEADER,
-			GFP_ATOMIC);
-	if (!skb)
-		return -ENOMEM;
-
-	skb_reserve(skb, MAX_HEADER);
-
-	{
-		u8 header[TQUIC_MAX_SHORT_HEADER_SIZE];
-		bool key_phase = false;
-		int header_len;
-
-		if (conn->crypto_state) {
-			struct tquic_key_update_state *ku_state;
-
-			ku_state = tquic_crypto_get_key_update_state(
-					conn->crypto_state);
-			if (ku_state)
-				key_phase = tquic_key_update_get_phase(
-						ku_state) != 0;
-		}
-
-		header_len = tquic_build_short_header_internal(
-				conn, path, header,
-				TQUIC_MAX_SHORT_HEADER_SIZE,
-				pkt_num, 0, key_phase, false, NULL);
-		if (header_len > 0) {
-			if (skb_tailroom(skb) < header_len) {
-				kfree_skb(skb);
-				return -ENOSPC;
-			}
-			skb_put_data(skb, header, header_len);
-		}
-	}
-
-	if (skb_tailroom(skb) < ctx.offset) {
+	if (ret < 0) {
 		kfree_skb(skb);
-		return -ENOSPC;
+		return ret;
 	}
-	skb_put_data(skb, buf_stack, ctx.offset);
+
+	payload_len = ctx.offset;
+
+	/* Build short header (1-RTT) */
+	if (conn->crypto_state) {
+		struct tquic_key_update_state *ku_state;
+
+		ku_state = tquic_crypto_get_key_update_state(
+				conn->crypto_state);
+		if (ku_state)
+			key_phase = tquic_key_update_get_phase(
+					ku_state) != 0;
+	}
+
+	header_len = tquic_build_short_header_internal(
+			conn, path, header_buf, sizeof(header_buf),
+			pkt_num, 0, key_phase, false, conn->grease_state);
+	if (header_len < 0) {
+		kfree_skb(skb);
+		return header_len;
+	}
+
+	/* Encrypt payload in-place (header is AAD) */
+	ret = tquic_encrypt_payload(conn, header_buf, header_len,
+				    payload_buf, payload_len, pkt_num,
+				    3 /* short header = APPLICATION */);
+	if (ret < 0) {
+		kfree_skb(skb);
+		return ret;
+	}
+
+	/* Trim skb to actual encrypted size (payload + 16 byte AEAD tag) */
+	skb_trim(skb, payload_len + 16);
+
+	/* Push header in front of encrypted payload */
+	memcpy(skb_push(skb, header_len), header_buf, header_len);
+
+	/* Apply header protection (pn_offset = header_len - 4) */
+	if (header_len >= 5) {
+		ret = tquic_apply_header_protection(conn, skb->data,
+						    skb->len,
+						    header_len - 4);
+		if (ret < 0) {
+			kfree_skb(skb);
+			return ret;
+		}
+	}
 
 	return tquic_output_packet(conn, path, skb);
 }
@@ -2343,66 +2388,90 @@ int tquic_flow_send_max_stream_data(struct tquic_connection *conn,
 {
 	struct tquic_frame_ctx ctx;
 	struct sk_buff *skb;
-	u8 buf_stack[128];
+	u8 header_buf[128];
+	u8 *payload_buf;
+	int header_len, payload_len;
 	int ret;
 	u64 pkt_num;
+	bool key_phase = false;
 
 	pr_info("tquic: flow_send_max_stream_data: stream=%llu max=%llu conn=%px is_server=%d\n",
 		stream_id, max_data, conn, conn->is_server);
 
+	pkt_num = atomic64_inc_return(&conn->pkt_num_tx) - 1;
+
+	/*
+	 * Allocate skb following tquic_assemble_packet pattern:
+	 * reserve headroom so the header can be pushed after encryption.
+	 */
+	skb = alloc_skb(MAX_HEADER + 128 + 128 + 16, GFP_ATOMIC);
+	if (!skb)
+		return -ENOMEM;
+
+	skb_reserve(skb, MAX_HEADER + 128);
+
+	/* Write frame directly into skb data area */
+	payload_buf = skb_put(skb, 128 + 16);
+
 	ctx.conn = conn;
 	ctx.path = path;
-	ctx.buf = buf_stack;
-	ctx.buf_len = sizeof(buf_stack);
+	ctx.buf = payload_buf;
+	ctx.buf_len = 128;
 	ctx.offset = 0;
 	ctx.ack_eliciting = true;
 
 	ret = tquic_gen_max_stream_data_frame(&ctx, stream_id, max_data);
-	if (ret < 0)
-		return ret;
-
-	pkt_num = atomic64_inc_return(&conn->pkt_num_tx) - 1;
-
-	skb = alloc_skb(ctx.offset + TQUIC_MAX_SHORT_HEADER_SIZE + MAX_HEADER,
-			GFP_ATOMIC);
-	if (!skb)
-		return -ENOMEM;
-
-	skb_reserve(skb, MAX_HEADER);
-
-	{
-		u8 header[TQUIC_MAX_SHORT_HEADER_SIZE];
-		bool key_phase = false;
-		int header_len;
-
-		if (conn->crypto_state) {
-			struct tquic_key_update_state *ku_state;
-
-			ku_state = tquic_crypto_get_key_update_state(
-					conn->crypto_state);
-			if (ku_state)
-				key_phase = tquic_key_update_get_phase(
-						ku_state) != 0;
-		}
-
-		header_len = tquic_build_short_header_internal(
-				conn, path, header,
-				TQUIC_MAX_SHORT_HEADER_SIZE,
-				pkt_num, 0, key_phase, false, NULL);
-		if (header_len > 0) {
-			if (skb_tailroom(skb) < header_len) {
-				kfree_skb(skb);
-				return -ENOSPC;
-			}
-			skb_put_data(skb, header, header_len);
-		}
-	}
-
-	if (skb_tailroom(skb) < ctx.offset) {
+	if (ret < 0) {
 		kfree_skb(skb);
-		return -ENOSPC;
+		return ret;
 	}
-	skb_put_data(skb, buf_stack, ctx.offset);
+
+	payload_len = ctx.offset;
+
+	/* Build short header (1-RTT) */
+	if (conn->crypto_state) {
+		struct tquic_key_update_state *ku_state;
+
+		ku_state = tquic_crypto_get_key_update_state(
+				conn->crypto_state);
+		if (ku_state)
+			key_phase = tquic_key_update_get_phase(
+					ku_state) != 0;
+	}
+
+	header_len = tquic_build_short_header_internal(
+			conn, path, header_buf, sizeof(header_buf),
+			pkt_num, 0, key_phase, false, conn->grease_state);
+	if (header_len < 0) {
+		kfree_skb(skb);
+		return header_len;
+	}
+
+	/* Encrypt payload in-place (header is AAD) */
+	ret = tquic_encrypt_payload(conn, header_buf, header_len,
+				    payload_buf, payload_len, pkt_num,
+				    3 /* short header = APPLICATION */);
+	if (ret < 0) {
+		kfree_skb(skb);
+		return ret;
+	}
+
+	/* Trim skb to actual encrypted size (payload + 16 byte AEAD tag) */
+	skb_trim(skb, payload_len + 16);
+
+	/* Push header in front of encrypted payload */
+	memcpy(skb_push(skb, header_len), header_buf, header_len);
+
+	/* Apply header protection (pn_offset = header_len - 4) */
+	if (header_len >= 5) {
+		ret = tquic_apply_header_protection(conn, skb->data,
+						    skb->len,
+						    header_len - 4);
+		if (ret < 0) {
+			kfree_skb(skb);
+			return ret;
+		}
+	}
 
 	return tquic_output_packet(conn, path, skb);
 }
