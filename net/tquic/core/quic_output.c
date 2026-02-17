@@ -687,12 +687,16 @@ static void tquic_cc_on_packet_sent(struct tquic_path *path, u32 bytes)
 static u64 tquic_cc_pacing_delay(struct tquic_path *path, u32 bytes)
 {
 	u64 rate = tquic_cong_get_pacing_rate(path);
+	u64 delay_ns;
 
 	if (rate == 0)
 		return 0;
 
 	/* delay_ns = bytes * NSEC_PER_SEC / pacing_rate */
-	return div64_u64((u64)bytes * NSEC_PER_SEC, rate);
+	delay_ns = div64_u64((u64)bytes * NSEC_PER_SEC, rate);
+	tquic_dbg("pacing: delay=%llu ns for %u bytes at rate %llu B/s\n",
+		  delay_ns, bytes, rate);
+	return delay_ns;
 }
 
 /*
@@ -826,6 +830,8 @@ static ktime_t tquic_pacing_delay(struct tquic_connection *conn, u32 bytes)
 /* Check if we should send now or wait for pacing */
 static bool tquic_pacing_allow(struct tquic_connection *conn)
 {
+	bool allowed;
+
 	/* Pacing disabled at socket level - allow immediately */
 	if (!conn->tsk || !conn->tsk->pacing_enabled)
 		return true;
@@ -835,7 +841,9 @@ static bool tquic_pacing_allow(struct tquic_connection *conn)
 		return true;
 
 	/* Check the hrtimer-based pacing gate */
-	return tquic_timer_can_send_paced(conn->timer_state);
+	allowed = tquic_timer_can_send_paced(conn->timer_state);
+	tquic_dbg("pacing: allow=%d (hrtimer gate check)\n", allowed);
+	return allowed;
 }
 
 /*
@@ -849,12 +857,16 @@ static int tquic_pacing_queue_packet(struct tquic_connection *conn,
 {
 	/* Limit pacing queue to prevent memory exhaustion */
 	if (skb_queue_len(&conn->pacing_queue) >= TQUIC_MAX_PENDING_FRAMES) {
+		tquic_dbg("pacing: queue full (%d), dropping skb len=%u\n",
+			  TQUIC_MAX_PENDING_FRAMES, skb->len);
 		kfree_skb(skb);
 		return -ENOBUFS;
 	}
 
 	/* Queue for pacing-delayed transmission */
 	skb_queue_tail(&conn->pacing_queue, skb);
+	tquic_dbg("pacing: queued skb len=%u, queue_depth=%d\n",
+		  skb->len, skb_queue_len(&conn->pacing_queue));
 
 	/*
 	 * Schedule the pacing timer to drain this queue.

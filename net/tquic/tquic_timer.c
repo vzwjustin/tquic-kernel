@@ -1639,17 +1639,27 @@ static void tquic_timer_work_fn(struct work_struct *work)
 	/* Handle pacing - drain pacing queue and re-trigger tx_work */
 	if (test_bit(TQUIC_TIMER_PACING_BIT, &pending)) {
 		struct sk_buff *pacing_skb;
+		int drained = 0;
+
+		tquic_dbg("timer:pacing: fired, queue_depth=%d\n",
+			  skb_queue_len(&conn->pacing_queue));
 
 		/* Drain any packets queued by tquic_pacing_queue_packet() */
-		while ((pacing_skb = skb_dequeue(&conn->pacing_queue)) != NULL)
+		while ((pacing_skb = skb_dequeue(&conn->pacing_queue)) != NULL) {
 			tquic_output(conn, pacing_skb);
+			drained++;
+		}
+
+		tquic_dbg("timer:pacing: drained %d queued packets\n", drained);
 
 		/*
 		 * Re-schedule tx_work to build and send new packets.
 		 * The pacing gate is now open since the hrtimer just fired.
 		 */
-		if (!work_pending(&conn->tx_work))
+		if (!work_pending(&conn->tx_work)) {
+			tquic_dbg("timer:pacing: re-scheduling tx_work\n");
 			schedule_work(&conn->tx_work);
+		}
 	}
 
 	tquic_dbg("timer:work_fn: completed, pending_mask=0x%lx\n", pending);

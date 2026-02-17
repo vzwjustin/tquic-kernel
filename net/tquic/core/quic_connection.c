@@ -577,6 +577,7 @@ static void tquic_conn_tx_work(struct work_struct *work)
 	pacing_enabled = conn->timer_state &&
 			 conn->tsk && conn->tsk->pacing_enabled &&
 			 tquic_net_get_pacing_enabled(sock_net(conn->sk));
+	tquic_dbg("tx_work: pacing_enabled=%d\n", pacing_enabled);
 
 	/*
 	 * Loop until we've drained all sendable packets or hit a limit.
@@ -606,6 +607,7 @@ static void tquic_conn_tx_work(struct work_struct *work)
 			if (pacing_enabled &&
 			    i == TQUIC_PN_SPACE_APPLICATION &&
 			    !tquic_timer_can_send_paced(conn->timer_state)) {
+				tquic_dbg("tx_work: pacing gate closed, deferring app data\n");
 				pacing_blocked = true;
 				continue;
 			}
@@ -643,6 +645,8 @@ static void tquic_conn_tx_work(struct work_struct *work)
 			    i == TQUIC_PN_SPACE_APPLICATION) {
 				u64 rate = tquic_cong_get_pacing_rate(path);
 
+				tquic_dbg("tx_work: pacing send pkt_len=%u rate=%llu B/s\n",
+					  pkt_len, rate);
 				tquic_timer_set_pacing_rate(conn->timer_state,
 							    rate);
 				tquic_timer_schedule_pacing(conn->timer_state,
@@ -659,6 +663,8 @@ static void tquic_conn_tx_work(struct work_struct *work)
 		 * when the send time arrives.
 		 */
 		if (pacing_blocked) {
+			tquic_dbg("tx_work: pacing blocked, sent=%d, waiting for hrtimer\n",
+				  total_sent);
 			more_work = false;
 			break;
 		}
