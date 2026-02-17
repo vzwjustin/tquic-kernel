@@ -943,7 +943,8 @@ struct tquic_transport_params {
  * @max_data_local: Local max data limit
  * @max_data_remote: Remote max data limit
  * @data_sent: Total data sent
- * @data_received: Total data received
+ * @data_received: Total data received (wire-level)
+ * @data_consumed: Total data consumed by application (for window updates)
  * @stats: Connection statistics
  * @idle_timeout: Idle timeout in ms
  * @timer_state: Unified timer and recovery state (idle, ack, loss, PTO)
@@ -1054,6 +1055,7 @@ struct tquic_connection {
 	u64 max_data_remote;
 	u64 data_sent;
 	u64 data_received;
+	u64 data_consumed;		/* App-read bytes (for window updates) */
 	/*
 	 * Connection-level flow control reservation for queued (not yet sent)
 	 * STREAM data. This is used to provide backpressure in send paths without

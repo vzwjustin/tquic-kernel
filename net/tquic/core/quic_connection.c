@@ -407,6 +407,7 @@ static void tquic_conn_init_flow_control(struct tquic_connection *conn)
 	conn->max_data_remote = 0;
 	conn->data_sent = 0;
 	conn->data_received = 0;
+	conn->data_consumed = 0;
 }
 
 static void tquic_timer_loss_cb(struct timer_list *t)
@@ -539,18 +540,31 @@ static void tquic_conn_tx_work(struct work_struct *work)
 		container_of(work, struct tquic_connection, tx_work);
 	struct sk_buff *skb;
 	int i;
+	int ctrl_pending = skb_queue_len(&conn->control_frames);
+
+	if (ctrl_pending)
+		pr_info("tquic: tx_work: conn=%px is_server=%d ctrl_frames=%d\n",
+			conn, conn->is_server, ctrl_pending);
 
 	for (i = TQUIC_PN_SPACE_APPLICATION; i >= TQUIC_PN_SPACE_INITIAL; i--) {
 		struct tquic_pn_space *pn_space = &conn->pn_spaces[i];
 
-		if (!pn_space->keys_available || pn_space->keys_discarded)
+		if (!pn_space->keys_available || pn_space->keys_discarded) {
+			if (ctrl_pending)
+				pr_info("tquic: tx_work: skip space %d keys_avail=%d keys_disc=%d\n",
+					i, pn_space->keys_available, pn_space->keys_discarded);
 			continue;
+		}
 
 		skb = tquic_packet_build(conn, i);
 		if (skb) {
 			struct tquic_path *path =
 				tquic_conn_active_path_get(conn);
 			int ret = tquic_udp_send(conn->tsk, skb, path);
+
+			if (ctrl_pending)
+				pr_info("tquic: tx_work: sent pkt space=%d len=%d ret=%d\n",
+					i, skb->len, ret);
 
 			if (ret < 0)
 				tquic_conn_err(
@@ -694,6 +708,7 @@ struct tquic_connection *tquic_conn_create(struct tquic_sock *tsk,
 
 	/* Initialize pending frame queues */
 	skb_queue_head_init(&conn->pending_frames);
+	skb_queue_head_init(&conn->control_frames);
 	for (i = 0; i < TQUIC_PN_SPACE_COUNT; i++)
 		skb_queue_head_init(&conn->crypto_buffer[i]);
 
@@ -888,8 +903,9 @@ void tquic_conn_destroy(struct tquic_connection *conn)
 	if (conn->zc_state)
 		tquic_zc_state_free(conn);
 
-	/* Free pending frames, pacing queue, and early data buffer */
+	/* Free pending frames, control frames, pacing queue, and early data buffer */
 	skb_queue_purge(&conn->pending_frames);
+	skb_queue_purge(&conn->control_frames);
 	skb_queue_purge(&conn->pacing_queue);
 	skb_queue_purge(&conn->early_data_buffer);
 	for (i = 0; i < TQUIC_PN_SPACE_COUNT; i++)

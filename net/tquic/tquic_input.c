@@ -489,15 +489,22 @@ static int tquic_decrypt_payload(struct tquic_connection *conn,
 {
 	if (conn->crypto_state) {
 		int enc_level = tquic_pkt_type_to_enc_level(pkt_type);
+		int dec_ret;
 
-		return tquic_decrypt_packet(conn->crypto_state,
+		dec_ret = tquic_decrypt_packet(conn->crypto_state,
 					    enc_level,
 					    header, header_len,
 					    payload, payload_len,
 					    pkt_num, out, out_len);
+		if (dec_ret < 0)
+			pr_info("tquic: decrypt FAILED ret=%d pkt_type=%d enc_level=%d is_server=%d\n",
+				dec_ret, pkt_type, enc_level, conn->is_server);
+		return dec_ret;
 	}
 
 	/* No crypto state - cannot process packet */
+	pr_info("tquic: decrypt NO crypto_state! pkt_type=%d is_server=%d\n",
+		pkt_type, conn->is_server);
 	return -ENOKEY;
 }
 
@@ -1226,6 +1233,12 @@ static int tquic_process_ack_frame(struct tquic_rx_ctx *ctx)
 
 				/* Update RTT in CC algorithm */
 				tquic_cong_on_rtt(ctx->path, rtt_us);
+
+				/*
+				 * ACK opened cwnd - resume sending any
+				 * pending stream data that was blocked.
+				 */
+				tquic_output_flush(ctx->conn);
 			}
 		}
 
@@ -1386,6 +1399,9 @@ static int tquic_process_stream_frame(struct tquic_rx_ctx *ctx)
 
 	pr_debug("tquic: process_stream: id=%llu offset=%llu fin=%d\n",
 		 stream_id, offset, fin);
+	pr_info("tquic: STREAM frame: id=%llu off=%llu len=%s fin=%d conn=%px is_server=%d\n",
+		stream_id, offset, has_length ? "pending" : "rest",
+		fin, ctx->conn, ctx->conn->is_server);
 
 	/* Length (optional) */
 	if (has_length) {
@@ -1537,6 +1553,41 @@ static int tquic_process_stream_frame(struct tquic_rx_ctx *ctx)
 		return -EDQUOT;
 	}
 
+	/*
+	 * Dedup check: skip data already received to prevent a malicious
+	 * peer from exhausting flow control by replaying STREAM frames.
+	 * recv_offset tracks the highest contiguous byte offset received.
+	 *
+	 * This MUST come after tquic_flow_check_recv_limits() so that
+	 * flow control *limit violations* are still detected on the
+	 * original offset+length, while flow control *accounting* below
+	 * only charges genuinely new bytes.
+	 */
+	if (length > 0 && offset + length <= stream->recv_offset) {
+		/* Fully duplicate -- ACK but do not charge FC or alloc */
+		pr_debug("tquic: stream %llu: dup data off=%llu len=%llu recv_offset=%llu\n",
+			 stream_id, offset, length, stream->recv_offset);
+		ctx->offset += length;
+		ctx->ack_eliciting = true;
+		tquic_stream_put(stream);
+		return 0;
+	}
+
+	if (offset < stream->recv_offset) {
+		/*
+		 * Partial overlap: trim the already-received prefix.
+		 * offset+length is preserved so recv_offset/final_size
+		 * updates downstream remain correct.
+		 */
+		u64 trim = stream->recv_offset - offset;
+
+		pr_debug("tquic: stream %llu: partial dup trim %llu bytes (off %llu->%llu)\n",
+			 stream_id, trim, offset, stream->recv_offset);
+		ctx->offset += trim;
+		length -= trim;
+		offset = stream->recv_offset;
+	}
+
 	/* Copy data to stream receive buffer */
 	data_skb = alloc_skb(length, GFP_ATOMIC);
 	if (!data_skb) {
@@ -1569,6 +1620,8 @@ static int tquic_process_stream_frame(struct tquic_rx_ctx *ctx)
 	}
 
 	skb_queue_tail(&stream->recv_buf, data_skb);
+	pr_info("tquic: stream %llu: enqueued %llu bytes at off=%llu conn=%px\n",
+		stream_id, length, offset, ctx->conn);
 	pr_debug("tquic: stream %llu: enqueued %llu bytes\n",
 		 stream_id, length);
 
@@ -1669,6 +1722,9 @@ static int tquic_process_max_stream_data_frame(struct tquic_rx_ctx *ctx)
 	tquic_dbg("process_max_stream_data: stream=%llu limit=%llu\n",
 		  stream_id, max_data);
 
+	pr_info("tquic: RX MAX_STREAM_DATA: stream=%llu limit=%llu conn=%px is_server=%d\n",
+		stream_id, max_data, ctx->conn, ctx->conn->is_server);
+
 	/* Look up stream and update its send-side flow control limit */
 	spin_lock_bh(&ctx->conn->lock);
 	{
@@ -1686,6 +1742,8 @@ static int tquic_process_max_stream_data_frame(struct tquic_rx_ctx *ctx)
 			} else {
 				/* Only increase, never decrease (RFC 9000) */
 				if (max_data > s->max_send_data) {
+					pr_info("tquic: MAX_STREAM_DATA: stream %llu limit %llu->%llu\n",
+						stream_id, s->max_send_data, max_data);
 					s->max_send_data = max_data;
 					s->blocked = false;
 					wake_up_interruptible(&s->wait);
@@ -1695,6 +1753,14 @@ static int tquic_process_max_stream_data_frame(struct tquic_rx_ctx *ctx)
 		}
 	}
 	spin_unlock_bh(&ctx->conn->lock);
+
+	/*
+	 * Stream-level flow control opened - resume sending any pending
+	 * stream data that was blocked.  Without this, the server stalls
+	 * after the client sends MAX_STREAM_DATA because nothing triggers
+	 * tquic_output_flush() to drain the send buffer.
+	 */
+	tquic_output_flush(ctx->conn);
 
 	ctx->ack_eliciting = true;
 
@@ -3806,6 +3872,8 @@ static int tquic_process_packet(struct tquic_connection *conn,
 						     &hp_pn_len,
 						     &hp_key_phase);
 		if (unlikely(ret < 0)) {
+			pr_info("tquic: HP removal FAILED ret=%d pkt_type=%d is_server=%d\n",
+				ret, pkt_type, conn ? conn->is_server : -1);
 			pr_debug("process_pkt: HP removal failed: %d\n", ret);
 			if (path_looked_up)
 				tquic_path_put(path);
@@ -4413,12 +4481,12 @@ int tquic_udp_recv(struct sock *sk, struct sk_buff *skb)
 
 		if (dcid_len <= TQUIC_MAX_CID_LEN &&
 		    len > (size_t)6 + dcid_len) {
-			pr_debug("tquic_udp_recv: DCID lookup len=%u bytes=%*phN\n",
+			pr_info("tquic: udp_recv DCID lookup len=%u bytes=%*phN pkt_hdr=0x%02x\n",
 				dcid_len, min_t(u8, dcid_len, 8),
-				data + 6);
+				data + 6, data[0]);
 			conn = tquic_lookup_by_dcid(data + 6, dcid_len);
-			pr_debug("tquic_udp_recv: DCID lookup result conn=%p\n",
-				conn);
+			pr_info("tquic: udp_recv DCID result conn=%px is_server=%d\n",
+				conn, conn ? conn->is_server : -1);
 		}
 	} else if (!conn && !(data[0] & TQUIC_HEADER_FORM_LONG) &&
 		   len > 1 + TQUIC_DEFAULT_CID_LEN) {
@@ -4428,6 +4496,8 @@ int tquic_udp_recv(struct sock *sk, struct sk_buff *skb)
 		 * for our own CIDs) for the lookup.
 		 */
 		conn = tquic_lookup_by_dcid(data + 1, TQUIC_DEFAULT_CID_LEN);
+		pr_info("tquic: udp_recv short-hdr DCID result conn=%px is_server=%d\n",
+			conn, conn ? conn->is_server : -1);
 	}
 
 	/* Find the path for this connection based on source address */
@@ -4580,9 +4650,12 @@ not_reset:
 	}
 
 	/* Process the QUIC packet */
-	pr_debug("tquic_udp_recv: no Initial match, calling process_packet (conn=%p data[0]=0x%02x len=%zu)\n",
-		conn, data[0], len);
+	pr_info("tquic: udp_recv -> process_packet conn=%px data[0]=0x%02x len=%zu is_server=%d state=%d\n",
+		conn, data[0], len,
+		conn ? conn->is_server : -1,
+		conn ? READ_ONCE(conn->state) : -1);
 	ret = tquic_process_packet(conn, path, data, len, &src_addr);
+	pr_info("tquic: udp_recv <- process_packet ret=%d conn=%px\n", ret, conn);
 
 	/*
 	 * Per RFC 9000 Section 10.3:

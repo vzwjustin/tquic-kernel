@@ -1312,11 +1312,16 @@ struct sk_buff *tquic_packet_build(struct tquic_connection *conn, int pn_space)
 	space = &conn->pn_spaces[pn_space];
 	path = tquic_output_active_path_get(conn);
 
-	if (!path)
+	if (!path) {
+		pr_info("tquic: pkt_build: no path conn=%px space=%d\n",
+			conn, pn_space);
 		return NULL;
+	}
 
 	/* Check if keys are available and not discarded */
 	if (!space->keys_available || space->keys_discarded) {
+		pr_info("tquic: pkt_build: no keys conn=%px space=%d avail=%d disc=%d\n",
+			conn, pn_space, space->keys_available, space->keys_discarded);
 		tquic_path_put(path);
 		return NULL;
 	}
@@ -1585,6 +1590,8 @@ skip_ack:
 	 * (unless there was an ACK to send).
 	 */
 	if (payload_len == 0 && !need_ack) {
+		pr_info("tquic: pkt_build: EMPTY payload conn=%px space=%d ctrl_q=%d\n",
+			conn, pn_space, skb_queue_len(&conn->control_frames));
 		kfree(header);
 		kfree(payload);
 		tquic_path_put(path);

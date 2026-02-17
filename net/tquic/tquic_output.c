@@ -2265,6 +2265,9 @@ int tquic_flow_send_max_data(struct tquic_connection *conn,
 	int ret;
 	u64 pkt_num;
 
+	pr_info("tquic: flow_send_max_data: max=%llu conn=%px is_server=%d\n",
+		max_data, conn, conn->is_server);
+
 	ctx.conn = conn;
 	ctx.path = path;
 	ctx.buf = buf_stack;
@@ -2343,6 +2346,9 @@ int tquic_flow_send_max_stream_data(struct tquic_connection *conn,
 	u8 buf_stack[128];
 	int ret;
 	u64 pkt_num;
+
+	pr_info("tquic: flow_send_max_stream_data: stream=%llu max=%llu conn=%px is_server=%d\n",
+		stream_id, max_data, conn, conn->is_server);
 
 	ctx.conn = conn;
 	ctx.path = path;
@@ -2520,13 +2526,18 @@ int tquic_output_flush(struct tquic_connection *conn)
 	int packets_sent = 0;
 	int ret = 0;
 	bool cwnd_limited;
+	bool any_pending;
+	int iter_sent;
 	const unsigned long flush_bit = 0;
 
 	if (!conn)
 		return -EINVAL;
 
-	if (READ_ONCE(conn->state) != TQUIC_CONN_CONNECTED)
+	if (READ_ONCE(conn->state) != TQUIC_CONN_CONNECTED) {
+		pr_info("tquic: output_flush: conn=%px NOT connected (state=%d)\n",
+			conn, READ_ONCE(conn->state));
 		return -ENOTCONN;
+	}
 
 	/* Avoid concurrent flushers racing conn_credit / conn->data_sent. */
 	if (test_and_set_bit(flush_bit, &conn->output_flush_flags))
@@ -2561,190 +2572,241 @@ int tquic_output_flush(struct tquic_connection *conn)
 	}
 
 	/*
-	 * Take conn->lock once for both flow control check and stream
-	 * iteration (CF-178: avoid releasing and re-acquiring the lock
-	 * between the two critical sections).
+	 * Outer drain loop: keep sending until all stream send_bufs are
+	 * empty, or we're blocked by cwnd / connection flow control.
+	 * The inner loop sends up to 16 packets per iteration to avoid
+	 * holding conn->lock for too long.
 	 */
-	spin_lock_bh(&conn->lock);
+	do {
+		any_pending = false;
+		iter_sent = 0;
 
-	/* Check connection-level flow control credit */
-	if (conn->data_sent >= conn->max_data_remote) {
-		spin_unlock_bh(&conn->lock);
-		tquic_dbg("output_flush blocked by connection flow control\n");
-		ret = 0;
-		goto out_clear_flush;
-	}
-	conn_credit = conn->max_data_remote - conn->data_sent;
+		/*
+		 * Re-check congestion window each outer iteration.
+		 * ACK processing may have opened cwnd between iterations.
+		 */
+		if (path->stats.cwnd > 0) {
+			inflight = (path->stats.tx_bytes >
+				    path->stats.acked_bytes) ?
+				   path->stats.tx_bytes -
+				   path->stats.acked_bytes : 0;
+			cwnd_limited = (inflight >= path->stats.cwnd);
+		} else {
+			cwnd_limited = false;
+		}
 
-	/* Iterate over streams with pending data (lock already held). */
-	for (node = rb_first(&conn->streams); node && packets_sent < 16; node = rb_next(node)) {
-		struct tquic_stream *stream;
-		size_t chunk_size;
+		if (cwnd_limited)
+			break;
 
-		stream = rb_entry(node, struct tquic_stream, node);
+		/*
+		 * Take conn->lock once for both flow control check and
+		 * stream iteration (CF-178: avoid releasing and
+		 * re-acquiring the lock between the two critical
+		 * sections).
+		 */
+		spin_lock_bh(&conn->lock);
 
-		/* Skip streams with no pending data */
-		if (skb_queue_empty(&stream->send_buf))
-			continue;
-
-		/* Skip blocked streams */
-		if (stream->blocked)
-			continue;
-
-		/* Process pending data from this stream's send buffer */
-		while (!skb_queue_empty(&stream->send_buf) &&
-		       conn_credit > 0 &&
-		       packets_sent < 16) {
-			struct tquic_stream_skb_cb *cb;
-			u64 stream_offset;
-			u32 data_off;
-			u32 remaining;
-			u64 stream_credit;
-			bool is_last;
-
-			skb = skb_dequeue(&stream->send_buf);
-			if (!skb)
-				break;
-
-			cb = tquic_stream_skb_cb(skb);
-			stream_offset = cb->stream_offset;
-			data_off = cb->data_off;
-			if (unlikely(data_off > skb->len)) {
-				/* Corrupted bookkeeping: drop skb to avoid looping. */
-				kfree_skb(skb);
-				ret = -EINVAL;
-				break;
-			}
-			remaining = skb->len - data_off;
-			if (unlikely(stream_offset >= stream->max_send_data)) {
-				stream->blocked = true;
-				skb_queue_head(&stream->send_buf, skb);
-				break;
-			}
-			stream_credit = stream->max_send_data - stream_offset;
-
-			/* Determine chunk size respecting flow control */
-			chunk_size = remaining;
-			if (chunk_size > conn_credit)
-				chunk_size = conn_credit;
-			if (chunk_size > stream_credit)
-				chunk_size = stream_credit;
-			if (chunk_size > path->mtu - 100)
-				chunk_size = path->mtu - 100;
-
-			/* FIN only on the last byte of the last queued skb. */
-			is_last = skb_queue_empty(&stream->send_buf);
-
-			/* Allocate and set up pending frame */
-			frame = kmem_cache_zalloc(tquic_frame_cache, GFP_ATOMIC);
-			if (!frame) {
-				ret = -ENOMEM;
-				skb_queue_head(&stream->send_buf, skb);
-				break;
-			}
-
-			frame->type = TQUIC_FRAME_STREAM;
-			frame->stream_id = stream->id;
-			frame->offset = stream_offset;
-			frame->len = chunk_size;
-			frame->fin = stream->fin_sent &&
-				     (chunk_size == remaining) &&
-				     is_last;
-
-			/*
-			 * Zero-copy optimization: Reference skb data directly.
-			 * The skb remains valid until packet assembly completes
-			 * (happens synchronously before we free/consume the skb).
-			 */
-			frame->data = NULL;
-			frame->data_ref = NULL;
-			frame->skb = skb;
-			frame->skb_off = data_off;
-			frame->owns_data = false;
-
-			INIT_LIST_HEAD(&frame->list);
-			list_add_tail(&frame->list, &frames);
-
-			/* Get next packet number (lock-free) */
-			pkt_num = atomic64_inc_return(&conn->pkt_num_tx) - 1;
-
-			/* Release lock while sending (may sleep in crypto) */
+		/* Check connection-level flow control credit */
+		if (conn->data_sent >= conn->max_data_remote) {
 			spin_unlock_bh(&conn->lock);
+			tquic_dbg("output_flush blocked by connection flow control\n");
+			break;
+		}
+		conn_credit = conn->max_data_remote - conn->data_sent;
 
-			/* Assemble and send packet */
-			send_skb = tquic_assemble_packet(conn, path, -1, pkt_num, &frames);
-			if (send_skb) {
-				/*
-				 * Send via tquic_output_packet which handles:
-				 * - EDT timestamp for FQ qdisc pacing
-				 * - Internal pacing timer scheduling
-				 * - Packet tracking for retransmission
-				 *
-				 * Pacing is configured via sk->sk_pacing_rate
-				 * and handled by either FQ qdisc or EDT timestamps.
-				 */
-				ret = tquic_output_packet(conn, path, send_skb);
+		/* Iterate over streams with pending data (lock held). */
+		for (node = rb_first(&conn->streams);
+		     node && iter_sent < 16;
+		     node = rb_next(node)) {
+			struct tquic_stream *stream;
+			size_t chunk_size;
 
-				if (ret >= 0) {
-					packets_sent++;
-					tquic_dbg("output_flush sent pkt %llu stream %llu offset %llu len %zu\n",
-						 pkt_num, stream->id, stream_offset, chunk_size);
-				}
-			} else {
-				/* CF-615: Cleanup frame on assembly failure */
-				struct tquic_pending_frame *f, *tmp;
-				list_for_each_entry_safe(f, tmp, &frames, list) {
-					list_del_init(&f->list);
-					if (f->owns_data)
-						kfree(f->data);
-					kmem_cache_free(tquic_frame_cache, f);
-				}
-				ret = -ENOMEM;
-			}
+			stream = rb_entry(node, struct tquic_stream, node);
 
-			/* Re-acquire lock and update state */
-			spin_lock_bh(&conn->lock);
+			/* Skip streams with no pending data */
+			if (skb_queue_empty(&stream->send_buf))
+				continue;
 
-			if (ret >= 0 && send_skb) {
-				/* Update flow control accounting */
-				conn->data_sent += chunk_size;
-				if (conn->fc_data_reserved >= chunk_size)
-					conn->fc_data_reserved -= chunk_size;
-				else
-					conn->fc_data_reserved = 0;
-				conn_credit -= chunk_size;
+			/* Skip blocked streams */
+			if (stream->blocked)
+				continue;
 
-				if (chunk_size == remaining) {
-					/* Consumed entire skb - uncharge memory */
-					if (conn->sk) {
-						sk_mem_uncharge(conn->sk, skb->truesize);
-						/* sk_wmem_alloc handled by skb destructor */
-						if (sk_stream_wspace(conn->sk) > 0)
-							conn->sk->sk_write_space(conn->sk);
-					}
+			/* Process pending data from this stream's send buffer */
+			while (!skb_queue_empty(&stream->send_buf) &&
+			       conn_credit > 0 &&
+			       iter_sent < 16) {
+				struct tquic_stream_skb_cb *cb;
+				u64 stream_offset;
+				u32 data_off;
+				u32 remaining;
+				u64 stream_credit;
+				bool is_last;
+
+				skb = skb_dequeue(&stream->send_buf);
+				if (!skb)
+					break;
+
+				cb = tquic_stream_skb_cb(skb);
+				stream_offset = cb->stream_offset;
+				data_off = cb->data_off;
+				if (unlikely(data_off > skb->len)) {
+					/* Corrupted bookkeeping: drop skb to avoid looping. */
 					kfree_skb(skb);
+					ret = -EINVAL;
+					break;
+				}
+				remaining = skb->len - data_off;
+				if (unlikely(stream_offset >= stream->max_send_data)) {
+					stream->blocked = true;
+					skb_queue_head(&stream->send_buf, skb);
+					break;
+				}
+				stream_credit = stream->max_send_data - stream_offset;
+
+				/* Determine chunk size respecting flow control */
+				chunk_size = remaining;
+				if (chunk_size > conn_credit)
+					chunk_size = conn_credit;
+				if (chunk_size > stream_credit)
+					chunk_size = stream_credit;
+				if (chunk_size > path->mtu - 100)
+					chunk_size = path->mtu - 100;
+
+				/* FIN only on the last byte of the last queued skb. */
+				is_last = skb_queue_empty(&stream->send_buf);
+
+				/* Allocate and set up pending frame */
+				frame = kmem_cache_zalloc(tquic_frame_cache, GFP_ATOMIC);
+				if (!frame) {
+					ret = -ENOMEM;
+					skb_queue_head(&stream->send_buf, skb);
+					break;
+				}
+
+				frame->type = TQUIC_FRAME_STREAM;
+				frame->stream_id = stream->id;
+				frame->offset = stream_offset;
+				frame->len = chunk_size;
+				frame->fin = stream->fin_sent &&
+					     (chunk_size == remaining) &&
+					     is_last;
+
+				/*
+				 * Zero-copy optimization: Reference skb data directly.
+				 * The skb remains valid until packet assembly completes
+				 * (happens synchronously before we free/consume the skb).
+				 */
+				frame->data = NULL;
+				frame->data_ref = NULL;
+				frame->skb = skb;
+				frame->skb_off = data_off;
+				frame->owns_data = false;
+
+				INIT_LIST_HEAD(&frame->list);
+				list_add_tail(&frame->list, &frames);
+
+				/* Get next packet number (lock-free) */
+				pkt_num = atomic64_inc_return(&conn->pkt_num_tx) - 1;
+
+				/* Release lock while sending (may sleep in crypto) */
+				spin_unlock_bh(&conn->lock);
+
+				/* Assemble and send packet */
+				send_skb = tquic_assemble_packet(conn, path, -1, pkt_num, &frames);
+				if (send_skb) {
+					/*
+					 * Send via tquic_output_packet which handles:
+					 * - EDT timestamp for FQ qdisc pacing
+					 * - Internal pacing timer scheduling
+					 * - Packet tracking for retransmission
+					 *
+					 * Pacing is configured via sk->sk_pacing_rate
+					 * and handled by either FQ qdisc or EDT timestamps.
+					 */
+					ret = tquic_output_packet(conn, path, send_skb);
+
+					if (ret >= 0) {
+						packets_sent++;
+						iter_sent++;
+						tquic_dbg("output_flush sent pkt %llu stream %llu offset %llu len %zu\n",
+							 pkt_num, stream->id, stream_offset, chunk_size);
+					}
 				} else {
-					/* Partial consumption - advance cb offsets (works for non-linear). */
-					cb->stream_offset = stream_offset + chunk_size;
-					cb->data_off = data_off + chunk_size;
+					/* CF-615: Cleanup frame on assembly failure */
+					struct tquic_pending_frame *f, *tmp;
+					list_for_each_entry_safe(f, tmp, &frames, list) {
+						list_del_init(&f->list);
+						if (f->owns_data)
+							kfree(f->data);
+						kmem_cache_free(tquic_frame_cache, f);
+					}
+					ret = -ENOMEM;
+				}
+
+				/* Re-acquire lock and update state */
+				spin_lock_bh(&conn->lock);
+
+				if (ret >= 0 && send_skb) {
+					/* Update flow control accounting */
+					conn->data_sent += chunk_size;
+					if (conn->fc_data_reserved >= chunk_size)
+						conn->fc_data_reserved -= chunk_size;
+					else
+						conn->fc_data_reserved = 0;
+					conn_credit -= chunk_size;
+
+					if (chunk_size == remaining) {
+						/* Consumed entire skb - uncharge memory */
+						if (conn->sk) {
+							sk_mem_uncharge(conn->sk, skb->truesize);
+							/* sk_wmem_alloc handled by skb destructor */
+							if (sk_stream_wspace(conn->sk) > 0)
+								conn->sk->sk_write_space(conn->sk);
+						}
+						kfree_skb(skb);
+					} else {
+						/* Partial consumption - advance cb offsets (works for non-linear). */
+						cb->stream_offset = stream_offset + chunk_size;
+						cb->data_off = data_off + chunk_size;
+						skb_queue_head(&stream->send_buf, skb);
+					}
+				} else {
+					/* Failed to send: put skb back for retry. */
 					skb_queue_head(&stream->send_buf, skb);
 				}
-			} else {
-				/* Failed to send: put skb back for retry. */
-				skb_queue_head(&stream->send_buf, skb);
-			}
 
-			/* Clear frame list for next iteration */
-			INIT_LIST_HEAD(&frames);
+				/* Clear frame list for next iteration */
+				INIT_LIST_HEAD(&frames);
+
+				if (ret < 0)
+					break;
+			}
 
 			if (ret < 0)
 				break;
 		}
 
-		if (ret < 0)
-			break;
-	}
-	spin_unlock_bh(&conn->lock);
+		/*
+		 * Check if any stream still has pending data.
+		 * If so, and we sent packets this iteration, loop
+		 * again to drain remaining buffers.
+		 */
+		if (ret >= 0) {
+			for (node = rb_first(&conn->streams);
+			     node; node = rb_next(node)) {
+				struct tquic_stream *s;
+
+				s = rb_entry(node, struct tquic_stream, node);
+				if (!skb_queue_empty(&s->send_buf) &&
+				    !s->blocked) {
+					any_pending = true;
+					break;
+				}
+			}
+		}
+
+		spin_unlock_bh(&conn->lock);
+	} while (ret >= 0 && any_pending);
 
 	/*
 	 * If we transmitted any packets, the timer/recovery subsystem
@@ -2753,6 +2815,9 @@ int tquic_output_flush(struct tquic_connection *conn)
 	 */
 
 	ret = packets_sent > 0 ? packets_sent : ret;
+	if (packets_sent > 0)
+		pr_info("tquic: output_flush: conn=%px sent %d pkts is_server=%d\n",
+			conn, packets_sent, conn->is_server);
 out_clear_flush:
 	if (path)
 		tquic_path_put(path);

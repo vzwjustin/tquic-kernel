@@ -1248,11 +1248,11 @@ static int tquic_inline_hs_install_keys(struct sock *sk, int level)
 		conn->crypto_state = crypto;
 	}
 
-	pr_debug("install_keys: level=%d is_server=%d cs_len=%u ss_len=%u\n",
+	pr_info("tquic: install_keys: level=%d is_server=%d cs_len=%u ss_len=%u\n",
 		level, conn->is_server, cs_len, ss_len);
-	pr_debug("install_keys: client_secret=%*phN\n",
+	pr_info("tquic: install_keys: client_secret[0:16]=%*phN\n",
 		min_t(int, cs_len, 16), client_secret);
-	pr_debug("install_keys: server_secret=%*phN\n",
+	pr_info("tquic: install_keys: server_secret[0:16]=%*phN\n",
 		min_t(int, ss_len, 16), server_secret);
 
 	if (conn->is_server)
@@ -1493,6 +1493,7 @@ int tquic_inline_hs_recv_crypto(struct sock *sk, const u8 *data, u32 len,
 			return ret;
 		}
 
+		pr_info("tquic: SERVER PATH done: ClientHello processed, flight queued, app keys installed\n");
 		kfree(resp_buf);
 		tquic_conn_put(conn);
 		return 0;
@@ -1534,6 +1535,9 @@ int tquic_inline_hs_recv_crypto(struct sock *sk, const u8 *data, u32 len,
 	}
 
 	/* Both client and server: mark complete after all Finished processed */
+	pr_info("tquic: inline_hs_recv: is_complete=%d hs_complete=%d is_server=%d prev=%d new=%d\n",
+		tquic_hs_is_complete(ihs), conn->handshake_complete,
+		conn->is_server, prev_state, new_state);
 	if (tquic_hs_is_complete(ihs) && !conn->handshake_complete) {
 		if (!conn->is_server) {
 			/* Client: install app keys after server Finished */
@@ -1602,6 +1606,7 @@ int tquic_inline_hs_recv_crypto(struct sock *sk, const u8 *data, u32 len,
 			struct sock *listener_sk;
 			struct tquic_sock *listen_tsk;
 
+			pr_info("tquic: SERVER handshake complete! conn=%px\n", conn);
 			inet_sk_set_state(sk, TCP_ESTABLISHED);
 			conn->handshake_confirmed = true;
 
@@ -1617,6 +1622,9 @@ int tquic_inline_hs_recv_crypto(struct sock *sk, const u8 *data, u32 len,
 			 * accept() can return it to userspace.
 			 */
 			listener_sk = conn->sk;
+			pr_info("tquic: accept_queue: listener_sk=%px sk=%px listener_state=%d\n",
+				listener_sk, sk,
+				listener_sk ? listener_sk->sk_state : -1);
 			if (listener_sk && listener_sk != sk &&
 			    listener_sk->sk_state == TCP_LISTEN) {
 				listen_tsk = tquic_sk(listener_sk);
@@ -1628,7 +1636,11 @@ int tquic_inline_hs_recv_crypto(struct sock *sk, const u8 *data, u32 len,
 				spin_unlock_bh(&listener_sk->sk_lock.slock);
 
 				listener_sk->sk_data_ready(listener_sk);
-				pr_debug("inline_hs: server child queued for accept\n");
+				pr_info("tquic: server child QUEUED for accept!\n");
+			} else {
+				pr_info("tquic: accept_queue SKIP: listener=%px sk=%px state=%d\n",
+					listener_sk, sk,
+					listener_sk ? listener_sk->sk_state : -1);
 			}
 		}
 

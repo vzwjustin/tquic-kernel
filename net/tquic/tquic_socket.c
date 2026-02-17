@@ -33,6 +33,7 @@
 #include "tquic_debug.h"
 #include "cong/tquic_cong.h"
 #include "tquic_zerocopy.h"
+#include "core/flow_control.h"
 
 #ifdef CONFIG_TQUIC_QLOG
 #include <uapi/linux/tquic_qlog.h>
@@ -2735,6 +2736,8 @@ static size_t tquic_sendmsg_check_flow_control(struct tquic_connection *conn,
 	if (stream->send_offset >= stream->max_send_data) {
 		stream->blocked = true;
 		spin_unlock_bh(&conn->lock);
+		pr_info_ratelimited("tquic: sendmsg FC BLOCKED: stream %llu send_off=%llu max_send=%llu\n",
+			stream->id, stream->send_offset, stream->max_send_data);
 		return 0;
 	}
 	stream_limit = stream->max_send_data - stream->send_offset;
@@ -2744,6 +2747,8 @@ static size_t tquic_sendmsg_check_flow_control(struct tquic_connection *conn,
 	/* Connection-level flow control (sent + reserved queued data) */
 	if (conn->data_sent + conn->fc_data_reserved >= conn->max_data_remote) {
 		spin_unlock_bh(&conn->lock);
+		pr_info_ratelimited("tquic: sendmsg FC BLOCKED: conn data_sent=%llu reserved=%llu max_remote=%llu\n",
+			conn->data_sent, conn->fc_data_reserved, conn->max_data_remote);
 		return 0;
 	}
 	conn_limit = conn->max_data_remote -
@@ -2898,15 +2903,31 @@ int tquic_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 			goto out_put;
 		}
 
-		/* Charge socket memory for this buffer */
-		if (sk_wmem_schedule(sk, skb->truesize)) {
-			skb_set_owner_w(skb, sk);
-		} else {
-			kfree_skb(skb);
-			if (copied == 0)
-				copied = -ENOBUFS;
-			goto out_put;
+		/*
+		 * Charge socket memory for this buffer.
+		 *
+		 * If the write memory budget is exhausted (too much data queued
+		 * but not yet transmitted), flush pending data first and retry.
+		 * This prevents silent partial writes that the application
+		 * might not handle, and provides proper backpressure.
+		 */
+		if (!sk_wmem_schedule(sk, skb->truesize)) {
+			/*
+			 * Flush pending output - transmitting queued data
+			 * frees skbs and releases sk_wmem_alloc, making
+			 * room for new data.
+			 */
+			tquic_output_flush(conn);
+
+			/* Retry after flush */
+			if (!sk_wmem_schedule(sk, skb->truesize)) {
+				kfree_skb(skb);
+				if (copied == 0)
+					copied = -ENOBUFS;
+				goto out_put;
+			}
 		}
+		skb_set_owner_w(skb, sk);
 
 			/* Initialize skb->cb stream offset for output_flush and reserve FC. */
 			spin_lock_bh(&conn->lock);
@@ -3158,21 +3179,30 @@ int tquic_recvmsg(struct sock *sk, struct msghdr *msg, size_t len, int flags,
 		 * Walk the tree and adopt the first bidirectional stream
 		 * as the default so that recv() works on accepted sockets.
 		 */
+		pr_info("tquic: recvmsg: no default_stream, walking tree conn=%px sk=%px\n",
+			conn, sk);
 		spin_lock_bh(&conn->lock);
 		{
 			struct rb_node *node;
+			int count = 0;
 
 			for (node = rb_first(&conn->streams); node;
 			     node = rb_next(node)) {
 				struct tquic_stream *s;
 
 				s = rb_entry(node, struct tquic_stream, node);
+				pr_info("tquic: recvmsg: tree stream id=%llu refs=%d recv_buf_len=%d\n",
+					s->id, refcount_read(&s->refcount),
+					skb_queue_len(&s->recv_buf));
+				count++;
 				if ((s->id & 0x02) == 0 &&
 				    tquic_stream_get(s)) {
 					stream = s;
 					break;
 				}
 			}
+			if (!count)
+				pr_info("tquic: recvmsg: stream tree EMPTY conn=%px\n", conn);
 		}
 		spin_unlock_bh(&conn->lock);
 
@@ -3268,48 +3298,109 @@ int tquic_recvmsg(struct sock *sk, struct msghdr *msg, size_t len, int flags,
 	 */
 	if (copied > 0) {
 		struct tquic_path *upd_path;
-		u64 consumed, threshold, new_max;
-		bool send_conn_update = false;
-		bool send_stream_update = false;
-		u64 new_conn_max = 0;
-		u64 new_stream_max = 0;
 
-		spin_lock_bh(&conn->lock);
+		/*
+		 * Track consumption and update flow control windows.
+		 *
+		 * NOTE: conn->data_received is already incremented in
+		 * tquic_flow_control_on_data_recvd() when STREAM frames
+		 * arrive on the wire.  Do NOT increment it again here;
+		 * that was the double-counting bug.
+		 *
+		 * Instead, track application-level consumption so that
+		 * MAX_DATA / MAX_STREAM_DATA window updates are driven
+		 * by consumed (app-read) bytes per RFC 9000 Section 4.2.
+		 */
+		if (conn->fc && stream->fc) {
+			/*
+			 * Preferred path: use the proper flow control
+			 * subsystem which tracks data_consumed separately
+			 * and computes correct window updates.
+			 */
+			tquic_fc_on_stream_consumed(conn->fc, stream->fc,
+						    (u64)copied);
 
-		/* Connection-level MAX_DATA */
-		conn->data_received += copied;
-		consumed = conn->data_received;
-		threshold = conn->max_data_local / 2;
-		if (consumed > threshold && conn->max_data_local > 0) {
-			new_conn_max = consumed + conn->max_data_local;
-			conn->max_data_local = new_conn_max;
-			send_conn_update = true;
+			/* Send pending MAX_DATA if the fc layer flagged it */
+			if (tquic_fc_needs_max_data(conn->fc)) {
+				u64 new_conn_max;
+
+				new_conn_max = tquic_fc_get_max_data(conn->fc);
+				rcu_read_lock();
+				upd_path = rcu_dereference(conn->active_path);
+				if (upd_path)
+					tquic_flow_send_max_data(conn, upd_path,
+								 new_conn_max);
+				rcu_read_unlock();
+				tquic_fc_max_data_sent(conn->fc, new_conn_max);
+			}
+
+			/* Send pending MAX_STREAM_DATA */
+			if (tquic_fc_needs_max_stream_data(stream->fc)) {
+				u64 new_stream_max;
+
+				new_stream_max =
+					tquic_fc_get_max_stream_data(stream->fc);
+				rcu_read_lock();
+				upd_path = rcu_dereference(conn->active_path);
+				if (upd_path)
+					tquic_flow_send_max_stream_data(
+						conn, upd_path, stream->id,
+						new_stream_max);
+				rcu_read_unlock();
+				tquic_fc_max_stream_data_sent(stream->fc,
+							      new_stream_max);
+			}
+		} else {
+			/*
+			 * Legacy fallback: conn->fc not yet initialised.
+			 * Use conn->data_consumed for window calculations.
+			 */
+			u64 consumed, threshold;
+			bool send_conn_update = false;
+			bool send_stream_update = false;
+			u64 new_conn_max = 0;
+			u64 new_stream_max = 0;
+
+			spin_lock_bh(&conn->lock);
+
+			conn->data_consumed += copied;
+			consumed = conn->data_consumed;
+			threshold = conn->max_data_local / 2;
+			if (consumed > threshold &&
+			    conn->max_data_local > 0) {
+				new_conn_max = consumed +
+					       conn->max_data_local;
+				conn->max_data_local = new_conn_max;
+				send_conn_update = true;
+			}
+
+			stream->recv_consumed += copied;
+			consumed = stream->recv_consumed;
+			threshold = stream->max_recv_data / 2;
+			if (consumed > threshold &&
+			    stream->max_recv_data > 0) {
+				new_stream_max = consumed +
+						 stream->max_recv_data;
+				stream->max_recv_data = new_stream_max;
+				send_stream_update = true;
+			}
+
+			spin_unlock_bh(&conn->lock);
+
+			rcu_read_lock();
+			upd_path = rcu_dereference(conn->active_path);
+			if (upd_path) {
+				if (send_conn_update)
+					tquic_flow_send_max_data(
+						conn, upd_path,
+						new_conn_max);
+				if (send_stream_update)
+					tquic_flow_send_max_stream_data(
+						conn, upd_path, stream->id,
+						new_stream_max);
+			}
+			rcu_read_unlock();
 		}
-
-		/* Stream-level MAX_STREAM_DATA */
-		stream->recv_consumed += copied;
-		consumed = stream->recv_consumed;
-		threshold = stream->max_recv_data / 2;
-		if (consumed > threshold && stream->max_recv_data > 0) {
-			new_stream_max = consumed + stream->max_recv_data;
-			stream->max_recv_data = new_stream_max;
-			send_stream_update = true;
-		}
-
-		spin_unlock_bh(&conn->lock);
-
-		rcu_read_lock();
-		upd_path = rcu_dereference(conn->active_path);
-		if (upd_path) {
-			if (send_conn_update)
-				tquic_flow_send_max_data(conn, upd_path,
-							 new_conn_max);
-			if (send_stream_update)
-				tquic_flow_send_max_stream_data(conn, upd_path,
-								stream->id,
-								new_stream_max);
-		}
-		rcu_read_unlock();
 	}
 
 out_release:

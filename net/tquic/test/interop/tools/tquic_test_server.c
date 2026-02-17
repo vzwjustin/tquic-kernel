@@ -464,7 +464,7 @@ static int handle_connection(int client_fd, struct server_config *config)
                 /* Serve file if serve_dir is set */
                 if (config->serve_dir) {
                     char filepath[512];
-                    snprintf(filepath, sizeof(filepath), "%s%s",
+                    snprintf(filepath, sizeof(filepath), "%s/%s",
                              config->serve_dir, path);
 
                     int file_fd = open(filepath, O_RDONLY);
@@ -482,9 +482,35 @@ static int handle_connection(int client_fd, struct server_config *config)
                         send(client_fd, header, header_len, 0);
 
                         while ((bytes = read(file_fd, buffer, sizeof(buffer))) > 0) {
-                            send(client_fd, buffer, bytes, 0);
+                            ssize_t sent = 0;
+                            while (sent < bytes) {
+                                ssize_t n = send(client_fd,
+                                                 buffer + sent,
+                                                 bytes - sent, 0);
+                                if (n < 0) {
+                                    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                                        usleep(1000);
+                                        continue;
+                                    }
+                                    LOG_ERROR("send error: %s", strerror(errno));
+                                    goto done_file;
+                                }
+                                sent += n;
+                            }
                         }
+                        done_file:
                         close(file_fd);
+
+                        /*
+                         * Allow kernel to drain the send buffer
+                         * via ACK-triggered output_flush before
+                         * closing the QUIC socket (which sends
+                         * CONNECTION_CLOSE and prevents further TX).
+                         *
+                         * On loopback, 500ms is sufficient for
+                         * several MB of data to drain.
+                         */
+                        usleep(500000);
                     } else {
                         const char *not_found =
                             "HTTP/1.0 404 Not Found\r\n"

@@ -166,6 +166,7 @@ void tquic_flow_control_init(struct tquic_connection *conn)
 	conn->max_data_remote = 0;  /* Set when received from peer */
 	conn->data_sent = 0;
 	conn->data_received = 0;
+	conn->data_consumed = 0;
 }
 
 /**
@@ -296,22 +297,38 @@ static void tquic_flow_control_update_max_data_internal(struct tquic_connection 
 {
 	struct sk_buff *skb;
 	u64 new_max_data;
+	u64 consumed;
 
 	spin_lock_bh(&conn->lock);
 
 	/*
-	 * Calculate new max_data. We extend the window beyond what
-	 * has been received to allow the peer to send more data.
+	 * RFC 9000 Section 4.2: The receive window should reopen based
+	 * on consumed (application-read) bytes, not just received bytes.
+	 * Use the proper fc subsystem when available, otherwise use the
+	 * legacy data_consumed counter.
 	 */
-	new_max_data = conn->data_received +
-		       2 * (conn->max_data_local - conn->data_received);
+	if (conn->fc) {
+		spin_lock_bh(&conn->fc->conn.lock);
+		consumed = conn->fc->conn.data_consumed;
+		spin_unlock_bh(&conn->fc->conn.lock);
+	} else {
+		consumed = conn->data_consumed;
+	}
+
+	/*
+	 * Calculate new max_data. Extend the window beyond what
+	 * has been consumed to allow the peer to send more data.
+	 */
+	new_max_data = consumed +
+		       2 * (conn->max_data_local - consumed);
 
 	/* Apply auto-tuning: gradually increase window size */
 	if (new_max_data < TQUIC_FC_MAX_WINDOW) {
-		u64 current_window = conn->max_data_local - conn->data_received;
-		u64 new_window = min_t(u64, current_window * TQUIC_FC_AUTOTUNE_MULTIPLIER,
+		u64 current_window = conn->max_data_local - consumed;
+		u64 new_window = min_t(u64,
+				       current_window * TQUIC_FC_AUTOTUNE_MULTIPLIER,
 				       TQUIC_FC_MAX_WINDOW);
-		new_max_data = conn->data_received + new_window;
+		new_max_data = consumed + new_window;
 	}
 
 	/* Only send update if we're actually increasing the limit */
@@ -625,9 +642,14 @@ static void tquic_stream_flow_control_update_max_stream_data(struct tquic_stream
 
 	/* Only update if increasing the limit */
 	if (new_max_stream_data <= stream->max_recv_data) {
+		pr_info("tquic: FC: skip MAX_STREAM_DATA id=%llu new=%llu <= cur=%llu\n",
+			stream->id, new_max_stream_data, stream->max_recv_data);
 		return;
 	}
 
+	pr_info("tquic: FC: sending MAX_STREAM_DATA id=%llu new_max=%llu (was %llu) conn=%px\n",
+		stream->id, new_max_stream_data, stream->max_recv_data,
+		stream->conn);
 	stream->max_recv_data = new_max_stream_data;
 
 	/* Create and queue MAX_STREAM_DATA frame */

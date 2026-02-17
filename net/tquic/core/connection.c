@@ -429,6 +429,20 @@ int tquic_conn_set_state(struct tquic_connection *conn,
 		if (cs)
 			cs->handshake_confirmed = true;
 		conn->stats.established_time = ktime_get();
+
+		/*
+		 * Mark APPLICATION PN space keys as available so that
+		 * tx_work -> tquic_packet_build can send control frames
+		 * (MAX_STREAM_DATA, MAX_DATA, etc.) in 1-RTT packets.
+		 * The crypto_state already has APPLICATION keys installed
+		 * by this point; this flag was only being set for INITIAL.
+		 */
+		if (conn->pn_spaces) {
+			conn->pn_spaces[TQUIC_PN_SPACE_APPLICATION].keys_available = 1;
+			pr_info("tquic: CONNECTED: set APPLICATION keys_available=1 conn=%px is_server=%d\n",
+				conn, conn->is_server);
+		}
+
 		if (conn->scheduler)
 			tquic_conn_info(conn, "established, bonding active\n");
 		break;

@@ -700,13 +700,13 @@ int tquic_decrypt_packet(struct tquic_crypto_state *crypto,
 	if (payload_len < 16)
 		return -EINVAL;  /* Too short for auth tag */
 
-	pr_debug("tquic_decrypt: level=%d pkt_num=%llu hdr_len=%zu "
+	pr_info("tquic: decrypt: level=%d pkt_num=%llu hdr_len=%zu "
 		"pay_len=%zu key=%*phN iv=%*phN\n",
 		enc_level, pkt_num, header_len, payload_len,
 		min_t(int, keys->key_len, 8), keys->key,
 		min_t(int, keys->iv_len, 8), keys->iv);
 	if (header_len >= 6)
-		pr_debug("tquic_decrypt: hdr[0..5]=%*phN\n",
+		pr_info("tquic: decrypt: hdr[0..5]=%*phN\n",
 			min_t(int, header_len, 6), header);
 
 	/* Re-key AEAD RX for this level's key material */

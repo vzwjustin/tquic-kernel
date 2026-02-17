@@ -1039,6 +1039,11 @@ static int tquic_hs_derive_handshake_secrets(struct tquic_handshake *hs)
 	if (ret)
 		goto out_zeroize;
 
+	pr_info("tquic: derive_hs_secrets: is_server=%d transcript_hash[0:16]=%*phN\n",
+		hs->is_server, min_t(int, hash_len, 16), transcript_hash);
+	pr_info("tquic: derive_hs_secrets: handshake_secret[0:16]=%*phN\n",
+		min_t(int, hash_len, 16), hs->handshake_secret);
+
 	/* client_handshake_traffic_secret */
 	ret = tquic_hs_derive_secret(hs, hs->handshake_secret,
 				     "c hs traffic", transcript_hash, hash_len,
