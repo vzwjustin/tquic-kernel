@@ -3242,7 +3242,7 @@ int tquic_recvmsg(struct sock *sk, struct msghdr *msg, size_t len, int flags,
 
 		add_wait_queue(sk_sleep(sk), &wait);
 		while (!stream) {
-			if (READ_ONCE(conn->state) != TQUIC_CONN_CONNECTED)
+			if (READ_ONCE(conn->state) == TQUIC_CONN_CLOSED)
 				break;
 			if (signal_pending(current))
 				break;
@@ -3294,8 +3294,12 @@ int tquic_recvmsg(struct sock *sk, struct msghdr *msg, size_t len, int flags,
 	 * Wait for data if the stream buffer is empty.
 	 *
 	 * For blocking sockets, sleep until data arrives, the stream
-	 * receives FIN, or the connection closes.  For non-blocking
-	 * sockets, return -EAGAIN immediately.
+	 * receives FIN, or the connection is fully CLOSED.
+	 *
+	 * Allow reads during CLOSING and DRAINING states — data that
+	 * was in transit can still arrive and should be delivered to the
+	 * application.  Only stop when the connection is CLOSED (no
+	 * more data possible) or when FIN is received on the stream.
 	 */
 	while (skb_queue_empty(&stream->recv_buf)) {
 		if (stream->fin_received) {
@@ -3303,7 +3307,7 @@ int tquic_recvmsg(struct sock *sk, struct msghdr *msg, size_t len, int flags,
 			copied = 0;
 			goto out_release;
 		}
-		if (READ_ONCE(conn->state) != TQUIC_CONN_CONNECTED) {
+		if (READ_ONCE(conn->state) == TQUIC_CONN_CLOSED) {
 			copied = 0;
 			goto out_release;
 		}
@@ -3316,8 +3320,8 @@ int tquic_recvmsg(struct sock *sk, struct msghdr *msg, size_t len, int flags,
 		if (wait_event_interruptible(stream->wait,
 				!skb_queue_empty(&stream->recv_buf) ||
 				stream->fin_received ||
-				READ_ONCE(conn->state) !=
-					TQUIC_CONN_CONNECTED)) {
+				READ_ONCE(conn->state) ==
+					TQUIC_CONN_CLOSED)) {
 			lock_sock(sk);
 			copied = -EINTR;
 			goto out_release;

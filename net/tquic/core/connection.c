@@ -525,8 +525,25 @@ int tquic_conn_set_state(struct tquic_connection *conn,
 		}
 
 		wake_up_interruptible(&conn->datagram.wait);
-		if (conn->sk && conn->sk->sk_state_change)
-			conn->sk->sk_state_change(conn->sk);
+		/* Wake all stream waiters so recv() returns 0 */
+		{
+			struct rb_node *node;
+
+			spin_lock_bh(&conn->lock);
+			for (node = rb_first(&conn->streams); node;
+			     node = rb_next(node)) {
+				struct tquic_stream *s;
+
+				s = rb_entry(node, struct tquic_stream, node);
+				wake_up_interruptible(&s->wait);
+			}
+			spin_unlock_bh(&conn->lock);
+		}
+		if (conn->sk) {
+			conn->sk->sk_data_ready(conn->sk);
+			if (conn->sk->sk_state_change)
+				conn->sk->sk_state_change(conn->sk);
+		}
 		break;
 
 	default:
