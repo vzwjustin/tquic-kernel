@@ -556,63 +556,32 @@ static int handle_connection(int client_fd, struct server_config *config)
 static int run_server(struct server_config *config)
 {
     int listen_fd;
-    int epoll_fd;
-    struct epoll_event ev, events[MAX_EVENTS];
 
     listen_fd = create_quic_socket(config);
     if (listen_fd < 0) {
         return -1;
     }
 
-    /* Create epoll instance */
-    epoll_fd = epoll_create1(0);
-    if (epoll_fd < 0) {
-        LOG_ERROR("Failed to create epoll: %s", strerror(errno));
-        close(listen_fd);
-        return -1;
-    }
-
-    ev.events = EPOLLIN;
-    ev.data.fd = listen_fd;
-    if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, listen_fd, &ev) < 0) {
-        LOG_ERROR("Failed to add listen socket to epoll: %s", strerror(errno));
-        close(epoll_fd);
-        close(listen_fd);
-        return -1;
-    }
-
-    LOG_INFO("Server started, waiting for connections...");
+    LOG_INFO("Server started, waiting for connections (blocking accept)...");
 
     while (running) {
-        int nfds = epoll_wait(epoll_fd, events, MAX_EVENTS, 1000);
+        struct sockaddr_storage peer_addr;
+        socklen_t peer_len = sizeof(peer_addr);
 
-        if (nfds < 0) {
-            if (errno == EINTR) continue;
-            LOG_ERROR("epoll_wait error: %s", strerror(errno));
+        int client_fd = accept(listen_fd,
+                               (struct sockaddr *)&peer_addr,
+                               &peer_len);
+
+        if (client_fd >= 0) {
+            handle_connection(client_fd, config);
+        } else if (errno == EINTR) {
+            continue;
+        } else {
+            LOG_ERROR("accept error: %s", strerror(errno));
             break;
-        }
-
-        for (int i = 0; i < nfds; i++) {
-            if (events[i].data.fd == listen_fd) {
-                /* New connection */
-                struct sockaddr_storage peer_addr;
-                socklen_t peer_len = sizeof(peer_addr);
-
-                int client_fd = accept(listen_fd,
-                                       (struct sockaddr *)&peer_addr,
-                                       &peer_len);
-
-                if (client_fd >= 0) {
-                    /* Handle in same thread for simplicity */
-                    handle_connection(client_fd, config);
-                } else if (errno != EAGAIN && errno != EWOULDBLOCK) {
-                    LOG_ERROR("accept error: %s", strerror(errno));
-                }
-            }
         }
     }
 
-    close(epoll_fd);
     close(listen_fd);
 
     LOG_INFO("Server stopped");
