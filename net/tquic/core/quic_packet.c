@@ -1424,8 +1424,16 @@ static int tquic_frame_process_ack(struct tquic_connection *conn,
 		offset += varint_len;
 	}
 
-	/* Process ACK through loss detection and recovery */
-	tquic_loss_detection_on_ack_received(conn, &ack_frame, level);
+	/*
+	 * Process ACK through loss detection and recovery.
+	 * Only for Application pn_space since sent-packet tracking
+	 * is currently only wired in tquic_output_flush (1-RTT).
+	 * Initial/Handshake ACKs have no tracked sent packets, so
+	 * calling loss detection would trigger a false PROTOCOL_VIOLATION
+	 * (largest_acked > largest_sent when largest_sent == 0).
+	 */
+	if (level == TQUIC_PN_SPACE_APPLICATION)
+		tquic_loss_detection_on_ack_received(conn, &ack_frame, level);
 
 	return offset;
 }
