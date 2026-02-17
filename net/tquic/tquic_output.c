@@ -261,7 +261,7 @@ static int tquic_gen_padding_frame(struct tquic_frame_ctx *ctx, size_t len)
 /*
  * Generate PING frame
  */
-static int __maybe_unused tquic_gen_ping_frame(struct tquic_frame_ctx *ctx)
+static int tquic_gen_ping_frame(struct tquic_frame_ctx *ctx)
 {
 	tquic_dbg("gen_ping: offset=%zu\n", ctx->offset);
 
@@ -1761,7 +1761,7 @@ EXPORT_SYMBOL_GPL(tquic_pacing_send);
 /*
  * Check if GSO is supported and beneficial
  */
-static bool __maybe_unused tquic_gso_supported(struct tquic_path *path)
+static bool tquic_gso_supported(struct tquic_path *path)
 {
 	/* GSO is beneficial for high-bandwidth paths */
 	return path->mtu >= 1200 && path->stats.bandwidth > 1000000;
@@ -1770,8 +1770,8 @@ static bool __maybe_unused tquic_gso_supported(struct tquic_path *path)
 /*
  * Initialize GSO context
  */
-static int __maybe_unused tquic_gso_init(struct tquic_gso_ctx *gso, struct tquic_path *path,
-					 u16 max_segs)
+static int tquic_gso_init(struct tquic_gso_ctx *gso,
+			  struct tquic_path *path, u16 max_segs)
 {
 	gso->gso_size = path->mtu - 48;  /* Leave room for UDP/IP headers */
 	gso->gso_segs = 0;
@@ -1804,8 +1804,8 @@ static int __maybe_unused tquic_gso_init(struct tquic_gso_ctx *gso, struct tquic
 /*
  * Add a segment to GSO SKB
  */
-static int __maybe_unused tquic_gso_add_segment(struct tquic_gso_ctx *gso,
-						const u8 *data, size_t len)
+static int tquic_gso_add_segment(struct tquic_gso_ctx *gso, const u8 *data,
+				 size_t len)
 {
 	if (gso->gso_segs >= TQUIC_GSO_MAX_SEGS)
 		return -ENOSPC;
@@ -1835,7 +1835,7 @@ static int __maybe_unused tquic_gso_add_segment(struct tquic_gso_ctx *gso,
 /*
  * Finalize GSO SKB
  */
-static struct sk_buff __maybe_unused *tquic_gso_finalize(struct tquic_gso_ctx *gso)
+static struct sk_buff *tquic_gso_finalize(struct tquic_gso_ctx *gso)
 {
 	struct sk_buff *skb = gso->gso_skb;
 
@@ -1877,15 +1877,17 @@ static struct sk_buff __maybe_unused *tquic_gso_finalize(struct tquic_gso_ctx *g
 #define TQUIC_IP_ECN_MASK	0x03
 
 /*
- * tquic_set_ecn_marking - Set ECN codepoint on outgoing packet
+ * tquic_set_ecn_marking - Set ECN codepoint on outgoing packet (IPv6 path)
  * @skb: Socket buffer to mark
  * @conn: Connection (for ECN enable check)
  *
- * Sets ECT(0) marking in IP header if ECN is enabled.
- * Called before packet transmission.
+ * Sets ECT(0) marking directly in the IP header. For IPv4,
+ * tquic_output_packet() sets ECN via flowi4 TOS before xmit,
+ * so this function is primarily needed for IPv6 packets where
+ * the traffic class must be modified on the skb directly.
  */
-static void __maybe_unused tquic_set_ecn_marking(struct sk_buff *skb,
-						  struct tquic_connection *conn)
+static void tquic_set_ecn_marking(struct sk_buff *skb,
+				  struct tquic_connection *conn)
 {
 	struct net *net = NULL;
 	struct iphdr *iph;
@@ -1904,19 +1906,31 @@ static void __maybe_unused tquic_set_ecn_marking(struct sk_buff *skb,
 	 * Set ECT(0) codepoint in IP header.
 	 * ECT(0) = 0x02 in low 2 bits of TOS/Traffic Class field.
 	 *
-	 * Per RFC 9000: "An endpoint that supports ECN marks all
-	 * IP packets with the ECT(0) codepoint."
+	 * Per RFC 9000 Section 13.4.1: "An endpoint that supports ECN
+	 * marks all IP packets with the ECT(0) codepoint."
 	 */
 	if (skb->protocol == htons(ETH_P_IP)) {
 		iph = ip_hdr(skb);
 		if (iph) {
-			/* Clear existing ECN bits and set ECT(0) */
-			iph->tos = (iph->tos & ~TQUIC_IP_ECN_MASK) | TQUIC_IP_ECN_ECT0;
-			/* Recompute checksum since TOS changed */
+			iph->tos = (iph->tos & ~TQUIC_IP_ECN_MASK) |
+				   TQUIC_IP_ECN_ECT0;
 			ip_send_check(iph);
+			tquic_dbg("ecn: set ECT(0) on IPv4 pkt len=%u\n",
+				  skb->len);
+		}
+	} else if (skb->protocol == htons(ETH_P_IPV6)) {
+		struct ipv6hdr *ip6h = ipv6_hdr(skb);
+
+		if (ip6h) {
+			u32 flow = ntohl(*(__be32 *)ip6h);
+
+			flow = (flow & ~(TQUIC_IP_ECN_MASK << 20)) |
+			       (TQUIC_IP_ECN_ECT0 << 20);
+			*(__be32 *)ip6h = htonl(flow);
+			tquic_dbg("ecn: set ECT(0) on IPv6 pkt len=%u\n",
+				  skb->len);
 		}
 	}
-	/* Note: IPv6 would use ipv6_hdr(skb)->flow_lbl for ECN */
 }
 
 /*
