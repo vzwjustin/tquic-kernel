@@ -1362,6 +1362,9 @@ err_free_skb:
  * Returns a referenced path on success; caller must call tquic_path_put().
  * Caller must NOT hold conn->paths_lock; this function acquires it as needed.
  */
+static struct tquic_path *tquic_select_path_lb(struct tquic_connection *conn,
+					       struct sk_buff *skb, u32 flags);
+
 struct tquic_path *tquic_select_path(struct tquic_connection *conn,
 				     struct sk_buff *skb)
 {
