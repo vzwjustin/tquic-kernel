@@ -25,6 +25,7 @@
 #include <net/tquic.h>
 #include "cong/tquic_cong.h"
 
+#include "core/quic_output.h"
 #include "protocol.h"
 #include "tquic_compat.h"
 #include "tquic_debug.h"
@@ -1635,10 +1636,20 @@ static void tquic_timer_work_fn(struct work_struct *work)
 		tquic_timer_reset_keepalive(ts);
 	}
 
-	/* Handle pacing - allow next packet send */
+	/* Handle pacing - drain pacing queue and re-trigger tx_work */
 	if (test_bit(TQUIC_TIMER_PACING_BIT, &pending)) {
-		/* Would trigger packet transmission */
-		/* tquic_transmit_pending(conn); */
+		struct sk_buff *pacing_skb;
+
+		/* Drain any packets queued by tquic_pacing_queue_packet() */
+		while ((pacing_skb = skb_dequeue(&conn->pacing_queue)) != NULL)
+			tquic_output(conn, pacing_skb);
+
+		/*
+		 * Re-schedule tx_work to build and send new packets.
+		 * The pacing gate is now open since the hrtimer just fired.
+		 */
+		if (!work_pending(&conn->tx_work))
+			schedule_work(&conn->tx_work);
 	}
 
 	tquic_dbg("timer:work_fn: completed, pending_mask=0x%lx\n", pending);

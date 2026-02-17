@@ -13,6 +13,7 @@
 #include <linux/slab.h>
 #include <linux/skbuff.h>
 #include <linux/workqueue.h>
+#include <linux/math64.h>
 #include <net/tquic.h>
 
 /*
@@ -279,6 +280,120 @@ static void test_tx_throughput_model(struct kunit *test)
 
 /*
  * =============================================================================
+ * Pacing Tests
+ *
+ * Validate the pacing delay formula and pacing-gated drain behavior.
+ * =============================================================================
+ */
+
+/*
+ * Test: Pacing delay calculation
+ *
+ * Verify that delay_ns = bytes * NSEC_PER_SEC / pacing_rate.
+ * - 1200 bytes at 1,200,000 bytes/sec = 1,000,000 ns (1ms)
+ * - 1200 bytes at 0 bytes/sec = 0 ns (no pacing)
+ */
+static void test_tx_pacing_delay_calculation(struct kunit *test)
+{
+	u64 rate, delay_ns;
+	u32 bytes = TX_TEST_MSS; /* 1200 bytes */
+
+	/* Case 1: Normal pacing rate */
+	rate = 1200000; /* 1.2 MB/s */
+	delay_ns = div64_u64((u64)bytes * NSEC_PER_SEC, rate);
+
+	KUNIT_EXPECT_EQ(test, delay_ns, (u64)1000000);
+	kunit_info(test, "pacing delay: %u bytes @ %llu B/s = %llu ns (expect 1ms)\n",
+		   bytes, rate, delay_ns);
+
+	/* Case 2: Zero rate means no pacing */
+	rate = 0;
+	delay_ns = (rate == 0) ? 0 :
+		   div64_u64((u64)bytes * NSEC_PER_SEC, rate);
+
+	KUNIT_EXPECT_EQ(test, delay_ns, (u64)0);
+	kunit_info(test, "pacing delay: %u bytes @ 0 B/s = %llu ns (no pacing)\n",
+		   bytes, delay_ns);
+
+	/* Case 3: High rate (10 Gbps ~ 1.25 GB/s) */
+	rate = 1250000000ULL;
+	delay_ns = div64_u64((u64)bytes * NSEC_PER_SEC, rate);
+
+	/* 1200 * 1e9 / 1.25e9 = 960 ns */
+	KUNIT_EXPECT_EQ(test, delay_ns, (u64)960);
+	kunit_info(test, "pacing delay: %u bytes @ %llu B/s = %llu ns\n",
+		   bytes, rate, delay_ns);
+}
+
+/*
+ * Test: Pacing blocks when next_send_time is in the future
+ *
+ * Simulate the pacing gate by tracking next_send_time. When the
+ * gate is closed (next_send_time > now), the drain loop should
+ * skip Application-space packets, similar to how cwnd limits
+ * stop draining.
+ */
+static void test_tx_pacing_blocks_when_rate_set(struct kunit *test)
+{
+	struct sk_buff_head queue;
+	int queued = 10;
+	int drained = 0;
+	u64 now_ns = 1000000000ULL;	/* 1 second */
+	u64 next_send_ns;
+	u64 pacing_rate = 1200000;	/* 1.2 MB/s */
+	u32 pkt_size = TX_TEST_MSS;
+	u64 delay_ns;
+
+	skb_queue_head_init(&queue);
+	tx_test_queue_frames(&queue, queued, TX_TEST_FRAME_SIZE);
+	KUNIT_ASSERT_EQ(test, skb_queue_len(&queue), queued);
+
+	/* Start with pacing gate open */
+	next_send_ns = now_ns;
+
+	/*
+	 * Drain loop that respects pacing: after each send, compute
+	 * the next allowed send time. Stop when the gate closes.
+	 */
+	while (!skb_queue_empty(&queue) && drained < 64) {
+		struct sk_buff *skb;
+
+		/* Pacing gate check */
+		if (now_ns < next_send_ns)
+			break;
+
+		skb = skb_dequeue(&queue);
+		KUNIT_ASSERT_NOT_NULL(test, skb);
+		kfree_skb(skb);
+		drained++;
+
+		/* Schedule next send time */
+		delay_ns = div64_u64((u64)pkt_size * NSEC_PER_SEC,
+				     pacing_rate);
+		next_send_ns = now_ns + delay_ns;
+
+		/*
+		 * In a real scenario, time advances. Here we keep now_ns
+		 * fixed, so the gate closes after the first send.
+		 */
+	}
+
+	/*
+	 * With time frozen, only 1 packet should be sent before the
+	 * pacing gate closes (next_send_ns moves 1ms into the future).
+	 */
+	KUNIT_EXPECT_EQ(test, drained, 1);
+	KUNIT_EXPECT_FALSE(test, skb_queue_empty(&queue));
+	KUNIT_EXPECT_GT(test, next_send_ns, now_ns);
+
+	skb_queue_purge(&queue);
+
+	kunit_info(test, "pacing blocked after %d pkt: next_send=%llu now=%llu delta=%llu ns\n",
+		   drained, next_send_ns, now_ns, next_send_ns - now_ns);
+}
+
+/*
+ * =============================================================================
  * Test Suite
  * =============================================================================
  */
@@ -290,6 +405,8 @@ static struct kunit_case tx_work_test_cases[] = {
 	KUNIT_CASE(test_tx_queue_empty),
 	KUNIT_CASE(test_tx_queue_single_frame),
 	KUNIT_CASE(test_tx_throughput_model),
+	KUNIT_CASE(test_tx_pacing_delay_calculation),
+	KUNIT_CASE(test_tx_pacing_blocks_when_rate_set),
 	{}
 };
 

@@ -36,6 +36,7 @@
 #include "../tquic_compat.h"
 #include "../tquic_debug.h"
 #include "../tquic_sysctl.h"
+#include "../cong/tquic_cong.h"
 #include "quic_output.h"
 
 /* Output path configuration */
@@ -685,8 +686,13 @@ static void tquic_cc_on_packet_sent(struct tquic_path *path, u32 bytes)
 /* Get pacing delay from congestion control */
 static u64 tquic_cc_pacing_delay(struct tquic_path *path, u32 bytes)
 {
-	/* Calculate delay based on pacing rate if available */
-	return 0;  /* No delay by default */
+	u64 rate = tquic_cong_get_pacing_rate(path);
+
+	if (rate == 0)
+		return 0;
+
+	/* delay_ns = bytes * NSEC_PER_SEC / pacing_rate */
+	return div64_u64((u64)bytes * NSEC_PER_SEC, rate);
 }
 
 /*
@@ -801,7 +807,7 @@ EXPORT_SYMBOL(tquic_output_batch);
  */
 
 /* Calculate pacing delay for next packet */
-static ktime_t __maybe_unused tquic_pacing_delay(struct tquic_connection *conn, u32 bytes)
+static ktime_t tquic_pacing_delay(struct tquic_connection *conn, u32 bytes)
 {
 	struct tquic_path *path;
 	u64 delay_ns;
@@ -820,8 +826,16 @@ static ktime_t __maybe_unused tquic_pacing_delay(struct tquic_connection *conn, 
 /* Check if we should send now or wait for pacing */
 static bool tquic_pacing_allow(struct tquic_connection *conn)
 {
-	/* For now, always allow sending - pacing managed by timer_state */
-	return true;
+	/* Pacing disabled at socket level - allow immediately */
+	if (!conn->tsk || !conn->tsk->pacing_enabled)
+		return true;
+
+	/* No timer state yet (early in connection) - allow */
+	if (!conn->timer_state)
+		return true;
+
+	/* Check the hrtimer-based pacing gate */
+	return tquic_timer_can_send_paced(conn->timer_state);
 }
 
 /*
@@ -834,13 +848,21 @@ static int tquic_pacing_queue_packet(struct tquic_connection *conn,
 				     struct sk_buff *skb)
 {
 	/* Limit pacing queue to prevent memory exhaustion */
-	if (skb_queue_len(&conn->control_frames) >= TQUIC_MAX_PENDING_FRAMES) {
+	if (skb_queue_len(&conn->pacing_queue) >= TQUIC_MAX_PENDING_FRAMES) {
 		kfree_skb(skb);
 		return -ENOBUFS;
 	}
 
-	/* Add to control frames queue for later transmission */
-	skb_queue_tail(&conn->control_frames, skb);
+	/* Queue for pacing-delayed transmission */
+	skb_queue_tail(&conn->pacing_queue, skb);
+
+	/*
+	 * Schedule the pacing timer to drain this queue.
+	 * tquic_timer_schedule_pacing() calculates the appropriate
+	 * delay based on the current pacing rate and packet size.
+	 */
+	if (conn->timer_state)
+		tquic_timer_schedule_pacing(conn->timer_state, skb->len);
 
 	return 0;
 }

@@ -20,6 +20,8 @@
 #include "transport_params.h"
 #include "../tquic_cid.h"
 #include "../tquic_debug.h"
+#include "../cong/tquic_cong.h"
+#include "../tquic_sysctl.h"
 #include "../diag/trace.h"
 #include "../tquic_compat.h"
 #include "../protocol.h"
@@ -564,6 +566,17 @@ static void tquic_conn_tx_work(struct work_struct *work)
 	int total_sent = 0;
 	int i;
 	bool more_work;
+	bool pacing_enabled;
+	bool pacing_blocked = false;
+
+	/*
+	 * Determine if pacing is active for this connection.
+	 * All three conditions must be true: timer infrastructure ready,
+	 * socket-level pacing flag set, and netns sysctl enabled.
+	 */
+	pacing_enabled = conn->timer_state &&
+			 conn->tsk && conn->tsk->pacing_enabled &&
+			 tquic_net_get_pacing_enabled(sock_net(conn->sk));
 
 	/*
 	 * Loop until we've drained all sendable packets or hit a limit.
@@ -579,10 +592,23 @@ static void tquic_conn_tx_work(struct work_struct *work)
 		for (i = TQUIC_PN_SPACE_APPLICATION;
 		     i >= TQUIC_PN_SPACE_INITIAL; i--) {
 			struct tquic_pn_space *pn_space = &conn->pn_spaces[i];
+			u32 pkt_len;
 
 			if (!pn_space->keys_available ||
 			    pn_space->keys_discarded)
 				continue;
+
+			/*
+			 * Per RFC 9002 Section 7.7: Initial and Handshake
+			 * packets are never paced. Only pace Application
+			 * data packets.
+			 */
+			if (pacing_enabled &&
+			    i == TQUIC_PN_SPACE_APPLICATION &&
+			    !tquic_timer_can_send_paced(conn->timer_state)) {
+				pacing_blocked = true;
+				continue;
+			}
 
 			skb = tquic_packet_build(conn, i);
 			if (!skb)
@@ -594,6 +620,12 @@ static void tquic_conn_tx_work(struct work_struct *work)
 				continue;
 			}
 
+			/*
+			 * Capture length before send - tquic_udp_send()
+			 * consumes the skb.
+			 */
+			pkt_len = skb->len;
+
 			if (tquic_udp_send(conn->tsk, skb, path) < 0) {
 				tquic_conn_err(conn,
 					       "tx_work: send failed on path %u\n",
@@ -602,8 +634,33 @@ static void tquic_conn_tx_work(struct work_struct *work)
 				continue;
 			}
 
+			/*
+			 * After successful Application-level send, update
+			 * the pacing rate from CC and schedule the next
+			 * pacing interval.
+			 */
+			if (pacing_enabled &&
+			    i == TQUIC_PN_SPACE_APPLICATION) {
+				u64 rate = tquic_cong_get_pacing_rate(path);
+
+				tquic_timer_set_pacing_rate(conn->timer_state,
+							    rate);
+				tquic_timer_schedule_pacing(conn->timer_state,
+							    pkt_len);
+			}
+
 			total_sent++;
 			tquic_path_put(path);
+		}
+
+		/*
+		 * If pacing blocked Application space, stop the outer
+		 * loop. The pacing hrtimer will re-trigger tx_work
+		 * when the send time arrives.
+		 */
+		if (pacing_blocked) {
+			more_work = false;
+			break;
 		}
 
 		/* Check if there are still frames waiting to be sent */
