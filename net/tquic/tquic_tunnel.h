@@ -78,6 +78,7 @@ struct tquic_stream;
  * @is_tproxy: True if TPROXY mode enabled
  * @connect_work: Async connect workqueue item
  * @forward_work: Data forwarding workqueue item
+ * @saved_data_ready: Original sk_data_ready callback saved before override
  * @lock: Tunnel state lock
  * @list: Client's tunnel list linkage
  * @refcnt: Reference counter
@@ -99,6 +100,9 @@ struct tquic_tunnel {
 
 	struct work_struct connect_work;
 	struct work_struct forward_work;
+
+	/* Saved TCP socket callback for proper restore on teardown */
+	void (*saved_data_ready)(struct sock *sk);
 
 	spinlock_t lock;
 	struct list_head list;

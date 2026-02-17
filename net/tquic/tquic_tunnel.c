@@ -515,6 +515,14 @@ static void tquic_tunnel_connect_work(struct work_struct *work)
 			tunnel->state = TQUIC_TUNNEL_ESTABLISHED;
 		/* EINPROGRESS handled by socket callback */
 		spin_unlock_bh(&tunnel->lock);
+
+		/*
+		 * Install data_ready callback so TCP-side data arrivals
+		 * trigger the forward_work handler.  Do this regardless of
+		 * EINPROGRESS: the callback is harmless if the socket is not
+		 * yet connected and will correctly fire once it is.
+		 */
+		tquic_forward_setup_tcp_callbacks(tunnel);
 	} else {
 		/* Connect failed */
 		spin_lock_bh(&tunnel->lock);
@@ -758,6 +766,13 @@ void tquic_tunnel_close(struct tquic_tunnel *tunnel)
 	 */
 	cancel_work_sync(&tunnel->connect_work);
 	cancel_work_sync(&tunnel->forward_work);
+
+	/*
+	 * Restore original TCP socket callbacks before shutting down.
+	 * This prevents tquic_forward_data_ready() from firing after
+	 * the tunnel has been closed and the work handlers cancelled.
+	 */
+	tquic_forward_teardown_tcp_callbacks(tunnel);
 
 	/* Shutdown TCP socket */
 	if (tunnel->tcp_sock) {
@@ -1026,3 +1041,27 @@ bool tquic_tunnel_is_tproxy(struct tquic_tunnel *tunnel)
 	return tunnel->is_tproxy;
 }
 EXPORT_SYMBOL_GPL(tquic_tunnel_is_tproxy);
+
+/**
+ * tquic_tunnel_schedule_forward - Schedule data forwarding for a tunnel
+ * @tunnel: Tunnel that has data ready to forward
+ *
+ * Called from data-ready callbacks (TCP sk_data_ready) to schedule
+ * the forward_work handler from softirq context. Takes a reference on
+ * the tunnel so the work handler can safely release it.
+ *
+ * Safe to call from softirq / sk_data_ready context.
+ */
+void tquic_tunnel_schedule_forward(struct tquic_tunnel *tunnel)
+{
+	if (!tunnel || !tquic_tunnel_wq)
+		return;
+
+	spin_lock_bh(&tunnel->lock);
+	if (tunnel->state == TQUIC_TUNNEL_ESTABLISHED) {
+		tquic_tunnel_get(tunnel);
+		queue_work(tquic_tunnel_wq, &tunnel->forward_work);
+	}
+	spin_unlock_bh(&tunnel->lock);
+}
+EXPORT_SYMBOL_GPL(tquic_tunnel_schedule_forward);

@@ -287,13 +287,27 @@ ssize_t tquic_forward_splice(struct tquic_tunnel *tunnel, int direction)
 		 *
 		 * Data arrives on the QUIC stream from the router.
 		 * We forward it to the destination via the TCP socket.
+		 *
+		 * Apply QoS priority to the TCP socket so all outgoing
+		 * TCP packets inherit the tunnel's traffic class.  This
+		 * lets tc/HTB shape forwarded traffic per-tunnel.
 		 */
+		sk->sk_priority = tquic_qos_get_priority(
+			tquic_tunnel_get_traffic_class(tunnel));
 
 		/* Process all queued data from QUIC stream */
 		while (!skb_queue_empty(&stream->recv_buf)) {
 			skb = skb_dequeue(&stream->recv_buf);
 			if (!skb)
 				break;
+
+			/*
+			 * Mark the stream skb with QoS before use.
+			 * tquic_qos_mark_skb sets skb->priority (used by tc)
+			 * and the IP DSCP field when the skb has an IP header.
+			 * For stream payload skbs, only priority is set.
+			 */
+			tquic_qos_mark_skb(skb, tunnel);
 
 			/* Set up iovec for kernel_sendmsg */
 			memset(&msg, 0, sizeof(msg));
@@ -1494,46 +1508,105 @@ static void tquic_forward_data_ready(struct sock *sk)
 	tquic_dbg("tquic_forward_data_ready: TCP socket data ready callback\n");
 
 	/*
-	 * Tunnel pointer stored in sk_user_data
+	 * Retrieve the tunnel pointer stored in sk_user_data when the
+	 * callback was installed via tquic_forward_setup_tcp_callbacks().
+	 *
+	 * This runs in softirq context (TCP receive path), so we must not
+	 * do blocking work here.  Delegate to the tunnel's forward_work
+	 * which runs in workqueue (process) context.
 	 */
-	tunnel = sk->sk_user_data;
+	tunnel = rcu_dereference_sk_user_data(sk);
 	if (!tunnel)
 		return;
 
 	/*
-	 * Queue work to forward received data to QUIC stream
-	 * Don't do actual forwarding in softirq context
+	 * tquic_tunnel_schedule_forward() is softirq-safe: it takes the
+	 * tunnel spinlock, bumps the refcount, and queues forward_work on
+	 * tquic_tunnel_wq.  The work handler releases the reference.
 	 */
-
-	/* Would queue tunnel->forward_work */
+	tquic_tunnel_schedule_forward(tunnel);
 }
 
 /**
  * tquic_forward_setup_tcp_callbacks - Install TCP socket callbacks
  * @tunnel: Tunnel to set up
  *
- * Installs data_ready callback on TCP socket for RX notification.
+ * Installs sk_data_ready callback on the tunnel's TCP socket so that
+ * incoming TCP data triggers the tunnel's forward_work handler.  Saves
+ * the original callback so it can be restored on teardown.
+ *
+ * Must be called after the TCP socket is created (tquic_tunnel_create*)
+ * and before the tunnel is transitioned to ESTABLISHED state.
  *
  * Returns: 0 on success, negative errno on failure
  */
 int tquic_forward_setup_tcp_callbacks(struct tquic_tunnel *tunnel)
 {
+	struct sock *sk;
+
 	tquic_dbg("tquic_forward_setup_tcp_callbacks: installing TCP callbacks\n");
 
-	if (!tunnel)
+	if (!tunnel || !tunnel->tcp_sock)
 		return -EINVAL;
 
+	sk = tunnel->tcp_sock->sk;
+	if (!sk)
+		return -EINVAL;
+
+	write_lock_bh(&sk->sk_callback_lock);
+
 	/*
-	 * Would access tunnel->tcp_sock->sk and install callbacks:
-	 *
-	 * sk = tunnel->tcp_sock->sk;
-	 * sk->sk_user_data = tunnel;
-	 * sk->sk_data_ready = tquic_forward_data_ready;
+	 * Save the original data_ready so we can chain it (e.g. for
+	 * kernel-side poll wakeups) and restore it on teardown.
 	 */
+	tunnel->saved_data_ready = sk->sk_data_ready;
+
+	/*
+	 * Store tunnel pointer for retrieval in the callback.
+	 * Use RCU-safe assignment so the callback sees the pointer
+	 * before the function pointer swap takes effect.
+	 */
+	rcu_assign_sk_user_data(sk, tunnel);
+	sk->sk_data_ready = tquic_forward_data_ready;
+
+	write_unlock_bh(&sk->sk_callback_lock);
 
 	return 0;
 }
 EXPORT_SYMBOL_GPL(tquic_forward_setup_tcp_callbacks);
+
+/**
+ * tquic_forward_teardown_tcp_callbacks - Restore original TCP socket callbacks
+ * @tunnel: Tunnel being torn down
+ *
+ * Restores the original sk_data_ready callback saved during setup and
+ * clears sk_user_data.  Must be called before the TCP socket is released.
+ */
+void tquic_forward_teardown_tcp_callbacks(struct tquic_tunnel *tunnel)
+{
+	struct sock *sk;
+
+	if (!tunnel || !tunnel->tcp_sock)
+		return;
+
+	sk = tunnel->tcp_sock->sk;
+	if (!sk)
+		return;
+
+	write_lock_bh(&sk->sk_callback_lock);
+
+	if (sk->sk_data_ready == tquic_forward_data_ready) {
+		sk->sk_data_ready = tunnel->saved_data_ready;
+		tunnel->saved_data_ready = NULL;
+	}
+	rcu_assign_sk_user_data(sk, NULL);
+
+	write_unlock_bh(&sk->sk_callback_lock);
+
+	/* Ensure any in-flight callback finishes before tcp_sock is freed */
+	synchronize_rcu();
+}
+EXPORT_SYMBOL_GPL(tquic_forward_teardown_tcp_callbacks);
 
 /*
  * =============================================================================

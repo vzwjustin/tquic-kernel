@@ -1348,17 +1348,26 @@ static int tquic_process_crypto_frame(struct tquic_rx_ctx *ctx)
 	}
 
 	/*
-	 * SECURITY: Check pre-handshake memory allocation limits before
+	 * SECURITY: Enforce pre-handshake memory allocation limits before
 	 * processing CRYPTO frames at Initial/Handshake level.
-	 * This prevents resource exhaustion from bogus Initial packets.
+	 * This prevents CVE-2025-54939 (QUIC-LEAK) resource exhaustion from
+	 * bogus Initial packets.
+	 *
+	 * tquic_pre_hs_alloc() atomically checks and increments the per-IP
+	 * and global counters.  On success the allocation is accounted; the
+	 * matching release happens in tquic_pre_hs_free() when processing
+	 * fails, or in tquic_pre_hs_connection_complete() when the handshake
+	 * succeeds.
 	 */
 	if (ctx->enc_level == TQUIC_PKT_INITIAL ||
 	    ctx->enc_level == TQUIC_PKT_HANDSHAKE) {
-		if (ctx->conn && ctx->path &&
-		    !tquic_pre_hs_can_allocate(&ctx->path->remote_addr,
-					       (size_t)length)) {
-			tquic_dbg("CRYPTO frame rejected: pre-HS memory limit\n");
-			return -ENOMEM;
+		if (ctx->conn && ctx->path) {
+			ret = tquic_pre_hs_alloc(&ctx->path->remote_addr,
+						 (size_t)length);
+			if (ret < 0) {
+				tquic_dbg("CRYPTO frame rejected: pre-HS memory limit\n");
+				return ret;
+			}
 		}
 	}
 

@@ -36,6 +36,7 @@
 #include "tquic_mib.h"
 #include "tquic_token.h"
 #include "tquic_retry.h"
+#include "security_hardening.h"
 #include "crypto/zero_rtt.h"
 #include "core/early_data.h"
 #include "core/transport_params.h"
@@ -1564,6 +1565,23 @@ int tquic_inline_hs_recv_crypto(struct sock *sk, const u8 *data, u32 len,
 		tquic_conn_set_state(conn, TQUIC_CONN_CONNECTED,
 				     TQUIC_REASON_NORMAL);
 		tsk->flags |= TQUIC_F_HANDSHAKE_DONE;
+
+		/*
+		 * Release pre-handshake memory accounting for CVE-2025-54939
+		 * (QUIC-LEAK) defense.  Now that the handshake has succeeded
+		 * the per-IP counters can be released so the IP is no longer
+		 * rate-limited for pre-HS allocations.
+		 */
+		{
+			struct tquic_path *act;
+
+			rcu_read_lock();
+			act = rcu_dereference(conn->active_path);
+			if (act)
+				tquic_pre_hs_connection_complete(
+					&act->remote_addr);
+			rcu_read_unlock();
+		}
 
 		TQUIC_INC_STATS(sock_net(sk), TQUIC_MIB_HANDSHAKESCOMPLETE);
 		TQUIC_INC_STATS(sock_net(sk), TQUIC_MIB_CURRESTAB);
