@@ -1124,6 +1124,14 @@ void tquic_set_loss_detection_timer(struct tquic_connection *conn)
 	if (!conn)
 		return;
 
+	/* Don't arm timers for connections that are draining or closed */
+	if (READ_ONCE(conn->state) == TQUIC_CONN_DRAINING ||
+	    READ_ONCE(conn->state) == TQUIC_CONN_CLOSED) {
+		conn->loss_detection_timer = 0;
+		tquic_timer_cancel(conn, TQUIC_TIMER_LOSS);
+		return;
+	}
+
 	tquic_dbg("tquic_set_loss_detection_timer: updating timer\n");
 
 	path = tquic_loss_active_path_get(conn);
@@ -1291,6 +1299,11 @@ void tquic_loss_detection_on_timeout(struct tquic_connection *conn)
 	if (!conn || !conn->pn_spaces)
 		return;
 
+	/* No loss detection for connections that are draining or closed */
+	if (READ_ONCE(conn->state) == TQUIC_CONN_DRAINING ||
+	    READ_ONCE(conn->state) == TQUIC_CONN_CLOSED)
+		return;
+
 	tquic_dbg("tquic_loss_detection_on_timeout: pto_count=%u\n",
 		  conn->pto_count);
 
@@ -1343,8 +1356,17 @@ void tquic_loss_detection_on_timeout(struct tquic_connection *conn)
 					"PTO limit exceeded (%u), closing\n",
 					conn->pto_count);
 			conn->error_code = 0;
-			conn->state = TQUIC_CONN_DRAINING;
 			conn->draining = true;
+			/*
+			 * Cancel loss timer before state transition to
+			 * prevent zombie connections: without this, the
+			 * timer callback rearms the timer after we return,
+			 * creating an infinite PTO loop.
+			 */
+			conn->loss_detection_timer = 0;
+			tquic_timer_cancel(conn, TQUIC_TIMER_LOSS);
+			tquic_conn_set_state(conn, TQUIC_CONN_DRAINING,
+					     TQUIC_REASON_TIMEOUT);
 			return;
 		}
 

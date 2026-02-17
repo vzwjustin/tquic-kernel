@@ -1471,8 +1471,6 @@ int tquic_inline_hs_recv_crypto(struct sock *sk, const u8 *data, u32 len,
 				skb_queue_tail(
 					&conn->crypto_buffer[TQUIC_PN_SPACE_HANDSHAKE],
 					resp_skb);
-				tquic_dbg("queued server flight (%u bytes) at Handshake\n",
-					  flight_len);
 			}
 
 			kfree(flight_buf);
@@ -2634,15 +2632,10 @@ int tquic_server_handshake(struct sock *listener_sk,
 
 	/* Step 3: Decrypt Initial packet and feed ClientHello to TLS */
 	ret = tquic_process_initial_for_server(conn, initial_pkt, client_addr);
-	pr_debug("tquic_server_handshake: process_initial ret=%d\n", ret);
 
 	/* Step 4: Flush ServerHello response to client */
-	if (ret >= 0) {
-		int flush_ret = tquic_output_flush_crypto(conn);
-
-		pr_debug("tquic_server_handshake: flush_crypto ret=%d\n",
-			flush_ret);
-	}
+	if (ret >= 0)
+		tquic_output_flush_crypto(conn);
 
 done_free_skb:
 	/* Free the Initial packet SKB (fixes memory leak) */

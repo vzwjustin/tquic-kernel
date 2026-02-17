@@ -1263,6 +1263,18 @@ static int tquic_process_ack_frame(struct tquic_rx_ctx *ctx)
 						  rtt_us);
 				ctx->path->stats.acked_bytes +=
 					bytes_acked;
+
+				/*
+				 * RFC 9002 Section A.7: Reset PTO count on
+				 * any valid ACK. Initial/Handshake packets
+				 * are always ack-eliciting (CRYPTO frames),
+				 * so any ACK at these levels proves the peer
+				 * is alive. Without this, pto_count stays
+				 * elevated after handshake and kills the
+				 * connection during data transfer.
+				 */
+				ctx->conn->pto_count = 0;
+				tquic_set_loss_detection_timer(ctx->conn);
 			}
 
 			/* Update RTT in CC algorithm */
@@ -3397,11 +3409,9 @@ static int tquic_process_frames(struct tquic_connection *conn,
 	 * Use the delayed ACK timer when available, otherwise send
 	 * immediately for correctness.
 	 */
-	if (ctx.ack_eliciting && ret >= 0 &&
-	    enc_level == TQUIC_ENC_APPLICATION) {
+	if (ctx.ack_eliciting && ret >= 0 && is_1rtt) {
 		if (conn->timer_state) {
 			tquic_timer_set_ack_delay(conn->timer_state);
-			tquic_dbg("input: armed delayed ACK timer\n");
 		} else {
 			struct tquic_path *ack_path;
 

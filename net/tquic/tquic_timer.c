@@ -1616,8 +1616,8 @@ static void tquic_timer_work_fn(struct work_struct *work)
 		if (path) {
 			pns = &conn->pn_spaces[TQUIC_PN_SPACE_APPLICATION];
 			tquic_send_ack(conn, path,
-				       pns->recv_ack_info.largest_pn,
-				       0, pns->recv_ack_info.largest_pn);
+				       pns->largest_recv_pn,
+				       0, pns->largest_recv_pn);
 		}
 		rcu_read_unlock();
 	}

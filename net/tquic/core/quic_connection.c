@@ -417,10 +417,17 @@ static void tquic_timer_loss_cb(struct timer_list *t)
 	struct tquic_connection *conn =
 		from_timer(conn, t, timers[TQUIC_TIMER_LOSS]);
 
-	if (READ_ONCE(conn->state) == TQUIC_CONN_CLOSED)
+	if (READ_ONCE(conn->state) == TQUIC_CONN_CLOSED ||
+	    READ_ONCE(conn->state) == TQUIC_CONN_DRAINING)
 		return;
 
 	tquic_loss_detection_on_timeout(conn);
+
+	/* Don't rearm if on_timeout transitioned to DRAINING/CLOSED */
+	if (READ_ONCE(conn->state) == TQUIC_CONN_CLOSED ||
+	    READ_ONCE(conn->state) == TQUIC_CONN_DRAINING)
+		return;
+
 	tquic_timer_update(conn);
 }
 
@@ -447,8 +454,8 @@ static void tquic_timer_ack_cb(struct timer_list *t)
 			&conn->pn_spaces[TQUIC_PN_SPACE_APPLICATION];
 
 		tquic_send_ack(conn, path,
-			       pns->recv_ack_info.largest_pn,
-			       0, pns->recv_ack_info.largest_pn);
+			       pns->largest_recv_pn,
+			       0, pns->largest_recv_pn);
 	}
 	rcu_read_unlock();
 }

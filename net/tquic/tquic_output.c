@@ -3264,7 +3264,6 @@ int tquic_output_flush_crypto(struct tquic_connection *conn)
 	u64 crypto_offset;
 	int pkt_type;
 
-	pr_debug("tquic_output_flush_crypto: conn=%p\n", conn);
 	u64 pkt_num;
 	int ret;
 
@@ -3277,13 +3276,8 @@ int tquic_output_flush_crypto(struct tquic_connection *conn)
 		path = NULL;
 	rcu_read_unlock();
 
-	if (!path) {
-		pr_debug("tquic_output_flush_crypto: no active path\n");
+	if (!path)
 		return -ENOENT;
-	}
-
-	pr_debug("tquic_output_flush_crypto: path=%p local=%pISpc remote=%pISpc\n",
-		path, &path->local_addr, &path->remote_addr);
 
 	/*
 	 * Process each PN space's crypto buffer.
@@ -3360,9 +3354,6 @@ int tquic_output_flush_crypto(struct tquic_connection *conn)
 
 				ret = tquic_output_packet(conn, path,
 							  send_skb);
-				pr_debug("flush_crypto: chunk %u/%u off=%llu space=%d ret=%d\n",
-					chunk, crypto_skb->len,
-					crypto_offset, space, ret);
 				if (ret < 0) {
 					kfree_skb(crypto_skb);
 					goto out_put_path;
