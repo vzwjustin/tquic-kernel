@@ -816,9 +816,9 @@ EXPORT_SYMBOL_GPL(tquic_stream_open);
  */
 /*
  * H-001: Lock-free stream creation helper.
-	 * Caller must hold conn->lock during the entire lookup-and-create
-	 * sequence to prevent races.
-	 */
+ * Caller must hold conn->lock during the entire lookup-and-create
+ * sequence to prevent races.
+ */
 static struct tquic_stream *
 tquic_stream_create_locked(struct tquic_connection *conn, u64 stream_id)
 {
