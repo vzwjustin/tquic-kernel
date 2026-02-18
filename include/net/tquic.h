@@ -2556,9 +2556,9 @@ void __exit tquic_exit(void);
 int __init tquic_netlink_init(void);
 void __exit tquic_netlink_exit(void);
 
-/* Sysctl interface */
-int __init tquic_sysctl_init(struct net *net);
-void tquic_sysctl_exit(void);
+/* Sysctl interface (registered per network namespace) */
+int tquic_sysctl_init(struct net *net);
+void tquic_sysctl_exit(struct net *net);
 
 /* Protocol handler registration */
 int __init tquic_proto_init(void);

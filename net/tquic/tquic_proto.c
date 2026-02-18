@@ -800,163 +800,13 @@ static const struct net_proto_family tquic_family_ops = {
 
 /*
  * Per-Network Namespace Sysctl
+ *
+ * The full sysctl table is defined in tquic_sysctl.c and registered
+ * per network namespace via tquic_sysctl_init()/tquic_sysctl_exit().
+ * This ensures all tunables (including scheduler, CC algorithm, GREASE,
+ * ECN, security hardening, etc.) are visible in every namespace,
+ * not just init_net.
  */
-
-/* Sysctl min/max values */
-static int sysctl_zero;
-static int sysctl_one = 1;
-static int sysctl_max_paths = TQUIC_MAX_PATHS;
-static int sysctl_max_reorder = 1024;
-static int sysctl_max_timeout = 60000;
-static int sysctl_max_rtt = 10000;
-static int sysctl_max_cwnd = 10000;
-static int sysctl_max_bond_mode = TQUIC_BOND_MODE_ECF;
-
-/* Per-netns sysctl table template */
-static struct ctl_table tquic_net_sysctl_table[] = {
-	{
-		.procname	= "enabled",
-		.maxlen		= sizeof(int),
-		.mode		= 0644,
-		.proc_handler	= proc_dointvec_minmax,
-		.extra1		= &sysctl_zero,
-		.extra2		= &sysctl_one,
-	},
-	{
-		.procname	= "default_bond_mode",
-		.maxlen		= sizeof(int),
-		.mode		= 0644,
-		.proc_handler	= proc_dointvec_minmax,
-		.extra1		= &sysctl_zero,
-		.extra2		= &sysctl_max_bond_mode,
-	},
-	{
-		.procname	= "max_paths",
-		.maxlen		= sizeof(int),
-		.mode		= 0644,
-		.proc_handler	= proc_dointvec_minmax,
-		.extra1		= &sysctl_one,
-		.extra2		= &sysctl_max_paths,
-	},
-	{
-		.procname	= "reorder_window",
-		.maxlen		= sizeof(int),
-		.mode		= 0644,
-		.proc_handler	= proc_dointvec_minmax,
-		.extra1		= &sysctl_one,
-		.extra2		= &sysctl_max_reorder,
-	},
-	{
-		.procname	= "probe_interval_ms",
-		.maxlen		= sizeof(int),
-		.mode		= 0644,
-		.proc_handler	= proc_dointvec_minmax,
-		.extra1		= &sysctl_one,
-		.extra2		= &sysctl_max_timeout,
-	},
-	{
-		.procname	= "failover_timeout_ms",
-		.maxlen		= sizeof(int),
-		.mode		= 0644,
-		.proc_handler	= proc_dointvec_minmax,
-		.extra1		= &sysctl_one,
-		.extra2		= &sysctl_max_timeout,
-	},
-	{
-		.procname	= "idle_timeout_ms",
-		.maxlen		= sizeof(int),
-		.mode		= 0644,
-		.proc_handler	= proc_dointvec_minmax,
-		.extra1		= &sysctl_one,
-		.extra2		= &sysctl_max_timeout,
-	},
-	{
-		.procname	= "initial_rtt_ms",
-		.maxlen		= sizeof(int),
-		.mode		= 0644,
-		.proc_handler	= proc_dointvec_minmax,
-		.extra1		= &sysctl_one,
-		.extra2		= &sysctl_max_rtt,
-	},
-	{
-		.procname	= "initial_cwnd_packets",
-		.maxlen		= sizeof(int),
-		.mode		= 0644,
-		.proc_handler	= proc_dointvec_minmax,
-		.extra1		= &sysctl_one,
-		.extra2		= &sysctl_max_cwnd,
-	},
-	{
-		.procname	= "debug_level",
-		.maxlen		= sizeof(int),
-		.mode		= 0644,
-		.proc_handler	= proc_dointvec,
-	},
-	{ }
-};
-
-/* Number of valid entries (exclude the null terminator). */
-#define TQUIC_SYSCTL_TABLE_SIZE (ARRAY_SIZE(tquic_net_sysctl_table) - 1)
-
-static int tquic_net_sysctl_register(struct net *net)
-{
-	struct tquic_net *tn = tquic_pernet(net);
-	struct ctl_table *table;
-	int i;
-
-	tquic_dbg("tquic_net_sysctl_register: net=%p\n", net);
-
-	/*
-	 * Avoid duplicate sysctl registration in init_net since the global
-	 * sysctl table is already registered via tquic_sysctl.c.
-	 */
-	if (net_eq(net, &init_net))
-		return 0;
-
-	table = kmemdup(tquic_net_sysctl_table, sizeof(tquic_net_sysctl_table),
-			GFP_KERNEL);
-	if (!table)
-		return -ENOMEM;
-
-	/* Link sysctl entries to per-netns data */
-	i = 0;
-	table[i++].data = &tn->enabled;
-	table[i++].data = &tn->bond_mode;
-	table[i++].data = &tn->max_paths;
-	table[i++].data = &tn->reorder_window;
-	table[i++].data = &tn->probe_interval;
-	table[i++].data = &tn->failover_timeout;
-	table[i++].data = &tn->idle_timeout;
-	table[i++].data = &tn->initial_rtt;
-	table[i++].data = &tn->initial_cwnd;
-	table[i++].data = &tn->debug_level;
-
-	tn->sysctl_header = register_net_sysctl_sz(net, "net/tquic", table,
-						    TQUIC_SYSCTL_TABLE_SIZE);
-	if (!tn->sysctl_header) {
-		kfree(table);
-		return -ENOMEM;
-	}
-
-	tquic_dbg("tquic_net_sysctl_register: ret=0\n");
-	return 0;
-}
-
-static void tquic_net_sysctl_unregister(struct net *net)
-{
-	struct tquic_net *tn = tquic_pernet(net);
-	TQUIC_CTL_TABLE *table;
-
-	tquic_dbg("tquic_net_sysctl_unregister: net=%p\n", net);
-
-	if (tn->sysctl_header) {
-		table = tn->sysctl_header->ctl_table_arg;
-		unregister_net_sysctl_table(tn->sysctl_header);
-		/* We allocated with kmemdup, so cast away const for kfree */
-		kfree((void *)table);
-		tn->sysctl_header = NULL;
-	}
-}
 
 /*
  * Per-Network Namespace Proc Entries
@@ -1022,8 +872,8 @@ static int __net_init tquic_net_init(struct net *net)
 	atomic64_set(&tn->total_rx_bytes, 0);
 	atomic64_set(&tn->total_connections, 0);
 
-	/* Register sysctl */
-	ret = tquic_net_sysctl_register(net);
+	/* Register full sysctl table for this namespace */
+	ret = tquic_sysctl_init(net);
 	if (ret)
 		goto err_sysctl;
 
@@ -1039,7 +889,7 @@ static int __net_init tquic_net_init(struct net *net)
 
 #ifdef CONFIG_PROC_FS
 err_proc:
-	tquic_net_sysctl_unregister(net);
+	tquic_sysctl_exit(net);
 #endif
 err_sysctl:
 	free_percpu(tn->mib);
@@ -1436,7 +1286,7 @@ static void __net_exit tquic_net_exit(struct net *net)
 #ifdef CONFIG_PROC_FS
 	tquic_proc_exit(net);
 #endif
-	tquic_net_sysctl_unregister(net);
+	tquic_sysctl_exit(net);
 
 	/* Free per-CPU MIB statistics */
 	free_percpu(tn->mib);

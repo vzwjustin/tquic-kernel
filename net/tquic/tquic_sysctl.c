@@ -1587,8 +1587,6 @@ static struct ctl_table tquic_sysctl_table[] = {
 	{ }
 };
 
-static struct ctl_table_header *tquic_sysctl_header;
-
 /* Accessor functions for other modules */
 int tquic_sysctl_get_bond_mode(void)
 {
@@ -2084,27 +2082,32 @@ EXPORT_SYMBOL_GPL(tquic_sysctl_get_gro_flush_timeout_us);
 /* Number of actual sysctl entries (excluding null terminator) */
 #define TQUIC_SYSCTL_TABLE_ENTRIES (ARRAY_SIZE(tquic_sysctl_table) - 1)
 
-int __init tquic_sysctl_init(struct net *net)
+int tquic_sysctl_init(struct net *net)
 {
+	struct tquic_net *tn = tquic_pernet(net);
+
 	/*
 	 * Kernel 6.x requires register_net_sysctl_sz() with explicit size
 	 * to avoid validation errors on the null terminator entry.
 	 *
-	 * Register in the provided network namespace (not init_net only)
-	 * so that sysctl parameters are available in containers.
+	 * Register per network namespace so that sysctl parameters are
+	 * visible in containers, not just in init_net.
 	 */
-	tquic_sysctl_header = register_net_sysctl_sz(net, "net/tquic",
-						     tquic_sysctl_table,
-						     TQUIC_SYSCTL_TABLE_ENTRIES);
-	if (!tquic_sysctl_header)
+	tn->sysctl_header = register_net_sysctl_sz(net, "net/tquic",
+						    tquic_sysctl_table,
+						    TQUIC_SYSCTL_TABLE_ENTRIES);
+	if (!tn->sysctl_header)
 		return -ENOMEM;
 
-	tquic_info("sysctl interface registered at /proc/sys/net/tquic/\n");
 	return 0;
 }
 
-void tquic_sysctl_exit(void)
+void tquic_sysctl_exit(struct net *net)
 {
-	if (tquic_sysctl_header)
-		unregister_net_sysctl_table(tquic_sysctl_header);
+	struct tquic_net *tn = tquic_pernet(net);
+
+	if (tn->sysctl_header) {
+		unregister_net_sysctl_table(tn->sysctl_header);
+		tn->sysctl_header = NULL;
+	}
 }
