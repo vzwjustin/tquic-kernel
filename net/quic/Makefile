@@ -166,4 +166,4 @@ quic-$(CONFIG_TQUIC_KUNIT_TEST) += \
 	tquic/test/grease_test.o \
 	tquic/test/security_test.o \
 	tquic/test/security_hardening_test.o \
-	tquic/test/reorder_test.o \
+	tquic/test/reorder_test.o

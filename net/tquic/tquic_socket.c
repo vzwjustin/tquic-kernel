@@ -2039,7 +2039,7 @@ int tquic_sock_setsockopt(struct socket *sock, int level, int optname,
 				return -ENOTCONN;
 
 		lock_sock(sk);
-		/* Would call: tquic_qlog_set_mask(conn->qlog, mask); */
+		tquic_qlog_set_mask(conn->qlog, mask);
 		release_sock(sk);
 			tquic_conn_put(conn);
 		}
@@ -2609,7 +2609,11 @@ int tquic_sock_getsockopt(struct socket *sock, int level, int optname,
 		if (!conn)
 			return -ENOTCONN;
 		lock_sock(sk);
-		/* Would call: tquic_qlog_get_stats(conn->qlog, &stats); */
+		if (conn->qlog) {
+			spin_lock_bh(&conn->qlog->lock);
+			stats = conn->qlog->stats;
+			spin_unlock_bh(&conn->qlog->lock);
+		}
 		release_sock(sk);
 		tquic_conn_put(conn);
 

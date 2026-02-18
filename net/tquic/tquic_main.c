@@ -1169,7 +1169,7 @@ int __ref tquic_init(void)
 	/* Register built-in old-style schedulers for the sched/ framework */
 	err = tquic_sched_framework_init();
 	if (err)
-		goto err_scheduler;
+		goto err_sched_framework;
 #endif
 
 	/* Initialize individual schedulers */
@@ -1354,6 +1354,7 @@ err_sched_minrtt:
 #ifdef TQUIC_OUT_OF_TREE
 	tquic_sched_framework_exit();
 #endif
+err_sched_framework:
 	tquic_scheduler_exit();
 err_scheduler:
 	tquic_mp_deadline_exit();

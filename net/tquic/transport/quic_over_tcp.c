@@ -876,8 +876,27 @@ static void quic_tcp_rx_work(struct work_struct *work)
 		if (conn->packet_callback) {
 			conn->packet_callback(conn->callback_data, pkt_buf, pkt_len);
 		} else if (conn->quic_conn) {
-			/* Would call QUIC packet input here */
-			pr_debug("quic_tcp: received %u byte QUIC packet\n", pkt_len);
+			struct tquic_path *path;
+			struct sockaddr_storage src_addr = {};
+
+			rcu_read_lock();
+			path = rcu_dereference(conn->quic_conn->active_path);
+			if (path && !tquic_path_get(path))
+				path = NULL;
+			if (path)
+				memcpy(&src_addr, &path->remote_addr,
+				       sizeof(src_addr));
+			rcu_read_unlock();
+
+			if (path) {
+				tquic_process_coalesced(conn->quic_conn, path,
+							pkt_buf, pkt_len,
+							&src_addr);
+				tquic_path_put(path);
+			} else {
+				pr_debug_ratelimited("quic_tcp: no active path for %u byte packet\n",
+						     pkt_len);
+			}
 		}
 
 		atomic64_inc(&conn->stats.packets_rx);

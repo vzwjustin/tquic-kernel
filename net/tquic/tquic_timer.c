@@ -1883,6 +1883,7 @@ int tquic_timer_on_ack_received(struct tquic_timer_state *ts, int pn_space,
 	struct tquic_sent_packet *pkt;
 	ktime_t now = ktime_get();
 	int newly_acked = 0;
+	u64 total_bytes_acked = 0;
 	int i;
 	bool is_handshake = (pn_space != TQUIC_PN_SPACE_APPLICATION);
 
@@ -1955,12 +1956,33 @@ int tquic_timer_on_ack_received(struct tquic_timer_state *ts, int pn_space,
 				spin_unlock_bh(&rs->lock);
 			}
 
-			/* Notify congestion controller */
-			/* Would call cong->on_ack() here */
+			/* Accumulate bytes for CC notification after unlock */
+			if (pkt->in_flight)
+				total_bytes_acked += pkt->sent_bytes;
 		}
 	}
 
 	spin_unlock_bh(&pns->lock);
+
+	/* Notify congestion controller of acknowledged bytes (RFC 9002 §7.1) */
+	if (total_bytes_acked > 0) {
+		struct tquic_path *path;
+		u64 rtt_us;
+
+		spin_lock_bh(&rs->lock);
+		rtt_us = rs->latest_rtt;
+		spin_unlock_bh(&rs->lock);
+
+		rcu_read_lock();
+		path = rcu_dereference(ts->conn->active_path);
+		if (path && !tquic_path_get(path))
+			path = NULL;
+		rcu_read_unlock();
+		if (path) {
+			tquic_cong_on_ack(path, total_bytes_acked, rtt_us);
+			tquic_path_put(path);
+		}
+	}
 
 	/* Detect any newly lost packets */
 	tquic_detect_lost_packets(ts, pn_space);
