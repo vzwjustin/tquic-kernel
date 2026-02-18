@@ -66,7 +66,7 @@
  * the bytes_acked value fed to congestion control.  ~300 bytes is a
  * realistic CRYPTO frame size (TLS ClientHello/ServerHello fragments).
  */
-#define TQUIC_CRYPTO_FRAME_ESTIMATE	300
+#define TQUIC_CRYPTO_FRAME_BYTES_EST	300ULL
 
 /*
  * M-001: Maximum per-STREAM frame allocation limit.
@@ -526,13 +526,7 @@ static int tquic_process_ack_frame(struct tquic_rx_ctx *ctx)
 								     pn_space_idx);
 			} else {
 				u64 bytes_acked;
-				/*
-				 * M-1 fix: Initial/Handshake packets carry
-				 * CRYPTO frames which are far smaller than
-				 * a full MTU packet. Use a conservative
-				 * per-frame estimate to avoid cwnd inflation.
-				 */
-#define TQUIC_CRYPTO_FRAME_BYTES_EST 300ULL
+
 				if (check_mul_overflow(total_acked_pkts,
 						       TQUIC_CRYPTO_FRAME_BYTES_EST,
 						       &bytes_acked))
@@ -566,9 +560,8 @@ static int tquic_process_ack_frame(struct tquic_rx_ctx *ctx)
 						ack_frame.largest_acked);
 
 				/*
-				 * M-2 fix: tquic_cong_on_rtt only for
-				 * Initial/Handshake here. Application-space
-				 * RTT notification is handled inside
+				 * Update CC RTT for Initial/Handshake only.
+				 * Application-space RTT is notified inside
 				 * tquic_loss_detection_on_ack_received().
 				 */
 				tquic_cong_on_rtt(ctx->path, rtt_us);
