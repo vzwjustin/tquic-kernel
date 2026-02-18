@@ -126,7 +126,9 @@ static void tquic_fill_path_metrics(struct tquic_path *path,
 	/* Path state */
 	metrics->state = path->state;
 	metrics->validation_state = path->validation.challenge_pending ? 1 : 0;
-	metrics->is_active = (conn->active_path == path);
+	metrics->is_active = (rcu_dereference_protected(conn->active_path,
+						lockdep_is_held(&conn->lock))
+			      == path);
 
 	/* Timestamps */
 	metrics->last_activity_us = ktime_to_us(path->last_activity);

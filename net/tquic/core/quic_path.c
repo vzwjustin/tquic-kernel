@@ -19,6 +19,7 @@
 #include "../diag/tracepoints.h"
 #include "../tquic_debug.h"
 #include "../protocol.h"
+#include "../tquic_mib.h"
 #include "../tquic_init.h"
 
 /* Forward declarations to silence -Wmissing-prototypes */
@@ -562,18 +563,27 @@ int tquic_path_migrate(struct tquic_connection *conn, struct tquic_path *path)
 	    path->state != TQUIC_PATH_ACTIVE)
 		return -EINVAL;
 
-	/* Get current active path */
-	old_path = conn->active_path;
-	if (old_path == path)
+	/* Get current active path — both locks required for active_path writes */
+	spin_lock_bh(&conn->lock);
+	spin_lock_bh(&conn->paths_lock);
+
+	old_path = rcu_dereference_protected(conn->active_path,
+					     lockdep_is_held(&conn->lock));
+	if (old_path == path) {
+		spin_unlock_bh(&conn->paths_lock);
+		spin_unlock_bh(&conn->lock);
 		return 0; /* Already on this path */
+	}
 
 	/* Perform migration */
 	path->state = TQUIC_PATH_ACTIVE;
 	rcu_assign_pointer(conn->active_path, path);
 
-	if (old_path) {
+	if (old_path)
 		old_path->state = TQUIC_PATH_STANDBY;
-	}
+
+	spin_unlock_bh(&conn->paths_lock);
+	spin_unlock_bh(&conn->lock);
 
 	/* Per RFC 9000 Section 9.4: Reset congestion controller
 	 * The congestion window and RTT estimator are reset when
@@ -600,6 +610,9 @@ int tquic_path_migrate(struct tquic_connection *conn, struct tquic_path *path)
 
 	/* Update statistics */
 	conn->stats.path_migrations++;
+	if (conn->sk)
+		TQUIC_INC_STATS(sock_net(conn->sk),
+				TQUIC_MIB_PATHMIGRATIONS);
 
 	return 0;
 }
