@@ -91,38 +91,7 @@ struct tquic_sent_packet {
 	u64 retrans_of;
 };
 
-/**
- * struct tquic_pn_space - Per packet-number-space state
- * @largest_acked: Largest acknowledged packet number
- * @largest_sent: Largest sent packet number
- * @loss_time: Time for next time-based loss detection
- * @last_ack_time: Time of last ACK in this space
- * @ack_eliciting_in_flight: Count of ack-eliciting packets in flight
- * @sent_packets: RB-tree of sent packets by packet number
- * @sent_list: Time-ordered list of sent packets
- * @pending_acks: Packet numbers waiting to be ACKed
- * @pending_ack_count: Number of pending ACKs
- * @lock: Per-space lock
- */
-#ifndef TQUIC_PN_SPACE_DEFINED
-#define TQUIC_PN_SPACE_DEFINED
-struct tquic_pn_space {
-	u64 largest_acked;
-	u64 largest_sent;
-	ktime_t loss_time;
-	ktime_t last_ack_time;
-	u32 ack_eliciting_in_flight;
-
-	struct rb_root sent_packets;
-	struct list_head sent_list;
-
-	u64 *pending_acks;
-	u32 pending_ack_count;
-	u32 pending_ack_capacity;
-
-	spinlock_t lock;
-};
-#endif /* TQUIC_PN_SPACE_DEFINED */
+/* struct tquic_pn_space is defined in include/net/tquic.h */
 
 /**
  * struct tquic_recovery_state - Connection recovery state
@@ -1608,18 +1577,21 @@ static void tquic_timer_work_fn(struct work_struct *work)
 
 	/* Handle ACK delay expiration - send pending ACKs */
 	if (test_bit(TQUIC_TIMER_ACK_DELAY_BIT, &pending)) {
-		struct tquic_path *path;
+		struct tquic_path *ack_path;
 		struct tquic_pn_space *pns;
 
 		rcu_read_lock();
-		path = rcu_dereference(conn->active_path);
-		if (path) {
+		ack_path = rcu_dereference(conn->active_path);
+		if (ack_path && tquic_path_get(ack_path)) {
+			rcu_read_unlock();
 			pns = &conn->pn_spaces[TQUIC_PN_SPACE_APPLICATION];
-			tquic_send_ack(conn, path,
+			tquic_send_ack(conn, ack_path,
 				       pns->largest_recv_pn,
 				       0, pns->largest_recv_pn);
+			tquic_path_put(ack_path);
+		} else {
+			rcu_read_unlock();
 		}
-		rcu_read_unlock();
 	}
 
 	/* Handle drain completion */
@@ -1717,6 +1689,7 @@ static void tquic_retransmit_work_fn(struct work_struct *work)
 
 	rs = ts->recovery;
 	pending = ts->pending_timer_mask;
+	ts->pending_timer_mask = 0;
 	spin_unlock_irqrestore(&ts->lock, flags);
 
 	/* Handle loss detection */
@@ -1943,6 +1916,13 @@ int tquic_timer_on_ack_received(struct tquic_timer_state *ts, int pn_space,
 				pns->ack_eliciting_in_flight--;
 
 			if (pkt->in_flight) {
+				/*
+				 * Accumulate before clearing in_flight so the
+				 * post-loop CC notification (RFC 9002 §7.1)
+				 * sees the correct byte count.
+				 */
+				total_bytes_acked += pkt->sent_bytes;
+
 				spin_lock_bh(&rs->lock);
 				if (unlikely(rs->bytes_in_flight <
 					     pkt->sent_bytes)) {
@@ -1955,10 +1935,6 @@ int tquic_timer_on_ack_received(struct tquic_timer_state *ts, int pn_space,
 				pkt->in_flight = false;
 				spin_unlock_bh(&rs->lock);
 			}
-
-			/* Accumulate bytes for CC notification after unlock */
-			if (pkt->in_flight)
-				total_bytes_acked += pkt->sent_bytes;
 		}
 	}
 

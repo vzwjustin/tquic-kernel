@@ -2343,6 +2343,8 @@ int tquic_process_frames(struct tquic_connection *conn,
 	ctx.ack_eliciting = false;
 	ctx.immediate_ack_seen = false;
 	ctx.saw_stream_no_length = false;
+	ctx.ack_frame_seen = false;
+	ctx.key_phase_bit = 0;
 
 	while (ctx.offset < ctx.len) {
 		prev_offset = ctx.offset;

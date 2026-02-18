@@ -972,7 +972,7 @@ static struct sk_buff *tquic_gro_receive_internal(struct tquic_gro_state *gro,
 	struct sk_buff *held;
 	bool coalesced = false;
 
-	spin_lock(&gro->lock);
+	spin_lock_bh(&gro->lock);
 
 	/* Check if we can coalesce with held packets */
 	skb_queue_walk(&gro->hold_queue, held) {
@@ -1021,7 +1021,7 @@ static struct sk_buff *tquic_gro_receive_internal(struct tquic_gro_state *gro,
 	/* Flush immediately if queue is full */
 	if (gro->held_count >= TQUIC_GRO_MAX_HOLD) {
 		hrtimer_cancel(&gro->flush_timer);
-		spin_unlock(&gro->lock);
+		spin_unlock_bh(&gro->lock);
 
 		if (gro->deliver)
 			tquic_gro_flush(gro, gro->deliver);
@@ -1029,7 +1029,7 @@ static struct sk_buff *tquic_gro_receive_internal(struct tquic_gro_state *gro,
 		return NULL;
 	}
 
-	spin_unlock(&gro->lock);
+	spin_unlock_bh(&gro->lock);
 
 	return NULL;
 }
@@ -1043,13 +1043,13 @@ int tquic_gro_flush(struct tquic_gro_state *gro,
 	struct sk_buff *skb;
 	int flushed = 0;
 
-	spin_lock(&gro->lock);
+	spin_lock_bh(&gro->lock);
 
 	while ((skb = __skb_dequeue(&gro->hold_queue)) != NULL) {
-		spin_unlock(&gro->lock);
+		spin_unlock_bh(&gro->lock);
 		deliver(skb);
 		flushed++;
-		spin_lock(&gro->lock);
+		spin_lock_bh(&gro->lock);
 	}
 
 	/*
@@ -1061,7 +1061,7 @@ int tquic_gro_flush(struct tquic_gro_state *gro,
 	 */
 	gro->held_count = skb_queue_len(&gro->hold_queue);
 
-	spin_unlock(&gro->lock);
+	spin_unlock_bh(&gro->lock);
 
 	return flushed;
 }
@@ -2079,6 +2079,8 @@ int tquic_udp_recv(struct sock *sk, struct sk_buff *skb)
 
 	if (conn && tquic_is_stateless_reset_internal(conn, data, len)) {
 		tquic_handle_stateless_reset(conn);
+		if (path)
+			tquic_path_put(path);
 		kfree_skb(skb);
 		return 0;
 	}
@@ -2223,11 +2225,6 @@ not_reset:
 	 * - Packets too small to trigger without amplification
 	 */
 	if (ret == -ENOENT && !(data[0] & TQUIC_HEADER_FORM_LONG) &&
-	    len > TQUIC_STATELESS_RESET_MIN_LEN + TQUIC_DEFAULT_CID_LEN) {
-		pr_debug("tquic_udp_recv: would send stateless reset (data[0]=0x%02x len=%zu ret=%d)\n",
-			data[0], len, ret);
-	}
-	if (0 && ret == -ENOENT && !(data[0] & TQUIC_HEADER_FORM_LONG) &&
 	    /*
 	     * CF-299: Do NOT send stateless resets during handshake
 	     * (before authentication). A stateless reset is only valid
@@ -2278,6 +2275,8 @@ not_reset:
 		}
 	}
 
+	if (path)
+		tquic_path_put(path);
 	kfree_skb(skb);
 	return ret;
 }
