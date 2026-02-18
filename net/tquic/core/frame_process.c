@@ -52,6 +52,11 @@
 #include "ack.h"
 #include "frame_process.h"
 
+/* QUIC encryption level / packet type identifiers (RFC 9000 §17.2) */
+#define TQUIC_PKT_INITIAL		0x00
+#define TQUIC_PKT_ZERO_RTT		0x01
+#define TQUIC_PKT_HANDSHAKE		0x02
+
 /* Maximum ACK ranges to prevent resource exhaustion from malicious frames */
 #define TQUIC_MAX_ACK_RANGES		256
 

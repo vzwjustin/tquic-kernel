@@ -46,6 +46,7 @@
 #include "tquic_token.h"
 #include "core/mp_frame.h"
 #include "core/quic_loss.h"
+#include "core/quic_output.h"
 
 /* Maximum packets per output_flush iteration */
 #define TQUIC_TX_WORK_BATCH_MAX		64
@@ -3838,7 +3839,8 @@ int tquic_send_datagram(struct tquic_connection *conn,
 						   TQUIC_PN_SPACE_APPLICATION,
 						   pkt_num, skb_len,
 						   false, true,
-						   BIT(TQUIC_FRAME_DATAGRAM));
+						   0 /* DATAGRAM=0x30 > 31, no u32 bit */
+						   );
 
 		return len;
 	}

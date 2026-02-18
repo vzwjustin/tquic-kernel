@@ -106,6 +106,9 @@ ssize_t tquic_splice_read_socket(struct socket *sock, loff_t *ppos,
 int tquic_init_sock(struct sock *sk);
 void tquic_destroy_sock(struct sock *sk);
 
+/* Forward declaration: work handler shared by listen and connect paths */
+static void tquic_listener_work_handler(struct work_struct *work);
+
 /*
  * Initialize a TQUIC socket
  */
@@ -129,6 +132,17 @@ int tquic_init_sock(struct sock *sk)
 	tsk->flags = 0;
 	init_waitqueue_head(&tsk->event_wait);
 	tsk->default_stream = NULL;
+
+	/*
+	 * Pre-initialise listener_queue and listener_work so that
+	 * cancel_work_sync() is always safe to call, even on a socket that has
+	 * never been through listen() or connect().  Both paths re-initialise
+	 * these fields before use; doing it here avoids WARN_ON(!work->func)
+	 * inside __flush_work when cancel_work_sync() is invoked on a socket
+	 * that never reached the UDP-tunnel setup step.
+	 */
+	skb_queue_head_init(&tsk->listener_queue);
+	INIT_WORK(&tsk->listener_work, tquic_listener_work_handler);
 
 	/* Clear requested scheduler (will use per-netns default if not set) */
 	tsk->requested_scheduler[0] = '\0';
@@ -291,9 +305,6 @@ int tquic_connect_socket(struct socket *sock, tquic_sockaddr_t *uaddr,
 
 	return tquic_connect(sk, uaddr, addr_len);
 }
-
-/* Forward declaration: work handler defined below (shared for listen/connect) */
-static void tquic_listener_work_handler(struct work_struct *work);
 
 /*
  * Client-side encap_rcv - receives server responses in softirq
