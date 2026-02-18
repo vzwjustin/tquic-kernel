@@ -107,9 +107,7 @@ static void tquic_failover_test_only_failed_path_is_requeued(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, sp->path_id, (u8)1);
 
 	/* Simulate scheduler consuming retransmit entry. */
-	if (sp->skb)
-		kfree_skb(sp->skb);
-	kfree(sp);
+	tquic_failover_put_packet(sp);
 
 	/* Packet on unaffected path should still ACK normally. */
 	ret = tquic_failover_on_ack(ctx->fc, 201);

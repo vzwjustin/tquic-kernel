@@ -2029,6 +2029,7 @@ int tquic_udp_send(struct tquic_sock *tsk, struct sk_buff *skb,
 
 	if (!path) {
 		kfree_skb(skb);
+		tquic_conn_put(conn);
 		return -EINVAL;
 	}
 
