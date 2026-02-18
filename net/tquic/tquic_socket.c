@@ -518,8 +518,8 @@ int tquic_connect(struct sock *sk, tquic_sockaddr_t *uaddr, int addr_len)
 	if (!conn->timer_state) {
 		conn->timer_state = tquic_timer_state_alloc(conn);
 		if (!conn->timer_state) {
-			tquic_warn("IPv4 timer state alloc failed\n");
-			/* Continue without timer - basic operation still works */
+			ret = -ENOMEM;
+			goto out_close;
 		}
 	}
 
