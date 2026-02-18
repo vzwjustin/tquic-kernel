@@ -54,6 +54,8 @@
 #include "core/quic_loss.h"
 #include "core/ack.h"
 #include "core/frame_process.h"
+#include "bond/tquic_bonding.h"
+#include "bond/tquic_failover.h"
 
 /* Per-packet RX decryption buffer slab cache (allocated in tquic_main.c) */
 #define TQUIC_RX_BUF_SIZE	2048
@@ -1593,6 +1595,32 @@ static int tquic_process_packet(struct tquic_connection *conn,
 	if (conn && conn->pn_spaces && pkt_num > largest_pn)
 		WRITE_ONCE(conn->pn_spaces[pn_space_idx].largest_recv_pn,
 			   pkt_num);
+
+	/*
+	 * Failover receiver deduplication (APPLICATION space only).
+	 *
+	 * When multipath bonding is active a packet may be retransmitted on
+	 * a different path after failover.  tquic_failover_dedup_check()
+	 * marks the packet number as seen the first time and returns true
+	 * for any subsequent copy.  Duplicates are silently dropped here,
+	 * after decryption but before frame processing, to prevent double-
+	 * counting ACK/flow-control state.
+	 */
+	if (conn && pn_space_idx == TQUIC_PN_SPACE_APPLICATION) {
+		struct tquic_failover_ctx *__fc =
+			tquic_bonding_get_failover(
+				(struct tquic_bonding_ctx *)conn->pm);
+		if (__fc && tquic_failover_dedup_check(__fc, pkt_num)) {
+			if (decrypted_from_slab)
+				kmem_cache_free(tquic_rx_buf_cache, decrypted);
+			else
+				kfree(decrypted);
+			if (path_looked_up)
+				tquic_path_put(path);
+			rcu_read_unlock();
+			return 0; /* duplicate: silently discard */
+		}
+	}
 
 	/*
 	 * Key Update Detection (RFC 9001 Section 6)

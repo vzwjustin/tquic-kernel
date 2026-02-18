@@ -47,6 +47,20 @@
 #include "core/mp_frame.h"
 #include "core/quic_loss.h"
 #include "core/quic_output.h"
+#include "bond/tquic_bonding.h"
+#include "bond/tquic_failover.h"
+
+/*
+ * tquic_conn_get_failover - Get failover context from a connection
+ *
+ * Returns the failover context when multipath bonding is active, NULL
+ * otherwise.  NULL-safe: all callers guard with `if (fc)`.
+ */
+static inline struct tquic_failover_ctx *
+tquic_conn_get_failover(struct tquic_connection *conn)
+{
+	return tquic_bonding_get_failover((struct tquic_bonding_ctx *)conn->pm);
+}
 
 /* Maximum packets per output_flush iteration */
 #define TQUIC_TX_WORK_BATCH_MAX		64
@@ -2283,19 +2297,34 @@ int tquic_xmit(struct tquic_connection *conn, struct tquic_stream *stream,
 		}
 
 		/* Send packet */
-		skb_len = skb->len;
-		ret = tquic_output_packet(conn, path, skb);
-		tquic_path_put(path);
-		if (ret < 0)
-			break;
+		{
+			struct tquic_failover_ctx *__fc =
+				tquic_conn_get_failover(conn);
+			u8 __pid = path->path_id;
 
-		/* RFC 9002: record sent packet in recovery state */
-		if (conn->timer_state)
-			tquic_timer_on_packet_sent(conn->timer_state,
-						   TQUIC_PN_SPACE_APPLICATION,
-						   pkt_num, skb_len,
-						   true, true,
-						   BIT(TQUIC_FRAME_STREAM));
+			/* Failover: clone skb BEFORE tquic_output_packet consumes it */
+			if (__fc)
+				tquic_failover_track_sent(__fc, skb, pkt_num,
+							  __pid);
+			skb_len = skb->len;
+			ret = tquic_output_packet(conn, path, skb);
+			tquic_path_put(path);
+			if (ret < 0) {
+				if (__fc)
+					tquic_failover_on_ack(__fc, pkt_num);
+				break;
+			}
+
+			/* RFC 9002: record sent packet in recovery state */
+			if (conn->timer_state)
+				tquic_timer_on_packet_sent(conn->timer_state,
+							   TQUIC_PN_SPACE_APPLICATION,
+							   pkt_num, skb_len,
+							   true, true,
+							   BIT(TQUIC_FRAME_STREAM));
+			if (__fc)
+				tquic_failover_arm_timeout(__fc, __pid);
+		}
 
 		offset += chunk;
 		pkt_num++;
@@ -2408,12 +2437,21 @@ int tquic_send_ack(struct tquic_connection *conn, struct tquic_path *path,
 	ret = tquic_output_packet(conn, path, skb);
 
 	/* RFC 9002: ACK-only packets are not ack-eliciting, not in-flight */
-	if (ret >= 0 && conn->timer_state)
-		tquic_timer_on_packet_sent(conn->timer_state,
-					   TQUIC_PN_SPACE_APPLICATION,
-					   pkt_num, skb_len,
-					   false, false,
-					   BIT(TQUIC_FRAME_ACK));
+	if (ret >= 0) {
+		if (conn->timer_state)
+			tquic_timer_on_packet_sent(conn->timer_state,
+						   TQUIC_PN_SPACE_APPLICATION,
+						   pkt_num, skb_len,
+						   false, false,
+						   BIT(TQUIC_FRAME_ACK));
+		/* Advance receiver dedup window: peer has seen our ACK */
+		{
+			struct tquic_failover_ctx *__fc =
+				tquic_conn_get_failover(conn);
+			if (__fc)
+				tquic_failover_dedup_advance(__fc, largest_ack);
+		}
+	}
 	return ret;
 }
 EXPORT_SYMBOL_GPL(tquic_send_ack);
@@ -2500,16 +2538,31 @@ int tquic_send_ping(struct tquic_connection *conn, struct tquic_path *path)
 	}
 
 	tquic_dbg("send_ping: sending pkt_num=%llu\n", pkt_num);
-	skb_len = skb->len;
-	ret = tquic_output_packet(conn, path, skb);
+	{
+		struct tquic_failover_ctx *__fc = tquic_conn_get_failover(conn);
+		u8 __pid = path->path_id;
 
-	/* RFC 9002: PING is ack-eliciting and counts against cwnd */
-	if (ret >= 0 && conn->timer_state)
-		tquic_timer_on_packet_sent(conn->timer_state,
-					   TQUIC_PN_SPACE_APPLICATION,
-					   pkt_num, skb_len,
-					   ctx.ack_eliciting, true,
-					   BIT(TQUIC_FRAME_PING));
+		/* Failover: clone skb BEFORE tquic_output_packet consumes it */
+		if (__fc)
+			tquic_failover_track_sent(__fc, skb, pkt_num, __pid);
+		skb_len = skb->len;
+		ret = tquic_output_packet(conn, path, skb);
+
+		/* RFC 9002: PING is ack-eliciting and counts against cwnd */
+		if (ret >= 0) {
+			if (conn->timer_state)
+				tquic_timer_on_packet_sent(conn->timer_state,
+							   TQUIC_PN_SPACE_APPLICATION,
+							   pkt_num, skb_len,
+							   ctx.ack_eliciting, true,
+							   BIT(TQUIC_FRAME_PING));
+			if (__fc)
+				tquic_failover_arm_timeout(__fc, __pid);
+		} else {
+			if (__fc)
+				tquic_failover_on_ack(__fc, pkt_num);
+		}
+	}
 	return ret;
 }
 EXPORT_SYMBOL_GPL(tquic_send_ping);
@@ -2616,16 +2669,31 @@ int tquic_flow_send_max_data(struct tquic_connection *conn,
 		}
 	}
 
-	skb_len = skb->len;
-	ret = tquic_output_packet(conn, path, skb);
+	{
+		struct tquic_failover_ctx *__fc = tquic_conn_get_failover(conn);
+		u8 __pid = path->path_id;
 
-	/* RFC 9002: MAX_DATA is ack-eliciting and counts against cwnd */
-	if (ret >= 0 && conn->timer_state)
-		tquic_timer_on_packet_sent(conn->timer_state,
-					   TQUIC_PN_SPACE_APPLICATION,
-					   pkt_num, skb_len,
-					   true, true,
-					   BIT(TQUIC_FRAME_MAX_DATA));
+		/* Failover: clone skb BEFORE tquic_output_packet consumes it */
+		if (__fc)
+			tquic_failover_track_sent(__fc, skb, pkt_num, __pid);
+		skb_len = skb->len;
+		ret = tquic_output_packet(conn, path, skb);
+
+		/* RFC 9002: MAX_DATA is ack-eliciting and counts against cwnd */
+		if (ret >= 0) {
+			if (conn->timer_state)
+				tquic_timer_on_packet_sent(conn->timer_state,
+							   TQUIC_PN_SPACE_APPLICATION,
+							   pkt_num, skb_len,
+							   true, true,
+							   BIT(TQUIC_FRAME_MAX_DATA));
+			if (__fc)
+				tquic_failover_arm_timeout(__fc, __pid);
+		} else {
+			if (__fc)
+				tquic_failover_on_ack(__fc, pkt_num);
+		}
+	}
 	return ret;
 }
 EXPORT_SYMBOL_GPL(tquic_flow_send_max_data);
@@ -2733,16 +2801,31 @@ int tquic_flow_send_max_stream_data(struct tquic_connection *conn,
 		}
 	}
 
-	skb_len = skb->len;
-	ret = tquic_output_packet(conn, path, skb);
+	{
+		struct tquic_failover_ctx *__fc = tquic_conn_get_failover(conn);
+		u8 __pid = path->path_id;
 
-	/* RFC 9002: MAX_STREAM_DATA is ack-eliciting and counts against cwnd */
-	if (ret >= 0 && conn->timer_state)
-		tquic_timer_on_packet_sent(conn->timer_state,
-					   TQUIC_PN_SPACE_APPLICATION,
-					   pkt_num, skb_len,
-					   true, true,
-					   BIT(TQUIC_FRAME_MAX_STREAM_DATA));
+		/* Failover: clone skb BEFORE tquic_output_packet consumes it */
+		if (__fc)
+			tquic_failover_track_sent(__fc, skb, pkt_num, __pid);
+		skb_len = skb->len;
+		ret = tquic_output_packet(conn, path, skb);
+
+		/* RFC 9002: MAX_STREAM_DATA is ack-eliciting and counts against cwnd */
+		if (ret >= 0) {
+			if (conn->timer_state)
+				tquic_timer_on_packet_sent(conn->timer_state,
+							   TQUIC_PN_SPACE_APPLICATION,
+							   pkt_num, skb_len,
+							   true, true,
+							   BIT(TQUIC_FRAME_MAX_STREAM_DATA));
+			if (__fc)
+				tquic_failover_arm_timeout(__fc, __pid);
+		} else {
+			if (__fc)
+				tquic_failover_on_ack(__fc, pkt_num);
+		}
+	}
 	return ret;
 }
 EXPORT_SYMBOL_GPL(tquic_flow_send_max_stream_data);
@@ -3083,8 +3166,18 @@ int tquic_output_flush(struct tquic_connection *conn)
 				/* Assemble and send packet */
 				send_skb = tquic_assemble_packet(conn, path, -1, pkt_num, &frames);
 				if (send_skb) {
+					struct tquic_failover_ctx *__fc =
+						tquic_conn_get_failover(conn);
+					/* Save before path may be set to NULL in paced path */
+					u8 __pid = path ? path->path_id : 0;
+
 					/* Capture size before send consumes skb */
 					pkt_size = send_skb->len;
+
+					/* Failover: clone skb BEFORE either xmit path consumes it */
+					if (__fc)
+						tquic_failover_track_sent(__fc, send_skb,
+									  pkt_num, __pid);
 
 					/*
 					 * Route through software pacing when FQ is absent.
@@ -3133,6 +3226,12 @@ int tquic_output_flush(struct tquic_connection *conn)
 								pkt_num, pkt_size,
 								true, true,
 								BIT(TQUIC_FRAME_STREAM));
+						if (__fc)
+							tquic_failover_arm_timeout(__fc,
+										   __pid);
+					} else {
+						if (__fc)
+							tquic_failover_on_ack(__fc, pkt_num);
 					}
 				} else {
 					/* CF-615: Cleanup frame on assembly failure */
@@ -3294,18 +3393,33 @@ int tquic_send_handshake_done(struct tquic_connection *conn)
 		return -ENOMEM;
 	}
 
-	skb_len = skb->len;
-	ret = tquic_output_packet(conn, path, skb);
-	pr_debug("tquic: sent HANDSHAKE_DONE frame (pkt_num=%llu ret=%d)\n",
-		pkt_num, ret);
+	{
+		struct tquic_failover_ctx *__fc = tquic_conn_get_failover(conn);
+		u8 __pid = path->path_id;
 
-	/* RFC 9002: HANDSHAKE_DONE is ack-eliciting and counts against cwnd */
-	if (ret >= 0 && conn->timer_state)
-		tquic_timer_on_packet_sent(conn->timer_state,
-					   TQUIC_PN_SPACE_APPLICATION,
-					   pkt_num, skb_len,
-					   true, true,
-					   BIT(TQUIC_FRAME_HANDSHAKE_DONE));
+		/* Failover: clone skb BEFORE tquic_output_packet consumes it */
+		if (__fc)
+			tquic_failover_track_sent(__fc, skb, pkt_num, __pid);
+		skb_len = skb->len;
+		ret = tquic_output_packet(conn, path, skb);
+		pr_debug("tquic: sent HANDSHAKE_DONE frame (pkt_num=%llu ret=%d)\n",
+			 pkt_num, ret);
+
+		/* RFC 9002: HANDSHAKE_DONE is ack-eliciting and counts against cwnd */
+		if (ret >= 0) {
+			if (conn->timer_state)
+				tquic_timer_on_packet_sent(conn->timer_state,
+							   TQUIC_PN_SPACE_APPLICATION,
+							   pkt_num, skb_len,
+							   true, true,
+							   BIT(TQUIC_FRAME_HANDSHAKE_DONE));
+			if (__fc)
+				tquic_failover_arm_timeout(__fc, __pid);
+		} else {
+			if (__fc)
+				tquic_failover_on_ack(__fc, pkt_num);
+		}
+	}
 	return ret;
 }
 EXPORT_SYMBOL_GPL(tquic_send_handshake_done);

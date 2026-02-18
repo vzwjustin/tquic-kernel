@@ -21,6 +21,8 @@
 #include "../tquic_debug.h"
 #include "quic_loss.h"
 #include "../tquic_init.h"
+#include "../bond/tquic_bonding.h"
+#include "../bond/tquic_failover.h"
 
 /* Maximum PTO probes before declaring connection dead */
 #define TQUIC_MAX_PTO_COUNT		6
@@ -730,6 +732,27 @@ void tquic_loss_detection_on_ack_received(struct tquic_connection *conn,
 	spin_unlock_irqrestore(&pn_space->lock, flags);
 
 	/*
+	 * Failover: notify per acknowledged in-flight packet.
+	 * Called outside pn_space->lock to avoid lock ordering issues
+	 * (tquic_failover_on_ack takes its own sent_packets_lock).
+	 * Only APPLICATION-space in-flight packets are tracked by failover.
+	 */
+	if (pn_space_idx == TQUIC_PN_SPACE_APPLICATION) {
+		struct tquic_failover_ctx *fc =
+			tquic_bonding_get_failover(
+				(struct tquic_bonding_ctx *)conn->pm);
+		if (fc) {
+			struct tquic_sent_packet *_p = newly_acked;
+
+			while (_p) {
+				if (_p->in_flight)
+					tquic_failover_on_ack(fc, _p->pn);
+				_p = (struct tquic_sent_packet *)_p->list.next;
+			}
+		}
+	}
+
+	/*
 	 * RFC 9002 Section 5.3:
 	 * Update RTT if largest_acked was newly acknowledged.
 	 * Only use Application Data space for adjusting ack_delay.
@@ -758,6 +781,20 @@ void tquic_loss_detection_on_ack_received(struct tquic_connection *conn,
 		path->cc.smoothed_rtt_us = path->rtt.smoothed_rtt;
 		path->cc.rtt_var_us = path->rtt.rtt_var;
 		path->cc.min_rtt_us = path->rtt.min_rtt;
+
+		/*
+		 * Failover: update per-path ACK timestamp and SRTT for the
+		 * 3×SRTT failure detection timer.
+		 */
+		if (pn_space_idx == TQUIC_PN_SPACE_APPLICATION) {
+			struct tquic_failover_ctx *fc =
+				tquic_bonding_get_failover(
+					(struct tquic_bonding_ctx *)conn->pm);
+			if (fc)
+				tquic_failover_update_path_ack(
+					fc, path->path_id,
+					path->rtt.smoothed_rtt);
+		}
 	}
 
 	/* Update congestion control - use path-level CC API */
