@@ -1705,6 +1705,10 @@ int tquic_inline_hs_recv_crypto(struct sock *sk, const u8 *data, u32 len,
 			inet_sk_set_state(sk, TCP_ESTABLISHED);
 			conn->handshake_confirmed = true;
 
+			/* Start idle timeout (RFC 9000 §10.1). */
+			if (conn->timer_state)
+				tquic_timer_set_idle(conn->timer_state);
+
 			/*
 			 * RFC 9000 Section 19.20: Server MUST send
 			 * HANDSHAKE_DONE in a 1-RTT packet to signal

@@ -2327,7 +2327,7 @@ int tquic_process_frames(struct tquic_connection *conn,
 			 u8 *payload, size_t len,
 			 int enc_level, u64 pkt_num)
 {
-	struct tquic_rx_ctx ctx;
+	struct tquic_rx_ctx ctx = {};
 	int ret = 0;
 	u8 frame_type;
 	size_t prev_offset;

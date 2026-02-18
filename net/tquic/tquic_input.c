@@ -256,42 +256,6 @@ slow_path:
 }
 
 /*
- * Find path by local connection ID
- *
- * Caller must NOT hold paths_lock. This function acquires it internally.
- */
-static struct tquic_path *tquic_find_path_by_cid(struct tquic_connection *conn,
-							       const u8 *cid, u8 cid_len)
-{
-	struct tquic_path *path;
-	struct tquic_path *found = NULL;
-
-	tquic_dbg("find_path_by_cid: conn=%p cid_len=%u\n", conn, cid_len);
-
-	/*
-	 * P-002: Use RCU for lock-free path list traversal.
-	 * Note: This function doesn't take a reference on the path,
-	 * so caller must hold appropriate lock or be in RCU critical section.
-	 */
-	rcu_read_lock();
-	list_for_each_entry_rcu(path, &conn->paths, list) {
-		if (path->local_cid.len == cid_len &&
-		    memcmp(path->local_cid.id, cid, cid_len) == 0) {
-			/*
-			 * Take reference to prevent path from being freed
-			 * after we release RCU read lock.
-			 */
-			if (tquic_path_get(path))
-				found = path;
-			break;
-		}
-	}
-	rcu_read_unlock();
-
-	return found;
-}
-
-/*
  * =============================================================================
  * Header Unprotection
  * =============================================================================
