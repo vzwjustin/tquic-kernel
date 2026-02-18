@@ -186,7 +186,7 @@ When using `/octo:debate`, `/octo:multi`, or `/octo:review` commands, Claude sho
 
 ### Provider Setup Status
 - **Codex** (OpenAI): ✅ Installed at `/opt/homebrew/bin/codex` (v0.98.0) - WORKING
-- **Gemini** (Google): ✅ Installed at `/opt/homebrew/bin/gemini` (v0.25.2) - Auth needs fix
+- **Gemini** (Google): ✅ Installed at `/opt/homebrew/bin/gemini` (v0.28.2) - WORKING (use --extensions "" to disable agentic mode)
 
 ### Correct CLI Invocation Patterns
 
@@ -197,7 +197,7 @@ echo "context..." | codex exec "Your question here" --full-auto
 
 **Gemini** (for ecosystem breadth, alternatives):
 ```bash
-gemini -p "Your question here"  # -p flag for non-interactive mode
+gemini --extensions "" -p "Your question here"  # --extensions "" disables agentic extensions (required)
 ```
 
 ### MANDATORY: Visual Indicator Banner
@@ -227,8 +227,8 @@ echo "Provider Status: Codex ✓, Gemini ✗, Claude ✓"
 # 3. Get Codex perspective
 echo "Analyzing commits for bugs..." | codex exec "Review commits 033c3048 and 7f9dabe7 for security vulnerabilities, use-after-free bugs, and race conditions in the TQUIC kernel module" --full-auto
 
-# 4. Get Gemini perspective (when auth fixed)
-gemini -p "Review commits 033c3048 and 7f9dabe7 for security vulnerabilities..."
+# 4. Get Gemini perspective
+gemini --extensions "" -p "Review commits 033c3048 and 7f9dabe7 for security vulnerabilities..."
 
 # 5. Provide Claude's (my) independent analysis
 
