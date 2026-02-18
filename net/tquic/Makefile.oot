@@ -24,7 +24,8 @@ obj-m += tquic_coupled.o
 obj-m += tquic_bbrv2.o
 obj-m += tquic_prague.o
 obj-m += tquic_l4s.o
-obj-m += tquic_accecn.o
+# AccECN is experimental; pass CONFIG_TQUIC_ACCECN_EXPERIMENTAL=m to enable.
+obj-$(CONFIG_TQUIC_ACCECN_EXPERIMENTAL) += tquic_accecn.o
 obj-m += tquic_multipath.o
 obj-m += tquic_crypto.o
 

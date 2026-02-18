@@ -86,7 +86,6 @@ tquic-y := \
 	cong/copa.o \
 	cong/westwood.o \
 	cong/l4s.o \
-	cong/accecn.o \
 	core/varint.o \
 	core/connection.o \
 	core/stream.o \
@@ -158,6 +157,14 @@ tquic-y := \
 	diag/path_metrics.o \
 	diag/tracepoints.o \
 	tquic_debug.o
+
+  # AccECN feedback (experimental) - only built when explicitly enabled.
+  # Out-of-tree builds must pass CONFIG_TQUIC_ACCECN_EXPERIMENTAL=m on the
+  # make command line to include this module.
+  ifdef CONFIG_TQUIC_ACCECN_EXPERIMENTAL
+    obj-m += tquic_accecn.o
+    tquic_accecn-y := cong/accecn.o
+  endif
 
   # io_uring integration requires kernel-internal io_uring headers;
   # only available when building against a kernel with CONFIG_TQUIC_IO_URING.

@@ -303,15 +303,18 @@ config TQUIC_L4S
 
 	  If unsure, say M.
 
-config TQUIC_ACCECN
-	tristate "TQUIC Accurate ECN Feedback (AccECN)"
+config TQUIC_ACCECN_EXPERIMENTAL
+	tristate "TQUIC Accurate ECN Feedback (AccECN) [EXPERIMENTAL]"
 	depends on TQUIC_CORE
 	depends on TQUIC_CONG
-	default m
+	default n
 	help
-	  Enable Accurate ECN (AccECN) feedback for TQUIC. AccECN provides
-	  accurate per-packet ECN feedback, enabling scalable congestion
-	  control algorithms like Prague.
+	  EXPERIMENTAL: Enable Accurate ECN (AccECN) feedback for TQUIC.
+	  AccECN provides accurate per-packet ECN feedback, enabling
+	  scalable congestion control algorithms like Prague.
+
+	  This is an experimental extension that is not yet standardised.
+	  Do not enable in production unless you know what you are doing.
 
 	  Standard ECN only reports whether CE marks were seen.
 	  AccECN reports:
@@ -330,7 +333,7 @@ config TQUIC_ACCECN
 	  To compile this as a module, choose M here: the module will
 	  be called tquic_accecn.
 
-	  If unsure, say M.
+	  If unsure, say N.
 
 endif # TQUIC_CONG_ADVANCED
 

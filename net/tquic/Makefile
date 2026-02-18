@@ -194,8 +194,8 @@ tquic_prague-y := cong/prague.o
 obj-$(CONFIG_TQUIC_L4S) += tquic_l4s.o
 tquic_l4s-y := cong/l4s.o
 
-# AccECN feedback
-obj-$(CONFIG_TQUIC_ACCECN) += tquic_accecn.o
+# AccECN feedback (experimental)
+obj-$(CONFIG_TQUIC_ACCECN_EXPERIMENTAL) += tquic_accecn.o
 tquic_accecn-y := cong/accecn.o
 
 # BDP Frame Extension (draft-kuhn-quic-bdpframe-extension-05)
