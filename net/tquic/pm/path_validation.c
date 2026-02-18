@@ -372,6 +372,10 @@ int tquic_path_handle_response(struct tquic_connection *conn,
 	 * If recovering from UNAVAILABLE, restore saved state but only if
 	 * it was a valid operational state. TQUIC_PATH_PENDING must not be
 	 * restored as it would skip the completed validation.
+	 *
+	 * RFC 9000 Section 9.3: When a new path is validated after
+	 * peer-initiated migration, update conn->active_path so the
+	 * endpoint uses the validated path for subsequent traffic.
 	 */
 	if (path->saved_state == TQUIC_PATH_ACTIVE ||
 	    path->saved_state == TQUIC_PATH_STANDBY ||
@@ -383,6 +387,21 @@ int tquic_path_handle_response(struct tquic_connection *conn,
 	} else {
 		path->state = TQUIC_PATH_ACTIVE;
 		path->saved_state = TQUIC_PATH_UNUSED;
+	}
+
+	/*
+	 * If this path became ACTIVE (either from saved_state or the
+	 * default branch above), promote it to conn->active_path and
+	 * demote the previous active path to STANDBY.
+	 */
+	if (path->state == TQUIC_PATH_ACTIVE) {
+		struct tquic_path *old_active;
+
+		old_active = rcu_dereference_protected(conn->active_path,
+			lockdep_is_held(&conn->paths_lock));
+		rcu_assign_pointer(conn->active_path, path);
+		if (old_active && old_active != path)
+			old_active->state = TQUIC_PATH_STANDBY;
 	}
 
 	path->validation.challenge_pending = false;
