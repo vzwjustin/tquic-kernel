@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 /* TQUIC - Multipath QUIC WAN Bonding
  *
  * TQUIC Netlink interface for userspace control
