@@ -473,7 +473,14 @@ int tquic_connect(struct sock *sk, tquic_sockaddr_t *uaddr, int addr_len)
 		((struct sockaddr_in6 *)&tsk->bind_addr)->sin6_port =
 			bound6.sin6_port;
 
-		/* Initialize deferred packet processing */
+		/*
+		 * Initialize deferred packet processing.  Drain any work item
+		 * left over from a previous failed connect attempt before
+		 * reinitialising the work_struct — calling INIT_WORK on a
+		 * pending item corrupts workqueue state (mirrors IPv4 path).
+		 */
+		cancel_work_sync(&tsk->listener_work);
+		skb_queue_purge(&tsk->listener_queue);
 		skb_queue_head_init(&tsk->listener_queue);
 		INIT_WORK(&tsk->listener_work, tquic_listener_work_handler);
 

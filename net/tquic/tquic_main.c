@@ -409,14 +409,14 @@ int tquic_conn_add_path(struct tquic_connection *conn,
 	else if (local->sa_family == AF_INET6)
 		memcpy(&path->local_addr, local, sizeof(struct sockaddr_in6));
 	else
-		memcpy(&path->local_addr, local, sizeof(struct sockaddr_storage));
+		goto err_afnosupport;
 
 	if (remote->sa_family == AF_INET)
 		memcpy(&path->remote_addr, remote, sizeof(struct sockaddr_in));
 	else if (remote->sa_family == AF_INET6)
 		memcpy(&path->remote_addr, remote, sizeof(struct sockaddr_in6));
 	else
-		memcpy(&path->remote_addr, remote, sizeof(struct sockaddr_storage));
+		goto err_afnosupport;
 
 	/* Initialize stats */
 	memset(&path->stats, 0, sizeof(path->stats));
@@ -500,6 +500,10 @@ int tquic_conn_add_path(struct tquic_connection *conn,
 	}
 
 	return path->path_id;
+
+err_afnosupport:
+	kmem_cache_free(tquic_path_cache, path);
+	return -EAFNOSUPPORT;
 }
 EXPORT_SYMBOL_GPL(tquic_conn_add_path);
 

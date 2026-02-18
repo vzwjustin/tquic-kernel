@@ -1407,15 +1407,20 @@ void tquic_path_validation_expired(struct timer_list *t)
 	struct tquic_path *path = from_timer(path, t, validation_timer);
 	struct tquic_connection *conn;
 
-	/* Get connection from path - use READ_ONCE for safe access */
+	/*
+	 * Get connection from path under rcu_read_lock to ensure that
+	 * the path struct itself is not freed between the READ_ONCE and
+	 * the refcount_inc_not_zero.  Paths are freed via kfree_rcu so
+	 * an rcu_read_lock window keeps the path alive for the whole
+	 * pointer-to-refcount sequence.
+	 */
+	rcu_read_lock();
 	conn = READ_ONCE(path->conn);
-
-	if (!conn)
+	if (!conn || !refcount_inc_not_zero(&conn->refcnt)) {
+		rcu_read_unlock();
 		return;
-
-	/* Ensure connection is still alive before accessing */
-	if (!refcount_inc_not_zero(&conn->refcnt))
-		return;
+	}
+	rcu_read_unlock();
 
 	spin_lock_bh(&conn->lock);
 
