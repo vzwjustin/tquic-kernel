@@ -301,8 +301,8 @@ static struct coupled_path_state *coupled_find_path(struct coupled_cc_ctx *ctx,
  *
  * Returns 0 on success, negative error on failure.
  */
-int coupled_cc_add_path(struct coupled_cc_ctx *ctx, u8 path_id, u64 cwnd,
-			u64 rtt_us)
+static int coupled_cc_add_path(struct coupled_cc_ctx *ctx, u8 path_id,
+			       u64 cwnd, u64 rtt_us)
 {
 	struct coupled_path_state *path;
 
@@ -344,14 +344,12 @@ int coupled_cc_add_path(struct coupled_cc_ctx *ctx, u8 path_id, u64 cwnd,
 
 	return 0;
 }
-EXPORT_SYMBOL_GPL(coupled_cc_add_path);
-
 /**
  * coupled_cc_remove_path - Remove a path from coupled CC
  * @ctx: Coupled CC context
  * @path_id: Path identifier
  */
-void coupled_cc_remove_path(struct coupled_cc_ctx *ctx, u8 path_id)
+static void coupled_cc_remove_path(struct coupled_cc_ctx *ctx, u8 path_id)
 {
 	struct coupled_path_state *path;
 	int i, idx = -1;
@@ -388,8 +386,6 @@ void coupled_cc_remove_path(struct coupled_cc_ctx *ctx, u8 path_id)
 
 	pr_debug("path %u removed from coupled CC\n", path_id);
 }
-EXPORT_SYMBOL_GPL(coupled_cc_remove_path);
-
 /**
  * coupled_cc_update_path - Update path state after RTT/cwnd change
  * @ctx: Coupled CC context
@@ -397,8 +393,8 @@ EXPORT_SYMBOL_GPL(coupled_cc_remove_path);
  * @cwnd: New congestion window
  * @rtt_us: New RTT in microseconds
  */
-void coupled_cc_update_path(struct coupled_cc_ctx *ctx, u8 path_id, u64 cwnd,
-			    u64 rtt_us)
+static void coupled_cc_update_path(struct coupled_cc_ctx *ctx, u8 path_id,
+				   u64 cwnd, u64 rtt_us)
 {
 	struct coupled_path_state *path;
 	u64 old_cwnd;
@@ -445,8 +441,6 @@ void coupled_cc_update_path(struct coupled_cc_ctx *ctx, u8 path_id, u64 cwnd,
 
 	spin_unlock_bh(&ctx->lock);
 }
-EXPORT_SYMBOL_GPL(coupled_cc_update_path);
-
 /*
  * ============================================================================
  * Coupled Congestion Control Operations
@@ -468,8 +462,8 @@ EXPORT_SYMBOL_GPL(coupled_cc_update_path);
  * This ensures the aggregate increase across all paths is at most
  * what a single TCP flow would achieve.
  */
-u64 coupled_cc_increase(struct coupled_cc_ctx *ctx, u8 path_id, u64 acked_bytes,
-			u32 mss)
+static u64 coupled_cc_increase(struct coupled_cc_ctx *ctx, u8 path_id,
+			       u64 acked_bytes, u32 mss)
 {
 	struct coupled_path_state *path;
 	u64 increase;
@@ -531,8 +525,6 @@ increase_done:
 
 	return increase;
 }
-EXPORT_SYMBOL_GPL(coupled_cc_increase);
-
 /**
  * coupled_cc_decrease - Handle loss event (standard halving)
  * @ctx: Coupled CC context
@@ -541,7 +533,7 @@ EXPORT_SYMBOL_GPL(coupled_cc_increase);
  * LIA uses standard AIMD decrease: cwnd = cwnd / 2
  * This is NOT coupled - each path responds independently to loss.
  */
-void coupled_cc_decrease(struct coupled_cc_ctx *ctx, u8 path_id)
+static void coupled_cc_decrease(struct coupled_cc_ctx *ctx, u8 path_id)
 {
 	struct coupled_path_state *path;
 	u64 old_cwnd, new_cwnd;
@@ -572,8 +564,6 @@ void coupled_cc_decrease(struct coupled_cc_ctx *ctx, u8 path_id)
 	pr_debug("path %u: loss response cwnd %llu -> %llu\n", path_id,
 		 old_cwnd, new_cwnd);
 }
-EXPORT_SYMBOL_GPL(coupled_cc_decrease);
-
 /**
  * coupled_cc_update_rtt - Update RTT for a path
  * @ctx: Coupled CC context
@@ -582,7 +572,8 @@ EXPORT_SYMBOL_GPL(coupled_cc_decrease);
  *
  * RTT updates trigger alpha recalculation since alpha depends on RTT.
  */
-void coupled_cc_update_rtt(struct coupled_cc_ctx *ctx, u8 path_id, u64 rtt_us)
+static void coupled_cc_update_rtt(struct coupled_cc_ctx *ctx, u8 path_id,
+				  u64 rtt_us)
 {
 	struct coupled_path_state *path;
 
@@ -612,8 +603,6 @@ void coupled_cc_update_rtt(struct coupled_cc_ctx *ctx, u8 path_id, u64 rtt_us)
 
 	spin_unlock_bh(&ctx->lock);
 }
-EXPORT_SYMBOL_GPL(coupled_cc_update_rtt);
-
 /*
  * ============================================================================
  * Context Lifecycle
@@ -721,11 +710,10 @@ EXPORT_SYMBOL_GPL(coupled_cc_disable);
  *
  * Returns true if coupled CC is active.
  */
-bool coupled_cc_is_enabled(struct coupled_cc_ctx *ctx)
+static bool coupled_cc_is_enabled(struct coupled_cc_ctx *ctx)
 {
 	return ctx && ctx->enabled;
 }
-EXPORT_SYMBOL_GPL(coupled_cc_is_enabled);
 
 /*
  * ============================================================================
@@ -748,8 +736,9 @@ EXPORT_SYMBOL_GPL(coupled_cc_is_enabled);
  * This wraps the base CC on_ack to apply coupled increase.
  * If cc is NULL, updates only the internal coupled CC tracking.
  */
-void coupled_cc_on_ack(struct coupled_cc_ctx *ctx, struct tquic_cc_state *cc,
-		       u8 path_id, u64 acked_bytes, struct tquic_rtt *rtt)
+static void coupled_cc_on_ack(struct coupled_cc_ctx *ctx,
+			      struct tquic_cc_state *cc, u8 path_id,
+			      u64 acked_bytes, struct tquic_rtt *rtt)
 {
 	u64 coupled_delta;
 	struct coupled_path_state *path_state;
@@ -800,8 +789,6 @@ void coupled_cc_on_ack(struct coupled_cc_ctx *ctx, struct tquic_cc_state *cc,
 	coupled_cc_update_path(ctx, path_id, cc->cwnd + coupled_delta,
 			       rtt ? rtt->smoothed_rtt : 0);
 }
-EXPORT_SYMBOL_GPL(coupled_cc_on_ack);
-
 /**
  * coupled_cc_on_loss - Process loss with coupled congestion control
  * @ctx: Coupled CC context
@@ -811,8 +798,8 @@ EXPORT_SYMBOL_GPL(coupled_cc_on_ack);
  * Loss handling is NOT coupled - each path responds independently.
  * This updates the coupled state to reflect the loss.
  */
-void coupled_cc_on_loss(struct coupled_cc_ctx *ctx, struct tquic_cc_state *cc,
-			u8 path_id)
+static void coupled_cc_on_loss(struct coupled_cc_ctx *ctx,
+			       struct tquic_cc_state *cc, u8 path_id)
 {
 	if (!ctx || !ctx->enabled)
 		return;
@@ -822,8 +809,6 @@ void coupled_cc_on_loss(struct coupled_cc_ctx *ctx, struct tquic_cc_state *cc,
 	/* Update coupled state with new cwnd after loss */
 	coupled_cc_decrease(ctx, path_id);
 }
-EXPORT_SYMBOL_GPL(coupled_cc_on_loss);
-
 /*
  * ============================================================================
  * Statistics and Debugging
@@ -831,12 +816,26 @@ EXPORT_SYMBOL_GPL(coupled_cc_on_loss);
  */
 
 /**
+ * struct coupled_cc_stats - Coupled CC statistics for reporting
+ */
+struct coupled_cc_stats {
+	bool		enabled;
+	int		num_paths;
+	u64		total_cwnd;
+	u64		alpha;
+	u64		min_rtt_us;
+	u64		max_rtt_us;
+	u64		coupled_increases;
+	u64		alpha_updates;
+};
+
+/**
  * coupled_cc_get_stats - Get current coupled CC statistics
  * @ctx: Coupled CC context
  * @stats: Output statistics structure
  */
-void coupled_cc_get_stats(struct coupled_cc_ctx *ctx,
-			  struct coupled_cc_stats *stats)
+static void coupled_cc_get_stats(struct coupled_cc_ctx *ctx,
+				 struct coupled_cc_stats *stats)
 {
 	tquic_dbg("coupled_cc_get_stats: retrieving coupled CC statistics\n");
 
@@ -858,15 +857,13 @@ void coupled_cc_get_stats(struct coupled_cc_ctx *ctx,
 
 	spin_unlock_bh(&ctx->lock);
 }
-EXPORT_SYMBOL_GPL(coupled_cc_get_stats);
-
 /**
  * coupled_cc_get_alpha - Get current alpha value
  * @ctx: Coupled CC context
  *
  * Returns alpha scaled by COUPLED_ALPHA_SCALE.
  */
-u64 coupled_cc_get_alpha(struct coupled_cc_ctx *ctx)
+static u64 coupled_cc_get_alpha(struct coupled_cc_ctx *ctx)
 {
 	u64 alpha;
 
@@ -880,15 +877,13 @@ u64 coupled_cc_get_alpha(struct coupled_cc_ctx *ctx)
 	tquic_dbg("coupled_cc_get_alpha: alpha=%llu\n", alpha);
 	return alpha;
 }
-EXPORT_SYMBOL_GPL(coupled_cc_get_alpha);
-
 /**
  * coupled_cc_get_total_cwnd - Get total cwnd across all paths
  * @ctx: Coupled CC context
  *
  * Returns sum of all path congestion windows.
  */
-u64 coupled_cc_get_total_cwnd(struct coupled_cc_ctx *ctx)
+static u64 coupled_cc_get_total_cwnd(struct coupled_cc_ctx *ctx)
 {
 	u64 total;
 
@@ -902,8 +897,6 @@ u64 coupled_cc_get_total_cwnd(struct coupled_cc_ctx *ctx)
 	tquic_dbg("coupled_cc_get_total_cwnd: total=%llu\n", total);
 	return total;
 }
-EXPORT_SYMBOL_GPL(coupled_cc_get_total_cwnd);
-
 /*
  * ============================================================================
  * OLIA (Opportunistic LIA) Variant
@@ -928,8 +921,8 @@ EXPORT_SYMBOL_GPL(coupled_cc_get_total_cwnd);
  *
  * Returns: Number of bytes to increase cwnd by
  */
-u64 olia_cc_increase(struct coupled_cc_ctx *ctx, u8 path_id, u64 acked_bytes,
-		     u32 mss)
+static u64 olia_cc_increase(struct coupled_cc_ctx *ctx, u8 path_id,
+			    u64 acked_bytes, u32 mss)
 {
 	struct coupled_path_state *path;
 	u64 increase;
@@ -1043,8 +1036,6 @@ u64 olia_cc_increase(struct coupled_cc_ctx *ctx, u8 path_id, u64 acked_bytes,
 
 	return increase;
 }
-EXPORT_SYMBOL_GPL(olia_cc_increase);
-
 /*
  * ============================================================================
  * Module Initialization
