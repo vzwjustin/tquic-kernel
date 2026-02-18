@@ -777,6 +777,17 @@ void tquic_loss_detection_on_ack_received(struct tquic_connection *conn,
 				      path->rtt.latest_rtt, path->rtt.min_rtt,
 				      path->rtt.smoothed_rtt, path->rtt.rtt_var);
 
+		/*
+		 * Propagate measured RTT to timer subsystem so that
+		 * tquic_get_pto_duration() uses real values instead of
+		 * the 333ms initial fallback (RFC 9002 §6.2.4).
+		 */
+		if (conn->timer_state)
+			tquic_timer_update_rtt(conn->timer_state,
+					       path->rtt.smoothed_rtt,
+					       path->rtt.rtt_var,
+					       path->rtt.latest_rtt);
+
 		/* Update path CC statistics */
 		path->cc.smoothed_rtt_us = path->rtt.smoothed_rtt;
 		path->cc.rtt_var_us = path->rtt.rtt_var;

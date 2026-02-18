@@ -224,11 +224,24 @@ void tquic_path_validation_expired(struct timer_list *t);
 static u64 tquic_get_pto_duration(struct tquic_recovery_state *recovery,
 				  int pn_space)
 {
-	u64 pto;
+	u64 srtt, rttvar, pto;
+
+	/*
+	 * RFC 9002 §6.2.4: Before the first RTT sample, use the initial
+	 * RTT (333ms) and initial variance (333ms/2), producing a ~1s PTO
+	 * matching TCP's initial RTO.  After the first sample, use the
+	 * measured values propagated from path->rtt via tquic_timer_update_rtt.
+	 */
+	if (recovery->has_rtt_sample) {
+		srtt   = recovery->smoothed_rtt;
+		rttvar = recovery->rtt_variance;
+	} else {
+		srtt   = TQUIC_INITIAL_RTT_US;
+		rttvar = TQUIC_INITIAL_RTT_US / 2;
+	}
 
 	/* PTO = smoothed_rtt + max(4 * rtt_variance, granularity) + max_ack_delay */
-	pto = recovery->smoothed_rtt +
-	      max(4 * recovery->rtt_variance, (u64)TQUIC_TIMER_GRANULARITY_US);
+	pto = srtt + max(4 * rttvar, (u64)TQUIC_TIMER_GRANULARITY_US);
 
 	/* Include max_ack_delay only for application data */
 	if (pn_space == TQUIC_PN_SPACE_APPLICATION)
@@ -1798,6 +1811,40 @@ void tquic_timer_on_ack_processed(struct tquic_timer_state *ts, int pn_space,
 	tquic_timer_reset_idle(ts);
 }
 EXPORT_SYMBOL_GPL(tquic_timer_on_ack_processed);
+
+/**
+ * tquic_timer_update_rtt - Propagate measured RTT into timer recovery state
+ * @ts: Timer state
+ * @smoothed_rtt: Smoothed RTT from path->rtt.smoothed_rtt (us)
+ * @rtt_variance: RTT variance from path->rtt.rtt_var (us)
+ * @latest_rtt: Latest RTT sample from path->rtt.latest_rtt (us)
+ *
+ * Called by core/quic_loss.c immediately after tquic_rtt_update() to keep
+ * the timer's recovery state in sync with the authoritative path RTT.
+ * Sets has_rtt_sample so tquic_get_pto_duration() stops using the 333ms
+ * initial fallback and uses the measured values instead.
+ *
+ * Does NOT perform RTT estimation or CC notification; those remain in
+ * core/quic_loss.c to avoid dual invocation.
+ */
+void tquic_timer_update_rtt(struct tquic_timer_state *ts, u64 smoothed_rtt,
+			    u64 rtt_variance, u64 latest_rtt)
+{
+	struct tquic_recovery_state *rs;
+
+	if (!ts || !ts->recovery)
+		return;
+
+	rs = ts->recovery;
+
+	spin_lock_bh(&rs->lock);
+	rs->smoothed_rtt   = smoothed_rtt;
+	rs->rtt_variance   = rtt_variance;
+	rs->latest_rtt     = latest_rtt;
+	rs->has_rtt_sample = true;
+	spin_unlock_bh(&rs->lock);
+}
+EXPORT_SYMBOL_GPL(tquic_timer_update_rtt);
 
 /*
  * ============================================================================

@@ -3212,6 +3212,10 @@ int tquic_timer_on_packet_sent(struct tquic_timer_state *ts, int pn_space,
 void tquic_timer_on_ack_processed(struct tquic_timer_state *ts, int pn_space,
 				  u64 largest_acked);
 
+/* RTT propagation — call after tquic_rtt_update() to feed PTO calculation */
+void tquic_timer_update_rtt(struct tquic_timer_state *ts, u64 smoothed_rtt,
+			    u64 rtt_variance, u64 latest_rtt);
+
 /* Timer subsystem initialization */
 int __init tquic_timer_init(void);
 void tquic_timer_exit(void);
