@@ -583,6 +583,7 @@ static void tquic_conn_tx_work(struct work_struct *work)
 	 */
 	pacing_enabled = conn->timer_state &&
 			 conn->tsk && conn->tsk->pacing_enabled &&
+			 conn->sk &&
 			 tquic_net_get_pacing_enabled(sock_net(conn->sk));
 	tquic_dbg("tx_work: pacing_enabled=%d\n", pacing_enabled);
 

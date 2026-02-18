@@ -1655,10 +1655,17 @@ static void tquic_timer_work_fn(struct work_struct *work)
 		tquic_dbg("timer:pacing: fired, queue_depth=%d\n",
 			  skb_queue_len(&conn->pacing_queue));
 
-		/* Drain any packets queued by tquic_pacing_queue_packet() */
-		while ((pacing_skb = skb_dequeue(&conn->pacing_queue)) != NULL) {
+		/* Release one packet per timer firing to maintain pacing. */
+		pacing_skb = skb_dequeue(&conn->pacing_queue);
+		if (pacing_skb) {
+			u32 pkt_len = pacing_skb->len;
+
 			tquic_output(conn, pacing_skb);
-			drained++;
+			drained = 1;
+
+			/* Re-arm timer for remaining queued packets. */
+			if (!skb_queue_empty(&conn->pacing_queue))
+				tquic_timer_schedule_pacing(ts, pkt_len);
 		}
 
 		tquic_dbg("timer:pacing: drained %d queued packets\n", drained);

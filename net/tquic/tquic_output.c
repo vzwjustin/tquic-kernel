@@ -1560,8 +1560,9 @@ void tquic_update_pacing(struct sock *sk, struct tquic_path *path)
 	if (!tquic_pernet(net)->pacing_enabled)
 		return;
 
-	/* Check if pacing is enabled per-socket (if field exists) */
-	/* Per-socket pacing_enabled would be checked here */
+	/* Check if pacing is enabled per-socket */
+	if (!tsk->pacing_enabled)
+		return;
 
 	pacing_rate = tquic_cong_get_pacing_rate(path);
 
