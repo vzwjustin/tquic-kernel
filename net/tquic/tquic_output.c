@@ -2071,9 +2071,13 @@ int tquic_output_packet(struct tquic_connection *conn,
 	local = (struct sockaddr_in *)&path->local_addr;
 	remote = (struct sockaddr_in *)&path->remote_addr;
 
-	/* Check if ECN is enabled for this connection */
-	if (conn && conn->sk)
-		net = sock_net(conn->sk);
+	/*
+	 * Snapshot conn->sk once.  Teardown paths write NULL to conn->sk
+	 * under sk_callback_lock; without a snapshot, a concurrent teardown
+	 * could null it between the guard check and the dereference below.
+	 */
+	if (conn && READ_ONCE(conn->sk))
+		net = sock_net(READ_ONCE(conn->sk));
 
 	/* Setup flow */
 	memset(&fl4, 0, sizeof(fl4));
@@ -2103,6 +2107,12 @@ int tquic_output_packet(struct tquic_connection *conn,
 
 	/* Determine TOS for ECN marking and send */
 	{
+		/*
+		 * Snapshot conn->sk inside this block so all uses below see the
+		 * same value.  Teardown paths may set conn->sk = NULL between
+		 * any two bare reads of the field.
+		 */
+		struct sock *csk = conn ? READ_ONCE(conn->sk) : NULL;
 		u8 tos = 0;
 		__be32 saddr = fl4.saddr;
 		__be16 sport = local->sin_port;
@@ -2115,8 +2125,8 @@ int tquic_output_packet(struct tquic_connection *conn,
 		 * use the socket's automatically assigned source port.
 		 * If the socket has no port either, pick an ephemeral one.
 		 */
-		if (!sport && conn->sk)
-			sport = inet_sk(conn->sk)->inet_sport;
+		if (!sport && csk)
+			sport = inet_sk(csk)->inet_sport;
 		if (!sport)
 			sport = htons(get_random_u32_below(16384) + 49152);
 
@@ -2127,7 +2137,7 @@ int tquic_output_packet(struct tquic_connection *conn,
 		}
 
 		/* Apply pacing EDT timestamp for FQ qdisc */
-		tquic_pacing_allows_send(conn->sk, skb);
+		tquic_pacing_allows_send(csk, skb);
 
 		/* Set ECN marking for IPv6 (IPv4 handled via flowi4) */
 		tquic_set_ecn_marking(skb, conn);
@@ -2140,7 +2150,7 @@ int tquic_output_packet(struct tquic_connection *conn,
 		 * This builds the UDP header, IP header, and transmits
 		 * the packet correctly through the network stack.
 		 */
-		TQUIC_UDP_TUNNEL_XMIT_SKB(rt, conn->sk, skb,
+		TQUIC_UDP_TUNNEL_XMIT_SKB(rt, csk, skb,
 					   saddr,
 					   remote->sin_addr.s_addr,
 					   tos,
@@ -2157,10 +2167,10 @@ int tquic_output_packet(struct tquic_connection *conn,
 		path->stats.tx_bytes += skb_len;
 		WRITE_ONCE(path->last_activity, ktime_get());
 
-		if (conn && conn->sk) {
-			TQUIC_INC_STATS(sock_net(conn->sk),
+		if (csk) {
+			TQUIC_INC_STATS(sock_net(csk),
 					TQUIC_MIB_PACKETSTX);
-			TQUIC_ADD_STATS(sock_net(conn->sk),
+			TQUIC_ADD_STATS(sock_net(csk),
 					TQUIC_MIB_BYTESTX, skb_len);
 		}
 	}

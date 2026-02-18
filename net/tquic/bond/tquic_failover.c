@@ -712,6 +712,15 @@ int tquic_failover_on_path_failed(struct tquic_failover_ctx *fc, u8 path_id)
 	if (!fc)
 		return 0;
 
+	/*
+	 * Guard against concurrent teardown.  tquic_failover_destroy() sets
+	 * fc->destroyed before tearing down the rhashtable.  A path-failure
+	 * callback that races with destroy could otherwise walk a half-torn-down
+	 * table, causing corruption or UAF.
+	 */
+	if (atomic_read(&fc->destroyed))
+		return 0;
+
 	start = ktime_get();
 
 	pr_info("path %u failed, requeuing unacked packets\n", path_id);

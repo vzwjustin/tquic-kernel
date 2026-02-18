@@ -947,6 +947,20 @@ void tquic_conn_destroy(struct tquic_connection *conn)
 	for (i = 0; i < TQUIC_TIMER_MAX; i++)
 		del_timer_sync(&conn->timers[i]);
 
+	/*
+	 * Cancel timer-state workqueue items before conn->tx_work.
+	 * tquic_timer_work_fn() runs as ts->timer_work and may call
+	 * schedule_work(&conn->tx_work) on its last iteration.  Stopping
+	 * the pacing hrtimer and draining ts->timer_work first guarantees
+	 * that no new tx_work scheduling can happen after we cancel it.
+	 */
+	if (conn->timer_state) {
+		hrtimer_cancel(&conn->timer_state->pacing_timer);
+		cancel_work_sync(&conn->timer_state->timer_work);
+		cancel_work_sync(&conn->timer_state->retransmit_work);
+		cancel_work_sync(&conn->timer_state->path_work);
+	}
+
 	/* Cancel work */
 	cancel_work_sync(&conn->tx_work);
 	cancel_work_sync(&conn->rx_work);

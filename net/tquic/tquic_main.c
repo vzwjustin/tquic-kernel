@@ -175,9 +175,17 @@ void tquic_conn_destroy(struct tquic_connection *conn)
 	/* Remove from global table */
 	rhashtable_remove_fast(&tquic_conn_table, &conn->node, tquic_conn_params);
 
-	/* Free timer state (cancels all timers) */
+	/*
+	 * Free timer state (cancels pacing hrtimer + ts->timer_work).
+	 * tquic_timer_work_fn() may schedule conn->tx_work on its last run,
+	 * so cancel tx/rx/close work AFTER this call to catch any last-moment
+	 * scheduling.
+	 */
 	if (conn->timer_state)
 		tquic_timer_state_free(conn->timer_state);
+	cancel_work_sync(&conn->tx_work);
+	cancel_work_sync(&conn->rx_work);
+	cancel_work_sync(&conn->close_work);
 
 	/* Free all paths */
 	list_for_each_entry_safe(path, tmp_path, &conn->paths, list) {

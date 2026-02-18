@@ -326,7 +326,7 @@ static void *tquic_conn_seq_start(struct seq_file *seq, loff_t *pos)
 		if (IS_ERR(conn))
 			continue;
 		/* Filter by namespace */
-		if (!net_eq(sock_net(conn->sk), iter->net))
+		if (!conn->sk || !net_eq(sock_net(conn->sk), iter->net))
 			continue;
 		if (--skip == 0)
 			return conn;
@@ -355,7 +355,7 @@ static void *tquic_conn_seq_next(struct seq_file *seq, void *v, loff_t *pos)
 		if (IS_ERR(conn))
 			continue;
 		/* Filter by namespace */
-		if (!net_eq(sock_net(conn->sk), iter->net))
+		if (!conn->sk || !net_eq(sock_net(conn->sk), iter->net))
 			continue;
 		return conn;
 	}
