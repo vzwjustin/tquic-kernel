@@ -1985,8 +1985,11 @@ static void tquic_set_ecn_marking(struct sk_buff *skb,
 		return;
 
 	/* Check if ECN is enabled at netns level */
-	if (conn->sk) {
-		net = sock_net(conn->sk);
+	{
+		struct sock *csk = READ_ONCE(conn->sk);
+
+		if (csk)
+			net = sock_net(csk);
 		if (!net || !tquic_pernet(net)->ecn_enabled)
 			return;
 	}
@@ -2076,8 +2079,12 @@ int tquic_output_packet(struct tquic_connection *conn,
 	 * under sk_callback_lock; without a snapshot, a concurrent teardown
 	 * could null it between the guard check and the dereference below.
 	 */
-	if (conn && READ_ONCE(conn->sk))
-		net = sock_net(READ_ONCE(conn->sk));
+	{
+		struct sock *csk = conn ? READ_ONCE(conn->sk) : NULL;
+
+		if (csk)
+			net = sock_net(csk);
+	}
 
 	/* Setup flow */
 	memset(&fl4, 0, sizeof(fl4));

@@ -370,24 +370,31 @@ EXPORT_SYMBOL_GPL(tquic_bonding_init);
  */
 void tquic_bonding_destroy(struct tquic_bonding_ctx *bc)
 {
+	struct tquic_failover_ctx *fc;
+
 	if (!bc)
 		return;
 
-	/* Signal that destruction is in progress so that code which
-	 * drops and reacquires state_lock can detect this and bail out.
+	/*
+	 * Signal destruction and snapshot+clear bc->failover under the lock
+	 * atomically.  Concurrent callers of tquic_bonding_on_path_failed()
+	 * also snapshot bc->failover under state_lock, so once we NULL it
+	 * here they will observe NULL and skip the failover call.  Callers
+	 * that already hold a snapshot see fc->destroyed set by
+	 * tquic_failover_destroy() before kfree(), keeping them safe.
 	 */
 	spin_lock_bh(&bc->state_lock);
 	bc->destroying = true;
+	fc = bc->failover;
+	bc->failover = NULL;
 	spin_unlock_bh(&bc->state_lock);
 
 	/* Cancel pending work */
 	cancel_work_sync(&bc->weight_work);
 
 	/* Free failover context */
-	if (bc->failover) {
-		tquic_failover_destroy(bc->failover);
-		bc->failover = NULL;
-	}
+	if (fc)
+		tquic_failover_destroy(fc);
 
 	/* Free coupled CC context */
 	if (bc->coupled_cc) {
@@ -849,6 +856,7 @@ EXPORT_SYMBOL_GPL(tquic_bonding_on_path_validated);
 void tquic_bonding_on_path_failed(void *ctx, struct tquic_path *path)
 {
 	struct tquic_bonding_ctx *bc = ctx;
+	struct tquic_failover_ctx *fc;
 	u8 path_id;
 	int requeued = 0;
 
@@ -866,14 +874,25 @@ void tquic_bonding_on_path_failed(void *ctx, struct tquic_path *path)
 	bc->failed_path_count++;
 	atomic64_inc(&bc->stats.failover_events);
 
+	/*
+	 * Snapshot bc->failover under state_lock to close the TOCTOU window
+	 * between the pointer check and its use.  tquic_bonding_destroy()
+	 * also NULLs bc->failover under this same lock before calling
+	 * tquic_failover_destroy(), so a concurrent destroy will either:
+	 *   (a) run first  → we see fc == NULL and skip; or
+	 *   (b) run after  → fc->destroyed is set before kfree(), so the
+	 *       entry guard in tquic_failover_on_path_failed() bails early.
+	 */
+	fc = bc->failover;
+
 	spin_unlock_bh(&bc->state_lock);
 
 	/*
 	 * Trigger failover: requeue all unacked packets from this path
 	 * to the retransmit queue for transmission on remaining paths.
 	 */
-	if (bc->failover) {
-		requeued = tquic_failover_on_path_failed(bc->failover, path_id);
+	if (fc) {
+		requeued = tquic_failover_on_path_failed(fc, path_id);
 		pr_info("path %u failed: active=%d failed=%d requeued=%d\n",
 			path_id, bc->active_path_count, bc->failed_path_count,
 			requeued);

@@ -581,10 +581,14 @@ static void tquic_conn_tx_work(struct work_struct *work)
 	 * All three conditions must be true: timer infrastructure ready,
 	 * socket-level pacing flag set, and netns sysctl enabled.
 	 */
-	pacing_enabled = conn->timer_state &&
-			 conn->tsk && conn->tsk->pacing_enabled &&
-			 conn->sk &&
-			 tquic_net_get_pacing_enabled(sock_net(conn->sk));
+	{
+		struct sock *csk = READ_ONCE(conn->sk);
+
+		pacing_enabled = conn->timer_state &&
+				 conn->tsk && conn->tsk->pacing_enabled &&
+				 csk &&
+				 tquic_net_get_pacing_enabled(sock_net(csk));
+	}
 	tquic_dbg("tx_work: pacing_enabled=%d\n", pacing_enabled);
 
 	/*
