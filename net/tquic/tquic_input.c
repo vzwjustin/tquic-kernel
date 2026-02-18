@@ -401,7 +401,7 @@ static bool tquic_is_stateless_reset_internal(struct tquic_connection *conn,
  */
 static void tquic_handle_stateless_reset(struct tquic_connection *conn)
 {
-	tquic_info("received stateless reset for connection\n");
+	pr_info_ratelimited("tquic: received stateless reset for connection\n");
 
 	/*
 	 * Use the proper state machine transition instead of directly

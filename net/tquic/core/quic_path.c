@@ -614,6 +614,9 @@ int tquic_path_migrate(struct tquic_connection *conn, struct tquic_path *path)
 		TQUIC_INC_STATS(sock_net(conn->sk),
 				TQUIC_MIB_PATHMIGRATIONS);
 
+	/* Notify bonding layer so it can rebalance schedulers */
+	tquic_bond_path_recovered(conn, path);
+
 	return 0;
 }
 

@@ -406,4 +406,4 @@ void tquic_sched_aggregate_exit(void)
 	tquic_mp_unregister_scheduler(&tquic_mp_sched_aggregate);
 }
 
-/* Note: module_init/exit handled by main protocol.c */
+/* Note: module_init/exit handled by tquic_main.c */
