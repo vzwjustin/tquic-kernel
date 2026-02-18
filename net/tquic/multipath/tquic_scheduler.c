@@ -298,7 +298,7 @@ static struct tquic_path *tquic_path_add(struct tquic_connection *conn,
                                          u8 path_id, int ifindex, gfp_t gfp);
 static void tquic_path_remove(struct tquic_connection *conn, u8 path_id);
 bool tquic_sched_has_failover_pending(struct tquic_failover_ctx *fc);
-struct tquic_sent_packet *tquic_sched_get_failover_packet(
+struct tquic_failover_packet *tquic_sched_get_failover_packet(
 		struct tquic_failover_ctx *fc);
 static void tquic_sched_feedback(struct tquic_connection *conn,
 				 const struct tquic_sched_feedback *fb);
@@ -2180,7 +2180,7 @@ EXPORT_SYMBOL_GPL(tquic_sched_has_failover_pending);
  * Returns the next packet to retransmit, or NULL if queue is empty.
  * Caller should retransmit this packet before sending new data.
  */
-struct tquic_sent_packet *tquic_sched_get_failover_packet(struct tquic_failover_ctx *fc)
+struct tquic_failover_packet *tquic_sched_get_failover_packet(struct tquic_failover_ctx *fc)
 {
 	return tquic_failover_get_next(fc);
 }

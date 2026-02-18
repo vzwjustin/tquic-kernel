@@ -1477,6 +1477,14 @@ static int tquic_migration_handle_path_response(struct tquic_connection *conn,
 	tquic_info("migration validated for path %u (RTT: %u us)\n",
 		   path->path_id, ms->probe_rtt);
 
+	/*
+	 * Notify userspace that a migrated path has become active.
+	 * Called outside ms->lock to avoid lock ordering issues with
+	 * the netlink layer's per-namespace conn_lock.
+	 * conn->sk is valid for the lifetime of this function call.
+	 */
+	tquic_nl_path_event(conn, path, TQUIC_PATH_EVENT_ACTIVE);
+
 	/* Schedule deferred migration completion */
 	schedule_work(&ms->work);
 

@@ -2400,6 +2400,13 @@ static void tquic_server_handshake_done(void *data, int status,
 		/* Initialize path manager for server-side connection */
 		tquic_pm_conn_init(conn);
 
+		/* Start idle timeout now that the server connection is
+		 * established. Mirrors the identical call in the IPv4 and
+		 * IPv6 client-side connect paths.
+		 */
+		if (conn->timer_state)
+			tquic_timer_set_idle(conn->timer_state);
+
 		/* Find listener and add to accept queue */
 		listener_sk = conn->sk;  /* Listener stored during creation */
 		if (listener_sk && listener_sk != child_sk &&

@@ -489,6 +489,14 @@ int tquic_conn_add_path(struct tquic_connection *conn,
 					path->path_id);
 	} else {
 		path->state = TQUIC_PATH_ACTIVE;
+
+		/*
+		 * Initial path (path_id 0) is validated by the TLS handshake.
+		 * Notify userspace that this path is now active.  conn->sk is
+		 * guaranteed non-NULL for established connections; the netlink
+		 * function guards against it internally.
+		 */
+		tquic_nl_path_event(conn, path, TQUIC_PATH_EVENT_ADD);
 	}
 
 	return path->path_id;
@@ -679,6 +687,18 @@ int tquic_pm_conn_init(struct tquic_connection *conn)
 		 */
 		tquic_dbg("kernel PM initialized with auto_discover\n");
 	}
+
+	/*
+	 * Populate the netlink shadow DB so that userspace GET commands
+	 * (TQUIC_NL_CMD_CONN_GET, TQUIC_NL_CMD_PATH_LIST) can find this
+	 * connection immediately after establishment.  conn->token was
+	 * assigned above; use it as the 64-bit conn_id throughout the
+	 * netlink layer.  Failure is non-fatal: only GET queries are
+	 * affected; multicast events still flow via tquic_nl_path_event().
+	 */
+	if (tquic_nl_conn_register(net, (u64)conn->token) < 0)
+		tquic_warn("netlink shadow DB registration failed for conn %u\n",
+			   conn->token);
 
 	return 0;
 }

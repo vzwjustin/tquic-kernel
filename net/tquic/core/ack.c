@@ -72,47 +72,9 @@
 #define TQUIC_FRAME_ACK_ECN		0x03
 
 /*
- * Packet metadata flags
+ * TQUIC_PKT_FLAG_* constants and struct tquic_sent_packet are defined
+ * canonically in include/net/tquic.h.
  */
-#define TQUIC_PKT_FLAG_ACK_ELICITING	BIT(0)
-#define TQUIC_PKT_FLAG_IN_FLIGHT	BIT(1)
-#define TQUIC_PKT_FLAG_HAS_CRYPTO	BIT(2)
-#define TQUIC_PKT_FLAG_RETRANSMITTABLE	BIT(3)
-#define TQUIC_PKT_FLAG_PATH_CHALLENGE	BIT(4)
-#define TQUIC_PKT_FLAG_PATH_RESPONSE	BIT(5)
-#define TQUIC_PKT_FLAG_MTU_PROBE	BIT(6)
-#define TQUIC_PKT_FLAG_ECN_CE		BIT(7)
-
-/**
- * struct tquic_sent_packet - Metadata for a sent packet
- * @pn: Packet number
- * @sent_time: Time when packet was sent (ktime)
- * @sent_bytes: Size of packet in bytes
- * @flags: Packet flags (ACK-eliciting, in-flight, etc.)
- * @pn_space: Packet number space (Initial, Handshake, Application)
- * @path_id: ID of path this packet was sent on
- * @frames: Bitmask of frame types in this packet
- * @largest_acked: Largest ACK included in this packet (if any)
- * @stream_data: List of stream data ranges included
- * @node: RB-tree node for efficient lookup
- * @list: List node for time-ordered traversal
- */
-struct tquic_sent_packet {
-	u64 pn;
-	ktime_t sent_time;
-	u32 sent_bytes;
-	u32 flags;
-	u8 pn_space;
-	u32 path_id;
-	u32 frames;
-	u64 largest_acked;
-
-	/* Stream data tracking for retransmission */
-	struct list_head stream_data;
-
-	struct rb_node node;
-	struct list_head list;
-};
 
 /**
  * struct tquic_stream_data_range - Range of stream data in a packet

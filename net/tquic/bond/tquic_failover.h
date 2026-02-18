@@ -90,7 +90,7 @@ struct tquic_connection;
  *   3. On path failure: requeued to retransmit queue, removed from table
  *   4. After retransmission: re-added with new send time
  */
-struct tquic_sent_packet {
+struct tquic_failover_packet {
 	/* Hash table linkage */
 	struct rhash_head	hash_node;
 
@@ -117,7 +117,7 @@ struct tquic_sent_packet {
 /*
  * rhashtable params for sent packet tracking
  */
-extern const struct rhashtable_params tquic_sent_packet_params;
+extern const struct rhashtable_params tquic_failover_packet_params;
 
 /*
  * Retransmit queue structure
@@ -126,7 +126,7 @@ extern const struct rhashtable_params tquic_sent_packet_params;
  * Retransmit queue is checked before new data queue.
  */
 struct tquic_retx_queue {
-	struct list_head	queue;		/* List of tquic_sent_packet */
+	struct list_head	queue;		/* List of tquic_failover_packet */
 	spinlock_t		lock;
 	u32			count;		/* Number of packets queued */
 	size_t			bytes;		/* Total bytes queued */
@@ -203,7 +203,7 @@ struct tquic_dedup_state {
  */
 struct tquic_failover_ctx {
 	/* Sent packet tracking (for ACK lookup and failover requeue) */
-	struct rhashtable	sent_packets;	/* pkt_num -> tquic_sent_packet */
+	struct rhashtable	sent_packets;	/* pkt_num -> tquic_failover_packet */
 	spinlock_t		sent_packets_lock;
 	u32			sent_count;	/* Number of tracked packets */
 
@@ -395,7 +395,7 @@ bool tquic_failover_is_path_usable(struct tquic_failover_ctx *fc,
  * Returns: 0 on success, -ENOBUFS if queue full
  */
 int tquic_failover_requeue(struct tquic_failover_ctx *fc,
-			   struct tquic_sent_packet *sp);
+			   struct tquic_failover_packet *sp);
 
 /**
  * tquic_failover_has_pending - Check if retransmit queue has packets
@@ -418,9 +418,9 @@ bool tquic_failover_has_pending(struct tquic_failover_ctx *fc);
  * sp back via tquic_failover_requeue() must NOT call put_packet until
  * the packet is finally retired.
  *
- * Returns: tquic_sent_packet pointer (caller owns it), or NULL
+ * Returns: tquic_failover_packet pointer (caller owns it), or NULL
  */
-struct tquic_sent_packet *tquic_failover_get_next(struct tquic_failover_ctx *fc);
+struct tquic_failover_packet *tquic_failover_get_next(struct tquic_failover_ctx *fc);
 
 /**
  * tquic_failover_put_packet - Release a packet obtained from tquic_failover_get_next
@@ -430,7 +430,7 @@ struct tquic_sent_packet *tquic_failover_get_next(struct tquic_failover_ctx *fc)
  * per packet returned by tquic_failover_get_next() that is not re-queued
  * via tquic_failover_requeue().
  */
-void tquic_failover_put_packet(struct tquic_sent_packet *sp);
+void tquic_failover_put_packet(struct tquic_failover_packet *sp);
 
 /**
  * tquic_failover_retx_count - Get number of packets in retransmit queue

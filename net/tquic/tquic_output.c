@@ -2761,6 +2761,7 @@ int tquic_send_connection_close(struct tquic_connection *conn,
 	struct tquic_path *path;
 	struct sk_buff *skb;
 	u8 buf_stack[256];
+	u32 skb_len;
 	int ret;
 	u64 pkt_num;
 
@@ -2827,7 +2828,19 @@ int tquic_send_connection_close(struct tquic_connection *conn,
 	}
 	skb_put_data(skb, buf_stack, ctx.offset);
 
+	skb_len = skb->len;
 	ret = tquic_output_packet(conn, path, skb);
+
+	/*
+	 * RFC 9002: CONNECTION_CLOSE does not elicit ACKs and is not
+	 * counted against the congestion window.
+	 */
+	if (ret >= 0 && conn->timer_state)
+		tquic_timer_on_packet_sent(conn->timer_state,
+					   TQUIC_PN_SPACE_APPLICATION,
+					   pkt_num, skb_len,
+					   false, false,
+					   BIT(TQUIC_FRAME_CONNECTION_CLOSE));
 
 out_put_path:
 	tquic_path_put(path);
@@ -3110,6 +3123,15 @@ int tquic_output_flush(struct tquic_connection *conn)
 							tquic_loss_detection_on_packet_sent(
 								conn, sent_pkt);
 						}
+
+						/* RFC 9002: drive timer/recovery state */
+						if (conn->timer_state)
+							tquic_timer_on_packet_sent(
+								conn->timer_state,
+								TQUIC_PN_SPACE_APPLICATION,
+								pkt_num, pkt_size,
+								true, true,
+								BIT(TQUIC_FRAME_STREAM));
 					}
 				} else {
 					/* CF-615: Cleanup frame on assembly failure */
@@ -3237,6 +3259,7 @@ int tquic_send_handshake_done(struct tquic_connection *conn)
 	struct sk_buff *skb;
 	LIST_HEAD(frames);
 	u64 pkt_num;
+	u32 skb_len;
 	int ret;
 
 	if (!conn->is_server)
@@ -3270,10 +3293,18 @@ int tquic_send_handshake_done(struct tquic_connection *conn)
 		return -ENOMEM;
 	}
 
+	skb_len = skb->len;
 	ret = tquic_output_packet(conn, path, skb);
 	pr_debug("tquic: sent HANDSHAKE_DONE frame (pkt_num=%llu ret=%d)\n",
 		pkt_num, ret);
 
+	/* RFC 9002: HANDSHAKE_DONE is ack-eliciting and counts against cwnd */
+	if (ret >= 0 && conn->timer_state)
+		tquic_timer_on_packet_sent(conn->timer_state,
+					   TQUIC_PN_SPACE_APPLICATION,
+					   pkt_num, skb_len,
+					   true, true,
+					   BIT(TQUIC_FRAME_HANDSHAKE_DONE));
 	return ret;
 }
 EXPORT_SYMBOL_GPL(tquic_send_handshake_done);
@@ -3296,6 +3327,7 @@ int tquic_xmit_close(struct tquic_connection *conn, u64 error_code,
 	struct sk_buff *skb;
 	LIST_HEAD(frames);
 	u64 pkt_num;
+	u32 skb_len;
 	int ret;
 
 	rcu_read_lock();
@@ -3334,12 +3366,23 @@ int tquic_xmit_close(struct tquic_connection *conn, u64 error_code,
 		return -ENOMEM;
 	}
 
+	skb_len = skb->len;
 	ret = tquic_output_packet(conn, path, skb);
 	tquic_path_put(path);
 
 	pr_debug("tquic: sent CONNECTION_CLOSE (error=%llu ret=%d)\n",
 		 error_code, ret);
 
+	/*
+	 * RFC 9002: CONNECTION_CLOSE does not elicit ACKs and is not
+	 * counted against the congestion window.
+	 */
+	if (ret >= 0 && conn->timer_state)
+		tquic_timer_on_packet_sent(conn->timer_state,
+					   TQUIC_PN_SPACE_APPLICATION,
+					   pkt_num, skb_len,
+					   false, false,
+					   BIT(TQUIC_FRAME_CONNECTION_CLOSE));
 	return ret;
 }
 EXPORT_SYMBOL_GPL(tquic_xmit_close);
@@ -3370,6 +3413,7 @@ int tquic_output_flush_crypto(struct tquic_connection *conn)
 	int space;
 	u64 crypto_offset;
 	int pkt_type;
+	u32 send_skb_len;
 
 	u64 pkt_num;
 	int ret;
@@ -3459,12 +3503,22 @@ int tquic_output_flush_crypto(struct tquic_connection *conn)
 					goto out_put_path;
 				}
 
+				send_skb_len = send_skb->len;
 				ret = tquic_output_packet(conn, path,
 							  send_skb);
 				if (ret < 0) {
 					kfree_skb(crypto_skb);
 					goto out_put_path;
 				}
+
+				/* RFC 9002: CRYPTO frames are ack-eliciting */
+				if (conn->timer_state)
+					tquic_timer_on_packet_sent(
+						conn->timer_state,
+						space, pkt_num,
+						send_skb_len,
+						true, true,
+						BIT(TQUIC_FRAME_CRYPTO));
 
 				chunk_data += chunk;
 				crypto_offset += chunk;
@@ -3636,6 +3690,7 @@ int tquic_send_datagram(struct tquic_connection *conn,
 	u8 *buf;
 	u64 pkt_num;
 	u64 max_size;
+	u32 skb_len;
 	int header_len;
 	int ret;
 
@@ -3761,6 +3816,7 @@ int tquic_send_datagram(struct tquic_connection *conn,
 	}
 
 	/* Send packet */
+	skb_len = skb->len;
 	ret = tquic_output_packet(conn, path, skb);
 	tquic_path_put(path);
 	if (ret >= 0) {
@@ -3772,6 +3828,17 @@ int tquic_send_datagram(struct tquic_connection *conn,
 		/* Update MIB counters */
 		if (conn->sk)
 			TQUIC_INC_STATS(sock_net(conn->sk), TQUIC_MIB_DATAGRAMSTX);
+
+		/*
+		 * RFC 9002 / RFC 9221: DATAGRAM frames are not ack-eliciting
+		 * but do count against the congestion window (in_flight=true).
+		 */
+		if (conn->timer_state)
+			tquic_timer_on_packet_sent(conn->timer_state,
+						   TQUIC_PN_SPACE_APPLICATION,
+						   pkt_num, skb_len,
+						   false, true,
+						   BIT(TQUIC_FRAME_DATAGRAM));
 
 		return len;
 	}

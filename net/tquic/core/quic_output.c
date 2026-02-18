@@ -134,19 +134,9 @@ extern int tquic_crypto_protect_header(void *ctx, struct sk_buff *skb,
 /* Timer types for pacing */
 #define TQUIC_TIMER_PACING	5
 
-/* Sent packet tracking structure */
-struct tquic_sent_packet {
-	struct list_head	list;
-	u64			pn;
-	ktime_t			sent_time;
-	u32			size;
-	u32			ack_eliciting:1;
-	u32			in_flight:1;
-	u32			retransmitted:1;
-	u32			has_crypto:1;
-	u8			pn_space;
-	struct sk_buff		*skb;
-};
+/*
+ * struct tquic_sent_packet is defined canonically in include/net/tquic.h.
+ */
 
 /* Stream info for cmsg */
 struct tquic_stream_info {

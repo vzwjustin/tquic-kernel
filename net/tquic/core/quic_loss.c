@@ -71,26 +71,10 @@ static inline int tquic_conn_queue_frame(struct tquic_connection *conn,
 }
 
 /*
- * struct tquic_sent_packet - Tracks a sent packet for loss detection
- *
- * Used by loss detection to track packets in flight and detect
- * when they should be declared lost per RFC 9002.
+ * struct tquic_sent_packet is defined canonically in include/net/tquic.h.
+ * The slab cache below uses sizeof(struct tquic_sent_packet) which resolves
+ * to the canonical definition at compile time.
  */
-struct tquic_sent_packet {
-	struct list_head list;
-	struct rb_node node;
-	u64 pn;
-	ktime_t sent_time;
-	u32 sent_bytes;
-	u32 size;		/* Alias for sent_bytes for API compatibility */
-	u8 pn_space;
-	u32 path_id;
-	bool ack_eliciting;
-	bool in_flight;
-	bool retransmitted;	/* Packet has been retransmitted */
-	u32 frames;
-	struct sk_buff *skb;
-};
 
 /*
  * RFC 9002 Constants

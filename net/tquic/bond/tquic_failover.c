@@ -36,9 +36,9 @@
  * ============================================================================
  */
 
-static u32 tquic_sent_packet_hash(const void *data, u32 len, u32 seed)
+static u32 tquic_failover_packet_hash(const void *data, u32 len, u32 seed)
 {
-	const struct tquic_sent_packet *sp = data;
+	const struct tquic_failover_packet *sp = data;
 	u32 hash;
 
 	hash = jhash_2words((u32)sp->packet_number,
@@ -48,30 +48,30 @@ static u32 tquic_sent_packet_hash(const void *data, u32 len, u32 seed)
 	return hash;
 }
 
-static u32 tquic_sent_packet_obj_hash(const void *data, u32 len, u32 seed)
+static u32 tquic_failover_packet_obj_hash(const void *data, u32 len, u32 seed)
 {
-	return tquic_sent_packet_hash(data, len, seed);
+	return tquic_failover_packet_hash(data, len, seed);
 }
 
-static int tquic_sent_packet_cmp(struct rhashtable_compare_arg *arg,
+static int tquic_failover_packet_cmp(struct rhashtable_compare_arg *arg,
 				 const void *obj)
 {
-	const struct tquic_sent_packet *sp = obj;
+	const struct tquic_failover_packet *sp = obj;
 	const u64 *pkt_num = arg->key;
 
 	return sp->packet_number != *pkt_num;
 }
 
-const struct rhashtable_params tquic_sent_packet_params = {
-	.head_offset = offsetof(struct tquic_sent_packet, hash_node),
-	.key_offset = offsetof(struct tquic_sent_packet, packet_number),
+const struct rhashtable_params tquic_failover_packet_params = {
+	.head_offset = offsetof(struct tquic_failover_packet, hash_node),
+	.key_offset = offsetof(struct tquic_failover_packet, packet_number),
 	.key_len = sizeof(u64),
-	.hashfn = tquic_sent_packet_obj_hash,
-	.obj_hashfn = tquic_sent_packet_obj_hash,
-	.obj_cmpfn = tquic_sent_packet_cmp,
+	.hashfn = tquic_failover_packet_obj_hash,
+	.obj_hashfn = tquic_failover_packet_obj_hash,
+	.obj_cmpfn = tquic_failover_packet_cmp,
 	.automatic_shrinking = true,
 };
-EXPORT_SYMBOL_GPL(tquic_sent_packet_params);
+EXPORT_SYMBOL_GPL(tquic_failover_packet_params);
 
 /*
  * ============================================================================
@@ -84,10 +84,10 @@ static inline u64 tquic_get_time_us(void)
 	return ktime_get_ns() / 1000;
 }
 
-static void tquic_sent_packet_free_rcu(struct rcu_head *rcu)
+static void tquic_failover_packet_free_rcu(struct rcu_head *rcu)
 {
-	struct tquic_sent_packet *sp =
-		container_of(rcu, struct tquic_sent_packet, rcu);
+	struct tquic_failover_packet *sp =
+		container_of(rcu, struct tquic_failover_packet, rcu);
 
 	tquic_dbg("sent_packet_free_rcu: pkt=%llu path=%u\n",
 		  sp->packet_number, sp->path_id);
@@ -96,7 +96,7 @@ static void tquic_sent_packet_free_rcu(struct rcu_head *rcu)
 	kfree(sp);
 }
 
-static void tquic_sent_packet_free(struct tquic_sent_packet *sp)
+static void tquic_failover_packet_free(struct tquic_failover_packet *sp)
 {
 	tquic_dbg("sent_packet_free: pkt=%llu path=%u\n",
 		  sp->packet_number, sp->path_id);
@@ -118,11 +118,11 @@ static void tquic_sent_packet_free(struct tquic_sent_packet *sp)
  * Callers that re-enqueue via tquic_failover_requeue() must NOT call
  * this until the packet is finally dequeued and not re-enqueued again.
  */
-void tquic_failover_put_packet(struct tquic_sent_packet *sp)
+void tquic_failover_put_packet(struct tquic_failover_packet *sp)
 {
 	if (!sp)
 		return;
-	tquic_sent_packet_free(sp);
+	tquic_failover_packet_free(sp);
 }
 EXPORT_SYMBOL_GPL(tquic_failover_put_packet);
 
@@ -354,7 +354,7 @@ tquic_failover_init(struct tquic_bonding_ctx *bonding,
 		return NULL;
 
 	/* Initialize sent packet rhashtable */
-	ret = rhashtable_init(&fc->sent_packets, &tquic_sent_packet_params);
+	ret = rhashtable_init(&fc->sent_packets, &tquic_failover_packet_params);
 	if (ret) {
 		pr_err("failed to initialize sent_packets rhashtable: %d\n",
 		       ret);
@@ -428,7 +428,7 @@ EXPORT_SYMBOL_GPL(tquic_failover_init);
  */
 void tquic_failover_destroy(struct tquic_failover_ctx *fc)
 {
-	struct tquic_sent_packet *sp, *tmp;
+	struct tquic_failover_packet *sp, *tmp;
 	struct rhashtable_iter iter;
 	int i;
 
@@ -454,7 +454,7 @@ void tquic_failover_destroy(struct tquic_failover_ctx *fc)
 	spin_lock_bh(&fc->retx_queue.lock);
 	list_for_each_entry_safe(sp, tmp, &fc->retx_queue.queue, retx_list) {
 		list_del_init(&sp->retx_list);
-		tquic_sent_packet_free(sp);
+		tquic_failover_packet_free(sp);
 	}
 	spin_unlock_bh(&fc->retx_queue.lock);
 
@@ -475,8 +475,8 @@ void tquic_failover_destroy(struct tquic_failover_ctx *fc)
 		}
 
 		rhashtable_remove_fast(&fc->sent_packets, &sp->hash_node,
-				       tquic_sent_packet_params);
-		tquic_sent_packet_free(sp);
+				       tquic_failover_packet_params);
+		tquic_failover_packet_free(sp);
 	}
 
 	rhashtable_walk_stop(&iter);
@@ -507,7 +507,7 @@ int tquic_failover_track_sent(struct tquic_failover_ctx *fc,
 			      struct sk_buff *skb, u64 packet_number,
 			      u8 path_id)
 {
-	struct tquic_sent_packet *sp;
+	struct tquic_failover_packet *sp;
 	int ret;
 
 	if (!fc || !skb)
@@ -535,7 +535,7 @@ int tquic_failover_track_sent(struct tquic_failover_ctx *fc,
 	spin_lock_bh(&fc->sent_packets_lock);
 
 	ret = rhashtable_insert_fast(&fc->sent_packets, &sp->hash_node,
-				     tquic_sent_packet_params);
+				     tquic_failover_packet_params);
 	if (ret) {
 		spin_unlock_bh(&fc->sent_packets_lock);
 		kfree_skb(sp->skb);
@@ -569,8 +569,8 @@ EXPORT_SYMBOL_GPL(tquic_failover_track_sent);
  */
 int tquic_failover_on_ack(struct tquic_failover_ctx *fc, u64 packet_number)
 {
-	struct tquic_sent_packet *sp;
-	struct tquic_sent_packet *queued = NULL;
+	struct tquic_failover_packet *sp;
+	struct tquic_failover_packet *queued = NULL;
 
 	if (!fc)
 		return -EINVAL;
@@ -578,7 +578,7 @@ int tquic_failover_on_ack(struct tquic_failover_ctx *fc, u64 packet_number)
 	spin_lock_bh(&fc->sent_packets_lock);
 
 	sp = rhashtable_lookup_fast(&fc->sent_packets, &packet_number,
-				    tquic_sent_packet_params);
+				    tquic_failover_packet_params);
 	if (!sp) {
 		spin_unlock_bh(&fc->sent_packets_lock);
 
@@ -612,13 +612,13 @@ int tquic_failover_on_ack(struct tquic_failover_ctx *fc, u64 packet_number)
 		atomic64_inc(&fc->stats.packets_acked);
 		pr_debug("acked packet %llu from retx_queue (retx_count=%u)\n",
 			 packet_number, queued->retx_count);
-		call_rcu(&queued->rcu, tquic_sent_packet_free_rcu);
+		call_rcu(&queued->rcu, tquic_failover_packet_free_rcu);
 		return 0;
 	}
 
 	/* Remove from tracking */
 	rhashtable_remove_fast(&fc->sent_packets, &sp->hash_node,
-			       tquic_sent_packet_params);
+			       tquic_failover_packet_params);
 	if (fc->sent_count > 0)
 		fc->sent_count--;
 	atomic64_inc(&fc->stats.packets_acked);
@@ -649,7 +649,7 @@ int tquic_failover_on_ack(struct tquic_failover_ctx *fc, u64 packet_number)
 		 sp->retx_count);
 
 	/* Free via RCU */
-	call_rcu(&sp->rcu, tquic_sent_packet_free_rcu);
+	call_rcu(&sp->rcu, tquic_failover_packet_free_rcu);
 
 	return 0;
 }
@@ -701,8 +701,8 @@ EXPORT_SYMBOL_GPL(tquic_failover_on_ack_range);
  */
 int tquic_failover_on_path_failed(struct tquic_failover_ctx *fc, u8 path_id)
 {
-	struct tquic_sent_packet *sp;
-	struct tquic_sent_packet *tracked;
+	struct tquic_failover_packet *sp;
+	struct tquic_failover_packet *tracked;
 	u64 packet_number;
 	struct rhashtable_iter iter;
 	int requeued = 0;
@@ -783,7 +783,7 @@ int tquic_failover_on_path_failed(struct tquic_failover_ctx *fc, u8 path_id)
 			 */
 			tracked = rhashtable_lookup_fast(&fc->sent_packets,
 							 &packet_number,
-							 tquic_sent_packet_params);
+							 tquic_failover_packet_params);
 			if (tracked != sp) {
 				spin_unlock_bh(&fc->retx_queue.lock);
 				spin_unlock_bh(&fc->sent_packets_lock);
@@ -809,7 +809,7 @@ int tquic_failover_on_path_failed(struct tquic_failover_ctx *fc, u8 path_id)
 		}
 
 			ret = rhashtable_remove_fast(&fc->sent_packets, &tracked->hash_node,
-						     tquic_sent_packet_params);
+						     tquic_failover_packet_params);
 			if (ret) {
 				spin_unlock_bh(&fc->retx_queue.lock);
 				spin_unlock_bh(&fc->sent_packets_lock);
@@ -1036,7 +1036,7 @@ EXPORT_SYMBOL_GPL(tquic_failover_is_path_usable);
  * tquic_failover_requeue - Add packet to retransmit queue
  */
 int tquic_failover_requeue(struct tquic_failover_ctx *fc,
-			   struct tquic_sent_packet *sp)
+			   struct tquic_failover_packet *sp)
 {
 	if (!fc || !sp)
 		return -EINVAL;
@@ -1091,9 +1091,9 @@ EXPORT_SYMBOL_GPL(tquic_failover_has_pending);
 /**
  * tquic_failover_get_next - Get next packet to retransmit
  */
-struct tquic_sent_packet *tquic_failover_get_next(struct tquic_failover_ctx *fc)
+struct tquic_failover_packet *tquic_failover_get_next(struct tquic_failover_ctx *fc)
 {
-	struct tquic_sent_packet *sp;
+	struct tquic_failover_packet *sp;
 
 	if (!fc)
 		return NULL;
@@ -1105,7 +1105,7 @@ struct tquic_sent_packet *tquic_failover_get_next(struct tquic_failover_ctx *fc)
 		return NULL;
 	}
 
-	sp = list_first_entry(&fc->retx_queue.queue, struct tquic_sent_packet,
+	sp = list_first_entry(&fc->retx_queue.queue, struct tquic_failover_packet,
 			      retx_list);
 
 	/* Remove from queue (entry already removed from sent_packets on failover). */

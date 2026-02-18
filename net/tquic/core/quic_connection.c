@@ -73,26 +73,8 @@ void tquic_crypto_revert_key_update(struct tquic_connection *conn);
 void tquic_key_update_timeout(struct tquic_connection *conn);
 
 /*
- * struct tquic_sent_packet - Tracks a sent packet for loss detection
- *
- * This structure is used internally for tracking packets in the
- * loss detection and ACK processing code. Must match definition in quic_loss.c.
+ * struct tquic_sent_packet is defined canonically in include/net/tquic.h.
  */
-struct tquic_sent_packet {
-	struct list_head list;
-	struct rb_node node;
-	u64 pn;
-	ktime_t sent_time;
-	u32 sent_bytes;
-	u32 size; /* Alias for sent_bytes for API compatibility */
-	u8 pn_space;
-	u32 path_id;
-	bool ack_eliciting;
-	bool in_flight;
-	bool retransmitted; /* Packet has been retransmitted */
-	u32 frames;
-	struct sk_buff *skb;
-};
 
 /*
  * tquic_trace_conn_id - Extract connection ID as u64 for tracing
@@ -958,12 +940,7 @@ void tquic_conn_destroy(struct tquic_connection *conn)
 	 * the pacing hrtimer and draining ts->timer_work first guarantees
 	 * that no new tx_work scheduling can happen after we cancel it.
 	 */
-	if (conn->timer_state) {
-		hrtimer_cancel(&conn->timer_state->pacing_timer);
-		cancel_work_sync(&conn->timer_state->timer_work);
-		cancel_work_sync(&conn->timer_state->retransmit_work);
-		cancel_work_sync(&conn->timer_state->path_work);
-	}
+	tquic_timer_cancel_work(conn->timer_state);
 
 	/* Cancel work */
 	cancel_work_sync(&conn->tx_work);

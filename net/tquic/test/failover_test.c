@@ -86,7 +86,7 @@ static void tquic_failover_test_only_failed_path_is_requeued(struct kunit *test)
 	struct failover_test_ctx *ctx;
 	struct sk_buff *skb1;
 	struct sk_buff *skb2;
-	struct tquic_sent_packet *sp;
+	struct tquic_failover_packet *sp;
 	int ret;
 
 	ctx = failover_test_ctx_create(test);

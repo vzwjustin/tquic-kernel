@@ -2085,6 +2085,45 @@ int tquic_nl_path_event(struct tquic_connection *conn, struct tquic_path *path,
 }
 EXPORT_SYMBOL_GPL(tquic_nl_path_event);
 
+/**
+ * tquic_nl_conn_register - Register a new connection in the netlink shadow DB
+ * @net: Network namespace
+ * @conn_id: Connection identifier (use conn->token cast to u64)
+ *
+ * Creates a shadow DB entry for the connection so that subsequent userspace
+ * GET commands (TQUIC_NL_CMD_CONN_GET, TQUIC_NL_CMD_PATH_LIST) return valid
+ * data.  Must be called after the connection is fully established and
+ * conn->token has been assigned by tquic_pm_conn_init().
+ *
+ * An existing entry is silently accepted (idempotent).
+ *
+ * Return: 0 on success, -ENOMEM if allocation fails.
+ */
+int tquic_nl_conn_register(struct net *net, u64 conn_id)
+{
+	struct tquic_nl_conn_info *ci;
+
+	ci = tquic_conn_lookup(net, conn_id);
+	if (ci) {
+		/* Already registered - drop the extra reference and return. */
+		tquic_nl_conn_put(ci);
+		return 0;
+	}
+
+	ci = tquic_conn_info_create(net, conn_id);
+	if (!ci)
+		return -ENOMEM;
+
+	/*
+	 * tquic_conn_info_create starts the refcount at 2: one for the hash
+	 * table entry and one for the caller.  Drop the caller's reference
+	 * now; the hash table holds the entry alive until teardown.
+	 */
+	tquic_nl_conn_put(ci);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(tquic_nl_conn_register);
+
 /* Module metadata */
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Linux Kernel Authors");

@@ -53,43 +53,11 @@ void tquic_set_loss_detection_timer(struct tquic_connection *conn);
 #define TQUIC_LOSS_REDUCTION_FACTOR 2 /* Halve cwnd on loss */
 #define TQUIC_PERSISTENT_CONGESTION_THRESHOLD 3 /* PTOs for persistent cong */
 
-/* Packet state for sent packet tracking */
-enum tquic_pkt_state {
-	TQUIC_PKT_OUTSTANDING, /* Awaiting ACK */
-	TQUIC_PKT_ACKED, /* ACKed by peer */
-	TQUIC_PKT_LOST, /* Declared lost */
-	TQUIC_PKT_RETRANSMITTED, /* Retransmission scheduled */
-};
-
-/**
- * struct tquic_sent_packet - Metadata for sent packet tracking
- * @node: RB-tree node for packet number ordering
- * @list: List linkage for time-ordered traversal
- * @pkt_num: Packet number
- * @pn_space: Packet number space (Initial/Handshake/Application)
- * @path_id: Path this packet was sent on
- * @state: Current packet state
- * @ack_eliciting: True if packet requires acknowledgment
- * @in_flight: True if counted against congestion window
- * @sent_time: Timestamp when packet was sent
- * @sent_bytes: Size of packet in bytes
- * @frames: Bitmask of frame types included
- * @retrans_of: Packet number this is a retransmission of (or 0)
+/*
+ * enum tquic_pkt_state and struct tquic_sent_packet are defined in
+ * include/net/tquic.h — the canonical single definition shared by all
+ * compilation units.
  */
-struct tquic_sent_packet {
-	struct rb_node node;
-	struct list_head list;
-	u64 pkt_num;
-	u8 pn_space;
-	u32 path_id;
-	enum tquic_pkt_state state;
-	bool ack_eliciting;
-	bool in_flight;
-	ktime_t sent_time;
-	u32 sent_bytes;
-	u32 frames;
-	u64 retrans_of;
-};
 
 /* struct tquic_pn_space is defined in include/net/tquic.h */
 
@@ -157,7 +125,6 @@ struct tquic_recovery_state {
  * @pacing_timer: Packet pacing timer (high resolution)
  * @timer_work: Workqueue work for deferred timer processing
  * @retransmit_work: Workqueue work for retransmissions
- * @path_work: Workqueue work for path management
  * @wq: Dedicated workqueue
  * @pending_timer_mask: Bitmask of pending timer types
  * @idle_timeout_us: Configured idle timeout
@@ -189,7 +156,6 @@ struct tquic_timer_state {
 	/* Workqueue for deferred processing */
 	struct work_struct timer_work;
 	struct work_struct retransmit_work;
-	struct work_struct path_work;
 	struct workqueue_struct *wq;
 
 	/* Timer state tracking */
@@ -246,7 +212,6 @@ static void tquic_timer_keepalive_expired(struct timer_list *t);
 static enum hrtimer_restart tquic_timer_pacing_expired(struct hrtimer *t);
 static void tquic_timer_work_fn(struct work_struct *work);
 static void tquic_retransmit_work_fn(struct work_struct *work);
-static void tquic_path_work_fn(struct work_struct *work);
 void tquic_path_validation_expired(struct timer_list *t);
 
 /*
@@ -400,7 +365,7 @@ static void tquic_sent_pkt_insert(struct tquic_pn_space *pn_space,
 		parent = *link;
 		entry = rb_entry(parent, struct tquic_sent_packet, node);
 
-		if (pkt->pkt_num < entry->pkt_num)
+		if (pkt->pn < entry->pn)
 			link = &parent->rb_left;
 		else
 			link = &parent->rb_right;
@@ -444,9 +409,9 @@ tquic_sent_pkt_find(struct tquic_pn_space *pn_space, u64 pkt_num)
 
 		entry = rb_entry(node, struct tquic_sent_packet, node);
 
-		if (pkt_num < entry->pkt_num)
+		if (pkt_num < entry->pn)
 			node = node->rb_left;
-		else if (pkt_num > entry->pkt_num)
+		else if (pkt_num > entry->pn)
 			node = node->rb_right;
 		else
 			return entry;
@@ -537,7 +502,6 @@ struct tquic_timer_state *tquic_timer_state_alloc(struct tquic_connection *conn)
 	/* Setup workqueue items */
 	INIT_WORK(&ts->timer_work, tquic_timer_work_fn);
 	INIT_WORK(&ts->retransmit_work, tquic_retransmit_work_fn);
-	INIT_WORK(&ts->path_work, tquic_path_work_fn);
 
 	/* Use global timer workqueue */
 	ts->wq = tquic_timer_wq;
@@ -620,7 +584,6 @@ void tquic_timer_state_free(struct tquic_timer_state *ts)
 	if (ts->wq) {
 		cancel_work_sync(&ts->timer_work);
 		cancel_work_sync(&ts->retransmit_work);
-		cancel_work_sync(&ts->path_work);
 	}
 
 	rs = ts->recovery;
@@ -849,7 +812,7 @@ static int tquic_detect_lost_packets(struct tquic_timer_state *ts, int pn_space)
 	spin_lock_bh(&pns->lock);
 
 	list_for_each_entry_safe(pkt, tmp, &pns->sent_list, list) {
-		if (pkt->pkt_num > pns->largest_acked)
+		if (pkt->pn > pns->largest_acked)
 			break;
 
 		if (pkt->state != TQUIC_PKT_OUTSTANDING)
@@ -861,7 +824,7 @@ static int tquic_detect_lost_packets(struct tquic_timer_state *ts, int pn_space)
 		 * 2. It was sent more than loss_delay ago
 		 */
 		if (pns->largest_acked >=
-			    pkt->pkt_num + TQUIC_PACKET_THRESHOLD ||
+			    pkt->pn + TQUIC_PACKET_THRESHOLD ||
 		    ktime_before(pkt->sent_time, lost_send_time)) {
 			pkt->state = TQUIC_PKT_LOST;
 			lost_count++;
@@ -901,7 +864,7 @@ static int tquic_detect_lost_packets(struct tquic_timer_state *ts, int pn_space)
 				}
 
 			tquic_dbg("timer:packet %llu declared lost\n",
-				  pkt->pkt_num);
+				  pkt->pn);
 		}
 	}
 
@@ -910,7 +873,7 @@ static int tquic_detect_lost_packets(struct tquic_timer_state *ts, int pn_space)
 	list_for_each_entry(pkt, &pns->sent_list, list) {
 		if (pkt->state != TQUIC_PKT_OUTSTANDING)
 			continue;
-		if (pkt->pkt_num >= pns->largest_acked)
+		if (pkt->pn >= pns->largest_acked)
 			break;
 
 		pns->loss_time = ktime_add_us(pkt->sent_time, loss_delay);
@@ -1743,42 +1706,25 @@ static void tquic_retransmit_work_fn(struct work_struct *work)
 }
 
 /**
- * tquic_path_work_fn - Path management work function
- * @work: Work struct
+ * tquic_timer_cancel_work - Cancel pending workqueue items and pacing timer
+ * @ts: Timer state
+ *
+ * Cancels the pacing hrtimer and drains the timer_work and retransmit_work
+ * workqueue items.  Must be called before the connection's tx_work can be
+ * safely cancelled; callers guarantee no new scheduling after this returns.
+ *
+ * This is the correct public API for callers that cannot access the opaque
+ * tquic_timer_state internals directly.
  */
-static void tquic_path_work_fn(struct work_struct *work)
+void tquic_timer_cancel_work(struct tquic_timer_state *ts)
 {
-	struct tquic_timer_state *ts =
-		container_of(work, struct tquic_timer_state, path_work);
-	struct tquic_connection *conn;
-	unsigned long flags;
-
-	tquic_dbg("timer:path_work_fn: processing path management work\n");
-
-	spin_lock_irqsave(&ts->lock, flags);
-	if (!ts->active || ts->shutting_down) {
-		spin_unlock_irqrestore(&ts->lock, flags);
+	if (!ts)
 		return;
-	}
-
-	conn = ts->conn;
-
-	/*
-	 * Take a reference on the connection while we hold ts->lock
-	 * to ensure conn remains valid after we drop the lock below.
-	 * Path work handlers access conn for validation and failover.
-	 */
-	if (!tquic_conn_get(conn)) {
-		spin_unlock_irqrestore(&ts->lock, flags);
-		return;
-	}
-	spin_unlock_irqrestore(&ts->lock, flags);
-
-	/* Handle path-related work like validation retries, failover, etc. */
-
-	tquic_dbg("timer:path_work_fn: completed\n");
-	tquic_conn_put(conn);
+	hrtimer_cancel(&ts->pacing_timer);
+	cancel_work_sync(&ts->timer_work);
+	cancel_work_sync(&ts->retransmit_work);
 }
+EXPORT_SYMBOL_GPL(tquic_timer_cancel_work);
 
 /*
  * ============================================================================
@@ -1810,7 +1756,7 @@ int tquic_timer_on_packet_sent(struct tquic_timer_state *ts, int pn_space,
 	if (!pkt)
 		return -ENOMEM;
 
-	pkt->pkt_num = pkt_num;
+	pkt->pn = pkt_num;
 	pkt->pn_space = pn_space;
 	pkt->sent_time = ktime_get();
 	pkt->sent_bytes = bytes;

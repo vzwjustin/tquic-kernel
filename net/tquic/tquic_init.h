@@ -85,6 +85,9 @@ void tquic_prague_exit(void);
 /* Netlink interface */
 int tquic_nl_init(void);
 void tquic_nl_exit(void);
+/* net is forward-declared; callers must include <net/net_namespace.h> */
+struct net;
+int tquic_nl_conn_register(struct net *net, u64 conn_id);
 
 /* HTTP/3 subsystem */
 int tquic_http3_conn_init(void);

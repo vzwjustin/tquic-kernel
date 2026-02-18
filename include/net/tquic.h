@@ -3011,7 +3011,107 @@ void tquic_udp_exit(void);
 /* Forward declarations for timer state */
 struct tquic_timer_state;
 struct tquic_recovery_state;
-struct tquic_sent_packet;
+
+/**
+ * enum tquic_pkt_state - State of a sent packet in the loss detection machine
+ * @TQUIC_PKT_OUTSTANDING: Sent, awaiting ACK
+ * @TQUIC_PKT_ACKED:       Acknowledged by the peer
+ * @TQUIC_PKT_LOST:        Declared lost by loss detection
+ * @TQUIC_PKT_RETRANSMITTED: Retransmission has been scheduled
+ *
+ * Used by the timer/recovery path (tquic_timer.c) to track per-packet
+ * state across the full loss-detection and retransmission lifecycle.
+ */
+enum tquic_pkt_state {
+	TQUIC_PKT_OUTSTANDING,    /* Awaiting ACK */
+	TQUIC_PKT_ACKED,          /* ACKed by peer */
+	TQUIC_PKT_LOST,           /* Declared lost */
+	TQUIC_PKT_RETRANSMITTED,  /* Retransmission scheduled */
+};
+
+/*
+ * Packet metadata flags for struct tquic_sent_packet::flags.
+ * Used by ack.c to track per-packet properties without a bool-per-field.
+ */
+#define TQUIC_PKT_FLAG_ACK_ELICITING	BIT(0)
+#define TQUIC_PKT_FLAG_IN_FLIGHT	BIT(1)
+#define TQUIC_PKT_FLAG_HAS_CRYPTO	BIT(2)
+#define TQUIC_PKT_FLAG_RETRANSMITTABLE	BIT(3)
+#define TQUIC_PKT_FLAG_PATH_CHALLENGE	BIT(4)
+#define TQUIC_PKT_FLAG_PATH_RESPONSE	BIT(5)
+#define TQUIC_PKT_FLAG_MTU_PROBE	BIT(6)
+#define TQUIC_PKT_FLAG_ECN_CE		BIT(7)
+
+/**
+ * struct tquic_sent_packet - Canonical metadata for a sent QUIC packet
+ *
+ * This is the single authoritative definition shared by all compilation
+ * units that track sent packets (tquic_timer.c, quic_loss.c, quic_output.c,
+ * quic_connection.c, ack.c).  Having one definition in the shared header
+ * eliminates undefined behaviour from passing pointers across translation
+ * units that previously each had a local, incompatible copy.
+ *
+ * Field notes:
+ *   @node:          RB-tree node; packet number ordering within a PN space.
+ *   @list:          List linkage for time-ordered traversal and lost/acked
+ *                   staging lists.
+ *   @stream_data:   Per-packet list of stream data ranges, used by ack.c to
+ *                   retransmit stream payload on loss.
+ *   @pn:            QUIC packet number (unique within @pn_space).
+ *   @sent_time:     ktime_t when the packet was handed to the network layer.
+ *   @sent_bytes:    On-wire size of the packet in bytes.
+ *   @size:          Alias for @sent_bytes kept for API compatibility with
+ *                   callers that use the shorter name.
+ *   @pn_space:      Packet number space index (Initial/Handshake/Application).
+ *   @path_id:       Multipath path identifier this packet was sent on.
+ *   @state:         Loss-detection state machine value (tquic_timer.c path).
+ *   @ack_eliciting: True when the peer must send an ACK for this packet.
+ *   @in_flight:     True when the packet counts against the congestion window.
+ *   @retransmitted: True once a retransmission has been scheduled (quic_loss.c
+ *                   / quic_output.c path, mutually exclusive with @state).
+ *   @flags:         Bitmask of TQUIC_PKT_FLAG_* values (ack.c path).
+ *   @frames:        Bitmask of QUIC frame types carried in the packet.
+ *   @largest_acked: Largest ACK number piggybacked in this packet (ack.c).
+ *   @retrans_of:    Packet number this is a retransmission of, or 0.
+ *   @skb:           Socket buffer clone kept for potential retransmission.
+ */
+struct tquic_sent_packet {
+	/* Tree / list linkage */
+	struct rb_node		node;
+	struct list_head	list;
+	struct list_head	stream_data;   /* ack.c: stream ranges in pkt */
+
+	/* Identification */
+	u64			pn;            /* QUIC packet number */
+	u8			pn_space;      /* PN space (Initial/HS/App) */
+	u32			path_id;       /* Multipath path identifier */
+
+	/* Timing */
+	ktime_t			sent_time;     /* Time of transmission */
+
+	/* Size — both names in active use across the codebase */
+	u32			sent_bytes;    /* On-wire byte count */
+	u32			size;          /* Alias for sent_bytes */
+
+	/* Loss-detection state (tquic_timer.c uses state enum; quic_loss.c /
+	 * quic_output.c use the retransmitted bool; they track the same packet
+	 * through non-overlapping code paths) */
+	enum tquic_pkt_state	state;
+	bool			ack_eliciting; /* Peer must ACK */
+	bool			in_flight;     /* Counts vs congestion window */
+	bool			retransmitted; /* Retransmission scheduled */
+
+	/* Flag bitmask (ack.c path, TQUIC_PKT_FLAG_* above) */
+	u32			flags;
+
+	/* Frame / retransmit metadata */
+	u32			frames;        /* Frame type bitmask */
+	u64			largest_acked; /* Largest ACK in this packet */
+	u64			retrans_of;    /* Original pkt_num, or 0 */
+
+	/* Payload for retransmission */
+	struct sk_buff		*skb;
+};
 
 /**
  * struct tquic_pn_space - Packet number space state
@@ -3061,6 +3161,7 @@ void tquic_crypto_destroy(void *crypto);
 /* Timer state lifecycle */
 struct tquic_timer_state *tquic_timer_state_alloc(struct tquic_connection *conn);
 void tquic_timer_state_free(struct tquic_timer_state *ts);
+void tquic_timer_cancel_work(struct tquic_timer_state *ts);
 
 /* Generic timer set function (from quic_timer.c) */
 void tquic_timer_set(struct tquic_connection *conn, u8 timer_type, ktime_t when);
