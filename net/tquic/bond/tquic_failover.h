@@ -409,12 +409,28 @@ bool tquic_failover_has_pending(struct tquic_failover_ctx *fc);
  * tquic_failover_get_next - Get next packet to retransmit
  * @fc: Failover context
  *
- * Returns packet from retransmit queue, or NULL if empty.
- * Caller must handle the returned packet (retransmit or free).
+ * Returns the next packet from the retransmit queue, or NULL if empty.
+ * The returned sp is no longer tracked in sent_packets (removed during
+ * tquic_failover_on_path_failed()).  The caller takes ownership and MUST
+ * call tquic_failover_put_packet() exactly once when finished — after a
+ * successful retransmit (and tquic_failover_track_sent() for the new
+ * packet number) or after abandoning the retransmit.  Callers that put
+ * sp back via tquic_failover_requeue() must NOT call put_packet until
+ * the packet is finally retired.
  *
- * Returns: tquic_sent_packet pointer, or NULL
+ * Returns: tquic_sent_packet pointer (caller owns it), or NULL
  */
 struct tquic_sent_packet *tquic_failover_get_next(struct tquic_failover_ctx *fc);
+
+/**
+ * tquic_failover_put_packet - Release a packet obtained from tquic_failover_get_next
+ * @sp: Packet to release; may be NULL (no-op)
+ *
+ * Frees the sp and its embedded skb clone.  Must be called exactly once
+ * per packet returned by tquic_failover_get_next() that is not re-queued
+ * via tquic_failover_requeue().
+ */
+void tquic_failover_put_packet(struct tquic_sent_packet *sp);
 
 /**
  * tquic_failover_retx_count - Get number of packets in retransmit queue

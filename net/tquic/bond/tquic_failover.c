@@ -105,6 +105,27 @@ static void tquic_sent_packet_free(struct tquic_sent_packet *sp)
 	kfree(sp);
 }
 
+/**
+ * tquic_failover_put_packet - Release a packet obtained from tquic_failover_get_next
+ * @sp: Packet to release
+ *
+ * After tquic_failover_get_next() returns an sp, the caller owns it.
+ * tquic_failover_on_path_failed() already removed sp from sent_packets,
+ * so no ACK or destroy path will free it automatically.  The caller
+ * MUST call this function exactly once after it has finished with sp
+ * (i.e. after a successful retransmit and tquic_failover_track_sent()
+ * for the new packet number, or after giving up on retransmission).
+ * Callers that re-enqueue via tquic_failover_requeue() must NOT call
+ * this until the packet is finally dequeued and not re-enqueued again.
+ */
+void tquic_failover_put_packet(struct tquic_sent_packet *sp)
+{
+	if (!sp)
+		return;
+	tquic_sent_packet_free(sp);
+}
+EXPORT_SYMBOL_GPL(tquic_failover_put_packet);
+
 /*
  * ============================================================================
  * Hysteresis helpers
@@ -549,6 +570,7 @@ EXPORT_SYMBOL_GPL(tquic_failover_track_sent);
 int tquic_failover_on_ack(struct tquic_failover_ctx *fc, u64 packet_number)
 {
 	struct tquic_sent_packet *sp;
+	struct tquic_sent_packet *queued = NULL;
 
 	if (!fc)
 		return -EINVAL;
@@ -559,7 +581,39 @@ int tquic_failover_on_ack(struct tquic_failover_ctx *fc, u64 packet_number)
 				    tquic_sent_packet_params);
 	if (!sp) {
 		spin_unlock_bh(&fc->sent_packets_lock);
-		return -ENOENT;
+
+		/*
+		 * Packet might already have been transferred to retx_queue by
+		 * failover. A late ACK should purge it from retransmission.
+		 */
+		spin_lock_bh(&fc->retx_queue.lock);
+		list_for_each_entry(sp, &fc->retx_queue.queue, retx_list) {
+			if (sp->packet_number != packet_number)
+				continue;
+
+			queued = sp;
+			list_del_init(&queued->retx_list);
+			queued->in_retx_queue = false;
+			if (likely(fc->retx_queue.count > 0))
+				fc->retx_queue.count--;
+			else
+				pr_warn_once("tquic: retx_queue.count underflow in late on_ack\n");
+			if (fc->retx_queue.bytes >= queued->len)
+				fc->retx_queue.bytes -= queued->len;
+			else
+				fc->retx_queue.bytes = 0;
+			break;
+		}
+		spin_unlock_bh(&fc->retx_queue.lock);
+
+		if (!queued)
+			return -ENOENT;
+
+		atomic64_inc(&fc->stats.packets_acked);
+		pr_debug("acked packet %llu from retx_queue (retx_count=%u)\n",
+			 packet_number, queued->retx_count);
+		call_rcu(&queued->rcu, tquic_sent_packet_free_rcu);
+		return 0;
 	}
 
 	/* Remove from tracking */
@@ -649,6 +703,7 @@ int tquic_failover_on_path_failed(struct tquic_failover_ctx *fc, u8 path_id)
 {
 	struct tquic_sent_packet *sp;
 	struct tquic_sent_packet *tracked;
+	u64 packet_number;
 	struct rhashtable_iter iter;
 	int requeued = 0;
 	ktime_t start;
@@ -693,12 +748,13 @@ int tquic_failover_on_path_failed(struct tquic_failover_ctx *fc, u8 path_id)
 			continue;
 		}
 
-		if (sp->path_id != path_id)
-			continue;
+			if (sp->path_id != path_id)
+				continue;
+			packet_number = sp->packet_number;
 
-		/*
-		 * Enforce a safety limit to prevent memory exhaustion
-		 * during catastrophic path failure with large BDP.
+			/*
+			 * Enforce a safety limit to prevent memory exhaustion
+			 * during catastrophic path failure with large BDP.
 		 */
 		if (requeued >= TQUIC_FAILOVER_MAX_QUEUED) {
 			pr_warn_ratelimited(
@@ -711,25 +767,25 @@ int tquic_failover_on_path_failed(struct tquic_failover_ctx *fc, u8 path_id)
 		spin_lock_bh(&fc->sent_packets_lock);
 		spin_lock_bh(&fc->retx_queue.lock);
 
-		/*
-		 * Validate that this object is still tracked by packet number
-		 * and pointer identity. If ACK already removed/replaced it,
-		 * skip safely.
-		 */
-		tracked = rhashtable_lookup_fast(&fc->sent_packets,
-						 &sp->packet_number,
-						 tquic_sent_packet_params);
-		if (tracked != sp) {
-			spin_unlock_bh(&fc->retx_queue.lock);
-			spin_unlock_bh(&fc->sent_packets_lock);
-			continue;
+			/*
+			 * Validate that this object is still tracked by packet number
+			 * and pointer identity. If ACK already removed/replaced it,
+			 * skip safely.
+			 */
+			tracked = rhashtable_lookup_fast(&fc->sent_packets,
+							 &packet_number,
+							 tquic_sent_packet_params);
+			if (tracked != sp) {
+				spin_unlock_bh(&fc->retx_queue.lock);
+				spin_unlock_bh(&fc->sent_packets_lock);
+				continue;
 		}
 
-		if (sp->in_retx_queue) {
-			/* Already queued by concurrent requeue — skip */
-			spin_unlock_bh(&fc->retx_queue.lock);
-			spin_unlock_bh(&fc->sent_packets_lock);
-			continue;
+			if (tracked->in_retx_queue) {
+				/* Already queued by concurrent requeue — skip */
+				spin_unlock_bh(&fc->retx_queue.lock);
+				spin_unlock_bh(&fc->sent_packets_lock);
+				continue;
 		}
 
 		/* Check queue limits under lock */
@@ -743,21 +799,21 @@ int tquic_failover_on_path_failed(struct tquic_failover_ctx *fc, u8 path_id)
 			break;
 		}
 
-		ret = rhashtable_remove_fast(&fc->sent_packets, &sp->hash_node,
-					     tquic_sent_packet_params);
-		if (ret) {
-			spin_unlock_bh(&fc->retx_queue.lock);
-			spin_unlock_bh(&fc->sent_packets_lock);
-			continue;
+			ret = rhashtable_remove_fast(&fc->sent_packets, &tracked->hash_node,
+						     tquic_sent_packet_params);
+			if (ret) {
+				spin_unlock_bh(&fc->retx_queue.lock);
+				spin_unlock_bh(&fc->sent_packets_lock);
+				continue;
 		}
 		if (fc->sent_count > 0)
 			fc->sent_count--;
 
-		list_add_tail(&sp->retx_list, &fc->retx_queue.queue);
-		sp->in_retx_queue = true;
-		fc->retx_queue.count++;
-		fc->retx_queue.bytes += sp->len;
-		requeued++;
+			list_add_tail(&tracked->retx_list, &fc->retx_queue.queue);
+			tracked->in_retx_queue = true;
+			fc->retx_queue.count++;
+			fc->retx_queue.bytes += tracked->len;
+			requeued++;
 
 		spin_unlock_bh(&fc->retx_queue.lock);
 		spin_unlock_bh(&fc->sent_packets_lock);
