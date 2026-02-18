@@ -52,6 +52,7 @@
 #include "ack.h"
 #include "frame_process.h"
 #include <net/tquic_pm.h>
+#include "../bond/tquic_reorder.h"
 #include "../bond/tquic_bonding.h"
 
 /* QUIC encryption level / packet type identifiers (RFC 9000 §17.2) */
