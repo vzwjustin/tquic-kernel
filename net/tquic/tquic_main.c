@@ -55,7 +55,7 @@
 #endif
 
 /* Module info */
-MODULE_AUTHOR("Linux Foundation");
+MODULE_AUTHOR("Justin Adams <spotty118@gmail.com>");
 MODULE_DESCRIPTION("TQUIC: WAN Bonding over QUIC");
 MODULE_LICENSE("GPL");
 MODULE_VERSION("1.0.0");
@@ -125,7 +125,9 @@ MODULE_PARM_DESC(bond_mode, "Default WAN bonding mode");
 void tquic_conn_destroy(struct tquic_connection *conn)
 {
 	struct tquic_path *path, *tmp_path;
+	LIST_HEAD(dead_paths);
 	struct rb_node *node;
+	void *sched;
 
 	tquic_dbg("tquic_conn_destroy: conn=%p\n", conn);
 
@@ -187,17 +189,26 @@ void tquic_conn_destroy(struct tquic_connection *conn)
 	cancel_work_sync(&conn->rx_work);
 	cancel_work_sync(&conn->close_work);
 
-	/* Free all paths */
+	/*
+	 * Phase 1: unlink all paths from the RCU list and collect them.
+	 * Do NOT call synchronize_rcu() here — we batch all removals so a
+	 * single grace period covers every path and the scheduler pointer.
+	 */
 	list_for_each_entry_safe(path, tmp_path, &conn->paths, list) {
 		list_del_rcu(&path->list);
 		timer_delete_sync(&path->validation_timer);
 		timer_delete_sync(&path->validation.timer);
 		skb_queue_purge(&path->response.queue);
-		/* Wait for any RCU readers before dropping ownership. */
-		synchronize_rcu();
-		INIT_LIST_HEAD(&path->list);
-		tquic_path_put(path);
+		list_add(&path->list, &dead_paths);
 	}
+
+	/*
+	 * Phase 2: NULL the scheduler pointer before the grace period so
+	 * that concurrent RCU readers see NULL rather than a freed pointer
+	 * as soon as the quiescent state completes.
+	 */
+	sched = conn->scheduler;
+	conn->scheduler = NULL;
 
 	/*
 	 * Free all streams with proper accounting and refcount safety.
@@ -268,34 +279,34 @@ void tquic_conn_destroy(struct tquic_connection *conn)
 		tquic_zc_state_free(conn);
 
 	/*
-	 * NULL the scheduler pointer before the RCU grace period so that
-	 * any concurrent reader that still sees the connection will not
-	 * dereference freed memory.  The actual kfree() is deferred until
-	 * after synchronize_rcu().
+	 * Phase 3: single grace period covers both the path list removals
+	 * (list_del_rcu above) and the scheduler pointer store.  Waiting
+	 * once rather than once-per-path avoids O(N) quiescent-state waits
+	 * when a connection has multiple bonded paths.
 	 */
-		{
-			void *sched = conn->scheduler;
+	synchronize_rcu();
 
-			conn->scheduler = NULL;
+	/*
+	 * Phase 4: free all collected paths now that no RCU reader can
+	 * observe them on conn->paths.
+	 */
+	list_for_each_entry_safe(path, tmp_path, &dead_paths, list) {
+		INIT_LIST_HEAD(&path->list);
+		tquic_path_put(path);
+	}
 
-		/*
-		 * Ensure an RCU grace period has passed before freeing
-		 * the connection. Some readers may still hold transient
-		 * references to connection-owned state across list unlink/
-		 * pointer publication boundaries until the grace period
-		 * completes.
-		 */
-			synchronize_rcu();
-
-			if (sched) {
-				if (test_bit(TQUIC_F_BONDING_ENABLED, &conn->flags)) {
-					tquic_bond_cleanup(sched);
-					clear_bit(TQUIC_F_BONDING_ENABLED, &conn->flags);
-				} else {
-					kfree(sched);
-				}
-			}
+	/*
+	 * Phase 5: free the scheduler state now that the grace period has
+	 * elapsed and conn->scheduler is already NULL.
+	 */
+	if (sched) {
+		if (test_bit(TQUIC_F_BONDING_ENABLED, &conn->flags)) {
+			tquic_bond_cleanup(sched);
+			clear_bit(TQUIC_F_BONDING_ENABLED, &conn->flags);
+		} else {
+			kfree(sched);
 		}
+	}
 
 	/*
 	 * SECURITY FIX (CF-134, updated): tquic_conn_create() now uses

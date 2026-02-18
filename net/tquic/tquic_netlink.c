@@ -229,19 +229,26 @@ struct tquic_nl_conn_info {
 /* CF-154: Maximum number of connections per network namespace */
 #define TQUIC_NL_MAX_CONNECTIONS	4096
 
-/* Per-network namespace data */
-struct tquic_net {
+/*
+ * Per-network namespace data for the netlink notification layer.
+ *
+ * NOTE: This is intentionally separate from the main protocol's
+ * struct tquic_net (protocol.h). This struct tracks the shadow
+ * connection/path database used solely for netlink event delivery.
+ * Named tquic_nl_net to avoid the naming collision.
+ */
+struct tquic_nl_net {
 	struct list_head connections;
 	spinlock_t conn_lock;
 	DECLARE_HASHTABLE(conn_hash, 8);
 	u32 conn_count;
 };
 
-static unsigned int tquic_net_id;
+static unsigned int tquic_nl_net_id;
 
-static struct tquic_net *tquic_get_net(struct net *net)
+static struct tquic_nl_net *tquic_nl_get_net(struct net *net)
 {
-	return net_generic(net, tquic_net_id);
+	return net_generic(net, tquic_nl_net_id);
 }
 
 /*
@@ -359,7 +366,7 @@ static const struct nla_policy tquic_path_entry_policy[TQUIC_NL_ATTR_MAX + 1] = 
  */
 static struct tquic_nl_conn_info *tquic_conn_lookup(struct net *net, u64 conn_id)
 {
-	struct tquic_net *tnet = tquic_get_net(net);
+	struct tquic_nl_net *tnet = tquic_nl_get_net(net);
 	struct tquic_nl_conn_info *conn;
 
 	rcu_read_lock();
@@ -399,7 +406,7 @@ static void tquic_nl_conn_put(struct tquic_nl_conn_info *conn)
 static struct tquic_nl_conn_info *tquic_conn_info_create(struct net *net,
 						      u64 conn_id)
 {
-	struct tquic_net *tnet = tquic_get_net(net);
+	struct tquic_nl_net *tnet = tquic_nl_get_net(net);
 	struct tquic_nl_conn_info *conn;
 
 	/*
@@ -1721,7 +1728,7 @@ struct genl_family tquic_genl_family __ro_after_init = {
  */
 static int __net_init tquic_net_init(struct net *net)
 {
-	struct tquic_net *tnet = tquic_get_net(net);
+	struct tquic_nl_net *tnet = tquic_nl_get_net(net);
 
 	tquic_dbg("tquic_net_init: initializing per-netns state\n");
 
@@ -1734,7 +1741,7 @@ static int __net_init tquic_net_init(struct net *net)
 
 static void __net_exit tquic_net_exit(struct net *net)
 {
-	struct tquic_net *tnet = tquic_get_net(net);
+	struct tquic_nl_net *tnet = tquic_nl_get_net(net);
 	struct tquic_nl_conn_info *conn;
 
 	tquic_dbg("tquic_net_exit: cleaning up per-netns state\n");
@@ -1763,8 +1770,8 @@ static void __net_exit tquic_net_exit(struct net *net)
 static struct pernet_operations tquic_net_ops = {
 	.init = tquic_net_init,
 	.exit = tquic_net_exit,
-	.id = &tquic_net_id,
-	.size = sizeof(struct tquic_net),
+	.id = &tquic_nl_net_id,
+	.size = sizeof(struct tquic_nl_net),
 };
 
 /*

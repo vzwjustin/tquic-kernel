@@ -406,8 +406,12 @@ int tquic_connect(struct sock *sk, tquic_sockaddr_t *uaddr, int addr_len)
 		}
 
 		/* Get assigned ephemeral port */
-		kernel_getsockname(usock,
-				   (struct sockaddr *)&bound);
+		memset(&bound, 0, sizeof(bound));
+		ret = kernel_getsockname(usock, (struct sockaddr *)&bound);
+		if (ret < 0) {
+			sock_release(usock);
+			goto out_unlock;
+		}
 
 		/* Update bind address so the path gets the correct port */
 		((struct sockaddr_in *)&tsk->bind_addr)->sin_family = AF_INET;
@@ -425,8 +429,56 @@ int tquic_connect(struct sock *sk, tquic_sockaddr_t *uaddr, int addr_len)
 		udp_encap_enable();
 		tsk->udp_sock = usock;
 
-		pr_warn("tquic: client UDP socket on port %u\n",
-			ntohs(bound.sin_port));
+		pr_debug("tquic: client IPv4 UDP socket on port %u\n",
+			 ntohs(bound.sin_port));
+	} else if (!tsk->udp_sock && addr->sa_family == AF_INET6) {
+		struct socket *usock;
+		struct sockaddr_in6 udp_addr6;
+		struct sockaddr_in6 bound6;
+
+		ret = sock_create_kern(sock_net(sk), AF_INET6,
+				       SOCK_DGRAM, IPPROTO_UDP, &usock);
+		if (ret < 0)
+			goto out_unlock;
+
+		/* Bind to ephemeral port on in6addr_any */
+		memset(&udp_addr6, 0, sizeof(udp_addr6));
+		udp_addr6.sin6_family = AF_INET6;
+		udp_addr6.sin6_addr = in6addr_any;
+		ret = kernel_bind(usock,
+				  (struct sockaddr_unsized *)&udp_addr6,
+				  sizeof(udp_addr6));
+		if (ret < 0) {
+			sock_release(usock);
+			goto out_unlock;
+		}
+
+		/* Get assigned ephemeral port */
+		memset(&bound6, 0, sizeof(bound6));
+		ret = kernel_getsockname(usock, (struct sockaddr *)&bound6);
+		if (ret < 0) {
+			sock_release(usock);
+			goto out_unlock;
+		}
+
+		/* Update bind address so the path gets the correct port */
+		((struct sockaddr_in6 *)&tsk->bind_addr)->sin6_family = AF_INET6;
+		((struct sockaddr_in6 *)&tsk->bind_addr)->sin6_port =
+			bound6.sin6_port;
+
+		/* Initialize deferred packet processing */
+		skb_queue_head_init(&tsk->listener_queue);
+		INIT_WORK(&tsk->listener_work, tquic_listener_work_handler);
+
+		/* Register encap_rcv handler */
+		WRITE_ONCE(usock->sk->sk_user_data, sk);
+		udp_sk(usock->sk)->encap_type = 1;
+		udp_sk(usock->sk)->encap_rcv = tquic_client_encap_recv;
+		udp_encap_enable();
+		tsk->udp_sock = usock;
+
+		pr_debug("tquic: client IPv6 UDP socket on port %u\n",
+			 ntohs(bound6.sin6_port));
 	}
 
 	/* Add initial path */
