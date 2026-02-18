@@ -2990,18 +2990,30 @@ int tquic_output_flush(struct tquic_connection *conn)
 				/* Assemble and send packet */
 				send_skb = tquic_assemble_packet(conn, path, -1, pkt_num, &frames);
 				if (send_skb) {
-					/*
-					 * Send via tquic_output_packet which handles:
-					 * - EDT timestamp for FQ qdisc pacing
-					 * - Internal pacing timer scheduling
-					 * - Packet tracking for retransmission
-					 *
-					 * Pacing is configured via sk->sk_pacing_rate
-					 * and handled by either FQ qdisc or EDT timestamps.
-					 */
 					/* Capture size before send consumes skb */
 					pkt_size = send_skb->len;
-					ret = tquic_output_packet(conn, path, send_skb);
+
+					/*
+					 * Route through software pacing when FQ is absent.
+					 * tquic_output_paced() gates on the hrtimer and
+					 * queues to pacing_queue if the interval has not
+					 * elapsed; the timer releases one packet per fire.
+					 * When FQ (SK_PACING_FQ) handles pacing or pacing
+					 * is disabled, tquic_output_packet() is used and
+					 * FQ is driven by sk_pacing_rate / EDT timestamps.
+					 *
+					 * Pairs with WRITE_ONCE in sock_set_pacing_status().
+					 */
+					if (conn->tsk && conn->tsk->pacing_enabled &&
+					    conn->sk && /* smp_load_acquire: see above */
+					    smp_load_acquire(&conn->sk->sk_pacing_status)
+							== SK_PACING_NEEDED) {
+						tquic_path_put(path);
+						path = NULL;
+						ret = tquic_output_paced(conn, send_skb);
+					} else {
+						ret = tquic_output_packet(conn, path, send_skb);
+					}
 
 					if (ret >= 0) {
 						packets_sent++;

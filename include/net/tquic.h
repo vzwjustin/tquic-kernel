@@ -1238,9 +1238,6 @@ struct tquic_connection {
 	u64 max_early_data;		/* Max early data size */
 	u64 early_data_sent;		/* Early data bytes sent */
 
-	/* Pacing state */
-	ktime_t pacing_next_send;	/* Next allowed send time */
-
 	/*
 	 * Preferred Address state (RFC 9000 Section 9.6)
 	 *

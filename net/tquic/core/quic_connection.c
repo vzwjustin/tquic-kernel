@@ -841,7 +841,6 @@ struct tquic_connection *tquic_conn_create(struct tquic_sock *tsk,
 
 	/* Initialize pacing state */
 	skb_queue_head_init(&conn->pacing_queue);
-	conn->pacing_next_send = 0;
 
 	/* Initialize 0-RTT early data state (RFC 9001 Section 4.6) */
 	skb_queue_head_init(&conn->early_data_buffer);

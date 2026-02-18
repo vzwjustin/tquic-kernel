@@ -814,23 +814,6 @@ EXPORT_SYMBOL(tquic_output_batch);
  * avoid bursts that could cause congestion.
  */
 
-/* Calculate pacing delay for next packet */
-static ktime_t tquic_pacing_delay(struct tquic_connection *conn, u32 bytes)
-{
-	struct tquic_path *path;
-	u64 delay_ns;
-
-	path = tquic_output_active_path_get(conn);
-	if (!path)
-		return ns_to_ktime(0);
-
-	/* Calculate delay: bytes / pacing_rate (in nanoseconds) */
-	delay_ns = tquic_cc_pacing_delay(path, bytes);
-	tquic_path_put(path);
-
-	return ns_to_ktime(delay_ns);
-}
-
 /* Check if we should send now or wait for pacing */
 static bool tquic_pacing_allow(struct tquic_connection *conn)
 {
