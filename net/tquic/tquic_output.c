@@ -2858,6 +2858,14 @@ int tquic_output_flush(struct tquic_connection *conn)
 		iter_sent = 0;
 
 		/*
+		 * Pacing branch in the inner loop may have released path and
+		 * set it to NULL.  If so, stop — the hrtimer will drain the
+		 * pacing_queue and re-invoke the output path when ready.
+		 */
+		if (!path)
+			break;
+
+		/*
 		 * Re-check congestion window each outer iteration.
 		 * ACK processing may have opened cwnd between iterations.
 		 */
@@ -3079,11 +3087,26 @@ int tquic_output_flush(struct tquic_connection *conn)
 				/* Clear frame list for next iteration */
 				INIT_LIST_HEAD(&frames);
 
+				/*
+				 * Pacing path taken: tquic_output_paced() queued the
+				 * packet for rate-limited delivery via hrtimer.  Stop
+				 * the flush loop — the timer drains pacing_queue one
+				 * packet per fire.  path was already put; do not
+				 * dereference it again (path->mtu on the next iteration
+				 * would be a NULL deref).
+				 */
+				if (!path)
+					break;
+
 				if (ret < 0)
 					break;
 			}
 
 			if (ret < 0)
+				break;
+
+			/* Pacing branch exited inner while; stop per-stream loop too. */
+			if (!path)
 				break;
 		}
 
