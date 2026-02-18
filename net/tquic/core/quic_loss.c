@@ -805,6 +805,17 @@ void tquic_loss_detection_on_ack_received(struct tquic_connection *conn,
 	/* Update timer */
 	tquic_set_loss_detection_timer(conn);
 
+	/*
+	 * Sync timer sent-list: removes acked packets from the timer
+	 * subsystem's duplicate pn_space tracking and recalculates PTO.
+	 * This prevents per-connection memory growth in the timer's
+	 * sent_list (one tquic_sent_packet per TX packet, never freed
+	 * otherwise without this hook).
+	 */
+	if (conn->timer_state)
+		tquic_timer_on_ack_processed(conn->timer_state, pn_space_idx,
+					     ack->largest_acked);
+
 	/* Free newly acknowledged packets */
 	while (newly_acked) {
 		pkt = newly_acked;

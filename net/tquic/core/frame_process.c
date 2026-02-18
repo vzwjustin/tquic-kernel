@@ -541,6 +541,16 @@ static int tquic_process_ack_frame(struct tquic_rx_ctx *ctx)
 				 */
 				ctx->conn->pto_count = 0;
 				tquic_set_loss_detection_timer(ctx->conn);
+
+				/*
+				 * Sync timer sent-list for Initial/Handshake
+				 * spaces (quic_loss.c handles Application).
+				 */
+				if (ctx->conn->timer_state)
+					tquic_timer_on_ack_processed(
+						ctx->conn->timer_state,
+						pn_space_idx,
+						ack_frame.largest_acked);
 			}
 
 			/* Update RTT in CC algorithm */

@@ -123,7 +123,6 @@ bool tquic_mib_alloc(struct net *net)
 	/* MIB already allocated in pernet init */
 	return tn && tn->mib != NULL;
 }
-EXPORT_SYMBOL_GPL(tquic_mib_alloc);
 
 /**
  * tquic_mib_free - Free per-CPU MIB counters for a network namespace
@@ -136,7 +135,6 @@ void tquic_mib_free(struct net *net)
 {
 	/* MIB freed in pernet exit */
 }
-EXPORT_SYMBOL_GPL(tquic_mib_free);
 
 /**
  * tquic_mib_seq_show_net - Output MIB counters in TquicExt format

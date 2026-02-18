@@ -261,12 +261,6 @@ static inline enum linux_tquic_mib_field tquic_equic_to_mib(u32 error_code)
  * MIB function declarations
  */
 
-/* Allocate MIB counters for network namespace */
-bool tquic_mib_alloc(struct net *net);
-
-/* Free MIB counters for network namespace */
-void tquic_mib_free(struct net *net);
-
 /* Output MIB counters to seq_file (explicit net for out-of-tree compatibility) */
 void tquic_mib_seq_show_net(struct seq_file *seq, struct net *net);
 

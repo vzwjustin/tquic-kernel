@@ -214,61 +214,6 @@ static void tquic_timer_work_fn(struct work_struct *work);
 static void tquic_retransmit_work_fn(struct work_struct *work);
 void tquic_path_validation_expired(struct timer_list *t);
 
-/*
- * ============================================================================
- * RTT Estimation
- * ============================================================================
- */
-
-/**
- * tquic_update_rtt - Update RTT estimates from an ACK
- * @recovery: Recovery state
- * @ack_delay: ACK delay reported by peer (us)
- * @rtt_sample: RTT sample from this ACK (us)
- * @is_handshake: True if this is a handshake packet
- */
-static void tquic_update_rtt(struct tquic_recovery_state *recovery,
-			     u64 ack_delay, u64 rtt_sample, bool is_handshake)
-{
-	/* Update minimum RTT (no smoothing) */
-	if (rtt_sample < recovery->min_rtt)
-		recovery->min_rtt = rtt_sample;
-
-	/* First RTT sample: use directly instead of EWMA */
-	if (!recovery->has_rtt_sample) {
-		recovery->smoothed_rtt = rtt_sample;
-		recovery->rtt_variance = rtt_sample / 2;
-		recovery->first_rtt_sample = ktime_get();
-		recovery->latest_rtt = rtt_sample;
-		recovery->has_rtt_sample = true;
-		return;
-	}
-
-	recovery->latest_rtt = rtt_sample;
-
-	/*
-	 * Adjust for ACK delay, but only for application data and only
-	 * if the adjusted RTT is still larger than min_rtt
-	 */
-	if (!is_handshake) {
-		u64 adjusted_rtt;
-
-		ack_delay = min(ack_delay, recovery->max_ack_delay);
-		adjusted_rtt = rtt_sample > ack_delay ? rtt_sample - ack_delay :
-							rtt_sample;
-
-		if (adjusted_rtt >= recovery->min_rtt)
-			rtt_sample = adjusted_rtt;
-	}
-
-	/* RFC 9002 EWMA update */
-	recovery->rtt_variance =
-		(3 * recovery->rtt_variance +
-		 abs((s64)recovery->smoothed_rtt - (s64)rtt_sample)) /
-		4;
-	recovery->smoothed_rtt = (7 * recovery->smoothed_rtt + rtt_sample) / 8;
-}
-
 /**
  * tquic_get_pto_duration - Calculate PTO duration
  * @recovery: Recovery state
@@ -1780,12 +1725,6 @@ int tquic_timer_on_packet_sent(struct tquic_timer_state *ts, int pn_space,
 		pns->ack_eliciting_in_flight++;
 	spin_unlock_bh(&pns->lock);
 
-	if (in_flight) {
-		spin_lock_bh(&rs->lock);
-		rs->bytes_in_flight += bytes;
-		spin_unlock_bh(&rs->lock);
-	}
-
 	/* Reset idle timer on packet sent */
 	tquic_timer_reset_idle(ts);
 
@@ -1798,274 +1737,67 @@ int tquic_timer_on_packet_sent(struct tquic_timer_state *ts, int pn_space,
 EXPORT_SYMBOL_GPL(tquic_timer_on_packet_sent);
 
 /**
- * tquic_timer_on_ack_received - Process received ACK
+ * tquic_timer_on_ack_processed - Clean up timer sent-list after ACK processing
  * @ts: Timer state
  * @pn_space: Packet number space
  * @largest_acked: Largest acknowledged packet number
- * @ack_delay_us: ACK delay from peer (in us)
- * @ack_ranges: Array of ACK ranges (pairs of first, last)
- * @num_ranges: Number of ACK ranges
  *
- * Returns: Number of newly acknowledged packets
+ * Called by the ACK processing path (core/quic_loss.c and frame_process.c)
+ * after it has fully processed an ACK frame.  Removes acknowledged packets
+ * from the timer's sent-list and recalculates the PTO timer.
+ *
+ * This function does NOT perform RTT updates or congestion control
+ * notification; those are handled exclusively by core/quic_loss.c.
  */
-int tquic_timer_on_ack_received(struct tquic_timer_state *ts, int pn_space,
-				u64 largest_acked, u64 ack_delay_us,
-				u64 *ack_ranges, int num_ranges)
+void tquic_timer_on_ack_processed(struct tquic_timer_state *ts, int pn_space,
+				  u64 largest_acked)
 {
-	struct tquic_recovery_state *rs = ts->recovery;
-	struct tquic_pn_space *pns = &rs->pn_spaces[pn_space];
-	struct tquic_sent_packet *pkt;
-	ktime_t now = ktime_get();
-	int newly_acked = 0;
-	u64 total_bytes_acked = 0;
-	int i;
-	bool is_handshake = (pn_space != TQUIC_PN_SPACE_APPLICATION);
+	struct tquic_recovery_state *rs;
+	struct tquic_pn_space *pns;
+	struct tquic_sent_packet *pkt, *tmp;
+
+	if (!ts || !ts->recovery || pn_space < 0 ||
+	    pn_space >= TQUIC_PN_SPACE_COUNT)
+		return;
+
+	rs = ts->recovery;
+	pns = &rs->pn_spaces[pn_space];
 
 	spin_lock_bh(&pns->lock);
 
-	/*
-	 * RFC 9000 Section 13.1: If an endpoint receives an ACK frame
-	 * that acknowledges a packet number it has not yet sent, it
-	 * SHOULD signal a connection error of type PROTOCOL_VIOLATION.
-	 */
-	if (largest_acked > pns->largest_sent) {
-		spin_unlock_bh(&pns->lock);
-		tquic_dbg(
-			"ACK for unsent pkt: largest_acked=%llu > largest_sent=%llu in space %u\n",
-			largest_acked, pns->largest_sent, pn_space);
-		return -EPROTO;
-	}
-
-	/* Update largest acked */
-	if (pns->largest_acked == U64_MAX ||
-	    largest_acked > pns->largest_acked) {
+	if (pns->largest_acked == U64_MAX || largest_acked > pns->largest_acked)
 		pns->largest_acked = largest_acked;
 
-		/* Get RTT sample from largest newly acked packet */
-		pkt = tquic_sent_pkt_find(pns, largest_acked);
-		if (pkt && pkt->state == TQUIC_PKT_OUTSTANDING) {
-			u64 rtt_sample = ktime_us_delta(now, pkt->sent_time);
-
-			spin_lock_bh(&rs->lock);
-			tquic_update_rtt(rs, ack_delay_us, rtt_sample,
-					 is_handshake);
-			rs->pto_count = 0;
-			rs->in_persistent_congestion = false;
-			rs->first_lost_time = 0;
-			rs->last_lost_time = 0;
-			spin_unlock_bh(&rs->lock);
-		}
-	}
-
-	pns->last_ack_time = now;
-
-	/* Process ACK ranges */
-	for (i = 0; i < num_ranges; i++) {
-		u64 first = ack_ranges[i * 2];
-		u64 last = ack_ranges[i * 2 + 1];
-		u64 pn;
-
-		for (pn = first; pn <= last; pn++) {
-			pkt = tquic_sent_pkt_find(pns, pn);
-			if (!pkt || pkt->state != TQUIC_PKT_OUTSTANDING)
-				continue;
-
-			pkt->state = TQUIC_PKT_ACKED;
-			newly_acked++;
-
-			if (pkt->ack_eliciting)
-				pns->ack_eliciting_in_flight--;
-
-			if (pkt->in_flight) {
-				/*
-				 * Accumulate before clearing in_flight so the
-				 * post-loop CC notification (RFC 9002 §7.1)
-				 * sees the correct byte count.
-				 */
-				total_bytes_acked += pkt->sent_bytes;
-
-				spin_lock_bh(&rs->lock);
-				if (unlikely(rs->bytes_in_flight <
-					     pkt->sent_bytes)) {
-					pr_warn_once(
-						"tquic: bytes_in_flight underflow in ack path\n");
-					rs->bytes_in_flight = 0;
-				} else {
-					rs->bytes_in_flight -= pkt->sent_bytes;
-				}
-				pkt->in_flight = false;
-				spin_unlock_bh(&rs->lock);
-			}
-		}
-	}
-
-	spin_unlock_bh(&pns->lock);
-
-	/* Notify congestion controller of acknowledged bytes (RFC 9002 §7.1) */
-	if (total_bytes_acked > 0) {
-		struct tquic_path *path;
-		u64 rtt_us;
-
-		spin_lock_bh(&rs->lock);
-		rtt_us = rs->latest_rtt;
-		spin_unlock_bh(&rs->lock);
-
-		rcu_read_lock();
-		path = rcu_dereference(ts->conn->active_path);
-		if (path && !tquic_path_get(path))
-			path = NULL;
-		rcu_read_unlock();
-		if (path) {
-			tquic_cong_on_ack(path, total_bytes_acked, rtt_us);
-			tquic_path_put(path);
-		}
-	}
-
-	/* Detect any newly lost packets */
-	tquic_detect_lost_packets(ts, pn_space);
-
-	/* Update timers */
-	tquic_timer_update_loss_timer(ts);
-	tquic_timer_update_pto(ts);
-	tquic_timer_reset_idle(ts);
-
-	return newly_acked;
-}
-EXPORT_SYMBOL_GPL(tquic_timer_on_ack_received);
-
-/*
- * ============================================================================
- * Retransmission Handling
- * ============================================================================
- */
-
-/**
- * tquic_timer_get_lost_packets - Get list of lost packets for retransmission
- * @ts: Timer state
- * @pn_space: Packet number space
- * @lost_list: List head to add lost packets to
- * @max_count: Maximum number of packets to return
- *
- * Returns: Number of lost packets added to list
- */
-int tquic_timer_get_lost_packets(struct tquic_timer_state *ts, int pn_space,
-				 struct list_head *lost_list, int max_count)
-{
-	struct tquic_recovery_state *rs = ts->recovery;
-	struct tquic_pn_space *pns = &rs->pn_spaces[pn_space];
-	struct tquic_sent_packet *pkt;
-	int count = 0;
-
-	spin_lock_bh(&pns->lock);
-
-	list_for_each_entry(pkt, &pns->sent_list, list) {
-		if (pkt->state != TQUIC_PKT_LOST)
+	/*
+	 * Remove all OUTSTANDING packets with pn <= largest_acked.
+	 *
+	 * ACK gaps (packets between ACK ranges) may be left in the list
+	 * briefly; they will be freed when a later ACK advances
+	 * largest_acked past them.  This is safe because the timer
+	 * subsystem uses sent_list only for PTO deadline calculation;
+	 * actual loss detection is handled by core/quic_loss.c using
+	 * conn->pn_spaces.
+	 */
+	list_for_each_entry_safe(pkt, tmp, &pns->sent_list, list) {
+		if (pkt->pn > largest_acked)
 			continue;
 
-		if (count >= max_count)
-			break;
+		if (pkt->state != TQUIC_PKT_OUTSTANDING)
+			continue;
 
-		/* Mark as being retransmitted */
-		pkt->state = TQUIC_PKT_RETRANSMITTED;
-		count++;
+		if (pkt->ack_eliciting && pns->ack_eliciting_in_flight)
+			pns->ack_eliciting_in_flight--;
 
-		/* Caller will handle actual retransmission */
+		tquic_sent_pkt_remove(pns, pkt);
+		tquic_sent_pkt_free(pkt);
 	}
 
 	spin_unlock_bh(&pns->lock);
 
-	return count;
+	tquic_timer_update_pto(ts);
+	tquic_timer_reset_idle(ts);
 }
-EXPORT_SYMBOL_GPL(tquic_timer_get_lost_packets);
-
-/**
- * tquic_timer_mark_retransmitted - Mark packet as retransmitted
- * @ts: Timer state
- * @pn_space: Packet number space
- * @old_pkt_num: Original packet number
- * @new_pkt_num: New packet number for retransmission
- */
-void tquic_timer_mark_retransmitted(struct tquic_timer_state *ts, int pn_space,
-				    u64 old_pkt_num, u64 new_pkt_num)
-{
-	struct tquic_recovery_state *rs = ts->recovery;
-	struct tquic_pn_space *pns = &rs->pn_spaces[pn_space];
-	struct tquic_sent_packet *pkt;
-
-	spin_lock_bh(&pns->lock);
-
-	pkt = tquic_sent_pkt_find(pns, old_pkt_num);
-	if (pkt) {
-		pkt->state = TQUIC_PKT_RETRANSMITTED;
-		/* New packet will be tracked separately */
-	}
-
-	spin_unlock_bh(&pns->lock);
-}
-EXPORT_SYMBOL_GPL(tquic_timer_mark_retransmitted);
-
-/*
- * ============================================================================
- * Statistics and Debugging
- * ============================================================================
- */
-
-/**
- * tquic_timer_get_rtt_stats - Get RTT statistics
- * @ts: Timer state
- * @smoothed: Output for smoothed RTT (us)
- * @variance: Output for RTT variance (us)
- * @min: Output for minimum RTT (us)
- * @latest: Output for latest RTT sample (us)
- */
-void tquic_timer_get_rtt_stats(struct tquic_timer_state *ts, u64 *smoothed,
-			       u64 *variance, u64 *min, u64 *latest)
-{
-	struct tquic_recovery_state *rs = ts->recovery;
-
-	spin_lock_bh(&rs->lock);
-
-	if (smoothed)
-		*smoothed = rs->smoothed_rtt;
-	if (variance)
-		*variance = rs->rtt_variance;
-	if (min)
-		*min = rs->min_rtt == U64_MAX ? 0 : rs->min_rtt;
-	if (latest)
-		*latest = rs->latest_rtt;
-
-	spin_unlock_bh(&rs->lock);
-}
-EXPORT_SYMBOL_GPL(tquic_timer_get_rtt_stats);
-
-/**
- * tquic_timer_get_recovery_stats - Get recovery statistics
- * @ts: Timer state
- * @bytes_in_flight: Output for bytes in flight
- * @cwnd: Output for congestion window
- * @ssthresh: Output for slow start threshold
- * @pto_count: Output for PTO count
- */
-void tquic_timer_get_recovery_stats(struct tquic_timer_state *ts,
-				    u64 *bytes_in_flight, u64 *cwnd,
-				    u64 *ssthresh, u32 *pto_count)
-{
-	struct tquic_recovery_state *rs = ts->recovery;
-
-	spin_lock_bh(&rs->lock);
-
-	if (bytes_in_flight)
-		*bytes_in_flight = rs->bytes_in_flight;
-	if (cwnd)
-		*cwnd = rs->congestion_window;
-	if (ssthresh)
-		*ssthresh = rs->ssthresh == U64_MAX ? 0 : rs->ssthresh;
-	if (pto_count)
-		*pto_count = rs->pto_count;
-
-	spin_unlock_bh(&rs->lock);
-}
-EXPORT_SYMBOL_GPL(tquic_timer_get_recovery_stats);
+EXPORT_SYMBOL_GPL(tquic_timer_on_ack_processed);
 
 /*
  * ============================================================================

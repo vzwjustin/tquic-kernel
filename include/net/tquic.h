@@ -2608,8 +2608,6 @@ void tquic_diag_exit(void);
 
 /* MIB statistics (net/tquic/tquic_mib.c) */
 struct seq_file;
-bool tquic_mib_alloc(struct net *net);
-void tquic_mib_free(struct net *net);
 void tquic_mib_seq_show(struct seq_file *seq);
 int __init tquic_mib_init(struct net *net);
 void __exit tquic_mib_exit(struct net *net);
@@ -3209,23 +3207,10 @@ void tquic_session_cleanup(struct tquic_connection *conn);
 int tquic_timer_on_packet_sent(struct tquic_timer_state *ts, int pn_space,
 			       u64 pkt_num, u32 bytes, bool ack_eliciting,
 			       bool in_flight, u32 frames);
-int tquic_timer_on_ack_received(struct tquic_timer_state *ts, int pn_space,
-				u64 largest_acked, u64 ack_delay_us,
-				u64 *ack_ranges, int num_ranges);
 
-/* Retransmission handling */
-int tquic_timer_get_lost_packets(struct tquic_timer_state *ts, int pn_space,
-				 struct list_head *lost_list, int max_count);
-void tquic_timer_mark_retransmitted(struct tquic_timer_state *ts, int pn_space,
-				    u64 old_pkt_num, u64 new_pkt_num);
-
-/* Statistics */
-void tquic_timer_get_rtt_stats(struct tquic_timer_state *ts,
-			       u64 *smoothed, u64 *variance,
-			       u64 *min, u64 *latest);
-void tquic_timer_get_recovery_stats(struct tquic_timer_state *ts,
-				    u64 *bytes_in_flight, u64 *cwnd,
-				    u64 *ssthresh, u32 *pto_count);
+/* ACK synchronization — call after core/quic_loss.c processes an ACK */
+void tquic_timer_on_ack_processed(struct tquic_timer_state *ts, int pn_space,
+				  u64 largest_acked);
 
 /* Timer subsystem initialization */
 int __init tquic_timer_init(void);
