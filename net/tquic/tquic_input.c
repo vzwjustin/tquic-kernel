@@ -413,6 +413,44 @@ static void tquic_handle_stateless_reset(struct tquic_connection *conn)
 }
 
 /*
+ * Scan all connections for a matching stateless reset token.
+ *
+ * RFC 9000 Section 10.3.1 requires that stateless reset detection checks
+ * the last 16 bytes of the packet against stored reset tokens.  This check
+ * must NOT depend on a successful DCID lookup, because the short header
+ * DCID length is not self-describing and a hardcoded length will miss
+ * connections using non-default CID lengths.
+ *
+ * This linear scan is acceptable because stateless resets are rare events
+ * (only when a peer has lost state, e.g. after a crash).
+ */
+static struct tquic_connection *
+tquic_find_conn_by_reset_token(const u8 *data, size_t len)
+{
+	struct rhashtable_iter iter;
+	struct tquic_connection *conn;
+	struct tquic_connection *found = NULL;
+
+	rhashtable_walk_enter(&tquic_conn_table, &iter);
+	rhashtable_walk_start(&iter);
+
+	while ((conn = rhashtable_walk_next(&iter)) != NULL) {
+		if (IS_ERR(conn))
+			continue;
+
+		if (tquic_stateless_reset_detect_conn(conn, data, len)) {
+			found = conn;
+			break;
+		}
+	}
+
+	rhashtable_walk_stop(&iter);
+	rhashtable_walk_exit(&iter);
+
+	return found;
+}
+
+/*
  * =============================================================================
  * Version Negotiation
  * =============================================================================
@@ -2063,6 +2101,25 @@ int tquic_udp_recv(struct sock *sk, struct sk_buff *skb)
 			tquic_path_put(path);
 		kfree_skb(skb);
 		return 0;
+	}
+
+	/*
+	 * RFC 9000 Section 10.3.1 fallback: if the DCID-based lookup
+	 * failed (e.g. non-default CID length) or the found connection's
+	 * tokens did not match, scan all connections for a reset token
+	 * match in the last 16 bytes of the packet.
+	 */
+	{
+		struct tquic_connection *reset_conn;
+
+		reset_conn = tquic_find_conn_by_reset_token(data, len);
+		if (reset_conn) {
+			tquic_handle_stateless_reset(reset_conn);
+			if (path)
+				tquic_path_put(path);
+			kfree_skb(skb);
+			return 0;
+		}
 	}
 
 not_reset:
