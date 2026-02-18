@@ -73,6 +73,7 @@ quic-y := \
 	tquic/core/connection.o \
 	tquic/core/stream.o \
 	tquic/core/frame.o \
+	tquic/core/frame_process.o \
 	tquic/core/packet.o \
 	tquic/core/ack_frequency.o \
 	tquic/core/flow_control.o \
