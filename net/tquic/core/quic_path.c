@@ -16,6 +16,7 @@
 #include <net/tquic.h>
 #include <net/tquic_frame.h>
 #include <net/tquic_pm.h>
+#include "../bond/tquic_bonding.h"
 #include "../diag/tracepoints.h"
 #include "../tquic_debug.h"
 #include "../protocol.h"
@@ -810,6 +811,37 @@ void tquic_path_rtt_update(struct tquic_path *path, u32 latest_rtt_us,
 	path->stats.rtt_smoothed = (u32)path->cc.smoothed_rtt_us;
 	path->stats.rtt_variance = (u32)path->cc.rtt_var_us;
 	path->stats.rtt_min = (u32)path->cc.min_rtt_us;
+
+	/*
+	 * Keep the bonding reorder buffer's gap-timeout in sync with the
+	 * measured RTT spread across all active paths.  The buffer needs
+	 * 2 * spread + margin milliseconds to wait for the slower path.
+	 * We scan all paths under RCU to find current min/max smoothed RTT.
+	 */
+	if (path->conn && path->conn->pm && path->conn->pm->bonding_ctx) {
+		struct tquic_bonding_ctx *bc = path->conn->pm->bonding_ctx;
+		struct tquic_path *p;
+		u32 min_rtt = U32_MAX, max_rtt = 0;
+
+		rcu_read_lock();
+		list_for_each_entry_rcu(p, &path->conn->paths, list) {
+			if ((p->state == TQUIC_PATH_ACTIVE ||
+			     p->state == TQUIC_PATH_VALIDATED) &&
+			    p->cc.smoothed_rtt_us > 0) {
+				u32 srtt = (u32)min_t(u64,
+						      p->cc.smoothed_rtt_us,
+						      U32_MAX);
+				if (srtt < min_rtt)
+					min_rtt = srtt;
+				if (srtt > max_rtt)
+					max_rtt = srtt;
+			}
+		}
+		rcu_read_unlock();
+
+		if (min_rtt != U32_MAX)
+			tquic_bonding_update_rtt_spread(bc, min_rtt, max_rtt);
+	}
 }
 
 /*

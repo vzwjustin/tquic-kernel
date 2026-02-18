@@ -51,6 +51,8 @@
 #include "quic_loss.h"
 #include "ack.h"
 #include "frame_process.h"
+#include <net/tquic_pm.h>
+#include "../bond/tquic_bonding.h"
 
 /* QUIC encryption level / packet type identifiers (RFC 9000 §17.2) */
 #define TQUIC_PKT_INITIAL		0x00
@@ -769,6 +771,76 @@ static int tquic_stream_recv_insert_sorted(struct tquic_stream *stream,
 }
 
 /*
+ * =============================================================================
+ * Bonding Reorder Buffer — Stream Delivery Helpers
+ * =============================================================================
+ */
+
+/*
+ * tquic_stream_reorder_cb - Extended SKB cb for bonding reorder buffer.
+ *
+ * The first member overlaps struct tquic_reorder_cb so the reorder buffer
+ * reads/writes seq, len, path_id, and arrival correctly.  The stream pointer
+ * and fin flag live in the remaining cb[] space and are only set/read here.
+ *
+ * Layout in skb->cb (48 bytes total):
+ *   base (tquic_reorder_cb): 24 bytes  [seq/len/path_id/arrival]
+ *   stream pointer:           8 bytes
+ *   fin flag:                 1 byte
+ *   ─────────────────────────────────
+ *   total:                   33 bytes  (< 48, verified by BUILD_BUG_ON)
+ */
+struct tquic_stream_reorder_cb {
+	struct tquic_reorder_cb  base;   /* Must be first */
+	struct tquic_stream     *stream; /* Stream to deliver data to */
+	bool                     fin;    /* FIN bit carried by this frame */
+};
+
+#define TQUIC_STREAM_REORDER_CB(skb) \
+	((struct tquic_stream_reorder_cb *)((skb)->cb))
+
+/*
+ * tquic_stream_reorder_deliver - Deliver a buffered stream skb in order.
+ *
+ * Called by tquic_reorder_drain() when a gap is filled, or by the gap-timeout
+ * work when the reorder buffer decides to flush a stale packet.
+ *
+ * The extra stream reference taken in tquic_process_stream_frame() is released
+ * here once the skb has been inserted (or dropped on duplicate).
+ */
+static void tquic_stream_reorder_deliver(void *conn_ctx, struct sk_buff *skb)
+{
+	struct tquic_connection *conn = conn_ctx;
+	struct tquic_stream_reorder_cb *scb = TQUIC_STREAM_REORDER_CB(skb);
+	struct tquic_stream *stream = scb->stream;
+
+	BUILD_BUG_ON(sizeof(struct tquic_stream_reorder_cb) >
+		     sizeof(((struct sk_buff *)0)->cb));
+
+	if (WARN_ON_ONCE(!stream)) {
+		kfree_skb(skb);
+		return;
+	}
+
+	if (tquic_stream_recv_insert_sorted(stream, skb)) {
+		/*
+		 * Duplicate within the stream buffer.  The reorder buffer
+		 * deduplicates by sequence number, so this should not happen
+		 * in practice — but handle it gracefully.
+		 */
+		if (conn->sk)
+			sk_mem_uncharge(conn->sk, skb->truesize);
+		kfree_skb(skb);
+	} else {
+		wake_up_interruptible(&stream->wait);
+		if (conn->sk)
+			conn->sk->sk_data_ready(conn->sk);
+	}
+
+	tquic_stream_put(stream);
+}
+
+/*
  * Process STREAM frame
  */
 static int tquic_process_stream_frame(struct tquic_rx_ctx *ctx)
@@ -1046,6 +1118,74 @@ static int tquic_process_stream_frame(struct tquic_rx_ctx *ctx)
 		skb_set_owner_r(data_skb, ctx->conn->sk);
 	}
 
+	/*
+	 * Bonding reorder buffer path: when multi-path bonding is active,
+	 * stream data passes through the RB-tree reorder buffer to compensate
+	 * for inter-path latency spread (e.g. fiber ~20 ms, satellite ~600 ms).
+	 * The stream byte offset serves as the per-stream sequence number.
+	 * State metadata (recv_offset, flow control) is updated at receive time
+	 * per RFC 9000 §2.2; ordered delivery to the application follows drain.
+	 */
+	if (ctx->conn->pm && ctx->conn->pm->bonding_ctx) {
+		struct tquic_bonding_ctx *bc = ctx->conn->pm->bonding_ctx;
+		struct tquic_reorder_buffer *rb = tquic_bonding_get_reorder(bc);
+
+		if (rb) {
+			struct tquic_stream_reorder_cb *scb =
+				TQUIC_STREAM_REORDER_CB(data_skb);
+			int r;
+
+			/*
+			 * Take an extra stream reference that the reorder buffer
+			 * holds until delivery.  tquic_stream_reorder_deliver()
+			 * releases it after handing the skb to the stream.
+			 */
+			if (!tquic_stream_get(stream))
+				goto normal_insert;
+
+			scb->stream = stream;
+			scb->fin    = fin;
+
+			/* Register timeout-flush callback (idempotent write) */
+			tquic_reorder_set_deliver(rb,
+						  tquic_stream_reorder_deliver,
+						  ctx->conn);
+
+			r = tquic_reorder_insert(rb, data_skb, offset,
+						 (u32)length,
+						 (u8)ctx->path->path_id);
+			if (r < 0) {
+				/* Dup, too old, or buffer full — drop cleanly */
+				if (ctx->conn->sk)
+					sk_mem_uncharge(ctx->conn->sk,
+							data_skb->truesize);
+				kfree_skb(data_skb);
+				tquic_stream_put(stream); /* release extra ref */
+			} else {
+				/* Flush any now-consecutive buffered packets */
+				tquic_reorder_drain(rb,
+						    tquic_stream_reorder_deliver,
+						    ctx->conn);
+			}
+
+			/* RFC 9000 §2.2: update state at receive time */
+			stream->recv_offset =
+				max(stream->recv_offset, offset + length);
+			if (fin && !stream->fin_received) {
+				stream->fin_received = true;
+				stream->final_size = offset + length;
+			}
+			tquic_flow_on_stream_data_recvd(stream, offset, length);
+
+			ctx->offset += length;
+			ctx->ack_eliciting = true;
+			ctx->conn->stats.rx_bytes += length;
+			tquic_stream_put(stream); /* release original ref */
+			return 0;
+		}
+	}
+
+normal_insert:
 	/*
 	 * Insert in offset-sorted order so recvmsg can deliver
 	 * contiguous data even when frames arrive out of order.
