@@ -301,6 +301,7 @@ tquic_test-y := \
 	test/nat_keepalive_test.o \
 	test/cong_data_test.o \
 	test/quic_exfil_test.o \
+	test/failover_test.o \
 	test/tx_work_test.o
 
 # Interoperability testing framework

@@ -372,10 +372,15 @@ EXPORT_SYMBOL_GPL(tquic_store_session_ticket);
  * @peerid: Peer certificate key serial (from tlshd)
  * @start_time: Jiffies when handshake started
  * @timeout_ms: Timeout in milliseconds
+ * @refcnt: Socket-owned + callback-owned references
  *
  * This structure tracks the state of an in-progress TLS handshake.
  * It is allocated when tquic_start_handshake() is called and freed
  * when the handshake completes or is cleaned up.
+ *
+ * @sk is pinned with sock_hold() for the lifetime of the structure so
+ * completion callbacks can safely dereference the socket even if teardown
+ * races with asynchronous handshake completion.
  */
 struct tquic_handshake_state {
 	struct sock *sk;
@@ -390,8 +395,11 @@ struct tquic_handshake_state {
 
 static inline void tquic_hs_state_put(struct tquic_handshake_state *hs)
 {
-	if (hs && refcount_dec_and_test(&hs->refcnt))
+	if (hs && refcount_dec_and_test(&hs->refcnt)) {
+		if (hs->sk)
+			sock_put(hs->sk);
 		kfree_sensitive(hs);
+	}
 }
 
 static struct tquic_handshake_state *tquic_hs_state_get_from_sock(struct sock *sk)
@@ -477,7 +485,7 @@ void tquic_handshake_done(void *data, int status, key_serial_t peerid)
 		tquic_conn_put(conn);
 	complete(&hs->done);
 
-	if (hs->tlshd_async)
+	if (READ_ONCE(hs->tlshd_async))
 		tquic_hs_state_put(hs);
 }
 EXPORT_SYMBOL_GPL(tquic_handshake_done);
@@ -587,8 +595,9 @@ int tquic_start_handshake(struct sock *sk)
 			return -ENOMEM;
 		}
 
-		hs->sk = sk;
-		init_completion(&hs->done);
+			hs->sk = sk;
+			sock_hold(sk);
+			init_completion(&hs->done);
 			hs->status = 0;
 			hs->peerid = TLS_NO_PEERID;
 			hs->start_time = jiffies;
@@ -755,13 +764,15 @@ int tquic_start_handshake(struct sock *sk)
 		 * SKB.  If this allocation fails we can return cleanly
 		 * without having queued an SKB that nobody will free.
 		 */
-			hs = kzalloc(sizeof(*hs), GFP_KERNEL);
-			if (!hs) {
-				kfree(ch_buf);
-				tquic_hs_cleanup(ihs);
-				tquic_conn_put(conn);
-				return -ENOMEM;
-			}
+				hs = kzalloc(sizeof(*hs), GFP_KERNEL);
+				if (!hs) {
+					kfree(ch_buf);
+					tquic_hs_cleanup(ihs);
+					tquic_conn_put(conn);
+					return -ENOMEM;
+				}
+			hs->sk = sk;
+			sock_hold(sk);
 
 		/* Defensive cap: ch_len must fit within the 4096-byte buffer */
 			if (ch_len == 0 || ch_len > 4096) {
@@ -785,8 +796,7 @@ int tquic_start_handshake(struct sock *sk)
 		skb_queue_tail(&conn->crypto_buffer[TQUIC_PN_SPACE_INITIAL],
 			       ch_skb);
 
-		hs->sk = sk;
-		init_completion(&hs->done);
+			init_completion(&hs->done);
 			hs->status = -ETIMEDOUT;
 			hs->peerid = TLS_NO_PEERID;
 			hs->start_time = jiffies;
@@ -857,6 +867,7 @@ tlshd_fallback:
 	}
 
 	hs->sk = sk;
+	sock_hold(sk);
 	init_completion(&hs->done);
 	hs->status = -ETIMEDOUT;  /* Default to timeout if never completed */
 	hs->peerid = TLS_NO_PEERID;
@@ -894,7 +905,7 @@ tlshd_fallback:
 	 * Hold an explicit callback reference so cleanup can drop only the
 	 * socket-owned reference while callback data remains valid.
 	 */
-	hs->tlshd_async = true;
+	WRITE_ONCE(hs->tlshd_async, true);
 	refcount_inc(&hs->refcnt);
 
 	/*
@@ -904,7 +915,7 @@ tlshd_fallback:
 	 */
 	ret = tls_client_hello_x509(&args, GFP_KERNEL);
 	if (ret) {
-		hs->tlshd_async = false;
+		WRITE_ONCE(hs->tlshd_async, false);
 		tquic_hs_state_put(hs);
 		tquic_dbg("tls_client_hello_x509 failed: %d\n", ret);
 		goto err_free;
@@ -1033,10 +1044,8 @@ void tquic_handshake_cleanup(struct sock *sk)
 	 * Cancel any pending tlshd handshake. If cancellation succeeds,
 	 * completion callback will not run, so release callback reference here.
 	 */
-	if (hs && hs->tlshd_async && tls_handshake_cancel(sk)) {
-		hs->tlshd_async = false;
+	if (hs && READ_ONCE(hs->tlshd_async) && tls_handshake_cancel(sk))
 		tquic_hs_state_put(hs);
-	}
 
 	/* Clean up inline handshake if present */
 	if (ihs)
@@ -2643,6 +2652,7 @@ int tquic_server_handshake(struct sock *listener_sk,
 
 	pr_debug("tquic_server_handshake: STEP1 hs_alloc ok\n");
 	hs->sk = child_sk;
+	sock_hold(child_sk);
 	hs->timeout_ms = TQUIC_HANDSHAKE_TIMEOUT_MS;
 	hs->start_time = jiffies;
 	init_completion(&hs->done);
