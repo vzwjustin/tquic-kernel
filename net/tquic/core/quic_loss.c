@@ -520,9 +520,9 @@ void tquic_loss_detection_on_packet_sent(struct tquic_connection *conn,
 
 	spin_unlock_irqrestore(&pn_space->lock, flags);
 
-	/* Update congestion control - use path-level CC */
+	/* Update congestion control - notify CC of packet sent */
 	if (pkt->in_flight && path) {
-		tquic_cong_on_ack(path, 0, 0); /* Signal packet sent */
+		tquic_cong_on_packet_sent(path, pkt->size, pkt->sent_time);
 		/* Update path CC bytes_in_flight */
 		path->cc.bytes_in_flight += pkt->size;
 	}

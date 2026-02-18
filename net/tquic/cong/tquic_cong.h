@@ -159,6 +159,10 @@ bool tquic_cong_check_persistent_congestion(struct tquic_path *path,
  */
 void tquic_cong_on_rtt(struct tquic_path *path, u64 rtt_us);
 
+/* Notify CC of packet transmission (bytes sent, time of send) */
+void tquic_cong_on_packet_sent(struct tquic_path *path, u64 bytes,
+			       ktime_t sent_time);
+
 /*
  * tquic_cong_get_cwnd - Get current cwnd from path's CC algorithm
  * @path: Path to query

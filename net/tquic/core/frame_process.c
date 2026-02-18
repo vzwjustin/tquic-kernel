@@ -61,6 +61,14 @@
 #define TQUIC_MAX_ACK_RANGES		256
 
 /*
+ * Conservative per-packet byte estimate for Initial/Handshake ACKs.
+ * These spaces carry CRYPTO frames only; using MTU would wildly inflate
+ * the bytes_acked value fed to congestion control.  ~300 bytes is a
+ * realistic CRYPTO frame size (TLS ClientHello/ServerHello fragments).
+ */
+#define TQUIC_CRYPTO_FRAME_ESTIMATE	300
+
+/*
  * M-001: Maximum per-STREAM frame allocation limit.
  * Prevents a single frame from allocating multi-MB skbs.
  * 64KB is reasonable for packet-sized data but prevents abuse.
@@ -518,11 +526,16 @@ static int tquic_process_ack_frame(struct tquic_rx_ctx *ctx)
 								     pn_space_idx);
 			} else {
 				u64 bytes_acked;
-				u64 mtu = (ctx->path->mtu > 0) ?
-					ctx->path->mtu : 1200;
-
+				/*
+				 * M-1 fix: Initial/Handshake packets carry
+				 * CRYPTO frames which are far smaller than
+				 * a full MTU packet. Use a conservative
+				 * per-frame estimate to avoid cwnd inflation.
+				 */
+#define TQUIC_CRYPTO_FRAME_BYTES_EST 300ULL
 				if (check_mul_overflow(total_acked_pkts,
-						       mtu, &bytes_acked))
+						       TQUIC_CRYPTO_FRAME_BYTES_EST,
+						       &bytes_acked))
 					return -EPROTO;
 
 				tquic_cong_on_ack(ctx->path, bytes_acked,
@@ -551,10 +564,15 @@ static int tquic_process_ack_frame(struct tquic_rx_ctx *ctx)
 						ctx->conn->timer_state,
 						pn_space_idx,
 						ack_frame.largest_acked);
-			}
 
-			/* Update RTT in CC algorithm */
-			tquic_cong_on_rtt(ctx->path, rtt_us);
+				/*
+				 * M-2 fix: tquic_cong_on_rtt only for
+				 * Initial/Handshake here. Application-space
+				 * RTT notification is handled inside
+				 * tquic_loss_detection_on_ack_received().
+				 */
+				tquic_cong_on_rtt(ctx->path, rtt_us);
+			}
 
 			/*
 			 * ACK opened cwnd - resume sending any

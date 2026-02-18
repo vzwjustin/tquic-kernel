@@ -792,8 +792,8 @@ EXPORT_SYMBOL_GPL(tquic_cong_get_pacing_rate);
  * @bytes: Number of bytes sent
  * @sent_time: Time the packet was sent
  */
-static void tquic_cong_on_packet_sent(struct tquic_path *path, u64 bytes,
-				      ktime_t sent_time)
+void tquic_cong_on_packet_sent(struct tquic_path *path, u64 bytes,
+			       ktime_t sent_time)
 {
 	struct tquic_cong_ops *ca;
 
