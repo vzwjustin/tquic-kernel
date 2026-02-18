@@ -593,17 +593,27 @@ void tquic_timer_state_free(struct tquic_timer_state *ts)
 
 	/*
 	 * Cancel path validation timers for all paths.
-	 * Use del_timer (not del_timer_sync) under spinlock to avoid
-	 * deadlock, then synchronize after releasing the lock.
+	 *
+	 * Two-pass approach required: del_timer under paths_lock deactivates
+	 * each timer atomically (preventing tquic_timer_start_path_validation
+	 * from re-arming it concurrently), but cannot wait for an in-progress
+	 * callback since the callback acquires conn->lock which we must not
+	 * hold.  The second pass calls del_timer_sync outside any spinlock to
+	 * drain any callback that was mid-execution when del_timer returned.
+	 * No new paths are added after ts->shutting_down = true, so iterating
+	 * paths without paths_lock in the second pass is safe.
 	 */
 	if (ts->conn) {
 		struct tquic_path *path;
 
 		spin_lock_bh(&ts->conn->paths_lock);
-		list_for_each_entry(path, &ts->conn->paths, list) {
+		list_for_each_entry(path, &ts->conn->paths, list)
 			del_timer(&path->validation_timer);
-		}
 		spin_unlock_bh(&ts->conn->paths_lock);
+
+		/* Wait for any callbacks already executing on another CPU. */
+		list_for_each_entry(path, &ts->conn->paths, list)
+			del_timer_sync(&path->validation_timer);
 	}
 
 	/* Flush workqueue items */

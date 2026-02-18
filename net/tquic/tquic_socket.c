@@ -418,7 +418,14 @@ int tquic_connect(struct sock *sk, tquic_sockaddr_t *uaddr, int addr_len)
 		((struct sockaddr_in *)&tsk->bind_addr)->sin_port =
 			bound.sin_port;
 
-		/* Initialize deferred packet processing */
+		/*
+		 * Initialize deferred packet processing.  cancel_work_sync
+		 * drains any work item left over from a previous failed
+		 * connect attempt before reinitialising the work_struct —
+		 * calling INIT_WORK on a pending item corrupts workqueue state.
+		 */
+		cancel_work_sync(&tsk->listener_work);
+		skb_queue_purge(&tsk->listener_queue);
 		skb_queue_head_init(&tsk->listener_queue);
 		INIT_WORK(&tsk->listener_work, tquic_listener_work_handler);
 
@@ -536,6 +543,10 @@ int tquic_connect(struct sock *sk, tquic_sockaddr_t *uaddr, int addr_len)
 	}
 
 	inet_sk_set_state(sk, TCP_ESTABLISHED);
+
+	/* Start idle timeout now that the connection is established. */
+	if (conn->timer_state)
+		tquic_timer_set_idle(conn->timer_state);
 
 	/* Initialize path manager after connection established */
 	ret = tquic_pm_conn_init(conn);

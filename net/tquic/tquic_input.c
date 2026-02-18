@@ -1393,18 +1393,6 @@ static int tquic_process_packet(struct tquic_connection *conn,
 			path_looked_up = true;
 	}
 
-	/* Try CID-based path routing for multipath */
-	{
-		struct tquic_path *cid_path;
-
-		cid_path = tquic_find_path_by_cid(conn, dcid, dcid_len);
-		if (cid_path) {
-			tquic_dbg("input: routed to path via CID len=%u\n",
-				  dcid_len);
-			tquic_path_put(cid_path);
-		}
-	}
-
 	/* Remove header protection */
 	{
 		u8 hp_pn_len = 0, hp_key_phase = 0;

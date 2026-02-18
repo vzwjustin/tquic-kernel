@@ -382,7 +382,7 @@ static int tquic_process_ack_frame(struct tquic_rx_ctx *ctx)
 			 * Max reasonable delta = (cwnd * 10) / mtu
 			 * This ensures the limit scales with path capacity.
 			 */
-			if (p->mtu > 0) {
+			if (p->mtu > 0 && p->cc.cwnd > 0) {
 				u64 max_reasonable_delta = (p->cc.cwnd * 10ULL) / p->mtu;
 
 				if (ect0_delta > max_reasonable_delta ||
@@ -997,11 +997,18 @@ static int tquic_process_stream_frame(struct tquic_rx_ctx *ctx)
 	 */
 	if (ctx->conn->sk) {
 		if (!sk_rmem_schedule(ctx->conn->sk, data_skb, length)) {
-			pr_debug("tquic: stream %llu: rmem_schedule failed\n",
+			/*
+			 * Buffer quota exceeded — drop the data so the peer
+			 * will retransmit.  Do NOT set ack_eliciting: sending
+			 * an ACK for a packet whose STREAM data we dropped
+			 * would falsely confirm delivery (RFC 9000 §2.2).
+			 * The offset is advanced so the frame loop continues
+			 * parsing subsequent frames in this packet.
+			 */
+			pr_debug("tquic: stream %llu: rmem_schedule failed, dropping\n",
 				 stream_id);
 			kfree_skb(data_skb);
 			ctx->offset += length;
-			ctx->ack_eliciting = true;
 			tquic_stream_put(stream);
 			return 0;
 		}
@@ -2379,7 +2386,8 @@ int tquic_process_frames(struct tquic_connection *conn,
 		 * CONNECTION_CLOSE frames are processed. All other
 		 * frames are silently ignored.
 		 */
-		if (READ_ONCE(conn->state) == TQUIC_CONN_CLOSING) {
+		/* CLOSING is rare in steady-state 1-RTT data transfer. */
+		if (unlikely(READ_ONCE(conn->state) == TQUIC_CONN_CLOSING)) {
 			if (frame_type != TQUIC_FRAME_CONNECTION_CLOSE &&
 			    frame_type != TQUIC_FRAME_CONNECTION_CLOSE_APP)
 				return 0;
@@ -2396,21 +2404,32 @@ int tquic_process_frames(struct tquic_connection *conn,
 		 * - HANDSHAKE_DONE (0x1e): 1-RTT only
 		 * - NEW_TOKEN (0x07): 1-RTT only
 		 * - Most other frames: 0-RTT and 1-RTT only
+		 *
+		 * Dispatch order: STREAM first (dominant in 1-RTT data
+		 * transfer), then ACK (dominant in ACK-only packets), then
+		 * rare control frames.  likely()/unlikely() guide branch
+		 * prediction on modern CPUs.
 		 */
 
 		/* Handle frame based on type */
-		if (frame_type == TQUIC_FRAME_PADDING) {
-			ret = tquic_process_padding_frame(&ctx);
-		} else if (frame_type == TQUIC_FRAME_PING) {
-			ret = tquic_process_ping_frame(&ctx);
-		} else if (frame_type == TQUIC_FRAME_ACK ||
-			   frame_type == TQUIC_FRAME_ACK_ECN) {
+		if (likely((frame_type & 0xf8) == TQUIC_FRAME_STREAM)) {
+			/* STREAM frames only in 0-RTT and 1-RTT */
+			if (unlikely(is_initial || is_handshake)) {
+				conn->error_code = EQUIC_FRAME_ENCODING;
+				tquic_conn_close_with_error(conn,
+					EQUIC_FRAME_ENCODING,
+					"STREAM in Initial/Handshake");
+				return -EPROTO;
+			}
+			ret = tquic_process_stream_frame(&ctx);
+		} else if (likely(frame_type == TQUIC_FRAME_ACK ||
+				  frame_type == TQUIC_FRAME_ACK_ECN)) {
 			/* CF-283: Limit to one ACK frame per packet */
 			if (ctx.ack_frame_seen)
 				return -EPROTO;
 			ctx.ack_frame_seen = true;
 			/* ACK frames forbidden in 0-RTT packets */
-			if (is_0rtt) {
+			if (unlikely(is_0rtt)) {
 				conn->error_code = EQUIC_FRAME_ENCODING;
 				tquic_conn_close_with_error(conn,
 					EQUIC_FRAME_ENCODING,
@@ -2418,6 +2437,10 @@ int tquic_process_frames(struct tquic_connection *conn,
 				return -EPROTO;
 			}
 			ret = tquic_process_ack_frame(&ctx);
+		} else if (frame_type == TQUIC_FRAME_PADDING) {
+			ret = tquic_process_padding_frame(&ctx);
+		} else if (frame_type == TQUIC_FRAME_PING) {
+			ret = tquic_process_ping_frame(&ctx);
 		} else if (frame_type == TQUIC_FRAME_CRYPTO) {
 			/* CRYPTO frames forbidden in 0-RTT */
 			if (is_0rtt) {
@@ -2438,16 +2461,6 @@ int tquic_process_frames(struct tquic_connection *conn,
 				return -EPROTO;
 			}
 			ret = tquic_process_new_token(&ctx);
-		} else if ((frame_type & 0xf8) == TQUIC_FRAME_STREAM) {
-			/* STREAM frames only in 0-RTT and 1-RTT */
-			if (is_initial || is_handshake) {
-				conn->error_code = EQUIC_FRAME_ENCODING;
-				tquic_conn_close_with_error(conn,
-					EQUIC_FRAME_ENCODING,
-					"STREAM in Initial/Handshake");
-				return -EPROTO;
-			}
-			ret = tquic_process_stream_frame(&ctx);
 		} else if (frame_type == TQUIC_FRAME_MAX_DATA) {
 			if (is_initial || is_handshake) {
 				conn->error_code = EQUIC_FRAME_ENCODING;

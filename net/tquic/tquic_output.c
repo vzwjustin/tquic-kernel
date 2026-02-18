@@ -2197,6 +2197,7 @@ int tquic_xmit(struct tquic_connection *conn, struct tquic_stream *stream,
 	struct sk_buff *skb;
 	LIST_HEAD(frames);
 	u64 pkt_num;
+	u32 skb_len;
 	size_t offset = 0;
 	size_t chunk;
 	int ret = 0;
@@ -2281,10 +2282,19 @@ int tquic_xmit(struct tquic_connection *conn, struct tquic_stream *stream,
 		}
 
 		/* Send packet */
+		skb_len = skb->len;
 		ret = tquic_output_packet(conn, path, skb);
 		tquic_path_put(path);
 		if (ret < 0)
 			break;
+
+		/* RFC 9002: record sent packet in recovery state */
+		if (conn->timer_state)
+			tquic_timer_on_packet_sent(conn->timer_state,
+						   TQUIC_PN_SPACE_APPLICATION,
+						   pkt_num, skb_len,
+						   true, true,
+						   BIT(TQUIC_FRAME_STREAM));
 
 		offset += chunk;
 		pkt_num++;
@@ -2316,6 +2326,7 @@ int tquic_send_ack(struct tquic_connection *conn, struct tquic_path *path,
 	u8 header_buf[128];
 	u8 *payload_buf;
 	int header_len, payload_len;
+	u32 skb_len;
 	int ret;
 	u64 pkt_num;
 	bool key_phase = false;
@@ -2392,7 +2403,17 @@ int tquic_send_ack(struct tquic_connection *conn, struct tquic_path *path,
 		}
 	}
 
-	return tquic_output_packet(conn, path, skb);
+	skb_len = skb->len;
+	ret = tquic_output_packet(conn, path, skb);
+
+	/* RFC 9002: ACK-only packets are not ack-eliciting, not in-flight */
+	if (ret >= 0 && conn->timer_state)
+		tquic_timer_on_packet_sent(conn->timer_state,
+					   TQUIC_PN_SPACE_APPLICATION,
+					   pkt_num, skb_len,
+					   false, false,
+					   BIT(TQUIC_FRAME_ACK));
+	return ret;
 }
 EXPORT_SYMBOL_GPL(tquic_send_ack);
 
@@ -2406,6 +2427,7 @@ int tquic_send_ping(struct tquic_connection *conn, struct tquic_path *path)
 	u8 header_buf[128];
 	u8 *payload_buf;
 	int header_len, payload_len;
+	u32 skb_len;
 	int ret;
 	u64 pkt_num;
 	bool key_phase = false;
@@ -2477,7 +2499,17 @@ int tquic_send_ping(struct tquic_connection *conn, struct tquic_path *path)
 	}
 
 	tquic_dbg("send_ping: sending pkt_num=%llu\n", pkt_num);
-	return tquic_output_packet(conn, path, skb);
+	skb_len = skb->len;
+	ret = tquic_output_packet(conn, path, skb);
+
+	/* RFC 9002: PING is ack-eliciting and counts against cwnd */
+	if (ret >= 0 && conn->timer_state)
+		tquic_timer_on_packet_sent(conn->timer_state,
+					   TQUIC_PN_SPACE_APPLICATION,
+					   pkt_num, skb_len,
+					   ctx.ack_eliciting, true,
+					   BIT(TQUIC_FRAME_PING));
+	return ret;
 }
 EXPORT_SYMBOL_GPL(tquic_send_ping);
 
@@ -2499,6 +2531,7 @@ int tquic_flow_send_max_data(struct tquic_connection *conn,
 	u8 header_buf[128];
 	u8 *payload_buf;
 	int header_len, payload_len;
+	u32 skb_len;
 	int ret;
 	u64 pkt_num;
 	bool key_phase = false;
@@ -2582,7 +2615,17 @@ int tquic_flow_send_max_data(struct tquic_connection *conn,
 		}
 	}
 
-	return tquic_output_packet(conn, path, skb);
+	skb_len = skb->len;
+	ret = tquic_output_packet(conn, path, skb);
+
+	/* RFC 9002: MAX_DATA is ack-eliciting and counts against cwnd */
+	if (ret >= 0 && conn->timer_state)
+		tquic_timer_on_packet_sent(conn->timer_state,
+					   TQUIC_PN_SPACE_APPLICATION,
+					   pkt_num, skb_len,
+					   true, true,
+					   BIT(TQUIC_FRAME_MAX_DATA));
+	return ret;
 }
 EXPORT_SYMBOL_GPL(tquic_flow_send_max_data);
 
@@ -2606,6 +2649,7 @@ int tquic_flow_send_max_stream_data(struct tquic_connection *conn,
 	u8 header_buf[128];
 	u8 *payload_buf;
 	int header_len, payload_len;
+	u32 skb_len;
 	int ret;
 	u64 pkt_num;
 	bool key_phase = false;
@@ -2688,7 +2732,17 @@ int tquic_flow_send_max_stream_data(struct tquic_connection *conn,
 		}
 	}
 
-	return tquic_output_packet(conn, path, skb);
+	skb_len = skb->len;
+	ret = tquic_output_packet(conn, path, skb);
+
+	/* RFC 9002: MAX_STREAM_DATA is ack-eliciting and counts against cwnd */
+	if (ret >= 0 && conn->timer_state)
+		tquic_timer_on_packet_sent(conn->timer_state,
+					   TQUIC_PN_SPACE_APPLICATION,
+					   pkt_num, skb_len,
+					   true, true,
+					   BIT(TQUIC_FRAME_MAX_STREAM_DATA));
+	return ret;
 }
 EXPORT_SYMBOL_GPL(tquic_flow_send_max_stream_data);
 
