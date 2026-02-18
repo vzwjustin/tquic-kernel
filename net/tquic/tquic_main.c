@@ -32,6 +32,7 @@
 #include <net/tquic_pm.h>
 #include "protocol.h"
 #include "grease.h"
+#include "tquic_mib.h"
 #if IS_ENABLED(CONFIG_TQUIC_IO_URING)
 #include "io_uring.h"
 #endif
@@ -834,6 +835,10 @@ struct tquic_stream *tquic_stream_open(struct tquic_connection *conn, bool bidi)
 	conn->stats.streams_opened++;
 	spin_unlock_bh(&conn->lock);
 
+	if (conn->sk)
+		TQUIC_INC_STATS(sock_net(conn->sk),
+				TQUIC_MIB_STREAMSOPENED);
+
 	return stream;
 }
 EXPORT_SYMBOL_GPL(tquic_stream_open);
@@ -973,6 +978,9 @@ void tquic_stream_close(struct tquic_stream *stream)
 		spin_lock_bh(&conn->lock);
 		conn->stats.streams_closed++;
 		spin_unlock_bh(&conn->lock);
+		if (conn->sk)
+			TQUIC_INC_STATS(sock_net(conn->sk),
+					TQUIC_MIB_STREAMSCLOSED);
 	}
 
 	/*
@@ -1290,12 +1298,14 @@ int __ref tquic_init(void)
 	if (err)
 		goto err_netlink;
 
-	/* Initialize sysctl interface */
-	err = tquic_sysctl_init(&init_net);
-	if (err)
-		goto err_sysctl;
+	/*
+	 * Sysctl registration is now handled per network namespace via
+	 * tquic_sysctl_init() called from the pernet .init callback in
+	 * tquic_proto.c. This ensures all tunables are visible in
+	 * containers, not just in init_net.
+	 */
 
-	/* Register protocol handlers */
+	/* Register protocol handlers (also registers pernet_operations) */
 	err = tquic_proto_init();
 	if (err)
 		goto err_proto;
@@ -1344,8 +1354,6 @@ err_offload:
 err_diag:
 	tquic_proto_exit();
 err_proto:
-	tquic_sysctl_exit();
-err_sysctl:
 	tquic_nl_exit();
 err_netlink:
 #if IS_ENABLED(CONFIG_TQUIC_IO_URING)
@@ -1388,8 +1396,8 @@ err_sched_aggregate:
 err_sched_minrtt:
 #ifdef TQUIC_OUT_OF_TREE
 	tquic_sched_framework_exit();
-#endif
 err_sched_framework:
+#endif
 	tquic_scheduler_exit();
 err_scheduler:
 	tquic_mp_deadline_exit();
@@ -1475,8 +1483,7 @@ void __exit tquic_exit(void)
 	tquic_offload_exit();
 	tquic_diag_exit();
 	tquic_proto_exit();
-	/* Proc interface is cleaned up per-netns via pernet_operations */
-	tquic_sysctl_exit();
+	/* Sysctl + proc interfaces are cleaned up per-netns via pernet_operations */
 	tquic_nl_exit();
 #if IS_ENABLED(CONFIG_TQUIC_IO_URING)
 	tquic_io_uring_exit();

@@ -29,6 +29,7 @@
 #include "protocol.h"
 #include "tquic_compat.h"
 #include "tquic_debug.h"
+#include "tquic_mib.h"
 
 /* Forward declaration from core/quic_loss.c */
 void tquic_set_loss_detection_timer(struct tquic_connection *conn);
@@ -840,6 +841,10 @@ static int tquic_detect_lost_packets(struct tquic_timer_state *ts, int pn_space)
 
 	spin_unlock_bh(&pns->lock);
 
+	if (lost_count > 0 && ts->conn && ts->conn->sk)
+		TQUIC_INC_STATS(sock_net(ts->conn->sk),
+				TQUIC_MIB_LOSSEVENTS);
+
 	return lost_count;
 }
 
@@ -1422,6 +1427,9 @@ void tquic_path_validation_expired(struct timer_list *t)
 	if (path->probe_count >= TQUIC_PATH_CHALLENGE_RETRIES) {
 		/* Path validation failed */
 		path->state = TQUIC_PATH_FAILED;
+		if (conn->sk)
+			TQUIC_INC_STATS(sock_net(conn->sk),
+					TQUIC_MIB_PATHFAILURES);
 		tquic_dbg("timer:path %u validation failed\n", path->path_id);
 	} else {
 		/* Retry path challenge */
@@ -1534,6 +1542,9 @@ static void tquic_timer_work_fn(struct work_struct *work)
 	/* Handle idle timeout */
 	if (test_bit(TQUIC_TIMER_IDLE_BIT, &pending)) {
 		if (READ_ONCE(conn->state) == TQUIC_CONN_CONNECTED) {
+			if (conn->sk)
+				TQUIC_INC_STATS(sock_net(conn->sk),
+						TQUIC_MIB_CONNTIMEDOUT);
 			tquic_conn_close_with_error(conn, EQUIC_NO_ERROR,
 						    "idle timeout");
 		}
@@ -1686,6 +1697,9 @@ static void tquic_retransmit_work_fn(struct work_struct *work)
 		 * other ack-eliciting data is pending for retransmission.
 		 */
 		tquic_dbg("timer:PTO fired, scheduling tx_work for probe\n");
+		if (conn->sk)
+			TQUIC_INC_STATS(sock_net(conn->sk),
+					TQUIC_MIB_RETRANSMISSIONS);
 		if (!work_pending(&conn->tx_work))
 			schedule_work(&conn->tx_work);
 

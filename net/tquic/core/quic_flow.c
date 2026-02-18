@@ -22,6 +22,7 @@
 #include <net/tquic_frame.h>
 #include "flow_control.h"
 #include "../tquic_debug.h"
+#include "../tquic_mib.h"
 
 /*
  * RFC 9000 Section 4 - Flow Control
@@ -717,6 +718,9 @@ static void tquic_stream_flow_control_send_blocked(struct tquic_stream *stream)
 	u64 limit;
 
 	limit = stream->max_send_data;
+
+	if (conn && conn->sk)
+		TQUIC_INC_STATS(sock_net(conn->sk), TQUIC_MIB_STREAMBLOCKED);
 
 	skb = tquic_flow_create_stream_data_blocked_frame(stream->id, limit);
 	if (!skb) {
