@@ -470,6 +470,15 @@ int tquic_conn_set_state(struct tquic_connection *conn,
 		break;
 
 	case TQUIC_CONN_DRAINING:
+		/*
+		 * Cancel timer-subsystem timers (idle, PTO, loss, pacing,
+		 * keepalive) before they can fire spuriously during the
+		 * draining period.  tquic_timer_start_drain() also arms
+		 * its own drain_timer as a backstop; the state-machine
+		 * drain_work below provides the authoritative close path.
+		 */
+		if (conn->timer_state)
+			tquic_timer_start_drain(conn->timer_state);
 		if (cs) {
 			cs->draining_start = ktime_get();
 			schedule_delayed_work(&cs->drain_work,
