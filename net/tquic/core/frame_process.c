@@ -143,6 +143,11 @@ static int tquic_process_padding_frame(struct tquic_rx_ctx *ctx)
 	 * If we hit the limit and there's still padding, reject as
 	 * excessive. Legitimate QUIC packets are at most ~1500 bytes
 	 * (PMTU), not more.
+	 *
+	 * BOUNDS SAFETY: ctx->data[ctx->offset] is only evaluated when
+	 * ctx->offset < ctx->len is true (short-circuit &&).  Do NOT
+	 * reorder or split this condition — the array access MUST be
+	 * guarded by the bounds check on the same line.
 	 */
 	if (ctx->offset >= limit && ctx->offset < ctx->len &&
 	    ctx->data[ctx->offset] == 0)
