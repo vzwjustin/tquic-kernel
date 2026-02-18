@@ -1370,6 +1370,27 @@ int tquic_sock_setsockopt(struct socket *sock, int level, int optname,
 		}
 		break;
 
+	case TQUIC_KEEPIDLE:
+		/*
+		 * Set keepalive interval (in seconds, like TCP_KEEPIDLE).
+		 * A value of 0 disables keepalive PING transmission.
+		 * Caps at 3600s (1 hour) per RFC 9000 §10.1 guidance.
+		 */
+		if (val < 0 || val > 3600)
+			return -ERANGE;
+		{
+			struct tquic_connection *conn;
+
+			conn = tquic_sock_conn_get(tsk);
+			if (!conn)
+				return -ENOTCONN;
+			if (conn->timer_state)
+				tquic_timer_set_keepalive(conn->timer_state,
+							  (u32)val * 1000);
+			tquic_conn_put(conn);
+		}
+		break;
+
 	case TQUIC_BOND_MODE: {
 		struct tquic_connection *conn;
 		int ret = -ENOTCONN;
