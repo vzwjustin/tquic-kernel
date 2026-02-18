@@ -1119,11 +1119,39 @@ void tquic_timer_start_drain(struct tquic_timer_state *ts)
 		return;
 	}
 
-	/* Set drain timeout to 3 * PTO */
-	spin_lock_bh(&rs->lock);
-	drain_duration = TQUIC_DRAIN_TIMEOUT_MULTIPLIER *
-			 tquic_get_pto_duration(rs, TQUIC_PN_SPACE_APPLICATION);
-	spin_unlock_bh(&rs->lock);
+	/*
+	 * RFC 9000 §10.2.1: The drain period MUST be at least 3 * PTO.
+	 * On multipath connections, use max(PTO) across all active paths
+	 * so that in-flight packets on the slowest path have time to arrive.
+	 */
+	{
+		struct tquic_path *path;
+		u64 max_pto_us = 0;
+
+		spin_lock_bh(&ts->conn->paths_lock);
+		list_for_each_entry(path, &ts->conn->paths, list) {
+			u32 pto_ms;
+
+			if (path->state != TQUIC_PATH_ACTIVE &&
+			    path->state != TQUIC_PATH_STANDBY)
+				continue;
+
+			pto_ms = tquic_rtt_pto(&path->rtt);
+			if ((u64)pto_ms * 1000 > max_pto_us)
+				max_pto_us = (u64)pto_ms * 1000;
+		}
+		spin_unlock_bh(&ts->conn->paths_lock);
+
+		/* Fall back to recovery-state PTO if no active paths */
+		if (max_pto_us == 0) {
+			spin_lock_bh(&rs->lock);
+			max_pto_us = tquic_get_pto_duration(rs,
+					TQUIC_PN_SPACE_APPLICATION);
+			spin_unlock_bh(&rs->lock);
+		}
+
+		drain_duration = TQUIC_DRAIN_TIMEOUT_MULTIPLIER * max_pto_us;
+	}
 
 	expires = jiffies + usecs_to_jiffies(drain_duration);
 	mod_timer(&ts->drain_timer, expires);
