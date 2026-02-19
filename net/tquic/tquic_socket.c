@@ -1368,16 +1368,17 @@ int tquic_sock_setsockopt(struct socket *sock, int level, int optname,
 		return -ENOPROTOOPT;
 
 	/*
-	 * Variable-length options (PSK identity, etc.) handle their
-	 * own optlen validation below.  For all other (integer) options,
-	 * require exactly sizeof(int).
+	 * Variable-length options handle their own optlen validation below.
+	 * For all other (integer) options, require exactly sizeof(int).
 	 */
 	switch (optname) {
 	case TQUIC_PSK_IDENTITY:
 	case TQUIC_EXPECTED_HOSTNAME:
 	case TQUIC_CERT_DATA:
 	case TQUIC_KEY_DATA:
-		/* Variable-length, validated in their case blocks */
+	case TQUIC_SCHEDULER:
+	case TQUIC_CONGESTION:
+		/* Variable-length string options, validated in their case blocks */
 		break;
 	default:
 		if (optlen != sizeof(int))
