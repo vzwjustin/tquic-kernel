@@ -26307,6 +26307,17 @@ F:	kernel/time/timekeeping*
 F:	kernel/time/time_test.c
 F:	tools/testing/selftests/timers/
 
+TQUIC WAN BONDING PROTOCOL
+M:	Justin Adams <spotty118@gmail.com>
+L:	netdev@vger.kernel.org
+S:	Maintained
+F:	Documentation/networking/tquic.rst
+F:	Documentation/networking/tquic-api.rst
+F:	include/net/tquic*.h
+F:	include/uapi/linux/tquic*.h
+F:	net/tquic/
+F:	tools/tquic/
+
 TIPC NETWORK LAYER
 M:	Jon Maloy <jmaloy@redhat.com>
 L:	netdev@vger.kernel.org (core kernel code)

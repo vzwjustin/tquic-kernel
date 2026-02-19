@@ -1,0 +1,222 @@
+.\" SPDX-License-Identifier: GPL-2.0
+.TH IP\-TQUIC 8 "2026-02-19" "Linux" "Linux User's Manual"
+.SH NAME
+ip\-tquic \- manage TQUIC multipath connections and paths
+.SH SYNOPSIS
+.B ip tquic
+.RI [ OPTIONS ]
+.I COMMAND
+.RI [ ARGUMENTS ]
+
+.SH DESCRIPTION
+.B ip\-tquic
+is the management tool for TQUIC, the Linux kernel multipath QUIC
+implementation for WAN bandwidth aggregation.
+It communicates with the
+.B tquic.ko
+kernel module via generic netlink.
+
+When installed as
+.I /usr/lib/iproute2/ip\-tquic
+it integrates with the
+.BR ip (8)
+command and is invoked as
+.BR "ip tquic" .
+
+.SH COMMANDS
+
+.SS "ip tquic show"
+Display all active TQUIC connections and their paths. For each path, shows:
+state, network interface, local and remote addresses, RTT, estimated bandwidth,
+packet loss rate, and scheduling weight.
+
+.SS "ip tquic path show [conn_id \fIID\fP]"
+Show paths. If
+.I conn_id
+is specified, show only paths belonging to that connection.
+
+.SS "ip tquic path add conn_id \fIID\fP ifindex \fIN\fP | dev \fINAME\fP local \fIADDR\fP:\fIPORT\fP remote \fIADDR\fP:\fIPORT\fP"
+Add a new path to an existing TQUIC connection. The kernel will begin
+PATH_CHALLENGE/PATH_RESPONSE validation on the new path before using it
+for data transmission.
+
+.I conn_id
+is the 64-bit connection identifier shown by
+.BR "ip tquic show" .
+
+Use either
+.BR ifindex " or " dev
+to specify the network interface.
+
+.SS "ip tquic path del path_id \fIN\fP"
+Remove a path from its connection. The path is removed immediately;
+in-flight data on other paths continues unaffected.
+
+.SS "ip tquic scheduler get [conn_id \fIID\fP]"
+Show the active scheduler. Without
+.I conn_id
+shows the system-wide default scheduler from
+.IR net.tquic.scheduler .
+
+.SS "ip tquic scheduler set \fINAME\fP [conn_id \fIID\fP]"
+Set the scheduler. If
+.I conn_id
+is provided, the change affects only that connection. Otherwise it changes
+the system-wide default for new connections.
+
+Available schedulers:
+.TP
+.B minrtt
+Send packets on the lowest-latency path. Best for latency-sensitive
+applications (VoIP, gaming).
+.TP
+.B aggregate
+Distribute packets across all paths proportional to capacity (cwnd/RTT).
+Default. Best for maximising bulk throughput.
+.TP
+.B weighted
+Use administrator-defined path weights. Combine with
+.B ip tquic path add
+weight parameter for fine-grained control.
+.TP
+.B blest
+BLEST scheduler. Avoids head-of-line blocking by estimating when a
+slow path would delay data delivery.
+.TP
+.B ecf
+Earliest Completion First. Chooses the path that would deliver the next
+packet soonest.
+
+.SS "ip tquic stats [conn_id \fIID\fP]"
+Show per-path statistics: transmitted/received bytes and packets,
+retransmissions, smoothed RTT, and congestion window.
+
+.SS "ip tquic monitor"
+Subscribe to live TQUIC events from the kernel. Events include:
+
+.IP \(bu 4
+.B path-up
+\- Path became available (validated and usable)
+.IP \(bu 4
+.B path-down
+\- Path has failed
+.IP \(bu 4
+.B path-change
+\- Path metrics changed significantly
+.IP \(bu 4
+.B migration
+\- Connection migrated to a new address
+
+Press
+.B Ctrl+C
+to stop monitoring. Requires the TQUIC module to be loaded.
+
+.SH EXAMPLES
+
+Show all connections and paths:
+.PP
+.RS
+.nf
+$ ip tquic show
+conn 1234567890
+        path 0 state active dev eth0 local 192.168.1.1:54321 \\
+             remote 203.0.113.1:4433 rtt 12.345ms bw 450.23Mbps \\
+             loss 0.00% weight 60 usable preferred
+        path 1 state active dev wlan0 local 192.168.2.1:54322 \\
+             remote 203.0.113.1:4433 rtt 28.102ms bw 200.10Mbps \\
+             loss 0.01% weight 40 usable
+.fi
+.RE
+
+Add a path using a device name:
+.PP
+.RS
+.nf
+$ ip tquic path add conn_id 1234567890 dev eth0 \\
+        local 192.168.1.1:0 remote 203.0.113.1:4433
+Path added successfully
+.fi
+.RE
+
+Change the scheduler to minrtt for a specific connection:
+.PP
+.RS
+.nf
+$ ip tquic scheduler set minrtt conn_id 1234567890
+Scheduler set to: minrtt
+.fi
+.RE
+
+Monitor live events:
+.PP
+.RS
+.nf
+$ ip tquic monitor
+Monitoring TQUIC events (press Ctrl+C to stop)...
+[1740000001.000123] path-up     conn 1234567890 path 2 state validated
+[1740000045.123456] path-change conn 1234567890 path 1 state degraded
+^C
+Done.
+.fi
+.RE
+
+.SH SYSCTLS
+
+TQUIC tunables are available in
+.IR /proc/sys/net/tquic/ :
+
+.TP
+.B net.tquic.scheduler
+Default scheduler for new connections. One of: minrtt, aggregate,
+weighted, blest, ecf. Default: aggregate.
+.TP
+.B net.tquic.congestion
+Default congestion control algorithm. One of: cubic, bbr, copa,
+westwood, auto. Default: cubic.
+.TP
+.B net.tquic.max_paths
+Maximum number of paths per connection. Default: 8.
+.TP
+.B net.tquic.probe_interval
+Path probe interval in milliseconds. Default: 1000.
+.TP
+.B net.tquic.failover_timeout
+Time before a path is declared failed, in milliseconds. Default: 3000.
+.TP
+.B net.tquic.idle_timeout
+Connection idle timeout in milliseconds. Default: 30000.
+.TP
+.B net.tquic.ecn_enabled
+Enable ECN (Explicit Congestion Notification). Default: 0.
+
+.SH FILES
+
+.TP
+.I /proc/sys/net/tquic/
+Per-namespace sysctl tunables.
+.TP
+.I /proc/net/tquic/connections
+Active connection list.
+.TP
+.I /proc/net/tquic/paths
+Per-path statistics.
+.TP
+.I /proc/net/tquic_nf
+Netfilter connection tracking (when tquic_nf module is loaded).
+.TP
+.I /usr/lib/iproute2/ip-tquic
+iproute2 plugin location.
+
+.SH SEE ALSO
+.BR ip (8),
+.BR ss (8),
+.BR tquicd (8),
+.BR sysctl (8)
+
+.SH AUTHOR
+Justin Adams <spotty118@gmail.com>
+
+.SH STANDARDS
+TQUIC implements RFC 9000 (QUIC Transport), RFC 9001 (QUIC+TLS),
+RFC 9002 (Loss Detection and Congestion Control), and
+draft-ietf-quic-multipath.
