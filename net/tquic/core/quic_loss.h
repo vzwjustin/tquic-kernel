@@ -22,9 +22,8 @@ void tquic_loss_cache_destroy(void);
 
 /* Sent packet management */
 struct tquic_sent_packet *tquic_sent_packet_alloc(gfp_t gfp);
-void tquic_sent_packet_init(struct tquic_sent_packet *pkt,
-			    u64 pn, u32 bytes, u8 pn_space,
-			    bool ack_eliciting, bool in_flight,
+void tquic_sent_packet_init(struct tquic_sent_packet *pkt, u64 pn, u32 bytes,
+			    u8 pn_space, bool ack_eliciting, bool in_flight,
 			    u32 path_id);
 void tquic_sent_packet_free(struct tquic_sent_packet *pkt);
 
@@ -37,12 +36,13 @@ void tquic_loss_detection_on_packet_sent(struct tquic_connection *conn,
 					 struct tquic_sent_packet *pkt);
 void tquic_loss_detection_on_ack_received(struct tquic_connection *conn,
 					  struct tquic_ack_frame *ack,
-					  u8 pn_space_idx);
+					  u8 pn_space_idx,
+					  struct tquic_path *recv_path);
 void tquic_loss_detection_on_timeout(struct tquic_connection *conn);
 void tquic_loss_on_packet_number_space_discarded(struct tquic_connection *conn,
 						 u8 pn_space_idx);
-void tquic_loss_mark_packet_lost(struct tquic_connection *conn,
-				 u8 pn_space_idx, u64 pn);
+void tquic_loss_mark_packet_lost(struct tquic_connection *conn, u8 pn_space_idx,
+				 u64 pn);
 
 /* Statistics and queries */
 u64 tquic_loss_get_bytes_in_flight(struct tquic_connection *conn);

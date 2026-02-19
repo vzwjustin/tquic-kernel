@@ -56,12 +56,12 @@
 #include "../bond/tquic_bonding.h"
 
 /* QUIC encryption level / packet type identifiers (RFC 9000 §17.2) */
-#define TQUIC_PKT_INITIAL		0x00
-#define TQUIC_PKT_ZERO_RTT		0x01
-#define TQUIC_PKT_HANDSHAKE		0x02
+#define TQUIC_PKT_INITIAL 0x00
+#define TQUIC_PKT_ZERO_RTT 0x01
+#define TQUIC_PKT_HANDSHAKE 0x02
 
 /* Maximum ACK ranges to prevent resource exhaustion from malicious frames */
-#define TQUIC_MAX_ACK_RANGES		256
+#define TQUIC_MAX_ACK_RANGES 256
 
 /*
  * Conservative per-packet byte estimate for Initial/Handshake ACKs.
@@ -69,41 +69,41 @@
  * the bytes_acked value fed to congestion control.  ~300 bytes is a
  * realistic CRYPTO frame size (TLS ClientHello/ServerHello fragments).
  */
-#define TQUIC_CRYPTO_FRAME_BYTES_EST	300ULL
+#define TQUIC_CRYPTO_FRAME_BYTES_EST 300ULL
 
 /*
  * M-001: Maximum per-STREAM frame allocation limit.
  * Prevents a single frame from allocating multi-MB skbs.
  * 64KB is reasonable for packet-sized data but prevents abuse.
  */
-#define TQUIC_MAX_STREAM_FRAME_ALLOC	(64 * 1024)
+#define TQUIC_MAX_STREAM_FRAME_ALLOC (64 * 1024)
 
 /* QUIC frame types (must match tquic_output.c) */
-#define TQUIC_FRAME_PADDING		0x00
-#define TQUIC_FRAME_PING		0x01
-#define TQUIC_FRAME_ACK			0x02
-#define TQUIC_FRAME_ACK_ECN		0x03
-#define TQUIC_FRAME_RESET_STREAM	0x04
-#define TQUIC_FRAME_STOP_SENDING	0x05
-#define TQUIC_FRAME_CRYPTO		0x06
-#define TQUIC_FRAME_NEW_TOKEN		0x07
-#define TQUIC_FRAME_STREAM		0x08  /* 0x08-0x0f */
-#define TQUIC_FRAME_MAX_DATA		0x10
-#define TQUIC_FRAME_MAX_STREAM_DATA	0x11
-#define TQUIC_FRAME_MAX_STREAMS_BIDI	0x12
-#define TQUIC_FRAME_MAX_STREAMS_UNI	0x13
-#define TQUIC_FRAME_DATA_BLOCKED	0x14
-#define TQUIC_FRAME_STREAM_DATA_BLOCKED	0x15
+#define TQUIC_FRAME_PADDING 0x00
+#define TQUIC_FRAME_PING 0x01
+#define TQUIC_FRAME_ACK 0x02
+#define TQUIC_FRAME_ACK_ECN 0x03
+#define TQUIC_FRAME_RESET_STREAM 0x04
+#define TQUIC_FRAME_STOP_SENDING 0x05
+#define TQUIC_FRAME_CRYPTO 0x06
+#define TQUIC_FRAME_NEW_TOKEN 0x07
+#define TQUIC_FRAME_STREAM 0x08 /* 0x08-0x0f */
+#define TQUIC_FRAME_MAX_DATA 0x10
+#define TQUIC_FRAME_MAX_STREAM_DATA 0x11
+#define TQUIC_FRAME_MAX_STREAMS_BIDI 0x12
+#define TQUIC_FRAME_MAX_STREAMS_UNI 0x13
+#define TQUIC_FRAME_DATA_BLOCKED 0x14
+#define TQUIC_FRAME_STREAM_DATA_BLOCKED 0x15
 #define TQUIC_FRAME_STREAMS_BLOCKED_BIDI 0x16
-#define TQUIC_FRAME_STREAMS_BLOCKED_UNI	0x17
-#define TQUIC_FRAME_NEW_CONNECTION_ID	0x18
+#define TQUIC_FRAME_STREAMS_BLOCKED_UNI 0x17
+#define TQUIC_FRAME_NEW_CONNECTION_ID 0x18
 #define TQUIC_FRAME_RETIRE_CONNECTION_ID 0x19
-#define TQUIC_FRAME_PATH_CHALLENGE	0x1a
-#define TQUIC_FRAME_PATH_RESPONSE	0x1b
-#define TQUIC_FRAME_CONNECTION_CLOSE	0x1c
+#define TQUIC_FRAME_PATH_CHALLENGE 0x1a
+#define TQUIC_FRAME_PATH_RESPONSE 0x1b
+#define TQUIC_FRAME_CONNECTION_CLOSE 0x1c
 #define TQUIC_FRAME_CONNECTION_CLOSE_APP 0x1d
-#define TQUIC_FRAME_HANDSHAKE_DONE	0x1e
-#define TQUIC_FRAME_DATAGRAM		0x30  /* 0x30-0x31 */
+#define TQUIC_FRAME_HANDSHAKE_DONE 0x1e
+#define TQUIC_FRAME_DATAGRAM 0x30 /* 0x30-0x31 */
 /* ACK frequency frame types defined in core/ack_frequency.h */
 
 /*
@@ -123,15 +123,15 @@
  * Attackers could send excessive padding to waste CPU cycles.
  * We use memchr() for efficient scanning instead of byte-by-byte loop.
  */
-#define TQUIC_MAX_PADDING_BYTES	1500
+#define TQUIC_MAX_PADDING_BYTES 1500
 
 static int tquic_process_padding_frame(struct tquic_rx_ctx *ctx)
 {
 	u32 start = ctx->offset;
 	u32 limit = min_t(u32, ctx->len, start + TQUIC_MAX_PADDING_BYTES);
 
-	tquic_dbg("process_padding: offset=%u remaining=%zu\n",
-		  start, ctx->len - start);
+	tquic_dbg("process_padding: offset=%u remaining=%zu\n", start,
+		  ctx->len - start);
 
 	/*
 	 * Optimization: Scan padding bytes efficiently.
@@ -166,7 +166,7 @@ static int tquic_process_ping_frame(struct tquic_rx_ctx *ctx)
 {
 	tquic_dbg("process_ping: pkt_num=%llu\n", ctx->pkt_num);
 
-	ctx->offset++;  /* Skip frame type */
+	ctx->offset++; /* Skip frame type */
 	ctx->ack_eliciting = true;
 
 	return 0;
@@ -200,7 +200,7 @@ static int tquic_process_ack_frame(struct tquic_rx_ctx *ctx)
 
 	frame_type = ctx->data[ctx->offset];
 	has_ecn = (frame_type == TQUIC_FRAME_ACK_ECN);
-	ctx->offset++;  /* Skip frame type */
+	ctx->offset++; /* Skip frame type */
 
 	/* Largest Acknowledged */
 	ret = tquic_decode_varint(ctx->data + ctx->offset,
@@ -248,8 +248,8 @@ static int tquic_process_ack_frame(struct tquic_rx_ctx *ctx)
 	ack_frame.largest_acked = largest_ack;
 	ack_frame.ack_delay = ack_delay;
 	ack_frame.first_range = first_ack_range;
-	ack_frame.range_count = min_t(u32, ack_range_count,
-				      TQUIC_MAX_ACK_RANGES);
+	ack_frame.range_count =
+		min_t(u32, ack_range_count, TQUIC_MAX_ACK_RANGES);
 	ack_frame.has_ecn = has_ecn;
 
 	/*
@@ -275,8 +275,7 @@ static int tquic_process_ack_frame(struct tquic_rx_ctx *ctx)
 			u64 gap, range;
 
 			ret = tquic_decode_varint(ctx->data + ctx->offset,
-						  ctx->len - ctx->offset,
-						  &gap);
+						  ctx->len - ctx->offset, &gap);
 			if (ret < 0)
 				return ret;
 			ctx->offset += ret;
@@ -381,10 +380,11 @@ static int tquic_process_ack_frame(struct tquic_rx_ctx *ctx)
 			if (ecn_ect0 < p->ecn_ect0_count_prev ||
 			    ecn_ect1 < p->ecn_ect1_count_prev ||
 			    ecn_ce < p->ecn_ce_count_prev) {
-				tquic_dbg("ECN counts decreased: ect0 %llu->%llu ect1 %llu->%llu ce %llu->%llu\n",
-					 p->ecn_ect0_count_prev, ecn_ect0,
-					 p->ecn_ect1_count_prev, ecn_ect1,
-					 p->ecn_ce_count_prev, ecn_ce);
+				tquic_dbg(
+					"ECN counts decreased: ect0 %llu->%llu ect1 %llu->%llu ce %llu->%llu\n",
+					p->ecn_ect0_count_prev, ecn_ect0,
+					p->ecn_ect1_count_prev, ecn_ect1,
+					p->ecn_ce_count_prev, ecn_ce);
 				return -EPROTO;
 			}
 
@@ -404,14 +404,17 @@ static int tquic_process_ack_frame(struct tquic_rx_ctx *ctx)
 			 * This ensures the limit scales with path capacity.
 			 */
 			if (p->mtu > 0 && p->cc.cwnd > 0) {
-				u64 max_reasonable_delta = (p->cc.cwnd * 10ULL) / p->mtu;
+				u64 max_reasonable_delta =
+					(p->cc.cwnd * 10ULL) / p->mtu;
 
 				if (ect0_delta > max_reasonable_delta ||
 				    ect1_delta > max_reasonable_delta ||
 				    ce_delta > max_reasonable_delta) {
-					tquic_warn("ECN delta exceeds path capacity: ect0=%llu ect1=%llu ce=%llu (max=%llu, cwnd=%u, mtu=%u)\n",
-						  ect0_delta, ect1_delta, ce_delta,
-						  max_reasonable_delta, p->cc.cwnd, p->mtu);
+					tquic_warn(
+						"ECN delta exceeds path capacity: ect0=%llu ect1=%llu ce=%llu (max=%llu, cwnd=%u, mtu=%u)\n",
+						ect0_delta, ect1_delta,
+						ce_delta, max_reasonable_delta,
+						p->cc.cwnd, p->mtu);
 					return -EPROTO;
 				}
 			}
@@ -433,8 +436,9 @@ static int tquic_process_ack_frame(struct tquic_rx_ctx *ctx)
 				tquic_cong_on_ecn(p, ce_delta);
 			}
 
-			tquic_dbg("ECN on path %u: ect0=%llu ect1=%llu ce=%llu\n",
-				 p->path_id, ecn_ect0, ecn_ect1, ecn_ce);
+			tquic_dbg(
+				"ECN on path %u: ect0=%llu ect1=%llu ce=%llu\n",
+				p->path_id, ecn_ect0, ecn_ect1, ecn_ce);
 
 			p->ecn_ect0_count_prev = ecn_ect0;
 			p->ecn_ect1_count_prev = ecn_ect1;
@@ -530,20 +534,21 @@ static int tquic_process_ack_frame(struct tquic_rx_ctx *ctx)
 					ack_frame.ecn.ect1 = ecn_ect1;
 					ack_frame.ecn.ce = ecn_ce;
 				}
-				tquic_loss_detection_on_ack_received(ctx->conn, &ack_frame,
-								     pn_space_idx);
+				tquic_loss_detection_on_ack_received(
+					ctx->conn, &ack_frame, pn_space_idx,
+					ctx->path);
 			} else {
 				u64 bytes_acked;
 
-				if (check_mul_overflow(total_acked_pkts,
-						       TQUIC_CRYPTO_FRAME_BYTES_EST,
-						       &bytes_acked))
+				if (check_mul_overflow(
+					    total_acked_pkts,
+					    TQUIC_CRYPTO_FRAME_BYTES_EST,
+					    &bytes_acked))
 					return -EPROTO;
 
 				tquic_cong_on_ack(ctx->path, bytes_acked,
 						  rtt_us);
-				ctx->path->stats.acked_bytes +=
-					bytes_acked;
+				ctx->path->stats.acked_bytes += bytes_acked;
 
 				/*
 				 * RFC 9002 Section A.7: Reset PTO count on
@@ -611,7 +616,7 @@ static int tquic_process_crypto_frame(struct tquic_rx_ctx *ctx)
 	u64 offset, length;
 	int ret;
 
-	ctx->offset++;  /* Skip frame type */
+	ctx->offset++; /* Skip frame type */
 
 	/* Offset */
 	ret = tquic_decode_varint(ctx->data + ctx->offset,
@@ -637,7 +642,8 @@ static int tquic_process_crypto_frame(struct tquic_rx_ctx *ctx)
 		size_t end_offset;
 
 		if (length > ctx->len ||
-		    check_add_overflow(ctx->offset, (size_t)length, &end_offset) ||
+		    check_add_overflow(ctx->offset, (size_t)length,
+				       &end_offset) ||
 		    end_offset > ctx->len)
 			return -EINVAL;
 	}
@@ -660,7 +666,8 @@ static int tquic_process_crypto_frame(struct tquic_rx_ctx *ctx)
 			ret = tquic_pre_hs_alloc(&ctx->path->remote_addr,
 						 (size_t)length);
 			if (ret < 0) {
-				tquic_dbg("CRYPTO frame rejected: pre-HS memory limit\n");
+				tquic_dbg(
+					"CRYPTO frame rejected: pre-HS memory limit\n");
 				return ret;
 			}
 		}
@@ -678,10 +685,9 @@ static int tquic_process_crypto_frame(struct tquic_rx_ctx *ctx)
 		struct sock *sk = (struct sock *)ctx->conn->tsk;
 
 		pr_debug("crypto_frame: offset=%llu length=%llu enc_level=%d "
-			"data[0..3]=%*phN\n",
-			offset, length, ctx->enc_level,
-			min_t(int, (int)length, 4),
-			ctx->data + ctx->offset);
+			 "data[0..3]=%*phN\n",
+			 offset, length, ctx->enc_level,
+			 min_t(int, (int)length, 4), ctx->data + ctx->offset);
 
 		/*
 		 * SECURITY: Validate length fits in u32 before cast.
@@ -690,14 +696,11 @@ static int tquic_process_crypto_frame(struct tquic_rx_ctx *ctx)
 		 */
 		if (length > U32_MAX)
 			return -EINVAL;
-		ret = tquic_inline_hs_recv_crypto(sk,
-						  ctx->data + ctx->offset,
-						  (u32)length,
-						  ctx->enc_level);
+		ret = tquic_inline_hs_recv_crypto(sk, ctx->data + ctx->offset,
+						  (u32)length, ctx->enc_level);
 		pr_debug("crypto_frame: inline_hs_recv_crypto ret=%d\n", ret);
 		if (ret < 0) {
-			tquic_dbg("CRYPTO frame processing failed: %d\n",
-				 ret);
+			tquic_dbg("CRYPTO frame processing failed: %d\n", ret);
 			ctx->offset += length;
 			return ret;
 		}
@@ -711,8 +714,7 @@ static int tquic_process_crypto_frame(struct tquic_rx_ctx *ctx)
 			tquic_output_flush_crypto(ctx->conn);
 	} else {
 		pr_debug("crypto_frame: no inline_hs! conn=%p tsk=%p\n",
-			ctx->conn,
-			ctx->conn ? ctx->conn->tsk : NULL);
+			 ctx->conn, ctx->conn ? ctx->conn->tsk : NULL);
 	}
 
 	ctx->offset += length;
@@ -744,22 +746,21 @@ static int tquic_stream_recv_insert_sorted(struct tquic_stream *stream,
 	spin_lock_irqsave(&stream->recv_buf.lock, flags);
 
 	/* Walk from tail — in-order arrival hits the first branch immediately */
-	skb_queue_reverse_walk(&stream->recv_buf, skb) {
+	skb_queue_reverse_walk(&stream->recv_buf, skb)
+	{
 		u64 off = get_unaligned((u64 *)skb->cb);
 		u64 end = off + skb->len;
 
 		if (new_off >= end) {
 			/* new_skb belongs right after this one */
 			__skb_queue_after(&stream->recv_buf, skb, new_skb);
-			spin_unlock_irqrestore(&stream->recv_buf.lock,
-					       flags);
+			spin_unlock_irqrestore(&stream->recv_buf.lock, flags);
 			return 0;
 		}
 
 		if (new_end > off && new_off < end) {
 			/* Overlaps with existing data — duplicate */
-			spin_unlock_irqrestore(&stream->recv_buf.lock,
-					       flags);
+			spin_unlock_irqrestore(&stream->recv_buf.lock, flags);
 			return -EEXIST;
 		}
 		/* new_end <= off: new_skb is earlier, keep walking back */
@@ -792,9 +793,9 @@ static int tquic_stream_recv_insert_sorted(struct tquic_stream *stream,
  *   total:                   33 bytes  (< 48, verified by BUILD_BUG_ON)
  */
 struct tquic_stream_reorder_cb {
-	struct tquic_reorder_cb  base;   /* Must be first */
-	struct tquic_stream     *stream; /* Stream to deliver data to */
-	bool                     fin;    /* FIN bit carried by this frame */
+	struct tquic_reorder_cb base; /* Must be first */
+	struct tquic_stream *stream; /* Stream to deliver data to */
+	bool fin; /* FIN bit carried by this frame */
 };
 
 #define TQUIC_STREAM_REORDER_CB(skb) \
@@ -858,7 +859,7 @@ static int tquic_process_stream_frame(struct tquic_rx_ctx *ctx)
 	has_length = (frame_type & 0x02) != 0;
 	fin = (frame_type & 0x01) != 0;
 
-	ctx->offset++;  /* Skip frame type */
+	ctx->offset++; /* Skip frame type */
 
 	/* Stream ID */
 	ret = tquic_decode_varint(ctx->data + ctx->offset,
@@ -876,10 +877,10 @@ static int tquic_process_stream_frame(struct tquic_rx_ctx *ctx)
 		ctx->offset += ret;
 	}
 
-	pr_debug("tquic: process_stream: id=%llu offset=%llu fin=%d len=%s is_server=%d\n",
-		 stream_id, offset, fin,
-		 has_length ? "pending" : "rest",
-		 ctx->conn->is_server);
+	pr_debug(
+		"tquic: process_stream: id=%llu offset=%llu fin=%d len=%s is_server=%d\n",
+		stream_id, offset, fin, has_length ? "pending" : "rest",
+		ctx->conn->is_server);
 
 	/* Length (optional) */
 	if (has_length) {
@@ -909,8 +910,9 @@ static int tquic_process_stream_frame(struct tquic_rx_ctx *ctx)
 	 * frame never causes a stream object to be allocated unnecessarily.
 	 */
 	if (length >= TQUIC_MAX_STREAM_FRAME_ALLOC) {
-		pr_debug("tquic: stream %llu: frame too large (%llu >= %u), dropping\n",
-			 stream_id, length, TQUIC_MAX_STREAM_FRAME_ALLOC);
+		pr_debug(
+			"tquic: stream %llu: frame too large (%llu >= %u), dropping\n",
+			stream_id, length, TQUIC_MAX_STREAM_FRAME_ALLOC);
 		return -EMSGSIZE;
 	}
 
@@ -928,8 +930,8 @@ static int tquic_process_stream_frame(struct tquic_rx_ctx *ctx)
 		struct rb_node *node = ctx->conn->streams.rb_node;
 
 		while (node) {
-			struct tquic_stream *s = rb_entry(node,
-							  struct tquic_stream, node);
+			struct tquic_stream *s =
+				rb_entry(node, struct tquic_stream, node);
 
 			if (stream_id < s->id) {
 				node = node->rb_left;
@@ -981,8 +983,9 @@ static int tquic_process_stream_frame(struct tquic_rx_ctx *ctx)
 
 		/* Cap allocation to remaining buffer capacity */
 		if (length > (u64)sk->sk_rcvbuf) {
-			pr_debug("tquic: stream %llu: dropped: len %llu > rcvbuf %d\n",
-				 stream_id, length, sk->sk_rcvbuf);
+			pr_debug(
+				"tquic: stream %llu: dropped: len %llu > rcvbuf %d\n",
+				stream_id, length, sk->sk_rcvbuf);
 			ctx->offset += length;
 			ctx->ack_eliciting = true;
 			tquic_stream_put(stream);
@@ -1059,8 +1062,9 @@ static int tquic_process_stream_frame(struct tquic_rx_ctx *ctx)
 	 */
 	if (length > 0 && offset + length <= stream->recv_consumed) {
 		/* Fully consumed — ACK but do not charge FC or alloc */
-		pr_debug("tquic: stream %llu: dup data off=%llu len=%llu consumed=%llu\n",
-			 stream_id, offset, length, stream->recv_consumed);
+		pr_debug(
+			"tquic: stream %llu: dup data off=%llu len=%llu consumed=%llu\n",
+			stream_id, offset, length, stream->recv_consumed);
 		ctx->offset += length;
 		ctx->ack_eliciting = true;
 		tquic_stream_put(stream);
@@ -1074,8 +1078,9 @@ static int tquic_process_stream_frame(struct tquic_rx_ctx *ctx)
 		 */
 		u64 trim = stream->recv_consumed - offset;
 
-		pr_debug("tquic: stream %llu: partial dup trim %llu bytes (off %llu->%llu)\n",
-			 stream_id, trim, offset, stream->recv_consumed);
+		pr_debug(
+			"tquic: stream %llu: partial dup trim %llu bytes (off %llu->%llu)\n",
+			stream_id, trim, offset, stream->recv_consumed);
 		ctx->offset += trim;
 		length -= trim;
 		offset = stream->recv_consumed;
@@ -1109,8 +1114,9 @@ static int tquic_process_stream_frame(struct tquic_rx_ctx *ctx)
 			 * The offset is advanced so the frame loop continues
 			 * parsing subsequent frames in this packet.
 			 */
-			pr_debug("tquic: stream %llu: rmem_schedule failed, dropping\n",
-				 stream_id);
+			pr_debug(
+				"tquic: stream %llu: rmem_schedule failed, dropping\n",
+				stream_id);
 			kfree_skb(data_skb);
 			ctx->offset += length;
 			tquic_stream_put(stream);
@@ -1145,12 +1151,11 @@ static int tquic_process_stream_frame(struct tquic_rx_ctx *ctx)
 				goto normal_insert;
 
 			scb->stream = stream;
-			scb->fin    = fin;
+			scb->fin = fin;
 
 			/* Register timeout-flush callback (idempotent write) */
-			tquic_reorder_set_deliver(rb,
-						  tquic_stream_reorder_deliver,
-						  ctx->conn);
+			tquic_reorder_set_deliver(
+				rb, tquic_stream_reorder_deliver, ctx->conn);
 
 			r = tquic_reorder_insert(rb, data_skb, offset,
 						 (u32)length,
@@ -1161,12 +1166,13 @@ static int tquic_process_stream_frame(struct tquic_rx_ctx *ctx)
 					sk_mem_uncharge(ctx->conn->sk,
 							data_skb->truesize);
 				kfree_skb(data_skb);
-				tquic_stream_put(stream); /* release extra ref */
+				tquic_stream_put(
+					stream); /* release extra ref */
 			} else {
 				/* Flush any now-consecutive buffered packets */
-				tquic_reorder_drain(rb,
-						    tquic_stream_reorder_deliver,
-						    ctx->conn);
+				tquic_reorder_drain(
+					rb, tquic_stream_reorder_deliver,
+					ctx->conn);
 			}
 
 			/* RFC 9000 §2.2: update state at receive time */
@@ -1244,7 +1250,7 @@ static int tquic_process_max_data_frame(struct tquic_rx_ctx *ctx)
 
 	tquic_dbg("process_max_data: pkt_num=%llu\n", ctx->pkt_num);
 
-	ctx->offset++;  /* Skip frame type */
+	ctx->offset++; /* Skip frame type */
 
 	ret = tquic_decode_varint(ctx->data + ctx->offset,
 				  ctx->len - ctx->offset, &max_data);
@@ -1268,10 +1274,10 @@ static int tquic_process_max_data_frame(struct tquic_rx_ctx *ctx)
 		 * re-checks tquic_stream_check_flow_control(), which
 		 * includes connection-level limits.
 		 */
-		for (node = rb_first(&ctx->conn->streams);
-		     node; node = rb_next(node)) {
-			struct tquic_stream *s = rb_entry(node,
-					struct tquic_stream, node);
+		for (node = rb_first(&ctx->conn->streams); node;
+		     node = rb_next(node)) {
+			struct tquic_stream *s =
+				rb_entry(node, struct tquic_stream, node);
 			wake_up_interruptible(&s->wait);
 		}
 
@@ -1294,10 +1300,9 @@ static int tquic_process_max_stream_data_frame(struct tquic_rx_ctx *ctx)
 	u64 stream_id, max_data;
 	int ret;
 
-	tquic_dbg("process_max_stream_data: pkt_num=%llu\n",
-		  ctx->pkt_num);
+	tquic_dbg("process_max_stream_data: pkt_num=%llu\n", ctx->pkt_num);
 
-	ctx->offset++;  /* Skip frame type */
+	ctx->offset++; /* Skip frame type */
 
 	/* Stream ID */
 	ret = tquic_decode_varint(ctx->data + ctx->offset,
@@ -1325,9 +1330,8 @@ static int tquic_process_max_stream_data_frame(struct tquic_rx_ctx *ctx)
 		struct rb_node *node = ctx->conn->streams.rb_node;
 
 		while (node) {
-			struct tquic_stream *s = rb_entry(node,
-							  struct tquic_stream,
-							  node);
+			struct tquic_stream *s =
+				rb_entry(node, struct tquic_stream, node);
 
 			if (stream_id < s->id) {
 				node = node->rb_left;
@@ -1336,8 +1340,10 @@ static int tquic_process_max_stream_data_frame(struct tquic_rx_ctx *ctx)
 			} else {
 				/* Only increase, never decrease (RFC 9000) */
 				if (max_data > s->max_send_data) {
-					pr_debug("tquic: MAX_STREAM_DATA: stream %llu limit %llu->%llu\n",
-						 stream_id, s->max_send_data, max_data);
+					pr_debug(
+						"tquic: MAX_STREAM_DATA: stream %llu limit %llu->%llu\n",
+						stream_id, s->max_send_data,
+						max_data);
 					s->max_send_data = max_data;
 					s->blocked = false;
 					wake_up_interruptible(&s->wait);
@@ -1372,7 +1378,7 @@ static int tquic_process_reset_stream_frame(struct tquic_rx_ctx *ctx)
 	u64 stream_id, error_code, final_size;
 	int ret;
 
-	ctx->offset++;  /* Skip frame type */
+	ctx->offset++; /* Skip frame type */
 
 	ret = tquic_decode_varint(ctx->data + ctx->offset,
 				  ctx->len - ctx->offset, &stream_id);
@@ -1401,9 +1407,8 @@ static int tquic_process_reset_stream_frame(struct tquic_rx_ctx *ctx)
 		struct rb_node *node = ctx->conn->streams.rb_node;
 
 		while (node) {
-			struct tquic_stream *s = rb_entry(node,
-							  struct tquic_stream,
-							  node);
+			struct tquic_stream *s =
+				rb_entry(node, struct tquic_stream, node);
 
 			if (stream_id < s->id) {
 				node = node->rb_left;
@@ -1446,7 +1451,7 @@ static int tquic_process_stop_sending_frame(struct tquic_rx_ctx *ctx)
 	u64 stream_id, error_code;
 	int ret;
 
-	ctx->offset++;  /* Skip frame type */
+	ctx->offset++; /* Skip frame type */
 
 	ret = tquic_decode_varint(ctx->data + ctx->offset,
 				  ctx->len - ctx->offset, &stream_id);
@@ -1460,8 +1465,8 @@ static int tquic_process_stop_sending_frame(struct tquic_rx_ctx *ctx)
 		return ret;
 	ctx->offset += ret;
 
-	pr_debug("tquic: STOP_SENDING stream=%llu error=%llu\n",
-		 stream_id, error_code);
+	pr_debug("tquic: STOP_SENDING stream=%llu error=%llu\n", stream_id,
+		 error_code);
 
 	/* Mark stream as send-closed */
 	spin_lock_bh(&ctx->conn->lock);
@@ -1469,9 +1474,8 @@ static int tquic_process_stop_sending_frame(struct tquic_rx_ctx *ctx)
 		struct rb_node *node = ctx->conn->streams.rb_node;
 
 		while (node) {
-			struct tquic_stream *s = rb_entry(node,
-							  struct tquic_stream,
-							  node);
+			struct tquic_stream *s =
+				rb_entry(node, struct tquic_stream, node);
 
 			if (stream_id < s->id) {
 				node = node->rb_left;
@@ -1501,7 +1505,7 @@ static int tquic_process_max_streams_frame(struct tquic_rx_ctx *ctx, bool bidi)
 	u64 max_streams;
 	int ret;
 
-	ctx->offset++;  /* Skip frame type */
+	ctx->offset++; /* Skip frame type */
 
 	ret = tquic_decode_varint(ctx->data + ctx->offset,
 				  ctx->len - ctx->offset, &max_streams);
@@ -1509,8 +1513,8 @@ static int tquic_process_max_streams_frame(struct tquic_rx_ctx *ctx, bool bidi)
 		return ret;
 	ctx->offset += ret;
 
-	tquic_dbg("process_max_streams: %s max=%llu\n",
-		  bidi ? "bidi" : "uni", max_streams);
+	tquic_dbg("process_max_streams: %s max=%llu\n", bidi ? "bidi" : "uni",
+		  max_streams);
 
 	/* Only increase, per RFC 9000 */
 	spin_lock_bh(&ctx->conn->lock);
@@ -1538,7 +1542,7 @@ static int tquic_process_data_blocked_frame(struct tquic_rx_ctx *ctx)
 	u64 limit;
 	int ret;
 
-	ctx->offset++;  /* Skip frame type */
+	ctx->offset++; /* Skip frame type */
 
 	ret = tquic_decode_varint(ctx->data + ctx->offset,
 				  ctx->len - ctx->offset, &limit);
@@ -1562,7 +1566,7 @@ static int tquic_process_stream_data_blocked_frame(struct tquic_rx_ctx *ctx)
 	u64 stream_id, limit;
 	int ret;
 
-	ctx->offset++;  /* Skip frame type */
+	ctx->offset++; /* Skip frame type */
 
 	ret = tquic_decode_varint(ctx->data + ctx->offset,
 				  ctx->len - ctx->offset, &stream_id);
@@ -1593,7 +1597,7 @@ static int tquic_process_streams_blocked_frame(struct tquic_rx_ctx *ctx)
 	u64 limit;
 	int ret;
 
-	ctx->offset++;  /* Skip frame type */
+	ctx->offset++; /* Skip frame type */
 
 	ret = tquic_decode_varint(ctx->data + ctx->offset,
 				  ctx->len - ctx->offset, &limit);
@@ -1615,7 +1619,7 @@ static int tquic_process_path_challenge_frame(struct tquic_rx_ctx *ctx)
 	u8 data[8];
 	int ret;
 
-	ctx->offset++;  /* Skip frame type */
+	ctx->offset++; /* Skip frame type */
 
 	if (ctx->offset + 8 > ctx->len)
 		return -EINVAL;
@@ -1643,10 +1647,9 @@ static int tquic_process_path_response_frame(struct tquic_rx_ctx *ctx)
 	u8 data[8];
 	int ret;
 
-	tquic_dbg("process_path_response: pkt_num=%llu\n",
-		  ctx->pkt_num);
+	tquic_dbg("process_path_response: pkt_num=%llu\n", ctx->pkt_num);
 
-	ctx->offset++;  /* Skip frame type */
+	ctx->offset++; /* Skip frame type */
 
 	if (ctx->offset + 8 > ctx->len)
 		return -EINVAL;
@@ -1659,7 +1662,8 @@ static int tquic_process_path_response_frame(struct tquic_rx_ctx *ctx)
 	if (ret == 0) {
 		/* Update MIB counter for successful path validation */
 		if (ctx->conn && ctx->conn->sk)
-			TQUIC_INC_STATS(sock_net(ctx->conn->sk), TQUIC_MIB_PATHVALIDATED);
+			TQUIC_INC_STATS(sock_net(ctx->conn->sk),
+					TQUIC_MIB_PATHVALIDATED);
 	}
 
 	ctx->ack_eliciting = true;
@@ -1678,7 +1682,7 @@ static int tquic_process_new_connection_id_frame(struct tquic_rx_ctx *ctx)
 	u8 reset_token[16];
 	int ret;
 
-	ctx->offset++;  /* Skip frame type */
+	ctx->offset++; /* Skip frame type */
 
 	/* Sequence Number */
 	ret = tquic_decode_varint(ctx->data + ctx->offset,
@@ -1725,8 +1729,9 @@ static int tquic_process_new_connection_id_frame(struct tquic_rx_ctx *ctx)
 
 		sret = tquic_cid_security_check_new_cid(&pool->security);
 		if (sret < 0) {
-			tquic_dbg("NEW_CONNECTION_ID rejected by security check: %d\n",
-				 sret);
+			tquic_dbg(
+				"NEW_CONNECTION_ID rejected by security check: %d\n",
+				sret);
 			return sret;
 		}
 	}
@@ -1742,8 +1747,9 @@ static int tquic_process_new_connection_id_frame(struct tquic_rx_ctx *ctx)
 	 * error of type FRAME_ENCODING_ERROR."
 	 */
 	if (retire_prior_to > seq_num) {
-		tquic_dbg("NEW_CONNECTION_ID: retire_prior_to %llu > seq %llu\n",
-			  retire_prior_to, seq_num);
+		tquic_dbg(
+			"NEW_CONNECTION_ID: retire_prior_to %llu > seq %llu\n",
+			retire_prior_to, seq_num);
 		return -EINVAL;
 	}
 
@@ -1782,10 +1788,9 @@ static int tquic_process_retire_connection_id_frame(struct tquic_rx_ctx *ctx)
 	u64 seq_num;
 	int ret;
 
-	tquic_dbg("process_retire_cid: pkt_num=%llu\n",
-		  ctx->pkt_num);
+	tquic_dbg("process_retire_cid: pkt_num=%llu\n", ctx->pkt_num);
 
-	ctx->offset++;  /* Skip frame type */
+	ctx->offset++; /* Skip frame type */
 
 	ret = tquic_decode_varint(ctx->data + ctx->offset,
 				  ctx->len - ctx->offset, &seq_num);
@@ -1806,12 +1811,13 @@ static int tquic_process_retire_connection_id_frame(struct tquic_rx_ctx *ctx)
 /*
  * Process CONNECTION_CLOSE frame
  */
-static int tquic_process_connection_close_frame(struct tquic_rx_ctx *ctx, bool app)
+static int tquic_process_connection_close_frame(struct tquic_rx_ctx *ctx,
+						bool app)
 {
 	u64 error_code, frame_type = 0, reason_len;
 	int ret;
 
-	ctx->offset++;  /* Skip frame type */
+	ctx->offset++; /* Skip frame type */
 
 	/* Error Code */
 	ret = tquic_decode_varint(ctx->data + ctx->offset,
@@ -1848,33 +1854,37 @@ static int tquic_process_connection_close_frame(struct tquic_rx_ctx *ctx, bool a
 
 	/* Enforce a reasonable maximum for the reason phrase */
 	if (reason_len > 1024) {
-		pr_warn_ratelimited("tquic: CONNECTION_CLOSE reason phrase too long (%llu)\n",
-				    reason_len);
+		pr_warn_ratelimited(
+			"tquic: CONNECTION_CLOSE reason phrase too long (%llu)\n",
+			reason_len);
 		return -EINVAL;
 	}
 	ctx->offset += (size_t)reason_len;
 
-	pr_info_ratelimited("tquic: received CONNECTION_CLOSE, error=%llu frame_type=%llu\n",
-			    error_code, frame_type);
+	pr_info_ratelimited(
+		"tquic: received CONNECTION_CLOSE, error=%llu frame_type=%llu\n",
+		error_code, frame_type);
 
 	/*
 	 * Transition to draining state via connection close handler.
 	 * Use tquic_conn_handle_close() which properly validates state
 	 * transitions rather than bypassing the state machine.
 	 */
-	tquic_conn_handle_close(ctx->conn, error_code, frame_type,
-				NULL, app);
+	tquic_conn_handle_close(ctx->conn, error_code, frame_type, NULL, app);
 
 	/* Update MIB counters for connection close */
 	if (ctx->conn && ctx->conn->sk) {
 		TQUIC_DEC_STATS(sock_net(ctx->conn->sk), TQUIC_MIB_CURRESTAB);
 		if (error_code == EQUIC_NO_ERROR)
-			TQUIC_INC_STATS(sock_net(ctx->conn->sk), TQUIC_MIB_CONNCLOSED);
+			TQUIC_INC_STATS(sock_net(ctx->conn->sk),
+					TQUIC_MIB_CONNCLOSED);
 		else
-			TQUIC_INC_STATS(sock_net(ctx->conn->sk), TQUIC_MIB_CONNRESET);
+			TQUIC_INC_STATS(sock_net(ctx->conn->sk),
+					TQUIC_MIB_CONNRESET);
 
 		/* Track specific EQUIC error */
-		enum linux_tquic_mib_field mib_field = tquic_equic_to_mib(error_code);
+		enum linux_tquic_mib_field mib_field =
+			tquic_equic_to_mib(error_code);
 		if (mib_field != TQUIC_MIB_NUM)
 			TQUIC_INC_STATS(sock_net(ctx->conn->sk), mib_field);
 	}
@@ -1887,7 +1897,7 @@ static int tquic_process_connection_close_frame(struct tquic_rx_ctx *ctx, bool a
  */
 static int tquic_process_handshake_done_frame(struct tquic_rx_ctx *ctx)
 {
-	ctx->offset++;  /* Skip frame type */
+	ctx->offset++; /* Skip frame type */
 
 	/*
 	 * RFC 9000 Section 19.20: "A server MUST NOT send a
@@ -1895,7 +1905,8 @@ static int tquic_process_handshake_done_frame(struct tquic_rx_ctx *ctx)
 	 * Servers receiving HANDSHAKE_DONE is a protocol violation.
 	 */
 	if (ctx->conn->is_server) {
-		tquic_dbg("server received HANDSHAKE_DONE - protocol violation\n");
+		tquic_dbg(
+			"server received HANDSHAKE_DONE - protocol violation\n");
 		ctx->conn->error_code = EQUIC_PROTOCOL_VIOLATION;
 		return -EPROTO;
 	}
@@ -1953,7 +1964,7 @@ static int tquic_process_new_token(struct tquic_rx_ctx *ctx)
 	u64 token_len;
 	int ret;
 
-	ctx->offset++;  /* Skip frame type */
+	ctx->offset++; /* Skip frame type */
 
 	/* Parse token length */
 	ret = tquic_decode_varint(ctx->data + ctx->offset,
@@ -1976,8 +1987,8 @@ static int tquic_process_new_token(struct tquic_rx_ctx *ctx)
 
 	/* Validate token length */
 	if (token_len > TQUIC_TOKEN_MAX_LEN) {
-		tquic_dbg("NEW_TOKEN too large: %llu > %u\n",
-			 token_len, TQUIC_TOKEN_MAX_LEN);
+		tquic_dbg("NEW_TOKEN too large: %llu > %u\n", token_len,
+			  TQUIC_TOKEN_MAX_LEN);
 		return -EINVAL;
 	}
 
@@ -1985,18 +1996,19 @@ static int tquic_process_new_token(struct tquic_rx_ctx *ctx)
 		return -EINVAL;
 
 	/* Process the token - delegate to token module */
-	ret = tquic_process_new_token_frame(ctx->conn,
-					    ctx->data + ctx->offset,
+	ret = tquic_process_new_token_frame(ctx->conn, ctx->data + ctx->offset,
 					    token_len);
 	if (ret < 0) {
 		tquic_dbg("NEW_TOKEN processing failed: %d\n", ret);
 		/* Update MIB counter for invalid token */
 		if (ctx->conn && ctx->conn->sk)
-			TQUIC_INC_STATS(sock_net(ctx->conn->sk), TQUIC_MIB_TOKENSINVALID);
+			TQUIC_INC_STATS(sock_net(ctx->conn->sk),
+					TQUIC_MIB_TOKENSINVALID);
 	} else {
 		/* Update MIB counter for token received */
 		if (ctx->conn && ctx->conn->sk)
-			TQUIC_INC_STATS(sock_net(ctx->conn->sk), TQUIC_MIB_NEWTOKENSRX);
+			TQUIC_INC_STATS(sock_net(ctx->conn->sk),
+					TQUIC_MIB_NEWTOKENSRX);
 	}
 
 	ctx->offset += token_len;
@@ -2026,7 +2038,7 @@ static int tquic_process_datagram_frame(struct tquic_rx_ctx *ctx)
 	struct sk_buff *dgram_skb;
 	int ret;
 
-	ctx->offset++;  /* Skip frame type */
+	ctx->offset++; /* Skip frame type */
 
 	/* Parse length field if present (0x31), otherwise use remaining bytes */
 	if (has_length) {
@@ -2057,8 +2069,8 @@ static int tquic_process_datagram_frame(struct tquic_rx_ctx *ctx)
 
 	/* Validate against negotiated maximum size */
 	if (length > ctx->conn->datagram.max_recv_size) {
-		tquic_dbg("DATAGRAM too large: %llu > %llu\n",
-			 length, ctx->conn->datagram.max_recv_size);
+		tquic_dbg("DATAGRAM too large: %llu > %llu\n", length,
+			  ctx->conn->datagram.max_recv_size);
 		return -EMSGSIZE;
 	}
 
@@ -2073,7 +2085,8 @@ static int tquic_process_datagram_frame(struct tquic_rx_ctx *ctx)
 		spin_unlock(&ctx->conn->datagram.lock);
 		/* Update MIB counter for dropped datagram */
 		if (ctx->conn->sk)
-			TQUIC_INC_STATS(sock_net(ctx->conn->sk), TQUIC_MIB_DATAGRAMSDROPPED);
+			TQUIC_INC_STATS(sock_net(ctx->conn->sk),
+					TQUIC_MIB_DATAGRAMSDROPPED);
 		tquic_dbg("DATAGRAM dropped, queue full\n");
 		/* Continue processing - this is not a fatal error */
 		ctx->offset += length;
@@ -2088,10 +2101,11 @@ static int tquic_process_datagram_frame(struct tquic_rx_ctx *ctx)
 		spin_unlock(&ctx->conn->datagram.lock);
 		/* Update MIB counter for dropped datagram */
 		if (ctx->conn->sk)
-			TQUIC_INC_STATS(sock_net(ctx->conn->sk), TQUIC_MIB_DATAGRAMSDROPPED);
+			TQUIC_INC_STATS(sock_net(ctx->conn->sk),
+					TQUIC_MIB_DATAGRAMSDROPPED);
 		ctx->offset += length;
 		ctx->ack_eliciting = true;
-		return 0;  /* Not fatal, continue */
+		return 0; /* Not fatal, continue */
 	}
 
 	/* Copy datagram payload */
@@ -2148,8 +2162,7 @@ static int tquic_process_ack_frequency_frame(struct tquic_rx_ctx *ctx)
 	int ret;
 	u64 frame_type;
 
-	tquic_dbg("process_ack_frequency: pkt_num=%llu\n",
-		  ctx->pkt_num);
+	tquic_dbg("process_ack_frequency: pkt_num=%llu\n", ctx->pkt_num);
 
 	/* Parse frame type */
 	ret = tquic_decode_varint(ctx->data + ctx->offset,
@@ -2160,8 +2173,7 @@ static int tquic_process_ack_frequency_frame(struct tquic_rx_ctx *ctx)
 
 	/* Parse the frame fields */
 	ret = tquic_parse_ack_frequency_frame(ctx->data + ctx->offset,
-					      ctx->len - ctx->offset,
-					      &frame);
+					      ctx->len - ctx->offset, &frame);
 	if (ret < 0)
 		return ret;
 	ctx->offset += ret;
@@ -2169,8 +2181,7 @@ static int tquic_process_ack_frequency_frame(struct tquic_rx_ctx *ctx)
 	/* Handle the frame */
 	ret = tquic_conn_handle_ack_frequency_frame(ctx->conn, &frame);
 	if (ret < 0) {
-		tquic_dbg("process_ack_frequency: handle failed=%d\n",
-			  ret);
+		tquic_dbg("process_ack_frequency: handle failed=%d\n", ret);
 		return ret;
 	}
 
@@ -2352,7 +2363,7 @@ static int tquic_process_mp_new_connection_id_frame(struct tquic_rx_ctx *ctx)
 	}
 
 	tquic_dbg("processed MP_NEW_CONNECTION_ID path=%llu seq=%llu\n",
-		 frame.path_id, frame.seq_num);
+		  frame.path_id, frame.seq_num);
 	return 0;
 }
 
@@ -2367,8 +2378,8 @@ static int tquic_process_mp_retire_connection_id_frame(struct tquic_rx_ctx *ctx)
 	struct tquic_mp_retire_connection_id frame;
 	int ret;
 
-	ret = tquic_mp_parse_retire_connection_id(ctx->data + ctx->offset,
-						  ctx->len - ctx->offset, &frame);
+	ret = tquic_mp_parse_retire_connection_id(
+		ctx->data + ctx->offset, ctx->len - ctx->offset, &frame);
 	if (ret < 0)
 		return ret;
 
@@ -2383,7 +2394,7 @@ static int tquic_process_mp_retire_connection_id_frame(struct tquic_rx_ctx *ctx)
 	}
 
 	tquic_dbg("processed MP_RETIRE_CONNECTION_ID path=%llu seq=%llu\n",
-		 frame.path_id, frame.seq_num);
+		  frame.path_id, frame.seq_num);
 	return 0;
 }
 
@@ -2398,7 +2409,7 @@ static int tquic_process_mp_ack_frame(struct tquic_rx_ctx *ctx)
 	struct tquic_mp_ack *frame;
 	struct tquic_path *path;
 	struct tquic_mp_path_ack_state *ack_state;
-	u8 ack_delay_exponent = 3;  /* Default */
+	u8 ack_delay_exponent = 3; /* Default */
 	int ret;
 
 	/* Allocate frame on heap to avoid stack overflow (>4KB struct) */
@@ -2407,8 +2418,8 @@ static int tquic_process_mp_ack_frame(struct tquic_rx_ctx *ctx)
 		return -ENOMEM;
 
 	ret = tquic_mp_parse_ack(ctx->data + ctx->offset,
-				 ctx->len - ctx->offset,
-				 frame, ack_delay_exponent);
+				 ctx->len - ctx->offset, frame,
+				 ack_delay_exponent);
 	if (ret < 0)
 		goto out_free;
 
@@ -2426,16 +2437,19 @@ static int tquic_process_mp_ack_frame(struct tquic_rx_ctx *ctx)
 		if (path->path_id == frame->path_id) {
 			ack_state = path->mp_ack_state;
 			if (ack_state) {
-				ret = tquic_mp_on_ack_received(ack_state,
-					TQUIC_PN_SPACE_APPLICATION,
+				ret = tquic_mp_on_ack_received(
+					ack_state, TQUIC_PN_SPACE_APPLICATION,
 					frame, ctx->conn);
 				spin_unlock_bh(&ctx->conn->paths_lock);
 				if (ret < 0) {
-					tquic_dbg("MP_ACK processing failed: %d\n", ret);
+					tquic_dbg(
+						"MP_ACK processing failed: %d\n",
+						ret);
 					goto out_free;
 				}
-				tquic_dbg("processed MP_ACK path=%llu largest=%llu\n",
-					 frame->path_id, frame->largest_ack);
+				tquic_dbg(
+					"processed MP_ACK path=%llu largest=%llu\n",
+					frame->path_id, frame->largest_ack);
 				kfree(frame);
 				return 0;
 			}
@@ -2445,7 +2459,7 @@ static int tquic_process_mp_ack_frame(struct tquic_rx_ctx *ctx)
 	spin_unlock_bh(&ctx->conn->paths_lock);
 
 	tquic_dbg("MP_ACK for unknown/uninitialized path %llu\n",
-		 frame->path_id);
+		  frame->path_id);
 	ret = 0;
 
 out_free:
@@ -2480,7 +2494,7 @@ static int tquic_process_path_status_frame(struct tquic_rx_ctx *ctx)
 	}
 
 	tquic_dbg("processed PATH_STATUS path=%llu status=%llu\n",
-		 frame.path_id, frame.status);
+		  frame.path_id, frame.status);
 	return 0;
 }
 
@@ -2489,18 +2503,16 @@ static int tquic_process_path_status_frame(struct tquic_rx_ctx *ctx)
 /*
  * Demultiplex and process all frames in packet
  */
-int tquic_process_frames(struct tquic_connection *conn,
-			 struct tquic_path *path,
-			 u8 *payload, size_t len,
-			 int enc_level, u64 pkt_num)
+int tquic_process_frames(struct tquic_connection *conn, struct tquic_path *path,
+			 u8 *payload, size_t len, int enc_level, u64 pkt_num)
 {
 	struct tquic_rx_ctx ctx = {};
 	int ret = 0;
 	u8 frame_type;
 	size_t prev_offset;
-	int frame_budget = 512;  /* CF-610: limit frames per packet */
+	int frame_budget = 512; /* CF-610: limit frames per packet */
 	bool is_0rtt = (enc_level == TQUIC_PKT_ZERO_RTT);
-	bool is_1rtt = (enc_level == 3);	/* Short header / Application */
+	bool is_1rtt = (enc_level == 3); /* Short header / Application */
 	bool is_initial = (enc_level == TQUIC_PKT_INITIAL);
 	bool is_handshake = (enc_level == TQUIC_PKT_HANDSHAKE);
 
@@ -2529,9 +2541,9 @@ int tquic_process_frames(struct tquic_connection *conn,
 		prev_offset = ctx.offset;
 
 		if (is_initial)
-			pr_debug("process_frames: offset=%zu/%zu frame_type=0x%02x\n",
-				ctx.offset, ctx.len,
-				ctx.data[ctx.offset]);
+			pr_debug(
+				"process_frames: offset=%zu/%zu frame_type=0x%02x\n",
+				ctx.offset, ctx.len, ctx.data[ctx.offset]);
 
 		/* CF-610: Enforce per-packet frame processing budget */
 		if (--frame_budget <= 0) {
@@ -2547,7 +2559,8 @@ int tquic_process_frames(struct tquic_connection *conn,
 		 * silently queued from an invalid frame sequence.
 		 */
 		if (ctx.saw_stream_no_length) {
-			tquic_dbg("trailing data after length-less STREAM frame\n");
+			tquic_dbg(
+				"trailing data after length-less STREAM frame\n");
 			return -EPROTO;
 		}
 
@@ -2588,8 +2601,8 @@ int tquic_process_frames(struct tquic_connection *conn,
 			/* STREAM frames only in 0-RTT and 1-RTT */
 			if (unlikely(is_initial || is_handshake)) {
 				conn->error_code = EQUIC_FRAME_ENCODING;
-				tquic_conn_close_with_error(conn,
-					EQUIC_FRAME_ENCODING,
+				tquic_conn_close_with_error(
+					conn, EQUIC_FRAME_ENCODING,
 					"STREAM in Initial/Handshake");
 				return -EPROTO;
 			}
@@ -2603,8 +2616,8 @@ int tquic_process_frames(struct tquic_connection *conn,
 			/* ACK frames forbidden in 0-RTT packets */
 			if (unlikely(is_0rtt)) {
 				conn->error_code = EQUIC_FRAME_ENCODING;
-				tquic_conn_close_with_error(conn,
-					EQUIC_FRAME_ENCODING,
+				tquic_conn_close_with_error(
+					conn, EQUIC_FRAME_ENCODING,
 					"ACK in 0-RTT");
 				return -EPROTO;
 			}
@@ -2617,8 +2630,8 @@ int tquic_process_frames(struct tquic_connection *conn,
 			/* CRYPTO frames forbidden in 0-RTT */
 			if (is_0rtt) {
 				conn->error_code = EQUIC_FRAME_ENCODING;
-				tquic_conn_close_with_error(conn,
-					EQUIC_FRAME_ENCODING,
+				tquic_conn_close_with_error(
+					conn, EQUIC_FRAME_ENCODING,
 					"CRYPTO in 0-RTT");
 				return -EPROTO;
 			}
@@ -2627,8 +2640,8 @@ int tquic_process_frames(struct tquic_connection *conn,
 			/* NEW_TOKEN only in 1-RTT */
 			if (!is_1rtt) {
 				conn->error_code = EQUIC_FRAME_ENCODING;
-				tquic_conn_close_with_error(conn,
-					EQUIC_FRAME_ENCODING,
+				tquic_conn_close_with_error(
+					conn, EQUIC_FRAME_ENCODING,
 					"NEW_TOKEN not in 1-RTT");
 				return -EPROTO;
 			}
@@ -2636,8 +2649,8 @@ int tquic_process_frames(struct tquic_connection *conn,
 		} else if (frame_type == TQUIC_FRAME_MAX_DATA) {
 			if (is_initial || is_handshake) {
 				conn->error_code = EQUIC_FRAME_ENCODING;
-				tquic_conn_close_with_error(conn,
-					EQUIC_FRAME_ENCODING,
+				tquic_conn_close_with_error(
+					conn, EQUIC_FRAME_ENCODING,
 					"MAX_DATA in Initial/Handshake");
 				return -EPROTO;
 			}
@@ -2645,8 +2658,8 @@ int tquic_process_frames(struct tquic_connection *conn,
 		} else if (frame_type == TQUIC_FRAME_MAX_STREAM_DATA) {
 			if (is_initial || is_handshake) {
 				conn->error_code = EQUIC_FRAME_ENCODING;
-				tquic_conn_close_with_error(conn,
-					EQUIC_FRAME_ENCODING,
+				tquic_conn_close_with_error(
+					conn, EQUIC_FRAME_ENCODING,
 					"MAX_STREAM_DATA in Initial/HS");
 				return -EPROTO;
 			}
@@ -2654,8 +2667,8 @@ int tquic_process_frames(struct tquic_connection *conn,
 		} else if (frame_type == TQUIC_FRAME_RESET_STREAM) {
 			if (is_initial || is_handshake) {
 				conn->error_code = EQUIC_FRAME_ENCODING;
-				tquic_conn_close_with_error(conn,
-					EQUIC_FRAME_ENCODING,
+				tquic_conn_close_with_error(
+					conn, EQUIC_FRAME_ENCODING,
 					"RESET_STREAM in Initial/HS");
 				return -EPROTO;
 			}
@@ -2663,8 +2676,8 @@ int tquic_process_frames(struct tquic_connection *conn,
 		} else if (frame_type == TQUIC_FRAME_STOP_SENDING) {
 			if (is_initial || is_handshake) {
 				conn->error_code = EQUIC_FRAME_ENCODING;
-				tquic_conn_close_with_error(conn,
-					EQUIC_FRAME_ENCODING,
+				tquic_conn_close_with_error(
+					conn, EQUIC_FRAME_ENCODING,
 					"STOP_SENDING in Initial/HS");
 				return -EPROTO;
 			}
@@ -2673,18 +2686,19 @@ int tquic_process_frames(struct tquic_connection *conn,
 			   frame_type == TQUIC_FRAME_MAX_STREAMS_UNI) {
 			if (is_initial || is_handshake) {
 				conn->error_code = EQUIC_FRAME_ENCODING;
-				tquic_conn_close_with_error(conn,
-					EQUIC_FRAME_ENCODING,
+				tquic_conn_close_with_error(
+					conn, EQUIC_FRAME_ENCODING,
 					"MAX_STREAMS in Initial/HS");
 				return -EPROTO;
 			}
-			ret = tquic_process_max_streams_frame(&ctx,
+			ret = tquic_process_max_streams_frame(
+				&ctx,
 				frame_type == TQUIC_FRAME_MAX_STREAMS_BIDI);
 		} else if (frame_type == TQUIC_FRAME_DATA_BLOCKED) {
 			if (is_initial || is_handshake) {
 				conn->error_code = EQUIC_FRAME_ENCODING;
-				tquic_conn_close_with_error(conn,
-					EQUIC_FRAME_ENCODING,
+				tquic_conn_close_with_error(
+					conn, EQUIC_FRAME_ENCODING,
 					"DATA_BLOCKED in Initial/HS");
 				return -EPROTO;
 			}
@@ -2692,8 +2706,8 @@ int tquic_process_frames(struct tquic_connection *conn,
 		} else if (frame_type == TQUIC_FRAME_STREAM_DATA_BLOCKED) {
 			if (is_initial || is_handshake) {
 				conn->error_code = EQUIC_FRAME_ENCODING;
-				tquic_conn_close_with_error(conn,
-					EQUIC_FRAME_ENCODING,
+				tquic_conn_close_with_error(
+					conn, EQUIC_FRAME_ENCODING,
 					"STREAM_DATA_BLOCKED in IH");
 				return -EPROTO;
 			}
@@ -2702,8 +2716,8 @@ int tquic_process_frames(struct tquic_connection *conn,
 			   frame_type == TQUIC_FRAME_STREAMS_BLOCKED_UNI) {
 			if (is_initial || is_handshake) {
 				conn->error_code = EQUIC_FRAME_ENCODING;
-				tquic_conn_close_with_error(conn,
-					EQUIC_FRAME_ENCODING,
+				tquic_conn_close_with_error(
+					conn, EQUIC_FRAME_ENCODING,
 					"STREAMS_BLOCKED in I/HS");
 				return -EPROTO;
 			}
@@ -2711,8 +2725,8 @@ int tquic_process_frames(struct tquic_connection *conn,
 		} else if (frame_type == TQUIC_FRAME_PATH_CHALLENGE) {
 			if (is_initial || is_handshake) {
 				conn->error_code = EQUIC_FRAME_ENCODING;
-				tquic_conn_close_with_error(conn,
-					EQUIC_FRAME_ENCODING,
+				tquic_conn_close_with_error(
+					conn, EQUIC_FRAME_ENCODING,
 					"PATH_CHALLENGE in Initial/HS");
 				return -EPROTO;
 			}
@@ -2720,8 +2734,8 @@ int tquic_process_frames(struct tquic_connection *conn,
 		} else if (frame_type == TQUIC_FRAME_PATH_RESPONSE) {
 			if (is_initial || is_handshake) {
 				conn->error_code = EQUIC_FRAME_ENCODING;
-				tquic_conn_close_with_error(conn,
-					EQUIC_FRAME_ENCODING,
+				tquic_conn_close_with_error(
+					conn, EQUIC_FRAME_ENCODING,
 					"PATH_RESPONSE in Initial/HS");
 				return -EPROTO;
 			}
@@ -2729,8 +2743,8 @@ int tquic_process_frames(struct tquic_connection *conn,
 		} else if (frame_type == TQUIC_FRAME_NEW_CONNECTION_ID) {
 			if (is_initial || is_handshake) {
 				conn->error_code = EQUIC_FRAME_ENCODING;
-				tquic_conn_close_with_error(conn,
-					EQUIC_FRAME_ENCODING,
+				tquic_conn_close_with_error(
+					conn, EQUIC_FRAME_ENCODING,
 					"NEW_CID in Initial/HS");
 				return -EPROTO;
 			}
@@ -2738,8 +2752,8 @@ int tquic_process_frames(struct tquic_connection *conn,
 		} else if (frame_type == TQUIC_FRAME_RETIRE_CONNECTION_ID) {
 			if (is_initial || is_handshake) {
 				conn->error_code = EQUIC_FRAME_ENCODING;
-				tquic_conn_close_with_error(conn,
-					EQUIC_FRAME_ENCODING,
+				tquic_conn_close_with_error(
+					conn, EQUIC_FRAME_ENCODING,
 					"RETIRE_CID in Initial/HS");
 				return -EPROTO;
 			}
@@ -2752,8 +2766,8 @@ int tquic_process_frames(struct tquic_connection *conn,
 			/* HANDSHAKE_DONE only in 1-RTT */
 			if (!is_1rtt) {
 				conn->error_code = EQUIC_FRAME_ENCODING;
-				tquic_conn_close_with_error(conn,
-					EQUIC_FRAME_ENCODING,
+				tquic_conn_close_with_error(
+					conn, EQUIC_FRAME_ENCODING,
 					"HANDSHAKE_DONE not in 1-RTT");
 				return -EPROTO;
 			}
@@ -2761,8 +2775,8 @@ int tquic_process_frames(struct tquic_connection *conn,
 		} else if ((frame_type & 0xfe) == TQUIC_FRAME_DATAGRAM) {
 			if (is_initial || is_handshake) {
 				conn->error_code = EQUIC_FRAME_ENCODING;
-				tquic_conn_close_with_error(conn,
-					EQUIC_FRAME_ENCODING,
+				tquic_conn_close_with_error(
+					conn, EQUIC_FRAME_ENCODING,
 					"DATAGRAM in Initial/HS");
 				return -EPROTO;
 			}
@@ -2774,8 +2788,8 @@ int tquic_process_frames(struct tquic_connection *conn,
 			 */
 			if (!is_1rtt) {
 				conn->error_code = EQUIC_FRAME_ENCODING;
-				tquic_conn_close_with_error(conn,
-					EQUIC_FRAME_ENCODING,
+				tquic_conn_close_with_error(
+					conn, EQUIC_FRAME_ENCODING,
 					"ACK_FREQUENCY not in 1-RTT");
 				return -EPROTO;
 			}
@@ -2787,8 +2801,8 @@ int tquic_process_frames(struct tquic_connection *conn,
 			 */
 			if (!is_1rtt) {
 				conn->error_code = EQUIC_FRAME_ENCODING;
-				tquic_conn_close_with_error(conn,
-					EQUIC_FRAME_ENCODING,
+				tquic_conn_close_with_error(
+					conn, EQUIC_FRAME_ENCODING,
 					"IMMEDIATE_ACK not in 1-RTT");
 				return -EPROTO;
 			}
@@ -2798,8 +2812,8 @@ int tquic_process_frames(struct tquic_connection *conn,
 			/* MP_NEW_CONNECTION_ID - CF-281: 1-RTT only */
 			if (!is_1rtt) {
 				conn->error_code = EQUIC_FRAME_ENCODING;
-				tquic_conn_close_with_error(conn,
-					EQUIC_FRAME_ENCODING,
+				tquic_conn_close_with_error(
+					conn, EQUIC_FRAME_ENCODING,
 					"MP frame not in 1-RTT");
 				return -EPROTO;
 			}
@@ -2808,8 +2822,8 @@ int tquic_process_frames(struct tquic_connection *conn,
 			/* MP_RETIRE_CONNECTION_ID - CF-281: 1-RTT only */
 			if (!is_1rtt) {
 				conn->error_code = EQUIC_FRAME_ENCODING;
-				tquic_conn_close_with_error(conn,
-					EQUIC_FRAME_ENCODING,
+				tquic_conn_close_with_error(
+					conn, EQUIC_FRAME_ENCODING,
 					"MP frame not in 1-RTT");
 				return -EPROTO;
 			}
@@ -2818,8 +2832,8 @@ int tquic_process_frames(struct tquic_connection *conn,
 			/* MP_ACK or MP_ACK_ECN - CF-281: 1-RTT only */
 			if (!is_1rtt) {
 				conn->error_code = EQUIC_FRAME_ENCODING;
-				tquic_conn_close_with_error(conn,
-					EQUIC_FRAME_ENCODING,
+				tquic_conn_close_with_error(
+					conn, EQUIC_FRAME_ENCODING,
 					"MP frame not in 1-RTT");
 				return -EPROTO;
 			}
@@ -2828,8 +2842,8 @@ int tquic_process_frames(struct tquic_connection *conn,
 			/* Extended multipath frames - CF-281: 1-RTT only */
 			if (!is_1rtt) {
 				conn->error_code = EQUIC_FRAME_ENCODING;
-				tquic_conn_close_with_error(conn,
-					EQUIC_FRAME_ENCODING,
+				tquic_conn_close_with_error(
+					conn, EQUIC_FRAME_ENCODING,
 					"MP frame not in 1-RTT");
 				return -EPROTO;
 			}
@@ -2852,8 +2866,8 @@ int tquic_process_frames(struct tquic_connection *conn,
 		if (ret < 0) {
 			if (is_initial)
 				pr_debug("process_frames: handler ret=%d "
-					"for frame 0x%02x at offset=%zu\n",
-					ret, frame_type, prev_offset);
+					 "for frame 0x%02x at offset=%zu\n",
+					 ret, frame_type, prev_offset);
 			break;
 		}
 
@@ -2861,8 +2875,8 @@ int tquic_process_frames(struct tquic_connection *conn,
 		if (ctx.offset == prev_offset) {
 			if (is_initial)
 				pr_debug("process_frames: stuck at offset=%zu "
-					"frame=0x%02x\n",
-					ctx.offset, frame_type);
+					 "frame=0x%02x\n",
+					 ctx.offset, frame_type);
 			return -EPROTO;
 		}
 	}
@@ -2884,8 +2898,7 @@ int tquic_process_frames(struct tquic_connection *conn,
 			rcu_read_lock();
 			ack_path = rcu_dereference(conn->active_path);
 			if (ack_path)
-				tquic_send_ack(conn, ack_path,
-					       pkt_num, 0, 0);
+				tquic_send_ack(conn, ack_path, pkt_num, 0, 0);
 			rcu_read_unlock();
 		}
 	}

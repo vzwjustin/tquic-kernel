@@ -21,32 +21,32 @@
 #include "ack.h"
 
 /* TQUIC packet header forms */
-#define TQUIC_HEADER_FORM_LONG	0x80
-#define TQUIC_HEADER_FORM_SHORT	0x00
-#define TQUIC_FIXED_BIT		0x40
+#define TQUIC_HEADER_FORM_LONG 0x80
+#define TQUIC_HEADER_FORM_SHORT 0x00
+#define TQUIC_FIXED_BIT 0x40
 
 /* Long header packet types */
-#define TQUIC_LONG_TYPE_INITIAL		0x00
-#define TQUIC_LONG_TYPE_0RTT		0x01
-#define TQUIC_LONG_TYPE_HANDSHAKE	0x02
-#define TQUIC_LONG_TYPE_RETRY		0x03
+#define TQUIC_LONG_TYPE_INITIAL 0x00
+#define TQUIC_LONG_TYPE_0RTT 0x01
+#define TQUIC_LONG_TYPE_HANDSHAKE 0x02
+#define TQUIC_LONG_TYPE_RETRY 0x03
 
 /* Crypto levels (mapping to PN spaces) - defined in tquic_crypto.h */
 
 /* Packet types for SKB CB */
-#define TQUIC_PACKET_1RTT		4
+#define TQUIC_PACKET_1RTT 4
 
 /* Varint prefix for 2-byte encoding */
-#define TQUIC_VARINT_2BYTE_PREFIX	0x40
+#define TQUIC_VARINT_2BYTE_PREFIX 0x40
 
 /* Packet size constants */
-#define TQUIC_MAX_PACKET_SIZE		1350
-#define TQUIC_MIN_PACKET_SIZE		1200
-#define TQUIC_MAX_CONNECTION_ID_LEN	20
-#define TQUIC_ACK_MAX_RANGES		256
+#define TQUIC_MAX_PACKET_SIZE 1350
+#define TQUIC_MIN_PACKET_SIZE 1200
+#define TQUIC_MAX_CONNECTION_ID_LEN 20
+#define TQUIC_ACK_MAX_RANGES 256
 
 /* Error codes */
-#define TQUIC_ERROR_FLOW_CONTROL_ERROR	0x03
+#define TQUIC_ERROR_FLOW_CONTROL_ERROR 0x03
 
 /* struct tquic_skb_cb and TQUIC_SKB_CB are defined in tquic_crypto.h */
 
@@ -62,7 +62,8 @@ static int tquic_frame_process_ack(struct tquic_connection *conn,
 static int tquic_frame_process_new_cid(struct tquic_connection *conn,
 				       const u8 *data, int len);
 
-static struct tquic_path *tquic_packet_active_path_get(struct tquic_connection *conn)
+static struct tquic_path *
+tquic_packet_active_path_get(struct tquic_connection *conn)
 {
 	struct tquic_path *path;
 
@@ -84,18 +85,24 @@ static int tquic_frame_process_connection_close(struct tquic_connection *conn,
 int tquic_varint_decode(const u8 *data, size_t len, u64 *value);
 int tquic_varint_encode(u64 value, u8 *buf, size_t len);
 int tquic_varint_len(u64 value);
-void tquic_ack_on_packet_received(struct tquic_connection *conn, u64 pn, u8 level);
-int tquic_ack_frequency_process(struct tquic_connection *conn, const u8 *data, int len);
+void tquic_ack_on_packet_received(struct tquic_connection *conn, u64 pn,
+				  u8 level);
+int tquic_ack_frequency_process(struct tquic_connection *conn, const u8 *data,
+				int len);
 int tquic_immediate_ack_process(struct tquic_connection *conn);
 void tquic_loss_detection_on_packet_sent(struct tquic_connection *conn,
 					 struct tquic_sent_packet *pkt);
 void tquic_loss_detection_on_ack_received(struct tquic_connection *conn,
 					  struct tquic_ack_frame *ack,
-					  u8 pn_space_idx);
+					  u8 pn_space_idx,
+					  struct tquic_path *recv_path);
 /* tquic_crypto_* functions declared in tquic_crypto.h */
-int tquic_flow_check_recv_limits(struct tquic_stream *stream, u64 offset, u64 len);
-void tquic_stream_handle_reset(struct tquic_stream *stream, u64 error_code, u64 final_size);
-void tquic_stream_handle_stop_sending(struct tquic_stream *stream, u64 error_code);
+int tquic_flow_check_recv_limits(struct tquic_stream *stream, u64 offset,
+				 u64 len);
+void tquic_stream_handle_reset(struct tquic_stream *stream, u64 error_code,
+			       u64 final_size);
+void tquic_stream_handle_stop_sending(struct tquic_stream *stream,
+				      u64 error_code);
 
 /*
  * quic_packet_deliver_stream_data - Internal helper to deliver raw data to stream
@@ -104,23 +111,28 @@ void tquic_stream_handle_stop_sending(struct tquic_stream *stream, u64 error_cod
  * tquic_stream_recv_data() in core/stream.c handles SKBs and stream manager
  * interactions for the complete implementation.
  */
-static void quic_packet_deliver_stream_data(struct tquic_stream *stream, u64 offset,
-					    const u8 *data, u64 len, bool fin);
+static void quic_packet_deliver_stream_data(struct tquic_stream *stream,
+					    u64 offset, const u8 *data, u64 len,
+					    bool fin);
 
 /* Forward declarations for functions defined later in this file */
-int tquic_frame_process_all(struct tquic_connection *conn, struct sk_buff *skb, u8 level);
-int tquic_frame_process_one(struct tquic_connection *conn, const u8 *data, int len, u8 level);
+int tquic_frame_process_all(struct tquic_connection *conn, struct sk_buff *skb,
+			    u8 level);
+int tquic_frame_process_one(struct tquic_connection *conn, const u8 *data,
+			    int len, u8 level);
 
 /* Stream lookup/create functions - internal implementations */
-static struct tquic_stream *tquic_stream_lookup_internal(struct tquic_connection *conn, u64 stream_id);
-static struct tquic_stream *tquic_stream_create_internal(struct tquic_connection *conn, u64 stream_id);
+static struct tquic_stream *
+tquic_stream_lookup_internal(struct tquic_connection *conn, u64 stream_id);
+static struct tquic_stream *
+tquic_stream_create_internal(struct tquic_connection *conn, u64 stream_id);
 
 /*
  * Connection state constants
  */
-#define TQUIC_STATE_CONNECTING	1
-#define TQUIC_STATE_CONNECTED	3
-#define TQUIC_STATE_DRAINING	5
+#define TQUIC_STATE_CONNECTING 1
+#define TQUIC_STATE_CONNECTED 3
+#define TQUIC_STATE_DRAINING 5
 
 /*
  * Internal connection structure fields accessed via offsets
@@ -151,15 +163,16 @@ bool tquic_conn_is_server(struct tquic_connection *conn)
  * Stream lookup/create helpers
  * Streams are stored in an rb_tree indexed by stream ID
  */
-static struct tquic_stream *tquic_stream_lookup_internal(struct tquic_connection *conn,
-							 u64 stream_id)
+static struct tquic_stream *
+tquic_stream_lookup_internal(struct tquic_connection *conn, u64 stream_id)
 {
 	struct rb_node *node;
 
 	spin_lock_bh(&conn->lock);
 	node = conn->streams.rb_node;
 	while (node) {
-		struct tquic_stream *stream = rb_entry(node, struct tquic_stream, node);
+		struct tquic_stream *stream =
+			rb_entry(node, struct tquic_stream, node);
 
 		if (stream_id < stream->id)
 			node = node->rb_left;
@@ -174,8 +187,8 @@ static struct tquic_stream *tquic_stream_lookup_internal(struct tquic_connection
 	return NULL;
 }
 
-static struct tquic_stream *tquic_stream_create_internal(struct tquic_connection *conn,
-							 u64 stream_id)
+static struct tquic_stream *
+tquic_stream_create_internal(struct tquic_connection *conn, u64 stream_id)
 {
 	struct tquic_stream *stream;
 	struct rb_node **link, *parent = NULL;
@@ -195,7 +208,8 @@ static struct tquic_stream *tquic_stream_create_internal(struct tquic_connection
 	spin_lock_bh(&conn->lock);
 	link = &conn->streams.rb_node;
 	while (*link) {
-		struct tquic_stream *s = rb_entry(*link, struct tquic_stream, node);
+		struct tquic_stream *s =
+			rb_entry(*link, struct tquic_stream, node);
 		parent = *link;
 		if (stream_id < s->id)
 			link = &(*link)->rb_left;
@@ -226,7 +240,8 @@ static inline int tquic_conn_close_internal(struct tquic_connection *conn,
 /*
  * Connection ID retirement helper
  */
-static inline void tquic_conn_retire_cid_internal(struct tquic_connection *conn, u64 seq)
+static inline void tquic_conn_retire_cid_internal(struct tquic_connection *conn,
+						  u64 seq)
 {
 	/* Call with is_local=false since we're retiring peer's CID */
 	tquic_conn_retire_cid(conn, seq, false);
@@ -241,8 +256,9 @@ static inline void tquic_conn_retire_cid_internal(struct tquic_connection *conn,
  * For full stream receive handling with flow control and reassembly,
  * use tquic_stream_recv_data() from core/stream.c which takes an SKB.
  */
-static void quic_packet_deliver_stream_data(struct tquic_stream *stream, u64 offset,
-					    const u8 *data, u64 len, bool fin)
+static void quic_packet_deliver_stream_data(struct tquic_stream *stream,
+					    u64 offset, const u8 *data, u64 len,
+					    bool fin)
 {
 	struct sk_buff *skb, *iter;
 	unsigned long flags;
@@ -293,7 +309,8 @@ static void quic_packet_deliver_stream_data(struct tquic_stream *stream, u64 off
 	 */
 	spin_lock_irqsave(&stream->recv_buf.lock, flags);
 
-	skb_queue_reverse_walk(&stream->recv_buf, iter) {
+	skb_queue_reverse_walk(&stream->recv_buf, iter)
+	{
 		u64 iter_off = get_unaligned((u64 *)iter->cb);
 		u64 iter_end = iter_off + iter->len;
 
@@ -303,8 +320,7 @@ static void quic_packet_deliver_stream_data(struct tquic_stream *stream, u64 off
 		}
 		if (offset + len > iter_off && offset < iter_end) {
 			/* Overlap — duplicate */
-			spin_unlock_irqrestore(&stream->recv_buf.lock,
-					       flags);
+			spin_unlock_irqrestore(&stream->recv_buf.lock, flags);
 			kfree_skb(skb);
 			return;
 		}
@@ -385,9 +401,8 @@ static int tquic_packet_parse_long(struct sk_buff *skb, u8 first_byte)
 			return -EINVAL;
 
 		{
-			int varint_len = tquic_varint_decode(data + offset,
-							     skb->len - offset,
-							     &token_len);
+			int varint_len = tquic_varint_decode(
+				data + offset, skb->len - offset, &token_len);
 			if (varint_len < 0)
 				return varint_len;
 			offset += varint_len;
@@ -418,9 +433,8 @@ static int tquic_packet_parse_long(struct sk_buff *skb, u8 first_byte)
 		return -EINVAL;
 
 	{
-		int varint_len = tquic_varint_decode(data + offset,
-						     skb->len - offset,
-						     &payload_len);
+		int varint_len = tquic_varint_decode(
+			data + offset, skb->len - offset, &payload_len);
 		if (varint_len < 0)
 			return varint_len;
 		offset += varint_len;
@@ -573,8 +587,8 @@ static int tquic_packet_get_length(const u8 *data, int len, int *packet_len)
 	if (len < offset + 1)
 		return -EINVAL;
 
-	varint_len = tquic_varint_decode(data + offset, len - offset,
-					 &payload_len);
+	varint_len =
+		tquic_varint_decode(data + offset, len - offset, &payload_len);
 	if (varint_len < 0)
 		return varint_len;
 	offset += varint_len;
@@ -616,7 +630,8 @@ int tquic_packet_parse(struct sk_buff *skb, struct tquic_packet *pkt)
 		err = tquic_packet_parse_long(skb, first_byte);
 	} else {
 		/* For short header, use expected DCID length from packet */
-		err = tquic_packet_parse_short(skb, first_byte, pkt->hdr.dcid_len);
+		err = tquic_packet_parse_short(skb, first_byte,
+					       pkt->hdr.dcid_len);
 	}
 
 	return err;
@@ -633,7 +648,8 @@ static u64 tquic_decode_pn(u64 largest_pn, u64 truncated_pn, u8 pn_len)
 
 	candidate_pn = (expected_pn & ~pn_mask) | truncated_pn;
 
-	if (candidate_pn <= expected_pn - pn_hwin && candidate_pn < (1ULL << 62) - pn_win)
+	if (candidate_pn <= expected_pn - pn_hwin &&
+	    candidate_pn < (1ULL << 62) - pn_win)
 		return candidate_pn + pn_win;
 
 	if (candidate_pn > expected_pn + pn_hwin && candidate_pn >= pn_win)
@@ -689,145 +705,146 @@ int tquic_packet_process(struct tquic_connection *conn, struct sk_buff *skb)
 	const int max_depth = 4;
 
 	while (skb) {
+		if (depth++ >= max_depth) {
+			kfree_skb(skb);
+			return -EINVAL;
+		}
 
-	if (depth++ >= max_depth) {
-		kfree_skb(skb);
-		return -EINVAL;
-	}
+		if (skb->len < 1) {
+			kfree_skb(skb);
+			return -EINVAL;
+		}
 
-	if (skb->len < 1) {
-		kfree_skb(skb);
-		return -EINVAL;
-	}
+		first_byte = skb->data[0];
 
-	first_byte = skb->data[0];
-
-	/*
+		/*
 	 * RFC 9000 Section 12.2: Coalesced Packets
 	 * Determine the length of this packet. For long header packets,
 	 * this allows us to separate coalesced packets. For short header
 	 * packets, the entire remaining datagram is this packet.
 	 */
-	err = tquic_packet_get_length(skb->data, skb->len, &packet_len);
-	if (err) {
-		kfree_skb(skb);
-		return err;
-	}
+		err = tquic_packet_get_length(skb->data, skb->len, &packet_len);
+		if (err) {
+			kfree_skb(skb);
+			return err;
+		}
 
-	/*
+		/*
 	 * Validate packet_len is within bounds.
 	 * This should not happen given tquic_packet_get_length validation,
 	 * but defense in depth is important for network code.
 	 */
-	if (packet_len < 1 || packet_len > skb->len) {
-		kfree_skb(skb);
-		return -EINVAL;
-	}
+		if (packet_len < 1 || packet_len > skb->len) {
+			kfree_skb(skb);
+			return -EINVAL;
+		}
 
-	/*
+		/*
 	 * If there's data remaining after this packet, we have coalesced
 	 * packets. Create a new skb for the remaining data and queue it
 	 * for processing after we finish with this packet.
 	 */
-	next_skb = NULL;
-	if (packet_len < skb->len) {
-		int remaining = skb->len - packet_len;
+		next_skb = NULL;
+		if (packet_len < skb->len) {
+			int remaining = skb->len - packet_len;
 
-		/*
+			/*
 		 * Validate remaining data has at least a header byte
 		 * to prevent processing empty/corrupt trailing data.
 		 */
-		if (remaining >= 1) {
-			next_skb = alloc_skb(remaining + 64, GFP_ATOMIC);
-			if (next_skb) {
-				skb_reserve(next_skb, 64);
-				skb_put_data(next_skb, skb->data + packet_len,
-					     remaining);
+			if (remaining >= 1) {
+				next_skb =
+					alloc_skb(remaining + 64, GFP_ATOMIC);
+				if (next_skb) {
+					skb_reserve(next_skb, 64);
+					skb_put_data(next_skb,
+						     skb->data + packet_len,
+						     remaining);
+				}
+				/* If allocation fails, we just lose the coalesced packet(s) */
 			}
-			/* If allocation fails, we just lose the coalesced packet(s) */
+			/* Trim this skb to just the first packet */
+			skb_trim(skb, packet_len);
 		}
-		/* Trim this skb to just the first packet */
-		skb_trim(skb, packet_len);
-	}
 
-	/* Determine encryption level */
-	if (first_byte & TQUIC_HEADER_FORM_LONG) {
-		u8 packet_type = (first_byte & 0x30) >> 4;
+		/* Determine encryption level */
+		if (first_byte & TQUIC_HEADER_FORM_LONG) {
+			u8 packet_type = (first_byte & 0x30) >> 4;
 
-		switch (packet_type) {
-		case TQUIC_LONG_TYPE_INITIAL:
-			level = TQUIC_CRYPTO_INITIAL;
-			break;
-		case TQUIC_LONG_TYPE_0RTT:
-			level = TQUIC_CRYPTO_EARLY_DATA;
-			break;
-		case TQUIC_LONG_TYPE_HANDSHAKE:
-			level = TQUIC_CRYPTO_HANDSHAKE;
-			break;
-		case TQUIC_LONG_TYPE_RETRY:
-			/* Handle retry packet specially */
-			tquic_packet_process_retry(conn, skb);
-			goto process_next;
-		default:
-			kfree_skb(skb);
-			goto process_next;
+			switch (packet_type) {
+			case TQUIC_LONG_TYPE_INITIAL:
+				level = TQUIC_CRYPTO_INITIAL;
+				break;
+			case TQUIC_LONG_TYPE_0RTT:
+				level = TQUIC_CRYPTO_EARLY_DATA;
+				break;
+			case TQUIC_LONG_TYPE_HANDSHAKE:
+				level = TQUIC_CRYPTO_HANDSHAKE;
+				break;
+			case TQUIC_LONG_TYPE_RETRY:
+				/* Handle retry packet specially */
+				tquic_packet_process_retry(conn, skb);
+				goto process_next;
+			default:
+				kfree_skb(skb);
+				goto process_next;
+			}
+		} else {
+			level = TQUIC_CRYPTO_APPLICATION;
 		}
-	} else {
-		level = TQUIC_CRYPTO_APPLICATION;
-	}
 
-	/*
+		/*
 	 * Note: The original code accessed conn->crypto[level].keys_available
 	 * and other internal fields. In tquic, the crypto state is managed
 	 * differently through conn->crypto_state. For now, we proceed with
 	 * processing assuming keys are available at the appropriate level.
 	 */
 
-	/* Remove header protection */
-	err = tquic_crypto_unprotect_header(conn->crypto_state, skb,
-					    &pn_offset, &pn_len);
-	if (err) {
+		/* Remove header protection */
+		err = tquic_crypto_unprotect_header(conn->crypto_state, skb,
+						    &pn_offset, &pn_len);
+		if (err) {
+			kfree_skb(skb);
+			goto process_next;
+		}
+
+		/* Decode packet number */
+		truncated_pn = tquic_extract_pn(skb->data + pn_offset, pn_len);
+		pn = tquic_decode_pn(atomic64_read(&conn->pkt_num_rx),
+				     truncated_pn, pn_len);
+
+		TQUIC_SKB_CB(skb)->pn = pn;
+		TQUIC_SKB_CB(skb)->pn_len = pn_len;
+		TQUIC_SKB_CB(skb)->header_len = pn_offset + pn_len;
+
+		/* Decrypt packet */
+		err = tquic_crypto_decrypt(conn->crypto_state, skb, pn);
+		if (err) {
+			kfree_skb(skb);
+			goto process_next;
+		}
+
+		/* Update largest received packet number */
+		if (pn > atomic64_read(&conn->pkt_num_rx))
+			atomic64_set(&conn->pkt_num_rx, pn);
+
+		/* Record ACK for this packet */
+		tquic_ack_on_packet_received(conn, pn, level);
+
+		/* Process frames */
+		tquic_frame_process_all(conn, skb, level);
+
+		/* Update statistics - use WRITE_ONCE to avoid KCSAN data races */
+		WRITE_ONCE(conn->stats.rx_packets,
+			   READ_ONCE(conn->stats.rx_packets) + 1);
+		WRITE_ONCE(conn->stats.rx_bytes,
+			   READ_ONCE(conn->stats.rx_bytes) + skb->len);
+
 		kfree_skb(skb);
-		goto process_next;
-	}
-
-	/* Decode packet number */
-	truncated_pn = tquic_extract_pn(skb->data + pn_offset, pn_len);
-	pn = tquic_decode_pn(atomic64_read(&conn->pkt_num_rx),
-			     truncated_pn, pn_len);
-
-	TQUIC_SKB_CB(skb)->pn = pn;
-	TQUIC_SKB_CB(skb)->pn_len = pn_len;
-	TQUIC_SKB_CB(skb)->header_len = pn_offset + pn_len;
-
-	/* Decrypt packet */
-	err = tquic_crypto_decrypt(conn->crypto_state, skb, pn);
-	if (err) {
-		kfree_skb(skb);
-		goto process_next;
-	}
-
-	/* Update largest received packet number */
-	if (pn > atomic64_read(&conn->pkt_num_rx))
-		atomic64_set(&conn->pkt_num_rx, pn);
-
-	/* Record ACK for this packet */
-	tquic_ack_on_packet_received(conn, pn, level);
-
-	/* Process frames */
-	tquic_frame_process_all(conn, skb, level);
-
-	/* Update statistics - use WRITE_ONCE to avoid KCSAN data races */
-	WRITE_ONCE(conn->stats.rx_packets,
-		   READ_ONCE(conn->stats.rx_packets) + 1);
-	WRITE_ONCE(conn->stats.rx_bytes,
-		   READ_ONCE(conn->stats.rx_bytes) + skb->len);
-
-	kfree_skb(skb);
 
 process_next:
-	/* Continue with any remaining coalesced packets */
-	skb = next_skb;
+		/* Continue with any remaining coalesced packets */
+		skb = next_skb;
 
 	} /* end while (skb) */
 
@@ -838,7 +855,7 @@ static void tquic_packet_process_retry(struct tquic_connection *conn,
 				       struct sk_buff *skb)
 {
 	u8 *data = skb->data;
-	int offset = 5;  /* Skip first byte and version */
+	int offset = 5; /* Skip first byte and version */
 	u8 dcid_len, scid_len;
 	struct tquic_cid new_scid;
 
@@ -946,28 +963,32 @@ int tquic_frame_process_one(struct tquic_connection *conn, const u8 *data,
 
 	case TQUIC_FRAME_RESET_STREAM:
 		/* Stream ID */
-		varint_len = tquic_varint_decode(data + offset, len - offset, &val1);
+		varint_len =
+			tquic_varint_decode(data + offset, len - offset, &val1);
 		if (varint_len < 0)
 
 			return varint_len;
 		offset += varint_len;
 
 		/* Application Protocol Error Code */
-		varint_len = tquic_varint_decode(data + offset, len - offset, &val2);
+		varint_len =
+			tquic_varint_decode(data + offset, len - offset, &val2);
 		if (varint_len < 0)
 
 			return varint_len;
 		offset += varint_len;
 
 		/* Final Size */
-		varint_len = tquic_varint_decode(data + offset, len - offset, &val3);
+		varint_len =
+			tquic_varint_decode(data + offset, len - offset, &val3);
 		if (varint_len < 0)
 
 			return varint_len;
 		offset += varint_len;
 
 		{
-			struct tquic_stream *stream = tquic_stream_lookup_internal(conn, val1);
+			struct tquic_stream *stream =
+				tquic_stream_lookup_internal(conn, val1);
 			if (stream) {
 				tquic_stream_handle_reset(stream, val2, val3);
 			}
@@ -976,21 +997,24 @@ int tquic_frame_process_one(struct tquic_connection *conn, const u8 *data,
 
 	case TQUIC_FRAME_STOP_SENDING:
 		/* Stream ID */
-		varint_len = tquic_varint_decode(data + offset, len - offset, &val1);
+		varint_len =
+			tquic_varint_decode(data + offset, len - offset, &val1);
 		if (varint_len < 0)
 
 			return varint_len;
 		offset += varint_len;
 
 		/* Application Protocol Error Code */
-		varint_len = tquic_varint_decode(data + offset, len - offset, &val2);
+		varint_len =
+			tquic_varint_decode(data + offset, len - offset, &val2);
 		if (varint_len < 0)
 
 			return varint_len;
 		offset += varint_len;
 
 		{
-			struct tquic_stream *stream = tquic_stream_lookup_internal(conn, val1);
+			struct tquic_stream *stream =
+				tquic_stream_lookup_internal(conn, val1);
 			if (stream) {
 				tquic_stream_handle_stop_sending(stream, val2);
 			}
@@ -1002,7 +1026,8 @@ int tquic_frame_process_one(struct tquic_connection *conn, const u8 *data,
 
 	case TQUIC_FRAME_NEW_TOKEN:
 		/* Length */
-		varint_len = tquic_varint_decode(data + offset, len - offset, &val1);
+		varint_len =
+			tquic_varint_decode(data + offset, len - offset, &val1);
 		if (varint_len < 0)
 
 			return varint_len;
@@ -1020,7 +1045,8 @@ int tquic_frame_process_one(struct tquic_connection *conn, const u8 *data,
 		return tquic_frame_process_stream(conn, data, len);
 
 	case TQUIC_FRAME_MAX_DATA:
-		varint_len = tquic_varint_decode(data + offset, len - offset, &val1);
+		varint_len =
+			tquic_varint_decode(data + offset, len - offset, &val1);
 		if (varint_len < 0)
 			return varint_len;
 		offset += varint_len;
@@ -1034,21 +1060,24 @@ int tquic_frame_process_one(struct tquic_connection *conn, const u8 *data,
 
 	case TQUIC_FRAME_MAX_STREAM_DATA:
 		/* Stream ID */
-		varint_len = tquic_varint_decode(data + offset, len - offset, &val1);
+		varint_len =
+			tquic_varint_decode(data + offset, len - offset, &val1);
 		if (varint_len < 0)
 
 			return varint_len;
 		offset += varint_len;
 
 		/* Maximum Stream Data */
-		varint_len = tquic_varint_decode(data + offset, len - offset, &val2);
+		varint_len =
+			tquic_varint_decode(data + offset, len - offset, &val2);
 		if (varint_len < 0)
 
 			return varint_len;
 		offset += varint_len;
 
 		{
-			struct tquic_stream *stream = tquic_stream_lookup_internal(conn, val1);
+			struct tquic_stream *stream =
+				tquic_stream_lookup_internal(conn, val1);
 
 			if (stream && val2 > stream->max_send_data) {
 				stream->max_send_data = val2;
@@ -1060,7 +1089,8 @@ int tquic_frame_process_one(struct tquic_connection *conn, const u8 *data,
 		return offset;
 
 	case TQUIC_FRAME_MAX_STREAMS_BIDI:
-		varint_len = tquic_varint_decode(data + offset, len - offset, &val1);
+		varint_len =
+			tquic_varint_decode(data + offset, len - offset, &val1);
 		if (varint_len < 0)
 
 			return varint_len;
@@ -1071,7 +1101,8 @@ int tquic_frame_process_one(struct tquic_connection *conn, const u8 *data,
 		return offset;
 
 	case TQUIC_FRAME_MAX_STREAMS_UNI:
-		varint_len = tquic_varint_decode(data + offset, len - offset, &val1);
+		varint_len =
+			tquic_varint_decode(data + offset, len - offset, &val1);
 		if (varint_len < 0)
 
 			return varint_len;
@@ -1086,14 +1117,16 @@ int tquic_frame_process_one(struct tquic_connection *conn, const u8 *data,
 	case TQUIC_FRAME_STREAMS_BLOCKED_BIDI:
 	case TQUIC_FRAME_STREAMS_BLOCKED_UNI:
 		/* These are informational, just parse and skip */
-		varint_len = tquic_varint_decode(data + offset, len - offset, &val1);
+		varint_len =
+			tquic_varint_decode(data + offset, len - offset, &val1);
 		if (varint_len < 0)
 
 			return varint_len;
 		offset += varint_len;
 
 		if (frame_type == TQUIC_FRAME_STREAM_DATA_BLOCKED) {
-			varint_len = tquic_varint_decode(data + offset, len - offset, &val2);
+			varint_len = tquic_varint_decode(data + offset,
+							 len - offset, &val2);
 			if (varint_len < 0)
 
 				return varint_len;
@@ -1105,7 +1138,8 @@ int tquic_frame_process_one(struct tquic_connection *conn, const u8 *data,
 		return tquic_frame_process_new_cid(conn, data, len);
 
 	case TQUIC_FRAME_RETIRE_CONNECTION_ID:
-		varint_len = tquic_varint_decode(data + offset, len - offset, &val1);
+		varint_len =
+			tquic_varint_decode(data + offset, len - offset, &val1);
 		if (varint_len < 0)
 
 			return varint_len;
@@ -1128,13 +1162,15 @@ int tquic_frame_process_one(struct tquic_connection *conn, const u8 *data,
 			 * Cap the control frame queue at 64 entries.
 			 */
 			if (skb_queue_len(&conn->control_frames) >= 64) {
-				net_warn_ratelimited("TQUIC: PATH_CHALLENGE rate limited\n");
+				net_warn_ratelimited(
+					"TQUIC: PATH_CHALLENGE rate limited\n");
 				return offset + 8;
 			}
 
 			resp = alloc_skb(16, GFP_ATOMIC);
 			if (!resp) {
-				net_warn_ratelimited("TQUIC: failed to allocate PATH_RESPONSE\n");
+				net_warn_ratelimited(
+					"TQUIC: failed to allocate PATH_RESPONSE\n");
 				return -ENOMEM;
 			}
 			p = skb_put(resp, 9);
@@ -1149,13 +1185,20 @@ int tquic_frame_process_one(struct tquic_connection *conn, const u8 *data,
 			return -EINVAL;
 		/* Validate path challenge response */
 		{
-			struct tquic_path *path = tquic_packet_active_path_get(conn);
+			struct tquic_path *path =
+				tquic_packet_active_path_get(conn);
 
-			if (path && READ_ONCE(path->validation.challenge_pending)) {
-				if (!crypto_memneq(data + offset,
-						   path->validation.challenge_data, 8)) {
-					WRITE_ONCE(path->state, TQUIC_PATH_VALIDATED);
-					WRITE_ONCE(path->validation.challenge_pending, 0);
+			if (path &&
+			    READ_ONCE(path->validation.challenge_pending)) {
+				if (!crypto_memneq(
+					    data + offset,
+					    path->validation.challenge_data,
+					    8)) {
+					WRITE_ONCE(path->state,
+						   TQUIC_PATH_VALIDATED);
+					WRITE_ONCE(path->validation
+							   .challenge_pending,
+						   0);
 				}
 			}
 			if (path)
@@ -1190,9 +1233,8 @@ int tquic_frame_process_one(struct tquic_connection *conn, const u8 *data,
 
 			if (has_length) {
 				/* Type 0x31: datagram length is explicit */
-				vlen = tquic_varint_decode(data + off,
-							   len - off,
-							   &datagram_len);
+				vlen = tquic_varint_decode(
+					data + off, len - off, &datagram_len);
 				if (vlen < 0)
 					return vlen;
 				off += vlen;
@@ -1224,12 +1266,11 @@ int tquic_frame_process_one(struct tquic_connection *conn, const u8 *data,
 			 * ACK_FREQUENCY frame (draft-ietf-quic-ack-frequency)
 			 * Skip the 2-byte frame type and process the frame.
 			 */
-			int consumed = tquic_ack_frequency_process(conn,
-								   data + 2,
-								   len - 2);
+			int consumed = tquic_ack_frequency_process(
+				conn, data + 2, len - 2);
 			if (consumed < 0)
 				return consumed;
-			return consumed + 2;  /* Include frame type bytes */
+			return consumed + 2; /* Include frame type bytes */
 		}
 
 		/*
@@ -1245,19 +1286,21 @@ int tquic_frame_process_one(struct tquic_connection *conn, const u8 *data,
 static int tquic_frame_process_crypto(struct tquic_connection *conn,
 				      const u8 *data, int len, u8 level)
 {
-	int offset = 1;  /* Skip frame type */
+	int offset = 1; /* Skip frame type */
 	u64 crypto_offset;
 	u64 crypto_len;
 	int varint_len;
 
 	/* Offset */
-	varint_len = tquic_varint_decode(data + offset, len - offset, &crypto_offset);
+	varint_len = tquic_varint_decode(data + offset, len - offset,
+					 &crypto_offset);
 	if (varint_len < 0)
 		return varint_len;
 	offset += varint_len;
 
 	/* Length */
-	varint_len = tquic_varint_decode(data + offset, len - offset, &crypto_len);
+	varint_len =
+		tquic_varint_decode(data + offset, len - offset, &crypto_len);
 	if (varint_len < 0)
 		return varint_len;
 	offset += varint_len;
@@ -1290,14 +1333,16 @@ static int tquic_frame_process_stream(struct tquic_connection *conn,
 	struct tquic_stream *stream;
 
 	/* Stream ID */
-	varint_len = tquic_varint_decode(data + offset, len - offset, &stream_id);
+	varint_len =
+		tquic_varint_decode(data + offset, len - offset, &stream_id);
 	if (varint_len < 0)
 		return varint_len;
 	offset += varint_len;
 
 	/* Offset (optional) */
 	if (has_offset) {
-		varint_len = tquic_varint_decode(data + offset, len - offset, &stream_offset);
+		varint_len = tquic_varint_decode(data + offset, len - offset,
+						 &stream_offset);
 		if (varint_len < 0)
 			return varint_len;
 		offset += varint_len;
@@ -1305,7 +1350,8 @@ static int tquic_frame_process_stream(struct tquic_connection *conn,
 
 	/* Length (optional) */
 	if (has_length) {
-		varint_len = tquic_varint_decode(data + offset, len - offset, &stream_len);
+		varint_len = tquic_varint_decode(data + offset, len - offset,
+						 &stream_len);
 		if (varint_len < 0)
 			return varint_len;
 		offset += varint_len;
@@ -1329,8 +1375,8 @@ static int tquic_frame_process_stream(struct tquic_connection *conn,
 		bool is_peer = (stream_id & 0x1) != conn->is_server;
 
 		if (is_peer) {
-			u64 max = is_bidi ? conn->max_streams_bidi
-					  : conn->max_streams_uni;
+			u64 max = is_bidi ? conn->max_streams_bidi :
+					    conn->max_streams_uni;
 			u64 stream_num = stream_id >> 2;
 
 			if (stream_num >= max) {
@@ -1360,12 +1406,14 @@ static int tquic_frame_process_stream(struct tquic_connection *conn,
 		 * with FLOW_CONTROL_ERROR (0x03) per RFC 9000.
 		 */
 		tquic_conn_close_internal(conn, TQUIC_ERROR_FLOW_CONTROL_ERROR,
-					  "flow control limit exceeded", 29, false);
+					  "flow control limit exceeded", 29,
+					  false);
 		return -EDQUOT;
 	}
 
 	/* Deliver data to stream */
-	quic_packet_deliver_stream_data(stream, stream_offset, data + offset, stream_len, has_fin);
+	quic_packet_deliver_stream_data(stream, stream_offset, data + offset,
+					stream_len, has_fin);
 
 	return offset + stream_len;
 }
@@ -1374,7 +1422,7 @@ static int tquic_frame_process_ack(struct tquic_connection *conn,
 				   const u8 *data, int len, u8 level)
 {
 	struct tquic_ack_frame ack_frame;
-	int offset = 1;  /* Skip frame type */
+	int offset = 1; /* Skip frame type */
 	u64 ack_range_count;
 	int varint_len;
 	int estimated_min_bytes;
@@ -1437,15 +1485,13 @@ static int tquic_frame_process_ack(struct tquic_connection *conn,
 	/* Additional ACK Ranges */
 	ack_frame.range_count = (u32)ack_range_count;
 	for (i = 0; i < ack_range_count; i++) {
-		varint_len = tquic_varint_decode(data + offset,
-						 len - offset,
+		varint_len = tquic_varint_decode(data + offset, len - offset,
 						 &ack_frame.ranges[i].gap);
 		if (varint_len < 0)
 			return varint_len;
 		offset += varint_len;
 
-		varint_len = tquic_varint_decode(data + offset,
-						 len - offset,
+		varint_len = tquic_varint_decode(data + offset, len - offset,
 						 &ack_frame.ranges[i].length);
 		if (varint_len < 0)
 			return varint_len;
@@ -1456,22 +1502,19 @@ static int tquic_frame_process_ack(struct tquic_connection *conn,
 	if (data[0] == TQUIC_FRAME_ACK_ECN) {
 		ack_frame.has_ecn = true;
 
-		varint_len = tquic_varint_decode(data + offset,
-						 len - offset,
+		varint_len = tquic_varint_decode(data + offset, len - offset,
 						 &ack_frame.ecn.ect0);
 		if (varint_len < 0)
 			return varint_len;
 		offset += varint_len;
 
-		varint_len = tquic_varint_decode(data + offset,
-						 len - offset,
+		varint_len = tquic_varint_decode(data + offset, len - offset,
 						 &ack_frame.ecn.ect1);
 		if (varint_len < 0)
 			return varint_len;
 		offset += varint_len;
 
-		varint_len = tquic_varint_decode(data + offset,
-						 len - offset,
+		varint_len = tquic_varint_decode(data + offset, len - offset,
 						 &ack_frame.ecn.ce);
 		if (varint_len < 0)
 			return varint_len;
@@ -1487,7 +1530,8 @@ static int tquic_frame_process_ack(struct tquic_connection *conn,
 	 * (largest_acked > largest_sent when largest_sent == 0).
 	 */
 	if (level == TQUIC_PN_SPACE_APPLICATION)
-		tquic_loss_detection_on_ack_received(conn, &ack_frame, level);
+		tquic_loss_detection_on_ack_received(conn, &ack_frame, level,
+						     NULL);
 
 	return offset;
 }
@@ -1512,7 +1556,8 @@ static int tquic_frame_process_new_cid(struct tquic_connection *conn,
 	offset += varint_len;
 
 	/* Retire Prior To */
-	varint_len = tquic_varint_decode(data + offset, len - offset, &retire_prior_to);
+	varint_len = tquic_varint_decode(data + offset, len - offset,
+					 &retire_prior_to);
 	if (varint_len < 0)
 		return varint_len;
 	offset += varint_len;
@@ -1554,21 +1599,24 @@ static int tquic_frame_process_connection_close(struct tquic_connection *conn,
 	bool is_app_error = (data[0] == TQUIC_FRAME_CONNECTION_CLOSE_APP);
 
 	/* Error Code */
-	varint_len = tquic_varint_decode(data + offset, len - offset, &error_code);
+	varint_len =
+		tquic_varint_decode(data + offset, len - offset, &error_code);
 	if (varint_len < 0)
 		return varint_len;
 	offset += varint_len;
 
 	/* Frame Type (not present in APPLICATION_CLOSE) */
 	if (!is_app_error) {
-		varint_len = tquic_varint_decode(data + offset, len - offset, &frame_type);
+		varint_len = tquic_varint_decode(data + offset, len - offset,
+						 &frame_type);
 		if (varint_len < 0)
 			return varint_len;
 		offset += varint_len;
 	}
 
 	/* Reason Phrase Length */
-	varint_len = tquic_varint_decode(data + offset, len - offset, &reason_len);
+	varint_len =
+		tquic_varint_decode(data + offset, len - offset, &reason_len);
 	if (varint_len < 0)
 		return varint_len;
 	offset += varint_len;

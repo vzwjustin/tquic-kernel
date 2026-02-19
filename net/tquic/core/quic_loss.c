@@ -638,13 +638,15 @@ static bool tquic_loss_is_pn_acked(struct tquic_ack_frame *ack, u64 pn)
  * @conn: TQUIC connection
  * @ack: ACK information from received frame
  * @pn_space_idx: Packet number space index
+ * @recv_path: Path the ACK was received on (for ECN attribution, may be NULL)
  *
  * RFC 9002 Section A.7: OnAckReceived
  * Processes acknowledgments, updates RTT, and detects lost packets.
  */
 void tquic_loss_detection_on_ack_received(struct tquic_connection *conn,
 					  struct tquic_ack_frame *ack,
-					  u8 pn_space_idx)
+					  u8 pn_space_idx,
+					  struct tquic_path *recv_path)
 {
 	struct tquic_pn_space *pn_space;
 	struct tquic_path *path;
@@ -866,25 +868,36 @@ void tquic_loss_detection_on_ack_received(struct tquic_connection *conn,
 	}
 
 	/*
-	 * Process ECN feedback (RFC 9000 Section 13.4)
+	 * RFC 9002 Section 7.1: Processing ECN Information
 	 *
 	 * If the ACK frame contains ECN counts (ACK_ECN frame type 0x03),
 	 * validate them and trigger congestion events for any new CE marks.
-	 * Currently attributing ECN to the active path as ACK frames don't specify
-	 * which path the ECN marks occurred on, but in multipath QUIC this should
-	 * be the path the ACK frame was received on.
+	 *
+	 * Multipath: Use the receive path (the path the ACK was received on)
+	 * for ECN attribution. The CE marks indicate congestion on that path.
+	 * Fall back to active path for legacy callers that don't provide
+	 * recv_path.
 	 */
-	path = tquic_loss_active_path_get(conn);
-	if (path && (ack->ecn.ect0 || ack->ecn.ect1 || ack->ecn.ce)) {
-		int ce_count = tquic_ecn_validate_ack(path, ack);
+	{
+		struct tquic_path *ecn_path = recv_path;
+		bool ecn_path_owned = false;
 
-		if (ce_count > 0) {
-			/* New CE marks received - trigger congestion response */
-			tquic_ecn_process_ce(conn, path, ce_count);
+		if (!ecn_path) {
+			ecn_path = tquic_loss_active_path_get(conn);
+			ecn_path_owned = true;
 		}
+		if (ecn_path &&
+		    (ack->ecn.ect0 || ack->ecn.ect1 || ack->ecn.ce)) {
+			int ce_count = tquic_ecn_validate_ack(ecn_path, ack);
+
+			if (ce_count > 0) {
+				/* New CE marks — trigger congestion response */
+				tquic_ecn_process_ce(conn, ecn_path, ce_count);
+			}
+		}
+		if (ecn_path_owned && ecn_path)
+			tquic_path_put(ecn_path);
 	}
-	if (path)
-		tquic_path_put(path);
 
 	/* Reset PTO count since we got a valid ACK */
 	if (includes_ack_eliciting)
