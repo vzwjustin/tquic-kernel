@@ -879,7 +879,7 @@ static void test_ack_range_overflow(struct kunit *test)
 /* Test: Maximum data limits */
 static void test_max_data_limits(struct kunit *test)
 {
-	u64 max_data = TQUIC_DEFAULT_MAX_DATA;
+	u64 max_data = tquic_get_validated_max_data();
 	u64 data_sent = 0;
 	u64 to_send;
 

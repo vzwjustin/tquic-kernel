@@ -311,10 +311,10 @@ void tquic_tp_set_defaults_client(struct tquic_transport_params *params)
 	tquic_tp_init(params);
 
 	params->max_idle_timeout = TQUIC_DEFAULT_IDLE_TIMEOUT;
-	params->initial_max_data = TQUIC_DEFAULT_MAX_DATA;
-	params->initial_max_stream_data_bidi_local = TQUIC_DEFAULT_MAX_STREAM_DATA;
-	params->initial_max_stream_data_bidi_remote = TQUIC_DEFAULT_MAX_STREAM_DATA;
-	params->initial_max_stream_data_uni = TQUIC_DEFAULT_MAX_STREAM_DATA;
+	params->initial_max_data = tquic_get_validated_max_data();
+	params->initial_max_stream_data_bidi_local = tquic_get_validated_max_stream_data();
+	params->initial_max_stream_data_bidi_remote = tquic_get_validated_max_stream_data();
+	params->initial_max_stream_data_uni = tquic_get_validated_max_stream_data();
 	params->initial_max_streams_bidi = 100;
 	params->initial_max_streams_uni = 100;
 	params->active_connection_id_limit = TQUIC_MAX_PATHS;
@@ -352,10 +352,10 @@ void tquic_tp_set_defaults_server(struct tquic_transport_params *params)
 	tquic_tp_init(params);
 
 	params->max_idle_timeout = TQUIC_DEFAULT_IDLE_TIMEOUT;
-	params->initial_max_data = TQUIC_DEFAULT_MAX_DATA;
-	params->initial_max_stream_data_bidi_local = TQUIC_DEFAULT_MAX_STREAM_DATA;
-	params->initial_max_stream_data_bidi_remote = TQUIC_DEFAULT_MAX_STREAM_DATA;
-	params->initial_max_stream_data_uni = TQUIC_DEFAULT_MAX_STREAM_DATA;
+	params->initial_max_data = tquic_get_validated_max_data();
+	params->initial_max_stream_data_bidi_local = tquic_get_validated_max_stream_data();
+	params->initial_max_stream_data_bidi_remote = tquic_get_validated_max_stream_data();
+	params->initial_max_stream_data_uni = tquic_get_validated_max_stream_data();
 	params->initial_max_streams_bidi = 100;
 	params->initial_max_streams_uni = 100;
 	params->active_connection_id_limit = TQUIC_MAX_PATHS;

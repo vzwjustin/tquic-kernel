@@ -350,8 +350,8 @@ static struct tquic_stream *tquic_stream_alloc(struct tquic_connection *conn,
 	 * These come from transport parameters negotiated during handshake.
 	 * Using default values here; actual values would come from conn.
 	 */
-	stream->max_send_data = TQUIC_DEFAULT_MAX_STREAM_DATA;
-	stream->max_recv_data = TQUIC_DEFAULT_MAX_STREAM_DATA;
+	stream->max_send_data = tquic_get_validated_max_stream_data();
+	stream->max_recv_data = tquic_get_validated_max_stream_data();
 
 	stream->send_offset = 0;
 	stream->recv_offset = 0;

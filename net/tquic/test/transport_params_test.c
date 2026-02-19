@@ -45,9 +45,9 @@ static void test_tp_client_defaults(struct kunit *test)
 	tquic_tp_set_defaults_client(&params);
 
 	KUNIT_EXPECT_EQ(test, params.max_idle_timeout, (u64)TQUIC_DEFAULT_IDLE_TIMEOUT);
-	KUNIT_EXPECT_EQ(test, params.initial_max_data, (u64)TQUIC_DEFAULT_MAX_DATA);
+	KUNIT_EXPECT_EQ(test, params.initial_max_data, (u64)tquic_get_validated_max_data());
 	KUNIT_EXPECT_EQ(test, params.initial_max_stream_data_bidi_local,
-			(u64)TQUIC_DEFAULT_MAX_STREAM_DATA);
+			(u64)tquic_get_validated_max_stream_data());
 	KUNIT_EXPECT_EQ(test, params.initial_max_streams_bidi, (u64)100);
 	KUNIT_EXPECT_EQ(test, params.initial_max_streams_uni, (u64)100);
 	KUNIT_EXPECT_TRUE(test, params.enable_multipath);
@@ -63,7 +63,7 @@ static void test_tp_server_defaults(struct kunit *test)
 	tquic_tp_set_defaults_server(&params);
 
 	KUNIT_EXPECT_EQ(test, params.max_idle_timeout, (u64)TQUIC_DEFAULT_IDLE_TIMEOUT);
-	KUNIT_EXPECT_EQ(test, params.initial_max_data, (u64)TQUIC_DEFAULT_MAX_DATA);
+	KUNIT_EXPECT_EQ(test, params.initial_max_data, (u64)tquic_get_validated_max_data());
 	KUNIT_EXPECT_EQ(test, params.active_connection_id_limit, (u64)TQUIC_MAX_PATHS);
 	KUNIT_EXPECT_TRUE(test, params.enable_multipath);
 }

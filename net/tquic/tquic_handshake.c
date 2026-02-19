@@ -617,7 +617,7 @@ int tquic_start_handshake(struct sock *sk)
 		 */
 		bypass_max_data = conn->local_params.initial_max_data;
 		if (!bypass_max_data)
-			bypass_max_data = TQUIC_DEFAULT_MAX_DATA;
+			bypass_max_data = tquic_get_validated_max_data();
 
 		bypass_max_streams_bidi =
 			conn->local_params.initial_max_streams_bidi;
@@ -1182,7 +1182,7 @@ static void tquic_inline_hs_apply_transport_params(struct sock *sk)
 	 */
 	conn->max_data_local = tsk->config.initial_max_data;
 	if (!conn->max_data_local)
-		conn->max_data_local = TQUIC_DEFAULT_MAX_DATA;
+		conn->max_data_local = tquic_get_validated_max_data();
 
 	conn->local_params.initial_max_data = conn->max_data_local;
 	conn->local_params.initial_max_streams_bidi =
@@ -1197,17 +1197,17 @@ static void tquic_inline_hs_apply_transport_params(struct sock *sk)
 		tsk->config.initial_max_stream_data_bidi_local;
 	if (!conn->local_params.initial_max_stream_data_bidi_local)
 		conn->local_params.initial_max_stream_data_bidi_local =
-			TQUIC_DEFAULT_MAX_STREAM_DATA;
+			tquic_get_validated_max_stream_data();
 	conn->local_params.initial_max_stream_data_bidi_remote =
 		tsk->config.initial_max_stream_data_bidi_remote;
 	if (!conn->local_params.initial_max_stream_data_bidi_remote)
 		conn->local_params.initial_max_stream_data_bidi_remote =
-			TQUIC_DEFAULT_MAX_STREAM_DATA;
+			tquic_get_validated_max_stream_data();
 	conn->local_params.initial_max_stream_data_uni =
 		tsk->config.initial_max_stream_data_uni;
 	if (!conn->local_params.initial_max_stream_data_uni)
 		conn->local_params.initial_max_stream_data_uni =
-			TQUIC_DEFAULT_MAX_STREAM_DATA;
+			tquic_get_validated_max_stream_data();
 
 	tquic_dbg("applied transport params: remote_max_data=%llu, "
 		 "local_max_data=%llu, max_streams_bidi=%llu\n",

@@ -34,14 +34,14 @@
  */
 
 /* Default flow control window sizes (may be defined in tquic.h) */
-#ifndef TQUIC_DEFAULT_MAX_DATA
-#define TQUIC_DEFAULT_MAX_DATA			(16 * 1024 * 1024)	/* 16 MB */
+#ifndef tquic_get_validated_max_data()
+#define tquic_get_validated_max_data()			(16 * 1024 * 1024)	/* 16 MB */
 #endif
-#ifndef TQUIC_DEFAULT_MAX_STREAM_DATA
-#define TQUIC_DEFAULT_MAX_STREAM_DATA		(1 * 1024 * 1024)	/* 1 MB */
+#ifndef tquic_get_validated_max_stream_data()
+#define tquic_get_validated_max_stream_data()		(1 * 1024 * 1024)	/* 1 MB */
 #endif
-#ifndef TQUIC_DEFAULT_MAX_STREAMS
-#define TQUIC_DEFAULT_MAX_STREAMS		256
+#ifndef tquic_get_validated_max_streams()
+#define tquic_get_validated_max_streams()		256
 #endif
 
 /* Flow control auto-tuning parameters - override values from flow_control.h */
@@ -157,11 +157,11 @@ static struct tquic_stream *tquic_stream_lookup(struct tquic_connection *conn,
 void tquic_flow_control_init(struct tquic_connection *conn)
 {
 	tquic_dbg("tquic_flow_control_init: max_data=%u max_streams=%u\n",
-		  TQUIC_DEFAULT_MAX_DATA, TQUIC_DEFAULT_MAX_STREAMS);
+		  tquic_get_validated_max_data(), tquic_get_validated_max_streams());
 	/* Initialize local flow control (what we advertise to peer) */
-	conn->max_data_local = TQUIC_DEFAULT_MAX_DATA;
-	conn->max_streams_bidi = TQUIC_DEFAULT_MAX_STREAMS;
-	conn->max_streams_uni = TQUIC_DEFAULT_MAX_STREAMS;
+	conn->max_data_local = tquic_get_validated_max_data();
+	conn->max_streams_bidi = tquic_get_validated_max_streams();
+	conn->max_streams_uni = tquic_get_validated_max_streams();
 
 	/* Initialize remote flow control (limits from peer) */
 	conn->max_data_remote = 0;  /* Set when received from peer */
@@ -894,13 +894,13 @@ static void tquic_streams_update_max_streams(struct tquic_connection *conn,
 	if (unidirectional) {
 		current_max = conn->max_streams_uni;
 		/* Increase by original limit */
-		new_max_streams = current_max + TQUIC_DEFAULT_MAX_STREAMS;
+		new_max_streams = current_max + tquic_get_validated_max_streams();
 		if (new_max_streams > TQUIC_MAX_STREAMS)
 			new_max_streams = TQUIC_MAX_STREAMS;
 		conn->max_streams_uni = new_max_streams;
 	} else {
 		current_max = conn->max_streams_bidi;
-		new_max_streams = current_max + TQUIC_DEFAULT_MAX_STREAMS;
+		new_max_streams = current_max + tquic_get_validated_max_streams();
 		if (new_max_streams > TQUIC_MAX_STREAMS)
 			new_max_streams = TQUIC_MAX_STREAMS;
 		conn->max_streams_bidi = new_max_streams;

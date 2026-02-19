@@ -102,16 +102,16 @@ static bool stream_fc_can_send(struct flow_control_test_ctx *ctx,
 static void tquic_fc_test_initial_state(struct kunit *test)
 {
 	struct flow_control_test_ctx ctx = {
-		.max_data = TQUIC_DEFAULT_MAX_DATA,
+		.max_data = tquic_get_validated_max_data(),
 		.data_sent = 0,
 		.data_received = 0,
 		.blocked = false,
 	};
 
-	KUNIT_EXPECT_EQ(test, ctx.max_data, (u64)TQUIC_DEFAULT_MAX_DATA);
+	KUNIT_EXPECT_EQ(test, ctx.max_data, (u64)tquic_get_validated_max_data());
 	KUNIT_EXPECT_EQ(test, ctx.data_sent, 0ULL);
 	KUNIT_EXPECT_FALSE(test, ctx.blocked);
-	KUNIT_EXPECT_EQ(test, fc_available(&ctx), (u64)TQUIC_DEFAULT_MAX_DATA);
+	KUNIT_EXPECT_EQ(test, fc_available(&ctx), (u64)tquic_get_validated_max_data());
 }
 
 /* Test: Basic flow control send */
@@ -207,17 +207,17 @@ static void tquic_fc_test_max_data_no_decrease(struct kunit *test)
 static void tquic_fc_test_stream_level(struct kunit *test)
 {
 	struct flow_control_test_ctx ctx = {
-		.max_stream_data = TQUIC_DEFAULT_MAX_STREAM_DATA,
+		.max_stream_data = tquic_get_validated_max_stream_data(),
 		.stream_offset = 0,
 	};
 
 	/* Can send within limit */
 	KUNIT_EXPECT_TRUE(test, stream_fc_can_send(&ctx, 0, 1000));
-	KUNIT_EXPECT_TRUE(test, stream_fc_can_send(&ctx, 0, TQUIC_DEFAULT_MAX_STREAM_DATA));
+	KUNIT_EXPECT_TRUE(test, stream_fc_can_send(&ctx, 0, tquic_get_validated_max_stream_data()));
 
 	/* Cannot exceed limit */
 	KUNIT_EXPECT_FALSE(test, stream_fc_can_send(&ctx, 0,
-						    TQUIC_DEFAULT_MAX_STREAM_DATA + 1));
+						    tquic_get_validated_max_stream_data() + 1));
 
 	/* Offset + length must not exceed */
 	KUNIT_EXPECT_TRUE(test, stream_fc_can_send(&ctx, 1000, 100));
@@ -405,12 +405,12 @@ static void tquic_fc_test_auto_tuning(struct kunit *test)
 static void tquic_fc_test_connection_limits(struct kunit *test)
 {
 	/* Verify default constants */
-	KUNIT_EXPECT_EQ(test, TQUIC_DEFAULT_MAX_DATA, (u64)(1 << 20));
-	KUNIT_EXPECT_EQ(test, TQUIC_DEFAULT_MAX_STREAM_DATA, (u64)(1 << 18));
+	KUNIT_EXPECT_EQ(test, tquic_get_validated_max_data(), (u64)(1 << 20));
+	KUNIT_EXPECT_EQ(test, tquic_get_validated_max_stream_data(), (u64)(1 << 18));
 
 	/* Stream default should be less than connection default */
-	KUNIT_EXPECT_LT(test, (u64)TQUIC_DEFAULT_MAX_STREAM_DATA,
-			(u64)TQUIC_DEFAULT_MAX_DATA);
+	KUNIT_EXPECT_LT(test, (u64)tquic_get_validated_max_stream_data(),
+			(u64)tquic_get_validated_max_data());
 }
 
 /* Test: Bidirectional stream flow control */

@@ -108,8 +108,8 @@ struct tquic_stream_manager *tquic_stream_manager_create(
 	}
 
 	/* Connection-level flow control */
-	mgr->max_data_local = TQUIC_DEFAULT_MAX_DATA;
-	mgr->max_data_remote = TQUIC_DEFAULT_MAX_DATA;
+	mgr->max_data_local = tquic_get_validated_max_data();
+	mgr->max_data_remote = tquic_get_validated_max_data();
 
 	/*
 	 * SECURITY: Initialize stream creation rate limiting
@@ -672,8 +672,8 @@ static struct tquic_stream *tquic_stream_create_internal(
 	skb_queue_head_init(&stream->recv_buf);
 
 	/* Set initial flow control limits */
-	stream->max_send_data = TQUIC_DEFAULT_MAX_STREAM_DATA;
-	stream->max_recv_data = TQUIC_DEFAULT_MAX_STREAM_DATA;
+	stream->max_send_data = tquic_get_validated_max_stream_data();
+	stream->max_recv_data = tquic_get_validated_max_stream_data();
 
 	/* Initialize state based on stream type and initiator */
 	if (is_bidi) {

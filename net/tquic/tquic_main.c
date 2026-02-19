@@ -811,8 +811,8 @@ struct tquic_stream *tquic_stream_open(struct tquic_connection *conn, bool bidi)
 	skb_queue_head_init(&stream->send_buf);
 	skb_queue_head_init(&stream->recv_buf);
 
-	stream->max_send_data = TQUIC_DEFAULT_MAX_STREAM_DATA;
-	stream->max_recv_data = TQUIC_DEFAULT_MAX_STREAM_DATA;
+	stream->max_send_data = tquic_get_validated_max_stream_data();
+	stream->max_recv_data = tquic_get_validated_max_stream_data();
 
 	init_waitqueue_head(&stream->wait);
 
@@ -895,8 +895,8 @@ tquic_stream_create_locked(struct tquic_connection *conn, u64 stream_id)
 	skb_queue_head_init(&stream->send_buf);
 	skb_queue_head_init(&stream->recv_buf);
 
-	stream->max_send_data = TQUIC_DEFAULT_MAX_STREAM_DATA;
-	stream->max_recv_data = TQUIC_DEFAULT_MAX_STREAM_DATA;
+	stream->max_send_data = tquic_get_validated_max_stream_data();
+	stream->max_recv_data = tquic_get_validated_max_stream_data();
 
 	init_waitqueue_head(&stream->wait);
 
