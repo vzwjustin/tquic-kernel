@@ -1881,35 +1881,23 @@ void tquic_loss_retransmit_unacked(struct tquic_connection *conn)
  */
 bool tquic_loss_check_persistent_congestion(struct tquic_connection *conn)
 {
-	struct tquic_path *path;
-	u32 pto;
-	ktime_t duration;
-	ktime_t oldest_lost_time = 0;
-	ktime_t newest_lost_time = 0;
-	int i;
+	int i, j;
+	bool pc_detected = false;
+
+#define LOSS_MAX_PATHS 8
+	struct {
+		u32 path_id;
+		ktime_t oldest_lost_time;
+		ktime_t newest_lost_time;
+	} path_pc[LOSS_MAX_PATHS];
+	int nr_paths = 0;
 
 	if (!conn || !conn->pn_spaces)
 		return false;
 
-	path = tquic_loss_active_path_get(conn);
-	if (!path)
-		return false;
+	memset(path_pc, 0, sizeof(path_pc));
 
-	/* Need RTT sample for persistent congestion check */
-	if (path->rtt.samples == 0) {
-		tquic_path_put(path);
-		return false;
-	}
-
-	/*
-	 * RFC 9002 Section 7.6.2:
-	 * pto = smoothed_rtt + max(4*rttvar, kGranularity) + max_ack_delay
-	 * Persistent congestion period = pto * kPersistentCongestionThreshold
-	 * kPersistentCongestionThreshold = 3
-	 */
-	pto = tquic_rtt_pto(&path->rtt);
-
-	/* Find oldest and newest lost packet times */
+	/* Find oldest and newest lost packet times per path */
 	for (i = 0; i < TQUIC_PN_SPACE_COUNT; i++) {
 		struct tquic_pn_space *pn_space = &conn->pn_spaces[i];
 		struct tquic_sent_packet *pkt;
@@ -1920,57 +1908,85 @@ bool tquic_loss_check_persistent_congestion(struct tquic_connection *conn)
 
 		spin_lock_irqsave(&pn_space->lock, flags);
 		list_for_each_entry(pkt, &pn_space->lost_packets, list) {
-			if (oldest_lost_time == 0 ||
-			    ktime_before(pkt->sent_time, oldest_lost_time))
-				oldest_lost_time = pkt->sent_time;
+			int found = -1;
 
-			if (ktime_after(pkt->sent_time, newest_lost_time))
-				newest_lost_time = pkt->sent_time;
+			for (j = 0; j < nr_paths; j++) {
+				if (path_pc[j].path_id == pkt->path_id) {
+					found = j;
+					break;
+				}
+			}
+
+			if (found == -1 && nr_paths < LOSS_MAX_PATHS) {
+				found = nr_paths++;
+				path_pc[found].path_id = pkt->path_id;
+				path_pc[found].oldest_lost_time =
+					pkt->sent_time;
+				path_pc[found].newest_lost_time =
+					pkt->sent_time;
+			} else if (found != -1) {
+				if (ktime_before(
+					    pkt->sent_time,
+					    path_pc[found].oldest_lost_time))
+					path_pc[found].oldest_lost_time =
+						pkt->sent_time;
+				if (ktime_after(pkt->sent_time,
+						path_pc[found].newest_lost_time))
+					path_pc[found].newest_lost_time =
+						pkt->sent_time;
+			}
 		}
 		spin_unlock_irqrestore(&pn_space->lock, flags);
 	}
 
-	if (oldest_lost_time == 0 || newest_lost_time == 0) {
+	/* Evaluate persistent congestion for each path */
+	for (j = 0; j < nr_paths; j++) {
+		struct tquic_path *path;
+		u32 pto;
+		ktime_t duration;
+
+		if (path_pc[j].oldest_lost_time == 0 ||
+		    path_pc[j].newest_lost_time == 0)
+			continue;
+
+		path = tquic_path_lookup(conn, path_pc[j].path_id);
+		if (!path)
+			continue;
+
+		/* Need RTT sample for persistent congestion check */
+		if (path->rtt.samples == 0) {
+			tquic_path_put(path);
+			continue;
+		}
+
+		pto = tquic_rtt_pto(&path->rtt);
+		duration = ktime_sub(path_pc[j].newest_lost_time,
+				     path_pc[j].oldest_lost_time);
+
+		/* 3 * PTO in milliseconds converted to nanoseconds */
+		if (ktime_to_ms(duration) > (u64)pto * 3) {
+			struct tquic_persistent_cong_info pc_info;
+
+			memset(&pc_info, 0, sizeof(pc_info));
+			pc_info.min_cwnd = 2 * path->mtu;
+			pc_info.max_datagram_size = path->mtu;
+			pc_info.earliest_send_time =
+				path_pc[j].oldest_lost_time;
+			pc_info.latest_send_time = path_pc[j].newest_lost_time;
+			pc_info.duration_us = ktime_to_us(duration);
+
+			path->cc.cwnd = pc_info.min_cwnd;
+			path->cc.bytes_in_flight = 0;
+
+			/* Signal persistent congestion to CC algorithm */
+			tquic_cong_on_persistent_congestion(path, &pc_info);
+			pc_detected = true;
+		}
 		tquic_path_put(path);
-		return false;
 	}
 
-	/*
-	 * RFC 9002 Section 7.6.2:
-	 * If the time between the oldest and newest lost packets spans
-	 * more than the persistent congestion period, declare persistent
-	 * congestion.
-	 */
-	duration = ktime_sub(newest_lost_time, oldest_lost_time);
-
-	/* 3 * PTO in milliseconds converted to nanoseconds */
-	if (ktime_to_ms(duration) > (u64)pto * 3) {
-		struct tquic_persistent_cong_info pc_info;
-
-		/*
-		 * Build persistent congestion info for the CC algorithm.
-		 * Per RFC 9002 Section 7.6.2: reset cwnd to minimum
-		 * (2 * max_datagram_size).
-		 */
-		memset(&pc_info, 0, sizeof(pc_info));
-		pc_info.min_cwnd = 2 * path->mtu;
-		pc_info.max_datagram_size = path->mtu;
-		pc_info.earliest_send_time = oldest_lost_time;
-		pc_info.latest_send_time = newest_lost_time;
-		pc_info.duration_us = ktime_to_us(duration);
-
-		path->cc.cwnd = pc_info.min_cwnd;
-		path->cc.bytes_in_flight = 0;
-
-		/* Signal persistent congestion to CC algorithm */
-		tquic_cong_on_persistent_congestion(path, &pc_info);
-
-		tquic_path_put(path);
-		return true;
-	}
-
-	tquic_path_put(path);
-	return false;
+#undef LOSS_MAX_PATHS
+	return pc_detected;
 }
 
 /**
