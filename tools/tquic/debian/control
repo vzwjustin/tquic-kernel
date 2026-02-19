@@ -2,7 +2,7 @@ Source: tquicd
 Section: net
 Priority: optional
 Maintainer: Linux Foundation <linux@linuxfoundation.org>
-Build-Depends: debhelper-compat (= 13), golang-1.22-go
+Build-Depends: debhelper-compat (= 13), golang-1.22-go, gcc, libc6-dev, linux-libc-dev
 Standards-Version: 4.6.0
 
 Package: tquicd
