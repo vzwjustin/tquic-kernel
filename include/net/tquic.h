@@ -1748,6 +1748,12 @@ int tquic_mp_register_scheduler(struct tquic_mp_sched_ops *sched);
 void tquic_mp_unregister_scheduler(struct tquic_mp_sched_ops *sched);
 struct tquic_mp_sched_ops *tquic_mp_sched_find(const char *name);
 
+/* Multipath scheduler per-connection lifecycle API */
+int tquic_mp_sched_init_conn(struct tquic_connection *conn, const char *name);
+void tquic_mp_sched_release_conn(struct tquic_connection *conn);
+int tquic_mp_sched_get_path(struct tquic_connection *conn,
+			    struct tquic_sched_path_result *result, u32 flags);
+
 /* Multipath scheduler notification API */
 void tquic_mp_sched_notify_sent(struct tquic_connection *conn,
 				struct tquic_path *path, u32 sent_bytes);

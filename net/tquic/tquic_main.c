@@ -191,6 +191,11 @@ void tquic_conn_destroy(struct tquic_connection *conn)
 	cancel_work_sync(&conn->rx_work);
 	cancel_work_sync(&conn->close_work);
 
+	/* Release user-configured multipath scheduler (does its own
+	 * synchronize_rcu to drain in-flight get_path callbacks).
+	 */
+	tquic_mp_sched_release_conn(conn);
+
 	/*
 	 * Phase 1: unlink all paths from the RCU list and collect them.
 	 * Do NOT call synchronize_rcu() here — we batch all removals so a

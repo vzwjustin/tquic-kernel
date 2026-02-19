@@ -647,6 +647,19 @@ int tquic_connect(struct sock *sk, tquic_sockaddr_t *uaddr, int addr_len)
 	if (conn->timer_state)
 		tquic_timer_set_idle(conn->timer_state);
 
+	/* Apply user-requested multipath scheduler (set via setsockopt before
+	 * connect).  -ENOENT means the name exists only in the stream-scheduler
+	 * list and is not yet wired into path selection; treat as non-fatal.
+	 */
+	if (tsk->requested_scheduler[0]) {
+		int sched_ret = tquic_mp_sched_init_conn(conn,
+						tsk->requested_scheduler);
+
+		if (sched_ret && sched_ret != -ENOENT)
+			tquic_warn("mp sched '%s' init failed: %d\n",
+				   tsk->requested_scheduler, sched_ret);
+	}
+
 	/* Initialize path manager after connection established */
 	ret = tquic_pm_conn_init(conn);
 	if (ret < 0) {

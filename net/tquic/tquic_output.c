@@ -1394,6 +1394,20 @@ struct tquic_path *tquic_select_path(struct tquic_connection *conn,
 	}
 
 	/*
+	 * User-configured multipath scheduler (via setsockopt TQUIC_SCHEDULER)
+	 * takes precedence over the default bond algorithm.  The mp scheduler
+	 * does its own locking (rcu_read_lock + list_for_each_entry_rcu), so
+	 * it must be called before we take paths_lock.
+	 */
+	if (rcu_access_pointer(conn->mp_sched_ops)) {
+		struct tquic_sched_path_result result = {};
+
+		if (!tquic_mp_sched_get_path(conn, &result, 0) &&
+		    result.primary)
+			return result.primary;
+	}
+
+	/*
 	 * Slow path: multipath scheduler needs conn->paths_lock to protect
 	 * path list iteration (paths can be added/removed concurrently).
 	 */

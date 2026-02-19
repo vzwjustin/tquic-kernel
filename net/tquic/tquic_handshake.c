@@ -2404,6 +2404,19 @@ static void tquic_server_handshake_done(void *data, int status,
 		/* Initialize path manager for server-side connection */
 		tquic_pm_conn_init(conn);
 
+		/* Apply the scheduler inherited from the listener socket.
+		 * -ENOENT is non-fatal (name may be from stream-scheduler list).
+		 */
+		if (child_tsk->requested_scheduler[0]) {
+			int sched_ret = tquic_mp_sched_init_conn(conn,
+						child_tsk->requested_scheduler);
+
+			if (sched_ret && sched_ret != -ENOENT)
+				tquic_warn("mp sched '%s' init failed: %d\n",
+					   child_tsk->requested_scheduler,
+					   sched_ret);
+		}
+
 		/* Start idle timeout now that the server connection is
 		 * established. Mirrors the identical call in the IPv4 and
 		 * IPv6 client-side connect paths.
