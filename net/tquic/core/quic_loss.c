@@ -1209,6 +1209,9 @@ static int tquic_loss_get_pto_time_space(struct tquic_connection *conn)
 		for (i = TQUIC_PN_SPACE_INITIAL; i <= TQUIC_PN_SPACE_HANDSHAKE;
 		     i++) {
 			struct tquic_pn_space *pn_space = &conn->pn_spaces[i];
+			struct tquic_path *space_path;
+			struct tquic_sent_packet *last_pkt;
+			unsigned long flags;
 			ktime_t t;
 
 			if (pn_space->keys_discarded)
@@ -1218,8 +1221,33 @@ static int tquic_loss_get_pto_time_space(struct tquic_connection *conn)
 				    pn_space))
 				continue;
 
-			pto = tquic_rtt_pto_for_space(
-				&path->rtt, i, conn->handshake_confirmed);
+			/* Use the path of the most recently sent packet in this space */
+			space_path =
+				tquic_loss_active_path_get(conn); /* fallback */
+			spin_lock_irqsave(&pn_space->lock, flags);
+			last_pkt = list_last_entry_or_null(
+				&pn_space->sent_list, struct tquic_sent_packet,
+				list);
+			if (last_pkt) {
+				struct tquic_path *pkt_path = tquic_path_lookup(
+					conn, last_pkt->path_id);
+				if (pkt_path) {
+					if (space_path)
+						tquic_path_put(space_path);
+					space_path = pkt_path;
+				}
+			}
+			spin_unlock_irqrestore(&pn_space->lock, flags);
+
+			if (space_path) {
+				pto = tquic_rtt_pto_for_space(
+					&space_path->rtt, i,
+					conn->handshake_confirmed);
+				tquic_path_put(space_path);
+			} else {
+				pto = 1000; /* Fallback 1s */
+			}
+
 			t = ktime_add_ms(pn_space->last_ack_time, pto);
 			if (ktime_before(t, earliest_time)) {
 				earliest_time = t;
@@ -1328,6 +1356,27 @@ void tquic_set_loss_detection_timer(struct tquic_connection *conn)
 	 * The timer is set for PTO * (2 ^ pto_count)
 	 * max_ack_delay only included for Application Data with confirmed HS.
 	 */
+	/* Use the path of the last sent packet in the pto_space */
+	if (pto_space >= 0 && pto_space < TQUIC_PN_SPACE_COUNT &&
+	    conn->pn_spaces) {
+		struct tquic_pn_space *pn_space = &conn->pn_spaces[pto_space];
+		struct tquic_sent_packet *last_pkt;
+		unsigned long flags;
+
+		spin_lock_irqsave(&pn_space->lock, flags);
+		last_pkt = list_last_entry_or_null(
+			&pn_space->sent_list, struct tquic_sent_packet, list);
+		if (last_pkt) {
+			struct tquic_path *pkt_path =
+				tquic_path_lookup(conn, last_pkt->path_id);
+			if (pkt_path) {
+				tquic_path_put(path);
+				path = pkt_path;
+			}
+		}
+		spin_unlock_irqrestore(&pn_space->lock, flags);
+	}
+
 	pto = tquic_rtt_pto_for_space(&path->rtt, (u8)pto_space,
 				      conn->handshake_confirmed);
 	/* Cap exponential backoff to prevent shift overflow and bound PTO */
