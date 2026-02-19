@@ -122,6 +122,8 @@ Userspace QUIC implementations pay a heavy cost crossing the kernel boundary on 
 | 1MB file transfer with integrity verification | Done |
 | Loss detection & retransmission (RFC 9002) | Done |
 | Delayed ACK timer (RFC 9000 Section 13.2.1) | Done |
+| Live VPS functional test (16/18 checks) | Done |
+| setsockopt string options (TQUIC_SCHEDULER/CONGESTION) | Fixed |
 | Multi-megabyte transfers & throughput optimization | Planned |
 | Interop testing (quiche, msquic, ngtcp2) | Planned |
 
@@ -173,6 +175,24 @@ Supported kernels: **Linux 6.x** (tested on 6.12). See [Quick Start Guide](docs/
 
 ```bash
 ./tools/testing/kunit/kunit.py run --kunitconfig=net/tquic/test/.kunitconfig
+```
+
+### Live Functional Test Results (2026-02-19, kernel 6.19.0-tquic-d43af692)
+
+Tested on a DigitalOcean VPS running the TQUIC kernel. Results after fixing a setsockopt bug where `TQUIC_SCHEDULER`/`TQUIC_CONGESTION` string options were blocked by the integer-only optlen guard (`sizeof(int)`):
+
+```
+[Socket Creation]     PASS: AF_INET SOCK_STREAM IPPROTO_TQUIC
+                      PASS: AF_INET6 SOCK_STREAM IPPROTO_TQUIC
+[Bind + Listen]       PASS: bind(lo:14560)  PASS: listen(5)
+[Socket Options]      PASS: getsockopt(TQUIC_SCHEDULER) = minrtt
+                      PASS: setsockopt(TQUIC_SCHEDULER, minrtt/weighted/blest/ecf)
+                      PASS: getsockopt(TQUIC_CONGESTION)
+[/proc Interfaces]    PASS: /proc/net/tquic, /proc/net/tquic_stat, /proc/net/tquic_errors
+[sysctl]              PASS: scheduler=aggregate, max_paths=16
+[Stress]              PASS: 64 concurrent TQUIC sockets
+
+Result: 16 passed, 2 failed (aggregate mp-scheduler alias, probe_interval sysctl)
 ```
 
 ## Author
