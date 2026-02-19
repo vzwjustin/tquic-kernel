@@ -27,6 +27,9 @@
 /* Maximum PTO probes before declaring connection dead */
 #define TQUIC_MAX_PTO_COUNT 6
 
+/* Maximum paths tracked for per-path loss/congestion attribution */
+#define LOSS_MAX_PATHS 8
+
 /* Forward declarations */
 void tquic_loss_detection_detect_lost(struct tquic_connection *conn,
 				      u8 pn_space_idx);
@@ -437,6 +440,7 @@ tquic_conn_has_ack_eliciting_in_flight(struct tquic_connection *conn)
  */
 int tquic_loss_detection_init(struct tquic_connection *conn)
 {
+	struct tquic_path *path;
 	int i;
 
 	if (!conn)
@@ -445,13 +449,10 @@ int tquic_loss_detection_init(struct tquic_connection *conn)
 	tquic_dbg("tquic_loss_detection_init: initializing loss detection\n");
 
 	/* Initialize RTT on the active path */
-	{
-		struct tquic_path *path = tquic_loss_active_path_get(conn);
-
-		if (path) {
-			tquic_rtt_init(&path->rtt);
-			tquic_path_put(path);
-		}
+	path = tquic_loss_active_path_get(conn);
+	if (path) {
+		tquic_rtt_init(&path->rtt);
+		tquic_path_put(path);
 	}
 
 	/* Initialize loss detection variables directly on connection */
@@ -649,13 +650,15 @@ void tquic_loss_detection_on_ack_received(struct tquic_connection *conn,
 					  struct tquic_path *recv_path)
 {
 	struct tquic_pn_space *pn_space;
-	struct tquic_path *path;
+	struct tquic_path *path = NULL;
+	struct tquic_path *ecn_path;
 	struct tquic_sent_packet *pkt, *tmp;
 	struct tquic_sent_packet *newly_acked = NULL;
 	ktime_t largest_acked_sent_time = 0;
 	u64 acked_bytes = 0;
 	bool includes_ack_eliciting = false;
 	bool largest_acked_newly_acked = false;
+	bool ecn_path_owned = false;
 	unsigned long flags;
 	u64 ack_delay_us;
 	u64 latest_rtt;
@@ -878,26 +881,20 @@ void tquic_loss_detection_on_ack_received(struct tquic_connection *conn,
 	 * Fall back to active path for legacy callers that don't provide
 	 * recv_path.
 	 */
-	{
-		struct tquic_path *ecn_path = recv_path;
-		bool ecn_path_owned = false;
-
-		if (!ecn_path) {
-			ecn_path = tquic_loss_active_path_get(conn);
-			ecn_path_owned = true;
-		}
-		if (ecn_path &&
-		    (ack->ecn.ect0 || ack->ecn.ect1 || ack->ecn.ce)) {
-			int ce_count = tquic_ecn_validate_ack(ecn_path, ack);
-
-			if (ce_count > 0) {
-				/* New CE marks — trigger congestion response */
-				tquic_ecn_process_ce(conn, ecn_path, ce_count);
-			}
-		}
-		if (ecn_path_owned && ecn_path)
-			tquic_path_put(ecn_path);
+	ecn_path = recv_path;
+	ecn_path_owned = false;
+	if (!ecn_path) {
+		ecn_path = tquic_loss_active_path_get(conn);
+		ecn_path_owned = true;
 	}
+	if (ecn_path && (ack->ecn.ect0 || ack->ecn.ect1 || ack->ecn.ce)) {
+		int ce_count = tquic_ecn_validate_ack(ecn_path, ack);
+
+		if (ce_count > 0)
+			tquic_ecn_process_ce(conn, ecn_path, ce_count);
+	}
+	if (ecn_path_owned && ecn_path)
+		tquic_path_put(ecn_path);
 
 	/* Reset PTO count since we got a valid ACK */
 	if (includes_ack_eliciting)
@@ -958,7 +955,6 @@ void tquic_loss_detection_detect_lost(struct tquic_connection *conn,
 	 * so we can issue per-path CC events (RFC 9002 Section 7).
 	 * Use a small inline table — multipath rarely exceeds 4 paths.
 	 */
-#define LOSS_MAX_PATHS 8
 	struct {
 		u32 path_id;
 		u64 lost_bytes;
@@ -1139,7 +1135,6 @@ void tquic_loss_detection_detect_lost(struct tquic_connection *conn,
 out_put_path:
 	if (path)
 		tquic_path_put(path);
-#undef LOSS_MAX_PATHS
 }
 
 /**
@@ -1379,15 +1374,11 @@ void tquic_set_loss_detection_timer(struct tquic_connection *conn)
 
 	pto = tquic_rtt_pto_for_space(&path->rtt, (u8)pto_space,
 				      conn->handshake_confirmed);
-	/* Cap exponential backoff to prevent shift overflow and bound PTO */
-	{
-		u8 shift = min_t(u8, conn->pto_count, 30);
 
-		pto <<= shift;
-		/* Cap maximum PTO to 60 seconds (60000 ms) */
-		if (pto > 60000)
-			pto = 60000;
-	}
+	/* Cap exponential backoff to prevent shift overflow and bound PTO */
+	pto <<= min_t(u8, conn->pto_count, 30);
+	if (pto > 60000)
+		pto = 60000;
 
 	if (conn->time_of_last_ack_eliciting)
 		timeout = ktime_add_ms(conn->time_of_last_ack_eliciting, pto);
@@ -1879,8 +1870,6 @@ bool tquic_loss_check_persistent_congestion(struct tquic_connection *conn)
 {
 	int i, j;
 	bool pc_detected = false;
-
-#define LOSS_MAX_PATHS 8
 	struct {
 		u32 path_id;
 		ktime_t oldest_lost_time;
@@ -1981,7 +1970,6 @@ bool tquic_loss_check_persistent_congestion(struct tquic_connection *conn)
 		tquic_path_put(path);
 	}
 
-#undef LOSS_MAX_PATHS
 	return pc_detected;
 }
 
