@@ -237,6 +237,22 @@ void tquic_destroy_sock(struct sock *sk)
 	if (dstream)
 		tquic_stream_put(dstream);
 	if (conn) {
+		/*
+		 * T-1 FIX: Force connection to CLOSED before releasing the
+		 * reference. Without this, timers and work items on
+		 * CONNECTED/CONNECTING connections keep rescheduling after
+		 * the socket is destroyed, creating zombie connections that
+		 * fire probe timers at ~500 Hz indefinitely (observed:
+		 * 1000 workqueue callbacks/sec from just 2 zombies).
+		 *
+		 * tquic_conn_set_state(CLOSED) cancels all pending work,
+		 * wakes stream waiters, and sets the state flag that timer
+		 * callbacks check before re-arming. Already-closed
+		 * connections return -EINVAL harmlessly.
+		 */
+		tquic_conn_set_state(conn, TQUIC_CONN_CLOSED,
+				     TQUIC_REASON_APPLICATION);
+
 		if (conn->scheduler &&
 		    test_bit(TQUIC_F_BONDING_ENABLED, &conn->flags)) {
 			tquic_bond_cleanup(conn->scheduler);
