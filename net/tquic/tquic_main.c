@@ -82,7 +82,7 @@ extern struct kmem_cache *tquic_path_cache;
  * Size: 2048 bytes covers all standard QUIC packets (MTU <= 1500).
  * Packets exceeding this size fall back to kmalloc.
  */
-#define TQUIC_RX_BUF_SIZE	2048
+#define TQUIC_RX_BUF_SIZE 2048
 struct kmem_cache *tquic_rx_buf_cache;
 EXPORT_SYMBOL_GPL(tquic_rx_buf_cache);
 
@@ -107,8 +107,8 @@ MODULE_PARM_DESC(scheduler, "Default packet scheduler for WAN bonding");
 
 /* Default congestion control */
 static char tquic_default_cong[TQUIC_MAX_CONG_NAME] = "cubic";
-module_param_string(congestion, tquic_default_cong,
-		    sizeof(tquic_default_cong), 0600);
+module_param_string(congestion, tquic_default_cong, sizeof(tquic_default_cong),
+		    0600);
 MODULE_PARM_DESC(congestion, "Default congestion control algorithm");
 
 /* Default bonding mode */
@@ -176,7 +176,8 @@ void tquic_conn_destroy(struct tquic_connection *conn)
 	}
 
 	/* Remove from global table */
-	rhashtable_remove_fast(&tquic_conn_table, &conn->node, tquic_conn_params);
+	rhashtable_remove_fast(&tquic_conn_table, &conn->node,
+			       tquic_conn_params);
 
 	/*
 	 * Free timer state (cancels pacing hrtimer + ts->timer_work).
@@ -227,7 +228,8 @@ void tquic_conn_destroy(struct tquic_connection *conn)
 	 */
 	spin_lock_bh(&conn->lock);
 	while ((node = rb_first(&conn->streams))) {
-		struct tquic_stream *stream = rb_entry(node, struct tquic_stream, node);
+		struct tquic_stream *stream =
+			rb_entry(node, struct tquic_stream, node);
 		struct sk_buff *skb;
 		u64 queued = 0;
 
@@ -347,8 +349,8 @@ static int tquic_conn_alloc_path_id_locked(struct tquic_connection *conn)
 	return -ENOSPC;
 }
 
-int tquic_conn_add_path(struct tquic_connection *conn,
-			struct sockaddr *local, struct sockaddr *remote)
+int tquic_conn_add_path(struct tquic_connection *conn, struct sockaddr *local,
+			struct sockaddr *remote)
 {
 	struct tquic_path *path;
 	int path_id;
@@ -382,8 +384,9 @@ int tquic_conn_add_path(struct tquic_connection *conn,
 
 			fl4.daddr = sin->sin_addr.s_addr;
 			fl4.flowi4_proto = IPPROTO_UDP;
-			rt = ip_route_output_key(conn->sk ?
-					sock_net(conn->sk) : &init_net, &fl4);
+			rt = ip_route_output_key(conn->sk ? sock_net(conn->sk) :
+							    &init_net,
+						 &fl4);
 			if (!IS_ERR(rt)) {
 				pmtu = dst_mtu(&rt->dst);
 				ip_rt_put(rt);
@@ -397,7 +400,7 @@ int tquic_conn_add_path(struct tquic_connection *conn,
 			pmtu = 1200;
 		path->mtu = pmtu;
 	}
-	path->priority = 128;  /* Default middle priority */
+	path->priority = 128; /* Default middle priority */
 	path->weight = 1;
 
 	/*
@@ -485,9 +488,10 @@ int tquic_conn_add_path(struct tquic_connection *conn,
 	 */
 	if (path->path_id != 0) {
 		if (tquic_path_start_validation(conn, path) < 0)
-			tquic_conn_warn(conn,
-					"failed to start validation for path %u\n",
-					path->path_id);
+			tquic_conn_warn(
+				conn,
+				"failed to start validation for path %u\n",
+				path->path_id);
 	} else {
 		path->state = TQUIC_PATH_ACTIVE;
 
@@ -522,18 +526,17 @@ int tquic_conn_remove_path(struct tquic_connection *conn, u32 path_id)
 				return -EINVAL;
 			}
 
-				list_del_rcu(&path->list);
-				conn->num_paths--;
+			list_del_rcu(&path->list);
+			conn->num_paths--;
 
 			/* Update active path if needed */
 			if (rcu_access_pointer(conn->active_path) == path) {
 				struct tquic_path *new_active;
 
-				new_active =
-					list_first_entry_or_null(&conn->paths,
-								 struct tquic_path,
-								 list);
-				rcu_assign_pointer(conn->active_path, new_active);
+				new_active = list_first_entry_or_null(
+					&conn->paths, struct tquic_path, list);
+				rcu_assign_pointer(conn->active_path,
+						   new_active);
 			}
 
 			found = true;
@@ -564,7 +567,8 @@ int tquic_conn_remove_path(struct tquic_connection *conn, u32 path_id)
 }
 EXPORT_SYMBOL_GPL(tquic_conn_remove_path);
 
-struct tquic_path *tquic_conn_get_path(struct tquic_connection *conn, u32 path_id)
+struct tquic_path *tquic_conn_get_path(struct tquic_connection *conn,
+				       u32 path_id)
 {
 	struct tquic_path *path;
 
@@ -583,7 +587,8 @@ struct tquic_path *tquic_conn_get_path(struct tquic_connection *conn, u32 path_i
 }
 EXPORT_SYMBOL_GPL(tquic_conn_get_path);
 
-void tquic_conn_migrate(struct tquic_connection *conn, struct tquic_path *new_path)
+void tquic_conn_migrate(struct tquic_connection *conn,
+			struct tquic_path *new_path)
 {
 	bool migrated = false;
 
@@ -599,7 +604,8 @@ void tquic_conn_migrate(struct tquic_connection *conn, struct tquic_path *new_pa
 		spin_lock_bh(&conn->lock);
 		conn->stats.path_migrations++;
 		spin_unlock_bh(&conn->lock);
-		tquic_conn_info(conn, "migrated to path %u\n", new_path->path_id);
+		tquic_conn_info(conn, "migrated to path %u\n",
+				new_path->path_id);
 	}
 }
 EXPORT_SYMBOL_GPL(tquic_conn_migrate);
@@ -681,16 +687,16 @@ int tquic_pm_conn_init(struct tquic_connection *conn)
 	 * namespaces (the "known issue" from Round 11).
 	 */
 
-	/* For kernel PM with auto_discover, trigger initial discovery
-	 * This discovers paths for already-up interfaces with default routes
+	/*
+	 * Call PM-type-specific connection initialization callback if defined.
+	 * For kernel PM with auto_discover, this triggers the initial
+	 * discovery sweep of already-up interfaces.
 	 */
-	if (pernet->pm_type == TQUIC_PM_TYPE_KERNEL &&
-	    pernet->auto_discover) {
-		/* Initial discovery happens via netdevice notifier
-		 * when interfaces are already up. The notifier was
-		 * registered in tquic_pm_kernel_init().
-		 */
-		tquic_dbg("kernel PM initialized with auto_discover\n");
+	if (ops->conn_init) {
+		int err = ops->conn_init(conn);
+		if (err)
+			tquic_warn("conn_init failed for PM type %u: %d\n",
+				   pernet->pm_type, err);
 	}
 
 	/*
@@ -702,8 +708,9 @@ int tquic_pm_conn_init(struct tquic_connection *conn)
 	 * affected; multicast events still flow via tquic_nl_path_event().
 	 */
 	if (tquic_nl_conn_register(net, (u64)conn->token) < 0)
-		tquic_warn("netlink shadow DB registration failed for conn %u\n",
-			   conn->token);
+		tquic_warn(
+			"netlink shadow DB registration failed for conn %u\n",
+			conn->token);
 
 	return 0;
 }
@@ -836,8 +843,7 @@ struct tquic_stream *tquic_stream_open(struct tquic_connection *conn, bool bidi)
 	spin_unlock_bh(&conn->lock);
 
 	if (conn->sk)
-		TQUIC_INC_STATS(sock_net(conn->sk),
-				TQUIC_MIB_STREAMSOPENED);
+		TQUIC_INC_STATS(sock_net(conn->sk), TQUIC_MIB_STREAMSOPENED);
 
 	return stream;
 }
@@ -875,8 +881,8 @@ tquic_stream_create_locked(struct tquic_connection *conn, u64 stream_id)
 	 * parameters, not what the peer advertised to us.
 	 * Caller already holds conn->lock — read directly.
 	 */
-	max_streams = bidi ? conn->local_params.initial_max_streams_bidi
-			   : conn->local_params.initial_max_streams_uni;
+	max_streams = bidi ? conn->local_params.initial_max_streams_bidi :
+			     conn->local_params.initial_max_streams_uni;
 
 	if (stream_seq >= max_streams)
 		return NULL;
@@ -955,8 +961,8 @@ void tquic_stream_close(struct tquic_stream *stream)
 	struct tquic_connection *conn;
 	bool removed = false;
 
-	tquic_dbg("tquic_stream_close: stream=%p id=%llu\n",
-		  stream, stream ? stream->id : 0);
+	tquic_dbg("tquic_stream_close: stream=%p id=%llu\n", stream,
+		  stream ? stream->id : 0);
 
 	if (!stream)
 		return;
@@ -1030,16 +1036,16 @@ int __ref tquic_init(void)
 
 	/* Create slab caches */
 	tquic_conn_cache = kmem_cache_create("tquic_connection",
-					     sizeof(struct tquic_connection),
-					     0, SLAB_HWCACHE_ALIGN, NULL);
+					     sizeof(struct tquic_connection), 0,
+					     SLAB_HWCACHE_ALIGN, NULL);
 	if (!tquic_conn_cache) {
 		err = -ENOMEM;
 		goto err_conn_cache;
 	}
 
 	tquic_stream_cache = kmem_cache_create("tquic_stream",
-					       sizeof(struct tquic_stream),
-					       0, SLAB_HWCACHE_ALIGN, NULL);
+					       sizeof(struct tquic_stream), 0,
+					       SLAB_HWCACHE_ALIGN, NULL);
 	if (!tquic_stream_cache) {
 		err = -ENOMEM;
 		goto err_stream_cache;
@@ -1047,9 +1053,8 @@ int __ref tquic_init(void)
 
 	/* tquic_path_cache created by tquic_path_init_module() */
 
-	tquic_rx_buf_cache = kmem_cache_create("tquic_rx_buf",
-					       TQUIC_RX_BUF_SIZE,
-					       0, SLAB_HWCACHE_ALIGN, NULL);
+	tquic_rx_buf_cache = kmem_cache_create(
+		"tquic_rx_buf", TQUIC_RX_BUF_SIZE, 0, SLAB_HWCACHE_ALIGN, NULL);
 	if (!tquic_rx_buf_cache) {
 		err = -ENOMEM;
 		goto err_rx_buf_cache;
@@ -1343,7 +1348,8 @@ int __ref tquic_init(void)
 
 	tquic_info("TQUIC WAN bonding subsystem initialized\n");
 	tquic_info("default bond mode: %d, scheduler: %s, congestion: %s\n",
-		   tquic_default_bond_mode, tquic_default_scheduler, tquic_default_cong);
+		   tquic_default_bond_mode, tquic_default_scheduler,
+		   tquic_default_cong);
 
 	return 0;
 

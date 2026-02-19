@@ -61,6 +61,9 @@ struct tquic_pm_ops {
 	int (*init)(struct net *net);
 	void (*release)(struct net *net);
 
+	/* Connection lifecycle */
+	int (*conn_init)(struct tquic_connection *conn);
+
 	/* Path management operations */
 	int (*add_path)(struct tquic_connection *conn, struct sockaddr *local,
 			struct sockaddr *remote);

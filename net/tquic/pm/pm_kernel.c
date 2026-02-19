@@ -358,8 +358,8 @@ static int tquic_pm_kernel_netdev_event(struct notifier_block *nb,
 			/* Then: discover new paths through this interface */
 			if (tquic_pm_kernel_should_add_path(dev, pernet)) {
 				list_for_each_entry(ref, &conn_refs, list)
-					tquic_pm_kernel_try_add_path(ref->conn, dev,
-							     pernet);
+					tquic_pm_kernel_try_add_path(
+						ref->conn, dev, pernet);
 			}
 
 			tquic_pm_kernel_release_conn_refs(&conn_refs);
@@ -372,10 +372,12 @@ static int tquic_pm_kernel_netdev_event(struct notifier_block *nb,
 			LIST_HEAD(conn_refs);
 			struct tquic_pm_kernel_conn_ref *ref;
 
-			tquic_pm_kernel_collect_conn_refs(tn, &conn_refs, false);
+			tquic_pm_kernel_collect_conn_refs(tn, &conn_refs,
+							  false);
 
 			list_for_each_entry(ref, &conn_refs, list)
-				tquic_pm_kernel_mark_unavailable(ref->conn, dev);
+				tquic_pm_kernel_mark_unavailable(ref->conn,
+								 dev);
 
 			tquic_pm_kernel_release_conn_refs(&conn_refs);
 		}
@@ -399,10 +401,12 @@ static int tquic_pm_kernel_netdev_event(struct notifier_block *nb,
 			LIST_HEAD(conn_refs);
 			struct tquic_pm_kernel_conn_ref *ref;
 
-			tquic_pm_kernel_collect_conn_refs(tn, &conn_refs, false);
+			tquic_pm_kernel_collect_conn_refs(tn, &conn_refs,
+							  false);
 
 			list_for_each_entry(ref, &conn_refs, list)
-				tquic_pm_kernel_mark_unavailable(ref->conn, dev);
+				tquic_pm_kernel_mark_unavailable(ref->conn,
+								 dev);
 
 			tquic_pm_kernel_release_conn_refs(&conn_refs);
 		}
@@ -501,11 +505,53 @@ static void tquic_pm_kernel_release(struct net *net)
 	pr_info("TQUIC PM kernel: Released for netns\n");
 }
 
+/**
+ * tquic_pm_kernel_conn_init - Initialize kernel PM for a specific connection
+ * @conn: Connection
+ *
+ * Scans all existing network interfaces in the connection's namespace.
+ * For any interface that is UP and has a default route, attempts to
+ * add a path. This complements the netdevice notifier which only catches
+ * future NETDEV_UP events.
+ */
+static int tquic_pm_kernel_conn_init(struct tquic_connection *conn)
+{
+	struct tquic_pm_pernet *pernet;
+	struct net_device *dev;
+	struct net *net;
+
+	if (!conn || !conn->sk)
+		return -EINVAL;
+
+	net = sock_net(conn->sk);
+	pernet = tquic_pm_get_pernet(net);
+	if (!pernet || !pernet->auto_discover)
+		return 0;
+
+	rtnl_lock();
+	for_each_netdev(net, dev) {
+		if (!(dev->flags & IFF_UP))
+			continue;
+
+		if (tquic_pm_kernel_should_add_path(dev, pernet)) {
+			/*
+			 * Ignore path addition errors during discovery sweep;
+			 * it might fail due to max_paths limit or no valid IPv4.
+			 */
+			tquic_pm_kernel_try_add_path(conn, dev, pernet);
+		}
+	}
+	rtnl_unlock();
+
+	return 0;
+}
+
 /* Kernel PM operations structure */
 static struct tquic_pm_ops kernel_pm_ops = {
 	.name = "kernel",
 	.init = tquic_pm_kernel_init,
 	.release = tquic_pm_kernel_release,
+	.conn_init = tquic_pm_kernel_conn_init,
 	.add_path = NULL, /* Auto-managed, not externally controlled */
 	.del_path = NULL, /* Auto-managed */
 	.path_event = tquic_pm_kernel_path_event,
