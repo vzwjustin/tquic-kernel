@@ -371,7 +371,7 @@ static struct tquic_path *tquic_find_path(struct tquic_connection *conn, u8 path
  *
  * Must be called with rcu_read_lock() held.
  */
-int tquic_count_active_paths(struct tquic_connection *conn)
+static int tquic_count_active_paths(struct tquic_connection *conn)
 {
 	struct tquic_path *path;
 	int count = 0;
@@ -2192,7 +2192,7 @@ EXPORT_SYMBOL_GPL(tquic_sched_get_failover_packet);
  * Note: This is for internal schedulers using tquic_path_selection.
  * The public API tquic_select_path() in tquic.h returns struct tquic_path *.
  */
-int tquic_int_select_path(struct tquic_connection *conn,
+static int tquic_int_select_path(struct tquic_connection *conn,
 				 struct tquic_path_selection *sel)
 {
 	int ret;
@@ -2253,13 +2253,6 @@ static void tquic_path_packet_sent(struct tquic_connection *conn, u8 path_id,
 		path->stats.last_send_time = tquic_get_time_us();
 		path->cc.bytes_in_flight += bytes;
 
-		/*
-		 * CF-252: Call scheduler notify directly without void*
-		 * casts that bypass type checking. The types are the
-		 * same (struct tquic_connection *, struct tquic_path *).
-		 */
-		tquic_mp_sched_notify_sent((void *)conn,
-						  (void *)path, bytes);
 	}
 
 	atomic64_inc(&conn->stats.total_packets);
@@ -2545,7 +2538,7 @@ EXPORT_SYMBOL_GPL(tquic_mp_sched_get_default);
  *
  * If name is NULL or empty, uses per-netns default.
  */
-int tquic_int_mp_sched_init_conn(struct tquic_connection *conn,
+static int tquic_int_mp_sched_init_conn(struct tquic_connection *conn,
 					const char *name)
 {
 	struct tquic_sched_internal *sched;
@@ -2649,7 +2642,7 @@ static void tquic_int_mp_sched_release_conn(struct tquic_connection *conn)
  * the public tquic_path type. Callers within the internal scheduler code
  * should cast back to tquic_int_path as needed.
  */
-int tquic_int_mp_sched_get_path(struct tquic_connection *conn,
+static int tquic_int_mp_sched_get_path(struct tquic_connection *conn,
 				       struct tquic_sched_path_result *result,
 				       u32 flags)
 {
