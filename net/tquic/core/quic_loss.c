@@ -30,10 +30,6 @@
 /* Maximum paths tracked for per-path loss/congestion attribution */
 #define LOSS_MAX_PATHS 8
 
-/* Forward declarations */
-void tquic_loss_detection_detect_lost(struct tquic_connection *conn,
-				      u8 pn_space_idx);
-
 /*
  * Helper to extract connection ID as u64 for tracing/debugging.
  * Uses first 8 bytes of connection ID.
@@ -122,6 +118,7 @@ void tquic_loss_cache_destroy(void)
 {
 	kmem_cache_destroy(tquic_sent_packet_cache);
 }
+EXPORT_SYMBOL_GPL(tquic_loss_cache_destroy);
 
 /**
  * tquic_sent_packet_alloc - Allocate a sent packet tracking structure
@@ -142,6 +139,7 @@ struct tquic_sent_packet *tquic_sent_packet_alloc(gfp_t gfp)
 
 	return pkt;
 }
+EXPORT_SYMBOL_GPL(tquic_sent_packet_alloc);
 
 /**
  * tquic_sent_packet_init - Initialize a sent packet with given values
@@ -169,6 +167,7 @@ void tquic_sent_packet_init(struct tquic_sent_packet *pkt, u64 pn, u32 bytes,
 	pkt->sent_time = ktime_get();
 	pkt->retransmitted = false;
 }
+EXPORT_SYMBOL_GPL(tquic_sent_packet_init);
 
 /**
  * tquic_sent_packet_free - Free a sent packet tracking structure
@@ -184,6 +183,7 @@ void tquic_sent_packet_free(struct tquic_sent_packet *pkt)
 
 	kmem_cache_free(tquic_sent_packet_cache, pkt);
 }
+EXPORT_SYMBOL_GPL(tquic_sent_packet_free);
 
 /**
  * tquic_rtt_init - Initialize RTT measurement state
@@ -194,7 +194,7 @@ void tquic_sent_packet_free(struct tquic_sent_packet *pkt)
  */
 static void tquic_rtt_init(struct tquic_rtt_state *rtt)
 {
-	tquic_dbg("tquic_rtt_init: setting initial srtt=%u us\n",
+	tquic_dbg("%s: setting initial srtt=%u us\n", __func__,
 		  TQUIC_INITIAL_RTT_US);
 	rtt->min_rtt = U64_MAX;
 	rtt->smoothed_rtt = TQUIC_INITIAL_RTT_US;
@@ -266,6 +266,7 @@ void tquic_rtt_update(struct tquic_rtt_state *rtt, u64 latest_rtt,
 
 	rtt->smoothed_rtt = (7 * rtt->smoothed_rtt + adjusted_rtt) / 8;
 }
+EXPORT_SYMBOL_GPL(tquic_rtt_update);
 
 /**
  * tquic_rtt_pto_for_space - Calculate PTO for a specific packet number space
@@ -331,6 +332,7 @@ u32 tquic_rtt_pto(struct tquic_rtt_state *rtt)
 {
 	return tquic_rtt_pto_for_space(rtt, TQUIC_PN_SPACE_APPLICATION, true);
 }
+EXPORT_SYMBOL_GPL(tquic_rtt_pto);
 
 /**
  * tquic_loss_time_threshold - Calculate time threshold for loss detection
@@ -446,7 +448,7 @@ int tquic_loss_detection_init(struct tquic_connection *conn)
 	if (!conn)
 		return -EINVAL;
 
-	tquic_dbg("tquic_loss_detection_init: initializing loss detection\n");
+	tquic_dbg("%s: initializing loss detection\n", __func__);
 
 	/* Initialize RTT on the active path */
 	path = tquic_loss_active_path_get(conn);
@@ -484,6 +486,7 @@ int tquic_loss_detection_init(struct tquic_connection *conn)
 
 	return 0;
 }
+EXPORT_SYMBOL_GPL(tquic_loss_detection_init);
 
 /**
  * tquic_loss_detection_on_packet_sent - Handle packet transmission
@@ -503,8 +506,7 @@ void tquic_loss_detection_on_packet_sent(struct tquic_connection *conn,
 	if (!conn || !pkt)
 		return;
 
-	tquic_dbg(
-		"tquic_loss_detection_on_packet_sent: pn=%llu space=%u bytes=%u\n",
+	tquic_dbg("%s: pn=%llu space=%u bytes=%u\n", __func__,
 		pkt->pn, pkt->pn_space, pkt->sent_bytes);
 
 	if (!conn->pn_spaces || pkt->pn_space >= TQUIC_PN_SPACE_COUNT)
@@ -543,6 +545,7 @@ void tquic_loss_detection_on_packet_sent(struct tquic_connection *conn,
 	if (path)
 		tquic_path_put(path);
 }
+EXPORT_SYMBOL_GPL(tquic_loss_detection_on_packet_sent);
 
 /**
  * tquic_loss_get_ack_delay_us - Get peer's ack_delay in microseconds
@@ -666,8 +669,7 @@ void tquic_loss_detection_on_ack_received(struct tquic_connection *conn,
 	if (!conn || !ack)
 		return;
 
-	tquic_dbg(
-		"tquic_loss_detection_on_ack_received: largest=%llu space=%u\n",
+	tquic_dbg("%s: largest=%llu space=%u\n", __func__,
 		ack->largest_acked, pn_space_idx);
 
 	if (pn_space_idx >= TQUIC_PN_SPACE_COUNT)
@@ -928,6 +930,7 @@ out_put_path:
 	if (path)
 		tquic_path_put(path);
 }
+EXPORT_SYMBOL_GPL(tquic_loss_detection_on_ack_received);
 
 /**
  * tquic_loss_detection_detect_lost - Detect and process lost packets
@@ -1136,6 +1139,7 @@ out_put_path:
 	if (path)
 		tquic_path_put(path);
 }
+EXPORT_SYMBOL_GPL(tquic_loss_detection_detect_lost);
 
 /**
  * tquic_loss_get_loss_time_space - Find packet number space with earliest loss time
@@ -1307,7 +1311,7 @@ void tquic_set_loss_detection_timer(struct tquic_connection *conn)
 		return;
 	}
 
-	tquic_dbg("tquic_set_loss_detection_timer: updating timer\n");
+	tquic_dbg("%s: updating timer\n", __func__);
 
 	path = tquic_loss_active_path_get(conn);
 	if (!path)
@@ -1396,6 +1400,7 @@ set_timer:
 out_put_path:
 	tquic_path_put(path);
 }
+EXPORT_SYMBOL_GPL(tquic_set_loss_detection_timer);
 
 /* PING frame type */
 #ifndef TQUIC_FRAME_PING
@@ -1446,15 +1451,13 @@ static void tquic_loss_send_probe(struct tquic_connection *conn,
 				}
 				conn->stats.retransmissions++;
 				return;
-			} else {
-				/* skb_clone failed - log and track the error */
-				tquic_conn_warn(
-					conn,
+			}
+			/* skb_clone failed - log and track the error */
+			tquic_conn_warn(conn,
 					"skb_clone failed probe retx pn=%llu\n",
 					pkt->pn);
-				spin_unlock_irqrestore(&pn_space->lock, flags);
-				return;
-			}
+			spin_unlock_irqrestore(&pn_space->lock, flags);
+			return;
 		}
 	}
 	spin_unlock_irqrestore(&pn_space->lock, flags);
@@ -1497,7 +1500,7 @@ void tquic_loss_detection_on_timeout(struct tquic_connection *conn)
 	    READ_ONCE(conn->state) == TQUIC_CONN_CLOSED)
 		return;
 
-	tquic_dbg("tquic_loss_detection_on_timeout: pto_count=%u\n",
+	tquic_dbg("%s: pto_count=%u\n", __func__,
 		  conn->pto_count);
 
 	/*
@@ -1580,6 +1583,7 @@ void tquic_loss_detection_on_timeout(struct tquic_connection *conn)
 	/* Reset timer */
 	tquic_set_loss_detection_timer(conn);
 }
+EXPORT_SYMBOL_GPL(tquic_loss_detection_on_timeout);
 
 /**
  * tquic_loss_on_packet_number_space_discarded - Handle discarding of a PN space
@@ -1654,6 +1658,7 @@ void tquic_loss_on_packet_number_space_discarded(struct tquic_connection *conn,
 	/* Update timer since we removed packets */
 	tquic_set_loss_detection_timer(conn);
 }
+EXPORT_SYMBOL_GPL(tquic_loss_on_packet_number_space_discarded);
 
 /**
  * tquic_loss_mark_packet_lost - Manually mark a packet as lost
@@ -1720,6 +1725,7 @@ void tquic_loss_mark_packet_lost(struct tquic_connection *conn, u8 pn_space_idx,
 
 	conn->stats.lost_packets++;
 }
+EXPORT_SYMBOL_GPL(tquic_loss_mark_packet_lost);
 
 /**
  * tquic_loss_get_bytes_in_flight - Get total bytes in flight
@@ -1753,6 +1759,7 @@ u64 tquic_loss_get_bytes_in_flight(struct tquic_connection *conn)
 
 	return bytes;
 }
+EXPORT_SYMBOL_GPL(tquic_loss_get_bytes_in_flight);
 
 /**
  * tquic_loss_get_oldest_unacked_time - Get send time of oldest unacked packet
@@ -1788,6 +1795,7 @@ ktime_t tquic_loss_get_oldest_unacked_time(struct tquic_connection *conn)
 
 	return oldest;
 }
+EXPORT_SYMBOL_GPL(tquic_loss_get_oldest_unacked_time);
 
 /**
  * tquic_loss_retransmit_unacked - Retransmit all unacked data
@@ -1855,6 +1863,7 @@ void tquic_loss_retransmit_unacked(struct tquic_connection *conn)
 	/* Schedule TX work to send retransmissions */
 	schedule_work(&conn->tx_work);
 }
+EXPORT_SYMBOL_GPL(tquic_loss_retransmit_unacked);
 
 /**
  * tquic_loss_check_persistent_congestion - Check for persistent congestion
@@ -1972,6 +1981,7 @@ bool tquic_loss_check_persistent_congestion(struct tquic_connection *conn)
 
 	return pc_detected;
 }
+EXPORT_SYMBOL_GPL(tquic_loss_check_persistent_congestion);
 
 /**
  * tquic_loss_cleanup_space - Clean up a packet number space
@@ -2018,6 +2028,7 @@ void tquic_loss_cleanup_space(struct tquic_connection *conn, u8 pn_space_idx)
 		tquic_sent_packet_free(pkt);
 	}
 }
+EXPORT_SYMBOL_GPL(tquic_loss_cleanup_space);
 
 /**
  * tquic_loss_cleanup - Clean up all loss detection state
@@ -2041,6 +2052,7 @@ void tquic_loss_cleanup(struct tquic_connection *conn)
 			tquic_loss_cleanup_space(conn, i);
 	}
 }
+EXPORT_SYMBOL_GPL(tquic_loss_cleanup);
 
 /**
  * tquic_loss_detection_cleanup - Alias for tquic_loss_cleanup
@@ -2052,30 +2064,6 @@ void tquic_loss_detection_cleanup(struct tquic_connection *conn)
 {
 	tquic_loss_cleanup(conn);
 }
-
-/*
- * Module exports
- */
-EXPORT_SYMBOL_GPL(tquic_loss_cache_destroy);
-EXPORT_SYMBOL_GPL(tquic_sent_packet_alloc);
-EXPORT_SYMBOL_GPL(tquic_sent_packet_free);
-EXPORT_SYMBOL_GPL(tquic_sent_packet_init);
-EXPORT_SYMBOL_GPL(tquic_rtt_update);
-EXPORT_SYMBOL_GPL(tquic_rtt_pto);
-EXPORT_SYMBOL_GPL(tquic_loss_detection_init);
-EXPORT_SYMBOL_GPL(tquic_loss_detection_on_packet_sent);
-EXPORT_SYMBOL_GPL(tquic_loss_detection_on_ack_received);
-EXPORT_SYMBOL_GPL(tquic_loss_detection_detect_lost);
-EXPORT_SYMBOL_GPL(tquic_set_loss_detection_timer);
-EXPORT_SYMBOL_GPL(tquic_loss_detection_on_timeout);
-EXPORT_SYMBOL_GPL(tquic_loss_on_packet_number_space_discarded);
-EXPORT_SYMBOL_GPL(tquic_loss_mark_packet_lost);
-EXPORT_SYMBOL_GPL(tquic_loss_get_bytes_in_flight);
-EXPORT_SYMBOL_GPL(tquic_loss_get_oldest_unacked_time);
-EXPORT_SYMBOL_GPL(tquic_loss_retransmit_unacked);
-EXPORT_SYMBOL_GPL(tquic_loss_check_persistent_congestion);
-EXPORT_SYMBOL_GPL(tquic_loss_cleanup_space);
-EXPORT_SYMBOL_GPL(tquic_loss_cleanup);
 EXPORT_SYMBOL_GPL(tquic_loss_detection_cleanup);
 
 /**

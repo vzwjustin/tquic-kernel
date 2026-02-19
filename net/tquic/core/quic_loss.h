@@ -32,6 +32,8 @@ void tquic_rtt_update(struct tquic_rtt_state *rtt, u64 latest_rtt,
 		      u64 ack_delay);
 
 /* Loss detection state machine */
+void tquic_loss_detection_detect_lost(struct tquic_connection *conn,
+				      u8 pn_space_idx);
 void tquic_loss_detection_on_packet_sent(struct tquic_connection *conn,
 					 struct tquic_sent_packet *pkt);
 void tquic_loss_detection_on_ack_received(struct tquic_connection *conn,
