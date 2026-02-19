@@ -119,6 +119,7 @@ tquic-y := \
 	core/priority.o \
 	bond/bonding.o \
 	bond/tquic_bonding.o \
+	bond/tquic_bpm.o \
 	bond/tquic_failover.o \
 	bond/tquic_reorder.o \
 	bond/cong_coupled.o \

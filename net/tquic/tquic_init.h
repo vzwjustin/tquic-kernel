@@ -55,6 +55,8 @@ int tquic_bonding_init_module(void);
 void tquic_bonding_exit_module(void);
 int tquic_path_init_module(void);
 void tquic_path_exit_module(void);
+int tquic_bpm_path_init_module(void);
+void tquic_bpm_path_exit_module(void);
 int coupled_cc_init_module(void);
 void coupled_cc_exit_module(void);
 

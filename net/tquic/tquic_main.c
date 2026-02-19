@@ -1245,6 +1245,10 @@ int __ref tquic_init(void)
 	if (err)
 		goto err_path_mgmt;
 
+	err = tquic_bpm_path_init_module();
+	if (err)
+		goto err_bpm;
+
 	err = coupled_cc_init_module();
 	if (err)
 		goto err_coupled_cc;
@@ -1380,6 +1384,8 @@ err_pm_nl:
 err_pm_types:
 	coupled_cc_exit_module();
 err_coupled_cc:
+	tquic_bpm_path_exit_module();
+err_bpm:
 	tquic_path_exit_module();
 err_path_mgmt:
 	tquic_bonding_exit_module();
@@ -1503,6 +1509,7 @@ void __exit tquic_exit(void)
 
 	/* Cleanup bonding subsystem */
 	coupled_cc_exit_module();
+	tquic_bpm_path_exit_module();
 	tquic_path_exit_module();
 	tquic_bonding_exit_module();
 
