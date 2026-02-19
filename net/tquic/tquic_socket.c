@@ -208,16 +208,40 @@ void tquic_destroy_sock(struct sock *sk)
 		tquic_unregister_listener(sk);
 
 	/*
-	 * T-2 FIX: Drain accept queue of server-side connections that were
-	 * never dequeued by accept() (e.g. server killed before accept()
-	 * returns).
+	 * Stop the listener worker BEFORE draining the accept queue.
 	 *
-	 * tquic_server_handshake() calls sock_hold(listener_sk) for each
-	 * child and stores listener_sk in child_conn->sk. accept() releases
-	 * that hold via sock_put(old_sk). Without this drain, those extra
-	 * sock_hold references keep the listener socket alive indefinitely
-	 * after the process dies, producing orphaned UNCONN sockets and
-	 * preventing rmmod.
+	 * listener_work (tquic_server_handshake) runs in a workqueue and
+	 * calls list_add_tail(&child_tsk->accept_list, &tsk->accept_queue).
+	 * If we drain accept_queue first and the worker is concurrently
+	 * running or pending, new children added after the drain are never
+	 * cleaned up: they hold a sock_hold on this listener indefinitely,
+	 * preventing rmmod and leaking child socket memory.
+	 *
+	 * Correct order:
+	 *   1. cancel_work_sync: wait for any in-progress handshake to
+	 *      finish, then prevent new ones from being scheduled
+	 *   2. skb_queue_purge: discard buffered packets that would have
+	 *      triggered further handshakes via schedule_work()
+	 *   3. udp_tunnel_sock_release: close the packet source so no
+	 *      new skbs can arrive
+	 * Only then is accept_queue quiescent and safe to drain.
+	 */
+	if (tsk->udp_sock) {
+		cancel_work_sync(&tsk->listener_work);
+		skb_queue_purge(&tsk->listener_queue);
+		udp_tunnel_sock_release(tsk->udp_sock);
+		tsk->udp_sock = NULL;
+	}
+
+	/*
+	 * Drain accept queue of server-side connections never dequeued by
+	 * accept() (e.g. server killed before accept() returns).
+	 *
+	 * Safe here: cancel_work_sync + skb_queue_purge above guarantee no
+	 * new children will be added.  tquic_server_handshake() calls
+	 * sock_hold(listener_sk) for each child; accept() releases that
+	 * hold via sock_put().  Without this drain, undequeued children
+	 * keep the listener refcount elevated, orphaning the socket.
 	 */
 	while (!list_empty(&tsk->accept_queue)) {
 		struct tquic_sock *child_tsk;
@@ -254,14 +278,6 @@ void tquic_destroy_sock(struct sock *sk)
 			 */
 			sock_put(sk);
 		}
-	}
-
-	/* Release the listener UDP tunnel socket and drain packet queue */
-	if (tsk->udp_sock) {
-		cancel_work_sync(&tsk->listener_work);
-		skb_queue_purge(&tsk->listener_queue);
-		udp_tunnel_sock_release(tsk->udp_sock);
-		tsk->udp_sock = NULL;
 	}
 
 	/* Clean up any in-progress handshake */

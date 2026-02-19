@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0-or-later
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * TQUIC - True QUIC with WAN Bonding
  *
@@ -656,7 +656,7 @@ void tquic_loss_detection_on_ack_received(struct tquic_connection *conn,
 	struct tquic_path *path = NULL;
 	struct tquic_path *ecn_path;
 	struct tquic_sent_packet *pkt, *tmp;
-	struct tquic_sent_packet *newly_acked = NULL;
+	LIST_HEAD(newly_acked_list);
 	ktime_t largest_acked_sent_time = 0;
 	u64 acked_bytes = 0;
 	bool includes_ack_eliciting = false;
@@ -735,10 +735,8 @@ void tquic_loss_detection_on_ack_received(struct tquic_connection *conn,
 			largest_acked_sent_time = pkt->sent_time;
 		}
 
-		/* Remove from sent list and prepare for cleanup */
-		list_del_init(&pkt->list);
-		pkt->list.next = (struct list_head *)newly_acked;
-		newly_acked = pkt;
+		/* Remove from sent list and collect for post-lock processing */
+		list_move_tail(&pkt->list, &newly_acked_list);
 
 		/* Update congestion control - use path-level CC API */
 		path = tquic_path_lookup(conn, pkt->path_id);
@@ -775,12 +773,9 @@ void tquic_loss_detection_on_ack_received(struct tquic_connection *conn,
 		struct tquic_failover_ctx *fc = tquic_bonding_get_failover(
 			(struct tquic_bonding_ctx *)conn->pm);
 		if (fc) {
-			struct tquic_sent_packet *_p = newly_acked;
-
-			while (_p) {
-				if (_p->in_flight)
-					tquic_failover_on_ack(fc, _p->pn);
-				_p = (struct tquic_sent_packet *)_p->list.next;
+			list_for_each_entry(pkt, &newly_acked_list, list) {
+				if (pkt->in_flight)
+					tquic_failover_on_ack(fc, pkt->pn);
 			}
 		}
 	}
@@ -792,14 +787,12 @@ void tquic_loss_detection_on_ack_received(struct tquic_connection *conn,
 	 */
 	if (largest_acked_newly_acked) {
 		/* Determine the path that the largest_acked packet was sent on */
-		struct tquic_sent_packet *_p;
 		u32 la_path_id = 0;
 		bool found_la = false;
 
-		for (_p = newly_acked; _p;
-		     _p = (struct tquic_sent_packet *)_p->list.next) {
-			if (_p->pn == ack->largest_acked) {
-				la_path_id = _p->path_id;
+		list_for_each_entry(pkt, &newly_acked_list, list) {
+			if (pkt->pn == ack->largest_acked) {
+				la_path_id = pkt->path_id;
 				found_la = true;
 				break;
 			}
@@ -920,10 +913,13 @@ void tquic_loss_detection_on_ack_received(struct tquic_connection *conn,
 					     ack->largest_acked);
 
 	/* Free newly acknowledged packets */
-	while (newly_acked) {
-		pkt = newly_acked;
-		newly_acked = (struct tquic_sent_packet *)pkt->list.next;
-		tquic_sent_packet_free(pkt);
+	{
+		struct tquic_sent_packet *_n;
+
+		list_for_each_entry_safe(pkt, _n, &newly_acked_list, list) {
+			list_del(&pkt->list);
+			tquic_sent_packet_free(pkt);
+		}
 	}
 
 out_put_path:
