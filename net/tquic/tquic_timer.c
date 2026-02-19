@@ -234,10 +234,10 @@ static u64 tquic_get_pto_duration(struct tquic_recovery_state *recovery,
 	 * measured values propagated from path->rtt via tquic_timer_update_rtt.
 	 */
 	if (recovery->has_rtt_sample) {
-		srtt   = recovery->smoothed_rtt;
+		srtt = recovery->smoothed_rtt;
 		rttvar = recovery->rtt_variance;
 	} else {
-		srtt   = TQUIC_INITIAL_RTT_US;
+		srtt = TQUIC_INITIAL_RTT_US;
 		rttvar = TQUIC_INITIAL_RTT_US / 2;
 	}
 
@@ -262,8 +262,9 @@ static u64 tquic_get_loss_time_threshold(struct tquic_recovery_state *recovery)
 	u64 rtt = max(recovery->latest_rtt, recovery->smoothed_rtt);
 	u64 threshold;
 
-	tquic_dbg("timer:get_loss_time_threshold: latest_rtt=%llu smoothed_rtt=%llu\n",
-		  recovery->latest_rtt, recovery->smoothed_rtt);
+	tquic_dbg(
+		"timer:get_loss_time_threshold: latest_rtt=%llu smoothed_rtt=%llu\n",
+		recovery->latest_rtt, recovery->smoothed_rtt);
 
 	/* 9/8 * max(latest_rtt, smoothed_rtt) */
 	threshold = rtt + rtt / TQUIC_TIME_THRESHOLD_DIVISOR;
@@ -782,8 +783,7 @@ static int tquic_detect_lost_packets(struct tquic_timer_state *ts, int pn_space)
 		 * 1. It's more than PACKET_THRESHOLD older than largest_acked, OR
 		 * 2. It was sent more than loss_delay ago
 		 */
-		if (pns->largest_acked >=
-			    pkt->pn + TQUIC_PACKET_THRESHOLD ||
+		if (pns->largest_acked >= pkt->pn + TQUIC_PACKET_THRESHOLD ||
 		    ktime_before(pkt->sent_time, lost_send_time)) {
 			pkt->state = TQUIC_PKT_LOST;
 			lost_count++;
@@ -809,21 +809,20 @@ static int tquic_detect_lost_packets(struct tquic_timer_state *ts, int pn_space)
 				}
 				pkt->in_flight = false;
 			}
-				spin_unlock_bh(&rs->lock);
+			spin_unlock_bh(&rs->lock);
 
-				/* Notify congestion controller of loss */
-				rcu_read_lock();
-				path = rcu_dereference(ts->conn->active_path);
-				if (path && !tquic_path_get(path))
-					path = NULL;
-				rcu_read_unlock();
-				if (path) {
-					tquic_cong_on_loss(path, pkt->sent_bytes);
-					tquic_path_put(path);
-				}
+			/* Notify congestion controller of loss */
+			rcu_read_lock();
+			path = rcu_dereference(ts->conn->active_path);
+			if (path && !tquic_path_get(path))
+				path = NULL;
+			rcu_read_unlock();
+			if (path) {
+				tquic_cong_on_loss(path, pkt->sent_bytes);
+				tquic_path_put(path);
+			}
 
-			tquic_dbg("timer:packet %llu declared lost\n",
-				  pkt->pn);
+			tquic_dbg("timer:packet %llu declared lost\n", pkt->pn);
 		}
 	}
 
@@ -842,8 +841,7 @@ static int tquic_detect_lost_packets(struct tquic_timer_state *ts, int pn_space)
 	spin_unlock_bh(&pns->lock);
 
 	if (lost_count > 0 && ts->conn && ts->conn->sk)
-		TQUIC_INC_STATS(sock_net(ts->conn->sk),
-				TQUIC_MIB_LOSSEVENTS);
+		TQUIC_INC_STATS(sock_net(ts->conn->sk), TQUIC_MIB_LOSSEVENTS);
 
 	return lost_count;
 }
@@ -859,7 +857,8 @@ void tquic_timer_update_loss_timer(struct tquic_timer_state *ts)
 	unsigned long expires, flags;
 	int i;
 
-	tquic_dbg("timer:update_loss_timer: scanning pn spaces for loss time\n");
+	tquic_dbg(
+		"timer:update_loss_timer: scanning pn spaces for loss time\n");
 
 	spin_lock_irqsave(&ts->lock, flags);
 	if (!ts->active) {
@@ -879,7 +878,8 @@ void tquic_timer_update_loss_timer(struct tquic_timer_state *ts)
 
 	if (earliest_loss == KTIME_MAX) {
 		del_timer(&ts->loss_timer);
-		tquic_dbg("timer:update_loss_timer: no pending loss, timer cancelled\n");
+		tquic_dbg(
+			"timer:update_loss_timer: no pending loss, timer cancelled\n");
 	} else {
 		s64 delay_us = ktime_us_delta(earliest_loss, ktime_get());
 
@@ -1033,7 +1033,8 @@ void tquic_timer_update_pto(struct tquic_timer_state *ts)
 	if (earliest_timeout == KTIME_MAX) {
 		/* No ack-eliciting packets in flight */
 		del_timer(&ts->pto_timer);
-		tquic_dbg("timer:update_pto: no ack-eliciting in flight, timer cancelled\n");
+		tquic_dbg(
+			"timer:update_pto: no ack-eliciting in flight, timer cancelled\n");
 	} else {
 		s64 delay_us = ktime_us_delta(earliest_timeout, now);
 
@@ -1042,8 +1043,7 @@ void tquic_timer_update_pto(struct tquic_timer_state *ts)
 
 		expires = jiffies + usecs_to_jiffies(delay_us);
 		mod_timer(&ts->pto_timer, expires);
-		tquic_dbg("timer:update_pto: armed, delay_us=%lld\n",
-			  delay_us);
+		tquic_dbg("timer:update_pto: armed, delay_us=%lld\n", delay_us);
 	}
 
 	spin_unlock_irqrestore(&ts->lock, flags);
@@ -1150,8 +1150,8 @@ void tquic_timer_start_drain(struct tquic_timer_state *ts)
 		/* Fall back to recovery-state PTO if no active paths */
 		if (max_pto_us == 0) {
 			spin_lock_bh(&rs->lock);
-			max_pto_us = tquic_get_pto_duration(rs,
-					TQUIC_PN_SPACE_APPLICATION);
+			max_pto_us = tquic_get_pto_duration(
+				rs, TQUIC_PN_SPACE_APPLICATION);
 			spin_unlock_bh(&rs->lock);
 		}
 
@@ -1367,7 +1367,8 @@ bool tquic_timer_can_send_paced(struct tquic_timer_state *ts)
 	spin_lock_irqsave(&ts->lock, flags);
 	if (!ts->active || ts->pacing_rate == 0) {
 		spin_unlock_irqrestore(&ts->lock, flags);
-		tquic_dbg("timer:can_send_paced: pacing inactive, allowing send\n");
+		tquic_dbg(
+			"timer:can_send_paced: pacing inactive, allowing send\n");
 		return true;
 	}
 
@@ -1560,9 +1561,8 @@ static void tquic_timer_work_fn(struct work_struct *work)
 		if (ack_path && tquic_path_get(ack_path)) {
 			rcu_read_unlock();
 			pns = &conn->pn_spaces[TQUIC_PN_SPACE_APPLICATION];
-			tquic_send_ack(conn, ack_path,
-				       pns->largest_recv_pn,
-				       0, pns->largest_recv_pn);
+			tquic_send_ack(conn, ack_path, pns->largest_recv_pn, 0,
+				       pns->largest_recv_pn);
 			tquic_path_put(ack_path);
 		} else {
 			rcu_read_unlock();
@@ -1751,7 +1751,7 @@ EXPORT_SYMBOL_GPL(tquic_timer_cancel_work);
  */
 int tquic_timer_on_packet_sent(struct tquic_timer_state *ts, int pn_space,
 			       u64 pkt_num, u32 bytes, bool ack_eliciting,
-			       bool in_flight, u32 frames)
+			       bool in_flight, u32 frames, u32 path_id)
 {
 	struct tquic_recovery_state *rs = ts->recovery;
 	struct tquic_pn_space *pns = &rs->pn_spaces[pn_space];
@@ -1763,6 +1763,7 @@ int tquic_timer_on_packet_sent(struct tquic_timer_state *ts, int pn_space,
 
 	pkt->pn = pkt_num;
 	pkt->pn_space = pn_space;
+	pkt->path_id = path_id;
 	pkt->sent_time = ktime_get();
 	pkt->sent_bytes = bytes;
 	pkt->ack_eliciting = ack_eliciting;
@@ -1880,9 +1881,9 @@ void tquic_timer_update_rtt(struct tquic_timer_state *ts, u64 smoothed_rtt,
 	rs = ts->recovery;
 
 	spin_lock_bh(&rs->lock);
-	rs->smoothed_rtt   = smoothed_rtt;
-	rs->rtt_variance   = rtt_variance;
-	rs->latest_rtt     = latest_rtt;
+	rs->smoothed_rtt = smoothed_rtt;
+	rs->rtt_variance = rtt_variance;
+	rs->latest_rtt = latest_rtt;
 	rs->has_rtt_sample = true;
 	spin_unlock_bh(&rs->lock);
 }

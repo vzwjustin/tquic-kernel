@@ -36,17 +36,17 @@
  * TQUIC is wired to a classic 8-bit IP protocol number in this tree.
  */
 #ifndef IPPROTO_TQUIC
-#define IPPROTO_TQUIC	253
+#define IPPROTO_TQUIC 253
 #endif
 
 /* Protocol version numbers */
-#define TQUIC_VERSION_1		0x00000001
-#define TQUIC_VERSION_2		0x6b3343cf  /* QUIC v2 (RFC 9369) */
-#define TQUIC_VERSION_CURRENT	TQUIC_VERSION_1
+#define TQUIC_VERSION_1 0x00000001
+#define TQUIC_VERSION_2 0x6b3343cf /* QUIC v2 (RFC 9369) */
+#define TQUIC_VERSION_CURRENT TQUIC_VERSION_1
 
 /* QUIC version helper macros */
-#define TQUIC_IS_VERSION_1(v)	((v) == TQUIC_VERSION_1)
-#define TQUIC_IS_VERSION_2(v)	((v) == TQUIC_VERSION_2)
+#define TQUIC_IS_VERSION_1(v) ((v) == TQUIC_VERSION_1)
+#define TQUIC_IS_VERSION_2(v) ((v) == TQUIC_VERSION_2)
 #define TQUIC_IS_SUPPORTED_VERSION(v) \
 	(TQUIC_IS_VERSION_1(v) || TQUIC_IS_VERSION_2(v))
 
@@ -55,33 +55,33 @@ u32 tquic_sysctl_get_preferred_version(void);
 bool tquic_sysctl_prefer_v2(void);
 
 /* Connection ID constraints */
-#define TQUIC_MAX_CID_LEN	20
-#define TQUIC_MIN_CID_LEN	0
-#define TQUIC_DEFAULT_CID_LEN	8
+#define TQUIC_MAX_CID_LEN 20
+#define TQUIC_MIN_CID_LEN 0
+#define TQUIC_DEFAULT_CID_LEN 8
 
 /* Packet number spaces */
-#define TQUIC_PN_SPACE_INITIAL	0
-#define TQUIC_PN_SPACE_HANDSHAKE	1
-#define TQUIC_PN_SPACE_APPLICATION	2
-#define TQUIC_PN_SPACE_COUNT	3
+#define TQUIC_PN_SPACE_INITIAL 0
+#define TQUIC_PN_SPACE_HANDSHAKE 1
+#define TQUIC_PN_SPACE_APPLICATION 2
+#define TQUIC_PN_SPACE_COUNT 3
 
 /* Timer types (mirrors QUIC_TIMER_* from include/net/quic.h) */
-#define TQUIC_TIMER_LOSS	0
-#define TQUIC_TIMER_ACK		1
-#define TQUIC_TIMER_IDLE	2
-#define TQUIC_TIMER_HANDSHAKE	3
-#define TQUIC_TIMER_PATH_PROBE	4
-#define TQUIC_TIMER_PACING	5
-#define TQUIC_TIMER_KEY_DISCARD	6
-#define TQUIC_TIMER_KEY_UPDATE	7	/* Key update timeout (3 * PTO) */
-#define TQUIC_TIMER_MAX		8
+#define TQUIC_TIMER_LOSS 0
+#define TQUIC_TIMER_ACK 1
+#define TQUIC_TIMER_IDLE 2
+#define TQUIC_TIMER_HANDSHAKE 3
+#define TQUIC_TIMER_PATH_PROBE 4
+#define TQUIC_TIMER_PACING 5
+#define TQUIC_TIMER_KEY_DISCARD 6
+#define TQUIC_TIMER_KEY_UPDATE 7 /* Key update timeout (3 * PTO) */
+#define TQUIC_TIMER_MAX 8
 
 /* Crypto level indices */
-#define TQUIC_CRYPTO_INITIAL		0
-#define TQUIC_CRYPTO_HANDSHAKE		1
-#define TQUIC_CRYPTO_APPLICATION	2
-#define TQUIC_CRYPTO_EARLY_DATA		3
-#define TQUIC_CRYPTO_MAX		4
+#define TQUIC_CRYPTO_INITIAL 0
+#define TQUIC_CRYPTO_HANDSHAKE 1
+#define TQUIC_CRYPTO_APPLICATION 2
+#define TQUIC_CRYPTO_EARLY_DATA 3
+#define TQUIC_CRYPTO_MAX 4
 
 /*
  * Stream limits - practical defaults for DoS prevention.
@@ -89,35 +89,35 @@ bool tquic_sysctl_prefer_v2(void);
  * sensible default.  These can be raised via sysctl or transport
  * parameter negotiation.
  */
-#define TQUIC_MAX_STREAM_COUNT_BIDI	256
-#define TQUIC_MAX_STREAM_COUNT_UNI	256
+#define TQUIC_MAX_STREAM_COUNT_BIDI 256
+#define TQUIC_MAX_STREAM_COUNT_UNI 256
 
 /* Flow control defaults */
-#define TQUIC_DEFAULT_MAX_DATA		(1 << 20)   /* 1 MB */
-#define TQUIC_DEFAULT_MAX_STREAM_DATA	(1 << 18)   /* 256 KB */
+#define TQUIC_DEFAULT_MAX_DATA (1 << 20) /* 1 MB */
+#define TQUIC_DEFAULT_MAX_STREAM_DATA (1 << 18) /* 256 KB */
 
 /* Timing constants (in ms) */
-#define TQUIC_DEFAULT_IDLE_TIMEOUT	30000
-#define TQUIC_MIN_RTT			1
-#define TQUIC_DEFAULT_RTT		100
-#define TQUIC_MAX_ACK_DELAY		25
+#define TQUIC_DEFAULT_IDLE_TIMEOUT 30000
+#define TQUIC_MIN_RTT 1
+#define TQUIC_DEFAULT_RTT 100
+#define TQUIC_MAX_ACK_DELAY 25
 
 /* Path limits for WAN bonding */
-#define TQUIC_MAX_PATHS		16
-#define TQUIC_MIN_PATHS		1
-#define TQUIC_DEFAULT_PATHS	4
+#define TQUIC_MAX_PATHS 16
+#define TQUIC_MIN_PATHS 1
+#define TQUIC_DEFAULT_PATHS 4
 
 /* Maximum number of available versions in version_info */
-#define TQUIC_MAX_AVAILABLE_VERSIONS	16
+#define TQUIC_MAX_AVAILABLE_VERSIONS 16
 
 /* Stateless reset token length (also defined later but needed for struct) */
 #ifndef TQUIC_STATELESS_RESET_TOKEN_LEN
-#define TQUIC_STATELESS_RESET_TOKEN_LEN	16
+#define TQUIC_STATELESS_RESET_TOKEN_LEN 16
 #endif
 
 /* Scheduler/CC name limits */
-#define TQUIC_SCHED_NAME_MAX	16
-#define TQUIC_CC_NAME_MAX	16
+#define TQUIC_SCHED_NAME_MAX 16
+#define TQUIC_CC_NAME_MAX 16
 
 struct tquic_sock;
 struct tquic_connection;
@@ -160,9 +160,9 @@ struct tquic_cid_manager;
 struct tquic_mp_sched_ops;
 
 /* State machine magic numbers for type discrimination */
-#define TQUIC_SM_MAGIC_CONN_STATE	0x434F4E53 /* "CONS" */
-#define TQUIC_SM_MAGIC_MIGRATION	0x4D494752 /* "MIGR" */
-#define TQUIC_SM_MAGIC_SESSION		0x53455353 /* "SESS" */
+#define TQUIC_SM_MAGIC_CONN_STATE 0x434F4E53 /* "CONS" */
+#define TQUIC_SM_MAGIC_MIGRATION 0x4D494752 /* "MIGR" */
+#define TQUIC_SM_MAGIC_SESSION 0x53455353 /* "SESS" */
 
 /**
  * enum tquic_conn_state - Connection state machine states
@@ -237,13 +237,13 @@ enum tquic_stream_state {
  */
 enum tquic_path_state {
 	TQUIC_PATH_UNUSED = 0,
-	TQUIC_PATH_PENDING,		/* Awaiting validation */
-	TQUIC_PATH_VALIDATED,		/* Validation passed */
-	TQUIC_PATH_ACTIVE,		/* In use for data */
-	TQUIC_PATH_STANDBY,		/* Backup path */
-	TQUIC_PATH_UNAVAILABLE,		/* Interface down, state preserved */
-	TQUIC_PATH_FAILED,		/* Validation failed or errors */
-	TQUIC_PATH_CLOSED,		/* Removal in progress */
+	TQUIC_PATH_PENDING, /* Awaiting validation */
+	TQUIC_PATH_VALIDATED, /* Validation passed */
+	TQUIC_PATH_ACTIVE, /* In use for data */
+	TQUIC_PATH_STANDBY, /* Backup path */
+	TQUIC_PATH_UNAVAILABLE, /* Interface down, state preserved */
+	TQUIC_PATH_FAILED, /* Validation failed or errors */
+	TQUIC_PATH_CLOSED, /* Removal in progress */
 };
 
 /**
@@ -266,10 +266,10 @@ struct tquic_cid {
  * ECN codepoint values from IP header (RFC 3168)
  * These are the 2-bit values in the IP TOS/Traffic Class field
  */
-#define TQUIC_ECN_NOT_ECT	0x00	/* Not ECN-Capable Transport */
-#define TQUIC_ECN_ECT_1		0x01	/* ECN Capable Transport(1) */
-#define TQUIC_ECN_ECT_0		0x02	/* ECN Capable Transport(0) */
-#define TQUIC_ECN_CE		0x03	/* Congestion Experienced */
+#define TQUIC_ECN_NOT_ECT 0x00 /* Not ECN-Capable Transport */
+#define TQUIC_ECN_ECT_1 0x01 /* ECN Capable Transport(1) */
+#define TQUIC_ECN_ECT_0 0x02 /* ECN Capable Transport(0) */
+#define TQUIC_ECN_CE 0x03 /* Congestion Experienced */
 
 /**
  * struct tquic_ecn_state - Per-path ECN state (RFC 9000 Section 13.4)
@@ -298,10 +298,10 @@ struct tquic_ecn_state {
 	u64 ce_acked;
 
 	/* ECN state flags */
-	u8 ecn_capable:1;	/* Path validated for ECN */
-	u8 ecn_validated:1;	/* Validation complete */
-	u8 ecn_failed:1;	/* Validation failed */
-	u8 ecn_testing:1;	/* In validation mode */
+	u8 ecn_capable : 1; /* Path validated for ECN */
+	u8 ecn_validated : 1; /* Validation complete */
+	u8 ecn_failed : 1; /* Validation failed */
+	u8 ecn_testing : 1; /* In validation mode */
 
 	/* Current ECN marking to use for outgoing packets */
 	u8 ecn_marking;
@@ -348,11 +348,11 @@ struct tquic_path_stats {
 	 * These are updated from softirq context (packet TX/RX)
 	 * and read from process context (stats queries).
 	 */
-	atomic64_t packets_sent;	/* Packets sent on this path */
-	atomic64_t bytes_sent;		/* Bytes sent on this path */
-	atomic64_t packets_acked;	/* Packets acknowledged */
-	atomic64_t packets_lost;	/* Packets declared lost (atomic) */
-	atomic64_t packets_retrans;	/* Packets retransmitted */
+	atomic64_t packets_sent; /* Packets sent on this path */
+	atomic64_t bytes_sent; /* Bytes sent on this path */
+	atomic64_t packets_acked; /* Packets acknowledged */
+	atomic64_t packets_lost; /* Packets declared lost (atomic) */
+	atomic64_t packets_retrans; /* Packets retransmitted */
 };
 
 /* Maximum pending PATH_RESPONSE frames per path to prevent memory exhaustion */
@@ -385,10 +385,10 @@ struct tquic_path_stats {
  * @rcu_head: RCU callback head for deferred freeing
  */
 struct tquic_path {
-	refcount_t refcnt;		/* Reference count */
+	refcount_t refcnt; /* Reference count */
 	struct tquic_connection *conn;
 	enum tquic_path_state state;
-	enum tquic_path_state saved_state;	/* State before unavailable */
+	enum tquic_path_state saved_state; /* State before unavailable */
 	u32 path_id;
 
 	struct sockaddr_storage local_addr;
@@ -417,8 +417,8 @@ struct tquic_path {
 	u64 ecn_ect1_count_prev;
 	u64 ecn_ce_count_prev;
 
-	void *cong;  /* Congestion control state */
-	struct tquic_cong_ops *cong_ops;  /* Current CC algorithm ops */
+	void *cong; /* Congestion control state */
+	struct tquic_cong_ops *cong_ops; /* Current CC algorithm ops */
 
 	/* Per-path UDP encapsulation socket (owned by the path). */
 	struct tquic_udp_sock *udp_sock;
@@ -448,30 +448,30 @@ struct tquic_path {
 	 */
 	struct {
 		/* RTT measurement (RFC 9002 Section 5) */
-		u64 smoothed_rtt_us;	/* Smoothed RTT in microseconds */
-		u64 rtt_var_us;		/* RTT variance in microseconds */
-		u64 min_rtt_us;		/* Minimum RTT observed */
-		u64 last_rtt_us;	/* Previous RTT sample */
+		u64 smoothed_rtt_us; /* Smoothed RTT in microseconds */
+		u64 rtt_var_us; /* RTT variance in microseconds */
+		u64 min_rtt_us; /* Minimum RTT observed */
+		u64 last_rtt_us; /* Previous RTT sample */
 
 		/* Congestion window (RFC 9002 Section 7) */
-		u32 cwnd;		/* Congestion window (bytes) */
-		u32 bytes_in_flight;	/* Bytes currently in flight */
-		u32 ssthresh;		/* Slow start threshold */
-		u32 mss;		/* Maximum segment size (1200 default) */
+		u32 cwnd; /* Congestion window (bytes) */
+		u32 bytes_in_flight; /* Bytes currently in flight */
+		u32 ssthresh; /* Slow start threshold */
+		u32 mss; /* Maximum segment size (1200 default) */
 
 		/* Loss tracking */
-		u64 delivered;		/* Total bytes delivered */
-		u64 lost;		/* Total bytes lost */
-		u32 loss_rate;		/* Loss rate (0-1000 = 0-100%) */
-		u64 bandwidth;		/* Estimated bandwidth (bytes/sec) */
+		u64 delivered; /* Total bytes delivered */
+		u64 lost; /* Total bytes lost */
+		u32 loss_rate; /* Loss rate (0-1000 = 0-100%) */
+		u64 bandwidth; /* Estimated bandwidth (bytes/sec) */
 
 		/* Recovery state */
-		bool in_slow_start;	/* In slow start phase */
-		bool in_recovery;	/* In loss recovery */
-		u64 recovery_start;	/* Packet number at recovery start */
+		bool in_slow_start; /* In slow start phase */
+		bool in_recovery; /* In loss recovery */
+		u64 recovery_start; /* Packet number at recovery start */
 
 		/* PTO state (RFC 9002 Section 6.2) */
-		u32 pto_count;		/* PTO backoff counter */
+		u32 pto_count; /* PTO backoff counter */
 	} cc;
 
 	/* Path degradation tracking (consecutive losses in a round) */
@@ -483,28 +483,28 @@ struct tquic_path {
 	} loss_tracker;
 
 	u32 mtu;
-	u32 flags;			/* Path flags (TQUIC_PATH_FLAG_*) */
+	u32 flags; /* Path flags (TQUIC_PATH_FLAG_*) */
 	u8 priority;
 	u8 weight;
-	bool schedulable;		/* Can be selected by scheduler */
-	int ifindex;			/* Network interface index */
+	bool schedulable; /* Can be selected by scheduler */
+	int ifindex; /* Network interface index */
 
-	struct net_device *dev;		/* Interface for this path */
+	struct net_device *dev; /* Interface for this path */
 	ktime_t last_activity;
 	struct timer_list validation_timer;
 	u8 probe_count;
-	u8 challenge_data[8];  /* Legacy - use validation.challenge_data instead */
+	u8 challenge_data[8]; /* Legacy - use validation.challenge_data instead */
 
-	struct list_head list;		/* Connection path list */
-	struct list_head pm_list;	/* Path manager path list */
+	struct list_head list; /* Connection path list */
+	struct list_head pm_list; /* Path manager path list */
 
 	/* Validation state */
 	struct {
-		u8 challenge_data[8];         /* Sent challenge */
-		ktime_t challenge_sent;       /* When challenge was sent */
-		bool challenge_pending;       /* Awaiting response */
-		u8 retries;                   /* Retry count */
-		struct timer_list timer;      /* Retransmission timer */
+		u8 challenge_data[8]; /* Sent challenge */
+		ktime_t challenge_sent; /* When challenge was sent */
+		bool challenge_pending; /* Awaiting response */
+		u8 retries; /* Retry count */
+		struct timer_list timer; /* Retransmission timer */
 	} validation;
 
 	/*
@@ -521,9 +521,10 @@ struct tquic_path {
 	 * shared lock.
 	 */
 	struct {
-		atomic64_t bytes_received;    /* Bytes received on unvalidated path */
-		atomic64_t bytes_sent;        /* Bytes sent on unvalidated path */
-		bool active;                  /* Anti-amplification limits in effect */
+		atomic64_t
+			bytes_received; /* Bytes received on unvalidated path */
+		atomic64_t bytes_sent; /* Bytes sent on unvalidated path */
+		bool active; /* Anti-amplification limits in effect */
 	} anti_amplification;
 
 	/*
@@ -534,23 +535,23 @@ struct tquic_path {
 	 * frames.  The counter resets each RTT interval.
 	 */
 	struct {
-		u32 challenge_count;          /* Challenges responded to in window */
-		ktime_t window_start;         /* Start of current rate limit window */
-#define TQUIC_MAX_CHALLENGE_RESPONSES_PER_RTT	4
+		u32 challenge_count; /* Challenges responded to in window */
+		ktime_t window_start; /* Start of current rate limit window */
+#define TQUIC_MAX_CHALLENGE_RESPONSES_PER_RTT 4
 	} challenge_rate;
 
 	/* Response queue (prevent memory exhaustion - RFC 9000 Section 8.2) */
 	struct {
-		struct sk_buff_head queue;    /* Pending PATH_RESPONSE frames */
-		atomic_t count;               /* Current queue depth */
+		struct sk_buff_head queue; /* Pending PATH_RESPONSE frames */
+		atomic_t count; /* Current queue depth */
 	} response;
 
 	/* Multipath extension state (draft-ietf-quic-multipath) */
-	void *mp_ack_state;		/* Per-path ACK tracking */
-	void *abandon_state;		/* Path abandonment state */
-	u64 status_seq_num;		/* Path status sequence number */
-	bool is_backup;			/* Path is in standby/backup mode */
-	bool is_preferred_addr;		/* Path to server's preferred address */
+	void *mp_ack_state; /* Per-path ACK tracking */
+	void *abandon_state; /* Path abandonment state */
+	u64 status_seq_num; /* Path status sequence number */
+	bool is_backup; /* Path is in standby/backup mode */
+	bool is_preferred_addr; /* Path to server's preferred address */
 
 	/*
 	 * PMTUD (Path MTU Discovery) state - RFC 8899 DPLPMTUD
@@ -558,7 +559,7 @@ struct tquic_path {
 	 * Manages per-path MTU probing using PING+PADDING frames.
 	 * Allocated by tquic_pmtud_init_path(), freed by tquic_pmtud_release_path().
 	 */
-	void *pmtud_state;		/* struct tquic_pmtud_state_info * */
+	void *pmtud_state; /* struct tquic_pmtud_state_info * */
 
 	/*
 	 * NAT Keepalive state - RFC 9308 Section 3.5
@@ -566,7 +567,7 @@ struct tquic_path {
 	 * Manages per-path NAT binding keepalive using minimal PING frames.
 	 * Allocated by tquic_nat_keepalive_init(), freed by tquic_nat_keepalive_cleanup().
 	 */
-	void *nat_keepalive_state;	/* struct tquic_nat_keepalive_state * */
+	void *nat_keepalive_state; /* struct tquic_nat_keepalive_state * */
 
 	/*
 	 * NAT Lifecycle state - Advanced NAT management
@@ -581,7 +582,7 @@ struct tquic_path {
 	 * Allocated by tquic_nat_lifecycle_init(), freed by tquic_nat_lifecycle_cleanup().
 	 * Works in conjunction with nat_keepalive_state for optimal NAT handling.
 	 */
-	void *nat_lifecycle_state;	/* struct tquic_nat_lifecycle_state * */
+	void *nat_lifecycle_state; /* struct tquic_nat_lifecycle_state * */
 
 	/*
 	 * Careful Resume state (BDP frame extension)
@@ -590,12 +591,12 @@ struct tquic_path {
 	 * tquic_careful_resume_init(), freed by release_cr_state().
 	 * NULL when Careful Resume is not active on this path.
 	 */
-	void *cr_state;			/* struct careful_resume_state * */
+	void *cr_state; /* struct careful_resume_state * */
 
 	/* AF_XDP socket for kernel-bypass packet I/O on this path */
 	struct tquic_xsk *xsk;
 
-	struct rcu_head rcu_head;	/* RCU callback for kfree_rcu */
+	struct rcu_head rcu_head; /* RCU callback for kfree_rcu */
 };
 
 /**
@@ -628,7 +629,7 @@ struct tquic_stream {
 
 	u64 send_offset;
 	u64 recv_offset;
-	u64 recv_consumed;	/* Bytes consumed by application (for FC) */
+	u64 recv_consumed; /* Bytes consumed by application (for FC) */
 	u64 max_send_data;
 	u64 max_recv_data;
 	struct tquic_fc_stream_state *fc;
@@ -637,12 +638,12 @@ struct tquic_stream {
 	bool blocked;
 	bool fin_sent;
 	bool fin_received;
-	u64 final_size;		/* Final size from FIN (RFC 9000 §4.5) */
+	u64 final_size; /* Final size from FIN (RFC 9000 §4.5) */
 
 	struct rb_node node;
 	wait_queue_head_t wait;
 
-	void *ext;  /* Extended stream state for reassembly and priority */
+	void *ext; /* Extended stream state for reassembly and priority */
 };
 
 /*
@@ -653,11 +654,12 @@ struct tquic_stream {
  * byte offset within the SKB separately.
  */
 struct tquic_stream_skb_cb {
-	u64 stream_offset;	/* Stream offset for skb data[0] */
-	u32 data_off;		/* Bytes already consumed from this skb */
+	u64 stream_offset; /* Stream offset for skb data[0] */
+	u32 data_off; /* Bytes already consumed from this skb */
 };
 
-static inline struct tquic_stream_skb_cb *tquic_stream_skb_cb(struct sk_buff *skb)
+static inline struct tquic_stream_skb_cb *
+tquic_stream_skb_cb(struct sk_buff *skb)
 {
 	return (struct tquic_stream_skb_cb *)skb->cb;
 }
@@ -684,7 +686,7 @@ struct tquic_conn_stats {
 	u64 streams_opened;
 	u64 streams_closed;
 	ktime_t established_time;
-	atomic64_t handshake_time_us;	/* Handshake completion time */
+	atomic64_t handshake_time_us; /* Handshake completion time */
 
 	/*
 	 * Atomic counters for lock-free access from multiple contexts.
@@ -693,42 +695,42 @@ struct tquic_conn_stats {
 	 */
 
 	/* RFC 9002 Loss Detection statistics */
-	atomic64_t packets_lost;	/* Total packets declared lost */
+	atomic64_t packets_lost; /* Total packets declared lost */
 	atomic64_t packets_retransmitted; /* Packets retransmitted */
-	atomic64_t clone_failures;	/* SKB clone failures during retx */
+	atomic64_t clone_failures; /* SKB clone failures during retx */
 
 	/* RTT statistics (aggregated from active path) */
-	atomic64_t min_rtt_us;		/* Minimum RTT observed (microseconds) */
-	atomic64_t smoothed_rtt_us;	/* Smoothed RTT (microseconds) */
-	atomic64_t rtt_variance_us;	/* RTT variance (microseconds) */
-	atomic64_t latest_rtt_us;	/* Most recent RTT sample */
+	atomic64_t min_rtt_us; /* Minimum RTT observed (microseconds) */
+	atomic64_t smoothed_rtt_us; /* Smoothed RTT (microseconds) */
+	atomic64_t rtt_variance_us; /* RTT variance (microseconds) */
+	atomic64_t latest_rtt_us; /* Most recent RTT sample */
 
 	/* Scheduler statistics */
-	atomic64_t total_packets;	/* Total packets scheduled */
-	atomic64_t total_bytes;		/* Total bytes scheduled */
-	atomic64_t sched_decisions;	/* Number of scheduler invocations */
-	atomic64_t path_switches;	/* Times scheduler switched paths */
-	atomic64_t reinjections;	/* Packets reinjected on alternate path */
+	atomic64_t total_packets; /* Total packets scheduled */
+	atomic64_t total_bytes; /* Total bytes scheduled */
+	atomic64_t sched_decisions; /* Number of scheduler invocations */
+	atomic64_t path_switches; /* Times scheduler switched paths */
+	atomic64_t reinjections; /* Packets reinjected on alternate path */
 
 	/*
 	 * QUIC-over-TCP statistics (transport/quic_over_tcp.c)
 	 * These are only used when QUIC runs over TCP for firewall traversal.
 	 */
-	atomic64_t packets_rx;		/* TCP: packets received */
-	atomic64_t packets_tx;		/* TCP: packets transmitted */
-	atomic64_t bytes_rx;		/* TCP: bytes received */
-	atomic64_t bytes_tx;		/* TCP: bytes transmitted */
-	atomic64_t coalesce_count;	/* TCP: packets coalesced */
-	atomic64_t tcp_segments_rx;	/* TCP: segments received */
-	atomic64_t tcp_segments_tx;	/* TCP: segments transmitted */
-	atomic64_t framing_errors;	/* TCP: framing errors */
-	atomic64_t flow_control_pauses;	/* TCP: flow control pauses */
-	atomic64_t keepalives_sent;	/* TCP: keepalives sent */
-	atomic64_t keepalives_recv;	/* TCP: keepalives received */
+	atomic64_t packets_rx; /* TCP: packets received */
+	atomic64_t packets_tx; /* TCP: packets transmitted */
+	atomic64_t bytes_rx; /* TCP: bytes received */
+	atomic64_t bytes_tx; /* TCP: bytes transmitted */
+	atomic64_t coalesce_count; /* TCP: packets coalesced */
+	atomic64_t tcp_segments_rx; /* TCP: segments received */
+	atomic64_t tcp_segments_tx; /* TCP: segments transmitted */
+	atomic64_t framing_errors; /* TCP: framing errors */
+	atomic64_t flow_control_pauses; /* TCP: flow control pauses */
+	atomic64_t keepalives_sent; /* TCP: keepalives sent */
+	atomic64_t keepalives_recv; /* TCP: keepalives received */
 
 	/* Additional counters for packet processing */
-	atomic64_t packets_received;	/* Input packets processed */
-	atomic64_t bytes_received;	/* Input bytes processed */
+	atomic64_t packets_received; /* Input packets processed */
+	atomic64_t bytes_received; /* Input bytes processed */
 };
 
 /**
@@ -751,9 +753,9 @@ struct tquic_flow_control {
  * struct tquic_config - Connection configuration
  */
 struct tquic_config {
-	u32 version;			/* QUIC version to use */
+	u32 version; /* QUIC version to use */
 	u32 max_idle_timeout_ms;
-	u32 handshake_timeout_ms;	/* Handshake timeout */
+	u32 handshake_timeout_ms; /* Handshake timeout */
 	u64 initial_max_data;
 	u64 initial_max_stream_data_bidi_local;
 	u64 initial_max_stream_data_bidi_remote;
@@ -818,16 +820,16 @@ struct tquic_transport_params {
 	bool retry_scid_present;
 
 	/* Timing parameters */
-	u64 max_idle_timeout;		/* milliseconds, 0 = disabled */
-	u8 ack_delay_exponent;		/* default 3, max 20 */
-	u32 max_ack_delay;		/* milliseconds, default 25, max 2^14 */
+	u64 max_idle_timeout; /* milliseconds, 0 = disabled */
+	u8 ack_delay_exponent; /* default 3, max 20 */
+	u32 max_ack_delay; /* milliseconds, default 25, max 2^14 */
 
 	/* Stateless reset token (server only) */
 	u8 stateless_reset_token[TQUIC_STATELESS_RESET_TOKEN_LEN];
 	bool stateless_reset_token_present;
 
 	/* Size limits */
-	u64 max_udp_payload_size;	/* minimum 1200, default 65527 */
+	u64 max_udp_payload_size; /* minimum 1200, default 65527 */
 
 	/* Connection-level flow control */
 	u64 initial_max_data;
@@ -838,8 +840,8 @@ struct tquic_transport_params {
 	u64 initial_max_stream_data_uni;
 
 	/* Stream limits */
-	u64 initial_max_streams_bidi;	/* max 2^60 */
-	u64 initial_max_streams_uni;	/* max 2^60 */
+	u64 initial_max_streams_bidi; /* max 2^60 */
+	u64 initial_max_streams_uni; /* max 2^60 */
 
 	/* Migration */
 	bool disable_active_migration;
@@ -849,79 +851,80 @@ struct tquic_transport_params {
 	bool preferred_address_present;
 
 	/* Connection ID management */
-	u64 active_connection_id_limit;	/* minimum 2 */
+	u64 active_connection_id_limit; /* minimum 2 */
 
 	/* Multipath extension for WAN bonding (RFC 9369) */
 	bool enable_multipath;
 
 	/* RFC 9369 Multipath transport parameters */
-	u64 initial_max_paths;		/* Maximum concurrent paths (0x0f01) */
+	u64 initial_max_paths; /* Maximum concurrent paths (0x0f01) */
 
 	/* draft-ietf-quic-multipath initial_max_path_id */
-	u64 initial_max_path_id;	/* Maximum Path ID (0x0f02) */
+	u64 initial_max_path_id; /* Maximum Path ID (0x0f02) */
 	bool initial_max_path_id_present;
 
 	/* DATAGRAM frame support (RFC 9221) */
-	u64 max_datagram_frame_size;	/* 0 = disabled, >0 = max size */
+	u64 max_datagram_frame_size; /* 0 = disabled, >0 = max size */
 
 	/* GREASE support (RFC 9287) */
-	bool grease_quic_bit;		/* Willing to receive GREASE'd packets */
+	bool grease_quic_bit; /* Willing to receive GREASE'd packets */
 
 	/* ACK Frequency (draft-ietf-quic-ack-frequency) */
-	u64 min_ack_delay;		/* Minimum ACK delay in microseconds (0x0e) */
-	bool min_ack_delay_present;	/* Whether min_ack_delay was advertised */
+	u64 min_ack_delay; /* Minimum ACK delay in microseconds (0x0e) */
+	bool min_ack_delay_present; /* Whether min_ack_delay was advertised */
 
 	/* Version Information (RFC 9368 - Compatible Version Negotiation) */
-	struct tquic_version_info *version_info;	/* Version information parameter */
-	bool version_info_present;	/* Whether version_info was advertised */
+	struct tquic_version_info
+		*version_info; /* Version information parameter */
+	bool version_info_present; /* Whether version_info was advertised */
 
 	/* Receive Timestamps (draft-smith-quic-receive-ts-03) */
-	u64 max_receive_timestamps_per_ack;	/* Max timestamps in ACK (0xff0a002) */
+	u64 max_receive_timestamps_per_ack; /* Max timestamps in ACK (0xff0a002) */
 	bool max_receive_timestamps_per_ack_present;
-	u8 receive_timestamps_exponent;		/* Timestamp delta exponent (0xff0a003) */
+	u8 receive_timestamps_exponent; /* Timestamp delta exponent (0xff0a003) */
 	bool receive_timestamps_exponent_present;
 
 	/* Address Discovery (draft-ietf-quic-address-discovery) */
-	bool enable_address_discovery;	/* Supports OBSERVED_ADDRESS frames (0x9f01) */
+	bool enable_address_discovery; /* Supports OBSERVED_ADDRESS frames (0x9f01) */
 
 	/* Reliable Stream Reset (draft-ietf-quic-reliable-stream-reset-07) */
-	bool reliable_stream_reset;	/* Supports RESET_STREAM_AT frame (0x17cd) */
+	bool reliable_stream_reset; /* Supports RESET_STREAM_AT frame (0x17cd) */
 
 	/* Extended Key Update (draft-ietf-quic-extended-key-update-01) */
-	u64 extended_key_update;	/* Max outstanding requests (0 = disabled) */
+	u64 extended_key_update; /* Max outstanding requests (0 = disabled) */
 	bool extended_key_update_present;
 
 	/* Additional Addresses (draft-piraux-quic-additional-addresses) */
-	void *additional_addresses;	/* Pointer to tquic_additional_addresses */
+	void *additional_addresses; /* Pointer to tquic_additional_addresses */
 	bool additional_addresses_present;
 
 	/* BDP Frame Extension (draft-kuhn-quic-bdpframe-extension-05) */
-	bool enable_bdp_frame;		/* Supports BDP Frame extension */
+	bool enable_bdp_frame; /* Supports BDP Frame extension */
 
 	/* Deadline-Aware Multipath Scheduling (draft-tjohn-quic-multipath-dmtp-01) */
-	bool enable_deadline_aware;	/* Enable deadline-aware scheduling (0x0f10) */
+	bool enable_deadline_aware; /* Enable deadline-aware scheduling (0x0f10) */
 	bool enable_deadline_aware_present;
-	u32 deadline_granularity;	/* Time granularity in microseconds (0x0f11) */
+	u32 deadline_granularity; /* Time granularity in microseconds (0x0f11) */
 	bool deadline_granularity_present;
-	u32 max_deadline_streams;	/* Max streams with deadlines (0x0f12) */
+	u32 max_deadline_streams; /* Max streams with deadlines (0x0f12) */
 	bool max_deadline_streams_present;
-	u8 deadline_miss_policy;	/* Policy for missed deadlines (0x0f13) */
+	u8 deadline_miss_policy; /* Policy for missed deadlines (0x0f13) */
 	bool deadline_miss_policy_present;
 
 	/* Forward Error Correction (draft-zheng-quic-fec-extension-01) */
-	bool enable_fec;		/* FEC is supported (0xff0f000) */
-	bool enable_fec_present;	/* Whether FEC was advertised */
-	u8 fec_scheme;			/* Preferred FEC scheme (0xff0f001) */
+	bool enable_fec; /* FEC is supported (0xff0f000) */
+	bool enable_fec_present; /* Whether FEC was advertised */
+	u8 fec_scheme; /* Preferred FEC scheme (0xff0f001) */
 	bool fec_scheme_present;
-	u8 max_source_symbols;		/* Max source symbols per block (0xff0f002) */
+	u8 max_source_symbols; /* Max source symbols per block (0xff0f002) */
 	bool max_source_symbols_present;
 
 	/* Congestion Control Data Exchange (draft-yuan-quic-congestion-data-00) */
-	bool enable_cong_data;		/* CC data exchange supported (0xff0cd002) */
-	bool enable_cong_data_present;	/* Whether enable_cong_data was advertised */
+	bool enable_cong_data; /* CC data exchange supported (0xff0cd002) */
+	bool enable_cong_data_present; /* Whether enable_cong_data was advertised */
 
 	/* One-Way Delay Measurement (draft-huitema-quic-1wd) */
-	u64 enable_one_way_delay;	/* Timestamp resolution in us (0xff02de1a) */
+	u64 enable_one_way_delay; /* Timestamp resolution in us (0xff02de1a) */
 	bool enable_one_way_delay_present;
 };
 #endif /* TQUIC_TRANSPORT_PARAMS_DEFINED */
@@ -980,9 +983,9 @@ struct tquic_connection {
 	 * packet must be included in the subsequent Initial packet.
 	 * The ODCID is stored in original_dcid above.
 	 */
-	u8 retry_token[256];		/* Token from Retry packet */
-	size_t retry_token_len;		/* Length of retry token */
-	bool retry_received;		/* True after Retry processing */
+	u8 retry_token[256]; /* Token from Retry packet */
+	size_t retry_token_len; /* Length of retry token */
+	bool retry_received; /* True after Retry processing */
 
 	/*
 	 * RFC 9000 Section 7.2: Client updates DCID to server's SCID
@@ -1008,12 +1011,12 @@ struct tquic_connection {
 
 	/* Multi-path support for WAN bonding */
 	struct list_head paths;
-	spinlock_t paths_lock;		/* Protects paths list */
+	spinlock_t paths_lock; /* Protects paths list */
 	struct tquic_path *active_path;
 	u8 num_paths;
-	u8 active_paths;		/* Number of active/usable paths */
-	u8 max_paths;			/* Maximum paths allowed */
-	u64 aggregate_cwnd;		/* Sum of cwnd across all paths */
+	u8 active_paths; /* Number of active/usable paths */
+	u8 max_paths; /* Maximum paths allowed */
+	u64 aggregate_cwnd; /* Sum of cwnd across all paths */
 
 	/*
 	 * Migration control (RFC 9000 Section 9)
@@ -1022,29 +1025,29 @@ struct tquic_connection {
 	 * parameter, active migration MUST NOT be performed. However,
 	 * migration to preferred_address is still allowed per RFC 9000 9.6.
 	 */
-	bool migration_disabled;	/* True if active migration is disabled */
+	bool migration_disabled; /* True if active migration is disabled */
 
 	/* Stream management */
 	struct rb_root streams;
-	spinlock_t streams_lock;	/* Protects stream tree */
+	spinlock_t streams_lock; /* Protects stream tree */
 	u64 next_stream_id_bidi;
 	u64 next_stream_id_uni;
 	u64 max_streams_bidi;
 	u64 max_streams_uni;
-	u64 max_stream_id_bidi;		/* Maximum stream ID for bidi streams */
-	u64 max_stream_id_uni;		/* Maximum stream ID for uni streams */
+	u64 max_stream_id_bidi; /* Maximum stream ID for bidi streams */
+	u64 max_stream_id_uni; /* Maximum stream ID for uni streams */
 
 	/*
 	 * Per-type stream counters for HTTP/3 unidirectional streams.
 	 * Indexed by H3_STREAM_TYPE_* (0-3). Avoids O(n) scans
 	 * in tquic_stream_count_by_type().
 	 */
-#define TQUIC_H3_STREAM_TYPE_MAX	4
+#define TQUIC_H3_STREAM_TYPE_MAX 4
 	int h3_uni_stream_count[TQUIC_H3_STREAM_TYPE_MAX];
 
 	/* Connection ID management */
-	struct list_head dcid_list;	/* List of destination CIDs */
-	struct list_head scid_list;	/* List of source CIDs */
+	struct list_head dcid_list; /* List of destination CIDs */
+	struct list_head scid_list; /* List of source CIDs */
 
 	/*
 	 * Legacy flow control fields -- DEPRECATED.
@@ -1055,7 +1058,7 @@ struct tquic_connection {
 	u64 max_data_remote;
 	u64 data_sent;
 	u64 data_received;
-	u64 data_consumed;		/* App-read bytes (for window updates) */
+	u64 data_consumed; /* App-read bytes (for window updates) */
 	/*
 	 * Connection-level flow control reservation for queued (not yet sent)
 	 * STREAM data. This is used to provide backpressure in send paths without
@@ -1075,8 +1078,8 @@ struct tquic_connection {
 	 * always serialized by conn->lock, so concurrent callers
 	 * need atomic increments for unique, monotonic packet numbers.
 	 */
-	atomic64_t pkt_num_tx;		/* Next TX packet number */
-	atomic64_t pkt_num_rx;		/* Highest RX packet number seen */
+	atomic64_t pkt_num_tx; /* Next TX packet number */
+	atomic64_t pkt_num_rx; /* Highest RX packet number seen */
 
 	/* Extended flow control state (tquic_fc_state from flow_control.c) */
 	struct tquic_fc_state *fc;
@@ -1086,16 +1089,16 @@ struct tquic_connection {
 	/* Timers - managed via timer_state for unified timer/recovery handling */
 	u32 idle_timeout;
 	struct tquic_timer_state *timer_state;
-	struct timer_list timers[TQUIC_TIMER_MAX];	/* Per-type timers */
+	struct timer_list timers[TQUIC_TIMER_MAX]; /* Per-type timers */
 
 	/* Crypto */
 	void *crypto_state;
-	void *crypto[TQUIC_CRYPTO_MAX];	/* Per-level crypto state */
-	u8 crypto_level;		/* Current crypto level (TQUIC_CRYPTO_*) */
+	void *crypto[TQUIC_CRYPTO_MAX]; /* Per-level crypto state */
+	u8 crypto_level; /* Current crypto level (TQUIC_CRYPTO_*) */
 
 	/* Handshake state */
 	bool handshake_complete;
-	bool draining;			/* Connection is draining */
+	bool draining; /* Connection is draining */
 
 	/*
 	 * RFC 9002 Loss Detection and Congestion Control State
@@ -1111,10 +1114,10 @@ struct tquic_connection {
 	 */
 
 	/* RFC 9002 Section 6.2: Probe Timeout (PTO) */
-	u32 pto_count;			/* PTO exponential backoff counter */
+	u32 pto_count; /* PTO exponential backoff counter */
 
 	/* RFC 9002 Appendix A.3: Loss Detection Timer */
-	ktime_t loss_detection_timer;	/* Timer deadline (0 = not set) */
+	ktime_t loss_detection_timer; /* Timer deadline (0 = not set) */
 	ktime_t time_of_last_ack_eliciting; /* When last ack-eliciting pkt sent */
 
 	/*
@@ -1146,33 +1149,34 @@ struct tquic_connection {
 	bool handshake_confirmed;
 
 	/* Packet number spaces */
-	struct tquic_pn_space *pn_spaces;	/* Array of PN spaces */
+	struct tquic_pn_space *pn_spaces; /* Array of PN spaces */
 
 	/* Connection error state */
-	u64 error_code;			/* QUIC error code for close */
-	bool app_error;			/* True if application error */
-	char *reason;			/* Error reason string (deprecated) */
-	u32 reason_len;			/* Length of reason string (deprecated) */
-	char *reason_phrase;		/* Error reason phrase */
+	u64 error_code; /* QUIC error code for close */
+	bool app_error; /* True if application error */
+	char *reason; /* Error reason string (deprecated) */
+	u32 reason_len; /* Length of reason string (deprecated) */
+	char *reason_phrase; /* Error reason phrase */
 
 	/* CID management */
-	u64 next_scid_seq;		/* Next SCID sequence number */
-	u64 retire_dcid_prior_to;	/* Retire DCIDs prior to this seq */
+	u64 next_scid_seq; /* Next SCID sequence number */
+	u64 retire_dcid_prior_to; /* Retire DCIDs prior to this seq */
 
 	/* Socket reference */
-	struct tquic_sock *tsk;		/* Associated TQUIC socket */
+	struct tquic_sock *tsk; /* Associated TQUIC socket */
 
 	/* Scheduler */
-	void *scheduler;		/* Bonding scheduler state (struct tquic_bond_state *) */
-	void *sched_priv;		/* Non-bond per-connection scheduler/congestion private data */
-	struct tquic_mp_sched_ops __rcu *mp_sched_ops; /* Multipath scheduler ops */
+	void *scheduler; /* Bonding scheduler state (struct tquic_bond_state *) */
+	void *sched_priv; /* Non-bond per-connection scheduler/congestion private data */
+	struct tquic_mp_sched_ops __rcu
+		*mp_sched_ops; /* Multipath scheduler ops */
 
 	/* Connection state machine (extended state) */
 	void *state_machine;
 
 	/* Connection ID pool (tquic_cid.c) */
 	void *cid_pool;
-	u64 cid_retire_prior_to;	/* Last retire_prior_to from peer */
+	u64 cid_retire_prior_to; /* Last retire_prior_to from peer */
 
 	/* Path manager state */
 	struct tquic_pm_state *pm;
@@ -1188,17 +1192,17 @@ struct tquic_connection {
 
 	/* DATAGRAM frame support (RFC 9221) */
 	struct {
-		bool enabled;			/* True if datagrams negotiated */
-		u64 max_send_size;		/* Max datagram size we can send */
-		u64 max_recv_size;		/* Max datagram size we accept */
-		struct sk_buff_head recv_queue;	/* Received datagram queue */
-		spinlock_t lock;		/* Protects datagram state */
-		u32 recv_queue_len;		/* Current queue length */
-		u32 recv_queue_max;		/* Maximum queue length */
-		u64 datagrams_sent;		/* Statistics: sent count */
-		u64 datagrams_received;		/* Statistics: recv count */
-		u64 datagrams_dropped;		/* Statistics: dropped count */
-		wait_queue_head_t wait;		/* Wait queue for blocking recv */
+		bool enabled; /* True if datagrams negotiated */
+		u64 max_send_size; /* Max datagram size we can send */
+		u64 max_recv_size; /* Max datagram size we accept */
+		struct sk_buff_head recv_queue; /* Received datagram queue */
+		spinlock_t lock; /* Protects datagram state */
+		u32 recv_queue_len; /* Current queue length */
+		u32 recv_queue_max; /* Maximum queue length */
+		u64 datagrams_sent; /* Statistics: sent count */
+		u64 datagrams_received; /* Statistics: recv count */
+		u64 datagrams_dropped; /* Statistics: dropped count */
+		wait_queue_head_t wait; /* Wait queue for blocking recv */
 	} datagram;
 
 	/*
@@ -1221,7 +1225,7 @@ struct tquic_connection {
 	 * connections from validated clients. Clients store tokens
 	 * received via NEW_TOKEN frames for future use.
 	 */
-	void *token_state;	/* struct tquic_token_state * */
+	void *token_state; /* struct tquic_token_state * */
 
 	/*
 	 * 0-RTT early data state (RFC 9001 Section 4.6-4.7)
@@ -1229,14 +1233,14 @@ struct tquic_connection {
 	 * Manages 0-RTT key derivation, early data transmission,
 	 * and server accept/reject handling. NULL when 0-RTT not in use.
 	 */
-	void *zero_rtt_state;	/* struct tquic_zero_rtt_state_s * */
+	void *zero_rtt_state; /* struct tquic_zero_rtt_state_s * */
 
 	/* 0-RTT early data tracking fields */
-	bool early_data_enabled;	/* 0-RTT is enabled for this connection */
-	bool early_data_accepted;	/* Server accepted early data */
-	bool early_data_rejected;	/* Server rejected early data */
-	u64 max_early_data;		/* Max early data size */
-	u64 early_data_sent;		/* Early data bytes sent */
+	bool early_data_enabled; /* 0-RTT is enabled for this connection */
+	bool early_data_accepted; /* Server accepted early data */
+	bool early_data_rejected; /* Server rejected early data */
+	u64 max_early_data; /* Max early data size */
+	u64 early_data_sent; /* Early data bytes sent */
 
 	/*
 	 * Preferred Address state (RFC 9000 Section 9.6)
@@ -1255,7 +1259,7 @@ struct tquic_connection {
 	 * For server-side, this holds the config being advertised
 	 * (struct tquic_pref_addr_config *).
 	 */
-	void *preferred_addr;	/* struct tquic_pref_addr_migration/config * */
+	void *preferred_addr; /* struct tquic_pref_addr_migration/config * */
 
 	/*
 	 * Additional Addresses state (draft-piraux-quic-additional-addresses)
@@ -1270,8 +1274,8 @@ struct tquic_connection {
 	 *
 	 * Both are struct tquic_additional_addresses *.
 	 */
-	void *additional_local_addrs;	/* Local addresses to advertise */
-	void *additional_remote_addrs;	/* Remote addresses from peer */
+	void *additional_local_addrs; /* Local addresses to advertise */
+	void *additional_remote_addrs; /* Remote addresses from peer */
 
 	/*
 	 * HTTP/3 Priority state (RFC 9218)
@@ -1283,7 +1287,7 @@ struct tquic_connection {
 	 * This is allocated by http3_priority_state_init() when HTTP/3
 	 * layer is established on this QUIC connection.
 	 */
-	void *priority_state;	/* struct http3_priority_state * */
+	void *priority_state; /* struct http3_priority_state * */
 
 	/*
 	 * ACK Frequency state (RFC 9002 Appendix A.7, draft-ietf-quic-ack-frequency)
@@ -1303,7 +1307,7 @@ struct tquic_connection {
 	 * Allocated by tquic_ack_freq_conn_init() during connection setup.
 	 * Freed by tquic_ack_freq_conn_cleanup() during connection teardown.
 	 */
-	void *ack_freq_state;	/* struct tquic_ack_frequency_state * */
+	void *ack_freq_state; /* struct tquic_ack_frequency_state * */
 
 	/*
 	 * Zero-copy I/O state (MSG_ZEROCOPY support)
@@ -1312,7 +1316,7 @@ struct tquic_connection {
 	 * and handles completion notifications via SO_EE_CODE_ZEROCOPY_COPIED.
 	 * Allocated by tquic_zc_state_alloc(), freed by tquic_zc_state_free().
 	 */
-	void *zc_state;		/* struct tquic_zc_state * */
+	void *zc_state; /* struct tquic_zc_state * */
 
 	/*
 	 * Extended Key Update state (RFC 9369 Key Update extension)
@@ -1320,7 +1324,7 @@ struct tquic_connection {
 	 * Manages extended key update negotiations and tracking for
 	 * enhanced cryptographic agility.
 	 */
-	void *eku_state;	/* struct tquic_eku_state * */
+	void *eku_state; /* struct tquic_eku_state * */
 
 	/*
 	 * io_uring integration context
@@ -1329,7 +1333,7 @@ struct tquic_connection {
 	 * and async I/O operations for high-performance I/O paths.
 	 * Allocated by tquic_uring_ctx_alloc(), freed by tquic_uring_ctx_free().
 	 */
-	void *uring_ctx;	/* struct tquic_uring_ctx * */
+	void *uring_ctx; /* struct tquic_uring_ctx * */
 
 	/*
 	 * Connection-level flags (atomic bit operations)
@@ -1359,17 +1363,18 @@ struct tquic_connection {
 	/*
 	 * Frame queues for various purposes
 	 */
-	struct sk_buff_head pending_frames;	/* Frames pending transmission */
-	struct sk_buff_head pacing_queue;	/* Pacing-delayed frames */
-	struct sk_buff_head early_data_buffer;	/* 0-RTT early data buffer */
-	struct sk_buff_head crypto_buffer[TQUIC_PN_SPACE_COUNT];	/* Per-space crypto buffers */
+	struct sk_buff_head pending_frames; /* Frames pending transmission */
+	struct sk_buff_head pacing_queue; /* Pacing-delayed frames */
+	struct sk_buff_head early_data_buffer; /* 0-RTT early data buffer */
+	struct sk_buff_head
+		crypto_buffer[TQUIC_PN_SPACE_COUNT]; /* Per-space crypto buffers */
 
 	/*
 	 * Work structs for deferred processing
 	 */
 	struct work_struct tx_work;
-	struct work_struct rx_work;		/* Receive processing */
-	struct work_struct close_work;		/* Connection close processing */
+	struct work_struct rx_work; /* Receive processing */
+	struct work_struct close_work; /* Connection close processing */
 
 	/*
 	 * Reliable Stream Reset (draft-ietf-quic-reliable-stream-reset-07)
@@ -1410,7 +1415,7 @@ struct tquic_connection {
 	 * Allocated by tquic_bdp_init() after transport parameter negotiation
 	 * confirms mutual support. Freed by tquic_bdp_release().
 	 */
-	void *bdp_state;	/* struct tquic_bdp_state * */
+	void *bdp_state; /* struct tquic_bdp_state * */
 
 	/*
 	 * Congestion Control Data Exchange state (draft-yuan-quic-congestion-data-00)
@@ -1422,7 +1427,7 @@ struct tquic_connection {
 	 * Allocated by tquic_cong_data_init() after transport parameter negotiation
 	 * confirms mutual support. Freed by tquic_cong_data_release().
 	 */
-	void *cong_data_state;	/* struct tquic_cong_data_state * */
+	void *cong_data_state; /* struct tquic_cong_data_state * */
 
 	/* AF_XDP socket for kernel-bypass packet I/O */
 	struct tquic_xsk *xsk;
@@ -1431,7 +1436,7 @@ struct tquic_connection {
 	refcount_t refcnt;
 	struct sock *sk;
 	struct rhash_head node;
-	struct list_head pm_node;	/* Path manager connection list linkage */
+	struct list_head pm_node; /* Path manager connection list linkage */
 };
 
 /*
@@ -1441,16 +1446,17 @@ struct tquic_connection {
  * These flags enable lock-free signaling between different contexts
  * (e.g., softirq, process context, tasklet).
  */
-#define TQUIC_CONN_FLAG_PATH_RESPONSE_PENDING	0  /* PATH_RESPONSE needs sending */
-#define TQUIC_CONN_FLAG_ACK_PENDING		1  /* ACK frame needs sending */
-#define TQUIC_CONN_FLAG_HANDSHAKE_DONE		2  /* Handshake completed */
-#define TQUIC_CONN_FLAG_DRAINING		3  /* Connection draining */
-#define TQUIC_CONN_FLAG_IMMEDIATE_ACK		4  /* Send ACK immediately */
-#define TQUIC_CONN_FLAG_KEY_UPDATE_PENDING	5  /* Key update in progress */
-#define TQUIC_CONN_FLAG_TASKLET_SCHED		6  /* TX tasklet is scheduled */
+#define TQUIC_CONN_FLAG_PATH_RESPONSE_PENDING \
+	0 /* PATH_RESPONSE needs sending */
+#define TQUIC_CONN_FLAG_ACK_PENDING 1 /* ACK frame needs sending */
+#define TQUIC_CONN_FLAG_HANDSHAKE_DONE 2 /* Handshake completed */
+#define TQUIC_CONN_FLAG_DRAINING 3 /* Connection draining */
+#define TQUIC_CONN_FLAG_IMMEDIATE_ACK 4 /* Send ACK immediately */
+#define TQUIC_CONN_FLAG_KEY_UPDATE_PENDING 5 /* Key update in progress */
+#define TQUIC_CONN_FLAG_TASKLET_SCHED 6 /* TX tasklet is scheduled */
 
 /* Backwards compatibility alias */
-#define TQUIC_PATH_RESPONSE_PENDING	TQUIC_CONN_FLAG_PATH_RESPONSE_PENDING
+#define TQUIC_PATH_RESPONSE_PENDING TQUIC_CONN_FLAG_PATH_RESPONSE_PENDING
 
 /* Forward declaration for handshake state */
 struct tquic_handshake_state;
@@ -1512,13 +1518,13 @@ struct tquic_bond_state {
 struct tquic_sock {
 	struct inet_connection_sock inet;
 	struct tquic_connection *conn;
-	struct socket *udp_sock;	/* UDP encapsulation socket */
+	struct socket *udp_sock; /* UDP encapsulation socket */
 
 	struct sockaddr_storage bind_addr;
 	struct sockaddr_storage connect_addr;
 
-	struct list_head accept_queue;	/* Listener: queue of pending children */
-	struct list_head accept_list;	/* Child: linkage in listener's queue */
+	struct list_head accept_queue; /* Listener: queue of pending children */
+	struct list_head accept_list; /* Child: linkage in listener's queue */
 	struct hlist_node listener_node; /* Listener hash table linkage */
 	atomic_t accept_queue_len;
 	u32 max_accept_queue;
@@ -1548,8 +1554,8 @@ struct tquic_sock {
 	u32 flags;
 
 	/* Socket options */
-	bool nodelay;		/* TQUIC_NODELAY: disable Nagle, send immediately */
-	bool pacing_enabled;	/* SO_TQUIC_PACING: enable pacing (default true) */
+	bool nodelay; /* TQUIC_NODELAY: disable Nagle, send immediately */
+	bool pacing_enabled; /* SO_TQUIC_PACING: enable pacing (default true) */
 
 	/*
 	 * Scheduler preference (set via SO_TQUIC_SCHEDULER before connect)
@@ -1599,8 +1605,8 @@ struct tquic_sock {
 	 * When enabled, sendmsg/recvmsg can transfer unreliable datagrams
 	 * using cmsg with TQUIC_CMSG_DATAGRAM type.
 	 */
-	bool datagram_enabled;		/* SO_TQUIC_DATAGRAM enabled */
-	u32 datagram_queue_max;		/* Max receive queue length */
+	bool datagram_enabled; /* SO_TQUIC_DATAGRAM enabled */
+	u32 datagram_queue_max; /* Max receive queue length */
 
 	/*
 	 * HTTP/3 support (RFC 9114)
@@ -1608,14 +1614,14 @@ struct tquic_sock {
 	 * When enabled, the QUIC connection operates in HTTP/3 mode with
 	 * proper stream type mapping, control streams, and QPACK support.
 	 */
-	bool http3_enabled;		/* SO_TQUIC_HTTP3_ENABLE enabled */
+	bool http3_enabled; /* SO_TQUIC_HTTP3_ENABLE enabled */
 	struct {
-		u32 max_table_capacity;		/* QPACK max table capacity */
-		u32 max_field_section_size;	/* Max header section size */
-		u32 max_blocked_streams;	/* QPACK blocked streams */
-		bool server_push_enabled;	/* Server push support */
+		u32 max_table_capacity; /* QPACK max table capacity */
+		u32 max_field_section_size; /* Max header section size */
+		u32 max_blocked_streams; /* QPACK blocked streams */
+		bool server_push_enabled; /* Server push support */
 	} http3_settings;
-	void *h3_conn;			/* h3_connection pointer when active */
+	void *h3_conn; /* h3_connection pointer when active */
 
 	/*
 	 * Certificate verification settings
@@ -1624,9 +1630,9 @@ struct tquic_sock {
 	 * Settings must be configured before connect().
 	 */
 	struct {
-		u8 verify_mode;		/* TQUIC_VERIFY_* mode */
-		bool verify_hostname;	/* Check hostname matches cert */
-		bool allow_self_signed;	/* Allow self-signed certs (testing) */
+		u8 verify_mode; /* TQUIC_VERIFY_* mode */
+		bool verify_hostname; /* Check hostname matches cert */
+		bool allow_self_signed; /* Allow self-signed certs (testing) */
 		char expected_hostname[256]; /* Override hostname for matching */
 		u8 expected_hostname_len;
 	} cert_verify;
@@ -1658,14 +1664,13 @@ static inline struct tquic_sock *tquic_sk(const struct sock *sk)
 struct tquic_bond_ops {
 	const char *name;
 
-	int (*add_path)(struct tquic_connection *conn,
-			struct sockaddr *local,
+	int (*add_path)(struct tquic_connection *conn, struct sockaddr *local,
 			struct sockaddr *remote);
 	int (*remove_path)(struct tquic_connection *conn, u32 path_id);
-	int (*set_path_priority)(struct tquic_connection *conn,
-				 u32 path_id, u8 priority);
-	int (*get_path_info)(struct tquic_connection *conn,
-			     u32 path_id, struct tquic_path_info *info);
+	int (*set_path_priority)(struct tquic_connection *conn, u32 path_id,
+				 u8 priority);
+	int (*get_path_info)(struct tquic_connection *conn, u32 path_id,
+			     struct tquic_path_info *info);
 
 	struct tquic_path *(*select_path)(struct tquic_connection *conn,
 					  struct sk_buff *skb);
@@ -1684,10 +1689,8 @@ struct tquic_sched_ops {
 	struct tquic_path *(*select)(void *sched_data,
 				     struct tquic_connection *conn,
 				     struct sk_buff *skb);
-	void (*feedback)(void *sched_data,
-			 struct tquic_path *path,
-			 struct sk_buff *skb,
-			 bool success);
+	void (*feedback)(void *sched_data, struct tquic_path *path,
+			 struct sk_buff *skb, bool success);
 
 	struct list_head list;
 };
@@ -1705,7 +1708,7 @@ struct tquic_sched_path_result {
 };
 
 /* Scheduler result flags */
-#define TQUIC_SCHED_F_REDUNDANT		BIT(0)	/* Send on multiple paths */
+#define TQUIC_SCHED_F_REDUNDANT BIT(0) /* Send on multiple paths */
 
 /**
  * struct tquic_mp_sched_ops - Multipath scheduler operations
@@ -1721,8 +1724,7 @@ struct tquic_mp_sched_ops {
 
 	/* Required: select path for next packet */
 	int (*get_path)(struct tquic_connection *conn,
-			struct tquic_sched_path_result *result,
-			u32 flags);
+			struct tquic_sched_path_result *result, u32 flags);
 
 	/* Optional lifecycle hooks */
 	int (*init)(struct tquic_connection *conn);
@@ -1760,21 +1762,21 @@ void tquic_mp_sched_notify_loss(struct tquic_connection *conn,
  * Path events: Base events defined in <uapi/linux/tquic.h>
  * Additional internal-only events for scheduler callbacks:
  */
-#define TQUIC_PATH_EVENT_RTT_UPDATE	100	/* Path RTT estimate updated */
-#define TQUIC_PATH_EVENT_CWND_UPDATE	101	/* Path congestion window changed */
+#define TQUIC_PATH_EVENT_RTT_UPDATE 100 /* Path RTT estimate updated */
+#define TQUIC_PATH_EVENT_CWND_UPDATE 101 /* Path congestion window changed */
 
 /* Scheduler parameter IDs for set_param callback */
-#define TQUIC_SCHED_PARAM_MODE		0
-#define TQUIC_SCHED_PARAM_MIN_PATHS	1
+#define TQUIC_SCHED_PARAM_MODE 0
+#define TQUIC_SCHED_PARAM_MIN_PATHS 1
 
 /* Scheduler context passed to select_path callback */
 struct tquic_sched_ctx {
-	struct sk_buff *skb;		/* Packet to schedule */
-	u64 stream_id;			/* Stream ID (if stream data) */
-	u32 len;			/* Payload length */
-	u8 frame_type;			/* Primary frame type */
-	bool ack_eliciting;		/* Is this an ack-eliciting packet */
-	bool retransmission;		/* Is this a retransmission */
+	struct sk_buff *skb; /* Packet to schedule */
+	u64 stream_id; /* Stream ID (if stream data) */
+	u32 len; /* Payload length */
+	u8 frame_type; /* Primary frame type */
+	bool ack_eliciting; /* Is this an ack-eliciting packet */
+	bool retransmission; /* Is this a retransmission */
 };
 
 /**
@@ -1796,7 +1798,7 @@ struct tquic_sched_stats {
 };
 
 /* Maximum private data size for BPF schedulers */
-#define TQUIC_SCHED_PRIV_SIZE	256
+#define TQUIC_SCHED_PRIV_SIZE 256
 
 /* Forward declaration for path manager */
 struct tquic_pm_state;
@@ -1861,7 +1863,8 @@ struct tquic_scheduler_ops {
 	void (*on_packet_sent)(struct tquic_scheduler *sched,
 			       struct tquic_path *path, u32 bytes);
 	void (*on_packet_acked)(struct tquic_scheduler *sched,
-				struct tquic_path *path, u32 bytes, ktime_t rtt);
+				struct tquic_path *path, u32 bytes,
+				ktime_t rtt);
 	void (*on_packet_lost)(struct tquic_scheduler *sched,
 			       struct tquic_path *path, u32 bytes);
 	void (*on_path_change)(struct tquic_scheduler *sched,
@@ -1870,7 +1873,8 @@ struct tquic_scheduler_ops {
 
 	/* Parameter and statistics */
 	int (*set_param)(struct tquic_scheduler *sched, int param, u64 value);
-	void (*get_stats)(struct tquic_scheduler *sched, void *stats, size_t len);
+	void (*get_stats)(struct tquic_scheduler *sched, void *stats,
+			  size_t len);
 
 	struct list_head list;
 };
@@ -1892,7 +1896,7 @@ struct tquic_cong_ops {
 	void (*on_ack)(void *cong_data, u64 bytes_acked, u64 rtt_us);
 	void (*on_loss)(void *cong_data, u64 bytes_lost);
 	void (*on_rtt_update)(void *cong_data, u64 rtt_us);
-	void (*on_ecn)(void *cong_data, u64 ecn_ce_count);  /* ECN CE handler */
+	void (*on_ecn)(void *cong_data, u64 ecn_ce_count); /* ECN CE handler */
 
 	/*
 	 * Persistent congestion handler (RFC 9002 Section 7.6)
@@ -1901,8 +1905,8 @@ struct tquic_cong_ops {
 	 * should reset cwnd to minimum (2 * max_datagram_size) and
 	 * reset any algorithm-specific state as needed.
 	 */
-	void (*on_persistent_congestion)(void *cong_data,
-					 struct tquic_persistent_cong_info *info);
+	void (*on_persistent_congestion)(
+		void *cong_data, struct tquic_persistent_cong_info *info);
 
 	u64 (*get_cwnd)(void *cong_data);
 	u64 (*get_pacing_rate)(void *cong_data);
@@ -1928,24 +1932,25 @@ void tquic_close(struct sock *sk, long timeout);
 __poll_t tquic_poll(struct file *file, struct socket *sock, poll_table *wait);
 
 /* Connection management */
-struct tquic_connection *tquic_conn_create(struct tquic_sock *tsk, bool is_server);
+struct tquic_connection *tquic_conn_create(struct tquic_sock *tsk,
+					   bool is_server);
 void tquic_conn_destroy(struct tquic_connection *conn);
-int tquic_conn_add_path(struct tquic_connection *conn,
-			struct sockaddr *local, struct sockaddr *remote);
+int tquic_conn_add_path(struct tquic_connection *conn, struct sockaddr *local,
+			struct sockaddr *remote);
 int tquic_conn_remove_path(struct tquic_connection *conn, u32 path_id);
-struct tquic_path *tquic_conn_get_path(struct tquic_connection *conn, u32 path_id);
-void tquic_conn_migrate(struct tquic_connection *conn, struct tquic_path *new_path);
+struct tquic_path *tquic_conn_get_path(struct tquic_connection *conn,
+				       u32 path_id);
+void tquic_conn_migrate(struct tquic_connection *conn,
+			struct tquic_path *new_path);
 struct tquic_connection *tquic_conn_lookup_by_token(struct net *net, u32 token);
 void tquic_conn_flush_paths(struct tquic_connection *conn);
 
 /* RCU-safe path operations (dynamic add/remove) */
 int tquic_conn_add_path_safe(struct tquic_connection *conn,
-			      struct sockaddr *local,
-			      struct sockaddr *remote);
-int tquic_conn_remove_path_safe(struct tquic_connection *conn,
-				 u32 path_id);
+			     struct sockaddr *local, struct sockaddr *remote);
+int tquic_conn_remove_path_safe(struct tquic_connection *conn, u32 path_id);
 struct tquic_path *tquic_conn_get_path_locked(struct tquic_connection *conn,
-					       u32 path_id);
+					      u32 path_id);
 
 /* Path manager connection lifecycle */
 int tquic_pm_conn_init(struct tquic_connection *conn);
@@ -1961,17 +1966,15 @@ void tquic_sched_cleanup(struct tquic_connection *conn);
 
 /* Path validation (PATH_CHALLENGE/RESPONSE) - net/tquic/pm/path_validation.c */
 int tquic_path_start_validation(struct tquic_connection *conn,
-				 struct tquic_path *path);
+				struct tquic_path *path);
 int tquic_path_handle_challenge(struct tquic_connection *conn,
-				 struct tquic_path *path,
-				 const u8 *data);
+				struct tquic_path *path, const u8 *data);
 int tquic_path_handle_response(struct tquic_connection *conn,
-				struct tquic_path *path,
-				const u8 *data);
+			       struct tquic_path *path, const u8 *data);
 void tquic_path_validation_timeout(struct timer_list *t);
 void tquic_path_validation_expired(struct timer_list *t);
 int tquic_path_send_challenge(struct tquic_connection *conn,
-			       struct tquic_path *path);
+			      struct tquic_path *path);
 
 /*
  * Connection State Machine API
@@ -1982,13 +1985,13 @@ struct tquic_cid_entry *tquic_conn_add_local_cid(struct tquic_connection *conn);
 int tquic_conn_add_remote_cid(struct tquic_connection *conn,
 			      const struct tquic_cid *cid, u64 seq,
 			      const u8 *reset_token);
-int tquic_conn_retire_cid(struct tquic_connection *conn, u64 seq, bool is_local);
+int tquic_conn_retire_cid(struct tquic_connection *conn, u64 seq,
+			  bool is_local);
 struct tquic_cid *tquic_conn_get_active_cid(struct tquic_connection *conn);
 
 /* CID manager operations for additional_addresses */
 int tquic_cid_register_remote(struct tquic_cid_manager *mgr,
-			      const struct tquic_cid *cid,
-			      u64 seq_num,
+			      const struct tquic_cid *cid, u64 seq_num,
 			      const u8 *reset_token);
 int tquic_cid_register_local(struct tquic_cid_manager *mgr,
 			     const struct tquic_cid *cid);
@@ -1996,8 +1999,8 @@ int tquic_cid_register_local(struct tquic_cid_manager *mgr,
 /* Stateless reset */
 void tquic_generate_stateless_reset_token(const struct tquic_cid *cid,
 					  const u8 *static_key, u8 *token);
-bool tquic_verify_stateless_reset(struct tquic_connection *conn,
-				  const u8 *data, size_t len);
+bool tquic_verify_stateless_reset(struct tquic_connection *conn, const u8 *data,
+				  size_t len);
 int tquic_send_stateless_reset(struct tquic_connection *conn);
 
 /* Version negotiation (RFC 9000, RFC 9368, RFC 9369) */
@@ -2014,10 +2017,10 @@ int tquic_handle_version_negotiation(struct tquic_connection *conn,
 /* Retry token handling */
 int tquic_generate_retry_token(struct tquic_connection *conn,
 			       const struct tquic_cid *original_dcid,
-			       const struct sockaddr *client_addr,
-			       u8 *token, u32 *token_len);
-int tquic_validate_retry_token(struct tquic_connection *conn,
-			       const u8 *token, u32 token_len,
+			       const struct sockaddr *client_addr, u8 *token,
+			       u32 *token_len);
+int tquic_validate_retry_token(struct tquic_connection *conn, const u8 *token,
+			       u32 token_len,
 			       const struct sockaddr *client_addr,
 			       struct tquic_cid *original_dcid);
 int tquic_send_retry(struct tquic_connection *conn,
@@ -2043,8 +2046,8 @@ int tquic_conn_handle_migration(struct tquic_connection *conn,
 
 /* 0-RTT handling */
 int tquic_conn_enable_0rtt(struct tquic_connection *conn);
-int tquic_conn_send_0rtt(struct tquic_connection *conn,
-			 const void *data, size_t len);
+int tquic_conn_send_0rtt(struct tquic_connection *conn, const void *data,
+			 size_t len);
 void tquic_conn_0rtt_accepted(struct tquic_connection *conn);
 void tquic_conn_0rtt_rejected(struct tquic_connection *conn);
 
@@ -2056,14 +2059,13 @@ int tquic_conn_process_handshake(struct tquic_connection *conn,
 int tquic_conn_set_state(struct tquic_connection *conn,
 			 enum tquic_conn_state new_state,
 			 enum tquic_state_reason reason);
-int tquic_conn_close_with_error(struct tquic_connection *conn,
-				u64 error_code, const char *reason);
-int tquic_conn_close_app(struct tquic_connection *conn,
-			 u64 error_code, const char *reason);
+int tquic_conn_close_with_error(struct tquic_connection *conn, u64 error_code,
+				const char *reason);
+int tquic_conn_close_app(struct tquic_connection *conn, u64 error_code,
+			 const char *reason);
 void tquic_conn_enter_closed(struct tquic_connection *conn);
-int tquic_conn_handle_close(struct tquic_connection *conn,
-			    u64 error_code, u64 frame_type,
-			    const char *reason, bool is_app);
+int tquic_conn_handle_close(struct tquic_connection *conn, u64 error_code,
+			    u64 frame_type, const char *reason, bool is_app);
 int tquic_conn_shutdown(struct tquic_connection *conn);
 
 /* Client/Server connection establishment */
@@ -2096,7 +2098,8 @@ static inline bool tquic_conn_get(struct tquic_connection *conn)
 	return refcount_inc_not_zero(&conn->refcnt);
 }
 
-static inline struct tquic_connection *tquic_sock_conn_get(struct tquic_sock *tsk)
+static inline struct tquic_connection *
+tquic_sock_conn_get(struct tquic_sock *tsk)
 {
 	struct sock *sk = (struct sock *)tsk;
 	struct tquic_connection *conn;
@@ -2161,20 +2164,25 @@ static inline void tquic_path_put(struct tquic_path *path)
 void tquic_conn_state_cleanup(struct tquic_connection *conn);
 
 /* Stream management */
-struct tquic_stream_manager;	/* Forward declaration */
-struct tquic_stream *tquic_stream_open(struct tquic_connection *conn, bool bidi);
+struct tquic_stream_manager; /* Forward declaration */
+struct tquic_stream *tquic_stream_open(struct tquic_connection *conn,
+				       bool bidi);
 struct tquic_stream *tquic_stream_open_incoming(struct tquic_connection *conn,
 						u64 stream_id);
-struct tquic_stream *tquic_conn_stream_lookup(struct tquic_connection *conn, u64 stream_id);
+struct tquic_stream *tquic_conn_stream_lookup(struct tquic_connection *conn,
+					      u64 stream_id);
 bool tquic_stream_get(struct tquic_stream *stream);
 void tquic_stream_put(struct tquic_stream *stream);
 void tquic_stream_close(struct tquic_stream *stream);
-void tquic_stream_destroy(struct tquic_stream_manager *mgr, struct tquic_stream *stream);
-int tquic_stream_send(struct tquic_stream *stream, const void *data, size_t len, bool fin);
+void tquic_stream_destroy(struct tquic_stream_manager *mgr,
+			  struct tquic_stream *stream);
+int tquic_stream_send(struct tquic_stream *stream, const void *data, size_t len,
+		      bool fin);
 int tquic_stream_recv(struct tquic_stream *stream, void *data, size_t len);
 void tquic_stream_reset(struct tquic_stream *stream, u64 error_code);
 
-static inline struct tquic_stream *tquic_sock_default_stream_get(struct tquic_sock *tsk)
+static inline struct tquic_stream *
+tquic_sock_default_stream_get(struct tquic_sock *tsk)
 {
 	struct sock *sk = (struct sock *)tsk;
 	struct tquic_stream *stream;
@@ -2255,11 +2263,13 @@ struct tquic_path *tquic_path_create(struct tquic_connection *conn,
 				     const struct sockaddr_storage *local,
 				     const struct sockaddr_storage *remote);
 int tquic_path_probe(struct tquic_connection *conn, struct tquic_path *path);
-void tquic_path_validate(struct tquic_connection *conn, struct tquic_path *path);
+void tquic_path_validate(struct tquic_connection *conn,
+			 struct tquic_path *path);
 int tquic_path_validate_start(struct tquic_path *path);
 int tquic_path_challenge(struct tquic_path *path);
 void tquic_path_destroy(struct tquic_path *path);
-void tquic_path_update_stats(struct tquic_path *path, struct sk_buff *skb, bool success);
+void tquic_path_update_stats(struct tquic_path *path, struct sk_buff *skb,
+			     bool success);
 int tquic_path_set_weight(struct tquic_path *path, u8 weight);
 
 /*
@@ -2269,12 +2279,13 @@ int tquic_path_set_weight(struct tquic_path *path, u8 weight);
  * marking the ECN field in the IP header. QUIC validates ECN capability
  * per-path and uses feedback from ACK_ECN frames.
  */
-struct tquic_ack_frame;  /* Forward declaration */
+struct tquic_ack_frame; /* Forward declaration */
 
 void tquic_ecn_init(struct tquic_path *path);
 u8 tquic_ecn_get_marking(const struct tquic_path *path);
 void tquic_ecn_on_packet_sent(struct tquic_path *path, u8 ecn_marking);
-int tquic_ecn_validate_ack(struct tquic_path *path, struct tquic_ack_frame *ack);
+int tquic_ecn_validate_ack(struct tquic_path *path,
+			   struct tquic_ack_frame *ack);
 void tquic_ecn_process_ce(struct tquic_connection *conn,
 			  struct tquic_path *path, u64 ce_count);
 int tquic_ecn_mark_packet(struct sk_buff *skb, u8 ecn_marking);
@@ -2283,7 +2294,8 @@ void tquic_ecn_disable(struct tquic_path *path);
 bool tquic_ecn_is_capable(struct tquic_path *path);
 
 /* Bonding state machine (Phase 05) */
-int tquic_bond_set_path_weight(struct tquic_connection *conn, u32 path_id, u32 weight);
+int tquic_bond_set_path_weight(struct tquic_connection *conn, u32 path_id,
+			       u32 weight);
 u32 tquic_bond_get_path_weight(struct tquic_connection *conn, u32 path_id);
 
 /* Packet transmission (tquic_output.c) */
@@ -2343,8 +2355,8 @@ void tquic_offload_exit(void);
  *          -ENOTCONN if connection not established, -EOPNOTSUPP if
  *          datagrams not negotiated, other negative errno on error.
  */
-int tquic_send_datagram(struct tquic_connection *conn,
-			const void *data, size_t len);
+int tquic_send_datagram(struct tquic_connection *conn, const void *data,
+			size_t len);
 
 /**
  * tquic_recv_datagram - Receive a DATAGRAM frame
@@ -2361,8 +2373,8 @@ int tquic_send_datagram(struct tquic_connection *conn,
  *          and MSG_DONTWAIT set, -EOPNOTSUPP if datagrams not negotiated,
  *          other negative errno on error.
  */
-int tquic_recv_datagram(struct tquic_connection *conn,
-			void *data, size_t len, int flags);
+int tquic_recv_datagram(struct tquic_connection *conn, void *data, size_t len,
+			int flags);
 
 /**
  * tquic_datagram_max_size - Get maximum datagram payload size
@@ -2403,22 +2415,22 @@ u32 tquic_datagram_queue_len(struct tquic_connection *conn);
 int tquic_xmit(struct tquic_connection *conn, struct tquic_stream *stream,
 	       const u8 *data, size_t len, bool fin);
 int tquic_xmit_close(struct tquic_connection *conn, u64 error_code,
-		      bool is_app);
+		     bool is_app);
 int tquic_send_ack(struct tquic_connection *conn, struct tquic_path *path,
 		   u64 largest_ack, u64 ack_delay, u64 ack_range);
 int tquic_send_ping(struct tquic_connection *conn, struct tquic_path *path);
 int tquic_flow_send_max_data(struct tquic_connection *conn,
 			     struct tquic_path *path, u64 max_data);
 int tquic_flow_send_max_stream_data(struct tquic_connection *conn,
-				    struct tquic_path *path,
-				    u64 stream_id, u64 max_data);
-int tquic_send_connection_close(struct tquic_connection *conn,
-				u64 error_code, const char *reason);
+				    struct tquic_path *path, u64 stream_id,
+				    u64 max_data);
+int tquic_send_connection_close(struct tquic_connection *conn, u64 error_code,
+				const char *reason);
 int tquic_output_flush(struct tquic_connection *conn);
 int tquic_output_flush_crypto(struct tquic_connection *conn);
 int tquic_send_handshake_done(struct tquic_connection *conn);
-int tquic_output_packet(struct tquic_connection *conn,
-			struct tquic_path *path, struct sk_buff *skb);
+int tquic_output_packet(struct tquic_connection *conn, struct tquic_path *path,
+			struct sk_buff *skb);
 
 /* Pacing */
 struct tquic_pacing_state *tquic_pacing_init(struct tquic_connection *conn,
@@ -2432,10 +2444,10 @@ struct tquic_gro_state;
 int tquic_udp_recv(struct sock *sk, struct sk_buff *skb);
 int tquic_setup_udp_encap(struct sock *sk);
 void tquic_clear_udp_encap(struct sock *sk);
-int tquic_udp_encap_init(struct tquic_sock *tsk);	/* Initialize UDP encap for sock */
+int tquic_udp_encap_init(
+	struct tquic_sock *tsk); /* Initialize UDP encap for sock */
 int tquic_process_coalesced(struct tquic_connection *conn,
-			    struct tquic_path *path,
-			    u8 *data, size_t total_len,
+			    struct tquic_path *path, u8 *data, size_t total_len,
 			    struct sockaddr_storage *src_addr);
 
 /* GRO handling */
@@ -2458,12 +2470,13 @@ struct tquic_crypto_state;
  *
  * tquic_crypto_init() is the legacy wrapper that defaults to QUIC v1.
  */
-struct tquic_crypto_state *tquic_crypto_init_versioned(const struct tquic_cid *dcid,
-						       bool is_server, u32 version);
+struct tquic_crypto_state *
+tquic_crypto_init_versioned(const struct tquic_cid *dcid, bool is_server,
+			    u32 version);
 struct tquic_crypto_state *tquic_crypto_init(const struct tquic_cid *dcid,
 					     bool is_server);
 void tquic_crypto_cleanup(struct tquic_crypto_state *crypto);
-void tquic_crypto_destroy(void *crypto);		/* Destroy per-level crypto */
+void tquic_crypto_destroy(void *crypto); /* Destroy per-level crypto */
 int tquic_crypto_derive_initial_secrets(struct tquic_connection *conn,
 					const struct tquic_cid *dcid);
 
@@ -2472,16 +2485,14 @@ u32 tquic_crypto_get_version(struct tquic_crypto_state *crypto);
 void tquic_crypto_set_version(struct tquic_crypto_state *crypto, u32 version);
 
 /* Packet encryption/decryption - enc_level selects which key set to use */
-int tquic_encrypt_packet(struct tquic_crypto_state *crypto,
-			 int enc_level,
-			 u8 *header, size_t header_len,
-			 u8 *payload, size_t payload_len,
-			 u64 pkt_num, u8 *out, size_t *out_len);
-int tquic_decrypt_packet(struct tquic_crypto_state *crypto,
-			 int enc_level,
-			 const u8 *header, size_t header_len,
-			 u8 *payload, size_t payload_len,
-			 u64 pkt_num, u8 *out, size_t *out_len);
+int tquic_encrypt_packet(struct tquic_crypto_state *crypto, int enc_level,
+			 u8 *header, size_t header_len, u8 *payload,
+			 size_t payload_len, u64 pkt_num, u8 *out,
+			 size_t *out_len);
+int tquic_decrypt_packet(struct tquic_crypto_state *crypto, int enc_level,
+			 const u8 *header, size_t header_len, u8 *payload,
+			 size_t payload_len, u64 pkt_num, u8 *out,
+			 size_t *out_len);
 bool tquic_crypto_handshake_complete(struct tquic_crypto_state *crypto);
 
 /*
@@ -2586,8 +2597,8 @@ int tquic_connect_socket(struct socket *sock, tquic_sockaddr_t *uaddr,
 int tquic_accept_socket(struct socket *sock, struct socket *newsock,
 			struct proto_accept_arg *arg);
 #else
-int tquic_accept_socket(struct socket *sock, struct socket *newsock,
-			int flags, bool kern);
+int tquic_accept_socket(struct socket *sock, struct socket *newsock, int flags,
+			bool kern);
 #endif
 int tquic_sock_getname(struct socket *sock, struct sockaddr *addr, int peer);
 __poll_t tquic_poll_socket(struct file *file, struct socket *sock,
@@ -2596,11 +2607,11 @@ int tquic_sock_listen(struct socket *sock, int backlog);
 int tquic_sock_shutdown(struct socket *sock, int how);
 int tquic_sock_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg);
 int tquic_sendmsg_socket(struct socket *sock, struct msghdr *msg, size_t len);
-int tquic_recvmsg_socket(struct socket *sock, struct msghdr *msg,
-			 size_t len, int flags);
+int tquic_recvmsg_socket(struct socket *sock, struct msghdr *msg, size_t len,
+			 int flags);
 ssize_t tquic_splice_read_socket(struct socket *sock, loff_t *ppos,
-				 struct pipe_inode_info *pipe,
-				 size_t len, unsigned int flags);
+				 struct pipe_inode_info *pipe, size_t len,
+				 unsigned int flags);
 
 /* Diagnostics (ss tool integration) */
 int __init tquic_diag_init(void);
@@ -2643,8 +2654,7 @@ void tquic_net_update_tx_stats(struct net *net, u64 bytes);
 void tquic_net_update_rx_stats(struct net *net, u64 bytes);
 
 /* Netlink path event notification */
-int tquic_nl_path_event(struct tquic_connection *conn,
-			struct tquic_path *path,
+int tquic_nl_path_event(struct tquic_connection *conn, struct tquic_path *path,
 			enum tquic_path_event event);
 
 /*
@@ -2663,10 +2673,10 @@ enum tquic_packet_type {
 };
 
 /* Stateless reset token length */
-#define TQUIC_STATELESS_RESET_TOKEN_LEN	16
+#define TQUIC_STATELESS_RESET_TOKEN_LEN 16
 
 /* Minimum initial packet size */
-#define TQUIC_MIN_INITIAL_PACKET_SIZE	1200
+#define TQUIC_MIN_INITIAL_PACKET_SIZE 1200
 
 /**
  * struct tquic_packet_header - Parsed packet header
@@ -2757,54 +2767,45 @@ u64 tquic_pn_decode(const u8 *data, int len, u64 largest_pn);
 
 /* Header parsing */
 int tquic_parse_long_header(const u8 *data, size_t len,
-			    struct tquic_packet_header *hdr,
-			    u64 largest_pn);
+			    struct tquic_packet_header *hdr, u64 largest_pn);
 int tquic_parse_short_header(const u8 *data, size_t len,
-			     struct tquic_packet_header *hdr,
-			     u8 dcid_len, u64 largest_pn);
+			     struct tquic_packet_header *hdr, u8 dcid_len,
+			     u64 largest_pn);
 bool tquic_is_long_header(const u8 *data, size_t len);
 int tquic_get_packet_type(const u8 *data, size_t len);
 
 /* Version negotiation */
-int tquic_build_version_negotiation(const u8 *dcid, u8 dcid_len,
-				    const u8 *scid, u8 scid_len,
-				    const u32 *versions, int num_versions,
-				    u8 *buf, size_t buflen);
-int tquic_parse_version_negotiation(const u8 *data, size_t len,
-				    u32 *versions, int max_versions,
-				    int *num_versions);
+int tquic_build_version_negotiation(const u8 *dcid, u8 dcid_len, const u8 *scid,
+				    u8 scid_len, const u32 *versions,
+				    int num_versions, u8 *buf, size_t buflen);
+int tquic_parse_version_negotiation(const u8 *data, size_t len, u32 *versions,
+				    int max_versions, int *num_versions);
 
 /* Stateless reset */
 int tquic_build_stateless_reset(const u8 *token, u8 *buf, size_t buflen);
-bool tquic_is_stateless_reset(const u8 *data, size_t len,
-			      const u8 (*tokens)[TQUIC_STATELESS_RESET_TOKEN_LEN],
-			      int num_tokens);
+bool tquic_is_stateless_reset(
+	const u8 *data, size_t len,
+	const u8 (*tokens)[TQUIC_STATELESS_RESET_TOKEN_LEN], int num_tokens);
 
 /* Retry packets */
-int tquic_build_retry(u32 version, const u8 *dcid, u8 dcid_len,
-		      const u8 *scid, u8 scid_len,
-		      const u8 *odcid, u8 odcid_len,
-		      const u8 *token, size_t token_len,
-		      u8 *buf, size_t buflen);
+int tquic_build_retry(u32 version, const u8 *dcid, u8 dcid_len, const u8 *scid,
+		      u8 scid_len, const u8 *odcid, u8 odcid_len,
+		      const u8 *token, size_t token_len, u8 *buf,
+		      size_t buflen);
 
 /* Packet construction */
 int tquic_build_long_header(enum tquic_packet_type type, u32 version,
-			    const u8 *dcid, u8 dcid_len,
-			    const u8 *scid, u8 scid_len,
-			    const u8 *token, size_t token_len,
-			    u64 pn, int pn_len,
-			    const u8 *payload, size_t payload_len,
-			    u8 *buf, size_t buflen);
-int tquic_build_short_header(const u8 *dcid, u8 dcid_len,
-			     u64 pn, int pn_len,
-			     u8 key_phase, u8 spin_bit,
-			     const u8 *payload, size_t payload_len,
-			     u8 *buf, size_t buflen);
+			    const u8 *dcid, u8 dcid_len, const u8 *scid,
+			    u8 scid_len, const u8 *token, size_t token_len,
+			    u64 pn, int pn_len, const u8 *payload,
+			    size_t payload_len, u8 *buf, size_t buflen);
+int tquic_build_short_header(const u8 *dcid, u8 dcid_len, u64 pn, int pn_len,
+			     u8 key_phase, u8 spin_bit, const u8 *payload,
+			     size_t payload_len, u8 *buf, size_t buflen);
 
 /* Coalesced packet handling */
-int tquic_split_coalesced(const u8 *data, size_t len,
-			  const u8 **packets, size_t *lengths,
-			  int max_packets, int *num_packets);
+int tquic_split_coalesced(const u8 *data, size_t len, const u8 **packets,
+			  size_t *lengths, int max_packets, int *num_packets);
 int tquic_coalesce_packets(const u8 **packets, const size_t *lengths,
 			   int num_packets, u8 *buf, size_t buflen);
 
@@ -2817,7 +2818,8 @@ u32 tquic_get_version(const u8 *data, size_t len);
 /* Packet structure management */
 struct tquic_packet *tquic_packet_alloc(gfp_t gfp);
 void tquic_packet_free(struct tquic_packet *pkt);
-struct tquic_packet *tquic_packet_clone(const struct tquic_packet *pkt, gfp_t gfp);
+struct tquic_packet *tquic_packet_clone(const struct tquic_packet *pkt,
+					gfp_t gfp);
 const char *tquic_packet_type_str(enum tquic_packet_type type);
 int tquic_packet_pn_space(enum tquic_packet_type type);
 
@@ -2835,8 +2837,10 @@ void __exit tquic_packet_exit(void);
 struct sk_buff *tquic_packet_build(struct tquic_connection *conn, int pn_space);
 int tquic_packet_process(struct tquic_connection *conn, struct sk_buff *skb);
 int tquic_packet_parse(struct sk_buff *skb, struct tquic_packet *pkt);
-int tquic_frame_process_all(struct tquic_connection *conn, struct sk_buff *skb, u8 level);
-int tquic_frame_process_one(struct tquic_connection *conn, const u8 *data, int len, u8 level);
+int tquic_frame_process_all(struct tquic_connection *conn, struct sk_buff *skb,
+			    u8 level);
+int tquic_frame_process_one(struct tquic_connection *conn, const u8 *data,
+			    int len, u8 level);
 int tquic_udp_send(struct tquic_sock *tsk, struct sk_buff *skb,
 		   struct tquic_path *path);
 
@@ -2845,11 +2849,11 @@ int tquic_udp_send(struct tquic_sock *tsk, struct sk_buff *skb,
  */
 
 /* CID management constants */
-#define TQUIC_RESET_TOKEN_LEN		16
+#define TQUIC_RESET_TOKEN_LEN 16
 #ifndef TQUIC_CID_POOL_MIN
-#define TQUIC_CID_POOL_MIN		4
+#define TQUIC_CID_POOL_MIN 4
 #endif
-#define TQUIC_CID_POOL_MAX		16
+#define TQUIC_CID_POOL_MAX 16
 
 /* Forward declarations for CID management */
 struct tquic_cid_manager;
@@ -2873,20 +2877,20 @@ struct tquic_connection *tquic_cid_lookup(const struct tquic_cid *cid);
 struct tquic_cid_entry *tquic_cid_lookup_entry(const struct tquic_cid *cid);
 
 /* CID manager lifecycle */
-struct tquic_cid_manager *tquic_cid_manager_create(
-	struct tquic_connection *conn, u8 cid_len);
+struct tquic_cid_manager *
+tquic_cid_manager_create(struct tquic_connection *conn, u8 cid_len);
 void tquic_cid_manager_destroy(struct tquic_cid_manager *mgr);
 
 /* CID pool management */
 int tquic_cid_pool_replenish(struct tquic_cid_manager *mgr);
-struct tquic_cid_entry *tquic_cid_get_unused_local(struct tquic_cid_manager *mgr);
+struct tquic_cid_entry *
+tquic_cid_get_unused_local(struct tquic_cid_manager *mgr);
 
 /* NEW_CONNECTION_ID frame handling */
 int tquic_cid_build_new_cid_frame(struct tquic_cid_manager *mgr,
 				  struct tquic_new_cid_frame *frame);
-int tquic_cid_handle_new_cid(struct tquic_cid_manager *mgr,
-			     u64 seq_num, u64 retire_prior_to,
-			     const struct tquic_cid *cid,
+int tquic_cid_handle_new_cid(struct tquic_cid_manager *mgr, u64 seq_num,
+			     u64 retire_prior_to, const struct tquic_cid *cid,
 			     const u8 *reset_token);
 
 /* RETIRE_CONNECTION_ID frame handling */
@@ -2918,22 +2922,22 @@ int tquic_cid_handle_preferred_addr(struct tquic_cid_manager *mgr,
 				    const u8 *reset_token);
 
 /* Active CID accessors */
-const struct tquic_cid *tquic_cid_get_active_local(struct tquic_cid_manager *mgr);
-const struct tquic_cid *tquic_cid_get_active_remote(struct tquic_cid_manager *mgr);
+const struct tquic_cid *
+tquic_cid_get_active_local(struct tquic_cid_manager *mgr);
+const struct tquic_cid *
+tquic_cid_get_active_remote(struct tquic_cid_manager *mgr);
 int tquic_cid_set_active_remote(struct tquic_cid_manager *mgr,
 				const struct tquic_cid *cid);
 
 /* Stateless reset handling */
 int tquic_cid_get_reset_token(struct tquic_cid_manager *mgr,
-			      const struct tquic_cid *cid,
-			      u8 *token);
+			      const struct tquic_cid *cid, u8 *token);
 bool tquic_cid_check_stateless_reset(struct tquic_cid_manager *mgr,
 				     const u8 *token);
 
 /* Statistics */
-void tquic_cid_get_stats(struct tquic_cid_manager *mgr,
-			 u32 *local_count, u32 *remote_count,
-			 u64 *local_seq);
+void tquic_cid_get_stats(struct tquic_cid_manager *mgr, u32 *local_count,
+			 u32 *remote_count, u64 *local_seq);
 
 /* CID subsystem initialization */
 int __init tquic_cid_init(void);
@@ -2943,7 +2947,7 @@ void __exit tquic_cid_exit(void);
 void tquic_bond_path_failed(struct tquic_connection *conn,
 			    struct tquic_path *path);
 void tquic_bond_interface_down(struct tquic_connection *conn,
-				struct net_device *dev);
+			       struct net_device *dev);
 void tquic_bond_path_recovered(struct tquic_connection *conn,
 			       struct tquic_path *path);
 
@@ -2963,8 +2967,9 @@ int tquic_bond_get_stats(struct tquic_connection *conn,
 int tquic_register_listener(struct sock *sk);
 void tquic_unregister_listener(struct sock *sk);
 struct sock *tquic_lookup_listener(const struct sockaddr_storage *local_addr);
-struct sock *tquic_lookup_listener_net(struct net *net,
-				       const struct sockaddr_storage *local_addr);
+struct sock *
+tquic_lookup_listener_net(struct net *net,
+			  const struct sockaddr_storage *local_addr);
 
 /* UDP socket lifecycle */
 void tquic_udp_sock_put(struct tquic_udp_sock *us);
@@ -2975,8 +2980,7 @@ int tquic_udp_connect(struct tquic_udp_sock *us,
 
 /* Receive path - deliver packets to connection */
 int tquic_udp_deliver_to_conn(struct tquic_connection *conn,
-			      struct tquic_path *path,
-			      struct sk_buff *skb);
+			      struct tquic_path *path, struct sk_buff *skb);
 
 /* Transmit path */
 int tquic_udp_xmit(struct tquic_udp_sock *us, struct sk_buff *skb);
@@ -2992,8 +2996,7 @@ int tquic_udp_create_path_socket(struct tquic_connection *conn,
 				 struct tquic_path *path);
 void tquic_udp_destroy_path_socket(struct tquic_path *path);
 int tquic_udp_xmit_on_path(struct tquic_connection *conn,
-			   struct tquic_path *path,
-			   struct sk_buff *skb);
+			   struct tquic_path *path, struct sk_buff *skb);
 
 /* inet_connection_sock integration */
 int tquic_udp_icsk_bind(struct sock *sk, struct sockaddr *uaddr, int addr_len);
@@ -3021,24 +3024,24 @@ struct tquic_recovery_state;
  * state across the full loss-detection and retransmission lifecycle.
  */
 enum tquic_pkt_state {
-	TQUIC_PKT_OUTSTANDING,    /* Awaiting ACK */
-	TQUIC_PKT_ACKED,          /* ACKed by peer */
-	TQUIC_PKT_LOST,           /* Declared lost */
-	TQUIC_PKT_RETRANSMITTED,  /* Retransmission scheduled */
+	TQUIC_PKT_OUTSTANDING, /* Awaiting ACK */
+	TQUIC_PKT_ACKED, /* ACKed by peer */
+	TQUIC_PKT_LOST, /* Declared lost */
+	TQUIC_PKT_RETRANSMITTED, /* Retransmission scheduled */
 };
 
 /*
  * Packet metadata flags for struct tquic_sent_packet::flags.
  * Used by ack.c to track per-packet properties without a bool-per-field.
  */
-#define TQUIC_PKT_FLAG_ACK_ELICITING	BIT(0)
-#define TQUIC_PKT_FLAG_IN_FLIGHT	BIT(1)
-#define TQUIC_PKT_FLAG_HAS_CRYPTO	BIT(2)
-#define TQUIC_PKT_FLAG_RETRANSMITTABLE	BIT(3)
-#define TQUIC_PKT_FLAG_PATH_CHALLENGE	BIT(4)
-#define TQUIC_PKT_FLAG_PATH_RESPONSE	BIT(5)
-#define TQUIC_PKT_FLAG_MTU_PROBE	BIT(6)
-#define TQUIC_PKT_FLAG_ECN_CE		BIT(7)
+#define TQUIC_PKT_FLAG_ACK_ELICITING BIT(0)
+#define TQUIC_PKT_FLAG_IN_FLIGHT BIT(1)
+#define TQUIC_PKT_FLAG_HAS_CRYPTO BIT(2)
+#define TQUIC_PKT_FLAG_RETRANSMITTABLE BIT(3)
+#define TQUIC_PKT_FLAG_PATH_CHALLENGE BIT(4)
+#define TQUIC_PKT_FLAG_PATH_RESPONSE BIT(5)
+#define TQUIC_PKT_FLAG_MTU_PROBE BIT(6)
+#define TQUIC_PKT_FLAG_ECN_CE BIT(7)
 
 /**
  * struct tquic_sent_packet - Canonical metadata for a sent QUIC packet
@@ -3075,40 +3078,40 @@ enum tquic_pkt_state {
  */
 struct tquic_sent_packet {
 	/* Tree / list linkage */
-	struct rb_node		node;
-	struct list_head	list;
-	struct list_head	stream_data;   /* ack.c: stream ranges in pkt */
+	struct rb_node node;
+	struct list_head list;
+	struct list_head stream_data; /* ack.c: stream ranges in pkt */
 
 	/* Identification */
-	u64			pn;            /* QUIC packet number */
-	u8			pn_space;      /* PN space (Initial/HS/App) */
-	u32			path_id;       /* Multipath path identifier */
+	u64 pn; /* QUIC packet number */
+	u8 pn_space; /* PN space (Initial/HS/App) */
+	u32 path_id; /* Multipath path identifier */
 
 	/* Timing */
-	ktime_t			sent_time;     /* Time of transmission */
+	ktime_t sent_time; /* Time of transmission */
 
 	/* Size — both names in active use across the codebase */
-	u32			sent_bytes;    /* On-wire byte count */
-	u32			size;          /* Alias for sent_bytes */
+	u32 sent_bytes; /* On-wire byte count */
+	u32 size; /* Alias for sent_bytes */
 
 	/* Loss-detection state (tquic_timer.c uses state enum; quic_loss.c /
 	 * quic_output.c use the retransmitted bool; they track the same packet
 	 * through non-overlapping code paths) */
-	enum tquic_pkt_state	state;
-	bool			ack_eliciting; /* Peer must ACK */
-	bool			in_flight;     /* Counts vs congestion window */
-	bool			retransmitted; /* Retransmission scheduled */
+	enum tquic_pkt_state state;
+	bool ack_eliciting; /* Peer must ACK */
+	bool in_flight; /* Counts vs congestion window */
+	bool retransmitted; /* Retransmission scheduled */
 
 	/* Flag bitmask (ack.c path, TQUIC_PKT_FLAG_* above) */
-	u32			flags;
+	u32 flags;
 
 	/* Frame / retransmit metadata */
-	u32			frames;        /* Frame type bitmask */
-	u64			largest_acked; /* Largest ACK in this packet */
-	u64			retrans_of;    /* Original pkt_num, or 0 */
+	u32 frames; /* Frame type bitmask */
+	u64 largest_acked; /* Largest ACK in this packet */
+	u64 retrans_of; /* Original pkt_num, or 0 */
 
 	/* Payload for retransmission */
-	struct sk_buff		*skb;
+	struct sk_buff *skb;
 };
 
 /**
@@ -3120,49 +3123,51 @@ struct tquic_sent_packet {
 #ifndef TQUIC_PN_SPACE_DEFINED
 #define TQUIC_PN_SPACE_DEFINED
 struct tquic_pn_space {
-	u64 largest_acked;		/* Largest ACKed packet number */
-	u64 largest_sent;		/* Largest sent packet number */
-	u64 next_pn;			/* Next packet number to use */
-	u64 largest_recv_pn;		/* Largest received packet number */
-	ktime_t loss_time;		/* Time-based loss detection */
-	ktime_t last_ack_time;		/* Last ACK sent time */
-	u32 ack_eliciting_in_flight;	/* ACK-eliciting packets in flight */
+	u64 largest_acked; /* Largest ACKed packet number */
+	u64 largest_sent; /* Largest sent packet number */
+	u64 next_pn; /* Next packet number to use */
+	u64 largest_recv_pn; /* Largest received packet number */
+	ktime_t loss_time; /* Time-based loss detection */
+	ktime_t last_ack_time; /* Last ACK sent time */
+	u32 ack_eliciting_in_flight; /* ACK-eliciting packets in flight */
 
-	struct rb_root sent_packets;	/* RB-tree of sent packets */
-	struct list_head sent_list;	/* Time-ordered list of sent packets */
-	struct list_head lost_packets;	/* Packets detected as lost */
+	struct rb_root sent_packets; /* RB-tree of sent packets */
+	struct list_head sent_list; /* Time-ordered list of sent packets */
+	struct list_head lost_packets; /* Packets detected as lost */
 
-	u64 *pending_acks;		/* Packet numbers to ACK */
-	u32 pending_ack_count;		/* Number of pending ACKs */
-	u32 pending_ack_capacity;	/* Capacity of pending_acks array */
+	u64 *pending_acks; /* Packet numbers to ACK */
+	u32 pending_ack_count; /* Number of pending ACKs */
+	u32 pending_ack_capacity; /* Capacity of pending_acks array */
 
 	struct {
 		u64 largest_pn;
-		u64 ranges[64];		/* ACK ranges */
+		u64 ranges[64]; /* ACK ranges */
 		u32 num_ranges;
-	} recv_ack_info;		/* Received packet tracking for ACKs */
-	u8 keys_available:1;		/* Crypto keys available */
-	u8 keys_discarded:1;		/* Keys have been discarded */
+	} recv_ack_info; /* Received packet tracking for ACKs */
+	u8 keys_available : 1; /* Crypto keys available */
+	u8 keys_discarded : 1; /* Keys have been discarded */
 
-	spinlock_t lock;		/* Per-space lock */
+	spinlock_t lock; /* Per-space lock */
 };
 #endif /* TQUIC_PN_SPACE_DEFINED */
 
 /* RTT measurement and loss detection */
 u32 tquic_rtt_pto(struct tquic_rtt_state *rtt);
-int tquic_pn_space_get_sent_time(struct tquic_pn_space *pn_space,
-				 u64 pkt_num, ktime_t *sent_time);
+int tquic_pn_space_get_sent_time(struct tquic_pn_space *pn_space, u64 pkt_num,
+				 ktime_t *sent_time);
 
 /* Crypto state management */
 void tquic_crypto_destroy(void *crypto);
 
 /* Timer state lifecycle */
-struct tquic_timer_state *tquic_timer_state_alloc(struct tquic_connection *conn);
+struct tquic_timer_state *
+tquic_timer_state_alloc(struct tquic_connection *conn);
 void tquic_timer_state_free(struct tquic_timer_state *ts);
 void tquic_timer_cancel_work(struct tquic_timer_state *ts);
 
 /* Generic timer set function (from quic_timer.c) */
-void tquic_timer_set(struct tquic_connection *conn, u8 timer_type, ktime_t when);
+void tquic_timer_set(struct tquic_connection *conn, u8 timer_type,
+		     ktime_t when);
 void tquic_timer_cancel(struct tquic_connection *conn, u8 timer_type);
 
 /* Idle timeout management */
@@ -3187,7 +3192,8 @@ void tquic_timer_set_keepalive(struct tquic_timer_state *ts, u32 interval_ms);
 void tquic_timer_reset_keepalive(struct tquic_timer_state *ts);
 
 /* Packet pacing (BBR support) */
-void tquic_timer_schedule_pacing(struct tquic_timer_state *ts, u32 bytes_to_send);
+void tquic_timer_schedule_pacing(struct tquic_timer_state *ts,
+				 u32 bytes_to_send);
 void tquic_timer_set_pacing_rate(struct tquic_timer_state *ts, u64 rate);
 bool tquic_timer_can_send_paced(struct tquic_timer_state *ts);
 
@@ -3199,14 +3205,14 @@ void tquic_timer_path_validated(struct tquic_connection *conn,
 
 /* Migration/session helpers (tquic_migration.c) */
 int tquic_migration_get_status(struct tquic_connection *conn,
-			      struct tquic_migrate_info *info);
+			       struct tquic_migrate_info *info);
 void tquic_migration_cleanup(struct tquic_connection *conn);
 void tquic_session_cleanup(struct tquic_connection *conn);
 
 /* Packet tracking for recovery */
 int tquic_timer_on_packet_sent(struct tquic_timer_state *ts, int pn_space,
 			       u64 pkt_num, u32 bytes, bool ack_eliciting,
-			       bool in_flight, u32 frames);
+			       bool in_flight, u32 frames, u32 path_id);
 
 /* ACK synchronization — call after core/quic_loss.c processes an ACK */
 void tquic_timer_on_ack_processed(struct tquic_timer_state *ts, int pn_space,
@@ -3229,9 +3235,9 @@ void tquic_timer_exit(void);
 /* PMTUD state machine states - defined in tquic_pmtud.h */
 
 /* PMTUD constants */
-#define TQUIC_PMTUD_BASE_MTU		1200	/* QUIC minimum MTU */
-#define TQUIC_PMTUD_MAX_MTU_DEFAULT	1500	/* Ethernet MTU */
-#define TQUIC_PMTUD_MAX_MTU_JUMBO	9000	/* Jumbo frames */
+#define TQUIC_PMTUD_BASE_MTU 1200 /* QUIC minimum MTU */
+#define TQUIC_PMTUD_MAX_MTU_DEFAULT 1500 /* Ethernet MTU */
+#define TQUIC_PMTUD_MAX_MTU_JUMBO 9000 /* Jumbo frames */
 
 /* PMTUD path lifecycle */
 int tquic_pmtud_init_path(struct tquic_path *path);
@@ -3382,8 +3388,7 @@ int tquic_coupled_get_stats(struct tquic_connection *conn,
 			    struct tquic_coupled_stats *stats);
 
 /* Get per-subflow statistics */
-int tquic_coupled_get_subflow_stats(struct tquic_connection *conn,
-				    u32 path_id,
+int tquic_coupled_get_subflow_stats(struct tquic_connection *conn, u32 path_id,
 				    struct tquic_subflow_stats *stats);
 
 /* Enable/disable CUBIC integration in coupled CC */
@@ -3397,7 +3402,6 @@ int tquic_coupled_set_sbd(struct tquic_connection *conn, bool enable);
 
 /* Force recalculation of global alpha */
 int tquic_coupled_force_alpha_update(struct tquic_connection *conn);
-
 
 /*
  * IPv6 Support for WAN Bonding
@@ -3415,8 +3419,8 @@ int tquic_coupled_force_alpha_update(struct tquic_connection *conn);
  * @inet6: IPv6 specific info
  */
 struct tquic6_sock {
-	struct tquic_sock	tquic;
-	struct ipv6_pinfo	inet6;
+	struct tquic_sock tquic;
+	struct ipv6_pinfo inet6;
 };
 
 static inline struct ipv6_pinfo *tquic6_inet6_sk(struct sock *sk)
@@ -3430,12 +3434,10 @@ void __exit tquic6_exit(void);
 
 /* IPv6 address discovery for bonding */
 int tquic_v6_discover_addresses(struct tquic_connection *conn,
-				struct sockaddr_storage *addrs,
-				int max_addrs);
+				struct sockaddr_storage *addrs, int max_addrs);
 
 /* IPv6 path management */
-int tquic_v6_add_path(struct tquic_connection *conn,
-		      struct sockaddr_in6 *local,
+int tquic_v6_add_path(struct tquic_connection *conn, struct sockaddr_in6 *local,
 		      struct sockaddr_in6 *remote);
 
 /**
@@ -3456,8 +3458,8 @@ struct tquic_happy_eyeballs_config {
 };
 
 /* Happy Eyeballs defaults per RFC 8305 */
-#define TQUIC_HE_RESOLUTION_DELAY_MS	50
-#define TQUIC_HE_CONNECTION_TIMEOUT_MS	30000
+#define TQUIC_HE_RESOLUTION_DELAY_MS 50
+#define TQUIC_HE_CONNECTION_TIMEOUT_MS 30000
 
 /* IPv6 flow label utilities */
 static inline __be32 tquic_v6_make_flowlabel(struct sock *sk,
@@ -3493,7 +3495,8 @@ static inline bool tquic_path_is_v4mapped(const struct tquic_path *path)
 }
 
 /* Get effective address family for routing decisions */
-static inline sa_family_t tquic_path_effective_family(const struct tquic_path *path)
+static inline sa_family_t
+tquic_path_effective_family(const struct tquic_path *path)
 {
 	if (tquic_path_is_v4mapped(path))
 		return AF_INET;
@@ -3525,7 +3528,7 @@ static inline u32 tquic_v6_path_mtu(struct sock *sk, u32 dst_mtu)
 		overhead += tquic_v6_ext_hdr_overhead(sk);
 
 	if (dst_mtu <= overhead)
-		return 1200;  /* QUIC minimum */
+		return 1200; /* QUIC minimum */
 
 	return dst_mtu - overhead;
 }
@@ -3537,8 +3540,13 @@ void tquic_bond_path_recovered(struct tquic_connection *conn,
 #else /* !CONFIG_IPV6 */
 
 /* Stubs when IPv6 is not enabled */
-static inline int tquic6_init(void) { return 0; }
-static inline void tquic6_exit(void) { }
+static inline int tquic6_init(void)
+{
+	return 0;
+}
+static inline void tquic6_exit(void)
+{
+}
 
 static inline int tquic_v6_discover_addresses(struct tquic_connection *conn,
 					      struct sockaddr_storage *addrs,
@@ -3557,7 +3565,8 @@ static inline bool tquic_path_is_v4mapped(const struct tquic_path *path)
 	return false;
 }
 
-static inline sa_family_t tquic_path_effective_family(const struct tquic_path *path)
+static inline sa_family_t
+tquic_path_effective_family(const struct tquic_path *path)
 {
 	return path->remote_addr.ss_family;
 }
@@ -3590,19 +3599,18 @@ void tquic_tunnel_close(struct tquic_tunnel *tunnel);
 void tquic_tunnel_established(struct tquic_tunnel *tunnel);
 
 /* ICMP passthrough */
-int tquic_tunnel_icmp_forward(struct tquic_tunnel *tunnel,
-			      struct sk_buff *skb, int direction);
-int tquic_tunnel_handle_icmp_error(struct tquic_tunnel *tunnel,
-				   u8 type, u8 code, u32 info);
+int tquic_tunnel_icmp_forward(struct tquic_tunnel *tunnel, struct sk_buff *skb,
+			      int direction);
+int tquic_tunnel_handle_icmp_error(struct tquic_tunnel *tunnel, u8 type,
+				   u8 code, u32 info);
 
 /* Tunnel accessor functions */
 u8 tquic_tunnel_get_traffic_class(struct tquic_tunnel *tunnel);
 __be16 tquic_tunnel_get_dest_port(struct tquic_tunnel *tunnel);
 int tquic_tunnel_get_dest_addr(struct tquic_tunnel *tunnel,
 			       struct sockaddr_storage *addr);
-int tquic_tunnel_get_stats(struct tquic_tunnel *tunnel,
-			   u64 *bytes_tx, u64 *bytes_rx,
-			   u64 *packets_tx, u64 *packets_rx);
+int tquic_tunnel_get_stats(struct tquic_tunnel *tunnel, u64 *bytes_tx,
+			   u64 *bytes_rx, u64 *packets_tx, u64 *packets_rx);
 bool tquic_tunnel_is_tproxy(struct tquic_tunnel *tunnel);
 void tquic_tunnel_schedule_forward(struct tquic_tunnel *tunnel);
 
@@ -3619,10 +3627,10 @@ void tquic_tunnel_exit(void);
  */
 
 /* Traffic class constants */
-#define TQUIC_TC_REALTIME	0
-#define TQUIC_TC_INTERACTIVE	1
-#define TQUIC_TC_BULK		2
-#define TQUIC_TC_BACKGROUND	3
+#define TQUIC_TC_REALTIME 0
+#define TQUIC_TC_INTERACTIVE 1
+#define TQUIC_TC_BULK 2
+#define TQUIC_TC_BACKGROUND 3
 
 /* QoS classification */
 int tquic_qos_classify(void *tunnel_ptr, u8 router_hint);
@@ -3632,7 +3640,8 @@ u32 tquic_qos_get_priority(u8 traffic_class);
 
 /* QoS statistics */
 void tquic_qos_update_stats(u8 traffic_class, u64 bytes);
-void tquic_qos_get_stats(u8 traffic_class, u64 *packets, u64 *bytes, u64 *drops);
+void tquic_qos_get_stats(u8 traffic_class, u64 *packets, u64 *bytes,
+			 u64 *drops);
 
 /* QoS subsystem init/exit */
 int __init tquic_qos_init(void);
@@ -3647,8 +3656,8 @@ void tquic_qos_exit(void);
  */
 
 /* Forwarding directions */
-#define TQUIC_FORWARD_TX	0	/* QUIC stream -> TCP socket */
-#define TQUIC_FORWARD_RX	1	/* TCP socket -> QUIC stream */
+#define TQUIC_FORWARD_TX 0 /* QUIC stream -> TCP socket */
+#define TQUIC_FORWARD_RX 1 /* TCP socket -> QUIC stream */
 
 /* Zero-copy splice forwarding */
 ssize_t tquic_forward_splice(struct tquic_tunnel *tunnel, int direction);
@@ -3701,8 +3710,8 @@ int tquic_sendmsg_zerocopy(struct sock *sk, struct msghdr *msg, size_t len,
 int tquic_check_zerocopy_flag(struct sock *sk, struct msghdr *msg, int flags);
 
 /* sendfile/sendpage support */
-ssize_t tquic_sendpage(struct socket *sock, struct page *page,
-		       int offset, size_t size, int flags);
+ssize_t tquic_sendpage(struct socket *sock, struct page *page, int offset,
+		       size_t size, int flags);
 
 /* splice support */
 ssize_t tquic_splice_read(struct socket *sock, loff_t *ppos,

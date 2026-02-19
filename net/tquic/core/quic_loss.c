@@ -25,10 +25,11 @@
 #include "../bond/tquic_failover.h"
 
 /* Maximum PTO probes before declaring connection dead */
-#define TQUIC_MAX_PTO_COUNT		6
+#define TQUIC_MAX_PTO_COUNT 6
 
 /* Forward declarations */
-void tquic_loss_detection_detect_lost(struct tquic_connection *conn, u8 pn_space_idx);
+void tquic_loss_detection_detect_lost(struct tquic_connection *conn,
+				      u8 pn_space_idx);
 
 /*
  * Helper to extract connection ID as u64 for tracing/debugging.
@@ -46,7 +47,8 @@ static inline u64 tquic_trace_conn_id(const struct tquic_cid *cid)
 	return id;
 }
 
-static struct tquic_path *tquic_loss_active_path_get(struct tquic_connection *conn)
+static struct tquic_path *
+tquic_loss_active_path_get(struct tquic_connection *conn)
 {
 	struct tquic_path *path;
 
@@ -84,12 +86,12 @@ static inline int tquic_conn_queue_frame(struct tquic_connection *conn,
  * Section 6.2: kTimeThreshold and kPacketThreshold
  * Section 6.2.2: kGranularity
  */
-#define TQUIC_TIME_THRESHOLD_NUMER	9
-#define TQUIC_TIME_THRESHOLD_DENOM	8
-#define TQUIC_PACKET_THRESHOLD		3
-#define TQUIC_GRANULARITY_US		1000	/* 1 ms in microseconds */
-#define TQUIC_INITIAL_RTT_US		333000	/* 333 ms in microseconds */
-#define TQUIC_MAX_ACK_DELAY_US		25000	/* 25 ms default max_ack_delay */
+#define TQUIC_TIME_THRESHOLD_NUMER 9
+#define TQUIC_TIME_THRESHOLD_DENOM 8
+#define TQUIC_PACKET_THRESHOLD 3
+#define TQUIC_GRANULARITY_US 1000 /* 1 ms in microseconds */
+#define TQUIC_INITIAL_RTT_US 333000 /* 333 ms in microseconds */
+#define TQUIC_MAX_ACK_DELAY_US 25000 /* 25 ms default max_ack_delay */
 
 /* Slab cache for sent packet tracking */
 static struct kmem_cache *tquic_sent_packet_cache __read_mostly;
@@ -101,9 +103,9 @@ static struct kmem_cache *tquic_sent_packet_cache __read_mostly;
  */
 int __init tquic_loss_cache_init(void)
 {
-	tquic_sent_packet_cache = kmem_cache_create("tquic_sent_packet",
-						   sizeof(struct tquic_sent_packet),
-						   0, SLAB_HWCACHE_ALIGN, NULL);
+	tquic_sent_packet_cache = kmem_cache_create(
+		"tquic_sent_packet", sizeof(struct tquic_sent_packet), 0,
+		SLAB_HWCACHE_ALIGN, NULL);
 	if (!tquic_sent_packet_cache)
 		return -ENOMEM;
 
@@ -147,17 +149,18 @@ struct tquic_sent_packet *tquic_sent_packet_alloc(gfp_t gfp)
  * @ack_eliciting: True if packet is ACK-eliciting
  * @in_flight: True if packet counts toward bytes in flight
  */
-void tquic_sent_packet_init(struct tquic_sent_packet *pkt,
-			    u64 pn, u32 bytes, u8 pn_space,
-			    bool ack_eliciting, bool in_flight)
+void tquic_sent_packet_init(struct tquic_sent_packet *pkt, u64 pn, u32 bytes,
+			    u8 pn_space, bool ack_eliciting, bool in_flight,
+			    u32 path_id)
 {
 	if (!pkt)
 		return;
 
 	pkt->pn = pn;
 	pkt->sent_bytes = bytes;
-	pkt->size = bytes;	/* Alias for compatibility */
+	pkt->size = bytes; /* Alias for compatibility */
 	pkt->pn_space = pn_space;
+	pkt->path_id = path_id;
 	pkt->ack_eliciting = ack_eliciting;
 	pkt->in_flight = in_flight;
 	pkt->sent_time = ktime_get();
@@ -207,7 +210,8 @@ static void tquic_rtt_init(struct tquic_rtt_state *rtt)
  * RFC 9002 Section 5.3: RTT estimation requires an acknowledgment
  * to be received for the largest packet number.
  */
-void tquic_rtt_update(struct tquic_rtt_state *rtt, u64 latest_rtt, u64 ack_delay)
+void tquic_rtt_update(struct tquic_rtt_state *rtt, u64 latest_rtt,
+		      u64 ack_delay)
 {
 	u64 adjusted_rtt;
 
@@ -249,10 +253,12 @@ void tquic_rtt_update(struct tquic_rtt_state *rtt, u64 latest_rtt, u64 ack_delay
 	 */
 	if (adjusted_rtt > rtt->smoothed_rtt) {
 		rtt->rtt_var = (3 * rtt->rtt_var +
-			       (adjusted_rtt - rtt->smoothed_rtt)) / 4;
+				(adjusted_rtt - rtt->smoothed_rtt)) /
+			       4;
 	} else {
 		rtt->rtt_var = (3 * rtt->rtt_var +
-			       (rtt->smoothed_rtt - adjusted_rtt)) / 4;
+				(rtt->smoothed_rtt - adjusted_rtt)) /
+			       4;
 	}
 
 	rtt->smoothed_rtt = (7 * rtt->smoothed_rtt + adjusted_rtt) / 8;
@@ -273,8 +279,8 @@ void tquic_rtt_update(struct tquic_rtt_state *rtt, u64 latest_rtt, u64 ack_delay
  *
  * Returns PTO in milliseconds.
  */
-static u32 tquic_rtt_pto_for_space(struct tquic_rtt_state *rtt,
-				   u8 pn_space, bool handshake_confirmed)
+static u32 tquic_rtt_pto_for_space(struct tquic_rtt_state *rtt, u8 pn_space,
+				   bool handshake_confirmed)
 {
 	u64 pto_us;
 	u64 var_component;
@@ -379,8 +385,8 @@ static u64 tquic_loss_time_threshold(struct tquic_rtt_state *rtt)
  *
  * Returns true if there are ack-eliciting packets in flight.
  */
-static bool tquic_pn_space_has_ack_eliciting_in_flight(
-	struct tquic_pn_space *pn_space)
+static bool
+tquic_pn_space_has_ack_eliciting_in_flight(struct tquic_pn_space *pn_space)
 {
 	return pn_space->ack_eliciting_in_flight > 0;
 }
@@ -391,7 +397,8 @@ static bool tquic_pn_space_has_ack_eliciting_in_flight(
  *
  * Returns true if there are ack-eliciting packets in flight in any space.
  */
-static bool tquic_conn_has_ack_eliciting_in_flight(struct tquic_connection *conn)
+static bool
+tquic_conn_has_ack_eliciting_in_flight(struct tquic_connection *conn)
 {
 	int i;
 
@@ -400,7 +407,8 @@ static bool tquic_conn_has_ack_eliciting_in_flight(struct tquic_connection *conn
 
 	for (i = 0; i < TQUIC_PN_SPACE_COUNT; i++) {
 		if (!conn->pn_spaces[i].keys_discarded &&
-		    tquic_pn_space_has_ack_eliciting_in_flight(&conn->pn_spaces[i]))
+		    tquic_pn_space_has_ack_eliciting_in_flight(
+			    &conn->pn_spaces[i]))
 			return true;
 	}
 
@@ -485,7 +493,7 @@ int tquic_loss_detection_init(struct tquic_connection *conn)
  * Records packet for loss detection and congestion control.
  */
 void tquic_loss_detection_on_packet_sent(struct tquic_connection *conn,
-					struct tquic_sent_packet *pkt)
+					 struct tquic_sent_packet *pkt)
 {
 	struct tquic_pn_space *pn_space;
 	struct tquic_path *path;
@@ -494,13 +502,14 @@ void tquic_loss_detection_on_packet_sent(struct tquic_connection *conn,
 	if (!conn || !pkt)
 		return;
 
-	tquic_dbg("tquic_loss_detection_on_packet_sent: pn=%llu space=%u bytes=%u\n",
-		  pkt->pn, pkt->pn_space, pkt->sent_bytes);
+	tquic_dbg(
+		"tquic_loss_detection_on_packet_sent: pn=%llu space=%u bytes=%u\n",
+		pkt->pn, pkt->pn_space, pkt->sent_bytes);
 
 	if (!conn->pn_spaces || pkt->pn_space >= TQUIC_PN_SPACE_COUNT)
 		return;
 
-	path = tquic_loss_active_path_get(conn);
+	path = tquic_path_lookup(conn, pkt->path_id);
 	pn_space = &conn->pn_spaces[pkt->pn_space];
 
 	spin_lock_irqsave(&pn_space->lock, flags);
@@ -544,7 +553,7 @@ void tquic_loss_detection_on_packet_sent(struct tquic_connection *conn,
  * Returns ack_delay in microseconds.
  */
 static u64 tquic_loss_get_ack_delay_us(struct tquic_connection *conn,
-				      u64 ack_delay_encoded)
+				       u64 ack_delay_encoded)
 {
 	u32 ack_delay_exponent = conn->remote_params.ack_delay_exponent;
 	u64 max_ack_delay_us;
@@ -634,8 +643,8 @@ static bool tquic_loss_is_pn_acked(struct tquic_ack_frame *ack, u64 pn)
  * Processes acknowledgments, updates RTT, and detects lost packets.
  */
 void tquic_loss_detection_on_ack_received(struct tquic_connection *conn,
-					 struct tquic_ack_frame *ack,
-					 u8 pn_space_idx)
+					  struct tquic_ack_frame *ack,
+					  u8 pn_space_idx)
 {
 	struct tquic_pn_space *pn_space;
 	struct tquic_path *path;
@@ -652,8 +661,9 @@ void tquic_loss_detection_on_ack_received(struct tquic_connection *conn,
 	if (!conn || !ack)
 		return;
 
-	tquic_dbg("tquic_loss_detection_on_ack_received: largest=%llu space=%u\n",
-		  ack->largest_acked, pn_space_idx);
+	tquic_dbg(
+		"tquic_loss_detection_on_ack_received: largest=%llu space=%u\n",
+		ack->largest_acked, pn_space_idx);
 
 	if (pn_space_idx >= TQUIC_PN_SPACE_COUNT)
 		return;
@@ -661,7 +671,6 @@ void tquic_loss_detection_on_ack_received(struct tquic_connection *conn,
 	if (!conn->pn_spaces)
 		return;
 
-	path = tquic_loss_active_path_get(conn);
 	pn_space = &conn->pn_spaces[pn_space_idx];
 
 	if (pn_space->keys_discarded)
@@ -673,15 +682,15 @@ void tquic_loss_detection_on_ack_received(struct tquic_connection *conn,
 	 * SHOULD signal a connection error of type PROTOCOL_VIOLATION.
 	 */
 	if (ack->largest_acked > pn_space->largest_sent) {
-		tquic_dbg("ACK for unsent pkt: largest_acked=%llu > largest_sent=%llu in space %u\n",
-			 ack->largest_acked, pn_space->largest_sent,
-			 pn_space_idx);
+		tquic_dbg(
+			"ACK for unsent pkt: largest_acked=%llu > largest_sent=%llu in space %u\n",
+			ack->largest_acked, pn_space->largest_sent,
+			pn_space_idx);
 		conn->error_code = EQUIC_PROTOCOL_VIOLATION;
-			tquic_conn_close_with_error(conn,
-				EQUIC_PROTOCOL_VIOLATION,
-				"ACK for unsent packet");
-			goto out_put_path;
-		}
+		tquic_conn_close_with_error(conn, EQUIC_PROTOCOL_VIOLATION,
+					    "ACK for unsent packet");
+		goto out_put_path;
+	}
 
 	/*
 	 * RFC 9002 Section 5.1:
@@ -723,6 +732,24 @@ void tquic_loss_detection_on_ack_received(struct tquic_connection *conn,
 		list_del_init(&pkt->list);
 		pkt->list.next = (struct list_head *)newly_acked;
 		newly_acked = pkt;
+
+		/* Update congestion control - use path-level CC API */
+		path = tquic_path_lookup(conn, pkt->path_id);
+		if (path && pkt->in_flight) {
+			tquic_cong_on_ack(path, pkt->size,
+					  path->rtt.latest_rtt);
+
+			/* Update path stats for output_flush inflight calculation */
+			path->stats.acked_bytes += pkt->size;
+
+			/* RFC 9002: Remove acknowledged bytes from bytes_in_flight */
+			if (path->cc.bytes_in_flight >= pkt->size)
+				path->cc.bytes_in_flight -= pkt->size;
+			else
+				path->cc.bytes_in_flight = 0;
+
+			tquic_path_put(path);
+		}
 	}
 
 	/* Update largest acked */
@@ -738,9 +765,8 @@ void tquic_loss_detection_on_ack_received(struct tquic_connection *conn,
 	 * Only APPLICATION-space in-flight packets are tracked by failover.
 	 */
 	if (pn_space_idx == TQUIC_PN_SPACE_APPLICATION) {
-		struct tquic_failover_ctx *fc =
-			tquic_bonding_get_failover(
-				(struct tquic_bonding_ctx *)conn->pm);
+		struct tquic_failover_ctx *fc = tquic_bonding_get_failover(
+			(struct tquic_bonding_ctx *)conn->pm);
 		if (fc) {
 			struct tquic_sent_packet *_p = newly_acked;
 
@@ -757,75 +783,86 @@ void tquic_loss_detection_on_ack_received(struct tquic_connection *conn,
 	 * Update RTT if largest_acked was newly acknowledged.
 	 * Only use Application Data space for adjusting ack_delay.
 	 */
-	if (largest_acked_newly_acked && path) {
-		ktime_t now = ktime_get();
+	if (largest_acked_newly_acked) {
+		/* Determine the path that the largest_acked packet was sent on */
+		struct tquic_sent_packet *_p;
+		u32 la_path_id = 0;
+		bool found_la = false;
 
-		latest_rtt = ktime_to_us(ktime_sub(now, largest_acked_sent_time));
-
-		/*
-		 * RFC 9002 Section 5.3:
-		 * ack_delay is only used for Application Data packets.
-		 */
-		if (pn_space_idx == TQUIC_PN_SPACE_APPLICATION)
-			ack_delay_us = tquic_loss_get_ack_delay_us(conn, ack->ack_delay);
-		else
-			ack_delay_us = 0;
-
-		tquic_rtt_update(&path->rtt, latest_rtt, ack_delay_us);
-
-		trace_quic_rtt_update(tquic_trace_conn_id(&conn->scid),
-				      path->rtt.latest_rtt, path->rtt.min_rtt,
-				      path->rtt.smoothed_rtt, path->rtt.rtt_var);
-
-		/*
-		 * Propagate measured RTT to timer subsystem so that
-		 * tquic_get_pto_duration() uses real values instead of
-		 * the 333ms initial fallback (RFC 9002 §6.2.4).
-		 */
-		if (conn->timer_state)
-			tquic_timer_update_rtt(conn->timer_state,
-					       path->rtt.smoothed_rtt,
-					       path->rtt.rtt_var,
-					       path->rtt.latest_rtt);
-
-		/* Update path CC statistics */
-		path->cc.smoothed_rtt_us = path->rtt.smoothed_rtt;
-		path->cc.rtt_var_us = path->rtt.rtt_var;
-		path->cc.min_rtt_us = path->rtt.min_rtt;
-
-		/*
-		 * Failover: update per-path ACK timestamp and SRTT for the
-		 * 3×SRTT failure detection timer.
-		 */
-		if (pn_space_idx == TQUIC_PN_SPACE_APPLICATION) {
-			struct tquic_failover_ctx *fc =
-				tquic_bonding_get_failover(
-					(struct tquic_bonding_ctx *)conn->pm);
-			if (fc)
-				tquic_failover_update_path_ack(
-					fc, path->path_id,
-					path->rtt.smoothed_rtt);
+		for (_p = newly_acked; _p;
+		     _p = (struct tquic_sent_packet *)_p->list.next) {
+			if (_p->pn == ack->largest_acked) {
+				la_path_id = _p->path_id;
+				found_la = true;
+				break;
+			}
 		}
-	}
 
-	/* Update congestion control - use path-level CC API */
-	if (path && acked_bytes > 0) {
-		tquic_cong_on_ack(path, acked_bytes, path->rtt.latest_rtt);
+		if (found_la) {
+			path = tquic_path_lookup(conn, la_path_id);
+			if (path) {
+				ktime_t now = ktime_get();
 
-		/* Update path stats for output_flush inflight calculation */
-		path->stats.acked_bytes += acked_bytes;
+				latest_rtt = ktime_to_us(ktime_sub(
+					now, largest_acked_sent_time));
 
-		/*
-		 * RFC 9002 Section 7:
-		 * Remove acknowledged bytes from bytes_in_flight.
-		 * This is essential for correct congestion window
-		 * utilization — without it, bytes_in_flight grows
-		 * monotonically and the sender eventually stalls.
-		 */
-		if (path->cc.bytes_in_flight >= acked_bytes)
-			path->cc.bytes_in_flight -= acked_bytes;
-		else
-			path->cc.bytes_in_flight = 0;
+				/*
+				 * RFC 9002 Section 5.3:
+				 * ack_delay is only used for Application Data packets.
+				 */
+				if (pn_space_idx == TQUIC_PN_SPACE_APPLICATION)
+					ack_delay_us =
+						tquic_loss_get_ack_delay_us(
+							conn, ack->ack_delay);
+				else
+					ack_delay_us = 0;
+
+				tquic_rtt_update(&path->rtt, latest_rtt,
+						 ack_delay_us);
+
+				trace_quic_rtt_update(
+					tquic_trace_conn_id(&conn->scid),
+					path->rtt.latest_rtt, path->rtt.min_rtt,
+					path->rtt.smoothed_rtt,
+					path->rtt.rtt_var);
+
+				/*
+				 * Propagate measured RTT to timer subsystem so that
+				 * tquic_get_pto_duration() uses real values instead of
+				 * the 333ms initial fallback (RFC 9002 §6.2.4).
+				 */
+				if (conn->timer_state)
+					tquic_timer_update_rtt(
+						conn->timer_state,
+						path->rtt.smoothed_rtt,
+						path->rtt.rtt_var,
+						path->rtt.latest_rtt);
+
+				/* Update path CC statistics */
+				path->cc.smoothed_rtt_us =
+					path->rtt.smoothed_rtt;
+				path->cc.rtt_var_us = path->rtt.rtt_var;
+				path->cc.min_rtt_us = path->rtt.min_rtt;
+
+				/*
+				 * Failover: update per-path ACK timestamp and SRTT for the
+				 * 3×SRTT failure detection timer.
+				 */
+				if (pn_space_idx ==
+				    TQUIC_PN_SPACE_APPLICATION) {
+					struct tquic_failover_ctx *fc =
+						tquic_bonding_get_failover(
+							(struct tquic_bonding_ctx
+								 *)conn->pm);
+					if (fc)
+						tquic_failover_update_path_ack(
+							fc, path->path_id,
+							path->rtt.smoothed_rtt);
+				}
+
+				tquic_path_put(path);
+			}
+		}
 	}
 
 	/*
@@ -833,7 +870,11 @@ void tquic_loss_detection_on_ack_received(struct tquic_connection *conn,
 	 *
 	 * If the ACK frame contains ECN counts (ACK_ECN frame type 0x03),
 	 * validate them and trigger congestion events for any new CE marks.
+	 * Currently attributing ECN to the active path as ACK frames don't specify
+	 * which path the ECN marks occurred on, but in multipath QUIC this should
+	 * be the path the ACK frame was received on.
 	 */
+	path = tquic_loss_active_path_get(conn);
 	if (path && (ack->ecn.ect0 || ack->ecn.ect1 || ack->ecn.ce)) {
 		int ce_count = tquic_ecn_validate_ack(path, ack);
 
@@ -842,6 +883,8 @@ void tquic_loss_detection_on_ack_received(struct tquic_connection *conn,
 			tquic_ecn_process_ce(conn, path, ce_count);
 		}
 	}
+	if (path)
+		tquic_path_put(path);
 
 	/* Reset PTO count since we got a valid ACK */
 	if (includes_ack_eliciting)
@@ -884,7 +927,8 @@ out_put_path:
  * RFC 9002 Section A.8: DetectAndRemoveLostPackets
  * Uses both time and packet thresholds to detect lost packets.
  */
-void tquic_loss_detection_detect_lost(struct tquic_connection *conn, u8 pn_space_idx)
+void tquic_loss_detection_detect_lost(struct tquic_connection *conn,
+				      u8 pn_space_idx)
 {
 	struct tquic_pn_space *pn_space;
 	struct tquic_path *path;
@@ -949,7 +993,7 @@ void tquic_loss_detection_detect_lost(struct tquic_connection *conn, u8 pn_space
 		 * - It was sent kTimeThreshold ago
 		 */
 		if (pkt->pn + conn->packet_threshold <=
-		    pn_space->largest_acked ||
+			    pn_space->largest_acked ||
 		    ktime_before(pkt->sent_time, pkt_time_threshold)) {
 			/* Mark as lost */
 			trace_quic_packet_lost(tquic_trace_conn_id(&conn->scid),
@@ -1101,18 +1145,20 @@ static int tquic_loss_get_pto_time_space(struct tquic_connection *conn)
 	 * During handshake, use the earliest time among Initial and Handshake.
 	 */
 	if (!handshake_complete) {
-		for (i = TQUIC_PN_SPACE_INITIAL; i <= TQUIC_PN_SPACE_HANDSHAKE; i++) {
+		for (i = TQUIC_PN_SPACE_INITIAL; i <= TQUIC_PN_SPACE_HANDSHAKE;
+		     i++) {
 			struct tquic_pn_space *pn_space = &conn->pn_spaces[i];
 			ktime_t t;
 
 			if (pn_space->keys_discarded)
 				continue;
 
-			if (!tquic_pn_space_has_ack_eliciting_in_flight(pn_space))
+			if (!tquic_pn_space_has_ack_eliciting_in_flight(
+				    pn_space))
 				continue;
 
-			pto = tquic_rtt_pto_for_space(&path->rtt, i,
-						      conn->handshake_confirmed);
+			pto = tquic_rtt_pto_for_space(
+				&path->rtt, i, conn->handshake_confirmed);
 			t = ktime_add_ms(pn_space->last_ack_time, pto);
 			if (ktime_before(t, earliest_time)) {
 				earliest_time = t;
@@ -1126,7 +1172,8 @@ static int tquic_loss_get_pto_time_space(struct tquic_connection *conn)
 	 * If handshake is complete, use Application Data space.
 	 */
 	if (earliest_space == -1 && handshake_complete) {
-		struct tquic_pn_space *pn_space = &conn->pn_spaces[TQUIC_PN_SPACE_APPLICATION];
+		struct tquic_pn_space *pn_space =
+			&conn->pn_spaces[TQUIC_PN_SPACE_APPLICATION];
 
 		if (!pn_space->keys_discarded &&
 		    tquic_pn_space_has_ack_eliciting_in_flight(pn_space))
@@ -1141,7 +1188,8 @@ static int tquic_loss_get_pto_time_space(struct tquic_connection *conn)
 	if (earliest_space == -1 && !conn->is_server && !handshake_complete) {
 		if (!conn->pn_spaces[TQUIC_PN_SPACE_INITIAL].keys_discarded)
 			earliest_space = TQUIC_PN_SPACE_INITIAL;
-		else if (!conn->pn_spaces[TQUIC_PN_SPACE_HANDSHAKE].keys_discarded)
+		else if (!conn->pn_spaces[TQUIC_PN_SPACE_HANDSHAKE]
+				  .keys_discarded)
 			earliest_space = TQUIC_PN_SPACE_HANDSHAKE;
 	}
 
@@ -1219,8 +1267,7 @@ void tquic_set_loss_detection_timer(struct tquic_connection *conn)
 	 * The timer is set for PTO * (2 ^ pto_count)
 	 * max_ack_delay only included for Application Data with confirmed HS.
 	 */
-	pto = tquic_rtt_pto_for_space(&path->rtt,
-				      (u8)pto_space,
+	pto = tquic_rtt_pto_for_space(&path->rtt, (u8)pto_space,
 				      conn->handshake_confirmed);
 	/* Cap exponential backoff to prevent shift overflow and bound PTO */
 	{
@@ -1251,7 +1298,7 @@ out_put_path:
 
 /* PING frame type */
 #ifndef TQUIC_FRAME_PING
-#define TQUIC_FRAME_PING	0x01
+#define TQUIC_FRAME_PING 0x01
 #endif
 
 /**
@@ -1262,7 +1309,8 @@ out_put_path:
  * RFC 9002 Section 6.2.4:
  * When PTO expires, send 1-2 probe packets.
  */
-static void tquic_loss_send_probe(struct tquic_connection *conn, u8 pn_space_idx)
+static void tquic_loss_send_probe(struct tquic_connection *conn,
+				  u8 pn_space_idx)
 {
 	struct tquic_pn_space *pn_space;
 	struct tquic_sent_packet *pkt;
@@ -1299,7 +1347,8 @@ static void tquic_loss_send_probe(struct tquic_connection *conn, u8 pn_space_idx
 				return;
 			} else {
 				/* skb_clone failed - log and track the error */
-				tquic_conn_warn(conn,
+				tquic_conn_warn(
+					conn,
 					"skb_clone failed probe retx pn=%llu\n",
 					pkt->pn);
 				spin_unlock_irqrestore(&pn_space->lock, flags);
@@ -1355,8 +1404,7 @@ void tquic_loss_detection_on_timeout(struct tquic_connection *conn)
 	 * Check if this is a loss time timeout.
 	 */
 	loss_space = tquic_loss_get_loss_time_space(conn);
-	if (loss_space >= 0 &&
-	    conn->pn_spaces[loss_space].loss_time != 0 &&
+	if (loss_space >= 0 && conn->pn_spaces[loss_space].loss_time != 0 &&
 	    !ktime_before(now, conn->pn_spaces[loss_space].loss_time)) {
 		/* Time-based loss detection */
 		tquic_loss_detection_detect_lost(conn, loss_space);
@@ -1380,8 +1428,10 @@ void tquic_loss_detection_on_timeout(struct tquic_connection *conn)
 		if (conn->pn_spaces[TQUIC_PN_SPACE_INITIAL].keys_available &&
 		    !conn->pn_spaces[TQUIC_PN_SPACE_INITIAL].keys_discarded) {
 			pto_space = TQUIC_PN_SPACE_INITIAL;
-		} else if (conn->pn_spaces[TQUIC_PN_SPACE_HANDSHAKE].keys_available &&
-			   !conn->pn_spaces[TQUIC_PN_SPACE_HANDSHAKE].keys_discarded) {
+		} else if (conn->pn_spaces[TQUIC_PN_SPACE_HANDSHAKE]
+				   .keys_available &&
+			   !conn->pn_spaces[TQUIC_PN_SPACE_HANDSHAKE]
+				    .keys_discarded) {
 			pto_space = TQUIC_PN_SPACE_HANDSHAKE;
 		}
 	}
@@ -1440,7 +1490,7 @@ void tquic_loss_detection_on_timeout(struct tquic_connection *conn)
  * in that space from bytes in flight.
  */
 void tquic_loss_on_packet_number_space_discarded(struct tquic_connection *conn,
-						u8 pn_space_idx)
+						 u8 pn_space_idx)
 {
 	struct tquic_pn_space *pn_space;
 	struct tquic_sent_packet *pkt, *tmp;
@@ -1516,8 +1566,8 @@ void tquic_loss_on_packet_number_space_discarded(struct tquic_connection *conn,
  *
  * This can be used when detecting loss through ECN or other means.
  */
-void tquic_loss_mark_packet_lost(struct tquic_connection *conn,
-				u8 pn_space_idx, u64 pn)
+void tquic_loss_mark_packet_lost(struct tquic_connection *conn, u8 pn_space_idx,
+				 u64 pn)
 {
 	struct tquic_pn_space *pn_space;
 	struct tquic_sent_packet *pkt, *tmp;
@@ -1549,16 +1599,16 @@ void tquic_loss_mark_packet_lost(struct tquic_connection *conn,
 
 		/* Move to lost list for retransmission */
 		list_del_init(&pkt->list);
-			if (pkt->ack_eliciting && !pkt->retransmitted) {
-				pkt->retransmitted = true;
-				list_add_tail(&pkt->list, &pn_space->lost_packets);
-			} else {
-				spin_unlock_irqrestore(&pn_space->lock, flags);
-				tquic_sent_packet_free(pkt);
-				if (path)
-					tquic_path_put(path);
-				return;
-			}
+		if (pkt->ack_eliciting && !pkt->retransmitted) {
+			pkt->retransmitted = true;
+			list_add_tail(&pkt->list, &pn_space->lost_packets);
+		} else {
+			spin_unlock_irqrestore(&pn_space->lock, flags);
+			tquic_sent_packet_free(pkt);
+			if (path)
+				tquic_path_put(path);
+			return;
+		}
 
 		break;
 	}
@@ -1681,7 +1731,8 @@ void tquic_loss_retransmit_unacked(struct tquic_connection *conn)
 					pkt->retransmitted = true;
 					skb_queue_tail(&clone_queue, skb);
 				} else {
-					tquic_conn_warn(conn,
+					tquic_conn_warn(
+						conn,
 						"skb_clone failed retx pn=%llu\n",
 						pkt->pn);
 				}
@@ -1801,9 +1852,9 @@ bool tquic_loss_check_persistent_congestion(struct tquic_connection *conn)
 		/* Signal persistent congestion to CC algorithm */
 		tquic_cong_on_persistent_congestion(path, &pc_info);
 
-			tquic_path_put(path);
-			return true;
-		}
+		tquic_path_put(path);
+		return true;
+	}
 
 	tquic_path_put(path);
 	return false;
@@ -1925,8 +1976,8 @@ EXPORT_SYMBOL_GPL(tquic_loss_detection_cleanup);
  *
  * Returns 0 on success, -ENOENT if packet not found.
  */
-int tquic_pn_space_get_sent_time(struct tquic_pn_space *pn_space,
-				 u64 pkt_num, ktime_t *sent_time)
+int tquic_pn_space_get_sent_time(struct tquic_pn_space *pn_space, u64 pkt_num,
+				 ktime_t *sent_time)
 {
 	struct tquic_sent_packet *pkt;
 

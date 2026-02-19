@@ -24,7 +24,8 @@ void tquic_loss_cache_destroy(void);
 struct tquic_sent_packet *tquic_sent_packet_alloc(gfp_t gfp);
 void tquic_sent_packet_init(struct tquic_sent_packet *pkt,
 			    u64 pn, u32 bytes, u8 pn_space,
-			    bool ack_eliciting, bool in_flight);
+			    bool ack_eliciting, bool in_flight,
+			    u32 path_id);
 void tquic_sent_packet_free(struct tquic_sent_packet *pkt);
 
 /* RTT tracking */

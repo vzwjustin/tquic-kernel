@@ -51,7 +51,8 @@ int tquic_write_connection_close_frame(u8 *buf, size_t buf_len, u64 error_code,
 				       u64 frame_type, const u8 *reason,
 				       u64 reason_len, bool app_close);
 
-static struct tquic_path *tquic_conn_active_path_get(struct tquic_connection *conn)
+static struct tquic_path *
+tquic_conn_active_path_get(struct tquic_connection *conn)
 {
 	struct tquic_path *path;
 
@@ -65,27 +66,27 @@ static struct tquic_path *tquic_conn_active_path_get(struct tquic_connection *co
 }
 
 /* QUIC Error Codes (RFC 9000 Section 20) */
-#define TQUIC_NO_ERROR			0x00
-#define TQUIC_INTERNAL_ERROR		0x01
-#define TQUIC_CONNECTION_REFUSED	0x02
-#define TQUIC_FLOW_CONTROL_ERROR	0x03
-#define TQUIC_STREAM_LIMIT_ERROR	0x04
-#define TQUIC_STREAM_STATE_ERROR	0x05
-#define TQUIC_FINAL_SIZE_ERROR		0x06
-#define TQUIC_FRAME_ENCODING_ERROR	0x07
-#define TQUIC_TRANSPORT_PARAMETER_ERROR	0x08
-#define TQUIC_CONNECTION_ID_LIMIT_ERROR	0x09
-#define TQUIC_PROTOCOL_VIOLATION	0x0a
-#define TQUIC_INVALID_TOKEN		0x0b
-#define TQUIC_APPLICATION_ERROR		0x0c
-#define TQUIC_CRYPTO_BUFFER_EXCEEDED	0x0d
-#define TQUIC_KEY_UPDATE_ERROR		0x0e
-#define TQUIC_AEAD_LIMIT_REACHED	0x0f
-#define TQUIC_NO_VIABLE_PATH		0x10
-#define TQUIC_VERSION_NEGOTIATION_ERROR	0x11
+#define TQUIC_NO_ERROR 0x00
+#define TQUIC_INTERNAL_ERROR 0x01
+#define TQUIC_CONNECTION_REFUSED 0x02
+#define TQUIC_FLOW_CONTROL_ERROR 0x03
+#define TQUIC_STREAM_LIMIT_ERROR 0x04
+#define TQUIC_STREAM_STATE_ERROR 0x05
+#define TQUIC_FINAL_SIZE_ERROR 0x06
+#define TQUIC_FRAME_ENCODING_ERROR 0x07
+#define TQUIC_TRANSPORT_PARAMETER_ERROR 0x08
+#define TQUIC_CONNECTION_ID_LIMIT_ERROR 0x09
+#define TQUIC_PROTOCOL_VIOLATION 0x0a
+#define TQUIC_INVALID_TOKEN 0x0b
+#define TQUIC_APPLICATION_ERROR 0x0c
+#define TQUIC_CRYPTO_BUFFER_EXCEEDED 0x0d
+#define TQUIC_KEY_UPDATE_ERROR 0x0e
+#define TQUIC_AEAD_LIMIT_REACHED 0x0f
+#define TQUIC_NO_VIABLE_PATH 0x10
+#define TQUIC_VERSION_NEGOTIATION_ERROR 0x11
 
 /* Crypto error range: 0x100-0x1ff */
-#define TQUIC_CRYPTO_ERROR_BASE		0x100
+#define TQUIC_CRYPTO_ERROR_BASE 0x100
 
 /* Handshake sub-states for internal state machine tracking */
 enum tquic_hs_substate {
@@ -125,7 +126,7 @@ struct tquic_path_challenge {
 /* Connection close frame data */
 struct tquic_close_frame {
 	u64 error_code;
-	u64 frame_type;		/* For transport errors */
+	u64 frame_type; /* For transport errors */
 	char *reason_phrase;
 	u32 reason_len;
 	bool is_application;
@@ -146,7 +147,7 @@ struct tquic_conn_state_machine {
 	enum tquic_hs_substate hs_state;
 	bool is_server;
 	bool handshake_confirmed;
-	bool client_hello_received;	/* Server: ClientHello received */
+	bool client_hello_received; /* Server: ClientHello received */
 
 	/* Version negotiation */
 	u32 original_version;
@@ -156,8 +157,8 @@ struct tquic_conn_state_machine {
 	u32 num_supported_versions;
 
 	/* Connection IDs */
-	struct list_head local_cids;	/* Our CIDs */
-	struct list_head remote_cids;	/* Peer's CIDs */
+	struct list_head local_cids; /* Our CIDs */
+	struct list_head remote_cids; /* Peer's CIDs */
 	u64 next_local_cid_seq;
 	u64 next_remote_cid_seq;
 	u32 active_cid_limit;
@@ -267,9 +268,9 @@ static const struct rhashtable_params cid_hash_params = {
 };
 
 /* Retry token AEAD encryption state */
-#define TQUIC_RETRY_TOKEN_KEY_LEN	16
-#define TQUIC_RETRY_TOKEN_IV_LEN	12
-#define TQUIC_RETRY_TOKEN_TAG_LEN	16
+#define TQUIC_RETRY_TOKEN_KEY_LEN 16
+#define TQUIC_RETRY_TOKEN_IV_LEN 12
+#define TQUIC_RETRY_TOKEN_TAG_LEN 16
 
 static u8 tquic_retry_token_key[TQUIC_RETRY_TOKEN_KEY_LEN];
 static struct crypto_aead *tquic_retry_aead;
@@ -391,7 +392,7 @@ int tquic_conn_set_state(struct tquic_connection *conn,
 		break;
 
 	case TQUIC_CONN_CLOSED:
-		valid = false;  /* Terminal state */
+		valid = false; /* Terminal state */
 		break;
 	}
 
@@ -438,7 +439,8 @@ int tquic_conn_set_state(struct tquic_connection *conn,
 		 * by this point; this flag was only being set for INITIAL.
 		 */
 		if (conn->pn_spaces) {
-			conn->pn_spaces[TQUIC_PN_SPACE_APPLICATION].keys_available = 1;
+			conn->pn_spaces[TQUIC_PN_SPACE_APPLICATION]
+				.keys_available = 1;
 			pr_info("tquic: CONNECTED: set APPLICATION keys_available=1 conn=%px is_server=%d\n",
 				conn, conn->is_server);
 		}
@@ -492,8 +494,9 @@ int tquic_conn_set_state(struct tquic_connection *conn,
 			tquic_timer_start_drain(conn->timer_state);
 		if (cs) {
 			cs->draining_start = ktime_get();
-			schedule_delayed_work(&cs->drain_work,
-					      msecs_to_jiffies(cs->drain_timeout_ms));
+			schedule_delayed_work(
+				&cs->drain_work,
+				msecs_to_jiffies(cs->drain_timeout_ms));
 		}
 		wake_up_interruptible(&conn->datagram.wait);
 		/* Wake all stream waiters so recv() can return 0 */
@@ -605,7 +608,8 @@ static void tquic_cid_gen_random(struct tquic_cid *cid, u8 len)
  *
  * Returns 0 if equal, non-zero otherwise.
  */
-static int tquic_cid_compare(const struct tquic_cid *a, const struct tquic_cid *b)
+static int tquic_cid_compare(const struct tquic_cid *a,
+			     const struct tquic_cid *b)
 {
 	tquic_dbg("tquic_cid_compare: a_len=%u b_len=%u\n", a->len, b->len);
 	if (a->len != b->len)
@@ -620,8 +624,8 @@ static int tquic_cid_compare(const struct tquic_cid *a, const struct tquic_cid *
  *
  * Allocates and initializes a new CID entry for the CID list.
  */
-static struct tquic_cid_entry *tquic_cid_entry_create(const struct tquic_cid *cid,
-						      u64 seq)
+static struct tquic_cid_entry *
+tquic_cid_entry_create(const struct tquic_cid *cid, u64 seq)
 {
 	struct tquic_cid_entry *entry;
 
@@ -674,8 +678,9 @@ struct tquic_cid_entry *tquic_conn_add_local_cid(struct tquic_connection *conn)
 		const u8 *static_key = tquic_stateless_reset_get_static_key();
 
 		if (static_key) {
-			tquic_stateless_reset_generate_token(&new_cid, static_key,
-							     entry->stateless_reset_token);
+			tquic_stateless_reset_generate_token(
+				&new_cid, static_key,
+				entry->stateless_reset_token);
 		} else {
 			get_random_bytes(entry->stateless_reset_token,
 					 sizeof(entry->stateless_reset_token));
@@ -689,15 +694,15 @@ struct tquic_cid_entry *tquic_conn_add_local_cid(struct tquic_connection *conn)
 	{
 		int err;
 
-		err = rhashtable_insert_fast(&cid_lookup_table,
-					     &entry->hash_node,
-					     cid_hash_params);
+		err = rhashtable_insert_fast(
+			&cid_lookup_table, &entry->hash_node, cid_hash_params);
 		if (err) {
 			list_del_init(&entry->list);
 			cs->next_local_cid_seq--;
 			spin_unlock_bh(&conn->lock);
 			kfree(entry);
-			tquic_conn_err(conn, "rhashtable insert failed: %d\n", err);
+			tquic_conn_err(conn, "rhashtable insert failed: %d\n",
+				       err);
 			return NULL;
 		}
 	}
@@ -820,8 +825,7 @@ struct tquic_cid *tquic_conn_get_active_cid(struct tquic_connection *conn)
 	list_for_each_entry(entry, &cs->remote_cids, list) {
 		if (!entry->retired) {
 			/* Copy CID data into stable conn->dcid under lock */
-			memcpy(&conn->dcid, &entry->cid,
-			       sizeof(conn->dcid));
+			memcpy(&conn->dcid, &entry->cid, sizeof(conn->dcid));
 			break;
 		}
 	}
@@ -845,8 +849,7 @@ EXPORT_SYMBOL_GPL(tquic_conn_get_active_cid);
  * truncated to 128 bits, per RFC 9000 Section 10.3.2.
  */
 void tquic_generate_stateless_reset_token(const struct tquic_cid *cid,
-					  const u8 *static_key,
-					  u8 *token)
+					  const u8 *static_key, u8 *token)
 {
 	struct crypto_shash *tfm;
 	struct shash_desc *desc;
@@ -868,8 +871,7 @@ void tquic_generate_stateless_reset_token(const struct tquic_cid *cid,
 		return;
 	}
 
-	desc = kzalloc(sizeof(*desc) + crypto_shash_descsize(tfm),
-		       GFP_ATOMIC);
+	desc = kzalloc(sizeof(*desc) + crypto_shash_descsize(tfm), GFP_ATOMIC);
 	if (!desc) {
 		crypto_free_shash(tfm);
 		tquic_stateless_reset_generate_token(cid, static_key, token);
@@ -919,15 +921,15 @@ EXPORT_SYMBOL_GPL(tquic_generate_stateless_reset_token);
  * Verifies if the last 16 bytes match any known reset token.
  * Returns true if this is a valid stateless reset.
  */
-bool tquic_verify_stateless_reset(struct tquic_connection *conn,
-				  const u8 *data, size_t len)
+bool tquic_verify_stateless_reset(struct tquic_connection *conn, const u8 *data,
+				  size_t len)
 {
 	struct tquic_conn_state_machine *cs = tquic_conn_get_cs(conn);
 	struct tquic_cid_entry *entry;
 	const u8 *token;
 	bool found = false;
 
-	if (len < 21)  /* Minimum: 1 byte header + 4 random + 16 token */
+	if (len < 21) /* Minimum: 1 byte header + 4 random + 16 token */
 		return false;
 
 	token = data + len - 16;
@@ -939,7 +941,8 @@ bool tquic_verify_stateless_reset(struct tquic_connection *conn,
 	spin_lock_bh(&conn->lock);
 	list_for_each_entry(entry, &cs->remote_cids, list) {
 		if (entry->has_reset_token &&
-		    crypto_memneq(entry->stateless_reset_token, token, 16) == 0) {
+		    crypto_memneq(entry->stateless_reset_token, token, 16) ==
+			    0) {
 			found = true;
 			break;
 		}
@@ -971,7 +974,7 @@ int tquic_send_stateless_reset(struct tquic_connection *conn)
 	/* Build stateless reset packet */
 	/* Fixed bit must be 0, rest is random */
 	get_random_bytes(packet, sizeof(packet) - 16);
-	packet[0] &= ~0x40;  /* Clear fixed bit */
+	packet[0] &= ~0x40; /* Clear fixed bit */
 
 	/* Append stateless reset token */
 	memcpy(packet + sizeof(packet) - 16, cs->stateless_reset_token, 16);
@@ -992,12 +995,14 @@ int tquic_send_stateless_reset(struct tquic_connection *conn)
 
 		skb = alloc_skb(len + 64, GFP_ATOMIC);
 		if (skb) {
-			skb_reserve(skb, 64);  /* Reserve headroom for headers */
+			skb_reserve(skb, 64); /* Reserve headroom for headers */
 			skb_put_data(skb, packet, len);
 
 			if (tquic_udp_xmit_on_path(conn, path, skb) == 0) {
-				tquic_conn_dbg(conn, "sent stateless reset on path %u\n",
-					       path->path_id);
+				tquic_conn_dbg(
+					conn,
+					"sent stateless reset on path %u\n",
+					path->path_id);
 				tquic_path_put(path);
 				return 0;
 			}
@@ -1022,14 +1027,13 @@ EXPORT_SYMBOL_GPL(tquic_send_stateless_reset);
 
 /* Supported QUIC versions (RFC 9000, RFC 9369) */
 static const u32 tquic_supported_versions[] = {
-	TQUIC_VERSION_1,	/* RFC 9000: QUIC v1 (0x00000001) */
-	TQUIC_VERSION_2,	/* RFC 9369: QUIC v2 (0x6b3343cf) */
-	0			/* Sentinel value - marks end of list */
+	TQUIC_VERSION_1, /* RFC 9000: QUIC v1 (0x00000001) */
+	TQUIC_VERSION_2, /* RFC 9369: QUIC v2 (0x6b3343cf) */
+	0 /* Sentinel value - marks end of list */
 };
 
 /* Number of supported versions (excluding sentinel) */
-#define TQUIC_NUM_SUPPORTED_VERSIONS \
-	(ARRAY_SIZE(tquic_supported_versions) - 1)
+#define TQUIC_NUM_SUPPORTED_VERSIONS (ARRAY_SIZE(tquic_supported_versions) - 1)
 
 /**
  * tquic_version_is_supported - Check if a version is supported
@@ -1041,7 +1045,8 @@ bool tquic_version_is_supported(u32 version)
 {
 	int i;
 
-	tquic_dbg("tquic_version_is_supported: checking version=0x%08x\n", version);
+	tquic_dbg("tquic_version_is_supported: checking version=0x%08x\n",
+		  version);
 	for (i = 0; tquic_supported_versions[i] != 0; i++) {
 		if (tquic_supported_versions[i] == version)
 			return true;
@@ -1151,7 +1156,10 @@ int tquic_send_version_negotiation(struct tquic_connection *conn,
 	 * selected randomly by the server." Randomize bits 0-6.
 	 */
 	*p++ = 0x80 | (get_random_u8() & 0x7f);
-	*p++ = 0x00; *p++ = 0x00; *p++ = 0x00; *p++ = 0x00;  /* Version 0 */
+	*p++ = 0x00;
+	*p++ = 0x00;
+	*p++ = 0x00;
+	*p++ = 0x00; /* Version 0 */
 
 	/* Swap DCIDs (send their SCID as DCID) */
 	*p++ = scid->len;
@@ -1198,8 +1206,10 @@ int tquic_send_version_negotiation(struct tquic_connection *conn,
 			skb_put_data(skb, packet, pkt_len);
 
 			if (tquic_udp_xmit_on_path(conn, path, skb) == 0) {
-				tquic_conn_dbg(conn, "sent version negotiation on path %u\n",
-					       path->path_id);
+				tquic_conn_dbg(
+					conn,
+					"sent version negotiation on path %u\n",
+					path->path_id);
 				tquic_path_put(path);
 				return 0;
 			}
@@ -1248,9 +1258,10 @@ int tquic_handle_version_negotiation(struct tquic_connection *conn,
 	 */
 	for (i = 0; i < num_versions; i++) {
 		if (versions[i] == conn->version) {
-			tquic_conn_warn(conn,
-					"VN lists our current version 0x%08x, discarding\n",
-					conn->version);
+			tquic_conn_warn(
+				conn,
+				"VN lists our current version 0x%08x, discarding\n",
+				conn->version);
 			return -EPROTO;
 		}
 	}
@@ -1281,8 +1292,8 @@ EXPORT_SYMBOL_GPL(tquic_handle_version_negotiation);
  */
 
 /* Retry token structure (encrypted) */
-#define TQUIC_RETRY_TOKEN_MAX_LEN	256
-#define TQUIC_RETRY_TOKEN_LIFETIME_MS	60000
+#define TQUIC_RETRY_TOKEN_MAX_LEN 256
+#define TQUIC_RETRY_TOKEN_LIFETIME_MS 60000
 
 /**
  * tquic_generate_retry_token - Generate a Retry token
@@ -1296,8 +1307,8 @@ EXPORT_SYMBOL_GPL(tquic_handle_version_negotiation);
  */
 int tquic_generate_retry_token(struct tquic_connection *conn,
 			       const struct tquic_cid *original_dcid,
-			       const struct sockaddr *client_addr,
-			       u8 *token, u32 *token_len)
+			       const struct sockaddr *client_addr, u8 *token,
+			       u32 *token_len)
 {
 	u8 plaintext[128];
 	u8 nonce[TQUIC_RETRY_TOKEN_IV_LEN];
@@ -1391,8 +1402,8 @@ EXPORT_SYMBOL_GPL(tquic_generate_retry_token);
  * Validates and decrypts a Retry token.
  * Returns 0 on success, negative error on failure.
  */
-int tquic_validate_retry_token(struct tquic_connection *conn,
-			       const u8 *token, u32 token_len,
+int tquic_validate_retry_token(struct tquic_connection *conn, const u8 *token,
+			       u32 token_len,
 			       const struct sockaddr *client_addr,
 			       struct tquic_cid *original_dcid)
 {
@@ -1414,7 +1425,7 @@ int tquic_validate_retry_token(struct tquic_connection *conn,
 
 	/* Minimum token length: nonce + timestamp + dcid_len + hash + tag */
 	if (token_len < TQUIC_RETRY_TOKEN_IV_LEN + sizeof(ktime_t) + 1 +
-			sizeof(u32) + TQUIC_RETRY_TOKEN_TAG_LEN)
+				sizeof(u32) + TQUIC_RETRY_TOKEN_TAG_LEN)
 		return -EINVAL;
 
 	/* Check if AEAD is initialized */
@@ -1475,7 +1486,8 @@ int tquic_validate_retry_token(struct tquic_connection *conn,
 	now = ktime_get();
 	age_ms = ktime_ms_delta(now, timestamp);
 	if (age_ms > TQUIC_RETRY_TOKEN_LIFETIME_MS) {
-		tquic_conn_dbg(conn, "retry token expired (age=%llu ms)\n", age_ms);
+		tquic_conn_dbg(conn, "retry token expired (age=%llu ms)\n",
+			       age_ms);
 		return -ETIMEDOUT;
 	}
 
@@ -1537,8 +1549,8 @@ int tquic_send_retry(struct tquic_connection *conn,
 	 * pseudo_packet[512] = 1280 bytes exceeds safe stack limits
 	 * for kernel code paths.
 	 */
-#define TQUIC_RETRY_PKT_BUF_SIZE	512
-#define TQUIC_RETRY_PSEUDO_BUF_SIZE	512
+#define TQUIC_RETRY_PKT_BUF_SIZE 512
+#define TQUIC_RETRY_PSEUDO_BUF_SIZE 512
 	u8 *packet = NULL;
 	u8 *p;
 	u8 *token = NULL;
@@ -1577,8 +1589,7 @@ int tquic_send_retry(struct tquic_connection *conn,
 	 * Layout: first_byte(1) + version(4) + dcid_len(1) + dcid +
 	 *         scid_len(1) + scid + token + integrity_tag(16)
 	 */
-	needed = 1 + 4 + 1 + conn->scid.len + 1 + new_scid.len +
-		 token_len + 16;
+	needed = 1 + 4 + 1 + conn->scid.len + 1 + new_scid.len + token_len + 16;
 	if (needed > TQUIC_RETRY_PKT_BUF_SIZE) {
 		ret = -ENOSPC;
 		goto out_free;
@@ -1619,14 +1630,12 @@ int tquic_send_retry(struct tquic_connection *conn,
 	 * v2 (RFC 9369 Section 5.8) retry integrity keys.
 	 */
 	{
-		static const u8 retry_nonce_v1[12] = {
-			0x46, 0x15, 0x99, 0xd3, 0x5d, 0x63, 0x2b, 0xf2,
-			0x23, 0x98, 0x25, 0xbb
-		};
-		static const u8 retry_nonce_v2[12] = {
-			0xd8, 0x69, 0x69, 0xbc, 0x2d, 0x7c, 0x6d, 0x99,
-			0x90, 0xef, 0xb0, 0x4a
-		};
+		static const u8 retry_nonce_v1[12] = { 0x46, 0x15, 0x99, 0xd3,
+						       0x5d, 0x63, 0x2b, 0xf2,
+						       0x23, 0x98, 0x25, 0xbb };
+		static const u8 retry_nonce_v2[12] = { 0xd8, 0x69, 0x69, 0xbc,
+						       0x2d, 0x7c, 0x6d, 0x99,
+						       0x90, 0xef, 0xb0, 0x4a };
 		const u8 *retry_nonce;
 		struct crypto_aead *integrity_aead;
 		u8 *pseudo_packet;
@@ -1654,8 +1663,8 @@ int tquic_send_retry(struct tquic_connection *conn,
 		 * encryption, so we use a single buffer for both input
 		 * and output.
 		 */
-		pseudo_packet = kmalloc(TQUIC_RETRY_PSEUDO_BUF_SIZE + 16,
-					GFP_ATOMIC);
+		pseudo_packet =
+			kmalloc(TQUIC_RETRY_PSEUDO_BUF_SIZE + 16, GFP_ATOMIC);
 		if (!pseudo_packet)
 			goto skip_tag;
 
@@ -1690,11 +1699,10 @@ int tquic_send_retry(struct tquic_connection *conn,
 
 		req = aead_request_alloc(integrity_aead, GFP_ATOMIC);
 		if (req) {
-			sg_init_one(&sg, pseudo_packet,
-				    pseudo_len + 16);
+			sg_init_one(&sg, pseudo_packet, pseudo_len + 16);
 
-			aead_request_set_crypt(req, &sg, &sg,
-					       0, (u8 *)retry_nonce);
+			aead_request_set_crypt(req, &sg, &sg, 0,
+					       (u8 *)retry_nonce);
 			aead_request_set_ad(req, pseudo_len);
 
 			tag_ret = crypto_aead_encrypt(req);
@@ -1710,7 +1718,7 @@ int tquic_send_retry(struct tquic_connection *conn,
 		kfree(pseudo_packet);
 	}
 
-	skip_tag:
+skip_tag:
 	tquic_conn_dbg(conn, "sent Retry packet\n");
 
 	/* Transmit the Retry packet via active path */
@@ -1806,28 +1814,66 @@ int tquic_send_path_challenge(struct tquic_connection *conn,
 	tquic_conn_dbg(conn, "sent PATH_CHALLENGE on path %u\n", path->path_id);
 
 	/*
-	 * BUG FIX: Build SKB and transmit via tquic_udp_xmit_on_path()
-	 * instead of tquic_xmit(). Previous code passed NULL for path,
-	 * causing all PATH_CHALLENGE frames to go out the default/active path
-	 * instead of the specific path being validated, breaking multipath.
+	 * Packetize via the standard QUIC output pipeline so the
+	 * PATH_CHALLENGE is encrypted, header-protected, and tracked
+	 * by loss detection (RFC 9000 §8.2.1).
 	 */
 	{
-		u8 frame_buf[16];
-		int frame_len;
+		struct tquic_pending_frame *frame;
 		struct sk_buff *skb;
+		LIST_HEAD(frames);
+		u64 pkt_num;
+		u32 skb_len;
+		int ret;
 
-		frame_len = tquic_write_path_challenge_frame(frame_buf,
-							     sizeof(frame_buf),
-							     challenge->data);
-		if (frame_len > 0) {
-			/* Allocate SKB with headroom */
-			skb = alloc_skb(frame_len + 64, GFP_ATOMIC);
-			if (skb) {
-				skb_reserve(skb, 64);
-				skb_put_data(skb, frame_buf, frame_len);
-				/* Transmit via the specific path */
-				tquic_udp_xmit_on_path(conn, path, skb);
+		frame = kmem_cache_zalloc(tquic_frame_cache, GFP_ATOMIC);
+		if (!frame)
+			return -ENOMEM;
+
+		frame->type = TQUIC_FRAME_PATH_CHALLENGE;
+		frame->data_ref = challenge->data;
+		frame->len = 8;
+		frame->owns_data = false;
+		list_add_tail(&frame->list, &frames);
+
+		pkt_num = atomic64_inc_return(&conn->pkt_num_tx) - 1;
+
+		/* pkt_type -1 = short header (1-RTT) */
+		skb = tquic_assemble_packet(conn, path, -1, pkt_num, &frames);
+		if (!skb) {
+			struct tquic_pending_frame *f, *tmp;
+
+			list_for_each_entry_safe(f, tmp, &frames, list) {
+				list_del_init(&f->list);
+				kmem_cache_free(tquic_frame_cache, f);
 			}
+			return -ENOMEM;
+		}
+
+		skb_len = skb->len;
+		ret = tquic_output_packet(conn, path, skb);
+
+		if (ret >= 0) {
+			/* Track for loss detection */
+			struct tquic_sent_packet *sent_pkt;
+
+			sent_pkt = tquic_sent_packet_alloc(GFP_ATOMIC);
+			if (sent_pkt) {
+				tquic_sent_packet_init(
+					sent_pkt, pkt_num, skb_len,
+					TQUIC_PN_SPACE_APPLICATION, true, true,
+					path->path_id);
+				tquic_loss_detection_on_packet_sent(conn,
+								    sent_pkt);
+			}
+
+			if (conn->timer_state)
+				tquic_timer_on_packet_sent(
+					conn->timer_state,
+					TQUIC_PN_SPACE_APPLICATION, pkt_num,
+					skb_len, true, true,
+					BIT(TQUIC_FRAME_PATH_CHALLENGE),
+					path->path_id);
 		}
 	}
 
@@ -1844,34 +1890,62 @@ EXPORT_SYMBOL_GPL(tquic_send_path_challenge);
  * Responds to a PATH_CHALLENGE with PATH_RESPONSE.
  */
 int tquic_send_path_response(struct tquic_connection *conn,
-			     struct tquic_path *path,
-			     const u8 *data)
+			     struct tquic_path *path, const u8 *data)
 {
 	tquic_conn_dbg(conn, "sent PATH_RESPONSE on path %u\n", path->path_id);
 
 	/*
-	 * BUG FIX: Build SKB and transmit via tquic_udp_xmit_on_path()
-	 * instead of tquic_xmit(). Previous code passed NULL for path,
-	 * causing PATH_RESPONSE to go out the default path instead of
-	 * the same path the PATH_CHALLENGE arrived on.
+	 * Packetize via the standard QUIC output pipeline so the
+	 * PATH_RESPONSE is encrypted, header-protected, and tracked
+	 * by loss detection (RFC 9000 §8.2.2).
 	 */
 	{
-		u8 frame_buf[16];
-		int frame_len;
+		struct tquic_pending_frame *frame;
 		struct sk_buff *skb;
+		LIST_HEAD(frames);
+		u64 pkt_num;
+		u32 skb_len;
+		int ret;
 
-		frame_len = tquic_write_path_response_frame(frame_buf,
-							    sizeof(frame_buf),
-							    data);
-		if (frame_len > 0) {
-			/* Allocate SKB with headroom */
-			skb = alloc_skb(frame_len + 64, GFP_ATOMIC);
-			if (skb) {
-				skb_reserve(skb, 64);
-				skb_put_data(skb, frame_buf, frame_len);
-				/* Transmit via the same path the challenge arrived on */
-				tquic_udp_xmit_on_path(conn, path, skb);
+		frame = kmem_cache_zalloc(tquic_frame_cache, GFP_ATOMIC);
+		if (!frame)
+			return -ENOMEM;
+
+		frame->type = TQUIC_FRAME_PATH_RESPONSE;
+		frame->data_ref = data;
+		frame->len = 8;
+		frame->owns_data = false;
+		list_add_tail(&frame->list, &frames);
+
+		pkt_num = atomic64_inc_return(&conn->pkt_num_tx) - 1;
+
+		/* pkt_type -1 = short header (1-RTT) */
+		skb = tquic_assemble_packet(conn, path, -1, pkt_num, &frames);
+		if (!skb) {
+			struct tquic_pending_frame *f, *tmp;
+
+			list_for_each_entry_safe(f, tmp, &frames, list) {
+				list_del_init(&f->list);
+				kmem_cache_free(tquic_frame_cache, f);
 			}
+			return -ENOMEM;
+		}
+
+		skb_len = skb->len;
+		ret = tquic_output_packet(conn, path, skb);
+
+		if (ret >= 0) {
+			/*
+			 * PATH_RESPONSE is ack-eliciting but not
+			 * in-flight (don't count against cwnd).
+			 */
+			if (conn->timer_state)
+				tquic_timer_on_packet_sent(
+					conn->timer_state,
+					TQUIC_PN_SPACE_APPLICATION, pkt_num,
+					skb_len, true, false,
+					BIT(TQUIC_FRAME_PATH_RESPONSE),
+					path->path_id);
 		}
 	}
 
@@ -1888,10 +1962,10 @@ EXPORT_SYMBOL_GPL(tquic_send_path_response);
  * Handles an incoming PATH_CHALLENGE by sending PATH_RESPONSE.
  */
 int tquic_handle_path_challenge(struct tquic_connection *conn,
-				struct tquic_path *path,
-				const u8 *data)
+				struct tquic_path *path, const u8 *data)
 {
-	tquic_conn_dbg(conn, "received PATH_CHALLENGE on path %u\n", path->path_id);
+	tquic_conn_dbg(conn, "received PATH_CHALLENGE on path %u\n",
+		       path->path_id);
 
 	return tquic_send_path_response(conn, path, data);
 }
@@ -1906,8 +1980,7 @@ EXPORT_SYMBOL_GPL(tquic_handle_path_challenge);
  * Validates path when PATH_RESPONSE matches our challenge.
  */
 int tquic_handle_path_response(struct tquic_connection *conn,
-			       struct tquic_path *path,
-			       const u8 *data)
+			       struct tquic_path *path, const u8 *data)
 {
 	struct tquic_conn_state_machine *cs = tquic_conn_get_cs(conn);
 	struct tquic_path_challenge *challenge, *tmp;
@@ -1917,7 +1990,8 @@ int tquic_handle_path_response(struct tquic_connection *conn,
 		return -EINVAL;
 
 	spin_lock_bh(&conn->lock);
-	list_for_each_entry_safe(challenge, tmp, &cs->pending_challenges, list) {
+	list_for_each_entry_safe(challenge, tmp, &cs->pending_challenges,
+				 list) {
 		if (challenge->path == path &&
 		    crypto_memneq(challenge->data, data, 8) == 0) {
 			list_del_init(&challenge->list);
@@ -2003,7 +2077,8 @@ int tquic_conn_migrate_to_path(struct tquic_connection *conn,
 	/* Schedule migration completion */
 	schedule_work(&cs->migration_work);
 
-	tquic_conn_info(conn, "initiating migration to path %u\n", new_path->path_id);
+	tquic_conn_info(conn, "initiating migration to path %u\n",
+			new_path->path_id);
 
 	return 0;
 }
@@ -2037,7 +2112,8 @@ int tquic_conn_handle_migration(struct tquic_connection *conn,
 	/* Update path's remote address */
 	memcpy(&path->remote_addr, remote_addr, sizeof(path->remote_addr));
 
-	tquic_conn_info(conn, "peer initiated migration on path %u\n", path->path_id);
+	tquic_conn_info(conn, "peer initiated migration on path %u\n",
+			path->path_id);
 
 	return 0;
 }
@@ -2045,8 +2121,8 @@ EXPORT_SYMBOL_GPL(tquic_conn_handle_migration);
 
 static void tquic_migration_work_handler(struct work_struct *work)
 {
-	struct tquic_conn_state_machine *cs = container_of(work, struct tquic_conn_state_machine,
-						   migration_work);
+	struct tquic_conn_state_machine *cs = container_of(
+		work, struct tquic_conn_state_machine, migration_work);
 	struct tquic_connection *conn = cs->conn;
 	struct tquic_path *target;
 
@@ -2065,7 +2141,8 @@ static void tquic_migration_work_handler(struct work_struct *work)
 		conn->stats.path_migrations++;
 		cs->migration_in_progress = false;
 		cs->migration_target = NULL;
-		tquic_conn_info(conn, "migration complete to path %u\n", target->path_id);
+		tquic_conn_info(conn, "migration complete to path %u\n",
+				target->path_id);
 	}
 
 	spin_unlock_bh(&conn->lock);
@@ -2106,7 +2183,8 @@ int tquic_conn_enable_0rtt(struct tquic_connection *conn)
 
 		/* Check if session ticket exists (stored in socket state) */
 		if (!tsk || !(tsk->flags & TQUIC_F_HAS_SESSION_TICKET)) {
-			tquic_conn_dbg(conn, "0-RTT: no valid session ticket\n");
+			tquic_conn_dbg(conn,
+				       "0-RTT: no valid session ticket\n");
 			return -ENOENT;
 		}
 
@@ -2128,8 +2206,8 @@ EXPORT_SYMBOL_GPL(tquic_conn_enable_0rtt);
  *
  * Queues data for 0-RTT transmission.
  */
-int tquic_conn_send_0rtt(struct tquic_connection *conn,
-			 const void *data, size_t len)
+int tquic_conn_send_0rtt(struct tquic_connection *conn, const void *data,
+			 size_t len)
 {
 	struct tquic_conn_state_machine *cs = tquic_conn_get_cs(conn);
 	struct sk_buff *skb;
@@ -2202,16 +2280,20 @@ void tquic_conn_0rtt_rejected(struct tquic_connection *conn)
 		 * The skb contains application data that was originally
 		 * queued for 0-RTT but must now wait for handshake completion.
 		 */
-		if (conn->sk && conn->sk->sk_write_queue.qlen <
-		    sysctl_wmem_max / 2) {
+		if (conn->sk &&
+		    conn->sk->sk_write_queue.qlen < sysctl_wmem_max / 2) {
 			/* Add to socket write queue for later transmission */
 			skb_queue_tail(&conn->sk->sk_write_queue, skb);
-			tquic_conn_dbg(conn, "re-queued 0-RTT data (%u bytes) for 1-RTT\n",
-				       skb->len);
+			tquic_conn_dbg(
+				conn,
+				"re-queued 0-RTT data (%u bytes) for 1-RTT\n",
+				skb->len);
 		} else {
 			/* Queue full or no socket - drop with warning */
-			tquic_conn_warn(conn, "dropping 0-RTT data (%u bytes) - queue full\n",
-					skb->len);
+			tquic_conn_warn(
+				conn,
+				"dropping 0-RTT data (%u bytes) - queue full\n",
+				skb->len);
 			kfree_skb(skb);
 		}
 	}
@@ -2288,7 +2370,7 @@ int tquic_conn_process_handshake(struct tquic_connection *conn,
 				size_t payload_offset;
 
 				/* Skip past header to find CRYPTO frame */
-				hdr_offset = 5;  /* first_byte + version */
+				hdr_offset = 5; /* first_byte + version */
 				if (hdr_offset >= len)
 					return 0;
 				dcid_len = data[hdr_offset++];
@@ -2331,7 +2413,9 @@ int tquic_conn_process_handshake(struct tquic_connection *conn,
 				/* Look for CRYPTO frame type (0x06) */
 				if (payload_offset < len &&
 				    data[payload_offset] == 0x06) {
-					tquic_conn_dbg(conn, "found CRYPTO frame in ClientHello\n");
+					tquic_conn_dbg(
+						conn,
+						"found CRYPTO frame in ClientHello\n");
 					cs->client_hello_received = true;
 				}
 			}
@@ -2392,15 +2476,15 @@ EXPORT_SYMBOL_GPL(tquic_conn_process_handshake);
  *
  * Begins graceful connection shutdown.
  */
-int tquic_conn_close_with_error(struct tquic_connection *conn,
-				u64 error_code, const char *reason)
+int tquic_conn_close_with_error(struct tquic_connection *conn, u64 error_code,
+				const char *reason)
 {
 	struct tquic_conn_state_machine *cs = tquic_conn_get_cs(conn);
 
 	if (READ_ONCE(conn->state) == TQUIC_CONN_CLOSING ||
 	    READ_ONCE(conn->state) == TQUIC_CONN_DRAINING ||
 	    READ_ONCE(conn->state) == TQUIC_CONN_CLOSED) {
-		return 0;  /* Already closing */
+		return 0; /* Already closing */
 	}
 
 	/* Store close information if state machine is available */
@@ -2427,8 +2511,8 @@ EXPORT_SYMBOL_GPL(tquic_conn_close_with_error);
  * @error_code: Application error code
  * @reason: Reason phrase
  */
-int tquic_conn_close_app(struct tquic_connection *conn,
-			 u64 error_code, const char *reason)
+int tquic_conn_close_app(struct tquic_connection *conn, u64 error_code,
+			 const char *reason)
 {
 	struct tquic_conn_state_machine *cs = tquic_conn_get_cs(conn);
 
@@ -2480,8 +2564,7 @@ static int tquic_send_close_frame(struct tquic_connection *conn)
 
 		frame_len = tquic_write_connection_close_frame(
 			frame_buf, sizeof(frame_buf),
-			cs->local_close.error_code,
-			cs->local_close.frame_type,
+			cs->local_close.error_code, cs->local_close.frame_type,
 			(const u8 *)reason, reason_len,
 			cs->local_close.is_application);
 
@@ -2507,9 +2590,8 @@ static int tquic_send_close_frame(struct tquic_connection *conn)
  * @reason: Reason phrase
  * @is_app: Whether this is an application close
  */
-int tquic_conn_handle_close(struct tquic_connection *conn,
-			    u64 error_code, u64 frame_type,
-			    const char *reason, bool is_app)
+int tquic_conn_handle_close(struct tquic_connection *conn, u64 error_code,
+			    u64 frame_type, const char *reason, bool is_app)
 {
 	struct tquic_conn_state_machine *cs = tquic_conn_get_cs(conn);
 
@@ -2531,8 +2613,10 @@ int tquic_conn_handle_close(struct tquic_connection *conn,
 		cs->remote_close.reason_len = strlen(reason);
 	}
 
-	tquic_conn_info(conn, "received CONNECTION_CLOSE (error=%llu, app=%d, reason=%s)\n",
-			error_code, is_app, reason ?: "");
+	tquic_conn_info(
+		conn,
+		"received CONNECTION_CLOSE (error=%llu, app=%d, reason=%s)\n",
+		error_code, is_app, reason ?: "");
 
 	/* Enter draining state */
 	tquic_conn_enter_draining(conn);
@@ -2558,7 +2642,8 @@ static void tquic_conn_enter_draining(struct tquic_connection *conn)
 	if (path)
 		tquic_path_put(path);
 
-	tquic_conn_set_state(conn, TQUIC_CONN_DRAINING, TQUIC_REASON_PEER_CLOSE);
+	tquic_conn_set_state(conn, TQUIC_CONN_DRAINING,
+			     TQUIC_REASON_PEER_CLOSE);
 }
 
 void tquic_conn_enter_closed(struct tquic_connection *conn)
@@ -2570,8 +2655,8 @@ EXPORT_SYMBOL_GPL(tquic_conn_enter_closed);
 static void tquic_drain_timeout(struct work_struct *work)
 {
 	struct delayed_work *dwork = to_delayed_work(work);
-	struct tquic_conn_state_machine *cs = container_of(dwork, struct tquic_conn_state_machine,
-						   drain_work);
+	struct tquic_conn_state_machine *cs = container_of(
+		dwork, struct tquic_conn_state_machine, drain_work);
 	struct tquic_connection *conn = cs->conn;
 
 	/*
@@ -2591,11 +2676,12 @@ static void tquic_drain_timeout(struct work_struct *work)
 
 static void tquic_close_work_handler(struct work_struct *work)
 {
-	struct tquic_conn_state_machine *cs = container_of(work, struct tquic_conn_state_machine,
-						   close_work);
+	struct tquic_conn_state_machine *cs =
+		container_of(work, struct tquic_conn_state_machine, close_work);
 	struct tquic_connection *conn = cs->conn;
 
-	tquic_conn_dbg(conn, "close_work_handler: retries=%u\n", cs->close_retries);
+	tquic_conn_dbg(conn, "close_work_handler: retries=%u\n",
+		       cs->close_retries);
 	if (READ_ONCE(conn->state) != TQUIC_CONN_CLOSING)
 		return;
 
@@ -2603,8 +2689,7 @@ static void tquic_close_work_handler(struct work_struct *work)
 	if (cs->close_retries < 3) {
 		tquic_send_close_frame(conn);
 		/* Schedule next retransmission */
-		schedule_delayed_work(&cs->drain_work,
-				      msecs_to_jiffies(1000));
+		schedule_delayed_work(&cs->drain_work, msecs_to_jiffies(1000));
 	} else {
 		/* Give up and enter draining */
 		tquic_conn_enter_draining(conn);
@@ -2623,7 +2708,8 @@ static void tquic_close_work_handler(struct work_struct *work)
  */
 int tquic_conn_shutdown(struct tquic_connection *conn)
 {
-	tquic_conn_dbg(conn, "tquic_conn_shutdown: initiating graceful shutdown\n");
+	tquic_conn_dbg(conn,
+		       "tquic_conn_shutdown: initiating graceful shutdown\n");
 	/* Close all streams gracefully */
 	/* Then close connection with NO_ERROR */
 	return tquic_conn_close_with_error(conn, TQUIC_NO_ERROR, NULL);
@@ -2722,8 +2808,8 @@ int tquic_conn_client_connect(struct tquic_connection *conn,
 		cs->next_local_cid_seq = 1; /* Next seq after SCID (seq 0) */
 		spin_unlock_bh(&conn->lock);
 		pr_warn("tquic: registered client SCID len=%u id=%*phN\n",
-			conn->scid.len,
-			min_t(int, conn->scid.len, 8), conn->scid.id);
+			conn->scid.len, min_t(int, conn->scid.len, 8),
+			conn->scid.id);
 	}
 
 	/* Add additional CID for migration/rotation */
@@ -2754,7 +2840,8 @@ int tquic_conn_client_connect(struct tquic_connection *conn,
 	if (conn->sk) {
 		ret = tquic_start_handshake(conn->sk);
 		if (ret < 0 && ret != -EALREADY) {
-			tquic_conn_err(conn, "failed to start handshake: %d\n", ret);
+			tquic_conn_err(conn, "failed to start handshake: %d\n",
+				       ret);
 			/*
 			 * Don't fail the connection here - handshake may be
 			 * triggered later when socket operations occur.
@@ -2818,19 +2905,21 @@ int tquic_conn_client_restart(struct tquic_connection *conn)
 		}
 
 		/* Initialize new crypto state with updated DCID and version */
-		conn->crypto_state = tquic_crypto_init_versioned(&conn->dcid,
-								 true,
-								 conn->version);
+		conn->crypto_state = tquic_crypto_init_versioned(
+			&conn->dcid, true, conn->version);
 		if (!conn->crypto_state) {
-			tquic_conn_err(conn, "failed to init crypto for restart (v%s)\n",
-				       conn->version == TQUIC_VERSION_2 ? "2" : "1");
+			tquic_conn_err(
+				conn,
+				"failed to init crypto for restart (v%s)\n",
+				conn->version == TQUIC_VERSION_2 ? "2" : "1");
 			return -ENOMEM;
 		}
 
 		/* Start new handshake */
 		ret = tquic_start_handshake(conn->sk);
 		if (ret < 0 && ret != -EALREADY) {
-			tquic_conn_err(conn, "failed to restart handshake: %d\n", ret);
+			tquic_conn_err(
+				conn, "failed to restart handshake: %d\n", ret);
 			return ret;
 		}
 	} else {
@@ -2984,8 +3073,9 @@ int tquic_conn_server_accept(struct tquic_connection *conn,
 		const u8 *static_key = tquic_stateless_reset_get_static_key();
 
 		if (static_key) {
-			tquic_stateless_reset_generate_token(&conn->scid, static_key,
-							     cs->stateless_reset_token);
+			tquic_stateless_reset_generate_token(
+				&conn->scid, static_key,
+				cs->stateless_reset_token);
 		} else {
 			get_random_bytes(cs->stateless_reset_token, 16);
 		}
@@ -3021,12 +3111,13 @@ int tquic_conn_server_accept(struct tquic_connection *conn,
 
 	/* Initialize crypto state with client's original DCID and version */
 	if (!conn->crypto_state) {
-		conn->crypto_state = tquic_crypto_init_versioned(&conn->dcid,
-								 false,
-								 conn->version);
+		conn->crypto_state = tquic_crypto_init_versioned(
+			&conn->dcid, false, conn->version);
 		if (!conn->crypto_state) {
-			tquic_conn_err(conn, "failed to init server crypto state (v%s)\n",
-				       conn->version == TQUIC_VERSION_2 ? "2" : "1");
+			tquic_conn_err(
+				conn,
+				"failed to init server crypto state (v%s)\n",
+				conn->version == TQUIC_VERSION_2 ? "2" : "1");
 			ret = -ENOMEM;
 			goto err_free;
 		}
@@ -3123,7 +3214,8 @@ bool tquic_conn_can_send(struct tquic_connection *conn, size_t bytes)
 
 	/* Server: limit to 3x received data */
 	if (cs->is_server) {
-		u64 limit = cs->bytes_received_unvalidated * cs->amplification_limit;
+		u64 limit = cs->bytes_received_unvalidated *
+			    cs->amplification_limit;
 		if (cs->bytes_sent_unvalidated + bytes > limit) {
 			cs->anti_amplification_blocked = true;
 			return false;
@@ -3158,7 +3250,8 @@ void tquic_conn_on_packet_received(struct tquic_connection *conn, size_t bytes)
 {
 	struct tquic_conn_state_machine *cs = tquic_conn_get_cs(conn);
 
-	tquic_conn_dbg(conn, "tquic_conn_on_packet_received: bytes=%zu\n", bytes);
+	tquic_conn_dbg(conn, "tquic_conn_on_packet_received: bytes=%zu\n",
+		       bytes);
 	if (cs && !cs->address_validated) {
 		cs->bytes_received_unvalidated += bytes;
 		/* Unblock if we were blocked */
@@ -3193,12 +3286,11 @@ struct tquic_connection *tquic_state_cid_lookup(const struct tquic_cid *cid)
 	if (!cid || cid->len == 0)
 		return NULL;
 
-	pr_warn("tquic_state_cid_lookup: searching len=%u id=%*phN\n",
-		cid->len, min_t(int, cid->len, 8), cid->id);
+	pr_warn("tquic_state_cid_lookup: searching len=%u id=%*phN\n", cid->len,
+		min_t(int, cid->len, 8), cid->id);
 
 	rcu_read_lock();
-	entry = rhashtable_lookup_fast(&cid_lookup_table, cid,
-				       cid_hash_params);
+	entry = rhashtable_lookup_fast(&cid_lookup_table, cid, cid_hash_params);
 	pr_warn("tquic_state_cid_lookup: entry=%p\n", entry);
 	if (entry && !entry->retired && entry->conn) {
 		if (refcount_inc_not_zero(&entry->conn->refcnt))
@@ -3282,7 +3374,8 @@ void tquic_conn_state_cleanup(struct tquic_connection *conn)
 	}
 
 	/* Free pending challenges */
-	list_for_each_entry_safe(challenge, ctmp, &cs->pending_challenges, list) {
+	list_for_each_entry_safe(challenge, ctmp, &cs->pending_challenges,
+				 list) {
 		list_del_init(&challenge->list);
 		kfree(challenge);
 	}
@@ -3331,7 +3424,8 @@ int __init tquic_connection_init(void)
 		return ret;
 	}
 
-	ret = crypto_aead_setauthsize(tquic_retry_aead, TQUIC_RETRY_TOKEN_TAG_LEN);
+	ret = crypto_aead_setauthsize(tquic_retry_aead,
+				      TQUIC_RETRY_TOKEN_TAG_LEN);
 	if (ret) {
 		tquic_err("failed to set AEAD auth size\n");
 		crypto_free_aead(tquic_retry_aead);
@@ -3362,19 +3456,20 @@ int __init tquic_connection_init(void)
 	 * (v1) and RFC 9369 Section 5.8 (v2), so we set them once here.
 	 */
 	{
-		static const u8 retry_key_v1[16] = {
-			0xbe, 0x0c, 0x69, 0x0b, 0x9f, 0x66, 0x57, 0x5a,
-			0x1d, 0x76, 0x6b, 0x54, 0xe3, 0x68, 0xc8, 0x4e
-		};
-		static const u8 retry_key_v2[16] = {
-			0x8f, 0xb4, 0xb0, 0x1b, 0x56, 0xac, 0x48, 0xe2,
-			0x60, 0xfb, 0xcb, 0xce, 0xad, 0x7c, 0xcc, 0x92
-		};
+		static const u8 retry_key_v1[16] = { 0xbe, 0x0c, 0x69, 0x0b,
+						     0x9f, 0x66, 0x57, 0x5a,
+						     0x1d, 0x76, 0x6b, 0x54,
+						     0xe3, 0x68, 0xc8, 0x4e };
+		static const u8 retry_key_v2[16] = { 0x8f, 0xb4, 0xb0, 0x1b,
+						     0x56, 0xac, 0x48, 0xe2,
+						     0x60, 0xfb, 0xcb, 0xce,
+						     0xad, 0x7c, 0xcc, 0x92 };
 
 		tquic_retry_integrity_aead_v1 =
 			crypto_alloc_aead("gcm(aes)", 0, 0);
 		if (IS_ERR(tquic_retry_integrity_aead_v1)) {
-			tquic_err("failed to allocate retry integrity AEAD v1\n");
+			tquic_err(
+				"failed to allocate retry integrity AEAD v1\n");
 			ret = PTR_ERR(tquic_retry_integrity_aead_v1);
 			tquic_retry_integrity_aead_v1 = NULL;
 			goto err_integrity_v1;
@@ -3391,7 +3486,8 @@ int __init tquic_connection_init(void)
 		tquic_retry_integrity_aead_v2 =
 			crypto_alloc_aead("gcm(aes)", 0, 0);
 		if (IS_ERR(tquic_retry_integrity_aead_v2)) {
-			tquic_err("failed to allocate retry integrity AEAD v2\n");
+			tquic_err(
+				"failed to allocate retry integrity AEAD v2\n");
 			ret = PTR_ERR(tquic_retry_integrity_aead_v2);
 			tquic_retry_integrity_aead_v2 = NULL;
 			goto err_integrity_v2;
