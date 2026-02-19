@@ -1,0 +1,8 @@
+@@ -3419,6 +3424,7 @@
+ 			if (__fc)
+ 				tquic_failover_on_ack(__fc, pkt_num);
+ 		}
+ 	}
++tquic_path_put(path);
+ 	return ret;
+ }

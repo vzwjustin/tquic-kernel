@@ -1346,6 +1346,11 @@ int __ref tquic_init(void)
 	if (err)
 		goto err_debug;
 
+	/* Initialize tracepoint infrastructure */
+	err = tquic_tracepoints_init();
+	if (err)
+		goto err_tracepoints;
+
 	tquic_info("TQUIC WAN bonding subsystem initialized\n");
 	tquic_info("default bond mode: %d, scheduler: %s, congestion: %s\n",
 		   tquic_default_bond_mode, tquic_default_scheduler,
@@ -1353,6 +1358,8 @@ int __ref tquic_init(void)
 
 	return 0;
 
+err_tracepoints:
+	tquic_debug_exit();
 err_debug:
 	tquic_ratelimit_module_exit();
 err_ratelimit:
@@ -1489,6 +1496,7 @@ void __exit tquic_exit(void)
 	tquic_info("shutting down TQUIC WAN bonding subsystem\n");
 
 	/* Cleanup in reverse order of initialization */
+	tquic_tracepoints_exit();
 	tquic_debug_exit();
 	tquic_ratelimit_module_exit();
 	tquic_rate_limit_module_exit();

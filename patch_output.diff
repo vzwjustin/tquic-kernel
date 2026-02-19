@@ -1,0 +1,32 @@
+--- net/tquic/tquic_output.c
++++ net/tquic/tquic_output.c
+@@ -3365,7 +3365,11 @@
+ 	if (!conn->is_server)
+ 		return -EINVAL;
+ 
++rcu_read_lock();
+ 	path = rcu_dereference(conn->active_path);
++if (path && !tquic_path_get(path))
++path = NULL;
++rcu_read_unlock();
+ 	if (!path)
+ 		return -ENOENT;
+ 
+@@ -3389,6 +3393,7 @@
+ 		list_for_each_entry_safe(f, tmp, &frames, list) {
+ 			list_del_init(&f->list);
+ 			kmem_cache_free(tquic_frame_cache, f);
+ 		}
++tquic_path_put(path);
+ 		return -ENOMEM;
+ 	}
+ 
+@@ -3419,6 +3424,7 @@
+ 			if (__fc)
+ 				tquic_failover_on_ack(__fc, pkt_num);
+ 		}
+ 	}
++tquic_path_put(path);
+ 	return ret;
+ }
+ 

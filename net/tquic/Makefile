@@ -91,6 +91,8 @@ tquic-y := \
 	core/quic_loss.o \
 	core/quic_path.o \
 	core/ack.o \
+	core/frame_process.o \
+	core/mp_frame.o \
 	core/quic_ack.o \
 	core/quic_ack_frequency.o \
 	core/quic_key_update.o \
@@ -125,6 +127,7 @@ tquic-y := \
 	multipath/sched_blest.o \
 	multipath/sched_weighted.o \
 	multipath/sched_aggregate.o \
+	multipath/mp_sched_registry.o \
 	multipath/tquic_scheduler.o \
 	crypto/cert_verify.o \
 	crypto/tls.o \
@@ -134,7 +137,8 @@ tquic-y := \
 	crypto/zero_rtt.o \
 	crypto/handshake.o \
 	crypto/crypto_module.o \
-	crypto/hw_offload.o
+	crypto/hw_offload.o \
+	tquic_debug.o
 
 # Tracing support
 tquic-$(CONFIG_TRACEPOINTS) += diag/trace.o
