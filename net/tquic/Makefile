@@ -83,7 +83,6 @@ tquic-y := \
 	core/quic_protocol.o \
 	core/quic_connection.o \
 	core/quic_crypto.o \
-	core/quic_packet.o \
 	core/quic_output.o \
 	core/quic_cong.o \
 	core/quic_ecn.o \

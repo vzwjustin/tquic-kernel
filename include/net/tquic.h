@@ -1363,7 +1363,6 @@ struct tquic_connection {
 	/*
 	 * Frame queues for various purposes
 	 */
-	struct sk_buff_head pending_frames; /* Frames pending transmission */
 	struct sk_buff_head pacing_queue; /* Pacing-delayed frames */
 	struct sk_buff_head early_data_buffer; /* 0-RTT early data buffer */
 	struct sk_buff_head
@@ -1373,7 +1372,6 @@ struct tquic_connection {
 	 * Work structs for deferred processing
 	 */
 	struct work_struct tx_work;
-	struct work_struct rx_work; /* Receive processing */
 	struct work_struct close_work; /* Connection close processing */
 
 	/*

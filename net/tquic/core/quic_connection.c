@@ -141,8 +141,7 @@ static const struct rhashtable_params tquic_cid_rht_params = {
 };
 
 static struct rhashtable tquic_cid_rht;
-static spinlock_t tquic_cid_rht_lock =
-	__SPIN_LOCK_UNLOCKED(tquic_cid_rht_lock);
+static spinlock_t tquic_cid_rht_lock = __SPIN_LOCK_UNLOCKED(tquic_cid_rht_lock);
 
 int tquic_cid_hash_init(void)
 {
@@ -233,8 +232,8 @@ struct tquic_connection *tquic_cid_rht_lookup(const struct tquic_cid *cid)
 	/* Copy to mutable struct for rhashtable API */
 	memcpy(&lookup_cid, cid, sizeof(lookup_cid));
 	conn = tquic_conn_lookup(&lookup_cid);
-	pr_warn("tquic_cid_rht_lookup: len=%u id=%*phN result=%p\n",
-		cid->len, min_t(int, cid->len, 8), cid->id, conn);
+	pr_warn("tquic_cid_rht_lookup: len=%u id=%*phN result=%p\n", cid->len,
+		min_t(int, cid->len, 8), cid->id, conn);
 	return conn;
 }
 EXPORT_SYMBOL_GPL(tquic_cid_rht_lookup);
@@ -309,8 +308,7 @@ static void tquic_pn_space_init(struct tquic_pn_space *pn_space)
 	pn_space->keys_discarded = 0;
 }
 
-static void
-tquic_pn_space_destroy(struct tquic_pn_space *pn_space)
+static void tquic_pn_space_destroy(struct tquic_pn_space *pn_space)
 {
 	struct tquic_sent_packet *pkt, *tmp;
 
@@ -435,9 +433,8 @@ static void tquic_timer_ack_cb(struct timer_list *t)
 		struct tquic_pn_space *pns =
 			&conn->pn_spaces[TQUIC_PN_SPACE_APPLICATION];
 
-		tquic_send_ack(conn, path,
-			       pns->largest_recv_pn,
-			       0, pns->largest_recv_pn);
+		tquic_send_ack(conn, path, pns->largest_recv_pn, 0,
+			       pns->largest_recv_pn);
 	}
 	rcu_read_unlock();
 }
@@ -544,7 +541,7 @@ static void tquic_timer_key_update_cb(struct timer_list *t)
  * 64 packets * ~1500 bytes = ~96 KB per invocation, enough to fill a
  * typical initial slow-start window in one pass.
  */
-#define TQUIC_TX_WORK_BATCH_MAX		64
+#define TQUIC_TX_WORK_BATCH_MAX 64
 
 static void tquic_conn_tx_work(struct work_struct *work)
 {
@@ -566,9 +563,8 @@ static void tquic_conn_tx_work(struct work_struct *work)
 	{
 		struct sock *csk = READ_ONCE(conn->sk);
 
-		pacing_enabled = conn->timer_state &&
-				 conn->tsk && conn->tsk->pacing_enabled &&
-				 csk &&
+		pacing_enabled = conn->timer_state && conn->tsk &&
+				 conn->tsk->pacing_enabled && csk &&
 				 tquic_net_get_pacing_enabled(sock_net(csk));
 	}
 	tquic_dbg("tx_work: pacing_enabled=%d\n", pacing_enabled);
@@ -598,10 +594,10 @@ static void tquic_conn_tx_work(struct work_struct *work)
 			 * packets are never paced. Only pace Application
 			 * data packets.
 			 */
-			if (pacing_enabled &&
-			    i == TQUIC_PN_SPACE_APPLICATION &&
+			if (pacing_enabled && i == TQUIC_PN_SPACE_APPLICATION &&
 			    !tquic_timer_can_send_paced(conn->timer_state)) {
-				tquic_dbg("tx_work: pacing gate closed, deferring app data\n");
+				tquic_dbg(
+					"tx_work: pacing gate closed, deferring app data\n");
 				pacing_blocked = true;
 				continue;
 			}
@@ -623,9 +619,10 @@ static void tquic_conn_tx_work(struct work_struct *work)
 			pkt_len = skb->len;
 
 			if (tquic_udp_send(conn->tsk, skb, path) < 0) {
-				tquic_conn_err(conn,
-					       "tx_work: send failed on path %u\n",
-					       path->path_id);
+				tquic_conn_err(
+					conn,
+					"tx_work: send failed on path %u\n",
+					path->path_id);
 				tquic_path_put(path);
 				continue;
 			}
@@ -635,12 +632,12 @@ static void tquic_conn_tx_work(struct work_struct *work)
 			 * the pacing rate from CC and schedule the next
 			 * pacing interval.
 			 */
-			if (pacing_enabled &&
-			    i == TQUIC_PN_SPACE_APPLICATION) {
+			if (pacing_enabled && i == TQUIC_PN_SPACE_APPLICATION) {
 				u64 rate = tquic_cong_get_pacing_rate(path);
 
-				tquic_dbg("tx_work: pacing send pkt_len=%u rate=%llu B/s\n",
-					  pkt_len, rate);
+				tquic_dbg(
+					"tx_work: pacing send pkt_len=%u rate=%llu B/s\n",
+					pkt_len, rate);
 				tquic_timer_set_pacing_rate(conn->timer_state,
 							    rate);
 				tquic_timer_schedule_pacing(conn->timer_state,
@@ -657,8 +654,9 @@ static void tquic_conn_tx_work(struct work_struct *work)
 		 * when the send time arrives.
 		 */
 		if (pacing_blocked) {
-			tquic_dbg("tx_work: pacing blocked, sent=%d, waiting for hrtimer\n",
-				  total_sent);
+			tquic_dbg(
+				"tx_work: pacing blocked, sent=%d, waiting for hrtimer\n",
+				total_sent);
 			more_work = false;
 			break;
 		}
@@ -686,19 +684,6 @@ static void tquic_conn_tx_work(struct work_struct *work)
 	 */
 	if (more_work && total_sent >= TQUIC_TX_WORK_BATCH_MAX)
 		schedule_work(&conn->tx_work);
-}
-
-static void tquic_conn_rx_work(struct work_struct *work)
-{
-	struct tquic_connection *conn =
-		container_of(work, struct tquic_connection, rx_work);
-	struct sk_buff *skb;
-	tquic_dbg("tquic_conn_rx_work: processing pending frames\n");
-
-	while ((skb = skb_dequeue(&conn->pending_frames)) != NULL) {
-		tquic_packet_process(conn, skb);
-		kfree_skb(skb);
-	}
 }
 
 static void tquic_conn_close_work(struct work_struct *work)
@@ -733,8 +718,8 @@ struct tquic_connection *tquic_conn_create(struct tquic_sock *tsk,
 	conn->tsk = tsk;
 	spin_lock_init(&conn->lock);
 	conn->state = TQUIC_CONN_IDLE;
-	conn->version = tsk->config.version ? tsk->config.version
-					     : TQUIC_VERSION_1;
+	conn->version = tsk->config.version ? tsk->config.version :
+					      TQUIC_VERSION_1;
 	conn->is_server = is_server;
 
 	/* Generate source connection ID */
@@ -759,8 +744,8 @@ struct tquic_connection *tquic_conn_create(struct tquic_sock *tsk,
 	tquic_cid_hash_add(scid_entry);
 	conn->next_scid_seq = 1;
 	pr_warn("tquic_conn_create: SCID#1 (cid_table) len=%u id=%*phN is_server=%d\n",
-		conn->scid.len, min_t(int, conn->scid.len, 8),
-		conn->scid.id, is_server);
+		conn->scid.len, min_t(int, conn->scid.len, 8), conn->scid.id,
+		is_server);
 
 	/* Allocate and initialize packet number spaces */
 	conn->pn_spaces = kcalloc(TQUIC_PN_SPACE_COUNT,
@@ -807,17 +792,14 @@ struct tquic_connection *tquic_conn_create(struct tquic_sock *tsk,
 	timer_setup(&conn->timers[TQUIC_TIMER_KEY_UPDATE],
 		    tquic_timer_key_update_cb, 0);
 
-	/* Initialize work queues */
 	INIT_WORK(&conn->tx_work, tquic_conn_tx_work);
-	INIT_WORK(&conn->rx_work, tquic_conn_rx_work);
 	INIT_WORK(&conn->close_work, tquic_conn_close_work);
 
 	/* Initialize loss detection */
 	if (tquic_loss_detection_init(conn) < 0)
 		goto err_free_pn_spaces;
 
-	/* Initialize pending frame queues */
-	skb_queue_head_init(&conn->pending_frames);
+	/* Initialize control frame queues */
 	skb_queue_head_init(&conn->control_frames);
 	for (i = 0; i < TQUIC_PN_SPACE_COUNT; i++)
 		skb_queue_head_init(&conn->crypto_buffer[i]);
@@ -944,7 +926,6 @@ void tquic_conn_destroy(struct tquic_connection *conn)
 
 	/* Cancel work */
 	cancel_work_sync(&conn->tx_work);
-	cancel_work_sync(&conn->rx_work);
 	cancel_work_sync(&conn->close_work);
 
 	/*
@@ -1021,8 +1002,7 @@ void tquic_conn_destroy(struct tquic_connection *conn)
 	if (conn->zc_state)
 		tquic_zc_state_free(conn);
 
-	/* Free pending frames, control frames, pacing queue, and early data buffer */
-	skb_queue_purge(&conn->pending_frames);
+	/* Free control frames, pacing queue, and early data buffer */
 	skb_queue_purge(&conn->control_frames);
 	skb_queue_purge(&conn->pacing_queue);
 	skb_queue_purge(&conn->early_data_buffer);
@@ -1039,8 +1019,8 @@ static struct tquic_cid *tquic_conn_get_dcid(struct tquic_connection *conn);
 static void tquic_conn_set_state_local(struct tquic_connection *conn,
 				       enum tquic_conn_state state);
 
-int tquic_conn_connect(struct tquic_connection *conn,
-			      struct sockaddr *addr, int addr_len)
+int tquic_conn_connect(struct tquic_connection *conn, struct sockaddr *addr,
+		       int addr_len)
 {
 	struct tquic_sock *tsk = conn->tsk;
 	struct tquic_path *path;
@@ -1075,7 +1055,8 @@ int tquic_conn_connect(struct tquic_connection *conn,
 	}
 
 	/* Derive initial secrets from destination connection ID */
-	err = tquic_crypto_derive_initial_secrets(conn, tquic_conn_get_dcid(conn));
+	err = tquic_crypto_derive_initial_secrets(conn,
+						  tquic_conn_get_dcid(conn));
 	if (err)
 		return err;
 
@@ -1137,7 +1118,7 @@ static int tquic_conn_close(struct tquic_connection *conn, u64 error_code,
 	if (!already_closing)
 		tquic_conn_set_state(conn, TQUIC_CONN_CLOSING,
 				     app_error ? TQUIC_REASON_APPLICATION :
-				     TQUIC_REASON_NORMAL);
+						 TQUIC_REASON_NORMAL);
 
 	/* Send CONNECTION_CLOSE frame */
 	schedule_work(&conn->tx_work);
@@ -1151,15 +1132,14 @@ static int tquic_conn_close(struct tquic_connection *conn, u64 error_code,
 }
 
 static void tquic_conn_set_state_local(struct tquic_connection *conn,
-			      enum tquic_conn_state state)
+				       enum tquic_conn_state state)
 {
 	tquic_dbg("tquic_conn_set_state_local: state=%d\n", state);
 	tquic_conn_set_state(conn, state, TQUIC_REASON_NORMAL);
 }
 
 /* Generate new connection ID */
-int tquic_conn_new_cid(struct tquic_connection *conn,
-			      struct tquic_cid *new_cid)
+int tquic_conn_new_cid(struct tquic_connection *conn, struct tquic_cid *new_cid)
 {
 	struct tquic_cid_entry *entry;
 	u64 seq = conn->next_scid_seq++;
@@ -1184,8 +1164,8 @@ int tquic_conn_retire_cid(struct tquic_connection *conn, u64 seq, bool is_local)
 	struct tquic_cid_entry *entry, *tmp;
 	struct list_head *list;
 
-	tquic_conn_dbg(conn, "tquic_conn_retire_cid: seq=%llu local=%d\n",
-		       seq, is_local);
+	tquic_conn_dbg(conn, "tquic_conn_retire_cid: seq=%llu local=%d\n", seq,
+		       is_local);
 
 	/* Select list based on whether it's a local or remote CID */
 	list = is_local ? &conn->scid_list : &conn->dcid_list;
@@ -1244,7 +1224,8 @@ static struct tquic_cid *tquic_conn_get_dcid(struct tquic_connection *conn)
 static int tquic_conn_rotate_dcid(struct tquic_connection *conn)
 {
 	struct tquic_cid_entry *entry;
-	tquic_conn_dbg(conn, "tquic_conn_rotate_dcid: rotating destination CID\n");
+	tquic_conn_dbg(conn,
+		       "tquic_conn_rotate_dcid: rotating destination CID\n");
 
 	list_for_each_entry(entry, &conn->dcid_list, list) {
 		if (entry->state == CID_STATE_ACTIVE) {
@@ -1969,7 +1950,9 @@ EXPORT_SYMBOL(tquic_transport_param_encode);
 int tquic_transport_param_validate(struct tquic_connection *conn)
 {
 	struct tquic_transport_params *params = &conn->remote_params;
-	tquic_conn_dbg(conn, "tquic_transport_param_validate: validating remote params\n");
+	tquic_conn_dbg(
+		conn,
+		"tquic_transport_param_validate: validating remote params\n");
 
 	/* Validate original_destination_connection_id matches */
 	if (!conn->is_server && params->original_dcid_present) {

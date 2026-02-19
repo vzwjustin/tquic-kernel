@@ -69,7 +69,7 @@ static inline int tquic_conn_queue_frame(struct tquic_connection *conn,
 	if (!conn || !skb)
 		return -EINVAL;
 
-	skb_queue_tail(&conn->pending_frames, skb);
+	skb_queue_tail(&conn->control_frames, skb);
 	return 0;
 }
 
@@ -506,8 +506,8 @@ void tquic_loss_detection_on_packet_sent(struct tquic_connection *conn,
 	if (!conn || !pkt)
 		return;
 
-	tquic_dbg("%s: pn=%llu space=%u bytes=%u\n", __func__,
-		pkt->pn, pkt->pn_space, pkt->sent_bytes);
+	tquic_dbg("%s: pn=%llu space=%u bytes=%u\n", __func__, pkt->pn,
+		  pkt->pn_space, pkt->sent_bytes);
 
 	if (!conn->pn_spaces || pkt->pn_space >= TQUIC_PN_SPACE_COUNT)
 		return;
@@ -669,8 +669,8 @@ void tquic_loss_detection_on_ack_received(struct tquic_connection *conn,
 	if (!conn || !ack)
 		return;
 
-	tquic_dbg("%s: largest=%llu space=%u\n", __func__,
-		ack->largest_acked, pn_space_idx);
+	tquic_dbg("%s: largest=%llu space=%u\n", __func__, ack->largest_acked,
+		  pn_space_idx);
 
 	if (pn_space_idx >= TQUIC_PN_SPACE_COUNT)
 		return;
@@ -1496,8 +1496,7 @@ void tquic_loss_detection_on_timeout(struct tquic_connection *conn)
 	    READ_ONCE(conn->state) == TQUIC_CONN_CLOSED)
 		return;
 
-	tquic_dbg("%s: pto_count=%u\n", __func__,
-		  conn->pto_count);
+	tquic_dbg("%s: pto_count=%u\n", __func__, conn->pto_count);
 
 	/*
 	 * RFC 9002 Section 6.2.1:
