@@ -52,17 +52,18 @@
  * This provides defense-in-depth against malformed input that could
  * cause size_t underflow and subsequent buffer over-reads.
  */
-#define FRAME_ADVANCE_SAFE(p, remaining, n) ({			\
-	int __ret = 0;						\
-	size_t __n = (n);					\
-	if (unlikely(__n > (remaining))) {			\
-		__ret = -EPROTO;				\
-	} else {						\
-		(p) += __n;					\
-		(remaining) -= __n;				\
-	}							\
-	__ret;							\
-})
+#define FRAME_ADVANCE_SAFE(p, remaining, n)        \
+	({                                         \
+		int __ret = 0;                     \
+		size_t __n = (n);                  \
+		if (unlikely(__n > (remaining))) { \
+			__ret = -EPROTO;           \
+		} else {                           \
+			(p) += __n;                \
+			(remaining) -= __n;        \
+		}                                  \
+		__ret;                             \
+	})
 
 /**
  * frame_check_remaining - Validate sufficient bytes remain before operation
@@ -104,7 +105,7 @@ static inline size_t frame_varint_len(u64 val)
 		return 4;
 	if (val <= TQUIC_MAX_VARINT)
 		return 8;
-	return 0;  /* Value too large */
+	return 0; /* Value too large */
 }
 
 /**
@@ -127,8 +128,8 @@ static inline size_t frame_varint_decode_len(u8 first_byte)
  *
  * Returns 0 on success, negative error code on failure.
  */
-static int frame_varint_decode(const u8 *buf, size_t buf_len,
-			       u64 *val, size_t *consumed)
+static int frame_varint_decode(const u8 *buf, size_t buf_len, u64 *val,
+			       size_t *consumed)
 {
 	size_t len;
 	u64 v;
@@ -148,20 +149,14 @@ static int frame_varint_decode(const u8 *buf, size_t buf_len,
 		v = ((u64)(buf[0] & 0x3f) << 8) | buf[1];
 		break;
 	case 4:
-		v = ((u64)(buf[0] & 0x3f) << 24) |
-		    ((u64)buf[1] << 16) |
-		    ((u64)buf[2] << 8) |
-		    buf[3];
+		v = ((u64)(buf[0] & 0x3f) << 24) | ((u64)buf[1] << 16) |
+		    ((u64)buf[2] << 8) | buf[3];
 		break;
 	case 8:
-		v = ((u64)(buf[0] & 0x3f) << 56) |
-		    ((u64)buf[1] << 48) |
-		    ((u64)buf[2] << 40) |
-		    ((u64)buf[3] << 32) |
-		    ((u64)buf[4] << 24) |
-		    ((u64)buf[5] << 16) |
-		    ((u64)buf[6] << 8) |
-		    buf[7];
+		v = ((u64)(buf[0] & 0x3f) << 56) | ((u64)buf[1] << 48) |
+		    ((u64)buf[2] << 40) | ((u64)buf[3] << 32) |
+		    ((u64)buf[4] << 24) | ((u64)buf[5] << 16) |
+		    ((u64)buf[6] << 8) | buf[7];
 		break;
 	default:
 		return -EINVAL;
@@ -294,7 +289,8 @@ static int tquic_parse_ack_frame(const u8 *buf, size_t buf_len,
 {
 	const u8 *p = buf;
 	size_t remaining = buf_len;
-	size_t consumed = 0;  /* Initialize to prevent use of garbage on error paths */
+	size_t consumed =
+		0; /* Initialize to prevent use of garbage on error paths */
 	u64 i;
 	int ret;
 
@@ -325,7 +321,8 @@ static int tquic_parse_ack_frame(const u8 *buf, size_t buf_len,
 	 */
 
 	/* Largest Acknowledged */
-	ret = frame_varint_decode(p, remaining, &frame->ack.largest_ack, &consumed);
+	ret = frame_varint_decode(p, remaining, &frame->ack.largest_ack,
+				  &consumed);
 	if (ret < 0)
 		return ret;
 	ret = FRAME_ADVANCE_SAFE(p, remaining, consumed);
@@ -333,7 +330,8 @@ static int tquic_parse_ack_frame(const u8 *buf, size_t buf_len,
 		return ret;
 
 	/* ACK Delay */
-	ret = frame_varint_decode(p, remaining, &frame->ack.ack_delay, &consumed);
+	ret = frame_varint_decode(p, remaining, &frame->ack.ack_delay,
+				  &consumed);
 	if (ret < 0)
 		return ret;
 	ret = FRAME_ADVANCE_SAFE(p, remaining, consumed);
@@ -341,7 +339,8 @@ static int tquic_parse_ack_frame(const u8 *buf, size_t buf_len,
 		return ret;
 
 	/* ACK Range Count */
-	ret = frame_varint_decode(p, remaining, &frame->ack.ack_range_count, &consumed);
+	ret = frame_varint_decode(p, remaining, &frame->ack.ack_range_count,
+				  &consumed);
 	if (ret < 0)
 		return ret;
 	ret = FRAME_ADVANCE_SAFE(p, remaining, consumed);
@@ -357,7 +356,8 @@ static int tquic_parse_ack_frame(const u8 *buf, size_t buf_len,
 		return -EOVERFLOW;
 
 	/* First ACK Range */
-	ret = frame_varint_decode(p, remaining, &frame->ack.first_ack_range, &consumed);
+	ret = frame_varint_decode(p, remaining, &frame->ack.first_ack_range,
+				  &consumed);
 	if (ret < 0)
 		return ret;
 	ret = FRAME_ADVANCE_SAFE(p, remaining, consumed);
@@ -379,7 +379,8 @@ static int tquic_parse_ack_frame(const u8 *buf, size_t buf_len,
 	 */
 	for (i = 0; i < frame->ack.ack_range_count; i++) {
 		/* Gap */
-		ret = frame_varint_decode(p, remaining, &ranges_buf[i].gap, &consumed);
+		ret = frame_varint_decode(p, remaining, &ranges_buf[i].gap,
+					  &consumed);
 		if (ret < 0)
 			return ret;
 		ret = FRAME_ADVANCE_SAFE(p, remaining, consumed);
@@ -387,7 +388,8 @@ static int tquic_parse_ack_frame(const u8 *buf, size_t buf_len,
 			return ret;
 
 		/* ACK Range Length */
-		ret = frame_varint_decode(p, remaining, &ranges_buf[i].ack_range_len, &consumed);
+		ret = frame_varint_decode(
+			p, remaining, &ranges_buf[i].ack_range_len, &consumed);
 		if (ret < 0)
 			return ret;
 		ret = FRAME_ADVANCE_SAFE(p, remaining, consumed);
@@ -398,7 +400,8 @@ static int tquic_parse_ack_frame(const u8 *buf, size_t buf_len,
 	/* ECN Counts (if present in ACK_ECN frame type 0x03) */
 	if (has_ecn) {
 		/* ECT(0) Count */
-		ret = frame_varint_decode(p, remaining, &frame->ack.ect0_count, &consumed);
+		ret = frame_varint_decode(p, remaining, &frame->ack.ect0_count,
+					  &consumed);
 		if (ret < 0)
 			return ret;
 		ret = FRAME_ADVANCE_SAFE(p, remaining, consumed);
@@ -406,7 +409,8 @@ static int tquic_parse_ack_frame(const u8 *buf, size_t buf_len,
 			return ret;
 
 		/* ECT(1) Count */
-		ret = frame_varint_decode(p, remaining, &frame->ack.ect1_count, &consumed);
+		ret = frame_varint_decode(p, remaining, &frame->ack.ect1_count,
+					  &consumed);
 		if (ret < 0)
 			return ret;
 		ret = FRAME_ADVANCE_SAFE(p, remaining, consumed);
@@ -414,7 +418,8 @@ static int tquic_parse_ack_frame(const u8 *buf, size_t buf_len,
 			return ret;
 
 		/* ECN-CE Count */
-		ret = frame_varint_decode(p, remaining, &frame->ack.ecn_ce_count, &consumed);
+		ret = frame_varint_decode(p, remaining,
+					  &frame->ack.ecn_ce_count, &consumed);
 		if (ret < 0)
 			return ret;
 		ret = FRAME_ADVANCE_SAFE(p, remaining, consumed);
@@ -458,7 +463,8 @@ static int tquic_parse_reset_stream_frame(const u8 *buf, size_t buf_len,
 	frame->type = TQUIC_FRAME_RESET_STREAM;
 
 	/* Stream ID */
-	ret = frame_varint_decode(p, remaining, &frame->reset_stream.stream_id, &consumed);
+	ret = frame_varint_decode(p, remaining, &frame->reset_stream.stream_id,
+				  &consumed);
 	if (ret < 0)
 		return ret;
 	ret = FRAME_ADVANCE_SAFE(p, remaining, consumed);
@@ -466,7 +472,8 @@ static int tquic_parse_reset_stream_frame(const u8 *buf, size_t buf_len,
 		return ret;
 
 	/* Application Protocol Error Code */
-	ret = frame_varint_decode(p, remaining, &frame->reset_stream.app_error_code, &consumed);
+	ret = frame_varint_decode(
+		p, remaining, &frame->reset_stream.app_error_code, &consumed);
 	if (ret < 0)
 		return ret;
 	ret = FRAME_ADVANCE_SAFE(p, remaining, consumed);
@@ -474,7 +481,8 @@ static int tquic_parse_reset_stream_frame(const u8 *buf, size_t buf_len,
 		return ret;
 
 	/* Final Size */
-	ret = frame_varint_decode(p, remaining, &frame->reset_stream.final_size, &consumed);
+	ret = frame_varint_decode(p, remaining, &frame->reset_stream.final_size,
+				  &consumed);
 	if (ret < 0)
 		return ret;
 	ret = FRAME_ADVANCE_SAFE(p, remaining, consumed);
@@ -512,7 +520,8 @@ static int tquic_parse_stop_sending_frame(const u8 *buf, size_t buf_len,
 	frame->type = TQUIC_FRAME_STOP_SENDING;
 
 	/* Stream ID */
-	ret = frame_varint_decode(p, remaining, &frame->stop_sending.stream_id, &consumed);
+	ret = frame_varint_decode(p, remaining, &frame->stop_sending.stream_id,
+				  &consumed);
 	if (ret < 0)
 		return ret;
 	ret = FRAME_ADVANCE_SAFE(p, remaining, consumed);
@@ -520,7 +529,8 @@ static int tquic_parse_stop_sending_frame(const u8 *buf, size_t buf_len,
 		return ret;
 
 	/* Application Protocol Error Code */
-	ret = frame_varint_decode(p, remaining, &frame->stop_sending.app_error_code, &consumed);
+	ret = frame_varint_decode(
+		p, remaining, &frame->stop_sending.app_error_code, &consumed);
 	if (ret < 0)
 		return ret;
 	ret = FRAME_ADVANCE_SAFE(p, remaining, consumed);
@@ -562,7 +572,8 @@ static int tquic_parse_crypto_frame(const u8 *buf, size_t buf_len,
 	frame->type = TQUIC_FRAME_CRYPTO;
 
 	/* Offset */
-	ret = frame_varint_decode(p, remaining, &frame->crypto.offset, &consumed);
+	ret = frame_varint_decode(p, remaining, &frame->crypto.offset,
+				  &consumed);
 	if (ret < 0)
 		return ret;
 	ret = FRAME_ADVANCE_SAFE(p, remaining, consumed);
@@ -570,7 +581,8 @@ static int tquic_parse_crypto_frame(const u8 *buf, size_t buf_len,
 		return ret;
 
 	/* Length */
-	ret = frame_varint_decode(p, remaining, &frame->crypto.length, &consumed);
+	ret = frame_varint_decode(p, remaining, &frame->crypto.length,
+				  &consumed);
 	if (ret < 0)
 		return ret;
 	ret = FRAME_ADVANCE_SAFE(p, remaining, consumed);
@@ -627,7 +639,8 @@ static int tquic_parse_new_token_frame(const u8 *buf, size_t buf_len,
 	frame->type = TQUIC_FRAME_NEW_TOKEN;
 
 	/* Token Length */
-	ret = frame_varint_decode(p, remaining, &frame->new_token.token_len, &consumed);
+	ret = frame_varint_decode(p, remaining, &frame->new_token.token_len,
+				  &consumed);
 	if (ret < 0)
 		return ret;
 	ret = FRAME_ADVANCE_SAFE(p, remaining, consumed);
@@ -647,11 +660,13 @@ static int tquic_parse_new_token_frame(const u8 *buf, size_t buf_len,
 		return -EPROTO;
 	if (frame->new_token.token_len > SIZE_MAX)
 		return -EPROTO;
-	if (!frame_check_remaining(remaining, (size_t)frame->new_token.token_len))
+	if (!frame_check_remaining(remaining,
+				   (size_t)frame->new_token.token_len))
 		return -EPROTO;
 
 	frame->new_token.token = p;
-	ret = FRAME_ADVANCE_SAFE(p, remaining, (size_t)frame->new_token.token_len);
+	ret = FRAME_ADVANCE_SAFE(p, remaining,
+				 (size_t)frame->new_token.token_len);
 	if (ret < 0)
 		return ret;
 
@@ -699,7 +714,8 @@ static int tquic_parse_stream_frame(const u8 *buf, size_t buf_len,
 		return ret;
 
 	/* Stream ID */
-	ret = frame_varint_decode(p, remaining, &frame->stream.stream_id, &consumed);
+	ret = frame_varint_decode(p, remaining, &frame->stream.stream_id,
+				  &consumed);
 	if (ret < 0)
 		return ret;
 	ret = FRAME_ADVANCE_SAFE(p, remaining, consumed);
@@ -708,7 +724,8 @@ static int tquic_parse_stream_frame(const u8 *buf, size_t buf_len,
 
 	/* Offset (if present) */
 	if (frame->stream.has_offset) {
-		ret = frame_varint_decode(p, remaining, &frame->stream.offset, &consumed);
+		ret = frame_varint_decode(p, remaining, &frame->stream.offset,
+					  &consumed);
 		if (ret < 0)
 			return ret;
 		ret = FRAME_ADVANCE_SAFE(p, remaining, consumed);
@@ -720,7 +737,8 @@ static int tquic_parse_stream_frame(const u8 *buf, size_t buf_len,
 
 	/* Length (if present, otherwise data extends to end of packet) */
 	if (frame->stream.has_length) {
-		ret = frame_varint_decode(p, remaining, &frame->stream.length, &consumed);
+		ret = frame_varint_decode(p, remaining, &frame->stream.length,
+					  &consumed);
 		if (ret < 0)
 			return ret;
 		ret = FRAME_ADVANCE_SAFE(p, remaining, consumed);
@@ -733,11 +751,13 @@ static int tquic_parse_stream_frame(const u8 *buf, size_t buf_len,
 		 */
 		if (frame->stream.length > SIZE_MAX)
 			return -EPROTO;
-		if (!frame_check_remaining(remaining, (size_t)frame->stream.length))
+		if (!frame_check_remaining(remaining,
+					   (size_t)frame->stream.length))
 			return -EPROTO;
 
 		frame->stream.data = p;
-		ret = FRAME_ADVANCE_SAFE(p, remaining, (size_t)frame->stream.length);
+		ret = FRAME_ADVANCE_SAFE(p, remaining,
+					 (size_t)frame->stream.length);
 		if (ret < 0)
 			return ret;
 	} else {
@@ -778,7 +798,8 @@ static int tquic_parse_max_data_frame(const u8 *buf, size_t buf_len,
 	frame->type = TQUIC_FRAME_MAX_DATA;
 
 	/* Maximum Data */
-	ret = frame_varint_decode(p, remaining, &frame->max_data.max_data, &consumed);
+	ret = frame_varint_decode(p, remaining, &frame->max_data.max_data,
+				  &consumed);
 	if (ret < 0)
 		return ret;
 	ret = FRAME_ADVANCE_SAFE(p, remaining, consumed);
@@ -816,7 +837,8 @@ static int tquic_parse_max_stream_data_frame(const u8 *buf, size_t buf_len,
 	frame->type = TQUIC_FRAME_MAX_STREAM_DATA;
 
 	/* Stream ID */
-	ret = frame_varint_decode(p, remaining, &frame->max_stream_data.stream_id, &consumed);
+	ret = frame_varint_decode(p, remaining,
+				  &frame->max_stream_data.stream_id, &consumed);
 	if (ret < 0)
 		return ret;
 	ret = FRAME_ADVANCE_SAFE(p, remaining, consumed);
@@ -824,7 +846,9 @@ static int tquic_parse_max_stream_data_frame(const u8 *buf, size_t buf_len,
 		return ret;
 
 	/* Maximum Stream Data */
-	ret = frame_varint_decode(p, remaining, &frame->max_stream_data.max_stream_data, &consumed);
+	ret = frame_varint_decode(p, remaining,
+				  &frame->max_stream_data.max_stream_data,
+				  &consumed);
 	if (ret < 0)
 		return ret;
 	ret = FRAME_ADVANCE_SAFE(p, remaining, consumed);
@@ -860,11 +884,13 @@ static int tquic_parse_max_streams_frame(const u8 *buf, size_t buf_len,
 	if (ret < 0)
 		return ret;
 
-	frame->type = bidi ? TQUIC_FRAME_MAX_STREAMS_BIDI : TQUIC_FRAME_MAX_STREAMS_UNI;
+	frame->type = bidi ? TQUIC_FRAME_MAX_STREAMS_BIDI :
+			     TQUIC_FRAME_MAX_STREAMS_UNI;
 	frame->max_streams.bidi = bidi;
 
 	/* Maximum Streams */
-	ret = frame_varint_decode(p, remaining, &frame->max_streams.max_streams, &consumed);
+	ret = frame_varint_decode(p, remaining, &frame->max_streams.max_streams,
+				  &consumed);
 	if (ret < 0)
 		return ret;
 	ret = FRAME_ADVANCE_SAFE(p, remaining, consumed);
@@ -906,7 +932,8 @@ static int tquic_parse_data_blocked_frame(const u8 *buf, size_t buf_len,
 	frame->type = TQUIC_FRAME_DATA_BLOCKED;
 
 	/* Maximum Data (the limit at which blocking occurred) */
-	ret = frame_varint_decode(p, remaining, &frame->data_blocked.max_data, &consumed);
+	ret = frame_varint_decode(p, remaining, &frame->data_blocked.max_data,
+				  &consumed);
 	if (ret < 0)
 		return ret;
 	ret = FRAME_ADVANCE_SAFE(p, remaining, consumed);
@@ -944,7 +971,8 @@ static int tquic_parse_stream_data_blocked_frame(const u8 *buf, size_t buf_len,
 	frame->type = TQUIC_FRAME_STREAM_DATA_BLOCKED;
 
 	/* Stream ID */
-	ret = frame_varint_decode(p, remaining, &frame->stream_data_blocked.stream_id, &consumed);
+	ret = frame_varint_decode(
+		p, remaining, &frame->stream_data_blocked.stream_id, &consumed);
 	if (ret < 0)
 		return ret;
 	ret = FRAME_ADVANCE_SAFE(p, remaining, consumed);
@@ -952,7 +980,9 @@ static int tquic_parse_stream_data_blocked_frame(const u8 *buf, size_t buf_len,
 		return ret;
 
 	/* Maximum Stream Data (the limit at which blocking occurred) */
-	ret = frame_varint_decode(p, remaining, &frame->stream_data_blocked.max_stream_data, &consumed);
+	ret = frame_varint_decode(p, remaining,
+				  &frame->stream_data_blocked.max_stream_data,
+				  &consumed);
 	if (ret < 0)
 		return ret;
 	ret = FRAME_ADVANCE_SAFE(p, remaining, consumed);
@@ -973,7 +1003,8 @@ static int tquic_parse_stream_data_blocked_frame(const u8 *buf, size_t buf_len,
  * Returns bytes consumed on success, negative error code on failure.
  */
 static int tquic_parse_streams_blocked_frame(const u8 *buf, size_t buf_len,
-					     struct tquic_frame *frame, bool bidi)
+					     struct tquic_frame *frame,
+					     bool bidi)
 {
 	const u8 *p = buf;
 	size_t remaining = buf_len;
@@ -993,7 +1024,8 @@ static int tquic_parse_streams_blocked_frame(const u8 *buf, size_t buf_len,
 	frame->streams_blocked.bidi = bidi;
 
 	/* Maximum Streams (the limit at which blocking occurred) */
-	ret = frame_varint_decode(p, remaining, &frame->streams_blocked.max_streams, &consumed);
+	ret = frame_varint_decode(
+		p, remaining, &frame->streams_blocked.max_streams, &consumed);
 	if (ret < 0)
 		return ret;
 	ret = FRAME_ADVANCE_SAFE(p, remaining, consumed);
@@ -1036,7 +1068,8 @@ static int tquic_parse_new_connection_id_frame(const u8 *buf, size_t buf_len,
 	frame->type = TQUIC_FRAME_NEW_CONNECTION_ID;
 
 	/* Sequence Number */
-	ret = frame_varint_decode(p, remaining, &frame->new_cid.seq_num, &consumed);
+	ret = frame_varint_decode(p, remaining, &frame->new_cid.seq_num,
+				  &consumed);
 	if (ret < 0)
 		return ret;
 	ret = FRAME_ADVANCE_SAFE(p, remaining, consumed);
@@ -1044,7 +1077,8 @@ static int tquic_parse_new_connection_id_frame(const u8 *buf, size_t buf_len,
 		return ret;
 
 	/* Retire Prior To */
-	ret = frame_varint_decode(p, remaining, &frame->new_cid.retire_prior_to, &consumed);
+	ret = frame_varint_decode(p, remaining, &frame->new_cid.retire_prior_to,
+				  &consumed);
 	if (ret < 0)
 		return ret;
 	ret = FRAME_ADVANCE_SAFE(p, remaining, consumed);
@@ -1067,7 +1101,8 @@ static int tquic_parse_new_connection_id_frame(const u8 *buf, size_t buf_len,
 	 * SECURITY: Validate CID length before buffer access.
 	 * RFC 9000 requires 1-20 bytes for NEW_CONNECTION_ID.
 	 */
-	if (frame->new_cid.cid_len < 1 || frame->new_cid.cid_len > TQUIC_MAX_CID_LEN)
+	if (frame->new_cid.cid_len < 1 ||
+	    frame->new_cid.cid_len > TQUIC_MAX_CID_LEN)
 		return -EPROTO;
 
 	/* Connection ID - validate remaining buffer first */
@@ -1081,7 +1116,8 @@ static int tquic_parse_new_connection_id_frame(const u8 *buf, size_t buf_len,
 	/* Stateless Reset Token (16 bytes) */
 	if (!frame_check_remaining(remaining, TQUIC_STATELESS_RESET_TOKEN_LEN))
 		return -EPROTO;
-	memcpy(frame->new_cid.stateless_reset_token, p, TQUIC_STATELESS_RESET_TOKEN_LEN);
+	memcpy(frame->new_cid.stateless_reset_token, p,
+	       TQUIC_STATELESS_RESET_TOKEN_LEN);
 	ret = FRAME_ADVANCE_SAFE(p, remaining, TQUIC_STATELESS_RESET_TOKEN_LEN);
 	if (ret < 0)
 		return ret;
@@ -1117,7 +1153,8 @@ static int tquic_parse_retire_connection_id_frame(const u8 *buf, size_t buf_len,
 	frame->type = TQUIC_FRAME_RETIRE_CONNECTION_ID;
 
 	/* Sequence Number */
-	ret = frame_varint_decode(p, remaining, &frame->retire_cid.seq_num, &consumed);
+	ret = frame_varint_decode(p, remaining, &frame->retire_cid.seq_num,
+				  &consumed);
 	if (ret < 0)
 		return ret;
 	ret = FRAME_ADVANCE_SAFE(p, remaining, consumed);
@@ -1206,7 +1243,8 @@ static int tquic_parse_connection_close_frame(const u8 *buf, size_t buf_len,
 	frame->conn_close.app_close = app_close;
 
 	/* Error Code */
-	ret = frame_varint_decode(p, remaining, &frame->conn_close.error_code, &consumed);
+	ret = frame_varint_decode(p, remaining, &frame->conn_close.error_code,
+				  &consumed);
 	if (ret < 0)
 		return ret;
 	ret = FRAME_ADVANCE_SAFE(p, remaining, consumed);
@@ -1215,7 +1253,8 @@ static int tquic_parse_connection_close_frame(const u8 *buf, size_t buf_len,
 
 	/* Frame Type (only for transport close, not app close) */
 	if (!app_close) {
-		ret = frame_varint_decode(p, remaining, &frame->conn_close.frame_type, &consumed);
+		ret = frame_varint_decode(
+			p, remaining, &frame->conn_close.frame_type, &consumed);
 		if (ret < 0)
 			return ret;
 		ret = FRAME_ADVANCE_SAFE(p, remaining, consumed);
@@ -1226,7 +1265,8 @@ static int tquic_parse_connection_close_frame(const u8 *buf, size_t buf_len,
 	}
 
 	/* Reason Phrase Length */
-	ret = frame_varint_decode(p, remaining, &frame->conn_close.reason_len, &consumed);
+	ret = frame_varint_decode(p, remaining, &frame->conn_close.reason_len,
+				  &consumed);
 	if (ret < 0)
 		return ret;
 	ret = FRAME_ADVANCE_SAFE(p, remaining, consumed);
@@ -1239,7 +1279,8 @@ static int tquic_parse_connection_close_frame(const u8 *buf, size_t buf_len,
 	 */
 	if (frame->conn_close.reason_len > SIZE_MAX)
 		return -EPROTO;
-	if (!frame_check_remaining(remaining, (size_t)frame->conn_close.reason_len))
+	if (!frame_check_remaining(remaining,
+				   (size_t)frame->conn_close.reason_len))
 		return -EPROTO;
 
 	if (frame->conn_close.reason_len > 0)
@@ -1247,7 +1288,8 @@ static int tquic_parse_connection_close_frame(const u8 *buf, size_t buf_len,
 	else
 		frame->conn_close.reason = NULL;
 
-	ret = FRAME_ADVANCE_SAFE(p, remaining, (size_t)frame->conn_close.reason_len);
+	ret = FRAME_ADVANCE_SAFE(p, remaining,
+				 (size_t)frame->conn_close.reason_len);
 	if (ret < 0)
 		return ret;
 
@@ -1313,7 +1355,8 @@ int tquic_parse_datagram_frame(const u8 *buf, size_t buf_len,
 
 	if (frame->datagram.has_length) {
 		/* Type 0x31: Length field present */
-		ret = frame_varint_decode(p, remaining, &frame->datagram.length, &consumed);
+		ret = frame_varint_decode(p, remaining, &frame->datagram.length,
+					  &consumed);
 		if (ret < 0)
 			return ret;
 		ret = FRAME_ADVANCE_SAFE(p, remaining, consumed);
@@ -1326,11 +1369,13 @@ int tquic_parse_datagram_frame(const u8 *buf, size_t buf_len,
 		 */
 		if (frame->datagram.length > SIZE_MAX)
 			return -EPROTO;
-		if (!frame_check_remaining(remaining, (size_t)frame->datagram.length))
+		if (!frame_check_remaining(remaining,
+					   (size_t)frame->datagram.length))
 			return -EPROTO;
 
 		frame->datagram.data = p;
-		ret = FRAME_ADVANCE_SAFE(p, remaining, (size_t)frame->datagram.length);
+		ret = FRAME_ADVANCE_SAFE(p, remaining,
+					 (size_t)frame->datagram.length);
 		if (ret < 0)
 			return ret;
 	} else {
@@ -1375,8 +1420,8 @@ int tquic_parse_frame(const u8 *buf, size_t buf_len, struct tquic_frame *frame,
 		return -EINVAL;
 
 	type = buf[0];
-	tquic_dbg("tquic_parse_frame: type=0x%02x buf_len=%zu\n",
-		  type, buf_len);
+	tquic_dbg("tquic_parse_frame: type=0x%02x buf_len=%zu\n", type,
+		  buf_len);
 
 	/* Handle STREAM frames (0x08-0x0f) */
 	if (type >= TQUIC_FRAME_STREAM_BASE && type <= TQUIC_FRAME_STREAM_MAX)
@@ -1419,25 +1464,30 @@ int tquic_parse_frame(const u8 *buf, size_t buf_len, struct tquic_frame *frame,
 		return tquic_parse_max_streams_frame(buf, buf_len, frame, true);
 
 	case TQUIC_FRAME_MAX_STREAMS_UNI:
-		return tquic_parse_max_streams_frame(buf, buf_len, frame, false);
+		return tquic_parse_max_streams_frame(buf, buf_len, frame,
+						     false);
 
 	case TQUIC_FRAME_DATA_BLOCKED:
 		return tquic_parse_data_blocked_frame(buf, buf_len, frame);
 
 	case TQUIC_FRAME_STREAM_DATA_BLOCKED:
-		return tquic_parse_stream_data_blocked_frame(buf, buf_len, frame);
+		return tquic_parse_stream_data_blocked_frame(buf, buf_len,
+							     frame);
 
 	case TQUIC_FRAME_STREAMS_BLOCKED_BIDI:
-		return tquic_parse_streams_blocked_frame(buf, buf_len, frame, true);
+		return tquic_parse_streams_blocked_frame(buf, buf_len, frame,
+							 true);
 
 	case TQUIC_FRAME_STREAMS_BLOCKED_UNI:
-		return tquic_parse_streams_blocked_frame(buf, buf_len, frame, false);
+		return tquic_parse_streams_blocked_frame(buf, buf_len, frame,
+							 false);
 
 	case TQUIC_FRAME_NEW_CONNECTION_ID:
 		return tquic_parse_new_connection_id_frame(buf, buf_len, frame);
 
 	case TQUIC_FRAME_RETIRE_CONNECTION_ID:
-		return tquic_parse_retire_connection_id_frame(buf, buf_len, frame);
+		return tquic_parse_retire_connection_id_frame(buf, buf_len,
+							      frame);
 
 	case TQUIC_FRAME_PATH_CHALLENGE:
 		return tquic_parse_path_challenge_frame(buf, buf_len, frame);
@@ -1446,10 +1496,12 @@ int tquic_parse_frame(const u8 *buf, size_t buf_len, struct tquic_frame *frame,
 		return tquic_parse_path_response_frame(buf, buf_len, frame);
 
 	case TQUIC_FRAME_CONNECTION_CLOSE:
-		return tquic_parse_connection_close_frame(buf, buf_len, frame, false);
+		return tquic_parse_connection_close_frame(buf, buf_len, frame,
+							  false);
 
 	case TQUIC_FRAME_CONNECTION_CLOSE_APP:
-		return tquic_parse_connection_close_frame(buf, buf_len, frame, true);
+		return tquic_parse_connection_close_frame(buf, buf_len, frame,
+							  true);
 
 	case TQUIC_FRAME_HANDSHAKE_DONE:
 		return tquic_parse_handshake_done_frame(buf, buf_len, frame);
@@ -1477,7 +1529,7 @@ EXPORT_SYMBOL_GPL(tquic_parse_frame);
  */
 size_t tquic_padding_frame_size(size_t length)
 {
-	return length;  /* Each padding byte is a 0x00 */
+	return length; /* Each padding byte is a 0x00 */
 }
 EXPORT_SYMBOL_GPL(tquic_padding_frame_size);
 
@@ -1507,10 +1559,11 @@ EXPORT_SYMBOL_GPL(tquic_ping_frame_size);
  * Returns the size in bytes, or 0 on error.
  */
 size_t tquic_ack_frame_size(u64 largest_ack, u64 ack_delay, u64 first_ack_range,
-			    const struct tquic_ack_range *ranges, u64 range_count,
-			    bool has_ecn, u64 ect0, u64 ect1, u64 ecn_ce)
+			    const struct tquic_ack_range *ranges,
+			    u64 range_count, bool has_ecn, u64 ect0, u64 ect1,
+			    u64 ecn_ce)
 {
-	size_t size = 1;  /* Frame type */
+	size_t size = 1; /* Frame type */
 	u64 i;
 
 	size += frame_varint_len(largest_ack);
@@ -1541,10 +1594,10 @@ EXPORT_SYMBOL_GPL(tquic_ack_frame_size);
  *
  * Returns the size in bytes.
  */
-size_t tquic_reset_stream_frame_size(u64 stream_id, u64 error_code, u64 final_size)
+size_t tquic_reset_stream_frame_size(u64 stream_id, u64 error_code,
+				     u64 final_size)
 {
-	return 1 + frame_varint_len(stream_id) +
-	       frame_varint_len(error_code) +
+	return 1 + frame_varint_len(stream_id) + frame_varint_len(error_code) +
 	       frame_varint_len(final_size);
 }
 EXPORT_SYMBOL_GPL(tquic_reset_stream_frame_size);
@@ -1600,7 +1653,7 @@ EXPORT_SYMBOL_GPL(tquic_new_token_frame_size);
 size_t tquic_stream_frame_size(u64 stream_id, u64 offset, u64 length,
 			       bool has_offset, bool has_length)
 {
-	size_t size = 1;  /* Frame type */
+	size_t size = 1; /* Frame type */
 
 	size += frame_varint_len(stream_id);
 
@@ -1610,7 +1663,7 @@ size_t tquic_stream_frame_size(u64 stream_id, u64 offset, u64 length,
 	if (has_length)
 		size += frame_varint_len(length);
 
-	size += length;  /* Stream data */
+	size += length; /* Stream data */
 
 	return size;
 }
@@ -1637,7 +1690,8 @@ EXPORT_SYMBOL_GPL(tquic_max_data_frame_size);
  */
 size_t tquic_max_stream_data_frame_size(u64 stream_id, u64 max_stream_data)
 {
-	return 1 + frame_varint_len(stream_id) + frame_varint_len(max_stream_data);
+	return 1 + frame_varint_len(stream_id) +
+	       frame_varint_len(max_stream_data);
 }
 EXPORT_SYMBOL_GPL(tquic_max_stream_data_frame_size);
 
@@ -1674,7 +1728,8 @@ EXPORT_SYMBOL_GPL(tquic_data_blocked_frame_size);
  */
 size_t tquic_stream_data_blocked_frame_size(u64 stream_id, u64 max_stream_data)
 {
-	return 1 + frame_varint_len(stream_id) + frame_varint_len(max_stream_data);
+	return 1 + frame_varint_len(stream_id) +
+	       frame_varint_len(max_stream_data);
 }
 EXPORT_SYMBOL_GPL(tquic_stream_data_blocked_frame_size);
 
@@ -1701,8 +1756,9 @@ EXPORT_SYMBOL_GPL(tquic_streams_blocked_frame_size);
 size_t tquic_new_connection_id_frame_size(u64 seq_num, u64 retire_prior_to,
 					  u8 cid_len)
 {
-	return 1 + frame_varint_len(seq_num) + frame_varint_len(retire_prior_to) +
-	       1 + cid_len + TQUIC_STATELESS_RESET_TOKEN_LEN;
+	return 1 + frame_varint_len(seq_num) +
+	       frame_varint_len(retire_prior_to) + 1 + cid_len +
+	       TQUIC_STATELESS_RESET_TOKEN_LEN;
 }
 EXPORT_SYMBOL_GPL(tquic_new_connection_id_frame_size);
 
@@ -1725,7 +1781,7 @@ EXPORT_SYMBOL_GPL(tquic_retire_connection_id_frame_size);
  */
 size_t tquic_path_challenge_frame_size(void)
 {
-	return 9;  /* 1 byte type + 8 bytes data */
+	return 9; /* 1 byte type + 8 bytes data */
 }
 EXPORT_SYMBOL_GPL(tquic_path_challenge_frame_size);
 
@@ -1736,7 +1792,7 @@ EXPORT_SYMBOL_GPL(tquic_path_challenge_frame_size);
  */
 size_t tquic_path_response_frame_size(void)
 {
-	return 9;  /* 1 byte type + 8 bytes data */
+	return 9; /* 1 byte type + 8 bytes data */
 }
 EXPORT_SYMBOL_GPL(tquic_path_response_frame_size);
 
@@ -1752,7 +1808,7 @@ EXPORT_SYMBOL_GPL(tquic_path_response_frame_size);
 size_t tquic_connection_close_frame_size(u64 error_code, u64 frame_type,
 					 u64 reason_len, bool app_close)
 {
-	size_t size = 1;  /* Frame type */
+	size_t size = 1; /* Frame type */
 
 	size += frame_varint_len(error_code);
 
@@ -1786,7 +1842,7 @@ EXPORT_SYMBOL_GPL(tquic_handshake_done_frame_size);
  */
 size_t tquic_datagram_frame_size(u64 data_len, bool with_length)
 {
-	size_t size = 1;  /* Frame type */
+	size_t size = 1; /* Frame type */
 
 	if (with_length)
 		size += frame_varint_len(data_len);
@@ -1904,7 +1960,8 @@ int tquic_write_ack_frame(u8 *buf, size_t buf_len, u64 largest_ack,
 		p += ret;
 		remaining -= ret;
 
-		ret = frame_varint_encode(ranges[i].ack_range_len, p, remaining);
+		ret = frame_varint_encode(ranges[i].ack_range_len, p,
+					  remaining);
 		if (ret < 0)
 			return ret;
 		p += ret;
@@ -2034,8 +2091,8 @@ int tquic_write_crypto_frame(u8 *buf, size_t buf_len, u64 offset,
 	size_t remaining = buf_len;
 	int ret;
 
-	tquic_dbg("tquic_write_crypto_frame: offset=%llu len=%llu\n",
-		  offset, data_len);
+	tquic_dbg("tquic_write_crypto_frame: offset=%llu len=%llu\n", offset,
+		  data_len);
 	if (remaining < 1)
 		return -ENOSPC;
 	*p++ = TQUIC_FRAME_CRYPTO;
@@ -2073,8 +2130,8 @@ EXPORT_SYMBOL_GPL(tquic_write_crypto_frame);
  *
  * Returns bytes written on success, negative error code on failure.
  */
-int tquic_write_new_token_frame(u8 *buf, size_t buf_len,
-				const u8 *token, u64 token_len)
+int tquic_write_new_token_frame(u8 *buf, size_t buf_len, const u8 *token,
+				u64 token_len)
 {
 	u8 *p = buf;
 	size_t remaining = buf_len;
@@ -2119,13 +2176,14 @@ EXPORT_SYMBOL_GPL(tquic_write_new_token_frame);
  *
  * Returns bytes written on success, negative error code on failure.
  */
-int tquic_write_stream_frame(u8 *buf, size_t buf_len, u64 stream_id,
-			     u64 offset, const u8 *data, u64 data_len,
-			     bool has_offset, bool has_length, bool fin)
+int tquic_write_stream_frame(u8 *buf, size_t buf_len, u64 stream_id, u64 offset,
+			     const u8 *data, u64 data_len, bool has_offset,
+			     bool has_length, bool fin)
 {
 	u8 *p = buf;
-	tquic_dbg("tquic_write_stream_frame: stream=%llu offset=%llu len=%llu fin=%d\n",
-		  stream_id, offset, data_len, fin);
+	tquic_dbg(
+		"tquic_write_stream_frame: stream=%llu offset=%llu len=%llu fin=%d\n",
+		stream_id, offset, data_len, fin);
 	size_t remaining = buf_len;
 	u8 type;
 	int ret;
@@ -2269,7 +2327,8 @@ int tquic_write_max_streams_frame(u8 *buf, size_t buf_len, u64 max_streams,
 
 	if (remaining < 1)
 		return -ENOSPC;
-	*p++ = bidi ? TQUIC_FRAME_MAX_STREAMS_BIDI : TQUIC_FRAME_MAX_STREAMS_UNI;
+	*p++ = bidi ? TQUIC_FRAME_MAX_STREAMS_BIDI :
+		      TQUIC_FRAME_MAX_STREAMS_UNI;
 	remaining--;
 
 	ret = frame_varint_encode(max_streams, p, remaining);
@@ -2398,7 +2457,8 @@ EXPORT_SYMBOL_GPL(tquic_write_streams_blocked_frame);
  */
 int tquic_write_new_connection_id_frame(u8 *buf, size_t buf_len, u64 seq_num,
 					u64 retire_prior_to, const u8 *cid,
-					u8 cid_len, const u8 *stateless_reset_token)
+					u8 cid_len,
+					const u8 *stateless_reset_token)
 {
 	u8 *p = buf;
 	size_t remaining = buf_len;
@@ -2481,46 +2541,6 @@ int tquic_write_retire_connection_id_frame(u8 *buf, size_t buf_len, u64 seq_num)
 	return (int)(buf_len - remaining);
 }
 EXPORT_SYMBOL_GPL(tquic_write_retire_connection_id_frame);
-
-/**
- * tquic_write_path_challenge_frame - Write PATH_CHALLENGE frame
- * @buf: Output buffer
- * @buf_len: Length of buffer
- * @data: 8 bytes of challenge data
- *
- * Returns bytes written on success, negative error code on failure.
- */
-int tquic_write_path_challenge_frame(u8 *buf, size_t buf_len, const u8 *data)
-{
-	if (buf_len < 9)
-		return -ENOSPC;
-
-	buf[0] = TQUIC_FRAME_PATH_CHALLENGE;
-	memcpy(buf + 1, data, 8);
-
-	return 9;
-}
-EXPORT_SYMBOL_GPL(tquic_write_path_challenge_frame);
-
-/**
- * tquic_write_path_response_frame - Write PATH_RESPONSE frame
- * @buf: Output buffer
- * @buf_len: Length of buffer
- * @data: 8 bytes of response data (must match challenge)
- *
- * Returns bytes written on success, negative error code on failure.
- */
-int tquic_write_path_response_frame(u8 *buf, size_t buf_len, const u8 *data)
-{
-	if (buf_len < 9)
-		return -ENOSPC;
-
-	buf[0] = TQUIC_FRAME_PATH_RESPONSE;
-	memcpy(buf + 1, data, 8);
-
-	return 9;
-}
-EXPORT_SYMBOL_GPL(tquic_write_path_response_frame);
 
 /**
  * tquic_write_connection_close_frame - Write CONNECTION_CLOSE frame
@@ -2791,7 +2811,7 @@ bool tquic_frame_allowed_in_pn_space(u8 type, int pn_space)
 	/* Only allowed in Initial and Handshake */
 	case TQUIC_FRAME_ACK:
 	case TQUIC_FRAME_ACK_ECN:
-		return true;  /* ACK allowed in all spaces */
+		return true; /* ACK allowed in all spaces */
 
 	/* Only allowed in Application (1-RTT) */
 	case TQUIC_FRAME_RESET_STREAM:

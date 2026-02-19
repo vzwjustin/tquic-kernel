@@ -938,8 +938,20 @@ void tquic_loss_detection_detect_lost(struct tquic_connection *conn,
 	u64 loss_delay;
 	ktime_t lost_time;
 	ktime_t pkt_time_threshold;
-	u64 lost_bytes = 0;
 	unsigned long flags;
+
+	/*
+	 * Per-path loss tracking: accumulate lost bytes per path_id
+	 * so we can issue per-path CC events (RFC 9002 Section 7).
+	 * Use a small inline table — multipath rarely exceeds 4 paths.
+	 */
+#define LOSS_MAX_PATHS 8
+	struct {
+		u32 path_id;
+		u64 lost_bytes;
+	} path_loss[LOSS_MAX_PATHS];
+	int nr_paths = 0;
+	int i;
 
 	if (!conn)
 		return;
@@ -950,6 +962,12 @@ void tquic_loss_detection_detect_lost(struct tquic_connection *conn,
 	if (!conn->pn_spaces)
 		return;
 
+	/*
+	 * Use active path's RTT for loss delay calculation.
+	 * In multipath, ideally each packet's path RTT would be used,
+	 * but the active path provides a conservative baseline that
+	 * avoids premature loss declaration on slower paths.
+	 */
 	path = tquic_loss_active_path_get(conn);
 	pn_space = &conn->pn_spaces[pn_space_idx];
 
@@ -1002,8 +1020,30 @@ void tquic_loss_detection_detect_lost(struct tquic_connection *conn,
 			if (pkt->ack_eliciting)
 				pn_space->ack_eliciting_in_flight--;
 
-			if (pkt->in_flight)
-				lost_bytes += pkt->size;
+			/*
+			 * Accumulate lost bytes per path_id for
+			 * per-path CC attribution.
+			 */
+			if (pkt->in_flight) {
+				int found = 0;
+
+				for (i = 0; i < nr_paths; i++) {
+					if (path_loss[i].path_id ==
+					    pkt->path_id) {
+						path_loss[i].lost_bytes +=
+							pkt->size;
+						found = 1;
+						break;
+					}
+				}
+				if (!found && nr_paths < LOSS_MAX_PATHS) {
+					path_loss[nr_paths].path_id =
+						pkt->path_id;
+					path_loss[nr_paths].lost_bytes =
+						pkt->size;
+					nr_paths++;
+				}
+			}
 
 			/* Move to lost list */
 			list_del_init(&pkt->list);
@@ -1023,27 +1063,34 @@ void tquic_loss_detection_detect_lost(struct tquic_connection *conn,
 
 	spin_unlock_irqrestore(&pn_space->lock, flags);
 
-	/* Process lost packets */
+	/* Process lost packets — attribute CC events per-path */
 	if (!list_empty(&lost_list)) {
 		LIST_HEAD(to_free);
 
-		/* Update congestion control */
-		if (lost_bytes > 0) {
-			tquic_cong_on_loss(path, lost_bytes);
-			conn->stats.lost_packets++;
+		/*
+		 * Update congestion control per-path (RFC 9002 §7).
+		 * Each path gets its own loss signal and bytes_in_flight
+		 * adjustment based on packets actually sent on that path.
+		 */
+		for (i = 0; i < nr_paths; i++) {
+			struct tquic_path *lpath;
 
-			/*
-			 * RFC 9002 Section 7:
-			 * Remove lost bytes from bytes_in_flight.
-			 * Lost packets are no longer considered in flight.
-			 */
-			if (path) {
-				if (path->cc.bytes_in_flight >= lost_bytes)
-					path->cc.bytes_in_flight -= lost_bytes;
+			lpath = tquic_path_lookup(conn, path_loss[i].path_id);
+			if (lpath) {
+				tquic_cong_on_loss(lpath,
+						   path_loss[i].lost_bytes);
+
+				if (lpath->cc.bytes_in_flight >=
+				    path_loss[i].lost_bytes)
+					lpath->cc.bytes_in_flight -=
+						path_loss[i].lost_bytes;
 				else
-					path->cc.bytes_in_flight = 0;
+					lpath->cc.bytes_in_flight = 0;
+
+				tquic_path_put(lpath);
 			}
 		}
+		conn->stats.lost_packets++;
 
 		/*
 		 * Sort lost packets into retransmit vs free lists under
@@ -1079,6 +1126,7 @@ void tquic_loss_detection_detect_lost(struct tquic_connection *conn,
 out_put_path:
 	if (path)
 		tquic_path_put(path);
+#undef LOSS_MAX_PATHS
 }
 
 /**
@@ -1571,7 +1619,6 @@ void tquic_loss_mark_packet_lost(struct tquic_connection *conn, u8 pn_space_idx,
 {
 	struct tquic_pn_space *pn_space;
 	struct tquic_sent_packet *pkt, *tmp;
-	struct tquic_path *path;
 	unsigned long flags;
 
 	if (!conn || !conn->pn_spaces)
@@ -1580,7 +1627,6 @@ void tquic_loss_mark_packet_lost(struct tquic_connection *conn, u8 pn_space_idx,
 	if (pn_space_idx >= TQUIC_PN_SPACE_COUNT)
 		return;
 
-	path = tquic_loss_active_path_get(conn);
 	pn_space = &conn->pn_spaces[pn_space_idx];
 
 	spin_lock_irqsave(&pn_space->lock, flags);
@@ -1593,9 +1639,19 @@ void tquic_loss_mark_packet_lost(struct tquic_connection *conn, u8 pn_space_idx,
 		if (pkt->ack_eliciting)
 			pn_space->ack_eliciting_in_flight--;
 
-		/* Update congestion control */
-		if (pkt->in_flight && path)
-			tquic_cong_on_loss(path, pkt->size);
+		/*
+		 * Update congestion control on the path the packet
+		 * was actually sent on, not the active path.
+		 */
+		if (pkt->in_flight) {
+			struct tquic_path *lpath;
+
+			lpath = tquic_path_lookup(conn, pkt->path_id);
+			if (lpath) {
+				tquic_cong_on_loss(lpath, pkt->size);
+				tquic_path_put(lpath);
+			}
+		}
 
 		/* Move to lost list for retransmission */
 		list_del_init(&pkt->list);
@@ -1605,8 +1661,6 @@ void tquic_loss_mark_packet_lost(struct tquic_connection *conn, u8 pn_space_idx,
 		} else {
 			spin_unlock_irqrestore(&pn_space->lock, flags);
 			tquic_sent_packet_free(pkt);
-			if (path)
-				tquic_path_put(path);
 			return;
 		}
 
@@ -1616,9 +1670,6 @@ void tquic_loss_mark_packet_lost(struct tquic_connection *conn, u8 pn_space_idx,
 	spin_unlock_irqrestore(&pn_space->lock, flags);
 
 	conn->stats.lost_packets++;
-
-	if (path)
-		tquic_path_put(path);
 }
 
 /**

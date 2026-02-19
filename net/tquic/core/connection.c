@@ -45,8 +45,6 @@
 #include "../protocol.h"
 
 /* Forward declarations for frame functions (from frame.c) */
-int tquic_write_path_challenge_frame(u8 *buf, size_t buf_len, const u8 *data);
-int tquic_write_path_response_frame(u8 *buf, size_t buf_len, const u8 *data);
 int tquic_write_connection_close_frame(u8 *buf, size_t buf_len, u64 error_code,
 				       u64 frame_type, const u8 *reason,
 				       u64 reason_len, bool app_close);

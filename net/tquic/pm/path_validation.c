@@ -25,11 +25,11 @@
 #include <uapi/linux/tquic_pm.h>
 
 /* Path validation constants */
-#define TQUIC_VALIDATION_MIN_TIMEOUT_US	100000   /* 100ms */
-#define TQUIC_VALIDATION_MAX_TIMEOUT_US	10000000 /* 10 seconds */
+#define TQUIC_VALIDATION_MIN_TIMEOUT_US 100000 /* 100ms */
+#define TQUIC_VALIDATION_MAX_TIMEOUT_US 10000000 /* 10 seconds */
 #define TQUIC_VALIDATION_DEFAULT_TIMEOUT_US 1000000 /* 1 second */
-#define TQUIC_VALIDATION_RTT_MULTIPLIER	3        /* 3x SRTT */
-#define TQUIC_VALIDATION_MAX_RETRIES	3
+#define TQUIC_VALIDATION_RTT_MULTIPLIER 3 /* 3x SRTT */
+#define TQUIC_VALIDATION_MAX_RETRIES 3
 
 /*
  * RFC 6298: SRTT and RTTVAR calculation
@@ -49,23 +49,24 @@ static void tquic_pm_update_rtt(struct tquic_path *path, u32 rtt_sample_us)
 		/* RTTVAR = (1 - beta) * RTTVAR + beta * |delta|
 		 * beta = 1/4 */
 		stats->rtt_variance = stats->rtt_variance -
-			(stats->rtt_variance / 4) +
-			(abs(delta) / 4);
+				      (stats->rtt_variance / 4) +
+				      (abs(delta) / 4);
 
 		/* SRTT = (1 - alpha) * SRTT + alpha * RTT
 		 * alpha = 1/8 */
 		stats->rtt_smoothed = stats->rtt_smoothed -
-			(stats->rtt_smoothed / 8) +
-			(rtt_sample_us / 8);
+				      (stats->rtt_smoothed / 8) +
+				      (rtt_sample_us / 8);
 	}
 
 	/* Update minimum RTT */
 	if (stats->rtt_min == 0 || rtt_sample_us < stats->rtt_min)
 		stats->rtt_min = rtt_sample_us;
 
-	pr_debug("tquic_pm: path %u RTT updated - sample: %u us, SRTT: %u us, RTTVAR: %u us, min: %u us\n",
-		 path->path_id, rtt_sample_us, stats->rtt_smoothed,
-		 stats->rtt_variance, stats->rtt_min);
+	pr_debug(
+		"tquic_pm: path %u RTT updated - sample: %u us, SRTT: %u us, RTTVAR: %u us, min: %u us\n",
+		path->path_id, rtt_sample_us, stats->rtt_smoothed,
+		stats->rtt_variance, stats->rtt_min);
 }
 
 /*
@@ -86,7 +87,8 @@ static u32 tquic_validation_timeout_us(struct tquic_path *path)
 	} else {
 		/* RFC 9000: Use 3x SRTT for path validation
 		 * Add 4x RTTVAR for variance tolerance */
-		timeout_us = path->stats.rtt_smoothed * TQUIC_VALIDATION_RTT_MULTIPLIER;
+		timeout_us = path->stats.rtt_smoothed *
+			     TQUIC_VALIDATION_RTT_MULTIPLIER;
 
 		/* Add variance component: max(1ms, 4*RTTVAR) */
 		u32 variance_us = max(1000U, path->stats.rtt_variance * 4);
@@ -94,8 +96,7 @@ static u32 tquic_validation_timeout_us(struct tquic_path *path)
 	}
 
 	/* Clamp to reasonable bounds for LAN to satellite */
-	timeout_us = clamp(timeout_us,
-			   TQUIC_VALIDATION_MIN_TIMEOUT_US,
+	timeout_us = clamp(timeout_us, TQUIC_VALIDATION_MIN_TIMEOUT_US,
 			   TQUIC_VALIDATION_MAX_TIMEOUT_US);
 
 	tquic_dbg("tquic_validation_timeout_us: path_id=%u timeout=%u us\n",
@@ -155,8 +156,17 @@ void tquic_path_validation_timeout(struct timer_list *t)
 		/* Emit path failed event via PM netlink */
 		tquic_pm_nl_send_event(net, conn, path, TQUIC_PM_EVENT_FAILED);
 
+#ifdef CONFIG_TQUIC_MULTIPATH
+		/*
+		 * Send PATH_ABANDON to peer (RFC 9369).
+		 * tquic_send_path_abandon transitions the path to CLOSED
+		 * and triggers bonding failover internally.
+		 */
+		tquic_send_path_abandon(conn, path, 0);
+#else
 		/* Trigger failover to other paths */
 		tquic_bond_path_failed(conn, path);
+#endif
 
 		tquic_path_put(path);
 		return;
@@ -181,8 +191,9 @@ void tquic_path_validation_timeout(struct timer_list *t)
 
 		/* Resend PATH_CHALLENGE */
 		if (tquic_path_send_challenge(conn, path) == 0) {
-			pr_debug("tquic_pm: path %u retry %u scheduled in %u us\n",
-				 retry_path_id, retry_count, timeout_us);
+			pr_debug(
+				"tquic_pm: path %u retry %u scheduled in %u us\n",
+				retry_path_id, retry_count, timeout_us);
 
 			mod_timer(&path->validation.timer,
 				  jiffies + usecs_to_jiffies(timeout_us));
@@ -194,7 +205,11 @@ void tquic_path_validation_timeout(struct timer_list *t)
 			path->validation.challenge_pending = false;
 			path->anti_amplification.active = false;
 			spin_unlock_bh(&conn->paths_lock);
+#ifdef CONFIG_TQUIC_MULTIPATH
+			tquic_send_path_abandon(conn, path, 0);
+#else
 			tquic_bond_path_failed(conn, path);
+#endif
 		}
 
 		tquic_path_put(path);
@@ -206,7 +221,7 @@ EXPORT_SYMBOL_GPL(tquic_path_validation_timeout);
  * Send PATH_CHALLENGE frame on path
  */
 int tquic_path_send_challenge(struct tquic_connection *conn,
-			       struct tquic_path *path)
+			      struct tquic_path *path)
 {
 	/*
 	 * BUG FIX: Do NOT generate challenge data here.
@@ -238,7 +253,7 @@ EXPORT_SYMBOL_GPL(tquic_path_send_challenge);
  * Start path validation
  */
 int tquic_path_start_validation(struct tquic_connection *conn,
-				 struct tquic_path *path)
+				struct tquic_path *path)
 {
 	u32 timeout_us;
 	int ret;
@@ -264,7 +279,8 @@ int tquic_path_start_validation(struct tquic_connection *conn,
 	/* Send initial PATH_CHALLENGE */
 	ret = tquic_path_send_challenge(conn, path);
 	if (ret < 0) {
-		pr_err("tquic_pm: failed to send initial PATH_CHALLENGE: %d\n", ret);
+		pr_err("tquic_pm: failed to send initial PATH_CHALLENGE: %d\n",
+		       ret);
 		return ret;
 	}
 
@@ -286,15 +302,15 @@ EXPORT_SYMBOL_GPL(tquic_path_start_validation);
  * Handle received PATH_CHALLENGE - send PATH_RESPONSE immediately
  */
 int tquic_path_handle_challenge(struct tquic_connection *conn,
-				 struct tquic_path *path,
-				 const u8 *data)
+				struct tquic_path *path, const u8 *data)
 {
 	int ret;
 
 	if (!conn || !path || !data)
 		return -EINVAL;
 
-	pr_debug("tquic_pm: received PATH_CHALLENGE on path %u\n", path->path_id);
+	pr_debug("tquic_pm: received PATH_CHALLENGE on path %u\n",
+		 path->path_id);
 
 	/*
 	 * RFC 9000 Section 8.2.2: PATH_RESPONSE MUST be sent on the same path
@@ -315,13 +331,13 @@ EXPORT_SYMBOL_GPL(tquic_path_handle_challenge);
  * Handle received PATH_RESPONSE - validate path
  */
 int tquic_path_handle_response(struct tquic_connection *conn,
-				struct tquic_path *path,
-				const u8 *data)
+			       struct tquic_path *path, const u8 *data)
 {
 	ktime_t now = ktime_get();
 	u32 rtt_us;
 
-	pr_debug("tquic_pm: received PATH_RESPONSE on path %u\n", path->path_id);
+	pr_debug("tquic_pm: received PATH_RESPONSE on path %u\n",
+		 path->path_id);
 
 	/*
 	 * Acquire paths_lock to prevent races with the validation
@@ -332,8 +348,9 @@ int tquic_path_handle_response(struct tquic_connection *conn,
 	/* Verify challenge is pending */
 	if (!path->validation.challenge_pending) {
 		spin_unlock_bh(&conn->paths_lock);
-		pr_debug("tquic_pm: unexpected PATH_RESPONSE on path %u (no pending challenge)\n",
-			 path->path_id);
+		pr_debug(
+			"tquic_pm: unexpected PATH_RESPONSE on path %u (no pending challenge)\n",
+			path->path_id);
 		return -EINVAL;
 	}
 
@@ -360,8 +377,7 @@ int tquic_path_handle_response(struct tquic_connection *conn,
 	/* Calculate RTT sample from challenge_sent to now */
 	rtt_us = ktime_us_delta(now, path->validation.challenge_sent);
 
-	tquic_info("path %u validated - RTT: %u us\n",
-		   path->path_id, rtt_us);
+	tquic_info("path %u validated - RTT: %u us\n", path->path_id, rtt_us);
 
 	/* Update RTT statistics using RFC 6298 algorithm */
 	tquic_pm_update_rtt(path, rtt_us);
@@ -382,8 +398,8 @@ int tquic_path_handle_response(struct tquic_connection *conn,
 	    path->saved_state == TQUIC_PATH_VALIDATED) {
 		path->state = path->saved_state;
 		path->saved_state = TQUIC_PATH_UNUSED;
-		tquic_info("path %u recovered to state %d\n",
-			   path->path_id, path->state);
+		tquic_info("path %u recovered to state %d\n", path->path_id,
+			   path->state);
 	} else {
 		path->state = TQUIC_PATH_ACTIVE;
 		path->saved_state = TQUIC_PATH_UNUSED;
@@ -397,8 +413,8 @@ int tquic_path_handle_response(struct tquic_connection *conn,
 	if (path->state == TQUIC_PATH_ACTIVE) {
 		struct tquic_path *old_active;
 
-		old_active = rcu_dereference_protected(conn->active_path,
-			lockdep_is_held(&conn->paths_lock));
+		old_active = rcu_dereference_protected(
+			conn->active_path, lockdep_is_held(&conn->paths_lock));
 		rcu_assign_pointer(conn->active_path, path);
 		if (old_active && old_active != path)
 			old_active->state = TQUIC_PATH_STANDBY;
