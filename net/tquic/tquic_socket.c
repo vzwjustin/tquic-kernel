@@ -1590,11 +1590,13 @@ int tquic_sock_setsockopt(struct socket *sock, int level, int optname,
 			return -EFAULT;
 		name[optlen] = '\0';
 
-		/* Validate scheduler exists and drop temporary module ref */
+		/* Validate scheduler exists in either core or mp list */
 		sched_ops = tquic_sched_find(name);
-		if (!sched_ops)
+		if (sched_ops) {
+			module_put(sched_ops->owner);
+		} else if (!tquic_mp_sched_find(name)) {
 			return -ENOENT;
-		module_put(sched_ops->owner);
+		}
 
 		conn = tquic_sock_conn_get(tsk);
 		lock_sock(sk);
