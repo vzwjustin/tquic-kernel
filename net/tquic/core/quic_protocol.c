@@ -130,7 +130,7 @@ static inline unsigned int tquic_get_validated_handshake_timeout(void)
 	return val;
 }
 
-static inline unsigned int tquic_get_validated_max_data(void)
+unsigned int tquic_get_validated_max_data(void)
 {
 	unsigned int val = READ_ONCE(tquic_default_max_data);
 
@@ -142,7 +142,7 @@ static inline unsigned int tquic_get_validated_max_data(void)
 	return val;
 }
 
-static inline unsigned int tquic_get_validated_max_stream_data(void)
+unsigned int tquic_get_validated_max_stream_data(void)
 {
 	unsigned int val = READ_ONCE(tquic_default_max_stream_data);
 
@@ -154,7 +154,7 @@ static inline unsigned int tquic_get_validated_max_stream_data(void)
 	return val;
 }
 
-static inline unsigned int tquic_get_validated_max_streams(void)
+unsigned int tquic_get_validated_max_streams(void)
 {
 	unsigned int val = READ_ONCE(tquic_default_max_streams);
 
@@ -166,7 +166,7 @@ static inline unsigned int tquic_get_validated_max_streams(void)
 	return val;
 }
 
-static inline unsigned int tquic_get_validated_initial_rtt(void)
+unsigned int tquic_get_validated_initial_rtt(void)
 {
 	unsigned int val = READ_ONCE(tquic_default_initial_rtt_ms);
 

@@ -275,7 +275,7 @@ int tquic_sendmsg_zerocopy(struct sock *sk, struct msghdr *msg, size_t len,
 	/* Check if zerocopy is enabled on socket */
 	if (!sock_flag(sk, SOCK_ZEROCOPY)) {
 		tquic_conn_put(conn);
-		return -EOPNOTSUPP;
+		return -EAGAIN;
 	}
 
 	/*
@@ -472,11 +472,11 @@ EXPORT_SYMBOL_GPL(tquic_sendmsg_zerocopy);
 int tquic_check_zerocopy_flag(struct sock *sk, struct msghdr *msg, int flags)
 {
 	if (!(flags & MSG_ZEROCOPY))
-		return -EOPNOTSUPP;
+		return -EAGAIN;
 
 	/* Check SO_ZEROCOPY is enabled */
 	if (!sock_flag(sk, SOCK_ZEROCOPY))
-		return -EOPNOTSUPP;
+		return -EAGAIN;
 
 	/* Check for scatter-gather support (preferred but not required) */
 	if (!(sk->sk_route_caps & NETIF_F_SG)) {
@@ -1242,20 +1242,20 @@ EXPORT_SYMBOL_GPL(tquic_zc_state_free);
 int tquic_sendmsg_zerocopy(struct sock *sk, struct msghdr *msg, size_t len,
 			   struct tquic_stream *stream)
 {
-	return -EOPNOTSUPP;
+	return -EAGAIN;
 }
 EXPORT_SYMBOL_GPL(tquic_sendmsg_zerocopy);
 
 int tquic_check_zerocopy_flag(struct sock *sk, struct msghdr *msg, int flags)
 {
-	return -EOPNOTSUPP;
+	return -EAGAIN;
 }
 EXPORT_SYMBOL_GPL(tquic_check_zerocopy_flag);
 
 ssize_t tquic_sendpage(struct socket *sock, struct page *page,
 		       int offset, size_t size, int flags)
 {
-	return -EOPNOTSUPP;
+	return -EAGAIN;
 }
 EXPORT_SYMBOL_GPL(tquic_sendpage);
 
@@ -1263,7 +1263,7 @@ ssize_t tquic_splice_read(struct socket *sock, loff_t *ppos,
 			  struct pipe_inode_info *pipe, size_t len,
 			  unsigned int flags)
 {
-	return -EOPNOTSUPP;
+	return -EAGAIN;
 }
 EXPORT_SYMBOL_GPL(tquic_splice_read);
 
@@ -1290,7 +1290,7 @@ EXPORT_SYMBOL_GPL(tquic_rx_build_skb_from_page);
 
 int tquic_set_zerocopy(struct sock *sk, int val)
 {
-	return -EOPNOTSUPP;
+	return -EAGAIN;
 }
 EXPORT_SYMBOL_GPL(tquic_set_zerocopy);
 
@@ -1313,7 +1313,7 @@ EXPORT_SYMBOL_GPL(tquic_zc_abort);
 int tquic_skb_zerocopy_setup(struct sk_buff *skb, struct page *page,
 			     unsigned int offset, unsigned int len)
 {
-	return -EOPNOTSUPP;
+	return -EAGAIN;
 }
 EXPORT_SYMBOL_GPL(tquic_skb_zerocopy_setup);
 

@@ -3333,7 +3333,7 @@ int tquic_add_trusted_ca(const u8 *cert_data, u32 cert_len,
 	pr_info("tquic_cert: Added trusted CA: %s\n", description);
 	return 0;
 #else
-	return -ENOTSUPP;
+	return -EAGAIN;
 #endif
 }
 EXPORT_SYMBOL_GPL(tquic_add_trusted_ca);
@@ -3370,7 +3370,7 @@ int tquic_remove_trusted_ca(const char *description)
 	pr_info("tquic_cert: Removed trusted CA: %s\n", description);
 	return 0;
 #else
-	return -ENOTSUPP;
+	return -EAGAIN;
 #endif
 }
 EXPORT_SYMBOL_GPL(tquic_remove_trusted_ca);

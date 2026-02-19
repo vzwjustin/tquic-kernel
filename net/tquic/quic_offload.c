@@ -695,7 +695,7 @@ static int tquic_crypto_offload_encrypt(struct sk_buff *skb,
 	if (!tquic_crypto_offload_available(dev, cb->crypto_level)) {
 		cb->hw_offload = 0;
 		cb->needs_encrypt = 1;
-		return -EOPNOTSUPP;
+		return -EAGAIN;
 	}
 
 	/* Mark for hardware encryption */
@@ -728,7 +728,7 @@ static int tquic_crypto_offload_decrypt(struct sk_buff *skb,
 
 	/* Fall back to software decryption */
 	cb->needs_decrypt = 1;
-	return -EOPNOTSUPP;
+	return -EAGAIN;
 }
 
 /*

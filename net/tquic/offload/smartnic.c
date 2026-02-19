@@ -353,10 +353,10 @@ int tquic_offload_key_install(struct tquic_nic_device *dev,
 		return -EINVAL;
 
 	if (!tquic_nic_has_capability(dev, TQUIC_NIC_CAP_CRYPTO))
-		return -EOPNOTSUPP;
+		return -EAGAIN;
 
 	if (!dev->ops->add_key)
-		return -EOPNOTSUPP;
+		return -EAGAIN;
 
 	/* Extract key from connection's crypto state */
 	memset(&key, 0, sizeof(key));
@@ -432,7 +432,7 @@ int tquic_offload_key_update(struct tquic_nic_device *dev,
 		return -EINVAL;
 
 	if (!tquic_nic_has_capability(dev, TQUIC_NIC_CAP_CRYPTO))
-		return -EOPNOTSUPP;
+		return -EAGAIN;
 
 	if (!dev->ops->update_key)
 		return tquic_offload_key_install(dev, conn);
@@ -503,10 +503,10 @@ int tquic_offload_cid_add(struct tquic_nic_device *dev,
 		return -EINVAL;
 
 	if (!tquic_nic_has_capability(dev, TQUIC_NIC_CAP_CID_LOOKUP))
-		return -EOPNOTSUPP;
+		return -EAGAIN;
 
 	if (!dev->ops->add_cid)
-		return -EOPNOTSUPP;
+		return -EAGAIN;
 
 	memset(&entry, 0, sizeof(entry));
 	memcpy(entry.cid, cid, min_t(size_t, cid_len, sizeof(entry.cid)));
@@ -552,10 +552,10 @@ int tquic_offload_cid_del(struct tquic_nic_device *dev,
 		return -EINVAL;
 
 	if (!tquic_nic_has_capability(dev, TQUIC_NIC_CAP_CID_LOOKUP))
-		return -EOPNOTSUPP;
+		return -EAGAIN;
 
 	if (!dev->ops->del_cid)
-		return -EOPNOTSUPP;
+		return -EAGAIN;
 
 	spin_lock_bh(&dev->lock);
 	ret = dev->ops->del_cid(dev, cid, cid_len);
@@ -637,16 +637,16 @@ int tquic_offload_tx(struct tquic_nic_device *dev, struct sk_buff *skb,
 	int ret;
 
 	if (!offload_enabled)
-		return -EOPNOTSUPP;
+		return -EAGAIN;
 
 	if (!dev || !skb || !conn)
 		return -EINVAL;
 
 	if (!conn->hw_offload_enabled || conn->hw_offload_dev != dev)
-		return -EOPNOTSUPP;
+		return -EAGAIN;
 
 	if (!tquic_nic_has_capability(dev, TQUIC_NIC_CAP_AEAD_ENCRYPT))
-		return -EOPNOTSUPP;
+		return -EAGAIN;
 
 	/* Get packet number for encryption */
 	pn = conn->tx_pn_next;
@@ -693,11 +693,11 @@ int tquic_offload_batch_rx(struct tquic_nic_device *dev,
 		return -EINVAL;
 
 	if (!conn->hw_offload_enabled)
-		return -EOPNOTSUPP;
+		return -EAGAIN;
 
 	if (!tquic_nic_has_capability(dev, TQUIC_NIC_CAP_BATCH_PROCESS) ||
 	    !dev->ops->batch_decrypt)
-		return -EOPNOTSUPP;
+		return -EAGAIN;
 
 	/* Allocate packet number array */
 	pns = kmalloc_array(count, sizeof(u64), GFP_ATOMIC);
@@ -748,11 +748,11 @@ int tquic_offload_batch_tx(struct tquic_nic_device *dev,
 		return -EINVAL;
 
 	if (!conn->hw_offload_enabled)
-		return -EOPNOTSUPP;
+		return -EAGAIN;
 
 	if (!tquic_nic_has_capability(dev, TQUIC_NIC_CAP_BATCH_PROCESS) ||
 	    !dev->ops->batch_encrypt)
-		return -EOPNOTSUPP;
+		return -EAGAIN;
 
 	/* Allocate packet number array */
 	pns = kmalloc_array(count, sizeof(u64), GFP_ATOMIC);

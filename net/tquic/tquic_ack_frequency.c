@@ -964,7 +964,7 @@ int tquic_ack_freq_conn_request_update(struct tquic_connection *conn,
 		return -EINVAL;
 
 	if (!tquic_ack_freq_conn_is_enabled(conn))
-		return -EOPNOTSUPP;
+		return -EAGAIN;
 
 	/* Validate parameters */
 	if (ack_elicit_threshold == 0)
@@ -1002,7 +1002,7 @@ int tquic_ack_freq_conn_request_immediate_ack(struct tquic_connection *conn)
 		return -EINVAL;
 
 	if (!tquic_ack_freq_conn_is_enabled(conn))
-		return -EOPNOTSUPP;
+		return -EAGAIN;
 
 	state = conn_get_ack_freq_state(conn);
 	if (state) {

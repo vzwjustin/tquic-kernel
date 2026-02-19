@@ -946,7 +946,7 @@ int tquic_napi_setsockopt(struct sock *sk, int level, int optname,
 		tn->busy_poll_enabled = (val > 0);
 		return 0;
 #else
-		return -EOPNOTSUPP;
+		return -EAGAIN;
 #endif
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
@@ -957,7 +957,7 @@ int tquic_napi_setsockopt(struct sock *sk, int level, int optname,
 		WRITE_ONCE(sk->sk_busy_poll_budget, val);
 		return 0;
 #else
-		return -EOPNOTSUPP;
+		return -EAGAIN;
 #endif
 #endif /* >= 5.11 */
 
@@ -992,7 +992,7 @@ int tquic_napi_getsockopt(struct sock *sk, int level, int optname,
 		val = READ_ONCE(sk->sk_ll_usec);
 		break;
 #else
-		return -EOPNOTSUPP;
+		return -EAGAIN;
 #endif
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
@@ -1001,7 +1001,7 @@ int tquic_napi_getsockopt(struct sock *sk, int level, int optname,
 		val = READ_ONCE(sk->sk_busy_poll_budget);
 		break;
 #else
-		return -EOPNOTSUPP;
+		return -EAGAIN;
 #endif
 #endif /* >= 5.11 */
 

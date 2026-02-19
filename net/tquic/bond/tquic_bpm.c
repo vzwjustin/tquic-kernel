@@ -400,7 +400,7 @@ static void tquic_addr_from_sockaddr(struct tquic_addr_info *info,
 	}
 }
 
-static void tquic_addr_to_sockaddr(
+void tquic_addr_to_sockaddr(
 	const struct tquic_addr_info *info, struct sockaddr_storage *addr)
 {
 	tquic_dbg("addr_to_sockaddr: family=%u\n", info->family);

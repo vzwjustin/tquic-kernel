@@ -880,7 +880,7 @@ static int __bpf_tquic_sched_set_param(struct tquic_scheduler *sched,
 		return 0;
 
 	default:
-		return -EOPNOTSUPP;
+		return -EAGAIN;
 	}
 }
 

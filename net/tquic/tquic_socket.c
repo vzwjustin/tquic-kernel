@@ -2875,7 +2875,7 @@ static int tquic_sendmsg_datagram(struct tquic_connection *conn,
 
 	/* Verify datagram support is negotiated */
 	if (!conn->datagram.enabled)
-		return -EOPNOTSUPP;
+		return -EAGAIN;
 
 	/* Check size against negotiated limit */
 	if (len > conn->datagram.max_send_size)

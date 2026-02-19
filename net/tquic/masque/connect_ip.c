@@ -1151,7 +1151,7 @@ int tquic_connect_ip_send(struct tquic_connect_ip_tunnel *tunnel,
 
 	/* Check if datagrams are enabled */
 	if (!conn->datagram.enabled)
-		return -EOPNOTSUPP;
+		return -EAGAIN;
 
 	/* Build HTTP Datagram with context ID 0 */
 	context_id_size = connect_ip_varint_size(CONNECT_IP_CONTEXT_ID);
@@ -1227,7 +1227,7 @@ int tquic_connect_ip_recv(struct tquic_connect_ip_tunnel *tunnel,
 
 	/* Check if datagrams are enabled */
 	if (!conn->datagram.enabled)
-		return -EOPNOTSUPP;
+		return -EAGAIN;
 
 	/* Allocate datagram buffer - max QUIC datagram size */
 	datagram_buf = kmalloc(TQUIC_MAX_DATAGRAM_SIZE, GFP_ATOMIC);

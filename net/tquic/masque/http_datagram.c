@@ -748,7 +748,7 @@ int http_datagram_send(struct http_datagram_flow *flow,
 
 	/* Check if datagrams are enabled */
 	if (!conn->datagram.enabled)
-		return -EOPNOTSUPP;
+		return -EAGAIN;
 
 	/* Calculate maximum buffer size needed */
 	buf_len = 16 + len;  /* 8 bytes for each varint + payload */
@@ -813,7 +813,7 @@ int http_datagram_recv(struct http_datagram_manager *mgr,
 		return -EINVAL;
 
 	if (!mgr->enabled)
-		return -EOPNOTSUPP;
+		return -EAGAIN;
 
 	/* Decode datagram */
 	ret = http_datagram_decode(data, len, &quarter_stream_id,

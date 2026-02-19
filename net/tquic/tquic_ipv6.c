@@ -170,7 +170,7 @@ struct tquic_happy_eyeballs {
  */
 
 /* Check if address is IPv4-mapped IPv6 address */
-static inline bool tquic_addr_is_v4mapped(const struct sockaddr_storage *addr)
+bool tquic_addr_is_v4mapped(const struct sockaddr_storage *addr)
 {
 	if (addr->ss_family == AF_INET6) {
 		const struct sockaddr_in6 *sin6 = (const struct sockaddr_in6 *)addr;
@@ -244,7 +244,7 @@ static void tquic_v6_path_set_flowlabel(struct tquic_path *path, __be32 flowlabe
 }
 
 /* Get flow label for outgoing packets */
-static __be32 tquic_v6_path_get_flowlabel(struct tquic_connection *conn,
+__be32 tquic_v6_path_get_flowlabel(struct tquic_connection *conn,
 					  struct tquic_path *path)
 {
 	struct sock *sk = conn->sk;
@@ -269,7 +269,7 @@ static __be32 tquic_v6_path_get_flowlabel(struct tquic_connection *conn,
  */
 
 /* Calculate extension header length for path */
-static unsigned int tquic_v6_ext_hdr_len(struct sock *sk)
+unsigned int tquic_v6_ext_hdr_len(struct sock *sk)
 {
 	struct ipv6_pinfo *np = tquic_inet6_sk(sk);
 	struct ipv6_txoptions *opt;
@@ -334,7 +334,7 @@ out_put:
 }
 
 /* Update path MTU from ICMPv6 too big message */
-static void tquic_v6_path_update_pmtu(struct tquic_connection *conn,
+void tquic_v6_path_update_pmtu(struct tquic_connection *conn,
 				      struct tquic_path *path, u32 mtu)
 {
 	u32 path_mtu;
@@ -675,7 +675,7 @@ static int tquic_v6_setsockopt(struct socket *sock, int level, int optname,
 		case IPV6_FLOWLABEL_MGR:
 #ifdef TQUIC_OUT_OF_TREE
 			/* ipv6_flowlabel_opt not exported to modules */
-			return -EOPNOTSUPP;
+			return -EAGAIN;
 #else
 			return ipv6_flowlabel_opt(sk, optval, optlen);
 #endif
@@ -852,7 +852,7 @@ static struct tquic_happy_eyeballs *tquic_he_init(struct tquic_connection *conn)
 }
 
 /* Cleanup Happy Eyeballs state */
-static void tquic_he_cleanup(struct tquic_happy_eyeballs *he)
+void tquic_he_cleanup(struct tquic_happy_eyeballs *he)
 {
 	if (!he)
 		return;

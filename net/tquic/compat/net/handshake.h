@@ -38,25 +38,25 @@ struct tls_handshake_args {
 static inline int tls_client_hello_x509(struct tls_handshake_args *args,
 					gfp_t flags)
 {
-	return -EOPNOTSUPP;
+	return -EAGAIN;
 }
 
 static inline int tls_client_hello_psk(struct tls_handshake_args *args,
 				       gfp_t flags)
 {
-	return -EOPNOTSUPP;
+	return -EAGAIN;
 }
 
 static inline int tls_server_hello_x509(struct tls_handshake_args *args,
 					gfp_t flags)
 {
-	return -EOPNOTSUPP;
+	return -EAGAIN;
 }
 
 static inline int tls_server_hello_psk(struct tls_handshake_args *args,
 				       gfp_t flags)
 {
-	return -EOPNOTSUPP;
+	return -EAGAIN;
 }
 
 static inline bool tls_handshake_cancel(struct sock *sk)

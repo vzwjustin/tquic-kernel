@@ -884,7 +884,7 @@ int tquic_ack_freq_request_update(struct tquic_ack_frequency_state *state,
 		return -EINVAL;
 
 	if (!state->enabled)
-		return -EOPNOTSUPP;
+		return -EAGAIN;
 
 	/* Validate parameters */
 	if (threshold == 0 || threshold > TQUIC_ACK_FREQ_MAX_THRESHOLD)
@@ -931,7 +931,7 @@ int tquic_ack_freq_request_immediate_ack(struct tquic_ack_frequency_state *state
 		return -EINVAL;
 
 	if (!state->enabled)
-		return -EOPNOTSUPP;
+		return -EAGAIN;
 
 	spin_lock_bh(&state->lock);
 	state->immediate_ack_request = true;

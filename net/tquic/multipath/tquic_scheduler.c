@@ -371,7 +371,7 @@ static struct tquic_path *tquic_find_path(struct tquic_connection *conn, u8 path
  *
  * Must be called with rcu_read_lock() held.
  */
-static int tquic_count_active_paths(struct tquic_connection *conn)
+int tquic_count_active_paths(struct tquic_connection *conn)
 {
 	struct tquic_path *path;
 	int count = 0;
@@ -2192,7 +2192,7 @@ EXPORT_SYMBOL_GPL(tquic_sched_get_failover_packet);
  * Note: This is for internal schedulers using tquic_path_selection.
  * The public API tquic_select_path() in tquic.h returns struct tquic_path *.
  */
-static int tquic_int_select_path(struct tquic_connection *conn,
+int tquic_int_select_path(struct tquic_connection *conn,
 				 struct tquic_path_selection *sel)
 {
 	int ret;
@@ -2545,7 +2545,7 @@ EXPORT_SYMBOL_GPL(tquic_mp_sched_get_default);
  *
  * If name is NULL or empty, uses per-netns default.
  */
-static int tquic_int_mp_sched_init_conn(struct tquic_connection *conn,
+int tquic_int_mp_sched_init_conn(struct tquic_connection *conn,
 					const char *name)
 {
 	struct tquic_sched_internal *sched;
@@ -2649,7 +2649,7 @@ static void tquic_int_mp_sched_release_conn(struct tquic_connection *conn)
  * the public tquic_path type. Callers within the internal scheduler code
  * should cast back to tquic_int_path as needed.
  */
-static int tquic_int_mp_sched_get_path(struct tquic_connection *conn,
+int tquic_int_mp_sched_get_path(struct tquic_connection *conn,
 				       struct tquic_sched_path_result *result,
 				       u32 flags)
 {

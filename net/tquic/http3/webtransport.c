@@ -993,7 +993,7 @@ int webtransport_send_datagram(struct webtransport_session *session,
 		return -EINVAL;
 
 	if (!session->datagrams_enabled)
-		return -EOPNOTSUPP;
+		return -EAGAIN;
 
 	if (session->state != WT_SESSION_OPEN)
 		return -EINVAL;
@@ -1006,7 +1006,7 @@ int webtransport_send_datagram(struct webtransport_session *session,
 	/* Get maximum datagram size from QUIC layer */
 	max_dgram_size = tquic_datagram_max_size(qconn);
 	if (max_dgram_size == 0)
-		return -EOPNOTSUPP;
+		return -EAGAIN;
 
 	/* Calculate quarter stream ID (session_id / 4) per RFC 9297 */
 	quarter_id = session->session_id / 4;
@@ -1062,7 +1062,7 @@ ssize_t webtransport_recv_datagram(struct webtransport_session *session,
 		return -EINVAL;
 
 	if (!session->datagrams_enabled)
-		return -EOPNOTSUPP;
+		return -EAGAIN;
 
 	if (session->state != WT_SESSION_OPEN)
 		return -EINVAL;
@@ -1108,7 +1108,7 @@ int wt_handle_incoming_datagram(struct webtransport_context *ctx,
 
 	if (!session->datagrams_enabled) {
 		webtransport_session_put(session);
-		return -EOPNOTSUPP;
+		return -EAGAIN;
 	}
 
 	/* Queue the datagram (payload only, without header) */

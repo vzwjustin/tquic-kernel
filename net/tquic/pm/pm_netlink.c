@@ -86,7 +86,7 @@ static const struct nla_policy tquic_pm_policy[TQUIC_PM_ATTR_MAX + 1] = {
  * Following MPTCP mptcp_pm_parse_addr pattern.
  * Sets extended ACK error messages for each failure.
  */
-static int tquic_pm_parse_addr(struct nlattr *attr, struct genl_info *info,
+int tquic_pm_parse_addr(struct nlattr *attr, struct genl_info *info,
 					      struct sockaddr_storage *addr, int *if_idx)
 {
 	struct nlattr *tb[TQUIC_PM_ADDR_ATTR_MAX + 1];
@@ -158,7 +158,7 @@ static int tquic_pm_parse_addr(struct nlattr *attr, struct genl_info *info,
  *
  * Following MPTCP mptcp_nl_fill_addr pattern.
  */
-static int tquic_pm_fill_addr(struct sk_buff *skb, int attr_type,
+int tquic_pm_fill_addr(struct sk_buff *skb, int attr_type,
 					     struct sockaddr_storage *addr, int if_idx)
 {
 	struct nlattr *nest;

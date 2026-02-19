@@ -1316,7 +1316,7 @@ int tquic_quic_proxy_header_compress(
 
 	ctx = &pconn->compress_ctx;
 	if (!ctx->enabled)
-		return -EOPNOTSUPP;
+		return -EAGAIN;
 
 	/* Parse QUIC header to extract DCID */
 	first_byte = packet[0];
@@ -1481,7 +1481,7 @@ int tquic_quic_proxy_header_decompress(
 
 	ctx = &pconn->compress_ctx;
 	if (!ctx->enabled)
-		return -EOPNOTSUPP;
+		return -EAGAIN;
 
 	first_byte = compressed[0];
 

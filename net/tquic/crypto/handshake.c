@@ -958,7 +958,7 @@ static int tquic_hs_transcript_hash(struct tquic_handshake *hs,
 /*
  * TLS 1.3 Key Schedule - derive early secrets for 0-RTT
  */
-static int tquic_hs_derive_early_secrets(struct tquic_handshake *hs,
+int tquic_hs_derive_early_secrets(struct tquic_handshake *hs,
 							const u8 *psk, u32 psk_len)
 {
 	u8 zero_salt[TLS_SECRET_MAX_LEN] = {0};
@@ -4478,7 +4478,7 @@ static int tquic_hs_process_client_hello(struct tquic_handshake *hs,
 						for (i = 0; i < hs->alpn_count; i++) {
 							if (strlen(hs->alpn_list[i]) == plen &&
 							    !memcmp(hs->alpn_list[i], ap, plen)) {
-								kfree(hs->alpn_selected);
+								kfree_sensitive(hs->alpn_selected);
 								hs->alpn_selected = kmalloc(plen + 1, GFP_KERNEL);
 								if (hs->alpn_selected) {
 									memcpy(hs->alpn_selected, ap, plen);
@@ -4504,7 +4504,7 @@ alpn_done:
 					if (p[2] == 0 && /* host_name type */
 					    5 + name_len <= ext_data_len &&
 					    name_len < TLS_MAX_SNI_LEN) {
-						kfree(hs->sni);
+						kfree_sensitive(hs->sni);
 						hs->sni = kmalloc(name_len + 1, GFP_KERNEL);
 						if (hs->sni) {
 							memcpy(hs->sni, p + 5, name_len);

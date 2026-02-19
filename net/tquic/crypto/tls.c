@@ -338,7 +338,7 @@ out_zeroize:
  * @keys: Key structure to populate
  * @version: QUIC version for selecting appropriate HKDF labels
  */
-static int tquic_derive_keys_versioned(struct tquic_crypto_state *crypto,
+int tquic_derive_keys_versioned(struct tquic_crypto_state *crypto,
 				       struct tquic_keys *keys, u32 version)
 {
 	const char *label;
@@ -389,7 +389,7 @@ static int tquic_derive_keys_versioned(struct tquic_crypto_state *crypto,
 /*
  * Derive keys from secret (legacy wrapper using v1 labels)
  */
-static int tquic_derive_keys(struct tquic_crypto_state *crypto,
+int tquic_derive_keys(struct tquic_crypto_state *crypto,
 					    struct tquic_keys *keys)
 {
 	tquic_dbg("derive_keys: crypto=%p keys=%p\n", crypto, keys);
@@ -444,7 +444,7 @@ static int tquic_setup_hp_keys(struct tquic_crypto_state *crypto,
  * @is_server: True if this is the server side
  * @version: QUIC version (TQUIC_VERSION_1 or TQUIC_VERSION_2)
  */
-static int tquic_derive_initial_keys_versioned(struct tquic_crypto_state *crypto,
+int tquic_derive_initial_keys_versioned(struct tquic_crypto_state *crypto,
 					       const struct tquic_cid *dcid,
 					       bool is_server, u32 version)
 {
@@ -543,7 +543,7 @@ out_zeroize:
 /*
  * Derive initial keys from connection ID (legacy wrapper - uses v1)
  */
-static int tquic_derive_initial_keys(struct tquic_crypto_state *crypto,
+int tquic_derive_initial_keys(struct tquic_crypto_state *crypto,
 						    const struct tquic_cid *dcid,
 						    bool is_server)
 {

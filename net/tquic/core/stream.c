@@ -1782,7 +1782,7 @@ ssize_t tquic_stream_splice_read(struct tquic_stream_manager *mgr,
 {
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 5, 0)
 	/* pipe ring API (head/tail/ring_size) was introduced in 5.5 */
-	return -EOPNOTSUPP;
+	return -EAGAIN;
 #else
 	size_t spliced = 0;
 	unsigned int head, tail, mask;

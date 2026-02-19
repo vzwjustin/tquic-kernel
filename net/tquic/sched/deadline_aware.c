@@ -674,7 +674,7 @@ int tquic_deadline_set_stream_deadline(struct tquic_connection *conn,
 
 	state = tquic_deadline_get_state(conn);
 	if (!state || !state->enabled)
-		return -EOPNOTSUPP;
+		return -EAGAIN;
 
 	/* Validate deadline */
 	if (deadline_us < TQUIC_MIN_DEADLINE_US ||

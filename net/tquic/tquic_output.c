@@ -1932,7 +1932,7 @@ static int tquic_output_gso_send(struct tquic_connection *conn,
 	if (num_pkts <= 1 || !tquic_gso_supported(path)) {
 		tquic_dbg("gso_send: not using GSO (pkts=%d supported=%d)\n",
 			  num_pkts, tquic_gso_supported(path));
-		return -EOPNOTSUPP;
+
 	}
 
 	ret = tquic_gso_init(&gso, path, num_pkts);
@@ -3191,7 +3191,7 @@ int tquic_output_flush(struct tquic_connection *conn)
 					 * Pairs with WRITE_ONCE in sock_set_pacing_status().
 					 */
 					if (conn->tsk && conn->tsk->pacing_enabled &&
-					    conn->sk && /* smp_load_acquire: see above */
+					       if (conn->sk)
 					    smp_load_acquire(&conn->sk->sk_pacing_status)
 							== SK_PACING_NEEDED) {
 						tquic_path_put(path);

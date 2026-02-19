@@ -1039,7 +1039,7 @@ static struct tquic_cid *tquic_conn_get_dcid(struct tquic_connection *conn);
 static void tquic_conn_set_state_local(struct tquic_connection *conn,
 				       enum tquic_conn_state state);
 
-static int tquic_conn_connect(struct tquic_connection *conn,
+int tquic_conn_connect(struct tquic_connection *conn,
 			      struct sockaddr *addr, int addr_len)
 {
 	struct tquic_sock *tsk = conn->tsk;
@@ -1099,7 +1099,7 @@ static int tquic_conn_connect(struct tquic_connection *conn,
 	return 0;
 }
 
-static int tquic_conn_accept(struct tquic_connection *conn)
+int tquic_conn_accept(struct tquic_connection *conn)
 {
 	tquic_conn_set_state_local(conn, TQUIC_CONN_CONNECTING);
 	return 0;
@@ -1158,7 +1158,7 @@ static void tquic_conn_set_state_local(struct tquic_connection *conn,
 }
 
 /* Generate new connection ID */
-static int tquic_conn_new_cid(struct tquic_connection *conn,
+int tquic_conn_new_cid(struct tquic_connection *conn,
 			      struct tquic_cid *new_cid)
 {
 	struct tquic_cid_entry *entry;

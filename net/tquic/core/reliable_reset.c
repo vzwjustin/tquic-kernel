@@ -494,7 +494,7 @@ int tquic_send_reset_stream_at(struct tquic_connection *conn,
 	/* Check if peer supports reliable reset */
 	if (!tquic_supports_reliable_reset(conn)) {
 		pr_debug("tquic: cannot send RESET_STREAM_AT: peer does not support\n");
-		return -EOPNOTSUPP;
+		return -EAGAIN;
 	}
 
 	spin_lock_bh(&conn->lock);

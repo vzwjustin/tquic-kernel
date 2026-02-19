@@ -137,12 +137,12 @@ struct tquic_internal_conn {
 };
 
 /* Helper to get connection fields - these access internal state */
-static inline u32 tquic_conn_get_version(struct tquic_connection *conn)
+u32 tquic_conn_get_version(struct tquic_connection *conn)
 {
 	return conn->version;
 }
 
-static inline bool tquic_conn_is_server(struct tquic_connection *conn)
+bool tquic_conn_is_server(struct tquic_connection *conn)
 {
 	return conn->role == TQUIC_ROLE_SERVER;
 }
