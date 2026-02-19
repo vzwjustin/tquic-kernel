@@ -207,6 +207,55 @@ void tquic_destroy_sock(struct sock *sk)
 	if (tsk->flags & TQUIC_F_LISTENER_REGISTERED)
 		tquic_unregister_listener(sk);
 
+	/*
+	 * T-2 FIX: Drain accept queue of server-side connections that were
+	 * never dequeued by accept() (e.g. server killed before accept()
+	 * returns).
+	 *
+	 * tquic_server_handshake() calls sock_hold(listener_sk) for each
+	 * child and stores listener_sk in child_conn->sk. accept() releases
+	 * that hold via sock_put(old_sk). Without this drain, those extra
+	 * sock_hold references keep the listener socket alive indefinitely
+	 * after the process dies, producing orphaned UNCONN sockets and
+	 * preventing rmmod.
+	 */
+	while (!list_empty(&tsk->accept_queue)) {
+		struct tquic_sock *child_tsk;
+		struct tquic_connection *child_conn;
+		struct sock *child_sk;
+
+		child_tsk = list_first_entry(&tsk->accept_queue,
+					     struct tquic_sock, accept_list);
+		list_del_init(&child_tsk->accept_list);
+		atomic_dec(&tsk->accept_queue_len);
+
+		child_sk = (struct sock *)child_tsk;
+		write_lock_bh(&child_sk->sk_callback_lock);
+		child_conn = child_tsk->conn;
+		child_tsk->conn = NULL;
+		write_unlock_bh(&child_sk->sk_callback_lock);
+
+		if (child_conn) {
+			/*
+			 * Null child_conn->sk before forcing CLOSED to
+			 * prevent sk_data_ready callbacks back into the
+			 * dying listener socket.
+			 */
+			WRITE_ONCE(child_conn->sk, NULL);
+			tquic_conn_set_state(child_conn, TQUIC_CONN_CLOSED,
+					     TQUIC_REASON_APPLICATION);
+			tquic_conn_put(child_conn);
+
+			/*
+			 * Release the sock_hold that server_handshake took
+			 * on this listener for the child. sk_common_release()
+			 * still holds one reference it will drop after we
+			 * return, so this sock_put() cannot free sk here.
+			 */
+			sock_put(sk);
+		}
+	}
+
 	/* Release the listener UDP tunnel socket and drain packet queue */
 	if (tsk->udp_sock) {
 		cancel_work_sync(&tsk->listener_work);

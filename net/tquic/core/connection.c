@@ -451,6 +451,17 @@ int tquic_conn_set_state(struct tquic_connection *conn,
 		if (cs) {
 			cs->closing_start = ktime_get();
 			schedule_work(&cs->close_work);
+		} else if (conn->timer_state) {
+			/*
+			 * Server connections created via tquic_server_handshake()
+			 * use a migration state machine (cs == NULL).  Without cs,
+			 * close_work is never scheduled and the connection would
+			 * remain CLOSING forever.  Start the drain timer directly
+			 * so tquic_conn_enter_closed() fires after 3*PTO.
+			 * The CLOSING -> CLOSED transition is valid per the state
+			 * table above (line 384).
+			 */
+			tquic_timer_start_drain(conn->timer_state);
 		}
 		wake_up_interruptible(&conn->datagram.wait);
 		/* Wake all stream waiters so recv() can return 0 */
