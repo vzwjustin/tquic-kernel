@@ -1604,8 +1604,6 @@ void tquic_loss_on_packet_number_space_discarded(struct tquic_connection *conn,
 {
 	struct tquic_pn_space *pn_space;
 	struct tquic_sent_packet *pkt, *tmp;
-	struct tquic_path *path;
-	u64 removed_bytes = 0;
 	unsigned long flags;
 	LIST_HEAD(to_free);
 
@@ -1615,7 +1613,6 @@ void tquic_loss_on_packet_number_space_discarded(struct tquic_connection *conn,
 	if (pn_space_idx >= TQUIC_PN_SPACE_COUNT)
 		return;
 
-	path = tquic_loss_active_path_get(conn);
 	pn_space = &conn->pn_spaces[pn_space_idx];
 
 	/*
@@ -1629,8 +1626,6 @@ void tquic_loss_on_packet_number_space_discarded(struct tquic_connection *conn,
 
 	/* Collect all sent packets */
 	list_for_each_entry_safe(pkt, tmp, &pn_space->sent_list, list) {
-		if (pkt->in_flight)
-			removed_bytes += pkt->size;
 		list_del_init(&pkt->list);
 		list_add_tail(&pkt->list, &to_free);
 	}
@@ -1647,25 +1642,26 @@ void tquic_loss_on_packet_number_space_discarded(struct tquic_connection *conn,
 
 	spin_unlock_irqrestore(&pn_space->lock, flags);
 
-	/* Free all collected packets outside the lock */
+	/* Free all collected packets and update CC outside the lock */
 	list_for_each_entry_safe(pkt, tmp, &to_free, list) {
+		if (pkt->in_flight) {
+			struct tquic_path *pkt_path =
+				tquic_path_lookup(conn, pkt->path_id);
+			if (pkt_path) {
+				if (pkt_path->cc.bytes_in_flight >= pkt->size)
+					pkt_path->cc.bytes_in_flight -=
+						pkt->size;
+				else
+					pkt_path->cc.bytes_in_flight = 0;
+				tquic_path_put(pkt_path);
+			}
+		}
 		list_del_init(&pkt->list);
 		tquic_sent_packet_free(pkt);
 	}
 
-	/* Update congestion control */
-	if (path && removed_bytes > 0) {
-		if (path->cc.bytes_in_flight >= removed_bytes)
-			path->cc.bytes_in_flight -= removed_bytes;
-		else
-			path->cc.bytes_in_flight = 0;
-	}
-
 	/* Update timer since we removed packets */
 	tquic_set_loss_detection_timer(conn);
-
-	if (path)
-		tquic_path_put(path);
 }
 
 /**
