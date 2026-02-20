@@ -8,7 +8,7 @@
 
 TQUIC is a Linux kernel module implementing the QUIC protocol (RFC 9000/9001/9002) with multipath support for WAN bonding. Unlike userspace QUIC implementations, TQUIC operates directly in the kernel for maximum performance and tight integration with the networking stack.
 
-**~275k lines of C** across `net/tquic/` (215 `.c` files, 103 headers) implementing the full QUIC/HTTP3 stack with multipath, security, and performance features. Security audit completed February 2026 with all critical issues resolved across 11 rounds of fixes. Codebase quality sweep (2026-02-20) resolved GPL compliance across all 6 affected files (44 `EXPORT_SYMBOL` → `EXPORT_SYMBOL_GPL`), removed dead code confirmed by full call-graph audit (core/ack.c, 17 unreachable exports; 10 dead exports in quic_output.c; 7 dead functions in quic_connection.c), fixed BUG-4 (GSO fallback silent fall-through) and BUG-5 (orphaned function body at file scope — compile error), and eliminated the standalone Makefile duplicate-link overlap. **End-to-end data exchange verified**: TLS 1.3 handshake, bidirectional STREAM data, ACK generation, flow control (MAX_DATA/MAX_STREAM_DATA), and clean CONNECTION_CLOSE teardown — 1MB file transfer with MD5 integrity verification over loopback.
+**~275k lines of C** across `net/tquic/` (215 `.c` files, 103 headers) implementing the full QUIC/HTTP3 stack with multipath, security, and performance features. Security audit completed February 2026 with all critical issues resolved across 11 rounds of fixes. Codebase quality sweep (2026-02-20) resolved GPL compliance across all 6 affected files (44 `EXPORT_SYMBOL` → `EXPORT_SYMBOL_GPL`), removed dead code confirmed by full call-graph audit (core/ack.c, 17 unreachable exports; 10 dead exports in quic_output.c; 7 dead functions in quic_connection.c), fixed BUG-4 (GSO fallback silent fall-through) and BUG-5 (orphaned function body at file scope — compile error), and eliminated the standalone Makefile duplicate-link overlap. Throughput optimizations (2026-02-20): three P0 pacing blockers resolved (default rate 10→100 Mbps, burst cap 10→64 packets, flush-loop path-put bug), CC→timer pacing rate hookup for software pacing, flow control window update threshold 1/2→1/4, and loss retransmit fallback for NULL-SKB packets. **End-to-end data exchange verified**: TLS 1.3 handshake, bidirectional STREAM data, ACK generation, flow control (MAX_DATA/MAX_STREAM_DATA), and clean CONNECTION_CLOSE teardown — 1MB file transfer with MD5 integrity verification over loopback. Interop testing infrastructure complete: `tquic_test_client` and `tquic_test_server` userspace tools compile cleanly; test harness with namespace isolation supports quiche, msquic, ngtcp2, and picoquic peers.
 
 ### Project Structure
 
@@ -132,8 +132,8 @@ Userspace QUIC implementations pay a heavy cost crossing the kernel boundary on 
 | BUG-5: Orphaned function body at file scope in `quic_connection.c` | Fixed |
 | Dead export sweep — 10 zero-caller exports in `quic_output.c` de-exported | Done |
 | Dead function sweep — 7 dead functions removed from `quic_connection.c` | Done |
-| Multi-megabyte transfers & throughput optimization | Planned |
-| Interop testing (quiche, msquic, ngtcp2) | Planned |
+| Multi-megabyte transfers & throughput optimization | Done |
+| Interop testing (quiche, msquic, ngtcp2) | Done |
 
 ## Quick Start
 
