@@ -60,11 +60,6 @@ tquic-y := \
 	grease.o \
 	tquic_ack_frequency.o \
 	security_hardening.o \
-	cong/cong_data.o \
-	cong/persistent_cong.o \
-	cong/bbrv2.o \
-	cong/bbrv3.o \
-	cong/prague.o \
 	core/varint.o \
 	core/connection.o \
 	core/stream.o \
@@ -102,11 +97,6 @@ tquic-y := \
 	bond/tquic_reorder.o \
 	bond/tquic_bpm.o \
 	bond/cong_coupled.o \
-	multipath/mp_frame.o \
-	multipath/mp_ack.o \
-	multipath/mp_deadline.o \
-	multipath/path_abandon.o \
-	multipath/multipath_module.o \
 	multipath/sched_minrtt.o \
 	multipath/sched_ecf.o \
 	multipath/sched_blest.o \
@@ -132,6 +122,37 @@ tquic-$(CONFIG_TQUIC_CONG) += cong/tquic_cong.o
 
 # Coupled multipath CC (OLIA/LIA/BALIA) - standalone module
 tquic-$(CONFIG_TQUIC_CONG_COUPLED) += cong/coupled.o
+
+# RFC 9369 multipath extension objects - gate under CONFIG_TQUIC_MULTIPATH.
+# These implement QUIC multipath frames (MP_NEW_CONNECTION_ID, PATH_ABANDON,
+# etc.) and are distinct from the per-path schedulers above.
+tquic-$(CONFIG_TQUIC_MULTIPATH) += \
+	multipath/mp_frame.o \
+	multipath/mp_ack.o \
+	multipath/mp_deadline.o \
+	multipath/path_abandon.o \
+	multipath/multipath_module.o
+
+# Fold CC algorithms into tquic.ko only when not building as a standalone
+# module.  When CONFIG_TQUIC_CONG_* = m the standalone tquic_bbrv2.ko /
+# tquic_bbrv3.ko / tquic_prague.ko / tquic_cong_data.ko rules below handle
+# the build; folding them here too would produce duplicate EXPORT_SYMBOL_GPL.
+# NOTE: the standalone module rules (obj-$(CONFIG_TQUIC_CONG_BBRV2) etc.)
+# require module_init()/module_exit() and MODULE_ALIAS() in the C source
+# files before they can be loaded independently.
+ifneq ($(CONFIG_TQUIC_CONG_BBRV2),m)
+tquic-$(CONFIG_TQUIC_CONG_BBRV2) += cong/bbrv2.o
+endif
+ifneq ($(CONFIG_TQUIC_CONG_BBRV3),m)
+tquic-$(CONFIG_TQUIC_CONG_BBRV3) += cong/bbrv3.o
+endif
+ifneq ($(CONFIG_TQUIC_CONG_PRAGUE),m)
+tquic-$(CONFIG_TQUIC_CONG_PRAGUE) += cong/prague.o
+endif
+ifneq ($(CONFIG_TQUIC_CONG_DATA),m)
+tquic-$(CONFIG_TQUIC_CONG_DATA) += cong/cong_data.o
+endif
+tquic-$(CONFIG_TQUIC_CONG) += cong/persistent_cong.o
 
 # debugfs interface
 tquic-$(CONFIG_TQUIC_DEBUGFS) += tquic_debug.o
@@ -249,10 +270,8 @@ tquic_crypto-$(CONFIG_TQUIC_CRYPTO_HW_OFFLOAD) += crypto/hw_offload.o
 # Netfilter integration for connection tracking
 obj-$(CONFIG_TQUIC_NETFILTER) += tquic_nf.o
 
-# Socket diagnostics for ss command support
-obj-$(CONFIG_TQUIC_DIAG) += tquic_diag.o
-
-# Path metrics export (diag/)
+# Path metrics export (diag/).  tquic_diag.o is already folded into tquic.ko
+# above; no separate tquic_diag.ko is needed.
 obj-$(CONFIG_TQUIC_DIAG) += diag/
 
 # BPF struct_ops for pluggable schedulers
