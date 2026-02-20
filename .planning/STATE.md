@@ -6,8 +6,8 @@
 **Plan:** 6 of 6 complete
 **Status:** All phases complete. Remaining gates require a Linux build host: checkpatch.pl
            --strict run, kernel build (make M=net/tquic), and KUnit test execution.
-**Last activity:** 2026-02-20 - Added KUnit tests for 6 optional subsystem hooks (commit 3546e2bd3):
-                   16 tests across 6 CONFIG_TQUIC_*-guarded suites in subsystem_hooks_test.c
+**Last activity:** 2026-02-20 - Fixed build-breaking XDP constant conflict in af_xdp.h (commit c94587e2a);
+                   enum tquic_xdp_mode / TQUIC_XDP_MODE redefinition vs uapi/linux/tquic.h
 
 Progress: [================================================================================] 100%
          41/41 plans complete
@@ -143,8 +143,9 @@ Decisions made during execution that affect future phases:
 
 **Last session:** 2026-02-20
 **Stopped at:** All phases complete; all TQUIC_OUT_OF_TREE guard bugs fixed (3 instances),
-               ROADMAP synced, stray files cleaned, KUnit tests for 6 subsystem hooks added
-               (commit 3546e2bd3). Remaining gates require a Linux build host.
+               ROADMAP synced, stray files cleaned, KUnit tests for 6 subsystem hooks added,
+               AF_XDP UAPI constant conflict fixed (commit c94587e2a).
+               Remaining gates require a Linux build host.
 **Resume file:** None
 
 ## Phase Summaries
@@ -164,6 +165,12 @@ Decisions made during execution that affect future phases:
 
 ## Recent Activity
 
+- **2026-02-20:** Fixed build-breaking XDP constant conflict in net/tquic/af_xdp.h
+  (commit c94587e2a). af_xdp.h defined `enum tquic_xdp_mode { TQUIC_XDP_OFF, ... }` and
+  `#define TQUIC_XDP_MODE 200` — both conflicting with the canonical values in
+  `<uapi/linux/tquic.h>` (macros TQUIC_XDP_OFF=0, TQUIC_XDP_MODE=210). Any TU including
+  both (e.g. tquic_socket.c) would produce a syntax error. Fixed by removing the enum and
+  duplicate defines; changed struct tquic_xsk.mode to u32.
 - **2026-02-20:** Added KUnit test suite for 6 optional subsystem hooks (commit 3546e2bd3):
   subsystem_hooks_test.c with 16 tests across 6 CONFIG_TQUIC_*-guarded suites — FEC (4 tests:
   frame constants, lifecycle, null-state guard, zero-len symbol), QUIC-LB (4 tests: mode enum,
