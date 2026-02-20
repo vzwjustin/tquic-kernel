@@ -392,6 +392,7 @@ config TQUIC_CRYPTO
 	depends on TQUIC_CORE
 	select CRYPTO_LIB_CHACHA20POLY1305
 	select CRYPTO_LIB_AES
+	select CRYPTO_CURVE25519
 	default y
 	help
 	  Cryptographic support for TQUIC including TLS 1.3 handshake
