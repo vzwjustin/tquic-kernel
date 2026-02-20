@@ -1055,7 +1055,6 @@ int tquic_conn_new_cid(struct tquic_connection *conn, struct tquic_cid *new_cid)
 }
 
 /* Retire a connection ID */
-#ifndef TQUIC_OUT_OF_TREE
 int tquic_conn_retire_cid(struct tquic_connection *conn, u64 seq, bool is_local)
 {
 	struct tquic_cid_entry *entry, *tmp;
@@ -1076,7 +1075,7 @@ int tquic_conn_retire_cid(struct tquic_connection *conn, u64 seq, bool is_local)
 
 	return -ENOENT;
 }
-#endif /* TQUIC_OUT_OF_TREE */
+EXPORT_SYMBOL_GPL(tquic_conn_retire_cid);
 
 /* Process NEW_CONNECTION_ID from peer */
 static int tquic_conn_add_peer_cid(struct tquic_connection *conn,
