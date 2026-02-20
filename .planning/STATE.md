@@ -6,8 +6,8 @@
 **Plan:** 6 of 6 complete
 **Status:** All phases complete. Remaining gates require a Linux build host: checkpatch.pl
            --strict run, kernel build (make M=net/tquic), and KUnit test execution.
-**Last activity:** 2026-02-20 - Fixed erroneous TQUIC_OUT_OF_TREE guard on tquic_conn_destroy()
-                   (commit 264440d23)
+**Last activity:** 2026-02-20 - Fixed TQUIC_OUT_OF_TREE guard on tquic_conn_retire_cid(),
+                   synced ROADMAP.md checkboxes, deleted stray temp files (commit 3cac0dc0f)
 
 Progress: [================================================================================] 100%
          41/41 plans complete
@@ -135,12 +135,15 @@ Decisions made during execution that affect future phases:
 - **No KUnit tests** for the 6 optional subsystem hooks wired 2026-02-20 (SmartNIC, FEC
   hook-side, QUIC-LB hook-side, TCP fallback trigger, AF_XDP/io_uring sockopt dispatch)
 - ~~**tquic_conn_destroy() unreachable in out-of-tree builds**~~ — Fixed 2026-02-20 (commit 264440d23)
+- ~~**tquic_conn_retire_cid() unreachable in out-of-tree builds**~~ — Fixed 2026-02-20 (commit 3cac0dc0f)
+- ~~**ROADMAP.md Phase 9/10 plan checkboxes unchecked**~~ — Fixed 2026-02-20 (commit 3cac0dc0f)
+- ~~**Stray temp/backup files in repo root**~~ — Deleted 2026-02-20 (commit 3cac0dc0f)
 
 ## Session Continuity
 
 **Last session:** 2026-02-20
-**Stopped at:** All phases complete; optional subsystem hooks wired + TQUIC_OUT_OF_TREE guard
-               bug fixed in tquic_conn_destroy() (commit 264440d23)
+**Stopped at:** All phases complete; two TQUIC_OUT_OF_TREE guard bugs fixed, ROADMAP synced,
+               stray files cleaned (commit 3cac0dc0f)
 **Resume file:** None
 
 ## Phase Summaries
@@ -160,6 +163,11 @@ Decisions made during execution that affect future phases:
 
 ## Recent Activity
 
+- **2026-02-20:** Fixed same TQUIC_OUT_OF_TREE guard bug on tquic_conn_retire_cid() (commit
+  3cac0dc0f). Declared unconditionally in include/net/tquic.h:2002 but defined inside
+  #ifndef guard — identical pattern to tquic_conn_destroy(). Guard removed, EXPORT_SYMBOL_GPL
+  added. ROADMAP.md Phase 9/10 plan checkboxes synced to [x]. Stray temp files deleted:
+  tquic_output.c.bak, original_tquic_output.c, all_obj_rules_new.txt, tquic_all_c.txt.
 - **2026-02-20:** Fixed erroneous #ifndef TQUIC_OUT_OF_TREE guard wrapping tquic_conn_destroy()
   in core/quic_connection.c (commit 264440d23). Function was declared unconditionally in
   include/net/tquic.h and called unconditionally from tquic_conn_put(), but its definition
