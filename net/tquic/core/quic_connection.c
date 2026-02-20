@@ -215,28 +215,6 @@ static struct tquic_connection *tquic_conn_lookup(struct tquic_cid *cid)
 	return conn;
 }
 
-/**
- * tquic_cid_rht_lookup - Look up connection by CID in the rhashtable
- *
- * Searches the CID rhashtable (populated by tquic_conn_create).
- * Exported for use as a fallback in the global lookup chain.
- */
-struct tquic_connection *tquic_cid_rht_lookup(const struct tquic_cid *cid)
-{
-	struct tquic_cid lookup_cid;
-	struct tquic_connection *conn;
-
-	if (!cid || cid->len == 0)
-		return NULL;
-
-	/* Copy to mutable struct for rhashtable API */
-	memcpy(&lookup_cid, cid, sizeof(lookup_cid));
-	conn = tquic_conn_lookup(&lookup_cid);
-	pr_warn("tquic_cid_rht_lookup: len=%u id=%*phN result=%p\n", cid->len,
-		min_t(int, cid->len, 8), cid->id, conn);
-	return conn;
-}
-EXPORT_SYMBOL_GPL(tquic_cid_rht_lookup);
 
 static void tquic_conn_generate_cid(struct tquic_cid *cid, u8 len)
 {
@@ -1014,125 +992,6 @@ void tquic_conn_destroy(struct tquic_connection *conn)
 }
 #endif /* TQUIC_OUT_OF_TREE */
 
-/* Forward declarations for functions used before their definitions */
-static struct tquic_cid *tquic_conn_get_dcid(struct tquic_connection *conn);
-static void tquic_conn_set_state_local(struct tquic_connection *conn,
-				       enum tquic_conn_state state);
-
-int tquic_conn_connect(struct tquic_connection *conn, struct sockaddr *addr,
-		       int addr_len)
-{
-	struct tquic_sock *tsk = conn->tsk;
-	struct tquic_path *path;
-	int err;
-
-	spin_lock_bh(&conn->lock);
-	if (conn->state != TQUIC_CONN_IDLE) {
-		spin_unlock_bh(&conn->lock);
-		return -EINVAL;
-	}
-	spin_unlock_bh(&conn->lock);
-
-	path = tquic_conn_active_path_get(conn);
-	if (!path)
-		return -ENETUNREACH;
-
-	if (addr_len <= 0 || addr_len > sizeof(path->remote_addr)) {
-		tquic_path_put(path);
-		return -EINVAL;
-	}
-
-	/* Set remote address */
-	memset(&path->remote_addr, 0, sizeof(path->remote_addr));
-	memcpy(&path->remote_addr, addr, addr_len);
-	tquic_path_put(path);
-
-	/* Create UDP socket for encapsulation if not exists */
-	if (!tsk->udp_sock) {
-		err = tquic_udp_encap_init(tsk);
-		if (err)
-			return err;
-	}
-
-	/* Derive initial secrets from destination connection ID */
-	err = tquic_crypto_derive_initial_secrets(conn,
-						  tquic_conn_get_dcid(conn));
-	if (err)
-		return err;
-
-	spin_lock_bh(&conn->lock);
-	conn->pn_spaces[TQUIC_PN_SPACE_INITIAL].keys_available = 1;
-	spin_unlock_bh(&conn->lock);
-
-	err = tquic_conn_set_state(conn, TQUIC_CONN_CONNECTING,
-				   TQUIC_REASON_NORMAL);
-	if (err)
-		return err;
-
-	/* Start handshake timer */
-	tquic_timer_set(conn, TQUIC_TIMER_HANDSHAKE,
-			ktime_add_ms(ktime_get(),
-				     tsk->config.handshake_timeout_ms));
-
-	/* Queue TX work to send Initial packet */
-	schedule_work(&conn->tx_work);
-
-	return 0;
-}
-
-int tquic_conn_accept(struct tquic_connection *conn)
-{
-	tquic_conn_set_state_local(conn, TQUIC_CONN_CONNECTING);
-	return 0;
-}
-
-bool already_closing;
-
-spin_lock_bh(&conn->lock);
-if (conn->state == TQUIC_CONN_CLOSED || conn->state == TQUIC_CONN_DRAINING) {
-	spin_unlock_bh(&conn->lock);
-	return -EINVAL;
-}
-already_closing = (conn->state == TQUIC_CONN_CLOSING);
-
-conn->error_code = error_code;
-conn->app_error = app_error ? 1 : 0;
-
-if (reason && reason_len > 0) {
-	char *phrase = kmemdup(reason, reason_len, GFP_ATOMIC);
-
-	if (phrase) {
-		kfree(conn->reason_phrase);
-		conn->reason_phrase = phrase;
-		conn->reason_len = reason_len;
-	}
-	/* On allocation failure, proceed without reason phrase */
-}
-
-spin_unlock_bh(&conn->lock);
-
-if (!already_closing)
-	tquic_conn_set_state(conn, TQUIC_CONN_CLOSING,
-			     app_error ? TQUIC_REASON_APPLICATION :
-					 TQUIC_REASON_NORMAL);
-
-/* Send CONNECTION_CLOSE frame */
-schedule_work(&conn->tx_work);
-
-/* Start draining timer (3 * PTO) */
-tquic_timer_set(conn, TQUIC_TIMER_IDLE,
-		ktime_add_ms(ktime_get(),
-			     tquic_conn_draining_timeout_ms(conn)));
-
-return 0;
-}
-
-static void tquic_conn_set_state_local(struct tquic_connection *conn,
-				       enum tquic_conn_state state)
-{
-	tquic_dbg("tquic_conn_set_state_local: state=%d\n", state);
-	tquic_conn_set_state(conn, state, TQUIC_REASON_NORMAL);
-}
 
 /* Generate new connection ID */
 int tquic_conn_new_cid(struct tquic_connection *conn, struct tquic_cid *new_cid)
@@ -1209,29 +1068,6 @@ static int tquic_conn_add_peer_cid(struct tquic_connection *conn,
 	return 0;
 }
 
-/* Get active destination CID */
-static struct tquic_cid *tquic_conn_get_dcid(struct tquic_connection *conn)
-{
-	tquic_dbg("tquic_conn_get_dcid: dcid_len=%u\n", conn->dcid.len);
-	return &conn->dcid;
-}
-
-/* Rotate to next destination CID */
-static int tquic_conn_rotate_dcid(struct tquic_connection *conn)
-{
-	struct tquic_cid_entry *entry;
-	tquic_conn_dbg(conn,
-		       "tquic_conn_rotate_dcid: rotating destination CID\n");
-
-	list_for_each_entry(entry, &conn->dcid_list, list) {
-		if (entry->state == CID_STATE_ACTIVE) {
-			memcpy(&conn->dcid, &entry->cid, sizeof(conn->dcid));
-			return 0;
-		}
-	}
-
-	return -ENOENT; /* No available CIDs */
-}
 
 /*
  * tquic_conn_migrate_to_preferred_address - Initiate migration to server's

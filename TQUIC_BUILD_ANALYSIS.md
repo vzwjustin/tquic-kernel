@@ -7,7 +7,7 @@
 
 > **Accuracy note (2026-02-20 re-sweep):** Sections **1-13** are retained as
 > historical baseline context from pre-remediation analysis passes. The
-> authoritative current-state summary is in **§14–§20**.
+> authoritative current-state summary is in **§14–§21**.
 
 ---
 
@@ -33,6 +33,7 @@
 18. [Post-Sweep Code Quality Issue (2026-02-20)](#18-post-sweep-code-quality-issue-2026-02-20)
 19. [Final Completion Sweep (2026-02-20)](#19-final-completion-sweep-2026-02-20)
 20. [GPL Compliance Sweep — Second Pass (2026-02-20)](#20-gpl-compliance-sweep--second-pass-2026-02-20)
+21. [P3 Dual-Implementation Resolution (2026-02-20)](#21-p3-dual-implementation-resolution-2026-02-20)
 
 ---
 
@@ -1125,11 +1126,10 @@ developer-days plus testing. Deferred.
 | BUG-4 | `tquic_output_gso_send` missing fallback return | Fixed (§18) |
 | Residual | Standalone Makefile pm/sched/crypto overlap | Fixed (§19) |
 | P3 | `core/ack.c` source deletion | Fixed (§20) — deleted from tree; zero out-of-tree callers confirmed |
-| P3 | `core/connection.c` migration to `quic_connection.c` | Audited (§19); deferred — 5–7 dev-days; both files necessary |
-| P3 | `tquic_output.c` / `core/quic_output.c` unification | Audited (§19); deferred — complementary two-layer arch |
+| P3 | `core/connection.c` migration to `quic_connection.c` | Resolved (§21) — dead code removed; BUG-5 fixed |
+| P3 | `tquic_output.c` / `core/quic_output.c` unification | Resolved (§21) — architecture confirmed intentional; 10 dead exports removed |
 
-**No remaining actionable open items.** The two deferred P3 items require
-significant refactoring effort and are documented with clear resolution paths.
+**No remaining open items.**
 
 ---
 
@@ -1186,6 +1186,86 @@ ls: net/tquic/core/ack.c: No such file or directory
 |---|---|---|
 | `EXPORT_SYMBOL` → `EXPORT_SYMBOL_GPL` | 5 | 30 entries |
 | Source file deleted | 1 (`core/ack.c`) | — |
+
+---
+
+## 21. P3 Dual-Implementation Resolution (2026-02-20)
+
+Both deferred P3 items resolved via call-graph audits of the dual-implementation
+pairs. Neither required a file merge; the correct action in each case was targeted
+dead-code removal.
+
+### `core/quic_connection.c` dead-code sweep
+
+Full call-graph audit (parallel agent) confirmed the following items in
+`core/quic_connection.c` have zero callers anywhere in the tree:
+
+| Removed item | Type | Reason |
+|---|---|---|
+| `tquic_cid_rht_lookup()` | Exported function | 0 callers; overlaps with `tquic_conn_lookup_by_cid` in connection.c (12 callers) |
+| `tquic_conn_connect()` | Internal function | 0 callers; superseded by `tquic_conn_client_connect` in connection.c (3 callers) |
+| `tquic_conn_accept()` | Internal function | 0 callers; superseded by `tquic_conn_server_accept` in connection.c |
+| Orphaned function body (lines 1089–1128) | **BUG-5** compile error | Fragment of `tquic_conn_close_with_error`; canonical impl is in connection.c:2477 |
+| `tquic_conn_set_state_local()` | Static helper | Only caller was `tquic_conn_accept` (deleted) |
+| `tquic_conn_get_dcid()` | Static helper | Only caller was `tquic_conn_connect` (deleted) |
+| `tquic_conn_rotate_dcid()` | Static helper | Never called |
+
+**BUG-5 detail:** The orphaned code at lines 1089–1128 was a function body without
+its function signature — statements at file scope including `spin_lock_bh()`,
+`return 0;`, and a stray closing `}`. This is a compile-time error. The body was
+a duplicate of `tquic_conn_close_with_error()` which is fully implemented in
+`connection.c:2477` and called from 10+ sites. Deleted the orphan; canonical
+implementation untouched.
+
+**Remaining exports in `quic_connection.c` (5, all active):**
+
+| Symbol | External callers |
+|---|---|
+| `tquic_conn_create` | 30 |
+| `tquic_transport_param_parse` | 20 |
+| `tquic_transport_param_apply` | 0 (RFC-required, protocol-facing) |
+| `tquic_transport_param_encode` | 0 (RFC-required, protocol-facing) |
+| `tquic_transport_param_validate` | 0 (RFC-required, protocol-facing) |
+
+**Architecture confirmation:** `connection.c` and `quic_connection.c` are
+complementary, not competing:
+- `connection.c` — RFC 9000 protocol state machine (connect/accept/close/migrate/handshake)
+- `quic_connection.c` — connection allocation, CID hash table, transport parameter negotiation
+
+No merge needed or desirable. Dead code removed; both files remain.
+
+---
+
+### `core/quic_output.c` dead-export sweep
+
+Full call-graph audit confirmed `core/quic_output.c` is the **low-level SKB
+pipeline** layer; `tquic_output.c` is the **high-level protocol API** layer.
+One-way dependency only: tquic_output.c → quic_output.c. Architecture is
+intentionally layered; merging would couple protocol logic to network stack.
+
+**10 zero-caller `EXPORT_SYMBOL_GPL` entries removed** (functions retained in file
+for intra-module use; no longer available to external modules):
+
+`tquic_alloc_tx_skb`, `tquic_free_tx_skb`, `tquic_output_gso`,
+`tquic_coalesce_skbs`, `tquic_output_coalesced`, `tquic_retransmit`,
+`tquic_do_sendmsg`, `tquic_stream_handle_reset`,
+`tquic_stream_handle_stop_sending`, `tquic_frame_process_new_cid`
+
+**Remaining exports in `core/quic_output.c` (4, all with confirmed callers):**
+
+| Symbol | External callers |
+|---|---|
+| `tquic_output` | 1 (tquic_timer.c) |
+| `tquic_output_batch` | 1 (tquic_timer.c) |
+| `tquic_output_paced` | 1 (tquic_output.c) |
+| `tquic_packet_build` | 1 (core/quic_connection.c) |
+
+---
+
+### Table of Contents addition
+
+20. [GPL Compliance Sweep — Second Pass (2026-02-20)](#20-gpl-compliance-sweep--second-pass-2026-02-20)
+21. [P3 Dual-Implementation Resolution (2026-02-20)](#21-p3-dual-implementation-resolution-2026-02-20)
 
 ---
 

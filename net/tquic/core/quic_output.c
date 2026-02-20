@@ -364,14 +364,12 @@ struct sk_buff *tquic_alloc_tx_skb(struct tquic_connection *conn, u32 size)
 
 	return skb;
 }
-EXPORT_SYMBOL_GPL(tquic_alloc_tx_skb);
 
 /* Free TX skb */
 void tquic_free_tx_skb(struct sk_buff *skb)
 {
 	kfree_skb(skb);
 }
-EXPORT_SYMBOL_GPL(tquic_free_tx_skb);
 
 #ifndef TQUIC_OUT_OF_TREE
 /* Get ECN marking for path - use path's cc state */
@@ -966,7 +964,6 @@ int tquic_output_gso(struct tquic_connection *conn, struct sk_buff_head *queue)
 
 	return err;
 }
-EXPORT_SYMBOL_GPL(tquic_output_gso);
 
 /*
  * Coalesced Packet Support
@@ -1024,7 +1021,6 @@ struct sk_buff *tquic_coalesce_skbs(struct sk_buff_head *packets)
 
 	return coalesced;
 }
-EXPORT_SYMBOL_GPL(tquic_coalesce_skbs);
 
 /* Send coalesced packet */
 int tquic_output_coalesced(struct tquic_connection *conn,
@@ -1044,7 +1040,6 @@ int tquic_output_coalesced(struct tquic_connection *conn,
 
 	return err;
 }
-EXPORT_SYMBOL_GPL(tquic_output_coalesced);
 
 /*
  * Retransmission Support
@@ -1076,7 +1071,6 @@ int tquic_retransmit(struct tquic_connection *conn,
 
 	return err;
 }
-EXPORT_SYMBOL_GPL(tquic_retransmit);
 
 /*
  * sendmsg Interface
@@ -1250,7 +1244,6 @@ out_put_conn:
 	tquic_conn_put(conn);
 	return err;
 }
-EXPORT_SYMBOL_GPL(tquic_do_sendmsg);
 
 /*
  * TQUIC SKB Control Block
@@ -1784,7 +1777,6 @@ void tquic_stream_handle_reset(struct tquic_stream *stream, u64 error_code,
 
 	wake_up(&stream->wait);
 }
-EXPORT_SYMBOL_GPL(tquic_stream_handle_reset);
 
 /* Helper to handle stop sending */
 void tquic_stream_handle_stop_sending(struct tquic_stream *stream,
@@ -1792,7 +1784,6 @@ void tquic_stream_handle_stop_sending(struct tquic_stream *stream,
 {
 	wake_up(&stream->wait);
 }
-EXPORT_SYMBOL_GPL(tquic_stream_handle_stop_sending);
 
 /*
  * tquic_stream_recv_data is defined in core/stream.c with full implementation.
@@ -1853,7 +1844,6 @@ int tquic_frame_process_new_cid(struct tquic_connection *conn, const u8 *data,
 
 	return offset;
 }
-EXPORT_SYMBOL_GPL(tquic_frame_process_new_cid);
 
 /*
  * Variable-length integer functions (tquic_varint_decode, tquic_varint_encode,
