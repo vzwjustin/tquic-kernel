@@ -855,7 +855,6 @@ err_free_conn:
 }
 EXPORT_SYMBOL_GPL(tquic_conn_create);
 
-#ifndef TQUIC_OUT_OF_TREE
 void tquic_conn_destroy(struct tquic_connection *conn)
 {
 	struct tquic_cid_entry *entry, *tmp_entry;
@@ -1034,8 +1033,7 @@ void tquic_conn_destroy(struct tquic_connection *conn)
 	kfree(conn->reason_phrase);
 	kmem_cache_free(tquic_conn_cache, conn);
 }
-#endif /* TQUIC_OUT_OF_TREE */
-
+EXPORT_SYMBOL_GPL(tquic_conn_destroy);
 
 /* Generate new connection ID */
 int tquic_conn_new_cid(struct tquic_connection *conn, struct tquic_cid *new_cid)
