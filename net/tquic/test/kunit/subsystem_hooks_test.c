@@ -274,7 +274,9 @@ kunit_test_suite(smartnic_suite);
  */
 #ifdef CONFIG_TQUIC_AF_XDP
 #include "../../af_xdp.h"
-#include <uapi/linux/tquic.h>
+/* TQUIC_XDP_MODE/STATS/OFF/COPY/ZEROCOPY come from <uapi/linux/tquic.h>
+ * via the af_xdp.h -> <net/tquic.h> include chain.
+ */
 
 static void test_xdp_sockopt_constants(struct kunit *test)
 {
@@ -313,7 +315,7 @@ kunit_test_suite(xdp_suite);
  */
 #ifdef CONFIG_TQUIC_IO_URING
 #include "../../io_uring.h"
-#include <uapi/linux/tquic.h>
+/* TQUIC_URING_* constants come from <uapi/linux/tquic.h> via include chain */
 
 static void test_uring_sockopt_constants(struct kunit *test)
 {

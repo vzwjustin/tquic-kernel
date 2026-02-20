@@ -40,13 +40,9 @@ struct tquic_packet;
 struct sock;
 
 /*
- * XDP mode configuration
+ * XDP mode values - defined in <uapi/linux/tquic.h> as TQUIC_XDP_OFF/COPY/ZEROCOPY.
+ * Do not redefine them here; the UAPI macros are already visible via <net/tquic.h>.
  */
-enum tquic_xdp_mode {
-	TQUIC_XDP_OFF = 0,	/* XDP disabled, use regular UDP socket */
-	TQUIC_XDP_COPY,		/* XDP copy mode (driver compatibility) */
-	TQUIC_XDP_ZEROCOPY,	/* XDP zero-copy mode (best performance) */
-};
 
 /*
  * UMEM frame state for reference counting
@@ -150,8 +146,8 @@ struct tquic_xsk {
 	/* Frame pool for UMEM management */
 	struct tquic_xsk_frame_pool *frame_pool;
 
-	/* Mode configuration */
-	enum tquic_xdp_mode mode;	/* Copy vs zero-copy */
+	/* Mode configuration (TQUIC_XDP_OFF / TQUIC_XDP_COPY / TQUIC_XDP_ZEROCOPY) */
+	u32 mode;
 	bool bound;			/* Socket bound to device */
 
 	/* BPF program */
@@ -260,11 +256,10 @@ struct tquic_xdp_config {
 #define TQUIC_XDP_PORT_4433		4433
 #define TQUIC_XDP_PORT_8443		8443
 
-/* Socket option (add to SOL_TQUIC options) */
-#define TQUIC_XDP_MODE		200	/* Set XDP mode */
-#define SO_TQUIC_XDP_MODE	TQUIC_XDP_MODE
-#define TQUIC_XDP_STATS		201	/* Get XDP statistics (read-only) */
-#define SO_TQUIC_XDP_STATS	TQUIC_XDP_STATS
+/*
+ * Socket options TQUIC_XDP_MODE (210) and TQUIC_XDP_STATS (211) are defined
+ * in <uapi/linux/tquic.h>.  Do not redefine them here.
+ */
 
 /*
  * XSK socket lifecycle management
