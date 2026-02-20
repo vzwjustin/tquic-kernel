@@ -55,6 +55,10 @@
 #include "../bond/tquic_reorder.h"
 #include "../bond/tquic_bonding.h"
 
+#ifdef CONFIG_TQUIC_FEC
+#include "../fec/fec.h"
+#endif
+
 /* QUIC encryption level / packet type identifiers (RFC 9000 §17.2) */
 #define TQUIC_PKT_INITIAL 0x00
 #define TQUIC_PKT_ZERO_RTT 0x01
@@ -2500,6 +2504,61 @@ static int tquic_process_path_status_frame(struct tquic_rx_ctx *ctx)
 
 #endif /* CONFIG_TQUIC_MULTIPATH */
 
+#ifdef CONFIG_TQUIC_FEC
+static bool tquic_is_fec_frame(struct tquic_rx_ctx *ctx)
+{
+	u64 fec_type;
+	int r = tquic_decode_varint(ctx->data + ctx->offset,
+				    ctx->len - ctx->offset, &fec_type);
+
+	return r > 0 && (fec_type == TQUIC_FRAME_FEC_REPAIR ||
+			 fec_type == TQUIC_FRAME_FEC_SOURCE_INFO);
+}
+
+static int tquic_process_fec_frame(struct tquic_rx_ctx *ctx)
+{
+	struct tquic_connection *conn = ctx->conn;
+	u64 fec_type;
+	int fec_vlen;
+
+	fec_vlen = tquic_decode_varint(ctx->data + ctx->offset,
+				       ctx->len - ctx->offset, &fec_type);
+	if (fec_vlen < 0)
+		return -EPROTO;
+	ctx->offset += fec_vlen;
+
+	if (!conn->fec_state)
+		return 0; /* FEC not initialised, skip frame */
+
+	ctx->ack_eliciting = true;
+
+	if (fec_type == TQUIC_FRAME_FEC_REPAIR) {
+		struct tquic_fec_repair_frame rf;
+		ssize_t n;
+
+		n = tquic_fec_decode_repair_frame(ctx->data + ctx->offset,
+						  ctx->len - ctx->offset, &rf);
+		if (n < 0)
+			return (int)n;
+		ctx->offset += (size_t)n;
+		return tquic_fec_receive_repair(conn->fec_state, &rf);
+	} else {
+		struct tquic_fec_source_info_frame sf;
+		ssize_t n;
+
+		n = tquic_fec_decode_source_info_frame(ctx->data + ctx->offset,
+						       ctx->len - ctx->offset,
+						       &sf);
+		if (n < 0)
+			return (int)n;
+		ctx->offset += (size_t)n;
+		return tquic_fec_receive_source(conn->fec_state, sf.block_id,
+						sf.first_source_symbol_id,
+						ctx->pkt_num, NULL, 0);
+	}
+}
+#endif /* CONFIG_TQUIC_FEC */
+
 /*
  * Demultiplex and process all frames in packet
  */
@@ -2849,6 +2908,18 @@ int tquic_process_frames(struct tquic_connection *conn, struct tquic_path *path,
 			}
 			ret = tquic_process_mp_extended_frame(&ctx);
 #endif
+#ifdef CONFIG_TQUIC_FEC
+		} else if (tquic_is_fec_frame(&ctx)) {
+			/* FEC frames only valid in 1-RTT (application level) */
+			if (!is_1rtt) {
+				conn->error_code = EQUIC_FRAME_ENCODING;
+				tquic_conn_close_with_error(
+					conn, EQUIC_FRAME_ENCODING,
+					"FEC frame not in 1-RTT");
+				return -EPROTO;
+			}
+			ret = tquic_process_fec_frame(&ctx);
+#endif /* CONFIG_TQUIC_FEC */
 		} else {
 			/*
 			 * Unknown frame type - RFC 9000 Section 12.4:

@@ -50,6 +50,13 @@
 #include "bond/tquic_bonding.h"
 #include "bond/tquic_failover.h"
 
+#ifdef CONFIG_TQUIC_OFFLOAD
+#include "offload/smartnic.h"
+#endif
+#ifdef CONFIG_TQUIC_OVER_TCP
+#include "transport/tcp_fallback.h"
+#endif
+
 /*
  * tquic_conn_get_failover - Get failover context from a connection
  *
@@ -2097,6 +2104,20 @@ int tquic_output_packet(struct tquic_connection *conn, struct tquic_path *path,
 		}
 	}
 
+#ifdef CONFIG_TQUIC_OFFLOAD
+	if (conn && path && path->dev) {
+		struct tquic_nic_device *nic = tquic_nic_find(path->dev);
+
+		if (nic) {
+			if (tquic_offload_tx(nic, skb, conn) == 0) {
+				tquic_nic_put(nic);
+				return 0; /* HW handled encryption+TX */
+			}
+			tquic_nic_put(nic);
+		}
+	}
+#endif /* CONFIG_TQUIC_OFFLOAD */
+
 	/* Get addresses */
 	local = (struct sockaddr_in *)&path->local_addr;
 	remote = (struct sockaddr_in *)&path->remote_addr;
@@ -2135,8 +2156,17 @@ int tquic_output_packet(struct tquic_connection *conn, struct tquic_path *path,
 	}
 	rt = ip_route_output_key(net, &fl4);
 	if (unlikely(IS_ERR(rt))) {
+		int rt_err = PTR_ERR(rt);
+
+#ifdef CONFIG_TQUIC_OVER_TCP
+		if (conn && conn->fallback_ctx &&
+		    (rt_err == -EACCES || rt_err == -ENETUNREACH ||
+		     rt_err == -EHOSTUNREACH || rt_err == -ECONNREFUSED))
+			tquic_fallback_trigger(conn->fallback_ctx,
+					       FALLBACK_REASON_ICMP_UNREACH);
+#endif /* CONFIG_TQUIC_OVER_TCP */
 		kfree_skb(skb);
-		return PTR_ERR(rt);
+		return rt_err;
 	}
 
 	/* Determine TOS for ECN marking and send */

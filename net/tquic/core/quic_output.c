@@ -39,6 +39,10 @@
 #include "../cong/tquic_cong.h"
 #include "quic_output.h"
 
+#ifdef CONFIG_TQUIC_FEC
+#include "../fec/fec.h"
+#endif
+
 /* Output path configuration */
 #define TQUIC_OUTPUT_BATCH_SIZE 16
 #define TQUIC_OUTPUT_SKB_HEADROOM 128
@@ -1667,6 +1671,12 @@ skip_ack:
 
 	/* Copy payload to skb */
 	skb_put_data(skb, payload, payload_len);
+
+#ifdef CONFIG_TQUIC_FEC
+	if (conn->fec_state)
+		tquic_fec_add_source_symbol(conn->fec_state, pn,
+					    payload, payload_len);
+#endif /* CONFIG_TQUIC_FEC */
 
 	/* Set up packet control block for crypto */
 	cb = TQUIC_BUILD_SKB_CB(skb);

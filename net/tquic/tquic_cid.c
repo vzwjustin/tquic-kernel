@@ -42,6 +42,10 @@
 
 #include "tquic_compat.h"
 
+#ifdef CONFIG_TQUIC_QUIC_LB
+#include "lb/quic_lb.h"
+#endif
+
 /* Frame type constants */
 #define TQUIC_FRAME_NEW_CONNECTION_ID		0x18
 #define TQUIC_FRAME_RETIRE_CONNECTION_ID	0x19
@@ -433,6 +437,16 @@ int tquic_cid_issue(struct tquic_connection *conn, struct tquic_cid *cid)
 	/* Generate new CID with random bytes */
 	entry->cid.len = pool->cid_len;
 	get_random_bytes(entry->cid.id, pool->cid_len);
+#ifdef CONFIG_TQUIC_QUIC_LB
+	if (conn && conn->lb_config) {
+		struct tquic_lb_cid lb_cid;
+
+		if (tquic_lb_encode_cid(conn->lb_config, &lb_cid) == 0) {
+			memcpy(entry->cid.id, lb_cid.cid, lb_cid.cid_len);
+			entry->cid.len = lb_cid.cid_len;
+		}
+	}
+#endif /* CONFIG_TQUIC_QUIC_LB */
 	entry->seq_num = pool->next_seq++;
 	entry->cid.seq_num = entry->seq_num;
 	entry->conn = conn;

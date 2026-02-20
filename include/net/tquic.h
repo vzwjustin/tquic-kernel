@@ -1430,6 +1430,16 @@ struct tquic_connection {
 	/* AF_XDP socket for kernel-bypass packet I/O */
 	struct tquic_xsk *xsk;
 
+#ifdef CONFIG_TQUIC_FEC
+	struct tquic_fec_state *fec_state; /* FEC encoder/decoder; NULL if disabled */
+#endif
+#ifdef CONFIG_TQUIC_QUIC_LB
+	struct tquic_lb_config *lb_config; /* QUIC-LB config; NULL if unused */
+#endif
+#ifdef CONFIG_TQUIC_OVER_TCP
+	struct tquic_fallback_ctx *fallback_ctx; /* TCP fallback; NULL if unused */
+#endif
+
 	spinlock_t lock;
 	refcount_t refcnt;
 	struct sock *sk;

@@ -57,6 +57,14 @@
 #include "bond/tquic_bonding.h"
 #include "bond/tquic_failover.h"
 
+#ifdef CONFIG_TQUIC_OFFLOAD
+#include "offload/smartnic.h"
+#endif
+#ifdef CONFIG_TQUIC_OVER_TCP
+#include "transport/tcp_fallback.h"
+#include "transport/quic_over_tcp.h"
+#endif
+
 /* Per-packet RX decryption buffer slab cache (allocated in tquic_main.c) */
 #define TQUIC_RX_BUF_SIZE 2048
 
@@ -2180,6 +2188,22 @@ not_reset:
 			 */
 		}
 	}
+
+#ifdef CONFIG_TQUIC_OFFLOAD
+	if (conn && path && path->dev) {
+		struct tquic_nic_device *nic = tquic_nic_find(path->dev);
+
+		if (nic) {
+			int offload_ret = tquic_offload_rx(nic, skb, conn);
+
+			tquic_nic_put(nic);
+			if (offload_ret == 0) {
+				kfree_skb(skb);
+				return 0; /* HW handled decryption */
+			}
+		}
+	}
+#endif /* CONFIG_TQUIC_OFFLOAD */
 
 	/* Process the QUIC packet */
 	pr_debug(

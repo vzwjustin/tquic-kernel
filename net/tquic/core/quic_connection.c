@@ -26,6 +26,16 @@
 #include "../tquic_compat.h"
 #include "../protocol.h"
 #include "../tquic_init.h"
+#ifdef CONFIG_TQUIC_FEC
+#include "../fec/fec.h"
+#endif
+#ifdef CONFIG_TQUIC_QUIC_LB
+#include "../lb/quic_lb.h"
+#endif
+#ifdef CONFIG_TQUIC_OVER_TCP
+#include "../transport/tcp_fallback.h"
+#endif
+
 static const struct rhashtable_params tquic_conn_table_params = {
 	.key_len = sizeof(struct tquic_cid),
 	.key_offset = offsetof(struct tquic_connection, scid),
@@ -804,6 +814,18 @@ struct tquic_connection *tquic_conn_create(struct tquic_sock *tsk,
 
 	refcount_set(&conn->refcnt, 1);
 
+#ifdef CONFIG_TQUIC_FEC
+	conn->fec_state = kzalloc(sizeof(*conn->fec_state), GFP_KERNEL);
+	if (conn->fec_state)
+		tquic_fec_init(conn->fec_state);
+	/* Non-fatal: FEC simply disabled if allocation fails */
+#endif /* CONFIG_TQUIC_FEC */
+
+#ifdef CONFIG_TQUIC_OVER_TCP
+	conn->fallback_ctx = tquic_fallback_ctx_create(conn);
+	/* Non-fatal: TCP fallback simply won't activate if NULL */
+#endif /* CONFIG_TQUIC_OVER_TCP */
+
 	/*
 	 * SECURITY FIX (CF-098): Insert into the global connection
 	 * hash table so that diagnostics, proc, and debug interfaces
@@ -986,6 +1008,28 @@ void tquic_conn_destroy(struct tquic_connection *conn)
 	skb_queue_purge(&conn->early_data_buffer);
 	for (i = 0; i < TQUIC_PN_SPACE_COUNT; i++)
 		skb_queue_purge(&conn->crypto_buffer[i]);
+
+#ifdef CONFIG_TQUIC_FEC
+	if (conn->fec_state) {
+		tquic_fec_destroy(conn->fec_state);
+		kfree(conn->fec_state);
+		conn->fec_state = NULL;
+	}
+#endif /* CONFIG_TQUIC_FEC */
+
+#ifdef CONFIG_TQUIC_QUIC_LB
+	if (conn->lb_config) {
+		tquic_lb_config_destroy(conn->lb_config);
+		conn->lb_config = NULL;
+	}
+#endif /* CONFIG_TQUIC_QUIC_LB */
+
+#ifdef CONFIG_TQUIC_OVER_TCP
+	if (conn->fallback_ctx) {
+		tquic_fallback_ctx_destroy(conn->fallback_ctx);
+		conn->fallback_ctx = NULL;
+	}
+#endif /* CONFIG_TQUIC_OVER_TCP */
 
 	kfree(conn->reason_phrase);
 	kmem_cache_free(tquic_conn_cache, conn);

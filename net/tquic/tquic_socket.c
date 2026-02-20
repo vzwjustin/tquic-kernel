@@ -40,6 +40,13 @@
 #include "diag/qlog.h"
 #endif
 
+#ifdef CONFIG_TQUIC_AF_XDP
+#include "af_xdp.h"
+#endif
+#ifdef CONFIG_TQUIC_IO_URING
+#include "io_uring.h"
+#endif
+
 /*
  * Lockdep class keys for TQUIC sockets
  * Indexed: [0] = IPv4, [1] = IPv6
@@ -2246,6 +2253,19 @@ int tquic_sock_setsockopt(struct socket *sock, int level, int optname,
 	}
 #endif /* CONFIG_TQUIC_QLOG */
 
+#ifdef CONFIG_TQUIC_AF_XDP
+	case TQUIC_XDP_MODE:
+	case TQUIC_XDP_STATS:
+		return tquic_xsk_setsockopt(sk, optval, optlen);
+#endif /* CONFIG_TQUIC_AF_XDP */
+
+#ifdef CONFIG_TQUIC_IO_URING
+	case TQUIC_URING_SQPOLL:
+	case TQUIC_URING_CQE_BATCH:
+	case TQUIC_URING_BUF_RING:
+		return tquic_uring_setsockopt(sk, optname, optval, optlen);
+#endif /* CONFIG_TQUIC_IO_URING */
+
 	default:
 		return -ENOPROTOOPT;
 	}
@@ -2832,6 +2852,16 @@ int tquic_sock_getsockopt(struct socket *sock, int level, int optname,
 		val = 0; /* Would check connection qlog != NULL */
 		break;
 #endif /* CONFIG_TQUIC_QLOG */
+
+#ifdef CONFIG_TQUIC_AF_XDP
+	case TQUIC_XDP_STATS:
+		return tquic_xsk_getsockopt(sk, optval, optlen);
+#endif /* CONFIG_TQUIC_AF_XDP */
+
+#ifdef CONFIG_TQUIC_IO_URING
+	case TQUIC_URING_STATS:
+		return tquic_uring_getsockopt(sk, optname, optval, optlen);
+#endif /* CONFIG_TQUIC_IO_URING */
 
 	default:
 		return -ENOPROTOOPT;
