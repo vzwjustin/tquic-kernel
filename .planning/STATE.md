@@ -6,8 +6,8 @@
 **Plan:** 6 of 6 complete
 **Status:** All phases complete. Remaining gates require a Linux build host: checkpatch.pl
            --strict run, kernel build (make M=net/tquic), and KUnit test execution.
-**Last activity:** 2026-02-20 - Wired 6 optional subsystem hooks (SmartNIC, FEC, QUIC-LB,
-                   TCP fallback, AF_XDP, io_uring) into core paths (commit b601fbce8)
+**Last activity:** 2026-02-20 - Fixed erroneous TQUIC_OUT_OF_TREE guard on tquic_conn_destroy()
+                   (commit 264440d23)
 
 Progress: [================================================================================] 100%
          41/41 plans complete
@@ -134,11 +134,13 @@ Decisions made during execution that affect future phases:
   3. `kunit.py run` to execute the 39 KUnit test files
 - **No KUnit tests** for the 6 optional subsystem hooks wired 2026-02-20 (SmartNIC, FEC
   hook-side, QUIC-LB hook-side, TCP fallback trigger, AF_XDP/io_uring sockopt dispatch)
+- ~~**tquic_conn_destroy() unreachable in out-of-tree builds**~~ — Fixed 2026-02-20 (commit 264440d23)
 
 ## Session Continuity
 
 **Last session:** 2026-02-20
-**Stopped at:** All phases complete; optional subsystem hooks wired (commit b601fbce8)
+**Stopped at:** All phases complete; optional subsystem hooks wired + TQUIC_OUT_OF_TREE guard
+               bug fixed in tquic_conn_destroy() (commit 264440d23)
 **Resume file:** None
 
 ## Phase Summaries
@@ -158,6 +160,11 @@ Decisions made during execution that affect future phases:
 
 ## Recent Activity
 
+- **2026-02-20:** Fixed erroneous #ifndef TQUIC_OUT_OF_TREE guard wrapping tquic_conn_destroy()
+  in core/quic_connection.c (commit 264440d23). Function was declared unconditionally in
+  include/net/tquic.h and called unconditionally from tquic_conn_put(), but its definition
+  disappeared in out-of-tree builds — guaranteed link failure. Guard removed; added
+  EXPORT_SYMBOL_GPL to match tquic_conn_create().
 - **2026-02-20:** Wired 6 optional subsystem hooks into core paths (234 insertions, 8 files, commit b601fbce8):
   SmartNIC offload TX/RX (CONFIG_TQUIC_OFFLOAD), FEC source symbol capture + frame handlers
   (CONFIG_TQUIC_FEC), QUIC-LB CID encoding (CONFIG_TQUIC_QUIC_LB), TCP fallback trigger
