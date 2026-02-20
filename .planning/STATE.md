@@ -6,8 +6,8 @@
 **Plan:** 6 of 6 complete
 **Status:** All phases complete. Remaining gates require a Linux build host: checkpatch.pl
            --strict run, kernel build (make M=net/tquic), and KUnit test execution.
-**Last activity:** 2026-02-20 - Fixed TQUIC_OUT_OF_TREE guard on tquic_conn_retire_cid(),
-                   synced ROADMAP.md checkboxes, deleted stray temp files (commit 3cac0dc0f)
+**Last activity:** 2026-02-20 - Fixed TQUIC_OUT_OF_TREE guard on 4 cert sysctl accessors in
+                   crypto/cert_verify.c (commit 17464402f); full guard audit complete
 
 Progress: [================================================================================] 100%
          41/41 plans complete
@@ -136,14 +136,15 @@ Decisions made during execution that affect future phases:
   hook-side, QUIC-LB hook-side, TCP fallback trigger, AF_XDP/io_uring sockopt dispatch)
 - ~~**tquic_conn_destroy() unreachable in out-of-tree builds**~~ — Fixed 2026-02-20 (commit 264440d23)
 - ~~**tquic_conn_retire_cid() unreachable in out-of-tree builds**~~ — Fixed 2026-02-20 (commit 3cac0dc0f)
+- ~~**4 cert sysctl accessors unreachable in out-of-tree builds**~~ — Fixed 2026-02-20 (commit 17464402f)
 - ~~**ROADMAP.md Phase 9/10 plan checkboxes unchecked**~~ — Fixed 2026-02-20 (commit 3cac0dc0f)
 - ~~**Stray temp/backup files in repo root**~~ — Deleted 2026-02-20 (commit 3cac0dc0f)
 
 ## Session Continuity
 
 **Last session:** 2026-02-20
-**Stopped at:** All phases complete; two TQUIC_OUT_OF_TREE guard bugs fixed, ROADMAP synced,
-               stray files cleaned (commit 3cac0dc0f)
+**Stopped at:** All phases complete; all TQUIC_OUT_OF_TREE guard bugs fixed (3 instances),
+               ROADMAP synced, stray files cleaned (commit 17464402f)
 **Resume file:** None
 
 ## Phase Summaries
@@ -163,6 +164,12 @@ Decisions made during execution that affect future phases:
 
 ## Recent Activity
 
+- **2026-02-20:** Fixed TQUIC_OUT_OF_TREE guard on 4 cert sysctl accessor functions in
+  crypto/cert_verify.c (commit 17464402f): tquic_sysctl_get_cert_verify_mode(),
+  tquic_sysctl_get_cert_verify_hostname(), tquic_sysctl_get_cert_revocation_mode(),
+  tquic_sysctl_get_cert_time_tolerance(). All declared in crypto/cert_verify.h:570-573
+  without guard. Full audit of all ~30 TQUIC_OUT_OF_TREE guard sites across net/tquic
+  complete — no further instances of this bug pattern found.
 - **2026-02-20:** Fixed same TQUIC_OUT_OF_TREE guard bug on tquic_conn_retire_cid() (commit
   3cac0dc0f). Declared unconditionally in include/net/tquic.h:2002 but defined inside
   #ifndef guard — identical pattern to tquic_conn_destroy(). Guard removed, EXPORT_SYMBOL_GPL
