@@ -431,6 +431,12 @@ void tquic_prague_exit(void)
 	tquic_unregister_cong(&prague_cong_ops);
 }
 
+#ifndef TQUIC_OUT_OF_TREE
+module_init(tquic_prague_init);
+module_exit(tquic_prague_exit);
+#endif /* !TQUIC_OUT_OF_TREE */
+
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("TQUIC Prague Congestion Control");
 MODULE_AUTHOR("Linux Foundation");
+MODULE_ALIAS("tquic-cong-prague");

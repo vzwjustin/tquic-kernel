@@ -821,6 +821,12 @@ void tquic_bbrv3_exit(void)
 	tquic_unregister_cong(&bbrv3_cong_ops);
 }
 
+#ifndef TQUIC_OUT_OF_TREE
+module_init(tquic_bbrv3_init);
+module_exit(tquic_bbrv3_exit);
+#endif /* !TQUIC_OUT_OF_TREE */
+
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("TQUIC BBRv3 Congestion Control");
 MODULE_AUTHOR("Linux Foundation");
+MODULE_ALIAS("tquic-cong-bbrv3");

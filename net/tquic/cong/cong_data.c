@@ -1328,5 +1328,11 @@ void tquic_cong_data_module_exit(void)
 	tquic_info("cong_data: cleanup complete\n");
 }
 
+#ifndef TQUIC_OUT_OF_TREE
+module_init(tquic_cong_data_module_init);
+module_exit(tquic_cong_data_module_exit);
+#endif /* !TQUIC_OUT_OF_TREE */
+
 MODULE_DESCRIPTION("TQUIC Congestion Control Data Exchange");
 MODULE_LICENSE("GPL");
+MODULE_ALIAS("tquic-cong-data");
