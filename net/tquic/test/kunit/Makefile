@@ -18,3 +18,7 @@ tquic_loss_kunit-y := quic_loss_test.o
 obj-$(CONFIG_TQUIC_KUNIT_TEST) += tquic_path_kunit.o
 
 tquic_path_kunit-y := quic_path_test.o
+
+obj-$(CONFIG_TQUIC_KUNIT_TEST) += tquic_subsystem_hooks_kunit.o
+
+tquic_subsystem_hooks_kunit-y := subsystem_hooks_test.o
