@@ -1827,18 +1827,35 @@ void tquic_loss_retransmit_unacked(struct tquic_connection *conn)
 		spin_lock_irqsave(&pn_space->lock, flags);
 
 		list_for_each_entry(pkt, &pn_space->sent_list, list) {
-			if (pkt->ack_eliciting && !pkt->retransmitted &&
-			    pkt->skb) {
-				skb = skb_clone(pkt->skb, GFP_ATOMIC);
-				if (skb) {
-					pkt->retransmitted = true;
-					skb_queue_tail(&clone_queue, skb);
-				} else {
-					tquic_conn_warn(
-						conn,
-						"skb_clone failed retx pn=%llu\n",
-						pkt->pn);
-				}
+			if (!pkt->ack_eliciting || pkt->retransmitted)
+				continue;
+
+			if (!pkt->skb) {
+				/*
+				 * SKB was consumed by the send path before
+				 * loss was detected (e.g. GSO batch freed
+				 * the original).  Mark as retransmitted so
+				 * loss detection stops tracking it, then
+				 * let the tx_work re-flush outstanding
+				 * stream data in new packets.
+				 */
+				tquic_conn_warn(
+					conn,
+					"retx pn=%llu: skb=NULL, relying on stream re-flush\n",
+					pkt->pn);
+				pkt->retransmitted = true;
+				continue;
+			}
+
+			skb = skb_clone(pkt->skb, GFP_ATOMIC);
+			if (skb) {
+				pkt->retransmitted = true;
+				skb_queue_tail(&clone_queue, skb);
+			} else {
+				tquic_conn_warn(
+					conn,
+					"skb_clone failed retx pn=%llu\n",
+					pkt->pn);
 			}
 		}
 

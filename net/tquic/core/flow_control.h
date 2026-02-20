@@ -29,7 +29,7 @@
 /* Auto-tuning parameters */
 #define TQUIC_FC_MIN_WINDOW (16 * 1024) /* 16 KB minimum */
 #define TQUIC_FC_MAX_WINDOW (16 * 1024 * 1024) /* 16 MB maximum */
-#define TQUIC_FC_WINDOW_UPDATE_THRESHOLD 2 /* Update when 1/2 consumed */
+#define TQUIC_FC_WINDOW_UPDATE_THRESHOLD 4 /* Update when 1/4 consumed */
 #define TQUIC_FC_AUTOTUNE_INTERVAL_MS 100 /* Autotune interval */
 #define TQUIC_FC_AUTOTUNE_RTT_MULTIPLIER 2 /* BDP multiplier */
 

@@ -48,7 +48,7 @@
 #undef TQUIC_FC_WINDOW_UPDATE_THRESHOLD
 #undef TQUIC_FC_MIN_WINDOW
 #undef TQUIC_FC_MAX_WINDOW
-#define TQUIC_FC_WINDOW_UPDATE_THRESHOLD	2	/* Update at 1/2 window */
+#define TQUIC_FC_WINDOW_UPDATE_THRESHOLD	4	/* Update at 1/4 window */
 #define TQUIC_FC_MIN_WINDOW			(64 * 1024)	/* 64 KB */
 #define TQUIC_FC_MAX_WINDOW			(64 * 1024 * 1024)	/* 64 MB */
 #define TQUIC_FC_AUTOTUNE_MULTIPLIER		2	/* Double window on autotune */

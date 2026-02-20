@@ -1594,11 +1594,14 @@ void tquic_update_pacing(struct sock *sk, struct tquic_path *path)
 	 * SK_PACING_FQ     - FQ qdisc handles pacing
 	 */
 	if (smp_load_acquire(&sk->sk_pacing_status) == SK_PACING_NEEDED) {
-		/* Internal pacing needed - FQ not available */
-		if (path->conn && path->conn->scheduler) {
-			/* Update internal pacing state if available */
-			/* Note: Per-path pacing state would be accessed here */
-		}
+		/*
+		 * Internal pacing (no FQ qdisc): push the CC-derived rate
+		 * into the timer state so tquic_timer_schedule_pacing() uses
+		 * the correct inter-packet gap on the next send.
+		 */
+		if (path->conn && path->conn->timer_state)
+			tquic_timer_set_pacing_rate(path->conn->timer_state,
+						    pacing_rate);
 	}
 
 	tquic_dbg(
