@@ -296,7 +296,28 @@ tquic_test-y := \
 	test/cong_data_test.o \
 	test/quic_exfil_test.o \
 	test/failover_test.o \
-	test/tx_work_test.o
+	test/tx_work_test.o \
+	test/ack_frequency_test.o \
+	test/additional_addresses_test.o \
+	test/cong_test.o \
+	test/crypto_test.o \
+	test/datagram_test.o \
+	test/deadline_aware_test.o \
+	test/extended_key_update_test.o \
+	test/http3_test.o \
+	test/ipv6_socket_test.o \
+	test/masque_test.o \
+	test/one_way_delay_test.o \
+	test/path_manager_test.o \
+	test/qlog_test.o \
+	test/quic_proxy_test.o \
+	test/quic_v2_test.o \
+	test/rate_limit_test.o \
+	test/ratelimit_test.o \
+	test/receive_timestamps_test.o \
+	test/reliable_reset_test.o \
+	test/stateless_reset_test.o \
+	test/webtransport_test.o
 
 # Interoperability testing framework
 obj-$(CONFIG_TQUIC_INTEROP_TEST) += test/interop/

@@ -5,4 +5,4 @@
 
 obj-$(CONFIG_TQUIC_INTEROP_TEST) += tquic_interop.o
 
-tquic_interop-y := interop_framework.o rfc9000_tests.o
+tquic_interop-y := interop_framework.o rfc9000_tests.o quic_interop_runner.o
