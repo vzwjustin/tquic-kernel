@@ -123,7 +123,7 @@ EXPORT_SYMBOL_GPL(tquic_frame_cache);
 /* Pacing configuration */
 #define TQUIC_PACING_GAIN 100 /* 100% of calculated rate */
 #define TQUIC_PACING_MIN_INTERVAL_US 1 /* Minimum 1us between packets */
-#define TQUIC_PACING_MAX_BURST 10 /* Max packets in a burst */
+#define TQUIC_PACING_MAX_BURST 64 /* Max packets in a burst */
 
 /* Frame generation context */
 struct tquic_frame_ctx {
@@ -1502,7 +1502,7 @@ struct tquic_pacing_state *tquic_pacing_init(struct tquic_connection *conn,
 
 	pacing->conn = conn;
 	pacing->path = path;
-	pacing->pacing_rate = 1250000; /* Default 10 Mbps */
+	pacing->pacing_rate = 12500000; /* Default 100 Mbps; CC will tune down via tquic_pacing_update_rate() */
 	pacing->max_tokens = TQUIC_PACING_MAX_BURST;
 	pacing->tokens = pacing->max_tokens;
 
@@ -3203,8 +3203,13 @@ int tquic_output_flush(struct tquic_connection *conn)
 					    smp_load_acquire(
 						    &pacing_sk->sk_pacing_status) ==
 						    SK_PACING_NEEDED) {
-						tquic_path_put(path);
-						path = NULL;
+						/*
+						 * Queue to pacing timer but
+						 * keep path so the flush loop
+						 * continues building more
+						 * packets.  path is released
+						 * at out_clear_flush.
+						 */
 						ret = tquic_output_paced(
 							conn, send_skb);
 					} else {
