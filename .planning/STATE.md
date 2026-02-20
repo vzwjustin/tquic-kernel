@@ -6,8 +6,8 @@
 **Plan:** 6 of 6 complete
 **Status:** All phases complete. Remaining gates require a Linux build host: checkpatch.pl
            --strict run, kernel build (make M=net/tquic), and KUnit test execution.
-**Last activity:** 2026-02-20 - Fixed TQUIC_OUT_OF_TREE guard on 4 cert sysctl accessors in
-                   crypto/cert_verify.c (commit 17464402f); full guard audit complete
+**Last activity:** 2026-02-20 - Added KUnit tests for 6 optional subsystem hooks (commit 3546e2bd3):
+                   16 tests across 6 CONFIG_TQUIC_*-guarded suites in subsystem_hooks_test.c
 
 Progress: [================================================================================] 100%
          41/41 plans complete
@@ -132,8 +132,7 @@ Decisions made during execution that affect future phases:
   1. `scripts/checkpatch.pl --strict` on all modified files
   2. `make M=net/tquic` to verify zero build errors against real kernel headers
   3. `kunit.py run` to execute the 39 KUnit test files
-- **No KUnit tests** for the 6 optional subsystem hooks wired 2026-02-20 (SmartNIC, FEC
-  hook-side, QUIC-LB hook-side, TCP fallback trigger, AF_XDP/io_uring sockopt dispatch)
+- ~~**No KUnit tests for the 6 optional subsystem hooks**~~ — Fixed 2026-02-20 (commit 3546e2bd3): 16 tests across 6 CONFIG_TQUIC_*-guarded suites in net/tquic/test/kunit/subsystem_hooks_test.c
 - ~~**tquic_conn_destroy() unreachable in out-of-tree builds**~~ — Fixed 2026-02-20 (commit 264440d23)
 - ~~**tquic_conn_retire_cid() unreachable in out-of-tree builds**~~ — Fixed 2026-02-20 (commit 3cac0dc0f)
 - ~~**4 cert sysctl accessors unreachable in out-of-tree builds**~~ — Fixed 2026-02-20 (commit 17464402f)
@@ -144,7 +143,8 @@ Decisions made during execution that affect future phases:
 
 **Last session:** 2026-02-20
 **Stopped at:** All phases complete; all TQUIC_OUT_OF_TREE guard bugs fixed (3 instances),
-               ROADMAP synced, stray files cleaned (commit 17464402f)
+               ROADMAP synced, stray files cleaned, KUnit tests for 6 subsystem hooks added
+               (commit 3546e2bd3). Remaining gates require a Linux build host.
 **Resume file:** None
 
 ## Phase Summaries
@@ -164,6 +164,13 @@ Decisions made during execution that affect future phases:
 
 ## Recent Activity
 
+- **2026-02-20:** Added KUnit test suite for 6 optional subsystem hooks (commit 3546e2bd3):
+  subsystem_hooks_test.c with 16 tests across 6 CONFIG_TQUIC_*-guarded suites — FEC (4 tests:
+  frame constants, lifecycle, null-state guard, zero-len symbol), QUIC-LB (4 tests: mode enum,
+  config lifecycle, CID struct layout, length limits), TCP fallback (3 tests: NONE==0,
+  ICMP_UNREACH==2, enum ordering), SmartNIC (2 tests: nic_find(NULL) null-safety, offload_tx
+  signature), AF_XDP (2 tests: sockopt constants 210/211, XDP_OFF==0), io_uring (2 tests:
+  sockopt constants 200-203, set/get split). Wired into Makefile as tquic_subsystem_hooks_kunit.
 - **2026-02-20:** Fixed TQUIC_OUT_OF_TREE guard on 4 cert sysctl accessor functions in
   crypto/cert_verify.c (commit 17464402f): tquic_sysctl_get_cert_verify_mode(),
   tquic_sysctl_get_cert_verify_hostname(), tquic_sysctl_get_cert_revocation_mode(),
