@@ -8,7 +8,7 @@
 
 TQUIC is a Linux kernel module implementing the QUIC protocol (RFC 9000/9001/9002) with multipath support for WAN bonding. Unlike userspace QUIC implementations, TQUIC operates directly in the kernel for maximum performance and tight integration with the networking stack.
 
-**~642k lines of C** across `net/tquic/` implementing the full QUIC/HTTP3 stack with multipath, security, and performance features. Security audit completed February 2026 with all critical issues resolved across 11 rounds of fixes. **End-to-end data exchange verified**: TLS 1.3 handshake, bidirectional STREAM data, ACK generation, flow control (MAX_DATA/MAX_STREAM_DATA), and clean CONNECTION_CLOSE teardown — 1MB file transfer with MD5 integrity verification over loopback.
+**~642k lines of C** across `net/tquic/` implementing the full QUIC/HTTP3 stack with multipath, security, and performance features. Security audit completed February 2026 with all critical issues resolved across 11 rounds of fixes. Codebase quality sweep (2026-02-20) resolved GPL compliance across all 6 affected files (44 `EXPORT_SYMBOL` → `EXPORT_SYMBOL_GPL`), removed dead code confirmed by full call-graph audit (core/ack.c, 17 unreachable exports; 10 dead exports in quic_output.c; 7 dead functions in quic_connection.c), fixed BUG-4 (GSO fallback silent fall-through) and BUG-5 (orphaned function body at file scope — compile error), and eliminated the standalone Makefile duplicate-link overlap. **End-to-end data exchange verified**: TLS 1.3 handshake, bidirectional STREAM data, ACK generation, flow control (MAX_DATA/MAX_STREAM_DATA), and clean CONNECTION_CLOSE teardown — 1MB file transfer with MD5 integrity verification over loopback.
 
 ### Project Structure
 
@@ -125,6 +125,13 @@ Userspace QUIC implementations pay a heavy cost crossing the kernel boundary on 
 | Live VPS functional test (18/18 checks) | Done |
 | setsockopt string options (TQUIC_SCHEDULER/CONGESTION) | Fixed |
 | SO_TQUIC_SCHEDULER mp-scheduler name lookup | Fixed |
+| GPL compliance — 44 `EXPORT_SYMBOL` → `EXPORT_SYMBOL_GPL` (6 files) | Fixed |
+| Build overlap fix — Makefile duplicate-link (pm/sched/crypto) | Fixed |
+| Dead-code audit — orphan files, 29 test files wired, core/ack.c removed | Done |
+| BUG-4: `tquic_output_gso_send` GSO fallback silent fall-through | Fixed |
+| BUG-5: Orphaned function body at file scope in `quic_connection.c` | Fixed |
+| Dead export sweep — 10 zero-caller exports in `quic_output.c` de-exported | Done |
+| Dead function sweep — 7 dead functions removed from `quic_connection.c` | Done |
 | Multi-megabyte transfers & throughput optimization | Planned |
 | Interop testing (quiche, msquic, ngtcp2) | Planned |
 
