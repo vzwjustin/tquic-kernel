@@ -65,7 +65,7 @@ void tquic_ecn_init(struct tquic_path *path)
 	path->ecn.ecn_testing = 1;
 	path->ecn.ecn_marking = TQUIC_ECN_ECT_0;
 }
-EXPORT_SYMBOL(tquic_ecn_init);
+EXPORT_SYMBOL_GPL(tquic_ecn_init);
 
 /*
  * tquic_ecn_get_marking - Get ECN marking for outgoing packets
@@ -89,7 +89,7 @@ u8 tquic_ecn_get_marking(const struct tquic_path *path)
 
 	return TQUIC_ECN_NOT_ECT;
 }
-EXPORT_SYMBOL(tquic_ecn_get_marking);
+EXPORT_SYMBOL_GPL(tquic_ecn_get_marking);
 
 /*
  * tquic_ecn_on_packet_sent - Track ECN-marked packet sent
@@ -116,7 +116,7 @@ void tquic_ecn_on_packet_sent(struct tquic_path *path, u8 ecn_marking)
 		break;
 	}
 }
-EXPORT_SYMBOL(tquic_ecn_on_packet_sent);
+EXPORT_SYMBOL_GPL(tquic_ecn_on_packet_sent);
 
 /*
  * tquic_ecn_validate_ack - Validate ECN counts from ACK_ECN frame
@@ -231,7 +231,7 @@ int tquic_ecn_validate_ack(struct tquic_path *path, struct tquic_ack_frame *ack)
 
 	return new_ce_count > 0 ? new_ce_count : 0;
 }
-EXPORT_SYMBOL(tquic_ecn_validate_ack);
+EXPORT_SYMBOL_GPL(tquic_ecn_validate_ack);
 
 /*
  * tquic_ecn_process_ce - Process ECN-CE events from ACK
@@ -264,7 +264,7 @@ void tquic_ecn_process_ce(struct tquic_connection *conn,
 	if (path->cong_ops && path->cong_ops->on_ecn)
 		path->cong_ops->on_ecn(path->cong, ce_count);
 }
-EXPORT_SYMBOL(tquic_ecn_process_ce);
+EXPORT_SYMBOL_GPL(tquic_ecn_process_ce);
 
 /*
  * tquic_ecn_mark_packet - Set ECN bits in IP header
@@ -323,7 +323,7 @@ int tquic_ecn_mark_packet(struct sk_buff *skb, u8 ecn_marking)
 
 	return 0;
 }
-EXPORT_SYMBOL(tquic_ecn_mark_packet);
+EXPORT_SYMBOL_GPL(tquic_ecn_mark_packet);
 
 /*
  * tquic_ecn_read_marking - Read ECN field from received packet
@@ -356,7 +356,7 @@ u8 tquic_ecn_read_marking(struct sk_buff *skb)
 
 	return TQUIC_ECN_NOT_ECT;
 }
-EXPORT_SYMBOL(tquic_ecn_read_marking);
+EXPORT_SYMBOL_GPL(tquic_ecn_read_marking);
 
 /*
  * tquic_ecn_disable - Disable ECN for a path
@@ -376,7 +376,7 @@ void tquic_ecn_disable(struct tquic_path *path)
 
 	tquic_info("ECN disabled for path %u\n", path->path_id);
 }
-EXPORT_SYMBOL(tquic_ecn_disable);
+EXPORT_SYMBOL_GPL(tquic_ecn_disable);
 
 /*
  * tquic_ecn_is_capable - Check if path is ECN capable
@@ -391,7 +391,7 @@ bool tquic_ecn_is_capable(struct tquic_path *path)
 
 	return path->ecn.ecn_capable && !path->ecn.ecn_failed;
 }
-EXPORT_SYMBOL(tquic_ecn_is_capable);
+EXPORT_SYMBOL_GPL(tquic_ecn_is_capable);
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Linux QUIC Authors");

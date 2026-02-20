@@ -1906,26 +1906,65 @@ static struct sk_buff *tquic_gso_finalize(struct tquic_gso_ctx *gso)
 	return skb;
 }
 
-if (ret < 0) {
-	tquic_dbg("gso_send: init failed %d\n", ret);
-	return ret;
-}
+/*
+ * Send multiple QUIC packets coalesced via GSO.
+ * Falls back to individual sends if GSO is not supported.
+ *
+ * @conn: Connection
+ * @path: Path for transmission
+ * @pkts: Array of assembled QUIC packet buffers
+ * @pkt_lens: Length of each packet
+ * @num_pkts: Number of packets to send
+ *
+ * Returns 0 on success, negative errno on failure.
+ */
+static int tquic_output_gso_send(struct tquic_connection *conn,
+				 struct tquic_path *path, const u8 **pkts,
+				 size_t *pkt_lens, int num_pkts)
+{
+	struct tquic_gso_ctx gso;
+	struct sk_buff *gso_skb;
+	int i, ret;
 
-for (i = 0; i < num_pkts; i++) {
-	ret = tquic_gso_add_segment(&gso, pkts[i], pkt_lens[i]);
+	if (num_pkts <= 1 || !tquic_gso_supported(path)) {
+		tquic_dbg("gso_send: not using GSO (pkts=%d supported=%d)\n",
+			  num_pkts, tquic_gso_supported(path));
+		for (i = 0; i < num_pkts; i++) {
+			struct sk_buff *skb;
+
+			skb = alloc_skb(MAX_HEADER + pkt_lens[i], GFP_ATOMIC);
+			if (!skb)
+				return -ENOMEM;
+			skb_reserve(skb, MAX_HEADER);
+			skb_put_data(skb, pkts[i], pkt_lens[i]);
+			ret = tquic_output_packet(conn, path, skb);
+			if (ret < 0)
+				return ret;
+		}
+		return 0;
+	}
+
+	ret = tquic_gso_init(&gso, path, num_pkts);
 	if (ret < 0) {
-		tquic_dbg("gso_send: add_segment %d failed %d\n", i, ret);
-		kfree_skb(gso.gso_skb);
+		tquic_dbg("gso_send: init failed %d\n", ret);
 		return ret;
 	}
-}
 
-gso_skb = tquic_gso_finalize(&gso);
-if (!gso_skb)
-	return -ENOMEM;
+	for (i = 0; i < num_pkts; i++) {
+		ret = tquic_gso_add_segment(&gso, pkts[i], pkt_lens[i]);
+		if (ret < 0) {
+			tquic_dbg("gso_send: add_segment %d failed %d\n", i, ret);
+			kfree_skb(gso.gso_skb);
+			return ret;
+		}
+	}
 
-tquic_dbg("gso_send: sending %d segs total_len=%u\n", num_pkts, gso_skb->len);
-return tquic_output_packet(conn, path, gso_skb);
+	gso_skb = tquic_gso_finalize(&gso);
+	if (!gso_skb)
+		return -ENOMEM;
+
+	tquic_dbg("gso_send: sending %d segs total_len=%u\n", num_pkts, gso_skb->len);
+	return tquic_output_packet(conn, path, gso_skb);
 }
 
 /*

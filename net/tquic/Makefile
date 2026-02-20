@@ -102,18 +102,6 @@ tquic-y := \
 	bond/tquic_reorder.o \
 	bond/tquic_bpm.o \
 	bond/cong_coupled.o \
-	pm/pm_types.o \
-	pm/pm_kernel.o \
-	pm/pm_netlink.o \
-	pm/path_manager.o \
-	pm/path_validation.o \
-	pm/nat_keepalive.o \
-	pm/nat_lifecycle.o \
-	pm/pm_userspace.o \
-	pm/pm_module.o \
-	sched/scheduler.o \
-	sched/deadline_scheduler.o \
-	sched/deadline_aware.o \
 	multipath/mp_frame.o \
 	multipath/mp_ack.o \
 	multipath/mp_deadline.o \
@@ -125,16 +113,7 @@ tquic-y := \
 	multipath/sched_weighted.o \
 	multipath/sched_aggregate.o \
 	multipath/mp_sched_registry.o \
-	multipath/tquic_scheduler.o \
-	crypto/cert_verify.o \
-	crypto/tls.o \
-	crypto/header_protection.o \
-	crypto/key_update.o \
-	crypto/extended_key_update.o \
-	crypto/zero_rtt.o \
-	crypto/handshake.o \
-	crypto/crypto_module.o \
-	crypto/hw_offload.o
+	multipath/tquic_scheduler.o
 
 # Tracing support
 tquic-$(CONFIG_TRACEPOINTS) += diag/trace.o
@@ -156,6 +135,44 @@ tquic-$(CONFIG_TQUIC_CONG_COUPLED) += cong/coupled.o
 
 # debugfs interface
 tquic-$(CONFIG_TQUIC_DEBUGFS) += tquic_debug.o
+
+# Path Manager: fold into tquic.ko only when not building as separate tquic_pm.ko.
+# When CONFIG_TQUIC_PATH_MANAGER=m the same objects land in tquic_pm.ko; including
+# them here too would produce duplicate EXPORT_SYMBOL_GPL on module load.
+ifneq ($(CONFIG_TQUIC_PATH_MANAGER),m)
+tquic-y += \
+	pm/pm_types.o \
+	pm/pm_kernel.o \
+	pm/pm_netlink.o \
+	pm/path_manager.o \
+	pm/path_validation.o \
+	pm/nat_keepalive.o \
+	pm/nat_lifecycle.o \
+	pm/pm_userspace.o \
+	pm/pm_module.o
+endif
+
+# Scheduler: fold into tquic.ko only when not building as separate tquic_sched.ko.
+ifneq ($(CONFIG_TQUIC_SCHEDULER),m)
+tquic-y += \
+	sched/scheduler.o \
+	sched/deadline_scheduler.o \
+	sched/deadline_aware.o
+endif
+
+# Crypto: fold into tquic.ko only when not building as separate tquic_crypto.ko.
+ifneq ($(CONFIG_TQUIC_CRYPTO),m)
+tquic-y += \
+	crypto/cert_verify.o \
+	crypto/tls.o \
+	crypto/header_protection.o \
+	crypto/key_update.o \
+	crypto/extended_key_update.o \
+	crypto/zero_rtt.o \
+	crypto/handshake.o \
+	crypto/crypto_module.o \
+	crypto/hw_offload.o
+endif
 
 # Optional separate modules (if corresponding CONFIG is =m)
 

@@ -123,7 +123,7 @@ void tquic_anti_replay_init(void)
 	for (i = 0; i < ANTI_REPLAY_HASH_SIZE; i++)
 		INIT_HLIST_HEAD(&anti_replay_state.hash[i]);
 }
-EXPORT_SYMBOL(tquic_anti_replay_init);
+EXPORT_SYMBOL_GPL(tquic_anti_replay_init);
 
 /*
  * tquic_anti_replay_cleanup - Clean up anti-replay state
@@ -149,7 +149,7 @@ void tquic_anti_replay_cleanup(void)
 
 	spin_unlock_irqrestore(&anti_replay_state.lock, flags);
 }
-EXPORT_SYMBOL(tquic_anti_replay_cleanup);
+EXPORT_SYMBOL_GPL(tquic_anti_replay_cleanup);
 
 /*
  * Hash a ticket for anti-replay bucket selection.
@@ -278,7 +278,7 @@ out:
 
 	return replay;
 }
-EXPORT_SYMBOL(tquic_anti_replay_check);
+EXPORT_SYMBOL_GPL(tquic_anti_replay_check);
 
 /*
  * tquic_early_data_derive_keys - Derive 0-RTT keys from resumption secret
@@ -377,7 +377,7 @@ out_free_hash:
 	crypto_free_shash(hash);
 	return err;
 }
-EXPORT_SYMBOL(tquic_early_data_derive_keys);
+EXPORT_SYMBOL_GPL(tquic_early_data_derive_keys);
 
 /*
  * tquic_early_data_frame_allowed - Check if frame type is allowed in 0-RTT
@@ -401,7 +401,7 @@ bool tquic_early_data_frame_allowed(u8 frame_type)
 		return true;
 	}
 }
-EXPORT_SYMBOL(tquic_early_data_frame_allowed);
+EXPORT_SYMBOL_GPL(tquic_early_data_frame_allowed);
 
 /*
  * tquic_early_data_build_packet - Build a 0-RTT packet
@@ -555,7 +555,7 @@ struct sk_buff *tquic_early_data_build_packet(struct tquic_connection *conn,
 
 	return skb;
 }
-EXPORT_SYMBOL(tquic_early_data_build_packet);
+EXPORT_SYMBOL_GPL(tquic_early_data_build_packet);
 
 /*
  * tquic_early_data_process_packet - Process received 0-RTT packet
@@ -595,7 +595,7 @@ int tquic_early_data_process_packet(struct tquic_connection *conn,
 
 	return 0;
 }
-EXPORT_SYMBOL(tquic_early_data_process_packet);
+EXPORT_SYMBOL_GPL(tquic_early_data_process_packet);
 
 /*
  * tquic_early_data_reject - Handle 0-RTT rejection
@@ -649,7 +649,7 @@ void tquic_early_data_reject(struct tquic_connection *conn)
 	 */
 	conn->early_data_sent = 0;
 }
-EXPORT_SYMBOL(tquic_early_data_reject);
+EXPORT_SYMBOL_GPL(tquic_early_data_reject);
 
 /*
  * tquic_early_data_accept - Handle 0-RTT acceptance
@@ -665,7 +665,7 @@ void tquic_early_data_accept(struct tquic_connection *conn)
 
 	tquic_conn_info(conn, "0-RTT accepted by server\n");
 }
-EXPORT_SYMBOL(tquic_early_data_accept);
+EXPORT_SYMBOL_GPL(tquic_early_data_accept);
 
 /*
  * tquic_early_data_init - Initialize 0-RTT state for connection
@@ -704,7 +704,7 @@ int tquic_early_data_init(struct tquic_connection *conn,
 
 	return 0;
 }
-EXPORT_SYMBOL(tquic_early_data_init);
+EXPORT_SYMBOL_GPL(tquic_early_data_init);
 
 /*
  * tquic_early_data_cleanup - Clean up 0-RTT state
@@ -720,7 +720,7 @@ void tquic_early_data_cleanup(struct tquic_connection *conn)
 	 * (tquic_zero_rtt_cleanup).
 	 */
 }
-EXPORT_SYMBOL(tquic_early_data_cleanup);
+EXPORT_SYMBOL_GPL(tquic_early_data_cleanup);
 
 /*
  * tquic_session_ticket_store - Store a session ticket for future 0-RTT
@@ -753,7 +753,7 @@ int tquic_session_ticket_store(struct tquic_sock *tsk,
 
 	return 0;
 }
-EXPORT_SYMBOL(tquic_session_ticket_store);
+EXPORT_SYMBOL_GPL(tquic_session_ticket_store);
 
 /*
  * tquic_session_ticket_retrieve - Retrieve stored session ticket
@@ -775,7 +775,7 @@ tquic_session_ticket_retrieve(struct tquic_sock *tsk)
 
 	return NULL;
 }
-EXPORT_SYMBOL(tquic_session_ticket_retrieve);
+EXPORT_SYMBOL_GPL(tquic_session_ticket_retrieve);
 
 /*
  * tquic_session_ticket_valid - Check if session ticket is still valid
@@ -803,7 +803,7 @@ bool tquic_session_ticket_valid(const struct tquic_session_ticket *ticket)
 
 	return true;
 }
-EXPORT_SYMBOL(tquic_session_ticket_valid);
+EXPORT_SYMBOL_GPL(tquic_session_ticket_valid);
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Linux TQUIC Authors");

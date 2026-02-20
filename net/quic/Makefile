@@ -90,7 +90,6 @@ quic-y := \
 	tquic/core/quic_loss.o \
 	tquic/core/quic_path.o \
 	tquic/core/quic_ack.o \
-	tquic/core/ack.o \
 	tquic/core/quic_ack_frequency.o \
 	tquic/core/quic_key_update.o \
 	tquic/core/mp_frame.o \

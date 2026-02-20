@@ -446,4 +446,4 @@ static void tquic_packet_process_retry(struct tquic_connection *conn,
 void quic_packet_process(struct tquic_connection *conn, struct sk_buff *skb)
 	__attribute__((alias("tquic_packet_process_coalesced")));
 
-EXPORT_SYMBOL(tquic_packet_process_coalesced);
+EXPORT_SYMBOL_GPL(tquic_packet_process_coalesced);

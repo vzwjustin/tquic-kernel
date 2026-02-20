@@ -52,15 +52,6 @@ struct tquic_offload_ops {
 	int (*gro_complete)(struct sk_buff *skb, int nhoff);
 };
 
-/*
- * Backlog receive handler for deferred packet processing
- */
-static inline int tquic_backlog_rcv(struct sock *sk, struct sk_buff *skb)
-{
-	/* Process packet from backlog - pass to socket receive queue */
-	return sock_queue_rcv_skb(sk, skb);
-}
-
 /* QUIC header constants */
 #define QUIC_HEADER_FORM_LONG	0x80
 #define QUIC_HEADER_FORM_SHORT	0x00
@@ -129,7 +120,7 @@ struct tquic_crypto_offload {
 
 /* Static key for QUIC encapsulation detection */
 DEFINE_STATIC_KEY_FALSE(tquic_encap_needed_key);
-EXPORT_SYMBOL(tquic_encap_needed_key);
+EXPORT_SYMBOL_GPL(tquic_encap_needed_key);
 
 /* Forward declarations - local static versions for offload layer */
 static struct sk_buff *tquic_gso_segment(struct sk_buff *skb,
@@ -751,7 +742,7 @@ static const struct tquic_offload_ops tquic_offload_ops = {
 };
 
 const struct tquic_offload_ops *tquic_offload = &tquic_offload_ops;
-EXPORT_SYMBOL(tquic_offload);
+EXPORT_SYMBOL_GPL(tquic_offload);
 
 /* IPv4 QUIC GRO receive wrapper */
 static struct sk_buff *quic4_gro_receive(struct list_head *head,

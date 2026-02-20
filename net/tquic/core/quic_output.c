@@ -364,14 +364,14 @@ struct sk_buff *tquic_alloc_tx_skb(struct tquic_connection *conn, u32 size)
 
 	return skb;
 }
-EXPORT_SYMBOL(tquic_alloc_tx_skb);
+EXPORT_SYMBOL_GPL(tquic_alloc_tx_skb);
 
 /* Free TX skb */
 void tquic_free_tx_skb(struct sk_buff *skb)
 {
 	kfree_skb(skb);
 }
-EXPORT_SYMBOL(tquic_free_tx_skb);
+EXPORT_SYMBOL_GPL(tquic_free_tx_skb);
 
 #ifndef TQUIC_OUT_OF_TREE
 /* Get ECN marking for path - use path's cc state */
@@ -764,7 +764,7 @@ int tquic_output(struct tquic_connection *conn, struct sk_buff *skb)
 	tquic_path_put(path);
 	return err;
 }
-EXPORT_SYMBOL(tquic_output);
+EXPORT_SYMBOL_GPL(tquic_output);
 
 /* Send multiple packets with coalescing support */
 int tquic_output_batch(struct tquic_connection *conn,
@@ -786,7 +786,7 @@ int tquic_output_batch(struct tquic_connection *conn,
 
 	return sent ? sent : err;
 }
-EXPORT_SYMBOL(tquic_output_batch);
+EXPORT_SYMBOL_GPL(tquic_output_batch);
 
 /*
  * Pacing Support
@@ -868,7 +868,7 @@ int tquic_output_paced(struct tquic_connection *conn, struct sk_buff *skb)
 	/* Send now */
 	return tquic_output(conn, skb);
 }
-EXPORT_SYMBOL(tquic_output_paced);
+EXPORT_SYMBOL_GPL(tquic_output_paced);
 
 /*
  * GSO Support for Output
@@ -966,7 +966,7 @@ int tquic_output_gso(struct tquic_connection *conn, struct sk_buff_head *queue)
 
 	return err;
 }
-EXPORT_SYMBOL(tquic_output_gso);
+EXPORT_SYMBOL_GPL(tquic_output_gso);
 
 /*
  * Coalesced Packet Support
@@ -1024,7 +1024,7 @@ struct sk_buff *tquic_coalesce_skbs(struct sk_buff_head *packets)
 
 	return coalesced;
 }
-EXPORT_SYMBOL(tquic_coalesce_skbs);
+EXPORT_SYMBOL_GPL(tquic_coalesce_skbs);
 
 /* Send coalesced packet */
 int tquic_output_coalesced(struct tquic_connection *conn,
@@ -1044,7 +1044,7 @@ int tquic_output_coalesced(struct tquic_connection *conn,
 
 	return err;
 }
-EXPORT_SYMBOL(tquic_output_coalesced);
+EXPORT_SYMBOL_GPL(tquic_output_coalesced);
 
 /*
  * Retransmission Support
@@ -1076,7 +1076,7 @@ int tquic_retransmit(struct tquic_connection *conn,
 
 	return err;
 }
-EXPORT_SYMBOL(tquic_retransmit);
+EXPORT_SYMBOL_GPL(tquic_retransmit);
 
 /*
  * sendmsg Interface
@@ -1250,7 +1250,7 @@ out_put_conn:
 	tquic_conn_put(conn);
 	return err;
 }
-EXPORT_SYMBOL(tquic_do_sendmsg);
+EXPORT_SYMBOL_GPL(tquic_do_sendmsg);
 
 /*
  * TQUIC SKB Control Block
@@ -1733,7 +1733,7 @@ skip_ack:
 
 	return skb;
 }
-EXPORT_SYMBOL(tquic_packet_build);
+EXPORT_SYMBOL_GPL(tquic_packet_build);
 
 /*
  * Module Initialization
@@ -1784,7 +1784,7 @@ void tquic_stream_handle_reset(struct tquic_stream *stream, u64 error_code,
 
 	wake_up(&stream->wait);
 }
-EXPORT_SYMBOL(tquic_stream_handle_reset);
+EXPORT_SYMBOL_GPL(tquic_stream_handle_reset);
 
 /* Helper to handle stop sending */
 void tquic_stream_handle_stop_sending(struct tquic_stream *stream,
@@ -1792,7 +1792,7 @@ void tquic_stream_handle_stop_sending(struct tquic_stream *stream,
 {
 	wake_up(&stream->wait);
 }
-EXPORT_SYMBOL(tquic_stream_handle_stop_sending);
+EXPORT_SYMBOL_GPL(tquic_stream_handle_stop_sending);
 
 /*
  * tquic_stream_recv_data is defined in core/stream.c with full implementation.
@@ -1853,7 +1853,7 @@ int tquic_frame_process_new_cid(struct tquic_connection *conn, const u8 *data,
 
 	return offset;
 }
-EXPORT_SYMBOL(tquic_frame_process_new_cid);
+EXPORT_SYMBOL_GPL(tquic_frame_process_new_cid);
 
 /*
  * Variable-length integer functions (tquic_varint_decode, tquic_varint_encode,

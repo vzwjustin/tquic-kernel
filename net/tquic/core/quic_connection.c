@@ -1721,7 +1721,7 @@ int tquic_transport_param_parse(struct tquic_connection *conn, const u8 *data,
 
 	return 0;
 }
-EXPORT_SYMBOL(tquic_transport_param_parse);
+EXPORT_SYMBOL_GPL(tquic_transport_param_parse);
 
 /**
  * tquic_transport_param_apply - Apply parsed transport params to connection
@@ -1805,7 +1805,7 @@ int tquic_transport_param_apply(struct tquic_connection *conn)
 
 	return 0;
 }
-EXPORT_SYMBOL(tquic_transport_param_apply);
+EXPORT_SYMBOL_GPL(tquic_transport_param_apply);
 
 /**
  * tquic_transport_param_encode - Encode local transport parameters
@@ -1935,7 +1935,7 @@ int tquic_transport_param_encode(struct tquic_connection *conn, u8 *buf,
 	*out_len = offset;
 	return 0;
 }
-EXPORT_SYMBOL(tquic_transport_param_encode);
+EXPORT_SYMBOL_GPL(tquic_transport_param_encode);
 
 /**
  * tquic_transport_param_validate - Validate transport parameters
@@ -1961,4 +1961,4 @@ int tquic_transport_param_validate(struct tquic_connection *conn)
 
 	return 0;
 }
-EXPORT_SYMBOL(tquic_transport_param_validate);
+EXPORT_SYMBOL_GPL(tquic_transport_param_validate);

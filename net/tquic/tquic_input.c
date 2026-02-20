@@ -932,42 +932,6 @@ void tquic_gro_cleanup(struct tquic_gro_state *gro)
 EXPORT_SYMBOL_GPL(tquic_gro_cleanup);
 
 /*
- * Check if packets can be coalesced
- *
- * @dcid_len: Actual DCID length from the connection state.  Must not
- *            exceed TQUIC_MAX_CID_LEN (20).
- */
-static bool tquic_gro_can_coalesce(struct sk_buff *skb1, struct sk_buff *skb2,
-				   u8 dcid_len)
-{
-	/* For QUIC, we can coalesce packets from same connection */
-	/* Check DCID matches */
-	u8 *h1 = skb1->data;
-	u8 *h2 = skb2->data;
-
-	/* Both must be short headers or both long headers */
-	if ((h1[0] & TQUIC_HEADER_FORM_LONG) !=
-	    (h2[0] & TQUIC_HEADER_FORM_LONG))
-		return false;
-
-	/* For short headers, compare DCID using actual CID length */
-	if (!(h1[0] & TQUIC_HEADER_FORM_LONG)) {
-		/*
-		 * CF-191: Use the actual DCID length from connection
-		 * state instead of a hardcoded 8-byte comparison.
-		 * Validate both skbs are long enough for the comparison.
-		 */
-		if (dcid_len > TQUIC_MAX_CID_LEN)
-			return false;
-		if (skb1->len < 1 + dcid_len || skb2->len < 1 + dcid_len)
-			return false;
-		return memcmp(h1 + 1, h2 + 1, dcid_len) == 0;
-	}
-
-	return false;
-}
-
-/*
  * Flush GRO held packets
  */
 int tquic_gro_flush(struct tquic_gro_state *gro,
