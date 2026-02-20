@@ -56,10 +56,8 @@ quic-y := \
 	tquic/grease.o \
 	tquic/tquic_ack_frequency.o \
 	tquic/security_hardening.o \
-	tquic/cong/tquic_cong.o \
 	tquic/cong/cong_data.o \
 	tquic/cong/persistent_cong.o \
-	tquic/cong/coupled.o \
 	tquic/cong/bbrv2.o \
 	tquic/cong/bbrv3.o \
 	tquic/cong/prague.o \
@@ -68,7 +66,6 @@ quic-y := \
 	tquic/cong/copa.o \
 	tquic/cong/westwood.o \
 	tquic/cong/l4s.o \
-	tquic/cong/accecn.o \
 	tquic/core/varint.o \
 	tquic/core/connection.o \
 	tquic/core/stream.o \
@@ -86,7 +83,6 @@ quic-y := \
 	tquic/core/quic_protocol.o \
 	tquic/core/quic_connection.o \
 	tquic/core/quic_crypto.o \
-	tquic/core/quic_packet.o \
 	tquic/core/quic_output.o \
 	tquic/core/quic_cong.o \
 	tquic/core/quic_ecn.o \
@@ -94,6 +90,7 @@ quic-y := \
 	tquic/core/quic_loss.o \
 	tquic/core/quic_path.o \
 	tquic/core/quic_ack.o \
+	tquic/core/ack.o \
 	tquic/core/quic_ack_frequency.o \
 	tquic/core/quic_key_update.o \
 	tquic/core/mp_frame.o \
@@ -104,6 +101,7 @@ quic-y := \
 	tquic/bond/tquic_bonding.o \
 	tquic/bond/tquic_failover.o \
 	tquic/bond/tquic_reorder.o \
+	tquic/bond/tquic_bpm.o \
 	tquic/bond/cong_coupled.o \
 	tquic/pm/pm_types.o \
 	tquic/pm/pm_kernel.o \
@@ -137,13 +135,24 @@ quic-y := \
 	tquic/crypto/zero_rtt.o \
 	tquic/crypto/handshake.o \
 	tquic/crypto/crypto_module.o \
-	tquic/crypto/hw_offload.o \
-	tquic/tquic_debug.o
+	tquic/crypto/hw_offload.o
+
+# AccECN feedback (experimental) - only built when explicitly enabled
+quic-$(CONFIG_TQUIC_ACCECN_EXPERIMENTAL) += tquic/cong/accecn.o
 
 # Diagnostics
 quic-$(CONFIG_TQUIC_DIAG) += tquic/diag/tracepoints.o
 quic-$(CONFIG_TQUIC_DIAG) += tquic/diag/path_metrics.o
 quic-$(CONFIG_TQUIC_QLOG) += tquic/diag/qlog.o tquic/diag/qlog_v2.o
+
+# Congestion control framework
+quic-$(CONFIG_TQUIC_CONG) += tquic/cong/tquic_cong.o
+
+# Coupled multipath CC (OLIA/LIA/BALIA)
+quic-$(CONFIG_TQUIC_CONG_COUPLED) += tquic/cong/coupled.o
+
+# debugfs interface
+quic-$(CONFIG_TQUIC_DEBUGFS) += tquic/tquic_debug.o
 
 # Tracing support
 quic-$(CONFIG_TRACEPOINTS) += tquic/diag/trace.o
@@ -168,3 +177,49 @@ quic-$(CONFIG_TQUIC_KUNIT_TEST) += \
 	tquic/test/security_test.o \
 	tquic/test/security_hardening_test.o \
 	tquic/test/reorder_test.o
+
+# Netfilter connection tracking integration
+obj-$(CONFIG_TQUIC_NETFILTER) += tquic_nf.o
+tquic_nf-y := tquic/tquic_nf.o
+
+# BDP Frame Extension (draft-kuhn-quic-bdpframe-extension-05)
+obj-$(CONFIG_TQUIC_BDP_FRAME) += tquic_bdp_frame.o
+tquic_bdp_frame-y := tquic/cong/bdp_frame.o tquic/cong/careful_resume.o
+
+# HTTP/3 support (RFC 9114) - builds tquic_http3.ko
+obj-$(CONFIG_TQUIC_HTTP3) += tquic/http3/
+
+# MASQUE support (RFC 9484 CONNECT-IP) - builds tquic_masque.ko
+obj-$(CONFIG_TQUIC_MASQUE) += tquic/masque/
+
+# Forward Error Correction (draft-zheng-quic-fec-extension-01)
+obj-$(CONFIG_TQUIC_FEC) += tquic_fec.o
+tquic_fec-y := \
+	tquic/fec/fec_core.o \
+	tquic/fec/fec_encoder.o \
+	tquic/fec/fec_decoder.o \
+	tquic/fec/xor_fec.o \
+	tquic/fec/reed_solomon.o \
+	tquic/fec/fec_scheduler.o
+
+# QUIC over TCP transport - builds tquic_tcp.ko
+obj-$(CONFIG_TQUIC_OVER_TCP) += tquic/transport/
+
+# SmartNIC offload support - builds tquic_offload.ko
+obj-$(CONFIG_TQUIC_OFFLOAD) += tquic/offload/
+
+# Security components - QUIC-Exfil mitigation (draft-iab-quic-exfil)
+obj-$(CONFIG_TQUIC_SECURITY) += tquic_security.o
+tquic_security-y := tquic/security/quic_exfil.o
+
+# QUIC-LB load balancer support (draft-ietf-quic-load-balancers)
+obj-$(CONFIG_TQUIC_QUIC_LB) += tquic_quic_lb.o
+tquic_quic_lb-y := tquic/lb/quic_lb.o
+
+# BPF struct_ops for pluggable schedulers
+obj-$(CONFIG_TQUIC_BPF) += tquic_bpf.o
+tquic_bpf-y := tquic/bpf.o
+
+# AF_XDP high-performance packet I/O
+obj-$(CONFIG_TQUIC_AF_XDP) += tquic_af_xdp.o
+tquic_af_xdp-y := tquic/af_xdp.o

@@ -649,28 +649,27 @@ EXPORT_SYMBOL_GPL(quic_tcp_activity);
 int quic_tcp_send_ping(struct quic_tcp_connection *conn)
 {
 	/*
-	 * QUIC PING frame is type 0x01, no payload.
-	 * For a minimal PING, we need a short header + PING frame.
-	 * This is a simplified implementation.
+	 * QUIC PING frame (RFC 9000 Section 19.2): type byte 0x01, no payload.
+	 * Frame is prefixed with a 2-byte big-endian length for QUIC-over-TCP
+	 * framing (QUIC_TCP_LENGTH_FIELD_SIZE).
 	 */
-	static const u8 ping_frame[] = { 0x01 };  /* PING frame type */
+	u8 buf[QUIC_TCP_LENGTH_FIELD_SIZE + 1];
+	__be16 pkt_len;
+	int ret;
 
 	if (!conn || conn->state != QUIC_TCP_STATE_CONNECTED)
 		return -ENOTCONN;
 
-	/* Mark that we're expecting a response */
+	pkt_len = cpu_to_be16(1);
+	memcpy(buf, &pkt_len, QUIC_TCP_LENGTH_FIELD_SIZE);
+	buf[QUIC_TCP_LENGTH_FIELD_SIZE] = 0x01; /* PING frame type */
+
+	ret = quic_tcp_send(conn, buf, sizeof(buf));
+	if (ret < 0)
+		return ret;
+
 	conn->keepalive.pending_pong = true;
 	conn->keepalive.last_keepalive = ktime_get();
-
-	/*
-	 * In a full implementation, this would construct a proper
-	 * QUIC short header packet with the PING frame.
-	 * For now, we rely on the QUIC connection layer to handle this.
-	 */
-	if (conn->quic_conn) {
-		/* Would trigger QUIC connection to send PING */
-		pr_debug("quic_tcp: sending QUIC PING\n");
-	}
 
 	return 0;
 }

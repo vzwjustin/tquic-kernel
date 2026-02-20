@@ -119,7 +119,12 @@ void tquic_trace_frame_debug(struct tquic_connection *conn,
 			     u32 path_id, bool is_send);
 
 /* Debugfs init/exit */
+#ifdef CONFIG_TQUIC_DEBUGFS
 int tquic_debug_init(void);
 void tquic_debug_exit(void);
+#else
+static inline int tquic_debug_init(void) { return 0; }
+static inline void tquic_debug_exit(void) {}
+#endif
 
 #endif /* _NET_TQUIC_DEBUG_H */

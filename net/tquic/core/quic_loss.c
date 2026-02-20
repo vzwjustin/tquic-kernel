@@ -917,7 +917,7 @@ void tquic_loss_detection_on_ack_received(struct tquic_connection *conn,
 		struct tquic_sent_packet *_n;
 
 		list_for_each_entry_safe(pkt, _n, &newly_acked_list, list) {
-			list_del(&pkt->list);
+			list_del_init(&pkt->list);
 			tquic_sent_packet_free(pkt);
 		}
 	}

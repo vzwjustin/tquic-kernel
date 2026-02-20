@@ -324,6 +324,78 @@ static void rs8_encode_symbol(const u8 **source, const u16 *lengths,
 }
 
 /**
+ * build_cauchy_matrix_gf16 - Build systematic Cauchy encoding matrix in GF(2^16)
+ * @matrix: Output matrix (k x n), u16 elements
+ * @k: Number of source symbols
+ * @n: Total symbols (source + repair)
+ */
+static void build_cauchy_matrix_gf16(u16 *matrix, int k, int n)
+{
+	int i, j;
+
+	for (i = 0; i < k; i++) {
+		for (j = 0; j < n; j++) {
+			if (j < k) {
+				/* Identity for source symbols (systematic) */
+				matrix[i * n + j] = (i == j) ? 1 : 0;
+			} else {
+				/* Cauchy element for repair symbols */
+				u16 x = (u16)i;
+				u16 y = (u16)(k + (j - k));
+				matrix[i * n + j] = gf16_inv(x ^ y);
+			}
+		}
+	}
+}
+
+/**
+ * rs16_encode_symbol - Encode one repair symbol in GF(2^16)
+ * @source: Array of source symbol data
+ * @lengths: Array of source symbol lengths
+ * @k: Number of source symbols
+ * @repair_idx: Index of repair symbol (0, 1, ...)
+ * @matrix: Encoding matrix (u16 elements)
+ * @n: Total symbols
+ * @repair: Output repair symbol
+ * @max_len: Maximum symbol length
+ *
+ * Processes source data as 16-bit GF elements (pairs of bytes).
+ */
+static void rs16_encode_symbol(const u8 **source, const u16 *lengths,
+			       int k, int repair_idx, const u16 *matrix, int n,
+			       u8 *repair, u16 max_len)
+{
+	int i, j;
+	int col = k + repair_idx;
+
+	memset(repair, 0, max_len);
+
+	for (i = 0; i < k; i++) {
+		u16 coef = matrix[i * n + col];
+
+		if (coef == 0)
+			continue;
+
+		/* Process pairs of bytes as one GF(2^16) symbol */
+		for (j = 0; j + 1 < (int)lengths[i]; j += 2) {
+			u16 src_word = ((u16)source[i][j] << 8) |
+				       source[i][j + 1];
+			u16 prod = gf16_mul(src_word, coef);
+
+			repair[j]     ^= (u8)(prod >> 8);
+			repair[j + 1] ^= (u8)(prod & 0xff);
+		}
+		/* Handle odd trailing byte */
+		if (j < (int)lengths[i]) {
+			u16 src_word = (u16)source[i][j] << 8;
+			u16 prod = gf16_mul(src_word, coef);
+
+			repair[j] ^= (u8)(prod >> 8);
+		}
+	}
+}
+
+/**
  * tquic_rs_encode - Generate Reed-Solomon repair symbols
  * @symbols: Array of source symbol pointers
  * @lengths: Array of symbol lengths
@@ -381,23 +453,32 @@ int tquic_rs_encode(const u8 **symbols, const u16 *lengths,
 			repair_lens[i] = max_len;
 		}
 	} else {
-		/* GF(2^16) encoding */
-		int ret = gf16_init();
+		/* GF(2^16) encoding: matrix elements are u16 */
+		u16 *matrix16;
+		int ret;
+
+		/* Free the u8 matrix; GF(2^16) requires a u16 element matrix */
+		kfree(matrix);
+
+		matrix16 = kmalloc_array(num_source * n, sizeof(u16), GFP_ATOMIC);
+		if (!matrix16)
+			return -ENOMEM;
+
+		ret = gf16_init();
 		if (ret < 0) {
-			kfree(matrix);
+			kfree(matrix16);
 			return ret;
 		}
 
-		/* For GF(2^16), process two bytes at a time */
-		build_cauchy_matrix_gf8(matrix, num_source, n);
+		build_cauchy_matrix_gf16(matrix16, num_source, n);
 
 		for (i = 0; i < num_repair; i++) {
-			/* Simplified: use GF(2^8) for now, GF(2^16) would need
-			 * 2-byte processing throughout */
-			rs8_encode_symbol(symbols, lengths, num_source,
-					  i, matrix, n, repair[i], max_len);
+			rs16_encode_symbol(symbols, lengths, num_source,
+					   i, matrix16, n, repair[i], max_len);
 			repair_lens[i] = max_len;
 		}
+		kfree(matrix16);
+		return 0;
 	}
 
 	kfree(matrix);

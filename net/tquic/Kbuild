@@ -73,11 +73,8 @@ tquic-y := \
 	grease.o \
 	tquic_ack_frequency.o \
 	security_hardening.o \
-	napi.o \
-	cong/tquic_cong.o \
 	cong/cong_data.o \
 	cong/persistent_cong.o \
-	cong/coupled.o \
 	cong/bbrv2.o \
 	cong/bbrv3.o \
 	cong/prague.o \
@@ -157,8 +154,12 @@ tquic-y := \
 	crypto/crypto_module.o \
 	crypto/hw_offload.o \
 	diag/path_metrics.o \
-	diag/tracepoints.o \
-	tquic_debug.o
+	diag/tracepoints.o
+
+  # QLog tracing support (draft-ietf-quic-qlog)
+  ifdef CONFIG_TQUIC_QLOG
+    tquic-y += diag/qlog.o diag/qlog_v2.o
+  endif
 
   # AccECN feedback (experimental) - only built when explicitly enabled.
   # Out-of-tree builds must pass CONFIG_TQUIC_ACCECN_EXPERIMENTAL=m on the
@@ -172,6 +173,37 @@ tquic-y := \
   # only available when building against a kernel with CONFIG_TQUIC_IO_URING.
   ifdef CONFIG_TQUIC_IO_URING
     tquic-y += io_uring.o
+  endif
+
+  # NAPI polling support
+  ifdef CONFIG_TQUIC_NAPI
+    tquic-y += napi.o
+  endif
+
+  # BDP Frame Extension (draft-kuhn-quic-bdpframe-extension-05)
+  ifdef CONFIG_TQUIC_BDP_FRAME
+    obj-m += tquic_bdp_frame.o
+    tquic_bdp_frame-y := cong/bdp_frame.o cong/careful_resume.o
+  endif
+
+  # Netfilter connection tracking integration
+  ifdef CONFIG_TQUIC_NETFILTER
+    obj-m += tquic_nf.o
+  endif
+
+  # Congestion control framework (gated to wire Kconfig to the build)
+  ifdef CONFIG_TQUIC_CONG
+    tquic-y += cong/tquic_cong.o
+  endif
+
+  # Coupled multipath CC algorithms (OLIA/LIA/BALIA)
+  ifdef CONFIG_TQUIC_CONG_COUPLED
+    tquic-y += cong/coupled.o
+  endif
+
+  # debugfs interface (only when kernel debugfs is available)
+  ifdef CONFIG_TQUIC_DEBUGFS
+    tquic-y += tquic_debug.o
   endif
 
 else

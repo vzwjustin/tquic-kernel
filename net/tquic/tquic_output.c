@@ -740,13 +740,6 @@ static int tquic_gen_datagram_frame(struct tquic_frame_ctx *ctx, const u8 *data,
 	return ctx->buf + ctx->offset - start;
 }
 
-/* Wrapper for backward compatibility - defaults to with_length variant */
-static inline int tquic_gen_datagram_frame_len(struct tquic_frame_ctx *ctx,
-					       const u8 *data, size_t data_len)
-{
-	return tquic_gen_datagram_frame(ctx, data, data_len, true);
-}
-
 /*
  * =============================================================================
  * Frame Coalescing
@@ -1913,54 +1906,26 @@ static struct sk_buff *tquic_gso_finalize(struct tquic_gso_ctx *gso)
 	return skb;
 }
 
-/*
- * Send multiple QUIC packets coalesced via GSO.
- * Falls back to individual sends if GSO is not supported.
- *
- * @conn: Connection
- * @path: Path for transmission
- * @pkts: Array of assembled QUIC packet buffers
- * @pkt_lens: Length of each packet
- * @num_pkts: Number of packets to send
- *
- * Returns 0 on success, negative errno on failure.
- */
-static int tquic_output_gso_send(struct tquic_connection *conn,
-				 struct tquic_path *path, const u8 **pkts,
-				 size_t *pkt_lens, int num_pkts)
-{
-	struct tquic_gso_ctx gso;
-	struct sk_buff *gso_skb;
-	int i, ret;
+if (ret < 0) {
+	tquic_dbg("gso_send: init failed %d\n", ret);
+	return ret;
+}
 
-	if (num_pkts <= 1 || !tquic_gso_supported(path)) {
-		tquic_dbg("gso_send: not using GSO (pkts=%d supported=%d)\n",
-			  num_pkts, tquic_gso_supported(path));
-	}
-
-	ret = tquic_gso_init(&gso, path, num_pkts);
+for (i = 0; i < num_pkts; i++) {
+	ret = tquic_gso_add_segment(&gso, pkts[i], pkt_lens[i]);
 	if (ret < 0) {
-		tquic_dbg("gso_send: init failed %d\n", ret);
+		tquic_dbg("gso_send: add_segment %d failed %d\n", i, ret);
+		kfree_skb(gso.gso_skb);
 		return ret;
 	}
+}
 
-	for (i = 0; i < num_pkts; i++) {
-		ret = tquic_gso_add_segment(&gso, pkts[i], pkt_lens[i]);
-		if (ret < 0) {
-			tquic_dbg("gso_send: add_segment %d failed %d\n", i,
-				  ret);
-			kfree_skb(gso.gso_skb);
-			return ret;
-		}
-	}
+gso_skb = tquic_gso_finalize(&gso);
+if (!gso_skb)
+	return -ENOMEM;
 
-	gso_skb = tquic_gso_finalize(&gso);
-	if (!gso_skb)
-		return -ENOMEM;
-
-	tquic_dbg("gso_send: sending %d segs total_len=%u\n", num_pkts,
-		  gso_skb->len);
-	return tquic_output_packet(conn, path, gso_skb);
+tquic_dbg("gso_send: sending %d segs total_len=%u\n", num_pkts, gso_skb->len);
+return tquic_output_packet(conn, path, gso_skb);
 }
 
 /*
@@ -3191,10 +3156,13 @@ int tquic_output_flush(struct tquic_connection *conn)
 					 *
 					 * Pairs with WRITE_ONCE in sock_set_pacing_status().
 					 */
+					struct sock *pacing_sk = conn->sk;
+
 					if (conn->tsk &&
 					    conn->tsk->pacing_enabled &&
-					    if (conn->sk) smp_load_acquire(
-						    &conn->sk->sk_pacing_status) ==
+					    pacing_sk &&
+					    smp_load_acquire(
+						    &pacing_sk->sk_pacing_status) ==
 						    SK_PACING_NEEDED) {
 						tquic_path_put(path);
 						path = NULL;
@@ -3277,17 +3245,16 @@ int tquic_output_flush(struct tquic_connection *conn)
 					conn_credit -= chunk_size;
 
 					if (chunk_size == remaining) {
+						struct sock *sk = conn->sk;
+
 						/* Consumed entire skb - uncharge memory */
-						if (conn->sk) {
-							sk_mem_uncharge(
-								conn->sk,
+						if (sk) {
+							sk_mem_uncharge(sk,
 								skb->truesize);
 							/* sk_wmem_alloc handled by skb destructor */
-							if (sk_stream_wspace(
-								    conn->sk) >
-							    0)
-								conn->sk->sk_write_space(
-									conn->sk);
+							if (sk_stream_wspace(sk) > 0 &&
+							    sk->sk_write_space)
+								sk->sk_write_space(sk);
 						}
 						kfree_skb(skb);
 					} else {

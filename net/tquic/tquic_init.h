@@ -105,6 +105,10 @@ void tquic_loss_cache_destroy(void);
 int tquic_output_tx_init(void);
 void tquic_output_tx_exit(void);
 
+/* Per-CPU output subsystem (core/quic_output.c) */
+int tquic_output_init(void);
+void tquic_output_exit(void);
+
 /* CID hash used by core/quic_connection.c */
 int tquic_cid_hash_init(void);
 void tquic_cid_hash_cleanup(void);

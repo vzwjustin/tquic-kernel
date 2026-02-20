@@ -115,16 +115,11 @@ tquic_bonding_count_paths(struct tquic_bonding_ctx *bc, int *active,
 	count = tquic_pm_get_active_paths(bc->pm, paths, TQUIC_MAX_PATHS);
 
 	for (i = 0; i < count; i++) {
-		/* We use a simplified state check here */
-		a++; /* Count all returned paths as active for now */
+		if (paths[i]->state == TQUIC_PATH_ACTIVE)
+			a++;
 	}
 	rcu_read_unlock();
 
-	/*
-	 * For proper counting, we'd iterate all paths (not just active).
-	 * This will be refined when path manager exposes full path list.
-	 * For now, we rely on callbacks to maintain accurate counts.
-	 */
 	*active = a;
 	*pending = bc->pending_path_count;
 	*failed = bc->failed_path_count;

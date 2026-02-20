@@ -1086,49 +1086,45 @@ int tquic_conn_accept(struct tquic_connection *conn)
 	return 0;
 }
 
-static int tquic_conn_close(struct tquic_connection *conn, u64 error_code,
-			    const char *reason, u32 reason_len, bool app_error)
-{
-	bool already_closing;
+bool already_closing;
 
-	spin_lock_bh(&conn->lock);
-	if (conn->state == TQUIC_CONN_CLOSED ||
-	    conn->state == TQUIC_CONN_DRAINING) {
-		spin_unlock_bh(&conn->lock);
-		return -EINVAL;
-	}
-	already_closing = (conn->state == TQUIC_CONN_CLOSING);
-
-	conn->error_code = error_code;
-	conn->app_error = app_error ? 1 : 0;
-
-	if (reason && reason_len > 0) {
-		char *phrase = kmemdup(reason, reason_len, GFP_ATOMIC);
-
-		if (phrase) {
-			kfree(conn->reason_phrase);
-			conn->reason_phrase = phrase;
-			conn->reason_len = reason_len;
-		}
-		/* On allocation failure, proceed without reason phrase */
-	}
-
+spin_lock_bh(&conn->lock);
+if (conn->state == TQUIC_CONN_CLOSED || conn->state == TQUIC_CONN_DRAINING) {
 	spin_unlock_bh(&conn->lock);
+	return -EINVAL;
+}
+already_closing = (conn->state == TQUIC_CONN_CLOSING);
 
-	if (!already_closing)
-		tquic_conn_set_state(conn, TQUIC_CONN_CLOSING,
-				     app_error ? TQUIC_REASON_APPLICATION :
-						 TQUIC_REASON_NORMAL);
+conn->error_code = error_code;
+conn->app_error = app_error ? 1 : 0;
 
-	/* Send CONNECTION_CLOSE frame */
-	schedule_work(&conn->tx_work);
+if (reason && reason_len > 0) {
+	char *phrase = kmemdup(reason, reason_len, GFP_ATOMIC);
 
-	/* Start draining timer (3 * PTO) */
-	tquic_timer_set(conn, TQUIC_TIMER_IDLE,
-			ktime_add_ms(ktime_get(),
-				     tquic_conn_draining_timeout_ms(conn)));
+	if (phrase) {
+		kfree(conn->reason_phrase);
+		conn->reason_phrase = phrase;
+		conn->reason_len = reason_len;
+	}
+	/* On allocation failure, proceed without reason phrase */
+}
 
-	return 0;
+spin_unlock_bh(&conn->lock);
+
+if (!already_closing)
+	tquic_conn_set_state(conn, TQUIC_CONN_CLOSING,
+			     app_error ? TQUIC_REASON_APPLICATION :
+					 TQUIC_REASON_NORMAL);
+
+/* Send CONNECTION_CLOSE frame */
+schedule_work(&conn->tx_work);
+
+/* Start draining timer (3 * PTO) */
+tquic_timer_set(conn, TQUIC_TIMER_IDLE,
+		ktime_add_ms(ktime_get(),
+			     tquic_conn_draining_timeout_ms(conn)));
+
+return 0;
 }
 
 static void tquic_conn_set_state_local(struct tquic_connection *conn,

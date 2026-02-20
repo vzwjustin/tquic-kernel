@@ -188,7 +188,6 @@ void tquic_conn_destroy(struct tquic_connection *conn)
 	if (conn->timer_state)
 		tquic_timer_state_free(conn->timer_state);
 	cancel_work_sync(&conn->tx_work);
-	cancel_work_sync(&conn->rx_work);
 	cancel_work_sync(&conn->close_work);
 
 	/* Release user-configured multipath scheduler (does its own
@@ -1070,6 +1069,11 @@ int __ref tquic_init(void)
 	if (err)
 		goto err_frame_cache;
 
+	/* Initialize per-CPU output subsystem */
+	err = tquic_output_init();
+	if (err)
+		goto err_output;
+
 	/* Initialize connection hashtable */
 	err = rhashtable_init(&tquic_conn_table, &tquic_conn_params);
 	if (err)
@@ -1484,6 +1488,8 @@ err_cid_table:
 err_cid_hash:
 	rhashtable_destroy(&tquic_conn_table);
 err_hashtable:
+	tquic_output_tx_exit();
+err_output:
 	tquic_output_tx_exit();
 err_frame_cache:
 	kmem_cache_destroy(tquic_rx_buf_cache);

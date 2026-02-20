@@ -23,7 +23,7 @@ ccflags-y += -Wno-missing-prototypes
 ccflags-y += -Wno-error=unused-function -Wno-error=unused-variable
 ccflags-y += -Wno-error=missing-prototypes
 
-obj-$(CONFIG_TQUIC) += tquic.o
+obj-$(CONFIG_TQUIC_CORE) += tquic.o
 
 # Main TQUIC module - ALL components in single block to avoid make evaluation issues
 tquic-y := \
@@ -60,10 +60,8 @@ tquic-y := \
 	grease.o \
 	tquic_ack_frequency.o \
 	security_hardening.o \
-	cong/tquic_cong.o \
 	cong/cong_data.o \
 	cong/persistent_cong.o \
-	cong/coupled.o \
 	cong/bbrv2.o \
 	cong/bbrv3.o \
 	cong/prague.o \
@@ -136,8 +134,7 @@ tquic-y := \
 	crypto/zero_rtt.o \
 	crypto/handshake.o \
 	crypto/crypto_module.o \
-	crypto/hw_offload.o \
-	tquic_debug.o
+	crypto/hw_offload.o
 
 # Tracing support
 tquic-$(CONFIG_TRACEPOINTS) += diag/trace.o
@@ -151,10 +148,16 @@ tquic-$(CONFIG_TQUIC_NAPI) += napi.o
 # io_uring support for high-performance async I/O
 tquic-$(CONFIG_TQUIC_IO_URING) += io_uring.o
 
+# Congestion control framework
+tquic-$(CONFIG_TQUIC_CONG) += cong/tquic_cong.o
+
+# Coupled multipath CC (OLIA/LIA/BALIA) - standalone module
+tquic-$(CONFIG_TQUIC_CONG_COUPLED) += cong/coupled.o
+
+# debugfs interface
+tquic-$(CONFIG_TQUIC_DEBUGFS) += tquic_debug.o
+
 # Optional separate modules (if corresponding CONFIG is =m)
-obj-$(CONFIG_TQUIC_WAN_BONDING) += tquic_bond.o
-tquic_bond-y := bond/bonding.o bond/tquic_bonding.o bond/tquic_failover.o \
-	bond/tquic_reorder.o bond/cong_coupled.o
 
 obj-$(CONFIG_TQUIC_PATH_MANAGER) += tquic_pm.o
 tquic_pm-y := pm/pm_types.o pm/pm_kernel.o pm/path_manager.o \
@@ -176,10 +179,6 @@ tquic_cubic-y := cong/cubic.o
 tquic_bbr-y := cong/bbr.o
 tquic_copa-y := cong/copa.o
 tquic_westwood-y := cong/westwood.o
-
-# Coupled congestion control for multipath
-obj-$(CONFIG_TQUIC_WAN_BONDING) += tquic_coupled.o
-tquic_coupled-y := cong/coupled.o
 
 # BBRv2 congestion control
 obj-$(CONFIG_TQUIC_CONG_BBRV2) += tquic_bbrv2.o
@@ -211,14 +210,6 @@ tquic_bdp_frame-y := \
 obj-$(CONFIG_TQUIC_CONG_DATA) += tquic_cong_data.o
 tquic_cong_data-y := cong/cong_data.o
 
-# Multipath extension (RFC 9369) - separate module
-obj-$(CONFIG_TQUIC_MULTIPATH) += tquic_multipath.o
-tquic_multipath-y := \
-	multipath/mp_frame.o \
-	multipath/mp_ack.o \
-	multipath/mp_deadline.o \
-	multipath/path_abandon.o \
-	multipath/multipath_module.o \
 
 
 # Crypto support - separate module

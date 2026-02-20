@@ -1389,10 +1389,64 @@ int tquic_connect_ip_process_capsule(
 		/* Caller is responsible for handling the request */
 		break;
 
-	case CAPSULE_ROUTE_ADVERTISEMENT:
-		pr_debug("tquic: received ROUTE_ADVERTISEMENT\n");
-		/* Parse and add routes - simplified for now */
+	case CAPSULE_ROUTE_ADVERTISEMENT: {
+		const u8 *payload = buf + consumed;
+		size_t off = 0;
+
+		spin_lock_bh(&tunnel->lock);
+		while (off < payload_len) {
+			struct tquic_ip_route *route;
+			u8 ver, ipproto;
+			int addr_len;
+
+			if (off + 1 > payload_len)
+				break;
+			ver = payload[off++];
+
+			if (ver == 4)
+				addr_len = 4;
+			else if (ver == 6)
+				addr_len = 16;
+			else
+				break; /* Unknown IP version */
+
+			if (off + (size_t)(2 * addr_len + 1) > payload_len)
+				break;
+
+			if (tunnel->num_routes >= CONNECT_IP_MAX_ROUTES) {
+				off += 2 * addr_len + 1;
+				continue;
+			}
+
+			route = kzalloc(sizeof(*route), GFP_ATOMIC);
+			if (!route)
+				break;
+
+			route->ip_version = ver;
+			if (ver == 4) {
+				memcpy(&route->start_addr.v4, payload + off, 4);
+				off += 4;
+				memcpy(&route->end_addr.v4, payload + off, 4);
+				off += 4;
+			} else {
+				memcpy(&route->start_addr.v6, payload + off, 16);
+				off += 16;
+				memcpy(&route->end_addr.v6, payload + off, 16);
+				off += 16;
+			}
+			ipproto = payload[off++];
+			route->ipproto = ipproto;
+
+			INIT_LIST_HEAD(&route->list);
+			list_add_tail(&route->list, &tunnel->routes);
+			tunnel->num_routes++;
+
+			pr_debug("tquic: added IPv%d route proto=%u\n",
+				 ver, ipproto);
+		}
+		spin_unlock_bh(&tunnel->lock);
 		break;
+	}
 
 	default:
 		/* Unknown capsule type - skip per RFC 9297 */
