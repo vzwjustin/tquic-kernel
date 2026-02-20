@@ -6,8 +6,11 @@
 **Plan:** 6 of 6 complete
 **Status:** All phases complete. Remaining gates require a Linux build host: checkpatch.pl
            --strict run, kernel build (make M=net/tquic), and KUnit test execution.
-**Last activity:** 2026-02-20 - Fixed build-breaking XDP constant conflict in af_xdp.h (commit c94587e2a);
-                   enum tquic_xdp_mode / TQUIC_XDP_MODE redefinition vs uapi/linux/tquic.h
+**Last activity:** 2026-02-20 - Fixed four Makefile structural defects (commit 94f5fc28b):
+                   (1) 5 CC objects unconditionally in tquic-y → ifneq/tquic-$(CONFIG_TQUIC_CONG_*) guards;
+                   (2) 5 RFC-9369 multipath objects ungated → tquic-$(CONFIG_TQUIC_MULTIPATH);
+                   (3) dead obj-$(CONFIG_TQUIC_DIAG) += tquic_diag.o standalone rule removed;
+                   (4) fec/Makefile obj-y → obj-$(CONFIG_TQUIC_FEC)
 
 Progress: [================================================================================] 100%
          41/41 plans complete
