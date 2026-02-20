@@ -3402,7 +3402,6 @@ EXPORT_SYMBOL_GPL(tquic_clear_trusted_cas);
  * Sysctl accessor functions
  */
 
-#ifndef TQUIC_OUT_OF_TREE
 int tquic_sysctl_get_cert_verify_mode(void)
 {
 	return tquic_cert_verify_mode;
@@ -3426,7 +3425,6 @@ u32 tquic_sysctl_get_cert_time_tolerance(void)
 	return tquic_cert_time_tolerance;
 }
 EXPORT_SYMBOL_GPL(tquic_sysctl_get_cert_time_tolerance);
-#endif /* TQUIC_OUT_OF_TREE */
 
 /*
  * Procfs interface for trusted CA management
