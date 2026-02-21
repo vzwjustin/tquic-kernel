@@ -1690,10 +1690,19 @@ int tquic_connect_ip_add_route(struct tquic_connect_ip_iface *iface,
 		if (entry->gateway.v4)
 			cfg.fc_gw4 = entry->gateway.v4;
 
+#ifdef MODULE
+		/*
+		 * fib_table_insert() and fib_get_table() are not exported to
+		 * modules. When TQUIC_MASQUE is built as a module, manage routes
+		 * via userspace 'ip route' or rtnetlink.
+		 */
+		ret = -EOPNOTSUPP;
+#else
 		rtnl_lock();
 		ret = fib_table_insert(net, fib_get_table(net, cfg.fc_table),
 				       &cfg, NULL);
 		rtnl_unlock();
+#endif
 #else
 		/* Simplified path without policy routing */
 		pr_debug("tquic: IPv4 route add (no policy routing support)\n");
@@ -1717,9 +1726,18 @@ int tquic_connect_ip_add_route(struct tquic_connect_ip_iface *iface,
 		if (!ipv6_addr_any(&entry->gateway.v6))
 			cfg.fc_gateway = entry->gateway.v6;
 
+#ifdef MODULE
+		/*
+		 * ip6_route_add() is not exported to modules. When
+		 * TQUIC_MASQUE is built as a module, manage routes via
+		 * userspace 'ip route' or rtnetlink.
+		 */
+		ret = -EOPNOTSUPP;
+#else
 		rtnl_lock();
 		ret = ip6_route_add(&cfg, GFP_KERNEL, NULL);
 		rtnl_unlock();
+#endif
 	}
 #endif
 	else {
@@ -1771,15 +1789,23 @@ int tquic_connect_ip_del_route(struct tquic_connect_ip_iface *iface,
 			.fc_table = entry->table_id ? entry->table_id : RT_TABLE_MAIN,
 		};
 
+#ifdef MODULE
+		/*
+		 * fib_table_delete() and fib_get_table() are not exported to
+		 * modules. When TQUIC_MASQUE is built as a module, manage
+		 * routes via userspace 'ip route' or rtnetlink.
+		 */
+		ret = -EOPNOTSUPP;
+#else
 		rtnl_lock();
 		ret = fib_table_delete(net, fib_get_table(net, cfg.fc_table),
 				       &cfg, NULL);
 		rtnl_unlock();
 #endif
+#endif
 	}
 #if IS_ENABLED(CONFIG_IPV6)
 	else if (entry->ip_version == 6) {
-		struct fib6_table *table;
 		struct fib6_config cfg = {
 			.fc_dst = entry->dst_addr.v6,
 			.fc_dst_len = entry->dst_prefix_len,
@@ -1789,11 +1815,24 @@ int tquic_connect_ip_del_route(struct tquic_connect_ip_iface *iface,
 				.nl_net = net,
 			},
 		};
+#ifdef MODULE
+		/*
+		 * fib6_table_delete() is not exported to modules. When
+		 * TQUIC_MASQUE is built as a module, manage routes via
+		 * userspace 'ip route' or rtnetlink.
+		 */
+		ret = -EOPNOTSUPP;
+#else
+		{
+			struct fib6_table *table;
 
-		rtnl_lock();
-		table = fib6_get_table(net, cfg.fc_table);
-		ret = table ? fib6_table_delete(net, table, &cfg, NULL) : -ESRCH;
-		rtnl_unlock();
+			rtnl_lock();
+			table = fib6_get_table(net, cfg.fc_table);
+			ret = table ? fib6_table_delete(net, table, &cfg, NULL)
+				    : -ESRCH;
+			rtnl_unlock();
+		}
+#endif
 	}
 #endif
 	else {
