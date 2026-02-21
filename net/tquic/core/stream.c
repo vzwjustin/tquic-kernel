@@ -61,6 +61,11 @@
  */
 #define TQUIC_STREAM_SIZE_UNKNOWN S64_MAX
 
+/* Forward declarations for priority scheduler (core/priority.c) */
+void tquic_stream_init_priority(struct tquic_stream *stream);
+void tquic_sched_remove_stream(struct tquic_connection *conn,
+			       struct tquic_stream *stream);
+
 /* Memory pool initialization */
 
 /**
@@ -735,6 +740,14 @@ tquic_stream_create_internal(struct tquic_stream_manager *mgr, u64 stream_id,
 	if (stream->conn && stream->conn->fc)
 		tquic_fc_stream_init(stream, stream->conn->fc);
 
+	/*
+	 * Initialize RFC 9218 extensible priority defaults (urgency=3,
+	 * incremental=false).  tquic_stream_init_priority allocates the
+	 * priority extension structure and sets the RFC defaults.  The
+	 * scheduler uses this state to determine stream ordering.
+	 */
+	tquic_stream_init_priority(stream);
+
 	return stream;
 }
 
@@ -875,6 +888,15 @@ void tquic_stream_destroy(struct tquic_stream_manager *mgr,
 		}
 		kfree_skb(skb);
 	}
+
+	/*
+	 * Remove stream from the RFC 9218 priority scheduler before
+	 * freeing the stream.  tquic_sched_remove_stream is safe to
+	 * call even when the scheduler was never initialised (the
+	 * function checks for NULL priority_state).
+	 */
+	if (stream->conn)
+		tquic_sched_remove_stream(stream->conn, stream);
 
 	/* Free extended stream state if allocated */
 	if (stream->ext && mgr)

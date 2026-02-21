@@ -49,6 +49,19 @@
 #include "quic_loss.h"
 #include "stream.h"
 
+/* Forward declarations for priority scheduler (core/priority.c) */
+void tquic_sched_release(struct tquic_connection *conn);
+
+/* Forward declarations for HTTP/3 integration (tquic_http3.c) */
+#ifdef CONFIG_TQUIC_HTTP3
+void tquic_h3_connection_close(struct tquic_connection *qconn);
+void tquic_h3_qpack_destroy(struct tquic_connection *qconn);
+void tquic_h3_conn_force_destroy(struct tquic_connection *qconn);
+#ifdef CONFIG_TQUIC_WEBTRANSPORT
+void tquic_h3_webtransport_disable(struct tquic_connection *qconn);
+#endif
+#endif /* CONFIG_TQUIC_HTTP3 */
+
 static const struct rhashtable_params tquic_conn_table_params = {
 	.key_len = sizeof(struct tquic_cid),
 	.key_offset = offsetof(struct tquic_connection, scid),
@@ -1164,6 +1177,36 @@ void tquic_conn_destroy(struct tquic_connection *conn)
 		conn->sched_priv = NULL;
 	}
 #endif /* CONFIG_TQUIC_SCHEDULER */
+
+	/*
+	 * Tear down RFC 9218 stream priority scheduler state.
+	 * Must happen after streams are destroyed (above) so that
+	 * tquic_sched_remove_stream() in tquic_stream_destroy()
+	 * can still find a valid priority_state pointer.
+	 */
+	tquic_sched_release(conn);
+
+#ifdef CONFIG_TQUIC_HTTP3
+	/*
+	 * Tear down HTTP/3 connection state (RFC 9114).
+	 * tquic_h3_connection_close sends GOAWAY if needed, releases
+	 * the tquic_http3_conn, and destroys per-connection priority
+	 * state.  tquic_h3_qpack_destroy frees the QPACK encoder and
+	 * decoder contexts.
+	 */
+	tquic_h3_connection_close(conn);
+	tquic_h3_qpack_destroy(conn);
+
+#ifdef CONFIG_TQUIC_WEBTRANSPORT
+	tquic_h3_webtransport_disable(conn);
+#endif /* CONFIG_TQUIC_WEBTRANSPORT */
+
+	/*
+	 * Force-destroy H3 connection object if a lingering reference
+	 * prevented tquic_h3_connection_close from completing teardown.
+	 */
+	tquic_h3_conn_force_destroy(conn);
+#endif /* CONFIG_TQUIC_HTTP3 */
 
 	/* Release multipath scheduler state bound to this connection. */
 	tquic_mp_sched_release_conn(conn);

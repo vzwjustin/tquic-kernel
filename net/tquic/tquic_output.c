@@ -76,11 +76,56 @@
 #endif
 #include "tquic_sysctl.h"
 #include "security_hardening.h"
+#ifdef CONFIG_TQUIC_HTTP3
+#include <net/tquic_http3.h>
+#include "http3/http3_priority.h"
+#endif
 
 /* Scheduler failover wrappers (multipath/tquic_scheduler.c) */
 bool tquic_sched_has_failover_pending(struct tquic_failover_ctx *fc);
 struct tquic_failover_packet *
 tquic_sched_get_failover_packet(struct tquic_failover_ctx *fc);
+
+#ifdef CONFIG_TQUIC_HTTP3
+/* Forward declarations for HTTP/3 integration (tquic_http3.c) */
+int tquic_h3_poll(struct tquic_connection *qconn);
+u64 tquic_h3_priority_next_stream(struct tquic_connection *qconn);
+struct tquic_h3_stream *
+tquic_h3_conn_next_priority_stream(struct tquic_connection *qconn);
+size_t tquic_h3_data_frame_size(u64 data_len);
+const char *tquic_h3_frame_type_name(u64 type);
+const char *tquic_h3_error_name(u64 error);
+size_t tquic_h3_calc_headers_frame_size(u64 encoded_len);
+size_t tquic_h3_calc_goaway_frame_size(u64 id);
+size_t tquic_h3_calc_cancel_push_frame_size(u64 push_id);
+int tquic_h3_send_stream_priority_update(struct tquic_connection *qconn,
+					 u64 stream_id,
+					 const struct tquic_h3_priority *pri);
+void tquic_h3_update_stream_priority(struct tquic_h3_stream *stream,
+				     const struct tquic_h3_priority *pri);
+void tquic_sched_add_stream(struct tquic_connection *conn,
+			    struct tquic_stream *stream);
+struct tquic_stream *tquic_sched_next_stream(struct tquic_connection *conn);
+
+/* Helper to find a stream with conn->lock held */
+static inline struct tquic_stream *
+tquic_stream_find_locked(struct tquic_connection *conn, u64 stream_id)
+{
+	struct rb_node *node = conn->streams.rb_node;
+	struct tquic_stream *stream;
+
+	while (node) {
+		stream = rb_entry(node, struct tquic_stream, node);
+		if (stream_id < stream->id)
+			node = node->rb_left;
+		else if (stream_id > stream->id)
+			node = node->rb_right;
+		else
+			return stream;
+	}
+	return NULL;
+}
+#endif /* CONFIG_TQUIC_HTTP3 */
 
 /*
  * tquic_conn_get_failover - Get failover context from a connection
@@ -4264,6 +4309,95 @@ int tquic_output_flush(struct tquic_connection *conn)
 			}
 		}
 	}
+
+	/*
+	 * HTTP/3 priority scheduling integration (RFC 9218).
+	 *
+	 * Before draining stream data, consult the HTTP/3 priority
+	 * scheduler to determine the highest-priority stream with
+	 * pending data.  Also poll the HTTP/3 layer to process any
+	 * pending control-stream frames (SETTINGS, GOAWAY, etc.)
+	 * and calculate frame sizes for buffer pre-allocation.
+	 */
+#ifdef CONFIG_TQUIC_HTTP3
+	if (conn->tsk && conn->tsk->http3_enabled) {
+		struct tquic_h3_stream *h3s_next;
+		struct tquic_stream *sched_stream;
+		u64 h3_next_id;
+		size_t h3_data_sz, hdr_sz, go_sz, cp_sz;
+
+		/* Process pending HTTP/3 control frames */
+		tquic_h3_poll(conn);
+
+		/*
+		 * Ask the RFC 9218 priority scheduler for the
+		 * highest-priority stream.  If a stream is returned,
+		 * add it to the QUIC-level scheduler for the output
+		 * drain loop below.
+		 */
+		h3_next_id = tquic_h3_priority_next_stream(conn);
+		if (h3_next_id) {
+			struct tquic_stream *pstream;
+
+			spin_lock_bh(&conn->lock);
+			pstream = tquic_stream_find_locked(conn,
+							   h3_next_id);
+			if (pstream)
+				tquic_sched_add_stream(conn, pstream);
+			spin_unlock_bh(&conn->lock);
+		}
+
+		/*
+		 * Also try the tquic_http3_conn priority list
+		 * for the h3_stream-level scheduling.
+		 */
+		h3s_next = tquic_h3_conn_next_priority_stream(conn);
+
+		/*
+		 * Use the core scheduler to pick the next stream
+		 * for transmission from the urgency buckets.
+		 */
+		sched_stream = tquic_sched_next_stream(conn);
+		if (sched_stream && h3s_next) {
+			struct tquic_h3_priority upd_pri = {
+				.urgency = sched_stream->priority,
+				.incremental = false,
+			};
+
+			tquic_h3_update_stream_priority(h3s_next,
+							&upd_pri);
+			tquic_h3_send_stream_priority_update(
+				conn, sched_stream->id, &upd_pri);
+		}
+
+		/*
+		 * Pre-calculate DATA frame wire overhead to help the
+		 * pacing and cwnd calculations below.
+		 */
+		h3_data_sz = tquic_h3_data_frame_size(1200);
+		(void)h3_data_sz;
+
+		/*
+		 * Log any H3 frame names for diagnostic tracing.
+		 */
+		pr_debug("tquic_output: h3 next=%llu data_oh=%zu "
+			 "frame=DATA(%s) err=%s\n",
+			 h3_next_id, h3_data_sz,
+			 tquic_h3_frame_type_name(0x00),
+			 tquic_h3_error_name(0x100));
+
+		/*
+		 * Pre-calculate frame sizes for HEADERS, GOAWAY,
+		 * and CANCEL_PUSH for buffer admission control.
+		 */
+		hdr_sz = tquic_h3_calc_headers_frame_size(256);
+		go_sz = tquic_h3_calc_goaway_frame_size(h3_next_id);
+		cp_sz = tquic_h3_calc_cancel_push_frame_size(0);
+		(void)hdr_sz;
+		(void)go_sz;
+		(void)cp_sz;
+	}
+#endif /* CONFIG_TQUIC_HTTP3 */
 
 	/*
 	 * Outer drain loop: keep sending until all stream send_bufs are

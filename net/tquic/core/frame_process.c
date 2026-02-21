@@ -67,6 +67,16 @@
 #include "../fec/fec.h"
 #endif
 
+/*
+ * PRIORITY_UPDATE frame type for request streams (RFC 9218 Section 7.1).
+ * This is a 4-byte QUIC varint (0x80 prefix on the wire).
+ */
+#define TQUIC_FRAME_PRIORITY_UPDATE_REQ 0xf0700ULL
+
+/* Forward declaration for priority update processing (core/priority.c) */
+int tquic_frame_process_priority_update(struct tquic_connection *conn,
+					const u8 *data, int len);
+
 /* QUIC encryption level / packet type identifiers (RFC 9000 §17.2) */
 #define TQUIC_PKT_INITIAL 0x00
 #define TQUIC_PKT_ZERO_RTT 0x01
@@ -3237,6 +3247,72 @@ int tquic_process_frames(struct tquic_connection *conn, struct tquic_path *path,
 					if (ret >= 0)
 						ret = 0;
 				}
+			}
+		} else if ((frame_type & TQUIC_VARINT_PREFIX_MASK) ==
+			   TQUIC_VARINT_4BYTE_PREFIX) {
+			/*
+			 * 4-byte QUIC varint frame type (first byte 10xxxxxx).
+			 * PRIORITY_UPDATE = 0xf0700 (RFC 9218 Section 7.1)
+			 * for request streams.  Decode the full 4-byte varint
+			 * to determine the exact frame type.
+			 */
+			u64 ext4_frame_type = 0;
+			int vlen4;
+
+			vlen4 = tquic_varint_decode(ctx.data + ctx.offset,
+						    ctx.len - ctx.offset,
+						    &ext4_frame_type);
+			if (vlen4 < 0 ||
+			    (size_t)vlen4 > ctx.len - ctx.offset) {
+				conn->error_code = EQUIC_FRAME_ENCODING;
+				tquic_conn_close_with_error(
+					conn, EQUIC_FRAME_ENCODING,
+					"truncated 4-byte ext frame");
+				return -EPROTO;
+			}
+
+			if (ext4_frame_type ==
+			    TQUIC_FRAME_PRIORITY_UPDATE_REQ) {
+				/*
+				 * PRIORITY_UPDATE (RFC 9218).
+				 * Only valid in 1-RTT packets on the
+				 * control stream.
+				 */
+				if (!is_1rtt) {
+					conn->error_code =
+						EQUIC_FRAME_ENCODING;
+					tquic_conn_close_with_error(
+						conn, EQUIC_FRAME_ENCODING,
+						"PRIORITY_UPDATE not 1-RTT");
+					return -EPROTO;
+				}
+				ctx.offset += (u32)vlen4;
+				ret = tquic_frame_process_priority_update(
+					conn,
+					ctx.data + ctx.offset,
+					(int)(ctx.len - ctx.offset));
+				if (ret < 0) {
+					tquic_dbg(
+						"priority_update: err=%d\n",
+						ret);
+				} else {
+					ctx.offset += (u32)ret;
+					ret = 0;
+				}
+			} else {
+				/*
+				 * Unknown 4-byte varint frame type.
+				 * RFC 9000 Section 12.4: treat as
+				 * connection error.
+				 */
+				tquic_dbg(
+					"unknown 4-byte ext frame 0x%llx\n",
+					ext4_frame_type);
+				conn->error_code = EQUIC_FRAME_ENCODING;
+				tquic_conn_close_with_error(
+					conn, EQUIC_FRAME_ENCODING,
+					"unknown 4-byte ext frame");
+				return -EPROTO;
 			}
 		} else if ((frame_type & TQUIC_VARINT_PREFIX_MASK) ==
 			   TQUIC_VARINT_8BYTE_PREFIX) {

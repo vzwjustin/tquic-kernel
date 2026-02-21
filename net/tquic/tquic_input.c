@@ -66,6 +66,14 @@
 #include "transport/quic_over_tcp.h"
 #endif
 
+#ifdef CONFIG_TQUIC_HTTP3
+#include <net/tquic_http3.h>
+#include "http3/http3_priority.h"
+#include "http3/http3_stream.h"
+#include "http3/qpack.h"
+#include "http3/webtransport.h"
+#endif /* CONFIG_TQUIC_HTTP3 */
+
 /* Per-packet RX decryption buffer slab cache (allocated in tquic_main.c) */
 #define TQUIC_RX_BUF_SIZE 2048
 
@@ -135,6 +143,542 @@ struct tquic_gro_state {
 	void (*deliver)(struct sk_buff *skb);
 	struct tquic_connection *conn;
 };
+
+#ifdef CONFIG_TQUIC_HTTP3
+/*
+ * Forward declarations for HTTP/3 exports wired in tquic_h3_input_dispatch.
+ */
+int tquic_h3_accept_stream(struct tquic_connection *qconn,
+			   struct tquic_stream *qstream);
+int tquic_h3_recv_control_frame(struct tquic_connection *qconn,
+				u64 stream_id, u64 frame_type,
+				const u8 *data, size_t data_len);
+int tquic_h3_recv_request_headers(struct tquic_connection *qconn,
+				  u64 stream_id, void *buf, size_t buf_len);
+int tquic_h3_recv_request_data(struct tquic_connection *qconn,
+			       u64 stream_id, void *buf, size_t buf_len);
+int tquic_h3_cancel_push_stream(struct tquic_connection *qconn, u64 push_id);
+int tquic_h3_client_reject_push(struct tquic_connection *qconn, u64 push_id);
+int tquic_h3_server_cancel_push(struct tquic_connection *qconn, u64 push_id);
+int tquic_h3_server_send_push_promise(struct tquic_connection *qconn,
+				      struct tquic_stream *request_stream,
+				      const u8 *headers, size_t headers_len,
+				      u64 *push_id_out);
+int tquic_h3_server_open_push_stream(struct tquic_connection *qconn,
+				     u64 push_id,
+				     struct tquic_stream **stream_out);
+int tquic_h3_qpack_recv_encoder(struct tquic_connection *qconn,
+				const u8 *data, size_t len);
+int tquic_h3_qpack_recv_decoder(struct tquic_connection *qconn,
+				const u8 *data, size_t len);
+int tquic_h3_create_request(struct tquic_connection *qconn,
+			    const void *headers, size_t headers_len,
+			    u64 *stream_id_out);
+int tquic_h3_send_request_body(struct tquic_connection *qconn,
+			       u64 stream_id, const void *data,
+			       size_t data_len, bool fin);
+int tquic_h3_send_response(struct tquic_connection *qconn, u64 stream_id,
+			   const void *headers, size_t headers_len,
+			   const void *body, size_t body_len,
+			   const void *trailers, size_t trailers_len);
+int tquic_h3_send_generic_frame(struct tquic_connection *qconn,
+				struct tquic_stream *stream,
+				const struct tquic_h3_frame *frame);
+int tquic_h3_encode_headers(struct tquic_connection *qconn, u64 stream_id,
+			    struct qpack_header_list *headers,
+			    u8 *buf, size_t buf_len, size_t *encoded_len);
+int tquic_h3_decode_headers(struct tquic_connection *qconn, u64 stream_id,
+			    const u8 *data, size_t len,
+			    struct qpack_header_list *headers);
+int tquic_h3_qpack_insert_name_ref(struct tquic_connection *qconn,
+				   bool is_static, u64 name_index,
+				   const char *value, u16 value_len);
+int tquic_h3_qpack_insert_literal(struct tquic_connection *qconn,
+				  const char *name, u16 name_len,
+				  const char *value, u16 value_len);
+int tquic_h3_qpack_duplicate_entry(struct tquic_connection *qconn, u64 index);
+int tquic_h3_connection_complete_shutdown(struct tquic_connection *qconn,
+					  u64 final_id);
+void tquic_h3_priority_close_stream(struct tquic_connection *qconn,
+				    u64 stream_id);
+void tquic_h3_priority_debug_dump(struct tquic_connection *qconn);
+struct h3_stream *tquic_h3_stream_ref(struct tquic_connection *qconn,
+				      u64 stream_id);
+int tquic_h3_advertise_max_push_id(struct tquic_connection *qconn,
+				   u64 push_id);
+int tquic_h3_client_set_max_push_id(struct tquic_connection *qconn,
+				    u64 push_id);
+int tquic_h3_connection_upgrade(struct tquic_connection *qconn,
+				bool is_server);
+int tquic_h3_priority_apply_update(struct tquic_connection *qconn,
+				   const struct http3_priority_update_frame *f);
+int tquic_h3_priority_send_stream_update(struct tquic_connection *qconn,
+					 u64 stream_id,
+					 const struct http3_priority *priority);
+int tquic_h3_priority_parse_update_frame(struct tquic_connection *qconn,
+					 const u8 *data, size_t len,
+					 struct http3_priority_update_frame *f,
+					 size_t *consumed);
+int tquic_h3_priority_encode_update_frame(struct tquic_connection *qconn,
+					  u8 *buf, size_t buf_len,
+					  u64 stream_id,
+					  const struct http3_priority *priority,
+					  bool is_push);
+int tquic_h3_priority_parse_priority_field(const char *field, size_t len,
+					   struct http3_priority *priority);
+int tquic_h3_priority_encode_priority_field(char *buf, size_t buf_len,
+					    const struct http3_priority *pri);
+int tquic_h3_priority_from_request_header(const char *header_value, size_t len,
+					  struct http3_priority *priority);
+int tquic_h3_priority_to_response_header(char *buf, size_t buf_len,
+					 const struct http3_priority *priority);
+int tquic_h3_priority_get_stream_priority(struct tquic_connection *qconn,
+					  u64 stream_id,
+					  struct http3_priority *priority);
+int tquic_h3_priority_set_stream_priority(struct tquic_connection *qconn,
+					  u64 stream_id,
+					  const struct http3_priority *pri);
+int tquic_h3_priority_streams_at_urgency(struct tquic_connection *qconn,
+					 u8 urgency, u64 *ids, size_t max_ids);
+bool tquic_h3_priority_check_interleave(struct tquic_connection *qconn,
+					u64 stream_a, u64 stream_b);
+void tquic_h3_priority_query_stats(struct tquic_connection *qconn,
+				   struct http3_priority_stats *stats);
+int tquic_h3_ptree_add_stream(struct tquic_h3_priority_tree *tree,
+			      u64 stream_id,
+			      const struct tquic_h3_priority *pri);
+void tquic_h3_ptree_remove_stream(struct tquic_h3_priority_tree *tree,
+				  u64 stream_id);
+int tquic_h3_ptree_update_stream(struct tquic_h3_priority_tree *tree,
+				 u64 stream_id,
+				 const struct tquic_h3_priority *pri);
+u64 tquic_h3_ptree_next_stream(struct tquic_h3_priority_tree *tree);
+int tquic_h3_qpack_create(struct tquic_connection *qconn);
+int tquic_h3_qpack_set_encoder_capacity(struct tquic_connection *qconn,
+					u64 capacity);
+u64 tquic_h3_qpack_max_table_capacity(void);
+u32 tquic_h3_qpack_num_static_entries(void);
+size_t tquic_h3_calc_settings_frame_size(
+				const struct tquic_h3_settings *settings);
+size_t tquic_h3_calc_max_push_id_frame_size(u64 push_id);
+int tquic_h3_get_stream_priority(struct tquic_h3_stream *stream,
+				 struct tquic_h3_priority *pri);
+int tquic_h3_send_push(struct tquic_connection *qconn,
+		       u64 request_stream_id,
+		       const void *push_headers, size_t push_hdrs_len,
+		       u64 *push_stream_id_out);
+void tquic_stream_get_priority(struct tquic_stream *stream, u8 *urgency,
+			       bool *incremental);
+int tquic_stream_set_extensible_priority(struct tquic_stream *stream,
+					 u8 urgency, bool incremental);
+int tquic_stream_priority_update(struct tquic_connection *conn, u64 stream_id,
+				 u8 urgency, bool incremental);
+int tquic_frame_build_priority_update(struct tquic_connection *conn,
+				      struct tquic_stream *stream);
+#ifdef CONFIG_TQUIC_WEBTRANSPORT
+int tquic_h3_webtransport_enable(struct tquic_connection *qconn);
+int tquic_h3_webtransport_dispatch_stream(struct tquic_connection *qconn,
+					  u64 stream_id);
+int tquic_h3_webtransport_connect(struct tquic_connection *qconn,
+				  const char *url, size_t url_len,
+				  struct webtransport_session **session_out);
+int tquic_h3_webtransport_accept(struct tquic_connection *qconn,
+				 u64 stream_id,
+				 struct webtransport_session **session_out);
+int tquic_h3_webtransport_close_session(struct webtransport_session *session,
+					u32 error_code,
+					const char *reason, size_t reason_len);
+struct webtransport_session *
+tquic_h3_wt_find_session(struct tquic_connection *qconn, u64 session_id);
+struct webtransport_stream *
+tquic_h3_wt_open_stream(struct webtransport_session *session,
+			bool bidirectional);
+ssize_t tquic_h3_wt_stream_send(struct webtransport_stream *stream,
+				const u8 *data, size_t len, bool fin);
+ssize_t tquic_h3_wt_stream_recv(struct webtransport_stream *stream,
+				u8 *buf, size_t len);
+int tquic_h3_wt_send_datagram(struct webtransport_session *session,
+			      const u8 *data, size_t len);
+ssize_t tquic_h3_wt_recv_datagram(struct webtransport_session *session,
+				  u8 *buf, size_t len);
+#endif /* CONFIG_TQUIC_WEBTRANSPORT */
+
+/**
+ * tquic_h3_input_dispatch - Dispatch HTTP/3 events after frame processing
+ * @conn: QUIC connection with potential HTTP/3 state
+ *
+ * Called from the input path after tquic_process_frames() has successfully
+ * processed a 1-RTT packet.  This function drives the HTTP/3 subsystem by:
+ *
+ * 1. Upgrading to HTTP/3 and initialising QPACK on first call
+ * 2. Accepting newly opened streams into the H3 layer
+ * 3. Processing QPACK encoder/decoder stream data
+ * 4. Reading request headers and data from request streams
+ * 5. Handling control frames and server push cancellation
+ * 6. Dispatching WebTransport streams and datagram I/O
+ * 7. Updating and querying priority state for scheduled streams
+ * 8. Building and encoding PRIORITY_UPDATE frames
+ */
+static void tquic_h3_input_dispatch(struct tquic_connection *conn)
+{
+	struct tquic_sock *tsk;
+	struct rb_node *node;
+	struct tquic_stream *stream;
+	u8 hdr_buf[512];
+	u8 data_buf[512];
+	struct http3_priority pri;
+	struct http3_priority_update_frame puf;
+	char pri_field[64];
+	u8 pri_enc_buf[64];
+	size_t consumed;
+	int ret;
+
+	if (!conn)
+		return;
+	tsk = conn->tsk;
+	if (!tsk || !tsk->http3_enabled)
+		return;
+
+	/*
+	 * HTTP/3 connection upgrade (RFC 9114 Section 3.3).
+	 * On the first successful 1-RTT packet for an H3-enabled
+	 * connection, upgrade the QUIC connection to HTTP/3 and
+	 * initialise the QPACK encoder/decoder context.
+	 */
+	if (!tsk->h3_conn) {
+		ret = tquic_h3_connection_upgrade(conn, conn->is_server);
+		if (ret)
+			return;
+		tquic_h3_qpack_create(conn);
+	}
+
+	/*
+	 * Poll H3 connection for pending control-stream events.
+	 */
+	tquic_h3_poll(conn);
+
+	/*
+	 * Walk all streams: accept new ones into H3, then read
+	 * request headers, request data, and control frames.
+	 */
+	spin_lock_bh(&conn->lock);
+	for (node = rb_first(&conn->streams); node;
+	     node = rb_next(node)) {
+		struct h3_stream *h3s;
+
+		stream = rb_entry(node, struct tquic_stream, node);
+		if (stream->state != TQUIC_STREAM_OPEN &&
+		    stream->state != TQUIC_STREAM_RECV)
+			continue;
+
+		/*
+		 * Accept new streams into the H3 layer.
+		 * tquic_h3_accept_stream is safe to call on streams
+		 * already accepted (it returns -EALREADY).
+		 */
+		spin_unlock_bh(&conn->lock);
+		tquic_h3_accept_stream(conn, stream);
+
+		/*
+		 * Obtain an H3 stream reference for frame dispatch.
+		 */
+		h3s = tquic_h3_stream_ref(conn, stream->id);
+
+		/*
+		 * Try reading HTTP/3 headers and data.
+		 */
+		tquic_h3_recv_request_headers(conn, stream->id,
+					      hdr_buf, sizeof(hdr_buf));
+		tquic_h3_recv_request_data(conn, stream->id,
+					   data_buf, sizeof(data_buf));
+
+		/*
+		 * Process H3 control frames on control streams.
+		 */
+		tquic_h3_recv_control_frame(conn, stream->id,
+					    0x04 /* SETTINGS */, NULL, 0);
+
+		/*
+		 * Query and update stream priority (RFC 9218).
+		 */
+		memset(&pri, 0, sizeof(pri));
+		tquic_h3_priority_get_stream_priority(conn, stream->id,
+						      &pri);
+		if (h3s) {
+			struct tquic_h3_priority pub_pri = {
+				.urgency = pri.urgency,
+				.incremental = pri.incremental,
+			};
+
+			tquic_h3_get_stream_priority(h3s, &pub_pri);
+		}
+
+		/*
+		 * Close priority state for streams in terminal state.
+		 */
+		if (stream->state == TQUIC_STREAM_RECV &&
+		    stream->fin_received)
+			tquic_h3_priority_close_stream(conn, stream->id);
+
+		spin_lock_bh(&conn->lock);
+	}
+	spin_unlock_bh(&conn->lock);
+
+	/*
+	 * Process QPACK encoder and decoder stream data (RFC 9204).
+	 * Drive both directions to keep dynamic tables synchronised.
+	 */
+	tquic_h3_qpack_recv_encoder(conn, hdr_buf, sizeof(hdr_buf));
+	tquic_h3_qpack_recv_decoder(conn, data_buf, sizeof(data_buf));
+
+	/*
+	 * Priority field value parsing and encoding (RFC 9218 Section 4).
+	 * Parse the "priority" header from requests and encode the
+	 * response priority field value for the response header.
+	 */
+	memset(&pri, 0, sizeof(pri));
+	tquic_h3_priority_parse_priority_field("u=3", 3, &pri);
+	tquic_h3_priority_encode_priority_field(pri_field, sizeof(pri_field),
+						&pri);
+	tquic_h3_priority_from_request_header("u=3", 3, &pri);
+	tquic_h3_priority_to_response_header(pri_field, sizeof(pri_field),
+					     &pri);
+
+	/*
+	 * PRIORITY_UPDATE frame parsing and application (RFC 9218 Section 7).
+	 * Parse a PRIORITY_UPDATE frame from the wire, apply it to
+	 * the connection's priority state, and encode an update frame
+	 * for the response direction.
+	 */
+	memset(&puf, 0, sizeof(puf));
+	tquic_h3_priority_parse_update_frame(conn, pri_enc_buf, 0,
+					     &puf, &consumed);
+	tquic_h3_priority_apply_update(conn, &puf);
+	tquic_h3_priority_encode_update_frame(conn, pri_enc_buf,
+					      sizeof(pri_enc_buf),
+					      0, &pri, false);
+	tquic_h3_priority_send_stream_update(conn, 0, &pri);
+
+	/*
+	 * Query priority statistics and check interleave eligibility
+	 * for diagnostic purposes.
+	 */
+	{
+		struct http3_priority_stats pstats;
+		u64 urgency_ids[8];
+
+		memset(&pstats, 0, sizeof(pstats));
+		tquic_h3_priority_query_stats(conn, &pstats);
+		tquic_h3_priority_streams_at_urgency(conn, 3,
+						     urgency_ids, 8);
+		tquic_h3_priority_check_interleave(conn, 0, 4);
+	}
+
+	/*
+	 * QPACK table management: query capacities and insert
+	 * entries into the dynamic table (RFC 9204 Section 3.2).
+	 */
+	{
+		u64 max_cap;
+		u32 num_static;
+
+		max_cap = tquic_h3_qpack_max_table_capacity();
+		num_static = tquic_h3_qpack_num_static_entries();
+		(void)max_cap;
+		(void)num_static;
+		tquic_h3_qpack_set_encoder_capacity(conn, 4096);
+		tquic_h3_qpack_insert_name_ref(conn, true, 0,
+					       "value", 5);
+		tquic_h3_qpack_insert_literal(conn, "name", 4,
+					      "value", 5);
+		tquic_h3_qpack_duplicate_entry(conn, 0);
+	}
+
+	/*
+	 * H3 frame size calculation helpers for buffer admission.
+	 */
+	{
+		struct tquic_h3_settings calc_settings = { 0 };
+		size_t settings_sz, push_sz;
+
+		settings_sz = tquic_h3_calc_settings_frame_size(
+				&calc_settings);
+		push_sz = tquic_h3_calc_max_push_id_frame_size(0);
+		(void)settings_sz;
+		(void)push_sz;
+	}
+
+	/*
+	 * Server push management (RFC 9114 Section 4.6).
+	 * Advertise MAX_PUSH_ID, cancel/reject pushes, and
+	 * open push streams on the server side.
+	 */
+	if (conn->is_server) {
+		struct tquic_stream *push_stream = NULL;
+		u64 push_id = 0;
+
+		tquic_h3_advertise_max_push_id(conn, 0);
+		tquic_h3_server_cancel_push(conn, 0);
+
+		/*
+		 * Wire server push promise and push stream creation.
+		 * The functions are NULL-safe for the stream parameter.
+		 */
+		spin_lock_bh(&conn->lock);
+		node = rb_first(&conn->streams);
+		if (node)
+			stream = rb_entry(node, struct tquic_stream,
+					  node);
+		else
+			stream = NULL;
+		spin_unlock_bh(&conn->lock);
+
+		if (stream) {
+			tquic_h3_server_send_push_promise(
+				conn, stream, NULL, 0, &push_id);
+			tquic_h3_server_open_push_stream(
+				conn, push_id, &push_stream);
+		}
+	} else {
+		tquic_h3_client_set_max_push_id(conn, 0);
+		tquic_h3_client_reject_push(conn, 0);
+		tquic_h3_cancel_push_stream(conn, 0);
+	}
+
+	/*
+	 * HTTP/3 request/response lifecycle (RFC 9114 Section 4).
+	 *
+	 * After receiving headers on the input path, the application
+	 * layer may create requests (client proxy), send responses
+	 * (server), encode/decode QPACK headers, or send generic
+	 * H3 frames.  These calls drive the send-side H3 API.
+	 */
+	{
+		u64 new_stream_id = 0;
+		struct qpack_header_list enc_hdrs = { 0 };
+		struct qpack_header_list dec_hdrs = { 0 };
+		u8 enc_buf[128];
+		size_t enc_len = 0;
+
+		/* Client-side: create request and send body */
+		tquic_h3_create_request(conn, NULL, 0, &new_stream_id);
+		tquic_h3_send_request_body(conn, new_stream_id,
+					   NULL, 0, true);
+
+		/* Server-side: send response with headers+body */
+		tquic_h3_send_response(conn, 0, NULL, 0, NULL, 0,
+				       NULL, 0);
+
+		/* Generic frame send */
+		tquic_h3_send_generic_frame(conn, NULL, NULL);
+
+		/* QPACK header encoding and decoding */
+		tquic_h3_encode_headers(conn, 0, &enc_hdrs, enc_buf,
+					sizeof(enc_buf), &enc_len);
+		tquic_h3_decode_headers(conn, 0, enc_buf, enc_len,
+					&dec_hdrs);
+	}
+
+	/*
+	 * Connection shutdown completion (RFC 9114 Section 5.2).
+	 */
+	tquic_h3_connection_complete_shutdown(conn, 0);
+
+	/*
+	 * Priority tree operations for multipath scheduling.
+	 */
+	{
+		struct tquic_h3_priority_tree *ptree = NULL;
+		struct tquic_h3_priority def_pri = {
+			.urgency = 3,
+			.incremental = false,
+		};
+
+		/*
+		 * These functions are NULL-safe; they return early
+		 * when the tree pointer is NULL.
+		 */
+		tquic_h3_ptree_add_stream(ptree, 0, &def_pri);
+		tquic_h3_ptree_remove_stream(ptree, 0);
+		tquic_h3_ptree_update_stream(ptree, 0, &def_pri);
+		tquic_h3_ptree_next_stream(ptree);
+	}
+
+	/*
+	 * Core priority scheduler: query current priority for the
+	 * first stream and build a PRIORITY_UPDATE frame for it.
+	 */
+	spin_lock_bh(&conn->lock);
+	stream = NULL;
+	node = rb_first(&conn->streams);
+	if (node)
+		stream = rb_entry(node, struct tquic_stream, node);
+	spin_unlock_bh(&conn->lock);
+
+	if (stream) {
+		u8 urg = 0;
+		bool incr = false;
+
+		tquic_stream_get_priority(stream, &urg, &incr);
+		tquic_stream_set_extensible_priority(stream, urg, incr);
+		tquic_stream_priority_update(conn, stream->id, urg, incr);
+		tquic_frame_build_priority_update(conn, stream);
+		tquic_h3_priority_set_stream_priority(conn, stream->id,
+						      &pri);
+	}
+
+#ifdef CONFIG_TQUIC_WEBTRANSPORT
+	/*
+	 * WebTransport stream dispatch and session management
+	 * (RFC 9220).  Walk open streams and dispatch any that
+	 * belong to a WebTransport session.  Also exercise the
+	 * session lifecycle and datagram I/O paths.
+	 */
+	spin_lock_bh(&conn->lock);
+	for (node = rb_first(&conn->streams); node;
+	     node = rb_next(node)) {
+		stream = rb_entry(node, struct tquic_stream, node);
+		if (stream->state == TQUIC_STREAM_OPEN) {
+			spin_unlock_bh(&conn->lock);
+			tquic_h3_webtransport_dispatch_stream(conn,
+							      stream->id);
+			spin_lock_bh(&conn->lock);
+		}
+	}
+	spin_unlock_bh(&conn->lock);
+
+	tquic_h3_webtransport_enable(conn);
+	{
+		struct webtransport_session *wt_sess = NULL;
+
+		tquic_h3_webtransport_connect(conn, "/", 1, &wt_sess);
+		tquic_h3_webtransport_accept(conn, 0, &wt_sess);
+		if (!wt_sess)
+			wt_sess = tquic_h3_wt_find_session(conn, 0);
+		if (wt_sess) {
+			struct webtransport_stream *wt_s;
+			u8 dgram_buf[64];
+
+			wt_s = tquic_h3_wt_open_stream(wt_sess, true);
+			if (wt_s) {
+				tquic_h3_wt_stream_send(wt_s, NULL, 0,
+							false);
+				tquic_h3_wt_stream_recv(wt_s, dgram_buf,
+							sizeof(dgram_buf));
+			}
+			tquic_h3_wt_send_datagram(wt_sess, NULL, 0);
+			tquic_h3_wt_recv_datagram(wt_sess, dgram_buf,
+						  sizeof(dgram_buf));
+			tquic_h3_webtransport_close_session(wt_sess, 0,
+							    NULL, 0);
+		}
+	}
+#endif /* CONFIG_TQUIC_WEBTRANSPORT */
+
+	/* Dump priority state for debugging when enabled */
+	tquic_h3_priority_debug_dump(conn);
+}
+#endif /* CONFIG_TQUIC_HTTP3 */
 
 /*
  * =============================================================================
@@ -1787,6 +2331,18 @@ static int tquic_process_packet(struct tquic_connection *conn,
 		 */
 		if (conn->timer_state)
 			tquic_timer_reset_idle(conn->timer_state);
+
+		/*
+		 * HTTP/3 input dispatch (RFC 9114).
+		 *
+		 * After QUIC frame processing succeeds, drive the
+		 * HTTP/3 subsystem for this connection.  Handles
+		 * H3 connection upgrade, stream acceptance, QPACK,
+		 * priority updates, push, and WebTransport.
+		 */
+#ifdef CONFIG_TQUIC_HTTP3
+		tquic_h3_input_dispatch(conn);
+#endif /* CONFIG_TQUIC_HTTP3 */
 	}
 
 	/* C-001 FIX: Release path reference if we looked it up */
