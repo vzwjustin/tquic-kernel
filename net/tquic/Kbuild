@@ -89,6 +89,7 @@ tquic-y := \
 	core/stream.o \
 	core/frame.o \
 	core/packet.o \
+	core/quic_packet.o \
 	core/ack_frequency.o \
 	core/flow_control.o \
 	core/transport_params.o \
@@ -201,10 +202,13 @@ tquic-y := \
     tquic-y += cong/coupled.o
   endif
 
-  # debugfs interface (only when kernel debugfs is available)
-  ifdef CONFIG_TQUIC_DEBUGFS
-    tquic-y += tquic_debug.o
-  endif
+  # debugfs interface - always compile so tquic_debug_level is exported.
+  # tquic_accecn and tquic_bdp_frame import it unconditionally, and our
+  # kernel requires CONFIG_DEBUG_FS=y.  Also pass -DCONFIG_TQUIC_DEBUGFS so
+  # the #ifdef guard in tquic_debug.h resolves to the real declarations
+  # (out-of-tree kbuild doesn't auto-convert make vars to -D flags).
+  tquic-y += tquic_debug.o
+  ccflags-y += -DCONFIG_TQUIC_DEBUGFS
 
   # Forward Error Correction (draft-zheng-quic-fec-extension-01)
   ifdef CONFIG_TQUIC_FEC
