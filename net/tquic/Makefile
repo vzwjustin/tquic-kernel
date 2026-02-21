@@ -66,6 +66,7 @@ tquic-y := \
 	core/stream.o \
 	core/frame.o \
 	core/packet.o \
+	core/quic_packet.o \
 	core/ack_frequency.o \
 	core/flow_control.o \
 	core/transport_params.o \
