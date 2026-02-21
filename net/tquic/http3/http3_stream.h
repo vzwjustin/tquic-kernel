@@ -214,6 +214,9 @@ struct h3_stream {
 	bool priority_incremental;
 	bool priority_valid;		/* True if priority explicitly set */
 
+	/* Reference counting */
+	refcount_t refcnt;
+
 	/* Tree linkage */
 	struct rb_node node;
 	struct list_head list;

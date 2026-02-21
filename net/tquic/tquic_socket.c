@@ -3142,12 +3142,12 @@ int tquic_sock_setsockopt(struct socket *sock, int level, int optname,
 		return 0;
 	}
 
+#ifdef CONFIG_TQUIC_BDP_FRAME
 	case TQUIC_BDP_HMAC_KEY: {
 		/*
 		 * TQUIC_BDP_HMAC_KEY: Set BDP frame HMAC authentication key.
-		 * Wire tquic_bdp_set_hmac_key: EXPORT_SYMBOL_GPL.
-		 *
-		 * optval is expected to be a 32-byte raw key.
+		 * Only available when CONFIG_TQUIC_BDP_FRAME is enabled to
+		 * avoid circular module dependency (tquic <-> tquic_bdp_frame).
 		 */
 		struct tquic_connection *conn;
 		u8 key[TQUIC_BDP_HMAC_KEY_LEN];
@@ -3163,6 +3163,7 @@ int tquic_sock_setsockopt(struct socket *sock, int level, int optname,
 		tquic_conn_put(conn);
 		return 0;
 	}
+#endif /* CONFIG_TQUIC_BDP_FRAME */
 
 	case TQUIC_CONG_DATA_HMAC_KEY: {
 		/*
