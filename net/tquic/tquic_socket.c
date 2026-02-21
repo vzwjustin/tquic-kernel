@@ -52,6 +52,14 @@
 #ifdef CONFIG_TQUIC_IO_URING
 #include "io_uring.h"
 #endif
+#ifdef CONFIG_TQUIC_MULTIPATH
+#include "multipath/mp_deadline.h"
+#endif
+#ifdef CONFIG_TQUIC_OVER_TCP
+#include "transport/tcp_fallback.h"
+#include "transport/quic_over_tcp.h"
+#endif
+#include "sched/deadline_aware.h"
 
 /*
  * Lockdep class keys for TQUIC sockets
@@ -1549,7 +1557,10 @@ int tquic_sock_setsockopt(struct socket *sock, int level, int optname,
 	case TQUIC_REMOVE_TRUSTED_CA:
 	case TQUIC_SCHEDULER:
 	case TQUIC_CONGESTION:
-		/* Variable-length string options, validated in their case blocks */
+	case TQUIC_STREAM_DEADLINE:
+	case TQUIC_CANCEL_STREAM_DEADLINE:
+	case TQUIC_TCP_KEEPALIVE:
+		/* Variable-length struct options, validated in their case blocks */
 		break;
 	default:
 		if (optlen != sizeof(int))
@@ -2542,6 +2553,164 @@ int tquic_sock_setsockopt(struct socket *sock, int level, int optname,
 		return ret;
 	}
 
+	case TQUIC_STREAM_DEADLINE: {
+		/*
+		 * TQUIC_STREAM_DEADLINE: Set a delivery deadline for stream
+		 * data.  Enables deadline-aware path selection for the stream
+		 * so the EDF scheduler can meet real-time delivery requirements.
+		 *
+		 * Userspace passes a tquic_stream_deadline_args struct.
+		 */
+		struct tquic_stream_deadline_args args;
+		struct tquic_connection *conn;
+		int ret;
+
+		if (optlen < sizeof(args))
+			return -EINVAL;
+		if (copy_from_sockptr(&args, optval, sizeof(args)))
+			return -EFAULT;
+		if (args.deadline_us == 0 ||
+		    args.deadline_us > TQUIC_MAX_DEADLINE_US)
+			return -ERANGE;
+
+		conn = tquic_sock_conn_get(tsk);
+		if (!conn)
+			return -ENOTCONN;
+
+		ret = tquic_deadline_set_stream_deadline(conn,
+							 args.stream_id,
+							 args.deadline_us,
+							 args.offset,
+							 args.length,
+							 args.priority,
+							 args.flags);
+		tquic_conn_put(conn);
+		return ret;
+	}
+
+	case TQUIC_CANCEL_STREAM_DEADLINE: {
+		/*
+		 * TQUIC_CANCEL_STREAM_DEADLINE: Cancel pending deadlines for
+		 * a stream, optionally at a specific data offset.
+		 * offset=0 cancels all deadlines on the stream.
+		 */
+		struct tquic_cancel_deadline_args args;
+		struct tquic_connection *conn;
+		int ret;
+
+		if (optlen < sizeof(args))
+			return -EINVAL;
+		if (copy_from_sockptr(&args, optval, sizeof(args)))
+			return -EFAULT;
+
+		conn = tquic_sock_conn_get(tsk);
+		if (!conn)
+			return -ENOTCONN;
+
+		ret = tquic_deadline_cancel_stream_deadline(conn,
+							    args.stream_id,
+							    args.offset);
+		tquic_conn_put(conn);
+		/* Return 0; number of cancelled deadlines is informational */
+		return ret >= 0 ? 0 : ret;
+	}
+
+#ifdef CONFIG_TQUIC_OVER_TCP
+	case TQUIC_TCP_CC_MODE: {
+		/*
+		 * TQUIC_TCP_CC_MODE: Set congestion control coordination mode
+		 * for the QUIC-over-TCP fallback connection.
+		 * val: QUIC_TCP_CC_DISABLED, PASSTHROUGH, or ADAPTIVE
+		 */
+		struct tquic_connection *conn;
+		int ret = -ENOTCONN;
+
+		conn = tquic_sock_conn_get(tsk);
+		if (!conn)
+			return -ENOTCONN;
+
+		if (conn->fallback_ctx) {
+			struct quic_tcp_connection *tcp_conn;
+
+			tcp_conn = tquic_fallback_get_tcp_conn(conn->fallback_ctx);
+			if (tcp_conn) {
+				ret = quic_tcp_set_cc_mode(tcp_conn, val);
+				quic_tcp_conn_put(tcp_conn);
+			} else {
+				ret = -ENOLINK;
+			}
+		}
+		tquic_conn_put(conn);
+		return ret;
+	}
+
+	case TQUIC_TCP_MTU: {
+		/*
+		 * TQUIC_TCP_MTU: Set the MTU used for QUIC-over-TCP framing.
+		 * Useful for tuning packet size when TCP path has unusual MTU.
+		 */
+		struct tquic_connection *conn;
+		int ret = -ENOTCONN;
+
+		if (val < QUIC_TCP_MIN_MTU || val > QUIC_TCP_MAX_MTU)
+			return -ERANGE;
+
+		conn = tquic_sock_conn_get(tsk);
+		if (!conn)
+			return -ENOTCONN;
+
+		if (conn->fallback_ctx) {
+			struct quic_tcp_connection *tcp_conn;
+
+			tcp_conn = tquic_fallback_get_tcp_conn(conn->fallback_ctx);
+			if (tcp_conn) {
+				ret = quic_tcp_set_mtu(tcp_conn, (u32)val);
+				quic_tcp_conn_put(tcp_conn);
+			} else {
+				ret = -ENOLINK;
+			}
+		}
+		tquic_conn_put(conn);
+		return ret;
+	}
+
+	case TQUIC_TCP_KEEPALIVE: {
+		/*
+		 * TQUIC_TCP_KEEPALIVE: Configure TCP keepalive settings for
+		 * the fallback TCP connection to maintain NAT mappings.
+		 */
+		struct tquic_tcp_keepalive_args args;
+		struct tquic_connection *conn;
+		int ret = -ENOTCONN;
+
+		if (optlen < sizeof(args))
+			return -EINVAL;
+		if (copy_from_sockptr(&args, optval, sizeof(args)))
+			return -EFAULT;
+
+		conn = tquic_sock_conn_get(tsk);
+		if (!conn)
+			return -ENOTCONN;
+
+		if (conn->fallback_ctx) {
+			struct quic_tcp_connection *tcp_conn;
+
+			tcp_conn = tquic_fallback_get_tcp_conn(conn->fallback_ctx);
+			if (tcp_conn) {
+				ret = quic_tcp_set_keepalive(tcp_conn,
+							     !!args.enable,
+							     args.interval_ms,
+							     args.timeout_ms);
+				quic_tcp_conn_put(tcp_conn);
+			} else {
+				ret = -ENOLINK;
+			}
+		}
+		tquic_conn_put(conn);
+		return ret;
+	}
+#endif /* CONFIG_TQUIC_OVER_TCP */
+
 	default:
 		return -ENOPROTOOPT;
 	}
@@ -3257,6 +3426,139 @@ int tquic_sock_getsockopt(struct socket *sock, int level, int optname,
 			return -EFAULT;
 		return 0;
 	}
+
+	case TQUIC_DEADLINE_STATS: {
+		/*
+		 * TQUIC_DEADLINE_STATS: Retrieve deadline scheduling statistics
+		 * from the EDF deadline-aware scheduler state.
+		 */
+		struct tquic_deadline_stats dstats = {};
+		struct tquic_connection *conn;
+		struct tquic_deadline_sched_state *ds;
+
+		if (len < sizeof(dstats))
+			return -EINVAL;
+
+		conn = tquic_sock_conn_get(tsk);
+		if (conn) {
+			ds = tquic_deadline_get_state(conn);
+			if (ds)
+				tquic_deadline_get_stats(ds, &dstats);
+			tquic_conn_put(conn);
+		}
+
+		if (copy_to_user(optval, &dstats, sizeof(dstats)))
+			return -EFAULT;
+		if (put_user(sizeof(dstats), optlen))
+			return -EFAULT;
+		return 0;
+	}
+
+#ifdef CONFIG_TQUIC_MULTIPATH
+	case TQUIC_MP_DEADLINE_STATS: {
+		/*
+		 * TQUIC_MP_DEADLINE_STATS: Retrieve multipath deadline
+		 * coordination statistics from the coordinator.
+		 */
+		struct tquic_mp_deadline_stats mpstats = {};
+		struct tquic_connection *conn;
+
+		if (len < sizeof(mpstats))
+			return -EINVAL;
+
+		conn = tquic_sock_conn_get(tsk);
+		if (conn) {
+			if (conn->deadline_coord)
+				tquic_mp_deadline_get_stats(conn->deadline_coord,
+							    &mpstats);
+			tquic_conn_put(conn);
+		}
+
+		if (copy_to_user(optval, &mpstats, sizeof(mpstats)))
+			return -EFAULT;
+		if (put_user(sizeof(mpstats), optlen))
+			return -EFAULT;
+		return 0;
+	}
+#endif /* CONFIG_TQUIC_MULTIPATH */
+
+#ifdef CONFIG_TQUIC_OVER_TCP
+	case TQUIC_TCP_CC_INFO: {
+		/*
+		 * TQUIC_TCP_CC_INFO: Get congestion control information from
+		 * the underlying TCP fallback connection.
+		 * Returns cwnd, rtt, and rtt_var as three u32 values.
+		 */
+		struct {
+			__u32 cwnd;
+			__u32 rtt;
+			__u32 rtt_var;
+		} ccinfo = {};
+		struct tquic_connection *conn;
+		int ret = 0;
+
+		if (len < sizeof(ccinfo))
+			return -EINVAL;
+
+		conn = tquic_sock_conn_get(tsk);
+		if (conn) {
+			if (conn->fallback_ctx) {
+				struct quic_tcp_connection *tcp_conn;
+
+				tcp_conn = tquic_fallback_get_tcp_conn(conn->fallback_ctx);
+				if (tcp_conn) {
+					ret = quic_tcp_get_cc_info(tcp_conn,
+								   &ccinfo.cwnd,
+								   &ccinfo.rtt,
+								   &ccinfo.rtt_var);
+					quic_tcp_conn_put(tcp_conn);
+				} else {
+					ret = -ENOLINK;
+				}
+			}
+			tquic_conn_put(conn);
+		}
+		if (ret < 0)
+			return ret;
+
+		if (copy_to_user(optval, &ccinfo, sizeof(ccinfo)))
+			return -EFAULT;
+		if (put_user(sizeof(ccinfo), optlen))
+			return -EFAULT;
+		return 0;
+	}
+
+	case TQUIC_TCP_FALLBACK_STATS: {
+		/*
+		 * TQUIC_TCP_FALLBACK_STATS: Get QUIC-over-TCP statistics.
+		 */
+		struct quic_tcp_stats tcpstats = {};
+		struct tquic_connection *conn;
+
+		if (len < sizeof(tcpstats))
+			return -EINVAL;
+
+		conn = tquic_sock_conn_get(tsk);
+		if (conn) {
+			if (conn->fallback_ctx) {
+				struct quic_tcp_connection *tcp_conn;
+
+				tcp_conn = tquic_fallback_get_tcp_conn(conn->fallback_ctx);
+				if (tcp_conn) {
+					quic_tcp_get_stats(tcp_conn, &tcpstats);
+					quic_tcp_conn_put(tcp_conn);
+				}
+			}
+			tquic_conn_put(conn);
+		}
+
+		if (copy_to_user(optval, &tcpstats, sizeof(tcpstats)))
+			return -EFAULT;
+		if (put_user(sizeof(tcpstats), optlen))
+			return -EFAULT;
+		return 0;
+	}
+#endif /* CONFIG_TQUIC_OVER_TCP */
 
 	default:
 		return -ENOPROTOOPT;

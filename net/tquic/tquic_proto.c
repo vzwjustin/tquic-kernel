@@ -56,6 +56,9 @@
 #include "tquic_mib.h"
 #include "tquic_compat.h"
 #include "tquic_debug.h"
+#ifdef CONFIG_TQUIC_OVER_TCP
+#include "transport/tcp_fallback.h"
+#endif
 
 /*
  * On < 5.9, sockptr_t doesn't exist in <net/tquic.h> (parsed before
@@ -289,6 +292,44 @@ static int tquic_v4_err(struct sk_buff *skb, u32 info)
 		} else {
 			/* Destination unreachable - path may have failed */
 			tquic_dbg("path unreachable: %pI4\n", &iph->daddr);
+
+#ifdef CONFIG_TQUIC_OVER_TCP
+			/*
+			 * Notify the fallback subsystem of the ICMP error.
+			 * tquic_fallback_on_icmp() will assess whether this
+			 * warrants triggering a switch to TCP transport.
+			 * We need the connection context; extract it from the
+			 * inner QUIC packet's CID if possible.
+			 */
+			if (skb->len >= sizeof(struct iphdr) + 8 + 1) {
+				const u8 *quic_hdr =
+					(const u8 *)(iph + 1) + 8;
+
+				if (!(quic_hdr[0] & 0x80)) {
+					struct tquic_cid dcid2;
+					struct tquic_connection *conn2;
+
+					dcid2.len = TQUIC_DEFAULT_CID_LEN;
+					if (skb->len >=
+					    sizeof(struct iphdr) + 8 +
+					    1 + dcid2.len) {
+						memcpy(dcid2.id,
+						       quic_hdr + 1,
+						       dcid2.len);
+						conn2 = tquic_conn_lookup_by_cid(
+								&dcid2);
+						if (conn2) {
+							if (conn2->fallback_ctx)
+								tquic_fallback_on_icmp(
+									conn2->fallback_ctx,
+									icmp_hdr(skb)->type,
+									icmp_hdr(skb)->code);
+							tquic_conn_put(conn2);
+						}
+					}
+				}
+			}
+#endif /* CONFIG_TQUIC_OVER_TCP */
 		}
 		break;
 

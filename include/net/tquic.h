@@ -159,6 +159,7 @@ struct tquic_addr_discovery_state;
 struct tquic_negotiated_params;
 struct tquic_cid_manager;
 struct tquic_mp_sched_ops;
+struct tquic_mp_deadline_coordinator;
 
 /* State machine magic numbers for type discrimination */
 #define TQUIC_SM_MAGIC_CONN_STATE 0x434F4E53 /* "CONS" */
@@ -1459,6 +1460,10 @@ struct tquic_connection {
 #endif
 #ifdef CONFIG_TQUIC_OVER_TCP
 	struct tquic_fallback_ctx *fallback_ctx; /* TCP fallback; NULL if unused */
+#endif
+#ifdef CONFIG_TQUIC_MULTIPATH
+	/* Cross-path deadline coordination (multipath/mp_deadline.c) */
+	struct tquic_mp_deadline_coordinator *deadline_coord;
 #endif
 
 	struct tquic_pacing_state *pacing; /* Pacing state; NULL if disabled */

@@ -809,18 +809,6 @@ EXPORT_SYMBOL_GPL(tquic_mp_deadline_complete_load);
  */
 
 /**
- * struct tquic_mp_deadline_stats - Multipath deadline statistics
- */
-struct tquic_mp_deadline_stats {
-	u32 num_paths;
-	u32 deadline_capable_paths;
-	u64 total_load;
-	u64 assignments;
-	u64 rebalances;
-	u64 cross_path_switches;
-};
-
-/**
  * tquic_mp_deadline_get_stats - Get multipath deadline statistics
  * @coord: Coordinator
  * @stats: Output statistics

@@ -1142,4 +1142,101 @@ struct tquic_xdp_stats {
 #define TQUIC_QLOG_FILTER		252
 #define SO_TQUIC_QLOG_FILTER		TQUIC_QLOG_FILTER
 
+/*
+ * Deadline-Aware Scheduling Socket Options
+ *
+ * TQUIC_STREAM_DEADLINE:
+ *   setsockopt(fd, SOL_TQUIC, TQUIC_STREAM_DEADLINE, &args, sizeof(args))
+ *   Sets a delivery deadline for stream data.
+ *
+ * TQUIC_CANCEL_STREAM_DEADLINE:
+ *   setsockopt(fd, SOL_TQUIC, TQUIC_CANCEL_STREAM_DEADLINE, &args,
+ *              sizeof(args))
+ *   Cancels pending deadline(s) for a stream.
+ *
+ * TQUIC_DEADLINE_STATS:
+ *   getsockopt(fd, SOL_TQUIC, TQUIC_DEADLINE_STATS, &stats, &len)
+ *   Retrieves deadline scheduling statistics for the connection.
+ *
+ * TQUIC_MP_DEADLINE_STATS:
+ *   getsockopt(fd, SOL_TQUIC, TQUIC_MP_DEADLINE_STATS, &stats, &len)
+ *   Retrieves multipath deadline coordination statistics.
+ */
+#define TQUIC_STREAM_DEADLINE		260
+#define TQUIC_CANCEL_STREAM_DEADLINE	261
+#define TQUIC_DEADLINE_STATS		262
+#define TQUIC_MP_DEADLINE_STATS		263
+
+/**
+ * struct tquic_stream_deadline_args - Arguments for TQUIC_STREAM_DEADLINE
+ * @stream_id: Target stream ID
+ * @deadline_us: Relative deadline in microseconds from now
+ * @offset: Data offset deadline applies to (0 for current)
+ * @length: Data length deadline covers (0 for all pending)
+ * @priority: Deadline priority (TQUIC_DEADLINE_PRIO_*)
+ * @flags: Deadline flags (TQUIC_DEADLINE_FLAG_*)
+ */
+struct tquic_stream_deadline_args {
+	__u64 stream_id;
+	__u64 deadline_us;
+	__u64 offset;
+	__u64 length;
+	__u8  priority;
+	__u32 flags;
+	__u8  reserved[3];
+};
+
+/**
+ * struct tquic_cancel_deadline_args - Arguments for
+ *                                      TQUIC_CANCEL_STREAM_DEADLINE
+ * @stream_id: Target stream ID
+ * @offset: Data offset to cancel (0 for all deadlines on stream)
+ */
+struct tquic_cancel_deadline_args {
+	__u64 stream_id;
+	__u64 offset;
+};
+
+/*
+ * QUIC-over-TCP Fallback Socket Options (CONFIG_TQUIC_OVER_TCP)
+ *
+ * TQUIC_TCP_CC_MODE:
+ *   setsockopt(fd, SOL_TQUIC, TQUIC_TCP_CC_MODE, &mode, sizeof(mode))
+ *   Sets the congestion control coordination mode for TCP fallback.
+ *   mode: QUIC_TCP_CC_DISABLED (0), PASSTHROUGH (1), ADAPTIVE (2)
+ *
+ * TQUIC_TCP_MTU:
+ *   setsockopt(fd, SOL_TQUIC, TQUIC_TCP_MTU, &mtu, sizeof(mtu))
+ *   Sets the MTU for QUIC-over-TCP framing.
+ *
+ * TQUIC_TCP_KEEPALIVE:
+ *   setsockopt(fd, SOL_TQUIC, TQUIC_TCP_KEEPALIVE, &args, sizeof(args))
+ *   Configures TCP keepalive settings.
+ *
+ * TQUIC_TCP_CC_INFO:
+ *   getsockopt(fd, SOL_TQUIC, TQUIC_TCP_CC_INFO, &info, &len)
+ *   Retrieves TCP congestion control information.
+ *
+ * TQUIC_TCP_FALLBACK_STATS:
+ *   getsockopt(fd, SOL_TQUIC, TQUIC_TCP_FALLBACK_STATS, &stats, &len)
+ *   Retrieves QUIC-over-TCP statistics.
+ */
+#define TQUIC_TCP_CC_MODE		270
+#define TQUIC_TCP_MTU			271
+#define TQUIC_TCP_KEEPALIVE		272
+#define TQUIC_TCP_CC_INFO		273
+#define TQUIC_TCP_FALLBACK_STATS	274
+
+/**
+ * struct tquic_tcp_keepalive_args - Arguments for TQUIC_TCP_KEEPALIVE
+ * @enable: Enable keepalive (non-zero = enable)
+ * @interval_ms: Keepalive interval in milliseconds (0 = default)
+ * @timeout_ms: Keepalive timeout in milliseconds (0 = default)
+ */
+struct tquic_tcp_keepalive_args {
+	__u32 enable;
+	__u32 interval_ms;
+	__u32 timeout_ms;
+};
+
 #endif /* _UAPI_LINUX_TQUIC_H */

@@ -27,6 +27,9 @@
 #include "../tquic_init.h"
 #include "../bond/tquic_bonding.h"
 #include "../bond/tquic_failover.h"
+#ifdef CONFIG_TQUIC_OVER_TCP
+#include "../transport/tcp_fallback.h"
+#endif
 
 /* Maximum PTO probes before declaring connection dead */
 #define TQUIC_MAX_PTO_COUNT 6
@@ -1232,6 +1235,22 @@ void tquic_loss_detection_detect_lost(struct tquic_connection *conn,
 	}
 
 out_put_path:
+#ifdef CONFIG_TQUIC_OVER_TCP
+	/*
+	 * Notify the TCP fallback subsystem of the current loss rate so
+	 * it can trigger a fallback to TCP if loss exceeds the configured
+	 * threshold.  Compute a coarse 8-bit percentage from connection
+	 * lifetime counters (saturate at 100%).
+	 */
+	if (conn->fallback_ctx && conn->stats.tx_packets > 0) {
+		u64 loss_pct = div64_u64(conn->stats.lost_packets * 100,
+					 conn->stats.tx_packets);
+
+		tquic_fallback_update_loss(conn->fallback_ctx,
+					   (u8)min_t(u64, loss_pct, 100));
+	}
+#endif /* CONFIG_TQUIC_OVER_TCP */
+
 	if (path)
 		tquic_path_put(path);
 }

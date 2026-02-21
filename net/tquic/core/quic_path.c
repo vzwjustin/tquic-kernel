@@ -22,6 +22,10 @@
 #include "../protocol.h"
 #include "../tquic_mib.h"
 #include "../tquic_init.h"
+#ifdef CONFIG_TQUIC_MULTIPATH
+#include "../multipath/mp_deadline.h"
+#endif
+#include "../sched/deadline_aware.h"
 
 /* Forward declarations to silence -Wmissing-prototypes */
 void tquic_trace_path_validated(struct tquic_connection *conn, u32 path_id,
@@ -305,6 +309,12 @@ tquic_path_create_internal(struct tquic_connection *conn,
 
 		tquic_conn_info(conn, "path %u created, mtu=%u\n",
 				path->path_id, path->mtu);
+
+#ifdef CONFIG_TQUIC_MULTIPATH
+		/* Notify deadline coordinator of new path */
+		if (conn->deadline_coord)
+			tquic_mp_deadline_path_added(conn->deadline_coord, path);
+#endif
 	}
 
 	return path;
@@ -324,6 +334,12 @@ void tquic_path_destroy(struct tquic_path *path)
 
 	tquic_dbg("tquic_path_destroy: path=%u state=%d\n",
 		  path->path_id, path->state);
+
+#ifdef CONFIG_TQUIC_MULTIPATH
+	/* Notify deadline coordinator before removing path from lists */
+	if (path->conn && path->conn->deadline_coord)
+		tquic_mp_deadline_path_removed(path->conn->deadline_coord, path);
+#endif
 
 	/* Remove from list if linked */
 	if (!list_empty(&path->list))
@@ -514,6 +530,27 @@ void tquic_path_on_validated(struct tquic_path *path)
 	 * PMTUD state and leaking the first allocation.
 	 */
 	tquic_pmtud_start(path);
+
+	/*
+	 * Notify the deadline scheduler of the path state change so it
+	 * can update path capability assessments and re-evaluate feasibility
+	 * of pending deadlines on this path.
+	 */
+	{
+		struct tquic_deadline_sched_state *ds;
+
+		ds = tquic_deadline_get_state(conn);
+		if (ds)
+			tquic_deadline_on_path_change(ds, path,
+						      TQUIC_PATH_VALIDATED);
+	}
+
+#ifdef CONFIG_TQUIC_MULTIPATH
+	/* Notify deadline coordinator of path state change */
+	if (conn->deadline_coord)
+		tquic_mp_deadline_path_state_changed(conn->deadline_coord, path,
+						     TQUIC_PATH_VALIDATED);
+#endif
 }
 
 /*
@@ -617,6 +654,37 @@ int tquic_path_migrate(struct tquic_connection *conn, struct tquic_path *path)
 
 	/* Notify bonding layer so it can rebalance schedulers */
 	tquic_bond_path_recovered(conn, path);
+
+	/*
+	 * Notify the deadline scheduler of the path state transitions so
+	 * it can update path capability assessments for both the new active
+	 * path and the old path moving to standby.
+	 */
+	{
+		struct tquic_deadline_sched_state *ds;
+
+		ds = tquic_deadline_get_state(conn);
+		if (ds) {
+			tquic_deadline_on_path_change(ds, path,
+						      TQUIC_PATH_ACTIVE);
+			if (old_path)
+				tquic_deadline_on_path_change(ds, old_path,
+							      TQUIC_PATH_STANDBY);
+		}
+	}
+
+#ifdef CONFIG_TQUIC_MULTIPATH
+	/* Notify deadline coordinator of path state transitions */
+	if (conn->deadline_coord) {
+		tquic_mp_deadline_path_state_changed(conn->deadline_coord,
+						     path,
+						     TQUIC_PATH_ACTIVE);
+		if (old_path)
+			tquic_mp_deadline_path_state_changed(conn->deadline_coord,
+							     old_path,
+							     TQUIC_PATH_STANDBY);
+	}
+#endif /* CONFIG_TQUIC_MULTIPATH */
 
 	return 0;
 }

@@ -14,7 +14,47 @@
 
 /* Forward declarations */
 struct tquic_mp_deadline_coordinator;
-struct tquic_mp_deadline_stats;
+
+/**
+ * struct tquic_mp_deadline_stats - Multipath deadline statistics
+ * @num_paths: Number of tracked paths
+ * @deadline_capable_paths: Paths capable of meeting deadlines
+ * @total_load: Total deadline load in bytes
+ * @assignments: Total deadline assignments made
+ * @rebalances: Number of rebalancing operations
+ * @cross_path_switches: Cross-path deadline switches
+ */
+struct tquic_mp_deadline_stats {
+	u32 num_paths;
+	u32 deadline_capable_paths;
+	u64 total_load;
+	u64 assignments;
+	u64 rebalances;
+	u64 cross_path_switches;
+};
+
+/**
+ * mp_deadline_select_best_path - Select best path for a deadline
+ * @coord: Coordinator
+ * @deadline_us: Deadline in microseconds
+ * @data_len: Amount of data to send
+ *
+ * Returns: Best path for meeting the deadline, or NULL if none can
+ */
+struct tquic_path *
+mp_deadline_select_best_path(struct tquic_mp_deadline_coordinator *coord,
+			     u64 deadline_us, size_t data_len);
+
+/**
+ * mp_deadline_record_delivery - Record deadline delivery result
+ * @coord: Coordinator
+ * @path: Path used for delivery
+ * @deadline_met: Whether deadline was met
+ * @delivery_time_us: Actual delivery time in microseconds
+ */
+void mp_deadline_record_delivery(struct tquic_mp_deadline_coordinator *coord,
+				 struct tquic_path *path, bool deadline_met,
+				 u64 delivery_time_us);
 
 /**
  * tquic_mp_deadline_path_added - Notify coordinator of new path

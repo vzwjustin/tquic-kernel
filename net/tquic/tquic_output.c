@@ -60,6 +60,7 @@
 #endif
 #ifdef CONFIG_TQUIC_OVER_TCP
 #include "transport/tcp_fallback.h"
+#include "transport/quic_over_tcp.h"
 #endif
 
 /* Scheduler failover wrappers (multipath/tquic_scheduler.c) */
@@ -2343,6 +2344,28 @@ int tquic_output_packet(struct tquic_connection *conn, struct tquic_path *path,
 		}
 	}
 
+#ifdef CONFIG_TQUIC_OVER_TCP
+	/*
+	 * If TCP fallback is active, route this packet through the
+	 * TCP transport layer instead of UDP.  tquic_fallback_send()
+	 * returns -ENOTSUP when fallback is not active; in that case
+	 * we fall through to the normal UDP transmission path.
+	 */
+	if (conn && conn->fallback_ctx) {
+		int fb_ret = tquic_fallback_send(conn->fallback_ctx,
+						 skb->data, skb->len);
+
+		if (fb_ret >= 0) {
+			/* Sent via TCP; update stats and free the skb */
+			tquic_path_on_data_sent(path, skb->len);
+			tquic_conn_on_packet_sent(conn, skb->len);
+			kfree_skb(skb);
+			return 0;
+		}
+		/* fb_ret == -ENOTSUP: UDP not in fallback mode, continue */
+	}
+#endif /* CONFIG_TQUIC_OVER_TCP */
+
 #ifdef CONFIG_TQUIC_OFFLOAD
 	if (conn && path && path->dev) {
 		struct tquic_nic_device *nic = tquic_nic_find(path->dev);
@@ -3709,6 +3732,30 @@ int tquic_output_flush(struct tquic_connection *conn)
 			conn, READ_ONCE(conn->state));
 		return -ENOTCONN;
 	}
+
+#ifdef CONFIG_TQUIC_OVER_TCP
+	if (conn->fallback_ctx) {
+		struct quic_tcp_connection *tcp_conn;
+
+		/*
+		 * Run the periodic fallback condition check so timeouts and
+		 * high-loss events are detected promptly.
+		 */
+		tquic_fallback_check(conn->fallback_ctx);
+
+		/*
+		 * If TCP fallback is active, flush the TCP transmit buffer
+		 * and return; the normal UDP flush path is not applicable.
+		 */
+		tcp_conn = tquic_fallback_get_tcp_conn(conn->fallback_ctx);
+		if (tcp_conn) {
+			int tcp_ret = quic_tcp_flush(tcp_conn);
+
+			quic_tcp_conn_put(tcp_conn);
+			return tcp_ret;
+		}
+	}
+#endif /* CONFIG_TQUIC_OVER_TCP */
 
 	/*
 	 * Avoid concurrent flushers racing conn_credit / conn->data_sent.

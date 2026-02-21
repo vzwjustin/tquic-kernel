@@ -31,6 +31,9 @@
 #include "../fec/fec.h"
 #endif
 #include "../multipath/tquic_sched.h"
+#ifdef CONFIG_TQUIC_MULTIPATH
+#include "../multipath/mp_deadline.h"
+#endif
 #ifdef CONFIG_TQUIC_QUIC_LB
 #include "../lb/quic_lb.h"
 #endif
@@ -918,6 +921,18 @@ struct tquic_connection *tquic_conn_create(struct tquic_sock *tsk,
 	/* Non-fatal: GRO disabled if allocation fails */
 #endif /* CONFIG_TQUIC_NAPI */
 
+#ifdef CONFIG_TQUIC_MULTIPATH
+	/*
+	 * Create the deadline coordinator for cross-path deadline management
+	 * (multipath/mp_deadline.c).  Errors here are non-fatal; the
+	 * coordinator is optional and deadline scheduling degrades gracefully
+	 * without it.
+	 */
+	conn->deadline_coord =
+		tquic_mp_deadline_coordinator_create(conn);
+	/* Non-fatal if NULL: mp_deadline functions null-guard the pointer */
+#endif /* CONFIG_TQUIC_MULTIPATH */
+
 	/*
 	 * SECURITY FIX (CF-098): Insert into the global connection
 	 * hash table so that diagnostics, proc, and debug interfaces
@@ -1152,6 +1167,18 @@ void tquic_conn_destroy(struct tquic_connection *conn)
 
 	/* Release multipath scheduler state bound to this connection. */
 	tquic_mp_sched_release_conn(conn);
+
+#ifdef CONFIG_TQUIC_MULTIPATH
+	/*
+	 * Tear down the deadline coordinator after the scheduler is released
+	 * so no further path events can arrive after the coordinator's memory
+	 * is freed.
+	 */
+	if (conn->deadline_coord) {
+		tquic_mp_deadline_coordinator_destroy(conn->deadline_coord);
+		conn->deadline_coord = NULL;
+	}
+#endif /* CONFIG_TQUIC_MULTIPATH */
 
 	if (conn->pacing) {
 		tquic_pacing_cleanup(conn->pacing);

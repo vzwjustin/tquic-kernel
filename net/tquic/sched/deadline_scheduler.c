@@ -29,6 +29,9 @@
 
 #include "deadline_aware.h"
 #include "../tquic_debug.h"
+#ifdef CONFIG_TQUIC_MULTIPATH
+#include "../multipath/mp_deadline.h"
+#endif
 
 /* Forward declarations for exported functions not in a public header */
 struct tquic_edf_scheduler;
@@ -834,6 +837,7 @@ EXPORT_SYMBOL_GPL(tquic_edf_get_stats);
 
 struct edf_sched_priv {
 	struct tquic_edf_scheduler *sched;
+	struct tquic_connection *conn;
 };
 
 static struct tquic_path *edf_sched_active_path_get(struct tquic_connection *conn)
@@ -851,17 +855,33 @@ static struct tquic_path *edf_sched_active_path_get(struct tquic_connection *con
 
 static void *edf_sched_init(struct tquic_connection *conn)
 {
+	struct tquic_deadline_params params = {
+		.enable_deadline_aware = true,
+		.deadline_granularity  = TQUIC_DEADLINE_GRANULARITY_MS,
+		.max_deadline_streams  = TQUIC_MAX_DEADLINE_STREAMS,
+		.miss_policy           = TQUIC_DEADLINE_MISS_BEST_EFFORT,
+	};
 	struct edf_sched_priv *priv;
 
 	priv = kzalloc(sizeof(*priv), GFP_KERNEL);
 	if (!priv)
 		return NULL;
 
+	priv->conn = conn;
+
 	priv->sched = tquic_edf_scheduler_create(conn, 1024);
 	if (!priv->sched) {
 		kfree(priv);
 		return NULL;
 	}
+
+	/*
+	 * Initialise the deadline-aware layer.  Store per-connection state
+	 * in conn->sched_priv; tquic_deadline_sched_init() does this.
+	 * Errors here are non-fatal — the EDF scheduler continues to work
+	 * without full deadline awareness.
+	 */
+	tquic_deadline_sched_init(conn, &params);
 
 	return priv;
 }
@@ -871,8 +891,79 @@ static void edf_sched_release(void *state)
 	struct edf_sched_priv *priv = state;
 
 	if (priv) {
+		/*
+		 * Release the deadline-aware layer before destroying the EDF
+		 * tree so all deadline entries are freed while the cache is
+		 * still alive.
+		 */
+		if (priv->conn)
+			tquic_deadline_sched_release(priv->conn);
+
 		tquic_edf_scheduler_destroy(priv->sched);
 		kfree(priv);
+	}
+}
+
+/*
+ * edf_sched_feedback - Post-send feedback for deadline-aware scheduling
+ *
+ * Called after a packet is sent or when an ACK/loss event is processed.
+ * Provides stream-level feedback to the deadline layer so it can update
+ * delivery statistics and feasibility assessments.
+ *
+ * On success: notify deadline_aware layer via on_ack, complete load
+ * tracking in the multipath deadline coordinator, and record delivery
+ * result for per-path miss-rate accounting.
+ *
+ * On failure: notify deadline_aware layer via on_loss so it can
+ * re-evaluate path feasibility.
+ */
+static void edf_sched_feedback(void *state, struct tquic_path *path,
+				struct sk_buff *skb, bool success)
+{
+	struct edf_sched_priv *priv = state;
+	struct tquic_deadline_sched_state *ds;
+	struct tquic_stream_skb_cb *scb;
+	u64 stream_id;
+	u64 offset;
+
+	if (!priv || !priv->conn || !skb)
+		return;
+
+	ds = tquic_deadline_get_state(priv->conn);
+	if (!ds)
+		return;
+
+	scb = tquic_stream_skb_cb(skb);
+	stream_id = 0; /* non-stream packet */
+	offset = scb ? scb->stream_offset : 0;
+
+	if (success) {
+		tquic_deadline_on_ack(ds, stream_id, offset, ktime_get());
+#ifdef CONFIG_TQUIC_MULTIPATH
+		/*
+		 * Complete load tracking so the coordinator can rebalance
+		 * after the bytes have been acknowledged on this path.
+		 */
+		if (path && priv->conn->deadline_coord) {
+			tquic_mp_deadline_complete_load(priv->conn->deadline_coord,
+							path, (u64)skb->len);
+			mp_deadline_record_delivery(priv->conn->deadline_coord,
+						    path, true,
+						    ktime_us_delta(ktime_get(),
+								   skb->tstamp));
+		}
+#endif /* CONFIG_TQUIC_MULTIPATH */
+	} else {
+		tquic_deadline_on_loss(ds, stream_id, offset);
+#ifdef CONFIG_TQUIC_MULTIPATH
+		if (path && priv->conn->deadline_coord) {
+			tquic_mp_deadline_complete_load(priv->conn->deadline_coord,
+							path, (u64)skb->len);
+			mp_deadline_record_delivery(priv->conn->deadline_coord,
+						    path, false, 0);
+		}
+#endif /* CONFIG_TQUIC_MULTIPATH */
 	}
 }
 
@@ -881,13 +972,55 @@ static struct tquic_path *edf_sched_select(void *state,
 					   struct sk_buff *skb)
 {
 	struct edf_sched_priv *priv = state;
+	struct tquic_deadline_sched_state *ds;
 	struct tquic_path *path = NULL;
 
+	if (!priv || !skb)
+		return edf_sched_active_path_get(conn);
+
 	/*
-	 * For non-deadline traffic, use ECF-style selection.
-	 * Deadline traffic is handled through tquic_edf_dequeue().
+	 * Step 1: Try the deadline-aware layer.
+	 * tquic_deadline_schedule_packet() selects a path that can meet
+	 * the earliest pending deadline for this packet's stream.
+	 * stream_id=0 means "any stream".
 	 */
-	if (priv && priv->sched) {
+	ds = tquic_deadline_get_state(conn);
+	if (ds) {
+		path = tquic_deadline_schedule_packet(ds, skb, 0);
+		if (path)
+			goto out_assign_load;
+	}
+
+#ifdef CONFIG_TQUIC_MULTIPATH
+	/*
+	 * Step 2: Try cross-path deadline coordination.
+	 * mp_deadline_select_best_path() picks the path that can deliver
+	 * data within the tightest remaining deadline across all paths,
+	 * considering current load and jitter on each path.
+	 *
+	 * We use TQUIC_DEFAULT_DEADLINE_US as a conservative deadline
+	 * budget when no explicit per-stream deadline is set.
+	 */
+	if (!path && conn->deadline_coord) {
+		struct tquic_path *mp_path;
+
+		mp_path = mp_deadline_select_best_path(conn->deadline_coord,
+						       TQUIC_DEFAULT_DEADLINE_US,
+						       (size_t)skb->len);
+		if (mp_path) {
+			if (tquic_path_get(mp_path))
+				path = mp_path;
+		}
+		if (path)
+			goto out_assign_load;
+	}
+#endif /* CONFIG_TQUIC_MULTIPATH */
+
+	/*
+	 * Step 3: Fall back to ECF-style selection: choose the path with
+	 * the shortest estimated delivery time for the packet.
+	 */
+	if (priv->sched) {
 		struct tquic_path *best = NULL;
 		u64 min_completion = ULLONG_MAX;
 
@@ -908,17 +1041,32 @@ static struct tquic_path *edf_sched_select(void *state,
 			best = NULL;
 		rcu_read_unlock();
 
-		return best ?: edf_sched_active_path_get(conn);
+		path = best ?: edf_sched_active_path_get(conn);
 	}
 
-	return edf_sched_active_path_get(conn);
+	if (!path)
+		path = edf_sched_active_path_get(conn);
+
+out_assign_load:
+#ifdef CONFIG_TQUIC_MULTIPATH
+	/*
+	 * Track outstanding deadline bytes on the selected path so the
+	 * coordinator can rebalance when load becomes uneven.
+	 */
+	if (path && conn->deadline_coord)
+		tquic_mp_deadline_assign_load(conn->deadline_coord, path,
+					      (u64)skb->len);
+#endif /* CONFIG_TQUIC_MULTIPATH */
+
+	return path;
 }
 
 static struct tquic_sched_ops tquic_sched_edf = {
-	.name = "edf",
-	.init = edf_sched_init,
-	.release = edf_sched_release,
-	.select = edf_sched_select,
+	.name     = "edf",
+	.init     = edf_sched_init,
+	.release  = edf_sched_release,
+	.select   = edf_sched_select,
+	.feedback = edf_sched_feedback,
 };
 
 /*

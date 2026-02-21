@@ -357,16 +357,48 @@ EXPORT_SYMBOL_GPL(tquic_fallback_on_icmp);
  * =============================================================================
  */
 
-static void fallback_tcp_packet_callback(void *data, const u8 *packet, size_t len)
+static void fallback_fc_callback(void *data, bool blocked)
 {
 	struct tquic_fallback_ctx *ctx = data;
 
 	if (!ctx || !ctx->conn)
 		return;
 
-	/* Deliver packet to QUIC connection for processing */
-	/* This would call into the QUIC packet input path */
+	/*
+	 * Flow control state changed on the TCP connection.
+	 * Wake or pause the QUIC TX path accordingly.
+	 */
+	if (!blocked)
+		schedule_work(&ctx->conn->tx_work);
+}
+
+static void fallback_tcp_packet_callback(void *data, const u8 *packet, size_t len)
+{
+	struct tquic_fallback_ctx *ctx = data;
+	struct sockaddr_storage tcp_src = {};
+
+	if (!ctx || !ctx->conn || !ctx->tcp_conn)
+		return;
+
 	pr_debug("tquic_fallback: received %zu byte packet over TCP\n", len);
+
+	/*
+	 * Deliver the QUIC packet to the connection via the coalesced
+	 * packet processor.  tquic_process_coalesced() handles Initial,
+	 * Handshake, and Short Header packets through the normal crypto
+	 * and frame dispatch path.  Pass NULL for path since this packet
+	 * arrived on a TCP transport, not a UDP QUIC path.
+	 *
+	 * tcp_src is zero-initialised; the source address is implicit in
+	 * the TCP connection context so path validation is not applied.
+	 */
+	tquic_process_coalesced(ctx->conn, NULL, (u8 *)packet, len, &tcp_src);
+
+	/*
+	 * Update TCP receive window now that buffer space has been consumed.
+	 * This coordinates QUIC and TCP flow control to prevent buffer bloat.
+	 */
+	quic_tcp_update_recv_window(ctx->tcp_conn);
 }
 
 static void fallback_do_fallback(struct work_struct *work)
@@ -406,7 +438,7 @@ static void fallback_do_fallback(struct work_struct *work)
 	/* Copy address while holding path reference */
 	memcpy(&addr, &path->remote_addr, sizeof(addr));
 	rcu_read_unlock();
-	tquic_path_put(path);
+	/* Do NOT drop path reference yet - we need it for quic_tcp_attach_to_path */
 
 	addrlen = (addr.ss_family == AF_INET6) ? sizeof(struct sockaddr_in6) :
 						 sizeof(struct sockaddr_in);
@@ -416,20 +448,30 @@ static void fallback_do_fallback(struct work_struct *work)
 	if (IS_ERR(tcp_conn)) {
 		pr_err("tquic_fallback: failed to create TCP connection: %ld\n",
 		       PTR_ERR(tcp_conn));
+		tquic_path_put(path);
 		spin_lock_bh(&ctx->lock);
 		ctx->state = FALLBACK_STATE_UDP;  /* Revert to UDP */
 		spin_unlock_bh(&ctx->lock);
 		return;
 	}
 
-	/* Set packet callback */
+	/* Set packet delivery callback */
 	quic_tcp_set_packet_callback(tcp_conn, fallback_tcp_packet_callback, ctx);
 
 	/*
-	 * Note: We don't need to attach to a specific path as the TCP
-	 * connection is associated with the QUIC connection as a whole.
-	 * The QUIC connection will route packets through this TCP transport.
+	 * Register flow-control notification callback so that TCP send-window
+	 * state changes wake the QUIC TX path promptly (blocked=false) or
+	 * suppress it (blocked=true).
 	 */
+	quic_tcp_set_flow_control_callback(tcp_conn, fallback_fc_callback, ctx);
+
+	/*
+	 * Attach the TCP connection to the primary QUIC path so that path-
+	 * level MTU and RTT accounting remain coherent during fallback.
+	 * path reference is still valid; drop it immediately after.
+	 */
+	quic_tcp_attach_to_path(tcp_conn, path);
+	tquic_path_put(path);
 
 	spin_lock_bh(&ctx->lock);
 	ctx->tcp_conn = tcp_conn;
@@ -562,8 +604,9 @@ static void fallback_do_recovery(struct work_struct *work)
 
 		spin_lock_bh(&ctx->lock);
 
-		/* Close TCP connection */
+		/* Detach from QUIC path, then close TCP connection */
 		if (ctx->tcp_conn) {
+			quic_tcp_detach_from_path(ctx->tcp_conn);
 			quic_tcp_close(ctx->tcp_conn);
 			ctx->tcp_conn = NULL;
 		}
@@ -703,8 +746,21 @@ int tquic_fallback_send(struct tquic_fallback_ctx *ctx,
 	spin_lock_bh(&ctx->lock);
 
 	if (ctx->state == FALLBACK_STATE_TCP && ctx->tcp_conn) {
+		struct quic_tcp_connection *tc = ctx->tcp_conn;
+		u64 credit;
+
 		spin_unlock_bh(&ctx->lock);
-		return quic_tcp_send(ctx->tcp_conn, data, len);
+
+		/*
+		 * Honour TCP send-side flow control: if the available credit
+		 * is less than what we need the caller must wait for the FC
+		 * callback to reschedule transmission.
+		 */
+		credit = quic_tcp_get_send_credit(tc);
+		if (credit < len)
+			return -EAGAIN;
+
+		return quic_tcp_send(tc, data, len);
 	}
 
 	spin_unlock_bh(&ctx->lock);
@@ -728,10 +784,23 @@ void tquic_fallback_update_loss(struct tquic_fallback_ctx *ctx, u8 loss_pct)
 
 	fallback_record_loss(ctx, loss_pct);
 
-	/* Check if we should trigger fallback */
-	if (ctx->state == FALLBACK_STATE_UDP && fallback_check_loss(ctx)) {
-		tquic_fallback_trigger(ctx, FALLBACK_REASON_LOSS);
+	/*
+	 * When already on TCP, notify the TCP CC layer about application-
+	 * visible loss so it can adjust its congestion window accordingly.
+	 */
+	spin_lock_bh(&ctx->lock);
+	if (ctx->state == FALLBACK_STATE_TCP && ctx->tcp_conn) {
+		struct quic_tcp_connection *tc = ctx->tcp_conn;
+
+		spin_unlock_bh(&ctx->lock);
+		quic_tcp_on_loss_event(tc);
+	} else {
+		spin_unlock_bh(&ctx->lock);
 	}
+
+	/* Check if we should trigger fallback (UDP path only) */
+	if (ctx->state == FALLBACK_STATE_UDP && fallback_check_loss(ctx))
+		tquic_fallback_trigger(ctx, FALLBACK_REASON_LOSS);
 }
 EXPORT_SYMBOL_GPL(tquic_fallback_update_loss);
 
