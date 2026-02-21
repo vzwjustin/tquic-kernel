@@ -56,6 +56,8 @@ quic-y := \
 	tquic/grease.o \
 	tquic/tquic_ack_frequency.o \
 	tquic/security_hardening.o \
+	tquic/tquic_wire_b.o \
+	tquic/cong/accecn.o \
 	tquic/cong/cong_data.o \
 	tquic/cong/persistent_cong.o \
 	tquic/cong/bbrv2.o \
