@@ -30,6 +30,7 @@
 #ifdef CONFIG_TQUIC_FEC
 #include "../fec/fec.h"
 #endif
+#include "../multipath/tquic_sched.h"
 #ifdef CONFIG_TQUIC_QUIC_LB
 #include "../lb/quic_lb.h"
 #endif
@@ -1148,6 +1149,9 @@ void tquic_conn_destroy(struct tquic_connection *conn)
 		conn->sched_priv = NULL;
 	}
 #endif /* CONFIG_TQUIC_SCHEDULER */
+
+	/* Release multipath scheduler state bound to this connection. */
+	tquic_mp_sched_release_conn(conn);
 
 	if (conn->pacing) {
 		tquic_pacing_cleanup(conn->pacing);

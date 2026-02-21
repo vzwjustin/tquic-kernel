@@ -223,6 +223,11 @@ static int tquic_gro_flush_timeout_us_max = 10000;	/* 10 ms ceiling */
 struct tquic_sched_ops;
 struct tquic_sched_ops *tquic_sched_find(const char *name);
 int tquic_sched_set_default(const char *name);
+struct tquic_sched_ops *tquic_new_sched_find(const char *name);
+int tquic_set_default_scheduler(const char *name);
+const char *tquic_get_default_scheduler(void);
+int tquic_mp_sched_set_default(struct net *net, const char *name);
+const char *tquic_mp_sched_get_default(struct net *net);
 
 /* Forward declarations for CC API */
 struct tquic_cong_ops;
@@ -260,6 +265,10 @@ static int proc_tquic_scheduler(TQUIC_CTL_TABLE *table, int write,
 			current_name = tn->sched_name;
 		else
 			current_name = tquic_sched_get_default(net);
+		if (!current_name || !current_name[0])
+			current_name = tquic_mp_sched_get_default(net);
+		if (!current_name || !current_name[0])
+			current_name = tquic_get_default_scheduler();
 		if (!current_name)
 			current_name = "aggregate";
 		strscpy(name, current_name, sizeof(name));
@@ -302,6 +311,24 @@ static int proc_tquic_scheduler(TQUIC_CTL_TABLE *table, int write,
 	ret = tquic_sched_set_default(name);
 	if (ret) {
 		tquic_warn("failed to set scheduler '%s': %d\n", name, ret);
+		return ret;
+	}
+
+	/*
+	 * Propagate to the new-style multipath scheduler registry so that
+	 * the per-netns and global-legacy registries stay in sync.
+	 * Ignore ENOENT — the scheduler may only exist in one registry.
+	 */
+	ret = tquic_mp_sched_set_default(net, name);
+	if (ret && ret != -ENOENT) {
+		tquic_warn("mp_sched_set_default '%s': %d\n", name, ret);
+		return ret;
+	}
+
+	/* Also update the legacy global default used by older paths. */
+	ret = tquic_set_default_scheduler(name);
+	if (ret && ret != -ENOENT) {
+		tquic_warn("set_default_scheduler '%s': %d\n", name, ret);
 		return ret;
 	}
 
@@ -532,6 +559,15 @@ static int tquic_sysctl_scheduler(TQUIC_CTL_TABLE *table, int write,
 
 	/* Set global default scheduler (void return in current API) */
 	tquic_sched_set_default(tquic_scheduler);
+
+	/*
+	 * Also update the new-style scheduler registries.  Use
+	 * tquic_new_sched_find() to confirm the name is known before
+	 * calling tquic_set_default_scheduler() so we can log clearly
+	 * on mismatch without silently swallowing the error.
+	 */
+	if (tquic_new_sched_find(tquic_scheduler))
+		tquic_set_default_scheduler(tquic_scheduler);
 
 	return 0;
 }

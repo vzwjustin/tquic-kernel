@@ -194,6 +194,16 @@ struct tquic_cert_verify_args {
 #define TQUIC_MAX_CERT_DER_SIZE		16384
 #define TQUIC_MAX_KEY_DER_SIZE		16384
 
+/*
+ * Trusted CA management socket options
+ *
+ * Add, remove, or clear custom trusted root CA certificates used for
+ * peer certificate chain verification. Requires CAP_NET_ADMIN.
+ */
+#define TQUIC_ADD_TRUSTED_CA		35  /* Add DER-encoded root CA */
+#define TQUIC_REMOVE_TRUSTED_CA		36  /* Remove CA by description */
+#define TQUIC_CLEAR_TRUSTED_CAS		37  /* Clear all custom CAs */
+
 /* WAN Bonding specific socket options */
 #define TQUIC_BOND_MODE		50  /* Bonding mode */
 #define TQUIC_BOND_ADD_PATH	51  /* Add a path to bond */

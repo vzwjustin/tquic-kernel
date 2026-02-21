@@ -39,6 +39,7 @@
 #include "tquic_retry.h"
 #include "security_hardening.h"
 #include "crypto/zero_rtt.h"
+#include "crypto/cert_verify.h"
 #include "core/early_data.h"
 #include "core/transport_params.h"
 #include "core/varint.h"
@@ -1629,6 +1630,43 @@ int tquic_inline_hs_recv_crypto(struct sock *sk, const u8 *data, u32 len,
 				       TQUIC_ENC_HANDSHAKE,
 				       TQUIC_ENC_HANDSHAKE);
 		pr_debug("inline_hs_recv: CLIENT handshake keys activated\n");
+	}
+
+	/*
+	 * CLIENT PATH: After CertificateVerify is processed the state
+	 * machine transitions from WAIT_CV to WAIT_FINISHED.  Wire the
+	 * certificate chain verifier so the peer certificate is validated
+	 * before we accept the Finished message.
+	 */
+	if (!conn->is_server &&
+	    prev_state == TQUIC_HS_WAIT_CV &&
+	    new_state == TQUIC_HS_WAIT_FINISHED) {
+		ret = tquic_hs_verify_server_cert(ihs, conn);
+		if (ret < 0) {
+			tquic_dbg("server cert verify failed: %d\n", ret);
+			kfree(resp_buf);
+			tquic_inline_hs_abort(sk, ret);
+			tquic_conn_put(conn);
+			return ret;
+		}
+	}
+
+	/*
+	 * SERVER PATH: After client CertificateVerify is processed the
+	 * state transitions from WAIT_CV to WAIT_FINISHED on the server.
+	 * Wire the client certificate verifier for mutual TLS.
+	 */
+	if (conn->is_server &&
+	    prev_state == TQUIC_HS_WAIT_CV &&
+	    new_state == TQUIC_HS_WAIT_FINISHED) {
+		ret = tquic_hs_verify_client_cert(ihs, conn);
+		if (ret < 0) {
+			tquic_dbg("client cert verify failed: %d\n", ret);
+			kfree(resp_buf);
+			tquic_inline_hs_abort(sk, ret);
+			tquic_conn_put(conn);
+			return ret;
+		}
 	}
 
 	/* Both client and server: mark complete after all Finished processed */

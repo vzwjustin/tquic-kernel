@@ -39,6 +39,7 @@
 #include "core/quic_loss.h"
 #include "core/quic_path.h"
 #include "core/stream.h"
+#include "crypto/cert_verify.h"
 
 #ifdef CONFIG_TQUIC_QLOG
 #include <uapi/linux/tquic_qlog.h>
@@ -1544,6 +1545,8 @@ int tquic_sock_setsockopt(struct socket *sock, int level, int optname,
 	case TQUIC_EXPECTED_HOSTNAME:
 	case TQUIC_CERT_DATA:
 	case TQUIC_KEY_DATA:
+	case TQUIC_ADD_TRUSTED_CA:
+	case TQUIC_REMOVE_TRUSTED_CA:
 	case TQUIC_SCHEDULER:
 	case TQUIC_CONGESTION:
 		/* Variable-length string options, validated in their case blocks */
@@ -2397,6 +2400,84 @@ int tquic_sock_setsockopt(struct socket *sock, int level, int optname,
 	case TQUIC_URING_BUF_RING:
 		return tquic_uring_setsockopt(sk, optname, optval, optlen);
 #endif /* CONFIG_TQUIC_IO_URING */
+
+	case TQUIC_ADD_TRUSTED_CA: {
+		/*
+		 * TQUIC_ADD_TRUSTED_CA: Add a trusted root CA certificate
+		 *
+		 * Userspace supplies a DER-encoded X.509 certificate to add
+		 * to the TQUIC trusted keyring. The certificate is used for
+		 * verifying peer certificates during TLS handshake.
+		 *
+		 * Requires CAP_NET_ADMIN.
+		 */
+		u8 *cert_data;
+		int ca_ret;
+
+		if (!ns_capable(sock_net(sk)->user_ns, CAP_NET_ADMIN))
+			return -EPERM;
+
+		if (optlen <= 0 || optlen > TQUIC_MAX_CERT_DER_SIZE)
+			return -EINVAL;
+
+		cert_data = kmalloc(optlen, GFP_KERNEL);
+		if (!cert_data)
+			return -ENOMEM;
+
+		if (copy_from_sockptr(cert_data, optval, optlen)) {
+			kfree(cert_data);
+			return -EFAULT;
+		}
+
+		ca_ret = tquic_add_trusted_ca(cert_data, optlen,
+					      "user-supplied");
+		kfree(cert_data);
+		return ca_ret;
+	}
+
+	case TQUIC_REMOVE_TRUSTED_CA: {
+		/*
+		 * TQUIC_REMOVE_TRUSTED_CA: Remove a trusted root CA by
+		 * description string.
+		 *
+		 * Requires CAP_NET_ADMIN.
+		 */
+		char *desc;
+		int ca_ret;
+
+		if (!ns_capable(sock_net(sk)->user_ns, CAP_NET_ADMIN))
+			return -EPERM;
+
+		if (optlen <= 0 || optlen > 256)
+			return -EINVAL;
+
+		desc = kmalloc(optlen + 1, GFP_KERNEL);
+		if (!desc)
+			return -ENOMEM;
+
+		if (copy_from_sockptr(desc, optval, optlen)) {
+			kfree(desc);
+			return -EFAULT;
+		}
+		desc[optlen] = '\0';
+
+		ca_ret = tquic_remove_trusted_ca(desc);
+		kfree(desc);
+		return ca_ret;
+	}
+
+	case TQUIC_CLEAR_TRUSTED_CAS:
+		/*
+		 * TQUIC_CLEAR_TRUSTED_CAS: Remove all custom trusted CAs
+		 *
+		 * Resets the trusted CA set to system defaults.
+		 * Requires CAP_NET_ADMIN.
+		 */
+		if (!ns_capable(sock_net(sk)->user_ns, CAP_NET_ADMIN))
+			return -EPERM;
+
+		tquic_clear_trusted_cas();
+		return 0;
 
 	case TQUIC_STREAM_PRIORITY: {
 		/*
