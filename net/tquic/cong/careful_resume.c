@@ -230,10 +230,10 @@ int tquic_careful_resume_init(struct tquic_path *path,
 	state->rtt_samples = 0;
 
 	/* Save original CC state for potential retreat */
-	state->original_ssthresh = path->stats.ssthresh;
+	state->original_ssthresh = path->cc.ssthresh;
 
 	/* Set path's cwnd to conservative initial value */
-	path->stats.cwnd = initial_cwnd;
+	path->cc.cwnd = initial_cwnd;
 
 	tquic_info("cr: initialized for path %u, target_cwnd=%llu initial=%llu saved_rtt=%llu\n",
 		path->path_id, state->target_cwnd, initial_cwnd, state->saved_rtt);
@@ -405,7 +405,7 @@ bool tquic_careful_resume_apply(struct tquic_path *path, u64 bytes_acked,
 
 			new_cwnd = min_t(u64, new_cwnd, state->target_cwnd);
 			state->current_cwnd = new_cwnd;
-			path->stats.cwnd = new_cwnd;
+			path->cc.cwnd = new_cwnd;
 		}
 
 		/*
@@ -514,8 +514,8 @@ void tquic_careful_resume_safe_retreat(struct tquic_path *path)
 	 */
 	min_cwnd = TQUIC_BDP_MIN_CWND;
 
-	path->stats.cwnd = min_cwnd;
-	path->stats.ssthresh = state->original_ssthresh;
+	path->cc.cwnd = min_cwnd;
+	path->cc.ssthresh = state->original_ssthresh;
 
 	/* Mark state as safe retreat */
 	state->phase = TQUIC_CR_PHASE_SAFE_RETREAT;
