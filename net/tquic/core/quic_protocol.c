@@ -141,6 +141,7 @@ unsigned int tquic_get_validated_max_data(void)
 	}
 	return val;
 }
+EXPORT_SYMBOL_GPL(tquic_get_validated_max_data);
 
 unsigned int tquic_get_validated_max_stream_data(void)
 {
@@ -153,6 +154,7 @@ unsigned int tquic_get_validated_max_stream_data(void)
 	}
 	return val;
 }
+EXPORT_SYMBOL_GPL(tquic_get_validated_max_stream_data);
 
 unsigned int tquic_get_validated_max_streams(void)
 {

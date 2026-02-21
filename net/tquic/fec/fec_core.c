@@ -258,7 +258,7 @@ EXPORT_SYMBOL_GPL(tquic_fec_get_stats);
  *
  * Return: 0 on success, negative error on failure
  */
-int __init tquic_fec_module_init(void)
+int tquic_fec_module_init(void)
 {
 	int ret;
 
@@ -279,7 +279,7 @@ EXPORT_SYMBOL_GPL(tquic_fec_module_init);
 /**
  * tquic_fec_module_exit - Clean up FEC subsystem
  */
-void __exit tquic_fec_module_exit(void)
+void tquic_fec_module_exit(void)
 {
 	tquic_rs_exit();
 	pr_info("tquic fec: Forward Error Correction subsystem cleaned up\n");

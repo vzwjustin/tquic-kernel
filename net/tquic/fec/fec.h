@@ -885,11 +885,11 @@ u8 tquic_fec_compute_repair_count(struct tquic_fec_state *state, u8 block_size);
  *
  * Return: 0 on success, negative error on failure
  */
-int __init tquic_fec_module_init(void);
+int tquic_fec_module_init(void);
 
 /**
  * tquic_fec_module_exit - Clean up FEC subsystem
  */
-void __exit tquic_fec_module_exit(void);
+void tquic_fec_module_exit(void);
 
 #endif /* _TQUIC_FEC_H */
