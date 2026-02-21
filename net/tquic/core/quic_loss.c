@@ -1159,6 +1159,7 @@ void tquic_loss_detection_detect_lost(struct tquic_connection *conn,
 			 * Emit structured qlog event for loss so tools like
 			 * quic-interop-runner can process it.
 			 */
+	#ifdef CONFIG_TQUIC_QLOG
 			if (conn->qlog) {
 				u32 trigger_v = (pkt->pn +
 						 conn->packet_threshold <=
@@ -1170,6 +1171,7 @@ void tquic_loss_detection_detect_lost(struct tquic_connection *conn,
 						       pkt->size, trigger_v,
 						       pkt->path_id);
 			}
+#endif
 
 			if (pkt->ack_eliciting)
 				pn_space->ack_eliciting_in_flight--;
@@ -1311,8 +1313,8 @@ void tquic_loss_detection_detect_lost(struct tquic_connection *conn,
 					struct tquic_lost_packet lp_arr[32];
 					int nlp = 0;
 					struct tquic_sent_packet *_lp;
-					u64 srtt = lpath->rtt.smoothed_rtt_us;
-					u64 rttvar = lpath->rtt.rtt_var_us;
+					u64 srtt = lpath->rtt.smoothed_rtt;
+					u64 rttvar = lpath->rtt.rtt_var;
 
 					list_for_each_entry(_lp, &lost_list,
 							    list) {

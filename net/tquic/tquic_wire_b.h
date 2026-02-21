@@ -14,6 +14,11 @@
 
 #include <linux/types.h>
 #include <linux/gfp.h>
+#include <linux/list.h>
+#include <linux/rcupdate.h>
+#include <linux/refcount.h>
+#include <linux/in.h>
+#include <linux/in6.h>
 #include <net/tquic.h>
 
 struct tquic_rate_limiter;
@@ -21,6 +26,24 @@ struct tquic_token_key;
 struct tquic_retry_state;
 struct tquic_tunnel;
 struct tquic_client;
+
+/*
+ * Event type enum shared between tquic_netlink.c and callers.
+ * Guard prevents double-definition when tquic_netlink.c also defines it.
+ */
+#ifndef _TQUIC_EVENT_TYPE_DEFINED
+#define _TQUIC_EVENT_TYPE_DEFINED
+enum tquic_event_type {
+	TQUIC_EVENT_UNSPEC,
+	TQUIC_EVENT_PATH_UP,		/* Path became available */
+	TQUIC_EVENT_PATH_DOWN,		/* Path failed */
+	TQUIC_EVENT_PATH_CHANGE,	/* Path metrics changed */
+	TQUIC_EVENT_MIGRATION,		/* Connection migrated */
+
+	__TQUIC_EVENT_MAX,
+};
+#define TQUIC_EVENT_MAX (__TQUIC_EVENT_MAX - 1)
+#endif /* _TQUIC_EVENT_TYPE_DEFINED */
 
 /*
  * tquic_netlink.c -- event notification helpers.
@@ -34,6 +57,59 @@ int tquic_nl_migration_event(struct net *net, u64 conn_id, u32 old_path_id,
 bool tquic_nl_has_listeners(struct net *net);
 void tquic_nl_notify_migration(struct net *net, u64 conn_id, u32 old_path_id,
 			       u32 new_path_id, u32 reason);
+
+/*
+ * struct tquic_nl_path_info - Netlink path information snapshot.
+ *
+ * Used to communicate path state between the TQUIC core and the
+ * generic netlink interface.  Canonical definition; guarded by
+ * _TQUIC_NL_PATH_INFO_DEFINED to prevent double-definition in
+ * tquic_netlink.c where this struct originated.
+ */
+#ifndef _TQUIC_NL_PATH_INFO_DEFINED
+#define _TQUIC_NL_PATH_INFO_DEFINED
+struct tquic_nl_path_info {
+	struct list_head list;
+	struct rcu_head rcu;
+	refcount_t refcnt;
+
+	u32 path_id;
+	u8 state;
+	u8 priority;
+	u16 family;
+	s32 ifindex;
+	u32 flags;
+	u32 weight;
+
+	/* Addresses */
+	union {
+		struct in_addr local_addr4;
+		struct in6_addr local_addr6;
+	};
+	union {
+		struct in_addr remote_addr4;
+		struct in6_addr remote_addr6;
+	};
+	__be16 local_port;
+	__be16 remote_port;
+
+	/* Metrics */
+	u32 rtt;		/* RTT in microseconds */
+	u64 bandwidth;		/* Bandwidth in bps */
+	u32 loss_rate;		/* Loss rate in 0.01% */
+
+	/* Statistics */
+	u64 tx_packets;
+	u64 rx_packets;
+	u64 tx_bytes;
+	u64 rx_bytes;
+	u64 retransmissions;
+	u64 spurious_retrans;
+	u32 cwnd;
+	u32 srtt;
+	u32 rttvar;
+};
+#endif /* _TQUIC_NL_PATH_INFO_DEFINED */
 
 /*
  * tquic_wire_b.c -- cross-file wiring hooks for dead exports (group B).

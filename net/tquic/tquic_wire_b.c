@@ -429,7 +429,7 @@ void tquic_wire_b_path_init(struct tquic_connection *conn,
 	net = sock_net(conn->sk);
 
 	/* PMTUD: configure maximum probing MTU for the path */
-	if (path->pmtud) {
+	if (path->pmtud_state) {
 		int ret = tquic_pmtud_set_max_mtu(path,
 						  TQUIC_WIRE_B_MAX_PLPMTU);
 
@@ -475,7 +475,7 @@ void tquic_wire_b_path_down(struct tquic_connection *conn,
 	tquic_migration_path_event(conn, path, TQUIC_PATH_EVENT_FAILED);
 
 	/* Migration: try automatic migration away from the failed path */
-	tquic_migrate_auto(conn, path, TQUIC_REASON_ERROR);
+	tquic_migrate_auto(conn, path, NULL);
 }
 EXPORT_SYMBOL_GPL(tquic_wire_b_path_down);
 
@@ -547,7 +547,7 @@ bool tquic_wire_b_retry_verify(u32 version, const u8 *odcid, u8 odcid_len,
 			       const u8 *tag)
 {
 	return tquic_retry_verify_integrity_tag(version, odcid, odcid_len,
-						retry_pkt, retry_len, tag);
+						retry_pkt, retry_len);
 }
 EXPORT_SYMBOL_GPL(tquic_wire_b_retry_verify);
 
@@ -824,13 +824,19 @@ int tquic_wire_b_forward_ops(struct tquic_client *client,
 			     struct tquic_connection *conn,
 			     struct net_device *dev)
 {
+	struct tquic_path *path;
 	int ret;
 
 	if (!client || !conn)
 		return -EINVAL;
 
+	/* Use the connection's active path address for registration */
+	path = conn->active_path;
+	if (!path)
+		return -EINVAL;
+
 	/* Exercises tquic_forward_register_client */
-	ret = tquic_forward_register_client(client, conn);
+	ret = tquic_forward_register_client(client, &path->local_addr);
 	if (ret)
 		return ret;
 
@@ -1010,7 +1016,7 @@ void tquic_wire_b_migration_ops(struct tquic_connection *conn,
 
 	/* Exercises tquic_server_handle_migration */
 	if (new_addr)
-		tquic_server_handle_migration(conn, new_addr);
+		tquic_server_handle_migration(conn, NULL, new_addr);
 
 	/* Exercises tquic_server_start_session_ttl */
 	tquic_server_start_session_ttl(conn);
@@ -1037,7 +1043,7 @@ int tquic_wire_b_session_resume(struct tquic_connection *conn,
 	if (!conn || !conn->is_server)
 		return -EINVAL;
 
-	return tquic_server_session_resume(conn, session_id, session_id_len);
+	return tquic_server_session_resume(conn, NULL);
 }
 EXPORT_SYMBOL_GPL(tquic_wire_b_session_resume);
 
@@ -1069,7 +1075,7 @@ int tquic_wire_b_server_psk(struct sock *sk, struct sk_buff *initial_pkt,
 		return -EINVAL;
 
 	/* Exercises tquic_server_hello_psk */
-	ret = tquic_server_hello_psk(sk, initial_pkt, identity, identity_len);
+	ret = tquic_server_hello_psk(sk, initial_pkt, NULL);
 	if (ret)
 		return ret;
 

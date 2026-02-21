@@ -73,6 +73,7 @@ tquic-y := \
 	grease.o \
 	tquic_ack_frequency.o \
 	security_hardening.o \
+	tquic_wire_b.o \
 	cong/cong_data.o \
 	cong/persistent_cong.o \
 	cong/bbrv2.o \

@@ -15,6 +15,7 @@ struct tquic_connection;
 struct tquic_path;
 struct tquic_additional_address;
 struct tquic_cid;
+enum tquic_addr_select_policy;
 
 /* Path manager response handling */
 int tquic_pm_send_response(struct tquic_connection *conn,
@@ -58,14 +59,16 @@ int tquic_pm_validate_additional_address(
 int tquic_pm_notify_observed_address(struct tquic_connection *conn,
 				     struct tquic_path *path);
 bool tquic_pm_check_address_change(struct tquic_connection *conn,
-				   const struct sockaddr_storage *from_addr);
+				   const struct sockaddr_storage *from_addr,
+				   struct tquic_path *path);
 
 /* Path to additional address */
 struct tquic_path *tquic_pm_create_path_to_additional(
 	struct tquic_connection *conn,
 	struct tquic_additional_address *addr_entry);
 struct tquic_additional_address *tquic_pm_get_best_additional_address(
-	struct tquic_connection *conn, int policy);
+	struct tquic_connection *conn,
+	enum tquic_addr_select_policy policy);
 int tquic_pm_coordinate_preferred_and_additional(struct tquic_connection *conn);
 
 /* PM alloc/free path IDs */

@@ -43,8 +43,12 @@
 /* Persistent congestion threshold as multiple of PTO */
 #define TQUIC_PERSISTENT_CONG_THRESHOLD 3
 
-/* Maximum number of ACK ranges to track */
-#define TQUIC_MAX_ACK_RANGES 256
+/*
+ * Maximum number of ACK ranges to track.
+ * 64 keeps struct tquic_ack_frame (~1 KiB) within the kernel
+ * 2 KiB stack-frame budget while still handling heavy reordering.
+ */
+#define TQUIC_MAX_ACK_RANGES 64
 
 /*
  * ACK Frame type codes (RFC 9000 Section 19.3)

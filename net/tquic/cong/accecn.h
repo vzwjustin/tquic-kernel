@@ -27,31 +27,13 @@
 /* AccECN validation thresholds */
 #define ACCECN_MAX_REORDER	3	/* Max ECN count reorder tolerance */
 
-/**
- * enum accecn_state - ECN capability state
- * @ACCECN_UNKNOWN: ECN support not determined
- * @ACCECN_TESTING: Testing ECN capability
- * @ACCECN_CAPABLE: Path supports ECN
- * @ACCECN_FAILED: ECN validation failed, disabled
+/*
+ * Core AccECN types (enum accecn_state, struct accecn_counts,
+ * struct accecn_ctx) are defined in <net/tquic.h> because
+ * struct tquic_path embeds accecn_ctx directly.  The guard
+ * _TQUIC_ACCECN_CTX_DEFINED prevents double-definition.
  */
-enum accecn_state {
-	ACCECN_UNKNOWN = 0,
-	ACCECN_TESTING,
-	ACCECN_CAPABLE,
-	ACCECN_FAILED,
-};
-
-/**
- * struct accecn_counts - ECN packet counts (cumulative)
- * @ect0: Packets received with ECT(0)
- * @ect1: Packets received with ECT(1)
- * @ce: Packets received with CE (Congestion Experienced)
- */
-struct accecn_counts {
-	u64 ect0;
-	u64 ect1;
-	u64 ce;
-};
+#include <net/tquic.h>
 
 /**
  * struct accecn_deltas - ECN count changes since last ACK
@@ -65,32 +47,6 @@ struct accecn_deltas {
 	u64 delta_ect1;
 	u64 delta_ce;
 	u64 newly_acked;
-};
-
-/**
- * struct accecn_ctx - Per-connection AccECN context
- * @state: ECN capability state
- * @local_counts: Our sent ECN packet counts
- * @peer_counts: Peer's reported ECN counts
- * @prev_peer_counts: Previous peer counts for delta calculation
- * @validation_needed: Packets needing ECN validation
- * @validated_ce: CE marks that passed validation
- * @bleaching_detected: ECN bleaching was detected
- * @mangling_detected: ECN mangling was detected
- * @send_ect0: Send with ECT(0) (classic)
- * @send_ect1: Send with ECT(1) (L4S)
- */
-struct accecn_ctx {
-	enum accecn_state state;
-	struct accecn_counts local_counts;
-	struct accecn_counts peer_counts;
-	struct accecn_counts prev_peer_counts;
-	u64 validation_needed;
-	u64 validated_ce;
-	bool bleaching_detected;
-	bool mangling_detected;
-	bool send_ect0;
-	bool send_ect1;
 };
 
 /* Initialization */

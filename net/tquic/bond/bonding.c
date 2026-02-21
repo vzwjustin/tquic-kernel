@@ -22,6 +22,7 @@
 #include <linux/rcupdate.h>
 #include <net/sock.h>
 #include <net/tquic.h>
+#include <net/tquic_pm.h>
 
 #include "../tquic_debug.h"
 #include "../protocol.h"

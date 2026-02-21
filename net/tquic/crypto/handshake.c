@@ -4330,7 +4330,6 @@ static int tquic_hs_process_client_hello(struct tquic_handshake *hs,
 	bool found_supported_versions = false;
 	bool found_key_share = false;
 	const u8 *peer_pubkey = NULL;
-	u16 peer_pubkey_len = 0;
 
 	if (!hs->is_server || hs->state != TQUIC_HS_START) {
 		pr_debug("tquic_hs: process_ch: bad state is_server=%d state=%d\n",
@@ -4548,7 +4547,6 @@ static int tquic_hs_process_client_hello(struct tquic_handshake *hs,
 						if (group == TLS_GROUP_X25519 &&
 						    klen == CURVE25519_KEY_SIZE) {
 							peer_pubkey = kp;
-							peer_pubkey_len = klen;
 							found_key_share = true;
 						}
 						kp += klen;
@@ -4840,7 +4838,6 @@ int tquic_hs_process_record(struct tquic_handshake *hs,
 {
 	u8 msg_type;
 	u32 msg_len;
-	const u8 *msg_data;
 	int ret;
 
 	if (!hs || !data || len < 4)
@@ -4857,8 +4854,6 @@ int tquic_hs_process_record(struct tquic_handshake *hs,
 
 	if (4 + msg_len > len)
 		return -EINVAL;
-
-	msg_data = data + 4;
 
 	switch (msg_type) {
 	case TLS_HS_CLIENT_HELLO:

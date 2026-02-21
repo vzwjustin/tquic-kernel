@@ -784,7 +784,7 @@ int tquic_ack_create(struct tquic_connection *conn, u8 pn_space,
 	 * = 33 + 256 * 16 + 24 = 4153 bytes; round up generously.
 	 */
 #define TQUIC_MAX_ACK_FRAME_LEN (64 + TQUIC_ACK_MAX_RANGES * 16 + 32)
-	u8 frame_buf[TQUIC_MAX_ACK_FRAME_LEN];
+	u8 *frame_buf;
 	struct tquic_ack_conn_ctx *ctx;
 	struct tquic_local_pn_space *space;
 	struct tquic_ack_info *ack_info;
@@ -802,11 +802,16 @@ int tquic_ack_create(struct tquic_connection *conn, u8 pn_space,
 	space = &ctx->pn_spaces[pn_space];
 	ack_info = &space->recv_ack_info;
 
+	frame_buf = kmalloc(TQUIC_MAX_ACK_FRAME_LEN, GFP_ATOMIC);
+	if (!frame_buf)
+		return -ENOMEM;
+
 	spin_lock_irqsave(&space->lock, flags);
 
 	/* Nothing to acknowledge */
 	if (space->largest_recv_pn == 0 && ack_info->largest_acked == 0) {
 		spin_unlock_irqrestore(&space->lock, flags);
+		kfree(frame_buf);
 		return 0;
 	}
 
@@ -827,14 +832,14 @@ int tquic_ack_create(struct tquic_connection *conn, u8 pn_space,
 	 *   ranges[]        = &ranges[1] (the gap/ack_range pairs)
 	 *   range_count     = ack_range_count - 1  (additional ranges)
 	 *
-	 * Write into the temporary stack buffer, then do a single skb_put +
+	 * Write into the temporary buffer, then do a single skb_put +
 	 * memcpy to avoid multiple skb_put calls inside the lock.
 	 */
 	range_count = ack_info->ack_range_count > 0 ?
 		      ack_info->ack_range_count - 1 : 0;
 
 	frame_len = tquic_write_ack_frame(
-		frame_buf, sizeof(frame_buf),
+		frame_buf, TQUIC_MAX_ACK_FRAME_LEN,
 		ack_info->largest_acked,
 		ack_info->ack_delay,
 		ack_info->ranges[0].ack_range_len,
@@ -847,12 +852,14 @@ int tquic_ack_create(struct tquic_connection *conn, u8 pn_space,
 
 	if (frame_len < 0) {
 		spin_unlock_irqrestore(&space->lock, flags);
+		kfree(frame_buf);
 		return frame_len;
 	}
 
 	/* Check if there's room in the skb */
 	if (skb_tailroom(skb) < frame_len) {
 		spin_unlock_irqrestore(&space->lock, flags);
+		kfree(frame_buf);
 		return -ENOSPC;
 	}
 
@@ -867,6 +874,7 @@ int tquic_ack_create(struct tquic_connection *conn, u8 pn_space,
 
 	spin_unlock_irqrestore(&space->lock, flags);
 
+	kfree(frame_buf);
 	return frame_len;
 #undef TQUIC_MAX_ACK_FRAME_LEN
 }

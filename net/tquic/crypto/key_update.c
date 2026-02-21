@@ -30,6 +30,11 @@
 #include "tls.h"
 #include "../tquic_debug.h"
 
+/* tquic_output.c HP key rotation export */
+extern void tquic_output_rotate_hp_keys(struct tquic_connection *conn,
+					const u8 *next_hp_key, size_t key_len,
+					u16 cipher);
+
 /* Key update HKDF label per RFC 9001 Section 6.1 */
 #define TQUIC_HKDF_LABEL_KU		"quic ku"
 
@@ -1395,6 +1400,17 @@ int tquic_key_update_with_psk(struct tquic_connection *conn,
 
 	/* Now perform the standard key update */
 	ret = tquic_initiate_key_update(conn);
+
+	/*
+	 * After a PSK-mixed key update, rotate the Header Protection
+	 * keys to match the new traffic secret generation.  The mixed
+	 * write secret serves as the HP key material with the cipher
+	 * suite from the connection's crypto state.
+	 */
+	if (ret == 0)
+		tquic_output_rotate_hp_keys(conn, mixed_write_secret,
+					    state->current_write.secret_len,
+					    state->cipher_suite);
 
 cleanup:
 	memzero_explicit(mixed_read_secret, sizeof(mixed_read_secret));

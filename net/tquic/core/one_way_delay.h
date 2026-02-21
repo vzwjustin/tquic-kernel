@@ -24,6 +24,7 @@
 #include <linux/ktime.h>
 #include <linux/spinlock.h>
 #include <linux/list.h>
+#include "ack.h"
 
 /*
  * Frame Types (draft-huitema-quic-1wd)
@@ -223,7 +224,7 @@ struct tquic_ack_1wd_frame {
 	struct {
 		u64 gap;
 		u64 length;
-	} ranges[256];  /* TQUIC_MAX_ACK_RANGES */
+	} ranges[TQUIC_MAX_ACK_RANGES];
 	u32 range_count;
 	struct {
 		u64 ect0;

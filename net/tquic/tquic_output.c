@@ -81,6 +81,7 @@
 #include "http3/http3_priority.h"
 #endif
 #include "tquic_wire_b.h"
+#include <net/tquic_pm.h>
 
 /* Scheduler failover wrappers (multipath/tquic_scheduler.c) */
 bool tquic_sched_has_failover_pending(struct tquic_failover_ctx *fc);
@@ -129,6 +130,7 @@ tquic_stream_find_locked(struct tquic_connection *conn, u64 stream_id)
 #endif /* CONFIG_TQUIC_HTTP3 */
 
 /* Forward declarations for dead-export wiring */
+struct tquic_nic_device;
 struct tquic_edf_scheduler;
 struct tquic_edf_stats;
 struct tquic_edf_scheduler *
@@ -2770,11 +2772,13 @@ int tquic_output_packet(struct tquic_connection *conn, struct tquic_path *path,
 
 			tquic_trace_packet_sent(conn, pkt_num, pkt_type,
 						skb_len, path->path_id);
+#ifdef CONFIG_TQUIC_QLOG
 			if (conn->qlog)
 				tquic_qlog_packet_sent_simple(
 					conn->qlog, pkt_num,
 					QLOG_PKT_1RTT, skb_len,
 					path->path_id, 0, true);
+#endif
 		}
 
 		/*
@@ -6098,6 +6102,7 @@ int tquic_send_datagram(struct tquic_connection *conn, const void *data,
 			inflight = 0;
 
 		if (inflight + len > path->stats.cwnd) {
+#ifdef CONFIG_TQUIC_QLOG
 			/* Wire tquic_qlog_packet_buffered: backpressure from CC */
 			if (conn->qlog) {
 				tquic_qlog_packet_buffered(conn->qlog,
@@ -6107,6 +6112,7 @@ int tquic_send_datagram(struct tquic_connection *conn, const void *data,
 					1 /* QLOG_BUFFER_BACKPRESSURE */,
 					path->path_id);
 			}
+#endif
 			tquic_path_put(path);
 			return -EAGAIN;
 		}

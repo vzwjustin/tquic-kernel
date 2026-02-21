@@ -83,7 +83,6 @@ tquic-y := \
 	core/quic_flow.o \
 	core/quic_loss.o \
 	core/quic_path.o \
-	core/ack.o \
 	core/frame_process.o \
 	core/mp_frame.o \
 	core/quic_ack.o \

@@ -37,6 +37,7 @@
 #include "bond/tquic_bonding.h"
 #include "bond/tquic_failover.h"
 #include "bond/tquic_reorder.h"
+#include <net/tquic_pm.h>
 
 /* External reference to global connection table from tquic_main.c */
 

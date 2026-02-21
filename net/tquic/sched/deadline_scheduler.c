@@ -788,9 +788,14 @@ EXPORT_SYMBOL_GPL(tquic_edf_update_path);
  * =============================================================================
  */
 
-/**
+/*
  * struct tquic_edf_stats - EDF scheduler statistics
+ *
+ * Canonical definition is in <net/tquic.h> so that callers outside
+ * this file can declare local variables of this type.
  */
+#ifndef _TQUIC_EDF_STATS_DEFINED
+#define _TQUIC_EDF_STATS_DEFINED
 struct tquic_edf_stats {
 	u64 entries_scheduled;
 	u64 entries_dropped;
@@ -799,6 +804,7 @@ struct tquic_edf_stats {
 	u64 path_switches;
 	u32 current_entries;
 };
+#endif /* _TQUIC_EDF_STATS_DEFINED */
 
 /**
  * tquic_edf_get_stats - Get EDF scheduler statistics

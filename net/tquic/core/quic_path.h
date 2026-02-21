@@ -32,6 +32,7 @@ void tquic_path_mtu_probe_lost(struct tquic_path *path, u32 probe_size);
 
 /* Path validation (RFC 9000 Section 8.2) */
 bool tquic_path_verify_response(struct tquic_path *path, const u8 *data);
+void tquic_path_on_validated(struct tquic_path *path);
 bool tquic_path_needs_probe(struct tquic_path *path);
 void tquic_path_on_probe_timeout(struct tquic_path *path);
 

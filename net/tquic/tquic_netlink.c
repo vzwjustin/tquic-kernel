@@ -73,8 +73,12 @@ enum {
 #define TQUIC_NL_CMD_MAX (__TQUIC_NL_CMD_MAX - 1)
 
 /*
- * Event definitions (sent via multicast)
+ * Event definitions (sent via multicast).
+ * Canonical definition is in tquic_wire_b.h; guarded here to allow
+ * the netlink module to compile stand-alone as well.
  */
+#ifndef _TQUIC_EVENT_TYPE_DEFINED
+#define _TQUIC_EVENT_TYPE_DEFINED
 enum tquic_event_type {
 	TQUIC_EVENT_UNSPEC,
 	TQUIC_EVENT_PATH_UP, /* Path became available */
@@ -85,6 +89,7 @@ enum tquic_event_type {
 	__TQUIC_EVENT_MAX,
 };
 #define TQUIC_EVENT_MAX (__TQUIC_EVENT_MAX - 1)
+#endif /* _TQUIC_EVENT_TYPE_DEFINED */
 
 /*
  * Attribute definitions
@@ -164,9 +169,13 @@ enum tquic_nl_path_state {
 
 /*
  * Internal data structures
+ *
+ * struct tquic_nl_path_info is now defined in tquic_wire_b.h so that
+ * core/quic_path.c and other callers can use it directly.  The guard
+ * _TQUIC_NL_PATH_INFO_DEFINED prevents double-definition.
  */
-
-/* Path information structure */
+#ifndef _TQUIC_NL_PATH_INFO_DEFINED
+#define _TQUIC_NL_PATH_INFO_DEFINED
 struct tquic_nl_path_info {
 	struct list_head list;
 	struct rcu_head rcu;
@@ -208,6 +217,7 @@ struct tquic_nl_path_info {
 	u32 srtt;
 	u32 rttvar;
 };
+#endif /* _TQUIC_NL_PATH_INFO_DEFINED */
 
 /* Connection information structure */
 struct tquic_nl_conn_info {

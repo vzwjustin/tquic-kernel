@@ -1210,6 +1210,43 @@ bool tquic_hp_has_key(struct tquic_hp_ctx *ctx, enum tquic_hp_enc_level level,
 }
 EXPORT_SYMBOL_GPL(tquic_hp_has_key);
 
+/**
+ * tquic_crypto_get_next_hp_key - Return the pending next-gen HP write key
+ * @crypto_state: Opaque pointer to struct tquic_crypto_state
+ * @key_len: Out-param receiving key length in bytes
+ * @cipher: Out-param receiving cipher suite identifier
+ *
+ * Called from tquic_output.c after TQUIC_CONN_FLAG_HP_KEY_PENDING is set
+ * during a key update.  Returns the raw key bytes for the next write-side
+ * HP key, or NULL if no key update is pending.
+ */
+const u8 *tquic_crypto_get_next_hp_key(void *crypto_state,
+					size_t *key_len, u16 *cipher)
+{
+	struct tquic_hp_ctx *hp_ctx;
+	struct tquic_hp_key *next;
+
+	if (!crypto_state)
+		return NULL;
+
+	hp_ctx = tquic_crypto_get_hp_ctx(
+			(struct tquic_crypto_state *)crypto_state);
+	if (!hp_ctx)
+		return NULL;
+
+	next = &hp_ctx->next_write_key;
+	if (!next->valid)
+		return NULL;
+
+	if (key_len)
+		*key_len = next->key_len;
+	if (cipher)
+		*cipher = next->cipher_type;
+
+	return next->key;
+}
+EXPORT_SYMBOL_GPL(tquic_crypto_get_next_hp_key);
+
 MODULE_DESCRIPTION("TQUIC Header Protection (RFC 9001 Section 5.4)");
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Linux Foundation");

@@ -20,6 +20,7 @@
 #include <net/tquic.h>
 
 #include "../tquic_debug.h"
+#include "../protocol.h"
 #include "transport_params.h"
 #include "../tquic_stateless_reset.h"
 

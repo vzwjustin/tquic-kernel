@@ -129,6 +129,106 @@ struct tquic_frame;
 struct tquic_packet;
 struct tquic_xsk;
 struct tquic_udp_sock;
+struct tquic_qlog;
+struct tquic_edf_scheduler;
+struct tquic_tunnel;
+struct tquic_pacing_ctx;
+struct tquic_pn_skip_state;
+struct tquic_stateless_reset_ctx;
+
+/*
+ * AccECN per-path context types.
+ *
+ * Defined here because struct tquic_path embeds struct accecn_ctx
+ * directly.  The private header cong/accecn.h guards against
+ * double-definition via _TQUIC_ACCECN_CTX_DEFINED.
+ */
+#ifndef _TQUIC_ACCECN_CTX_DEFINED
+#define _TQUIC_ACCECN_CTX_DEFINED
+
+enum accecn_state {
+	ACCECN_UNKNOWN = 0,
+	ACCECN_TESTING,
+	ACCECN_CAPABLE,
+	ACCECN_FAILED,
+};
+
+struct accecn_counts {
+	u64 ect0;
+	u64 ect1;
+	u64 ce;
+};
+
+struct accecn_ctx {
+	enum accecn_state state;
+	struct accecn_counts local_counts;
+	struct accecn_counts peer_counts;
+	struct accecn_counts prev_peer_counts;
+	u64 validation_needed;
+	u64 validated_ce;
+	bool bleaching_detected;
+	bool mangling_detected;
+	bool send_ect0;
+	bool send_ect1;
+};
+#endif /* _TQUIC_ACCECN_CTX_DEFINED */
+
+/*
+ * EDF scheduler statistics.
+ *
+ * Defined here so tquic_output.c (and others) can declare local
+ * variables of this type.  The full scheduler struct lives in
+ * sched/deadline_scheduler.c.
+ */
+#ifndef _TQUIC_EDF_STATS_DEFINED
+#define _TQUIC_EDF_STATS_DEFINED
+struct tquic_edf_stats {
+	u64 entries_scheduled;
+	u64 entries_dropped;
+	u64 deadlines_met;
+	u64 deadlines_missed;
+	u64 path_switches;
+	u32 current_entries;
+};
+#endif /* _TQUIC_EDF_STATS_DEFINED */
+
+/*
+ * L4S per-path context types.
+ *
+ * Defined here (rather than in cong/l4s.h) because struct tquic_path
+ * embeds a struct tquic_l4s_ctx directly.  The private header guards
+ * against double-definition via _TQUIC_L4S_CTX_DEFINED.
+ */
+#ifndef _TQUIC_L4S_CTX_DEFINED
+#define _TQUIC_L4S_CTX_DEFINED
+
+enum tquic_l4s_state {
+	TQUIC_L4S_UNKNOWN = 0,
+	TQUIC_L4S_PROBING,
+	TQUIC_L4S_ENABLED,
+	TQUIC_L4S_DISABLED,
+};
+
+struct tquic_l4s_stats {
+	u64 ect0_sent;
+	u64 ect1_sent;
+	u64 ect0_recv;
+	u64 ect1_recv;
+	u64 ce_recv;
+	u64 ce_responded;
+};
+
+struct tquic_l4s_ctx {
+	enum tquic_l4s_state state;
+	bool enabled;
+	bool capable;
+	u32 ce_count;
+	u32 loss_count;
+	u32 probe_round;
+	u32 alpha;
+	struct tquic_l4s_stats stats;
+};
+#endif /* _TQUIC_L4S_CTX_DEFINED */
 
 /**
  * struct tquic_rtt_state - RTT measurement state (RFC 9002 Section 5)
@@ -341,9 +441,11 @@ struct tquic_path_stats {
 	u64 lost_packets;
 	u32 rtt_min;
 	u32 rtt_smoothed;
+	u32 srtt;		/* Smoothed RTT alias (scheduler use) */
 	u32 rtt_variance;
 	u64 bandwidth;
 	u32 cwnd;
+	u32 loss_rate;		/* Loss rate in 0.01% units */
 
 	/*
 	 * Atomic counters for scheduler and loss detection.
@@ -598,6 +700,19 @@ struct tquic_path {
 	/* AF_XDP socket for kernel-bypass packet I/O on this path */
 	struct tquic_xsk *xsk;
 
+	/* Accurate ECN (AccECN) per-path context (RFC 9000 Section 13.4) */
+	struct accecn_ctx accecn;
+
+	/* Per-path pacing context; NULL if pacing disabled */
+	void *pacing; /* struct tquic_pacing_ctx * */
+
+	/* Raw send buffer for direct UDP transmission */
+	u8 *raw_send_buf;
+	u32 raw_send_len;
+
+	/* Scheduler weight for weighted round-robin path selection */
+	u32 sched_weight;
+
 	/*
 	 * Pernet (per-network-namespace) path ID token.
 	 *
@@ -608,6 +723,9 @@ struct tquic_path {
 	 * Zero means no pernet ID has been allocated.
 	 */
 	u32 global_path_id;
+
+	/* L4S (Low Latency Low Loss Scalable) per-path context (RFC 9330) */
+	struct tquic_l4s_ctx l4s;
 
 	struct rcu_head rcu_head; /* RCU callback for kfree_rcu */
 };
@@ -655,6 +773,8 @@ struct tquic_stream {
 
 	struct rb_node node;
 	wait_queue_head_t wait;
+
+	u64 deadline_us; /* EDF deadline in microseconds; 0 = none */
 
 	void *ext; /* Extended stream state for reassembly and priority */
 };
@@ -1206,6 +1326,9 @@ struct tquic_connection {
 	/* Coupled CC state (NULL when coupling disabled) */
 	struct tquic_coupled_state *coupled_cc;
 
+	/* Stateless reset context (tquic_stateless_reset.c) */
+	struct tquic_stateless_reset_ctx *stateless_reset_ctx;
+
 	/* Server-side client binding (NULL for client connections) */
 	struct tquic_client *client;
 
@@ -1469,6 +1592,31 @@ struct tquic_connection {
 	struct tquic_pacing_state *pacing; /* Pacing state; NULL if disabled */
 	struct tquic_gro_state *gro; /* GRO aggregation; NULL if disabled */
 
+	/* EDF (Earliest Deadline First) stream scheduler */
+	struct tquic_edf_scheduler *edf_sched;
+
+	/* Spin bit state for RTT measurement (RFC 9312 Section 3.5.1) */
+	void *spin_bit_state; /* struct tquic_spin_bit_state * */
+
+	/* Tunnel state for QUIC-in-QUIC / proxied connections */
+	struct tquic_tunnel *tunnel;
+
+	/* PN skip state for optimistic ACK detection */
+	void *pn_skip_state; /* struct tquic_pn_skip_state * */
+
+	/* ACK validation state for spoofed-ACK detection */
+	void *ack_validation_state; /* struct tquic_ack_validation_state * */
+
+	/* Default stream ID for single-stream mode */
+	u64 default_stream_id;
+
+	/* Connection identifier for netlink notifications */
+	u64 conn_id;
+
+#ifdef CONFIG_TQUIC_QLOG
+	struct tquic_qlog *qlog; /* Qlog tracing context; NULL if disabled */
+#endif
+
 	spinlock_t lock;
 	refcount_t refcnt;
 	struct sock *sk;
@@ -1491,6 +1639,7 @@ struct tquic_connection {
 #define TQUIC_CONN_FLAG_IMMEDIATE_ACK 4 /* Send ACK immediately */
 #define TQUIC_CONN_FLAG_KEY_UPDATE_PENDING 5 /* Key update in progress */
 #define TQUIC_CONN_FLAG_TASKLET_SCHED 6 /* TX tasklet is scheduled */
+#define TQUIC_CONN_FLAG_HP_KEY_PENDING 7 /* HP key rotation pending */
 
 /* Backwards compatibility alias */
 #define TQUIC_PATH_RESPONSE_PENDING TQUIC_CONN_FLAG_PATH_RESPONSE_PENDING

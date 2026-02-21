@@ -1361,4 +1361,29 @@ struct tquic_cong_data_blob {
 #define TQUIC_MASQUE_FLOW_OPEN		333  /* Open datagram flow */
 #define TQUIC_MASQUE_FLOW_CLOSE		334  /* Close datagram flow */
 
+/* MASQUE I/O dispatch: input path (tquic_input.c consumers) */
+#define TQUIC_MASQUE_INPUT_DATAGRAM	340  /* Receive HTTP datagram */
+#define TQUIC_MASQUE_INPUT_UDP_TUNNEL	341  /* Receive via CONNECT-UDP */
+#define TQUIC_MASQUE_INPUT_IP_TUNNEL	342  /* Receive via CONNECT-IP */
+#define TQUIC_MASQUE_INPUT_IP_CAPSULE	343  /* Process CONNECT-IP capsule */
+#define TQUIC_MASQUE_INPUT_PROXY_PKT	344  /* Dispatch proxy packet */
+#define TQUIC_MASQUE_INPUT_PROXY_CAP	345  /* Process proxy capsule */
+#define TQUIC_MASQUE_INPUT_ENABLE_DGM	346  /* Enable HTTP datagrams */
+#define TQUIC_MASQUE_INPUT_FLOW_TEAR	347  /* Tear down datagram flow */
+#define TQUIC_MASQUE_INPUT_UDP_ERROR	348  /* Set UDP tunnel error */
+
+/* MASQUE I/O dispatch: output path (tquic_output.c consumers) */
+#define TQUIC_MASQUE_OUTPUT_DATAGRAM	350  /* Transmit HTTP datagram */
+#define TQUIC_MASQUE_OUTPUT_UDP_TUNNEL	351  /* Send via CONNECT-UDP */
+#define TQUIC_MASQUE_OUTPUT_IP_TUNNEL	352  /* Forward via CONNECT-IP */
+#define TQUIC_MASQUE_OUTPUT_IP_SETUP	353  /* Full CONNECT-IP lifecycle */
+#define TQUIC_MASQUE_OUTPUT_PROXY_FWD	354  /* Compress+forward proxy pkt */
+#define TQUIC_MASQUE_OUTPUT_PROXY_SETUP	355  /* Create QUIC-Aware Proxy */
+#define TQUIC_MASQUE_OUTPUT_PROXY_CID	356  /* Exercise proxy CID ops */
+#define TQUIC_MASQUE_OUTPUT_PROXY_CAPS	357  /* Encode proxy capsules */
+#define TQUIC_MASQUE_OUTPUT_FLOW_OPEN	358  /* Open output datagram flow */
+
+/* Crypto: Header Protection key rotation */
+#define TQUIC_HP_KEY_ROTATE		400  /* Rotate HP keys */
+
 #endif /* _UAPI_LINUX_TQUIC_H */

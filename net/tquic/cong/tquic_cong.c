@@ -574,18 +574,9 @@ void tquic_cong_on_persistent_congestion(struct tquic_path *path,
 					 struct tquic_persistent_cong_info *info)
 {
 	struct tquic_cong_ops *ca;
-	struct net *net = NULL;
 
 	if (!path || !info)
 		return;
-
-	/* Get network namespace for MIB counter */
-	if (path->conn) {
-		struct sock *sk = READ_ONCE(path->conn->sk);
-
-		if (sk)
-			net = sock_net(sk);
-	}
 
 	ca = path->cong_ops;
 

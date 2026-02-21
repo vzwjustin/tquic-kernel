@@ -302,12 +302,9 @@ static int tquic_napi_poll(struct napi_struct *napi, int budget)
 	struct tquic_napi *tn = container_of(napi, struct tquic_napi, napi);
 	int work_done = 0;
 	struct sk_buff *skb;
-	ktime_t start_time;
 	unsigned long flags;
 	struct sk_buff_head local_queue;
-	int spliced;
 
-	start_time = ktime_get();
 	tn->stats.poll_cycles++;
 	this_cpu_inc(tquic_napi_pcpu_stats.total_polls);
 
@@ -320,7 +317,7 @@ static int tquic_napi_poll(struct napi_struct *napi, int budget)
 
 	spin_lock_irqsave(&tn->lock, flags);
 	skb_queue_splice_init(&tn->rx_queue, &local_queue);
-	spliced = atomic_xchg(&tn->rx_queue_len, 0);
+	atomic_xchg(&tn->rx_queue_len, 0);
 	spin_unlock_irqrestore(&tn->lock, flags);
 
 	/*

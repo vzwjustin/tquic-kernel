@@ -54,7 +54,7 @@
 
 /* Maximum values */
 #define TQUIC_MAX_VARINT		((1ULL << 62) - 1)
-#define TQUIC_MAX_ACK_RANGES		256
+#define TQUIC_MAX_ACK_RANGES		64
 #define TQUIC_MAX_FRAME_SIZE		(16 * 1024)
 #define TQUIC_MAX_REASON_LEN		256
 #define TQUIC_MAX_TOKEN_LEN		(8 * 1024)

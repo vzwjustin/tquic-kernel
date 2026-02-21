@@ -1722,14 +1722,23 @@ static int tquic_process_packet(struct tquic_connection *conn,
 
 		/* Handle version negotiation */
 		if (unlikely(version == TQUIC_VERSION_NEGOTIATION)) {
-			if (conn)
+			if (conn) {
 				/*
 				 * RFC 9000 Section 6: Process via the exported
 				 * API which selects a compatible version and
 				 * restarts the connection via tquic_conn_client_restart.
+				 *
+				 * The versions payload starts after the header
+				 * that was parsed above (at ctx.offset).  Each
+				 * version is a 4-byte big-endian u32.
 				 */
+				const u32 *vn_versions =
+					(const u32 *)(data + ctx.offset);
+				int num_vn = (len - ctx.offset) / sizeof(u32);
+
 				return tquic_handle_version_negotiation(
-					conn, data, len);
+					conn, vn_versions, num_vn);
+			}
 			return 0;
 		}
 
@@ -2902,9 +2911,38 @@ not_reset:
 			/*
 			 * RFC 9000 Section 6.1: Process via the exported API
 			 * which selects a compatible version and restarts.
+			 *
+			 * VN packet layout (RFC 9000 Section 17.2.1):
+			 *   1 byte  header form
+			 *   4 bytes version (0x00000000)
+			 *   1 byte  DCID len
+			 *   DCID
+			 *   1 byte  SCID len
+			 *   SCID
+			 *   4*N bytes supported versions
 			 */
-			ret = tquic_handle_version_negotiation(conn, data,
-							       len);
+			size_t vn_off = 5; /* header + version */
+			u8 vn_dcid_len, vn_scid_len;
+
+			if (len > vn_off) {
+				vn_dcid_len = data[vn_off];
+				vn_off += 1 + vn_dcid_len;
+			}
+			if (len > vn_off) {
+				vn_scid_len = data[vn_off];
+				vn_off += 1 + vn_scid_len;
+			}
+			if (vn_off < len) {
+				const u32 *vn_versions =
+					(const u32 *)(data + vn_off);
+				int num_vn =
+					(len - vn_off) / sizeof(u32);
+
+				ret = tquic_handle_version_negotiation(
+					conn, vn_versions, num_vn);
+			} else {
+				ret = -EINVAL;
+			}
 		} else {
 			ret = 0; /* Ignore orphan version negotiation */
 		}

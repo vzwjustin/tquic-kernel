@@ -30,59 +30,14 @@
 #define TQUIC_L4S_CE_THRESHOLD		10	/* CE marks to detect L4S AQM */
 #define TQUIC_L4S_CLASSIC_THRESHOLD	5	/* Loss events to detect classic */
 
-/**
- * enum tquic_l4s_state - L4S path state
- * @TQUIC_L4S_UNKNOWN: L4S support not yet determined
- * @TQUIC_L4S_PROBING: Probing for L4S support
- * @TQUIC_L4S_ENABLED: L4S AQM detected, using ECT(1)
- * @TQUIC_L4S_DISABLED: Classic AQM or no ECN, using ECT(0)
+/*
+ * L4S context types (enum tquic_l4s_state, struct tquic_l4s_stats,
+ * struct tquic_l4s_ctx) are defined in <net/tquic.h> because
+ * struct tquic_path embeds tquic_l4s_ctx directly.  The guard
+ * _TQUIC_L4S_CTX_DEFINED prevents double-definition when both
+ * headers are included.
  */
-enum tquic_l4s_state {
-	TQUIC_L4S_UNKNOWN = 0,
-	TQUIC_L4S_PROBING,
-	TQUIC_L4S_ENABLED,
-	TQUIC_L4S_DISABLED,
-};
-
-/**
- * struct tquic_l4s_stats - L4S statistics
- * @ect0_sent: Packets sent with ECT(0)
- * @ect1_sent: Packets sent with ECT(1)
- * @ect0_recv: Packets received with ECT(0)
- * @ect1_recv: Packets received with ECT(1)
- * @ce_recv: CE marks received
- * @ce_responded: CE marks we responded to
- */
-struct tquic_l4s_stats {
-	u64 ect0_sent;
-	u64 ect1_sent;
-	u64 ect0_recv;
-	u64 ect1_recv;
-	u64 ce_recv;
-	u64 ce_responded;
-};
-
-/**
- * struct tquic_l4s_ctx - Per-path L4S context
- * @state: Current L4S detection state
- * @enabled: L4S marking enabled by user
- * @capable: Path appears L4S-capable
- * @ce_count: CE marks in current detection window
- * @loss_count: Losses in current detection window
- * @probe_round: Current probing round
- * @alpha: EWMA of CE fraction (scaled by 1024)
- * @stats: L4S statistics
- */
-struct tquic_l4s_ctx {
-	enum tquic_l4s_state state;
-	bool enabled;
-	bool capable;
-	u32 ce_count;
-	u32 loss_count;
-	u32 probe_round;
-	u32 alpha;
-	struct tquic_l4s_stats stats;
-};
+#include <net/tquic.h>
 
 /* Initialization and cleanup */
 void tquic_l4s_init(struct tquic_l4s_ctx *ctx);

@@ -757,13 +757,13 @@ int tquic_failover_on_path_failed(struct tquic_failover_ctx *fc, u8 path_id)
 			continue;
 		}
 
-			if (sp->path_id != path_id)
-				continue;
-			packet_number = sp->packet_number;
+		if (sp->path_id != path_id)
+			continue;
+		packet_number = sp->packet_number;
 
-			/*
-			 * Enforce a safety limit to prevent memory exhaustion
-			 * during catastrophic path failure with large BDP.
+		/*
+		 * Enforce a safety limit to prevent memory exhaustion
+		 * during catastrophic path failure with large BDP.
 		 */
 		if (requeued >= TQUIC_FAILOVER_MAX_QUEUED) {
 			pr_warn_ratelimited(
@@ -776,25 +776,25 @@ int tquic_failover_on_path_failed(struct tquic_failover_ctx *fc, u8 path_id)
 		spin_lock_bh(&fc->sent_packets_lock);
 		spin_lock_bh(&fc->retx_queue.lock);
 
-			/*
-			 * Validate that this object is still tracked by packet number
-			 * and pointer identity. If ACK already removed/replaced it,
-			 * skip safely.
-			 */
-			tracked = rhashtable_lookup_fast(&fc->sent_packets,
-							 &packet_number,
-							 tquic_failover_packet_params);
-			if (tracked != sp) {
-				spin_unlock_bh(&fc->retx_queue.lock);
-				spin_unlock_bh(&fc->sent_packets_lock);
-				continue;
+		/*
+		 * Validate that this object is still tracked by packet number
+		 * and pointer identity. If ACK already removed/replaced it,
+		 * skip safely.
+		 */
+		tracked = rhashtable_lookup_fast(&fc->sent_packets,
+						 &packet_number,
+						 tquic_failover_packet_params);
+		if (tracked != sp) {
+			spin_unlock_bh(&fc->retx_queue.lock);
+			spin_unlock_bh(&fc->sent_packets_lock);
+			continue;
 		}
 
-			if (tracked->in_retx_queue) {
-				/* Already queued by concurrent requeue — skip */
-				spin_unlock_bh(&fc->retx_queue.lock);
-				spin_unlock_bh(&fc->sent_packets_lock);
-				continue;
+		if (tracked->in_retx_queue) {
+			/* Already queued by concurrent requeue — skip */
+			spin_unlock_bh(&fc->retx_queue.lock);
+			spin_unlock_bh(&fc->sent_packets_lock);
+			continue;
 		}
 
 		/* Check queue limits under lock */
@@ -808,21 +808,22 @@ int tquic_failover_on_path_failed(struct tquic_failover_ctx *fc, u8 path_id)
 			break;
 		}
 
-			ret = rhashtable_remove_fast(&fc->sent_packets, &tracked->hash_node,
-						     tquic_failover_packet_params);
-			if (ret) {
-				spin_unlock_bh(&fc->retx_queue.lock);
-				spin_unlock_bh(&fc->sent_packets_lock);
-				continue;
+		ret = rhashtable_remove_fast(&fc->sent_packets,
+					     &tracked->hash_node,
+					     tquic_failover_packet_params);
+		if (ret) {
+			spin_unlock_bh(&fc->retx_queue.lock);
+			spin_unlock_bh(&fc->sent_packets_lock);
+			continue;
 		}
 		if (fc->sent_count > 0)
 			fc->sent_count--;
 
-			list_add_tail(&tracked->retx_list, &fc->retx_queue.queue);
-			tracked->in_retx_queue = true;
-			fc->retx_queue.count++;
-			fc->retx_queue.bytes += tracked->len;
-			requeued++;
+		list_add_tail(&tracked->retx_list, &fc->retx_queue.queue);
+		tracked->in_retx_queue = true;
+		fc->retx_queue.count++;
+		fc->retx_queue.bytes += tracked->len;
+		requeued++;
 
 		spin_unlock_bh(&fc->retx_queue.lock);
 		spin_unlock_bh(&fc->sent_packets_lock);

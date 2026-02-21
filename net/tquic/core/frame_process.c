@@ -82,8 +82,6 @@ int tquic_frame_process_priority_update(struct tquic_connection *conn,
 #define TQUIC_PKT_ZERO_RTT 0x01
 #define TQUIC_PKT_HANDSHAKE 0x02
 
-/* Maximum ACK ranges to prevent resource exhaustion from malicious frames */
-#define TQUIC_MAX_ACK_RANGES 256
 
 /*
  * Conservative per-packet byte estimate for Initial/Handshake ACKs.
@@ -1922,7 +1920,7 @@ static int tquic_process_path_response_frame(struct tquic_rx_ctx *ctx)
 	 */
 	if (ctx->path && tquic_path_verify_response(ctx->path, data)) {
 		ctx->path->validation.challenge_pending = false;
-		tquic_path_on_validated(ctx->conn, ctx->path);
+		tquic_path_on_validated(ctx->path);
 	}
 
 	/*

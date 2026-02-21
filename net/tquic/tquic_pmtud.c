@@ -536,7 +536,7 @@ static int tquic_pmtud_send_probe(struct tquic_path *path, u32 probe_size)
 
 		if (probe_clone) {
 			tquic_dbg(
-				"pmtud:probe clone: type=%d pn_space=%d raw_len=%u path_id=%u\n",
+				"pmtud:probe clone: type=%d pn_space=%d raw_len=%zu path_id=%u\n",
 				probe_clone->hdr.type, probe_clone->pn_space,
 				probe_clone->raw_len,
 				probe_clone->path

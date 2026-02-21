@@ -660,7 +660,7 @@ static int tquic_pm_kernel_add_path(struct tquic_connection *conn,
 	if (!bpath)
 		return -ENOMEM;
 
-	tquic_dbg("kernel PM: added bpm path %u\n", bpath->path_id);
+	tquic_dbg("kernel PM: added bpm path\n");
 	return 0;
 }
 

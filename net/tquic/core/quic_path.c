@@ -26,6 +26,7 @@
 #include "../multipath/mp_deadline.h"
 #endif
 #include "../sched/deadline_aware.h"
+#include "../tquic_wire_b.h"
 
 /* Forward declarations to silence -Wmissing-prototypes */
 void tquic_trace_path_validated(struct tquic_connection *conn, u32 path_id,

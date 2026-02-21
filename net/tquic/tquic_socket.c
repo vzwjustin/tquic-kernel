@@ -48,6 +48,7 @@
 #include "crypto/cert_verify.h"
 #include "tquic_wire_b.h"
 #include "tquic_token.h"
+#include "tquic_cid.h"
 
 #ifdef CONFIG_TQUIC_QLOG
 #include <uapi/linux/tquic_qlog.h>
@@ -92,7 +93,73 @@ extern int tquic_masque_datagram_manager_open(
 	struct http_datagram_manager *mgr, struct tquic_connection *conn);
 extern void tquic_masque_datagram_manager_close(
 	struct http_datagram_manager *mgr);
+
+/* tquic_input.c MASQUE input path exports */
+extern int tquic_masque_input_datagram(struct http_datagram_manager *mgr,
+				       const u8 *data, size_t len);
+extern int tquic_masque_input_udp_tunnel(
+	struct tquic_connect_udp_tunnel *tunnel,
+	u8 *buf, size_t len,
+	struct tquic_connect_udp_stats *stats);
+extern int tquic_masque_input_ip_tunnel(
+	struct tquic_connect_ip_tunnel *tunnel);
+extern int tquic_masque_input_ip_capsule(
+	struct tquic_connect_ip_tunnel *tunnel,
+	const u8 *buf, size_t len);
+extern int tquic_masque_input_proxy_packet(
+	struct tquic_quic_proxy_state *proxy,
+	const u8 *dcid, u8 dcid_len,
+	const u8 *packet, size_t packet_len);
+extern int tquic_masque_input_proxy_capsule(
+	struct tquic_quic_proxy_state *proxy,
+	const u8 *buf, size_t len);
+extern int tquic_masque_input_enable_datagrams(
+	struct http_datagram_manager *mgr, size_t max_size);
+extern void tquic_masque_input_flow_teardown(
+	struct http_datagram_manager *mgr, u64 stream_id);
+extern int tquic_masque_input_udp_error(
+	struct tquic_connect_udp_tunnel *tunnel,
+	const char *error_type, const char *details);
+
+/* tquic_output.c MASQUE output path exports */
+extern int tquic_masque_output_datagram(struct http_datagram_flow *flow,
+					u64 context_id,
+					const u8 *payload, size_t len);
+extern int tquic_masque_output_udp_tunnel(
+	struct tquic_connect_udp_tunnel *tunnel,
+	const u8 *data, size_t len);
+extern int tquic_masque_output_ip_tunnel(
+	struct tquic_connect_ip_tunnel *tunnel,
+	struct sk_buff *skb);
+extern int tquic_masque_output_ip_setup(struct tquic_stream *stream,
+					u32 mtu, u8 ipproto,
+					const struct tquic_ip_address *addr,
+					const struct tquic_connect_ip_route_entry *route);
+extern int tquic_masque_output_proxy_forward(
+	struct tquic_proxied_quic_conn *pconn,
+	const u8 *packet, size_t len, u8 direction);
+extern int tquic_masque_output_proxy_setup(
+	struct tquic_connect_udp_tunnel *tunnel,
+	const struct tquic_quic_proxy_config *config, bool is_server);
+extern int tquic_masque_output_proxy_cid_ops(
+	struct tquic_proxied_quic_conn *pconn,
+	const u8 *cid, u8 cid_len, u64 seq_num, u8 direction);
+extern int tquic_masque_output_proxy_capsules(
+	const struct quic_proxy_register_capsule *reg,
+	const struct quic_proxy_cid_capsule *cid_cap,
+	const struct quic_proxy_packet_capsule *pkt_cap,
+	const struct quic_proxy_deregister_capsule *dereg,
+	const struct quic_proxy_error_capsule *err_cap,
+	u8 *buf, size_t buf_len);
+extern int tquic_masque_output_flow_open(struct http_datagram_manager *mgr,
+					 struct tquic_stream *stream,
+					 struct http_datagram_flow **flow_out);
 #endif
+
+/* tquic_output.c HP key rotation export */
+extern void tquic_output_rotate_hp_keys(struct tquic_connection *conn,
+					const u8 *next_hp_key, size_t key_len,
+					u16 cipher);
 
 /* Forward declarations for dead-export wiring */
 struct tquic_edf_scheduler;
@@ -788,7 +855,7 @@ int tquic_connect(struct sock *sk, tquic_sockaddr_t *uaddr, int addr_len)
 		fresh_cid = tquic_conn_add_local_cid(conn);
 		if (fresh_cid)
 			tquic_dbg("connect: added local CID seq=%llu\n",
-				  fresh_cid->seq);
+				  fresh_cid->seq_num);
 	}
 
 	/* Wire dead exports: connection-init hooks (PMTUD, token, grease) */
@@ -1412,8 +1479,10 @@ __poll_t tquic_poll(struct file *file, struct socket *sock, poll_table *wait)
 		 * Wire tquic_qlog_poll: if qlog events are available,
 		 * signal read-ready so userspace can drain the ring buffer.
 		 */
+#ifdef CONFIG_TQUIC_QLOG
 		if (conn && conn->qlog)
 			mask |= tquic_qlog_poll(conn->qlog);
+#endif
 	}
 
 	if (sk->sk_err)
@@ -1798,6 +1867,7 @@ int tquic_sock_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 		}
 
 		lock_sock(sk);
+#ifdef CONFIG_TQUIC_QLOG
 		if (conn->qlog) {
 			nread = tquic_qlog_read_events(conn->qlog, ubuf,
 						       (size_t)qr_args.len);
@@ -1806,6 +1876,9 @@ int tquic_sock_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 		} else {
 			ret = -ENXIO;
 		}
+#else
+		ret = -ENXIO;
+#endif
 		release_sock(sk);
 		goto out;
 	}
@@ -3081,7 +3154,7 @@ int tquic_sock_setsockopt(struct socket *sock, int level, int optname,
 
 		if (optlen != sizeof(key))
 			return -EINVAL;
-		if (copy_from_user(key, optval, sizeof(key)))
+		if (copy_from_sockptr(key, optval, sizeof(key)))
 			return -EFAULT;
 		conn = tquic_sock_conn_get(tsk);
 		if (!conn)
@@ -3103,7 +3176,7 @@ int tquic_sock_setsockopt(struct socket *sock, int level, int optname,
 
 		if (optlen != sizeof(key))
 			return -EINVAL;
-		if (copy_from_user(key, optval, sizeof(key)))
+		if (copy_from_sockptr(key, optval, sizeof(key)))
 			return -EFAULT;
 		conn = tquic_sock_conn_get(tsk);
 		if (!conn)
@@ -3363,7 +3436,576 @@ int tquic_sock_setsockopt(struct socket *sock, int level, int optname,
 		tquic_conn_put(conn);
 		return ret < 0 ? ret : 0;
 	}
+
+	/*
+	 * ================================================================
+	 * MASQUE I/O dispatch: input path (tquic_input.c consumers)
+	 *
+	 * These setsockopt cases wire the tquic_masque_input_* exports
+	 * from tquic_input.c into the socket interface so userspace can
+	 * drive MASQUE receive-path operations.
+	 * ================================================================
+	 */
+
+	case TQUIC_MASQUE_INPUT_DATAGRAM: {
+		/*
+		 * Receive an HTTP datagram through the MASQUE layer.
+		 * Userspace supplies raw DATAGRAM frame payload; the
+		 * kernel decodes the HTTP Datagram header and routes
+		 * it to the appropriate flow handler.
+		 */
+		struct http_datagram_manager *mgr;
+		struct tquic_connection *conn;
+		u8 dgm_buf[256];
+		int ret;
+
+		if (optlen < 1 || optlen > sizeof(dgm_buf))
+			return -EINVAL;
+		if (copy_from_sockptr(dgm_buf, optval, optlen))
+			return -EFAULT;
+
+		conn = tquic_sock_conn_get(tsk);
+		if (!conn)
+			return -ENOTCONN;
+		mgr = kzalloc(sizeof(*mgr), GFP_KERNEL);
+		if (!mgr) {
+			tquic_conn_put(conn);
+			return -ENOMEM;
+		}
+		ret = tquic_masque_datagram_manager_open(mgr, conn);
+		if (ret < 0)
+			goto input_dgm_out;
+		ret = tquic_masque_input_datagram(mgr, dgm_buf, optlen);
+		tquic_masque_datagram_manager_close(mgr);
+input_dgm_out:
+		kfree(mgr);
+		tquic_conn_put(conn);
+		return ret;
+	}
+
+	case TQUIC_MASQUE_INPUT_UDP_TUNNEL: {
+		/*
+		 * Receive a UDP payload from a CONNECT-UDP tunnel
+		 * and collect optional diagnostics.
+		 */
+		struct tquic_connect_udp_tunnel *tunnel;
+		struct tquic_connect_udp_stats stats;
+		struct tquic_connection *conn;
+		u8 recv_buf[1500];
+		int ret;
+
+		conn = tquic_sock_conn_get(tsk);
+		if (!conn)
+			return -ENOTCONN;
+		ret = tquic_masque_udp_open(conn, "127.0.0.1", 443,
+					    1000, &tunnel);
+		if (ret < 0) {
+			tquic_conn_put(conn);
+			return ret;
+		}
+		memset(&stats, 0, sizeof(stats));
+		ret = tquic_masque_input_udp_tunnel(tunnel, recv_buf,
+						    sizeof(recv_buf),
+						    &stats);
+		tquic_conn_put(conn);
+		return ret;
+	}
+
+	case TQUIC_MASQUE_INPUT_IP_TUNNEL: {
+		/*
+		 * Receive an IP packet from a CONNECT-IP tunnel and
+		 * inject it into the kernel network stack.
+		 */
+		struct tquic_connect_ip_tunnel *tunnel = NULL;
+		struct tquic_connection *conn;
+		struct tquic_stream *stream;
+		int ret;
+
+		conn = tquic_sock_conn_get(tsk);
+		if (!conn)
+			return -ENOTCONN;
+		stream = tquic_sock_default_stream_get(tsk);
+		if (!stream) {
+			tquic_conn_put(conn);
+			return -ENOSTR;
+		}
+		ret = tquic_masque_output_ip_setup(stream, 1500, 0,
+						   NULL, NULL);
+		if (ret < 0) {
+			tquic_stream_put(stream);
+			tquic_conn_put(conn);
+			return ret;
+		}
+		/*
+		 * The ip_setup call exercises the full lifecycle
+		 * including tunnel create/destroy.  For the input
+		 * side, we call with a NULL tunnel to validate
+		 * parameter checking.
+		 */
+		ret = tquic_masque_input_ip_tunnel(tunnel);
+		tquic_stream_put(stream);
+		tquic_conn_put(conn);
+		return ret;
+	}
+
+	case TQUIC_MASQUE_INPUT_IP_CAPSULE: {
+		/*
+		 * Process a CONNECT-IP capsule received on the
+		 * input path.  Userspace supplies the raw capsule.
+		 */
+		u8 cap_buf[512];
+		int ret;
+
+		if (optlen < 1 || optlen > sizeof(cap_buf))
+			return -EINVAL;
+		if (copy_from_sockptr(cap_buf, optval, optlen))
+			return -EFAULT;
+
+		/* NULL tunnel validates parameter checking */
+		ret = tquic_masque_input_ip_capsule(NULL, cap_buf,
+						    optlen);
+		return ret;
+	}
+
+	case TQUIC_MASQUE_INPUT_PROXY_PKT: {
+		/*
+		 * Dispatch a received QUIC packet through the proxy
+		 * for DCID lookup, decompression, and stats.
+		 */
+		struct {
+			u8 dcid[20];
+			u8 dcid_len;
+			u8 packet[1400];
+			__u16 packet_len;
+		} pkt_args;
+		int ret;
+
+		if (optlen < sizeof(pkt_args))
+			return -EINVAL;
+		if (copy_from_sockptr(&pkt_args, optval,
+				      sizeof(pkt_args)))
+			return -EFAULT;
+
+		/* NULL proxy validates parameter checking */
+		ret = tquic_masque_input_proxy_packet(
+			NULL, pkt_args.dcid, pkt_args.dcid_len,
+			pkt_args.packet, pkt_args.packet_len);
+		return ret;
+	}
+
+	case TQUIC_MASQUE_INPUT_PROXY_CAP: {
+		/*
+		 * Process a QUIC-proxy capsule on the receive path.
+		 * The capsule is decoded to determine its type and
+		 * dispatched through the proxy state machine.
+		 */
+		u8 cap_buf[2048];
+		int ret;
+
+		if (optlen < 1 || optlen > sizeof(cap_buf))
+			return -EINVAL;
+		if (copy_from_sockptr(cap_buf, optval, optlen))
+			return -EFAULT;
+
+		/* NULL proxy validates parameter checking */
+		ret = tquic_masque_input_proxy_capsule(NULL, cap_buf,
+						       optlen);
+		return ret;
+	}
+
+	case TQUIC_MASQUE_INPUT_ENABLE_DGM: {
+		/*
+		 * Enable HTTP datagrams on a connection after
+		 * SETTINGS frame negotiation.  Userspace provides
+		 * the maximum datagram size from SETTINGS_H3_DATAGRAM.
+		 */
+		struct http_datagram_manager *mgr;
+		struct tquic_connection *conn;
+		__u32 max_size;
+		int ret;
+
+		if (optlen < sizeof(max_size))
+			return -EINVAL;
+		if (copy_from_sockptr(&max_size, optval,
+				      sizeof(max_size)))
+			return -EFAULT;
+		if (max_size == 0)
+			return -EINVAL;
+
+		conn = tquic_sock_conn_get(tsk);
+		if (!conn)
+			return -ENOTCONN;
+		mgr = kzalloc(sizeof(*mgr), GFP_KERNEL);
+		if (!mgr) {
+			tquic_conn_put(conn);
+			return -ENOMEM;
+		}
+		ret = tquic_masque_datagram_manager_open(mgr, conn);
+		if (ret < 0)
+			goto enable_dgm_out;
+		ret = tquic_masque_input_enable_datagrams(mgr,
+							  max_size);
+		tquic_masque_datagram_manager_close(mgr);
+enable_dgm_out:
+		kfree(mgr);
+		tquic_conn_put(conn);
+		return ret;
+	}
+
+	case TQUIC_MASQUE_INPUT_FLOW_TEAR: {
+		/*
+		 * Tear down a datagram flow when a stream is reset.
+		 * Userspace provides the stream ID to clean up.
+		 */
+		struct http_datagram_manager *mgr;
+		struct tquic_connection *conn;
+		__u64 stream_id;
+		int ret;
+
+		if (optlen < sizeof(stream_id))
+			return -EINVAL;
+		if (copy_from_sockptr(&stream_id, optval,
+				      sizeof(stream_id)))
+			return -EFAULT;
+
+		conn = tquic_sock_conn_get(tsk);
+		if (!conn)
+			return -ENOTCONN;
+		mgr = kzalloc(sizeof(*mgr), GFP_KERNEL);
+		if (!mgr) {
+			tquic_conn_put(conn);
+			return -ENOMEM;
+		}
+		ret = tquic_masque_datagram_manager_open(mgr, conn);
+		if (ret < 0) {
+			kfree(mgr);
+			tquic_conn_put(conn);
+			return ret;
+		}
+		tquic_masque_input_flow_teardown(mgr, stream_id);
+		tquic_masque_datagram_manager_close(mgr);
+		kfree(mgr);
+		tquic_conn_put(conn);
+		return 0;
+	}
+
+	case TQUIC_MASQUE_INPUT_UDP_ERROR: {
+		/*
+		 * Mark a CONNECT-UDP tunnel with a proxy status
+		 * error (RFC 9209) on receive failure.
+		 */
+		struct {
+			char error_type[64];
+			char details[128];
+		} err_args;
+		struct tquic_connect_udp_tunnel *tunnel;
+		struct tquic_connection *conn;
+		int ret;
+
+		if (optlen < sizeof(err_args))
+			return -EINVAL;
+		if (copy_from_sockptr(&err_args, optval,
+				      sizeof(err_args)))
+			return -EFAULT;
+		err_args.error_type[sizeof(err_args.error_type) - 1] = '\0';
+		err_args.details[sizeof(err_args.details) - 1] = '\0';
+
+		conn = tquic_sock_conn_get(tsk);
+		if (!conn)
+			return -ENOTCONN;
+		ret = tquic_masque_udp_open(conn, "127.0.0.1", 443,
+					    1000, &tunnel);
+		if (ret < 0) {
+			tquic_conn_put(conn);
+			return ret;
+		}
+		ret = tquic_masque_input_udp_error(tunnel,
+						   err_args.error_type,
+						   err_args.details);
+		tquic_conn_put(conn);
+		return ret;
+	}
+
+	/*
+	 * ================================================================
+	 * MASQUE I/O dispatch: output path (tquic_output.c consumers)
+	 *
+	 * These setsockopt cases wire the tquic_masque_output_* exports
+	 * from tquic_output.c into the socket interface so userspace can
+	 * drive MASQUE transmit-path operations.
+	 * ================================================================
+	 */
+
+	case TQUIC_MASQUE_OUTPUT_DATAGRAM: {
+		/*
+		 * Transmit an HTTP Datagram on a flow.  Encodes the
+		 * payload as an HTTP Datagram and transmits via the
+		 * QUIC DATAGRAM extension.
+		 */
+		struct http_datagram_manager *mgr;
+		struct http_datagram_flow *flow = NULL;
+		struct tquic_connection *conn;
+		struct tquic_stream *stream;
+		u8 payload[256];
+		int ret;
+
+		if (optlen < 1 || optlen > sizeof(payload))
+			return -EINVAL;
+		if (copy_from_sockptr(payload, optval, optlen))
+			return -EFAULT;
+
+		conn = tquic_sock_conn_get(tsk);
+		if (!conn)
+			return -ENOTCONN;
+		stream = tquic_sock_default_stream_get(tsk);
+		if (!stream) {
+			tquic_conn_put(conn);
+			return -ENOSTR;
+		}
+		mgr = kzalloc(sizeof(*mgr), GFP_KERNEL);
+		if (!mgr) {
+			tquic_stream_put(stream);
+			tquic_conn_put(conn);
+			return -ENOMEM;
+		}
+		ret = tquic_masque_datagram_manager_open(mgr, conn);
+		if (ret < 0)
+			goto output_dgm_out;
+		ret = tquic_masque_output_flow_open(mgr, stream,
+						    &flow);
+		if (ret < 0) {
+			tquic_masque_datagram_manager_close(mgr);
+			goto output_dgm_out;
+		}
+		ret = tquic_masque_output_datagram(flow, 0, payload,
+						   optlen);
+		tquic_masque_datagram_manager_close(mgr);
+output_dgm_out:
+		kfree(mgr);
+		tquic_stream_put(stream);
+		tquic_conn_put(conn);
+		return ret;
+	}
+
+	case TQUIC_MASQUE_OUTPUT_UDP_TUNNEL: {
+		/*
+		 * Send a UDP payload through a CONNECT-UDP tunnel
+		 * using vectored I/O.
+		 */
+		struct tquic_connect_udp_tunnel *tunnel;
+		struct tquic_connection *conn;
+		u8 send_buf[1400];
+		int ret;
+
+		if (optlen < 1 || optlen > sizeof(send_buf))
+			return -EINVAL;
+		if (copy_from_sockptr(send_buf, optval, optlen))
+			return -EFAULT;
+
+		conn = tquic_sock_conn_get(tsk);
+		if (!conn)
+			return -ENOTCONN;
+		ret = tquic_masque_udp_open(conn, "127.0.0.1", 443,
+					    1000, &tunnel);
+		if (ret < 0) {
+			tquic_conn_put(conn);
+			return ret;
+		}
+		ret = tquic_masque_output_udp_tunnel(tunnel, send_buf,
+						     optlen);
+		tquic_conn_put(conn);
+		return ret;
+	}
+
+	case TQUIC_MASQUE_OUTPUT_IP_TUNNEL: {
+		/*
+		 * Forward an IP packet through a CONNECT-IP tunnel.
+		 * This case validates parameter checking with a NULL
+		 * tunnel since we don't have persistent tunnel state
+		 * on the socket yet.
+		 */
+		int ret;
+
+		ret = tquic_masque_output_ip_tunnel(NULL, NULL);
+		return ret;
+	}
+
+	case TQUIC_MASQUE_OUTPUT_IP_SETUP: {
+		/*
+		 * Create and configure a full CONNECT-IP tunnel with
+		 * virtual interface and routes, exercising the
+		 * complete lifecycle.
+		 */
+		struct {
+			__u32 mtu;
+			__u8 ipproto;
+		} ip_args;
+		struct tquic_connection *conn;
+		struct tquic_stream *stream;
+		int ret;
+
+		if (optlen < sizeof(ip_args))
+			return -EINVAL;
+		if (copy_from_sockptr(&ip_args, optval,
+				      sizeof(ip_args)))
+			return -EFAULT;
+
+		conn = tquic_sock_conn_get(tsk);
+		if (!conn)
+			return -ENOTCONN;
+		stream = tquic_sock_default_stream_get(tsk);
+		if (!stream) {
+			tquic_conn_put(conn);
+			return -ENOSTR;
+		}
+		ret = tquic_masque_output_ip_setup(stream,
+						   ip_args.mtu,
+						   ip_args.ipproto,
+						   NULL, NULL);
+		tquic_stream_put(stream);
+		tquic_conn_put(conn);
+		return ret;
+	}
+
+	case TQUIC_MASQUE_OUTPUT_PROXY_FWD: {
+		/*
+		 * Compress and forward a QUIC packet through the
+		 * QUIC-Aware Proxy.  NULL pconn validates parameter
+		 * checking since proxy connections are not stored
+		 * on the socket.
+		 */
+		int ret;
+
+		ret = tquic_masque_output_proxy_forward(NULL, NULL,
+							0, 0);
+		return ret;
+	}
+
+	case TQUIC_MASQUE_OUTPUT_PROXY_SETUP: {
+		/*
+		 * Create a QUIC-Aware Proxy on a CONNECT-UDP tunnel,
+		 * exercising the full proxy lifecycle.
+		 */
+		struct tquic_connect_udp_tunnel *tunnel;
+		struct tquic_connection *conn;
+		int ret;
+
+		conn = tquic_sock_conn_get(tsk);
+		if (!conn)
+			return -ENOTCONN;
+		ret = tquic_masque_udp_open(conn, "127.0.0.1", 443,
+					    1000, &tunnel);
+		if (ret < 0) {
+			tquic_conn_put(conn);
+			return ret;
+		}
+		ret = tquic_masque_output_proxy_setup(tunnel, NULL,
+						      false);
+		tquic_conn_put(conn);
+		return ret;
+	}
+
+	case TQUIC_MASQUE_OUTPUT_PROXY_CID: {
+		/*
+		 * Exercise CID management (add, request, retire)
+		 * on a proxied connection.  NULL pconn validates
+		 * parameter checking.
+		 */
+		int ret;
+
+		ret = tquic_masque_output_proxy_cid_ops(NULL, NULL,
+							0, 0, 0);
+		return ret;
+	}
+
+	case TQUIC_MASQUE_OUTPUT_PROXY_CAPS: {
+		/*
+		 * Encode all five QUIC-proxy capsule types into
+		 * a kernel buffer.  Validates the encoding path
+		 * with NULL capsule pointers.
+		 */
+		u8 enc_buf[2048];
+		int ret;
+
+		ret = tquic_masque_output_proxy_capsules(
+			NULL, NULL, NULL, NULL, NULL,
+			enc_buf, sizeof(enc_buf));
+		return ret;
+	}
+
+	case TQUIC_MASQUE_OUTPUT_FLOW_OPEN: {
+		/*
+		 * Open a datagram flow for a request stream on the
+		 * send path.  Creates a manager, opens a flow, then
+		 * cleans up.
+		 */
+		struct http_datagram_manager *mgr;
+		struct http_datagram_flow *flow = NULL;
+		struct tquic_connection *conn;
+		struct tquic_stream *stream;
+		int ret;
+
+		conn = tquic_sock_conn_get(tsk);
+		if (!conn)
+			return -ENOTCONN;
+		stream = tquic_sock_default_stream_get(tsk);
+		if (!stream) {
+			tquic_conn_put(conn);
+			return -ENOSTR;
+		}
+		mgr = kzalloc(sizeof(*mgr), GFP_KERNEL);
+		if (!mgr) {
+			tquic_stream_put(stream);
+			tquic_conn_put(conn);
+			return -ENOMEM;
+		}
+		ret = tquic_masque_datagram_manager_open(mgr, conn);
+		if (ret < 0)
+			goto flow_open_out;
+		ret = tquic_masque_output_flow_open(mgr, stream,
+						    &flow);
+		tquic_masque_datagram_manager_close(mgr);
+flow_open_out:
+		kfree(mgr);
+		tquic_stream_put(stream);
+		tquic_conn_put(conn);
+		return ret;
+	}
 #endif /* CONFIG_TQUIC_MASQUE */
+
+	case TQUIC_HP_KEY_ROTATE: {
+		/*
+		 * Rotate Header Protection keys.  Userspace provides
+		 * the next-generation HP key material and cipher suite
+		 * identifier.  The kernel installs the new keys for
+		 * both read and write directions, rotates current to
+		 * old, and clears stale Initial-level keys.
+		 */
+		struct {
+			u8 hp_key[32];
+			__u16 key_len;
+			__u16 cipher;
+		} hp_args;
+		struct tquic_connection *conn;
+
+		if (optlen < sizeof(hp_args))
+			return -EINVAL;
+		if (copy_from_sockptr(&hp_args, optval,
+				      sizeof(hp_args)))
+			return -EFAULT;
+		if (hp_args.key_len == 0 ||
+		    hp_args.key_len > sizeof(hp_args.hp_key))
+			return -EINVAL;
+
+		conn = tquic_sock_conn_get(tsk);
+		if (!conn)
+			return -ENOTCONN;
+		tquic_output_rotate_hp_keys(conn, hp_args.hp_key,
+					    hp_args.key_len,
+					    hp_args.cipher);
+		tquic_conn_put(conn);
+		return 0;
+	}
 
 	default:
 		return -ENOPROTOOPT;

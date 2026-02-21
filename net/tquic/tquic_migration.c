@@ -41,6 +41,7 @@
 #include "tquic_sysctl.h"
 #include "tquic_compat.h"
 #include "tquic_wire_b.h"
+#include <net/tquic_pm.h>
 #ifdef CONFIG_TQUIC_AF_XDP
 #include "af_xdp.h"
 #endif
@@ -1000,7 +1001,7 @@ int tquic_migrate_auto(struct tquic_connection *conn, struct tquic_path *path,
 		 * update its remote address list for future path selection.
 		 */
 		if (path) {
-			tquic_pm_check_address_change(conn, new_addr);
+			tquic_pm_check_address_change(conn, new_addr, path);
 			tquic_pm_notify_observed_address(conn, path);
 		}
 

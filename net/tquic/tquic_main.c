@@ -1215,12 +1215,10 @@ int __ref tquic_init(void)
 
 	/*
 	 * Benchmark subsystem: verify the benchmark runner and JSON
-	 * serializer are reachable.  tquic_bench_run(NULL) returns
-	 * -EINVAL immediately; tquic_bench_result_to_json(NULL, ...)
-	 * returns 0.  interop_result_to_json follows the same pattern.
-	 * These are wired purely to eliminate dead-export warnings;
-	 * real benchmark runs are triggered from userspace via netlink.
+	 * serializer are reachable.  Gated on CONFIG so the symbols
+	 * are only required when the corresponding modules are built.
 	 */
+#ifdef CONFIG_TQUIC_BENCH
 	{
 		int bret = tquic_bench_run(NULL);
 
@@ -1229,10 +1227,14 @@ int __ref tquic_init(void)
 
 		bret = tquic_bench_result_to_json(NULL, NULL, 0);
 		(void)bret;
-
-		bret = interop_result_to_json(NULL, NULL, 0);
+	}
+#endif
+#ifdef CONFIG_TQUIC_INTEROP_TEST
+	{
+		int bret = interop_result_to_json(NULL, NULL, 0);
 		(void)bret;
 	}
+#endif
 
 	/*
 	 * Verify tunnel tproxy factory is linkable.  Passing NULL
