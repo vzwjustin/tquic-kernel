@@ -162,13 +162,9 @@ tquic-y := \
     tquic-y += diag/qlog.o diag/qlog_v2.o
   endif
 
-  # AccECN feedback (experimental) - only built when explicitly enabled.
-  # Out-of-tree builds must pass CONFIG_TQUIC_ACCECN_EXPERIMENTAL=m on the
-  # make command line to include this module.
-  ifdef CONFIG_TQUIC_ACCECN_EXPERIMENTAL
-    obj-m += tquic_accecn.o
-    tquic_accecn-y := cong/accecn.o
-  endif
+  # AccECN feedback - fold into tquic.ko to avoid circular dependency
+  # (tquic.ko calls accecn_* unconditionally; accecn needs tquic_debug_level).
+  tquic-y += cong/accecn.o
 
   # io_uring integration requires kernel-internal io_uring headers;
   # only available when building against a kernel with CONFIG_TQUIC_IO_URING.
@@ -181,11 +177,9 @@ tquic-y := \
     tquic-y += napi.o
   endif
 
-  # BDP Frame Extension (draft-kuhn-quic-bdpframe-extension-05)
-  ifdef CONFIG_TQUIC_BDP_FRAME
-    obj-m += tquic_bdp_frame.o
-    tquic_bdp_frame-y := cong/bdp_frame.o cong/careful_resume.o
-  endif
+  # BDP Frame Extension - fold into tquic.ko to avoid circular dependency
+  # (tquic.ko calls tquic_bdp_* unconditionally; bdp_frame needs tquic_debug_level).
+  tquic-y += cong/bdp_frame.o cong/careful_resume.o
 
   # Netfilter connection tracking integration
   ifdef CONFIG_TQUIC_NETFILTER
@@ -208,7 +202,7 @@ tquic-y := \
   # the #ifdef guard in tquic_debug.h resolves to the real declarations
   # (out-of-tree kbuild doesn't auto-convert make vars to -D flags).
   tquic-y += tquic_debug.o
-  ccflags-y += -DCONFIG_TQUIC_DEBUGFS
+  ccflags-y += -DCONFIG_TQUIC_DEBUGFS -DCONFIG_TQUIC_BDP_FRAME -DCONFIG_TQUIC_ACCECN_EXPERIMENTAL
 
   # Forward Error Correction (draft-zheng-quic-fec-extension-01)
   ifdef CONFIG_TQUIC_FEC
