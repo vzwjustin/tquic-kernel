@@ -14,6 +14,8 @@
 #include <linux/slab.h>
 #include <net/tquic.h>
 
+#include "../protocol.h"
+
 /* Flow control test context */
 struct flow_control_test_ctx {
 	u64 max_data;		/* Connection-level max data */

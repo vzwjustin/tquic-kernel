@@ -10,6 +10,7 @@
 #include <linux/slab.h>
 #include <net/tquic.h>
 
+#include "../protocol.h"
 #include "../core/transport_params.h"
 
 /*
