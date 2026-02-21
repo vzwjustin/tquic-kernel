@@ -197,6 +197,7 @@ struct h3_stream {
 	bool trailers_received;
 	bool fin_received;
 	bool fin_sent;
+	bool data_sending;
 
 	/* Content tracking */
 	u64 data_offset;
@@ -213,6 +214,9 @@ struct h3_stream {
 	u8 priority_urgency;
 	bool priority_incremental;
 	bool priority_valid;		/* True if priority explicitly set */
+
+	/* Back-reference to owning HTTP/3 connection (for control stream handling) */
+	struct h3_connection *h3conn;
 
 	/* Reference counting */
 	refcount_t refcnt;
