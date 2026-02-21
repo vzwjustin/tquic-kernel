@@ -70,38 +70,6 @@ static const char *tquic_bpm_path_state_names[] = {
 #define TQUIC_BPM_PATH_CLOSED TQUIC_BPM_PATH_CLOSING
 #define TQUIC_BPM_PATH_PENDING TQUIC_BPM_PATH_VALIDATING
 
-/*
- * Adapter helpers: bridge tquic_bpm_path lifecycle to the bonding API.
- *
- * The bonding layer uses struct tquic_path *, but BPM has its own
- * struct tquic_bpm_path type.  For callbacks that only read path_id
- * or state, we synthesise a minimal tquic_path stub on the stack.
- * Callbacks that do not dereference the path arg at all pass NULL.
- */
-static enum tquic_path_state
-bpm_to_core_state(enum tquic_bpm_path_state s)
-{
-	if (s == TQUIC_BPM_PATH_ACTIVE)
-		return TQUIC_PATH_ACTIVE;
-	if (s == TQUIC_BPM_PATH_FAILED || s == TQUIC_BPM_PATH_CLOSING)
-		return TQUIC_PATH_FAILED;
-	return TQUIC_PATH_VALIDATING;
-}
-
-/* on_path_available: bonding callee ignores the path arg entirely */
-static void bpm_on_path_available(void *ctx, struct tquic_bpm_path *path)
-{
-	tquic_bonding_on_path_validated(ctx, NULL);
-}
-
-/* on_path_failed: bonding callee reads only path->path_id */
-static void bpm_on_path_failed(void *ctx, struct tquic_bpm_path *path)
-{
-	struct tquic_path tpath = {};
-
-	tpath.path_id = path->path_id;
-	tquic_bonding_on_path_failed(ctx, &tpath);
-}
 
 /* Alias for state name array (backwards compatibility) */
 #define tquic_bpm_path_state_names tquic_bpm_path_state_names
@@ -317,6 +285,39 @@ struct tquic_bpm_path {
 	/* Back pointer to path manager */
 	struct tquic_bpm_path_manager *pm;
 };
+
+/*
+ * Adapter helpers: bridge tquic_bpm_path lifecycle to the bonding API.
+ *
+ * The bonding layer uses struct tquic_path *, but BPM has its own
+ * struct tquic_bpm_path type.  For callbacks that only read path_id
+ * or state, we synthesise a minimal tquic_path stub on the stack.
+ * Callbacks that do not dereference the path arg at all pass NULL.
+ */
+static enum tquic_path_state
+bpm_to_core_state(enum tquic_bpm_path_state s)
+{
+	if (s == TQUIC_BPM_PATH_ACTIVE)
+		return TQUIC_PATH_ACTIVE;
+	if (s == TQUIC_BPM_PATH_FAILED || s == TQUIC_BPM_PATH_CLOSING)
+		return TQUIC_PATH_FAILED;
+	return TQUIC_PATH_PENDING;
+}
+
+/* on_path_available: bonding callee ignores the path arg entirely */
+static void bpm_on_path_available(void *ctx, struct tquic_bpm_path *path)
+{
+	tquic_bonding_on_path_validated(ctx, NULL);
+}
+
+/* on_path_failed: bonding callee reads only path->path_id */
+static void bpm_on_path_failed(void *ctx, struct tquic_bpm_path *path)
+{
+	struct tquic_path tpath = {};
+
+	tpath.path_id = path->path_id;
+	tquic_bonding_on_path_failed(ctx, &tpath);
+}
 
 /*
  * Path Manager per connection
