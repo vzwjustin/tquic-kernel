@@ -646,6 +646,22 @@ struct tquic_sendfile_args {
 /* Send file to stream zero-copy, returns bytes sent on success */
 #define TQUIC_SENDFILE		_IOW(TQUIC_IOC_MAGIC, 2, struct tquic_sendfile_args)
 
+/**
+ * struct tquic_qlog_read_args - Arguments for TQUIC_QLOG_READ_EVENTS ioctl
+ * @buf: User-space buffer to receive JSON-SEQ events
+ * @len: Buffer length in bytes
+ *
+ * Drains pending qlog events from the ring buffer into @buf as JSON-SEQ lines.
+ * Returns number of bytes written to @buf, or negative error code.
+ */
+struct tquic_qlog_read_args {
+	__u64 buf;	/* User-space buffer pointer */
+	__u64 len;	/* Buffer length */
+};
+
+/* Read pending qlog events as JSON-SEQ into user buffer */
+#define TQUIC_QLOG_READ_EVENTS	_IOWR(TQUIC_IOC_MAGIC, 3, struct tquic_qlog_read_args)
+
 /* Stream type flags */
 #define TQUIC_STREAM_BIDI	0x00	/* Bidirectional stream (default) */
 #define TQUIC_STREAM_UNIDI	0x01	/* Unidirectional stream (send-only) */
@@ -1237,6 +1253,69 @@ struct tquic_tcp_keepalive_args {
 	__u32 enable;
 	__u32 interval_ms;
 	__u32 timeout_ms;
+};
+
+/* L4S socket options */
+#define TQUIC_L4S_ENABLE		275  /* Enable/disable L4S ECT(1) marking */
+#define SO_TQUIC_L4S_ENABLE		TQUIC_L4S_ENABLE
+
+/*
+ * struct tquic_l4s_info - L4S path information for getsockopt(TQUIC_L4S_ENABLE)
+ * @enabled: L4S enabled flag
+ * @capable: Path detected as L4S-capable
+ * @alpha: CE fraction EWMA scaled by 1024
+ * @ecn_codepoint: Current ECN codepoint in use
+ */
+struct tquic_l4s_info {
+	__u8 enabled;
+	__u8 capable;
+	__u32 alpha;
+	__u8 ecn_codepoint;
+	__u8 _pad[3];
+};
+
+/* Path diagnostics getsockopt */
+#define TQUIC_GET_PATH_INFO		276  /* Get per-path diagnostics */
+#define SO_TQUIC_GET_PATH_INFO		TQUIC_GET_PATH_INFO
+
+/* BDP Frame extension socket options */
+#define TQUIC_BDP_HMAC_KEY		277  /* Set BDP HMAC authentication key */
+#define SO_TQUIC_BDP_HMAC_KEY		TQUIC_BDP_HMAC_KEY
+
+/* CONGESTION_DATA extension socket options */
+#define TQUIC_CONG_DATA_HMAC_KEY	278  /* Set CONGESTION_DATA HMAC key */
+#define SO_TQUIC_CONG_DATA_HMAC_KEY	TQUIC_CONG_DATA_HMAC_KEY
+
+#define TQUIC_CONG_DATA_PRIVACY		279  /* Set CONGESTION_DATA privacy level */
+#define SO_TQUIC_CONG_DATA_PRIVACY	TQUIC_CONG_DATA_PRIVACY
+
+/* Careful Resume / CONGESTION_DATA phase getsockopt */
+#define TQUIC_GET_CAREFUL_RESUME_PHASE	280  /* Get BDP Careful Resume phase */
+#define SO_TQUIC_GET_CAREFUL_RESUME_PHASE TQUIC_GET_CAREFUL_RESUME_PHASE
+
+#define TQUIC_GET_CONG_DATA_PHASE	281  /* Get CONGESTION_DATA apply phase */
+#define SO_TQUIC_GET_CONG_DATA_PHASE	TQUIC_GET_CONG_DATA_PHASE
+
+/* CONGESTION_DATA session export/import socket options */
+#define TQUIC_CONG_DATA_EXPORT		282  /* Export CC data for session storage */
+#define SO_TQUIC_CONG_DATA_EXPORT	TQUIC_CONG_DATA_EXPORT
+
+#define TQUIC_CONG_DATA_IMPORT		283  /* Import CC data from session storage */
+#define SO_TQUIC_CONG_DATA_IMPORT	TQUIC_CONG_DATA_IMPORT
+
+/*
+ * struct tquic_cong_data_blob - Opaque CC data blob for export/import.
+ *
+ * Used with TQUIC_CONG_DATA_EXPORT (getsockopt) and
+ * TQUIC_CONG_DATA_IMPORT (setsockopt) to persist congestion control
+ * state across connections (e.g. with 0-RTT resumption).
+ *
+ * @len:   Actual data length in @data[].
+ * @data:  Opaque blob; treated as struct tquic_cong_data_export by kernel.
+ */
+struct tquic_cong_data_blob {
+	__u32 len;
+	__u8  data[512];
 };
 
 #endif /* _UAPI_LINUX_TQUIC_H */

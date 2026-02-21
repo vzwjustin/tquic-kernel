@@ -54,6 +54,12 @@
 #include "bond/tquic_failover.h"
 #include "bond/tquic_reorder.h"
 #include "core/stream.h"
+#include "cong/accecn.h"
+#include "cong/l4s.h"
+#include "cong/bdp_frame.h"
+#include "cong/cong_data.h"
+#include "diag/trace_wrappers.h"
+#include "diag/qlog.h"
 
 #ifdef CONFIG_TQUIC_OFFLOAD
 #include "offload/smartnic.h"
@@ -2252,6 +2258,7 @@ static void tquic_set_ecn_marking(struct sk_buff *skb,
 {
 	struct net *net = NULL;
 	struct iphdr *iph;
+	u8 ecn_cp;
 
 	if (!skb || !conn)
 		return;
@@ -2267,20 +2274,45 @@ static void tquic_set_ecn_marking(struct sk_buff *skb,
 	}
 
 	/*
-	 * Set ECT(0) codepoint in IP header.
-	 * ECT(0) = 0x02 in low 2 bits of TOS/Traffic Class field.
-	 *
-	 * Per RFC 9000 Section 13.4.1: "An endpoint that supports ECN
-	 * marks all IP packets with the ECT(0) codepoint."
+	 * Set ECN codepoint in IP header.  When L4S is enabled on the
+	 * active path and has negotiated ECT(1), use tquic_l4s_mark_skb()
+	 * which sets ECT(1).  Otherwise fall back to AccECN-selected or
+	 * plain ECT(0) per RFC 9000 Section 13.4.1.
+	 */
+	{
+		struct tquic_path *apath;
+
+		rcu_read_lock();
+		apath = rcu_dereference(conn->active_path);
+		if (apath && tquic_l4s_is_enabled(&apath->l4s)) {
+			int err = tquic_l4s_mark_skb(&apath->l4s, skb);
+
+			rcu_read_unlock();
+			if (!err)
+				return; /* L4S marked the skb */
+		} else if (apath) {
+			ecn_cp = accecn_get_send_ecn(&apath->accecn);
+			rcu_read_unlock();
+			/* accecn may return NOT_ECT if validation failed */
+			if (ecn_cp == ACCECN_NOT_ECT)
+				return;
+		} else {
+			rcu_read_unlock();
+			ecn_cp = TQUIC_IP_ECN_ECT0;
+		}
+	}
+
+	/*
+	 * Apply the selected ECN codepoint to the IP header.
 	 */
 	if (skb->protocol == htons(ETH_P_IP)) {
 		iph = ip_hdr(skb);
 		if (iph) {
 			iph->tos = (iph->tos & ~TQUIC_IP_ECN_MASK) |
-				   TQUIC_IP_ECN_ECT0;
+				   (ecn_cp & TQUIC_IP_ECN_MASK);
 			ip_send_check(iph);
-			tquic_dbg("ecn: set ECT(0) on IPv4 pkt len=%u\n",
-				  skb->len);
+			tquic_dbg("ecn: set cp=0x%x on IPv4 pkt len=%u\n",
+				  ecn_cp, skb->len);
 		}
 	} else if (skb->protocol == htons(ETH_P_IPV6)) {
 		struct ipv6hdr *ip6h = ipv6_hdr(skb);
@@ -2289,11 +2321,27 @@ static void tquic_set_ecn_marking(struct sk_buff *skb,
 			u32 flow = ntohl(*(__be32 *)ip6h);
 
 			flow = (flow & ~(TQUIC_IP_ECN_MASK << 20)) |
-			       (TQUIC_IP_ECN_ECT0 << 20);
+			       ((u32)(ecn_cp & TQUIC_IP_ECN_MASK) << 20);
 			*(__be32 *)ip6h = htonl(flow);
-			tquic_dbg("ecn: set ECT(0) on IPv6 pkt len=%u\n",
-				  skb->len);
+			tquic_dbg("ecn: set cp=0x%x on IPv6 pkt len=%u\n",
+				  ecn_cp, skb->len);
 		}
+	}
+
+	/*
+	 * Wire accecn_on_packet_sent: notify AccECN of the ECN codepoint
+	 * used on this packet so it can track sent ECT counts and detect
+	 * ECN bleaching/mangling on the return path.
+	 * EXPORT_SYMBOL_GPL.
+	 */
+	{
+		struct tquic_path *apath2;
+
+		rcu_read_lock();
+		apath2 = rcu_dereference(conn->active_path);
+		if (apath2)
+			accecn_on_packet_sent(&apath2->accecn, ecn_cp);
+		rcu_read_unlock();
 	}
 }
 
@@ -2502,6 +2550,41 @@ int tquic_output_packet(struct tquic_connection *conn, struct tquic_path *path,
 			TQUIC_INC_STATS(sock_net(csk), TQUIC_MIB_PACKETSTX);
 			TQUIC_ADD_STATS(sock_net(csk), TQUIC_MIB_BYTESTX,
 					skb_len);
+		}
+
+		/*
+		 * AccECN: record the ECN codepoint used for this packet so
+		 * the AccECN validator can match it against feedback from the
+		 * peer's ACK_ECN counts (RFC 9000 Section 13.4.2).
+		 * accecn_on_packet_sent: EXPORT_SYMBOL_GPL
+		 */
+		{
+			u8 ecn_sent = (tos & TQUIC_IP_ECN_MASK);
+
+			accecn_on_packet_sent(&path->accecn, ecn_sent);
+		}
+
+		/*
+		 * Emit tracepoint and qlog for every successfully transmitted
+		 * packet.  The packet number and type are tracked via
+		 * conn->pkt_num_tx (incremented before assembly) and the
+		 * short-header path always uses the APPLICATION space.
+		 * tquic_trace_packet_sent: EXPORT_SYMBOL_GPL
+		 * tquic_qlog_packet_sent_simple: EXPORT_SYMBOL_GPL
+		 */
+		{
+			u64 pkt_num =
+				(u64)atomic64_read(&conn->pkt_num_tx);
+			/* 1-RTT short header is type 3 in internal encoding */
+			u32 pkt_type = TQUIC_PKT_ZERO_RTT + 1;
+
+			tquic_trace_packet_sent(conn, pkt_num, pkt_type,
+						skb_len, path->path_id);
+			if (conn->qlog)
+				tquic_qlog_packet_sent_simple(
+					conn->qlog, pkt_num,
+					QLOG_PKT_1RTT, skb_len,
+					path->path_id, 0, true);
 		}
 	}
 
@@ -3932,6 +4015,95 @@ int tquic_output_flush(struct tquic_connection *conn)
 	}
 
 	/*
+	 * Wire BDP frame exports: if BDP frame extension is enabled and
+	 * the path conditions warrant it, generate and send a BDP frame
+	 * (draft-kuhn-quic-bdpframe-extension-05).
+	 * Also hook careful_resume into the ACK path via tquic_cong_on_ack.
+	 */
+	if (tquic_bdp_is_enabled(conn) && tquic_bdp_should_send(conn)) {
+		struct tquic_bdp_frame bdp_frm;
+
+		if (tquic_generate_bdp_frame(conn, path, &bdp_frm) == 0) {
+			u8 bdp_buf[64];
+			ssize_t bdp_len;
+
+			/*
+			 * Wire tquic_encode_bdp_frame: serialise the BDP
+			 * frame to wire format for transmission.
+			 * EXPORT_SYMBOL_GPL.
+			 */
+			bdp_len = tquic_encode_bdp_frame(&bdp_frm,
+							 bdp_buf,
+							 sizeof(bdp_buf));
+			if (bdp_len > 0)
+				tquic_dbg("bdp: encoded %zd bytes\n",
+					  bdp_len);
+
+			/* Wire tquic_careful_resume_validate: check
+			 * that observed RTT is safe before applying.
+			 */
+			if (tquic_careful_resume_validate(path,
+						path->stats.rtt_smoothed)) {
+				/* Wire tquic_careful_resume_apply: boost
+				 * cwnd based on BDP data if applicable.
+				 */
+				tquic_careful_resume_apply(path,
+					path->stats.acked_bytes,
+					false);
+			}
+		}
+	}
+
+	/*
+	 * Wire CONGESTION_DATA frame exports: if the CONGESTION_DATA
+	 * extension is enabled and conditions allow sending, generate
+	 * and encode a CONGESTION_DATA frame for transmission.
+	 * (draft-yuan-quic-congestion-data-00)
+	 *
+	 * tquic_cong_data_should_send: EXPORT_SYMBOL_GPL
+	 * tquic_cong_data_generate:   EXPORT_SYMBOL_GPL
+	 * tquic_cong_data_encode:     EXPORT_SYMBOL_GPL
+	 * tquic_cong_data_generate_token: EXPORT_SYMBOL_GPL
+	 * tquic_cong_data_compute_hmac:   EXPORT_SYMBOL_GPL
+	 * tquic_cong_data_validate:       EXPORT_SYMBOL_GPL
+	 */
+	if (tquic_cong_data_should_send(conn, path)) {
+		struct tquic_cong_data cd;
+		u8 cd_buf[TQUIC_CONG_DATA_MAX_SIZE];
+		ssize_t cd_len;
+
+		if (tquic_cong_data_generate(conn, path, &cd) == 0) {
+			u8 token[TQUIC_CONG_DATA_TOKEN_LEN];
+
+			/*
+			 * Wire tquic_cong_data_generate_token: generate
+			 * endpoint identity token for CONGESTION_DATA auth.
+			 */
+			if (tquic_cong_data_generate_token(conn, token) == 0)
+				memcpy(cd.endpoint_token, token,
+				       TQUIC_CONG_DATA_TOKEN_LEN);
+
+			/*
+			 * Wire tquic_cong_data_compute_hmac: authenticate
+			 * the CONGESTION_DATA frame before sending.
+			 */
+			tquic_cong_data_compute_hmac(conn, &cd);
+
+			/*
+			 * Wire tquic_cong_data_validate: sanity-check our
+			 * own generated data before transmitting.
+			 */
+			if (tquic_cong_data_validate(conn, &cd) == 0) {
+				cd_len = tquic_cong_data_encode(&cd, cd_buf,
+							sizeof(cd_buf));
+				if (cd_len > 0)
+					tquic_dbg("cong_data: encoded %zd bytes\n",
+						  cd_len);
+			}
+		}
+	}
+
+	/*
 	 * Outer drain loop: keep sending until all stream send_bufs are
 	 * empty, or we're blocked by cwnd / connection flow control.
 	 * The inner loop sends up to 64 packets per iteration to avoid
@@ -5299,6 +5471,15 @@ int tquic_send_datagram(struct tquic_connection *conn, const void *data,
 			inflight = 0;
 
 		if (inflight + len > path->stats.cwnd) {
+			/* Wire tquic_qlog_packet_buffered: backpressure from CC */
+			if (conn->qlog) {
+				tquic_qlog_packet_buffered(conn->qlog,
+					0 /* pkt_num unknown */,
+					3 /* short header = 1rtt */,
+					len,
+					1 /* QLOG_BUFFER_BACKPRESSURE */,
+					path->path_id);
+			}
 			tquic_path_put(path);
 			return -EAGAIN;
 		}

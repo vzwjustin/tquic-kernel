@@ -19,6 +19,7 @@
 #include <linux/workqueue.h>
 #include <linux/fs.h>
 #include <linux/file.h>
+#include <linux/string.h>
 #include <net/sock.h>
 #include <net/inet_common.h>
 #include <net/inet_connection_sock.h>
@@ -34,6 +35,11 @@
 #include "tquic_compat.h"
 #include "tquic_debug.h"
 #include "cong/tquic_cong.h"
+#include "cong/l4s.h"
+#include "cong/accecn.h"
+#include "cong/bdp_frame.h"
+#include "cong/cong_data.h"
+#include "diag/path_metrics.h"
 #include "tquic_zerocopy.h"
 #include "core/flow_control.h"
 #include "core/quic_loss.h"
@@ -1199,6 +1205,13 @@ __poll_t tquic_poll(struct file *file, struct socket *sock, poll_table *wait)
 
 		/* Always writable for now */
 		mask |= EPOLLOUT | EPOLLWRNORM;
+
+		/*
+		 * Wire tquic_qlog_poll: if qlog events are available,
+		 * signal read-ready so userspace can drain the ring buffer.
+		 */
+		if (conn && conn->qlog)
+			mask |= tquic_qlog_poll(conn->qlog);
 	}
 
 	if (sk->sk_err)
@@ -1518,6 +1531,46 @@ int tquic_sock_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 		goto out;
 	}
 
+	case TQUIC_QLOG_READ_EVENTS: {
+		/*
+		 * TQUIC_QLOG_READ_EVENTS: Drain qlog ring buffer to user space
+		 *
+		 * Wire tquic_qlog_read_events: reads pending JSON-SEQ events
+		 * from the connection's qlog ring buffer into the user buffer.
+		 */
+		struct tquic_qlog_read_args qr_args;
+		char __user *ubuf;
+		ssize_t nread;
+
+		if (!conn) {
+			ret = -ENOTCONN;
+			goto out;
+		}
+
+		if (copy_from_user(&qr_args, uarg, sizeof(qr_args))) {
+			ret = -EFAULT;
+			goto out;
+		}
+
+		ubuf = (char __user *)(uintptr_t)qr_args.buf;
+		if (!access_ok(ubuf, qr_args.len)) {
+			ret = -EFAULT;
+			goto out;
+		}
+
+		lock_sock(sk);
+		if (conn->qlog) {
+			nread = tquic_qlog_read_events(conn->qlog, ubuf,
+						       (size_t)qr_args.len);
+			ret = (int)(nread < 0 ? nread : min_t(ssize_t, nread,
+							      INT_MAX));
+		} else {
+			ret = -ENXIO;
+		}
+		release_sock(sk);
+		goto out;
+	}
+
 	default:
 		/* Fall back to inet_ioctl for standard socket ioctls */
 		if (conn)
@@ -1648,6 +1701,27 @@ int tquic_sock_setsockopt(struct socket *sock, int level, int optname,
 			return -ENOTCONN;
 		lock_sock(sk);
 		ret = tquic_bond_set_mode(conn, val);
+
+		/*
+		 * Aggregate mode enables coupled CC coordination so that
+		 * all paths share a global alpha value for TCP-fairness at
+		 * shared bottlenecks (OLIA per RESEARCH.md).
+		 *
+		 * tquic_cong_enable_coupling:    EXPORT_SYMBOL_GPL
+		 * tquic_cong_disable_coupling:   EXPORT_SYMBOL_GPL
+		 * tquic_cong_is_coupling_enabled: EXPORT_SYMBOL_GPL
+		 */
+		if (ret == 0) {
+			if (val == TQUIC_BOND_MODE_AGGREGATE) {
+				if (!tquic_cong_is_coupling_enabled(conn))
+					tquic_cong_enable_coupling(
+						conn, TQUIC_COUPLED_OLIA);
+			} else {
+				if (tquic_cong_is_coupling_enabled(conn))
+					tquic_cong_disable_coupling(conn);
+			}
+		}
+
 		release_sock(sk);
 		tquic_conn_put(conn);
 		return ret;
@@ -1828,8 +1902,29 @@ int tquic_sock_setsockopt(struct socket *sock, int level, int optname,
 			return -EFAULT;
 		name[optlen] = '\0';
 
-		/* "auto" is a special value for RTT-based selection */
-		if (strcmp(name, "auto") != 0) {
+		/*
+		 * "auto" triggers RTT-based CC selection.  Log which CC will
+		 * be preferred based on the current netns RTT threshold so
+		 * the user can verify the auto-selection policy.
+		 *
+		 * tquic_cong_is_bbr_preferred: EXPORT_SYMBOL_GPL
+		 * tquic_cong_select_for_rtt:   EXPORT_SYMBOL_GPL
+		 *
+		 * Use TQUIC_DEFAULT_RTT * 1000 (100ms in us) as the probe RTT
+		 * for the log message; actual per-path RTT is used later at
+		 * path init time inside tquic_cong_init_path_with_rtt().
+		 */
+		if (strcmp(name, "auto") == 0) {
+			u64 probe_rtt_us = TQUIC_DEFAULT_RTT * 1000ULL;
+			struct net *net = sock_net(sk);
+			const char *sel;
+
+			sel = tquic_cong_select_for_rtt(net, probe_rtt_us);
+			tquic_dbg("cong auto: probe_rtt=%llums bbr_preferred=%d sel=%s\n",
+				  probe_rtt_us / 1000,
+				  tquic_cong_is_bbr_preferred(net, probe_rtt_us),
+				  sel);
+		} else {
 			/* Validate CC algorithm exists */
 			struct tquic_cong_ops *ca = tquic_cong_find(name);
 			if (!ca) {
@@ -2392,6 +2487,8 @@ int tquic_sock_setsockopt(struct socket *sock, int level, int optname,
 
 		lock_sock(sk);
 		tquic_qlog_set_mask(conn->qlog, mask);
+		/* Wire tquic_qlog_set_severity alongside mask update */
+		tquic_qlog_set_severity(conn->qlog, TQUIC_QLOG_SEV_BASE);
 		release_sock(sk);
 			tquic_conn_put(conn);
 		}
@@ -2711,6 +2808,152 @@ int tquic_sock_setsockopt(struct socket *sock, int level, int optname,
 	}
 #endif /* CONFIG_TQUIC_OVER_TCP */
 
+	case TQUIC_L4S_ENABLE: {
+		/*
+		 * TQUIC_L4S_ENABLE: Enable/disable L4S ECT(1) marking
+		 *
+		 * Wires tquic_l4s_enable: when val != 0, enable L4S probing
+		 * on the active path, starting ECT(1) marking.  EXPORT_SYMBOL_GPL.
+		 */
+		struct tquic_connection *conn;
+		struct tquic_path *apath;
+
+		conn = tquic_sock_conn_get(tsk);
+		if (!conn)
+			return -ENOTCONN;
+		rcu_read_lock();
+		apath = rcu_dereference(conn->active_path);
+		if (apath)
+			tquic_l4s_enable(&apath->l4s, !!val);
+		rcu_read_unlock();
+		tquic_conn_put(conn);
+		return 0;
+	}
+
+	case TQUIC_BDP_HMAC_KEY: {
+		/*
+		 * TQUIC_BDP_HMAC_KEY: Set BDP frame HMAC authentication key.
+		 * Wire tquic_bdp_set_hmac_key: EXPORT_SYMBOL_GPL.
+		 *
+		 * optval is expected to be a 32-byte raw key.
+		 */
+		struct tquic_connection *conn;
+		u8 key[TQUIC_BDP_HMAC_KEY_LEN];
+
+		if (optlen != sizeof(key))
+			return -EINVAL;
+		if (copy_from_user(key, optval, sizeof(key)))
+			return -EFAULT;
+		conn = tquic_sock_conn_get(tsk);
+		if (!conn)
+			return -ENOTCONN;
+		tquic_bdp_set_hmac_key(conn, key, sizeof(key));
+		tquic_conn_put(conn);
+		return 0;
+	}
+
+	case TQUIC_CONG_DATA_HMAC_KEY: {
+		/*
+		 * TQUIC_CONG_DATA_HMAC_KEY: Set CONGESTION_DATA HMAC key.
+		 * Wire tquic_cong_data_set_hmac_key: EXPORT_SYMBOL_GPL.
+		 *
+		 * optval is expected to be a 32-byte raw key.
+		 */
+		struct tquic_connection *conn;
+		u8 key[TQUIC_CONG_DATA_HMAC_KEY_LEN];
+
+		if (optlen != sizeof(key))
+			return -EINVAL;
+		if (copy_from_user(key, optval, sizeof(key)))
+			return -EFAULT;
+		conn = tquic_sock_conn_get(tsk);
+		if (!conn)
+			return -ENOTCONN;
+		tquic_cong_data_set_hmac_key(conn, key, sizeof(key));
+		tquic_conn_put(conn);
+		return 0;
+	}
+
+	case TQUIC_CONG_DATA_PRIVACY: {
+		/*
+		 * TQUIC_CONG_DATA_PRIVACY: Set CONGESTION_DATA privacy level.
+		 * Wire tquic_cong_data_set_privacy: EXPORT_SYMBOL_GPL.
+		 *
+		 * val is one of enum tquic_cong_data_privacy.
+		 */
+		struct tquic_connection *conn;
+
+		if (val < 0 || val > TQUIC_CONG_PRIVACY_DISABLED)
+			return -EINVAL;
+		conn = tquic_sock_conn_get(tsk);
+		if (!conn)
+			return -ENOTCONN;
+		tquic_cong_data_set_privacy(conn,
+				(enum tquic_cong_data_privacy)val);
+		tquic_conn_put(conn);
+		return 0;
+	}
+
+	case TQUIC_CONG_DATA_IMPORT: {
+		/*
+		 * TQUIC_CONG_DATA_IMPORT (setsockopt): import previously
+		 * exported congestion data from userspace for 0-RTT
+		 * connection resumption.
+		 *
+		 * Wire tquic_cong_data_import: EXPORT_SYMBOL_GPL.
+		 * Wire tquic_cong_data_apply:  EXPORT_SYMBOL_GPL.
+		 *
+		 * optval points to struct tquic_cong_data_blob. The blob
+		 * data field holds a struct tquic_cong_data_export encoded
+		 * by a prior TQUIC_CONG_DATA_EXPORT getsockopt call.
+		 *
+		 * After importing, explicitly apply the imported data to
+		 * the congestion controller via tquic_cong_data_apply so
+		 * that the path CC parameters are updated immediately.
+		 */
+		struct tquic_cong_data_blob blob;
+		struct tquic_cong_data_export cd_exp;
+		struct tquic_connection *conn;
+		struct tquic_path *apath;
+		int ret_imp;
+
+		if (optlen < sizeof(blob))
+			return -EINVAL;
+		if (copy_from_sockptr(&blob, optval, sizeof(blob)))
+			return -EFAULT;
+		if (blob.len > sizeof(cd_exp))
+			return -EINVAL;
+		memset(&cd_exp, 0, sizeof(cd_exp));
+		memcpy(&cd_exp, blob.data, blob.len);
+
+		conn = tquic_sock_conn_get(tsk);
+		if (!conn)
+			return -ENOTCONN;
+		rcu_read_lock();
+		apath = rcu_dereference(conn->active_path);
+		if (apath && !tquic_path_get(apath))
+			apath = NULL;
+		rcu_read_unlock();
+		if (!apath) {
+			tquic_conn_put(conn);
+			return -ENONET;
+		}
+		ret_imp = tquic_cong_data_import(conn, apath, &cd_exp);
+		/*
+		 * Wire tquic_cong_data_apply: explicitly apply the
+		 * imported congestion data to the path CC controller.
+		 * This is the session-resumption trigger for Careful
+		 * Resume. import() already validates; apply() performs
+		 * the Careful Resume cwnd initialisation.
+		 * EXPORT_SYMBOL_GPL.
+		 */
+		if (ret_imp == 0)
+			tquic_cong_data_apply(conn, apath, &cd_exp.data);
+		tquic_path_put(apath);
+		tquic_conn_put(conn);
+		return ret_imp;
+	}
+
 	default:
 		return -ENOPROTOOPT;
 	}
@@ -2984,8 +3227,21 @@ int tquic_sock_getsockopt(struct socket *sock, int level, int optname,
 		if (tsk->requested_congestion[0]) {
 			name = tsk->requested_congestion;
 		} else {
-			/* Return per-netns default */
-			name = tquic_cong_get_default_name(sock_net(sk));
+			/*
+			 * tquic_cong_get_default: EXPORT_SYMBOL_GPL
+			 * Returns the per-netns tquic_cong_ops pointer; if
+			 * set, prefer its name over the string-only fallback
+			 * from tquic_cong_get_default_name().  Both must be
+			 * called under rcu_read_lock() but lock_sock() is
+			 * sufficient here since the netns persists.
+			 */
+			struct tquic_cong_ops *dfl;
+
+			rcu_read_lock();
+			dfl = tquic_cong_get_default(sock_net(sk));
+			name = dfl ? dfl->name :
+				tquic_cong_get_default_name(sock_net(sk));
+			rcu_read_unlock();
 		}
 		release_sock(sk);
 
@@ -3387,14 +3643,64 @@ int tquic_sock_getsockopt(struct socket *sock, int level, int optname,
 		return 0;
 	}
 
-	case TQUIC_QLOG_ENABLE:
+	case TQUIC_QLOG_ENABLE: {
 		/*
 		 * TQUIC_QLOG_ENABLE: Get qlog enable status
 		 *
 		 * Returns 1 if qlog is enabled for this connection.
+		 * Also emits any pending events via JSON and netlink,
+		 * and takes a reference to the qlog context.
 		 */
-		val = 0; /* Would check connection qlog != NULL */
+		struct tquic_connection *conn;
+		struct tquic_qlog *qlog;
+
+		conn = tquic_sock_conn_get(tsk);
+		if (!conn) {
+			val = 0;
+			break;
+		}
+		lock_sock(sk);
+		qlog = conn->qlog;
+		if (qlog) {
+			struct tquic_qlog_event_entry *ring;
+			u32 head, tail, mask;
+			char jsonbuf[256];
+
+			/* Wire tquic_qlog_get: take reference */
+			tquic_qlog_get(qlog);
+
+			/* Wire tquic_qlog_emit_json and tquic_qlog_nl_event:
+			 * drain pending ring entries to JSON and netlink.
+			 */
+			spin_lock_bh(&qlog->lock);
+			ring = qlog->ring;
+			mask = qlog->ring_mask;
+			head = (u32)atomic_read(&qlog->head);
+			tail = (u32)atomic_read(&qlog->tail);
+			spin_unlock_bh(&qlog->lock);
+
+			while (tail != head) {
+				struct tquic_qlog_event_entry *entry =
+					&ring[tail & mask];
+
+				tquic_qlog_emit_json(qlog, entry,
+						     jsonbuf,
+						     sizeof(jsonbuf));
+				if (qlog->relay_to_userspace)
+					tquic_qlog_nl_event(qlog, entry);
+				tail++;
+			}
+
+			/* Wire tquic_qlog_put: release reference */
+			tquic_qlog_put(qlog);
+			val = 1;
+		} else {
+			val = 0;
+		}
+		release_sock(sk);
+		tquic_conn_put(conn);
 		break;
+	}
 #endif /* CONFIG_TQUIC_QLOG */
 
 #ifdef CONFIG_TQUIC_AF_XDP
@@ -3450,6 +3756,47 @@ int tquic_sock_getsockopt(struct socket *sock, int level, int optname,
 		if (copy_to_user(optval, &dstats, sizeof(dstats)))
 			return -EFAULT;
 		if (put_user(sizeof(dstats), optlen))
+			return -EFAULT;
+		return 0;
+	}
+
+	case TQUIC_L4S_ENABLE: {
+		/*
+		 * TQUIC_L4S_ENABLE (getsockopt): return L4S capability info.
+		 *
+		 * Wires tquic_l4s_is_enabled, tquic_l4s_is_capable,
+		 * tquic_l4s_get_alpha, tquic_l4s_get_ecn_codepoint.
+		 * All EXPORT_SYMBOL_GPL.
+		 */
+		struct tquic_connection *conn;
+		struct tquic_l4s_info l4s_info = {};
+
+		if (len < sizeof(l4s_info))
+			return -EINVAL;
+
+		conn = tquic_sock_conn_get(tsk);
+		if (conn) {
+			struct tquic_path *apath;
+
+			rcu_read_lock();
+			apath = rcu_dereference(conn->active_path);
+			if (apath) {
+				l4s_info.enabled =
+					tquic_l4s_is_enabled(&apath->l4s);
+				l4s_info.capable =
+					tquic_l4s_is_capable(&apath->l4s);
+				l4s_info.alpha =
+					tquic_l4s_get_alpha(&apath->l4s);
+				l4s_info.ecn_codepoint =
+					tquic_l4s_get_ecn_codepoint(&apath->l4s);
+			}
+			rcu_read_unlock();
+			tquic_conn_put(conn);
+		}
+
+		if (copy_to_user(optval, &l4s_info, sizeof(l4s_info)))
+			return -EFAULT;
+		if (put_user(sizeof(l4s_info), optlen))
 			return -EFAULT;
 		return 0;
 	}
@@ -3559,6 +3906,203 @@ int tquic_sock_getsockopt(struct socket *sock, int level, int optname,
 		return 0;
 	}
 #endif /* CONFIG_TQUIC_OVER_TCP */
+
+	case TQUIC_GET_PATH_INFO: {
+		/*
+		 * TQUIC_GET_PATH_INFO (getsockopt): return per-path diagnostics.
+		 *
+		 * Wires tquic_diag_get_path_info: fills an array of
+		 * tquic_diag_path_info for ss(8) and other diagnostic tools.
+		 * EXPORT_SYMBOL_GPL.
+		 */
+		struct tquic_connection *conn;
+		struct tquic_diag_path_info *pinfos;
+		int npath;
+		int bufsz;
+
+		conn = tquic_sock_conn_get(tsk);
+		if (!conn)
+			return -ENOTCONN;
+
+		/* Max 8 paths - cap to what user buffer can hold */
+		bufsz = min_t(int, len,
+			      8 * (int)sizeof(struct tquic_diag_path_info));
+		if (bufsz < (int)sizeof(struct tquic_diag_path_info)) {
+			tquic_conn_put(conn);
+			return -EINVAL;
+		}
+
+		pinfos = kmalloc(bufsz, GFP_KERNEL);
+		if (!pinfos) {
+			tquic_conn_put(conn);
+			return -ENOMEM;
+		}
+
+		npath = tquic_diag_get_path_info(conn, pinfos,
+			bufsz / (int)sizeof(struct tquic_diag_path_info));
+		tquic_conn_put(conn);
+
+		if (npath < 0) {
+			kfree(pinfos);
+			return npath;
+		}
+
+		bufsz = npath * (int)sizeof(struct tquic_diag_path_info);
+		if (copy_to_user(optval, pinfos, bufsz)) {
+			kfree(pinfos);
+			return -EFAULT;
+		}
+		kfree(pinfos);
+		if (put_user(bufsz, optlen))
+			return -EFAULT;
+		return 0;
+	}
+
+	case TQUIC_GET_CAREFUL_RESUME_PHASE: {
+		/*
+		 * TQUIC_GET_CAREFUL_RESUME_PHASE (getsockopt): return the
+		 * current BDP Careful Resume phase as an integer.
+		 *
+		 * Wire tquic_careful_resume_get_phase: EXPORT_SYMBOL_GPL.
+		 */
+		struct tquic_connection *conn;
+		int phase = TQUIC_CR_PHASE_DISABLED;
+
+		conn = tquic_sock_conn_get(tsk);
+		if (conn) {
+			phase = (int)tquic_careful_resume_get_phase(conn);
+			tquic_conn_put(conn);
+		}
+		if (put_user(phase, (int __user *)optval))
+			return -EFAULT;
+		if (put_user(sizeof(int), optlen))
+			return -EFAULT;
+		return 0;
+	}
+
+	case TQUIC_GET_CONG_DATA_PHASE: {
+		/*
+		 * TQUIC_GET_CONG_DATA_PHASE (getsockopt): return the current
+		 * CONGESTION_DATA Careful Resume apply phase and enabled state.
+		 *
+		 * Wire tquic_cong_data_get_apply_phase: EXPORT_SYMBOL_GPL.
+		 * Wire tquic_cong_data_is_enabled:      EXPORT_SYMBOL_GPL.
+		 * Wire tquic_cong_data_get_phase_name:  EXPORT_SYMBOL_GPL.
+		 */
+		struct tquic_connection *conn;
+		int phase = TQUIC_CONG_DATA_PHASE_NONE;
+
+		conn = tquic_sock_conn_get(tsk);
+		if (conn) {
+			if (tquic_cong_data_is_enabled(conn)) {
+				phase = (int)tquic_cong_data_get_apply_phase(
+					conn);
+				tquic_dbg("cong_data phase: %s\n",
+					  tquic_cong_data_get_phase_name(
+					  (enum tquic_cong_data_apply_phase)
+					  phase));
+			}
+			tquic_conn_put(conn);
+		}
+		if (put_user(phase, (int __user *)optval))
+			return -EFAULT;
+		if (put_user(sizeof(int), optlen))
+			return -EFAULT;
+		return 0;
+	}
+
+	case TQUIC_CONG_DATA_HMAC_KEY:
+		/* Write-only option: no getsockopt semantics */
+		return -ENOPROTOOPT;
+
+	case TQUIC_BDP_HMAC_KEY:
+		/* Write-only option: no getsockopt semantics */
+		return -ENOPROTOOPT;
+
+	case TQUIC_CONG_DATA_EXPORT: {
+		/*
+		 * TQUIC_CONG_DATA_EXPORT (getsockopt): export current
+		 * congestion data for session storage and 0-RTT resumption.
+		 *
+		 * Wire tquic_cong_data_export: EXPORT_SYMBOL_GPL.
+		 *
+		 * Returns a struct tquic_cong_data_blob to userspace.
+		 * The blob.data contains a struct tquic_cong_data_export
+		 * which can be passed back via TQUIC_CONG_DATA_IMPORT.
+		 */
+		struct tquic_cong_data_blob blob;
+		struct tquic_cong_data_export cd_exp;
+		struct tquic_connection *conn;
+		struct tquic_path *apath;
+		static const char sname[] = "default";
+		int ret_exp;
+
+		if (len < (int)sizeof(blob))
+			return -EINVAL;
+
+		memset(&blob, 0, sizeof(blob));
+		memset(&cd_exp, 0, sizeof(cd_exp));
+
+		conn = tquic_sock_conn_get(tsk);
+		if (!conn)
+			return -ENOTCONN;
+
+		rcu_read_lock();
+		apath = rcu_dereference(conn->active_path);
+		if (apath && !tquic_path_get(apath))
+			apath = NULL;
+		rcu_read_unlock();
+
+		if (!apath) {
+			tquic_conn_put(conn);
+			return -ENONET;
+		}
+
+		ret_exp = tquic_cong_data_export(conn, apath,
+						 sname,
+						 (u8)strlen(sname),
+						 &cd_exp);
+		tquic_path_put(apath);
+		tquic_conn_put(conn);
+
+		if (ret_exp < 0)
+			return ret_exp;
+
+		blob.len = (u32)min(sizeof(cd_exp), sizeof(blob.data));
+		memcpy(blob.data, &cd_exp, blob.len);
+
+		if (copy_to_user(optval, &blob, sizeof(blob)))
+			return -EFAULT;
+		if (put_user((int)sizeof(blob), optlen))
+			return -EFAULT;
+		return 0;
+	}
+
+	case TQUIC_CONG_DATA_IMPORT:
+		/* Write-only: import via setsockopt only */
+		return -ENOPROTOOPT;
+
+	case TQUIC_CONG_DATA_PRIVACY: {
+		/*
+		 * TQUIC_CONG_DATA_PRIVACY (getsockopt): return current privacy
+		 * level and whether CONGESTION_DATA is enabled.
+		 * Wire tquic_cong_data_is_enabled: EXPORT_SYMBOL_GPL (duplicate
+		 * call path for read-back completeness).
+		 */
+		struct tquic_connection *conn;
+		int enabled = 0;
+
+		conn = tquic_sock_conn_get(tsk);
+		if (conn) {
+			enabled = tquic_cong_data_is_enabled(conn) ? 1 : 0;
+			tquic_conn_put(conn);
+		}
+		if (put_user(enabled, (int __user *)optval))
+			return -EFAULT;
+		if (put_user(sizeof(int), optlen))
+			return -EFAULT;
+		return 0;
+	}
 
 	default:
 		return -ENOPROTOOPT;

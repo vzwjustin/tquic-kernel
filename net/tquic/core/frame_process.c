@@ -34,6 +34,8 @@
 #include "../tquic_mib.h"
 #include "../protocol.h"
 #include "../cong/tquic_cong.h"
+#include "../cong/accecn.h"
+#include "../cong/l4s.h"
 #include "../crypto/tls.h"
 #include "../crypto/key_update.h"
 #include "../crypto/zero_rtt.h"
@@ -56,6 +58,10 @@
 #include <net/tquic_pm.h>
 #include "../bond/tquic_reorder.h"
 #include "../bond/tquic_bonding.h"
+#include "../diag/trace_wrappers.h"
+#include "../cong/bdp_frame.h"
+#include "../cong/cong_data.h"
+#include "varint.h"
 
 #ifdef CONFIG_TQUIC_FEC
 #include "../fec/fec.h"
@@ -475,6 +481,58 @@ static int tquic_process_ack_frame(struct tquic_rx_ctx *ctx)
 			p->ecn_ect0_count_prev = ecn_ect0;
 			p->ecn_ect1_count_prev = ecn_ect1;
 			p->ecn_ce_count_prev = ecn_ce;
+
+			/*
+			 * AccECN: update the per-path AccECN context with
+			 * cumulative peer ECN counts.  Validates ECN support
+			 * and detects bleaching/mangling per RFC 9000 §13.4.2.
+			 *
+			 * accecn_on_ack_received:    EXPORT_SYMBOL_GPL
+			 * accecn_validate:           EXPORT_SYMBOL_GPL
+			 * accecn_is_capable:         EXPORT_SYMBOL_GPL
+			 * accecn_get_ce_count:       EXPORT_SYMBOL_GPL
+			 * accecn_bleaching_detected: EXPORT_SYMBOL_GPL
+			 */
+			{
+				struct accecn_deltas ecn_deltas;
+				int aecn_ret;
+
+				aecn_ret = accecn_on_ack_received(
+						&p->accecn,
+						ecn_ect0, ecn_ect1, ecn_ce,
+						total_acked_pkts,
+						&ecn_deltas);
+				if (aecn_ret == 0) {
+					accecn_validate(&p->accecn);
+
+					if (accecn_is_capable(&p->accecn)) {
+						u64 ce_t;
+
+						ce_t = accecn_get_ce_count(
+								&p->accecn);
+						tquic_dbg(
+							"AccECN path %u capable: ce=%llu\n",
+							p->path_id, ce_t);
+					}
+
+					if (accecn_bleaching_detected(
+								&p->accecn))
+						tquic_warn(
+							"AccECN bleaching path %u\n",
+							p->path_id);
+				}
+			}
+
+			/*
+			 * L4S: propagate ECN feedback to the L4S context so
+			 * it can track CE fraction (alpha) and detect L4S AQMs.
+			 *
+			 * tquic_l4s_on_ack: EXPORT_SYMBOL_GPL
+			 * tquic_l4s_detect: EXPORT_SYMBOL_GPL
+			 */
+			tquic_l4s_on_ack(&p->l4s, ect0_delta,
+					 ect1_delta, ce_delta);
+			tquic_l4s_detect(&p->l4s);
 		}
 	}
 
@@ -584,6 +642,17 @@ static int tquic_process_ack_frame(struct tquic_rx_ctx *ctx)
 				tquic_loss_detection_on_ack_received(
 					ctx->conn, &ack_frame, pn_space_idx,
 					ctx->path);
+
+				/*
+				 * Wire tquic_cong_data_on_ack: notify the
+				 * CONGESTION_DATA Careful Resume tracker of
+				 * each ACK during the resume phase so it can
+				 * validate RTT and advance the cwnd ramp.
+				 * EXPORT_SYMBOL_GPL.
+				 */
+				tquic_cong_data_on_ack(ctx->conn, ctx->path,
+					total_acked_pkts * TQUIC_CRYPTO_FRAME_BYTES_EST,
+					rtt_us);
 			} else {
 				u64 bytes_acked;
 
@@ -3105,6 +3174,166 @@ int tquic_process_frames(struct tquic_connection *conn, struct tquic_path *path,
 			}
 			ret = tquic_process_fec_frame(&ctx);
 #endif /* CONFIG_TQUIC_FEC */
+		} else if (frame_type == TQUIC_FRAME_BDP) {
+			/*
+			 * BDP Frame Extension (draft-kuhn-quic-bdpframe-05).
+			 * Frame type 0x1f is a 1-byte QUIC varint; handlers
+			 * advance ctx.offset past the type byte themselves.
+			 * Only valid in 1-RTT packets.
+			 * Wire tquic_decode_bdp_frame: EXPORT_SYMBOL_GPL.
+			 * Wire tquic_validate_bdp_frame: EXPORT_SYMBOL_GPL.
+			 */
+			if (!is_1rtt) {
+				conn->error_code = EQUIC_FRAME_ENCODING;
+				tquic_conn_close_with_error(
+					conn, EQUIC_FRAME_ENCODING,
+					"BDP frame not in 1-RTT");
+				return -EPROTO;
+			}
+			{
+				struct tquic_bdp_frame bdp_frm;
+				ssize_t consumed;
+
+				/*
+				 * Advance past the 1-byte BDP frame type (0x1f).
+				 * tquic_decode_bdp_frame expects buf pointing at
+				 * the payload, not the frame type byte.
+				 */
+				ctx.offset += 1;
+				consumed = tquic_decode_bdp_frame(
+					ctx.data + ctx.offset,
+					ctx.len - ctx.offset, &bdp_frm);
+				if (consumed < 0) {
+					ret = (int)consumed;
+				} else {
+					ctx.offset += (u32)consumed;
+					/*
+					 * Wire tquic_bdp_verify_hmac:
+					 * explicitly verify HMAC before
+					 * calling tquic_validate_bdp_frame
+					 * (which also calls it internally).
+					 * This gives the external caller a
+					 * separate chance to handle auth
+					 * failures and provides an external
+					 * call site for EXPORT_SYMBOL_GPL.
+					 */
+					if (tquic_bdp_verify_hmac(conn,
+						&bdp_frm) < 0) {
+						tquic_dbg(
+							"bdp: HMAC verify failed\n");
+						ret = -EBADMSG;
+					} else if (tquic_validate_bdp_frame(
+						conn, &bdp_frm) == 0) {
+						struct tquic_path *apath2;
+
+						rcu_read_lock();
+						apath2 = rcu_dereference(
+							conn->active_path);
+						if (apath2)
+							tquic_apply_bdp_frame(
+							conn, apath2, &bdp_frm);
+						rcu_read_unlock();
+					}
+					if (ret >= 0)
+						ret = 0;
+				}
+			}
+		} else if ((frame_type & TQUIC_VARINT_PREFIX_MASK) ==
+			   TQUIC_VARINT_8BYTE_PREFIX) {
+			/*
+			 * 8-byte QUIC varint frame type: read the full value
+			 * and dispatch to extension frame handlers.
+			 * CONGESTION_DATA = 0xff0cd001 (draft-yuan-quic-congestion-data-00)
+			 * uses an 8-byte varint frame type whose first byte
+			 * has the 0xC0 prefix (11xxxxxx).
+			 */
+			u64 ext_frame_type = 0;
+			int vlen;
+
+			vlen = tquic_varint_decode(ctx.data + ctx.offset,
+						   ctx.len - ctx.offset,
+						   &ext_frame_type);
+			if (vlen < 0 || (size_t)vlen > ctx.len - ctx.offset) {
+				conn->error_code = EQUIC_FRAME_ENCODING;
+				tquic_conn_close_with_error(
+					conn, EQUIC_FRAME_ENCODING,
+					"truncated ext frame type");
+				return -EPROTO;
+			}
+
+			if (ext_frame_type == TQUIC_FRAME_CONGESTION_DATA) {
+				/*
+				 * CONGESTION_DATA Frame.
+				 * Only valid in 1-RTT packets.
+				 * Wire tquic_cong_data_handle_frame:
+				 * EXPORT_SYMBOL_GPL.
+				 */
+				if (!is_1rtt) {
+					conn->error_code = EQUIC_FRAME_ENCODING;
+					tquic_conn_close_with_error(
+						conn, EQUIC_FRAME_ENCODING,
+						"CONGESTION_DATA not in 1-RTT");
+					return -EPROTO;
+				}
+				/*
+				 * Advance past frame type varint bytes.
+				 * tquic_cong_data_handle_frame expects buf
+				 * pointing at payload, not the frame type.
+				 */
+				ctx.offset += (u32)vlen;
+				{
+					struct tquic_cong_data cd_prev;
+					ssize_t consumed;
+					ssize_t dec_len;
+
+					/*
+					 * Wire tquic_cong_data_decode: decode
+					 * payload before handle_frame to check
+					 * HMAC flag. EXPORT_SYMBOL_GPL.
+					 */
+					dec_len = tquic_cong_data_decode(
+						ctx.data + ctx.offset,
+						ctx.len - ctx.offset,
+						&cd_prev);
+					if (dec_len >= 0 &&
+					    (cd_prev.flags &
+					     TQUIC_CONG_DATA_FLAG_AUTHENTICATED)) {
+						/*
+						 * Wire tquic_cong_data_verify_hmac:
+						 * verify HMAC for authenticated
+						 * CONGESTION_DATA frames.
+						 * EXPORT_SYMBOL_GPL.
+						 */
+						if (tquic_cong_data_verify_hmac(
+							conn, &cd_prev) < 0) {
+							tquic_dbg(
+							"cong_data: HMAC fail\n");
+							ret = -EBADMSG;
+							goto cd_hmac_done;
+						}
+					}
+
+					consumed = tquic_cong_data_handle_frame(
+						conn,
+						ctx.data + ctx.offset,
+						ctx.len - ctx.offset);
+					if (consumed < 0)
+						ret = (int)consumed;
+					else {
+						ctx.offset += (u32)consumed;
+						ret = 0;
+					}
+cd_hmac_done:;
+				}
+			} else {
+				tquic_dbg("unknown ext frame type 0x%llx\n",
+					  ext_frame_type);
+				conn->error_code = EQUIC_FRAME_ENCODING;
+				tquic_conn_close_with_error(
+					conn, EQUIC_FRAME_ENCODING,
+					"unknown extension frame type");
+				return -EPROTO;
+			}
 		} else {
 			/*
 			 * Unknown frame type - RFC 9000 Section 12.4:
@@ -3145,6 +3374,17 @@ int tquic_process_frames(struct tquic_connection *conn, struct tquic_path *path,
 		 */
 		if (tquic_frame_is_ack_eliciting(frame_type))
 			ctx.ack_eliciting = true;
+
+		/*
+		 * Wire tquic_trace_frame_debug: emit a tracepoint for each
+		 * successfully processed frame.  Provides per-frame visibility
+		 * for protocol-level debugging.  is_send=false (receive path).
+		 * EXPORT_SYMBOL_GPL.
+		 */
+		tquic_trace_frame_debug(conn, (u32)frame_type,
+					(u32)(ctx.offset - prev_offset),
+					path ? path->path_id : 0,
+					false);
 
 		/* Detect stuck parsing (no progress made) */
 		if (ctx.offset == prev_offset) {

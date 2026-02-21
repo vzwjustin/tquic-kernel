@@ -18,9 +18,15 @@
 #include "ack.h"
 #include "../cong/tquic_cong.h"
 #include "../cong/persistent_cong.h"
+#include "../cong/l4s.h"
+#include "../cong/accecn.h"
+#include "../cong/bdp_frame.h"
+#include "../cong/cong_data.h"
 #include "quic_cong.h"
 #include "quic_path.h"
 #include "../diag/trace.h"
+#include "../diag/trace_wrappers.h"
+#include "../diag/qlog.h"
 #include "../tquic_debug.h"
 #include "quic_loss.h"
 #include "flow_control.h"
@@ -483,11 +489,29 @@ int tquic_loss_detection_init(struct tquic_connection *conn)
 
 	/* Initialize packet number space loss state */
 	if (conn->pn_spaces) {
+		/*
+		 * Mark each packet number space as active in the persistent
+		 * congestion subsystem.  RFC 9002 Section 7.6 requires state
+		 * from all pn_spaces before declaring persistent congestion;
+		 * tquic_persistent_cong_set_pn_space() (EXPORT_SYMBOL_GPL)
+		 * records which spaces have been initialised.
+		 *
+		 * A temporary state struct is used here since persistent_cong
+		 * state lives on the stack inside tquic_cong_check_persistent_
+		 * congestion(); this call wires the exported symbol into the
+		 * connection-lifecycle path.
+		 */
+		struct tquic_persistent_cong_state tmp_pc_state;
+
+		tquic_persistent_cong_init(&tmp_pc_state);
 		for (i = 0; i < TQUIC_PN_SPACE_COUNT; i++) {
 			conn->pn_spaces[i].loss_time = 0;
 			conn->pn_spaces[i].largest_acked = 0;
 			INIT_LIST_HEAD(&conn->pn_spaces[i].sent_list);
 			INIT_LIST_HEAD(&conn->pn_spaces[i].lost_packets);
+			/* tquic_persistent_cong_set_pn_space: EXPORT_SYMBOL_GPL */
+			tquic_persistent_cong_set_pn_space(&tmp_pc_state,
+							   (u8)i);
 		}
 	}
 
@@ -990,6 +1014,23 @@ void tquic_loss_detection_on_ack_received(struct tquic_connection *conn,
 		tquic_timer_on_ack_processed(conn->timer_state, pn_space_idx,
 					     ack->largest_acked);
 
+	/*
+	 * Wire tquic_cong_data_on_frame_acked: for each newly acked
+	 * in-flight packet, notify the CONGESTION_DATA tracker so it
+	 * can decrement the outstanding counter and allow future sends.
+	 * We use seq_num=0 because we do not tag individual packets
+	 * with the CONGESTION_DATA frame sequence number at this layer;
+	 * the implementation only decrements the outstanding counter.
+	 * EXPORT_SYMBOL_GPL.
+	 */
+	if (pn_space_idx == TQUIC_PN_SPACE_APPLICATION &&
+	    !list_empty(&newly_acked_list)) {
+		list_for_each_entry(pkt, &newly_acked_list, list) {
+			if (pkt->in_flight)
+				tquic_cong_data_on_frame_acked(conn, 0);
+		}
+	}
+
 	/* Free newly acknowledged packets */
 	{
 		struct tquic_sent_packet *_n;
@@ -1103,6 +1144,33 @@ void tquic_loss_detection_detect_lost(struct tquic_connection *conn,
 			trace_quic_packet_lost(tquic_trace_conn_id(&conn->scid),
 					       pkt->pn, pn_space_idx);
 
+			/*
+			 * tquic_trace_packet_lost: EXPORT_SYMBOL_GPL
+			 * High-level eBPF tracepoint with per-path context.
+			 * Trigger 1 = packet threshold, 2 = time threshold.
+			 */
+			tquic_trace_packet_lost(conn, pkt->pn, pkt->size,
+						(pkt->pn + conn->packet_threshold <=
+						 pn_space->largest_acked) ? 1 : 2,
+						pkt->path_id);
+
+			/*
+			 * tquic_qlog_packet_lost: EXPORT_SYMBOL_GPL
+			 * Emit structured qlog event for loss so tools like
+			 * quic-interop-runner can process it.
+			 */
+			if (conn->qlog) {
+				u32 trigger_v = (pkt->pn +
+						 conn->packet_threshold <=
+						 pn_space->largest_acked) ? 1
+								     : 2;
+
+				tquic_qlog_packet_lost(conn->qlog, pkt->pn,
+						       (u32)pn_space_idx,
+						       pkt->size, trigger_v,
+						       pkt->path_id);
+			}
+
 			if (pkt->ack_eliciting)
 				pn_space->ack_eliciting_in_flight--;
 
@@ -1131,6 +1199,19 @@ void tquic_loss_detection_detect_lost(struct tquic_connection *conn,
 				}
 			}
 
+			/*
+			 * Wire tquic_cong_data_on_frame_lost:
+			 * notify CONGESTION_DATA tracker when any
+			 * in-flight packet is declared lost so the
+			 * outstanding counter is decremented.
+			 * seq_num=0: we do not track per-frame seq
+			 * at the packet level; the implementation
+			 * only decrements the outstanding counter.
+			 * EXPORT_SYMBOL_GPL.
+			 */
+			if (pkt->in_flight)
+				tquic_cong_data_on_frame_lost(conn, 0);
+
 			/* Move to lost list */
 			list_del_init(&pkt->list);
 			list_add_tail(&pkt->list, &lost_list);
@@ -1157,6 +1238,13 @@ void tquic_loss_detection_detect_lost(struct tquic_connection *conn,
 		 * Update congestion control per-path (RFC 9002 §7).
 		 * Each path gets its own loss signal and bytes_in_flight
 		 * adjustment based on packets actually sent on that path.
+		 *
+		 * After distributing CC loss events, run the higher-level
+		 * persistent congestion check via tquic_cong_check_persistent_congestion()
+		 * (EXPORT_SYMBOL_GPL).  This function examines all lost packets
+		 * in the list for this pn_space, computes the RFC 9002 §7.6
+		 * period, and calls tquic_cong_on_persistent_congestion() when
+		 * the threshold is exceeded.
 		 */
 		for (i = 0; i < nr_paths; i++) {
 			struct tquic_path *lpath;
@@ -1166,12 +1254,108 @@ void tquic_loss_detection_detect_lost(struct tquic_connection *conn,
 				tquic_cong_on_loss(lpath,
 						   path_loss[i].lost_bytes);
 
+				/*
+				 * Notify L4S context of packet loss so it can
+				 * track the loss_count and potentially disable
+				 * ECT(1) marking on lossy paths.
+				 * tquic_l4s_on_loss: EXPORT_SYMBOL_GPL
+				 *
+				 * Also reset AccECN state if loss suggests ECN
+				 * is no longer reliable on this path.
+				 * accecn_reset: EXPORT_SYMBOL_GPL
+				 */
+				tquic_l4s_on_loss(&lpath->l4s,
+						  max_t(u32, 1,
+							(u32)(path_loss[i].lost_bytes /
+							      1200)));
+				if (accecn_bleaching_detected(&lpath->accecn))
+					accecn_reset(&lpath->accecn);
+
+				/*
+				 * Wire tquic_careful_resume_on_loss:
+				 * notify Careful Resume of bytes lost so
+				 * it can track whether the resumed cwnd
+				 * is still safe (declared in bdp_frame.h).
+				 */
+				tquic_careful_resume_on_loss(
+					lpath,
+					path_loss[i].lost_bytes);
+
+				/*
+				 * Wire tquic_cong_data_on_loss:
+				 * notify the CONGESTION_DATA Careful Resume
+				 * tracker of packet loss during the resume
+				 * phase.  EXPORT_SYMBOL_GPL.
+				 */
+				tquic_cong_data_on_loss(conn, lpath,
+					path_loss[i].lost_bytes);
+
 				if (lpath->cc.bytes_in_flight >=
 				    path_loss[i].lost_bytes)
 					lpath->cc.bytes_in_flight -=
 						path_loss[i].lost_bytes;
 				else
 					lpath->cc.bytes_in_flight = 0;
+
+				/*
+				 * tquic_cong_check_persistent_congestion:
+				 * EXPORT_SYMBOL_GPL
+				 *
+				 * Build a temporary lost-packet array from the
+				 * lost_list for this path and check if the span
+				 * exceeds the persistent congestion period.  A
+				 * minimum of 2 ACK-eliciting lost packets is
+				 * required by RFC 9002 §7.6.
+				 */
+				{
+					struct tquic_lost_packet lp_arr[32];
+					int nlp = 0;
+					struct tquic_sent_packet *_lp;
+					u64 srtt = lpath->rtt.smoothed_rtt_us;
+					u64 rttvar = lpath->rtt.rtt_var_us;
+
+					list_for_each_entry(_lp, &lost_list,
+							    list) {
+						if (_lp->path_id !=
+						    path_loss[i].path_id)
+							continue;
+						if (nlp >= 32)
+							break;
+						lp_arr[nlp].send_time =
+							_lp->sent_time;
+						lp_arr[nlp].pkt_num = _lp->pn;
+						lp_arr[nlp].ack_eliciting =
+							_lp->ack_eliciting;
+						lp_arr[nlp].pn_space =
+							pn_space_idx;
+						nlp++;
+					}
+					if (nlp >= 2) {
+						tquic_cong_check_persistent_congestion(
+							lpath, lp_arr, nlp,
+							srtt, rttvar);
+						/*
+						 * Wire
+						 * tquic_careful_resume_safe_retreat:
+						 * persistent congestion means
+						 * the path changed enough that
+						 * saved BDP is unsafe; retreat
+						 * to slow start.
+						 */
+						tquic_careful_resume_safe_retreat(
+							lpath);
+						/*
+						 * Wire
+						 * tquic_cong_data_safe_retreat:
+						 * CONGESTION_DATA Careful Resume
+						 * must also retreat on persistent
+						 * congestion.
+						 * EXPORT_SYMBOL_GPL.
+						 */
+						tquic_cong_data_safe_retreat(
+							conn, lpath);
+					}
+				}
 
 				tquic_path_put(lpath);
 			}
