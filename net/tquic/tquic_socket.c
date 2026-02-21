@@ -2863,6 +2863,26 @@ int tquic_sock_getsockopt(struct socket *sock, int level, int optname,
 		return tquic_uring_getsockopt(sk, optname, optval, optlen);
 #endif /* CONFIG_TQUIC_IO_URING */
 
+	case TQUIC_BOND_STATS: {
+		struct tquic_connection *conn;
+		struct tquic_bond_stats bstats = {};
+
+		if (len < sizeof(bstats))
+			return -EINVAL;
+
+		conn = tquic_sock_conn_get(tsk);
+		if (conn) {
+			tquic_bond_get_stats(conn, &bstats);
+			tquic_conn_put(conn);
+		}
+
+		if (copy_to_user(optval, &bstats, sizeof(bstats)))
+			return -EFAULT;
+		if (put_user(sizeof(bstats), optlen))
+			return -EFAULT;
+		return 0;
+	}
+
 	default:
 		return -ENOPROTOOPT;
 	}

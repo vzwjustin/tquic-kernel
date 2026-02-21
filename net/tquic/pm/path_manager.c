@@ -381,9 +381,9 @@ static int tquic_pm_netdev_event(struct notifier_block *nb, unsigned long event,
 			num_addrs = __tquic_pm_discover_addresses_locked(
 				pm->conn, addrs, TQUIC_MAX_PATHS);
 			for (i = 0; i < num_addrs; i++) {
-				/* Try to add path if remote addr is known */
+				/* RCU-safe add with full validation */
 				if (have_remote) {
-					tquic_conn_add_path(
+					tquic_conn_add_path_safe(
 						pm->conn,
 						(struct sockaddr *)&addrs[i],
 						(struct sockaddr *)&remote_addr);

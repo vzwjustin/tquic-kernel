@@ -373,8 +373,8 @@ static int tquic_pm_nl_del_path(struct sk_buff *skb, struct genl_info *info)
 		return -ENOENT;
 	}
 
-	/* Remove path */
-	err = tquic_conn_remove_path(conn, path_id);
+	/* RCU-safe path removal with drain and cleanup */
+	err = tquic_conn_remove_path_safe(conn, path_id);
 	if (err) {
 		tquic_conn_put(conn);
 		GENL_SET_ERR_MSG(info, "failed to remove path");

@@ -863,7 +863,12 @@ int tquic_output_paced(struct tquic_connection *conn, struct sk_buff *skb)
 {
 	/* Check pacing */
 	if (!tquic_pacing_allow(conn)) {
-		/* Queue for later transmission with timer */
+		/*
+		 * Prefer per-connection hrtimer pacing when available;
+		 * fall back to inline queue otherwise.
+		 */
+		if (conn->pacing)
+			return tquic_pacing_send(conn->pacing, skb);
 		return tquic_pacing_queue_packet(conn, skb);
 	}
 

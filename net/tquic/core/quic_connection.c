@@ -865,6 +865,8 @@ struct tquic_connection *tquic_conn_create(struct tquic_sock *tsk,
 #ifdef CONFIG_TQUIC_PATH_MANAGER
 	conn->pm = tquic_pm_init(conn);
 	/* Non-fatal: path management disabled if allocation fails */
+	if (conn->pm)
+		tquic_pm_enable_monitoring(conn->pm);
 #endif /* CONFIG_TQUIC_PATH_MANAGER */
 
 #ifdef CONFIG_TQUIC_SCHEDULER
