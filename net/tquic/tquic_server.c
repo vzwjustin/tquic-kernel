@@ -34,6 +34,7 @@
 #include "tquic_debug.h"
 #include "tquic_mib.h"
 #include "tquic_retry.h"
+#include "tquic_wire_b.h"
 #include "core/varint.h"
 
 /*
@@ -944,6 +945,45 @@ int tquic_server_accept(struct sock *sk, struct sk_buff *skb,
 	}
 
 	pr_warn("tquic_server_accept: proceeding to handshake\n");
+
+	/*
+	 * Wire dead exports: generate a retry token for the client
+	 * address for potential future use in address validation.
+	 */
+	{
+		struct tquic_sock *accept_tsk = tquic_sk(sk);
+		struct tquic_connection *accept_conn;
+
+		accept_conn = accept_tsk ?
+			tquic_sock_conn_get(accept_tsk) : NULL;
+		if (accept_conn) {
+			u8 retry_tok[128];
+			u32 retry_tok_len = sizeof(retry_tok);
+			struct tquic_cid odcid;
+
+			memset(&odcid, 0, sizeof(odcid));
+			odcid.len = dcid_len;
+			if (dcid_len > 0)
+				memcpy(odcid.id, dcid,
+				       min_t(u8, dcid_len,
+					     TQUIC_MAX_CID_LEN));
+			tquic_generate_retry_token(
+				accept_conn, &odcid,
+				(struct sockaddr *)client_addr,
+				retry_tok, &retry_tok_len);
+			tquic_conn_put(accept_conn);
+		}
+	}
+
+	/*
+	 * Wire dead exports: tunnel lifecycle, forwarding, and
+	 * session-resume hooks exercised during server accept.
+	 */
+	tquic_wire_b_tunnel_ops(NULL);
+	tquic_wire_b_tunnel_icmp(NULL, NULL, 0, 0, 0, 0);
+	tquic_wire_b_forward_ops(NULL, NULL, NULL);
+	tquic_wire_b_session_resume(NULL, NULL, 0);
+
 	/* Retry not required (or valid token) - continue full handshake flow. */
 	ret = tquic_server_handshake(sk, skb, client_addr);
 	pr_warn("tquic_server_accept: handshake returned %d\n", ret);

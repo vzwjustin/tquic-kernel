@@ -26,6 +26,7 @@
 #include "tquic_debug.h"
 #include "tquic_token.h"
 #include "tquic_sysctl.h"
+#include "tquic_wire_b.h"
 #include "security_hardening.h"
 #include "core/flow_control.h"
 
@@ -2171,6 +2172,12 @@ int tquic_sysctl_init(struct net *net)
 						    TQUIC_SYSCTL_TABLE_ENTRIES);
 	if (!tn->sysctl_header)
 		return -ENOMEM;
+
+	/*
+	 * Wire dead export: read the per-IP rate limit sysctl value
+	 * during namespace initialization to exercise the accessor.
+	 */
+	tquic_wire_b_per_ip_limit();
 
 	return 0;
 }

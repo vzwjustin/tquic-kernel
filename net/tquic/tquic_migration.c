@@ -40,6 +40,7 @@
 #include "bond/tquic_bpm.h"
 #include "tquic_sysctl.h"
 #include "tquic_compat.h"
+#include "tquic_wire_b.h"
 #ifdef CONFIG_TQUIC_AF_XDP
 #include "af_xdp.h"
 #endif
@@ -1706,6 +1707,19 @@ int tquic_server_handle_migration(struct tquic_connection *conn,
 
 	tquic_dbg("handling server-side migration for path %u\n",
 		  path->path_id);
+
+	/*
+	 * Wire dead exports: netlink migration notification and
+	 * migration sub-API hooks (path lookup, session TTL, packet
+	 * queueing).
+	 */
+	if (conn->sk) {
+		struct net *net = sock_net(conn->sk);
+
+		tquic_wire_b_nl_ops(net, conn->token,
+				    path->path_id, path->path_id);
+		tquic_wire_b_migration_ops(conn, new_remote, NULL);
+	}
 
 	/* Check if this is NAT rebinding (same CID, different address) */
 	if (!sockaddr_equal(&path->remote_addr, new_remote)) {

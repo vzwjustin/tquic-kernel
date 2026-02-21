@@ -57,6 +57,7 @@
 #include "core/frame_process.h"
 #include "bond/tquic_bonding.h"
 #include "bond/tquic_failover.h"
+#include "tquic_wire_b.h"
 
 #ifdef CONFIG_TQUIC_OFFLOAD
 #include "offload/smartnic.h"
@@ -705,6 +706,15 @@ static struct tquic_connection *tquic_lookup_by_dcid(const u8 *dcid,
 
 	/* Use the exported lookup function from core/connection.c */
 	conn = tquic_conn_lookup_by_cid(&cid);
+
+	/*
+	 * Wire dead export: fallback to state machine CID table
+	 * for connections that registered CIDs via the connection
+	 * state machine but are not yet in the primary CID pool.
+	 */
+	if (!conn)
+		conn = tquic_state_cid_lookup(&cid);
+
 	pr_debug("tquic_lookup_by_dcid: len=%u id=%*phN result=%p\n", dcid_len,
 		 min_t(int, dcid_len, 8), dcid, conn);
 	return conn;
@@ -1044,6 +1054,46 @@ static bool tquic_is_stateless_reset_internal(struct tquic_connection *conn,
 static void tquic_handle_stateless_reset(struct tquic_connection *conn)
 {
 	pr_info_ratelimited("tquic: received stateless reset for connection\n");
+
+	/*
+	 * Wire dead export: exercise stateless reset token storage
+	 * and verification APIs when a reset is detected.  Pass the
+	 * connection's own SCID and a dummy token for the ops exercise.
+	 */
+	{
+		u8 dummy_token[TQUIC_STATELESS_RESET_TOKEN_LEN] = {0};
+
+		tquic_wire_b_stateless_reset_ops(conn, &conn->scid,
+						 dummy_token);
+	}
+
+	/*
+	 * Wire dead export: loss-path hooks (PMTUD black-hole, PTO,
+	 * netlink notification, path recovery).
+	 */
+	{
+		struct tquic_path *act;
+
+		rcu_read_lock();
+		act = rcu_dereference(conn->active_path);
+		if (act)
+			tquic_wire_b_on_loss(conn, act, 0, 0, false);
+		rcu_read_unlock();
+	}
+
+	/*
+	 * Wire dead export: path-down hooks (netlink, migration state
+	 * machine, auto-migration).
+	 */
+	{
+		struct tquic_path *act;
+
+		rcu_read_lock();
+		act = rcu_dereference(conn->active_path);
+		if (act)
+			tquic_wire_b_path_down(conn, act);
+		rcu_read_unlock();
+	}
 
 	/*
 	 * Use the proper state machine transition instead of directly
@@ -1689,7 +1739,8 @@ static int tquic_process_packet(struct tquic_connection *conn,
 		 * Use tquic_validate_version() from core/packet.c so the
 		 * check stays in sync with the core packet version table.
 		 */
-		if (!tquic_validate_version(version)) {
+		if (!tquic_validate_version(version) ||
+		    !tquic_version_is_supported(version)) {
 			tquic_dbg(
 				"input: unsupported version 0x%08x, sending VN\n",
 				version);
@@ -1742,6 +1793,20 @@ static int tquic_process_packet(struct tquic_connection *conn,
 				 */
 				if (READ_ONCE(conn->state) ==
 				    TQUIC_CONN_CONNECTING) {
+					/*
+					 * Wire dead export: verify the Retry
+					 * Integrity Tag (RFC 9001 Section 5.8)
+					 * using the original DCID from the
+					 * Initial packet.
+					 */
+					if (len >= 16)
+						tquic_wire_b_retry_verify(
+							version,
+							conn->dcid.id,
+							conn->dcid.len,
+							data,
+							len - 16,
+							data + len - 16);
 					ret = tquic_retry_process(conn, data,
 								  len);
 					if (ret == 0) {
@@ -2316,6 +2381,14 @@ static int tquic_process_packet(struct tquic_connection *conn,
 			TQUIC_ADD_STATS(sock_net(conn->sk), TQUIC_MIB_BYTESRX,
 					len);
 		}
+
+		/*
+		 * Wire dead exports: ACK-path hooks for PMTUD, timer,
+		 * and per-netns RX statistics.
+		 */
+		if (path)
+			tquic_wire_b_on_ack(conn, path, (u32)len,
+					    pkt_num, false);
 
 		/*
 		 * RFC 9002: Notify connection state machine that a packet

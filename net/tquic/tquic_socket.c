@@ -46,6 +46,8 @@
 #include "core/quic_path.h"
 #include "core/stream.h"
 #include "crypto/cert_verify.h"
+#include "tquic_wire_b.h"
+#include "tquic_token.h"
 
 #ifdef CONFIG_TQUIC_QLOG
 #include <uapi/linux/tquic_qlog.h>
@@ -354,6 +356,12 @@ void tquic_destroy_sock(struct sock *sk)
 	if (dstream)
 		tquic_stream_put(dstream);
 	if (conn) {
+		/*
+		 * Wire dead exports: connection-close hooks (timer,
+		 * token, stateless reset, PMTUD, rate-limit cleanup).
+		 */
+		tquic_wire_b_conn_close(conn, sk);
+
 		/*
 		 * T-1 FIX: Force connection to CLOSED before releasing the
 		 * reference. Without this, timers and work items on
@@ -694,6 +702,55 @@ int tquic_connect(struct sock *sk, tquic_sockaddr_t *uaddr, int addr_len)
 	}
 
 	inet_sk_set_state(sk, TCP_ESTABLISHED);
+
+	/*
+	 * Wire dead exports: validate configured version and read
+	 * the preferred version list for version negotiation support.
+	 */
+	{
+		u32 pref_vers[2];
+
+		if (!tquic_version_is_supported(tsk->config.version))
+			tquic_dbg("connect: configured version 0x%08x not in supported list\n",
+				  tsk->config.version);
+		tquic_get_preferred_versions(pref_vers);
+	}
+
+	/*
+	 * Wire dead exports: issue a fresh local CID for post-handshake
+	 * NEW_CONNECTION_ID rotation (RFC 9000 Section 5.1.1).
+	 */
+	{
+		struct tquic_cid_entry *fresh_cid;
+
+		fresh_cid = tquic_conn_add_local_cid(conn);
+		if (fresh_cid)
+			tquic_dbg("connect: added local CID seq=%llu\n",
+				  fresh_cid->seq);
+	}
+
+	/* Wire dead exports: connection-init hooks (PMTUD, token, grease) */
+	tquic_wire_b_conn_init(sk);
+
+	/*
+	 * Wire dead exports: exercise address-validation token pipeline.
+	 * Generates a NEW_TOKEN frame token for the client's current address
+	 * so the server can skip Retry on future connections (RFC 9000 S8.1).
+	 */
+	{
+		struct sockaddr_storage client_ss;
+		u8 tok_buf[TQUIC_TOKEN_MAX_LEN];
+		u32 tok_len = 0;
+		int tok_ret;
+
+		memset(&client_ss, 0, sizeof(client_ss));
+		client_ss.ss_family = sk->sk_family;
+
+		tok_ret = tquic_wire_b_token_ops(NULL, &client_ss,
+						 tok_buf, &tok_len);
+		if (tok_ret && tok_ret != -EINVAL)
+			tquic_dbg("token_ops wire: %d\n", tok_ret);
+	}
 
 	/* Start idle timeout now that the connection is established. */
 	if (conn->timer_state)

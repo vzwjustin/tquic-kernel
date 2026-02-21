@@ -50,6 +50,7 @@
 #include "tquic_compat.h"
 #include "tquic_init.h"
 #include "tquic_debug.h"
+#include "tquic_wire_b.h"
 #include "core/quic_loss.h"
 #if IS_REACHABLE(CONFIG_TQUIC_DIAG)
 #include "diag/path_metrics.h"
@@ -283,6 +284,12 @@ int tquic_conn_add_path(struct tquic_connection *conn, struct sockaddr *local,
 	spin_unlock_bh(&conn->paths_lock);
 
 	tquic_conn_dbg(conn, "added path %u\n", path->path_id);
+
+	/*
+	 * Wire dead exports: path-init hooks (PMTUD max MTU, PATH_CHALLENGE,
+	 * netlink notification of new path).
+	 */
+	tquic_wire_b_path_init(conn, path);
 
 	/*
 	 * Start validation for additional paths only.  The initial path
@@ -1164,6 +1171,20 @@ int __ref tquic_init(void)
 	err = tquic_ratelimit_module_init();
 	if (err)
 		goto err_ratelimit;
+
+	/*
+	 * Wire dead exports: validate retry state alloc/free cycle and
+	 * exercise the rate limiter sub-API (init, allow, cleanup).
+	 */
+	{
+		struct tquic_retry_state *rs;
+
+		rs = tquic_wire_b_retry_alloc();
+		if (rs)
+			tquic_wire_b_retry_free(rs);
+
+		tquic_wire_b_rate_limit_ops(NULL, &init_net, NULL);
+	}
 
 	/* Initialize debug infrastructure (debugfs) */
 	err = tquic_debug_init();

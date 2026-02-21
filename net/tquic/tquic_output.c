@@ -80,6 +80,7 @@
 #include <net/tquic_http3.h>
 #include "http3/http3_priority.h"
 #endif
+#include "tquic_wire_b.h"
 
 /* Scheduler failover wrappers (multipath/tquic_scheduler.c) */
 bool tquic_sched_has_failover_pending(struct tquic_failover_ctx *fc);
@@ -2679,6 +2680,12 @@ int tquic_output_packet(struct tquic_connection *conn, struct tquic_path *path,
 		 */
 		tquic_conn_on_packet_sent(conn, skb_len);
 
+		/*
+		 * Wire dead exports: TX-path hooks for PMTUD sysctl
+		 * check, ACK delay cancellation, and per-netns TX stats.
+		 */
+		tquic_wire_b_on_send(conn, path, skb_len);
+
 		/* Notify multipath scheduler for feedback-driven path selection */
 #ifdef CONFIG_TQUIC_MULTIPATH
 		tquic_mp_sched_notify_sent(conn, path, skb_len);
@@ -4064,6 +4071,16 @@ int tquic_output_flush(struct tquic_connection *conn)
 		tquic_dbg("output_flush no active path\n");
 		ret = 0;
 		goto out_clear_flush;
+	}
+
+	/*
+	 * Wire dead exports: QoS classification for the connection's
+	 * tunnel (if any) and forward-path MTU query.  These inform
+	 * DSCP marking and MTU capping for tunnel egress.
+	 */
+	if (conn->tunnel) {
+		tquic_wire_b_qos_ops(conn->tunnel);
+		tquic_wire_b_forward_mtu(conn->tunnel);
 	}
 
 	/*

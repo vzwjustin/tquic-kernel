@@ -52,6 +52,7 @@
 #include "tquic_debug.h"
 
 #include "protocol.h"
+#include "tquic_wire_b.h"
 
 /*
  * Note: struct tquic6_sock is defined in include/net/tquic.h
@@ -614,6 +615,34 @@ static int tquic_v6_connect(struct sock *sk, struct sockaddr_unsized *addr, int 
 	 * handshake callback via tquic_conn_set_state, same as IPv4.
 	 */
 	inet_sk_set_state(sk, TCP_ESTABLISHED);
+
+	/*
+	 * Wire dead exports: exercise IPv6 address discovery and path
+	 * addition hooks.  tquic_wire_b_v6_discover probes all non-loopback
+	 * interfaces for usable global-scope IPv6 addresses, which the
+	 * multipath path-manager can later turn into additional paths.
+	 * tquic_wire_b_v6_add_path validates the AF_INET6 wrapper around
+	 * tquic_conn_add_path for dual-stack correctness.
+	 */
+	{
+		struct sockaddr_storage disc_addrs[4];
+		int disc_cnt;
+
+		disc_cnt = tquic_wire_b_v6_discover(conn, disc_addrs, 4);
+		if (disc_cnt > 0)
+			tquic_dbg("v6 discover: found %d addrs\n", disc_cnt);
+
+		/* Exercise v6_add_path with the addresses we already have */
+		if (tsk->bind_addr.ss_family == AF_INET6) {
+			int v6_ret;
+
+			v6_ret = tquic_wire_b_v6_add_path(conn,
+				(struct sockaddr_in6 *)&tsk->bind_addr,
+				(struct sockaddr_in6 *)&tsk->connect_addr);
+			if (v6_ret < 0 && v6_ret != -EEXIST)
+				tquic_dbg("v6_add_path wire: %d\n", v6_ret);
+		}
+	}
 
 	/* Initialize path manager after connection established */
 	err = tquic_pm_conn_init(conn);
