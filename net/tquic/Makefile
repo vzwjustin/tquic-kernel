@@ -155,8 +155,11 @@ tquic-$(CONFIG_TQUIC_CONG_DATA) += cong/cong_data.o
 endif
 tquic-$(CONFIG_TQUIC_CONG) += cong/persistent_cong.o
 
-# debugfs interface
-tquic-$(CONFIG_TQUIC_DEBUGFS) += tquic_debug.o
+# debugfs interface - always compile so tquic_debug_level is always exported;
+# CONFIG_DEBUG_FS=y is required by our kernel config anyway.
+# Out-of-tree builds: also pass the define so tquic_debug.h uses real decls.
+tquic-y += tquic_debug.o
+ccflags-y += -DCONFIG_TQUIC_DEBUGFS
 
 # Path Manager: fold into tquic.ko only when not building as separate tquic_pm.ko.
 # When CONFIG_TQUIC_PATH_MANAGER=m the same objects land in tquic_pm.ko; including
