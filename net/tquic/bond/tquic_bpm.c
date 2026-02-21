@@ -70,6 +70,39 @@ static const char *tquic_bpm_path_state_names[] = {
 #define TQUIC_BPM_PATH_CLOSED TQUIC_BPM_PATH_CLOSING
 #define TQUIC_BPM_PATH_PENDING TQUIC_BPM_PATH_VALIDATING
 
+/*
+ * Adapter helpers: bridge tquic_bpm_path lifecycle to the bonding API.
+ *
+ * The bonding layer uses struct tquic_path *, but BPM has its own
+ * struct tquic_bpm_path type.  For callbacks that only read path_id
+ * or state, we synthesise a minimal tquic_path stub on the stack.
+ * Callbacks that do not dereference the path arg at all pass NULL.
+ */
+static enum tquic_path_state
+bpm_to_core_state(enum tquic_bpm_path_state s)
+{
+	if (s == TQUIC_BPM_PATH_ACTIVE)
+		return TQUIC_PATH_ACTIVE;
+	if (s == TQUIC_BPM_PATH_FAILED || s == TQUIC_BPM_PATH_CLOSING)
+		return TQUIC_PATH_FAILED;
+	return TQUIC_PATH_VALIDATING;
+}
+
+/* on_path_available: bonding callee ignores the path arg entirely */
+static void bpm_on_path_available(void *ctx, struct tquic_bpm_path *path)
+{
+	tquic_bonding_on_path_validated(ctx, NULL);
+}
+
+/* on_path_failed: bonding callee reads only path->path_id */
+static void bpm_on_path_failed(void *ctx, struct tquic_bpm_path *path)
+{
+	struct tquic_path tpath = {};
+
+	tpath.path_id = path->path_id;
+	tquic_bonding_on_path_failed(ctx, &tpath);
+}
+
 /* Alias for state name array (backwards compatibility) */
 #define tquic_bpm_path_state_names tquic_bpm_path_state_names
 
@@ -482,10 +515,11 @@ static void tquic_cc_on_ack(struct tquic_bpm_path *path,
 
 	spin_unlock_bh(&path->cc_lock);
 
-	/* Notify bonding layer of ACK for scheduler feedback */
-	if (path->pm && path->pm->bonding)
-		tquic_bonding_on_ack_received(NULL, path->pm->bonding, path,
-					      bytes_acked);
+	/*
+	 * BPM manages its own CC state independently.  Do not forward to the
+	 * multipath scheduler via the bonding API: that API expects a core
+	 * struct tquic_path *, not a struct tquic_bpm_path *.
+	 */
 }
 
 static void tquic_cc_on_loss(struct tquic_bpm_path *path,
@@ -511,10 +545,11 @@ static void tquic_cc_on_loss(struct tquic_bpm_path *path,
 
 	spin_unlock_bh(&path->cc_lock);
 
-	/* Notify bonding layer of loss for scheduler feedback */
-	if (path->pm && path->pm->bonding)
-		tquic_bonding_on_loss_detected(NULL, path->pm->bonding, path,
-					       bytes_lost);
+	/*
+	 * BPM manages its own CC state independently.  Do not forward to the
+	 * multipath scheduler via the bonding API: that API expects a core
+	 * struct tquic_path *, not a struct tquic_bpm_path *.
+	 */
 }
 
 static u32 tquic_cc_available_cwnd(struct tquic_bpm_path *path)
@@ -1406,7 +1441,7 @@ struct tquic_bpm_path_manager *tquic_bpm_init(struct net *net, gfp_t gfp)
 	INIT_DELAYED_WORK(&pm->probe_work, tquic_bpm_probe_work_fn);
 
 	/* Initialize bonding state machine */
-	pm->bonding = tquic_bonding_init(pm, gfp);
+	pm->bonding = tquic_bonding_init((struct tquic_path_manager *)pm, gfp);
 	if (!pm->bonding) {
 		kfree(pm);
 		return NULL;
@@ -1414,8 +1449,8 @@ struct tquic_bpm_path_manager *tquic_bpm_init(struct net *net, gfp_t gfp)
 
 	/* Wire up bonding callbacks */
 	pm->cb_ctx = pm->bonding;
-	pm->on_path_available = tquic_bonding_on_path_validated;
-	pm->on_path_failed = tquic_bonding_on_path_failed;
+	pm->on_path_available = bpm_on_path_available;
+	pm->on_path_failed = bpm_on_path_failed;
 
 	/* Register with global list */
 	spin_lock_bh(&tquic_bpm_list_lock);
@@ -1571,9 +1606,9 @@ struct tquic_bpm_path *tquic_bpm_add_path(struct tquic_bpm_path_manager *pm,
 			tquic_wan_type_names[path->wan_type] :
 			"unknown");
 
-	/* Notify bonding state machine of new path */
+	/* Notify bonding state machine of new path (path arg unused by callee) */
 	if (pm->bonding)
-		tquic_bonding_on_path_added(pm->bonding, path);
+		tquic_bonding_on_path_added(pm->bonding, NULL);
 
 	return path;
 }
@@ -1639,9 +1674,16 @@ void tquic_bpm_remove_path(struct tquic_bpm_path_manager *pm,
 
 	spin_unlock_bh(&pm->lock);
 
-	/* Notify bonding state machine before path removal */
-	if (pm->bonding)
-		tquic_bonding_on_path_removed(pm->bonding, path);
+	/* Notify bonding state machine before path removal.
+	 * Synthesise a minimal tquic_path stub so bonding can account
+	 * for the path's current state in its counters.
+	 */
+	if (pm->bonding) {
+		struct tquic_path tpath = {};
+
+		tpath.state = bpm_to_core_state(path->state);
+		tquic_bonding_on_path_removed(pm->bonding, &tpath);
+	}
 
 	tquic_bpm_path_set_state(path, TQUIC_BPM_PATH_CLOSED);
 
