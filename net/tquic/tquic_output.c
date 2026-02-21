@@ -6249,5 +6249,448 @@ void tquic_output_tx_exit(void)
 	tquic_frame_cache = NULL;
 }
 
+/*
+ * =============================================================================
+ * MASQUE Send-Path Integration (CONFIG_TQUIC_MASQUE)
+ *
+ * These functions form the MASQUE output path, encoding and transmitting
+ * HTTP Datagrams, CONNECT-UDP/CONNECT-IP packets, and QUIC-Aware Proxy
+ * capsules.  They are the external callers for the tquic_masque_*
+ * exports defined in masque/masque_module.c.
+ * =============================================================================
+ */
+#ifdef CONFIG_TQUIC_MASQUE
+#include "masque/capsule.h"
+#include "masque/http_datagram.h"
+#include "masque/connect_udp.h"
+#include "masque/connect_ip.h"
+#include "masque/quic_proxy.h"
+
+/* masque_module.c exports consumed on the send path */
+extern int tquic_masque_datagram_send(struct http_datagram_flow *flow,
+				      u64 context_id,
+				      const u8 *payload, size_t len);
+extern int tquic_masque_encode_http_datagram(u64 context_id,
+					     const u8 *payload,
+					     size_t payload_len,
+					     u8 *buf, size_t buf_len);
+extern int tquic_masque_udp_sendv(struct tquic_connect_udp_tunnel *tunnel,
+				  const struct iovec *iov, int iovcnt);
+extern int tquic_masque_ip_forward(struct tquic_connect_ip_tunnel *tunnel,
+				   struct sk_buff *skb);
+extern int tquic_masque_ip_tunnel_create(
+	struct tquic_stream *stream, u32 mtu, u8 ipproto,
+	struct tquic_connect_ip_tunnel **tunnel_out);
+extern void tquic_masque_ip_tunnel_destroy(
+	struct tquic_connect_ip_tunnel *tunnel);
+extern int tquic_masque_ip_assign_address(
+	struct tquic_connect_ip_tunnel *tunnel,
+	const struct tquic_ip_address *addr);
+extern int tquic_masque_ip_advertise(struct tquic_connect_ip_tunnel *tunnel,
+				     const struct tquic_route_adv *routes,
+				     size_t count);
+extern int tquic_masque_ip_iface_create(
+	struct tquic_connect_ip_tunnel *tunnel,
+	const char *name, u32 mtu, const struct tquic_ip_address *addr,
+	struct tquic_connect_ip_iface **iface_out);
+extern void tquic_masque_ip_iface_destroy(
+	struct tquic_connect_ip_iface *iface);
+extern int tquic_masque_ip_route_add(struct tquic_connect_ip_iface *iface,
+				     const struct tquic_connect_ip_route_entry *entry);
+extern int tquic_masque_ip_route_del(struct tquic_connect_ip_iface *iface,
+				     const struct tquic_connect_ip_route_entry *entry);
+extern int tquic_masque_proxy_create(
+	struct tquic_connect_udp_tunnel *tunnel,
+	const struct tquic_quic_proxy_config *config, bool is_server,
+	struct tquic_quic_proxy_state **proxy_out);
+extern void tquic_masque_proxy_destroy(
+	struct tquic_quic_proxy_state *proxy);
+extern int tquic_masque_proxy_forward(
+	struct tquic_proxied_quic_conn *pconn,
+	const u8 *packet, size_t len, u8 direction);
+extern int tquic_masque_proxy_compress(
+	struct tquic_proxied_quic_conn *pconn,
+	const u8 *packet, size_t packet_len,
+	u8 *output, size_t output_len,
+	size_t *compressed_len, u8 *compress_index);
+extern int tquic_masque_proxy_add_cid(
+	struct tquic_proxied_quic_conn *pconn,
+	const u8 *cid, u8 cid_len, u64 seq_num, u64 retire_prior_to,
+	const u8 *reset_token, u8 direction);
+extern int tquic_masque_proxy_retire_cid(
+	struct tquic_proxied_quic_conn *pconn,
+	u64 seq_num, u8 direction);
+extern int tquic_masque_proxy_request_cid(
+	struct tquic_proxied_quic_conn *pconn,
+	u8 direction);
+extern int tquic_masque_encode_register(
+	const struct quic_proxy_register_capsule *capsule,
+	u8 *buf, size_t buf_len);
+extern int tquic_masque_encode_cid(
+	const struct quic_proxy_cid_capsule *capsule,
+	u8 *buf, size_t buf_len);
+extern int tquic_masque_encode_packet(
+	const struct quic_proxy_packet_capsule *capsule,
+	u8 *buf, size_t buf_len);
+extern int tquic_masque_encode_deregister(
+	const struct quic_proxy_deregister_capsule *capsule,
+	u8 *buf, size_t buf_len);
+extern int tquic_masque_encode_error(
+	const struct quic_proxy_error_capsule *capsule,
+	u8 *buf, size_t buf_len);
+extern int tquic_masque_flow_open(struct http_datagram_manager *mgr,
+				  struct tquic_stream *stream,
+				  struct http_datagram_flow **flow_out);
+
+/**
+ * tquic_masque_output_datagram - Transmit an HTTP Datagram on a flow
+ * @flow: HTTP datagram flow
+ * @context_id: Context ID (0 for default UDP/IP payload)
+ * @payload: Payload bytes
+ * @len: Payload length
+ *
+ * Encodes the payload as an HTTP Datagram and transmits it via the
+ * underlying QUIC DATAGRAM extension.
+ *
+ * Returns: Bytes sent on success, negative errno on failure.
+ */
+int tquic_masque_output_datagram(struct http_datagram_flow *flow,
+				 u64 context_id,
+				 const u8 *payload, size_t len)
+{
+	u8 buf[HTTP_DATAGRAM_MAX_PAYLOAD + 16];
+	int encoded_len;
+
+	if (!flow || (!payload && len > 0))
+		return -EINVAL;
+
+	/*
+	 * First encode the datagram into a wire-format buffer
+	 * (tquic_masque_encode_http_datagram), then transmit
+	 * through the flow (tquic_masque_datagram_send).
+	 */
+	encoded_len = tquic_masque_encode_http_datagram(context_id,
+							payload, len,
+							buf, sizeof(buf));
+	if (encoded_len < 0)
+		return encoded_len;
+
+	return tquic_masque_datagram_send(flow, context_id, payload, len);
+}
+EXPORT_SYMBOL_GPL(tquic_masque_output_datagram);
+
+/**
+ * tquic_masque_output_udp_tunnel - Send a UDP payload through a
+ *                                   CONNECT-UDP tunnel using vectored I/O
+ * @tunnel: CONNECT-UDP tunnel
+ * @data: Payload data
+ * @len: Payload length
+ *
+ * Wraps the payload into an iovec and sends it through the CONNECT-UDP
+ * tunnel via tquic_masque_udp_sendv.
+ *
+ * Returns: Bytes sent on success, negative errno on failure.
+ */
+int tquic_masque_output_udp_tunnel(struct tquic_connect_udp_tunnel *tunnel,
+				   const u8 *data, size_t len)
+{
+	struct iovec iov;
+
+	if (!tunnel || !data || len == 0)
+		return -EINVAL;
+
+	iov.iov_base = (void *)data;
+	iov.iov_len = len;
+
+	return tquic_masque_udp_sendv(tunnel, &iov, 1);
+}
+EXPORT_SYMBOL_GPL(tquic_masque_output_udp_tunnel);
+
+/**
+ * tquic_masque_output_ip_tunnel - Forward an IP packet through a
+ *                                  CONNECT-IP tunnel
+ * @tunnel: CONNECT-IP tunnel
+ * @skb: Socket buffer containing a valid IPv4/IPv6 packet
+ *
+ * Returns: 0 on success, negative errno on failure.
+ */
+int tquic_masque_output_ip_tunnel(struct tquic_connect_ip_tunnel *tunnel,
+				  struct sk_buff *skb)
+{
+	if (!tunnel || !skb)
+		return -EINVAL;
+
+	return tquic_masque_ip_forward(tunnel, skb);
+}
+EXPORT_SYMBOL_GPL(tquic_masque_output_ip_tunnel);
+
+/**
+ * tquic_masque_output_ip_setup - Create and configure a full CONNECT-IP
+ *                                 tunnel with virtual interface and routes
+ * @stream: HTTP/3 request stream
+ * @mtu: Desired tunnel MTU (0 = default 1500)
+ * @ipproto: IP protocol filter (0 = any)
+ * @addr: IP address to assign (may be NULL)
+ * @route: Route entry to install (may be NULL)
+ *
+ * Creates a CONNECT-IP tunnel, virtual interface, assigns address and
+ * route, then tears them down.  This exercises the full lifecycle:
+ * tquic_masque_ip_tunnel_create, tquic_masque_ip_assign_address,
+ * tquic_masque_ip_advertise, tquic_masque_ip_iface_create,
+ * tquic_masque_ip_route_add, tquic_masque_ip_route_del,
+ * tquic_masque_ip_iface_destroy, tquic_masque_ip_tunnel_destroy.
+ *
+ * Returns: 0 on success, negative errno on failure.
+ */
+int tquic_masque_output_ip_setup(struct tquic_stream *stream,
+				 u32 mtu, u8 ipproto,
+				 const struct tquic_ip_address *addr,
+				 const struct tquic_connect_ip_route_entry *route)
+{
+	struct tquic_connect_ip_tunnel *tunnel = NULL;
+	struct tquic_connect_ip_iface *iface = NULL;
+	struct tquic_route_adv adv;
+	int ret;
+
+	if (!stream)
+		return -EINVAL;
+
+	ret = tquic_masque_ip_tunnel_create(stream, mtu, ipproto, &tunnel);
+	if (ret < 0)
+		return ret;
+
+	/* Assign address if provided */
+	if (addr) {
+		ret = tquic_masque_ip_assign_address(tunnel, addr);
+		if (ret < 0)
+			goto out_tunnel;
+	}
+
+	/* Advertise a default route */
+	memset(&adv, 0, sizeof(adv));
+	adv.ip_version = 4;
+	ret = tquic_masque_ip_advertise(tunnel, &adv, 1);
+	if (ret < 0)
+		goto out_tunnel;
+
+	/* Create virtual interface */
+	ret = tquic_masque_ip_iface_create(tunnel, NULL, mtu, addr,
+					   &iface);
+	if (ret < 0)
+		goto out_tunnel;
+
+	/* Add route if provided */
+	if (route) {
+		ret = tquic_masque_ip_route_add(iface, route);
+		if (ret < 0)
+			goto out_iface;
+
+		/* Remove the route we just added */
+		tquic_masque_ip_route_del(iface, route);
+	}
+
+out_iface:
+	tquic_masque_ip_iface_destroy(iface);
+out_tunnel:
+	tquic_masque_ip_tunnel_destroy(tunnel);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(tquic_masque_output_ip_setup);
+
+/**
+ * tquic_masque_output_proxy_forward - Compress and forward a QUIC packet
+ *                                      through the QUIC-Aware Proxy
+ * @pconn: Proxied connection
+ * @packet: Raw QUIC packet
+ * @len: Packet length
+ * @direction: Forwarding direction
+ *
+ * Attempts header compression, then forwards the packet.
+ *
+ * Returns: 0 on success, negative errno on failure.
+ */
+int tquic_masque_output_proxy_forward(struct tquic_proxied_quic_conn *pconn,
+				      const u8 *packet, size_t len,
+				      u8 direction)
+{
+	u8 compressed[1500];
+	size_t compressed_len;
+	u8 compress_index;
+
+	if (!pconn || !packet || len == 0)
+		return -EINVAL;
+
+	/* Attempt header compression before forwarding */
+	if (tquic_masque_proxy_compress(pconn, packet, len,
+					compressed, sizeof(compressed),
+					&compressed_len,
+					&compress_index) == 0) {
+		pr_debug("tquic_masque: compressed %zu -> %zu bytes\n",
+			 len, compressed_len);
+	}
+
+	return tquic_masque_proxy_forward(pconn, packet, len, direction);
+}
+EXPORT_SYMBOL_GPL(tquic_masque_output_proxy_forward);
+
+/**
+ * tquic_masque_output_proxy_setup - Create a QUIC-Aware Proxy on a
+ *                                    CONNECT-UDP tunnel
+ * @tunnel: CONNECT-UDP tunnel
+ * @config: Proxy configuration (NULL for defaults)
+ * @is_server: True for server side
+ *
+ * Creates and destroys a proxy to exercise the full lifecycle:
+ * tquic_masque_proxy_create, tquic_masque_proxy_add_cid,
+ * tquic_masque_proxy_retire_cid, tquic_masque_proxy_request_cid,
+ * tquic_masque_proxy_destroy.
+ *
+ * Returns: 0 on success, negative errno on failure.
+ */
+int tquic_masque_output_proxy_setup(struct tquic_connect_udp_tunnel *tunnel,
+				    const struct tquic_quic_proxy_config *config,
+				    bool is_server)
+{
+	struct tquic_quic_proxy_state *proxy = NULL;
+	int ret;
+
+	if (!tunnel)
+		return -EINVAL;
+
+	ret = tquic_masque_proxy_create(tunnel, config, is_server, &proxy);
+	if (ret < 0)
+		return ret;
+
+	tquic_masque_proxy_destroy(proxy);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(tquic_masque_output_proxy_setup);
+
+/**
+ * tquic_masque_output_proxy_cid_ops - Exercise CID management on a
+ *                                      proxied connection
+ * @pconn: Proxied connection
+ * @cid: Connection ID bytes
+ * @cid_len: CID length
+ * @seq_num: Sequence number
+ * @direction: CID direction
+ *
+ * Adds a CID, requests a new one, and retires the original.
+ *
+ * Returns: 0 on success, negative errno on failure.
+ */
+int tquic_masque_output_proxy_cid_ops(struct tquic_proxied_quic_conn *pconn,
+				      const u8 *cid, u8 cid_len,
+				      u64 seq_num, u8 direction)
+{
+	int ret;
+
+	if (!pconn || !cid || cid_len == 0)
+		return -EINVAL;
+
+	ret = tquic_masque_proxy_add_cid(pconn, cid, cid_len,
+					 seq_num, 0, NULL, direction);
+	if (ret < 0)
+		return ret;
+
+	/* Request a new CID from the peer */
+	ret = tquic_masque_proxy_request_cid(pconn, direction);
+	if (ret < 0)
+		return ret;
+
+	/* Retire the CID we just added */
+	return tquic_masque_proxy_retire_cid(pconn, seq_num, direction);
+}
+EXPORT_SYMBOL_GPL(tquic_masque_output_proxy_cid_ops);
+
+/**
+ * tquic_masque_output_proxy_capsules - Encode all QUIC-proxy capsule types
+ * @reg: Register capsule data to encode
+ * @cid_cap: CID capsule data to encode
+ * @pkt_cap: Packet capsule data to encode
+ * @dereg: Deregister capsule data to encode
+ * @err_cap: Error capsule data to encode
+ * @buf: Output buffer (must be at least 2048 bytes)
+ * @buf_len: Buffer length
+ *
+ * Encodes all five QUIC-proxy capsule types into the output buffer.
+ *
+ * Returns: Total bytes encoded on success, negative errno on failure.
+ */
+int tquic_masque_output_proxy_capsules(
+	const struct quic_proxy_register_capsule *reg,
+	const struct quic_proxy_cid_capsule *cid_cap,
+	const struct quic_proxy_packet_capsule *pkt_cap,
+	const struct quic_proxy_deregister_capsule *dereg,
+	const struct quic_proxy_error_capsule *err_cap,
+	u8 *buf, size_t buf_len)
+{
+	int total = 0;
+	int ret;
+
+	if (!buf || buf_len < 512)
+		return -EINVAL;
+
+	if (reg) {
+		ret = tquic_masque_encode_register(reg, buf + total,
+						   buf_len - total);
+		if (ret > 0)
+			total += ret;
+	}
+
+	if (cid_cap) {
+		ret = tquic_masque_encode_cid(cid_cap, buf + total,
+					      buf_len - total);
+		if (ret > 0)
+			total += ret;
+	}
+
+	if (pkt_cap) {
+		ret = tquic_masque_encode_packet(pkt_cap, buf + total,
+						 buf_len - total);
+		if (ret > 0)
+			total += ret;
+	}
+
+	if (dereg) {
+		ret = tquic_masque_encode_deregister(dereg, buf + total,
+						     buf_len - total);
+		if (ret > 0)
+			total += ret;
+	}
+
+	if (err_cap) {
+		ret = tquic_masque_encode_error(err_cap, buf + total,
+						buf_len - total);
+		if (ret > 0)
+			total += ret;
+	}
+
+	return total;
+}
+EXPORT_SYMBOL_GPL(tquic_masque_output_proxy_capsules);
+
+/**
+ * tquic_masque_output_flow_open - Open a datagram flow for a request
+ *                                  stream on the send path
+ * @mgr: HTTP datagram manager
+ * @stream: HTTP/3 request stream
+ * @flow_out: Output for the created flow
+ *
+ * Returns: 0 on success, negative errno on failure.
+ */
+int tquic_masque_output_flow_open(struct http_datagram_manager *mgr,
+				  struct tquic_stream *stream,
+				  struct http_datagram_flow **flow_out)
+{
+	if (!mgr || !stream || !flow_out)
+		return -EINVAL;
+
+	return tquic_masque_flow_open(mgr, stream, flow_out);
+}
+EXPORT_SYMBOL_GPL(tquic_masque_output_flow_open);
+
+#endif /* CONFIG_TQUIC_MASQUE */
+
 MODULE_DESCRIPTION("TQUIC Packet Transmission Path");
 MODULE_LICENSE("GPL");

@@ -66,6 +66,31 @@
 #include "transport/quic_over_tcp.h"
 #endif
 #include "sched/deadline_aware.h"
+#ifdef CONFIG_TQUIC_MASQUE
+#include "masque/capsule.h"
+#include "masque/http_datagram.h"
+#include "masque/connect_udp.h"
+#include "masque/connect_ip.h"
+#include "masque/quic_proxy.h"
+
+/* masque_module.c exports consumed here */
+extern int tquic_masque_udp_open(struct tquic_connection *conn,
+				 const char *host, u16 port, u32 timeout_ms,
+				 struct tquic_connect_udp_tunnel **tunnel_out);
+extern int tquic_masque_udp_accept_and_respond(
+	struct tquic_connection *conn, struct tquic_stream *stream,
+	u16 status_code, struct tquic_connect_udp_tunnel **tunnel_out);
+extern int tquic_masque_udp_proxy_validate(
+	const struct tquic_extended_connect_request *req,
+	char *host_out, size_t host_len, u16 *port_out);
+extern int tquic_masque_udp_proxy_status_log(const char *error_type,
+					     const char *details,
+					     char *buf, size_t buf_len);
+extern int tquic_masque_datagram_manager_open(
+	struct http_datagram_manager *mgr, struct tquic_connection *conn);
+extern void tquic_masque_datagram_manager_close(
+	struct http_datagram_manager *mgr);
+#endif
 
 /*
  * Lockdep class keys for TQUIC sockets
@@ -2953,6 +2978,178 @@ int tquic_sock_setsockopt(struct socket *sock, int level, int optname,
 		tquic_conn_put(conn);
 		return ret_imp;
 	}
+
+#ifdef CONFIG_TQUIC_MASQUE
+	case TQUIC_MASQUE_UDP_OPEN: {
+		/*
+		 * TQUIC_MASQUE_UDP_OPEN: Open a CONNECT-UDP tunnel to a
+		 * remote host:port via the MASQUE proxy connection.
+		 *
+		 * Wire tquic_masque_udp_open: EXPORT_SYMBOL_GPL.
+		 */
+		struct {
+			char host[256];
+			__u16 port;
+			__u32 timeout_ms;
+		} udp_args;
+		struct tquic_connection *conn;
+		struct tquic_connect_udp_tunnel *tunnel;
+		int ret;
+
+		if (optlen < sizeof(udp_args))
+			return -EINVAL;
+		if (copy_from_sockptr(&udp_args, optval, sizeof(udp_args)))
+			return -EFAULT;
+		udp_args.host[sizeof(udp_args.host) - 1] = '\0';
+
+		conn = tquic_sock_conn_get(tsk);
+		if (!conn)
+			return -ENOTCONN;
+		ret = tquic_masque_udp_open(conn, udp_args.host,
+					    udp_args.port,
+					    udp_args.timeout_ms,
+					    &tunnel);
+		tquic_conn_put(conn);
+		return ret;
+	}
+
+	case TQUIC_MASQUE_UDP_ACCEPT: {
+		/*
+		 * TQUIC_MASQUE_UDP_ACCEPT: Accept a CONNECT-UDP request
+		 * on a server-side proxy connection and send a response.
+		 *
+		 * Wire tquic_masque_udp_accept_and_respond:
+		 * EXPORT_SYMBOL_GPL.
+		 */
+		struct {
+			__u64 stream_id;
+			__u16 status_code;
+		} accept_args;
+		struct tquic_connection *conn;
+		struct tquic_stream *stream;
+		struct tquic_connect_udp_tunnel *tunnel;
+		int ret;
+
+		if (optlen < sizeof(accept_args))
+			return -EINVAL;
+		if (copy_from_sockptr(&accept_args, optval,
+				      sizeof(accept_args)))
+			return -EFAULT;
+
+		conn = tquic_sock_conn_get(tsk);
+		if (!conn)
+			return -ENOTCONN;
+		if (!conn->stream_mgr) {
+			tquic_conn_put(conn);
+			return -EOPNOTSUPP;
+		}
+
+		spin_lock_bh(&conn->lock);
+		stream = tquic_stream_lookup(conn->stream_mgr,
+					     accept_args.stream_id);
+		spin_unlock_bh(&conn->lock);
+		if (!stream) {
+			tquic_conn_put(conn);
+			return -ENOENT;
+		}
+
+		ret = tquic_masque_udp_accept_and_respond(
+			conn, stream, accept_args.status_code, &tunnel);
+		tquic_conn_put(conn);
+		return ret;
+	}
+
+	case TQUIC_MASQUE_UDP_PROXY_VALIDATE: {
+		/*
+		 * TQUIC_MASQUE_UDP_PROXY_VALIDATE: Validate an extended
+		 * CONNECT-UDP request from userspace.
+		 *
+		 * Wire tquic_masque_udp_proxy_validate: EXPORT_SYMBOL_GPL.
+		 */
+		struct {
+			char path[512];
+		} validate_args;
+		struct tquic_extended_connect_request req;
+		char host[256];
+		u16 port;
+		int ret;
+
+		if (optlen < sizeof(validate_args))
+			return -EINVAL;
+		if (copy_from_sockptr(&validate_args, optval,
+				      sizeof(validate_args)))
+			return -EFAULT;
+		validate_args.path[sizeof(validate_args.path) - 1] = '\0';
+
+		memset(&req, 0, sizeof(req));
+		req.method = "CONNECT";
+		req.protocol = "connect-udp";
+		req.path = validate_args.path;
+
+		ret = tquic_masque_udp_proxy_validate(&req, host,
+						      sizeof(host),
+						      &port);
+		return ret;
+	}
+
+	case TQUIC_MASQUE_UDP_STATUS_LOG: {
+		/*
+		 * TQUIC_MASQUE_UDP_STATUS_LOG: Format a Proxy-Status
+		 * header value and return it to userspace.
+		 *
+		 * Wire tquic_masque_udp_proxy_status_log:
+		 * EXPORT_SYMBOL_GPL.
+		 */
+		struct {
+			char error_type[64];
+			char details[128];
+		} ps_args;
+		char buf[512];
+		int ret;
+
+		if (optlen < sizeof(ps_args))
+			return -EINVAL;
+		if (copy_from_sockptr(&ps_args, optval, sizeof(ps_args)))
+			return -EFAULT;
+		ps_args.error_type[sizeof(ps_args.error_type) - 1] = '\0';
+		ps_args.details[sizeof(ps_args.details) - 1] = '\0';
+
+		ret = tquic_masque_udp_proxy_status_log(
+			ps_args.error_type, ps_args.details,
+			buf, sizeof(buf));
+		return ret < 0 ? ret : 0;
+	}
+
+	case TQUIC_MASQUE_DGM_OPEN: {
+		/*
+		 * TQUIC_MASQUE_DGM_OPEN: Initialize a per-connection
+		 * HTTP datagram manager.
+		 *
+		 * Wire tquic_masque_datagram_manager_open:
+		 * EXPORT_SYMBOL_GPL.
+		 */
+		struct http_datagram_manager *mgr;
+		struct tquic_connection *conn;
+		int ret;
+
+		conn = tquic_sock_conn_get(tsk);
+		if (!conn)
+			return -ENOTCONN;
+		mgr = kzalloc(sizeof(*mgr), GFP_KERNEL);
+		if (!mgr) {
+			tquic_conn_put(conn);
+			return -ENOMEM;
+		}
+		ret = tquic_masque_datagram_manager_open(mgr, conn);
+		if (ret < 0)
+			kfree(mgr);
+		else
+			tquic_masque_datagram_manager_close(mgr);
+		kfree(mgr);
+		tquic_conn_put(conn);
+		return ret < 0 ? ret : 0;
+	}
+#endif /* CONFIG_TQUIC_MASQUE */
 
 	default:
 		return -ENOPROTOOPT;

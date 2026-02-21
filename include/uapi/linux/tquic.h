@@ -1318,4 +1318,47 @@ struct tquic_cong_data_blob {
 	__u8  data[512];
 };
 
+/*
+ * =============================================================================
+ * MASQUE Tunnel Management Socket Options (CONFIG_TQUIC_MASQUE)
+ * =============================================================================
+ *
+ * These options manage MASQUE (RFC 9297/9298/9484) tunnel lifecycle,
+ * datagram flow management, CONNECT-UDP/CONNECT-IP tunnel creation,
+ * and QUIC-Aware Proxy state.
+ */
+
+/* MASQUE CONNECT-UDP tunnel management */
+#define TQUIC_MASQUE_UDP_OPEN		300  /* Open CONNECT-UDP tunnel */
+#define TQUIC_MASQUE_UDP_DIAG		301  /* Get CONNECT-UDP tunnel diagnostics */
+#define TQUIC_MASQUE_UDP_PROXY_VALIDATE	302  /* Validate CONNECT-UDP request */
+#define TQUIC_MASQUE_UDP_STATUS_LOG	303  /* Log proxy status */
+#define TQUIC_MASQUE_UDP_STATUS_ERROR	304  /* Set proxy status error */
+#define TQUIC_MASQUE_UDP_ACCEPT		305  /* Accept CONNECT-UDP request */
+
+/* MASQUE CONNECT-IP tunnel management */
+#define TQUIC_MASQUE_IP_CREATE		310  /* Create CONNECT-IP tunnel */
+#define TQUIC_MASQUE_IP_DESTROY		311  /* Destroy CONNECT-IP tunnel */
+#define TQUIC_MASQUE_IP_ASSIGN_ADDR	312  /* Assign address to tunnel */
+#define TQUIC_MASQUE_IP_ADVERTISE	313  /* Advertise routes */
+#define TQUIC_MASQUE_IP_IFACE_CREATE	314  /* Create virtual interface */
+#define TQUIC_MASQUE_IP_IFACE_DESTROY	315  /* Destroy virtual interface */
+#define TQUIC_MASQUE_IP_ROUTE_ADD	316  /* Add route via interface */
+#define TQUIC_MASQUE_IP_ROUTE_DEL	317  /* Delete route via interface */
+
+/* MASQUE QUIC-Aware Proxy management */
+#define TQUIC_MASQUE_PROXY_CREATE	320  /* Create QUIC proxy */
+#define TQUIC_MASQUE_PROXY_DESTROY	321  /* Destroy QUIC proxy */
+#define TQUIC_MASQUE_PROXY_ADD_CID	322  /* Add CID to proxy connection */
+#define TQUIC_MASQUE_PROXY_RETIRE_CID	323  /* Retire CID */
+#define TQUIC_MASQUE_PROXY_REQUEST_CID	324  /* Request new CID */
+#define TQUIC_MASQUE_PROXY_STATS	325  /* Get proxy connection stats */
+
+/* MASQUE Datagram management */
+#define TQUIC_MASQUE_DGM_OPEN		330  /* Open datagram manager */
+#define TQUIC_MASQUE_DGM_ENABLE		331  /* Enable HTTP datagrams */
+#define TQUIC_MASQUE_DGM_CLOSE		332  /* Close datagram manager */
+#define TQUIC_MASQUE_FLOW_OPEN		333  /* Open datagram flow */
+#define TQUIC_MASQUE_FLOW_CLOSE		334  /* Close datagram flow */
+
 #endif /* _UAPI_LINUX_TQUIC_H */

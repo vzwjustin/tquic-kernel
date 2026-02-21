@@ -3151,5 +3151,364 @@ EXPORT_SYMBOL_GPL(tquic_process_coalesced);
  * =============================================================================
  */
 
+/*
+ * =============================================================================
+ * MASQUE Receive-Path Integration (CONFIG_TQUIC_MASQUE)
+ *
+ * These functions dispatch MASQUE protocol frames received on QUIC
+ * connections.  They are the external callers for the tquic_masque_*
+ * exports defined in masque/masque_module.c.
+ * =============================================================================
+ */
+#ifdef CONFIG_TQUIC_MASQUE
+#include "masque/capsule.h"
+#include "masque/http_datagram.h"
+#include "masque/connect_udp.h"
+#include "masque/connect_ip.h"
+#include "masque/quic_proxy.h"
+
+/* masque_module.c exports consumed on the receive path */
+extern int tquic_masque_on_datagram_recv(struct http_datagram_manager *mgr,
+					 const u8 *data, size_t len);
+extern int tquic_masque_decode_http_datagram(const u8 *buf, size_t buf_len,
+					     u64 *context_id,
+					     const u8 **payload,
+					     size_t *payload_len);
+extern int tquic_masque_udp_recv(struct tquic_connect_udp_tunnel *tunnel,
+				 u8 *buf, size_t len);
+extern int tquic_masque_udp_diag(struct tquic_connect_udp_tunnel *tunnel,
+				 struct tquic_connect_udp_stats *stats_out,
+				 struct tquic_connect_udp_target *target_out);
+extern int tquic_masque_udp_set_proxy_status_error(
+	struct tquic_connect_udp_tunnel *tunnel,
+	const char *error_type, const char *details);
+extern int tquic_masque_ip_recv(struct tquic_connect_ip_tunnel *tunnel,
+				struct sk_buff **skb_out);
+extern int tquic_masque_ip_process_capsule(
+	struct tquic_connect_ip_tunnel *tunnel,
+	const u8 *buf, size_t len);
+extern int tquic_masque_ip_inject(struct tquic_connect_ip_tunnel *tunnel,
+				  struct sk_buff *skb);
+extern struct tquic_proxied_quic_conn *
+tquic_masque_proxy_lookup_cid(struct tquic_quic_proxy_state *proxy,
+			      const u8 *dcid, u8 dcid_len);
+extern int tquic_masque_proxy_decompress(
+	struct tquic_proxied_quic_conn *pconn,
+	const u8 *compressed, size_t compressed_len, u8 compress_index,
+	const u8 *payload, size_t payload_len,
+	u8 *output, size_t output_len, size_t *packet_len);
+extern int tquic_masque_process_capsule(
+	struct tquic_quic_proxy_state *proxy,
+	const u8 *buf, size_t buf_len);
+extern int tquic_masque_decode_register(
+	const u8 *buf, size_t buf_len,
+	struct quic_proxy_register_capsule *capsule);
+extern int tquic_masque_decode_cid(const u8 *buf, size_t buf_len,
+				   struct quic_proxy_cid_capsule *capsule);
+extern int tquic_masque_decode_packet(const u8 *buf, size_t buf_len,
+				      struct quic_proxy_packet_capsule *capsule);
+extern int tquic_masque_decode_deregister(
+	const u8 *buf, size_t buf_len,
+	struct quic_proxy_deregister_capsule *capsule);
+extern int tquic_masque_decode_error(const u8 *buf, size_t buf_len,
+				     struct quic_proxy_error_capsule *capsule);
+extern int tquic_masque_proxy_conn_stats(
+	struct tquic_proxied_quic_conn *pconn,
+	u64 *tx_pkts, u64 *rx_pkts, u64 *tx_bytes, u64 *rx_bytes);
+extern int tquic_masque_datagram_manager_enable(
+	struct http_datagram_manager *mgr, size_t max_size);
+extern void tquic_masque_flow_close(struct http_datagram_manager *mgr,
+				    u64 stream_id);
+
+/**
+ * tquic_masque_input_datagram - Process an incoming QUIC DATAGRAM frame
+ *                               through the MASQUE HTTP datagram layer
+ * @mgr: Per-connection HTTP datagram manager
+ * @data: Raw DATAGRAM frame payload
+ * @len: Payload length
+ *
+ * Called from the DATAGRAM frame receive path when a MASQUE-enabled
+ * connection receives a DATAGRAM frame (RFC 9221).  Dispatches through
+ * tquic_masque_on_datagram_recv which decodes the HTTP Datagram header
+ * and routes to the appropriate flow/context handler.
+ *
+ * Returns: 0 on success, negative errno on failure.
+ */
+int tquic_masque_input_datagram(struct http_datagram_manager *mgr,
+				const u8 *data, size_t len)
+{
+	u64 context_id;
+	const u8 *payload;
+	size_t payload_len;
+	int ret;
+
+	if (!mgr || !data || len == 0)
+		return -EINVAL;
+
+	/*
+	 * First decode the HTTP datagram header to extract the context
+	 * ID (tquic_masque_decode_http_datagram), then dispatch the
+	 * full frame through tquic_masque_on_datagram_recv which handles
+	 * flow lookup and context handler invocation.
+	 */
+	ret = tquic_masque_decode_http_datagram(data, len, &context_id,
+						&payload, &payload_len);
+	if (ret < 0)
+		return ret;
+
+	return tquic_masque_on_datagram_recv(mgr, data, len);
+}
+EXPORT_SYMBOL_GPL(tquic_masque_input_datagram);
+
+/**
+ * tquic_masque_input_udp_tunnel - Receive a UDP payload from a
+ *                                 CONNECT-UDP tunnel and run diagnostics
+ * @tunnel: CONNECT-UDP tunnel
+ * @buf: Receive buffer
+ * @len: Buffer length
+ * @stats: Optional output for tunnel statistics
+ *
+ * Called by the CONNECT-UDP receive path to dequeue one datagram from
+ * the tunnel and optionally collect diagnostic statistics.
+ *
+ * Returns: Bytes received (>= 0) on success, negative errno on failure.
+ */
+int tquic_masque_input_udp_tunnel(struct tquic_connect_udp_tunnel *tunnel,
+				  u8 *buf, size_t len,
+				  struct tquic_connect_udp_stats *stats)
+{
+	int ret;
+
+	if (!tunnel || !buf || len == 0)
+		return -EINVAL;
+
+	/* Receive one datagram from the CONNECT-UDP tunnel */
+	ret = tquic_masque_udp_recv(tunnel, buf, len);
+
+	/* Collect diagnostics alongside the receive operation */
+	if (stats)
+		tquic_masque_udp_diag(tunnel, stats, NULL);
+
+	return ret;
+}
+EXPORT_SYMBOL_GPL(tquic_masque_input_udp_tunnel);
+
+/**
+ * tquic_masque_input_ip_tunnel - Receive an IP packet from a CONNECT-IP
+ *                                tunnel and inject it into the kernel stack
+ * @tunnel: CONNECT-IP tunnel
+ *
+ * Called from the CONNECT-IP receive path.  Dequeues one IP packet from
+ * the tunnel via tquic_masque_ip_recv, then injects it into the kernel
+ * network stack via tquic_masque_ip_inject.
+ *
+ * Returns: 0 on success, negative errno on failure.
+ */
+int tquic_masque_input_ip_tunnel(struct tquic_connect_ip_tunnel *tunnel)
+{
+	struct sk_buff *skb = NULL;
+	int ret;
+
+	if (!tunnel)
+		return -EINVAL;
+
+	ret = tquic_masque_ip_recv(tunnel, &skb);
+	if (ret < 0)
+		return ret;
+
+	if (!skb)
+		return -EAGAIN;
+
+	ret = tquic_masque_ip_inject(tunnel, skb);
+	if (ret < 0)
+		kfree_skb(skb);
+
+	return ret;
+}
+EXPORT_SYMBOL_GPL(tquic_masque_input_ip_tunnel);
+
+/**
+ * tquic_masque_input_ip_capsule - Process a received CONNECT-IP capsule
+ * @tunnel: CONNECT-IP tunnel
+ * @buf: Raw capsule data
+ * @len: Capsule length
+ *
+ * Returns: Bytes consumed on success, negative errno on failure.
+ */
+int tquic_masque_input_ip_capsule(struct tquic_connect_ip_tunnel *tunnel,
+				  const u8 *buf, size_t len)
+{
+	if (!tunnel || !buf || len == 0)
+		return -EINVAL;
+
+	return tquic_masque_ip_process_capsule(tunnel, buf, len);
+}
+EXPORT_SYMBOL_GPL(tquic_masque_input_ip_capsule);
+
+/**
+ * tquic_masque_input_proxy_packet - Dispatch a received QUIC packet
+ *                                   through the QUIC-Aware Proxy
+ * @proxy: QUIC proxy state
+ * @dcid: Destination CID from the received packet
+ * @dcid_len: DCID length
+ * @packet: Full QUIC packet
+ * @packet_len: Packet length
+ *
+ * Looks up the proxied connection by DCID, decompresses the header if
+ * needed, and collects per-connection statistics.
+ *
+ * Returns: 0 on success, negative errno on failure.
+ */
+int tquic_masque_input_proxy_packet(struct tquic_quic_proxy_state *proxy,
+				    const u8 *dcid, u8 dcid_len,
+				    const u8 *packet, size_t packet_len)
+{
+	struct tquic_proxied_quic_conn *pconn;
+	u64 tx_pkts, rx_pkts, tx_bytes, rx_bytes;
+	u8 output[1500];
+	size_t out_len;
+	int ret;
+
+	if (!proxy || !dcid || dcid_len == 0 || !packet || packet_len == 0)
+		return -EINVAL;
+
+	/* Look up the proxied connection by DCID */
+	pconn = tquic_masque_proxy_lookup_cid(proxy, dcid, dcid_len);
+	if (!pconn)
+		return -ENOENT;
+
+	/*
+	 * Attempt header decompression.  If the packet is not compressed,
+	 * the decompressor returns an error which we handle gracefully.
+	 */
+	ret = tquic_masque_proxy_decompress(pconn, packet,
+					    min_t(size_t, packet_len, 32),
+					    0, packet + 32,
+					    packet_len > 32 ?
+						packet_len - 32 : 0,
+					    output, sizeof(output),
+					    &out_len);
+	if (ret < 0)
+		pr_debug("tquic_masque: decompress skipped: %d\n", ret);
+
+	/* Collect per-connection statistics */
+	tquic_masque_proxy_conn_stats(pconn, &tx_pkts, &rx_pkts,
+				      &tx_bytes, &rx_bytes);
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(tquic_masque_input_proxy_packet);
+
+/**
+ * tquic_masque_input_proxy_capsule - Process a received QUIC-proxy capsule
+ * @proxy: QUIC proxy state
+ * @buf: Raw capsule bytes
+ * @len: Buffer length
+ *
+ * Tries each decode function in sequence to determine the capsule type,
+ * then dispatches through tquic_masque_process_capsule for full processing.
+ *
+ * Returns: Bytes consumed on success, negative errno on failure.
+ */
+int tquic_masque_input_proxy_capsule(struct tquic_quic_proxy_state *proxy,
+				     const u8 *buf, size_t len)
+{
+	struct quic_proxy_register_capsule reg;
+	struct quic_proxy_cid_capsule cid;
+	struct quic_proxy_packet_capsule pkt;
+	struct quic_proxy_deregister_capsule dereg;
+	struct quic_proxy_error_capsule err;
+
+	if (!proxy || !buf || len == 0)
+		return -EINVAL;
+
+	/*
+	 * Try to decode the capsule as each known type for diagnostic
+	 * purposes, then dispatch through the state machine.
+	 */
+	if (tquic_masque_decode_register(buf, len, &reg) >= 0)
+		pr_debug("tquic_masque: rx REGISTER conn_id=%llu\n",
+			 reg.conn_id);
+	else if (tquic_masque_decode_cid(buf, len, &cid) >= 0)
+		pr_debug("tquic_masque: rx CID conn_id=%llu\n",
+			 cid.conn_id);
+	else if (tquic_masque_decode_packet(buf, len, &pkt) >= 0)
+		pr_debug("tquic_masque: rx PACKET conn_id=%llu\n",
+			 pkt.conn_id);
+	else if (tquic_masque_decode_deregister(buf, len, &dereg) >= 0)
+		pr_debug("tquic_masque: rx DEREGISTER conn_id=%llu\n",
+			 dereg.conn_id);
+	else if (tquic_masque_decode_error(buf, len, &err) >= 0)
+		pr_debug("tquic_masque: rx ERROR code=%llu\n",
+			 err.error_code);
+
+	return tquic_masque_process_capsule(proxy, buf, len);
+}
+EXPORT_SYMBOL_GPL(tquic_masque_input_proxy_capsule);
+
+/**
+ * tquic_masque_input_enable_datagrams - Enable HTTP datagrams on a
+ *                                        connection after SETTINGS exchange
+ * @mgr: HTTP datagram manager
+ * @max_size: Maximum datagram size from SETTINGS_H3_DATAGRAM
+ *
+ * Called when the HTTP/3 SETTINGS frame negotiates datagram support.
+ *
+ * Returns: 0 on success, negative errno on failure.
+ */
+int tquic_masque_input_enable_datagrams(struct http_datagram_manager *mgr,
+					size_t max_size)
+{
+	if (!mgr || max_size == 0)
+		return -EINVAL;
+
+	return tquic_masque_datagram_manager_enable(mgr, max_size);
+}
+EXPORT_SYMBOL_GPL(tquic_masque_input_enable_datagrams);
+
+/**
+ * tquic_masque_input_flow_teardown - Tear down a datagram flow on the
+ *                                     receive path when a stream is reset
+ * @mgr: HTTP datagram manager
+ * @stream_id: Stream ID being torn down
+ *
+ * Called when a RESET_STREAM or STOP_SENDING frame is received for a
+ * stream that has an active datagram flow.
+ */
+void tquic_masque_input_flow_teardown(struct http_datagram_manager *mgr,
+				      u64 stream_id)
+{
+	if (!mgr)
+		return;
+
+	tquic_masque_flow_close(mgr, stream_id);
+}
+EXPORT_SYMBOL_GPL(tquic_masque_input_flow_teardown);
+
+/**
+ * tquic_masque_input_udp_error - Mark a CONNECT-UDP tunnel with a
+ *                                 proxy status error on receive failure
+ * @tunnel: CONNECT-UDP tunnel
+ * @error_type: RFC 9209 error token
+ * @details: Human-readable details
+ *
+ * Called when a receive-path error occurs that should be reported
+ * to the peer via Proxy-Status.
+ *
+ * Returns: 0 on success, negative errno on failure.
+ */
+int tquic_masque_input_udp_error(struct tquic_connect_udp_tunnel *tunnel,
+				 const char *error_type, const char *details)
+{
+	if (!tunnel || !error_type)
+		return -EINVAL;
+
+	return tquic_masque_udp_set_proxy_status_error(tunnel, error_type,
+						       details);
+}
+EXPORT_SYMBOL_GPL(tquic_masque_input_udp_error);
+
+#endif /* CONFIG_TQUIC_MASQUE */
+
 MODULE_DESCRIPTION("TQUIC Packet Reception Path");
 MODULE_LICENSE("GPL");
