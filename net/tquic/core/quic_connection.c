@@ -225,6 +225,31 @@ static struct tquic_connection *tquic_conn_lookup(struct tquic_cid *cid)
 	return conn;
 }
 
+/**
+ * tquic_cid_rht_lookup - Look up a connection by CID via the rhashtable
+ * @cid: Connection ID to look up
+ *
+ * Returns the connection with an incremented refcount, or NULL.
+ * Caller must call tquic_conn_put() when done.
+ */
+struct tquic_connection *tquic_cid_rht_lookup(const struct tquic_cid *cid)
+{
+	struct tquic_cid_entry *entry;
+	struct tquic_connection *conn = NULL;
+
+	rcu_read_lock();
+	entry = tquic_cid_hash_lookup((struct tquic_cid *)cid);
+	if (entry) {
+		conn = entry->conn;
+		if (conn && !refcount_inc_not_zero(&conn->refcnt))
+			conn = NULL;
+	}
+	rcu_read_unlock();
+
+	return conn;
+}
+EXPORT_SYMBOL_GPL(tquic_cid_rht_lookup);
+
 
 static void tquic_conn_generate_cid(struct tquic_cid *cid, u8 len)
 {

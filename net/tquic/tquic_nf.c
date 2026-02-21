@@ -887,8 +887,6 @@ void __exit tquic_nf_exit(void)
 	tquic_info("netfilter integration exited\n");
 }
 
-EXPORT_SYMBOL_GPL(tquic_nf_init);
-EXPORT_SYMBOL_GPL(tquic_nf_exit);
 
 module_init(tquic_nf_init);
 module_exit(tquic_nf_exit);
