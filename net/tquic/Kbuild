@@ -206,6 +206,51 @@ tquic-y := \
     tquic-y += tquic_debug.o
   endif
 
+  # KUnit tests
+  ifdef CONFIG_TQUIC_KUNIT_TEST
+    obj-m += tquic_test.o
+    tquic_test-y := \
+	test/varint_test.o \
+	test/packet_test.o \
+	test/frame_test.o \
+	test/flow_control_test.o \
+	test/scheduler_test.o \
+	test/transport_params_test.o \
+	test/grease_test.o \
+	test/security_test.o \
+	test/security_hardening_test.o \
+	test/reorder_test.o \
+	test/address_discovery_test.o \
+	test/bdp_frame_test.o \
+	test/fec_test.o \
+	test/nat_keepalive_test.o \
+	test/cong_data_test.o \
+	test/quic_exfil_test.o \
+	test/failover_test.o \
+	test/tx_work_test.o \
+	test/ack_frequency_test.o \
+	test/additional_addresses_test.o \
+	test/cong_test.o \
+	test/crypto_test.o \
+	test/datagram_test.o \
+	test/deadline_aware_test.o \
+	test/extended_key_update_test.o \
+	test/http3_test.o \
+	test/ipv6_socket_test.o \
+	test/masque_test.o \
+	test/one_way_delay_test.o \
+	test/path_manager_test.o \
+	test/qlog_test.o \
+	test/quic_proxy_test.o \
+	test/quic_v2_test.o \
+	test/rate_limit_test.o \
+	test/ratelimit_test.o \
+	test/receive_timestamps_test.o \
+	test/reliable_reset_test.o \
+	test/stateless_reset_test.o \
+	test/webtransport_test.o
+  endif
+
 else
   # In-tree kernel build: net/quic/Makefile already builds quic.ko
   # which includes all tquic source files via the net/quic/tquic symlink.
