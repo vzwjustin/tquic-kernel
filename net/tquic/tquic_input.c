@@ -2205,6 +2205,20 @@ not_reset:
 	}
 #endif /* CONFIG_TQUIC_OFFLOAD */
 
+#ifdef CONFIG_TQUIC_OVER_TCP
+	if (conn && conn->fallback_ctx &&
+	    tquic_fallback_is_active(conn->fallback_ctx)) {
+		/*
+		 * Connection has migrated to TCP fallback transport.
+		 * Discard stale UDP packets; data flows via TCP path.
+		 */
+		if (path)
+			tquic_path_put(path);
+		kfree_skb(skb);
+		return 0;
+	}
+#endif /* CONFIG_TQUIC_OVER_TCP */
+
 	/* Process the QUIC packet */
 	pr_debug(
 		"tquic: udp_recv -> process_packet conn=%px data[0]=0x%02x len=%zu\n",
