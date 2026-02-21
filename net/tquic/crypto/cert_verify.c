@@ -3402,29 +3402,6 @@ EXPORT_SYMBOL_GPL(tquic_clear_trusted_cas);
  * Sysctl accessor functions
  */
 
-int tquic_sysctl_get_cert_verify_mode(void)
-{
-	return tquic_cert_verify_mode;
-}
-EXPORT_SYMBOL_GPL(tquic_sysctl_get_cert_verify_mode);
-
-bool tquic_sysctl_get_cert_verify_hostname(void)
-{
-	return tquic_cert_verify_hostname_enabled;
-}
-EXPORT_SYMBOL_GPL(tquic_sysctl_get_cert_verify_hostname);
-
-int tquic_sysctl_get_cert_revocation_mode(void)
-{
-	return tquic_cert_revocation_mode;
-}
-EXPORT_SYMBOL_GPL(tquic_sysctl_get_cert_revocation_mode);
-
-u32 tquic_sysctl_get_cert_time_tolerance(void)
-{
-	return tquic_cert_time_tolerance;
-}
-EXPORT_SYMBOL_GPL(tquic_sysctl_get_cert_time_tolerance);
 
 /*
  * Procfs interface for trusted CA management

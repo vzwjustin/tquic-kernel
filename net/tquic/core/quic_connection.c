@@ -1054,28 +1054,6 @@ int tquic_conn_new_cid(struct tquic_connection *conn, struct tquic_cid *new_cid)
 	return 0;
 }
 
-/* Retire a connection ID */
-int tquic_conn_retire_cid(struct tquic_connection *conn, u64 seq, bool is_local)
-{
-	struct tquic_cid_entry *entry, *tmp;
-	struct list_head *list;
-
-	tquic_conn_dbg(conn, "tquic_conn_retire_cid: seq=%llu local=%d\n", seq,
-		       is_local);
-
-	/* Select list based on whether it's a local or remote CID */
-	list = is_local ? &conn->scid_list : &conn->dcid_list;
-
-	list_for_each_entry_safe(entry, tmp, list, list) {
-		if (entry->seq_num == seq) {
-			tquic_cid_entry_destroy(entry);
-			return 0;
-		}
-	}
-
-	return -ENOENT;
-}
-EXPORT_SYMBOL_GPL(tquic_conn_retire_cid);
 
 /* Process NEW_CONNECTION_ID from peer */
 static int tquic_conn_add_peer_cid(struct tquic_connection *conn,
