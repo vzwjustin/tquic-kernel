@@ -26,6 +26,7 @@
 #include "cong/tquic_cong.h"
 
 #include "core/quic_output.h"
+#include "core/quic_path.h"
 #include "protocol.h"
 #include "tquic_compat.h"
 #include "tquic_debug.h"
@@ -1423,25 +1424,33 @@ void tquic_path_validation_expired(struct timer_list *t)
 		return;
 	}
 
-	path->probe_count++;
+	/*
+	 * Delegate probe-timeout logic to tquic_path_on_probe_timeout()
+	 * which owns the path validation state machine per RFC 9000
+	 * Section 8.2.  The function handles retry counting, challenge
+	 * retransmission, and TQUIC_PATH_FAILED transition.
+	 */
+	tquic_path_on_probe_timeout(path);
 
-	if (path->probe_count >= TQUIC_PATH_CHALLENGE_RETRIES) {
-		/* Path validation failed */
-		path->state = TQUIC_PATH_FAILED;
-		if (conn->sk)
-			TQUIC_INC_STATS(sock_net(conn->sk),
-					TQUIC_MIB_PATHFAILURES);
-		tquic_dbg("timer:path %u validation failed\n", path->path_id);
-	} else {
-		/* Retry path challenge */
+	/*
+	 * If the path survived the probe timeout (still pending) reschedule
+	 * the validation timer for the next probe attempt.  If the path
+	 * moved to FAILED state the timer is not rearmed.
+	 */
+	if (path->state == TQUIC_PATH_PENDING) {
 		unsigned long expires;
 
 		expires = jiffies +
 			  msecs_to_jiffies(TQUIC_PATH_CHALLENGE_TIMEOUT_MS);
 		mod_timer(&path->validation_timer, expires);
 
-		tquic_dbg("timer:path %u validation retry %u\n", path->path_id,
-			  path->probe_count);
+		tquic_dbg("timer:path %u probe retry scheduled\n",
+			  path->path_id);
+	} else if (path->state == TQUIC_PATH_FAILED) {
+		if (conn->sk)
+			TQUIC_INC_STATS(sock_net(conn->sk),
+					TQUIC_MIB_PATHFAILURES);
+		tquic_dbg("timer:path %u validation failed\n", path->path_id);
 	}
 
 	spin_unlock_bh(&conn->lock);
@@ -1493,6 +1502,13 @@ void tquic_timer_path_validated(struct tquic_connection *conn,
 	spin_unlock_bh(&conn->lock);
 
 	tquic_dbg("timer:path %u validated successfully\n", path->path_id);
+
+	/*
+	 * RFC 8899 Section 5.1: Begin MTU discovery on a newly validated
+	 * path.  tquic_path_mtu_discovery_start() checks state internally
+	 * and is a no-op if called on a non-active path.
+	 */
+	tquic_path_mtu_discovery_start(path);
 }
 EXPORT_SYMBOL_GPL(tquic_timer_path_validated);
 

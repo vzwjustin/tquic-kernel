@@ -35,6 +35,7 @@
 #include <linux/workqueue.h>
 #include <linux/skbuff.h>
 #include <net/tquic.h>
+#include <net/tquic_frame.h>
 #include "protocol.h"
 #include "tquic_debug.h"
 #include "tquic_stateless_reset.h"
@@ -301,15 +302,17 @@ int tquic_cid_pool_init(struct tquic_connection *conn)
 	entry->path = NULL;
 
 	/*
-	 * Generate stateless reset token deterministically using HMAC
+	 * Generate stateless reset token deterministically using HMAC-SHA256
 	 * Per RFC 9000 Section 10.3.2, tokens must be generated from
 	 * a static key so they can be regenerated after state loss.
+	 * tquic_generate_stateless_reset_token uses kernel crypto API for
+	 * full HMAC-SHA256, falling back to the simpler implementation.
 	 */
 	{
 		const u8 *static_key = tquic_stateless_reset_get_static_key();
 
 		if (static_key) {
-			tquic_stateless_reset_generate_token(&entry->cid,
+			tquic_generate_stateless_reset_token(&entry->cid,
 							     static_key,
 							     entry->reset_token);
 		} else {
@@ -454,15 +457,17 @@ int tquic_cid_issue(struct tquic_connection *conn, struct tquic_cid *cid)
 	entry->path = NULL;
 
 	/*
-	 * Generate stateless reset token deterministically using HMAC
+	 * Generate stateless reset token deterministically using HMAC-SHA256
 	 * Per RFC 9000 Section 10.3.2, tokens must be generated from
 	 * a static key so they can be regenerated after state loss.
+	 * tquic_generate_stateless_reset_token uses kernel crypto API for
+	 * full HMAC-SHA256, falling back to the simpler implementation.
 	 */
 	{
 		const u8 *static_key = tquic_stateless_reset_get_static_key();
 
 		if (static_key) {
-			tquic_stateless_reset_generate_token(&entry->cid,
+			tquic_generate_stateless_reset_token(&entry->cid,
 							     static_key,
 							     entry->reset_token);
 		} else {
@@ -913,30 +918,18 @@ void tquic_send_new_connection_id(struct tquic_connection *conn,
  * @buf_len: Buffer length
  * @seq_num: Sequence number of CID to retire
  *
+ * Delegates to the canonical frame API in core/frame.c.
  * Returns: Number of bytes written, or negative error code
  */
 static int tquic_build_retire_connection_id_frame(u8 *buf, size_t buf_len,
 						  u64 seq_num)
 {
-	size_t offset = 0;
-	int ret;
+	size_t needed = tquic_retire_connection_id_frame_size(seq_num);
 
-	/* Calculate required size */
-	size_t min_size = 1 + tquic_varint_len(seq_num);
-
-	if (buf_len < min_size)
+	if (buf_len < needed)
 		return -ENOSPC;
 
-	/* Frame type (0x19) */
-	buf[offset++] = TQUIC_FRAME_RETIRE_CONNECTION_ID;
-
-	/* Sequence Number (varint) */
-	ret = tquic_encode_varint(buf + offset, buf_len - offset, seq_num);
-	if (ret < 0)
-		return ret;
-	offset += ret;
-
-	return offset;
+	return tquic_write_retire_connection_id_frame(buf, buf_len, seq_num);
 }
 
 /**

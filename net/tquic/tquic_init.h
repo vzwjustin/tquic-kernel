@@ -77,6 +77,8 @@ void tquic_nat_lifecycle_module_exit(void);
 /* Congestion control algorithms */
 int tquic_cong_data_module_init(void);
 void tquic_cong_data_module_exit(void);
+int tquic_canonical_cc_init_module(void);
+void tquic_canonical_cc_exit_module(void);
 int tquic_bbrv2_init(void);
 void tquic_bbrv2_exit(void);
 int tquic_bbrv3_init(void);

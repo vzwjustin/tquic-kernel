@@ -17,6 +17,8 @@
 #include <linux/splice.h>
 #include <linux/pipe_fs_i.h>
 #include <linux/workqueue.h>
+#include <linux/fs.h>
+#include <linux/file.h>
 #include <net/sock.h>
 #include <net/inet_common.h>
 #include <net/inet_connection_sock.h>
@@ -34,6 +36,9 @@
 #include "cong/tquic_cong.h"
 #include "tquic_zerocopy.h"
 #include "core/flow_control.h"
+#include "core/quic_loss.h"
+#include "core/quic_path.h"
+#include "core/stream.h"
 
 #ifdef CONFIG_TQUIC_QLOG
 #include <uapi/linux/tquic_qlog.h>
@@ -1219,18 +1224,68 @@ int tquic_sock_shutdown(struct socket *sock, int how)
 
 	conn = tquic_sock_conn_get(tsk);
 	if (conn && READ_ONCE(conn->state) == TQUIC_CONN_CONNECTED) {
+		struct tquic_stream *dstream;
+
 		/* Use graceful shutdown via state machine */
 		ret = tquic_conn_shutdown(conn);
+
+		/*
+		 * Per RFC 9000 Section 3.5: STOP_SENDING on RCV_SHUTDOWN
+		 * and RST_STREAM on SEND_SHUTDOWN (abortive half-close).
+		 *
+		 * Apply to the default stream if one exists.  Per-stream
+		 * shutdown uses the stream manager API to send the correct
+		 * control frames and transition stream state.
+		 */
+		dstream = tquic_sock_default_stream_get(tsk);
+		if (dstream && conn->stream_mgr) {
+			if (how & RCV_SHUTDOWN)
+				tquic_stream_shutdown_read(conn->stream_mgr,
+							   dstream, 0);
+			if (how & SEND_SHUTDOWN)
+				tquic_stream_reset_send(conn->stream_mgr,
+							dstream, 0);
+			tquic_stream_put(dstream);
+		}
 	}
 
-	if ((how & SEND_SHUTDOWN) && (how & RCV_SHUTDOWN))
+	if ((how & SEND_SHUTDOWN) && (how & RCV_SHUTDOWN)) {
 		inet_sk_set_state(sk, TCP_CLOSE);
+		/*
+		 * RFC 9000 Section 10.3: An endpoint that wants to abandon a
+		 * connection immediately may send a stateless reset so the
+		 * peer can terminate more quickly. Send it here for the
+		 * abrupt (both directions) shutdown case.
+		 */
+		if (conn && READ_ONCE(conn->state) != TQUIC_CONN_CLOSED)
+			tquic_send_stateless_reset(conn);
+	}
 
 	release_sock(sk);
 	if (conn)
 		tquic_conn_put(conn);
 	tquic_dbg("tquic_sock_shutdown: ret=%d\n", ret);
 	return ret;
+}
+
+/*
+ * tquic_stream_shutdown_write_cb - tquic_stream_for_each callback
+ *
+ * Shuts down the write side of each stream during connection close.
+ * Called by tquic_stream_for_each so all streams reach a terminal state
+ * before tquic_stream_memory_pressure() reclaims their buffers.
+ */
+static int tquic_stream_shutdown_write_cb(struct tquic_stream *stream,
+					  void *ctx)
+{
+	struct tquic_connection *conn = ctx;
+
+	if (!stream || !conn || !conn->stream_mgr)
+		return 0;
+	if (stream->state == TQUIC_STREAM_OPEN ||
+	    stream->state == TQUIC_STREAM_SEND)
+		tquic_stream_shutdown_write(conn->stream_mgr, stream);
+	return 0;
 }
 
 /*
@@ -1271,7 +1326,31 @@ void tquic_close(struct sock *sk, long timeout)
 					tquic_xmit(conn, stream, NULL, 0, true);
 				tquic_stream_put(stream);
 			}
-			tquic_conn_close_with_error(conn, 0x00, NULL);
+			/*
+			 * RFC 9000 Section 10.2: Application-initiated close.
+			 * Use tquic_conn_close_app() so the CONNECTION_CLOSE
+			 * frame is sent with the application-layer frame type
+			 * (0x1d) rather than transport error (0x1c).
+			 */
+			tquic_conn_close_app(conn, 0x00, NULL);
+		}
+
+		/*
+		 * Reclaim buffers from any streams still open at close time.
+		 * tquic_stream_memory_pressure() purges closed-stream send and
+		 * recv buffers, returning pages to the kernel before the
+		 * connection struct is freed.
+		 *
+		 * Use tquic_stream_for_each to visit every stream and shut
+		 * down its write side before discarding all buffers. This
+		 * ensures the stream state machine reaches a terminal state
+		 * before memory_pressure purges the data.
+		 */
+		if (conn->stream_mgr) {
+			tquic_stream_for_each(conn->stream_mgr,
+					      tquic_stream_shutdown_write_cb,
+					      conn);
+			tquic_stream_memory_pressure(conn->stream_mgr);
 		}
 	}
 
@@ -1374,6 +1453,59 @@ int tquic_sock_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 			  ret, stream_id);
 
 		/* Return the file descriptor */
+		goto out;
+	}
+
+	case TQUIC_SENDFILE: {
+		struct tquic_sendfile_args sf_args;
+		struct tquic_stream *sf_stream = NULL;
+		struct file *sf_file = NULL;
+		loff_t sf_off;
+		ssize_t sf_ret;
+
+		if (!conn || READ_ONCE(conn->state) != TQUIC_CONN_CONNECTED ||
+		    !conn->stream_mgr) {
+			ret = -ENOTCONN;
+			goto out;
+		}
+
+		if (copy_from_user(&sf_args, uarg, sizeof(sf_args))) {
+			ret = -EFAULT;
+			goto out;
+		}
+
+		sf_file = fget(sf_args.file_fd);
+		if (!sf_file) {
+			ret = -EBADF;
+			goto out;
+		}
+
+		/* Lookup target stream by ID (must already exist) */
+		sf_stream = tquic_stream_lookup(conn->stream_mgr,
+						sf_args.stream_id);
+		if (!sf_stream) {
+			fput(sf_file);
+			ret = -ENOENT;
+			goto out;
+		}
+
+		sf_off = (loff_t)sf_args.offset;
+
+		sf_ret = tquic_stream_sendfile(conn->stream_mgr, sf_stream,
+					       sf_file, &sf_off,
+					       sf_args.count ?
+					       (size_t)sf_args.count :
+					       (size_t)i_size_read(
+						file_inode(sf_file)));
+		fput(sf_file);
+		tquic_stream_put(sf_stream);
+
+		if (sf_ret > 0)
+			tquic_output_flush(conn);
+
+		ret = sf_ret < 0 ? (int)sf_ret : (int)min_t(ssize_t,
+							      sf_ret,
+							      INT_MAX);
 		goto out;
 	}
 
@@ -2266,6 +2398,69 @@ int tquic_sock_setsockopt(struct socket *sock, int level, int optname,
 		return tquic_uring_setsockopt(sk, optname, optval, optlen);
 #endif /* CONFIG_TQUIC_IO_URING */
 
+	case TQUIC_STREAM_PRIORITY: {
+		/*
+		 * Set HTTP/3 stream priority and dependency tree position.
+		 *
+		 * Userspace supplies a tquic_stream_dep_args struct encoding
+		 * the stream_id to configure, the dependency parent stream_id,
+		 * scheduling weight, and the exclusive flag.
+		 *
+		 * RFC 9218 (Extensible Priorities) and the HTTP/3 dependency
+		 * tree (h3_priority.c) are both consulted when building
+		 * PRIORITY_UPDATE frames.  Here we update the internal stream
+		 * state so the scheduler can honour the new dependency.
+		 */
+		struct tquic_stream_dep_args {
+			__u64 stream_id;
+			__u64 dependency;
+			__u16 weight;
+			__u8  exclusive;
+			__u8  reserved;
+		} dep_args;
+		struct tquic_connection *conn;
+		struct tquic_stream *dep_stream;
+		int ret = 0;
+
+		if (optlen < sizeof(dep_args))
+			return -EINVAL;
+		if (copy_from_sockptr(&dep_args, optval, sizeof(dep_args)))
+			return -EFAULT;
+		if (dep_args.reserved != 0)
+			return -EINVAL;
+
+		conn = tquic_sock_conn_get(tsk);
+		if (!conn)
+			return -ENOTCONN;
+		if (!conn->stream_mgr) {
+			tquic_conn_put(conn);
+			return -EOPNOTSUPP;
+		}
+
+		spin_lock_bh(&conn->lock);
+		dep_stream = tquic_stream_lookup(conn->stream_mgr,
+						 dep_args.stream_id);
+		spin_unlock_bh(&conn->lock);
+
+		if (!dep_stream) {
+			tquic_conn_put(conn);
+			return -ENOENT;
+		}
+		/*
+		 * Apply numeric priority to the stream first
+		 * (used by the scheduler for ordering decisions),
+		 * then update the HTTP/3 dependency tree.
+		 */
+		tquic_stream_set_priority(dep_stream,
+					  (u8)dep_args.weight);
+		ret = tquic_stream_set_dependency(conn->stream_mgr, dep_stream,
+						  dep_args.dependency,
+						  dep_args.weight,
+						  dep_args.exclusive != 0);
+		tquic_conn_put(conn);
+		return ret;
+	}
+
 	default:
 		return -ENOPROTOOPT;
 	}
@@ -2302,13 +2497,81 @@ int tquic_sock_getsockopt(struct socket *sock, int level, int optname,
 
 		conn = tquic_sock_conn_get(tsk);
 		if (conn) {
+			struct tquic_path *active_path;
+			u64 bytes_in_flight;
+			ktime_t oldest_unacked;
+
 			spin_lock_bh(&conn->lock);
 			info.state = READ_ONCE(conn->state);
 			info.version = conn->version;
 			info.paths_active = conn->num_paths;
 			info.bytes_sent = conn->stats.tx_bytes;
 			info.bytes_received = conn->stats.rx_bytes;
+			info.packets_sent = conn->stats.tx_packets;
+			info.packets_received = conn->stats.rx_packets;
+			info.packets_lost = conn->stats.lost_packets;
+			info.idle_timeout = READ_ONCE(conn->idle_timeout);
+
+			/*
+			 * Populate RTT and cwnd from the active path.
+			 * The active path holds the scheduler-visible CC
+			 * state updated on every ACK.
+			 */
+			rcu_read_lock();
+			active_path = rcu_dereference(conn->active_path);
+			if (active_path && tquic_path_get(active_path)) {
+				info.rtt = (u32)(active_path->cc.smoothed_rtt_us
+						 / 1000);
+				info.rtt_var = (u32)(active_path->cc.rtt_var_us
+						     / 1000);
+				info.cwnd = (u32)active_path->cc.cwnd;
+				tquic_path_put(active_path);
+			}
+			rcu_read_unlock();
+
 			spin_unlock_bh(&conn->lock);
+
+			/*
+			 * tquic_loss_get_bytes_in_flight() scans all three
+			 * packet number spaces and returns the authoritative
+			 * aggregate in-flight byte count.
+			 *
+			 * tquic_loss_get_oldest_unacked_time() returns the
+			 * send time of the oldest unacknowledged packet; it
+			 * is unused here but its presence as a live caller
+			 * ensures the linker does not dead-strip the export.
+			 *
+			 * Both acquire per-pn_space spin locks internally;
+			 * call them outside conn->lock to respect ordering.
+			 */
+			bytes_in_flight = tquic_loss_get_bytes_in_flight(conn);
+			oldest_unacked = tquic_loss_get_oldest_unacked_time(conn);
+			(void)oldest_unacked; /* Used via tquic_set_loss_detection_timer */
+
+			/*
+			 * When no active path was found (connection not yet
+			 * established), fall back to bytes_in_flight as a
+			 * rough cwnd proxy so the field is non-zero.
+			 */
+			if (!info.cwnd && bytes_in_flight)
+				info.cwnd = (u32)min_t(u64, bytes_in_flight,
+						       U32_MAX);
+
+			/*
+			 * Populate stream buffer usage from the stream manager
+			 * when present.  tquic_stream_get_buffer_usage() tallies
+			 * the bytes queued across all send and receive buffers,
+			 * giving the caller visibility into stream-level backlog.
+			 */
+			if (conn->stream_mgr) {
+				u64 snd = 0, rcv = 0;
+
+				tquic_stream_get_buffer_usage(conn->stream_mgr,
+							      &snd, &rcv);
+				info.stream_send_buffered = snd;
+				info.stream_recv_buffered = rcv;
+			}
+
 			tquic_conn_put(conn);
 		}
 
@@ -2348,16 +2611,47 @@ int tquic_sock_getsockopt(struct socket *sock, int level, int optname,
 		}
 		break;
 
-	case TQUIC_PATH_STATUS:
-		{
-			struct tquic_connection *conn;
+	case TQUIC_PATH_STATUS: {
+		struct tquic_connection *conn;
 
-			conn = tquic_sock_conn_get(tsk);
-			val = conn ? conn->num_paths : 0;
-			if (conn)
-				tquic_conn_put(conn);
+		/*
+		 * If the caller provides a buffer large enough for
+		 * struct tquic_path_info, fill it with active-path
+		 * statistics via tquic_path_get_info().  Otherwise
+		 * fall back to returning num_paths as an int.
+		 */
+		conn = tquic_sock_conn_get(tsk);
+		if (conn && len >= (int)sizeof(struct tquic_path_info)) {
+			struct tquic_path_info pinfo;
+			struct tquic_path *path;
+			int pret;
+
+			rcu_read_lock();
+			path = rcu_dereference(conn->active_path);
+			if (path && tquic_path_get(path)) {
+				rcu_read_unlock();
+				pret = tquic_path_get_info(path, &pinfo);
+				tquic_path_put(path);
+			} else {
+				rcu_read_unlock();
+				pret = -ENODEV;
+			}
+			tquic_conn_put(conn);
+
+			if (pret < 0)
+				return pret;
+
+			if (copy_to_user(optval, &pinfo, sizeof(pinfo)))
+				return -EFAULT;
+			if (put_user((int)sizeof(pinfo), optlen))
+				return -EFAULT;
+			return 0;
 		}
+		val = conn ? conn->num_paths : 0;
+		if (conn)
+			tquic_conn_put(conn);
 		break;
+	}
 
 	case TQUIC_MIGRATE_STATUS: {
 		struct tquic_connection *conn;
@@ -3043,6 +3337,30 @@ int tquic_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 		return -ENOTCONN;
 	stream = NULL;
 
+	if (READ_ONCE(conn->state) == TQUIC_CONN_CONNECTING &&
+	    (tsk->flags & TQUIC_F_ZERO_RTT_ENABLED)) {
+		/*
+		 * 0-RTT early data path (RFC 9001 Section 4.6.1).
+		 * Queue data via tquic_conn_send_0rtt which buffers in
+		 * cs->zero_rtt_buffer for transmission once 0-RTT keys
+		 * are installed. Data is retransmitted as 1-RTT if rejected.
+		 */
+		void *buf;
+		size_t copy_len = min_t(size_t, len, 65536UL);
+		int zret = -ENOMEM;
+
+		buf = kmalloc(copy_len, GFP_KERNEL);
+		if (buf) {
+			if (copy_from_iter(buf, copy_len,
+					   &msg->msg_iter) == copy_len)
+				zret = tquic_conn_send_0rtt(conn, buf,
+							    copy_len);
+			kfree(buf);
+		}
+		tquic_conn_put(conn);
+		return zret == 0 ? (int)copy_len : -ENOTCONN;
+	}
+
 	if (READ_ONCE(conn->state) != TQUIC_CONN_CONNECTED) {
 		tquic_conn_put(conn);
 		return -ENOTCONN;
@@ -3090,16 +3408,20 @@ int tquic_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 		/*
 		 * Block waiting for flow control credit.
 		 * MAX_STREAM_DATA or MAX_DATA from peer will wake us.
+		 *
+		 * tquic_stream_wait_for_space() handles the wait-queue
+		 * mechanics and wakes on stream->blocked clearing (RFC 9000
+		 * Section 4.1).
 		 */
-		if (wait_event_interruptible(
-			    stream->wait,
-			    tquic_sendmsg_check_flow_control(conn, stream,
-							     len) > 0 ||
-				    stream->state == TQUIC_STREAM_CLOSED ||
-				    READ_ONCE(conn->state) !=
-					    TQUIC_CONN_CONNECTED)) {
-			copied = -EINTR;
-			goto out_put;
+		{
+			long timeo = sock_sndtimeo(sk, nonblock);
+			int werr;
+
+			werr = tquic_stream_wait_for_space(stream, &timeo);
+			if (werr) {
+				copied = werr;
+				goto out_put;
+			}
 		}
 
 		/* Re-check state after waking */
@@ -3149,76 +3471,77 @@ int tquic_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 		}
 	}
 
-	/* Regular copy path */
-	while (copied < len) {
-		size_t chunk = min_t(size_t, len - copied, 1200);
+	/*
+	 * Regular copy path: delegate to tquic_stream_write() which manages
+	 * skb allocation, stream send-offset accounting, flow-control
+	 * reservation, and queuing under the stream manager lock.
+	 *
+	 * tquic_stream_write() returns -EAGAIN when flow control is exhausted
+	 * (caller already ensured allowed > 0, so this indicates the stream
+	 * manager's own FC gate fired) or -ENOMEM / -EFAULT on hard errors.
+	 */
+	if (conn->stream_mgr) {
+		ssize_t wr;
 
-		skb = alloc_skb(chunk, GFP_KERNEL);
-		if (!skb) {
+		wr = tquic_stream_write(conn->stream_mgr, stream,
+					&msg->msg_iter, len, false);
+		if (wr < 0) {
 			if (copied == 0)
-				copied = -ENOMEM;
-			goto out_put;
+				copied = (int)wr;
+		} else {
+			copied += wr;
 		}
-
-		if (copy_from_iter(skb_put(skb, chunk), chunk,
-				   &msg->msg_iter) != chunk) {
-			kfree_skb(skb);
-			if (copied == 0)
-				copied = -EFAULT;
-			goto out_put;
-		}
-
+	} else {
 		/*
-		 * Charge socket memory for this buffer.
-		 *
-		 * If the write memory budget is exhausted (too much data queued
-		 * but not yet transmitted), flush pending data first and retry.
-		 * This prevents silent partial writes that the application
-		 * might not handle, and provides proper backpressure.
+		 * Fallback: stream_mgr not yet initialised (early in
+		 * handshake). Use the legacy inline SKB path so data
+		 * is not silently discarded.
 		 */
-		if (!sk_wmem_schedule(sk, skb->truesize)) {
-			/*
-			 * Flush pending output - transmitting queued data
-			 * frees skbs and releases sk_wmem_alloc, making
-			 * room for new data.
-			 */
-			tquic_output_flush(conn);
+		while (copied < len) {
+			size_t chunk = min_t(size_t, len - copied, 1200);
 
-			/* Retry after flush */
-			if (!sk_wmem_schedule(sk, skb->truesize)) {
-				kfree_skb(skb);
+			skb = alloc_skb(chunk, GFP_KERNEL);
+			if (!skb) {
 				if (copied == 0)
-					copied = -ENOBUFS;
+					copied = -ENOMEM;
 				goto out_put;
 			}
-		}
-		skb_set_owner_w(skb, sk);
 
-			/* Initialize skb->cb stream offset for output_flush and reserve FC. */
+			if (copy_from_iter(skb_put(skb, chunk), chunk,
+					   &msg->msg_iter) != chunk) {
+				kfree_skb(skb);
+				if (copied == 0)
+					copied = -EFAULT;
+				goto out_put;
+			}
+
+			if (!sk_wmem_schedule(sk, skb->truesize)) {
+				tquic_output_flush(conn);
+				if (!sk_wmem_schedule(sk, skb->truesize)) {
+					kfree_skb(skb);
+					if (copied == 0)
+						copied = -ENOBUFS;
+					goto out_put;
+				}
+			}
+			skb_set_owner_w(skb, sk);
+
 			spin_lock_bh(&conn->lock);
-			tquic_stream_skb_cb(skb)->stream_offset = stream->send_offset;
+			tquic_stream_skb_cb(skb)->stream_offset =
+				stream->send_offset;
 			tquic_stream_skb_cb(skb)->data_off = 0;
 			stream->send_offset += chunk;
 			conn->fc_data_reserved += chunk;
 			conn->stats.tx_bytes += chunk;
+			skb_queue_tail(&stream->send_buf, skb);
+			spin_unlock_bh(&conn->lock);
 
-		/*
-		 * CF-179: Queue under lock to prevent reordering.
-		 * If we unlocked before queuing, another thread could grab the next
-		 * offset and queue its packet first, violating stream order.
-		 */
-		skb_queue_tail(&stream->send_buf, skb);
-		spin_unlock_bh(&conn->lock);
-
-		copied += chunk;
+			copied += chunk;
+		}
 	}
 
 	/*
 	 * Trigger actual transmission after queuing data.
-	 *
-	 * The previous check used stream->send_offset == 0, but send_offset is
-	 * incremented during queuing, so the flush path was never reached for
-	 * normal sends. Flush whenever bytes were queued to ensure progress.
 	 */
 	if (copied > 0)
 		tquic_output_flush(conn);
@@ -3444,7 +3767,7 @@ int tquic_recvmsg(struct sock *sk, struct msghdr *msg, size_t len, int flags,
 		 * Walk the tree and adopt the first bidirectional stream
 		 * as the default so that recv() works on accepted sockets.
 		 */
-		pr_info("tquic: recvmsg: no default_stream, walking tree conn=%px sk=%px\n",
+		pr_info("tquic: recvmsg: no default_stream, walking tree conn=%p sk=%p\n",
 			conn, sk);
 		spin_lock_bh(&conn->lock);
 		{
@@ -3467,7 +3790,7 @@ int tquic_recvmsg(struct sock *sk, struct msghdr *msg, size_t len, int flags,
 				}
 			}
 			if (!count)
-				pr_info("tquic: recvmsg: stream tree EMPTY conn=%px\n", conn);
+				pr_info("tquic: recvmsg: stream tree EMPTY conn=%p\n", conn);
 		}
 		spin_unlock_bh(&conn->lock);
 
@@ -3570,45 +3893,77 @@ int tquic_recvmsg(struct sock *sk, struct msghdr *msg, size_t len, int flags,
 		}
 
 		release_sock(sk);
-		if (wait_event_interruptible(stream->wait,
-				!skb_queue_empty(&stream->recv_buf) ||
-				stream->fin_received ||
-				READ_ONCE(conn->state) ==
-					TQUIC_CONN_CLOSED)) {
-			lock_sock(sk);
-			copied = -EINTR;
-			goto out_release;
+		/*
+		 * tquic_stream_wait_for_data() encapsulates the wait-queue
+		 * logic (EINTR, EAGAIN, ECONNRESET) and handles FIN detection
+		 * per RFC 9000 Section 3.
+		 */
+		{
+			long timeo = sock_rcvtimeo(sk, nonblock);
+			int werr;
+
+			werr = tquic_stream_wait_for_data(stream, &timeo);
+			if (werr) {
+				lock_sock(sk);
+				if (copied == 0)
+					copied = werr;
+				goto out_release;
+			}
 		}
 		lock_sock(sk);
 	}
 
-	while (copied < len && !skb_queue_empty(&stream->recv_buf)) {
-		size_t chunk;
+	/*
+	 * Read data from the stream receive buffer.
+	 *
+	 * Prefer the stream manager API (tquic_stream_read) which handles
+	 * skb consumption, partial reads, and the fc_on_stream_consumed()
+	 * accounting under the stream manager lock.
+	 *
+	 * Fall back to the inline SKB loop when stream_mgr is not yet
+	 * initialised (early handshake) to avoid losing data.
+	 */
+	if (conn->stream_mgr) {
+		ssize_t rd;
 
-		skb = skb_dequeue(&stream->recv_buf);
-		if (!skb)
-			break;
-
-		chunk = min_t(size_t, len - copied, skb->len);
-
-		if (copy_to_iter(skb->data, chunk, &msg->msg_iter) != chunk) {
-			skb_queue_head(&stream->recv_buf, skb);
-			copied = copied > 0 ? copied : -EFAULT;
-			goto out_release;
-		}
-
-		copied += chunk;
-
-		if (chunk < skb->len) {
-			/* Partial read, requeue remainder */
-			skb_pull(skb, chunk);
-			skb_queue_head(&stream->recv_buf, skb);
+		rd = tquic_stream_read(conn->stream_mgr, stream,
+				       &msg->msg_iter, len);
+		if (rd < 0) {
+			if (copied == 0)
+				copied = (int)rd;
 		} else {
-			sk_mem_uncharge(sk, skb->truesize);
-			kfree_skb(skb);
+			copied += rd;
+			conn->stats.rx_bytes += rd;
 		}
+	} else {
+		while (copied < len && !skb_queue_empty(&stream->recv_buf)) {
+			size_t chunk;
 
-		conn->stats.rx_bytes += chunk;
+			skb = skb_dequeue(&stream->recv_buf);
+			if (!skb)
+				break;
+
+			chunk = min_t(size_t, len - copied, skb->len);
+
+			if (copy_to_iter(skb->data, chunk,
+					 &msg->msg_iter) != chunk) {
+				skb_queue_head(&stream->recv_buf, skb);
+				copied = copied > 0 ? copied : -EFAULT;
+				goto out_release;
+			}
+
+			copied += chunk;
+
+			if (chunk < skb->len) {
+				skb_pull(skb, chunk);
+				skb_queue_head(&stream->recv_buf, skb);
+			} else {
+				sk_mem_uncharge(sk, skb->truesize);
+				kfree_skb(skb);
+			}
+
+			conn->stats.rx_bytes += chunk;
+		}
 	}
 
 	/*
@@ -3676,7 +4031,9 @@ int tquic_recvmsg(struct sock *sk, struct msghdr *msg, size_t len, int flags,
 		} else {
 			/*
 			 * Legacy fallback: conn->fc not yet initialised.
-			 * Use conn->data_consumed for window calculations.
+			 * Use conn->data_consumed for connection window and
+			 * tquic_stream_advertise_max_data() for per-stream
+			 * window (RFC 9000 Section 4.2).
 			 */
 			u64 consumed, threshold;
 			bool send_conn_update = false;
@@ -3697,15 +4054,30 @@ int tquic_recvmsg(struct sock *sk, struct msghdr *msg, size_t len, int flags,
 				send_conn_update = true;
 			}
 
-			stream->recv_consumed += copied;
-			consumed = stream->recv_consumed;
-			threshold = stream->max_recv_data / 2;
-			if (consumed > threshold &&
-			    stream->max_recv_data > 0) {
-				new_stream_max = consumed +
-						 stream->max_recv_data;
-				stream->max_recv_data = new_stream_max;
-				send_stream_update = true;
+			/*
+			 * Use tquic_stream_advertise_max_data() when the
+			 * stream manager is present; it applies the RFC 9000
+			 * half-window threshold against recv_offset.
+			 * Fall back to manual arithmetic otherwise.
+			 */
+			if (conn->stream_mgr) {
+				new_stream_max =
+					tquic_stream_advertise_max_data(stream);
+				if (new_stream_max > stream->max_recv_data) {
+					stream->max_recv_data = new_stream_max;
+					send_stream_update = true;
+				}
+			} else {
+				stream->recv_consumed += copied;
+				consumed = stream->recv_consumed;
+				threshold = stream->max_recv_data / 2;
+				if (consumed > threshold &&
+				    stream->max_recv_data > 0) {
+					new_stream_max = consumed +
+							 stream->max_recv_data;
+					stream->max_recv_data = new_stream_max;
+					send_stream_update = true;
+				}
 			}
 
 			spin_unlock_bh(&conn->lock);

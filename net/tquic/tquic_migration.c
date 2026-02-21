@@ -813,18 +813,26 @@ static void tquic_migration_work_handler(struct work_struct *work)
 
 	/* Complete migration unless probe-only */
 	if (!(ms->flags & TQUIC_MIGRATE_FLAG_PROBE_ONLY)) {
-		spin_lock_bh(&conn->lock);
-		rcu_assign_pointer(conn->active_path, new_path);
-		conn->stats.path_migrations++;
-		spin_unlock_bh(&conn->lock);
+		/*
+		 * Use tquic_conn_migrate_to_path to perform the path switch
+		 * via the connection state machine (RFC 9000 Section 9).
+		 * This schedules the completion work and handles the active
+		 * path update under proper locking.  Fall back to the direct
+		 * rcu_assign_pointer path if cs is not initialised.
+		 */
+		if (tquic_conn_migrate_to_path(conn, new_path) < 0) {
+			spin_lock_bh(&conn->lock);
+			rcu_assign_pointer(conn->active_path, new_path);
+			conn->stats.path_migrations++;
+			spin_unlock_bh(&conn->lock);
+		}
 
 		tquic_info("migration complete to path %u (RTT: %u us)\n",
 			   new_path->path_id, ms->probe_rtt);
 
 		/* Demote old path to standby */
-		if (old_path && old_path != new_path) {
+		if (old_path && old_path != new_path)
 			old_path->state = TQUIC_PATH_STANDBY;
-		}
 	}
 
 	ms->status = TQUIC_MIGRATE_NONE;
@@ -2410,7 +2418,6 @@ static int tquic_migrate_validate_all_additional(struct tquic_connection *conn)
 	return count;
 }
 
-
 /**
  * tquic_additional_addr_migration_cleanup - Clean up additional address migration state
  * @conn: Connection
@@ -2424,7 +2431,6 @@ static void tquic_additional_addr_migration_cleanup(struct tquic_connection *con
 
 	tquic_additional_addr_conn_cleanup(conn);
 }
-
 
 MODULE_DESCRIPTION("TQUIC Connection Migration");
 MODULE_LICENSE("GPL");

@@ -31,6 +31,7 @@
 #include <linux/unaligned.h>
 #include <net/sock.h>
 #include <net/tquic.h>
+#include <net/tquic_frame.h>
 #include "../tquic_compat.h"
 #include "../tquic_debug.h"
 #include "../protocol.h"
@@ -473,6 +474,19 @@ static int tquic_stream_alloc_id(struct tquic_stream_manager *mgr, bool bidi,
 		return -ENOSPC;
 	}
 
+	/* Also check RFC 9000 Section 4.6 FC stream count limit */
+	if (mgr->conn && mgr->conn->fc) {
+		bool fc_allowed = bidi ?
+			tquic_fc_can_open_bidi_stream(mgr->conn->fc) :
+			tquic_fc_can_open_uni_stream(mgr->conn->fc);
+
+		if (!fc_allowed) {
+			tquic_warn("stream limit reached (FC): bidi=%d\n",
+				   bidi);
+			return -ENOSPC;
+		}
+	}
+
 	*stream_id = next_id;
 
 	/* Advance to next ID (IDs increment by 4) */
@@ -482,6 +496,14 @@ static int tquic_stream_alloc_id(struct tquic_stream_manager *mgr, bool bidi,
 		mgr->next_uni_local += 4;
 
 	(*counter)++;
+
+	/* Update RFC 9000 Section 4.6 stream count flow control */
+	if (mgr->conn && mgr->conn->fc) {
+		if (bidi)
+			tquic_fc_bidi_stream_opened(mgr->conn->fc);
+		else
+			tquic_fc_uni_stream_opened(mgr->conn->fc);
+	}
 
 	return 0;
 }
@@ -637,6 +659,14 @@ static int tquic_stream_accept_id(struct tquic_stream_manager *mgr,
 	*next_id = stream_id + 4;
 	*counter += new_streams;
 
+	/* Update RFC 9000 Section 4.6 stream count flow control */
+	if (mgr->conn && mgr->conn->fc) {
+		if (is_bidi)
+			tquic_fc_bidi_stream_received(mgr->conn->fc, stream_id);
+		else
+			tquic_fc_uni_stream_received(mgr->conn->fc, stream_id);
+	}
+
 	return 0;
 }
 
@@ -695,6 +725,15 @@ tquic_stream_create_internal(struct tquic_stream_manager *mgr, u64 stream_id,
 
 	/* Store extended state in stream's ext field */
 	stream->ext = ext;
+
+	/*
+	 * Initialize per-stream RFC 9000 flow control state (Section 4.2).
+	 * Requires conn->fc to be initialized first (tquic_fc_init called
+	 * during connection creation). Failure is non-fatal: the existing
+	 * inline FC fields (max_send_data / max_recv_data) remain active.
+	 */
+	if (stream->conn && stream->conn->fc)
+		tquic_fc_stream_init(stream, stream->conn->fc);
 
 	return stream;
 }
@@ -841,6 +880,9 @@ void tquic_stream_destroy(struct tquic_stream_manager *mgr,
 	if (stream->ext && mgr)
 		tquic_stream_ext_free(mgr, stream->ext);
 
+	/* Release per-stream RFC 9000 flow control state (Section 4.2) */
+	tquic_fc_stream_cleanup(stream);
+
 	/* Wake any waiters */
 	wake_up_all(&stream->wait);
 
@@ -917,6 +959,14 @@ ssize_t tquic_stream_write(struct tquic_stream_manager *mgr,
 		return -EINVAL;
 
 	/*
+	 * RFC 9000 Section 4: Quick connection-level FC gate check before
+	 * acquiring the stream manager lock. Uses the Simplified FC API which
+	 * reads conn->max_data_remote / conn->data_sent under conn->lock.
+	 */
+	if (mgr->conn && !tquic_flow_control_can_send(mgr->conn, len))
+		return -EAGAIN;
+
+	/*
 	 * IMPORTANT: copy_from_iter() can fault/sleep. Only hold mgr->lock for
 	 * short reservations and queue operations; do not hold it across the copy.
 	 */
@@ -938,10 +988,44 @@ ssize_t tquic_stream_write(struct tquic_stream_manager *mgr,
 		/* Limit chunk size for reasonable SKB sizes */
 		chunk = min_t(size_t, allowed, 16384);
 
+		/*
+		 * Reserve combined stream + connection credit atomically
+		 * before dropping the lock (CF-428).  This prevents a race
+		 * where two concurrent writers both pass the FC gate but
+		 * together exceed the window.  On failure, bail out gracefully.
+		 *
+		 * tquic_fc_stream_check_send is a lightweight combined check
+		 * (RFC 9000 Section 4.1, 4.2) that gates on the effective
+		 * credit before we attempt the atomic reservation.
+		 */
+		if (stream->fc && mgr->conn->fc) {
+			if (tquic_fc_stream_check_send(mgr->conn->fc,
+						       stream->fc,
+						       chunk) < 0) {
+				if (copied == 0) {
+					spin_unlock_bh(&mgr->lock);
+					return -EAGAIN;
+				}
+				break;
+			}
+			if (tquic_fc_reserve_credit(mgr->conn->fc, stream->fc,
+						    chunk) < 0) {
+				if (copied == 0) {
+					spin_unlock_bh(&mgr->lock);
+					return -EAGAIN;
+				}
+				break;
+			}
+		}
+
 		spin_unlock_bh(&mgr->lock);
 
 		skb = alloc_skb(chunk, GFP_KERNEL);
 		if (!skb) {
+			/* Release reserved credit on allocation failure. */
+			if (stream->fc && mgr->conn->fc)
+				tquic_fc_release_credit(mgr->conn->fc,
+							stream->fc, chunk);
 			spin_lock_bh(&mgr->lock);
 			if (copied == 0)
 				return -ENOMEM;
@@ -951,7 +1035,10 @@ ssize_t tquic_stream_write(struct tquic_stream_manager *mgr,
 		err = copy_from_iter(skb_put(skb, chunk), chunk, from);
 		if (err != chunk) {
 			kfree_skb(skb);
-
+			/* Release reserved credit on copy failure. */
+			if (stream->fc && mgr->conn->fc)
+				tquic_fc_release_credit(mgr->conn->fc,
+							stream->fc, chunk);
 			spin_lock_bh(&mgr->lock);
 			if (copied == 0)
 				return -EFAULT;
@@ -965,6 +1052,22 @@ ssize_t tquic_stream_write(struct tquic_stream_manager *mgr,
 		stream->send_offset += chunk;
 		mgr->data_sent += chunk;
 		mgr->conn->stats.tx_bytes += chunk;
+
+		/*
+		 * Update RFC 9000 Section 4 flow control send accounting.
+		 * When the rich FC subsystem reserved credit above, commit it
+		 * now (moves data_reserved -> data_sent).  Otherwise use the
+		 * individual tquic_fc_stream_data_sent / tquic_fc_conn_data_sent
+		 * calls for the simple-mode path.
+		 */
+		if (stream->fc && mgr->conn->fc) {
+			tquic_fc_commit_credit(mgr->conn->fc, stream->fc, chunk);
+		} else {
+			if (stream->fc)
+				tquic_fc_stream_data_sent(stream->fc, chunk);
+			if (mgr->conn->fc)
+				tquic_fc_conn_data_sent(mgr->conn->fc, chunk);
+		}
 
 		/* Store reserved stream offset in skb->cb */
 		tquic_stream_skb_cb(skb)->stream_offset = offset;
@@ -983,6 +1086,13 @@ ssize_t tquic_stream_write(struct tquic_stream_manager *mgr,
 	}
 
 	spin_unlock_bh(&mgr->lock);
+
+	/*
+	 * Update Simplified FC API send accounting after releasing the lock
+	 * (tquic_flow_control_on_data_sent acquires conn->lock).
+	 */
+	if (copied > 0 && mgr->conn)
+		tquic_flow_control_on_data_sent(mgr->conn, (u64)copied);
 
 	return copied;
 }
@@ -1257,6 +1367,23 @@ int tquic_stream_recv_data(struct tquic_stream_manager *mgr,
 	stream->recv_offset = max(stream->recv_offset, offset + skb->len);
 	mgr->data_received += skb->len;
 
+	/* Update RFC 9000 Section 4 flow control receive accounting */
+	if (stream->fc && mgr->conn->fc) {
+		/*
+		 * tquic_fc_stream_check_recv enforces both stream-level and
+		 * connection-level receive limits in a single call
+		 * (RFC 9000 Section 4.1, 4.2).
+		 */
+		tquic_fc_stream_check_recv(mgr->conn->fc, stream->fc, offset,
+					   skb->len, fin);
+	} else {
+		if (stream->fc)
+			tquic_fc_stream_data_received(stream->fc, offset,
+						      skb->len, fin);
+		if (mgr->conn->fc)
+			tquic_fc_conn_data_received(mgr->conn->fc, skb->len);
+	}
+
 	/* Handle FIN */
 	if (fin) {
 		stream->fin_received = true;
@@ -1268,6 +1395,13 @@ int tquic_stream_recv_data(struct tquic_stream_manager *mgr,
 
 	/* Wake up any readers */
 	wake_up_interruptible(&stream->wait);
+
+	/*
+	 * After receive processing, check if connection-level window needs
+	 * updating (Simplified FC API operates on conn->data_consumed).
+	 */
+	if (mgr->conn)
+		tquic_flow_control_update_max_data(mgr->conn);
 
 	return 0;
 }
@@ -1345,6 +1479,27 @@ ssize_t tquic_stream_read(struct tquic_stream_manager *mgr,
 	if (copied > 0 && stream->conn && stream->conn->fc && stream->fc) {
 		tquic_fc_on_stream_consumed(stream->conn->fc, stream->fc,
 					    copied);
+
+		/*
+		 * Check whether the per-stream receive window needs expanding.
+		 * tquic_fc_should_update_stream_window returns true when
+		 * enough data has been consumed to warrant a new
+		 * MAX_STREAM_DATA frame (RFC 9000 Section 4.2).
+		 * tquic_fc_calc_stream_window computes the new window size
+		 * (incorporating auto-tuning) and stores it in
+		 * stream->fc->max_data_next, which the output path reads when
+		 * it decides whether to send MAX_STREAM_DATA.
+		 */
+		if (tquic_fc_should_update_stream_window(stream->fc,
+							 stream->conn->fc)) {
+			u64 new_window = tquic_fc_calc_stream_window(
+				stream->fc, stream->conn->fc);
+
+			spin_lock_bh(&stream->fc->lock);
+			stream->fc->max_data_next = new_window;
+			stream->fc->needs_max_stream_data = true;
+			spin_unlock_bh(&stream->fc->lock);
+		}
 	}
 
 	return copied;
@@ -1405,9 +1560,35 @@ int tquic_stream_shutdown_read(struct tquic_stream_manager *mgr,
 	spin_lock_bh(&mgr->lock);
 
 	/* Mark that we sent STOP_SENDING */
-	/* In real impl, would queue STOP_SENDING frame */
 
 	spin_unlock_bh(&mgr->lock);
+
+	/*
+	 * Build and queue the STOP_SENDING frame (RFC 9000 Section 19.5).
+	 * tquic_stop_sending_frame_size() gives the exact encoded size so the
+	 * allocation is right-sized from the start.
+	 */
+	if (mgr->conn) {
+		size_t frame_sz = tquic_stop_sending_frame_size(stream->id,
+								error_code);
+		u8 frame_buf[1 + 8 + 8]; /* type + stream_id + error_code */
+		int ret;
+
+		ret = tquic_write_stop_sending_frame(frame_buf,
+						     sizeof(frame_buf),
+						     stream->id, error_code);
+		if (ret > 0) {
+			struct sk_buff *frame_skb;
+
+			frame_skb = alloc_skb(frame_sz + 16, GFP_ATOMIC);
+			if (frame_skb) {
+				skb_put_data(frame_skb, frame_buf, ret);
+				skb_queue_tail(&mgr->conn->control_frames,
+					       frame_skb);
+				schedule_work(&mgr->conn->tx_work);
+			}
+		}
+	}
 
 	tquic_dbg("stream %llu STOP_SENDING error=%llu\n", stream->id,
 		  error_code);
@@ -1463,6 +1644,37 @@ int tquic_stream_reset_send(struct tquic_stream_manager *mgr,
 	}
 
 	spin_unlock_bh(&mgr->lock);
+
+	/*
+	 * Build and queue the RESET_STREAM frame (RFC 9000 Section 19.4).
+	 * The final_size is the number of bytes already sent on the stream.
+	 * tquic_reset_stream_frame_size() gives the exact encoded size so the
+	 * allocation is never wasteful.
+	 */
+	if (mgr->conn) {
+		u64 final_size = stream->send_offset;
+		size_t frame_sz = tquic_reset_stream_frame_size(stream->id,
+								error_code,
+								final_size);
+		u8 frame_buf[1 + 8 + 8 + 8]; /* type + 3 varints, max 25B */
+		int ret;
+
+		ret = tquic_write_reset_stream_frame(frame_buf,
+						     sizeof(frame_buf),
+						     stream->id, error_code,
+						     final_size);
+		if (ret > 0) {
+			struct sk_buff *frame_skb;
+
+			frame_skb = alloc_skb(frame_sz + 16, GFP_ATOMIC);
+			if (frame_skb) {
+				skb_put_data(frame_skb, frame_buf, ret);
+				skb_queue_tail(&mgr->conn->control_frames,
+					       frame_skb);
+				schedule_work(&mgr->conn->tx_work);
+			}
+		}
+	}
 
 	tquic_dbg("stream %llu RST_STREAM sent error=%llu\n", stream->id,
 		  error_code);

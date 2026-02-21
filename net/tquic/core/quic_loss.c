@@ -14,12 +14,16 @@
 #include <linux/workqueue.h>
 #include <linux/rcupdate.h>
 #include <net/tquic.h>
+#include <net/tquic_frame.h>
 #include "ack.h"
 #include "../cong/tquic_cong.h"
 #include "../cong/persistent_cong.h"
+#include "quic_cong.h"
+#include "quic_path.h"
 #include "../diag/trace.h"
 #include "../tquic_debug.h"
 #include "quic_loss.h"
+#include "flow_control.h"
 #include "../tquic_init.h"
 #include "../bond/tquic_bonding.h"
 #include "../bond/tquic_failover.h"
@@ -839,6 +843,16 @@ void tquic_loss_detection_on_ack_received(struct tquic_connection *conn,
 				tquic_rtt_update(&path->rtt, latest_rtt,
 						 ack_delay_us);
 
+				/*
+				 * Propagate measured RTT to flow control for
+				 * RFC 9000 Section 4 window auto-tuning (BDP).
+				 */
+				if (conn->fc) {
+					tquic_fc_update_rtt(conn->fc,
+							    path->rtt.smoothed_rtt);
+					tquic_fc_autotune(conn->fc);
+				}
+
 				trace_quic_rtt_update(
 					tquic_trace_conn_id(&conn->scid),
 					path->rtt.latest_rtt, path->rtt.min_rtt,
@@ -916,6 +930,15 @@ void tquic_loss_detection_on_ack_received(struct tquic_connection *conn,
 
 	/* Detect and handle lost packets */
 	tquic_loss_detection_detect_lost(conn, pn_space_idx);
+
+	/*
+	 * RFC 9002 Section 7.6: Check for persistent congestion after
+	 * loss detection.  If detected, retransmit all unacked data.
+	 * The path-level CC is notified via tquic_cong_on_loss() in the
+	 * detect_lost path; persistent congestion requires a full retransmit.
+	 */
+	if (tquic_loss_check_persistent_congestion(conn))
+		tquic_loss_retransmit_unacked(conn);
 
 	/* Update timer */
 	tquic_set_loss_detection_timer(conn);
@@ -1480,14 +1503,29 @@ static void tquic_loss_send_probe(struct tquic_connection *conn,
 	/*
 	 * RFC 9002 Section 6.2.4:
 	 * If there's nothing to retransmit, send a PING frame.
+	 *
+	 * Use tquic_ping_frame_size() to determine the allocation size and
+	 * tquic_write_ping_frame() to serialise the frame, so this path uses
+	 * the same canonical frame-construction API as every other site.
 	 */
-	skb = alloc_skb(16, GFP_ATOMIC);
-	if (skb) {
-		u8 *p = skb_put(skb, 1);
-		*p = TQUIC_FRAME_PING;
-		/* Best effort - if queue full, skip PING */
-		if (tquic_conn_queue_frame(conn, skb))
-			kfree_skb(skb);
+	{
+		size_t ping_sz = tquic_ping_frame_size();
+
+		skb = alloc_skb(ping_sz + 16, GFP_ATOMIC);
+		if (skb) {
+			u8 frame_buf[1];
+			int ret = tquic_write_ping_frame(frame_buf,
+							 sizeof(frame_buf));
+
+			if (ret < 0) {
+				kfree_skb(skb);
+			} else {
+				skb_put_data(skb, frame_buf, ret);
+				/* Best effort - if queue full, skip PING */
+				if (tquic_conn_queue_frame(conn, skb))
+					kfree_skb(skb);
+			}
+		}
 	}
 
 	/* Schedule TX work to send probe */
@@ -1984,7 +2022,13 @@ bool tquic_loss_check_persistent_congestion(struct tquic_connection *conn)
 			continue;
 		}
 
-		pto = tquic_rtt_pto(&path->rtt);
+		/*
+		 * tquic_path_pto() is the authoritative PTO computation
+		 * (RFC 9002 Section 6.2.1) and uses the path's CC-visible
+		 * smoothed_rtt_us / rtt_var_us fields.  It replaces the
+		 * previous direct call to tquic_rtt_pto(&path->rtt).
+		 */
+		pto = tquic_path_pto(path);
 		duration = ktime_sub(path_pc[j].newest_lost_time,
 				     path_pc[j].oldest_lost_time);
 

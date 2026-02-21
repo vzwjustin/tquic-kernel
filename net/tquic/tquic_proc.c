@@ -33,6 +33,7 @@
 #include "tquic_debug.h"
 #include "tquic_compat.h"
 #include "tquic_ratelimit.h"
+#include "core/flow_control.h"
 
 /* External reference to global connection table from tquic_main.c */
 
@@ -470,14 +471,94 @@ static const struct seq_operations tquic_conn_seq_ops = {
  * =============================================================================
  */
 
+/**
+ * tquic_fc_stat_seq_show - Emit per-connection flow control statistics
+ * @seq: seq_file to write to
+ * @conn: Connection whose FC stats to show
+ *
+ * Uses tquic_fc_get_stats() to copy the FC statistics snapshot and formats
+ * them as human-readable key-value pairs in the /proc/net/tquic_stat output.
+ */
+static void tquic_fc_stat_seq_show(struct seq_file *seq,
+				   struct tquic_connection *conn)
+{
+	struct {
+		u64 max_data_frames_sent;
+		u64 max_data_frames_received;
+		u64 data_blocked_frames_sent;
+		u64 data_blocked_frames_received;
+		u64 max_stream_data_frames_sent;
+		u64 max_stream_data_frames_received;
+		u64 stream_data_blocked_frames_sent;
+		u64 stream_data_blocked_frames_received;
+		u64 max_streams_frames_sent;
+		u64 max_streams_frames_received;
+		u64 streams_blocked_frames_sent;
+		u64 streams_blocked_frames_received;
+		u64 window_updates;
+		u64 autotune_adjustments;
+	} fc_stats;
+
+	if (!conn->fc)
+		return;
+
+	memset(&fc_stats, 0, sizeof(fc_stats));
+	tquic_fc_get_stats(conn->fc, &fc_stats, sizeof(fc_stats));
+
+	seq_printf(seq,
+		   "  fc_max_data_tx=%llu fc_max_data_rx=%llu"
+		   " fc_blocked_tx=%llu fc_blocked_rx=%llu"
+		   " fc_max_stream_tx=%llu fc_max_stream_rx=%llu"
+		   " fc_stream_blocked_tx=%llu fc_stream_blocked_rx=%llu"
+		   " fc_max_streams_tx=%llu fc_max_streams_rx=%llu"
+		   " fc_streams_blocked_tx=%llu fc_streams_blocked_rx=%llu"
+		   " fc_window_updates=%llu fc_autotune_adj=%llu\n",
+		   fc_stats.max_data_frames_sent,
+		   fc_stats.max_data_frames_received,
+		   fc_stats.data_blocked_frames_sent,
+		   fc_stats.data_blocked_frames_received,
+		   fc_stats.max_stream_data_frames_sent,
+		   fc_stats.max_stream_data_frames_received,
+		   fc_stats.stream_data_blocked_frames_sent,
+		   fc_stats.stream_data_blocked_frames_received,
+		   fc_stats.max_streams_frames_sent,
+		   fc_stats.max_streams_frames_received,
+		   fc_stats.streams_blocked_frames_sent,
+		   fc_stats.streams_blocked_frames_received,
+		   fc_stats.window_updates,
+		   fc_stats.autotune_adjustments);
+}
+
 static int tquic_stat_seq_show(struct seq_file *seq, void *v)
 {
 	struct net *net = seq->private;
+	struct rhashtable_iter hti;
+	struct tquic_connection *conn;
 
 	tquic_mib_seq_show_net(seq, net);
 
 	/* Include GRO statistics */
 	tquic_gro_stats_show(seq);
+
+	/*
+	 * Emit per-connection flow control statistics gathered via
+	 * tquic_fc_get_stats().  This provides visibility into FC frame
+	 * counts, window update frequency, and auto-tuning activity.
+	 */
+	rhashtable_walk_enter(&tquic_conn_table, &hti);
+	rhashtable_walk_start(&hti);
+	while ((conn = rhashtable_walk_next(&hti)) != NULL) {
+		struct sock *csk;
+
+		if (IS_ERR(conn))
+			continue;
+		csk = READ_ONCE(conn->sk);
+		if (!csk || !net_eq(sock_net(csk), net))
+			continue;
+		tquic_fc_stat_seq_show(seq, conn);
+	}
+	rhashtable_walk_stop(&hti);
+	rhashtable_walk_exit(&hti);
 
 	return 0;
 }

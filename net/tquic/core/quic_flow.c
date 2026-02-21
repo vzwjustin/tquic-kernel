@@ -1214,28 +1214,29 @@ static struct sk_buff *tquic_flow_create_max_stream_data_frame(u64 stream_id,
 static struct sk_buff *tquic_flow_create_max_streams_frame(u64 max_streams,
 							  bool unidirectional)
 {
+	/*
+	 * Max frame size: 1 (type) + 8 (varint max_streams) = 9 bytes.
+	 * tquic_max_streams_frame_size() returns the exact encoded size.
+	 */
+	u8 frame_buf[1 + 8];
+	size_t frame_len;
 	struct sk_buff *skb;
 	u8 *p;
-	int frame_len;
-	u8 frame_type;
+	int ret;
 
-	frame_type = unidirectional ? TQUIC_FRAME_MAX_STREAMS_UNI :
-				      TQUIC_FRAME_MAX_STREAMS_BIDI;
+	frame_len = tquic_max_streams_frame_size(max_streams);
 
-	/* Calculate frame size */
-	frame_len = 1 + tquic_varint_len(max_streams);
+	ret = tquic_write_max_streams_frame(frame_buf, sizeof(frame_buf),
+					    max_streams, !unidirectional);
+	if (ret < 0)
+		return NULL;
 
 	skb = alloc_skb(frame_len + 16, GFP_ATOMIC);
 	if (!skb)
 		return NULL;
 
-	/* Frame type */
-	p = skb_put(skb, 1);
-	*p = frame_type;
-
-	/* Maximum Streams */
-	p = skb_put(skb, tquic_varint_len(max_streams));
-	tquic_varint_encode(max_streams, p, tquic_varint_len(max_streams));
+	p = skb_put(skb, ret);
+	memcpy(p, frame_buf, ret);
 
 	return skb;
 }
@@ -1255,23 +1256,29 @@ static struct sk_buff *tquic_flow_create_max_streams_frame(u64 max_streams,
  */
 static struct sk_buff *tquic_flow_create_data_blocked_frame(u64 limit)
 {
+	/*
+	 * Max frame size: 1 (type) + 8 (varint limit) = 9 bytes.
+	 * tquic_data_blocked_frame_size() returns the exact encoded size.
+	 */
+	u8 frame_buf[1 + 8];
+	size_t frame_len;
 	struct sk_buff *skb;
 	u8 *p;
-	int frame_len;
+	int ret;
 
-	frame_len = 1 + tquic_varint_len(limit);
+	frame_len = tquic_data_blocked_frame_size(limit);
+
+	ret = tquic_write_data_blocked_frame(frame_buf, sizeof(frame_buf),
+					     limit);
+	if (ret < 0)
+		return NULL;
 
 	skb = alloc_skb(frame_len + 16, GFP_ATOMIC);
 	if (!skb)
 		return NULL;
 
-	/* Frame type */
-	p = skb_put(skb, 1);
-	*p = TQUIC_FRAME_DATA_BLOCKED;
-
-	/* Maximum Data (limit) */
-	p = skb_put(skb, tquic_varint_len(limit));
-	tquic_varint_encode(limit, p, tquic_varint_len(limit));
+	p = skb_put(skb, ret);
+	memcpy(p, frame_buf, ret);
 
 	return skb;
 }
@@ -1294,27 +1301,29 @@ static struct sk_buff *tquic_flow_create_data_blocked_frame(u64 limit)
 static struct sk_buff *tquic_flow_create_stream_data_blocked_frame(u64 stream_id,
 								  u64 limit)
 {
+	/*
+	 * Max frame size: 1 (type) + 8 (varint stream_id) +
+	 *                 8 (varint limit) = 17 bytes.
+	 * tquic_stream_data_blocked_frame_size() returns the exact encoded size.
+	 */
+	u8 frame_buf[1 + 8 + 8];
+	size_t frame_len;
 	struct sk_buff *skb;
 	u8 *p;
-	int frame_len;
+	int ret;
 
-	frame_len = 1 + tquic_varint_len(stream_id) + tquic_varint_len(limit);
+	frame_len = tquic_stream_data_blocked_frame_size(stream_id, limit);
+	ret = tquic_write_stream_data_blocked_frame(frame_buf, sizeof(frame_buf),
+						    stream_id, limit);
+	if (ret < 0)
+		return NULL;
 
 	skb = alloc_skb(frame_len + 16, GFP_ATOMIC);
 	if (!skb)
 		return NULL;
 
-	/* Frame type */
-	p = skb_put(skb, 1);
-	*p = TQUIC_FRAME_STREAM_DATA_BLOCKED;
-
-	/* Stream ID */
-	p = skb_put(skb, tquic_varint_len(stream_id));
-	tquic_varint_encode(stream_id, p, tquic_varint_len(stream_id));
-
-	/* Maximum Stream Data (limit) */
-	p = skb_put(skb, tquic_varint_len(limit));
-	tquic_varint_encode(limit, p, tquic_varint_len(limit));
+	p = skb_put(skb, ret);
+	memcpy(p, frame_buf, ret);
 
 	return skb;
 }
@@ -1336,27 +1345,29 @@ static struct sk_buff *tquic_flow_create_stream_data_blocked_frame(u64 stream_id
 static struct sk_buff *tquic_flow_create_streams_blocked_frame(u64 limit,
 							      bool unidirectional)
 {
+	/*
+	 * Max frame size: 1 (type) + 8 (varint limit) = 9 bytes.
+	 * tquic_streams_blocked_frame_size() returns the exact encoded size.
+	 * Note: tquic_write_streams_blocked_frame takes bidi=!unidirectional.
+	 */
+	u8 frame_buf[1 + 8];
+	size_t frame_len;
 	struct sk_buff *skb;
 	u8 *p;
-	int frame_len;
-	u8 frame_type;
+	int ret;
 
-	frame_type = unidirectional ? TQUIC_FRAME_STREAMS_BLOCKED_UNI :
-				      TQUIC_FRAME_STREAMS_BLOCKED_BIDI;
-
-	frame_len = 1 + tquic_varint_len(limit);
+	frame_len = tquic_streams_blocked_frame_size(limit);
+	ret = tquic_write_streams_blocked_frame(frame_buf, sizeof(frame_buf),
+						limit, !unidirectional);
+	if (ret < 0)
+		return NULL;
 
 	skb = alloc_skb(frame_len + 16, GFP_ATOMIC);
 	if (!skb)
 		return NULL;
 
-	/* Frame type */
-	p = skb_put(skb, 1);
-	*p = frame_type;
-
-	/* Maximum Streams (limit) */
-	p = skb_put(skb, tquic_varint_len(limit));
-	tquic_varint_encode(limit, p, tquic_varint_len(limit));
+	p = skb_put(skb, ret);
+	memcpy(p, frame_buf, ret);
 
 	return skb;
 }

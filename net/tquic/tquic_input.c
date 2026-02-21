@@ -52,6 +52,7 @@
 #include "tquic_cid.h"
 #include "core/flow_control.h"
 #include "core/quic_loss.h"
+#include "core/quic_path.h"
 #include "core/ack.h"
 #include "core/frame_process.h"
 #include "bond/tquic_bonding.h"
@@ -264,7 +265,16 @@ slow_path:
 		}
 	}
 
-	return found;
+	if (found)
+		return found;
+
+	/*
+	 * RCU slow path returned NULL: the path list may be transitioning
+	 * (new path being added, RCU grace period pending).  Fall back to
+	 * tquic_path_find() which uses conn->paths_lock for a consistent
+	 * spinlock-protected view.  This is a rare slow path.
+	 */
+	return tquic_path_find(conn, (struct sockaddr *)addr);
 }
 
 /*
@@ -492,20 +502,24 @@ static bool tquic_is_version_negotiation(const u8 *data, size_t len)
 static int tquic_process_version_negotiation(struct tquic_connection *conn,
 					     const u8 *data, size_t len)
 {
+	/* Maximum versions we will inspect from the VN list */
+#define TQUIC_MAX_VN_VERSIONS 32
+	u32 versions[TQUIC_MAX_VN_VERSIONS];
+	int num_versions = 0;
 	u8 dcid_len, scid_len;
-	const u8 *versions;
-	size_t versions_len;
-	int i;
+	const u8 *vn_payload;
+	size_t vn_payload_len;
 	bool found = false;
+	int ret;
+	int i;
 
 	if (len < 7)
 		return -EINVAL;
 
 	/*
 	 * SECURITY: Validate CID lengths before use as offsets.
-	 * RFC 9000 limits CID to 20 bytes. Without this check, a crafted
+	 * RFC 9000 limits CID to 20 bytes.  Without this check, a crafted
 	 * dcid_len of 255 would cause 6 + dcid_len to overflow u8 arithmetic.
-	 * Use size_t arithmetic to prevent narrowing issues.
 	 */
 	dcid_len = data[5];
 	if (dcid_len > TQUIC_MAX_CID_LEN)
@@ -519,19 +533,27 @@ static int tquic_process_version_negotiation(struct tquic_connection *conn,
 	if (len < (size_t)7 + dcid_len + scid_len)
 		return -EINVAL;
 
-	versions = data + 7 + dcid_len + scid_len;
-	versions_len = len - 7 - dcid_len - scid_len;
+	/* Payload begins after the long header fixed fields and CIDs */
+	vn_payload = data + 7 + dcid_len + scid_len;
+	vn_payload_len = len - 7 - dcid_len - scid_len;
 
 	tquic_dbg("received version negotiation, %zu bytes of versions\n",
-		  versions_len);
+		  vn_payload_len);
 
-	/* Check each offered version (cap log output to prevent flooding) */
-	for (i = 0; i + 4 <= versions_len; i += 4) {
-		/* CF-157: cast to u32 before shift to avoid signed overflow */
-		u32 version = ((u32)versions[i] << 24) |
-			      ((u32)versions[i + 1] << 16) |
-			      ((u32)versions[i + 2] << 8) |
-			      (u32)versions[i + 3];
+	/*
+	 * Parse the version list using the exported parser
+	 * (tquic_parse_version_negotiation, core/packet.c, EXPORT_SYMBOL_GPL).
+	 * It validates that the payload is a multiple of 4 bytes and extracts
+	 * up to TQUIC_MAX_VN_VERSIONS entries.
+	 */
+	ret = tquic_parse_version_negotiation(vn_payload, vn_payload_len,
+					      versions, TQUIC_MAX_VN_VERSIONS,
+					      &num_versions);
+	if (ret < 0)
+		return ret;
+
+	for (i = 0; i < num_versions; i++) {
+		u32 version = versions[i];
 
 		/*
 		 * RFC 9000 Section 6.1: A client MUST discard a VN packet
@@ -590,7 +612,7 @@ static int tquic_send_vn_from_listener(struct sock *listener,
 		TQUIC_VERSION_2,
 	};
 	size_t vn_len;
-	int i, ret;
+	int ret;
 
 	/* Extract connection IDs from Initial packet (RFC 9000 Section 17.2) */
 	if (len <
@@ -609,7 +631,14 @@ static int tquic_send_vn_from_listener(struct sock *listener,
 
 	scid = &data[7 + dcid_len];
 
-	/* Build Version Negotiation packet */
+	/*
+	 * Build Version Negotiation packet using the exported constructor
+	 * (tquic_build_version_negotiation, core/packet.c).  The packet
+	 * format is: random first byte | version=0 | DCID=client_SCID |
+	 * SCID=client_DCID | supported_versions_list.
+	 *
+	 * VN packet: DCID=client's SCID, SCID=client's DCID (RFC 9000 §6)
+	 */
 	vn_len = 1 + 4 + 1 + scid_len + 1 + dcid_len +
 		 sizeof(supported_versions);
 	vn_skb = alloc_skb(vn_len + MAX_HEADER, GFP_ATOMIC);
@@ -619,29 +648,15 @@ static int tquic_send_vn_from_listener(struct sock *listener,
 	skb_reserve(vn_skb, MAX_HEADER);
 	p = skb_put(vn_skb, vn_len);
 
-	/* First byte: long header form with random bits */
-	get_random_bytes(p, 1);
-	p[0] |= TQUIC_HEADER_FORM_LONG;
-	p++;
-
-	/* Version = 0 for Version Negotiation */
-	put_unaligned_be32(0, p);
-	p += 4;
-
-	/* DCID = client's SCID */
-	*p++ = scid_len;
-	memcpy(p, scid, scid_len);
-	p += scid_len;
-
-	/* SCID = client's DCID */
-	*p++ = dcid_len;
-	memcpy(p, dcid, dcid_len);
-	p += dcid_len;
-
-	/* Supported versions list */
-	for (i = 0; i < ARRAY_SIZE(supported_versions); i++) {
-		put_unaligned_be32(supported_versions[i], p);
-		p += 4;
+	ret = tquic_build_version_negotiation(
+		scid, scid_len,		/* DCID of VN = client SCID */
+		dcid, dcid_len,		/* SCID of VN = client DCID */
+		supported_versions,
+		ARRAY_SIZE(supported_versions),
+		p, vn_len);
+	if (ret < 0) {
+		kfree_skb(vn_skb);
+		return ret;
 	}
 
 	/* Send VN packet to client using UDP */
@@ -678,6 +693,10 @@ static int tquic_send_vn_from_listener(struct sock *listener,
 
 /*
  * Send version negotiation response (server side)
+ *
+ * Uses tquic_build_version_negotiation() (core/packet.c, EXPORT_SYMBOL_GPL)
+ * to build the on-wire packet.  Per RFC 9000 Section 6, the VN packet's
+ * DCID is the client's SCID and the SCID is the client's DCID.
  */
 static int tquic_send_version_negotiation_internal(struct sock *sk,
 						   const struct sockaddr *addr,
@@ -690,10 +709,11 @@ static int tquic_send_version_negotiation_internal(struct sock *sk,
 		TQUIC_VERSION_1,
 		TQUIC_VERSION_2,
 	};
-	int i;
 	size_t pkt_len;
+	int ret;
 
-	pkt_len = 7 + dcid_len + scid_len + sizeof(supported_versions);
+	pkt_len = 1 + 4 + 1 + scid_len + 1 + dcid_len +
+		  sizeof(supported_versions);
 
 	skb = alloc_skb(pkt_len + MAX_HEADER, GFP_ATOMIC);
 	if (!skb)
@@ -702,38 +722,26 @@ static int tquic_send_version_negotiation_internal(struct sock *sk,
 	skb_reserve(skb, MAX_HEADER);
 	p = skb_put(skb, pkt_len);
 
-	/* First byte with random bits, long header form */
-	get_random_bytes(p, 1);
-	p[0] |= TQUIC_HEADER_FORM_LONG;
-	p++;
-
-	/* Version = 0 for version negotiation */
-	memset(p, 0, 4);
-	p += 4;
-
-	/* DCID (echo back client's SCID) */
-	*p++ = scid_len;
-	memcpy(p, scid, scid_len);
-	p += scid_len;
-
-	/* SCID (echo back client's DCID) */
-	*p++ = dcid_len;
-	memcpy(p, dcid, dcid_len);
-	p += dcid_len;
-
-	/* Supported versions */
-	for (i = 0; i < ARRAY_SIZE(supported_versions); i++) {
-		*p++ = (supported_versions[i] >> 24) & 0xff;
-		*p++ = (supported_versions[i] >> 16) & 0xff;
-		*p++ = (supported_versions[i] >> 8) & 0xff;
-		*p++ = supported_versions[i] & 0xff;
+	/*
+	 * RFC 9000 Section 6: VN DCID = client SCID, VN SCID = client DCID.
+	 * tquic_build_version_negotiation() sets the random first byte and
+	 * version=0 per spec.
+	 */
+	ret = tquic_build_version_negotiation(
+		scid, scid_len,		/* DCID of VN = client SCID */
+		dcid, dcid_len,		/* SCID of VN = client DCID */
+		supported_versions,
+		ARRAY_SIZE(supported_versions),
+		p, pkt_len);
+	if (ret < 0) {
+		kfree_skb(skb);
+		return ret;
 	}
 
 	/* Send via UDP */
 	{
 		struct msghdr msg = {};
 		struct kvec iov;
-		int ret;
 
 		msg.msg_name = (void *)addr;
 		msg.msg_namelen = (addr->sa_family == AF_INET) ?
@@ -844,37 +852,16 @@ tquic_parse_short_header_internal(struct tquic_rx_ctx *ctx,
 
 /*
  * Decode packet number
+ *
+ * Delegates to tquic_pn_decode() from core/packet.c (EXPORT_SYMBOL_GPL).
+ * That function implements the RFC 9000 Appendix A reconstruction algorithm
+ * using the same truncated-PN window approach.
  */
-static u64 tquic_decode_pkt_num(u8 *buf, int pkt_num_len, u64 largest_pn)
+static u64 tquic_decode_pkt_num(const u8 *buf, int pkt_num_len, u64 largest_pn)
 {
-	u64 truncated_pn = 0;
-	u64 expected_pn, pn_win, pn_hwin, pn_mask;
-	u64 candidate_pn;
-	int i;
-
 	tquic_dbg("decode_pkt_num: pn_len=%d largest=%llu\n", pkt_num_len,
 		  largest_pn);
-
-	/* Read truncated packet number */
-	for (i = 0; i < pkt_num_len; i++)
-		truncated_pn = (truncated_pn << 8) | buf[i];
-
-	/* Reconstruct full packet number */
-	expected_pn = largest_pn + 1;
-	pn_win = 1ULL << (pkt_num_len * 8);
-	pn_hwin = pn_win / 2;
-	pn_mask = pn_win - 1;
-
-	candidate_pn = (expected_pn & ~pn_mask) | truncated_pn;
-
-	if (candidate_pn + pn_hwin <= expected_pn &&
-	    candidate_pn + pn_win < (1ULL << 62))
-		candidate_pn += pn_win;
-	else if (candidate_pn > expected_pn + pn_hwin && candidate_pn >= pn_win)
-		candidate_pn -= pn_win;
-
-	tquic_dbg("decode_pkt_num: result=%llu\n", candidate_pn);
-	return candidate_pn;
+	return tquic_pn_decode(buf, pkt_num_len, largest_pn);
 }
 
 /*
@@ -1008,6 +995,18 @@ static int tquic_process_packet(struct tquic_connection *conn,
 	pr_debug("process_pkt: ENTER conn=%p data[0]=0x%02x len=%zu\n", conn,
 		 data[0], len);
 
+	/*
+	 * Validate basic packet structure before parsing.
+	 * tquic_validate_packet() checks minimum length, fixed bit,
+	 * and CID length fields.  Fail fast to avoid wasting CPU on
+	 * malformed input.
+	 */
+	ret = tquic_validate_packet(data, len);
+	if (unlikely(ret < 0)) {
+		pr_debug("process_pkt: packet validation failed: %d\n", ret);
+		return ret;
+	}
+
 	/* Check header form */
 	if (data[0] & TQUIC_HEADER_FORM_LONG) {
 		/* Long header */
@@ -1028,7 +1027,12 @@ static int tquic_process_packet(struct tquic_connection *conn,
 		/* Handle version negotiation */
 		if (unlikely(version == TQUIC_VERSION_NEGOTIATION)) {
 			if (conn)
-				return tquic_process_version_negotiation(
+				/*
+				 * RFC 9000 Section 6: Process via the exported
+				 * API which selects a compatible version and
+				 * restarts the connection via tquic_conn_client_restart.
+				 */
+				return tquic_handle_version_negotiation(
 					conn, data, len);
 			return 0;
 		}
@@ -1036,16 +1040,31 @@ static int tquic_process_packet(struct tquic_connection *conn,
 		/*
 		 * RFC 9000 Section 6: If the version is not supported,
 		 * send a Version Negotiation packet listing our versions.
+		 * Use tquic_validate_version() from core/packet.c so the
+		 * check stays in sync with the core packet version table.
 		 */
-		if (version != TQUIC_VERSION_1 && version != TQUIC_VERSION_2) {
+		if (!tquic_validate_version(version)) {
 			tquic_dbg(
 				"input: unsupported version 0x%08x, sending VN\n",
 				version);
-			if (conn && conn->sk) {
-				tquic_send_version_negotiation_internal(
-					conn->sk,
-					(const struct sockaddr *)src_addr, scid,
-					scid_len, dcid, dcid_len);
+			if (conn) {
+				struct tquic_cid pkt_dcid, pkt_scid;
+
+				/*
+				 * Build tquic_cid structs from the parsed
+				 * byte arrays so we can call the exported
+				 * tquic_send_version_negotiation API.
+				 */
+				memset(&pkt_dcid, 0, sizeof(pkt_dcid));
+				memset(&pkt_scid, 0, sizeof(pkt_scid));
+				pkt_dcid.len = min_t(u8, dcid_len,
+						     TQUIC_MAX_CID_LEN);
+				memcpy(pkt_dcid.id, dcid, pkt_dcid.len);
+				pkt_scid.len = min_t(u8, scid_len,
+						     TQUIC_MAX_CID_LEN);
+				memcpy(pkt_scid.id, scid, pkt_scid.len);
+				tquic_send_version_negotiation(conn, &pkt_dcid,
+							       &pkt_scid);
 			}
 			return -EPROTONOSUPPORT;
 		}
@@ -1211,6 +1230,25 @@ static int tquic_process_packet(struct tquic_connection *conn,
 			memcpy(conn->dcid.id, scid, scid_len);
 			conn->dcid.len = scid_len;
 			conn->dcid_updated = true;
+		}
+
+		/*
+		 * RFC 9000 Section 14.1: Client Initial packets MUST be at
+		 * least 1200 bytes.  Servers MUST discard shorter ones.
+		 * tquic_validate_initial_packet() (core/packet.c,
+		 * EXPORT_SYMBOL_GPL) enforces this and re-validates the header
+		 * structure before we parse further fields.  Skip for
+		 * server-originated Initials (is_server == false means client).
+		 */
+		if (pkt_type == TQUIC_PKT_INITIAL &&
+		    conn && conn->role == TQUIC_ROLE_SERVER) {
+			ret = tquic_validate_initial_packet(data, len, false);
+			if (ret < 0) {
+				tquic_dbg(
+					"Initial packet failed validation: %d\n",
+					ret);
+				return ret;
+			}
 		}
 
 		/* Parse token for Initial packets */
@@ -1393,16 +1431,22 @@ static int tquic_process_packet(struct tquic_connection *conn,
 	 * (RFC 9000 Appendix A) requires the largest successfully
 	 * processed PN to correctly unwrap truncated packet numbers.
 	 */
-	if (pkt_type == TQUIC_PKT_INITIAL)
-		pn_space_idx = TQUIC_PN_SPACE_INITIAL;
-	else if (pkt_type == TQUIC_PKT_HANDSHAKE)
-		pn_space_idx = TQUIC_PN_SPACE_HANDSHAKE;
-	else
-		pn_space_idx = TQUIC_PN_SPACE_APPLICATION;
+	/*
+	 * tquic_packet_pn_space() maps packet type to the RFC 9000
+	 * Section 12.3 packet number space: Initial->0, Handshake->1,
+	 * 0-RTT/1-RTT->2.  Returns a negative error for unknown types
+	 * which we treat as APPLICATION space.
+	 */
+	{
+		int ps = tquic_packet_pn_space((enum tquic_packet_type)pkt_type);
 
-	pr_debug("process_pkt: PN decode: pkt_type=%d pkt_num=%llu "
-		 "pn_len=%d hdr_offset=%zu total_len=%lu\n",
-		 pkt_type, pkt_num, pkt_num_len, ctx.offset,
+		pn_space_idx = (ps >= 0) ? ps : TQUIC_PN_SPACE_APPLICATION;
+	}
+
+	pr_debug("process_pkt: PN decode: pkt_type=%d (%s) pn_space=%d "
+		 "pkt_num=%llu pn_len=%d hdr_offset=%zu total_len=%lu\n",
+		 pkt_type, tquic_packet_type_str((enum tquic_packet_type)pkt_type),
+		 pn_space_idx, pkt_num, pkt_num_len, ctx.offset,
 		 (unsigned long)len);
 
 	if (conn && conn->pn_spaces)
@@ -1628,6 +1672,13 @@ static int tquic_process_packet(struct tquic_connection *conn,
 		}
 
 		/*
+		 * RFC 9002: Notify connection state machine that a packet
+		 * was received. Updates anti-amplification accounting so the
+		 * server can send more data after receiving client packets.
+		 */
+		tquic_conn_on_packet_received(conn, len);
+
+		/*
 		 * RFC 9000 Section 10.1: "An endpoint restarts its idle
 		 * timer when a packet from its peer is received and
 		 * processed successfully."
@@ -1810,7 +1861,7 @@ int tquic_udp_recv(struct sock *sk, struct sk_buff *skb)
 		"tquic_udp_recv: pre-ratelimit len=%zu data[0]=0x%02x longform=%d\n",
 		len, data[0], !!(data[0] & TQUIC_HEADER_FORM_LONG));
 
-	if (len >= 7 && (data[0] & TQUIC_HEADER_FORM_LONG)) {
+	if (tquic_is_long_header(data, len)) {
 		/* Long header - check if this is an Initial packet */
 		int pkt_type = (data[0] & 0x30) >> 4;
 
@@ -1988,7 +2039,7 @@ int tquic_udp_recv(struct sock *sk, struct sk_buff *skb)
 	 * Handshake packets from the server, and enables the server to match
 	 * subsequent client packets on existing connections.
 	 */
-	if (!conn && (data[0] & TQUIC_HEADER_FORM_LONG) && len > 6) {
+	if (!conn && tquic_is_long_header(data, len) && len > 6) {
 		u8 dcid_len = data[5];
 
 		if (dcid_len <= TQUIC_MAX_CID_LEN &&
@@ -2015,6 +2066,30 @@ int tquic_udp_recv(struct sock *sk, struct sk_buff *skb)
 		rcu_read_lock();
 		path = tquic_find_path_by_addr(conn, &src_addr);
 		rcu_read_unlock();
+
+		/*
+		 * RFC 9000 Section 9: Connection Migration.
+		 * If a packet arrives from an address that doesn't match any
+		 * known path but we have an established connection, the peer
+		 * may have migrated. Notify the connection state machine which
+		 * will send a PATH_CHALLENGE to validate the new address.
+		 * tquic_conn_handle_migration only triggers on CONNECTED state
+		 * and when migration is not disabled via transport parameters.
+		 */
+		if (!path &&
+		    READ_ONCE(conn->state) == TQUIC_CONN_CONNECTED) {
+			struct tquic_path *active;
+
+			rcu_read_lock();
+			active = rcu_dereference(conn->active_path);
+			if (active && tquic_path_get(active)) {
+				tquic_conn_handle_migration(
+					conn, active,
+					(const struct sockaddr *)&src_addr);
+				tquic_path_put(active);
+			}
+			rcu_read_unlock();
+		}
 	}
 
 	pr_debug(
@@ -2033,7 +2108,12 @@ int tquic_udp_recv(struct sock *sk, struct sk_buff *skb)
 		conn = tquic_lookup_by_dcid(data + 1, TQUIC_DEFAULT_CID_LEN);
 	}
 
-	if (conn && tquic_is_stateless_reset_internal(conn, data, len)) {
+	/*
+	 * RFC 9000 Section 10.3.1: Check for stateless reset via the
+	 * exported API which verifies the last 16 bytes against tokens
+	 * from NEW_CONNECTION_ID frames.
+	 */
+	if (conn && tquic_verify_stateless_reset(conn, data, len)) {
 		tquic_handle_stateless_reset(conn);
 		if (path)
 			tquic_path_put(path);
@@ -2070,7 +2150,7 @@ not_reset:
 	if (unlikely(tquic_is_version_negotiation(data, len))) {
 		pr_debug(
 			"tquic_udp_recv: version negotiation detected (version=0x%08x), conn=%p\n",
-			len >= 5 ? get_unaligned_be32(data + 1) : 0, conn);
+			tquic_get_version(data, len), conn);
 		/* Need connection context */
 		if (len > 6) {
 			u8 dcid_len = data[5];
@@ -2088,8 +2168,12 @@ not_reset:
 		}
 
 		if (conn) {
-			ret = tquic_process_version_negotiation(conn, data,
-								len);
+			/*
+			 * RFC 9000 Section 6.1: Process via the exported API
+			 * which selects a compatible version and restarts.
+			 */
+			ret = tquic_handle_version_negotiation(conn, data,
+							       len);
 		} else {
 			ret = 0; /* Ignore orphan version negotiation */
 		}
@@ -2352,158 +2436,50 @@ EXPORT_SYMBOL_GPL(tquic_clear_udp_encap);
 
 /*
  * Process coalesced packets (multiple QUIC packets in single UDP datagram)
+ *
+ * Uses tquic_split_coalesced() (core/packet.c, EXPORT_SYMBOL_GPL) to split
+ * the datagram into individual packet spans first, then processes each span
+ * via tquic_process_packet().  This delegates the security-hardened splitting
+ * logic (overflow checks, CID bounds, Retry handling) to the canonical
+ * implementation instead of duplicating it here.
  */
 int tquic_process_coalesced(struct tquic_connection *conn,
 			    struct tquic_path *path, u8 *data, size_t total_len,
 			    struct sockaddr_storage *src_addr)
 {
-	size_t offset = 0;
+	const u8 *pkts[TQUIC_MAX_COALESCED_PACKETS];
+	size_t lens[TQUIC_MAX_COALESCED_PACKETS];
+	int num_pkts = 0;
 	int packets = 0;
 	int ret;
+	int i;
 
-	while (offset < total_len) {
-		size_t pkt_len;
-		u8 first_byte = data[offset];
+	/*
+	 * Split the datagram into individual packet spans.
+	 * tquic_split_coalesced() validates CID lengths, handles version-
+	 * aware Initial detection (including QUIC v2 / RFC 9369), enforces
+	 * integer-overflow-safe arithmetic, and caps the count at
+	 * max_packets (CF-075 / C-003).
+	 */
+	ret = tquic_split_coalesced(data, total_len, pkts, lens,
+				    TQUIC_MAX_COALESCED_PACKETS, &num_pkts);
+	if (ret < 0) {
+		tquic_dbg("coalesced split failed: %d\n", ret);
+		return ret;
+	}
 
+	for (i = 0; i < num_pkts; i++) {
 		/*
-		 * CF-075: Limit coalesced packets per UDP datagram
-		 * to prevent CPU exhaustion from crafted datagrams.
+		 * tquic_split_coalesced() returns const u8 * pointers into
+		 * the original datagram.  tquic_process_packet() takes u8 *
+		 * but does not write to the raw header (it writes to a
+		 * separately allocated decryption buffer).  The cast is safe.
 		 */
-		if (packets >= TQUIC_MAX_COALESCED_PACKETS) {
-			tquic_dbg("coalesced packet limit reached (%d)\n",
-				  TQUIC_MAX_COALESCED_PACKETS);
-			break;
-		}
-
-		if (first_byte & TQUIC_HEADER_FORM_LONG) {
-			/* Long header - need to parse length field */
-			size_t hdr_len;
-			u8 dcid_len, scid_len;
-			u64 pkt_len_val;
-			u32 pkt_version;
-			bool is_initial;
-
-			if (offset + 7 > total_len)
-				break;
-
-			/*
-			 * CF-176: Read the version field (bytes 1-4)
-			 * for version-aware packet type detection.
-			 * QUIC v2 (RFC 9369) uses different type bits.
-			 */
-			pkt_version = get_unaligned_be32(data + offset + 1);
-			dcid_len = data[offset + 5];
-
-			/*
-			 * SECURITY: Validate CID length per RFC 9000.
-			 * Matches validation in tquic_parse_long_header().
-			 */
-			if (dcid_len > TQUIC_MAX_CID_LEN)
-				break;
-
-			if (offset + 6 + dcid_len > total_len)
-				break;
-
-			/* Bounds check before reading scid_len */
-			if (offset + 6 + dcid_len >= total_len)
-				break;
-
-			scid_len = data[offset + 6 + dcid_len];
-			if (scid_len > TQUIC_MAX_CID_LEN)
-				break;
-
-			if (offset + 7 + dcid_len + scid_len > total_len)
-				break;
-
-			hdr_len = 7 + dcid_len + scid_len;
-
-			/*
-			 * CF-176: Version-aware Initial packet detection.
-			 * v1 wire type 0 = Initial, v2 wire type 1 = Initial.
-			 */
-			{
-				u8 wire_type = (first_byte & 0x30) >> 4;
-
-				if (pkt_version == QUIC_VERSION_2)
-					is_initial =
-						(wire_type ==
-						 QUIC_V2_PACKET_TYPE_INITIAL);
-				else
-					is_initial = (wire_type ==
-						      TQUIC_PKT_INITIAL);
-			}
-			if (is_initial) {
-				u64 token_len;
-				size_t token_addition;
-				int vlen = tquic_decode_varint(
-					data + offset + hdr_len,
-					total_len - offset - hdr_len,
-					&token_len);
-				if (vlen < 0)
-					break;
-
-				/*
-				 * SECURITY: Validate token_len against
-				 * reasonable max and use check_add_overflow
-				 * to prevent integer overflow in hdr_len.
-				 */
-				if (token_len > TQUIC_COALESCED_MAX_TOKEN_LEN)
-					break;
-				if (check_add_overflow((size_t)vlen,
-						       (size_t)token_len,
-						       &token_addition))
-					break;
-				if (check_add_overflow(hdr_len, token_addition,
-						       &hdr_len))
-					break;
-				if (offset + hdr_len > total_len)
-					break;
-			}
-
-			/* Length field */
-			{
-				int vlen = tquic_decode_varint(
-					data + offset + hdr_len,
-					total_len - offset - hdr_len,
-					&pkt_len_val);
-				if (vlen < 0)
-					break;
-				hdr_len += vlen;
-			}
-
-			/*
-			 * SECURITY: Use check_add_overflow to prevent
-			 * integer overflow in pkt_len computation.
-			 */
-			if (check_add_overflow(hdr_len, (size_t)pkt_len_val,
-					       &pkt_len))
-				break;
-		} else {
-			/* Short header - extends to end of datagram */
-			pkt_len = total_len - offset;
-		}
-
-		/*
-		 * CF-441: Reject coalesced packet when claimed length
-		 * exceeds remaining data instead of silently truncating.
-		 */
-		if (offset + pkt_len > total_len)
-			break;
-
-		/*
-		 * CF-631: Ensure forward progress.  A zero-length packet
-		 * would cause an infinite loop.
-		 */
-		if (pkt_len == 0)
-			break;
-
-		/* Process this packet */
-		ret = tquic_process_packet(conn, path, data + offset, pkt_len,
-					   src_addr);
+		ret = tquic_process_packet(conn, path,
+					   (u8 *)pkts[i], lens[i], src_addr);
 		if (ret < 0 && ret != -ENOENT)
 			return ret;
 
-		offset += pkt_len;
 		packets++;
 	}
 

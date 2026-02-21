@@ -752,8 +752,7 @@ int tquic_retry_build_packet(u8 *buf, size_t buf_len,
 			     const u8 *odcid, u8 odcid_len,
 			     const u8 *token, size_t token_len)
 {
-	u8 *p = buf;
-	size_t hdr_len;
+	u8 *p;
 	int ret;
 
 	if (!buf || !dcid || !scid || !odcid || !token)
@@ -778,39 +777,25 @@ int tquic_retry_build_packet(u8 *buf, size_t buf_len,
 	 *   Retry Integrity Tag (128)
 	 */
 
-	/* Calculate header length (without tag) */
-	hdr_len = 1 + 4 + 1 + dcid_len + 1 + scid_len + token_len;
+	/*
+	 * Delegate Retry header encoding to the canonical builder
+	 * (tquic_build_retry, core/packet.c, EXPORT_SYMBOL_GPL), which
+	 * handles the wire format per RFC 9000 Section 17.2.5 including
+	 * the version-aware packet type bit encoding for QUIC v2.
+	 * The integrity tag space is included in QUIC_RETRY_INTEGRITY_TAG_LEN
+	 * but tquic_build_retry() returns the offset before the tag; we
+	 * append the tag separately.
+	 */
+	ret = tquic_build_retry(version,
+				dcid, dcid_len,
+				scid, scid_len,
+				odcid, odcid_len,
+				token, token_len,
+				buf, buf_len);
+	if (ret < 0)
+		return ret;
 
-	if (buf_len < hdr_len + TQUIC_RETRY_INTEGRITY_TAG_LEN)
-		return -ENOSPC;
-
-	/* First byte: long header | fixed bit | Retry type | unused */
-	*p++ = TQUIC_HEADER_FORM_LONG | TQUIC_HEADER_FIXED_BIT |
-	       (TQUIC_PKT_TYPE_RETRY << 4);
-
-	/* Version */
-	*p++ = (version >> 24) & 0xff;
-	*p++ = (version >> 16) & 0xff;
-	*p++ = (version >> 8) & 0xff;
-	*p++ = version & 0xff;
-
-	/* DCID Length and DCID */
-	*p++ = dcid_len;
-	if (dcid_len > 0) {
-		memcpy(p, dcid, dcid_len);
-		p += dcid_len;
-	}
-
-	/* SCID Length and SCID */
-	*p++ = scid_len;
-	if (scid_len > 0) {
-		memcpy(p, scid, scid_len);
-		p += scid_len;
-	}
-
-	/* Retry Token */
-	memcpy(p, token, token_len);
-	p += token_len;
+	p = buf + ret; /* Points to where the integrity tag goes */
 
 	/* Compute and append Retry Integrity Tag */
 	ret = tquic_retry_compute_integrity_tag(version, odcid, odcid_len,

@@ -27,6 +27,7 @@
 #include "tquic_token.h"
 #include "tquic_sysctl.h"
 #include "security_hardening.h"
+#include "core/flow_control.h"
 
 /* Global tunables */
 static int tquic_enabled = 1;
@@ -39,6 +40,8 @@ static int tquic_idle_timeout = 30000;   /* ms */
 static int tquic_max_data_mb = 1;        /* MB */
 static int tquic_max_stream_data_kb = 256; /* KB */
 static int tquic_ack_delay = 25;         /* ms */
+/* Flow control receive-window auto-tuning (RFC 9000 Section 4, BDP-aware) */
+static int tquic_fc_autotune_enabled = 1; /* Enabled by default */
 
 /* RTT-related tunables */
 static int tquic_initial_rtt = 100;      /* ms */
@@ -810,6 +813,25 @@ static struct ctl_table tquic_sysctl_table[] = {
 		.proc_handler	= proc_dointvec_minmax,
 		.extra1		= &one,
 		.extra2		= &max_data,
+	},
+	/*
+	 * fc_autotune_enabled: Flow control receive window auto-tuning
+	 *
+	 * When enabled, the receive window is dynamically adjusted based on
+	 * the measured bandwidth-delay product (BDP).  This improves
+	 * throughput on high-bandwidth, high-latency paths without wasting
+	 * memory on low-bandwidth paths.
+	 *
+	 * Default: 1 (enabled)
+	 */
+	{
+		.procname	= "fc_autotune_enabled",
+		.data		= &tquic_fc_autotune_enabled,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= &zero,
+		.extra2		= &one,
 	},
 	{
 		.procname	= "max_ack_delay_ms",
@@ -2078,6 +2100,21 @@ int tquic_sysctl_get_gro_flush_timeout_us(void)
 	return tquic_gro_flush_timeout_us;
 }
 EXPORT_SYMBOL_GPL(tquic_sysctl_get_gro_flush_timeout_us);
+
+/**
+ * tquic_sysctl_get_fc_autotune_enabled - Check if FC auto-tuning is enabled
+ *
+ * Returns: true if receive window auto-tuning is enabled, false otherwise
+ *
+ * When true, tquic_fc_set_autotune(conn->fc, true) is called at connection
+ * create time so the FC subsystem dynamically grows the receive window to
+ * match the BDP (RFC 9000 Section 4, BDP-aware window sizing).
+ */
+bool tquic_sysctl_get_fc_autotune_enabled(void)
+{
+	return tquic_fc_autotune_enabled != 0;
+}
+EXPORT_SYMBOL_GPL(tquic_sysctl_get_fc_autotune_enabled);
 
 /* Number of actual sysctl entries (excluding null terminator) */
 #define TQUIC_SYSCTL_TABLE_ENTRIES (ARRAY_SIZE(tquic_sysctl_table) - 1)

@@ -212,7 +212,6 @@ int tquic_stateless_reset_build(u8 *buf, size_t buf_len,
 				const u8 *token, size_t incoming_pkt_len)
 {
 	size_t packet_len;
-	size_t random_len;
 
 	if (!buf || !token)
 		return -EINVAL;
@@ -249,32 +248,13 @@ int tquic_stateless_reset_build(u8 *buf, size_t buf_len,
 	packet_len = min_t(size_t, packet_len, TQUIC_STATELESS_RESET_MAX_LEN);
 
 	/*
-	 * First byte: must look like a valid short header
-	 * Format: 0b01XXXXXX where:
-	 * - Bit 7 (form) = 0 (short header)
-	 * - Bit 6 (fixed) = 1 (required for QUIC packets)
-	 * - Bits 5-0: random, unpredictable values
-	 *
-	 * We generate a random byte and mask appropriately.
+	 * Delegate the on-wire encoding to the canonical builder
+	 * (tquic_build_stateless_reset, core/packet.c, EXPORT_SYMBOL_GPL).
+	 * It fills buf[0..packet_len-1] with a random short-header-like
+	 * packet with the reset token in the last 16 bytes, as specified
+	 * in RFC 9000 Section 10.3.
 	 */
-	get_random_bytes(buf, 1);
-	buf[0] = (buf[0] & 0x3F) | 0x40;  /* Form=0, Fixed=1, rest random */
-
-	/*
-	 * Random bytes between first byte and token
-	 * Must be unpredictable to prevent fingerprinting
-	 */
-	random_len = packet_len - 1 - TQUIC_STATELESS_RESET_TOKEN_LEN;
-	if (random_len > 0)
-		get_random_bytes(buf + 1, random_len);
-
-	/*
-	 * Stateless reset token in last 16 bytes
-	 */
-	memcpy(buf + packet_len - TQUIC_STATELESS_RESET_TOKEN_LEN,
-	       token, TQUIC_STATELESS_RESET_TOKEN_LEN);
-
-	return packet_len;
+	return tquic_build_stateless_reset(token, buf, packet_len);
 }
 EXPORT_SYMBOL_GPL(tquic_stateless_reset_build);
 
@@ -519,35 +499,16 @@ bool tquic_stateless_reset_detect(const u8 *data, size_t len,
 				  const u8 (*tokens)[TQUIC_STATELESS_RESET_TOKEN_LEN],
 				  int num_tokens)
 {
-	const u8 *pkt_token;
-	int i;
-
 	if (!data || !tokens || num_tokens <= 0)
 		return false;
 
-	/* Must be at least minimum length */
-	if (len < TQUIC_STATELESS_RESET_MIN_LEN)
-		return false;
-
 	/*
-	 * Must look like a short header packet
-	 * First bit (form) must be 0
+	 * Delegate to the canonical implementation (tquic_is_stateless_reset,
+	 * core/packet.c, EXPORT_SYMBOL_GPL) which performs the minimum-length
+	 * check, short-header form validation, and constant-time token
+	 * comparison against the provided token array.
 	 */
-	if (data[0] & 0x80)
-		return false;
-
-	/* Token is in last 16 bytes */
-	pkt_token = data + len - TQUIC_STATELESS_RESET_TOKEN_LEN;
-
-	/* Compare against all known tokens */
-	for (i = 0; i < num_tokens; i++) {
-		/* Constant-time comparison */
-		if (crypto_memneq(pkt_token, tokens[i],
-				  TQUIC_STATELESS_RESET_TOKEN_LEN) == 0)
-			return true;
-	}
-
-	return false;
+	return tquic_is_stateless_reset(data, len, tokens, num_tokens);
 }
 EXPORT_SYMBOL_GPL(tquic_stateless_reset_detect);
 

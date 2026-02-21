@@ -27,6 +27,7 @@
 #include <crypto/gcm.h>
 #include <crypto/utils.h>
 #include <net/tquic.h>
+#include <net/tquic_frame.h>
 
 #include "tquic_token.h"
 #include "tquic_mib.h"
@@ -672,35 +673,28 @@ int tquic_gen_new_token_frame(const struct tquic_token_key *key,
 {
 	u8 token[TQUIC_TOKEN_MAX_LEN];
 	u32 token_len;
-	u8 *p = buf;
+	size_t needed;
 	int ret;
 
 	if (!key || !client_addr || !buf)
 		return -EINVAL;
 
 	/* Generate token */
-	ret = tquic_token_generate_new_token(key, client_addr, token, &token_len);
+	ret = tquic_token_generate_new_token(key, client_addr, token,
+					     &token_len);
 	if (ret)
 		return ret;
 
-	/* Calculate required space: type(1) + token_len_varint + token */
-	if (buf_len < 1 + 2 + token_len)  /* Conservative estimate */
+	/*
+	 * tquic_new_token_frame_size() computes the exact encoded size:
+	 * 1 (type) + varint(token_len) + token_len bytes.
+	 * Pre-check the buffer before writing to avoid partial frames.
+	 */
+	needed = tquic_new_token_frame_size(token_len);
+	if (buf_len < needed)
 		return -ENOSPC;
 
-	/* Frame type */
-	*p++ = TQUIC_FRAME_NEW_TOKEN;
-
-	/* Token length (varint) */
-	ret = tquic_token_encode_varint(p, buf_len - 1, token_len);
-	if (ret < 0)
-		return ret;
-	p += ret;
-
-	/* Token data */
-	memcpy(p, token, token_len);
-	p += token_len;
-
-	return p - buf;
+	return tquic_write_new_token_frame(buf, buf_len, token, token_len);
 }
 EXPORT_SYMBOL_GPL(tquic_gen_new_token_frame);
 

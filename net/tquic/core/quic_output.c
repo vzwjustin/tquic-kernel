@@ -1506,56 +1506,35 @@ struct sk_buff *tquic_packet_build(struct tquic_connection *conn, int pn_space)
 
 	if (need_ack) {
 		/*
-		 * Generate ACK frame. We use a simplified ACK with just
-		 * the largest acknowledged packet number and first range.
+		 * Generate ACK frame using tquic_write_ack_frame().
+		 * Simplified form: largest_recv_pn acknowledged with
+		 * first_ack_range = largest_recv_pn (all packets up to
+		 * largest), no additional ranges, no ECN counts.
+		 *
+		 * tquic_ack_frame_size() is used to pre-check fit before
+		 * writing, preventing partial writes to the payload buffer.
 		 */
-		u8 *ack_start = payload + payload_len;
-		u64 ack_delay;
-		u64 first_range;
-		int ack_len;
+		size_t ack_sz = tquic_ack_frame_size(
+			space->largest_recv_pn, 0,
+			space->largest_recv_pn, NULL, 0,
+			false, 0, 0, 0);
 
-		/* Frame type: ACK (0x02) */
-		*ack_start = 0x02;
-		ack_len = 1;
-
-		/* Largest Acknowledged */
-		ret = tquic_varint_encode(space->largest_recv_pn,
-					  ack_start + ack_len,
-					  remaining - ack_len);
-		if (ret < 0)
-			goto skip_ack;
-		ack_len += ret;
-
-		/* ACK Delay (in microseconds, scaled by ack_delay_exponent) */
-		ack_delay =
-			0; /* Simplified - would compute from receive time */
-		ret = tquic_varint_encode(ack_delay, ack_start + ack_len,
-					  remaining - ack_len);
-		if (ret < 0)
-			goto skip_ack;
-		ack_len += ret;
-
-		/* ACK Range Count (0 = only first range) */
-		ret = tquic_varint_encode(0, ack_start + ack_len,
-					  remaining - ack_len);
-		if (ret < 0)
-			goto skip_ack;
-		ack_len += ret;
-
-		/* First ACK Range */
-		first_range = space->largest_recv_pn; /* Simplified */
-		ret = tquic_varint_encode(first_range, ack_start + ack_len,
-					  remaining - ack_len);
-		if (ret < 0)
-			goto skip_ack;
-		ack_len += ret;
-
-		payload_len += ack_len;
-		remaining -= ack_len;
-		space->last_ack_time = ktime_get();
+		if (ack_sz <= remaining) {
+			ret = tquic_write_ack_frame(
+				payload + payload_len, remaining,
+				space->largest_recv_pn,
+				0, /* ack_delay = 0 (simplified) */
+				space->largest_recv_pn, /* first_ack_range */
+				NULL, 0, /* no additional ranges */
+				false, 0, 0, 0); /* no ECN */
+			if (ret > 0) {
+				payload_len += ret;
+				remaining -= ret;
+				space->last_ack_time = ktime_get();
+			}
+		}
 	}
 
-skip_ack:
 	/*
 	 * Add pending control frames from the connection's control_frames queue.
 	 * These are pre-built frames waiting to be sent.
@@ -1583,15 +1562,26 @@ skip_ack:
 	/*
 	 * RFC 9000 Section 14.1: Initial packets MUST be padded to at least
 	 * 1200 bytes to prevent amplification attacks.
+	 *
+	 * tquic_padding_frame_size() / tquic_write_padding_frame() encode
+	 * the padding as RFC 9000 PADDING frames (stream of 0x00 bytes),
+	 * which is exactly what memset(0) produced but now goes through the
+	 * canonical frame-construction API.
 	 */
 	if (pn_space == TQUIC_PN_SPACE_INITIAL) {
 		int min_payload = 1200 - (p - header) - 2 - pn_len - 16;
+
 		if (payload_len < min_payload &&
-		    min_payload <= remaining + payload_len) {
-			/* Add PADDING frames (0x00) */
+		    min_payload <= (int)(remaining + payload_len)) {
 			int padding = min_payload - payload_len;
-			memset(payload + payload_len, 0, padding);
-			payload_len += padding;
+			size_t pad_sz = tquic_padding_frame_size(padding);
+
+			ret = tquic_write_padding_frame(
+				payload + payload_len, remaining, pad_sz);
+			if (ret > 0) {
+				payload_len += ret;
+				remaining -= ret;
+			}
 		}
 	}
 

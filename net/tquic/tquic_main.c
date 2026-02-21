@@ -989,6 +989,11 @@ int __ref tquic_init(void)
 	if (err)
 		goto err_cong_data;
 
+	/* Initialize canonical CC ops (core/quic_cong.c wrapper) */
+	err = tquic_canonical_cc_init_module();
+	if (err)
+		goto err_canonical_cc;
+
 	/* Initialize congestion control algorithms */
 	err = tquic_bbrv2_init();
 	if (err)
@@ -1244,6 +1249,8 @@ err_prague:
 err_bbrv3:
 	tquic_bbrv2_exit();
 err_bbrv2:
+	tquic_canonical_cc_exit_module();
+err_canonical_cc:
 	tquic_cong_data_module_exit();
 err_cong_data:
 	tquic_hw_offload_exit();
@@ -1361,6 +1368,7 @@ void __exit tquic_exit(void)
 	tquic_prague_exit();
 	tquic_bbrv3_exit();
 	tquic_bbrv2_exit();
+	tquic_canonical_cc_exit_module();
 	tquic_cong_data_module_exit();
 
 	/* Cleanup crypto subsystem */

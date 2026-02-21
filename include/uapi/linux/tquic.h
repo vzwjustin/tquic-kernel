@@ -260,6 +260,8 @@ struct tquic_cert_verify_args {
  * @streams_active: Number of active streams
  * @paths_active: Number of active paths (bonding)
  * @idle_timeout: Idle timeout in ms
+ * @stream_send_buffered: Bytes queued in stream send buffers
+ * @stream_recv_buffered: Bytes queued in stream receive buffers
  */
 struct tquic_info {
 	__u8	state;
@@ -275,6 +277,8 @@ struct tquic_info {
 	__u64	packets_sent;
 	__u64	packets_received;
 	__u64	packets_lost;
+	__u64	stream_send_buffered;
+	__u64	stream_recv_buffered;
 };
 
 /**
@@ -611,6 +615,26 @@ struct tquic_stream_args {
 
 /* Create new stream, returns fd on success */
 #define TQUIC_NEW_STREAM	_IOWR(TQUIC_IOC_MAGIC, 1, struct tquic_stream_args)
+
+/**
+ * struct tquic_sendfile_args - Arguments for TQUIC_SENDFILE ioctl
+ * @stream_id: Target stream ID
+ * @file_fd: File descriptor of the file to send
+ * @offset: Offset within the file
+ * @count: Number of bytes to send (0 = send to EOF)
+ *
+ * Sends file data directly to a TQUIC stream using zero-copy page mapping.
+ */
+struct tquic_sendfile_args {
+	__u64 stream_id;	/* Target stream ID */
+	__s32 file_fd;		/* Source file descriptor */
+	__u32 reserved;		/* Must be 0 */
+	__u64 offset;		/* File offset */
+	__u64 count;		/* Bytes to send (0 = to EOF) */
+};
+
+/* Send file to stream zero-copy, returns bytes sent on success */
+#define TQUIC_SENDFILE		_IOW(TQUIC_IOC_MAGIC, 2, struct tquic_sendfile_args)
 
 /* Stream type flags */
 #define TQUIC_STREAM_BIDI	0x00	/* Bidirectional stream (default) */

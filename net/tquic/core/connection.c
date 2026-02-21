@@ -46,10 +46,11 @@
 #include "../protocol.h"
 #include "quic_loss.h"
 
-/* Forward declarations for frame functions (from frame.c) */
-int tquic_write_connection_close_frame(u8 *buf, size_t buf_len, u64 error_code,
-				       u64 frame_type, const u8 *reason,
-				       u64 reason_len, bool app_close);
+/*
+ * tquic_write_connection_close_frame and tquic_connection_close_frame_size
+ * are declared in <net/tquic_frame.h> which is already included above.
+ * No forward declaration needed.
+ */
 
 static struct tquic_path *
 tquic_conn_active_path_get(struct tquic_connection *conn)
@@ -2410,13 +2411,30 @@ int tquic_conn_process_handshake(struct tquic_connection *conn,
 
 				payload_offset = hdr_offset;
 
-				/* Look for CRYPTO frame type (0x06) */
-				if (payload_offset < len &&
-				    data[payload_offset] == 0x06) {
-					tquic_conn_dbg(
-						conn,
-						"found CRYPTO frame in ClientHello\n");
-					cs->client_hello_received = true;
+				/*
+				 * Use tquic_parse_frame() to identify the
+				 * leading frame type rather than comparing
+				 * the raw byte.  This delegates all varint
+				 * and bounds logic to the canonical parser
+				 * and is robust against future frame-type
+				 * remapping.
+				 */
+				if (payload_offset < len) {
+					struct tquic_frame peek_frame = {};
+					int pret;
+
+					pret = tquic_parse_frame(
+						data + payload_offset,
+						len - payload_offset,
+						&peek_frame, NULL, 0);
+					if (pret > 0 &&
+					    peek_frame.type ==
+					    TQUIC_FRAME_CRYPTO) {
+						tquic_conn_dbg(conn,
+							"found CRYPTO frame in ClientHello\n");
+						cs->client_hello_received =
+							true;
+					}
 				}
 			}
 		}
@@ -2557,10 +2575,23 @@ static int tquic_send_close_frame(struct tquic_connection *conn)
 
 	/* Build and send CONNECTION_CLOSE frame */
 	{
-		u8 frame_buf[256];
 		const char *reason = cs->local_close.reason_phrase;
 		size_t reason_len = reason ? strlen(reason) : 0;
+		/*
+		 * tquic_connection_close_frame_size() computes the exact
+		 * encoded byte count so the stack buffer is right-sized and
+		 * we know before writing whether the frame will fit.
+		 */
+		size_t needed = tquic_connection_close_frame_size(
+			cs->local_close.error_code,
+			cs->local_close.frame_type,
+			reason_len,
+			cs->local_close.is_application);
+		u8 frame_buf[256];
 		int frame_len;
+
+		if (needed > sizeof(frame_buf))
+			return -EMSGSIZE;
 
 		frame_len = tquic_write_connection_close_frame(
 			frame_buf, sizeof(frame_buf),
@@ -2568,9 +2599,8 @@ static int tquic_send_close_frame(struct tquic_connection *conn)
 			(const u8 *)reason, reason_len,
 			cs->local_close.is_application);
 
-		if (frame_len > 0) {
+		if (frame_len > 0)
 			tquic_xmit(conn, NULL, frame_buf, frame_len, false);
-		}
 	}
 
 	tquic_conn_dbg(conn, "sent CONNECTION_CLOSE (error=%llu)\n",

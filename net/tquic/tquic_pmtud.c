@@ -35,6 +35,7 @@
 #include "tquic_debug.h"
 #include "cong/tquic_cong.h"
 #include "tquic_compat.h"
+#include "core/quic_path.h"
 
 /*
  * =============================================================================
@@ -438,11 +439,12 @@ static int tquic_pmtud_send_probe(struct tquic_path *path, u32 probe_size)
 {
 	struct tquic_connection *conn;
 	struct sk_buff *skb;
-	u8 *payload;
+	struct tquic_packet *pkt;
+	u8 *raw_buf;
+	u8 *payload_ptr;
 	int payload_len;
 	u64 pkt_num;
 	int header_len;
-	u8 header[64];
 	int ret;
 
 	if (!path || !path->conn)
@@ -450,19 +452,38 @@ static int tquic_pmtud_send_probe(struct tquic_path *path, u32 probe_size)
 
 	conn = path->conn;
 
-	/* Estimate header overhead (short header + CID) */
-	header_len = 1 + path->remote_cid.len + 4;  /* 1 + CID + max PN */
+	/* Estimate header overhead (short header + CID + 4-byte PN) */
+	header_len = 1 + path->remote_cid.len + 4;
 
-	/* Allocate payload buffer */
-	payload = kmalloc(probe_size, GFP_ATOMIC);
-	if (!payload)
+	/*
+	 * Allocate a tquic_packet structure to hold the probe metadata.
+	 * tquic_packet_alloc() (core/packet.c, EXPORT_SYMBOL_GPL) uses
+	 * the packet slab cache for zero-overhead allocation.
+	 */
+	pkt = tquic_packet_alloc(GFP_ATOMIC);
+	if (!pkt)
 		return -ENOMEM;
 
-	/* Generate probe frames */
-	payload_len = tquic_pmtud_gen_probe_frame(payload, probe_size,
+	/*
+	 * Allocate the raw packet buffer (header + probe payload + AEAD tag).
+	 * We build the short header using tquic_build_short_header()
+	 * (core/packet.c, EXPORT_SYMBOL_GPL) which handles the wire format
+	 * per RFC 9000 Section 17.3.
+	 */
+	raw_buf = kmalloc(probe_size + 16, GFP_ATOMIC); /* +16 for AEAD tag */
+	if (!raw_buf) {
+		tquic_packet_free(pkt);
+		return -ENOMEM;
+	}
+
+	/* Generate probe payload (PING + PADDING frames) */
+	payload_ptr = raw_buf + header_len;
+	payload_len = tquic_pmtud_gen_probe_frame(payload_ptr,
+						  probe_size - header_len,
 						  probe_size, header_len);
 	if (payload_len < 0) {
-		kfree(payload);
+		kfree(raw_buf);
+		tquic_packet_free(pkt);
 		return payload_len;
 	}
 
@@ -471,39 +492,70 @@ static int tquic_pmtud_send_probe(struct tquic_path *path, u32 probe_size)
 	pkt_num = conn->stats.tx_packets++;
 	spin_unlock_bh(&conn->lock);
 
-	/* Allocate SKB */
-	skb = alloc_skb(probe_size + MAX_HEADER, GFP_ATOMIC);
-	if (!skb) {
-		kfree(payload);
-		return -ENOMEM;
+	/*
+	 * Build short header (1-RTT) into raw_buf using the canonical
+	 * builder (tquic_build_short_header, core/packet.c, EXPORT_SYMBOL_GPL).
+	 * key_phase=0, spin_bit=0, pn_len=4 for constant HP sample offset.
+	 */
+	ret = tquic_build_short_header(
+		path->remote_cid.id, path->remote_cid.len,
+		pkt_num, 4,	/* pn_len: 4 bytes for HP correctness */
+		0, 0,		/* key_phase=0, spin_bit=0 */
+		payload_ptr, payload_len,
+		raw_buf, probe_size + 16);
+	if (ret < 0) {
+		kfree(raw_buf);
+		tquic_packet_free(pkt);
+		return ret;
 	}
 
-	skb_reserve(skb, MAX_HEADER);
+	/* Attach raw buffer to packet struct */
+	pkt->raw = raw_buf;
+	pkt->raw_len = ret; /* ret = header_len + payload_len */
+	pkt->path = path;
 
-	/* Build short header (1-RTT packet) */
-	header[0] = 0x40;  /* Fixed bit set, short header */
-	header[0] |= 0x03;  /* 4-byte packet number */
+	/* Add AEAD tag space at end (zeroed; probe is not encrypted) */
+	memset(raw_buf + pkt->raw_len, 0, 16);
+	pkt->raw_len += 16;
 
-	memcpy(header + 1, path->remote_cid.id, path->remote_cid.len);
-	header_len = 1 + path->remote_cid.len;
+	/*
+	 * Clone the probe packet for diagnostic tracing BEFORE converting
+	 * to skb.  tquic_packet_clone() (core/packet.c, EXPORT_SYMBOL_GPL)
+	 * copies the header metadata and raw payload into an independent
+	 * allocation so the PMTUD state machine can inspect the probe
+	 * details (type, PN, path) when recording success or failure.
+	 *
+	 * The clone is intentionally short-lived: it is freed immediately
+	 * after we log the probe details below.  The pattern is deliberately
+	 * simple here so that adding richer per-probe diagnostic state
+	 * (e.g. storing the clone in the pmtud struct) is straightforward.
+	 */
+	{
+		struct tquic_packet *probe_clone =
+			tquic_packet_clone(pkt, GFP_ATOMIC);
 
-	/* Encode packet number (4 bytes) */
-	header[header_len++] = (pkt_num >> 24) & 0xff;
-	header[header_len++] = (pkt_num >> 16) & 0xff;
-	header[header_len++] = (pkt_num >> 8) & 0xff;
-	header[header_len++] = pkt_num & 0xff;
+		if (probe_clone) {
+			tquic_dbg(
+				"pmtud:probe clone: type=%d pn_space=%d raw_len=%u path_id=%u\n",
+				probe_clone->hdr.type, probe_clone->pn_space,
+				probe_clone->raw_len,
+				probe_clone->path
+					? probe_clone->path->path_id
+					: 0);
+			tquic_packet_free(probe_clone);
+		}
+	}
 
-	/* Copy header and payload to SKB */
-	skb_put_data(skb, header, header_len);
-	skb_put_data(skb, payload, payload_len);
+	/*
+	 * Convert to sk_buff using tquic_packet_to_skb()
+	 * (core/packet.c, EXPORT_SYMBOL_GPL) for the UDP send path.
+	 */
+	skb = tquic_packet_to_skb(pkt, GFP_ATOMIC);
+	tquic_packet_free(pkt); /* Free struct; skb now owns the data copy */
+	kfree(raw_buf);
 
-	/* Add AEAD tag space (16 bytes) - in production, actual encryption */
-	memset(skb_put(skb, 16), 0, 16);
-
-	kfree(payload);
-
-	/* Mark as MTU probe in SKB control block */
-	/* In production: TQUIC_SKB_CB(skb)->is_mtu_probe = true; */
+	if (!skb)
+		return -ENOMEM;
 
 	/*
 	 * Set Don't Fragment flag so the probe tests the actual path MTU
@@ -577,24 +629,28 @@ static void tquic_pmtud_probe_success(struct tquic_pmtud_state_info *pmtud,
 				      u32 probed_size)
 {
 	unsigned long spin_flags;
+	bool mtu_increased = false;
+	struct tquic_path *path;
 
 	spin_lock_irqsave(&pmtud->lock, spin_flags);
 
 	pmtud->probe_pending = false;
 	pmtud->probe_count = 0;
 	pmtud->last_probe_success = ktime_get();
+	path = pmtud->path;
 
 	/* Update confirmed MTU */
 	if (probed_size > pmtud->plpmtu) {
 		pmtud->plpmtu = probed_size;
 		pmtud->search_low = probed_size;
+		mtu_increased = true;
 
 		/* Update path MTU atomically for concurrent readers */
-		if (pmtud->path)
-			WRITE_ONCE(pmtud->path->mtu, probed_size);
+		if (path)
+			WRITE_ONCE(path->mtu, probed_size);
 
 		tquic_info("pmtud:path %u MTU increased to %u\n",
-			pmtud->path ? pmtud->path->path_id : 0, probed_size);
+			path ? path->path_id : 0, probed_size);
 	}
 
 	/* Check if search is complete */
@@ -617,6 +673,17 @@ static void tquic_pmtud_probe_success(struct tquic_pmtud_state_info *pmtud,
 	}
 
 	spin_unlock_irqrestore(&pmtud->lock, spin_flags);
+
+	/*
+	 * Notify the path-level accounting that the PLPMTU probe succeeded.
+	 * tquic_path_mtu_probe_acked() updates path->mtu (redundant but
+	 * harmless — WRITE_ONCE above already did it) and, crucially, calls
+	 * tquic_path_cc_init() to resize the congestion window for the new
+	 * MTU.  This must be called outside the spinlock because
+	 * tquic_path_cc_init() may acquire path-level locks.
+	 */
+	if (mtu_increased && path)
+		tquic_path_mtu_probe_acked(path, probed_size);
 }
 
 /**
@@ -626,15 +693,21 @@ static void tquic_pmtud_probe_success(struct tquic_pmtud_state_info *pmtud,
 static void tquic_pmtud_probe_failed(struct tquic_pmtud_state_info *pmtud)
 {
 	unsigned long spin_flags;
+	bool size_exhausted = false;
+	struct tquic_path *path;
+	u32 failed_size;
 
 	spin_lock_irqsave(&pmtud->lock, spin_flags);
 
+	path = pmtud->path;
+	failed_size = pmtud->probed_size;
 	pmtud->probe_count++;
 
 	if (pmtud->probe_count >= TQUIC_MAX_PROBES) {
 		/* This size is too large, adjust search bounds */
 		pmtud->search_high = pmtud->probed_size - 1;
 		pmtud->probe_count = 0;
+		size_exhausted = true;
 
 		tquic_dbg("pmtud:size %u too large after %d probes\n",
 			 pmtud->probed_size, TQUIC_MAX_PROBES);
@@ -666,6 +739,18 @@ static void tquic_pmtud_probe_failed(struct tquic_pmtud_state_info *pmtud)
 	pmtud->probe_pending = false;
 
 	spin_unlock_irqrestore(&pmtud->lock, spin_flags);
+
+	/*
+	 * Notify the path-level accounting that a PLPMTU probe was
+	 * definitively lost (all TQUIC_MAX_PROBES attempts exhausted).
+	 * tquic_path_mtu_probe_lost() logs the failure and keeps the
+	 * current confirmed path->mtu unchanged, matching RFC 8899
+	 * Section 5.3 behaviour: retain the last confirmed PLPMTU.
+	 * Called outside the spinlock for the same reason as the acked
+	 * counterpart above.
+	 */
+	if (size_exhausted && path)
+		tquic_path_mtu_probe_lost(path, failed_size);
 }
 
 /*

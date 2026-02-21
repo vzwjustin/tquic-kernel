@@ -71,6 +71,7 @@
 
 #include "zero_rtt.h"
 #include "../core/transport_params.h"
+#include "../core/flow_control.h"
 #include "../tquic_mib.h"
 #include "../tquic_debug.h"
 
@@ -1565,6 +1566,13 @@ void tquic_zero_rtt_reject(struct tquic_connection *conn)
 		state->aead = NULL;
 	}
 	memzero_explicit(&state->keys, sizeof(state->keys));
+
+	/*
+	 * RFC 9001 Section 4.7: On 0-RTT rejection the connection flow
+	 * control state must be reset so limits are re-applied from the
+	 * server's transport parameters, discarding any 0-RTT state.
+	 */
+	tquic_fc_reset(conn->fc);
 
 	tquic_info("0-RTT rejected\n");
 }

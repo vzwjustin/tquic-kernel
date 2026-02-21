@@ -36,6 +36,7 @@
 #include "tquic_compat.h"
 #include "tquic_debug.h"
 #include "protocol.h"
+#include "core/stream.h"
 
 /*
  * =============================================================================
@@ -628,6 +629,29 @@ ssize_t tquic_sendpage(struct socket *sock, struct page *page,
 	if (offset < 0 || send_size > PAGE_SIZE - offset)
 		goto out_err_inval;
 
+	/*
+	 * If a stream manager is present use tquic_stream_write_zerocopy,
+	 * which maps the page directly into the stream's send_buf frags
+	 * without a data copy (true zero-copy sendfile path).
+	 */
+	if (conn->stream_mgr) {
+		ssize_t zc_ret;
+
+		zc_ret = tquic_stream_write_zerocopy(conn->stream_mgr,
+						     stream, &page, 1,
+						     (size_t)offset,
+						     send_size, false);
+		if (zc_ret < 0) {
+			ret = zc_ret;
+			goto out_put;
+		}
+		send_size = (size_t)zc_ret;
+		if (send_size)
+			tquic_output_flush(conn);
+		ret = send_size;
+		goto out_put;
+	}
+
 	/* Allocate skb without data buffer - we'll use page frags */
 	skb = alloc_skb(0, GFP_KERNEL);
 	if (!skb)
@@ -827,6 +851,21 @@ ssize_t tquic_splice_read(struct socket *sock, loff_t *ppos,
 		return 0;  /* No data available */
 	}
 
+	/*
+	 * If a stream manager is present, delegate to tquic_stream_splice_read
+	 * which uses the add_to_pipe() API for proper kernel-to-pipe zero-copy.
+	 * Fall back to the __tquic_splice_read skb-based path otherwise.
+	 */
+	if (conn->stream_mgr) {
+		ssize_t sr;
+
+		sr = tquic_stream_splice_read(conn->stream_mgr, stream,
+					      pipe, len, flags);
+		tquic_stream_put(stream);
+		tquic_conn_put(conn);
+		return sr;
+	}
+
 	/* Initialize splice state */
 	tss.conn = conn;
 	tss.stream = stream;
@@ -841,9 +880,9 @@ ssize_t tquic_splice_read(struct socket *sock, loff_t *ppos,
 
 	while (tss.len) {
 		ret = __tquic_splice_read(sk, &tss);
-		if (ret < 0)
+		if (ret < 0) {
 			break;
-		else if (!ret) {
+		} else if (!ret) {
 			/* No data spliced */
 			if (spliced)
 				break;

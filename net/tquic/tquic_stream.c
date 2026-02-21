@@ -34,6 +34,7 @@
 #include "protocol.h"
 #include "tquic_debug.h"
 #include "http3/http3_stream.h"
+#include "core/stream.h"
 
 /* Slab cache for stream objects -- defined in tquic_main.c */
 
@@ -659,8 +660,17 @@ int tquic_stream_socket_create(struct tquic_connection *conn,
 
 	is_bidi = !(flags & TQUIC_STREAM_UNIDI);
 
-	/* Allocate stream structure */
-	stream = tquic_stream_alloc(conn, is_bidi);
+	/*
+	 * Allocate the stream structure. When the stream manager is present,
+	 * use tquic_stream_create() which registers the stream with the manager
+	 * and assigns an ID from the manager's ID sequence.  Fall back to the
+	 * legacy tquic_stream_alloc() path otherwise.
+	 */
+	if (conn->stream_mgr) {
+		stream = tquic_stream_create(conn->stream_mgr, is_bidi);
+	} else {
+		stream = tquic_stream_alloc(conn, is_bidi);
+	}
 	if (!stream)
 		return -ENOMEM;
 
@@ -791,11 +801,20 @@ static int tquic_stream_release(struct socket *sock)
 			tquic_stream_send_fin(conn, stream);
 		}
 
-		/* Remove from connection's stream tree */
-		tquic_stream_remove_from_conn(conn, stream);
-
-		/* Drop the stream-socket's owning reference. */
-		tquic_stream_put(stream);
+		/*
+		 * When the stream manager is active, use tquic_stream_destroy()
+		 * to unregister the stream from the manager's RB-tree and free
+		 * its extended state.  Otherwise fall back to the legacy
+		 * tquic_stream_remove_from_conn() + tquic_stream_put() pair.
+		 */
+		if (conn->stream_mgr) {
+			tquic_stream_destroy(conn->stream_mgr, stream);
+		} else {
+			/* Remove from connection's stream tree */
+			tquic_stream_remove_from_conn(conn, stream);
+			/* Drop the stream-socket's owning reference. */
+			tquic_stream_put(stream);
+		}
 		tquic_conn_put(conn);
 	}
 

@@ -38,6 +38,7 @@
 
 #include "protocol.h"
 #include "tquic_debug.h"
+#include "core/stream.h"
 
 /* Global debug level - controlled via debugfs and sysctl */
 int tquic_debug_level = TQUIC_DBG_WARN;
@@ -547,6 +548,65 @@ DEFINE_DEBUGFS_ATTRIBUTE(tquic_debug_level_fops,
  * =============================================================================
  */
 
+/*
+ * =============================================================================
+ * /sys/kernel/debug/tquic/streams
+ * =============================================================================
+ *
+ * Dumps per-stream state for all active connections via
+ * tquic_stream_manager_dump() -> tquic_stream_dump().
+ * Reading the file triggers a pr_info dump to the kernel log.
+ */
+static int tquic_debug_streams_show(struct seq_file *seq, void *v)
+{
+	struct tquic_debug_conn_iter *iter;
+	struct tquic_connection *conn;
+
+	iter = seq->private;
+
+	if (v == SEQ_START_TOKEN) {
+		seq_puts(seq, "# TQUIC Stream Debug Dump\n");
+		seq_puts(seq, "# (per-stream details emitted to kernel log)\n");
+		return 0;
+	}
+
+	if (IS_ERR(v))
+		return 0;
+
+	conn = v;
+
+	if (conn->stream_mgr) {
+		seq_printf(seq, "conn 0x%x: dumping streams to kernel log\n",
+			   conn->token);
+		tquic_stream_manager_dump(conn->stream_mgr);
+	} else {
+		seq_printf(seq, "conn 0x%x: no stream manager\n",
+			   conn->token);
+	}
+
+	return 0;
+}
+
+static const struct seq_operations tquic_debug_streams_seq_ops = {
+	.start	= tquic_debug_conn_start,
+	.next	= tquic_debug_conn_next,
+	.stop	= tquic_debug_conn_stop,
+	.show	= tquic_debug_streams_show,
+};
+
+static int tquic_debug_streams_open(struct inode *inode, struct file *file)
+{
+	return seq_open_private(file, &tquic_debug_streams_seq_ops,
+				sizeof(struct tquic_debug_conn_iter));
+}
+
+static const struct file_operations tquic_debug_streams_fops = {
+	.open		= tquic_debug_streams_open,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= seq_release_private,
+};
+
 int tquic_debug_init(void)
 {
 	tquic_debugfs_root = debugfs_create_dir("tquic", NULL);
@@ -567,6 +627,9 @@ int tquic_debug_init(void)
 
 	debugfs_create_file("debug_level", 0644, tquic_debugfs_root,
 			    NULL, &tquic_debug_level_fops);
+
+	debugfs_create_file("streams", 0444, tquic_debugfs_root,
+			    NULL, &tquic_debug_streams_fops);
 
 	pr_debug("tquic: debugfs interface created at /sys/kernel/debug/tquic/\n");
 	return 0;

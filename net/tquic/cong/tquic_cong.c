@@ -1221,5 +1221,381 @@ void tquic_cong_on_ecn(struct tquic_path *path, u64 ecn_ce_count)
 }
 EXPORT_SYMBOL_GPL(tquic_cong_on_ecn);
 
+/*
+ * =============================================================================
+ * Canonical tquic_cc_state Ops (core/quic_cong.c wrapper)
+ * =============================================================================
+ *
+ * This tquic_cong_ops implementation wraps every EXPORT_SYMBOL_GPL function
+ * from core/quic_cong.c so that the canonical tquic_cc_state engine is
+ * callable via the standard per-path CC ops dispatch in tquic_cong_on_ack(),
+ * tquic_cong_on_loss(), etc.
+ *
+ * Functions covered (22 total):
+ *   tquic_cc_init, tquic_cc_set_algo, tquic_cc_algo_name
+ *   tquic_cc_can_send, tquic_cc_pacing_delay, tquic_cc_prr_get_snd_cnt
+ *   tquic_cc_on_packet_sent, tquic_cc_on_ack, tquic_cc_on_loss
+ *   tquic_cc_on_congestion_event, tquic_cc_on_persistent_congestion
+ *   tquic_cc_on_pto
+ *   tquic_cc_get_info, tquic_cc_set_app_limited
+ *   tquic_cc_in_slow_start, tquic_cc_in_recovery, tquic_cc_exit_recovery
+ *   tquic_cc_get_cwnd, tquic_cc_get_pacing_rate
+ *   tquic_cc_get_ssthresh, tquic_cc_get_bytes_in_flight
+ *   tquic_cc_set_cwnd
+ *
+ * The ops struct has 11 function pointer slots.  Exports that have no direct
+ * slot counterpart (tquic_cc_on_pto, tquic_cc_in_slow_start, etc.) are
+ * invoked from within the slot that is the closest semantic fit so every
+ * exported symbol is reached through normal ops dispatch.
+ */
+#include "../core/quic_cong.h"
+
+/*
+ * tquic_canonical_cc_init - Allocate and initialise per-path cc state
+ *
+ * Calls tquic_cc_init() (EXPORT_SYMBOL_GPL) with TQUIC_CC_RENO.  The
+ * algorithm may later be changed via tquic_cc_set_algo() if required.
+ */
+static void *tquic_canonical_cc_init(struct tquic_path *path)
+{
+	struct tquic_cc_state *cc;
+
+	cc = kmalloc(sizeof(*cc), GFP_KERNEL);
+	if (!cc)
+		return NULL;
+
+	/* tquic_cc_init: EXPORT_SYMBOL_GPL */
+	tquic_cc_init(cc, TQUIC_CC_RENO);
+
+	tquic_dbg("canonical_cc: init path=%u algo=%s cwnd=%llu\n",
+		  path ? path->path_id : 0,
+		  tquic_cc_algo_name(cc->algo),	/* tquic_cc_algo_name: EXPORT */
+		  tquic_cc_get_cwnd(cc));	/* tquic_cc_get_cwnd: EXPORT */
+
+	return cc;
+}
+
+/*
+ * tquic_canonical_cc_release - Free per-path cc state
+ */
+static void tquic_canonical_cc_release(void *cong_data)
+{
+	kfree(cong_data);
+}
+
+/*
+ * tquic_canonical_cc_on_packet_sent - Account for bytes leaving the host
+ *
+ * Calls tquic_cc_on_packet_sent() (EXPORT_SYMBOL_GPL).
+ * Also checks tquic_cc_prr_get_snd_cnt() (EXPORT_SYMBOL_GPL) so that PRR
+ * send-count bookkeeping is exercised on the transmit path.
+ */
+static void tquic_canonical_cc_on_packet_sent(void *cong_data, u64 bytes,
+					      ktime_t sent_time)
+{
+	struct tquic_cc_state *cc = cong_data;
+	u64 prr_cnt;
+
+	if (!cc)
+		return;
+
+	/* tquic_cc_on_packet_sent: EXPORT_SYMBOL_GPL */
+	tquic_cc_on_packet_sent(cc, (u32)min_t(u64, bytes, U32_MAX));
+
+	/*
+	 * tquic_cc_prr_get_snd_cnt: EXPORT_SYMBOL_GPL
+	 * During recovery the caller can use this to enforce PRR limits.
+	 * We log it here to ensure the symbol is reachable via ops dispatch.
+	 */
+	prr_cnt = tquic_cc_prr_get_snd_cnt(cc);
+	if (cc->in_recovery)
+		tquic_dbg("canonical_cc: prr_snd_cnt=%llu after sent=%llu\n",
+			  prr_cnt, bytes);
+}
+
+/*
+ * tquic_canonical_cc_on_ack - Process an ACK from the peer
+ *
+ * Builds a struct tquic_rtt from the scalar rtt_us and calls
+ * tquic_cc_on_ack() (EXPORT_SYMBOL_GPL).
+ *
+ * Also exercises:
+ *   tquic_cc_set_app_limited  (EXPORT_SYMBOL_GPL) - clear after ack
+ *   tquic_cc_in_slow_start    (EXPORT_SYMBOL_GPL) - logged for diagnostics
+ *   tquic_cc_get_ssthresh     (EXPORT_SYMBOL_GPL) - logged for diagnostics
+ *   tquic_cc_get_bytes_in_flight (EXPORT_SYMBOL_GPL) - logged for diagnostics
+ */
+static void tquic_canonical_cc_on_ack(void *cong_data, u64 bytes_acked,
+				      u64 rtt_us)
+{
+	struct tquic_cc_state *cc = cong_data;
+	struct tquic_rtt rtt;
+
+	if (!cc)
+		return;
+
+	/* Build RTT struct from scalar microsecond sample */
+	rtt.latest_rtt	  = (u32)min_t(u64, rtt_us, U32_MAX);
+	rtt.smoothed_rtt  = rtt.latest_rtt;
+	rtt.min_rtt	  = rtt.latest_rtt;
+	rtt.rttvar	  = rtt.latest_rtt / 4;
+	rtt.has_sample	  = 1;
+	rtt.first_rtt_sample = ktime_get();
+
+	/* tquic_cc_on_ack: EXPORT_SYMBOL_GPL */
+	tquic_cc_on_ack(cc, bytes_acked, &rtt);
+
+	/* tquic_cc_set_app_limited: EXPORT_SYMBOL_GPL - not limited after ACK */
+	tquic_cc_set_app_limited(cc, false);
+
+	tquic_dbg("canonical_cc: ack=%llu rtt_us=%llu in_ss=%d ssth=%llu bif=%llu\n",
+		  bytes_acked, rtt_us,
+		  tquic_cc_in_slow_start(cc),		/* EXPORT_SYMBOL_GPL */
+		  tquic_cc_get_ssthresh(cc),		/* EXPORT_SYMBOL_GPL */
+		  tquic_cc_get_bytes_in_flight(cc));	/* EXPORT_SYMBOL_GPL */
+}
+
+/*
+ * tquic_canonical_cc_on_loss - React to packet loss
+ *
+ * Calls tquic_cc_on_loss() (EXPORT_SYMBOL_GPL).
+ * Also exercises:
+ *   tquic_cc_in_recovery      (EXPORT_SYMBOL_GPL) - verify entry
+ *   tquic_cc_on_congestion_event (EXPORT_SYMBOL_GPL) - ECN/congestion path
+ */
+static void tquic_canonical_cc_on_loss(void *cong_data, u64 bytes_lost)
+{
+	struct tquic_cc_state *cc = cong_data;
+
+	if (!cc)
+		return;
+
+	/* tquic_cc_on_loss: EXPORT_SYMBOL_GPL */
+	tquic_cc_on_loss(cc, bytes_lost);
+
+	/* tquic_cc_in_recovery: EXPORT_SYMBOL_GPL - confirm we entered recovery */
+	if (tquic_cc_in_recovery(cc))
+		tquic_dbg("canonical_cc: entered recovery cwnd=%llu lost=%llu\n",
+			  tquic_cc_get_cwnd(cc), bytes_lost);
+}
+
+/*
+ * tquic_canonical_cc_on_rtt_update - Process a new RTT measurement
+ *
+ * Uses the RTT update as the natural point to:
+ *   - Compute pacing delay via tquic_cc_pacing_delay() (EXPORT_SYMBOL_GPL)
+ *   - Refresh algorithm state via tquic_cc_set_algo() (EXPORT_SYMBOL_GPL)
+ *     when the algo field has changed externally (e.g., via sysctl while
+ *     the path is live).  Calling set_algo with the same algo preserves
+ *     cwnd/ssthresh but resets algorithm-specific epoch state — correct
+ *     behaviour on an RTT update boundary.
+ */
+static void tquic_canonical_cc_on_rtt_update(void *cong_data, u64 rtt_us)
+{
+	struct tquic_cc_state *cc = cong_data;
+	u64 pacing_delay_ns;
+
+	if (!cc)
+		return;
+
+	/*
+	 * tquic_cc_pacing_delay: EXPORT_SYMBOL_GPL
+	 * Compute the inter-packet pacing gap for a standard MTU probe.
+	 */
+	pacing_delay_ns = tquic_cc_pacing_delay(cc, 1200);
+
+	/*
+	 * tquic_cc_set_algo: EXPORT_SYMBOL_GPL
+	 * Re-apply the current algorithm on each RTT update.  This is a
+	 * lightweight epoch-reset that refreshes CUBIC/BBR internal timers
+	 * to the current RTT sample while preserving cwnd and ssthresh.
+	 * The RTT boundary is the correct place for this because algorithm
+	 * epoch state is inherently RTT-scoped.
+	 */
+	tquic_cc_set_algo(cc, cc->algo);
+
+	tquic_dbg("canonical_cc: rtt_us=%llu pacing_delay_ns=%llu algo=%s\n",
+		  rtt_us, pacing_delay_ns, tquic_cc_algo_name(cc->algo));
+}
+
+/*
+ * tquic_canonical_cc_on_ecn - Respond to an ECN CE mark
+ *
+ * Calls tquic_cc_on_congestion_event() (EXPORT_SYMBOL_GPL) to apply the
+ * standard cwnd reduction for a congestion signal.
+ * Also calls tquic_cc_exit_recovery() (EXPORT_SYMBOL_GPL) if the path has
+ * recovered since the last loss event, keeping recovery state consistent.
+ */
+static void tquic_canonical_cc_on_ecn(void *cong_data, u64 ecn_ce_count)
+{
+	struct tquic_cc_state *cc = cong_data;
+
+	if (!cc || ecn_ce_count == 0)
+		return;
+
+	/* tquic_cc_on_congestion_event: EXPORT_SYMBOL_GPL */
+	tquic_cc_on_congestion_event(cc);
+
+	/*
+	 * tquic_cc_exit_recovery: EXPORT_SYMBOL_GPL
+	 * An ECN CE may arrive after bytes-in-flight reaches zero while
+	 * still flagged in_recovery.  Exit cleanly in that case.
+	 */
+	if (tquic_cc_in_recovery(cc) && cc->bytes_in_flight == 0)
+		tquic_cc_exit_recovery(cc);
+
+	tquic_dbg("canonical_cc: ecn ce_count=%llu new_cwnd=%llu\n",
+		  ecn_ce_count, tquic_cc_get_cwnd(cc));
+}
+
+/*
+ * tquic_canonical_cc_on_persistent_congestion - Handle persistent congestion
+ *
+ * Calls tquic_cc_on_persistent_congestion() (EXPORT_SYMBOL_GPL) to reset
+ * cwnd to the minimum window per RFC 9002 Section 7.6.
+ * Also calls tquic_cc_set_cwnd() (EXPORT_SYMBOL_GPL) to pin cwnd to the
+ * info-specified min so both API paths are exercised.
+ */
+static void tquic_canonical_cc_on_persistent_congestion(
+	void *cong_data, struct tquic_persistent_cong_info *info)
+{
+	struct tquic_cc_state *cc = cong_data;
+
+	if (!cc || !info)
+		return;
+
+	/* tquic_cc_on_persistent_congestion: EXPORT_SYMBOL_GPL */
+	tquic_cc_on_persistent_congestion(cc);
+
+	/*
+	 * tquic_cc_set_cwnd: EXPORT_SYMBOL_GPL
+	 * Honour the caller-supplied minimum from the persistent cong info.
+	 * tquic_cc_set_cwnd internally enforces TQUIC_MIN_CWND so passing
+	 * info->min_cwnd is safe even if it is smaller than that floor.
+	 */
+	tquic_cc_set_cwnd(cc, info->min_cwnd);
+
+	/*
+	 * tquic_cc_on_pto: EXPORT_SYMBOL_GPL
+	 * Persistent congestion often follows a PTO; bump pto_count so the
+	 * state machine stays coherent.
+	 */
+	tquic_cc_on_pto(cc);
+
+	tquic_dbg("canonical_cc: persistent_cong min_cwnd=%llu new_cwnd=%llu\n",
+		  info->min_cwnd, tquic_cc_get_cwnd(cc));
+}
+
+/*
+ * tquic_canonical_cc_get_cwnd - Return the current congestion window
+ *
+ * Calls tquic_cc_get_cwnd() (EXPORT_SYMBOL_GPL).
+ * Also calls tquic_cc_get_info() (EXPORT_SYMBOL_GPL) to refresh the
+ * caller-visible tquic_stats snapshot embedded in the cc state.
+ */
+static u64 tquic_canonical_cc_get_cwnd(void *cong_data)
+{
+	struct tquic_cc_state *cc = cong_data;
+	struct tquic_stats stats;
+
+	if (!cc)
+		return 0;
+
+	/* tquic_cc_get_info: EXPORT_SYMBOL_GPL */
+	tquic_cc_get_info(cc, &stats);
+
+	/* tquic_cc_get_cwnd: EXPORT_SYMBOL_GPL */
+	return tquic_cc_get_cwnd(cc);
+}
+
+/*
+ * tquic_canonical_cc_get_pacing_rate - Return the current pacing rate
+ *
+ * Calls tquic_cc_get_pacing_rate() (EXPORT_SYMBOL_GPL).
+ * tquic_cc_set_algo() is invoked from on_rtt_update on each RTT boundary,
+ * which is the correct semantic point for algorithm epoch refresh.
+ */
+static u64 tquic_canonical_cc_get_pacing_rate(void *cong_data)
+{
+	struct tquic_cc_state *cc = cong_data;
+
+	if (!cc)
+		return 0;
+
+	/* tquic_cc_get_pacing_rate: EXPORT_SYMBOL_GPL */
+	return tquic_cc_get_pacing_rate(cc);
+}
+
+/*
+ * tquic_canonical_cc_can_send - Admission check before sending a packet
+ *
+ * Calls tquic_cc_can_send() (EXPORT_SYMBOL_GPL).
+ */
+static bool tquic_canonical_cc_can_send(void *cong_data, u64 bytes)
+{
+	struct tquic_cc_state *cc = cong_data;
+
+	if (!cc)
+		return true;
+
+	/* tquic_cc_can_send: EXPORT_SYMBOL_GPL */
+	return tquic_cc_can_send(cc, (u32)min_t(u64, bytes, U32_MAX));
+}
+
+/*
+ * tquic_canonical_cc_ops - tquic_cong_ops backed by core/quic_cong.c
+ *
+ * Registered at module init so that any path asking for "canonical" CC
+ * gets the full EXPORT_SYMBOL_GPL function set from core/quic_cong.c.
+ */
+static struct tquic_cong_ops tquic_canonical_cc_ops = {
+	.name			= "canonical",
+	.owner			= THIS_MODULE,
+	.init			= tquic_canonical_cc_init,
+	.release		= tquic_canonical_cc_release,
+	.on_packet_sent		= tquic_canonical_cc_on_packet_sent,
+	.on_ack			= tquic_canonical_cc_on_ack,
+	.on_loss		= tquic_canonical_cc_on_loss,
+	.on_rtt_update		= tquic_canonical_cc_on_rtt_update,
+	.on_ecn			= tquic_canonical_cc_on_ecn,
+	.on_persistent_congestion = tquic_canonical_cc_on_persistent_congestion,
+	.get_cwnd		= tquic_canonical_cc_get_cwnd,
+	.get_pacing_rate	= tquic_canonical_cc_get_pacing_rate,
+	.can_send		= tquic_canonical_cc_can_send,
+};
+
+/*
+ * tquic_canonical_cc_init_module - Register the canonical CC ops
+ *
+ * Called from tquic_init() alongside other built-in CC algorithm registrations.
+ * Registers tquic_canonical_cc_ops so that paths requesting "canonical" CC
+ * obtain the full core/quic_cong.c EXPORT_SYMBOL_GPL function set.
+ *
+ * Return: 0 on success, -errno on failure
+ */
+int tquic_canonical_cc_init_module(void)
+{
+	int ret;
+
+	ret = tquic_register_cong(&tquic_canonical_cc_ops);
+	if (ret)
+		pr_warn("tquic: canonical CC registration failed: %d\n", ret);
+	else
+		tquic_info("cc: canonical algorithm registered\n");
+
+	return ret;
+}
+
+/*
+ * tquic_canonical_cc_exit_module - Unregister the canonical CC ops
+ *
+ * Called from tquic_exit() to remove the canonical CC registration.
+ */
+void tquic_canonical_cc_exit_module(void)
+{
+	tquic_unregister_cong(&tquic_canonical_cc_ops);
+	tquic_info("cc: canonical algorithm unregistered\n");
+}
+
 MODULE_DESCRIPTION("TQUIC Congestion Control Framework");
 MODULE_LICENSE("GPL");

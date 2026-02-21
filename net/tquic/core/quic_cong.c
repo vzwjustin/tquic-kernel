@@ -22,6 +22,7 @@
 #include <linux/random.h>
 #include <net/tquic.h>
 #include "../tquic_debug.h"
+#include "quic_cong.h"
 
 /*
  * Maximum packet size constant
@@ -29,101 +30,6 @@
  * We use 1500 for Ethernet MTU compatibility.
  */
 #define TQUIC_MAX_PACKET_SIZE		1500
-
-/*
- * TQUIC congestion control algorithms
- */
-enum tquic_cc_algo {
-	TQUIC_CC_RENO	= 0,
-	TQUIC_CC_CUBIC	= 1,
-	TQUIC_CC_BBR	= 2,
-	TQUIC_CC_BBR2	= 3,
-};
-
-/*
- * TQUIC RTT measurement structure
- */
-struct tquic_rtt {
-	u32		latest_rtt;
-	u32		min_rtt;
-	u32		smoothed_rtt;
-	u32		rttvar;
-	ktime_t		first_rtt_sample;
-	u8		has_sample:1;
-};
-
-/*
- * TQUIC congestion control state
- */
-struct tquic_cc_state {
-	u64		cwnd;
-	u64		ssthresh;
-	u64		bytes_in_flight;
-	u64		congestion_window;
-	u64		pacing_rate;
-	u64		last_sent_time;
-	ktime_t		congestion_recovery_start;
-	u32		pto_count;
-	u32		loss_burst_count;
-	u8		in_slow_start:1;
-	u8		in_recovery:1;
-	u8		app_limited:1;
-	enum tquic_cc_algo algo;
-	/*
-	 * PRR (Proportional Rate Reduction) state per RFC 6937
-	 * Smoothly reduces cwnd during loss recovery instead of halving
-	 * immediately. Tracks bytes delivered and sent during recovery
-	 * to proportionally allow new transmissions.
-	 */
-	u64		prr_delivered;		/* Bytes delivered since loss */
-	u64		prr_out;		/* Bytes sent since loss */
-	u64		recov_start_pipe;	/* Bytes in flight at recovery start */
-	/* BBR specific */
-	u64		bbr_bw;
-	u64		bbr_min_rtt;
-	u64		bbr_full_bw;		/* Full bandwidth estimate for startup exit */
-	u32		bbr_cycle_index;
-	u32		bbr_full_bw_count;	/* Count of rounds without BW increase */
-	u8		bbr_mode;
-	/* CUBIC specific */
-	u64		cubic_k;
-	u64		cubic_origin_point;
-	ktime_t		cubic_epoch_start;
-};
-
-/*
- * TQUIC statistics for congestion control
- */
-struct tquic_stats {
-	u64		cwnd;
-	u64		bytes_in_flight;
-	u8		congestion_state;
-};
-
-/* Forward declarations to silence -Wmissing-prototypes */
-void tquic_cc_init(struct tquic_cc_state *cc, enum tquic_cc_algo algo);
-void tquic_cc_on_packet_sent(struct tquic_cc_state *cc, u32 bytes);
-void tquic_cc_on_ack(struct tquic_cc_state *cc, u64 acked_bytes,
-		     struct tquic_rtt *rtt);
-void tquic_cc_on_loss(struct tquic_cc_state *cc, u64 lost_bytes);
-void tquic_cc_on_congestion_event(struct tquic_cc_state *cc);
-u64 tquic_cc_pacing_delay(struct tquic_cc_state *cc, u32 bytes);
-u64 tquic_cc_prr_get_snd_cnt(struct tquic_cc_state *cc);
-bool tquic_cc_can_send(struct tquic_cc_state *cc, u32 bytes);
-void tquic_cc_on_persistent_congestion(struct tquic_cc_state *cc);
-void tquic_cc_on_pto(struct tquic_cc_state *cc);
-void tquic_cc_get_info(struct tquic_cc_state *cc, struct tquic_stats *stats);
-void tquic_cc_set_app_limited(struct tquic_cc_state *cc, bool limited);
-bool tquic_cc_in_slow_start(struct tquic_cc_state *cc);
-bool tquic_cc_in_recovery(struct tquic_cc_state *cc);
-void tquic_cc_exit_recovery(struct tquic_cc_state *cc);
-u64 tquic_cc_get_cwnd(struct tquic_cc_state *cc);
-u64 tquic_cc_get_pacing_rate(struct tquic_cc_state *cc);
-u64 tquic_cc_get_ssthresh(struct tquic_cc_state *cc);
-u64 tquic_cc_get_bytes_in_flight(struct tquic_cc_state *cc);
-void tquic_cc_set_cwnd(struct tquic_cc_state *cc, u64 cwnd);
-void tquic_cc_set_algo(struct tquic_cc_state *cc, enum tquic_cc_algo algo);
-const char *tquic_cc_algo_name(enum tquic_cc_algo algo);
 
 /* RFC 9002 constants */
 #define TQUIC_INITIAL_CWND_PACKETS	10

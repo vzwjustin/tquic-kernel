@@ -122,6 +122,7 @@ bool tquic_sysctl_prefer_v2(void);
 struct tquic_sock;
 struct tquic_connection;
 struct tquic_stream;
+struct tquic_stream_manager;
 struct tquic_fc_stream_state;
 struct tquic_path;
 struct tquic_frame;
@@ -1036,6 +1037,15 @@ struct tquic_connection {
 	u64 max_streams_uni;
 	u64 max_stream_id_bidi; /* Maximum stream ID for bidi streams */
 	u64 max_stream_id_uni; /* Maximum stream ID for uni streams */
+
+	/*
+	 * Stream manager for the exported stream API (stream.c).
+	 * This provides the tquic_stream_manager_create/destroy lifecycle
+	 * and backs tquic_stream_reset_recv, tquic_stream_update_max_data,
+	 * tquic_stream_conn_update_max_data, tquic_stream_shutdown_write,
+	 * and the other exported stream operations.
+	 */
+	struct tquic_stream_manager *stream_mgr;
 
 	/*
 	 * Per-type stream counters for HTTP/3 unidirectional streams.
@@ -2185,7 +2195,6 @@ void tquic_path_on_data_received(struct tquic_path *path, u32 bytes);
 void tquic_conn_state_cleanup(struct tquic_connection *conn);
 
 /* Stream management */
-struct tquic_stream_manager; /* Forward declaration */
 struct tquic_stream *tquic_stream_open(struct tquic_connection *conn,
 				       bool bidi);
 struct tquic_stream *tquic_stream_open_incoming(struct tquic_connection *conn,

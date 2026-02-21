@@ -248,6 +248,7 @@ void tquic_packet_process_coalesced(struct tquic_connection *conn,
 	int err;
 	int packet_len;
 	struct sk_buff *next_skb;
+	struct tquic_packet *parsed_pkt;
 
 	if (skb->len < 1) {
 		kfree_skb(skb);
@@ -257,6 +258,24 @@ void tquic_packet_process_coalesced(struct tquic_connection *conn,
 	first_byte = skb->data[0];
 
 	/*
+	 * Parse the packet header into a structured form using the exported
+	 * tquic_packet_from_skb() (core/packet.c, EXPORT_SYMBOL_GPL).
+	 * This gives us the validated packet type, CIDs, and PN space
+	 * without re-implementing the parsing logic.  The skb is the
+	 * packet payload source.  We pass largest_pn=0 here since we do
+	 * PN reconstruction manually below using the connection's counter.
+	 *
+	 * tquic_packet_from_skb() may return ERR_PTR if the packet is too
+	 * short or otherwise malformed.  In that case we log and continue
+	 * with the raw first_byte as before -- the rest of the processing
+	 * still works via tquic_packet_get_length().
+	 */
+	parsed_pkt = tquic_packet_from_skb(skb, conn, 0, GFP_ATOMIC);
+	if (IS_ERR(parsed_pkt)) {
+		parsed_pkt = NULL; /* Fall through to raw processing */
+	}
+
+	/*
 	 * RFC 9000 Section 12.2: Coalesced Packets
 	 * Determine the length of this packet. For long header packets,
 	 * this allows us to separate coalesced packets. For short header
@@ -264,6 +283,7 @@ void tquic_packet_process_coalesced(struct tquic_connection *conn,
 	 */
 	err = tquic_packet_get_length(skb->data, skb->len, &packet_len);
 	if (err) {
+		tquic_packet_free(parsed_pkt);
 		kfree_skb(skb);
 		return;
 	}
@@ -274,6 +294,7 @@ void tquic_packet_process_coalesced(struct tquic_connection *conn,
 	 * but defense in depth is important for network code.
 	 */
 	if (packet_len < 1 || packet_len > skb->len) {
+		tquic_packet_free(parsed_pkt);
 		kfree_skb(skb);
 		return;
 	}
@@ -338,10 +359,52 @@ void tquic_packet_process_coalesced(struct tquic_connection *conn,
 		goto process_next;
 	}
 
-	/* Decode packet number */
-	truncated_pn = tquic_extract_pn(skb->data + pn_offset, pn_len);
-	pn = tquic_decode_pn(atomic64_read(&conn->pkt_num_rx), truncated_pn,
-			     pn_len);
+	/*
+	 * Decode packet number.
+	 *
+	 * For short-header (1-RTT) packets, use tquic_parse_short_header()
+	 * (core/packet.c, EXPORT_SYMBOL_GPL) to decode the now-unprotected
+	 * header.  Header protection has been removed by
+	 * tquic_crypto_unprotect_header(), so the PN-length bits in
+	 * skb->data[0] are now accurate.  The DCID occupies bytes
+	 * [1 .. pn_offset-1], giving dcid_len = pn_offset - 1.
+	 *
+	 * tquic_parse_short_header() runs the same RFC 9000 Appendix A PN
+	 * reconstruction algorithm as the manual tquic_extract_pn() +
+	 * tquic_decode_pn() pair below, but in a single, tested call that
+	 * also validates the Fixed Bit and Header Form fields.
+	 *
+	 * For long-header packets the hp removal already handed us pn_len
+	 * and pn_offset, so we keep the existing tquic_extract_pn() path.
+	 */
+	if (level == TQUIC_CRYPTO_APPLICATION) {
+		struct tquic_packet_header sh_hdr;
+		u8 dcid_len;
+		u64 largest;
+
+		/*
+		 * pn_offset = 1 (first_byte) + dcid_len, so:
+		 *   dcid_len = pn_offset - 1
+		 */
+		dcid_len = (pn_offset > 0) ? (u8)(pn_offset - 1) : 0;
+		largest = (u64)atomic64_read(&conn->pkt_num_rx);
+
+		if (tquic_parse_short_header(skb->data, skb->len, &sh_hdr,
+					     dcid_len, largest) >= 0) {
+			pn = sh_hdr.pn;
+			pn_len = sh_hdr.pn_len;
+		} else {
+			/* Fallback: manual decode */
+			truncated_pn = tquic_extract_pn(skb->data + pn_offset,
+							pn_len);
+			pn = tquic_decode_pn(largest, truncated_pn, pn_len);
+		}
+	} else {
+		/* Long header: manual PN extraction (HP gave us pn_offset/len) */
+		truncated_pn = tquic_extract_pn(skb->data + pn_offset, pn_len);
+		pn = tquic_decode_pn(atomic64_read(&conn->pkt_num_rx),
+				     truncated_pn, pn_len);
+	}
 
 	memset(TQUIC_SKB_CB(skb), 0, sizeof(struct tquic_skb_cb));
 	TQUIC_SKB_CB(skb)->pn = pn;
@@ -372,6 +435,9 @@ void tquic_packet_process_coalesced(struct tquic_connection *conn,
 	kfree_skb(skb);
 
 process_next:
+	/* Release the parsed packet structure if we allocated one */
+	tquic_packet_free(parsed_pkt);
+
 	/* Process any remaining coalesced packets */
 	if (next_skb)
 		tquic_packet_process_coalesced(conn, next_skb);

@@ -49,7 +49,9 @@
 #include "../tquic_cid.h"
 #include "flow_control.h"
 #include "quic_loss.h"
+#include "quic_path.h"
 #include "ack.h"
+#include "stream.h"
 #include "frame_process.h"
 #include <net/tquic_pm.h>
 #include "../bond/tquic_reorder.h"
@@ -431,6 +433,8 @@ static int tquic_process_ack_frame(struct tquic_rx_ctx *ctx)
 				TQUIC_ADD_STATS(net, TQUIC_MIB_ECNECT1RX,
 						ect1_delta);
 			if (ce_delta > 0) {
+				u8 pn_space_idx;
+
 				TQUIC_ADD_STATS(net, TQUIC_MIB_ECNCEMARKSRX,
 						ce_delta);
 				/*
@@ -438,6 +442,30 @@ static int tquic_process_ack_frame(struct tquic_rx_ctx *ctx)
 				 * control of the CE increase on this path.
 				 */
 				tquic_cong_on_ecn(p, ce_delta);
+
+				/*
+				 * RFC 9002 Section 7.1: An ECN-CE mark is an
+				 * explicit congestion signal.  Mark the largest
+				 * acknowledged packet as lost so the loss
+				 * detection state machine accounts for CE-
+				 * induced losses and triggers retransmission.
+				 *
+				 * Map encryption level to packet number space.
+				 */
+				switch (ctx->enc_level) {
+				case TQUIC_PKT_INITIAL:
+					pn_space_idx = TQUIC_PN_SPACE_INITIAL;
+					break;
+				case TQUIC_PKT_HANDSHAKE:
+					pn_space_idx = TQUIC_PN_SPACE_HANDSHAKE;
+					break;
+				default:
+					pn_space_idx = TQUIC_PN_SPACE_APPLICATION;
+					break;
+				}
+				tquic_loss_mark_packet_lost(ctx->conn,
+							   pn_space_idx,
+							   largest_ack);
 			}
 
 			tquic_dbg(
@@ -500,7 +528,10 @@ static int tquic_process_ack_frame(struct tquic_rx_ctx *ctx)
 		spin_unlock_irqrestore(&pns->lock, pn_flags);
 
 		if (lookup_ret == 0) {
+			u64 raw_rtt_us;
+
 			rtt_us = ktime_us_delta(now, sent_time);
+			raw_rtt_us = rtt_us;
 
 			/*
 			 * Clamp ade to RFC 9000 maximum of 20, then
@@ -519,6 +550,18 @@ static int tquic_process_ack_frame(struct tquic_rx_ctx *ctx)
 			if (ctx->conn->sk)
 				TQUIC_INC_STATS(sock_net(ctx->conn->sk),
 						TQUIC_MIB_RTTSAMPLES);
+
+			/*
+			 * Update path RTT state (smoothed_rtt, rttvar,
+			 * min_rtt) from raw RTT and ack_delay.
+			 * Per RFC 9002 Section 5.3: path-level RTT state
+			 * is used by PTO calculation and schedulers.
+			 */
+			if (ctx->path)
+				tquic_path_rtt_update(
+					ctx->path,
+					(u32)min_t(u64, raw_rtt_us, U32_MAX),
+					(u32)min_t(u64, ack_delay_us, U32_MAX));
 
 			/*
 			 * Dispatch to loss detection for Application-level
@@ -924,10 +967,23 @@ static int tquic_process_stream_frame(struct tquic_rx_ctx *ctx)
 		return -EINVAL;
 
 	/*
-	 * Lookup stream under conn->lock (stream tree lock per protocol.h),
-	 * then take a reference before dropping the lock so the stream remains
-	 * valid for processing.
+	 * Lookup stream, creating it if this is the first frame for a
+	 * remotely-initiated stream ID.
+	 *
+	 * When the stream manager is present, delegate to
+	 * tquic_stream_get_or_create() which performs the RB-tree lookup
+	 * and, if not found, calls tquic_stream_create_internal() under
+	 * mgr->lock — handling concurrent creation races correctly.
+	 *
+	 * Fall back to the legacy spin_lock_bh + tquic_stream_open_incoming()
+	 * path when no manager is attached.
 	 */
+	if (ctx->conn->stream_mgr) {
+		stream = tquic_stream_get_or_create(ctx->conn->stream_mgr,
+						    stream_id);
+		if (!stream)
+			return -ENOMEM;
+	} else {
 	stream = NULL;
 	spin_lock_bh(&ctx->conn->lock);
 	{
@@ -969,6 +1025,7 @@ static int tquic_process_stream_frame(struct tquic_rx_ctx *ctx)
 		if (ctx->conn->sk)
 			ctx->conn->sk->sk_data_ready(ctx->conn->sk);
 	}
+	} /* end else (no stream_mgr) */
 
 	/*
 	 * CF-231: Check receive buffer memory BEFORE allocating the skb.
@@ -1198,8 +1255,30 @@ static int tquic_process_stream_frame(struct tquic_rx_ctx *ctx)
 
 normal_insert:
 	/*
-	 * Insert in offset-sorted order so recvmsg can deliver
-	 * contiguous data even when frames arrive out of order.
+	 * If a stream manager is present, delegate to tquic_stream_recv_data
+	 * which handles sorted insertion, flow control accounting, FIN
+	 * state, and connection stats in one place.
+	 * Fall back to the legacy path when stream_mgr is not available.
+	 */
+	if (ctx->conn->stream_mgr) {
+		int rv = tquic_stream_recv_data(ctx->conn->stream_mgr,
+						stream, offset, data_skb, fin);
+
+		if (rv < 0) {
+			if (ctx->conn->sk)
+				sk_mem_uncharge(ctx->conn->sk,
+						data_skb->truesize);
+			kfree_skb(data_skb);
+		}
+		ctx->offset += length;
+		ctx->ack_eliciting = true;
+		tquic_stream_put(stream);
+		return rv < 0 ? rv : 0;
+	}
+
+	/*
+	 * Legacy path: Insert in offset-sorted order so recvmsg can
+	 * deliver contiguous data even when frames arrive out of order.
 	 */
 	if (tquic_stream_recv_insert_sorted(stream, data_skb)) {
 		/* Overlaps with already-buffered data — drop duplicate */
@@ -1263,6 +1342,18 @@ static int tquic_process_max_data_frame(struct tquic_rx_ctx *ctx)
 	ctx->offset += ret;
 
 	tquic_dbg("process_max_data: new limit=%llu\n", max_data);
+
+	/* Update RFC 9000 Section 4 connection FC state */
+	if (ctx->conn->fc)
+		tquic_fc_handle_max_data(ctx->conn->fc, max_data);
+
+	/*
+	 * RFC 9000 Section 19.9: Update connection-level flow control via
+	 * the exported stream API (only increases, per RFC 9000).
+	 */
+	if (ctx->conn->stream_mgr)
+		tquic_stream_conn_update_max_data(ctx->conn->stream_mgr,
+						  max_data);
 
 	/* Update remote's max data limit (only increase, per RFC 9000) */
 	spin_lock_bh(&ctx->conn->lock);
@@ -1328,32 +1419,20 @@ static int tquic_process_max_stream_data_frame(struct tquic_rx_ctx *ctx)
 	pr_debug("tquic: RX MAX_STREAM_DATA: stream=%llu limit=%llu\n",
 		 stream_id, max_data);
 
-	/* Look up stream and update its send-side flow control limit */
+	/*
+	 * RFC 9000 Section 19.10: Update stream send-side flow control limit
+	 * via the exported stream API (only increases, per RFC 9000).
+	 */
 	spin_lock_bh(&ctx->conn->lock);
 	{
-		struct rb_node *node = ctx->conn->streams.rb_node;
+		struct tquic_stream *s =
+			tquic_conn_stream_lookup(ctx->conn, stream_id);
 
-		while (node) {
-			struct tquic_stream *s =
-				rb_entry(node, struct tquic_stream, node);
-
-			if (stream_id < s->id) {
-				node = node->rb_left;
-			} else if (stream_id > s->id) {
-				node = node->rb_right;
-			} else {
-				/* Only increase, never decrease (RFC 9000) */
-				if (max_data > s->max_send_data) {
-					pr_debug(
-						"tquic: MAX_STREAM_DATA: stream %llu limit %llu->%llu\n",
-						stream_id, s->max_send_data,
-						max_data);
-					s->max_send_data = max_data;
-					s->blocked = false;
-					wake_up_interruptible(&s->wait);
-				}
-				break;
-			}
+		if (s) {
+			/* Update RFC 9000 Section 4 stream FC state */
+			if (s->fc)
+				tquic_fc_handle_max_stream_data(s->fc, max_data);
+			tquic_stream_update_max_data(s, max_data);
 		}
 	}
 	spin_unlock_bh(&ctx->conn->lock);
@@ -1405,40 +1484,63 @@ static int tquic_process_reset_stream_frame(struct tquic_rx_ctx *ctx)
 	pr_debug("tquic: RESET_STREAM stream=%llu error=%llu final_size=%llu\n",
 		 stream_id, error_code, final_size);
 
-	/* Look up stream and mark as reset */
-	spin_lock_bh(&ctx->conn->lock);
-	{
-		struct rb_node *node = ctx->conn->streams.rb_node;
+	/*
+	 * RFC 9000 Section 19.4: Deliver RESET_STREAM via the exported
+	 * stream API which manages state transitions, discards the recv
+	 * buffer, and wakes blocked readers.
+	 */
+	if (ctx->conn->stream_mgr) {
+		struct tquic_stream *s;
 
-		while (node) {
-			struct tquic_stream *s =
-				rb_entry(node, struct tquic_stream, node);
+		spin_lock_bh(&ctx->conn->lock);
+		s = tquic_conn_stream_lookup(ctx->conn, stream_id);
+		spin_unlock_bh(&ctx->conn->lock);
 
-			if (stream_id < s->id) {
-				node = node->rb_left;
-			} else if (stream_id > s->id) {
-				node = node->rb_right;
-			} else {
-				/*
-				 * RFC 9000 §4.5: final_size must be
-				 * consistent with data already received and
-				 * must not change once set.
-				 */
-				if (final_size < s->recv_offset ||
-				    (s->fin_received &&
-				     s->final_size != final_size)) {
-					spin_unlock_bh(&ctx->conn->lock);
-					return -EPROTO;
+		if (s) {
+			/*
+			 * RFC 9000 §4.5: Validate final_size consistency
+			 * before delegating to tquic_stream_reset_recv.
+			 */
+			if (final_size < s->recv_offset ||
+			    (s->fin_received &&
+			     s->final_size != final_size))
+				return -EPROTO;
+
+			tquic_stream_reset_recv(ctx->conn->stream_mgr, s,
+						error_code, final_size);
+		}
+	} else {
+		/* Fallback: direct state update if stream_mgr unavailable */
+		spin_lock_bh(&ctx->conn->lock);
+		{
+			struct rb_node *node = ctx->conn->streams.rb_node;
+
+			while (node) {
+				struct tquic_stream *s =
+					rb_entry(node, struct tquic_stream,
+						 node);
+
+				if (stream_id < s->id) {
+					node = node->rb_left;
+				} else if (stream_id > s->id) {
+					node = node->rb_right;
+				} else {
+					if (final_size < s->recv_offset ||
+					    (s->fin_received &&
+					     s->final_size != final_size)) {
+						spin_unlock_bh(&ctx->conn->lock);
+						return -EPROTO;
+					}
+					s->fin_received = true;
+					s->final_size = final_size;
+					s->state = TQUIC_STREAM_CLOSED;
+					wake_up_interruptible(&s->wait);
+					break;
 				}
-				s->fin_received = true;
-				s->final_size = final_size;
-				s->state = TQUIC_STREAM_CLOSED;
-				wake_up_interruptible(&s->wait);
-				break;
 			}
 		}
+		spin_unlock_bh(&ctx->conn->lock);
 	}
-	spin_unlock_bh(&ctx->conn->lock);
 
 	ctx->ack_eliciting = true;
 	return 0;
@@ -1472,27 +1574,44 @@ static int tquic_process_stop_sending_frame(struct tquic_rx_ctx *ctx)
 	pr_debug("tquic: STOP_SENDING stream=%llu error=%llu\n", stream_id,
 		 error_code);
 
-	/* Mark stream as send-closed */
-	spin_lock_bh(&ctx->conn->lock);
-	{
-		struct rb_node *node = ctx->conn->streams.rb_node;
+	/*
+	 * RFC 9000 Section 19.5: Peer requests we stop sending on this stream.
+	 * Use the exported stream API to shut down the write side cleanly
+	 * (sets fin_sent, wakes blocked writers, triggers RESET_STREAM).
+	 */
+	if (ctx->conn->stream_mgr) {
+		struct tquic_stream *s;
 
-		while (node) {
-			struct tquic_stream *s =
-				rb_entry(node, struct tquic_stream, node);
+		spin_lock_bh(&ctx->conn->lock);
+		s = tquic_conn_stream_lookup(ctx->conn, stream_id);
+		spin_unlock_bh(&ctx->conn->lock);
 
-			if (stream_id < s->id) {
-				node = node->rb_left;
-			} else if (stream_id > s->id) {
-				node = node->rb_right;
-			} else {
-				s->fin_sent = true;
-				wake_up_interruptible(&s->wait);
-				break;
+		if (s)
+			tquic_stream_shutdown_write(ctx->conn->stream_mgr, s);
+	} else {
+		/* Fallback: direct state update if stream_mgr unavailable */
+		spin_lock_bh(&ctx->conn->lock);
+		{
+			struct rb_node *node = ctx->conn->streams.rb_node;
+
+			while (node) {
+				struct tquic_stream *s =
+					rb_entry(node, struct tquic_stream,
+						 node);
+
+				if (stream_id < s->id) {
+					node = node->rb_left;
+				} else if (stream_id > s->id) {
+					node = node->rb_right;
+				} else {
+					s->fin_sent = true;
+					wake_up_interruptible(&s->wait);
+					break;
+				}
 			}
 		}
+		spin_unlock_bh(&ctx->conn->lock);
 	}
-	spin_unlock_bh(&ctx->conn->lock);
 
 	ctx->ack_eliciting = true;
 	return 0;
@@ -1519,6 +1638,10 @@ static int tquic_process_max_streams_frame(struct tquic_rx_ctx *ctx, bool bidi)
 
 	tquic_dbg("process_max_streams: %s max=%llu\n", bidi ? "bidi" : "uni",
 		  max_streams);
+
+	/* Update RFC 9000 Section 4.6 stream count FC state */
+	if (ctx->conn->fc)
+		tquic_fc_handle_max_streams(ctx->conn->fc, max_streams, bidi);
 
 	/* Only increase, per RFC 9000 */
 	spin_lock_bh(&ctx->conn->lock);
@@ -1556,6 +1679,16 @@ static int tquic_process_data_blocked_frame(struct tquic_rx_ctx *ctx)
 
 	pr_debug("tquic: DATA_BLOCKED at limit=%llu\n", limit);
 
+	/*
+	 * RFC 9000 Section 4.1: Peer is blocked by our receive window.
+	 * Update FC state and trigger a MAX_DATA update so the peer
+	 * can make progress.
+	 */
+	if (ctx->conn->fc) {
+		tquic_fc_handle_data_blocked(ctx->conn->fc, limit);
+		tquic_output_flush(ctx->conn);
+	}
+
 	ctx->ack_eliciting = true;
 	return 0;
 }
@@ -1587,6 +1720,33 @@ static int tquic_process_stream_data_blocked_frame(struct tquic_rx_ctx *ctx)
 	pr_debug("tquic: STREAM_DATA_BLOCKED stream=%llu limit=%llu\n",
 		 stream_id, limit);
 
+	/*
+	 * RFC 9000 Section 4.2: Peer is blocked on stream-level FC.
+	 * Update FC state and trigger MAX_STREAM_DATA so peer can
+	 * make progress.
+	 */
+	spin_lock_bh(&ctx->conn->lock);
+	{
+		struct rb_node *node = ctx->conn->streams.rb_node;
+
+		while (node) {
+			struct tquic_stream *s =
+				rb_entry(node, struct tquic_stream, node);
+
+			if (stream_id < s->id) {
+				node = node->rb_left;
+			} else if (stream_id > s->id) {
+				node = node->rb_right;
+			} else {
+				if (s->fc)
+					tquic_fc_handle_stream_data_blocked(
+						s->fc, limit);
+				break;
+			}
+		}
+	}
+	spin_unlock_bh(&ctx->conn->lock);
+
 	ctx->ack_eliciting = true;
 	return 0;
 }
@@ -1596,7 +1756,8 @@ static int tquic_process_stream_data_blocked_frame(struct tquic_rx_ctx *ctx)
  *
  * RFC 9000 Section 19.14: Peer is blocked by MAX_STREAMS limit.
  */
-static int tquic_process_streams_blocked_frame(struct tquic_rx_ctx *ctx)
+static int tquic_process_streams_blocked_frame(struct tquic_rx_ctx *ctx,
+					       bool bidi)
 {
 	u64 limit;
 	int ret;
@@ -1610,6 +1771,13 @@ static int tquic_process_streams_blocked_frame(struct tquic_rx_ctx *ctx)
 	ctx->offset += ret;
 
 	pr_debug("tquic: STREAMS_BLOCKED at limit=%llu\n", limit);
+
+	/*
+	 * RFC 9000 Section 4.6: Peer is blocked on MAX_STREAMS.
+	 * Update FC state so autotune can consider increasing the limit.
+	 */
+	if (ctx->conn->fc)
+		tquic_fc_handle_streams_blocked(ctx->conn->fc, limit, bidi);
 
 	ctx->ack_eliciting = true;
 	return 0;
@@ -1631,8 +1799,11 @@ static int tquic_process_path_challenge_frame(struct tquic_rx_ctx *ctx)
 	memcpy(data, ctx->data + ctx->offset, 8);
 	ctx->offset += 8;
 
-	/* Handle challenge through path validation module */
-	ret = tquic_path_handle_challenge(ctx->conn, ctx->path, data);
+	/*
+	 * RFC 9000 Section 8.2: Handle PATH_CHALLENGE via the exported
+	 * connection-layer API which sends a PATH_RESPONSE in reply.
+	 */
+	ret = tquic_handle_path_challenge(ctx->conn, ctx->path, data);
 	if (ret < 0 && ret != -ENOBUFS) {
 		/* Log error but don't fail packet processing */
 		tquic_dbg("PATH_CHALLENGE handling failed: %d\n", ret);
@@ -1661,8 +1832,25 @@ static int tquic_process_path_response_frame(struct tquic_rx_ctx *ctx)
 	memcpy(data, ctx->data + ctx->offset, 8);
 	ctx->offset += 8;
 
-	/* Handle response through path validation module */
-	ret = tquic_path_handle_response(ctx->conn, ctx->path, data);
+	/*
+	 * RFC 9000 Section 8.2.2: Verify the PATH_RESPONSE data matches
+	 * the per-path challenge we sent (stored in path->validation).
+	 * tquic_path_verify_response() does a constant-time compare of
+	 * the 8-byte challenge token.  If the per-path check passes we
+	 * mark the path validated directly; if it fails we still try the
+	 * connection-layer pending-challenges list (tquic_handle_path_response)
+	 * which handles challenges issued from the conn state machine.
+	 */
+	if (ctx->path && tquic_path_verify_response(ctx->path, data)) {
+		ctx->path->validation.challenge_pending = false;
+		tquic_path_on_validated(ctx->conn, ctx->path);
+	}
+
+	/*
+	 * RFC 9000 Section 8.2: Handle PATH_RESPONSE via the exported
+	 * connection-layer API which validates the pending challenge.
+	 */
+	ret = tquic_handle_path_response(ctx->conn, ctx->path, data);
 	if (ret == 0) {
 		/* Update MIB counter for successful path validation */
 		if (ctx->conn && ctx->conn->sk)
@@ -2029,40 +2217,30 @@ static int tquic_process_new_token(struct tquic_rx_ctx *ctx)
  * DATAGRAM frames carry unreliable, unordered application data.
  * Unlike STREAM frames, there is no retransmission or ordering.
  *
- * Frame format:
- *   Type (0x30 or 0x31): 1 byte
- *   [Length]: varint (only if Type & 0x01)
- *   Data: remaining bytes
+ * Wire parsing is delegated to tquic_parse_datagram_frame() which
+ * handles both the 0x30 (no length) and 0x31 (with length) variants,
+ * validates all bounds, and returns a tquic_frame with the data
+ * pointer and length filled in.
  */
 static int tquic_process_datagram_frame(struct tquic_rx_ctx *ctx)
 {
-	u8 frame_type = ctx->data[ctx->offset];
-	bool has_length = (frame_type & 0x01) != 0;
+	struct tquic_frame frame = {};
 	u64 length;
 	struct sk_buff *dgram_skb;
-	int ret;
-
-	ctx->offset++; /* Skip frame type */
-
-	/* Parse length field if present (0x31), otherwise use remaining bytes */
-	if (has_length) {
-		ret = tquic_decode_varint(ctx->data + ctx->offset,
-					  ctx->len - ctx->offset, &length);
-		if (ret < 0)
-			return ret;
-		ctx->offset += ret;
-	} else {
-		/* Type 0x30: datagram extends to end of packet */
-		length = ctx->len - ctx->offset;
-	}
+	int consumed;
 
 	/*
-	 * SECURITY: Validate datagram length to prevent integer overflow.
-	 * length is u64; compare against remaining bytes (safe size_t)
-	 * to avoid overflow in ctx->offset + length on 32-bit.
+	 * tquic_parse_datagram_frame() parses the frame type, optional
+	 * length varint, and records a pointer into the packet buffer.
+	 * It returns the total number of bytes consumed (type + length
+	 * varint + data).  Security bounds-checking is centralised there.
 	 */
-	if (length > ctx->len - ctx->offset)
-		return -EINVAL;
+	consumed = tquic_parse_datagram_frame(ctx->data + ctx->offset,
+					      ctx->len - ctx->offset, &frame);
+	if (consumed < 0)
+		return consumed;
+
+	length = frame.datagram.length;
 
 	/* Check if datagram support is enabled on this connection */
 	if (!ctx->conn || !ctx->conn->datagram.enabled) {
@@ -2093,7 +2271,7 @@ static int tquic_process_datagram_frame(struct tquic_rx_ctx *ctx)
 					TQUIC_MIB_DATAGRAMSDROPPED);
 		tquic_dbg("DATAGRAM dropped, queue full\n");
 		/* Continue processing - this is not a fatal error */
-		ctx->offset += length;
+		ctx->offset += consumed;
 		ctx->ack_eliciting = true;
 		return 0;
 	}
@@ -2107,13 +2285,13 @@ static int tquic_process_datagram_frame(struct tquic_rx_ctx *ctx)
 		if (ctx->conn->sk)
 			TQUIC_INC_STATS(sock_net(ctx->conn->sk),
 					TQUIC_MIB_DATAGRAMSDROPPED);
-		ctx->offset += length;
+		ctx->offset += consumed;
 		ctx->ack_eliciting = true;
 		return 0; /* Not fatal, continue */
 	}
 
-	/* Copy datagram payload */
-	skb_put_data(dgram_skb, ctx->data + ctx->offset, length);
+	/* Copy datagram payload using pointer from parsed frame */
+	skb_put_data(dgram_skb, frame.datagram.data, length);
 
 	/* Store receive timestamp in SKB cb -- ensure it fits */
 	BUILD_BUG_ON(sizeof(struct timespec64) > sizeof(dgram_skb->cb));
@@ -2139,7 +2317,12 @@ static int tquic_process_datagram_frame(struct tquic_rx_ctx *ctx)
 	if (ctx->conn->sk)
 		ctx->conn->sk->sk_data_ready(ctx->conn->sk);
 
-	ctx->offset += length;
+	/*
+	 * Advance by the total number of bytes consumed by the frame
+	 * (type byte + optional length varint + data), as returned by
+	 * tquic_parse_datagram_frame().
+	 */
+	ctx->offset += consumed;
 	ctx->ack_eliciting = true;
 
 	tquic_dbg("received DATAGRAM, len=%llu\n", length);
@@ -2780,7 +2963,9 @@ int tquic_process_frames(struct tquic_connection *conn, struct tquic_path *path,
 					"STREAMS_BLOCKED in I/HS");
 				return -EPROTO;
 			}
-			ret = tquic_process_streams_blocked_frame(&ctx);
+			ret = tquic_process_streams_blocked_frame(
+				&ctx,
+				frame_type == TQUIC_FRAME_STREAMS_BLOCKED_BIDI);
 		} else if (frame_type == TQUIC_FRAME_PATH_CHALLENGE) {
 			if (is_initial || is_handshake) {
 				conn->error_code = EQUIC_FRAME_ENCODING;
@@ -2926,8 +3111,14 @@ int tquic_process_frames(struct tquic_connection *conn, struct tquic_path *path,
 			 * "An endpoint MUST treat the receipt of a frame of
 			 * unknown type as a connection error of type
 			 * FRAME_ENCODING_ERROR."
+			 *
+			 * tquic_frame_type_name() provides a canonical name
+			 * for any frame type byte, returning "UNKNOWN" for
+			 * unrecognised values, enabling consistent diagnostics.
 			 */
-			tquic_dbg("unknown frame type 0x%02x\n", frame_type);
+			tquic_dbg("unknown frame type 0x%02x (%s)\n",
+				  frame_type,
+				  tquic_frame_type_name(frame_type));
 			conn->error_code = EQUIC_FRAME_ENCODING;
 			tquic_conn_close_with_error(conn, EQUIC_FRAME_ENCODING,
 						    "unknown frame type");
@@ -2937,17 +3128,31 @@ int tquic_process_frames(struct tquic_connection *conn, struct tquic_path *path,
 		if (ret < 0) {
 			if (is_initial)
 				pr_debug("process_frames: handler ret=%d "
-					 "for frame 0x%02x at offset=%zu\n",
-					 ret, frame_type, prev_offset);
+					 "for frame 0x%02x (%s) at offset=%zu\n",
+					 ret, frame_type,
+					 tquic_frame_type_name(frame_type),
+					 prev_offset);
 			break;
 		}
+
+		/*
+		 * Consolidate ack-eliciting status using the canonical
+		 * tquic_frame_is_ack_eliciting() predicate (RFC 9000
+		 * Section 13.2).  Individual handlers may set
+		 * ctx.ack_eliciting = true for their frame type;
+		 * this OR-in ensures the flag is always set correctly
+		 * even if a handler forgets to do so.
+		 */
+		if (tquic_frame_is_ack_eliciting(frame_type))
+			ctx.ack_eliciting = true;
 
 		/* Detect stuck parsing (no progress made) */
 		if (ctx.offset == prev_offset) {
 			if (is_initial)
 				pr_debug("process_frames: stuck at offset=%zu "
-					 "frame=0x%02x\n",
-					 ctx.offset, frame_type);
+					 "frame=0x%02x (%s)\n",
+					 ctx.offset, frame_type,
+					 tquic_frame_type_name(frame_type));
 			return -EPROTO;
 		}
 	}

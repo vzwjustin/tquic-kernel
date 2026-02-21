@@ -18,6 +18,7 @@
 #define QUIC_MAX_PACKET_SIZE 1500
 #define QUIC_ERROR_INTERNAL_ERROR 0x01
 #include "transport_params.h"
+#include "flow_control.h"
 #include "../tquic_cid.h"
 #include "../tquic_debug.h"
 #include "../cong/tquic_cong.h"
@@ -41,6 +42,8 @@
 #ifdef CONFIG_TQUIC_PATH_MANAGER
 #include <net/tquic_pm.h>
 #endif
+#include "quic_loss.h"
+#include "stream.h"
 
 static const struct rhashtable_params tquic_conn_table_params = {
 	.key_len = sizeof(struct tquic_cid),
@@ -376,6 +379,7 @@ static void tquic_conn_init_flow_control(struct tquic_connection *conn)
 {
 	struct tquic_flow_control *local = &conn->local_fc;
 	struct tquic_flow_control *remote = &conn->remote_fc;
+
 	tquic_dbg("tquic_conn_init_flow_control: max_data=%llu\n",
 		  conn->local_params.initial_max_data);
 
@@ -661,6 +665,14 @@ static void tquic_conn_tx_work(struct work_struct *work)
 							    rate);
 				tquic_timer_schedule_pacing(conn->timer_state,
 							    pkt_len);
+
+				/*
+				 * Propagate bandwidth estimate to RFC 9000
+				 * Section 4 flow control for BDP auto-tuning.
+				 */
+				if (conn->fc && rate)
+					tquic_fc_update_bandwidth(conn->fc,
+								  rate);
 			}
 
 			total_sent++;
@@ -710,6 +722,7 @@ static void tquic_conn_close_work(struct work_struct *work)
 	struct tquic_connection *conn =
 		container_of(work, struct tquic_connection, close_work);
 	unsigned long flags;
+
 	tquic_dbg("tquic_conn_close_work: processing connection close\n");
 
 	spin_lock_irqsave(&conn->lock, flags);
@@ -738,7 +751,8 @@ struct tquic_connection *tquic_conn_create(struct tquic_sock *tsk,
 	spin_lock_init(&conn->lock);
 	conn->state = TQUIC_CONN_IDLE;
 	conn->version = tsk->config.version ? tsk->config.version :
-					      TQUIC_VERSION_1;
+			(!is_server ? tquic_version_select_for_initial() :
+				      TQUIC_VERSION_1);
 	conn->is_server = is_server;
 
 	/* Generate source connection ID */
@@ -798,6 +812,19 @@ struct tquic_connection *tquic_conn_create(struct tquic_sock *tsk,
 	tquic_conn_init_local_params(conn, &tsk->config);
 	tquic_conn_init_flow_control(conn);
 
+	/* Initialize RFC 9000 flow control state (Section 4) */
+	if (tquic_fc_init(conn, NULL) < 0)
+		goto err_free_pn_spaces;
+
+	/*
+	 * Apply the global autotune sysctl to the newly-created FC state.
+	 * tquic_fc_set_autotune enables or disables BDP-based receive window
+	 * growth for the duration of this connection.
+	 */
+	if (conn->fc)
+		tquic_fc_set_autotune(conn->fc,
+				      tquic_sysctl_get_fc_autotune_enabled());
+
 	/* Initialize timers */
 	timer_setup(&conn->timers[TQUIC_TIMER_LOSS], tquic_timer_loss_cb, 0);
 	timer_setup(&conn->timers[TQUIC_TIMER_ACK], tquic_timer_ack_cb, 0);
@@ -839,6 +866,13 @@ struct tquic_connection *tquic_conn_create(struct tquic_sock *tsk,
 
 	/* Initialize datagram state (wait queue, recv queue, etc.) */
 	tquic_datagram_init(conn);
+
+	/*
+	 * Allocate the stream manager that backs the exported stream API
+	 * (tquic_stream_reset_recv, tquic_stream_update_max_data, etc.).
+	 * Non-fatal: stream manager functions will no-op if NULL.
+	 */
+	conn->stream_mgr = tquic_stream_manager_create(conn, is_server);
 
 	/* Initialize statistics */
 	memset(&conn->stats, 0, sizeof(conn->stats));
@@ -984,6 +1018,9 @@ void tquic_conn_destroy(struct tquic_connection *conn)
 	cancel_work_sync(&conn->tx_work);
 	cancel_work_sync(&conn->close_work);
 
+	/* Release RFC 9000 flow control state (Section 4) */
+	tquic_fc_cleanup(conn);
+
 	/*
 	 * Destroy streams with refcount safety.
 	 *
@@ -1042,6 +1079,12 @@ void tquic_conn_destroy(struct tquic_connection *conn)
 	list_for_each_entry_safe(entry, tmp_entry, &conn->dcid_list, list) {
 		tquic_cid_entry_destroy(entry);
 	}
+
+	/*
+	 * Clean up loss detection state (timers, sent-packet lists).
+	 * Must run before pn_spaces are freed so the lists are still valid.
+	 */
+	tquic_loss_cleanup(conn);
 
 	/* Destroy packet number spaces */
 	if (conn->pn_spaces) {
@@ -1117,6 +1160,17 @@ void tquic_conn_destroy(struct tquic_connection *conn)
 		conn->gro = NULL;
 	}
 #endif /* CONFIG_TQUIC_NAPI */
+
+	/*
+	 * Destroy the stream manager allocated during tquic_conn_create.
+	 * This releases the SLAB caches and any remaining stream objects
+	 * tracked by the manager (separate from conn->streams which is
+	 * torn down above via the embedded RB-tree walk).
+	 */
+	if (conn->stream_mgr) {
+		tquic_stream_manager_destroy(conn->stream_mgr);
+		conn->stream_mgr = NULL;
+	}
 
 	kfree(conn->reason_phrase);
 	kmem_cache_free(tquic_conn_cache, conn);
@@ -1681,6 +1735,20 @@ int tquic_transport_param_apply(struct tquic_connection *conn)
 	conn->remote_fc.max_streams_bidi = params->initial_max_streams_bidi;
 	conn->remote_fc.max_streams_uni = params->initial_max_streams_uni;
 
+	/*
+	 * Propagate remote transport parameters to RFC 9000 Section 4
+	 * flow control state so FC functions use peer-advertised limits.
+	 */
+	if (conn->fc) {
+		tquic_fc_handle_max_data(conn->fc, params->initial_max_data);
+		tquic_fc_handle_max_streams(conn->fc,
+					    params->initial_max_streams_bidi,
+					    true);
+		tquic_fc_handle_max_streams(conn->fc,
+					    params->initial_max_streams_uni,
+					    false);
+	}
+
 	/* Update stream limits */
 	if (conn->is_server) {
 		conn->max_stream_id_bidi =
@@ -1736,6 +1804,7 @@ int tquic_transport_param_apply(struct tquic_connection *conn)
 	 */
 	if (!conn->is_server && params->preferred_address_present) {
 		int ret = tquic_conn_migrate_to_preferred_address(conn);
+
 		if (ret < 0) {
 			pr_debug(
 				"TQUIC: Failed to initiate preferred address migration: %d\n",
@@ -1889,6 +1958,7 @@ EXPORT_SYMBOL_GPL(tquic_transport_param_encode);
 int tquic_transport_param_validate(struct tquic_connection *conn)
 {
 	struct tquic_transport_params *params = &conn->remote_params;
+
 	tquic_conn_dbg(
 		conn,
 		"tquic_transport_param_validate: validating remote params\n");

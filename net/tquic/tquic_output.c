@@ -32,6 +32,7 @@
 #include <crypto/aead.h>
 #include <crypto/skcipher.h>
 #include <net/tquic.h>
+#include <net/tquic_frame.h>
 
 #include "tquic_compat.h"
 #include "tquic_debug.h"
@@ -47,8 +48,11 @@
 #include "core/mp_frame.h"
 #include "core/quic_loss.h"
 #include "core/quic_output.h"
+#include "core/quic_path.h"
+#include "core/flow_control.h"
 #include "bond/tquic_bonding.h"
 #include "bond/tquic_failover.h"
+#include "core/stream.h"
 
 #ifdef CONFIG_TQUIC_OFFLOAD
 #include "offload/smartnic.h"
@@ -204,12 +208,15 @@ static void tquic_pacing_work(struct work_struct *work);
  * Variable Length Integer Encoding (QUIC RFC 9000)
  * =============================================================================
  *
- * tquic_varint_len and other varint functions are defined in core/varint.c
+ * tquic_varint_encode_len() (exported by core/frame.c via <net/tquic_frame.h>)
+ * returns the number of bytes needed to encode a QUIC variable-length integer.
+ * Using it here instead of the internal tquic_varint_len() keeps all size
+ * calculations routed through the canonical exported symbol.
  */
 
 static inline int tquic_encode_varint(u8 *buf, size_t buf_len, u64 val)
 {
-	int len = tquic_varint_len(val);
+	int len = (int)tquic_varint_encode_len(val);
 
 	tquic_dbg("encode_varint: val=%llu buf_len=%zu\n", val, buf_len);
 
@@ -259,15 +266,17 @@ static inline int tquic_encode_varint(u8 *buf, size_t buf_len, u64 val)
  */
 static int tquic_gen_padding_frame(struct tquic_frame_ctx *ctx, size_t len)
 {
+	int ret;
+
 	tquic_dbg("gen_padding: len=%zu offset=%zu\n", len, ctx->offset);
 
-	if (ctx->offset + len > ctx->buf_len)
-		return -ENOSPC;
+	ret = tquic_write_padding_frame(ctx->buf + ctx->offset,
+					ctx->buf_len - ctx->offset, len);
+	if (ret < 0)
+		return ret;
+	ctx->offset += ret;
 
-	memset(ctx->buf + ctx->offset, 0, len);
-	ctx->offset += len;
-
-	return len;
+	return ret;
 }
 
 /*
@@ -275,15 +284,18 @@ static int tquic_gen_padding_frame(struct tquic_frame_ctx *ctx, size_t len)
  */
 static int tquic_gen_ping_frame(struct tquic_frame_ctx *ctx)
 {
+	int ret;
+
 	tquic_dbg("gen_ping: offset=%zu\n", ctx->offset);
 
-	if (ctx->offset + 1 > ctx->buf_len)
-		return -ENOSPC;
+	ret = tquic_write_ping_frame(ctx->buf + ctx->offset,
+				     ctx->buf_len - ctx->offset);
+	if (ret < 0)
+		return ret;
+	ctx->offset += ret;
+	ctx->ack_eliciting = tquic_frame_is_ack_eliciting(TQUIC_FRAME_PING);
 
-	ctx->buf[ctx->offset++] = TQUIC_FRAME_PING;
-	ctx->ack_eliciting = true;
-
-	return 1;
+	return ret;
 }
 
 /*
@@ -293,41 +305,24 @@ static int tquic_gen_ack_frame(struct tquic_frame_ctx *ctx, u64 largest_ack,
 			       u64 ack_delay, u64 ack_range_count,
 			       u64 first_ack_range)
 {
-	u8 *start = ctx->buf + ctx->offset;
 	int ret;
 
-	if (ctx->offset + 1 > ctx->buf_len)
-		return -ENOSPC;
-
-	ctx->buf[ctx->offset++] = TQUIC_FRAME_ACK;
-
-	ret = tquic_encode_varint(ctx->buf + ctx->offset,
-				  ctx->buf_len - ctx->offset, largest_ack);
+	/*
+	 * ack_range_count here is the count of *additional* ranges beyond
+	 * the first. Pass NULL for ranges array when count is 0 (common
+	 * case in this simplified builder).
+	 */
+	ret = tquic_write_ack_frame(ctx->buf + ctx->offset,
+				    ctx->buf_len - ctx->offset,
+				    largest_ack, ack_delay, first_ack_range,
+				    NULL, 0, false, 0, 0, 0);
 	if (ret < 0)
 		return ret;
 	ctx->offset += ret;
 
-	ret = tquic_encode_varint(ctx->buf + ctx->offset,
-				  ctx->buf_len - ctx->offset, ack_delay);
-	if (ret < 0)
-		return ret;
-	ctx->offset += ret;
+	/* ACK frames are not ack-eliciting (RFC 9000 Section 13.2) */
 
-	ret = tquic_encode_varint(ctx->buf + ctx->offset,
-				  ctx->buf_len - ctx->offset, ack_range_count);
-	if (ret < 0)
-		return ret;
-	ctx->offset += ret;
-
-	ret = tquic_encode_varint(ctx->buf + ctx->offset,
-				  ctx->buf_len - ctx->offset, first_ack_range);
-	if (ret < 0)
-		return ret;
-	ctx->offset += ret;
-
-	/* Note: ACK frames are not ack-eliciting */
-
-	return ctx->buf + ctx->offset - start;
+	return ret;
 }
 
 /*
@@ -336,34 +331,28 @@ static int tquic_gen_ack_frame(struct tquic_frame_ctx *ctx, u64 largest_ack,
 static int tquic_gen_crypto_frame(struct tquic_frame_ctx *ctx, u64 offset,
 				  const u8 *data, size_t data_len)
 {
-	u8 *start = ctx->buf + ctx->offset;
+	size_t needed;
 	int ret;
 
-	if (ctx->offset + 1 > ctx->buf_len)
+	/*
+	 * Use tquic_crypto_frame_size() to verify the frame fits in the
+	 * remaining buffer space before committing to the write.  This
+	 * mirrors the ACK/PADDING patterns in this file and avoids
+	 * relying solely on the -ENOSPC return from tquic_write_crypto_frame.
+	 */
+	needed = tquic_crypto_frame_size(offset, (u64)data_len);
+	if (ctx->offset + needed > ctx->buf_len)
 		return -ENOSPC;
 
-	ctx->buf[ctx->offset++] = TQUIC_FRAME_CRYPTO;
-
-	ret = tquic_encode_varint(ctx->buf + ctx->offset,
-				  ctx->buf_len - ctx->offset, offset);
+	ret = tquic_write_crypto_frame(ctx->buf + ctx->offset,
+				       ctx->buf_len - ctx->offset,
+				       offset, data, data_len);
 	if (ret < 0)
 		return ret;
 	ctx->offset += ret;
+	ctx->ack_eliciting = tquic_frame_is_ack_eliciting(TQUIC_FRAME_CRYPTO);
 
-	ret = tquic_encode_varint(ctx->buf + ctx->offset,
-				  ctx->buf_len - ctx->offset, data_len);
-	if (ret < 0)
-		return ret;
-	ctx->offset += ret;
-
-	if (ctx->offset + data_len > ctx->buf_len)
-		return -ENOSPC;
-
-	memcpy(ctx->buf + ctx->offset, data, data_len);
-	ctx->offset += data_len;
-	ctx->ack_eliciting = true;
-
-	return ctx->buf + ctx->offset - start;
+	return ret;
 }
 
 /*
@@ -373,59 +362,35 @@ static int tquic_gen_stream_frame(struct tquic_frame_ctx *ctx, u64 stream_id,
 				  u64 offset, const u8 *data, size_t data_len,
 				  bool fin)
 {
-	u8 *start = ctx->buf + ctx->offset;
-	u8 frame_type = TQUIC_FRAME_STREAM;
+	bool has_offset = (offset > 0);
+	size_t needed;
 	int ret;
 
-	/* Build frame type with flags */
-	if (offset > 0)
-		frame_type |= 0x04; /* OFF bit */
-	frame_type |= 0x02; /* LEN bit (always include length) */
-	if (fin)
-		frame_type |= 0x01; /* FIN bit */
-
-	if (ctx->offset + 1 > ctx->buf_len)
-		return -ENOSPC;
-
-	ctx->buf[ctx->offset++] = frame_type;
-
-	/* Stream ID */
-	ret = tquic_encode_varint(ctx->buf + ctx->offset,
-				  ctx->buf_len - ctx->offset, stream_id);
-	if (ret < 0)
-		return ret;
-	ctx->offset += ret;
-
-	/* Offset (if present) */
-	if (offset > 0) {
-		ret = tquic_encode_varint(ctx->buf + ctx->offset,
-					  ctx->buf_len - ctx->offset, offset);
-		if (ret < 0)
-			return ret;
-		ctx->offset += ret;
-	}
-
-	/* Length */
-	ret = tquic_encode_varint(ctx->buf + ctx->offset,
-				  ctx->buf_len - ctx->offset, data_len);
-	if (ret < 0)
-		return ret;
-	ctx->offset += ret;
-
-	/* Data - single copy directly into packet buffer */
-	if (ctx->offset + data_len > ctx->buf_len)
+	/*
+	 * tquic_stream_frame_size() calculates the exact encoded byte count
+	 * including the type byte, stream ID varint, optional offset varint,
+	 * length varint, and payload.  Pre-checking with it ensures we never
+	 * attempt a write that is guaranteed to fail with -ENOSPC.
+	 */
+	needed = tquic_stream_frame_size(stream_id, offset, (u64)data_len,
+					 has_offset, true);
+	if (ctx->offset + needed > ctx->buf_len)
 		return -ENOSPC;
 
 	/*
-	 * Zero-copy optimization: Only one memcpy here.
-	 * The data pointer now references the original source
-	 * (user buffer or skb data), avoiding intermediate allocation.
+	 * Always include length field (LEN bit) for non-terminal frames
+	 * so frames can be coalesced in the same packet.
 	 */
-	memcpy(ctx->buf + ctx->offset, data, data_len);
-	ctx->offset += data_len;
-	ctx->ack_eliciting = true;
+	ret = tquic_write_stream_frame(ctx->buf + ctx->offset,
+				       ctx->buf_len - ctx->offset,
+				       stream_id, offset, data, data_len,
+				       has_offset, true, fin);
+	if (ret < 0)
+		return ret;
+	ctx->offset += ret;
+	ctx->ack_eliciting = tquic_frame_is_ack_eliciting(TQUIC_FRAME_STREAM);
 
-	return ctx->buf + ctx->offset - start;
+	return ret;
 }
 
 static int tquic_gen_stream_frame_skb(struct tquic_frame_ctx *ctx,
@@ -482,7 +447,8 @@ static int tquic_gen_stream_frame_skb(struct tquic_frame_ctx *ctx,
 		return -EFAULT;
 
 	ctx->offset += data_len;
-	ctx->ack_eliciting = true;
+	ctx->ack_eliciting =
+		tquic_frame_is_ack_eliciting(TQUIC_FRAME_STREAM);
 
 	return ctx->buf + ctx->offset - start;
 }
@@ -492,25 +458,25 @@ static int tquic_gen_stream_frame_skb(struct tquic_frame_ctx *ctx,
  */
 static int tquic_gen_max_data_frame(struct tquic_frame_ctx *ctx, u64 max_data)
 {
-	u8 *start = ctx->buf + ctx->offset;
+	size_t needed;
 	int ret;
 
 	tquic_dbg("gen_max_data: max_data=%llu\n", max_data);
 
-	if (ctx->offset + 1 > ctx->buf_len)
+	/* Pre-check space using canonical size function. */
+	needed = tquic_max_data_frame_size(max_data);
+	if (ctx->offset + needed > ctx->buf_len)
 		return -ENOSPC;
 
-	ctx->buf[ctx->offset++] = TQUIC_FRAME_MAX_DATA;
-
-	ret = tquic_encode_varint(ctx->buf + ctx->offset,
-				  ctx->buf_len - ctx->offset, max_data);
+	ret = tquic_write_max_data_frame(ctx->buf + ctx->offset,
+					 ctx->buf_len - ctx->offset, max_data);
 	if (ret < 0)
 		return ret;
 	ctx->offset += ret;
+	ctx->ack_eliciting =
+		tquic_frame_is_ack_eliciting(TQUIC_FRAME_MAX_DATA);
 
-	ctx->ack_eliciting = true;
-
-	return ctx->buf + ctx->offset - start;
+	return ret;
 }
 
 /*
@@ -519,63 +485,166 @@ static int tquic_gen_max_data_frame(struct tquic_frame_ctx *ctx, u64 max_data)
 static int tquic_gen_max_stream_data_frame(struct tquic_frame_ctx *ctx,
 					   u64 stream_id, u64 max_data)
 {
-	u8 *start = ctx->buf + ctx->offset;
+	size_t needed;
 	int ret;
 
-	if (ctx->offset + 1 > ctx->buf_len)
+	/* Pre-check space using canonical size function. */
+	needed = tquic_max_stream_data_frame_size(stream_id, max_data);
+	if (ctx->offset + needed > ctx->buf_len)
 		return -ENOSPC;
 
-	ctx->buf[ctx->offset++] = TQUIC_FRAME_MAX_STREAM_DATA;
-
-	ret = tquic_encode_varint(ctx->buf + ctx->offset,
-				  ctx->buf_len - ctx->offset, stream_id);
+	ret = tquic_write_max_stream_data_frame(ctx->buf + ctx->offset,
+						ctx->buf_len - ctx->offset,
+						stream_id, max_data);
 	if (ret < 0)
 		return ret;
 	ctx->offset += ret;
+	ctx->ack_eliciting =
+		tquic_frame_is_ack_eliciting(TQUIC_FRAME_MAX_STREAM_DATA);
 
-	ret = tquic_encode_varint(ctx->buf + ctx->offset,
-				  ctx->buf_len - ctx->offset, max_data);
+	return ret;
+}
+
+/*
+ * Generate DATA_BLOCKED frame
+ *
+ * RFC 9000 Section 19.12: Signals that the connection is blocked at
+ * the given limit.  The peer should respond with MAX_DATA to open credit.
+ */
+static int tquic_gen_data_blocked_frame(struct tquic_frame_ctx *ctx,
+					u64 limit)
+{
+	int ret;
+
+	ret = tquic_write_data_blocked_frame(ctx->buf + ctx->offset,
+					     ctx->buf_len - ctx->offset,
+					     limit);
 	if (ret < 0)
 		return ret;
 	ctx->offset += ret;
+	ctx->ack_eliciting =
+		tquic_frame_is_ack_eliciting(TQUIC_FRAME_DATA_BLOCKED);
 
-	ctx->ack_eliciting = true;
+	return ret;
+}
 
-	return ctx->buf + ctx->offset - start;
+/*
+ * Generate STREAM_DATA_BLOCKED frame
+ *
+ * RFC 9000 Section 19.13: Signals that this stream is blocked at the given
+ * per-stream limit.  The peer should respond with MAX_STREAM_DATA.
+ */
+static int tquic_gen_stream_data_blocked_frame(struct tquic_frame_ctx *ctx,
+					       u64 stream_id, u64 limit)
+{
+	int ret;
+
+	ret = tquic_write_stream_data_blocked_frame(ctx->buf + ctx->offset,
+						    ctx->buf_len - ctx->offset,
+						    stream_id, limit);
+	if (ret < 0)
+		return ret;
+	ctx->offset += ret;
+	ctx->ack_eliciting =
+		tquic_frame_is_ack_eliciting(TQUIC_FRAME_STREAM_DATA_BLOCKED);
+
+	return ret;
+}
+
+/*
+ * Generate MAX_STREAMS frame
+ *
+ * RFC 9000 Section 19.11: Advertises new peer stream-open limit.
+ * bidi=true -> BIDI (0x12), bidi=false -> UNI (0x13).
+ */
+static int tquic_gen_max_streams_frame(struct tquic_frame_ctx *ctx,
+				       u64 max_streams, bool bidi)
+{
+	int ret;
+
+	ret = tquic_write_max_streams_frame(ctx->buf + ctx->offset,
+					    ctx->buf_len - ctx->offset,
+					    max_streams, bidi);
+	if (ret < 0)
+		return ret;
+	ctx->offset += ret;
+	ctx->ack_eliciting = tquic_frame_is_ack_eliciting(
+		bidi ? TQUIC_FRAME_MAX_STREAMS_BIDI :
+		       TQUIC_FRAME_MAX_STREAMS_UNI);
+
+	return ret;
+}
+
+/*
+ * Generate STREAMS_BLOCKED frame
+ *
+ * RFC 9000 Section 19.14: Signals we are blocked from opening new streams
+ * at the given limit.  The peer should respond with MAX_STREAMS.
+ * bidi=true -> BIDI (0x16), bidi=false -> UNI (0x17).
+ */
+static int tquic_gen_streams_blocked_frame(struct tquic_frame_ctx *ctx,
+					   u64 limit, bool bidi)
+{
+	int ret;
+
+	ret = tquic_write_streams_blocked_frame(ctx->buf + ctx->offset,
+						ctx->buf_len - ctx->offset,
+						limit, bidi);
+	if (ret < 0)
+		return ret;
+	ctx->offset += ret;
+	ctx->ack_eliciting = tquic_frame_is_ack_eliciting(
+		bidi ? TQUIC_FRAME_STREAMS_BLOCKED_BIDI :
+		       TQUIC_FRAME_STREAMS_BLOCKED_UNI);
+
+	return ret;
 }
 
 /*
  * Generate PATH_CHALLENGE frame
+ *
+ * Uses tquic_path_challenge_frame_size() for space validation.
+ * Frame encoding is a fixed 9-byte layout (1 type byte + 8 data bytes)
+ * which does not require a dedicated write helper.
  */
 static int tquic_gen_path_challenge_frame(struct tquic_frame_ctx *ctx,
 					  const u8 data[8])
 {
-	if (ctx->offset + 9 > ctx->buf_len)
+	size_t needed = tquic_path_challenge_frame_size();
+
+	if (ctx->offset + needed > ctx->buf_len)
 		return -ENOSPC;
 
 	ctx->buf[ctx->offset++] = TQUIC_FRAME_PATH_CHALLENGE;
 	memcpy(ctx->buf + ctx->offset, data, 8);
 	ctx->offset += 8;
-	ctx->ack_eliciting = true;
+	ctx->ack_eliciting =
+		tquic_frame_is_ack_eliciting(TQUIC_FRAME_PATH_CHALLENGE);
 
-	return 9;
+	return (int)needed;
 }
 
 /*
  * Generate PATH_RESPONSE frame
+ *
+ * Uses tquic_path_response_frame_size() for space validation.
+ * Frame encoding is a fixed 9-byte layout (1 type byte + 8 data bytes).
  */
 static int tquic_gen_path_response_frame(struct tquic_frame_ctx *ctx,
 					 const u8 data[8])
 {
-	if (ctx->offset + 9 > ctx->buf_len)
+	size_t needed = tquic_path_response_frame_size();
+
+	if (ctx->offset + needed > ctx->buf_len)
 		return -ENOSPC;
 
 	ctx->buf[ctx->offset++] = TQUIC_FRAME_PATH_RESPONSE;
 	memcpy(ctx->buf + ctx->offset, data, 8);
 	ctx->offset += 8;
-	ctx->ack_eliciting = true;
+	ctx->ack_eliciting =
+		tquic_frame_is_ack_eliciting(TQUIC_FRAME_PATH_RESPONSE);
 
-	return 9;
+	return (int)needed;
 }
 
 /*
@@ -583,13 +652,23 @@ static int tquic_gen_path_response_frame(struct tquic_frame_ctx *ctx,
  */
 static int tquic_gen_handshake_done_frame(struct tquic_frame_ctx *ctx)
 {
-	if (ctx->offset + 1 > ctx->buf_len)
+	size_t needed;
+	int ret;
+
+	/* HANDSHAKE_DONE is always 1 byte; use size fn for consistency. */
+	needed = tquic_handshake_done_frame_size();
+	if (ctx->offset + needed > ctx->buf_len)
 		return -ENOSPC;
 
-	ctx->buf[ctx->offset++] = TQUIC_FRAME_HANDSHAKE_DONE;
-	ctx->ack_eliciting = true;
+	ret = tquic_write_handshake_done_frame(ctx->buf + ctx->offset,
+					       ctx->buf_len - ctx->offset);
+	if (ret < 0)
+		return ret;
+	ctx->offset += ret;
+	ctx->ack_eliciting =
+		tquic_frame_is_ack_eliciting(TQUIC_FRAME_HANDSHAKE_DONE);
 
-	return 1;
+	return ret;
 }
 
 /*
@@ -600,85 +679,54 @@ static int tquic_gen_new_connection_id_frame(struct tquic_frame_ctx *ctx,
 					     const struct tquic_cid *cid,
 					     const u8 stateless_reset_token[16])
 {
-	u8 *start = ctx->buf + ctx->offset;
+	size_t needed;
 	int ret;
 
-	if (ctx->offset + 1 > ctx->buf_len)
+	/*
+	 * tquic_new_connection_id_frame_size() accounts for the type byte,
+	 * seq_num and retire_prior_to varints, the 1-byte CID length,
+	 * the CID bytes, and the 16-byte stateless reset token.
+	 */
+	needed = tquic_new_connection_id_frame_size(seq_num, retire_prior_to,
+						    cid->len);
+	if (ctx->offset + needed > ctx->buf_len)
 		return -ENOSPC;
 
-	ctx->buf[ctx->offset++] = TQUIC_FRAME_NEW_CONNECTION_ID;
-
-	ret = tquic_encode_varint(ctx->buf + ctx->offset,
-				  ctx->buf_len - ctx->offset, seq_num);
+	ret = tquic_write_new_connection_id_frame(
+		ctx->buf + ctx->offset, ctx->buf_len - ctx->offset,
+		seq_num, retire_prior_to, cid->id, cid->len,
+		stateless_reset_token);
 	if (ret < 0)
 		return ret;
 	ctx->offset += ret;
+	ctx->ack_eliciting =
+		tquic_frame_is_ack_eliciting(TQUIC_FRAME_NEW_CONNECTION_ID);
 
-	ret = tquic_encode_varint(ctx->buf + ctx->offset,
-				  ctx->buf_len - ctx->offset, retire_prior_to);
-	if (ret < 0)
-		return ret;
-	ctx->offset += ret;
-
-	if (ctx->offset + 1 + cid->len + 16 > ctx->buf_len)
-		return -ENOSPC;
-
-	ctx->buf[ctx->offset++] = cid->len;
-	memcpy(ctx->buf + ctx->offset, cid->id, cid->len);
-	ctx->offset += cid->len;
-
-	memcpy(ctx->buf + ctx->offset, stateless_reset_token, 16);
-	ctx->offset += 16;
-
-	ctx->ack_eliciting = true;
-
-	return ctx->buf + ctx->offset - start;
+	return ret;
 }
 
 /*
  * Generate CONNECTION_CLOSE frame
+ *
+ * error_code is stored in frame->offset by the caller.
+ * frame_type 0 signals a transport-level close (not application-level).
  */
 static int tquic_gen_connection_close_frame(struct tquic_frame_ctx *ctx,
-					    u64 error_code, const char *reason,
-					    size_t reason_len)
+					    u64 error_code, const u8 *reason,
+					    u64 reason_len)
 {
-	u8 *start = ctx->buf + ctx->offset;
 	int ret;
 
-	if (ctx->offset + 1 > ctx->buf_len)
-		return -ENOSPC;
-
-	ctx->buf[ctx->offset++] = TQUIC_FRAME_CONNECTION_CLOSE;
-
-	ret = tquic_encode_varint(ctx->buf + ctx->offset,
-				  ctx->buf_len - ctx->offset, error_code);
+	ret = tquic_write_connection_close_frame(
+		ctx->buf + ctx->offset, ctx->buf_len - ctx->offset,
+		error_code, 0, reason, reason_len, false);
 	if (ret < 0)
 		return ret;
 	ctx->offset += ret;
 
-	/* Frame type (0 for transport errors) */
-	ret = tquic_encode_varint(ctx->buf + ctx->offset,
-				  ctx->buf_len - ctx->offset, 0);
-	if (ret < 0)
-		return ret;
-	ctx->offset += ret;
+	/* CONNECTION_CLOSE is not ack-eliciting (RFC 9000 Section 13.2) */
 
-	ret = tquic_encode_varint(ctx->buf + ctx->offset,
-				  ctx->buf_len - ctx->offset, reason_len);
-	if (ret < 0)
-		return ret;
-	ctx->offset += ret;
-
-	if (reason_len > 0) {
-		if (ctx->offset + reason_len > ctx->buf_len)
-			return -ENOSPC;
-		memcpy(ctx->buf + ctx->offset, reason, reason_len);
-		ctx->offset += reason_len;
-	}
-
-	/* CONNECTION_CLOSE is not ack-eliciting */
-
-	return ctx->buf + ctx->offset - start;
+	return ret;
 }
 
 /*
@@ -692,11 +740,6 @@ static int tquic_gen_connection_close_frame(struct tquic_frame_ctx *ctx,
  * @with_length: If true, include length field (type 0x31); if false,
  *               omit length field (type 0x30, datagram extends to end)
  *
- * Frame format:
- *   Type: 0x30 (no length) or 0x31 (with length)
- *   [Length]: varint (only if type 0x31)
- *   Data: payload bytes
- *
  * Per RFC 9221, the "without length" variant (0x30) is more space-efficient
  * when the datagram is the last frame in a packet, as no length field is
  * needed. The "with length" variant (0x31) allows multiple datagrams or
@@ -705,32 +748,28 @@ static int tquic_gen_connection_close_frame(struct tquic_frame_ctx *ctx,
 static int tquic_gen_datagram_frame(struct tquic_frame_ctx *ctx, const u8 *data,
 				    size_t data_len, bool with_length)
 {
-	u8 *start = ctx->buf + ctx->offset;
+	size_t needed;
 	int ret;
 
-	if (ctx->offset + 1 > ctx->buf_len)
+	/*
+	 * tquic_datagram_frame_size() accounts for the type byte, the
+	 * optional length varint (when with_length is true), and the
+	 * payload bytes.  Pre-checking prevents a useless write attempt.
+	 */
+	needed = tquic_datagram_frame_size((u64)data_len, with_length);
+	if (ctx->offset + needed > ctx->buf_len)
 		return -ENOSPC;
 
-	/* Frame type: 0x30 without length, 0x31 with length */
-	ctx->buf[ctx->offset++] = TQUIC_FRAME_DATAGRAM |
-				  (with_length ? 0x01 : 0x00);
+	ret = tquic_write_datagram_frame(ctx->buf + ctx->offset,
+					 ctx->buf_len - ctx->offset,
+					 data, (u64)data_len, with_length);
+	if (ret < 0)
+		return ret;
+	ctx->offset += ret;
+	ctx->ack_eliciting =
+		tquic_frame_is_ack_eliciting(TQUIC_FRAME_DATAGRAM);
 
-	if (with_length) {
-		ret = tquic_encode_varint(ctx->buf + ctx->offset,
-					  ctx->buf_len - ctx->offset, data_len);
-		if (ret < 0)
-			return ret;
-		ctx->offset += ret;
-	}
-
-	if (ctx->offset + data_len > ctx->buf_len)
-		return -ENOSPC;
-
-	memcpy(ctx->buf + ctx->offset, data, data_len);
-	ctx->offset += data_len;
-	ctx->ack_eliciting = true;
-
-	return ctx->buf + ctx->offset - start;
+	return ret;
 }
 
 /*
@@ -740,18 +779,60 @@ static int tquic_gen_datagram_frame(struct tquic_frame_ctx *ctx, const u8 *data,
  */
 
 /*
+ * enc_level_to_pn_space - Map encryption level to packet number space
+ *
+ * RFC 9000 Section 12.3: each encryption level corresponds to a
+ * packet number space:
+ *   Initial (0)   -> PN_SPACE_INITIAL (0)
+ *   0-RTT   (1)   -> PN_SPACE_APPLICATION (2)
+ *   Handshake (2) -> PN_SPACE_HANDSHAKE (1)
+ *   1-RTT   (3)   -> PN_SPACE_APPLICATION (2)
+ */
+static inline int enc_level_to_pn_space(int enc_level)
+{
+	switch (enc_level) {
+	case TQUIC_PKT_INITIAL:
+		return TQUIC_PN_SPACE_INITIAL;
+	case TQUIC_PKT_HANDSHAKE:
+		return TQUIC_PN_SPACE_HANDSHAKE;
+	default: /* 0-RTT and 1-RTT share Application space */
+		return TQUIC_PN_SPACE_APPLICATION;
+	}
+}
+
+/*
  * Coalesce pending frames into a packet payload
  */
 static int tquic_coalesce_frames(struct tquic_connection *conn,
 				 struct tquic_frame_ctx *ctx,
 				 struct list_head *pending_frames)
 {
+	int pn_space = enc_level_to_pn_space(ctx->enc_level);
 	struct tquic_pending_frame *frame, *tmp;
 	int total = 0;
 	int ret;
 
 	list_for_each_entry_safe(frame, tmp, pending_frames, list) {
 		const u8 *data_ptr;
+
+		/*
+		 * RFC 9000 Section 12.4, Table 3: validate frame type is
+		 * permitted in this packet number space before writing.
+		 */
+		if (!tquic_frame_allowed_in_pn_space(frame->type, pn_space)) {
+			tquic_dbg("frame %s not allowed in pn_space %d\n",
+				  tquic_frame_type_name(frame->type),
+				  pn_space);
+			list_del_init(&frame->list);
+			if (frame->owns_data)
+				kfree(frame->data);
+			kmem_cache_free(tquic_frame_cache, frame);
+			continue;
+		}
+
+		tquic_dbg("coalesce: type=%s probing=%d\n",
+			  tquic_frame_type_name(frame->type),
+			  tquic_frame_is_probing(frame->type));
 
 		/* Use reference if available, otherwise use allocated data */
 		data_ptr = frame->data_ref ? frame->data_ref : frame->data;
@@ -805,6 +886,9 @@ static int tquic_coalesce_frames(struct tquic_connection *conn,
 			break;
 
 		default:
+			tquic_dbg("coalesce: unhandled frame 0x%02x (%s)\n",
+				  frame->type,
+				  tquic_frame_type_name(frame->type));
 			ret = -EINVAL;
 			break;
 		}
@@ -847,38 +931,31 @@ static int tquic_coalesce_frames(struct tquic_connection *conn,
  */
 
 /*
- * Encode packet number with minimal bytes
+ * Encode packet number with minimal bytes.
+ *
+ * Delegates to tquic_pn_encode() in core/packet.c (RFC 9000 Section 17.1).
+ * tquic_pn_encode_len() computes the minimum byte count; tquic_pn_encode()
+ * writes the truncated big-endian value.  The local wrapper keeps all
+ * existing call sites unchanged.
  */
 static int tquic_encode_pkt_num(u8 *buf, u64 pkt_num, u64 largest_acked)
 {
-	u64 diff = pkt_num - largest_acked;
 	int len;
+	int ret;
 
 	tquic_dbg("encode_pkt_num: pkt=%llu largest_acked=%llu\n", pkt_num,
 		  largest_acked);
 
-	if (diff < 128) {
-		len = 1;
-		buf[0] = (u8)pkt_num;
-	} else if (diff < 32768) {
-		len = 2;
-		buf[0] = ((pkt_num >> 8) & 0xff);
-		buf[1] = (pkt_num & 0xff);
-	} else if (diff < 8388608) {
-		len = 3;
-		buf[0] = ((pkt_num >> 16) & 0xff);
-		buf[1] = ((pkt_num >> 8) & 0xff);
-		buf[2] = (pkt_num & 0xff);
-	} else {
-		len = 4;
-		buf[0] = ((pkt_num >> 24) & 0xff);
-		buf[1] = ((pkt_num >> 16) & 0xff);
-		buf[2] = ((pkt_num >> 8) & 0xff);
-		buf[3] = (pkt_num & 0xff);
-	}
+	len = tquic_pn_encode_len(pkt_num, largest_acked);
+	if (len < 1 || len > 4)
+		len = 4; /* Fallback to maximum on unexpected return */
 
-	tquic_dbg("encode_pkt_num: encoded len=%d\n", len);
-	return len;
+	ret = tquic_pn_encode(pkt_num, len, buf, 4);
+	if (ret < 0)
+		return ret;
+
+	tquic_dbg("encode_pkt_num: encoded len=%d\n", ret);
+	return ret;
 }
 
 /*
@@ -968,6 +1045,10 @@ static int tquic_build_long_header_internal(
 	 * the minimal encoding would be.  Write all 4 bytes explicitly
 	 * to avoid leaving uninitialized stack bytes that would corrupt
 	 * the AEAD nonce on the receiver side.
+	 *
+	 * tquic_pn_encode() (core/packet.c, EXPORT_SYMBOL_GPL) is called
+	 * via tquic_encode_pkt_num() above; here we use the 4-byte fixed
+	 * form directly since long headers do not need minimal encoding.
 	 */
 	p[0] = (pkt_num >> 24) & 0xff;
 	p[1] = (pkt_num >> 16) & 0xff;
@@ -1004,13 +1085,12 @@ static int tquic_build_short_header_internal(
 	 * and that the packet is long enough for the HP sample
 	 * (RFC 9001 Section 5.4.2).
 	 *
-	 * tquic_encode_pkt_num() computes the minimal encoding;
+	 * tquic_pn_encode_len() computes the minimal encoding length;
 	 * log it for diagnostics but always send 4 bytes.
 	 */
 	pkt_num_len = 4;
 	if (largest_acked > 0) {
-		u8 tmp[4];
-		int optimal = tquic_encode_pkt_num(tmp, pkt_num, largest_acked);
+		int optimal = tquic_pn_encode_len(pkt_num, largest_acked);
 
 		tquic_dbg("short_hdr: pkt=%llu optimal_pn_len=%d using=4\n",
 			  pkt_num, optimal);
@@ -1035,16 +1115,27 @@ static int tquic_build_short_header_internal(
 		first_byte |= TQUIC_HEADER_KEY_PHASE;
 	first_byte |= (pkt_num_len - 1); /* 0x03 = 4-byte PN */
 
-	/* Check buffer space */
-	if (buf_len < 1 + path->remote_cid.len + pkt_num_len)
-		return -ENOSPC;
+	/*
+	 * Prefer the active remote CID from the connection state machine
+	 * (tracks CID rotation and retirements per RFC 9000 Section 5.1).
+	 * Fall back to path->remote_cid when cs is not yet initialised.
+	 */
+	{
+		struct tquic_cid *active_cid = tquic_conn_get_active_cid(conn);
+		struct tquic_cid *dcid = (active_cid && active_cid->len > 0) ?
+					  active_cid : &path->remote_cid;
 
-	*p++ = first_byte;
+		/* Check buffer space */
+		if (buf_len < 1 + dcid->len + pkt_num_len)
+			return -ENOSPC;
 
-	/* Destination Connection ID */
-	if (path->remote_cid.len > 0) {
-		memcpy(p, path->remote_cid.id, path->remote_cid.len);
-		p += path->remote_cid.len;
+		*p++ = first_byte;
+
+		/* Destination Connection ID */
+		if (dcid->len > 0) {
+			memcpy(p, dcid->id, dcid->len);
+			p += dcid->len;
+		}
 	}
 
 	/* Packet Number (4 bytes, big-endian) */
@@ -2210,6 +2301,13 @@ int tquic_output_packet(struct tquic_connection *conn, struct tquic_path *path,
 		/* Update path statistics */
 		tquic_path_on_data_sent(path, skb_len);
 
+		/*
+		 * RFC 9002: Notify connection state machine that a packet was
+		 * sent. Updates anti-amplification accounting so the server
+		 * knows how many unvalidated bytes have been transmitted.
+		 */
+		tquic_conn_on_packet_sent(conn, skb_len);
+
 		/* Notify multipath scheduler for feedback-driven path selection */
 #ifdef CONFIG_TQUIC_MULTIPATH
 		tquic_mp_sched_notify_sent(conn, path, skb_len);
@@ -2849,6 +2947,462 @@ int tquic_flow_send_max_stream_data(struct tquic_connection *conn,
 }
 EXPORT_SYMBOL_GPL(tquic_flow_send_max_stream_data);
 
+/**
+ * tquic_flow_send_data_blocked - Send DATA_BLOCKED frame
+ * @conn: QUIC connection
+ * @path: Network path to send on
+ * @limit: Connection-level limit at which we are blocked
+ *
+ * Builds a minimal 1-RTT packet containing a DATA_BLOCKED frame.
+ * Called when the connection send window is exhausted (RFC 9000 Section 4.1).
+ * Caller MUST call tquic_fc_data_blocked_sent() after a successful return
+ * to prevent duplicate frames on the next output pass.
+ */
+static int tquic_flow_send_data_blocked(struct tquic_connection *conn,
+					struct tquic_path *path, u64 limit)
+{
+	struct tquic_frame_ctx ctx;
+	struct sk_buff *skb;
+	u8 header_buf[128];
+	u8 *payload_buf;
+	int header_len, payload_len;
+	u32 skb_len;
+	int ret;
+	u64 pkt_num;
+	bool key_phase = false;
+
+	pkt_num = atomic64_inc_return(&conn->pkt_num_tx) - 1;
+
+	skb = alloc_skb(MAX_HEADER + 128 + 128 + 16, GFP_ATOMIC);
+	if (!skb)
+		return -ENOMEM;
+
+	skb_reserve(skb, MAX_HEADER + 128);
+	payload_buf = skb_put(skb, 128 + 16);
+
+	ctx.conn = conn;
+	ctx.path = path;
+	ctx.buf = payload_buf;
+	ctx.buf_len = 128;
+	ctx.offset = 0;
+	ctx.ack_eliciting = true;
+
+	ret = tquic_gen_data_blocked_frame(&ctx, limit);
+	if (ret < 0) {
+		kfree_skb(skb);
+		return ret;
+	}
+
+	payload_len = ctx.offset;
+
+	if (conn->crypto_state) {
+		struct tquic_key_update_state *ku_state;
+
+		ku_state =
+			tquic_crypto_get_key_update_state(conn->crypto_state);
+		if (ku_state)
+			key_phase = tquic_key_update_get_phase(ku_state) != 0;
+	}
+
+	header_len = tquic_build_short_header_internal(
+		conn, path, header_buf, sizeof(header_buf), pkt_num, 0,
+		key_phase, false, conn->grease_state);
+	if (header_len < 0) {
+		kfree_skb(skb);
+		return header_len;
+	}
+
+	ret = tquic_encrypt_payload(conn, header_buf, header_len, payload_buf,
+				    payload_len, pkt_num,
+				    3 /* APPLICATION */);
+	if (ret < 0) {
+		kfree_skb(skb);
+		return ret;
+	}
+
+	skb_trim(skb, payload_len + 16);
+	memcpy(skb_push(skb, header_len), header_buf, header_len);
+
+	if (header_len >= 5) {
+		ret = tquic_apply_header_protection(conn, skb->data, skb->len,
+						    header_len - 4);
+		if (ret < 0) {
+			kfree_skb(skb);
+			return ret;
+		}
+	}
+
+	{
+		struct tquic_failover_ctx *__fc = tquic_conn_get_failover(conn);
+		u8 __pid = path->path_id;
+
+		if (__fc)
+			tquic_failover_track_sent(__fc, skb, pkt_num, __pid);
+		skb_len = skb->len;
+		ret = tquic_output_packet(conn, path, skb);
+
+		if (ret >= 0) {
+			if (conn->timer_state)
+				tquic_timer_on_packet_sent(
+					conn->timer_state,
+					TQUIC_PN_SPACE_APPLICATION, pkt_num,
+					skb_len, true, true,
+					BIT(TQUIC_FRAME_DATA_BLOCKED), __pid);
+			if (__fc)
+				tquic_failover_arm_timeout(__fc, __pid);
+		} else {
+			if (__fc)
+				tquic_failover_on_ack(__fc, pkt_num);
+		}
+	}
+	return ret;
+}
+
+/**
+ * tquic_flow_send_stream_data_blocked - Send STREAM_DATA_BLOCKED frame
+ * @conn: QUIC connection
+ * @path: Network path to send on
+ * @stream_id: Stream whose send window is exhausted
+ * @limit: Per-stream limit at which the stream is blocked
+ *
+ * Builds a minimal 1-RTT packet containing a STREAM_DATA_BLOCKED frame.
+ * Called when a specific stream's send window is exhausted (RFC 9000 Section
+ * 4.1).  Caller MUST call tquic_fc_stream_data_blocked_sent() after a
+ * successful return to prevent duplicate frames.
+ */
+static int tquic_flow_send_stream_data_blocked(struct tquic_connection *conn,
+					       struct tquic_path *path,
+					       u64 stream_id, u64 limit)
+{
+	struct tquic_frame_ctx ctx;
+	struct sk_buff *skb;
+	u8 header_buf[128];
+	u8 *payload_buf;
+	int header_len, payload_len;
+	u32 skb_len;
+	int ret;
+	u64 pkt_num;
+	bool key_phase = false;
+
+	pkt_num = atomic64_inc_return(&conn->pkt_num_tx) - 1;
+
+	skb = alloc_skb(MAX_HEADER + 128 + 128 + 16, GFP_ATOMIC);
+	if (!skb)
+		return -ENOMEM;
+
+	skb_reserve(skb, MAX_HEADER + 128);
+	payload_buf = skb_put(skb, 128 + 16);
+
+	ctx.conn = conn;
+	ctx.path = path;
+	ctx.buf = payload_buf;
+	ctx.buf_len = 128;
+	ctx.offset = 0;
+	ctx.ack_eliciting = true;
+
+	ret = tquic_gen_stream_data_blocked_frame(&ctx, stream_id, limit);
+	if (ret < 0) {
+		kfree_skb(skb);
+		return ret;
+	}
+
+	payload_len = ctx.offset;
+
+	if (conn->crypto_state) {
+		struct tquic_key_update_state *ku_state;
+
+		ku_state =
+			tquic_crypto_get_key_update_state(conn->crypto_state);
+		if (ku_state)
+			key_phase = tquic_key_update_get_phase(ku_state) != 0;
+	}
+
+	header_len = tquic_build_short_header_internal(
+		conn, path, header_buf, sizeof(header_buf), pkt_num, 0,
+		key_phase, false, conn->grease_state);
+	if (header_len < 0) {
+		kfree_skb(skb);
+		return header_len;
+	}
+
+	ret = tquic_encrypt_payload(conn, header_buf, header_len, payload_buf,
+				    payload_len, pkt_num,
+				    3 /* APPLICATION */);
+	if (ret < 0) {
+		kfree_skb(skb);
+		return ret;
+	}
+
+	skb_trim(skb, payload_len + 16);
+	memcpy(skb_push(skb, header_len), header_buf, header_len);
+
+	if (header_len >= 5) {
+		ret = tquic_apply_header_protection(conn, skb->data, skb->len,
+						    header_len - 4);
+		if (ret < 0) {
+			kfree_skb(skb);
+			return ret;
+		}
+	}
+
+	{
+		struct tquic_failover_ctx *__fc = tquic_conn_get_failover(conn);
+		u8 __pid = path->path_id;
+
+		if (__fc)
+			tquic_failover_track_sent(__fc, skb, pkt_num, __pid);
+		skb_len = skb->len;
+		ret = tquic_output_packet(conn, path, skb);
+
+		if (ret >= 0) {
+			if (conn->timer_state)
+				tquic_timer_on_packet_sent(
+					conn->timer_state,
+					TQUIC_PN_SPACE_APPLICATION, pkt_num,
+					skb_len, true, true,
+					BIT(TQUIC_FRAME_STREAM_DATA_BLOCKED),
+					__pid);
+			if (__fc)
+				tquic_failover_arm_timeout(__fc, __pid);
+		} else {
+			if (__fc)
+				tquic_failover_on_ack(__fc, pkt_num);
+		}
+	}
+	return ret;
+}
+
+/**
+ * tquic_flow_send_max_streams - Send MAX_STREAMS frame
+ * @conn: QUIC connection
+ * @path: Network path to send on
+ * @max_streams: New stream-count limit to advertise to peer
+ * @bidi: true for bidirectional streams, false for unidirectional
+ *
+ * Builds a minimal 1-RTT packet containing a MAX_STREAMS frame.
+ * Called to open the peer's stream-open limit (RFC 9000 Section 4.6).
+ * Caller MUST call tquic_fc_max_streams_sent() after a successful return.
+ */
+static int tquic_flow_send_max_streams(struct tquic_connection *conn,
+				       struct tquic_path *path,
+				       u64 max_streams, bool bidi)
+{
+	struct tquic_frame_ctx ctx;
+	struct sk_buff *skb;
+	u8 header_buf[128];
+	u8 *payload_buf;
+	int header_len, payload_len;
+	u32 skb_len;
+	int ret;
+	u64 pkt_num;
+	bool key_phase = false;
+	u8 frame_bit;
+
+	pkt_num = atomic64_inc_return(&conn->pkt_num_tx) - 1;
+
+	skb = alloc_skb(MAX_HEADER + 128 + 128 + 16, GFP_ATOMIC);
+	if (!skb)
+		return -ENOMEM;
+
+	skb_reserve(skb, MAX_HEADER + 128);
+	payload_buf = skb_put(skb, 128 + 16);
+
+	ctx.conn = conn;
+	ctx.path = path;
+	ctx.buf = payload_buf;
+	ctx.buf_len = 128;
+	ctx.offset = 0;
+	ctx.ack_eliciting = true;
+
+	ret = tquic_gen_max_streams_frame(&ctx, max_streams, bidi);
+	if (ret < 0) {
+		kfree_skb(skb);
+		return ret;
+	}
+
+	payload_len = ctx.offset;
+
+	if (conn->crypto_state) {
+		struct tquic_key_update_state *ku_state;
+
+		ku_state =
+			tquic_crypto_get_key_update_state(conn->crypto_state);
+		if (ku_state)
+			key_phase = tquic_key_update_get_phase(ku_state) != 0;
+	}
+
+	header_len = tquic_build_short_header_internal(
+		conn, path, header_buf, sizeof(header_buf), pkt_num, 0,
+		key_phase, false, conn->grease_state);
+	if (header_len < 0) {
+		kfree_skb(skb);
+		return header_len;
+	}
+
+	ret = tquic_encrypt_payload(conn, header_buf, header_len, payload_buf,
+				    payload_len, pkt_num,
+				    3 /* APPLICATION */);
+	if (ret < 0) {
+		kfree_skb(skb);
+		return ret;
+	}
+
+	skb_trim(skb, payload_len + 16);
+	memcpy(skb_push(skb, header_len), header_buf, header_len);
+
+	if (header_len >= 5) {
+		ret = tquic_apply_header_protection(conn, skb->data, skb->len,
+						    header_len - 4);
+		if (ret < 0) {
+			kfree_skb(skb);
+			return ret;
+		}
+	}
+
+	frame_bit = bidi ? TQUIC_FRAME_MAX_STREAMS_BIDI :
+			   TQUIC_FRAME_MAX_STREAMS_UNI;
+	{
+		struct tquic_failover_ctx *__fc = tquic_conn_get_failover(conn);
+		u8 __pid = path->path_id;
+
+		if (__fc)
+			tquic_failover_track_sent(__fc, skb, pkt_num, __pid);
+		skb_len = skb->len;
+		ret = tquic_output_packet(conn, path, skb);
+
+		if (ret >= 0) {
+			if (conn->timer_state)
+				tquic_timer_on_packet_sent(
+					conn->timer_state,
+					TQUIC_PN_SPACE_APPLICATION, pkt_num,
+					skb_len, true, true,
+					BIT(frame_bit), __pid);
+			if (__fc)
+				tquic_failover_arm_timeout(__fc, __pid);
+		} else {
+			if (__fc)
+				tquic_failover_on_ack(__fc, pkt_num);
+		}
+	}
+	return ret;
+}
+
+/**
+ * tquic_flow_send_streams_blocked - Send STREAMS_BLOCKED frame
+ * @conn: QUIC connection
+ * @path: Network path to send on
+ * @limit: Stream limit at which we are blocked
+ * @bidi: true for bidirectional, false for unidirectional
+ *
+ * Builds a minimal 1-RTT packet containing a STREAMS_BLOCKED frame.
+ * Called when we cannot open new streams due to the peer's limit
+ * (RFC 9000 Section 4.6).  Caller MUST call tquic_fc_streams_blocked_sent()
+ * after a successful return to prevent duplicate frames.
+ */
+static int tquic_flow_send_streams_blocked(struct tquic_connection *conn,
+					   struct tquic_path *path,
+					   u64 limit, bool bidi)
+{
+	struct tquic_frame_ctx ctx;
+	struct sk_buff *skb;
+	u8 header_buf[128];
+	u8 *payload_buf;
+	int header_len, payload_len;
+	u32 skb_len;
+	int ret;
+	u64 pkt_num;
+	bool key_phase = false;
+	u8 frame_bit;
+
+	pkt_num = atomic64_inc_return(&conn->pkt_num_tx) - 1;
+
+	skb = alloc_skb(MAX_HEADER + 128 + 128 + 16, GFP_ATOMIC);
+	if (!skb)
+		return -ENOMEM;
+
+	skb_reserve(skb, MAX_HEADER + 128);
+	payload_buf = skb_put(skb, 128 + 16);
+
+	ctx.conn = conn;
+	ctx.path = path;
+	ctx.buf = payload_buf;
+	ctx.buf_len = 128;
+	ctx.offset = 0;
+	ctx.ack_eliciting = true;
+
+	ret = tquic_gen_streams_blocked_frame(&ctx, limit, bidi);
+	if (ret < 0) {
+		kfree_skb(skb);
+		return ret;
+	}
+
+	payload_len = ctx.offset;
+
+	if (conn->crypto_state) {
+		struct tquic_key_update_state *ku_state;
+
+		ku_state =
+			tquic_crypto_get_key_update_state(conn->crypto_state);
+		if (ku_state)
+			key_phase = tquic_key_update_get_phase(ku_state) != 0;
+	}
+
+	header_len = tquic_build_short_header_internal(
+		conn, path, header_buf, sizeof(header_buf), pkt_num, 0,
+		key_phase, false, conn->grease_state);
+	if (header_len < 0) {
+		kfree_skb(skb);
+		return header_len;
+	}
+
+	ret = tquic_encrypt_payload(conn, header_buf, header_len, payload_buf,
+				    payload_len, pkt_num,
+				    3 /* APPLICATION */);
+	if (ret < 0) {
+		kfree_skb(skb);
+		return ret;
+	}
+
+	skb_trim(skb, payload_len + 16);
+	memcpy(skb_push(skb, header_len), header_buf, header_len);
+
+	if (header_len >= 5) {
+		ret = tquic_apply_header_protection(conn, skb->data, skb->len,
+						    header_len - 4);
+		if (ret < 0) {
+			kfree_skb(skb);
+			return ret;
+		}
+	}
+
+	frame_bit = bidi ? TQUIC_FRAME_STREAMS_BLOCKED_BIDI :
+			   TQUIC_FRAME_STREAMS_BLOCKED_UNI;
+	{
+		struct tquic_failover_ctx *__fc = tquic_conn_get_failover(conn);
+		u8 __pid = path->path_id;
+
+		if (__fc)
+			tquic_failover_track_sent(__fc, skb, pkt_num, __pid);
+		skb_len = skb->len;
+		ret = tquic_output_packet(conn, path, skb);
+
+		if (ret >= 0) {
+			if (conn->timer_state)
+				tquic_timer_on_packet_sent(
+					conn->timer_state,
+					TQUIC_PN_SPACE_APPLICATION, pkt_num,
+					skb_len, true, true,
+					BIT(frame_bit), __pid);
+			if (__fc)
+				tquic_failover_arm_timeout(__fc, __pid);
+		} else {
+			if (__fc)
+				tquic_failover_on_ack(__fc, pkt_num);
+		}
+	}
+	return ret;
+}
+
 /*
  * tquic_send_path_challenge and tquic_send_path_response are defined
  * in core/connection.c
@@ -2884,7 +3438,8 @@ int tquic_send_connection_close(struct tquic_connection *conn, u64 error_code,
 	ctx.offset = 0;
 	ctx.ack_eliciting = false;
 
-	ret = tquic_gen_connection_close_frame(&ctx, error_code, reason,
+	ret = tquic_gen_connection_close_frame(&ctx, error_code,
+					       (const u8 *)reason,
 					       reason ? strlen(reason) : 0);
 	if (ret < 0)
 		goto out_put_path;
@@ -3013,6 +3568,16 @@ int tquic_output_flush(struct tquic_connection *conn)
 	}
 
 	/*
+	 * RFC 8899 Section 5.2: If the path needs an MTU probe, send one
+	 * now.  Probe packets are not subject to cwnd limits because they
+	 * are used to discover the path MTU, not to carry application data.
+	 * tquic_path_needs_probe() returns true only when validation is
+	 * pending and the path is in TQUIC_PATH_PENDING state.
+	 */
+	if (tquic_path_needs_probe(path))
+		tquic_path_mtu_probe(path);
+
+	/*
 	 * Check congestion window before attempting transmission.
 	 * If cwnd is exhausted, we'll be woken by ACK processing.
 	 */
@@ -3033,6 +3598,86 @@ int tquic_output_flush(struct tquic_connection *conn)
 			inflight, path->stats.cwnd);
 		ret = 0;
 		goto out_clear_flush;
+	}
+
+	/*
+	 * RFC 9000 Section 4: Send pending flow control frames before stream
+	 * data so the peer gets credits as early as possible.
+	 *
+	 * tquic_fc_collect_frames returns non-zero values only when the
+	 * corresponding frame is pending (needs_* flags are set).  For each
+	 * value we send the frame and then mark it sent so the FC subsystem
+	 * clears the pending flag and won't re-queue until the condition
+	 * recurs (RFC 9000 Section 4.1, 4.6).
+	 *
+	 * We also check STREAMS_BLOCKED here: when we cannot open new streams
+	 * because the peer's limit is exhausted, we send STREAMS_BLOCKED so
+	 * the peer knows to send MAX_STREAMS when ready.
+	 */
+	if (conn->fc) {
+		u64 fc_max_data = 0;
+		u64 fc_data_blocked = 0;
+		u64 fc_max_streams_bidi = 0;
+		u64 fc_max_streams_uni = 0;
+
+		tquic_fc_collect_frames(conn->fc, &fc_max_data,
+					&fc_data_blocked, &fc_max_streams_bidi,
+					&fc_max_streams_uni);
+
+		/* MAX_DATA: open peer's connection receive window */
+		if (fc_max_data)
+			tquic_flow_send_max_data(conn, path, fc_max_data);
+
+		/*
+		 * DATA_BLOCKED: tell peer we are stuck at the given offset.
+		 * tquic_fc_get_data_blocked() returns the blocked-at value
+		 * that tquic_fc_collect_frames already loaded into
+		 * fc_data_blocked; use it directly.
+		 */
+		if (fc_data_blocked) {
+			if (tquic_flow_send_data_blocked(conn, path,
+							 fc_data_blocked) >= 0)
+				tquic_fc_data_blocked_sent(conn->fc);
+		}
+
+		/* MAX_STREAMS (bidi): open peer's bidi stream-open limit */
+		if (fc_max_streams_bidi) {
+			if (tquic_flow_send_max_streams(conn, path,
+							fc_max_streams_bidi,
+							true) >= 0)
+				tquic_fc_max_streams_sent(conn->fc,
+							  fc_max_streams_bidi,
+							  true);
+		}
+
+		/* MAX_STREAMS (uni): open peer's uni stream-open limit */
+		if (fc_max_streams_uni) {
+			if (tquic_flow_send_max_streams(conn, path,
+							fc_max_streams_uni,
+							false) >= 0)
+				tquic_fc_max_streams_sent(conn->fc,
+							  fc_max_streams_uni,
+							  false);
+		}
+
+		/*
+		 * STREAMS_BLOCKED: signal we cannot open new streams because
+		 * the peer's limit is exhausted.  Check each direction.
+		 */
+		if (tquic_fc_needs_streams_blocked(conn->fc, NULL)) {
+			bool sb_bidi = false;
+
+			if (tquic_fc_needs_streams_blocked(conn->fc, &sb_bidi)) {
+				u64 sb_val =
+					tquic_fc_get_streams_blocked(conn->fc,
+								     sb_bidi);
+				if (sb_val &&
+				    tquic_flow_send_streams_blocked(
+					    conn, path, sb_val, sb_bidi) >= 0)
+					tquic_fc_streams_blocked_sent(conn->fc,
+								      sb_bidi);
+			}
+		}
 	}
 
 	/*
@@ -3079,32 +3724,45 @@ int tquic_output_flush(struct tquic_connection *conn)
 		 */
 		spin_lock_bh(&conn->lock);
 
-		/* Check connection-level flow control credit */
-		if (conn->data_sent >= conn->max_data_remote) {
-			spin_unlock_bh(&conn->lock);
-			tquic_dbg(
-				"output_flush blocked by connection flow control\n");
-			break;
+		/*
+		 * Check connection-level flow control credit.
+		 * Use tquic_fc_conn_can_send / tquic_fc_conn_get_credit when
+		 * the rich FC subsystem is active; otherwise fall back to the
+		 * simple inline accounting used in non-FC mode.
+		 */
+		if (conn->fc) {
+			if (!tquic_fc_conn_can_send(conn->fc, 1)) {
+				spin_unlock_bh(&conn->lock);
+				tquic_dbg(
+					"output_flush blocked by connection flow control (fc)\n");
+				break;
+			}
+			conn_credit = tquic_fc_conn_get_credit(conn->fc);
+		} else {
+			if (conn->data_sent >= conn->max_data_remote) {
+				spin_unlock_bh(&conn->lock);
+				tquic_dbg(
+					"output_flush blocked by connection flow control\n");
+				break;
+			}
+			conn_credit = conn->max_data_remote - conn->data_sent;
 		}
-		conn_credit = conn->max_data_remote - conn->data_sent;
 
-		/* Iterate over streams with pending data (lock held). */
-		for (node = rb_first(&conn->streams);
-		     node && iter_sent < TQUIC_TX_WORK_BATCH_MAX;
-		     node = rb_next(node)) {
+		/*
+		 * Iterate over streams with pending data (lock held).
+		 * Use tquic_stream_iter_init/next when the stream manager
+		 * is present: it skips empty and blocked streams by priority
+		 * order.  Fall back to the raw rb_first/rb_next walk when
+		 * the manager is absent (legacy / pre-manager connections).
+		 */
+		if (conn->stream_mgr) {
+			struct tquic_stream_iter siter;
 			struct tquic_stream *stream;
 			size_t chunk_size;
 
-			stream = rb_entry(node, struct tquic_stream, node);
-
-			/* Skip streams with no pending data */
-			if (skb_queue_empty(&stream->send_buf))
-				continue;
-
-			/* Skip blocked streams */
-			if (stream->blocked)
-				continue;
-
+			tquic_stream_iter_init(&siter, conn->stream_mgr, 0);
+			while ((stream = tquic_stream_iter_next(&siter)) &&
+			       iter_sent < TQUIC_TX_WORK_BATCH_MAX) {
 			/* Process pending data from this stream's send buffer */
 			while (!skb_queue_empty(&stream->send_buf) &&
 			       conn_credit > 0 &&
@@ -3130,14 +3788,58 @@ int tquic_output_flush(struct tquic_connection *conn)
 					break;
 				}
 				remaining = skb->len - data_off;
-				if (unlikely(stream_offset >=
-					     stream->max_send_data)) {
-					stream->blocked = true;
-					skb_queue_head(&stream->send_buf, skb);
-					break;
+
+				/*
+				 * Per-stream flow control gate.  When the rich
+				 * FC subsystem is active use
+				 * tquic_fc_stream_can_send /
+				 * tquic_fc_stream_get_credit; otherwise fall
+				 * back to the simple inline accounting.
+				 *
+				 * When blocked, emit STREAM_DATA_BLOCKED once
+				 * per blocked epoch (RFC 9000 Section 4.1) so
+				 * the peer knows to send MAX_STREAM_DATA.
+				 */
+				if (stream->fc) {
+					if (!tquic_fc_stream_can_send(
+						    stream->fc, 1)) {
+						if (tquic_fc_needs_stream_data_blocked(
+							    stream->fc)) {
+							u64 sdb_val =
+								tquic_fc_get_stream_data_blocked(
+									stream->fc);
+
+							spin_unlock_bh(
+								&conn->lock);
+							if (sdb_val &&
+							    tquic_flow_send_stream_data_blocked(
+								    conn, path,
+								    stream->id,
+								    sdb_val) >= 0)
+								tquic_fc_stream_data_blocked_sent(
+									stream->fc);
+							spin_lock_bh(&conn->lock);
+						}
+						stream->blocked = true;
+						skb_queue_head(&stream->send_buf,
+							       skb);
+						break;
+					}
+					stream_credit =
+						tquic_fc_stream_get_credit(
+							stream->fc);
+				} else {
+					if (unlikely(stream_offset >=
+						     stream->max_send_data)) {
+						stream->blocked = true;
+						skb_queue_head(&stream->send_buf,
+							       skb);
+						break;
+					}
+					stream_credit =
+						stream->max_send_data -
+						stream_offset;
 				}
-				stream_credit =
-					stream->max_send_data - stream_offset;
 
 				/* Determine chunk size respecting flow control */
 				chunk_size = remaining;
@@ -3364,7 +4066,217 @@ int tquic_output_flush(struct tquic_connection *conn)
 			/* Pacing branch exited inner while; stop per-stream loop too. */
 			if (!path)
 				break;
-		}
+			} /* end while stream_iter_next */
+		} else {
+			/*
+			 * Legacy path: no stream manager, walk RB tree directly.
+			 * Skip streams with no pending data or a blocked flag.
+			 */
+			for (node = rb_first(&conn->streams);
+			     node && iter_sent < TQUIC_TX_WORK_BATCH_MAX;
+			     node = rb_next(node)) {
+				struct tquic_stream *stream;
+				size_t chunk_size;
+
+				stream = rb_entry(node, struct tquic_stream,
+						  node);
+
+				/* Skip streams with no pending data */
+				if (skb_queue_empty(&stream->send_buf))
+					continue;
+
+				/*
+				 * Use tquic_stream_should_send_blocked() when
+				 * the stream has an FC object; otherwise check
+				 * the raw flag directly.
+				 */
+				if (tquic_stream_should_send_blocked(stream))
+					continue;
+
+				/* Process pending data from this stream */
+				while (!skb_queue_empty(&stream->send_buf) &&
+				       conn_credit > 0 &&
+				       iter_sent < TQUIC_TX_WORK_BATCH_MAX) {
+					struct tquic_stream_skb_cb *cb;
+					u64 stream_offset;
+					u32 data_off;
+					u32 remaining;
+					u64 stream_credit;
+					bool is_last;
+					size_t cs2;
+
+					skb = skb_dequeue(&stream->send_buf);
+					if (!skb)
+						break;
+
+					cb = tquic_stream_skb_cb(skb);
+					stream_offset = cb->stream_offset;
+					data_off = cb->data_off;
+					if (unlikely(data_off > skb->len)) {
+						kfree_skb(skb);
+						ret = -EINVAL;
+						break;
+					}
+					remaining = skb->len - data_off;
+
+					if (stream->fc) {
+						if (!tquic_fc_stream_can_send(
+							    stream->fc, 1)) {
+							if (tquic_fc_needs_stream_data_blocked(stream->fc)) {
+								u64 sdb_val = tquic_fc_get_stream_data_blocked(stream->fc);
+
+								spin_unlock_bh(&conn->lock);
+								if (sdb_val &&
+								    tquic_flow_send_stream_data_blocked(conn, path, stream->id, sdb_val) >= 0)
+									tquic_fc_stream_data_blocked_sent(stream->fc);
+								spin_lock_bh(&conn->lock);
+							}
+							stream->blocked = true;
+							skb_queue_head(&stream->send_buf, skb);
+							break;
+						}
+						stream_credit = tquic_fc_stream_get_credit(stream->fc);
+					} else {
+						if (unlikely(stream_offset >= stream->max_send_data)) {
+							stream->blocked = true;
+							skb_queue_head(&stream->send_buf, skb);
+							break;
+						}
+						stream_credit = stream->max_send_data - stream_offset;
+					}
+
+					cs2 = remaining;
+					if (cs2 > conn_credit)
+						cs2 = conn_credit;
+					if (cs2 > stream_credit)
+						cs2 = stream_credit;
+					if (cs2 > path->mtu - 100)
+						cs2 = path->mtu - 100;
+					chunk_size = cs2;
+
+					is_last = skb_queue_empty(&stream->send_buf);
+
+					frame = kmem_cache_zalloc(tquic_frame_cache, GFP_ATOMIC);
+					if (!frame) {
+						ret = -ENOMEM;
+						skb_queue_head(&stream->send_buf, skb);
+						break;
+					}
+
+					frame->type = TQUIC_FRAME_STREAM;
+					frame->stream_id = stream->id;
+					frame->offset = stream_offset;
+					frame->len = chunk_size;
+					frame->fin = stream->fin_sent &&
+						     (chunk_size == remaining) &&
+						     is_last;
+					frame->data = NULL;
+					frame->data_ref = NULL;
+					frame->skb = skb;
+					frame->skb_off = data_off;
+					frame->owns_data = false;
+					INIT_LIST_HEAD(&frame->list);
+					list_add_tail(&frame->list, &frames);
+
+					pkt_num = atomic64_inc_return(&conn->pkt_num_tx) - 1;
+					spin_unlock_bh(&conn->lock);
+
+					send_skb = tquic_assemble_packet(conn, path, -1, pkt_num, &frames);
+					if (send_skb) {
+						struct tquic_failover_ctx *__fc = tquic_conn_get_failover(conn);
+						u8 __pid = path ? path->path_id : 0;
+
+						pkt_size = send_skb->len;
+						if (__fc)
+							tquic_failover_track_sent(__fc, send_skb, pkt_num, __pid);
+
+						{
+						struct sock *psk = conn->sk;
+
+						if (conn->tsk && conn->tsk->pacing_enabled &&
+						    psk && smp_load_acquire(&psk->sk_pacing_status) == SK_PACING_NEEDED)
+							ret = tquic_output_paced(conn, send_skb);
+						else
+							ret = tquic_output_packet(conn, path, send_skb);
+						}
+
+						if (ret >= 0) {
+							packets_sent++;
+							iter_sent++;
+							sent_pkt = tquic_sent_packet_alloc(GFP_ATOMIC);
+							if (sent_pkt) {
+								tquic_sent_packet_init(sent_pkt, pkt_num, pkt_size,
+										       TQUIC_PN_SPACE_APPLICATION,
+										       true, true, __pid);
+								tquic_loss_detection_on_packet_sent(conn, sent_pkt);
+							}
+							if (conn->timer_state)
+								tquic_timer_on_packet_sent(conn->timer_state,
+											   TQUIC_PN_SPACE_APPLICATION,
+											   pkt_num, pkt_size,
+											   true, true,
+											   BIT(TQUIC_FRAME_STREAM),
+											   __pid);
+							if (__fc)
+								tquic_failover_arm_timeout(__fc, __pid);
+						} else {
+							if (__fc)
+								tquic_failover_on_ack(__fc, pkt_num);
+						}
+					} else {
+						struct tquic_pending_frame *f2, *t2;
+
+						list_for_each_entry_safe(f2, t2, &frames, list) {
+							list_del_init(&f2->list);
+							if (f2->owns_data)
+								kfree(f2->data);
+							kmem_cache_free(tquic_frame_cache, f2);
+						}
+						ret = -ENOMEM;
+					}
+
+					spin_lock_bh(&conn->lock);
+
+					if (ret >= 0 && send_skb) {
+						conn->data_sent += chunk_size;
+						if (conn->fc_data_reserved >= chunk_size)
+							conn->fc_data_reserved -= chunk_size;
+						else
+							conn->fc_data_reserved = 0;
+						conn_credit -= chunk_size;
+
+						if (chunk_size == remaining) {
+							struct sock *sk = conn->sk;
+
+							if (sk) {
+								sk_mem_uncharge(sk, skb->truesize);
+								if (sk_stream_wspace(sk) > 0 && sk->sk_write_space)
+									sk->sk_write_space(sk);
+							}
+							kfree_skb(skb);
+						} else {
+							cb->stream_offset = stream_offset + chunk_size;
+							cb->data_off = data_off + chunk_size;
+							skb_queue_head(&stream->send_buf, skb);
+						}
+					} else {
+						skb_queue_head(&stream->send_buf, skb);
+					}
+
+					INIT_LIST_HEAD(&frames);
+
+					if (!path)
+						break;
+					if (ret < 0)
+						break;
+				}
+
+				if (ret < 0)
+					break;
+				if (!path)
+					break;
+			} /* end for legacy rb_first loop */
+		} /* end if (conn->stream_mgr) else */
 
 		/*
 		 * Check if any stream still has pending data.
@@ -3372,15 +4284,30 @@ int tquic_output_flush(struct tquic_connection *conn)
 		 * again to drain remaining buffers.
 		 */
 		if (ret >= 0) {
-			for (node = rb_first(&conn->streams); node;
-			     node = rb_next(node)) {
-				struct tquic_stream *s;
+			if (conn->stream_mgr) {
+				/*
+				 * tquic_stream_get_sendable returns streams that
+				 * have data pending and are not blocked. Pass
+				 * max_streams=1 to just test for any sendable
+				 * stream without allocating a full array.
+				 */
+				struct tquic_stream *ps = NULL;
 
-				s = rb_entry(node, struct tquic_stream, node);
-				if (!skb_queue_empty(&s->send_buf) &&
-				    !s->blocked) {
+				if (tquic_stream_get_sendable(conn->stream_mgr,
+							      &ps, 1) > 0)
 					any_pending = true;
-					break;
+			} else {
+				for (node = rb_first(&conn->streams); node;
+				     node = rb_next(node)) {
+					struct tquic_stream *s;
+
+					s = rb_entry(node, struct tquic_stream,
+						     node);
+					if (!skb_queue_empty(&s->send_buf) &&
+					    !s->blocked) {
+						any_pending = true;
+						break;
+					}
 				}
 			}
 		}
@@ -3578,6 +4505,87 @@ int tquic_xmit_close(struct tquic_connection *conn, u64 error_code, bool is_app)
 EXPORT_SYMBOL_GPL(tquic_xmit_close);
 
 /*
+ * tquic_send_coalesced_crypto - Coalesce two crypto packets and send together
+ * @conn:   Connection context
+ * @path:   Path for transmission
+ * @pkt_a:  First assembled QUIC packet (e.g. Initial)
+ * @pkt_b:  Second assembled QUIC packet (e.g. Handshake)
+ *
+ * Implements RFC 9000 Section 12.2 packet coalescing: concatenates the two
+ * wire-format QUIC packets into a single UDP datagram using the canonical
+ * tquic_coalesce_packets() helper (core/packet.c, EXPORT_SYMBOL_GPL).
+ *
+ * Ordering MUST follow RFC 9000 Section 12.2: Initial before Handshake.
+ * The caller guarantees this by always passing the lower-PN-space packet
+ * as @pkt_a.
+ *
+ * Returns the number of bytes sent (>= 0) or a negative errno.
+ * On success both @pkt_a and @pkt_b have been consumed.
+ * On error, @pkt_a and @pkt_b remain untouched; caller must free them.
+ */
+static int tquic_send_coalesced_crypto(struct tquic_connection *conn,
+				       struct tquic_path *path,
+				       struct sk_buff *pkt_a,
+				       struct sk_buff *pkt_b)
+{
+	const u8 *pkts[2];
+	size_t lens[2];
+	u8 *coal_buf;
+	size_t coal_len;
+	struct sk_buff *coal_skb;
+	int total;
+	int ret;
+
+	if (!pkt_a || !pkt_b)
+		return -EINVAL;
+
+	pkts[0] = pkt_a->data;
+	lens[0] = pkt_a->len;
+	pkts[1] = pkt_b->data;
+	lens[1] = pkt_b->len;
+	coal_len = lens[0] + lens[1];
+
+	if (coal_len > path->mtu) {
+		/*
+		 * Combined size exceeds path MTU: send separately.
+		 * Return -EMSGSIZE so the caller can fall back to individual
+		 * sends.  Both skbs remain valid.
+		 */
+		return -EMSGSIZE;
+	}
+
+	coal_buf = kmalloc(coal_len, GFP_ATOMIC);
+	if (!coal_buf)
+		return -ENOMEM;
+
+	/*
+	 * tquic_coalesce_packets() (core/packet.c, EXPORT_SYMBOL_GPL)
+	 * concatenates the packet byte arrays per RFC 9000 Section 12.2.
+	 * The function validates that all packets fit in coal_buf.
+	 */
+	total = tquic_coalesce_packets(pkts, lens, 2, coal_buf, coal_len);
+	if (total < 0) {
+		kfree(coal_buf);
+		return total;
+	}
+
+	coal_skb = alloc_skb(MAX_HEADER + total, GFP_ATOMIC);
+	if (!coal_skb) {
+		kfree(coal_buf);
+		return -ENOMEM;
+	}
+	skb_reserve(coal_skb, MAX_HEADER);
+	skb_put_data(coal_skb, coal_buf, total);
+	kfree(coal_buf);
+
+	kfree_skb(pkt_a);
+	kfree_skb(pkt_b);
+
+	ret = tquic_output_packet(conn, path, coal_skb);
+	return (ret >= 0) ? total : ret;
+}
+
+/*
  * tquic_output_flush_crypto - Flush pending CRYPTO frame data
  * @conn: Connection with pending crypto data
  *
@@ -3604,6 +4612,17 @@ int tquic_output_flush_crypto(struct tquic_connection *conn)
 	u64 crypto_offset;
 	int pkt_type;
 	u32 send_skb_len;
+	/*
+	 * RFC 9000 Section 12.2 coalescing: hold the last assembled Initial
+	 * packet so we can try to coalesce it with the first Handshake packet
+	 * via tquic_coalesce_packets() (core/packet.c, EXPORT_SYMBOL_GPL).
+	 *
+	 * If coalescing succeeds both packets are delivered in one UDP
+	 * datagram, saving a round-trip worth of handshake RTT.
+	 * The pending_initial_pkt_num records the PN for timer accounting.
+	 */
+	struct sk_buff *pending_initial_skb = NULL;
+	u64 pending_initial_pkt_num = 0;
 
 	u64 pkt_num;
 	int ret;
@@ -3694,6 +4713,94 @@ int tquic_output_flush_crypto(struct tquic_connection *conn)
 					goto out_put_path;
 				}
 
+				/*
+				 * RFC 9000 Section 12.2 coalescing:
+				 * Hold the first Initial packet to try coalescing
+				 * with the first Handshake packet.  If the
+				 * Handshake space has pending data and both
+				 * packets fit in the MTU, tquic_send_coalesced_crypto()
+				 * will merge them via tquic_coalesce_packets()
+				 * (core/packet.c, EXPORT_SYMBOL_GPL) and send a
+				 * single UDP datagram.
+				 *
+				 * Only the very first Initial packet is held;
+				 * subsequent Initial packets (rare in practice)
+				 * are sent individually to avoid complexity.
+				 */
+				if (pkt_type == TQUIC_PKT_INITIAL &&
+				    !pending_initial_skb &&
+				    !skb_queue_empty(
+					    &conn->crypto_buffer[TQUIC_PN_SPACE_HANDSHAKE])) {
+					pending_initial_skb = send_skb;
+					pending_initial_pkt_num = pkt_num;
+					/* Timer accounting deferred to coalesce path */
+					goto next_chunk;
+				}
+
+				/*
+				 * If we have a pending Initial and this is the
+				 * first Handshake packet, attempt coalescing.
+				 */
+				if (pkt_type == TQUIC_PKT_HANDSHAKE &&
+				    pending_initial_skb) {
+					struct sk_buff *init_skb =
+						pending_initial_skb;
+					int coal_ret;
+
+					pending_initial_skb = NULL;
+					coal_ret = tquic_send_coalesced_crypto(
+						conn, path, init_skb,
+						send_skb);
+					if (coal_ret >= 0) {
+						/*
+						 * Both packets sent as one
+						 * datagram; account for both.
+						 * send_skb is consumed by
+						 * tquic_send_coalesced_crypto.
+						 */
+						if (conn->timer_state) {
+							tquic_timer_on_packet_sent(
+								conn->timer_state,
+								TQUIC_PN_SPACE_INITIAL,
+								pending_initial_pkt_num,
+								0, true, true,
+								BIT(TQUIC_FRAME_CRYPTO),
+								path->path_id);
+							tquic_timer_on_packet_sent(
+								conn->timer_state,
+								space, pkt_num, 0,
+								true, true,
+								BIT(TQUIC_FRAME_CRYPTO),
+								path->path_id);
+						}
+						packets_sent += 2;
+						goto next_chunk;
+					}
+					/*
+					 * Coalescing failed (MTU too small or
+					 * alloc failure).  On failure,
+					 * tquic_send_coalesced_crypto() does NOT
+					 * consume either skb.  Send the Initial
+					 * packet now (individually), then fall
+					 * through to send the Handshake packet.
+					 */
+					send_skb_len = init_skb->len;
+					if (tquic_output_packet(conn, path,
+								init_skb) >= 0) {
+						if (conn->timer_state)
+							tquic_timer_on_packet_sent(
+								conn->timer_state,
+								TQUIC_PN_SPACE_INITIAL,
+								pending_initial_pkt_num,
+								send_skb_len, true,
+								true,
+								BIT(TQUIC_FRAME_CRYPTO),
+								path->path_id);
+						packets_sent++;
+					}
+					/* Fall through to send Handshake pkt */
+				}
+
 				send_skb_len = send_skb->len;
 				ret = tquic_output_packet(conn, path, send_skb);
 				if (ret < 0) {
@@ -3708,6 +4815,7 @@ int tquic_output_flush_crypto(struct tquic_connection *conn)
 						pkt_num, send_skb_len, true,
 						true, BIT(TQUIC_FRAME_CRYPTO),
 						path->path_id);
+next_chunk:
 
 				chunk_data += chunk;
 				crypto_offset += chunk;
@@ -3722,6 +4830,13 @@ int tquic_output_flush_crypto(struct tquic_connection *conn)
 	ret = packets_sent;
 
 out_put_path:
+	/*
+	 * If an Initial packet was held for coalescing but we never got
+	 * a Handshake packet (or hit an error before coalescing), free it
+	 * to avoid a leak.  The send was not completed; retransmission will
+	 * resend it on the next PTO or explicit crypto retransmit.
+	 */
+	kfree_skb(pending_initial_skb);
 	tquic_path_put(path);
 	return ret;
 }

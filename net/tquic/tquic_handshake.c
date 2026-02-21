@@ -60,6 +60,7 @@ int tquic_client_copy_psk(const struct tquic_client *client, u8 *psk);
  * Forward declarations for crypto/tls.c functions
  */
 #include "crypto/tls.h"
+#include "core/quic_loss.h"
 struct tquic_crypto_state *tquic_crypto_init_versioned(
 	const struct tquic_cid *scid, bool is_server, u32 version);
 
@@ -264,18 +265,30 @@ void tquic_handle_zero_rtt_response(struct sock *sk, bool accepted)
 		tquic_zero_rtt_confirmed(conn);
 		TQUIC_INC_STATS(sock_net(sk), TQUIC_MIB_0RTTACCEPTED);
 		tquic_dbg("0-RTT accepted by server\n");
+		/*
+		 * Notify the connection state machine that 0-RTT was accepted.
+		 * This updates cs->zero_rtt_accepted for diagnostics and
+		 * allows state-machine-aware code to react to acceptance.
+		 */
+		tquic_conn_0rtt_accepted(conn);
 	} else {
 		/* Remove stale ticket */
 		if (state->ticket) {
 			tquic_zero_rtt_remove_ticket(state->ticket->server_name,
 						     state->ticket->server_name_len);
 		}
-			tquic_zero_rtt_reject(conn);
-			TQUIC_INC_STATS(sock_net(sk), TQUIC_MIB_0RTTREJECTED);
-			tquic_dbg("0-RTT rejected by server\n");
+		tquic_zero_rtt_reject(conn);
+		TQUIC_INC_STATS(sock_net(sk), TQUIC_MIB_0RTTREJECTED);
+		tquic_dbg("0-RTT rejected by server\n");
+		/*
+		 * Notify the connection state machine that 0-RTT was rejected.
+		 * This updates cs->zero_rtt_rejected and moves buffered 0-RTT
+		 * data to the 1-RTT retransmit queue per RFC 9001 Section 4.6.3.
+		 */
+		tquic_conn_0rtt_rejected(conn);
 
-			/*
-			 * Trigger retransmission of 0-RTT data as 1-RTT.
+		/*
+		 * Trigger retransmission of 0-RTT data as 1-RTT.
 		 * This calls tquic_zero_rtt_reject() and moves buffered
 		 * 0-RTT packets to the 1-RTT retransmit queue.
 		 */
@@ -848,6 +861,18 @@ tlshd_fallback:
 	 * 0-RTT data before the handshake completes."
 	 */
 	if (tsk->server_name[0] != '\0') {
+		struct tquic_connection *conn0rtt = tquic_sock_conn_get(tsk);
+
+		/*
+		 * Attempt 0-RTT: first enable it via the exported connection
+		 * API (which validates the session ticket and sets the
+		 * cs->zero_rtt_enabled flag), then attempt the TLS 0-RTT.
+		 */
+		if (conn0rtt) {
+			tquic_conn_enable_0rtt(conn0rtt);
+			tquic_conn_put(conn0rtt);
+		}
+
 		zero_rtt_ret = tquic_attempt_zero_rtt(sk, tsk->server_name,
 						      strnlen(tsk->server_name,
 							      sizeof(tsk->server_name) - 1));
@@ -1640,6 +1665,17 @@ int tquic_inline_hs_recv_crypto(struct sock *sk, const u8 *data, u32 len,
 		tsk->flags |= TQUIC_F_HANDSHAKE_DONE;
 
 		/*
+		 * RFC 9002 Section 6.2.2: Discard Initial and Handshake
+		 * packet number spaces on handshake completion.
+		 * This removes in-flight bytes from those spaces and
+		 * resets the loss detection timer.
+		 */
+		tquic_loss_on_packet_number_space_discarded(
+			conn, TQUIC_PN_SPACE_INITIAL);
+		tquic_loss_on_packet_number_space_discarded(
+			conn, TQUIC_PN_SPACE_HANDSHAKE);
+
+		/*
 		 * Release pre-handshake memory accounting for CVE-2025-54939
 		 * (QUIC-LEAK) defense.  Now that the handshake has succeeded
 		 * the per-IP counters can be released so the IP is no longer
@@ -2053,7 +2089,39 @@ static int tquic_conn_server_accept_init(struct tquic_connection *conn,
 	 *
 	 * Validation failure is not fatal - we just proceed without
 	 * address validation credit (subject to amplification limits).
+	 *
+	 * If retry is required (via sysctl) and no token is present,
+	 * use tquic_send_retry() to initiate address validation before
+	 * the handshake continues.  Return -EAGAIN so the caller knows
+	 * to drop this Initial and wait for the client's next one which
+	 * should carry the token.
 	 */
+	if (token_len == 0 && conn->sk &&
+	    tquic_retry_is_required(sock_net(conn->sk))) {
+		struct sockaddr_storage client_addr;
+		struct tquic_path *apath;
+		struct tquic_cid odcid;
+
+		memset(&client_addr, 0, sizeof(client_addr));
+		rcu_read_lock();
+		apath = rcu_dereference(conn->active_path);
+		if (apath)
+			memcpy(&client_addr, &apath->remote_addr,
+			       sizeof(client_addr));
+		rcu_read_unlock();
+
+		/*
+		 * Build a dummy original DCID (what the client put in DCID
+		 * before we assigned our own) - we stored it in conn->scid
+		 * from the packet's DCID field above.
+		 */
+		memcpy(&odcid, &conn->scid, sizeof(odcid));
+
+		tquic_send_retry(conn, &odcid,
+				 (const struct sockaddr *)&client_addr);
+		return -EAGAIN;
+	}
+
 	if (token_len > 0) {
 		const u8 *token_data = data + offset;
 		struct tquic_path *apath;
@@ -2078,16 +2146,32 @@ static int tquic_conn_server_accept_init(struct tquic_connection *conn,
 		 * validation (short lifetime, retry subsystem format) and
 		 * regular NEW_TOKEN validation (long lifetime).
 		 *
-		 * Retry and NEW_TOKEN tokens use different formats, so Retry
-		 * validation is delegated to tquic_retry_token_validate_global().
-		 * Try Retry first since it is common immediately after a Retry.
+		 * Prefer tquic_validate_retry_token() (from core/connection.c)
+		 * when the connection state machine is ready: it decrypts the
+		 * AES-GCM wrapped token and verifies the client address and
+		 * timestamp in one step.  Fall back to the global retry helper
+		 * (tquic_retry_token_validate_global) when cs is not set.
 		 */
 		memset(&original_dcid, 0, sizeof(original_dcid));
+
+		{
+			int cs_ret = tquic_validate_retry_token(
+				conn, token_data, (u32)token_len,
+				(const struct sockaddr *)&client_addr,
+				&original_dcid);
+
+			if (cs_ret == 0) {
+				token_ret = 0;
+				goto token_validated;
+			}
+			/* cs not initialized or token invalid - try global */
+		}
 
 		token_ret = tquic_retry_token_validate_global(
 			token_data, (size_t)token_len,
 			&client_addr,
 			original_dcid.id, &original_dcid.len);
+token_validated:
 
 		if (token_ret == 0) {
 			/*
@@ -2624,8 +2708,21 @@ int tquic_server_handshake(struct sock *listener_sk,
 
 	/* Child connections use the default path selection until bonded. */
 
-	/* Process Initial packet to extract CIDs */
-	ret = tquic_conn_server_accept_init(conn, initial_pkt);
+	/*
+	 * Process Initial packet to extract CIDs and set up the server-side
+	 * connection state machine.
+	 *
+	 * tquic_conn_server_accept() (RFC 9000 Section 7.2) validates the
+	 * version, sets conn->version, and initialises the connection state
+	 * machine via tquic_conn_state_machine.  On success the private
+	 * parse step is not needed.  If it returns -ENOENT the version was
+	 * unsupported and a Version Negotiation packet was already sent; in
+	 * that case fall through to the private init so CID fields are still
+	 * populated for logging and connection cleanup.
+	 */
+	ret = tquic_conn_server_accept(conn, initial_pkt);
+	if (ret == -ENOENT)
+		ret = tquic_conn_server_accept_init(conn, initial_pkt);
 	pr_debug("tquic_server_handshake: accept_init ret=%d\n", ret);
 		if (ret < 0) {
 			struct tquic_stream *dstream = NULL;
@@ -2814,18 +2911,16 @@ int tquic_server_psk_callback(struct sock *sk, const char *identity,
 	/* Look up client by PSK identity (returns with rcu_read_lock held) */
 	client = tquic_client_lookup_by_psk(identity, identity_len);
 	if (!client) {
-		if (__ratelimit(&tquic_psk_reject_log)) {
+		if (__ratelimit(&tquic_psk_reject_log))
 			tquic_dbg("unknown PSK identity\n");
-		}
 		TQUIC_INC_STATS(sock_net(sk), TQUIC_MIB_HANDSHAKESFAILED);
 		return -ENOENT;
 	}
 
 	/* Check rate limit before accepting connection */
 	if (!tquic_client_rate_limit_check(client)) {
-		if (__ratelimit(&tquic_psk_reject_log)) {
+		if (__ratelimit(&tquic_psk_reject_log))
 			tquic_dbg("PSK connection rate limited\n");
-		}
 		rcu_read_unlock();
 		TQUIC_INC_STATS(sock_net(sk), TQUIC_MIB_HANDSHAKESFAILED);
 		return -EQUIC_CONNECTION_REFUSED;
@@ -2842,6 +2937,7 @@ int tquic_server_psk_callback(struct sock *sk, const char *identity,
 	conn = tquic_sock_conn_get(tsk);
 	if (conn) {
 		int ret = tquic_server_bind_client(conn, client);
+
 		if (ret < 0) {
 			tquic_warn("failed to bind client: %d\n", ret);
 			/* Continue anyway - binding is for stats */

@@ -737,7 +737,7 @@ static int tquic_ack_frame_length(struct tquic_ack_info *ack_info, bool include_
 
 	/* ACK Range Count */
 	len += tquic_varint_len(ack_info->ack_range_count > 0 ?
-			        ack_info->ack_range_count - 1 : 0);
+				ack_info->ack_range_count - 1 : 0);
 
 	/* First ACK Range */
 	len += tquic_varint_len(ack_info->ranges[0].ack_range_len);
@@ -772,15 +772,27 @@ static int tquic_ack_frame_length(struct tquic_ack_info *ack_info, bool include_
 int tquic_ack_create(struct tquic_connection *conn, u8 pn_space,
 		     struct sk_buff *skb)
 {
+	/*
+	 * TQUIC_MAX_ACK_FRAME_LEN: upper bound for a fully-populated
+	 * ACK frame with TQUIC_ACK_MAX_RANGES ranges and ECN counts.
+	 *
+	 * Each field is at most 8 bytes (varint); the frame has:
+	 *   1 (type) + 8 (largest_acked) + 8 (ack_delay) +
+	 *   8 (range_count) + 8 (first_range) +
+	 *   TQUIC_ACK_MAX_RANGES * 16 (gap + ack_range_len each 8 bytes) +
+	 *   3 * 8 (ECN counts)
+	 * = 33 + 256 * 16 + 24 = 4153 bytes; round up generously.
+	 */
+#define TQUIC_MAX_ACK_FRAME_LEN (64 + TQUIC_ACK_MAX_RANGES * 16 + 32)
+	u8 frame_buf[TQUIC_MAX_ACK_FRAME_LEN];
 	struct tquic_ack_conn_ctx *ctx;
 	struct tquic_local_pn_space *space;
 	struct tquic_ack_info *ack_info;
 	u8 *p;
-	u8 frame_type;
 	int frame_len;
 	bool include_ecn;
+	u64 range_count;
 	unsigned long flags;
-	int i;
 
 	tquic_dbg("tquic_ack_create: pn_space=%u\n", pn_space);
 	if (!conn || !skb || pn_space >= TQUIC_PN_SPACE_COUNT)
@@ -809,8 +821,34 @@ int tquic_ack_create(struct tquic_connection *conn, u8 pn_space,
 		       ack_info->ecn_ect1 > 0 ||
 		       ack_info->ecn_ce > 0);
 
-	/* Calculate required space */
-	frame_len = tquic_ack_frame_length(ack_info, include_ecn);
+	/*
+	 * tquic_write_ack_frame() takes:
+	 *   first_ack_range = ranges[0].ack_range_len
+	 *   ranges[]        = &ranges[1] (the gap/ack_range pairs)
+	 *   range_count     = ack_range_count - 1  (additional ranges)
+	 *
+	 * Write into the temporary stack buffer, then do a single skb_put +
+	 * memcpy to avoid multiple skb_put calls inside the lock.
+	 */
+	range_count = ack_info->ack_range_count > 0 ?
+		      ack_info->ack_range_count - 1 : 0;
+
+	frame_len = tquic_write_ack_frame(
+		frame_buf, sizeof(frame_buf),
+		ack_info->largest_acked,
+		ack_info->ack_delay,
+		ack_info->ranges[0].ack_range_len,
+		(range_count > 0) ? &ack_info->ranges[1] : NULL,
+		range_count,
+		include_ecn,
+		ack_info->ecn_ect0,
+		ack_info->ecn_ect1,
+		ack_info->ecn_ce);
+
+	if (frame_len < 0) {
+		spin_unlock_irqrestore(&space->lock, flags);
+		return frame_len;
+	}
 
 	/* Check if there's room in the skb */
 	if (skb_tailroom(skb) < frame_len) {
@@ -818,77 +856,8 @@ int tquic_ack_create(struct tquic_connection *conn, u8 pn_space,
 		return -ENOSPC;
 	}
 
-	/* Frame type: 0x02 for ACK, 0x03 for ACK_ECN */
-	frame_type = include_ecn ? TQUIC_FRAME_ACK_ECN : TQUIC_FRAME_ACK;
-
-	p = skb_put(skb, 1);
-	*p = frame_type;
-
-	/* Largest Acknowledged */
-	p = skb_put(skb, tquic_varint_len(ack_info->largest_acked));
-	tquic_varint_encode(ack_info->largest_acked, p, tquic_varint_len(ack_info->largest_acked));
-
-	/* ACK Delay */
-	p = skb_put(skb, tquic_varint_len(ack_info->ack_delay));
-	tquic_varint_encode(ack_info->ack_delay, p, tquic_varint_len(ack_info->ack_delay));
-
-	/*
-	 * ACK Range Count: Number of Gap and ACK Range fields that follow
-	 * the First ACK Range. This is one less than ack_range_count since
-	 * the first range is encoded separately.
-	 */
-	{
-		u64 range_count = ack_info->ack_range_count > 0 ?
-				  ack_info->ack_range_count - 1 : 0;
-		p = skb_put(skb, tquic_varint_len(range_count));
-		tquic_varint_encode(range_count, p, tquic_varint_len(range_count));
-	}
-
-	/*
-	 * First ACK Range: Number of contiguous packets preceding the
-	 * Largest Acknowledged that are being acknowledged. A value of
-	 * 0 indicates only the largest packet is acknowledged.
-	 */
-	p = skb_put(skb, tquic_varint_len(ack_info->ranges[0].ack_range_len));
-	tquic_varint_encode(ack_info->ranges[0].ack_range_len, p,
-			    tquic_varint_len(ack_info->ranges[0].ack_range_len));
-
-	/*
-	 * Additional ACK Ranges: Each contains a Gap field and an
-	 * ACK Range field.
-	 *
-	 * Gap: Number of contiguous unacknowledged packets preceding the
-	 * packet number one lower than the smallest in the preceding range.
-	 *
-	 * ACK Range: Number of contiguous acknowledged packets preceding
-	 * the largest packet number in this range.
-	 */
-	for (i = 1; i < ack_info->ack_range_count; i++) {
-		/* Gap */
-		p = skb_put(skb, tquic_varint_len(ack_info->ranges[i].gap));
-		tquic_varint_encode(ack_info->ranges[i].gap, p,
-				    tquic_varint_len(ack_info->ranges[i].gap));
-
-		/* ACK Range */
-		p = skb_put(skb, tquic_varint_len(ack_info->ranges[i].ack_range_len));
-		tquic_varint_encode(ack_info->ranges[i].ack_range_len, p,
-				    tquic_varint_len(ack_info->ranges[i].ack_range_len));
-	}
-
-	/* ECN Counts (if ACK_ECN frame) */
-	if (include_ecn) {
-		/* ECT(0) Count */
-		p = skb_put(skb, tquic_varint_len(ack_info->ecn_ect0));
-		tquic_varint_encode(ack_info->ecn_ect0, p, tquic_varint_len(ack_info->ecn_ect0));
-
-		/* ECT(1) Count */
-		p = skb_put(skb, tquic_varint_len(ack_info->ecn_ect1));
-		tquic_varint_encode(ack_info->ecn_ect1, p, tquic_varint_len(ack_info->ecn_ect1));
-
-		/* ECN-CE Count */
-		p = skb_put(skb, tquic_varint_len(ack_info->ecn_ce));
-		tquic_varint_encode(ack_info->ecn_ce, p, tquic_varint_len(ack_info->ecn_ce));
-	}
+	p = skb_put(skb, frame_len);
+	memcpy(p, frame_buf, frame_len);
 
 	/*
 	 * Reset ack-eliciting counter since we're sending an ACK.
@@ -899,6 +868,7 @@ int tquic_ack_create(struct tquic_connection *conn, u8 pn_space,
 	spin_unlock_irqrestore(&space->lock, flags);
 
 	return frame_len;
+#undef TQUIC_MAX_ACK_FRAME_LEN
 }
 
 /*
