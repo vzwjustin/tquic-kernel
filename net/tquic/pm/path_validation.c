@@ -21,6 +21,7 @@
 #include <net/tquic.h>
 #include "../tquic_compat.h"
 #include "../tquic_debug.h"
+#include "../tquic_preferred_addr.h"
 #include <net/tquic_pm.h>
 #include <uapi/linux/tquic_pm.h>
 
@@ -155,6 +156,26 @@ void tquic_path_validation_timeout(struct timer_list *t)
 
 		/* Emit path failed event via PM netlink */
 		tquic_pm_nl_send_event(net, conn, path, TQUIC_PM_EVENT_FAILED);
+
+		/*
+		 * Wire: tquic_pref_addr_client_on_failed —
+		 *
+		 * If this path was the preferred-address migration path,
+		 * notify the preferred address subsystem that migration
+		 * validation has failed.  The subsystem cleans up the
+		 * migration_path pointer and marks the state as FAILED.
+		 * Non-fatal: continue with bonding failover regardless.
+		 */
+		if (!conn->is_server && conn->preferred_addr) {
+			struct tquic_pref_addr_migration *m =
+				(struct tquic_pref_addr_migration *)
+					conn->preferred_addr;
+
+			if (m->state == TQUIC_PREF_ADDR_VALIDATING &&
+			    m->migration_path == path)
+				tquic_pref_addr_client_on_failed(conn,
+								 -ETIMEDOUT);
+		}
 
 #ifdef CONFIG_TQUIC_MULTIPATH
 		/*
@@ -441,6 +462,28 @@ int tquic_path_handle_response(struct tquic_connection *conn,
 	if (conn && conn->sk)
 		tquic_pm_nl_send_event(sock_net(conn->sk), conn, path,
 				       TQUIC_PM_EVENT_VALIDATED);
+
+	/*
+	 * Wire: tquic_pref_addr_client_on_validated —
+	 *
+	 * If this is a client and the validated path is the
+	 * preferred-address migration path, notify the preferred address
+	 * subsystem.  It will promote the path to active_path and update
+	 * conn->stats.path_migrations.
+	 *
+	 * We must call this BEFORE tquic_bond_path_recovered() because
+	 * the subsystem's rcu_assign_pointer(conn->active_path, path)
+	 * may overlap with bonding's path selection.  Non-fatal if the
+	 * path is not the preferred-address path.
+	 */
+	if (conn && !conn->is_server && conn->preferred_addr) {
+		struct tquic_pref_addr_migration *m =
+			(struct tquic_pref_addr_migration *)conn->preferred_addr;
+
+		if (m->state == TQUIC_PREF_ADDR_VALIDATING &&
+		    m->migration_path == path)
+			tquic_pref_addr_client_on_validated(conn, path);
+	}
 
 	/* Notify bonding layer path is available again */
 	tquic_bond_path_recovered(conn, path);

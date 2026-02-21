@@ -64,10 +64,18 @@
 #ifdef CONFIG_TQUIC_OFFLOAD
 #include "offload/smartnic.h"
 #endif
+#ifdef CONFIG_TQUIC_AF_XDP
+#include "af_xdp.h"
+#endif
 #ifdef CONFIG_TQUIC_OVER_TCP
 #include "transport/tcp_fallback.h"
 #include "transport/quic_over_tcp.h"
 #endif
+#ifdef CONFIG_TQUIC_FEC
+#include "fec/fec.h"
+#endif
+#include "tquic_sysctl.h"
+#include "security_hardening.h"
 
 /* Scheduler failover wrappers (multipath/tquic_scheduler.c) */
 bool tquic_sched_has_failover_pending(struct tquic_failover_ctx *fc);
@@ -1524,9 +1532,22 @@ struct sk_buff *tquic_assemble_packet(struct tquic_connection *conn,
 				key_phase = tquic_key_update_get_phase(
 						    ku_state) != 0;
 		}
-		header_len = tquic_build_short_header_internal(
-			conn, path, header_buf, sizeof(header_buf), pkt_num, 0,
-			key_phase, false, conn->grease_state);
+		{
+			/*
+			 * Wire: tquic_spin_bit_get — RFC 9000 Section 17.4
+			 * spin bit privacy policy.
+			 */
+			u8 spin = conn->spin_bit_state ?
+				tquic_spin_bit_get(
+					(struct tquic_spin_bit_state *)
+						conn->spin_bit_state,
+					pkt_num) : 0;
+
+			header_len = tquic_build_short_header_internal(
+				conn, path, header_buf, sizeof(header_buf),
+				pkt_num, 0, key_phase, spin != 0,
+				conn->grease_state);
+		}
 	}
 
 	if (unlikely(header_len < 0))
@@ -2428,6 +2449,78 @@ int tquic_output_packet(struct tquic_connection *conn, struct tquic_path *path,
 	}
 #endif /* CONFIG_TQUIC_OFFLOAD */
 
+#ifdef CONFIG_TQUIC_AF_XDP
+	/*
+	 * Wire: tquic_xsk_send / tquic_xsk_flush_tx / tquic_xsk_poll_tx —
+	 *
+	 * When the path or connection has an AF_XDP socket attached, send
+	 * via the XDP ring buffer instead of the normal UDP stack.
+	 * This provides kernel-bypass TX for maximum throughput.
+	 *
+	 * Per-path XSK (path->xsk) takes precedence over per-connection XSK
+	 * (conn->xsk) for multipath scenarios where each path may use a
+	 * separate hardware queue.
+	 *
+	 * We allocate a single tquic_xsk_packet from the XSK frame pool,
+	 * copy the skb payload into the UMEM buffer, then call tquic_xsk_send()
+	 * to queue it to the TX ring.  tquic_xsk_flush_tx() kicks the kernel
+	 * to transmit, and tquic_xsk_poll_tx() recycles completed TX frames.
+	 */
+	{
+		struct tquic_xsk *tx_xsk = NULL;
+
+		if (path && path->xsk)
+			tx_xsk = path->xsk;
+		else if (conn && conn->xsk)
+			tx_xsk = conn->xsk;
+
+		if (tx_xsk) {
+			struct tquic_xsk_packet xpkt = {};
+			u64 frame_addr;
+			int xsk_ret;
+
+			xsk_ret = tquic_xsk_alloc_frame(tx_xsk, &frame_addr);
+			if (xsk_ret == 0) {
+				void *buf = tquic_xsk_get_frame_data(tx_xsk,
+								     frame_addr);
+
+				if (buf && skb->len <= tx_xsk->frame_size) {
+					memcpy(buf, skb->data, skb->len);
+					xpkt.addr = frame_addr;
+					xpkt.data = buf;
+					xpkt.len = skb->len;
+					xpkt.xsk = tx_xsk;
+					xpkt.owns_frame = true;
+
+					xsk_ret = tquic_xsk_send(tx_xsk,
+								 &xpkt, 1);
+					if (xsk_ret == 1) {
+						tquic_xsk_flush_tx(tx_xsk);
+						tquic_xsk_poll_tx(tx_xsk, 32);
+						/*
+						 * Wire: tquic_xsk_wakeup --
+						 *
+						 * AF_XDP sockets in copy mode,
+						 * or when XDP_RING_NEED_WAKEUP
+						 * is set, the TX ring needs an
+						 * explicit wakeup after
+						 * descriptors are queued.
+						 */
+						if (tquic_xsk_need_wakeup(tx_xsk))
+							tquic_xsk_wakeup(tx_xsk);
+						kfree_skb(skb);
+						return 0;
+					}
+				}
+				/* Frame not used; free it back to pool */
+				if (xsk_ret != 1)
+					tquic_xsk_free_frame(tx_xsk, frame_addr);
+			}
+			/* Fall through to normal UDP path on XSK failure */
+		}
+	}
+#endif /* CONFIG_TQUIC_AF_XDP */
+
 	/* Get addresses */
 	local = (struct sockaddr_in *)&path->local_addr;
 	remote = (struct sockaddr_in *)&path->remote_addr;
@@ -2791,9 +2884,17 @@ int tquic_send_ack(struct tquic_connection *conn, struct tquic_path *path,
 			key_phase = tquic_key_update_get_phase(ku_state) != 0;
 	}
 
-	header_len = tquic_build_short_header_internal(
-		conn, path, header_buf, sizeof(header_buf), pkt_num, 0,
-		key_phase, false, conn->grease_state);
+	{
+		u8 spin = conn->spin_bit_state ?
+			tquic_spin_bit_get(
+				(struct tquic_spin_bit_state *)
+					conn->spin_bit_state,
+				pkt_num) : 0;
+
+		header_len = tquic_build_short_header_internal(
+			conn, path, header_buf, sizeof(header_buf), pkt_num, 0,
+			key_phase, spin != 0, conn->grease_state);
+	}
 	if (header_len < 0) {
 		kfree_skb(skb);
 		return header_len;
@@ -2898,9 +2999,17 @@ int tquic_send_ping(struct tquic_connection *conn, struct tquic_path *path)
 			key_phase = tquic_key_update_get_phase(ku_state) != 0;
 	}
 
-	header_len = tquic_build_short_header_internal(
-		conn, path, header_buf, sizeof(header_buf), pkt_num, 0,
-		key_phase, false, conn->grease_state);
+	{
+		u8 spin = conn->spin_bit_state ?
+			tquic_spin_bit_get(
+				(struct tquic_spin_bit_state *)
+					conn->spin_bit_state,
+				pkt_num) : 0;
+
+		header_len = tquic_build_short_header_internal(
+			conn, path, header_buf, sizeof(header_buf), pkt_num, 0,
+			key_phase, spin != 0, conn->grease_state);
+	}
 	if (header_len < 0) {
 		kfree_skb(skb);
 		return header_len;
@@ -3022,9 +3131,17 @@ int tquic_flow_send_max_data(struct tquic_connection *conn,
 			key_phase = tquic_key_update_get_phase(ku_state) != 0;
 	}
 
-	header_len = tquic_build_short_header_internal(
-		conn, path, header_buf, sizeof(header_buf), pkt_num, 0,
-		key_phase, false, conn->grease_state);
+	{
+		u8 spin = conn->spin_bit_state ?
+			tquic_spin_bit_get(
+				(struct tquic_spin_bit_state *)
+					conn->spin_bit_state,
+				pkt_num) : 0;
+
+		header_len = tquic_build_short_header_internal(
+			conn, path, header_buf, sizeof(header_buf), pkt_num, 0,
+			key_phase, spin != 0, conn->grease_state);
+	}
 	if (header_len < 0) {
 		kfree_skb(skb);
 		return header_len;
@@ -3152,9 +3269,17 @@ int tquic_flow_send_max_stream_data(struct tquic_connection *conn,
 			key_phase = tquic_key_update_get_phase(ku_state) != 0;
 	}
 
-	header_len = tquic_build_short_header_internal(
-		conn, path, header_buf, sizeof(header_buf), pkt_num, 0,
-		key_phase, false, conn->grease_state);
+	{
+		u8 spin = conn->spin_bit_state ?
+			tquic_spin_bit_get(
+				(struct tquic_spin_bit_state *)
+					conn->spin_bit_state,
+				pkt_num) : 0;
+
+		header_len = tquic_build_short_header_internal(
+			conn, path, header_buf, sizeof(header_buf), pkt_num, 0,
+			key_phase, spin != 0, conn->grease_state);
+	}
 	if (header_len < 0) {
 		kfree_skb(skb);
 		return header_len;
@@ -3272,9 +3397,17 @@ static int tquic_flow_send_data_blocked(struct tquic_connection *conn,
 			key_phase = tquic_key_update_get_phase(ku_state) != 0;
 	}
 
-	header_len = tquic_build_short_header_internal(
-		conn, path, header_buf, sizeof(header_buf), pkt_num, 0,
-		key_phase, false, conn->grease_state);
+	{
+		u8 spin = conn->spin_bit_state ?
+			tquic_spin_bit_get(
+				(struct tquic_spin_bit_state *)
+					conn->spin_bit_state,
+				pkt_num) : 0;
+
+		header_len = tquic_build_short_header_internal(
+			conn, path, header_buf, sizeof(header_buf), pkt_num, 0,
+			key_phase, spin != 0, conn->grease_state);
+	}
 	if (header_len < 0) {
 		kfree_skb(skb);
 		return header_len;
@@ -3385,9 +3518,17 @@ static int tquic_flow_send_stream_data_blocked(struct tquic_connection *conn,
 			key_phase = tquic_key_update_get_phase(ku_state) != 0;
 	}
 
-	header_len = tquic_build_short_header_internal(
-		conn, path, header_buf, sizeof(header_buf), pkt_num, 0,
-		key_phase, false, conn->grease_state);
+	{
+		u8 spin = conn->spin_bit_state ?
+			tquic_spin_bit_get(
+				(struct tquic_spin_bit_state *)
+					conn->spin_bit_state,
+				pkt_num) : 0;
+
+		header_len = tquic_build_short_header_internal(
+			conn, path, header_buf, sizeof(header_buf), pkt_num, 0,
+			key_phase, spin != 0, conn->grease_state);
+	}
 	if (header_len < 0) {
 		kfree_skb(skb);
 		return header_len;
@@ -3499,9 +3640,17 @@ static int tquic_flow_send_max_streams(struct tquic_connection *conn,
 			key_phase = tquic_key_update_get_phase(ku_state) != 0;
 	}
 
-	header_len = tquic_build_short_header_internal(
-		conn, path, header_buf, sizeof(header_buf), pkt_num, 0,
-		key_phase, false, conn->grease_state);
+	{
+		u8 spin = conn->spin_bit_state ?
+			tquic_spin_bit_get(
+				(struct tquic_spin_bit_state *)
+					conn->spin_bit_state,
+				pkt_num) : 0;
+
+		header_len = tquic_build_short_header_internal(
+			conn, path, header_buf, sizeof(header_buf), pkt_num, 0,
+			key_phase, spin != 0, conn->grease_state);
+	}
 	if (header_len < 0) {
 		kfree_skb(skb);
 		return header_len;
@@ -3615,9 +3764,17 @@ static int tquic_flow_send_streams_blocked(struct tquic_connection *conn,
 			key_phase = tquic_key_update_get_phase(ku_state) != 0;
 	}
 
-	header_len = tquic_build_short_header_internal(
-		conn, path, header_buf, sizeof(header_buf), pkt_num, 0,
-		key_phase, false, conn->grease_state);
+	{
+		u8 spin = conn->spin_bit_state ?
+			tquic_spin_bit_get(
+				(struct tquic_spin_bit_state *)
+					conn->spin_bit_state,
+				pkt_num) : 0;
+
+		header_len = tquic_build_short_header_internal(
+			conn, path, header_buf, sizeof(header_buf), pkt_num, 0,
+			key_phase, spin != 0, conn->grease_state);
+	}
 	if (header_len < 0) {
 		kfree_skb(skb);
 		return header_len;
@@ -3728,9 +3885,14 @@ int tquic_send_connection_close(struct tquic_connection *conn, u64 error_code,
 	/* Build short header with connection's GREASE state */
 	{
 		u8 header[TQUIC_MAX_SHORT_HEADER_SIZE];
+		u8 spin = conn->spin_bit_state ?
+			tquic_spin_bit_get(
+				(struct tquic_spin_bit_state *)
+					conn->spin_bit_state,
+				pkt_num) : 0;
 		int header_len = tquic_build_short_header_internal(
 			conn, path, header, TQUIC_MAX_SHORT_HEADER_SIZE,
-			pkt_num, 0, false, false, conn->grease_state);
+			pkt_num, 0, false, spin != 0, conn->grease_state);
 		if (header_len <= 0) {
 			/* Header build failed -- do not send unframed data */
 			kfree_skb(skb);
@@ -4312,6 +4474,42 @@ int tquic_output_flush(struct tquic_connection *conn)
 					atomic64_inc_return(&conn->pkt_num_tx) -
 					1;
 
+				/*
+				 * Wire: tquic_pn_should_skip / tquic_pn_record_skip
+				 * Optimistic ACK defense (security_hardening.h).
+				 * Randomly skip packet numbers; if peer ACKs a
+				 * skipped PN, an optimistic ACK attack is detected.
+				 */
+				if (conn->pn_skip_state) {
+					int skip = tquic_pn_should_skip(
+						(struct tquic_pn_skip_state *)
+							conn->pn_skip_state,
+						TQUIC_PN_SPACE_APPLICATION);
+
+					if (skip > 0) {
+						tquic_pn_record_skip(
+							(struct tquic_pn_skip_state *)
+								conn->pn_skip_state,
+							pkt_num,
+							TQUIC_PN_SPACE_APPLICATION);
+						atomic64_add(skip,
+							     &conn->pkt_num_tx);
+						pkt_num += skip;
+					}
+				}
+
+				/*
+				 * Wire: tquic_ack_validation_record_sent
+				 * ACK range validation defense: track what we send
+				 * so we can reject ACKs for unsent packet numbers.
+				 */
+				if (conn->ack_validation_state)
+					tquic_ack_validation_record_sent(
+						(struct tquic_ack_validation_state *)
+							conn->ack_validation_state,
+						pkt_num,
+						TQUIC_PN_SPACE_APPLICATION);
+
 				/* Release lock while sending (may sleep in crypto) */
 				spin_unlock_bh(&conn->lock);
 
@@ -4767,6 +4965,60 @@ int tquic_output_flush(struct tquic_connection *conn)
 	if (packets_sent > 0)
 		pr_info("tquic: output_flush: conn=%px sent %d pkts is_server=%d\n",
 			conn, packets_sent, conn->is_server);
+
+#ifdef CONFIG_TQUIC_FEC
+	/*
+	 * After flushing source data, check if the FEC scheduler
+	 * wants a repair frame sent on this connection.
+	 * tquic_fec_should_send_repair() returns true when the loss
+	 * rate and block state warrant sending a repair symbol.
+	 * tquic_fec_generate_repair() encodes the pending block.
+	 *
+	 * Wire: tquic_fec_should_send_repair, tquic_fec_get_pending_repair,
+	 *       tquic_fec_generate_repair, tquic_fec_find_block
+	 */
+	if (conn->fec_state && packets_sent > 0) {
+		u64 last_pn = (u64)atomic64_read(&conn->pkt_num_tx) - 1;
+
+		if (tquic_fec_should_send_repair(conn->fec_state, last_pn)) {
+			struct tquic_fec_repair_frame frame;
+
+			if (tquic_fec_get_pending_repair(conn->fec_state,
+							 &frame)) {
+				struct tquic_fec_source_block *blk;
+
+				blk = tquic_fec_find_block(conn->fec_state,
+							   frame.block_id);
+				if (blk) {
+					int fret;
+
+					fret = tquic_fec_generate_repair(
+						conn->fec_state, blk);
+					if (fret < 0)
+						tquic_dbg("fec: repair gen failed: %d\n",
+							  fret);
+				}
+			}
+		}
+	}
+#endif /* CONFIG_TQUIC_FEC */
+
+#ifdef CONFIG_TQUIC_OFFLOAD
+	/*
+	 * If hardware offload is active for this connection, notify
+	 * the SmartNIC that TX is complete for stat accounting.
+	 * The actual per-packet encrypt is done via tquic_offload_tx()
+	 * in tquic_output_packet(); here we call tquic_offload_key_update()
+	 * to rotate keys if a key-update is pending post-flush.
+	 *
+	 * Wire: tquic_offload_key_update (key rotation on TX path)
+	 */
+	if (conn->hw_offload_enabled && conn->hw_offload_dev && packets_sent > 0 &&
+	    test_bit(TQUIC_CONN_FLAG_KEY_UPDATE_PENDING, &conn->flags)) {
+		tquic_offload_key_update(conn->hw_offload_dev, conn);
+	}
+#endif /* CONFIG_TQUIC_OFFLOAD */
+
 out_clear_flush:
 	if (path)
 		tquic_path_put(path);
@@ -5529,10 +5781,15 @@ int tquic_send_datagram(struct tquic_connection *conn, const void *data,
 	/* Build short header */
 	{
 		u8 header[TQUIC_MAX_SHORT_HEADER_SIZE];
+		u8 spin = conn->spin_bit_state ?
+			tquic_spin_bit_get(
+				(struct tquic_spin_bit_state *)
+					conn->spin_bit_state,
+				pkt_num) : 0;
 
 		header_len = tquic_build_short_header_internal(
 			conn, path, header, TQUIC_MAX_SHORT_HEADER_SIZE,
-			pkt_num, 0, false, false, NULL);
+			pkt_num, 0, false, spin != 0, NULL);
 		if (header_len < 0) {
 			kfree_skb(skb);
 			kfree(buf);

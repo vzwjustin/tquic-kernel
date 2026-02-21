@@ -527,6 +527,42 @@ static int tquic_encode_transport_params(struct tquic_hs_transport_params *param
 			TP_ENCODE_VARINT(params->retry_scid_len);
 			TP_COPY(params->retry_scid, params->retry_scid_len);
 		}
+
+		/*
+		 * Wire: tquic_pref_addr_server_encode path —
+		 * preferred_address (RFC 9000 Section 18.2, id 0x0d).
+		 *
+		 * Encoded only by servers when they have a preferred address
+		 * to advertise. The length is fixed-variable:
+		 *   4 + 2 + 16 + 2 + 1 + cid_len + 16
+		 */
+		if (params->has_preferred_address) {
+			u8 cid_len = params->preferred_address_cid_len;
+			u32 pa_len = 4 + 2 + 16 + 2 + 1 + cid_len + 16;
+
+			TP_ENCODE_VARINT(QUIC_TP_PREFERRED_ADDRESS);
+			TP_ENCODE_VARINT(pa_len);
+
+			/* IPv4 address (4 bytes) */
+			TP_COPY(params->preferred_address_ipv4, 4);
+			/* IPv4 port (2 bytes, big-endian) */
+			TP_CHECK_SPACE(2);
+			*p++ = (u8)(params->preferred_address_ipv4_port >> 8);
+			*p++ = (u8)(params->preferred_address_ipv4_port);
+			/* IPv6 address (16 bytes) */
+			TP_COPY(params->preferred_address_ipv6, 16);
+			/* IPv6 port (2 bytes, big-endian) */
+			TP_CHECK_SPACE(2);
+			*p++ = (u8)(params->preferred_address_ipv6_port >> 8);
+			*p++ = (u8)(params->preferred_address_ipv6_port);
+			/* CID length (1 byte) */
+			TP_WRITE_BYTE(cid_len);
+			/* CID (variable) */
+			if (cid_len > 0)
+				TP_COPY(params->preferred_address_cid, cid_len);
+			/* Stateless reset token (16 bytes) */
+			TP_COPY(params->preferred_address_reset_token, 16);
+		}
 	}
 
 	/* max_datagram_frame_size (for DATAGRAM extension) */
@@ -724,6 +760,72 @@ static int tquic_decode_transport_params(const u8 *buf, u32 buf_len,
 			params->retry_scid_len = param_len;
 			params->has_retry_scid = true;
 			break;
+
+		/*
+		 * Wire: tquic_pref_addr_client_decode path —
+		 * preferred_address (RFC 9000 Section 18.2, id 0x0d).
+		 *
+		 * Client decodes the server's preferred address transport param.
+		 * Min length: 4 + 2 + 16 + 2 + 1 + 0 + 16 = 41 bytes.
+		 * Only clients should process this (servers reject it above).
+		 */
+		case QUIC_TP_PREFERRED_ADDRESS: {
+			const u8 *pa = p;
+			u8 cid_len;
+			const u64 pa_min_len = 4 + 2 + 16 + 2 + 1 + 16;
+
+			/*
+			 * RFC 9000 Section 18.2: servers MUST NOT send
+			 * preferred_address from a client. Discard if seen
+			 * during client (is_server == true means WE are server,
+			 * so we're receiving a ClientHello — ignore).
+			 */
+			if (is_server)
+				break;
+
+			if (param_len < pa_min_len) {
+				pr_debug("tquic_tp: preferred_address too short: %llu\n",
+					 param_len);
+				return -EINVAL;
+			}
+
+			/* IPv4 address (4 bytes) */
+			memcpy(params->preferred_address_ipv4, pa, 4);
+			pa += 4;
+			/* IPv4 port (2 bytes, big-endian) */
+			params->preferred_address_ipv4_port =
+				((u16)pa[0] << 8) | pa[1];
+			pa += 2;
+			/* IPv6 address (16 bytes) */
+			memcpy(params->preferred_address_ipv6, pa, 16);
+			pa += 16;
+			/* IPv6 port (2 bytes, big-endian) */
+			params->preferred_address_ipv6_port =
+				((u16)pa[0] << 8) | pa[1];
+			pa += 2;
+			/* CID length (1 byte) */
+			cid_len = *pa++;
+			if (cid_len > 20) {
+				pr_debug("tquic_tp: preferred_address CID too long: %u\n",
+					 cid_len);
+				return -EINVAL;
+			}
+			/* Validate remaining length */
+			if (param_len < pa_min_len + cid_len) {
+				pr_debug("tquic_tp: preferred_address truncated for CID len %u\n",
+					 cid_len);
+				return -EINVAL;
+			}
+			params->preferred_address_cid_len = cid_len;
+			if (cid_len > 0) {
+				memcpy(params->preferred_address_cid, pa, cid_len);
+				pa += cid_len;
+			}
+			/* Stateless reset token (16 bytes) */
+			memcpy(params->preferred_address_reset_token, pa, 16);
+			params->has_preferred_address = true;
+			break;
+		}
 
 		case QUIC_TP_MAX_DATAGRAM_FRAME_SIZE:
 			ret = hs_varint_decode(p, param_len, &val, &vlen);

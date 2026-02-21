@@ -35,6 +35,12 @@
 #include "tquic_debug.h"
 #include "protocol.h"
 #include "tquic_compat.h"
+#ifdef CONFIG_TQUIC_AF_XDP
+#include "af_xdp.h"
+#endif
+#ifdef CONFIG_TQUIC_OFFLOAD
+#include "offload/smartnic.h"
+#endif
 
 /*
  * =============================================================================
@@ -249,6 +255,13 @@ void tquic_napi_disable(struct tquic_sock *sk)
 	napi_disable(&tn->napi);
 	tn->enabled = false;
 	tn->state = TQUIC_NAPI_STATE_DISABLED;
+
+	/*
+	 * Wire: tquic_napi_reset_stats — reset per-NAPI statistics
+	 * when NAPI is disabled so each new enable period starts
+	 * from a clean counter baseline.
+	 */
+	tquic_napi_reset_stats(tn);
 }
 EXPORT_SYMBOL_GPL(tquic_napi_disable);
 
@@ -310,7 +323,123 @@ static int tquic_napi_poll(struct napi_struct *napi, int budget)
 	spliced = atomic_xchg(&tn->rx_queue_len, 0);
 	spin_unlock_irqrestore(&tn->lock, flags);
 
+	/*
+	 * Wire: tquic_xsk_recv / tquic_xsk_recv_complete —
+	 *
+	 * When the connection has an AF_XDP socket attached (conn->xsk),
+	 * drain packets from the XSK ring buffer first.  AF_XDP provides
+	 * kernel-bypass reception: packets arrive directly from the NIC
+	 * via XDP redirect without going through the normal skb path.
+	 *
+	 * We allocate a batch of tquic_xsk_packet descriptors, call
+	 * tquic_xsk_recv() to fill them from the XSK RX ring, then
+	 * build a minimal skb for each and inject it into the normal
+	 * TQUIC input path.  tquic_xsk_recv_complete() returns the frame
+	 * buffers to the fill ring for reuse.
+	 *
+	 * The fill ring must be replenished when low to prevent stalls;
+	 * tquic_xsk_fill_ring_replenish() handles this.
+	 */
+#ifdef CONFIG_TQUIC_AF_XDP
+	if (tn->conn && tn->conn->xsk) {
+		struct tquic_xsk *xsk = tn->conn->xsk;
+		struct tquic_xsk_packet xsk_pkts[TQUIC_NAPI_DEFAULT_WEIGHT];
+		int xsk_count;
+		int i;
+
+		xsk_count = tquic_xsk_recv(xsk, xsk_pkts,
+					   min(budget, TQUIC_NAPI_DEFAULT_WEIGHT));
+		if (xsk_count > 0) {
+			for (i = 0; i < xsk_count; i++) {
+				struct sk_buff *xsk_skb;
+
+				/*
+				 * Build a minimal skb referencing the XSK
+				 * frame data.  dev_alloc_skb + memcpy avoids
+				 * zero-copy complications for now; zero-copy
+				 * mode (TQUIC_XDP_ZEROCOPY) can be added as
+				 * an optimisation on top of this wiring.
+				 */
+				xsk_skb = dev_alloc_skb(xsk_pkts[i].len);
+				if (xsk_skb) {
+					skb_put_data(xsk_skb,
+						     xsk_pkts[i].data,
+						     xsk_pkts[i].len);
+					tquic_process_rx_packet(tn->sk, xsk_skb);
+					work_done++;
+				}
+			}
+
+			tquic_xsk_recv_complete(xsk, xsk_pkts, xsk_count);
+
+			/* Replenish fill ring if running low */
+			if (tquic_xsk_fill_ring_empty(xsk))
+				tquic_xsk_fill_ring_replenish(xsk,
+							      xsk->num_frames / 2);
+		}
+	}
+#endif /* CONFIG_TQUIC_AF_XDP */
+
 	/* Process up to budget packets from the local queue */
+#ifdef CONFIG_TQUIC_OFFLOAD
+	/*
+	 * Wire: tquic_offload_batch_rx — when the connection is backed by a
+	 * SmartNIC that supports batch decryption (TQUIC_NIC_CAP_BATCH_PROCESS),
+	 * collect dequeued skbs into a flat array and issue a single batch
+	 * decrypt call to the hardware.  Hardware decrypts in parallel;
+	 * remaining skbs fall back to the per-packet software path.
+	 * The batch call returns the number of packets decrypted; we still
+	 * call tquic_process_rx_packet() for each so upper-layer processing
+	 * (frame parsing, ACKs, flow control) proceeds normally.
+	 */
+	if (tn->conn && tn->conn->hw_offload_enabled &&
+	    tn->conn->hw_offload_dev) {
+		struct tquic_nic_device *nic = tn->conn->hw_offload_dev;
+		int q_len = skb_queue_len(&local_queue);
+		int batch = min(q_len, budget);
+
+		if (batch > 0 &&
+		    tquic_nic_has_capability(nic,
+					     TQUIC_NIC_CAP_BATCH_PROCESS)) {
+			struct sk_buff **skbs;
+
+			skbs = kmalloc_array(batch, sizeof(*skbs), GFP_ATOMIC);
+			if (skbs) {
+				int i;
+
+				for (i = 0; i < batch; i++) {
+					skbs[i] = __skb_dequeue(&local_queue);
+					if (!skbs[i]) {
+						batch = i;
+						break;
+					}
+				}
+
+				/*
+				 * Attempt batch hardware decryption.
+				 * The return value is the number of packets
+				 * the hardware successfully decrypted; we
+				 * continue processing all packets regardless
+				 * (sw path handles fallback internally).
+				 */
+				if (batch > 0)
+					tquic_offload_batch_rx(nic, skbs,
+							       batch,
+							       tn->conn);
+
+				for (i = 0; i < batch; i++) {
+					if (skbs[i]) {
+						tquic_process_rx_packet(tn->sk,
+								skbs[i]);
+						work_done++;
+					}
+				}
+				kfree(skbs);
+			}
+		}
+	}
+#endif /* CONFIG_TQUIC_OFFLOAD */
+
 	while (likely(work_done < budget)) {
 		skb = __skb_dequeue(&local_queue);
 
@@ -889,14 +1018,22 @@ void tquic_napi_proc_show(struct seq_file *seq)
 
 	spin_lock(&tquic_napi_list_lock);
 	list_for_each_entry(tn, &tquic_napi_list, list) {
+		/*
+		 * Wire: tquic_napi_get_stats — use the exported API to
+		 * snapshot per-NAPI statistics for /proc output rather
+		 * than reading tn->stats directly.
+		 */
+		struct tquic_napi_stats snap;
+
+		tquic_napi_get_stats(tn, &snap);
 		seq_printf(seq, "  %3d  %7s  %6llu  %9llu  %5llu  %10llu  %9u\n",
 			   tn->cpu,
 			   tn->enabled ? "yes" : "no",
-			   tn->stats.packets_polled,
-			   tn->stats.busy_poll_packets,
-			   tn->stats.poll_empty,
-			   tn->stats.rx_queue_full,
-			   tn->stats.avg_batch_size);
+			   snap.packets_polled,
+			   snap.busy_poll_packets,
+			   snap.poll_empty,
+			   snap.rx_queue_full,
+			   snap.avg_batch_size);
 	}
 	spin_unlock(&tquic_napi_list_lock);
 }
@@ -944,6 +1081,19 @@ int tquic_napi_setsockopt(struct sock *sk, int level, int optname,
 		WRITE_ONCE(sk->sk_ll_usec, val);
 		tn->busy_poll_timeout_us = val;
 		tn->busy_poll_enabled = (val > 0);
+
+		/*
+		 * Wire: tquic_napi_coalesce_enable / tquic_napi_coalesce_disable
+		 * When busy-poll is enabled, use adaptive coalescing to
+		 * tune interrupt delay based on traffic rate.  When busy-poll
+		 * is disabled, disable adaptive coalescing so interrupt
+		 * delays are no longer adjusted.
+		 */
+		if (val > 0)
+			tquic_napi_coalesce_enable(tn);
+		else
+			tquic_napi_coalesce_disable(tn);
+
 		return 0;
 #else
 		return -EAGAIN;

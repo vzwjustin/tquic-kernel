@@ -43,6 +43,7 @@
 #include "core/early_data.h"
 #include "core/transport_params.h"
 #include "core/varint.h"
+#include "tquic_preferred_addr.h"
 
 /*
  * Forward declarations for server functions
@@ -1240,6 +1241,42 @@ static void tquic_inline_hs_apply_transport_params(struct sock *sk)
 		 peer_tp.initial_max_data, conn->max_data_local,
 		 peer_tp.initial_max_streams_bidi);
 
+	/*
+	 * Wire: tquic_pref_addr_client_received —
+	 *
+	 * When the server includes a preferred_address in its transport
+	 * parameters (RFC 9000 Section 9.6), decode the inline fields
+	 * from peer_tp and notify the preferred address subsystem.
+	 *
+	 * tquic_pref_addr_client_received() stores the server's preferred
+	 * address for later migration (triggered by the migration timer or
+	 * explicit API call via tquic_pref_addr_client_start_migration()).
+	 *
+	 * Non-fatal: log and continue if decoding fails.
+	 */
+	if (!conn->is_server && peer_tp.has_preferred_address) {
+		struct tquic_preferred_address pref_addr;
+
+		memset(&pref_addr, 0, sizeof(pref_addr));
+		memcpy(pref_addr.ipv4_addr,
+		       peer_tp.preferred_address_ipv4, 4);
+		pref_addr.ipv4_port = peer_tp.preferred_address_ipv4_port;
+		memcpy(pref_addr.ipv6_addr,
+		       peer_tp.preferred_address_ipv6, 16);
+		pref_addr.ipv6_port = peer_tp.preferred_address_ipv6_port;
+		pref_addr.cid.len = peer_tp.preferred_address_cid_len;
+		if (pref_addr.cid.len > 0)
+			memcpy(pref_addr.cid.id,
+			       peer_tp.preferred_address_cid,
+			       pref_addr.cid.len);
+		memcpy(pref_addr.stateless_reset_token,
+		       peer_tp.preferred_address_reset_token, 16);
+
+		if (tquic_pref_addr_client_received(conn, &pref_addr) < 0)
+			tquic_dbg("preferred_address: failed to store, "
+				  "migration will not be attempted\n");
+	}
+
 out_put:
 	tquic_conn_put(conn);
 }
@@ -2397,6 +2434,57 @@ static int tquic_start_server_handshake(struct sock *sk,
 	tp.initial_scid_len = conn->scid.len;
 	if (conn->scid.len > 0)
 		memcpy(tp.initial_scid, conn->scid.id, conn->scid.len);
+
+	/*
+	 * Wire: tquic_pref_addr_server_generate —
+	 *
+	 * If the server has a preferred_address configured
+	 * (conn->preferred_addr holds a struct tquic_pref_addr_config *
+	 * when is_server && tquic_pref_addr_enabled()), populate the
+	 * preferred_address transport parameter before encoding.
+	 *
+	 * tquic_pref_addr_server_generate() fills
+	 * conn->local_params.preferred_address and sets
+	 * preferred_address_present.  We then copy the wire fields
+	 * into the tquic_hs_transport_params so the encoder includes
+	 * them.
+	 *
+	 * Non-fatal: if no config is set or generation fails, the
+	 * server simply does not advertise a preferred address.
+	 */
+	if (conn->is_server && tquic_pref_addr_enabled(sock_net(sk))) {
+		struct tquic_pref_addr_config *pa_config =
+			(struct tquic_pref_addr_config *)conn->preferred_addr;
+
+		if (pa_config) {
+			struct tquic_transport_params local_params;
+
+			memset(&local_params, 0, sizeof(local_params));
+			if (tquic_pref_addr_server_generate(conn, pa_config,
+							    &local_params) == 0 &&
+			    local_params.preferred_address_present) {
+				const struct tquic_preferred_address *pa =
+					&local_params.preferred_address;
+
+				tp.has_preferred_address = true;
+				memcpy(tp.preferred_address_ipv4,
+				       pa->ipv4_addr, 4);
+				tp.preferred_address_ipv4_port =
+					pa->ipv4_port;
+				memcpy(tp.preferred_address_ipv6,
+				       pa->ipv6_addr, 16);
+				tp.preferred_address_ipv6_port =
+					pa->ipv6_port;
+				tp.preferred_address_cid_len =
+					pa->cid.len;
+				if (pa->cid.len > 0)
+					memcpy(tp.preferred_address_cid,
+					       pa->cid.id, pa->cid.len);
+				memcpy(tp.preferred_address_reset_token,
+				       pa->stateless_reset_token, 16);
+			}
+		}
+	}
 
 	ret = tquic_hs_set_transport_params(ihs, &tp);
 	if (ret < 0) {

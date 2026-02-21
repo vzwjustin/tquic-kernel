@@ -38,8 +38,11 @@
 #include "pm/path_manager.h"
 #include "bond/tquic_bonding.h"
 #include "bond/tquic_bpm.h"
-
+#include "tquic_sysctl.h"
 #include "tquic_compat.h"
+#ifdef CONFIG_TQUIC_AF_XDP
+#include "af_xdp.h"
+#endif
 
 /* Slab cache for path objects -- defined in tquic_main.c */
 
@@ -551,9 +554,22 @@ struct tquic_path *tquic_path_create(struct tquic_connection *conn,
 	INIT_LIST_HEAD(&path->list);
 
 	/* Initialize congestion control */
-	if (tquic_cong_init_path(path, NULL) < 0)
-		tquic_dbg("CC init failed for path %u (non-fatal)\n",
-			  path->path_id);
+	{
+		/*
+		 * Wire: tquic_net_get_cc_algorithm / tquic_sysctl_get_congestion
+		 * Prefer per-netns CC name; fall back to module-level sysctl.
+		 */
+		const char *cc_name = NULL;
+
+		if (conn->sk)
+			cc_name = tquic_net_get_cc_algorithm(
+					sock_net(conn->sk));
+		if (!cc_name || !*cc_name)
+			cc_name = tquic_sysctl_get_congestion();
+		if (tquic_cong_init_path(path, cc_name) < 0)
+			tquic_dbg("CC init failed for path %u (non-fatal)\n",
+				  path->path_id);
+	}
 
 	/* Add to connection's path list */
 	spin_lock_bh(&conn->paths_lock);
@@ -630,6 +646,20 @@ void tquic_path_free(struct tquic_path *path)
 	/* Release device reference */
 	if (path->dev)
 		dev_put(path->dev);
+
+#ifdef CONFIG_TQUIC_AF_XDP
+	/*
+	 * Wire: tquic_xsk_detach_path —
+	 *
+	 * If a per-path AF_XDP socket was attached (e.g., to bind a
+	 * specific NIC hardware queue to this multipath QUIC path),
+	 * release it now.  tquic_xsk_detach_path() decrements the XSK
+	 * refcount and clears path->xsk.  Must be called before
+	 * kmem_cache_free() to avoid a use-after-free on the path object.
+	 */
+	if (path->xsk)
+		tquic_xsk_detach_path(conn, path);
+#endif /* CONFIG_TQUIC_AF_XDP */
 
 	/*
 	 * Remove from connection's path list if still linked.
@@ -937,6 +967,21 @@ int tquic_migrate_auto(struct tquic_connection *conn, struct tquic_path *path,
 		return -EBUSY;
 
 	/*
+	 * Wire: tquic_pref_addr_client_abort —
+	 *
+	 * If a preferred-address migration validation is in progress and
+	 * we are about to start a different auto-migration (e.g., path
+	 * degradation), abort the preferred-address migration first.
+	 * The abort reverts the state from VALIDATING back to AVAILABLE
+	 * so the client can retry the preferred-address migration later.
+	 *
+	 * Per RFC 9000 Section 9.6, there is no requirement to complete
+	 * preferred-address migration; it can be abandoned at any time.
+	 */
+	if (!conn->is_server)
+		tquic_pref_addr_client_abort(conn);
+
+	/*
 	 * Case 1: NAT rebinding - new_addr is provided
 	 * Peer sent from a different source address, need to validate.
 	 *
@@ -1212,6 +1257,16 @@ int tquic_migrate_explicit(struct tquic_connection *conn,
 	ms = tquic_conn_get_migration_state(conn);
 	if (ms && ms->status == TQUIC_MIGRATE_PROBING)
 		return -EBUSY;
+
+	/*
+	 * Wire: tquic_pref_addr_client_abort —
+	 *
+	 * An explicit application-level migration supersedes an in-progress
+	 * preferred-address migration.  Abort so the VALIDATING path is
+	 * freed and state returns to AVAILABLE for a potential future retry.
+	 */
+	if (!conn->is_server)
+		tquic_pref_addr_client_abort(conn);
 
 	/* If not forcing, check if current path is OK */
 	if (!(flags & TQUIC_MIGRATE_FLAG_FORCE)) {
@@ -2202,8 +2257,16 @@ static void tquic_migration_on_handshake_complete(struct tquic_connection *conn)
 
 	net = sock_net(conn->sk);
 
-	/* Check if auto-migration to preferred address is enabled */
-	if (!tquic_sysctl_get_prefer_preferred_address())
+	/*
+	 * Wire: tquic_pref_addr_auto_migrate —
+	 *
+	 * Check the per-netns sysctl (with global default fallback) for
+	 * whether the client should automatically migrate to the server's
+	 * preferred address after the handshake completes.
+	 * Uses the proper preferred-address API instead of the raw sysctl
+	 * accessor so that per-netns overrides are respected.
+	 */
+	if (!tquic_pref_addr_auto_migrate(net))
 		return;
 
 	/*

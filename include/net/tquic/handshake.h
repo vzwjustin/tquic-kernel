@@ -69,6 +69,23 @@ struct tquic_hs_transport_params {
 	bool has_retry_scid;
 	u64 max_datagram_frame_size;
 	bool grease_quic_bit;
+
+	/*
+	 * Preferred address (RFC 9000 Section 18.2, param id 0x0d).
+	 * Server-only: encoded in server's transport parameters.
+	 * Client: decoded when processing server's transport parameters.
+	 *
+	 * Wire format: IPv4(4) + IPv4Port(2) + IPv6(16) + IPv6Port(2) +
+	 *              CID len(1) + CID(0-20) + stateless_reset_token(16)
+	 */
+	bool has_preferred_address;
+	u8 preferred_address_ipv4[4];
+	u16 preferred_address_ipv4_port;
+	u8 preferred_address_ipv6[16];
+	u16 preferred_address_ipv6_port;
+	u8 preferred_address_cid_len;
+	u8 preferred_address_cid[20];
+	u8 preferred_address_reset_token[16];
 };
 
 /* Session ticket for resumption */
