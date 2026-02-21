@@ -77,36 +77,20 @@
 
 /*
  * =============================================================================
- * IP ADDRESS STRUCTURES
+ * PRIVATE IMPLEMENTATION STRUCTURES
  * =============================================================================
  */
 
 /**
- * struct tquic_ip_address - Assigned IP address entry
- * @version: IP version (4 or 6)
- * @addr: IP address (v4 in first 4 bytes, v6 in all 16)
- * @prefix_len: Prefix length (CIDR notation)
- * @request_id: Request ID that assigned this address
- * @list: Linkage in address list
- */
-struct tquic_ip_address {
-	u8 version;
-	union {
-		__be32 v4;
-		struct in6_addr v6;
-	} addr;
-	u8 prefix_len;
-	u64 request_id;
-	struct list_head list;
-};
-
-/**
- * struct tquic_ip_route - Route advertisement entry
+ * struct tquic_ip_route - Internal route tracking entry
  * @ip_version: IP version (4 or 6)
- * @start_addr: Start of address range
- * @end_addr: End of address range
+ * @start_addr: Start of address range (union for v4/v6)
+ * @end_addr: End of address range (union for v4/v6)
  * @ipproto: IP protocol (0 = any, 1-255 = specific)
- * @list: Linkage in route list
+ * @list: Linkage in tunnel route list
+ *
+ * Private to connect_ip.c. The wire format uses flat byte arrays
+ * (struct tquic_route_adv); this struct uses unions for fast comparisons.
  */
 struct tquic_ip_route {
 	u8 ip_version;
@@ -120,103 +104,6 @@ struct tquic_ip_route {
 	} end_addr;
 	u8 ipproto;
 	struct list_head list;
-};
-
-/*
- * =============================================================================
- * CONNECT-IP TUNNEL STRUCTURE
- * =============================================================================
- */
-
-/**
- * struct tquic_connect_ip_tunnel - CONNECT-IP tunnel state
- * @stream: HTTP/3 CONNECT stream for this tunnel
- * @local_addrs: List of locally assigned IP addresses
- * @remote_addrs: List of remote (peer) IP addresses
- * @routes: List of advertised routes
- * @num_local_addrs: Count of local addresses
- * @num_remote_addrs: Count of remote addresses
- * @num_routes: Count of routes
- * @ipproto: IP protocol filter (0 = any, 1-255 = specific)
- * @raw_sock: Raw socket for IP packet injection (optional)
- * @next_request_id: Next request ID for address requests
- * @mtu: Current tunnel MTU
- * @lock: Protects tunnel state
- * @refcnt: Reference counter
- */
-struct tquic_connect_ip_tunnel {
-	struct tquic_stream *stream;
-
-	/* Assigned addresses */
-	struct list_head local_addrs;
-	struct list_head remote_addrs;
-	u8 num_local_addrs;
-	u8 num_remote_addrs;
-
-	/* Routes */
-	struct list_head routes;
-	u16 num_routes;
-
-	/* IP protocol filter (0 = any, 1-255 = specific) */
-	u8 ipproto;
-
-	/* Raw socket for IP packet injection */
-	struct socket *raw_sock;
-
-	/* Request ID counter */
-	u64 next_request_id;
-
-	/* MTU (minimum 1280 for IPv6) */
-	u32 mtu;
-
-	spinlock_t lock;
-	refcount_t refcnt;
-};
-
-/*
- * =============================================================================
- * CAPSULE STRUCTURES
- * =============================================================================
- */
-
-/**
- * struct tquic_address_assign - ADDRESS_ASSIGN capsule payload
- * @request_id: Request ID (echoed from ADDRESS_REQUEST or server-generated)
- * @ip_version: IP version (4 or 6)
- * @addr: IP address bytes (4 for IPv4, 16 for IPv6)
- * @prefix_len: Prefix length
- */
-struct tquic_address_assign {
-	u64 request_id;
-	u8 ip_version;
-	u8 addr[16];
-	u8 prefix_len;
-};
-
-/**
- * struct tquic_address_request - ADDRESS_REQUEST capsule payload
- * @request_id: Request ID for correlation
- * @ip_version: Requested IP version (4 or 6)
- * @prefix_len: Requested prefix length (0 = any)
- */
-struct tquic_address_request {
-	u64 request_id;
-	u8 ip_version;
-	u8 prefix_len;
-};
-
-/**
- * struct tquic_route_adv - ROUTE_ADVERTISEMENT capsule entry
- * @ip_version: IP version (4 or 6)
- * @start_addr: Start of address range
- * @end_addr: End of address range
- * @ipproto: IP protocol (0 = any)
- */
-struct tquic_route_adv {
-	u8 ip_version;
-	u8 start_addr[16];
-	u8 end_addr[16];
-	u8 ipproto;
 };
 
 /*
@@ -504,13 +391,13 @@ static int tquic_connect_ip_add_remote_addr(
 }
 
 /**
- * tquic_connect_ip_add_route - Add route to tunnel
+ * tunnel_track_route - Track route in tunnel's internal route list
  * @tunnel: CONNECT-IP tunnel
- * @route: Route to add
+ * @route: Route to track
  *
  * Returns: 0 on success, negative errno on failure.
  */
-static int tquic_connect_ip_add_route(
+static int tunnel_track_route(
 	struct tquic_connect_ip_tunnel *tunnel,
 	const struct tquic_ip_route *route)
 {
@@ -998,7 +885,7 @@ int tquic_connect_ip_advertise_routes(
 			memcpy(&route.end_addr.v6, routes[i].end_addr, 16);
 		}
 
-		ret = tquic_connect_ip_add_route(tunnel, &route);
+		ret = tunnel_track_route(tunnel, &route);
 		if (ret < 0) {
 			pr_warn("tquic: failed to track route %zu: %d\n", i, ret);
 			/* Continue - routes were already sent */
@@ -1653,7 +1540,7 @@ static void tquic_netdev_setup(struct net_device *dev)
 	dev->hard_header_len = 0;
 	dev->addr_len = 0;
 	dev->tx_queue_len = 500;
-	dev->features |= NETIF_F_LLTX;
+	dev->lltx = true;
 }
 
 /**
@@ -1789,7 +1676,6 @@ int tquic_connect_ip_add_route(struct tquic_connect_ip_iface *iface,
 	if (entry->ip_version == 4) {
 #if IS_ENABLED(CONFIG_IP_MULTIPLE_TABLES)
 		struct fib_config cfg = {
-			.fc_family = AF_INET,
 			.fc_dst = entry->dst_addr.v4,
 			.fc_dst_len = entry->dst_prefix_len,
 			.fc_oif = iface->net_device->ifindex,
@@ -1816,7 +1702,6 @@ int tquic_connect_ip_add_route(struct tquic_connect_ip_iface *iface,
 #if IS_ENABLED(CONFIG_IPV6)
 	else if (entry->ip_version == 6) {
 		struct fib6_config cfg = {
-			.fc_family = AF_INET6,
 			.fc_dst = entry->dst_addr.v6,
 			.fc_dst_len = entry->dst_prefix_len,
 			.fc_ifindex = iface->net_device->ifindex,
@@ -1880,7 +1765,6 @@ int tquic_connect_ip_del_route(struct tquic_connect_ip_iface *iface,
 	if (entry->ip_version == 4) {
 #if IS_ENABLED(CONFIG_IP_MULTIPLE_TABLES)
 		struct fib_config cfg = {
-			.fc_family = AF_INET,
 			.fc_dst = entry->dst_addr.v4,
 			.fc_dst_len = entry->dst_prefix_len,
 			.fc_oif = iface->net_device->ifindex,
@@ -1895,8 +1779,8 @@ int tquic_connect_ip_del_route(struct tquic_connect_ip_iface *iface,
 	}
 #if IS_ENABLED(CONFIG_IPV6)
 	else if (entry->ip_version == 6) {
+		struct fib6_table *table;
 		struct fib6_config cfg = {
-			.fc_family = AF_INET6,
 			.fc_dst = entry->dst_addr.v6,
 			.fc_dst_len = entry->dst_prefix_len,
 			.fc_ifindex = iface->net_device->ifindex,
@@ -1907,7 +1791,8 @@ int tquic_connect_ip_del_route(struct tquic_connect_ip_iface *iface,
 		};
 
 		rtnl_lock();
-		ret = ip6_route_del(&cfg, NULL);
+		table = fib6_get_table(net, cfg.fc_table);
+		ret = table ? fib6_table_delete(net, table, &cfg, NULL) : -ESRCH;
 		rtnl_unlock();
 	}
 #endif
@@ -1973,73 +1858,67 @@ int tquic_connect_ip_set_iface_addr(struct tquic_connect_ip_iface *iface,
 				    const struct tquic_ip_address *addr)
 {
 	struct net_device *dev;
+	struct net *net;
 	int ret = 0;
 
 	if (!iface || !iface->net_device || !addr)
 		return -EINVAL;
 
 	dev = iface->net_device;
-
-	rtnl_lock();
+	net = dev_net(dev);
 
 	if (addr->version == 4) {
-		struct in_ifaddr *ifa;
-		struct in_device *in_dev;
+		/*
+		 * Use devinet_ioctl() which is exported and handles its own
+		 * locking. SIOCSIFADDR sets the primary address; SIOCSIFNETMASK
+		 * sets the subnet mask for the configured address.
+		 */
+		struct ifreq ifr = {};
+		struct sockaddr_in *sin = (struct sockaddr_in *)&ifr.ifr_addr;
 
-		in_dev = __in_dev_get_rtnl(dev);
-		if (!in_dev) {
-			in_dev = inetdev_init(dev);
-			if (!in_dev) {
-				rtnl_unlock();
-				return -ENOMEM;
-			}
+		strscpy(ifr.ifr_name, dev->name, IFNAMSIZ);
+		sin->sin_family = AF_INET;
+		sin->sin_addr.s_addr = addr->addr.v4;
+		ret = devinet_ioctl(net, SIOCSIFADDR, &ifr);
+		if (ret == 0) {
+			sin->sin_addr.s_addr = inet_make_mask(addr->prefix_len);
+			devinet_ioctl(net, SIOCSIFNETMASK, &ifr);
 		}
-
-		ifa = inet_alloc_ifa();
-		if (!ifa) {
-			rtnl_unlock();
-			return -ENOMEM;
-		}
-
-		ifa->ifa_local = addr->addr.v4;
-		ifa->ifa_address = addr->addr.v4;
-		ifa->ifa_prefixlen = addr->prefix_len;
-		ifa->ifa_mask = inet_make_mask(addr->prefix_len);
-		ifa->ifa_scope = RT_SCOPE_UNIVERSE;
-		ifa->ifa_dev = in_dev;
-
-		ret = __inet_insert_ifa(ifa, NULL, 0, NULL);
 	}
 #if IS_ENABLED(CONFIG_IPV6)
 	else if (addr->version == 6) {
 		struct inet6_dev *idev;
 		struct inet6_ifaddr *ifp;
+		struct ifa6_config cfg = {
+			.pfx		= &addr->addr.v6,
+			.plen		= addr->prefix_len,
+			.ifa_flags	= IFA_F_PERMANENT,
+			.valid_lft	= INFINITY_LIFE_TIME,
+			.preferred_lft	= INFINITY_LIFE_TIME,
+			.scope		= RT_SCOPE_UNIVERSE,
+		};
 
+		rtnl_lock();
 		idev = ipv6_find_idev(dev);
 		if (IS_ERR(idev)) {
 			rtnl_unlock();
 			return PTR_ERR(idev);
 		}
-
-		ifp = ipv6_add_addr(idev, &addr->addr.v6, NULL,
-				    addr->prefix_len, RT_SCOPE_UNIVERSE,
-				    IFA_F_PERMANENT, INFINITY_LIFE_TIME,
-				    INFINITY_LIFE_TIME, true, NULL);
-		if (IS_ERR(ifp)) {
+		ifp = ipv6_add_addr(idev, &cfg, true, NULL);
+		rtnl_unlock();
+		if (IS_ERR(ifp))
 			ret = PTR_ERR(ifp);
-		}
+		else
+			in6_ifa_put(ifp);
 	}
 #endif
 	else {
 		ret = -EAFNOSUPPORT;
 	}
 
-	rtnl_unlock();
-
-	if (ret == 0) {
+	if (ret == 0)
 		pr_debug("tquic: set IPv%d address on %s\n",
 			 addr->version, dev->name);
-	}
 
 	return ret;
 }

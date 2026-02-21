@@ -358,6 +358,9 @@ int tquic_http_datagram_decode(const u8 *buf, size_t buf_len,
 }
 EXPORT_SYMBOL_GPL(tquic_http_datagram_decode);
 
+/* Forward declaration for work function used in tunnel_alloc */
+static void proxy_forward_work(struct work_struct *work);
+
 /*
  * =============================================================================
  * Tunnel Lifecycle Management
@@ -397,6 +400,7 @@ static struct tquic_connect_udp_tunnel *tunnel_alloc(
 	spin_lock_init(&tunnel->lock);
 	refcount_set(&tunnel->refcnt, 1);
 	INIT_LIST_HEAD(&tunnel->list);
+	INIT_WORK(&tunnel->forward_work, proxy_forward_work);
 
 	return tunnel;
 }
@@ -416,7 +420,8 @@ static void tunnel_free(struct tquic_connect_udp_tunnel *tunnel)
 		tunnel->udp_sock = NULL;
 	}
 
-	/* Cancel timers */
+	/* Cancel pending work and timers */
+	cancel_work_sync(&tunnel->forward_work);
 	del_timer_sync(&tunnel->idle_timer);
 
 	/* Free structure */
@@ -845,7 +850,6 @@ int tquic_connect_udp_accept(struct tquic_connection *conn,
 			     struct tquic_connect_udp_tunnel **tunnel)
 {
 	struct tquic_connect_udp_tunnel *t;
-	int ret;
 
 	if (!conn || !stream || !tunnel)
 		return -EINVAL;

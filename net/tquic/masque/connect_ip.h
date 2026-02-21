@@ -42,9 +42,6 @@
 #define TQUIC_CONNECT_IP_MAX_ADDRESSES		16
 #define TQUIC_CONNECT_IP_MAX_ROUTES		64
 
-/* Maximum datagram buffer size (max QUIC datagram payload) */
-#define TQUIC_MAX_DATAGRAM_SIZE			65535
-
 /*
  * =============================================================================
  * DATA STRUCTURES
@@ -127,10 +124,16 @@ struct tquic_route_adv {
  * @stream: HTTP/3 CONNECT stream for this tunnel
  * @local_addrs: List of locally assigned IP addresses
  * @remote_addrs: List of remote (peer) IP addresses
+ * @num_local_addrs: Count of local addresses
+ * @num_remote_addrs: Count of remote addresses
  * @routes: List of advertised routes
+ * @num_routes: Count of routes
  * @ipproto: IP protocol filter (0 = any, 1-255 = specific)
  * @raw_sock: Raw socket for IP packet injection (optional)
+ * @next_request_id: Next request ID for address requests
+ * @mtu: Current tunnel MTU
  * @lock: Protects tunnel state
+ * @refcnt: Reference counter
  *
  * Main structure for managing a CONNECT-IP tunnel.
  */
@@ -140,15 +143,27 @@ struct tquic_connect_ip_tunnel {
 	/* Assigned addresses */
 	struct list_head local_addrs;
 	struct list_head remote_addrs;
+	u8 num_local_addrs;
+	u8 num_remote_addrs;
 
 	/* Routes */
 	struct list_head routes;
+	u16 num_routes;
 
 	/* IP protocol filter (0 = any, 1-255 = specific) */
 	u8 ipproto;
 
+	/* Raw socket for IP packet injection */
 	struct socket *raw_sock;
+
+	/* Request ID counter */
+	u64 next_request_id;
+
+	/* MTU (minimum 1280 for IPv6) */
+	u32 mtu;
+
 	spinlock_t lock;
+	refcount_t refcnt;
 };
 
 /*

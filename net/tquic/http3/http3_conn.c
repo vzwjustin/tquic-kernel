@@ -287,6 +287,48 @@ static int h3_process_settings_frame(struct tquic_http3_conn *h3conn,
  *
  * Returns: 0 on success, negative error on failure.
  */
+/*
+ * =============================================================================
+ * Server Push State Tracking (RFC 9114 Section 4.6)
+ * =============================================================================
+ *
+ * Push states:
+ *   PROMISED - PUSH_PROMISE sent/received but push stream not yet opened
+ *   ACTIVE   - Push stream is open and transmitting
+ *   CANCELLED - Push was cancelled via CANCEL_PUSH frame
+ *   COMPLETE - Push stream finished successfully
+ */
+
+#define H3_PUSH_MAX_TRACKED	256	/* Max concurrent pushes tracked */
+
+enum h3_push_entry_state {
+	H3_PUSH_STATE_PROMISED = 0,
+	H3_PUSH_STATE_ACTIVE,
+	H3_PUSH_STATE_CANCELLED,
+	H3_PUSH_STATE_COMPLETE,
+};
+
+/**
+ * struct h3_push_entry - Tracks a single server push
+ * @push_id: Unique push identifier
+ * @state: Current push state
+ * @request_stream_id: Associated request stream (for PUSH_PROMISE)
+ * @push_stream: Push stream (if opened)
+ * @node: List linkage in push_entries
+ */
+struct h3_push_entry {
+	u64 push_id;
+	enum h3_push_entry_state state;
+	u64 request_stream_id;
+	struct tquic_stream *push_stream;
+	struct list_head node;
+};
+
+/* Forward declarations for static functions used before their definition */
+static void h3_push_entry_cancel(struct tquic_http3_conn *h3conn,
+				 struct h3_push_entry *entry);
+static void h3_cleanup_push_entries(struct tquic_http3_conn *h3conn);
+
 /**
  * h3_cancel_pending_pushes - Cancel all pending pushes
  * @h3conn: HTTP/3 connection
@@ -394,43 +436,6 @@ static int h3_process_max_push_id_frame(struct tquic_http3_conn *h3conn,
 
 	return 0;
 }
-
-/*
- * =============================================================================
- * Server Push State Tracking (RFC 9114 Section 4.6)
- * =============================================================================
- *
- * Push states:
- *   PROMISED - PUSH_PROMISE sent/received but push stream not yet opened
- *   ACTIVE   - Push stream is open and transmitting
- *   CANCELLED - Push was cancelled via CANCEL_PUSH frame
- *   COMPLETE - Push stream finished successfully
- */
-
-#define H3_PUSH_MAX_TRACKED	256	/* Max concurrent pushes tracked */
-
-enum h3_push_entry_state {
-	H3_PUSH_STATE_PROMISED = 0,
-	H3_PUSH_STATE_ACTIVE,
-	H3_PUSH_STATE_CANCELLED,
-	H3_PUSH_STATE_COMPLETE,
-};
-
-/**
- * struct h3_push_entry - Tracks a single server push
- * @push_id: Unique push identifier
- * @state: Current push state
- * @request_stream_id: Associated request stream (for PUSH_PROMISE)
- * @push_stream: Push stream (if opened)
- * @node: List linkage in push_entries
- */
-struct h3_push_entry {
-	u64 push_id;
-	enum h3_push_entry_state state;
-	u64 request_stream_id;
-	struct tquic_stream *push_stream;
-	struct list_head node;
-};
 
 /**
  * h3_push_entry_find - Find push entry by push_id

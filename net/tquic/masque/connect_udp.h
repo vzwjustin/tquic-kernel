@@ -134,6 +134,22 @@ struct tquic_connect_udp_stats {
 };
 
 /**
+ * tquic_connect_udp_datagram_handler - QUIC datagram receive callback type
+ * @tunnel: Tunnel that received the datagram
+ * @context_id: Context ID
+ * @data: Payload data
+ * @len: Payload length
+ * @context: Handler context
+ *
+ * Returns: 0 on success, negative errno on error.
+ */
+typedef int (*tquic_connect_udp_datagram_handler)(
+	struct tquic_connect_udp_tunnel *tunnel,
+	u64 context_id,
+	const u8 *data, size_t len,
+	void *context);
+
+/**
  * struct tquic_connect_udp_tunnel - CONNECT-UDP tunnel state
  * @stream: QUIC stream for HTTP/3 request/response
  * @conn: Parent QUIC connection
@@ -742,22 +758,6 @@ void tquic_connect_udp_unregister_context(struct tquic_connect_udp_tunnel *tunne
  * Datagram Receive Callback
  * =============================================================================
  */
-
-/**
- * tquic_connect_udp_datagram_handler - QUIC datagram receive callback type
- * @tunnel: Tunnel that received the datagram
- * @context_id: Context ID
- * @data: Payload data
- * @len: Payload length
- * @context: Handler context
- *
- * Returns: 0 on success, negative errno on error.
- */
-typedef int (*tquic_connect_udp_datagram_handler)(
-	struct tquic_connect_udp_tunnel *tunnel,
-	u64 context_id,
-	const u8 *data, size_t len,
-	void *context);
 
 /**
  * tquic_connect_udp_set_recv_handler - Set receive handler
