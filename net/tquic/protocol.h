@@ -824,4 +824,8 @@ int tquic_transport_param_validate(struct tquic_connection *conn);
 /* Coalesced packet processing (core/packet_coalesce_fix.c) */
 void tquic_packet_process_coalesced(struct tquic_connection *conn,
 				    struct sk_buff *skb);
+
+/* Flow control default (core/quic_protocol.c) */
+unsigned int tquic_get_validated_max_stream_data(void);
+
 #endif /* _NET_TQUIC_PROTOCOL_H */
