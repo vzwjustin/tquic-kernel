@@ -2208,9 +2208,12 @@ int tquic_output_packet(struct tquic_connection *conn, struct tquic_path *path,
 		ret = 0;
 
 		/* Update path statistics */
-		path->stats.tx_packets++;
-		path->stats.tx_bytes += skb_len;
-		WRITE_ONCE(path->last_activity, ktime_get());
+		tquic_path_on_data_sent(path, skb_len);
+
+		/* Notify multipath scheduler for feedback-driven path selection */
+#ifdef CONFIG_TQUIC_MULTIPATH
+		tquic_mp_sched_notify_sent(conn, path, skb_len);
+#endif
 
 		if (csk) {
 			TQUIC_INC_STATS(sock_net(csk), TQUIC_MIB_PACKETSTX);
@@ -2330,12 +2333,14 @@ int tquic_xmit(struct tquic_connection *conn, struct tquic_stream *stream,
 							  __pid);
 			skb_len = skb->len;
 			ret = tquic_output_packet(conn, path, skb);
-			tquic_path_put(path);
 			if (ret < 0) {
+				tquic_path_put(path);
 				if (__fc)
 					tquic_failover_on_ack(__fc, pkt_num);
 				break;
 			}
+
+			tquic_path_put(path);
 
 			/* RFC 9002: record sent packet in recovery state */
 			if (conn->timer_state)
@@ -3244,6 +3249,12 @@ int tquic_output_flush(struct tquic_connection *conn)
 							pkt_num, stream->id,
 							stream_offset,
 							chunk_size);
+
+#ifdef CONFIG_TQUIC_MULTIPATH
+						tquic_mp_sched_notify_sent(
+							conn, path,
+							pkt_size);
+#endif
 
 						/* Track packet for loss detection (RFC 9002 A.5) */
 						sent_pkt =

@@ -1440,6 +1440,9 @@ struct tquic_connection {
 	struct tquic_fallback_ctx *fallback_ctx; /* TCP fallback; NULL if unused */
 #endif
 
+	struct tquic_pacing_state *pacing; /* Pacing state; NULL if disabled */
+	struct tquic_gro_state *gro; /* GRO aggregation; NULL if disabled */
+
 	spinlock_t lock;
 	refcount_t refcnt;
 	struct sock *sk;
@@ -2173,6 +2176,10 @@ static inline void tquic_path_put(struct tquic_path *path)
 	if (refcount_dec_and_test(&path->refcnt))
 		tquic_path_free(path);
 }
+
+/* Path data accounting (anti-amplification + statistics) */
+void tquic_path_on_data_sent(struct tquic_path *path, u32 bytes);
+void tquic_path_on_data_received(struct tquic_path *path, u32 bytes);
 
 /* State machine cleanup */
 void tquic_conn_state_cleanup(struct tquic_connection *conn);

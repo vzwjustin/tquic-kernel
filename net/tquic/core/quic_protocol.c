@@ -415,6 +415,9 @@ static void tquic_proto_close(struct sock *sk, long timeout)
 	if (conn)
 		tquic_conn_put(conn);
 
+	/* Remove UDP encapsulation (reverse of tquic_setup_udp_encap) */
+	tquic_clear_udp_encap(sk);
+
 	sk->sk_shutdown = SHUTDOWN_MASK;
 	sk_common_release(sk);
 	release_sock(sk);

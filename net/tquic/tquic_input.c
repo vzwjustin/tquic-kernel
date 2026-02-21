@@ -2226,6 +2226,10 @@ not_reset:
 	ret = tquic_process_packet(conn, path, data, len, &src_addr);
 	pr_debug("tquic: udp_recv <- process_packet ret=%d\n", ret);
 
+	/* Update RX accounting for anti-amplification (RFC 9000 §8.1) */
+	if (path && ret >= 0)
+		tquic_path_on_data_received(path, len);
+
 	/*
 	 * Per RFC 9000 Section 10.3:
 	 * "An endpoint that receives packets that it cannot process sends

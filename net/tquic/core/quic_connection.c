@@ -872,6 +872,15 @@ struct tquic_connection *tquic_conn_create(struct tquic_sock *tsk,
 	/* Non-fatal: per-connection scheduler state unavailable if NULL */
 #endif /* CONFIG_TQUIC_SCHEDULER */
 
+	conn->pacing = tquic_pacing_init(conn,
+					 rcu_dereference(conn->active_path));
+	/* Non-fatal: pacing disabled if allocation fails */
+
+#ifdef CONFIG_TQUIC_NAPI
+	conn->gro = tquic_gro_init(conn, NULL);
+	/* Non-fatal: GRO disabled if allocation fails */
+#endif /* CONFIG_TQUIC_NAPI */
+
 	/*
 	 * SECURITY FIX (CF-098): Insert into the global connection
 	 * hash table so that diagnostics, proc, and debug interfaces
@@ -1094,6 +1103,18 @@ void tquic_conn_destroy(struct tquic_connection *conn)
 		conn->sched_priv = NULL;
 	}
 #endif /* CONFIG_TQUIC_SCHEDULER */
+
+	if (conn->pacing) {
+		tquic_pacing_cleanup(conn->pacing);
+		conn->pacing = NULL;
+	}
+
+#ifdef CONFIG_TQUIC_NAPI
+	if (conn->gro) {
+		tquic_gro_cleanup(conn->gro);
+		conn->gro = NULL;
+	}
+#endif /* CONFIG_TQUIC_NAPI */
 
 	kfree(conn->reason_phrase);
 	kmem_cache_free(tquic_conn_cache, conn);
