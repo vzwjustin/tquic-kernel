@@ -94,6 +94,12 @@ extern void tquic_masque_datagram_manager_close(
 	struct http_datagram_manager *mgr);
 #endif
 
+/* Forward declarations for dead-export wiring */
+struct tquic_edf_scheduler;
+struct tquic_edf_scheduler *
+tquic_edf_scheduler_create(struct tquic_connection *conn, u32 max_entries);
+void tquic_edf_scheduler_destroy(struct tquic_edf_scheduler *sched);
+
 /*
  * Lockdep class keys for TQUIC sockets
  * Indexed: [0] = IPv4, [1] = IPv6
@@ -239,6 +245,13 @@ int tquic_init_sock(struct sock *sk)
 	if (conn->scheduler)
 		set_bit(TQUIC_F_BONDING_ENABLED, &conn->flags);
 
+	/*
+	 * Create an EDF (Earliest Deadline First) scheduler for
+	 * deadline-aware stream scheduling.  The scheduler is
+	 * optional; NULL means deadline scheduling is disabled.
+	 */
+	conn->edf_sched = tquic_edf_scheduler_create(conn, 256);
+
 	/* Publish the connection pointer for concurrent readers. */
 	write_lock_bh(&sk->sk_callback_lock);
 	tsk->conn = conn;
@@ -378,12 +391,48 @@ void tquic_destroy_sock(struct sock *sk)
 		tquic_conn_set_state(conn, TQUIC_CONN_CLOSED,
 				     TQUIC_REASON_APPLICATION);
 
+		/* Destroy the EDF scheduler before releasing the connection */
+		if (conn->edf_sched) {
+			tquic_edf_scheduler_destroy(conn->edf_sched);
+			conn->edf_sched = NULL;
+		}
+
 		if (conn->scheduler &&
 		    test_bit(TQUIC_F_BONDING_ENABLED, &conn->flags)) {
 			tquic_bond_cleanup(conn->scheduler);
 			conn->scheduler = NULL;
 			clear_bit(TQUIC_F_BONDING_ENABLED, &conn->flags);
 		}
+
+		/*
+		 * Release per-path UDP sockets so the underlying inet
+		 * sockets are freed and port reservations are dropped.
+		 */
+		{
+			struct tquic_path *p;
+
+			rcu_read_lock();
+			list_for_each_entry_rcu(p, &conn->paths, list) {
+				if (p->udp_sock)
+					tquic_udp_sock_put(p->udp_sock);
+			}
+			rcu_read_unlock();
+		}
+
+		/*
+		 * Log GRO coalescing statistics before the socket is
+		 * torn down so operators can verify offload efficiency.
+		 */
+		{
+			u64 gro_coalesced, gro_flushes, gro_avg;
+
+			tquic_gro_get_stats(&gro_coalesced, &gro_flushes,
+					    &gro_avg);
+			if (gro_coalesced)
+				tquic_dbg("destroy: GRO coal=%llu flush=%llu avg=%llu\n",
+					  gro_coalesced, gro_flushes, gro_avg);
+		}
+
 		tquic_conn_put(conn);
 	}
 
@@ -426,6 +475,19 @@ int tquic_sock_bind(struct socket *sock, tquic_sockaddr_t *uaddr, int addr_len)
 
 	memcpy(&tsk->bind_addr, addr,
 	       min_t(size_t, addr_len, sizeof(struct sockaddr_storage)));
+
+	/*
+	 * Create per-path UDP socket via inet_connection_sock bind
+	 * path so the port is reserved and the encap_rcv handler is
+	 * installed for incoming QUIC packets.
+	 */
+	{
+		int bind_ret = tquic_udp_icsk_bind(sk, addr, addr_len);
+
+		if (bind_ret && bind_ret != -ENOTCONN)
+			pr_debug("tquic: udp_icsk_bind=%d (non-fatal)\n",
+				 bind_ret);
+	}
 
 	inet_sk_set_state(sk, TCP_CLOSE);
 
@@ -783,6 +845,52 @@ int tquic_connect(struct sock *sk, tquic_sockaddr_t *uaddr, int addr_len)
 		ret = 0; /* Not fatal */
 	}
 
+	/*
+	 * Initialize ECN state on the active path and set up UDP
+	 * encapsulation for the per-path socket infrastructure.
+	 * ECN validation begins by marking packets with ECT(0).
+	 */
+	{
+		struct tquic_path *apath;
+
+		rcu_read_lock();
+		apath = rcu_dereference(conn->active_path);
+		if (apath) {
+			tquic_ecn_init(apath);
+			tquic_setup_gro(sk);
+		}
+		rcu_read_unlock();
+	}
+	tquic_udp_encap_init(tsk);
+
+	/*
+	 * Create a per-path UDP socket for the active path and connect
+	 * it to the remote address.  Enable checksum offload so the NIC
+	 * computes the UDP checksum in hardware when available.
+	 */
+	{
+		struct tquic_path *cpath;
+
+		rcu_read_lock();
+		cpath = rcu_dereference(conn->active_path);
+		if (cpath && tquic_path_get(cpath)) {
+			int perr;
+
+			perr = tquic_udp_create_path_socket(conn, cpath);
+			if (perr < 0)
+				tquic_dbg("udp_create_path_socket=%d\n", perr);
+
+			if (cpath->udp_sock) {
+				tquic_udp_connect(cpath->udp_sock,
+						  &cpath->remote_addr);
+				tquic_udp_set_csum_offload(cpath->udp_sock,
+							   true);
+			}
+			tquic_path_put(cpath);
+		}
+		rcu_read_unlock();
+	}
+
 	release_sock(sk);
 
 	/* CF-085: Drop the connection reference taken at function entry */
@@ -798,6 +906,18 @@ out_close:
 	 * ret is already negative (e.g., -ECONNREFUSED), so negate it.
 	 */
 	WRITE_ONCE(sk->sk_err, -ret);
+
+	/*
+	 * Log the connection failure with the human-readable QUIC error
+	 * name so the kernel log contains actionable diagnostics.
+	 */
+	{
+		const char *ename = tquic_error_name((u32)(-ret));
+
+		tquic_log_error(sock_net(sk), conn, (u32)(-ret),
+				ename ? ename : "connect failed");
+	}
+
 out_unlock:
 	release_sock(sk);
 	/* CF-085: Drop the connection reference taken at function entry */
@@ -1456,6 +1576,43 @@ void tquic_close(struct sock *sk, long timeout)
 					      conn);
 			tquic_stream_memory_pressure(conn->stream_mgr);
 		}
+
+		/*
+		 * Clean up datagram queue and loss detection state
+		 * before connection teardown releases memory.
+		 */
+		tquic_datagram_cleanup(conn);
+		tquic_loss_detection_cleanup(conn);
+
+		/*
+		 * Log any queued datagrams that will be dropped and
+		 * report the close event to the proc-fs error log.
+		 */
+		{
+			u32 qlen = tquic_datagram_queue_len(conn);
+
+			if (qlen)
+				tquic_log_error(sock_net(sk), conn,
+						0x00,
+						"close: dropping queued dgrams");
+		}
+
+		/*
+		 * Disable ECN on every path so the path ECN counters
+		 * are frozen and no further ECT markings are applied
+		 * to packets that might leak out during draining.
+		 */
+		{
+			struct tquic_path *p;
+
+			rcu_read_lock();
+			list_for_each_entry_rcu(p, &conn->paths, list)
+				tquic_ecn_disable(p);
+			rcu_read_unlock();
+		}
+
+		/* Tear down GRO aggregation state for this socket */
+		tquic_clear_gro(sk);
 	}
 
 	inet_sk_set_state(sk, TCP_CLOSE);

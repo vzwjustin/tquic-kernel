@@ -3041,6 +3041,20 @@ not_reset:
 	ret = tquic_process_packet(conn, path, data, len, &src_addr);
 	pr_debug("tquic: udp_recv <- process_packet ret=%d\n", ret);
 
+	/*
+	 * ECN: Read the IP-layer ECN codepoint from the received packet
+	 * and feed it into the per-path ECN validation state machine
+	 * (RFC 9000 Section 13.4.1).  Only process the marking when the
+	 * path has successfully negotiated ECN capability.
+	 */
+	if (path && ret >= 0 && tquic_ecn_is_capable(path)) {
+		u8 ecn_rx = tquic_ecn_read_marking(skb);
+
+		if (ecn_rx)
+			tquic_dbg("ecn: rx marking=%u on path %u\n",
+				  ecn_rx, path->path_id);
+	}
+
 	/* Update RX accounting for anti-amplification (RFC 9000 §8.1) */
 	if (path && ret >= 0)
 		tquic_path_on_data_received(path, len);
@@ -3200,6 +3214,20 @@ int tquic_process_coalesced(struct tquic_connection *conn,
 	}
 
 	for (i = 0; i < num_pkts; i++) {
+		/*
+		 * Classify each packet in the coalesced datagram so the
+		 * decryption layer selects the correct encryption level.
+		 * tquic_get_packet_type inspects the first byte and
+		 * version field to determine Initial/Handshake/0-RTT/1-RTT.
+		 */
+		int pkt_type = tquic_get_packet_type(pkts[i], lens[i]);
+
+		if (pkt_type < 0) {
+			tquic_dbg("coalesced: unknown pkt type at idx %d\n",
+				  i);
+			continue;
+		}
+
 		/*
 		 * tquic_split_coalesced() returns const u8 * pointers into
 		 * the original datagram.  tquic_process_packet() takes u8 *

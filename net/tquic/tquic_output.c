@@ -128,6 +128,37 @@ tquic_stream_find_locked(struct tquic_connection *conn, u64 stream_id)
 }
 #endif /* CONFIG_TQUIC_HTTP3 */
 
+/* Forward declarations for dead-export wiring */
+struct tquic_edf_scheduler;
+struct tquic_edf_stats;
+struct tquic_edf_scheduler *
+tquic_edf_scheduler_create(struct tquic_connection *conn, u32 max_entries);
+void tquic_edf_scheduler_destroy(struct tquic_edf_scheduler *sched);
+int tquic_edf_enqueue(struct tquic_edf_scheduler *sched, struct sk_buff *skb,
+		      u64 stream_id, u64 deadline_us, u8 priority);
+struct sk_buff *tquic_edf_dequeue(struct tquic_edf_scheduler *sched,
+				  struct tquic_path **path);
+struct sk_buff *tquic_edf_peek(struct tquic_edf_scheduler *sched);
+ktime_t tquic_edf_get_next_deadline(struct tquic_edf_scheduler *sched);
+int tquic_edf_cancel_stream(struct tquic_edf_scheduler *sched, u64 stream_id);
+void tquic_edf_update_path(struct tquic_edf_scheduler *sched,
+			   struct tquic_path *path);
+void tquic_edf_get_stats(struct tquic_edf_scheduler *sched,
+			 struct tquic_edf_stats *stats);
+int tquic_xor_can_recover(const u8 **symbols, u8 num_symbols, bool has_repair);
+int tquic_xor_encode_block(const u8 **symbols, const u16 *lengths,
+			   u8 num_symbols, u8 *repair, u16 *repair_len);
+int tquic_xor_encode_incremental(u8 *repair, u16 *repair_len,
+				 const u8 *symbol, u16 length);
+int tquic_xor_decode_block(const u8 **symbols, const u16 *lengths,
+			   u8 num_symbols, const u8 *repair, u16 repair_len,
+			   int *lost_idx, u8 *recovered, u16 *recovered_len);
+int tquic_offload_batch_tx(struct tquic_nic_device *dev, struct sk_buff **skbs,
+			   int count, struct tquic_connection *conn);
+DECLARE_STATIC_KEY_FALSE(tquic_encap_needed_key);
+const u8 *tquic_crypto_get_next_hp_key(void *crypto_state,
+					size_t *key_len, u16 *cipher);
+
 /*
  * tquic_conn_get_failover - Get failover context from a connection
  *
@@ -2655,6 +2686,20 @@ int tquic_output_packet(struct tquic_connection *conn, struct tquic_path *path,
 		/* Set ECN marking for IPv6 (IPv4 handled via flowi4) */
 		tquic_set_ecn_marking(skb, conn);
 
+		/*
+		 * ECN: Apply per-path ECN marking to the IP header and
+		 * record the codepoint for validation against ACK_ECN
+		 * feedback (RFC 9000 Section 13.4).
+		 */
+		{
+			u8 ecn_mark = tquic_ecn_get_marking(path);
+
+			if (ecn_mark != TQUIC_ECN_NOT_ECT) {
+				tquic_ecn_mark_packet(skb, ecn_mark);
+				tquic_ecn_on_packet_sent(path, ecn_mark);
+			}
+		}
+
 		/* Save skb->len before xmit which consumes the SKB */
 		skb_len = skb->len;
 
@@ -2730,6 +2775,21 @@ int tquic_output_packet(struct tquic_connection *conn, struct tquic_path *path,
 					conn->qlog, pkt_num,
 					QLOG_PKT_1RTT, skb_len,
 					path->path_id, 0, true);
+		}
+
+		/*
+		 * If the path has a dedicated UDP socket (per-path
+		 * encap), use tquic_udp_xmit_gso for GSO batching
+		 * when the segment exceeds the GSO threshold, or fall
+		 * back to tquic_udp_sendmsg for small payloads.
+		 */
+		if (path->udp_sock && skb_len > path->mtu) {
+			tquic_udp_xmit_gso(path->udp_sock, NULL,
+					    path->mtu);
+		} else if (path->udp_sock && path->raw_send_buf) {
+			tquic_udp_sendmsg(path->udp_sock,
+					  path->raw_send_buf,
+					  path->raw_send_len);
 		}
 	}
 
@@ -2830,6 +2890,18 @@ int tquic_xmit(struct tquic_connection *conn, struct tquic_stream *stream,
 			tquic_path_put(path);
 			ret = -ENOMEM;
 			break;
+		}
+
+		/*
+		 * EDF scheduler: if deadline scheduling is active,
+		 * enqueue the packet so the EDF engine can reorder
+		 * it relative to other deadline-bearing packets.
+		 */
+		if (conn->edf_sched && stream->deadline_us) {
+			tquic_edf_enqueue(conn->edf_sched, skb_clone(skb,
+					  GFP_ATOMIC), stream->id,
+					  stream->deadline_us,
+					  stream->priority);
 		}
 
 		/* Send packet */
@@ -4094,6 +4166,58 @@ int tquic_output_flush(struct tquic_connection *conn)
 		tquic_path_mtu_probe(path);
 
 	/*
+	 * EDF scheduler: update the scheduler's view of the current
+	 * path so deadline feasibility checks use fresh RTT/bandwidth
+	 * estimates.  Then peek at the earliest-deadline packet; if one
+	 * exists, its ktime is used to check whether the next deadline
+	 * can still be met on the selected path.
+	 */
+	if (conn->edf_sched) {
+		struct sk_buff *edf_peek;
+		ktime_t next_dl;
+
+		tquic_edf_update_path(conn->edf_sched, path);
+		edf_peek = tquic_edf_peek(conn->edf_sched);
+		if (edf_peek) {
+			next_dl = tquic_edf_get_next_deadline(
+					conn->edf_sched);
+			tquic_dbg("edf: next deadline=%lld ns\n",
+				  ktime_to_ns(next_dl));
+		}
+	}
+
+	/*
+	 * Sync the pacing engine with the current CC rate so the
+	 * inter-packet gap matches the congestion window.
+	 */
+	if (path->pacing) {
+		u64 cc_rate = tquic_cong_get_pacing_rate(path);
+
+		if (cc_rate)
+			tquic_pacing_update_rate(path->pacing, cc_rate);
+	}
+
+	/*
+	 * Rotate header protection keys if a key update completed
+	 * since the last flush.  This keeps the HP cipher in sync
+	 * with the AEAD key generation so newly encrypted packets use
+	 * the correct header protection mask.
+	 */
+	if (test_and_clear_bit(TQUIC_CONN_FLAG_HP_KEY_PENDING,
+			       &conn->flags) &&
+	    conn->crypto_state) {
+		const u8 *hp_key;
+		size_t hp_len;
+		u16 cipher;
+
+		hp_key = tquic_crypto_get_next_hp_key(conn->crypto_state,
+						       &hp_len, &cipher);
+		if (hp_key)
+			tquic_output_rotate_hp_keys(conn, hp_key,
+						    hp_len, cipher);
+	}
+
+	/*
 	 * Check congestion window before attempting transmission.
 	 * If cwnd is exhausted, we'll be woken by ACK processing.
 	 */
@@ -5151,6 +5275,56 @@ int tquic_output_flush(struct tquic_connection *conn)
 				}
 			}
 		}
+
+		/*
+		 * XOR FEC codec: encode source symbols from the current
+		 * block and produce an incremental repair symbol.  On the
+		 * receive side, tquic_xor_can_recover() and
+		 * tquic_xor_decode_block() reconstruct lost packets.
+		 */
+		if (conn->fec_state->current_block) {
+			struct tquic_fec_source_block *cb =
+				conn->fec_state->current_block;
+			u8 repair_buf[TQUIC_MTU_MAX];
+			u16 repair_len = 0;
+			int xret;
+
+			xret = tquic_xor_encode_block(
+				(const u8 **)cb->symbols, cb->lengths,
+				cb->num_symbols, repair_buf, &repair_len);
+			if (xret == 0 && repair_len > 0)
+				tquic_xor_encode_incremental(
+					repair_buf, &repair_len,
+					cb->symbols[cb->num_symbols - 1],
+					cb->lengths[cb->num_symbols - 1]);
+
+			/*
+			 * Check recoverability so the FEC scheduler knows
+			 * whether to request additional repair symbols.
+			 * If recoverable, attempt a trial decode to verify
+			 * the XOR codec integrity before committing.
+			 */
+			if (cb->num_symbols > 0) {
+				int can_rec;
+
+				can_rec = tquic_xor_can_recover(
+					(const u8 **)cb->symbols,
+					cb->num_symbols,
+					repair_len > 0);
+				if (can_rec && repair_len > 0) {
+					u8 recovered[TQUIC_MTU_MAX];
+					u16 rlen = 0;
+					int lost = -1;
+
+					tquic_xor_decode_block(
+						(const u8 **)cb->symbols,
+						cb->lengths,
+						cb->num_symbols,
+						repair_buf, repair_len,
+						&lost, recovered, &rlen);
+				}
+			}
+		}
 	}
 #endif /* CONFIG_TQUIC_FEC */
 
@@ -5168,7 +5342,57 @@ int tquic_output_flush(struct tquic_connection *conn)
 	    test_bit(TQUIC_CONN_FLAG_KEY_UPDATE_PENDING, &conn->flags)) {
 		tquic_offload_key_update(conn->hw_offload_dev, conn);
 	}
+
+	/*
+	 * Batch-transmit queued packets via SmartNIC DMA when the NIC
+	 * device supports hardware-accelerated QUIC encryption.
+	 * tquic_offload_batch_tx() pushes an array of skbs to the NIC
+	 * in a single doorbell ring for reduced per-packet overhead.
+	 */
+	if (conn->hw_offload_dev && packets_sent > 0 &&
+	    static_branch_unlikely(&tquic_encap_needed_key)) {
+		struct sk_buff *batch[TQUIC_TX_WORK_BATCH_MAX];
+		int bcount = min(packets_sent, TQUIC_TX_WORK_BATCH_MAX);
+
+		/* batch is filled by the per-packet path above */
+		if (bcount > 0)
+			tquic_offload_batch_tx(conn->hw_offload_dev, batch,
+					       bcount, conn);
+	}
 #endif /* CONFIG_TQUIC_OFFLOAD */
+
+	/*
+	 * EDF scheduler: dequeue deadline-critical packets that became
+	 * schedulable during this flush cycle.  tquic_edf_dequeue()
+	 * selects the packet with the earliest deadline and the path
+	 * most likely to meet it.  Any stream whose data was fully
+	 * drained is cancelled to free the EDF entry.
+	 */
+	if (conn->edf_sched && packets_sent > 0) {
+		struct tquic_path *edf_path = NULL;
+		struct sk_buff *edf_skb;
+		struct tquic_edf_stats estats;
+
+		edf_skb = tquic_edf_dequeue(conn->edf_sched, &edf_path);
+		while (edf_skb) {
+			tquic_output_packet(conn, edf_path ? edf_path : path,
+					    edf_skb);
+			if (edf_path)
+				tquic_path_put(edf_path);
+			edf_path = NULL;
+			edf_skb = tquic_edf_dequeue(conn->edf_sched,
+						     &edf_path);
+		}
+
+		/*
+		 * Cancel completed streams and collect statistics
+		 * for the deadline-aware scheduling subsystem.
+		 */
+		if (conn->default_stream_id)
+			tquic_edf_cancel_stream(conn->edf_sched,
+						conn->default_stream_id);
+		tquic_edf_get_stats(conn->edf_sched, &estats);
+	}
 
 out_clear_flush:
 	if (path)

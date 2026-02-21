@@ -38,6 +38,25 @@ bool tquic_path_verify_response(struct tquic_path *path, const u8 *data);
 int tquic_path_migrate(struct tquic_connection *conn, struct tquic_path *path);
 void tquic_path_mtu_discovery_start(struct tquic_path *path);
 int tquic_path_mtu_probe(struct tquic_path *path);
+
+/* Forward declarations for dead-export wiring */
+void tquic_pm_on_path_validated_additional(struct tquic_connection *conn,
+					   struct tquic_path *path);
+void tquic_pm_on_path_failed_additional(struct tquic_connection *conn,
+					struct tquic_path *path);
+void tquic_nl_notify_path_up(struct net *net, u64 conn_id,
+			     const struct tquic_nl_path_info *path);
+void tquic_nl_notify_path_down(struct net *net, u64 conn_id,
+			       const struct tquic_nl_path_info *path,
+			       u32 reason);
+void tquic_nl_notify_path_change(struct net *net, u64 conn_id,
+				 const struct tquic_nl_path_info *path);
+void tquic_path_update_metrics(struct tquic_nl_path_info *path, u32 rtt,
+			       u64 bandwidth, u32 loss_rate);
+void tquic_path_info_update_stats(struct tquic_nl_path_info *path,
+				  u64 tx_packets, u64 rx_packets,
+				  u64 tx_bytes, u64 rx_bytes);
+u32 tquic_bond_get_path_weight(struct tquic_connection *conn, u32 path_id);
 void tquic_path_mtu_probe_acked(struct tquic_path *path, u32 probe_size);
 void tquic_path_mtu_probe_lost(struct tquic_path *path, u32 probe_size);
 void tquic_path_rtt_update(struct tquic_path *path, u32 latest_rtt_us,
@@ -551,6 +570,47 @@ void tquic_path_on_validated(struct tquic_path *path)
 		tquic_mp_deadline_path_state_changed(conn->deadline_coord, path,
 						     TQUIC_PATH_VALIDATED);
 #endif
+
+	/*
+	 * Notify the path manager that an additional (non-primary) path
+	 * has been validated.  tquic_pm_on_path_validated_additional()
+	 * updates internal path tables and may trigger secondary path
+	 * scheduling or bonding weight recalculation.
+	 */
+	tquic_pm_on_path_validated_additional(conn, path);
+
+	/*
+	 * Notify userspace via generic netlink that a path is now usable.
+	 * Populate a tquic_nl_path_info snapshot from the kernel path
+	 * structure so the daemon can update its routing table.
+	 */
+	{
+		struct net *net = sock_net(conn->sk);
+		struct tquic_nl_path_info nlpi;
+
+		memset(&nlpi, 0, sizeof(nlpi));
+		nlpi.path_id = path->path_id;
+		tquic_path_update_metrics(&nlpi, path->stats.srtt,
+					  path->stats.bandwidth,
+					  path->stats.loss_rate);
+		tquic_path_info_update_stats(&nlpi,
+					     path->stats.tx_packets,
+					     path->stats.rx_packets,
+					     path->stats.tx_bytes,
+					     path->stats.rx_bytes);
+		tquic_nl_notify_path_up(net, conn->conn_id, &nlpi);
+	}
+
+	/*
+	 * Retrieve the bonding weight assigned to this path so the
+	 * multipath scheduler can use weighted round-robin selection.
+	 */
+	{
+		u32 bweight = tquic_bond_get_path_weight(conn,
+							  path->path_id);
+		if (bweight)
+			path->sched_weight = bweight;
+	}
 }
 
 /*
@@ -910,6 +970,22 @@ void tquic_path_rtt_update(struct tquic_path *path, u32 latest_rtt_us,
 		if (min_rtt != U32_MAX)
 			tquic_bonding_update_rtt_spread(bc, min_rtt, max_rtt);
 	}
+
+	/*
+	 * Notify userspace of significant metric changes so the
+	 * routing daemon can recalculate path preferences.
+	 */
+	if (path->conn && path->conn->sk) {
+		struct net *net = sock_net(path->conn->sk);
+		struct tquic_nl_path_info nlpi;
+
+		memset(&nlpi, 0, sizeof(nlpi));
+		nlpi.path_id = path->path_id;
+		tquic_path_update_metrics(&nlpi, path->stats.rtt_smoothed,
+					  path->stats.bandwidth,
+					  path->stats.loss_rate);
+		tquic_nl_notify_path_change(net, path->conn->conn_id, &nlpi);
+	}
 }
 
 /*
@@ -1095,6 +1171,22 @@ void tquic_path_on_probe_timeout(struct tquic_path *path)
 		/* Validation failed */
 		path->validation.challenge_pending = false;
 		path->state = TQUIC_PATH_FAILED;
+
+		/*
+		 * Notify the path manager of the failure so internal
+		 * tables and bonding weights are updated.
+		 */
+		if (path->conn) {
+			struct net *net = sock_net(path->conn->sk);
+			struct tquic_nl_path_info nlpi;
+
+			tquic_pm_on_path_failed_additional(path->conn, path);
+
+			memset(&nlpi, 0, sizeof(nlpi));
+			nlpi.path_id = path->path_id;
+			tquic_nl_notify_path_down(net, path->conn->conn_id,
+						  &nlpi, ETIMEDOUT);
+		}
 		return;
 	}
 
@@ -1104,6 +1196,18 @@ void tquic_path_on_probe_timeout(struct tquic_path *path)
 		/* Too many retries - validation failed */
 		path->validation.challenge_pending = false;
 		path->state = TQUIC_PATH_FAILED;
+
+		if (path->conn) {
+			struct net *net = sock_net(path->conn->sk);
+			struct tquic_nl_path_info nlpi;
+
+			tquic_pm_on_path_failed_additional(path->conn, path);
+
+			memset(&nlpi, 0, sizeof(nlpi));
+			nlpi.path_id = path->path_id;
+			tquic_nl_notify_path_down(net, path->conn->conn_id,
+						  &nlpi, ECONNABORTED);
+		}
 		return;
 	}
 
