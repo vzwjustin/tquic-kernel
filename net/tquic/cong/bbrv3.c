@@ -159,6 +159,7 @@ static u64 bbrv3_inflight(struct bbrv3 *bbr, u32 gain)
 	/* Add extra acked estimate if enabled */
 	if (bbr->params.use_extra_acked) {
 		u64 extra = max(bbr->extra_acked[0], bbr->extra_acked[1]);
+
 		inflight += extra * mss;
 	}
 
@@ -511,6 +512,7 @@ static void bbrv3_handle_ecn(struct bbrv3 *bbr, u64 ce_count)
 	/* Reduce cwnd based on ECN if above threshold */
 	if (ce_ratio >= bbr->params.ecn_thresh_percent) {
 		u64 reduction = (bbr->cwnd * bbr->ecn_alpha) >> BBR3_SCALE;
+
 		bbr->cwnd = max_t(u64, bbr->cwnd - reduction,
 				  BBR3_MIN_CWND * mss);
 		bbr->inflight_hi = bbr->cwnd;

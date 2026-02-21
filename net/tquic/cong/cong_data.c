@@ -550,6 +550,7 @@ int tquic_cong_data_apply(struct tquic_connection *conn,
 		/* Estimate cwnd from BWE and RTT: cwnd = BWE * RTT / 8 */
 		u64 bwe_bytes = data->bwe / 8;  /* Convert to bytes */
 		u64 rtt_sec_frac = data->min_rtt;  /* in microseconds */
+
 		target_cwnd = (bwe_bytes * rtt_sec_frac) / 1000000ULL;
 		target_cwnd = clamp_u64_val(target_cwnd,
 					    TQUIC_CONG_DATA_MIN_CWND,
@@ -675,6 +676,7 @@ bool tquic_cong_data_on_ack(struct tquic_connection *conn,
 			 * This gives slow-start-like growth
 			 */
 			u64 new_cwnd = current_cwnd + bytes_acked;
+
 			new_cwnd = min(new_cwnd, state->target_cwnd);
 
 			/* We don't directly set cwnd here - the CC algorithm
@@ -1313,9 +1315,8 @@ int __init tquic_cong_data_module_init(void)
 
 	/* Initialize cache */
 	spin_lock_init(&cong_data_cache_lock);
-	for (i = 0; i < CONG_DATA_CACHE_SIZE; i++) {
+	for (i = 0; i < CONG_DATA_CACHE_SIZE; i++)
 		cong_data_cache[i].valid = false;
-	}
 
 	tquic_info("cong_data: initialized\n");
 	return 0;

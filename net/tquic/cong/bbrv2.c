@@ -251,9 +251,8 @@ static void bbr_check_full_bw_reached(struct bbrv2 *bbr)
 	}
 
 	/* No significant increase for 3 rounds = full */
-	if (++bbr->full_bw_count >= 3) {
+	if (++bbr->full_bw_count >= 3)
 		bbr->full_bw_reached = true;
-	}
 }
 
 /**
@@ -599,11 +598,10 @@ static void bbrv2_on_ack(void *cong_data, u64 bytes_acked, u64 rtt_us)
 	bbr_check_probe_rtt(bbr);
 
 	/* Update cwnd during ProbeRTT */
-	if (bbr->mode == BBR_PROBE_RTT) {
+	if (bbr->mode == BBR_PROBE_RTT)
 		bbr->cwnd = BBR_PROBE_RTT_CWND * mss;
-	} else {
+	else
 		bbr_set_cwnd(bbr);
-	}
 }
 
 /**
