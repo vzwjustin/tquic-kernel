@@ -3250,12 +3250,6 @@ int tquic_output_flush(struct tquic_connection *conn)
 							stream_offset,
 							chunk_size);
 
-#ifdef CONFIG_TQUIC_MULTIPATH
-						tquic_mp_sched_notify_sent(
-							conn, path,
-							pkt_size);
-#endif
-
 						/* Track packet for loss detection (RFC 9002 A.5) */
 						sent_pkt =
 							tquic_sent_packet_alloc(
