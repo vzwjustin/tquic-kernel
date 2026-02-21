@@ -35,6 +35,12 @@
 #ifdef CONFIG_TQUIC_OVER_TCP
 #include "../transport/tcp_fallback.h"
 #endif
+#ifdef CONFIG_TQUIC_IO_URING
+#include "../io_uring.h"
+#endif
+#ifdef CONFIG_TQUIC_PATH_MANAGER
+#include <net/tquic_pm.h>
+#endif
 
 static const struct rhashtable_params tquic_conn_table_params = {
 	.key_len = sizeof(struct tquic_cid),
@@ -851,6 +857,21 @@ struct tquic_connection *tquic_conn_create(struct tquic_sock *tsk,
 	/* Non-fatal: TCP fallback simply won't activate if NULL */
 #endif /* CONFIG_TQUIC_OVER_TCP */
 
+#ifdef CONFIG_TQUIC_IO_URING
+	tquic_uring_ctx_alloc(conn);
+	/* Non-fatal: io_uring path degrades to non-uring I/O if alloc fails */
+#endif /* CONFIG_TQUIC_IO_URING */
+
+#ifdef CONFIG_TQUIC_PATH_MANAGER
+	conn->pm = tquic_pm_init(conn);
+	/* Non-fatal: path management disabled if allocation fails */
+#endif /* CONFIG_TQUIC_PATH_MANAGER */
+
+#ifdef CONFIG_TQUIC_SCHEDULER
+	conn->sched_priv = tquic_sched_init_conn(conn, NULL);
+	/* Non-fatal: per-connection scheduler state unavailable if NULL */
+#endif /* CONFIG_TQUIC_SCHEDULER */
+
 	/*
 	 * SECURITY FIX (CF-098): Insert into the global connection
 	 * hash table so that diagnostics, proc, and debug interfaces
@@ -1054,6 +1075,25 @@ void tquic_conn_destroy(struct tquic_connection *conn)
 		conn->fallback_ctx = NULL;
 	}
 #endif /* CONFIG_TQUIC_OVER_TCP */
+
+#ifdef CONFIG_TQUIC_IO_URING
+	tquic_uring_ctx_free(conn);
+#endif /* CONFIG_TQUIC_IO_URING */
+
+#ifdef CONFIG_TQUIC_PATH_MANAGER
+	if (conn->pm) {
+		tquic_pm_cleanup(conn->pm);
+		conn->pm = NULL;
+	}
+#endif /* CONFIG_TQUIC_PATH_MANAGER */
+
+#ifdef CONFIG_TQUIC_SCHEDULER
+	if (conn->sched_priv) {
+		tquic_sched_release_conn(tquic_sched_default(),
+					 conn->sched_priv);
+		conn->sched_priv = NULL;
+	}
+#endif /* CONFIG_TQUIC_SCHEDULER */
 
 	kfree(conn->reason_phrase);
 	kmem_cache_free(tquic_conn_cache, conn);
