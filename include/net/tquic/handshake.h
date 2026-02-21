@@ -160,6 +160,8 @@ bool tquic_hs_is_complete(struct tquic_handshake *hs);
 const char *tquic_hs_get_alpn(struct tquic_handshake *hs);
 bool tquic_hs_early_data_accepted(struct tquic_handshake *hs);
 enum tquic_hs_state tquic_hs_get_state(struct tquic_handshake *hs);
+const char *tquic_hs_get_sni(struct tquic_handshake *hs, u32 *len);
+bool tquic_hs_is_psk_mode(struct tquic_handshake *hs);
 
 /* Secret accessors for QUIC key installation */
 u16 tquic_hs_get_cipher_suite(struct tquic_handshake *hs);
