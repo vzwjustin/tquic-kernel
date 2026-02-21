@@ -52,6 +52,7 @@
 #include "core/flow_control.h"
 #include "bond/tquic_bonding.h"
 #include "bond/tquic_failover.h"
+#include "bond/tquic_reorder.h"
 #include "core/stream.h"
 
 #ifdef CONFIG_TQUIC_OFFLOAD
@@ -1675,6 +1676,25 @@ static struct tquic_path *tquic_select_path_lb(struct tquic_connection *conn,
 
 		if (!tquic_output_path_usable(path))
 			continue;
+
+		/*
+		 * Failover hysteresis guard: skip paths that are in FAILED
+		 * or RECOVERING state per the failover state machine.  This
+		 * prevents the LB selector from using a path that the
+		 * 3×SRTT timeout has declared dead, even if its QUIC state
+		 * still shows ACTIVE (the path manager may not have caught
+		 * up yet).
+		 */
+		if (conn->pm) {
+			struct tquic_bonding_ctx *__bc =
+				conn->pm->bonding_ctx;
+			struct tquic_failover_ctx *__fc =
+				tquic_bonding_get_failover(__bc);
+
+			if (__fc &&
+			    !tquic_failover_is_path_usable(__fc, path->path_id))
+				continue;
+		}
 
 		/* Score based on available capacity and RTT */
 		inflight = path->stats.tx_bytes - path->stats.rx_bytes;
@@ -3743,6 +3763,48 @@ int tquic_output_flush(struct tquic_connection *conn)
 	}
 
 	/*
+	 * Bonding failover retransmit priority (pre-FC, pre-stream data).
+	 *
+	 * When multipath bonding is active and a path has failed, unacked
+	 * packets are queued for retransmission. The scheduler must drain
+	 * these before new stream data per the zero-loss guarantee.
+	 *
+	 * tquic_bonding_has_pending_retx() is lockless (checks atomic
+	 * retx_queue.count) so safe to call before taking conn->lock.
+	 */
+	if (conn->pm) {
+		struct tquic_bonding_ctx *__bc = conn->pm->bonding_ctx;
+
+		if (tquic_bonding_has_pending_retx(__bc)) {
+			struct tquic_failover_ctx *__fc =
+				tquic_bonding_get_failover(__bc);
+			struct tquic_failover_packet *sp;
+
+			while (__fc &&
+			       (sp = tquic_failover_get_next(__fc)) != NULL) {
+				int __r;
+
+				if (!sp->skb) {
+					tquic_failover_put_packet(sp);
+					continue;
+				}
+				/*
+				 * Requeue on active path. On send error,
+				 * re-enqueue for next opportunity rather
+				 * than dropping.
+				 */
+				__r = tquic_output_packet(conn, path,
+							  skb_clone(sp->skb,
+								    GFP_ATOMIC));
+				if (__r < 0)
+					tquic_failover_requeue(__fc, sp);
+				else
+					tquic_failover_put_packet(sp);
+			}
+		}
+	}
+
+	/*
 	 * RFC 9000 Section 4: Send pending flow control frames before stream
 	 * data so the peer gets credits as early as possible.
 	 *
@@ -4462,6 +4524,25 @@ int tquic_output_flush(struct tquic_connection *conn)
 	 * will handle loss detection and retransmission via
 	 * tquic_timer_schedule() called from tquic_output_packet().
 	 */
+
+	/*
+	 * Adapt reorder buffer size to current aggregate bandwidth.
+	 * Called after each flush batch so the buffer stays tuned to
+	 * actual throughput rather than a fixed default.  Only has
+	 * effect when multipath bonding is active and a reorder buffer
+	 * has been allocated (BONDED/DEGRADED states).
+	 */
+	if (packets_sent > 0 && conn->pm) {
+		struct tquic_bonding_ctx *__bc = conn->pm->bonding_ctx;
+		struct tquic_reorder_buffer *__rb =
+			tquic_bonding_get_reorder(__bc);
+
+		if (__rb && path) {
+			u64 agg_bw = path->stats.bandwidth;
+
+			tquic_reorder_adapt_size(__rb, agg_bw);
+		}
+	}
 
 	ret = packets_sent > 0 ? packets_sent : ret;
 	if (packets_sent > 0)

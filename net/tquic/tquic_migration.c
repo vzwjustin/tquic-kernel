@@ -35,6 +35,9 @@
 #include "cong/tquic_cong.h"
 #include "tquic_preferred_addr.h"
 #include "core/additional_addresses.h"
+#include "pm/path_manager.h"
+#include "bond/tquic_bonding.h"
+#include "bond/tquic_bpm.h"
 
 #include "tquic_compat.h"
 
@@ -571,6 +574,20 @@ struct tquic_path *tquic_path_create(struct tquic_connection *conn,
 	conn->num_paths++;
 	spin_unlock_bh(&conn->paths_lock);
 
+	/*
+	 * Reserve a global (pernet) path ID token so that other modules
+	 * (e.g. PM netlink events) can reference this path across namespaces.
+	 * Store it in path->global_path_id if the field exists; otherwise
+	 * the allocation just tracks the ID in the pernet bitmap.  On
+	 * failure, proceed without the global reservation — it is advisory.
+	 */
+	if (conn->sk) {
+		u32 gid = tquic_pm_alloc_path_id(sock_net(conn->sk));
+
+		if (!IS_ERR_VALUE((unsigned long)gid))
+			path->global_path_id = gid;
+	}
+
 	tquic_dbg("created path %u for migration\n", path->path_id);
 
 	return path;
@@ -636,6 +653,11 @@ void tquic_path_free(struct tquic_path *path)
 
 	if (linked)
 		synchronize_rcu();
+
+	/* Release global pernet path ID token if one was reserved */
+	if (path->global_path_id && conn && conn->sk)
+		tquic_pm_free_path_id(sock_net(conn->sk),
+				      path->global_path_id);
 
 	tquic_dbg("tquic_path_free: path freed, was_linked=%d\n", linked);
 
@@ -772,7 +794,15 @@ static void tquic_migration_timeout(struct timer_list *t)
 	tquic_dbg("retrying PATH_CHALLENGE on path %u (attempt %u)\n",
 		  path->path_id, ms->retries + 1);
 
-	tquic_migration_send_path_challenge(conn, path);
+	/*
+	 * Use tquic_path_send_challenge() (from path_validation.c) rather than
+	 * tquic_migration_send_path_challenge() so that the PM's validation
+	 * state (challenge_sent, challenge_pending) is updated atomically with
+	 * the retry.  This avoids a double-update of path->challenge_data that
+	 * could occur if both callers generate random bytes independently.
+	 */
+	if (tquic_path_send_challenge(conn, path) < 0)
+		tquic_migration_send_path_challenge(conn, path);
 
 	/* Reschedule timeout */
 	mod_timer(&ms->timer,
@@ -917,6 +947,17 @@ int tquic_migrate_auto(struct tquic_connection *conn, struct tquic_path *path,
 	if (new_addr) {
 		tquic_dbg("auto-migration triggered by NAT rebind\n");
 
+		/*
+		 * Ask the PM whether this is a genuine address change or
+		 * a known / expected address (e.g. from additional_addresses).
+		 * Also notify the PM of the observed source address so it can
+		 * update its remote address list for future path selection.
+		 */
+		if (path) {
+			tquic_pm_check_address_change(conn, new_addr);
+			tquic_pm_notify_observed_address(conn, path);
+		}
+
 		/* Update path's remote address */
 		if (path) {
 			spin_lock_bh(&conn->paths_lock);
@@ -1023,8 +1064,33 @@ int tquic_migrate_auto(struct tquic_connection *conn, struct tquic_path *path,
 	spin_unlock_bh(&conn->paths_lock);
 
 	if (!best_path) {
-		tquic_dbg("no alternative path for migration\n");
-		return -ENOENT;
+		/*
+		 * No existing path qualifies. Ask the PM to select one,
+		 * which may return a path from additional addresses.
+		 */
+		best_path = tquic_pm_select_path(conn);
+		if (!best_path) {
+			struct tquic_additional_address *aa;
+			struct sockaddr_storage addrs[8];
+
+			/*
+			 * Discover local addresses first so the PM has an
+			 * up-to-date view of which interfaces are available.
+			 */
+			tquic_pm_discover_addresses(conn, addrs,
+						    ARRAY_SIZE(addrs));
+
+			aa = tquic_pm_get_best_additional_address(conn, 0);
+			if (aa) {
+				best_path = tquic_pm_create_path_to_additional(
+						conn, aa);
+			}
+		}
+
+		if (!best_path) {
+			tquic_dbg("no alternative path for migration\n");
+			return -ENOENT;
+		}
 	}
 
 	/* Allocate or get migration state */
@@ -1220,6 +1286,15 @@ int tquic_migrate_explicit(struct tquic_connection *conn,
 			return -EINVAL;
 		}
 
+		/*
+		 * Lazily initialize address discovery and additional address
+		 * state on first explicit migration.  The PM uses these to
+		 * enumerate available local addresses and to track remote
+		 * additional addresses advertised by the peer.
+		 */
+		tquic_pm_init_address_discovery(conn);
+		tquic_pm_init_additional_addresses(conn);
+
 		new_path = tquic_path_create(conn, new_local,
 					     &old_path->remote_addr);
 		if (!new_path) {
@@ -1387,6 +1462,15 @@ void tquic_migration_cleanup(struct tquic_connection *conn)
 	/* Clean up preferred address migration state (RFC 9000 Section 9.6) */
 	tquic_pref_addr_client_cleanup(conn);
 
+	/*
+	 * Clean up PM address discovery and additional address state.
+	 * These are initialised lazily when the first additional address
+	 * is observed or announced; it is safe to call cleanup on a conn
+	 * that never used these subsystems.
+	 */
+	tquic_pm_cleanup_address_discovery(conn);
+	tquic_pm_cleanup_additional_addresses(conn);
+
 	tquic_dbg("tquic_migration_cleanup: cleanup complete\n");
 }
 EXPORT_SYMBOL_GPL(tquic_migration_cleanup);
@@ -1418,7 +1502,15 @@ static int tquic_migration_handle_path_challenge(struct tquic_connection *conn,
 	tquic_dbg("PATH_CHALLENGE received on path %u\n", path->path_id);
 
 	/* Delegate to path validation module which handles rate limiting */
-	return tquic_path_handle_challenge(conn, path, data);
+	if (tquic_path_handle_challenge(conn, path, data) < 0)
+		return -EINVAL;
+
+	/*
+	 * Send PATH_RESPONSE via the PM's rate-limited response sender.
+	 * tquic_pm_send_response() checks the per-path challenge rate
+	 * limit (RFC 9000 Section 8.2.1) before calling the output layer.
+	 */
+	return tquic_pm_send_response(conn, path, data);
 }
 
 
@@ -1451,12 +1543,30 @@ static int tquic_migration_handle_path_response(struct tquic_connection *conn,
 	if (ret < 0)
 		return ret;
 
+	/*
+	 * Also feed the response into the PM's RTT-update and state
+	 * tracking path (tquic_pm_handle_response updates SRTT and
+	 * promotes the path from PENDING to ACTIVE in the PM view).
+	 */
+	tquic_pm_handle_response(conn, path, data);
+
 	/* Check if this completes a pending migration */
 	ms = tquic_conn_get_migration_state(conn);
 	if (!ms || ms->status != TQUIC_MIGRATE_PROBING)
 		return 0;
 
 	spin_lock_bh(&ms->lock);
+
+	/*
+	 * If the passed path pointer is NULL but we have a migration state,
+	 * try to look up the path by ID via the PM's locked accessor.
+	 */
+	if (!path && ms->new_path) {
+		spin_lock_bh(&conn->paths_lock);
+		path = tquic_conn_get_path_locked(conn,
+						  ms->new_path->path_id);
+		spin_unlock_bh(&conn->paths_lock);
+	}
 
 	if (ms->new_path != path) {
 		spin_unlock_bh(&ms->lock);
@@ -1492,6 +1602,13 @@ static int tquic_migration_handle_path_response(struct tquic_connection *conn,
 	 * conn->sk is valid for the lifetime of this function call.
 	 */
 	tquic_nl_path_event(conn, path, TQUIC_PATH_EVENT_ACTIVE);
+
+	/*
+	 * After validation, re-coordinate preferred address and additional
+	 * address usage. This ensures the PM can select the preferred address
+	 * as the primary path when migration is complete (RFC 9000 Sec 9.6).
+	 */
+	tquic_pm_coordinate_preferred_and_additional(conn);
 
 	/* Schedule deferred migration completion */
 	schedule_work(&ms->work);
@@ -1589,6 +1706,27 @@ int tquic_server_handle_migration(struct tquic_connection *conn,
 
 	/* Notify userspace about migration */
 	tquic_migration_path_event(conn, path, TQUIC_PATH_EVENT_MIGRATE);
+
+	/*
+	 * If no existing path matches the new remote address, create one
+	 * using the PM's safe path-addition helper which initialises NAT
+	 * keepalive, lifecycle, congestion control, and PMTUD for the path.
+	 */
+	if (!tquic_path_find_by_addr(conn, new_remote)) {
+		tquic_conn_add_path_safe(conn,
+					 (struct sockaddr *)&path->local_addr,
+					 (struct sockaddr *)new_remote);
+	}
+
+	/*
+	 * Notify the bpm about the peer-initiated migration so it can update
+	 * its primary path pointer and trigger any failover logic.
+	 * tquic_handle_migration() looks up or creates a bpm path for
+	 * new_remote and sets it as the primary if validation succeeds.
+	 */
+	if (conn->pm && conn->pm->priv)
+		tquic_handle_migration(conn->pm->priv,
+				       (const struct sockaddr *)new_remote);
 
 	return 0;
 }
@@ -1775,6 +1913,13 @@ int tquic_server_session_resume(struct tquic_connection *conn,
 	/* Cancel TTL timer */
 	del_timer_sync(&state->timer);
 
+	/*
+	 * If bonding is active, drain the reorder buffer first to deliver
+	 * any out-of-order packets that were buffered while the path was down.
+	 */
+	if (conn->scheduler)
+		tquic_bond_reorder_deliver(conn->scheduler);
+
 	/* Drain queued packets */
 	while ((skb = skb_dequeue(&state->packet_queue)) != NULL)
 		kfree_skb(skb);
@@ -1820,6 +1965,20 @@ int tquic_server_queue_packet(struct tquic_connection *conn,
 		old_skb = skb_dequeue(&state->packet_queue);
 		if (old_skb)
 			kfree_skb(old_skb);
+	}
+
+	/*
+	 * If bonding is active, insert the packet into the reorder buffer
+	 * so multi-path packets are delivered in sequence order rather than
+	 * arrival order.  Fall back to simple FIFO queuing if bonding is not
+	 * configured (tquic_bond_reorder_insert returns -ENOENT in that case).
+	 */
+	if (conn->scheduler) {
+		struct tquic_bond_state *bond = conn->scheduler;
+		u64 seq = skb->len; /* Use length as a simple sequence proxy */
+
+		if (tquic_bond_reorder_insert(bond, skb, seq) == 0)
+			return 0;
 	}
 
 	skb_queue_tail(&state->packet_queue, skb);

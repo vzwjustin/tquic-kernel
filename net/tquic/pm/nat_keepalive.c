@@ -234,7 +234,9 @@ static void tquic_nat_keepalive_adaptive_adjust(
 		if (success) {
 			/* Calculate approximate RTT for the keepalive */
 			ktime_t now = ktime_get();
-			u32 rtt_ms = (u32)ktime_ms_delta(now, state->last_keepalive);
+			u32 rtt_ms;
+
+			rtt_ms = (u32)ktime_ms_delta(now, state->last_keepalive);
 			tquic_nat_lifecycle_on_keepalive_ack(lifecycle, rtt_ms);
 		} else {
 			tquic_nat_lifecycle_on_keepalive_timeout(lifecycle);
@@ -689,6 +691,44 @@ void tquic_nat_keepalive_on_activity(struct tquic_path *path)
 }
 EXPORT_SYMBOL_GPL(tquic_nat_keepalive_on_activity);
 
+/**
+ * tquic_nat_keepalive_on_packet_received - Notify keepalive of inbound packet
+ * @path: Path that received a packet
+ * @from_addr: Source address of the received packet
+ *
+ * Called when a packet is received on the path. Confirms the NAT binding
+ * is active and may update symmetric NAT detection state in the lifecycle
+ * module.
+ *
+ * Context: Softirq context
+ */
+void tquic_nat_keepalive_on_packet_received(struct tquic_path *path,
+					    const struct sockaddr_storage *from_addr)
+{
+	struct tquic_nat_keepalive_state *state;
+	struct tquic_nat_lifecycle_state *lifecycle;
+
+	if (!path)
+		return;
+
+	state = tquic_nat_keepalive_get_state(path);
+	if (!state || !state->initialized)
+		return;
+
+	/* Update last activity - inbound packet also refreshes NAT binding */
+	spin_lock_bh(&state->lock);
+	state->last_activity = ktime_get();
+	spin_unlock_bh(&state->lock);
+
+	/* Notify lifecycle - received packet confirms binding is alive and
+	 * may help detect address changes for symmetric NAT tracking.
+	 */
+	lifecycle = tquic_nat_lifecycle_from_keepalive(state);
+	if (lifecycle)
+		tquic_nat_lifecycle_on_packet_received(lifecycle, from_addr);
+}
+EXPORT_SYMBOL_GPL(tquic_nat_keepalive_on_packet_received);
+
 void tquic_nat_keepalive_on_ack(struct tquic_path *path, u64 pn)
 {
 	struct tquic_nat_keepalive_state *state;
@@ -783,6 +823,7 @@ EXPORT_SYMBOL_GPL(tquic_nat_keepalive_suspend);
 void tquic_nat_keepalive_resume(struct tquic_path *path)
 {
 	struct tquic_nat_keepalive_state *state;
+	struct tquic_nat_lifecycle_state *lifecycle;
 
 	if (!path)
 		return;
@@ -795,6 +836,15 @@ void tquic_nat_keepalive_resume(struct tquic_path *path)
 	state->suspended = false;
 	state->last_activity = ktime_get();  /* Reset activity timestamp */
 	spin_unlock_bh(&state->lock);
+
+	/*
+	 * Path resumption implies a path change (e.g. migration recovery or
+	 * interface re-attach). Notify the lifecycle module so it resets its
+	 * NAT type detection state and re-probes the new binding.
+	 */
+	lifecycle = tquic_nat_lifecycle_from_keepalive(state);
+	if (lifecycle)
+		tquic_nat_lifecycle_on_path_change(lifecycle);
 
 	/* Reschedule the timer */
 	tquic_nat_keepalive_schedule(state);
@@ -859,6 +909,18 @@ int tquic_nat_keepalive_set_config(struct tquic_path *path,
 	pr_debug("tquic: NAT keepalive config updated for path %u\n",
 		 path->path_id);
 
+	/* Propagate relevant settings to the lifecycle module */
+	if (path->nat_lifecycle_state) {
+		struct tquic_nat_lifecycle_config lc_cfg = {};
+
+		lc_cfg.enabled = config->enabled;
+		lc_cfg.adaptive_refresh = config->adaptive_mode;
+		lc_cfg.min_refresh_interval_ms = config->min_interval_ms;
+		lc_cfg.max_refresh_interval_ms = config->max_interval_ms;
+		tquic_nat_lifecycle_set_config(path->nat_lifecycle_state,
+					       &lc_cfg);
+	}
+
 	return 0;
 }
 EXPORT_SYMBOL_GPL(tquic_nat_keepalive_set_config);
@@ -897,6 +959,22 @@ void tquic_nat_keepalive_get_stats(struct tquic_path *path,
 	if (timeouts)
 		*timeouts = state->total_timeouts;
 	spin_unlock_bh(&state->lock);
+
+	/*
+	 * Overlay per-path lifecycle stats into the keepalive totals when
+	 * a lifecycle state is present.  The lifecycle module tracks binding
+	 * refreshes and losses separately; accumulate them into the timeout
+	 * counter so callers get a combined failure count.
+	 */
+	if (path->nat_lifecycle_state) {
+		u64 lc_probes = 0, lc_refreshes = 0, lc_losses = 0;
+
+		tquic_nat_lifecycle_get_stats(path->nat_lifecycle_state,
+					      &lc_probes, &lc_refreshes,
+					      &lc_losses);
+		if (timeouts)
+			*timeouts += lc_losses;
+	}
 }
 EXPORT_SYMBOL_GPL(tquic_nat_keepalive_get_stats);
 
@@ -951,39 +1029,42 @@ void tquic_nat_keepalive_sync_with_lifecycle(struct tquic_nat_keepalive_state *s
 	struct tquic_nat_lifecycle_state *lifecycle;
 	u32 lifecycle_interval;
 	u32 lifecycle_timeout;
+	int hops;
 
 	if (!state || !state->initialized || !state->path)
 		return;
 
-	lifecycle = state->path->nat_lifecycle_state;
+	/*
+	 * Use tquic_nat_lifecycle_from_keepalive() as the canonical lookup
+	 * to reach the lifecycle state associated with this keepalive.
+	 */
+	lifecycle = tquic_nat_lifecycle_from_keepalive(state);
 	if (!lifecycle)
 		return;
 
-	/* Get recommendations from lifecycle */
+	/* Let lifecycle push its interval/timeout directly into keepalive */
+	tquic_nat_lifecycle_update_keepalive(lifecycle, state);
+
+	/* Read back for logging */
 	lifecycle_interval = tquic_nat_lifecycle_get_refresh_interval(lifecycle);
 	lifecycle_timeout = tquic_nat_lifecycle_get_timeout(lifecycle);
 
-	spin_lock_bh(&state->lock);
+	/*
+	 * If enough timeout samples have been collected, trigger cascaded
+	 * NAT detection.  The hop count informs the effective timeout: the
+	 * minimum across all NAT hops is used by the lifecycle module.
+	 */
+	hops = tquic_nat_lifecycle_get_cascade_count(lifecycle);
+	if (hops == 0 && lifecycle->timeout_est.sample_count >= 4) {
+		int detected = tquic_nat_lifecycle_detect_cascade(lifecycle);
 
-	/* Update interval if lifecycle has better information */
-	if (lifecycle_interval > 0 && state->config) {
-		if (lifecycle_interval >= state->config->min_interval_ms &&
-		    lifecycle_interval <= state->config->max_interval_ms) {
-			state->current_interval_ms = lifecycle_interval;
-		}
+		if (detected > 0)
+			pr_debug("tquic: cascaded NAT detected: %d hops\n",
+				 detected);
 	}
 
-	/* Update timeout estimate */
-	if (lifecycle_timeout > 0)
-		state->estimated_timeout_ms = lifecycle_timeout;
-
-	spin_unlock_bh(&state->lock);
-
-	/* Reschedule with updated interval */
-	tquic_nat_keepalive_schedule(state);
-
-	pr_debug("tquic: keepalive synced with lifecycle (interval=%u ms, timeout=%u ms)\n",
-		 lifecycle_interval, lifecycle_timeout);
+	pr_debug("tquic: keepalive synced (interval=%u ms, timeout=%u ms, hops=%d)\n",
+		 lifecycle_interval, lifecycle_timeout, hops);
 }
 EXPORT_SYMBOL_GPL(tquic_nat_keepalive_sync_with_lifecycle);
 
@@ -1003,7 +1084,7 @@ enum tquic_nat_binding_state tquic_nat_keepalive_get_binding_state(
 	if (!state || !state->initialized || !state->path)
 		return TQUIC_NAT_BINDING_UNKNOWN;
 
-	lifecycle = state->path->nat_lifecycle_state;
+	lifecycle = tquic_nat_lifecycle_from_keepalive(state);
 	if (!lifecycle)
 		return TQUIC_NAT_BINDING_UNKNOWN;
 
@@ -1027,7 +1108,7 @@ enum tquic_nat_type tquic_nat_keepalive_get_nat_type(
 	if (!state || !state->initialized || !state->path)
 		return TQUIC_NAT_TYPE_UNKNOWN;
 
-	lifecycle = state->path->nat_lifecycle_state;
+	lifecycle = tquic_nat_lifecycle_from_keepalive(state);
 	if (!lifecycle)
 		return TQUIC_NAT_TYPE_UNKNOWN;
 

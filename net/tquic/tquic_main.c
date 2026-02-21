@@ -571,8 +571,16 @@ void tquic_pm_conn_release(struct tquic_connection *conn)
 		}
 	}
 
-	/* Free PM-specific private data if any */
-	kfree(pm_state->priv);
+	/*
+	 * Release PM-specific private data via the ops conn_release callback
+	 * if one is registered.  The callback is responsible for calling any
+	 * required subsystem teardown (e.g. tquic_bpm_destroy) before freeing.
+	 * Fall back to plain kfree() for PM types that allocate plain structs.
+	 */
+	if (pm_state->ops && pm_state->ops->conn_release)
+		pm_state->ops->conn_release(conn);
+	else
+		kfree(pm_state->priv);
 
 	kfree(pm_state);
 	conn->pm = NULL;

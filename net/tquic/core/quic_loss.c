@@ -787,18 +787,51 @@ void tquic_loss_detection_on_ack_received(struct tquic_connection *conn,
 	spin_unlock_irqrestore(&pn_space->lock, flags);
 
 	/*
-	 * Failover: notify per acknowledged in-flight packet.
-	 * Called outside pn_space->lock to avoid lock ordering issues
-	 * (tquic_failover_on_ack takes its own sent_packets_lock).
+	 * Failover: notify per acknowledged in-flight packet and as a
+	 * range.  Called outside pn_space->lock to avoid lock ordering
+	 * issues (tquic_failover_on_ack takes its own sent_packets_lock).
 	 * Only APPLICATION-space in-flight packets are tracked by failover.
 	 */
 	if (pn_space_idx == TQUIC_PN_SPACE_APPLICATION) {
-		struct tquic_failover_ctx *fc = tquic_bonding_get_failover(
-			(struct tquic_bonding_ctx *)conn->pm);
+		struct tquic_bonding_ctx *__bc =
+			(struct tquic_bonding_ctx *)conn->pm;
+		struct tquic_failover_ctx *fc =
+			tquic_bonding_get_failover(__bc);
+
 		if (fc) {
+			/*
+			 * Bulk-acknowledge the entire range covered by this
+			 * ACK frame in one call - more efficient than the
+			 * per-packet loop for the common case of a long range.
+			 */
+			tquic_failover_on_ack_range(fc,
+				ack->largest_acked - ack->first_range,
+				ack->largest_acked);
+
+			/* Per-packet fallback for packets outside the range */
 			list_for_each_entry(pkt, &newly_acked_list, list) {
 				if (pkt->in_flight)
 					tquic_failover_on_ack(fc, pkt->pn);
+			}
+		}
+
+		/*
+		 * Notify bonding state machine: ACK received on path.
+		 * Drives feedback-driven path selection in multipath
+		 * schedulers (MinRTT, ECF, BLEST, etc.).
+		 */
+		if (__bc && !list_empty(&newly_acked_list)) {
+			struct tquic_path *ack_path = recv_path;
+
+			if (!ack_path)
+				ack_path = tquic_loss_active_path_get(conn);
+
+			if (ack_path) {
+				tquic_bonding_on_ack_received(conn, __bc,
+							      ack_path,
+							      acked_bytes);
+				if (!recv_path)
+					tquic_path_put(ack_path);
 			}
 		}
 	}
@@ -1141,6 +1174,31 @@ void tquic_loss_detection_detect_lost(struct tquic_connection *conn,
 			}
 		}
 		conn->stats.lost_packets++;
+
+		/*
+		 * Notify bonding layer of loss so multipath schedulers
+		 * can react (e.g., avoid the losing path, trigger
+		 * failover assessment, update BLEST or ECF weights).
+		 */
+		{
+			struct tquic_bonding_ctx *__bc =
+				(struct tquic_bonding_ctx *)conn->pm;
+			if (__bc) {
+				for (i = 0; i < nr_paths; i++) {
+					struct tquic_path *lpath;
+
+					lpath = tquic_path_lookup(
+						conn,
+						path_loss[i].path_id);
+					if (lpath) {
+						tquic_bonding_on_loss_detected(
+							conn, __bc, lpath,
+							path_loss[i].lost_bytes);
+						tquic_path_put(lpath);
+					}
+				}
+			}
+		}
 
 		/*
 		 * Sort lost packets into retransmit vs free lists under

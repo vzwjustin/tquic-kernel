@@ -28,6 +28,7 @@
 #include <net/tquic_pm.h>
 #include "../tquic_init.h"
 #include "../protocol.h"
+#include "../bond/tquic_bpm.h"
 
 /* Kernel PM private data per-namespace */
 struct tquic_pm_kernel_data {
@@ -420,18 +421,67 @@ static int tquic_pm_kernel_netdev_event(struct notifier_block *nb,
  * tquic_pm_kernel_path_event - Handle path events
  * @conn: Connection
  * @path: Path that had the event
- * @event: Event type
+ * @event: Event type (TQUIC_PM_EVENT_*)
  *
- * Internal tracking callback for path state changes.
+ * Mirrors path state changes into the bpm and triggers migration when a
+ * newly validated path is better than the current primary.
  */
 static void tquic_pm_kernel_path_event(struct tquic_connection *conn,
 				       struct tquic_path *path, int event)
 {
-	/* Kernel PM is mostly passive - path validation happens
-	 * automatically via PATH_CHALLENGE/PATH_RESPONSE.
-	 * This callback is for internal tracking if needed.
-	 */
+	struct tquic_bpm_path_manager *bpm;
+	struct tquic_bpm_path *bpath;
+
 	pr_debug("TQUIC PM kernel: Path %u event %d\n", path->path_id, event);
+
+	if (!conn || !conn->pm)
+		return;
+
+	bpm = conn->pm->priv;
+	if (!bpm)
+		return;
+
+	bpath = tquic_bpm_get_path(bpm, path->path_id);
+	if (!bpath)
+		return;
+
+	switch (event) {
+	case TQUIC_PM_EVENT_VALIDATED:
+		/*
+		 * Path validated -- promote to VALIDATED in the bpm and
+		 * trigger a migration check.  tquic_migrate_to_path() is a
+		 * no-op if this path is not better than the current primary.
+		 */
+		tquic_bpm_path_set_state(bpath, TQUIC_BPM_PATH_VALIDATED);
+		tquic_migrate_to_path(bpm, bpath);
+
+		/*
+		 * Log the current number of active paths in the bpm for
+		 * diagnostics.  tquic_bpm_get_active_paths() returns only
+		 * VALIDATED, ACTIVE, or STANDBY bpm paths.
+		 */
+		{
+			struct tquic_bpm_path *active[TQUIC_MAX_PATHS];
+			int n;
+
+			n = tquic_bpm_get_active_paths(bpm, active,
+						       ARRAY_SIZE(active));
+			pr_debug("TQUIC PM kernel: %d active bpm path(s) after validation of path %u\n",
+				 n, path->path_id);
+		}
+		break;
+
+	case TQUIC_PM_EVENT_FAILED:
+		/*
+		 * Path failed -- mark FAILED in bpm.  The bpm on_path_failed
+		 * callback will trigger failover to the backup path.
+		 */
+		tquic_bpm_path_set_state(bpath, TQUIC_BPM_PATH_FAILED);
+		break;
+
+	default:
+		break;
+	}
 }
 
 /**
@@ -509,25 +559,59 @@ static void tquic_pm_kernel_release(struct net *net)
  * tquic_pm_kernel_conn_init - Initialize kernel PM for a specific connection
  * @conn: Connection
  *
- * Scans all existing network interfaces in the connection's namespace.
- * For any interface that is UP and has a default route, attempts to
- * add a path. This complements the netdevice notifier which only catches
- * future NETDEV_UP events.
+ * Creates a tquic_bpm_path_manager instance, stores it in conn->pm->priv,
+ * then scans existing interfaces for auto-discovery.  Also kicks off
+ * async path discovery and WAN signal-strength monitoring via the bpm.
+ * This complements the netdevice notifier which only catches future events.
+ *
+ * Returns 0 on success, negative error code on failure.
  */
 static int tquic_pm_kernel_conn_init(struct tquic_connection *conn)
 {
+	struct tquic_bpm_path_manager *bpm;
 	struct tquic_pm_pernet *pernet;
 	struct net_device *dev;
 	struct net *net;
 
-	if (!conn || !conn->sk)
+	if (!conn || !conn->sk || !conn->pm)
 		return -EINVAL;
 
 	net = sock_net(conn->sk);
-	pernet = tquic_pm_get_pernet(net);
-	if (!pernet || !pernet->auto_discover)
-		return 0;
 
+	/*
+	 * Allocate a bpm instance for this connection.  The bpm manages
+	 * path lifecycle (validation, scoring, migration) and integrates
+	 * with the bonding layer via callbacks.
+	 */
+	bpm = tquic_bpm_init(net, GFP_KERNEL);
+	if (!bpm)
+		return -ENOMEM;
+
+	conn->pm->priv = bpm;
+
+	/*
+	 * Kick off async path discovery: enumerate local interfaces and
+	 * add candidate paths.  Runs via workqueue so it is softirq-safe.
+	 */
+	tquic_bpm_discover_paths(bpm);
+
+	/*
+	 * Start WAN signal-strength monitoring so that the bpm can trigger
+	 * proactive migration when an interface degrades (e.g. weak LTE).
+	 */
+	tquic_wan_monitor_start(bpm);
+
+	pernet = tquic_pm_get_pernet(net);
+	if (!pernet || !pernet->auto_discover) {
+		pr_debug("tquic kernel PM: bpm %p ready (auto_discover off)\n",
+			 bpm);
+		return 0;
+	}
+
+	/*
+	 * Scan currently-UP interfaces and add paths for any that meet the
+	 * WAN-bonding criteria.  The netdevice notifier handles future events.
+	 */
 	rtnl_lock();
 	for_each_netdev(net, dev) {
 		if (!(dev->flags & IFF_UP))
@@ -535,26 +619,115 @@ static int tquic_pm_kernel_conn_init(struct tquic_connection *conn)
 
 		if (tquic_pm_kernel_should_add_path(dev, pernet)) {
 			/*
-			 * Ignore path addition errors during discovery sweep;
-			 * it might fail due to max_paths limit or no valid IPv4.
+			 * Ignore per-device errors: a failed add (e.g. max
+			 * paths, no IPv4) must not abort discovery of others.
 			 */
 			tquic_pm_kernel_try_add_path(conn, dev, pernet);
 		}
 	}
 	rtnl_unlock();
 
+	pr_debug("tquic kernel PM: bpm %p initialized for conn %p\n",
+		 bpm, conn);
 	return 0;
+}
+
+/**
+ * tquic_pm_kernel_add_path - Add a path via kernel PM bpm
+ * @conn: Connection
+ * @local: Local address for the new path
+ * @remote: Remote address for the new path
+ *
+ * Creates a bpm path entry and starts RFC 9000 Section 8.2 validation.
+ *
+ * Returns 0 on success, negative error code on failure.
+ */
+static int tquic_pm_kernel_add_path(struct tquic_connection *conn,
+				    struct sockaddr *local,
+				    struct sockaddr *remote)
+{
+	struct tquic_bpm_path_manager *bpm;
+	struct tquic_bpm_path *bpath;
+
+	if (!conn || !conn->pm)
+		return -EINVAL;
+
+	bpm = conn->pm->priv;
+	if (!bpm)
+		return -ENODEV;
+
+	bpath = tquic_bpm_add_path(bpm, local, remote, -1);
+	if (!bpath)
+		return -ENOMEM;
+
+	tquic_dbg("kernel PM: added bpm path %u\n", bpath->path_id);
+	return 0;
+}
+
+/**
+ * tquic_pm_kernel_del_path - Remove a path via kernel PM bpm
+ * @conn: Connection
+ * @path_id: ID of path to remove
+ *
+ * Looks up the bpm path and removes it.
+ *
+ * Returns 0 on success, -ENOENT if not found.
+ */
+static int tquic_pm_kernel_del_path(struct tquic_connection *conn,
+				    u32 path_id)
+{
+	struct tquic_bpm_path_manager *bpm;
+	struct tquic_bpm_path *bpath;
+
+	if (!conn || !conn->pm)
+		return -EINVAL;
+
+	bpm = conn->pm->priv;
+	if (!bpm)
+		return -ENODEV;
+
+	bpath = tquic_bpm_get_path(bpm, path_id);
+	if (!bpath)
+		return -ENOENT;
+
+	tquic_bpm_remove_path(bpm, bpath);
+	tquic_dbg("kernel PM: removed bpm path %u\n", path_id);
+	return 0;
+}
+
+/**
+ * tquic_pm_kernel_conn_release - Release bpm for a connection
+ * @conn: Connection being torn down
+ *
+ * Destroys the tquic_bpm_path_manager instance allocated by
+ * tquic_pm_kernel_conn_init().  Cancels all outstanding path work,
+ * removes paths from the bpm registry, and frees the structure.
+ */
+static void tquic_pm_kernel_conn_release(struct tquic_connection *conn)
+{
+	struct tquic_bpm_path_manager *bpm;
+
+	if (!conn || !conn->pm)
+		return;
+
+	bpm = conn->pm->priv;
+	if (!bpm)
+		return;
+
+	tquic_bpm_destroy(bpm);
+	conn->pm->priv = NULL;
 }
 
 /* Kernel PM operations structure */
 static struct tquic_pm_ops kernel_pm_ops = {
-	.name = "kernel",
-	.init = tquic_pm_kernel_init,
-	.release = tquic_pm_kernel_release,
-	.conn_init = tquic_pm_kernel_conn_init,
-	.add_path = NULL, /* Auto-managed, not externally controlled */
-	.del_path = NULL, /* Auto-managed */
-	.path_event = tquic_pm_kernel_path_event,
+	.name		= "kernel",
+	.init		= tquic_pm_kernel_init,
+	.release	= tquic_pm_kernel_release,
+	.conn_init	= tquic_pm_kernel_conn_init,
+	.conn_release	= tquic_pm_kernel_conn_release,
+	.add_path	= tquic_pm_kernel_add_path,
+	.del_path	= tquic_pm_kernel_del_path,
+	.path_event	= tquic_pm_kernel_path_event,
 };
 
 /**

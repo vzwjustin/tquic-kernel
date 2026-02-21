@@ -597,6 +597,17 @@ struct tquic_path {
 	/* AF_XDP socket for kernel-bypass packet I/O on this path */
 	struct tquic_xsk *xsk;
 
+	/*
+	 * Pernet (per-network-namespace) path ID token.
+	 *
+	 * Allocated by tquic_pm_alloc_path_id() when the path is created
+	 * and freed by tquic_pm_free_path_id() when the path is destroyed.
+	 * Allows the path manager to maintain a namespace-scoped path ID
+	 * bitmap that prevents ID reuse across concurrent connections.
+	 * Zero means no pernet ID has been allocated.
+	 */
+	u32 global_path_id;
+
 	struct rcu_head rcu_head; /* RCU callback for kfree_rcu */
 };
 

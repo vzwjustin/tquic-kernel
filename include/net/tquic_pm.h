@@ -64,6 +64,15 @@ struct tquic_pm_ops {
 	/* Connection lifecycle */
 	int (*conn_init)(struct tquic_connection *conn);
 
+	/*
+	 * conn_release - Release per-connection PM private data
+	 *
+	 * Called during connection teardown to free any PM-specific state
+	 * stored in conn->pm->priv.  If NULL, the generic path calls
+	 * kfree(conn->pm->priv) instead.
+	 */
+	void (*conn_release)(struct tquic_connection *conn);
+
 	/* Path management operations */
 	int (*add_path)(struct tquic_connection *conn, struct sockaddr *local,
 			struct sockaddr *remote);

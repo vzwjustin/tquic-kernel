@@ -27,6 +27,7 @@
 #include "../protocol.h"
 #include "../core/mp_frame.h"
 #include "tquic_bonding.h"
+#include "tquic_reorder.h"
 
 /* Path quality metrics for scheduling decisions */
 struct tquic_path_quality {
@@ -816,6 +817,29 @@ void tquic_bond_path_failed(struct tquic_connection *conn,
 	bond->stats.failed_paths++;
 
 	spin_unlock_bh(&conn->paths_lock);
+
+	/*
+	 * Force-flush the reorder buffer when a path fails.
+	 *
+	 * Any out-of-order packets buffered while waiting for gaps from
+	 * the failed path will never arrive.  Flushing immediately prevents
+	 * head-of-line blocking: packets already in the buffer that follow
+	 * the gap are delivered to the application without waiting for the
+	 * full gap timeout.
+	 *
+	 * The reorder buffer's deliver_fn and deliver_ctx are set up during
+	 * stream frame processing (tquic_process_stream_frame in
+	 * frame_process.c) and remain valid for the connection lifetime.
+	 */
+	if (conn->pm) {
+		struct tquic_bonding_ctx *__bc = conn->pm->bonding_ctx;
+		struct tquic_reorder_buffer *__rb =
+			tquic_bonding_get_reorder(__bc);
+
+		if (__rb && __rb->deliver_fn)
+			tquic_reorder_flush_timeout(__rb, __rb->deliver_fn,
+						    __rb->deliver_ctx);
+	}
 }
 EXPORT_SYMBOL_GPL(tquic_bond_path_failed);
 

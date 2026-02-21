@@ -34,6 +34,9 @@
 #include "tquic_compat.h"
 #include "tquic_ratelimit.h"
 #include "core/flow_control.h"
+#include "bond/tquic_bonding.h"
+#include "bond/tquic_failover.h"
+#include "bond/tquic_reorder.h"
 
 /* External reference to global connection table from tquic_main.c */
 
@@ -472,6 +475,91 @@ static const struct seq_operations tquic_conn_seq_ops = {
  */
 
 /**
+ * tquic_bonding_stat_seq_show - Emit per-connection bonding statistics
+ * @seq: seq_file to write to
+ * @conn: Connection whose bonding stats to show
+ *
+ * Reads bonding state snapshot via tquic_bonding_get_info() and failover
+ * statistics via tquic_failover_get_stats(). Both are lockless snapshots
+ * suitable for the proc read-side path.
+ */
+static void tquic_bonding_stat_seq_show(struct seq_file *seq,
+					struct tquic_connection *conn)
+{
+	struct tquic_bonding_ctx *bc;
+	struct tquic_bonding_info binfo;
+	struct tquic_failover_ctx *fc;
+	struct tquic_failover_stats fstats;
+	enum tquic_bonding_state bstate;
+
+	if (!conn || !conn->pm)
+		return;
+
+	bc = conn->pm->bonding_ctx;
+	if (!bc)
+		return;
+
+	bstate = tquic_bonding_get_state(bc);
+	tquic_bonding_get_info(bc, &binfo);
+
+	seq_printf(seq,
+		   "  bond_state=%s active=%d degraded=%d failed=%d"
+		   " state_changes=%llu weight_updates=%llu"
+		   " bytes_aggregated=%llu failover_events=%llu\n",
+		   tquic_bonding_state_names[bstate],
+		   binfo.active_paths,
+		   binfo.degraded_paths,
+		   binfo.failed_paths,
+		   binfo.state_changes,
+		   binfo.weight_updates,
+		   binfo.bytes_aggregated,
+		   binfo.failover_events);
+
+	fc = tquic_bonding_get_failover(bc);
+	if (!fc)
+		return;
+
+	memset(&fstats, 0, sizeof(fstats));
+	tquic_failover_get_stats(fc, &fstats);
+
+	seq_printf(seq,
+		   "  failover_tracked=%llu acked=%llu requeued=%llu"
+		   " retransmitted=%llu path_failures=%llu"
+		   " flaps_suppressed=%llu recoveries=%llu\n",
+		   fstats.packets_tracked,
+		   fstats.packets_acked,
+		   fstats.packets_requeued,
+		   fstats.packets_retransmitted,
+		   fstats.path_failures,
+		   fstats.flaps_suppressed,
+		   fstats.path_recoveries);
+
+	/* Reorder buffer stats (only meaningful in BONDED/DEGRADED state) */
+	{
+		struct tquic_reorder_buffer *rb =
+			tquic_bonding_get_reorder(bc);
+
+		if (rb) {
+			struct tquic_reorder_stats rstats;
+
+			tquic_reorder_get_stats(rb, &rstats);
+			seq_printf(seq,
+				   "  reorder_in_order=%llu buffered=%llu"
+				   " delivered=%llu gap_timeout=%llu"
+				   " dropped=%llu duplicates=%llu"
+				   " peak_bytes=%llu\n",
+				   rstats.in_order_packets,
+				   rstats.buffered_packets,
+				   rstats.delivered_packets,
+				   rstats.gap_timeout_packets,
+				   rstats.dropped_packets,
+				   rstats.duplicate_packets,
+				   rstats.buffer_peak_bytes);
+		}
+	}
+}
+
+/**
  * tquic_fc_stat_seq_show - Emit per-connection flow control statistics
  * @seq: seq_file to write to
  * @conn: Connection whose FC stats to show
@@ -556,6 +644,7 @@ static int tquic_stat_seq_show(struct seq_file *seq, void *v)
 		if (!csk || !net_eq(sock_net(csk), net))
 			continue;
 		tquic_fc_stat_seq_show(seq, conn);
+		tquic_bonding_stat_seq_show(seq, conn);
 	}
 	rhashtable_walk_stop(&hti);
 	rhashtable_walk_exit(&hti);

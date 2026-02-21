@@ -247,6 +247,19 @@ int tquic_nat_keepalive_send(struct tquic_nat_keepalive_state *state);
 void tquic_nat_keepalive_on_activity(struct tquic_path *path);
 
 /**
+ * tquic_nat_keepalive_on_packet_received - Notify keepalive of inbound packet
+ * @path: Path that received a packet
+ * @from_addr: Source address of the received packet
+ *
+ * Called when a packet is received on the path. Confirms the NAT binding
+ * is active and updates the lifecycle module for symmetric NAT detection.
+ *
+ * Context: Softirq context
+ */
+void tquic_nat_keepalive_on_packet_received(struct tquic_path *path,
+					    const struct sockaddr_storage *from_addr);
+
+/**
  * tquic_nat_keepalive_on_ack - Handle ACK for keepalive
  * @path: Path that received ACK
  * @pn: Packet number that was acknowledged

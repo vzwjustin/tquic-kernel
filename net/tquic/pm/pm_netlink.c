@@ -19,6 +19,8 @@
 #include "../tquic_debug.h"
 #include <net/tquic_pm.h>
 #include <uapi/linux/tquic_pm.h>
+#include "path_manager.h"
+#include "../bond/tquic_bonding.h"
 
 /* Multicast group offsets */
 #define TQUIC_PM_CMD_GRP_OFFSET  0
@@ -522,6 +524,40 @@ static int tquic_pm_nl_set_flags(struct sk_buff *skb, struct genl_info *info)
 		WRITE_ONCE(path->priority,
 			   nla_get_u8(info->attrs[TQUIC_PM_ATTR_PRIORITY]));
 
+	/* Update path weight via path_manager and bonding APIs */
+	if (info->attrs[TQUIC_PM_ATTR_WEIGHT]) {
+		u8 weight = nla_get_u8(info->attrs[TQUIC_PM_ATTR_WEIGHT]);
+		struct tquic_bonding_ctx *bc = conn->pm ?
+					       conn->pm->bonding_ctx : NULL;
+
+		/* Apply weight to the path struct itself */
+		tquic_path_set_weight(path, weight);
+
+		if (bc) {
+			if (weight == 0) {
+				/* Weight 0 means clear any override */
+				tquic_bonding_clear_weight_override(bc,
+								    path_id);
+			} else {
+				/*
+				 * Set weight override on the bonding ctx.
+				 * Scale from 0-255 (u8) to 0-1000 (u32).
+				 */
+				u32 scaled = (u32)weight * 1000 / 255;
+
+				tquic_bonding_set_path_weight(bc, path_id,
+							      scaled);
+			}
+		}
+
+		/*
+		 * If the backup flag is set, designate this path as the
+		 * primary for failover mode.
+		 */
+		if (flags & TQUIC_PATH_FLAG_BACKUP)
+			tquic_bond_set_primary(conn, path_id);
+	}
+
 	tquic_path_put(path);
 	tquic_conn_put(conn);
 	return 0;
@@ -633,6 +669,175 @@ free_skb:
 EXPORT_SYMBOL_GPL(tquic_pm_nl_send_event);
 
 /*
+ * Command: TQUIC_PM_CMD_ANNOUNCE
+ *
+ * Advertise a local address to the peer (ADD_ADDRESS frame).
+ * Calls tquic_pm_add_local_additional_address() to register the
+ * address in the connection's additional-address list; the transport
+ * layer will then send an ADD_ADDRESS frame on the next opportunity.
+ */
+static int tquic_pm_nl_announce(struct sk_buff *skb, struct genl_info *info)
+{
+	struct sockaddr_storage local_addr;
+	struct tquic_connection *conn;
+	u32 token;
+	int err;
+
+	if (!info->attrs[TQUIC_PM_ATTR_TOKEN]) {
+		GENL_SET_ERR_MSG(info, "missing connection token");
+		return -EINVAL;
+	}
+
+	token = nla_get_u32(info->attrs[TQUIC_PM_ATTR_TOKEN]);
+
+	/* Parse local address from nested ADDR attribute or flat SADDR */
+	memset(&local_addr, 0, sizeof(local_addr));
+	if (info->attrs[TQUIC_PM_ATTR_FAMILY]) {
+		u16 family = nla_get_u16(info->attrs[TQUIC_PM_ATTR_FAMILY]);
+
+		if (family == AF_INET) {
+			struct sockaddr_in *sin =
+				(struct sockaddr_in *)&local_addr;
+
+			if (!info->attrs[TQUIC_PM_ATTR_SADDR4]) {
+				GENL_SET_ERR_MSG(info,
+						 "missing source IPv4 address");
+				return -EINVAL;
+			}
+			sin->sin_family = AF_INET;
+			sin->sin_addr.s_addr =
+				nla_get_be32(info->attrs[TQUIC_PM_ATTR_SADDR4]);
+			if (info->attrs[TQUIC_PM_ATTR_SPORT])
+				sin->sin_port = htons(
+					nla_get_u16(
+					info->attrs[TQUIC_PM_ATTR_SPORT]));
+		} else if (family == AF_INET6) {
+			struct sockaddr_in6 *sin6 =
+				(struct sockaddr_in6 *)&local_addr;
+
+			if (!info->attrs[TQUIC_PM_ATTR_SADDR6]) {
+				GENL_SET_ERR_MSG(info,
+						 "missing source IPv6 address");
+				return -EINVAL;
+			}
+			sin6->sin6_family = AF_INET6;
+			sin6->sin6_addr = nla_get_in6_addr(
+					info->attrs[TQUIC_PM_ATTR_SADDR6]);
+			if (info->attrs[TQUIC_PM_ATTR_SPORT])
+				sin6->sin6_port = htons(
+					nla_get_u16(
+					info->attrs[TQUIC_PM_ATTR_SPORT]));
+		} else {
+			GENL_SET_ERR_MSG(info, "unsupported address family");
+			return -EINVAL;
+		}
+	} else {
+		GENL_SET_ERR_MSG(info, "missing address family");
+		return -EINVAL;
+	}
+
+	conn = tquic_conn_lookup_by_token(genl_info_net(info), token);
+	if (!conn) {
+		GENL_SET_ERR_MSG(info, "connection not found");
+		return -ENOENT;
+	}
+
+	/* Register address and schedule ADD_ADDRESS advertisement */
+	err = tquic_pm_add_local_additional_address(conn, &local_addr, NULL);
+	if (err) {
+		tquic_conn_put(conn);
+		GENL_SET_ERR_MSG(info, "failed to announce address");
+		return err;
+	}
+
+	tquic_conn_put(conn);
+	return 0;
+}
+
+/*
+ * Command: TQUIC_PM_CMD_REMOVE
+ *
+ * Withdraw a previously announced local address (REMOVE_ADDRESS frame).
+ * Calls tquic_pm_remove_local_additional_address() to de-register the
+ * address; the transport layer will send a REMOVE_ADDRESS frame.
+ */
+static int tquic_pm_nl_remove(struct sk_buff *skb, struct genl_info *info)
+{
+	struct sockaddr_storage local_addr;
+	struct tquic_connection *conn;
+	u32 token;
+	int err;
+
+	if (!info->attrs[TQUIC_PM_ATTR_TOKEN]) {
+		GENL_SET_ERR_MSG(info, "missing connection token");
+		return -EINVAL;
+	}
+
+	token = nla_get_u32(info->attrs[TQUIC_PM_ATTR_TOKEN]);
+
+	memset(&local_addr, 0, sizeof(local_addr));
+	if (info->attrs[TQUIC_PM_ATTR_FAMILY]) {
+		u16 family = nla_get_u16(info->attrs[TQUIC_PM_ATTR_FAMILY]);
+
+		if (family == AF_INET) {
+			struct sockaddr_in *sin =
+				(struct sockaddr_in *)&local_addr;
+
+			if (!info->attrs[TQUIC_PM_ATTR_SADDR4]) {
+				GENL_SET_ERR_MSG(info,
+						 "missing source IPv4 address");
+				return -EINVAL;
+			}
+			sin->sin_family = AF_INET;
+			sin->sin_addr.s_addr =
+				nla_get_be32(info->attrs[TQUIC_PM_ATTR_SADDR4]);
+			if (info->attrs[TQUIC_PM_ATTR_SPORT])
+				sin->sin_port = htons(
+					nla_get_u16(
+					info->attrs[TQUIC_PM_ATTR_SPORT]));
+		} else if (family == AF_INET6) {
+			struct sockaddr_in6 *sin6 =
+				(struct sockaddr_in6 *)&local_addr;
+
+			if (!info->attrs[TQUIC_PM_ATTR_SADDR6]) {
+				GENL_SET_ERR_MSG(info,
+						 "missing source IPv6 address");
+				return -EINVAL;
+			}
+			sin6->sin6_family = AF_INET6;
+			sin6->sin6_addr = nla_get_in6_addr(
+					info->attrs[TQUIC_PM_ATTR_SADDR6]);
+			if (info->attrs[TQUIC_PM_ATTR_SPORT])
+				sin6->sin6_port = htons(
+					nla_get_u16(
+					info->attrs[TQUIC_PM_ATTR_SPORT]));
+		} else {
+			GENL_SET_ERR_MSG(info, "unsupported address family");
+			return -EINVAL;
+		}
+	} else {
+		GENL_SET_ERR_MSG(info, "missing address family");
+		return -EINVAL;
+	}
+
+	conn = tquic_conn_lookup_by_token(genl_info_net(info), token);
+	if (!conn) {
+		GENL_SET_ERR_MSG(info, "connection not found");
+		return -ENOENT;
+	}
+
+	err = tquic_pm_remove_local_additional_address(conn, &local_addr);
+	if (err) {
+		tquic_conn_put(conn);
+		GENL_SET_ERR_MSG(info, "failed to remove address");
+		return err;
+	}
+
+	tquic_conn_put(conn);
+	return 0;
+}
+
+/*
  * Genetlink operations
  */
 static const struct genl_ops tquic_pm_nl_ops[] = {
@@ -659,6 +864,16 @@ static const struct genl_ops tquic_pm_nl_ops[] = {
 	{
 		.cmd		= TQUIC_PM_CMD_FLUSH_PATHS,
 		.doit		= tquic_pm_nl_flush_paths,
+		.flags		= GENL_ADMIN_PERM,
+	},
+	{
+		.cmd		= TQUIC_PM_CMD_ANNOUNCE,
+		.doit		= tquic_pm_nl_announce,
+		.flags		= GENL_ADMIN_PERM,
+	},
+	{
+		.cmd		= TQUIC_PM_CMD_REMOVE,
+		.doit		= tquic_pm_nl_remove,
 		.flags		= GENL_ADMIN_PERM,
 	},
 };
