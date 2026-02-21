@@ -113,9 +113,13 @@ void tquic_output_exit(void);
 int tquic_cid_hash_init(void);
 void tquic_cid_hash_cleanup(void);
 
-/* Debug infrastructure (debugfs) */
-int tquic_debug_init(void);
-void tquic_debug_exit(void);
+/* Debug infrastructure (debugfs) - declarations live in tquic_debug.h
+ * under CONFIG_TQUIC_DEBUGFS guard; do not re-declare here to avoid
+ * a static-vs-non-static conflict with the no-op stubs.
+ */
+
+/* Flow control helper (core/quic_protocol.c) */
+unsigned int tquic_get_validated_max_stream_data(void);
 
 /* Sysctl accessors (defined in tquic_sysctl.c) */
 u32 tquic_sysctl_get_preferred_version(void);
