@@ -558,8 +558,10 @@ static void __exit tquic_careful_resume_exit_module(void)
 	tquic_info("careful_resume: cleaned up\n");
 }
 
+#ifndef TQUIC_OUT_OF_TREE
 module_init(tquic_careful_resume_init_module);
 module_exit(tquic_careful_resume_exit_module);
 
 MODULE_DESCRIPTION("TQUIC Careful Resume for BDP Frame Extension");
 MODULE_LICENSE("GPL");
+#endif
