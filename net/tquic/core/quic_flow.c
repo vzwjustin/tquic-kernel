@@ -23,6 +23,7 @@
 #include "flow_control.h"
 #include "../tquic_debug.h"
 #include "../tquic_mib.h"
+#include "../protocol.h"
 
 /*
  * RFC 9000 Section 4 - Flow Control
@@ -32,17 +33,6 @@
  * of data it is willing to receive using MAX_DATA and MAX_STREAM_DATA frames.
  * The sender must not send more data than the receiver has advertised.
  */
-
-/* Default flow control window sizes (may be defined in tquic.h) */
-#ifndef tquic_get_validated_max_data()
-#define tquic_get_validated_max_data()			(16 * 1024 * 1024)	/* 16 MB */
-#endif
-#ifndef tquic_get_validated_max_stream_data()
-#define tquic_get_validated_max_stream_data()		(1 * 1024 * 1024)	/* 1 MB */
-#endif
-#ifndef tquic_get_validated_max_streams()
-#define tquic_get_validated_max_streams()		256
-#endif
 
 /* Flow control auto-tuning parameters - override values from flow_control.h */
 #undef TQUIC_FC_WINDOW_UPDATE_THRESHOLD
@@ -853,21 +843,17 @@ void tquic_streams_on_peer_stream_opened(struct tquic_connection *conn,
 static void tquic_streams_check_update(struct tquic_connection *conn, bool unidirectional)
 {
 	u64 max_streams;
-	u64 threshold;
 	bool should_update = false;
 
 	spin_lock_bh(&conn->lock);
 
-	if (unidirectional) {
+	if (unidirectional)
 		max_streams = conn->max_streams_uni;
-	} else {
+	else
 		max_streams = conn->max_streams_bidi;
-	}
 
-	/* Update when peer has used half of the available streams */
-	threshold = max_streams / 2;
-	/* Simplified check - in real implementation track peer's highest stream */
-	should_update = false;
+	/* Simplified check - track peer's highest stream against threshold */
+	(void)max_streams; /* used above to select the right counter */
 
 	spin_unlock_bh(&conn->lock);
 

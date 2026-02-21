@@ -828,6 +828,7 @@ void tquic_packet_process_coalesced(struct tquic_connection *conn,
 /* Flow control defaults (core/quic_protocol.c) */
 unsigned int tquic_get_validated_max_data(void);
 unsigned int tquic_get_validated_max_stream_data(void);
+unsigned int tquic_get_validated_max_streams(void);
 
 /* Output path types and helpers (tquic_output.c) */
 struct tquic_pending_frame {

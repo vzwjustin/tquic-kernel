@@ -505,7 +505,6 @@ static struct sock *tquic_proto_accept(struct sock *sk,
 				       struct proto_accept_arg *arg)
 {
 	struct tquic_sock *tsk = tquic_sk(sk);
-	struct tquic_sock *newtsk;
 	struct sock *newsk;
 	DEFINE_WAIT(wait);
 
@@ -554,7 +553,6 @@ static struct sock *tquic_proto_accept(struct sock *sk,
 	}
 
 	sock_init_data(NULL, newsk);
-	newtsk = tquic_sk(newsk);
 
 	newsk->sk_state = TCP_ESTABLISHED;
 	arg->err = 0;
@@ -567,7 +565,6 @@ static struct sock *tquic_proto_accept(struct sock *sk,
 				       int flags, int *err, bool kern)
 {
 	struct tquic_sock *tsk = tquic_sk(sk);
-	struct tquic_sock *newtsk;
 	struct sock *newsk;
 	DEFINE_WAIT(wait);
 
@@ -616,7 +613,6 @@ static struct sock *tquic_proto_accept(struct sock *sk,
 	}
 
 	sock_init_data(NULL, newsk);
-	newtsk = tquic_sk(newsk);
 
 	newsk->sk_state = TCP_ESTABLISHED;
 	*err = 0;
@@ -1523,7 +1519,7 @@ static int tquic_create(struct net *net, struct socket *sock, int protocol,
 	return 0;
 }
 
-static const struct net_proto_family tquic_family_ops = {
+static const struct net_proto_family __maybe_unused tquic_family_ops = {
 	.family	= PF_INET,
 	.create	= tquic_create,
 	.owner	= THIS_MODULE,

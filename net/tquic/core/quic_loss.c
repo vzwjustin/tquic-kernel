@@ -489,6 +489,25 @@ int tquic_loss_detection_init(struct tquic_connection *conn)
 EXPORT_SYMBOL_GPL(tquic_loss_detection_init);
 
 /**
+ * tquic_path_lookup - Find a path by its path_id
+ * @conn: TQUIC connection
+ * @path_id: Path identifier to look up
+ *
+ * Returns the matching path, or NULL if not found.
+ */
+static struct tquic_path *tquic_path_lookup(struct tquic_connection *conn,
+					    u32 path_id)
+{
+	struct tquic_path *path;
+
+	list_for_each_entry(path, &conn->paths, list) {
+		if (path->path_id == path_id)
+			return path;
+	}
+	return NULL;
+}
+
+/**
  * tquic_loss_detection_on_packet_sent - Handle packet transmission
  * @conn: TQUIC connection
  * @pkt: Sent packet information
