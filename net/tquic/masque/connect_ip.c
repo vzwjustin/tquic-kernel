@@ -1897,58 +1897,82 @@ int tquic_connect_ip_set_iface_addr(struct tquic_connect_ip_iface *iface,
 				    const struct tquic_ip_address *addr)
 {
 	struct net_device *dev;
-	struct net *net;
 	int ret = 0;
 
 	if (!iface || !iface->net_device || !addr)
 		return -EINVAL;
 
 	dev = iface->net_device;
-	net = dev_net(dev);
 
 	if (addr->version == 4) {
+#ifdef MODULE
 		/*
-		 * Use devinet_ioctl() which is exported and handles its own
-		 * locking. SIOCSIFADDR sets the primary address; SIOCSIFNETMASK
-		 * sets the subnet mask for the configured address.
+		 * devinet_ioctl() is not exported to modules. When
+		 * TQUIC_MASQUE is built as a module, configure addresses
+		 * via userspace 'ip addr add' or rtnetlink.
 		 */
-		struct ifreq ifr = {};
-		struct sockaddr_in *sin = (struct sockaddr_in *)&ifr.ifr_addr;
+		ret = -EOPNOTSUPP;
+#else
+		{
+			struct net *net = dev_net(dev);
+			struct ifreq ifr = {};
+			struct sockaddr_in *sin =
+				(struct sockaddr_in *)&ifr.ifr_addr;
 
-		strscpy(ifr.ifr_name, dev->name, IFNAMSIZ);
-		sin->sin_family = AF_INET;
-		sin->sin_addr.s_addr = addr->addr.v4;
-		ret = devinet_ioctl(net, SIOCSIFADDR, &ifr);
-		if (ret == 0) {
-			sin->sin_addr.s_addr = inet_make_mask(addr->prefix_len);
-			devinet_ioctl(net, SIOCSIFNETMASK, &ifr);
+			strscpy(ifr.ifr_name, dev->name, IFNAMSIZ);
+			sin->sin_family = AF_INET;
+			sin->sin_addr.s_addr = addr->addr.v4;
+			ret = devinet_ioctl(net, SIOCSIFADDR, &ifr);
+			if (ret == 0) {
+				sin->sin_addr.s_addr =
+					inet_make_mask(addr->prefix_len);
+				devinet_ioctl(net, SIOCSIFNETMASK, &ifr);
+			}
 		}
+#endif
 	}
 #if IS_ENABLED(CONFIG_IPV6)
 	else if (addr->version == 6) {
-		struct inet6_dev *idev;
-		struct inet6_ifaddr *ifp;
-		struct ifa6_config cfg = {
-			.pfx		= &addr->addr.v6,
-			.plen		= addr->prefix_len,
-			.ifa_flags	= IFA_F_PERMANENT,
-			.valid_lft	= INFINITY_LIFE_TIME,
-			.preferred_lft	= INFINITY_LIFE_TIME,
-			.scope		= RT_SCOPE_UNIVERSE,
-		};
+#ifdef MODULE
+		/*
+		 * ipv6_add_addr() is not exported to modules. When
+		 * TQUIC_MASQUE is built as a module, configure addresses
+		 * via userspace 'ip addr add' or rtnetlink.
+		 */
+		ret = -EOPNOTSUPP;
+#else
+		{
+			struct inet6_dev *idev;
+			struct inet6_ifaddr *ifp;
+			struct ifa6_config cfg = {
+				.pfx		= &addr->addr.v6,
+				.plen		= addr->prefix_len,
+				.ifa_flags	= IFA_F_PERMANENT,
+				.valid_lft	= INFINITY_LIFE_TIME,
+				.preferred_lft	= INFINITY_LIFE_TIME,
+				.scope		= RT_SCOPE_UNIVERSE,
+			};
 
-		rtnl_lock();
-		idev = ipv6_find_idev(dev);
-		if (IS_ERR(idev)) {
+			rtnl_lock();
+			/*
+			 * Use __in6_dev_get() instead of static
+			 * ipv6_find_idev(). The inet6_dev is created by the
+			 * NETDEV_REGISTER notifier (addrconf_notify) during
+			 * register_netdev().
+			 */
+			idev = __in6_dev_get(dev);
+			if (!idev) {
+				rtnl_unlock();
+				return -ENODEV;
+			}
+			ifp = ipv6_add_addr(idev, &cfg, true, NULL);
 			rtnl_unlock();
-			return PTR_ERR(idev);
+			if (IS_ERR(ifp))
+				ret = PTR_ERR(ifp);
+			else
+				in6_ifa_put(ifp);
 		}
-		ifp = ipv6_add_addr(idev, &cfg, true, NULL);
-		rtnl_unlock();
-		if (IS_ERR(ifp))
-			ret = PTR_ERR(ifp);
-		else
-			in6_ifa_put(ifp);
+#endif
 	}
 #endif
 	else {
