@@ -37,12 +37,14 @@
 #include <net/sock.h>
 #include <net/udp.h>
 #include <net/tquic.h>
+#include <net/tquic_frame.h>
 
 #include "../tquic_compat.h"
 #include "../tquic_debug.h"
 #include "varint.h"
 #include "../tquic_stateless_reset.h"
 #include "../protocol.h"
+#include "quic_loss.h"
 
 /* Forward declarations for frame functions (from frame.c) */
 int tquic_write_connection_close_frame(u8 *buf, size_t buf_len, u64 error_code,

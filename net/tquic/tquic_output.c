@@ -161,24 +161,10 @@ struct tquic_frame_ctx {
  * Safety: The referenced data must remain valid until packet assembly
  * completes. Both tquic_xmit() and tquic_output_flush() ensure this
  * by calling tquic_assemble_packet() synchronously before returning.
+ *
+ * struct tquic_pending_frame is defined in protocol.h (shared with
+ * core/connection.c which also calls tquic_assemble_packet).
  */
-struct tquic_pending_frame {
-	struct list_head list;
-	u8 type;
-	u8 *data; /* For allocated data (legacy/special frames) */
-	const u8 *data_ref; /* Zero-copy reference to original data */
-	struct sk_buff *
-		skb; /* Optional: payload sourced from skb (may be non-linear) */
-	u32 skb_off; /* Byte offset into skb for payload start */
-	size_t len;
-	u64 stream_id;
-	u64 offset;
-	u64 retire_prior_to; /* For NEW_CONNECTION_ID frame */
-	const struct tquic_cid *new_cid; /* CID for NEW_CONNECTION_ID */
-	const u8 *reset_token; /* Reset token for NEW_CONNECTION_ID */
-	bool fin;
-	bool owns_data; /* True if data was allocated and must be freed */
-};
 
 static_assert(sizeof(struct tquic_stream_skb_cb) <=
 		      sizeof(((struct sk_buff *)0)->cb),
@@ -1182,10 +1168,10 @@ static int tquic_encrypt_payload(struct tquic_connection *conn, u8 *header,
  * protection the header is prepended, giving a single contiguous
  * packet in the skb with zero intermediate heap allocations.
  */
-static struct sk_buff *tquic_assemble_packet(struct tquic_connection *conn,
-					     struct tquic_path *path,
-					     int pkt_type, u64 pkt_num,
-					     struct list_head *frames)
+struct sk_buff *tquic_assemble_packet(struct tquic_connection *conn,
+				      struct tquic_path *path,
+				      int pkt_type, u64 pkt_num,
+				      struct list_head *frames)
 {
 	struct sk_buff *skb;
 	struct tquic_frame_ctx ctx;

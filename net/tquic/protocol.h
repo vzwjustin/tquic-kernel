@@ -829,4 +829,29 @@ void tquic_packet_process_coalesced(struct tquic_connection *conn,
 unsigned int tquic_get_validated_max_data(void);
 unsigned int tquic_get_validated_max_stream_data(void);
 
+/* Output path types and helpers (tquic_output.c) */
+struct tquic_pending_frame {
+	struct list_head list;
+	u8 type;
+	u8 *data;		/* For allocated data (legacy/special frames) */
+	const u8 *data_ref;	/* Zero-copy reference to original data */
+	struct sk_buff *skb;	/* Optional: payload sourced from skb */
+	u32 skb_off;		/* Byte offset into skb for payload start */
+	size_t len;
+	u64 stream_id;
+	u64 offset;
+	u64 retire_prior_to;	/* For NEW_CONNECTION_ID frame */
+	const struct tquic_cid *new_cid;
+	const u8 *reset_token;
+	bool fin;
+	bool owns_data;		/* True if data was alloc'd and must be freed */
+};
+
+extern struct kmem_cache *tquic_frame_cache;
+
+struct sk_buff *tquic_assemble_packet(struct tquic_connection *conn,
+				      struct tquic_path *path,
+				      int pkt_type, u64 pkt_num,
+				      struct list_head *frames);
+
 #endif /* _NET_TQUIC_PROTOCOL_H */
