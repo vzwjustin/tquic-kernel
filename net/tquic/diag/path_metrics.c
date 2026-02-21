@@ -581,20 +581,17 @@ EXPORT_SYMBOL_GPL(tquic_metrics_unsubscribe_conn);
 static const struct genl_ops tquic_metrics_ops[] = {
 	{
 		.cmd = TQUIC_NL_CMD_GET_PATH_METRICS,
-		.validate = GENL_DONT_VALIDATE_STRICT | GENL_DONT_VALIDATE_DUMP,
 		.doit = tquic_nl_get_path_metrics,
 		/* CF-144: Require CAP_NET_ADMIN for metrics access */
 		.flags = GENL_ADMIN_PERM,
 	},
 	{
 		.cmd = TQUIC_NL_CMD_GET_ALL_PATHS,
-		.validate = GENL_DONT_VALIDATE_STRICT | GENL_DONT_VALIDATE_DUMP,
 		.doit = tquic_nl_get_all_paths,
 		.flags = GENL_ADMIN_PERM,
 	},
 	{
 		.cmd = TQUIC_NL_CMD_SUBSCRIBE_EVENTS,
-		.validate = GENL_DONT_VALIDATE_STRICT | GENL_DONT_VALIDATE_DUMP,
 		.doit = tquic_nl_subscribe_events,
 		.flags = GENL_ADMIN_PERM,
 	},
