@@ -206,8 +206,11 @@ tquic-y := \
     tquic-y += tquic_debug.o
   endif
 
-  # KUnit tests
+  # KUnit tests — requires both TQUIC_KUNIT_TEST and KUNIT to be available.
+  # CONFIG_KUNIT_ALL_TESTS may force TQUIC_KUNIT_TEST=m even when the running
+  # kernel lacks KUnit; the inner guard prevents modpost failures in that case.
   ifdef CONFIG_TQUIC_KUNIT_TEST
+  ifdef CONFIG_KUNIT
     obj-m += tquic_test.o
     tquic_test-y := \
 	test/varint_test.o \
@@ -249,6 +252,7 @@ tquic-y := \
 	test/reliable_reset_test.o \
 	test/stateless_reset_test.o \
 	test/webtransport_test.o
+  endif
   endif
 
 else
