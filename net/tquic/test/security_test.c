@@ -23,6 +23,8 @@
 #include <linux/overflow.h>
 #include <net/tquic.h>
 
+#include "../protocol.h"
+
 /*
  * =============================================================================
  * Constants and Macros
